@@ -30,7 +30,7 @@ converter/
 | `dots/convert_dots_tts.py` | dots 专用 writer 与 BF16/Q8_0 导出 |
 | `dreamx/convert_dreamx_creator.py` | DreamX 主模型/mmproj 配对导出 |
 | `edge0/convert_edge0.py` | Edge0-35B MLX-affine；支持 `--quant lossless/f32/f16/q8_0/q4_0` |
-| `edge0/mlx_affine.py` | MLX-affine 反量化（与 `MlxAffineKernel::value` 对齐） |
+| `edge0/mlx_affine.py` | MLX-affine 反量化（与 `MlxAffineKernel::decode_row` 对齐） |
 | `neohorse/convert_neohorse.py` | 使用固定 llama.cpp 版本导出 |
 | `qwen_drive/convert_qwen_drive.py` | `inspect`、`export`、`verify` |
 | `vibevoice/convert_vibevoice_asr_original.py` | 原版导出 |
@@ -113,7 +113,7 @@ affine group 展开成 F32 后重新编码，`scales`/`biases` 随之合并进�
 Q8_0/Q4_0 走 `load_expanded`（通用量化 kernel，按 expert 步长切片）。所以除
 `lossless` 外的所有模式都能被 Rust 加载推理。
 
-**实测（`Hello`，greedy，官方参考 `[9419, 0, 2500, 628]`）：**
+**历史实测（lossless 仍使用逐元素标量点积的版本；`Hello`，greedy，官方参考 `[9419, 0, 2500, 628]`）：**
 
 | 模式 | 文件大小 | 生成速度（8 线程） | token IDs |
 |---|---|---|---|
@@ -122,8 +122,9 @@ Q8_0/Q4_0 走 `load_expanded`（通用量化 kernel，按 expert 步长切片）
 | `q8_0` | 34.3 GB | 16.8 t/s | ✅ 逐位一致 |
 | `f16` | 64.6 GB | 8.7 t/s | ✅ 逐位一致 |
 
-`q4_0` 与 `lossless` 体积相同，但因 lossless 需要逐元素反量化 affine group，
-实测快 **229×**。这是推荐的生产格式。`f32` 需要 129 GiB，本机内存不足。
+当时 `q4_0` 因复用通用量化 kernel，实测比 `lossless` 快 **229×**，是推荐的生产格式。
+当前 lossless 已改用按行解码和共享 SIMD 点积，MoE 也接入了线程池；上表不是当前版本的性能测量。
+`f32` 需要 129 GiB，原测试机器内存不足。
 
 反量化公式（`mlx_affine.py` 与 `src/ops/kernel/mlx_affine.rs` 必须一致）：
 

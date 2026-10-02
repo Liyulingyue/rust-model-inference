@@ -20,8 +20,8 @@ use crate::core::thread_pool::ComputePool;
 use crate::models::edge0::forward::{forward_edge0_moe_token, normalize_recurrent_qk};
 use crate::models::edge0::weights::Edge0MoeWeights;
 use crate::ops::{
-    dot_f32, rope_mrope, rope_neox_inplace, sigmoid_inplace, silu, silu_approx_inplace,
-    silu_mul_approx_inplace, softmax_inplace,
+    dot_f32, rope_mrope, rope_neox_inplace, sigmoid_inplace, silu_approx_inplace, silu_inplace,
+    silu_mul_approx_inplace, silu_mul_inplace, softmax_inplace,
 };
 #[cfg(feature = "parity-trace")]
 use crate::parity_trace;
@@ -351,6 +351,8 @@ impl<'a> super::weights::HybridTrunk<'a> {
                         moe,
                         &ffn_input[offset..offset + n_embd],
                         &mut scratch.buf[offset..offset + n_embd],
+                        &mut scratch.prepared,
+                        pool,
                         il,
                         token,
                     )?;
@@ -834,9 +836,7 @@ impl<'a> super::weights::HybridTrunk<'a> {
                 scratch.qkv_buf[qkv_off + c] = conv_val;
             }
             if edge0 {
-                for value in &mut scratch.qkv_buf[qkv_off..qkv_off + conv_dim] {
-                    *value = silu(*value);
-                }
+                silu_inplace(&mut scratch.qkv_buf[qkv_off..qkv_off + conv_dim]);
             } else {
                 silu_approx_inplace(&mut scratch.qkv_buf[qkv_off..qkv_off + conv_dim]);
             }
@@ -996,12 +996,10 @@ impl<'a> super::weights::HybridTrunk<'a> {
             }
             let z_off = t * value_dim;
             if edge0 {
-                for (gate, value) in scratch.z_buf[z_off..z_off + value_dim]
-                    .iter()
-                    .zip(&mut scratch.attn_out_buf[t * value_dim..t * value_dim + value_dim])
-                {
-                    *value *= silu(*gate);
-                }
+                silu_mul_inplace(
+                    &scratch.z_buf[z_off..z_off + value_dim],
+                    &mut scratch.attn_out_buf[t * value_dim..t * value_dim + value_dim],
+                );
             } else {
                 crate::ops::silu_mul_approx_inplace(
                     &scratch.z_buf[z_off..z_off + value_dim],
@@ -1096,12 +1094,10 @@ impl<'a> super::weights::HybridTrunk<'a> {
             .expect("validated Qwen3.5 FFN input shape");
 
         if edge0 {
-            for (gate, up) in scratch.ffn_gate_buf[..n_tokens * n_ff]
-                .iter()
-                .zip(&mut scratch.ffn_up_buf[..n_tokens * n_ff])
-            {
-                *up *= silu(*gate);
-            }
+            silu_mul_inplace(
+                &scratch.ffn_gate_buf[..n_tokens * n_ff],
+                &mut scratch.ffn_up_buf[..n_tokens * n_ff],
+            );
         } else {
             silu_mul_approx_inplace(
                 &scratch.ffn_gate_buf[..n_tokens * n_ff],
