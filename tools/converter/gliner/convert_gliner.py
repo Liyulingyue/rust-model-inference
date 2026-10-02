@@ -209,7 +209,8 @@ def validate_config(config: dict) -> dict:
     return encoder
 
 
-def added_tokens(tokenizer_config: dict, spm_pieces: list[str]) -> dict[str, int]:
+def added_tokens(tokenizer_config: dict, spm_pieces: list[str],
+                 fast: dict | None = None) -> dict[str, int]:
     """Tokens appended past the SentencePiece vocab, id-ordered.
 
     `added_tokens_decoder` also lists tokens that are *already* in the SPM
@@ -223,6 +224,22 @@ def added_tokens(tokenizer_config: dict, spm_pieces: list[str]) -> dict[str, int
     base = len(spm_pieces)
     decoder = tokenizer_config.get("added_tokens_decoder") or {}
     declared = {entry["content"]: int(index) for index, entry in decoder.items()}
+    # The family ships two declaration styles. Older repos carry an
+    # `added_tokens_decoder` in `tokenizer_config.json`; the guardrail repos and
+    # the whole boundary family carry only `extra_special_tokens` (ten names, no
+    # `[MASK]`) and leave the ids to `tokenizer.json`. When both are present they
+    # must agree, which is a stronger check than trusting either alone.
+    from_fast = {entry["content"]: int(entry["id"])
+                 for entry in (fast or {}).get("added_tokens", [])}
+    if declared and from_fast:
+        disagree = sorted(token for token in set(declared) & set(from_fast)
+                          if declared[token] != from_fast[token])
+        if disagree:
+            raise ValueError(
+                f"tokenizer_config and tokenizer.json disagree on {disagree[:3]}"
+            )
+    if not declared:
+        declared = from_fast
     for content, index in (("[PAD]", 0), ("[CLS]", 1), ("[SEP]", 2), ("[UNK]", 3)):
         if declared.get(content) != index or spm_pieces[index] != content:
             raise ValueError(f"base special token {content} does not match the SPM piece at {index}")
@@ -246,10 +263,21 @@ def fast_tokenizer_pieces(fast: dict) -> list[str]:
     # the checkpoint's embedding shape is the authority.
     if model.get("type") != "Unigram" or not model.get("vocab"):
         raise ValueError("unsupported tokenizer.json vocabulary")
+    pieces = [entry[0] for entry in model["vocab"]]
+    # The eleven schema specials occupy a contiguous block starting right after
+    # the vocabulary: 128000 for the DeBERTa-v3 tokenizers, 250101 for
+    # mDeBERTa-v3's. Deriving the base from the vocabulary length is what makes
+    # this work for both, and `added_tokens` cross-checks it against whatever
+    # `tokenizer_config.json` declares.
     declared = {entry["content"]: entry["id"] for entry in fast.get("added_tokens", [])}
-    if any(declared.get(token) != index for index, token in enumerate(SPECIAL_TOKENS, 128000)):
-        raise ValueError("tokenizer.json added token IDs differ from GLiNER2")
-    return [entry[0] for entry in model["vocab"]]
+    base = len(pieces)
+    for offset, token in enumerate(SPECIAL_TOKENS):
+        if declared.get(token) != base + offset:
+            raise ValueError(
+                f"tokenizer.json places {token!r} at {declared.get(token)!r}, "
+                f"expected {base + offset} (vocab is {base} pieces)"
+            )
+    return pieces
 
 
 def tensor_contracts(encoder: dict, vocab_size: int) -> dict[str, tuple]:
@@ -348,7 +376,7 @@ def convert(model_dir: Path, output: Path) -> None:
         if spm["normalizer"].get("name") != "nmt_nfkc":
             raise ValueError(f"Unsupported normalizer {spm['normalizer'].get('name')!r}")
         pieces = spm["pieces"]
-    added = added_tokens(tokenizer_config, pieces)
+    added = added_tokens(tokenizer_config, pieces, fast)
     vocab_size = max(added.values()) + 1
     contracts = tensor_contracts(encoder, vocab_size)
     sources = source_contracts(encoder, vocab_size)

@@ -158,12 +158,15 @@ def main():
         help="upstream GLiNER2 checkout (the SchemaTransformer reference)",
     )
     arguments.add_argument(
-        "--encoder-config",
+        "--base-encoder",
         type=Path,
-        default=REPO_ROOT / "target/gliner2-deberta-config",
-        help="directory holding the base deberta-v3 config.json matching the "
-             "checkpoint's `model_name` (large for Decide/large-v1, base for "
-             "gliner2-base-v1)",
+        default=REPO_ROOT / "models" / "deberta-v3-base",
+        help="the base encoder repo the checkpoint fine-tunes. Supplies both the "
+             "encoder config and the tokenizer. Required rather than optional "
+             "because some repos cannot be loaded as tokenizers at all: the three "
+             "guardrail repos ship a `tokenizer_config.json` that transformers "
+             "rejects (its `extra_special_tokens` is a bare list), so the "
+             "reference can only have tokenized from the base encoder.",
     )
     arguments.add_argument(
         "--model-dir",
@@ -185,8 +188,8 @@ def main():
     from transformers import AutoConfig, DebertaV2Model  # noqa: E402
 
     model_dir = options.model_dir
-    processor = SchemaTransformer(str(model_dir), token_pooling="first")
-    config = AutoConfig.from_pretrained(str(options.encoder_config))
+    processor = SchemaTransformer(str(options.base_encoder), token_pooling="first")
+    config = AutoConfig.from_pretrained(str(options.base_encoder))
     state = load_file(str(model_dir / "model.safetensors"))
     # The published config's `vocab_size` only bounds the table: DeBERTa-v3 says
     # 128100 while the SPM has 128000 pieces, and mDeBERTa-v3 says 251000 while
@@ -201,8 +204,18 @@ def main():
             f"checkpoint embedding table ({vocab_size}) exceeds the base config's "
             f"vocab_size ({config.vocab_size}); wrong encoder config?"
         )
+    # The family declares added tokens in one of two places: an
+    # `added_tokens_decoder` in `tokenizer_config.json` (the older repos) or the
+    # `added_tokens` array in `tokenizer.json` (the guardrail repos, whose
+    # `tokenizer_config.json` transformers cannot even load). Either is
+    # authoritative; the check is that the embedding table covers the highest id.
     tokenizer_config = json.loads((model_dir / "tokenizer_config.json").read_text())
-    highest_id = max(int(index) for index in tokenizer_config["added_tokens_decoder"])
+    decoder = tokenizer_config.get("added_tokens_decoder") or {}
+    if decoder:
+        highest_id = max(int(index) for index in decoder)
+    else:
+        fast = json.loads((model_dir / "tokenizer.json").read_text())
+        highest_id = max(int(entry["id"]) for entry in fast.get("added_tokens", []))
     if vocab_size != highest_id + 1:
         raise ValueError(
             f"embedding table ({vocab_size} rows) does not cover the tokenizer's "
