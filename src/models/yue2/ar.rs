@@ -220,14 +220,7 @@ impl YuE2Weight {
             }
         }
         if self.bf16.is_some() {
-            for row in 0..n_rows {
-                self.matmul_bf16(
-                    &input[row * self.n_in..(row + 1) * self.n_in],
-                    bias,
-                    &mut output[row * self.n_out..(row + 1) * self.n_out],
-                    pool,
-                );
-            }
+            self.matmul_bf16(input, bias, output, pool);
             return Ok(());
         }
         if self.fast.ggml_type == crate::core::tensor::GGMLType::F32 {
@@ -336,6 +329,8 @@ impl YuE2Weight {
         pool: &ComputePool,
     ) {
         let bytes = self.bf16.unwrap();
+        let n_rows = input.len() / self.n_in;
+        let batched_rows = n_rows / 4 * 4;
         let output_ptr = output.as_mut_ptr();
         pool.compute(|thread, threads| {
             let (start, end) =
@@ -343,9 +338,37 @@ impl YuE2Weight {
             if start == end {
                 return;
             }
-            let output =
-                unsafe { std::slice::from_raw_parts_mut(output_ptr.add(start), end - start) };
-            torch_bf16_matmul_rows(bytes, input, bias, output, self.n_in, start);
+            for row in (0..batched_rows).step_by(4) {
+                let inputs = &input[row * self.n_in..(row + 4) * self.n_in];
+                for column in start..end {
+                    let weight = &bytes[column * self.n_in * 2..(column + 1) * self.n_in * 2];
+                    let sums = crate::ops::dot_bf16_f32_4(inputs, weight, self.n_in);
+                    for (offset, sum) in sums.into_iter().enumerate() {
+                        let sum = bias.map_or(sum, |bias| sum + bias[column]);
+                        unsafe {
+                            output_ptr
+                                .add((row + offset) * self.n_out + column)
+                                .write(half::bf16::from_f32(sum).to_f32());
+                        }
+                    }
+                }
+            }
+            for row in batched_rows..n_rows {
+                let output = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        output_ptr.add(row * self.n_out + start),
+                        end - start,
+                    )
+                };
+                torch_bf16_matmul_rows(
+                    bytes,
+                    &input[row * self.n_in..(row + 1) * self.n_in],
+                    bias,
+                    output,
+                    self.n_in,
+                    start,
+                );
+            }
         });
     }
 }
@@ -799,16 +822,21 @@ impl<'model> YuE2ArSession<'model> {
             ));
         }
         validate_token_ids(token_ids, self.model.config.vocab)?;
-        for &token in token_ids {
+        for (index, &token) in token_ids.iter().enumerate() {
             let position = self.kv.seq_len;
-            self.forward_token(token, position)?;
+            self.forward_token(token, position, index + 1 == token_ids.len())?;
             self.kv.seq_len += 1;
         }
         self.kv.update_access();
         Ok(&self.logits)
     }
 
-    fn forward_token(&mut self, token_id: u32, position: usize) -> Result<(), String> {
+    fn forward_token(
+        &mut self,
+        token_id: u32,
+        position: usize,
+        project_logits: bool,
+    ) -> Result<(), String> {
         let config = &self.model.config;
         self.model
             .token_embedding
@@ -1040,6 +1068,12 @@ impl<'model> YuE2ArSession<'model> {
             );
         }
 
+        if !project_logits && !cfg!(feature = "parity-trace") {
+            if self.x.iter().any(|value| !value.is_finite()) {
+                return Err("YuE2 AR produced non-finite hidden state".into());
+            }
+            return Ok(());
+        }
         rms_norm(
             &self.x,
             &self.model.final_norm,
@@ -1935,4 +1969,162 @@ fn trace(name: &str, layer: Option<usize>, step: usize, shape: &[usize], values:
     ));
     #[cfg(not(feature = "parity-trace"))]
     let _ = (name, layer, step, shape, values);
+}
+
+#[cfg(test)]
+mod performance_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingKernel {
+        inner: Box<dyn Kernel>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Kernel for CountingKernel {
+        fn forward_prequantized(
+            &self,
+            input: &[u8],
+            scales: &[f32],
+            output: &mut [f32],
+            n_in: usize,
+            n_out: usize,
+            thread: usize,
+            threads: usize,
+        ) {
+            self.inner
+                .forward_prequantized(input, scales, output, n_in, n_out, thread, threads);
+        }
+
+        fn forward_prepared(
+            &self,
+            input: &[f32],
+            quantized: &[u8],
+            scales: &[f32],
+            q8k: Option<&[BlockQ8K]>,
+            output: &mut [f32],
+            n_in: usize,
+            n_out: usize,
+            thread: usize,
+            threads: usize,
+        ) {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.inner.forward_prepared(
+                input, quantized, scales, q8k, output, n_in, n_out, thread, threads,
+            );
+        }
+    }
+
+    #[test]
+    fn prefill_projects_only_returned_logits_and_preserves_decode_bits() {
+        let mut model = super::super::tests::tiny_yue2_model();
+        let mut sequential = YuE2ArSession::new(&model, 8).unwrap();
+        let mut expected = Vec::new();
+        for token in [1, 2, 3, 4] {
+            expected = sequential.prefill(&[token]).unwrap().to_vec();
+        }
+        let expected_decode = sequential.prefill(&[5]).unwrap().to_vec();
+        drop(sequential);
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        model.lm_head.fast.kernel = Box::new(CountingKernel {
+            inner: model.lm_head.fast.kernel,
+            calls: Arc::clone(&calls),
+        });
+        let mut batched = YuE2ArSession::new(&model, 8).unwrap();
+        let actual = batched.prefill(&[1, 2, 3, 4]).unwrap();
+        assert_eq!(
+            actual
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            expected
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
+        let expected_calls = if cfg!(feature = "parity-trace") { 4 } else { 1 };
+        assert_eq!(calls.load(Ordering::Relaxed), expected_calls);
+        assert_eq!(batched.position(), 4);
+        assert_eq!(
+            batched
+                .prefill(&[5])
+                .unwrap()
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            expected_decode
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), expected_calls + 1);
+    }
+
+    #[test]
+    fn bf16_batches_match_single_row_bits_with_bias_tails_and_partitions() {
+        for (n_in, n_out) in [(3, 2), (259, 17), (2048, 9), (6144, 5)] {
+            let bytes: &'static [u8] = Box::leak(
+                (0..n_in * n_out)
+                    .flat_map(|index| {
+                        half::bf16::from_f32(((index * 17 % 101) as f32 - 50.0) * 0.013)
+                            .to_bits()
+                            .to_le_bytes()
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            );
+            let weight = YuE2Weight {
+                fast: Weight::from_quantized(QuantizedTensor::from_bytes(
+                    bytes,
+                    GGMLType::BF16,
+                    n_in,
+                    n_out,
+                )),
+                bf16: Some(bytes),
+                n_in,
+                n_out,
+            };
+            let bias: Vec<f32> = (0..n_out)
+                .map(|index| (index as f32 - 4.0) * 0.017)
+                .collect();
+            for threads in [1, 4] {
+                let pool = ComputePool::new(threads);
+                for n_rows in [1, 3, 4, 5, 9] {
+                    let input: Vec<f32> = (0..n_rows * n_in)
+                        .map(|index| ((index * 29 % 73) as f32 - 36.0) * 0.017)
+                        .collect();
+                    for bias in [None, Some(bias.as_slice())] {
+                        let mut expected = vec![0.0; n_rows * n_out];
+                        for row in 0..n_rows {
+                            torch_bf16_matmul_rows(
+                                bytes,
+                                &input[row * n_in..(row + 1) * n_in],
+                                bias,
+                                &mut expected[row * n_out..(row + 1) * n_out],
+                                n_in,
+                                0,
+                            );
+                        }
+                        let mut actual = vec![f32::NAN; expected.len()];
+                        weight
+                            .matmul_rows(&input, &mut actual, &pool, &mut RowScratch::new(), bias)
+                            .unwrap();
+                        assert_eq!(
+                            actual
+                                .iter()
+                                .map(|value| value.to_bits())
+                                .collect::<Vec<_>>(),
+                            expected
+                                .iter()
+                                .map(|value| value.to_bits())
+                                .collect::<Vec<_>>(),
+                            "n_in={n_in} n_out={n_out} n_rows={n_rows} threads={threads} bias={}",
+                            bias.is_some()
+                        );
+                    }
+                }
+            }
+        }
+    }
 }

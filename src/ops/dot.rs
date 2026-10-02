@@ -472,6 +472,49 @@ unsafe fn dot_bf16_f32_neon(a: &[f32], b: &[u8], n: usize) -> f32 {
 }
 
 #[inline]
+pub(crate) fn dot_bf16_f32_4(input: &[f32], weight: &[u8], width: usize) -> [f32; 4] {
+    assert!(width <= input.len() / 4 && width <= weight.len() / 2);
+    #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+    if has_neon() && width >= 4 {
+        return unsafe { dot_bf16_f32_4_neon(input, weight, width) };
+    }
+    std::array::from_fn(|row| dot_bf16_f32(&input[row * width..(row + 1) * width], weight, width))
+}
+
+#[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+#[target_feature(enable = "neon")]
+unsafe fn dot_bf16_f32_4_neon(input: &[f32], weight: &[u8], width: usize) -> [f32; 4] {
+    use std::arch::aarch64::*;
+
+    let mut accumulators = [vdupq_n_f32(0.0); 4];
+    let mut column = 0;
+    while column + 4 <= width {
+        let packed = vld1_u16(weight.as_ptr().add(column * 2).cast());
+        let values = vreinterpretq_f32_u32(vshlq_n_u32(vmovl_u16(packed), 16));
+        for row in 0..4 {
+            accumulators[row] = vfmaq_f32(
+                accumulators[row],
+                values,
+                vld1q_f32(input.as_ptr().add(row * width + column)),
+            );
+        }
+        column += 4;
+    }
+    let mut sums = std::array::from_fn(|row| vaddvq_f32(accumulators[row]));
+    while column < width {
+        let value = bf16_to_f32(u16::from_le_bytes([
+            weight[column * 2],
+            weight[column * 2 + 1],
+        ]));
+        for row in 0..4 {
+            sums[row] += value * input[row * width + column];
+        }
+        column += 1;
+    }
+    sums
+}
+
+#[inline]
 fn dot_bf16_f32_scalar(a: &[f32], b: &[u8], n: usize) -> f32 {
     let mut sum = 0.0f32;
     let mut i = 0;
@@ -1620,6 +1663,31 @@ mod tests {
             (simd - scalar).abs() / denom < 1e-5,
             "non-aligned dot diverged: simd={simd} scalar={scalar}"
         );
+    }
+
+    #[test]
+    fn dot_bf16_f32_four_rows_preserves_individual_dot_bits() {
+        for width in [0, 1, 3, 4, 7, 15, 16, 17, 259, 2048, 6144] {
+            let input: Vec<f32> = (0..width * 4 + 1)
+                .map(|index| ((index * 29 % 73) as f32 - 36.0) * 0.017)
+                .collect();
+            let weights: Vec<f32> = (0..width)
+                .map(|index| ((index * 17 % 101) as f32 - 50.0) * 0.013)
+                .collect();
+            let mut bytes = vec![0];
+            bytes.extend(bf16_bytes_from_f32(&weights));
+            let input = &input[1..];
+            let actual = super::dot_bf16_f32_4(input, &bytes[1..], width);
+            for row in 0..4 {
+                let expected =
+                    super::dot_bf16_f32(&input[row * width..(row + 1) * width], &bytes[1..], width);
+                assert_eq!(
+                    actual[row].to_bits(),
+                    expected.to_bits(),
+                    "width={width} row={row}"
+                );
+            }
+        }
     }
 
     #[test]

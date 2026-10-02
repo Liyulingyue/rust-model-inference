@@ -161,6 +161,27 @@ NAR 是绝对瓶颈：每步对全部 latent 位置做两次全模型前向。VA
 cache line 的乒乓开销会压倒收益：实测 `--threads 20` 比默认慢 **16 倍**
 （1.45 tok/s vs 23.96 tok/s）。默认值 `DEFAULT_THREAD_CAP = 8` 对本机是最优的。
 
+### 3.3 BF16 性能路径
+
+BF16 批量投影在一次 `ComputePool` 调度中处理全部输入帧，避免逐帧同步。
+ARM64 NEON 路径每组四帧共享权重读取和 BF16 展开，但每个输出的累加顺序、
+bias 加法和 BF16 舍入保持不变；不足四帧的尾部和单 token 解码沿用原算子。
+其它架构及标量模式复用各自已有的单行 dot。
+
+AR prefill 只计算最后一个输入 token 的最终 norm 和词表 logits，中间 token
+仍完整更新 KV cache。`parity-trace` 构建保留所有中间 logits/checkpoint，
+因此正常推理测速不要开启该 feature。
+
+这些优化不更换权重、不减少扩散步数，也不修改采样参数。可用以下回归检查
+逐位一致性及中间 logits 的省略行为（不需要下载模型）：
+
+```bash
+cargo test --profile release-fast --lib models::yue2::ar::performance_tests
+cargo test --profile release-fast --lib ops::dot::tests
+RMI_SCALAR=1 cargo test --profile release-fast --features parity-trace --lib \
+  bf16_batches_match_single_row_bits_with_bias_tails_and_partitions
+```
+
 ## 4. 样例音频
 
 本机在 `models/YuE2-gguf/samples/` 下留了真权重跑出的成品音频与说明
