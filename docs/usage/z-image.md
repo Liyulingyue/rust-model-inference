@@ -44,11 +44,38 @@ Z-Image model requires --text-encoder, --vae, --prompt, and --out
 
 每步约 140 s，其中 `attention_into` 占 50%、`linear ffn` 36%、`linear qkv` 11%。
 
-> **加速空间有限。** 每步要把 5.64 GB Q8_0 权重完整流过一遍，实测约
-> 48 GB/s，已是单通道 DDR5 的上限。`examples/dit_vk_bench.rs` 测得
-> GB10 的 Vulkan 在这些形状上只有 0.4×–1.36×（加权约 0.6×），因为
-> 单图推理权重搬运量不变，而每次 dispatch 的固定开销被放大 2880 次。
-> 线程数也非越多越好：16 线程首步 269.3 s，反而慢于 8 线程的 140.5 s。
+> **线程数也非越多越好**：16 线程首步 269.3 s，反而慢于 8 线程的 140.5 s。
+
+### GPU 路径（`--gpu`，同机 512×512，8 步）
+
+| | 耗时 | 每步去噪 |
+|---|---|---|
+| CPU | 1166 s | 约 140 s |
+| GPU（Vulkan） | **718 s** | 约 86 s |
+
+整体 **1.62×**，去噪阶段 **1.65×**。主层 30 层的 Q8_0 投影与
+`rms_norm` + AdaLN 调制在 GPU 上；attention 与 4 层 F16 refiner 仍在 CPU，
+所以 CPU attention（约 70 s/步）是目前的天花板。
+
+关键改动是 Q8_0 grouped matmul 的 tiling。旧 kernel 每个 workgroup 只算
+**一个**输出元素：64 个 lane 切分 K 维再做树形归约，于是每字节权重只服务
+**一个** token，权重复用为 1。实测 W2 形状 757.6 ms / 110 GOP/s，而同一形状
+PyTorch 约 5900 GOP/s。`shaders/glsl/q8_matmul_tiled_dp4a.comp` 让 lane 持有
+输出列、一次权重加载复用于 8 个 token 的寄存器累加器，**11.8×**（64.4 ms /
+1289 GOP/s），与旧 kernel 相对误差 9.5e-7。
+
+> **`examples/dit_vk_bench.rs` 的 0.4×–1.36× 是误导性的**：它测的是 GEMV
+> （`gpu_out` 只有一行长），权重复用同样为 1，于是读带宽看起来正常，却完全
+> 没有测到真实形状。判断 kernel 速度必须用
+> `zimage_tiled_matmul_beats_the_one_token_per_weight_kernel`，它轮流读取 8 个
+> 不同权重矩阵以绕开 L2，单矩阵热缓存下会报出 10 万 GOP/s 的假数字。
+
+> **host 写 → device 读的 barrier 不能省。** arena 是 CPU 直接写、shader 直接
+> 读的映射内存，缺失 HOST→COMPUTE barrier 时能否看见写入只取决于速度：旧
+> kernel 每次 dispatch 约 700 ms，写入早被"看见"；tiled kernel 约 64 ms，
+> 同种子两次渲染就会差 1.9–5.8/255，且只有 arena 大到装不进缓存的 512×512
+> 才复现（256×256 逐位一致）。`VulkanContext::host_write_barrier` 在每次
+> submit 前补上它。
 
 ## 2. 参数约束
 
