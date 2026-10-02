@@ -445,28 +445,46 @@ pub struct EncodedPrompt {
     pub classification_names: Vec<String>,
 }
 
-/// Every token the reference registers in `_added_tokens_encoder`, with its id.
+/// The four base specials, whose ids the SentencePiece convention fixes at 0..3.
+pub const BASE_SPECIALS: [(&str, u32); 4] =
+    [("[PAD]", 0), ("[CLS]", 1), ("[SEP]", 2), ("[UNK]", 3)];
+
+/// The eleven tokens GLiNER2 appends past the SentencePiece vocabulary, in id
+/// order: `[MASK]` first, then `additional_special_tokens`.
 ///
-/// The four base specials come from the checkpoint's `added_tokens_decoder`
-/// (transformers replays that dict through `add_tokens`); the eleven that follow
-/// are GLiNER2's `additional_special_tokens` plus `[MASK]`.
-pub const ADDED_TOKENS: [(&str, u32); 15] = [
-    ("[PAD]", 0),
-    ("[CLS]", 1),
-    ("[SEP]", 2),
-    ("[UNK]", 3),
-    ("[MASK]", 128000),
-    (SEP_STRUCT, 128001),
-    (SEP_TEXT, 128002),
-    (P_TOKEN, 128003),
-    ("[C]", 128004),
-    ("[E]", 128005),
-    ("[R]", 128006),
-    (L_TOKEN, 128007),
-    (EXAMPLE_TOKEN, 128008),
-    (OUTPUT_TOKEN, 128009),
-    (DESC_TOKEN, 128010),
+/// Their ids are **not** fixed — they start at the piece count, which is 128000
+/// for the 128k DeBERTa-v3 vocabularies but 250101 for mDeBERTa-v3's 250k
+/// multilingual one. Pinning 128000 encoded multilingual prompts with
+/// out-of-vocab ids: the surrounding text still tokenized correctly, so the only
+/// symptom was every marker landing on the wrong row of the embedding table.
+pub const APPENDED_SPECIALS: [&str; 11] = [
+    "[MASK]",
+    SEP_STRUCT,
+    SEP_TEXT,
+    P_TOKEN,
+    "[C]",
+    "[E]",
+    "[R]",
+    L_TOKEN,
+    EXAMPLE_TOKEN,
+    OUTPUT_TOKEN,
+    DESC_TOKEN,
 ];
+
+/// Every added token with its id, for a tokenizer whose vocabulary ends at
+/// `piece_count` — the same number the converter used to lay the block out.
+pub fn added_tokens(piece_count: u32) -> impl Iterator<Item = (&'static str, u32)> + use<> {
+    BASE_SPECIALS
+        .iter()
+        .copied()
+        .map(|(text, id)| (text, id))
+        .chain(
+            APPENDED_SPECIALS
+                .iter()
+                .enumerate()
+                .map(move |(offset, text)| (*text, piece_count + offset as u32)),
+        )
+}
 
 /// `PreTrainedTokenizer.tokenize` with `split_special_tokens = false`: the
 /// `tokens_trie` cuts every added token out of the input, wherever it appears,
@@ -480,6 +498,9 @@ pub fn encode_token(
     token: &str,
     spm: &crate::core::sentencepiece::SentencePieceTokenizer,
 ) -> Vec<u32> {
+    // The appended block's base is this tokenizer's own piece count, so the ids
+    // can never drift from the vocabulary that does the encoding.
+    let special = added_tokens(spm.len() as u32).collect::<Vec<_>>();
     let mut ids = Vec::new();
     let mut rest = token;
     while !rest.is_empty() {
@@ -488,7 +509,7 @@ pub fn encode_token(
         let mut offset = 0usize;
         for candidate in rest.char_indices() {
             let (index, _) = candidate;
-            for (text, _) in ADDED_TOKENS {
+            for (text, _) in &special {
                 if rest[index..].starts_with(text)
                     && (index < at
                         || (index == at && hit.is_some_and(|current| text.len() > current.len())))
@@ -507,18 +528,17 @@ pub fn encode_token(
         if at > 0 {
             ids.extend(spm.encode_ids(&rest[..at]));
         }
-        ids.push(id_of(found));
+        ids.push(id_of(found, spm.len() as u32));
         rest = &rest[at + found.len()..];
     }
     ids
 }
 
-fn id_of(token: &str) -> u32 {
-    ADDED_TOKENS
-        .iter()
+fn id_of(token: &str, piece_count: u32) -> u32 {
+    added_tokens(piece_count)
         .find(|(text, _)| *text == token)
-        .map(|(_, id)| *id)
-        .expect("token comes from ADDED_TOKENS")
+        .map(|(_, id)| id)
+        .expect("token comes from the added-token set")
 }
 
 /// `_transform_record` + `_format_input_with_mapping` for classification tasks.
