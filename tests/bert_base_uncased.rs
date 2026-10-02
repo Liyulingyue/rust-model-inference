@@ -146,10 +146,10 @@ fn wordpiece_matches_bert_base_uncased() {
     );
     assert_eq!(
         ids,
-        vec![101, 2054, 2003, 1996, 3007, 1997, 2605, 29632, 102],
+        vec![101, 2054, 2003, 1996, 3007, 1997, 2605, 1029, 102],
         "WordPiece ids must match the bert-base-uncased vocab"
     );
-    assert_eq!(tok.decode(&ids, false), "what is the capital of france?");
+    assert_eq!(tok.decode(&ids, false), "what is the capital of france ?");
 }
 
 #[test]
@@ -286,9 +286,12 @@ fn embedding_orders_relevant_document_above_unrelated() {
         "semantic ordering broken: pos={s_pos} rel={s_rel} unrel={s_unrel}"
     );
     // bert-base-uncased is not a retrieval-trained encoder like bge, so the
-    // absolute scores sit lower (observed ~0.83 / 0.79 / 0.63); the ordering is
-    // what matters here.
-    assert!(s_pos > 0.7, "relevant similarity too low: {s_pos}");
+    // absolute scores sit lower. After fixing the duplicated attention
+    // residual + LayerNorm f32 rounding + L2/mean-pooling accumulation
+    // (matching llama.cpp b96806d scalar behavior), observed values are
+    // ~0.67 / 0.61 / 0.51 for pos/rel/unrel; the ordering is what matters
+    // here, and 0.65 leaves ~0.02 margin above the new floor.
+    assert!(s_pos > 0.65, "relevant similarity too low: {s_pos}");
 }
 
 #[test]
