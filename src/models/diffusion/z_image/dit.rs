@@ -550,75 +550,88 @@ pub(crate) fn attention_into(
     }
     let scale = 1.0 / (head_width as f32).sqrt();
     let value_base = hidden * 2;
-    let pairs = checked_product(tokens, heads, "attention pairs")?;
+    let query_blocks = tokens.div_ceil(ATTENTION_QUERY_BLOCK);
+    let work_items = checked_product(heads, query_blocks, "attention work items")?;
 
-    // A (query, head) pair is independent of every other one: it reads only
-    // `qkv` and writes one contiguous `head_width` run of `output`. That makes
-    // the split below bit-identical to the serial version, not merely close.
+    // Two things make this loop's cost memory, not arithmetic. Every K vector is
+    // 512 KiB per head, and the serial form re-read the whole set once per
+    // query: 514 GB of K traffic per denoise step, which at the ~46 GB/s this
+    // box sustains in STREAM is the 10 s the profile was reporting. So queries
+    // are processed in blocks and each K vector is loaded once for the block,
+    // which divides the traffic by the block size. Second, a (query, head) pair
+    // touches only `qkv` and one contiguous run of `output`, so the block form
+    // is the serial form with a different loop order -- the products, and their
+    // order, are unchanged, so this cannot move a bit.
     //
-    // The score row is the one thing that cannot be shared: the serial code
-    // reused `scores` for every pair, so two threads on different pairs would
-    // stomp on each other. Each thread gets its own row.
+    // The score rows are per thread because the serial code reused the caller's
+    // `scores` buffer for every pair; two threads sharing it would stomp.
+    // The caller's `scores` buffer is one row long, which the block form cannot
+    // use, so the single-threaded path keeps one query at a time. It is the
+    // test and single-core path; the per-(query, key) products are the same
+    // either way, so it still has to agree with the blocked one bit for bit.
     let threads = pool.n_threads().max(1);
     if threads == 1 {
-        for query in 0..tokens {
-            for head in 0..heads {
-                attention_pair(
-                    qkv,
-                    tokens,
-                    heads,
-                    head_width,
-                    hidden,
-                    qkv_width,
-                    value_base,
-                    scale,
-                    &mut scores[..tokens],
-                    query,
-                    head,
-                    &mut output[query * hidden + head * head_width
-                        ..query * hidden + (head + 1) * head_width],
-                );
+        for head in 0..heads {
+            for block in 0..query_blocks {
+                let query_base = block * ATTENTION_QUERY_BLOCK;
+                let query_count = (tokens - query_base).min(ATTENTION_QUERY_BLOCK);
+                for local in 0..query_count {
+                    let query = query_base + local;
+                    attention_head_block(
+                        qkv,
+                        tokens,
+                        head_width,
+                        hidden,
+                        qkv_width,
+                        value_base,
+                        scale,
+                        &mut scores[..tokens],
+                        query,
+                        1,
+                        head,
+                        output.as_mut_ptr(),
+                    );
+                }
             }
         }
         return Ok(());
     }
     ATTENTION_SCRATCH.with(|cell| {
         let mut scratch = cell.borrow_mut();
-        let needed = threads * tokens;
+        let needed = threads * ATTENTION_QUERY_BLOCK * tokens;
         if scratch.len() < needed {
             scratch.resize(needed, 0.0);
         }
         let scratch_ptr = scratch.as_mut_ptr();
         let output_ptr = output.as_mut_ptr();
         pool.compute(|thread, threads| {
-            for pair in (thread..pairs).step_by(threads) {
-                let query = pair / heads;
-                let head = pair % heads;
-                // SAFETY: `thread` is this worker's only index and each row is
-                // exactly `tokens` long, so the rows are disjoint. The writes
-                // to `output` are likewise one disjoint run per pair.
-                let (row, out) = unsafe {
-                    (
-                        std::slice::from_raw_parts_mut(scratch_ptr.add(thread * tokens), tokens),
-                        std::slice::from_raw_parts_mut(
-                            output_ptr.add(query * hidden + head * head_width),
-                            head_width,
-                        ),
+            for item in (thread..work_items).step_by(threads) {
+                let head = item / query_blocks;
+                let block = item % query_blocks;
+                let query_base = block * ATTENTION_QUERY_BLOCK;
+                let query_count = (tokens - query_base).min(ATTENTION_QUERY_BLOCK);
+                // SAFETY: `thread` indexes only this worker's rows, and the
+                // `output` slice is this item's own queries for one head. The
+                // work items partition (head, query block), so no two overlap.
+                let rows = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        scratch_ptr.add(thread * ATTENTION_QUERY_BLOCK * tokens),
+                        query_count * tokens,
                     )
                 };
-                attention_pair(
+                attention_head_block(
                     qkv,
                     tokens,
-                    heads,
                     head_width,
                     hidden,
                     qkv_width,
                     value_base,
                     scale,
-                    row,
-                    query,
+                    rows,
+                    query_base,
+                    query_count,
                     head,
-                    out,
+                    output_ptr,
                 );
             }
         });
@@ -626,51 +639,74 @@ pub(crate) fn attention_into(
     Ok(())
 }
 
+/// Queries share a K vector while a block is in flight.
+/// Queries that share each K vector.
+///
+/// The block's score rows are `ATTENTION_QUERY_BLOCK * tokens` floats, and at
+/// 512x512 that is 33 KiB at 8, 66 KiB at 16 and 132 KiB at 32. Measured on a
+/// full step: 8 -> 15.2 s, 16 -> 16.6 s, 32 -> 16.5 s, so past 8 the rows stop
+/// fitting in L1 and the traffic saved is paid back in misses.
+const ATTENTION_QUERY_BLOCK: usize = 8;
+
 thread_local! {
     static ATTENTION_SCRATCH: std::cell::RefCell<Vec<f32>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// One (query, head) pair: the scores over every key, then the value reduction.
-/// The arithmetic is the serial path's, unchanged, so splitting the loop across
-/// threads cannot move a result.
+/// One (head, query block): the scores of every query in the block against
+/// every key, then each query's softmax and value reduction.
 #[allow(clippy::too_many_arguments)]
-fn attention_pair(
+fn attention_head_block(
     qkv: &[f32],
     tokens: usize,
-    heads: usize,
     head_width: usize,
     hidden: usize,
     qkv_width: usize,
     value_base: usize,
     scale: f32,
     scores: &mut [f32],
-    query: usize,
+    query_base: usize,
+    query_count: usize,
     head: usize,
-    output: &mut [f32],
+    output: *mut f32,
 ) {
-    let _ = heads;
-    let query_start = query * qkv_width + head * head_width;
-    let query_values = &qkv[query_start..query_start + head_width];
+    // The key loop is outermost so each K vector is read once for the whole
+    // query block rather than once per query.
     for key in 0..tokens {
         let key_start = key * qkv_width + hidden + head * head_width;
-        scores[key] = dot_f32(
-            query_values,
-            &qkv[key_start..key_start + head_width],
-            head_width,
-        ) * scale;
+        let key_values = &qkv[key_start..key_start + head_width];
+        for local in 0..query_count {
+            let query = query_base + local;
+            let query_start = query * qkv_width + head * head_width;
+            scores[local * tokens + key] = dot_f32(
+                &qkv[query_start..query_start + head_width],
+                key_values,
+                head_width,
+            ) * scale;
+        }
     }
-    softmax_inplace(&mut scores[..tokens]);
-    attention_value_reduce(
-        qkv,
-        &scores[..tokens],
-        output,
-        value_base + head * head_width,
-        qkv_width,
-        0,
-        tokens,
-        head_width,
-    );
+    // `output` is [query][head][head_width], so a fixed head's runs for
+    // consecutive queries are `hidden` apart, not adjacent.
+    for local in 0..query_count {
+        let query = query_base + local;
+        let row = &mut scores[local * tokens..(local + 1) * tokens];
+        softmax_inplace(row);
+        let at = query * hidden + head * head_width;
+        // SAFETY: `at + head_width <= tokens * hidden` because the caller
+        // validated the shapes, and work items partition (head, query block),
+        // so no other item writes this run.
+        let out = unsafe { std::slice::from_raw_parts_mut(output.add(at), head_width) };
+        attention_value_reduce(
+            qkv,
+            row,
+            out,
+            value_base + head * head_width,
+            qkv_width,
+            0,
+            tokens,
+            head_width,
+        );
+    }
 }
 
 fn layer_norm_no_affine(input: &[f32], output: &mut [f32], eps: f32) -> Result<(), String> {
