@@ -131,28 +131,40 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
 
 ## 🟠 SpanExtractor 1B 族（**完全不同**：Ettin + BPE）
 
-### 4. `fastino/GLiNER2.5-Decide-1B` — Ettin-1B + BPE
-- **架构族**：SpanExtractor（`architecture="span"`, `config_version=3`，同 Decide head 契约）
-- **encoder**：`jhu-clsp/ettin-enc-from-dec-1b`
-  - hidden=**1792**, 28 层, fused QKV `attn.Wqkv.weight (5376,1792)`, MLP `mlp.Wi (7680,1792)` + `mlp.Wo (1792,3840)` → **SwiGLU** + 中间维 3840
-  - **RMSNorm**（`mlp_norm.weight`、`embeddings.norm.weight`、`final_norm.weight`）
-  - 预 norm → fused QKV → output proj → add → 预 norm → SwiGLU → output proj → add（标准 LLaMA-style decoder 布局，**不是** DeBERTa）
-- **tokenizer**：`tokenizer.json` 是 HF `TokenizersBackend`（`model.type=BPE`, `normalizer=NFC`, `pre_tokenizer=ByteLevel`），**不是** SentencePiece
-  - vocab=50280 + 98 added = 50378（决定 embedding 行数）
-  - 特殊 token ID：`[CLS]=50281 [SEP]=50282 [PAD]=50283 [MASK]=50284 [SEP_STRUCT]=50368 [SEP_TEXT]=50369 [P]=50370 [C]=50371 [E]=50372 [R]=50373 [L]=50374 [EXAMPLE]=50375 [OUTPUT]=50376 [DESCRIPTION]=50377`
-- **classifier head 同 Decide**：2 层 ReLU MLP `classifier.0 (3584,1792)` + `classifier.2 (1,3584)` —— 3584 = 2 × 1792
-- **flag 决策**：❓ 三个选项
-  - (a) 共用 `--gliner2-decide`，因为同样 SpanExtractor 同样 schema。代价：encoder 实现 + tokenizer 实现都要新增
-  - (b) 新增 `--gliner2-decide-1b`（明确型号）。代价：split 不可持续，每来一个新变体都加 flag
-  - (c) `--gliner2-decide` 根据 GGUF metadata 自动适配（推荐），与 OpenAI 风格的"模型驱动路由"一致
-- **路由**：✅ 共用 `/v1/jev/score`
-- **架构位置**：❓ 二选一
-  - (a) 新建 `src/models/gliner/encoder/ettin.rs` + `src/models/gliner/tokenizer/bpe.rs`，现有 `src/models/gliner/{compute,prompt,weights}.rs` 抽象出 `Encoder` / `Tokenizer` trait
-  - (b) 全新模块 `src/models/gliner_ettin/`（彻底独立），简单但难维护
-- **预计工作量**：~2000 行新代码（Ettin forward ~1500 + BPE tokenizer ~500 + GGUF 转换器 ~300 + 测试 ~500 + oracle）
-- **前置**：先定 flag 决策（(a)/(b)/(c)），再开工
+### 🟠 4. `fastino/GLiNER2.5-Decide-1B` — Ettin-1B + ByteLevel BPE（已勘察，**未实现**）
+- **架构族**：SpanExtractor（`architecture=span`, `config_version=3`），head 契约同 Decide
+- **这是唯一还需要新架构的模型**。其余 11 个全部复用 DeBERTa 系 forward
 
----
+**encoder（从 checkpoint 形状反推，199 个 tensor）**
+- 28 层，`hidden=1792`，`mlp.Wi` 7680 / `mlp.Wo` [1792, 3840] → **fused gate+up，SwiGLU**
+- `attn.Wqkv` [5376, 1792] **fused QKV**；`attn.Wo` [1792, 1792]
+- **无 bias**（`Wqkv`/`Wo`/`Wi` 全无）；`attn_norm` / `mlp_norm` / `embeddings.norm` /
+  `final_norm` 四个 RMSNorm
+- **无位置编码参数**（无 rope 缓存、无 relative embedding）→ 纯 LLaMA-style 布局
+- `embeddings.tok_embeddings` [50378, 1792]（vocab 50280 + 98 added）
+
+**tokenizer（与全家族都不同）**
+- HF `tokenizers`，`model.type=BPE`（**不是** SentencePiece），50009 merges
+- `normalizer=NFC`，`pre_tokenizer/decoder=ByteLevel(add_prefix_space=false)`
+- 126 个 added token，**包含业务符号**：`|||IP_ADDRESS|||` 在 id 0，
+  末段才是 `[SEP_STRUCT]=50368 … [DESCRIPTION]=50377`
+- 所以**不能**沿用 `spm.piece_count` 那套：`tokenizer.ggml.model` 需要新的 `hf-bpe` 分支
+
+**head**
+- `classifier.0` [3584, 1792] + `classifier.2` [1, 3584] → 3584 = 2×1792，与 Decide 同契约
+- `count_embed` / `count_pred` / `span_rep` 与 Decide 同结构，照旧 drop
+
+**实现清单**（预计 ~2000 行）
+- `src/models/gliner_ettin/`：RMSNorm + fused QKV + SwiGLU 的 28 层 forward
+  - ⚠ **不要重写**：仓库已有 `llama` / `qwen3` 系带 RMSNorm + SwiGLU + RoPE 的实现。
+    开工前先评估能否复用（这正是"架构融合"要回答的问题之一）
+- ByteLevel BPE tokenizer：NFC 归一化 + byte-level 预分词 + 50009 merges 的 BPE 合并
+  - ⚠ 同样先看 `src/core/tokenizer/` 有无可用实现
+- 转换器：新的 `ENCODER_SIZES`（1792/28/16）+ `hf-bpe` tokenizer 嵌入路径
+- oracle：`dump_golden.py` 需支持 BPE tokenizer + Ettin encoder config
+  - `jhu-clsp/ettin-enc-from-dec-1b` 的 config 需单独准备
+
+**建议**：单独一个 PR。与其余 11 个的"零新代码"性质完全不同，混在一起会让 review 失焦。
 
 ## 🔴 BoundaryExtractor 族（**完全不同的架构**）
 
