@@ -7,8 +7,8 @@ whose source is already 4-bit -- a Q4_0 round trip measured ~12% mean relative
 error against the MLX affine weights, because one F16 scale per 32 values
 cannot track the per-group bias the source format carries.
 
-Both writers are line-by-line ports of ``quantize_row_q4_K_ref`` and
-``quantize_row_q6_K_ref`` in ``references/llama.cpp/ggml/src/ggml-quants.c``,
+Both writers follow ``quantize_row_q4_K_ref`` and ``quantize_row_q6_K_ref`` in
+``references/llama.cpp/ggml/src/ggml-quants.c``,
 including ``make_qkx2_quants`` and ``get_scale_min_k4``.  The float
 accumulation order is preserved because the scale search compares weighted
 squared errors, so a different summation order can select a different scale and
@@ -36,8 +36,8 @@ K_SEARCH_BUDGET_BYTES = 5 << 30
 
 #: Bytes of transient arrays the Q4_K search holds per super-block.
 _Q4K_BYTES_PER_BLOCK = 8 * SUB_BLOCK * 20 * 8 * 4
-#: Q6_K sweeps 19 candidate scales over 16-value sub-blocks.
-_Q6K_BYTES_PER_BLOCK = 16 * 19 * 8 * 3
+#: Q6_K keeps F64 inputs, weighted values and one candidate's working arrays.
+_Q6K_BYTES_PER_BLOCK = K_BLOCK * 8 * 8
 
 
 def _batch_blocks(bytes_per_block: int) -> int:
@@ -60,10 +60,6 @@ def _nearest_int_scalar(value: float) -> int:
     if value >= 0.0:
         return int(np.floor(value + 0.5))
     return int(np.ceil(value - 0.5))
-
-
-def _f16_bytes(value) -> bytes:
-    return np.float16(value).tobytes()
 
 
 def _get_scale_min_k4(j: int, q: np.ndarray) -> tuple[int, int]:
@@ -362,113 +358,80 @@ def quantize_q4_k(values: np.ndarray, progress=None) -> bytes:
     )
 
 
-def _make_qx_quants(n: int, nmax: int, x: np.ndarray) -> tuple[float, np.ndarray]:
-    """Port of ``make_qx_quants`` with ``rmse_type=1`` and ``qw=NULL``.
-
-    Q6_K needs a symmetric scale per sub-block.  The reference minimizes the
-    squared error, so it first fits ``scale = sumlx/suml2`` and then sweeps
-    ``iscale = -(nmax + 0.1*is) / max`` for ``is`` in -9..9, keeping whichever
-    candidate has the larger ``scale*sumlx``.  ``L`` comes back biased by
-    ``nmax``; the caller recomputes the codes against the stored scale anyway.
-    """
-    mx = 0.0
-    amax = 0.0
-    for i in range(n):
-        ax = abs(float(x[i]))
-        if ax > amax:
-            amax = ax
-            mx = float(x[i])
-    if amax < 1e-15:
-        return 0.0, np.zeros(n, dtype=np.int8)
-    iscale = -nmax / mx
-    L = np.zeros(n, dtype=np.int8)
-    sumlx = suml2 = 0.0
-    for i in range(n):
-        xi = float(x[i])
-        l = _nearest_int_scalar(iscale * xi)
-        l = max(-nmax, min(nmax - 1, l))
-        L[i] = l + nmax
-        w = xi * xi
-        sumlx += w * xi * l
-        suml2 += w * l * l
-    scale = sumlx / suml2 if suml2 else 0.0
-    best = scale * sumlx
-    for is_ in range(-9, 10):
-        if is_ == 0:
-            continue
-        iscale = -(nmax + 0.1 * is_) / mx
-        sumlx = suml2 = 0.0
-        for i in range(n):
-            xi = float(x[i])
-            l = max(-nmax, min(nmax - 1, _nearest_int_scalar(iscale * xi)))
-            w = xi * xi
-            sumlx += w * xi * l
-            suml2 += w * l * l
-        if suml2 > 0 and sumlx * sumlx > best * suml2:
-            for i in range(n):
-                l = max(-nmax, min(nmax - 1, _nearest_int_scalar(iscale * float(x[i]))))
-                L[i] = nmax + l
-            scale = sumlx / suml2
-            best = scale * sumlx
-    return scale, L
-
-
 def _q6k_batch(blocks: np.ndarray) -> np.ndarray:
-    """Quantize ``(n, 256)`` F32 blocks into ``(n, 210)`` Q6_K payloads."""
-    out = np.zeros((blocks.shape[0], K_BLOCK_BYTES["q6_k"]), dtype=np.uint8)
+    """Batch independent Q6_K blocks, retaining scalar F64 accumulation order.
 
-    for bi, block in enumerate(blocks):
-        sub = block.reshape(16, 16)
-        scales = np.zeros(16, dtype=np.float32)
-        # ``L`` is flat, indexed ``L[16*sub_block + position]``, matching the
-        # reference's packing loop.
-        L = np.zeros(K_BLOCK, dtype=np.int8)
-        max_scale = np.float32(0.0)
-        max_abs_scale = np.float32(0.0)
-        for ib in range(16):
-            scale, codes = _make_qx_quants(16, 32, sub[ib])
-            scales[ib] = scale
-            L[16 * ib : 16 * ib + 16] = codes
-            if abs(scale) > max_abs_scale:
-                max_abs_scale = abs(scale)
-                max_scale = scale
-        if max_abs_scale < 1e-15:
-            out[bi, 208:210] = np.frombuffer(_f16_bytes(0.0), dtype=np.uint8)
-            continue
+    Candidates are visited in their original order, including the initial
+    estimate. Each reduction still walks the sixteen values sequentially;
+    only independent sub-blocks are vectorized. Sub-scales and final codes
+    retain the scalar encoder's F32 rounding, including codes whose stored
+    sub-scale rounds to zero.
+    """
+    if not np.isfinite(blocks).all():
+        raise ValueError("q6_k input must contain only finite F32 values")
+    block_count = blocks.shape[0]
+    values = blocks.reshape(-1, 16).astype(np.float64)
+    extrema = np.take_along_axis(values, np.abs(values).argmax(axis=1)[:, None], axis=1)[:, 0]
+    active = np.abs(extrema) >= 1e-15
+    safe_extrema = np.where(active, extrema, 1.0)
+    weights = values * values
+    weighted_values = weights * values
+    scales = np.zeros(values.shape[0], dtype=np.float64)
+    best = np.zeros_like(scales)
+    best_codes = np.zeros(values.shape, dtype=np.uint8)
 
-        iscale = -128.0 / max_scale
-        d = np.float16(1.0 / iscale)
-        # The reference clamps to 127 and then stores into an ``int8_t``, so a
-        # 127 becomes -128 on the wire.  Reproduce the wrap rather than
-        # clamping to 127 here, or the sub-scales will not match the reader.
-        stored = np.clip(_nearest_int(iscale * scales), -127, 127).astype(np.int8)
-        d_f32 = np.float32(d)
-        for j in range(16):
-            dj = d_f32 * np.float32(stored[j])
-            if dj == 0.0:
-                continue
-            L[16 * j : 16 * j + 16] = (
-                np.clip(_nearest_int(sub[j] / dj), -32, 31).astype(np.int8) + np.int8(32)
-            )
-        codes = L.view(np.uint8)
-        # Each 128-value group packs four sub-blocks per byte column: the low
-        # nibbles of ``ql[l]``/``ql[l+32]`` hold sub-blocks 0/2 and 1/3, and
-        # ``qh[l]`` collects the top two bits of all four.
-        for j in range(0, K_BLOCK, 128):
-            for l in range(32):
-                ql = j // 2 + l
-                out[bi, ql] = (codes[j + l] & 0xF) | ((codes[j + l + 64] & 0xF) << 4)
-                out[bi, ql + 32] = (codes[j + l + 32] & 0xF) | (
-                    (codes[j + l + 96] & 0xF) << 4
-                )
-                out[bi, 128 + j // 4 + l] = (
-                    (codes[j + l] >> 4)
-                    | ((codes[j + l + 32] >> 4) << 2)
-                    | ((codes[j + l + 64] >> 4) << 4)
-                    | ((codes[j + l + 96] >> 4) << 6)
-                )
-        out[bi, 192:208] = stored.view(np.uint8)
-        out[bi, 208:210] = np.frombuffer(_f16_bytes(d), dtype=np.uint8)
+    for step in (0, *range(-9, 0), *range(1, 10)):
+        inverse = -(32 + 0.1 * step) / safe_extrema
+        candidate = np.clip(_nearest_int(inverse[:, None] * values), -32, 31)
+        sum_weighted = np.zeros_like(scales)
+        sum_squared = np.zeros_like(scales)
+        for position in range(16):
+            codes = candidate[:, position]
+            sum_weighted += weighted_values[:, position] * codes
+            sum_squared += weights[:, position] * codes * codes
+        improved = active & (sum_squared > 0)
+        if step != 0:
+            improved &= sum_weighted * sum_weighted > best * sum_squared
+        next_scales = np.divide(
+            sum_weighted, sum_squared, out=np.zeros_like(scales), where=sum_squared > 0
+        )
+        scales = np.where(improved, next_scales, scales)
+        best = np.where(improved, next_scales * sum_weighted, best)
+        best_codes[improved] = (candidate[improved] + 32).astype(np.uint8)
+
+    scales = scales.reshape(block_count, 16)
+    max_scale = np.take_along_axis(scales, np.abs(scales).argmax(axis=1)[:, None], axis=1)[:, 0]
+    active_blocks = np.abs(max_scale) >= 1e-15
+    inverse = -128.0 / np.where(active_blocks, max_scale, 1.0)
+    scale = np.where(active_blocks, 1.0 / inverse, 0.0).astype("<f2")
+    stored = np.clip(
+        _nearest_int(inverse.astype(np.float32)[:, None] * scales.astype(np.float32)), -127, 127
+    ).astype(np.int8)
+    sub_scales = scale.astype(np.float32)[:, None] * stored.astype(np.float32)
+    subblocks = blocks.reshape(block_count, 16, 16)
+    scaled = np.divide(
+        subblocks, sub_scales[:, :, None], out=np.zeros_like(subblocks),
+        where=sub_scales[:, :, None] != 0,
+    )
+    codes = np.where(
+        sub_scales[:, :, None] != 0,
+        np.clip(_nearest_int(scaled), -32, 31).astype(np.int8) + np.int8(32),
+        best_codes.reshape(block_count, 16, 16),
+    ).astype(np.uint8).reshape(block_count, 2, 4, 32)
+
+    out = np.zeros((block_count, K_BLOCK_BYTES["q6_k"]), dtype=np.uint8)
+    out[:, :128] = np.stack(
+        ((codes[:, :, 0] & 0xF) | ((codes[:, :, 2] & 0xF) << 4),
+         (codes[:, :, 1] & 0xF) | ((codes[:, :, 3] & 0xF) << 4)),
+        axis=2,
+    ).reshape(block_count, 128)
+    out[:, 128:192] = (
+        (codes[:, :, 0] >> 4) | ((codes[:, :, 1] >> 4) << 2)
+        | ((codes[:, :, 2] >> 4) << 4) | ((codes[:, :, 3] >> 4) << 6)
+    ).reshape(block_count, 64)
+    out[:, 192:208] = stored.view(np.uint8)
+    out[:, 208:210] = scale.view(np.uint8).reshape(block_count, 2)
+    out[~active_blocks] = 0
     return out
 
 
@@ -478,13 +441,14 @@ def quantize_q6_k(values: np.ndarray, progress=None) -> bytes:
     A port of ``quantize_row_q6_K_ref``.  The shared F16 scale is derived from
     the sub-block with the largest magnitude, the remaining sub-scales are
     stored as int8 ratios against it, and the codes are packed so the runtime's
-    ``dequantize_row_q6_k`` reads the shared scale from offset 208.
+    ``dequantize_row_q6_k`` reads the shared scale from offset 208. Batches are
+    capped at 1024 blocks to bound working arrays and refresh progress regularly.
     """
     return _quantize_chunked(
         values,
         "q6_k",
         _q6k_batch,
-        _batch_blocks(_Q6K_BYTES_PER_BLOCK),
+        min(1024, _batch_blocks(_Q6K_BYTES_PER_BLOCK)),
         progress,
     )
 
