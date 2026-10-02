@@ -27,7 +27,56 @@ if str(REPO_ROOT / "target" / "gliner2-oracle") not in sys.path:
 from gliner2.configuration import BoundaryHeadSettings  # noqa: E402
 from gliner2.models.boundary.model import BoundaryHead  # noqa: E402
 
-HIDDEN_SIZE = 768
+# Every boundary checkpoint, and the base encoder each one fine-tunes. The head
+# is built at the encoder's width and the token states come from that encoder, so
+# both have to move together — a 768-wide head over 384-wide states would fail
+# loudly rather than quietly, but the reverse (a wide head over narrow states
+# padded into place) is exactly the kind of mismatch that certifies nothing.
+#
+# ``hidden_size`` is the one field no checkpoint tensor shape pins down (the
+# attention projections are square), so it is read off the published encoder
+# config and the oracle's delta is what confirms it.
+BOUNDARY_MODELS = {
+    "gliner2.5-base-v1": {
+        "checkpoint": "gliner2.5-base-v1",
+        "encoder": "deberta-v3-base",
+        "hidden_size": 768,
+    },
+    "gliner2.5-multi-v1": {
+        "checkpoint": "gliner2.5-multi-v1",
+        "encoder": "mdeberta-v3-base",
+        "hidden_size": 768,
+    },
+    "GLiNER2.5-multi-Decide": {
+        "checkpoint": "GLiNER2.5-multi-Decide",
+        "encoder": "mdeberta-v3-base",
+        "hidden_size": 768,
+    },
+    "gliner2.5-small-v1": {
+        "checkpoint": "gliner2.5-small-v1",
+        "encoder": "deberta-v3-xsmall",
+        "hidden_size": 384,
+    },
+}
+
+DEFAULT_MODEL = "gliner2.5-base-v1"
+
+HIDDEN_SIZE = BOUNDARY_MODELS[DEFAULT_MODEL]["hidden_size"]
+
+
+def model_entry(name: str) -> dict:
+    if name not in BOUNDARY_MODELS:
+        raise ValueError(f"unknown boundary model {name!r}; "
+                         f"expected one of {sorted(BOUNDARY_MODELS)}")
+    return BOUNDARY_MODELS[name]
+
+
+def encoder_dir(name: str = DEFAULT_MODEL) -> Path:
+    return REPO_ROOT / "models" / model_entry(name)["encoder"]
+
+
+def model_dir_for(name: str = DEFAULT_MODEL) -> Path:
+    return REPO_ROOT / "models" / model_entry(name)["checkpoint"]
 
 # ``c_count`` only applies to the explicit-span path, which takes
 # caller-supplied candidates. The shared pool picks its own width
@@ -49,14 +98,14 @@ CASES = [
 
 
 def model_dir() -> Path:
-    return REPO_ROOT / "models" / "gliner2.5-base-v1"
+    return model_dir_for(DEFAULT_MODEL)
 
 
 def fixture_dir() -> Path:
     return REPO_ROOT / "tests" / "fixtures" / "gliner2.5-base-v1"
 
 
-def build_head(dir_: Path | None = None) -> BoundaryHead:
+def build_head(dir_: Path | None = None, model: str = DEFAULT_MODEL) -> BoundaryHead:
     """The reference head, loaded from the checkpoint's own config + weights.
 
     ``load_state_dict`` is strict on purpose: a missing or extra key means this
@@ -66,7 +115,8 @@ def build_head(dir_: Path | None = None) -> BoundaryHead:
     built a scorer config no released checkpoint uses, and certified a partial
     port against it.
     """
-    dir_ = dir_ or model_dir()
+    dir_ = dir_ or model_dir_for(model)
+    hidden = model_entry(model)["hidden_size"]
     config = json.loads((dir_ / "config.json").read_text())
     if config.get("architecture") != "boundary":
         raise ValueError(
@@ -74,7 +124,7 @@ def build_head(dir_: Path | None = None) -> BoundaryHead:
         )
     settings = BoundaryHeadSettings(**config["boundary_head"])
     head = BoundaryHead(
-        HIDDEN_SIZE, settings, query_dim=HIDDEN_SIZE,
+        hidden, settings, query_dim=hidden,
         build_candidate_states=settings.enable_records,
     )
     state_dict = load_file(str(dir_ / "model.safetensors"))

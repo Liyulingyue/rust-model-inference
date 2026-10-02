@@ -44,11 +44,12 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "target" / "gliner2-oracle"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from transformers import AutoModel, AutoTokenizer  # noqa: E402
+from transformers import AutoConfig, AutoModel, AutoTokenizer  # noqa: E402
 
-from common import build_head, dump_json, fixture_dir  # noqa: E402
+from common import (  # noqa: E402
+    DEFAULT_MODEL, build_head, dump_json, encoder_dir, fixture_dir,
+)
 from dump_extract_spans_end_to_end import (  # noqa: E402
-    ENCODER_DIR,
     load_checkpoint_encoder,
 )
 from gliner2.models.boundary.relations import (  # noqa: E402
@@ -276,16 +277,28 @@ def _ext_specs(schema_tokens_list) -> list:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--model", default=DEFAULT_MODEL,
+        help="boundary checkpoint to score; picks the base encoder and head width",
+    )
+    parser.add_argument(
         "--out", type=Path, default=fixture_dir() / "relations-e2e-golden.json"
     )
     args = parser.parse_args()
 
+    base = encoder_dir(args.model)
+    # The reference tokenizes with the *base* encoder's tokenizer and then adds
+    # the ten schema specials, so point SchemaTransformer at the same directory
+    # rather than the GLiNER repo, whose tokenizer.json already has them.
     processor = SchemaTransformer(
-        "models/deberta-v3-base", token_pooling="first", word_splitter=None
+        str(base), token_pooling="first", word_splitter=None
     )
-    tokenizer = AutoTokenizer.from_pretrained(str(ENCODER_DIR))
-    encoder = AutoModel.from_pretrained(str(ENCODER_DIR))
-    load_checkpoint_encoder(encoder)
+    tokenizer = AutoTokenizer.from_pretrained(str(base))
+    # Built from the config rather than `from_pretrained`: every tensor is
+    # replaced by the checkpoint's own weights in `load_checkpoint_encoder`,
+    # which raises unless its key set matches exactly. Loading the base weights
+    # first would only cost a gigabyte per encoder and add a way to be wrong.
+    encoder = AutoModel.from_config(AutoConfig.from_pretrained(str(base)))
+    load_checkpoint_encoder(encoder, args.model)
     encoder.eval()
     added = tokenizer.add_special_tokens(
         {"additional_special_tokens": SchemaTransformer.SPECIAL_TOKENS}
@@ -293,7 +306,7 @@ def main() -> None:
     if added != len(SchemaTransformer.SPECIAL_TOKENS):
         raise ValueError(f"added {added} special tokens")
 
-    head = build_head()
+    head = build_head(model=args.model)
     settings = head.settings
     scorer = build_relation_scorer(settings, 768)
     generator = TypedRelationPairGenerator(

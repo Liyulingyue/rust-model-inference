@@ -190,10 +190,18 @@ def _ext_specs(schema_tokens_list) -> list:
     return specs
 
 
-def load_checkpoint_encoder(encoder) -> None:
+def load_checkpoint_encoder(encoder, model: str = "gliner2.5-base-v1") -> None:
+    """Overwrite the base encoder with the checkpoint's fine-tuned weights.
+
+    The published encoder is only the starting point: the released checkpoint
+    carries its own `encoder.*`, and using the base weights instead leaves every
+    logit around -15 with no error anywhere.
+    """
     from safetensors.torch import load_file
 
-    state = load_file(str(REPO_ROOT / "models" / "gliner2.5-base-v1" / "model.safetensors"))
+    from common import model_dir_for
+
+    state = load_file(str(model_dir_for(model) / "model.safetensors"))
     prefix = "encoder."
     mapping = {}
     for key, value in state.items():
@@ -212,8 +220,9 @@ def load_checkpoint_encoder(encoder) -> None:
             value = mapping[name]
             if tuple(target.shape) != tuple(value.shape):
                 if name == "embeddings.word_embeddings.weight":
-                    # The checkpoint carries 128011 rows (SPM vocab + in-vocab
-                    # `[MASK]` + the 10 schema specials); HF pads to 128100.
+                    # The checkpoint carries SPM-vocab + in-vocab `[MASK]` + the
+                    # schema specials; HF pads to the base config's number
+                    # (128100 for DeBERTa-v3, 251000 for mDeBERTa-v3).
                     target[: value.shape[0]].copy_(value)
                     continue
                 raise ValueError(f"{name}: checkpoint {tuple(value.shape)} != HF {tuple(target.shape)}")

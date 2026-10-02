@@ -241,8 +241,11 @@ def added_tokens(tokenizer_config: dict, spm_pieces: list[str]) -> dict[str, int
 
 def fast_tokenizer_pieces(fast: dict) -> list[str]:
     model = fast.get("model", {})
-    if model.get("type") != "Unigram" or len(model.get("vocab", [])) != 128000:
-        raise ValueError("unsupported tokenizer.json Unigram vocabulary")
+    # See the boundary converter: Unigram is the structural requirement, the
+    # length is not fixed (128000 for DeBERTa-v3, 250101 for mDeBERTa-v3), and
+    # the checkpoint's embedding shape is the authority.
+    if model.get("type") != "Unigram" or not model.get("vocab"):
+        raise ValueError("unsupported tokenizer.json vocabulary")
     declared = {entry["content"]: entry["id"] for entry in fast.get("added_tokens", [])}
     if any(declared.get(token) != index for index, token in enumerate(SPECIAL_TOKENS, 128000)):
         raise ValueError("tokenizer.json added token IDs differ from GLiNER2")

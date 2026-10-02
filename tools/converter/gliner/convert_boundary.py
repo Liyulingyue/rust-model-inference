@@ -56,24 +56,52 @@ ARCH = "gliner2"
 # Unlike ``convert_gliner.py`` (which hardcodes DeBERTa-v3-large), this
 # converter uses base dims because the boundary-family checkpoints ship
 # only with DeBERTa-v3-base + mDeBERTa-v3-base.
-ENCODER = {
-    "model_name": "microsoft/deberta-v3-base",
-    "hidden_size": 768,
-    "num_hidden_layers": 12,
-    "num_attention_heads": 12,
-    "intermediate_size": 3072,
-    "hidden_act": "gelu",
-    "layer_norm_eps": 1e-7,
-    "relative_attention": True,
-    "position_buckets": 256,
-    "max_position_embeddings": 512,
-    "max_relative_positions": -1,
-    "position_biased_input": False,
-    "type_vocab_size": 0,
-    "norm_rel_ebd": "layer_norm",
-    "pos_att_type": "p2c|c2p",
+# Encoder size per ``config.json``'s ``model_name``. The boundary family ships
+# with three encoders: DeBERTa-v3-base (base-v1), mDeBERTa-v3-base
+# (multi-v1 / multi-Decide) and DeBERTa-v3-xsmall (small-v1). mDeBERTa-v3's
+# published config is field-for-field deberta-v3-base apart from `vocab_size`,
+# so its numbers repeat; xsmall is a genuinely different width.
+#
+# Only the size fields vary. The values are read off the published
+# ``microsoft/*`` configs, and `tensor_contracts` re-derives hidden_size,
+# num_hidden_layers and intermediate_size from the checkpoint's own shapes, so a
+# wrong entry fails the conversion. `num_attention_heads` appears in no tensor
+# shape, which makes it the one field only the oracle can catch.
+ENCODER_SIZES = {
+    "microsoft/deberta-v3-base": {"hidden_size": 768, "num_hidden_layers": 12,
+                                  "num_attention_heads": 12, "intermediate_size": 3072},
+    "microsoft/mdeberta-v3-base": {"hidden_size": 768, "num_hidden_layers": 12,
+                                   "num_attention_heads": 12, "intermediate_size": 3072},
+    "microsoft/deberta-v3-xsmall": {"hidden_size": 384, "num_hidden_layers": 12,
+                                    "num_attention_heads": 6, "intermediate_size": 1536},
+}
+
+# As ``AutoConfig.from_pretrained`` resolves them for every size above.
+ENCODER_COMMON = {
+    "hidden_act": "gelu", "layer_norm_eps": 1e-7,
+    "relative_attention": True, "position_buckets": 256,
+    "max_position_embeddings": 512, "max_relative_positions": -1,
+    "position_biased_input": False, "type_vocab_size": 0,
+    "norm_rel_ebd": "layer_norm", "pos_att_type": "p2c|c2p",
     "share_att_key": True,
 }
+
+
+TOKENIZER_CLASSES = ("DebertaV2Tokenizer", "DebertaV2TokenizerFast")
+
+
+def resolve_encoder(model_name: str) -> dict:
+    """The encoder dims for ``model_name``, or an error naming what is supported.
+
+    An unknown name raises rather than falling back to the base sizes: a
+    silently wrong ``hidden_size`` would either trip the shape contracts or,
+    worse, pass them and produce a GGUF that decodes to noise.
+    """
+    if model_name not in ENCODER_SIZES:
+        raise ValueError(f"unsupported boundary model_name {model_name!r}; "
+                         f"expected one of {sorted(ENCODER_SIZES)}")
+    return {**ENCODER_COMMON, **ENCODER_SIZES[model_name]}
+
 
 SCALE_DIVISOR = 3
 
@@ -178,8 +206,13 @@ def parse_spm(buf):
 
 def fast_tokenizer_pieces(fast):
     model_block = fast.get("model", {})
-    if model_block.get("type") != "Unigram" or len(model_block.get("vocab", [])) != 128000:
-        raise ValueError("unsupported tokenizer.json Unigram vocabulary")
+    # Unigram is the structural requirement — DeBERTa-v3 and mDeBERTa-v3 both
+    # ship a Unigram SentencePiece. The vocabulary *length* is not fixed: it is
+    # 128000 for the DeBERTa-v3 tokenizers and 250101 for mDeBERTa-v3's, and the
+    # checkpoint's `word_embeddings` shape is the authority, which
+    # `tensor_contracts` already checks.
+    if model_block.get("type") != "Unigram" or not model_block.get("vocab"):
+        raise ValueError("unsupported tokenizer.json vocabulary")
     return [entry[0] for entry in model_block["vocab"]]
 
 
@@ -187,10 +220,9 @@ def fast_tokenizer_pieces(fast):
 # Source / target tensor mapping
 # ---------------------------------------------------------------------------
 
-def encoder_source_contracts():
-    """Encoder + classifier safetensors → GGUF tensor name. Same shape as
-    Decide's converter, just with base-v1 dims."""
-    d, f = ENCODER["hidden_size"], ENCODER["intermediate_size"]
+def encoder_source_contracts(encoder: dict):
+    """Encoder + classifier safetensors → GGUF tensor name."""
+    d, f = encoder["hidden_size"], encoder["intermediate_size"]
     wide = d * 2  # classifier takes (start, end) concat = 2 * encoder_dim
     mapping = {
         "token_embd.weight": "encoder.embeddings.word_embeddings.weight",
@@ -210,7 +242,7 @@ def encoder_source_contracts():
     }
     layer = "attention.self.{q}"
     ff = "attention.output.dense"
-    for i in range(ENCODER["num_hidden_layers"]):
+    for i in range(encoder["num_hidden_layers"]):
         src = f"encoder.encoder.layer.{i}."
         dst = f"blk.{i}."
         for role, name in (("q", "query_proj"), ("k", "key_proj"), ("v", "value_proj")):
@@ -485,18 +517,18 @@ def check_relation_scorer_shapes(settings: dict, shapes: dict, hidden_size: int)
             forbid(name, "relation_biaffine_content is false")
 
 
-def tensor_contracts():
-    d, f = ENCODER["hidden_size"], ENCODER["intermediate_size"]
+def tensor_contracts(encoder: dict, vocab_size: int):
+    d, f = encoder["hidden_size"], encoder["intermediate_size"]
     wide = d * 2
     shapes = {
-        "token_embd.weight": (128011, d),  # 128000 SPM + 11 schema specials (same as Decide)
+        "token_embd.weight": (vocab_size, d),
         "tok_norm.weight": (d,), "tok_norm.bias": (d,),
-        "rel_embeddings.weight": (ENCODER["position_buckets"] * 2, d),
+        "rel_embeddings.weight": (encoder["position_buckets"] * 2, d),
         "rel_norm.weight": (d,), "rel_norm.bias": (d,),
         "classifier.0.weight": (wide, d), "classifier.0.bias": (wide,),
         "classifier.3.weight": (1, wide), "classifier.3.bias": (1,),
     }
-    for i in range(ENCODER["num_hidden_layers"]):
+    for i in range(encoder["num_hidden_layers"]):
         p = f"blk.{i}."
         shapes.update({
             p + "attn_q.weight": (d, d), p + "attn_q.bias": (d,),
@@ -519,11 +551,14 @@ def convert(model_dir: Path, output: Path) -> None:
     config = json.loads((model_dir / "config.json").read_text())
     if config.get("architecture") != "boundary":
         raise ValueError(f"this converter handles architecture='boundary', got {config.get('architecture')!r}")
-    if config.get("model_name") not in ("microsoft/deberta-v3-base", "microsoft/mdeberta-v3-base"):
-        raise ValueError(f"this converter hard-codes DeBERTa-v3-base dims; got model_name={config.get('model_name')!r}")
+    encoder = resolve_encoder(config.get("model_name"))
     tokenizer_config = json.loads((model_dir / "tokenizer_config.json").read_text())
-    if tokenizer_config.get("tokenizer_class") != "DebertaV2Tokenizer":
-        raise ValueError(f"Expected DebertaV2Tokenizer, got {tokenizer_config.get('tokenizer_class')!r}")
+    # fastino ships both the slow and the fast DeBERTa-v2 class over one SPM
+    # vocab; the properties that decide the pieces and the normalizer are
+    # checked on the next line, so name exactly these two rather than widening.
+    if tokenizer_config.get("tokenizer_class") not in TOKENIZER_CLASSES:
+        raise ValueError(f"expected one of {sorted(TOKENIZER_CLASSES)}, "
+                         f"got {tokenizer_config.get('tokenizer_class')!r}")
     if tokenizer_config.get("vocab_type") != "spm" or tokenizer_config.get("do_lower_case"):
         raise ValueError("Expected a case-sensitive SentencePiece tokenizer")
     tokenizer_json_path = model_dir / "tokenizer.json"
@@ -564,8 +599,8 @@ def convert(model_dir: Path, output: Path) -> None:
         added = {token: base + index for index, token in enumerate(SPECIAL_TOKENS)}
     vocab_size = max(added.values()) + 1
 
-    contracts = tensor_contracts()
-    sources = encoder_source_contracts()
+    contracts = tensor_contracts(encoder, vocab_size)
+    sources = encoder_source_contracts(encoder)
 
     source = open_safetensors(model_dir / "model.safetensors")
     present = {name for name in source.header if name != "__metadata__"}
@@ -597,8 +632,8 @@ def convert(model_dir: Path, output: Path) -> None:
     # shapes agree with the settings we are about to write into the GGUF.
     boundary_settings = boundary_settings_metadata(config["boundary_head"])
     bundled_shapes = {name: tuple(source.header[name]["shape"]) for name in bundled}
-    check_pair_scorer_shapes(boundary_settings, bundled_shapes, ENCODER["hidden_size"])
-    check_relation_scorer_shapes(boundary_settings, bundled_shapes, ENCODER["hidden_size"])
+    check_pair_scorer_shapes(boundary_settings, bundled_shapes, encoder["hidden_size"])
+    check_relation_scorer_shapes(boundary_settings, bundled_shapes, encoder["hidden_size"])
 
     tokens = list(pieces) + [token for token, _ in sorted(added.items(), key=lambda kv: kv[1])]
     # ``vocab_size`` and ``len(tokens)`` can differ by 1 when ``[MASK]`` is part
@@ -610,21 +645,21 @@ def convert(model_dir: Path, output: Path) -> None:
 
     writer = GgufWriter(output)
     writer.add_meta("general.architecture", ARCH)
-    writer.add_meta("general.name", "gliner2.5-boundary")
+    writer.add_meta("general.name", model_dir.name)
     writer.add_meta("general.file_type", "F32")
-    writer.add_meta(f"{ARCH}.block_count", ENCODER["num_hidden_layers"])
-    writer.add_meta(f"{ARCH}.embedding_length", ENCODER["hidden_size"])
-    writer.add_meta(f"{ARCH}.feed_forward_length", ENCODER["intermediate_size"])
-    writer.add_meta(f"{ARCH}.attention.head_count", ENCODER["num_attention_heads"])
-    writer.add_meta(f"{ARCH}.attention.head_dim", ENCODER["hidden_size"] // ENCODER["num_attention_heads"])
+    writer.add_meta(f"{ARCH}.block_count", encoder["num_hidden_layers"])
+    writer.add_meta(f"{ARCH}.embedding_length", encoder["hidden_size"])
+    writer.add_meta(f"{ARCH}.feed_forward_length", encoder["intermediate_size"])
+    writer.add_meta(f"{ARCH}.attention.head_count", encoder["num_attention_heads"])
+    writer.add_meta(f"{ARCH}.attention.head_dim", encoder["hidden_size"] // encoder["num_attention_heads"])
     writer.add_meta(f"{ARCH}.attention.scale_divisor", SCALE_DIVISOR)
-    writer.add_meta(f"{ARCH}.attention.layer_norm_epsilon", ENCODER["layer_norm_eps"])
-    writer.add_meta(f"{ARCH}.relative_attention.bucket_size", ENCODER["position_buckets"])
-    writer.add_meta(f"{ARCH}.relative_attention.max_relative_positions", ENCODER["max_position_embeddings"])
+    writer.add_meta(f"{ARCH}.attention.layer_norm_epsilon", encoder["layer_norm_eps"])
+    writer.add_meta(f"{ARCH}.relative_attention.bucket_size", encoder["position_buckets"])
+    writer.add_meta(f"{ARCH}.relative_attention.max_relative_positions", encoder["max_position_embeddings"])
     writer.add_meta(f"{ARCH}.norm_rel_embeddings", True)
-    writer.add_meta(f"{ARCH}.hidden_act", ENCODER["hidden_act"])
+    writer.add_meta(f"{ARCH}.hidden_act", encoder["hidden_act"])
     writer.add_meta(f"{ARCH}.vocab_size", vocab_size)
-    writer.add_meta(f"{ARCH}.classifier.intermediate_size", ENCODER["hidden_size"] * 2)
+    writer.add_meta(f"{ARCH}.classifier.intermediate_size", encoder["hidden_size"] * 2)
     # The reference hardcodes `activation="relu"` in
     # `BoundaryExtractorModel.__init__`'s `create_mlp` call
     # (gliner2/models/boundary/model.py:1163). Decide's classifier also
@@ -641,7 +676,7 @@ def convert(model_dir: Path, output: Path) -> None:
         k: config[k] for k in ("architecture", "model_name", "config_version", "token_pooling")
         if k in config
     }))
-    writer.add_meta(f"{ARCH}.source_config", json.dumps(ENCODER))
+    writer.add_meta(f"{ARCH}.source_config", json.dumps(encoder))
     writer.add_meta("tokenizer.ggml.model", "hf-json" if fast_json is not None else "spm")
     writer.add_meta("tokenizer.ggml.vocab_size", vocab_size)
     if fast_json is not None:
