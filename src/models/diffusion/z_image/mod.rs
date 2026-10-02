@@ -5,6 +5,8 @@ use crate::ops::matmul_q8_0_quantized_parallel_rows;
 use std::sync::Arc;
 
 pub(crate) mod dit;
+#[cfg(feature = "vulkan")]
+pub(crate) mod dit_gpu;
 pub(crate) mod text;
 pub(crate) mod vae;
 
