@@ -363,6 +363,40 @@ impl VulkanContext {
     }
 
     /// True when the device can run the packed int8 dot-product matmul variant.
+    /// Human-readable memory heaps, for diagnosing why a buffer is slower than
+    /// the device's bandwidth suggests. `alloc_persistently_mapped` deliberately
+    /// asks only for HOST_VISIBLE|HOST_COHERENT, so a device that keeps a
+    /// separate DEVICE_LOCAL heap leaves its fastest memory unused and the
+    /// reason is not visible from the timings alone.
+    pub fn memory_type_report(&self) -> String {
+        let properties = unsafe {
+            self.instance
+                .get_physical_device_memory_properties(self._physical_device)
+        };
+        let mut lines = Vec::new();
+        for (index, ty) in properties.memory_types.iter().enumerate() {
+            let heap = properties.memory_heaps[ty.heap_index as usize];
+            let mut flags = Vec::new();
+            for (set, name) in [
+                (vk::MemoryPropertyFlags::DEVICE_LOCAL, "DEVICE_LOCAL"),
+                (vk::MemoryPropertyFlags::HOST_VISIBLE, "HOST_VISIBLE"),
+                (vk::MemoryPropertyFlags::HOST_CACHED, "HOST_CACHED"),
+                (vk::MemoryPropertyFlags::HOST_COHERENT, "HOST_COHERENT"),
+            ] {
+                if ty.property_flags.contains(set) {
+                    flags.push(name);
+                }
+            }
+            lines.push(format!(
+                "  type {index}: heap {} ({:.1} GiB) [{}]",
+                ty.heap_index,
+                heap.size as f64 / (1024.0 * 1024.0 * 1024.0),
+                flags.join("|")
+            ));
+        }
+        lines.join("\n")
+    }
+
     pub(crate) fn supports_integer_dot_product(&self) -> bool {
         self.integer_dot_product
     }

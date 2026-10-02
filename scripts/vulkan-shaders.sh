@@ -29,6 +29,8 @@ shader_names=(
     qwen35_recurrent_ssm
     silu_mul
     add
+    adaln_modulate
+    q8_matmul_tiled_dp4a
 )
 manifest="$root_dir/shaders/manifest.sha256"
 

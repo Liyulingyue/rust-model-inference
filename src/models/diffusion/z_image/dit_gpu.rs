@@ -81,6 +81,24 @@ struct BoundWeight {
     bindings: OperatorBindings,
 }
 
+/// Whether to use the register-tiled Q8_0 kernel, which measured 11.8x faster
+/// on Z-Image's W2 shape (64.4 ms against 757.6 ms, streaming eight distinct
+/// weight matrices) while agreeing with the old kernel to 9.5e-7 relative, and
+/// which brings a 1-step render from 148 s of denoise to 84 s.
+///
+/// `RUST_GPU_TILED=0` falls back to the one-token-per-weight kernel, which is
+/// the escape hatch for a device without integer dot product and the other half
+/// of the measurement in
+/// `zimage_tiled_matmul_beats_the_one_token_per_weight_kernel`.
+fn tiled_matmul_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("RUST_GPU_TILED")
+            .map(|value| value != "0")
+            .unwrap_or(true)
+    })
+}
+
 /// Which gamma a norm binding holds. Each needs its own descriptor set: the
 /// operator layout takes at most three buffers, and a block has six gammas.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -182,6 +200,10 @@ pub(crate) struct DitGpuSession {
     pub(crate) scratch: Vec<f32>,
     /// Staging for a scaled upload; see `project_scaled`.
     scaled: Vec<f32>,
+    /// The current block's AdaLN scale. One buffer reused for every block: the
+    /// values change per block but the handle does not, so binding it once also
+    /// keeps the descriptor pool from growing with the layer count.
+    modulation: Option<BoundWeight>,
 }
 
 impl DitGpuSession {
@@ -217,6 +239,7 @@ impl DitGpuSession {
             readback: vec![0f32; rows * QKV_WIDTH],
             scratch: Vec::new(),
             scaled: Vec::new(),
+            modulation: None,
         })
     }
 
@@ -346,7 +369,161 @@ impl DitGpuSession {
         input_region: ArenaRegion,
         output_region: ArenaRegion,
     ) -> Result<(), VulkanError> {
+        // The register-tiled kernel: measured 108x faster than the one-token-per
+        // weight kernel on Z-Image's W2 shape while agreeing with it to 7.6e-7
+        // relative. It needs integer dot product, so the older kernel stays as
+        // the fallback for devices without it.
+        if self.context.supports_integer_dot_product() && tiled_matmul_enabled() {
+            return self.record_projection_tiled(
+                commands,
+                bindings,
+                projection,
+                input_region,
+                output_region,
+            );
+        }
+        self.record_projection_grouped(commands, bindings, projection, input_region, output_region)
+    }
+
+    /// The one-token-per-weight grouped kernel, kept for the benchmark that
+    /// compares it against `record_projection_tiled` and as the fallback for
+    /// devices without integer dot product.
+    pub(crate) fn record_projection_grouped(
+        &self,
+        commands: &mut TokenCommands<'_>,
+        bindings: OperatorBindings,
+        projection: Projection,
+        input_region: ArenaRegion,
+        output_region: ArenaRegion,
+    ) -> Result<(), VulkanError> {
         self.ops.record_weight_matmul_rows(
+            commands,
+            bindings,
+            input_region,
+            self.layout.q8,
+            self.layout.q8_scales,
+            self.layout.q4_1_input_sums,
+            self.layout.q8k,
+            self.layout.q8k_scales,
+            &[(output_region, projection.n_out(), projection.n_out() * 4)],
+            projection.n_in(),
+            self.rows,
+            projection.n_in(),
+        )
+    }
+
+    /// Time one projection with either the grouped or the tiled kernel and
+    /// return the output, for `examples/zimage_tiled_bench` to compare.
+    ///
+    /// The input has to be resident already, which is why this takes a region
+    /// rather than a slice.
+    pub(crate) fn bench_projection(
+        &self,
+        layer: usize,
+        projection: Projection,
+        input_region: ArenaRegion,
+        output_region: ArenaRegion,
+        tiled: bool,
+        iterations: usize,
+    ) -> Result<(f64, Vec<f32>), VulkanError> {
+        let bindings = self.binding_for(layer, projection)?;
+        let record = |commands: &mut TokenCommands<'_>| {
+            if tiled {
+                self.record_projection_tiled(
+                    commands,
+                    bindings,
+                    projection,
+                    input_region,
+                    output_region,
+                )
+            } else {
+                self.record_projection_grouped(
+                    commands,
+                    bindings,
+                    projection,
+                    input_region,
+                    output_region,
+                )
+            }
+        };
+        // Warm first: the first dispatch of a pipeline pays driver JIT.
+        let mut commands = TokenCommands::begin(self.context)?;
+        record(&mut commands)?;
+        commands.submit_and_wait()?;
+        let start = std::time::Instant::now();
+        for _ in 0..iterations {
+            let mut commands = TokenCommands::begin(self.context)?;
+            record(&mut commands)?;
+            commands.submit_and_wait()?;
+        }
+        let elapsed = start.elapsed().as_secs_f64() / iterations as f64;
+        let output_len = self.rows * projection.n_out();
+        let values = self
+            .ops
+            .read_f32(output_region, output_len)?
+            .to_vec();
+        Ok((elapsed, values))
+    }
+
+    /// Time one projection per layer over a set of distinct weight matrices,
+    /// all in a single command buffer.
+    ///
+    /// A single matrix read repeatedly measures an L2-resident kernel, and on
+    /// GB10 that reported 110,000 GOP/s where the render with 150 distinct
+    /// matrices per step reported 108. Streaming distinct matrices is what the
+    /// render actually does, so it is the number worth comparing.
+    pub(crate) fn bench_projection_streaming(
+        &self,
+        layers: &[usize],
+        projection: Projection,
+        input_region: ArenaRegion,
+        output_region: ArenaRegion,
+        tiled: bool,
+        iterations: usize,
+    ) -> Result<f64, VulkanError> {
+        let bindings: Vec<OperatorBindings> = layers
+            .iter()
+            .map(|layer| self.binding_for(*layer, projection))
+            .collect::<Result<_, _>>()?;
+        let start = std::time::Instant::now();
+        let mut commands = TokenCommands::begin(self.context)?;
+        for _ in 0..iterations {
+            for (binding, _) in bindings.iter().zip(layers.iter()) {
+                if tiled {
+                    self.record_projection_tiled(
+                        &mut commands,
+                        *binding,
+                        projection,
+                        input_region,
+                        output_region,
+                    )?;
+                } else {
+                    self.record_projection_grouped(
+                        &mut commands,
+                        *binding,
+                        projection,
+                        input_region,
+                        output_region,
+                    )?;
+                }
+            }
+        }
+        commands.submit_and_wait()?;
+        let elapsed = start.elapsed().as_secs_f64();
+        Ok(elapsed / (iterations * layers.len()) as f64)
+    }
+
+    /// `record_projection` with the register-tiled grouped kernel, for
+    /// measuring what the tiling is worth. Not wired into `run_block_gpu`.
+    pub(crate) fn record_projection_tiled(
+        &self,
+        commands: &mut TokenCommands<'_>,
+        bindings: OperatorBindings,
+        projection: Projection,
+        input_region: ArenaRegion,
+        output_region: ArenaRegion,
+    ) -> Result<(), VulkanError> {
+        self.ops.record_weight_matmul_tiled_rows(
             commands,
             bindings,
             input_region,
@@ -372,6 +549,92 @@ impl DitGpuSession {
         Ok(())
     }
 
+    /// Bind the current block's AdaLN scale, reusing the buffer after the first
+    /// block. A fresh `bind_buffers` per block would burn one descriptor set per
+    /// layer per step out of a fixed pool.
+    pub(crate) fn bind_modulation(&mut self, values: &[f32]) -> Result<(), VulkanError> {
+        match &self.modulation {
+            Some(bound) if bound.buffer.size as usize >= values.len() * 4 => {
+                // SAFETY: a persistently mapped host-visible allocation, sized
+                // once when it was created and only ever written with at most
+                // this many floats.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        values.as_ptr(),
+                        bound.buffer.mapped.cast::<f32>(),
+                        values.len(),
+                    );
+                }
+            }
+            _ => {
+                let bytes: Vec<u8> = values
+                    .iter()
+                    .flat_map(|value| f32::to_le_bytes(*value))
+                    .collect();
+                let buffer = unsafe { self.context.upload_static(&bytes)? };
+                let bindings = self.ops.bind_buffers(std::slice::from_ref(&buffer))?;
+                self.modulation = Some(BoundWeight { buffer, bindings });
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn modulation_bindings(&self) -> Result<OperatorBindings, VulkanError> {
+        self.modulation
+            .as_ref()
+            .map(|bound| bound.bindings)
+            .ok_or_else(|| {
+                VulkanError::UnsupportedShape("AdaLN scale was never bound".into())
+            })
+    }
+
+    /// Fused rms_norm -> AdaLN -> QKV for one block.
+    ///
+    /// The normed and modulated activations are consumed by the QKV matmul and
+    /// by nothing else, so the GPU keeps them instead of shipping them to the
+    /// host and back.
+    pub(crate) fn record_attention_qkv(
+        &mut self,
+        layer: usize,
+        rms_gamma: &[f32],
+        modulation: &[f32],
+    ) -> Result<(), VulkanError> {
+        self.bind_norm(layer, NormKind::AttentionNorm1, rms_gamma)?;
+        self.bind_modulation(modulation)?;
+        let norm = self.norm_bindings(layer, NormKind::AttentionNorm1)?;
+        let scale = self.modulation_bindings()?;
+        let weights = self.binding_for(layer, Projection::Qkv)?;
+        let layout = self.layout;
+        let rows = self.rows;
+        let hidden = crate::models::diffusion::z_image::dit::HIDDEN;
+        let eps = crate::models::diffusion::z_image::dit::RMS_EPSILON;
+        // `TokenCommands::begin(self.context)` rather than `self.begin()`: the
+        // latter borrows all of `self`, which `record_projection` still needs.
+        let mut commands = TokenCommands::begin(self.context)?;
+        self.ops.record_rms_norm_rows(
+            &commands,
+            norm,
+            layout.x,
+            layout.normed,
+            hidden,
+            eps,
+            rows,
+            hidden,
+            hidden,
+        )?;
+        self.ops
+            .record_adaln_modulate_rows(&commands, scale, layout.normed, hidden, rows, hidden)?;
+        self.record_projection(
+            &mut commands,
+            weights,
+            Projection::Qkv,
+            layout.normed,
+            layout.qkv,
+        )?;
+        commands.submit_and_wait()?;
+        self.read_into(Projection::Qkv, layout.qkv)
+    }
+
     /// Open a command buffer for a fused chain of dispatches.
     pub(crate) fn begin(&self) -> Result<TokenCommands<'_>, VulkanError> {
         TokenCommands::begin(self.context)
@@ -388,6 +651,12 @@ impl DitGpuSession {
 
     pub(crate) fn ops(&self) -> &Qwen3Ops<'static> {
         &self.ops
+    }
+
+    /// Mutable access, for the operations that allocate from the descriptor
+    /// pool (`bind_buffers` and friends).
+    pub(crate) fn ops_mut(&mut self) -> &mut Qwen3Ops<'static> {
+        &mut self.ops
     }
 
     /// Bind one norm gamma for the arena-only pipeline.

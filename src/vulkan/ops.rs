@@ -15,6 +15,8 @@ const Q8_MATMUL_GROUPED_SHADER: &[u8] = include_bytes!("../../shaders/bin/q8_mat
 /// caller keeps addressing it through `Q8_MATMUL_GROUPED`.
 const Q8_MATMUL_GROUPED_DP4A_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/q8_matmul_grouped_dp4a.spv");
+const Q8_MATMUL_GROUPED_TILED_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/q8_matmul_tiled_dp4a.spv");
 const Q4_0_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_0_matmul.spv");
 const Q4_1_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_1_matmul.spv");
 const Q4_K_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_k_matmul.spv");
@@ -38,6 +40,7 @@ const QWEN35_RECURRENT_CONV_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/qwen35_recurrent_conv.spv");
 const QWEN35_RECURRENT_SSM_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/qwen35_recurrent_ssm.spv");
+const ADALN_MODULATE_SHADER: &[u8] = include_bytes!("../../shaders/bin/adaln_modulate.spv");
 
 const QUANTIZE: usize = 0;
 const QUANTIZE_K: usize = 1;
@@ -62,6 +65,8 @@ const QWEN35_RECURRENT_CONV: usize = 19;
 const QWEN35_RECURRENT_SSM: usize = 20;
 const Q5_K_MATMUL: usize = 21;
 const F32_MATMUL: usize = 22;
+const ADALN_MODULATE: usize = 23;
+const Q8_MATMUL_GROUPED_TILED: usize = 24;
 /// Per-pipeline dispatch counters, populated only while `RUST_GPU_DISPATCH_TRACE`
 /// is set. Indexed by the `OPERATOR_SHADERS` position, so a new pipeline needs
 /// no extra bookkeeping here.
@@ -89,7 +94,7 @@ pub fn dump_dispatch_trace() {
     }
 }
 
-const OPERATOR_SHADERS: [&[u8]; 23] = [
+const OPERATOR_SHADERS: [&[u8]; 25] = [
     QUANTIZE_Q8_0_SHADER,
     QUANTIZE_Q8_K_SHADER,
     Q8_MATMUL_GROUPED_SHADER,
@@ -113,6 +118,8 @@ const OPERATOR_SHADERS: [&[u8]; 23] = [
     QWEN35_RECURRENT_SSM_SHADER,
     Q5_K_MATMUL_SHADER,
     F32_MATMUL_SHADER,
+    ADALN_MODULATE_SHADER,
+    Q8_MATMUL_GROUPED_TILED_SHADER,
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -843,6 +850,12 @@ impl<'a> Qwen3Ops<'a> {
             .map(|(index, shader)| {
                 if index == Q8_MATMUL_GROUPED && force_dp4a {
                     Q8_MATMUL_GROUPED_DP4A_SHADER
+                } else if index == Q8_MATMUL_GROUPED_TILED && !force_dp4a {
+                    // The tiled kernel needs `dotPacked4x8EXT`, so on a device
+                    // without it the slot falls back to the plain grouped shader
+                    // and `record_weight_matmul_tiled_rows` refuses instead of
+                    // recording a dispatch whose semantics it cannot honour.
+                    Q8_MATMUL_GROUPED_SHADER
                 } else {
                     *shader
                 }
@@ -1269,6 +1282,111 @@ impl<'a> Qwen3Ops<'a> {
             self.record_linear_dispatch(commands, pipeline, self.arena_bindings, &push, dispatch);
         }
         self.record_linear_dispatch(commands, format.layout().2, bindings, &push, dispatch);
+        Ok(())
+    }
+
+    /// Grouped Q8_0 matmul, register-tiled over tokens.
+    ///
+    /// Same inputs, same output, same quantization as
+    /// `record_weight_matmul_rows` -- only the tiling differs. The caller is
+    /// responsible for having run the quantize step, which this reuses by
+    /// construction: the push constant and the staged layout are identical, so
+    /// the only difference is which pipeline is recorded and how the workgroups
+    /// are shaped.
+    ///
+    /// Requires integer dot product; without it the tiled slot holds a different
+    /// shader, so this returns an error rather than silently computing the
+    /// wrong thing.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_weight_matmul_tiled_rows(
+        &self,
+        commands: &TokenCommands<'_>,
+        bindings: OperatorBindings,
+        activation: ArenaRegion,
+        q8: ArenaRegion,
+        q8_scales: ArenaRegion,
+        q4_1_input_sums: ArenaRegion,
+        q8k: ArenaRegion,
+        q8k_scales: ArenaRegion,
+        outputs: &[(ArenaRegion, usize, usize)],
+        n_in: usize,
+        token_rows: usize,
+        input_stride: usize,
+    ) -> Result<(), VulkanError> {
+        if !self.context.supports_integer_dot_product() {
+            return Err(VulkanError::UnsupportedShape(
+                "tiled Q8_0 matmul needs integer dot product".into(),
+            ));
+        }
+        let format = bindings.weight_format(outputs.len())?;
+        let (activation, scales, quantize) = match format {
+            GpuWeightFormat::F16 | GpuWeightFormat::BF16 | GpuWeightFormat::F32 => {
+                return Err(VulkanError::UnsupportedShape(
+                    "tiled Q8_0 matmul is only defined for quantized weights".into(),
+                ));
+            }
+            GpuWeightFormat::Q4_K | GpuWeightFormat::Q5_K | GpuWeightFormat::Q6_K => {
+                let push = quantize_rows_push(
+                    self.arena.size as usize,
+                    activation,
+                    q8k,
+                    q8k_scales,
+                    None,
+                    n_in,
+                    token_rows,
+                    input_stride,
+                    256,
+                )?;
+                let dispatch = row_dispatch(n_in / 256, token_rows, &self.context.limits)?;
+                (q8k, q8k_scales, Some((QUANTIZE_K, push, dispatch)))
+            }
+            _ => {
+                let push = quantize_rows_push(
+                    self.arena.size as usize,
+                    activation,
+                    q8,
+                    q8_scales,
+                    Some(q4_1_input_sums),
+                    n_in,
+                    token_rows,
+                    input_stride,
+                    32,
+                )?;
+                let dispatch = row_dispatch(n_in / 32, token_rows, &self.context.limits)?;
+                (q8, q8_scales, Some((QUANTIZE, push, dispatch)))
+            }
+        };
+        let (push, _) = matmul_rows_push(
+            self.arena.size as usize,
+            &self.context.limits,
+            bindings,
+            activation,
+            scales,
+            Some(q4_1_input_sums),
+            outputs,
+            n_in,
+            token_rows,
+            input_stride,
+        )?;
+        // One lane per output column, TOKENS tokens per workgroup.
+        let columns = outputs
+            .first()
+            .map(|(_, n_out, _)| *n_out)
+            .ok_or(VulkanError::UnsupportedShape("tiled matmul has no output".into()))?;
+        const TOKENS: usize = 8;
+        let tiles = token_rows.div_ceil(TOKENS);
+        let dispatch = row_dispatch(columns.div_ceil(64), tiles * outputs.len(), &self.context.limits)?;
+        // Validation is complete before the first command is recorded.
+        if let Some((pipeline, quantize_push, quantize_dispatch)) = quantize {
+            self.record_linear_dispatch(
+                commands,
+                pipeline,
+                self.arena_bindings,
+                &quantize_push,
+                quantize_dispatch,
+            );
+        }
+        self.record_linear_dispatch(commands, Q8_MATMUL_GROUPED_TILED, bindings, &push, dispatch);
         Ok(())
     }
 
@@ -2397,6 +2515,65 @@ impl<'a> Qwen3Ops<'a> {
                 bytemuck::cast_slice(&push),
             );
             commands.dispatch(x, y, z);
+            commands.barrier();
+        }
+        Ok(())
+    }
+
+    /// `target[channel] = target[channel] * scale[channel] + shift[channel]`,
+    /// in place, over `rows` rows of `count` values each.
+    ///
+    /// This is the DiT's AdaLN modulation. The CPU path runs it per row between
+    /// `rms_norm` and the projection, which means the normalised rows have to
+    /// be uploaded and the modulated rows read back before the matmul can use
+    /// them. Recorded here instead, the whole chain stays in the arena.
+    ///
+    /// `scale` and `shift` share one read-only binding: the caller uploads them
+    /// back to back into a single buffer, and the shader reads the first half as
+    /// scale and the second as shift. They are per-channel `[width]` vectors
+    /// indexed by `index % width`, not by the flat element offset, which is why
+    /// they cannot live in the arena at all.
+    pub(crate) fn record_adaln_modulate_rows(
+        &self,
+        commands: &TokenCommands<'_>,
+        scale: OperatorBindings,
+        target: ArenaRegion,
+        count: usize,
+        rows: usize,
+        row_stride: usize,
+    ) -> Result<(), VulkanError> {
+        // The scale is one `[width]` vector broadcast over every row, so it is
+        // sized by `count` and not by `rows * count`. `require` indexes the
+        // bound extras rather than the descriptor binding, and the scale is the
+        // first extra even though it lands on binding 1.
+        scale.require(0, f32_bytes(count)?, "AdaLN scale")?;
+        let push = [
+            self.f32_rows_word(target, rows, count, row_stride, "modulate target")?,
+            as_u32(count, "modulate length")?,
+            as_u32(rows, "modulate rows")?,
+            as_u32(row_stride, "modulate row stride")?,
+            as_u32(count, "modulate width")?,
+        ];
+        let [x, y, z] = row_dispatch(count.div_ceil(64), rows, &self.context.limits)?;
+        unsafe {
+            commands.bind(
+                self.pipelines[ADALN_MODULATE],
+                self.context.pipeline_layout,
+                // The operator layout puts all four bindings in a single
+                // descriptor set, so one set carries the arena at binding 0 and
+                // the scale at binding 1. Binding three sets here would read
+                // `scale` out of set 0, which is the arena.
+                &[scale.descriptor_set],
+                bytemuck::cast_slice(&push),
+            );
+            commands.dispatch(x, y, z);
+            // Every sibling record_* ends with a barrier, and the fused block
+            // depends on it: AdaLN writes the region the QKV matmul then reads,
+            // and without this the two dispatches race. It stayed hidden while
+            // the matmul was the slow one-token-per-weight kernel, whose long
+            // K-walk left the writes time to land, and showed up as a
+            // run-to-run difference of ~11/255 as soon as the tiled kernel made
+            // that dispatch an order of magnitude faster.
             commands.barrier();
         }
         Ok(())
