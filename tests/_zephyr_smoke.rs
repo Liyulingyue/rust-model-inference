@@ -28,9 +28,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use rust_model_inference::GGUFLoader;
 use rust_model_inference::core::tensor::TensorSource;
 use rust_model_inference::models::llama::trunk::forward::build_prompt_tokens;
+use rust_model_inference::GGUFLoader;
 
 fn model_path() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -46,9 +46,8 @@ fn zephyr_7b_alpha_chat_template_smoke() {
         eprintln!("skipping: {} not present", model_path().display());
         return;
     }
-    let source: Arc<dyn TensorSource> = Arc::new(
-        GGUFLoader::from_file(model_path()).expect("failed to load Zephyr-7B-alpha GGUF"),
-    );
+    let source: Arc<dyn TensorSource> =
+        Arc::new(GGUFLoader::from_file(model_path()).expect("failed to load Zephyr-7B-alpha GGUF"));
 
     let prompt = "What is the capital of France?";
     let ids = build_prompt_tokens(source.as_ref(), prompt, false)

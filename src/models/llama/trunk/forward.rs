@@ -2492,10 +2492,8 @@ pub(crate) fn silu_mul_rows(
         let r_end = (r_start + per_thread).min(n_ff);
         for row in 0..rows {
             unsafe {
-                let g = std::slice::from_raw_parts(
-                    gate_ptr.add(row * n_ff + r_start),
-                    r_end - r_start,
-                );
+                let g =
+                    std::slice::from_raw_parts(gate_ptr.add(row * n_ff + r_start), r_end - r_start);
                 let u = std::slice::from_raw_parts_mut(
                     up_ptr.add(row * n_ff + r_start) as *mut f32,
                     r_end - r_start,

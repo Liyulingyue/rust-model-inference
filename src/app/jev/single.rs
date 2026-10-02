@@ -90,16 +90,15 @@ fn run_jev_decision_data_with_image(
         // CLI + HTTP); it was missing here, so `--jev` on an
         // EXAONE GGUF errored out. LlamaJevScorer renders its
         // `[|user|]` template (see llama.rs).
-        "llama" | "k2-horizon" | "granite" | "nanbeige" | "qwen2_2" | "phi3" | "exaone" | "glm4" => {
-            llama::run_jev_decision_llama(
-                source.clone(),
-                context,
-                &prepared,
-                n_threads_arg,
-                prefill_batch_size,
-                false,
-            )
-        }
+        "llama" | "k2-horizon" | "granite" | "nanbeige" | "qwen2_2" | "phi3" | "exaone"
+        | "glm4" => llama::run_jev_decision_llama(
+            source.clone(),
+            context,
+            &prepared,
+            n_threads_arg,
+            prefill_batch_size,
+            false,
+        ),
         "gemma4" => gemma4::run_jev_decision_gemma4(
             source.clone(),
             context,

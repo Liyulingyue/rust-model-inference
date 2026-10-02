@@ -15,9 +15,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use rust_model_inference::GGUFLoader;
 use rust_model_inference::core::tensor::TensorSource;
 use rust_model_inference::models::llama::trunk::forward::build_prompt_tokens;
+use rust_model_inference::GGUFLoader;
 
 fn model_path() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

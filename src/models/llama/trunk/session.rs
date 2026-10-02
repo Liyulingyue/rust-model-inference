@@ -727,11 +727,7 @@ impl<'a> LlamaSession<'a> {
                 let needs_q8k_ffn = lw.w_gate.uses_q8_k();
                 let ffn_fused = &mut scratch.ffn_fused[..rows * 2 * n_ff];
                 prepared_rows.prepare(normed, rows, n_embd, needs_q8_ffn, needs_q8k_ffn)?;
-                prepared_rows.matmul_group(
-                    normed,
-                    [(&lw.w_gate, ffn_fused)],
-                    pool,
-                )?;
+                prepared_rows.matmul_group(normed, [(&lw.w_gate, ffn_fused)], pool)?;
                 // `silu_mul_rows` writes `silu(gate) * up` into the
                 // up half (i.e. the second `n_ff` chunk of `ffn_fused`).
                 // The CLI path uses `silu_mul_approx_inplace` which
@@ -739,11 +735,7 @@ impl<'a> LlamaSession<'a> {
                 // overwrites the second arg in a pool-parallel loop.
                 let (gate_part, up_part) = ffn_fused.split_at_mut(rows * n_ff);
                 crate::models::llama::trunk::forward::silu_mul_rows(
-                    pool,
-                    n_threads,
-                    gate_part,
-                    up_part,
-                    n_ff,
+                    pool, n_threads, gate_part, up_part, n_ff,
                 );
                 // `w_down` reads from `gate_buf`; copy the post-silu
                 // activation (now living in `up_part` after
@@ -763,11 +755,7 @@ impl<'a> LlamaSession<'a> {
                     pool,
                 )?;
                 crate::models::llama::trunk::forward::silu_mul_rows(
-                    pool,
-                    n_threads,
-                    gate_proj,
-                    up_proj,
-                    n_ff,
+                    pool, n_threads, gate_proj, up_proj, n_ff,
                 );
                 // `silu_mul_rows(gate, up)` writes the post-silu
                 // tensor into `up`; copy it back into `gate_buf`
@@ -1257,94 +1245,89 @@ impl<'a> LlamaSession<'a> {
                 let input = unsafe { std::slice::from_raw_parts(normed_ptr, n_embd) };
                 let q8 = unsafe { std::slice::from_raw_parts(q8_ptr_ffn, n_embd) };
                 let sc = unsafe { std::slice::from_raw_parts(sc_ptr_ffn, n_embd / 32) };
-let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr_ffn, n_embd / 256) };
-                 let gate_buf = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, n_ff) };
-                 let up_buf = unsafe { std::slice::from_raw_parts_mut(up_buf_ptr, n_ff) };
-                 // GLM-4 (`glm4` arch) ships a single fused
-                 // `ffn_up.weight` of shape `[n_embd, 2*n_ff]`; the
-                 // first half is gate, the second is up. Plain llama
-                 // uses two distinct matmuls on separate `w_gate` /
-                 // `w_up` tensors. weights.rs substitutes `w_gate`
-                 // to point at the fused tensor when GLM-4 has no
-                 // separate `ffn_gate.weight`, so the unfused path
-                 // (two matmuls on w_gate / w_up) reads the same
-                 // tensor twice and produces garbage. Dispatch on
-                 // `arch` here for the same reason `forward.rs`
-                 // does. (`up_buf_ptr` is `*mut f32`; we cast for
-                 // the 2*n_ff-sized destination.)
-                 if arch == "glm4" {
-                     let ffn_fused = unsafe {
-                         std::slice::from_raw_parts_mut(
-                             ffn_fused_ptr,
-                             2 * n_ff,
-                         )
-                     };
-                     lw.w_gate.kernel.forward_prepared(
-                         input,
-                         q8,
-                         sc,
-                         Some(q8k),
-                         ffn_fused,
-                         n_embd,
-                         2 * n_ff,
-                         ith,
-                         nth,
-                     );
-                     let (gate_part, up_part) = ffn_fused.split_at_mut(n_ff);
-                     if gpu_matmul_active() {
-                         if ith == 0 {
-                             silu_mul_approx_inplace(gate_part, up_part);
-                             gate_buf.copy_from_slice(&up_part[..n_ff]);
-                         }
-                     } else {
-                         let per_thread = (n_ff + nth - 1) / nth;
-                         let r_start = ith * per_thread;
-                         let r_end = (r_start + per_thread).min(n_ff);
-                         silu_mul_approx_inplace(
-                             &gate_part[r_start..r_end],
-                             &mut up_part[r_start..r_end],
-                         );
-                         gate_buf[r_start..r_end]
-                             .copy_from_slice(&up_part[r_start..r_end]);
-                     }
-                 } else {
-                     lw.w_gate.kernel.forward_prepared(
-                         input,
-                         q8,
-                         sc,
-                         Some(q8k),
-                         up_buf,
-                         n_embd,
-                         n_ff,
-                         ith,
-                         nth,
-                     );
-                     lw.w_up.kernel.forward_prepared(
-                         input,
-                         q8,
-                         sc,
-                         Some(q8k),
-                         gate_buf,
-                         n_embd,
-                         n_ff,
-                         ith,
-                         nth,
-                     );
-                     if gpu_matmul_active() {
-                         if ith == 0 {
-                             silu_mul_approx_inplace(&up_buf[..n_ff], &mut gate_buf[..n_ff]);
-                         }
-                     } else {
-                         let per_thread = (n_ff + nth - 1) / nth;
-                         let r_start = ith * per_thread;
-                         let r_end = (r_start + per_thread).min(n_ff);
-                         silu_mul_approx_inplace(
-                             &up_buf[r_start..r_end],
-                             &mut gate_buf[r_start..r_end],
-                         );
-                     }
-                 }
-             });
+                let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr_ffn, n_embd / 256) };
+                let gate_buf = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, n_ff) };
+                let up_buf = unsafe { std::slice::from_raw_parts_mut(up_buf_ptr, n_ff) };
+                // GLM-4 (`glm4` arch) ships a single fused
+                // `ffn_up.weight` of shape `[n_embd, 2*n_ff]`; the
+                // first half is gate, the second is up. Plain llama
+                // uses two distinct matmuls on separate `w_gate` /
+                // `w_up` tensors. weights.rs substitutes `w_gate`
+                // to point at the fused tensor when GLM-4 has no
+                // separate `ffn_gate.weight`, so the unfused path
+                // (two matmuls on w_gate / w_up) reads the same
+                // tensor twice and produces garbage. Dispatch on
+                // `arch` here for the same reason `forward.rs`
+                // does. (`up_buf_ptr` is `*mut f32`; we cast for
+                // the 2*n_ff-sized destination.)
+                if arch == "glm4" {
+                    let ffn_fused =
+                        unsafe { std::slice::from_raw_parts_mut(ffn_fused_ptr, 2 * n_ff) };
+                    lw.w_gate.kernel.forward_prepared(
+                        input,
+                        q8,
+                        sc,
+                        Some(q8k),
+                        ffn_fused,
+                        n_embd,
+                        2 * n_ff,
+                        ith,
+                        nth,
+                    );
+                    let (gate_part, up_part) = ffn_fused.split_at_mut(n_ff);
+                    if gpu_matmul_active() {
+                        if ith == 0 {
+                            silu_mul_approx_inplace(gate_part, up_part);
+                            gate_buf.copy_from_slice(&up_part[..n_ff]);
+                        }
+                    } else {
+                        let per_thread = (n_ff + nth - 1) / nth;
+                        let r_start = ith * per_thread;
+                        let r_end = (r_start + per_thread).min(n_ff);
+                        silu_mul_approx_inplace(
+                            &gate_part[r_start..r_end],
+                            &mut up_part[r_start..r_end],
+                        );
+                        gate_buf[r_start..r_end].copy_from_slice(&up_part[r_start..r_end]);
+                    }
+                } else {
+                    lw.w_gate.kernel.forward_prepared(
+                        input,
+                        q8,
+                        sc,
+                        Some(q8k),
+                        up_buf,
+                        n_embd,
+                        n_ff,
+                        ith,
+                        nth,
+                    );
+                    lw.w_up.kernel.forward_prepared(
+                        input,
+                        q8,
+                        sc,
+                        Some(q8k),
+                        gate_buf,
+                        n_embd,
+                        n_ff,
+                        ith,
+                        nth,
+                    );
+                    if gpu_matmul_active() {
+                        if ith == 0 {
+                            silu_mul_approx_inplace(&up_buf[..n_ff], &mut gate_buf[..n_ff]);
+                        }
+                    } else {
+                        let per_thread = (n_ff + nth - 1) / nth;
+                        let r_start = ith * per_thread;
+                        let r_end = (r_start + per_thread).min(n_ff);
+                        silu_mul_approx_inplace(
+                            &up_buf[r_start..r_end],
+                            &mut gate_buf[r_start..r_end],
+                        );
+                    }
+                }
+            });
 
             quantize_q8_0_into(
                 &scratch.gate_buf[..n_ff],

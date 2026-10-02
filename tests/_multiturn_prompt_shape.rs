@@ -12,10 +12,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use rust_model_inference::GGUFLoader;
 use rust_model_inference::core::tensor::TensorSource;
 use rust_model_inference::core::tokenizer::BPETokenizer;
 use rust_model_inference::models::llama::trunk::forward::build_prompt_tokens_from_turns;
+use rust_model_inference::GGUFLoader;
 
 fn gguf(parts: &[&str]) -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -35,8 +35,7 @@ fn load(path: &PathBuf) -> Option<Loaded> {
     }
     let source: Arc<dyn TensorSource> =
         Arc::new(GGUFLoader::from_file(path.clone()).expect("failed to open GGUF"));
-    let tok =
-        BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned()).expect("tokenizer");
+    let tok = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned()).expect("tokenizer");
     Some((source, tok))
 }
 
@@ -48,10 +47,8 @@ const DIALOGUE: [(&str, &str); 3] = [
 
 #[test]
 fn glm4_multi_turn_prompt_ends_with_assistant_marker() {
-    let Some((source, tok)) = load(&gguf(&[
-        "GLM-4-9B-0414-GGUF",
-        "GLM-4-9B-0414-Q4_K_M.gguf",
-    ])) else {
+    let Some((source, tok)) = load(&gguf(&["GLM-4-9B-0414-GGUF", "GLM-4-9B-0414-Q4_K_M.gguf"]))
+    else {
         return;
     };
 
@@ -67,9 +64,7 @@ fn glm4_multi_turn_prompt_ends_with_assistant_marker() {
     );
     // [gMASK]<sop> must appear exactly once, at the very front (after the
     // tokenizer's BOS, which GLM-4 needs even though add_bos_token=false).
-    let body = rendered
-        .strip_prefix("<|endoftext|>")
-        .unwrap_or(&rendered);
+    let body = rendered.strip_prefix("<|endoftext|>").unwrap_or(&rendered);
     assert!(
         body.starts_with("[gMASK]"),
         "prompt should start with [gMASK] after BOS; got {rendered:?}",

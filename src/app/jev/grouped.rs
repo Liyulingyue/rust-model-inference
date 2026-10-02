@@ -288,9 +288,7 @@ fn build_jev_token_ids_for_arch(
                     },
                 ))
             } else if arch == "glm4" {
-                let prompt = format!(
-                    "[gMASK]<sop><|user|>\n{payload}<|assistant|>\n"
-                );
+                let prompt = format!("[gMASK]<sop><|user|>\n{payload}<|assistant|>\n");
                 let mut ids = tokenizer.encode(
                     &prompt,
                     EncodeOptions {
