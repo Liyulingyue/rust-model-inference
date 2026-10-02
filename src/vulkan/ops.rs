@@ -1373,7 +1373,15 @@ impl<'a> Qwen3Ops<'a> {
             .first()
             .map(|(_, n_out, _)| *n_out)
             .ok_or(VulkanError::UnsupportedShape("tiled matmul has no output".into()))?;
-        const TOKENS: usize = 8;
+        // Must match `TOKENS` in shaders/glsl/q8_matmul_tiled_dp4a.comp: the
+        // shader derives the token tile from the workgroup id, so a mismatch
+        // here would read and write the wrong rows rather than fail.
+        //
+        // Measured on GB10 at Z-Image's W2 shape, streaming eight distinct
+        // weight matrices: 8 -> 64.4 ms, 16 -> 32.0 ms, 32 -> 20.6 ms,
+        // 64 -> 48.9 ms. Sixty-four accumulators per lane is past what the
+        // register file holds, so 32 is where the curve turns.
+        const TOKENS: usize = 32;
         let tiles = token_rows.div_ceil(TOKENS);
         let dispatch = row_dispatch(columns.div_ceil(64), tiles * outputs.len(), &self.context.limits)?;
         // Validation is complete before the first command is recorded.

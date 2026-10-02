@@ -19,7 +19,7 @@
 
 layout(local_size_x = 64) in;
 
-const uint TOKENS = 8u;
+const uint TOKENS = 32u;
 const uint CHUNK_BLOCKS = 16u;
 const uint INPUT_WORDS_PER_BLOCK = 8u;
 

@@ -1541,17 +1541,19 @@ thread_local! {
 /// block and reads all zeroes on this path -- which is what made the CPU
 /// attention share of a step unknowable from the profile output.
 thread_local! {
-    static GPU_PROFILE_TIMERS: std::cell::RefCell<[f64; 6]> =
-        const { std::cell::RefCell::new([0.0; 6]) };
+    static GPU_PROFILE_TIMERS: std::cell::RefCell<[f64; 8]> =
+        const { std::cell::RefCell::new([0.0; 8]) };
 }
 
-const GPU_PHASE_LABELS: [&str; 6] = [
+const GPU_PHASE_LABELS: [&str; 8] = [
     "modulation (host)",
     "norm+adaln+qkv (gpu)",
     "rope (host)",
     "attention (host)",
     "out proj (gpu)",
     "ffn (gpu)",
+    "  w1 readback",
+    "  host silu",
 ];
 
 #[cfg(feature = "vulkan")]
@@ -1563,7 +1565,7 @@ fn gpu_profile_add(slot: usize, started: std::time::Instant) {
 
 #[cfg(feature = "vulkan")]
 fn gpu_profile_reset() {
-    GPU_PROFILE_TIMERS.with(|cell| *cell.borrow_mut() = [0.0; 6]);
+    GPU_PROFILE_TIMERS.with(|cell| *cell.borrow_mut() = [0.0; 8]);
 }
 
 #[cfg(feature = "vulkan")]
@@ -2281,7 +2283,11 @@ fn run_block_gpu(
                 1.0,
             )
             .map_err(|e| format!("Z-Image DiT w1 dispatch failed: {e}"))?;
+        let t_ffn = std::time::Instant::now();
         let mut gate = session.readback(ffn_len).to_vec();
+        gpu_profile_add(6, t_ffn);
+        let t_ffn = std::time::Instant::now();
+        let t_ffn = std::time::Instant::now();
         if up_on_gpu {
             session
                 .project(
@@ -2293,10 +2299,12 @@ fn run_block_gpu(
                 )
                 .map_err(|e| format!("Z-Image DiT w3 dispatch failed: {e}"))?;
             let up = session.readback(ffn_len);
+            let t_silu = std::time::Instant::now();
             for index in 0..ffn_len {
                 let gate_value = gate[index];
                 gate[index] = (gate_value / (1.0 + (-gate_value).exp())) * up[index];
             }
+            gpu_profile_add(7, t_silu);
         } else {
             for row in 0..rows {
                 let input = &attention[row * HIDDEN..(row + 1) * HIDDEN];
