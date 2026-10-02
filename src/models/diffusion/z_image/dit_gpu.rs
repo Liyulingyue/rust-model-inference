@@ -81,6 +81,18 @@ struct BoundWeight {
     bindings: OperatorBindings,
 }
 
+/// Which gamma a norm binding holds. Each needs its own descriptor set: the
+/// operator layout takes at most three buffers, and a block has six gammas.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(crate) enum NormKind {
+    AttentionNorm1,
+    AttentionNorm2,
+    FfnNorm1,
+    FfnNorm2,
+    QNorm,
+    KNorm,
+}
+
 /// Arena regions, laid out once for a fixed maximum row count and grown by
 /// rebuilding if a larger render shows up.
 #[derive(Clone, Copy)]
@@ -161,6 +173,8 @@ pub(crate) struct DitGpuSession {
     layout: Layout,
     rows: usize,
     weights: HashMap<(usize, Projection), BoundWeight>,
+    /// Per-(layer, kind) descriptor sets for the element-wise norm gammas.
+    norms: HashMap<(usize, NormKind), BoundWeight>,
     /// Scratch the caller reads back after each dispatch.
     readback: Vec<f32>,
     /// Host-side working buffer for element-wise work between dispatches, so
@@ -197,6 +211,7 @@ impl DitGpuSession {
             layout,
             rows,
             weights: HashMap::new(),
+            norms: HashMap::new(),
             // QKV is the widest projection; FFN_WIDTH (10240) is narrower, so
             // one buffer sized for QKV serves all five.
             readback: vec![0f32; rows * QKV_WIDTH],
@@ -298,13 +313,6 @@ impl DitGpuSession {
         output_region: ArenaRegion,
         scale: f32,
     ) -> Result<(), VulkanError> {
-        let n_in = projection.n_in();
-        let n_out = projection.n_out();
-        let output_len = self.rows * n_out;
-        if self.readback.len() < output_len {
-            self.readback.resize(output_len, 0.0);
-        }
-        debug_assert!(self.readback.len() >= output_len);
         let bindings = self.binding_for(layer, projection)?;
         if scale == 1.0 {
             self.ops.write_f32(input_region, input)?;
@@ -318,8 +326,28 @@ impl DitGpuSession {
             self.ops.write_f32(input_region, &self.scaled[..input.len()])?;
         }
         let mut commands = TokenCommands::begin(self.context)?;
+        self.record_projection(&mut commands, bindings, projection, input_region, output_region)?;
+        commands.submit_and_wait()?;
+        self.read_into(projection, output_region)
+    }
+
+    /// Record one projection onto an in-flight command buffer.
+    ///
+    /// Nothing is uploaded and nothing is read back: the input has to be
+    /// resident already. That is what makes fusing worth doing -- a block
+    /// otherwise ships 167.8 MB of activations over PCIe, and at the ~10 GB/s
+    /// that costs it is the entire step, against 58 ms for the dispatches
+    /// themselves.
+    pub(crate) fn record_projection(
+        &self,
+        commands: &mut TokenCommands<'_>,
+        bindings: OperatorBindings,
+        projection: Projection,
+        input_region: ArenaRegion,
+        output_region: ArenaRegion,
+    ) -> Result<(), VulkanError> {
         self.ops.record_weight_matmul_rows(
-            &commands,
+            commands,
             bindings,
             input_region,
             self.layout.q8,
@@ -327,15 +355,76 @@ impl DitGpuSession {
             self.layout.q4_1_input_sums,
             self.layout.q8k,
             self.layout.q8k_scales,
-            &[(output_region, n_out, n_out * 4)],
-            n_in,
+            &[(output_region, projection.n_out(), projection.n_out() * 4)],
+            projection.n_in(),
             self.rows,
-            n_in,
-        )?;
-        commands.submit_and_wait()?;
+            projection.n_in(),
+        )
+    }
+
+    fn read_into(&mut self, projection: Projection, output_region: ArenaRegion) -> Result<(), VulkanError> {
+        let output_len = self.rows * projection.n_out();
+        if self.readback.len() < output_len {
+            self.readback.resize(output_len, 0.0);
+        }
         let values = self.ops.read_f32(output_region, output_len)?;
         self.readback[..output_len].copy_from_slice(&values[..output_len]);
         Ok(())
+    }
+
+    /// Open a command buffer for a fused chain of dispatches.
+    pub(crate) fn begin(&self) -> Result<TokenCommands<'_>, VulkanError> {
+        TokenCommands::begin(self.context)
+    }
+
+    /// Read a projection's result out of the arena.
+    pub(crate) fn read_projection(
+        &mut self,
+        projection: Projection,
+        output_region: ArenaRegion,
+    ) -> Result<(), VulkanError> {
+        self.read_into(projection, output_region)
+    }
+
+    pub(crate) fn ops(&self) -> &Qwen3Ops<'static> {
+        &self.ops
+    }
+
+    /// Bind one norm gamma for the arena-only pipeline.
+    ///
+    /// The descriptor set takes at most three buffers, so each norm kind gets
+    /// its own set rather than sharing one six-way binding. They are created
+    /// once per (layer, kind) and live as long as the render, because
+    /// `bind_buffers` allocates from a pool that is never freed.
+    pub(crate) fn bind_norm(
+        &mut self,
+        layer: usize,
+        kind: NormKind,
+        values: &[f32],
+    ) -> Result<(), VulkanError> {
+        if self.norms.contains_key(&(layer, kind)) {
+            return Ok(());
+        }
+        let bytes: Vec<u8> = values
+            .iter()
+            .flat_map(|value| f32::to_le_bytes(*value))
+            .collect();
+        let buffer = unsafe { self.context.upload_static(&bytes) }?;
+        let bindings = self.ops.bind_buffers(std::slice::from_ref(&buffer))?;
+        self.norms.insert((layer, kind), BoundWeight { buffer, bindings });
+        Ok(())
+    }
+
+    pub(crate) fn norm_bindings(
+        &self,
+        layer: usize,
+        kind: NormKind,
+    ) -> Result<OperatorBindings, VulkanError> {
+        self.norms.get(&(layer, kind)).map(|w| w.bindings).ok_or_else(|| {
+            VulkanError::UnsupportedShape(format!(
+                "Z-Image DiT norm {kind:?} for layer {layer} was not bound"
+            ))
+        })
     }
 
     /// The last projection's result, valid until the next `project` call.
