@@ -636,10 +636,11 @@ structures/records（`[C]`）；外加 abstention（`null_projection`）与 coun
 |---|---|---|---|---|---|
 | ~~A~~ | ~~架构 trait 化~~ | 全部 | ~~~1天~~ | ~~后续所有变体的前置~~ | **取消**：抽象应在真有重复时再做，避免过早抽象 |
 | ✅ B | `gliner2-large-v1` Decide 验证 | span pre-2.5 | 小（~200行） | 中（兼容性证据） | 完成 |
-| C | `gliner2-base-v1` + multi-v1 | span pre-2.5 | 中（~500行 + 尺寸动态化） | **高**（生产可用） | ✅ 两者都完成 |
-| D | BoundaryExtractor 任一基线 | boundary | 大（~3000行） | 中（多任务） | 中 |
-| E | Ettin encoder + BPE tokenizer | span 1B | **巨大**（~2000行） | 中（1B 升级） | 低 |
-| F | 专项 guardrail（待定） | 待定 | 中 | 低 | 低 |
+| ✅ C | `gliner2-base-v1` + multi-v1 | span pre-2.5 | 中 | **高** | ✅ `9f71c78` / `8215fd8` |
+| D | boundary 家族另三个变体（multi-v1 / multi-Decide / small-v1） | boundary | 小（尺寸表） | 中 | ✅ `b6bba85` |
+| E | 三个 guardrail（Guardrails-PII / privacy-filter / gliguard） | span pre-2.5 | **≈0**（tokenizer 声明风格） | 中 | ✅ `499e7ec` |
+| F | 架构融合评估（11 个变体实现后） | 全部 | 文档 | — | ✅ `ca40928` → `docs/GLINER_FAMILY.md` |
+| G | `GLiNER2.5-Decide-1B`（Ettin + ByteLevel BPE） | span 1B | 大（~2000 行） | 中 | 🟡 已勘察，未实现 |
 
 每条开工前必须先 `modelscope download --model <repo> config.json tokenizer_config.json`（按 model-download skill），读 config 填本文件对应 TODO 的"flag 决策 / 路由 / 架构位置"三栏，再写代码。**不再做"看着像就动手"的盲改**。
 
