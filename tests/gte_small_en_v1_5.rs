@@ -128,9 +128,9 @@ fn wordpiece_shares_the_bert_base_uncased_vocab() {
     // bert-base-uncased WordPiece vocab, only the encoder differs.
     assert_eq!(
         ids,
-        vec![101, 2054, 2003, 1996, 3007, 1997, 2605, 29632, 102]
+        vec![101, 2054, 2003, 1996, 3007, 1997, 2605, 1029, 102]
     );
-    assert_eq!(tok.decode(&ids, false), "what is the capital of france?");
+    assert_eq!(tok.decode(&ids, false), "what is the capital of france ?");
 }
 
 #[test]
