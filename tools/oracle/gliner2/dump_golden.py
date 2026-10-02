@@ -187,9 +187,29 @@ def main():
     model_dir = options.model_dir
     processor = SchemaTransformer(str(model_dir), token_pooling="first")
     config = AutoConfig.from_pretrained(str(options.encoder_config))
-    config.vocab_size = 128011
-    encoder = DebertaV2Model(config)
     state = load_file(str(model_dir / "model.safetensors"))
+    # The published config's `vocab_size` only bounds the table: DeBERTa-v3 says
+    # 128100 while the SPM has 128000 pieces, and mDeBERTa-v3 says 251000 while
+    # its SPM has 250101. GLiNER2 appends `[MASK]` plus ten schema markers, so
+    # the real table is `pieces + 11` — 128011 and 250112 respectively. Take the
+    # authoritative number from the checkpoint's embedding table, and check it
+    # against the tokenizer's highest declared id: that pairing is what decides
+    # whether the last marker rows are addressable at all.
+    vocab_size = state["encoder.embeddings.word_embeddings.weight"].shape[0]
+    if vocab_size > config.vocab_size:
+        raise ValueError(
+            f"checkpoint embedding table ({vocab_size}) exceeds the base config's "
+            f"vocab_size ({config.vocab_size}); wrong encoder config?"
+        )
+    tokenizer_config = json.loads((model_dir / "tokenizer_config.json").read_text())
+    highest_id = max(int(index) for index in tokenizer_config["added_tokens_decoder"])
+    if vocab_size != highest_id + 1:
+        raise ValueError(
+            f"embedding table ({vocab_size} rows) does not cover the tokenizer's "
+            f"highest added-token id ({highest_id}); expected {highest_id + 1} rows"
+        )
+    config.vocab_size = vocab_size
+    encoder = DebertaV2Model(config)
     missing, unexpected = encoder.load_state_dict(
         {key[len("encoder."):]: value for key, value in state.items() if key.startswith("encoder.")},
         strict=False,

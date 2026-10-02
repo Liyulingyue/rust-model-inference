@@ -77,9 +77,55 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
   补 `model_type` / `source_config` key 顺序）
 - **价值**：base 尺寸跑得快很多（吞吐 ~3×），生产部署友好
 
-### 3. `fastino/gliner2-multi-v1` — 多语 base
-- 同 #2 但训练数据换了，权重不同，tokenizer 可能是 mDeBERTa-v3（多语 SPM）
-- flag / 路由 / 位置同上
+### ✅ 3. `fastino/gliner2-multi-v1` — mDeBERTa-v3-base（已完成，抓到两个真 bug）
+- **架构族**：SpanExtractor pre-2.5（同 #1/#2），`model_name: microsoft/mdeberta-v3-base`
+- **flag / 路由 / 位置**：✅ 沿用 `--gliner2-decide` + `/v1/jev/score` + `src/models/gliner/`
+- **encoder 侧零新代码**：mDeBERTa-v3 的 config 与 deberta-v3-base **逐字段相同**（只差
+  `vocab_size` 251000 vs 128100），HF 用同一个 `DebertaV2Model`，且 torch 版用的是普通
+  `softmax`（`XSoftmax` 只存在于 TF 实现）。所以 `ENCODER_SIZES` 里它就是 base 那一行
+- **测试**：`tests/gliner2_multi_v1.rs`（6 smoke）+ `tests/gliner2_multi_v1_parity.rs`（1
+  byte-exact）。**max logit delta 5.627e-5**（1e-4 容差）
+- **故意没有**跨变体 `input_ids` 测试：250k 多语 SPM 的分段与 DeBERTa 不同，该断言不成立
+
+**bug 1：schema marker 的 id 被硬编码在 128000 段**
+- `prompt::ADDED_TOKENS` 原本是 `const [(&str, u32); 15]`，11 个 GLiNER2 special 写死
+  128000..128010。那只对 128k 词表成立——mDeBERTa 的追加块从 **250101** 开始，于是每个
+  `[P]`/`[L]`/`[E]` 都被编码成**不存在的 id**
+- 症状特别隐蔽：周围文本分词完全正确，只有 marker 落到 embedding 表的错误行
+- 修法：拆成 `BASE_SPECIALS`（SPM 约定固定 0..3）+ `APPENDED_SPECIALS`（只存名字），
+  id 由 `added_tokens(spm.len())` 推导。基址取自**做编码的那个 tokenizer 自己的 piece
+  数**，所以 id 不可能与词表漂移
+- 验证中性：三个 deberta 模型的 `spm.piece_count` 都是 128000，推导出的 id 与原硬编码
+  逐个相同；只有 multi-v1 是 250101
+
+**bug 2：SentencePiece trie 的根节点与第一个子节点别名（跨模型、跨进程不确定性）**
+- `PieceTrie` 用 `#[derive(Default)]`，`values` 初始为空，于是 `insert` 里
+  `child = values.len()` 让**第一个子节点拿到索引 0，与根槽位重合**
+- 后果：任何在根层走到"第一个 piece 的首字节"、并恰好在该处结束的 piece，都会把
+  `values[0]` 覆写成自己的 id，根节点就此被污染
+- **为什么是间歇性**：谁赢取决于 `normal_ids`（`HashMap`）的迭代顺序，而
+  `RandomState` 每进程不同 → 同一输入在不同进程给出不同分段。实测
+  `down. Can` 会切成 `666.` / `1111.` / `0000.` / `.` 之一
+- 定位手法：先证明"同进程内 200 次稳定、跨进程变"（排除 DP 和 prompt 构造），再在
+  `insert` 里加碰撞检测，一眼看到冲突全在 `node 0`；最后用"同进程重建 60 次"把
+  间歇性变成**确定性复现**（60 次里 5~13 种结果）
+- 修法：`PieceTrie::new()` 显式 `values: vec![u32::MAX]` 预分配根哨兵
+- 回归测试：`piece_trie_root_never_holds_a_piece` +
+  `piece_trie_build_is_order_independent`。**原有的 `piece_trie_reports_prefixes_in_order`
+  在有 bug 时也通过**，所以这个洞一直没被发现——两个新测试退回修复后立刻失败
+- 影响面不止 gliner：所有 SentencePiece 模型（BERT 家族等）都走这条路径
+- 修复后 multi-v1 parity 连跑 15/15 通过（修复前约 2/10 失败）
+- 其它既有模型的 golden 全部仍然通过——说明这个 bug 此前只在少数输入上触发
+
+**顺带修的 tokenizer 差异**
+- `tokenizer_class`：base-v1 发的是 `DebertaV2TokenizerFast`，另两个是 slow 类。精确接受
+  这两个名字，不放宽到任意 `Deberta*`
+- `added_tokens_decoder` 里可以有**已在 SPM vocab 内**的声明：4 个 base specials 加上
+  mDeBERTa 的 100 个 `<extra_id_N>` sentinel。转换器现在按 id 划分，vocab 内的每个都必须
+  与它声明的 piece 一致（比忽略它们更严），只有越过 SPM 边界的 11 个算追加 token
+- oracle 的 `vocab_size` 原写死 128011，改为从 checkpoint 的 embedding 表读，并校验它
+  覆盖 tokenizer 的最大 added-token id（mDeBERTa 发布 config 写 251000，是**上界**不是
+  piece 数）
 
 ---
 
@@ -578,7 +624,7 @@ structures/records（`[C]`）；外加 abstention（`null_projection`）与 coun
 |---|---|---|---|---|---|
 | ~~A~~ | ~~架构 trait 化~~ | 全部 | ~~~1天~~ | ~~后续所有变体的前置~~ | **取消**：抽象应在真有重复时再做，避免过早抽象 |
 | ✅ B | `gliner2-large-v1` Decide 验证 | span pre-2.5 | 小（~200行） | 中（兼容性证据） | 完成 |
-| C | `gliner2-base-v1` + multi-v1 | span pre-2.5 | 中（~500行 + 尺寸动态化） | **高**（生产可用） | base ✅ / multi-v1 下一条 |
+| C | `gliner2-base-v1` + multi-v1 | span pre-2.5 | 中（~500行 + 尺寸动态化） | **高**（生产可用） | ✅ 两者都完成 |
 | D | BoundaryExtractor 任一基线 | boundary | 大（~3000行） | 中（多任务） | 中 |
 | E | Ettin encoder + BPE tokenizer | span 1B | **巨大**（~2000行） | 中（1B 升级） | 低 |
 | F | 专项 guardrail（待定） | 待定 | 中 | 低 | 低 |

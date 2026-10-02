@@ -55,6 +55,14 @@ ENCODER_SIZES = {
                                    "num_attention_heads": 16, "intermediate_size": 4096},
     "microsoft/deberta-v3-base": {"hidden_size": 768, "num_hidden_layers": 12,
                                   "num_attention_heads": 12, "intermediate_size": 3072},
+    # fastino/gliner2-multi-v1. mDeBERTa-v3 is DeBERTa-v2 with a 250k
+    # multilingual SPM vocab; its published config is field-for-field identical
+    # to deberta-v3-base apart from `vocab_size` (251000 vs 128100), so every
+    # number here is the base row again. The vocab is not in this table: it is
+    # derived from the tokenizer below and re-checked against the checkpoint's
+    # `word_embeddings` shape.
+    "microsoft/mdeberta-v3-base": {"hidden_size": 768, "num_hidden_layers": 12,
+                                   "num_attention_heads": 12, "intermediate_size": 3072},
 }
 
 # As resolved by `AutoConfig.from_pretrained` inside
@@ -204,21 +212,31 @@ def validate_config(config: dict) -> dict:
 def added_tokens(tokenizer_config: dict, spm_pieces: list[str]) -> dict[str, int]:
     """Tokens appended past the SentencePiece vocab, id-ordered.
 
-    `added_tokens_decoder` also lists the four base specials, so those are
-    dropped after being checked against the SPM pieces.
+    `added_tokens_decoder` also lists tokens that are *already* in the SPM
+    vocab, and those are not a mistake: the four base specials always are, and
+    mDeBERTa-v3 (`fastino/gliner2-multi-v1`) additionally declares its 100
+    `<extra_id_N>` sentinel pieces there. So declarations are split by id — those
+    below the SPM length must match the piece they claim, which is a stricter
+    check than ignoring them, and only the rest are the appended block the GGUF
+    has to carry.
     """
+    base = len(spm_pieces)
     decoder = tokenizer_config.get("added_tokens_decoder") or {}
     declared = {entry["content"]: int(index) for index, entry in decoder.items()}
     for content, index in (("[PAD]", 0), ("[CLS]", 1), ("[SEP]", 2), ("[UNK]", 3)):
-        if declared.pop(content, None) != index or spm_pieces[index] != content:
+        if declared.get(content) != index or spm_pieces[index] != content:
             raise ValueError(f"base special token {content} does not match the SPM piece at {index}")
+    mismatched = [content for content, index in declared.items()
+                  if index < base and spm_pieces[index] != content]
+    if mismatched:
+        raise ValueError(f"added token {mismatched[0]!r} does not match the SPM piece at its id")
     missing = [token for token in SPECIAL_TOKENS if token not in declared]
     if missing:
         raise ValueError(f"tokenizer_config is missing added tokens: {missing}")
-    base = len(spm_pieces)
-    if sorted(declared.values()) != list(range(base, base + len(declared))):
-        raise ValueError(f"added tokens are not a contiguous block at {base}: {declared}")
-    return declared
+    added = {content: index for content, index in declared.items() if index >= base}
+    if sorted(added.values()) != list(range(base, base + len(added))):
+        raise ValueError(f"added tokens are not a contiguous block at {base}: {added}")
+    return added
 
 
 def fast_tokenizer_pieces(fast: dict) -> list[str]:
