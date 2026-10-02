@@ -91,6 +91,28 @@ n_ff=9728, head_dim=128, n_ctx=262144, freq_base=5e6, M-RoPE [24,20,20,0]`）。
   这个偏置不明显，输出正常。
 - 文本-only 路径在 4 核上约 4 tok/s，与 multimodal 完全无关。
 
+**Qwen3-VL 其它尺寸 (`-2B` / `-8B` / `-32B` / `-30B-A3B` / `-235B-A22B`) 状态**：
+
+- **`-2B`（`-Instruct` 与 `-Thinking` 两个 GGUF 均下载并尝试过）——本仓库未适配**。
+  在 4 核 + 7.5 GiB RAM 上 2B 端到端不工作：
+  - 文本-only + ChatML: 首 token 预测 `151645`（`<|im_end|>` = EOS），0 输出 token；
+  - 文本-only + `--thinking` flag: 工作（首 token 是普通文本）；
+  - 多模态 + ChatML: 首 token 仍预测 `151645`，立即结束；
+  - 多模态 + 字面文字 chat (`\nuser\n…assistant\n` 各种变体): 不预测 EOS，但陷入退化循环
+    —— 反复输出 `\n\n\n...` / `####...` / `sponsorsponsor...` / `mainmainmain...` 等；
+  - 多模态 + 高温度采样 (temp=2.0 + rep_penalty 1.1): 产出 multilingual 乱码
+    （`abandoningดีๆ imorig eloney craz…`），无可用语义。
+  - 根因疑似：2B-Instruct GGUF 的 `tokenizer.chat_template` 用字面文字 `user\n…\nassistant\n`
+    格式而非 ChatML 的 `<|im_start|>…<|im_end|>` tokens；我们的代码走 ChatML。
+    4B 能容忍两种格式，2B 不能。即便换成字面文字也只是把 "首 token = EOS" 问题替换成
+    "生成退化为重复 token"，vision encoder 输出与 2B 的 LLM 主干也可能有交互问题。
+  - 2B 容量 (2.1B) 对 vision encoder embedding 的容错较差也是候选原因之一。
+  - 暂时不打算修，等用户进一步指令。
+
+- **`-8B` / `-32B` / `-30B-A3B` / `-235B-A22B` 等更大尺寸**：Q4_K_M 量化后 ≥ 5 GB，
+  在 4 核 + 7.5 GiB RAM 环境下未做端到端验证。需要更大机器才能跑。
+- 文本-only `-0.6B`（同 `-2B` 等 Instruct 模型）不在 ModelScope 上能找到 GGUF，本仓库未尝试。
+
 限制：
 
 - 当前每种媒体最多一份；同一轮同时给图像和音频时顺序固定为图像、音频、提示词。
