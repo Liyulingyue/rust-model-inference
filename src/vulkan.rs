@@ -19,6 +19,8 @@ pub(crate) mod qwen3;
 #[cfg(feature = "vulkan")]
 pub(crate) mod qwen35;
 #[cfg(feature = "vulkan")]
+mod zimage_probe;
+#[cfg(feature = "vulkan")]
 #[doc(hidden)]
 pub use ops::{dump_dispatch_trace, run_batched_matmul_check, run_qwen3_operator_check};
 

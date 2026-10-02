@@ -634,29 +634,32 @@ fn gemma4_vulkan_linear_device_rows_match_and_decode_stays_cpu() {
     let mut model = deterministic_model(Arc::new(AtomicUsize::new(0)));
     install(
         "per_layer_model_proj.weight".into(),
-        &mut model.per_layer_model_proj,
+        model.per_layer_model_proj.as_mut().expect("fixture proj present"),
         GGMLType::BF16,
     );
     for (index, layer) in model.layers.iter_mut().enumerate() {
         for (name, weight) in [
-            ("attn_q", &mut layer.attn_q),
-            ("attn_k", &mut layer.attn_k),
-            ("attn_v", &mut layer.attn_v),
-            ("attn_output", &mut layer.attn_output),
-            ("ffn_gate", &mut layer.ffn_gate),
-            ("ffn_up", &mut layer.ffn_up),
-            ("ffn_down", &mut layer.ffn_down),
+            ("attn_q", Some(&mut layer.attn_q)),
+            ("attn_k", layer.attn_k.as_mut()),
+            ("attn_v", layer.attn_v.as_mut()),
+            ("attn_output", Some(&mut layer.attn_output)),
+            ("ffn_gate", Some(&mut layer.ffn_gate)),
+            ("ffn_up", Some(&mut layer.ffn_up)),
+            ("ffn_down", Some(&mut layer.ffn_down)),
         ] {
+            // `attn_k`/`attn_v` are `Option` because 12B's MQA layers share V
+            // with K; this fixture is not one of those, so both are present.
+            let weight = weight.expect("fixture installs a shared-K weight");
             install(format!("blk.{index}.{name}.weight"), weight, GGMLType::Q8_0);
         }
         install(
             format!("blk.{index}.inp_gate.weight"),
-            &mut layer.inp_gate,
+            layer.inp_gate.as_mut().expect("fixture gate present"),
             GGMLType::F32,
         );
         install(
             format!("blk.{index}.proj.weight"),
-            &mut layer.proj,
+            layer.proj.as_mut().expect("fixture projection present"),
             GGMLType::F32,
         );
     }
