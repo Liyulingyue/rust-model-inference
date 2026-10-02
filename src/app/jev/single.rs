@@ -90,7 +90,7 @@ fn run_jev_decision_data_with_image(
         // CLI + HTTP); it was missing here, so `--jev` on an
         // EXAONE GGUF errored out. LlamaJevScorer renders its
         // `[|user|]` template (see llama.rs).
-        "llama" | "k2-horizon" | "granite" | "nanbeige" | "qwen2_2" | "phi3" | "exaone" => {
+        "llama" | "k2-horizon" | "granite" | "nanbeige" | "qwen2_2" | "phi3" | "exaone" | "glm4" => {
             llama::run_jev_decision_llama(
                 source.clone(),
                 context,
@@ -167,7 +167,7 @@ fn run_jev_decision_data_with_image(
         other => Err(format!(
             "--jev is not yet supported for architecture {:?}; \
              currently supported: qwen3 / qwen3vl / qwen35 / \
-             llama / k2-horizon / granite / nanbeige / qwen2_2 / \
+             llama / k2-horizon / granite / nanbeige / qwen2_2 / glm4 / \
              gemma4 / lfm2 / lfm25 / spark2_5 / hunyuan-dense / nemotron_h",
             other
         )),

@@ -258,7 +258,7 @@ fn build_jev_token_ids_for_arch(
             append_qwen_assistant_prefix(&mut token_ids, tokenizer, false)?;
             Ok(token_ids)
         }
-        "llama" | "k2-horizon" | "granite" | "nanbeige" | "qwen2_2" => {
+        "llama" | "k2-horizon" | "granite" | "nanbeige" | "qwen2_2" | "glm4" => {
             if arch == "k2-horizon" || arch == "granite" {
                 let prompt = format!(
                     "<|start_of_role|>system<|end_of_role|>{system}<|end_of_text|>\n\
@@ -287,6 +287,18 @@ fn build_jev_token_ids_for_arch(
                         parse_special: true,
                     },
                 ))
+            } else if arch == "glm4" {
+                let prompt = format!(
+                    "[gMASK]<sop><|user|>\n{payload}<|assistant|>\n"
+                );
+                let mut ids = tokenizer.encode(
+                    &prompt,
+                    EncodeOptions {
+                        add_special: false,
+                        parse_special: true,
+                    },
+                );
+                Ok(ids)
             } else {
                 let prompt = format!("system\n{system}\nuser\n{payload}\nassistant\n");
                 let mut ids = tokenizer.encode(
@@ -527,7 +539,7 @@ pub fn run_jev_grouped_decision_data(
             prefill_batch_size,
             false,
         )?,
-        "llama" | "k2-horizon" | "granite" | "nanbeige" | "qwen2_2" | "phi3" => {
+        "llama" | "k2-horizon" | "granite" | "nanbeige" | "qwen2_2" | "phi3" | "glm4" => {
             llama::run_jev_grouped_llama(
                 source.clone(),
                 context,
