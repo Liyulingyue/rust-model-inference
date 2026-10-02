@@ -141,6 +141,9 @@ pub(crate) struct DitGpuSession {
     weights: HashMap<(usize, Projection), BoundWeight>,
     /// Scratch the caller reads back after each dispatch.
     readback: Vec<f32>,
+    /// Host-side working buffer for element-wise work between dispatches, so
+    /// the fused silu(gate) * up never has to round-trip through the arena.
+    pub(crate) scratch: Vec<f32>,
 }
 
 impl DitGpuSession {
@@ -167,6 +170,7 @@ impl DitGpuSession {
             rows,
             weights: HashMap::new(),
             readback: vec![0f32; rows * QKV_WIDTH],
+            scratch: Vec::new(),
         })
     }
 

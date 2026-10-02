@@ -24,41 +24,41 @@ const MT_LOWER_MASK: u32 = 0x7fff_ffff;
 const PATCH_SIZE: usize = 2;
 const ROPE_THETA: f32 = 256.0;
 const ROPE_AXES: [usize; 3] = [32, 48, 48];
-const ROPE_HEAD_WIDTH: usize = 128;
+pub(crate) const ROPE_HEAD_WIDTH: usize = 128;
 const SEQUENCE_MULTIPLE: usize = 32;
 const LATENT_CHANNELS: usize = 16;
 const PATCH_WIDTH: usize = LATENT_CHANNELS * PATCH_SIZE * PATCH_SIZE;
 const CAP_WIDTH: usize = 2_560;
 pub(crate) const HIDDEN: usize = 3_840;
-const HEADS: usize = 30;
+pub(crate) const HEADS: usize = 30;
 pub(crate) const QKV_WIDTH: usize = HIDDEN * 3;
 pub(crate) const FFN_WIDTH: usize = 10_240;
-const TIME_WIDTH: usize = 256;
+pub(crate) const TIME_WIDTH: usize = 256;
 const TIME_HIDDEN: usize = 1_024;
 const MAIN_LAYERS: usize = 30;
 const REFINER_LAYERS: usize = 2;
-const RMS_EPSILON: f32 = 1e-5;
-const QK_RMS_EPSILON: f32 = 1e-6;
+pub(crate) const RMS_EPSILON: f32 = 1e-5;
+pub(crate) const QK_RMS_EPSILON: f32 = 1e-6;
 const FINAL_NORM_EPSILON: f32 = 1e-6;
 
-struct ModulationWeights {
-    matrix: String,
-    bias: Vec<f32>,
+pub(crate) struct ModulationWeights {
+    pub(crate) matrix: String,
+    pub(crate) bias: Vec<f32>,
 }
 
-struct BlockWeights {
-    qkv: String,
-    out: String,
-    w1: String,
-    w2: String,
-    w3: String,
-    attention_norm1: Vec<f32>,
-    attention_norm2: Vec<f32>,
-    q_norm: Vec<f32>,
-    k_norm: Vec<f32>,
-    ffn_norm1: Vec<f32>,
-    ffn_norm2: Vec<f32>,
-    modulation: Option<ModulationWeights>,
+pub(crate) struct BlockWeights {
+    pub(crate) qkv: String,
+    pub(crate) out: String,
+    pub(crate) w1: String,
+    pub(crate) w2: String,
+    pub(crate) w3: String,
+    pub(crate) attention_norm1: Vec<f32>,
+    pub(crate) attention_norm2: Vec<f32>,
+    pub(crate) q_norm: Vec<f32>,
+    pub(crate) k_norm: Vec<f32>,
+    pub(crate) ffn_norm1: Vec<f32>,
+    pub(crate) ffn_norm2: Vec<f32>,
+    pub(crate) modulation: Option<ModulationWeights>,
 }
 
 pub(crate) struct ZImageDit {
@@ -365,14 +365,14 @@ pub(crate) fn euler_flow_step(
 }
 
 #[derive(Clone, Copy)]
-struct AdaLnModulation<'a> {
-    scale_msa: &'a [f32],
-    gate_msa: &'a [f32],
-    scale_mlp: &'a [f32],
-    gate_mlp: &'a [f32],
+pub(crate) struct AdaLnModulation<'a> {
+    pub(crate) scale_msa: &'a [f32],
+    pub(crate) gate_msa: &'a [f32],
+    pub(crate) scale_mlp: &'a [f32],
+    pub(crate) gate_mlp: &'a [f32],
 }
 
-fn split_adaln_modulation(values: &[f32], hidden: usize) -> Result<AdaLnModulation<'_>, String> {
+pub(crate) fn split_adaln_modulation(values: &[f32], hidden: usize) -> Result<AdaLnModulation<'_>, String> {
     let expected = hidden
         .checked_mul(4)
         .ok_or("Z-Image AdaLN width overflow")?;
@@ -393,7 +393,7 @@ fn split_adaln_modulation(values: &[f32], hidden: usize) -> Result<AdaLnModulati
     })
 }
 
-fn scale_modulated_branch(values: &mut [f32], scales: Option<&[f32]>) -> Result<(), String> {
+pub(crate) fn scale_modulated_branch(values: &mut [f32], scales: Option<&[f32]>) -> Result<(), String> {
     let Some(scales) = scales else {
         return Ok(());
     };
@@ -406,7 +406,7 @@ fn scale_modulated_branch(values: &mut [f32], scales: Option<&[f32]>) -> Result<
     Ok(())
 }
 
-fn add_modulated_residual(
+pub(crate) fn add_modulated_residual(
     tokens: &mut [f32],
     residual: &[f32],
     gates: Option<&[f32]>,
@@ -510,7 +510,7 @@ fn z_image_model_timestep(sigma: f32) -> f32 {
     1_000.0 - sigma * 1_000.0
 }
 
-fn rotate_interleaved_inplace(values: &mut [f32], rope: &[f32]) -> Result<(), String> {
+pub(crate) fn rotate_interleaved_inplace(values: &mut [f32], rope: &[f32]) -> Result<(), String> {
     if values.len() != rope.len() || values.len() % 2 != 0 {
         return Err("Invalid compact Z-Image RoPE slice".into());
     }
@@ -523,7 +523,7 @@ fn rotate_interleaved_inplace(values: &mut [f32], rope: &[f32]) -> Result<(), St
     Ok(())
 }
 
-fn attention_into(
+pub(crate) fn attention_into(
     qkv: &[f32],
     tokens: usize,
     heads: usize,
