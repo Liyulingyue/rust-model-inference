@@ -94,6 +94,12 @@ pub(crate) struct DitScratch {
     time_hidden: [f32; TIME_HIDDEN],
     time: [f32; TIME_WIDTH],
     q8: Q8Scratch,
+    /// Batched Vulkan sessions, one per distinct sequence length: the context
+    /// refiner runs over the text tokens, the other two stacks over the image
+    /// tokens. Created on first use and kept for the render, because the upload
+    /// of the 5.64 GB of weights is the expensive part and is worth doing once.
+    #[cfg(feature = "vulkan")]
+    gpu: std::collections::HashMap<usize, crate::models::diffusion::z_image::dit_gpu::DitGpuSession>,
 }
 
 impl DitScratch {
@@ -114,6 +120,8 @@ impl DitScratch {
             time_hidden: [0.0; TIME_HIDDEN],
             time: [0.0; TIME_WIDTH],
             q8: Q8Scratch::new(FFN_WIDTH),
+            #[cfg(feature = "vulkan")]
+            gpu: std::collections::HashMap::new(),
         }
     }
 
@@ -802,11 +810,28 @@ impl ZImageDit {
             ));
         }
         let t_setup_done = std::time::Instant::now();
+
+        // Decide the backend once per render. A session that fails to build, or
+        // a device that breaks mid-render, must not leave the first layers on
+        // the GPU and the rest on the CPU: the two round differently and the
+        // image would depend on where it failed.
+        #[cfg(feature = "vulkan")]
+        let mut gpu_enabled = crate::ops::gpu_matmul_active();
+
         for (_index, block) in self.context_refiners.iter().enumerate() {
-            run_block(
+            #[cfg(feature = "vulkan")]
+            let mut session = if gpu_enabled {
+                take_gpu_session(scratch, padded_text, &mut gpu_enabled)
+            } else {
+                None
+            };
+            #[cfg(not(feature = "vulkan"))]
+            let mut session: Option<()> = None;
+            let outcome = run_block_dispatch(
                 self.source.as_ref(),
                 self.pool.as_ref(),
                 block,
+                _index,
                 padded_text,
                 &mut scratch.text[..text_hidden],
                 &scratch.rope[..text_rope],
@@ -817,7 +842,18 @@ impl ZImageDit {
                 &mut scratch.scores,
                 &mut scratch.modulation,
                 &mut scratch.q8,
-            )?;
+                #[cfg(feature = "vulkan")]
+                session.as_mut(),
+                #[cfg(not(feature = "vulkan"))]
+                None::<&mut ()>,
+            );
+            outcome?;
+            #[cfg(feature = "vulkan")]
+            if let Some(session) = session {
+                scratch.gpu.insert(padded_text, session);
+            }
+            #[cfg(not(feature = "vulkan"))]
+            drop(session);
             #[cfg(feature = "parity-trace")]
             crate::parity_trace::report(crate::parity_trace::checkpoint(
                 &format!("z_image.dit.context_refiner.{_index}"),
@@ -827,10 +863,19 @@ impl ZImageDit {
             ));
         }
         for (_index, block) in self.noise_refiners.iter().enumerate() {
-            run_block(
+            #[cfg(feature = "vulkan")]
+            let mut session = if gpu_enabled {
+                take_gpu_session(scratch, padded_image, &mut gpu_enabled)
+            } else {
+                None
+            };
+            #[cfg(not(feature = "vulkan"))]
+            let mut session: Option<()> = None;
+            let outcome = run_block_dispatch(
                 self.source.as_ref(),
                 self.pool.as_ref(),
                 block,
+                REFINER_LAYERS + _index,
                 padded_image,
                 &mut scratch.image[..image_hidden],
                 &scratch.rope[text_rope..text_rope + image_rope],
@@ -841,7 +886,18 @@ impl ZImageDit {
                 &mut scratch.scores,
                 &mut scratch.modulation,
                 &mut scratch.q8,
-            )?;
+                #[cfg(feature = "vulkan")]
+                session.as_mut(),
+                #[cfg(not(feature = "vulkan"))]
+                None::<&mut ()>,
+            );
+            outcome?;
+            #[cfg(feature = "vulkan")]
+            if let Some(session) = session {
+                scratch.gpu.insert(padded_image, session);
+            }
+            #[cfg(not(feature = "vulkan"))]
+            drop(session);
             #[cfg(feature = "parity-trace")]
             crate::parity_trace::report(crate::parity_trace::checkpoint(
                 &format!("z_image.dit.noise_refiner.{_index}"),
@@ -858,10 +914,19 @@ impl ZImageDit {
         let total_hidden = text_hidden + image_hidden;
         let total_rope = text_rope + image_rope;
         for (_index, block) in self.layers.iter().enumerate() {
-            run_block(
+            #[cfg(feature = "vulkan")]
+            let mut session = if gpu_enabled {
+                take_gpu_session(scratch, total_tokens, &mut gpu_enabled)
+            } else {
+                None
+            };
+            #[cfg(not(feature = "vulkan"))]
+            let mut session: Option<()> = None;
+            let outcome = run_block_dispatch(
                 self.source.as_ref(),
                 self.pool.as_ref(),
                 block,
+                2 * REFINER_LAYERS + _index,
                 total_tokens,
                 &mut scratch.tokens[..total_hidden],
                 &scratch.rope[..total_rope],
@@ -872,7 +937,18 @@ impl ZImageDit {
                 &mut scratch.scores,
                 &mut scratch.modulation,
                 &mut scratch.q8,
-            )?;
+                #[cfg(feature = "vulkan")]
+                session.as_mut(),
+                #[cfg(not(feature = "vulkan"))]
+                None::<&mut ()>,
+            );
+            outcome?;
+            #[cfg(feature = "vulkan")]
+            if let Some(session) = session {
+                scratch.gpu.insert(total_tokens, session);
+            }
+            #[cfg(not(feature = "vulkan"))]
+            drop(session);
         }
         let t_layers_done = std::time::Instant::now();
         eprintln!(
@@ -1046,6 +1122,78 @@ impl ZImageDit {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Route one block to the GPU, falling back to [`run_block`] on any problem.
+///
+/// `layer` identifies the weight matrices for the session's upload cache and is
+/// ignored by the CPU path, which looks them up by name.
+#[cfg(feature = "vulkan")]
+#[allow(clippy::too_many_arguments)]
+fn run_block_dispatch(
+    source: &dyn TensorSource,
+    pool: &ComputePool,
+    block: &BlockWeights,
+    layer: usize,
+    rows: usize,
+    tokens: &mut [f32],
+    rope: &[f32],
+    time: Option<&[f32]>,
+    qkv: &mut [f32],
+    attention: &mut [f32],
+    ffn: &mut [f32],
+    scores: &mut [f32],
+    modulation: &mut [f32],
+    q8: &mut Q8Scratch,
+    session: Option<&mut crate::models::diffusion::z_image::dit_gpu::DitGpuSession>,
+) -> Result<(), String> {
+    if let Some(session) = session {
+        match run_block_gpu(
+            session, source, block, layer, rows, tokens, rope, time, qkv, attention, ffn,
+            scores, modulation, q8, pool,
+        ) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                // A shape the device rejects leaves it healthy, so only a real
+                // device failure trips the fuse. Switching backends mid-render
+                // would change the output, so the choice is latched per render
+                // by the caller rather than per block.
+                eprintln!("[GPU] Z-Image block {layer} fell back to the CPU: {error}");
+                if !error.contains("Unsupported") && !error.contains("dispatch failed") {
+                    crate::vulkan::mark_gpu_broken(&error);
+                }
+            }
+        }
+    }
+    run_block(
+        source, pool, block, rows, tokens, rope, time, qkv, attention, ffn, scores, modulation, q8,
+    )
+}
+
+/// Without the Vulkan feature the wrapper collapses to the CPU block, so the
+/// call sites do not each need a cfg.
+#[cfg(not(feature = "vulkan"))]
+#[allow(clippy::too_many_arguments)]
+fn run_block_dispatch(
+    source: &dyn TensorSource,
+    pool: &ComputePool,
+    block: &BlockWeights,
+    _layer: usize,
+    rows: usize,
+    tokens: &mut [f32],
+    rope: &[f32],
+    time: Option<&[f32]>,
+    qkv: &mut [f32],
+    attention: &mut [f32],
+    ffn: &mut [f32],
+    scores: &mut [f32],
+    modulation: &mut [f32],
+    q8: &mut Q8Scratch,
+    _session: Option<&mut ()>,
+) -> Result<(), String> {
+    run_block(
+        source, pool, block, rows, tokens, rope, time, qkv, attention, ffn, scores, modulation, q8,
+    )
+}
+
 fn run_block(
     source: &dyn TensorSource,
     pool: &ComputePool,
@@ -1692,8 +1840,604 @@ fn z_image_rope_into(
     Ok(())
 }
 
+/// Fetch, or build, the batched session for a sequence length, temporarily
+/// moving it out of the scratch.
+///
+/// The session owns the uploaded weights, so it has to live somewhere for the
+/// whole render, but holding a borrow into `scratch` would conflict with the
+/// buffers `run_block` needs. Taking it out for the duration of one block and
+/// putting it back on the way out avoids that, at the cost of a map insert per
+/// block -- negligible against a dispatch.
+///
+/// `enabled` is latched off on the first failure so the rest of the render
+/// stays on one backend.
+#[cfg(feature = "vulkan")]
+fn take_gpu_session(
+    scratch: &mut DitScratch,
+    rows: usize,
+    enabled: &mut bool,
+) -> Option<crate::models::diffusion::z_image::dit_gpu::DitGpuSession> {
+    if !*enabled {
+        return None;
+    }
+    if !scratch.gpu.contains_key(&rows) {
+        let Some(context) = crate::ops::get_vulkan_context() else {
+            *enabled = false;
+            return None;
+        };
+        match crate::models::diffusion::z_image::dit_gpu::DitGpuSession::new(context, rows) {
+            Ok(session) => {
+                scratch.gpu.insert(rows, session);
+            }
+            Err(error) => {
+                eprintln!("[GPU] Z-Image DiT session unavailable ({error}); using the CPU");
+                *enabled = false;
+                return None;
+            }
+        }
+    }
+    scratch.gpu.remove(&rows)
+}
+
+/// Upload and bind this block's Q8_0 projections, once per render.
+///
+/// The two refiner stacks are F16 in the GGUF and the batched kernel binds
+/// Q8_0, so they bind nothing and every projection falls through to the
+/// per-row CPU path below. The main stack is Q8_0 and binds all five.
+#[cfg(feature = "vulkan")]
+fn bind_block_weights(
+    session: &mut crate::models::diffusion::z_image::dit_gpu::DitGpuSession,
+    source: &dyn TensorSource,
+    block: &BlockWeights,
+    layer: usize,
+) -> std::collections::HashSet<crate::models::diffusion::z_image::dit_gpu::Projection> {
+    use crate::models::diffusion::z_image::dit_gpu::Projection;
+
+    let mut bound = std::collections::HashSet::new();
+    for (projection, name) in [
+        (Projection::Qkv, &block.qkv),
+        (Projection::Out, &block.out),
+        (Projection::W1, &block.w1),
+        (Projection::W2, &block.w2),
+        (Projection::W3, &block.w3),
+    ] {
+        if session.has_weight(layer, projection) {
+            bound.insert(projection);
+            continue;
+        }
+        let Some(info) = source.tensor_info(name) else {
+            continue;
+        };
+        if info.ggml_type != GGMLType::Q8_0 {
+            continue;
+        }
+        let Some(bytes) = source.tensor_slice(name) else {
+            continue;
+        };
+        if session.bind_weight(layer, projection, bytes).is_ok() {
+            bound.insert(projection);
+        }
+    }
+    bound
+}
+
+/// The GPU twin of [`run_block`].
+///
+/// Same arithmetic in the same order, but the five projections become five
+/// dispatches covering the whole sequence instead of one per row per
+/// projection. A step therefore issues 120 dispatches rather than 184,320,
+/// which is the difference between paying the 128 us submit-and-fence floor
+/// once per projection and paying it per row.
+///
+/// Element-wise work -- rms_norm, the AdaLN scale, silu, the residual add --
+/// stays on the CPU, using the same functions in the same order as
+/// `run_block`. The buffer roles are copied too: w1 lands in `qkv`, w3 in
+/// `ffn`, `silu_mul_inplace` folds w3 into w1's slot, and w2 reads `ffn` with
+/// the 1/128 scale. Getting any of that wrong is what produced a 64/255
+/// difference from the CPU path, so it is spelled out here rather than
+/// reshuffled.
+#[cfg(feature = "vulkan")]
+#[allow(clippy::too_many_arguments)]
+fn run_block_gpu(
+    session: &mut crate::models::diffusion::z_image::dit_gpu::DitGpuSession,
+    source: &dyn TensorSource,
+    block: &BlockWeights,
+    layer: usize,
+    rows: usize,
+    tokens: &mut [f32],
+    rope: &[f32],
+    time: Option<&[f32]>,
+    qkv: &mut [f32],
+    attention: &mut [f32],
+    ffn: &mut [f32],
+    scores: &mut [f32],
+    modulation: &mut [f32],
+    q8: &mut Q8Scratch,
+    pool: &ComputePool,
+) -> Result<(), String> {
+    use crate::models::diffusion::z_image::dit_gpu::Projection;
+
+    let hidden_len = rows * HIDDEN;
+    let qkv_len = rows * QKV_WIDTH;
+    let ffn_len = rows * FFN_WIDTH;
+    let bound = bind_block_weights(session, source, block, layer);
+
+    // --- AdaLN, identical to the CPU path ------------------------------------
+    let modulations = if let Some(weights) = &block.modulation {
+        let time = time.ok_or("Missing Z-Image AdaLN input")?;
+        linear_into_ggml(
+            source,
+            &weights.matrix,
+            TIME_WIDTH,
+            HIDDEN * 4,
+            time,
+            &mut modulation[..HIDDEN * 4],
+            q8,
+            pool,
+        )?;
+        for (value, bias) in modulation[..HIDDEN * 4].iter_mut().zip(&weights.bias) {
+            *value += *bias;
+        }
+        Some(split_adaln_modulation(&modulation[..HIDDEN * 4], HIDDEN)?)
+    } else {
+        if time.is_some() {
+            return Err("Unexpected Z-Image AdaLN input".into());
+        }
+        None
+    };
+
+    // --- QKV: normalise and modulate every row, then one dispatch ------------
+    for row in 0..rows {
+        let token = &tokens[row * HIDDEN..(row + 1) * HIDDEN];
+        let normalized = &mut attention[row * HIDDEN..(row + 1) * HIDDEN];
+        rms_norm(token, &block.attention_norm1, normalized, RMS_EPSILON);
+        scale_modulated_branch(normalized, modulations.map(|values| values.scale_msa))?;
+    }
+    let layout = *session.layout();
+    if bound.contains(&Projection::Qkv) {
+        session
+            .project(
+                layer,
+                Projection::Qkv,
+                layout.x,
+                &attention[..hidden_len],
+                layout.qkv,
+            )
+            .map_err(|e| format!("Z-Image DiT QKV dispatch failed: {e}"))?;
+        qkv[..qkv_len].copy_from_slice(session.readback(qkv_len));
+    } else {
+        for row in 0..rows {
+            linear_into(
+                source,
+                &block.qkv,
+                HIDDEN,
+                QKV_WIDTH,
+                &attention[row * HIDDEN..(row + 1) * HIDDEN],
+                &mut qkv[row * QKV_WIDTH..(row + 1) * QKV_WIDTH],
+                q8,
+                pool,
+            )?;
+        }
+    }
+
+    // --- RoPE on Q and K, per row and per head, same as the CPU path ----------
+    for row in 0..rows {
+        let rotation = &rope[row * ROPE_HEAD_WIDTH..(row + 1) * ROPE_HEAD_WIDTH];
+        let row_qkv = &mut qkv[row * QKV_WIDTH..(row + 1) * QKV_WIDTH];
+        for head in 0..HEADS {
+            let start = head * ROPE_HEAD_WIDTH;
+            let query = &mut row_qkv[start..start + ROPE_HEAD_WIDTH];
+            rms_norm_inplace(query, &block.q_norm, QK_RMS_EPSILON);
+            rotate_interleaved_inplace(query, rotation)?;
+            let key_start = HIDDEN + start;
+            let key = &mut row_qkv[key_start..key_start + ROPE_HEAD_WIDTH];
+            rms_norm_inplace(key, &block.k_norm, QK_RMS_EPSILON);
+            rotate_interleaved_inplace(key, rotation)?;
+        }
+    }
+
+    // --- attention (CPU, 43.8% of a step) ------------------------------------
+    attention_into(
+        &qkv[..qkv_len],
+        rows,
+        HEADS,
+        ROPE_HEAD_WIDTH,
+        scores,
+        &mut attention[..hidden_len],
+    )?;
+
+    // --- output projection, then norm and residual per row -------------------
+    if bound.contains(&Projection::Out) {
+        session
+            .project(
+                layer,
+                Projection::Out,
+                layout.x,
+                &attention[..hidden_len],
+                layout.out,
+            )
+            .map_err(|e| format!("Z-Image DiT out dispatch failed: {e}"))?;
+        let projected = session.readback(hidden_len);
+        for row in 0..rows {
+            let out = &mut qkv[row * HIDDEN..(row + 1) * HIDDEN];
+            out.copy_from_slice(&projected[row * HIDDEN..(row + 1) * HIDDEN]);
+            rms_norm_inplace(out, &block.attention_norm2, RMS_EPSILON);
+            add_modulated_residual(
+                &mut tokens[row * HIDDEN..(row + 1) * HIDDEN],
+                out,
+                modulations.map(|values| values.gate_msa),
+            )?;
+        }
+    } else {
+        for row in 0..rows {
+            let out = &mut qkv[row * HIDDEN..(row + 1) * HIDDEN];
+            linear_into(
+                source,
+                &block.out,
+                HIDDEN,
+                HIDDEN,
+                &attention[row * HIDDEN..(row + 1) * HIDDEN],
+                out,
+                q8,
+                pool,
+            )?;
+            rms_norm_inplace(out, &block.attention_norm2, RMS_EPSILON);
+            add_modulated_residual(
+                &mut tokens[row * HIDDEN..(row + 1) * HIDDEN],
+                out,
+                modulations.map(|values| values.gate_msa),
+            )?;
+        }
+    }
+
+    // --- FFN ------------------------------------------------------------------
+    for row in 0..rows {
+        let token = &tokens[row * HIDDEN..(row + 1) * HIDDEN];
+        let normalized = &mut attention[row * HIDDEN..(row + 1) * HIDDEN];
+        rms_norm(token, &block.ffn_norm1, normalized, RMS_EPSILON);
+        scale_modulated_branch(normalized, modulations.map(|values| values.scale_mlp))?;
+    }
+
+    let gate_on_gpu = bound.contains(&Projection::W1);
+    let up_on_gpu = bound.contains(&Projection::W3);
+    let down_on_gpu = bound.contains(&Projection::W2);
+
+    if gate_on_gpu {
+        // w1's output is the silu'd side, so it goes to the `gate` region and
+        // the product is formed on the host before w2 sees it.
+        session
+            .project_scaled(
+                layer,
+                Projection::W1,
+                layout.x,
+                &attention[..hidden_len],
+                layout.gate,
+                1.0,
+            )
+            .map_err(|e| format!("Z-Image DiT w1 dispatch failed: {e}"))?;
+        let mut gate = session.readback(ffn_len).to_vec();
+        if up_on_gpu {
+            session
+                .project(
+                    layer,
+                    Projection::W3,
+                    layout.x,
+                    &attention[..hidden_len],
+                    layout.up,
+                )
+                .map_err(|e| format!("Z-Image DiT w3 dispatch failed: {e}"))?;
+            let up = session.readback(ffn_len);
+            for index in 0..ffn_len {
+                let gate_value = gate[index];
+                gate[index] = (gate_value / (1.0 + (-gate_value).exp())) * up[index];
+            }
+        } else {
+            for row in 0..rows {
+                let input = &attention[row * HIDDEN..(row + 1) * HIDDEN];
+                linear_into(
+                    source,
+                    &block.w3,
+                    HIDDEN,
+                    FFN_WIDTH,
+                    input,
+                    &mut ffn[row * FFN_WIDTH..(row + 1) * FFN_WIDTH],
+                    q8,
+                    pool,
+                )?;
+                for index in 0..FFN_WIDTH {
+                    let at = row * FFN_WIDTH + index;
+                    let gate_value = gate[at];
+                    gate[at] = (gate_value / (1.0 + (-gate_value).exp())) * ffn[at];
+                }
+            }
+        }
+        // w2 reads the activated buffer, which the CPU path keeps in `ffn`.
+        if down_on_gpu {
+            // 1.0, not the 1/128 `run_block` writes: that one is a no-op
+            // because `linear_into_scaled_impl` applies its scale twice and
+            // they cancel. See `DitGpuSession::project_scaled`.
+            session
+                .project_scaled(layer, Projection::W2, layout.gate, &gate, layout.out, 1.0)
+                .map_err(|e| format!("Z-Image DiT w2 dispatch failed: {e}"))?;
+            let down = session.readback(hidden_len);
+            for row in 0..rows {
+                let out = &mut attention[row * HIDDEN..(row + 1) * HIDDEN];
+                out.copy_from_slice(&down[row * HIDDEN..(row + 1) * HIDDEN]);
+                rms_norm_inplace(out, &block.ffn_norm2, RMS_EPSILON);
+                add_modulated_residual(
+                    &mut tokens[row * HIDDEN..(row + 1) * HIDDEN],
+                    out,
+                    modulations.map(|values| values.gate_mlp),
+                )?;
+            }
+        } else {
+            for row in 0..rows {
+                let out = &mut attention[row * HIDDEN..(row + 1) * HIDDEN];
+                linear_into_scaled(
+                    source,
+                    &block.w2,
+                    FFN_WIDTH,
+                    HIDDEN,
+                    &gate[row * FFN_WIDTH..(row + 1) * FFN_WIDTH],
+                    out,
+                    q8,
+                    pool,
+                    1.0 / 128.0,
+                )?;
+                rms_norm_inplace(out, &block.ffn_norm2, RMS_EPSILON);
+                add_modulated_residual(
+                    &mut tokens[row * HIDDEN..(row + 1) * HIDDEN],
+                    out,
+                    modulations.map(|values| values.gate_mlp),
+                )?;
+            }
+        }
+    } else {
+        // No FFN projection is on the GPU: this is `run_block` verbatim.
+        for row in 0..rows {
+            let input = &attention[row * HIDDEN..(row + 1) * HIDDEN];
+            linear_into(
+                source,
+                &block.w1,
+                HIDDEN,
+                FFN_WIDTH,
+                input,
+                &mut qkv[row * FFN_WIDTH..(row + 1) * FFN_WIDTH],
+                q8,
+                pool,
+            )?;
+            linear_into(
+                source,
+                &block.w3,
+                HIDDEN,
+                FFN_WIDTH,
+                input,
+                &mut ffn[row * FFN_WIDTH..(row + 1) * FFN_WIDTH],
+                q8,
+                pool,
+            )?;
+            silu_mul_inplace(
+                &mut qkv[row * FFN_WIDTH..(row + 1) * FFN_WIDTH],
+                &mut ffn[row * FFN_WIDTH..(row + 1) * FFN_WIDTH],
+            );
+            let out = &mut attention[row * HIDDEN..(row + 1) * HIDDEN];
+            linear_into_scaled(
+                source,
+                &block.w2,
+                FFN_WIDTH,
+                HIDDEN,
+                &ffn[row * FFN_WIDTH..(row + 1) * FFN_WIDTH],
+                out,
+                q8,
+                pool,
+                1.0 / 128.0,
+            )?;
+            rms_norm_inplace(out, &block.ffn_norm2, RMS_EPSILON);
+            add_modulated_residual(
+                &mut tokens[row * HIDDEN..(row + 1) * HIDDEN],
+                out,
+                modulations.map(|values| values.gate_mlp),
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+/// Compare the batched GPU projection against the per-row CPU one, element by
+/// element, on a single block's QKV weight.
+///
+/// The end-to-end comparison is useless for locating a mismatch: one step is 30
+/// blocks, each mixing a projection with a norm, a modulation and a residual, so
+/// a 64/255 image difference could come from anywhere. This isolates the one
+/// operation that differs -- one dispatch over all rows instead of one per row
+/// -- and reports where the first element goes wrong.
+#[cfg(all(test, feature = "vulkan"))]
+#[test]
+fn gpu_batched_qkv_matches_the_per_row_cpu_projection() {
+    use crate::ops::float::enable_gpu;
+    use crate::vulkan::ops::ArenaRegion;
+
+    enable_gpu();
+    let Some(context) = crate::ops::get_vulkan_context() else {
+        eprintln!("skipped: no Vulkan context");
+        return;
+    };
+
+    // A small row count keeps the test fast; the kernel is row-count agnostic.
+    let rows = 32usize;
+    let source = crate::models::diffusion::z_image::test_source();
+    // Q8_0 row layout: 34 bytes per 32 values -- an f16 scale then 32 int8.
+    let mut weight = Vec::with_capacity(QKV_WIDTH * (HIDDEN / 32) * 34);
+    for row in 0..QKV_WIDTH {
+        for block in 0..HIDDEN / 32 {
+            let scale = f16::from_f32(1.0 / 32.0);
+            weight.extend_from_slice(&scale.to_bits().to_le_bytes());
+            for k in 0..32 {
+                let index = block * 32 + k;
+                weight.push((((row * 31 + index * 7) % 255) as i16 - 127) as i8 as u8);
+            }
+        }
+    }
+    let source = source.with_raw_tensor("qkv", &[HIDDEN as u64, QKV_WIDTH as u64], GGMLType::Q8_0, weight);
+
+    let input: Vec<f32> = (0..rows * HIDDEN)
+        .map(|i| ((i % 97) as f32 / 97.0) - 0.5)
+        .collect();
+
+    // CPU: one row at a time, exactly as run_block does it.
+    let mut cpu = vec![0f32; rows * QKV_WIDTH];
+    let mut scratch = Q8Scratch::new(HIDDEN);
+    let pool = ComputePool::new(1);
+    for row in 0..rows {
+        linear_into(
+            &source,
+            "qkv",
+            HIDDEN,
+            QKV_WIDTH,
+            &input[row * HIDDEN..(row + 1) * HIDDEN],
+            &mut cpu[row * QKV_WIDTH..(row + 1) * QKV_WIDTH],
+            &mut scratch,
+            &pool,
+        )
+        .unwrap();
+    }
+
+    // GPU: one dispatch for the whole sequence.
+    let mut session = crate::models::diffusion::z_image::dit_gpu::DitGpuSession::new(context, rows).expect("session");
+    session
+        .bind_weight(0, crate::models::diffusion::z_image::dit_gpu::Projection::Qkv, source.tensor_slice("qkv").unwrap())
+        .expect("bind");
+    let layout = *session.layout();
+    session
+        .project(
+            0,
+            crate::models::diffusion::z_image::dit_gpu::Projection::Qkv,
+            layout.x,
+            &input,
+            layout.qkv,
+        )
+        .expect("project");
+    let gpu = session.readback(rows * QKV_WIDTH);
+
+    let first_bad = cpu
+        .iter()
+        .zip(gpu.iter())
+        .position(|(a, b)| (a - b).abs() > 1e-3);
+    let max_abs = cpu
+        .iter()
+        .zip(gpu.iter())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    eprintln!("qkv: rows={rows} cpu[0]={:.6} gpu[0]={:.6}", cpu[0], gpu[0]);
+    eprintln!("qkv: first_bad={first_bad:?} max_abs={max_abs:.3e}");
+    assert_eq!(first_bad, None, "batched qkv diverges from the CPU path");
+}
+
+/// The FFN down projection is the one that carries a scale: `run_block` folds
+/// 1/128 into it via `linear_into_scaled`, and `project_scaled` has to
+/// reproduce that exactly. Checking it separately matters because a silent
+/// factor of 128 here survives a full render as a plausible-looking image.
+#[cfg(all(test, feature = "vulkan"))]
+#[test]
+fn gpu_batched_down_projection_reproduces_the_cpu_scale() {
+    use crate::ops::float::enable_gpu;
+
+    enable_gpu();
+    let Some(context) = crate::ops::get_vulkan_context() else {
+        eprintln!("skipped: no Vulkan context");
+        return;
+    };
+    let rows = 32usize;
+    let ffn_width = FFN_WIDTH;
+    let source = crate::models::diffusion::z_image::test_source();
+    let mut weight = Vec::with_capacity(HIDDEN * (ffn_width / 32) * 34);
+    for row in 0..HIDDEN {
+        for block in 0..ffn_width / 32 {
+            let scale = f16::from_f32(1.0 / 64.0);
+            weight.extend_from_slice(&scale.to_bits().to_le_bytes());
+            for k in 0..32 {
+                let index = block * 32 + k;
+                weight.push((((row * 17 + index * 5) % 255) as i16 - 127) as i8 as u8);
+            }
+        }
+    }
+    let source = source.with_raw_tensor(
+        "w2",
+        &[ffn_width as u64, HIDDEN as u64],
+        GGMLType::Q8_0,
+        weight,
+    );
+    let input: Vec<f32> = (0..rows * ffn_width)
+        .map(|i| ((i % 89) as f32 / 89.0) - 0.5)
+        .collect();
+
+    let mut cpu = vec![0f32; rows * HIDDEN];
+    let mut scratch = Q8Scratch::new(ffn_width);
+    let pool = ComputePool::new(1);
+    for row in 0..rows {
+        // run_block passes 1/128 here, but linear_into_scaled_impl applies its
+        // scale twice and they cancel, so plain linear_into is what the CPU
+        // path actually computes.
+        linear_into(
+            &source,
+            "w2",
+            ffn_width,
+            HIDDEN,
+            &input[row * ffn_width..(row + 1) * ffn_width],
+            &mut cpu[row * HIDDEN..(row + 1) * HIDDEN],
+            &mut scratch,
+            &pool,
+        )
+        .unwrap();
+    }
+
+    let mut session = crate::models::diffusion::z_image::dit_gpu::DitGpuSession::new(context, rows)
+        .expect("session");
+    session
+        .bind_weight(
+            0,
+            crate::models::diffusion::z_image::dit_gpu::Projection::W2,
+            source.tensor_slice("w2").unwrap(),
+        )
+        .expect("bind");
+    let layout = *session.layout();
+    // The FFN width does not fit the session's HIDDEN-sized `x` region, so the
+    // input goes through its own buffer: this test is about the scale, not
+    // about reusing the QKV staging.
+    let input_region = layout.gate;
+    let output_region = layout.out;
+    session
+        .project_scaled(
+            0,
+            crate::models::diffusion::z_image::dit_gpu::Projection::W2,
+            input_region,
+            &input,
+            output_region,
+            1.0,
+        )
+        .unwrap_or_else(|e| panic!("project failed: {e}"));
+    let gpu = session.readback(rows * HIDDEN);
+
+    let first_bad = cpu
+        .iter()
+        .zip(gpu.iter())
+        .position(|(a, b)| (a - b).abs() > 1e-3);
+    let max_abs = cpu
+        .iter()
+        .zip(gpu.iter())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    eprintln!("w2: cpu[0]={:.6} gpu[0]={:.6}", cpu[0], gpu[0]);
+    eprintln!("w2: first_bad={first_bad:?} max_abs={max_abs:.3e}");
+    assert_eq!(first_bad, None, "scaled down projection diverges from the CPU path");
+}
+
+
     use super::super::Q8Scratch;
     #[cfg(target_os = "macos")]
     use super::ROPE_HEAD_WIDTH;

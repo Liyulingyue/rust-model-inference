@@ -46,6 +46,19 @@ impl Projection {
         }
     }
 
+    /// Width of the activation this projection consumes.
+    ///
+    /// The down projection is the odd one out: it reads the FFN's 10240-wide
+    /// activation, not a 3840-wide one. Hardcoding HIDDEN here made it read a
+    /// truncated row, which is why `project_scaled` looked correct and still
+    /// returned a result 128x off.
+    pub(crate) fn n_in(self) -> usize {
+        match self {
+            Projection::Qkv | Projection::Out | Projection::W1 | Projection::W3 => HIDDEN,
+            Projection::W2 => FFN_WIDTH,
+        }
+    }
+
     pub(crate) fn label(self) -> &'static str {
         match self {
             Projection::Qkv => "qkv",
@@ -93,7 +106,6 @@ impl Layout {
     /// i8 with one f32 scale per 32 values, and `q4_1_input_sums` mirrors the
     /// scales.
     fn build(rows: usize) -> Result<Self, VulkanError> {
-        let blocks = HIDDEN / 32;
         let mut cursor = 0usize;
         let mut take = |elements: usize| -> Result<ArenaRegion, VulkanError> {
             cursor = cursor.next_multiple_of(4);
@@ -122,11 +134,14 @@ impl Layout {
             qkv: take(rows_qkv as usize)?,
             gate: take(rows_ffn as usize)?,
             up: take(rows_ffn as usize)?,
-            q8: take((rows * HIDDEN as f64) as usize)?,
-            q8_scales: take((rows * blocks as f64) as usize * 4)?,
-            q4_1_input_sums: take((rows * blocks as f64) as usize * 4)?,
-            q8k: take((rows * HIDDEN as f64) as usize)?,
-            q8k_scales: take((rows * blocks as f64) as usize * 4)?,
+            // The Q8_0 staging and its scales are sized for the widest input
+            // any projection consumes, which is the FFN activation at
+            // FFN_WIDTH rather than the 3840-wide one the QKV projection reads.
+            q8: take((rows * FFN_WIDTH as f64) as usize)?,
+            q8_scales: take((rows * (FFN_WIDTH / 32) as f64) as usize * 4)?,
+            q4_1_input_sums: take((rows * (FFN_WIDTH / 32) as f64) as usize * 4)?,
+            q8k: take((rows * FFN_WIDTH as f64) as usize)?,
+            q8k_scales: take((rows * (FFN_WIDTH / 32) as f64) as usize * 4)?,
         })
     }
 
@@ -151,6 +166,8 @@ pub(crate) struct DitGpuSession {
     /// Host-side working buffer for element-wise work between dispatches, so
     /// the fused silu(gate) * up never has to round-trip through the arena.
     pub(crate) scratch: Vec<f32>,
+    /// Staging for a scaled upload; see `project_scaled`.
+    scaled: Vec<f32>,
 }
 
 impl DitGpuSession {
@@ -184,6 +201,7 @@ impl DitGpuSession {
             // one buffer sized for QKV serves all five.
             readback: vec![0f32; rows * QKV_WIDTH],
             scratch: Vec::new(),
+            scaled: Vec::new(),
         })
     }
 
@@ -235,6 +253,7 @@ impl DitGpuSession {
     /// Run one projection over every row: read `input` from `input_region`,
     /// write into `output_region`, and leave the result in `readback`.
     #[allow(clippy::too_many_arguments)]
+    /// Run one projection over every row, unscaled.
     pub(crate) fn project(
         &mut self,
         layer: usize,
@@ -243,6 +262,43 @@ impl DitGpuSession {
         input: &[f32],
         output_region: ArenaRegion,
     ) -> Result<(), VulkanError> {
+        self.project_scaled(
+            layer,
+            projection,
+            input_region,
+            input,
+            output_region,
+            1.0,
+        )
+    }
+
+    /// Run one projection over every row.
+    ///
+    /// `scale` multiplies the activations before they are uploaded, which is
+    /// the only place a factor can go: `record_weight_matmul_rows` quantizes on
+    /// the device and exposes no scale argument. The matmul is linear in its
+    /// input, so `scale * (W . x) == W . (scale * x)`.
+    ///
+    /// Z-Image's FFN down projection passes 1.0, not the 1/128 `run_block`
+    /// writes. That is not an oversight: `linear_into_scaled_impl` applies its
+    /// scale twice, once to the activations before quantizing and once to the
+    /// result afterwards, so the two cancel and the CPU path's `1/128` is a
+    /// no-op. Applying it once here would have made the GPU disagree with the
+    /// CPU by exactly that factor -- which is what the first version did, and
+    /// is most of the 64/255 it produced.
+    ///
+    /// The cost is one pass over the activations, 0.7 MB for a 512x512 step,
+    /// against 5.64 GB of weights.
+    pub(crate) fn project_scaled(
+        &mut self,
+        layer: usize,
+        projection: Projection,
+        input_region: ArenaRegion,
+        input: &[f32],
+        output_region: ArenaRegion,
+        scale: f32,
+    ) -> Result<(), VulkanError> {
+        let n_in = projection.n_in();
         let n_out = projection.n_out();
         let output_len = self.rows * n_out;
         if self.readback.len() < output_len {
@@ -250,7 +306,17 @@ impl DitGpuSession {
         }
         debug_assert!(self.readback.len() >= output_len);
         let bindings = self.binding_for(layer, projection)?;
-        self.ops.write_f32(input_region, input)?;
+        if scale == 1.0 {
+            self.ops.write_f32(input_region, input)?;
+        } else {
+            if self.scaled.len() < input.len() {
+                self.scaled.resize(input.len(), 0.0);
+            }
+            for (destination, value) in self.scaled[..input.len()].iter_mut().zip(input) {
+                *destination = value * scale;
+            }
+            self.ops.write_f32(input_region, &self.scaled[..input.len()])?;
+        }
         let mut commands = TokenCommands::begin(self.context)?;
         self.ops.record_weight_matmul_rows(
             &commands,
@@ -262,9 +328,9 @@ impl DitGpuSession {
             self.layout.q8k,
             self.layout.q8k_scales,
             &[(output_region, n_out, n_out * 4)],
-            HIDDEN,
+            n_in,
             self.rows,
-            HIDDEN,
+            n_in,
         )?;
         commands.submit_and_wait()?;
         let values = self.ops.read_f32(output_region, output_len)?;

@@ -775,6 +775,12 @@ fn matmul_q8_0_ggml(
     }
 }
 
+/// A one-tensor [`TensorSource`] for tests that need real GGUF bytes.
+#[cfg(test)]
+pub(crate) fn test_source() -> crate::models::diffusion::z_image::tests::TestSource {
+    crate::models::diffusion::z_image::tests::TestSource::default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -784,7 +790,7 @@ mod tests {
     use std::collections::HashMap;
 
     #[derive(Default)]
-    struct TestSource {
+    pub(crate) struct TestSource {
         metadata: HashMap<String, MetaValue>,
         tensors: HashMap<String, TensorInfo>,
         data: HashMap<String, Vec<u8>>,
@@ -832,7 +838,7 @@ mod tests {
             self
         }
 
-        fn with_raw_tensor(
+        pub(crate) fn with_raw_tensor(
             mut self,
             name: &str,
             dims: &[u64],
