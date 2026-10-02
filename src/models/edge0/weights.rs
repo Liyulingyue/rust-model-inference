@@ -1,10 +1,50 @@
 //! Edge0 model weights and architecture-specific validation.
 
-use crate::core::tensor::{GGMLType, TensorSource};
+use crate::core::tensor::{GGMLType, TensorInfo, TensorSource};
 use crate::models::qwen35::trunk::{HybridTrunk, Qwen35Config};
 use crate::ops::kernel::mlx_affine::MlxAffineKernel;
-use crate::ops::kernel::Weight;
+use crate::ops::kernel::{QuantizedTensor, Weight};
 
+/// Bytes one `n_in x n_out` matrix occupies for a block-quantized GGML type.
+///
+/// Q4_0 and Q8_0 pack 32 values per block, so the stride is the block count
+/// times the block size; the fixed-width types are a plain product.
+fn quantized_stride(ggml_type: GGMLType, n_in: usize, n_out: usize) -> usize {
+    match ggml_type {
+        GGMLType::Q8_0 => (n_in / 32) * 34 * n_out,
+        GGMLType::Q4_0 => (n_in / 32) * 18 * n_out,
+        GGMLType::F32 => n_in * n_out * 4,
+        GGMLType::F16 | GGMLType::BF16 => n_in * n_out * 2,
+        other => panic!("unsupported Edge0 expanded type {other:?}"),
+    }
+}
+
+/// GGML types the expanded `--quant f16/q8_0/q4_0` exports write.
+///
+/// The lossless export keeps the packed U32 words as I32 plus BF16 `scales` and
+/// `biases` companions, which only `MlxAffineKernel` can read.  Every other
+/// mode folds the affine groups into the matrix itself and re-encodes it, so
+/// the result is an ordinary GGML tensor and goes through `load_weight`.
+const EXPANDED_TYPES: [GGMLType; 4] =
+    [GGMLType::F32, GGMLType::F16, GGMLType::Q8_0, GGMLType::Q4_0];
+
+/// True when the checkpoint stores pre-expanded matrices instead of affine codes.
+///
+/// `edge0.quant.mode` is written by `tools/converter/edge0/convert_edge0.py`;
+/// a checkpoint without the key predates the flag and is lossless.
+pub(crate) fn is_expanded(source: &dyn TensorSource) -> bool {
+    match source.metadata("edge0.quant.mode") {
+        Some(value) => value.to_string_val().as_deref() != Some("lossless"),
+        None => false,
+    }
+}
+
+/// Load one Edge0 MoE matrix, accepting either the affine triplet or an
+/// already-expanded GGML tensor.
+///
+/// `expert` selects a slice out of a 3D expert-stacked tensor.  The expanded
+/// export keeps the expert axis last, so the same stride arithmetic applies to
+/// both layouts once the per-expert element count is known.
 pub(crate) fn load_affine<'a, S: TensorSource + ?Sized>(
     source: &'a S,
     name: &str,
@@ -13,6 +53,61 @@ pub(crate) fn load_affine<'a, S: TensorSource + ?Sized>(
     let info = source
         .tensor_info(name)
         .ok_or_else(|| format!("missing {name}"))?;
+    if EXPANDED_TYPES.contains(&info.ggml_type) {
+        return load_expanded(source, name, info, expert);
+    }
+    load_packed(source, name, info, expert)
+}
+
+/// Load a matrix whose affine groups have already been folded in, so the tensor
+/// is a plain GGML matrix and the generic quantized kernels can run it.
+fn load_expanded<'a, S: TensorSource + ?Sized>(
+    source: &'a S,
+    name: &str,
+    info: &TensorInfo,
+    expert: Option<usize>,
+) -> Result<Weight<'a>, String> {
+    let experts = info.dims.get(2).copied().unwrap_or(1) as usize;
+    if expert.is_some() != (info.dims.len() == 3) || expert.unwrap_or(0) >= experts {
+        return Err(format!("invalid Edge0 expert index for {name}"));
+    }
+    let n_in = info.dims[0] as usize;
+    let n_out = info.dims[1] as usize;
+    if n_in == 0 || n_out == 0 {
+        return Err(format!("invalid Edge0 matrix dimensions for {name}"));
+    }
+    // `from_quantized` addresses a whole matrix, so hand it this expert's slice
+    // rather than teaching the shared kernel about a leading expert stride.
+    let data = source
+        .tensor_slice(name)
+        .ok_or_else(|| format!("missing {name} data"))?;
+    let stride = quantized_stride(info.ggml_type, n_in, n_out);
+    let index = expert.unwrap_or(0);
+    let slice = data
+        .get(index * stride..(index + 1) * stride)
+        .ok_or_else(|| format!("truncated {name}"))?;
+    let mut weight = Weight::from_quantized(QuantizedTensor::from_bytes(
+        slice,
+        info.ggml_type,
+        n_in,
+        n_out,
+    ));
+    weight.n_in = n_in;
+    weight.n_out = n_out;
+    if info.ggml_type == GGMLType::BF16 {
+        weight.kernel = Box::new(crate::ops::kernel::bf16::BF16Kernel::with_bf16_input(slice));
+    }
+    Ok(weight)
+}
+
+/// Load the lossless layout: I32 packed codes plus BF16 scale/bias companions,
+/// dequantized on the fly by `MlxAffineKernel`.
+fn load_packed<'a, S: TensorSource + ?Sized>(
+    source: &'a S,
+    name: &str,
+    info: &TensorInfo,
+    expert: Option<usize>,
+) -> Result<Weight<'a>, String> {
     let scale_name = name.replace(".weight", ".scales");
     let bias_name = name.replace(".weight", ".biases");
     let scale_info = source
@@ -301,4 +396,32 @@ fn validate_edge0_trunk(trunk: &HybridTrunk<'_>) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quantized_stride_matches_the_ggml_block_layouts() {
+        // 64 inputs by 3 rows: two 32-value blocks per row.
+        assert_eq!(quantized_stride(GGMLType::Q8_0, 64, 3), 2 * 34 * 3);
+        assert_eq!(quantized_stride(GGMLType::Q4_0, 64, 3), 2 * 18 * 3);
+        assert_eq!(quantized_stride(GGMLType::F16, 64, 3), 64 * 3 * 2);
+        assert_eq!(quantized_stride(GGMLType::BF16, 64, 3), 64 * 3 * 2);
+        assert_eq!(quantized_stride(GGMLType::F32, 64, 3), 64 * 3 * 4);
+    }
+
+    #[test]
+    fn expanded_types_cover_the_modes_the_converter_can_write() {
+        // Everything the converter emits for --quant f32/f16/q8_0/q4_0.
+        for ty in [GGMLType::F32, GGMLType::F16, GGMLType::Q8_0, GGMLType::Q4_0] {
+            assert!(
+                EXPANDED_TYPES.contains(&ty),
+                "{ty:?} must route to the generic kernels"
+            );
+        }
+        // The lossless layout must keep going through MlxAffineKernel.
+        assert!(!EXPANDED_TYPES.contains(&GGMLType::I32));
+    }
 }
