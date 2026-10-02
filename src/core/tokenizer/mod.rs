@@ -1159,7 +1159,7 @@ impl SPMTokenizer {
             }
         }
 
-        let fragments = self.partition(text, options.parse_special);
+        let fragments = partition_special(&self.special_tokens, text, options.parse_special);
         let mut prev_was_special = true; // mirror llama.cpp: BOS counts as special
         for frag in fragments {
             match frag {
@@ -1181,13 +1181,6 @@ impl SPMTokenizer {
         }
 
         output
-    }
-
-    /// Split input text on CONTROL/USER_DEFINED special token literals so
-    /// each fragment can be tokenized independently. Mirrors
-    /// `tokenizer_st_partition` in llama.cpp.
-    fn partition<'a>(&self, text: &'a str, parse_special: bool) -> Vec<Fragment<'a>> {
-        partition_special(&self.special_tokens, text, parse_special)
     }
 
     /// Encode a single text fragment after applying prefix-space and
