@@ -1,7 +1,7 @@
 # TODO — RustModelInference Roadmap
 
 This document merges the legacy `docs/TODO.md` (deep-dive format with
-TODO-001…TODO-016) and the roadmap-style `docs/develop/TODO.md`
+TODO-001…TODO-018) and the roadmap-style `docs/develop/TODO.md`
 (checklist of upcoming work). The bottom half carries the detailed
 investigation notes; the top half carries the at-a-glance priority list.
 
@@ -831,10 +831,22 @@ pub mod capability {
    - 验证方法：取 jina-omni + llama.cpp fork + 一段 >30s 音频（e.g. 60s），分别跑两端的最终 embedding，断言 cos ≥ 0.99 + max abs diff 在量化噪声内（Q8_0 文本 + F16 mmproj 路径下应该是 ~1e-3）
    - 触发条件：commit `9717d17` 之后任何 jina v5 改动、Q4_K / Q5_K / Q6_K 等不同量化、新 mmproj 版本
 
+**2026-10-01 per-chunk oracle 实跑结果**（commit `fe4b99c` 之前 / 之后）：
+- **mel extraction**：✅ 与 llama.cpp bitwise-aligned（max abs diff 0.378 主要来自帧 2999 末尾 40 个 reflect-vs-zero 反射差异，符合预期）
+- **位置嵌入**：❌→✅ commit `1201166` 修了 `token % self.config.window` bug，固定到 `token`（1500 个唯一 pos）。见 commit message
+- **conv1d 输出**：✅ **Rust 端正确**——numpy 参考实现和 Rust `conv2_only` 在 ULP 级吻合（max abs 3.4e-3，AVX2 vs scalar 重排差），意味着 Rust 的 `conv1d_same_f16` patch 构造 + `dot_f16_f16_bytes` 实现都没问题
+- **oracle dump 不可信**：之前以为是 Rust conv1d 有大 bug（cos=0.18 with oracle），但 2026-10-01 bisect 时发现 llama.cpp 的 `inp_raw` dump 两次值不一样（v0[0]=4.92, v1[0]=1.35），且 dump 出的值和我们 mel 也对不上——说明 ggml 的 input tensor 在 `ggml_set_input` 之后 buffer 被 allocator 复用了，`ggml_backend_tensor_get` 读到的是被覆盖的脏数据。同理 `after_conv1d` dump 也不可信
+- **结论**：当前 oracle 对比无法作为 ground truth。Rust 端的 correctness 由 numpy 参考独立验证了。TODO-016 暂时挂起，等 oracle dump 机制修好后重新跑
+
 **当前不做**：
-- 触发条件没到：jina v5 audio encoder 改动少（一次 30s 切块重构），且端到端语义验证已经覆盖了跨块拼接的功能正确性
+- 触发条件没到：jina v5 audio encoder 改动少（一次 30s 切块重构 + 一次位置嵌入修复），且端到端语义验证已经覆盖了跨块拼接的功能正确性
 - 仓库的 cargo test 已经能在没有 llama.cpp 副本的 CI 上跑出 934/19/67 baseline，oracle 失败不会阻塞
-- 触发再做：第二条等用户加新的 jina-omni 量化、或者上游 llama.cpp fork 有新 audio 相关改动需要重新对齐
+- **触发再做**：
+  1. llama.cpp dump 机制修了之后（用 `ggml_backend_tensor_get_and_copy` 或者 `ggml_set_input` 后立即读），重新跑 per-chunk 对齐
+  2. 用户加新的 jina-omni 量化、或者上游 llama.cpp fork 有新 audio 相关改动需要重新对齐
+
+调试现场保留在 `/tmp/audio-fix-test/`（`our-trace-conv1.jsonl.*`、numpy 参考脚本 `conv2_only=0.054`/`-0.008` 验算过程）和 `/tmp/rmi-jina-audio-*-oracle*.f32`。
+下次继续走：先修 oracle dump（直接读 `t->data` 改用 `ggml_backend_tensor_copy` 或者改在 `set_input_f32` 之后立刻 dump），再用可信的 oracle 验证 Rust 端对齐。
 
 **实施步骤**（任一触发条件满足时）：
 1. `cd $LLAMA_DIR && git checkout b96806d` 起固定 commit
@@ -843,6 +855,129 @@ pub mod capability {
 4. 跑现有 `jina_audio_projection_matches_llama_cpp_bits` 对 30s 单块
 5. 新增 `jina_audio_projection_matches_llama_cpp_bits_concat`（#[ignore]）跑 60s 跨块拼接
 6. 把对照数据 commit 到 `tools/oracle/jina_audio/`（或外置 datum）
+
+### TODO-017: BERT 家族 + EmbeddingGemma encoder — llama.cpp 位级 oracle 未做
+
+`src/models/bert_family/`（bert / jina-bert-v2 / jina-bert-v3 / nomic-bert / nomic-bert-moe）
+与 `src/models/gemma_embedding/` 共 7 个 arch，全部**只做了语义验证，没做 llama.cpp 位级 oracle**。
+
+每个测试文件自己都写明了这一点，例如 `tests/jina_v2_base_en.rs`：
+
+> Oracle: local read-only `references/llama.cpp/src/models/bert.cpp`.
+> bit-level parity with llama.cpp requires the oracle binary and is tracked separately.
+
+而 `tools/oracle/` 下**没有** `bert/` 也没有 `gemma_embedding/` 目录——对比 gliner2 / clm / laya /
+jina_audio / qwen3_tts 都有完整的 `dump_*.py` + `fixtures/` + `compare.py`。
+
+| arch | 上游源文件（本地 `references/llama.cpp` 存在） | 现有验证 |
+|---|---|---|
+| `bert` | `src/models/bert.cpp` | 语义 + 元数据 + 张量清单 |
+| `jina-bert-v2` | `src/models/bert.cpp` + `jina-bert-v2.cpp` | 同上 + WPM pinned ids + 语义排序 |
+| `nomic-bert` | `src/models/bert.cpp` | 同上 |
+| `nomic-bert-moe` | `src/models/bert.cpp` + `nomic-bert-moe.cpp` | 同上 + MoE 张量清单 |
+| `bge-m3` | `src/models/bert.cpp` | 同上 |
+| `gemma-embedding` | `src/models/gemma-embedding.cpp` | 同上 + 语义排序 |
+
+已验证的部分（2026-09-30 对 `jina-embeddings-v2-base-en` 复核）：4/4 集成测试通过、CLI 与 HTTP
+输出 768/768 元素 `%.9f` 文本完全一致、线程数 1/4/8/0 输出确定、L2 范数 1.000000、语义排序正确。
+**这些都不等价于"与 llama.cpp 逐位一致"。**
+
+#### 为什么值得做
+
+这个区域已经出过两个只有 oracle 能早发现的真 bug，都是 port 完成后靠别暴露的：
+
+1. **`attn_proj` 从未加回 `hidden`**（PR #125 记）：每层对 `inpL` 都是恒等映射，attention stack
+   整体空转。jina-bert-v2 / nomic-bert / bert 三个变体全中，只是前两个 ERSS 相似度够高掩盖了；
+   bge-small 因 CLS pooling 直接输出退化（相似度全 ~1.0）才暴露。修复后 rel→unrel 差距
+   jina 0.170→0.417、nomic 0.258→0.443。
+2. **MoE `per_expert_bytes` 算成 44 应为 34**（nomic-embed-text-v2-moe）：每个 expert 多读
+   0.73 MB，第二个 expert 之后产出 NaN。
+
+共同点：都能被一个位级 oracle 在 port 当天抓住，而不是等用户撞上。
+
+#### 需要的产出
+
+1. `tools/oracle/bert/` 与 `tools/oracle/gemma_embedding/`：`dump_golden.py`（从 llama.cpp
+   `llama-embedding` dump 向量 + token ids）、`fixtures/*.json`（覆盖每个变体的开关组合：
+   ALiBi vs pos_embd、GELU vs geglu vs SwiGLU、mean vs CLS vs last pooling、fused vs split QKV、
+   MoE 偶奇层）、`compare.py`（严格查 token ids / 形状 / F32 原始位，报告首个分叉）。
+2. 复用 `tools/oracle/shared/` 的 llama.cpp 构建 recipe（标量、单线程、关 Accelerate/
+   Flash Attention），与 gliner2 的 `scalar.c` 模式一致。
+3. 每个 arch 至少一条 `#[ignore]` 的 `matches_llama_cpp_bits` 测试，`RMI_*` 环境变量 gating。
+
+#### 触发条件（满足任一才启动）
+
+- 改动 `src/models/bert_family/` 或 `src/models/gemma_embedding/` 的任何数值路径；
+- 换量化档（目前 7 个 arch 只有 Q8_0 验证过）；
+- 用户报告 embedding 与官方实现不一致；
+- 新接 BERT 家族变体（如 `jina-bert-v3`，源文件已在但没接）。
+
+在触发前，`docs/MODEL_LIST.md` 对应行的口径保持"语义验证 + CLI/HTTP bit 一致"，**不写**
+"逐位对齐 llama.cpp"。
+
+### TODO-018: server 的两池超售（vision/audio 仍走 rayron）
+
+核对 jina-embeddings-v5-omni 的 image 路径时发现两件事，都还没修。共同背景是
+`src/core/thread_pool.rs:45-72` 记录的双池设计：LLM 走 `ComputePool`（显式分区、
+无 work-stealing），vision/audio/qwen35 走 **rayron 全局池**（`into_par_iter` / `par_chunks_mut`）。
+文档说两池靠 `src/main.rs:130` 的 `init_rayon_global_pool(n)` 对齐线程数，且
+"never run concurrently ... so oversubscription is not an issue"。
+
+#### 1. server 从不调用 `init_rayon_global_pool` → 线程数不可控 + 与 ComputePool 超售
+
+CLI 在 main.rs 解析 `--threads` 后就建好 rayron 池；**`src/app/server/mod.rs::run_server`
+完全没有这一步**。于是 HTTP 进程里第一个用 rayron 的请求会懒建池，线程数取 rayron
+自己的默认（本机 `num_cpus`=18），而 ComputePool 是 `resolve_thread_count(--threads, 18)`
+= clamp 到 `DEFAULT_THREAD_CAP=8`。
+
+在 CLI 里这无害（vision 与 LLM 不并发）。在 server 里并发请求可以让 vision（rayron）
+与 LLM（ComputePool）真正重叠，于是 18+8 个线程抢 8 核。
+
+曾试过在 server 里补 `init_rayon_global_pool(8)`（2 行），**已撤回**，原因是：
+  (a) 它不解决第 2 条的分歧（实测差异数仍是 153/1024，一点没变）；
+  (b) 它只把超售从 18+8=26 降到 8+8=16，没有消掉超售本身；
+  (c) `rayon::ThreadPoolBuilder::build_global` 只能成功一次，若别处先建了池则我的
+      调用静默失效，属于脆弱写法。
+根治手段是第 3 条。
+
+#### 2. 〔已结案：误报〕jina-v5-omni image 路径 CLI/HTTP "1 ULP 分歧"是测量假象
+
+一度记录为未决 bug，**实为比对方法错误，两侧逐位一致**。保留此节是因为那个坑
+很容易再踩，且我踩了两次。
+
+现象：CLI 打印（`print_embedding` 用 `{:.9}`）与 HTTP JSON（serde_json 对 f32 用
+ryu 最短往返）逐元素比，**153/1024 个 `%.9f` 文本不同**，max abs diff 5.0e-10。
+
+错在比法：把 HTTP 的十进制字符串解析成 **f64** 之后直接 format。该字符串是
+"能 round-trip 回同一个 f32 的最短表示"，但它对应的 f64 落在 f32 精确值之上，
+二次取整后末位进一。元素 0 实证：
+
+    f32 精确值 = 0.0010754974791780114   (bits 3a8cf7b5)
+    Rust {:.9}            -> 0.001075497   (正确：第 10 位是 4，舍)
+    JSON 最短往返字符串    -> 0.0010754975
+    Python format(f64)    -> 0.001075498   (错误：f64 落在 .5 上，进)
+
+正确比法：先 `struct.pack('<f', ...)` 还原成 f32，再 format。改用后
+**0/1024 不一致**。旁证：`embedding.final` trace 二进制两份 md5 相同、
+HTTP JSON 与其 trace 1024/1024 位一致、CLI 文本与其 trace 1024/1024 一致。
+
+教训（写给你我他）：**跨 `%.9f` 文本与 serde_json 浮点比较，必须先过 f32。**
+本轮先是在 BERT/Gemma encoder 上正确绕过（0/1024），随后在 jina image 路径上
+又直接 format f64，顺着错方向排查了很多轮（rayron 线程数 / `--threads` /
+`--max-context` / 图片路径 / vision 逐位比对都做了，全是白工）。
+
+#### 3. vision 迁到 ComputePool（`thread_pool.rs` 已登记的优选方向）
+
+`src/core/thread_pool.rs:66-72`：未来统一方向是"把 audio/vision/qwen35 迁到
+ComputePool，不是把 LLM 迁去 rayron"。迁移面：
+- rayron 用点：`src/models/qwen3/vision/mod.rs` 3 处（1094 attention 的
+  `into_par_iter`、213/278 两个 `par_chunks_mut`）、`src/models/qwen35/vision/mod.rs` 1 处；
+- 需要穿 `pool` 的公共 API：`encode_pair` / `encode_image`（13 个调用点，分布在
+  `app/qwen_drive.rs`、`app/omni.rs`、`app/text/multimodal.rs`、`app/text/vision.rs`）
+  与 `VisionEncoder::from_source` / `VisionEncoder35::from_source`（10 个构造点）；
+- 迁移后 rayron 依赖可整体从 Cargo.toml 移除，第 1 条的"两池对齐"问题随之消失。
+
+注意：**这一条不修第 2 条**（vision 输出已证逐位相同）。它是第 1 条的根治手段。
 
 ---
 

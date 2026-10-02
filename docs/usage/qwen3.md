@@ -65,6 +65,59 @@ cargo run --release --bin rust-model-inference -- \
   --prompt "描述这张图片"
 ```
 
+`Qwen3-VL-4B-Instruct`（Qwen/Qwen3-VL-4B-Instruct-GGUF Q4_K_M，~2.5 GB）
+在 `src/core/loader.rs:715` 的 `KNOWN_QWEN3VL_4B_DIMENSIONS` 白名单里，
+LLM backbone 是 Qwen3-4B（`n_embd=2560, n_layer=36, n_head=32, n_head_kv=8,
+n_ff=9728, head_dim=128, n_ctx=262144, freq_base=5e6, M-RoPE [24,20,20,0]`）。
+
+**现状（2026-10-01 修通后）**：
+
+- 4 核 CPU + 7.5 GiB RAM 下端到端跑通：128/256/384/512/1024 PNG
+  都能产出准确的图像描述（"This image is a simple, abstract
+  composition of two overlapping circular shapes..."）。
+- **修复**：multimodal 流中 text token 的 M-RoPE 位置从
+  `[next, next, next, 0]` 改成 `[next, 0, 0, 0]` —— 即只把 T 轴当作
+  真正的 1D 位置，H/W/E 轴保持 0 (M-RoPE identity)。
+  改前 256×256 起 LLM 在最后位置预测 `<|im_end|>` 文本为空；改后 ≥256 image
+  文本生成正常。
+- 根因：upstream llama.cpp (`tools/mtmd/mtmd-helper-common.h` 的
+  `set_position_normal`) 走的是 1D legacy path，compat layer 只填
+  `token.pos[0]`，H/W/E 留 0；而我们的 `build_qwen3_media_positions`
+  原本把所有 4 个轴都填 `next`，H/W 多出来的 rotation 会在大 image grid
+  (`next = base + max(grid_h, grid_w) ≥ 12` 时) 累积，导致 LLM 在
+  最后位置 logits 偏向 `<|im_end|>` / ``。
+- **小遗留**：greedy decode 首 token 偶尔会是 ``（被 streaming decoder
+  静默跳过），实际可见输出从第二个 token 开始。若用 sampling (temp=0.7)
+  这个偏置不明显，输出正常。
+- 文本-only 路径在 4 核上约 4 tok/s，与 multimodal 完全无关。
+
+**Qwen3-VL 其它尺寸 (`-2B` / `-8B` / `-32B` / `-30B-A3B` / `-235B-A22B`) 状态**：
+
+- **`-2B`（`-Instruct` 与 `-Thinking` 两个 GGUF 均下载并尝试过）——本仓库未适配**。
+  在 4 核 + 7.5 GiB RAM 上 2B 端到端不工作：
+  - 文本-only + ChatML: 首 token 预测 `151645`（`<|im_end|>` = EOS），0 输出 token；
+  - 文本-only + `--thinking` flag: 工作（首 token 是普通文本）；
+  - 多模态 + ChatML: 首 token 仍预测 `151645`，立即结束；
+  - 多模态 + 字面文字 chat (`\nuser\n…assistant\n` 各种变体): 不预测 EOS，但陷入退化循环
+    —— 反复输出 `\n\n\n...` / `####...` / `sponsorsponsor...` / `mainmainmain...` 等；
+  - 多模态 + 高温度采样 (temp=2.0 + rep_penalty 1.1): 产出 multilingual 乱码
+    （`abandoningดีๆ imorig eloney craz…`），无可用语义。
+  - 根因疑似：2B-Instruct GGUF 的 `tokenizer.chat_template` 用字面文字 `user\n…\nassistant\n`
+    格式而非 ChatML 的 `<|im_start|>…<|im_end|>` tokens；我们的代码走 ChatML。
+    4B 能容忍两种格式，2B 不能。即便换成字面文字也只是把 "首 token = EOS" 问题替换成
+    "生成退化为重复 token"，vision encoder 输出与 2B 的 LLM 主干也可能有交互问题。
+  - 2B 容量 (2.1B) 对 vision encoder embedding 的容错较差也是候选原因之一。
+  - 暂时不打算修，等用户进一步指令。
+
+- **`-8B` / `-32B` / `-30B-A3B` / `-235B-A22B` 等更大尺寸**：Q4_K_M 量化后 ≥ 5 GB，
+  在 4 核 + 7.5 GiB RAM 环境下未做端到端验证。需要更大机器才能跑。
+- 文本-only `-0.6B`（同 `-2B` 等 Instruct 模型）不在 ModelScope 上能找到 GGUF，本仓库未尝试。
+
+限制：
+
+- 当前每种媒体最多一份；同一轮同时给图像和音频时顺序固定为图像、音频、提示词。
+- 音频必须是 16 kHz PCM16 WAV。
+
 限制：
 
 - 当前每种媒体最多一份；同一轮同时给图像和音频时顺序固定为图像、音频、提示词。

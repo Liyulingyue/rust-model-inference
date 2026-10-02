@@ -1,12 +1,13 @@
 pub mod clip_config;
 
 use crate::core::tensor::TensorSource;
+use crate::core::thread_pool::ComputePool;
 use crate::ops::{
     gelu_inplace, rope_mrope_interleaved, softmax_inplace, sum_f32, sum_sq_centered_f32, vec_add,
     vec_add_into,
 };
 use clip_config::ClipVisionConfig;
-use rayon::prelude::*;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VisionGrid {
@@ -185,6 +186,7 @@ impl Q8Weight {
 
     fn matmul_batch(
         &self,
+        pool: &ComputePool,
         input: &[f32],
         output: &mut [f32],
         n_tokens: usize,
@@ -194,7 +196,7 @@ impl Q8Weight {
         let n_in = self.n_in;
         let n_out = self.n_out;
         if let Some(weight) = &self.f32_data {
-            matmul_f32_weight(weight, input, output, n_tokens, n_in, n_out);
+            matmul_f32_weight(pool, weight, input, output, n_tokens, n_in, n_out);
             return;
         }
         let blocks = n_in / 32;
@@ -209,12 +211,17 @@ impl Q8Weight {
         }
         let total_rows = n_tokens * n_out;
         if total_rows >= 256 {
-            output
-                .par_chunks_mut(n_out)
-                .enumerate()
-                .for_each(|(t, out_chunk)| {
+            let pool = pool.clone();
+            let out_ptr = output.as_mut_ptr();
+            pool.compute(move |ith, nth| {
+                let (start, end) = crate::ops::kernel::f32::scalar::row_range(n_tokens, ith, nth);
+                for t in start..end {
                     let q8_off = t * n_in;
                     let scale_off = t * blocks;
+                    // SAFETY: row_range partitions [0, n_tokens) disjointly
+                    // across workers, so `t` is unique per worker.
+                    let out_chunk =
+                        unsafe { std::slice::from_raw_parts_mut(out_ptr.add(t * n_out), n_out) };
                     crate::ops::matmul_q8_0_quantized_parallel(
                         weight,
                         &q8_buf[q8_off..q8_off + n_in],
@@ -223,7 +230,8 @@ impl Q8Weight {
                         n_in,
                         n_out,
                     );
-                });
+                }
+            });
         } else {
             for t in 0..n_tokens {
                 let q8_off = t * n_in;
@@ -242,6 +250,7 @@ impl Q8Weight {
 
     fn matmul_single(
         &self,
+        pool: &ComputePool,
         input: &[f32],
         output: &mut [f32],
         q8_buf: &mut [u8],
@@ -250,7 +259,7 @@ impl Q8Weight {
         let n_in = self.n_in;
         let n_out = self.n_out;
         if let Some(weight) = &self.f32_data {
-            matmul_f32_weight(weight, input, output, 1, n_in, n_out);
+            matmul_f32_weight(pool, weight, input, output, 1, n_in, n_out);
             return;
         }
         let blocks = n_in / 32;
@@ -267,6 +276,7 @@ impl Q8Weight {
 }
 
 fn matmul_f32_weight(
+    pool: &ComputePool,
     weight: &[f32],
     input: &[f32],
     output: &mut [f32],
@@ -274,21 +284,44 @@ fn matmul_f32_weight(
     n_in: usize,
     n_out: usize,
 ) {
-    output
-        .par_chunks_mut(n_out)
-        .take(n_tokens)
-        .enumerate()
-        .for_each(|(token, output_row)| {
-            let input_row = &input[token * n_in..(token + 1) * n_in];
-            for (out, value) in output_row.iter_mut().enumerate() {
-                *value =
-                    crate::ops::dot_f32(&weight[out * n_in..(out + 1) * n_in], input_row, n_in);
+    let dot_row = |token: usize, out_row: &mut [f32]| {
+        let input_row = &input[token * n_in..(token + 1) * n_in];
+        for (out, value) in out_row.iter_mut().enumerate() {
+            *value = crate::ops::dot_f32(&weight[out * n_in..(out + 1) * n_in], input_row, n_in);
+        }
+    };
+    // Small batches: the pool handshake costs more than the work.
+    if n_tokens * n_out < 256 {
+        for token in 0..n_tokens {
+            dot_row(token, &mut output[token * n_out..(token + 1) * n_out]);
+        }
+        return;
+    }
+    let out_ptr = output.as_mut_ptr();
+    let weight = weight.as_ptr();
+    let input = input.as_ptr();
+    pool.clone().compute(move |ith, nth| {
+        let (start, end) = crate::ops::kernel::f32::scalar::row_range(n_tokens, ith, nth);
+        for token in start..end {
+            // SAFETY: row_range partitions [0, n_tokens) disjointly.
+            let out_row =
+                unsafe { std::slice::from_raw_parts_mut(out_ptr.add(token * n_out), n_out) };
+            let input_row = unsafe { std::slice::from_raw_parts(input.add(token * n_in), n_in) };
+            for (out, value) in out_row.iter_mut().enumerate() {
+                let w = unsafe { std::slice::from_raw_parts(weight.add(out * n_in), n_in) };
+                *value = crate::ops::dot_f32(w, input_row, n_in);
             }
-        });
+        }
+    });
 }
 
 pub struct VisionEncoder<'a> {
     pub config: ClipVisionConfig,
+    /// Parallelism for the ViT layers. Owned by the encoder (like
+    /// `Qwen3Model`'s pool) so `encode_pair` needs no extra parameter and
+    /// the thread count comes from the caller's `--threads` resolution
+    /// instead of rayon's lazy global default.
+    pub pool: Arc<ComputePool>,
     pub patch_embd_weight: &'a [u8],
     pub patch_embd_weight_1: Option<&'a [u8]>,
     pub position_embd: Option<&'a [u8]>,
@@ -437,7 +470,10 @@ fn disable_missing_deepstack_layers<S: TensorSource + ?Sized>(source: &S, layers
 }
 
 impl<'a> VisionEncoder<'a> {
-    pub fn from_source<S: TensorSource + ?Sized>(source: &'a S) -> Result<Self, String> {
+    pub fn from_source<S: TensorSource + ?Sized>(
+        source: &'a S,
+        pool: Arc<ComputePool>,
+    ) -> Result<Self, String> {
         let mut config = ClipVisionConfig::from_source(source)?;
         disable_missing_deepstack_layers(source, &mut config.has_deepstack_layers);
 
@@ -535,6 +571,7 @@ impl<'a> VisionEncoder<'a> {
             mm_2_weight,
             mm_2_bias,
             precomputed: None,
+            pool,
         })
     }
 
@@ -970,6 +1007,7 @@ impl<'a> VisionEncoder<'a> {
             }
 
             pc.qkv_weights[il].matmul_batch(
+                &self.pool,
                 &scratch.merged[..n_tokens * n_embd],
                 &mut scratch.qkv_buf[..n_tokens * n_embd * 3],
                 n_tokens,
@@ -1091,34 +1129,46 @@ impl<'a> VisionEncoder<'a> {
         let sw = PtrWrap(scores);
         let ow = PtrWrap(out_buf);
 
-        (0..n_head).into_par_iter().for_each(move |h| {
-            let q_base = h * n_tokens * d_head;
-            let k_base = n_head * n_tokens * d_head + h * n_tokens * d_head;
-            let v_base = 2 * n_head * n_tokens * d_head + h * n_tokens * d_head;
-            let score_off = h * n_tokens * n_tokens;
-            unsafe {
-                let score_slice = sw.slice(score_off, n_tokens * n_tokens);
-                let out_slice = ow.slice(h * n_tokens * d_head, n_tokens * d_head);
-                for t in 0..n_tokens {
-                    let q_ptr = attn_buf.as_ptr().add(q_base + t * d_head);
-                    for s in 0..n_tokens {
-                        let k_ptr = attn_buf.as_ptr().add(k_base + s * d_head);
-                        let mut sum = 0.0f32;
-                        for i in 0..d_head {
-                            sum += *q_ptr.add(i) * *k_ptr.add(i);
+        // Head-partitioned attention: each `h` writes a disjoint score row
+        // band and a disjoint output band, so the same partition is exact
+        // under ComputePool as it was under rayon's into_par_iter.
+        // Replaces `(0..n_head).into_par_iter().for_each(...)` so the ViT
+        // no longer depends on rayon's lazily-built global pool (which the
+        // server never sizes — see src/core/thread_pool.rs).
+        let pool = self.pool.clone();
+        pool.compute(move |ith, nth| {
+            let per_worker = n_head.div_ceil(nth);
+            let h_start = (ith * per_worker).min(n_head);
+            let h_end = (h_start + per_worker).min(n_head);
+            for h in h_start..h_end {
+                let q_base = h * n_tokens * d_head;
+                let k_base = n_head * n_tokens * d_head + h * n_tokens * d_head;
+                let v_base = 2 * n_head * n_tokens * d_head + h * n_tokens * d_head;
+                let score_off = h * n_tokens * n_tokens;
+                unsafe {
+                    let score_slice = sw.slice(score_off, n_tokens * n_tokens);
+                    let out_slice = ow.slice(h * n_tokens * d_head, n_tokens * d_head);
+                    for t in 0..n_tokens {
+                        let q_ptr = attn_buf.as_ptr().add(q_base + t * d_head);
+                        for s in 0..n_tokens {
+                            let k_ptr = attn_buf.as_ptr().add(k_base + s * d_head);
+                            let mut sum = 0.0f32;
+                            for i in 0..d_head {
+                                sum += *q_ptr.add(i) * *k_ptr.add(i);
+                            }
+                            score_slice[t * n_tokens + s] = sum * scale;
                         }
-                        score_slice[t * n_tokens + s] = sum * scale;
-                    }
-                    softmax_inplace(&mut score_slice[t * n_tokens..t * n_tokens + n_tokens]);
+                        softmax_inplace(&mut score_slice[t * n_tokens..t * n_tokens + n_tokens]);
 
-                    for d in 0..d_head {
-                        out_slice[t * d_head + d] = 0.0;
-                    }
-                    for s in 0..n_tokens {
-                        let sc = score_slice[t * n_tokens + s];
-                        let v_ptr = attn_buf.as_ptr().add(v_base + s * d_head);
                         for d in 0..d_head {
-                            out_slice[t * d_head + d] += sc * *v_ptr.add(d);
+                            out_slice[t * d_head + d] = 0.0;
+                        }
+                        for s in 0..n_tokens {
+                            let sc = score_slice[t * n_tokens + s];
+                            let v_ptr = attn_buf.as_ptr().add(v_base + s * d_head);
+                            for d in 0..d_head {
+                                out_slice[t * d_head + d] += sc * *v_ptr.add(d);
+                            }
                         }
                     }
                 }
@@ -1138,6 +1188,7 @@ impl<'a> VisionEncoder<'a> {
 
         if let Some(ref pc) = self.precomputed {
             pc.out_weights[il].matmul_batch(
+                &self.pool,
                 &scratch.attn_concat[..n_tokens * n_embd],
                 &mut scratch.proj_buf[..n_tokens * n_embd],
                 n_tokens,
@@ -1207,6 +1258,7 @@ impl<'a> VisionEncoder<'a> {
             }
 
             pc.ffn_up_weights[il].matmul_batch(
+                &self.pool,
                 &scratch.merged[..n_tokens * n_embd],
                 &mut scratch.ffn_buf[..n_tokens * cfg.n_ff],
                 n_tokens,
@@ -1265,6 +1317,7 @@ impl<'a> VisionEncoder<'a> {
         let t_ffn_down_start = std::time::Instant::now();
         if let Some(ref pc) = self.precomputed {
             pc.ffn_down_weights[il].matmul_batch(
+                &self.pool,
                 &scratch.ffn_buf[..n_tokens * cfg.n_ff],
                 &mut scratch.proj_buf[..n_tokens * n_embd],
                 n_tokens,
@@ -1353,6 +1406,7 @@ impl<'a> VisionEncoder<'a> {
                 let src_off = t * merged_embd;
                 let dst_off = t * merged_embd;
                 pc.mm_0_weight.matmul_single(
+                    &self.pool,
                     &concat_buf[src_off..src_off + merged_embd],
                     &mut mm0_out[dst_off..dst_off + merged_embd],
                     &mut scratch.q8_buf,
@@ -1395,6 +1449,7 @@ impl<'a> VisionEncoder<'a> {
                 let src_off = t * merged_embd;
                 let dst_off = t * proj_dim;
                 pc.mm_2_weight.matmul_single(
+                    &self.pool,
                     &mm0_out[src_off..src_off + merged_embd],
                     &mut out[dst_off..dst_off + proj_dim],
                     &mut scratch.q8_buf,
@@ -1470,6 +1525,7 @@ impl<'a> VisionEncoder<'a> {
             );
         }
         weights.fc1_weight.matmul_batch(
+            &self.pool,
             &scratch.project_concat_buf[..concat_len],
             &mut scratch.project_mm0_out[..concat_len],
             n_projected,
@@ -1485,6 +1541,7 @@ impl<'a> VisionEncoder<'a> {
         let output =
             &mut scratch.deepstack[output_start..output_start + n_projected * projection_dim];
         weights.fc2_weight.matmul_batch(
+            &self.pool,
             &scratch.project_mm0_out[..concat_len],
             output,
             n_projected,
@@ -1926,12 +1983,14 @@ mod tests {
         let weight = Q8Weight::from_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], 3, 2);
         let mut output = [0.0; 2];
 
-        weight.matmul_single(&[1.0, 1.0, 1.0], &mut output, &mut [], &mut []);
+        let pool = std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(1));
+        weight.matmul_single(&pool, &[1.0, 1.0, 1.0], &mut output, &mut [], &mut []);
 
         assert_eq!(output, [6.0, 15.0]);
 
         let mut batch_output = [0.0; 4];
         weight.matmul_batch(
+            &pool,
             &[1.0, 1.0, 1.0, 2.0, 0.0, -1.0],
             &mut batch_output,
             2,

@@ -609,8 +609,8 @@ pub fn run_qwen_drive_cli(options: QwenDriveCliOptions, threads: usize) -> Resul
     let tokenizer = BPETokenizer::from_gguf_metadata(|key| vlm.metadata(key).cloned())
         .map_err(|error| format!("Failed to initialize Qwen-Drive tokenizer: {error}"))?;
     let mut model = Qwen35Model::from_source(vlm.as_ref())?;
-    let encoder = VisionEncoder::from_source(mmproj.as_ref())?;
     let pool = Arc::new(ComputePool::new(threads.max(1)));
+    let encoder = VisionEncoder::from_source(mmproj.as_ref(), Arc::clone(&pool))?;
     let temporary = temp_output_path(&options.output)?;
     let result = (|| {
         let file = File::create(&temporary)

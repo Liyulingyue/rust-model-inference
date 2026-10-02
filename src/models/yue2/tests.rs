@@ -875,3 +875,202 @@ fn ar_sampling_matches_e2e_oracle_tokens() {
         Phase::Semantic,
     );
 }
+
+/// `matmul_rows` (one pool region for the whole batch) must equal the original
+/// per-row `matmul` bit-for-bit. The NAR attention has its own parity tests, but
+/// the batched projections were rewritten alongside it and this is the piece
+/// with no coverage: for a quantized weight the two paths differ in how the
+/// activation is quantized and how the output is split across threads.
+#[test]
+fn batched_matmul_matches_the_per_row_path() {
+    use super::ar::{RowScratch, YuE2Weight};
+    use crate::core::tensor::GGMLType;
+
+    fn draw(state: &mut u32, divisor: f32) -> f32 {
+        *state ^= *state << 13;
+        *state ^= *state >> 17;
+        *state ^= *state << 5;
+        half::bf16::from_f32((((*state >> 8) & 0xffff) as i32 - 32768) as f32 / divisor).to_f32()
+    }
+
+    let n_in = 2048usize;
+    let n_out = 1024usize;
+    let n_rows = 37usize;
+    let mut state = 2468u32;
+
+    let blocks = n_in / 32;
+    let stride = blocks * 34;
+    let mut bytes = vec![0u8; stride * n_out];
+    for row in 0..n_out {
+        for block in 0..blocks {
+            let base = row * stride + block * 34;
+            let scale = half::bf16::from_f32(draw(&mut state, 256.0));
+            bytes[base..base + 2].copy_from_slice(&scale.to_bits().to_le_bytes());
+            for lane in 0..32 {
+                bytes[base + 2 + lane] = (draw(&mut state, 64.0) * 100.0) as i8 as u8;
+            }
+        }
+    }
+    let owned: &'static [u8] = Box::leak(bytes.into_boxed_slice());
+    let weight = YuE2Weight::from_quantized_bytes(owned, GGMLType::Q8_0, n_in, n_out);
+
+    let pool = crate::core::thread_pool::ComputePool::new(4);
+    let input: Vec<f32> = (0..n_rows * n_in)
+        .map(|_| draw(&mut state, 512.0))
+        .collect();
+
+    let mut per_row = vec![0.0f32; n_rows * n_out];
+    let mut q8 = vec![0u8; n_in];
+    let mut scales = vec![0.0f32; blocks];
+    let mut q8k = vec![
+        crate::ops::quant::BlockQ8K {
+            d: 0.0,
+            qs: [0; 256],
+            bsums: [0; 16],
+        };
+        n_in.div_ceil(256)
+    ];
+    for row in 0..n_rows {
+        weight.matmul(
+            &input[row * n_in..(row + 1) * n_in],
+            &mut per_row[row * n_out..(row + 1) * n_out],
+            &pool,
+            &mut q8,
+            &mut scales,
+            &mut q8k,
+        );
+    }
+
+    let mut batched = vec![0.0f32; n_rows * n_out];
+    let mut scratch = RowScratch::new();
+    weight
+        .matmul_rows(&input, &mut batched, &pool, &mut scratch, None)
+        .expect("shapes are consistent");
+
+    for (index, (a, b)) in per_row.iter().zip(&batched).enumerate() {
+        assert_eq!(
+            a.to_bits(),
+            b.to_bits(),
+            "batched matmul element {index}: per-row {a} vs batched {b}"
+        );
+    }
+}
+
+/// Narrow the batched-vs-per-row divergence: run one input row through both
+/// the pool-dispatched per-row entry and a direct `forward_prequantized`.
+#[test]
+fn per_row_and_direct_kernel_agree_for_one_row() {
+    use super::ar::YuE2Weight;
+    use crate::core::tensor::GGMLType;
+    use crate::ops::kernel::Kernel;
+
+    fn draw(state: &mut u32, divisor: f32) -> f32 {
+        *state ^= *state << 13;
+        *state ^= *state >> 17;
+        *state ^= *state << 5;
+        half::bf16::from_f32((((*state >> 8) & 0xffff) as i32 - 32768) as f32 / divisor).to_f32()
+    }
+
+    let n_in = 2048usize;
+    let n_out = 1024usize;
+    let mut state = 13579u32;
+    let blocks = n_in / 32;
+    let stride = blocks * 34;
+    let mut bytes = vec![0u8; stride * n_out];
+    for row in 0..n_out {
+        for block in 0..blocks {
+            let base = row * stride + block * 34;
+            let scale = half::bf16::from_f32(draw(&mut state, 256.0));
+            bytes[base..base + 2].copy_from_slice(&scale.to_bits().to_le_bytes());
+            for lane in 0..32 {
+                bytes[base + 2 + lane] = (draw(&mut state, 64.0) * 100.0) as i8 as u8;
+            }
+        }
+    }
+    let owned: &'static [u8] = Box::leak(bytes.into_boxed_slice());
+    let weight = YuE2Weight::from_quantized_bytes(owned, GGMLType::Q8_0, n_in, n_out);
+    let pool = crate::core::thread_pool::ComputePool::new(4);
+    let input: Vec<f32> = (0..n_in).map(|_| draw(&mut state, 512.0)).collect();
+
+    let mut via_matmul = vec![0.0f32; n_out];
+    let mut q8 = vec![0u8; n_in];
+    let mut scales = vec![0.0f32; blocks];
+    let mut q8k = vec![
+        crate::ops::quant::BlockQ8K {
+            d: 0.0,
+            qs: [0; 256],
+            bsums: [0; 16]
+        };
+        n_in.div_ceil(256)
+    ];
+    weight.matmul(
+        &input,
+        &mut via_matmul,
+        &pool,
+        &mut q8,
+        &mut scales,
+        &mut q8k,
+    );
+
+    let mut direct = vec![0.0f32; n_out];
+    weight
+        .kernel()
+        .kernel
+        .forward_prequantized(&q8, &scales, &mut direct, n_in, n_out, 0, 1);
+
+    let mut worst = (0.0f32, 0usize);
+    for (index, (a, b)) in via_matmul.iter().zip(&direct).enumerate() {
+        let d = (a - b).abs();
+        if d > worst.0 {
+            worst = (d, index);
+        }
+    }
+    println!(
+        "matmul vs direct kernel: max|diff|={} at {}",
+        worst.0, worst.1
+    );
+    assert_eq!(
+        worst.0.to_bits(),
+        0.0f32.to_bits(),
+        "per-row matmul and direct kernel disagree"
+    );
+}
+
+/// The cached RoPE table must produce exactly what the uncached per-call
+/// computation produced, for every position a generation can reach. The cache
+/// only skips recomputation, so this is a pure equality check against the
+/// original code path.
+#[test]
+fn cached_rope_matches_uncached_computation() {
+    fn draw(state: &mut u32, divisor: f32) -> f32 {
+        *state ^= *state << 13;
+        *state ^= *state >> 17;
+        *state ^= *state << 5;
+        half::bf16::from_f32((((*state >> 8) & 0xffff) as i32 - 32768) as f32 / divisor).to_f32()
+    }
+    let head_dim = 128usize;
+    let base = 1_000_000.0f32;
+    let mut state = 606u32;
+    let values: Vec<f32> = (0..head_dim).map(|_| draw(&mut state, 512.0)).collect();
+    for position in [0usize, 1, 2, 7, 63, 64, 511, 512, 1000] {
+        let mut cached = values.clone();
+        super::ar::rope(&mut cached, position, head_dim, base);
+
+        // Exactly what the original implementation did on every call.
+        let (mut cos, mut sin) =
+            crate::ops::rope::rope_sin_cos_sleef_table_with_threads(&[position], head_dim, base, 1);
+        for value in cos.iter_mut().chain(&mut sin) {
+            *value = half::bf16::from_f32(*value).to_f32();
+        }
+        let mut uncached = values.clone();
+        crate::ops::rope::rope_neox_inplace_with_table(&mut uncached, head_dim, &cos, &sin);
+
+        for (index, (a, b)) in cached.iter().zip(&uncached).enumerate() {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "position {position} dim {index}: cached {a} vs uncached {b}"
+            );
+        }
+    }
+}
