@@ -75,6 +75,9 @@ pub(crate) struct Layout {
     pub(crate) x: ArenaRegion,
     pub(crate) normed: ArenaRegion,
     pub(crate) out: ArenaRegion,
+    /// QKV is 3x HIDDEN, so it cannot share the `out` region: a single
+    /// dispatch writes all of it and the two overlap in time.
+    pub(crate) qkv: ArenaRegion,
     pub(crate) gate: ArenaRegion,
     pub(crate) up: ArenaRegion,
     q8: ArenaRegion,
@@ -108,11 +111,15 @@ impl Layout {
         // projection" and "its output", and neither aliases the other.
         let rows_hidden = rows.checked_mul(HIDDEN * 4).ok_or(VulkanError::OutOfMemory)?;
         let rows_ffn = rows.checked_mul(FFN_WIDTH * 4).ok_or(VulkanError::OutOfMemory)?;
+        let rows_qkv = rows
+            .checked_mul(QKV_WIDTH * 4)
+            .ok_or(VulkanError::OutOfMemory)?;
         let rows = rows as f64;
         Ok(Self {
             x: take(rows_hidden as usize)?,
             normed: take(rows_hidden as usize)?,
             out: take(rows_hidden as usize)?,
+            qkv: take(rows_qkv as usize)?,
             gate: take(rows_ffn as usize)?,
             up: take(rows_ffn as usize)?,
             q8: take((rows * HIDDEN as f64) as usize)?,
@@ -125,8 +132,8 @@ impl Layout {
 
     fn bytes(&self) -> usize {
         let regions = [
-            self.x, self.normed, self.out, self.gate, self.up, self.q8, self.q8_scales,
-            self.q4_1_input_sums, self.q8k, self.q8k_scales,
+            self.x, self.normed, self.out, self.qkv, self.gate, self.up, self.q8,
+            self.q8_scales, self.q4_1_input_sums, self.q8k, self.q8k_scales,
         ];
         regions.iter().map(|r| r.end()).max().unwrap_or(0)
     }
@@ -162,16 +169,28 @@ impl DitGpuSession {
         // 1.5x headroom over the computed regions, rounded up, so the driver's
         // own alignment does not push the last region past the arena.
         let arena_bytes = layout.bytes().next_multiple_of(1 << 20) + (1 << 20);
-        let ops = Qwen3Ops::new_with_size(context, arena_bytes, 64)?;
+        // One descriptor set per (layer, projection) that ever gets bound: 34
+        // blocks x 5 projections for Z-Image Turbo, and `bind_weight_buffers`
+        // allocates a fresh set each time, so the pool has to cover all of them
+        // for the life of the render.
+        let ops = Qwen3Ops::new_with_size(context, arena_bytes, 256)?;
         Ok(Self {
             context,
             ops,
             layout,
             rows,
             weights: HashMap::new(),
+            // QKV is the widest projection; FFN_WIDTH (10240) is narrower, so
+            // one buffer sized for QKV serves all five.
             readback: vec![0f32; rows * QKV_WIDTH],
             scratch: Vec::new(),
         })
+    }
+
+    /// Whether this projection already has an uploaded matrix, so the caller
+    /// can skip the tensor lookup as well as the upload.
+    pub(crate) fn has_weight(&self, layer: usize, projection: Projection) -> bool {
+        self.weights.contains_key(&(layer, projection))
     }
 
     pub(crate) fn rows(&self) -> usize {
@@ -229,6 +248,7 @@ impl DitGpuSession {
         if self.readback.len() < output_len {
             self.readback.resize(output_len, 0.0);
         }
+        debug_assert!(self.readback.len() >= output_len);
         let bindings = self.binding_for(layer, projection)?;
         self.ops.write_f32(input_region, input)?;
         let mut commands = TokenCommands::begin(self.context)?;

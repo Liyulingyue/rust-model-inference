@@ -7,8 +7,6 @@ use std::sync::Arc;
 pub(crate) mod dit;
 #[cfg(feature = "vulkan")]
 pub(crate) mod dit_gpu;
-#[cfg(feature = "vulkan")]
-pub(crate) mod dit_gpu_block;
 pub(crate) mod text;
 pub(crate) mod vae;
 
