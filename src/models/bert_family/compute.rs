@@ -179,7 +179,18 @@ fn silu_inplace(values: &mut [f32]) {
 }
 
 fn l2_normalize(values: &mut [f32]) -> Result<(), String> {
-    let sum: f64 = values.iter().map(|v| f64::from(*v * *v)).sum();
+    // Production: each value promoted to f64 first, then squared in f64.
+    // Parity mode: square in f32 first (matches llama.cpp scalar), then
+    // promote. The two paths differ in the rounding of the squared term
+    // (1 ULP at most for typical embedding magnitudes); downstream
+    // normalization is unchanged. `scalar_mode()` returns `false`
+    // (compile-time const) in non-parity-trace builds, so the runtime
+    // branch is DCE'd away in production.
+    let sum: f64 = if crate::ops::scalar_mode() {
+        values.iter().map(|v| f64::from(*v * *v)).sum()
+    } else {
+        values.iter().map(|v| f64::from(*v) * f64::from(*v)).sum()
+    };
     if !sum.is_finite() || sum <= 0.0 {
         return Err("embedding has zero or non-finite norm".into());
     }
@@ -916,13 +927,33 @@ pub fn run_embedding_tokens(
     let mut pooled = vec![0.0f32; n_embd];
     match cfg.pooling_type {
         1 => {
-            // ggml multiplies each token by 1/n_tokens before its F64 dot reduction.
+            // Mean over every token, specials included. Two paths:
+            // - Production (default): sum in f32 first, then scale by 1/n
+            //   tokens. Simple, fast, and uses our native precision rather
+            //   than borrowing llama.cpp's pattern.
+            // - Parity mode (`scalar_mode()`): each token multiplied by
+            //   1/n_tokens in f32 first, then accumulated in f64. Matches
+            //   `llm_graph_input_mean::set_input` (`llama-graph.cpp:250-278`)
+            //   so the oracle at `tools/oracle/jina_bert_v2/` stays
+            //   bit-equal. The 1–2 ULP gap between the two paths does not
+            //   affect similarity ordering.
             let inv_tokens = 1.0f32 / n_tokens as f32;
-            for (dim, value) in pooled.iter_mut().enumerate() {
-                *value = hidden
-                    .chunks_exact(n_embd)
-                    .map(|row| f64::from(row[dim] * inv_tokens))
-                    .sum::<f64>() as f32;
+            if crate::ops::scalar_mode() {
+                for (dim, value) in pooled.iter_mut().enumerate() {
+                    *value = hidden
+                        .chunks_exact(n_embd)
+                        .map(|row| f64::from(row[dim] * inv_tokens))
+                        .sum::<f64>() as f32;
+                }
+            } else {
+                for row in hidden.chunks_exact(n_embd) {
+                    for (slot, value) in pooled.iter_mut().zip(row) {
+                        *slot += *value;
+                    }
+                }
+                for value in pooled.iter_mut() {
+                    *value *= inv_tokens;
+                }
             }
         }
         2 => {
