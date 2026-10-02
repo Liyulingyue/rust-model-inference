@@ -418,6 +418,7 @@ impl VulkanContext {
         let t0 = std::time::Instant::now();
         let result = (|| -> Result<(), VulkanError> {
             unsafe {
+                self.host_write_barrier(self.command_buffer);
                 self.device
                     .end_command_buffer(self.command_buffer)
                     .map_err(|error| VulkanError::InitFailed(error.to_string()))?;
@@ -756,6 +757,35 @@ impl VulkanContext {
         shader: &[u8],
     ) -> Result<vk::Pipeline, VulkanError> {
         Self::create_pipeline_for_device(&self.device, pipeline_layout, shader)
+    }
+
+    /// Order this submission's host writes against the device reads them.
+    ///
+    /// The arena is mapped host memory that the CPU writes directly
+    /// (`write_f32`) and the shaders read from the same allocation, so every
+    /// submission that follows a host write needs a HOST -> COMPUTE barrier
+    /// rather than a shader-only one. Without it the two are only ordered by
+    /// luck: the one-token-per-weight kernel took ~700 ms per dispatch, which
+    /// gave the write time to become visible, while the register-tiled kernel
+    /// finished in ~64 ms and read the activation region while the host store
+    /// was still not visible. That showed up as the same seed producing
+    /// different images, and only at sizes where the arena no longer fits in
+    /// cache -- 256x256 reproduced exactly, 512x512 did not.
+    pub(crate) unsafe fn host_write_barrier(&self, command: vk::CommandBuffer) {
+        let barrier = vk::MemoryBarrier::builder()
+            .src_access_mask(vk::AccessFlags::HOST_WRITE)
+            .dst_access_mask(
+                vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE,
+            );
+        self.device.cmd_pipeline_barrier(
+            command,
+            vk::PipelineStageFlags::HOST,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::DependencyFlags::empty(),
+            std::slice::from_ref(&barrier),
+            &[],
+            &[],
+        );
     }
 
     pub(crate) unsafe fn compute_barrier(&self, command: vk::CommandBuffer) {
