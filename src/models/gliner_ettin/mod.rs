@@ -343,6 +343,25 @@ fn linear_no_bias(input: &[f32], weight: &[f32], n_in: usize, n_out: usize) -> V
     output
 }
 
+/// The same projection over a `[rows, n_in]` matrix.
+///
+/// A whole sequence goes through this rather than through [`linear_no_bias`],
+/// which projects a single row: passing `seq * n_in` values to that one would
+/// silently produce the projection of the first token and then broadcast it.
+fn linear_rows(input: &[f32], weight: &[f32], n_in: usize, n_out: usize) -> Vec<f32> {
+    let rows = input.len() / n_in;
+    let mut output = vec![0.0f32; rows * n_out];
+    let table: Vec<&[f32]> = weight.chunks_exact(n_in).take(n_out).collect();
+    for row in 0..rows {
+        let source = &input[row * n_in..(row + 1) * n_in];
+        let target = &mut output[row * n_out..(row + 1) * n_out];
+        for (out_index, weights_row) in table.iter().enumerate() {
+            target[out_index] = crate::ops::dot_f32(weights_row, source, n_in);
+        }
+    }
+    output
+}
+
 /// `Linear` with bias, for the two-layer classifier head.
 fn linear_bias(input: &[f32], weight: &[f32], bias: &[f32], n_in: usize, n_out: usize) -> Vec<f32> {
     let mut output = linear_no_bias(input, weight, n_in, n_out);
@@ -352,10 +371,23 @@ fn linear_bias(input: &[f32], weight: &[f32], bias: &[f32], n_in: usize, n_out: 
     output
 }
 
-/// LayerNorm with no bias, which is all ModernBERT uses (`norm_bias = False`).
+/// LayerNorm with no bias, which is all ModernBERT uses (`norm_bias = False`),
+/// over a `[rows, width]` matrix — one normalization per row.
 fn layer_norm_no_bias(input: &[f32], weight: &[f32], eps: f32) -> Vec<f32> {
+    let width = weight.len();
+    assert_eq!(
+        input.len() % width,
+        0,
+        "hidden state of {} rows is not a multiple of width {width}",
+        input.len()
+    );
     let mut output = vec![0.0f32; input.len()];
-    crate::ops::layer_norm(input, weight, &[], eps, &mut output);
+    for (source, target) in input
+        .chunks_exact(width)
+        .zip(output.chunks_exact_mut(width))
+    {
+        crate::ops::layer_norm(source, weight, &[], eps, target);
+    }
     output
 }
 
@@ -371,7 +403,11 @@ fn rope_tables(head_dim: usize, positions: usize, theta: f32) -> (Vec<f32>, Vec<
         .enumerate()
     {
         for (index, slot) in cos_row.iter_mut().enumerate() {
-            let exponent = index as f32 / half as f32;
+            // `emb = cat((freqs, freqs), -1)`: the table is `head_dim` wide but
+            // carries only `head_dim / 2` distinct frequencies, repeated. Letting
+            // the exponent keep climbing across the second half would rotate the
+            // upper half at the wrong rate.
+            let exponent = (index % half) as f32 / half as f32;
             let angle = position as f32 * (1.0f32 / theta).powf(exponent);
             *slot = angle.cos();
             sin_row[index] = angle.sin();
@@ -384,7 +420,8 @@ fn rope_tables(head_dim: usize, positions: usize, theta: f32) -> (Vec<f32>, Vec<
 ///
 /// The fused projection is read as `[seq, 3, heads, head_dim]`, so the three
 /// roles interleave with stride `heads * head_dim` rather than sitting in three
-/// contiguous blocks.
+/// contiguous blocks. The output is head-major (`[heads, seq, head_dim]`), which
+/// is the layout the per-head attention loop slices contiguously.
 fn split_interleaved_qkv(
     qkv: &[f32],
     seq: usize,
@@ -397,13 +434,14 @@ fn split_interleaved_qkv(
     let head_width = head_dim;
     for position in 0..seq {
         for head in 0..heads {
-            let destination = (position * heads + head) * head_width;
+            let destination = (head * seq + position) * head_width;
             for component in 0..head_width {
-                // `view(seq, 3, heads, head_dim)`: the role axis is the second,
-                // so it strides by `heads * head_dim` within one position.
-                let source = position * 3 * heads * head_dim
-                    + component * (heads * head_dim)
-                    + head * head_width;
+                // `view(seq, 3, heads, head_dim)` flattens to
+                // `position * (3 * heads * head_dim) + role * (heads * head_dim)
+                //  + head * head_dim + component`: the role axis is the second,
+                // so it strides by `heads * head_dim` within one position, and
+                // `component` is the innermost index and does not stride at all.
+                let source = position * 3 * heads * head_dim + head * head_width + component;
                 query[destination + component] = qkv[source];
                 key[destination + component] = qkv[source + heads * head_dim];
                 value[destination + component] = qkv[source + 2 * heads * head_dim];
@@ -424,7 +462,7 @@ fn apply_rope(
     let half = head_dim / 2;
     for position in 0..seq {
         for head in 0..heads {
-            let base = (position * heads + head) * head_dim;
+            let base = (head * seq + position) * head_dim;
             for index in 0..half {
                 let first = values[base + index];
                 let second = values[base + index + half];
@@ -556,6 +594,7 @@ pub fn encode(
     hidden.copy_from_slice(&normalized);
 
     let (cos, sin) = rope_tables(config.head_dim, seq, config.rope_theta);
+    let rows = seq;
 
     for (index, layer) in weights.layers.iter().enumerate() {
         // x + attn(attn_norm(x)), with `attn_norm` skipped where it is Identity.
@@ -563,7 +602,7 @@ pub fn encode(
             Some(norm) => layer_norm_no_bias(&hidden, f32_of(norm)?, config.norm_eps),
             None => hidden.clone(),
         };
-        let qkv = linear_no_bias(&attention_input, f32_of(&layer.attn_qkv)?, d, 3 * d);
+        let qkv = linear_rows(&attention_input, f32_of(&layer.attn_qkv)?, d, 3 * d);
         let (mut query, mut key, value) =
             split_interleaved_qkv(&qkv, seq, config.n_head, config.head_dim);
         apply_rope(&mut query, seq, config.n_head, config.head_dim, &cos, &sin);
@@ -573,7 +612,8 @@ pub fn encode(
         let window = config.local_attention(index);
         for head in 0..config.n_head {
             let head_width = config.head_dim;
-            let offset = head * head_width;
+            // Head-major: head `h` owns a contiguous `[seq, head_dim]` block.
+            let offset = head * seq * head_width;
             let mut head_out = vec![0.0f32; seq * head_width];
             attend_head(
                 HeadSlices {
@@ -586,13 +626,15 @@ pub fn encode(
                 window,
                 &mut head_out,
             );
+            // Scatter back into the `[seq, d]` context, where a head's columns
+            // are strided by `d` rather than contiguous.
             for position in 0..seq {
-                let destination = position * d + offset;
+                let destination = position * d + head * head_width;
                 context[destination..destination + head_width]
                     .copy_from_slice(&head_out[position * head_width..(position + 1) * head_width]);
             }
         }
-        let projected = linear_no_bias(&context, f32_of(&layer.attn_out)?, d, d);
+        let projected = linear_rows(&context, f32_of(&layer.attn_out)?, d, d);
         for (value, addend) in hidden.iter_mut().zip(projected.iter()) {
             *value += addend;
         }
@@ -600,17 +642,25 @@ pub fn encode(
         // x + mlp(mlp_norm(x)), where mlp is a GeLU GLU: `chunk(2)` then
         // `act(first) * second`.
         let mlp_input = layer_norm_no_bias(&hidden, f32_of(&layer.mlp_norm)?, config.norm_eps);
-        let mut gate = linear_no_bias(&mlp_input, f32_of(&layer.mlp_in)?, d, 2 * config.n_ff);
-        crate::ops::gelu_inplace(&mut gate[..config.n_ff]);
-        for index in 0..config.n_ff {
-            gate[index] *= gate[config.n_ff + index];
+        let gate = linear_rows(&mlp_input, f32_of(&layer.mlp_in)?, d, 2 * config.n_ff);
+        // `chunk(2)` then `act(first) * second`, per token. The gate is
+        // `[rows, 2 * n_ff]`, so a token's two halves sit `2 * n_ff` apart and
+        // the gated result has to be gathered into a fresh `[rows, n_ff]`
+        // buffer. Leaving it in place would look right for row 0 — whose halves
+        // are contiguous anyway — and pair every later token's gate with the
+        // previous token's projection.
+        let mut activated = vec![0.0f32; rows * config.n_ff];
+        for row in 0..rows {
+            let base = row * 2 * config.n_ff;
+            let (first, second) = gate[base..base + 2 * config.n_ff].split_at(config.n_ff);
+            let target = &mut activated[row * config.n_ff..(row + 1) * config.n_ff];
+            target.copy_from_slice(first);
+            crate::ops::gelu_inplace(target);
+            for index in 0..config.n_ff {
+                target[index] *= second[index];
+            }
         }
-        let mlp_out = linear_no_bias(
-            &gate[..config.n_ff],
-            f32_of(&layer.mlp_out)?,
-            config.n_ff,
-            d,
-        );
+        let mlp_out = linear_rows(&activated, f32_of(&layer.mlp_out)?, config.n_ff, d);
         for (value, addend) in hidden.iter_mut().zip(mlp_out.iter()) {
             *value += addend;
         }

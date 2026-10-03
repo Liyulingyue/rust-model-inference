@@ -220,18 +220,16 @@ pub struct ByteLevelBpe {
     /// the reverse map is built once.
     ids: HashMap<String, u32>,
     ranks: HashMap<String, u32>,
-    /// The eleven schema specials, by surface form.
-    specials: HashMap<String, u32>,
     table: [char; 256],
 }
 
 impl ByteLevelBpe {
-    /// Build from the pieces and merges of a `tokenizer.json`, plus the
-    /// specials the prompt builder splices in.
+    /// Build from the pieces and merges of a `tokenizer.json`, plus the tokens
+    /// it declares as added (`added`), of which the whitespace runs (`whitespace`)
+    /// also need a table of their own.
     pub fn new(
         pieces: Vec<String>,
         merges: &[String],
-        specials: HashMap<String, u32>,
         added: HashMap<String, u32>,
         whitespace: HashMap<String, u32>,
     ) -> Result<Self, String> {
@@ -250,7 +248,6 @@ impl ByteLevelBpe {
             pieces,
             ids,
             ranks,
-            specials,
             added,
             whitespace,
             table: byte_to_unicode_table(),
@@ -406,14 +403,6 @@ impl ByteLevelBpe {
             // Longest first, so `'  '` beats `' '` and `[SEP_STRUCT]` beats `[SEP]`.
             .max_by_key(|text| text.chars().count())
     }
-
-    fn id_of(&self, piece: &str, _index: usize) -> u32 {
-        self.pieces
-            .iter()
-            .position(|candidate| candidate == piece)
-            .map(|position| position as u32)
-            .unwrap_or_else(|| panic!("piece {piece:?} is not in the vocabulary"))
-    }
 }
 
 /// Unicode NFC.
@@ -512,7 +501,6 @@ mod tests {
             &["a b".to_string(), "b c".to_string(), "ab c".to_string()],
             HashMap::new(),
             HashMap::new(),
-            HashMap::new(),
         )
         .expect("build");
         // `a b` is rank 0, so it wins and `abc` becomes reachable.
@@ -521,7 +509,6 @@ mod tests {
         let bc_first = ByteLevelBpe::new(
             vocab,
             &["b c".to_string(), "a b".to_string(), "ab c".to_string()],
-            HashMap::new(),
             HashMap::new(),
             HashMap::new(),
         )
@@ -659,5 +646,5 @@ pub fn from_gguf<S: crate::core::tensor::TensorSource + ?Sized>(
             }
         }
     }
-    ByteLevelBpe::new(pieces, &merges, specials, added, whitespace)
+    ByteLevelBpe::new(pieces, &merges, added, whitespace)
 }
