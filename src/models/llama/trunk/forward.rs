@@ -572,14 +572,28 @@ pub fn run_inference(
             .metadata("general.name")
             .and_then(|v| v.to_string_val())
             .map(|s| {
-                // Both spellings: classic Mistral (`Mistral-7B-Instruct-v0.3`,
-                // lowercased contains "mistral") and Mistral 3's "Ministral"
-                // family (deliberate misspelling with an extra `n`, so
-                // `general.name = "Ministral-3B-Instruct-2512"` only matches
-                // "ministral", not "mistral"). Matching either spelling routes
-                // both through `[INST] … [/INST]`.
+                // All Mistral chat-template families share the
+                // `[INST] … [/INST]` user-turn shape:
+                //   - classic Mistral (`Mistral-7B-Instruct-v0.3`,
+                //     `Mistral-Large-Instruct-*`, etc.)
+                //   - Mistral 3's "Ministral" deliberate misspelling
+                //     (`Ministral-3B-Instruct-2512`,
+                //     `Ministral-3-3B-Reasoning-2512`)
+                //   - Shieldstral (`mistralai/Shieldstral-1.0-3B` /
+                //     `Mistral-Shieldstral-*`), Mistral's safety /
+                //     moderation classifier family. GGUF shippers set
+                //     `general.name = "Shieldstral 1.0 3B"` /
+                //     `"Mistral-Shieldstral-22B"`, so neither substring
+                //     contains "mistral" / "ministral" literally — the
+                //     product name "Shieldstral" only overlaps the
+                //     suffix.
+                // Match all three families here; new Mistral chat
+                // products should follow the same `[INST] … [/INST]`
+                // convention and need to be added when they ship.
                 let lower = s.to_ascii_lowercase();
-                lower.contains("mistral") || lower.contains("ministral")
+                lower.contains("mistral")
+                    || lower.contains("ministral")
+                    || lower.contains("shieldstral")
             })
             .unwrap_or(false);
         // Zephyr detection: `general.name` containing "zephyr" covers
