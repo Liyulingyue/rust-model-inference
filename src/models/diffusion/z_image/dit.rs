@@ -2154,18 +2154,21 @@ fn take_gpu_session(
 /// skips the AdaLN dispatch when it is absent, which is what `scale_modulated_branch`
 /// does with a missing scale on the CPU.
 ///
-/// `RUST_GPU_ATTENTION=1` runs the DiT attention on the device instead of
-/// `attention_into`. Off by default, so the flag is an A/B rather than a
-/// behaviour change: the device chain is verified against a reference that
-/// matches its f16 rounding, but the CPU path is still the default until the
-/// whole-render numbers back it.
+/// `RUST_GPU_ATTENTION=0` puts the DiT attention back on the CPU row path.
+///
+/// On by default. The chain was measured against a CPU render of the same seed
+/// and the difference did not grow: 28.96 dB against 28.43 dB for the CPU
+/// attention render, both away from the same CPU reference, so the device path
+/// lands inside the divergence the rest of the GPU path already carries rather
+/// than adding to it. Turning it off is for when bit-level agreement with the CPU
+/// output matters, which the GPU path has never provided.
 #[cfg(feature = "vulkan")]
 fn gpu_attention_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
         std::env::var("RUST_GPU_ATTENTION")
             .map(|value| value != "0")
-            .unwrap_or(false)
+            .unwrap_or(true)
     })
 }
 
