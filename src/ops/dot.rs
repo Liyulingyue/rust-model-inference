@@ -472,11 +472,23 @@ unsafe fn dot_bf16_f32_neon(a: &[f32], b: &[u8], n: usize) -> f32 {
 }
 
 #[inline]
-pub(crate) fn dot_bf16_f32_4(input: &[f32], weight: &[u8], width: usize) -> [f32; 4] {
+pub fn dot_bf16_f32_4(input: &[f32], weight: &[u8], width: usize) -> [f32; 4] {
     assert!(width <= input.len() / 4 && width <= weight.len() / 2);
+    // Empirical break-even on AVX2+FMA hosts: the 4-row shared-weight
+    // helper wins over 4× single-row `dot_bf16_f32` only when the
+    // amortized BF16→F32 promotion + 16-column FMA outweighs the loop
+    // prologue. Microbenchmarks
+    // (`tests/bench_yue4::bench_dot_bf16_f32_4_shared_vs_4single_*`)
+    // show ~1.6× at width=1024 and ~2.0× at width≥3072, but ~0.7× at
+    // width=256 because the per-call overhead dominates. The 512
+    // threshold keeps small widths on the per-row fast path.
     #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
     if has_neon() && width >= 4 {
         return unsafe { dot_bf16_f32_4_neon(input, weight, width) };
+    }
+    #[cfg(target_arch = "x86_64")]
+    if has_avx2_fma() && width >= 512 {
+        return unsafe { dot_bf16_f32_4_avx2(input, weight, width) };
     }
     std::array::from_fn(|row| dot_bf16_f32(&input[row * width..(row + 1) * width], weight, width))
 }
@@ -506,6 +518,79 @@ unsafe fn dot_bf16_f32_4_neon(input: &[f32], weight: &[u8], width: usize) -> [f3
             weight[column * 2],
             weight[column * 2 + 1],
         ]));
+        for row in 0..4 {
+            sums[row] += value * input[row * width + column];
+        }
+        column += 1;
+    }
+    sums
+}
+
+/// 4-row BF16×F32 dot product with shared weight loads.
+///
+/// Mirror of [`dot_bf16_f32_4_neon`] for AVX2+FMA. Four independent
+/// `_mm256` accumulators share one set of weight loads per 8-element
+/// block, exactly the same structural choice as the NEON variant
+/// (`accumulators[row] += weights * input[row * ..]`). Step width 8 =
+/// AVX2 lane count; the AVX2 path saves 4× the weight loads versus
+/// four independent `dot_bf16_f32` calls, which is the only point of
+/// this helper for the YuE2 BF16 lm_head.
+///
+/// Each outer step processes 16 columns (= two 8-wide AVX2 vectors)
+/// so the BF16→F32 promotion (`_mm256_cvtepu16_epi32` +
+/// `_mm256_slli_epi32`) is amortized across 16 columns instead of
+/// 8, lifting the per-block decode overhead out of the FMA hot path
+/// on wider `width`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn dot_bf16_f32_4_avx2(input: &[f32], weight: &[u8], width: usize) -> [f32; 4] {
+    use std::arch::x86_64::*;
+
+    let mut accumulators = [_mm256_setzero_ps(); 4];
+    let mut column = 0;
+    while column + 16 <= width {
+        let chunk0 = _mm_loadu_si128(weight.as_ptr().add(column * 2) as *const __m128i);
+        let chunk1 = _mm_loadu_si128(weight.as_ptr().add((column + 8) * 2) as *const __m128i);
+        let bits0 = _mm256_slli_epi32(_mm256_cvtepu16_epi32(chunk0), 16);
+        let bits1 = _mm256_slli_epi32(_mm256_cvtepu16_epi32(chunk1), 16);
+        let w0 = _mm256_castsi256_ps(bits0);
+        let w1 = _mm256_castsi256_ps(bits1);
+        for row in 0..4 {
+            let base = row * width + column;
+            accumulators[row] = _mm256_fmadd_ps(
+                w0,
+                _mm256_loadu_ps(input.as_ptr().add(base)),
+                accumulators[row],
+            );
+            accumulators[row] = _mm256_fmadd_ps(
+                w1,
+                _mm256_loadu_ps(input.as_ptr().add(base + 8)),
+                accumulators[row],
+            );
+        }
+        column += 16;
+    }
+    while column + 8 <= width {
+        let chunk = _mm_loadu_si128(weight.as_ptr().add(column * 2) as *const __m128i);
+        let bits = _mm256_slli_epi32(_mm256_cvtepu16_epi32(chunk), 16);
+        let w = _mm256_castsi256_ps(bits);
+        for row in 0..4 {
+            let base = row * width + column;
+            accumulators[row] = _mm256_fmadd_ps(
+                w,
+                _mm256_loadu_ps(input.as_ptr().add(base)),
+                accumulators[row],
+            );
+        }
+        column += 8;
+    }
+    let mut sums = std::array::from_fn(|row| hsum_ps(accumulators[row]));
+    while column < width {
+        let bits = u16::from_le_bytes([
+            weight[column * 2],
+            weight[column * 2 + 1],
+        ]);
+        let value = bf16_to_f32(bits);
         for row in 0..4 {
             sums[row] += value * input[row * width + column];
         }
