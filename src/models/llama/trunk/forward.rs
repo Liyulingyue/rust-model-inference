@@ -336,7 +336,16 @@ pub fn run_inference(
         let is_mistral = source
             .metadata("general.name")
             .and_then(|v| v.to_string_val())
-            .map(|s| s.to_ascii_lowercase().contains("mistral"))
+            .map(|s| {
+                // Both spellings: classic Mistral (`Mistral-7B-Instruct-v0.3`,
+                // lowercased contains "mistral") and Mistral 3's "Ministral"
+                // family (deliberate misspelling with an extra `n`, so
+                // `general.name = "Ministral-3B-Instruct-2512"` only matches
+                // "ministral", not "mistral"). Matching either spelling routes
+                // both through `[INST] … [/INST]`.
+                let lower = s.to_ascii_lowercase();
+                lower.contains("mistral") || lower.contains("ministral")
+            })
             .unwrap_or(false);
         // Zephyr detection: `general.name` containing "zephyr" covers
         // TheBloke's conversions (`huggingfaceh4_zephyr-7b-alpha`), but
