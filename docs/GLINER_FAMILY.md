@@ -1,8 +1,12 @@
-# GLiNER 家族：11/12 已实现，融合点评估
+# GLiNER 家族：12/12 已实现，融合点评估
 
-本文记录在 11 个 checkpoint 全部适配完成后，对"哪些模块应当融合"的评估。
+本文记录在 12 个 checkpoint 全部适配完成后，对"哪些模块应当融合"的评估。
 评估的前提是：**先把所有变体实现出来，才知道哪些重复是真实需求、哪些是过早抽象**。
 现在数据齐了。
+
+需要区分两种"完成"：#1–#11 只在转换器里加了尺寸表，推理层是同一份 DeBERTa forward；
+#12 是家族里唯一需要新 forward 的 checkpoint（ModernBERT），它让"哪些重复是真实需求"
+这个问题多了一个数据点 —— 见结论三。
 
 ## 实现现状
 
@@ -19,7 +23,7 @@
 | 9 | `GLiNER2-Guardrails-PII-Multi` | Span pre-2.5 | mDeBERTa-v3-base 768 | **0**（tokenizer 声明风格） |
 | 10 | `gliner2-privacy-filter-PII-multi` | Span pre-2.5 | mDeBERTa-v3-base 768 | **0** |
 | 11 | `gliguard-LLMGuardrails-300M` | Span pre-2.5 | DeBERTa-v3-base 768 | **0** |
-| 12 | `GLiNER2.5-Decide-1B` | Span | **Ettin-1B 1792**（ModernBERT） | 新模块 `src/models/gliner_ettin/` |
+| 12 | `GLiNER2.5-Decide-1B` | Span | **Ettin-1B 1792**（ModernBERT） | 新模块 `src/models/gliner_ettin/`（forward + ByteLevel BPE） |
 
 **10 个变体只花了两处改动**：转换器的尺寸表，和 tokenizer 声明风格的兼容。
 真正的新代码只有 BoundaryExtractor（#5，四个 head）和 Ettin（#12）。
