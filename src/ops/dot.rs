@@ -586,10 +586,7 @@ unsafe fn dot_bf16_f32_4_avx2(input: &[f32], weight: &[u8], width: usize) -> [f3
     }
     let mut sums = std::array::from_fn(|row| hsum_ps(accumulators[row]));
     while column < width {
-        let bits = u16::from_le_bytes([
-            weight[column * 2],
-            weight[column * 2 + 1],
-        ]);
+        let bits = u16::from_le_bytes([weight[column * 2], weight[column * 2 + 1]]);
         let value = bf16_to_f32(bits);
         for row in 0..4 {
             sums[row] += value * input[row * width + column];

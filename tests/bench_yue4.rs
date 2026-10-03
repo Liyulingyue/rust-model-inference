@@ -46,13 +46,7 @@ fn dot_bf16_f32_scalar(a: &[f32], b: &[u8], n: usize) -> f32 {
 #[inline]
 fn dot_bf16_f32_4_4calls(input: &[f32], weight: &[u8], width: usize) -> [f32; 4] {
     use rust_model_inference::ops::dot::dot_bf16_f32;
-    std::array::from_fn(|row| {
-        dot_bf16_f32(
-            &input[row * width..(row + 1) * width],
-            weight,
-            width,
-        )
-    })
+    std::array::from_fn(|row| dot_bf16_f32(&input[row * width..(row + 1) * width], weight, width))
 }
 
 /// Dispatched `dot_bf16_f32_4`: routes to AVX2 4-row on AVX2+FMA hosts
@@ -71,7 +65,9 @@ fn make_inputs(width: usize, seed: u64) -> (Vec<f32>, Vec<u8>) {
     // the bit-equal test.
     let mut s = seed;
     let mut next = || {
-        s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (s >> 33) as i32
     };
     let input: Vec<f32> = (0..(4 * width))
@@ -134,18 +130,14 @@ fn bench_dot_bf16_f32_4_shared_vs_4single_yue2_shapes() {
 fn dot_bf16_f32_4_matches_per_row_dispatch_for_yue2_shapes() {
     use rust_model_inference::ops::dot::dot_bf16_f32;
     let widths = [
-        0usize, 1, 3, 4, 7, 8, 15, 16, 17, 32, 64, 128, 255, 256, 257, 259, 1024, 2048,
-        3072, 4096, 6144,
+        0usize, 1, 3, 4, 7, 8, 15, 16, 17, 32, 64, 128, 255, 256, 257, 259, 1024, 2048, 3072, 4096,
+        6144,
     ];
     for width in &widths {
         let (input, weight) = make_inputs(*width, 0xfeedface);
         let actual = dot_bf16_f32_4_dispatched(&input, &weight, *width);
         for row in 0..4 {
-            let expected = dot_bf16_f32(
-                &input[row * *width..(row + 1) * *width],
-                &weight,
-                *width,
-            );
+            let expected = dot_bf16_f32(&input[row * *width..(row + 1) * *width], &weight, *width);
             if actual[row].is_finite() && expected.is_finite() {
                 assert_eq!(
                     actual[row].to_bits(),
