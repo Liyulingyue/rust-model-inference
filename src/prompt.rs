@@ -273,7 +273,24 @@ pub fn append_qwen_assistant_prefix(
     out.push(required_control(tokenizer, "im_start", "<|im_start|>")?);
     out.extend(tokenizer.encode("assistant\n", PLAIN_TEXT));
     if !enable_thinking {
-        out.extend(tokenizer.encode("<think>\n\n</think>\n\n", WITH_SPECIAL));
+        // Only emit the empty think/close markers when the tokenizer actually
+        // treats `<think>` / `</think>` as a single special token. For models
+        // without native thinking (Qwen2 / Qwen2.5 / most chat-tuned GGUF
+        // files), `encode("<think>", …)` falls through to plain `<` + `think`
+        // and the markers become random garbage in the prompt — measured at
+        // the JEV argmax position that garbage shifts the model from its
+        // trained distribution toward a positional bias (Qwen2.5-1.5B starts
+        // preferring `B` over `A` regardless of context). The intent of the
+        // skip-thinking path is preserved for models that *do* expose the
+        // tokens (Qwen3 hybrid-thinking); for everyone else we just emit a
+        // clean `<|im_start|>assistant\n` and let the model answer.
+        let think_ids = tokenizer.encode("<think>", WITH_SPECIAL);
+        if think_ids.len() == 1 {
+            out.extend(think_ids);
+            out.extend(tokenizer.encode("\n\n", PLAIN_TEXT));
+            out.extend(tokenizer.encode("</think>", WITH_SPECIAL));
+            out.extend(tokenizer.encode("\n\n", PLAIN_TEXT));
+        }
     }
     Ok(())
 }
