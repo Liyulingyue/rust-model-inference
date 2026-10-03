@@ -2074,26 +2074,32 @@ fn take_gpu_session(
 /// the render agrees with the CPU slightly better, 2.17/255 against 2.26,
 /// because the kernel's f16 rounding matches what the CPU row path does.
 ///
-/// **Off by default.** The single step is a clear win -- the refiner FFN drops
-/// from 5.72 s to 3.32 s and parity improves to 2.17/255 -- but an 8-step render
-/// is 394 s of main layers against 125 s with the refiner on the CPU, and the
-/// shape of it is the interesting part:
+/// **Off by default**, and the reason is now measured rather than guessed.
 ///
-///   step            1      2      3    ...     8
-///   refiner on   15.3   53.9   54.1        54.4  s
-///   refiner off  16.2   15.6   15.6        15.6  s
+/// Bisected with RUST_GPU_F16_RESIDENT, which uploads the F16 weights but
+/// keeps the refiner on the CPU dispatch. Main-layer seconds per step:
 ///
-/// The first step is fine and every step after it is 38.4 s worse, to within a
-/// tenth of a second each time. A kernel that were simply slow would be slow on
-/// the first step too, so this is not the matmul: it is a one-time state that
-/// starts costing something per block after the first pass. Ruled out so far:
-/// the descriptor pool (246 of 256 sets against a per-session pool, and the
-/// stacks have separate sessions because their row counts differ), weight
-/// re-upload (`has_weight` caches per (layer, projection), and the refiner and
-/// main stack occupy disjoint layer indices), and the profile itself, which
-/// reconciles to within 10 s over eight steps with the refiner off.
+///   refiner off                       16.1   15.5   15.5
+///   F16 bound, not dispatched         93.6   14.6   63.0
+///   F16 on                             15.1   53.8   54.0
 ///
-/// `RUST_GPU_F16_REF=1` opts in.
+/// The middle row separates the two things enabling the refiner does, and it is
+/// not the culprit: merely having 1.4 GB of F16 weights resident next to the
+/// 5.6 GB of Q8 ones is *unstable* -- 93.6 s, then 14.6 s, then 63.0 s, which is
+/// a different and louder problem than the 54 s. The clean 54 s comes from
+/// taking the F16 dispatch path, and only from the second step on.
+///
+/// So the cost is per-block work in that path that the first pass does not pay
+/// and every later one does, and it is not weight bandwidth, not the descriptor
+/// pool, and not the kernel being slow on its own. Ruled out with measurements:
+/// descriptor capacity (256 sets per session, 36 used by the refiner stack, and
+/// the stacks have separate sessions because their row counts differ), weight
+/// re-upload (`has_weight` caches per (layer, projection), refiner and main on
+/// disjoint layer indices), and profiler drift (the eight per-step totals
+/// reconcile to within 10 s once the refiner is off).
+///
+/// `RUST_GPU_F16_REF=1` opts in. RUST_GPU_F16_RESIDENT=1 on top of it is the
+/// diagnostic above.
 #[cfg(feature = "vulkan")]
 fn f16_refiner_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -2102,6 +2108,20 @@ fn f16_refiner_enabled() -> bool {
             .map(|value| value != "0")
             .unwrap_or(false)
     })
+}
+
+/// Bind the F16 refiner weights without dispatching on them.
+///
+/// This separates the two things enabling the refiner does, which is the only
+/// way to tell "1.4 GB of F16 weights sitting next to the Q8 ones costs the
+/// main stack something per block" from "the F16 path is being taken costs
+/// something per block". Diagnostic only: `bind_block_weights` reporting a
+/// projection as bound is what routes the block onto the device, so this
+/// returns the set it will actually use.
+#[cfg(feature = "vulkan")]
+fn f16_refiner_resident_only() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("RUST_GPU_F16_RESIDENT").is_ok())
 }
 
 /// Upload and bind this block's projections, once per render.
@@ -2119,6 +2139,9 @@ fn bind_block_weights(
     use crate::models::diffusion::z_image::dit_gpu::Projection;
 
     let mut bound = std::collections::HashSet::new();
+    // The F16 weights get uploaded either way when this is set; only the
+    // decision to dispatch on them changes, which is the whole point.
+    let resident_only = f16_refiner_resident_only() && f16_refiner_enabled();
     for (projection, name) in [
         (Projection::Qkv, &block.qkv),
         (Projection::Out, &block.out),
@@ -2155,6 +2178,7 @@ fn bind_block_weights(
         if session
             .bind_weight_as(layer, projection, bytes, format)
             .is_ok()
+            && !resident_only
         {
             bound.insert(projection);
         }
