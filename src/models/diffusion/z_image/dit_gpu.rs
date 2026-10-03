@@ -606,16 +606,24 @@ impl DitGpuSession {
     /// The normed and modulated activations are consumed by the QKV matmul and
     /// by nothing else, so the GPU keeps them instead of shipping them to the
     /// host and back.
+    /// `modulation` is `None` for the context refiner, which carries no AdaLN
+    /// weights; the norm still runs and the AdaLN dispatch is skipped, matching
+    /// `scale_modulated_branch`'s no-op on a missing scale.
     pub(crate) fn record_attention_qkv(
         &mut self,
         layer: usize,
         rms_gamma: &[f32],
-        modulation: &[f32],
+        modulation: Option<&[f32]>,
     ) -> Result<(), VulkanError> {
         self.bind_norm(layer, NormKind::AttentionNorm1, rms_gamma)?;
-        self.bind_modulation(modulation)?;
         let norm = self.norm_bindings(layer, NormKind::AttentionNorm1)?;
-        let scale = self.modulation_bindings()?;
+        let scale = match modulation {
+            Some(values) => {
+                self.bind_modulation(values)?;
+                Some(self.modulation_bindings()?)
+            }
+            None => None,
+        };
         let weights = self.binding_for(layer, Projection::Qkv)?;
         let layout = self.layout;
         let rows = self.rows;
@@ -635,8 +643,16 @@ impl DitGpuSession {
             hidden,
             hidden,
         )?;
-        self.ops
-            .record_adaln_modulate_rows(&commands, scale, layout.normed, hidden, rows, hidden)?;
+        if let Some(scale) = scale {
+            self.ops.record_adaln_modulate_rows(
+                &commands,
+                scale,
+                layout.normed,
+                hidden,
+                rows,
+                hidden,
+            )?;
+        }
         self.record_projection(
             &mut commands,
             weights,

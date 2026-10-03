@@ -1577,6 +1577,10 @@ thread_local! {
 /// block and reads all zeroes on this path -- which is what made the CPU
 /// attention share of a step unknowable from the profile output.
 thread_local! {
+}
+
+#[cfg(feature = "vulkan")]
+thread_local! {
     static GPU_PROFILE_TIMERS: std::cell::RefCell<[f64; 10]> =
         const { std::cell::RefCell::new([0.0; 10]) };
 }
@@ -2074,39 +2078,21 @@ fn take_gpu_session(
 /// the render agrees with the CPU slightly better, 2.17/255 against 2.26,
 /// because the kernel's f16 rounding matches what the CPU row path does.
 ///
-/// **Off by default**, and the reason is now measured rather than guessed.
+/// Whether to bind the F16 refiner stacks to the GPU.
 ///
-/// Bisected with RUST_GPU_F16_RESIDENT, which uploads the F16 weights but
-/// keeps the refiner on the CPU dispatch. Main-layer seconds per step:
+/// The context refiner has no AdaLN weights and no time input, so its
+/// `modulations` is `None` -- the fused QKV chain takes `Option<&[f32]>` and
+/// skips the AdaLN dispatch when it is absent, which is what `scale_modulated_branch`
+/// does with a missing scale on the CPU.
 ///
-///   refiner off                       16.1   15.5   15.5
-///   F16 bound, not dispatched         93.6   14.6   63.0
-///   F16 on                             15.1   53.8   54.0
-///
-/// The middle row separates the two things enabling the refiner does, and it is
-/// not the culprit: merely having 1.4 GB of F16 weights resident next to the
-/// 5.6 GB of Q8 ones is *unstable* -- 93.6 s, then 14.6 s, then 63.0 s, which is
-/// a different and louder problem than the 54 s. The clean 54 s comes from
-/// taking the F16 dispatch path, and only from the second step on.
-///
-/// So the cost is per-block work in that path that the first pass does not pay
-/// and every later one does, and it is not weight bandwidth, not the descriptor
-/// pool, and not the kernel being slow on its own. Ruled out with measurements:
-/// descriptor capacity (256 sets per session, 36 used by the refiner stack, and
-/// the stacks have separate sessions because their row counts differ), weight
-/// re-upload (`has_weight` caches per (layer, projection), refiner and main on
-/// disjoint layer indices), and profiler drift (the eight per-step totals
-/// reconcile to within 10 s once the refiner is off).
-///
-/// `RUST_GPU_F16_REF=1` opts in. RUST_GPU_F16_RESIDENT=1 on top of it is the
-/// diagnostic above.
+/// `RUST_GPU_F16_REF=0` puts the refiner stacks back on the CPU row path.
 #[cfg(feature = "vulkan")]
 fn f16_refiner_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
         std::env::var("RUST_GPU_F16_REF")
             .map(|value| value != "0")
-            .unwrap_or(false)
+            .unwrap_or(true)
     })
 }
 
@@ -2265,13 +2251,16 @@ fn run_block_gpu(
             .ops()
             .write_f32(layout.x, &tokens[..hidden_len])
             .map_err(|e| format!("Z-Image DiT token upload failed: {e}"))?;
+        // `modulations` is None for the context refiner, which has no AdaLN
+        // weights and no time input. The CPU branch passes that straight
+        // through to `scale_modulated_branch`; unwrapping it here turned a
+        // legitimate shape into an error, and the error latched the GPU off for
+        // every remaining step of the render.
         session
             .record_attention_qkv(
                 layer,
                 &block.attention_norm1,
-                modulations
-                    .ok_or("Missing Z-Image AdaLN scale")?
-                    .scale_msa,
+                modulations.map(|values| values.scale_msa),
             )
             .map_err(|e| format!("Z-Image DiT fused QKV dispatch failed: {e}"))?;
         qkv[..qkv_len].copy_from_slice(session.readback(qkv_len));
