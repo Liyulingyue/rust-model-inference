@@ -808,9 +808,7 @@ impl VulkanContext {
     pub(crate) unsafe fn host_write_barrier(&self, command: vk::CommandBuffer) {
         let barrier = vk::MemoryBarrier::builder()
             .src_access_mask(vk::AccessFlags::HOST_WRITE)
-            .dst_access_mask(
-                vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE,
-            );
+            .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE);
         self.device.cmd_pipeline_barrier(
             command,
             vk::PipelineStageFlags::HOST,

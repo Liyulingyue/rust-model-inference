@@ -62,7 +62,10 @@ fn main() {
     let scales = vec![0.001f32; HIDDEN / 32];
     let mut out = vec![0f32; QKV];
 
-    println!("{:>7}  {:>11}  {:>10}  {:>18}", "rows", "total", "us/row", "marginal us/row");
+    println!(
+        "{:>7}  {:>11}  {:>10}  {:>18}",
+        "rows", "total", "us/row", "marginal us/row"
+    );
     let mut previous: Option<(usize, f64)> = None;
     let mut samples = Vec::new();
     for rows in [1usize, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 1536] {
@@ -71,22 +74,13 @@ fn main() {
         let t0 = Instant::now();
         for _ in 0..repeats {
             for _ in 0..rows {
-                matmul_q8_0_quantized_parallel(
-                    &weight,
-                    &input,
-                    &scales,
-                    &mut out,
-                    HIDDEN,
-                    QKV,
-                );
+                matmul_q8_0_quantized_parallel(&weight, &input, &scales, &mut out, HIDDEN, QKV);
             }
         }
         let per_pass = t0.elapsed().as_secs_f64() / repeats as f64;
         let per_row_us = per_pass / rows as f64 * 1e6;
         let marginal = match previous {
-            Some((prev_rows, prev_s)) => {
-                (per_pass - prev_s) / (rows - prev_rows) as f64 * 1e6
-            }
+            Some((prev_rows, prev_s)) => (per_pass - prev_s) / (rows - prev_rows) as f64 * 1e6,
             None => per_row_us,
         };
         samples.push(per_row_us);
@@ -105,20 +99,24 @@ fn main() {
     let high_mean = high.iter().sum::<f64>() / high.len() as f64;
     println!("\nmean us/row, rows 1-8   : {low_mean:.1}");
     println!("mean us/row, rows 256+  : {high_mean:.1}");
-    println!("drift                    : {:+.0}%", (high_mean / low_mean - 1.0) * 100.0);
+    println!(
+        "drift                    : {:+.0}%",
+        (high_mean / low_mean - 1.0) * 100.0
+    );
 
     let macs = (HIDDEN * QKV) as f64;
     let gops = 2.0 * macs / low_mean / 1e3;
     println!("\nachieved rate            : {gops:.0} GOP/s");
     println!("  (44.2 MMAC per row in {low_mean:.0} us; 20 cores of int8 NEON)");
 
-    let projections =
-        (HIDDEN * 3 * HIDDEN + HIDDEN * HIDDEN + FFN * HIDDEN * 3) as f64;
+    let projections = (HIDDEN * 3 * HIDDEN + HIDDEN * HIDDEN + FFN * HIDDEN * 3) as f64;
     let per_layer = ROWS as f64 * projections;
     let step_gop = 2.0 * per_layer * MAIN_LAYERS as f64 / 1e9;
     println!("\none step needs           : {step_gop:.1} GOP of matmul");
     println!("at {gops:.0} GOP/s that is    : {:.0} s", step_gop / gops);
     println!("a step actually takes    : 140 s");
-    println!("=> matmul accounts for about {:.0}% of a step; the rest is attention",
-        (step_gop / gops) / 140.5 * 100.0);
+    println!(
+        "=> matmul accounts for about {:.0}% of a step; the rest is attention",
+        (step_gop / gops) / 140.5 * 100.0
+    );
 }

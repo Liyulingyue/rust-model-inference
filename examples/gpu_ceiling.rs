@@ -47,25 +47,32 @@ thread_local! {
         rust_model_inference::core::thread_pool::ComputePool::new(16);
 }
 
-fn gpu_rows(weight: &[u8], input: &[u8], scales: &[f32], out: &mut [f32], n_in: usize, n_out: usize) {
+fn gpu_rows(
+    weight: &[u8],
+    input: &[u8],
+    scales: &[f32],
+    out: &mut [f32],
+    n_in: usize,
+    n_out: usize,
+) {
     POOL.with(|pool| {
-    let w = weight.as_ptr() as usize;
-    let wl = weight.len();
-    let i = input.as_ptr() as usize;
-    let il = input.len();
-    let s = scales.as_ptr() as usize;
-    let sl = scales.len();
-    let o = out.as_mut_ptr() as usize;
-    let ol = out.len();
-    pool.compute(|ith, nth| {
-        let weight = unsafe { std::slice::from_raw_parts(w as *const u8, wl) };
-        let input = unsafe { std::slice::from_raw_parts(i as *const u8, il) };
-        let scales = unsafe { std::slice::from_raw_parts(s as *const f32, sl) };
-        let out = unsafe { std::slice::from_raw_parts_mut(o as *mut f32, ol) };
-        rust_model_inference::ops::kernel::q8_0::parallel::matmul_q8_0_quantized_parallel_rows(
-            weight, input, scales, out, n_in, n_out, ith, nth,
-        );
-    });
+        let w = weight.as_ptr() as usize;
+        let wl = weight.len();
+        let i = input.as_ptr() as usize;
+        let il = input.len();
+        let s = scales.as_ptr() as usize;
+        let sl = scales.len();
+        let o = out.as_mut_ptr() as usize;
+        let ol = out.len();
+        pool.compute(|ith, nth| {
+            let weight = unsafe { std::slice::from_raw_parts(w as *const u8, wl) };
+            let input = unsafe { std::slice::from_raw_parts(i as *const u8, il) };
+            let scales = unsafe { std::slice::from_raw_parts(s as *const f32, sl) };
+            let out = unsafe { std::slice::from_raw_parts_mut(o as *mut f32, ol) };
+            rust_model_inference::ops::kernel::q8_0::parallel::matmul_q8_0_quantized_parallel_rows(
+                weight, input, scales, out, n_in, n_out, ith, nth,
+            );
+        });
     });
 }
 
@@ -95,7 +102,10 @@ fn main() {
     // Warm: uploads the matrix and JITs the shader.
     gpu_rows(&weight, &input, &scales, &mut out, n_in, n_out);
 
-    println!("{:>7}  {:>11}  {:>12}  {:>12}", "calls", "total", "us/call", "GOP/s");
+    println!(
+        "{:>7}  {:>11}  {:>12}  {:>12}",
+        "calls", "total", "us/call", "GOP/s"
+    );
     for calls in [1usize, 8, 64, 256] {
         let t0 = Instant::now();
         for _ in 0..calls {
@@ -117,7 +127,10 @@ fn main() {
     // How big can the matrix get before bandwidth, rather than dispatch, is
     // the limit? Sweep n_out at fixed n_in.
     println!("\n== sweep n_out at n_in = 3840: where does bandwidth take over? ==");
-    println!("{:>8}  {:>10}  {:>12}  {:>12}", "n_out", "weight MB", "us/call", "GB/s");
+    println!(
+        "{:>8}  {:>10}  {:>12}  {:>12}",
+        "n_out", "weight MB", "us/call", "GB/s"
+    );
     for out_n in [64usize, 512, 4096, 11520, 32768, 65536] {
         let w = synth_q8_0(n_in, out_n);
         let mut o = vec![0f32; out_n];

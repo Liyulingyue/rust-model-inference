@@ -271,7 +271,8 @@ fn validate_dit(source: &dyn TensorSource) -> Result<(), String> {
         require_tensor(source, name, &dims, GGMLType::F16)?;
     }
     for layer in 0..2 {
-        validate_refiner(source, &format!("context_refiner.{layer}"), false)?;        validate_refiner(source, &format!("noise_refiner.{layer}"), true)?;
+        validate_refiner(source, &format!("context_refiner.{layer}"), false)?;
+        validate_refiner(source, &format!("noise_refiner.{layer}"), true)?;
     }
     for layer in 0..30 {
         let prefix = format!("layers.{layer}");
@@ -304,7 +305,11 @@ fn validate_refiner(
     has_adaln: bool,
 ) -> Result<(), String> {
     if has_adaln {
-        require_matrix(source, &format!("{prefix}.adaLN_modulation.0.weight"), &[256, 15360])?;
+        require_matrix(
+            source,
+            &format!("{prefix}.adaLN_modulation.0.weight"),
+            &[256, 15360],
+        )?;
         require_tensor(
             source,
             &format!("{prefix}.adaLN_modulation.0.bias"),
@@ -653,9 +658,8 @@ fn linear_into_scaled_impl(
             let staging = &q8.f16_inputs[..threads];
             let staging_ptr = staging.as_ptr() as usize;
             pool.compute(move |ith, nth| {
-                let weight = unsafe {
-                    std::slice::from_raw_parts(weight_ptr as *const u8, weight_len)
-                };
+                let weight =
+                    unsafe { std::slice::from_raw_parts(weight_ptr as *const u8, weight_len) };
                 let values =
                     unsafe { std::slice::from_raw_parts(input_ptr as *const f32, input_len) };
                 let out =
@@ -917,7 +921,14 @@ mod tests {
         let pool = ComputePool::new(2);
 
         linear_into(
-            &source, "w", 2, 2, &[5.0, 6.0], &mut output, &mut scratch, &pool,
+            &source,
+            "w",
+            2,
+            2,
+            &[5.0, 6.0],
+            &mut output,
+            &mut scratch,
+            &pool,
         )
         .unwrap();
         // A DiT step runs 30 layers x 4 projections x 2 (pre-NAR and in-loop),
@@ -927,7 +938,14 @@ mod tests {
         let pointers: Vec<*const u16> = scratch.f16_inputs.iter().map(|b| b.as_ptr()).collect();
         assert!(pointers.iter().all(|p| !p.is_null()));
         linear_into(
-            &source, "w", 2, 2, &[5.0, 6.0], &mut output, &mut scratch, &pool,
+            &source,
+            "w",
+            2,
+            2,
+            &[5.0, 6.0],
+            &mut output,
+            &mut scratch,
+            &pool,
         )
         .unwrap();
 

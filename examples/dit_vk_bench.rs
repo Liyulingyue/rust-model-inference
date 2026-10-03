@@ -61,7 +61,14 @@ fn bench_one(
 
     let t0 = Instant::now();
     for _ in 0..iters {
-        matmul_q8_0_quantized_parallel(&weight, &input_q8, &input_scales, &mut cpu_out, n_in, n_out);
+        matmul_q8_0_quantized_parallel(
+            &weight,
+            &input_q8,
+            &input_scales,
+            &mut cpu_out,
+            n_in,
+            n_out,
+        );
     }
     let cpu_us = t0.elapsed().as_secs_f64() / iters as f64 * 1e6;
 

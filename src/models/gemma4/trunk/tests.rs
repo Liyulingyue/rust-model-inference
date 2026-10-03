@@ -634,7 +634,10 @@ fn gemma4_vulkan_linear_device_rows_match_and_decode_stays_cpu() {
     let mut model = deterministic_model(Arc::new(AtomicUsize::new(0)));
     install(
         "per_layer_model_proj.weight".into(),
-        model.per_layer_model_proj.as_mut().expect("fixture proj present"),
+        model
+            .per_layer_model_proj
+            .as_mut()
+            .expect("fixture proj present"),
         GGMLType::BF16,
     );
     for (index, layer) in model.layers.iter_mut().enumerate() {

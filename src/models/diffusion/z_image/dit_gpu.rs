@@ -19,9 +19,7 @@
 //! numerics.
 use std::collections::HashMap;
 
-use crate::vulkan::ops::{
-    ArenaRegion, GpuWeightFormat, OperatorBindings, Qwen3Ops, TokenCommands,
-};
+use crate::vulkan::ops::{ArenaRegion, GpuWeightFormat, OperatorBindings, Qwen3Ops, TokenCommands};
 use crate::vulkan::{GpuBuffer, VulkanContext, VulkanError};
 
 use super::dit::{FFN_WIDTH, HIDDEN, QKV_WIDTH};
@@ -151,8 +149,12 @@ impl Layout {
         };
         // Two row buffers: the block alternates between "input to the current
         // projection" and "its output", and neither aliases the other.
-        let rows_hidden = rows.checked_mul(HIDDEN * 4).ok_or(VulkanError::OutOfMemory)?;
-        let rows_ffn = rows.checked_mul(FFN_WIDTH * 4).ok_or(VulkanError::OutOfMemory)?;
+        let rows_hidden = rows
+            .checked_mul(HIDDEN * 4)
+            .ok_or(VulkanError::OutOfMemory)?;
+        let rows_ffn = rows
+            .checked_mul(FFN_WIDTH * 4)
+            .ok_or(VulkanError::OutOfMemory)?;
         let rows_qkv = rows
             .checked_mul(QKV_WIDTH * 4)
             .ok_or(VulkanError::OutOfMemory)?;
@@ -177,8 +179,17 @@ impl Layout {
 
     fn bytes(&self) -> usize {
         let regions = [
-            self.x, self.normed, self.out, self.qkv, self.gate, self.up, self.q8,
-            self.q8_scales, self.q4_1_input_sums, self.q8k, self.q8k_scales,
+            self.x,
+            self.normed,
+            self.out,
+            self.qkv,
+            self.gate,
+            self.up,
+            self.q8,
+            self.q8_scales,
+            self.q4_1_input_sums,
+            self.q8k,
+            self.q8k_scales,
         ];
         regions.iter().map(|r| r.end()).max().unwrap_or(0)
     }
@@ -313,14 +324,7 @@ impl DitGpuSession {
         input: &[f32],
         output_region: ArenaRegion,
     ) -> Result<(), VulkanError> {
-        self.project_scaled(
-            layer,
-            projection,
-            input_region,
-            input,
-            output_region,
-            1.0,
-        )
+        self.project_scaled(layer, projection, input_region, input, output_region, 1.0)
     }
 
     /// Run one projection over every row.
@@ -359,10 +363,17 @@ impl DitGpuSession {
             for (destination, value) in self.scaled[..input.len()].iter_mut().zip(input) {
                 *destination = value * scale;
             }
-            self.ops.write_f32(input_region, &self.scaled[..input.len()])?;
+            self.ops
+                .write_f32(input_region, &self.scaled[..input.len()])?;
         }
         let mut commands = TokenCommands::begin(self.context)?;
-        self.record_projection(&mut commands, bindings, projection, input_region, output_region)?;
+        self.record_projection(
+            &mut commands,
+            bindings,
+            projection,
+            input_region,
+            output_region,
+        )?;
         commands.submit_and_wait()?;
         self.read_into(projection, output_region)
     }
@@ -471,10 +482,7 @@ impl DitGpuSession {
         }
         let elapsed = start.elapsed().as_secs_f64() / iterations as f64;
         let output_len = self.rows * projection.n_out();
-        let values = self
-            .ops
-            .read_f32(output_region, output_len)?
-            .to_vec();
+        let values = self.ops.read_f32(output_region, output_len)?.to_vec();
         Ok((elapsed, values))
     }
 
@@ -552,7 +560,11 @@ impl DitGpuSession {
         )
     }
 
-    fn read_into(&mut self, projection: Projection, output_region: ArenaRegion) -> Result<(), VulkanError> {
+    fn read_into(
+        &mut self,
+        projection: Projection,
+        output_region: ArenaRegion,
+    ) -> Result<(), VulkanError> {
         let output_len = self.rows * projection.n_out();
         if self.readback.len() < output_len {
             self.readback.resize(output_len, 0.0);
@@ -596,9 +608,7 @@ impl DitGpuSession {
         self.modulation
             .as_ref()
             .map(|bound| bound.bindings)
-            .ok_or_else(|| {
-                VulkanError::UnsupportedShape("AdaLN scale was never bound".into())
-            })
+            .ok_or_else(|| VulkanError::UnsupportedShape("AdaLN scale was never bound".into()))
     }
 
     /// Fused rms_norm -> AdaLN -> QKV for one block.
@@ -709,7 +719,8 @@ impl DitGpuSession {
             .collect();
         let buffer = unsafe { self.context.upload_static(&bytes) }?;
         let bindings = self.ops.bind_buffers(std::slice::from_ref(&buffer))?;
-        self.norms.insert((layer, kind), BoundWeight { buffer, bindings });
+        self.norms
+            .insert((layer, kind), BoundWeight { buffer, bindings });
         Ok(())
     }
 
@@ -718,11 +729,14 @@ impl DitGpuSession {
         layer: usize,
         kind: NormKind,
     ) -> Result<OperatorBindings, VulkanError> {
-        self.norms.get(&(layer, kind)).map(|w| w.bindings).ok_or_else(|| {
-            VulkanError::UnsupportedShape(format!(
-                "Z-Image DiT norm {kind:?} for layer {layer} was not bound"
-            ))
-        })
+        self.norms
+            .get(&(layer, kind))
+            .map(|w| w.bindings)
+            .ok_or_else(|| {
+                VulkanError::UnsupportedShape(format!(
+                    "Z-Image DiT norm {kind:?} for layer {layer} was not bound"
+                ))
+            })
     }
 
     /// The last projection's result, valid until the next `project` call.

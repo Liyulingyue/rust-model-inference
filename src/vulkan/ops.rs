@@ -17,8 +17,7 @@ const Q8_MATMUL_GROUPED_DP4A_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/q8_matmul_grouped_dp4a.spv");
 const Q8_MATMUL_GROUPED_TILED_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/q8_matmul_tiled_dp4a.spv");
-const F16_MATMUL_TILED_SHADER: &[u8] =
-    include_bytes!("../../shaders/bin/f16_matmul_tiled.spv");
+const F16_MATMUL_TILED_SHADER: &[u8] = include_bytes!("../../shaders/bin/f16_matmul_tiled.spv");
 const Q4_0_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_0_matmul.spv");
 const Q4_1_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_1_matmul.spv");
 const Q4_K_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_k_matmul.spv");
@@ -1352,10 +1351,9 @@ impl<'a> Qwen3Ops<'a> {
                 token_rows,
                 input_stride,
             )?;
-            let columns = outputs
-                .first()
-                .map(|(_, n_out, _)| *n_out)
-                .ok_or(VulkanError::UnsupportedShape("tiled matmul has no output".into()))?;
+            let columns = outputs.first().map(|(_, n_out, _)| *n_out).ok_or(
+                VulkanError::UnsupportedShape("tiled matmul has no output".into()),
+            )?;
             const FLOAT_TOKENS: usize = 32;
             let tiles = token_rows.div_ceil(FLOAT_TOKENS);
             let dispatch = row_dispatch(
@@ -1411,10 +1409,13 @@ impl<'a> Qwen3Ops<'a> {
             input_stride,
         )?;
         // One lane per output column, TOKENS tokens per workgroup.
-        let columns = outputs
-            .first()
-            .map(|(_, n_out, _)| *n_out)
-            .ok_or(VulkanError::UnsupportedShape("tiled matmul has no output".into()))?;
+        let columns =
+            outputs
+                .first()
+                .map(|(_, n_out, _)| *n_out)
+                .ok_or(VulkanError::UnsupportedShape(
+                    "tiled matmul has no output".into(),
+                ))?;
         // Must match `TOKENS` in shaders/glsl/q8_matmul_tiled_dp4a.comp: the
         // shader derives the token tile from the workgroup id, so a mismatch
         // here would read and write the wrong rows rather than fail.
@@ -1425,7 +1426,11 @@ impl<'a> Qwen3Ops<'a> {
         // register file holds, so 32 is where the curve turns.
         const TOKENS: usize = 32;
         let tiles = token_rows.div_ceil(TOKENS);
-        let dispatch = row_dispatch(columns.div_ceil(64), tiles * outputs.len(), &self.context.limits)?;
+        let dispatch = row_dispatch(
+            columns.div_ceil(64),
+            tiles * outputs.len(),
+            &self.context.limits,
+        )?;
         // Validation is complete before the first command is recorded.
         if let Some((pipeline, quantize_push, quantize_dispatch)) = quantize {
             self.record_linear_dispatch(

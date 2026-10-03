@@ -84,7 +84,14 @@ fn run_probe() -> Result<(), String> {
             pool.compute(|ith, nth| {
                 let out = unsafe { std::slice::from_raw_parts_mut(row_ptr, QKV) };
                 matmul_q8_0_quantized_parallel_rows(
-                    &weight, &input_q8, &input_scales, out, HIDDEN, QKV, ith, nth,
+                    &weight,
+                    &input_q8,
+                    &input_scales,
+                    out,
+                    HIDDEN,
+                    QKV,
+                    ith,
+                    nth,
                 );
             });
         }
@@ -160,7 +167,8 @@ fn run_probe() -> Result<(), String> {
             HIDDEN,
             ROWS,
             HIDDEN,
-        ).map_err(|e| e.to_string())?;
+        )
+        .map_err(|e| e.to_string())?;
         commands.submit_and_wait().map_err(|e| e.to_string())?;
         head_value = ops.read_f32(out, 1).map_err(|e| e.to_string())?[0];
         let elapsed = t0.elapsed().as_secs_f64();
