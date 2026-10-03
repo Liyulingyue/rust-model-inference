@@ -28,7 +28,7 @@ fn quantized_stride(ggml_type: GGMLType, n_in: usize, n_out: usize) -> usize {
 /// small or sensitive tensors at F16 / Q8_0.  All of those are already expanded,
 /// so treating any of them as affine codes sends the loader looking for
 /// `.scales` companions that the export never wrote.
-const EXPANDED_TYPES: [GGMLType; 6] = [
+const EXPANDED_TYPES: &[GGMLType] = &[
     GGMLType::F32,
     GGMLType::F16,
     GGMLType::Q8_0,
@@ -423,14 +423,55 @@ mod tests {
 
     #[test]
     fn expanded_types_cover_the_modes_the_converter_can_write() {
-        // Everything the converter emits for --quant f32/f16/q8_0/q4_0.
-        for ty in [GGMLType::F32, GGMLType::F16, GGMLType::Q8_0, GGMLType::Q4_0] {
+        // Everything the converter emits for --quant f32/f16/q8_0/q4_0, plus
+        // q4_k_m, which is the mode that broke: it writes Q4_K and Q6_K, and a
+        // list that only knew the four older modes sent those down the packed
+        // path looking for `.scales` companions the export never wrote.
+        for ty in [
+            GGMLType::F32,
+            GGMLType::F16,
+            GGMLType::Q8_0,
+            GGMLType::Q4_0,
+            GGMLType::Q4K,
+            GGMLType::Q6K,
+        ] {
             assert!(
                 EXPANDED_TYPES.contains(&ty),
                 "{ty:?} must route to the generic kernels"
             );
         }
-        // The lossless layout must keep going through MlxAffineKernel.
+        // The lossless layout must keep going through MlxAffineKernel: it is the
+        // one mode that stores affine codes beside the packed words rather than
+        // folding them into the matrix.
         assert!(!EXPANDED_TYPES.contains(&GGMLType::I32));
+        // BF16 is never an expanded Edge0 type, and the stride helper used to
+        // list it, which is how the two tables drifted apart in the first place.
+        assert!(!EXPANDED_TYPES.contains(&GGMLType::BF16));
+    }
+
+    /// The k-quants pack 256 values per super-block, not 32.
+    ///
+    /// These are the types the `q4_k_m` export is mostly made of, and the stride
+    /// used to be a hand-written table that panicked on them, so a shape this
+    /// size is where a wrong block size would show up.
+    #[test]
+    fn k_quant_strides_use_the_256_value_super_block() {
+        // 256 inputs by 3 rows: one super-block per row.
+        assert_eq!(quantized_stride(GGMLType::Q4K, 256, 3), 144 * 3);
+        assert_eq!(quantized_stride(GGMLType::Q5K, 256, 3), 176 * 3);
+        assert_eq!(quantized_stride(GGMLType::Q6K, 256, 3), 210 * 3);
+        // Two super-blocks, and 257 is not a multiple of 256 so it rounds up.
+        assert_eq!(quantized_stride(GGMLType::Q4K, 512, 3), 2 * 144 * 3);
+        assert_eq!(quantized_stride(GGMLType::Q4K, 257, 1), 2 * 144);
+        // Cross-check against the type table itself so the two cannot drift.
+        for ty in [GGMLType::Q4K, GGMLType::Q5K, GGMLType::Q6K] {
+            for (n_in, n_out) in [(256usize, 1usize), (1024, 7), (3840, 512)] {
+                assert_eq!(
+                    quantized_stride(ty, n_in, n_out),
+                    ty.nbytes(n_in * n_out),
+                    "{ty:?} at {n_in}x{n_out}"
+                );
+            }
+        }
     }
 }
