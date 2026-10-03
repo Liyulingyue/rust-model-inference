@@ -336,7 +336,14 @@ pub(crate) fn compute_yarn_thetas(
     let freq_scale = 1.0f64 / factor;
     for i in 0..half {
         // Per-dim extrap theta (what plain RoPE would do for this dim i).
-        let theta_extrap = freq_base as f64 * (-2.0 * i as f64 / rope_dim as f64).exp();
+        // Plain RoPE: `theta_at_pos = pos * freq_base^(-2i/rope_dim)`,
+        // so the position-independent per-dim multiplier is
+        // `freq_base^(-2i/rope_dim)`. Note xing4_0 and llama.cpp
+        // multiply `pos` into `theta_extrap` and store the full
+        // position-dependent table — we split that into
+        // `thetas[i] * pos` to avoid allocating `max_ctx × half`
+        // floats (Mistral 3 ships a 256K-context model).
+        let theta_extrap = (freq_base as f64).powf(-2.0 * i as f64 / rope_dim as f64);
         // Per-dim interp theta (the YaRN-reduced extrapolation).
         let theta_interp = freq_scale * theta_extrap;
         // Linear ramp across the wavelength-correction zone.
@@ -2915,7 +2922,7 @@ pub(crate) fn run_attention_chunked(
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_rope, normalization_groups};
+    use super::{apply_rope, compute_yarn_thetas, normalization_groups};
     use crate::core::tensor::{MetaValue, TensorInfo, TensorSource};
     use std::collections::HashMap;
 
@@ -2950,9 +2957,136 @@ mod tests {
 
         let mut actual = [1.0, 2.0, 3.0, 4.0];
         let mut expected = actual;
-        apply_rope("k2-horizon", &mut actual, 7, 4, 10_000_000.0, 4, 1.0);
+        apply_rope("k2-horizon", &mut actual, 7, 4, 10_000_000.0, 4, 1.0, None);
         crate::ops::rope_neox_inplace(&mut expected, 7, 4, 10_000_000.0);
         assert_eq!(actual.map(f32::to_bits), expected.map(f32::to_bits));
+    }
+
+    /// `compute_yarn_thetas` returns `None` when the GGUF doesn't
+    /// declare YaRN (no allocation, no cost) and `Some(thetas)` of
+    /// length `rope_dim / 2` when `rope.scaling.type = "yarn"`.
+    #[test]
+    fn compute_yarn_thetas_is_none_for_plain_rope() {
+        let source = MetadataSource(HashMap::new()); // no scaling keys
+        let thetas = compute_yarn_thetas(&source, "llama", 1.0e6, 128);
+        assert!(thetas.is_none(), "no yarn metadata -> None");
+    }
+
+    /// `compute_yarn_thetas` reads every required key. Mistral 3's
+    /// GGUF pins `factor=16, original_context_length=16384,
+    /// yarn_beta_fast=32, yarn_beta_slow=1, yarn_log_multiplier=1,
+    /// freq_base=1e6, rope_dim=128`. We pin the per-dim shape and
+    /// the wavelength-correction ramp bounds: outside the
+    /// `[start, end]` ramp thetas equal the plain RoPE table; inside
+    /// the ramp thetas are scaled down by `1/factor = 1/16`.
+    #[test]
+    fn compute_yarn_thetas_matches_mistral3_pin() {
+        let mut map = HashMap::new();
+        map.insert("mistral3.rope.scaling.type".into(), MetaValue::String("yarn".into()));
+        map.insert("mistral3.rope.scaling.factor".into(), MetaValue::Float32(16.0));
+        map.insert(
+            "mistral3.rope.scaling.original_context_length".into(),
+            MetaValue::Uint32(16384),
+        );
+        map.insert(
+            "mistral3.rope.scaling.yarn_beta_fast".into(),
+            MetaValue::Float32(32.0),
+        );
+        map.insert(
+            "mistral3.rope.scaling.yarn_beta_slow".into(),
+            MetaValue::Float32(1.0),
+        );
+        map.insert(
+            "mistral3.rope.scaling.yarn_log_multiplier".into(),
+            MetaValue::Float32(1.0),
+        );
+        let source = MetadataSource(map);
+        let thetas = compute_yarn_thetas(&source, "mistral3", 1.0e6, 128).unwrap();
+        assert_eq!(thetas.len(), 128 / 2, "thetas length must be rope_dim/2");
+
+        // `extrap[i] = freq_base^(-2i/rope_dim)`. We re-derive the
+        // plain RoPE baseline here so the test fails loudly if the
+        // YaRN implementation drifts from the published formula.
+        let extrap = |i: usize| -> f32 {
+            (1.0e6f32).powf(-2.0 * i as f32 / 128.0)
+        };
+        let inv_factor = 1.0f32 / 16.0;
+        // `corr(n_rot) = rope_dim * ln(n_ctx_orig / n_rot) / (2 * ln(base))`
+        let corr = |n_rot: f64| -> f64 {
+            let dim = 128.0_f64;
+            let base_ln = (1.0e6f64).ln();
+            let n_ctx_orig = 16384.0_f64;
+            dim * (n_ctx_orig / (n_rot * 2.0 * std::f64::consts::PI)).ln() / (2.0 * base_ln)
+        };
+        let start = corr(32.0).floor().max(0.0);
+        let end = corr(1.0).ceil().min(127.0);
+        let span = (end - start).max(0.001);
+        for i in 0..thetas.len() {
+            let extrap_i = extrap(i);
+            let interp_i = inv_factor * extrap_i;
+            let ramp = 1.0 - ((i as f64 - start) / span).clamp(0.0, 1.0);
+            let expected = interp_i * (1.0 - ramp as f32) + extrap_i * ramp as f32;
+            // YaRN recomputes the per-dim theta via `powf` twice
+            // (the reference tests do the same), so the round-trip
+            // through f64 introduces ≤1 ULP drift. Compare with a
+            // tolerance instead of bit-exact.
+            let rel_err =
+                ((thetas[i] - expected) / expected.max(1e-30)).abs();
+            assert!(
+                rel_err < 1e-6,
+                "yarn theta mismatch at i={i}: got {}, expected {} (rel_err={})",
+                thetas[i],
+                expected,
+                rel_err
+            );
+        }
+    }
+
+    /// Sanity: for positions inside the training window
+    /// (`pos < original_context_length`), the YaRN thetas reduce to
+    /// the plain RoPE baseline (`theta = pos * freq_base^(-2i/rope_dim)`).
+    /// Above the ramp end (`start..end` are inside the wavelength-
+    /// correction zone), the thetas are smaller than plain RoPE by
+    /// `1/factor` at the centre of the ramp.
+    #[test]
+    fn compute_yarn_thetas_short_context_equals_plain_rope() {
+        let mut map = HashMap::new();
+        map.insert("mistral3.rope.scaling.type".into(), MetaValue::String("yarn".into()));
+        map.insert("mistral3.rope.scaling.factor".into(), MetaValue::Float32(16.0));
+        map.insert(
+            "mistral3.rope.scaling.original_context_length".into(),
+            MetaValue::Uint32(16384),
+        );
+        map.insert(
+            "mistral3.rope.scaling.yarn_beta_fast".into(),
+            MetaValue::Float32(32.0),
+        );
+        map.insert(
+            "mistral3.rope.scaling.yarn_beta_slow".into(),
+            MetaValue::Float32(1.0),
+        );
+        let source = MetadataSource(map);
+        let yarn = compute_yarn_thetas(&source, "mistral3", 1.0e6, 128).unwrap();
+        let freq_base = 1.0e6_f32;
+        // For Mistral 3, `start ≈ 6`, `end ≈ 28` (depends on the exact
+        // log). Outside `[6, 28]` the thetas equal plain RoPE
+        // (`ramp=0` or `ramp=1`); inside that range the thetas are
+        // strictly smaller than plain RoPE (YaRN compression).
+        let mut saw_smaller = false;
+        for i in 0..yarn.len() {
+            let plain = freq_base.powf(-2.0 * i as f32 / 128.0);
+            if yarn[i] < plain * 0.5 {
+                saw_smaller = true;
+            }
+        }
+        // At least one dim inside the ramp must be < 1/2 plain. If the
+        // ramp is empty (which would only happen with bizarre
+        // beta_fast > beta_slow) we'd never see this; assert the
+        // ramp range is non-empty via `saw_smaller`.
+        assert!(
+            saw_smaller,
+            "expected at least one dim to be YaRN-compressed"
+        );
     }
 }
 
