@@ -40,6 +40,8 @@
 | Qwen2.5-Omni | 3B | 文本、音频、视频、图像（文本、音频输出） | llama.cpp | https://www.modelscope.cn/models/Qwen/Qwen2.5-Omni-3B | https://www.modelscope.cn/models/unsloth/Qwen2.5-Omni-3B-GGUF | √ |
 | Qwen2.5-VL | 3B | 文本、图像 |  | https://www.modelscope.cn/models/Qwen/Qwen2.5-VL-3B-Instruct | https://www.modelscope.cn/models/unsloth/Qwen2.5-VL-3B-Instruct-GGUF | √ |
 | Qwen2.5 | 1.5B-Instruct | 文本（ChatML） | llama.cpp | https://www.modelscope.cn/models/Qwen/Qwen2.5-1.5B-Instruct | https://www.modelscope.cn/models/Qwen/Qwen2.5-1.5B-Instruct-GGUF | √ |
+| Ministral-3 | 3B / 8B | 文本 | llama.cpp | https://www.modelscope.cn/models/mistralai/Ministral-3-3B-Instruct-2512 / https://www.modelscope.cn/models/mistralai/Ministral-3-3B-Reasoning-2512 / https://www.modelscope.cn/models/mistralai/Ministral-3-8B-Instruct-2512 | https://www.modelscope.cn/models/mistralai/Ministral-3-3B-Instruct-2512-GGUF | √ |
+| Mistral-Shieldstral | 3B | 内容审核 / 安全分类 | llama.cpp | https://huggingface.co/mistralai/Shieldstral-1.0-3B | https://huggingface.co/Metabaron6/Shieldstral-1.0-3B-GGUF | √ |
 | Qwen3 | 0.6B | 文本 | llama.cpp | https://www.modelscope.cn/models/Qwen/Qwen3-0.6B | https://www.modelscope.cn/models/unsloth/Qwen3-0.6B-GGUF | √ |
 | Qwen3-Reranker | 0.6B | 跨编码器重排序（query/document 打分） | llama.cpp | https://www.modelscope.cn/models/Qwen/Qwen3-Reranker-0.6B | https://modelscope.cn/models/ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF | √ |
 | Qwen3-Embedding | 0.6B | Embedding |  | https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-0.6B | https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-0.6B-GGUF | √ |

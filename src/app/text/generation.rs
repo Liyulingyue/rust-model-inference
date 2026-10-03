@@ -14,7 +14,12 @@ pub(super) fn validate_gemma4_temperature(arch: &str, temperature: f32) -> Resul
 pub(crate) fn uses_llama_trunk(arch: &str) -> bool {
     matches!(
         arch,
-        "llama" | "exaone" | "k2-horizon" | "granite" | "nanbeige" | "phi3" | "glm4"
+        // `mistral3` rides the llama trunk; YaRN RoPE is detected from
+        // `rope.scaling.{type,factor,original_context_length,yarn_beta_*,
+        // yarn_log_multiplier}` inside the trunk, so this dispatch is
+        // unconditional — Mistral 3 3B / Shieldstral / Ministral-3
+        // (`harshatheg/Ministral-3-3B-Instruct-2512-GGUF`) all route here.
+        "llama" | "exaone" | "k2-horizon" | "granite" | "nanbeige" | "phi3" | "glm4" | "mistral3"
     )
 }
 

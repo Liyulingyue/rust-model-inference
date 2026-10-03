@@ -57,7 +57,7 @@ pub struct LlamaSession<'a> {
     pub loop_final_norm: bool,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct LlamaSessionConfig {
     pub max_ctx: usize,
     pub n_embd: usize,
@@ -79,6 +79,16 @@ pub struct LlamaSessionConfig {
     /// Phi-3 / Phi-4 multiply RoPE outputs by this factor; 1.0 means
     /// "no rescaling" (standard llama behaviour).
     pub attn_factor: f32,
+    /// Per-dim YaRN-corrected RoPE thetas (`theta_per_dim[i]` so that
+    /// the final theta at position `pos` is `pos * theta_per_dim[i]`).
+    /// `Some(_)` when the GGUF declares `rope.scaling.type = "yarn"`
+    /// AND `factor > 1.0`; `None` otherwise (plain RoPE). Used by
+    /// Mistral 3 (`mistral3.rope.scaling.{type=factor, factor=16,
+    /// original_context_length=16384, yarn_beta_fast=32,
+    /// yarn_beta_slow=1, yarn_log_multiplier=1}`); see
+    /// `forward::compute_yarn_thetas` for the construction. Length
+    /// is `rope_dim / 2` (i.e. one theta per pair lane).
+    pub yarn_thetas: Option<Vec<f32>>,
     pub vocab: usize,
 }
 
@@ -163,6 +173,13 @@ impl<'a> LlamaSession<'a> {
             .and_then(|v| v.to_f64())
             .map(|v| v as f32)
             .unwrap_or(1.0);
+        // Detect YaRN RoPE and precompute the per-dim thetas.
+        // `compute_yarn_thetas` returns `None` for non-YaRN architectures
+        // (no allocation, no cost); for Mistral 3 it builds a
+        // `Vec<f32>` of length `rope_dim / 2 = 64` once at session
+        // init, so the per-token rotation stays a single multiply
+        // (no position-dependent table lookup).
+        let yarn_thetas = super::forward::compute_yarn_thetas(source, &arch, freq_base, rope_dim);
         let norm_groups = normalization_groups(source, &arch, n_embd)?;
         let arch_prefix = arch.clone();
         let embedding_scale = source
@@ -234,6 +251,7 @@ impl<'a> LlamaSession<'a> {
                 freq_base,
                 rope_dim,
                 attn_factor,
+                yarn_thetas,
                 vocab,
             },
             tokenizer,
@@ -442,6 +460,7 @@ impl<'a> LlamaSession<'a> {
         let freq_base = cfg.freq_base;
         let rope_dim = cfg.rope_dim;
         let attn_factor = cfg.attn_factor;
+        let yarn_thetas = cfg.yarn_thetas.as_deref();
         let arch = &self.arch;
         let embedding_scale = self.embedding_scale;
         let residual_scale = self.residual_scale;
@@ -577,6 +596,7 @@ impl<'a> LlamaSession<'a> {
                     freq_base,
                     rope_dim,
                     attn_factor,
+                    yarn_thetas.as_deref(),
                 );
                 apply_rope(
                     arch.as_str(),
@@ -586,6 +606,7 @@ impl<'a> LlamaSession<'a> {
                     freq_base,
                     rope_dim,
                     attn_factor,
+                    yarn_thetas.as_deref(),
                 );
             }
 
@@ -1051,6 +1072,7 @@ impl<'a> LlamaSession<'a> {
                     freq_base,
                     cfg.rope_dim,
                     cfg.attn_factor,
+                    cfg.yarn_thetas.as_deref(),
                 );
             }
             for h in 0..cfg.n_head_kv {
@@ -1062,6 +1084,7 @@ impl<'a> LlamaSession<'a> {
                     freq_base,
                     cfg.rope_dim,
                     cfg.attn_factor,
+                    cfg.yarn_thetas.as_deref(),
                 );
             }
 

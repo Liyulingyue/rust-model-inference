@@ -438,9 +438,17 @@ impl BPETokenizer {
                 // fires on GLM-4 inputs that Minicpm5 would handle
                 // differently.
                 Some(MetaValue::String(value)) if value == "glm4" => PreTokenizer::Minicpm5,
+                // Mistral 3 / Tekken (`harshatheg/Ministral-3-3B-Instruct-2512-GGUF`):
+                // vocab is GPT-2 byte-level BPE with a Mistral-flavored
+                // pretokenizer regex. The byte-level BPE encoding is the
+                // same as Llama-3 / pixtral / dbrx, so reusing
+                // `LlamaBpe` is correct. Special-token boundaries
+                // (BOS=1, EOS=2, pad=11) are pinned by the GGUF, no extra
+                // `force_add_bos` needed.
+                Some(MetaValue::String(value)) if value == "tekken" => PreTokenizer::LlamaBpe,
                 Some(MetaValue::String(value)) => {
                     return Err(format!(
-                        "Unsupported tokenizer.ggml.pre {value:?}; expected qwen2 or qwen35, hunyuan, hunyuan-dense, lfm2, llama-bpe, pixtral, falcon-h1, exaone, jina-v1-en, jina-v2-code, roberta-bpe, k2-horizon, minicpm5, gpt-4o, or glm4"
+                        "Unsupported tokenizer.ggml.pre {value:?}; expected qwen2 or qwen35, hunyuan, hunyuan-dense, lfm2, llama-bpe, pixtral, falcon-h1, exaone, jina-v1-en, jina-v2-code, roberta-bpe, k2-horizon, minicpm5, gpt-4o, tekken, or glm4"
                     ));
                 }
                 _ => return Err("Missing or invalid tokenizer.ggml.pre".into()),
