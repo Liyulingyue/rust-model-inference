@@ -53,6 +53,7 @@ pub use yue2::run_yue2_cli;
 use crate::core::tensor::TensorSource;
 use crate::format::ggufrs::{open_model_source, ComponentRole};
 use std::path::Path;
+use std::sync::Arc;
 
 /// `general.architecture` of an already-open source.
 pub fn arch_of(source: &dyn TensorSource) -> String {
@@ -110,6 +111,47 @@ pub fn run_embedding(
             )
         }
         _ => qwen3_run_embedding(source, prompt, n_threads_arg, kv_format, output),
+    }
+}
+
+/// Cross-encoder rerank entry point. Dispatches on architecture:
+///
+/// - `jina-bert-v2` with `cls.weight` + `cls.bias`: bidirectional BERT
+///   forward + CLS-row projection (`src/models/bert_family::compute_rerank_score`).
+/// - `qwen3` with `pooling_type = 4` + `cls.output.weight`: causal prefill
+///   of the standard ChatML prompt + last-token classification head
+///   (`src/models/qwen3::trunk`).
+///
+/// Anything else returns an error rather than falling back to a generic
+/// embedder — rerank is a deliberately arch-locked contract and silently
+/// degrading to embedding would be the wrong failure mode.
+pub fn run_rerank(
+    source: Arc<dyn TensorSource>,
+    query: &str,
+    documents: &[String],
+    n_threads_arg: usize,
+    instruction: Option<&str>,
+) -> Result<Vec<f32>, String> {
+    let arch = arch_of(source.as_ref());
+    match arch.as_str() {
+        "jina-bert-v2" => crate::models::bert_family::compute_rerank_score(
+            source.as_ref(),
+            query,
+            documents,
+            n_threads_arg,
+        ),
+        "qwen3" => crate::models::qwen3::trunk::score_qwen3_rerank(
+            source,
+            query,
+            documents,
+            n_threads_arg,
+            instruction,
+        ),
+        other => Err(format!(
+            "--rerank does not support architecture {other:?}; \
+             expected jina-bert-v2 (with cls.weight + cls.bias) or qwen3 \
+             (with pooling_type=4 + cls.output.weight)"
+        )),
     }
 }
 

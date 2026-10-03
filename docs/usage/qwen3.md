@@ -209,7 +209,57 @@ TTS 帧预算自动按 `max(max_tokens * 4, 128).min(1024)` 计算 — 用户传
 
 完整输出验证参考 `models/omni_apple_reply.wav` 等。
 
-## 6. 与 llama.cpp 的数值对齐
+## 6. 跨编码器 Rerank（Qwen3-Reranker 0.6B）
+
+CLI 与 server 都通过 `--rerank` 一站式入口（不再有独立的 `qwen3_rerank` 二进制，
+主 binary 内置 `app::run_rerank`，按 arch 分发）。模型需要是带 `cls.output.weight`
++ `pooling_type = 4` 的 Qwen3 GGUF（即 `ggml-org/Qwen3-Reranker-*-Q8_0-GGUF` 的官方包）。
+本仓库 `models/Qwen3-Reranker-0.6B-GGUF/` 的 unsloth 转换文件没有 cls head，会直接拒绝。
+
+```bash
+# CLI（--rerank-doc 重复多次，或 --rerank-documents <newline-separated FILE>）
+cargo run --release --bin rust-model-inference -- \
+  --model models/Qwen3-Reranker-0.6B-QGUF/qwen3-reranker-0.6b-q8_0.gguf \
+  --rerank --rerank-query "What is the capital of France?" \
+  --rerank-doc "Paris is the capital of France." \
+  --rerank-doc "Berlin is the capital of Germany." \
+  --rerank-doc "Tokyo is the capital of Japan."
+
+# 服务端：自动检测 cls.output.weight + qwen3.pooling_type=4 → POST /v1/rerank
+cargo run --release --bin server -- \
+  --model models/Qwen3-Reranker-0.6B-QGUF/qwen3-reranker-0.6b-q8_0.gguf \
+  --port 8080 --threads 4
+
+curl -s -X POST http://127.0.0.1:8080/v1/rerank \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "What is the capital of France?",
+    "documents": [
+      "Paris is the capital of France.",
+      "Berlin is the capital of Germany.",
+      "Tokyo is the capital of Japan."
+    ],
+    "top_n": 3
+  }'
+```
+
+ChatML prompt（system + `<Instruct>/<Query>/<Document>`）在
+`src/models/qwen3/trunk/rerank.rs` 内置；2 分类头输出 `yes` logit + softmax
+后的 `yes_prob`（`[0, 1]`）。CLI 输出格式与 `/v1/rerank` 响应的
+`relevance_score` 字段对齐：
+
+```
+rank  idx  relevance_score
+0     0     0.938243
+1     1     0.001332
+2     2     0.001107
+```
+
+相关/不相关文档的得分间隔通常 >1000×（Paris vs Berlin 0.938 / 0.001）。详细
+集成测试 `tests/qwen3_rerank.rs`（单元）+ `tests/qwen3_rerank_http.rs`
+（HTTP, 3/3），用合成 cls head GGUF。
+
+## 7. 与 llama.cpp 的数值对齐
 
 ### 通用 scalar 位级对比（Qwen3-0.6B）
 
@@ -250,7 +300,7 @@ llama-bench -ngl 0 -t 8 -m models/Qwen3-0.6B-Q8_0.gguf
 
 复现脚本与机器固定方法见 `docs/OPTIMIZATION.md#rust-与-llamacpp-固定机器对比2026-08-10`。
 
-## 7. 服务端模式（OpenAI 兼容）
+## 8. 服务端模式（OpenAI 兼容）
 
 ```bash
 # 文本
@@ -261,6 +311,11 @@ cargo run --release --bin server -- \
 # Embedding
 cargo run --release --bin server -- \
   --model models/Qwen3-Embedding-0.6B-Q8_0.gguf --embedding
+
+# Rerank（自动检测 cls.output.weight + qwen3.pooling_type=4 → POST /v1/rerank）
+cargo run --release --bin server -- \
+  --model models/Qwen3-Reranker-0.6B-QGUF/qwen3-reranker-0.6b-q8_0.gguf \
+  --port 8080 --threads 4
 
 # ASR
 cargo run --release --bin server -- \
@@ -275,7 +330,7 @@ cargo run --release --bin server -- \
   --tts --language cn
 ```
 
-## 8. 已确认的限制 / 边界
+## 9. 已确认的限制 / 边界
 
 | 范围 | 行为 |
 |------|------|
@@ -284,16 +339,18 @@ cargo run --release --bin server -- \
 | Qwen3-VL 不匹配的维度（除 1024-dim 与 2048-dim 两组白名单外） | 配置阶段拒绝 |
 | GPU 后端（`--features vulkan`） | 可跑，但当前不提供 GPU 位级 Oracle 保证 |
 
-## 9. 相关源码索引
+## 10. 相关源码索引
 
 - `src/models/qwen3/` — 文本 / Embedding / VL / ASR / TTS trunk
+- `src/models/qwen3/trunk/rerank.rs` — Rerank 评分循环（`app::run_rerank` 的 qwen3 分支）
 - `src/app/audio.rs` — ASR 路由
 - `src/app/text.rs` — 文本、Embedding、多模态 CLI 入口
 - `src/app/tts.rs` — TTS CLI 入口
+- `src/app/server/rerank.rs` — `/v1/rerank` HTTP handler（CLI 与 server 共用 rerank.rs 的 per-doc scoring 实现）
 - `src/format/ggufrs.rs` — GGUF / GGUFRS 等价测试
 - `docs/REFERENCE_IMPLEMENTATIONS.md` — Pinned Oracle 与构建脚本
 
-## 10. JEV 决策评分（Qwen3 用法）
+## 11. JEV 决策评分（Qwen3 用法）
 
 `--jev` 是 OpenJEV 风格的 single-forward-pass 决策评分模式 —— 完整协议、
 跨 trunk 实现现状、chat template 差异、限制等全局性内容见

@@ -18,7 +18,7 @@ use crate::app::cli::{
     normalize_tts_language, parse_cli_options, validate_cli_options, CliOptions, KvFormat,
 };
 use crate::app::{compute_embedding, open_or_exit};
-use crate::core::tensor::TensorSource;
+use crate::core::tensor::{MetaValue, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
 use crate::format::ggufrs::ComponentRole;
@@ -85,14 +85,31 @@ struct ClmBackend {
     context_length: usize,
 }
 
+/// The two cross-encoder rerank families this server understands.
+///
+/// `Qwen3` reuses the qwen3 trunk (causal prefill + last-token
+/// classification head). `JinaBertV2` reuses the bert-encoder forward loop
+/// (bidirectional CLS token + `cls.weight` linear projection), which is
+/// structurally different: no causal mask, no Qwen3Session.
+enum RerankKind {
+    Qwen3,
+    JinaBertV2,
+}
+
 struct RerankBackend {
-    /// The Qwen3 model loaded with the optional `cls.output.weight`
-    /// rerank head. Leaked to `'static` so per-request `Qwen3Session`s
-    /// can borrow from it without re-loading.
-    model: Arc<&'static Qwen3Model>,
+    /// Qwen3 model loaded with the optional `cls.output.weight` rerank
+    /// head. Leaked to `'static` so per-request `Qwen3Session`s can
+    /// borrow from it without re-loading. `None` for `JinaBertV2`.
+    model: Option<Arc<&'static Qwen3Model>>,
     tokenizer: Arc<BPETokenizer>,
     prefill_batch_size: usize,
     context_length: usize,
+    /// jina-bert-v2 backend keeps the raw `TensorSource` and reuses the
+    /// shared `bert_family::compute_rerank_score` for scoring. `None` for
+    /// `Qwen3` (the qwen3 path doesn't need it).
+    jina_source: Option<Arc<dyn TensorSource>>,
+    /// Selects the per-doc scoring path in `rerank::score_one_doc`.
+    kind: RerankKind,
 }
 
 unsafe impl Send for Backend {}
@@ -879,13 +896,15 @@ fn build_backend(options: &CliOptions) -> Result<Arc<Backend>, String> {
     }
     // Cross-encoder rerank detection: a GGUF that carries
     // `pooling_type = 4` and a `cls.output.weight` is a Qwen3-style
-    // rerank model. Detected by metadata peek BEFORE the full Text
-    // build (which would load unrelated multimodal state).
+    // rerank model; a `jina-bert-v2` arch with `cls.weight` + `cls.bias`
+    // is the jina-bert-v2-style rerank model. Both are detected by
+    // metadata peek BEFORE the full Text build (which would load
+    // unrelated multimodal state).
     //
     // This is the only metadata-probed backend in this function; the others are
     // flag-driven. Why they differ — and why adding a probe is usually the wrong
     // fix — is in docs/develop/SERVER_BACKEND_SELECTION.md.
-    if is_rerank_gguf(&options.model) {
+    if is_rerank_gguf(&options.model) || is_jina_rerank_gguf(&options.model) {
         // The probe outranks the flag-driven backends below, so a caller
         // who explicitly selected one of them would have it silently
         // dropped (their flag ignored, the rerank backend served).
@@ -972,6 +991,26 @@ fn is_rerank_gguf(path: &std::path::Path) -> bool {
     loader.tensor_info("cls.output.weight").is_some()
 }
 
+/// Returns `true` when the GGUF at `path` looks like a jina-bert-v2
+/// reranker: `arch = jina-bert-v2` AND the `cls.weight` + `cls.bias`
+/// classification tensors are present. Parallel probe to
+/// [`is_rerank_gguf`] — used by the same dispatcher to choose
+/// `RerankKind::JinaBertV2` over `RerankKind::Qwen3`.
+fn is_jina_rerank_gguf(path: &std::path::Path) -> bool {
+    use crate::MetaValue;
+    let Ok(loader) = crate::GGUFLoader::from_file(path) else {
+        return false;
+    };
+    let arch = loader
+        .metadata("general.architecture")
+        .and_then(MetaValue::to_string_val)
+        .unwrap_or_default();
+    if arch != "jina-bert-v2" {
+        return false;
+    }
+    loader.tensor_info("cls.weight").is_some() && loader.tensor_info("cls.bias").is_some()
+}
+
 /// Returns `true` when the GGUF at `name` is an `audio8_asr_infinite`
 /// model (Voxtral Realtime bundled with its Qwen2 text decoder). The
 /// probe fires only inside the `options.audio.is_some()` branch, so it
@@ -988,6 +1027,35 @@ fn is_audio8_gguf(path: &std::path::Path) -> bool {
 }
 
 fn build_rerank(options: &CliOptions) -> Result<RerankBackend, String> {
+    if is_jina_rerank_gguf(&options.model) {
+        // jina-bert-v2 cross-encoder reranker. No qwen3 trunk: the forward
+        // loop lives in `bert_family::compute_rerank_score`, which takes
+        // `&dyn TensorSource` directly. The tokenizer here is unused by
+        // the scoring path itself (compute_rerank_score builds tokens
+        // internally) but we still keep one so future endpoints
+        // (e.g. /v1/rerank echoes the input) can decode.
+        let source: Arc<dyn TensorSource> =
+            Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+        let tokenizer = Arc::new(
+            BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
+                .map_err(|e| format!("init tokenizer: {e}"))?,
+        );
+        let context_length: usize = source
+            .metadata("jina-bert-v2.context_length")
+            .and_then(MetaValue::to_u64)
+            .map(|v| v as usize)
+            .unwrap_or(8192);
+        return Ok(RerankBackend {
+            model: None,
+            tokenizer,
+            prefill_batch_size: 0,
+            context_length,
+            jina_source: Some(source),
+            kind: RerankKind::JinaBertV2,
+        });
+    }
+
+    // Qwen3-style rerank (pooling_type=4 + cls.output.weight).
     let prefill_batch_size = options.effective_prefill_batch_size()?;
     let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
     let tokenizer = Arc::new(BPETokenizer::from_gguf_metadata(|k| {
@@ -1005,10 +1073,12 @@ fn build_rerank(options: &CliOptions) -> Result<RerankBackend, String> {
     // on `Qwen3Session` is satisfied for the server lifetime.
     let model: &'static Qwen3Model = Box::leak(Box::new(model));
     Ok(RerankBackend {
-        model: Arc::new(model),
+        model: Some(Arc::new(model)),
         tokenizer,
         prefill_batch_size,
         context_length,
+        jina_source: None,
+        kind: RerankKind::Qwen3,
     })
 }
 
