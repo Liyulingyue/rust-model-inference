@@ -26,15 +26,15 @@ use crate::vulkan::{VulkanContext, VulkanError};
 
 use super::dit::{
     add_modulated_residual, attention_into, rotate_interleaved_inplace, scale_modulated_branch,
-    split_adaln_modulation, AdaLnModulation, BlockWeights, FFN_WIDTH, HEADS, HIDDEN,
-    QK_RMS_EPSILON, QKV_WIDTH, RMS_EPSILON, ROPE_HEAD_WIDTH, TIME_WIDTH,
+    split_adaln_modulation, AdaLnModulation, BlockWeights, FFN_WIDTH, HEADS, HIDDEN, QKV_WIDTH,
+    QK_RMS_EPSILON, RMS_EPSILON, ROPE_HEAD_WIDTH, TIME_WIDTH,
 };
-use crate::ops::{rms_norm, rms_norm_inplace};
 use super::dit_gpu::{DitGpuSession, Projection};
 use super::linear_into_ggml;
 use super::Q8Scratch;
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
+use crate::ops::{rms_norm, rms_norm_inplace};
 
 /// A `Result` that can be either a CPU or a GPU failure, so the caller can fall
 /// back to the CPU block when the device rejects a shape or breaks mid-render.
@@ -138,7 +138,15 @@ pub(crate) fn run_block_gpu(
 
     let layout = *session.layout();
     let t = Instant::now();
-    session.project(layer, Projection::Qkv, layout.x, &attention[..hidden_len], layout.out).map_err(|e| e.to_string())?;
+    session
+        .project(
+            layer,
+            Projection::Qkv,
+            layout.x,
+            &attention[..hidden_len],
+            layout.out,
+        )
+        .map_err(|e| e.to_string())?;
     qkv[..qkv_len].copy_from_slice(session.readback(qkv_len));
     timings.linear_qkv += t.elapsed();
 
@@ -174,13 +182,15 @@ pub(crate) fn run_block_gpu(
 
     // --- output projection and residual --------------------------------------
     let t = Instant::now();
-    session.project(
-        layer,
-        Projection::Out,
-        layout.x,
-        &attention[..hidden_len],
-        layout.normed,
-    ).map_err(|e| e.to_string())?;
+    session
+        .project(
+            layer,
+            Projection::Out,
+            layout.x,
+            &attention[..hidden_len],
+            layout.normed,
+        )
+        .map_err(|e| e.to_string())?;
     let projected = session.readback(hidden_len);
     // The residual is element-wise, so it stays on the CPU over the same buffer
     // the CPU path would use.
@@ -215,7 +225,14 @@ pub(crate) fn run_block_gpu(
     // gate and up share their input, so the normalised activations are uploaded
     // once and both projections read it. The activation is fused on the host so
     // the product never round-trips through the arena.
-    session.project(layer, Projection::W1, layout.x, &attention[..hidden_len], layout.gate)
+    session
+        .project(
+            layer,
+            Projection::W1,
+            layout.x,
+            &attention[..hidden_len],
+            layout.gate,
+        )
         .map_err(|e| e.to_string())?;
     //
     // `project` overwrites the readback buffer, so the gate half has to be
@@ -226,7 +243,14 @@ pub(crate) fn run_block_gpu(
     }
     let gate = session.readback(ffn_len).to_vec();
     session.scratch[..ffn_len].copy_from_slice(&gate);
-    session.project(layer, Projection::W3, layout.x, &attention[..hidden_len], layout.up)
+    session
+        .project(
+            layer,
+            Projection::W3,
+            layout.x,
+            &attention[..hidden_len],
+            layout.up,
+        )
         .map_err(|e| e.to_string())?;
     let mut activated = std::mem::take(&mut session.scratch);
     for index in 0..ffn_len {
