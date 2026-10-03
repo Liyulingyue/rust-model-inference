@@ -749,20 +749,20 @@ impl DitGpuSession {
     ) -> Result<(), VulkanError> {
         let layout = self.layout;
         let mut commands = TokenCommands::begin(self.context)?;
-        self.ops.record_diy_attention_scores(
+        self.ops.record_diy_attention_full(
             &commands,
             layout.qkv,
             layout.kv_cache_k,
             layout.kv_cache_v,
             layout.gate,
             scores,
+            out,
             QKV_WIDTH,
             HEADS,
             HEADS,
             ROPE_HEAD_WIDTH,
             rows,
         )?;
-        let _ = out;
         commands.submit_and_wait()?;
         Ok(())
     }

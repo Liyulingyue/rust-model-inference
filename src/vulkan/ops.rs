@@ -2151,6 +2151,53 @@ impl<'a> Qwen3Ops<'a> {
         Ok(())
     }
 
+    /// The whole DiT attention: scores, softmax and the value reduction.
+    ///
+    /// `kv_source` must already hold the projected QKV with the qk_norm and RoPE
+    /// applied, which is what `run_block` produces before it calls
+    /// `attention_into`. DiT has no KV cache and no mask, so the cache regions
+    /// hold exactly one block at position 0 and both later stages are told the
+    /// sequence is fully visible. The three stages are recorded into one command
+    /// buffer so the K copy, the score write and the probability write are
+    /// ordered by the barriers between them rather than by a submit each.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_diy_attention_full(
+        &self,
+        commands: &TokenCommands<'_>,
+        kv_source: ArenaRegion,
+        cache_k: ArenaRegion,
+        cache_v: ArenaRegion,
+        scratch: ArenaRegion,
+        scores: ArenaRegion,
+        output: ArenaRegion,
+        source_stride: usize,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        rows: usize,
+    ) -> Result<(), VulkanError> {
+        self.record_diy_attention_scores(
+            commands,
+            kv_source,
+            cache_k,
+            cache_v,
+            scratch,
+            scores,
+            source_stride,
+            q_heads,
+            kv_heads,
+            head_dim,
+            rows,
+        )?;
+        // base_position 0 with `rows` rows makes the sequence exactly one block,
+        // and full_attention lifts the causal limit the decoder path relies on.
+        self.record_softmax_rows(commands, scores, q_heads, 0, rows, true)?;
+        self.record_attention_values_rows(
+            commands, scores, cache_v, output, 0, 1, 0, rows, q_heads, kv_heads, head_dim, rows,
+            true,
+        )
+    }
+
     pub(crate) fn record_attention_rows(
         &self,
         commands: &TokenCommands<'_>,
