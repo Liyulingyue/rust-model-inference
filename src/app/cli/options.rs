@@ -498,8 +498,6 @@ pub fn z_image_cli_options(options: &CliOptions) -> Result<Option<ZImageCliOptio
         Some("--bench")
     } else if options.profile {
         Some("--profile")
-    } else if options.gpu {
-        Some("--gpu")
     } else if options.thinking {
         Some("--thinking")
     } else if options.language.is_some() {
@@ -513,6 +511,11 @@ pub fn z_image_cli_options(options: &CliOptions) -> Result<Option<ZImageCliOptio
     } else {
         None
     };
+    // `--gpu` is deliberately not in the conflict list. The DiT's projections
+    // go through `matmul_q8_0_quantized_parallel_rows`, which hands supported
+    // shapes to the Vulkan backend and falls back per-matmul otherwise, so the
+    // flag is meaningful here. Everything outside that kernel -- attention,
+    // norms, the VAE convolutions -- stays on the CPU either way.
     if let Some(conflict) = conflict {
         return Err(format!("Z-Image cannot be used with {conflict}"));
     }

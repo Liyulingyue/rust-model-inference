@@ -1,0 +1,39 @@
+#version 450
+
+// AdaLN modulation for the Z-Image DiT, `x + x * scale`.
+//
+// The zero-centred form is not interchangeable with `x * scale`:
+// `scale_modulated_branch` on the CPU path uses `vec_mad_self_f32`, so the
+// scale is an offset around 1.0 and a plain multiply would diverge from the
+// very first block.
+//
+// The scale is a per-channel `[width]` vector indexed by `index % width`, not by
+// the flat element offset, so it is bound read-only at binding 1 rather than
+// living in the arena.
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(std430, binding = 1) readonly buffer Scale { float values[]; } scale_buffer;
+layout(std430, binding = 2) readonly buffer Unused { float values[]; } unused;
+layout(push_constant) uniform PC {
+    uint target_word;
+    uint count;
+    uint rows;
+    uint row_stride;
+    uint width;
+} pc;
+
+void main() {
+    uint row = gl_WorkGroupID.z;
+    if (row >= pc.rows) return;
+    uint group = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint index = group * 64u + gl_LocalInvocationID.x;
+    if (index >= pc.count) return;
+
+    uint channel = index % pc.width;
+    uint at = pc.target_word + row * pc.row_stride + channel;
+    float value = uintBitsToFloat(arena.data[at]);
+    value = value + value * scale_buffer.values[channel];
+    arena.data[at] = floatBitsToUint(value);
+}

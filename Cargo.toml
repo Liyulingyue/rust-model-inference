@@ -104,3 +104,17 @@ required-features = ["vulkan"]
 name = "vk_ops_check"
 path = "examples/vk_ops_check.rs"
 required-features = ["vulkan"]
+
+[[example]]
+name = "dit_cost_model"
+path = "examples/dit_cost_model.rs"
+
+[[example]]
+name = "gpu_ceiling"
+path = "examples/gpu_ceiling.rs"
+required-features = ["vulkan"]
+
+[[example]]
+name = "dit_vk_bench"
+path = "examples/dit_vk_bench.rs"
+required-features = ["vulkan"]
