@@ -88,7 +88,10 @@ fn q4_k_m_yarn_scaling_matches_pinned_metadata() {
         .metadata("mistral3.rope.scaling.type")
         .and_then(|v| v.to_string_val())
         .unwrap_or_default();
-    assert_eq!(yarn_type, "yarn", "YaRN scaling must be active for Mistral 3");
+    assert_eq!(
+        yarn_type, "yarn",
+        "YaRN scaling must be active for Mistral 3"
+    );
     let factor: f64 = loader
         .metadata("mistral3.rope.scaling.factor")
         .and_then(|v| v.to_f64())
@@ -100,7 +103,10 @@ fn q4_k_m_yarn_scaling_matches_pinned_metadata() {
         .metadata("mistral3.rope.scaling.yarn_beta_fast")
         .and_then(|v| v.to_f64())
         .unwrap_or(0.0);
-    assert!((beta_fast - 32.0).abs() < 1e-6, "yarn_beta_fast={beta_fast}");
+    assert!(
+        (beta_fast - 32.0).abs() < 1e-6,
+        "yarn_beta_fast={beta_fast}"
+    );
     let beta_slow: f64 = loader
         .metadata("mistral3.rope.scaling.yarn_beta_slow")
         .and_then(|v| v.to_f64())
@@ -112,7 +118,10 @@ fn q4_k_m_yarn_scaling_matches_pinned_metadata() {
         .unwrap_or(0.0);
     // Mistral 3 ships `yarn_log_multiplier=1.0` (not the 0.1 llama-3
     // default). The trunk must read whatever the GGUF pins.
-    assert!((log_mult - 1.0).abs() < 1e-6, "yarn_log_multiplier={log_mult}");
+    assert!(
+        (log_mult - 1.0).abs() < 1e-6,
+        "yarn_log_multiplier={log_mult}"
+    );
 }
 
 #[test]
@@ -188,15 +197,9 @@ fn q4_k_m_tensor_inventory_matches_mistral3_graph() {
     let t0_q = shape(&loader, "blk.0.attn_q.weight").expect("blk.0.attn_q.weight");
     assert_eq!(t0_q.dims, &[n_embd as u64, (n_head * head_dim) as u64]);
     let t0_k = shape(&loader, "blk.0.attn_k.weight").expect("blk.0.attn_k.weight");
-    assert_eq!(
-        t0_k.dims,
-        &[n_embd as u64, (n_head_kv * head_dim) as u64]
-    );
+    assert_eq!(t0_k.dims, &[n_embd as u64, (n_head_kv * head_dim) as u64]);
     let t0_v = shape(&loader, "blk.0.attn_v.weight").expect("blk.0.attn_v.weight");
-    assert_eq!(
-        t0_v.dims,
-        &[n_embd as u64, (n_head_kv * head_dim) as u64]
-    );
+    assert_eq!(t0_v.dims, &[n_embd as u64, (n_head_kv * head_dim) as u64]);
     let t0_ao = shape(&loader, "blk.0.attn_output.weight").expect("blk.0.attn_output.weight");
     assert_eq!(t0_ao.dims, &[(n_head * head_dim) as u64, n_embd as u64]);
     let t0_fg = shape(&loader, "blk.0.ffn_gate.weight").expect("blk.0.ffn_gate.weight");

@@ -61,7 +61,10 @@ fn jev_runs_and_chooses_yes_for_capital_question() {
         .iter()
         .map(|c| probability_for(&stdout, *c).unwrap_or(0.0))
         .sum();
-    assert!((sum - 1.0).abs() < 1e-3, "distribution does not sum to 1: {sum}");
+    assert!(
+        (sum - 1.0).abs() < 1e-3,
+        "distribution does not sum to 1: {sum}"
+    );
 }
 
 #[test]
@@ -111,7 +114,12 @@ fn model_path() -> std::path::PathBuf {
     Path::new(&raw).to_path_buf()
 }
 
-fn run_jev(model: &std::path::Path, context: &str, question: &str, options: &[&str]) -> std::process::Output {
+fn run_jev(
+    model: &std::path::Path,
+    context: &str,
+    question: &str,
+    options: &[&str],
+) -> std::process::Output {
     assert!(model.exists(), "model file missing: {}", model.display());
     let mut command = Command::new(env!("CARGO_BIN_EXE_rust-model-inference"));
     command
@@ -128,7 +136,9 @@ fn run_jev(model: &std::path::Path, context: &str, question: &str, options: &[&s
 
 fn probability_for(stdout: &str, label: char) -> Option<f32> {
     let needle = format!("{label}:");
-    let line = stdout.lines().find(|line| line.trim_start().starts_with(&needle))?;
+    let line = stdout
+        .lines()
+        .find(|line| line.trim_start().starts_with(&needle))?;
     let after = line.split(':').nth(1)?.trim();
     after.parse::<f32>().ok()
 }

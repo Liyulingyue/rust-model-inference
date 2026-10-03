@@ -179,12 +179,7 @@ impl<'a> LlamaSession<'a> {
         // `Vec<f32>` of length `rope_dim / 2 = 64` once at session
         // init, so the per-token rotation stays a single multiply
         // (no position-dependent table lookup).
-        let yarn_thetas = super::forward::compute_yarn_thetas(
-            source,
-            &arch,
-            freq_base,
-            rope_dim,
-        );
+        let yarn_thetas = super::forward::compute_yarn_thetas(source, &arch, freq_base, rope_dim);
         let norm_groups = normalization_groups(source, &arch, n_embd)?;
         let arch_prefix = arch.clone();
         let embedding_scale = source

@@ -133,7 +133,9 @@ fn run_jev(
 
 fn probability_for(stdout: &str, label: char) -> Option<f32> {
     let needle = format!("{label}:");
-    let line = stdout.lines().find(|line| line.trim_start().starts_with(&needle))?;
+    let line = stdout
+        .lines()
+        .find(|line| line.trim_start().starts_with(&needle))?;
     let after = line.split(':').nth(1)?.trim();
     after.parse::<f32>().ok()
 }

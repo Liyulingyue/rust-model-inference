@@ -237,14 +237,7 @@ pub(crate) fn apply_rope(
         || arch == "stablelm";
     let rope_dim = rope_dim.min(head_dim);
     if rope_dim < head_dim {
-        apply_partial_rope(
-            values,
-            pos,
-            rope_dim,
-            freq_base,
-            neox_layout,
-            yarn_thetas,
-        );
+        apply_partial_rope(values, pos, rope_dim, freq_base, neox_layout, yarn_thetas);
         apply_attn_factor(values, rope_dim, attn_factor);
         return;
     }
@@ -3020,8 +3013,14 @@ mod tests {
     #[test]
     fn compute_yarn_thetas_matches_mistral3_pin() {
         let mut map = HashMap::new();
-        map.insert("mistral3.rope.scaling.type".into(), MetaValue::String("yarn".into()));
-        map.insert("mistral3.rope.scaling.factor".into(), MetaValue::Float32(16.0));
+        map.insert(
+            "mistral3.rope.scaling.type".into(),
+            MetaValue::String("yarn".into()),
+        );
+        map.insert(
+            "mistral3.rope.scaling.factor".into(),
+            MetaValue::Float32(16.0),
+        );
         map.insert(
             "mistral3.rope.scaling.original_context_length".into(),
             MetaValue::Uint32(16384),
@@ -3045,9 +3044,7 @@ mod tests {
         // `extrap[i] = freq_base^(-2i/rope_dim)`. We re-derive the
         // plain RoPE baseline here so the test fails loudly if the
         // YaRN implementation drifts from the published formula.
-        let extrap = |i: usize| -> f32 {
-            (1.0e6f32).powf(-2.0 * i as f32 / 128.0)
-        };
+        let extrap = |i: usize| -> f32 { (1.0e6f32).powf(-2.0 * i as f32 / 128.0) };
         let inv_factor = 1.0f32 / 16.0;
         // `corr(n_rot) = rope_dim * ln(n_ctx_orig / n_rot) / (2 * ln(base))`
         let corr = |n_rot: f64| -> f64 {
@@ -3068,8 +3065,7 @@ mod tests {
             // (the reference tests do the same), so the round-trip
             // through f64 introduces ≤1 ULP drift. Compare with a
             // tolerance instead of bit-exact.
-            let rel_err =
-                ((thetas[i] - expected) / expected.max(1e-30)).abs();
+            let rel_err = ((thetas[i] - expected) / expected.max(1e-30)).abs();
             assert!(
                 rel_err < 1e-6,
                 "yarn theta mismatch at i={i}: got {}, expected {} (rel_err={})",
@@ -3089,8 +3085,14 @@ mod tests {
     #[test]
     fn compute_yarn_thetas_short_context_equals_plain_rope() {
         let mut map = HashMap::new();
-        map.insert("mistral3.rope.scaling.type".into(), MetaValue::String("yarn".into()));
-        map.insert("mistral3.rope.scaling.factor".into(), MetaValue::Float32(16.0));
+        map.insert(
+            "mistral3.rope.scaling.type".into(),
+            MetaValue::String("yarn".into()),
+        );
+        map.insert(
+            "mistral3.rope.scaling.factor".into(),
+            MetaValue::Float32(16.0),
+        );
         map.insert(
             "mistral3.rope.scaling.original_context_length".into(),
             MetaValue::Uint32(16384),
