@@ -418,6 +418,7 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             | "jina-bert-v2"
             | "nomic-bert"
             | "nomic-bert-moe"
+            | "mistral3"
     ) {
         return Err(format!("Unsupported architecture: {arch}"));
     }

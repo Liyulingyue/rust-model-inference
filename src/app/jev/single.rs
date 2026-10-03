@@ -96,8 +96,15 @@ fn run_jev_decision_data_with_image(
         // CLI + HTTP); it was missing here, so `--jev` on an
         // EXAONE GGUF errored out. LlamaJevScorer renders its
         // `[|user|]` template (see llama.rs).
+        // `mistral3` rides the llama trunk for `--prompt` /
+        // completion; the JEV path uses the same `[INST] … [/INST]`
+        // template that `llama::JevScorer::build_prompt` emits
+        // (per-arch detection: `general.name` contains "mistral" or
+        // "ministral"), so routing it through the llama scorer is
+        // exact. See `tests/ministral3_3b_jev.rs` for the JEV smoke
+        // pin.
         "llama" | "k2-horizon" | "granite" | "nanbeige" | "qwen2_2" | "phi3" | "exaone"
-        | "glm4" => llama::run_jev_decision_llama(
+        | "glm4" | "mistral3" => llama::run_jev_decision_llama(
             source.clone(),
             context,
             &prepared,
