@@ -5,28 +5,37 @@ use crate::models::qwen35::trunk::{HybridTrunk, Qwen35Config};
 use crate::ops::kernel::mlx_affine::MlxAffineKernel;
 use crate::ops::kernel::{QuantizedTensor, Weight};
 
-/// Bytes one `n_in x n_out` matrix occupies for a block-quantized GGML type.
+/// Bytes one `n_in x n_out` matrix occupies for a GGML type.
 ///
-/// Q4_0 and Q8_0 pack 32 values per block, so the stride is the block count
-/// times the block size; the fixed-width types are a plain product.
+/// `GGMLType::nbytes` already knows each type's block geometry, including the
+/// 256-value super-blocks of the k-quants, so this is deliberately not a
+/// hand-rolled per-type table: the Q4_K_M export writes Q4_K, Q6_K, Q8_0, F16
+/// and BF16 in the same file, and a table that predates the k-quants panics on
+/// the first expert matrix it meets.
 fn quantized_stride(ggml_type: GGMLType, n_in: usize, n_out: usize) -> usize {
-    match ggml_type {
-        GGMLType::Q8_0 => (n_in / 32) * 34 * n_out,
-        GGMLType::Q4_0 => (n_in / 32) * 18 * n_out,
-        GGMLType::F32 => n_in * n_out * 4,
-        GGMLType::F16 | GGMLType::BF16 => n_in * n_out * 2,
-        other => panic!("unsupported Edge0 expanded type {other:?}"),
-    }
+    ggml_type.nbytes(n_in * n_out)
 }
 
-/// GGML types the expanded `--quant f16/q8_0/q4_0` exports write.
+/// GGML types the expanded exports write.
 ///
 /// The lossless export keeps the packed U32 words as I32 plus BF16 `scales` and
 /// `biases` companions, which only `MlxAffineKernel` can read.  Every other
 /// mode folds the affine groups into the matrix itself and re-encodes it, so
 /// the result is an ordinary GGML tensor and goes through `load_weight`.
-const EXPANDED_TYPES: [GGMLType; 4] =
-    [GGMLType::F32, GGMLType::F16, GGMLType::Q8_0, GGMLType::Q4_0];
+///
+/// `q4_k_m` is in this list because it is a mix: it writes Q4_K for the bulk of
+/// the linears, Q6_K where the mixed-precision rule asks for more, and leaves
+/// small or sensitive tensors at F16 / Q8_0.  All of those are already expanded,
+/// so treating any of them as affine codes sends the loader looking for
+/// `.scales` companions that the export never wrote.
+const EXPANDED_TYPES: [GGMLType; 6] = [
+    GGMLType::F32,
+    GGMLType::F16,
+    GGMLType::Q8_0,
+    GGMLType::Q4_0,
+    GGMLType::Q4K,
+    GGMLType::Q6K,
+];
 
 /// True when the checkpoint stores pre-expanded matrices instead of affine codes.
 ///
