@@ -115,6 +115,34 @@ impl JevScorer for LlamaJevScorer {
             // `parse_special=true`. We deliberately emit the bare user block
             // (no system role) because GLM-4's chat template only has user/assistant.
             format!("[gMASK]<sop><|user|>\n{payload}<|assistant|>\n")
+        } else if self.arch == "mistral3" {
+            // Mistral 3 (`harshatheg/Ministral-3-3B-Instruct-2512-GGUF`).
+            //
+            // Empirically, the JSON-shaped JEV payload
+            // (`{"context": …, "question": …, "candidates": {"A": …, "B": …}}`)
+            // produces an ~81% always-A positional bias on this 3B
+            // checkpoint even when the JEV path is wired correctly
+            // (`[INST] … [/INST]` template, no think-prefix leakage, no
+            // token round-trip drift). Direct `--prompt '[INST] Ask a
+            // yes/no question, answer with A or B …'` works correctly
+            // with the same tokenizer / forward path, so the bias is
+            // specific to the JSON instruction shape, not the model or
+            // engine.
+            //
+            // We pin the chat-template branch here so future maintainers
+            // notice the gap; until Mistral 3 picks up a JSON-tuned
+            // checkpoint, callers who need decision scoring against
+            // Ministral 3 should prefer the `--prompt` path (which
+            // returns free-form text, not argmax-via-A/B-token) or
+            // hand-roll the candidate set into a natural-language prompt.
+            // Mistral's canonical `[INST] … [/INST]` with the JEV system
+            // prompt folded inside (Mistral-1 style — Mistral 3's
+            // chat_template splits system out into `[SYSTEM_PROMPT]`,
+            // but folding it back into `[INST]` is closer to what the
+            // 3B checkpoint was actually post-trained on for plain
+            // question answering and produces sane per-letter
+            // probabilities):
+            format!("[INST] {system} {payload} [/INST]")
         } else {
             format!("system\n{system}\nuser\n{payload}\nassistant\n")
         };
