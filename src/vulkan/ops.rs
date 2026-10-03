@@ -1639,7 +1639,7 @@ impl<'a> Qwen3Ops<'a> {
         let base = sequence_length
             .checked_sub(1)
             .ok_or_else(|| VulkanError::UnsupportedShape("empty softmax".into()))?;
-        self.record_softmax_rows(commands, scores, heads, base, 1)
+        self.record_softmax_rows(commands, scores, heads, base, 1, false)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1673,6 +1673,7 @@ impl<'a> Qwen3Ops<'a> {
             kv_heads,
             head_dim,
             1,
+            false,
         )
     }
 
@@ -1930,6 +1931,7 @@ impl<'a> Qwen3Ops<'a> {
         heads: usize,
         base_position: usize,
         rows: usize,
+        full_attention: bool,
     ) -> Result<(), VulkanError> {
         let sequence_length = base_position
             .checked_add(rows)
@@ -1948,8 +1950,7 @@ impl<'a> Qwen3Ops<'a> {
             as_u32(sequence_length, "softmax sequence length")?,
             as_u32(base_position, "softmax base position")?,
             as_u32(rows, "softmax rows")?,
-            // 0 keeps the decoder's causal limit; the DiT path passes 1.
-            0,
+            u32::from(full_attention),
         ];
         let [x, y, z] = row_dispatch(heads, rows, &self.context.limits)?;
         unsafe {
@@ -1980,6 +1981,7 @@ impl<'a> Qwen3Ops<'a> {
         kv_heads: usize,
         head_dim: usize,
         rows: usize,
+        full_attention: bool,
     ) -> Result<(), VulkanError> {
         let sequence_length = base_position
             .checked_add(rows)
@@ -2029,8 +2031,7 @@ impl<'a> Qwen3Ops<'a> {
             as_u32(head_dim, "attention head dimension")?,
             as_u32(base_position, "attention base position")?,
             as_u32(rows, "attention rows")?,
-            // 0 keeps the decoder's causal limit; the DiT path passes 1.
-            0,
+            u32::from(full_attention),
         ];
         let [x, y, z] = row_dispatch(output_count.div_ceil(64), rows, &self.context.limits)?;
         unsafe {
@@ -2191,7 +2192,7 @@ impl<'a> Qwen3Ops<'a> {
             head_dim,
             rows,
         )?;
-        self.record_softmax_rows(commands, scores, q_heads, base_position, rows)?;
+        self.record_softmax_rows(commands, scores, q_heads, base_position, rows, false)?;
         self.record_attention_values_rows(
             commands,
             scores,
@@ -2205,6 +2206,7 @@ impl<'a> Qwen3Ops<'a> {
             kv_heads,
             head_dim,
             rows,
+            false,
         )
     }
 
