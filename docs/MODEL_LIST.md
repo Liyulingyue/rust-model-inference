@@ -57,4 +57,5 @@
 | Spark-X2.5 | 1.7B / 4B | 文本 | XHToken/llama.cpp | https://www.modelscope.cn/models/XHToken/Spark-X2.5-4B | https://www.modelscope.cn/models/XHToken/Spark-X2.5-4B-GGUF | √ |
 | VibeVoice-ASR | 7B | ASR |  | https://www.modelscope.cn/models/microsoft/VibeVoice-ASR | `tools/converter/vibevoice`（本仓库产出） | 待核验 |
 | Z-Image | Turbo | 文生图 | leejet/stable-diffusion.cpp @ `97d2990` | https://www.modelscope.cn/models/Tongyi-MAI/Z-Image-Turbo | https://www.modelscope.cn/models/gguf-org/z-image-gguf | 待核验。|
+| ERNIE-Image-Turbo | 8B | 文生图 | leejet/stable-diffusion.cpp @ `de298c2` | https://www.modelscope.cn/models/PaddlePaddle/ERNIE-Image-Turbo | https://www.modelscope.cn/models/unsloth/ERNIE-Image-Turbo-GGUF | 待核验。|
 | NVIDIA-Nemotron-3-Nano | 4B | 文本 | llama.cpp @ `b96806d` | https://www.modelscope.cn/models/nvidia/NVIDIA-Nemotron-3-Nano-4B-v1 | https://www.modelscope.cn/models/unsloth/NVIDIA-Nemotron-3-Nano-4B-GGUF | √ |

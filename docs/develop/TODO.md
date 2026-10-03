@@ -1020,6 +1020,31 @@ ComputePool，不是把 LLM 迁去 rayron"。迁移面：
 
 验证：llama.cpp oracle 8/8 步一致。封顶同时惠及 Qwen3.5-2B（原每次运行 KV cache 固定分配 12.9GB）。
 
+### ERNIE-Image-Turbo (8B, single-stream DiT) 适配 — 🚧 进行中 (2026-10)
+
+`general.architecture = ernie_image`（stable-diffusion.cpp @ `de298c2` 的 `ernie_image.hpp` 是参考实现；GGUF 通过 `model.diffusion_model.layers.0.adaLN_sa_ln.weight` 探测）。
+
+核心架构（`ernie_image.hpp::ErnieImageConfig`）：
+- 36 层 / hidden=4096 / heads=32 / head_dim=128 / ffn=12288（gate_proj + up_proj + linear_fc2，**SwiGLU**）
+- in_channels=128, out_channels=128, patch_size=1（latent 像素 1:1 → 4096 tokens @ 1024×1024 latent = 4096×1024 = 4.2 M tokens，远超 RAM）
+- `text_proj` 3072→4096（Ministral-3-3B 的 n_embd=3072 与 text_in_dim=3072 对齐；ELN：cross-attn 不需要，直接 concat image_tokens + text_tokens 后跑 AdaLN block）
+- 共享 AdaLN：`adaLN_modulation.1` hidden→6·hidden → chunk(6) = (shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp)；每个 block 自己 RMSNorm（`adaLN_sa_ln`、`adaLN_mlp_ln`）+ Q/K RMSNorm
+- 3D RoPE：`theta=256`，`axes_dim=[32,48,48]`（时间/temporal、h、w），只在 head_dim 前 32+48+48=128 上应用
+- `final_norm` 是 `AdaLNContinuous`（独立 norm+linear，复用 conditioning `c`）
+- `final_linear`: hidden → patch_size²·out_channels = 128
+
+调度器：flow-matching Euler（8 步 cfg=1.0；EE，支持 `--steps`）。
+
+进度：
+1. ✅ MODEL_LIST.md 加行 + TODO.md 占位
+2. ⏳ `src/models/diffusion/ernie_image/{mod,dit}.rs` scaffold + loader
+3. ⏳ DiT forward（Conv2d in + timestep embed + AdaLN shared modulation + 36 blocks + AdaLNContinuous final + final_linear unpatchify）
+4. ⏳ text encoder（复用 llama trunk `forward_to_block`，拉 Ministral-3 最后一层 hidden）+ `text_proj` matmul
+5. ⏳ CLI dispatch（`--ernie-image ...` 或 `--arch=ernie_image` 自动检测）+ arch 注册 + 测试 contract
+6. ⏳ E2E：拉 `unsloth/ERNIE-Image-Turbo-GGUF`（Q4_K_M 5.02 GB）+ `Ministral-3-3B-Instruct-2512-GGUF`（已有）+ `pig_flux_vae_fp32-f16.gguf`（已有，复用 Z-Image），512×512 跑通。
+
+参考：`references/stable-diffusion.cpp/src/model/diffusion/ernie_image.hpp`（410 行）+ `docs/ernie_image.md`（34 行）；HF mirror README: `https://hf-mirror.com/unsloth/ERNIE-Image-Turbo-GGUF`（Q2_K 3.18 GB → BF16 16.1 GB；152k 下载/月）。
+
 ### Spark-X2.5-1.7B / 4B-GGUF 适配 — ✅ 已完成（功能）+ ⚠️ 性能待优化
 
 `arch=spark2_5`，Xunfei Spark 2.5 讯飞星火。适配点：
