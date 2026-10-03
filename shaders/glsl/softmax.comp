@@ -11,6 +11,10 @@ layout(push_constant) uniform PC {
     uint sequence_length;
     uint base_position;
     uint rows;
+    /// Nonzero when every token is visible. A decoder hides tokens after the
+    /// query; the Z-Image DiT has no mask, and folding that into `base_position`
+    /// is not possible because the limit does not depend on the row.
+    uint full_attention;
 } pc;
 
 shared float partial[64];
@@ -60,7 +64,7 @@ void add_pair(
 void main() {
     uint row = gl_WorkGroupID.z;
     if (row >= pc.rows) return;
-    uint visible = pc.base_position + row + 1u;
+    uint visible = pc.full_attention != 0u ? pc.sequence_length : pc.base_position + row + 1u;
     uint head = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
     if (head >= pc.heads) return;
     uint lane = gl_LocalInvocationID.x;

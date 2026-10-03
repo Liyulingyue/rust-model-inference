@@ -16,6 +16,8 @@ layout(push_constant) uniform PC {
     uint head_dim;
     uint base_position;
     uint rows;
+    /// Nonzero when every token is visible; see `softmax.comp`.
+    uint full_attention;
 } pc;
 
 void add_pair(inout float high, inout float low, float value) {
@@ -29,7 +31,7 @@ void add_pair(inout float high, inout float low, float value) {
 void main() {
     uint row = gl_WorkGroupID.z;
     if (row >= pc.rows) return;
-    uint visible = pc.base_position + row + 1u;
+    uint visible = pc.full_attention != 0u ? pc.sequence_length : pc.base_position + row + 1u;
     uint group = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
     uint index = group * 64u + gl_LocalInvocationID.x;
     uint total = pc.q_heads * pc.head_dim;

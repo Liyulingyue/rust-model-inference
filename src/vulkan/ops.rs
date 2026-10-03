@@ -1906,6 +1906,8 @@ impl<'a> Qwen3Ops<'a> {
             (1.0 / (head_dim as f32).sqrt()).to_bits(),
             as_u32(base_position, "attention base position")?,
             as_u32(rows, "attention rows")?,
+            // 0 keeps the decoder's causal limit; the DiT path passes 1.
+            0,
         ];
         let [x, y, z] = row_dispatch(score_count.div_ceil(64), rows, &self.context.limits)?;
         unsafe {
@@ -1946,6 +1948,8 @@ impl<'a> Qwen3Ops<'a> {
             as_u32(sequence_length, "softmax sequence length")?,
             as_u32(base_position, "softmax base position")?,
             as_u32(rows, "softmax rows")?,
+            // 0 keeps the decoder's causal limit; the DiT path passes 1.
+            0,
         ];
         let [x, y, z] = row_dispatch(heads, rows, &self.context.limits)?;
         unsafe {
@@ -2025,6 +2029,8 @@ impl<'a> Qwen3Ops<'a> {
             as_u32(head_dim, "attention head dimension")?,
             as_u32(base_position, "attention base position")?,
             as_u32(rows, "attention rows")?,
+            // 0 keeps the decoder's causal limit; the DiT path passes 1.
+            0,
         ];
         let [x, y, z] = row_dispatch(output_count.div_ceil(64), rows, &self.context.limits)?;
         unsafe {
