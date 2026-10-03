@@ -32,6 +32,8 @@ from tools.converter.utils.gguf import (
     GGML_F32,
     GGML_I32,
     GGML_Q4_0,
+    GGML_Q4K,
+    GGML_Q6K,
     GGML_Q8_0,
     GgufWriter,
     read_gguf_directory,
@@ -167,7 +169,10 @@ def test_matrix_axes_rejects_row_axis_mismatch() -> None:
 
 @pytest.mark.parametrize(
     "ggml_type,bytes_per_value",
-    [(GGML_F32, 4.0), (GGML_F16, 2.0), (GGML_Q8_0, 34 / 32), (GGML_Q4_0, 18 / 32)],
+    [
+        (GGML_F32, 4.0), (GGML_F16, 2.0), (GGML_Q8_0, 34 / 32),
+        (GGML_Q4_0, 18 / 32), (GGML_Q6K, 210 / 256),
+    ],
 )
 def test_reencode_round_trips_through_the_declared_size(
     ggml_type: int, bytes_per_value: float
@@ -227,11 +232,14 @@ def test_emit_packed_f32_and_f16_reproduce_the_dequantized_values(
         assert np.allclose(got, expected, rtol=1e-3, atol=1e-3)
 
 
-@pytest.mark.parametrize("ggml_type,per_value_bytes", [(GGML_Q8_0, 34 / 32), (GGML_Q4_0, 18 / 32)])
+@pytest.mark.parametrize(
+    "ggml_type,per_value_bytes",
+    [(GGML_Q8_0, 34 / 32), (GGML_Q4_0, 18 / 32), (GGML_Q6K, 210 / 256)],
+)
 def test_emit_packed_block_quantizes_within_tolerance(
     tmp_path: Path, ggml_type: int, per_value_bytes: float
 ) -> None:
-    n_out, n_in = 4, 128
+    n_out, n_in = 4, 256 if ggml_type == GGML_Q6K else 128
     weight, scales, biases, expected = _affine_triplet(tmp_path, "blk.0.ffn_gate", n_out, n_in, 4, seed=5)
 
     out = tmp_path / f"block{ggml_type}.gguf"
@@ -284,4 +292,7 @@ def test_quant_modes_cover_lossless_and_the_ggml_targets() -> None:
     assert QUANT_MODES["f16"] == GGML_F16
     assert QUANT_MODES["q8_0"] == GGML_Q8_0
     assert QUANT_MODES["q4_0"] == GGML_Q4_0
-    assert set(QUANT_MODES) == {"lossless", "f32", "f16", "q8_0", "q4_0"}
+    assert QUANT_MODES["q4_k"] == GGML_Q4K
+    assert QUANT_MODES["q6_k"] == GGML_Q6K
+    assert QUANT_MODES["q4_k_m"] is None
+    assert set(QUANT_MODES) == {"lossless", "f32", "f16", "q8_0", "q4_0", "q4_k", "q6_k", "q4_k_m"}

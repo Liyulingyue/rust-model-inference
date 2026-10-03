@@ -50,8 +50,8 @@ position / bridge 查表保持 BF16（loader 走 `load_f32_tensor`，且对量�
 | `q8_0` | 4.61 GB | 394 Q8_0 + 234 BF16 | 25 s | ✅ 加载 | ⚠ **NAR 崩坏**，见下 |
 | `q4_0` | 3.20 GB | 394 Q4_0 + 234 BF16 | ~50 s | ✅ | 类型往返校验通过 |
 | `ar_q8_0` | 5.94 GB | 196 Q8_0 + 198 BF16 | ~100 s | ✅ | AR -21%、端到端 -13%；**另一首曲子** |
-| `q4_k_m` | ~3.2 GB | 混合 Q4_K / Q6_K | **数小时** | ✅ | 见下 |
-| `q6_k` | 3.93 GB | 394 Q6_K + 234 BF16 | **数小时** | ✅ | 见下 |
+| `q4_k_m` | ~3.2 GB | 混合 Q4_K / Q6_K | Q6_K 已加速，完整导出待重测 | ✅ | 见下 |
+| `q6_k` | 3.93 GB | 394 Q6_K + 234 BF16 | 已批量化，完整导出待重测 | ✅ | 见下 |
 
 体积为按张量精确计算值（量化目标 394 个 / 2.82 B 参数，其余 0.81 B 保持 BF16）；
 `q8_0` 的 4.61 GB 与实测导出 4.62 GB 一致。
@@ -65,8 +65,20 @@ position / bridge 查表保持 BF16（loader 走 `load_f32_tensor`，且对量�
 > **出成品音频必须用默认的 `bf16`**；量化模式仅供测速与 AR 阶段单点验证。
 > 详见 `docs/usage/yue2.md` §2.1。
 
-> **K-quant 暂不可用**：`quantize_q4_k` 量化单个 6144×2048 矩阵约需 97 s，完整导出
-> 数小时。类型与解码链路已打通且可往返校验，但 block search 需批量化之后才能实用。
+Q6_K 量化已改为 NumPy 分块向量化：保留 19 个候选及原有 F64 顺序累加、F32/F16
+舍入和编码布局，每批最多 1024 个 256 元素块，不新增依赖。与 `e7f0cc8` 的标量
+实现对照，M3 Max / Python 3.12 / NumPy 2.5.3 上，真实 YuE2
+`model.layers.0.mlp.down_proj.weight` 的前 1,048,576 个权重，三次中位数从
+7.886 s 降到 0.129 s（约 61 倍）；同一完整 2048×6144 矩阵单次对照从
+108.516 s 降到 1.504 s（约 72 倍），两组输出均逐字节一致。这是 Q6_K 编码耗时，
+**不是完整模型导出的提速倍数**；Q4_K 搜索及 NAR 的量化限制不变。
+
+回归检查：
+
+```bash
+python -m pytest -q tools/converter/utils/test_kquants.py \
+  tools/converter/edge0/test_convert_edge0.py tools/converter/yue2/test_convert_yue2.py
+```
 
 本机样例音频见 `models/YuE2-gguf/samples/`（`/models/` 已被 `.gitignore` 忽略，不随仓库分发）。
 
