@@ -1,0 +1,849 @@
+{
+ "cases": [
+  {
+   "name": "valid_natural",
+   "groups": [
+    {
+     "name": "person",
+     "task_type": "json_structures",
+     "roles": [
+      "name",
+      "employer",
+      "role",
+      "born"
+     ]
+    }
+   ],
+   "field_dtypes": {
+    "person": {
+     "name": "str",
+     "employer": "str",
+     "role": "str",
+     "born": "str"
+    }
+   },
+   "record_metadata": {
+    "person": {
+     "mode": "natural",
+     "anchor": "name",
+     "fields": {
+      "employer": {
+       "cardinality": "optional_one",
+       "exclusive": true
+      },
+      "role": {
+       "cardinality": "zero_or_more"
+      }
+     }
+    }
+   },
+   "normalized": {
+    "person": {
+     "mode": "natural",
+     "anchor": "name",
+     "occurrence_policy": "latent_all",
+     "fields": {
+      "employer": {
+       "cardinality": "optional_one",
+       "exclusive": true
+      },
+      "role": {
+       "cardinality": "zero_or_more",
+       "exclusive": false
+      }
+     }
+    }
+   },
+   "specs": {
+    "0": {
+     "task_name": "person",
+     "task_type": "json_structures",
+     "mode": "natural",
+     "anchor_query_id": 0,
+     "occurrence_policy": "latent_all",
+     "fields": [
+      {
+       "query_id": 0,
+       "name": "name",
+       "role_index": 0,
+       "cardinality": "required_one",
+       "is_anchor": true,
+       "exclusive": false
+      },
+      {
+       "query_id": 1,
+       "name": "employer",
+       "role_index": 1,
+       "cardinality": "optional_one",
+       "is_anchor": false,
+       "exclusive": true
+      },
+      {
+       "query_id": 2,
+       "name": "role",
+       "role_index": 2,
+       "cardinality": "zero_or_more",
+       "is_anchor": false,
+       "exclusive": false
+      },
+      {
+       "query_id": 3,
+       "name": "born",
+       "role_index": 3,
+       "cardinality": "optional_one",
+       "is_anchor": false,
+       "exclusive": false
+      }
+     ]
+    }
+   },
+   "error": null
+  },
+  {
+   "name": "valid_latent",
+   "groups": [
+    {
+     "name": "person",
+     "task_type": "json_structures",
+     "roles": [
+      "name",
+      "employer",
+      "role",
+      "born"
+     ]
+    }
+   ],
+   "field_dtypes": {
+    "person": {
+     "name": "str",
+     "employer": "str",
+     "role": "str",
+     "born": "str"
+    }
+   },
+   "record_metadata": {
+    "person": {
+     "mode": "latent",
+     "fields": {
+      "name": {
+       "cardinality": "required_one"
+      },
+      "employer": {
+       "cardinality": "required_one",
+       "exclusive": true
+      },
+      "role": {
+       "cardinality": "one_or_more"
+      }
+     }
+    }
+   },
+   "normalized": {
+    "person": {
+     "mode": "latent",
+     "anchor": null,
+     "occurrence_policy": "latent_all",
+     "fields": {
+      "name": {
+       "cardinality": "required_one",
+       "exclusive": false
+      },
+      "employer": {
+       "cardinality": "required_one",
+       "exclusive": true
+      },
+      "role": {
+       "cardinality": "one_or_more",
+       "exclusive": false
+      }
+     }
+    }
+   },
+   "specs": {
+    "0": {
+     "task_name": "person",
+     "task_type": "json_structures",
+     "mode": "latent",
+     "anchor_query_id": null,
+     "occurrence_policy": "latent_all",
+     "fields": [
+      {
+       "query_id": 0,
+       "name": "name",
+       "role_index": 0,
+       "cardinality": "required_one",
+       "is_anchor": false,
+       "exclusive": false
+      },
+      {
+       "query_id": 1,
+       "name": "employer",
+       "role_index": 1,
+       "cardinality": "required_one",
+       "is_anchor": false,
+       "exclusive": true
+      },
+      {
+       "query_id": 2,
+       "name": "role",
+       "role_index": 2,
+       "cardinality": "one_or_more",
+       "is_anchor": false,
+       "exclusive": false
+      },
+      {
+       "query_id": 3,
+       "name": "born",
+       "role_index": 3,
+       "cardinality": "optional_one",
+       "is_anchor": false,
+       "exclusive": false
+      }
+     ]
+    }
+   },
+   "error": null
+  },
+  {
+   "name": "valid_anchorless",
+   "groups": [
+    {
+     "name": "person",
+     "task_type": "json_structures",
+     "roles": [
+      "name",
+      "employer",
+      "role",
+      "born"
+     ]
+    }
+   ],
+   "field_dtypes": {
+    "person": {
+     "name": "str"
+    }
+   },
+   "record_metadata": {
+    "person": {
+     "mode": "anchorless",
+     "occurrence_policy": "first"
+    }
+   },
+   "normalized": {
+    "person": {
+     "mode": "anchorless",
+     "anchor": null,
+     "occurrence_policy": "first",
+     "fields": {}
+    }
+   },
+   "specs": {
+    "0": {
+     "task_name": "person",
+     "task_type": "json_structures",
+     "mode": "anchorless",
+     "anchor_query_id": null,
+     "occurrence_policy": "first",
+     "fields": [
+      {
+       "query_id": 0,
+       "name": "name",
+       "role_index": 0,
+       "cardinality": "optional_one",
+       "is_anchor": false,
+       "exclusive": false
+      },
+      {
+       "query_id": 1,
+       "name": "employer",
+       "role_index": 1,
+       "cardinality": "zero_or_more",
+       "is_anchor": false,
+       "exclusive": false
+      },
+      {
+       "query_id": 2,
+       "name": "role",
+       "role_index": 2,
+       "cardinality": "zero_or_more",
+       "is_anchor": false,
+       "exclusive": false
+      },
+      {
+       "query_id": 3,
+       "name": "born",
+       "role_index": 3,
+       "cardinality": "zero_or_more",
+       "is_anchor": false,
+       "exclusive": false
+      }
+     ]
+    }
+   },
+   "error": null
+  },
+  {
+   "name": "no_metadata_is_a_legacy_no_op",
+   "groups": [
+    {
+     "name": "person",
+     "task_type": "json_structures",
+     "roles": [
+      "name",
+      "employer",
+      "role",
+      "born"
+     ]
+    }
+   ],
+   "field_dtypes": {
+    "person": {
+     "name": "str"
+    }
+   },
+   "record_metadata": null,
+   "normalized": {},
+   "specs": {},
+   "error": null
+  },
+  {
+   "name": "mode_absent_is_a_legacy_no_op",
+   "groups": [
+    {
+     "name": "person",
+     "task_type": "json_structures",
+     "roles": [
+      "name",
+      "employer",
+      "role",
+      "born"
+     ]
+    }
+   ],
+   "field_dtypes": {
+    "person": {
+     "name": "str"
+    }
+   },
+   "record_metadata": {
+    "person": {
+     "anchor": "name"
+    }
+   },
+   "normalized": {},
+   "specs": {},
+   "error": null
+  },
+  {
+   "name": "metadata_for_an_absent_group",
+   "groups": [
+    {
+     "name": "person",
+     "task_type": "json_structures",
+     "roles": [
+      "name",
+      "employer",
+      "role",
+      "born"
+     ]
+    }
+   ],
+   "field_dtypes": {
+    "person": {
+     "name": "str"
+    }
+   },
+   "record_metadata": {
+    "other": {
+     "mode": "latent"
+    }
+   },
+   "normalized": {
+    "other": {
+     "mode": "latent",
+     "anchor": null,
+     "occurrence_policy": "latent_all",
+     "fields": {}
+    }
+   },
+   "specs": {},
+   "error": null
+  },
+  {
+   "name": "defaults_anchor_dtype_and_fallback",
+   "groups": [
+    {
+     "name": "person",
+     "task_type": "json_structures",
+     "roles": [
+      "name",
+      "employer",
+      "role",
+      "born"
+     ]
+    }
+   ],
+   "field_dtypes": {
+    "person": {
+     "name": "str",
+     "employer": "str",
+     "role": "str"
+    }
+   },
+   "record_metadata": {
+    "person": {
+     "mode": "natural",
+     "anchor": "name"
+    }
+   },
+   "normalized": {
+    "person": {
+     "mode": "natural",
+     "anchor": "name",
+     "occurrence_policy": "latent_all",
+     "fields": {}
+    }
+   },
+   "specs": {
+    "0": {
+     "task_name": "person",
+     "task_type": "json_structures",
+     "mode": "natural",
+     "anchor_query_id": 0,
+     "occurrence_policy": "latent_all",
+     "fields": [
+      {
+       "query_id": 0,
+       "name": "name",
+       "role_index": 0,
+       "cardinality": "required_one",
+       "is_anchor": true,
+       "exclusive": false
+      },
+      {
+       "query_id": 1,
+       "name": "employer",
+       "role_index": 1,
+       "cardinality": "optional_one",
+       "is_anchor": false,
+       "exclusive": false
+      },
+      {
+       "query_id": 2,
+       "name": "role",
+       "role_index": 2,
+       "cardinality": "optional_one",
+       "is_anchor": false,
+       "exclusive": false
+      },
+      {
+       "query_id": 3,
+       "name": "born",
+       "role_index": 3,
+       "cardinality": "zero_or_more",
+       "is_anchor": false,
+       "exclusive": false
+      }
+     ]
+    }
+   },
+   "error": null
+  },
+  {
+   "name": "explicit_beats_dtype",
+   "groups": [
+    {
+     "name": "person",
+     "task_type": "json_structures",
+     "roles": [
+      "name",
+      "employer",
+      "role",
+      "born"
+     ]
+    }
+   ],
+   "field_dtypes": {
+    "person": {
+     "name": "str",
+     "born": "str"
+    }
+   },
+   "record_metadata": {
+    "person": {
+     "mode": "natural",
+     "anchor": "name",
+     "fields": {
+      "born": {
+       "cardinality": "one_or_more"
+      }
+     }
+    }
+   },
+   "normalized": {
+    "person": {
+     "mode": "natural",
+     "anchor": "name",
+     "occurrence_policy": "latent_all",
+     "fields": {
+      "born": {
+       "cardinality": "one_or_more",
+       "exclusive": false
+      }
+     }
+    }
+   },
+   "specs": {
+    "0": {
+     "task_name": "person",
+     "task_type": "json_structures",
+     "mode": "natural",
+     "anchor_query_id": 0,
+     "occurrence_policy": "latent_all",
+     "fields": [
+      {
+       "query_id": 0,
+       "name": "name",
+       "role_index": 0,
+       "cardinality": "required_one",
+       "is_anchor": true,
+       "exclusive": false
+      },
+      {
+       "query_id": 1,
+       "name": "employer",
+       "role_index": 1,
+       "cardinality": "zero_or_more",
+       "is_anchor": false,
+       "exclusive": false
+      },
+      {
+       "query_id": 2,
+       "name": "role",
+       "role_index": 2,
+       "cardinality": "zero_or_more",
+       "is_anchor": false,
+       "exclusive": false
+      },
+      {
+       "query_id": 3,
+       "name": "born",
+       "role_index": 3,
+       "cardinality": "one_or_more",
+       "is_anchor": false,
+       "exclusive": false
+      }
+     ]
+    }
+   },
+   "error": null
+  },
+  {
+   "name": "two_groups_keep_their_own_anchor",
+   "groups": [
+    {
+     "name": "person",
+     "task_type": "json_structures",
+     "roles": [
+      "name",
+      "employer",
+      "role",
+      "born"
+     ]
+    },
+    {
+     "name": "company",
+     "task_type": "json_structures",
+     "roles": [
+      "name",
+      "founder",
+      "city"
+     ]
+    }
+   ],
+   "field_dtypes": {},
+   "record_metadata": {
+    "person": {
+     "mode": "natural",
+     "anchor": "name"
+    },
+    "company": {
+     "mode": "natural",
+     "anchor": "founder"
+    }
+   },
+   "normalized": {
+    "person": {
+     "mode": "natural",
+     "anchor": "name",
+     "occurrence_policy": "latent_all",
+     "fields": {}
+    },
+    "company": {
+     "mode": "natural",
+     "anchor": "founder",
+     "occurrence_policy": "latent_all",
+     "fields": {}
+    }
+   },
+   "specs": {
+    "0": {
+     "task_name": "person",
+     "task_type": "json_structures",
+     "mode": "natural",
+     "anchor_query_id": 0,
+     "occurrence_policy": "latent_all",
+     "fields": [
+      {
+       "query_id": 0,
+       "name": "name",
+       "role_index": 0,
+       "cardinality": "required_one",
+       "is_anchor": true,
+       "exclusive": false
+      },
+      {
+       "query_id": 1,
+       "name": "employer",
+       "role_index": 1,
+       "cardinality": "zero_or_more",
+       "is_anchor": false,
+       "exclusive": false
+      },
+      {
+       "query_id": 2,
+       "name": "role",
+       "role_index": 2,
+       "cardinality": "zero_or_more",
+       "is_anchor": false,
+       "exclusive": false
+      },
+      {
+       "query_id": 3,
+       "name": "born",
+       "role_index": 3,
+       "cardinality": "zero_or_more",
+       "is_anchor": false,
+       "exclusive": false
+      }
+     ]
+    },
+    "1": {
+     "task_name": "company",
+     "task_type": "json_structures",
+     "mode": "natural",
+     "anchor_query_id": 5,
+     "occurrence_policy": "latent_all",
+     "fields": [
+      {
+       "query_id": 4,
+       "name": "name",
+       "role_index": 0,
+       "cardinality": "zero_or_more",
+       "is_anchor": false,
+       "exclusive": false
+      },
+      {
+       "query_id": 5,
+       "name": "founder",
+       "role_index": 1,
+       "cardinality": "required_one",
+       "is_anchor": true,
+       "exclusive": false
+      },
+      {
+       "query_id": 6,
+       "name": "city",
+       "role_index": 2,
+       "cardinality": "zero_or_more",
+       "is_anchor": false,
+       "exclusive": false
+      }
+     ]
+    }
+   },
+   "error": null
+  },
+  {
+   "name": "error_natural_without_anchor",
+   "groups": [
+    {
+     "name": "person",
+     "task_type": "json_structures",
+     "roles": [
+      "name",
+      "employer",
+      "role",
+      "born"
+     ]
+    }
+   ],
+   "field_dtypes": {},
+   "record_metadata": {
+    "person": {
+     "mode": "natural"
+    }
+   },
+   "normalized": {},
+   "specs": {},
+   "error": "ValueError: record_metadata['person'] mode='natural' requires 'anchor'"
+  },
+  {
+   "name": "error_latent_with_anchor",
+   "groups": [
+    {
+     "name": "person",
+     "task_type": "json_structures",
+     "roles": [
+      "name",
+      "employer",
+      "role",
+      "born"
+     ]
+    }
+   ],
+   "field_dtypes": {},
+   "record_metadata": {
+    "person": {
+     "mode": "latent",
+     "anchor": "name"
+    }
+   },
+   "normalized": {},
+   "specs": {},
+   "error": "ValueError: record_metadata['person'] mode='latent' must not set 'anchor'"
+  },
+  {
+   "name": "error_unknown_mode",
+   "groups": [
+    {
+     "name": "person",
+     "task_type": "json_structures",
+     "roles": [
+      "name",
+      "employer",
+      "role",
+      "born"
+     ]
+    }
+   ],
+   "field_dtypes": {},
+   "record_metadata": {
+    "person": {
+     "mode": "greedy"
+    }
+   },
+   "normalized": {},
+   "specs": {},
+   "error": "ValueError: record_metadata['person'].mode must be one of ('natural', 'latent', 'anchorless'), got 'greedy'"
+  },
+  {
+   "name": "error_bad_cardinality",
+   "groups": [
+    {
+     "name": "person",
+     "task_type": "json_structures",
+     "roles": [
+      "name",
+      "employer",
+      "role",
+      "born"
+     ]
+    }
+   ],
+   "field_dtypes": {},
+   "record_metadata": {
+    "person": {
+     "mode": "latent",
+     "fields": {
+      "employer": {
+       "cardinality": "maybe"
+      }
+     }
+    }
+   },
+   "normalized": {},
+   "specs": {},
+   "error": "ValueError: record_metadata['person'].fields['employer'].cardinality invalid: 'maybe'"
+  },
+  {
+   "name": "error_anchor_not_a_field",
+   "groups": [
+    {
+     "name": "person",
+     "task_type": "json_structures",
+     "roles": [
+      "name",
+      "employer",
+      "role",
+      "born"
+     ]
+    }
+   ],
+   "field_dtypes": {},
+   "record_metadata": {
+    "person": {
+     "mode": "natural",
+     "anchor": "nope"
+    }
+   },
+   "normalized": {
+    "person": {
+     "mode": "natural",
+     "anchor": "nope",
+     "occurrence_policy": "latent_all",
+     "fields": {}
+    }
+   },
+   "specs": {},
+   "error": "ValueError: record 'person' declares anchor 'nope' but no matching field query was found in the layout"
+  },
+  {
+   "name": "error_bad_occurrence_policy",
+   "groups": [
+    {
+     "name": "person",
+     "task_type": "json_structures",
+     "roles": [
+      "name",
+      "employer",
+      "role",
+      "born"
+     ]
+    }
+   ],
+   "field_dtypes": {},
+   "record_metadata": {
+    "person": {
+     "mode": "latent",
+     "occurrence_policy": "whenever"
+    }
+   },
+   "normalized": {},
+   "specs": {},
+   "error": "ValueError: record_metadata['person'].occurrence_policy must be one of ('all', 'first', 'error_on_ambiguous', 'latent_all'), got 'whenever'"
+  },
+  {
+   "name": "error_metadata_not_a_mapping",
+   "groups": [
+    {
+     "name": "person",
+     "task_type": "json_structures",
+     "roles": [
+      "name",
+      "employer",
+      "role",
+      "born"
+     ]
+    }
+   ],
+   "field_dtypes": {},
+   "record_metadata": {
+    "person": "natural"
+   },
+   "normalized": {},
+   "specs": {},
+   "error": "ValueError: record_metadata['person'] must be a mapping"
+  }
+ ]
+}

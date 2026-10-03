@@ -15,6 +15,17 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
     {
         return Err("--qwen-timestep must be finite".into());
     }
+    if options.gliner2_boundary {
+        if !options.jev {
+            return Err("--gliner2-boundary requires --jev".into());
+        }
+        if options.gliner2_decide {
+            return Err("--gliner2-boundary and --gliner2-decide select different backends".into());
+        }
+        if options.clm_head.is_some() {
+            return Err("--gliner2-boundary and --clm-head select different backends".into());
+        }
+    }
     if options.gliner2_decide {
         if !options.jev {
             return Err("--gliner2-decide requires --jev".into());
@@ -25,8 +36,8 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
         if options.gliner2_schema.is_some() && options.jev_multi {
             return Err("--gliner2-schema cannot be combined with --jev-multi".into());
         }
-    } else if options.gliner2_schema.is_some() {
-        return Err("--gliner2-schema requires --gliner2-decide".into());
+    } else if options.gliner2_schema.is_some() && !options.gliner2_boundary {
+        return Err("--gliner2-schema requires --gliner2-decide or --gliner2-boundary".into());
     }
     if options.laya_request.is_some() {
         if options.model.as_os_str().is_empty() {

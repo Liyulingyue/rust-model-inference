@@ -27,19 +27,65 @@ ARCH = "gliner2"
 # Added on top of the 128000 SentencePiece pieces; ids 128000..128010 in
 # `tokenizer_config.json`. [MASK] leads because GLiNER2 appends its ten schema
 # markers after whatever the base tokenizer already declared.
-EXPECTED_CONFIG = {"architecture": "span", "model_name": "microsoft/deberta-v3-large",
-                   "token_pooling": "first", "config_version": 3}
+#
+# Pre-2.5 configs (e.g. fastino/gliner2-large-v1) omit `architecture`,
+# `config_version`, and `token_pooling`; the field is present only from
+# gliner2.5 onwards. Same encoder + head contract, just an older config schema.
+EXPECTED_CONFIG_OPTIONAL = {"architecture": "span", "config_version": 3,
+                            "token_pooling": "first"}
 
-# microsoft/deberta-v3-large, as resolved by `AutoConfig.from_pretrained` inside
-# `SpanExtractorModel._load_encoder`. `position_buckets * 2` is the row count of
-# `rel_embeddings`, and `att_span` (the clamp range inside
-# `disentangled_attention_bias`) is the bucket count itself.
-ENCODER = {"hidden_size": 1024, "num_hidden_layers": 24, "num_attention_heads": 16,
-           "intermediate_size": 4096, "hidden_act": "gelu", "layer_norm_eps": 1e-7,
-           "relative_attention": True, "position_buckets": 256,
-           "max_position_embeddings": 512, "max_relative_positions": -1,
-           "position_biased_input": False, "type_vocab_size": 0,
-           "norm_rel_ebd": "layer_norm", "pos_att_type": "p2c|c2p", "share_att_key": True}
+# Both the slow and the fast DeBERTa-v2 tokenizer classes, over one SPM vocab.
+TOKENIZER_CLASSES = ("DebertaV2Tokenizer", "DebertaV2TokenizerFast")
+
+# Encoder size per `config.json`'s `model_name`. Only the four size fields vary
+# across the DeBERTa-v3 checkpoints GLiNER2 ships; the relative-attention
+# settings in ENCODER_COMMON are what `AutoConfig.from_pretrained` resolves
+# identically for every v3 size.
+#
+# `position_buckets * 2` is the row count of `rel_embeddings`, and `att_span`
+# (the clamp range inside `disentangled_attention_bias`) is the bucket count.
+#
+# Sizes are read off the published `microsoft/deberta-v3-*` configs, not
+# inferred. Three of the four are re-derived from the checkpoint's tensor shapes
+# by the contracts below, so a wrong entry here fails the conversion;
+# `num_attention_heads` appears in no tensor shape, which makes it the one field
+# only the byte-exact oracle can catch.
+ENCODER_SIZES = {
+    "microsoft/deberta-v3-large": {"hidden_size": 1024, "num_hidden_layers": 24,
+                                   "num_attention_heads": 16, "intermediate_size": 4096},
+    "microsoft/deberta-v3-base": {"hidden_size": 768, "num_hidden_layers": 12,
+                                  "num_attention_heads": 12, "intermediate_size": 3072},
+    # fastino/gliner2-multi-v1. mDeBERTa-v3 is DeBERTa-v2 with a 250k
+    # multilingual SPM vocab; its published config is field-for-field identical
+    # to deberta-v3-base apart from `vocab_size` (251000 vs 128100), so every
+    # number here is the base row again. The vocab is not in this table: it is
+    # derived from the tokenizer below and re-checked against the checkpoint's
+    # `word_embeddings` shape.
+    "microsoft/mdeberta-v3-base": {"hidden_size": 768, "num_hidden_layers": 12,
+                                   "num_attention_heads": 12, "intermediate_size": 3072},
+}
+
+# As resolved by `AutoConfig.from_pretrained` inside
+# `SpanExtractorModel._load_encoder`, for every size in ENCODER_SIZES.
+ENCODER_COMMON = {"hidden_act": "gelu", "layer_norm_eps": 1e-7,
+                  "relative_attention": True, "position_buckets": 256,
+                  "max_position_embeddings": 512, "max_relative_positions": -1,
+                  "position_biased_input": False, "type_vocab_size": 0,
+                  "norm_rel_ebd": "layer_norm", "pos_att_type": "p2c|c2p",
+                  "share_att_key": True}
+
+
+def resolve_encoder(model_name: str) -> dict:
+    """The encoder dims for `model_name`, or an error naming what is supported.
+
+    An unknown `model_name` is a hard failure rather than a fallback to the
+    large sizes: a silently wrong `hidden_size` would either trip the shape
+    contracts or, worse, pass them and produce a GGUF that decodes to noise.
+    """
+    if model_name not in ENCODER_SIZES:
+        raise ValueError(f"Unsupported model_name {model_name!r}; "
+                         f"expected one of {sorted(ENCODER_SIZES)}")
+    return {**ENCODER_COMMON, **ENCODER_SIZES[model_name]}
 
 # `DisentangledSelfAttention.forward` sets `scale_factor = 1 + |pos_att_type|`
 # and divides the content-content *and* both position terms by
@@ -148,55 +194,105 @@ def parse_spm(blob: bytes) -> dict:
 # Contract
 # ---------------------------------------------------------------------------
 
-def validate_config(config: dict) -> None:
-    for key, value in EXPECTED_CONFIG.items():
-        if config.get(key) != value:
-            raise ValueError(f"Unsupported config {key}: {config.get(key)!r}; expected {value!r}")
+def validate_config(config: dict) -> dict:
+    """Check the config against the contract and return the encoder dims.
+
+    `model_type` is the family marker both sizes share; `model_name` selects the
+    size and is resolved rather than compared, since more than one is supported.
+    """
+    if config.get("model_type") != "extractor":
+        raise ValueError(f"Unsupported model_type: {config.get('model_type')!r}; expected 'extractor'")
+    encoder = resolve_encoder(config.get("model_name"))
+    for key, value in EXPECTED_CONFIG_OPTIONAL.items():
+        if config.get(key) not in (value, None):
+            raise ValueError(f"Unsupported config {key}: {config.get(key)!r}; expected {value!r} or missing")
+    return encoder
 
 
-def added_tokens(tokenizer_config: dict, spm_pieces: list[str]) -> dict[str, int]:
+def added_tokens(tokenizer_config: dict, spm_pieces: list[str],
+                 fast: dict | None = None) -> dict[str, int]:
     """Tokens appended past the SentencePiece vocab, id-ordered.
 
-    `added_tokens_decoder` also lists the four base specials, so those are
-    dropped after being checked against the SPM pieces.
+    `added_tokens_decoder` also lists tokens that are *already* in the SPM
+    vocab, and those are not a mistake: the four base specials always are, and
+    mDeBERTa-v3 (`fastino/gliner2-multi-v1`) additionally declares its 100
+    `<extra_id_N>` sentinel pieces there. So declarations are split by id — those
+    below the SPM length must match the piece they claim, which is a stricter
+    check than ignoring them, and only the rest are the appended block the GGUF
+    has to carry.
     """
+    base = len(spm_pieces)
     decoder = tokenizer_config.get("added_tokens_decoder") or {}
     declared = {entry["content"]: int(index) for index, entry in decoder.items()}
+    # The family ships two declaration styles. Older repos carry an
+    # `added_tokens_decoder` in `tokenizer_config.json`; the guardrail repos and
+    # the whole boundary family carry only `extra_special_tokens` (ten names, no
+    # `[MASK]`) and leave the ids to `tokenizer.json`. When both are present they
+    # must agree, which is a stronger check than trusting either alone.
+    from_fast = {entry["content"]: int(entry["id"])
+                 for entry in (fast or {}).get("added_tokens", [])}
+    if declared and from_fast:
+        disagree = sorted(token for token in set(declared) & set(from_fast)
+                          if declared[token] != from_fast[token])
+        if disagree:
+            raise ValueError(
+                f"tokenizer_config and tokenizer.json disagree on {disagree[:3]}"
+            )
+    if not declared:
+        declared = from_fast
     for content, index in (("[PAD]", 0), ("[CLS]", 1), ("[SEP]", 2), ("[UNK]", 3)):
-        if declared.pop(content, None) != index or spm_pieces[index] != content:
+        if declared.get(content) != index or spm_pieces[index] != content:
             raise ValueError(f"base special token {content} does not match the SPM piece at {index}")
+    mismatched = [content for content, index in declared.items()
+                  if index < base and spm_pieces[index] != content]
+    if mismatched:
+        raise ValueError(f"added token {mismatched[0]!r} does not match the SPM piece at its id")
     missing = [token for token in SPECIAL_TOKENS if token not in declared]
     if missing:
         raise ValueError(f"tokenizer_config is missing added tokens: {missing}")
-    base = len(spm_pieces)
-    if sorted(declared.values()) != list(range(base, base + len(declared))):
-        raise ValueError(f"added tokens are not a contiguous block at {base}: {declared}")
-    return declared
+    added = {content: index for content, index in declared.items() if index >= base}
+    if sorted(added.values()) != list(range(base, base + len(added))):
+        raise ValueError(f"added tokens are not a contiguous block at {base}: {added}")
+    return added
 
 
 def fast_tokenizer_pieces(fast: dict) -> list[str]:
     model = fast.get("model", {})
-    if model.get("type") != "Unigram" or len(model.get("vocab", [])) != 128000:
-        raise ValueError("unsupported tokenizer.json Unigram vocabulary")
+    # See the boundary converter: Unigram is the structural requirement, the
+    # length is not fixed (128000 for DeBERTa-v3, 250101 for mDeBERTa-v3), and
+    # the checkpoint's embedding shape is the authority.
+    if model.get("type") != "Unigram" or not model.get("vocab"):
+        raise ValueError("unsupported tokenizer.json vocabulary")
+    pieces = [entry[0] for entry in model["vocab"]]
+    # The eleven schema specials occupy a contiguous block starting right after
+    # the vocabulary: 128000 for the DeBERTa-v3 tokenizers, 250101 for
+    # mDeBERTa-v3's. Deriving the base from the vocabulary length is what makes
+    # this work for both, and `added_tokens` cross-checks it against whatever
+    # `tokenizer_config.json` declares.
     declared = {entry["content"]: entry["id"] for entry in fast.get("added_tokens", [])}
-    if any(declared.get(token) != index for index, token in enumerate(SPECIAL_TOKENS, 128000)):
-        raise ValueError("tokenizer.json added token IDs differ from GLiNER2")
-    return [entry[0] for entry in model["vocab"]]
+    base = len(pieces)
+    for offset, token in enumerate(SPECIAL_TOKENS):
+        if declared.get(token) != base + offset:
+            raise ValueError(
+                f"tokenizer.json places {token!r} at {declared.get(token)!r}, "
+                f"expected {base + offset} (vocab is {base} pieces)"
+            )
+    return pieces
 
 
-def tensor_contracts(vocab_size: int) -> dict[str, tuple]:
-    d, f = ENCODER["hidden_size"], ENCODER["intermediate_size"]
+def tensor_contracts(encoder: dict, vocab_size: int) -> dict[str, tuple]:
+    d, f = encoder["hidden_size"], encoder["intermediate_size"]
     # `create_mlp(input_dim=hidden, intermediate_dims=[hidden * 2], output_dim=1)`.
     wide = d * 2
     shapes = {
         "token_embd.weight": (vocab_size, d),
         "tok_norm.weight": (d,), "tok_norm.bias": (d,),
-        "rel_embeddings.weight": (ENCODER["position_buckets"] * 2, d),
+        "rel_embeddings.weight": (encoder["position_buckets"] * 2, d),
         "rel_norm.weight": (d,), "rel_norm.bias": (d,),
         "classifier.0.weight": (wide, d), "classifier.0.bias": (wide,),
         "classifier.2.weight": (1, wide), "classifier.2.bias": (1,),
     }
-    for i in range(ENCODER["num_hidden_layers"]):
+    for i in range(encoder["num_hidden_layers"]):
         p = f"blk.{i}."
         shapes.update({
             p + "attn_q.weight": (d, d), p + "attn_q.bias": (d,),
@@ -211,7 +307,7 @@ def tensor_contracts(vocab_size: int) -> dict[str, tuple]:
     return shapes
 
 
-def source_contracts(vocab_size: int) -> dict[str, str]:
+def source_contracts(encoder: dict, vocab_size: int) -> dict[str, str]:
     """Map GGUF tensor name -> safetensors key."""
     mapping = {
         "token_embd.weight": "encoder.embeddings.word_embeddings.weight",
@@ -227,7 +323,7 @@ def source_contracts(vocab_size: int) -> dict[str, str]:
     }
     layer = "attention.self.{q}.{k}"
     ff = "attention.output.dense"
-    for i in range(ENCODER["num_hidden_layers"]):
+    for i in range(encoder["num_hidden_layers"]):
         src = f"encoder.encoder.layer.{i}."
         dst = f"blk.{i}."
         for role, name in (("q", "query_proj"), ("k", "key_proj"), ("v", "value_proj")):
@@ -252,10 +348,17 @@ def convert(model_dir: Path, output: Path) -> None:
     if output.exists():
         raise FileExistsError(output)
     config = json.loads((model_dir / "config.json").read_text())
-    validate_config(config)
+    encoder = validate_config(config)
     tokenizer_config = json.loads((model_dir / "tokenizer_config.json").read_text())
-    if tokenizer_config.get("tokenizer_class") != "DebertaV2Tokenizer":
-        raise ValueError(f"Expected DebertaV2Tokenizer, got {tokenizer_config.get('tokenizer_class')!r}")
+    # fastino ships both the slow `DebertaV2Tokenizer` (gliner2-large-v1,
+    # GLiNER2.5-Decide) and the fast `DebertaV2TokenizerFast` (gliner2-base-v1)
+    # for what is the same DeBERTa-v2 SPM vocabulary. The class name is only a
+    # flavour marker; the properties that decide the pieces and the normalizer
+    # are checked on the next line, so accept exactly these two rather than
+    # widening to any `Deberta*`.
+    if tokenizer_config.get("tokenizer_class") not in TOKENIZER_CLASSES:
+        raise ValueError(f"Expected one of {sorted(TOKENIZER_CLASSES)}, "
+                         f"got {tokenizer_config.get('tokenizer_class')!r}")
     if tokenizer_config.get("vocab_type") != "spm" or tokenizer_config.get("do_lower_case"):
         raise ValueError("Expected a case-sensitive SentencePiece tokenizer")
     tokenizer_json_path = model_dir / "tokenizer.json"
@@ -273,10 +376,10 @@ def convert(model_dir: Path, output: Path) -> None:
         if spm["normalizer"].get("name") != "nmt_nfkc":
             raise ValueError(f"Unsupported normalizer {spm['normalizer'].get('name')!r}")
         pieces = spm["pieces"]
-    added = added_tokens(tokenizer_config, pieces)
+    added = added_tokens(tokenizer_config, pieces, fast)
     vocab_size = max(added.values()) + 1
-    contracts = tensor_contracts(vocab_size)
-    sources = source_contracts(vocab_size)
+    contracts = tensor_contracts(encoder, vocab_size)
+    sources = source_contracts(encoder, vocab_size)
 
     source = open_safetensors(model_dir / "model.safetensors")
     present = {name for name in source.header if name != "__metadata__"}
@@ -298,24 +401,25 @@ def convert(model_dir: Path, output: Path) -> None:
 
     writer = GgufWriter(output)
     writer.add_meta("general.architecture", ARCH)
-    writer.add_meta("general.name", "gliner2.5-decide")
+    writer.add_meta("general.name", model_dir.name)
     writer.add_meta("general.file_type", "F32")
-    writer.add_meta(f"{ARCH}.block_count", ENCODER["num_hidden_layers"])
-    writer.add_meta(f"{ARCH}.embedding_length", ENCODER["hidden_size"])
-    writer.add_meta(f"{ARCH}.feed_forward_length", ENCODER["intermediate_size"])
-    writer.add_meta(f"{ARCH}.attention.head_count", ENCODER["num_attention_heads"])
-    writer.add_meta(f"{ARCH}.attention.head_dim", ENCODER["hidden_size"] // ENCODER["num_attention_heads"])
+    writer.add_meta(f"{ARCH}.block_count", encoder["num_hidden_layers"])
+    writer.add_meta(f"{ARCH}.embedding_length", encoder["hidden_size"])
+    writer.add_meta(f"{ARCH}.feed_forward_length", encoder["intermediate_size"])
+    writer.add_meta(f"{ARCH}.attention.head_count", encoder["num_attention_heads"])
+    writer.add_meta(f"{ARCH}.attention.head_dim", encoder["hidden_size"] // encoder["num_attention_heads"])
     writer.add_meta(f"{ARCH}.attention.scale_divisor", SCALE_DIVISOR)
-    writer.add_meta(f"{ARCH}.attention.layer_norm_epsilon", ENCODER["layer_norm_eps"])
-    writer.add_meta(f"{ARCH}.relative_attention.bucket_size", ENCODER["position_buckets"])
-    writer.add_meta(f"{ARCH}.relative_attention.max_relative_positions", ENCODER["max_position_embeddings"])
+    writer.add_meta(f"{ARCH}.attention.layer_norm_epsilon", encoder["layer_norm_eps"])
+    writer.add_meta(f"{ARCH}.relative_attention.bucket_size", encoder["position_buckets"])
+    writer.add_meta(f"{ARCH}.relative_attention.max_relative_positions", encoder["max_position_embeddings"])
     writer.add_meta(f"{ARCH}.norm_rel_embeddings", True)
-    writer.add_meta(f"{ARCH}.hidden_act", ENCODER["hidden_act"])
+    writer.add_meta(f"{ARCH}.hidden_act", encoder["hidden_act"])
     writer.add_meta(f"{ARCH}.vocab_size", vocab_size)
-    writer.add_meta(f"{ARCH}.classifier.intermediate_size", ENCODER["hidden_size"] * 2)
+    writer.add_meta(f"{ARCH}.classifier.intermediate_size", encoder["hidden_size"] * 2)
     writer.add_meta(f"{ARCH}.classifier.activation", "relu")
-    writer.add_meta(f"{ARCH}.source_architecture", json.dumps({k: config[k] for k in EXPECTED_CONFIG}))
-    writer.add_meta(f"{ARCH}.source_config", json.dumps(ENCODER))
+    source_keys = ("model_name", "model_type", *EXPECTED_CONFIG_OPTIONAL)
+    writer.add_meta(f"{ARCH}.source_architecture", json.dumps({k: config.get(k) for k in source_keys}))
+    writer.add_meta(f"{ARCH}.source_config", json.dumps(encoder))
     writer.add_meta("tokenizer.ggml.model", "hf-json" if fast_json is not None else "spm")
     writer.add_meta("tokenizer.ggml.vocab_size", vocab_size)
     if fast_json is not None:

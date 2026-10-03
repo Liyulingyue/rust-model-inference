@@ -27,6 +27,13 @@ use std::sync::OnceLock;
 pub const P_TOKEN: &str = "[P]";
 /// `SchemaTransformer.L_TOKEN`.
 pub const L_TOKEN: &str = "[L]";
+/// `SchemaTransformer.E_TOKEN` — the child marker for extractive (`entities`)
+/// schema groups, i.e. one query per field.
+pub const E_TOKEN: &str = "[E]";
+/// `SchemaTransformer.C_TOKEN` — the child marker for classification groups.
+pub const C_TOKEN: &str = "[C]";
+/// `SchemaTransformer.R_TOKEN` — the child marker for relation groups.
+pub const R_TOKEN: &str = "[R]";
 /// `SchemaTransformer.SEP_TEXT`.
 pub const SEP_TEXT: &str = "[SEP_TEXT]";
 /// `SchemaTransformer.SEP_STRUCT`.
@@ -359,6 +366,14 @@ impl Task {
 
     /// `SchemaTransformer._transform_schema`.
     pub fn schema_tokens(&self) -> Vec<String> {
+        self.schema_tokens_with(L_TOKEN)
+    }
+
+    /// The reference's `_transform_schema` layout with an explicit child
+    /// marker: `[L]` for classification (Decide), `[E]` for extractive entities,
+    /// `[R]` for relations. The rest of the token stream is identical, so this
+    /// is the only thing that distinguishes the two prompt families.
+    pub fn schema_tokens_with(&self, child_marker: &str) -> Vec<String> {
         let mut prompt = match &self.prompt {
             Some(text) => format!("{}: {text}", self.name),
             None => self.name.clone(),
@@ -380,7 +395,7 @@ impl Task {
             "(".to_string(),
         ];
         for label in &self.labels {
-            tokens.push(L_TOKEN.to_string());
+            tokens.push(child_marker.to_string());
             tokens.push(label.name.clone());
         }
         tokens.push(")".to_string());
@@ -402,31 +417,74 @@ pub struct TaskMarkers {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncodedPrompt {
     pub input_ids: Vec<u32>,
+    /// Per task: the `[P]` group marker followed by one row per child marker.
+    /// The classification head reads this with `.skip(1)`.
     pub markers: Vec<TaskMarkers>,
+    /// The text, lowercased and split into words. Span indices the boundary
+    /// path reports are offsets into this list, so the caller needs it to turn
+    /// a span back into text.
+    pub words: Vec<String>,
+    /// Subword index of the first subword of each entry of `words`
+    /// (`token_pooling = "first"`). `_encode_core` gathers `text_states` here.
+    /// Kept 1:1 with `words`: a word that tokenizes to nothing still gets a
+    /// placeholder row, because dropping it would shift every later index.
+    pub text_word_first_positions: Vec<usize>,
+    /// Subword index of each child marker, `[P]` dropped, tasks in order. This
+    /// is `schema_special_positions[group][1:]` flattened, which is what
+    /// `_encode_core` routes into `query_states` — the group marker itself is
+    /// not scored.
+    pub query_positions: Vec<usize>,
+    /// Field name per entry of `query_positions`.
+    pub query_names: Vec<String>,
+    /// Subword index of each *classification* choice's `[C]` marker, tasks in
+    /// order. `_encode_core` routes these to `cls_marker_indices` rather than
+    /// `query_marker_indices` (`processor.py:712-719`), because they are scored
+    /// by the shared classifier instead of the boundary pool.
+    pub classification_positions: Vec<usize>,
+    /// Label per entry of `classification_positions`.
+    pub classification_names: Vec<String>,
 }
 
-/// Every token the reference registers in `_added_tokens_encoder`, with its id.
+/// The four base specials, whose ids the SentencePiece convention fixes at 0..3.
+pub const BASE_SPECIALS: [(&str, u32); 4] =
+    [("[PAD]", 0), ("[CLS]", 1), ("[SEP]", 2), ("[UNK]", 3)];
+
+/// The eleven tokens GLiNER2 appends past the SentencePiece vocabulary, in id
+/// order: `[MASK]` first, then `additional_special_tokens`.
 ///
-/// The four base specials come from the checkpoint's `added_tokens_decoder`
-/// (transformers replays that dict through `add_tokens`); the eleven that follow
-/// are GLiNER2's `additional_special_tokens` plus `[MASK]`.
-pub const ADDED_TOKENS: [(&str, u32); 15] = [
-    ("[PAD]", 0),
-    ("[CLS]", 1),
-    ("[SEP]", 2),
-    ("[UNK]", 3),
-    ("[MASK]", 128000),
-    (SEP_STRUCT, 128001),
-    (SEP_TEXT, 128002),
-    (P_TOKEN, 128003),
-    ("[C]", 128004),
-    ("[E]", 128005),
-    ("[R]", 128006),
-    (L_TOKEN, 128007),
-    (EXAMPLE_TOKEN, 128008),
-    (OUTPUT_TOKEN, 128009),
-    (DESC_TOKEN, 128010),
+/// Their ids are **not** fixed — they start at the piece count, which is 128000
+/// for the 128k DeBERTa-v3 vocabularies but 250101 for mDeBERTa-v3's 250k
+/// multilingual one. Pinning 128000 encoded multilingual prompts with
+/// out-of-vocab ids: the surrounding text still tokenized correctly, so the only
+/// symptom was every marker landing on the wrong row of the embedding table.
+pub const APPENDED_SPECIALS: [&str; 11] = [
+    "[MASK]",
+    SEP_STRUCT,
+    SEP_TEXT,
+    P_TOKEN,
+    "[C]",
+    "[E]",
+    "[R]",
+    L_TOKEN,
+    EXAMPLE_TOKEN,
+    OUTPUT_TOKEN,
+    DESC_TOKEN,
 ];
+
+/// Every added token with its id, for a tokenizer whose vocabulary ends at
+/// `piece_count` — the same number the converter used to lay the block out.
+pub fn added_tokens(piece_count: u32) -> impl Iterator<Item = (&'static str, u32)> + use<> {
+    BASE_SPECIALS
+        .iter()
+        .copied()
+        .map(|(text, id)| (text, id))
+        .chain(
+            APPENDED_SPECIALS
+                .iter()
+                .enumerate()
+                .map(move |(offset, text)| (*text, piece_count + offset as u32)),
+        )
+}
 
 /// `PreTrainedTokenizer.tokenize` with `split_special_tokens = false`: the
 /// `tokens_trie` cuts every added token out of the input, wherever it appears,
@@ -440,6 +498,9 @@ pub fn encode_token(
     token: &str,
     spm: &crate::core::sentencepiece::SentencePieceTokenizer,
 ) -> Vec<u32> {
+    // The appended block's base is this tokenizer's own piece count, so the ids
+    // can never drift from the vocabulary that does the encoding.
+    let special = added_tokens(spm.len() as u32).collect::<Vec<_>>();
     let mut ids = Vec::new();
     let mut rest = token;
     while !rest.is_empty() {
@@ -448,7 +509,7 @@ pub fn encode_token(
         let mut offset = 0usize;
         for candidate in rest.char_indices() {
             let (index, _) = candidate;
-            for (text, _) in ADDED_TOKENS {
+            for (text, _) in &special {
                 if rest[index..].starts_with(text)
                     && (index < at
                         || (index == at && hit.is_some_and(|current| text.len() > current.len())))
@@ -467,18 +528,17 @@ pub fn encode_token(
         if at > 0 {
             ids.extend(spm.encode_ids(&rest[..at]));
         }
-        ids.push(id_of(found));
+        ids.push(id_of(found, spm.len() as u32));
         rest = &rest[at + found.len()..];
     }
     ids
 }
 
-fn id_of(token: &str) -> u32 {
-    ADDED_TOKENS
-        .iter()
+fn id_of(token: &str, piece_count: u32) -> u32 {
+    added_tokens(piece_count)
         .find(|(text, _)| *text == token)
-        .map(|(_, id)| *id)
-        .expect("token comes from ADDED_TOKENS")
+        .map(|(_, id)| id)
+        .expect("token comes from the added-token set")
 }
 
 /// `_transform_record` + `_format_input_with_mapping` for classification tasks.
@@ -491,10 +551,191 @@ pub fn build_prompt(
 }
 
 /// The same schema builder with the checkpoint's `tokenizer.json` encoder.
+pub fn build_boundary_prompt(
+    tasks: &[Task],
+    text: &str,
+    child_marker: &str,
+    spm: &crate::core::sentencepiece::SentencePieceTokenizer,
+) -> Result<EncodedPrompt, String> {
+    build_boundary_prompt_with(tasks, text, child_marker, |part| {
+        Ok(encode_token(part, spm))
+    })
+}
+
+/// The same schema builder with the checkpoint's `tokenizer.json` encoder.
 pub fn build_prompt_with(
     tasks: &[Task],
     text: &str,
+    encode: impl FnMut(&str) -> Result<Vec<u32>, String>,
+) -> Result<EncodedPrompt, String> {
+    build_with_child_marker(tasks, text, L_TOKEN, encode, false, None)
+}
+
+/// Prompt assembly for the boundary architecture, with an explicit child
+/// marker ([E] / [C] / [R]).
+///
+/// Identical token stream to [`build_prompt_with`] — the reference's
+/// `_format_input_with_mapping` does not know about architectures — but it also
+/// reports the two routing index sets `_encode_core` gathers from
+/// `last_hidden_state`: the text words and the query markers. Passing
+/// `require_query_count` checks that every task produced one query per field,
+/// which is the same mis-alignment guard the classification path applies to its
+/// label count.
+pub fn build_boundary_prompt_with(
+    tasks: &[Task],
+    text: &str,
+    child_marker: &str,
+    encode: impl FnMut(&str) -> Result<Vec<u32>, String>,
+) -> Result<EncodedPrompt, String> {
+    build_with_child_marker(tasks, text, child_marker, encode, true, None)
+}
+
+/// Which marker a boundary task group uses, and therefore which head scores it.
+///
+/// The reference picks the child token from the schema's task type
+/// (`processor.py`: `_process_entities` / `_process_json_structures` /
+/// `_process_classifications` / `_process_relations`). Note that
+/// **classifications use `[L]`, not `[C]`** — `[C]` belongs to
+/// `json_structures`. Getting this backwards would route a classification
+/// group's markers into the document pool, where they are scored as span
+/// queries and emit spans nobody asked for.
+///
+/// The Rust `Task` type does not carry a task type, so the caller states it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BoundaryTaskKind {
+    /// `[E]` — one boundary query per field, scored by the document pool.
+    Entities,
+    /// `[L]` — one classifier logit per choice, scored by `classifier.0`/`3`.
+    /// Same marker Decide uses, which is why the classification path is the
+    /// shared one.
+    Classification,
+    /// `[C]` — `json_structures`. Routed like `Entities` but decoded by the
+    /// structure decoder, which is not implemented yet.
+    JsonStructure,
+    /// `[R]` — relation roles, scored by `relation_scorer`. The group's first
+    /// two fields are the head and tail roles.
+    Relation,
+}
+
+impl BoundaryTaskKind {
+    pub fn child_marker(self) -> &'static str {
+        match self {
+            Self::Entities => E_TOKEN,
+            Self::Classification => L_TOKEN,
+            Self::JsonStructure => C_TOKEN,
+            Self::Relation => R_TOKEN,
+        }
+    }
+
+    /// Whether the group contributes boundary queries to the document pool.
+    ///
+    /// Only `Entities` does today. `JsonStructure` would also (its markers are
+    /// routed as queries and scored for spans), but its decode is a nested
+    /// structure rather than a flat span list, so it is left out rather than
+    /// half-supported.
+    /// Whether this group's `[L]`-position children are boundary queries rather
+    /// than classifier choices.
+    ///
+    /// The reference's split is on the task *type* being `"classifications"`
+    /// (`processor.py:712-719`), so it is everything-else that goes to the
+    /// query side — not just `Entities`. Matching only `Entities` routed
+    /// `[C]` and `[R]` children to the classifier, which then failed the
+    /// "routed but not consumed" check with a message that pointed at the
+    /// classification head rather than at the routing.
+    pub fn yields_boundary_queries(self) -> bool {
+        !matches!(self, Self::Classification)
+    }
+}
+
+/// Build a prompt for a mix of [`BoundaryTaskKind`] groups.
+///
+/// `kinds[i]` describes `tasks[i]`, and groups are laid out in that order.
+pub fn build_mixed_boundary_prompt(
+    tasks: &[Task],
+    kinds: &[BoundaryTaskKind],
+    text: &str,
+    spm: &crate::core::sentencepiece::SentencePieceTokenizer,
+) -> Result<EncodedPrompt, String> {
+    build_mixed_boundary_prompt_with(tasks, kinds, text, |part| Ok(encode_token(part, spm)))
+}
+
+/// The SPM-free form of [`build_mixed_boundary_prompt`].
+pub fn build_mixed_boundary_prompt_with(
+    tasks: &[Task],
+    kinds: &[BoundaryTaskKind],
+    text: &str,
+    encode: impl FnMut(&str) -> Result<Vec<u32>, String>,
+) -> Result<EncodedPrompt, String> {
+    if kinds.len() != tasks.len() {
+        return Err(format!("{} tasks but {} kinds", tasks.len(), kinds.len()));
+    }
+    build_with_child_marker_mixed(tasks, kinds, text, encode)
+}
+
+fn build_with_child_marker(
+    tasks: &[Task],
+    text: &str,
+    child_marker: &str,
+    encode: impl FnMut(&str) -> Result<Vec<u32>, String>,
+    check_query_count: bool,
+    kinds: Option<&[BoundaryTaskKind]>,
+) -> Result<EncodedPrompt, String> {
+    // `kinds` is absent for the single-marker callers, which pass the marker
+    // directly. It has to stay authoritative: defaulting to `Entities` here
+    // silently turns the classification path's `[L]` markers into `[E]`, and
+    // every label then routes to the wrong position.
+    let schema_tokens: Vec<Vec<String>> = match kinds {
+        Some(kinds) => tasks
+            .iter()
+            .zip(kinds)
+            .map(|(task, kind)| task.schema_tokens_with(kind.child_marker()))
+            .collect(),
+        None => tasks
+            .iter()
+            .map(|task| task.schema_tokens_with(child_marker))
+            .collect(),
+    };
+    let owned;
+    let kinds = match kinds {
+        Some(kinds) => kinds,
+        None => {
+            // Only consulted to split the routing below, which the
+            // classification path never reaches (`check_query_count` is false).
+            owned = vec![BoundaryTaskKind::Entities; tasks.len()];
+            &owned
+        }
+    };
+    assemble(
+        tasks,
+        kinds,
+        &schema_tokens,
+        text,
+        encode,
+        check_query_count,
+    )
+}
+
+fn build_with_child_marker_mixed(
+    tasks: &[Task],
+    kinds: &[BoundaryTaskKind],
+    text: &str,
+    encode: impl FnMut(&str) -> Result<Vec<u32>, String>,
+) -> Result<EncodedPrompt, String> {
+    let schema_tokens: Vec<Vec<String>> = tasks
+        .iter()
+        .zip(kinds)
+        .map(|(task, kind)| task.schema_tokens_with(kind.child_marker()))
+        .collect();
+    assemble(tasks, kinds, &schema_tokens, text, encode, true)
+}
+
+fn assemble(
+    tasks: &[Task],
+    kinds: &[BoundaryTaskKind],
+    schema_tokens: &[Vec<String>],
+    text: &str,
     mut encode: impl FnMut(&str) -> Result<Vec<u32>, String>,
+    check_query_count: bool,
 ) -> Result<EncodedPrompt, String> {
     for task in tasks {
         task.validate()?;
@@ -503,7 +744,6 @@ pub fn build_prompt_with(
         return Err("no classification task was given".into());
     }
 
-    let schema_tokens: Vec<Vec<String>> = tasks.iter().map(Task::schema_tokens).collect();
     // Combined token stream: every schema followed by [SEP_STRUCT], then the
     // final [SEP_STRUCT] popped, then [SEP_TEXT] and the text words.
     let mut combined: Vec<String> = Vec::new();
@@ -516,8 +756,9 @@ pub fn build_prompt_with(
         }
     }
     combined.push(SEP_TEXT.to_string());
-    let text_tokens = split_words(&normalize_text(text));
-    combined.extend(text_tokens.iter().cloned());
+    let words = split_words(&normalize_text(text));
+    combined.extend(words.iter().cloned());
+    let sep_index = combined.len() - 1 - words.len();
 
     // Which combined-token indices are structural markers, per task. The
     // reference computes this on the un-popped stream, where every struct is
@@ -530,18 +771,18 @@ pub fn build_prompt_with(
         if tokens.len() > 1 {
             slots.push(offset + 1); // [P]
         }
-        // range(4, len(struct) - 2, 2) is every [L].
+        // range(4, len(struct) - 2, 2) is every child marker.
         let mut cursor = 4;
         while cursor + 2 < tokens.len() {
             slots.push(offset + cursor);
             cursor += 2;
         }
+        marker_orig.push(slots);
         if index + 1 < schema_tokens.len() {
             offset += tokens.len() + 1; // tokens plus [SEP_STRUCT]
         } else {
             offset += tokens.len();
         }
-        marker_orig.push(slots);
     }
 
     let mut input_ids: Vec<u32> = Vec::new();
@@ -552,6 +793,7 @@ pub fn build_prompt_with(
             labels: task.labels.iter().map(|l| l.name.clone()).collect(),
         });
     }
+    let mut text_word_first_positions: Vec<usize> = Vec::with_capacity(words.len());
     for (orig_index, token) in combined.iter().enumerate() {
         let sub = encode(token)?;
         let base = input_ids.len();
@@ -561,6 +803,59 @@ pub fn build_prompt_with(
                 markers[task_index].positions.push(base);
             }
         }
+        // One entry per text word, recorded at the word's first subword even if
+        // the word produced no subwords at all — that is what keeps word indices
+        // and subword positions aligned 1:1.
+        if orig_index > sep_index {
+            text_word_first_positions.push(base);
+        }
+    }
+
+    if check_query_count {
+        let expected: usize = tasks.iter().map(|task| task.labels.len()).sum();
+        let mut query_positions = Vec::with_capacity(expected);
+        let mut query_names = Vec::with_capacity(expected);
+        let mut classification_positions = Vec::new();
+        let mut classification_names = Vec::new();
+        for (task_index, task) in tasks.iter().enumerate() {
+            let found = markers[task_index].positions.len();
+            if found != task.labels.len() + 1 {
+                return Err(format!(
+                    "task {:?}: {} markers for {} fields",
+                    task.name,
+                    found,
+                    task.labels.len()
+                ));
+            }
+            // `[P]` is not routed; `schema_special_positions[group][1:]` is.
+            // Classification groups go to the classifier's routing instead,
+            // matching `processor.py:712-719`, which splits the two on the
+            // group's task type before padding them separately.
+            let target: (&mut Vec<usize>, &mut Vec<String>) =
+                if kinds[task_index].yields_boundary_queries() {
+                    (&mut query_positions, &mut query_names)
+                } else {
+                    (&mut classification_positions, &mut classification_names)
+                };
+            for (label, position) in task
+                .labels
+                .iter()
+                .zip(markers[task_index].positions.iter().skip(1))
+            {
+                target.0.push(*position);
+                target.1.push(label.name.clone());
+            }
+        }
+        return Ok(EncodedPrompt {
+            input_ids,
+            markers,
+            words,
+            text_word_first_positions,
+            query_positions,
+            query_names,
+            classification_positions,
+            classification_names,
+        });
     }
 
     for (task_index, task) in tasks.iter().enumerate() {
@@ -576,7 +871,16 @@ pub fn build_prompt_with(
             ));
         }
     }
-    Ok(EncodedPrompt { input_ids, markers })
+    Ok(EncodedPrompt {
+        input_ids,
+        markers,
+        words,
+        text_word_first_positions,
+        query_positions: Vec::new(),
+        query_names: Vec::new(),
+        classification_positions: Vec::new(),
+        classification_names: Vec::new(),
+    })
 }
 
 #[cfg(test)]
@@ -585,6 +889,34 @@ mod tests {
 
     fn words(text: &str) -> Vec<String> {
         split_words(text)
+    }
+
+    /// The two prompt families differ in exactly one token, and getting it
+    /// wrong routes every label to the wrong position while leaving all the
+    /// per-stage boundary fixtures green — the boundary path passes its marker
+    /// explicitly, so only the Decide path is affected. Lock it here.
+    #[test]
+    fn the_two_prompt_families_use_their_own_child_marker() {
+        let task = Task::new("entities", vec![Label::new("person")]);
+        let decide = task.schema_tokens();
+        assert!(
+            decide.contains(&L_TOKEN.to_string()),
+            "the classification path must use [L]"
+        );
+        assert!(
+            !decide.contains(&E_TOKEN.to_string()),
+            "the classification path must not emit [E]"
+        );
+        for (kind, marker) in [
+            (BoundaryTaskKind::Entities, E_TOKEN),
+            (BoundaryTaskKind::Classification, L_TOKEN),
+            (BoundaryTaskKind::JsonStructure, C_TOKEN),
+            (BoundaryTaskKind::Relation, R_TOKEN),
+        ] {
+            assert_eq!(kind.child_marker(), marker, "{kind:?} marker");
+            let tokens = task.schema_tokens_with(kind.child_marker());
+            assert!(tokens.contains(&marker.to_string()), "{kind:?} tokens");
+        }
     }
 
     #[test]

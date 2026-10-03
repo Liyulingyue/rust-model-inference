@@ -157,7 +157,7 @@ impl SentencePieceTokenizer {
         if min_score == f32::MAX {
             return Err("sentencepiece model has no NORMAL piece".into());
         }
-        let mut trie = PieceTrie::default();
+        let mut trie = PieceTrie::new();
         for (piece, &id) in &normal_ids {
             trie.insert(piece, id);
         }
@@ -431,15 +431,31 @@ fn char_len(bytes: &[u8], pos: usize, byte_len: usize) -> usize {
 }
 
 /// Byte trie over the model's normal pieces, replacing Darts' double array.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 struct PieceTrie {
     /// `(node << 8) | byte` -> child node.
     edges: HashMap<u64, u32>,
     /// Piece id per node, `u32::MAX` when the node is not a piece.
+    ///
+    /// Index 0 is the root and is never a piece, so [`PieceTrie::new`] seeds it
+    /// with `u32::MAX`. Letting the first child take index 0 instead aliases it
+    /// with the root: any later piece whose walk returns to node 0 on its final
+    /// byte then overwrites the root's sentinel with its own id. Which piece
+    /// lands there depends on `normal_ids`' HashMap iteration order, so the
+    /// corruption was per-process and showed up as an occasional wrong
+    /// segmentation — e.g. `down. Can` cutting to `666.` instead of `.`.
     values: Vec<u32>,
 }
 
 impl PieceTrie {
+    /// An empty trie holding only the root.
+    fn new() -> Self {
+        PieceTrie {
+            edges: HashMap::new(),
+            values: vec![u32::MAX],
+        }
+    }
+
     fn insert(&mut self, piece: &[u8], id: u32) {
         let mut node = 0u32;
         for &byte in piece {
@@ -873,13 +889,56 @@ mod tests {
 
     #[test]
     fn piece_trie_reports_prefixes_in_order() {
-        let mut trie = PieceTrie::default();
+        let mut trie = PieceTrie::new();
         trie.insert(b"ab", 7);
         trie.insert(b"abc", 8);
         trie.insert(b"abd", 9);
         assert_eq!(trie.common_prefix(b"abcde"), vec![(7, 2), (8, 3)]);
         assert_eq!(trie.common_prefix(b"abx"), vec![(7, 2)]);
         assert!(trie.common_prefix(b"zz").is_empty());
+    }
+
+    #[test]
+    fn piece_trie_root_never_holds_a_piece() {
+        // The regression that let the root alias the first child. `root-first`
+        // takes node 0's only key, so a later piece *ending* on that byte at the
+        // root level lands back on node 0. Before the root was seeded, that
+        // overwrote the root sentinel with the later piece's id, and which piece
+        // won depended on the caller's iteration order.
+        let mut trie = PieceTrie::new();
+        trie.insert(b"u", 1);
+        trie.insert(b"uu", 2);
+        trie.insert(b"bu", 3);
+        assert_eq!(trie.values[0], u32::MAX, "root must stay empty");
+        assert_eq!(trie.common_prefix(b"u"), vec![(1, 1)]);
+        assert_eq!(trie.common_prefix(b"uu"), vec![(1, 1), (2, 2)]);
+        assert_eq!(trie.common_prefix(b"bu"), vec![(3, 2)]);
+        // A byte sharing the root's key must still resolve to its own node.
+        assert_eq!(trie.common_prefix(b"b"), Vec::new());
+    }
+
+    #[test]
+    fn piece_trie_build_is_order_independent() {
+        // Same pieces, different insertion order, identical answers. The aliasing
+        // above only showed up because the real caller inserts from a HashMap,
+        // whose order is randomised per process.
+        let pieces: [&[u8]; 6] = [b"u", b"uu", b"bu", b"a", b"ab", b"abc"];
+        let build = |order: &[usize]| {
+            let mut trie = PieceTrie::new();
+            for &i in order {
+                trie.insert(pieces[i], i as u32 + 1);
+            }
+            trie
+        };
+        let forward = build(&[0, 1, 2, 3, 4, 5]);
+        let backward = build(&[5, 4, 3, 2, 1, 0]);
+        for probe in [&b"uu"[..], b"bu", b"abc", b"abx", b"u"] {
+            assert_eq!(
+                forward.common_prefix(probe),
+                backward.common_prefix(probe),
+                "prefix search for {probe:?} depends on insertion order"
+            );
+        }
     }
 
     #[test]

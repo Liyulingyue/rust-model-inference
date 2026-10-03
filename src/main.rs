@@ -86,7 +86,7 @@ fn main() {
         println!("{USAGE}");
         return;
     }
-    // Server mode: --serve delegates to app::server::run_server which has its
+    // \n\nGLiNER2 boundary mode: --jev --gliner2-boundary --model <gliner2.5-boundary.gguf> --jev-context <text> --gliner2-schema <json> | span extraction; the schema is {\"entities\":[\"person\",\"location\"],\"entity_descriptions\":{...}} (the dict form {\"entities\":{\"person\":[...]}} is also accepted). Output is (start, end) word spans per field; --jev-output json for machine-readable.\n\nServer mode: --serve delegates to app::server::run_server which has its
     // own --host/--port pre-parser and reuses the shared CLI parser for the rest.
     if args.iter().any(|arg| arg == "--serve") {
         app::server::run_server();
@@ -581,6 +581,49 @@ fn main() {
             &context,
             options.threads,
             options.jev_output_json,
+        ));
+    } else if options.jev && options.gliner2_boundary {
+        // GLiNER2.5 BoundaryExtractor: same flag surface as --gliner2-decide,
+        // but the schema declares fields to *extract* rather than labels to
+        // classify, so the parser differs and the output is spans.
+        let context = match options.jev_context.clone() {
+            Some(context) => context,
+            None => {
+                app::run_or_exit(Err("--jev requires --jev-context <text>".into()));
+                unreachable!()
+            }
+        };
+        let schema: serde_json::Value = match options.gliner2_schema.clone() {
+            Some(raw) => app::unwrap_or_exit(
+                serde_json::from_str(&raw).map_err(|error| format!("--gliner2-schema: {error}")),
+            ),
+            None => {
+                app::run_or_exit(Err("--gliner2-boundary needs --gliner2-schema, e.g. \
+                     '{\"entities\":[\"person\",\"location\"]}' or \
+                 '{\"classifications\":[{\"task\":\"topic\",\"labels\":[\"a\",\"b\"]}]}'"
+                    .to_string()));
+                unreachable!()
+            }
+        };
+        let (tasks, kinds) = app::unwrap_or_exit(
+            app::parse_boundary_schema(&schema)
+                .map_err(|error| format!("--gliner2-schema: {error}")),
+        );
+        app::run_or_exit(app::run_gliner2_boundary(
+            source,
+            &tasks,
+            &kinds,
+            &context,
+            options.threads,
+            app::BoundaryDecodeOptions {
+                threshold: None,
+                // A `json_structures` group only becomes a record when the schema
+                // annotates it with a `mode`; without this the record head never
+                // runs.
+                record_metadata: schema.get("record_metadata"),
+                field_metadata: schema.get("field_metadata"),
+                output_json: options.jev_output_json,
+            },
         ));
     } else if options.jev && options.clm_head.is_some() {
         // CLM: one encoder + a projection-head file, scored by cosine

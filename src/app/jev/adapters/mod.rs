@@ -13,3 +13,4 @@
 //! already merged and verified.
 
 pub mod gliner2;
+pub mod gliner2_boundary;

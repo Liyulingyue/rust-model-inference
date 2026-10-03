@@ -37,6 +37,7 @@ handler。
 | `Clm` | `--clm-head` | **头在第二个 GGUF 里**，`--model` 只是个普通 qwen3，判别信息不可能来自权重 |
 | `Rerank` | **元数据探测** `is_rerank_gguf()` | reranker 和普通 qwen3 聊天的 `general.architecture` **都是 `"qwen3"`**，命令行无从区分 |
 | `Gliner2` | `--gliner2-decide` | arch 是 `gliner2`，`--model` 本身就唯一；用 flag 是为了和 CLM 对齐、避免再造一个探测函数 |
+| `Gliner2Boundary` | `--gliner2-boundary` | 同上，**且** `gliner2.variant = "boundary"`；flag 选模式，权重确认变体 |
 
 ### 为什么 rerank 必须探测而 gliner2 不必
 
@@ -79,11 +80,37 @@ if options.clm_head.is_some() { ... }       // 后跑
 |---|---|
 | `--clm-head h.gguf` | 400：`--clm-head` 选 CLM，但 model 是 reranker，`h.gguf` 会被丢 |
 | `--gliner2-decide` | 400：同上，且 GLiNER2 需要 DeBERTa GGUF 而非 Qwen3 reranker |
+| `--gliner2-boundary` | 400：同上，且 boundary 变体必须是 boundary-variant DeBERTa |
 | `--mmproj m.gguf` | 400：`--mmproj` 意味多模态聊天，reranker 上它会被丢 |
 | 无其它 backend flag | 正常进 Rerank（探测的本职） |
 
 `--tts` / `--audio` / `--embedding` 排在探测**之前**且各自提前 return，所以它们
 天然优先，不存在"丢掉"的问题——用户显式选了那个后端。
+
+## GLiNER2 boundary 后端：flag 选模式，权重定变体
+
+`--gliner2-decide` 和 `--gliner2-boundary` 指向**同一个 arch**，权重里靠
+`gliner2.variant` 区分（`classification` vs `boundary`）。所以：
+
+- flag 决定**跑哪个 head**，因此决定挂哪条路由；
+- `is_boundary_gguf()` 确认**权重确实是 boundary 变体**，启动时校验一次；
+- 两者不匹配时报错而不是回退。`--gliner2-decide` 吃到 boundary GGUF 时，
+  分类头根本不存在，回退会得到"加载成功、输出全空"的静默错误。
+
+模型不缓存：mapping 留在后端里，**每个请求**从 `&dyn TensorSource` 现建一个
+`BoundaryModel`（零拷贝视图 + 一次 settings 解析），和 Decide 后端每请求重建
+tokenizer 的做法一致，因此不需要 `'static` 泄漏。
+
+### 为什么 boundary 不挂在 `/v1/jev/score` 上
+
+`JevResult` 装不下 span：它只有 per-question 的分类概率，没有 word offset、没有
+重叠消解后的顺序、也没有多组 classification。所以 boundary 走自己的
+`POST /v1/jev/boundary`，body 直接吃 **reference 自己的 schema 形状**
+（`{"entities": [...], "entity_descriptions": {...}, "classifications": [...]}`）。
+
+刻意**不**把 `/v1/jev/score` alias 到它：JEV 形状的 body 在那里会因为缺 `schema`
+字段而报反序列化错误，读起来像"请求写错了"，而不是"这个 server 不提供这个路由"。
+404 才是诚实的答案。
 
 ## 新增后端时的决策树
 

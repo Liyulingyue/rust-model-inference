@@ -560,6 +560,12 @@ mod tests {
                     labels: vec![],
                 })
                 .collect(),
+            words: vec![],
+            text_word_first_positions: vec![],
+            query_positions: vec![],
+            query_names: vec![],
+            classification_positions: vec![],
+            classification_names: vec![],
         }
     }
 

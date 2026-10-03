@@ -158,10 +158,15 @@ def main():
         help="upstream GLiNER2 checkout (the SchemaTransformer reference)",
     )
     arguments.add_argument(
-        "--encoder-config",
+        "--base-encoder",
         type=Path,
-        default=REPO_ROOT / "target/gliner2-deberta-config",
-        help="directory holding the base deberta-v3-large config.json",
+        default=REPO_ROOT / "models" / "deberta-v3-base",
+        help="the base encoder repo the checkpoint fine-tunes. Supplies both the "
+             "encoder config and the tokenizer. Required rather than optional "
+             "because some repos cannot be loaded as tokenizers at all: the three "
+             "guardrail repos ship a `tokenizer_config.json` that transformers "
+             "rejects (its `extra_special_tokens` is a bare list), so the "
+             "reference can only have tokenized from the base encoder.",
     )
     arguments.add_argument(
         "--model-dir",
@@ -183,11 +188,41 @@ def main():
     from transformers import AutoConfig, DebertaV2Model  # noqa: E402
 
     model_dir = options.model_dir
-    processor = SchemaTransformer(str(model_dir), token_pooling="first")
-    config = AutoConfig.from_pretrained(str(options.encoder_config))
-    config.vocab_size = 128011
-    encoder = DebertaV2Model(config)
+    processor = SchemaTransformer(str(options.base_encoder), token_pooling="first")
+    config = AutoConfig.from_pretrained(str(options.base_encoder))
     state = load_file(str(model_dir / "model.safetensors"))
+    # The published config's `vocab_size` only bounds the table: DeBERTa-v3 says
+    # 128100 while the SPM has 128000 pieces, and mDeBERTa-v3 says 251000 while
+    # its SPM has 250101. GLiNER2 appends `[MASK]` plus ten schema markers, so
+    # the real table is `pieces + 11` — 128011 and 250112 respectively. Take the
+    # authoritative number from the checkpoint's embedding table, and check it
+    # against the tokenizer's highest declared id: that pairing is what decides
+    # whether the last marker rows are addressable at all.
+    vocab_size = state["encoder.embeddings.word_embeddings.weight"].shape[0]
+    if vocab_size > config.vocab_size:
+        raise ValueError(
+            f"checkpoint embedding table ({vocab_size}) exceeds the base config's "
+            f"vocab_size ({config.vocab_size}); wrong encoder config?"
+        )
+    # The family declares added tokens in one of two places: an
+    # `added_tokens_decoder` in `tokenizer_config.json` (the older repos) or the
+    # `added_tokens` array in `tokenizer.json` (the guardrail repos, whose
+    # `tokenizer_config.json` transformers cannot even load). Either is
+    # authoritative; the check is that the embedding table covers the highest id.
+    tokenizer_config = json.loads((model_dir / "tokenizer_config.json").read_text())
+    decoder = tokenizer_config.get("added_tokens_decoder") or {}
+    if decoder:
+        highest_id = max(int(index) for index in decoder)
+    else:
+        fast = json.loads((model_dir / "tokenizer.json").read_text())
+        highest_id = max(int(entry["id"]) for entry in fast.get("added_tokens", []))
+    if vocab_size != highest_id + 1:
+        raise ValueError(
+            f"embedding table ({vocab_size} rows) does not cover the tokenizer's "
+            f"highest added-token id ({highest_id}); expected {highest_id + 1} rows"
+        )
+    config.vocab_size = vocab_size
+    encoder = DebertaV2Model(config)
     missing, unexpected = encoder.load_state_dict(
         {key[len("encoder."):]: value for key, value in state.items() if key.startswith("encoder.")},
         strict=False,
@@ -197,8 +232,15 @@ def main():
     encoder.eval()
 
     classifier = torch.nn.Sequential(
-        torch.nn.Linear(1024, 2048), torch.nn.ReLU(), torch.nn.Linear(2048, 1)
+        torch.nn.Linear(config.hidden_size, config.hidden_size * 2),
+        torch.nn.ReLU(),
+        torch.nn.Linear(config.hidden_size * 2, 1),
     )
+    # `hidden * 2` is `create_mlp(hidden, [hidden * 2], 1)`, matching the
+    # converter's `classifier.intermediate_size`. Deriving it from the encoder
+    # config rather than writing 1024/2048 is what lets this oracle score a
+    # base-sized checkpoint: `load_state_dict` is strict, so a wrong width here
+    # fails loudly instead of producing plausible garbage.
     classifier.load_state_dict(
         {
             "0.weight": state["classifier.0.weight"],

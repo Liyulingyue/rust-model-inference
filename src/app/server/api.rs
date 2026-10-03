@@ -1168,6 +1168,194 @@ fn default_grouped_mode() -> String {
     "multi_select".to_string()
 }
 
+/// `POST /v1/jev/boundary` — GLiNER2.5 BoundaryExtractor span extraction and
+/// classification over a caller-supplied schema.
+///
+/// The request carries a raw `schema` object rather than a JEV label set,
+/// because the boundary head's contract is the reference's schema shape:
+/// `{"entities": ["person", ...], "entity_descriptions": {...},
+/// "classifications": [{"task": ..., "labels": [...], ...}]}`. Field order
+/// fixes the query order, so it is preserved exactly as sent. Going through
+/// `JevScoreRequest` and flattening it into a label set would lose the
+/// descriptions and the group structure, so this is a separate request type.
+// `pub(super)` rather than `pub`: `AppState` is private to `server`, and a
+// wider handler re-exports that private type in its signature (lint
+// `private_interfaces`). `pub(super)` is exactly `AppState`'s own visibility,
+// and `mod.rs` is the only caller.
+pub(super) async fn jev_boundary(
+    State(state): State<AppState>,
+    body: Result<Json<BoundaryRequest>, JsonRejection>,
+) -> Response {
+    let Json(req) = match body {
+        Ok(j) => j,
+        Err(e) => return jev_error(StatusCode::BAD_REQUEST, format!("invalid JSON: {e}")),
+    };
+    let boundary = match state.model.as_ref() {
+        Backend::Gliner2Boundary(boundary) => boundary,
+        // The router only mounts this on the boundary backend, so reaching here
+        // means the dispatch table and the handler disagree.
+        _ => {
+            return jev_error(
+                StatusCode::NOT_FOUND,
+                "this server is not a GLiNER2 boundary model".to_string(),
+            )
+        }
+    };
+    let (tasks, kinds) = match crate::app::parse_boundary_schema(&req.schema) {
+        Ok(parsed) => parsed,
+        Err(e) => return jev_error(StatusCode::BAD_REQUEST, e),
+    };
+    if req.context.trim().is_empty() {
+        return jev_error(
+            StatusCode::BAD_REQUEST,
+            "context must contain some text".to_string(),
+        );
+    }
+    let model = match crate::models::gliner_boundary::BoundaryModel::from_source(
+        boundary.source.as_ref(),
+    ) {
+        Ok(model) => model,
+        Err(e) => return jev_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
+    let result = match crate::app::run_gliner2_boundary_extract(
+        &model,
+        &req.context,
+        &tasks,
+        &kinds,
+        boundary.n_threads,
+        req.threshold,
+        // A `json_structures` group only becomes a record when the schema
+        // annotates it with a `mode`; otherwise it takes the legacy structure
+        // path, which reports one instance per group.
+        crate::app::BoundarySchemaOptions {
+            record_metadata: req.schema.get("record_metadata"),
+            field_metadata: req.schema.get("field_metadata"),
+        },
+    ) {
+        Ok(result) => result,
+        Err(e) => return jev_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
+
+    // The head-level diagnostics (abstention margin, predicted count) ride along
+    // because a caller whose spans all vanish needs to tell "the model said no"
+    // apart from "the threshold was too high", and the threshold is a
+    // per-request knob here.
+    let overlap_policy = match crate::models::gliner_boundary::boundary_overlap_policy(&model) {
+        Ok(policy) => policy.as_str().to_string(),
+        Err(e) => return jev_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
+    // `QueryHeads` keeps the two scalar heads as parallel per-query vectors, so
+    // they are zipped by index rather than iterated as records.
+    let heads: Vec<serde_json::Value> = (0..result.query_names.len())
+        .map(|index| {
+            json!({
+                "field": result.query_names[index],
+                "null_logit": result.query_heads.null_logits.get(index),
+                "count_log_rate": result.query_heads.count_log_rates.get(index),
+            })
+        })
+        .collect();
+    let relations: Vec<serde_json::Value> = result
+        .relations
+        .iter()
+        .map(|relation| {
+            json!({
+                "relation": relation.relation_type,
+                "score": relation.score,
+                "head": relation.head_text,
+                "head_start": relation.head_start,
+                "head_end": relation.head_end,
+                "tail": relation.tail_text,
+                "tail_start": relation.tail_start,
+                "tail_end": relation.tail_end,
+            })
+        })
+        .collect();
+    let classifications: Vec<serde_json::Value> = result
+        .classifications
+        .iter()
+        .map(|group| {
+            json!({
+                "task": group.task,
+                "activation": group.activation,
+                "labels": group.labels,
+                "probabilities": group.probabilities,
+                "logits": group.logits,
+                "selected": group.selected,
+                "choice_label": group.choice_label,
+            })
+        })
+        .collect();
+    let records: Vec<serde_json::Value> = result
+        .records
+        .iter()
+        .map(|record| {
+            json!({
+                "task": record.task,
+                "mode": record.mode,
+                "score": record.score,
+                "anchor_span": record.anchor_span.map(|(start, end)| json!([start, end])),
+                "fields": record
+                    .fields
+                    .iter()
+                    .map(|(query_id, spans)| {
+                        (
+                            query_id.to_string(),
+                            json!(spans
+                                .iter()
+                                .map(|(start, end)| json!({
+                                    "start": start,
+                                    "end": end,
+                                    "text": result.words[*start..*end].join(" "),
+                                }))
+                                .collect::<Vec<_>>()),
+                        )
+                    })
+                    .collect::<serde_json::Map<String, serde_json::Value>>(),
+            })
+        })
+        .collect();
+    let spans: Vec<serde_json::Value> = result
+        .spans
+        .iter()
+        .map(|span| {
+            json!({
+                "field": span.field,
+                "score": span.score,
+                "start": span.start,
+                "end": span.end,
+                "text": span.text,
+                "logit": span.logit,
+            })
+        })
+        .collect();
+    Json(json!({
+        "mode": "boundary",
+        "context": req.context,
+        "overlap_policy": overlap_policy,
+        "spans": spans,
+        "relations": relations,
+        "records": records,
+        "classifications": classifications,
+        "query_heads": heads,
+    }))
+    .into_response()
+}
+
+/// Body for `POST /v1/jev/boundary`.
+#[derive(Debug, serde::Deserialize)]
+pub(super) struct BoundaryRequest {
+    /// The text to extract from. The reference's inference collator appends a
+    /// sentence-final `.` when the text lacks one, and this path does the same
+    /// inside `extract`.
+    pub context: String,
+    /// The extraction schema, in the reference's own shape. See the handler doc.
+    pub schema: serde_json::Value,
+    /// Span score threshold. Defaults to the checkpoint's `pair_threshold`.
+    #[serde(default)]
+    pub threshold: Option<f32>,
+}
+
 pub async fn jev_score(
     State(state): State<AppState>,
     body: Result<Json<JevScoreRequest>, JsonRejection>,
@@ -1384,6 +1572,7 @@ fn backend_label(b: &Backend) -> &'static str {
         Backend::Rerank(_) => "rerank",
         Backend::Clm(_) => "clm",
         Backend::Gliner2(_) => "gliner2",
+        Backend::Gliner2Boundary(_) => "gliner2-boundary",
     }
 }
 
