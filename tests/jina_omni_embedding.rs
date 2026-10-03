@@ -220,9 +220,9 @@ fn generate_test_wav(path: &std::path::Path, seconds: usize) -> bool {
     let mut data = Vec::with_capacity(seconds * 16000 * 2);
     for i in 0..(seconds * 16000) {
         // 440 Hz, amplitude 0.2 of int16 max
-        let sample = (0.2 * 32767.0
-            * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 16000.0)
-                .sin()) as i16;
+        let sample =
+            (0.2 * 32767.0 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 16000.0).sin())
+                as i16;
         data.extend_from_slice(&sample.to_le_bytes());
     }
     let header = build_wav_header(data.len() as u32);
@@ -294,12 +294,7 @@ fn server_post_embeddings_against_jina_omni_text() {
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut ready = false;
     while Instant::now() < deadline {
-        if TcpStream::connect_timeout(
-            &addr.parse().unwrap(),
-            Duration::from_millis(200),
-        )
-        .is_ok()
-        {
+        if TcpStream::connect_timeout(&addr.parse().unwrap(), Duration::from_millis(200)).is_ok() {
             ready = true;
             break;
         }
@@ -314,7 +309,9 @@ fn server_post_embeddings_against_jina_omni_text() {
     let models_deadline = Instant::now() + Duration::from_secs(120);
     let mut head_buf = [0u8; 256];
     while Instant::now() < models_deadline {
-        if let Ok(mut s) = TcpStream::connect_timeout(&addr.parse().unwrap(), Duration::from_millis(500)) {
+        if let Ok(mut s) =
+            TcpStream::connect_timeout(&addr.parse().unwrap(), Duration::from_millis(500))
+        {
             let req = b"GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
             if s.write_all(req).is_ok() {
                 if s.read(&mut head_buf).is_ok() && !head_buf.is_empty() {
@@ -335,14 +332,10 @@ fn server_post_embeddings_against_jina_omni_text() {
         body_bytes.len()
     );
     let mut stream = TcpStream::connect(&addr).expect("connect server");
-    stream
-        .write_all(request.as_bytes())
-        .expect("write request");
+    stream.write_all(request.as_bytes()).expect("write request");
     stream.write_all(&body_bytes).expect("write body");
     let mut response = String::new();
-    stream
-        .read_to_string(&mut response)
-        .expect("read response");
+    stream.read_to_string(&mut response).expect("read response");
     let _ = child.kill();
     let _ = child.wait();
 
@@ -355,10 +348,8 @@ fn server_post_embeddings_against_jina_omni_text() {
         .map(|i| i + 4)
         .unwrap_or_else(|| panic!("response must contain body separator; got: {response:?}"));
     let body_json = &response[body_start..];
-    let parsed: serde_json::Value =
-        serde_json::from_str(body_json).unwrap_or_else(|error| {
-            panic!("parse response JSON: {error}; body: {body_json:?}")
-        });
+    let parsed: serde_json::Value = serde_json::from_str(body_json)
+        .unwrap_or_else(|error| panic!("parse response JSON: {error}; body: {body_json:?}"));
     let embedding = parsed["data"][0]["embedding"]
         .as_array()
         .expect("data[0].embedding must be an array");
@@ -371,10 +362,7 @@ fn server_post_embeddings_against_jina_omni_text() {
         let v = value.as_f64().expect("element must be f64");
         assert!(v.is_finite(), "non-finite value at dim {i}: {v}");
     }
-    let norm_sq: f64 = embedding
-        .iter()
-        .map(|v| v.as_f64().unwrap().powi(2))
-        .sum();
+    let norm_sq: f64 = embedding.iter().map(|v| v.as_f64().unwrap().powi(2)).sum();
     let norm = norm_sq.sqrt();
     assert!(
         (norm - 1.0).abs() < 1e-4,
