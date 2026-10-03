@@ -56,6 +56,18 @@ pub enum GGMLType {
     F64 = 28,
     IQ1_M = 29,
     BF16 = 30,
+    /// BitNet 1.58-bit ternary weight quantization (`QK_I2_S = 128`
+    /// in the upstream `bitnet.cpp` reference). 128-element blocks,
+    /// 2-bit signed symmetric ternary {-1, 0, +1} (no in-block scale —
+    /// per-row scale is recovered from the `*_norm_in` RMSNorm that
+    /// precedes the projection in the BitLinear forward). 32 bytes
+    /// per block = 128 × 2 bits / 8. Currently recognized by the GGUF
+    /// loader only for tensor listing / shape inspection — no dequant
+    /// kernel is implemented in this repo, so any model that ships
+    /// i2_s weights (Microsoft's `bitnet-embedding-0.6b` /
+    /// `bitnet-embedding-270m` BitNet 1.58 GGUF conversions)
+    /// cannot forward through the existing engine trunk yet.
+    I2_S = 36,
     Q1_0 = 41,
 }
 
@@ -91,6 +103,7 @@ impl GGMLType {
             28 => Some(Self::F64),
             29 => Some(Self::IQ1_M),
             30 => Some(Self::BF16),
+            36 => Some(Self::I2_S),
             41 => Some(Self::Q1_0),
             _ => None,
         }
@@ -127,6 +140,7 @@ impl GGMLType {
             Self::I64 => (1, 8),
             Self::F64 => (1, 8),
             Self::BF16 => (1, 2),
+            Self::I2_S => (128, 32),
             Self::Q1_0 => (128, 18),
         }
     }

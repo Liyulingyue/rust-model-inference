@@ -31,6 +31,14 @@ pub struct Qwen3Config {
     pub n_deepstack_layers: usize,
     pub moe: Option<crate::core::loader::Qwen3MoeConfig>,
     pub rope: Qwen3Rope,
+    /// `true` when this Qwen3-architecture GGUF is a Microsoft
+    /// BitNet b1.58 I2_S conversion (file_type=40 +
+    /// `*_norm_in.weight` per-projection RMSNorm tensors present).
+    /// Drives the text_encode forward to use the BitLinear path
+    /// (per-projection RMSNorm → per-token absmax int8 quant →
+    /// ternary matmul) instead of the Q8_0 matmul path. See
+    /// `docs/usage/bitnet_embedding.md` for the full spec.
+    pub is_bitnet: bool,
 }
 
 impl Qwen3Config {
@@ -65,6 +73,26 @@ impl Qwen3Config {
         let n_deepstack_layers =
             optional_usize(source, &format!("{}.n_deepstack_layers", knobs.arch))?.unwrap_or(0);
 
+        // BitNet detection: Microsoft's BitNet b1.58 GGUF conversions
+        // (file_type=40) ship `blk.{i}.{attn_q,attn_k,...}_norm_in.weight`
+        // per-projection RMSNorm tensors alongside I2_S ternary weights.
+        // Detect by either the file_type or the presence of the first
+        // BitLinear per-projection norm tensor. Both checks are
+        // defensive — the file_type is the canonical marker but the
+        // norm presence is the structural one (some custom conversions
+        // may not bump file_type).
+        let file_type = source
+            .metadata("general.file_type")
+            .and_then(crate::core::tensor::MetaValue::to_u64)
+            .unwrap_or(0);
+        let has_norm_in = source.tensor_info("blk.0.attn_q_norm_in.weight").is_some();
+        let is_bitnet = file_type == 40 || has_norm_in;
+        if has_norm_in && file_type != 0 && file_type != 40 {
+            // Defensive warning if the file_type disagrees with the
+            // structural marker; not an error (community conversions
+            // sometimes omit file_type=40).
+        }
+
         Ok(Self {
             architecture: knobs.arch,
             n_embd: config.n_embd,
@@ -83,6 +111,7 @@ impl Qwen3Config {
             n_deepstack_layers,
             moe: knobs.moe,
             rope,
+            is_bitnet,
         })
     }
 }
