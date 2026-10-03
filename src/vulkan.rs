@@ -1781,4 +1781,101 @@ mod tests {
         let context = VulkanContext::new().expect("Homebrew MoltenVK should initialize");
         assert!(!context.device_name().is_empty());
     }
+
+    /// What the device can actually do, so kernel work is aimed at real ceilings.
+    ///
+    /// The Q8_0 tiled matmul tops out around 4.0 TOP/s, which is already below the
+    /// 5.9 TOP/s a PyTorch reference sustains, so no amount of Q8 tuning closes the
+    /// gap. F16 tensor cores are the only route past it, and whether they are
+    /// reachable at all is a property of the device, not of the shader: an 8-wide
+    /// subgroup dot is what the hardware turns into a matrix instruction. This
+    /// prints the subgroup geometry and the feature bits that decide it, so the
+    /// next kernel is written against a measured bound rather than a hope.
+    #[test]
+    #[ignore = "prints device capabilities"]
+    fn print_subgroup_and_f16_capabilities() {
+        use std::ffi::c_void;
+        crate::ops::float::enable_gpu();
+        let Some(context) = crate::ops::get_vulkan_context() else {
+            eprintln!("skipped: no Vulkan context");
+            return;
+        };
+        let instance = &context.instance;
+        let physical = context._physical_device;
+
+        let mut subgroup = vk::PhysicalDeviceSubgroupProperties::default();
+        let mut properties = vk::PhysicalDeviceProperties2::default();
+        properties.p_next = &mut subgroup as *mut _ as *mut c_void;
+        unsafe { instance.get_physical_device_properties2(physical, &mut properties) };
+
+        let mut features12 = vk::PhysicalDeviceVulkan12Features::default();
+        let mut features = vk::PhysicalDeviceFeatures2::default();
+        features.p_next = &mut features12 as *mut _ as *mut c_void;
+        unsafe { instance.get_physical_device_features2(physical, &mut features) };
+
+        let ops = subgroup.supported_operations;
+        let named = [
+            (vk::SubgroupFeatureFlags::BASIC, "BASIC"),
+            (vk::SubgroupFeatureFlags::VOTE, "VOTE"),
+            (vk::SubgroupFeatureFlags::ARITHMETIC, "ARITHMETIC"),
+            (vk::SubgroupFeatureFlags::BALLOT, "BALLOT"),
+            (vk::SubgroupFeatureFlags::SHUFFLE, "SHUFFLE"),
+            (
+                vk::SubgroupFeatureFlags::SHUFFLE_RELATIVE,
+                "SHUFFLE_RELATIVE",
+            ),
+            (vk::SubgroupFeatureFlags::CLUSTERED, "CLUSTERED"),
+            (vk::SubgroupFeatureFlags::QUAD, "QUAD"),
+        ];
+        eprintln!("device: {}", context.device_name);
+        eprintln!("  subgroup_size: {}", subgroup.subgroup_size);
+        eprintln!(
+            "  shared_memory: {} bytes  workgroup_invocations: {}",
+            properties.properties.limits.max_compute_shared_memory_size,
+            properties
+                .properties
+                .limits
+                .max_compute_work_group_invocations
+        );
+        eprintln!("  shaderFloat16: {}", features12.shader_float16 == vk::TRUE);
+        let available: Vec<&str> = named
+            .iter()
+            .filter(|(flag, _)| ops.contains(*flag))
+            .map(|(_, name)| *name)
+            .collect();
+        eprintln!("  subgroup ops: {}", available.join(", "));
+        eprintln!(
+            "  8-wide float dot usable: {}",
+            ops.contains(vk::SubgroupFeatureFlags::ARITHMETIC) && subgroup.subgroup_size >= 8
+        );
+        // Core subgroup ops stop at ARITHMETIC: there is no DOT, so the portable route
+        // to a matrix instruction is closed. NVIDIA's own matrix path is the only
+        // remaining way onto the tensor cores, and it is not in the core feature set.
+        let extensions = unsafe { instance.enumerate_device_extension_properties(physical) }
+            .map(|list| {
+                list.iter()
+                    .map(|e| {
+                        // ash hands back a fixed-size NUL-padded array, so the name
+                        // has to be trimmed before it compares equal to anything.
+                        let raw = &e.extension_name;
+                        let end = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
+                        String::from_utf8_lossy(&raw[..end]).into_owned()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for wanted in [
+            "VK_NV_cooperative_matrix",
+            "VK_KHR_cooperative_matrix",
+            "VK_EXT_shader_subgroup_matrix_multiply",
+            "VK_NV_shader_subgroup_partitioned",
+        ] {
+            eprintln!("  {wanted}: {}", extensions.iter().any(|n| n == wanted));
+        }
+        let matrix_ish: Vec<&String> = extensions
+            .iter()
+            .filter(|n| n.contains("matrix") || n.contains("tensor"))
+            .collect();
+        eprintln!("  matrix/tensor extensions: {matrix_ish:?}");
+    }
 }
