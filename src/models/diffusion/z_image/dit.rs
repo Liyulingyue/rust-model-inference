@@ -4254,4 +4254,95 @@ mod tests {
             eprintln!("{projection:?} {n_in}x{n_out}: {ms:7.2} ms  {gop:6.0} GOP/s");
         }
     }
+
+    /// What the QKV chain spends time on once the matmul is accounted for.
+    ///
+    /// `record_attention_qkv` puts rms_norm, AdaLN and the matmul under a single
+    /// fence, so subtracting the matmul's separately measured time is the only way
+    /// to see the other two -- and doing that across sessions is how the 1.55 s
+    /// "missing time" was invented earlier. This measures each stage on its own,
+    /// in one session, at the shape the render uses.
+    #[test]
+    #[ignore = "GPU benchmark, not a correctness gate"]
+    fn zimage_qkv_norm_and_adaln_cost_at_the_render_shape() {
+        use crate::models::diffusion::z_image::dit_gpu::NormKind;
+        use crate::ops::float::enable_gpu;
+        use std::time::Instant;
+
+        enable_gpu();
+        let Some(context) = crate::ops::get_vulkan_context() else {
+            eprintln!("skipped: no Vulkan context");
+            return;
+        };
+        let rows = 1056usize;
+        let hidden = HIDDEN;
+        let mut session =
+            crate::models::diffusion::z_image::dit_gpu::DitGpuSession::new(context, rows)
+                .expect("session");
+        let layout = *session.layout();
+        let (rms_gamma, _) = tiled_bench_synthetic(rows, hidden, hidden);
+        let scale: Vec<f32> = (0..hidden * 6).map(|i| 0.01 * (i % 7) as f32).collect();
+        session
+            .bind_norm(0, NormKind::AttentionNorm1, &rms_gamma[..hidden])
+            .expect("bind norm");
+        session.bind_modulation(&scale).expect("bind modulation");
+        let norm = session
+            .norm_bindings(0, NormKind::AttentionNorm1)
+            .expect("norm");
+        let mod_bind = session.modulation_bindings().expect("modulation");
+        session
+            .ops()
+            .write_f32(layout.x, &vec![0.5f32; rows * hidden])
+            .expect("write");
+
+        let mut best_rms = f64::INFINITY;
+        let mut best_adaln = f64::INFINITY;
+        for _ in 0..5 {
+            let mut commands = session.begin().expect("begin");
+            session
+                .ops()
+                .record_rms_norm_rows(
+                    &commands,
+                    norm,
+                    layout.x,
+                    layout.normed,
+                    hidden,
+                    RMS_EPSILON,
+                    rows,
+                    hidden,
+                    hidden,
+                )
+                .expect("rms");
+            let start = Instant::now();
+            commands.submit_and_wait().expect("submit");
+            best_rms = best_rms.min(start.elapsed().as_secs_f64());
+
+            let mut commands = session.begin().expect("begin");
+            session
+                .ops()
+                .record_adaln_modulate_rows(
+                    &commands,
+                    mod_bind,
+                    layout.normed,
+                    hidden,
+                    rows,
+                    hidden,
+                )
+                .expect("adaln");
+            let start = Instant::now();
+            commands.submit_and_wait().expect("submit");
+            best_adaln = best_adaln.min(start.elapsed().as_secs_f64());
+        }
+        eprintln!(
+        "rows={rows} hidden={hidden}: rms_norm {:.3} ms | adaln_modulate {:.3} ms | sum {:.3} ms",
+        best_rms * 1e3,
+        best_adaln * 1e3,
+        (best_rms + best_adaln) * 1e3
+    );
+        eprintln!(
+            "  bytes moved: rms {:.1} MB, adaln {:.1} MB",
+            3.0 * rows as f64 * hidden as f64 * 4.0 / 1e6,
+            2.0 * rows as f64 * hidden as f64 * 4.0 / 1e6
+        );
+    }
 }
