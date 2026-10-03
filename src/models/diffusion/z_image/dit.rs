@@ -4195,4 +4195,63 @@ mod tests {
             );
         }
     }
+
+    /// Is the Q8 main stack already at the machine's streaming limit?
+    ///
+    /// The QKV chain in `record_attention_qkv` reports 28.2 ms under a single fence
+    /// for rms_norm, AdaLN and the QKV matmul together. The matmul alone reads
+    /// 3840 x 11520 Q8_0 weights, which at the rate the FFN projections stream should
+    /// cost well over 28 ms on its own -- the chain total being smaller than the
+    /// matmul's own floor is a contradiction, and one of the two numbers is wrong.
+    ///
+    /// This measures each projection the render actually runs, streaming eight
+    /// distinct matrices the way the render cycles its layers, so the numbers are
+    /// honest rather than L2-hot. It answers whether the FFN is at the roof (and so
+    /// has nothing left) or whether the QKV projection is running short of what its
+    /// shape implies -- which would point at the chain's other two stages instead.
+    #[test]
+    #[ignore = "multi-second GPU benchmark, not a correctness gate"]
+    fn zimage_projection_shapes_stream_at_the_machine_limit() {
+        use crate::ops::float::enable_gpu;
+
+        enable_gpu();
+        let Some(context) = crate::ops::get_vulkan_context() else {
+            eprintln!("skipped: no Vulkan context");
+            return;
+        };
+        let rows = 1056usize;
+        let mut session =
+            crate::models::diffusion::z_image::dit_gpu::DitGpuSession::new(context, rows)
+                .expect("session");
+        let layout = *session.layout();
+        const LAYERS: usize = 8;
+        for projection in [
+            crate::models::diffusion::z_image::dit_gpu::Projection::Qkv,
+            crate::models::diffusion::z_image::dit_gpu::Projection::Out,
+            crate::models::diffusion::z_image::dit_gpu::Projection::W1,
+            crate::models::diffusion::z_image::dit_gpu::Projection::W2,
+        ] {
+            let n_in = projection.n_in();
+            let n_out = projection.n_out();
+            for layer in 0..LAYERS {
+                let (_, weight) = tiled_bench_synthetic(rows + layer, n_in, n_out);
+                session
+                    .bind_weight(layer, projection, &weight)
+                    .expect("bind");
+            }
+            let layers: Vec<usize> = (0..LAYERS).collect();
+            // QKV is 11520 wide, so it needs the qkv region; the rest fit in `out`.
+            let output = if n_out > HIDDEN {
+                layout.qkv
+            } else {
+                layout.out
+            };
+            let ms = session
+                .bench_projection_streaming(&layers, projection, layout.gate, output, true, 3)
+                .expect("stream")
+                * 1e3;
+            let gop = 2.0 * (rows * n_in * n_out) as f64 / (ms / 1e3) / 1e9;
+            eprintln!("{projection:?} {n_in}x{n_out}: {ms:7.2} ms  {gop:6.0} GOP/s");
+        }
+    }
 }
