@@ -8,6 +8,7 @@ pub mod dots;
 pub mod edge0;
 pub mod falcon_h1;
 pub mod funasr;
+pub mod gemma3;
 pub mod gemma4;
 pub mod gemma_embedding;
 pub mod gliner;

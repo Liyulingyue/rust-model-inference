@@ -101,6 +101,13 @@ pub fn run_embedding(
             kv_format,
             output,
         ),
+        "gemma3" => crate::models::gemma3::run_embedding(
+            source,
+            prompt,
+            n_threads_arg,
+            kv_format,
+            output,
+        ),
         "bert" | "jina-bert-v2" | "nomic-bert" | "nomic-bert-moe" => {
             crate::models::bert_family::run_embedding(
                 source,

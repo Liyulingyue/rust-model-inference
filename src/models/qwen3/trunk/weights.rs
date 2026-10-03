@@ -79,40 +79,7 @@ pub struct Qwen3LayerWeights<'a> {
 /// The `weight` byte slice is the raw GGUF payload (no header, no
 /// scale — see `src/ops/kernel/i2_s.rs` for the block layout and the
 /// `bitnet.cpp` reference).
-#[derive(Debug, Clone)]
-pub struct BitLinearWeights {
-    pub norm_in: Vec<f32>,
-    pub weight: Vec<u8>,
-    pub n_in: usize,
-    pub n_out: usize,
-}
-
-/// Seven BitLinear projection slots per layer (attn_q/k/v/o +
-/// ffn_gate/up/down). `None` for every slot when the model is not
-/// BitNet; non-`None` only when `Qwen3Config::is_bitnet` is set.
-pub struct BitLinearSlot {
-    pub attn_q: Option<BitLinearWeights>,
-    pub attn_k: Option<BitLinearWeights>,
-    pub attn_v: Option<BitLinearWeights>,
-    pub attn_output: Option<BitLinearWeights>,
-    pub ffn_gate: Option<BitLinearWeights>,
-    pub ffn_up: Option<BitLinearWeights>,
-    pub ffn_down: Option<BitLinearWeights>,
-}
-
-impl Default for BitLinearSlot {
-    fn default() -> Self {
-        Self {
-            attn_q: None,
-            attn_k: None,
-            attn_v: None,
-            attn_output: None,
-            ffn_gate: None,
-            ffn_up: None,
-            ffn_down: None,
-        }
-    }
-}
+pub use crate::ops::bitlinear::{BitLinearSlot, BitLinearWeights};
 
 // =============================================================================
 // Load helpers

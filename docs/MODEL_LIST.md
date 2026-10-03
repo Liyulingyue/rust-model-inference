@@ -46,6 +46,7 @@
 | Qwen3-Reranker | 0.6B | 跨编码器重排序（query/document 打分） | llama.cpp | https://www.modelscope.cn/models/Qwen/Qwen3-Reranker-0.6B | https://modelscope.cn/models/ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF | √ |
 | Qwen3-Embedding | 0.6B | Embedding |  | https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-0.6B | https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-0.6B-GGUF | √ |
 | BitNet-Embedding | 0.6B | Embedding |  | https://huggingface.co/microsoft/bitnet-embedding-0.6b | `models/bitnet-embedding-0.6b-GGUF/bitnet-embeddings-0.6b-bf16-i2_s.gguf`（下载自 mistralai ModelScope 同步） | √ |
+| BitNet-Embedding | 270M | Embedding |  | https://huggingface.co/microsoft/bitnet-embedding-270m | `models/bitnet-embedding-270m-GGUF/bitnet-embeddings-270m-bf16-i2_s.gguf` | √ |
 | Qwen3-ASR | 0.6B | ASR | llama.cpp | https://www.modelscope.cn/models/Qwen/Qwen3-ASR-0.6B | https://www.modelscope.cn/models/ggml-org/Qwen3-ASR-0.6B-GGUF | √ |
 | Qwen3-Omni-MoE |  | 多模态 |  | 待补 | 待补 | 待核验。两列权重来源均未定位。 |
 | Qwen3-TTS | 12Hz-1.7B-Base | TTS | llama.cpp @ `201e50c` | https://www.modelscope.cn/models/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice | https://www.modelscope.cn/models/ggml-org/Qwen3-TTS-12Hz-1.7B-Base-GGUF | √ |

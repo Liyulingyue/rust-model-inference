@@ -62,6 +62,10 @@
 //! point gap (acceptable for the conversion to be considered lossless
 //! at the 2-bit-per-weight precision).
 
+pub mod weights;
+
+pub use weights::{BitLinearSlot, BitLinearWeights};
+
 use crate::ops::kernel::i2_s::{dequant_i2_s_row, QK_I2_S};
 
 /// Per-token (per-row) activation quantization to int8 with absmax
