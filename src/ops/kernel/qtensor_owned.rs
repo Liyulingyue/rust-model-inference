@@ -263,6 +263,15 @@ impl QTensorOwned {
             | QuantizedTensor::IQ1S { .. } => {
                 panic!("Q4_0 / Q4_1 / I-quant not yet supported in QTensorOwned")
             }
+            // BitNet I2_S — see the BitLinear forward in
+            // `src/ops/bitlinear.rs`. The BitLinear path doesn't go
+            // through QTensorOwned (it uses `BitLinearWeights::weight`
+            // raw bytes directly), so `from_quantized(I2S)` is
+            // unreachable in practice. Panic with a clear hint if
+            // it ever fires.
+            QuantizedTensor::I2S { .. } => {
+                panic!("I2_S QTensorOwned unsupported: BitLinear forward uses raw bytes, not this path")
+            }
         }
     }
 

@@ -192,6 +192,7 @@ pub(crate) fn test_model(tokenizer: Arc<BPETokenizer>, n_ctx: usize, n_embd: usi
             n_deepstack_layers: 0,
             moe: None,
             rope: Qwen3Rope::Neox,
+            is_bitnet: false,
         },
         tokenizer,
         layers: Vec::new(),
@@ -288,6 +289,7 @@ pub(super) fn deterministic_session_model(n_ctx: usize) -> Qwen3Model {
             n_deepstack_layers: 0,
             moe: None,
             rope: Qwen3Rope::Neox,
+            is_bitnet: false,
         },
         layers: vec![Qwen3LayerWeights {
             attn_norm: vec![1.0; WIDTH],
@@ -308,6 +310,7 @@ pub(super) fn deterministic_session_model(n_ctx: usize) -> Qwen3Model {
             w_gate: f32_weight(WIDTH, WIDTH, 5),
             w_up: f32_weight(WIDTH, WIDTH, 6),
             w_down: f32_weight(WIDTH, WIDTH, 7),
+            bitlinear: crate::models::qwen3::trunk::weights::BitLinearSlot::default(),
         }],
         output_norm: vec![1.0; WIDTH],
         token_embedding: f32_weight(WIDTH, VOCAB, 8),

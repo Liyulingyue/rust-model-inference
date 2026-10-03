@@ -63,6 +63,55 @@ pub struct Qwen3LayerWeights<'a> {
     pub w_gate: Weight<'a>,
     pub w_up: Weight<'a>,
     pub w_down: Weight<'a>,
+    /// BitNet b1.58 BitLinear projection slots. All seven slots
+    /// remain `None` for non-BitNet models. Loaded from
+    /// `blk.{i}.{proj}_norm_in.weight` (F16) + `blk.{i}.{proj}.weight`
+    /// (I2_S) when the GGUF carries the BitNet markers (see
+    /// `Qwen3Config::is_bitnet`).
+    pub bitlinear: BitLinearSlot,
+}
+
+/// Microsoft BitNet b1.58 BitLinear projection pair: per-projection
+/// RMSNorm (`*_norm_in.weight`, F16) + I2_S ternary weights packed
+/// 2-bit per element. The forward in `forward.rs::bitlinear_projection`
+/// does: `rms_norm → quantize_per_token_abs8 → ternary matmul → rescale`.
+///
+/// The `weight` byte slice is the raw GGUF payload (no header, no
+/// scale — see `src/ops/kernel/i2_s.rs` for the block layout and the
+/// `bitnet.cpp` reference).
+#[derive(Debug, Clone)]
+pub struct BitLinearWeights {
+    pub norm_in: Vec<f32>,
+    pub weight: Vec<u8>,
+    pub n_in: usize,
+    pub n_out: usize,
+}
+
+/// Seven BitLinear projection slots per layer (attn_q/k/v/o +
+/// ffn_gate/up/down). `None` for every slot when the model is not
+/// BitNet; non-`None` only when `Qwen3Config::is_bitnet` is set.
+pub struct BitLinearSlot {
+    pub attn_q: Option<BitLinearWeights>,
+    pub attn_k: Option<BitLinearWeights>,
+    pub attn_v: Option<BitLinearWeights>,
+    pub attn_output: Option<BitLinearWeights>,
+    pub ffn_gate: Option<BitLinearWeights>,
+    pub ffn_up: Option<BitLinearWeights>,
+    pub ffn_down: Option<BitLinearWeights>,
+}
+
+impl Default for BitLinearSlot {
+    fn default() -> Self {
+        Self {
+            attn_q: None,
+            attn_k: None,
+            attn_v: None,
+            attn_output: None,
+            ffn_gate: None,
+            ffn_up: None,
+            ffn_down: None,
+        }
+    }
 }
 
 // =============================================================================
@@ -81,14 +130,36 @@ pub fn get_f32_tensor<S: TensorSource + ?Sized>(
         .tensor_slice(name)
         .unwrap_or_else(|| panic!("slice {name} not found"));
     let mut output = vec![0.0; expected_len];
-    if info.ggml_type == GGMLType::F32 {
-        for (value, chunk) in output.iter_mut().zip(bytes.chunks_exact(4)) {
-            *value = f32::from_le_bytes(chunk.try_into().unwrap());
+    match info.ggml_type {
+        GGMLType::F32 => {
+            for (value, chunk) in output.iter_mut().zip(bytes.chunks_exact(4)) {
+                *value = f32::from_le_bytes(chunk.try_into().unwrap());
+            }
         }
-    } else if info.ggml_type == GGMLType::BF16 {
-        for (value, chunk) in output.iter_mut().zip(bytes.chunks_exact(2)) {
-            *value = bf16_to_f32(u16::from_le_bytes([chunk[0], chunk[1]]));
+        GGMLType::BF16 => {
+            for (value, chunk) in output.iter_mut().zip(bytes.chunks_exact(2)) {
+                *value = bf16_to_f32(u16::from_le_bytes([chunk[0], chunk[1]]));
+            }
         }
+        // BitNet b1.58 ships all RMSNorm weights as F16
+        // (`attn_norm`, `ffn_norm`, `attn_q_norm`, `attn_k_norm`,
+        // `attn_v_norm`, `attn_output_norm`, `ffn_gate_norm`,
+        // `ffn_up_norm`, `ffn_down_norm`). Pre-BitNet models use
+        // BF16; the legacy `get_f32_tensor` only matched F32/BF16
+        // and silently left the output all-zero, which made
+        // `rms_norm(x, all-zeros) = 0` cascade through every BitLinear
+        // and produce all-zero embeddings. Adding the F16 branch is
+        // the missing piece for BitNet.
+        GGMLType::F16 => {
+            for (value, chunk) in output.iter_mut().zip(bytes.chunks_exact(2)) {
+                let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
+                *value = crate::ops::float::f16_to_f32(bits);
+            }
+        }
+        other => panic!(
+            "get_f32_tensor {name}: unsupported ggml_type {other:?}; \
+             expected F32/F16/BF16"
+        ),
     }
     output
 }
@@ -102,8 +173,15 @@ pub fn load_layers<'a>(
     n_embd_gqa: usize,
     n_ff: usize,
     n_embd_head_k: usize,
-    has_qk_norm: bool,
+    is_bitnet: bool,
 ) -> Vec<Qwen3LayerWeights<'a>> {
+    // Both the Qwen3-Embedding path (mean pooling, has_qk_norm=true)
+    // and the BitNet-Embeddings path (last-token pooling, has_qk_norm=true)
+    // carry `blk.{i}.attn_{q,k}_norm.weight`. The legacy `load_layers`
+    // helper predates the BitNet-specific dispatch and hardcodes
+    // qk_norm loading — `load_layers_static` is the modern path that
+    // honours both flags from the GGUF metadata.
+    let has_qk_norm = true;
     (0..n_layer)
         .map(|l| Qwen3LayerWeights {
             attn_norm: get_f32_tensor(source, &format!("blk.{}.attn_norm.weight", l), n_embd),
@@ -210,6 +288,12 @@ pub fn load_layers<'a>(
                 n_ff,
                 n_embd,
             )),
+            bitlinear: if is_bitnet {
+                load_bitlinear_layer_borrowed(source, l, n_embd, n_embd_q, n_embd_gqa, n_ff)
+                    .expect("BitNet b1.58 BitLinear load failure")
+            } else {
+                BitLinearSlot::default()
+            },
         })
         .collect()
 }
@@ -227,6 +311,7 @@ pub fn load_layers_static(
     n_embd_head_k: usize,
     has_qk_norm: bool,
     has_qkv_bias: bool,
+    is_bitnet: bool,
     moe: Option<crate::core::loader::Qwen3MoeConfig>,
 ) -> Result<Vec<Qwen3LayerWeights<'static>>, String> {
     let source = source.as_ref();
@@ -422,9 +507,218 @@ pub fn load_layers_static(
             moe_gate,
             moe_up,
             moe_down,
+            bitlinear: load_bitlinear_layer(source, l, is_bitnet, n_embd, n_embd_q, n_embd_gqa, n_ff)?,
         });
     }
     Ok(layers)
+}
+
+/// Load BitLinear projection slots for layer `l` when `is_bitnet` is
+/// set; otherwise return a `BitLinearSlot::default()` (all seven
+/// slots `None`). Each `Some(BitLinearWeights)` slot carries the
+/// pre-projection RMSNorm weight (`*_norm_in.weight`, F16) and the
+/// raw I2_S payload (`*.weight`, byte slice — see
+/// `src/ops/kernel/i2_s.rs` for the block layout).
+///
+/// When `is_bitnet` is true but a tensor is missing we return an
+/// error rather than silently degrading — the BitLinear forward in
+/// `forward.rs::bitlinear_projection` requires both pieces per slot.
+fn load_bitlinear_layer(
+    source: &dyn TensorSource,
+    l: usize,
+    is_bitnet: bool,
+    n_embd: usize,
+    n_embd_q: usize,
+    n_embd_gqa: usize,
+    n_ff: usize,
+) -> Result<BitLinearSlot, String> {
+    if !is_bitnet {
+        return Ok(BitLinearSlot::default());
+    }
+    load_bitlinear_layer_inner(
+        source,
+        l,
+        n_embd,
+        n_embd_q,
+        n_embd_gqa,
+        n_ff,
+        |name, n_in| {
+            let info = source
+                .tensor_info(name)
+                .ok_or_else(|| format!("BitNet missing tensor info for {name}"))?;
+            if info.ggml_type != crate::core::tensor::GGMLType::I2_S {
+                return Err(format!(
+                    "BitNet {name} must be I2_S, got {:?}",
+                    info.ggml_type
+                ));
+            }
+            let bytes = source
+                .tensor_slice(name)
+                .ok_or_else(|| format!("BitNet missing data for {name}"))?
+                .to_vec();
+            Ok(bytes)
+        },
+        |name, n_in| {
+            let info = source
+                .tensor_info(name)
+                .ok_or_else(|| format!("BitNet missing tensor info for {name}"))?;
+            let bytes = source
+                .tensor_slice(name)
+                .ok_or_else(|| format!("BitNet missing data for {name}"))?;
+            let mut norm = vec![0.0f32; n_in];
+            match info.ggml_type {
+                crate::core::tensor::GGMLType::F16 => {
+                    for (dst, chunk) in norm.iter_mut().zip(bytes.chunks_exact(2)) {
+                        let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
+                        *dst = crate::ops::float::f16_to_f32(bits);
+                    }
+                }
+                crate::core::tensor::GGMLType::F32 => {
+                    for (dst, chunk) in norm.iter_mut().zip(bytes.chunks_exact(4)) {
+                        *dst = f32::from_le_bytes(chunk.try_into().unwrap());
+                    }
+                }
+                crate::core::tensor::GGMLType::BF16 => {
+                    for (dst, chunk) in norm.iter_mut().zip(bytes.chunks_exact(2)) {
+                        let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
+                        *dst = crate::ops::float::bf16_to_f32(bits);
+                    }
+                }
+                other => {
+                    return Err(format!(
+                        "BitNet {name} must be F16/F32/BF16, got {other:?}"
+                    ));
+                }
+            }
+            Ok(norm)
+        },
+    )
+}
+
+/// Borrowed-lifetime variant of `load_bitlinear_layer` for the
+/// legacy `load_layers` helper (used by the embed CLI in
+/// `qwen3::embedding::run_embedding_tokens`). Mirrors the
+/// `'static` version but stores the I2_S payload as `Vec<u8>` (a
+/// copy) since the embed CLI does not hold a `'static` source.
+fn load_bitlinear_layer_borrowed(
+    source: &dyn TensorSource,
+    l: usize,
+    n_embd: usize,
+    n_embd_q: usize,
+    n_embd_gqa: usize,
+    n_ff: usize,
+) -> Result<BitLinearSlot, String> {
+    load_bitlinear_layer_inner(
+        source,
+        l,
+        n_embd,
+        n_embd_q,
+        n_embd_gqa,
+        n_ff,
+        |name, _n_in| {
+            let info = source
+                .tensor_info(name)
+                .ok_or_else(|| format!("BitNet missing tensor info for {name}"))?;
+            if info.ggml_type != crate::core::tensor::GGMLType::I2_S {
+                return Err(format!(
+                    "BitNet {name} must be I2_S, got {:?}",
+                    info.ggml_type
+                ));
+            }
+            Ok(source
+                .tensor_slice(name)
+                .ok_or_else(|| format!("BitNet missing data for {name}"))?
+                .to_vec())
+        },
+        |name, n_in| {
+            let info = source
+                .tensor_info(name)
+                .ok_or_else(|| format!("BitNet missing tensor info for {name}"))?;
+            let bytes = source
+                .tensor_slice(name)
+                .ok_or_else(|| format!("BitNet missing data for {name}"))?;
+            let mut norm = vec![0.0f32; n_in];
+            match info.ggml_type {
+                crate::core::tensor::GGMLType::F16 => {
+                    for (dst, chunk) in norm.iter_mut().zip(bytes.chunks_exact(2)) {
+                        let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
+                        *dst = crate::ops::float::f16_to_f32(bits);
+                    }
+                }
+                crate::core::tensor::GGMLType::F32 => {
+                    for (dst, chunk) in norm.iter_mut().zip(bytes.chunks_exact(4)) {
+                        *dst = f32::from_le_bytes(chunk.try_into().unwrap());
+                    }
+                }
+                crate::core::tensor::GGMLType::BF16 => {
+                    for (dst, chunk) in norm.iter_mut().zip(bytes.chunks_exact(2)) {
+                        let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
+                        *dst = crate::ops::float::bf16_to_f32(bits);
+                    }
+                }
+                other => {
+                    return Err(format!(
+                        "BitNet {name} must be F16/F32/BF16, got {other:?}"
+                    ));
+                }
+            }
+            Ok(norm)
+        },
+    )
+}
+
+/// Shared loader body — the only difference between the two
+/// callers is the lifetime of the I2_S byte slice (the embed CLI
+/// clones the borrowed slice to `Vec<u8>`; the Qwen3Model path
+/// transmutes to `'static` and keeps the borrowed reference). Both
+/// callers route through this function.
+fn load_bitlinear_layer_inner<L, N>(
+    source: &dyn TensorSource,
+    l: usize,
+    n_embd: usize,
+    n_embd_q: usize,
+    n_embd_gqa: usize,
+    n_ff: usize,
+    load_i2s: L,
+    load_norm: N,
+) -> Result<BitLinearSlot, String>
+where
+    L: Fn(&str, usize) -> Result<Vec<u8>, String>,
+    N: Fn(&str, usize) -> Result<Vec<f32>, String>,
+{
+    let dims: &[(&str, usize, usize)] = &[
+        ("attn_q", n_embd, n_embd_q),
+        ("attn_k", n_embd, n_embd_gqa),
+        ("attn_v", n_embd, n_embd_gqa),
+        ("attn_output", n_embd_q, n_embd),
+        ("ffn_gate", n_embd, n_ff),
+        ("ffn_up", n_embd, n_ff),
+        ("ffn_down", n_ff, n_embd),
+    ];
+    let mut slots = BitLinearSlot::default();
+    for (proj, n_in, n_out) in dims.iter() {
+        let norm_name = format!("blk.{l}.{proj}_norm_in.weight");
+        let weight_name = format!("blk.{l}.{proj}.weight");
+        let norm_f32 = load_norm(&norm_name, *n_in)?;
+        let weight_bytes = load_i2s(&weight_name, *n_out)?;
+        let slot = match *proj {
+            "attn_q" => &mut slots.attn_q,
+            "attn_k" => &mut slots.attn_k,
+            "attn_v" => &mut slots.attn_v,
+            "attn_output" => &mut slots.attn_output,
+            "ffn_gate" => &mut slots.ffn_gate,
+            "ffn_up" => &mut slots.ffn_up,
+            "ffn_down" => &mut slots.ffn_down,
+            other => panic!("load_bitlinear_layer_inner: unhandled projection {other}"),
+        };
+        *slot = Some(BitLinearWeights {
+            norm_in: norm_f32,
+            weight: weight_bytes,
+            n_in: *n_in,
+            n_out: *n_out,
+        });
+    }
+    Ok(slots)
 }
 
 fn weight_from_bytes(
@@ -584,6 +878,7 @@ impl Qwen3Model {
             config.n_embd_head_k,
             config.has_qk_norm,
             config.has_qkv_bias,
+            config.is_bitnet,
             config.moe,
         )?;
         if config.architecture == "qwen3" && crate::ops::scalar_mode() {

@@ -76,7 +76,17 @@ fn embedding_config(
     get_meta: impl Fn(&str) -> Option<crate::core::tensor::MetaValue>,
 ) -> Result<EmbeddingConfig, String> {
     let pooling_key = format!("{arch}.pooling_type");
+    // Detect BitNet embeddings (file_type=40 + has any `*_norm_in`
+    // tensor). On BitNet-Embeddings, `pooling_type=1` means
+    // last-token pooling (per the BitNet-Embeddings paper §2), NOT
+    // mean pooling (which is the Qwen3-Embedding convention).
+    let file_type = get_meta("general.file_type")
+        .and_then(|value| value.to_u64())
+        .unwrap_or(0);
+    let has_norm_in = get_meta("blk.0.attn_q_norm_in.weight").is_some();
+    let is_bitnet = file_type == 40 || has_norm_in;
     let pooling = match get_meta(&pooling_key).and_then(|value| value.to_u64()) {
+        Some(1) if is_bitnet => EmbeddingPooling::Last,
         Some(1) => EmbeddingPooling::Mean,
         Some(3) => EmbeddingPooling::Last,
         Some(value) => {
@@ -122,6 +132,33 @@ fn encode_embedding_input(tokenizer: &BPETokenizer, prompt: &str) -> Vec<u32> {
             parse_special: true,
         },
     )
+}
+
+/// BitLinear forward used by the embed CLI for BitNet models. Mirrors
+/// `forward.rs::bitlinear_projection` but stays in this module so the
+/// embed path doesn't have to depend on `trunk::forward`. The output
+/// is written in-place to `output` (length `n_out`).
+fn embed_bitlinear(
+    proj: &crate::models::qwen3::trunk::BitLinearWeights,
+    input: &[f32],
+    n_in: usize,
+    n_out: usize,
+    output: &mut [f32],
+    eps: f32,
+) {
+    debug_assert_eq!(input.len(), n_in);
+    debug_assert_eq!(output.len(), n_out);
+    debug_assert_eq!(proj.n_in, n_in);
+    debug_assert_eq!(proj.n_out, n_out);
+    let mut normed = vec![0.0f32; n_in];
+    rms_norm(input, &proj.norm_in, &mut normed, eps);
+    crate::ops::bitlinear::bitlinear_forward_from_f32(
+        &proj.weight,
+        &normed,
+        n_in,
+        n_out,
+        output,
+    );
 }
 
 fn embedding_positions(n_tokens: usize) -> std::ops::Range<usize> {
@@ -326,6 +363,20 @@ pub fn run_embedding_tokens(
         .ok_or("missing token_embd.weight")?;
     let embd_type = embd_info.ggml_type;
 
+    // BitNet detection (mirrors `Qwen3Config::is_bitnet`): GGUF
+    // file_type=40 OR per-projection `*_norm_in` tensors present
+    // both mark a Microsoft BitNet b1.58 conversion. The embed path
+    // here uses the same `load_layers` as the LLM text_encode path
+    // (which separately takes `Qwen3Config::is_bitnet` from the
+    // model), but the embed CLI doesn't load a full `Qwen3Model`
+    // — only the layer weights + tokenizer + scratch buffers — so
+    // we detect here from raw metadata.
+    let file_type = source
+        .metadata("general.file_type")
+        .and_then(crate::core::tensor::MetaValue::to_u64)
+        .unwrap_or(0);
+    let has_norm_in = source.tensor_info("blk.0.attn_q_norm_in.weight").is_some();
+    let is_bitnet = file_type == 40 || has_norm_in;
     let layers: Vec<Qwen3LayerWeights> = load_layers(
         source,
         n_layer,
@@ -334,7 +385,7 @@ pub fn run_embedding_tokens(
         n_embd_gqa,
         n_ff,
         n_embd_head_k,
-        is_qwen3,
+        is_bitnet,
     );
 
     let n_tokens = token_ids.len();
@@ -401,30 +452,59 @@ pub fn run_embedding_tokens(
             let k = &mut k_buf[t * n_embd_gqa..(t + 1) * n_embd_gqa];
             let v = &mut v_buf[t * n_embd_gqa..(t + 1) * n_embd_gqa];
 
-            lw.wq.quantize_and_matmul_with_scratch(
-                x,
-                &mut q8k_buf,
-                &mut q8_buf,
-                &mut scale_buf,
-                q,
-                &pool,
-            );
-            lw.wk.quantize_and_matmul_with_scratch(
-                x,
-                &mut q8k_buf,
-                &mut q8_buf,
-                &mut scale_buf,
-                k,
-                &pool,
-            );
-            lw.wv.quantize_and_matmul_with_scratch(
-                x,
-                &mut q8k_buf,
-                &mut q8_buf,
-                &mut scale_buf,
-                v,
-                &pool,
-            );
+            if is_bitnet {
+                // BitNet b1.58: per-projection RMSNorm →
+                // per-token absmax int8 quant → ternary matmul.
+                embed_bitlinear(
+                    &lw.bitlinear.attn_q.as_ref().unwrap(),
+                    x,
+                    n_embd,
+                    n_embd_q,
+                    q,
+                    eps,
+                );
+                embed_bitlinear(
+                    &lw.bitlinear.attn_k.as_ref().unwrap(),
+                    x,
+                    n_embd,
+                    n_embd_gqa,
+                    k,
+                    eps,
+                );
+                embed_bitlinear(
+                    &lw.bitlinear.attn_v.as_ref().unwrap(),
+                    x,
+                    n_embd,
+                    n_embd_gqa,
+                    v,
+                    eps,
+                );
+            } else {
+                lw.wq.quantize_and_matmul_with_scratch(
+                    x,
+                    &mut q8k_buf,
+                    &mut q8_buf,
+                    &mut scale_buf,
+                    q,
+                    &pool,
+                );
+                lw.wk.quantize_and_matmul_with_scratch(
+                    x,
+                    &mut q8k_buf,
+                    &mut q8_buf,
+                    &mut scale_buf,
+                    k,
+                    &pool,
+                );
+                lw.wv.quantize_and_matmul_with_scratch(
+                    x,
+                    &mut q8k_buf,
+                    &mut q8_buf,
+                    &mut scale_buf,
+                    v,
+                    &pool,
+                );
+            }
         }
 
         if let (Some(qn), Some(kn)) = (&lw.q_norm, &lw.k_norm) {
@@ -507,14 +587,25 @@ pub fn run_embedding_tokens(
             let attn = &attn_out[t * n_embd_q..(t + 1) * n_embd_q];
             let proj = &mut attn_proj[t * n_embd..(t + 1) * n_embd];
 
-            lw.wo.quantize_and_matmul_with_scratch(
-                attn,
-                &mut q8k_buf,
-                &mut q8_buf,
-                &mut scale_buf,
-                proj,
-                &pool,
-            );
+            if is_bitnet {
+                embed_bitlinear(
+                    &lw.bitlinear.attn_output.as_ref().unwrap(),
+                    attn,
+                    n_embd_q,
+                    n_embd,
+                    proj,
+                    eps,
+                );
+            } else {
+                lw.wo.quantize_and_matmul_with_scratch(
+                    attn,
+                    &mut q8k_buf,
+                    &mut q8_buf,
+                    &mut scale_buf,
+                    proj,
+                    &pool,
+                );
+            }
         }
 
         for t in 0..n_tokens {
@@ -534,22 +625,57 @@ pub fn run_embedding_tokens(
             );
         }
 
-        apply_embedding_ffn_typed(
-            &mut hidden,
-            &normed,
-            n_embd,
-            n_ff,
-            &lw.w_gate,
-            &lw.w_up,
-            &lw.w_down,
-            &mut gate_buf,
-            &mut up_buf,
-            &mut down_buf,
-            &mut q8k_buf,
-            &mut q8_buf,
-            &mut scale_buf,
-            &pool,
-        )?;
+        if is_bitnet {
+            for t in 0..n_tokens {
+                let ffn_row = &normed[t * n_embd..(t + 1) * n_embd];
+                embed_bitlinear(
+                    &lw.bitlinear.ffn_gate.as_ref().unwrap(),
+                    ffn_row,
+                    n_embd,
+                    n_ff,
+                    &mut gate_buf,
+                    eps,
+                );
+                embed_bitlinear(
+                    &lw.bitlinear.ffn_up.as_ref().unwrap(),
+                    ffn_row,
+                    n_embd,
+                    n_ff,
+                    &mut up_buf,
+                    eps,
+                );
+                silu_mul_approx_inplace(&mut gate_buf, &mut up_buf);
+                embed_bitlinear(
+                    &lw.bitlinear.ffn_down.as_ref().unwrap(),
+                    &up_buf,
+                    n_ff,
+                    n_embd,
+                    &mut down_buf,
+                    eps,
+                );
+                let residual = &mut hidden[t * n_embd..(t + 1) * n_embd];
+                for index in 0..n_embd {
+                    residual[index] += down_buf[index];
+                }
+            }
+        } else {
+            apply_embedding_ffn_typed(
+                &mut hidden,
+                &normed,
+                n_embd,
+                n_ff,
+                &lw.w_gate,
+                &lw.w_up,
+                &lw.w_down,
+                &mut gate_buf,
+                &mut up_buf,
+                &mut down_buf,
+                &mut q8k_buf,
+                &mut q8_buf,
+                &mut scale_buf,
+                &pool,
+            )?;
+        }
     }
 
     for t in 0..n_tokens {

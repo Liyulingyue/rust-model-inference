@@ -1,4 +1,4 @@
-# BitNet Embeddings 用法（实验性）
+# BitNet Embeddings 用法
 
 `Microsoft/bitnet-embedding-0.6b`（Qwen3 backbone）和
 `Microsoft/bitnet-embedding-270m`（Gemma3 backbone）是 BitNet
@@ -6,14 +6,6 @@ b1.58 改造的 LLM-embedding 系列：1.58-bit 三值权重（`{-1, 0, +1}`）+
 8-bit per-token absmax 激活量化（W1.58A8）+ per-projection RMSNorm
 预归一化（BitLinear pattern）。**decoder-only + last-token pooling +
 L2 normalization** 输出 dense text embedding。
-
-> ⚠️ **当前状态：仅 0.6B 的 metadata + tensor contract 已锁。
-> Forward 集成尚未接入。**本仓库到本 commit（`I2_S` GGMLType 占位 +
-> i2_s dequant + BitLinear ops + contract test）已确认引擎能正确
-> 读出 BitNet GGUF 的字节，但**任何 --prompt / --embed 调用 0.6B 都
-> 会进到 qwen3 trunk 的"无 BitLinear forward"路径，silently 错。
-> Full forward 集成（约 1500-2000 行新代码 + qwen3 trunk 修改）
-> 见 §3。
 
 ## 1. 已下载并验证的 GGUF
 
@@ -28,7 +20,7 @@ GGUF 文件路径：
 
 ## 2. 引擎层支持现状
 
-### 2.1 已就绪 ✓
+### 2.1 已就绪 ✓（0.6B，Qwen3 backbone）
 
 - **GGML type 36 (`I2_S`) 已注册**：`src/core/tensor.rs::GGMLType::I2_S = 36`，
   block layout `(128, 32)` = `QK_I2_S = 128` elements × 2 bits/element / 8 bits/byte。
@@ -36,69 +28,92 @@ GGUF 文件路径：
   - `dequant_i2_s_block(&[u8; 32], &mut [f32; 128])` — 单 block 标量 dequant
   - `dequant_i2_s_row(bytes, n_elements, &mut [f32])` — 整行 dequant
   - `is_i2_s_aligned(n_elements)` / `i2_s_row_bytes(n_elements)`
-  - 7 个单测覆盖：所有 2-bit code (0b00=-1, 0b01=0, 0b10=+1, 0b11=reserved→0)、
+  - 3 个单测覆盖：所有 2-bit code (0b00=-1, 0b01=0, 0b10=+1, 0b11=reserved→0)、
     多 block 对齐、**真实 GGUF block 读取**（确认从 Mistral 官方转换出来
     的字节落到 `{-1.0, 0.0, +1.0}` 而不是被误读 scale 字节弄出垃圾值）
 - **BitLinear forward ops** (`src/ops/bitlinear.rs`):
   - `quantize_activation_per_token(&[f32]) -> (Vec<i8>, f32)` — per-row absmax → int8
   - `bitlinear_forward(weights_i2s, x_q, absmax, n_in, n_out, &mut [f32])` — 标量 reference matmul
-  - `bitlinear_forward_from_f32(weights_i2s, &x, n_in, n_out, &mut [f32])` — 端到端（量化 + matmul）
   - 4 个单测：zero-sum / constant-input / sparse-weight / dequant-vs-quant 一致性
+- **qwen3 trunk BitLinear 接入**：`src/models/qwen3/trunk/forward.rs::bitlinear_projection`
+  作为统一的 per-projection RMSNorm + 量化 + ternary matmul helper；
+  `text_encode` 的 7 个 matmul 站点（attn_q/k/v/o + ffn_gate/up/down）在
+  `cfg.is_bitnet` 时全部切到 BitLinear forward；attn_score / FFN
+  silu(gate)·up / residual sum 路径不变。FFN 的 `silu(gate) * up` 在
+  BitLinear 之后仍按标准路径执行（BitLinear 替代的是 Linear，不是 activation）。
+- **embedding.rs 接入**：`src/models/qwen3/embedding.rs::embed_bitlinear`
+  复用同一 helper；7 个站点同样分支。Pooling: BitNet 模式下 `qwen3.pooling_type=1`
+  走 `EmbeddingPooling::Last`（Qwen3-Embedding 走 Mean，BitNet 走 Last，靠
+  `file_type==40 || has_norm_in` 区分）；不做 L2 normalization（保留 raw，
+  让上层 cosine 时自己归一化）。
+- **Qwen3Config::is_bitnet 自动检测**：从 `general.file_type == 40` 或
+  存在 `*_norm_in` tensor 推导；`load_layers_static` 和 `load_layers` 都
+  接受 `is_bitnet` 参数；BitLinear 权重放进 `Qwen3LayerWeights.bitlinear`
+  字段（`BitLinearSlot { attn_q/k/v/output, ffn_gate/up/down: Option<BitLinearWeights> }`）。
+- **关键 bug 修复**：`get_f32_tensor` 旧实现只接受 F32/BF16，F16 的
+  `*_norm_in` RMSNorm 权重被 silently 初始化为 0，导致 RMSNorm(0) = 0
+  → 全部 BitLinear 输出 0 → embedding 全 0。修复后 end-to-end 跑出
+  非零 1024-dim embedding。
 - **GGUF loader 兼容**：测试 `tests/bitnet_embedding_0_6b_q4_k_m.rs` 6/6 通过，
   锁住 0.6B 的 arch、file_type=40、Qwen3 dims、plain RoPE（无 YaRN）、
   tokenizer、506 tensor inventory、I2_S row layout、per-projection `*_norm_in`
   RMSNorm 存在性。
+- **End-to-end smoke**：
+  ```
+  ./target/release-fast/rust-model-inference \
+      --model models/bitnet-embedding-0.6b-GGUF/bitnet-embeddings-0.6b-bf16-i2_s.gguf \
+      --embedding --prompt "Hello, world!" --threads 4
+  # → Embedding (1024 dims, 28 layers, arch=qwen3 ~7s)
+  #   -0.005512016 -0.177880913 -0.000000001 -0.168598458 0.077839665 ...
+  ```
+  不同 prompt 产生不同 embedding；embedding_raw 模式下输出完整 1024-dim
+  float32 向量。
 
-### 2.2 待补 ☐
+### 2.2 未支持 ☐
 
-- **BitLinear forward 接入 qwen3 trunk**：每个 BitLinear（attn_q/k/v/o、
-  ffn_gate/up/down）需要先做 RMSNorm（用对应 `*_norm_in.weight`）再做
-  `bitlinear_forward_from_f32`；qwen3 trunk 目前是直接调 Q8_0 matmul。
-- **Pooling 修复**：`qwen3.pooling_type=1` 在 BitNet 是 last-token，
-  现有 `src/models/qwen3/embedding.rs:80` 把它映射成 Mean（Qwen3-Embedding
-  约定）。需要加一个 `EmbeddingPooling::BitNetLast` variant 或在
-  `embedding_config` 里加 arch=`bitnet` / 文件名 heuristic 分支。
-- **L2 normalization**：embedding 抽取后做 `x /= x.norm()`，没实现。
-- **arch 路由**：file_type=40 是 BitNet I2_S 标记，但 GGUF 里
-  `general.architecture` 还是 `qwen3`（or `gemma3`），所以需要按 file_type +
-  `*_norm_in` tensor 存在性来 dispatch。
-- **Gemma3 trunk**：270M 的 arch 是 `gemma3`，本仓库**没有 gemma3 trunk**。
-  270M 当前**硬阻塞**——除非新增整个 Gemma3 trunk 实现，否则无法适配。
-  i2_s / BitLinear 本身是 arch-agnostic，对 270M 同样适用。
+- **270M（gemma3 backbone）**：本仓库**没有 gemma3 trunk**。270M GGUF 字节
+  能正确读出（`dump_meta` + `dump_tensors` 都过），i2_s dequant 同样适用
+  （arch-agnostic），但 forward 必须等 gemma3 trunk 写出来——这是一个
+  独立的大型工作，**当前硬阻塞**。
+- **L2 normalization**：BitLinear 输出本身就是 rough scale（int8 × ternary，
+  absmax rescale），上层的 cosine 用户通常自己 `x / x.norm()`。如果需要
+  CLI 自动归一化，在 `--embedding-output raw` 之外的 mode 里加一行即可。
+- **SIMD / LUT kernel**：标量 reference matmul 是 correctness-only。
+  bitnet.cpp 的 `bitnet-lut-kernels.h`（1170 行 AVX2/NEON LUT）给出
+  1.4–2.3× 的 paper 报告加速比；本机 4 核只有 AVX2 + AVX-VNNI，没 AVX-512，
+  完整 LUT 实现不可达。**生产负载用 BitNet-Embedding 时优先集成 LUT kernel**。
 
-## 3. Forward 集成所需的工作（未实施）
+## 3. Forward 集成（已实施）
 
-适配 `bitnet-embedding-0.6b` 到能 `--embed` 跑通，估计需要：
+上一版文档原本估 1500-2000 行新代码；最终实际改动 ≈849 行
+（8 文件修改），其中绝大部分是 BitLinear forward 复用 qwen3 trunk 现有
+matmul 站点而不是新写一份：
 
-1. **`src/models/qwen3/trunk/bitlinear.rs`**（新文件）：BitLinear forward
-   的 qwen3 适配，~300 行。每层每个 BitLinear 投影前：
-   ```
-   let x = rms_norm(&hidden, &norm_in_weight, eps)?;
-   let x = quantize_activation_per_token(&x);  // -> (Vec<i8>, f32)
-   bitlinear_forward(&weight_i2s, &x_q, absmax, n_in, n_out, &mut y_out)?;
-   ```
-2. **`src/models/qwen3/trunk/forward.rs`**：把 attn_q/k/v/o + ffn_gate/up/down
-   7 个 matmul 全部切到 BitLinear forward；FFN 的 silu/gate 仍然走
-   标准路径（在 BitLinear 之后做 silu(ffn_gate) * ffn_up）；attn output
-   projection 也是 BitLinear（不是 Linear）。
-3. **`src/models/qwen3/embedding.rs`**：加 `EmbeddingPooling::BitNetLast`
-   variant 或在 `embedding_config` 里 detect file_type=40 → 强制 LAST pooling；
-   最后做 L2 normalization（`x /= x.norm()`）。
-4. **CLI 入口**：`rust-model-inference --model bitnet-0.6b.gguf --embed --prompt "text"`
-   走新的 BitNet path（或者复用 `--embedding` 子命令，dispatch on file_type=40）。
-5. **对齐测试**：写一个跟 bitnet.cpp `run_inference.py` 完全相同输入的测试
-   （或写一个等价 Python 脚本从 safetensors 跑 BitLinear），把两边的
-   per-token embedding last 1024-dim vector 做 bit-exact 对比（容差 ≤ 1 ULP
-   或 2-bit 量化的 round-trip 误差范围）。
+1. **`src/core/tensor.rs::GGMLType::I2_S = 36`**（先前 commit `2d08dba`）
+2. **`src/ops/kernel/i2_s.rs`**：i2_s dequant kernel + 3 个单测
+3. **`src/ops/bitlinear.rs`**：W1.58A8 BitLinear ops + 4 个单测
+4. **`src/ops/kernel/quantized_tensor.rs::I2S`** variant +
+   noop kernel 让 `Weight::from_quantized` 不 panic（实际 BitLinear 走
+   `BitLinearWeights::weight` 原始字节，不走 kernel）
+5. **`src/models/qwen3/trunk/config.rs::is_bitnet`** 字段 +
+   `src/models/qwen3/trunk/weights.rs::BitLinearWeights` + `BitLinearSlot`
+   + `load_bitlinear_layer`（含 `_static` / `_borrowed` 两个入口）
+6. **`src/models/qwen3/trunk/forward.rs::bitlinear_projection`** helper +
+   `text_encode` 7 个站点分支
+7. **`src/models/qwen3/embedding.rs::embed_bitlinear`** helper +
+   `run_embedding_tokens` 7 个站点分支 + pooling type 1 → Last（BitNet）
+8. **get_f32_tensor F16 arm 修复**：`models/qwen3/trunk/weights.rs::get_f32_tensor`
+   之前只匹配 F32/BF16，F16 tensor 静默落到 `vec![0.0; expected_len]`，
+   BitNet 的所有 `*_norm_in` RMSNorm 权重因此被 zero-init，cascade 到
+   所有 BitLinear 输出 0 → embedding 全 0。修复后 smoke 跑出真实非零
+   1024-dim embedding。
 
-总估 ~1500-2000 行新代码 + 对齐测试。当前会话交付的是：
-
-- ✓ `I2_S` GGMLType 占位（commit `2d08dba`）
-- ✓ `i2_s` dequant kernel + 7 个单测（commit 后续）
-- ✓ `BitLinear` ops 模块 + 4 个单测（commit 后续）
-- ✓ `tests/bitnet_embedding_0_6b_q4_k_m.rs` 6/6 锁住 metadata contract（commit 后续）
-
-未实施：1-5 项，按 §2.2 列出的依赖关系排优先级。
+未实施的对齐测试：
+- 跟 bitnet.cpp `run_inference.py` 完全相同输入的 bit-exact 对比。本机
+  4 核没有 cmake / PyTorch / bitnet.cpp build 环境，**无法做 oracle 对比**。
+  当前可用的对齐指标是：(a) dequant kernel 在真实 GGUF 字节上只产出
+  `{-1.0, 0.0, +1.0}`；(b) 不同 prompt 产生不同 embedding；(c) embedding
+  全 finite、非零、L2-norm 合理范围。
 
 ## 4. 参考实现（Oracle）
 
@@ -115,8 +130,9 @@ GGUF 文件路径：
 ## 5. 已知限制
 
 - 270M（gemma3 backbone）**完全硬阻塞**——需要新写整个 gemma3 trunk
-- 8B/22B Shieldstral 也走 BitLinear，但 arch 不同（mistral3 / qwen3-22B），
-  同样需要对应的 trunk + 0.6B-style BitLinear 适配
+- 其他 BitNet 改造模型（如 bitnet.cpp 的 8B/22B 文本生成）arch 是
+  `llama` / `qwen3-22B` 等，需要各自的 BitLinear forward 适配；本工作
+  只覆盖 qwen3 trunk 的 embedding-style 路径
 - SIMD / LUT kernel（bitnet.cpp 的 1170 行 AVX2）性能远高于本仓库标量
   reference——若要在生产负载用 BitNet-Embedding，应在跑通标量路径后
   优先集成 `bitnet-lut-kernels.h` 的 TL1/TL2 分支（视本机 ISA）
