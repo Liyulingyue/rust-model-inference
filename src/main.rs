@@ -13,7 +13,7 @@ use rust_model_inference::DreamXConfig;
 use rust_model_inference::MetaValue;
 use rust_model_inference::TensorSource;
 
-const USAGE: &str = "Usage: rust-model-inference --model <path.gguf-or-ggufrs> [--prompt ...] [--threads N] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--max-context N (default 8192)] [--repetition-penalty α (default 1.0 = disabled)] [--serve [--host 0.0.0.0] [--port 8080]]\n\nJEV mode: --jev --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | single-forward-pass decision scoring over candidate labels A/B/C/…\n\nJEV grouped: --jev --jev-multi [--jev-option <pos> --jev-option <neg> ...] (pairs) or --jev-block <label> --jev-option <a> [--jev-option <b> ...] (blocks)\n\nServer mode: --serve [--host 0.0.0.0] [--port 8080] --model <path> [--mmproj ...] [--tts] [--embedding]\n\nCLM mode: --jev --clm-head <clm-heads.gguf> --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | cosine scoring via CLM projection heads on the chosen encoder (state = context, blank line, question; candidates verbatim\n\nGLiNER2 mode: --jev --gliner2-decide --model <gliner2-decide.gguf> --jev-context <text> [--gliner2-schema <json> | --jev-question <name> --jev-option <a> [--jev-option <b> ...]] | one DeBERTa-v3 pass scores every label of every task; --gliner2-schema takes a classify_text-shaped mapping: {intent: [a, b], aspects: {labels: [x], multi_label: true, cls_threshold: 0.4}}";
+const USAGE: &str = "Usage: rust-model-inference --model <path.gguf-or-ggufrs> [--prompt ...] [--threads N] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--max-context N (default 8192)] [--repetition-penalty α (default 1.0 = disabled)] [--serve [--host 0.0.0.0] [--port 8080]]\n\nRerank mode: --rerank --rerank-query <TEXT> [--rerank-doc <TEXT> ...] | [--rerank-documents <FILE>] [--rerank-instruction <TEXT>] [--rerank-max-tokens N] | cross-encoder scoring; backend picked by GGUF arch (jina-bert-v2 + cls.weight/cls.bias → bert forward, qwen3 + cls.output.weight + pooling_type=4 → qwen3 trunk + 2-class head); one sigmoid'd score per document in [0, 1]\n\nJEV mode: --jev --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | single-forward-pass decision scoring over candidate labels A/B/C/…\n\nJEV grouped: --jev --jev-multi [--jev-option <pos> --jev-option <neg> ...] (pairs) or --jev-block <label> --jev-option <a> [--jev-option <b> ...] (blocks)\n\nServer mode: --serve [--host 0.0.0.0] [--port 8080] --model <path> [--mmproj ...] [--tts] [--embedding]\n\nCLM mode: --jev --clm-head <clm-heads.gguf> --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | cosine scoring via CLM projection heads on the chosen encoder (state = context, blank line, question; candidates verbatim\n\nGLiNER2 mode: --jev --gliner2-decide --model <gliner2-decide.gguf> --jev-context <text> [--gliner2-schema <json> | --jev-question <name> --jev-option <a> [--jev-option <b> ...]] | one DeBERTa-v3 pass scores every label of every task; --gliner2-schema takes a classify_text-shaped mapping: {intent: [a, b], aspects: {labels: [x], multi_label: true, cls_threshold: 0.4}}";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DispatchMode {
     DreamX,
@@ -344,6 +344,111 @@ fn main() {
             options.embedding_output,
             started.elapsed().as_millis(),
         );
+        return;
+    }
+
+    if options.rerank {
+        // Load documents from --rerank-doc (repeatable) and/or
+        // --rerank-documents <file>. The CLI validator in
+        // `validate_cli_options` already required at least one source;
+        // we still re-check for the case where the file is the only
+        // source and is unreadable.
+        let mut docs: Vec<String> = options.rerank_documents.clone();
+        if let Some(path) = &options.rerank_documents_file {
+            let text = std::fs::read_to_string(path).unwrap_or_else(|error| {
+                eprintln!(
+                    "rerank: failed to read documents file {}: {error}",
+                    path.display()
+                );
+                std::process::exit(1);
+            });
+            for chunk in text.split('\n') {
+                if !chunk.is_empty() {
+                    docs.push(chunk.to_string());
+                }
+            }
+        }
+        // Soft per-doc word-based truncation (qwen3 path); the jina
+        // path already runs per-doc and the limit is enforced by
+        // context_length inside compute_rerank_score.
+        let max_words = options.rerank_max_tokens.unwrap_or(512);
+        let docs: Vec<String> = if max_words == 0 {
+            docs
+        } else {
+            docs.into_iter()
+                .map(|d| {
+                    let mut count = 0usize;
+                    let mut out = String::with_capacity(d.len());
+                    for word in d.split_whitespace() {
+                        if count > 0 {
+                            out.push(' ');
+                        }
+                        out.push_str(word);
+                        count += 1;
+                        if count >= max_words {
+                            break;
+                        }
+                    }
+                    out
+                })
+                .collect()
+        };
+        let query = options
+            .rerank_query
+            .as_deref()
+            .expect("validated --rerank-query non-empty");
+        let scores = match app::run_rerank(
+            Arc::clone(&source),
+            query,
+            &docs,
+            n_threads,
+            options.rerank_instruction.as_deref(),
+        ) {
+            Ok(scores) => scores,
+            Err(error) => {
+                eprintln!("Inference error: {error}");
+                std::process::exit(1);
+            }
+        };
+        // jina-bert-v2 returns raw CLS logits, qwen3 returns softmaxed
+        // yes_probabilities. Normalize to `[0, 1]` for a unified column.
+        let scores: Vec<f32> = if arch == "jina-bert-v2" {
+            scores
+                .iter()
+                .map(|s| 1.0f32 / (1.0f32 + (-*s).exp()))
+                .collect()
+        } else {
+            scores
+        };
+        let mut stdout = std::io::stdout().lock();
+        use std::io::Write as _;
+        let _ = writeln!(stdout, "rank\tidx\trelevance_score");
+        let mut indexed: Vec<(usize, f32)> = scores.iter().copied().enumerate().collect();
+        indexed.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        for (rank, (idx, score)) in indexed.iter().enumerate() {
+            let _ = writeln!(stdout, "{rank}\t{idx}\t{score:.6}");
+        }
+        let _ = writeln!(stdout, "\n--- documents ---");
+        for (rank, (idx, score)) in indexed.iter().enumerate() {
+            let snippet: String = docs[*idx]
+                .chars()
+                .take(120)
+                .collect::<String>()
+                .replace('\n', " ");
+            let _ = writeln!(
+                stdout,
+                "[rank={rank} idx={idx} score={score:.3}] {snippet}{}",
+                if docs[*idx].chars().count() > 120 {
+                    "..."
+                } else {
+                    ""
+                }
+            );
+        }
         return;
     }
 

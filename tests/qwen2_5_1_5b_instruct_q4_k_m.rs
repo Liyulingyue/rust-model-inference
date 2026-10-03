@@ -109,8 +109,7 @@ fn q4_k_m_tokenizer_matches_qwen2_5_chatml() {
     // Pattern-match the `Bool` variant directly; `to_u64()` does not handle
     // it (intentional — GGUF Bools are not silently coerced to integers).
     let add_bos = matches!(
-        loader
-            .metadata("tokenizer.ggml.add_bos_token"),
+        loader.metadata("tokenizer.ggml.add_bos_token"),
         Some(rust_model_inference::MetaValue::Bool(false))
     );
     assert!(add_bos, "add_bos_token must be Bool(false)");
@@ -189,15 +188,9 @@ fn q4_k_m_tensor_inventory_matches_qwen2_5_graph() {
     let t0_q = shape(&loader, "blk.0.attn_q.weight").expect("blk.0.attn_q.weight");
     assert_eq!(t0_q.dims, &[n_embd as u64, n_embd as u64]);
     let t0_k = shape(&loader, "blk.0.attn_k.weight").expect("blk.0.attn_k.weight");
-    assert_eq!(
-        t0_k.dims,
-        &[n_embd as u64, (n_head_kv * head_k) as u64]
-    );
+    assert_eq!(t0_k.dims, &[n_embd as u64, (n_head_kv * head_k) as u64]);
     let t0_v = shape(&loader, "blk.0.attn_v.weight").expect("blk.0.attn_v.weight");
-    assert_eq!(
-        t0_v.dims,
-        &[n_embd as u64, (n_head_kv * head_v) as u64]
-    );
+    assert_eq!(t0_v.dims, &[n_embd as u64, (n_head_kv * head_v) as u64]);
     let t0_ao = shape(&loader, "blk.0.attn_output.weight").expect("blk.0.attn_output.weight");
     assert_eq!(t0_ao.dims, &[n_embd as u64, n_embd as u64]);
     // Attn biases — present because Qwen2 uses QKV-bias attention.

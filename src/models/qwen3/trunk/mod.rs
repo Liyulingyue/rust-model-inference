@@ -13,6 +13,7 @@ pub mod config;
 pub mod forward;
 pub mod positions;
 mod prefill;
+pub mod rerank;
 pub mod session;
 pub mod tests;
 pub mod util;
@@ -23,6 +24,7 @@ pub use forward::{
     run_shared_inference, text_encode, Qwen3GenerateOptions, Qwen3Generation, Qwen3Input,
 };
 pub use positions::qwen_text_positions;
+pub use rerank::score_qwen3_rerank;
 pub use session::Qwen3Session;
 pub use weights::{
     get_f32_tensor, load_layers, load_layers_static, static_weight, Qwen3LayerWeights, Qwen3Model,

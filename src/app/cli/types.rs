@@ -109,6 +109,21 @@ pub struct CliOptions {
     pub qwen_latent_width: Option<usize>,
     pub qwen_latent_height: Option<usize>,
     pub qwen_timestep: Option<f32>,
+    /// Cross-encoder rerank: rank a query against a list of documents.
+    /// Backend chosen by the loaded GGUF's architecture
+    /// (`jina-bert-v2` + `cls.weight`/`cls.bias` → bert_family forward,
+    /// `qwen3` + `cls.output.weight` + `pooling_type=4` → qwen3 trunk).
+    pub rerank: bool,
+    /// Rerank query (mandatory when `rerank = true`).
+    pub rerank_query: Option<String>,
+    /// Inline documents (repeatable `--rerank-doc`).
+    pub rerank_documents: Vec<String>,
+    /// Newline-separated documents file (alternative to `--rerank-doc *`).
+    pub rerank_documents_file: Option<PathBuf>,
+    /// Optional instruction / system prompt (qwen3 path only).
+    pub rerank_instruction: Option<String>,
+    /// Soft word-based cap on per-doc length (0 = unlimited; default 512).
+    pub rerank_max_tokens: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default)]
