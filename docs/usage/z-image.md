@@ -42,25 +42,77 @@ Z-Image model requires --text-encoder, --vae, --prompt, and --out
 | **本仓库 GPU（`--gpu`）** | 8 | 7 | **150 s** | **16.8 s** |
 | PyTorch 2.11 + CUDA（同一权重） | 9 | 8 | 15.1 s | 1.89 s |
 
-`--steps N` 跑 N-1 次 forward（最后一步是 sigma→0 的收尾）。本仓库两条路径步数
-相同，**GPU 快 3.12×**；PyTorch 多跑一次 forward，按每次 forward 折算仍快
-**8.9×**。三条路径与 CPU 参考图的差异都在 2.5/255（40 dB）以内，本仓库两条
-路径同种子逐位可复现。
+`--steps N` 跑 N-1 次 forward（最后一步是 sigma→0 的收尾）。
 
-去噪阶段（不含文本编码与 VAE 解码）：CPU 437 s，GPU 118 s，PyTorch 约 13 s。
+⚠️ **这一张表的绝对值已经失效**，本机今天实测纯 CPU 就要 496.6 s（denoise
+462.4 s），远高于表里的 466 s / 437 s；GPU 侧同理。差异不是编译 profile
+（`release` 与 `release-fast` 只差 0.1 s），而是机器状态漂移——同一份未改动的
+VAE 解码代码在重复运行里就给出 34.5 / 44.8 / 77.2 s。**请只使用下方"绝对值
+不可信"一节里的同会话 A/B 差值**，并重新测量 PyTorch 之后再谈比值：表里的
+1.89 s/forward 与 8.9× 同样是历史数字。
 
-单步分解（GPU，14.7 s/步）：
+单步分解（GPU；attention 已上设备，见下表与下方 A/B）：
 
-| 阶段 | 单步 | 占比 |
+| 阶段 | 单步 | 备注 |
 |---|---|---|
-| FFN 主栈（GPU，Q8_0 tiled） | 3.86 s | 26% |
-| FFN refiner（GPU，F16 tiled） | 3.43 s | 24% |
-| attention（CPU，pool 并行 + query 分块） | 3.41 s | 23% |
-| rms_norm + AdaLN + QKV（GPU，单 command buffer） | 2.09 s | 14% |
-| 输出投影（GPU） | 1.24 s | 8% |
-| RoPE + 调制（CPU） | 0.11 s | 1% |
+| FFN 主栈 | 3.86 s | Q8_0 tiled，105% 理论地板，别碰 |
+| rms_norm + AdaLN + QKV | 2.09 s | 单 command buffer；其中约 1.4 s 去向未查明 |
+| 输出投影 | 1.24 s | |
+| FFN refiner | 1.42 s | F16 tiled，原生解码 + packed staging 后 2.54× |
+| attention | 0.31 s | GPU 整链：tiled scores + softmax + value reduction |
+| RoPE + 调制 | 0.11 s | 仍在 CPU |
 
 > **线程数也非越多越好**：16 线程首步 269.3 s，反而慢于 8 线程的 140.5 s。
+
+### ⚠️ 绝对值不可信，只有 A/B 差值可信
+
+历史文档写 14.7 s/步。本机今天实测**纯净 HEAD（9a831ee）已经是 23.07 s/步**，
+`release`（fat LTO）与 `release-fast` 相差 0.1 s，所以**不是编译 profile**。旁证
+VAE 解码——只跑一次、与步数无关、代码未改——在多次相同运行里分别是
+34.5 / 44.8 / 77.2 s，本身带 2.2× 噪声，**不能用于任何归因**。
+
+同会话前后对照（8 步 / 512 / seed 42 / 20 线程 / release-fast）：
+
+| | 纯净 HEAD | +F16 改造 | +attention 上 GPU |
+|---|---|---|---|
+| denoise | 184.5 s | 158.8 s | **109.3 s** |
+| 单步 | 23.07 s | 19.85 s | **13.35 s** |
+| refiner/步 | 3608 ms | 1421 ms | 1421 ms |
+| attention/步 | ~3.4 s（CPU） | ~3.4 s（CPU） | **~0.31 s（GPU）** |
+| 总计 | 231.5 s | 211.7 s | 145.4 s |
+
+前两列输出逐字节一致。attention 那一列**不逐字节一致**，见下节。
+
+### 画质：attention 上 GPU 没有抬高偏差
+
+拿同 seed 的三张图对比（512×512，8 步）：A = 纯 CPU 渲染，B = GPU 路径 +
+CPU attention，C = GPU 路径 + GPU attention。
+
+| 对比 | mean\|Δ\| | PSNR |
+|---|---|---|
+| A↔B（CPU vs 旧 GPU 路径） | 4.93 | 28.43 dB |
+| A↔C（CPU vs 新 GPU 路径） | **5.01** | **28.96 dB** |
+| B↔C（两种 attention 互比） | 3.45 | 31.42 dB |
+
+**A↔C 没有比 A↔B 更差**，所以设备 attention 落在 GPU 路径本来就有偏差之内，
+没有新增代价。整条 GPU 路径与纯 CPU 的 28–29 dB 差距早于本次改动（f16 舍入贯穿
+Q8 主栈、F16 refiner 与 QKV），**GPU 路径从来就不是逐位精确的**，需要与 CPU 输出
+对拍时用 `RUST_GPU_ATTENTION=0` 把它关掉。
+
+差异集中在高频：把图模糊一下 PSNR 涨到 32.6 dB，降采样 /8 涨到 35.2 dB，
+说明结构与构图没有变，差的是细纹理与像素级噪声——肉眼"一眼看过去一样、近看有
+差异"就是这个 PSNR 区间的典型表现。
+
+### 环境变量
+
+| 变量 | 默认 | 作用 |
+|---|---|---|
+| `RUST_GPU_ATTENTION` | `1` | `0` 把 DiT attention 放回 CPU 逐行路径 |
+| `RUST_GPU_F16_REF` | `1` | `0` 把 refiner 栈放回 CPU |
+| `RUST_GPU_TILED` | `1` | `0` 关掉 Q8_0 tiled matmul |
+| `RUST_GPU_DIAG` | 关 | 打印每步 GPU 上的 block / dispatch 数 |
+
+在重建绝对基线之前，不要用这些数字与 PyTorch 的 1.89 s/forward 算比值。
 
 ### 让 GPU 路径快起来的四件事
 
@@ -89,6 +141,16 @@ Z-Image model requires --text-encoder, --vae, --prompt, and --out
 4. **F16 refiner 上 GPU。** 两层 refiner 栈在 GGUF 里是 F16，而绑定只接受
    Q8_0，所以 4 个 block 曾整个走 CPU 逐行路径，比 30 层主栈在 GPU上还贵。
    `shaders/glsl/f16_matmul_tiled.comp` 是 Q8_0 tiled kernel 的浮点版。
+
+5. **F16 kernel 的两处改写，refiner 再快 2.54×。** 权重解码原本是手写位运算：
+   每个值一次分支加一次 `exp2()`，而 Q8_0 的 dequant 只有一次乘法。权重本来
+   就成对塞在一个 32-bit word 里，改用原生 `unpackHalf2x16` 一次取两个、零
+   分支（顺带把 inf/nan 与 subnormal 也算对了）。第二处是共享内存：激活在入
+   shared 之前已经 `round_f16_rte` 过，却仍以 f32 存放，占 32 KB，正好是每 SM
+   预算的一半，只塞得下一个 workgroup；Q8_0 kernel 同一块 chunk 只占 16 KB。
+   改成按 f16 成对打包后同样是 16 KB。refiner 3610 ms → 1423 ms/步，同 seed
+   输出与旧 kernel 逐字节一致。**refiner 是解码受限而不是字节受限**，所以把
+   权重换成更小的量化格式没有意义——这一点先测出来省掉了一次错误方向的重做。
 
 > **`examples/dit_vk_bench.rs` 的 0.4×–1.36× 是误导性的**：它测的是 GEMV
 > （`gpu_out` 只有一行长），权重复用同样为 1，于是读带宽看起来正常，却完全

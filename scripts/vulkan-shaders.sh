@@ -32,6 +32,7 @@ shader_names=(
     adaln_modulate
     q8_matmul_tiled_dp4a
     f16_matmul_tiled
+    attention_scores_tiled
 )
 manifest="$root_dir/shaders/manifest.sha256"
 

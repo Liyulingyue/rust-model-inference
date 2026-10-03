@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use crate::vulkan::ops::{ArenaRegion, GpuWeightFormat, OperatorBindings, Qwen3Ops, TokenCommands};
 use crate::vulkan::{GpuBuffer, VulkanContext, VulkanError};
 
-use super::dit::{FFN_WIDTH, HIDDEN, QKV_WIDTH};
+use super::dit::{FFN_WIDTH, HEADS, HIDDEN, QKV_WIDTH, ROPE_HEAD_WIDTH};
 
 /// A projection the DiT performs, named the way `BlockWeights` names it.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -126,6 +126,14 @@ pub(crate) struct Layout {
     q4_1_input_sums: ArenaRegion,
     q8k: ArenaRegion,
     q8k_scales: ArenaRegion,
+    /// DiT has no KV cache -- every token sees every token in its own block --
+    /// so these hold one block's K and V in the [position][head][dim] shape the
+    /// attention operators index, written from the interleaved QKV projection.
+    kv_cache_k: ArenaRegion,
+    kv_cache_v: ArenaRegion,
+    /// rows x HEADS x rows scores, and rows x HIDDEN for the attention result.
+    pub(crate) attention_scores: ArenaRegion,
+    pub(crate) attention_out: ArenaRegion,
 }
 
 impl Layout {
@@ -133,7 +141,11 @@ impl Layout {
     /// activations are `rows * width` f32, the Q8_0 staging is `rows * width`
     /// i8 with one f32 scale per 32 values, and `q4_1_input_sums` mirrors the
     /// scales.
-    fn build(rows: usize) -> Result<Self, VulkanError> {
+    /// `with_attention` reserves the score and K/V regions. They are 134 MB at
+    /// the 1056-token shape for one block's scores, so a session that does not
+    /// run attention must not pay for them: the wider arena measurably slows the
+    /// main stack down.
+    fn build(rows: usize, with_attention: bool) -> Result<Self, VulkanError> {
         let mut cursor = 0usize;
         let mut take = |elements: usize| -> Result<ArenaRegion, VulkanError> {
             cursor = cursor.next_multiple_of(4);
@@ -174,6 +186,26 @@ impl Layout {
             q4_1_input_sums: take((rows * (FFN_WIDTH / 32) as f64) as usize * 4)?,
             q8k: take((rows * FFN_WIDTH as f64) as usize)?,
             q8k_scales: take((rows * (FFN_WIDTH / 32) as f64) as usize * 4)?,
+            kv_cache_k: take(if with_attention {
+                (rows * HIDDEN as f64) as usize * 4
+            } else {
+                0
+            })?,
+            kv_cache_v: take(if with_attention {
+                (rows * HIDDEN as f64) as usize * 4
+            } else {
+                0
+            })?,
+            attention_scores: take(if with_attention {
+                (rows * HEADS as f64 * rows) as usize * 4
+            } else {
+                0
+            })?,
+            attention_out: take(if with_attention {
+                (rows * HIDDEN as f64) as usize * 4
+            } else {
+                0
+            })?,
         })
     }
 
@@ -190,6 +222,10 @@ impl Layout {
             self.q4_1_input_sums,
             self.q8k,
             self.q8k_scales,
+            self.kv_cache_k,
+            self.kv_cache_v,
+            self.attention_scores,
+            self.attention_out,
         ];
         regions.iter().map(|r| r.end()).max().unwrap_or(0)
     }
@@ -221,6 +257,17 @@ impl DitGpuSession {
     /// Build for `rows` sequence rows. Returns `None` if the shape does not fit,
     /// so the caller can fall back rather than fail.
     pub(crate) fn new(context: &'static VulkanContext, rows: usize) -> Result<Self, VulkanError> {
+        Self::new_with_attention(context, rows, false)
+    }
+
+    /// A session with the K/V and score regions reserved, for the attention
+    /// operators. They are large enough to change the main stack's speed, so
+    /// only a session that runs attention should ask for them.
+    pub(crate) fn new_with_attention(
+        context: &'static VulkanContext,
+        rows: usize,
+        with_attention: bool,
+    ) -> Result<Self, VulkanError> {
         if rows == 0 || rows % 32 != 0 {
             // The shader stages the input row in 4096 shared words and the
             // sequence is padded to a multiple of 32 by the caller, so this is
@@ -229,7 +276,7 @@ impl DitGpuSession {
                 "Z-Image DiT row count {rows} must be a nonzero multiple of 32"
             )));
         }
-        let layout = Layout::build(rows)?;
+        let layout = Layout::build(rows, with_attention)?;
         // 1.5x headroom over the computed regions, rounded up, so the driver's
         // own alignment does not push the last region past the arena.
         let arena_bytes = layout.bytes().next_multiple_of(1 << 20) + (1 << 20);
@@ -641,6 +688,7 @@ impl DitGpuSession {
         let eps = crate::models::diffusion::z_image::dit::RMS_EPSILON;
         // `TokenCommands::begin(self.context)` rather than `self.begin()`: the
         // latter borrows all of `self`, which `record_projection` still needs.
+        let t0 = std::time::Instant::now();
         let mut commands = TokenCommands::begin(self.context)?;
         self.ops.record_rms_norm_rows(
             &commands,
@@ -653,6 +701,7 @@ impl DitGpuSession {
             hidden,
             hidden,
         )?;
+        let t_norm = t0.elapsed();
         if let Some(scale) = scale {
             self.ops.record_adaln_modulate_rows(
                 &commands,
@@ -663,6 +712,7 @@ impl DitGpuSession {
                 hidden,
             )?;
         }
+        let t_adaln = t0.elapsed();
         self.record_projection(
             &mut commands,
             weights,
@@ -670,8 +720,51 @@ impl DitGpuSession {
             layout.normed,
             layout.qkv,
         )?;
+        let t_mat = t0.elapsed();
         commands.submit_and_wait()?;
-        self.read_into(Projection::Qkv, layout.qkv)
+        let t_fence = t0.elapsed();
+        self.read_into(Projection::Qkv, layout.qkv)?;
+        {
+            static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            if N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 3 {
+                eprintln!(
+                    "[qkv-probe] rms_norm={t_norm:?} +adaln={:?} +qkv_matmul={:?} +fence={:?} +readback={:?}",
+                    t_adaln - t_norm, t_mat - t_adaln, t_fence - t_mat, t0.elapsed() - t_fence
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Scores for the DiT's attention, from the interleaved QKV projection.
+    ///
+    /// `layout.qkv` must already hold the projected QKV with the qk_norm and
+    /// RoPE already applied to its q and k halves, which is what `run_block`
+    /// produces before it calls `attention_into`.
+    pub(crate) fn record_diy_attention(
+        &mut self,
+        rows: usize,
+        scores: ArenaRegion,
+        out: ArenaRegion,
+    ) -> Result<(), VulkanError> {
+        let layout = self.layout;
+        let mut commands = TokenCommands::begin(self.context)?;
+        self.ops.record_diy_attention_full(
+            &commands,
+            layout.qkv,
+            layout.kv_cache_k,
+            layout.kv_cache_v,
+            layout.gate,
+            scores,
+            out,
+            QKV_WIDTH,
+            HEADS,
+            HEADS,
+            ROPE_HEAD_WIDTH,
+            rows,
+        )?;
+        commands.submit_and_wait()?;
+        Ok(())
     }
 
     /// Open a command buffer for a fused chain of dispatches.

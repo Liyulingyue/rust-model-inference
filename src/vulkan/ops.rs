@@ -18,6 +18,8 @@ const Q8_MATMUL_GROUPED_DP4A_SHADER: &[u8] =
 const Q8_MATMUL_GROUPED_TILED_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/q8_matmul_tiled_dp4a.spv");
 const F16_MATMUL_TILED_SHADER: &[u8] = include_bytes!("../../shaders/bin/f16_matmul_tiled.spv");
+const ATTENTION_SCORES_TILED_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/attention_scores_tiled.spv");
 const Q4_0_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_0_matmul.spv");
 const Q4_1_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_1_matmul.spv");
 const Q4_K_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_k_matmul.spv");
@@ -69,6 +71,7 @@ const F32_MATMUL: usize = 22;
 const ADALN_MODULATE: usize = 23;
 const Q8_MATMUL_GROUPED_TILED: usize = 24;
 const F16_MATMUL_TILED: usize = 25;
+const ATTENTION_SCORES_TILED: usize = 26;
 /// Per-pipeline dispatch counters, populated only while `RUST_GPU_DISPATCH_TRACE`
 /// is set. Indexed by the `OPERATOR_SHADERS` position, so a new pipeline needs
 /// no extra bookkeeping here.
@@ -96,7 +99,7 @@ pub fn dump_dispatch_trace() {
     }
 }
 
-const OPERATOR_SHADERS: [&[u8]; 26] = [
+const OPERATOR_SHADERS: [&[u8]; 27] = [
     QUANTIZE_Q8_0_SHADER,
     QUANTIZE_Q8_K_SHADER,
     Q8_MATMUL_GROUPED_SHADER,
@@ -123,6 +126,7 @@ const OPERATOR_SHADERS: [&[u8]; 26] = [
     ADALN_MODULATE_SHADER,
     Q8_MATMUL_GROUPED_TILED_SHADER,
     F16_MATMUL_TILED_SHADER,
+    ATTENTION_SCORES_TILED_SHADER,
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -193,6 +197,16 @@ pub(crate) struct ArenaRegion {
 }
 
 impl ArenaRegion {
+    /// The region starting `bytes` into this one, for a row-interleaved buffer
+    /// holding several tensors per row -- a QKV projection is one region with q,
+    /// k and v side by side in every row.
+    pub(crate) fn shifted(self, bytes: usize) -> Self {
+        Self {
+            offset: self.offset + bytes,
+            size: self.size.saturating_sub(bytes),
+        }
+    }
+
     pub(crate) fn end(self) -> usize {
         self.offset + self.size
     }
@@ -1577,6 +1591,7 @@ impl<'a> Qwen3Ops<'a> {
             capacity,
             kv_count,
             1,
+            kv_count,
         )
     }
 
@@ -1624,7 +1639,7 @@ impl<'a> Qwen3Ops<'a> {
         let base = sequence_length
             .checked_sub(1)
             .ok_or_else(|| VulkanError::UnsupportedShape("empty softmax".into()))?;
-        self.record_softmax_rows(commands, scores, heads, base, 1)
+        self.record_softmax_rows(commands, scores, heads, base, 1, false)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1658,6 +1673,7 @@ impl<'a> Qwen3Ops<'a> {
             kv_heads,
             head_dim,
             1,
+            false,
         )
     }
 
@@ -1785,6 +1801,7 @@ impl<'a> Qwen3Ops<'a> {
         capacity: usize,
         kv_count: usize,
         rows: usize,
+        source_stride: usize,
     ) -> Result<(), VulkanError> {
         if layer >= layer_count
             || rows == 0
@@ -1815,6 +1832,7 @@ impl<'a> Qwen3Ops<'a> {
             as_u32(capacity, "KV capacity")?,
             as_u32(kv_count, "KV width")?,
             as_u32(rows, "KV rows")?,
+            as_u32(source_stride, "KV source stride")?,
         ];
         let [x, y, z] = row_dispatch(kv_count.div_ceil(64), rows, &self.context.limits)?;
         unsafe {
@@ -1889,6 +1907,8 @@ impl<'a> Qwen3Ops<'a> {
             (1.0 / (head_dim as f32).sqrt()).to_bits(),
             as_u32(base_position, "attention base position")?,
             as_u32(rows, "attention rows")?,
+            // 0 keeps the decoder's causal limit; the DiT path passes 1.
+            0,
         ];
         let [x, y, z] = row_dispatch(score_count.div_ceil(64), rows, &self.context.limits)?;
         unsafe {
@@ -1911,6 +1931,7 @@ impl<'a> Qwen3Ops<'a> {
         heads: usize,
         base_position: usize,
         rows: usize,
+        full_attention: bool,
     ) -> Result<(), VulkanError> {
         let sequence_length = base_position
             .checked_add(rows)
@@ -1929,6 +1950,7 @@ impl<'a> Qwen3Ops<'a> {
             as_u32(sequence_length, "softmax sequence length")?,
             as_u32(base_position, "softmax base position")?,
             as_u32(rows, "softmax rows")?,
+            u32::from(full_attention),
         ];
         let [x, y, z] = row_dispatch(heads, rows, &self.context.limits)?;
         unsafe {
@@ -1959,6 +1981,7 @@ impl<'a> Qwen3Ops<'a> {
         kv_heads: usize,
         head_dim: usize,
         rows: usize,
+        full_attention: bool,
     ) -> Result<(), VulkanError> {
         let sequence_length = base_position
             .checked_add(rows)
@@ -2008,6 +2031,7 @@ impl<'a> Qwen3Ops<'a> {
             as_u32(head_dim, "attention head dimension")?,
             as_u32(base_position, "attention base position")?,
             as_u32(rows, "attention rows")?,
+            u32::from(full_attention),
         ];
         let [x, y, z] = row_dispatch(output_count.div_ceil(64), rows, &self.context.limits)?;
         unsafe {
@@ -2024,6 +2048,156 @@ impl<'a> Qwen3Ops<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Scores for the DiT, which keeps q, k and v interleaved in one
+    /// projection output and needs the cooperative kernel.
+    ///
+    /// `kv_source` is the region holding q | k | v side by side per row and
+    /// `source_stride` is that region's row width; `cache_k` and `cache_v` are
+    /// written from it at layer 0, position 0, capacity `rows`, which is the
+    /// whole "cache" a block needs since DiT has no history.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_diy_attention_scores(
+        &self,
+        commands: &TokenCommands<'_>,
+        kv_source: ArenaRegion,
+        cache_k: ArenaRegion,
+        cache_v: ArenaRegion,
+        scratch: ArenaRegion,
+        scores: ArenaRegion,
+        source_stride: usize,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        rows: usize,
+    ) -> Result<(), VulkanError> {
+        let kv_count = q_heads
+            .checked_mul(head_dim)
+            .ok_or(VulkanError::OutOfMemory)?;
+        let k = kv_source.shifted(q_heads * head_dim * 4);
+        let v = kv_source.shifted(2 * q_heads * head_dim * 4);
+        self.record_kv_write_rows(
+            commands,
+            k,
+            v,
+            cache_k,
+            cache_v,
+            scratch,
+            scratch,
+            0,
+            0,
+            1,
+            rows,
+            kv_count,
+            rows,
+            source_stride,
+        )?;
+        let sequence_length = rows;
+        let score_count = q_heads
+            .checked_mul(sequence_length)
+            .ok_or(VulkanError::OutOfMemory)?;
+        self.f32_rows_word(
+            scores,
+            rows,
+            score_count,
+            score_count,
+            "DiT attention scores",
+        )?;
+        self.f32_rows_word(cache_k, 1, kv_count, kv_count, "DiT K cache")?;
+        // The strided kv source reaches past what the shifted regions validated.
+        let span = (rows - 1)
+            .checked_mul(source_stride)
+            .and_then(|last| last.checked_add(kv_count))
+            .ok_or(VulkanError::OutOfMemory)?;
+        if kv_source
+            .offset
+            .checked_add(span * 4)
+            .is_none_or(|end| end > self.arena.size as usize)
+        {
+            return Err(VulkanError::UnsupportedShape(format!(
+                "DiT KV source needs {span} floats past offset {}",
+                kv_source.offset
+            )));
+        }
+        let push = [
+            as_u32(kv_source.offset / 4, "DiT q offset")?,
+            as_u32(cache_k.offset / 4, "DiT K cache offset")?,
+            as_u32(scores.offset / 4, "DiT scores offset")?,
+            as_u32(sequence_length, "DiT sequence length")?,
+            as_u32(q_heads, "DiT query heads")?,
+            as_u32(head_dim, "DiT head dim")?,
+            (1.0 / (head_dim as f32).sqrt()).to_bits(),
+            0,
+            as_u32(rows, "DiT rows")?,
+            as_u32(source_stride, "DiT q stride")?,
+        ];
+        let _ = kv_heads;
+        // The K cache was just written by the copy above; the scores read it.
+        unsafe { commands.barrier() };
+        // The kernel gives each workgroup QUERY_TILE queries, so it needs one
+        // group per tile rather than one per row. Keep in step with QUERY_TILE in
+        // attention_scores_tiled.comp.
+        const QUERY_TILE: usize = 8;
+        let [x, y, z] = row_dispatch(q_heads, rows.div_ceil(QUERY_TILE), &self.context.limits)?;
+        unsafe {
+            commands.bind(
+                self.pipelines[ATTENTION_SCORES_TILED],
+                self.context.pipeline_layout,
+                &[self.arena_bindings.descriptor_set],
+                bytemuck::cast_slice(&push),
+            );
+            commands.dispatch(x, y, z);
+            commands.barrier();
+        }
+        Ok(())
+    }
+
+    /// The whole DiT attention: scores, softmax and the value reduction.
+    ///
+    /// `kv_source` must already hold the projected QKV with the qk_norm and RoPE
+    /// applied, which is what `run_block` produces before it calls
+    /// `attention_into`. DiT has no KV cache and no mask, so the cache regions
+    /// hold exactly one block at position 0 and both later stages are told the
+    /// sequence is fully visible. The three stages are recorded into one command
+    /// buffer so the K copy, the score write and the probability write are
+    /// ordered by the barriers between them rather than by a submit each.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_diy_attention_full(
+        &self,
+        commands: &TokenCommands<'_>,
+        kv_source: ArenaRegion,
+        cache_k: ArenaRegion,
+        cache_v: ArenaRegion,
+        scratch: ArenaRegion,
+        scores: ArenaRegion,
+        output: ArenaRegion,
+        source_stride: usize,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        rows: usize,
+    ) -> Result<(), VulkanError> {
+        self.record_diy_attention_scores(
+            commands,
+            kv_source,
+            cache_k,
+            cache_v,
+            scratch,
+            scores,
+            source_stride,
+            q_heads,
+            kv_heads,
+            head_dim,
+            rows,
+        )?;
+        // base_position 0 with `rows` rows makes the sequence exactly one block,
+        // and full_attention lifts the causal limit the decoder path relies on.
+        self.record_softmax_rows(commands, scores, q_heads, 0, rows, true)?;
+        self.record_attention_values_rows(
+            commands, scores, cache_v, output, 0, 1, 0, rows, q_heads, kv_heads, head_dim, rows,
+            true,
+        )
+    }
+
     pub(crate) fn record_attention_rows(
         &self,
         commands: &TokenCommands<'_>,
@@ -2065,7 +2239,7 @@ impl<'a> Qwen3Ops<'a> {
             head_dim,
             rows,
         )?;
-        self.record_softmax_rows(commands, scores, q_heads, base_position, rows)?;
+        self.record_softmax_rows(commands, scores, q_heads, base_position, rows, false)?;
         self.record_attention_values_rows(
             commands,
             scores,
@@ -2079,6 +2253,7 @@ impl<'a> Qwen3Ops<'a> {
             kv_heads,
             head_dim,
             rows,
+            false,
         )
     }
 
@@ -4969,7 +5144,8 @@ mod tests {
                 2,
                 5,
                 16,
-                3
+                3,
+                16
             )
             .is_err());
         let short = ArenaRegion {
