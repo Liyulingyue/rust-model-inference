@@ -9,7 +9,7 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
 | 族 | 架构 | encoder | tokenizer | 适配状态 |
 |---|---|---|---|---|
 | **SpanExtractor (pre-2.5)** | `SpanExtractor`（无 `architecture` 字段，tensor 命名同 Decide） | DeBERTa-v3 | `DebertaV2Tokenizer` (SPM) | 没适配，权重可能跟 Decide 不同 |
-| **SpanExtractor (2.5 / 1B)** | `architecture="span"` | Ettin 1B（decoder-only-派生的 encoder） | **BPE ByteLevel**（HF fast tokenizer） | 没适配 |
+| **SpanExtractor (2.5 / 1B)** | `architecture="span"` | Ettin 1B（ModernBERT，decoder-only 派生） | **BPE ByteLevel**（HF fast tokenizer） | ✅ 完成（`src/models/gliner_ettin/`） |
 | **BoundaryExtractor (2.5)** | `architecture="boundary"` | DeBERTa-v3-base / mDeBERTa-v3-base | `DebertaV2Tokenizer` (SPM) | 没适配，**forward 完全不同于 Decide** |
 
 含义：
@@ -131,40 +131,43 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
 
 ## 🟠 SpanExtractor 1B 族（**完全不同**：Ettin + BPE）
 
-### 🟠 4. `fastino/GLiNER2.5-Decide-1B` — Ettin-1B + ByteLevel BPE（已勘察，**未实现**）
+### ✅ 4. `fastino/GLiNER2.5-Decide-1B` — Ettin-1B + ByteLevel BPE（**已完成**）
 - **架构族**：SpanExtractor（`architecture=span`, `config_version=3`），head 契约同 Decide
-- **这是唯一还需要新架构的模型**。其余 11 个全部复用 DeBERTa 系 forward
+- commit `ac27379`（tokenizer）+ `4e58bfd`（forward）
+- 6 个请求 `input_ids` 逐 token 一致，最大 logit delta **7.6e-4**
 
-**encoder（从 checkpoint 形状反推，199 个 tensor）**
-- 28 层，`hidden=1792`，`mlp.Wi` 7680 / `mlp.Wo` [1792, 3840] → **fused gate+up，SwiGLU**
-- `attn.Wqkv` [5376, 1792] **fused QKV**；`attn.Wo` [1792, 1792]
-- **无 bias**（`Wqkv`/`Wo`/`Wi` 全无）；`attn_norm` / `mlp_norm` / `embeddings.norm` /
-  `final_norm` 四个 RMSNorm
-- **无位置编码参数**（无 rope 缓存、无 relative embedding）→ 纯 LLaMA-style 布局
-- `embeddings.tok_embeddings` [50378, 1792]（vocab 50280 + 98 added）
+**⚠ 勘察阶段的六处猜测全部被实测推翻**——`models/ettin-enc-from-dec-1b/config.json`
+的权威答案是 `ModernBertForMaskedLM`，不是 LLaMA 派生的纯 decoder：
 
-**tokenizer（与全家族都不同）**
-- HF `tokenizers`，`model.type=BPE`（**不是** SentencePiece），50009 merges
-- `normalizer=NFC`，`pre_tokenizer/decoder=ByteLevel(add_prefix_space=false)`
-- 126 个 added token，**包含业务符号**：`|||IP_ADDRESS|||` 在 id 0，
-  末段才是 `[SEP_STRUCT]=50368 … [DESCRIPTION]=50377`
-- 所以**不能**沿用 `spm.piece_count` 那套：`tokenizer.ggml.model` 需要新的 `hf-bpe` 分支
+| 勘察时猜的 | 实测 | 出处 |
+|---|---|---|
+| RMSNorm | **LayerNorm，`bias = False`**，eps 1e-5 | `norm_bias: False` |
+| SwiGLU | **GeLU GLU**：`chunk(2)` + `act(first) * second` | `ModernBertMLP` |
+| 16 头 | **28 头**，head_dim 64，`hidden 1792` | `num_attention_heads: 28` |
+| 纯 LLaMA 式全局注意力 | **混合**：层 0,3,6… 全局，其余 128 宽窗口 | `global_attn_every_n_layers: 3` |
+| QKV 可能连续 | **交错**：`view(seq, 3, heads, head_dim)`，role 轴跨 `heads*head_dim` | `ModernBertAttention.forward` |
+| 无位置参数 → 纯 LLaMA | RoPE **有**，theta 160000；`position_embedding_type: sans_pos` | `rope_parameters` |
 
-**head**
-- `classifier.0` [3584, 1792] + `classifier.2` [1, 3584] → 3584 = 2×1792，与 Decide 同契约
-- `count_embed` / `count_pred` / `span_rep` 与 Decide 同结构，照旧 drop
+层 0 的 `attn_norm` 是 `nn.Identity()`，checkpoint 里**没有对应张量**（199 → 202 tensor）。
+`mlp.Wi` [7680, 1792] = 2 × 3840 确实是 fused gate+up，但门控算子是 GeLU 不是 SwiGLU。
 
-**实现清单**（预计 ~2000 行）
-- `src/models/gliner_ettin/`：RMSNorm + fused QKV + SwiGLU 的 28 层 forward
-  - ⚠ **不要重写**：仓库已有 `llama` / `qwen3` 系带 RMSNorm + SwiGLU + RoPE 的实现。
-    开工前先评估能否复用（这正是"架构融合"要回答的问题之一）
-- ByteLevel BPE tokenizer：NFC 归一化 + byte-level 预分词 + 50009 merges 的 BPE 合并
-  - ⚠ 同样先看 `src/core/tokenizer/` 有无可用实现
-- 转换器：新的 `ENCODER_SIZES`（1792/28/16）+ `hf-bpe` tokenizer 嵌入路径
-- oracle：`dump_golden.py` 需支持 BPE tokenizer + Ettin encoder config
-  - `jhu-clsp/ettin-enc-from-dec-1b` 的 config 需单独准备
+**实现**：`src/models/gliner_ettin/{mod,bpe}.rs`（全新模块，未复用 llama/qwen3——
+见下）。转换器 `tools/converter/gliner/convert_ettin.py`，oracle `dump_ettin_golden.py`。
 
-**建议**：单独一个 PR。与其余 11 个的"零新代码"性质完全不同，混在一起会让 review 失焦。
+**关于"先评估能否复用 `llama`/`qwen3` 的 RMSNorm+SwiGLU+RoPE"**：
+评估结论是**不可复用**，且理由比"接口不同"更硬——仓库里根本没有 RMSNorm+SwiGLU+RoPE
+的现成组合。`llama`/`qwen3` 用 RMSNorm + SwiGLU + RoPE，ModernBERT 是 LayerNorm +
+GeLU GLU + RoPE，两者只共享 RoPE。`src/ops/norm.rs` 的 `rms_norm` 和
+`silu_mul_inplace` 都是**错误的算子**，模块注释里已写明这一点。强行复用的结果是
+"形状对、数值全错"，而这正是本模型五个 forward bug 的共同特征。
+
+**ByteLevel BPE 是一等实现**，不是薄封装。`src/core/tokenizer/` 里现有的三套
+（`SPMTokenizer` linked-list trie、`UgmTokenizer` `NaiveTrie`）都是 SentencePiece /
+Unigram，没有 ByteLevel 的 byte→unicode 映射与 GPT-2 预分词。对齐 `tokenizers`
+需要四处规则，详见 `docs/GLINER_FAMILY.md`。
+
+**已知限制**：`nfc()` 目前是恒等实现（std 没有 Unicode 归一化）。12 个 fixture case
+都不含 combining mark，所以尚未暴露。`is_nfc_safe()` 提供前置检测，PR 里已写明。
 
 ## 🔴 BoundaryExtractor 族（**完全不同的架构**）
 
@@ -640,7 +643,7 @@ structures/records（`[C]`）；外加 abstention（`null_projection`）与 coun
 | D | boundary 家族另三个变体（multi-v1 / multi-Decide / small-v1） | boundary | 小（尺寸表） | 中 | ✅ `b6bba85` |
 | E | 三个 guardrail（Guardrails-PII / privacy-filter / gliguard） | span pre-2.5 | **≈0**（tokenizer 声明风格） | 中 | ✅ `499e7ec` |
 | F | 架构融合评估（11 个变体实现后） | 全部 | 文档 | — | ✅ `ca40928` → `docs/GLINER_FAMILY.md` |
-| G | `GLiNER2.5-Decide-1B`（Ettin + ByteLevel BPE） | span 1B | 大（~2000 行） | 中 | 🟡 已勘察，未实现 |
+| G | `GLiNER2.5-Decide-1B`（Ettin + ByteLevel BPE） | span 1B | 大（~2000 行） | 中 | ✅ `ac27379` / `4e58bfd` |
 
 每条开工前必须先 `modelscope download --model <repo> config.json tokenizer_config.json`（按 model-download skill），读 config 填本文件对应 TODO 的"flag 决策 / 路由 / 架构位置"三栏，再写代码。**不再做"看着像就动手"的盲改**。
 

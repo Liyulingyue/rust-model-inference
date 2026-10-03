@@ -19,10 +19,13 @@
 | 9 | `GLiNER2-Guardrails-PII-Multi` | Span pre-2.5 | mDeBERTa-v3-base 768 | **0**（tokenizer 声明风格） |
 | 10 | `gliner2-privacy-filter-PII-multi` | Span pre-2.5 | mDeBERTa-v3-base 768 | **0** |
 | 11 | `gliguard-LLMGuardrails-300M` | Span pre-2.5 | DeBERTa-v3-base 768 | **0** |
-| 12 | `GLiNER2.5-Decide-1B` | Span | **Ettin-1B 1792** | **~2000 行，未实现** |
+| 12 | `GLiNER2.5-Decide-1B` | Span | **Ettin-1B 1792**（ModernBERT） | 新模块 `src/models/gliner_ettin/` |
 
 **10 个变体只花了两处改动**：转换器的尺寸表，和 tokenizer 声明风格的兼容。
-真正的新代码只有 BoundaryExtractor（#5，四个 head）和尚未开始的 Ettin（#12）。
+真正的新代码只有 BoundaryExtractor（#5，四个 head）和 Ettin（#12）。
+
+（#12 的新代码量比预估小，因为 prompt 组装复用了 `gliner::prompt`；但
+tokenizer 必须自实现，见结论四。）
 
 ## 结论一：Rust 推理层**不需要**融合
 
@@ -80,20 +83,41 @@ convert_boundary.py   752 行（447 实质行）
 
 ## 结论三：Ettin（#12）是另一个问题，不属于本次融合
 
-`GLiNER2.5-Decide-1B` 用的是 Ettin-1B（LLaMA-style：28 层 / 1792 / fused QKV /
-SwiGLU / RMSNorm / 无位置编码参数），tokenizer 是 ByteLevel BPE 而非
+`GLiNER2.5-Decide-1B` 的 encoder 是 **Ettin-1B**，tokenizer 是 ByteLevel BPE 而非
 SentencePiece。它需要新 forward 和新 tokenizer。
 
 **不要在这次 PR 里抽公共层。** 理由：
 
 1. 它的 forward 与 DeBERTa 毫无共同结构，抽象不出东西
-2. 真正的候选复用点是仓库**已有**的 `llama` / `qwen3` 系（RMSNorm + SwiGLU + RoPE），
-   而不是 gliner 内部。这是一次跨模块的架构评估，不是 gliner 家族的收尾
+2. 真正的候选复用点是仓库**已有**的 `llama` / `qwen3` 系，而不是 gliner 内部。
+   这是一次跨模块的架构评估，不是 gliner 家族的收尾
 3. 现在做会得出没有证据的结论——`llama` / `qwen3` / `qwen35` 三个模块之间是否
    该融合，需要先看清它们各自为战到什么程度
 
-**建议单独一个 PR**，并在那个 PR 里回答"LLaMA-style forward 在本仓库应该
-复用哪一份"。
+### 实现后修正：候选复用点其实不存在
+
+勘察时写的是「Ettin 是 LLaMA-style，可复用 `llama`/`qwen3` 的
+RMSNorm + SwiGLU + RoPE」。**实现后证明这个判断是错的**，值得记下来：
+
+Ettin 的权威 config 是 `ModernBertForMaskedLM`，28 层 / hidden 1792 /
+**28 头**（head_dim 64）/ FF 3840 / RoPE theta 160000 / `norm_eps 1e-5`。
+与 `llama`/`qwen3` 逐项对比：
+
+| | llama / qwen3 | Ettin (ModernBERT) |
+|---|---|---|
+| norm | RMSNorm | LayerNorm，`bias = False` |
+| MLP | SwiGLU | GeLU GLU |
+| 注意力 | 全局 | 层 0,3,6… 全局，其余 128 窗口 |
+| QKV | 分开或连续 | 交错 `view(seq,3,heads,head_dim)` |
+| RoPE | 有 | **有**（唯一相同项） |
+
+只共享 RoPE。`src/ops/norm.rs` 的 `rms_norm` 和 `silu_mul_inplace` 是
+**错误的算子**，不是「风格不同」。强行复用的后果是「形状对、数值全错」——
+这与本模型五个 forward bug 的共同特征完全一致（序列走单行投影、GLU 布局错位、
+QKV 索引越界、RoPE 表后半未重复、LayerNorm 拒绝空 bias；全部输出有限 logits）。
+
+**结论**：#12 新建 `src/models/gliner_ettin/`，不触碰 `llama`/`qwen3`。
+「LLaMA-style forward 该复用哪一份」这个问题仍然悬着，但它不阻塞 GLiNER 家族。
 
 ## 顺带记录：三个 tokenizer 声明风格
 
@@ -109,3 +133,32 @@ SentencePiece。它需要新 forward 和新 tokenizer。
 transformers 的 fast 和 slow 类都失败——这说明 reference 只能从基座 encoder
 取 tokenizer，oracle 因此新增了 `--base-encoder`（必填）。我们的转换器不受影响，
 因为它直接读文件、只需要 id。
+
+## 顺带记录二：仓库里没有任何 ByteLevel BPE 可复用
+
+`src/core/` 下有三套 tokenizer 实现，全都不是 ByteLevel：
+
+| 实现 | 结构 | 用于 |
+|---|---|---|
+| `core::sentencepiece::SentencePieceTokenizer` | 扁平 Vec trie | gliner 家族 11 个模型 |
+| `core::tokenizer::SPMTokenizer` | llama.cpp 式 linked list + `HashMap<String,u32>` | llama 系 |
+| `core::tokenizer::UgmTokenizer` | 递归 `NaiveTrie` | T5 系 |
+
+ByteLevel 需要的是 byte→unicode 映射表 + GPT-2 预分词模式 + lowest-rank-first
+合并，三套都不提供，所以 #12 自实现 `src/models/gliner_ettin/bpe.rs`。
+
+与 `tokenizers` 对齐时有四处规则不是「照抄正则」就能得到的，每一处都有 token id
+在背后：
+
+1. GPT-2 模式是 **Unicode 感知**的（`\p{L}` / `\p{N}`）。按 ASCII 字母切会把
+   `naïve` 从重音字节处切开，`Ã¯` 独自成块，rank-29935 的 `Ã¯ve` 合并永不触发。
+2. 标点的 ` ?` 会吸收一个前导空格，所以 `" -42"` 是一个 chunk（`Ġ-`）而非 `Ġ` + `-`。
+3. `\s+(?!\S)` 让非末尾的空白 run 让出最后一个字符，下一个 chunk 才能以其空格开头。
+4. reference 在**原始文本**上按全部 126 个 added token 做最左最长切分。本 checkpoint
+   声明了 23 个纯空白 run（`' '` 到 22 个空格，id 50254..50276），这解释了
+   `"a  b"` = `a`, `'  '`, `b` —— 切走的两空格不会把前导空格带给后面的词。
+   只处理 10 个 schema marker 会让每个双空格都与后词合并。
+
+顺带记一个陷阱：单空格走 BPE（`Ġ`，id 209），双空格走 added token
+（`'  '`，id 50276）——**不是** `ĠĠ`（id 245，词表里存在但 reference 永不到达，
+因为 merges 表没有 `(Ġ, Ġ)`）。判据是 added-token 表，不是「在不在词表里」。
