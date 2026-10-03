@@ -232,6 +232,53 @@ fn main() {
         return;
     }
 
+    // ERNIE-Image / ERNIE-Image-Turbo: when the diffusion GGUF carries
+    // `general.architecture = ernie_image`, dispatch to the dedicated pipeline
+    // (Ministral-3 text encoder + Baidu's 8B DiT + Flux2 VAE). Same CLI
+    // surface as Z-Image (--model / --text-encoder / --vae / --prompt /
+    // --out / --steps / --resolution / --seed).
+    if options.model.as_os_str().is_empty() == false
+        && options.text_encoder.is_some()
+        && options.vae.is_some()
+        && options.out.is_some()
+        && options.prompt.is_some()
+    {
+        let arch_probe: Arc<dyn TensorSource> =
+            Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+        let arch_name = arch_probe
+            .metadata("general.architecture")
+            .and_then(MetaValue::to_string_val)
+            .unwrap_or_default();
+        if arch_name == "ernie_image" {
+            if options.gpu {
+                ops::enable_gpu();
+            }
+            let text: Arc<dyn TensorSource> = Arc::from(open_or_exit(
+                options
+                    .text_encoder
+                    .as_deref()
+                    .expect("ERNIE-Image text encoder required"),
+                ComponentRole::Llm,
+            ));
+            let vae: Arc<dyn TensorSource> = Arc::from(open_or_exit(
+                options.vae.as_deref().expect("ERNIE-Image VAE required"),
+                ComponentRole::Llm,
+            ));
+            app::run_or_exit(app::run_ernie_image_cli(
+                arch_probe,
+                text,
+                vae,
+                options.prompt.as_deref().expect("ERNIE-Image prompt required"),
+                options.steps.unwrap_or(8),
+                options.resolution.unwrap_or(512),
+                options.seed.unwrap_or(0),
+                options.out.clone().expect("ERNIE-Image --out required"),
+                n_threads,
+            ));
+            return;
+        }
+    }
+
     let model_path = options.model.as_path();
     let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(model_path, ComponentRole::Llm));
     // Qwen-Image-2.1 diffusion GGUFs carry no metadata (kv=0), so the route is
