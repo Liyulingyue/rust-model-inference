@@ -1082,6 +1082,26 @@ impl ZImageDit {
             drop(session);
         }
         let t_layers_done = std::time::Instant::now();
+        // Per-block count of projections the GPU took. This is the probe that
+        // found the AdaLN latch: an empty list meant `run_block_gpu` had stopped
+        // being called, so the render was silently on the CPU with no error in
+        // the timings. Set RUST_GPU_DIAG=1 to see it.
+        #[cfg(feature = "vulkan")]
+        if gpu_diag_enabled() {
+            if let Some(session) = scratch.gpu.get(&total_tokens) {
+                let (blocks, projections) = GPU_BLOCKS_TAKEN.with(|c| {
+                    let mut taken = c.borrow_mut();
+                    let seen = (taken.0, taken.1);
+                    *taken = (0, 0);
+                    seen
+                });
+                eprintln!(
+                    "[diag] sigma={sigma:.3} dispatches={} blocks_on_gpu={blocks} projections={projections}",
+                    session.ops().recorded_dispatch_count(),
+                );
+            }
+        }
+
         eprintln!(
             "[profile] sigma={:.3} setup={:.1}ms main_layers={:.1}ms total_so_far={:.1}ms",
             sigma,
@@ -1577,6 +1597,21 @@ thread_local! {
 /// block and reads all zeroes on this path -- which is what made the CPU
 /// attention share of a step unknowable from the profile output.
 thread_local! {
+}
+
+#[cfg(feature = "vulkan")]
+fn gpu_diag_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("RUST_GPU_DIAG").is_ok())
+}
+
+/// How many blocks in the step took the GPU path, and how many projections each
+/// bound. Diagnostic only, and the number that matters is the count: zero when
+/// the device has been latched off.
+#[cfg(feature = "vulkan")]
+thread_local! {
+    static GPU_BLOCKS_TAKEN: std::cell::RefCell<(usize, usize)> =
+        const { std::cell::RefCell::new((0, 0)) };
 }
 
 #[cfg(feature = "vulkan")]
@@ -2212,6 +2247,11 @@ fn run_block_gpu(
     let qkv_len = rows * QKV_WIDTH;
     let ffn_len = rows * FFN_WIDTH;
     let bound = bind_block_weights(session, source, block, layer);
+    GPU_BLOCKS_TAKEN.with(|cell| {
+        let mut taken = cell.borrow_mut();
+        taken.0 += 1;
+        taken.1 += bound.len();
+    });
 
     let t_phase = std::time::Instant::now();
     // --- AdaLN, identical to the CPU path ------------------------------------
