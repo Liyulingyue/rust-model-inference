@@ -11,7 +11,7 @@
 | EXAONE-3.5 | 2.4B | 文本 | llama.cpp | https://www.modelscope.cn/models/LGAI-EXAONE/EXAONE-3.5-2.4B-Instruct | https://modelscope.cn/models/LGAI-EXAONE/EXAONE-3.5-2.4B-Instruct-GGUF | √ |
 | Gemma-4 | E2B / E4B / 12B | 文本、图像、音频 | llama.cpp @ `3173a56` | https://www.modelscope.cn/models/unsloth/gemma-4-E2B-it | https://www.modelscope.cn/models/unsloth/gemma-4-E2B-it-GGUF | √ |
 | EmbeddingGemma | 300M | 文本 Embedding（编码器） | llama.cpp | https://www.modelscope.cn/models/nvidia/embeddinggemma-300m | https://modelscope.cn/models/ggml-org/embeddinggemma-300m-GGUF | √ |
-| jina-reranker-v1-turbo-en | 38M | 跨编码器重排序（query/document 打分） | llama.cpp `jina-bert-v2.cpp`（双向 forward + CLS row 投影 `cls.weight`/`cls.bias` 单 logit） | - | https://modelscope.cn/models/ggml-org/jina-reranker-v1-turbo-en-GGUF | √ |
+| jina-reranker-v1-turbo-en | 38M | 跨编码器重排序（query/document 打分） | llama.cpp | - | https://modelscope.cn/models/ggml-org/jina-reranker-v1-turbo-en-GGUF | √ |
 | jina-embeddings-v2-base-en | 137M | 文本 Embedding（编码器） | llama.cpp | https://www.modelscope.cn/models/jinaai/jina-embeddings-v2-base-en | https://modelscope.cn/models/ggml-org/jina-embeddings-v2-base-en-Q8_0-GGUF | √ |
 | nomic-embed-text-v1.5 | 137M | 文本 Embedding（编码器） | llama.cpp | https://www.modelscope.cn/models/nomic-ai/nomic-embed-text-v1.5 | https://modelscope.cn/models/nomic-ai/nomic-embed-text-v1.5-GGUF | √ |
 | bge-small-en-v1.5 | 33M | 文本 Embedding（编码器） | llama.cpp | https://www.modelscope.cn/models/BAAI/bge-small-en-v1.5 | https://modelscope.cn/models/ggml-org/bge-small-en-v1.5-Q8_0-GGUF | √ |
