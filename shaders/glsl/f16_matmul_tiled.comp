@@ -40,32 +40,17 @@ layout(push_constant) uniform PC {
     uint group_count; uint input_sum_word; uint input_stride; uint q8_stride; uint scales_stride; uint input_sum_stride; uint q8k_stride; uint q8k_scales_stride; uint token_rows;
 } pc;
 
-shared float input_stage[TOKENS * CHUNK_ELEMENTS];
+// The activation is already rounded to f16 by the time it reaches here, so it
+// is staged packed: the same 256 elements in half the shared memory. The Q8_0
+// kernel stages 16 KB and reaches the bandwidth roof; staging f32 put this one
+// at 32 KB, which is half the per-SM budget and leaves one workgroup per SM to
+// hide any latency with.
+shared uint input_stage[TOKENS * CHUNK_ELEMENTS / 2u];
 
 uint weight_word(uint slot, uint index) {
     if (slot == 0u) return w0.data[index];
     if (slot == 1u) return w1.data[index];
     return w2.data[index];
-}
-
-uint weight_f16(uint slot, uint index) {
-    uint word = weight_word(slot, index >> 1u);
-    return (index & 1u) == 0u ? word & 0xffffu : word >> 16u;
-}
-
-float f16_decode(uint bits) {
-    uint sign = (bits >> 15u) & 1u;
-    int exponent = int((bits >> 10u) & 0x1fu);
-    uint mantissa = bits & 0x3ffu;
-    float value;
-    if (exponent == 0) {
-        value = (float(mantissa) / 1024.0) * exp2(-14.0);
-    } else if (exponent == 31) {
-        return 0.0;
-    } else {
-        value = (1.0 + float(mantissa) / 1024.0) * exp2(float(exponent - 15));
-    }
-    return sign == 0u ? value : -value;
 }
 
 void main() {
@@ -103,21 +88,41 @@ void main() {
         // Stage this chunk's activations for every live token.
         for (uint t = 0u; t < live; t++) {
             uint base = (token_base + t) * pc.input_stride + chunk;
-            uint dst = t * CHUNK_ELEMENTS;
-            for (uint index = lane; index < elements; index += 64u) {
-                input_stage[dst + index] = round_f16_rte(
-                    uintBitsToFloat(arena.data[pc.input_word + base + index])
-                );
+            uint dst = t * (CHUNK_ELEMENTS / 2u);
+            for (uint pair = lane; pair * 2u + 1u < elements; pair += 64u) {
+                uint low = f32_to_f16_rte(uintBitsToFloat(arena.data[pc.input_word + base + pair * 2u]));
+                uint high = f32_to_f16_rte(uintBitsToFloat(arena.data[pc.input_word + base + pair * 2u + 1u]));
+                input_stage[dst + pair] = low | (high << 16u);
+            }
+            // An odd length leaves a last element that has no partner.
+            if ((elements & 1u) != 0u && lane == 0u) {
+                input_stage[dst + elements / 2u] =
+                    f32_to_f16_rte(uintBitsToFloat(arena.data[pc.input_word + base + elements - 1u]));
             }
         }
         barrier();
 
+        // The row starts even, so its halves come in pairs: one load and one
+        // native conversion per two weights.
         uint row_base = read_column * pc.elements_per_row + chunk;
-        for (uint index = 0u; index < elements; index++) {
-            // One weight load, TOKENS dots.
-            float weight_value = f16_decode(weight_f16(slot, row_base + index));
+        uint index = 0u;
+        for (; index + 1u < elements; index += 2u) {
+            vec2 pair = unpackHalf2x16(weight_word(slot, (row_base + index) >> 1u));
             for (uint t = 0u; t < live; t++) {
-                accumulator[t] = fma(input_stage[t * CHUNK_ELEMENTS + index], weight_value, accumulator[t]);
+                // One shared read covers both halves of the pair.
+                vec2 act = unpackHalf2x16(input_stage[t * (CHUNK_ELEMENTS / 2u) + index / 2u]);
+                accumulator[t] = fma(act.x, pair.x, accumulator[t]);
+                accumulator[t] = fma(act.y, pair.y, accumulator[t]);
+            }
+        }
+        if (index < elements) {
+            // An odd row length leaves the last element in the high half.
+            float odd = unpackHalf2x16(weight_word(slot, (row_base + index) >> 1u)).y;
+            for (uint t = 0u; t < live; t++) {
+                float value = unpackHalf2x16(
+                    input_stage[t * (CHUNK_ELEMENTS / 2u) + index / 2u]
+                )[index & 1u];
+                accumulator[t] = fma(value, odd, accumulator[t]);
             }
         }
         barrier();

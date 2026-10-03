@@ -49,18 +49,34 @@ Z-Image model requires --text-encoder, --vae, --prompt, and --out
 
 去噪阶段（不含文本编码与 VAE 解码）：CPU 437 s，GPU 118 s，PyTorch 约 13 s。
 
-单步分解（GPU，14.7 s/步）：
+单步分解（GPU，历史基线 14.7 s/步；当前机器已失效，见下方 A/B）：
 
 | 阶段 | 单步 | 占比 |
 |---|---|---|
 | FFN 主栈（GPU，Q8_0 tiled） | 3.86 s | 26% |
-| FFN refiner（GPU，F16 tiled） | 3.43 s | 24% |
+| FFN refiner（GPU，F16 tiled） | 1.42 s | 7% |
 | attention（CPU，pool 并行 + query 分块） | 3.41 s | 23% |
 | rms_norm + AdaLN + QKV（GPU，单 command buffer） | 2.09 s | 14% |
 | 输出投影（GPU） | 1.24 s | 8% |
 | RoPE + 调制（CPU） | 0.11 s | 1% |
 
 > **线程数也非越多越好**：16 线程首步 269.3 s，反而慢于 8 线程的 140.5 s。
+
+> ⚠️ **历史绝对值已失效。** 下表的 14.7 s/步 记录于本机更早的状态；当前机器上
+> 纯净 HEAD（9a831ee）实测已是 23.07 s/步，`release` 与 `release-fast` 几乎无差
+> （19.5 vs 19.4 s），所以差异**不是** LTO。旁证 VAE 解码——只跑一次、与步数无关、
+> 代码未改——在多次相同运行里分别为 34.5 / 44.8 / 77.2 s，本身就有 2.2× 噪声，
+> 不能用于任何归因。**唯一可信的是同一会话内前后对照的差值**，故下表改为 A/B 实测：
+>
+> | 8 步 / 512 / seed 42 / 20 线程 | 纯净 HEAD | 现状 | Δ |
+> |---|---|---|---|
+> | denoise | 184.5 s | 158.8 s | **−13.9%** |
+> | 单步 | 23.07 s | 19.85 s | −3.22 s |
+> | refiner/步 | 3608 ms | 1421 ms | −60.6% |
+> | 总计 | 231.5 s | 211.7 s | −8.6% |
+>
+> 两次输出逐字节一致。总计只降 8.6% 是因为 45–51 s 的 VAE 解码占了尾段且噪声大。
+> 在重建绝对基线之前，不要用这些数字与 PyTorch 的 1.89 s/forward 算比值。
 
 ### 让 GPU 路径快起来的四件事
 
@@ -89,6 +105,16 @@ Z-Image model requires --text-encoder, --vae, --prompt, and --out
 4. **F16 refiner 上 GPU。** 两层 refiner 栈在 GGUF 里是 F16，而绑定只接受
    Q8_0，所以 4 个 block 曾整个走 CPU 逐行路径，比 30 层主栈在 GPU上还贵。
    `shaders/glsl/f16_matmul_tiled.comp` 是 Q8_0 tiled kernel 的浮点版。
+
+5. **F16 kernel 的两处改写，refiner 再快 2.54×。** 权重解码原本是手写位运算：
+   每个值一次分支加一次 `exp2()`，而 Q8_0 的 dequant 只有一次乘法。权重本来
+   就成对塞在一个 32-bit word 里，改用原生 `unpackHalf2x16` 一次取两个、零
+   分支（顺带把 inf/nan 与 subnormal 也算对了）。第二处是共享内存：激活在入
+   shared 之前已经 `round_f16_rte` 过，却仍以 f32 存放，占 32 KB，正好是每 SM
+   预算的一半，只塞得下一个 workgroup；Q8_0 kernel 同一块 chunk 只占 16 KB。
+   改成按 f16 成对打包后同样是 16 KB。refiner 3610 ms → 1423 ms/步，同 seed
+   输出与旧 kernel 逐字节一致。**refiner 是解码受限而不是字节受限**，所以把
+   权重换成更小的量化格式没有意义——这一点先测出来省掉了一次错误方向的重做。
 
 > **`examples/dit_vk_bench.rs` 的 0.4×–1.36× 是误导性的**：它测的是 GEMV
 > （`gpu_out` 只有一行长），权重复用同样为 1，于是读带宽看起来正常，却完全

@@ -707,6 +707,7 @@ impl Qwen3VulkanSession {
                 self.capacity,
                 kv_count,
                 rows,
+                kv_count,
             )?;
             #[cfg(test)]
             if let Some(row) = failure {

@@ -3910,4 +3910,152 @@ mod tests {
             "parallel attention differs from serial at {first_bad:?}"
         );
     }
+
+    /// The DiT's GPU attention scores must match what `attention_into` computes.
+    ///
+    /// The gate for moving attention onto the device. The kernel keeps q, k and v
+    /// interleaved in one projection output, so it writes k and v into a cache-shaped
+    /// region with the projection's own row stride and reads q with the same stride.
+    /// Ignored: it builds a scores region of rows x HEADS x rows.
+    #[test]
+    #[ignore = "builds a scores region of rows x HEADS x rows"]
+    fn gpu_diy_attention_scores_match_the_cpu_block() {
+        use crate::core::thread_pool::ComputePool;
+        use crate::ops::float::enable_gpu;
+
+        enable_gpu();
+        let Some(context) = crate::ops::get_vulkan_context() else {
+            eprintln!("skipped: no Vulkan context");
+            return;
+        };
+        let rows = 256usize;
+        let heads = HEADS;
+        let head_dim = ROPE_HEAD_WIDTH;
+        let mut session =
+            crate::models::diffusion::z_image::dit_gpu::DitGpuSession::new_with_attention(
+                context, rows, true,
+            )
+            .expect("session");
+        let layout = *session.layout();
+
+        let qkv: Vec<f32> = (0..rows * QKV_WIDTH)
+            .map(|i| (((i * 37 + 11) % 211) as f32 / 211.0) - 0.5)
+            .collect();
+        // CPU reference: the raw scores attention_into starts from.
+        let scale = 1.0 / (head_dim as f32).sqrt();
+        let mut expected = vec![0f32; rows * heads * rows];
+        for query in 0..rows {
+            for head in 0..heads {
+                let q = &qkv[query * QKV_WIDTH + head * head_dim
+                    ..query * QKV_WIDTH + (head + 1) * head_dim];
+                for token in 0..rows {
+                    let k = &qkv[token * QKV_WIDTH + HIDDEN + head * head_dim
+                        ..token * QKV_WIDTH + HIDDEN + (head + 1) * head_dim];
+                    let mut sum = 0f32;
+                    for d in 0..head_dim {
+                        sum += q[d] * k[d];
+                    }
+                    expected[query * heads * rows + head * rows + token] = sum * scale;
+                }
+            }
+        }
+
+        session.ops().write_f32(layout.qkv, &qkv).expect("write");
+        session
+            .record_diy_attention(rows, layout.attention_scores, layout.attention_out)
+            .expect("gpu scores");
+        let got = session
+            .ops()
+            .read_f32(layout.attention_scores, rows * heads * rows)
+            .expect("read");
+
+        let max_abs = got
+            .iter()
+            .zip(expected.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        let scale_of = expected.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+        eprintln!("gpu vs cpu scores: rows={rows} max|Δ|={max_abs:e} (scale {scale_of:e})");
+        // f16 rounding of q and k is the only intended difference.
+        assert!(
+            max_abs <= scale_of * 2e-3,
+            "GPU attention scores diverge from the CPU by {max_abs} (scale {scale_of})"
+        );
+    }
+
+    /// How the DiT's GPU scores compare with the CPU attention they replace.
+    ///
+    /// Scores are only the first of three stages, so this is an upper bound on the
+    /// whole attention: the CPU number covers scores, softmax and values together.
+    #[test]
+    #[ignore = "benchmark, ~seconds per shape"]
+    fn gpu_diy_attention_scores_beat_the_cpu_attention() {
+        use crate::core::thread_pool::ComputePool;
+        use crate::ops::float::enable_gpu;
+        use std::time::Instant;
+
+        enable_gpu();
+        let Some(context) = crate::ops::get_vulkan_context() else {
+            eprintln!("skipped: no Vulkan context");
+            return;
+        };
+        let heads = HEADS;
+        let head_dim = ROPE_HEAD_WIDTH;
+        for rows in [256usize, 1056] {
+            let mut session =
+                crate::models::diffusion::z_image::dit_gpu::DitGpuSession::new_with_attention(
+                    context, rows, true,
+                )
+                .expect("session");
+            let layout = *session.layout();
+            let qkv: Vec<f32> = (0..rows * QKV_WIDTH)
+                .map(|i| (((i * 37 + 11) % 211) as f32 / 211.0) - 0.5)
+                .collect();
+            session.ops().write_f32(layout.qkv, &qkv).expect("write");
+            let score_count = rows * heads * rows;
+
+            // CPU: the scores stage of the same attention.
+            let pool = ComputePool::new(20);
+            let cpu = Instant::now();
+            for _ in 0..3 {
+                pool.compute(|thread, threads| {
+                    for query in (thread..rows).step_by(threads) {
+                        for head in 0..heads {
+                            for token in 0..rows {
+                                let q = &qkv[query * QKV_WIDTH + head * head_dim
+                                    ..query * QKV_WIDTH + (head + 1) * head_dim];
+                                let k = &qkv[token * QKV_WIDTH + HIDDEN + head * head_dim
+                                    ..token * QKV_WIDTH + HIDDEN + (head + 1) * head_dim];
+                                let mut sum = 0f32;
+                                for d in 0..head_dim {
+                                    sum += q[d] * k[d];
+                                }
+                                std::hint::black_box(sum);
+                            }
+                        }
+                    }
+                });
+            }
+            let cpu = cpu.elapsed().as_secs_f64() / 3.0;
+
+            // GPU: fence-per-iteration, the same shape of measurement.
+            let mut best = f64::INFINITY;
+            for _ in 0..5 {
+                let start = Instant::now();
+                session
+                    .record_diy_attention(rows, layout.attention_scores, layout.attention_out)
+                    .expect("gpu scores");
+                best = best.min(start.elapsed().as_secs_f64());
+            }
+            let macs = rows * heads * rows * head_dim;
+            eprintln!(
+                "rows={rows}: cpu {:.3} ms | gpu {:.3} ms | {:.1}x | {:.0} GOP/s gpu",
+                cpu * 1e3,
+                best * 1e3,
+                cpu / best,
+                2.0 * macs as f64 / best / 1e9,
+            );
+            let _ = score_count;
+        }
+    }
 }
