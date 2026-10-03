@@ -1,5 +1,18 @@
 #version 450
 
+// RMS normalisation, one workgroup per row.
+//
+// The reduction used to run on lane 0 alone: every workgroup has 64 lanes, and
+// 63 of them waited at the barrier while one lane walked `count` elements through
+// a serial Kahan chain. At the DiT's shape that is 1056 rows x 3840 elements
+// each, and it is where the QKV chain's non-matmul time was going.
+//
+// The sum of squares is now a 64-lane tree reduction. The correction term is
+// kept, because this kernel's output feeds the QKV projection and the change
+// has to stay within the same rounding the CPU path produces -- a plain
+// reassociation of the same products is a different thing from a plain sum, and
+// the caller compares against the CPU block.
+
 layout(local_size_x = 64) in;
 
 layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
@@ -15,6 +28,8 @@ layout(push_constant) uniform PC {
     uint output_stride;
 } pc;
 
+shared float partial[64];
+shared float partial_correction[64];
 shared float inverse_rms;
 
 void main() {
@@ -23,19 +38,46 @@ void main() {
     uint lane = gl_LocalInvocationID.x;
     uint base = vector_index * pc.input_stride;
     uint output_base = vector_index * pc.output_stride;
-    if (lane == 0u) {
-        precise float sum = 0.0;
-        precise float correction = 0.0;
-        for (uint index = 0u; index < pc.count; index++) {
-            float value = uintBitsToFloat(arena.data[pc.input_word + base + index]);
-            float square = value * value;
-            precise float next = sum + square;
-            correction += sum >= square
-                ? (sum - next) + square
-                : (square - next) + sum;
-            sum = next;
+
+    // Lane `l` takes every 64th element, so the row is covered in `count / 64`
+    // strides by all lanes at once. The Kahan pair is per lane, then the tree
+    // below combines the lanes with the same correction, which keeps the result
+    // as accurate as the serial chain was.
+    precise float sum = 0.0;
+    precise float correction = 0.0;
+    for (uint index = lane; index < pc.count; index += 64u) {
+        float value = uintBitsToFloat(arena.data[pc.input_word + base + index]);
+        float square = value * value;
+        precise float next = sum + square;
+        correction += sum >= square
+            ? (sum - next) + square
+            : (square - next) + sum;
+        sum = next;
+    }
+    partial[lane] = sum;
+    partial_correction[lane] = correction;
+    barrier();
+    // Six pairwise steps bring 64 lanes to one. Each step needs its own barrier:
+    // without one a lane can read a partial another has not written yet.
+    for (uint step = 32u; step > 0u; step >>= 1u) {
+        if (lane < step) {
+            precise float high = partial[lane];
+            precise float low = partial_correction[lane];
+            precise float other_high = partial[lane + step];
+            precise float other_low = partial_correction[lane + step];
+            precise float total = high + other_high;
+            precise float other_virtual = total - high;
+            precise float error =
+                (high - (total - other_virtual)) + (other_high - other_virtual);
+            error += low + other_low;
+            partial[lane] = total + error;
+            partial_correction[lane] = error - (partial[lane] - total);
         }
-        precise float mean_square = (sum + correction) / float(pc.count) + pc.eps;
+        barrier();
+    }
+    if (lane == 0u) {
+        precise float mean_square = (partial[0] + partial_correction[0]) / float(pc.count)
+            + pc.eps;
         precise float root = sqrt(mean_square);
         precise float root_residual = fma(-root, root, mean_square);
         root = fma(root_residual, 0.5 / root, root);
