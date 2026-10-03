@@ -114,10 +114,10 @@ Ministral-3-3B-Reasoning 的 chat_template 要求模型先在 `[THINK]…[/THINK
 | 路径 | 状态 | 说明 |
 |---|---|---|
 | `/v1/jev/score` | ✅ **好使** | 走 llama scorer；正确产出 `mode/choice/probabilities`。Schema：`{context, questions: [{text, options: [...]}]}`，注意**不是** CLI 风格的 `--jev-option` 数组 |
-| `/v1/jev/grouped` | ❌ **拒绝** | 返回 `"--jev grouped is not yet supported for architecture \"mistral3\""`；`src/app/jev/grouped.rs:404` 的 match arm 仅匹配 `qwen3/qwen3vl/qwen35/llama/k2-horizon/granite/nanbeige/qwen2_2/gemma4/lfm2/lfm25/spark2_5/hunyuan-dense/nemotron_h`，`mistral3` 落进 `other` 分支 |
-| `/v1/chat/completions` | ❌ **拒绝** | 返回 `"Tool/chat template is unsupported for architecture mistral3"`；`src/app/server/api/tools.rs:53` `is_qwen35` 白名单只列了 `llama/nanbeige/exaone/k2-horizon/granite/phi3/glm4`，`mistral3` 被当作未知 arch |
-| `/v1/responses` | ❌ **拒绝** | 同上（`chat` handler 共享） |
-| `/v1/messages` | ❌ **拒绝** | Anthropic 兼容端点，同上 |
+| `/v1/jev/grouped` | ✅ **好使** | 走 llama scorer；`{context, questions: [{text, groups: [{label, options}]}], mode: "multi_select"\|"block_choice"}` |
+| `/v1/chat/completions` | ✅ **好使** | OpenAI 风格；用 `messages: [{role, content}]`，`is_mistral` 子串匹配驱动 `[INST]…[/INST]` 模板 |
+| `/v1/responses` | ✅ **好使** | OpenAI 新风格；同上 |
+| `/v1/messages` | ✅ **好使** | Anthropic 兼容；同上 |
 
 ### 4.1 CLI vs HTTP 的实际差异
 
@@ -127,21 +127,52 @@ Ministral-3-3B-Reasoning 的 chat_template 要求模型先在 `[THINK]…[/THINK
 | Schema | `--jev-option "safe" --jev-option "unsafe"` 多个 flag | `questions: [{text, options: ["safe","unsafe"]}]` 单个对象 |
 | 候选 → letter 映射 | CLI 直接透传 A/B/C… | HTTP 自动 letter 映射：`["safe","unsafe"]` → A=safe / B=unsafe |
 
-### 4.2 HTTP 端修复路径（未实施）
+### 4.2 HTTP 端如何接入 mistral3
 
-要把 mistral3 全部 HTTP 路径打通，需要两处改动：
+实测已通过（Shieldstral-3B Q4_K_M release-fast，4 核 + 7.5 GiB）：
+
+```bash
+target/release-fast/rust-model-server \
+  --model models/Shieldstral-1.0-3B-GGUF/Shieldstral-1.0-3B-Q4_K_M.gguf \
+  --host 127.0.0.1 --port 18080 --threads 4
+
+# curl
+curl http://127.0.0.1:18080/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model":"Shieldstral","messages":[{"role":"user","content":"Say hi"}],
+       "max_tokens":8}'
+# → "no"（safety classifier 用 yes/no 回答）
+
+curl http://127.0.0.1:18080/v1/jev/score -H 'Content-Type: application/json' \
+  -d '{"context":"User: I want to hurt someone",
+       "questions":[{"text":"safe?","options":["safe","unsafe"]}]}'
+# → choice=A(safe) prob=0.5571
+
+curl http://127.0.0.1:18080/v1/jev/grouped -H 'Content-Type: application/json' \
+  -d '{"context":"User: hello",
+       "questions":[{"text":"intent","groups":[{"label":"yes","options":["yes","no"]}]}],
+       "mode":"multi_select"}'
+# → choice=A(yes) prob=0.5601
+```
+
+### 4.3 HTTP 端接入 mistral3 的代码改动
+
+5 处微改：
 
 1. `src/app/server/api/tools.rs:30-54` `is_qwen35` 白名单追加
-   `"mistral3" => Ok(false)`。这是单行修改——`llama::trunk::build_prompt_tokens`
-   已经被 CLI 路径验证过能处理 mistral3（`is_mistral` 子串匹配同时驱动 CLI
-   和 JEV），HTTP 这边只是过早拒绝。
-2. `src/app/jev/grouped.rs:202` 的 `match arch` 加 `mistral3` arm，复用
-   `llama` arm 的 prompt 模板（Mistral-3 grouped 的 `[INST] {system} {payload} [/INST]`
-   模板见 `src/app/jev/single/llama.rs:118-145`）。
-
-未在当前 PR 实施是因为这两块都是用户面广的 HTTP 路径，prompt 模板细节
-需要单独回归测试（`tests/cli_http_agreement.rs` 已经为 llama trunk 写过
-端到端对齐测试，mistral3 可以直接接进去）。
+   `| "mistral3" => Ok(false)`。
+2. `src/app/server/api/tools.rs:155-160` `llama_family` match 追加
+   `| "mistral3"`——`build_prompt_tokens_from_turns` 已经被 CLI 验证过能
+   处理 mistral3（`is_mistral` 子串匹配同时驱动 CLI 和 JEV），HTTP 这边
+   只是过早拒绝。
+3. `src/app/jev/grouped.rs:202` 的 `build_jev_token_ids_for_arch` 加
+   `mistral3` arm，prompt 模板复用 `[INST] {system} {payload} [/INST]`
+   （同 single scorer）。
+4. `src/app/jev/grouped.rs:564` 的 `run_jev_grouped_decision_data` 顶部
+   match 把 `mistral3` 加进 `"llama" | "k2-horizon" | ...` arm，复用
+   `run_jev_grouped_llama`（其 `LlamaJevGroupedScorer` 内部已经走
+   `LlamaJevScorer`，arch 由 `is_mistral` 自动判别）。
+5. `src/app/jev/grouped.rs:431,627` 两处 `currently supported: ...` 错误
+   消息里把 `mistral3` 加进去。
 
 ## 5. 与 llama.cpp 的对齐
 

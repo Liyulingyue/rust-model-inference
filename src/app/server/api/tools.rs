@@ -48,7 +48,8 @@ fn is_qwen35(arch: &str) -> Result<bool, String> {
         // llama trunk with its own `[gMASK]<sop><|user|>...<|assistant|>`
         // chat template and additionally does post-attention / post-FFN
         // RMSNorm (`attn_post_norm` / `ffn_post_norm`); last user turn only.
-        "llama" | "nanbeige" | "exaone" | "k2-horizon" | "granite" | "phi3" | "glm4" => Ok(false),
+        "llama" | "nanbeige" | "exaone" | "k2-horizon" | "granite" | "phi3" | "glm4"
+        | "mistral3" => Ok(false),
         _ => Err(format!(
             "Tool/chat template is unsupported for architecture {arch}"
         )),
@@ -150,6 +151,7 @@ pub fn build_prompt(
     let llama_family = matches!(
         arch,
         "llama" | "nanbeige" | "exaone" | "k2-horizon" | "granite" | "phi3" | "glm4"
+            | "mistral3"
     );
     if llama_family {
         if !tools.is_empty() {

@@ -258,6 +258,30 @@ fn build_jev_token_ids_for_arch(
             append_qwen_assistant_prefix(&mut token_ids, tokenizer, false)?;
             Ok(token_ids)
         }
+        // Mistral 3 (`mistral3` arch — covers Ministral-3-3B-Instruct /
+        // -3B-Reasoning / -8B-Instruct / Mistral-Shieldstral-1.0-3B,
+        // all of which ride the llama trunk and use the Tekken / Mistral
+        // `[INST] … [/INST]` chat-template family). Same
+        // `[INST] {system} {payload} [/INST]` shape the single scorer
+        // uses (`src/app/jev/single/llama.rs::build_prompt` `mistral3`
+        // arm); folds the JEV system back into the user turn the same
+        // way (Mistral 3's own chat_template splits system out via
+        // `[SYSTEM_PROMPT]`, but folding it back into `[INST]` is what
+        // the 3B checkpoint was actually post-trained on for plain
+        // question answering). The same ~56-81% always-A positional
+        // bias documented in `docs/usage/ministral3.md` §3.1 applies
+        // to the JSON instruction shape; call out here so future
+        // maintainers don't think a mistral3 arm is missing by mistake.
+        "mistral3" => {
+            let prompt = format!("[INST] {system} {payload} [/INST]");
+            Ok(tokenizer.encode(
+                &prompt,
+                EncodeOptions {
+                    add_special: false,
+                    parse_special: true,
+                },
+            ))
+        }
         "llama" | "k2-horizon" | "granite" | "nanbeige" | "qwen2_2" | "glm4" => {
             if arch == "k2-horizon" || arch == "granite" {
                 let prompt = format!(
@@ -404,7 +428,7 @@ fn build_jev_token_ids_for_arch(
             "--jev grouped is not yet supported for architecture {:?}; \
              currently supported: qwen3 / qwen3vl / qwen35 / llama / k2-horizon / \
              granite / nanbeige / qwen2_2 / gemma4 / lfm2 / lfm25 / spark2_5 / \
-             hunyuan-dense / nemotron_h",
+             mistral3 / hunyuan-dense / nemotron_h",
             other
         )),
     }
@@ -537,7 +561,8 @@ pub fn run_jev_grouped_decision_data(
             prefill_batch_size,
             false,
         )?,
-        "llama" | "k2-horizon" | "granite" | "nanbeige" | "qwen2_2" | "phi3" | "glm4" => {
+        "llama" | "k2-horizon" | "granite" | "nanbeige" | "qwen2_2" | "phi3" | "glm4"
+        | "mistral3" => {
             llama::run_jev_grouped_llama(
                 source.clone(),
                 context,
@@ -600,7 +625,7 @@ pub fn run_jev_grouped_decision_data(
                 "--jev grouped is not yet supported for architecture {:?}; \
                  currently supported: qwen3 / qwen3vl / qwen35 / llama / k2-horizon / \
                  granite / nanbeige / qwen2_2 / gemma4 / lfm2 / lfm25 / spark2_5 / \
-                 hunyuan-dense / nemotron_h",
+                 mistral3 / hunyuan-dense / nemotron_h",
                 other
             ));
         }
