@@ -644,6 +644,30 @@ pub fn run_inference(
             // because `parse_special=true`.
             format!("[gMASK]<sop><|user|>\n{prompt}<|assistant|>\n")
         } else if is_mistral {
+            // TODO(mistral3-reasoning): the CLI emits a bare
+            // `[INST] {prompt} [/INST]` turn and never injects the
+            // `[SYSTEM_PROMPT] … [/SYSTEM_PROMPT]` block from
+            // `tokenizer.chat_template`. For Ministral-3-3B-Instruct-2512
+            // that's fine — it answers in free text directly. For
+            // Ministral-3-3B-Reasoning-2512 (same engine path, same arch)
+            // the chat template's default system prompt asks the model to
+            // "First draft your thinking process in [THINK]…[/THINK] then
+            // answer" — without that prompt the Reasoning model still
+            // produces structured reasoning prose but never emits the
+            // canonical `[THINK] … [/THINK]` separators Mistral trained it
+            // for. Smoke-tested: `--prompt "If a train leaves station A
+            // at 60 km/h …"` produces a Markdown-headed reasoning walk-
+            // through (no `[THINK]` markers). Unblocking the canonical
+            // shape needs one of:
+            //   (a) a `--system-prompt` CLI flag passed through to here
+            //       and prepended as
+            //       `[SYSTEM_PROMPT]{system}[/SYSTEM_PROMPT][INST]{p}[/INST]`,
+            //   (b) a chat-template-aware mode that runs the model's own
+            //       jinja against the prompt, or
+            //   (c) at minimum, for `general.name` containing
+            //       "reasoning" / "Ministral-3-Reasoning", inject the
+            //       stock default system prompt automatically.
+            // Tracked; not in scope for this PR.
             format!("[INST] {prompt} [/INST]")
         } else if is_zephyr {
             format!("<|user|>\n{prompt}</s>\n<|assistant|>\n")
