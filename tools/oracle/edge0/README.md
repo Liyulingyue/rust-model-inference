@@ -4,6 +4,8 @@
 
 Rust 的 `Edge0Model` 独立持有 MoE 权重，与 Qwen3.5 共用 attention/SSM 的 `HybridTrunk` 和 session 实现；`Qwen35Model::from_source` 拒绝 `edge0` 架构。
 
+正常推理时，lossless affine 权重按行解码到临时缓冲，矩阵乘法和 LoRA 复用共享点积的 ARM NEON / x86 AVX2 分派；MoE 投影使用共享 `PreparedRows` 和线程池。权重仍保持 packed mmap 存储，不会整模型展开成 F32。逐位验证需要下面的 `parity-trace` 与 `RMI_SCALAR=1`；此时点积恢复顺序 F32 累加。Edge0 的整模型 Vulkan 路径仍未实现。
+
 转换器保留全部 2377 个张量的原始字节（19,551,119,616 字节 payload），将 U32 packed words 放进 `general.architecture=edge0` 的 GGUF I32 张量；这是本仓库专用格式。已生成文件 `Edge0-35B-A3B-preview-lossless.gguf` 的 SHA-256 是 `50c6c1ce5faef36d5e72d565fa4a27a04801aa243a0d4a5c3f5c4337a408ec7d`。
 
 **只有 `lossless` 模式可以跑下面的 oracle。** 转换器还支持 `--quant f32/f16/q8_0/q4_0`，

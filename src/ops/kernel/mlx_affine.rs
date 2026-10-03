@@ -1,4 +1,4 @@
-//! Scalar MLX affine group quantization used by Edge0's lossless GGUF.
+//! MLX affine decoding with shared SIMD/scalar dot-product dispatch.
 
 use super::Kernel;
 use half::f16;
@@ -70,29 +70,33 @@ impl<'a> MlxAffineKernel<'a> {
         f16::from_bits(u16::from_le_bytes([bytes[i], bytes[i + 1]])).to_f32()
     }
 
-    fn value(&self, row: usize, col: usize) -> f32 {
-        let values_per_word = 32 / self.bits;
-        let word = row * (self.n_in / values_per_word) + col / values_per_word;
-        let offset = word * 4;
-        let packed = u32::from_le_bytes(self.packed[offset..offset + 4].try_into().unwrap());
-        let q = (packed >> ((col % values_per_word) * self.bits)) & ((1 << self.bits) - 1);
-        let group = row * (self.n_in / 64) + col / 64;
-        Self::bf16(self.scales, group) * q as f32 + Self::bf16(self.biases, group)
+    fn decode_row(&self, row: usize, output: &mut [f32]) {
+        let group_bytes = 64 * self.bits / 8;
+        let row_offset = row * self.n_in * self.bits / 8;
+        for (group, values) in output.chunks_exact_mut(64).enumerate() {
+            let scale_index = row * (self.n_in / 64) + group;
+            let scale = Self::bf16(self.scales, scale_index);
+            let bias = Self::bf16(self.biases, scale_index);
+            let offset = row_offset + group * group_bytes;
+            let packed = &self.packed[offset..offset + group_bytes];
+            if self.bits == 4 {
+                for (&codes, pair) in packed.iter().zip(values.chunks_exact_mut(2)) {
+                    pair[0] = scale * f32::from(codes & 15) + bias;
+                    pair[1] = scale * f32::from(codes >> 4) + bias;
+                }
+            } else {
+                for (&code, value) in packed.iter().zip(values) {
+                    *value = scale * f32::from(code) + bias;
+                }
+            }
+        }
     }
 
-    fn row(&self, input: &[f32], row: usize, lora_low: Option<&[f32]>) -> f32 {
-        let mut sum = 0.0f32;
-        for (col, &x) in input.iter().enumerate() {
-            sum += x * self.value(row, col);
+    fn dot_f16(input: &[f32], weights: &[u8], decoded: &mut [f32]) -> f32 {
+        for (index, value) in decoded[..input.len()].iter_mut().enumerate() {
+            *value = Self::f16(weights, index);
         }
-        if let (Some((_, b, rank, scale)), Some(low)) = (self.lora, lora_low) {
-            let mut delta = 0.0f32;
-            for r in 0..rank {
-                delta += low[r] * Self::f16(b, row * rank + r);
-            }
-            sum += scale * delta;
-        }
-        sum
+        crate::ops::dot_f32_exact(input, decoded, input.len())
     }
 }
 
@@ -123,18 +127,37 @@ impl Kernel for MlxAffineKernel<'_> {
         nth: usize,
     ) {
         debug_assert_eq!((n_in, n_out), (self.n_in, self.n_out));
+        let rows_per_thread = n_out.div_ceil(nth);
+        let start = ith * rows_per_thread;
+        let end = ((ith + 1) * rows_per_thread).min(n_out);
+        if start >= end {
+            return;
+        }
+        let rank = self.lora.map_or(0, |(_, _, rank, _)| rank);
+        let mut decoded = vec![0.0; n_in.max(rank)];
         let lora_low = self.lora.map(|(a, _, rank, _)| {
             (0..rank)
-                .map(|r| {
-                    input_f32.iter().enumerate().fold(0.0f32, |sum, (col, &x)| {
-                        sum + x * Self::f16(a, r * n_in + col)
-                    })
+                .map(|row| {
+                    Self::dot_f16(
+                        input_f32,
+                        &a[row * n_in * 2..(row + 1) * n_in * 2],
+                        &mut decoded,
+                    )
                 })
                 .collect::<Vec<_>>()
         });
-        let rows_per_thread = n_out.div_ceil(nth);
-        for row in ith * rows_per_thread..((ith + 1) * rows_per_thread).min(n_out) {
-            output[row] = self.row(input_f32, row, lora_low.as_deref());
+        for row in start..end {
+            self.decode_row(row, &mut decoded[..n_in]);
+            let mut sum = crate::ops::dot_f32_exact(input_f32, &decoded, n_in);
+            if let (Some((_, weights, rank, scale)), Some(low)) = (self.lora, &lora_low) {
+                sum += scale
+                    * Self::dot_f16(
+                        low,
+                        &weights[row * rank * 2..(row + 1) * rank * 2],
+                        &mut decoded,
+                    );
+            }
+            output[row] = sum;
         }
     }
 
@@ -151,15 +174,158 @@ impl Kernel for MlxAffineKernel<'_> {
     fn embedding_lookup(&self, token_id: u32, n_embd: usize, out: &mut [f32]) {
         assert_eq!(n_embd, self.n_in);
         assert!((token_id as usize) < self.n_out);
-        for (col, value) in out.iter_mut().enumerate() {
-            *value = self.value(token_id as usize, col);
-        }
+        assert_eq!(out.len(), n_embd);
+        self.decode_row(token_id as usize, out);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn affine_and_lora_use_shared_dot_dispatch() {
+        let mut input = [0.0f32; 64];
+        input[0] = 16_777_216.0;
+        input[4] = 1.0;
+        input[8] = -16_777_216.0;
+        input[12] = 1.0;
+        let expected = crate::ops::dot_f32_exact(&input, &[1.0; 64], 64);
+        let scales = 0x3f80u16.to_le_bytes();
+        let biases = 0u16.to_le_bytes();
+        let lora_a = vec![f16::from_f32(1.0).to_bits().to_le_bytes(); 64].concat();
+        let lora_b = f16::from_f32(0.5).to_bits().to_le_bytes();
+        for bits in [4, 8] {
+            let packed = vec![if bits == 4 { 0x11 } else { 1 }; 64 * bits / 8];
+            for lora in [None, Some((lora_a.as_slice(), lora_b.as_slice(), 1, 2.0))] {
+                let kernel =
+                    MlxAffineKernel::new(&packed, &scales, &biases, 64, 1, bits, lora).unwrap();
+                let mut output = [f32::NAN];
+                kernel.forward(&input, &mut output, 64, 1);
+                let expected = if lora.is_some() {
+                    expected * 2.0
+                } else {
+                    expected
+                };
+                assert_eq!(output[0].to_bits(), expected.to_bits(), "bits={bits}");
+            }
+        }
+    }
+
+    #[test]
+    fn affine_rows_match_independent_reference_with_lora_and_partitions() {
+        let n_in = 128;
+        let n_out = 5;
+        let rank = 3;
+        let input: Vec<f32> = (0..n_in)
+            .map(|index| ((index * 17 % 43) as f32 - 21.0) / 7.0)
+            .collect();
+        let scales: Vec<f32> = (0..n_out * 2)
+            .map(|index| (index as f32 - 4.0) / 16.0)
+            .collect();
+        let biases: Vec<f32> = (0..n_out * 2)
+            .map(|index| (3.0 - index as f32) / 8.0)
+            .collect();
+        let scale_bytes: Vec<u8> = scales
+            .iter()
+            .flat_map(|value| ((value.to_bits() >> 16) as u16).to_le_bytes())
+            .collect();
+        let bias_bytes: Vec<u8> = biases
+            .iter()
+            .flat_map(|value| ((value.to_bits() >> 16) as u16).to_le_bytes())
+            .collect();
+        let lora_a: Vec<f32> = (0..rank * n_in)
+            .map(|index| ((index * 7 % 13) as f32 - 6.0) / 32.0)
+            .collect();
+        let lora_b: Vec<f32> = (0..n_out * rank)
+            .map(|index| (index as f32 - 7.0) / 16.0)
+            .collect();
+        let lora_a_bytes: Vec<u8> = lora_a
+            .iter()
+            .flat_map(|&value| f16::from_f32(value).to_bits().to_le_bytes())
+            .collect();
+        let lora_b_bytes: Vec<u8> = lora_b
+            .iter()
+            .flat_map(|&value| f16::from_f32(value).to_bits().to_le_bytes())
+            .collect();
+        let scalar_dot = |left: &[f32], right: &[f32]| {
+            left.iter()
+                .zip(right)
+                .fold(0.0f32, |sum, (&left, &right)| sum + left * right)
+        };
+        let low: Vec<f32> = lora_a
+            .chunks_exact(n_in)
+            .map(|weights| scalar_dot(&input, weights))
+            .collect();
+        for bits in [4, 8] {
+            let codes: Vec<u8> = (0..n_in * n_out)
+                .map(|index| ((index * 37 + 3) % (1 << bits)) as u8)
+                .collect();
+            let packed: Vec<u8> = if bits == 4 {
+                codes
+                    .chunks_exact(2)
+                    .map(|pair| pair[0] | pair[1] << 4)
+                    .collect()
+            } else {
+                codes.clone()
+            };
+            let weights: Vec<f32> = codes
+                .iter()
+                .enumerate()
+                .map(|(index, &code)| scales[index / 64] * f32::from(code) + biases[index / 64])
+                .collect();
+            let kernel = MlxAffineKernel::new(
+                &packed,
+                &scale_bytes,
+                &bias_bytes,
+                n_in,
+                n_out,
+                bits,
+                Some((&lora_a_bytes, &lora_b_bytes, rank, 0.75)),
+            )
+            .unwrap();
+            for row in 0..n_out {
+                let mut embedding = vec![f32::NAN; n_in];
+                kernel.embedding_lookup(row as u32, n_in, &mut embedding);
+                assert_eq!(embedding, weights[row * n_in..(row + 1) * n_in]);
+            }
+            let expected: Vec<f32> = weights
+                .chunks_exact(n_in)
+                .enumerate()
+                .map(|(row, weights)| {
+                    scalar_dot(&input, weights)
+                        + 0.75 * scalar_dot(&low, &lora_b[row * rank..(row + 1) * rank])
+                })
+                .collect();
+            for worker in 0..8 {
+                let mut output = vec![f32::NAN; n_out];
+                kernel.forward_prepared(
+                    &input,
+                    &[],
+                    &[],
+                    None,
+                    &mut output,
+                    n_in,
+                    n_out,
+                    worker,
+                    8,
+                );
+                for (row, &value) in output.iter().enumerate() {
+                    if row != worker {
+                        assert!(value.is_nan(), "worker {worker} overwrote row {row}");
+                    } else if crate::ops::scalar_mode() {
+                        assert_eq!(value.to_bits(), expected[row].to_bits());
+                    } else {
+                        assert!(
+                            (value - expected[row]).abs() <= 2e-5 * expected[row].abs().max(1.0),
+                            "bits={bits}, row={row}: {value} != {}",
+                            expected[row]
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn affine4_and_lora_preserve_scalar_math() {
