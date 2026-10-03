@@ -66,7 +66,13 @@ fn run_jev_decision_data_with_image(
     }
 
     match &*arch {
-        "qwen3" | "qwen3vl" | "qwen3vlmoe" => qwen3::run_jev_decision_qwen3(
+        // `qwen2` covers both Qwen2 (base, ChatML-style since Qwen2.5) and
+        // Qwen2.5-Instruct — both surface `<|im_start|>`/`<|im_end|>` markers
+        // in the tokenizer, so the Qwen3 ChatML scorer handles them. Qwen1 /
+        // Qwen1.5 use a different newline format and are not in scope; if a
+        // user opens such a GGUF with `--jev`, the dispatch will still reach
+        // this branch and the special-token lookup will fail loudly.
+        "qwen2" | "qwen3" | "qwen3vl" | "qwen3vlmoe" => qwen3::run_jev_decision_qwen3(
             source.clone(),
             context,
             &prepared,

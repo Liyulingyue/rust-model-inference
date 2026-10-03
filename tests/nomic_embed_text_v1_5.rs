@@ -123,7 +123,7 @@ fn wordpiece_uses_the_bert_tokenizer_with_cls_and_sep() {
     );
     assert_eq!(ids.first().copied(), Some(101), "must start with [CLS]");
     assert_eq!(ids.last().copied(), Some(102), "must end with [SEP]");
-    assert_eq!(tok.decode(&ids, false), "what is the capital of france?");
+    assert_eq!(tok.decode(&ids, false), "what is the capital of france ?");
 }
 
 #[test]

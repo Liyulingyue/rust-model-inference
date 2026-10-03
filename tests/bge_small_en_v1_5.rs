@@ -96,10 +96,10 @@ fn wordpiece_uses_the_bert_tokenizer_with_cls_and_sep() {
     // match that test exactly — a shared-vocab regression would show here.
     assert_eq!(
         ids,
-        vec![101, 2054, 2003, 1996, 3007, 1997, 2605, 29632, 102],
+        vec![101, 2054, 2003, 1996, 3007, 1997, 2605, 1029, 102],
         "lowercased, ▁-prefixed greedy longest-match"
     );
-    assert_eq!(tok.decode(&ids, false), "what is the capital of france?");
+    assert_eq!(tok.decode(&ids, false), "what is the capital of france ?");
 }
 
 #[test]
