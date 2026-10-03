@@ -1849,8 +1849,22 @@ mod tests {
             ops.contains(vk::SubgroupFeatureFlags::ARITHMETIC) && subgroup.subgroup_size >= 8
         );
         // Core subgroup ops stop at ARITHMETIC: there is no DOT, so the portable route
-        // to a matrix instruction is closed. NVIDIA's own matrix path is the only
-        // remaining way onto the tensor cores, and it is not in the core feature set.
+        // to a matrix instruction is closed. Cooperative matrix is the only way left,
+        // and the device does advertise it.
+        //
+        // It is still not reachable from here. The shader build is GLSL through
+        // glslang, and glslang 16.0.0 does not implement GL_KHR_cooperative_matrix:
+        // `layout(cooperative_matrix)` is an unrecognised layout qualifier and there
+        // is no cooperative_matrix type, so a shader here cannot be written in it.
+        // Getting there means hand-assembling OpCooperativeMatrixMulAddKHR with its
+        // type and scope decorations, and teaching the build to accept SPIR-V that
+        // no .comp produced.
+        //
+        // That is the ceiling for F16 on this machine. The Q8_0 kernel gets 4 to 8 MACs
+        // per instruction from dotPacked4x8EXT while scalar FFMA gets one, so F16 is
+        // instruction-bound rather than bandwidth-bound, and the wins left for it are
+        // the ones that delete instructions -- native unpackHalf2x16, packed shared
+        // staging -- not ones that add tensor cores.
         let extensions = unsafe { instance.enumerate_device_extension_properties(physical) }
             .map(|list| {
                 list.iter()
