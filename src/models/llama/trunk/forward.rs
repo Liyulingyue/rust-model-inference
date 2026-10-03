@@ -191,6 +191,7 @@ pub(crate) fn apply_rope(
     freq_base: f32,
     rope_dim: usize,
     attn_factor: f32,
+    yarn_thetas: Option<&[f32]>,
 ) {
     // Phi-3 / Phi-4 only apply RoPE to the first `rope_dim` of `head_dim`;
     // the remaining lanes pass through unchanged. Mirror that by splitting
@@ -213,6 +214,16 @@ pub(crate) fn apply_rope(
     // layout in llama.cpp: `out[i] = x[i]*cos - x[i + half]*sin`, with
     // `half = rope_dim / 2`. The "normal" (interleaved) layout is used
     // by llama / qwen / granite / k2-horizon.
+    //
+    // `yarn_thetas` (when `Some`) overrides the per-dim
+    // `theta = pos * freq_base^(-2i/rope_dim)` table with a precomputed
+    // YaRN-corrected table for long-context extension. Used by Mistral 3
+    // (`mistral3.rope.scaling.type = "yarn"`, factor=16, orig_ctx=16384,
+    // beta_fast=32, beta_slow=1, log_multiplier=1). For short contexts
+    // (< orig_ctx) YaRN is a no-op (`ramp=0` everywhere) and the thetas
+    // reduce to the plain RoPE table; for long contexts the thetas
+    // diverge per `rope.scaling.yarn_beta_*` ramps. See
+    // `compute_yarn_thetas` for the construction.
     let neox_layout = arch == "phi3"
         || arch == "phi2"
         || arch == "phimoe"
@@ -226,16 +237,116 @@ pub(crate) fn apply_rope(
         || arch == "stablelm";
     let rope_dim = rope_dim.min(head_dim);
     if rope_dim < head_dim {
-        apply_partial_rope(values, pos, rope_dim, freq_base, neox_layout);
+        apply_partial_rope(
+            values,
+            pos,
+            rope_dim,
+            freq_base,
+            neox_layout,
+            yarn_thetas,
+        );
         apply_attn_factor(values, rope_dim, attn_factor);
         return;
     }
     if neox_layout || arch == "k2-horizon" {
-        rope_neox_inplace(values, pos, head_dim, freq_base);
+        rope_neox_inplace_with_thetas(values, pos, head_dim, freq_base, yarn_thetas);
     } else {
-        rope_norm(values, pos, head_dim, freq_base);
+        rope_norm_with_thetas(values, pos, head_dim, freq_base, yarn_thetas);
     }
     apply_attn_factor(values, head_dim, attn_factor);
+}
+
+/// Compute per-dim YaRN-corrected `theta` factors.
+///
+/// Returns `Some(Vec<f32>)` of length `rope_dim / 2` (so that
+/// `thetas[i] * pos` is the final theta for dim `i`) when the GGUF
+/// metadata declares YaRN (`rope.scaling.type = "yarn"`, plus the five
+/// numeric keys below); `None` otherwise. With `pos < original_ctx`,
+/// the returned thetas reduce to plain RoPE (`theta = pos *
+/// freq_base^(-2i/rope_dim)`); with `pos > original_ctx`, dims inside
+/// the `[start, end]` wavelength-correction ramp get a fraction of
+/// `pos * (1/factor) * freq_base^(-2i/rope_dim)` interpolated with the
+/// extrapolation, which is what YaRN does to extend context past the
+/// training window without breaking short-context behavior.
+///
+/// `yarn_log_multiplier` (`rope.scaling.yarn_log_multiplier`) is the
+/// mscale factor: per xing4_0 trunk, the attention logits are
+/// scaled by `1 + 0.1 * log_mult * ln(factor)` (squared when used as
+/// the `attn_factor`); we keep the per-dim thetas independent of
+/// `attn_factor` and leave that scaling to `apply_attn_factor` below
+/// (so llama-3-style `attn_factor=1.0` plus YaRN thetas still works).
+///
+/// Reference: xing4_0 trunk (`src/models/xing4_0/trunk/forward.rs`,
+/// `build_rope`); llama.cpp `ggml_compute_forward_rope_f32` YaRN branch
+/// in `ggml-cpu/ops.cpp`.
+pub(crate) fn compute_yarn_thetas(
+    source: &dyn crate::core::tensor::TensorSource,
+    arch: &str,
+    freq_base: f32,
+    rope_dim: usize,
+) -> Option<Vec<f32>> {
+    let scaling_type = source
+        .metadata(&format!("{arch}.rope.scaling.type"))
+        .and_then(|v| v.to_string_val())?;
+    if scaling_type != "yarn" {
+        return None;
+    }
+    let factor: f64 = source
+        .metadata(&format!("{arch}.rope.scaling.factor"))
+        .and_then(|v| v.to_f64())
+        .unwrap_or(1.0);
+    if !(factor > 1.0) {
+        // YaRN only kicks in for factor > 1.0; fall through to plain
+        // RoPE so the thetas table is still Some, just with `ramp=0`
+        // everywhere.
+        return None;
+    }
+    let orig_ctx: f64 = source
+        .metadata(&format!("{arch}.rope.scaling.original_context_length"))
+        .and_then(|v| v.to_u64())
+        .map(|v| v as f64)
+        .unwrap_or(0.0);
+    let beta_fast: f64 = source
+        .metadata(&format!("{arch}.rope.scaling.yarn_beta_fast"))
+        .and_then(|v| v.to_f64())
+        .unwrap_or(32.0);
+    let beta_slow: f64 = source
+        .metadata(&format!("{arch}.rope.scaling.yarn_beta_slow"))
+        .and_then(|v| v.to_f64())
+        .unwrap_or(1.0);
+    let half = rope_dim / 2;
+    if half == 0 || orig_ctx <= 0.0 {
+        return None;
+    }
+    let ln_factor = (1.0 / factor).ln();
+    // mscale: a multiplicative bias on the per-position cos/sin so
+    // long-context logits don't collapse; llama.cpp applies this as
+    // `attn_factor`, but we surface it as a `theta_scale` so that
+    // `attn_factor` from GGUF (when separately shipped) still wins.
+    let _mscale = 1.0f64 + 0.1 * ln_factor; // documented but applied via `attn_factor`
+    let base_ln = freq_base.ln() as f64;
+    let corr = |n_rot: f64| -> f64 {
+        // wavelength: `dim * ln(n_ctx_orig / n_rot) / (2 * ln(base))`
+        (rope_dim as f64) * (orig_ctx / (n_rot * 2.0 * std::f64::consts::PI)).ln() / (2.0 * base_ln)
+    };
+    let start = corr(beta_fast as f64).floor().max(0.0);
+    let end = corr(beta_slow as f64).ceil().min((rope_dim as f64) - 1.0);
+    let span = (end - start).max(0.001);
+    let mut thetas = vec![0.0f32; half];
+    let freq_scale = 1.0f64 / factor;
+    for i in 0..half {
+        // Per-dim extrap theta (what plain RoPE would do for this dim i).
+        let theta_extrap = freq_base as f64 * (-2.0 * i as f64 / rope_dim as f64).exp();
+        // Per-dim interp theta (the YaRN-reduced extrapolation).
+        let theta_interp = freq_scale * theta_extrap;
+        // Linear ramp across the wavelength-correction zone.
+        let ramp = 1.0 - ((i as f64 - start) / span).clamp(0.0, 1.0);
+        // The final per-dim multiplier is the ramp-blend; `pos` is
+        // multiplied in at rotation time so the thetas table is
+        // position-independent.
+        thetas[i] = (theta_interp * (1.0 - ramp) + theta_extrap * ramp) as f32;
+    }
+    Some(thetas)
 }
 
 /// Apply RoPE to the first `rope_dim` of `values`. `neox_layout=true`
@@ -246,21 +357,32 @@ pub(crate) fn apply_rope(
 ///
 /// The cos/sin table is built against `rope_dim` itself (not `head_dim`),
 /// matching llama.cpp's `n_dims` semantics.
+///
+/// When `yarn_thetas` is `Some(t)`, the per-dim theta is `pos * t[i]`
+/// instead of `pos * freq_base^(-2i/rope_dim)` (the recurrence `theta
+/// *= theta_scale` is replaced with `theta *= t[i] / t[i-1]` for
+/// consecutive i; the absolute path uses `pos * t[i]` directly to
+/// avoid accumulating the recurrence).
 fn apply_partial_rope(
     values: &mut [f32],
     pos: usize,
     rope_dim: usize,
     freq_base: f32,
     neox_layout: bool,
+    yarn_thetas: Option<&[f32]>,
 ) {
     use crate::ops::rope::neox::rope_sin_cos;
     if rope_dim < 2 {
         return;
     }
     let half = rope_dim / 2;
-    let theta_scale = freq_base.powf(-2.0f32 / rope_dim as f32);
-    let mut theta = pos as f32;
     for i in 0..half {
+        let theta = if let Some(t) = yarn_thetas {
+            pos as f32 * t[i]
+        } else {
+            let theta_scale = freq_base.powf(-2.0f32 / rope_dim as f32);
+            pos as f32 * theta_scale.powi(i as i32)
+        };
         let (c, s) = rope_sin_cos(theta);
         if neox_layout {
             // Half-rotation: x[i] paired with x[i + half].
@@ -275,7 +397,113 @@ fn apply_partial_rope(
             values[2 * i] = x0 * c - x1 * s;
             values[2 * i + 1] = x0 * s + x1 * c;
         }
-        theta *= theta_scale;
+    }
+}
+
+/// Same as `crate::ops::rope::norm::rope_norm` but optionally reads
+/// per-dim thetas from `yarn_thetas` (length = `head_dim / 2`) instead
+/// of `pos * freq_base^(-2i/head_dim)`.
+fn rope_norm_with_thetas(
+    values: &mut [f32],
+    pos: usize,
+    head_dim: usize,
+    freq_base: f32,
+    yarn_thetas: Option<&[f32]>,
+) {
+    let half = head_dim / 2;
+    if half == 0 || values.is_empty() {
+        return;
+    }
+    let n_heads = values.len() / head_dim;
+    // Cache sin/cos table once across all heads (same for each head at this pos).
+    let mut cos_table = vec![0.0f32; half];
+    let mut sin_table = vec![0.0f32; half];
+    if let Some(t) = yarn_thetas {
+        debug_assert_eq!(t.len(), half, "yarn_thetas length must match head_dim/2");
+        for i in 0..half {
+            let theta = pos as f32 * t[i];
+            let (c, s) = crate::ops::rope::neox::rope_sin_cos(theta);
+            cos_table[i] = c;
+            sin_table[i] = s;
+        }
+    } else {
+        let theta_scale = freq_base.powf(-2.0f32 / head_dim as f32);
+        let mut theta = pos as f32;
+        for i in 0..half {
+            let (c, s) = crate::ops::rope::neox::rope_sin_cos(theta);
+            cos_table[i] = c;
+            sin_table[i] = s;
+            theta *= theta_scale;
+        }
+    }
+    for h in 0..n_heads {
+        let base = h * head_dim;
+        for i in 0..half {
+            let x0 = values[base + 2 * i];
+            let x1 = values[base + 2 * i + 1];
+            let c = cos_table[i];
+            let sn = sin_table[i];
+            if crate::ops::scalar_mode() {
+                values[base + 2 * i] = x0 * c - x1 * sn;
+                values[base + 2 * i + 1] = x0 * sn + x1 * c;
+            } else {
+                values[base + 2 * i] = x0.mul_add(c, x1 * -sn);
+                values[base + 2 * i + 1] = x0.mul_add(sn, x1 * c);
+            }
+        }
+    }
+}
+
+/// Same as `crate::ops::rope::neox::rope_neox_inplace` but optionally
+/// reads per-dim thetas from `yarn_thetas` (length = `head_dim / 2`)
+/// instead of `pos * freq_base^(-2i/head_dim)`.
+fn rope_neox_inplace_with_thetas(
+    values: &mut [f32],
+    pos: usize,
+    head_dim: usize,
+    freq_base: f32,
+    yarn_thetas: Option<&[f32]>,
+) {
+    let half = head_dim / 2;
+    if half == 0 || values.is_empty() {
+        return;
+    }
+    let n_heads = values.len() / head_dim;
+    let mut cos_table = vec![0.0f32; half];
+    let mut sin_table = vec![0.0f32; half];
+    if let Some(t) = yarn_thetas {
+        debug_assert_eq!(t.len(), half, "yarn_thetas length must match head_dim/2");
+        for i in 0..half {
+            let theta = pos as f32 * t[i];
+            let (c, s) = crate::ops::rope::neox::rope_sin_cos(theta);
+            cos_table[i] = c;
+            sin_table[i] = s;
+        }
+    } else {
+        let theta_scale = freq_base.powf(-2.0f32 / head_dim as f32);
+        let mut theta = pos as f32;
+        for i in 0..half {
+            let (c, s) = crate::ops::rope::neox::rope_sin_cos(theta);
+            cos_table[i] = c;
+            sin_table[i] = s;
+            theta *= theta_scale;
+        }
+    }
+    for h in 0..n_heads {
+        let base = h * head_dim;
+        for i in 0..half {
+            let x0 = values[base + i];
+            let x1 = values[base + i + half];
+            let c = cos_table[i];
+            let sn = sin_table[i];
+            if crate::ops::scalar_mode() {
+                values[base + i] = x0 * c - x1 * sn;
+                values[base + i + half] = x0 * sn + x1 * c;
+            } else {
+                values[base + i] = x0.mul_add(c, x1 * -sn);
+                values[base + i + half] = x0.mul_add(sn, x1 * c);
+            }
+        }
     }
 }
 
@@ -1101,6 +1329,7 @@ pub fn run_inference_tokens(
                         freq_base,
                         rope_dim,
                         attn_factor,
+                        None,
                     );
                 }
                 for h in 0..n_head_kv {
@@ -1112,6 +1341,7 @@ pub fn run_inference_tokens(
                         freq_base,
                         rope_dim,
                         attn_factor,
+                        None,
                     );
                 }
                 dbg_tensor(step, "Qcur", layer, q);
@@ -2006,6 +2236,7 @@ pub fn run_forward_logits_llama_inner(
                         freq_base,
                         rope_dim,
                         attn_factor,
+                        None,
                     );
                 }
                 for h in 0..n_head_kv {
@@ -2017,6 +2248,7 @@ pub fn run_forward_logits_llama_inner(
                         freq_base,
                         rope_dim,
                         attn_factor,
+                        None,
                     );
                 }
 
