@@ -562,16 +562,14 @@ pub fn run_jev_grouped_decision_data(
             false,
         )?,
         "llama" | "k2-horizon" | "granite" | "nanbeige" | "qwen2_2" | "phi3" | "glm4"
-        | "mistral3" => {
-            llama::run_jev_grouped_llama(
-                source.clone(),
-                context,
-                &prepared,
-                n_threads_arg,
-                prefill_batch_size,
-                false,
-            )?
-        }
+        | "mistral3" => llama::run_jev_grouped_llama(
+            source.clone(),
+            context,
+            &prepared,
+            n_threads_arg,
+            prefill_batch_size,
+            false,
+        )?,
         "gemma4" => gemma4::run_jev_grouped_gemma4(
             source.clone(),
             context,

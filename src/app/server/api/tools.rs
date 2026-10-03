@@ -150,8 +150,7 @@ pub fn build_prompt(
     }
     let llama_family = matches!(
         arch,
-        "llama" | "nanbeige" | "exaone" | "k2-horizon" | "granite" | "phi3" | "glm4"
-            | "mistral3"
+        "llama" | "nanbeige" | "exaone" | "k2-horizon" | "granite" | "phi3" | "glm4" | "mistral3"
     );
     if llama_family {
         if !tools.is_empty() {
