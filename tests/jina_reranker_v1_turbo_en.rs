@@ -24,16 +24,27 @@
 //!    reached through the embedding path).
 //! 4. Embedding invariants: 384 dims, L2-normalized, no NaN/Inf.
 //!
+//! ## What's covered here
+//!
+//! 1. The contract pin: `arch = jina-bert-v2`, `tokenizer.ggml.model = gpt2`,
+//!    `pre = jina-v1-en`, eps = 1e-12, 6 layers, 384 dims, 12 heads.
+//! 2. The third tokenizer/arch mismatch in this family:
+//!    `arch = jina-bert-v2` but `tokenizer.ggml.model = gpt2` (BPE), unlike
+//!    `jina-embeddings-v2-base-en` (which is `arch = jina-bert-v2` +
+//!    `tokenizer.ggml.model = bert` → WordPiece). `0897baa`'s
+//!    tokenizer-by-model dispatch handles it, but jina-v1-en is a new
+//!    `tokenizer.ggml.pre` that requires explicit handling
+//!    (`tokenizer/mod.rs:413`); without that, `BPETokenizer::from_gguf_metadata`
+//!    rejects the file.
+//! 3. The 102-tensor inventory including the unique-to-this-GGUF `cls.weight`
+//!    + `cls.bias` classification head.
+//! 4. Embedding invariants: 384 dims, L2-normalized, no NaN/Inf.
+//! 5. Reranker ranking: query + 4 docs, expect most_relevant=index 2
+//!    (ML doc), least_relevant=index 3 (Paris) — mirroring
+//!    `references/llama.cpp/tools/server/tests/unit/test_rerank.py::test_rerank`.
+//!
 //! ## What is **not** verified here (deferred)
 //!
-//! - **Reranker scoring**. The reranker takes `query [SEP] document` and
-//!   projects the pooled embedding through `cls.weight` + `cls.bias` to a
-//!   single logit. The embedding path (`compute_embedding`) does not exercise
-//!   `cls.weight` / `cls.bias` — they're loaded but never used. To actually
-//!   verify cross-encoder ranking we'd need either (a) a CLI flag like
-//!   `--rerank` that pipes `(query, document)` through the head, or (b) a
-//!   `compute_rerank_score` function and a new test that asserts score
-//!   ordering. Both are larger than this commit.
 //! - **Bit-level oracle alignment**. The "TODO: BERT 家族位级 oracle 对齐"
 //!   block in `docs/develop/MODEL_ADAPT_PLAN.md` is parked (per its own
 //!   warning: "暂缓, 勿与他方核对工作并行").
@@ -41,11 +52,10 @@
 //! Because the reranker model is not designed to produce semantically
 //! meaningful *standalone* embeddings (cross-encoders are optimized for the
 //! CLS head, not raw vector geometry), we deliberately do NOT assert
-//! "relevant doc above unrelated doc" on the embedding. Per
-//! `docs/develop/MODEL_ADAPT_PLAN.md` §"jina-reranker-v1-turbo-en" this PR
-//! only verifies "加载 + 输出合理 embedding", not reranker ranking.
+//! "relevant doc above unrelated doc" on the embedding. The rerank test
+//! covers that ground instead.
 
-use rust_model_inference::models::bert_family::compute_embedding;
+use rust_model_inference::models::bert_family::{compute_embedding, compute_rerank_score};
 use rust_model_inference::GGUFLoader;
 
 fn loader() -> Option<GGUFLoader> {
@@ -306,5 +316,49 @@ fn overlong_prompt_is_rejected_with_context_length_diagnostic() {
     assert!(
         err.contains("8192"),
         "error should pin the trained context, got: {err}"
+    );
+}
+
+#[test]
+fn rerank_scores_put_ml_doc_above_unrelated_paris_doc() {
+    let Some(loader) = loader() else {
+        return;
+    };
+
+    // Borrowed verbatim from
+    // `references/llama.cpp/tools/server/tests/unit/test_rerank.py::test_rerank`:
+    // query "Machine learning is" + 4 docs, expected most_relevant=index 2
+    // (ML doc), least_relevant=index 3 (Paris). The rerank sequence we build
+    // (`[BOS] query [EOS] [SEP] doc [EOS]`) matches
+    // `references/llama.cpp/tools/server/server-common.cpp:1817-1830`, and
+    // the CLS projection goes through `cls.weight [384]` + `cls.bias [1]`.
+    let query = "Machine learning is";
+    let docs = vec![
+        "A machine is a physical system that uses power to apply forces and control movement to perform an action.".to_string(),
+        "Learning is the process of acquiring new understanding, knowledge, behaviors, skills, values, attitudes, and preferences.".to_string(),
+        "Machine learning is a field of study in artificial intelligence concerned with the development and study of statistical algorithms that can learn from data and generalize to unseen data.".to_string(),
+        "Paris, capitale de la France, est une grande ville europeenne et un centre mondial de l'art, de la mode, de la gastronomie et de la culture.".to_string(),
+    ];
+    let scores = compute_rerank_score(&loader, query, &docs, 4).expect("rerank");
+    assert_eq!(scores.len(), 4, "one score per doc");
+    for (i, s) in scores.iter().enumerate() {
+        assert!(s.is_finite(), "score {i} not finite: {s}");
+    }
+    let mut indexed: Vec<(usize, f32)> = scores.iter().copied().enumerate().collect();
+    indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    let top = indexed[0].0;
+    let bottom = indexed[3].0;
+    assert_eq!(
+        top, 2,
+        "ML doc (index 2) must be ranked top, got scores={scores:?}"
+    );
+    assert_eq!(
+        bottom, 3,
+        "Paris doc (index 3) must be ranked last, got scores={scores:?}"
+    );
+    // Sanity: top beats bottom (raw logit scale, sigmoid midpoint = 0).
+    assert!(
+        indexed[0].1 > indexed[3].1,
+        "top must beat bottom, got scores={scores:?}"
     );
 }

@@ -242,9 +242,24 @@ pub struct BertWeights<'a> {
     /// Number of experts used per token (`LLM_KV_EXPERT_USED_COUNT`,
     /// top-k for the router).
     pub expert_used_count: usize,
-    /// `expert_weights_scale` (`LLM_KV_EXPERT_WEIGHTS_SCALE`); default 1.0.
+    /// `expert_weights_scale` (`LLM_KV_EXPERT_WEIGHTS_SCORE`); default 1.0.
     pub expert_weights_scale: f32,
     pub layers: Vec<BertLayerWeights<'a>>,
+    /// `cls.weight` [n_embd] — cross-encoder rerank linear head.
+    /// `None` when the GGUF doesn't carry one (the default for the bert
+    /// encoder family; only rerank packs include it). When `Some`, the
+    /// model's `cls.bias` [1] scalar is also loaded under [`Self::cls_bias`].
+    pub cls_weight: Option<Vec<f32>>,
+    /// `cls.bias` [1] — scalar bias on the cls projection.
+    pub cls_bias: Option<Vec<f32>>,
+}
+
+impl BertWeights<'_> {
+    /// `true` when the GGUF carries a `cls.weight` + `cls.bias` rerank head.
+    /// Use this to gate `--rerank` / `/v1/rerank` entry points.
+    pub fn is_rerank(&self) -> bool {
+        self.cls_weight.is_some() && self.cls_bias.is_some()
+    }
 }
 
 /// Decode an F32 row at `index` from a plain (non-quantized) tensor.
@@ -653,5 +668,11 @@ pub fn load_weights<S: TensorSource + ?Sized>(
         expert_used_count,
         expert_weights_scale,
         layers,
+        // cls.* are rerank-only tensors — loaded best-effort. The reranker
+        // GGUF carries `cls.weight [n_embd]` + `cls.bias [1]` as plain F32.
+        // The plain bert/jina-bert-v2 embedding GGUF omits both; we land at
+        // `None` and `compute_rerank_score` reports "not a rerank model".
+        cls_weight: optional_f32_tensor(source, "cls.weight", n_embd),
+        cls_bias: optional_f32_tensor(source, "cls.bias", 1),
     }
 }

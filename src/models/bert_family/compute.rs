@@ -134,6 +134,74 @@ fn read_meta(source: &dyn TensorSource) -> Result<BertConfig, String> {
     })
 }
 
+/// Build the per-token hidden states for a tokenized input: token embedding
+/// (token + optional segment row 0 for jina + optional absolute position for
+/// bert), then the embedding LayerNorm. `hidden` is sized `[n_tokens * n_embd]`
+/// and fully populated on return. Shared by [`run_embedding_tokens`] and
+/// [`compute_rerank_score`].
+fn populate_embeddings(
+    cfg: &BertConfig,
+    weights: &BertWeights<'_>,
+    token_ids: &[u32],
+    hidden: &mut [f32],
+) -> Result<(), String> {
+    let n_embd = cfg.n_embd;
+    debug_assert_eq!(hidden.len(), token_ids.len() * n_embd);
+
+    // ---- embeddings: token (+ segment row 0 for jina) (+ abs pos for bert)
+    for (token, row) in token_ids.iter().zip(hidden.chunks_exact_mut(n_embd)) {
+        embedding_lookup(
+            weights.token_embd,
+            *token,
+            n_embd,
+            weights.token_embd_ggml_type,
+            row,
+        );
+    }
+    if let Some((bytes, _)) = weights.token_types {
+        // `bert.cpp:83-86` — token types are hardcoded to 0 ("sentence A"),
+        // so only row 0 of `token_types` is ever added. `token_types` is a
+        // plain F32 [n_embd, n_token_types] table, not a quantized
+        // embedding matrix, so decode the row directly.
+        let segment = super::weights::decode_f32_row_public(bytes, n_embd)
+            .ok_or("token_types.weight is not decodable as f32")?;
+        for row in hidden.chunks_exact_mut(n_embd) {
+            for (slot, value) in row.iter_mut().zip(&segment) {
+                *slot += *value;
+            }
+        }
+    }
+    if let Some((bytes, _)) = weights.pos_embd {
+        // `bert.cpp:87-89` — absolute learned position embeddings, `bert` only.
+        // `ggml_get_rows(pos_embd, inp_pos)` indexes the table by **position**,
+        // so token `t` reads row `t`, not row 0. The row offset must account
+        // for the element width, so it is done in the weights helper rather
+        // than here. Not covered by a test: no `bert`-arch GGUF is available
+        // locally to verify against.
+        for (t, row) in hidden.chunks_exact_mut(n_embd).enumerate() {
+            let position = super::weights::decode_f32_row_at_public(bytes, t, n_embd)
+                .ok_or("pos_embd.weight is not decodable as f32")?;
+            for (slot, value) in row.iter_mut().zip(&position) {
+                *slot += *value;
+            }
+        }
+    }
+
+    // ---- embedding LayerNorm (`bert.cpp:92`, `LLM_NORM` with bias)
+    let mut normed = vec![0.0f32; n_embd];
+    for row in hidden.chunks_exact_mut(n_embd) {
+        layer_norm(
+            row,
+            &weights.tok_norm.weight,
+            &weights.tok_norm.bias,
+            cfg.eps,
+            &mut normed,
+        );
+        row.copy_from_slice(&normed);
+    }
+    Ok(())
+}
+
 /// Per-head ALiBi slope, exactly as `soft_max_ext` computes it
 /// (`ggml-cpu/ops.cpp:8944`):
 ///
@@ -397,58 +465,127 @@ pub fn run_embedding_tokens(
 
     let n_tokens = token_ids.len();
     let mut hidden = vec![0.0f32; n_tokens * n_embd];
+    populate_embeddings(&cfg, &weights, token_ids, &mut hidden)?;
 
-    // ---- embeddings: token (+ segment row 0 for jina) (+ abs pos for bert)
-    for (token, row) in token_ids.iter().zip(hidden.chunks_exact_mut(n_embd)) {
-        embedding_lookup(
-            weights.token_embd,
-            *token,
-            n_embd,
-            weights.token_embd_ggml_type,
-            row,
-        );
-    }
-    if let Some((bytes, _)) = weights.token_types {
-        // `bert.cpp:83-86` — token types are hardcoded to 0 ("sentence A"),
-        // so only row 0 of `token_types` is ever added. `token_types` is a
-        // plain F32 [n_embd, n_token_types] table, not a quantized
-        // embedding matrix, so decode the row directly.
-        let segment = super::weights::decode_f32_row_public(bytes, n_embd)
-            .ok_or("token_types.weight is not decodable as f32")?;
-        for row in hidden.chunks_exact_mut(n_embd) {
-            for (slot, value) in row.iter_mut().zip(&segment) {
-                *slot += *value;
+    // Forward loop (per-layer transformer block + residual) lives in
+    // `forward_bert_layers` so rerank and embedding share one body.
+    forward_bert_layers(
+        &cfg,
+        &weights,
+        pool.clone(),
+        &slopes,
+        n_embd_q,
+        n_embd_gqa,
+        n_head,
+        head_k,
+        head_v,
+        score_scale,
+        n_ff,
+        group_size,
+        n_layer,
+        n_tokens,
+        &mut hidden,
+    )?;
+
+    // ---- pooling, then L2 (`common.cpp:1893`, `embd_normalize = 2`)
+    let mut pooled = vec![0.0f32; n_embd];
+    match cfg.pooling_type {
+        1 => {
+            // Mean over every token, specials included.
+            // `llm_graph_input_mean::set_input` (`llama-graph.cpp:250-278`)
+            // gives each token weight 1/n_tokens.
+            for row in hidden.chunks_exact(n_embd) {
+                for (slot, value) in pooled.iter_mut().zip(row) {
+                    *slot += *value;
+                }
+            }
+            let inv_tokens = 1.0f32 / n_tokens as f32;
+            for value in pooled.iter_mut() {
+                *value *= inv_tokens;
             }
         }
-    }
-    if let Some((bytes, _)) = weights.pos_embd {
-        // `bert.cpp:87-89` — absolute learned position embeddings, `bert` only.
-        // `ggml_get_rows(pos_embd, inp_pos)` indexes the table by **position**,
-        // so token `t` reads row `t`, not row 0. The row offset must account
-        // for the element width, so it is done in the weights helper rather
-        // than here. Not covered by a test: no `bert`-arch GGUF is available
-        // locally to verify against.
-        for (t, row) in hidden.chunks_exact_mut(n_embd).enumerate() {
-            let position = super::weights::decode_f32_row_at_public(bytes, t, n_embd)
-                .ok_or("pos_embd.weight is not decodable as f32")?;
-            for (slot, value) in row.iter_mut().zip(&position) {
-                *slot += *value;
-            }
+        2 => {
+            // CLS: the row of the lowest-position token. `set_input`
+            // (`llama-graph.cpp:303-319`) takes `pos < target_pos`, so for a
+            // single fresh sequence that is row 0, which the WPM tokenizer has
+            // already filled with [CLS].
+            let cls = hidden
+                .chunks_exact(n_embd)
+                .next()
+                .ok_or("CLS pooling found no tokens")?;
+            pooled.copy_from_slice(cls);
         }
+        3 => {
+            // Last token row, equivalent to row `n_tokens - 1` here.
+            let last = hidden
+                .chunks_exact(n_embd)
+                .nth(n_tokens - 1)
+                .ok_or("LAST pooling found no tokens")?;
+            pooled.copy_from_slice(last);
+        }
+        other => return Err(format!("unsupported pooling_type {other}")),
     }
+    l2_normalize(&mut pooled)?;
+    Ok(pooled)
+}
 
-    // ---- embedding LayerNorm (`bert.cpp:92`, `LLM_NORM` with bias)
+/// Per-layer forward loop shared between [`run_embedding_tokens`] and
+/// [`compute_rerank_score`]. Reads `cfg` / `weights` / `slopes` / scratch
+/// buffers, mutates `hidden` in place over `n_layer` BertLayers, returns the
+/// layer-output hidden states in the same buffer.
+///
+/// Allocation strategy mirrors the original embedding forward:
+/// scratch buffers are hoisted out of the per-layer loop to amortize
+/// allocation cost across the whole forward, matching `bert.cpp`'s
+/// `CB` graph caches (`references/llama.cpp/src/models/bert.cpp:88-160`).
+#[allow(clippy::too_many_arguments)]
+fn forward_bert_layers(
+    cfg: &BertConfig,
+    weights: &BertWeights<'_>,
+    pool: Arc<ComputePool>,
+    slopes: &[f32],
+    n_embd_q: usize,
+    n_embd_gqa: usize,
+    n_head: usize,
+    head_k: usize,
+    head_v: usize,
+    score_scale: f32,
+    n_ff: usize,
+    group_size: usize,
+    n_layer: usize,
+    n_tokens: usize,
+    hidden: &mut [f32],
+) -> Result<(), String> {
+    let n_embd = cfg.n_embd;
     let mut normed = vec![0.0f32; n_embd];
-    for row in hidden.chunks_exact_mut(n_embd) {
-        layer_norm(
-            row,
-            &weights.tok_norm.weight,
-            &weights.tok_norm.bias,
-            cfg.eps,
-            &mut normed,
-        );
-        row.copy_from_slice(&normed);
-    }
+    let mut qkv_buf = vec![0.0f32; n_tokens * (n_embd_q + 2 * n_embd_gqa)];
+    // Fused QKV width: Q + K + V concatenated along the output dim.
+    let qkv_width = n_embd_q + 2 * n_embd_gqa;
+    let mut attn_out = vec![0.0f32; n_tokens * n_embd_q];
+    let mut attn_proj = vec![0.0f32; n_tokens * n_embd];
+    let mut gate_buf = vec![0.0f32; n_ff];
+    let mut up_buf = vec![0.0f32; n_ff];
+    let mut down_buf = vec![0.0f32; n_embd];
+    let max_width = n_embd.max(n_ff);
+    let mut q8k_buf = vec![
+        crate::ops::quant::BlockQ8K {
+            d: 0.0,
+            qs: [0i8; 256],
+            bsums: [0i16; 16],
+        };
+        max_width.div_ceil(crate::ops::quant::QK_K)
+    ];
+    let mut q8_buf = vec![0u8; max_width];
+    let mut scale_buf = vec![0.0f32; max_width.div_ceil(32)];
+    // Attention scratch, allocated once for the whole forward. `scores` used to
+    // be allocated inside the `for token { for head {` nest, i.e.
+    // `n_tokens * n_head * n_layer` times — 4608 allocations for a 32-token
+    // bge-m3 prompt — for a buffer that depends on none of the three.
+    let mut scores = vec![0.0f32; n_tokens];
+    // Snapshot of `hidden` at the top of each layer (`bert.cpp:151`'s `inpL`).
+    // Same allocation-once discipline: `hidden.clone()` per layer was
+    // `n_layer` allocations plus copies that are still required either way.
+    let mut residual = vec![0.0f32; n_tokens * n_embd];
 
     let mut qkv_buf = vec![0.0f32; n_tokens * (n_embd_q + 2 * n_embd_gqa)];
     // Fused QKV width: Q + K + V concatenated along the output dim.
@@ -485,7 +622,7 @@ pub fn run_embedding_tokens(
         // again after the FFN (residual re-add, not a pre-norm sandwich). The
         // snapshot itself is still needed every layer; only its allocation
         // moved out of the loop.
-        residual.copy_from_slice(&hidden);
+        residual.copy_from_slice(hidden);
 
         // 1. Q / K / V with biases. Fused `attn_qkv` for nomic-bert, three
         //    separate projections for the others. `bert.cpp:120-133` ropes Q
@@ -892,46 +1029,195 @@ pub fn run_embedding_tokens(
         }
     }
 
-    // ---- pooling, then L2 (`common.cpp:1893`, `embd_normalize = 2`)
-    let mut pooled = vec![0.0f32; n_embd];
-    match cfg.pooling_type {
-        1 => {
-            // Mean over every token, specials included.
-            // `llm_graph_input_mean::set_input` (`llama-graph.cpp:250-278`)
-            // gives each token weight 1/n_tokens.
-            for row in hidden.chunks_exact(n_embd) {
-                for (slot, value) in pooled.iter_mut().zip(row) {
-                    *slot += *value;
-                }
-            }
-            let inv_tokens = 1.0f32 / n_tokens as f32;
-            for value in pooled.iter_mut() {
-                *value *= inv_tokens;
-            }
-        }
-        2 => {
-            // CLS: the row of the lowest-position token. `set_input`
-            // (`llama-graph.cpp:303-319`) takes `pos < target_pos`, so for a
-            // single fresh sequence that is row 0, which the WPM tokenizer has
-            // already filled with [CLS].
-            let cls = hidden
-                .chunks_exact(n_embd)
-                .next()
-                .ok_or("CLS pooling found no tokens")?;
-            pooled.copy_from_slice(cls);
-        }
-        3 => {
-            // Last token row, equivalent to row `n_tokens - 1` here.
-            let last = hidden
-                .chunks_exact(n_embd)
-                .nth(n_tokens - 1)
-                .ok_or("LAST pooling found no tokens")?;
-            pooled.copy_from_slice(last);
-        }
-        other => return Err(format!("unsupported pooling_type {other}")),
+    Ok(())
+}
+
+/// Cross-encoder rerank scoring for a jina-bert-v2 model that carries a
+/// `cls.weight [n_embd]` + `cls.bias [1]` rerank head. Returns a `Vec<f32>`
+/// of single-logit scores in input document order — the linear projection
+/// of the CLS-token row through the head, matching the `jina-bert-v2.cpp`
+/// reranker contract. The score is a raw logit, NOT a probability; callers
+/// can `sigmoid(score)` if they want a `[0, 1]` score.
+pub fn compute_rerank_score(
+    source: &dyn TensorSource,
+    query: &str,
+    documents: &[String],
+    n_threads_arg: usize,
+) -> Result<Vec<f32>, String> {
+    if documents.is_empty() {
+        return Ok(Vec::new());
     }
-    l2_normalize(&mut pooled)?;
-    Ok(pooled)
+    let cfg = read_meta(source)?;
+
+    // SEP / EOS share an id for jina-v1-en (`tokenizer.ggml.seperator_token_id ==
+    // tokenizer.ggml.eos_token_id == 2`), so we read EOS from the GGUF and
+    // double it as SEP for the mid-stream separator. If a future GGUF
+    // decouples them we'll need a separate lookup.
+    let sep_id: u32 = source
+        .metadata("tokenizer.ggml.eos_token_id")
+        .and_then(MetaValue::to_u64)
+        .ok_or("rerank model is missing tokenizer.ggml.eos_token_id")? as u32;
+    let bos_id: u32 = source
+        .metadata("tokenizer.ggml.bos_token_id")
+        .and_then(MetaValue::to_u64)
+        .ok_or("rerank model is missing tokenizer.ggml.bos_token_id")? as u32;
+
+    let (n_embd, n_layer, n_head, n_head_kv) = (cfg.n_embd, cfg.n_layer, cfg.n_head, cfg.n_head_kv);
+    let (head_k, head_v, n_ff) = (cfg.n_embd_head_k, cfg.n_embd_head_v, cfg.n_ff);
+    let n_embd_q = n_head * head_k;
+    let n_embd_gqa = n_head_kv * head_v;
+    let group_size = n_head / n_head_kv;
+    let score_scale = 1.0f32 / (head_k as f32).sqrt();
+
+    let weights: BertWeights<'_> = load_weights(
+        source,
+        cfg.variant,
+        n_layer,
+        n_embd,
+        n_embd_q,
+        n_embd_gqa,
+        head_k,
+        n_ff,
+    );
+    let cls_weight = weights
+        .cls_weight
+        .as_ref()
+        .ok_or("rerank model is missing cls.weight")?;
+    let cls_bias = weights
+        .cls_bias
+        .as_ref()
+        .ok_or("rerank model is missing cls.bias")?;
+    if cls_weight.len() != n_embd {
+        return Err(format!(
+            "cls.weight has length {} but n_embd={} — rerank head shape mismatch",
+            cls_weight.len(),
+            n_embd
+        ));
+    }
+    let slopes = if cfg.variant.uses_alibi() {
+        alibi_slopes(n_head, MAX_ALIBI_BIAS_JINA_V2)
+    } else {
+        vec![1.0; n_head]
+    };
+
+    let available = std::thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(4);
+    let n_threads = crate::app::resolve_thread_count(n_threads_arg, available);
+    let pool = Arc::new(ComputePool::new(n_threads));
+
+    // Build the per-doc prompt as `[CLS] query [SEP] doc [SEP]`. The jina
+    // tokenizer ships `bos_token_id == cls_token_id == 0` and
+    // `seperator_token_id == eos_token_id == 2`, so `BPETokenizer::encode`
+    // with `add_special = true` produces `[BOS, q_tokens, EOS]` and
+    // `add_special = false` produces the bare piece.
+    let options_special = EncodeOptions {
+        add_special: true,
+        parse_special: true,
+    };
+    let options_plain = EncodeOptions {
+        add_special: false,
+        parse_special: true,
+    };
+
+    let model_kind = source
+        .metadata("tokenizer.ggml.model")
+        .and_then(MetaValue::to_string_val)
+        .unwrap_or_default()
+        .to_string();
+
+    // Tokenize the query once.
+    let query_tokens = if model_kind == "bert" {
+        WPMTokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
+            .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?
+            .encode(query, options_plain)
+    } else {
+        crate::core::tokenizer::load_tokenizer(|k| source.metadata(k).cloned())
+            .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?
+            .encode(query, options_plain)
+    };
+    if query_tokens.is_empty() {
+        return Err("query produced no tokens".into());
+    }
+
+    let mut scores = Vec::with_capacity(documents.len());
+    for (idx, doc) in documents.iter().enumerate() {
+        let doc_tokens = if model_kind == "bert" {
+            WPMTokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
+                .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?
+                .encode(doc, options_plain)
+        } else {
+            crate::core::tokenizer::load_tokenizer(|k| source.metadata(k).cloned())
+                .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?
+                .encode(doc, options_plain)
+        };
+        if doc_tokens.is_empty() {
+            return Err(format!("document {idx} produced no tokens"));
+        }
+        // Rerank sequence matches `server-common.cpp:1817-1830`:
+        //   [BOS] query [EOS] [SEP] doc [EOS]
+        // jina-v1-en has `seperator_token_id == eos_token_id == 2`, so the
+        // mid-stream [SEP] and trailing [EOS] share an id and the sequence
+        // collapses to [BOS, q_tokens, sep_id, doc_tokens, sep_id]. The
+        // BPETokenizer builds this by emitting BOS, the bare query, EOS, an
+        // explicit SEP (= EOS id), the bare doc, and EOS — exactly mirroring
+        // llama.cpp.
+        let mut token_ids: Vec<u32> = Vec::with_capacity(2 + query_tokens.len() + doc_tokens.len());
+        token_ids.push(bos_id);
+        token_ids.extend_from_slice(&query_tokens);
+        token_ids.push(sep_id); // EOS (= SEP) after query
+        token_ids.extend_from_slice(&doc_tokens);
+        token_ids.push(sep_id); // EOS at end
+
+        let n_tokens = token_ids.len();
+        if cfg.n_ctx_train != 0 && n_tokens > cfg.n_ctx_train {
+            return Err(format!(
+                "document {idx} produced {n_tokens} tokens, but this model was trained \
+                 for {} (context_length)",
+                cfg.n_ctx_train
+            ));
+        }
+
+        let n_tokens = token_ids.len();
+        if cfg.n_ctx_train != 0 && n_tokens > cfg.n_ctx_train {
+            return Err(format!(
+                "document {idx} produced {n_tokens} tokens, but this model was trained \
+                 for {} (context_length)",
+                cfg.n_ctx_train
+            ));
+        }
+        let mut hidden = vec![0.0f32; n_tokens * n_embd];
+        populate_embeddings(&cfg, &weights, &token_ids, &mut hidden)?;
+        forward_bert_layers(
+            &cfg,
+            &weights,
+            pool.clone(),
+            &slopes,
+            n_embd_q,
+            n_embd_gqa,
+            n_head,
+            head_k,
+            head_v,
+            score_scale,
+            n_ff,
+            group_size,
+            n_layer,
+            n_tokens,
+            &mut hidden,
+        )?;
+
+        // CLS row (row 0). The CLS token sits at the lowest-position slot
+        // (`llm_graph_input_cls::set_input` reads `inp_pos < target_pos`),
+        // which for a fresh single sequence is row 0.
+        let cls_row = &hidden[..n_embd];
+        let mut dot = 0.0f32;
+        for (a, b) in cls_row.iter().zip(cls_weight.iter()) {
+            dot += a * b;
+        }
+        let score = dot + cls_bias[0];
+        scores.push(score);
+    }
+    Ok(scores)
 }
 
 pub fn print_embedding(pooled: &[f32], output: EmbeddingOutput) {
