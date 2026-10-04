@@ -136,6 +136,23 @@ LFM2 / LFM2.5 / Spark / Nemotron-H / Hunyuan / LFM2-MoE），每个 scorer 实�
 - [ ] **讨论：两套线程调度统一** — ComputePool vs rayon。暂不统一（LLM 热路径不应轻易改动）
 - [ ] **Q8_0 与 Q8_K 量化路径按需量化（消除冗余计算，保留两份 buffer）** — dispatch 按 layer 权重格式，省一次量化 pass
 - [ ] **Qwen3.5：借用权重与 FFN gate/up 输入量化复用的取舍** — 中期重构，不阻塞局部 FFN 优化
+- [ ] **删掉三个纯转发的无参 `new()`** — `CollectSink`（`src/ops/generation_runtime.rs:158`）、
+      `DacState`（`src/models/qwen3/tts/codec/dac.rs:115`）、
+      `Lfm2MoeSampler`（`src/ops/sampling.rs:376`）都是
+      `pub fn new() -> Self { Self::default() }`，而类型本身 `#[derive(Default)]`。
+      同一个零值因此有两个名字，调用点又只用其中一个（`new()` 1/3/2 处，
+      `default()` 0 处），`Default` derive 只是为了给 `new()` 转发而留。
+      `Lfm2MoeSampler` 的动机可见：同族 `LlamaSampler::new(40, 0.95)` 必须带参，
+      于是给无参版本也补了个 `new()` 让两行看起来一致 —— 代价是多一个名字。
+      仓库分工应是 `new(args)` = 真构造函数（可带参、可 `Result`，如 `VulkanContext::new()`），
+      `::default()` = derive-`Default` 类型的零值（`CliOptions` 17 处、
+      `ExportOptions` 16 处均如此），两者不互换。已核实：三者均无
+      `Default::default()` / `..Default::default()` 残留，也没有任何外层结构体
+      依赖它们的 `Default`，故清理是每处 3 行（删 `new()` + 删 derive 里的
+      `Default`）。
+      反向教训见 `docs/develop/OPTIMIZATION.md:215` 记的 `KvFormat::default() = F32`
+      （与 CLI 实际想要的 F16 相反）：**`Default` 的零值不成立时才真该用 `new()`**
+      或干脆不给 `Default`。
 
 ### K-quant multi-row tile（vec_dot_q4k_q8k_avx2 / vec_dot_q6k_q8k_avx2）
 
