@@ -93,14 +93,19 @@ check_hashes() {
 }
 
 check_workgroup_limit() {
-    local shader="$1"
-    spirv-dis "$shader" -o - | awk -v shader="$shader" '
+    local shader="$1" limit=64
+    # Optional DiT attention is gated on both device limits in Vulkan ops;
+    # keep the baseline shaders within the original 64x1x1 requirement.
+    case "${shader##*/}" in
+        attention_scores_tiled.spv) limit=256 ;;
+    esac
+    spirv-dis "$shader" -o - | awk -v shader="$shader" -v limit="$limit" '
         $1 == "OpExecutionMode" && $3 == "LocalSize" {
             found = 1
             invocations = $4 * $5 * $6
-            if (invocations > 64) {
-                printf "%s: workgroup %sx%sx%s requires %s invocations; baseline limit is 64\n", \
-                    shader, $4, $5, $6, invocations > "/dev/stderr"
+            if (invocations > limit || $4 > limit || $5 > 1 || $6 > 1) {
+                printf "%s: workgroup %sx%sx%s requires %s invocations; limit is %sx1x1 (%s invocations)\n", \
+                    shader, $4, $5, $6, invocations, limit, limit > "/dev/stderr"
                 failed = 1
             }
         }

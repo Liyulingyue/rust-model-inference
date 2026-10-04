@@ -72,6 +72,21 @@ const ADALN_MODULATE: usize = 23;
 const Q8_MATMUL_GROUPED_TILED: usize = 24;
 const F16_MATMUL_TILED: usize = 25;
 const ATTENTION_SCORES_TILED: usize = 26;
+
+pub(crate) fn require_tiled_attention(context: &VulkanContext) -> Result<(), VulkanError> {
+    let limits = &context.limits;
+    // attention_scores_tiled.comp uses eight groups of 32 lanes. Its 12 KiB
+    // shared memory fits within the existing Q8 baseline requirement.
+    if limits.max_compute_work_group_invocations < 256
+        || limits.max_compute_work_group_size[0] < 256
+    {
+        return Err(VulkanError::UnsupportedShape(
+            "tiled attention requires 256 workgroup invocations and a 256-wide workgroup".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Per-pipeline dispatch counters, populated only while `RUST_GPU_DISPATCH_TRACE`
 /// is set. Indexed by the `OPERATOR_SHADERS` position, so a new pipeline needs
 /// no extra bookkeeping here.
@@ -820,6 +835,7 @@ impl Drop for BatchedLinearRuntime {
 pub(crate) struct Qwen3Ops<'a> {
     context: &'a VulkanContext,
     arena: GpuBuffer,
+    staging: Option<GpuBuffer>,
     descriptor_pool: vk::DescriptorPool,
     arena_bindings: OperatorBindings,
     pipelines: [vk::Pipeline; OPERATOR_SHADERS.len()],
@@ -839,6 +855,29 @@ impl<'a> Qwen3Ops<'a> {
         context: &'a VulkanContext,
         arena_size: usize,
         descriptor_capacity: usize,
+    ) -> Result<Self, VulkanError> {
+        Self::new_with_arena(context, arena_size, descriptor_capacity, false)
+    }
+
+    /// Discrete GPU arena with explicit transfers; mapped memory on UMA.
+    pub(crate) fn new_device_local_with_size(
+        context: &'a VulkanContext,
+        arena_size: usize,
+        descriptor_capacity: usize,
+    ) -> Result<Self, VulkanError> {
+        if arena_size % 4 != 0 {
+            return Err(VulkanError::UnsupportedShape(
+                "device arena size must be word aligned".into(),
+            ));
+        }
+        Self::new_with_arena(context, arena_size, descriptor_capacity, true)
+    }
+
+    fn new_with_arena(
+        context: &'a VulkanContext,
+        arena_size: usize,
+        descriptor_capacity: usize,
+        device_local: bool,
     ) -> Result<Self, VulkanError> {
         DISPATCH_TRACE_ENABLED.store(
             std::env::var("RUST_GPU_DISPATCH_TRACE").is_ok(),
@@ -878,6 +917,12 @@ impl<'a> Qwen3Ops<'a> {
                     // and `record_weight_matmul_tiled_rows` refuses instead of
                     // recording a dispatch whose semantics it cannot honour.
                     Q8_MATMUL_GROUPED_SHADER
+                } else if index == ATTENTION_SCORES_TILED
+                    && require_tiled_attention(context).is_err()
+                {
+                    // Keep ordinary Qwen operators available on baseline
+                    // devices; DiT rejects this slot before recording it.
+                    ATTENTION_SCORES_SHADER
                 } else {
                     *shader
                 }
@@ -911,18 +956,18 @@ impl<'a> Qwen3Ops<'a> {
         }
         let pipelines: [vk::Pipeline; OPERATOR_SHADERS.len()] = pipelines.try_into().unwrap();
 
-        let arena = match unsafe { context.allocate_session_buffer(arena_size) } {
-            Ok(arena) => arena,
-            Err(error) => {
-                unsafe {
-                    for pipeline in pipelines {
-                        context.device.destroy_pipeline(pipeline, None);
+        let (arena, staging) =
+            match unsafe { context.allocate_operator_arena(arena_size, device_local) } {
+                Ok(buffers) => buffers,
+                Err(error) => {
+                    unsafe {
+                        for pipeline in pipelines {
+                            context.device.destroy_pipeline(pipeline, None);
+                        }
                     }
+                    return Err(error);
                 }
-                return Err(error);
-            }
-        };
-        unsafe { std::ptr::write_bytes(arena.mapped, 0, arena_size) };
+            };
 
         let pool_sizes = [vk::DescriptorPoolSize {
             ty: vk::DescriptorType::STORAGE_BUFFER,
@@ -940,6 +985,9 @@ impl<'a> Qwen3Ops<'a> {
             Err(error) => {
                 unsafe {
                     context.destroy_buffer(&arena);
+                    if let Some(staging) = &staging {
+                        context.destroy_buffer(staging);
+                    }
                     for pipeline in pipelines {
                         context.device.destroy_pipeline(pipeline, None);
                     }
@@ -955,6 +1003,9 @@ impl<'a> Qwen3Ops<'a> {
                         .device
                         .destroy_descriptor_pool(descriptor_pool, None);
                     context.destroy_buffer(&arena);
+                    if let Some(staging) = &staging {
+                        context.destroy_buffer(staging);
+                    }
                     for pipeline in pipelines {
                         context.device.destroy_pipeline(pipeline, None);
                     }
@@ -966,6 +1017,7 @@ impl<'a> Qwen3Ops<'a> {
         Ok(Self {
             context,
             arena,
+            staging,
             descriptor_pool,
             arena_bindings,
             pipelines,
@@ -1007,6 +1059,30 @@ impl<'a> Qwen3Ops<'a> {
 
     pub(crate) fn write_f32(&self, region: ArenaRegion, values: &[f32]) -> Result<(), VulkanError> {
         self.f32_word(region, values.len(), "host write")?;
+        if values.is_empty() {
+            return Ok(());
+        }
+        if let Some(staging) = self.staging {
+            // Recover any uncertain submission before touching a staging buffer
+            // that it could still be reading. Call before TokenCommands::begin.
+            let commands = TokenCommands::begin(self.context)?;
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    values.as_ptr(),
+                    staging.mapped.cast::<f32>(),
+                    values.len(),
+                );
+                self.context.record_buffer_copy(
+                    commands.command,
+                    staging,
+                    self.arena,
+                    0,
+                    region.offset as u64,
+                    f32_bytes(values.len())? as u64,
+                );
+            }
+            return commands.submit_and_wait();
+        }
         unsafe {
             std::ptr::copy_nonoverlapping(
                 values.as_ptr(),
@@ -1023,9 +1099,53 @@ impl<'a> Qwen3Ops<'a> {
         count: usize,
     ) -> Result<&[f32], VulkanError> {
         self.f32_word(region, count, "host read")?;
+        if self.staging.is_some() {
+            return Err(VulkanError::UnsupportedShape(
+                "device arena requires read_f32_into".into(),
+            ));
+        }
         Ok(unsafe {
             std::slice::from_raw_parts(self.arena.mapped.add(region.offset).cast::<f32>(), count)
         })
+    }
+
+    /// Copy into caller-owned memory: staging must never escape as a borrowed
+    /// slice that a later download could overwrite. Call outside a recording.
+    pub(crate) fn read_f32_into(
+        &self,
+        region: ArenaRegion,
+        output: &mut [f32],
+    ) -> Result<(), VulkanError> {
+        self.f32_word(region, output.len(), "host read")?;
+        if output.is_empty() {
+            return Ok(());
+        }
+        if let Some(staging) = self.staging {
+            let mut commands = TokenCommands::begin(self.context)?;
+            unsafe {
+                self.context.record_buffer_copy(
+                    commands.command,
+                    self.arena,
+                    staging,
+                    region.offset as u64,
+                    0,
+                    f32_bytes(output.len())? as u64,
+                );
+            }
+            self.context.submit_commands(&mut commands.guard)?;
+            // Keep the guard through the host copy, so another transfer cannot
+            // reuse staging between the fence and this read.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    staging.mapped.cast::<f32>(),
+                    output.as_mut_ptr(),
+                    output.len(),
+                );
+            }
+        } else {
+            output.copy_from_slice(self.read_f32(region, output.len())?);
+        }
+        Ok(())
     }
 
     pub(crate) fn read_bytes(
@@ -1034,6 +1154,11 @@ impl<'a> Qwen3Ops<'a> {
         count: usize,
     ) -> Result<&[u8], VulkanError> {
         self.byte_word(region, count, "host byte read")?;
+        if self.staging.is_some() {
+            return Err(VulkanError::UnsupportedShape(
+                "device arena cannot expose mapped bytes".into(),
+            ));
+        }
         Ok(unsafe { std::slice::from_raw_parts(self.arena.mapped.add(region.offset), count) })
     }
 
@@ -2070,6 +2195,7 @@ impl<'a> Qwen3Ops<'a> {
         head_dim: usize,
         rows: usize,
     ) -> Result<(), VulkanError> {
+        require_tiled_attention(self.context)?;
         let kv_count = q_heads
             .checked_mul(head_dim)
             .ok_or(VulkanError::OutOfMemory)?;
@@ -2850,6 +2976,29 @@ impl<'a> Qwen3Ops<'a> {
 
     pub(crate) fn zero_region(&self, region: ArenaRegion) -> Result<(), VulkanError> {
         self.byte_word(region, region.size, "zeroed Vulkan arena region")?;
+        if let Some(staging) = self.staging {
+            if region.size % 4 != 0 {
+                return Err(VulkanError::UnsupportedShape(
+                    "device arena fill must be word aligned".into(),
+                ));
+            }
+            if region.size == 0 {
+                return Ok(());
+            }
+            let commands = TokenCommands::begin(self.context)?;
+            unsafe {
+                std::ptr::write_bytes(staging.mapped, 0, region.size);
+                self.context.record_buffer_copy(
+                    commands.command,
+                    staging,
+                    self.arena,
+                    0,
+                    region.offset as u64,
+                    region.size as u64,
+                );
+            }
+            return commands.submit_and_wait();
+        }
         unsafe { std::ptr::write_bytes(self.arena.mapped.add(region.offset), 0, region.size) };
         Ok(())
     }
@@ -2912,6 +3061,9 @@ impl Drop for Qwen3Ops<'_> {
                 self.context.device.destroy_pipeline(pipeline, None);
             }
             self.context.destroy_buffer(&self.arena);
+            if let Some(staging) = &self.staging {
+                self.context.destroy_buffer(staging);
+            }
         }
     }
 }
@@ -5071,6 +5223,304 @@ fn check_close(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn tiled_attention_limits_preserve_baseline_operators() {
+        use super::{Qwen3Ops, TokenCommands, VulkanContext, VulkanError};
+        use crate::models::diffusion::z_image::dit_gpu::DitGpuSession;
+
+        for (invocations, size_x) in [(128, 256), (256, 128)] {
+            let mut context = VulkanContext::new().unwrap();
+            context.limits.max_compute_work_group_invocations = invocations;
+            context.limits.max_compute_work_group_size[0] = size_x;
+            let context = Box::leak(Box::new(context));
+            let projection_only = DitGpuSession::new_with_attention(context, 32, false).unwrap();
+            drop(projection_only);
+            assert!(matches!(
+                DitGpuSession::new_with_attention(context, 32, true),
+                Err(VulkanError::UnsupportedShape(_))
+            ));
+
+            let mut cursor = 0;
+            let qkv = super::region(&mut cursor, 384 * 4).unwrap();
+            let cache_k = super::region(&mut cursor, 128 * 4).unwrap();
+            let cache_v = super::region(&mut cursor, 128 * 4).unwrap();
+            let scratch = super::region(&mut cursor, 128 * 4).unwrap();
+            let scores = super::region(&mut cursor, 4).unwrap();
+            let q8 = super::region(&mut cursor, 32).unwrap();
+            let scales = super::region(&mut cursor, 4).unwrap();
+            let sums = super::region(&mut cursor, 4).unwrap();
+            let ops = Qwen3Ops::new_with_size(context, cursor, 1).unwrap();
+            ops.write_f32(qkv, &[1.0; 384]).unwrap();
+            let commands = TokenCommands::begin(context).unwrap();
+            assert!(matches!(
+                ops.record_diy_attention_scores(
+                    &commands, qkv, cache_k, cache_v, scratch, scores, 384, 1, 1, 128, 1,
+                ),
+                Err(VulkanError::UnsupportedShape(_))
+            ));
+            ops.record_quantize_q8_0(&commands, qkv, q8, scales, sums, 32)
+                .unwrap();
+            commands.submit_and_wait().unwrap();
+            assert_eq!(ops.read_bytes(q8, 32).unwrap(), &[127; 32]);
+        }
+    }
+
+    /// Compare the complete 30-head production attention shape, including
+    /// readback. Timing is diagnostic; numerical equality is the assertion.
+    #[test]
+    #[ignore = "requires a discrete GPU; attention bandwidth benchmark"]
+    fn z_image_attention_staging_matches_mapped_arena() {
+        use super::{Qwen3Ops, TokenCommands, VulkanContext};
+        use crate::models::diffusion::z_image::dit::{HEADS, HIDDEN, QKV_WIDTH, ROPE_HEAD_WIDTH};
+        let context = VulkanContext::new().unwrap();
+        if !context.is_discrete() {
+            return;
+        }
+        let rows = 1056;
+        let mut cursor = 0;
+        let qkv_region = super::region(&mut cursor, rows * QKV_WIDTH * 4).unwrap();
+        let cache_k = super::region(&mut cursor, rows * HIDDEN * 4).unwrap();
+        let cache_v = super::region(&mut cursor, rows * HIDDEN * 4).unwrap();
+        let scratch = super::region(&mut cursor, rows * HIDDEN * 4).unwrap();
+        let scores = super::region(&mut cursor, rows * HEADS * rows * 4).unwrap();
+        let out = super::region(&mut cursor, rows * HIDDEN * 4).unwrap();
+        let staged = Qwen3Ops::new_device_local_with_size(&context, cursor, 1).unwrap();
+        let mapped = Qwen3Ops::new_with_size(&context, cursor, 1).unwrap();
+        let qkv: Vec<f32> = (0..rows * QKV_WIDTH)
+            .map(|i| ((i * 37 + 11) % 211) as f32 / 211.0 - 0.5)
+            .collect();
+        let mut outputs = Vec::new();
+        for (name, ops) in [("mapped", &mapped), ("staged", &staged)] {
+            ops.write_f32(qkv_region, &qkv).unwrap();
+            let mut output = vec![0.0; rows * HIDDEN];
+            let mut compute_ms = Vec::new();
+            let mut read_ms = Vec::new();
+            for iteration in 0..13 {
+                let start = std::time::Instant::now();
+                let commands = TokenCommands::begin(&context).unwrap();
+                ops.record_diy_attention_full(
+                    &commands,
+                    qkv_region,
+                    cache_k,
+                    cache_v,
+                    scratch,
+                    scores,
+                    out,
+                    QKV_WIDTH,
+                    HEADS,
+                    HEADS,
+                    ROPE_HEAD_WIDTH,
+                    rows,
+                )
+                .unwrap();
+                commands.submit_and_wait().unwrap();
+                let compute = start.elapsed().as_secs_f64() * 1000.0;
+                let start = std::time::Instant::now();
+                ops.read_f32_into(out, &mut output).unwrap();
+                let read = start.elapsed().as_secs_f64() * 1000.0;
+                assert!(output.iter().all(|value| value.is_finite()));
+                if iteration >= 3 {
+                    compute_ms.push(compute);
+                    read_ms.push(read);
+                }
+            }
+            eprintln!("attention {name}: rows={rows} heads={HEADS} compute_ms={compute_ms:?} read_ms={read_ms:?}");
+            outputs.push(
+                output
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+            );
+        }
+        assert_eq!(
+            outputs[0], outputs[1],
+            "staging changed attention output bits"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn staged_arena_partial_upload_preserves_gpu_writes_and_padding() {
+        use super::{ArenaRegion, Qwen3Ops, TokenCommands, VulkanContext};
+        let context = VulkanContext::new().unwrap();
+        for device_local in [false, true] {
+            let ops = if device_local {
+                Qwen3Ops::new_device_local_with_size(&context, 512, 1)
+            } else {
+                Qwen3Ops::new_with_size(&context, 512, 1)
+            }
+            .unwrap();
+            let target = ArenaRegion {
+                offset: 16,
+                size: 64 * 4,
+            };
+            let addition = ArenaRegion {
+                offset: 320,
+                size: 16 * 4,
+            };
+            let mut expected: Vec<f32> = (0..64).map(|i| i as f32).collect();
+            let mut actual = vec![f32::NAN; 64];
+            ops.read_f32_into(target, &mut actual).unwrap();
+            assert_eq!(actual, vec![0.0; 64], "arena must start zeroed");
+            ops.write_f32(target, &expected).unwrap();
+            ops.write_f32(addition, &[2.0; 16]).unwrap();
+            for _ in 0..2 {
+                let commands = TokenCommands::begin(&context).unwrap();
+                ops.record_add(&commands, target, addition, 16).unwrap();
+                commands.submit_and_wait().unwrap();
+                for value in &mut expected[..16] {
+                    *value += 2.0;
+                }
+                let partial = ArenaRegion {
+                    offset: target.offset + 32 * 4,
+                    size: 4 * 4,
+                };
+                ops.write_f32(partial, &[123.0; 4]).unwrap();
+                expected[32..36].fill(123.0);
+                ops.read_f32_into(target, &mut actual).unwrap();
+                assert_eq!(
+                    actual, expected,
+                    "partial upload clobbered GPU output or padding"
+                );
+            }
+            // Abandon a recording: a later transfer must not replay it.
+            let commands = TokenCommands::begin(&context).unwrap();
+            ops.record_add(&commands, target, addition, 16).unwrap();
+            drop(commands);
+            ops.read_f32_into(target, &mut actual).unwrap();
+            assert_eq!(actual, expected);
+            let submissions = context.submission_count();
+            let short = ArenaRegion {
+                offset: target.offset,
+                size: 4,
+            };
+            assert!(ops.write_f32(short, &[1.0, 2.0]).is_err());
+            assert!(ops.read_f32_into(short, &mut [0.0; 2]).is_err());
+            let unaligned = ArenaRegion { offset: 1, size: 4 };
+            assert!(ops.write_f32(unaligned, &[0.0]).is_err());
+            ops.write_f32(target, &[]).unwrap();
+            ops.read_f32_into(target, &mut []).unwrap();
+            assert_eq!(
+                context.submission_count(),
+                submissions,
+                "invalid/empty transfers must not submit"
+            );
+            let cleared = ArenaRegion {
+                offset: target.offset + 4 * 4,
+                size: 4 * 4,
+            };
+            ops.zero_region(cleared).unwrap();
+            expected[4..8].fill(0.0);
+            ops.read_f32_into(target, &mut actual).unwrap();
+            assert_eq!(actual, expected);
+            if device_local && context.is_discrete() {
+                assert!(ops.staging.is_some());
+                assert!(
+                    ops.read_f32(target, 64).is_err(),
+                    "staging must not escape as a shared slice"
+                );
+                assert!(ops.read_bytes(target, 16).is_err());
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a discrete Vulkan device"]
+    fn staged_arena_failed_transfer_recovers_before_reusing_staging() {
+        use super::{ArenaRegion, Ordering, Qwen3Ops, VulkanContext};
+        let context = VulkanContext::new().unwrap();
+        if !context.is_discrete() {
+            return;
+        }
+        let ops = Qwen3Ops::new_device_local_with_size(&context, 256, 1).unwrap();
+        let region = ArenaRegion {
+            offset: 16,
+            size: 32,
+        };
+        ops.write_f32(region, &[3.0; 8]).unwrap();
+        context.fail_fence_wait.store(true, Ordering::Relaxed);
+        let mut output = [123.0; 8];
+        assert!(ops.read_f32_into(region, &mut output).is_err());
+        assert_eq!(output, [123.0; 8]);
+        assert!(context.mutex.lock().unwrap().uncertain);
+        context.fail_wait_idle.store(true, Ordering::Relaxed);
+        let resets = context.command_resets.load(Ordering::Relaxed);
+        assert!(ops.write_f32(region, &[9.0; 8]).is_err());
+        assert_eq!(context.command_resets.load(Ordering::Relaxed), resets);
+        context.fail_wait_idle.store(false, Ordering::Relaxed);
+        ops.read_f32_into(region, &mut output).unwrap();
+        assert_eq!(
+            output, [3.0; 8],
+            "failed recovery must not mutate staging or the device"
+        );
+        ops.write_f32(region, &[9.0; 8]).unwrap();
+        ops.read_f32_into(region, &mut output).unwrap();
+        assert_eq!(output, [9.0; 8]);
+        assert!(!context.mutex.lock().unwrap().uncertain);
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn staged_static_upload_preserves_bytes_and_zeroes_padding() {
+        use super::{ArenaRegion, Qwen3Ops, TokenCommands, VulkanContext};
+        let context = VulkanContext::new().unwrap();
+        let ops = Qwen3Ops::new_device_local_with_size(&context, 256, 1).unwrap();
+        let bytes: Vec<u8> = (0..67).collect();
+        for device_local in [false, true] {
+            let weight = unsafe {
+                if device_local {
+                    context.upload_device_static(&bytes)
+                } else {
+                    context.upload_static(&bytes)
+                }
+            }
+            .unwrap();
+            let commands = TokenCommands::begin(&context).unwrap();
+            unsafe {
+                context.record_buffer_copy(commands.command, weight, ops.arena, 0, 0, weight.size)
+            };
+            commands.submit_and_wait().unwrap();
+            let mut output = vec![0.0; weight.size as usize / 4];
+            ops.read_f32_into(
+                ArenaRegion {
+                    offset: 0,
+                    size: weight.size as usize,
+                },
+                &mut output,
+            )
+            .unwrap();
+            let actual: &[u8] = bytemuck::cast_slice(&output);
+            assert_eq!(&actual[..bytes.len()], bytes);
+            assert!(actual[bytes.len()..].iter().all(|&byte| byte == 0));
+            unsafe { context.destroy_completed_buffers([&weight]) }.unwrap();
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a discrete Vulkan device"]
+    fn z_image_discrete_arena_does_not_map_gpu_intermediates() {
+        let context = Box::leak(Box::new(super::VulkanContext::new().unwrap()));
+        let properties = unsafe {
+            context
+                .instance
+                .get_physical_device_properties(context._physical_device)
+        };
+        if properties.device_type != ash::vk::PhysicalDeviceType::DISCRETE_GPU {
+            eprintln!("skipped: requires a discrete GPU");
+            return;
+        }
+        let session =
+            crate::models::diffusion::z_image::dit_gpu::DitGpuSession::new_with_attention(
+                context, 32, true,
+            )
+            .unwrap();
+        assert!(
+            session.ops().arena.mapped.is_null(),
+            "discrete GPU intermediates must live in an unmapped device-local arena"
+        );
+    }
+
     #[test]
     #[ignore = "requires a Vulkan device"]
     fn qwen3_chunk_attention_validates_all_spans_before_recording() {
