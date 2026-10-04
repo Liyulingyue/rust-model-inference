@@ -1,8 +1,8 @@
-# GLiNER 家族：12/12 已实现，融合点评估
+# GLiNER 家族：12/12 已实现，融合点评估与落地
 
 本文记录在 12 个 checkpoint 全部适配完成后，对"哪些模块应当融合"的评估。
 评估的前提是：**先把所有变体实现出来，才知道哪些重复是真实需求、哪些是过早抽象**。
-现在数据齐了。
+现在数据齐了，结论也已在本 PR 落地。
 
 需要区分两种"完成"：#1–#11 只在转换器里加了尺寸表，推理层是同一份 DeBERTa forward；
 #12 是家族里唯一需要新 forward 的 checkpoint（ModernBERT），它让"哪些重复是真实需求"
@@ -49,6 +49,29 @@ tokenizer 必须自实现，见结论四。）
 > `gliner2.5-small-v1` 是 "DeBERTa-v3-small"。前者不需要做，后者是 **xsmall**
 > （384 宽 / 6 头 / 1536 FF）。**没有验证就写进 TODO 的架构判断，两次都是错的。**
 
+### 但"架构不需要融合"不等于"文件里没有重复"
+
+上面说的是**架构层面**：`gliner` 与 `gliner_boundary` 共享 DeBERTa forward
+（`extract.rs:208` 调 `compute::encode`）、共享 `weights::load_weights`、
+共享 `prompt`。这部分确实无需再动。
+
+但 `gliner_boundary/` **19 个文件内部**另有 4 个 leaf helper 被逐字复制了
+9–10 份（`load_vec` / `load_weight` / `apply_linear_full` / `apply_linear_rows`），
+而且**已经开始漂移**：
+
+- 10 份 `apply_linear_full` 里有 3 份丢了 `debug_assert_eq!`（bias 长度断言）
+- `loader.rs` 的 `load_vec` 写成了单行
+- `load_weight` 是那个把 shape 不匹配变成报错、而不是静默错误投影的维度检查，
+  它存在了 **9 份**
+
+已收进 `src/models/gliner_boundary/tensor_util.rs`：**515 行删掉，25 行加回**。
+lib 基线不变（1031/32/67），6 个 boundary parity 套件不变。
+顺带删掉一个 3 行死函数 `apply_linear`（只转发给 `apply_linear_full`，无人调用）。
+
+`gliner_ettin` 与前两者**没有可融合点**：仓库里不存在 RMSNorm+SwiGLU+RoPE
+组合（见结论三），`load_vec` 只是撞名——Ettin 版返回 `Weight` 并校验 1-D，
+语义不同，合并反而是错的。
+
 ## 结论二：转换器层**确实**该融合，且收益明确
 
 这是唯一真实的重复点，实测数据：
@@ -81,16 +104,40 @@ convert_boundary.py   752 行（447 实质行）
   都各踩了一遍）
 - 写 #9/#10/#11 时确认：三个模型**零新代码**，全部落在转换器
 
-所以建议是：**把 `parse_spm` / tokenizer 解析 / `resolve_encoder` / 形状契约
-抽成 `tools/converter/gliner/common.py`，boundary 的 8000 行逻辑留在原文件。**
-预期把 boundary 转换器从 752 行降到 ~400 行。
+所以**已经在本 PR 落地**：`tools/converter/gliner/common.py` 抽出
+`parse_spm` / tokenizer 解析 / `resolve_encoder` / 形状契约 / metadata 写入 /
+tensor 流式写盘 / 原子落盘，boundary 的 `boundary_head.*` 逻辑留在原文件。
+
+实测结果比预估更好——重复不只是"冗余"，它**已经漂移出 bug**：
+
+- boundary 那份 `parse_spm` 里有一段 `... if False else 0.0` 的死分支，
+  把每个 score 写成 0.0，type 按字符串解而正确实现返回 int
+- boundary 那份 `fast_tokenizer_pieces` 完全跳过了 added-token id 校验
+- 16 行 encoder metadata 块 + 16 行形状契约块两边逐字重复
+
+字节验证：5 个 checkpoint × 4 种 encoder 尺寸（deberta-v3-large/base、
+mdeberta-v3-base、deberta-v3-xsmall）× 两个转换器，重构前后 **sha256 完全一致**。
+
+```
+common.py            336 行（新）
+convert_gliner.py    485 → 264 行
+convert_boundary.py  752 → 552 行
+```
+
+（`convert_boundary.py` 只降 200 行而非预估的 350：boundary 特有的
+`boundary_head` 83 项设置转录 + 两个形状交叉校验共 170 行是不可省的。）
+
+顺带修好了一个更严重的问题：`test_convert_gliner.py` 早已**无法 import**
+（引用了已删除的 `ENCODER` 常量和旧签名 `tensor_contracts(128011)`），
+即转换器单测实际处于失效状态。重写并扩到 **50 个测试**，含对真实 base-v1
+state dict 的交叉校验。
 
 ## 结论三：Ettin（#12）是另一个问题，不属于本次融合
 
 `GLiNER2.5-Decide-1B` 的 encoder 是 **Ettin-1B**，tokenizer 是 ByteLevel BPE 而非
 SentencePiece。它需要新 forward 和新 tokenizer。
 
-**不要在这次 PR 里抽公共层。** 理由：
+**Ettin 不要进这次的 `common.py`，也不要在这次 PR 里为它抽公共层。** 理由：
 
 1. 它的 forward 与 DeBERTa 毫无共同结构，抽象不出东西
 2. 真正的候选复用点是仓库**已有**的 `llama` / `qwen3` 系，而不是 gliner 内部。
