@@ -1,7 +1,7 @@
 pub mod activation;
 pub mod argmax;
 pub mod attention_value;
-pub mod bitlinear;
+pub mod bitnet;
 pub mod dot;
 pub mod embedding;
 pub mod float;

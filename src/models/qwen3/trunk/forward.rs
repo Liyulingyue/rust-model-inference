@@ -18,7 +18,7 @@ use super::session::Qwen3Session;
 use super::util::{
     checked_product, checked_session_capacity, validate_generation, validate_token_ids,
 };
-use super::weights::{BitLinearWeights, Qwen3LayerWeights, Qwen3Model};
+use super::weights::{Qwen3LayerWeights, Qwen3Model};
 use crate::app::cli::resolve_thread_count;
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
@@ -29,37 +29,6 @@ use crate::prompt::{build_qwen_chat_prompt, QwenMessage};
 use crate::vulkan::qwen3::Qwen3VulkanSession;
 use std::io::{self, Write};
 
-/// BitLinear forward: per-projection RMSNorm → per-token absmax
-/// int8 quantization → ternary (I2_S) matmul → rescale.
-///
-/// This is the BitNet 1.58 W1.58A8 building block used by
-/// `bitnet-embedding-0.6b` / future BitNet Qwen3 variants. See
-/// `docs/usage/bitnet_embedding.md` §2 for the full spec.
-///
-/// **Scalar reference only** — no SIMD. For the production hot path
-/// on CPUs with AVX-512/NEON, port this to `bitnet.cpp`'s LUT
-/// kernel (`/tmp/oracle-bitnet-cpp/BitNet/include/bitnet-lut-kernels.h`,
-/// 1170 lines of platform-specific SIMD) for the 1.4–2.3× speedup
-/// the BitNet-Embedding paper reports over F16.
-///
-/// Allocation: one `Vec<f32>(n_in)` for the RMSNorm output and one
-/// `Vec<i8>(n_in)` for the int8 activations. No per-token heap
-/// traffic — `quantize_activation_per_token` returns an owned `Vec<i8>`
-/// and we copy into a local buffer below.
-fn bitlinear_projection(
-    input: &[f32],         // n_in activations
-    proj: &BitLinearWeights, // norm_in (n_in F32) + I2_S payload (n_in × n_out)
-    output: &mut [f32],    // n_out outputs
-    eps: f32,
-) {
-    debug_assert_eq!(input.len(), proj.n_in);
-    debug_assert_eq!(output.len(), proj.n_out);
-    let n_in = proj.n_in;
-    let mut normed = vec![0.0f32; n_in];
-    rms_norm(input, &proj.norm_in, &mut normed, eps);
-    let (x_q, absmax) = crate::ops::bitlinear::quantize_activation_per_token(&normed);
-    crate::ops::bitlinear::bitlinear_forward(&proj.weight, &x_q, absmax, n_in, proj.n_out, output);
-}
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -307,92 +276,57 @@ pub fn text_encode(
             let k_off = tok * n_embd_k;
             let v_off = tok * n_embd_v;
 
-            if cfg.is_bitnet {
-                // BitNet b1.58: per-projection RMSNorm → per-token
-                // absmax int8 quant → ternary matmul. No Q8_0 quantize.
-                bitlinear_projection(
-                    norm_row,
-                    layer
-                        .bitlinear
-                        .attn_q
-                        .as_ref()
-                        .expect("BitNet layer missing attn_q BitLinear slot"),
-                    &mut q_all[q_off..q_off + n_embd_q],
-                    cfg.eps,
-                );
-                bitlinear_projection(
-                    norm_row,
-                    layer
-                        .bitlinear
-                        .attn_k
-                        .as_ref()
-                        .expect("BitNet layer missing attn_k BitLinear slot"),
-                    &mut k_all[k_off..k_off + n_embd_k],
-                    cfg.eps,
-                );
-                bitlinear_projection(
-                    norm_row,
-                    layer
-                        .bitlinear
-                        .attn_v
-                        .as_ref()
-                        .expect("BitNet layer missing attn_v BitLinear slot"),
-                    &mut v_all[v_off..v_off + n_embd_v],
-                    cfg.eps,
-                );
-            } else {
-                let blocks = (cfg.n_embd + 31) / 32;
-                let mut q8_buf = vec![0u8; cfg.n_embd];
-                let mut scale_buf = vec![0.0f32; blocks];
-                quantize_q8_0_into(norm_row, cfg.n_embd, &mut q8_buf, &mut scale_buf);
+            let blocks = (cfg.n_embd + 31) / 32;
+            let mut q8_buf = vec![0u8; cfg.n_embd];
+            let mut scale_buf = vec![0.0f32; blocks];
+            quantize_q8_0_into(norm_row, cfg.n_embd, &mut q8_buf, &mut scale_buf);
 
-                layer.wq.kernel.forward_prepared(
-                    norm_row,
-                    &q8_buf,
-                    &scale_buf,
-                    None,
-                    &mut q_all[q_off..q_off + n_embd_q],
-                    cfg.n_embd,
-                    n_embd_q,
-                    0,
-                    1,
-                );
-                layer.wk.kernel.forward_prepared(
-                    norm_row,
-                    &q8_buf,
-                    &scale_buf,
-                    None,
-                    &mut k_all[k_off..k_off + n_embd_k],
-                    cfg.n_embd,
-                    n_embd_k,
-                    0,
-                    1,
-                );
-                layer.wv.kernel.forward_prepared(
-                    norm_row,
-                    &q8_buf,
-                    &scale_buf,
-                    None,
-                    &mut v_all[v_off..v_off + n_embd_v],
-                    cfg.n_embd,
-                    n_embd_v,
-                    0,
-                    1,
-                );
-                if let Some(bias) = layer.q_bias.as_deref() {
-                    for (value, bias) in q_all[q_off..q_off + n_embd_q].iter_mut().zip(bias) {
-                        *value += *bias;
-                    }
+            layer.wq.kernel.forward_prepared(
+                norm_row,
+                &q8_buf,
+                &scale_buf,
+                None,
+                &mut q_all[q_off..q_off + n_embd_q],
+                cfg.n_embd,
+                n_embd_q,
+                0,
+                1,
+            );
+            layer.wk.kernel.forward_prepared(
+                norm_row,
+                &q8_buf,
+                &scale_buf,
+                None,
+                &mut k_all[k_off..k_off + n_embd_k],
+                cfg.n_embd,
+                n_embd_k,
+                0,
+                1,
+            );
+            layer.wv.kernel.forward_prepared(
+                norm_row,
+                &q8_buf,
+                &scale_buf,
+                None,
+                &mut v_all[v_off..v_off + n_embd_v],
+                cfg.n_embd,
+                n_embd_v,
+                0,
+                1,
+            );
+            if let Some(bias) = layer.q_bias.as_deref() {
+                for (value, bias) in q_all[q_off..q_off + n_embd_q].iter_mut().zip(bias) {
+                    *value += *bias;
                 }
-                if let Some(bias) = layer.k_bias.as_deref() {
-                    for (value, bias) in k_all[k_off..k_off + n_embd_k].iter_mut().zip(bias) {
-                        *value += *bias;
-                    }
+            }
+            if let Some(bias) = layer.k_bias.as_deref() {
+                for (value, bias) in k_all[k_off..k_off + n_embd_k].iter_mut().zip(bias) {
+                    *value += *bias;
                 }
-                if let Some(bias) = layer.v_bias.as_deref() {
-                    for (value, bias) in v_all[v_off..v_off + n_embd_v].iter_mut().zip(bias) {
-                        *value += *bias;
-                    }
+            }
+            if let Some(bias) = layer.v_bias.as_deref() {
+                for (value, bias) in v_all[v_off..v_off + n_embd_v].iter_mut().zip(bias) {
+                    *value += *bias;
                 }
             }
         }
@@ -497,34 +431,21 @@ pub fn text_encode(
         let mut attn_proj_out = vec![0.0; n_tokens * cfg.n_embd];
         for tok in 0..n_tokens {
             let attn_row = &attn_out[tok * n_attn..tok * n_attn + n_attn];
-            if cfg.is_bitnet {
-                bitlinear_projection(
-                    attn_row,
-                    layer
-                        .bitlinear
-                        .attn_output
-                        .as_ref()
-                        .expect("BitNet layer missing attn_output BitLinear slot"),
-                    &mut attn_proj_out[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd],
-                    cfg.eps,
-                );
-            } else {
-                let blocks = (n_attn + 31) / 32;
-                let mut q8_buf = vec![0u8; n_attn];
-                let mut scale_buf = vec![0.0f32; blocks];
-                quantize_q8_0_into(attn_row, n_attn, &mut q8_buf, &mut scale_buf);
-                layer.wo.kernel.forward_prepared(
-                    attn_row,
-                    &q8_buf,
-                    &scale_buf,
-                    None,
-                    &mut attn_proj_out[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd],
-                    n_attn,
-                    cfg.n_embd,
-                    0,
-                    1,
-                );
-            }
+            let blocks = (n_attn + 31) / 32;
+            let mut q8_buf = vec![0u8; n_attn];
+            let mut scale_buf = vec![0.0f32; blocks];
+            quantize_q8_0_into(attn_row, n_attn, &mut q8_buf, &mut scale_buf);
+            layer.wo.kernel.forward_prepared(
+                attn_row,
+                &q8_buf,
+                &scale_buf,
+                None,
+                &mut attn_proj_out[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd],
+                n_attn,
+                cfg.n_embd,
+                0,
+                1,
+            );
         }
 
         for tok in 0..n_tokens {
@@ -560,55 +481,32 @@ pub fn text_encode(
             let mut up_buf = vec![0.0; n_tokens * cfg.n_ff];
             for tok in 0..n_tokens {
                 let ffn_row = &ffn_normed[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd];
-                if cfg.is_bitnet {
-                    bitlinear_projection(
-                        ffn_row,
-                        layer
-                            .bitlinear
-                            .ffn_gate
-                            .as_ref()
-                            .expect("BitNet layer missing ffn_gate BitLinear slot"),
-                        &mut gate_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
-                        cfg.eps,
-                    );
-                    bitlinear_projection(
-                        ffn_row,
-                        layer
-                            .bitlinear
-                            .ffn_up
-                            .as_ref()
-                            .expect("BitNet layer missing ffn_up BitLinear slot"),
-                        &mut up_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
-                        cfg.eps,
-                    );
-                } else {
-                    let blocks = (cfg.n_embd + 31) / 32;
-                    let mut q8_buf = vec![0u8; cfg.n_embd];
-                    let mut scale_buf = vec![0.0f32; blocks];
-                    quantize_q8_0_into(ffn_row, cfg.n_embd, &mut q8_buf, &mut scale_buf);
-                    layer.w_gate.kernel.forward_prepared(
-                        ffn_row,
-                        &q8_buf,
-                        &scale_buf,
-                        None,
-                        &mut gate_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
-                        cfg.n_embd,
-                        cfg.n_ff,
-                        0,
-                        1,
-                    );
-                    layer.w_up.kernel.forward_prepared(
-                        ffn_row,
-                        &q8_buf,
-                        &scale_buf,
-                        None,
-                        &mut up_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
-                        cfg.n_embd,
-                        cfg.n_ff,
-                        0,
-                        1,
-                    );
-                }
+                let blocks = (cfg.n_embd + 31) / 32;
+                let mut q8_buf = vec![0u8; cfg.n_embd];
+                let mut scale_buf = vec![0.0f32; blocks];
+                quantize_q8_0_into(ffn_row, cfg.n_embd, &mut q8_buf, &mut scale_buf);
+                layer.w_gate.kernel.forward_prepared(
+                    ffn_row,
+                    &q8_buf,
+                    &scale_buf,
+                    None,
+                    &mut gate_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
+                    cfg.n_embd,
+                    cfg.n_ff,
+                    0,
+                    1,
+                );
+                layer.w_up.kernel.forward_prepared(
+                    ffn_row,
+                    &q8_buf,
+                    &scale_buf,
+                    None,
+                    &mut up_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
+                    cfg.n_embd,
+                    cfg.n_ff,
+                    0,
+                    1,
+                );
             }
 
             for tok in 0..n_tokens {
@@ -621,39 +519,26 @@ pub fn text_encode(
             let mut down_buf = vec![0.0; n_tokens * cfg.n_embd];
             for tok in 0..n_tokens {
                 let down_row = &gate_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff];
-                if cfg.is_bitnet {
-                    bitlinear_projection(
-                        down_row,
-                        layer
-                            .bitlinear
-                            .ffn_down
-                            .as_ref()
-                            .expect("BitNet layer missing ffn_down BitLinear slot"),
-                        &mut down_buf[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd],
-                        cfg.eps,
-                    );
-                } else {
-                    let blocks = (cfg.n_ff + 31) / 32;
-                    let mut q8_buf = vec![0u8; cfg.n_ff];
-                    let mut scale_buf = vec![0.0f32; blocks];
-                    quantize_q8_0_into(
-                        &gate_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
-                        cfg.n_ff,
-                        &mut q8_buf,
-                        &mut scale_buf,
-                    );
-                    layer.w_down.kernel.forward_prepared(
-                        &gate_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
-                        &q8_buf,
-                        &scale_buf,
-                        None,
-                        &mut down_buf[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd],
-                        cfg.n_ff,
-                        cfg.n_embd,
-                        0,
-                        1,
-                    );
-                }
+                let blocks = (cfg.n_ff + 31) / 32;
+                let mut q8_buf = vec![0u8; cfg.n_ff];
+                let mut scale_buf = vec![0.0f32; blocks];
+                quantize_q8_0_into(
+                    &gate_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
+                    cfg.n_ff,
+                    &mut q8_buf,
+                    &mut scale_buf,
+                );
+                layer.w_down.kernel.forward_prepared(
+                    &gate_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
+                    &q8_buf,
+                    &scale_buf,
+                    None,
+                    &mut down_buf[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd],
+                    cfg.n_ff,
+                    cfg.n_embd,
+                    0,
+                    1,
+                );
             }
 
             for tok in 0..n_tokens {

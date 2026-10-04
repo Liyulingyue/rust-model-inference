@@ -74,6 +74,9 @@ pub fn compute_embedding(
     prompt: &str,
     n_threads_arg: usize,
 ) -> Result<Vec<f32>, String> {
+    if crate::models::bitnet::detect_is_bitnet(source) {
+        return crate::models::bitnet::compute_embedding(source, prompt, n_threads_arg);
+    }
     match arch_of(source).as_str() {
         "gemma-embedding" => {
             crate::models::gemma_embedding::compute_embedding(source, prompt, n_threads_arg)
@@ -93,7 +96,8 @@ pub fn run_embedding(
     kv_format: KvFormat,
     output: EmbeddingOutput,
 ) {
-    match arch_of(source).as_str() {
+    let arch = arch_of(source);
+    match arch.as_str() {
         "gemma-embedding" => crate::models::gemma_embedding::run_embedding(
             source,
             prompt,
@@ -101,13 +105,21 @@ pub fn run_embedding(
             kv_format,
             output,
         ),
-        "gemma3" => crate::models::gemma3::run_embedding(
-            source,
-            prompt,
-            n_threads_arg,
-            kv_format,
-            output,
-        ),
+        // BitNet b1.58 (file_type=40 + per-projection `*_norm_in`
+        // tensors). Architecture-neutral dispatch inside the BitNet
+        // trunk family: `bitnet::compute_embedding` reads
+        // `general.architecture` and routes to `qwen3_arch` /
+        // `gemma3_arch` accordingly. The qwen3 / gemma3 standard
+        // trunks below are BitNet-free.
+        arch if crate::models::bitnet::detect_is_bitnet(source) => {
+            crate::models::bitnet::run_embedding(
+                source,
+                prompt,
+                n_threads_arg,
+                kv_format,
+                output,
+            )
+        }
         "bert" | "jina-bert-v2" | "nomic-bert" | "nomic-bert-moe" => {
             crate::models::bert_family::run_embedding(
                 source,

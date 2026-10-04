@@ -141,6 +141,25 @@ LFM2 / LFM2.5 / Spark / Nemotron-H / Hunyuan / LFM2-MoE），每个 scorer 实�
 
 目标：Q4_K_M 从 ~76 t/s → 120-150 t/s。详见 TODO-001 关联。
 
+### BitNet `I2_S` GGML type 的 provenance 与上游兼容性
+
+`GGMLType::I2_S = 36` 和 `general.file_type = 40` (LLAMA_FTYPE_MOSTLY_I2_S) **不是上游
+ggml-org/llama.cpp 的一部分**——它们是 `microsoft/BitNet` 私有 fork 在 `ggml.h` 中加的扩展，
+转换脚本 `utils/convert-hf-to-gguf-bitnet.py` 用 `gguf.GGMLQuantizationType.I2_S`。后果：
+
+- 这两种 BitNet GGUF **只能**在 BitNet-patched llama.cpp / `microsoft/BitNet` build / 本仓库 (`I2_S` 已注册) 里
+  跑，stock `llama.cpp`、`ollama`、`koboldcpp` 等社区 GGML 引擎会在加载时报
+  "unknown tensor type" 直接 abort。
+- 跨生态分发 BitNet 模型时需要在 README / GGUF 描述里明确这一点，避免用户误以为
+  `ollama run bitnet-embedding-0.6b` 能跑（实际上 GGUF 类型会被拒）。
+- 长期：上游 PR 把 `I2_S` 合并进 ggml-org/ggml（需要 bitnet.cpp 团队与 ggml 维护者协调），
+  或者在 GGUF 规范里加一个 `quantization_version` 字段，让 stock llama.cpp 把
+  `file_type=40 + GGMLType=36` 解释成 "需要 BitNet-patched build" 错误并清晰报错。
+
+当前会话的处理：commit message + `src/core/tensor.rs::GGMLType::I2_S = 36` 旁的注释明确写了
+"Microsoft BitNet b1.58 I2_S extension; not upstream ggml"。`docs/usage/bitnet_embedding.md` 第一节
+"已下载并验证的 GGUF" 提示兼容性受限。**没有自动对齐上游的工作；等上游 merge 或社区分流后再调整。**
+
 ## Low Priority
 
 - [ ] 更多量化格式支持（Q4_K, Q5_K 等）
