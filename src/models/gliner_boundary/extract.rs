@@ -31,7 +31,7 @@ use std::collections::BTreeMap;
 use crate::core::tensor::TensorSource;
 use crate::models::gliner::compute;
 use crate::models::gliner::prompt::{self, BoundaryTaskKind, EncodedPrompt, Task, C_TOKEN};
-use crate::ops::kernel::Weight;
+use crate::models::gliner_boundary::tensor_util::apply_linear_full;
 
 use super::loader::BoundaryModel;
 use super::overlap::{
@@ -1167,21 +1167,4 @@ fn apply_row(model: &BoundaryModel<'_>, name: &str, state: &[f32]) -> Result<f32
     let mut out = [0.0f32; 1];
     apply_linear_full(state, weight, bias, &mut out);
     Ok(out[0])
-}
-
-fn apply_linear_full(input: &[f32], weight: &Weight<'_>, bias: &[f32], output: &mut [f32]) {
-    if let Some(rows) = weight.kernel.f32_slice() {
-        let n_in = input.len();
-        let n_out = output.len();
-        for (out_index, row) in rows.chunks_exact(n_in).take(n_out).enumerate() {
-            output[out_index] = crate::ops::dot_f32(row, input, n_in) + bias[out_index];
-        }
-    } else {
-        weight
-            .kernel
-            .forward(input, output, weight.n_in, weight.n_out);
-        for (out, b) in output.iter_mut().zip(bias.iter()) {
-            *out += *b;
-        }
-    }
 }

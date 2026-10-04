@@ -22,7 +22,7 @@
 //! loading here so the classifier branch can diverge, and to avoid
 //! pulling Decide's ``classifier.2.*`` requirement into the loader API.
 
-use crate::core::tensor::{load_f32_tensor, GGMLType, MetaValue, TensorInfo, TensorSource};
+use crate::core::tensor::{GGMLType, MetaValue, TensorSource};
 use crate::models::gliner::compute::EncoderConfig;
 use crate::models::gliner::weights::{LayerWeights, Norm};
 use crate::ops::kernel::{QuantizedTensor, Weight};
@@ -37,6 +37,7 @@ use super::proposer::BoundaryProposer;
 use super::record_head::RecordHead;
 use super::relations::SparseRelationScorer;
 use super::settings::BoundarySettings;
+use super::tensor_util::{load_vec, load_weight};
 
 /// Loaded BoundaryExtractor weights + cached `EncoderConfig`.
 pub struct BoundaryModel<'a> {
@@ -292,41 +293,11 @@ fn meta_bool(source: &dyn TensorSource, name: &str) -> Result<bool, String> {
     }
 }
 
-fn load_vec(source: &dyn TensorSource, name: &str, len: usize) -> Result<Vec<f32>, String> {
-    load_f32_tensor(source, name, &[len as u64]).map_err(|e| format!("{name}: {e}"))
-}
-
 fn load_norm(source: &dyn TensorSource, name: &str, width: usize) -> Result<Norm, String> {
     Ok(Norm {
         weight: load_vec(source, &format!("{name}.weight"), width)?,
         bias: load_vec(source, &format!("{name}.bias"), width)?,
     })
-}
-
-fn load_weight<'a>(
-    source: &'a dyn TensorSource,
-    name: &str,
-    n_in: usize,
-    n_out: usize,
-) -> Result<Weight<'a>, String> {
-    let info = source
-        .tensor_info(name)
-        .ok_or_else(|| format!("missing tensor {name}"))?;
-    if info.dims != [n_in as u64, n_out as u64] {
-        return Err(format!(
-            "tensor {name} has dims {:?}, expected [{n_in}, {n_out}]",
-            info.dims
-        ));
-    }
-    let bytes = source
-        .tensor_slice(name)
-        .ok_or_else(|| format!("missing tensor data {name}"))?;
-    Ok(Weight::from_quantized(QuantizedTensor::from_bytes(
-        bytes,
-        info.ggml_type,
-        n_in,
-        n_out,
-    )))
 }
 
 fn load_encoder<'a>(

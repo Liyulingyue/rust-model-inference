@@ -37,6 +37,7 @@ pub mod relations;
 pub mod settings;
 pub mod spans;
 pub mod structure;
+pub mod tensor_util;
 
 pub use candidate_encoder::CandidateEncoder;
 pub use content_pooler::SpanContentPooler;

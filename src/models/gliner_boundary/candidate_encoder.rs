@@ -19,6 +19,7 @@
 //! are now separate fields with the names they have in the reference.
 
 use crate::core::tensor::TensorSource;
+use crate::models::gliner_boundary::tensor_util::apply_linear_full;
 use crate::ops::kernel::{QuantizedTensor, Weight};
 
 /// `nn.Linear(2 * boundary_dim, hidden_size)`, no activation.
@@ -108,23 +109,5 @@ impl<'a> CandidateEncoder<'a> {
             );
         }
         out
-    }
-}
-
-fn apply_linear_full(input: &[f32], weight: &Weight<'_>, bias: &[f32], output: &mut [f32]) {
-    if let Some(rows) = weight.kernel.f32_slice() {
-        let n_in = input.len();
-        let n_out = output.len();
-        debug_assert_eq!(bias.len(), n_out);
-        for (out_index, row) in rows.chunks_exact(n_in).take(n_out).enumerate() {
-            output[out_index] = crate::ops::dot_f32(row, input, n_in) + bias[out_index];
-        }
-    } else {
-        weight
-            .kernel
-            .forward(input, output, weight.n_in, weight.n_out);
-        for (out, b) in output.iter_mut().zip(bias.iter()) {
-            *out += *b;
-        }
     }
 }

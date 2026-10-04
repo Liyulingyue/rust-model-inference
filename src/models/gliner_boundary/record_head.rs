@@ -29,7 +29,10 @@
 use std::collections::BTreeMap;
 
 use crate::core::tensor::TensorSource;
-use crate::ops::kernel::{QuantizedTensor, Weight};
+use crate::models::gliner_boundary::tensor_util::{
+    apply_linear_full, apply_linear_rows, load_vec, load_weight,
+};
+use crate::ops::kernel::Weight;
 
 use super::matching::linear_sum_assignment;
 use super::record_spec::RecordSpec;
@@ -892,72 +895,4 @@ fn load_instance_embed(
         &[hidden_size as u64, instance_queries as u64],
     )
     .map_err(|e| format!("{name}: {e}"))
-}
-
-fn load_vec(source: &dyn TensorSource, name: &str, len: usize) -> Result<Vec<f32>, String> {
-    crate::core::tensor::load_f32_tensor(source, name, &[len as u64])
-        .map_err(|e| format!("{name}: {e}"))
-}
-
-fn load_weight<'a>(
-    source: &'a dyn TensorSource,
-    name: &str,
-    n_in: usize,
-    n_out: usize,
-) -> Result<Weight<'a>, String> {
-    let info = source
-        .tensor_info(name)
-        .ok_or_else(|| format!("missing tensor {name}"))?;
-    if info.dims != [n_in as u64, n_out as u64] {
-        return Err(format!(
-            "tensor {name} has dims {:?}, expected [{n_in}, {n_out}]",
-            info.dims
-        ));
-    }
-    let bytes = source
-        .tensor_slice(name)
-        .ok_or_else(|| format!("missing tensor data {name}"))?;
-    Ok(Weight::from_quantized(QuantizedTensor::from_bytes(
-        bytes,
-        info.ggml_type,
-        n_in,
-        n_out,
-    )))
-}
-
-fn apply_linear_full(input: &[f32], weight: &Weight<'_>, bias: &[f32], output: &mut [f32]) {
-    if let Some(rows) = weight.kernel.f32_slice() {
-        let n_in = input.len();
-        let n_out = output.len();
-        debug_assert_eq!(bias.len(), n_out);
-        for (out_index, row) in rows.chunks_exact(n_in).take(n_out).enumerate() {
-            output[out_index] = crate::ops::dot_f32(row, input, n_in) + bias[out_index];
-        }
-    } else {
-        weight
-            .kernel
-            .forward(input, output, weight.n_in, weight.n_out);
-        for (out, b) in output.iter_mut().zip(bias.iter()) {
-            *out += *b;
-        }
-    }
-}
-
-fn apply_linear_rows(
-    input: &[f32],
-    weight: &Weight<'_>,
-    bias: &[f32],
-    output: &mut [f32],
-    n_out: usize,
-) {
-    let n_in = weight.n_in.max(1);
-    debug_assert!(output.len() >= input.len() / n_in * n_out);
-    for row in 0..input.len() / n_in {
-        apply_linear_full(
-            &input[row * n_in..][..n_in],
-            weight,
-            bias,
-            &mut output[row * n_out..][..n_out],
-        );
-    }
 }
