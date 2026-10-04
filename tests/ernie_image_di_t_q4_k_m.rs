@@ -40,12 +40,26 @@ fn pick(source: &dyn TensorSource, key: &str) -> Option<String> {
 }
 
 #[test]
-fn contract_pins_ernie_image_di_t_architecture_metadata() {
+fn contract_pins_ernie_image_di_t_via_tensor_signature() {
     let Some(source) = loader() else {
         eprintln!("skipping: set RMI_ERNIE_IMAGE_DIT_GGUF to a real ERNIE-Image GGUF");
         return;
     };
-    assert_eq!(pick(source.as_ref(), "general.architecture").as_deref(), Some("ernie_image"));
+    // Detection: stable-diffusion.cpp probes via
+    //   `model.diffusion_model.layers.0.adaLN_sa_ln.weight`
+    // but the unsloth export drops the `model.diffusion_model.` prefix and
+    // sets `general.architecture = "wan"` (a metadata mis-tag), so the
+    // pragmatic check is `layers.0.self_attention.to_q.weight` presence plus
+    // `text_proj.weight` -- this combination is unique to ERNIE-Image among
+    // diffusion GGUFs in the repo.
+    assert!(
+        source.tensor_info("layers.0.self_attention.to_q.weight").is_some(),
+        "ERNIE-Image signature: layers.0.self_attention.to_q.weight missing"
+    );
+    assert!(
+        source.tensor_info("text_proj.weight").is_some(),
+        "ERNIE-Image signature: text_proj.weight missing"
+    );
 }
 
 #[test]
@@ -84,7 +98,8 @@ fn contract_pins_ernie_image_di_t_tensor_inventory() {
             );
         }
     }
-    // Top-level tensors
+    // Top-level tensors. The unsloth export drops `final_norm.norm.weight`
+    // (the AdaLNContinuous inner norm), so we skip it.
     for name in [
         "x_embedder.proj.weight",
         "x_embedder.proj.bias",
@@ -94,7 +109,6 @@ fn contract_pins_ernie_image_di_t_tensor_inventory() {
         "time_embedding.linear_1.bias",
         "time_embedding.linear_2.weight",
         "time_embedding.linear_2.bias",
-        "final_norm.norm.weight",
         "final_norm.linear.weight",
         "final_norm.linear.bias",
         "final_linear.weight",

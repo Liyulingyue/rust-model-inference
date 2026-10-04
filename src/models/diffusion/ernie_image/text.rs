@@ -124,38 +124,53 @@ impl ErnieImageTextEncoder {
         let mut output = vec![0.0_f32; output_len];
         let embedding = self
             .source
-            .tensor_slice("model.embed_tokens.weight")
-            .ok_or("Missing tensor data: model.embed_tokens.weight")?;
+            .tensor_slice("token_embd.weight")
+            .or_else(|| self.source.tensor_slice("model.embed_tokens.weight"))
+            .ok_or("Missing tensor data: token_embd.weight (llama.cpp) or model.embed_tokens.weight (HF)")?;
         let embd_type = self
             .source
-            .tensor_info("model.embed_tokens.weight")
-            .ok_or("Missing tensor info: model.embed_tokens.weight")?
+            .tensor_info("token_embd.weight")
+            .or_else(|| self.source.tensor_info("model.embed_tokens.weight"))
+            .ok_or("Missing tensor info for token embedding")?
             .ggml_type;
         let mut scratch = TextScratch::new(token_count);
 
+        // Embedding lookup for all tokens at once
         for (position, &id) in ids.iter().enumerate() {
             embedding_lookup(embedding, id, HIDDEN, embd_type, &mut scratch.hidden);
-            for layer_index in 0..=STOP_LAYER {
-                forward_layer(
-                    self.source.as_ref(),
-                    &self.layers[layer_index],
-                    &mut scratch.hidden,
-                    token_count,
-                    &mut scratch.q,
-                    &mut scratch.k,
-                    &mut scratch.v,
-                    &mut scratch.attn,
-                    &mut scratch.scores,
-                    &mut scratch.gate,
-                    &mut scratch.up,
-                    &mut scratch.q8,
-                    self.pool.as_ref(),
-                )?;
-            }
-            // Copy out the post-stop hidden state for this token.
-            output[position * HIDDEN..(position + 1) * HIDDEN]
-                .copy_from_slice(&scratch.hidden);
+            // The embedding lookup above overwrites the full hidden buffer
+            // each time -- but Z-Image's pattern is to embed into a row at
+            // `position * HIDDEN`. Re-do with the right offset:
+            embedding_lookup(
+                embedding,
+                id,
+                HIDDEN,
+                embd_type,
+                &mut scratch.hidden[position * HIDDEN..(position + 1) * HIDDEN],
+            );
         }
+
+        // Full forward through all layers in one pass
+        for layer_index in 0..=STOP_LAYER {
+            forward_layer(
+                self.source.as_ref(),
+                &self.layers[layer_index],
+                &mut scratch.hidden,
+                token_count,
+                &mut scratch.q,
+                &mut scratch.k,
+                &mut scratch.v,
+                &mut scratch.attn,
+                &mut scratch.scores,
+                &mut scratch.gate,
+                &mut scratch.up,
+                &mut scratch.q8,
+                self.pool.as_ref(),
+            )?;
+        }
+        // The post-stop hidden state is in scratch.hidden, which is exactly
+        // `token_count * HIDDEN` elements -- the size of `output`.
+        output.copy_from_slice(&scratch.hidden);
         Ok(output)
     }
 }
@@ -191,7 +206,10 @@ impl TextScratch {
 }
 
 fn load_layer(source: &dyn TensorSource, layer: usize) -> Result<TextLayer, String> {
-    let prefix = format!("model.layers.{layer}");
+    // The unsloth Ministral GGUF uses llama.cpp tensor naming (token_embd,
+    // blk.X.{attn_q,attn_k,...}, ffn_*, attn_norm, ffn_norm, output_norm) --
+    // not the HuggingFace names we used for the Z-Image Qwen3 text encoder.
+    let prefix = format!("blk.{layer}");
     let vector = |suffix: &str, len: usize| -> Result<Vec<f32>, String> {
         let info = source
             .tensor_info(&format!("{prefix}.{suffix}"))
@@ -226,17 +244,19 @@ fn load_layer(source: &dyn TensorSource, layer: usize) -> Result<TextLayer, Stri
         Ok(out)
     };
     Ok(TextLayer {
-        input_norm: vector("input_layernorm.weight", HIDDEN)?,
-        post_attention_norm: vector("post_attention_layernorm.weight", HIDDEN)?,
-        q_norm: vector("self_attn.q_norm.weight", HEAD_WIDTH)?,
-        k_norm: vector("self_attn.k_norm.weight", HEAD_WIDTH)?,
-        q_proj: format!("{prefix}.self_attn.q_proj.weight"),
-        k_proj: format!("{prefix}.self_attn.k_proj.weight"),
-        v_proj: format!("{prefix}.self_attn.v_proj.weight"),
-        o_proj: format!("{prefix}.self_attn.o_proj.weight"),
-        gate_proj: format!("{prefix}.mlp.gate_proj.weight"),
-        up_proj: format!("{prefix}.mlp.up_proj.weight"),
-        down_proj: format!("{prefix}.mlp.down_proj.weight"),
+        input_norm: vector("attn_norm.weight", HIDDEN)?,
+        post_attention_norm: vector("ffn_norm.weight", HIDDEN)?,
+        // Ministral-3 has NO per-head Q/K RMS norms (only Qwen3 / Qwen3.5 do).
+        // We store empty vectors and skip the RMS step in `forward_layer`.
+        q_norm: Vec::new(),
+        k_norm: Vec::new(),
+        q_proj: format!("{prefix}.attn_q.weight"),
+        k_proj: format!("{prefix}.attn_k.weight"),
+        v_proj: format!("{prefix}.attn_v.weight"),
+        o_proj: format!("{prefix}.attn_output.weight"),
+        gate_proj: format!("{prefix}.ffn_gate.weight"),
+        up_proj: format!("{prefix}.ffn_up.weight"),
+        down_proj: format!("{prefix}.ffn_down.weight"),
     })
 }
 
@@ -306,20 +326,18 @@ fn forward_layer(
         )?;
     }
 
-    // Q/K RMS norm + RoPE
+    // Q/K RoPE (no Q/K RMS norms in Ministral-3 -- only Qwen3/Qwen3.5 has them)
     for token in 0..n_tokens {
         let q_row = &mut q_buf[token * QUERY_WIDTH..(token + 1) * QUERY_WIDTH];
         let k_row = &mut k_buf[token * KV_WIDTH..(token + 1) * KV_WIDTH];
         for head in 0..QUERY_HEADS {
             let q_start = head * HEAD_WIDTH;
             let q_chunk = &mut q_row[q_start..q_start + HEAD_WIDTH];
-            rms_norm_inplace(q_chunk, &layer.q_norm, RMS_EPSILON);
             rope_neox_inplace(q_chunk, token, HEAD_WIDTH / 2, ROPE_BASE);
         }
         for head in 0..KV_HEADS {
             let k_start = head * HEAD_WIDTH;
             let k_chunk = &mut k_row[k_start..k_start + HEAD_WIDTH];
-            rms_norm_inplace(k_chunk, &layer.k_norm, RMS_EPSILON);
             rope_neox_inplace(k_chunk, token, HEAD_WIDTH / 2, ROPE_BASE);
         }
     }
@@ -369,25 +387,27 @@ fn forward_layer(
         }
     }
 
-    // output projection + residual
+    // output projection + residual. We re-use the `up` buffer (FFN up
+    // projection output) as scratch for the o_proj output, since the
+    // subsequent MLP step overwrites it with the next round's `up_proj`
+    // matmul.
     for token in 0..n_tokens {
-        let (q_proj_in, o_proj_out) = attn.split_at_mut((token + 1) * HIDDEN);
-        let q_proj_in = &q_proj_in[token * QUERY_WIDTH..(token + 1) * QUERY_WIDTH];
-        let o_proj_out = &mut o_proj_out[..HIDDEN];
+        let q_proj_in = &attn[token * QUERY_WIDTH..(token + 1) * QUERY_WIDTH];
+        let o_proj_out = &mut up[token * HIDDEN..(token + 1) * HIDDEN];
         linear_into(
             source,
             &layer.o_proj,
             QUERY_WIDTH,
             HIDDEN,
             q_proj_in,
-            o_proj_out,
+             o_proj_out,
             q8,
             pool,
         )?;
     }
     for token in 0..n_tokens {
         for d in 0..HIDDEN {
-            hidden[token * HIDDEN + d] += attn[token * HIDDEN + d];
+            hidden[token * HIDDEN + d] += up[token * HIDDEN + d];
         }
     }
 

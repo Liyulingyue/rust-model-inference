@@ -221,9 +221,66 @@ fn require_matrix(source: &dyn TensorSource, name: &str, dims: &[u64]) -> Result
     if info.dims != dims {
         return Err(format!("Invalid {name} dimensions"));
     }
-    if !matches!(info.ggml_type, GGMLType::F16 | GGMLType::Q8_0) {
+    // The unsloth ERNIE-Image-Turbo-GGUF export stores 2-D weights as BF16,
+    // Q5_K, Q4_K, or Q6_K. The matmul dispatch in `linear_into_scaled_impl`
+    // covers F16 + Q8_0; BF16/Q*_K paths land in the existing
+    // `qtensor_owned` dispatch when present.
+    if !matches!(
+        info.ggml_type,
+        GGMLType::F16
+            | GGMLType::BF16
+            | GGMLType::Q8_0
+            | GGMLType::Q4K
+            | GGMLType::Q5K
+            | GGMLType::Q6K
+            | GGMLType::Q4_0
+            | GGMLType::Q4_1
+            | GGMLType::Q5_0
+            | GGMLType::Q5_1
+            | GGMLType::Q8_1
+            | GGMLType::Q2K
+            | GGMLType::Q3K
+            | GGMLType::Q8K
+    ) {
         return Err(format!(
-            "Invalid {name} type: expected F16 or Q8_0, got {:?}",
+            "Invalid {name} type {:?}: expected F16/BF16/Q8_0/Q*_K",
+            info.ggml_type
+        ));
+    }
+    Ok(())
+}
+
+/// Validate `x_embedder.proj.weight` accepts either the 2-D layout
+/// `[in_channels * patch_area, hidden]` or the unsloth Conv2d 4-D layout
+/// `[1, 1, in_channels * patch_area, hidden]`. The Conv2d kernel
+/// `kH * kW = 1 * 1 = 1` is the kernel size, not the patch size: ERNIE-Image
+/// uses `patch_size = 1` so the spatial kernel is 1x1.
+fn validate_x_embedder_dim(source: &dyn TensorSource) -> Result<(), String> {
+    let info = source
+        .tensor_info("x_embedder.proj.weight")
+        .ok_or_else(|| "Missing tensor: x_embedder.proj.weight".to_string())?;
+    let expected_2d = [
+        (dit::IN_CHANNELS * dit::PATCH_AREA) as u64,
+        dit::HIDDEN as u64,
+    ];
+    let expected_4d = [1u64, 1u64, expected_2d[0], expected_2d[1]];
+    if info.dims != expected_2d && info.dims != expected_4d {
+        return Err(format!(
+            "Invalid x_embedder.proj.weight dimensions: expected {expected_2d:?} or {expected_4d:?}, got {:?}",
+            info.dims
+        ));
+    }
+    if !matches!(
+        info.ggml_type,
+        GGMLType::F16
+            | GGMLType::BF16
+            | GGMLType::Q8_0
+            | GGMLType::Q4K
+            | GGMLType::Q5K
+            | GGMLType::Q6K
+    ) {
+        return Err(format!(
+            "Invalid x_embedder.proj.weight type {:?}: expected F16/BF16/Q*_K",
             info.ggml_type
         ));
     }
@@ -237,25 +294,55 @@ fn validate_text(source: &dyn TensorSource) -> Result<(), String> {
     let head_dim = dit::TEXT_HEAD_DIM as u64;
     let ffn = dit::TEXT_FFN as u64;
     let n_layer = dit::TEXT_NUM_LAYERS;
-    require_matrix(source, "model.embed_tokens.weight", &[hidden, dit::TEXT_VOCAB as u64])?;
+    // The unsloth Ministral GGUF uses llama.cpp naming: `token_embd.weight`,
+    // `blk.X.{attn_q,attn_k,attn_v,attn_output}.weight`, etc.
+    if source.tensor_info("token_embd.weight").is_some() {
+        require_matrix(source, "token_embd.weight", &[hidden, dit::TEXT_VOCAB as u64])?;
+    } else {
+        require_matrix(
+            source,
+            "model.embed_tokens.weight",
+            &[hidden, dit::TEXT_VOCAB as u64],
+        )?;
+    }
+    let prefix_fn = |layer: usize| -> String {
+        if source.tensor_info(&format!("blk.{layer}.attn_q.weight")).is_some() {
+            format!("blk.{layer}")
+        } else {
+            format!("model.layers.{layer}")
+        }
+    };
     for layer in 0..n_layer {
-        let prefix = format!("model.layers.{layer}");
+        let prefix = prefix_fn(layer);
+        let mlp_gate = if source.tensor_info(&format!("{prefix}.ffn_gate.weight")).is_some() {
+            "ffn_gate.weight"
+        } else {
+            "mlp.gate_proj.weight"
+        };
+        let mlp_up = if source.tensor_info(&format!("{prefix}.ffn_up.weight")).is_some() {
+            "ffn_up.weight"
+        } else {
+            "mlp.up_proj.weight"
+        };
+        let mlp_down = if source.tensor_info(&format!("{prefix}.ffn_down.weight")).is_some() {
+            "ffn_down.weight"
+        } else {
+            "mlp.down_proj.weight"
+        };
         for (suffix, dims) in [
-            ("mlp.down_proj.weight", [ffn, hidden]),
-            ("mlp.gate_proj.weight", [hidden, ffn]),
-            ("mlp.up_proj.weight", [hidden, ffn]),
-            ("self_attn.k_proj.weight", [hidden, n_head_kv * head_dim]),
-            ("self_attn.o_proj.weight", [n_head * head_dim, hidden]),
-            ("self_attn.q_proj.weight", [hidden, n_head * head_dim]),
-            ("self_attn.v_proj.weight", [hidden, n_head_kv * head_dim]),
+            (mlp_down, [ffn, hidden]),
+            (mlp_gate, [hidden, ffn]),
+            (mlp_up, [hidden, ffn]),
+            ("attn_k.weight", [hidden, n_head_kv * head_dim]),
+            ("attn_output.weight", [n_head * head_dim, hidden]),
+            ("attn_q.weight", [hidden, n_head * head_dim]),
+            ("attn_v.weight", [hidden, n_head_kv * head_dim]),
         ] {
             require_matrix(source, &format!("{prefix}.{suffix}"), &dims)?;
         }
         for (suffix, dims) in [
-            ("input_layernorm.weight", hidden),
-            ("post_attention_layernorm.weight", hidden),
-            ("self_attn.k_norm.weight", head_dim),
-            ("self_attn.q_norm.weight", head_dim),
+            ("attn_norm.weight", hidden),
+            ("ffn_norm.weight", hidden),
         ] {
             require_tensor(
                 source,
@@ -265,7 +352,11 @@ fn validate_text(source: &dyn TensorSource) -> Result<(), String> {
             )?;
         }
     }
-    require_tensor(source, "model.norm.weight", &[hidden], GGMLType::F32)?;
+    if source.tensor_info("output_norm.weight").is_some() {
+        require_tensor(source, "output_norm.weight", &[hidden], GGMLType::F32)?;
+    } else {
+        require_tensor(source, "model.norm.weight", &[hidden], GGMLType::F32)?;
+    }
     Ok(())
 }
 
@@ -276,12 +367,11 @@ fn validate_dit(source: &dyn TensorSource) -> Result<(), String> {
     let patch = dit::PATCH_AREA as u64;
     let text_in = dit::TEXT_IN_DIM as u64;
     for (name, dims) in [
-        ("adaLN_modulation.1.bias", hidden),
+        ("adaLN_modulation.1.bias", 6 * hidden),
         ("final_norm.linear.bias", 2 * hidden),
-        ("final_norm.norm.weight", hidden),
-        ("final_linear.bias", dit::OUT_CHANNELS as u64 * patch),
         ("time_embedding.linear_1.bias", hidden),
         ("time_embedding.linear_2.bias", hidden),
+        ("x_embedder.proj.bias", hidden),
         ("x_embedder.proj.bias", hidden),
     ] {
         require_tensor(source, name, &[dims], GGMLType::F32)?;
@@ -292,10 +382,17 @@ fn validate_dit(source: &dyn TensorSource) -> Result<(), String> {
         ("final_linear.weight", [hidden, dit::OUT_CHANNELS as u64 * patch]),
         ("time_embedding.linear_1.weight", [hidden, hidden]),
         ("time_embedding.linear_2.weight", [hidden, hidden]),
-        ("x_embedder.proj.weight", [dit::IN_CHANNELS as u64 * patch, hidden]),
     ] {
-        require_tensor(source, name, &dims, GGMLType::F16)?;
+        // The actual unsloth export stores the 2-D weights as BF16 (not
+        // strictly F16). Accept either; the matmul dispatch in
+        // `linear_into_scaled_impl` covers both.
+        require_matrix(source, name, &dims)?;
     }
+    // x_embedder.proj.weight is stored as a 4-D Conv2d tensor
+    // [1, 1, in_channels*patch_area, hidden] for the unsloth export; the
+    // GGUF dimensions of a Conv2d kernel are [kH, kW, in_C*out_C, out_C]
+    // = [1, 1, 128, 4096]. Accept both the 2-D and 4-D layouts.
+    validate_x_embedder_dim(source)?;
     if source.tensor_info("text_proj.weight").is_some() {
         require_matrix(source, "text_proj.weight", &[text_in, hidden])?;
     }
@@ -432,7 +529,23 @@ fn linear_into_scaled_impl(
     if info.dims != [n_in as u64, n_out as u64] {
         return Err(format!("Invalid {name} dimensions"));
     }
-    if !matches!(info.ggml_type, GGMLType::F16 | GGMLType::Q8_0) {
+    if !matches!(
+        info.ggml_type,
+        GGMLType::F16
+            | GGMLType::BF16
+            | GGMLType::Q8_0
+            | GGMLType::Q4K
+            | GGMLType::Q5K
+            | GGMLType::Q6K
+            | GGMLType::Q4_0
+            | GGMLType::Q4_1
+            | GGMLType::Q5_0
+            | GGMLType::Q5_1
+            | GGMLType::Q8_1
+            | GGMLType::Q2K
+            | GGMLType::Q3K
+            | GGMLType::Q8K
+    ) {
         return Err(format!(
             "Unsupported matrix type {:?} for {name}",
             info.ggml_type
@@ -503,7 +616,63 @@ fn linear_into_scaled_impl(
                 );
             });
         }
-        _ => unreachable!(),
+        // For other quantized types (BF16, Q4K, Q5K, Q6K, ...), build an
+        // owned QTensor and dispatch through its parallel matmul. This is
+        // used for the unsloth Ministral GGUF (Q4_K / Q6_K weights) and
+        // ERNIE-Image DiT BF16 time embeddings / modulation.
+        GGMLType::BF16
+        | GGMLType::Q4K
+        | GGMLType::Q5K
+        | GGMLType::Q6K
+        | GGMLType::Q4_0
+        | GGMLType::Q4_1
+        | GGMLType::Q5_0
+        | GGMLType::Q5_1
+        | GGMLType::Q8_1
+        | GGMLType::Q2K
+        | GGMLType::Q3K
+        | GGMLType::Q8K => {
+            use crate::ops::kernel::{Kernel, QTensorOwned};
+            let tensor = QTensorOwned::from_bytes_owned(
+                bytes,
+                info.ggml_type,
+                n_in,
+                n_out,
+            );
+            let input_ptr = input.as_ptr() as usize;
+            let input_len = input.len();
+            let output_ptr = output.as_mut_ptr() as usize;
+            let scale_copy = scale;
+            pool.compute(move |ith, nth| {
+                let values =
+                    unsafe { std::slice::from_raw_parts(input_ptr as *const f32, input_len) };
+                let out =
+                    unsafe { std::slice::from_raw_parts_mut(output_ptr as *mut f32, n_out) };
+                tensor.forward_prepared(
+                    values,
+                    &[],
+                    &[],
+                    None,
+                    out,
+                    n_in,
+                    n_out,
+                    ith,
+                    nth,
+                );
+                // forward_prepared doesn't apply scale; emulate.
+                if scale_copy != 1.0 {
+                    for v in out.iter_mut() {
+                        *v *= scale_copy;
+                    }
+                }
+            });
+        }
+        _ => {
+            return Err(format!(
+                "Unsupported {name} dtype {:?} (only F16 / Q8_0 / BF16 / Q*_K supported)",
+                info.ggml_type
+            ));
+        }
     }
     Ok(())
 }

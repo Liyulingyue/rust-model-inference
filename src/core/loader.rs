@@ -443,7 +443,13 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
     // diffusion model whose GGUF metadata only carries general.architecture
     // = "ernie_image" (see stable-diffusion.cpp @ de298c2). The pipeline
     // loads its own config from the tensor inventory.
-    if arch == "ernie_image" {
+    // Note: the unsloth GGUF export mis-tags architecture as "wan", so we
+    // fall back to tensor-name detection when the arch key is missing or
+    // mismatched.
+    let ernie_image_by_arch = arch == "ernie_image";
+    let ernie_image_by_tensor = source.tensor_info("layers.0.self_attention.to_q.weight").is_some()
+        && source.tensor_info("text_proj.weight").is_some();
+    if ernie_image_by_arch || ernie_image_by_tensor {
         return Ok(ModelConfig {
             n_embd: 4096,
             n_layer: 36,

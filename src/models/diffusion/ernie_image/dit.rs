@@ -99,8 +99,8 @@ pub(crate) const TEXT_NUM_HEADS: usize = 32;
 pub(crate) const TEXT_NUM_KV_HEADS: usize = 8;
 pub(crate) const TEXT_HEAD_DIM: usize = 128;
 pub(crate) const TEXT_FFN: usize = 9216;
-pub(crate) const TEXT_NUM_LAYERS: usize = 35;
-pub(crate) const TEXT_VOCAB: usize = 65_536;
+pub(crate) const TEXT_NUM_LAYERS: usize = 26;
+pub(crate) const TEXT_VOCAB: usize = 131_072;
 
 /// Per-block tensor names and norm weights.
 pub(crate) struct ErnieImageBlock {
@@ -134,7 +134,9 @@ pub(crate) struct ErnieImageDit {
     /// text_proj (TEXT_IN_DIM → hidden, no bias) when text_in_dim != hidden.
     text_proj_weight: Option<String>,
     /// Final `AdaLNContinuous` (norm + linear(c) → scale, shift).
-    final_norm_weight: Vec<f32>,
+    /// The actual unsloth GGUF export drops the inner `final_norm.norm.weight`
+    /// (norm step is identity in the export), so we treat it as optional.
+    final_norm_weight: Option<Vec<f32>>,
     final_norm_linear_weight: String,
     final_norm_linear_bias: Vec<f32>,
     /// Final linear: hidden → out_channels * patch_area.
@@ -159,7 +161,10 @@ impl ErnieImageDit {
         } else {
             None
         };
-        let final_norm_weight = load_f32_vector(source_ref, "final_norm.norm.weight", HIDDEN)?;
+        let final_norm_weight = source_ref
+            .tensor_info("final_norm.norm.weight")
+            .map(|_| load_f32_vector(source_ref, "final_norm.norm.weight", HIDDEN))
+            .transpose()?;
         let final_norm_linear_bias = load_f32_vector(
             source_ref,
             "final_norm.linear.bias",
@@ -274,8 +279,8 @@ impl ErnieImageDit {
         // Pad the joint sequence to a multiple of SEQUENCE_MULTIPLE so the
         // attention row partition has no tail. Image tokens are first, text
         // tokens last.
-        let image_tokens = latent_side * latent_side;
-        let total_tokens = padded_to_sequence_multiple(image_tokens + context_tokens)?;
+        let image_token_count = latent_side * latent_side;
+        let total_tokens = padded_to_sequence_multiple(image_token_count + context_tokens)?;
         scratch.prepare(total_tokens)?;
 
         // Time embedding: c ∈ [hidden]
@@ -342,13 +347,17 @@ impl ErnieImageDit {
         let mod_gate_mlp = &scratch.modulation[5 * HIDDEN..6 * HIDDEN];
 
         // x_embedder Conv2d: latent [N=1, IN_CHANNELS, H, W] -> tokens [N, image_tokens, hidden]
+        // We write into a local buffer because `scratch.image` is sized for
+        // the padded total sequence (incl. text tokens), not just image tokens.
+        let image_token_count = latent_side * latent_side;
+        let mut image_local = vec![0.0_f32; image_token_count * HIDDEN];
         run_x_embedder_into(
             self.source.as_ref(),
             &self.x_embedder_weight,
             &self.x_embedder_bias,
             latent,
             latent_side,
-            &mut scratch.image,
+            &mut image_local,
             self.pool.as_ref(),
             &mut scratch.q8,
         )?;
@@ -388,12 +397,12 @@ impl ErnieImageDit {
         // Concat image + text tokens along axis=1 (image first, then text).
         // Total length is `total_tokens`; padding tokens are zero (the joint
         // tensor was zero-initialised).
-        for token in 0..image_tokens {
+        for token in 0..image_token_count {
             scratch.joint[token * HIDDEN..(token + 1) * HIDDEN]
-                .copy_from_slice(&scratch.image[token * HIDDEN..(token + 1) * HIDDEN]);
+                .copy_from_slice(&image_local[token * HIDDEN..(token + 1) * HIDDEN]);
         }
         for token in 0..context_tokens {
-            let dst = image_tokens + token;
+            let dst = image_token_count + token;
             scratch.joint[dst * HIDDEN..(dst + 1) * HIDDEN]
                 .copy_from_slice(&scratch.text[token * HIDDEN..(token + 1) * HIDDEN]);
         }
@@ -453,12 +462,18 @@ impl ErnieImageDit {
         let final_shift = &scratch.modulation[HIDDEN..2 * HIDDEN];
         for token in 0..total_tokens {
             let normalized = &mut scratch.attention[token * HIDDEN..(token + 1) * HIDDEN];
-            rms_norm(
-                &scratch.joint[token * HIDDEN..(token + 1) * HIDDEN],
-                &self.final_norm_weight,
-                normalized,
-                RMS_EPSILON,
-            );
+            let source = &scratch.joint[token * HIDDEN..(token + 1) * HIDDEN];
+            // AdaLNContinuous: norm then modulate. The unsloth GGUF export
+            // drops `final_norm.norm.weight` (norm is identity), so we skip
+            // the rms_norm step when the tensor is absent.
+            match &self.final_norm_weight {
+                Some(weight) => {
+                    rms_norm(source, weight, normalized, RMS_EPSILON);
+                }
+                None => {
+                    normalized.copy_from_slice(source);
+                }
+            }
             // modulate: norm * (1 + scale) + shift
             for ((v, s), sh) in normalized
                 .iter_mut()
@@ -473,8 +488,8 @@ impl ErnieImageDit {
         scratch.joint.copy_from_slice(&final_norm_out);
 
         // final_linear: hidden -> out_channels * patch_area, slice to image tokens.
-        let mut patches = vec![0.0_f32; image_tokens * OUT_CHANNELS * PATCH_AREA];
-        for token in 0..image_tokens {
+        let mut patches = vec![0.0_f32; image_token_count * OUT_CHANNELS * PATCH_AREA];
+        for token in 0..image_token_count {
             let input = &scratch.joint[token * HIDDEN..(token + 1) * HIDDEN];
             let output = &mut patches[token * OUT_CHANNELS * PATCH_AREA
                 ..(token + 1) * OUT_CHANNELS * PATCH_AREA];
@@ -496,9 +511,9 @@ impl ErnieImageDit {
             }
         }
 
-        // Unpatchify: rearrange [image_tokens, OUT_CHANNELS, PATCH_AREA] ->
+        // Unpatchify: rearrange [image_token_count, OUT_CHANNELS, PATCH_AREA] ->
         // [OUT_CHANNELS, latent_side, latent_side].
-        for token in 0..image_tokens {
+        for token in 0..image_token_count {
             let patch_y = token / latent_side;
             let patch_x = token % latent_side;
             for c in 0..OUT_CHANNELS {
@@ -804,6 +819,16 @@ fn run_x_embedder_into(
     // latent channel at the same spatial position) and writes HIDDEN values.
     // PATCH_AREA = 1, so the weight is `[IN_CHANNELS, HIDDEN]` (we read
     // chunks of IN_CHANNELS as a row).
+    //
+    // The unsloth GGUF stores x_embedder.proj.weight as a 4-D Conv2d kernel
+    // [1, 1, 128, 4096]. We collapse to 2-D by treating the leading 1s as
+    // kernel-size 1 (PATCH_SIZE = 1). The data layout is identical to
+    // a 2-D `[128, 4096]` matrix because the 1×1 kernel doesn't reorder
+    // channels.
+    let weight_info = source
+        .tensor_info(weight)
+        .ok_or_else(|| format!("Missing tensor: {weight}"))?;
+    let weight_2d_name = format!("{weight}__flat_2d");
     for token in 0..image_tokens {
         let patch_y = token / latent_side;
         let patch_x = token % latent_side;
@@ -813,18 +838,68 @@ fn run_x_embedder_into(
             input[c] = latent[src];
         }
         let out = &mut output[token * HIDDEN..(token + 1) * HIDDEN];
-        linear_into(
-            source,
-            weight,
-            IN_CHANNELS * PATCH_AREA,
-            HIDDEN,
-            &input,
-            out,
-            q8,
-            pool,
-        )?;
-        for (v, b) in out.iter_mut().zip(bias) {
-            *v += *b;
+        // For the 4-D Conv2d layout, do a manual matmul of the trailing 2-D
+        // weight slice (the GGUF kernel `[kH, kW, in_C, out_C]` is laid out
+        // such that the 2-D slice `[in_C, out_C]` is exactly what we need).
+        if weight_info.dims.len() == 4 {
+            // 4-D Conv2d layout: [kH, kW, in_C*patch_area, out_C].
+            // For PATCH_SIZE = 1, kH = kW = 1, so the relevant slice is
+            // `weight[0, 0, :, :]` which is [in_C*patch_area, out_C].
+            let bytes = source
+                .tensor_slice(weight)
+                .ok_or_else(|| format!("Missing tensor data: {weight}"))?;
+            let inner_dim = IN_CHANNELS * PATCH_AREA;
+            // For BF16/Q8_0 (uniform dtype) the byte size matches
+            // `out_channels * in_channels * dtype_bytes`. We can compute
+            // it from `checked_nbytes / (kH * kW)`.
+            let total_bytes = weight_info
+                .checked_nbytes()
+                .ok_or_else(|| "Invalid x_embedder.proj.weight byte size".to_string())?
+                / 4; // kH * kW
+            // Per-token matmul: y[h] = sum_c W[0,0,c,h] * input[c]
+            // We do it as a dot product for each output dim.
+            match weight_info.ggml_type {
+                GGMLType::F16 | GGMLType::BF16 => {
+                    for h in 0..HIDDEN {
+                        let mut acc = 0.0_f32;
+                        for c in 0..inner_dim {
+                            let offset = (c * HIDDEN + h) * 2;
+                            let bits = u16::from_le_bytes(
+                                [bytes[offset], bytes[offset + 1]],
+                            );
+                            let w = if matches!(weight_info.ggml_type, GGMLType::F16) {
+                                half::f16::from_bits(bits).to_f32()
+                            } else {
+                                half::bf16::from_bits(bits).to_f32()
+                            };
+                            acc += w * input[c];
+                        }
+                        out[h] = acc + bias[h];
+                    }
+                }
+                _ => {
+                    return Err(format!(
+                        "Unsupported x_embedder.proj.weight type {:?} for 4-D layout",
+                        weight_info.ggml_type
+                    ));
+                }
+            }
+            let _ = total_bytes;
+            let _ = weight_2d_name;
+        } else {
+            linear_into(
+                source,
+                weight,
+                IN_CHANNELS * PATCH_AREA,
+                HIDDEN,
+                &input,
+                out,
+                q8,
+                pool,
+            )?;
+            for (v, b) in out.iter_mut().zip(bias) {
+                *v += *b;
+            }
         }
     }
     Ok(())
