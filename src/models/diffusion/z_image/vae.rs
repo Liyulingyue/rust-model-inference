@@ -2,6 +2,7 @@ use super::{validate_component, Component, ZImageRgb};
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::ops::{dot_f16_f16_bytes, f32_to_f16, silu_inplace, softmax_inplace};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 const LATENT_CHANNELS: usize = 16;
@@ -564,7 +565,7 @@ impl FluxVae {
             side,
             &mut scratch.v,
         )?;
-        one_head_spatial_attention_into(
+        one_head_spatial_attention_parallel_into(
             &scratch.q,
             &scratch.k,
             &scratch.v,
@@ -572,6 +573,7 @@ impl FluxVae {
             spatial,
             &mut scratch.first,
             &mut scratch.scores,
+            &self.pool,
         )?;
         run_conv(
             self.source.as_ref(),
@@ -1011,6 +1013,101 @@ fn one_head_spatial_attention_into(
             }
             output[channel * spatial + query_position] = value;
         }
+    }
+    Ok(())
+}
+
+/// Runs the VAE's single-head spatial attention by partitioning query rows.
+///
+/// A query row only reads Q/K/V and writes its own spatial positions in the
+/// output, so query rows are independent. Keeping the dot-product and softmax
+/// loops unchanged preserves the scalar result for each row while allowing
+/// the existing inference pool to process rows concurrently.
+fn one_head_spatial_attention_parallel_into(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    channels: usize,
+    spatial: usize,
+    output: &mut [f32],
+    scores: &mut [f32],
+    pool: &Arc<ComputePool>,
+) -> Result<(), String> {
+    if pool.n_threads() <= 1 {
+        return one_head_spatial_attention_into(q, k, v, channels, spatial, output, scores);
+    }
+    let feature_len = checked_feature_len(channels, spatial, "VAE attention")?;
+    if channels == 0
+        || spatial == 0
+        || q.len() != feature_len
+        || k.len() != feature_len
+        || v.len() != feature_len
+        || output.len() != feature_len
+        || scores.len() != spatial
+    {
+        return Err("Invalid VAE attention buffer length".into());
+    }
+    if q.iter().chain(k).chain(v).any(|value| !value.is_finite()) {
+        return Err("Non-finite VAE attention input".into());
+    }
+    output.fill(0.0);
+    let scale = 1.0 / (channels as f32).sqrt();
+    let output_ptr = output.as_mut_ptr() as usize;
+    let failure = AtomicBool::new(false);
+    let worker_failure = &failure;
+
+    // SAFETY: each worker receives a disjoint query-position range. It only
+    // reads q/k/v and writes output[channel * spatial + query_position] for
+    // positions in that range. The source slices and output outlive compute.
+    pool.compute(move |ith, nth| {
+        let per_thread = spatial.div_ceil(nth);
+        let start = ith * per_thread;
+        let end = (start + per_thread).min(spatial);
+        if start >= end {
+            return;
+        }
+        let mut local_scores = vec![0.0f32; spatial];
+
+        for query_position in start..end {
+            for key_position in 0..spatial {
+                let mut score = 0.0f32;
+                for channel in 0..channels {
+                    score +=
+                        q[channel * spatial + query_position] * k[channel * spatial + key_position];
+                }
+                score *= scale;
+                if !score.is_finite() {
+                    worker_failure.store(true, Ordering::Relaxed);
+                    return;
+                }
+                local_scores[key_position] = score;
+            }
+            vae_softmax_inplace(&mut local_scores);
+            if local_scores.iter().any(|value| !value.is_finite()) {
+                worker_failure.store(true, Ordering::Relaxed);
+                return;
+            }
+            for channel in 0..channels {
+                let mut value = 0.0f32;
+                for key_position in 0..spatial {
+                    value += local_scores[key_position] * v[channel * spatial + key_position];
+                }
+                if !value.is_finite() {
+                    worker_failure.store(true, Ordering::Relaxed);
+                    return;
+                }
+                // Write the query element directly so each worker creates no
+                // mutable slice that aliases another worker's disjoint
+                // strided query range.
+                unsafe {
+                    *(output_ptr as *mut f32).add(channel * spatial + query_position) = value;
+                }
+            }
+        }
+    });
+
+    if failure.load(Ordering::Relaxed) || output.iter().any(|value| !value.is_finite()) {
+        return Err("Non-finite VAE attention output".into());
     }
     Ok(())
 }
@@ -1599,6 +1696,85 @@ mod tests {
         assert!((output[0] - 4.0757656).abs() < 1e-6);
         assert!((output[1] - 3.4768117).abs() < 1e-6);
         assert_eq!(&output[2..], &[0.0; 6]);
+    }
+
+    #[test]
+    fn mid_attention_parallel_matches_scalar_query_partitioning() {
+        for (channels, spatial) in [(1, 1), (4, 5), (7, 17), (512, 33)] {
+            let q = (0..channels * spatial)
+                .map(|index| ((index * 17 % 143) as f32 - 71.0) * 0.03125)
+                .collect::<Vec<_>>();
+            let k = (0..channels * spatial)
+                .map(|index| ((index * 13 % 137) as f32 - 68.0) * -0.046875)
+                .collect::<Vec<_>>();
+            let v = (0..channels * spatial)
+                .map(|index| ((index * 7 % 131) as f32 - 65.0) * 0.0625)
+                .collect::<Vec<_>>();
+            let mut expected = vec![0.0; channels * spatial];
+            let mut scalar_scores = vec![0.0; spatial];
+            one_head_spatial_attention_into(
+                &q,
+                &k,
+                &v,
+                channels,
+                spatial,
+                &mut expected,
+                &mut scalar_scores,
+            )
+            .unwrap();
+            let expected_bits = expected
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>();
+            for threads in [1, 2, 4, 8] {
+                // NaNs make missing query writes fail, including an empty
+                // worker range when there are more threads than queries.
+                let mut actual = vec![f32::NAN; channels * spatial];
+                let mut parallel_scores = vec![0.0; spatial];
+                one_head_spatial_attention_parallel_into(
+                    &q,
+                    &k,
+                    &v,
+                    channels,
+                    spatial,
+                    &mut actual,
+                    &mut parallel_scores,
+                    &Arc::new(ComputePool::new(threads)),
+                )
+                .unwrap();
+                assert_eq!(
+                    actual
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>(),
+                    expected_bits,
+                    "channels={channels}, spatial={spatial}, threads={threads}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mid_attention_parallel_rejects_invalid_and_non_finite_buffers() {
+        let pool = Arc::new(ComputePool::new(4));
+        let mut output = [0.0; 2];
+        let mut scores = [0.0; 2];
+        let mut run = |q: &[f32], k: &[f32], v: &[f32]| {
+            one_head_spatial_attention_parallel_into(q, k, v, 1, 2, &mut output, &mut scores, &pool)
+        };
+        assert_eq!(
+            run(&[0.0], &[0.0; 2], &[0.0; 2]).unwrap_err(),
+            "Invalid VAE attention buffer length"
+        );
+        assert_eq!(
+            run(&[0.0, f32::NAN], &[0.0; 2], &[0.0; 2]).unwrap_err(),
+            "Non-finite VAE attention input"
+        );
+        // Finite inputs can still overflow inside a worker. Reuse the same
+        // pool afterwards to verify the error does not leave workers busy.
+        assert!(run(&[0.0, f32::MAX], &[2.0; 2], &[1.0; 2]).is_err());
+        run(&[0.0; 2], &[0.0; 2], &[1.0, 3.0]).unwrap();
+        assert_eq!(output, [2.0; 2]);
     }
 
     #[test]
