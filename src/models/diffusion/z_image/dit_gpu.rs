@@ -276,6 +276,9 @@ impl DitGpuSession {
                 "Z-Image DiT row count {rows} must be a nonzero multiple of 32"
             )));
         }
+        if with_attention {
+            crate::vulkan::ops::require_tiled_attention(context)?;
+        }
         let layout = Layout::build(rows, with_attention)?;
         // 1.5x headroom over the computed regions, rounded up, so the driver's
         // own alignment does not push the last region past the arena.

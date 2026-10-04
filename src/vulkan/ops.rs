@@ -72,6 +72,21 @@ const ADALN_MODULATE: usize = 23;
 const Q8_MATMUL_GROUPED_TILED: usize = 24;
 const F16_MATMUL_TILED: usize = 25;
 const ATTENTION_SCORES_TILED: usize = 26;
+
+pub(crate) fn require_tiled_attention(context: &VulkanContext) -> Result<(), VulkanError> {
+    let limits = &context.limits;
+    // attention_scores_tiled.comp uses eight groups of 32 lanes. Its 12 KiB
+    // shared memory fits within the existing Q8 baseline requirement.
+    if limits.max_compute_work_group_invocations < 256
+        || limits.max_compute_work_group_size[0] < 256
+    {
+        return Err(VulkanError::UnsupportedShape(
+            "tiled attention requires 256 workgroup invocations and a 256-wide workgroup".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Per-pipeline dispatch counters, populated only while `RUST_GPU_DISPATCH_TRACE`
 /// is set. Indexed by the `OPERATOR_SHADERS` position, so a new pipeline needs
 /// no extra bookkeeping here.
@@ -902,6 +917,12 @@ impl<'a> Qwen3Ops<'a> {
                     // and `record_weight_matmul_tiled_rows` refuses instead of
                     // recording a dispatch whose semantics it cannot honour.
                     Q8_MATMUL_GROUPED_SHADER
+                } else if index == ATTENTION_SCORES_TILED
+                    && require_tiled_attention(context).is_err()
+                {
+                    // Keep ordinary Qwen operators available on baseline
+                    // devices; DiT rejects this slot before recording it.
+                    ATTENTION_SCORES_SHADER
                 } else {
                     *shader
                 }
@@ -2174,6 +2195,7 @@ impl<'a> Qwen3Ops<'a> {
         head_dim: usize,
         rows: usize,
     ) -> Result<(), VulkanError> {
+        require_tiled_attention(self.context)?;
         let kv_count = q_heads
             .checked_mul(head_dim)
             .ok_or(VulkanError::OutOfMemory)?;
@@ -5201,6 +5223,49 @@ fn check_close(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn tiled_attention_limits_preserve_baseline_operators() {
+        use super::{Qwen3Ops, TokenCommands, VulkanContext, VulkanError};
+        use crate::models::diffusion::z_image::dit_gpu::DitGpuSession;
+
+        for (invocations, size_x) in [(128, 256), (256, 128)] {
+            let mut context = VulkanContext::new().unwrap();
+            context.limits.max_compute_work_group_invocations = invocations;
+            context.limits.max_compute_work_group_size[0] = size_x;
+            let context = Box::leak(Box::new(context));
+            let projection_only = DitGpuSession::new_with_attention(context, 32, false).unwrap();
+            drop(projection_only);
+            assert!(matches!(
+                DitGpuSession::new_with_attention(context, 32, true),
+                Err(VulkanError::UnsupportedShape(_))
+            ));
+
+            let mut cursor = 0;
+            let qkv = super::region(&mut cursor, 384 * 4).unwrap();
+            let cache_k = super::region(&mut cursor, 128 * 4).unwrap();
+            let cache_v = super::region(&mut cursor, 128 * 4).unwrap();
+            let scratch = super::region(&mut cursor, 128 * 4).unwrap();
+            let scores = super::region(&mut cursor, 4).unwrap();
+            let q8 = super::region(&mut cursor, 32).unwrap();
+            let scales = super::region(&mut cursor, 4).unwrap();
+            let sums = super::region(&mut cursor, 4).unwrap();
+            let ops = Qwen3Ops::new_with_size(context, cursor, 1).unwrap();
+            ops.write_f32(qkv, &[1.0; 384]).unwrap();
+            let commands = TokenCommands::begin(context).unwrap();
+            assert!(matches!(
+                ops.record_diy_attention_scores(
+                    &commands, qkv, cache_k, cache_v, scratch, scores, 384, 1, 1, 128, 1,
+                ),
+                Err(VulkanError::UnsupportedShape(_))
+            ));
+            ops.record_quantize_q8_0(&commands, qkv, q8, scales, sums, 32)
+                .unwrap();
+            commands.submit_and_wait().unwrap();
+            assert_eq!(ops.read_bytes(q8, 32).unwrap(), &[127; 32]);
+        }
+    }
+
     /// Compare the complete 30-head production attention shape, including
     /// readback. Timing is diagnostic; numerical equality is the assertion.
     #[test]
