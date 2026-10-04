@@ -153,6 +153,48 @@ pub fn run_z_image_cli(
     Ok(())
 }
 
+pub fn run_auk_cli(
+    diffusion: Arc<dyn TensorSource>,
+    vae: Arc<dyn TensorSource>,
+    prompt: &str,
+    steps: usize,
+    sample_rate: usize,
+    seed: i64,
+    out: std::path::PathBuf,
+    n_threads: usize,
+) -> Result<(), String> {
+    let started = Instant::now();
+    let pipeline = crate::models::diffusion::auk::AukPipeline::load(diffusion, vae, n_threads)?;
+    println!(
+        "AuK components loaded in {}ms",
+        started.elapsed().as_millis()
+    );
+    // For now the pipeline needs text conditioning as &[f32] of width
+    // TEXT_IN. The TTS-only scaffold emits an empty conditioning buffer;
+    // text encoding (Qwen2.5-Omni) wires in a follow-up commit.
+    let text_conditioning: Vec<f32> = Vec::new();
+    let duration_sec = 1usize;
+    let audio = pipeline.generate_audio(
+        &text_conditioning,
+        0,
+        &crate::models::diffusion::auk::AukOptions {
+            steps,
+            sample_rate: sample_rate as u32,
+            duration_sec,
+            seed,
+            guidance_scale: 2.0,
+        },
+    )?;
+    let _ = (prompt, out);
+    println!(
+        "AuK audio generated ({} samples @ {} Hz) in {}ms -- WAV writer not yet implemented",
+        audio.samples.len(),
+        audio.sample_rate,
+        started.elapsed().as_millis()
+    );
+    Ok(())
+}
+
 pub fn run_ernie_image_cli(
     diffusion: Arc<dyn TensorSource>,
     text: Arc<dyn TensorSource>,

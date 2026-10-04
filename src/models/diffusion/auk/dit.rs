@@ -78,7 +78,7 @@ pub(crate) const LATENT_DIM: usize = 64;
 pub(crate) const NUM_DOUBLE_LAYERS: usize = 10;
 
 /// Number of single blocks (sequential img attention + FF).
-pub(crate) const NUM_SINGLE_LAYERS: usize = 20;
+pub(crate) const NUM_SINGLE_LAYERS: usize = 10;
 
 /// Padding multiple for joint sequence length.
 pub(crate) const SEQUENCE_MULTIPLE: usize = 32;
@@ -93,10 +93,11 @@ pub(crate) struct DoubleBlockWeights {
     pub(crate) qkv_c: String,
     pub(crate) qkv_c_bias: Vec<f32>,
     pub(crate) out_c: String,
-    pub(crate) q_norm_x: Vec<f32>,
-    pub(crate) k_norm_x: Vec<f32>,
-    pub(crate) q_norm_c: Vec<f32>,
-    pub(crate) k_norm_c: Vec<f32>,
+    /// Single shared Q/K RMS norm (used by both x-stream and c-stream).
+    /// The unsloth GGUF does not store per-stream copies -- the C++ source
+    /// (`audio.cpp`) loads a single `attn.q_norm.weight` per layer.
+    pub(crate) q_norm: Vec<f32>,
+    pub(crate) k_norm: Vec<f32>,
     pub(crate) ff_x_in: String,
     pub(crate) ff_x_out: String,
     pub(crate) ff_c_in: String,
@@ -497,7 +498,7 @@ fn load_f32_vector(
     if info.dims != [len as u64] {
         return Err(format!("Invalid {name} dimensions"));
     }
-    if !matches!(info.ggml_type, GGMLType::F32 | GGMLType::BF16) {
+    if !matches!(info.ggml_type, GGMLType::F32 | GGMLType::BF16 | GGMLType::F16) {
         return Err(format!(
             "Invalid {name} type {:?}: expected F32/BF16",
             info.ggml_type
@@ -521,9 +522,15 @@ fn load_f32_vector(
                 *dst = f32::from_le_bytes(chunk.try_into().unwrap());
             }
         }
-        GGMLType::BF16 => {
+        GGMLType::F16 => {
             for (dst, chunk) in values.iter_mut().zip(bytes.chunks_exact(2)) {
                 *dst = f16::from_bits(u16::from_le_bytes(chunk.try_into().unwrap())).to_f32();
+            }
+        }
+        GGMLType::BF16 => {
+            for (dst, chunk) in values.iter_mut().zip(bytes.chunks_exact(2)) {
+                *dst = half::bf16::from_bits(u16::from_le_bytes(chunk.try_into().unwrap()))
+                    .to_f32();
             }
         }
         _ => unreachable!(),
@@ -549,10 +556,8 @@ fn load_double_block(
         qkv_c: format!("{prefix}.attn.to_qkv_c.weight"),
         qkv_c_bias: vector("attn.to_qkv_c.bias", QKV_DIM)?,
         out_c: format!("{prefix}.attn.to_out_c.weight"),
-        q_norm_x: vector("attn.q_norm.weight", HEAD_DIM)?,
-        k_norm_x: vector("attn.k_norm.weight", HEAD_DIM)?,
-        q_norm_c: vector("attn.q_norm_c.weight", HEAD_DIM)?,
-        k_norm_c: vector("attn.k_norm_c.weight", HEAD_DIM)?,
+        q_norm: vector("attn.q_norm.weight", HEAD_DIM)?,
+        k_norm: vector("attn.k_norm.weight", HEAD_DIM)?,
         ff_x_in: format!("{prefix}.ff_x.linear_in.weight"),
         ff_x_out: format!("{prefix}.ff_x.linear_out.weight"),
         ff_c_in: format!("{prefix}.ff_c.linear_in.weight"),

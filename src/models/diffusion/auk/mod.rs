@@ -132,13 +132,8 @@ fn validate_dit(source: &dyn TensorSource) -> Result<(), String> {
     )?;
     // Text in: text_hidden 2048 -> hidden
     require_matrix(source, "transformer.txt_proj.weight", &[dit::TEXT_IN as u64, hidden])?;
-    // txt_norm: 1-D, hidden
-    require_tensor(
-        source,
-        "transformer.txt_norm.weight",
-        &[hidden],
-        GGMLType::F32,
-    )?;
+    // txt_norm: 1-D, hidden (F16 in the unsloth F16 GGUF)
+    require_norm_f16(source, "transformer.txt_norm.weight", hidden)?;
     // Final norm: AdaLNContinuous linear (hidden -> 2*hidden) + norm_out.norm
     // is not stored (norm is identity in the GGUF).
     require_matrix(
@@ -146,31 +141,17 @@ fn validate_dit(source: &dyn TensorSource) -> Result<(), String> {
         "transformer.norm_out.linear.weight",
         &[hidden, 2 * hidden],
     )?;
-    require_tensor(
-        source,
-        "transformer.norm_out.linear.bias",
-        &[2 * hidden],
-        GGMLType::F32,
-    )?;
+    require_norm_f16(source, "transformer.norm_out.linear.bias", 2 * hidden)?;
     // Final projection: hidden -> latent_dim
     require_matrix(
         source,
         "transformer.proj_out.weight",
         &[hidden, dit::LATENT_DIM as u64],
     )?;
-    require_tensor(
-        source,
-        "transformer.proj_out.bias",
-        &[dit::LATENT_DIM as u64],
-        GGMLType::F32,
-    )?;
-    // Rotary inv_freq: head_dim/2 = 32 (just the inv_freq, not the expanded form)
-    require_tensor(
-        source,
-        "transformer.rotary_embed.inv_freq",
-        &[32],
-        GGMLType::F32,
-    )?;
+    require_norm_f16(source, "transformer.proj_out.bias", dit::LATENT_DIM as u64)?;
+    // Rotary inv_freq: head_dim/2 = 32 (just the inv_freq, not the expanded form;
+    // F16 in the unsloth F16 GGUF).
+    require_norm_f16(source, "transformer.rotary_embed.inv_freq", 32)?;
     // Per-block tensors
     for layer in 0..dit::NUM_DOUBLE_LAYERS {
         let prefix = format!("transformer.transformer_blocks.{layer}");
@@ -180,47 +161,27 @@ fn validate_dit(source: &dyn TensorSource) -> Result<(), String> {
             &format!("{prefix}.attn_norm_x.linear.weight"),
             &[hidden, mod_dim],
         )?;
-        require_tensor(
-            source,
-            &format!("{prefix}.attn_norm_x.linear.bias"),
-            &[mod_dim],
-            GGMLType::F32,
-        )?;
+        require_norm_f16(source, &format!("{prefix}.attn_norm_x.linear.bias"), mod_dim)?;
         require_matrix(
             source,
             &format!("{prefix}.attn_norm_c.linear.weight"),
             &[hidden, mod_dim],
         )?;
-        require_tensor(
-            source,
-            &format!("{prefix}.attn_norm_c.linear.bias"),
-            &[mod_dim],
-            GGMLType::F32,
-        )?;
+        require_norm_f16(source, &format!("{prefix}.attn_norm_c.linear.bias"), mod_dim)?;
         // QKV for x-stream (no suffix)
         require_matrix(
             source,
             &format!("{prefix}.attn.to_qkv.weight"),
             &[hidden, qkv],
         )?;
-        require_tensor(
-            source,
-            &format!("{prefix}.attn.to_qkv.bias"),
-            &[qkv],
-            GGMLType::F32,
-        )?;
+        require_norm_f16(source, &format!("{prefix}.attn.to_qkv.bias"), qkv)?;
         // QKV for c-stream (_c suffix)
         require_matrix(
             source,
             &format!("{prefix}.attn.to_qkv_c.weight"),
             &[hidden, qkv],
         )?;
-        require_tensor(
-            source,
-            &format!("{prefix}.attn.to_qkv_c.bias"),
-            &[qkv],
-            GGMLType::F32,
-        )?;
+        require_norm_f16(source, &format!("{prefix}.attn.to_qkv_c.bias"), qkv)?;
         // Output projection for c-stream (no bias)
         require_matrix(
             source,
@@ -228,17 +189,15 @@ fn validate_dit(source: &dyn TensorSource) -> Result<(), String> {
             &[hidden, hidden],
         )?;
         // Q/K RMS norms
-        require_tensor(
+        require_norm_f16(
             source,
             &format!("{prefix}.attn.q_norm.weight"),
-            &[dit::HEAD_DIM as u64],
-            GGMLType::F32,
+            dit::HEAD_DIM as u64,
         )?;
-        require_tensor(
+        require_norm_f16(
             source,
             &format!("{prefix}.attn.k_norm.weight"),
-            &[dit::HEAD_DIM as u64],
-            GGMLType::F32,
+            dit::HEAD_DIM as u64,
         )?;
         // FF gate+up packed for x-stream
         require_matrix(
@@ -270,46 +229,29 @@ fn validate_dit(source: &dyn TensorSource) -> Result<(), String> {
             &format!("{prefix}.attn_norm.linear.weight"),
             &[hidden, mod_dim],
         )?;
-        require_tensor(
-            source,
-            &format!("{prefix}.attn_norm.linear.bias"),
-            &[mod_dim],
-            GGMLType::F32,
-        )?;
+        require_norm_f16(source, &format!("{prefix}.attn_norm.linear.bias"), mod_dim)?;
         require_matrix(
             source,
             &format!("{prefix}.attn.to_qkv.weight"),
             &[hidden, qkv],
         )?;
-        require_tensor(
-            source,
-            &format!("{prefix}.attn.to_qkv.bias"),
-            &[qkv],
-            GGMLType::F32,
-        )?;
+        require_norm_f16(source, &format!("{prefix}.attn.to_qkv.bias"), qkv)?;
         // to_out.0 (special: 0 suffix even for single block)
         require_matrix(
             source,
             &format!("{prefix}.attn.to_out.0.weight"),
             &[hidden, hidden],
         )?;
-        require_tensor(
-            source,
-            &format!("{prefix}.attn.to_out.0.bias"),
-            &[hidden],
-            GGMLType::F32,
-        )?;
-        require_tensor(
+        require_norm_f16(source, &format!("{prefix}.attn.to_out.0.bias"), hidden)?;
+        require_norm_f16(
             source,
             &format!("{prefix}.attn.q_norm.weight"),
-            &[dit::HEAD_DIM as u64],
-            GGMLType::F32,
+            dit::HEAD_DIM as u64,
         )?;
-        require_tensor(
+        require_norm_f16(
             source,
             &format!("{prefix}.attn.k_norm.weight"),
-            &[dit::HEAD_DIM as u64],
-            GGMLType::F32,
+            dit::HEAD_DIM as u64,
         )?;
         require_matrix(
             source,
@@ -321,6 +263,33 @@ fn validate_dit(source: &dyn TensorSource) -> Result<(), String> {
             &format!("{prefix}.ff.linear_out.weight"),
             &[ff_inner, hidden],
         )?;
+    }
+    Ok(())
+}
+
+/// Accept either F16 or F32 for a 1-D vector tensor. The AuK F16 GGUF
+/// stores biases and rotary inv_freq as F16; the F32 GGUF would store
+/// them as F32. Both round-trip cleanly through the F32 normalization in
+/// `load_f32_vector`.
+fn require_norm_f16(
+    source: &dyn TensorSource,
+    name: &str,
+    len: u64,
+) -> Result<(), String> {
+    let info = source
+        .tensor_info(name)
+        .ok_or_else(|| format!("Missing tensor: {name}"))?;
+    if info.dims != [len] {
+        return Err(format!("Invalid {name} dimensions"));
+    }
+    if !matches!(
+        info.ggml_type,
+        GGMLType::F32 | GGMLType::BF16 | GGMLType::F16
+    ) {
+        return Err(format!(
+            "Invalid {name} type {:?}: expected F32/F16/BF16",
+            info.ggml_type
+        ));
     }
     Ok(())
 }
