@@ -447,7 +447,9 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
     // fall back to tensor-name detection when the arch key is missing or
     // mismatched.
     let ernie_image_by_arch = arch == "ernie_image";
-    let ernie_image_by_tensor = source.tensor_info("layers.0.self_attention.to_q.weight").is_some()
+    let ernie_image_by_tensor = source
+        .tensor_info("layers.0.self_attention.to_q.weight")
+        .is_some()
         && source.tensor_info("text_proj.weight").is_some();
     if ernie_image_by_arch || ernie_image_by_tensor {
         return Ok(ModelConfig {

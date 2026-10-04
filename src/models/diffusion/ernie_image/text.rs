@@ -63,10 +63,8 @@ impl ErnieImageTextEncoder {
         pool: Arc<ComputePool>,
     ) -> Result<Self, String> {
         validate_component(source.as_ref(), Component::Text)?;
-        let tokenizer = BPETokenizer::from_gguf_metadata(|key| {
-            source.metadata(key).cloned()
-        })
-        .map_err(|e| format!("Ministral-3 tokenizer: {e}"))?;
+        let tokenizer = BPETokenizer::from_gguf_metadata(|key| source.metadata(key).cloned())
+            .map_err(|e| format!("Ministral-3 tokenizer: {e}"))?;
         let mut layers = Vec::with_capacity(LAYERS);
         for layer in 0..LAYERS {
             layers.push(load_layer(source.as_ref(), layer)?);
@@ -286,12 +284,7 @@ fn forward_layer(
 ) -> Result<(), String> {
     // attention
     let mut normalized = vec![0.0_f32; n_tokens * HIDDEN];
-    rms_norm(
-        hidden,
-        &layer.input_norm,
-        &mut normalized,
-        RMS_EPSILON,
-    );
+    rms_norm(hidden, &layer.input_norm, &mut normalized, RMS_EPSILON);
     for token in 0..n_tokens {
         let row = &normalized[token * HIDDEN..(token + 1) * HIDDEN];
         linear_into(
@@ -400,7 +393,7 @@ fn forward_layer(
             QUERY_WIDTH,
             HIDDEN,
             q_proj_in,
-             o_proj_out,
+            o_proj_out,
             q8,
             pool,
         )?;
@@ -412,7 +405,12 @@ fn forward_layer(
     }
 
     // post-attention norm + MLP
-    rms_norm(hidden, &layer.post_attention_norm, &mut normalized, RMS_EPSILON);
+    rms_norm(
+        hidden,
+        &layer.post_attention_norm,
+        &mut normalized,
+        RMS_EPSILON,
+    );
     for token in 0..n_tokens {
         let row = &normalized[token * HIDDEN..(token + 1) * HIDDEN];
         linear_into(

@@ -34,13 +34,9 @@ use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::ops::dot_f32;
 use crate::ops::rope::neox::rope_sin_cos;
-use crate::ops::{
-    rms_norm, rms_norm_inplace, silu_inplace,
-};
+use crate::ops::{rms_norm, rms_norm_inplace, silu_inplace};
 
-use super::{
-    linear_into, Q8Scratch,
-};
+use super::{linear_into, Q8Scratch};
 
 // === DiT architecture constants (ERNIE-Image, Baidu) ===
 
@@ -165,32 +161,17 @@ impl ErnieImageDit {
             .tensor_info("final_norm.norm.weight")
             .map(|_| load_f32_vector(source_ref, "final_norm.norm.weight", HIDDEN))
             .transpose()?;
-        let final_norm_linear_bias = load_f32_vector(
-            source_ref,
-            "final_norm.linear.bias",
-            HIDDEN * 2,
-        )?;
-        let final_linear_bias = load_f32_vector(
-            source_ref,
-            "final_linear.bias",
-            OUT_CHANNELS * PATCH_AREA,
-        )?;
+        let final_norm_linear_bias =
+            load_f32_vector(source_ref, "final_norm.linear.bias", HIDDEN * 2)?;
+        let final_linear_bias =
+            load_f32_vector(source_ref, "final_linear.bias", OUT_CHANNELS * PATCH_AREA)?;
         let x_embedder_bias = load_f32_vector(source_ref, "x_embedder.proj.bias", HIDDEN)?;
-        let adaLN_modulation_bias = load_f32_vector(
-            source_ref,
-            "adaLN_modulation.1.bias",
-            HIDDEN * 6,
-        )?;
-        let time_linear_1_bias = load_f32_vector(
-            source_ref,
-            "time_embedding.linear_1.bias",
-            HIDDEN,
-        )?;
-        let time_linear_2_bias = load_f32_vector(
-            source_ref,
-            "time_embedding.linear_2.bias",
-            HIDDEN,
-        )?;
+        let adaLN_modulation_bias =
+            load_f32_vector(source_ref, "adaLN_modulation.1.bias", HIDDEN * 6)?;
+        let time_linear_1_bias =
+            load_f32_vector(source_ref, "time_embedding.linear_1.bias", HIDDEN)?;
+        let time_linear_2_bias =
+            load_f32_vector(source_ref, "time_embedding.linear_2.bias", HIDDEN)?;
         Ok(Self {
             source,
             pool,
@@ -333,7 +314,11 @@ impl ErnieImageDit {
             &mut scratch.q8,
             self.pool.as_ref(),
         )?;
-        for (v, b) in scratch.modulation.iter_mut().zip(&self.adaLN_modulation_bias) {
+        for (v, b) in scratch
+            .modulation
+            .iter_mut()
+            .zip(&self.adaLN_modulation_bias)
+        {
             *v += *b;
         }
         // Split into 6 chunks of HIDDEN.
@@ -380,7 +365,11 @@ impl ErnieImageDit {
                     self.pool.as_ref(),
                 )?;
             }
-            for (dst, src) in scratch.text.chunks_exact_mut(HIDDEN).zip(projected.chunks_exact(HIDDEN)) {
+            for (dst, src) in scratch
+                .text
+                .chunks_exact_mut(HIDDEN)
+                .zip(projected.chunks_exact(HIDDEN))
+            {
                 dst.copy_from_slice(src);
             }
         } else {
@@ -408,12 +397,7 @@ impl ErnieImageDit {
         }
 
         // 3D RoPE cache.
-        ernie_image_rope_into(
-            context_tokens,
-            latent_side,
-            latent_side,
-            &mut scratch.rope,
-        )?;
+        ernie_image_rope_into(context_tokens, latent_side, latent_side, &mut scratch.rope)?;
 
         // Forward the 36 blocks.
         for (layer_index, block) in self.layers.iter().enumerate() {
@@ -492,8 +476,8 @@ impl ErnieImageDit {
         let mut patches = vec![0.0_f32; image_token_count * OUT_CHANNELS * PATCH_AREA];
         for token in 0..image_token_count {
             let input = &scratch.joint[token * HIDDEN..(token + 1) * HIDDEN];
-            let output = &mut patches[token * OUT_CHANNELS * PATCH_AREA
-                ..(token + 1) * OUT_CHANNELS * PATCH_AREA];
+            let output = &mut patches
+                [token * OUT_CHANNELS * PATCH_AREA..(token + 1) * OUT_CHANNELS * PATCH_AREA];
             linear_into(
                 self.source.as_ref(),
                 &self.final_linear_weight,
@@ -504,10 +488,7 @@ impl ErnieImageDit {
                 &mut scratch.q8,
                 self.pool.as_ref(),
             )?;
-            for (v, b) in output
-                .iter_mut()
-                .zip(&self.final_linear_bias)
-            {
+            for (v, b) in output.iter_mut().zip(&self.final_linear_bias) {
                 *v += *b;
             }
         }
@@ -536,11 +517,7 @@ impl ErnieImageDit {
 
 // === Helpers ===
 
-fn load_f32_vector(
-    source: &dyn TensorSource,
-    name: &str,
-    len: usize,
-) -> Result<Vec<f32>, String> {
+fn load_f32_vector(source: &dyn TensorSource, name: &str, len: usize) -> Result<Vec<f32>, String> {
     let info = source
         .tensor_info(name)
         .ok_or_else(|| format!("Missing tensor: {name}"))?;
@@ -548,7 +525,10 @@ fn load_f32_vector(
     if info.dims != expected_dims {
         return Err(format!("Invalid {name} dimensions"));
     }
-    if !matches!(info.ggml_type, GGMLType::F32 | GGMLType::BF16 | GGMLType::F16) {
+    if !matches!(
+        info.ggml_type,
+        GGMLType::F32 | GGMLType::BF16 | GGMLType::F16
+    ) {
         return Err(format!(
             "Invalid {name} type {:?}: expected F32 / F16 / BF16",
             info.ggml_type
@@ -587,8 +567,16 @@ fn load_block(source: &dyn TensorSource, layer: usize) -> Result<ErnieImageBlock
     Ok(ErnieImageBlock {
         adaLN_sa_ln: load_f32_vector(source, &format!("{prefix}.adaLN_sa_ln.weight"), HIDDEN)?,
         adaLN_mlp_ln: load_f32_vector(source, &format!("{prefix}.adaLN_mlp_ln.weight"), HIDDEN)?,
-        q_norm: load_f32_vector(source, &format!("{prefix}.self_attention.norm_q.weight"), HEAD_DIM)?,
-        k_norm: load_f32_vector(source, &format!("{prefix}.self_attention.norm_k.weight"), HEAD_DIM)?,
+        q_norm: load_f32_vector(
+            source,
+            &format!("{prefix}.self_attention.norm_q.weight"),
+            HEAD_DIM,
+        )?,
+        k_norm: load_f32_vector(
+            source,
+            &format!("{prefix}.self_attention.norm_k.weight"),
+            HEAD_DIM,
+        )?,
         to_q: format!("{prefix}.self_attention.to_q.weight"),
         to_k: format!("{prefix}.self_attention.to_k.weight"),
         to_v: format!("{prefix}.self_attention.to_v.weight"),
@@ -659,7 +647,11 @@ struct SplitMix64(u64);
 
 impl SplitMix64 {
     fn new(seed: u64) -> Self {
-        Self(if seed == 0 { 0xdead_beef_cafe_babe } else { seed })
+        Self(if seed == 0 {
+            0xdead_beef_cafe_babe
+        } else {
+            seed
+        })
     }
     fn next_u64(&mut self) -> u64 {
         self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -768,27 +760,15 @@ impl ErnieScratch {
             total_tokens * HIDDEN,
             "ERNIE-Image attention",
         )?;
-        resize_zeroed(
-            &mut self.ffn,
-            total_tokens * FFN_WIDTH,
-            "ERNIE-Image FFN",
-        )?;
+        resize_zeroed(&mut self.ffn, total_tokens * FFN_WIDTH, "ERNIE-Image FFN")?;
         resize_zeroed(
             &mut self.ffn_up,
             total_tokens * FFN_WIDTH,
             "ERNIE-Image FFN up",
         )?;
-        resize_zeroed(
-            &mut self.mlp_out,
-            total_tokens * HIDDEN,
-            "ERNIE-Image MLP",
-        )?;
+        resize_zeroed(&mut self.mlp_out, total_tokens * HIDDEN, "ERNIE-Image MLP")?;
         resize_zeroed(&mut self.scores, total_tokens, "ERNIE-Image scores")?;
-        resize_zeroed(
-            &mut self.modulation,
-            HIDDEN * 6,
-            "ERNIE-Image modulation",
-        )?;
+        resize_zeroed(&mut self.modulation, HIDDEN * 6, "ERNIE-Image modulation")?;
         resize_zeroed(
             &mut self.rope,
             total_tokens * ROPE_HEAD_WIDTH,
@@ -866,17 +846,15 @@ fn run_x_embedder_into(
                 .checked_nbytes()
                 .ok_or_else(|| "Invalid x_embedder.proj.weight byte size".to_string())?
                 / 4; // kH * kW
-            // Per-token matmul: y[h] = sum_c W[0,0,c,h] * input[c]
-            // We do it as a dot product for each output dim.
+                     // Per-token matmul: y[h] = sum_c W[0,0,c,h] * input[c]
+                     // We do it as a dot product for each output dim.
             match weight_info.ggml_type {
                 GGMLType::F16 | GGMLType::BF16 => {
                     for h in 0..HIDDEN {
                         let mut acc = 0.0_f32;
                         for c in 0..inner_dim {
                             let offset = (c * HIDDEN + h) * 2;
-                            let bits = u16::from_le_bytes(
-                                [bytes[offset], bytes[offset + 1]],
-                            );
+                            let bits = u16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
                             let w = if matches!(weight_info.ggml_type, GGMLType::F16) {
                                 half::f16::from_bits(bits).to_f32()
                             } else {
@@ -944,11 +922,7 @@ fn run_block(
         let token_slice = &mut tokens[token * HIDDEN..(token + 1) * HIDDEN];
         // rms_norm + modulate: x_norm * (1 + scale) + shift
         rms_norm_inplace_with_scratch(token_slice, &block.adaLN_sa_ln, attention);
-        for ((v, s), sh) in token_slice
-            .iter_mut()
-            .zip(scale_msa)
-            .zip(shift_msa)
-        {
+        for ((v, s), sh) in token_slice.iter_mut().zip(scale_msa).zip(shift_msa) {
             *v = *v * (1.0 + *s) + *sh;
         }
     }
@@ -1059,7 +1033,16 @@ fn run_block(
     for token in 0..total_tokens {
         let input = &attention[token * HIDDEN..(token + 1) * HIDDEN];
         let out = &mut ffn_buf[token * HIDDEN..(token + 1) * HIDDEN];
-        linear_into(source, &block.to_out, INNER_DIM, HIDDEN, input, out, q8, pool)?;
+        linear_into(
+            source,
+            &block.to_out,
+            INNER_DIM,
+            HIDDEN,
+            input,
+            out,
+            q8,
+            pool,
+        )?;
         for ((token_v, proj_v), g) in tokens[token * HIDDEN..(token + 1) * HIDDEN]
             .iter_mut()
             .zip(out.iter())
@@ -1157,12 +1140,7 @@ fn rms_norm_inplace_with_scratch(input: &mut [f32], weight: &[f32], scratch: &mu
         mean += v * v;
     }
     mean = (mean / len as f32 + RMS_EPSILON).sqrt().recip();
-    for ((s, w), v) in scratch
-        .iter_mut()
-        .take(len)
-        .zip(weight)
-        .zip(input.iter())
-    {
+    for ((s, w), v) in scratch.iter_mut().take(len).zip(weight).zip(input.iter()) {
         *s = v * mean * w;
     }
     input.copy_from_slice(&scratch[..len]);

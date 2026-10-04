@@ -219,7 +219,9 @@ fn main() {
             .and_then(MetaValue::to_string_val)
             .unwrap_or_default();
         let is_ernie_image = arch_name == "ernie_image"
-            || (arch_probe.tensor_info("layers.0.self_attention.to_q.weight").is_some()
+            || (arch_probe
+                .tensor_info("layers.0.self_attention.to_q.weight")
+                .is_some()
                 && arch_probe.tensor_info("text_proj.weight").is_some());
         if is_ernie_image {
             if options.gpu {
@@ -240,7 +242,10 @@ fn main() {
                 arch_probe,
                 text,
                 vae,
-                options.prompt.as_deref().expect("ERNIE-Image prompt required"),
+                options
+                    .prompt
+                    .as_deref()
+                    .expect("ERNIE-Image prompt required"),
                 options.steps.unwrap_or(8),
                 options.resolution.unwrap_or(512),
                 options.seed.unwrap_or(0),

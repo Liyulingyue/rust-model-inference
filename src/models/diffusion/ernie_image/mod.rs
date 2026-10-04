@@ -139,8 +139,8 @@ fn validate_latent_shape(latent: &[f32], resolution: usize) -> Result<usize, Str
 }
 
 fn validate_decoded_rgb(rgb: &ErnieImageRgb, resolution: usize) -> Result<(), String> {
-    let resolution = u32::try_from(resolution)
-        .map_err(|_| "ERNIE-Image output resolution does not fit u32")?;
+    let resolution =
+        u32::try_from(resolution).map_err(|_| "ERNIE-Image output resolution does not fit u32")?;
     if rgb.width != resolution || rgb.height != resolution {
         return Err("Invalid ERNIE-Image decoded RGB dimensions".into());
     }
@@ -297,7 +297,11 @@ fn validate_text(source: &dyn TensorSource) -> Result<(), String> {
     // The unsloth Ministral GGUF uses llama.cpp naming: `token_embd.weight`,
     // `blk.X.{attn_q,attn_k,attn_v,attn_output}.weight`, etc.
     if source.tensor_info("token_embd.weight").is_some() {
-        require_matrix(source, "token_embd.weight", &[hidden, dit::TEXT_VOCAB as u64])?;
+        require_matrix(
+            source,
+            "token_embd.weight",
+            &[hidden, dit::TEXT_VOCAB as u64],
+        )?;
     } else {
         require_matrix(
             source,
@@ -306,7 +310,10 @@ fn validate_text(source: &dyn TensorSource) -> Result<(), String> {
         )?;
     }
     let prefix_fn = |layer: usize| -> String {
-        if source.tensor_info(&format!("blk.{layer}.attn_q.weight")).is_some() {
+        if source
+            .tensor_info(&format!("blk.{layer}.attn_q.weight"))
+            .is_some()
+        {
             format!("blk.{layer}")
         } else {
             format!("model.layers.{layer}")
@@ -314,17 +321,26 @@ fn validate_text(source: &dyn TensorSource) -> Result<(), String> {
     };
     for layer in 0..n_layer {
         let prefix = prefix_fn(layer);
-        let mlp_gate = if source.tensor_info(&format!("{prefix}.ffn_gate.weight")).is_some() {
+        let mlp_gate = if source
+            .tensor_info(&format!("{prefix}.ffn_gate.weight"))
+            .is_some()
+        {
             "ffn_gate.weight"
         } else {
             "mlp.gate_proj.weight"
         };
-        let mlp_up = if source.tensor_info(&format!("{prefix}.ffn_up.weight")).is_some() {
+        let mlp_up = if source
+            .tensor_info(&format!("{prefix}.ffn_up.weight"))
+            .is_some()
+        {
             "ffn_up.weight"
         } else {
             "mlp.up_proj.weight"
         };
-        let mlp_down = if source.tensor_info(&format!("{prefix}.ffn_down.weight")).is_some() {
+        let mlp_down = if source
+            .tensor_info(&format!("{prefix}.ffn_down.weight"))
+            .is_some()
+        {
             "ffn_down.weight"
         } else {
             "mlp.down_proj.weight"
@@ -340,10 +356,7 @@ fn validate_text(source: &dyn TensorSource) -> Result<(), String> {
         ] {
             require_matrix(source, &format!("{prefix}.{suffix}"), &dims)?;
         }
-        for (suffix, dims) in [
-            ("attn_norm.weight", hidden),
-            ("ffn_norm.weight", hidden),
-        ] {
+        for (suffix, dims) in [("attn_norm.weight", hidden), ("ffn_norm.weight", hidden)] {
             require_tensor(
                 source,
                 &format!("{prefix}.{suffix}"),
@@ -379,7 +392,10 @@ fn validate_dit(source: &dyn TensorSource) -> Result<(), String> {
     for (name, dims) in [
         ("adaLN_modulation.1.weight", [hidden, 6 * hidden]),
         ("final_norm.linear.weight", [hidden, 2 * hidden]),
-        ("final_linear.weight", [hidden, dit::OUT_CHANNELS as u64 * patch]),
+        (
+            "final_linear.weight",
+            [hidden, dit::OUT_CHANNELS as u64 * patch],
+        ),
         ("time_embedding.linear_1.weight", [hidden, hidden]),
         ("time_embedding.linear_2.weight", [hidden, hidden]),
     ] {
@@ -615,8 +631,7 @@ fn linear_into_scaled_impl(
                     unsafe { std::slice::from_raw_parts(input_ptr as *const u8, input_len) };
                 let scales =
                     unsafe { std::slice::from_raw_parts(scale_ptr as *const f32, scale_len) };
-                let out =
-                    unsafe { std::slice::from_raw_parts_mut(output_ptr as *mut f32, n_out) };
+                let out = unsafe { std::slice::from_raw_parts_mut(output_ptr as *mut f32, n_out) };
                 matmul_q8_0_quantized_parallel_rows(
                     weight, input, scales, out, n_in, n_out, ith, nth,
                 );
@@ -639,12 +654,7 @@ fn linear_into_scaled_impl(
         | GGMLType::Q3K
         | GGMLType::Q8K => {
             use crate::ops::kernel::{Kernel, QTensorOwned};
-            let tensor = QTensorOwned::from_bytes_owned(
-                bytes,
-                info.ggml_type,
-                n_in,
-                n_out,
-            );
+            let tensor = QTensorOwned::from_bytes_owned(bytes, info.ggml_type, n_in, n_out);
             let input_ptr = input.as_ptr() as usize;
             let input_len = input.len();
             let output_ptr = output.as_mut_ptr() as usize;
@@ -652,19 +662,8 @@ fn linear_into_scaled_impl(
             pool.compute(move |ith, nth| {
                 let values =
                     unsafe { std::slice::from_raw_parts(input_ptr as *const f32, input_len) };
-                let out =
-                    unsafe { std::slice::from_raw_parts_mut(output_ptr as *mut f32, n_out) };
-                tensor.forward_prepared(
-                    values,
-                    &[],
-                    &[],
-                    None,
-                    out,
-                    n_in,
-                    n_out,
-                    ith,
-                    nth,
-                );
+                let out = unsafe { std::slice::from_raw_parts_mut(output_ptr as *mut f32, n_out) };
+                tensor.forward_prepared(values, &[], &[], None, out, n_in, n_out, ith, nth);
                 // forward_prepared doesn't apply scale; emulate.
                 if scale_copy != 1.0 {
                     for v in out.iter_mut() {

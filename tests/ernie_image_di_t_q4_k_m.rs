@@ -36,7 +36,10 @@ fn loader() -> Option<Arc<dyn TensorSource>> {
 }
 
 fn pick(source: &dyn TensorSource, key: &str) -> Option<String> {
-    source.metadata(key).and_then(|value| value.to_string_val()).map(|s| s.to_string())
+    source
+        .metadata(key)
+        .and_then(|value| value.to_string_val())
+        .map(|s| s.to_string())
 }
 
 #[test]
@@ -53,7 +56,9 @@ fn contract_pins_ernie_image_di_t_via_tensor_signature() {
     // `text_proj.weight` -- this combination is unique to ERNIE-Image among
     // diffusion GGUFs in the repo.
     assert!(
-        source.tensor_info("layers.0.self_attention.to_q.weight").is_some(),
+        source
+            .tensor_info("layers.0.self_attention.to_q.weight")
+            .is_some(),
         "ERNIE-Image signature: layers.0.self_attention.to_q.weight missing"
     );
     assert!(
@@ -212,6 +217,12 @@ fn contract_pins_ernie_image_di_t_text_encoder_paired_via_text_proj() {
     let tp = source
         .tensor_info("text_proj.weight")
         .expect("text_proj.weight present");
-    assert_eq!(tp.dims[0], 3072, "text_proj source rows must match Ministral-3 n_embd");
-    assert_eq!(tp.dims[1], 4096, "text_proj target cols must match DiT hidden");
+    assert_eq!(
+        tp.dims[0], 3072,
+        "text_proj source rows must match Ministral-3 n_embd"
+    );
+    assert_eq!(
+        tp.dims[1], 4096,
+        "text_proj target cols must match DiT hidden"
+    );
 }
