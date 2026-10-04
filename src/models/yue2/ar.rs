@@ -29,12 +29,18 @@ pub(super) struct YuE2Weight {
 /// `n_in` to be a whole number of blocks. The converter only ever quantizes
 /// matrices whose `n_in` is one of the architecture widths (2048 / 6144), so
 /// this is checked here rather than trusted.
-const MATRIX_TYPES: [GGMLType; 5] = [
+///
+/// `Q4K` / `Q6K` are the k-quants the `q4_k_m` / `q6_k` and `ar_q4_k_m` modes
+/// emit. They share the Q8_K activation staging that `Weight` already owns, and
+/// the Q8_K scratch here is sized in 256-element super-blocks to match.
+const MATRIX_TYPES: [GGMLType; 7] = [
     GGMLType::BF16,
     GGMLType::F16,
     GGMLType::F32,
     GGMLType::Q8_0,
     GGMLType::Q4_0,
+    GGMLType::Q4K,
+    GGMLType::Q6K,
 ];
 
 /// Reusable per-thread staging buffers for [`YuE2Weight::matmul_rows`].
@@ -94,8 +100,10 @@ impl YuE2Weight {
                 info.ggml_type
             ));
         }
-        if matches!(info.ggml_type, GGMLType::Q8_0 | GGMLType::Q4_0)
-            && n_in % info.ggml_type.type_traits().0 != 0
+        if matches!(
+            info.ggml_type,
+            GGMLType::Q8_0 | GGMLType::Q4_0 | GGMLType::Q4K | GGMLType::Q6K
+        ) && n_in % info.ggml_type.type_traits().0 != 0
         {
             return Err(format!(
                 "YuE2 weight {name} has n_in={n_in}, which is not a whole number of \
