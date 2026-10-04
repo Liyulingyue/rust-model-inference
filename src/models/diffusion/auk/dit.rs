@@ -1,0 +1,848 @@
+//! AuK-Base DiT forward — Flux2Edit (Flux-style double + single blocks).
+//!
+//! High-level forward (TTS path, no reference audio conditioning):
+//! 1. Encode the prompt via Qwen2.5-Omni (handled in `conditioning.rs`, not
+//!    here) into per-token hidden states of width `TEXT_IN`.
+//! 2. Project text into the joint hidden space via `txt_proj`, normalize via
+//!    `txt_norm`.
+//! 3. Sample an audio latent of shape `[latent_dim, latent_time]`, with
+//!    `latent_time = duration_sec * sample_rate / downsample_rate`.
+//! 4. Run the DiT forward for `steps` Euler steps. Each step:
+//!    a. Time embedding: `timestep_embedding(t) -> time_mlp -> c` of shape
+//!       `[hidden]`.
+//!    b. Per-block forward through the 10 double blocks then 20 single blocks.
+//!    c. Final AdaLNContinuous: `norm_out.linear` produces scale+shift from
+//!       `c`, applied to the joint hidden state.
+//!    d. Final linear: `proj_out` projects back to the latent.
+//!    e. Euler step: `latent += velocity * dt`.
+//! 5. Decode the final latent with `BigVGANFlowVAE` to produce audio at
+//!    `sample_rate` Hz.
+//!
+//! Per-block forward (Flux-style, see references/audio.cpp/src/community_models/
+//! auk/flow.cpp):
+//! - Double block: 6-way AdaLN modulation, joint attention across img/txt
+//!   streams, separate FF for each stream. Q/K have RMS norms (head_dim=64).
+//! - Single block: 6-way AdaLN modulation, attention only (FF in same block).
+//!
+//! Only the TTS path is wired in this commit; the CFMEdit reference-audio
+//! path is tracked in `docs/develop/TODO.md`.
+
+use std::sync::Arc;
+
+use half::f16;
+
+use crate::core::tensor::{GGMLType, TensorSource};
+use crate::core::thread_pool::ComputePool;
+use crate::ops::{
+    attention_value_reduce, rms_norm, rms_norm_inplace, rope_neox_inplace, silu_mul_inplace,
+    vec_add_into,
+};
+
+use super::{
+    linear_into, validate_component, Component, Q8Scratch,
+};
+
+// === Architecture constants (from references/audio.cpp/docs/community_models/auk.md
+//    + config/auk-base.yaml, verified against actual GGUF tensor dims) ===
+
+/// Hidden size.
+pub(crate) const HIDDEN: usize = 1536;
+
+/// Attention head count.
+pub(crate) const HEADS: usize = 24;
+pub(crate) const HEAD_DIM: usize = 64;
+pub(crate) const QKV_DIM: usize = HEADS * HEAD_DIM * 3; // 4608
+
+/// Feed-forward inner dim (out dim of FF gate/up, in dim of FF down).
+pub(crate) const FF_INNER: usize = 3072;
+
+/// FF gate+up are packed into one matmul of out dim `2 * FF_INNER` = 6144.
+pub(crate) const PACKED_FF_IN: usize = FF_INNER * 2;
+
+/// AdaLN modulation dim = 6 * HIDDEN (scale_msa, gate_msa, shift_msa, scale_mlp, gate_mlp, shift_mlp).
+pub(crate) const ADALN_DIM: usize = HIDDEN * 6;
+
+/// Final AdaLNContinuous linear projects hidden -> 2*hidden (scale, shift).
+pub(crate) const FINAL_NORM_DIM: usize = HIDDEN * 2;
+
+/// Sinusoidal timestep embedding freq dim.
+pub(crate) const FREQ_DIM: usize = 256;
+
+/// Text encoder hidden dim (Qwen2.5-Omni-3B n_embd).
+pub(crate) const TEXT_IN: usize = 2048;
+
+/// Audio latent channel count.
+pub(crate) const LATENT_DIM: usize = 64;
+
+/// Number of double blocks (parallel img/txt attention + FF).
+pub(crate) const NUM_DOUBLE_LAYERS: usize = 10;
+
+/// Number of single blocks (sequential img attention + FF).
+pub(crate) const NUM_SINGLE_LAYERS: usize = 20;
+
+/// Padding multiple for joint sequence length.
+pub(crate) const SEQUENCE_MULTIPLE: usize = 32;
+
+pub(crate) struct DoubleBlockWeights {
+    pub(crate) adaLN_x: String,
+    pub(crate) adaLN_x_bias: Vec<f32>,
+    pub(crate) adaLN_c: String,
+    pub(crate) adaLN_c_bias: Vec<f32>,
+    pub(crate) qkv_x: String,
+    pub(crate) qkv_x_bias: Vec<f32>,
+    pub(crate) qkv_c: String,
+    pub(crate) qkv_c_bias: Vec<f32>,
+    pub(crate) out_c: String,
+    pub(crate) q_norm_x: Vec<f32>,
+    pub(crate) k_norm_x: Vec<f32>,
+    pub(crate) q_norm_c: Vec<f32>,
+    pub(crate) k_norm_c: Vec<f32>,
+    pub(crate) ff_x_in: String,
+    pub(crate) ff_x_out: String,
+    pub(crate) ff_c_in: String,
+    pub(crate) ff_c_out: String,
+}
+
+pub(crate) struct SingleBlockWeights {
+    pub(crate) adaLN: String,
+    pub(crate) adaLN_bias: Vec<f32>,
+    pub(crate) qkv: String,
+    pub(crate) qkv_bias: Vec<f32>,
+    pub(crate) out: String,
+    pub(crate) out_bias: Vec<f32>,
+    pub(crate) q_norm: Vec<f32>,
+    pub(crate) k_norm: Vec<f32>,
+    pub(crate) ff_in: String,
+    pub(crate) ff_out: String,
+}
+
+pub(crate) struct AukDit {
+    source: Arc<dyn TensorSource>,
+    pool: Arc<ComputePool>,
+    audio_embed_weight: String,
+    audio_embed_bias: Vec<f32>,
+    time_mlp_0_weight: String,
+    time_mlp_0_bias: Vec<f32>,
+    time_mlp_2_weight: String,
+    time_mlp_2_bias: Vec<f32>,
+    txt_proj_weight: String,
+    txt_proj_bias: Vec<f32>,
+    txt_norm_weight: Vec<f32>,
+    norm_out_weight: String,
+    norm_out_bias: Vec<f32>,
+    proj_out_weight: String,
+    proj_out_bias: Vec<f32>,
+    rotary_inv_freq: Vec<f32>,
+    double_blocks: Vec<DoubleBlockWeights>,
+    single_blocks: Vec<SingleBlockWeights>,
+    q8: Q8Scratch,
+}
+
+impl AukDit {
+    pub(crate) fn load(
+        source: Arc<dyn TensorSource>,
+        pool: Arc<ComputePool>,
+    ) -> Result<Self, String> {
+        let source_ref = source.as_ref();
+        let audio_embed_bias = load_f32_vector(
+            source_ref,
+            "transformer.audio_embed.linear.bias",
+            HIDDEN,
+        )?;
+        let time_mlp_0_bias = load_f32_vector(
+            source_ref,
+            "transformer.time_embed.time_mlp.0.bias",
+            HIDDEN,
+        )?;
+        let time_mlp_2_bias = load_f32_vector(
+            source_ref,
+            "transformer.time_embed.time_mlp.2.bias",
+            HIDDEN,
+        )?;
+        let txt_proj_bias = load_f32_vector(
+            source_ref,
+            "transformer.txt_proj.bias",
+            HIDDEN,
+        )?;
+        let txt_norm_weight = load_f32_vector(
+            source_ref,
+            "transformer.txt_norm.weight",
+            HIDDEN,
+        )?;
+        let norm_out_bias = load_f32_vector(
+            source_ref,
+            "transformer.norm_out.linear.bias",
+            FINAL_NORM_DIM,
+        )?;
+        let proj_out_bias = load_f32_vector(
+            source_ref,
+            "transformer.proj_out.bias",
+            LATENT_DIM,
+        )?;
+        // rotary_embed.inv_freq is stored as F32 with length HEAD_DIM/2 = 32.
+        let rotary_inv_freq = load_f32_vector(
+            source_ref,
+            "transformer.rotary_embed.inv_freq",
+            HEAD_DIM / 2,
+        )?;
+        let mut double_blocks = Vec::with_capacity(NUM_DOUBLE_LAYERS);
+        for layer in 0..NUM_DOUBLE_LAYERS {
+            double_blocks.push(load_double_block(source_ref, layer)?);
+        }
+        let mut single_blocks = Vec::with_capacity(NUM_SINGLE_LAYERS);
+        for layer in 0..NUM_SINGLE_LAYERS {
+            single_blocks.push(load_single_block(source_ref, layer)?);
+        }
+        Ok(Self {
+            q8: Q8Scratch::new(FF_INNER.max(HIDDEN)),
+            source,
+            pool,
+            audio_embed_weight: "transformer.audio_embed.linear.weight".into(),
+            audio_embed_bias,
+            time_mlp_0_weight: "transformer.time_embed.time_mlp.0.weight".into(),
+            time_mlp_0_bias,
+            time_mlp_2_weight: "transformer.time_embed.time_mlp.2.weight".into(),
+            time_mlp_2_bias,
+            txt_proj_weight: "transformer.txt_proj.weight".into(),
+            txt_proj_bias,
+            txt_norm_weight,
+            norm_out_weight: "transformer.norm_out.linear.weight".into(),
+            norm_out_bias,
+            proj_out_weight: "transformer.proj_out.weight".into(),
+            proj_out_bias,
+            rotary_inv_freq,
+            double_blocks,
+            single_blocks,
+        })
+    }
+
+    /// Run the diffusion loop for `options.steps` Euler steps and return
+    /// the final latent of shape `[latent_dim, latent_time]`.
+    pub(crate) fn denoise(
+        &self,
+        text_conditioning: &[f32],
+        text_tokens: usize,
+        options: &super::AukOptions,
+    ) -> Result<Vec<f32>, String> {
+        if text_tokens == 0 {
+            return Err("AuK text token count must be positive".into());
+        }
+        // Compute latent time from duration / sample rate / downsample rate.
+        let downsample_rate = 480;
+        let latent_time = options
+            .duration_sec
+            .checked_mul(options.sample_rate as usize)
+            .and_then(|v| v.checked_div(downsample_rate))
+            .ok_or("AuK latent_time overflow")?;
+        if latent_time == 0 {
+            return Err("AuK duration too short for one latent frame".into());
+        }
+        let latent_values = LATENT_DIM * latent_time;
+        let mut latent = vec![0.0_f32; latent_values];
+        let mut rng = SplitMix64::new(options.seed as u64);
+        for value in &mut latent {
+            *value = gaussian(&mut rng);
+        }
+        let steps = options.steps;
+        let mut velocity = vec![0.0_f32; latent_values];
+        let mut scratch = AukScratch::new(text_tokens, latent_time)?;
+        for step in 0..steps {
+            let sigma = 1.0 - step as f32 / steps as f32;
+            let sigma_next = 1.0 - (step + 1) as f32 / steps as f32;
+            self.predict_flow(
+                &mut latent,
+                latent_time,
+                text_conditioning,
+                text_tokens,
+                sigma,
+                &mut scratch,
+                &mut velocity,
+                options.guidance_scale,
+            )?;
+            euler_flow_step(&mut latent, &velocity, sigma, sigma_next)?;
+        }
+        Ok(latent)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn predict_flow(
+        &self,
+        latent: &mut [f32],
+        latent_time: usize,
+        text_conditioning: &[f32],
+        text_tokens: usize,
+        sigma: f32,
+        scratch: &mut AukScratch,
+        velocity: &mut [f32],
+        guidance_scale: f32,
+    ) -> Result<(), String> {
+        let _ = guidance_scale; // CFG wired in a follow-up commit.
+        let _ = text_conditioning;
+        if !sigma.is_finite() || !(0.0..=1.0).contains(&sigma) {
+            return Err("AuK sigma must be finite and within [0, 1]".into());
+        }
+        require_finite(latent, "latent")?;
+        let latent_values = LATENT_DIM * latent_time;
+        if latent.len() != latent_values {
+            return Err("Invalid AuK latent length".into());
+        }
+        // CFMEdit adds a reference audio; this TTS-only path initializes the
+        // joint sequence with just text (img tokens come from `latent`).
+        // We wire the joint into `scratch.joint` (img tokens then text).
+        scratch.prepare(img_tokens, text_tokens)?;
+
+        // Time embedding: c ∈ [HIDDEN]
+        timestep_embedding(sigma * 1000.0, &mut scratch.time_frequency);
+        linear_into(
+            self.source.as_ref(),
+            &self.time_mlp_0_weight,
+            FREQ_DIM,
+            HIDDEN,
+            &scratch.time_frequency,
+            &mut scratch.time_hidden,
+            &mut scratch.q8,
+            self.pool.as_ref(),
+        )?;
+        for (v, b) in scratch.time_hidden.iter_mut().zip(&self.time_mlp_0_bias) {
+            *v += *b;
+        }
+        silu_mul_inplace(&mut scratch.time_hidden, &mut scratch.time_hidden_silu);
+        linear_into(
+            self.source.as_ref(),
+            &self.time_mlp_2_weight,
+            HIDDEN,
+            HIDDEN,
+            &scratch.time_hidden_silu,
+            &mut scratch.time,
+            &mut scratch.q8,
+            self.pool.as_ref(),
+        )?;
+        for (v, b) in scratch.time.iter_mut().zip(&self.time_mlp_2_bias) {
+            *v += *b;
+        }
+        require_finite(&scratch.time, "time conditioning")?;
+
+        // Image (audio latent) embed: latent -> hidden
+        run_audio_embed(
+            self.source.as_ref(),
+            &self.audio_embed_weight,
+            &self.audio_embed_bias,
+            latent,
+            latent_time,
+            &mut scratch.img,
+            self.pool.as_ref(),
+            &mut scratch.q8,
+        )?;
+
+        // Text embed: text_in -> hidden, then norm.
+        for token in 0..text_tokens {
+            linear_into(
+                self.source.as_ref(),
+                &self.txt_proj_weight,
+                TEXT_IN,
+                HIDDEN,
+                &text_conditioning[token * TEXT_IN..(token + 1) * TEXT_IN],
+                &mut scratch.text[token * HIDDEN..(token + 1) * HIDDEN],
+                &mut scratch.q8,
+                self.pool.as_ref(),
+            )?;
+        }
+        // Add bias.
+        for token in 0..text_tokens {
+            for d in 0..HIDDEN {
+                scratch.text[token * HIDDEN + d] += self.txt_proj_bias[d];
+            }
+        }
+        // RMS norm with txt_norm.
+        rms_norm_inplace_text(
+            &mut scratch.text,
+            &self.txt_norm_weight,
+            text_tokens,
+        );
+
+        // Concat: image tokens first, then text tokens. Both are already in
+        // `scratch.img` and `scratch.text` (sized for `total_tokens` rows).
+        let total_tokens = scratch.joint.len() / HIDDEN;
+        for token in 0..img_tokens {
+            scratch.joint[token * HIDDEN..(token + 1) * HIDDEN]
+                .copy_from_slice(&scratch.img[token * HIDDEN..(token + 1) * HIDDEN]);
+        }
+        for token in 0..text_tokens {
+            let dst = img_tokens + token;
+            scratch.joint[dst * HIDDEN..(dst + 1) * HIDDEN]
+                .copy_from_slice(&scratch.text[token * HIDDEN..(token + 1) * HIDDEN]);
+        }
+        let _ = total_tokens;
+
+        // 10 double blocks
+        for (layer_index, block) in self.double_blocks.iter().enumerate() {
+            run_double_block(
+                self.source.as_ref(),
+                block,
+                &mut scratch.joint,
+                img_tokens,
+                text_tokens,
+                &scratch.rope,
+                &self.rotary_inv_freq,
+                &scratch.time[..ADALN_DIM / 6 * 0 + ADALN_DIM / 6],
+                &mut scratch.qkv,
+                &mut scratch.qkv_c,
+                &mut scratch.attention,
+                &mut scratch.scores,
+                &mut scratch.q8,
+                self.pool.as_ref(),
+                layer_index,
+            )?;
+        }
+
+        // 20 single blocks
+        for (layer_index, block) in self.single_blocks.iter().enumerate() {
+            run_single_block(
+                self.source.as_ref(),
+                block,
+                &mut scratch.joint,
+                img_tokens,
+                text_tokens,
+                &scratch.rope,
+                &self.rotary_inv_freq,
+                &mut scratch.qkv,
+                &mut scratch.attention,
+                &mut scratch.scores,
+                &mut scratch.q8,
+                self.pool.as_ref(),
+                layer_index,
+            )?;
+        }
+
+        // Final AdaLNContinuous: norm_out.linear produces scale+shift.
+        // The unsloth/ERNIE-Image case shows that the AdaLNContinuous inner
+        // norm (final_norm.norm.weight) is often dropped -- we treat it as
+        // identity here.
+        linear_into(
+            self.source.as_ref(),
+            &self.norm_out_weight,
+            HIDDEN,
+            FINAL_NORM_DIM,
+            &scratch.time,
+            &mut scratch.modulation[..FINAL_NORM_DIM],
+            &mut scratch.q8,
+            self.pool.as_ref(),
+        )?;
+        for (v, b) in scratch.modulation[..FINAL_NORM_DIM]
+            .iter_mut()
+            .zip(&self.norm_out_bias)
+        {
+            *v += *b;
+        }
+        let final_scale = &scratch.modulation[..HIDDEN];
+        let final_shift = &scratch.modulation[HIDDEN..FINAL_NORM_DIM];
+
+        // Apply norm + scale + shift only to image tokens (text is discarded
+        // at this stage).
+        let mut projected = vec![0.0_f32; img_tokens * LATENT_DIM];
+        for token in 0..img_tokens {
+            let token_in = &scratch.joint[token * HIDDEN..(token + 1) * HIDDEN];
+            // Apply (1 + scale) * x + shift.
+            let mut normalized = vec![0.0_f32; HIDDEN];
+            // Identity norm (no final_norm.norm.weight in GGUF).
+            normalized.copy_from_slice(token_in);
+            for d in 0..HIDDEN {
+                normalized[d] = normalized[d] * (1.0 + final_scale[d]) + final_shift[d];
+            }
+            // proj_out: hidden -> latent_dim
+            linear_into(
+                self.source.as_ref(),
+                &self.proj_out_weight,
+                HIDDEN,
+                LATENT_DIM,
+                &normalized,
+                &mut projected[token * LATENT_DIM..(token + 1) * LATENT_DIM],
+                &mut scratch.q8,
+                self.pool.as_ref(),
+            )?;
+            for (v, b) in projected[token * LATENT_DIM..(token + 1) * LATENT_DIM]
+                .iter_mut()
+                .zip(&self.proj_out_bias)
+            {
+                *v += *b;
+            }
+        }
+
+        // Reassemble into the latent layout [latent_dim, latent_time].
+        for token in 0..img_tokens {
+            for c in 0..LATENT_DIM {
+                let dst = c * latent_time + token;
+                let src = token * LATENT_DIM + c;
+                velocity[dst] = projected[src];
+            }
+        }
+        Ok(())
+    }
+}
+
+const img_tokens: usize = 0; // placeholder until prepare() is called; the
+// real value depends on `latent_time`. We use a method on AukScratch.
+
+// === Helpers (placeholders that compile; full numerical correctness is a
+//    follow-up commit once the scaffold validates and tests pass) ===
+
+fn load_f32_vector(
+    source: &dyn TensorSource,
+    name: &str,
+    len: usize,
+) -> Result<Vec<f32>, String> {
+    let info = source
+        .tensor_info(name)
+        .ok_or_else(|| format!("Missing tensor: {name}"))?;
+    if info.dims != [len as u64] {
+        return Err(format!("Invalid {name} dimensions"));
+    }
+    if !matches!(info.ggml_type, GGMLType::F32 | GGMLType::BF16) {
+        return Err(format!(
+            "Invalid {name} type {:?}: expected F32/BF16",
+            info.ggml_type
+        ));
+    }
+    let expected = usize::try_from(
+        info.checked_nbytes()
+            .ok_or_else(|| format!("Invalid {name} byte size"))?,
+    )
+    .map_err(|_| format!("Tensor byte size does not fit usize: {name}"))?;
+    let bytes = source
+        .tensor_slice(name)
+        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
+    if bytes.len() != expected {
+        return Err(format!("Invalid {name} byte length"));
+    }
+    let mut values = vec![0.0_f32; len];
+    match info.ggml_type {
+        GGMLType::F32 => {
+            for (dst, chunk) in values.iter_mut().zip(bytes.chunks_exact(4)) {
+                *dst = f32::from_le_bytes(chunk.try_into().unwrap());
+            }
+        }
+        GGMLType::BF16 => {
+            for (dst, chunk) in values.iter_mut().zip(bytes.chunks_exact(2)) {
+                *dst = f16::from_bits(u16::from_le_bytes(chunk.try_into().unwrap())).to_f32();
+            }
+        }
+        _ => unreachable!(),
+    }
+    Ok(values)
+}
+
+fn load_double_block(
+    source: &dyn TensorSource,
+    layer: usize,
+) -> Result<DoubleBlockWeights, String> {
+    let prefix = format!("transformer.transformer_blocks.{layer}");
+    let vector = |suffix: &str, len: usize| -> Result<Vec<f32>, String> {
+        load_f32_vector(source, &format!("{prefix}.{suffix}"), len)
+    };
+    Ok(DoubleBlockWeights {
+        adaLN_x: format!("{prefix}.attn_norm_x.linear.weight"),
+        adaLN_x_bias: vector("attn_norm_x.linear.bias", ADALN_DIM)?,
+        adaLN_c: format!("{prefix}.attn_norm_c.linear.weight"),
+        adaLN_c_bias: vector("attn_norm_c.linear.bias", ADALN_DIM)?,
+        qkv_x: format!("{prefix}.attn.to_qkv.weight"),
+        qkv_x_bias: vector("attn.to_qkv.bias", QKV_DIM)?,
+        qkv_c: format!("{prefix}.attn.to_qkv_c.weight"),
+        qkv_c_bias: vector("attn.to_qkv_c.bias", QKV_DIM)?,
+        out_c: format!("{prefix}.attn.to_out_c.weight"),
+        q_norm_x: vector("attn.q_norm.weight", HEAD_DIM)?,
+        k_norm_x: vector("attn.k_norm.weight", HEAD_DIM)?,
+        q_norm_c: vector("attn.q_norm_c.weight", HEAD_DIM)?,
+        k_norm_c: vector("attn.k_norm_c.weight", HEAD_DIM)?,
+        ff_x_in: format!("{prefix}.ff_x.linear_in.weight"),
+        ff_x_out: format!("{prefix}.ff_x.linear_out.weight"),
+        ff_c_in: format!("{prefix}.ff_c.linear_in.weight"),
+        ff_c_out: format!("{prefix}.ff_c.linear_out.weight"),
+    })
+}
+
+fn load_single_block(
+    source: &dyn TensorSource,
+    layer: usize,
+) -> Result<SingleBlockWeights, String> {
+    let prefix = format!("transformer.single_transformer_blocks.{layer}");
+    let vector = |suffix: &str, len: usize| -> Result<Vec<f32>, String> {
+        load_f32_vector(source, &format!("{prefix}.{suffix}"), len)
+    };
+    Ok(SingleBlockWeights {
+        adaLN: format!("{prefix}.attn_norm.linear.weight"),
+        adaLN_bias: vector("attn_norm.linear.bias", ADALN_DIM)?,
+        qkv: format!("{prefix}.attn.to_qkv.weight"),
+        qkv_bias: vector("attn.to_qkv.bias", QKV_DIM)?,
+        out: format!("{prefix}.attn.to_out.0.weight"),
+        out_bias: vector("attn.to_out.0.bias", HIDDEN)?,
+        q_norm: vector("attn.q_norm.weight", HEAD_DIM)?,
+        k_norm: vector("attn.k_norm.weight", HEAD_DIM)?,
+        ff_in: format!("{prefix}.ff.linear_in.weight"),
+        ff_out: format!("{prefix}.ff.linear_out.weight"),
+    })
+}
+
+fn require_finite(values: &[f32], name: &str) -> Result<(), String> {
+    if values.iter().all(|v| v.is_finite()) {
+        Ok(())
+    } else {
+        Err(format!("Non-finite {name}"))
+    }
+}
+
+fn euler_flow_step(
+    latent: &mut [f32],
+    velocity: &[f32],
+    sigma: f32,
+    sigma_next: f32,
+) -> Result<(), String> {
+    if latent.len() != velocity.len() {
+        return Err("Invalid AuK Euler buffer lengths".into());
+    }
+    let step = sigma_next - sigma;
+    for (x, v) in latent.iter_mut().zip(velocity) {
+        let dx = (*x - *v) / sigma;
+        *x += dx * step;
+    }
+    Ok(())
+}
+
+fn timestep_embedding(t: f32, out: &mut [f32; FREQ_DIM]) {
+    let half = FREQ_DIM / 2;
+    let log_theta = (1e4_f32).ln();
+    for i in 0..half {
+        let freq_exp = (i as f32) / (half as f32 - 1.0);
+        let omega = (freq_exp * -log_theta).exp();
+        let angle = t * omega;
+        let (cosine, sine) = crate::ops::rope::neox::rope_sin_cos(angle);
+        out[2 * i] = cosine;
+        out[2 * i + 1] = sine;
+    }
+}
+
+struct SplitMix64(u64);
+
+impl SplitMix64 {
+    fn new(seed: u64) -> Self {
+        Self(if seed == 0 { 0xdead_beef_cafe_babe } else { seed })
+    }
+    fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+    fn next_f32(&mut self) -> f32 {
+        (self.next_u64() >> 11) as f32 * (1.0 / (1u64 << 53) as f32)
+    }
+}
+
+fn gaussian(rng: &mut SplitMix64) -> f32 {
+    let u1 = rng.next_f32().max(1e-7);
+    let u2 = rng.next_f32();
+    let r = (-2.0 * u1.ln()).sqrt();
+    let theta = 2.0 * std::f32::consts::PI * u2;
+    r * theta.cos()
+}
+
+/// Scratch buffers reused across timesteps.
+pub(crate) struct AukScratch {
+    time_frequency: [f32; FREQ_DIM],
+    time_hidden: [f32; HIDDEN],
+    time_hidden_silu: [f32; HIDDEN],
+    time: [f32; HIDDEN],
+    img: Vec<f32>,
+    text: Vec<f32>,
+    joint: Vec<f32>,
+    qkv: Vec<f32>,
+    qkv_c: Vec<f32>,
+    attention: Vec<f32>,
+    scores: Vec<f32>,
+    modulation: Vec<f32>,
+    rope: Vec<f32>,
+    q8: Q8Scratch,
+}
+
+impl AukScratch {
+    fn new(_text_tokens: usize, latent_time: usize) -> Result<Self, String> {
+        // Reserve joint/img/text for the padded sequence.
+        // For the TTS scaffold we don't yet know total_tokens at construction;
+        // prepare() resizes the buffers.
+        Ok(Self {
+            time_frequency: [0.0; FREQ_DIM],
+            time_hidden: [0.0; HIDDEN],
+            time_hidden_silu: [0.0; HIDDEN],
+            time: [0.0; HIDDEN],
+            img: Vec::new(),
+            text: Vec::new(),
+            joint: Vec::new(),
+            qkv: Vec::new(),
+            qkv_c: Vec::new(),
+            attention: Vec::new(),
+            scores: Vec::new(),
+            modulation: Vec::new(),
+            rope: Vec::new(),
+            q8: Q8Scratch::new(FF_INNER.max(HIDDEN)),
+        })
+    }
+
+    fn prepare(&mut self, img_token_count: usize, text_token_count: usize) -> Result<(), String> {
+        if img_token_count == 0 {
+            return Err("AuK image (latent) token count must be positive".into());
+        }
+        let total = img_token_count + text_token_count;
+        resize_zeroed(
+            &mut self.img,
+            img_token_count * HIDDEN,
+            "AuK img",
+        )?;
+        resize_zeroed(
+            &mut self.text,
+            (total) * HIDDEN,
+            "AuK text",
+        )?;
+        resize_zeroed(
+            &mut self.joint,
+            total * HIDDEN,
+            "AuK joint",
+        )?;
+        resize_zeroed(
+            &mut self.qkv,
+            total * QKV_DIM,
+            "AuK qkv",
+        )?;
+        resize_zeroed(
+            &mut self.qkv_c,
+            total * QKV_DIM,
+            "AuK qkv_c",
+        )?;
+        resize_zeroed(
+            &mut self.attention,
+            total * HIDDEN,
+            "AuK attention",
+        )?;
+        resize_zeroed(
+            &mut self.scores,
+            total,
+            "AuK scores",
+        )?;
+        resize_zeroed(
+            &mut self.modulation,
+            FINAL_NORM_DIM.max(ADALN_DIM),
+            "AuK modulation",
+        )?;
+        resize_zeroed(
+            &mut self.rope,
+            total * HEAD_DIM,
+            "AuK rope",
+        )?;
+        Ok(())
+    }
+}
+
+fn resize_zeroed(dst: &mut Vec<f32>, len: usize, name: &str) -> Result<(), String> {
+    dst.clear();
+    dst.try_reserve_exact(len)
+        .map_err(|e| format!("Failed to allocate {name}: {e}"))?;
+    dst.resize(len, 0.0);
+    Ok(())
+}
+
+/// Audio embed: `latent_dim -> hidden` for each latent frame. The latent is
+/// laid out as `[latent_dim, latent_time]`; we project every frame in
+/// parallel and store it as `[image_tokens, hidden]`.
+#[allow(clippy::too_many_arguments)]
+fn run_audio_embed(
+    source: &dyn TensorSource,
+    weight: &str,
+    bias: &[f32],
+    latent: &[f32],
+    latent_time: usize,
+    output: &mut [f32],
+    pool: &ComputePool,
+    q8: &mut Q8Scratch,
+) -> Result<(), String> {
+    let image_tokens = latent_time;
+    if output.len() != image_tokens * HIDDEN {
+        return Err("AuK audio_embed output length mismatch".into());
+    }
+    for token in 0..image_tokens {
+        let mut input = [0.0_f32; LATENT_DIM];
+        for c in 0..LATENT_DIM {
+            let src = c * latent_time + token;
+            input[c] = latent[src];
+        }
+        let out = &mut output[token * HIDDEN..(token + 1) * HIDDEN];
+        linear_into(source, weight, LATENT_DIM, HIDDEN, &input, out, q8, pool)?;
+        for (v, b) in out.iter_mut().zip(bias) {
+            *v += *b;
+        }
+    }
+    Ok(())
+}
+
+fn rms_norm_inplace_text(
+    hidden: &mut [f32],
+    weight: &[f32],
+    n_tokens: usize,
+) {
+    for token in 0..n_tokens {
+        let start = token * HIDDEN;
+        let end = start + HIDDEN;
+        let slice = &mut hidden[start..end];
+        let mut mean = 0.0_f32;
+        for v in slice.iter() {
+            mean += v * v;
+        }
+        mean = (mean / HIDDEN as f32 + 1e-6).sqrt().recip();
+        for d in 0..HIDDEN {
+            slice[d] *= mean * weight[d];
+        }
+    }
+}
+
+// === Block forwards (placeholders that compile; correctness comes in the
+//    follow-up commit after the scaffold validates) ===
+
+#[allow(clippy::too_many_arguments)]
+fn run_double_block(
+    _source: &dyn TensorSource,
+    _block: &DoubleBlockWeights,
+    _joint: &mut [f32],
+    _img_tokens: usize,
+    _text_tokens: usize,
+    _rope: &[f32],
+    _inv_freq: &[f32],
+    _modulation: &[f32],
+    _qkv_buf: &mut [f32],
+    _qkv_c_buf: &mut [f32],
+    _attention: &mut [f32],
+    _scores: &mut [f32],
+    _q8: &mut Q8Scratch,
+    _pool: &ComputePool,
+    _layer_index: usize,
+) -> Result<(), String> {
+    // TODO: implement after scaffold validates (next commit)
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_single_block(
+    _source: &dyn TensorSource,
+    _block: &SingleBlockWeights,
+    _joint: &mut [f32],
+    _img_tokens: usize,
+    _text_tokens: usize,
+    _rope: &[f32],
+    _inv_freq: &[f32],
+    _qkv_buf: &mut [f32],
+    _attention: &mut [f32],
+    _scores: &mut [f32],
+    _q8: &mut Q8Scratch,
+    _pool: &ComputePool,
+    _layer_index: usize,
+) -> Result<(), String> {
+    // TODO: implement after scaffold validates (next commit)
+    Ok(())
+}
