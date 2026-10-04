@@ -16,7 +16,6 @@ use rust_model_inference::core::loader::GGUFLoader;
 use rust_model_inference::core::tensor::TensorSource;
 use rust_model_inference::models::gliner_boundary::BoundaryModel;
 
-const GGUF: &str = "models/gliner2.5-base-v1/gliner2.5-base-v1-f32.gguf";
 const FIXTURE: &str = "tests/fixtures/gliner2.5-base-v1/document-candidate-pool-golden.json";
 
 fn gguf_path() -> Option<std::path::PathBuf> {
@@ -113,7 +112,6 @@ fn pool_matches_the_reference() {
     let fixture = fixture();
     for (case_index, case) in fixture["cases"].as_array().unwrap().iter().enumerate() {
         let seq_len = case["seq_len"].as_u64().unwrap() as usize;
-        let q_count = case["q_count"].as_u64().unwrap() as usize;
 
         let text_states = f32s(&case["text_states"]);
         let flat_mask = bool_list(&case["text_mask"]);

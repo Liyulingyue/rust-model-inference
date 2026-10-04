@@ -18,7 +18,6 @@ use rust_model_inference::core::tensor::TensorSource;
 use rust_model_inference::models::gliner_boundary::pool::SharedPoolInputs;
 use rust_model_inference::models::gliner_boundary::{score_document_candidates, BoundaryModel};
 
-const GGUF: &str = "models/gliner2.5-base-v1/gliner2.5-base-v1-f32.gguf";
 const FIXTURE: &str = "tests/fixtures/gliner2.5-base-v1/shared-pool-scorer-golden.json";
 
 fn gguf_path() -> Option<std::path::PathBuf> {

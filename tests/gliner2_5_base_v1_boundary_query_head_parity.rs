@@ -19,9 +19,8 @@
 
 use rust_model_inference::core::loader::GGUFLoader;
 use rust_model_inference::core::tensor::TensorSource;
-use rust_model_inference::models::gliner_boundary::{BoundaryEncoding, BoundaryModel};
+use rust_model_inference::models::gliner_boundary::BoundaryModel;
 
-const GGUF: &str = "models/gliner2.5-base-v1/gliner2.5-base-v1-f32.gguf";
 const FIXTURE: &str = "tests/fixtures/gliner2.5-base-v1/boundary-query-head-golden.json";
 
 fn gguf_path() -> Option<std::path::PathBuf> {
@@ -44,15 +43,6 @@ fn loaded_model() -> Option<(Box<dyn std::any::Any>, BoundaryModel<'static>)> {
     let leaked: &'static dyn TensorSource = Box::leak(Box::new(source));
     let model = BoundaryModel::from_source(leaked).expect("load boundary model");
     Some((Box::new(()), model))
-}
-
-trait BoundaryEncodingExt {
-    fn boundary_len(&self) -> usize;
-}
-impl BoundaryEncodingExt for BoundaryEncoding {
-    fn boundary_len(&self) -> usize {
-        self.seq_len + 1
-    }
 }
 
 #[test]
@@ -93,9 +83,7 @@ fn matches_the_reference_stack() {
     let mut query_states: Vec<f32> = Vec::with_capacity(q_count * hidden_size);
     query_states.extend_from_slice(&text_states[..hidden_size]); // q=0
     query_states.extend_from_slice(&text_states[hidden_size..2 * hidden_size]); // q=1
-    let query_mask: Vec<Vec<Vec<bool>>> = vec![vec![vec![true; q_count]; 1]; 1];
-    // query_mask is shape [B][Q], but q_count is queried per batch, so
-    // rebuild as [B=1][Q=q_count]
+                                                                                // query_mask is shape [B][Q], and this batch is one row of `q_count` queries.
     let query_mask = vec![vec![true; q_count]];
 
     let marginals = model.query_head.forward(

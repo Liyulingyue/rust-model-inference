@@ -16,9 +16,8 @@
 
 use rust_model_inference::core::loader::GGUFLoader;
 use rust_model_inference::core::tensor::TensorSource;
-use rust_model_inference::models::gliner_boundary::{BoundaryEncoding, BoundaryModel};
+use rust_model_inference::models::gliner_boundary::BoundaryModel;
 
-const GGUF: &str = "models/gliner2.5-base-v1/gliner2.5-base-v1-f32.gguf";
 const FIXTURE: &str = "tests/fixtures/gliner2.5-base-v1/score-explicit-pairs-golden.json";
 
 fn gguf_path() -> Option<std::path::PathBuf> {
@@ -43,15 +42,6 @@ fn loaded_model() -> Option<(Box<dyn std::any::Any>, BoundaryModel<'static>)> {
     Some((Box::new(()), model))
 }
 
-trait BoundaryEncodingExt {
-    fn boundary_len(&self) -> usize;
-}
-impl BoundaryEncodingExt for BoundaryEncoding {
-    fn boundary_len(&self) -> usize {
-        self.seq_len + 1
-    }
-}
-
 #[test]
 fn matches_the_reference_stack() {
     let Some((_anchor, model)) = loaded_model() else {
@@ -73,8 +63,8 @@ fn matches_the_reference_stack() {
     let batch: usize = 1;
 
     // Deterministic text_states mirroring the Python dump.
-    let mut text_states: Vec<f32> = (0..seq_len * hidden_size)
-        .map(|i| (((i as f32) * 0.011).sin() - 1.0))
+    let text_states: Vec<f32> = (0..seq_len * hidden_size)
+        .map(|i| (i as f32 * 0.011).sin() - 1.0)
         .collect();
     let mut text_mask: Vec<Vec<bool>> = vec![vec![false; seq_len]];
     for slot in text_mask[0].iter_mut().take(valid_tokens) {

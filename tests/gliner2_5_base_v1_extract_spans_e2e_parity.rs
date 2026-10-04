@@ -26,9 +26,8 @@ use rust_model_inference::models::gliner_boundary::extract::decode_spans;
 use rust_model_inference::models::gliner_boundary::overlap::{
     normalize_overlap_policy, OverlapPolicy,
 };
-use rust_model_inference::models::gliner_boundary::{extract_spans, run_extraction, BoundaryModel};
+use rust_model_inference::models::gliner_boundary::{run_extraction, BoundaryModel};
 
-const GGUF: &str = "models/gliner2.5-base-v1/gliner2.5-base-v1-f32.gguf";
 const FIXTURE: &str = "tests/fixtures/gliner2.5-base-v1/extract-spans-e2e-golden.json";
 
 fn loaded_model() -> Option<BoundaryModel<'static>> {
@@ -156,8 +155,9 @@ fn logits_and_spans_match_the_reference() {
         let text = case["text"].as_str().unwrap();
         let threshold = case["threshold"].as_f64().unwrap() as f32;
 
-        let (batch, words) =
-            run_extraction(&model, text, &tasks, E_TOKEN, 0).expect("run extraction");
+        // The word list comes from the fixture below, not from `run_extraction`,
+        // so the decoder sees exactly the reference's segmentation.
+        let (batch, _) = run_extraction(&model, text, &tasks, E_TOKEN, 0).expect("run extraction");
         let want_logits: Vec<f32> = case["pair_logits"]
             .as_array()
             .unwrap()

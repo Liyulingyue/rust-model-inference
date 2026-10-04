@@ -12,8 +12,6 @@ use rust_model_inference::core::loader::GGUFLoader;
 use rust_model_inference::core::tensor::TensorSource;
 use rust_model_inference::models::gliner_boundary::{score_spans, BoundaryModel};
 
-const GGUF: &str = "models/gliner2.5-base-v1/gliner2.5-base-v1-f32.gguf";
-
 fn gguf_path() -> Option<std::path::PathBuf> {
     std::env::var_os("RMI_GLINER2_5_BASE_V1_GGUF").map(std::path::PathBuf::from)
 }
@@ -47,8 +45,8 @@ fn score_spans_runs_end_to_end() {
     let q_count = 2;
     let c_count = 6;
 
-    let mut text_states: Vec<f32> = (0..seq_len * hidden_size)
-        .map(|i| (((i as f32) * 0.011).sin() - 1.0))
+    let text_states: Vec<f32> = (0..seq_len * hidden_size)
+        .map(|i| (i as f32 * 0.011).sin() - 1.0)
         .collect();
     let mut text_mask: Vec<Vec<bool>> = vec![vec![false; seq_len]];
     for slot in text_mask[0].iter_mut().take(valid_tokens) {

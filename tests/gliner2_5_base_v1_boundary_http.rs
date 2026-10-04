@@ -245,7 +245,10 @@ fn boundary_http_extracts_spans_and_classifies() {
     let group = &resp.classifications[0];
     assert_eq!(group.task, "overall sentiment");
     assert_eq!(group.activation, "softmax");
-    assert_eq!(group.probabilities.len(), 3);
+    // The label vocabulary comes back in schema order, and `probabilities` is
+    // indexed by it — so this pins the two to each other, not just the sum.
+    assert_eq!(group.labels, ["positive", "neutral", "negative"]);
+    assert_eq!(group.probabilities.len(), group.labels.len());
     assert!((group.probabilities.iter().sum::<f32>() - 1.0).abs() < 1e-4);
     // Single-label group: the winner is reported in `choice_label`, and
     // `selected` stays empty.

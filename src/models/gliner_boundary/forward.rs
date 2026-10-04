@@ -490,17 +490,16 @@ pub fn attention_allowed(mask_row: &[bool], i: usize, j: usize, window: usize) -
 
 /// `head_dim` for attention blocks is `boundary_dim / num_heads`. The
 /// reference uses `boundary_attention_heads` from metadata (default 4).
-/// We can't read metadata per-block, so we default to 4 and require the
-/// QKV bias tensor to declare `3 * boundary_dim`. If a future variant
-/// diverges here, this loader will trip on a shape mismatch.
+///
+/// This is an existence check, not a derivation: the QKV bias must be present
+/// for the block to load at all, but its `(3 * boundary_dim,)` shape carries no
+/// head count, so the answer is always the config default. The doc previously
+/// claimed this "requires the QKV bias tensor to declare `3 * boundary_dim`",
+/// which it never did — `run_attention_block` is what trips on a bad shape.
 fn attention_num_heads(source: &dyn TensorSource, attn_index: usize) -> Option<usize> {
     let qkv_bias_name =
         format!("boundary_head.boundary_encoder.attention_blocks.{attn_index}.qkv_projection.bias");
-    source.tensor_info(&qkv_bias_name).map(|info| {
-        // QKV bias is `(3 * boundary_dim,)`. We don't know num_heads from
-        // here; default 4 (boundary_attention_heads config default).
-        4
-    })
+    source.tensor_info(&qkv_bias_name).map(|_| 4)
 }
 
 /// Scalar `y = W @ x + b` for an F32 weight. The boundary projections

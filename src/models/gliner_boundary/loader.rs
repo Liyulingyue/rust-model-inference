@@ -26,7 +26,6 @@ use crate::core::tensor::{GGMLType, MetaValue, TensorSource};
 use crate::models::gliner::compute::EncoderConfig;
 use crate::models::gliner::weights::{LayerWeights, Norm};
 use crate::ops::kernel::{QuantizedTensor, Weight};
-use std::sync::Arc;
 
 use super::candidate_encoder::CandidateEncoder;
 use super::forward::BoundaryEncoder;
@@ -147,7 +146,7 @@ impl<'a> BoundaryModel<'a> {
         let tokenizer = crate::models::gliner::load_tokenizer(source)?;
 
         // 4. Encoder weights (token_embd / rel_embeddings / rel_norm / tok_norm / blk.X.*)
-        let encoder = load_encoder(source, n_layer, n_embd, n_head, n_ff, bucket_size * 2)?;
+        let encoder = load_encoder(source, n_layer, n_embd, n_ff, bucket_size * 2)?;
 
         // 5. Boundary classifier (layers 0 and 3)
         let classifier_0 = load_weight(
@@ -304,7 +303,6 @@ fn load_encoder<'a>(
     source: &'a dyn TensorSource,
     n_layer: usize,
     n_embd: usize,
-    n_head: usize,
     n_ff: usize,
     pos_ebd_size: usize,
 ) -> Result<crate::models::gliner::weights::ModelWeights<'a>, String> {

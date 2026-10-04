@@ -15,7 +15,6 @@ use rust_model_inference::core::tensor::TensorSource;
 use rust_model_inference::models::gliner_boundary::forward::attention_allowed;
 use rust_model_inference::models::gliner_boundary::BoundaryModel;
 
-const GGUF: &str = "models/gliner2.5-base-v1/gliner2.5-base-v1-f32.gguf";
 const FIXTURE: &str = "tests/fixtures/gliner2.5-base-v1/boundary-attention-window-golden.json";
 
 fn fixture() -> serde_json::Value {

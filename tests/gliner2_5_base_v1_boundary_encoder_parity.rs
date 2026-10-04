@@ -20,9 +20,8 @@
 
 use rust_model_inference::core::loader::GGUFLoader;
 use rust_model_inference::core::tensor::TensorSource;
-use rust_model_inference::models::gliner_boundary::{BoundaryEncoding, BoundaryModel};
+use rust_model_inference::models::gliner_boundary::BoundaryModel;
 
-const GGUF: &str = "models/gliner2.5-base-v1/gliner2.5-base-v1-f32.gguf";
 const FIXTURE: &str = "tests/fixtures/gliner2.5-base-v1/boundary-encoder-golden.json";
 
 fn gguf_path() -> Option<std::path::PathBuf> {
@@ -45,16 +44,6 @@ fn loaded_model() -> Option<(Box<dyn std::any::Any>, BoundaryModel<'static>)> {
     let leaked: &'static dyn TensorSource = Box::leak(Box::new(source));
     let model = BoundaryModel::from_source(leaked).expect("load boundary model");
     Some((Box::new(()), model))
-}
-
-trait BoundaryEncodingExt {
-    fn boundary_len(&self) -> usize;
-}
-
-impl BoundaryEncodingExt for BoundaryEncoding {
-    fn boundary_len(&self) -> usize {
-        self.seq_len + 1
-    }
 }
 
 #[test]

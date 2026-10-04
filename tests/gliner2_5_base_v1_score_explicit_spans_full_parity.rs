@@ -18,7 +18,6 @@ use rust_model_inference::core::loader::GGUFLoader;
 use rust_model_inference::core::tensor::TensorSource;
 use rust_model_inference::models::gliner_boundary::{score_spans, BoundaryModel, ScoredSpan};
 
-const GGUF: &str = "models/gliner2.5-base-v1/gliner2.5-base-v1-f32.gguf";
 const FIXTURE: &str = "tests/fixtures/gliner2.5-base-v1/score-explicit-spans-full-golden.json";
 
 fn gguf_path() -> Option<std::path::PathBuf> {

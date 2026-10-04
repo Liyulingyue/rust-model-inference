@@ -29,7 +29,6 @@ use rust_model_inference::models::gliner_boundary::extract::{
 };
 use rust_model_inference::models::gliner_boundary::BoundaryModel;
 
-const GGUF: &str = "models/gliner2.5-base-v1/gliner2.5-base-v1-f32.gguf";
 const FIXTURE: &str = "tests/fixtures/gliner2.5-base-v1/classification-head-golden.json";
 
 fn loaded_model() -> Option<BoundaryModel<'static>> {

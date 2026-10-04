@@ -384,13 +384,9 @@ pub fn run_mixed_extraction(
                 ));
             }
             let slice = &states[cursor * hidden_size..(cursor + count) * hidden_size];
-            extractions.classifications.push(classify_group(
-                model,
-                task,
-                slice,
-                task.multi_label,
-                n_threads_arg,
-            )?);
+            extractions
+                .classifications
+                .push(classify_group(model, task, slice, task.multi_label)?);
             cursor += count;
         }
         if cursor != encoded.classification_names.len() {
@@ -833,7 +829,7 @@ pub fn decode_spans(
                 })
                 .collect();
             let keep = resolve_overlaps(&scored, policy);
-            let mut kept: Vec<ExtractedSpan> =
+            let kept: Vec<ExtractedSpan> =
                 keep.into_iter().map(|index| hits[index].clone()).collect();
             // `resolve_overlaps` returns ranked order already; re-sorting would
             // be a no-op but hides the contract, so assert it instead.
@@ -1054,7 +1050,6 @@ pub fn classify_group(
     task: &Task,
     choice_states: &[f32],
     multi_label: bool,
-    n_threads_arg: usize,
 ) -> Result<ClassificationResult, String> {
     let hidden_size = model.config.n_embd;
     if choice_states.len() != task.labels.len() * hidden_size {
