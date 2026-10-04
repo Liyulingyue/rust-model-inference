@@ -1045,6 +1045,35 @@ ComputePool，不是把 LLM 迁去 rayron"。迁移面：
 
 参考：`references/stable-diffusion.cpp/src/model/diffusion/ernie_image.hpp`（410 行）+ `docs/ernie_image.md`（34 行）；HF mirror README: `https://hf-mirror.com/unsloth/ERNIE-Image-Turbo-GGUF`（Q2_K 3.18 GB → BF16 16.1 GB；152k 下载/月）。
 
+### AuK-Base (1.5B, Flux2Edit 音频 DiT) 适配 — 🚧 进行中 (2026-10)
+
+`general.architecture = auk`（audio.cpp 的 community model；GGUF 通过 `transformer.transformer_blocks.0.img_attn.qkv.weight` 这类 tensor 命名探测，参考 `references/audio.cpp/src/community_models/auk/{flow,conditioning,vae,audio_conditioning,session}.cpp` 116 KB 参考实现；HuggingFace 镜像源 `audio-cpp/AuK-Base-and-Flash-GGUF`）
+
+核心架构（`audio.cpp/docs/community_models/auk.md` + `config/auk-base.yaml`）：
+- Backbone = **Flux2Edit**（Flux 风格双流 DiT，跟 `pig` (Z-Image) 同一家族）
+- `dim=1536, heads=24, head_dim=64`，`ff_mult=2 → ffn=3072`
+- 10 个 double blocks（并行 img/txt 注意力 + MLP）+ 20 个 single blocks（仅 img 注意力）
+- `text_hidden_dim=2048`（Qwen2.5-Omni-3B n_embd）
+- VAE = `BigVGANFlowVAE`，64-dim latent，480× 下采样，24 kHz 输出
+- CFMEdit = flow-matching 编辑变体，logistic_normal schedule（P_mean=-0.8, P_std=0.8）
+- AuK-Base：32 Euler 步 + guidance 2.0
+- AuK-Flash：固定 4 步 + guidance 0（蒸馏版；本轮暂不 port）
+
+GGUF 重量（从 `audio-cpp/AuK-Base-and-Flash-GGUF`）：
+- `auk-base-f16.gguf` 2.9 GB（F16 DiT，本轮首选）
+- `auk-base-q8_0.gguf` 1.5 GB（Q8_0 量化）
+- `auk-vae-f32.gguf` 608 MB
+- `qwen2.5-omni-3b-q8_0.gguf` 4.0 GB（**本地已有** `models/Qwen2.5-Omni-3B-GGUF/Qwen2.5-Omni-3B-Q8_0.gguf`）
+
+进度：
+1. ✅ MODEL_LIST.md 加行 + TODO.md 占位
+2. ⏳ 下 AuK GGUF + inspect tensor 命名（vs audio.cpp 期望），自校
+3. ⏳ `src/models/diffusion/auk/{mod,dit,vae,conditioning}.rs` scaffold（参照 pig 的 Flux 双流 + AuK 专有 CFMEdit 逻辑）
+4. ⏳ CLI dispatch + arch detection + 测试钉 contract
+5. ⏳ 端到端冒烟：`--model auk-base-f16.gguf --text-encoder Qwen2.5-Omni-3B-Q8_0.gguf --vae auk-vae-f32.gguf --text "..." --audio ref.wav (optional) --out speech.wav`
+
+注：audio.cpp 的 C++ 代码是 **参考** 而非金标准 — tensor 命名、参数化约定可能跟实际 GGUF 有微小差异（参考 ERNIE-Image 跟 unsloth GGUF 的踩坑先例），以 **GGUF 实际 tensor 名 + shape** 为准。
+
 ### Spark-X2.5-1.7B / 4B-GGUF 适配 — ✅ 已完成（功能）+ ⚠️ 性能待优化
 
 `arch=spark2_5`，Xunfei Spark 2.5 讯飞星火。适配点：

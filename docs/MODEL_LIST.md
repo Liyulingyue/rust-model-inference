@@ -59,3 +59,4 @@
 | Z-Image | Turbo | 文生图 | leejet/stable-diffusion.cpp @ `97d2990` | https://www.modelscope.cn/models/Tongyi-MAI/Z-Image-Turbo | https://www.modelscope.cn/models/gguf-org/z-image-gguf | 待核验。|
 | ERNIE-Image-Turbo | 8B | 文生图 | leejet/stable-diffusion.cpp @ `de298c2` | https://www.modelscope.cn/models/PaddlePaddle/ERNIE-Image-Turbo | https://www.modelscope.cn/models/unsloth/ERNIE-Image-Turbo-GGUF | 待核验。|
 | NVIDIA-Nemotron-3-Nano | 4B | 文本 | llama.cpp @ `b96806d` | https://www.modelscope.cn/models/nvidia/NVIDIA-Nemotron-3-Nano-4B-v1 | https://www.modelscope.cn/models/unsloth/NVIDIA-Nemotron-3-Nano-4B-GGUF | √ |
+| AuK-Base | 1.5B | 语音生成（Flux2Edit 音频 DiT） | 0xShug0/audio.cpp @ `auk` community model（参考） | https://www.modelscope.cn/models/Tencent-Hunyuan/AuK | https://hf-mirror.com/audio-cpp/AuK-Base-and-Flash-GGUF | 待核验。|
