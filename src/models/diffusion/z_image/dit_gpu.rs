@@ -284,7 +284,7 @@ impl DitGpuSession {
         // blocks x 5 projections for Z-Image Turbo, and `bind_weight_buffers`
         // allocates a fresh set each time, so the pool has to cover all of them
         // for the life of the render.
-        let ops = Qwen3Ops::new_with_size(context, arena_bytes, 256)?;
+        let ops = Qwen3Ops::new_device_local_with_size(context, arena_bytes, 256)?;
         Ok(Self {
             context,
             ops,
@@ -335,10 +335,17 @@ impl DitGpuSession {
         if self.weights.contains_key(&(layer, projection)) {
             return Ok(());
         }
-        let buffer = unsafe { self.context.upload_static(bytes) }?;
-        let bindings = self
+        let buffer = unsafe { self.context.upload_device_static(bytes) }?;
+        let bindings = match self
             .ops
-            .bind_weight_buffers(std::slice::from_ref(&buffer), &[format])?;
+            .bind_weight_buffers(std::slice::from_ref(&buffer), &[format])
+        {
+            Ok(bindings) => bindings,
+            Err(error) => {
+                unsafe { self.context.destroy_buffer(&buffer) };
+                return Err(error);
+            }
+        };
         self.weights
             .insert((layer, projection), BoundWeight { buffer, bindings });
         Ok(())
@@ -529,7 +536,8 @@ impl DitGpuSession {
         }
         let elapsed = start.elapsed().as_secs_f64() / iterations as f64;
         let output_len = self.rows * projection.n_out();
-        let values = self.ops.read_f32(output_region, output_len)?.to_vec();
+        let mut values = vec![0.0; output_len];
+        self.ops.read_f32_into(output_region, &mut values)?;
         Ok((elapsed, values))
     }
 
@@ -616,8 +624,8 @@ impl DitGpuSession {
         if self.readback.len() < output_len {
             self.readback.resize(output_len, 0.0);
         }
-        let values = self.ops.read_f32(output_region, output_len)?;
-        self.readback[..output_len].copy_from_slice(&values[..output_len]);
+        self.ops
+            .read_f32_into(output_region, &mut self.readback[..output_len])?;
         Ok(())
     }
 
@@ -839,5 +847,21 @@ impl DitGpuSession {
 
     pub(crate) fn layout(&self) -> &Layout {
         &self.layout
+    }
+}
+
+impl Drop for DitGpuSession {
+    fn drop(&mut self) {
+        // Every uploaded buffer belongs to this render. On an uncertain fence,
+        // confirm idle before freeing it; retain the handles if recovery fails.
+        unsafe {
+            let _ = self.context.destroy_completed_buffers(
+                self.weights
+                    .values()
+                    .map(|bound| &bound.buffer)
+                    .chain(self.norms.values().map(|bound| &bound.buffer))
+                    .chain(self.modulation.iter().map(|bound| &bound.buffer)),
+            );
+        }
     }
 }
