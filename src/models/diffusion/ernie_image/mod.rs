@@ -516,10 +516,16 @@ fn linear_into_scaled_impl(
     scale: f32,
 ) -> Result<(), String> {
     if input.len() != n_in {
-        return Err("Invalid linear input length".into());
+        return Err(format!(
+            "Invalid linear input length for {name}: expected {n_in}, got {}",
+            input.len()
+        ));
     }
     if output.len() != n_out {
-        return Err("Invalid linear output length".into());
+        return Err(format!(
+            "Invalid linear output length for {name}: expected {n_out}, got {}",
+            output.len()
+        ));
     }
     n_in.checked_mul(n_out)
         .ok_or_else(|| format!("Invalid {name} dimensions"))?;

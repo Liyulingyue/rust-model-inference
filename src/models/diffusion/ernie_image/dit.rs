@@ -432,6 +432,7 @@ impl ErnieImageDit {
                 &mut scratch.qkv,
                 &mut scratch.attention,
                 &mut scratch.ffn,
+                &mut scratch.ffn_up,
                 &mut scratch.scores,
                 &mut scratch.mlp_out,
                 &mut scratch.q8,
@@ -699,8 +700,11 @@ pub(crate) struct ErnieScratch {
     qkv: Vec<f32>,
     /// Attention output `[total_tokens, HIDDEN]`.
     attention: Vec<f32>,
-    /// FFN intermediate `[total_tokens, FFN_WIDTH]` (SiLU(gate) * up).
+    /// FFN intermediate `[total_tokens, FFN_WIDTH]` (gelu(gate) * up).
     ffn: Vec<f32>,
+    /// Up-projection output `[total_tokens, FFN_WIDTH]` (separate from
+    /// `ffn` so we can hold both gate and up before multiplying).
+    ffn_up: Vec<f32>,
     /// MLP output `[total_tokens, HIDDEN]` before residual add.
     mlp_out: Vec<f32>,
     /// Attention score buffer `[total_tokens]`.
@@ -729,6 +733,7 @@ impl ErnieScratch {
             qkv: Vec::new(),
             attention: Vec::new(),
             ffn: Vec::new(),
+            ffn_up: Vec::new(),
             mlp_out: Vec::new(),
             scores: Vec::new(),
             modulation: Vec::new(),
@@ -767,6 +772,11 @@ impl ErnieScratch {
             &mut self.ffn,
             total_tokens * FFN_WIDTH,
             "ERNIE-Image FFN",
+        )?;
+        resize_zeroed(
+            &mut self.ffn_up,
+            total_tokens * FFN_WIDTH,
+            "ERNIE-Image FFN up",
         )?;
         resize_zeroed(
             &mut self.mlp_out,
@@ -921,6 +931,7 @@ fn run_block(
     qkv: &mut [f32],
     attention: &mut [f32],
     ffn_buf: &mut [f32],
+    ffn_up: &mut [f32],
     scores: &mut [f32],
     mlp_out: &mut [f32],
     q8: &mut Q8Scratch,
@@ -1062,16 +1073,24 @@ fn run_block(
     for token in 0..total_tokens {
         let token_slice = &mut tokens[token * HIDDEN..(token + 1) * HIDDEN];
         rms_norm_inplace_with_scratch(token_slice, &block.adaLN_mlp_ln, mlp_out);
-        for ((v, s), sh) in mlp_out.iter_mut().zip(scale_mlp).zip(shift_mlp) {
-            *v = *v * (1.0 + *s) + *sh;
+        // modulate: norm * (1 + scale) + shift, write back into mlp_out's slice.
+        // We use split_at_mut to break the immutable borrow from rms_norm.
+        let token_mlp = &mut mlp_out[token * HIDDEN..(token + 1) * HIDDEN];
+        let mlp_in: Vec<f32> = token_mlp.to_vec();
+        for (v, (in_v, (s, sh))) in token_mlp
+            .iter_mut()
+            .zip(mlp_in.iter().zip(scale_mlp.iter().zip(shift_mlp.iter())))
+        {
+            *v = *in_v * (1.0 + *s) + *sh;
         }
-        // gate_proj, up_proj
+        // gate_proj → ffn_buf (gate), up_proj → ffn_up (up). Both buffers
+        // are sized `total_tokens * FFN_WIDTH` and disjoint.
         linear_into(
             source,
             &block.gate_proj,
             HIDDEN,
             FFN_WIDTH,
-            mlp_out,
+            &mlp_out[token * HIDDEN..(token + 1) * HIDDEN],
             &mut ffn_buf[token * FFN_WIDTH..(token + 1) * FFN_WIDTH],
             q8,
             pool,
@@ -1081,19 +1100,19 @@ fn run_block(
             &block.up_proj,
             HIDDEN,
             FFN_WIDTH,
-            mlp_out,
-            &mut attention[token * FFN_WIDTH..(token + 1) * FFN_WIDTH],
+            &mlp_out[token * HIDDEN..(token + 1) * HIDDEN],
+            &mut ffn_up[token * FFN_WIDTH..(token + 1) * FFN_WIDTH],
             q8,
             pool,
         )?;
-        // gelu(gate) * up -> linear_fc2
+        // gelu(gate) * up -> linear_fc2. Result lands in `mlp_out`.
         let gate = &mut ffn_buf[token * FFN_WIDTH..(token + 1) * FFN_WIDTH];
         for g in gate.iter_mut() {
             *g = gelu(*g);
         }
         for (g, u) in gate
             .iter_mut()
-            .zip(&attention[token * FFN_WIDTH..(token + 1) * FFN_WIDTH])
+            .zip(ffn_up[token * FFN_WIDTH..(token + 1) * FFN_WIDTH].iter())
         {
             *g *= *u;
         }
@@ -1103,14 +1122,14 @@ fn run_block(
             FFN_WIDTH,
             HIDDEN,
             gate,
-            mlp_out,
+            &mut mlp_out[token * HIDDEN..(token + 1) * HIDDEN],
             q8,
             pool,
         )?;
         // residual add with gate_mlp
         for ((token_v, mlp_v), g) in tokens[token * HIDDEN..(token + 1) * HIDDEN]
             .iter_mut()
-            .zip(mlp_out.iter())
+            .zip(mlp_out[token * HIDDEN..(token + 1) * HIDDEN].iter())
             .zip(gate_mlp)
         {
             *token_v += mlp_v * *g;
