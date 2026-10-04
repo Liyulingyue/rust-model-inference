@@ -32,6 +32,7 @@ use crate::ops::matmul_q8_0_quantized_parallel_rows;
 use std::sync::Arc;
 
 pub(crate) mod dit;
+pub(crate) mod text;
 pub(crate) mod vae;
 
 pub struct AukAudio {
@@ -52,32 +53,52 @@ pub(crate) struct AukOptions {
 pub(crate) struct AukPipeline {
     dit: dit::AukDit,
     vae: vae::BigVGANFlowVae,
+    text: Option<text::AukTextEncoder>,
 }
 
 impl AukPipeline {
     pub(crate) fn load(
         diffusion: Arc<dyn TensorSource>,
         vae_source: Arc<dyn TensorSource>,
+        text_source: Option<Arc<dyn TensorSource>>,
         n_threads: usize,
     ) -> Result<Self, String> {
         validate_component(diffusion.as_ref(), Component::Dit)?;
         let pool = Arc::new(ComputePool::new(n_threads.max(1)));
+        let text = match text_source {
+            Some(src) => Some(text::AukTextEncoder::load(src, Arc::clone(&pool))?),
+            None => None,
+        };
         Ok(Self {
             dit: dit::AukDit::load(diffusion, Arc::clone(&pool))?,
             vae: vae::BigVGANFlowVae::load(vae_source, pool)?,
+            text,
         })
     }
 
     pub(crate) fn generate_audio(
         &self,
-        text_conditioning: &[f32],
-        text_tokens: usize,
+        prompt: &str,
         options: &AukOptions,
     ) -> Result<AukAudio, String> {
         let total_start = std::time::Instant::now();
+        let (text_conditioning, text_tokens) = match self.text.as_ref() {
+            Some(encoder) => {
+                let t = std::time::Instant::now();
+                let hidden = encoder.encode(prompt)?;
+                let tokens = encoder.last_token_count(&hidden);
+                eprintln!(
+                    "[auk-stage-profile] text_encode={:.1}ms  n_tokens={}",
+                    t.elapsed().as_secs_f64() * 1000.0,
+                    tokens,
+                );
+                (hidden, tokens)
+            }
+            None => return Err("AuK requires --text-encoder (Qwen2.5-Omni-3B) for TTS".into()),
+        };
         let t = std::time::Instant::now();
         let latent = self.dit.denoise(
-            text_conditioning,
+            &text_conditioning,
             text_tokens,
             options,
         )?;

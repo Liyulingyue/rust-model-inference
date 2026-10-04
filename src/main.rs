@@ -254,9 +254,17 @@ fn main() {
             options.vae.as_deref().expect("AuK VAE required"),
             ComponentRole::Llm,
         ));
+        let text = match options.text_encoder.as_deref() {
+            Some(path) => Some(Arc::<dyn TensorSource>::from(open_or_exit(
+                path,
+                ComponentRole::Llm,
+            ))),
+            None => None,
+        };
         app::run_or_exit(app::run_auk_cli(
             arch_probe,
             vae,
+            text,
             options.prompt.as_deref().unwrap_or(""),
             options.steps.unwrap_or(32),
             options.resolution.unwrap_or(24000),
@@ -291,9 +299,17 @@ fn main() {
                 options.vae.as_deref().expect("AuK VAE required"),
                 ComponentRole::Llm,
             ));
+            let text = match options.text_encoder.as_deref() {
+                Some(path) => Some(Arc::<dyn TensorSource>::from(open_or_exit(
+                    path,
+                    ComponentRole::Llm,
+                ))),
+                None => None,
+            };
             app::run_or_exit(app::run_auk_cli(
                 arch_probe,
                 vae,
+                text,
                 options.prompt.as_deref().unwrap_or(""),
                 options.steps.unwrap_or(32),
                 options.resolution.unwrap_or(24000),

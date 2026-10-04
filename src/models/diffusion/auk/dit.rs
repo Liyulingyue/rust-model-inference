@@ -287,6 +287,7 @@ impl AukDit {
         if latent.len() != latent_values {
             return Err("Invalid AuK latent length".into());
         }
+        let img_tokens = latent_time;
         // CFMEdit adds a reference audio; this TTS-only path initializes the
         // joint sequence with just text (img tokens come from `latent`).
         // We wire the joint into `scratch.joint` (img tokens then text).
@@ -481,7 +482,7 @@ impl AukDit {
     }
 }
 
-const img_tokens: usize = 0; // placeholder until prepare() is called; the
+const IMG_TOKENS_PLACEHOLDER: usize = 0; // placeholder until prepare() is called; the
 // real value depends on `latent_time`. We use a method on AukScratch.
 
 // === Helpers (placeholders that compile; full numerical correctness is a
