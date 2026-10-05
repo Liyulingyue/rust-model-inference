@@ -42,22 +42,22 @@ pub struct AukAudio {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct AukOptions {
-    pub(crate) steps: usize,
-    pub(crate) sample_rate: u32,
-    pub(crate) duration_sec: usize,
-    pub(crate) seed: i64,
-    pub(crate) guidance_scale: f32,
+pub struct AukOptions {
+    pub steps: usize,
+    pub sample_rate: u32,
+    pub duration_sec: usize,
+    pub seed: i64,
+    pub guidance_scale: f32,
 }
 
-pub(crate) struct AukPipeline {
+pub struct AukPipeline {
     dit: dit::AukDit,
     vae: vae::BigVGANFlowVae,
     text: Option<text::AukTextEncoder>,
 }
 
 impl AukPipeline {
-    pub(crate) fn load(
+    pub fn load(
         diffusion: Arc<dyn TensorSource>,
         vae_source: Arc<dyn TensorSource>,
         text_source: Option<Arc<dyn TensorSource>>,
@@ -76,7 +76,7 @@ impl AukPipeline {
         })
     }
 
-    pub(crate) fn generate_audio(
+    pub fn generate_audio(
         &self,
         prompt: &str,
         options: &AukOptions,
