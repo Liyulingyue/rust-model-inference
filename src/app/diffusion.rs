@@ -161,6 +161,7 @@ pub fn run_ernie_image_cli(
     steps: usize,
     resolution: usize,
     seed: i64,
+    cfg_scale: f32,
     out: std::path::PathBuf,
     n_threads: usize,
 ) -> Result<(), String> {
@@ -179,6 +180,7 @@ pub fn run_ernie_image_cli(
             steps,
             resolution,
             seed,
+            cfg_scale,
         },
     )?;
     let z_rgb = ZImageRgb {

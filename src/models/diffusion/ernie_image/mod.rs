@@ -23,6 +23,7 @@ use std::sync::Arc;
 
 pub(crate) mod dit;
 pub(crate) mod text;
+mod vae;
 
 pub struct ErnieImageRgb {
     pub width: u32,
@@ -30,17 +31,18 @@ pub struct ErnieImageRgb {
     pub bytes: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct ErnieImageOptions {
     pub(crate) steps: usize,
     pub(crate) resolution: usize,
     pub(crate) seed: i64,
+    pub(crate) cfg_scale: f32,
 }
 
 pub(crate) struct ErnieImagePipeline {
     dit: dit::ErnieImageDit,
     text: text::ErnieImageTextEncoder,
-    vae: super::z_image::vae::FluxVae,
+    vae: vae::ErnieImageVae,
 }
 
 impl ErnieImagePipeline {
@@ -56,7 +58,7 @@ impl ErnieImagePipeline {
         Ok(Self {
             dit: dit::ErnieImageDit::load(diffusion, Arc::clone(&pool))?,
             text: text::ErnieImageTextEncoder::load(text, Arc::clone(&pool))?,
-            vae: super::z_image::vae::FluxVae::load(vae, pool)?,
+            vae: vae::ErnieImageVae::load(vae, pool)?,
         })
     }
 
@@ -70,9 +72,16 @@ impl ErnieImagePipeline {
         let t = std::time::Instant::now();
         let context = self.text.encode(prompt)?;
         let context_tokens = context_token_count(&context)?;
+        let unconditional = if options.cfg_scale != 1.0 {
+            Some(self.text.encode("")?)
+        } else {
+            None
+        };
         let t_text = t.elapsed();
         let t = std::time::Instant::now();
-        let latent = self.dit.denoise(&context, context_tokens, options)?;
+        let latent =
+            self.dit
+                .denoise(&context, context_tokens, unconditional.as_deref(), options)?;
         let t_denoise = t.elapsed();
         drop(context);
         let t = std::time::Instant::now();
@@ -117,11 +126,14 @@ fn validate_generate_request(prompt: &str, options: &ErnieImageOptions) -> Resul
     if options.steps == 0 || options.resolution == 0 || options.resolution % 16 != 0 {
         return Err("ERNIE-Image requires positive steps and a resolution divisible by 16".into());
     }
+    if !options.cfg_scale.is_finite() || options.cfg_scale <= 0.0 {
+        return Err("ERNIE-Image CFG scale must be finite and positive".into());
+    }
     Ok(())
 }
 
 fn validate_latent_shape(latent: &[f32], resolution: usize) -> Result<usize, String> {
-    let latent_side = resolution / 8;
+    let latent_side = resolution / 16;
     let expected = latent_side
         .checked_mul(latent_side)
         .and_then(|spatial| spatial.checked_mul(dit::LATENT_CHANNELS))
@@ -223,8 +235,7 @@ fn require_matrix(source: &dyn TensorSource, name: &str, dims: &[u64]) -> Result
     }
     // The unsloth ERNIE-Image-Turbo-GGUF export stores 2-D weights as BF16,
     // Q5_K, Q4_K, or Q6_K. The matmul dispatch in `linear_into_scaled_impl`
-    // covers F16 + Q8_0; BF16/Q*_K paths land in the existing
-    // `qtensor_owned` dispatch when present.
+    // reuses the existing float and quantized kernels.
     if !matches!(
         info.ggml_type,
         GGMLType::F16
@@ -233,14 +244,8 @@ fn require_matrix(source: &dyn TensorSource, name: &str, dims: &[u64]) -> Result
             | GGMLType::Q4K
             | GGMLType::Q5K
             | GGMLType::Q6K
-            | GGMLType::Q4_0
-            | GGMLType::Q4_1
-            | GGMLType::Q5_0
-            | GGMLType::Q5_1
-            | GGMLType::Q8_1
             | GGMLType::Q2K
             | GGMLType::Q3K
-            | GGMLType::Q8K
     ) {
         return Err(format!(
             "Invalid {name} type {:?}: expected F16/BF16/Q8_0/Q*_K",
@@ -399,14 +404,12 @@ fn validate_dit(source: &dyn TensorSource) -> Result<(), String> {
         ("time_embedding.linear_1.weight", [hidden, hidden]),
         ("time_embedding.linear_2.weight", [hidden, hidden]),
     ] {
-        // The actual unsloth export stores the 2-D weights as BF16 (not
-        // strictly F16). Accept either; the matmul dispatch in
-        // `linear_into_scaled_impl` covers both.
+        // The export mixes BF16 conditioning with K-quant projections.
         require_matrix(source, name, &dims)?;
     }
     // x_embedder.proj.weight is stored as a 4-D Conv2d tensor
     // [1, 1, in_channels*patch_area, hidden] for the unsloth export; the
-    // GGUF dimensions of a Conv2d kernel are [kH, kW, in_C*out_C, out_C]
+    // GGUF Conv2d dimensions are [kW, kH, in_C, out_C].
     // = [1, 1, 128, 4096]. Accept both the 2-D and 4-D layouts.
     validate_x_embedder_dim(source)?;
     if source.tensor_info("text_proj.weight").is_some() {
@@ -465,6 +468,7 @@ pub(crate) struct Q8Scratch {
     /// allocated once here and reused across every call, the way `f16_input`
     /// is, rather than a fresh `Vec` per worker per matmul.
     f16_inputs: Vec<Vec<u16>>,
+    q8_k: Vec<crate::ops::quant::BlockQ8K>,
     values: Vec<u8>,
     scales: Vec<f32>,
 }
@@ -476,6 +480,7 @@ impl Q8Scratch {
             force_f32_row: Vec::new(),
             f16_input: Vec::new(),
             f16_inputs: Vec::new(),
+            q8_k: Vec::new(),
             values: vec![0; n_in],
             scales: vec![0.0; n_in.div_ceil(32)],
         }
@@ -559,14 +564,8 @@ fn linear_into_scaled_impl(
             | GGMLType::Q4K
             | GGMLType::Q5K
             | GGMLType::Q6K
-            | GGMLType::Q4_0
-            | GGMLType::Q4_1
-            | GGMLType::Q5_0
-            | GGMLType::Q5_1
-            | GGMLType::Q8_1
             | GGMLType::Q2K
             | GGMLType::Q3K
-            | GGMLType::Q8K
     ) {
         return Err(format!(
             "Unsupported matrix type {:?} for {name}",
@@ -637,24 +636,34 @@ fn linear_into_scaled_impl(
                 );
             });
         }
-        // For other quantized types (BF16, Q4K, Q5K, Q6K, ...), build an
-        // owned QTensor and dispatch through its parallel matmul. This is
-        // used for the unsloth Ministral GGUF (Q4_K / Q6_K weights) and
-        // ERNIE-Image DiT BF16 time embeddings / modulation.
-        GGMLType::BF16
-        | GGMLType::Q4K
-        | GGMLType::Q5K
-        | GGMLType::Q6K
-        | GGMLType::Q4_0
-        | GGMLType::Q4_1
-        | GGMLType::Q5_0
-        | GGMLType::Q5_1
-        | GGMLType::Q8_1
-        | GGMLType::Q2K
-        | GGMLType::Q3K
-        | GGMLType::Q8K => {
-            use crate::ops::kernel::{Kernel, QTensorOwned};
-            let tensor = QTensorOwned::from_bytes_owned(bytes, info.ggml_type, n_in, n_out);
+        GGMLType::BF16 => {
+            use crate::ops::kernel::{bf16::BF16Kernel, Kernel};
+            let kernel = BF16Kernel::with_bf16_input(bytes);
+            let input_ptr = input.as_ptr() as usize;
+            let output_ptr = output.as_mut_ptr() as usize;
+            pool.compute(move |ith, nth| {
+                let values = unsafe { std::slice::from_raw_parts(input_ptr as *const f32, n_in) };
+                let out = unsafe { std::slice::from_raw_parts_mut(output_ptr as *mut f32, n_out) };
+                kernel.forward_prepared(values, &[], &[], None, out, n_in, n_out, ith, nth);
+            });
+        }
+        // Borrow the K-quant weights and share one GGML-compatible Q8_K activation per row.
+        GGMLType::Q4K | GGMLType::Q5K | GGMLType::Q6K | GGMLType::Q2K | GGMLType::Q3K => {
+            use crate::ops::kernel::{Kernel, QuantizedTensor};
+            // Keep the GGUF bytes borrowed so Q2_K/Q3_K use their existing
+            // kernels too; QTensorOwned intentionally does not model these
+            // formats.
+            let tensor = QuantizedTensor::from_bytes(bytes, info.ggml_type, n_in, n_out);
+            q8.q8_k.resize(
+                n_in / crate::ops::quant::QK_K,
+                crate::ops::quant::BlockQ8K {
+                    d: 0.,
+                    qs: [0; 256],
+                    bsums: [0; 16],
+                },
+            );
+            crate::ops::quant::quantize_row_q8_k_ggml_into(input, &mut q8.q8_k);
+            let prepared = &q8.q8_k;
             let input_ptr = input.as_ptr() as usize;
             let input_len = input.len();
             let output_ptr = output.as_mut_ptr() as usize;
@@ -663,14 +672,23 @@ fn linear_into_scaled_impl(
                 let values =
                     unsafe { std::slice::from_raw_parts(input_ptr as *const f32, input_len) };
                 let out = unsafe { std::slice::from_raw_parts_mut(output_ptr as *mut f32, n_out) };
-                tensor.forward_prepared(values, &[], &[], None, out, n_in, n_out, ith, nth);
-                // forward_prepared doesn't apply scale; emulate.
-                if scale_copy != 1.0 {
-                    for v in out.iter_mut() {
-                        *v *= scale_copy;
-                    }
-                }
+                tensor.forward_prepared(
+                    values,
+                    &[],
+                    &[],
+                    Some(prepared),
+                    out,
+                    n_in,
+                    n_out,
+                    ith,
+                    nth,
+                );
             });
+            if scale_copy != 1.0 {
+                for v in output.iter_mut() {
+                    *v *= scale_copy;
+                }
+            }
         }
         _ => {
             return Err(format!(

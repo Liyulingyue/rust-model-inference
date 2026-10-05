@@ -55,7 +55,9 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
         return Err("--top-p must be finite and in (0, 1]".into());
     }
     if let Some(scale) = options.cfg_scale {
-        if !options.tts || options.edit {
+        let diffusion =
+            options.text_encoder.is_some() && options.vae.is_some() && options.out.is_some();
+        if (!options.tts || options.edit) && !diffusion {
             return Err("--cfg-scale requires Breeze --tts without --edit".into());
         }
         if !scale.is_finite() || scale <= 0.0 {

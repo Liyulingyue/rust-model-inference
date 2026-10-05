@@ -2,7 +2,7 @@
 
 use std::sync::atomic::Ordering;
 
-#[cfg(feature = "parity-trace")]
+#[cfg(any(feature = "parity-trace", feature = "vulkan", feature = "wgpu"))]
 use std::sync::OnceLock;
 
 #[cfg(target_arch = "x86_64")]
@@ -51,13 +51,7 @@ pub fn mark_gpu_broken(reason: &str) {
 }
 
 #[cfg(feature = "vulkan")]
-use std::sync::OnceLock;
-
-#[cfg(feature = "vulkan")]
 use crate::vulkan::VulkanContext;
-
-#[cfg(feature = "wgpu")]
-use std::sync::OnceLock;
 
 #[cfg(feature = "wgpu")]
 use crate::wgpu::WgpuContext;
