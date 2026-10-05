@@ -78,15 +78,79 @@ pub const RESERVED: [&str; 10] = [
 fn word_pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
     PATTERN.get_or_init(|| {
-        Regex::new(concat!(
-            r"(?:https?://[^\s]+|www\.[^\s]+)",
-            r"|[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}",
-            r"|@[a-z0-9_]+",
-            r"|\w+(?:[-_]\w+)*",
-            r"|\S",
+        // `\w` is spelled `[\p{L}\p{N}_]` rather than left as `\w` because the
+        // `regex` crate's `\w` is `[\p{Alphabetic}\p{M}\p{Nd}\p{Join_Control}\p{Pc}]`
+        // and Python's is "alphanumeric as `str.isalnum()` reports it, plus the
+        // underscore" — that is, categories L* and N* plus `_`. The two differ in
+        // both directions: `\p{M}` matches combining and spacing marks that
+        // Python rejects (so `cafe` + U+0301 stays one token here and splits into
+        // two there), and `\p{Nd}` misses Nl and No that Python accepts.
+        const PY_WORD: &str = r"[\p{L}\p{N}_]";
+        Regex::new(&format!(
+            concat!(
+                r"(?:https?://[^\s]+|www\.[^\s]+)",
+                r"|[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{{2,}}",
+                r"|@[a-z0-9_]+",
+                r"|{PY_WORD}+(?:[-_]{PY_WORD}+)*",
+                r"|\S",
+            ),
+            PY_WORD = PY_WORD,
         ))
         .expect("word splitter pattern")
     })
+}
+
+fn char_level_pattern() -> &'static Regex {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    PATTERN
+        .get_or_init(|| Regex::new(r"[A-Za-z0-9@._\-+]+|\S").expect("char-level splitter pattern"))
+}
+
+/// Which word segmentation to run, as `word_splitter` names them.
+///
+/// The two differ on one axis: which characters may share a token. The
+/// whitespace splitter's `\w` is Unicode-aware, so it keeps `café` and CJK runs
+/// whole; the char splitter's class is ASCII-only, so `café` becomes `caf` +
+/// `é` and CJK becomes one token per character. That is the point of it — a
+/// whitespace splitter cannot find word boundaries in a language that does not
+/// delimit them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WordSplitter {
+    /// `word_splitter="whitespace"`, and the default.
+    #[default]
+    Whitespace,
+    /// `word_splitter="char"`.
+    CharLevel,
+}
+
+impl WordSplitter {
+    /// `resolve_word_splitter`: the built-in names, with `whitespace` as the
+    /// default for an absent setting.
+    pub fn from_name(name: &str) -> Result<Self, String> {
+        match name {
+            "whitespace" => Ok(WordSplitter::Whitespace),
+            "char" => Ok(WordSplitter::CharLevel),
+            other => Err(format!(
+                "Unknown word_splitter {other:?}. Supported names: 'char', 'whitespace'."
+            )),
+        }
+    }
+
+    fn pattern(self) -> &'static Regex {
+        match self {
+            WordSplitter::Whitespace => word_pattern(),
+            WordSplitter::CharLevel => char_level_pattern(),
+        }
+    }
+}
+
+/// One word plus half-open **code point** offsets into the original string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WordSpan {
+    /// The matched text, lower-cased when the caller asked for it.
+    pub token: String,
+    pub start: usize,
+    pub end: usize,
 }
 
 /// `SchemaTransformer._normalize_text`: collation expects terminal punctuation.
@@ -104,10 +168,53 @@ pub fn normalize_text(text: &str) -> String {
 /// `WhitespaceTokenSplitter`: the first alternative that matches at each
 /// position wins, and the token value is lower-cased.
 pub fn split_words(text: &str) -> Vec<String> {
-    word_pattern()
-        .find_iter(text)
-        .map(|m| m.as_str().to_lowercase())
+    split_words_with(text, WordSplitter::Whitespace)
+}
+
+/// Word tokens under `splitter`, lower-cased.
+pub fn split_words_with(text: &str, splitter: WordSplitter) -> Vec<String> {
+    word_spans(text, splitter, true)
+        .into_iter()
+        .map(|span| span.token)
         .collect()
+}
+
+/// Word tokens with their offsets, as both reference splitters yield them.
+///
+/// The offsets are **code point** indices, matching Python `str` slicing, not
+/// the byte offsets the `regex` crate reports. For `中华人民共和国` the
+/// reference's second token is `(1, 2)`; the byte range for the same token is
+/// `3..6`. Every caller-visible offset in the reference — span character
+/// offsets, chunk boundaries — is a code point index, so the conversion is not
+/// optional.
+///
+/// Lower-casing is applied to the token value only, never to the source text
+/// first: Unicode case folding can change length (`"İ".lower()` is `"i̇"`, two
+/// code points), which would shift every later offset.
+pub fn word_spans(text: &str, splitter: WordSplitter, lower: bool) -> Vec<WordSpan> {
+    let pattern = splitter.pattern();
+    let mut spans = Vec::new();
+    // Byte position of the last match end, so the code point offset advances by
+    // counting only the text between matches.
+    let mut cursor = 0usize;
+    let mut code_point = 0usize;
+    for mat in pattern.find_iter(text) {
+        code_point += text[cursor..mat.start()].chars().count();
+        let token = &text[mat.start()..mat.end()];
+        let width = token.chars().count();
+        spans.push(WordSpan {
+            token: if lower {
+                token.to_lowercase()
+            } else {
+                token.to_string()
+            },
+            start: code_point,
+            end: code_point + width,
+        });
+        cursor = mat.end();
+        code_point += width;
+    }
+    spans
 }
 
 /// One label of a classification task.
