@@ -22,7 +22,6 @@ use std::sync::Arc;
 
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
-use rayon::prelude::*;
 
 use super::AukAudio;
 
@@ -415,6 +414,7 @@ fn apply_resblock(
             frames,
             &snake.alpha[2 * layer],
             &snake.beta[2 * layer],
+            self.pool.as_ref(),
         );
         apply_branch_conv_dilated(
             &mut hidden,
@@ -424,6 +424,7 @@ fn apply_resblock(
             &block.bias1[layer],
             block.kernels[layer],
             dilations[layer],
+            self.pool.as_ref(),
         );
         apply_snake_beta_inplace(
             &mut hidden,
@@ -431,6 +432,7 @@ fn apply_resblock(
             frames,
             &snake.alpha[2 * layer + 1],
             &snake.beta[2 * layer + 1],
+            self.pool.as_ref(),
         );
         apply_branch_conv_dilated(
             &mut hidden,
@@ -440,6 +442,7 @@ fn apply_resblock(
             &block.bias2[layer],
             block.kernels[layer],
             1,
+            self.pool.as_ref(),
         );
         // residual += hidden (in place). x still holds the original residual.
         for i in 0..x.len() {
@@ -462,6 +465,7 @@ fn apply_branch_conv_dilated(
     bias: &[f32],
     kernel: usize,
     dilation: usize,
+    pool: &ComputePool,
 ) {
     let pad = (kernel / 2) * dilation;
     let padded_frames = frames + 2 * pad;
@@ -476,9 +480,9 @@ fn apply_branch_conv_dilated(
     // approximated as stride=1 with extra zero-padding in the loop body.
     // For dilation>1 the conv weight's effective stride is dilation, which
     // we model by spacing out the kernel taps via the dilation factor.
-    // Parallelize the output-channel loop with rayon: each `oc` writes a
-    // disjoint slice of `out`, so no synchronization needed.
-    use rayon::prelude::*;
+    // Parallelize the output-channel loop via ComputePool: each `oc` writes
+    // a disjoint slice of `out`, so the per-thread closures can run
+    // independently with no synchronization.
     let padded_frames_const = padded_frames;
     let kernel_const = kernel;
     let channels_const = channels;
@@ -490,19 +494,28 @@ fn apply_branch_conv_dilated(
     let out_ptr = out.as_mut_ptr() as usize;
     let out_len = out.len();
     let bias_ptr = bias.as_ptr() as usize;
-    out.par_chunks_mut(padded_frames)
-        .enumerate()
-        .for_each(|(oc, out_row)| {
-            let w_slice = unsafe {
-                std::slice::from_raw_parts(weight_ptr as *const f32, weight_len)
-            };
-            let p_slice = unsafe {
-                std::slice::from_raw_parts(padded_ptr as *const f32, padded_len)
-            };
-            let b_slice =
-                unsafe { std::slice::from_raw_parts(bias_ptr as *const f32, channels_const) };
+    pool.compute(move |ith, nth| {
+        let per_thread = (channels_const + nth - 1) / nth;
+        let start = ith * per_thread;
+        let end = (start + per_thread).min(channels_const);
+        if start >= end {
+            return;
+        }
+        let w_slice = unsafe {
+            std::slice::from_raw_parts(weight_ptr as *const f32, weight_len)
+        };
+        let p_slice = unsafe {
+            std::slice::from_raw_parts(padded_ptr as *const f32, padded_len)
+        };
+        let b_slice =
+            unsafe { std::slice::from_raw_parts(bias_ptr as *const f32, channels_const) };
+        let out_local = unsafe {
+            std::slice::from_raw_parts_mut(out_ptr as *mut f32, out_len)
+        };
+        for oc in start..end {
+            let bias_oc = b_slice[oc];
             for t in 0..padded_frames_const {
-                let mut sum = b_slice[oc];
+                let mut sum = bias_oc;
                 for k in 0..kernel_const {
                     let src_signed = t as isize - (k as isize * dilation_const as isize);
                     if src_signed < 0 || src_signed >= padded_frames_const as isize {
@@ -514,9 +527,10 @@ fn apply_branch_conv_dilated(
                         sum += w * p_slice[ic * padded_frames_const + src];
                     }
                 }
-                out_row[t] = sum;
+                out_local[oc * padded_frames_const + t] = sum;
             }
-        });
+        }
+    });
     // Crop center to original frames.
     for c in 0..channels {
         for t in 0..frames {
@@ -533,31 +547,44 @@ fn snake_beta(x: f32, alpha: f32, beta: f32) -> f32 {
 }
 
 /// In-place SnakeBeta activation on a `[channels, frames]` buffer.
+/// Parallelized across output channels via `ComputePool`. Each channel's
+/// row is a disjoint slice, so no synchronization is needed.
 fn apply_snake_beta_inplace(
     x: &mut [f32],
     channels: usize,
     frames: usize,
     alpha: &[f32],
     beta: &[f32],
+    pool: &ComputePool,
 ) {
-    // Each (c, t) cell is independent. Parallelize across output channels
-    // so each thread writes a disjoint slice.
     let stride = frames;
     let x_ptr = x.as_mut_ptr() as usize;
     let x_len = x.len();
     let alpha_ptr = alpha.as_ptr() as usize;
     let beta_ptr = beta.as_ptr() as usize;
-    (0..channels).into_par_iter().for_each(|c| {
-        let x_slice = unsafe {
-            std::slice::from_raw_parts_mut((x_ptr as *mut f32).add(c * stride), stride)
-        };
-        let a = unsafe { *((alpha_ptr as *const f32).add(c)) };
-        let b = unsafe { *((beta_ptr as *const f32).add(c)) };
-        for v in x_slice.iter_mut() {
-            *v = snake_beta(*v, a, b);
+    pool.compute(move |ith, nth| {
+        let per_thread = (channels + nth - 1) / nth;
+        let start = ith * per_thread;
+        let end = (start + per_thread).min(channels);
+        if start >= end {
+            return;
+        }
+        let x_local =
+            unsafe { std::slice::from_raw_parts_mut(x_ptr as *mut f32, x_len) };
+        let alpha_local =
+            unsafe { std::slice::from_raw_parts(alpha_ptr as *const f32, channels) };
+        let beta_local =
+            unsafe { std::slice::from_raw_parts(beta_ptr as *const f32, channels) };
+        for c in start..end {
+            let row_start = c * stride;
+            let a = alpha_local[c];
+            let b = beta_local[c];
+            for t in 0..stride {
+                let v = x_local[row_start + t];
+                x_local[row_start + t] = snake_beta(v, a, b);
+            }
         }
     });
-    let _ = x_len; // suppress unused warning
 }
 
 /// 1D convolution (single channel-group, all-input-to-all-output). Input
