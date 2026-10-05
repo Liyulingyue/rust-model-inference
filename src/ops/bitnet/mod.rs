@@ -36,8 +36,12 @@
 //! `bitnet.cpp::bitnet-lut-kernels.h` (1170 lines of platform-
 //! specific SIMD, /tmp/oracle-bitnet-cpp/BitNet/include/) for the
 //! 1.4–2.3× speedup the BitNet-Embedding paper reports. This 4-core
-//! / 7.5 GiB box has only AVX2 + AVX-VNNI per /proc/cpuinfo; full
-//! LUT kernels are out of scope.
+//! / 7.5 GiB box has AVX2 + FMA but no AVX-512 (and Rust's
+//! `is_x86_feature_detected!("avxvnni")` reports true on this
+//! Intel N150 even though the actual `_mm256_dpbssd_epi32`
+//! instruction SIGILLs — see the long-form note in
+//! `forward_avx2.rs`). The universal AVX2 + `_mm256_madd_epi16`
+//! path is the production kernel.
 
 pub mod forward;
 #[cfg(target_arch = "x86_64")]
