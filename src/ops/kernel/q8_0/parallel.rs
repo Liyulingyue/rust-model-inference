@@ -39,6 +39,8 @@ pub fn matmul_q8_0_quantized_parallel_rows(
             && !crate::vulkan::gpu_broken()
             && n_in <= MAX_GPU_N_IN
             && n_out <= max_rows;
+        if std::env::var("RUST_GPU_TRACE").is_ok() {
+        }
         if gpu_takes_this {
             if let Some(ctx) = get_vulkan_context() {
                 if ith == 0 {
