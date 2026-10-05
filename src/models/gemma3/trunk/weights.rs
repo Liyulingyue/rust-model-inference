@@ -333,6 +333,22 @@ pub fn static_weight(
     let n_total = n_in * n_out;
     let mut out = vec![0.0f32; n_total];
     match info.ggml_type {
+        GGMLType::F32 => {
+            // 1B-it (gemma-3-1b-it-Q4_K_M) packs its norms in
+            // native F32 instead of F16; the standard gemma3
+            // forward does an F32→F32 byte-reinterpret here.
+            let expected_bytes = n_total * 4;
+            if slice.len() != expected_bytes {
+                return Err(format!(
+                    "gemma3: {name} has {} bytes; expected {} for {n_in} x {n_out} F32",
+                    slice.len(),
+                    expected_bytes
+                ));
+            }
+            for (value, chunk) in out.iter_mut().zip(slice.chunks_exact(4)) {
+                *value = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            }
+        }
         GGMLType::F16 => {
             let expected_bytes = n_total * 2;
             if slice.len() != expected_bytes {
