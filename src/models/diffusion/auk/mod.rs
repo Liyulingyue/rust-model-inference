@@ -104,7 +104,26 @@ impl AukPipeline {
         )?;
         let t_denoise = t.elapsed();
         let t = std::time::Instant::now();
-        let audio = self.vae.decode(&latent, options.sample_rate)?;
+        let audio = {
+            let mut min = f32::INFINITY;
+            let mut max = f32::NEG_INFINITY;
+            let mut sum_sq = 0.0_f64;
+            for v in &latent {
+                if *v < min {
+                    min = *v;
+                }
+                if *v > max {
+                    max = *v;
+                }
+                sum_sq += (*v as f64) * (*v as f64);
+            }
+            let rms = (sum_sq / latent.len() as f64).sqrt();
+            eprintln!(
+                "[auk-stage-profile] latent_stats min={:.3} max={:.3} rms={:.3}",
+                min, max, rms
+            );
+            self.vae.decode(&latent, options.sample_rate)?
+        };
         let t_vae = t.elapsed();
         eprintln!(
             "[auk-stage-profile] denoise={:.1}ms  vae_decode={:.1}ms  total={:.1}ms",
@@ -203,12 +222,20 @@ fn validate_dit(source: &dyn TensorSource) -> Result<(), String> {
             &[hidden, qkv],
         )?;
         require_norm_f16(source, &format!("{prefix}.attn.to_qkv_c.bias"), qkv)?;
-        // Output projection for c-stream (no bias)
+        // Output projection for c-stream
         require_matrix(
             source,
             &format!("{prefix}.attn.to_out_c.weight"),
             &[hidden, hidden],
         )?;
+        require_norm_f16(source, &format!("{prefix}.attn.to_out_c.bias"), hidden)?;
+        // Output projection for x-stream (`.0` suffix)
+        require_matrix(
+            source,
+            &format!("{prefix}.attn.to_out.0.weight"),
+            &[hidden, hidden],
+        )?;
+        require_norm_f16(source, &format!("{prefix}.attn.to_out.0.bias"), hidden)?;
         // Q/K RMS norms
         require_norm_f16(
             source,

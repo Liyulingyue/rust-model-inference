@@ -92,7 +92,14 @@ pub(crate) struct DoubleBlockWeights {
     pub(crate) qkv_x_bias: Vec<f32>,
     pub(crate) qkv_c: String,
     pub(crate) qkv_c_bias: Vec<f32>,
+    /// x-stream attention output projection. The doubled suffix `.0` is
+    /// because the GGUF mirrors a torch `nn.Sequential` index, not a sub-block.
+    pub(crate) out_x: String,
+    pub(crate) out_x_bias: Vec<f32>,
+    /// c-stream attention output projection. Stored as `attn.to_out_c`
+    /// (no `.0` suffix).
     pub(crate) out_c: String,
+    pub(crate) out_c_bias: Vec<f32>,
     /// Single shared Q/K RMS norm (used by both x-stream and c-stream).
     /// The unsloth GGUF does not store per-stream copies -- the C++ source
     /// (`audio.cpp`) loads a single `attn.q_norm.weight` per layer.
@@ -378,38 +385,89 @@ impl AukDit {
 
         // 10 double blocks
         for (layer_index, block) in self.double_blocks.iter().enumerate() {
+            // Project time_emb through per-block AdaLN linear layers (each
+            // produces 9216 = 6*1536 modulation values).
+            linear_into(
+                self.source.as_ref(),
+                &block.adaLN_x,
+                HIDDEN,
+                ADALN_DIM,
+                &scratch.time,
+                &mut scratch.modulation[..ADALN_DIM],
+                &mut scratch.q8,
+                self.pool.as_ref(),
+            )?;
+            for (v, b) in scratch.modulation[..ADALN_DIM]
+                .iter_mut()
+                .zip(&block.adaLN_x_bias)
+            {
+                *v += *b;
+            }
+            linear_into(
+                self.source.as_ref(),
+                &block.adaLN_c,
+                HIDDEN,
+                ADALN_DIM,
+                &scratch.time,
+                &mut scratch.modulation[ADALN_DIM..2 * ADALN_DIM],
+                &mut scratch.q8,
+                self.pool.as_ref(),
+            )?;
+            for (v, b) in scratch.modulation[ADALN_DIM..2 * ADALN_DIM]
+                .iter_mut()
+                .zip(&block.adaLN_c_bias)
+            {
+                *v += *b;
+            }
             run_double_block(
                 self.source.as_ref(),
                 block,
                 &mut scratch.joint,
                 img_tokens,
                 text_tokens,
-                &scratch.rope,
                 &self.rotary_inv_freq,
-                &scratch.time[..ADALN_DIM / 6 * 0 + ADALN_DIM / 6],
+                &scratch.modulation[..2 * ADALN_DIM],
                 &mut scratch.qkv,
                 &mut scratch.qkv_c,
                 &mut scratch.attention,
                 &mut scratch.scores,
+                &mut scratch.normed_buf,
                 &mut scratch.q8,
                 self.pool.as_ref(),
                 layer_index,
             )?;
         }
 
-        // 20 single blocks
+        // 10 single blocks
         for (layer_index, block) in self.single_blocks.iter().enumerate() {
+            linear_into(
+                self.source.as_ref(),
+                &block.adaLN,
+                HIDDEN,
+                ADALN_DIM,
+                &scratch.time,
+                &mut scratch.modulation[..ADALN_DIM],
+                &mut scratch.q8,
+                self.pool.as_ref(),
+            )?;
+            for (v, b) in scratch.modulation[..ADALN_DIM]
+                .iter_mut()
+                .zip(&block.adaLN_bias)
+            {
+                *v += *b;
+            }
             run_single_block(
                 self.source.as_ref(),
                 block,
                 &mut scratch.joint,
                 img_tokens,
                 text_tokens,
-                &scratch.rope,
                 &self.rotary_inv_freq,
+                &scratch.modulation[..ADALN_DIM],
                 &mut scratch.qkv,
                 &mut scratch.attention,
                 &mut scratch.scores,
+                &mut scratch.normed_buf,
                 &mut scratch.q8,
                 self.pool.as_ref(),
                 layer_index,
@@ -556,7 +614,10 @@ fn load_double_block(
         qkv_x_bias: vector("attn.to_qkv.bias", QKV_DIM)?,
         qkv_c: format!("{prefix}.attn.to_qkv_c.weight"),
         qkv_c_bias: vector("attn.to_qkv_c.bias", QKV_DIM)?,
+        out_x: format!("{prefix}.attn.to_out.0.weight"),
+        out_x_bias: vector("attn.to_out.0.bias", HIDDEN)?,
         out_c: format!("{prefix}.attn.to_out_c.weight"),
+        out_c_bias: vector("attn.to_out_c.bias", HIDDEN)?,
         q_norm: vector("attn.q_norm.weight", HEAD_DIM)?,
         k_norm: vector("attn.k_norm.weight", HEAD_DIM)?,
         ff_x_in: format!("{prefix}.ff_x.linear_in.weight"),
@@ -665,8 +726,9 @@ pub(crate) struct AukScratch {
     qkv_c: Vec<f32>,
     attention: Vec<f32>,
     scores: Vec<f32>,
-    modulation: Vec<f32>,
+modulation: Vec<f32>,
     rope: Vec<f32>,
+    normed_buf: Vec<f32>,
     q8: Q8Scratch,
 }
 
@@ -689,6 +751,7 @@ impl AukScratch {
             scores: Vec::new(),
             modulation: Vec::new(),
             rope: Vec::new(),
+            normed_buf: Vec::new(),
             q8: Q8Scratch::new(FF_INNER.max(HIDDEN)),
         })
     }
@@ -735,13 +798,18 @@ impl AukScratch {
         )?;
         resize_zeroed(
             &mut self.modulation,
-            FINAL_NORM_DIM.max(ADALN_DIM),
+            2 * ADALN_DIM,
             "AuK modulation",
         )?;
         resize_zeroed(
             &mut self.rope,
             total * HEAD_DIM,
             "AuK rope",
+        )?;
+        resize_zeroed(
+            &mut self.normed_buf,
+            total * HIDDEN,
+            "AuK normed_buf",
         )?;
         Ok(())
     }
@@ -808,47 +876,758 @@ fn rms_norm_inplace_text(
     }
 }
 
-// === Block forwards (placeholders that compile; correctness comes in the
-//    follow-up commit after the scaffold validates) ===
+// === Flux2Edit block forwards ===
+//
+// Per `references/audio.cpp/src/community_models/auk/flow.cpp::build_transformer_block`
+// (templated over `Streams`).
+//
+// Layout conventions:
+// - Joint sequence: [img_tokens, text_tokens] (img first).
+// - x-stream (img) attends to its own + c-stream (text) tokens.
+// - c-stream (text) attends to the same joint.
+// - RoPE positions: img uses 0..img_tokens, text uses 0..text_tokens independently.
+// - `scratch.modulation[..ADALN_DIM]` holds the time-embedding projection for
+//   the current step; we slice it into six 1536-wide chunks for the per-stream
+//   (shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp).
+
+/// Apply rotary embedding in-place using a precomputed `inv_freq` table of
+/// length `head_dim/2`. `x` is a single token's head-major slice
+/// `[n_heads * head_dim]` flattened row-major; we apply neox halves.
+fn rope_apply_token(
+    x: &mut [f32],
+    pos: usize,
+    head_dim: usize,
+    inv_freq: &[f32],
+) {
+    let half = head_dim / 2;
+    if half == 0 || inv_freq.len() != half {
+        return;
+    }
+    let n_heads = x.len() / head_dim;
+    if n_heads == 0 {
+        return;
+    }
+    for head in 0..n_heads {
+        let off = head * head_dim;
+        // Half-rotation: pair (i, i+half).
+        for i in 0..half {
+            let theta = pos as f32 * inv_freq[i];
+            let (cos_t, sin_t) = crate::ops::rope::neox::rope_sin_cos(theta);
+            let a = x[off + i];
+            let b = x[off + half + i];
+            x[off + i] = a * cos_t - b * sin_t;
+            x[off + half + i] = b * cos_t + a * sin_t;
+        }
+    }
+}
+
+/// Per-head RMS norm applied independently per token. `hidden` is laid out
+/// `[n_tokens, n_heads, head_dim]` (contiguous); `weight` is `[head_dim]`.
+fn rms_norm_per_head(
+    hidden: &mut [f32],
+    n_tokens: usize,
+    n_heads: usize,
+    head_dim: usize,
+    weight: &[f32],
+    eps: f32,
+) {
+    let row = n_heads * head_dim;
+    for token in 0..n_tokens {
+        for head in 0..n_heads {
+            let off = token * row + head * head_dim;
+            let slice = &mut hidden[off..off + head_dim];
+            let mut mean_sq = 0.0_f32;
+            for v in slice.iter() {
+                mean_sq += *v * *v;
+            }
+            let scale = 1.0 / (mean_sq / head_dim as f32 + eps).sqrt();
+            for d in 0..head_dim {
+                slice[d] = slice[d] * scale * weight[d];
+            }
+        }
+    }
+}
+
+/// Softmax over `scores[..n]`. Modifies in place.
+fn softmax_inplace(scores: &mut [f32], n: usize) {
+    let max = scores[..n]
+        .iter()
+        .copied()
+        .fold(f32::NEG_INFINITY, f32::max);
+    let mut sum = 0.0_f32;
+    for j in 0..n {
+        scores[j] = (scores[j] - max).exp();
+        sum += scores[j];
+    }
+    let inv = if sum > 0.0 { 1.0 / sum } else { 0.0 };
+    for j in 0..n {
+        scores[j] *= inv;
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 fn run_double_block(
-    _source: &dyn TensorSource,
-    _block: &DoubleBlockWeights,
-    _joint: &mut [f32],
-    _img_tokens: usize,
-    _text_tokens: usize,
-    _rope: &[f32],
-    _inv_freq: &[f32],
-    _modulation: &[f32],
-    _qkv_buf: &mut [f32],
-    _qkv_c_buf: &mut [f32],
-    _attention: &mut [f32],
-    _scores: &mut [f32],
-    _q8: &mut Q8Scratch,
-    _pool: &ComputePool,
-    _layer_index: usize,
+    source: &dyn TensorSource,
+    block: &DoubleBlockWeights,
+    joint: &mut [f32],
+    img_tokens: usize,
+    text_tokens: usize,
+    inv_freq: &[f32],
+    modulation: &[f32],
+    qkv_buf: &mut [f32],
+    qkv_c_buf: &mut [f32],
+    attention: &mut [f32],
+    scores: &mut [f32],
+    normed: &mut [f32],
+    q8: &mut Q8Scratch,
+    pool: &ComputePool,
+    layer_index: usize,
 ) -> Result<(), String> {
-    // TODO: implement after scaffold validates (next commit)
+    let _ = layer_index;
+    let total = img_tokens + text_tokens;
+    if total == 0 || total * HIDDEN != joint.len() {
+        return Err("AuK double block joint length mismatch".into());
+    }
+    if scores.len() < total {
+        return Err("AuK scores buffer too small".into());
+    }
+    if qkv_buf.len() < total * QKV_DIM {
+        return Err("AuK qkv buffer too small".into());
+    }
+    if qkv_c_buf.len() < total * QKV_DIM {
+        return Err("AuK qkv_c buffer too small".into());
+    }
+    if attention.len() < total * HIDDEN {
+        return Err("AuK attention buffer too small".into());
+    }
+    if normed.len() < total * HIDDEN {
+        return Err("AuK normed buffer too small".into());
+    }
+    if modulation.len() < 2 * ADALN_DIM {
+        return Err("AuK modulation buffer too small".into());
+    }
+    if inv_freq.len() != HEAD_DIM / 2 {
+        return Err(format!(
+            "AuK inv_freq length {} != HEAD_DIM/2={}",
+            inv_freq.len(),
+            HEAD_DIM / 2
+        ));
+    }
+
+    // === Pass 1: per-stream RMSNorm + AdaLN modulation + QKV projection ===
+    // Stream x (img) — occupies joint rows [0, img_tokens)
+    ada_ln_qkv(
+        source,
+        &block.adaLN_x,
+        &block.adaLN_x_bias,
+        &block.qkv_x,
+        &block.qkv_x_bias,
+        joint,
+        0..img_tokens,
+        &modulation[..ADALN_DIM],
+        normed,
+        qkv_buf,
+        q8,
+        pool,
+    )?;
+    // Stream c (text) — occupies joint rows [img_tokens, total)
+    ada_ln_qkv(
+        source,
+        &block.adaLN_c,
+        &block.adaLN_c_bias,
+        &block.qkv_c,
+        &block.qkv_c_bias,
+        joint,
+        img_tokens..total,
+        &modulation[ADALN_DIM..2 * ADALN_DIM],
+        normed,
+        qkv_c_buf,
+        q8,
+        pool,
+    )?;
+
+    // === Pass 2: per-stream Q/K RMS-norm + RoPE ===
+    // QKV layout: [tokens, QKV_DIM] = [tokens, 3*HIDDEN] with interleaved Q,K,V
+    // per row.
+    project_qk_with_rope(
+        qkv_buf,
+        img_tokens,
+        0,
+        &block.q_norm,
+        &block.k_norm,
+        inv_freq,
+    );
+    project_qk_with_rope(
+        qkv_c_buf,
+        text_tokens,
+        0,
+        &block.q_norm,
+        &block.k_norm,
+        inv_freq,
+    );
+
+    // === Joint attention: concat Q/K/V along seq dim ===
+    // We need separate K, V slices for concat. Allocate within qkv_buf/qkv_c_buf
+    // by reinterpreting their halves. Simpler: use the original buffers.
+    // Q @ K^T then softmax * V.
+    let heads = HEAD_DIM;
+    let n_heads = HIDDEN / heads;
+    let scale = 1.0 / (heads as f32).sqrt();
+    let qkv_x = &qkv_buf[..total * QKV_DIM];
+    let qkv_c = &qkv_c_buf[..total * QKV_DIM];
+
+    // Joint K, V are not contiguous in qkv_buf (qkv_c is separate). We process
+    // the attention by iterating heads and concatenating K/V from both
+    // streams per head.
+    // Per-stream output: attention[i] for i in 0..img_tokens (x-stream) and
+    // i in img_tokens..total (c-stream).
+    for head in 0..n_heads {
+        // Compute Q (x_stream) @ K (x+c stream) -> img_logits[img_tokens, total]
+        for q_tok in 0..img_tokens {
+            let q_off = q_tok * QKV_DIM + head * heads;
+            let q_row = &qkv_x[q_off..q_off + heads];
+            let mut max_logit = f32::NEG_INFINITY;
+            // x-stream keys
+            for k_tok in 0..img_tokens {
+                let k_off = k_tok * QKV_DIM + HIDDEN + head * heads;
+                let dot = dot32(q_row, &qkv_x[k_off..k_off + heads]);
+                scores[k_tok] = dot * scale;
+                if scores[k_tok] > max_logit {
+                    max_logit = scores[k_tok];
+                }
+            }
+            // c-stream keys
+            for k_tok in 0..text_tokens {
+                let k_off = k_tok * QKV_DIM + HIDDEN + head * heads;
+                let dot = dot32(q_row, &qkv_c[k_off..k_off + heads]);
+                let s = dot * scale;
+                scores[img_tokens + k_tok] = s;
+                if s > max_logit {
+                    max_logit = s;
+                }
+            }
+            softmax_inplace(scores, total);
+            // attention output row for x-stream
+            let out_off = q_tok * HIDDEN + head * heads;
+            for d in 0..heads {
+                let mut sum = 0.0_f32;
+                for k_tok in 0..img_tokens {
+                    let v_off = k_tok * QKV_DIM + 2 * HIDDEN + head * heads + d;
+                    sum += scores[k_tok] * qkv_x[v_off];
+                }
+                for k_tok in 0..text_tokens {
+                    let v_off = k_tok * QKV_DIM + 2 * HIDDEN + head * heads + d;
+                    sum += scores[img_tokens + k_tok] * qkv_c[v_off];
+                }
+                attention[out_off + d] = sum;
+            }
+        }
+        // Q (c_stream) @ K (x+c stream) -> text_logits[text_tokens, total]
+        for q_tok in 0..text_tokens {
+            let q_off = q_tok * QKV_DIM + head * heads;
+            let q_row = &qkv_c[q_off..q_off + heads];
+            let mut max_logit = f32::NEG_INFINITY;
+            for k_tok in 0..img_tokens {
+                let k_off = k_tok * QKV_DIM + HIDDEN + head * heads;
+                let dot = dot32(q_row, &qkv_x[k_off..k_off + heads]);
+                scores[k_tok] = dot * scale;
+                if scores[k_tok] > max_logit {
+                    max_logit = scores[k_tok];
+                }
+            }
+            for k_tok in 0..text_tokens {
+                let k_off = k_tok * QKV_DIM + HIDDEN + head * heads;
+                let dot = dot32(q_row, &qkv_c[k_off..k_off + heads]);
+                let s = dot * scale;
+                scores[img_tokens + k_tok] = s;
+                if s > max_logit {
+                    max_logit = s;
+                }
+            }
+            softmax_inplace(scores, total);
+            let out_off = (img_tokens + q_tok) * HIDDEN + head * heads;
+            for d in 0..heads {
+                let mut sum = 0.0_f32;
+                for k_tok in 0..img_tokens {
+                    let v_off = k_tok * QKV_DIM + 2 * HIDDEN + head * heads + d;
+                    sum += scores[k_tok] * qkv_x[v_off];
+                }
+                for k_tok in 0..text_tokens {
+                    let v_off = k_tok * QKV_DIM + 2 * HIDDEN + head * heads + d;
+                    sum += scores[img_tokens + k_tok] * qkv_c[v_off];
+                }
+                attention[out_off + d] = sum;
+            }
+        }
+    }
+
+    // === Pass 3: per-stream output projection + residual + MLP ===
+    stream_block_residual_mlp(
+        source,
+        &block.out_x,
+        &block.out_x_bias,
+        &block.ff_x_in,
+        &block.ff_x_out,
+        joint,
+        0..img_tokens,
+        &attention[..total * HIDDEN],
+        &modulation[..ADALN_DIM],
+        normed,
+        q8,
+        pool,
+    )?;
+    stream_block_residual_mlp(
+        source,
+        &block.out_c,
+        &block.out_c_bias,
+        &block.ff_c_in,
+        &block.ff_c_out,
+        joint,
+        img_tokens..total,
+        &attention[..total * HIDDEN],
+        &modulation[ADALN_DIM..2 * ADALN_DIM],
+        normed,
+        q8,
+        pool,
+    )?;
+
+    require_finite(joint, "AuK double block output")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ada_ln_qkv(
+    source: &dyn TensorSource,
+    ada_weight: &str,
+    ada_bias: &[f32],
+    qkv_weight: &str,
+    qkv_bias: &[f32],
+    joint: &[f32],
+    row_range: std::ops::Range<usize>,
+    ada_params: &[f32],
+    normed: &mut [f32],
+    qkv_buf: &mut [f32],
+    q8: &mut Q8Scratch,
+    pool: &ComputePool,
+) -> Result<(), String> {
+    let tokens = row_range.len();
+    // Slice modulation: 6 parts of HIDDEN each. We use shift_msa, scale_msa
+    // (gate_msa, shift_mlp, scale_mlp, gate_mlp are used later in the residual/MLP).
+    let shift_msa = &ada_params[0..HIDDEN];
+    let scale_msa = &ada_params[HIDDEN..2 * HIDDEN];
+    let gate_msa = &ada_params[2 * HIDDEN..3 * HIDDEN];
+    let _shift_mlp = &ada_params[3 * HIDDEN..4 * HIDDEN];
+    let _scale_mlp = &ada_params[4 * HIDDEN..5 * HIDDEN];
+    let _gate_mlp = &ada_params[5 * HIDDEN..6 * HIDDEN];
+    let _ = gate_msa;
+
+    // RMSNorm per token.
+    for token in 0..tokens {
+        let row = row_range.start + token;
+        let off = row * HIDDEN;
+        let slice = &joint[off..off + HIDDEN];
+        let mut mean_sq = 0.0_f32;
+        for v in slice.iter() {
+            mean_sq += *v * *v;
+        }
+        let scale = 1.0 / (mean_sq / HIDDEN as f32 + 1e-6).sqrt();
+        let n_off = token * HIDDEN;
+        for d in 0..HIDDEN {
+            // No learnable rms_norm weight for the block; Flux2Edit AdaLN path
+            // uses scale_modulation = 1 + scale_msa (so unit norm at scale=0).
+            normed[n_off + d] = slice[d] * scale;
+        }
+    }
+
+    // Apply AdaLN modulation.
+    for token in 0..tokens {
+        let n_off = token * HIDDEN;
+        for d in 0..HIDDEN {
+            let v = normed[n_off + d];
+            normed[n_off + d] = v * (1.0 + scale_msa[d]) + shift_msa[d];
+        }
+    }
+
+    // QKV projection: per-token matmul into qkv_buf.
+    for token in 0..tokens {
+        let input = &normed[token * HIDDEN..(token + 1) * HIDDEN];
+        let out = &mut qkv_buf[token * QKV_DIM..(token + 1) * QKV_DIM];
+        linear_into(source, qkv_weight, HIDDEN, QKV_DIM, input, out, q8, pool)?;
+        for (v, b) in out.iter_mut().zip(qkv_bias) {
+            *v += *b;
+        }
+    }
+
+    // ada_weight / ada_bias are unused here; we read the 9216-wide modulation
+    // directly from `ada_params` (which was already projected by the caller).
+    let _ = (ada_weight, ada_bias);
     Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_single_block(
-    _source: &dyn TensorSource,
-    _block: &SingleBlockWeights,
-    _joint: &mut [f32],
-    _img_tokens: usize,
-    _text_tokens: usize,
-    _rope: &[f32],
-    _inv_freq: &[f32],
-    _qkv_buf: &mut [f32],
-    _attention: &mut [f32],
-    _scores: &mut [f32],
-    _q8: &mut Q8Scratch,
-    _pool: &ComputePool,
-    _layer_index: usize,
+fn project_qk_with_rope(
+    qkv: &mut [f32],
+    tokens: usize,
+    pos_offset: usize,
+    q_norm_w: &[f32],
+    k_norm_w: &[f32],
+    inv_freq: &[f32],
+) {
+    // QKV row: [Q (HIDDEN) | K (HIDDEN) | V (HIDDEN)]
+    for token in 0..tokens {
+        let off = token * QKV_DIM;
+        let pos = pos_offset + token;
+        // Q RMSNorm + RoPE
+        rms_norm_per_head(
+            &mut qkv[off..off + HIDDEN],
+            1,
+            HIDDEN / HEAD_DIM,
+            HEAD_DIM,
+            q_norm_w,
+            1e-6,
+        );
+        rope_apply_token(&mut qkv[off..off + HIDDEN], pos, HEAD_DIM, inv_freq);
+        // K RMSNorm + RoPE
+        rms_norm_per_head(
+            &mut qkv[off + HIDDEN..off + 2 * HIDDEN],
+            1,
+            HIDDEN / HEAD_DIM,
+            HEAD_DIM,
+            k_norm_w,
+            1e-6,
+        );
+        rope_apply_token(
+            &mut qkv[off + HIDDEN..off + 2 * HIDDEN],
+            pos,
+            HEAD_DIM,
+            inv_freq,
+        );
+        // V: no norm, no RoPE.
+        let _ = (q_norm_w, k_norm_w);
+    }
+    let _ = inv_freq;
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stream_block_residual_mlp(
+    source: &dyn TensorSource,
+    out_weight: &str,
+    out_bias: &[f32],
+    ff_in_weight: &str,
+    ff_out_weight: &str,
+    joint: &mut [f32],
+    row_range: std::ops::Range<usize>,
+    attention: &[f32],
+    ada_params: &[f32],
+    normed: &mut [f32],
+    q8: &mut Q8Scratch,
+    pool: &ComputePool,
 ) -> Result<(), String> {
-    // TODO: implement after scaffold validates (next commit)
+    let tokens = row_range.len();
+    let _shift_msa = &ada_params[0..HIDDEN];
+    let _scale_msa = &ada_params[HIDDEN..2 * HIDDEN];
+    let gate_msa = &ada_params[2 * HIDDEN..3 * HIDDEN];
+    let shift_mlp = &ada_params[3 * HIDDEN..4 * HIDDEN];
+    let scale_mlp = &ada_params[4 * HIDDEN..5 * HIDDEN];
+    let gate_mlp = &ada_params[5 * HIDDEN..6 * HIDDEN];
+
+    // Output projection (1536 -> 1536) per token + bias.
+    let mut proj = vec![0.0_f32; HIDDEN];
+    for token in 0..tokens {
+        let att_off = (row_range.start + token) * HIDDEN;
+        let att_row = &attention[att_off..att_off + HIDDEN];
+        linear_into(
+            source,
+            out_weight,
+            HIDDEN,
+            HIDDEN,
+            att_row,
+            &mut proj,
+            q8,
+            pool,
+        )?;
+        for (v, b) in proj.iter_mut().zip(out_bias) {
+            *v += *b;
+        }
+        // residual_1 = input + proj * gate_msa
+        let row = (row_range.start + token) * HIDDEN;
+        for d in 0..HIDDEN {
+            joint[row + d] += proj[d] * gate_msa[d];
+        }
+    }
+
+    // MLP: RMSNorm(residual_1), AdaLN modulate, ff_in (packed gate+up), SwiGLU,
+    // ff_out, residual.
+    let mut normed_token = vec![0.0_f32; HIDDEN];
+    let mut packed = vec![0.0_f32; PACKED_FF_IN];
+    let mut gated = vec![0.0_f32; FF_INNER];
+    let mut ff = vec![0.0_f32; HIDDEN];
+    for token in 0..tokens {
+        let row = row_range.start + token;
+        let off = row * HIDDEN;
+        let slice = &joint[off..off + HIDDEN];
+        let mut mean_sq = 0.0_f32;
+        for v in slice.iter() {
+            mean_sq += *v * *v;
+        }
+        let scale = 1.0 / (mean_sq / HIDDEN as f32 + 1e-6).sqrt();
+        for d in 0..HIDDEN {
+            normed_token[d] = slice[d] * scale;
+        }
+        // Modulate.
+        for d in 0..HIDDEN {
+            let v = normed_token[d];
+            normed_token[d] = v * (1.0 + scale_mlp[d]) + shift_mlp[d];
+        }
+        // ff_in: 1536 -> 6144 (gate+up packed)
+        linear_into(
+            source,
+            ff_in_weight,
+            HIDDEN,
+            PACKED_FF_IN,
+            &normed_token,
+            &mut packed,
+            q8,
+            pool,
+        )?;
+        // SwiGLU: split into gate (0..3072) and up (3072..6144); out = silu(gate) * up
+        for d in 0..FF_INNER {
+            let g = packed[d];
+            let u = packed[FF_INNER + d];
+            // silu(g) = g * sigmoid(g)
+            let silu = g / (1.0 + (-g).exp());
+            gated[d] = silu * u;
+        }
+        // ff_out: 3072 -> 1536
+        linear_into(
+            source,
+            ff_out_weight,
+            FF_INNER,
+            HIDDEN,
+            &gated,
+            &mut ff,
+            q8,
+            pool,
+        )?;
+        // residual_2 = residual_1 + ff * gate_mlp
+        for d in 0..HIDDEN {
+            joint[off + d] += ff[d] * gate_mlp[d];
+        }
+    }
+    let _ = normed;
     Ok(())
+}
+
+fn dot32(a: &[f32], b: &[f32]) -> f32 {
+    let mut s = 0.0_f32;
+    for (x, y) in a.iter().zip(b) {
+        s += *x * *y;
+    }
+    s
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_single_block(
+    source: &dyn TensorSource,
+    block: &SingleBlockWeights,
+    joint: &mut [f32],
+    img_tokens: usize,
+    text_tokens: usize,
+    inv_freq: &[f32],
+    modulation: &[f32],
+    qkv_buf: &mut [f32],
+    attention: &mut [f32],
+    scores: &mut [f32],
+    normed: &mut [f32],
+    q8: &mut Q8Scratch,
+    pool: &ComputePool,
+    layer_index: usize,
+) -> Result<(), String> {
+    let _ = layer_index;
+    let total = img_tokens + text_tokens;
+    if total == 0 || total * HIDDEN != joint.len() {
+        return Err("AuK single block joint length mismatch".into());
+    }
+    if scores.len() < total {
+        return Err("AuK scores buffer too small".into());
+    }
+    if qkv_buf.len() < total * QKV_DIM {
+        return Err("AuK qkv buffer too small".into());
+    }
+    if attention.len() < total * HIDDEN {
+        return Err("AuK attention buffer too small".into());
+    }
+    if normed.len() < HIDDEN {
+        return Err("AuK normed buffer too small".into());
+    }
+    if modulation.len() < ADALN_DIM {
+        return Err("AuK modulation buffer too small".into());
+    }
+    if inv_freq.len() != HEAD_DIM / 2 {
+        return Err(format!(
+            "AuK inv_freq length {} != HEAD_DIM/2={}",
+            inv_freq.len(),
+            HEAD_DIM / 2
+        ));
+    }
+
+    let shift_msa = &modulation[0..HIDDEN];
+    let scale_msa = &modulation[HIDDEN..2 * HIDDEN];
+    let gate_msa = &modulation[2 * HIDDEN..3 * HIDDEN];
+    let shift_mlp = &modulation[3 * HIDDEN..4 * HIDDEN];
+    let scale_mlp = &modulation[4 * HIDDEN..5 * HIDDEN];
+    let gate_mlp = &modulation[5 * HIDDEN..6 * HIDDEN];
+
+    // Per-token RMSNorm + AdaLN modulation + QKV projection.
+    for token in 0..total {
+        let off = token * HIDDEN;
+        let slice = &joint[off..off + HIDDEN];
+        let mut mean_sq = 0.0_f32;
+        for v in slice.iter() {
+            mean_sq += *v * *v;
+        }
+        let scale = 1.0 / (mean_sq / HIDDEN as f32 + 1e-6).sqrt();
+        let mut normed_token = vec![0.0_f32; HIDDEN];
+        for d in 0..HIDDEN {
+            normed_token[d] = slice[d] * scale;
+        }
+        for d in 0..HIDDEN {
+            normed_token[d] = normed_token[d] * (1.0 + scale_msa[d]) + shift_msa[d];
+        }
+        let out = &mut qkv_buf[token * QKV_DIM..(token + 1) * QKV_DIM];
+        linear_into(source, &block.qkv, HIDDEN, QKV_DIM, &normed_token, out, q8, pool)?;
+        for (v, b) in out.iter_mut().zip(&block.qkv_bias) {
+            *v += *b;
+        }
+    }
+    // Q/K RMS-norm + RoPE (V: no norm). Stream positions: text tokens use
+    // 0..text_tokens, audio tokens use text_tokens..text_tokens+img_tokens
+    // (audio comes second in single block per audio.cpp).
+    let heads = HEAD_DIM;
+    let n_heads = HIDDEN / heads;
+    let scale = 1.0 / (heads as f32).sqrt();
+    for token in 0..total {
+        let off = token * QKV_DIM;
+        rms_norm_per_head(
+            &mut qkv_buf[off..off + HIDDEN],
+            1,
+            n_heads,
+            heads,
+            &block.q_norm,
+            1e-6,
+        );
+        rms_norm_per_head(
+            &mut qkv_buf[off + HIDDEN..off + 2 * HIDDEN],
+            1,
+            n_heads,
+            heads,
+            &block.k_norm,
+            1e-6,
+        );
+        let pos = if token < text_tokens {
+            token
+        } else {
+            text_tokens + (token - text_tokens)
+        };
+        rope_apply_token(&mut qkv_buf[off..off + HIDDEN], pos, HEAD_DIM, inv_freq);
+        rope_apply_token(&mut qkv_buf[off + HIDDEN..off + 2 * HIDDEN], pos, HEAD_DIM, inv_freq);
+    }
+
+    // Single-stream attention.
+    for head in 0..n_heads {
+        for q_tok in 0..total {
+            let q_off = q_tok * QKV_DIM + head * heads;
+            let q_row = &qkv_buf[q_off..q_off + heads];
+            let mut max_logit = f32::NEG_INFINITY;
+            for k_tok in 0..total {
+                let k_off = k_tok * QKV_DIM + HIDDEN + head * heads;
+                let dot = dot32(q_row, &qkv_buf[k_off..k_off + heads]);
+                let s = dot * scale;
+                scores[k_tok] = s;
+                if s > max_logit {
+                    max_logit = s;
+                }
+            }
+            softmax_inplace(scores, total);
+            let out_off = q_tok * HIDDEN + head * heads;
+            for d in 0..heads {
+                let mut sum = 0.0_f32;
+                for k_tok in 0..total {
+                    let v_off = k_tok * QKV_DIM + 2 * HIDDEN + head * heads + d;
+                    sum += scores[k_tok] * qkv_buf[v_off];
+                }
+                attention[out_off + d] = sum;
+            }
+        }
+    }
+
+    // Output projection + residual + MLP.
+    let mut proj = vec![0.0_f32; HIDDEN];
+    let mut gated_buf = vec![0.0_f32; FF_INNER];
+    let mut packed_buf = vec![0.0_f32; PACKED_FF_IN];
+    let mut ff = vec![0.0_f32; HIDDEN];
+    let mut normed_token = vec![0.0_f32; HIDDEN];
+    for token in 0..total {
+        let off = token * HIDDEN;
+        let att_row = &attention[off..off + HIDDEN];
+        linear_into(
+            source,
+            &block.out,
+            HIDDEN,
+            HIDDEN,
+            att_row,
+            &mut proj,
+            q8,
+            pool,
+        )?;
+        for (v, b) in proj.iter_mut().zip(&block.out_bias) {
+            *v += *b;
+        }
+        for d in 0..HIDDEN {
+            joint[off + d] += proj[d] * gate_msa[d];
+        }
+        // MLP
+        let slice = &joint[off..off + HIDDEN];
+        let mut mean_sq = 0.0_f32;
+        for v in slice.iter() {
+            mean_sq += *v * *v;
+        }
+        let scale = 1.0 / (mean_sq / HIDDEN as f32 + 1e-6).sqrt();
+        for d in 0..HIDDEN {
+            normed_token[d] = slice[d] * scale;
+        }
+        for d in 0..HIDDEN {
+            let v = normed_token[d];
+            normed_token[d] = v * (1.0 + scale_mlp[d]) + shift_mlp[d];
+        }
+        linear_into(
+            source,
+            &block.ff_in,
+            HIDDEN,
+            PACKED_FF_IN,
+            &normed_token,
+            &mut packed_buf,
+            q8,
+            pool,
+        )?;
+        for d in 0..FF_INNER {
+            let g = packed_buf[d];
+            let u = packed_buf[FF_INNER + d];
+            let silu = g / (1.0 + (-g).exp());
+            gated_buf[d] = silu * u;
+        }
+        linear_into(
+            source,
+            &block.ff_out,
+            FF_INNER,
+            HIDDEN,
+            &gated_buf,
+            &mut ff,
+            q8,
+            pool,
+        )?;
+        for d in 0..HIDDEN {
+            joint[off + d] += ff[d] * gate_mlp[d];
+        }
+    }
+    require_finite(joint, "AuK single block output")
 }
