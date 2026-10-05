@@ -536,6 +536,18 @@ pub struct EncodedPrompt {
     /// Kept 1:1 with `words`: a word that tokenizes to nothing still gets a
     /// placeholder row, because dropping it would shift every later index.
     pub text_word_first_positions: Vec<usize>,
+    /// How many leading entries of the text stream are the `choices` prefix
+    /// rather than document words — `len_prefix` in the reference.
+    ///
+    /// The prefix is prepended to the **text** token stream, not the schema
+    /// stream (`processor.py:645`), so `schema_tokens` and the `[C]` marker
+    /// stride are untouched. It is word-routed like any other text token, which
+    /// is what lets a choice be scored as a one-token span — and it means every
+    /// candidate index the pool produces is a *text-stream* index, so a document
+    /// index is that index minus this.
+    ///
+    /// Zero when the schema declares no `choices`.
+    pub text_prefix_len: usize,
     /// Subword index of each child marker, `[P]` dropped, tasks in order. This
     /// is `schema_special_positions[group][1:]` flattened, which is what
     /// `_encode_core` routes into `query_states` — the group marker itself is
@@ -757,26 +769,34 @@ impl BoundaryTaskKind {
 /// Build a prompt for a mix of [`BoundaryTaskKind`] groups.
 ///
 /// `kinds[i]` describes `tasks[i]`, and groups are laid out in that order.
+/// `text_prefix` is the rendered `choices` prefix; see
+/// [`render_choice_prefix`].
 pub fn build_mixed_boundary_prompt(
     tasks: &[Task],
     kinds: &[BoundaryTaskKind],
+    text_prefix: &[String],
     text: &str,
     spm: &crate::core::sentencepiece::SentencePieceTokenizer,
 ) -> Result<EncodedPrompt, String> {
-    build_mixed_boundary_prompt_with(tasks, kinds, text, |part| Ok(encode_token(part, spm)))
+    build_mixed_boundary_prompt_with(tasks, kinds, text_prefix, text, |part| {
+        Ok(encode_token(part, spm))
+    })
 }
 
 /// The SPM-free form of [`build_mixed_boundary_prompt`].
+/// `text_prefix` is the rendered `choices` prefix; pass `&[]` for a schema with
+/// no choice field.
 pub fn build_mixed_boundary_prompt_with(
     tasks: &[Task],
     kinds: &[BoundaryTaskKind],
+    text_prefix: &[String],
     text: &str,
     encode: impl FnMut(&str) -> Result<Vec<u32>, String>,
 ) -> Result<EncodedPrompt, String> {
     if kinds.len() != tasks.len() {
         return Err(format!("{} tasks but {} kinds", tasks.len(), kinds.len()));
     }
-    build_with_child_marker_mixed(tasks, kinds, text, encode)
+    build_with_child_marker_mixed(tasks, kinds, text_prefix, text, encode)
 }
 
 fn build_with_child_marker(
@@ -816,15 +836,103 @@ fn build_with_child_marker(
         tasks,
         kinds,
         &schema_tokens,
+        // The classification path has no `choices` concept; only the boundary
+        // `json_structures` path renders one.
+        &[],
         text,
         encode,
         check_query_count,
     )
 }
 
+/// Render the `choices` prefix for a schema's literal-enum fields.
+///
+/// `_build_classification_prefix` (`processor.py:825-858`) emits, per group that
+/// has at least one choice field:
+///
+/// ```text
+/// ( <parent>: <field> ( <c1> | <c2> ) , <field2> ( <c3> ) )
+/// ```
+///
+/// and returns `[]` when no field carries choices, which is what keeps every
+/// other schema byte-identical. Field order and choice order are the schema's
+/// declaration order; the reference shuffles both when training and not at
+/// inference.
+///
+/// Choice literals are emitted verbatim — the reference does not lower-case them,
+/// and `_find_choice_idx` lower-cases both sides when it looks them up — so
+/// `"Happy"` reaches the encoder as `Happy`.
+pub fn render_choice_prefix(schema: &serde_json::Value) -> Vec<String> {
+    let mut prefix = Vec::new();
+    let Some(groups) = schema
+        .get("json_structures")
+        .and_then(|value| value.as_array())
+    else {
+        return prefix;
+    };
+    for group in groups {
+        let Some(fields) = group.as_object() else {
+            continue;
+        };
+        for (parent, occurrences) in fields {
+            let Some(occurrences) = occurrences.as_object() else {
+                continue;
+            };
+            // `processor.py:830-835`: only a field whose value is a dict carrying
+            // both `value` and `choices` is a choice field. A plain `[]` field
+            // contributes no parenthesised run, so a group mixes both shapes.
+            let choice_fields: Vec<(&String, &Vec<serde_json::Value>)> = occurrences
+                .iter()
+                .filter_map(|(name, value)| {
+                    let object = value.as_object()?;
+                    if !object.contains_key("value") {
+                        return None;
+                    }
+                    let choices = object.get("choices")?.as_array()?;
+                    if choices.is_empty() {
+                        return None;
+                    }
+                    Some((name, choices))
+                })
+                .collect();
+            if choice_fields.is_empty() {
+                continue;
+            }
+            // `processor.py:848-852`: each field contributes
+            // `[name, "(", *choices, ")", ","]` — comma *last* — and the
+            // trailing comma is then dropped from the whole run. Emitting the
+            // separator as a leading token instead would need the same pop to
+            // land on a different element.
+            let mut inner: Vec<String> = Vec::new();
+            for (name, choices) in &choice_fields {
+                inner.push((*name).clone());
+                inner.push("(".to_string());
+                for (choice_index, choice) in choices.iter().enumerate() {
+                    if choice_index > 0 {
+                        inner.push("|".to_string());
+                    }
+                    inner.push(choice.as_str().unwrap_or_default().to_string());
+                }
+                inner.push(")".to_string());
+                inner.push(",".to_string());
+            }
+            // `if inner: inner = inner[:-1]`
+            inner.pop();
+            prefix.push("(".to_string());
+            prefix.push(format!("{parent}:"));
+            prefix.extend(inner);
+            prefix.push(")".to_string());
+        }
+    }
+    prefix
+}
+
+/// `text_prefix` is the rendered `choices` prefix for this schema; see
+/// [`assemble`].
 fn build_with_child_marker_mixed(
     tasks: &[Task],
     kinds: &[BoundaryTaskKind],
+    text_prefix: &[String],
     text: &str,
     encode: impl FnMut(&str) -> Result<Vec<u32>, String>,
 ) -> Result<EncodedPrompt, String> {
@@ -833,13 +941,25 @@ fn build_with_child_marker_mixed(
         .zip(kinds)
         .map(|(task, kind)| task.schema_tokens_with(kind.child_marker()))
         .collect();
-    assemble(tasks, kinds, &schema_tokens, text, encode, true)
+    assemble(
+        tasks,
+        kinds,
+        &schema_tokens,
+        text_prefix,
+        text,
+        encode,
+        true,
+    )
 }
 
+/// `text_prefix` is the rendered `choices` prefix, prepended to the text stream
+/// after `[SEP_TEXT]`. Pass `&[]` when the schema declares no choice field, which
+/// is every schema on the span path.
 fn assemble(
     tasks: &[Task],
     kinds: &[BoundaryTaskKind],
     schema_tokens: &[Vec<String>],
+    text_prefix: &[String],
     text: &str,
     mut encode: impl FnMut(&str) -> Result<Vec<u32>, String>,
     check_query_count: bool,
@@ -863,6 +983,10 @@ fn assemble(
         }
     }
     combined.push(SEP_TEXT.to_string());
+    // `_format_input_with_mapping` does `combined.extend(text_tokens)` and
+    // `text_tokens` is `prefix + words`, so the prefix sits between `[SEP_TEXT]`
+    // and the document words.
+    combined.extend(text_prefix.iter().cloned());
     let words = split_words(&normalize_text(text));
     combined.extend(words.iter().cloned());
     let sep_index = combined.len() - 1 - words.len();
@@ -958,6 +1082,7 @@ fn assemble(
             markers,
             words,
             text_word_first_positions,
+            text_prefix_len: text_prefix.len(),
             query_positions,
             query_names,
             classification_positions,
@@ -983,6 +1108,7 @@ fn assemble(
         markers,
         words,
         text_word_first_positions,
+        text_prefix_len: text_prefix.len(),
         query_positions: Vec::new(),
         query_names: Vec::new(),
         classification_positions: Vec::new(),

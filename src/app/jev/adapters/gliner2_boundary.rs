@@ -471,6 +471,10 @@ pub struct BoundarySchemaOptions<'a> {
     /// Per-relation-type knobs keyed by the bare relation name. Applied by the
     /// relation scorer, not by the candidate stage.
     pub relation_metadata: Option<&'a serde_json::Value>,
+    /// The caller's raw schema. `choices` lives inside each `json_structures`
+    /// field's value rather than in a side table, and is needed during prompt
+    /// assembly, so it cannot be derived from the metadata slices above.
+    pub schema: Option<&'a serde_json::Value>,
 }
 
 pub fn extract(
@@ -487,6 +491,7 @@ pub fn extract(
         field_metadata,
         entity_metadata,
         relation_metadata,
+        schema: raw_schema,
     } = schema_options;
     let mut result = run_mixed_extraction(
         model,
@@ -500,6 +505,7 @@ pub fn extract(
             field_metadata,
             entity_metadata,
             relation_metadata,
+            schema: raw_schema,
         },
     )?;
     if !result.query_names.is_empty() {
@@ -593,6 +599,8 @@ pub struct BoundaryDecodeOptions<'a> {
     /// Per-relation-type knobs keyed by the bare relation name. Only
     /// `threshold` is read today, and the relation scorer applies it.
     pub relation_metadata: Option<&'a serde_json::Value>,
+    /// The CLI's raw `--gliner2-schema` value, read for the `choices` prefix.
+    pub schema: Option<&'a serde_json::Value>,
     pub output_json: bool,
 }
 
@@ -612,6 +620,7 @@ pub fn run_gliner2_boundary(
         field_metadata,
         entity_metadata,
         relation_metadata,
+        schema,
         output_json,
     } = decode;
     if !crate::models::gliner_boundary::is_boundary_gguf(source.as_ref()) {
@@ -643,6 +652,7 @@ pub fn run_gliner2_boundary(
             field_metadata,
             entity_metadata,
             relation_metadata,
+            schema,
         },
     )?;
     let spans = &result.spans;

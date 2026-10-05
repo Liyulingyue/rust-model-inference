@@ -562,6 +562,7 @@ mod tests {
                 .collect(),
             words: vec![],
             text_word_first_positions: vec![],
+            text_prefix_len: 0,
             query_positions: vec![],
             query_names: vec![],
             classification_positions: vec![],

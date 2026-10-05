@@ -91,22 +91,27 @@ pub fn encode_boundary_prompt(
         };
         tasks.len()
     ];
-    encode_mixed_boundary_prompt(model, tasks, &kinds, text)
+    // The single-marker convenience path takes no schema, so no `choices`.
+    encode_mixed_boundary_prompt(model, tasks, &kinds, None, text)
 }
 
 /// Prompt assembly for a mix of group kinds. `kinds[i]` describes `tasks[i]`.
+/// `schema` is the caller's raw schema, read only for `choices`; pass `None`
+/// when there is none, which is every schema on the paths that predate it.
 pub fn encode_mixed_boundary_prompt(
     model: &BoundaryModel<'_>,
     tasks: &[Task],
     kinds: &[BoundaryTaskKind],
+    schema: Option<&serde_json::Value>,
     text: &str,
 ) -> Result<EncodedPrompt, String> {
+    let text_prefix = schema.map(prompt::render_choice_prefix).unwrap_or_default();
     match &model.tokenizer {
         crate::models::gliner::ModelTokenizer::SentencePiece(spm) => {
-            prompt::build_mixed_boundary_prompt(tasks, kinds, text, spm)
+            prompt::build_mixed_boundary_prompt(tasks, kinds, &text_prefix, text, spm)
         }
         crate::models::gliner::ModelTokenizer::Json(fast) => {
-            prompt::build_mixed_boundary_prompt_with(tasks, kinds, text, |part| {
+            prompt::build_mixed_boundary_prompt_with(tasks, kinds, &text_prefix, text, |part| {
                 let encoding = fast
                     .encode(part, false)
                     .map_err(|error| error.to_string())?;
@@ -180,6 +185,13 @@ pub struct SchemaOptions<'a> {
     /// Per-relation-type knobs, keyed by the bare relation name. Not read by
     /// the candidate stage at all; see `resolve_relation_thresholds`.
     pub relation_metadata: Option<&'a serde_json::Value>,
+    /// The caller's raw schema, read only for the `choices` prefix.
+    ///
+    /// Distinct from the metadata tables above because `choices` lives *inside*
+    /// each `json_structures` field's value rather than in a side table, and
+    /// because it is consumed during prompt assembly — before any of the
+    /// decode-side metadata is read.
+    pub schema: Option<&'a serde_json::Value>,
 }
 
 /// One query's identity, as `_query_thresholds` sees it.
@@ -369,11 +381,12 @@ pub fn run_mixed_extraction(
         field_metadata,
         entity_metadata: _,
         relation_metadata,
+        schema,
     } = schema;
     if tasks.is_empty() {
         return Err("extraction needs at least one schema task".into());
     }
-    let encoded = encode_mixed_boundary_prompt(model, tasks, kinds, text)?;
+    let encoded = encode_mixed_boundary_prompt(model, tasks, kinds, schema, text)?;
     let hidden_size = model.config.n_embd;
     if hidden_size == 0 {
         return Err("encoder hidden size is zero".into());
@@ -508,6 +521,7 @@ pub fn run_mixed_extraction(
                 record_metadata,
                 entity_metadata: None,
                 relation_metadata: None,
+                schema: None,
                 field_metadata,
             },
             relation_threshold.unwrap_or(DEFAULT_SCORE_THRESHOLD),
@@ -606,6 +620,7 @@ fn score_structures(
         field_metadata,
         entity_metadata,
         relation_metadata: _,
+        schema: _,
     } = schema;
     if !tasks
         .iter()

@@ -1235,6 +1235,7 @@ pub(super) async fn jev_boundary(
             // `<group>.<field>`, matching the reference's two lookups.
             entity_metadata: req.schema.get("entity_metadata"),
             relation_metadata: req.schema.get("relation_metadata"),
+            schema: Some(&req.schema),
         },
     ) {
         Ok(result) => result,
