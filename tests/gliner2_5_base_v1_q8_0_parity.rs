@@ -47,13 +47,32 @@ use rust_model_inference::models::gliner_boundary::{run_extraction, BoundaryMode
 const TEXT: &str = "The product shipped late but the support team was great.";
 const TEXT_2: &str = "Tesla delivered 500,000 cars last year. BMW should be in second place.";
 const SCHEMA: &str = r#"{"entities": ["product"]}"#;
-/// Q8_0 quantizes linear weights to ~1% relative error per the
-/// `tools/converter/utils/gguf.py:quantize_q8_0` docstring, and the
-/// DeBERTa-v3-base + pool + pair scorer is ~28 layers deep. The observed
-/// median lands at 1.2–1.6% with a max near 7%, so 5% covers the bulk of
-/// the distribution and anything above it is a real regression rather than
-/// quantization noise.
-const MEDIAN_TOLERANCE: f32 = 5.0e-2;
+/// Median pair-logit tolerance per format, as a fraction.
+///
+/// Q8_0 carries 8 bits per weight and lands at 1.1–2.5% across 28 layers of
+/// DeBERTa plus the boundary heads. The 4-bit k-quants carry half that and
+/// land at 4.5–13% depending on the input, so the bound scales with the bit
+/// width rather than being one number for all of them. These are regression
+/// guards, not accuracy claims: anything above the bound means the decode
+/// path changed, not that the format misbehaves.
+fn median_tolerance_for(quantized: &std::path::Path) -> f32 {
+    // The format comes from the `general.file_type` the converter stamped
+    // into the file, not from the file name.
+    let Ok(source) = GGUFLoader::from_file(quantized) else {
+        return 5.0e-2;
+    };
+    let Some(text) = source.metadata("general.file_type") else {
+        return 5.0e-2;
+    };
+    let Some(text) = text.to_string_val() else {
+        return 5.0e-2;
+    };
+    match text {
+        "q4_k" | "Q4_K" => 2.0e-1,
+        "q6_k" | "Q6_K" => 1.0e-1,
+        _ => 5.0e-2,
+    }
+}
 /// Padded pool slots carry `MASK_LOGIT`, a large negative sentinel rather
 /// than a score. Anything at or below it is padding, not a live candidate.
 const MASK_LOGIT_FLOOR: f32 = -1.0e4;
@@ -90,7 +109,7 @@ fn collect_logits(model: &BoundaryModel<'_>, text: &str, _schema: &str) -> Vec<f
     batch.pair_logits.clone()
 }
 
-fn assert_cross_format(f32_pair: &[f32], q8_pair: &[f32], label: &str) {
+fn assert_cross_format(f32_pair: &[f32], q8_pair: &[f32], label: &str, tolerance: f32) {
     assert_eq!(
         f32_pair.len(),
         q8_pair.len(),
@@ -128,9 +147,9 @@ fn assert_cross_format(f32_pair: &[f32], q8_pair: &[f32], label: &str) {
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let median = sorted[sorted.len() / 2];
     assert!(
-        median <= MEDIAN_TOLERANCE,
-        "{label}: median |delta| is {median}, tolerance is {MEDIAN_TOLERANCE}; \
-         the Q8_0 quantize-input path is drifting on the bulk of slots"
+        median <= tolerance,
+        "{label}: median |delta| is {median}, tolerance is {tolerance}; \
+         the quantized decode path is drifting on the bulk of slots"
     );
     let mut indexed: Vec<(usize, f32, f32, f32)> = f32_sorted
         .iter()
@@ -165,15 +184,16 @@ fn boundary_q8_0_logits_track_f32() {
 
     let f32_model = loaded(&f32_path);
     let q8_model = loaded(&q8_path);
+    let tolerance = median_tolerance_for(&q8_path);
 
     let f32_pair = collect_logits(&f32_model, TEXT, SCHEMA);
     let q8_pair = collect_logits(&q8_model, TEXT, SCHEMA);
-    assert_cross_format(&f32_pair, &q8_pair, "first text");
+    assert_cross_format(&f32_pair, &q8_pair, "first text", tolerance);
 
     // A second text shows the gap does not blow up across inputs; the
     // quantize-and-replay risk is that a particular short input happens to
     // land on zero everywhere, which would mask a real regression.
     let f32_pair_b = collect_logits(&f32_model, TEXT_2, SCHEMA);
     let q8_pair_b = collect_logits(&q8_model, TEXT_2, SCHEMA);
-    assert_cross_format(&f32_pair_b, &q8_pair_b, "second text");
+    assert_cross_format(&f32_pair_b, &q8_pair_b, "second text", tolerance);
 }

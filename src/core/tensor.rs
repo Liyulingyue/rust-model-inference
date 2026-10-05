@@ -311,15 +311,10 @@ pub fn load_f32_tensor<S: TensorSource + ?Sized>(
     let info = source
         .tensor_info(name)
         .ok_or_else(|| format!("Missing tensor: {name}"))?;
-    if info.dims != dims
-        || !matches!(
-            info.ggml_type,
-            GGMLType::F32 | GGMLType::BF16 | GGMLType::Q8_0
-        )
-    {
+    if info.dims != dims || !DECODABLE_TO_F32.contains(&info.ggml_type) {
         return Err(format!(
-            "Invalid tensor {name}: shape {:?} type {:?}; expected {:?} F32, BF16 or Q8_0",
-            info.dims, info.ggml_type, dims
+            "Invalid tensor {name}: shape {:?} type {:?}; expected {:?} in {:?}",
+            info.dims, info.ggml_type, dims, DECODABLE_TO_F32
         ));
     }
     let expected = usize::try_from(
@@ -336,33 +331,41 @@ pub fn load_f32_tensor<S: TensorSource + ?Sized>(
             bytes.len()
         ));
     }
-    match info.ggml_type {
-        GGMLType::F32 => Ok(bytes
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect()),
-        GGMLType::BF16 => Ok(bytes
-            .chunks_exact(2)
-            .map(|c| bf16_to_f32(u16::from_le_bytes([c[0], c[1]])))
-            .collect()),
-        // Q8_0 is quantized row-wise: GGUF dims are `[n_rows, n_cols]` with
-        // `n_cols` a multiple of 32 (the caller's contract). Dequantizing on
-        // load is the safe choice for the small tables — the record head's
-        // `instance_embed` and the rest of the loader's F32-only paths run
-        // them once per model load, not per token, so the decode cost is
-        // amortized away. The same path will gain Q4_0 the day a quantization
-        // tool needs it.
-        GGMLType::Q8_0 => {
-            let n_rows = dims[0] as usize;
-            let n_cols = dims[1..]
-                .iter()
-                .try_fold(1usize, |acc, &d| acc.checked_mul(d as usize))
-                .ok_or_else(|| format!("{name}: dims overflow"))?;
-            Ok(crate::ops::quant::dequant_q80_weight(bytes, n_cols, n_rows))
-        }
-        other => Err(format!("{name}: unsupported tensor type {other:?}")),
+    if matches!(info.ggml_type, GGMLType::F32 | GGMLType::BF16) {
+        return Ok(match info.ggml_type {
+            GGMLType::F32 => bytes
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect(),
+            _ => bytes
+                .chunks_exact(2)
+                .map(|c| bf16_to_f32(u16::from_le_bytes([c[0], c[1]])))
+                .collect(),
+        });
     }
+    // Block-quantized layouts are expanded once, here. These are the small
+    // tables a loader reads directly — the record head's `instance_embed`,
+    // the norms and biases — which run once per model load rather than per
+    // token, so the cost is amortized away. The big projections never come
+    // through this path; they stay quantized and are consumed by
+    // `QuantizedTensor::from_bytes`.
+    let n_cols = *dims.first().ok_or_else(|| format!("{name}: no dims"))? as usize;
+    let n_rows = dims[1..]
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d as usize))
+        .ok_or_else(|| format!("{name}: dims overflow"))?;
+    crate::ops::quant::dequantize_tensor(bytes, info.ggml_type, n_cols, n_rows)
+        .map_err(|e| format!("{name}: {e}"))
 }
+
+/// Tensor types `load_f32_tensor` will expand to F32 on load.
+const DECODABLE_TO_F32: &[GGMLType] = &[
+    GGMLType::F32,
+    GGMLType::BF16,
+    GGMLType::Q8_0,
+    GGMLType::Q4K,
+    GGMLType::Q6K,
+];
 
 /// Bit-level BF16 → F32 conversion (zero-extend the 16 high bits).
 #[inline]

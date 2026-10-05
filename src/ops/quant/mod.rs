@@ -1896,6 +1896,51 @@ pub fn dequantize_row_q6_k(block_bytes: &[u8], output: &mut [f32]) {
     }
 }
 
+/// Whole-tensor Q4_K expansion, shaped like [`dequant_q6k_weight`].
+///
+/// The per-row helper reads from the byte offset onward, so the caller has to
+/// hand it the slice starting at this row rather than the whole buffer; the
+/// extra capacity is harmless because it stops after `QK_K` values.
+pub fn dequant_q4k_weight(data: &[u8], n_cols: usize, n_rows: usize) -> Vec<f32> {
+    let mut out = vec![0.0f32; n_rows * n_cols];
+    let blocks_per_row = n_cols / QK_K;
+    for row in 0..n_rows {
+        let byte_offset = row * blocks_per_row * BLOCK_Q4K_SIZE;
+        dequantize_row_q4_k(
+            &data[byte_offset..],
+            &mut out[row * n_cols..row * n_cols + n_cols],
+        );
+    }
+    out
+}
+
+/// Expand a whole block-quantized tensor to F32.
+///
+/// `n_cols` is the GGUF leading dim (the contiguous one the block format
+/// walks) and `n_rows` the product of the rest, which is how every tensor
+/// here is laid out. The caller has already validated the byte count against
+/// `GGMLType::checked_nbytes`, so the block geometry is consistent by the
+/// time this runs.
+pub fn dequantize_tensor(
+    data: &[u8],
+    ggml_type: crate::core::tensor::GGMLType,
+    n_cols: usize,
+    n_rows: usize,
+) -> Result<Vec<f32>, String> {
+    use crate::core::tensor::GGMLType;
+    Ok(match ggml_type {
+        GGMLType::Q8_0 => dequant_q80_weight(data, n_cols, n_rows),
+        GGMLType::Q4K => dequant_q4k_weight(data, n_cols, n_rows),
+        GGMLType::Q6K => dequant_q6k_weight(data, n_cols, n_rows),
+        other => {
+            return Err(format!(
+                "no whole-tensor decoder for {other:?}; the per-row decoders \
+                 cover the rest"
+            ))
+        }
+    })
+}
+
 pub fn dequant_q6k_weight(data: &[u8], n_cols: usize, n_rows: usize) -> Vec<f32> {
     let mut out = vec![0.0f32; n_rows * n_cols];
     let blocks_per_row = n_cols / QK_K;

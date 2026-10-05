@@ -1,47 +1,40 @@
-"""Quantize an F32 GGUF to a smaller GGUF in-place.
+"""Quantize an F32 GGUF to a smaller GGUF.
 
 The GLiNER family converters emit F32 for byte-exact parity against the
-HF reference. The boundary pipeline's ``Weight::from_quantized`` already
-supports Q8_0, Q4_0, Q4_K, Q6_K, F16 and BF16 — the only thing the F32
-output does not exercise today is that one path. This script reads an F32
-GGUF and writes a new one with the same tensors, switching every
-boundary-pipeline weight that survives the alignment check to Q8_0. The
-runtime's per-tensor ``ggml_type`` dispatch means the file's mixed
-F32-encoder / F32-1D / Q8_0-boundary-weights form is one file the loader
-picks up unchanged.
+HF reference. The runtime already supports Q8_0, Q4_0, Q4_K, Q6_K, F16 and
+BF16 through ``Weight::from_quantized`` and the block-quantized row decoder
+in ``gliner::compute::decode_row`` — the F32 output just never exercises
+those paths. This script reads an F32 GGUF and writes a new one with the
+same tensor names, switching every weight whose row width is block-aligned
+to the requested format. The runtime's per-tensor ``ggml_type`` dispatch
+means the resulting mix (F32 norms, F32 small heads, quantized
+projections) is one file the loader picks up unchanged.
+
+Formats: ``q8_0`` (32 values per block), ``q4_k`` and ``q6_k`` (256 per
+super-block). The encoders are line-by-line ports of ggml's
+``quantize_row_q8_0_ref`` (``utils/gguf.py:213``) and
+``quantize_row_q4_K_ref`` / ``quantize_row_q6_K_ref``
+(``utils/kquants.py``), so the weights decode the way llama.cpp's would.
 
 What cannot be quantized stays F32:
 
-  * The word embedding table `token_embd.weight` and every 1-D tensor
-    (norms, biases). `token_embd` is `[vocab, d]` with a vocab of 128011,
-    and GGUF's Q8_0 byte count keys off the first dim, so a
-    non-32-aligned vocab cannot be Q8_0 in this layout at all. 1-D
-    tensors are read through `load_vec`, which decodes F32 and BF16
-    only. Both are the same trade breeze makes
-    (``convert_breeze.py:286-329``).
-  * A few small output heads in the boundary family land on GGUF dims
-    where at least one axis is not a multiple of 32 — e.g. `compat_mix`
-    (1 output), `inside_weight` (1 output), `length_projection`
-    (3 outputs) on a 768 wide base-v1. Q8_0 blocks every 32 elements
-    along each axis, and `TensorInfo::checked_nbytes` rejects the tensor
-    when an axis is short, so they stay F32.
-
-Everything else crosses, encoder included: `gliner::compute::encode`
-reads the relative-position table and the embedding rows through
-`decode_row`, which accepts the block-quantized embedding types, and the
-per-layer projections already went through `Weight::from_quantized`.
-
-Quantization is line-by-line ggml's ``quantize_row_q8_0_reference``
-(``tools/converter/utils/gguf.py:213``), the same routine the breeze
-converter uses. Weight noise is well under 1% per the doc on
-``quantize_q8_0``; the boundary pipeline absorbs it through
-``ops::kernel::Q8_0``'s dot.
+  * Every 1-D tensor (norms, biases). They are read through ``load_vec``,
+    which decodes F32 and BF16 only.
+  * Tensors whose row width is not a multiple of the block size. The
+    alignment is on ``dims[0]`` alone: GGUF stores a ``[n_out, n_in]``
+    linear as ``[n_in, n_out]``, so the leading dim is the contiguous one
+    the block format walks, and ``TensorInfo::checked_nbytes`` only checks
+    it. ``token_embd`` shows why the distinction matters — its row is 768
+    wide (aligned) while its row count is the 128011-entry vocab (not, and
+    irrelevant). The small boundary heads are the other side of it:
+    ``compat_mix`` (1 wide), ``inside_weight`` (1), ``length_projection``
+    (3) are all under 32 and cannot move at any format here.
 
 Usage::
 
     models/.venv/bin/python -m tools.converter.utils.quantize_gguf \\
         models/gliner2.5-base-v1/gliner2.5-base-v1-f32.gguf \\
-        models/gliner2.5-base-v1/gliner2.5-base-v1-q8_0.gguf
+        models/gliner2.5-base-v1/gliner2.5-base-v1-q4_k.gguf --format q4_k
 """
 from __future__ import annotations
 
@@ -52,25 +45,33 @@ from pathlib import Path
 import numpy as np
 
 from tools.converter.utils.gguf import (
-    GGML_F32, GGML_Q8_0, _read_gguf, GgufWriter, gguf_dims, quantize_q8_0,
+    GGML_F32, GGML_Q4K, GGML_Q6K, GGML_Q8_0, _read_gguf, GgufWriter, gguf_dims,
+    quantize_q8_0,
 )
+from tools.converter.utils.kquants import quantize_k
 
-Q8_0_BLOCK = 32
-#: Tensors the loader reads through an F32-only path even after the encoder
-#: gained block-quantized row decoding. `token_embd` is a `[vocab, d]` table and
-#: GGUF's Q8_0 byte count keys off the *first* dim, so a vocab of 128011 is
-#: never 32-aligned and cannot be Q8_0 in this layout at all — the header
-#: would round its size to zero. Same reason breeze keeps its embeddings at
-#: full precision (``convert_breeze.py:286-329``).
-KEEP_F32_PREFIXES: tuple[str, ...] = ("token_embd.",)
+#: Elements per block, and the GGUF type each format produces.
+BLOCK_FORMATS = {
+    "q8_0": (32, GGML_Q8_0),
+    "q4_k": (256, GGML_Q4K),
+    "q6_k": (256, GGML_Q6K),
+}
+#: Nothing is excluded by name. The alignment rule below is checked against
+#: the row width, not the vocabulary: GGUF stores a `[n_out, n_in]` linear as
+#: `[n_in, n_out]`, so `dims[0]` is the contiguous dim and it is the one that
+#: has to be block-aligned. For `token_embd` that is the 768-wide row, not
+#: the 128011-entry vocab.
+KEEP_F32_PREFIXES: tuple[str, ...] = ()
 
 
-def _pick_target(tensor_name: str, ggml_type: int, dims: tuple[int, ...]) -> int:
+def _pick_target(tensor_name: str, ggml_type: int, dims: tuple[int, ...],
+                 block: int, target: int) -> int:
     """Decide the GGUF tensor type for `tensor_name` in the output file.
 
     See the module docstring for the rules. 1-D tensors are read by the
     loader through ``load_vec``, which decodes F32 and BF16 only, so they
-    stay as they are; the rest crosses to Q8_0 when every axis aligns.
+    stay as they are; the rest crosses to `target` when the row width is
+    block-aligned, and falls back to F32 when it is not.
     """
     if ggml_type != GGML_F32:
         return ggml_type
@@ -78,41 +79,50 @@ def _pick_target(tensor_name: str, ggml_type: int, dims: tuple[int, ...]) -> int
         return GGML_F32
     if len(dims) <= 1:
         return GGML_F32
-    # Q8_0 blocks every 32 elements along each non-leading axis; both the
-    # contiguous dim (GGUF ``dims[0]``) and every other dim must align, or
-    # ``TensorInfo::checked_nbytes`` rejects the tensor outright and the
-    # loader never sees it.
-    for d in dims:
-        if int(d) % Q8_0_BLOCK != 0:
-            return GGML_F32
-    return GGML_Q8_0
+    # Only `dims[0]` has to align. GGUF stores a `[n_out, n_in]` linear as
+    # `[n_in, n_out]`, so the leading dim is the contiguous one and it is
+    # what the block format walks; `dims[1..]` is a row count that
+    # `TensorInfo::checked_nbytes` multiplies through without checking.
+    # `token_embd` is the case that makes this visible: its row is 768 wide
+    # (256-aligned) and its row count is the 128011-entry vocab, which is
+    # neither and does not need to be.
+    if int(dims[0]) % block != 0:
+        return GGML_F32
+    return target
 
 
 def _quantize_one(
     name: str, raw: bytes, source_type: int, dims: tuple[int, ...],
+    target_format: str,
 ) -> tuple[int, bytes]:
     """Return ``(target_ggml_type, payload_bytes)`` for one tensor."""
-    target = _pick_target(name, source_type, dims)
+    block, target_type = BLOCK_FORMATS[target_format]
+    target = _pick_target(name, source_type, dims, block, target_type)
     if target == GGML_F32:
         return target, raw
+    values = np.frombuffer(raw, dtype="<f4")
     if target == GGML_Q8_0:
-        # The Rust kernel decodes Q8_0 from F32 weights in a single pass.
-        # f32-to-f16 scaling is not safe here: the breeze quantizer emits
-        # raw bytes from the fp32 array and treats Q8_0 as a per-block
-        # `f16 scale / int8 payload` over the F32 dynamic range, which is
-        # what `ggml-quants.c` does too.
-        return target, quantize_q8_0(np.frombuffer(raw, dtype="<f4"))
+        # Per-block `f16 scale / int8 payload` over the F32 dynamic range,
+        # which is what `quantize_row_q8_0_ref` in `ggml-quants.c` does.
+        return target, quantize_q8_0(values)
+    if target in (GGML_Q4K, GGML_Q6K):
+        # The k-quant search compares weighted squared errors, so its float
+        # accumulation order is load-bearing: `kquants.py` is a line-by-line
+        # port of `quantize_row_q4_K_ref` / `quantize_row_q6_K_ref` for that
+        # reason, and reordering it here would change which scale wins.
+        return target, quantize_k(target_format, values)
+    raise AssertionError(f"unreachable target {target}")
 
 
 def quantize_gguf(
     source: Path, output: Path, *,
-    target_format: str = "Q8_0",
+    target_format: str = "q8_0",
     progress_every: int = 32,
 ) -> None:
-    if target_format != "Q8_0":
+    if target_format not in BLOCK_FORMATS:
         raise ValueError(
-            f"only Q8_0 is implemented (got {target_format!r}); K-quants need "
-            "their own dispatch and a per-super-block alignment check"
+            f"unknown target format {target_format!r}; "
+            f"expected one of {sorted(BLOCK_FORMATS)}"
         )
     if output.exists():
         raise FileExistsError(output)
@@ -133,7 +143,7 @@ def quantize_gguf(
     for index, (name, value) in enumerate(sorted(tensors.items())):
         source_type, dims, length, offset = value
         raw = _tensor_bytes(source, offset, length)
-        target, payload = _quantize_one(name, raw, source_type, dims)
+        target, payload = _quantize_one(name, raw, source_type, dims, target_format)
         if target != source_type:
             quantised += 1
         else:
@@ -169,8 +179,8 @@ def main() -> None:
     parser.add_argument("source", type=Path, help="F32 GGUF to quantize")
     parser.add_argument("output", type=Path, help="destination GGUF path")
     parser.add_argument(
-        "--format", default="Q8_0",
-        help="target quant format (only Q8_0 is implemented)",
+        "--format", default="q8_0", choices=sorted(BLOCK_FORMATS),
+        help="target quant format (default: q8_0)",
     )
     args = parser.parse_args()
     quantize_gguf(args.source, args.output, target_format=args.format)
