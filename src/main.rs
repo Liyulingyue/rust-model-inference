@@ -153,6 +153,12 @@ fn main() {
             return;
         }
         DispatchMode::Yue2 => {
+            // Same reason as the Z-Image branch below: this returns before the
+            // shared `enable_gpu()`, and the AR session only reaches the Vulkan
+            // backend once the flag is set.
+            if options.gpu {
+                ops::enable_gpu();
+            }
             app::run_or_exit(app::run_yue2_cli(
                 yue2_options.expect("validated YuE2 options"),
                 n_threads,

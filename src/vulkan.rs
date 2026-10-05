@@ -19,6 +19,8 @@ pub(crate) mod qwen3;
 #[cfg(feature = "vulkan")]
 pub(crate) mod qwen35;
 #[cfg(feature = "vulkan")]
+pub(crate) mod yue2;
+#[cfg(feature = "vulkan")]
 mod zimage_probe;
 #[cfg(feature = "vulkan")]
 #[doc(hidden)]

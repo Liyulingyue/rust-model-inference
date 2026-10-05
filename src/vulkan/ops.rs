@@ -289,6 +289,28 @@ impl ArenaLayout {
         )
     }
 
+    /// Arena for the YuE2 autoregressive decoder. YuE2 is a plain dense
+    /// transformer (no MoE, no SSM, no fused QKV), so the region set is
+    /// exactly the Qwen3 one; only the dimensions differ, including a
+    /// 184704-wide logits row for `lm_head`.
+    pub(crate) fn yue2(
+        config: &crate::models::yue2::YuE2Config,
+        capacity: usize,
+        max_rows: usize,
+    ) -> Result<Self, VulkanError> {
+        Self::build_rows(
+            config.hidden,
+            config.ffn,
+            config.q_heads,
+            config.kv_heads,
+            config.head_dim,
+            config.vocab,
+            config.layers,
+            capacity,
+            max_rows,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn build(
         n_embd: usize,

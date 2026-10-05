@@ -15,11 +15,19 @@ use super::protocol::{
     SamplingConfig, YuE2Protocol, ABC_END, CODEC_OFFSET, CODEC_SIZE, EOD, MUSIC_END,
 };
 
-pub(super) struct YuE2Weight {
+pub(crate) struct YuE2Weight {
     fast: Weight<'static>,
     bf16: Option<&'static [u8]>,
     n_in: usize,
     n_out: usize,
+}
+
+impl YuE2Weight {
+    /// The on-disk type, so a device uploader can pick a matching layout
+    /// instead of guessing from the shape.
+    pub(crate) fn ggml_type(&self) -> GGMLType {
+        self.fast.ggml_type
+    }
 }
 
 /// GGML types the YuE2 converter can emit for a 2-D projection.
@@ -398,28 +406,28 @@ pub(super) fn torch_bf16_matmul_rows(
     }
 }
 
-pub(super) struct YuE2AttentionWeights {
-    pub(super) norm: Vec<f32>,
-    pub(super) q_norm: Vec<f32>,
-    pub(super) k_norm: Vec<f32>,
-    pub(super) q: YuE2Weight,
-    pub(super) k: YuE2Weight,
-    pub(super) v: YuE2Weight,
-    pub(super) output: YuE2Weight,
+pub(crate) struct YuE2AttentionWeights {
+    pub(crate) norm: Vec<f32>,
+    pub(crate) q_norm: Vec<f32>,
+    pub(crate) k_norm: Vec<f32>,
+    pub(crate) q: YuE2Weight,
+    pub(crate) k: YuE2Weight,
+    pub(crate) v: YuE2Weight,
+    pub(crate) output: YuE2Weight,
 }
 
-pub(super) struct YuE2MlpWeights {
-    pub(super) norm: Vec<f32>,
-    pub(super) gate: YuE2Weight,
-    pub(super) up: YuE2Weight,
-    pub(super) down: YuE2Weight,
+pub(crate) struct YuE2MlpWeights {
+    pub(crate) norm: Vec<f32>,
+    pub(crate) gate: YuE2Weight,
+    pub(crate) up: YuE2Weight,
+    pub(crate) down: YuE2Weight,
 }
 
-pub(super) struct YuE2LayerWeights {
-    pub(super) ar_attention: YuE2AttentionWeights,
-    pub(super) ar_mlp: YuE2MlpWeights,
-    pub(super) nar_attention: YuE2AttentionWeights,
-    pub(super) nar_mlp: YuE2MlpWeights,
+pub(crate) struct YuE2LayerWeights {
+    pub(crate) ar_attention: YuE2AttentionWeights,
+    pub(crate) ar_mlp: YuE2MlpWeights,
+    pub(crate) nar_attention: YuE2AttentionWeights,
+    pub(crate) nar_mlp: YuE2MlpWeights,
 }
 
 pub(super) struct YuE2AuxWeights {
@@ -457,6 +465,28 @@ impl fmt::Debug for YuE2Model {
 }
 
 impl YuE2Model {
+    /// The tensor source, for consumers that upload weights to another device
+    /// (the Vulkan session does).
+    pub fn tensor_source(&self) -> Option<&Arc<dyn TensorSource>> {
+        self.source.as_ref()
+    }
+
+    /// The AR half of the per-layer weights. The NAR half is deliberately not
+    /// exposed for device upload: it is a diffusion solve that amplifies weight
+    /// noise every step, so its weights have to stay BF16.
+    pub(crate) fn ar_layers(&self) -> &[YuE2LayerWeights] {
+        &self.layers
+    }
+
+    pub(crate) fn ar_final_norm(&self) -> &[f32] {
+        &self.final_norm
+    }
+
+    /// `lm_head.weight`, the only AR projection outside the layer stack.
+    pub(crate) fn ar_lm_head(&self) -> &YuE2Weight {
+        &self.lm_head
+    }
+
     pub fn from_source(
         source: Arc<dyn TensorSource>,
         tokenizer: Arc<BPETokenizer>,
@@ -756,6 +786,58 @@ pub struct YuE2ArSession<'model> {
     q8: Vec<u8>,
     scales: Vec<f32>,
     q8k: Vec<BlockQ8K>,
+    /// Device-side mirror of the AR stack, when the build has Vulkan and the
+    /// weights are eligible. Built lazily on the first prefill; `None` after a
+    /// failed attempt so the fallback is not retried per token.
+    #[cfg(feature = "vulkan")]
+    gpu: Option<Option<crate::vulkan::yue2::YuE2VulkanSession<'model>>>,
+}
+
+/// Run one device chunk for `token_ids`, mirror the K/V deltas into the CPU
+/// shadow cache, and copy the logits back.
+///
+/// Deliberately a free function rather than a method: the caller already holds
+/// a `&mut` to the GPU session, and taking `&mut self` as well would alias.
+#[cfg(feature = "vulkan")]
+fn prefill_on_gpu(
+    model: &YuE2Model,
+    gpu: &mut crate::vulkan::yue2::YuE2VulkanSession<'_>,
+    kv: &mut KvState,
+    logits: &mut [f32],
+    token_ids: &[u32],
+    base: usize,
+) -> Result<(), String> {
+    let config = &model.config;
+    let mut input = vec![0.0f32; token_ids.len() * config.hidden];
+    for (row, &token) in token_ids.iter().enumerate() {
+        model.token_embedding.embedding_lookup(
+            token,
+            &mut input[row * config.hidden..(row + 1) * config.hidden],
+        );
+    }
+    let kv_stride = config.kv_heads * config.head_dim;
+    let result = gpu
+        .forward_chunk(&input, base, token_ids.len())
+        .map_err(|error| error.to_string())?;
+    crate::vulkan::yue2::commit_kv_shadow(
+        &mut kv.cache,
+        base,
+        token_ids.len(),
+        kv.capacity,
+        kv_stride,
+        config.layers,
+        result.k_delta,
+        result.v_delta,
+    )?;
+    if result.logits.len() != logits.len() {
+        return Err(format!(
+            "YuE2 GPU returned {} logits, expected {}",
+            result.logits.len(),
+            logits.len()
+        ));
+    }
+    logits.copy_from_slice(result.logits);
+    Ok(())
 }
 
 impl<'model> YuE2ArSession<'model> {
@@ -807,6 +889,8 @@ impl<'model> YuE2ArSession<'model> {
                 };
                 max_input.div_ceil(256)
             ],
+            #[cfg(feature = "vulkan")]
+            gpu: None,
         })
     }
 
@@ -830,6 +914,49 @@ impl<'model> YuE2ArSession<'model> {
             ));
         }
         validate_token_ids(token_ids, self.model.config.vocab)?;
+        let base = self.kv.seq_len;
+
+        #[cfg(feature = "vulkan")]
+        {
+            // Build the session once; a failed attempt is remembered so the
+            // fallback is not retried on every token.
+            if matches!(self.gpu, Some(None)) {
+                self.gpu = Some(match crate::ops::get_vulkan_context() {
+                    Some(context) => crate::vulkan::yue2::YuE2VulkanSession::try_new(
+                        self.model,
+                        self.kv.capacity,
+                        context,
+                    )
+                    .map_err(|error| error.to_string())?,
+                    None => None,
+                });
+            }
+            if !matches!(self.gpu, Some(None)) {
+                let attempt = self.gpu.get_or_insert(None);
+                if let Some(gpu) = attempt {
+                    let model = self.model;
+                    let kv = &mut self.kv;
+                    let logits = &mut self.logits;
+                    match prefill_on_gpu(model, gpu, kv, logits, token_ids, base) {
+                        Ok(()) => {
+                            self.kv.seq_len = end;
+                            self.kv.update_access();
+                            return Ok(&self.logits);
+                        }
+                        Err(error) => {
+                            eprintln!(
+                                "[GPU] YuE2 AR forward failed ({error}); falling back to CPU."
+                            );
+                            // The device may hold a partial KV shadow, so drop
+                            // it and let the CPU path re-derive every position.
+                            *attempt = None;
+                            self.kv.seq_len = base;
+                        }
+                    }
+                }
+            }
+        }
+
         for (index, &token) in token_ids.iter().enumerate() {
             let position = self.kv.seq_len;
             self.forward_token(token, position, index + 1 == token_ids.len())?;

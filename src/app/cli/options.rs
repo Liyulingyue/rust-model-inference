@@ -67,8 +67,6 @@ pub fn yue2_cli_options(options: &CliOptions) -> Result<Option<YuE2CliOptions>, 
         || options.allow_memory_overcommit
     {
         Some("DreamX flags")
-    } else if options.gpu {
-        Some("--gpu")
     } else if options.bench {
         Some("--bench")
     } else if options.profile {
