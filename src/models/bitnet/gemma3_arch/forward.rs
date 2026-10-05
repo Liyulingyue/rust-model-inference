@@ -26,31 +26,11 @@
 //! [`crate::models::bitnet`].
 
 use super::config::{Gemma3Config, Gemma3Rope};
-use super::weights::{BitLinearWeights, Gemma3LayerWeights, Gemma3Model};
+use super::weights::{Gemma3LayerWeights, Gemma3Model};
 use crate::ops::bitnet::{
-    bitlinear_forward, bitlinear_forward_packed, quantize_activation_per_token,
-    BitLinearWeightsPacked,
+    bitlinear_forward_packed, quantize_activation_per_token, BitLinearWeightsPacked,
 };
 use crate::ops::rope::rope_neox_inplace;
-
-/// BitLinear per-projection: rms_norm → absmax int8 quant →
-/// ternary matmul → rescale. Same scalar reference impl as
-/// `qwen3::trunk::forward::bitlinear_projection` — duplicated
-/// here so the gemma3 trunk doesn't have to reach across.
-fn bitlinear_projection(
-    input: &[f32],
-    proj: &BitLinearWeights,
-    output: &mut [f32],
-    eps: f32,
-) {
-    debug_assert_eq!(input.len(), proj.n_in);
-    debug_assert_eq!(output.len(), proj.n_out);
-    let n_in = proj.n_in;
-    let mut normed = vec![0.0f32; n_in];
-    crate::ops::norm::rms_norm(input, &proj.norm_in, &mut normed, eps);
-    let (x_q, absmax) = quantize_activation_per_token(&normed);
-    bitlinear_forward(&proj.weight, &x_q, absmax, n_in, proj.n_out, output);
-}
 
 /// Per-projection BitLinear, **packed-weight** variant. Mirrors
 /// `qwen3_arch::bitlinear_projection_packed`. Uses the AVX2
@@ -231,7 +211,7 @@ pub fn text_encode(
             let k_off = tok * n_embd_k;
             let v_off = tok * n_embd_v;
             bitlinear_projection_packed(
-                norm_row, layer.bitlinear_packed.attn_q.as_ref().expect(
+                norm_row, layer.bitlinear.attn_q.as_ref().expect(
                     "gemma3 BitNet layer missing attn_q BitLinear slot",
                 ),
                 &mut q_all[q_off..q_off + n_embd_q],
@@ -240,7 +220,7 @@ pub fn text_encode(
             bitlinear_projection_packed(
                 norm_row,
                 layer
-                    .bitlinear_packed
+                    .bitlinear
                     .attn_k
                     .as_ref()
                     .expect("gemma3 BitNet layer missing attn_k BitLinear slot"),
@@ -250,7 +230,7 @@ pub fn text_encode(
             bitlinear_projection_packed(
                 norm_row,
                 layer
-                    .bitlinear_packed
+                    .bitlinear
                     .attn_v
                     .as_ref()
                     .expect("gemma3 BitNet layer missing attn_v BitLinear slot"),
@@ -317,7 +297,7 @@ pub fn text_encode(
             bitlinear_projection_packed(
                 attn_row,
                 layer
-                    .bitlinear_packed
+                    .bitlinear
                     .attn_output
                     .as_ref()
                     .expect("gemma3 BitNet layer missing attn_output BitLinear slot"),
@@ -358,7 +338,7 @@ pub fn text_encode(
             bitlinear_projection_packed(
                 ffn_row,
                 layer
-                    .bitlinear_packed
+                    .bitlinear
                     .ffn_gate
                     .as_ref()
                     .expect("gemma3 BitNet layer missing ffn_gate BitLinear slot"),
@@ -368,7 +348,7 @@ pub fn text_encode(
             bitlinear_projection_packed(
                 ffn_row,
                 layer
-                    .bitlinear_packed
+                    .bitlinear
                     .ffn_up
                     .as_ref()
                     .expect("gemma3 BitNet layer missing ffn_up BitLinear slot"),
@@ -387,7 +367,7 @@ pub fn text_encode(
             bitlinear_projection_packed(
                 act_row,
                 layer
-                    .bitlinear_packed
+                    .bitlinear
                     .ffn_down
                     .as_ref()
                     .expect("gemma3 BitNet layer missing ffn_down BitLinear slot"),

@@ -29,23 +29,7 @@ use crate::core::tensor::{GGMLType, TensorSource};
 use crate::ops::float::{bf16_to_f32, f16_to_f32};
 use crate::ops::kernel::{F16Weight, QuantizedTensor};
 
-pub use crate::ops::bitnet::{BitLinearSlot, BitLinearSlotPacked, BitLinearWeights};
-
-/// Pre-pack a [`BitLinearSlot`]'s seven [`BitLinearWeights`] into a
-/// [`BitLinearSlotPacked`]. Used by `load_layers_static` to populate
-/// the SIMD hot path. Mirrors `qwen3_arch::pack_slot` — duplicated
-/// here so the gemma3 trunk doesn't reach across.
-fn pack_bitlinear_slot(slot: &BitLinearSlot) -> BitLinearSlotPacked {
-    BitLinearSlotPacked {
-        attn_q: slot.attn_q.as_ref().map(|w| w.prepack()),
-        attn_k: slot.attn_k.as_ref().map(|w| w.prepack()),
-        attn_v: slot.attn_v.as_ref().map(|w| w.prepack()),
-        attn_output: slot.attn_output.as_ref().map(|w| w.prepack()),
-        ffn_gate: slot.ffn_gate.as_ref().map(|w| w.prepack()),
-        ffn_up: slot.ffn_up.as_ref().map(|w| w.prepack()),
-        ffn_down: slot.ffn_down.as_ref().map(|w| w.prepack()),
-    }
-}
+pub use crate::ops::bitnet::{BitLinearSlotPacked, BitLinearWeights, BitLinearWeightsPacked};
 pub use crate::ops::kernel::Weight;
 
 use super::config::{Gemma3Config, Gemma3Rope};
@@ -61,16 +45,10 @@ pub struct Gemma3LayerWeights<'a> {
     pub post_ffw_norm: Vec<f32>,
     pub q_norm: Vec<f32>,
     pub k_norm: Vec<f32>,
-    /// Pre-BitLinear RMSNorm gains + I2_S payloads. Always
-    /// `BitLinearSlot::default()` (all slots `None`) for non-BitNet
-    /// gemma3 GGUFs; for the BitNet 270M GGUF every slot is
-    /// `Some(BitLinearWeights)`. The hot forward consumes the
-    /// packed form in `bitlinear_packed`; this field is kept for
-    /// tests / debugging / future fall-back.
-    pub bitlinear: BitLinearSlot,
     /// Pre-dequanted int8 weights — the layout consumed by the
-    /// SIMD hot path (`bitlinear_projection_packed`).
-    pub bitlinear_packed: BitLinearSlotPacked,
+    /// SIMD hot path (`bitlinear_projection_packed`). Packed once
+    /// at model load (no per-call I2_S dequant).
+    pub bitlinear: BitLinearSlotPacked,
     pub _marker: std::marker::PhantomData<&'a ()>,
 }
 
@@ -145,7 +123,7 @@ fn load_bitlinear_slot(
     projection: &str,
     n_in: usize,
     n_out: usize,
-) -> Option<BitLinearWeights> {
+) -> Option<BitLinearWeightsPacked> {
     let norm_name = format!("blk.{layer}.{projection}_norm_in.weight");
     let weight_name = format!("blk.{layer}.{projection}.weight");
     if source.tensor_info(&norm_name).is_none() || source.tensor_info(&weight_name).is_none() {
@@ -168,12 +146,15 @@ fn load_bitlinear_slot(
         bytes.len(),
         expected_bytes
     );
-    Some(BitLinearWeights {
-        norm_in,
-        weight: bytes.to_vec(),
-        n_in,
-        n_out,
-    })
+    Some(
+        BitLinearWeights {
+            norm_in,
+            weight: bytes.to_vec(),
+            n_in,
+            n_out,
+        }
+        .prepack(),
+    )
 }
 
 /// Load all 18 layers of the 270M BitNet gemma3 GGUF (or any
@@ -209,7 +190,7 @@ pub fn load_layers_static(
             let ffn_gate = load_bitlinear_slot(source, i, "ffn_gate", n_embd, n_ff);
             let ffn_up = load_bitlinear_slot(source, i, "ffn_up", n_embd, n_ff);
             let ffn_down = load_bitlinear_slot(source, i, "ffn_down", n_ff, n_embd);
-            let bitlinear = BitLinearSlot {
+            let bitlinear = BitLinearSlotPacked {
                 attn_q,
                 attn_k,
                 attn_v,
@@ -241,7 +222,6 @@ pub fn load_layers_static(
                     &format!("blk.{i}.attn_k_norm.weight"),
                     n_embd_head_k,
                 ),
-                bitlinear_packed: pack_bitlinear_slot(&bitlinear),
                 bitlinear,
                 _marker: std::marker::PhantomData,
             }
