@@ -876,6 +876,31 @@ fn run_audio_embed(
     Ok(())
 }
 
+/// Per-token LayerNorm (mean subtraction + variance scaling). Matches
+/// `LayerNormModule({channels, 1e-6F, false, false})` from audio.cpp -- no
+/// elementwise affine, no bias. Output is unit-variance, zero-mean.
+fn layer_norm_token(input: &[f32], normalized: &mut [f32]) {
+    let len = input.len().min(normalized.len());
+    if len == 0 {
+        return;
+    }
+    let mut sum = 0.0_f32;
+    for v in &input[..len] {
+        sum += *v;
+    }
+    let mean = sum / len as f32;
+    let mut var_sum = 0.0_f32;
+    for v in &input[..len] {
+        let d = *v - mean;
+        var_sum += d * d;
+    }
+    let variance = var_sum / len as f32;
+    let std_recip = 1.0 / (variance + 1e-6).sqrt();
+    for d in 0..len {
+        normalized[d] = (input[d] - mean) * std_recip;
+    }
+}
+
 fn rms_norm_inplace_text(
     hidden: &mut [f32],
     weight: &[f32],
@@ -1240,21 +1265,29 @@ fn ada_ln_qkv(
     let _gate_mlp = &ada_params[5 * HIDDEN..6 * HIDDEN];
     let _ = gate_msa;
 
-    // RMSNorm per token.
+    // LayerNorm per token (audio.cpp uses LayerNormModule -- mean subtraction, not
+    // RMSNorm). The Flux2Edit AdaLN path then modulates (1+scale)*normalized + shift.
     for token in 0..tokens {
         let row = row_range.start + token;
         let off = row * HIDDEN;
         let slice = &joint[off..off + HIDDEN];
-        let mut mean_sq = 0.0_f32;
+        // Compute mean.
+        let mut sum = 0.0_f32;
         for v in slice.iter() {
-            mean_sq += *v * *v;
+            sum += *v;
         }
-        let scale = 1.0 / (mean_sq / HIDDEN as f32 + 1e-6).sqrt();
+        let mean = sum / HIDDEN as f32;
+        // Compute variance.
+        let mut var_sum = 0.0_f32;
+        for v in slice.iter() {
+            let d = *v - mean;
+            var_sum += d * d;
+        }
+        let variance = var_sum / HIDDEN as f32;
+        let std_recip = 1.0 / (variance + 1e-6).sqrt();
         let n_off = token * HIDDEN;
         for d in 0..HIDDEN {
-            // No learnable rms_norm weight for the block; Flux2Edit AdaLN path
-            // uses scale_modulation = 1 + scale_msa (so unit norm at scale=0).
-            normed[n_off + d] = slice[d] * scale;
+            normed[n_off + d] = (slice[d] - mean) * std_recip;
         }
     }
 
@@ -1385,14 +1418,7 @@ fn stream_block_residual_mlp(
         let row = row_range.start + token;
         let off = row * HIDDEN;
         let slice = &joint[off..off + HIDDEN];
-        let mut mean_sq = 0.0_f32;
-        for v in slice.iter() {
-            mean_sq += *v * *v;
-        }
-        let scale = 1.0 / (mean_sq / HIDDEN as f32 + 1e-6).sqrt();
-        for d in 0..HIDDEN {
-            normed_token[d] = slice[d] * scale;
-        }
+        layer_norm_token(slice, &mut normed_token);
         // Modulate.
         for d in 0..HIDDEN {
             let v = normed_token[d];
@@ -1497,19 +1523,12 @@ fn run_single_block(
     let scale_mlp = &modulation[4 * HIDDEN..5 * HIDDEN];
     let gate_mlp = &modulation[5 * HIDDEN..6 * HIDDEN];
 
-    // Per-token RMSNorm + AdaLN modulation + QKV projection.
+    // Per-token LayerNorm + AdaLN modulation + QKV projection.
     for token in 0..total {
         let off = token * HIDDEN;
         let slice = &joint[off..off + HIDDEN];
-        let mut mean_sq = 0.0_f32;
-        for v in slice.iter() {
-            mean_sq += *v * *v;
-        }
-        let scale = 1.0 / (mean_sq / HIDDEN as f32 + 1e-6).sqrt();
         let mut normed_token = vec![0.0_f32; HIDDEN];
-        for d in 0..HIDDEN {
-            normed_token[d] = slice[d] * scale;
-        }
+        layer_norm_token(slice, &mut normed_token);
         for d in 0..HIDDEN {
             normed_token[d] = normed_token[d] * (1.0 + scale_msa[d]) + shift_msa[d];
         }
@@ -1603,14 +1622,7 @@ fn run_single_block(
         }
         // MLP
         let slice = &joint[off..off + HIDDEN];
-        let mut mean_sq = 0.0_f32;
-        for v in slice.iter() {
-            mean_sq += *v * *v;
-        }
-        let scale = 1.0 / (mean_sq / HIDDEN as f32 + 1e-6).sqrt();
-        for d in 0..HIDDEN {
-            normed_token[d] = slice[d] * scale;
-        }
+        layer_norm_token(slice, &mut normed_token);
         for d in 0..HIDDEN {
             let v = normed_token[d];
             normed_token[d] = v * (1.0 + scale_mlp[d]) + shift_mlp[d];
