@@ -43,6 +43,56 @@ pub struct BitLinearWeights {
     pub n_out: usize,
 }
 
+impl BitLinearWeights {
+    /// Pre-pack the I2_S weight matrix into a flat int8 buffer of
+    /// length `n_in × n_out` (row-major: row `j` at offset
+    /// `j * n_in`), with each byte holding the corresponding
+    /// ternary value in `{-1, 0, +1}`. This is the layout that the
+    /// AVX2 SIMD kernel in [`crate::ops::bitnet::forward_avx2`]
+    /// consumes directly — calling
+    /// [`crate::ops::bitnet::bitlinear_forward_packed`] with the
+    /// result skips the per-call dequant-to-int8 walk entirely.
+    ///
+    /// One-time cost on model load (every projection is pre-packed
+    /// exactly once); saves a per-forward dequant pass for every
+    /// subsequent forward call. For the 0.6B model with 28 layers
+    /// × 7 projections = 196 calls, the pre-pack amortizes over
+    /// every forward call in the inference loop.
+    ///
+    /// See [`BitLinearWeightsPacked`] for the consumer side.
+    pub fn prepack(&self) -> BitLinearWeightsPacked {
+        let mut weight_i8 = vec![0i8; self.n_in * self.n_out];
+        crate::ops::bitnet::forward_avx2::dequant_i2_s_to_i8(
+            &self.weight,
+            self.n_in,
+            self.n_out,
+            &mut weight_i8,
+        );
+        BitLinearWeightsPacked {
+            norm_in: self.norm_in.clone(),
+            weight_i8,
+            n_in: self.n_in,
+            n_out: self.n_out,
+        }
+    }
+}
+
+/// Same shape as [`BitLinearWeights`] but with the weight matrix
+/// pre-dequanted to `{-1, 0, +1}` int8 — the layout that
+/// [`crate::ops::bitnet::bitlinear_forward_packed`] and
+/// [`crate::ops::bitnet::forward_avx2::bitlinear_forward_avx2_packed`]
+/// consume directly. Produced via [`BitLinearWeights::prepack`]
+/// during model load to skip the per-forward dequant walk.
+#[derive(Debug, Clone)]
+pub struct BitLinearWeightsPacked {
+    pub norm_in: Vec<f32>,
+    /// Row-major int8 weights of length `n_in × n_out`. Row `j`
+    /// occupies indices `[j * n_in, (j + 1) * n_in)`.
+    pub weight_i8: Vec<i8>,
+    pub n_in: usize,
+    pub n_out: usize,
+}
+
 /// The seven BitLinear projection slots per decoder layer
 /// (attn_q/k/v/output + ffn_gate/up/down).
 #[derive(Debug, Clone, Default)]
@@ -54,4 +104,18 @@ pub struct BitLinearSlot {
     pub ffn_gate: Option<BitLinearWeights>,
     pub ffn_up: Option<BitLinearWeights>,
     pub ffn_down: Option<BitLinearWeights>,
+}
+
+/// The seven BitLinear projection slots per decoder layer, with weights
+/// pre-dequanted to int8 via [`BitLinearWeights::prepack`]. Drop-in
+/// replacement for [`BitLinearSlot`] in the forward hot path.
+#[derive(Debug, Clone, Default)]
+pub struct BitLinearSlotPacked {
+    pub attn_q: Option<BitLinearWeightsPacked>,
+    pub attn_k: Option<BitLinearWeightsPacked>,
+    pub attn_v: Option<BitLinearWeightsPacked>,
+    pub attn_output: Option<BitLinearWeightsPacked>,
+    pub ffn_gate: Option<BitLinearWeightsPacked>,
+    pub ffn_up: Option<BitLinearWeightsPacked>,
+    pub ffn_down: Option<BitLinearWeightsPacked>,
 }

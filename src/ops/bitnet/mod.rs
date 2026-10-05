@@ -45,7 +45,7 @@ pub mod forward_avx2;
 pub mod slot;
 
 pub use forward::{
-    bitlinear_forward, bitlinear_forward_from_f32, bitlinear_forward_scalar,
-    quantize_activation_per_token,
+    bitlinear_forward, bitlinear_forward_from_f32, bitlinear_forward_packed,
+    bitlinear_forward_scalar, quantize_activation_per_token,
 };
-pub use slot::{BitLinearSlot, BitLinearWeights};
+pub use slot::{BitLinearSlot, BitLinearSlotPacked, BitLinearWeights, BitLinearWeightsPacked};

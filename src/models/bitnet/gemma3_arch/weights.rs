@@ -29,7 +29,23 @@ use crate::core::tensor::{GGMLType, TensorSource};
 use crate::ops::float::{bf16_to_f32, f16_to_f32};
 use crate::ops::kernel::{F16Weight, QuantizedTensor};
 
-pub use crate::ops::bitnet::{BitLinearSlot, BitLinearWeights};
+pub use crate::ops::bitnet::{BitLinearSlot, BitLinearSlotPacked, BitLinearWeights};
+
+/// Pre-pack a [`BitLinearSlot`]'s seven [`BitLinearWeights`] into a
+/// [`BitLinearSlotPacked`]. Used by `load_layers_static` to populate
+/// the SIMD hot path. Mirrors `qwen3_arch::pack_slot` — duplicated
+/// here so the gemma3 trunk doesn't reach across.
+fn pack_bitlinear_slot(slot: &BitLinearSlot) -> BitLinearSlotPacked {
+    BitLinearSlotPacked {
+        attn_q: slot.attn_q.as_ref().map(|w| w.prepack()),
+        attn_k: slot.attn_k.as_ref().map(|w| w.prepack()),
+        attn_v: slot.attn_v.as_ref().map(|w| w.prepack()),
+        attn_output: slot.attn_output.as_ref().map(|w| w.prepack()),
+        ffn_gate: slot.ffn_gate.as_ref().map(|w| w.prepack()),
+        ffn_up: slot.ffn_up.as_ref().map(|w| w.prepack()),
+        ffn_down: slot.ffn_down.as_ref().map(|w| w.prepack()),
+    }
+}
 pub use crate::ops::kernel::Weight;
 
 use super::config::{Gemma3Config, Gemma3Rope};
@@ -48,8 +64,13 @@ pub struct Gemma3LayerWeights<'a> {
     /// Pre-BitLinear RMSNorm gains + I2_S payloads. Always
     /// `BitLinearSlot::default()` (all slots `None`) for non-BitNet
     /// gemma3 GGUFs; for the BitNet 270M GGUF every slot is
-    /// `Some(BitLinearWeights)`.
+    /// `Some(BitLinearWeights)`. The hot forward consumes the
+    /// packed form in `bitlinear_packed`; this field is kept for
+    /// tests / debugging / future fall-back.
     pub bitlinear: BitLinearSlot,
+    /// Pre-dequanted int8 weights — the layout consumed by the
+    /// SIMD hot path (`bitlinear_projection_packed`).
+    pub bitlinear_packed: BitLinearSlotPacked,
     pub _marker: std::marker::PhantomData<&'a ()>,
 }
 
@@ -220,6 +241,7 @@ pub fn load_layers_static(
                     &format!("blk.{i}.attn_k_norm.weight"),
                     n_embd_head_k,
                 ),
+                bitlinear_packed: pack_bitlinear_slot(&bitlinear),
                 bitlinear,
                 _marker: std::marker::PhantomData,
             }

@@ -27,7 +27,10 @@
 
 use super::config::{Gemma3Config, Gemma3Rope};
 use super::weights::{BitLinearWeights, Gemma3LayerWeights, Gemma3Model};
-use crate::ops::bitnet::{bitlinear_forward, quantize_activation_per_token};
+use crate::ops::bitnet::{
+    bitlinear_forward, bitlinear_forward_packed, quantize_activation_per_token,
+    BitLinearWeightsPacked,
+};
 use crate::ops::rope::rope_neox_inplace;
 
 /// BitLinear per-projection: rms_norm → absmax int8 quant →
@@ -47,6 +50,24 @@ fn bitlinear_projection(
     crate::ops::norm::rms_norm(input, &proj.norm_in, &mut normed, eps);
     let (x_q, absmax) = quantize_activation_per_token(&normed);
     bitlinear_forward(&proj.weight, &x_q, absmax, n_in, proj.n_out, output);
+}
+
+/// Per-projection BitLinear, **packed-weight** variant. Mirrors
+/// `qwen3_arch::bitlinear_projection_packed`. Uses the AVX2
+/// SIMD kernel via [`bitlinear_forward_packed`].
+fn bitlinear_projection_packed(
+    input: &[f32],
+    proj: &BitLinearWeightsPacked,
+    output: &mut [f32],
+    eps: f32,
+) {
+    debug_assert_eq!(input.len(), proj.n_in);
+    debug_assert_eq!(output.len(), proj.n_out);
+    let n_in = proj.n_in;
+    let mut normed = vec![0.0f32; n_in];
+    crate::ops::norm::rms_norm(input, &proj.norm_in, &mut normed, eps);
+    let (x_q, absmax) = quantize_activation_per_token(&normed);
+    bitlinear_forward_packed(&proj.weight_i8, &x_q, absmax, n_in, proj.n_out, output);
 }
 
 /// Per-head RMSNorm applied to Q (and K) before RoPE.
@@ -209,28 +230,27 @@ pub fn text_encode(
             let q_off = tok * n_embd_q;
             let k_off = tok * n_embd_k;
             let v_off = tok * n_embd_v;
-            bitlinear_projection(
-                norm_row,
-                layer.bitlinear.attn_q.as_ref().expect(
+            bitlinear_projection_packed(
+                norm_row, layer.bitlinear_packed.attn_q.as_ref().expect(
                     "gemma3 BitNet layer missing attn_q BitLinear slot",
                 ),
                 &mut q_all[q_off..q_off + n_embd_q],
                 cfg.eps,
             );
-            bitlinear_projection(
+            bitlinear_projection_packed(
                 norm_row,
                 layer
-                    .bitlinear
+                    .bitlinear_packed
                     .attn_k
                     .as_ref()
                     .expect("gemma3 BitNet layer missing attn_k BitLinear slot"),
                 &mut k_all[k_off..k_off + n_embd_k],
                 cfg.eps,
             );
-            bitlinear_projection(
+            bitlinear_projection_packed(
                 norm_row,
                 layer
-                    .bitlinear
+                    .bitlinear_packed
                     .attn_v
                     .as_ref()
                     .expect("gemma3 BitNet layer missing attn_v BitLinear slot"),
@@ -294,10 +314,10 @@ pub fn text_encode(
         let mut attn_proj_out = vec![0.0f32; n_tokens * cfg.n_embd];
         for tok in 0..n_tokens {
             let attn_row = &attn_out[tok * n_attn..tok * n_attn + n_attn];
-            bitlinear_projection(
+            bitlinear_projection_packed(
                 attn_row,
                 layer
-                    .bitlinear
+                    .bitlinear_packed
                     .attn_output
                     .as_ref()
                     .expect("gemma3 BitNet layer missing attn_output BitLinear slot"),
@@ -335,20 +355,20 @@ pub fn text_encode(
         let mut up_buf = vec![0.0f32; n_tokens * cfg.n_ff];
         for tok in 0..n_tokens {
             let ffn_row = &ffn_normed[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd];
-            bitlinear_projection(
+            bitlinear_projection_packed(
                 ffn_row,
                 layer
-                    .bitlinear
+                    .bitlinear_packed
                     .ffn_gate
                     .as_ref()
                     .expect("gemma3 BitNet layer missing ffn_gate BitLinear slot"),
                 &mut gate_buf[tok * cfg.n_ff..(tok + 1) * cfg.n_ff],
                 cfg.eps,
             );
-            bitlinear_projection(
+            bitlinear_projection_packed(
                 ffn_row,
                 layer
-                    .bitlinear
+                    .bitlinear_packed
                     .ffn_up
                     .as_ref()
                     .expect("gemma3 BitNet layer missing ffn_up BitLinear slot"),
@@ -364,10 +384,10 @@ pub fn text_encode(
         let mut ffn_out = vec![0.0f32; n_tokens * cfg.n_embd];
         for tok in 0..n_tokens {
             let act_row = &gate_buf[tok * cfg.n_ff..(tok + 1) * cfg.n_ff];
-            bitlinear_projection(
+            bitlinear_projection_packed(
                 act_row,
                 layer
-                    .bitlinear
+                    .bitlinear_packed
                     .ffn_down
                     .as_ref()
                     .expect("gemma3 BitNet layer missing ffn_down BitLinear slot"),

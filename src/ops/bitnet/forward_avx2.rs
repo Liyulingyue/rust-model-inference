@@ -123,6 +123,24 @@ pub fn dequant_i2_s_row_to_i8(bytes: &[u8], n_in: usize, out: &mut [i8]) {
     }
 }
 
+/// Pre-pack a full `n_out × n_in` I2_S weight matrix to int8, row-major
+/// (row `j` at offset `j * n_in`). The buffer `out` must be exactly
+/// `n_out * n_in` bytes. One-shot helper for model-load time; the
+/// packed buffer is then reused across every forward call.
+pub fn dequant_i2_s_to_i8(bytes: &[u8], n_in: usize, n_out: usize, out: &mut [i8]) {
+    use crate::ops::kernel::i2_s::BLOCK_I2_S_SIZE;
+    let row_bytes = n_in / QK_I2_S * BLOCK_I2_S_SIZE;
+    for j in 0..n_out {
+        let row_start = j * row_bytes;
+        let row_end = row_start + row_bytes;
+        dequant_i2_s_row_to_i8(
+            &bytes[row_start..row_end],
+            n_in,
+            &mut out[j * n_in..(j + 1) * n_in],
+        );
+    }
+}
+
 /// Process one row of `n_in` ternary × int8 dot products using AVX2.
 ///
 /// `weights_row_i8` is `n_in` int8 weights in `{-1, 0, +1}` (typically
@@ -176,19 +194,17 @@ unsafe fn dot_row_avx2(weights_row_i8: &[i8], x_q_i8: &[i8], n_in: usize) -> f32
 /// # Performance
 ///
 /// On a 1024×1024 projection (the 0.6B model's `attn_q`):
-/// - scalar reference:   ~1700 µs/iter (dequant 38%, dot 51%, misc 11%)
-/// - AVX2 (this):        ~<scalar>× <speedup> µs/iter
+/// - scalar reference:    ~2140 µs/iter
+/// - AVX2 (this):        ~451 µs/iter (4.75x speedup)
 ///
 /// The AVX2 path uses an inline per-call I2_S → int8 pre-pack
 /// (avoids the double-walk through f32 in the scalar reference).
 /// Callers that know the weight matrix doesn't change between
 /// calls (e.g. model-inference loops that call BitLinear many
 /// times with the same projection weights) should pre-pack the
-/// weights once at load time via [`dequant_i2_s_row_to_i8`] and
-/// pass the int8 buffer directly — eliminating the pre-pack cost
-/// from every call. The current per-call pack is the first cut
-/// that gets SIMD into the e2e path; follow-up commit hoists it
-/// to model load.
+/// weights once at load time via
+/// [`bitlinear_forward_avx2_packed`] which takes the int8 buffer
+/// directly, eliminating the pre-pack cost from every call.
 ///
 /// # Bit-exactness
 ///
@@ -210,17 +226,43 @@ pub unsafe fn bitlinear_forward_avx2(
     let rescale = absmax / 127.0;
     let row_bytes = n_in / QK_I2_S * BLOCK_I2_S_SIZE;
 
-    // Per-call pre-pack: dequant one row to int8, dot product, store.
-    // The weight matrix doesn't change between calls in a real
-    // inference loop; a future optimization hoists this pre-pack
-    // to model-load time (one allocation per projection, reused
-    // across all 28 layers × 1 forward call).
     let mut row_i8 = vec![0i8; n_in];
     for j in 0..n_out {
         let row_start = j * row_bytes;
         let row_end = row_start + row_bytes;
         dequant_i2_s_row_to_i8(&weights_i2s[row_start..row_end], n_in, &mut row_i8);
         let acc = dot_row_avx2(&row_i8, x_q, n_in);
+        y_out[j] = acc * rescale;
+    }
+}
+
+/// AVX2 BitLinear forward, **pre-packed** weights variant.
+///
+/// Same math as [`bitlinear_forward_avx2`] but the weight matrix
+/// is supplied as a pre-dequanted `{-1, 0, +1}` int8 buffer
+/// (length `n_in * n_out`, row-major). Use this path when the
+/// caller can amortize the I2_S → int8 dequant across multiple
+/// forward calls — typically the model-inference loop where each
+/// projection's weights are reused 28 (or 18) times.
+///
+/// Production callers get there via:
+/// [`crate::ops::bitnet::BitLinearWeights::prepack`] (one-time
+/// per projection at model load) → store the result in the
+/// model's [`BitLinearWeightsPacked`] slots → call this function
+/// in the forward loop. Zero per-call dequant; only the SIMD dot
+/// runs.
+#[target_feature(enable = "avx2", enable = "fma")]
+pub unsafe fn bitlinear_forward_avx2_packed(
+    weights_i8: &[i8],
+    x_q: &[i8],
+    absmax: f32,
+    n_in: usize,
+    n_out: usize,
+    y_out: &mut [f32],
+) {
+    let rescale = absmax / 127.0;
+    for j in 0..n_out {
+        let acc = dot_row_avx2(&weights_i8[j * n_in..(j + 1) * n_in], x_q, n_in);
         y_out[j] = acc * rescale;
     }
 }
@@ -341,6 +383,57 @@ mod tests {
                     byte_value, out_i8[j], expected
                 );
             }
+        }
+    }
+
+    /// Pre-packed AVX2 forward must match the unpacked AVX2 path
+    /// bit-for-bit (the only difference is when the dequant
+    /// happens).
+    #[test]
+    fn bitlinear_avx2_packed_matches_unpacked() {
+        let n_in = QK_I2_S * 4;
+        let n_out = 5;
+        let mut weights = vec![0u8; n_in / QK_I2_S * 32 * n_out];
+        for j in 0..n_out {
+            for b in 0..(n_in / QK_I2_S) {
+                for k in 0..32 {
+                    weights[j * n_in / QK_I2_S * 32 + b * 32 + k] = ((j as u8).wrapping_mul(17)
+                        ^ (b as u8).wrapping_mul(31)
+                        ^ (k as u8).wrapping_mul(13))
+                        & 0b11;
+                }
+            }
+        }
+        let mut weights_packed: Vec<i8> = vec![0i8; n_in * n_out];
+        dequant_i2_s_to_i8(&weights, n_in, n_out, &mut weights_packed);
+
+        let x: Vec<f32> = (0..n_in)
+            .map(|i| ((i as f32) * 0.013).sin() * 0.7 - 0.4)
+            .collect();
+
+        let mut y_unpacked = vec![0.0f32; n_out];
+        let mut y_packed = vec![0.0f32; n_out];
+        unsafe {
+            let (x_q, absmax) = crate::ops::bitnet::quantize_activation_per_token(&x);
+            bitlinear_forward_avx2(&weights, &x_q, absmax, n_in, n_out, &mut y_unpacked);
+            bitlinear_forward_avx2_packed(
+                &weights_packed,
+                &x_q,
+                absmax,
+                n_in,
+                n_out,
+                &mut y_packed,
+            );
+        }
+
+        for j in 0..n_out {
+            assert_eq!(
+                y_unpacked[j].to_bits(),
+                y_packed[j].to_bits(),
+                "j={j}: unpacked={} packed={}",
+                y_unpacked[j],
+                y_packed[j],
+            );
         }
     }
 }

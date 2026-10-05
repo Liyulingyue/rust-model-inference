@@ -201,6 +201,72 @@ pub fn bitlinear_forward_from_f32(
     bitlinear_forward(weights_i2s, &x_q, absmax, n_in, n_out, y_out);
 }
 
+/// BitLinear forward, **pre-packed** weight variant.
+///
+/// `weights_i8` is the pre-dequanted int8 weight matrix
+/// (length `n_out * n_in`, row-major) produced by
+/// [`crate::ops::bitnet::BitLinearWeights::prepack`]. Skips the
+/// per-call I2_S dequant walk entirely.
+///
+/// On AVX2+FMA hosts the inner dot is vectorized with
+/// `_mm256_madd_epi16` (same SIMD kernel as the unpacked path,
+/// just with the dequant hoisted out of the inner loop). The two
+/// paths produce **bit-exact identical outputs** for any input
+/// pair (the dequant helper is the same scalar implementation
+/// used in both, just called at different times).
+pub fn bitlinear_forward_packed(
+    weights_i8: &[i8],
+    x_q: &[i8],
+    absmax: f32,
+    n_in: usize,
+    n_out: usize,
+    y_out: &mut [f32],
+) {
+    assert_eq!(y_out.len(), n_out);
+    assert_eq!(x_q.len(), n_in);
+    assert_eq!(
+        weights_i8.len(),
+        n_in * n_out,
+        "packed weight size mismatch: have {}, expected {}",
+        weights_i8.len(),
+        n_in * n_out,
+    );
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        if crate::ops::has_avx2_fma() {
+            unsafe {
+                crate::ops::bitnet::forward_avx2::bitlinear_forward_avx2_packed(
+                    weights_i8, x_q, absmax, n_in, n_out, y_out,
+                );
+            }
+            return;
+        }
+    }
+
+    bitlinear_forward_packed_scalar(weights_i8, x_q, absmax, n_in, n_out, y_out);
+}
+
+/// Scalar reference for the pre-packed path (same math, no SIMD).
+fn bitlinear_forward_packed_scalar(
+    weights_i8: &[i8],
+    x_q: &[i8],
+    absmax: f32,
+    n_in: usize,
+    n_out: usize,
+    y_out: &mut [f32],
+) {
+    let rescale = absmax / 127.0;
+    for j in 0..n_out {
+        let row = &weights_i8[j * n_in..(j + 1) * n_in];
+        let mut acc: i32 = 0;
+        for i in 0..n_in {
+            acc += (row[i] as i32) * (x_q[i] as i32);
+        }
+        y_out[j] = (acc as f32) * rescale;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
