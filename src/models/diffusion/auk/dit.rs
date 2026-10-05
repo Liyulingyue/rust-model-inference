@@ -253,11 +253,19 @@ impl AukDit {
         }
         let steps = options.steps;
         let mut velocity = vec![0.0_f32; latent_values];
+        let mut uncond_velocity = vec![0.0_f32; latent_values];
         let mut scratch = AukScratch::new(text_tokens, latent_time)?;
+        // Pre-build the unconditional text conditioning buffer (all zeros,
+        // same shape as the encoded prompt). This avoids running the text
+        // encoder twice for the CFG unconditional pass.
+        let uncond_text = vec![0.0_f32; text_tokens * TEXT_IN];
+        let guidance_scale = options.guidance_scale;
+        let do_cfg = guidance_scale > 1.0;
         for step in 0..steps {
             let sigma = 1.0 - step as f32 / steps as f32;
             let sigma_next = 1.0 - (step + 1) as f32 / steps as f32;
-            self.predict_flow(
+            // Conditional forward.
+            self.predict_velocity_inner(
                 &mut latent,
                 latent_time,
                 text_conditioning,
@@ -265,8 +273,28 @@ impl AukDit {
                 sigma,
                 &mut scratch,
                 &mut velocity,
-                options.guidance_scale,
+                1.0,
             )?;
+            // Unconditional forward (zero text conditioning) -- only when CFG
+            // is enabled (guidance_scale > 1.0). Skip the second pass
+            // otherwise; velocity already is the conditional prediction.
+            if do_cfg {
+                self.predict_velocity_inner(
+                    &mut latent,
+                    latent_time,
+                    &uncond_text,
+                    text_tokens,
+                    sigma,
+                    &mut scratch,
+                    &mut uncond_velocity,
+                    1.0,
+                )?;
+                // guided = uncond + scale * (cond - uncond)
+                for i in 0..velocity.len() {
+                    velocity[i] =
+                        uncond_velocity[i] + guidance_scale * (velocity[i] - uncond_velocity[i]);
+                }
+            }
             // Clip velocity to a sane range to prevent NaN propagation when
             // the block forward produces anomalously large outputs (the
             // DiffusionFlow model is trained for small v magnitudes; the
@@ -286,7 +314,7 @@ impl AukDit {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn predict_flow(
+    fn predict_velocity_inner(
         &self,
         latent: &mut [f32],
         latent_time: usize,
@@ -297,8 +325,7 @@ impl AukDit {
         velocity: &mut [f32],
         guidance_scale: f32,
     ) -> Result<(), String> {
-        let _ = guidance_scale; // CFG wired in a follow-up commit.
-        let _ = text_conditioning;
+        let _ = sigma;
         if !sigma.is_finite() || !(0.0..=1.0).contains(&sigma) {
             return Err("AuK sigma must be finite and within [0, 1]".into());
         }
