@@ -148,73 +148,67 @@ impl BigVGANFlowVae {
             latent_time,
         )?;
 
-        // 6 upsample stages. Each doubles the time axis and reduces channels.
+        // 6 upsample stages. Each reduces channels by 2x (input is current stage's
+        // in_channels, weight has [kernel, out_ch, in_ch] = [kernel, current
+        // stage's channels, previous stage's channels]). audio.cpp interprets
+        // the conv as a ConvTranspose1d with stride=2 for time upsampling,
+        // but we collapse the upsample via 2x linear interpolation + a regular
+        // Conv1d at the upsampled rate (this loses the FIR shape but produces
+        // finite audio).
         for stage in 0..UPSAMPLE_STAGES {
             let in_ch = if stage == 0 { HIDDEN } else { STAGE_CHANNELS[stage - 1] };
             let out_ch = STAGE_CHANNELS[stage];
             let kernel = STAGE_KERNELS[stage];
-            // The upsample conv kernel is [kernel, in_ch, out_ch * 2]. Output
-            // is structured as [out_ch, frames_out] where each channel has a
-            // paired-odd/even-tap folded form. audio.cpp does a transpose FIR
-            // + SnakeBeta + depthwise conv; we approximate with a 1D conv
-            // that maps in_ch -> out_ch directly at the upsampled rate.
-            // Approximation: zero-pad pre, then conv with kernel=kernel.
+            // 2x upsample via linear interpolation in time.
             let frames = pre.len() / in_ch;
-            let upsample = 2usize;
-            let out_frames = frames * upsample;
-            // Pad input on both sides so kernel center aligns.
-            let pad = kernel / 2;
-            let mut padded = vec![0.0_f32; in_ch * (frames + 2 * pad)];
+            let out_frames = frames * 2;
+            let mut upsampled = vec![0.0_f32; in_ch * out_frames];
             for c in 0..in_ch {
                 for t in 0..frames {
-                    padded[c * (frames + 2 * pad) + pad + t] = pre[c * frames + t];
+                    upsampled[c * out_frames + 2 * t] = pre[c * frames + t];
+                    let next = if t + 1 < frames { pre[c * frames + t + 1] } else { pre[c * frames + t] };
+                    upsampled[c * out_frames + 2 * t + 1] = (pre[c * frames + t] + next) * 0.5;
                 }
             }
-            // Conv to [out_ch * 2, frames + 2*pad] then average the two
-            // channel halves to collapse phases -> [out_ch, frames].
-            let mut upsampled = vec![0.0_f32; 2 * out_ch * (frames + 2 * pad)];
+            // Conv1d with the actual weight, padding so output is out_frames.
+            let pad = kernel / 2;
+            let padded_frames = out_frames + 2 * pad;
+            let mut padded = vec![0.0_f32; in_ch * padded_frames];
+            for c in 0..in_ch {
+                for t in 0..out_frames {
+                    padded[c * padded_frames + pad + t] = upsampled[c * out_frames + t];
+                }
+            }
+            let mut stage_buf = vec![0.0_f32; out_ch * padded_frames];
             conv1d_into(
                 &padded,
                 in_ch,
-                2 * out_ch,
+                out_ch,
                 kernel,
                 &self.ups_weight[stage],
                 Some(&self.ups_bias[stage]),
-                0,
-                in_ch,
-                frames + 2 * pad,
-                &mut upsampled,
+                pad,
+                padded_frames,
+                padded_frames,
+                &mut stage_buf,
             )?;
-            // Collapse: take channels [c, c+out_ch] and average.
-            let mut collapsed = vec![0.0_f32; out_ch * (frames + 2 * pad)];
+            // Crop the center padded_frames -> out_frames (drop pad samples).
+            let mut cropped = vec![0.0_f32; out_ch * out_frames];
             for c in 0..out_ch {
-                for t in 0..(frames + 2 * pad) {
-                    collapsed[c * (frames + 2 * pad) + t] =
-                        (upsampled[c * (frames + 2 * pad) + t]
-                            + upsampled[(c + out_ch) * (frames + 2 * pad) + t])
-                            * 0.5;
+                for t in 0..out_frames {
+                    cropped[c * out_frames + t] = stage_buf[c * padded_frames + pad + t];
                 }
             }
             // SnakeBeta activation per channel (with identity alpha/beta).
             for c in 0..out_ch {
-                for t in 0..(frames + 2 * pad) {
-                    let v = collapsed[c * (frames + 2 * pad) + t];
-                    collapsed[c * (frames + 2 * pad) + t] =
+                for t in 0..out_frames {
+                    let v = cropped[c * out_frames + t];
+                    cropped[c * out_frames + t] =
                         snake_beta(v, self.ups_snake_alpha[stage][c], self.ups_snake_beta[stage][c]);
                 }
             }
-            // Subsample 2x -> out_frames. Since the kernel is twice the input
-            // time-shift stride (a property of the original transpose-FIR),
-            // we read every other frame.
-            let _ = (out_frames, pad);
-            let mut stage_buf = vec![0.0_f32; out_ch * frames];
-            for c in 0..out_ch {
-                for t in 0..frames {
-                    stage_buf[c * frames + t] = collapsed[c * (frames + 2 * pad) + 2 * t + pad];
-                }
-            }
-            pre = stage_buf;
-            let _ = (out_ch, frames);
+            pre = cropped;
+            let _ = (out_ch, frames, pad);
         }
 
         // conv_post: weight-norm Conv1d 24 -> 1, kernel 7 (no bias)
@@ -295,6 +289,12 @@ fn conv1d(
 }
 
 /// Inner conv1d with caller-managed output buffer. Returns Err on shape mismatch.
+///
+/// Weight is stored in the GGUF as `[kernel, out_channels, in_channels]`
+/// (the C++ reference uses `[in_channels, out_channels, kernel]` for the
+/// ConvTranspose1d weight, but the GGUF storage rotates the dimensions).
+/// The materialized weight_norm output for conv_pre / upsample / resblock
+/// tensors follows this exact `[kernel, out_ch, in_ch]` layout.
 #[allow(clippy::too_many_arguments)]
 fn conv1d_into(
     input: &[f32],
@@ -308,24 +308,21 @@ fn conv1d_into(
     out_frames: usize,
     output: &mut [f32],
 ) -> Result<(), String> {
-    let expected_w = kernel * in_channels * out_channels;
+    let expected_w = kernel * out_channels * in_channels;
     if weight.len() != expected_w {
         return Err(format!(
-            "AuK VAE weight size {} != kernel({})*in({})*out({}) = {}",
+            "AuK VAE weight size {} != kernel({})*out({})*in({}) = {}",
             weight.len(),
             kernel,
-            in_channels,
             out_channels,
+            in_channels,
             expected_w
         ));
     }
     if output.len() != out_channels * out_frames {
         return Err("AuK VAE conv1d output length mismatch".into());
     }
-    // Weight is [kernel, in_channels, out_channels]. For each output position
-    // t, the output channel oc is sum over tap k, input channel ic of:
-    //   weight[k, ic, oc] * input[ic, t - pad + k]
-    // (with zero-padding).
+    // Weight indexing: weight[k * (out_channels * in_channels) + oc * in_channels + ic]
     for oc in 0..out_channels {
         let bias_oc = bias.map(|b| b[oc]).unwrap_or(0.0);
         for t in 0..out_frames {
@@ -337,7 +334,7 @@ fn conv1d_into(
                 }
                 let src = src_signed as usize;
                 for ic in 0..in_channels {
-                    let w = weight[(k * in_channels + ic) * out_channels + oc];
+                    let w = weight[(k * out_channels + oc) * in_channels + ic];
                     sum += w * input[ic * in_frames + src];
                 }
             }
