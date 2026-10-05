@@ -563,6 +563,7 @@ mod tests {
             words: vec![],
             text_word_first_positions: vec![],
             text_prefix_len: 0,
+            text_prefix_tokens: vec![],
             query_positions: vec![],
             query_names: vec![],
             classification_positions: vec![],

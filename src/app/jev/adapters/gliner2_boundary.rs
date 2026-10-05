@@ -18,7 +18,7 @@ use crate::models::gliner_boundary::extract::{
     apply_abstention, boundary_overlap_policy, decode_spans, run_mixed_extraction,
     ClassificationResult, ExtractedSpan, Extraction, SchemaOptions,
 };
-use crate::models::gliner_boundary::structure::{StructureField, StructureSpan};
+use crate::models::gliner_boundary::structure::{ChoiceValue, StructureField, StructureSpan};
 use crate::models::gliner_boundary::BoundaryModel;
 
 /// One extracted span, as emitted by `--jev-output-json`.
@@ -82,6 +82,17 @@ struct RecordJson {
 enum StructureFieldJson {
     Scalar(Option<SpanJson>),
     List(Vec<SpanJson>),
+    /// A literal-enum value. No `start`/`end`: the reference scores the choice at
+    /// its own prefix token, so there is no document location to report.
+    ChoiceScalar(Option<ChoiceJson>),
+    ChoiceList(Vec<ChoiceJson>),
+}
+
+/// One literal-enum value, as emitted by `--jev-output-json`.
+#[derive(Debug, serde::Serialize)]
+struct ChoiceJson {
+    score: f32,
+    text: String,
 }
 
 /// One legacy `json_structures` instance, as emitted by `--jev-output json`.
@@ -108,6 +119,13 @@ fn structure_span_json(span: &StructureSpan) -> SpanJson {
         start: span.start,
         end: span.end,
         text: span.text.clone(),
+    }
+}
+
+fn choice_json(choice: &ChoiceValue) -> ChoiceJson {
+    ChoiceJson {
+        score: choice.score,
+        text: choice.text.clone(),
     }
 }
 
@@ -728,6 +746,16 @@ pub fn run_gliner2_boundary(
                                     StructureField::List(spans) => StructureFieldJson::List(
                                         spans.iter().map(structure_span_json).collect(),
                                     ),
+                                    StructureField::ChoiceScalar(choice) => {
+                                        StructureFieldJson::ChoiceScalar(
+                                            choice.as_ref().map(choice_json),
+                                        )
+                                    }
+                                    StructureField::ChoiceList(choices) => {
+                                        StructureFieldJson::ChoiceList(
+                                            choices.iter().map(choice_json).collect(),
+                                        )
+                                    }
                                 },
                             )
                         })
@@ -804,6 +832,21 @@ pub fn run_gliner2_boundary(
                         let text = spans
                             .iter()
                             .map(|span| span.text.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" | ");
+                        println!("  {name}: {text}");
+                    }
+                    StructureField::ChoiceScalar(None) => println!("  {name}: (none)"),
+                    StructureField::ChoiceScalar(Some(choice)) => {
+                        println!("  {name}: {}  p={:.4}", choice.text, choice.score)
+                    }
+                    StructureField::ChoiceList(choices) if choices.is_empty() => {
+                        println!("  {name}: (none)")
+                    }
+                    StructureField::ChoiceList(choices) => {
+                        let text = choices
+                            .iter()
+                            .map(|choice| choice.text.as_str())
                             .collect::<Vec<_>>()
                             .join(" | ");
                         println!("  {name}: {text}");

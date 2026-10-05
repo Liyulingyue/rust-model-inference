@@ -548,6 +548,11 @@ pub struct EncodedPrompt {
     ///
     /// Zero when the schema declares no `choices`.
     pub text_prefix_len: usize,
+    /// The prefix tokens themselves, in stream order. `_find_choice_idx`
+    /// (`runtime.py:1206`) matches a choice against these entries verbatim — it
+    /// does **not** re-split them, so a multi-word literal is one entry, matches
+    /// as one entry, and the scored span covers the whole literal.
+    pub text_prefix_tokens: Vec<String>,
     /// Subword index of each child marker, `[P]` dropped, tasks in order. This
     /// is `schema_special_positions[group][1:]` flattened, which is what
     /// `_encode_core` routes into `query_states` — the group marker itself is
@@ -989,7 +994,12 @@ fn assemble(
     combined.extend(text_prefix.iter().cloned());
     let words = split_words(&normalize_text(text));
     combined.extend(words.iter().cloned());
-    let sep_index = combined.len() - 1 - words.len();
+    // The index of `[SEP_TEXT]`, which is the last thing before the prefix and the
+    // words. Counting back from the end only covers the words, so with a prefix in
+    // between it would land inside them and silently drop the prefix rows *and*
+    // as many leading words — `text_word_first_positions` came out half length,
+    // and every span index shifted.
+    let sep_index = combined.len() - 1 - words.len() - text_prefix.len();
 
     // Which combined-token indices are structural markers, per task. The
     // reference computes this on the un-popped stream, where every struct is
@@ -1083,6 +1093,7 @@ fn assemble(
             words,
             text_word_first_positions,
             text_prefix_len: text_prefix.len(),
+            text_prefix_tokens: text_prefix.to_vec(),
             query_positions,
             query_names,
             classification_positions,
@@ -1109,6 +1120,7 @@ fn assemble(
         words,
         text_word_first_positions,
         text_prefix_len: text_prefix.len(),
+        text_prefix_tokens: text_prefix.to_vec(),
         query_positions: Vec::new(),
         query_names: Vec::new(),
         classification_positions: Vec::new(),

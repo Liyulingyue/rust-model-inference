@@ -48,7 +48,9 @@ use super::relations::{
 use super::spans::{
     group_scored_candidates, score_document_candidates, DocumentCandidateBatch, QueryThresholds,
 };
-use super::structure::{decode_legacy_structures, LegacyStructureGroup, StructureField};
+use super::structure::{
+    decode_legacy_structures, ChoiceValue, LegacyStructureGroup, StructureField,
+};
 
 /// The reference's default score threshold, used when the caller does not pass
 /// one (`_group_scored_candidates`'s `threshold: float = 0.5`).
@@ -400,10 +402,16 @@ pub fn run_mixed_extraction(
     if hidden.len() != encoded.input_ids.len() * hidden_size {
         return Err("encoder output does not match the encoded prompt".into());
     }
-    if encoded.text_word_first_positions.len() != encoded.words.len() {
+    // The text stream is the `choices` prefix followed by the document words, and
+    // both are word-routed, so the invariant is 1:1 *per stream segment* rather
+    // than 1:1 overall. A mismatch means a token produced no subword and every
+    // later index would shift.
+    let expected_rows = encoded.words.len() + encoded.text_prefix_len;
+    if encoded.text_word_first_positions.len() != expected_rows {
         return Err(format!(
-            "word routing is not 1:1: {} words but {} positions",
+            "word routing is not 1:1: {} words + {} prefix tokens but {} positions",
             encoded.words.len(),
+            encoded.text_prefix_len,
             encoded.text_word_first_positions.len()
         ));
     }
@@ -510,6 +518,25 @@ pub fn run_mixed_extraction(
     // Emitted alongside the spans rather than instead of them — the reference's
     // engine returns both the per-field spans and the structure instances.
     if !encoded.query_positions.is_empty() {
+        // The states the choice decode needs, gathered once more rather than
+        // threaded through: the prefix rows are part of the text stream, so this
+        // is the same tensor the span path used.
+        let text_states = gather_states(&hidden, &encoded.text_word_first_positions, hidden_size);
+        let query_states = gather_states(&hidden, &encoded.query_positions, hidden_size);
+        let text_mask = vec![vec![true; encoded.text_word_first_positions.len()]];
+        let query_mask = vec![vec![true; encoded.query_names.len()]];
+        let choices = decode_choice_fields(
+            model,
+            schema,
+            field_metadata,
+            &text_states,
+            &text_mask,
+            &query_states,
+            &query_mask,
+            &encoded.text_prefix_tokens,
+            &encoded.query_names,
+            relation_threshold.unwrap_or(DEFAULT_SCORE_THRESHOLD),
+        )?;
         extractions.structures = score_structures(
             model,
             tasks,
@@ -525,6 +552,7 @@ pub fn run_mixed_extraction(
                 field_metadata,
             },
             relation_threshold.unwrap_or(DEFAULT_SCORE_THRESHOLD),
+            &choices,
         )?;
     }
 
@@ -614,6 +642,7 @@ fn score_structures(
     query_names: &[String],
     schema: SchemaOptions<'_>,
     threshold: f32,
+    choices: &BTreeMap<String, StructureField>,
 ) -> Result<Vec<ExtractedStructure>, String> {
     let SchemaOptions {
         record_metadata,
@@ -746,13 +775,58 @@ fn score_structures(
                 .map(move |field: &String| (name.clone(), field.clone()))
         }),
     )?;
-    Ok(decode_legacy_structures(&groups, policy, &validators)
+    let mut out: Vec<ExtractedStructure> = decode_legacy_structures(&groups, policy, &validators)
         .into_iter()
         .map(|instance| ExtractedStructure {
             task: instance.task,
             fields: instance.fields,
         })
-        .collect())
+        .collect();
+
+    // A `choices` field's value is scored, not resolved: it has no document span
+    // for `_resolve_spans` to rank, and it arrives already thresholded. So it is
+    // substituted after the aggregate decode rather than fed through it — the
+    // field keeps the slot the schema gave it.
+    for instance in &mut out {
+        for (field, value) in &mut instance.fields {
+            let group = instance.task.clone();
+            if let Some(choice) = choices.get(&format!("{group}.{field}")) {
+                *value = choice.clone();
+            }
+        }
+    }
+    // A group whose every field is a choice field produced no aggregate instance
+    // at all, because `_resolve_spans` had nothing to rank. The reference still
+    // emits it when a choice resolved, so rebuild those.
+    for (_, group, fields) in &legacy {
+        let already = out.iter().any(|instance| instance.task == *group);
+        if already {
+            continue;
+        }
+        let resolved: Vec<(String, StructureField)> = fields
+            .iter()
+            .filter_map(|field| {
+                choices
+                    .get(&format!("{group}.{field}"))
+                    .map(|value| (field.clone(), value.clone()))
+            })
+            .collect();
+        if resolved.is_empty() {
+            continue;
+        }
+        let has_value = resolved.iter().any(|(_, value)| match value {
+            StructureField::ChoiceScalar(Some(_)) => true,
+            StructureField::ChoiceList(list) => !list.is_empty(),
+            _ => false,
+        });
+        if has_value {
+            out.push(ExtractedStructure {
+                task: group.clone(),
+                fields: resolved,
+            });
+        }
+    }
+    Ok(out)
 }
 
 /// Compile and decode every record group in the schema.
@@ -1403,4 +1477,195 @@ fn apply_row(model: &BoundaryModel<'_>, name: &str, state: &[f32]) -> Result<f32
     let mut out = [0.0f32; 1];
     apply_linear_full(state, weight, bias, &mut out);
     Ok(out[0])
+}
+
+/// `_decode_choice_field` (`engine.py:656-759`) for every `choices` field in the
+/// schema, keyed `<group>.<field>`.
+///
+/// This is **not** a threshold-and-sort over proposals. Each declared choice is
+/// scored as an explicit one-token span `(index, index + 1)` through
+/// `score_explicit_spans`, bypassing the candidate pool, so the score belongs to
+/// the choice's own row in the prefix rather than to any span of the input.
+///
+/// Four details are load-bearing, and each has a fixture case:
+///
+/// 1. **The index is a prefix index** — a text-stream row, not a document word.
+///    `index + 1` is the span end, and `words` is not consulted at all, which is
+///    why a choice value has no `start`/`end`.
+/// 2. **The two dtype branches differ in more than arity.** `list` returns every
+///    choice at or above the threshold in *declaration* order; scalar returns the
+///    `argmax`, or nothing at all when the best is below the threshold. A scalar
+///    choice field never falls back to the first choice.
+/// 3. **A repeated literal is scored once**, at its first prefix occurrence, and
+///    a literal absent from the prefix is dropped — so `present` can be shorter
+///    than the declared list.
+/// 4. **The score is `sigmoid(logit / pair_temperature)`**, the same temperature
+///    the span path uses, so a checkpoint with `pair_temperature != 1.0` shifts
+///    the gate.
+fn decode_choice_fields(
+    model: &BoundaryModel<'_>,
+    schema: Option<&serde_json::Value>,
+    field_metadata: Option<&serde_json::Value>,
+    text_states: &[f32],
+    text_mask: &[Vec<bool>],
+    query_states: &[f32],
+    query_mask: &[Vec<bool>],
+    prefix_tokens: &[String],
+    query_names: &[String],
+    default_threshold: f32,
+) -> Result<BTreeMap<String, StructureField>, String> {
+    let Some(schema) = schema else {
+        return Ok(BTreeMap::new());
+    };
+    if prefix_tokens.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let hidden_size = model.config.n_embd;
+    if hidden_size == 0 {
+        return Err("encoder hidden size is zero".into());
+    }
+    let temperature = if model.settings.pair_temperature > 0.0 {
+        model.settings.pair_temperature
+    } else {
+        1.0
+    };
+    let mut out: BTreeMap<String, StructureField> = BTreeMap::new();
+
+    let groups = schema
+        .get("json_structures")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    for group in groups {
+        let Some(fields) = group.as_object() else {
+            continue;
+        };
+        for (parent, occurrences) in fields {
+            let Some(occurrences) = occurrences.as_object() else {
+                continue;
+            };
+            for (field, value) in occurrences {
+                let Some(choice_list) = value
+                    .as_object()
+                    .and_then(|object| object.get("choices"))
+                    .and_then(|choices| choices.as_array())
+                else {
+                    continue;
+                };
+                if choice_list.is_empty() {
+                    continue;
+                }
+                let literals: Vec<String> = choice_list
+                    .iter()
+                    .map(|choice| choice.as_str().unwrap_or_default().to_string())
+                    .collect();
+                let present = super::structure::present_choices(&literals, prefix_tokens);
+                if present.is_empty() {
+                    // `engine.py:682-683`: nothing found means the field reports
+                    // nothing at all, in either dtype's shape.
+                    continue;
+                }
+                let Some(query_id) = query_names.iter().position(|name| name == field) else {
+                    return Err(format!(
+                        "choices field {parent}.{field} has no routed query"
+                    ));
+                };
+                let Some(query_row) =
+                    query_states.get(query_id * hidden_size..(query_id + 1) * hidden_size)
+                else {
+                    return Err(format!(
+                        "choices field {parent}.{field} routes query {query_id} past the query states"
+                    ));
+                };
+
+                // Each choice is scored as the one-token span (index, index + 1).
+                let mut indices = Vec::with_capacity(present.len() * 2);
+                for (_, index) in &present {
+                    indices.push(*index);
+                    indices.push(index + 1);
+                }
+                let candidate = present.len();
+                let scored = super::spans::score_spans(
+                    model,
+                    text_states,
+                    text_mask,
+                    query_row,
+                    &query_mask[query_id..query_id + 1],
+                    &indices,
+                    &[],
+                    0,
+                    1,
+                    candidate,
+                );
+
+                if scored.len() != present.len() {
+                    // The scorer is asked for exactly one score per present choice.
+                    // A short answer is a wiring fault, not a decoding outcome, and
+                    // returning a short list would report an empty field where the
+                    // reference reports a value — a silent wrong answer on the one
+                    // path in this port that no model-backed test covers yet. See
+                    // `gliner2_5_choice_decode_parity::end_to_end`.
+                    return Err(format!(
+                        "choices field {parent}.{field}: scored {} of {} choices",
+                        scored.len(),
+                        present.len()
+                    ));
+                }
+                let mut values: Vec<ChoiceValue> = Vec::with_capacity(present.len());
+                for (position, (literal, _)) in present.iter().enumerate() {
+                    let span = &scored[position];
+                    values.push(ChoiceValue {
+                        text: literal.clone(),
+                        score: 1.0 / (1.0 + (-span.logit / temperature).exp()),
+                    });
+                }
+
+                let dtype = field_metadata
+                    .and_then(|table| table.get(format!("{parent}.{field}")))
+                    .and_then(|entry| entry.get("dtype"))
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("list");
+                let gate = field_metadata
+                    .and_then(|table| table.get(format!("{parent}.{field}")))
+                    .and_then(|entry| entry.get("threshold"))
+                    .and_then(|value| value.as_f64())
+                    .unwrap_or(default_threshold as f64) as f32;
+
+                let key = format!("{parent}.{field}");
+                out.insert(
+                    key,
+                    if dtype == "str" {
+                        // `argmax` over all present choices, then the gate. The
+                        // reference takes the best *before* thresholding, so a
+                        // field whose best choice fails still reports nothing
+                        // rather than its runner-up.
+                        let best = values
+                            .iter()
+                            .enumerate()
+                            .max_by(|(a_index, a), (b_index, b)| {
+                                a.score
+                                    .total_cmp(&b.score)
+                                    // `torch.argmax` returns the first maximum.
+                                    .then(b_index.cmp(a_index))
+                            })
+                            .map(|(index, _)| index);
+                        StructureField::ChoiceScalar(match best {
+                            Some(index) if values[index].score >= gate => {
+                                Some(values[index].clone())
+                            }
+                            _ => None,
+                        })
+                    } else {
+                        StructureField::ChoiceList(
+                            values
+                                .into_iter()
+                                .filter(|value| value.score >= gate)
+                                .collect(),
+                        )
+                    },
+                );
+            }
+        }
+    }
+    Ok(out)
 }

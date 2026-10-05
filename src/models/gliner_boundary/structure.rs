@@ -46,6 +46,20 @@ pub struct StructureSpan {
     pub score: f32,
 }
 
+/// One literal-enum value: the declared choice and its score.
+///
+/// A `choices` field has no document location. It is scored at the choice's own
+/// token inside the **prefix** on the text stream (`processor.py:645`), not at a
+/// span of the input, so there is no `start`/`end` to report and `StructureSpan`
+/// would be a lie.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChoiceValue {
+    /// The literal exactly as the schema declared it — the reference does not
+    /// lower-case the reported value, only the lookup key.
+    pub text: String,
+    pub score: f32,
+}
+
 /// One field of a legacy structure instance.
 #[derive(Clone, Debug, PartialEq)]
 pub enum StructureField {
@@ -58,6 +72,19 @@ pub enum StructureField {
     Scalar(Option<StructureSpan>),
     /// Every surviving span, in resolution order.
     List(Vec<StructureSpan>),
+    /// A `choices` field under `dtype: "str"`: the argmax, or absent.
+    ///
+    /// `None` when even the best choice is below the threshold. A scalar choice
+    /// field never falls back to the first choice — it reports nothing, which is
+    /// the behaviour `unreachable_threshold_scalar_reports_nothing` pins.
+    ChoiceScalar(Option<ChoiceValue>),
+    /// A `choices` field under `dtype: "list"`: every choice at or above the
+    /// threshold, in **declaration** order.
+    ///
+    /// Declaration order, not score order: the reference iterates `present`,
+    /// which follows the schema. `uppercase_choices` pins it, where the second
+    /// choice scores higher yet is reported second.
+    ChoiceList(Vec<ChoiceValue>),
 }
 
 /// One legacy `json_structures` instance.
@@ -150,6 +177,11 @@ pub fn decode_legacy_structures(
             StructureField::Scalar(Some(_)) => true,
             StructureField::List(spans) => !spans.is_empty(),
             StructureField::Scalar(None) => false,
+            // A choice field that resolved to a value is content, exactly like a
+            // span. One that resolved to nothing — every choice below the
+            // threshold, or none found in the prefix — is not.
+            StructureField::ChoiceScalar(choice) => choice.is_some(),
+            StructureField::ChoiceList(choices) => !choices.is_empty(),
         });
         if has_content {
             out.push(instance);
@@ -174,4 +206,43 @@ pub struct LegacyStructureGroup<'a> {
     pub is_scalar: &'a [bool],
     /// The document's word list, for the surface text.
     pub words: &'a [String],
+}
+
+/// `_find_choice_idx` (`runtime.py:1206`): the index of `choice` among the
+/// prefix tokens, or `None`.
+///
+/// Two details the reference gets right that are easy to get wrong:
+///
+/// * the comparison lower-cases **both** sides, so `"Happy"` is found in a prefix
+///   rendered as `Happy` and a lowercase schema value is found in either;
+/// * it returns the **first** match, and `_decode_choice_field` skips a repeated
+///   literal before looking it up, so a choice declared twice is scored once at
+///   its first occurrence.
+///
+/// The prefix entries are matched verbatim and never re-split, so a multi-word
+/// literal is one entry and matches as one entry.
+pub fn find_choice_idx(choice: &str, prefix_tokens: &[String]) -> Option<usize> {
+    let wanted = choice.to_lowercase();
+    prefix_tokens
+        .iter()
+        .position(|token| token.to_lowercase() == wanted)
+}
+
+/// The choices of one field, in the order the reference's `present` list holds
+/// them: declared order, first occurrence of each, skipping any literal the
+/// prefix does not contain.
+pub fn present_choices(
+    choice_literals: &[String],
+    prefix_tokens: &[String],
+) -> Vec<(String, usize)> {
+    let mut present: Vec<(String, usize)> = Vec::new();
+    for choice in choice_literals {
+        if present.iter().any(|(seen, _)| seen == choice) {
+            continue;
+        }
+        if let Some(index) = find_choice_idx(choice, prefix_tokens) {
+            present.push((choice.clone(), index));
+        }
+    }
+    present
 }

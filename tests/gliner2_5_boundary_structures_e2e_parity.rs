@@ -100,6 +100,7 @@ fn structures(
         SchemaOptions {
             record_metadata: schema.get("record_metadata"),
             field_metadata: schema.get("field_metadata"),
+            schema: schema.get("choices_schema"),
             entity_metadata: schema.get("entity_metadata"),
             relation_metadata: schema.get("relation_metadata"),
         },
@@ -113,6 +114,13 @@ fn structures(
 /// oracle dumps, so one comparison covers both.
 fn value_json(value: &StructureField) -> serde_json::Value {
     match value {
+        // No schema in this fixture declares `choices`, so a choice field here
+        // means the fixture grew one without a reference value to compare
+        // against. Saying so beats a silent mismatch; the choices decode is
+        // covered by `gliner2_5_choice_decode_parity`.
+        StructureField::ChoiceScalar(_) | StructureField::ChoiceList(_) => {
+            panic!("this fixture declares no `choices`, so a choice field cannot appear")
+        }
         StructureField::Scalar(None) => serde_json::Value::Null,
         StructureField::Scalar(Some(span)) => serde_json::json!({
             "text": span.text,
@@ -263,6 +271,10 @@ fn a_scalar_field_binds_exactly_one_span() {
         for instance in &got {
             for (field, value) in &instance.fields {
                 match value {
+                    // No schema here declares `choices`.
+                    StructureField::ChoiceScalar(_) | StructureField::ChoiceList(_) => {
+                        panic!("{name} {field}: this fixture declares no `choices`")
+                    }
                     StructureField::Scalar(Some(span)) => {
                         assert!(span.start < span.end, "{name} {field}: empty span {span:?}")
                     }
@@ -336,6 +348,7 @@ fn an_unannotated_group_does_not_become_a_record() {
             SchemaOptions {
                 record_metadata: schema.get("record_metadata"),
                 field_metadata: schema.get("field_metadata"),
+                schema: schema.get("choices_schema"),
                 entity_metadata: schema.get("entity_metadata"),
                 relation_metadata: schema.get("relation_metadata"),
             },

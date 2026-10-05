@@ -667,29 +667,40 @@ structures/records（`[C]`）；外加 abstention（`null_projection`）与 coun
 | `word_splitter="char"` + 修 `\w` | `e9904c4` | `dump_word_splitter.py` | **修了既有 bug**，见下 |
 | per-entity / per-field / per-relation threshold | `5a22717` | `dump_per_query_thresholds.py` | 三条**互不相通**的通道 |
 | `validators` / `RegexValidator` | `3be43a0` | `dump_regex_validator.py` | 两处 engine 差异**显式记录**而非掩盖 |
-| `choices` prefix 渲染 | `34622d3` | `dump_choice_fields.py` | **半程**，解码侧未做（见 F-1） |
+| `choices` prefix 渲染 + 查表 + dtype/gate 分支 | `34622d3` + 待提交 | `dump_choice_fields.py` + `dump_choice_decode.py` | **打分路径未验证**，见 F-1 |
 
-### 🔴 F-1 `choices` 的解码半程（**当前半成品，优先收尾**）
+### 🔴 F-1 `choices` 的打分路径（**唯一剩下的半成品**）
 
-`34622d3` 只做了 prompt 侧：prefix 渲染 + 落在 text 流上 + `EncodedPrompt.text_prefix_len`。
-**没有任何代码消费它** —— prefix 进了 encoder 输入但没被读取。半成品状态最危险，
-因为它会改变 prompt 却对输出无贡献，看起来像「有这特性但没触发」。
+**已验证（7 个单测 + oracle fixture）**：
+- [x] prompt 侧 prefix 渲染 + 落在 text 流 `[SEP_TEXT]` 之后（`34622d3`）
+- [x] `_find_choice_idx`：prefix 区内小写全等匹配，**整条目匹配不重分词**
+      —— 所以多词字面量 `very happy` 是**一个**条目、能匹配、span 覆盖整个字面量
+      （我一开始以为是两个 token 匹配不上，oracle 推翻了）
+- [x] 重复字面量只打分一次（取首次出现）；prefix 里没有的字面量被丢弃
+- [x] `dtype` 两个分支：`list` 给全部过阈值的、**按声明序**；scalar 给 `argmax`，
+      **best 未过阈则什么都不给**（不退回第一个）。`uppercase_choices` 钉住声明序
+      （第二个分数更高却排第二）
+- [x] `field_metadata` 里 reported value **保留声明时的大小写**，只有查表折叠
+- [x] 空列表结构被判为「无内容」而丢弃（与 span 字段同一规则）
 
-待做（`engine.py:656` `_decode_choice_field`）：
-- [ ] 给 choice token 的 `(idx, idx+1)` 打分。参考用 `score_explicit_spans`，**不是**走
-      candidate pool
-- [ ] `sigmoid(logit / pair_temperature)`，再按 `dtype` 分 list / scalar
-- [ ] **索引偏移**：choice 的 `idx` 是 text 流坐标，落回文档要减 `text_prefix_len`。
-      `pool.rs` / `record_head.rs` / `overlap.rs` 三处都消费 span 索引，**改错任一处
-      都会静默偏移所有 span 且不报错**
-- [ ] `_find_choice_idx` 只在 prefix 区内做小写全等匹配（`runtime.py:1206`）
-- [ ] record 路径的 `_record_local_choice_mentions`（`engine.py:595`）：在**原始文本**上跑
-      `(?<!\w)choice(?!\w)` 忽略大小写，归属到最近的前置 anchor，按值去重、保持源序
-- [ ] `field_metadata["<g>.<f>"]["choices"]` 的 JSON 表达（reference 只能从 Python builder
-      传，`to_dict`/`from_dict`/HTTP 都不支持，**形态要自己定**）
+**未验证 —— 这是唯一剩下的缺口**：
+- [ ] **打分本身**。给 choice token 的 `(idx, idx+1)` 打分这一步走
+      `score_spans`，目前**传单个切片 query row 会形状不匹配**
+      （`bias.len() == 64`，而 `boundary_dim` 是 128）。
+      span 路径走 `score_document_candidates`，它提供的张量本调用点还没复现。
+- [ ] 已用 `#[ignore]` + 明确原因把 e2e 测试留在树里
+      （`gliner2_5_choice_decode_parity::end_to_end`）—— **一个被 ignore 的失败测试
+      远好过一个从没跑过的绿测试**。
+- [ ] `decode_choice_fields` 已在打分数量不足时**返回 Err 而不是少报**：
+      静默少报会在唯一没有 model-backed 测试的路径上给出「空字段」这种错答案。
 
-**验证缺口**：12 个模型没有一个 schema 用过 `choices`，**零 ground truth**。
-必须先用 oracle 造 fixture，否则只能靠读 reference 自证。
+**ground truth 怎么解决的**（原以为是个死结）：12 个模型没有一个 schema 用过 `choices`，
+但 reference 愿意解任何声明了 `choices` 的 schema —— 所以 oracle 直接**声明一个让
+reference 自己解**，数字来自真 encoder + 真 head。已生成 `choice-decode-golden.json`。
+
+**record 路径仍未做**：`_record_local_choice_mentions`（`engine.py:595`）在**原始文本**上
+跑 `(?<!\w)choice(?!\w)` 忽略大小写，归属到最近的前置 anchor，按值去重、保持源序。
+注意它在 record 路径校验的是 **choice 字面量本身**，不是文档 span（`engine.py:1086`）。
 
 ### 🟠 F-2 `entity_attributes` / `AttributeGroup`（工作量最大，无 ground truth）
 
@@ -748,7 +759,15 @@ structures/records（`[C]`）；外加 abstention（`null_projection`）与 coun
 2. **structure validator key 错配**（`3be43a0` 修）：`structure.rs` 用裸字段名查，
    `score_structures` 用 `<group>.<field>` 建表 —— 永远查不到，且裸名会在两个 group
    声明同名字段时撞车。**编译通过、测试全绿、特性完全无效**。
-3. **`overlap.rs` 的 `usize` 下溢**（`1c1466a` 修）：reference 的
+3. **`sep_index` 在有 prefix 时算错**（本轮修）：`combined.len() - 1 - words.len()`
+   这个公式假设 `[SEP_TEXT]` 紧邻 words。插进 prefix 后它落进 words 内部，
+   于是 **prefix 的 11 行 + 前 11 个词被一起跳过**，`text_word_first_positions`
+   长度直接腰斩（22 → 11），所有 span 索引平移。
+   特征单测（只查 `input_ids` 顺序）抓不到，**model-backed e2e 才抓到**。
+4. **`score_spans` 的 `batch` 是「样本数」不是「样本下标」**（本轮踩到）：
+   返回 `0..batch * q_count * c` 个元素，传 `0` 得到 0 个候选 —— 而调用点读起来
+   像是索引。参数名有歧义，值得改。
+5. **`overlap.rs` 的 `usize` 下溢**（`1c1466a` 修）：reference 的
    `bisect_right(ends, start, 0, position) - 1` 对 `usize` 减 1。release 下靠二次回绕
    碰巧正确，**debug 的溢出检查会让 3 个 `overlap_resolution_parity` 测试失败**。
    之前记的「gliner 82/82」是 release 下测的。
