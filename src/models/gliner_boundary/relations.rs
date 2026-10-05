@@ -631,18 +631,48 @@ fn f32_order(a: f32, b: f32) -> std::cmp::Ordering {
 /// Grouped because that is what they are: `relation_temperature` calibrates the
 /// logit, and the threshold is the caller's score cutoff — the same one the span
 /// path uses, since `_decode_relations` receives it as `threshold`.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RelationDecodeSettings {
     pub temperature: f32,
     pub threshold: f32,
+    /// Per-relation-type cutoff, keyed by the **bare** relation name, as
+    /// `relation_metadata` spells it. `_decode_relations`
+    /// (`engine.py:849-853`) applies this after the scorer, independently of
+    /// `threshold` — the candidate stage admitted the pairs at `threshold`, so
+    /// raising one must not starve the other of pairs.
+    ///
+    /// A name absent here uses `threshold`. A relation the scorer reports as
+    /// `"<name>: <description>"` is looked up by `<name>`, because the
+    /// reference inverts its description map before reading the metadata.
+    pub type_thresholds: std::collections::BTreeMap<String, f32>,
 }
 
 impl RelationDecodeSettings {
-    pub fn from_settings(settings: &BoundarySettings, threshold: f32) -> Self {
+    pub fn from_settings(
+        settings: &BoundarySettings,
+        threshold: f32,
+        type_thresholds: std::collections::BTreeMap<String, f32>,
+    ) -> Self {
         Self {
             temperature: settings.relation_temperature,
             threshold,
+            type_thresholds,
         }
+    }
+
+    /// The cutoff for one relation type.
+    pub fn threshold_for(&self, relation_type: &str) -> f32 {
+        // The scorer labels a described relation `"<name>: <description>"`, so
+        // the bare name is the part before the first `": "`.
+        let bare = match relation_type.split_once(": ") {
+            Some((name, _)) => name,
+            None => relation_type,
+        };
+        self.type_thresholds
+            .get(bare)
+            .or_else(|| self.type_thresholds.get(relation_type))
+            .copied()
+            .unwrap_or(self.threshold)
     }
 }
 
@@ -747,7 +777,13 @@ pub fn score_relations(
     let mut out = Vec::new();
     for (pair, logit) in pairs.iter().zip(logits) {
         let score = sigmoid(logit / decode.temperature);
-        if score < decode.threshold {
+        // A pair names its spec by index, and the spec is what carries the
+        // relation type, so the per-type threshold is looked up through it.
+        let relation_type = specs
+            .get(pair.relation_index)
+            .map(|spec| spec.relation_type.as_str())
+            .unwrap_or_default();
+        if score < decode.threshold_for(relation_type) {
             continue;
         }
         // The reference's bounds check, minus the `offset`: the word-routed

@@ -1230,6 +1230,11 @@ pub(super) async fn jev_boundary(
         crate::app::BoundarySchemaOptions {
             record_metadata: req.schema.get("record_metadata"),
             field_metadata: req.schema.get("field_metadata"),
+            // Per-label and per-relation-type overrides. `entity_metadata` is
+            // keyed by label while `field_metadata` is keyed
+            // `<group>.<field>`, matching the reference's two lookups.
+            entity_metadata: req.schema.get("entity_metadata"),
+            relation_metadata: req.schema.get("relation_metadata"),
         },
     ) {
         Ok(result) => result,

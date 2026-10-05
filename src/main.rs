@@ -511,6 +511,8 @@ fn main() {
                 // runs.
                 record_metadata: schema.get("record_metadata"),
                 field_metadata: schema.get("field_metadata"),
+                entity_metadata: schema.get("entity_metadata"),
+                relation_metadata: schema.get("relation_metadata"),
                 output_json: options.jev_output_json,
             },
         ));

@@ -100,6 +100,8 @@ fn structures(
         SchemaOptions {
             record_metadata: schema.get("record_metadata"),
             field_metadata: schema.get("field_metadata"),
+            entity_metadata: schema.get("entity_metadata"),
+            relation_metadata: schema.get("relation_metadata"),
         },
     )
     .expect("mixed extraction");
@@ -334,6 +336,8 @@ fn an_unannotated_group_does_not_become_a_record() {
             SchemaOptions {
                 record_metadata: schema.get("record_metadata"),
                 field_metadata: schema.get("field_metadata"),
+                entity_metadata: schema.get("entity_metadata"),
+                relation_metadata: schema.get("relation_metadata"),
             },
         )
         .expect("mixed extraction");

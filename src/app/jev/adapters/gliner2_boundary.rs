@@ -465,6 +465,12 @@ fn parse_json_structure_groups(
 pub struct BoundarySchemaOptions<'a> {
     pub record_metadata: Option<&'a serde_json::Value>,
     pub field_metadata: Option<&'a serde_json::Value>,
+    /// Per-entity knobs keyed by label; `threshold` overrides the caller's for
+    /// that one query.
+    pub entity_metadata: Option<&'a serde_json::Value>,
+    /// Per-relation-type knobs keyed by the bare relation name. Applied by the
+    /// relation scorer, not by the candidate stage.
+    pub relation_metadata: Option<&'a serde_json::Value>,
 }
 
 pub fn extract(
@@ -479,6 +485,8 @@ pub fn extract(
     let BoundarySchemaOptions {
         record_metadata,
         field_metadata,
+        entity_metadata,
+        relation_metadata,
     } = schema_options;
     let mut result = run_mixed_extraction(
         model,
@@ -490,15 +498,36 @@ pub fn extract(
         SchemaOptions {
             record_metadata,
             field_metadata,
+            entity_metadata,
+            relation_metadata,
         },
     )?;
     if !result.query_names.is_empty() {
+        // The reference hands `_group_scored_candidates` a `[B, Q]` threshold
+        // tensor, not a scalar, so a schema can configure one entity label
+        // differently from its neighbour.
+        let default_threshold = threshold.unwrap_or(0.5);
+        let specs = crate::models::gliner_boundary::extract::query_layout(tasks, kinds);
+        if specs.len() != result.query_names.len() {
+            return Err(format!(
+                "query layout has {} entries but {} queries were routed",
+                specs.len(),
+                result.query_names.len()
+            ));
+        }
+        let thresholds = crate::models::gliner_boundary::extract::resolve_query_thresholds(
+            &specs,
+            entity_metadata,
+            field_metadata,
+            default_threshold,
+        );
         result.spans = decode_spans(
             &result.candidates,
             &result.words,
             &result.query_names,
             model.settings.pair_temperature,
-            threshold.unwrap_or(0.5),
+            &thresholds,
+            default_threshold,
             Some(boundary_overlap_policy(model)?),
         );
         apply_abstention(
@@ -539,7 +568,13 @@ pub struct BoundaryDecodeOptions<'a> {
     pub record_metadata: Option<&'a serde_json::Value>,
     /// The schema's `field_metadata`: `{group: {field: "str"}}`. A `"str"`
     /// field is a scalar in the legacy structure path; anything else is a list.
+    /// Its `threshold` entries are honoured for `json_structures` queries.
     pub field_metadata: Option<&'a serde_json::Value>,
+    /// Per-entity knobs keyed by label. Only `threshold` is read today.
+    pub entity_metadata: Option<&'a serde_json::Value>,
+    /// Per-relation-type knobs keyed by the bare relation name. Only
+    /// `threshold` is read today, and the relation scorer applies it.
+    pub relation_metadata: Option<&'a serde_json::Value>,
     pub output_json: bool,
 }
 
@@ -557,6 +592,8 @@ pub fn run_gliner2_boundary(
         threshold,
         record_metadata,
         field_metadata,
+        entity_metadata,
+        relation_metadata,
         output_json,
     } = decode;
     if !crate::models::gliner_boundary::is_boundary_gguf(source.as_ref()) {
@@ -586,6 +623,8 @@ pub fn run_gliner2_boundary(
         BoundarySchemaOptions {
             record_metadata,
             field_metadata,
+            entity_metadata,
+            relation_metadata,
         },
     )?;
     let spans = &result.spans;

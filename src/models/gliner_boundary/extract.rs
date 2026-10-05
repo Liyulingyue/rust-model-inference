@@ -45,7 +45,9 @@ use super::relations::{
     self, ExtractedRelation, RelationCandidates, RelationDecodeSettings, RelationProposalSettings,
     RelationStates, RelationTypeSpec,
 };
-use super::spans::{score_document_candidates, DocumentCandidateBatch};
+use super::spans::{
+    group_scored_candidates, score_document_candidates, DocumentCandidateBatch, QueryThresholds,
+};
 use super::structure::{decode_legacy_structures, LegacyStructureGroup, StructureField};
 
 /// The reference's default score threshold, used when the caller does not pass
@@ -170,6 +172,175 @@ pub struct Extraction {
 pub struct SchemaOptions<'a> {
     pub record_metadata: Option<&'a serde_json::Value>,
     pub field_metadata: Option<&'a serde_json::Value>,
+    /// Per-entity knobs, keyed by entity label. `_query_thresholds` reads the
+    /// `threshold` here for `entities` queries — note that the entity side of
+    /// the schema is keyed by *label*, not by `<group>.<field>` the way
+    /// `field_metadata` is for `json_structures`.
+    pub entity_metadata: Option<&'a serde_json::Value>,
+    /// Per-relation-type knobs, keyed by the bare relation name. Not read by
+    /// the candidate stage at all; see `resolve_relation_thresholds`.
+    pub relation_metadata: Option<&'a serde_json::Value>,
+}
+
+/// One query's identity, as `_query_thresholds` sees it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuerySpec {
+    /// `"entities"` or `"json_structures"`. The reference's `if`/`elif` chain
+    /// matches on exactly these two strings.
+    pub task_type: String,
+    /// The group's name. Only `json_structures` looks anything up by it, and
+    /// only as the `<group>` half of `field_metadata`'s key.
+    pub task_name: String,
+    pub field_name: String,
+}
+
+/// Flatten `tasks` into the query layout, in the order the prompt routes them.
+///
+/// Classification groups contribute no boundary queries, and relation queries
+/// are included because the reference's `_query_thresholds` walks every spec and
+/// simply leaves the ones it does not recognise at the caller's default. The
+/// order must match `encoded.query_names`, which is the same
+/// `json_structures` → `entities` → `relations` order `parse_boundary_schema`
+/// produces.
+pub fn query_layout(tasks: &[Task], kinds: &[BoundaryTaskKind]) -> Vec<QuerySpec> {
+    let mut specs = Vec::new();
+    for (task, kind) in tasks.iter().zip(kinds) {
+        let task_type = match kind {
+            BoundaryTaskKind::Entities => "entities",
+            BoundaryTaskKind::JsonStructure => "json_structures",
+            BoundaryTaskKind::Relation => "relations",
+            BoundaryTaskKind::Classification => continue,
+        };
+        for label in &task.labels {
+            specs.push(QuerySpec {
+                task_type: task_type.to_string(),
+                task_name: task.name.clone(),
+                field_name: label.name.clone(),
+            });
+        }
+    }
+    specs
+}
+
+/// [`query_layout`], checked against the field names the prompt actually routed.
+///
+/// A mismatch means the layout and the marker bookkeeping disagree about which
+/// field each query scores, and a per-query threshold applied to the wrong query
+/// is a wrong answer rather than an error — a schema that configures
+/// `entity_metadata["city"]` at 0.9 would silently throttle `person` instead. So
+/// this refuses rather than guesses.
+fn query_layout_from_names(
+    tasks: &[Task],
+    kinds: &[BoundaryTaskKind],
+    query_names: &[String],
+) -> Result<Vec<QuerySpec>, String> {
+    let specs = query_layout(tasks, kinds);
+    if specs.len() != query_names.len() {
+        return Err(format!(
+            "query layout has {} entries but {} queries were routed",
+            specs.len(),
+            query_names.len()
+        ));
+    }
+    for (spec, name) in specs.iter().zip(query_names) {
+        if spec.field_name != *name {
+            return Err(format!(
+                "query layout expects field {:?} at this position but the prompt routed {:?}",
+                spec.field_name, name
+            ));
+        }
+    }
+    Ok(specs)
+}
+
+/// `_query_thresholds` (`engine.py:197-226`): per-query admission thresholds.
+///
+/// Two metadata keys, and the difference between them is a `None` check and a
+/// key shape:
+///
+/// * `entities` queries read `entity_metadata[<field_name>]["threshold"]`,
+///   because an entity query *is* its label;
+/// * `json_structures` queries read
+///   `field_metadata["<task_name>.<field_name>"]["threshold"]`.
+///
+/// Every other task type — relations — keeps `default`. That is not an
+/// oversight in the port: a relation's configured threshold is applied once by
+/// the relation scorer, and letting it reach the candidate stage would change
+/// which pairs get *generated* rather than which are kept. See
+/// `resolve_relation_thresholds`.
+///
+/// The tensor is dense and starts at `default`, so a label the schema never
+/// mentions is indistinguishable from one that configured the default
+/// explicitly.
+pub fn resolve_query_thresholds(
+    specs: &[QuerySpec],
+    entity_metadata: Option<&serde_json::Value>,
+    field_metadata: Option<&serde_json::Value>,
+    default: f32,
+) -> Vec<f32> {
+    let entity = entity_metadata.and_then(|value| value.as_object());
+    let field = field_metadata.and_then(|value| value.as_object());
+    specs
+        .iter()
+        .map(|spec| {
+            let configured = match spec.task_type.as_str() {
+                "entities" => entity
+                    .and_then(|table| table.get(&spec.field_name))
+                    .and_then(|entry| entry.get("threshold")),
+                "json_structures" => field
+                    .and_then(|table| table.get(&format!("{}.{}", spec.task_name, spec.field_name)))
+                    .and_then(|entry| entry.get("threshold")),
+                _ => None,
+            };
+            configured
+                .and_then(|value| value.as_f64())
+                .map(|value| value as f32)
+                .unwrap_or(default)
+        })
+        .collect()
+}
+
+/// Per-relation-type thresholds, as `_decode_relations` resolves them
+/// (`engine.py:837-853`).
+///
+/// This is a **separate channel** from `resolve_query_thresholds`, and the two
+/// thresholds for one relation are independent: the candidate stage admits pairs
+/// at the caller's global threshold, and this value is then applied to the
+/// scored pair. A port that folds the two together changes which pairs are
+/// generated, which is observable in the pair count and not only in the edges.
+///
+/// Two details are load-bearing:
+///
+/// * The lookup key is the *resolved* relation name. A relation declared with a
+///   description reaches the scorer as `"<name>: <description>"`, so the
+///   reference inverts the description map first (`engine.py:837-843`). Using
+///   the scorer's own string as the key silently misses.
+/// * A present-but-`null` threshold falls back to `default`. `.get(key, default)`
+///   does not cover that, which is why the reference re-checks for `None`.
+pub fn resolve_relation_thresholds(
+    relation_metadata: Option<&serde_json::Value>,
+    default: f32,
+) -> BTreeMap<String, f32> {
+    let mut out = BTreeMap::new();
+    let Some(table) = relation_metadata.and_then(|value| value.as_object()) else {
+        return out;
+    };
+    for (name, config) in table {
+        let configured = match config.get("threshold") {
+            Some(value) => value.as_f64(),
+            None => Some(default as f64),
+        };
+        match configured {
+            Some(value) => {
+                out.insert(name.clone(), value as f32);
+            }
+            // An explicit null carries no value, so the caller decides.
+            None => {
+                out.insert(name.clone(), default);
+            }
+        }
+    }
+    out
 }
 
 /// Run the whole pipeline.
@@ -196,6 +367,8 @@ pub fn run_mixed_extraction(
     let SchemaOptions {
         record_metadata,
         field_metadata,
+        entity_metadata: _,
+        relation_metadata,
     } = schema;
     if tasks.is_empty() {
         return Err("extraction needs at least one schema task".into());
@@ -311,6 +484,10 @@ pub fn run_mixed_extraction(
                 RelationDecodeSettings::from_settings(
                     &model.settings,
                     relation_threshold.unwrap_or(DEFAULT_SCORE_THRESHOLD),
+                    resolve_relation_thresholds(
+                        relation_metadata,
+                        relation_threshold.unwrap_or(DEFAULT_SCORE_THRESHOLD),
+                    ),
                 ),
             );
         }
@@ -329,6 +506,8 @@ pub fn run_mixed_extraction(
             &encoded.query_names,
             SchemaOptions {
                 record_metadata,
+                entity_metadata: None,
+                relation_metadata: None,
                 field_metadata,
             },
             relation_threshold.unwrap_or(DEFAULT_SCORE_THRESHOLD),
@@ -425,6 +604,8 @@ fn score_structures(
     let SchemaOptions {
         record_metadata,
         field_metadata,
+        entity_metadata,
+        relation_metadata: _,
     } = schema;
     if !tasks
         .iter()
@@ -456,36 +637,50 @@ fn score_structures(
     // declared field back to the query the prompt actually routed it to. Those two
     // orders differ whenever a non-extractive group is interleaved, which is why
     // the mapping is explicit rather than positional.
-    let mut query_cursor = 0usize;
-    let mut scored: Vec<Vec<(f32, usize, usize)>> = Vec::with_capacity(query_names.len());
     let mut is_scalar: Vec<bool> = vec![false; query_names.len()];
     let temperature = if model.settings.pair_temperature > 0.0 {
         model.settings.pair_temperature
     } else {
         1.0
     };
-    for _ in 0..query_names.len() {
-        let mut hits: Vec<(f32, usize, usize)> = Vec::new();
-        for slot in 0..candidates.pool_size {
-            let flat = query_cursor * candidates.pool_size + slot;
-            if !candidates.valid_mask.get(flat).copied().unwrap_or(false) {
-                continue;
-            }
-            let score = 1.0 / (1.0 + (-candidates.pair_logits[flat] / temperature).exp());
-            if score < threshold {
-                continue;
-            }
-            let start = candidates.indices[flat * 2];
-            let end = candidates.indices[flat * 2 + 1];
-            hits.push((score, start, end));
-        }
-        // `_group_scored_candidates` sorts by `(-score, start, end)`. The legacy
-        // decoder then takes `spans[0]` for a scalar field, so this order *is* the
-        // value choice and must not be re-sorted afterwards.
-        hits.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
-        scored.push(hits);
-        query_cursor += 1;
-    }
+    // One admission pass for the whole batch, shared with the span path, so the
+    // per-query thresholds a schema configures apply here too. A structure
+    // field is a `json_structures` query, which is one of the two task types
+    // `_query_thresholds` reads `field_metadata` for.
+    let probabilities: Vec<f32> = candidates
+        .pair_logits
+        .iter()
+        .map(|logit| 1.0 / (1.0 + (-logit / temperature).exp()))
+        .collect();
+    let thresholds = resolve_query_thresholds(
+        &query_layout_from_names(tasks, kinds, query_names)?,
+        entity_metadata,
+        field_metadata,
+        threshold,
+    );
+    let grouped = group_scored_candidates(
+        candidates,
+        &probabilities,
+        query_names.len(),
+        &QueryThresholds::PerQuery {
+            values: thresholds,
+            queries: query_names.len(),
+        },
+        None,
+        false,
+    );
+    // `_group_scored_candidates` emits candidates in ascending slot order; the
+    // legacy decoder takes `spans[0]` for a scalar field, so ranking by
+    // `(-score, start, end)` first is the value choice and must not be redone
+    // afterwards.
+    let scored: Vec<Vec<(f32, usize, usize)>> = grouped[0]
+        .iter()
+        .map(|hits| {
+            let mut hits = hits.clone();
+            hits.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+            hits
+        })
+        .collect();
 
     // Resolve every field's dtype first: `LegacyStructureGroup` borrows
     // `is_scalar` immutably, so it cannot be filled while a group is alive.
@@ -772,12 +967,17 @@ pub fn run_extraction(
 /// per field sorted by `(-score, start, end)` — `decode_candidates`' order.
 /// Padded candidates carry `MASK_LOGIT`, so their probability is ~0 and the
 /// threshold drops them; the `valid_mask` check is belt and braces.
+///
+/// `thresholds` is per query, because `_query_thresholds` hands the reference a
+/// `[B, Q]` tensor rather than one scalar. A schema may configure one entity
+/// label at 0.05 and its neighbour at 0.9, and a scalar cannot express that.
 pub fn decode_spans(
     batch: &DocumentCandidateBatch,
     words: &[String],
     field_names: &[String],
     pair_temperature: f32,
-    threshold: f32,
+    thresholds: &[f32],
+    default_threshold: f32,
     overlap_policy: Option<OverlapPolicy>,
 ) -> Vec<ExtractedSpan> {
     let temperature = if pair_temperature > 0.0 {
@@ -788,6 +988,7 @@ pub fn decode_spans(
     let q_count = field_names.len();
     let mut out = Vec::new();
     for q in 0..q_count {
+        let threshold = thresholds.get(q).copied().unwrap_or(default_threshold);
         let mut hits: Vec<ExtractedSpan> = Vec::new();
         for slot in 0..batch.pool_size {
             let flat = q * batch.pool_size + slot;
@@ -868,12 +1069,17 @@ pub fn extract_spans(
         .iter()
         .flat_map(|task| task.labels.iter().map(|label| label.name.clone()))
         .collect();
+    let default = threshold.unwrap_or(DEFAULT_SCORE_THRESHOLD);
     Ok(decode_spans(
         &batch,
         &words,
         &fields,
         model.settings.pair_temperature,
-        threshold.unwrap_or(DEFAULT_SCORE_THRESHOLD),
+        // This convenience entry point takes no schema, so every query shares
+        // the caller's threshold. `run_mixed_extraction` plus
+        // `resolve_query_thresholds` is the path that honours per-query values.
+        &vec![default; fields.len()],
+        default,
         Some(boundary_overlap_policy(model)?),
     ))
 }
