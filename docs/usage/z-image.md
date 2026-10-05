@@ -83,7 +83,44 @@ VAE 解码——只跑一次、与步数无关、代码未改——在多次相�
 
 前两列输出逐字节一致。attention 那一列**不逐字节一致**，见下节。
 
-### 画质：attention 上 GPU 没有抬高偏差
+#### 2026-10-06 在当前 HEAD（合入 #151/#152 后）复测的分解
+
+`[gpu-block-profile]` 是代码里已有的分段计时（`GPU_PHASE_LABELS`），8 步
+512×512 seed 42，20 线程，合计 107.2 s：
+
+| 阶段 | 8 步 | 占比 |
+|---|---|---|
+| ffn: main stack (gpu) | 50.7 s | 47.3% |
+| out proj (gpu) | 21.8 s | 20.4% |
+| ffn: refiner | 11.5 s | 10.7% |
+| **attention (host)** | 10.9 s | 10.1% |
+| norm+adaln+qkv (gpu) | 10.6 s | 9.9% |
+| **rope (host)** | 1.7 s | 1.6% |
+| modulation (host) | 0.02 s | 0.0% |
+| &nbsp;&nbsp;其中 w1 readback | 3.1 s | 2.9% |
+| &nbsp;&nbsp;其中 **host silu** | **12.3 s** | **11.5%** |
+
+**26% 的时间在 host 上**：attention 10.9 s + rope 1.7 s + w1 readback 3.1 s +
+host silu 12.3 s。标签里的 `(host)` 不是笔误。
+
+同步次数是硬约束：`RUST_GPU_SUBMIT_TRACE=1` 在 3 步上给出 3308 次提交，
+即**每步 1103 次** `submit_and_wait`，而每步只有 320 次 dispatch——平均每
+3.4 次同步才凑一次有意义的 GPU 工作。`queue_submit` 本身 0.009 ms，费用
+全在 `wait_for_fences`。根源是 `run_block_gpu` 每 block 有 5 次 readback
+（QKV、out proj、w1/w3/w2），34 block × 5 ≈ 170 次/步。
+
+`run_block_gpu` 里 w1/w3 投影后在 host 做 silu 再传回给 w2，是纯粹的
+CPU/GPU 边界错配：`SILU_MUL_SHADER` 已经是 pipeline 16（YuE2 AR 在用），
+`Layout` 也已有 `gate`/`up` 区域，所以这段可以整段留在设备上。
+
+⚠️ **但改的时候必须把 w1+w3+silu+w2 录进同一个 command buffer**。
+`project_scaled` 自带 `submit_and_wait`（`dit_gpu.rs:434`），
+`record_projection` 才是"录到在途 buffer、不回读"的那个变体。用
+`session.begin()` 单独录 silu 会让这个 `TokenCommands` 在语句结束时被丢弃
+（drop 不提交），w2 于是读到未激活的 gate——实测 PSNR 掉到 5.11 dB，整张图
+报废。该改动已回退。
+
+## 画质：attention 上 GPU 没有抬高偏差
 
 拿同 seed 的三张图对比（512×512，8 步）：A = 纯 CPU 渲染，B = GPU 路径 +
 CPU attention，C = GPU 路径 + GPU attention。
