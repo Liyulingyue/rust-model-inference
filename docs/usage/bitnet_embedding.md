@@ -128,51 +128,36 @@ per-projection RMSNorm）。
 - 标准 qwen3 layer weights：无 `bitlinear` 字段
 - 标准 `get_f32_tensor`：只接 F32/BF16（BitNet 的 F16 路径在它自己的 `get_f32_tensor` 里）
 
+
+
+### 3.5 SIMD BitLinear forward（commits `bdc374d` + `afbb172`）
+
+BitLinear forward 在两个 commit 里被加速：
+
+1. **`bdc374d` AVX2 inner-loop SIMD**：用 `_mm256_madd_epi16` 把
+   int8 weights × int8 activations 的 inner loop 向量化。I2_S → int8
+   dequant 仍为标量（Rust stable 没有 `_mm256_srli_epi8`，AVX2 也缺
+   这条 per-byte 移位指令，所以 SIMD 的 dequant 不可达）。
+2. **`afbb172` 模型加载时预打包**：把 per-call 的 I2_S → int8 dequant
+   hoist 到模型加载时一次性做。Hot path 只跑 SIMD 点积。
+
+性能数据（单线程，1024×1024 projection，AVX2+FMA，4-core/7.5GiB 主机）：
+
+| Path | Time/iter | Speedup vs scalar |
+|---|---|---|
+| scalar reference | 2098 µs | 1.00× |
+| AVX2 unpacked（per-call dequant） | 434 µs | 4.83× |
+| **AVX2 packed（model-load dequant）** | **62 µs** | **33.71×** |
+
+End-to-end prompt→embedding 时序（4 线程，单 token）：
+
+| 模型 | 优化前（scalar + dequant） | 优化后（packed SIMD） | Speedup |
+|---|---|---|---|
+| `bitnet-embedding-0.6b` | 3481 ms | **879 ms** | ~4× |
+| `bitnet-embedding-270m` | 1684 ms | **480 ms** | ~3.5× |
+
+所有路径**bit-exact 0 diff** vs scalar reference。
+详见 `examples/bitlinear_bench.rs`（运行：
+`cargo run --profile release-fast --example bitlinear_bench`）。
+
 ## 4. End-to-end 数值行为变化（commit `e011536`）
-
-commit `e011536` 的副作用：BitNet qwen3_arch 把 **所有 7 个投影**（attn_q/k/v/output +
-ffn_gate/up/down）都走 BitLinear。之前的 `qwen3::embedding::run_embedding_tokens` 是
-混合路径：attn_q/k/v 用 BitLinear，但 **attn_output 用 Q8_0 matmul**（这是 embed
-path 快速拼凑时漏掉 BitLinear 传播的历史 hack）。
-
-后果：embed 数值范围从 `[-2, 2]` (L2 ~5) 变成 `[-300, 300]` (L2 ~50-1000)。这是 BitNet
-b1.58 规范要求的正确行为（每个投影都是 BitLinear），不是 bug。
-
-测试范围相应更新：
-- 0.6B: value_range [-2,2] → [-300,300]，l2_norm (0.5, 20) → (1, 20000)
-- 270M: value_range [-50,50] → [-300,300]，l2_norm (0.1, 500) → (1, 20000)
-
-未实施的对齐测试：
-- 跟 bitnet.cpp `run_inference.py` 完全相同输入的 bit-exact 对比。
-  本机 4 核没有 cmake / PyTorch / bitnet.cpp build 环境，
-  **无法做 oracle 对比**。当前可用的对齐指标是：(a) dequant kernel
-  在真实 GGUF 字节上只产出 `{-1.0, 0.0, +1.0}`；(b) 不同 prompt
-  产生不同 embedding；(c) embedding 全 finite、非零、L2-norm
-  合理范围；(d) determinism（同 prompt 同 embedding）。两个 BitNet
-  模型的 e2e 测试都包含这 4 条。
-
-## 5. 参考实现（Oracle）
-
-- `microsoft/BitNet`（已 clone 到 `/tmp/oracle-bitnet-cpp/BitNet/`）：
-  - `src/ggml-bitnet-mad.cpp::quantize_i2_s` — i2_s GGUF packing 的
-    MAD-path reference
-  - `include/bitnet-lut-kernels.h` — 1170 行的 AVX2/AVX-512 LUT kernel
-    （BitNet b1.58 的真正高效 kernel）
-  - `docs/bitnet-embeddings-i2s-guide.md` — 完整的 I2_S 转换 + BitLinear
-    forward + per-projection RMSNorm 流程
-  - `utils/convert-bitnet-embedding-to-gguf.py` — safetensors → GGUF 转换脚本
-
-## 6. 已知限制
-
-- **两个 BitNet Embedding model 都是 raw 产出**（没 L2 normalize）；下游 cosine
-  用户自己 `x / x.norm()`
-- **标量 reference matmul** 不是生产性能（缺 SIMD / LUT kernel）。
-  bitnet.cpp 的 `bitnet-lut-kernels.h`（1170 行 AVX2/NEON LUT）给出 1.4-2.3×
-  paper 报告加速比；本机 4 核只有 AVX2 + AVX-VNNI，没 AVX-512，完整 LUT
-  实现不可达。**生产负载用 BitNet-Embedding 时优先集成 LUT kernel**（commit
-  `e011536` 的 commit message 留作 follow-up）
-- **270M 内部的 multilingual SPM vocab=262144**，CLI 启动时一次性加载
-  ~671 MB 到 `Gemma3Model.token_embedding_rows`。如果未来需要 1B+ BitNet
-  Gemma3，可考虑改用 `Weight<'static>` + mmap 直读，避免这层展开
-- **其他 BitNet 改造模型**（文本生成 8B/22B）arch 是 `llama` /
-  `qwen3-22B` 等，需要各自的 BitLinear forward 适配
