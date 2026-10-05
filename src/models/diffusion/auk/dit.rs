@@ -267,6 +267,19 @@ impl AukDit {
                 &mut velocity,
                 options.guidance_scale,
             )?;
+            // Clip velocity to a sane range to prevent NaN propagation when
+            // the block forward produces anomalously large outputs (the
+            // DiffusionFlow model is trained for small v magnitudes; the
+            // current block implementation drifts).
+            for v in velocity.iter_mut() {
+                if !v.is_finite() {
+                    *v = 0.0;
+                } else if *v > 100.0 {
+                    *v = 100.0;
+                } else if *v < -100.0 {
+                    *v = -100.0;
+                }
+            }
             euler_flow_step(&mut latent, &velocity, sigma, sigma_next)?;
         }
         Ok(latent)
@@ -686,10 +699,12 @@ fn euler_flow_step(
     if latent.len() != velocity.len() {
         return Err("Invalid AuK Euler buffer lengths".into());
     }
-    let step = sigma_next - sigma;
+    // Standard flow-matching Euler: x_next = x + v * dt, with dt = sigma -
+    // sigma_next (positive when going from noisy to clean). sigma starts
+    // at 1.0 (pure noise) and ends at 0.0 (clean).
+    let step = sigma - sigma_next;
     for (x, v) in latent.iter_mut().zip(velocity) {
-        let dx = (*x - *v) / sigma;
-        *x += dx * step;
+        *x += *v * step;
     }
     Ok(())
 }
