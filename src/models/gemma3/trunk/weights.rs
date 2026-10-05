@@ -373,6 +373,48 @@ pub fn static_weight(
                 }
             }
         }
+        GGMLType::Q4K | GGMLType::Q5K | GGMLType::Q6K => {
+            // K-quants use 256-element super-blocks:
+            //   Q4_K = 144 bytes/block, Q5_K = 176 bytes/block,
+            //   Q6_K = 210 bytes/block.
+            // All three delegate to the existing
+            // `dequantize_row_q{4,5,6}_k` helpers in `ops::quant`.
+            let block_bytes = match info.ggml_type {
+                GGMLType::Q4K => 144,
+                GGMLType::Q5K => 176,
+                GGMLType::Q6K => 210,
+                _ => unreachable!(),
+            };
+            let n_blocks_per_row = n_in / 256;
+            let row_bytes = n_blocks_per_row * block_bytes;
+            if slice.len() < n_out * row_bytes {
+                return Err(format!(
+                    "gemma3: {name} has {} bytes; expected {} for {n_in} x {n_out} {:?}",
+                    slice.len(),
+                    n_out * row_bytes,
+                    info.ggml_type
+                ));
+            }
+            let mut row_buf = vec![0.0f32; n_in];
+            for row in 0..n_out {
+                let row_off = row * row_bytes;
+                let row_bytes_slice = &slice[row_off..row_off + row_bytes];
+                let out_row = &mut out[row * n_in..(row + 1) * n_in];
+                match info.ggml_type {
+                    GGMLType::Q4K => {
+                        crate::ops::quant::dequantize_row_q4_k(row_bytes_slice, out_row);
+                    }
+                    GGMLType::Q5K => {
+                        crate::ops::quant::dequantize_row_q5_k(row_bytes_slice, out_row);
+                    }
+                    GGMLType::Q6K => {
+                        crate::ops::quant::dequantize_row_q6_k(row_bytes_slice, out_row);
+                    }
+                    _ => unreachable!(),
+                }
+                let _ = row_buf; // keep the compiler happy if unused
+            }
+        }
         other => {
             return Err(format!(
                 "gemma3: {name} has unsupported ggml_type {other:?}; expected F16 or Q8_0"

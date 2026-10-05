@@ -42,7 +42,7 @@ use super::config::{Gemma3Config, Gemma3Rope};
 use super::weights::{BitLinearWeights, Gemma3LayerWeights, Gemma3Model, Weight};
 use crate::ops::bitnet::{bitlinear_forward, quantize_activation_per_token};
 use crate::ops::quantize_q8_0_into;
-use crate::ops::rope::rope_neox_inplace;
+use crate::ops::rope::rope_neox_inplace_with_factor;
 
 /// BitLinear per-projection: rms_norm → absmax int8 quant →
 /// ternary matmul → rescale. Same scalar reference impl as
@@ -366,7 +366,13 @@ pub fn text_encode(
                 let q_slice = &mut q_all[off..off + cfg.n_embd_head_k];
                 match cfg.rope {
                     Gemma3Rope::Neox => {
-                        rope_neox_inplace(q_slice, tok, cfg.n_embd_head_k, cfg.freq_base);
+                        rope_neox_inplace_with_factor(
+                            q_slice,
+                            tok,
+                            cfg.n_embd_head_k,
+                            cfg.freq_base,
+                            cfg.rope_factor,
+                        );
                     }
                 }
             }
@@ -375,7 +381,13 @@ pub fn text_encode(
                 let k_slice = &mut k_all[off..off + cfg.n_embd_head_k];
                 match cfg.rope {
                     Gemma3Rope::Neox => {
-                        rope_neox_inplace(k_slice, tok, cfg.n_embd_head_k, cfg.freq_base);
+                        rope_neox_inplace_with_factor(
+                            k_slice,
+                            tok,
+                            cfg.n_embd_head_k,
+                            cfg.freq_base,
+                            cfg.rope_factor,
+                        );
                     }
                 }
             }

@@ -42,6 +42,18 @@ pub struct Gemma3Config {
     pub eps: f32,
     pub freq_base: f32,
     pub rope: Gemma3Rope,
+    /// RoPE linear-scaling factor (`gemma3.rope.scaling.factor`).
+    /// Standard Gemma 3 4B+/12B/27B declares
+    /// `scaling.type = "linear"` with `factor = 8.0` to extend the
+    /// effective context from 32k → 256k. Smaller variants (270M)
+    /// omit the metadata entirely and use factor=1.0 (no scaling).
+    /// Applied inside `rope_neox_inplace_with_factor` at the Q/K
+    /// application site.
+    pub rope_factor: f32,
+    /// RoPE scaling type as a string (mirrors the metadata, kept
+    /// for diagnostics and future YaRN support). `"linear"` is the
+    /// only one gemma3 ships today.
+    pub rope_scaling_type: String,
     pub pooling_type: u32,
     /// Sliding-window size for local attention (0 = full causal,
     /// no masking). Standard gemma3 270M-it declares 512; BitNet

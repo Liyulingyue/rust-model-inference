@@ -130,6 +130,20 @@ pub fn build_config(source: &dyn TensorSource) -> Result<Gemma3Config, String> {
         eps: pick_f32("gemma3.attention.layer_norm_rms_epsilon")?,
         freq_base: pick_f32("gemma3.rope.freq_base")?,
         rope: Gemma3Rope::Neox,
+        // RoPE linear scaling: standard Gemma 3 4B+/12B/27B
+        // declares `gemma3.rope.scaling.type = "linear"` + a
+        // `factor` (typically 8.0). Smaller variants (270M) omit
+        // the metadata entirely and we default to factor=1.0.
+        rope_factor: source
+            .metadata("gemma3.rope.scaling.factor")
+            .and_then(|v| v.to_f64())
+            .map(|v| v as f32)
+            .unwrap_or(1.0),
+        rope_scaling_type: source
+            .metadata("gemma3.rope.scaling.type")
+            .and_then(|v| v.to_string_val())
+            .unwrap_or("")
+            .to_string(),
         pooling_type: pick_u64("gemma3.pooling_type").unwrap_or(1) as u32,
         sliding_window: source
             .metadata("gemma3.attention.sliding_window")

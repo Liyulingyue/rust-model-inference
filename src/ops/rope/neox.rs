@@ -17,6 +17,25 @@ pub fn rope_sin_cos(theta: f32) -> (f32, f32) {
 }
 
 pub fn rope_neox_inplace(x: &mut [f32], pos: usize, head_dim: usize, freq_base: f32) {
+    rope_neox_inplace_with_factor(x, pos, head_dim, freq_base, 1.0)
+}
+
+/// RoPE-Neox with optional linear position scaling.
+///
+/// `factor > 1.0` extends the effective context length: a position
+/// `pos` is treated as if it were `pos * factor` in the original
+/// (un-scaled) RoPE. This is the "linear scaling" form used by
+/// Gemma 3 4B+/12B/27B (`gemma3.rope.scaling.factor = 8.0`,
+/// `scaling.type = linear`), GPT-NeoX / PaLM-style extension. The
+/// original `rope_neox_inplace` is equivalent to `factor = 1.0`
+/// and kept as a thin wrapper for callers that don't need scaling.
+pub fn rope_neox_inplace_with_factor(
+    x: &mut [f32],
+    pos: usize,
+    head_dim: usize,
+    freq_base: f32,
+    factor: f32,
+) {
     let half = head_dim / 2;
     let n_heads = x.len() / head_dim;
     if half == 0 || n_heads == 0 {
@@ -26,7 +45,7 @@ pub fn rope_neox_inplace(x: &mut [f32], pos: usize, head_dim: usize, freq_base: 
     // Reduces `powf` + `sin_cos` calls from `n_heads × half` to just `half`.
     let mut cos_table = vec![0.0f32; half];
     let mut sin_table = vec![0.0f32; half];
-    let pos_f = pos as f32;
+    let pos_f = pos as f32 * factor;
     let theta_scale = freq_base.powf(-2.0 / head_dim as f32);
     let mut theta = pos_f;
     for i in 0..half {
