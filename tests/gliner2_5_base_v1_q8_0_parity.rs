@@ -3,11 +3,17 @@
 //!
 //! The runtime's `Weight::from_quantized` dispatches on the per-tensor
 //! `ggml_type`, so a GGUF that carries F32 vocab + F32 norms + Q8_0
-//! boundary weights loads unchanged. This test exists to prove the
-//! boundary wire path holds across that mix — the byte-exactness is
-//! F32-only by design, but the quantization adapter that produces the
-//! Q8_0 GGUF needs a non-trivial runtime witness that no kernel
-//! misbehaves on it.
+//! weights loads unchanged. This test exists to prove the boundary wire
+//! path holds across that mix — the byte-exactness is F32-only by design,
+//! but the quantization adapter that produces the Q8_0 GGUF needs a
+//! non-trivial runtime witness that no kernel misbehaves on it.
+//!
+//! The encoder is quantized too (117 of 334 tensors on base-v1, 783 MB →
+//! 490 MB): `gliner::compute::decode_row` accepts the block-quantized
+//! embedding types for the relative-position table and the word embedding,
+//! and the per-layer projections already went through `Weight`. Only
+//! `token_embd` and the 1-D norms stay F32 — see
+//! `tools/converter/utils/quantize_gguf.py` for why.
 //!
 //! `tools/converter/utils/quantize_gguf.py` produces the Q8_0 file when run
 //! against the F32 GGUF. The test reads both, runs the same text/schema

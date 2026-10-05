@@ -12,26 +12,24 @@ picks up unchanged.
 
 What cannot be quantized stays F32:
 
-  * Embeddings and other 1-D / 0-D tensors whose row length is not a
-    multiple of 32. DeBERTa-v3's vocab is 128011/128012, never a multiple
-    of 32, so the embedding stays F32 by necessity rather than choice.
-    The breeze converter makes the same call on its embeddings for the
-    same reason (``convert_breeze.py:286-329``).
-  * The DeBERTa-v3 encoder weights — ``blk.*``, ``token_embd.*``,
-    ``tok_norm.*``, ``rel_embeddings.*``, ``rel_norm.*`` — go through
-    ``gliner::compute::decode_row``, which today is F32-only. Quantizing
-    them would force a second loader change (``compute::matmul_rows``
-    reading Q8_0 on-the-fly). That is tracked as a follow-up; this
-    script keeps the encoder F32 so the resulting GGUF runs through the
-    current loader unchanged.
+  * The word embedding table `token_embd.weight` and every 1-D tensor
+    (norms, biases). `token_embd` is `[vocab, d]` with a vocab of 128011,
+    and GGUF's Q8_0 byte count keys off the first dim, so a
+    non-32-aligned vocab cannot be Q8_0 in this layout at all. 1-D
+    tensors are read through `load_vec`, which decodes F32 and BF16
+    only. Both are the same trade breeze makes
+    (``convert_breeze.py:286-329``).
   * A few small output heads in the boundary family land on GGUF dims
-    where at least one axis is not a multiple of 32 — e.g. ``compat_mix``
-    (1 output), ``inside_weight`` (1 output), ``length_projection``
+    where at least one axis is not a multiple of 32 — e.g. `compat_mix`
+    (1 output), `inside_weight` (1 output), `length_projection`
     (3 outputs) on a 768 wide base-v1. Q8_0 blocks every 32 elements
-    along each axis, and ``dequant_q80_weight`` decodes fewer blocks than
-    the GGUF header claims when the inner dim is shorter than 32,
-    yielding a zeroed slice. The breeze converter keeps the same tensors
-    at full precision for the same reason.
+    along each axis, and `TensorInfo::checked_nbytes` rejects the tensor
+    when an axis is short, so they stay F32.
+
+Everything else crosses, encoder included: `gliner::compute::encode`
+reads the relative-position table and the embedding rows through
+`decode_row`, which accepts the block-quantized embedding types, and the
+per-layer projections already went through `Weight::from_quantized`.
 
 Quantization is line-by-line ggml's ``quantize_row_q8_0_reference``
 (``tools/converter/utils/gguf.py:213``), the same routine the breeze
@@ -58,36 +56,32 @@ from tools.converter.utils.gguf import (
 )
 
 Q8_0_BLOCK = 32
-#: Tensor names the loader decodes through the F32-only ``decode_row`` /
-#: ``matmul_rows`` path inside ``gliner::compute::encode``. Quantizing them
-#: today would require a second loader change. Tracked as follow-up.
-ENCODER_WEIGHTS_PREFIXES: tuple[str, ...] = (
-    "token_embd.",
-    "tok_norm.",
-    "rel_embeddings.",
-    "rel_norm.",
-    "blk.",
-)
+#: Tensors the loader reads through an F32-only path even after the encoder
+#: gained block-quantized row decoding. `token_embd` is a `[vocab, d]` table and
+#: GGUF's Q8_0 byte count keys off the *first* dim, so a vocab of 128011 is
+#: never 32-aligned and cannot be Q8_0 in this layout at all — the header
+#: would round its size to zero. Same reason breeze keeps its embeddings at
+#: full precision (``convert_breeze.py:286-329``).
+KEEP_F32_PREFIXES: tuple[str, ...] = ("token_embd.",)
 
 
 def _pick_target(tensor_name: str, ggml_type: int, dims: tuple[int, ...]) -> int:
     """Decide the GGUF tensor type for `tensor_name` in the output file.
 
-    See the module docstring for the rules. Encoders stay F32 even when
-    their shape is Q8_0-eligible, because the loader is the constraint,
-    not the quantization.
+    See the module docstring for the rules. 1-D tensors are read by the
+    loader through ``load_vec``, which decodes F32 and BF16 only, so they
+    stay as they are; the rest crosses to Q8_0 when every axis aligns.
     """
     if ggml_type != GGML_F32:
         return ggml_type
-    if tensor_name.startswith(ENCODER_WEIGHTS_PREFIXES):
+    if tensor_name.startswith(KEEP_F32_PREFIXES):
         return GGML_F32
     if len(dims) <= 1:
         return GGML_F32
     # Q8_0 blocks every 32 elements along each non-leading axis; both the
     # contiguous dim (GGUF ``dims[0]``) and every other dim must align, or
-    # ``dequant_q80_weight`` decodes fewer blocks than the GGUF header claims
-    # and the output is a zeroed slice. ``TensorInfo::checked_nbytes`` only
-    # checks ``dims[0]`` so the wider-all check is a quantize-tool rule.
+    # ``TensorInfo::checked_nbytes`` rejects the tensor outright and the
+    # loader never sees it.
     for d in dims:
         if int(d) % Q8_0_BLOCK != 0:
             return GGML_F32
