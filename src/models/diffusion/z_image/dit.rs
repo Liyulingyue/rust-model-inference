@@ -2416,11 +2416,10 @@ fn run_block_gpu(
         session
             .record_diy_attention(rows, regions.attention_scores, regions.attention_out)
             .map_err(|error| error.to_string())?;
-        let produced = session
+        session
             .ops()
-            .read_f32(regions.attention_out, hidden_len)
+            .read_f32_into(regions.attention_out, &mut attention[..hidden_len])
             .map_err(|error| error.to_string())?;
-        attention[..hidden_len].copy_from_slice(&produced);
     } else {
         attention_into(
             &qkv[..qkv_len],
@@ -2712,7 +2711,8 @@ mod tests {
             .record_adaln_modulate_rows(&commands, bindings, layout.x, width, rows, width)
             .expect("record");
         commands.submit_and_wait().expect("submit");
-        let got = session.ops().read_f32(layout.x, rows * width).unwrap();
+        let mut got = vec![0.0; rows * width];
+        session.ops().read_f32_into(layout.x, &mut got).unwrap();
 
         let max_abs = expected
             .iter()
@@ -2797,11 +2797,11 @@ mod tests {
             )
             .expect("rms_norm");
         commands.submit_and_wait().expect("submit norm");
-        let normed = session
+        let mut normed = vec![0.0; rows * width];
+        session
             .ops()
-            .read_f32(layout.normed, rows * width)
-            .unwrap()
-            .to_vec();
+            .read_f32_into(layout.normed, &mut normed)
+            .unwrap();
 
         let mut expected_normed = tokens.clone();
         for row in 0..rows {
@@ -2820,7 +2820,11 @@ mod tests {
             .record_adaln_modulate_rows(&commands, modulation, layout.normed, width, rows, width)
             .expect("adaln");
         commands.submit_and_wait().expect("submit adaln");
-        let got = session.ops().read_f32(layout.normed, rows * width).unwrap();
+        let mut got = vec![0.0; rows * width];
+        session
+            .ops()
+            .read_f32_into(layout.normed, &mut got)
+            .unwrap();
 
         let norm_error = normed
             .iter()
@@ -4075,9 +4079,10 @@ mod tests {
         session
             .record_diy_attention(rows, layout.attention_scores, layout.attention_out)
             .expect("gpu attention");
-        let got = session
+        let mut got = vec![0.0; rows * HIDDEN];
+        session
             .ops()
-            .read_f32(layout.attention_out, rows * HIDDEN)
+            .read_f32_into(layout.attention_out, &mut got)
             .expect("read");
 
         let mut max_abs = 0f32;

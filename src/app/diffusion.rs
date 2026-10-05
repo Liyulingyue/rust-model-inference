@@ -153,6 +153,53 @@ pub fn run_z_image_cli(
     Ok(())
 }
 
+pub fn run_ernie_image_cli(
+    diffusion: Arc<dyn TensorSource>,
+    text: Arc<dyn TensorSource>,
+    vae: Arc<dyn TensorSource>,
+    prompt: &str,
+    steps: usize,
+    resolution: usize,
+    seed: i64,
+    out: std::path::PathBuf,
+    n_threads: usize,
+) -> Result<(), String> {
+    use crate::models::diffusion::ernie_image::{
+        ErnieImageOptions, ErnieImagePipeline, ErnieImageRgb,
+    };
+    let started = Instant::now();
+    let pipeline = ErnieImagePipeline::load(diffusion, text, vae, n_threads)?;
+    println!(
+        "ERNIE-Image components loaded in {}ms",
+        started.elapsed().as_millis()
+    );
+    let rgb = pipeline.generate_rgb(
+        prompt,
+        &ErnieImageOptions {
+            steps,
+            resolution,
+            seed,
+        },
+    )?;
+    let z_rgb = ZImageRgb {
+        width: rgb.width,
+        height: rgb.height,
+        bytes: rgb.bytes,
+    };
+    write_png_atomically(&out, &z_rgb)?;
+    let _ = ErnieImageRgb {
+        width: 0,
+        height: 0,
+        bytes: Vec::new(),
+    };
+    println!(
+        "ERNIE-Image PNG saved to {} in {}ms",
+        out.display(),
+        started.elapsed().as_millis()
+    );
+    Ok(())
+}
+
 pub struct QwenImage21Request {
     pub latent: Option<Vec<f32>>,
     pub context: Option<Vec<f32>>,

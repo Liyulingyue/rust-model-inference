@@ -419,6 +419,7 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             | "nomic-bert"
             | "nomic-bert-moe"
             | "mistral3"
+            | "ernie_image"
     ) {
         return Err(format!("Unsupported architecture: {arch}"));
     }
@@ -436,6 +437,32 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             vocab_size: 0,
             rope_freq_base: 0.0,
             norm_eps: 1e-5,
+        });
+    }
+    // ERNIE-Image / ERNIE-Image-Turbo DiT uses default config too: it's a
+    // diffusion model whose GGUF metadata only carries general.architecture
+    // = "ernie_image" (see stable-diffusion.cpp @ de298c2). The pipeline
+    // loads its own config from the tensor inventory.
+    // Note: the unsloth GGUF export mis-tags architecture as "wan", so we
+    // fall back to tensor-name detection when the arch key is missing or
+    // mismatched.
+    let ernie_image_by_arch = arch == "ernie_image";
+    let ernie_image_by_tensor = source
+        .tensor_info("layers.0.self_attention.to_q.weight")
+        .is_some()
+        && source.tensor_info("text_proj.weight").is_some();
+    if ernie_image_by_arch || ernie_image_by_tensor {
+        return Ok(ModelConfig {
+            n_embd: 4096,
+            n_layer: 36,
+            n_head: 32,
+            n_head_kv: 32,
+            n_embd_head: 128,
+            n_ff: 12288,
+            n_ctx: 0,
+            vocab_size: 0,
+            rope_freq_base: 0.0,
+            norm_eps: 1e-6,
         });
     }
     // Nemotron-3 Nano is a hybrid Mamba-Transformer; n_head / n_ff /

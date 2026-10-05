@@ -201,6 +201,61 @@ fn main() {
         DispatchMode::Model => {}
     }
 
+    // ERNIE-Image / ERNIE-Image-Turbo dispatch (MUST run before the Z-Image
+    // branch below, since both share --model/--text-encoder/--vae; the GGUF
+    // signature distinguishes them -- the unsloth export mis-tags
+    // general.architecture as "wan" so we use tensor-name presence as the
+    // primary signal).
+    if options.model.as_os_str().is_empty() == false
+        && options.text_encoder.is_some()
+        && options.vae.is_some()
+        && options.out.is_some()
+        && options.prompt.is_some()
+    {
+        let arch_probe: Arc<dyn TensorSource> =
+            Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+        let arch_name = arch_probe
+            .metadata("general.architecture")
+            .and_then(MetaValue::to_string_val)
+            .unwrap_or_default();
+        let is_ernie_image = arch_name == "ernie_image"
+            || (arch_probe
+                .tensor_info("layers.0.self_attention.to_q.weight")
+                .is_some()
+                && arch_probe.tensor_info("text_proj.weight").is_some());
+        if is_ernie_image {
+            if options.gpu {
+                ops::enable_gpu();
+            }
+            let text: Arc<dyn TensorSource> = Arc::from(open_or_exit(
+                options
+                    .text_encoder
+                    .as_deref()
+                    .expect("ERNIE-Image text encoder required"),
+                ComponentRole::Llm,
+            ));
+            let vae: Arc<dyn TensorSource> = Arc::from(open_or_exit(
+                options.vae.as_deref().expect("ERNIE-Image VAE required"),
+                ComponentRole::Llm,
+            ));
+            app::run_or_exit(app::run_ernie_image_cli(
+                arch_probe,
+                text,
+                vae,
+                options
+                    .prompt
+                    .as_deref()
+                    .expect("ERNIE-Image prompt required"),
+                options.steps.unwrap_or(8),
+                options.resolution.unwrap_or(512),
+                options.seed.unwrap_or(0),
+                options.out.clone().expect("ERNIE-Image --out required"),
+                n_threads,
+            ));
+            return;
+        }
+    }
+
     if let Some(z_image_options) = z_image_options {
         // Has to happen here, not at the shared `enable_gpu()` below: this
         // branch returns before reaching it, and the DiT's projections only
