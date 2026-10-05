@@ -12,6 +12,7 @@ pub mod funasr;
 pub mod gemma3;
 pub mod gemma4;
 pub mod gemma_embedding;
+pub mod gemma2;
 pub mod gliner;
 pub mod hybrid;
 pub mod laya;

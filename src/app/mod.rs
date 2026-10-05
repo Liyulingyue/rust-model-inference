@@ -88,6 +88,10 @@ pub fn compute_embedding(
         // the same SPM tokenizer (`tokenizer.ggml.model = "llama"`,
         // `pre = "default"`, no merges).
         "gemma3" => crate::models::gemma3::compute_embedding(source, prompt, n_threads_arg),
+        // gemma2 (standard, non-BitNet). Shares tensor layout with
+        // the llama trunk; arch-specific GeGLU + softcap + sliding
+        // window is wired inside `models::llama::trunk`.
+        "gemma2" => crate::models::gemma2::compute_embedding(source, prompt, n_threads_arg),
         "bert" | "jina-bert-v2" | "nomic-bert" | "nomic-bert-moe" => {
             crate::models::bert_family::compute_embedding(source, prompt, n_threads_arg)
         }

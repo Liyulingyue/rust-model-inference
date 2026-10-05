@@ -19,7 +19,11 @@ pub(crate) fn uses_llama_trunk(arch: &str) -> bool {
         // yarn_log_multiplier}` inside the trunk, so this dispatch is
         // unconditional — Mistral 3 3B / Shieldstral / Ministral-3
         // (`harshatheg/Ministral-3-3B-Instruct-2512-GGUF`) all route here.
-        "llama" | "exaone" | "k2-horizon" | "granite" | "nanbeige" | "phi3" | "glm4" | "mistral3"
+        // `gemma2` rides the llama trunk too — it shares the standard
+        // llama.cpp tensor layout (no BitLinear packing) and adds
+        // GeGLU + sliding-window attention + logit softcapping,
+        // all detected from `gemma2.*` GGUF metadata inside the trunk.
+        "llama" | "exaone" | "k2-horizon" | "granite" | "nanbeige" | "phi3" | "glm4" | "mistral3" | "gemma2"
     )
 }
 

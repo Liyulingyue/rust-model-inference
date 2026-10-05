@@ -1163,6 +1163,12 @@ impl<'a> LlamaSession<'a> {
                             n_embd_gqa,
                             n_cached,
                             kq_scale,
+                            // TODO(gemma2-session): pass through the
+                            // attn logit softcap here once the
+                            // session reads `attn_logit_softcapping`
+                            // from metadata. 0.0 keeps every other
+                            // llama-family model bit-identical.
+                            0.0,
                         );
                     }
                 } else {
