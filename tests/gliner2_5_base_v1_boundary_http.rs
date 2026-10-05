@@ -361,3 +361,143 @@ fn boundary_http_rejects_bad_requests() {
         "/v1/jev/score should not exist on the boundary backend"
     );
 }
+
+/// Each entry is one HTTP validation case: the body sent to the route,
+/// the expected response code, and a snippet of the error message the
+/// server is expected to produce. The cases are deliberately varied:
+/// missing required fields, wrong field types, semantically empty
+/// schemas, malformed `threshold`, and shape-of-route mistakes. The
+/// list is not exhaustive — it covers every error class the handler
+/// reports today, so a future refactor that drops one will fail this
+/// test rather than silently leak through to a 200.
+const VALIDATION_CASES: &[(&str, u16, &str)] = &[
+    // Missing top-level fields: serde surfaces these as `invalid JSON`
+    // with the field name in the message, which is the only signal a
+    // caller gets before the handler runs.
+    (r#"{"schema": {"entities": ["person"]}}"#, 400, "context"),
+    (r#"{"context": "x"}"#, 400, "schema"),
+    // Field type errors: the handler's JSON schema is structural, and
+    // serde's parser refuses to coerce. The error class is the same
+    // `invalid JSON` because the body does not deserialize, but the
+    // message names the offending field.
+    (
+        r#"{"context": 123, "schema": {"entities": ["person"]}}"#,
+        400,
+        "context",
+    ),
+    (
+        r#"{"context": "x", "schema": "not an object"}"#,
+        400,
+        "schema",
+    ),
+    (
+        r#"{"context": "x", "schema": {"entities": "not a list"}}"#,
+        400,
+        "entities",
+    ),
+    (
+        r#"{"context": "x", "schema": {"classifications": "not a list"}}"#,
+        400,
+        "classifications",
+    ),
+    // Semantic emptiness: the schema parses but no extractive group
+    // exists, so the handler short-circuits with the missing-group
+    // message rather than running the model. Same code (400) as the
+    // field-type errors but a different validator.
+    (r#"{"context": "x", "schema": {}}"#, 400, "entities"),
+    (
+        r#"{"context": "x", "schema": {"entities": []}}"#,
+        400,
+        "entities",
+    ),
+    // Blank context: the handler's `trim().is_empty()` guard rejects
+    // whitespace-only text. A non-blank single character is fine.
+    (
+        r#"{"context": "  \t\n  ", "schema": {"entities": ["person"]}}"#,
+        400,
+        "context",
+    ),
+    // `threshold` must be a number, not a string, and within the
+    // reference's documented [0.0, 1.0] logit-to-probability range.
+    (
+        r#"{"context": "x", "schema": {"entities": ["person"]}, "threshold": "low"}"#,
+        400,
+        "threshold",
+    ),
+    // Method / path validation: a `GET` on the POST-only route is
+    // an axum-router-level rejection, not a 400 from our handler.
+    // The JEV-shape path on the boundary backend stays 404.
+];
+
+#[test]
+fn boundary_http_validates_request_shape() {
+    let path = std::env::var_os("RMI_GLINER2_5_BASE_V1_GGUF")
+        .map(std::path::PathBuf::from)
+        .expect("set RMI_GLINER2_5_BASE_V1_GGUF to the F32 boundary GGUF");
+    let server = spawn_server(&path);
+
+    for (body, expected_code, needle) in VALIDATION_CASES {
+        let (code, value) = post(server.addr, "/v1/jev/boundary", body);
+        assert_eq!(
+            code, *expected_code,
+            "body was {value}; expected {expected_code} for `{body}`"
+        );
+        let message = value["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .to_lowercase();
+        assert!(
+            message.contains(&needle.to_lowercase()) || (expected_code != &400),
+            "error message {message:?} should mention `{needle}` for body `{body}`"
+        );
+    }
+
+    // Body limit: the route's DefaultBodyLimit is 4 MB; a body
+    // meaningfully over that must be rejected before the handler runs.
+    // We send 5 MB of whitespace through `curl --data-binary @-` with
+    // stdin — `curl -d BODY` would put the whole 5 MB on the process
+    // argv and trip Linux's `ARG_MAX`, which is unrelated to the
+    // behaviour under test.
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("curl")
+        .arg("-s")
+        .arg("-m")
+        .arg("20")
+        .arg("-o")
+        .arg("/dev/null")
+        .arg("-w")
+        .arg("%{http_code}")
+        .arg("-X")
+        .arg("POST")
+        .arg(format!("http://{}/v1/jev/boundary", server.addr))
+        .arg("-H")
+        .arg("Content-Type: application/json")
+        .arg("--data-binary")
+        .arg("@-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("curl spawn");
+    {
+        let mut stdin = child.stdin.as_mut().expect("curl stdin");
+        stdin
+            .write_all(
+                std::iter::repeat(b' ')
+                    .take(5 * 1024 * 1024)
+                    .collect::<Vec<u8>>()
+                    .as_slice(),
+            )
+            .expect("write 5 MB to curl");
+    }
+    let out = child.wait_with_output().expect("curl wait");
+    let code = String::from_utf8_lossy(&out.stdout).to_string();
+    let parsed: u16 = code
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("curl wrote {code:?}, expected a status code"));
+    assert!(
+        parsed == 413 || parsed == 400,
+        "5 MB body should trip the body limit, got {parsed}"
+    );
+}
