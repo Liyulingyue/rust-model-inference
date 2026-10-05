@@ -4,7 +4,7 @@ mod uv_model;
 use crate::core::tensor::{GGMLType, MetaValue, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::ops::{
-    dot_f16_f16_bytes, dot_f32, f16_to_f32, f32_to_f16, rope_neox_inplace, softmax_inplace,
+    dot_f16_f16_bytes, dot_f32, f16_to_f32, f32_to_f16, rope_neox_inplace_with_factor, softmax_inplace,
 };
 pub use config::Gemma4VisionConfig;
 use std::path::Path;
@@ -667,18 +667,18 @@ fn apply_2d_rope(values: &mut [f32], patches_x: usize, patches_y: usize) -> Resu
             let token = y * patches_x + x;
             for head in 0..HEADS {
                 let offset = token * EMBED + head * HEAD_DIM;
-                rope_neox_inplace(
+                rope_neox_inplace_with_factor(
                     &mut values[offset..offset + HEAD_DIM / 2],
                     x,
                     HEAD_DIM / 2,
-                    ROPE_BASE,
-                );
-                rope_neox_inplace(
+                    ROPE_BASE, 1.0_f32,
+            );
+                rope_neox_inplace_with_factor(
                     &mut values[offset + HEAD_DIM / 2..offset + HEAD_DIM],
                     y,
                     HEAD_DIM / 2,
-                    ROPE_BASE,
-                );
+                    ROPE_BASE, 1.0_f32,
+            );
             }
         }
     }

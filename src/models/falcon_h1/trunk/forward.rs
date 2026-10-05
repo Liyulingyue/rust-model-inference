@@ -18,7 +18,7 @@ use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::{Kernel, Weight};
 use crate::ops::{
-    f32_slice_to_f16, quantize_q8_0_into, rope_neox_inplace, rope_norm, sample_llama_cpp,
+    f32_slice_to_f16, quantize_q8_0_into, rope_neox_inplace_with_factor, rope_norm, sample_llama_cpp,
     softmax_inplace,
 };
 

@@ -478,12 +478,12 @@ impl Qwen3Session<'_> {
                 }
                 for head in q.chunks_exact_mut(config.n_embd_head_k) {
                     match config.rope {
-                        Qwen3Rope::Neox => rope_neox_inplace(
+                        Qwen3Rope::Neox => rope_neox_inplace_with_factor(
                             head,
                             position[0],
                             config.n_embd_head_k,
                             config.freq_base,
-                        ),
+                        1.0_f32),
                         Qwen3Rope::Interleaved { sections, n_dims } => rope_mrope_interleaved(
                             head,
                             position,
@@ -496,12 +496,12 @@ impl Qwen3Session<'_> {
                 }
                 for head in k.chunks_exact_mut(config.n_embd_head_k) {
                     match config.rope {
-                        Qwen3Rope::Neox => rope_neox_inplace(
+                        Qwen3Rope::Neox => rope_neox_inplace_with_factor(
                             head,
                             position[0],
                             config.n_embd_head_k,
                             config.freq_base,
-                        ),
+                        1.0_f32),
                         Qwen3Rope::Interleaved { sections, n_dims } => rope_mrope_interleaved(
                             head,
                             position,

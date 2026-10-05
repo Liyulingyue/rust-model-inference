@@ -10,7 +10,7 @@ use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{EncodeOptions, SPMTokenizer};
 use crate::ops::kernel::Weight;
 use crate::ops::quant::BlockQ8K;
-use crate::ops::{embedding_lookup, gelu_ggml_f16_inplace, rope_neox_inplace, softmax_inplace};
+use crate::ops::{embedding_lookup, gelu_ggml_f16_inplace, rope_neox_inplace_with_factor, softmax_inplace};
 use std::sync::Arc;
 
 use super::weights::{load_weights, GemmaEmbeddingWeights};
@@ -356,22 +356,22 @@ pub fn run_embedding_tokens(
         for t in 0..n_tokens {
             let q = &mut q_buf[t * n_embd_q..(t + 1) * n_embd_q];
             for h in 0..n_head {
-                rope_neox_inplace(
+                rope_neox_inplace_with_factor(
                     &mut q[h * n_embd_head_k..(h + 1) * n_embd_head_k],
                     t,
                     n_embd_head_k,
-                    freq_base,
+                    freq_base, 1.0_f32,
                 );
             }
         }
         for t in 0..n_tokens {
             let k = &mut k_buf[t * n_embd_gqa..(t + 1) * n_embd_gqa];
             for h in 0..n_head_kv {
-                rope_neox_inplace(
+                rope_neox_inplace_with_factor(
                     &mut k[h * n_embd_head_k..(h + 1) * n_embd_head_k],
                     t,
                     n_embd_head_k,
-                    freq_base,
+                    freq_base, 1.0_f32,
                 );
             }
         }

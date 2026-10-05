@@ -1,8 +1,11 @@
 //! Neox-style RoPE: rotate lo/hi halves independently.
 //!
 //! Public API:
-//! - [`rope_neox_inplace`] — high-level entry point that caches the sin/cos table once
-//!   per token and dispatches to the AVX2 / NEON / scalar apply kernel.
+//! - [`rope_neox_inplace_with_factor`] — high-level entry point that
+//!   caches the sin/cos table once per token and dispatches to the
+//!   AVX2 / NEON / scalar apply kernel. The `factor` argument is the
+//!   linear-scaling multiplier applied to the effective position;
+//!   pass `1.0` for vanilla RoPE (no wrapper / no hidden multiply).
 //!
 //! Private kernels:
 //! - [`rope_neox_inplace_avx2`] / [`rope_neox_inplace_neon`] /
@@ -16,19 +19,21 @@ pub fn rope_sin_cos(theta: f32) -> (f32, f32) {
     (cos, sin)
 }
 
-pub fn rope_neox_inplace(x: &mut [f32], pos: usize, head_dim: usize, freq_base: f32) {
-    rope_neox_inplace_with_factor(x, pos, head_dim, freq_base, 1.0)
-}
-
 /// RoPE-Neox with optional linear position scaling.
 ///
-/// `factor > 1.0` extends the effective context length: a position
-/// `pos` is treated as if it were `pos * factor` in the original
-/// (un-scaled) RoPE. This is the "linear scaling" form used by
-/// Gemma 3 4B+/12B/27B (`gemma3.rope.scaling.factor = 8.0`,
-/// `scaling.type = linear`), GPT-NeoX / PaLM-style extension. The
-/// original `rope_neox_inplace` is equivalent to `factor = 1.0`
-/// and kept as a thin wrapper for callers that don't need scaling.
+/// `factor` is the linear-scaling multiplier applied to the
+/// effective position (`theta_i = pos * factor * freq_base^(-2i/d)`):
+///
+/// - `factor = 1.0` — vanilla RoPE (no scaling). All non-gemma3-4B
+///   callers pass 1.0 explicitly; no hidden per-call multiply is
+///   folded into a wrapper that the compiler can't constant-fold
+///   away.
+/// - `factor > 1.0` — linear position scaling. Gemma 3 4B+/
+///   12B/27B declares `gemma3.rope.scaling.factor = 8.0`,
+///   `scaling.type = linear` to extend the effective context
+///   from 32k → 256k. The gemma3 trunk reads `cfg.rope_factor`
+///   from metadata and passes it here. Same form as GPT-NeoX /
+///   PaLM-style RoPE extension.
 pub fn rope_neox_inplace_with_factor(
     x: &mut [f32],
     pos: usize,
@@ -180,7 +185,7 @@ pub(crate) fn rope_neox_inplace_scalar(
 /// Rope with a caller-supplied cos/sin table and bf16-quantised
 /// intermediates.
 ///
-/// Unlike [`rope_neox_inplace`] this entry point does not compute the
+/// Unlike [`rope_neox_inplace_with_factor`] this entry point does not compute the
 /// sin/cos table internally — the caller is expected to pre-quantise
 /// cos/sin to BF16 (matching the upstream `bf(angle.cos())` /
 /// `bf(angle.sin())` round-trips) and to handle any rope variant
@@ -331,7 +336,7 @@ mod tests {
         values[130] = f32::from_bits(0xbccb_b52e);
         values[138] = f32::from_bits(0xbd7e_afee);
 
-        rope_neox_inplace(&mut values, 1, 256, 10_000.0);
+        rope_neox_inplace_with_factor(&mut values, 1, 256, 10_000.0, 1.0_f32);
 
         assert_eq!(values[2].to_bits(), 0x3e89_3aee);
         assert_eq!(values[10].to_bits(), 0x3e82_1b0c);

@@ -11,7 +11,7 @@ use crate::models::qwen3::{get_f32_tensor, load_layers, Qwen3LayerWeights};
 use crate::ops::kernel::Weight;
 use crate::ops::quant::BlockQ8K;
 use crate::ops::{
-    dot_f32, embedding_lookup, rms_norm, rms_norm_inplace, rope_neox_inplace,
+    dot_f32, embedding_lookup, rms_norm, rms_norm_inplace, rope_neox_inplace_with_factor,
     silu_mul_approx_inplace, softmax_inplace,
 };
 use std::sync::Arc;
@@ -448,22 +448,22 @@ pub fn run_embedding_tokens(
         for t in embedding_positions(n_tokens) {
             let q = &mut q_buf[t * n_embd_q..(t + 1) * n_embd_q];
             for h in 0..n_head {
-                rope_neox_inplace(
+                rope_neox_inplace_with_factor(
                     &mut q[h * n_embd_head_k..(h + 1) * n_embd_head_k],
                     t,
                     n_embd_head_k,
-                    freq_base,
+                    freq_base, 1.0_f32,
                 );
             }
         }
         for t in embedding_positions(n_tokens) {
             let k = &mut k_buf[t * n_embd_gqa..(t + 1) * n_embd_gqa];
             for h in 0..n_head_kv {
-                rope_neox_inplace(
+                rope_neox_inplace_with_factor(
                     &mut k[h * n_embd_head_k..(h + 1) * n_embd_head_k],
                     t,
                     n_embd_head_k,
-                    freq_base,
+                    freq_base, 1.0_f32,
                 );
             }
         }

@@ -12,10 +12,10 @@
 //! - [`rope_mrope_interleaved`] — interleaved-pair layout: rotate
 //!   `(x[2i], x[2i + 1])` at `pair % section_pairs`.
 //!
-//! `rope_mrope` internally delegates to [`super::rope_neox_inplace`] when
+//! `rope_mrope` internally delegates to [`super::rope_neox_inplace_with_factor`] when
 //! `sections` are all-zero (pure text mode).
 
-use super::neox::rope_neox_inplace;
+use super::neox::rope_neox_inplace_with_factor;
 
 unsafe extern "C" {
     fn powf(base: f32, exponent: f32) -> f32;
@@ -37,7 +37,7 @@ pub fn rope_mrope(
     let half = head_dim / 2;
     let total_sections: i32 = sections.iter().sum();
     if total_sections == 0 {
-        rope_neox_inplace(x, positions[0], head_dim, freq_base);
+        rope_neox_inplace_with_factor(x, positions[0], head_dim, freq_base, 1.0_f32);
         return;
     }
     let total_sections = total_sections as usize;

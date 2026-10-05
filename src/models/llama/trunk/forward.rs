@@ -14,7 +14,7 @@ use crate::ops::embedding_lookup;
 use crate::ops::kernel::{QuantizedTensor, Weight};
 use crate::ops::{
     dot_f16_f32, dot_f32, f32_slice_to_f16, quantize_q8_0_into, rms_norm_grouped, rms_norm_inplace,
-    rope_neox_inplace, rope_norm, silu_mul_approx_inplace, silu_mul_inplace, softmax_inplace,
+    rope_neox_inplace_with_factor, rope_norm, silu_mul_approx_inplace, silu_mul_inplace, softmax_inplace,
     sum_sq_f32, vec_add_into, vec_mad_f16_f32, vec_mad_f32, vec_scale_f32,
 };
 use crate::prompt::format_k2_horizon_chat_prompt_with_thinking;
@@ -454,7 +454,7 @@ fn rope_norm_with_thetas(
     }
 }
 
-/// Same as `crate::ops::rope::neox::rope_neox_inplace` but optionally
+/// Same as `rope_neox_inplace_with_factor` but optionally
 /// reads per-dim thetas from `yarn_thetas` (length = `head_dim / 2`)
 /// instead of `pos * freq_base^(-2i/head_dim)`.
 fn rope_neox_inplace_with_thetas(
@@ -2989,7 +2989,7 @@ mod tests {
         let mut actual = [1.0, 2.0, 3.0, 4.0];
         let mut expected = actual;
         apply_rope("k2-horizon", &mut actual, 7, 4, 10_000_000.0, 4, 1.0, None);
-        crate::ops::rope_neox_inplace(&mut expected, 7, 4, 10_000_000.0);
+        crate::ops::rope_neox_inplace_with_factor(&mut expected, 7, 4, 10_000_000.0, 1.0_f32);
         assert_eq!(actual.map(f32::to_bits), expected.map(f32::to_bits));
     }
 
