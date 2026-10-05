@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
+use rayon::prelude::*;
 
 use super::AukAudio;
 
@@ -475,23 +476,47 @@ fn apply_branch_conv_dilated(
     // approximated as stride=1 with extra zero-padding in the loop body.
     // For dilation>1 the conv weight's effective stride is dilation, which
     // we model by spacing out the kernel taps via the dilation factor.
-    for oc in 0..channels {
-        for t in 0..padded_frames {
-            let mut sum = bias[oc];
-            for k in 0..kernel {
-                let src_signed = t as isize - (k as isize * dilation as isize);
-                if src_signed < 0 || src_signed >= padded_frames as isize {
-                    continue;
+    // Parallelize the output-channel loop with rayon: each `oc` writes a
+    // disjoint slice of `out`, so no synchronization needed.
+    use rayon::prelude::*;
+    let padded_frames_const = padded_frames;
+    let kernel_const = kernel;
+    let channels_const = channels;
+    let dilation_const = dilation;
+    let weight_ptr = weight.as_ptr() as usize;
+    let weight_len = weight.len();
+    let padded_ptr = padded.as_ptr() as usize;
+    let padded_len = padded.len();
+    let out_ptr = out.as_mut_ptr() as usize;
+    let out_len = out.len();
+    let bias_ptr = bias.as_ptr() as usize;
+    out.par_chunks_mut(padded_frames)
+        .enumerate()
+        .for_each(|(oc, out_row)| {
+            let w_slice = unsafe {
+                std::slice::from_raw_parts(weight_ptr as *const f32, weight_len)
+            };
+            let p_slice = unsafe {
+                std::slice::from_raw_parts(padded_ptr as *const f32, padded_len)
+            };
+            let b_slice =
+                unsafe { std::slice::from_raw_parts(bias_ptr as *const f32, channels_const) };
+            for t in 0..padded_frames_const {
+                let mut sum = b_slice[oc];
+                for k in 0..kernel_const {
+                    let src_signed = t as isize - (k as isize * dilation_const as isize);
+                    if src_signed < 0 || src_signed >= padded_frames_const as isize {
+                        continue;
+                    }
+                    let src = src_signed as usize;
+                    for ic in 0..channels_const {
+                        let w = w_slice[(k * channels_const + oc) * channels_const + ic];
+                        sum += w * p_slice[ic * padded_frames_const + src];
+                    }
                 }
-                let src = src_signed as usize;
-                for ic in 0..channels {
-                    let w = weight[(k * channels + oc) * channels + ic];
-                    sum += w * padded[ic * padded_frames + src];
-                }
+                out_row[t] = sum;
             }
-            out[oc * padded_frames + t] = sum;
-        }
-    }
+        });
     // Crop center to original frames.
     for c in 0..channels {
         for t in 0..frames {
