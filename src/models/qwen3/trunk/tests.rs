@@ -361,6 +361,7 @@ fn prefill_qwen3_tokens(
                 deepstack_embeddings: None,
             },
             batch_size,
+            true,
         )
         .map(|_| ())
 }
@@ -468,6 +469,7 @@ fn qwen3_four_axis_positions_and_deepstack_match_across_chunks() {
                     deepstack_embeddings: Some(&deepstack),
                 },
                 batch,
+                true,
             )
             .unwrap();
         (

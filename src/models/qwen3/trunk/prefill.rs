@@ -138,14 +138,6 @@ impl Qwen3Session<'_> {
         &mut self,
         input: &Qwen3Input<'_>,
         batch_size: usize,
-    ) -> Result<Duration, String> {
-        self.prefill_inner(input, batch_size, true)
-    }
-
-    pub(super) fn prefill_inner(
-        &mut self,
-        input: &Qwen3Input<'_>,
-        batch_size: usize,
         need_logits: bool,
     ) -> Result<Duration, String> {
         let batch_size = checked_prefill_batch_size(Some(batch_size))?;

@@ -1,7 +1,6 @@
 use super::{dit::trace, CONTEXT_DIM};
 use crate::core::scratchpad::{KvFormat, KvLifecycle};
 use crate::core::tokenizer::EncodeOptions;
-use crate::models::qwen3::vision::{VisionEncoder, VisionScratchpad};
 use crate::models::qwen3::{Qwen3Input, Qwen3Model, Qwen3Session};
 
 const SYSTEM: &str = "Describe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:";
@@ -11,23 +10,6 @@ const IMAGE: &str = "<|vision_start|><|image_pad|><|vision_end|>";
 pub struct ReferenceFeatures {
     pub embeddings: Vec<f32>,
     pub deepstack: Vec<f32>,
-}
-
-pub fn encode_reference(
-    encoder: &VisionEncoder<'_>,
-    pixels: &[f32],
-    height: usize,
-    width: usize,
-) -> Result<ReferenceFeatures, String> {
-    if height > 512 || width > 512 || pixels.iter().any(|v| !v.is_finite()) {
-        return Err("Invalid Mage reference pixels".into());
-    }
-    let mut scratch = VisionScratchpad::new(&encoder.config);
-    encoder.encode_image(pixels, width, height, &mut scratch)?;
-    Ok(ReferenceFeatures {
-        embeddings: scratch.projected,
-        deepstack: scratch.deepstack,
-    })
 }
 
 pub fn prompt_text(prompt: &str, references: usize) -> String {

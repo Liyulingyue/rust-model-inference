@@ -1,4 +1,4 @@
-use super::dit::{trace, unweighted_norm};
+use super::dit::trace;
 use crate::core::tensor::{load_f32_tensor, GGMLType, MetaValue, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::models::diffusion::dreamx::kernels::{
@@ -53,9 +53,6 @@ impl<'a> MageVae<'a> {
             return Err("Expected deterministic mage_vae GGUF".into());
         }
         Ok(Self { source, pool })
-    }
-    fn vector(&self, name: &str, width: usize) -> Result<Vec<f32>, String> {
-        load_f32_tensor(self.source, name, &[width as u64])
     }
     fn linear(
         &self,
@@ -113,7 +110,11 @@ impl<'a> MageVae<'a> {
         let out = usize::try_from(info.dims[3]).map_err(|e| e.to_string())?;
         let w = load_f32_tensor(self.source, &weight_name, &info.dims)?;
         let b = if bias {
-            Some(self.vector(&format!("{name}.bias"), out)?)
+            Some(load_f32_tensor(
+                self.source,
+                &format!("{name}.bias"),
+                &[out as u64],
+            )?)
         } else {
             None
         };
@@ -136,11 +137,11 @@ impl<'a> MageVae<'a> {
         let [width, h, w] = input.shape;
         let rows = input.rows();
         let values = if let Some(name) = name {
-            let weight = self.vector(&format!("{name}.weight"), width)?;
-            let bias = self.vector(&format!("{name}.bias"), width)?;
+            let weight = load_f32_tensor(self.source, &format!("{name}.weight"), &[width as u64])?;
+            let bias = load_f32_tensor(self.source, &format!("{name}.bias"), &[width as u64])?;
             layer_norm_rows(&rows, h * w, Some(&weight), Some(&bias), 1e-6)?
         } else {
-            unweighted_norm(&rows, h * w, width)?
+            layer_norm_rows(&rows, h * w, Some(&vec![1.0; width]), None, 1e-6)?
         };
         Ok(Map::from_rows(&values, input.shape))
     }
@@ -150,8 +151,8 @@ impl<'a> MageVae<'a> {
             &input.data,
             [c, 1, h, w],
             32,
-            &self.vector(&format!("{name}.weight"), c)?,
-            &self.vector(&format!("{name}.bias"), c)?,
+            &load_f32_tensor(self.source, &format!("{name}.weight"), &[c as u64])?,
+            &load_f32_tensor(self.source, &format!("{name}.bias"), &[c as u64])?,
             1e-6,
         )?;
         Ok(Map {
@@ -411,8 +412,8 @@ impl<'a> MageVae<'a> {
             let mut c = cond.clone();
             silu_inplace(&mut c);
             let m = self.linear(&format!("{name}.adaLN_modulation.1"), &c, n * 256, 32, 96)?;
-            let norm_weight = self.vector(&format!("{name}.in_ln.weight"), 32)?;
-            let norm_bias = self.vector(&format!("{name}.in_ln.bias"), 32)?;
+            let norm_weight = load_f32_tensor(self.source, &format!("{name}.in_ln.weight"), &[32])?;
+            let norm_bias = load_f32_tensor(self.source, &format!("{name}.in_ln.bias"), &[32])?;
             let mut norm =
                 layer_norm_rows(&x, n * 256, Some(&norm_weight), Some(&norm_bias), 1e-6)?;
             for r in 0..n * 256 {
@@ -433,7 +434,7 @@ impl<'a> MageVae<'a> {
         let x = rms_norm_rows(
             &x,
             n * 256,
-            &self.vector(&format!("{p}.final_layer.norm.weight"), 32)?,
+            &load_f32_tensor(self.source, &format!("{p}.final_layer.norm.weight"), &[32])?,
             1e-6,
         )?;
         let x = self.linear(&format!("{p}.final_layer.linear"), &x, n * 256, 32, 3)?;

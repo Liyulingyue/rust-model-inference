@@ -26,7 +26,7 @@ class Scalar(BaseScalar):
             "linear":[p,p,p,p,n,n,n],"unary":[p,p,n,i,f],"binary":[p,p,p,n,i],
             "norm":[p,p,p,p,n,n,f],"softmax":[p,p,n,n],"sum_rows":[p,p,n,n],
             "attention":[p,p,p,p,p,n,n,n,n,f],
-            "mage_attention":[p,p,p,p,n,n,n,n,f,i,i,i],"mage_linear64":[p,p,p,p,n,n,n],"mage_softmax64":[p,p,n,n],"mage_patch":[p,p,p,p,n,n,n],
+            "mage_attention":[p,p,p,p,n,n,n,n,f,i,i,i],"mage_linear64":[p,p,p,p,n,n,n],"mage_softmax64":[p,p,n,n],
             "mage_unary":[p,p,n,i],"mage_mean":[p,p,n,n],
             "mage_norm":[p,p,p,p,p,p,n,n,f],"mage_group_norm":[p,p,p,p,n,n,n,n,f],
             "mage_linspace":[f,f,p,n],"mage_conv":[p,p,p,p]+[n]*12,"mage_complex_mul":[p,p,p,n],
@@ -64,7 +64,7 @@ class Scalar(BaseScalar):
             return y
         if name=="aten.conv3d.default" and self.kind=="vision":
             a,w,b=args[:3];assert a.shape[2:]==w.shape[2:] and a.shape[1]==w.shape[1]
-            y=torch.empty((a.shape[0],w.shape[0],1,1,1));self.call("mage_patch",a.contiguous(),w.contiguous(),b,y,a.shape[0],w[0].numel(),w.shape[0]);return y
+            y=torch.empty((a.shape[0],w.shape[0],1,1,1));self.call("mage_linear64",a.contiguous(),w.contiguous(),b,y,a.shape[0],w[0].numel(),w.shape[0]);return y
         if name=="aten.linspace.default":
             start,end,count=args;y=torch.empty(count,dtype=kw.get("dtype",torch.float32))
             assert y.dtype==torch.float32 and y.device.type=="cpu"

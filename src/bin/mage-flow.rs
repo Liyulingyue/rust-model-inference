@@ -1,17 +1,18 @@
+use rust_model_inference::app::read_f32_file;
 use rust_model_inference::core::{tensor::GGMLType, tokenizer::BPETokenizer};
 use rust_model_inference::models::gemma4::vision::resize_bicubic_pillow;
 use rust_model_inference::models::{
     diffusion::mage_flow::{
-        text::{encode_prompt, encode_reference, ReferenceFeatures},
+        dit::MageFlowDit,
+        text::{encode_prompt, ReferenceFeatures},
         vae::MageVae,
-        MageFlowDit,
     },
     qwen3::{
         vision::{qwen_smart_resize, VisionEncoder, VisionScratchpad},
         Qwen3Model,
     },
 };
-use rust_model_inference::{read_f32_file, ComputePool, GGUFLoader};
+use rust_model_inference::{ComputePool, GGUFLoader};
 use std::{
     collections::HashMap,
     io::Write,
@@ -179,45 +180,38 @@ fn reference_features(
     let encoder = vision_model(source.ok_or("Edit conditioning requires --vision")?, pool)?;
     refs.iter()
         .map(|p| {
-            let mut image = image::open(p).map_err(|e| e.to_string())?.to_rgb8();
+            let image = image::open(p).map_err(|e| e.to_string())?.to_rgb8();
             let (w, h) = image.dimensions();
+            let (mut w, mut h) = (w as usize, h as usize);
+            let mut pixels = image.into_raw();
             if w.max(h) > 384 {
                 let ratio = 384.0 / w.max(h) as f64;
-                image = resize_reference(
-                    &image,
-                    (w as f64 * ratio).round_ties_even().max(1.0) as usize,
-                    (h as f64 * ratio).round_ties_even().max(1.0) as usize,
-                )?;
+                let new_w = (w as f64 * ratio).round_ties_even().max(1.0) as usize;
+                let new_h = (h as f64 * ratio).round_ties_even().max(1.0) as usize;
+                pixels = resize_bicubic_pillow(&pixels, w, h, new_w, new_h)?;
+                (w, h) = (new_w, new_h);
             }
             let mut cfg = encoder.config.clone();
             cfg.image_min_pixels = 65536;
             cfg.image_max_pixels = 16777216;
-            let grid = qwen_smart_resize(image.width() as usize, image.height() as usize, &cfg)?;
-            let (h, w) = (grid.image_height(), grid.image_width());
-            let image = resize_reference(&image, w, h)?;
-            let pixels: Vec<_> = image
-                .as_raw()
+            let grid = qwen_smart_resize(w, h, &cfg)?;
+            let (new_h, new_w) = (grid.image_height(), grid.image_width());
+            let pixels = resize_bicubic_pillow(&pixels, w, h, new_w, new_h)?;
+            let pixels: Vec<_> = pixels
                 .iter()
                 .map(|&v| (v as f32 / 255.0 - 0.5) / 0.5)
                 .collect();
-            encode_reference(&encoder, &pixels, h, w)
+            if new_h > 512 || new_w > 512 || pixels.iter().any(|v| !v.is_finite()) {
+                return Err("Invalid Mage reference pixels".into());
+            }
+            let mut scratch = VisionScratchpad::new(&encoder.config);
+            encoder.encode_image(&pixels, new_w, new_h, &mut scratch)?;
+            Ok(ReferenceFeatures {
+                embeddings: scratch.projected,
+                deepstack: scratch.deepstack,
+            })
         })
         .collect()
-}
-fn resize_reference(
-    image: &image::RgbImage,
-    width: usize,
-    height: usize,
-) -> Result<image::RgbImage, String> {
-    let pixels = resize_bicubic_pillow(
-        image.as_raw(),
-        image.width() as usize,
-        image.height() as usize,
-        width,
-        height,
-    )?;
-    image::RgbImage::from_raw(width as u32, height as u32, pixels)
-        .ok_or("Invalid resized reference".into())
 }
 fn run() -> Result<(), String> {
     let (mode, args, refs) = arguments()?;
@@ -313,9 +307,15 @@ fn run() -> Result<(), String> {
         let mut shapes = vec![[lh, lw]];
         for p in &refs {
             let image = image::open(p).map_err(|e| e.to_string())?.to_rgb8();
-            let image = resize_reference(&image, w, h)?;
+            let rgb = resize_bicubic_pillow(
+                image.as_raw(),
+                image.width() as usize,
+                image.height() as usize,
+                w,
+                h,
+            )?;
             let mut pixels = vec![0.0; 3 * h * w];
-            for (i, pixel) in image.pixels().enumerate() {
+            for (i, pixel) in rgb.chunks_exact(3).enumerate() {
                 for c in 0..3 {
                     pixels[c * h * w + i] = (pixel[c] as f32 / 255.0 - 0.5) / 0.5;
                 }

@@ -37,15 +37,6 @@ VARIANTS = {
 }
 
 
-def _find_transformer(root: Path) -> Path:
-    candidates = sorted((root / "transformer").glob("*.safetensors"))
-    if not candidates:
-        raise FileNotFoundError(f"no transformer safetensors under {root / 'transformer'}")
-    if len(candidates) != 1:
-        raise ValueError("Mage-Flow transformer must be a single safetensors file")
-    return candidates[0]
-
-
 def _validate_config(root: Path) -> dict:
     path = root / "transformer" / "config.json"
     try:
@@ -104,10 +95,6 @@ def _expected_shapes() -> dict[str, tuple[int, ...]]:
     return shapes
 
 
-def _expected_names() -> set[str]:
-    return set(_expected_shapes())
-
-
 def _validate_tensors(source, expected=None) -> dict[str, tuple[int, ...]]:
     expected = _expected_shapes() if expected is None else expected
     names = set(source.header) - {"__metadata__"}
@@ -161,7 +148,12 @@ def convert(model_dir: Path, out_dir: Path, variant: str) -> Path:
     config = _validate_config(model_dir)
     if variant not in VARIANTS:
         raise ValueError(f"unknown Mage-Flow variant {variant!r}; choose from {sorted(VARIANTS)}")
-    source = open_safetensors(_find_transformer(model_dir))
+    candidates = sorted((model_dir / "transformer").glob("*.safetensors"))
+    if not candidates:
+        raise FileNotFoundError(f"no transformer safetensors under {model_dir / 'transformer'}")
+    if len(candidates) != 1:
+        raise ValueError("Mage-Flow transformer must be a single safetensors file")
+    source = open_safetensors(candidates[0])
     expected = _validate_tensors(source)
     with source.path.open("rb") as stream:
         digest = hashlib.file_digest(stream, "sha256").hexdigest()

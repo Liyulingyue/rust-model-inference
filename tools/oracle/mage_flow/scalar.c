@@ -78,4 +78,3 @@ void mage_attention(const float*q,const float*k,const float*v,float*y,size_t bat
  }
  free(scores);
 }
-void mage_patch(const float*x,const float*w,const float*b,float*y,size_t rows,size_t d,size_t out){mage_linear64(x,w,b,y,rows,d,out);}

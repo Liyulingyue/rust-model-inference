@@ -1,7 +1,7 @@
 use super::{
-    validate_dit, AXES_DIM, CONTEXT_DIM, FFN, HEADS, HEAD_DIM, HIDDEN, IN_CHANNELS, LAYERS,
+    AXES_DIM, CONTEXT_DIM, FFN, HEADS, HEAD_DIM, HIDDEN, IN_CHANNELS, LAYERS, OUT_CHANNELS,
 };
-use crate::core::tensor::{load_f32_tensor, TensorSource};
+use crate::core::tensor::{load_f32_tensor, GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::models::diffusion::dreamx::kernels::{
     attention_scalar, checked_len, layer_norm_rows, rms_norm_rows, AttentionSpec, Linear,
@@ -20,7 +20,164 @@ pub struct MageFlowDit<'a> {
 
 impl<'a> MageFlowDit<'a> {
     pub fn load(source: &'a dyn TensorSource, pool: Arc<ComputePool>) -> Result<Self, String> {
-        validate_dit(source)?;
+        if source
+            .metadata("general.architecture")
+            .and_then(crate::core::tensor::MetaValue::to_string_val)
+            != Some("mage_flow")
+        {
+            return Err("Expected general.architecture=mage_flow".into());
+        }
+        let variant = source
+            .metadata("mage_flow.variant")
+            .and_then(crate::core::tensor::MetaValue::to_string_val);
+        if !matches!(
+            variant,
+            Some("base" | "flow" | "turbo" | "edit-base" | "edit" | "edit-turbo")
+        ) {
+            return Err("Missing or unsupported mage_flow.variant".into());
+        }
+        let tensor = |name: &str, dims: &[u64]| -> Result<(), String> {
+            let info = source
+                .tensor_info(name)
+                .ok_or_else(|| format!("Missing Mage-Flow tensor: {name}"))?;
+            if info.dims != dims || info.ggml_type != GGMLType::BF16 {
+                return Err(format!(
+                    "Invalid Mage-Flow tensor {name}: expected BF16 {dims:?}, got {:?} {:?}",
+                    info.ggml_type, info.dims
+                ));
+            }
+            let bytes = source
+                .tensor_slice(name)
+                .ok_or_else(|| format!("Missing Mage-Flow data: {name}"))?;
+            if Some(bytes.len() as u64) != info.checked_nbytes() {
+                return Err(format!("Invalid Mage-Flow tensor payload: {name}"));
+            }
+            Ok(())
+        };
+        tensor("img_in.weight", &[IN_CHANNELS as u64, HIDDEN as u64])?;
+        tensor("img_in.bias", &[HIDDEN as u64])?;
+        tensor("txt_in.weight", &[CONTEXT_DIM as u64, HIDDEN as u64])?;
+        tensor("txt_in.bias", &[HIDDEN as u64])?;
+        tensor("txt_norm.weight", &[CONTEXT_DIM as u64])?;
+        tensor(
+            "norm_out.linear.weight",
+            &[HIDDEN as u64, (2 * HIDDEN) as u64],
+        )?;
+        tensor("norm_out.linear.bias", &[(2 * HIDDEN) as u64])?;
+        tensor("proj_out.weight", &[HIDDEN as u64, OUT_CHANNELS as u64])?;
+        tensor("proj_out.bias", &[OUT_CHANNELS as u64])?;
+        tensor(
+            "time_text_embed.timestep_embedder.linear_1.weight",
+            &[256, HIDDEN as u64],
+        )?;
+        tensor(
+            "time_text_embed.timestep_embedder.linear_1.bias",
+            &[HIDDEN as u64],
+        )?;
+        tensor(
+            "time_text_embed.timestep_embedder.linear_2.weight",
+            &[HIDDEN as u64, HIDDEN as u64],
+        )?;
+        tensor(
+            "time_text_embed.timestep_embedder.linear_2.bias",
+            &[HIDDEN as u64],
+        )?;
+        for layer in 0..LAYERS {
+            let p = format!("transformer_blocks.{layer}");
+            for (name, dims) in [
+                (
+                    format!("{p}.img_mod.1.weight"),
+                    [HIDDEN as u64, (6 * HIDDEN) as u64],
+                ),
+                (
+                    format!("{p}.txt_mod.1.weight"),
+                    [HIDDEN as u64, (6 * HIDDEN) as u64],
+                ),
+                (
+                    format!("{p}.attn.to_q.weight"),
+                    [HIDDEN as u64, HIDDEN as u64],
+                ),
+                (
+                    format!("{p}.attn.to_k.weight"),
+                    [HIDDEN as u64, HIDDEN as u64],
+                ),
+                (
+                    format!("{p}.attn.to_v.weight"),
+                    [HIDDEN as u64, HIDDEN as u64],
+                ),
+                (
+                    format!("{p}.attn.add_q_proj.weight"),
+                    [HIDDEN as u64, HIDDEN as u64],
+                ),
+                (
+                    format!("{p}.attn.add_k_proj.weight"),
+                    [HIDDEN as u64, HIDDEN as u64],
+                ),
+                (
+                    format!("{p}.attn.add_v_proj.weight"),
+                    [HIDDEN as u64, HIDDEN as u64],
+                ),
+                (
+                    format!("{p}.attn.to_out.0.weight"),
+                    [HIDDEN as u64, HIDDEN as u64],
+                ),
+                (
+                    format!("{p}.attn.to_add_out.weight"),
+                    [HIDDEN as u64, HIDDEN as u64],
+                ),
+                (
+                    format!("{p}.img_mlp.net.0.proj.weight"),
+                    [HIDDEN as u64, FFN as u64],
+                ),
+                (
+                    format!("{p}.img_mlp.net.2.weight"),
+                    [FFN as u64, HIDDEN as u64],
+                ),
+                (
+                    format!("{p}.txt_mlp.net.0.proj.weight"),
+                    [HIDDEN as u64, FFN as u64],
+                ),
+                (
+                    format!("{p}.txt_mlp.net.2.weight"),
+                    [FFN as u64, HIDDEN as u64],
+                ),
+            ] {
+                tensor(&name, &dims)?;
+            }
+            for name in [
+                "img_mod.1.bias",
+                "txt_mod.1.bias",
+                "attn.to_q.bias",
+                "attn.to_k.bias",
+                "attn.to_v.bias",
+                "attn.add_q_proj.bias",
+                "attn.add_k_proj.bias",
+                "attn.add_v_proj.bias",
+                "attn.to_out.0.bias",
+                "attn.to_add_out.bias",
+                "img_mlp.net.0.proj.bias",
+                "img_mlp.net.2.bias",
+                "txt_mlp.net.0.proj.bias",
+                "txt_mlp.net.2.bias",
+            ] {
+                let len = if name.contains("mod") {
+                    6 * HIDDEN
+                } else if name.contains("net.0") {
+                    FFN
+                } else {
+                    HIDDEN
+                };
+                tensor(&format!("{p}.{name}"), &[len as u64])?;
+            }
+            for name in [
+                "attn.norm_q.weight",
+                "attn.norm_k.weight",
+                "attn.norm_added_q.weight",
+                "attn.norm_added_k.weight",
+            ] {
+                tensor(&format!("{p}.{name}"), &[HEAD_DIM as u64])?;
+            }
+        }
         Ok(Self { source, pool })
     }
 
@@ -255,7 +412,7 @@ impl<'a> MageFlowDit<'a> {
             }
         }
         let modulation = self.linear("norm_out.linear", &time_silu, 1, HIDDEN, 2 * HIDDEN)?;
-        let mut img = unweighted_norm(&img, image_tokens, HIDDEN)?;
+        let mut img = layer_norm_rows(&img, image_tokens, Some(&vec![1.0; HIDDEN]), None, EPS)?;
         for row in img.chunks_exact_mut(HIDDEN) {
             for j in 0..HIDDEN {
                 row[j] = row[j] * (1.0 + modulation[j]) + modulation[HIDDEN + j];
@@ -280,16 +437,8 @@ pub(crate) fn trace(name: &str, rows: usize, width: usize, values: &[f32]) -> Re
     Ok(())
 }
 
-pub(crate) fn unweighted_norm(
-    input: &[f32],
-    rows: usize,
-    width: usize,
-) -> Result<Vec<f32>, String> {
-    layer_norm_rows(input, rows, Some(&vec![1.0; width]), None, EPS)
-}
-
 fn modulated_norm(input: &[f32], rows: usize, params: &[f32]) -> Result<Vec<f32>, String> {
-    let mut values = unweighted_norm(input, rows, HIDDEN)?;
+    let mut values = layer_norm_rows(input, rows, Some(&vec![1.0; HIDDEN]), None, EPS)?;
     for row in values.chunks_exact_mut(HIDDEN) {
         for j in 0..HIDDEN {
             row[j] = row[j] * (1.0 + params[HIDDEN + j]) + params[j];
