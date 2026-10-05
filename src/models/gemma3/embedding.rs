@@ -53,9 +53,8 @@ pub fn compute_embedding(
     // `src/core/tokenizer/mod.rs::SPMTokenizer` accepts exactly
     // this combination; the BPE tokenizer rejects it (BPE needs
     // merge rules, which the 270M GGUF doesn't ship).
-    let tokenizer =
-        SPMTokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
-            .map_err(|e| format!("gemma3::compute_embedding: tokenizer init failed: {e}"))?;
+    let tokenizer = SPMTokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
+        .map_err(|e| format!("gemma3::compute_embedding: tokenizer init failed: {e}"))?;
     let prompt_tokens = encode_embedding_input(&tokenizer, prompt);
     if prompt_tokens.is_empty() {
         return Err("gemma3::compute_embedding: empty token sequence".into());
@@ -161,16 +160,11 @@ pub fn build_config(source: &dyn TensorSource) -> Result<Gemma3Config, String> {
 pub fn load_model(source: &dyn TensorSource) -> Result<Gemma3Model, String> {
     let config = build_config(source)?;
     let layers = load_layers_static(source, &config);
-    let output_norm = crate::models::gemma3::trunk::get_f32_tensor(
-        source,
-        "output_norm.weight",
-        config.n_embd,
-    );
-    let token_embedding_rows = crate::models::gemma3::trunk::static_weight(
-        source,
-        "token_embd.weight",
-    )
-    .map_err(|e| format!("gemma3: token_embd.weight load failed: {e}"))?;
+    let output_norm =
+        crate::models::gemma3::trunk::get_f32_tensor(source, "output_norm.weight", config.n_embd);
+    let token_embedding_rows =
+        crate::models::gemma3::trunk::static_weight(source, "token_embd.weight")
+            .map_err(|e| format!("gemma3: token_embd.weight load failed: {e}"))?;
     Ok(Gemma3Model {
         config,
         layers,

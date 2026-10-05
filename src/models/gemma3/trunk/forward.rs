@@ -48,12 +48,7 @@ use crate::ops::rope::rope_neox_inplace_with_factor;
 /// ternary matmul → rescale. Same scalar reference impl as
 /// `qwen3::trunk::forward::bitlinear_projection` — duplicated
 /// here so the gemma3 trunk doesn't have to reach across.
-fn bitlinear_projection(
-    input: &[f32],
-    proj: &BitLinearWeights,
-    output: &mut [f32],
-    eps: f32,
-) {
+fn bitlinear_projection(input: &[f32], proj: &BitLinearWeights, output: &mut [f32], eps: f32) {
     debug_assert_eq!(input.len(), proj.n_in);
     debug_assert_eq!(output.len(), proj.n_out);
     let n_in = proj.n_in;
@@ -100,17 +95,9 @@ fn standard_projection(
     let mut q8_buf = vec![0u8; n_in];
     let mut scale_buf = vec![0.0f32; blocks];
     quantize_q8_0_into(input, n_in, &mut q8_buf, &mut scale_buf);
-    weight.kernel.forward_prepared(
-        input,
-        &q8_buf,
-        &scale_buf,
-        None,
-        output,
-        n_in,
-        n_out,
-        0,
-        1,
-    );
+    weight
+        .kernel
+        .forward_prepared(input, &q8_buf, &scale_buf, None, output, n_in, n_out, 0, 1);
 }
 
 /// Per-head RMSNorm applied to Q (and K) before RoPE.
@@ -239,10 +226,7 @@ fn causal_self_attention(
 /// and returns the **last-token** row of the hidden state (the
 /// BitNet pooling convention; `cfg.pooling_type == 1` +
 /// `cfg.is_bitnet` triggers this).
-pub fn text_encode(
-    model: &Gemma3Model,
-    token_ids: &[u32],
-) -> Result<Vec<f32>, String> {
+pub fn text_encode(model: &Gemma3Model, token_ids: &[u32]) -> Result<Vec<f32>, String> {
     if token_ids.is_empty() {
         return Err("gemma3::text_encode: empty token sequence".into());
     }
@@ -250,18 +234,15 @@ pub fn text_encode(
     let cfg = &model.config;
 
     let mut hidden = vec![0.0f32; n_tokens * cfg.n_embd];
-    for (row, &tid) in hidden
-        .chunks_exact_mut(cfg.n_embd)
-        .zip(token_ids.iter())
-    {
+    for (row, &tid) in hidden.chunks_exact_mut(cfg.n_embd).zip(token_ids.iter()) {
         if (tid as usize) >= cfg.vocab {
             return Err(format!(
                 "gemma3::text_encode: token id {tid} >= vocab {}",
                 cfg.vocab
             ));
         }
-        let src = &model.token_embedding_rows[tid as usize * cfg.n_embd
-            ..(tid as usize + 1) * cfg.n_embd];
+        let src =
+            &model.token_embedding_rows[tid as usize * cfg.n_embd..(tid as usize + 1) * cfg.n_embd];
         row.copy_from_slice(src);
     }
 
@@ -296,9 +277,11 @@ pub fn text_encode(
                 let v_off = tok * n_embd_v;
                 bitlinear_projection(
                     norm_row,
-                    layer.bitlinear.attn_q.as_ref().expect(
-                        "gemma3 BitNet layer missing attn_q BitLinear slot",
-                    ),
+                    layer
+                        .bitlinear
+                        .attn_q
+                        .as_ref()
+                        .expect("gemma3 BitNet layer missing attn_q BitLinear slot"),
                     &mut q_all[q_off..q_off + n_embd_q],
                     cfg.eps,
                 );
@@ -329,17 +312,47 @@ pub fn text_encode(
             // activations). Each projection goes through
             // `standard_projection` which dequantizes per token
             // and calls the matmul kernel.
-            let wq = layer.wq.as_ref().expect("gemma3 standard layer missing wq StdProjection");
-            let wk = layer.wk.as_ref().expect("gemma3 standard layer missing wk StdProjection");
-            let wv = layer.wv.as_ref().expect("gemma3 standard layer missing wv StdProjection");
+            let wq = layer
+                .wq
+                .as_ref()
+                .expect("gemma3 standard layer missing wq StdProjection");
+            let wk = layer
+                .wk
+                .as_ref()
+                .expect("gemma3 standard layer missing wk StdProjection");
+            let wv = layer
+                .wv
+                .as_ref()
+                .expect("gemma3 standard layer missing wv StdProjection");
             for tok in 0..n_tokens {
                 let norm_row = &normed[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd];
                 let q_off = tok * n_embd_q;
                 let k_off = tok * n_embd_k;
                 let v_off = tok * n_embd_v;
-                standard_projection(norm_row, &wq.bytes, wq.ggml_type, &mut q_all[q_off..q_off + n_embd_q], wq.n_in, wq.n_out);
-                standard_projection(norm_row, &wk.bytes, wk.ggml_type, &mut k_all[k_off..k_off + n_embd_k], wk.n_in, wk.n_out);
-                standard_projection(norm_row, &wv.bytes, wv.ggml_type, &mut v_all[v_off..v_off + n_embd_v], wv.n_in, wv.n_out);
+                standard_projection(
+                    norm_row,
+                    &wq.bytes,
+                    wq.ggml_type,
+                    &mut q_all[q_off..q_off + n_embd_q],
+                    wq.n_in,
+                    wq.n_out,
+                );
+                standard_projection(
+                    norm_row,
+                    &wk.bytes,
+                    wk.ggml_type,
+                    &mut k_all[k_off..k_off + n_embd_k],
+                    wk.n_in,
+                    wk.n_out,
+                );
+                standard_projection(
+                    norm_row,
+                    &wv.bytes,
+                    wv.ggml_type,
+                    &mut v_all[v_off..v_off + n_embd_v],
+                    wv.n_in,
+                    wv.n_out,
+                );
             }
         }
 
@@ -424,7 +437,10 @@ pub fn text_encode(
                 );
             }
         } else {
-            let wo = layer.wo.as_ref().expect("gemma3 standard layer missing wo StdProjection");
+            let wo = layer
+                .wo
+                .as_ref()
+                .expect("gemma3 standard layer missing wo StdProjection");
             for tok in 0..n_tokens {
                 let attn_row = &attn_out[tok * n_attn..tok * n_attn + n_attn];
                 standard_projection(
@@ -494,8 +510,14 @@ pub fn text_encode(
                 }
             }
         } else {
-            let w_gate = layer.w_gate.as_ref().expect("gemma3 standard layer missing w_gate StdProjection");
-            let w_up = layer.w_up.as_ref().expect("gemma3 standard layer missing w_up StdProjection");
+            let w_gate = layer
+                .w_gate
+                .as_ref()
+                .expect("gemma3 standard layer missing w_gate StdProjection");
+            let w_up = layer
+                .w_up
+                .as_ref()
+                .expect("gemma3 standard layer missing w_up StdProjection");
             for tok in 0..n_tokens {
                 let ffn_row = &ffn_normed[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd];
                 standard_projection(
@@ -537,7 +559,10 @@ pub fn text_encode(
                 );
             }
         } else {
-            let w_down = layer.w_down.as_ref().expect("gemma3 standard layer missing w_down StdProjection");
+            let w_down = layer
+                .w_down
+                .as_ref()
+                .expect("gemma3 standard layer missing w_down StdProjection");
             for tok in 0..n_tokens {
                 let act_row = &gate_buf[tok * cfg.n_ff..(tok + 1) * cfg.n_ff];
                 standard_projection(
@@ -586,10 +611,7 @@ pub fn text_encode(
 /// only supports the embedding extraction path; text generation
 /// requires a sampling loop that this session did not implement.
 /// Returns an error if invoked.
-pub fn run_shared_inference(
-    _model: &Gemma3Model,
-    _token_ids: &[u32],
-) -> Result<Vec<f32>, String> {
+pub fn run_shared_inference(_model: &Gemma3Model, _token_ids: &[u32]) -> Result<Vec<f32>, String> {
     Err("gemma3::run_shared_inference: text generation not implemented; use compute_embedding via app::run_embedding".into())
 }
 

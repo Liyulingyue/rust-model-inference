@@ -152,10 +152,7 @@ fn causal_self_attention(
 /// and returns the **last-token** row of the hidden state (the
 /// BitNet pooling convention; `cfg.pooling_type == 1` on a
 /// `file_type=40` GGUF triggers this).
-pub fn text_encode(
-    model: &Gemma3Model,
-    token_ids: &[u32],
-) -> Result<Vec<f32>, String> {
+pub fn text_encode(model: &Gemma3Model, token_ids: &[u32]) -> Result<Vec<f32>, String> {
     if token_ids.is_empty() {
         return Err("gemma3::text_encode: empty token sequence".into());
     }
@@ -163,18 +160,15 @@ pub fn text_encode(
     let cfg = &model.config;
 
     let mut hidden = vec![0.0f32; n_tokens * cfg.n_embd];
-    for (row, &tid) in hidden
-        .chunks_exact_mut(cfg.n_embd)
-        .zip(token_ids.iter())
-    {
+    for (row, &tid) in hidden.chunks_exact_mut(cfg.n_embd).zip(token_ids.iter()) {
         if (tid as usize) >= cfg.vocab {
             return Err(format!(
                 "gemma3::text_encode: token id {tid} >= vocab {}",
                 cfg.vocab
             ));
         }
-        let src = &model.token_embedding_rows[tid as usize * cfg.n_embd
-            ..(tid as usize + 1) * cfg.n_embd];
+        let src =
+            &model.token_embedding_rows[tid as usize * cfg.n_embd..(tid as usize + 1) * cfg.n_embd];
         row.copy_from_slice(src);
     }
 
@@ -211,9 +205,12 @@ pub fn text_encode(
             let k_off = tok * n_embd_k;
             let v_off = tok * n_embd_v;
             bitlinear_projection_packed(
-                norm_row, layer.bitlinear.attn_q.as_ref().expect(
-                    "gemma3 BitNet layer missing attn_q BitLinear slot",
-                ),
+                norm_row,
+                layer
+                    .bitlinear
+                    .attn_q
+                    .as_ref()
+                    .expect("gemma3 BitNet layer missing attn_q BitLinear slot"),
                 &mut q_all[q_off..q_off + n_embd_q],
                 cfg.eps,
             );
@@ -411,10 +408,7 @@ pub fn text_encode(
 /// only supports the embedding extraction path; text generation
 /// requires a sampling loop that this session did not implement.
 /// Returns an error if invoked.
-pub fn run_shared_inference(
-    _model: &Gemma3Model,
-    _token_ids: &[u32],
-) -> Result<Vec<f32>, String> {
+pub fn run_shared_inference(_model: &Gemma3Model, _token_ids: &[u32]) -> Result<Vec<f32>, String> {
     Err("gemma3::run_shared_inference: text generation not implemented; use compute_embedding via app::run_embedding".into())
 }
 

@@ -139,7 +139,12 @@ pub fn bitlinear_forward(
         if crate::ops::has_avx2_fma() {
             unsafe {
                 crate::ops::bitnet::forward_avx2::bitlinear_forward_avx2(
-                    weights_i2s, x_q, absmax, n_in, n_out, y_out,
+                    weights_i2s,
+                    x_q,
+                    absmax,
+                    n_in,
+                    n_out,
+                    y_out,
                 );
             }
             return;
@@ -322,10 +327,7 @@ mod tests {
         for &v in &y {
             // Float arithmetic; allow 1e-3 relative tolerance for
             // rounding through int8 quant.
-            assert!(
-                (v - expected).abs() < 1.0,
-                "expected ≈ {expected}, got {v}"
-            );
+            assert!((v - expected).abs() < 1.0, "expected ≈ {expected}, got {v}");
         }
     }
 
@@ -369,13 +371,10 @@ mod tests {
         // 0b10 across elements.
         for j in 0..n_out {
             for b in 0..(n_in / QK_I2_S) {
-                weights[j * n_in / QK_I2_S * 32 + b * 32] =
-                    0b10_01_01_10;
+                weights[j * n_in / QK_I2_S * 32 + b * 32] = 0b10_01_01_10;
             }
         }
-        let x: Vec<f32> = (0..n_in)
-            .map(|i| (i as f32 * 0.013).sin() * 0.7)
-            .collect();
+        let x: Vec<f32> = (0..n_in).map(|i| (i as f32 * 0.013).sin() * 0.7).collect();
         // Our BitLinear (quantize-then-forward).
         let mut y_quant = vec![0.0f32; n_out];
         bitlinear_forward_from_f32(&weights, &x, n_in, n_out, &mut y_quant);

@@ -110,7 +110,12 @@ pub fn dequant_i2_s_row(bytes: &[u8], n_elements: usize, out: &mut [f32]) {
     let mut block = [0u8; BLOCK_I2_S_SIZE];
     for b in 0..n_blocks {
         block.copy_from_slice(&bytes[b * BLOCK_I2_S_SIZE..(b + 1) * BLOCK_I2_S_SIZE]);
-        dequant_i2_s_block(&block, (&mut out[b * QK_I2_S..(b + 1) * QK_I2_S]).try_into().unwrap());
+        dequant_i2_s_block(
+            &block,
+            (&mut out[b * QK_I2_S..(b + 1) * QK_I2_S])
+                .try_into()
+                .unwrap(),
+        );
     }
 }
 
@@ -213,9 +218,7 @@ mod tests {
             "models/bitnet-embedding-0.6b-GGUF/bitnet-embeddings-0.6b-bf16-i2_s.gguf",
         );
         if !path.exists() {
-            eprintln!(
-                "skipping: {path:?} not present (model artifact not in working tree)"
-            );
+            eprintln!("skipping: {path:?} not present (model artifact not in working tree)");
             return;
         }
         use crate::core::loader::GGUFLoader;
@@ -237,9 +240,8 @@ mod tests {
         // tensor is laid out across many such blocks.
         let file_bytes = std::fs::read(path).expect("read GGUF file");
         let mut block = [0u8; BLOCK_I2_S_SIZE];
-        block.copy_from_slice(
-            &file_bytes[tensor_byte_offset..tensor_byte_offset + BLOCK_I2_S_SIZE],
-        );
+        block
+            .copy_from_slice(&file_bytes[tensor_byte_offset..tensor_byte_offset + BLOCK_I2_S_SIZE]);
         let mut out = [0.0f32; QK_I2_S];
         dequant_i2_s_block(&block, &mut out);
         // Every dequantized value must be in {-1.0, 0.0, +1.0}.

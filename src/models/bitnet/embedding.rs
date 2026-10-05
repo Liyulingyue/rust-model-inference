@@ -99,11 +99,7 @@ pub fn run_embedding(
 /// shape (which took only `(pooled, output, elapsed_ms)` and read
 /// n_layers / arch from elsewhere). New callers should prefer
 /// [`print_embedding_for_arch`].
-pub fn print_embedding(
-    pooled: &[f32],
-    output: EmbeddingOutput,
-    elapsed_ms: u128,
-) {
+pub fn print_embedding(pooled: &[f32], output: EmbeddingOutput, elapsed_ms: u128) {
     print_embedding_for_arch(pooled, output, elapsed_ms, "bitnet", pooled.len());
 }
 

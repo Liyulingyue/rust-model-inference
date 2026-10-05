@@ -37,7 +37,7 @@
 //!   `src/ops/kernel/i2_s.rs` decodes this correctly — verified
 //!   by `dequant_i2_s_real_gguf_block_produces_ternary`)
 
-use rust_model_inference::{GGUFLoader, GGMLType};
+use rust_model_inference::{GGMLType, GGUFLoader};
 
 fn loader() -> Option<GGUFLoader> {
     let path = std::env::var_os("RMI_BITNET_EMBEDDING_0_6B_Q4_K_MODEL")?;
@@ -62,7 +62,10 @@ fn bitnet_embedding_0_6b_contract_loads() {
         .metadata("general.architecture")
         .and_then(|v| v.to_string_val())
         .unwrap_or_default();
-    assert_eq!(arch, "qwen3", "BitNet Embeddings 0.6B rides the qwen3 trunk");
+    assert_eq!(
+        arch, "qwen3",
+        "BitNet Embeddings 0.6B rides the qwen3 trunk"
+    );
     // Microsoft-specific file type (40 = "BitNet I2_S GGUF"). Q4_K_M
     // is 12; the loader accepts any uint but our engine would dispatch
     // off the tensor types, not the file_type.
@@ -111,7 +114,10 @@ fn bitnet_embedding_0_6b_uses_plain_rope_no_yarn() {
         .metadata("qwen3.rope.freq_base")
         .and_then(|v| v.to_f64())
         .unwrap_or(0.0);
-    assert!((rope_base - 1_000_000.0).abs() < 1.0, "rope_freq_base={rope_base}");
+    assert!(
+        (rope_base - 1_000_000.0).abs() < 1.0,
+        "rope_freq_base={rope_base}"
+    );
     assert_eq!(
         pick(&loader, "qwen3.context_length"),
         32768,
@@ -129,7 +135,10 @@ fn bitnet_embedding_0_6b_pooling_type_is_last_token() {
     // This test pins the GGUF contract so the fix knows what to
     // target.
     let pooling = pick(&loader, "qwen3.pooling_type");
-    assert_eq!(pooling, 1, "BitNet-Embeddings pooling_type must be 1 (last-token)");
+    assert_eq!(
+        pooling, 1,
+        "BitNet-Embeddings pooling_type must be 1 (last-token)"
+    );
 }
 
 #[test]
@@ -183,7 +192,10 @@ fn bitnet_embedding_0_6b_tensor_inventory_is_bitnet_layout() {
         .iter()
         .filter(|t| t.ggml_type == GGMLType::F16)
         .count();
-    assert_eq!(n_i2s, 196, "196 BitLinear weights = 28 layers × 7 projections");
+    assert_eq!(
+        n_i2s, 196,
+        "196 BitLinear weights = 28 layers × 7 projections"
+    );
     assert_eq!(n_f16, 310, "310 F16 norms (pre/post BitLinear RMSNorm)");
     // token_embd: [1024, 151936] F16
     let te = loader
@@ -254,8 +266,7 @@ fn bitnet_embedding_0_6b_i2_s_block_layout_matches_dequant() {
         .expect("blk.0.ffn_down.weight present in 0.6B GGUF");
     assert_eq!(ti.ggml_type, GGMLType::I2_S);
     assert_eq!(ti.dims, &[3072, 1024]);
-    let expected_bytes =
-        ti.dims[0] * (ti.dims[1] / 128) * 32;
+    let expected_bytes = ti.dims[0] * (ti.dims[1] / 128) * 32;
     assert_eq!(
         ti.dims[1] % 128,
         0,

@@ -4,24 +4,40 @@
 //! Run with:
 //!   cargo run --profile release-fast --example bitlinear_bench
 
+use rust_model_inference::ops::bitnet::forward_avx2::dequant_i2_s_to_i8;
 use rust_model_inference::ops::bitnet::{
     bitlinear_forward, bitlinear_forward_from_f32, bitlinear_forward_packed,
     bitlinear_forward_scalar, quantize_activation_per_token,
 };
-use rust_model_inference::ops::bitnet::forward_avx2::dequant_i2_s_to_i8;
 use std::hint::black_box;
 use std::time::Instant;
 
-fn time_scalar(weights: &[u8], x_q: &[i8], absmax: f32, n_in: usize, n_out: usize, iters: usize) -> u128 {
+fn time_scalar(
+    weights: &[u8],
+    x_q: &[i8],
+    absmax: f32,
+    n_in: usize,
+    n_out: usize,
+    iters: usize,
+) -> u128 {
     let mut y = vec![0.0f32; n_out];
     let start = Instant::now();
     for _ in 0..iters {
-        black_box(bitlinear_forward_scalar(weights, x_q, absmax, n_in, n_out, &mut y));
+        black_box(bitlinear_forward_scalar(
+            weights, x_q, absmax, n_in, n_out, &mut y,
+        ));
     }
     start.elapsed().as_nanos()
 }
 
-fn time_dispatch(weights: &[u8], x_q: &[i8], absmax: f32, n_in: usize, n_out: usize, iters: usize) -> u128 {
+fn time_dispatch(
+    weights: &[u8],
+    x_q: &[i8],
+    absmax: f32,
+    n_in: usize,
+    n_out: usize,
+    iters: usize,
+) -> u128 {
     let mut y = vec![0.0f32; n_out];
     let start = Instant::now();
     for _ in 0..iters {
@@ -30,11 +46,25 @@ fn time_dispatch(weights: &[u8], x_q: &[i8], absmax: f32, n_in: usize, n_out: us
     start.elapsed().as_nanos()
 }
 
-fn time_packed(weights_packed: &[i8], x_q: &[i8], absmax: f32, n_in: usize, n_out: usize, iters: usize) -> u128 {
+fn time_packed(
+    weights_packed: &[i8],
+    x_q: &[i8],
+    absmax: f32,
+    n_in: usize,
+    n_out: usize,
+    iters: usize,
+) -> u128 {
     let mut y = vec![0.0f32; n_out];
     let start = Instant::now();
     for _ in 0..iters {
-        black_box(bitlinear_forward_packed(weights_packed, x_q, absmax, n_in, n_out, &mut y));
+        black_box(bitlinear_forward_packed(
+            weights_packed,
+            x_q,
+            absmax,
+            n_in,
+            n_out,
+            &mut y,
+        ));
     }
     start.elapsed().as_nanos()
 }
@@ -81,7 +111,9 @@ fn main() {
 
     println!("BitLinear microbenchmark: {n_in}×{n_out}, {iters} iters");
     println!("  scalar reference:       {scalar_us:.2} us/iter");
-    println!("  dispatcher (unpacked):  {dispatch_us:.2} us/iter  ({speedup_dispatch:.2}x vs scalar)");
+    println!(
+        "  dispatcher (unpacked):  {dispatch_us:.2} us/iter  ({speedup_dispatch:.2}x vs scalar)"
+    );
     println!("  dispatcher (packed):    {packed_us:.2} us/iter  ({speedup_packed:.2}x vs scalar)");
     println!(
         "  AVX2 active:            {}",

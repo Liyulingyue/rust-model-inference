@@ -119,13 +119,7 @@ pub fn run_embedding(
         // `gemma3_arch` accordingly. The qwen3 / gemma3 standard
         // trunks below are BitNet-free.
         arch if crate::models::bitnet::detect_is_bitnet(source) => {
-            crate::models::bitnet::run_embedding(
-                source,
-                prompt,
-                n_threads_arg,
-                kv_format,
-                output,
-            )
+            crate::models::bitnet::run_embedding(source, prompt, n_threads_arg, kv_format, output)
         }
         "bert" | "jina-bert-v2" | "nomic-bert" | "nomic-bert-moe" => {
             crate::models::bert_family::run_embedding(
@@ -136,13 +130,9 @@ pub fn run_embedding(
                 output,
             )
         }
-        "gemma3" => crate::models::gemma3::run_embedding(
-            source,
-            prompt,
-            n_threads_arg,
-            kv_format,
-            output,
-        ),
+        "gemma3" => {
+            crate::models::gemma3::run_embedding(source, prompt, n_threads_arg, kv_format, output)
+        }
         _ => qwen3_run_embedding(source, prompt, n_threads_arg, kv_format, output),
     }
 }

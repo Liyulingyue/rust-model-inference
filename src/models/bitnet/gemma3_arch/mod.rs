@@ -28,6 +28,5 @@ pub use config::{build_config, Gemma3Config, Gemma3Rope};
 pub use embedding::{compute_embedding, run_embedding, run_embedding_tokens};
 pub use forward::{run_shared_inference, text_encode};
 pub use weights::{
-    get_f32_tensor, load_layers, load_layers_static, static_weight, Gemma3LayerWeights,
-    Gemma3Model,
+    get_f32_tensor, load_layers, load_layers_static, static_weight, Gemma3LayerWeights, Gemma3Model,
 };

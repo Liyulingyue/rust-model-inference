@@ -68,17 +68,13 @@ pub use embedding::{
 ///
 /// Both checks are robust against non-Microsoft re-exports that
 /// might forget one of the two markers.
-pub fn detect_is_bitnet<S: crate::core::tensor::TensorSource + ?Sized>(
-    source: &S,
-) -> bool {
+pub fn detect_is_bitnet<S: crate::core::tensor::TensorSource + ?Sized>(source: &S) -> bool {
     let file_type_matches = source
         .metadata("general.file_type")
         .and_then(|v| v.to_u64())
         .map(|v| v == 40)
         .unwrap_or(false);
-    let has_norm_in = source
-        .tensor_info("blk.0.attn_q_norm_in.weight")
-        .is_some();
+    let has_norm_in = source.tensor_info("blk.0.attn_q_norm_in.weight").is_some();
     file_type_matches || has_norm_in
 }
 

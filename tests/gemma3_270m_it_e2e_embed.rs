@@ -99,7 +99,10 @@ fn gemma3_270m_it_e2e_value_range_and_non_degenerate() {
         return;
     };
     let v = embed(&loader, "Hello, world!");
-    assert!(v.iter().any(|x| *x != 0.0), "embedding must not be all-zero");
+    assert!(
+        v.iter().any(|x| *x != 0.0),
+        "embedding must not be all-zero"
+    );
     for x in &v {
         assert!(
             *x >= -300.0 && *x <= 300.0,

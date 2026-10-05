@@ -94,9 +94,15 @@ fn bitnet_embedding_270m_e2e_value_range_and_non_degenerate() {
         return;
     };
     let v = embed(&loader, "Hello, world!");
-    assert!(v.iter().any(|x| *x != 0.0), "embedding must not be all-zero");
+    assert!(
+        v.iter().any(|x| *x != 0.0),
+        "embedding must not be all-zero"
+    );
     for x in &v {
-        assert!(*x >= -300.0 && *x <= 300.0, "value {x} out of expected range");
+        assert!(
+            *x >= -300.0 && *x <= 300.0,
+            "value {x} out of expected range"
+        );
     }
 }
 
@@ -121,8 +127,14 @@ fn bitnet_embedding_270m_e2e_discriminates_unrelated_prompts() {
         return;
     };
     let animals = embed(&loader, "Cats and dogs are common household pets.");
-    let physics = embed(&loader, "The speed of light in vacuum is approximately 3e8 m/s.");
-    let cooking = embed(&loader, "Sauté onions until translucent before adding garlic.");
+    let physics = embed(
+        &loader,
+        "The speed of light in vacuum is approximately 3e8 m/s.",
+    );
+    let cooking = embed(
+        &loader,
+        "Sauté onions until translucent before adding garlic.",
+    );
     let sim_ap = cosine(&animals, &physics);
     let sim_ac = cosine(&animals, &cooking);
     let sim_pc = cosine(&physics, &cooking);
@@ -160,6 +172,9 @@ fn bitnet_embedding_270m_e2e_l2_norm_in_reasonable_range() {
         let v = embed(&loader, prompt);
         let n = l2_norm(&v);
         assert!(n > 1.0, "norm {n} for {prompt:?} is too small (collapse?)");
-        assert!(n < 20000.0, "norm {n} for {prompt:?} is too large (overflow?)");
+        assert!(
+            n < 20000.0,
+            "norm {n} for {prompt:?} is too large (overflow?)"
+        );
     }
 }

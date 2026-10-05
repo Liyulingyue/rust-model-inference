@@ -39,6 +39,5 @@ pub use positions::qwen_text_positions;
 pub use rerank::score_qwen3_rerank;
 pub use session::Qwen3Session;
 pub use weights::{
-    get_f32_tensor, load_layers, load_layers_static, static_weight, Qwen3LayerWeights,
-    Qwen3Model,
+    get_f32_tensor, load_layers, load_layers_static, static_weight, Qwen3LayerWeights, Qwen3Model,
 };

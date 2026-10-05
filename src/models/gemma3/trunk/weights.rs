@@ -314,10 +314,7 @@ pub fn load_layers_static(
 /// BitNet gemma3 variants it scales linearly. If memory becomes
 /// a constraint, swap this for a borrowed `Weight<'a>` + the
 /// `'static` lifetime trick from `qwen3::trunk::weights`.
-pub fn static_weight(
-    source: &dyn TensorSource,
-    name: &str,
-) -> Result<Vec<f32>, String> {
+pub fn static_weight(source: &dyn TensorSource, name: &str) -> Result<Vec<f32>, String> {
     let info = source
         .tensor_info(name)
         .ok_or_else(|| format!("gemma3: tensor {name} not found"))?;

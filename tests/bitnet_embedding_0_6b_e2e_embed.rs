@@ -88,7 +88,11 @@ fn bitnet_embedding_0_6b_e2e_shape_and_finite() {
         return;
     };
     let v = embed(&loader, "Hello, world!");
-    assert_eq!(v.len(), 1024, "BitNet-Embedding 0.6B output dim must be 1024");
+    assert_eq!(
+        v.len(),
+        1024,
+        "BitNet-Embedding 0.6B output dim must be 1024"
+    );
     for (i, x) in v.iter().enumerate() {
         assert!(x.is_finite(), "element {i} must be finite, got {x}");
     }
@@ -101,9 +105,15 @@ fn bitnet_embedding_0_6b_e2e_value_range_and_non_degenerate() {
         return;
     };
     let v = embed(&loader, "Hello, world!");
-    assert!(v.iter().any(|x| *x != 0.0), "embedding must not be all-zero");
+    assert!(
+        v.iter().any(|x| *x != 0.0),
+        "embedding must not be all-zero"
+    );
     for x in &v {
-        assert!(*x >= -300.0 && *x <= 300.0, "value {x} out of expected range");
+        assert!(
+            *x >= -300.0 && *x <= 300.0,
+            "value {x} out of expected range"
+        );
     }
 }
 
@@ -128,12 +138,21 @@ fn bitnet_embedding_0_6b_e2e_discriminates_unrelated_prompts() {
         return;
     };
     let animals = embed(&loader, "Cats and dogs are common household pets.");
-    let physics = embed(&loader, "The speed of light in vacuum is approximately 3e8 m/s.");
-    let cooking = embed(&loader, "Sauté onions until translucent before adding garlic.");
+    let physics = embed(
+        &loader,
+        "The speed of light in vacuum is approximately 3e8 m/s.",
+    );
+    let cooking = embed(
+        &loader,
+        "Sauté onions until translucent before adding garlic.",
+    );
     let norm_a = l2_norm(&animals);
     let norm_p = l2_norm(&physics);
     let norm_c = l2_norm(&cooking);
-    assert!(norm_a > 0.0 && norm_p > 0.0 && norm_c > 0.0, "non-zero norms");
+    assert!(
+        norm_a > 0.0 && norm_p > 0.0 && norm_c > 0.0,
+        "non-zero norms"
+    );
     let sim_ap = cosine(&animals, &physics);
     let sim_ac = cosine(&animals, &cooking);
     let sim_pc = cosine(&physics, &cooking);
@@ -174,11 +193,14 @@ fn bitnet_embedding_0_6b_e2e_l2_norm_in_reasonable_range() {
     for prompt in &[
         "Hello, world!",
         "The quick brown fox jumps over the lazy dog.",
-        "A" ,
+        "A",
     ] {
         let v = embed(&loader, prompt);
         let n = l2_norm(&v);
         assert!(n > 1.0, "norm {n} for {prompt:?} is too small (collapse?)");
-        assert!(n < 20000.0, "norm {n} for {prompt:?} is too large (overflow?)");
+        assert!(
+            n < 20000.0,
+            "norm {n} for {prompt:?} is too large (overflow?)"
+        );
     }
 }

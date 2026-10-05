@@ -28,7 +28,7 @@ pub mod trunk;
 
 pub use embedding::{compute_embedding, print_embedding, run_embedding, run_embedding_tokens};
 pub use trunk::{
-    get_f32_tensor, load_layers, load_layers_static, static_weight, text_encode,
-    run_shared_inference, BitLinearSlot, BitLinearWeights, Gemma3Config, Gemma3LayerWeights,
-    Gemma3Model, Gemma3Rope, Weight,
+    get_f32_tensor, load_layers, load_layers_static, run_shared_inference, static_weight,
+    text_encode, BitLinearSlot, BitLinearWeights, Gemma3Config, Gemma3LayerWeights, Gemma3Model,
+    Gemma3Rope, Weight,
 };

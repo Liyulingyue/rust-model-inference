@@ -160,8 +160,11 @@ pub fn compute_embedding(
     n_threads_arg: usize,
 ) -> Result<Vec<f32>, String> {
     let _ = n_threads_arg;
-    let tokenizer = crate::core::tokenizer::BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
-        .map_err(|e| format!("bitnet::qwen3_arch::compute_embedding: tokenizer init failed: {e}"))?;
+    let tokenizer =
+        crate::core::tokenizer::BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
+            .map_err(|e| {
+            format!("bitnet::qwen3_arch::compute_embedding: tokenizer init failed: {e}")
+        })?;
     let prompt_tokens = encode_embedding_input(&tokenizer, prompt);
     if prompt_tokens.is_empty() {
         return Err("bitnet::qwen3_arch::compute_embedding: empty token sequence".into());
@@ -169,7 +172,10 @@ pub fn compute_embedding(
     run_embedding_tokens(source, &prompt_tokens)
 }
 
-fn encode_embedding_input(tokenizer: &crate::core::tokenizer::BPETokenizer, prompt: &str) -> Vec<u32> {
+fn encode_embedding_input(
+    tokenizer: &crate::core::tokenizer::BPETokenizer,
+    prompt: &str,
+) -> Vec<u32> {
     tokenizer
         .encode(
             prompt,
@@ -264,8 +270,16 @@ pub fn load_layers(
         .map(|l| {
             let bitlinear = load_bitlinear_layer(source, l, config);
             BitNetQwen3LayerWeights {
-                attn_norm: get_f32_tensor(source, &format!("blk.{l}.attn_norm.weight"), config.n_embd),
-                ffn_norm: get_f32_tensor(source, &format!("blk.{l}.ffn_norm.weight"), config.n_embd),
+                attn_norm: get_f32_tensor(
+                    source,
+                    &format!("blk.{l}.attn_norm.weight"),
+                    config.n_embd,
+                ),
+                ffn_norm: get_f32_tensor(
+                    source,
+                    &format!("blk.{l}.ffn_norm.weight"),
+                    config.n_embd,
+                ),
                 q_norm: get_f32_tensor(
                     source,
                     &format!("blk.{l}.attn_q_norm.weight"),
@@ -350,13 +364,15 @@ fn load_bitlinear_slot(
         bytes.len(),
         expected_bytes
     );
-    Some(crate::ops::bitnet::BitLinearWeights {
-        norm_in,
-        weight: bytes.to_vec(),
-        n_in,
-        n_out,
-    }
-    .prepack())
+    Some(
+        crate::ops::bitnet::BitLinearWeights {
+            norm_in,
+            weight: bytes.to_vec(),
+            n_in,
+            n_out,
+        }
+        .prepack(),
+    )
 }
 
 /// Build a `BitNetQwen3Config` from the GGUF metadata.
@@ -439,10 +455,7 @@ pub fn get_f32_tensor<S: TensorSource + ?Sized>(
 /// qwen3 `text_encode` but with **no `if cfg.is_bitnet` branch** —
 /// every projection is BitLinear. Architectural notes in the
 /// module-level docs.
-pub fn text_encode(
-    model: &BitNetQwen3Model,
-    token_ids: &[u32],
-) -> Result<Vec<f32>, String> {
+pub fn text_encode(model: &BitNetQwen3Model, token_ids: &[u32]) -> Result<Vec<f32>, String> {
     if token_ids.is_empty() {
         return Err("bitnet::qwen3_arch::text_encode: empty token sequence".into());
     }
@@ -450,18 +463,15 @@ pub fn text_encode(
     let cfg = &model.config;
 
     let mut hidden = vec![0.0f32; n_tokens * cfg.n_embd];
-    for (row, &tid) in hidden
-        .chunks_exact_mut(cfg.n_embd)
-        .zip(token_ids.iter())
-    {
+    for (row, &tid) in hidden.chunks_exact_mut(cfg.n_embd).zip(token_ids.iter()) {
         if (tid as usize) >= cfg.vocab {
             return Err(format!(
                 "bitnet::qwen3_arch::text_encode: token id {tid} >= vocab {}",
                 cfg.vocab
             ));
         }
-        let src = &model.token_embedding_rows[tid as usize * cfg.n_embd
-            ..(tid as usize + 1) * cfg.n_embd];
+        let src =
+            &model.token_embedding_rows[tid as usize * cfg.n_embd..(tid as usize + 1) * cfg.n_embd];
         row.copy_from_slice(src);
     }
 
@@ -495,23 +505,32 @@ pub fn text_encode(
             let k_off = tok * n_embd_k;
             let v_off = tok * n_embd_v;
             bitlinear_projection_packed(
-                norm_row, layer.bitlinear.attn_q.as_ref().expect(
-                    "bitnet::qwen3_arch: BitNet layer missing attn_q BitLinear slot",
-                ),
+                norm_row,
+                layer
+                    .bitlinear
+                    .attn_q
+                    .as_ref()
+                    .expect("bitnet::qwen3_arch: BitNet layer missing attn_q BitLinear slot"),
                 &mut q_all[q_off..q_off + n_embd_q],
                 cfg.eps,
             );
             bitlinear_projection_packed(
-                norm_row, layer.bitlinear.attn_k.as_ref().expect(
-                    "bitnet::qwen3_arch: BitNet layer missing attn_k BitLinear slot",
-                ),
+                norm_row,
+                layer
+                    .bitlinear
+                    .attn_k
+                    .as_ref()
+                    .expect("bitnet::qwen3_arch: BitNet layer missing attn_k BitLinear slot"),
                 &mut k_all[k_off..k_off + n_embd_k],
                 cfg.eps,
             );
             bitlinear_projection_packed(
-                norm_row, layer.bitlinear.attn_v.as_ref().expect(
-                    "bitnet::qwen3_arch: BitNet layer missing attn_v BitLinear slot",
-                ),
+                norm_row,
+                layer
+                    .bitlinear
+                    .attn_v
+                    .as_ref()
+                    .expect("bitnet::qwen3_arch: BitNet layer missing attn_v BitLinear slot"),
                 &mut v_all[v_off..v_off + n_embd_v],
                 cfg.eps,
             );
@@ -560,7 +579,8 @@ pub fn text_encode(
                 let mut max_val = f32::NEG_INFINITY;
                 let mut scores = vec![0.0f32; n_tokens];
                 for j in 0..=i {
-                    let k_row = &k_all[j * n_embd_k + k_off..j * n_embd_k + k_off + cfg.n_embd_head_k];
+                    let k_row =
+                        &k_all[j * n_embd_k + k_off..j * n_embd_k + k_off + cfg.n_embd_head_k];
                     let mut dot = 0.0f32;
                     for d in 0..cfg.n_embd_head_k {
                         dot += q_row[d] * k_row[d];
@@ -582,7 +602,8 @@ pub fn text_encode(
                 for dim in 0..cfg.n_embd_head_v {
                     let mut sum = 0.0f32;
                     for j in 0..=i {
-                        let v_row = &v_all[j * n_embd_v + v_off..j * n_embd_v + v_off + cfg.n_embd_head_v];
+                        let v_row =
+                            &v_all[j * n_embd_v + v_off..j * n_embd_v + v_off + cfg.n_embd_head_v];
                         sum += scores[j] * v_row[dim];
                     }
                     attn_out[i * n_attn + attn_off + dim] = sum;
@@ -594,9 +615,12 @@ pub fn text_encode(
         for tok in 0..n_tokens {
             let attn_row = &attn_out[tok * n_attn..tok * n_attn + n_attn];
             bitlinear_projection_packed(
-                attn_row, layer.bitlinear.attn_output.as_ref().expect(
-                    "bitnet::qwen3_arch: BitNet layer missing attn_output BitLinear slot",
-                ),
+                attn_row,
+                layer
+                    .bitlinear
+                    .attn_output
+                    .as_ref()
+                    .expect("bitnet::qwen3_arch: BitNet layer missing attn_output BitLinear slot"),
                 &mut attn_proj_out[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd],
                 cfg.eps,
             );
@@ -625,16 +649,22 @@ pub fn text_encode(
         for tok in 0..n_tokens {
             let ffn_row = &ffn_normed[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd];
             bitlinear_projection_packed(
-                ffn_row, layer.bitlinear.ffn_gate.as_ref().expect(
-                    "bitnet::qwen3_arch: BitNet layer missing ffn_gate BitLinear slot",
-                ),
+                ffn_row,
+                layer
+                    .bitlinear
+                    .ffn_gate
+                    .as_ref()
+                    .expect("bitnet::qwen3_arch: BitNet layer missing ffn_gate BitLinear slot"),
                 &mut gate_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
                 cfg.eps,
             );
             bitlinear_projection_packed(
-                ffn_row, layer.bitlinear.ffn_up.as_ref().expect(
-                    "bitnet::qwen3_arch: BitNet layer missing ffn_up BitLinear slot",
-                ),
+                ffn_row,
+                layer
+                    .bitlinear
+                    .ffn_up
+                    .as_ref()
+                    .expect("bitnet::qwen3_arch: BitNet layer missing ffn_up BitLinear slot"),
                 &mut up_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
                 cfg.eps,
             );
@@ -648,9 +678,12 @@ pub fn text_encode(
         for tok in 0..n_tokens {
             let down_row = &gate_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff];
             bitlinear_projection_packed(
-                down_row, layer.bitlinear.ffn_down.as_ref().expect(
-                    "bitnet::qwen3_arch: BitNet layer missing ffn_down BitLinear slot",
-                ),
+                down_row,
+                layer
+                    .bitlinear
+                    .ffn_down
+                    .as_ref()
+                    .expect("bitnet::qwen3_arch: BitNet layer missing ffn_down BitLinear slot"),
                 &mut down_buf[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd],
                 cfg.eps,
             );

@@ -110,7 +110,10 @@ fn gemma3_270m_it_contract_loads() {
     );
     assert_eq!(pick(&loader, "gemma3.context_length"), 32768);
     let rope_base: f64 = pick_f32(&loader, "gemma3.rope.freq_base");
-    assert!((rope_base - 1_000_000.0).abs() < 1.0, "rope.freq_base={rope_base}");
+    assert!(
+        (rope_base - 1_000_000.0).abs() < 1.0,
+        "rope.freq_base={rope_base}"
+    );
     let eps: f64 = pick_f32(&loader, "gemma3.attention.layer_norm_rms_epsilon");
     assert!((eps - 1e-6).abs() < 1e-9, "norm_eps={eps}");
 }
@@ -308,10 +311,7 @@ fn gemma3_270m_it_per_block_tensor_count_is_thirteen() {
     }
     assert_eq!(per_layer.len(), 18, "expected 18 layer blocks");
     for (idx, count) in per_layer.iter() {
-        assert_eq!(
-            *count, 13,
-            "layer {idx} has {count} tensors, expected 13"
-        );
+        assert_eq!(*count, 13, "layer {idx} has {count} tensors, expected 13");
     }
 }
 
@@ -323,9 +323,7 @@ fn gemma3_270m_it_metadata_differs_from_bitnet_270m() {
     };
     // Side-by-side diff between standard 270m-it and BitNet-270M
     // on the metadata keys that distinguish them.
-    let standard_keys = [
-        "gemma3.attention.sliding_window",
-    ];
+    let standard_keys = ["gemma3.attention.sliding_window"];
     for key in standard_keys {
         assert!(
             loader.metadata(key).is_some(),

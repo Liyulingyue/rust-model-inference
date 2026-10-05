@@ -92,8 +92,14 @@ fn gemma3_4b_it_contract_loads() {
     // actual tensor data is IQ4_XS). Just assert it's not the
     // Q4_K_M=15 (270M-it) or BitNet I2_S=40 file_types.
     let file_type = pick(&loader, "general.file_type");
-    assert_ne!(file_type, 15, "file_type 15 = Q4_K_M (270M-it), not 4B IQ4_XS");
-    assert_ne!(file_type, 40, "file_type 40 = BitNet I2_S, not standard gemma3");
+    assert_ne!(
+        file_type, 15,
+        "file_type 15 = Q4_K_M (270M-it), not 4B IQ4_XS"
+    );
+    assert_ne!(
+        file_type, 40,
+        "file_type 40 = BitNet I2_S, not standard gemma3"
+    );
     assert_eq!(pick(&loader, "gemma3.block_count"), 34);
     assert_eq!(pick(&loader, "gemma3.embedding_length"), 2560);
     assert_eq!(pick(&loader, "gemma3.attention.head_count"), 8);
@@ -181,7 +187,10 @@ fn gemma3_4b_it_tensor_inventory_iq4_xs_with_q6k_embd() {
     // 6 norms × 34 layers + token_embd (Q6K not F32) + output_norm + cls (?) = ~205
     // The exact F32 count varies by model; just assert it's > 0 and not the only type.
     assert!(n_f32 > 100, "F32 norms must be present (n_f32={n_f32})");
-    assert_eq!(n_total, 444, "expected 444 tensors (205 F32 + 238 IQ4_XS + 1 Q6K)");
+    assert_eq!(
+        n_total, 444,
+        "expected 444 tensors (205 F32 + 238 IQ4_XS + 1 Q6K)"
+    );
 }
 
 #[test]
@@ -202,9 +211,6 @@ fn gemma3_4b_it_per_block_tensor_count_is_thirteen() {
     }
     assert_eq!(per_layer.len(), 34, "expected 34 layer blocks");
     for (idx, count) in per_layer.iter() {
-        assert_eq!(
-            *count, 13,
-            "layer {idx} has {count} tensors, expected 13"
-        );
+        assert_eq!(*count, 13, "layer {idx} has {count} tensors, expected 13");
     }
 }

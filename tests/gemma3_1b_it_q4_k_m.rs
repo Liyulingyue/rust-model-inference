@@ -108,7 +108,10 @@ fn gemma3_1b_it_no_rope_scaling() {
         "1B has NO RoPE scaling factor"
     );
     let sw = pick(&loader, "gemma3.attention.sliding_window");
-    assert_eq!(sw, 512, "1B uses sliding_window=512 (same as 270M-it, vs 1024 in 4B)");
+    assert_eq!(
+        sw, 512,
+        "1B uses sliding_window=512 (same as 270M-it, vs 1024 in 4B)"
+    );
 }
 
 #[test]
@@ -162,9 +165,16 @@ fn gemma3_1b_it_tensor_inventory_mixed_q4_q5_q6_q8() {
     assert_eq!(n_norm_in, 0, "no per-projection norm_in");
     // 26 layers × 13 tensors = 338
     // + token_embd + output_norm = 340
-    assert_eq!(n_total, 340, "expected 340 tensors (157 F32 + 39 Q4K + 117 Q5_0 + 13 Q6K + 14 Q8_0)");
+    assert_eq!(
+        n_total, 340,
+        "expected 340 tensors (157 F32 + 39 Q4K + 117 Q5_0 + 13 Q6K + 14 Q8_0)"
+    );
     // 26 × 7 = 182 matmul weights, distributed across Q4K/Q5_0/Q6K/Q8_0
-    assert_eq!(n_q4k + n_q5_0 + n_q6k + n_q8_0, 183, "matmul weights (26*7 + token_embd)");
+    assert_eq!(
+        n_q4k + n_q5_0 + n_q6k + n_q8_0,
+        183,
+        "matmul weights (26*7 + token_embd)"
+    );
 }
 
 #[test]
@@ -185,9 +195,6 @@ fn gemma3_1b_it_per_block_tensor_count_is_thirteen() {
     }
     assert_eq!(per_layer.len(), 26, "expected 26 layer blocks");
     for (idx, count) in per_layer.iter() {
-        assert_eq!(
-            *count, 13,
-            "layer {idx} has {count} tensors, expected 13"
-        );
+        assert_eq!(*count, 13, "layer {idx} has {count} tensors, expected 13");
     }
 }

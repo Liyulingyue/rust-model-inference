@@ -335,13 +335,7 @@ mod noop {
         fn weight_bytes(&self) -> Option<&[u8]> {
             None
         }
-        fn forward(
-            &self,
-            _input: &[f32],
-            _output: &mut [f32],
-            _n_in: usize,
-            _n_out: usize,
-        ) {
+        fn forward(&self, _input: &[f32], _output: &mut [f32], _n_in: usize, _n_out: usize) {
             panic!(
                 "BitNet I2_S Weight kernel is a no-op; the BitLinear forward path \
                  should use BitLinearWeights::weight directly, not this kernel. \

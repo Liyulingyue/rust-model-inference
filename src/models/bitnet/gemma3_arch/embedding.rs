@@ -27,11 +27,7 @@ fn source_path_unused() {}
 pub fn load_model(source: &dyn TensorSource) -> Result<Gemma3Model, String> {
     let config = super::config::build_config(source)?;
     let layers: Vec<Gemma3LayerWeights<'static>> = load_layers_static(source, &config);
-    let output_norm = super::weights::get_f32_tensor(
-        source,
-        "output_norm.weight",
-        config.n_embd,
-    );
+    let output_norm = super::weights::get_f32_tensor(source, "output_norm.weight", config.n_embd);
     let token_embedding_rows = static_weight(source, "token_embd.weight")
         .map_err(|e| format!("bitnet::gemma3_arch: token_embd.weight load failed: {e}"))?;
     Ok(Gemma3Model {
@@ -49,8 +45,10 @@ pub fn compute_embedding(
     n_threads_arg: usize,
 ) -> Result<Vec<f32>, String> {
     let _ = n_threads_arg;
-    let tokenizer = SPMTokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
-        .map_err(|e| format!("bitnet::gemma3_arch::compute_embedding: tokenizer init failed: {e}"))?;
+    let tokenizer =
+        SPMTokenizer::from_gguf_metadata(|k| source.metadata(k).cloned()).map_err(|e| {
+            format!("bitnet::gemma3_arch::compute_embedding: tokenizer init failed: {e}")
+        })?;
     let prompt_tokens = encode_embedding_input(&tokenizer, prompt);
     if prompt_tokens.is_empty() {
         return Err("bitnet::gemma3_arch::compute_embedding: empty token sequence".into());
@@ -103,11 +101,7 @@ pub fn run_embedding(
                 .map(|v| v as usize)
                 .unwrap_or(0);
             super::super::embedding::print_embedding_for_arch(
-                &pooled,
-                output,
-                elapsed,
-                "gemma3",
-                n_layers,
+                &pooled, output, elapsed, "gemma3", n_layers,
             );
         }
         Err(error) => {

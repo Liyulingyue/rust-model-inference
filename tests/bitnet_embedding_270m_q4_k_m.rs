@@ -40,7 +40,7 @@
 //! - Plus per-model `token_embd.weight` (F16) and `output_norm.weight`
 //!   (F16). Total: 18 × 20 + 2 = 362.
 
-use rust_model_inference::{GGUFLoader, GGMLType};
+use rust_model_inference::{GGMLType, GGUFLoader};
 
 fn loader() -> Option<GGUFLoader> {
     let path = std::env::var_os("RMI_BITNET_EMBEDDING_270M_MODEL")?;
@@ -72,7 +72,10 @@ fn bitnet_embedding_270m_contract_loads() {
         .metadata("general.architecture")
         .and_then(|v| v.to_string_val())
         .unwrap_or_default();
-    assert_eq!(arch, "gemma3", "BitNet Embeddings 270M rides the gemma3 trunk");
+    assert_eq!(
+        arch, "gemma3",
+        "BitNet Embeddings 270M rides the gemma3 trunk"
+    );
     let file_type = loader
         .metadata("general.file_type")
         .and_then(|v| v.to_u64())
@@ -87,9 +90,16 @@ fn bitnet_embedding_270m_contract_loads() {
     assert_eq!(pick(&loader, "gemma3.attention.value_length"), 256);
     assert_eq!(pick(&loader, "gemma3.vocab_size"), 262144);
     assert_eq!(pick(&loader, "gemma3.rope.dimension_count"), 256);
-    assert_eq!(pick(&loader, "gemma3.pooling_type"), 1, "last-token pooling");
+    assert_eq!(
+        pick(&loader, "gemma3.pooling_type"),
+        1,
+        "last-token pooling"
+    );
     let rope_base: f64 = pick_f32(&loader, "gemma3.rope.freq_base");
-    assert!((rope_base - 1_000_000.0).abs() < 1.0, "rope.freq_base={rope_base}");
+    assert!(
+        (rope_base - 1_000_000.0).abs() < 1.0,
+        "rope.freq_base={rope_base}"
+    );
     let eps: f64 = pick_f32(&loader, "gemma3.attention.layer_norm_rms_epsilon");
     assert!((eps - 1e-6).abs() < 1e-9, "norm_eps={eps}");
 }
@@ -104,7 +114,10 @@ fn bitnet_embedding_270m_uses_spm_tokenizer_no_bpe_merges() {
         .metadata("tokenizer.ggml.model")
         .and_then(|v| v.to_string_val())
         .unwrap_or_default();
-    assert_eq!(model, "llama", "BitNet 270M declares the llama SPM model type");
+    assert_eq!(
+        model, "llama",
+        "BitNet 270M declares the llama SPM model type"
+    );
     let pre = loader
         .metadata("tokenizer.ggml.pre")
         .and_then(|v| v.to_string_val())
@@ -180,7 +193,10 @@ fn bitnet_embedding_270m_tensor_inventory_matches_gemma3_graph() {
     }
     assert_eq!(n_total, 362, "BitNet 270M total tensor count");
     assert_eq!(n_f16, 236, "F16 count: 310 norms + 2 per-model");
-    assert_eq!(n_i2s, 126, "I2_S count: 18 layers * 7 BitLinear projections");
+    assert_eq!(
+        n_i2s, 126,
+        "I2_S count: 18 layers * 7 BitLinear projections"
+    );
     assert_eq!(n_other, 0, "no other ggml_types expected");
     assert_eq!(
         per_layer_has_norm_in, 126,
