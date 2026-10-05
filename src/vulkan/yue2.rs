@@ -353,6 +353,11 @@ impl<'model> YuE2VulkanSession<'model> {
             .and_then(|count| count.checked_mul(rows))
             .ok_or(VulkanError::OutOfMemory)?;
 
+        // Gated: the device is far slower than the CPU for this stage, so the
+        // per-phase split is here to be re-measured when the k-quant shaders get
+        // their workgroups fixed (see docs/usage/yue2-gpu.md).
+        let profile = std::env::var("YUE2_GPU_PROFILE").is_ok();
+        let t_start = std::time::Instant::now();
         let commands = TokenCommands::begin(self.context)?;
         self.ops.write_f32(self.layout.x, input)?;
         for row in 0..rows {
@@ -365,6 +370,7 @@ impl<'model> YuE2VulkanSession<'model> {
         self.ops
             .write_f32(self.layout.rope, &self.rope[..rows * config.head_dim])?;
 
+        let t_layers = std::time::Instant::now();
         for (layer_index, bindings) in self.layers.iter().enumerate() {
             self.ops.record_rms_norm_rows(
                 &commands,
@@ -523,6 +529,7 @@ impl<'model> YuE2VulkanSession<'model> {
             )?;
         }
 
+        let t_head = std::time::Instant::now();
         // Only the last row needs logits: sampling is autoregressive, so the
         // 184704-wide lm_head runs once per chunk rather than once per row.
         let last_offset = (rows - 1)
@@ -559,12 +566,26 @@ impl<'model> YuE2VulkanSession<'model> {
             config.hidden,
             1,
         )?;
+        let t_submit = std::time::Instant::now();
         commands.submit_and_wait()?;
+        let t_read = std::time::Instant::now();
         self.ops
             .read_f32(self.layout.logits, self.config.vocab)
             .map(|logits| {
                 self.logits.copy_from_slice(&logits);
             })?;
+
+        if profile {
+            eprintln!(
+                "[GPU-PROF] record {:.1}ms  layers {:.1}ms  head {:.1}ms  submit {:.1}ms  read {:.1}ms  total {:.1}ms",
+                (t_layers - t_start).as_secs_f64() * 1e3,
+                (t_head - t_layers).as_secs_f64() * 1e3,
+                (t_submit - t_head).as_secs_f64() * 1e3,
+                (t_read - t_submit).as_secs_f64() * 1e3,
+                t_read.elapsed().as_secs_f64() * 1e3,
+                t_start.elapsed().as_secs_f64() * 1e3,
+            );
+        }
 
         Ok(YuE2GpuChunkResult {
             logits: &self.logits,
