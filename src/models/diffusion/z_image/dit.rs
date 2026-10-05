@@ -2586,7 +2586,7 @@ fn run_block_gpu(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "vulkan"))]
 mod tests {
     use super::*;
 
