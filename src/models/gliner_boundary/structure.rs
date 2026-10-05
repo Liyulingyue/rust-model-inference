@@ -88,6 +88,7 @@ pub struct StructureInstance {
 pub fn decode_legacy_structures(
     groups: &[LegacyStructureGroup<'_>],
     overlap_policy: OverlapPolicy,
+    validators: &std::collections::BTreeMap<String, super::validator::CompiledValidators>,
 ) -> Vec<StructureInstance> {
     let mut out = Vec::new();
     for group in groups {
@@ -120,6 +121,20 @@ pub fn decode_legacy_structures(
                     text: group.words[span.start..span.end].join(" "),
                     score: span.score,
                 })
+                // `_decode_json_structures` filters on the derived surface
+                // (`engine.py:576-580`), so a validator sees the same string the
+                // output reports.
+                //
+                // The key is `<group>.<field>`, the shape `field_metadata` uses and
+                // the same shape `_query_thresholds` looks its threshold up under.
+                // A bare field name would collide across two groups declaring the
+                // same field, and would never match what the caller built.
+                .filter(
+                    |span| match validators.get(&format!("{}.{}", group.name, field_name)) {
+                        Some(rules) if !rules.is_empty() => rules.accepts(&span.text),
+                        _ => true,
+                    },
+                )
                 .collect();
             let value = if is_scalar {
                 StructureField::Scalar(kept.into_iter().next())

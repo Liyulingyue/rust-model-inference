@@ -521,6 +521,23 @@ pub fn extract(
             field_metadata,
             default_threshold,
         );
+        // `entity_metadata` is keyed by label, so the entity labels are what the
+        // validator table is built from; the structure side is handled inside
+        // `score_structures`, which knows each field's group.
+        // Only `entities` queries reach `decode_spans`, and their field name is
+        // the entity label, so the table is keyed from that subset. Passing the
+        // whole `query_names` would also key relation and structure field names,
+        // which no span here is scored under.
+        let entity_validators =
+            crate::models::gliner_boundary::validator::parse_metadata_validators(
+                entity_metadata,
+                None,
+                specs
+                    .iter()
+                    .filter(|spec| spec.task_type == "entities")
+                    .map(|spec| spec.field_name.clone()),
+                std::iter::empty(),
+            )?;
         result.spans = decode_spans(
             &result.candidates,
             &result.words,
@@ -529,6 +546,7 @@ pub fn extract(
             &thresholds,
             default_threshold,
             Some(boundary_overlap_policy(model)?),
+            &entity_validators,
         );
         apply_abstention(
             &mut result.spans,

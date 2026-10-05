@@ -721,7 +721,17 @@ fn score_structures(
             words,
         })
         .collect();
-    Ok(decode_legacy_structures(&groups, policy)
+    let validators = super::validator::parse_metadata_validators(
+        entity_metadata,
+        field_metadata,
+        std::iter::empty(),
+        legacy.iter().flat_map(|(_, name, fields)| {
+            fields
+                .iter()
+                .map(move |field: &String| (name.clone(), field.clone()))
+        }),
+    )?;
+    Ok(decode_legacy_structures(&groups, policy, &validators)
         .into_iter()
         .map(|instance| ExtractedStructure {
             task: instance.task,
@@ -979,6 +989,7 @@ pub fn decode_spans(
     thresholds: &[f32],
     default_threshold: f32,
     overlap_policy: Option<OverlapPolicy>,
+    validators: &BTreeMap<String, super::validator::CompiledValidators>,
 ) -> Vec<ExtractedSpan> {
     let temperature = if pair_temperature > 0.0 {
         pair_temperature
@@ -1048,6 +1059,14 @@ pub fn decode_spans(
                     .then(a.end.cmp(&b.end))
             });
         }
+        // `_decode_entities` filters after `_resolve_spans`, on the surface text
+        // it derived (`engine.py:293`), so a validator sees the same string the
+        // output reports and not a word join.
+        if let Some(rules) = validators.get(&field_names[q]) {
+            if !rules.is_empty() {
+                hits.retain(|hit| rules.accepts(&hit.text));
+            }
+        }
         out.extend(hits);
     }
     out
@@ -1081,6 +1100,7 @@ pub fn extract_spans(
         &vec![default; fields.len()],
         default,
         Some(boundary_overlap_policy(model)?),
+        &BTreeMap::new(),
     ))
 }
 

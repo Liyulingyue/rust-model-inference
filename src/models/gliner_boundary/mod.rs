@@ -38,6 +38,7 @@ pub mod settings;
 pub mod spans;
 pub mod structure;
 pub mod tensor_util;
+pub mod validator;
 
 pub use candidate_encoder::CandidateEncoder;
 pub use content_pooler::SpanContentPooler;
