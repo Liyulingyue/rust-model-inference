@@ -1202,15 +1202,77 @@ let mut values = [0.0f32; 512];  // attention 长生成时越界 panic
 - TODO-AVX-VNNI / TODO-LLAMA-PER-TOKEN-SIMD 实现后，再跑一遍 K2-Horizon-4B
   对比 `--max-context 8192` vs `--max-context 32768` 的 prefill 时间（验证大 context
   不会因为 KV 随机访问模式变慢）。
-### Standard gemma3 trunk (`src/models/gemma3/trunk/forward.rs`)
+### Standard gemma3 trunk (`src/models/gemma3/trunk/forward.rs`) — DONE for 270M-it
 
-`src/models/gemma3/` 现在只服务 BitNet 270M — 每行 20 张量、7 个 `*_norm_in` RMSNorm + 7 个
-I2_S BitLinear 投影。`unsloth/gemma-3-270m-it-GGUF`（Q4_K_M，242 MiB，标准 gemma3 架构）
-的 8 条 contract test 已加入 `tests/gemma3_270m_it_q4_k_m.rs` 并全部通过（与 BitNet 270M
-同维 18 layers / 640 / 2048 / 4 heads / 1 KV / head_dim 256），但 forward 路径仍
-`return Err("non-BitNet gemma3 forward not yet implemented")`。
+`src/models/gemma3/` 现在服务 **BitNet 270M** (file_type=40) **和**
+**standard gemma3-270m-it** (file_type=15, Q4_K_M mixed) — 两条 forward
+path 共享同一个 `text_encode` 函数体，`cfg.is_bitnet` 在 7 个投影
+（attn_q/k/v/output + ffn_gate/up/down）处分发：
 
-要做的是：
+- `is_bitnet=true`  → `bitlinear_projection(...)` (BitNet path，SIMD hot path)
+- `is_bitnet=false` → `standard_projection(...)` (Q4_K/Q5_0/Q6K/Q8_0 matmul，
+  Q8_0-quantized 激活 × mixed-quant 权重，跟 qwen3 trunk 同款)
+
+新增 `Gemma3Config.sliding_window: usize` 字段（默认 0 = full causal），
+`causal_self_attention` 在 mask `j ∈ [0, i + 1 - sliding_window)`。
+Standard gemma3-270m-it 声明 `sliding_window=512`（hybrid local/global attn）。
+
+`Gemma3LayerWeights` 同时存 `bitlinear: BitLinearSlot` 和
+`wq/wk/.../w_down: Option<StdProjection>`（owned `Vec<u8>` + ggml type + shape）。
+Forward 路径在调用 `standard_projection` 时按需构造 `Weight` kernel
+（cheap; kernel 只是 byte buffer 的 view + 维度）。
+
+`static_weight` (`src/models/gemma3/trunk/weights.rs`) 现支持 F16 (BitNet 270M)
+和 Q8_0 (standard gemma3-270m-it，mixed-quant conversion) 两种 token
+embedding。Q8_0 dequant 用 34 bytes / 32-element block layout
+(2-byte F16 scale + 32 signed int8)。
+
+`build_config` (`src/models/gemma3/embedding.rs`) 改：
+- vocab 从 `tokenizer.ggml.tokens` array length 读（standard GGUF 没有
+  `gemma3.vocab_size`；BitNet 仍用 `gemma3.vocab_size` fallback）。
+- `gemma3.context_length` 改 unwrap_or(0)（standard GGUF 总是有，BitNet 也总有；fallback
+  仅为防御）。
+- `gemma3.pooling_type` 改 unwrap_or(1)（standard GGUF 不设，BitNet 设 1）。
+- `gemma3.attention.sliding_window` 新字段。
+
+`app/mod.rs::compute_embedding` / `run_embedding` dispatch 加 `"gemma3"` case
+→ `crate::models::gemma3::compute_embedding` / `run_embedding`（之前默认
+fall through 到 qwen3，不识别 arch）。`models::gemma3` 现在 pub mod。
+
+`models::gemma3::trunk::BitLinearWeights` 引用从 `crate::ops::bitlinear` 改到
+`crate::ops::bitnet`（旧的 `bitlinear/` 模块已不再 pub；commit e011536
+之后一直未更新 gemma3 trunk 的 import，这是 e011536 的 holdout）。
+
+**e2e** (`tests/gemma3_270m_it_e2e_embed.rs`) 5/5：
+shape=640、finite、value range `[-300, 300]`、L2 norm `∈ (0.1, 1000)`、
+byte-deterministic、longer prompt 32 tokens 仍 finite、cooking vs
+software cosine sim < 0.99（IT 模型 + last-token pooling discrimination
+较弱；0.99 threshold 是宽口径，只 catch 完全相同 embedding）。
+
+**性能**：standard gemma3-270m-it Q4_K_M 单 token 4 线程 ~1.0 s；BitNet-270M
+packed SIMD 路径 ~480 ms。两者 forward 时间在同一数量级 — Q4_K matmul
+是 AVX2 + Q8_0-quantized activation，跟 SIMD int8 × int8 dot 在内存带宽上
+类似。
+
+**未做**（4B/12B/27B standard gemma3 的前置）：
+
+1. KV cache + decode loop（生成模式；当前只有 embedding extraction = last-token）。
+2. IT chat template（`tokenizer.chat_template` 已在 contract test 里锁定含
+   `<start_of_turn>{role}
+...<end_of_turn>
+`，但 `run_shared_inference` 仍
+   返回 error）。
+3. **Bit-exact 对照 oracle**：本机没有 cmake/PyTorch/bitnet.cpp build；任何
+   "对得上 llama.cpp b96806d --temp 0 --top-k 1 golden log" 的工作需 cmake
+   工具链，目前不可达。Forward 通过有限 golden test 验证（shape / finite /
+   range / determinism / discrimination）— 跟 BitNet-270M 的 e2e 套件同级别。
+
+针对 gemma-3-270m-it 的 contract test (`tests/gemma3_270m_it_q4_k_m.rs`)
+已 8/8：metadata (arch, file_type=15, dims)、sliding_window=512、
+SPM tokenizer (`model=llama`, no merges, EOS=106)、mixed-quant tensor
+inventory (109 F32 + 81 Q5_0 + 27 Q4K + 9 Q6K + 10 Q8_0 = 236 张量, no I2_S, no norm_in)。
+
+历史：
 
 1. `causal_self_attention` 加 sliding window mask（`gemma3.attention.sliding_window=512`，
    屏蔽 `|i - j| > sliding_window` 的 K/V）。

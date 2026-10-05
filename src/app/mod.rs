@@ -81,6 +81,13 @@ pub fn compute_embedding(
         "gemma-embedding" => {
             crate::models::gemma_embedding::compute_embedding(source, prompt, n_threads_arg)
         }
+        // gemma3 arch: BitNet b1.58 270M (file_type=40) hits the
+        // detect_is_bitnet gate above; the standard gemma3 270M-it
+        // (and future 1B/4B/12B/27B) falls through to the standard
+        // path here. Both paths live in `models::gemma3` and share
+        // the same SPM tokenizer (`tokenizer.ggml.model = "llama"`,
+        // `pre = "default"`, no merges).
+        "gemma3" => crate::models::gemma3::compute_embedding(source, prompt, n_threads_arg),
         "bert" | "jina-bert-v2" | "nomic-bert" | "nomic-bert-moe" => {
             crate::models::bert_family::compute_embedding(source, prompt, n_threads_arg)
         }
@@ -129,6 +136,13 @@ pub fn run_embedding(
                 output,
             )
         }
+        "gemma3" => crate::models::gemma3::run_embedding(
+            source,
+            prompt,
+            n_threads_arg,
+            kv_format,
+            output,
+        ),
         _ => qwen3_run_embedding(source, prompt, n_threads_arg, kv_format, output),
     }
 }

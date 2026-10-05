@@ -10,7 +10,7 @@ use std::time::Instant;
 use crate::app::cli::EmbeddingOutput;
 use crate::core::loader::GGUFLoader;
 use crate::core::scratchpad::KvFormat;
-use crate::core::tensor::TensorSource;
+use crate::core::tensor::{MetaValue, TensorSource};
 use crate::core::tokenizer::SPMTokenizer;
 use crate::models::gemma3::trunk::{
     load_layers_static, text_encode, Gemma3Config, Gemma3Model, Gemma3Rope,
@@ -114,12 +114,28 @@ pub fn build_config(source: &dyn TensorSource) -> Result<Gemma3Config, String> {
         n_embd_head_k: pick_u64("gemma3.attention.key_length")?,
         n_embd_head_v: pick_u64("gemma3.attention.value_length")?,
         n_ff: pick_u64("gemma3.feed_forward_length")?,
-        vocab: pick_u64("gemma3.vocab_size")?,
-        n_ctx: pick_u64("gemma3.context_length")?,
+        // vocab is encoded as `tokenizer.ggml.tokens` array length
+        // in standard gemma3 GGUFs (gemma3-270m-it and friends).
+        // BitNet 270M declares `gemma3.vocab_size` directly; fall
+        // back to that if the tokens array is missing.
+        vocab: source
+            .metadata("tokenizer.ggml.tokens")
+            .and_then(|v| match v {
+                MetaValue::Array(_, items) => Some(items.len()),
+                _ => None,
+            })
+            .or_else(|| pick_u64("gemma3.vocab_size").ok())
+            .ok_or_else(|| "gemma3: cannot determine vocab (no tokenizer.ggml.tokens array and no gemma3.vocab_size)".to_string())?,
+        n_ctx: pick_u64("gemma3.context_length").unwrap_or(0),
         eps: pick_f32("gemma3.attention.layer_norm_rms_epsilon")?,
         freq_base: pick_f32("gemma3.rope.freq_base")?,
         rope: Gemma3Rope::Neox,
-        pooling_type: pick_u64("gemma3.pooling_type")? as u32,
+        pooling_type: pick_u64("gemma3.pooling_type").unwrap_or(1) as u32,
+        sliding_window: source
+            .metadata("gemma3.attention.sliding_window")
+            .and_then(|v| v.to_u64())
+            .map(|v| v as usize)
+            .unwrap_or(0),
         is_bitnet: detect_is_bitnet(source),
     })
 }

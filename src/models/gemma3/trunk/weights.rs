@@ -21,7 +21,7 @@
 //!
 //! The 4-norm sandwich and QK-norm make this trunk differ from
 //! the qwen3 trunk; the BitLinear slots are identical in wire
-//! format and dispatch to the shared [`crate::ops::bitlinear`]
+//! format and dispatch to the shared [`crate::ops::bitnet`]
 //! forward.
 
 use crate::core::loader::GGUFLoader;
@@ -29,7 +29,7 @@ use crate::core::tensor::{GGMLType, TensorSource};
 use crate::ops::float::{bf16_to_f32, f16_to_f32};
 use crate::ops::kernel::{F16Weight, QuantizedTensor};
 
-pub use crate::ops::bitlinear::{BitLinearSlot, BitLinearWeights};
+pub use crate::ops::bitnet::{BitLinearSlot, BitLinearWeights};
 pub use crate::ops::kernel::Weight;
 
 use super::config::{Gemma3Config, Gemma3Rope};
@@ -38,6 +38,25 @@ use super::config::{Gemma3Config, Gemma3Rope};
 /// lifetime parameter is currently unused — kept for API symmetry
 /// with [`crate::models::qwen3::trunk::Qwen3LayerWeights`], which
 /// stores borrowed `Weight<'a>` projections.
+///
+/// Holds **both** the BitNet (`bitlinear`) and standard
+/// (`std_proj` byte buffers) projection sets. The loader populates
+/// only the set relevant to the model's forward path:
+/// - `cfg.is_bitnet == true`  → `bitlinear` populated, `std_proj` empty
+/// - `cfg.is_bitnet == false` → `bitlinear` default, `std_proj` populated
+///
+/// The unused set is small (a few hundred bytes for the empty
+/// `Vec`/`Option` fields) so we keep both rather than fork the
+/// layer struct per path.
+///
+/// `StdProjection` stores **owned bytes** (not `Weight<'a>`) so
+/// the layer can outlive the borrowed `&dyn TensorSource`: the
+/// forward pass rebuilds the `Weight` from `(bytes, ggml_type,
+/// n_in, n_out)` per call (cheap; the kernel is just a `&[u8]` view
+/// of the byte buffer + dimensions). Storing the Weight directly
+/// would force a `'static` byte buffer owned by the model, which
+/// the gemma3 trunk's per-call rebuild pattern can't supply
+/// without duplicating the entire GGUF payload.
 pub struct Gemma3LayerWeights<'a> {
     pub attn_norm: Vec<f32>,
     pub post_attention_norm: Vec<f32>,
@@ -50,7 +69,28 @@ pub struct Gemma3LayerWeights<'a> {
     /// gemma3 GGUFs; for the BitNet 270M GGUF every slot is
     /// `Some(BitLinearWeights)`.
     pub bitlinear: BitLinearSlot,
+    /// Standard (Q4_K / Q5_0 / Q6K / Q8_0) matmul weight payloads,
+    /// populated for standard gemma3, empty for BitNet 270M.
+    /// `(bytes, ggml_type, n_in, n_out)` per projection.
+    pub wq: Option<StdProjection>,
+    pub wk: Option<StdProjection>,
+    pub wv: Option<StdProjection>,
+    pub wo: Option<StdProjection>,
+    pub w_gate: Option<StdProjection>,
+    pub w_up: Option<StdProjection>,
+    pub w_down: Option<StdProjection>,
     pub _marker: std::marker::PhantomData<&'a ()>,
+}
+
+/// Owned byte buffer + ggml type + shape for one standard
+/// matmul projection. The forward pass rebuilds the `Weight`
+/// kernel from this each call.
+#[derive(Debug, Clone)]
+pub struct StdProjection {
+    pub bytes: Vec<u8>,
+    pub ggml_type: GGMLType,
+    pub n_in: usize,
+    pub n_out: usize,
 }
 
 /// Full gemma3 model: layers + embeddings + final norm.
@@ -158,6 +198,12 @@ fn load_bitlinear_slot(
 /// Load all 18 layers of the 270M BitNet gemma3 GGUF (or any
 /// future BitNet gemma3 GGUF). The seven projection shapes per
 /// layer are fixed by the metadata and passed in.
+///
+/// For BitNet (`cfg.is_bitnet == true`) the `bitlinear` slot is
+/// populated and `w_*` stays empty. For standard gemma3 (`cfg.is_bitnet == false`)
+/// the `w_*` fields are populated via
+/// [`Weight::from_quantized(QuantizedTensor::from_bytes(...))`] and
+/// `bitlinear` stays default.
 pub fn load_layers_static(
     source: &dyn TensorSource,
     config: &Gemma3Config,
@@ -165,22 +211,14 @@ pub fn load_layers_static(
     let n_embd = config.n_embd;
     let n_embd_head_k = config.n_embd_head_k;
     let n_embd_q = config.n_embd_q();
+    let n_embd_kv = config.n_embd_kv();
     let n_ff = config.n_ff;
-    let projection_shapes: [(&str, usize, usize); 7] = [
-        ("attn_q", n_embd, n_embd_q),
-        ("attn_k", n_embd, config.n_embd_kv()),
-        ("attn_v", n_embd, config.n_embd_kv()),
-        ("attn_output", n_embd_q, n_embd),
-        ("ffn_gate", n_embd, n_ff),
-        ("ffn_up", n_embd, n_ff),
-        ("ffn_down", n_ff, n_embd),
-    ];
     (0..config.n_layer)
         .map(|i| {
             let bitlinear = if config.is_bitnet {
                 let attn_q = load_bitlinear_slot(source, i, "attn_q", n_embd, n_embd_q);
-                let attn_k = load_bitlinear_slot(source, i, "attn_k", n_embd, config.n_embd_kv());
-                let attn_v = load_bitlinear_slot(source, i, "attn_v", n_embd, config.n_embd_kv());
+                let attn_k = load_bitlinear_slot(source, i, "attn_k", n_embd, n_embd_kv);
+                let attn_v = load_bitlinear_slot(source, i, "attn_v", n_embd, n_embd_kv);
                 let attn_output = load_bitlinear_slot(source, i, "attn_output", n_embd_q, n_embd);
                 let ffn_gate = load_bitlinear_slot(source, i, "ffn_gate", n_embd, n_ff);
                 let ffn_up = load_bitlinear_slot(source, i, "ffn_up", n_embd, n_ff);
@@ -196,6 +234,35 @@ pub fn load_layers_static(
                 }
             } else {
                 BitLinearSlot::default()
+            };
+            // For the standard path, load each matmul tensor as a
+            // generic quantized Weight. We use Option so missing
+            // tensors (e.g. for partial loads / subset of layers)
+            // surface as a clear "tensor not found" error instead of
+            // a panic.
+            let std_proj = |projection: &str, n_in: usize, n_out: usize| -> Option<StdProjection> {
+                let name = format!("blk.{i}.{projection}.weight");
+                let info = source.tensor_info(&name)?;
+                let bytes = source.tensor_slice(&name)?;
+                Some(StdProjection {
+                    bytes: bytes.to_vec(),
+                    ggml_type: info.ggml_type,
+                    n_in,
+                    n_out,
+                })
+            };
+            let (wq, wk, wv, wo, w_gate, w_up, w_down) = if config.is_bitnet {
+                (None, None, None, None, None, None, None)
+            } else {
+                (
+                    std_proj("attn_q", n_embd, n_embd_q),
+                    std_proj("attn_k", n_embd, n_embd_kv),
+                    std_proj("attn_v", n_embd, n_embd_kv),
+                    std_proj("attn_output", n_embd_q, n_embd),
+                    std_proj("ffn_gate", n_embd, n_ff),
+                    std_proj("ffn_up", n_embd, n_ff),
+                    std_proj("ffn_down", n_ff, n_embd),
+                )
             };
             Gemma3LayerWeights {
                 attn_norm: get_f32_tensor(source, &format!("blk.{i}.attn_norm.weight"), n_embd),
@@ -221,15 +288,23 @@ pub fn load_layers_static(
                     n_embd_head_k,
                 ),
                 bitlinear,
+                wq,
+                wk,
+                wv,
+                wo,
+                w_gate,
+                w_up,
+                w_down,
                 _marker: std::marker::PhantomData,
             }
         })
         .collect()
 }
 
-/// Load the F16 token-embedding table and expand it to F32 in
-/// row-major `vocab × n_embd` order. The caller gets a single
-/// owned `Vec<f32>` slice that doesn't borrow from the
+/// Load the token-embedding table and expand it to F32 in
+/// row-major `vocab × n_embd` order. Supports F16 (BitNet 270M)
+/// and Q8_0 (standard gemma3-270m-it and friends). The caller gets
+/// a single owned `Vec<f32>` slice that doesn't borrow from the
 /// `TensorSource`, which lets [`crate::models::gemma3::embedding`]
 /// keep the model fully owned and survive the end of the
 /// `compute_embedding` call's borrow scope.
@@ -255,18 +330,54 @@ pub fn static_weight(
     } else {
         1
     };
-    let expected_bytes = n_in * n_out * 2; // F16 = 2 bytes
-    if slice.len() != expected_bytes {
-        return Err(format!(
-            "gemma3: {name} has {} bytes; expected {} for {n_in} x {n_out} F16",
-            slice.len(),
-            expected_bytes
-        ));
-    }
-    let mut out = vec![0.0f32; n_in * n_out];
-    for (value, chunk) in out.iter_mut().zip(slice.chunks_exact(2)) {
-        let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
-        *value = f16_to_f32(bits);
+    let n_total = n_in * n_out;
+    let mut out = vec![0.0f32; n_total];
+    match info.ggml_type {
+        GGMLType::F16 => {
+            let expected_bytes = n_total * 2;
+            if slice.len() != expected_bytes {
+                return Err(format!(
+                    "gemma3: {name} has {} bytes; expected {} for {n_in} x {n_out} F16",
+                    slice.len(),
+                    expected_bytes
+                ));
+            }
+            for (value, chunk) in out.iter_mut().zip(slice.chunks_exact(2)) {
+                let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
+                *value = f16_to_f32(bits);
+            }
+        }
+        GGMLType::Q8_0 => {
+            // Q8_0 block layout: 34 bytes per 32 elements (2-byte F16
+            // scale + 32 signed int8 values). For the standard
+            // gemma3-270m-it GGUF the token_embd.weight is Q8_0
+            // quantized (mixed-quant layout).
+            let blocks_per_row = n_in / 32;
+            let row_bytes = blocks_per_row * 34;
+            if slice.len() < n_out * row_bytes {
+                return Err(format!(
+                    "gemma3: {name} has {} bytes; expected {} for {n_in} x {n_out} Q8_0",
+                    slice.len(),
+                    n_out * row_bytes
+                ));
+            }
+            for row in 0..n_out {
+                let row_off = row * row_bytes;
+                for block in 0..blocks_per_row {
+                    let off = row_off + block * 34;
+                    let scale = f16_to_f32(u16::from_le_bytes([slice[off], slice[off + 1]]));
+                    for lane in 0..32 {
+                        let q = slice[off + 2 + lane] as i8 as f32;
+                        out[row * n_in + block * 32 + lane] = scale * q;
+                    }
+                }
+            }
+        }
+        other => {
+            return Err(format!(
+                "gemma3: {name} has unsupported ggml_type {other:?}; expected F16 or Q8_0"
+            ));
+        }
     }
     Ok(out)
 }

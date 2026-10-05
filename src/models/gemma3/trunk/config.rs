@@ -1,12 +1,31 @@
 //! Gemma3 decoder configuration (`general.architecture = "gemma3"`).
 //!
 //! Used by [`crate::models::gemma3::trunk::forward`] and the
-//! embedding path. Mirrors the metadata that
-//! `bitnet-embedding-270m` carries; for an un-BitLinear regular
-//! Gemma3 (which this engine does not yet support), this struct
-//! would also be the right home for the hybrid sliding-window
-//! pattern that larger Gemma3 (4B/12B/27B) ships — but 270M does
-//! not declare `sliding_window` so it is omitted here.
+//! embedding path.
+//!
+//! # Forward path dispatch
+//!
+//! Two forward paths share this config:
+//!
+//! - **BitNet b1.58** (`cfg.is_bitnet == true`): every projection
+//!   goes through [`crate::ops::bitnet::bitlinear_forward_packed`]
+//!   (pre-dequant `{-1, 0, +1}` int8 SIMD path; the SIMD hot path
+//!   added in afbb172). The `weight` slot in each layer is unused.
+//! - **Standard** (`cfg.is_bitnet == false`): every projection
+//!   goes through the standard `Weight::kernel.forward_prepared`
+//!   path (Q4_K / Q5_0 / Q6K / Q8_0 mixed-quant matmul, the same
+//!   kernels the qwen3 trunk uses). The `bitlinear` slot in each
+//!   layer is `BitLinearSlot::default()`.
+//!
+//! # Sliding-window attention
+//!
+//! Standard Gemma3 (4B/12B/27B and the 270M-it variant) carries a
+//! hybrid local/global attention pattern: a layer attends locally
+//! to the last `sliding_window` tokens and globally to everything
+//! else. The BitNet 270M GGUF does NOT declare this metadata; the
+//! standard gemma3 trunks (4B+) do. When `sliding_window == 0` the
+//! attention is full causal; otherwise `|i - j| > sliding_window`
+//! keys are masked.
 
 #[derive(Debug, Clone)]
 pub struct Gemma3Config {
@@ -24,9 +43,14 @@ pub struct Gemma3Config {
     pub freq_base: f32,
     pub rope: Gemma3Rope,
     pub pooling_type: u32,
+    /// Sliding-window size for local attention (0 = full causal,
+    /// no masking). Standard gemma3 270M-it declares 512; BitNet
+    /// 270M does not declare this metadata at all and is treated
+    /// as 0.
+    pub sliding_window: usize,
     /// BitNet b1.58 flag — true when `general.file_type == 40` or
     /// when `*_norm_in` tensors are present. Decides whether the
-    /// forward goes through [`crate::ops::bitlinear::bitlinear_forward`]
+    /// forward goes through [`crate::ops::bitnet::bitlinear_forward_packed`]
     /// at every projection (vs the standard matmul path).
     pub is_bitnet: bool,
 }
