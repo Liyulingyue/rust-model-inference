@@ -273,3 +273,143 @@ pub fn score_document_candidates(
         pool_size: c,
     }
 }
+
+/// One per-query admission threshold.
+#[derive(Clone, Debug)]
+pub enum QueryThresholds {
+    /// A single threshold for every query, as `_query_thresholds` produces when
+    /// no query carries a configured one.
+    Uniform(f32),
+    /// `[B, Q]` thresholds. `queries` is the query count; entry
+    /// `b * queries + q` is query `q` of sample `b`.
+    PerQuery { values: Vec<f32>, queries: usize },
+}
+
+impl QueryThresholds {
+    fn at(&self, sample: usize, query: usize) -> f32 {
+        match self {
+            QueryThresholds::Uniform(value) => *value,
+            QueryThresholds::PerQuery { values, queries } => values
+                .get(sample * queries + query)
+                .copied()
+                .unwrap_or(f32::NAN),
+        }
+    }
+}
+
+/// Count-head-guided candidate admission, optional on top of a threshold.
+///
+/// `_group_scored_candidates` (`boundary/model.py:949-1023`) with
+/// `adaptive_threshold=True`, and the `threshold`-as-tensor form the engine
+/// always uses (`engine.py:91` passes `threshold=query_thresholds`).
+///
+/// Three properties of the reference's count branch are load-bearing, and each
+/// is a way a plausible port diverges:
+///
+/// 1. **It unions; it never filters.** Count guidance may admit a candidate the
+///    threshold rejected, and may not drop one the threshold kept. Truncating
+///    the thresholded set to `predicted_count` is the same function for every
+///    case where the threshold is loose, and different for every case where it
+///    is not.
+/// 2. **Rank is taken after masking ineligible slots to `MASK_LOGIT`**
+///    (`probs.masked_fill(~eligible, MASK_LOGIT)`), so padding consumes no rank.
+///    Ranking the raw probabilities instead shifts each rank by however many
+///    higher-scoring padding slots precede it — which on real checkpoints is
+///    zero, because their padding logits saturate negative, and is nonzero for
+///    any candidate batch where padding outscores a real candidate.
+/// 3. **The sort is stable and descending**, so equal probabilities rank by
+///    candidate index. An unstable sort admits a different set of the right
+///    size, which is easy to mistake for agreement.
+///
+/// `predicted_count` is `round(exp(count_log_rate))` clamped to `[0, C]`. The
+/// exponentiation happens before the rounding, so a log-rate of `1.0` admits
+/// three candidates rather than one.
+/// `queries` is `Q` from the batch's `[B, Q, C]` layout, which the flattened
+/// `DocumentCandidateBatch` does not record: only `C` is stored, and the
+/// reference recovers both axes from `candidates.indices.shape`.
+pub fn group_scored_candidates(
+    candidates: &DocumentCandidateBatch,
+    probabilities: &[f32],
+    queries: usize,
+    thresholds: &QueryThresholds,
+    count_log_rates: Option<&[f32]>,
+    adaptive_threshold: bool,
+) -> Vec<Vec<Vec<(f32, usize, usize)>>> {
+    let pool = candidates.pool_size;
+    let row_len = queries * pool;
+    let samples = probabilities.len().checked_div(row_len).unwrap_or(0);
+    let mut out = vec![vec![Vec::new(); queries]; samples];
+
+    for (sample, queries_out) in out.iter_mut().enumerate() {
+        for (query, query_out) in queries_out.iter_mut().enumerate() {
+            let row = sample * row_len + query * pool;
+            let threshold = thresholds.at(sample, query);
+            let count = if adaptive_threshold {
+                count_log_rates
+                    .and_then(|rates| rates.get(row).copied())
+                    .map(|rate| predicted_count(rate, pool))
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+
+            // Rank within the eligible set, so padding never consumes a rank and
+            // ties fall to the lower candidate index. `rank_of` is indexed by
+            // candidate slot, so an ineligible slot is distinguishable from rank 0.
+            let mut rank_of: Vec<usize> = vec![usize::MAX; pool];
+            let mut ranked: Vec<(usize, f32)> = Vec::new();
+            for slot in 0..pool {
+                let flat = row + slot;
+                if candidates.valid_mask.get(flat).copied().unwrap_or(false) {
+                    ranked.push((
+                        slot,
+                        probabilities
+                            .get(flat)
+                            .copied()
+                            .unwrap_or(f32::NEG_INFINITY),
+                    ));
+                }
+            }
+            ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+            for (rank, (slot, _)) in ranked.iter().enumerate() {
+                rank_of[*slot] = rank;
+            }
+
+            let mut hits: Vec<(f32, usize, usize)> = Vec::new();
+            // Walking slots ascending reproduces the reference's
+            // `keep.nonzero()` order, which is row-major over
+            // `(sample, query, candidate)` — not descending score. Callers sort.
+            for (slot, &rank) in rank_of.iter().enumerate() {
+                if rank == usize::MAX {
+                    continue;
+                }
+                let flat = row + slot;
+                let probability = probabilities
+                    .get(flat)
+                    .copied()
+                    .unwrap_or(f32::NEG_INFINITY);
+                if !(probability >= threshold || rank < count) {
+                    continue;
+                }
+                let start = candidates.indices.get(flat * 2).copied().unwrap_or(0);
+                let end = candidates.indices.get(flat * 2 + 1).copied().unwrap_or(0);
+                hits.push((probability, start, end));
+            }
+            *query_out = hits;
+        }
+    }
+    out
+}
+
+/// `round(exp(rate))` clamped to `[0, C]`, as the reference spells it.
+///
+/// The clamp is unobservable through `group_scored_candidates` — `rank` can
+/// never reach a count that exceeds the candidate count — so it is applied for
+/// fidelity rather than because a case depends on it.
+fn predicted_count(rate: f32, candidates: usize) -> usize {
+    let raw = rate.exp().round();
+    if !raw.is_finite() || raw <= 0.0 {
+        return 0;
+    }
+    (raw as usize).min(candidates)
+}

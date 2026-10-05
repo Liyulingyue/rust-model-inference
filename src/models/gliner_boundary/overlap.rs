@@ -186,21 +186,29 @@ fn maximum_score_non_overlapping(items: &[ScoredSpan], distinct: &[usize]) -> Ve
         (span.end, span.start, OrderedF32(-span.score), index)
     });
     let ends: Vec<usize> = by_end.iter().map(|&index| items[index].end).collect();
-    // `bisect_right(ends, start, 0, index) - 1`: the last span that ends at or
-    // before this one starts. Half-open spans may touch.
-    let predecessors: Vec<usize> = by_end
+    // How many spans end at or before this one starts; `0` means "no
+    // predecessor". Half-open spans may touch, hence `<=`.
+    //
+    // This counts rather than recording the last predecessor's index, so the
+    // no-predecessor case is `0` instead of `-1`. The reference's
+    // `bisect_right(ends, start, 0, position) - 1` is a `- 1` on a `usize` that
+    // underflows to `usize::MAX` for the first span and only lands back on
+    // `best[0]` because the read is `predecessors[position] + 1`, wrapping twice.
+    // That is correct in release and panics under debug's overflow check, so the
+    // count is carried directly instead.
+    let predecessor_counts: Vec<usize> = by_end
         .iter()
         .enumerate()
         .map(|(position, &index)| {
             let start = items[index].start;
-            ends[..position].partition_point(|end| *end <= start) - 1
+            ends[..position].partition_point(|end| *end <= start)
         })
         .collect();
 
     // `best[k]` is the optimum over the first `k` spans: (score, selection).
     let mut best: Vec<(f32, Vec<usize>)> = vec![(0.0, Vec::new())];
     for (position, &index) in by_end.iter().enumerate() {
-        let (previous_score, previous_selection) = &best[predecessors[position] + 1];
+        let (previous_score, previous_selection) = &best[predecessor_counts[position]];
         let with_item = (previous_score + items[index].score, {
             let mut selection = previous_selection.clone();
             selection.push(position);
