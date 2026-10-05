@@ -438,6 +438,24 @@ impl AukDit {
             )?;
         }
 
+        // Swap joint order from [img, text] (double-block convention) to
+// [text, img] (single-block convention). audio.cpp does this via
+// ConcatModule({1}).build(text, img) before the single-stream stage and
+// resets positions to 0..text+img sequentially.
+        let total = img_tokens + text_tokens;
+        if img_tokens > 0 && text_tokens > 0 {
+            let mut swapped = vec![0.0_f32; total * HIDDEN];
+            for token in 0..text_tokens {
+                swapped[token * HIDDEN..(token + 1) * HIDDEN]
+                    .copy_from_slice(&scratch.joint[(img_tokens + token) * HIDDEN..(img_tokens + token + 1) * HIDDEN]);
+            }
+            for token in 0..img_tokens {
+                swapped[(text_tokens + token) * HIDDEN..(text_tokens + token + 1) * HIDDEN]
+                    .copy_from_slice(&scratch.joint[token * HIDDEN..(token + 1) * HIDDEN]);
+            }
+            scratch.joint[..total * HIDDEN].copy_from_slice(&swapped);
+        }
+
         // 10 single blocks
         for (layer_index, block) in self.single_blocks.iter().enumerate() {
             linear_into(
@@ -498,10 +516,12 @@ impl AukDit {
         let final_shift = &scratch.modulation[HIDDEN..FINAL_NORM_DIM];
 
         // Apply norm + scale + shift only to image tokens (text is discarded
-        // at this stage).
+        // at this stage). After single blocks the joint order is [text, img]
+        // so we must offset by text_tokens.
         let mut projected = vec![0.0_f32; img_tokens * LATENT_DIM];
         for token in 0..img_tokens {
-            let token_in = &scratch.joint[token * HIDDEN..(token + 1) * HIDDEN];
+            let token_in =
+                &scratch.joint[(text_tokens + token) * HIDDEN..(text_tokens + token + 1) * HIDDEN];
             // Apply (1 + scale) * x + shift.
             let mut normalized = vec![0.0_f32; HIDDEN];
             // Identity norm (no final_norm.norm.weight in GGUF).
@@ -1523,11 +1543,7 @@ fn run_single_block(
             &block.k_norm,
             1e-6,
         );
-        let pos = if token < text_tokens {
-            token
-        } else {
-            text_tokens + (token - text_tokens)
-        };
+        let pos = token; // Sequential 0..text_tokens+img_tokens after the [text, img] swap.
         rope_apply_token(&mut qkv_buf[off..off + HIDDEN], pos, HEAD_DIM, inv_freq);
         rope_apply_token(&mut qkv_buf[off + HIDDEN..off + 2 * HIDDEN], pos, HEAD_DIM, inv_freq);
     }
