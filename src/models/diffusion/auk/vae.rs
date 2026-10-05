@@ -540,12 +540,24 @@ fn apply_snake_beta_inplace(
     alpha: &[f32],
     beta: &[f32],
 ) {
-    for c in 0..channels {
-        for t in 0..frames {
-            let v = x[c * frames + t];
-            x[c * frames + t] = snake_beta(v, alpha[c], beta[c]);
+    // Each (c, t) cell is independent. Parallelize across output channels
+    // so each thread writes a disjoint slice.
+    let stride = frames;
+    let x_ptr = x.as_mut_ptr() as usize;
+    let x_len = x.len();
+    let alpha_ptr = alpha.as_ptr() as usize;
+    let beta_ptr = beta.as_ptr() as usize;
+    (0..channels).into_par_iter().for_each(|c| {
+        let x_slice = unsafe {
+            std::slice::from_raw_parts_mut((x_ptr as *mut f32).add(c * stride), stride)
+        };
+        let a = unsafe { *((alpha_ptr as *const f32).add(c)) };
+        let b = unsafe { *((beta_ptr as *const f32).add(c)) };
+        for v in x_slice.iter_mut() {
+            *v = snake_beta(*v, a, b);
         }
-    }
+    });
+    let _ = x_len; // suppress unused warning
 }
 
 /// 1D convolution (single channel-group, all-input-to-all-output). Input
