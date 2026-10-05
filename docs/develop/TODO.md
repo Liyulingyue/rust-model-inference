@@ -1202,3 +1202,31 @@ let mut values = [0.0f32; 512];  // attention 长生成时越界 panic
 - TODO-AVX-VNNI / TODO-LLAMA-PER-TOKEN-SIMD 实现后，再跑一遍 K2-Horizon-4B
   对比 `--max-context 8192` vs `--max-context 32768` 的 prefill 时间（验证大 context
   不会因为 KV 随机访问模式变慢）。
+### Standard gemma3 trunk (`src/models/gemma3/trunk/forward.rs`)
+
+`src/models/gemma3/` 现在只服务 BitNet 270M — 每行 20 张量、7 个 `*_norm_in` RMSNorm + 7 个
+I2_S BitLinear 投影。`unsloth/gemma-3-270m-it-GGUF`（Q4_K_M，242 MiB，标准 gemma3 架构）
+的 8 条 contract test 已加入 `tests/gemma3_270m_it_q4_k_m.rs` 并全部通过（与 BitNet 270M
+同维 18 layers / 640 / 2048 / 4 heads / 1 KV / head_dim 256），但 forward 路径仍
+`return Err("non-BitNet gemma3 forward not yet implemented")`。
+
+要做的是：
+
+1. `causal_self_attention` 加 sliding window mask（`gemma3.attention.sliding_window=512`，
+   屏蔽 `|i - j| > sliding_window` 的 K/V）。
+2. 在 `gemma3/trunk/weights.rs` 加非 BitLinear 路径：`attn_q/k/v/output` +
+   `ffn_gate/up/down` 用 `Weight::from_quantized`（Q4_K/Q5_0/Q6K/Q8_0 混合，按张量名匹配），
+   走 `matmul_q8_0_quantized_parallel_rows`（现有的 standard matmul，已在 qwen3 trunk 用过）。
+3. `Gemma3Config::is_bitnet` field 保留作 dispatcher，但加一个
+   `pub fn new_from_source(&self) -> ...` 的 standard gemma3 入口（`text_encode_v2` 或
+   重命名）；`embedding.rs::compute_embedding` 走 `cfg.is_bitnet` 分发两个 path。
+4. IT tokenizer：`tokenizer.chat_template`（含 `<start_of_turn>{role}\n…<end_of_turn>\n`）
+   + EOS=106（不是 BitNet 的 EOS=1）已经在 contract test 锁定；`BPETokenizer` 已经能处理
+   SPM `tokens + scores + token_type`（这是 BitNet-270M 复用过的），IT 模型跟 base 模型
+   tokenizer layout 完全一致，理论上零增量工作量。
+5. KV cache + decode loop（用于 IT generation 而非仅 embedding extraction）。
+
+rough scope: ~400-500 LOC（取决于要不要 KV cache / generation），
+与 `tests/gemma3_270m_it_q4_k_m.rs` 的 8 条 contract test + 端到端 forward parity test 配对
+（参 llama.cpp `--temp 0 --top-k 1` greedy 输出做 32→1 字符串对齐；oracle 见 llama.cpp `b96806d`
+在 `unsloth/gemma-3-270m-it-GGUF` 上的 golden log `main-0319c65`）。
