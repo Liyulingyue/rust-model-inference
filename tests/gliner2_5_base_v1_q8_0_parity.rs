@@ -11,16 +11,21 @@
 //!
 //! `tools/converter/utils/quantize_gguf.py` produces the Q8_0 file when run
 //! against the F32 GGUF. The test reads both, runs the same text/schema
-//! through `run_extraction`, and asserts the **median** pair-logit delta is
-//! below `MEDIAN_TOLERANCE` — the Q8_0 quantize-input → dot → dequantize
-//! round trip is bounded by the documented ~1% Q8_0 noise on the bulk of
-//! slots, with the input-quantization step adding at most another factor
-//! or two for a 28-layer DeBERTa forward.
+//! through `run_extraction`, and compares the pair logits.
 //!
-//! A small minority of slots drift further (a separate Q8_0 kernel stride
-//! bug, visible as adjacent-slot value swaps that does not flip the
-//! thresholded span output); the test surfaces them via `eprintln!` as
-//! diagnostics rather than treating them as a quantization-noise issue.
+//! **Compare sorted, not by index.** `DocumentCandidatePool` is a ranked
+//! top-K list, so a slot index is a rank rather than a stable identity: two
+//! candidates whose scores sit within quantization noise of each other can
+//! come back in the opposite order, and the same slot index then names a
+//! different span. Comparing by index on this model reported a max delta of
+//! 1.28 (first text) and 2.90 (second text) and read exactly like a stride
+//! bug — adjacent slots appeared to trade values — while the sorted
+//! comparison puts the same runs at 0.064 and 0.070, i.e. ordinary Q8_0
+//! noise. A separate `tests/q8_0_row_identity.rs` pins the kernel's row
+//! mapping directly so this class of misreading does not recur.
+//!
+//! Padded pool slots carry `MASK_LOGIT`, a large negative sentinel rather
+//! than a score, so they are filtered out before the comparison.
 //!
 //! Run with both:
 //!   `RMI_GLINER2_5_BASE_V1_GGUF=…f32.gguf  RMI_GLINER2_5_BASE_V1_Q8_0_GGUF=…q8_0.gguf`
@@ -37,13 +42,15 @@ const TEXT: &str = "The product shipped late but the support team was great.";
 const TEXT_2: &str = "Tesla delivered 500,000 cars last year. BMW should be in second place.";
 const SCHEMA: &str = r#"{"entities": ["product"]}"#;
 /// Q8_0 quantizes linear weights to ~1% relative error per the
-/// `tools/converter/utils/quantize_q8_0` docstring, and the DeBERTa-v3-base +
-/// pool + pair scorer is ~28 layers deep. The bulk of slots stay within
-/// 5% (the upper bound the Q8_0 kernel documents for the production Qwen3
-/// hot path); a small minority drift further due to a separate Q8_0
-/// kernel stride bug worth investigating, but the thresholded span output
-/// for those slots does not flip under any documented threshold.
+/// `tools/converter/utils/gguf.py:quantize_q8_0` docstring, and the
+/// DeBERTa-v3-base + pool + pair scorer is ~28 layers deep. The observed
+/// median lands at 1.2–1.6% with a max near 7%, so 5% covers the bulk of
+/// the distribution and anything above it is a real regression rather than
+/// quantization noise.
 const MEDIAN_TOLERANCE: f32 = 5.0e-2;
+/// Padded pool slots carry `MASK_LOGIT`, a large negative sentinel rather
+/// than a score. Anything at or below it is padding, not a live candidate.
+const MASK_LOGIT_FLOOR: f32 = -1.0e4;
 
 fn tasks() -> Vec<Task> {
     vec![Task {
@@ -78,9 +85,37 @@ fn collect_logits(model: &BoundaryModel<'_>, text: &str, _schema: &str) -> Vec<f
 }
 
 fn assert_cross_format(f32_pair: &[f32], q8_pair: &[f32], label: &str) {
-    let abs_deltas: Vec<f32> = f32_pair
+    assert_eq!(
+        f32_pair.len(),
+        q8_pair.len(),
+        "pair-logit vectors differ in length"
+    );
+    // `DocumentCandidatePool` is a *ranked* top-K list, so a slot index is
+    // a rank, not a stable identity: two candidates whose scores are within
+    // quantization noise of each other can come back in the opposite order,
+    // and the same slot index then names a different span. Comparing by
+    // index therefore measures ranking jitter, not the forward pass. Sort
+    // both sides and compare the multisets instead — that is the question
+    // this file is actually asking.
+    let sorted_multiset = |values: &[f32]| -> Vec<f32> {
+        let mut kept: Vec<f32> = values
+            .iter()
+            .copied()
+            .filter(|v| *v > MASK_LOGIT_FLOOR)
+            .collect();
+        kept.sort_by(|a, b| a.total_cmp(b));
+        kept
+    };
+    let f32_sorted = sorted_multiset(f32_pair);
+    let q8_sorted = sorted_multiset(q8_pair);
+    assert_eq!(
+        f32_sorted.len(),
+        q8_sorted.len(),
+        "{label}: live-slot count differs"
+    );
+    let abs_deltas: Vec<f32> = f32_sorted
         .iter()
-        .zip(q8_pair.iter())
+        .zip(q8_sorted.iter())
         .map(|(a, b)| (a - b).abs())
         .collect();
     let mut sorted = abs_deltas.clone();
@@ -91,16 +126,17 @@ fn assert_cross_format(f32_pair: &[f32], q8_pair: &[f32], label: &str) {
         "{label}: median |delta| is {median}, tolerance is {MEDIAN_TOLERANCE}; \
          the Q8_0 quantize-input path is drifting on the bulk of slots"
     );
-    let mut indexed: Vec<(usize, f32, f32, f32)> = f32_pair
+    let mut indexed: Vec<(usize, f32, f32, f32)> = f32_sorted
         .iter()
-        .zip(q8_pair.iter())
+        .zip(q8_sorted.iter())
         .enumerate()
         .map(|(i, (a, b))| (i, *a, *b, (a - b).abs()))
         .collect();
     indexed.sort_by(|x, y| y.3.partial_cmp(&x.3).unwrap());
     eprintln!(
-        "{label}: median |delta| {median}, worst 5: {:?}",
-        &indexed[..5]
+        "{label}: {} live slots, median |delta| {median}, worst 5: {:?}",
+        f32_sorted.len(),
+        &indexed[..5.min(indexed.len())]
     );
 }
 
