@@ -480,15 +480,14 @@ fn boundary_http_validates_request_shape() {
         .spawn()
         .expect("curl spawn");
     {
-        let mut stdin = child.stdin.as_mut().expect("curl stdin");
-        stdin
-            .write_all(
-                std::iter::repeat(b' ')
-                    .take(5 * 1024 * 1024)
-                    .collect::<Vec<u8>>()
-                    .as_slice(),
-            )
-            .expect("write 5 MB to curl");
+        let stdin = child.stdin.as_mut().expect("curl stdin");
+        let chunk = vec![b' '; 64 * 1024];
+        let mut written = 0usize;
+        while written < 5 * 1024 * 1024 {
+            let n = chunk.len().min(5 * 1024 * 1024 - written);
+            stdin.write_all(&chunk[..n]).expect("write 5 MB to curl");
+            written += n;
+        }
     }
     let out = child.wait_with_output().expect("curl wait");
     let code = String::from_utf8_lossy(&out.stdout).to_string();
