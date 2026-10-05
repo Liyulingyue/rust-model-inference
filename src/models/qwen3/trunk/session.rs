@@ -339,6 +339,38 @@ impl<'model> Qwen3Session<'model> {
         Ok(self.scratch.normed.clone())
     }
 
+    /// Extract every post-normalization token row, including optional VL DeepStack inputs.
+    /// A fresh F32-KV session preserves conditioning without half-precision KV rounding.
+    pub fn forward_hidden_sequence(&mut self, input: Qwen3Input<'_>) -> Result<Vec<f32>, String> {
+        if self.kv_state.seq_len != 0
+            || input.token_ids.is_empty()
+            || input.token_ids.len() > self.capacity
+            || !matches!(
+                &self.kv_state.cache,
+                crate::core::scratchpad::KvCache::F32(_)
+            )
+        {
+            return Err("Hidden-sequence extraction requires a fresh F32-KV session and a non-empty input within capacity".into());
+        }
+        // This API reads CPU scratch rows; the Vulkan path only exports final logits.
+        #[cfg(feature = "vulkan")]
+        {
+            self.gpu = None;
+        }
+        self.prefill_inner(&input, input.token_ids.len(), false)?;
+        let width = self.model.config.n_embd;
+        let mut output = vec![0.0; input.token_ids.len() * width];
+        for (row, destination) in output.chunks_exact_mut(width).enumerate() {
+            crate::ops::rms_norm(
+                &self.prefill_scratch.x[row * width..(row + 1) * width],
+                &self.model.output_norm,
+                destination,
+                self.model.config.eps,
+            );
+        }
+        Ok(output)
+    }
+
     /// Return false from the callback to stop generation. Empty text callbacks
     /// still allow cancellation when a token has not completed a UTF-8 character.
     pub fn generate_streaming_until(
@@ -559,7 +591,7 @@ impl<'model> Qwen3Session<'model> {
                 parity_trace::report(parity_trace::checkpoint(
                     "result_output",
                     None,
-                    &[config.vocab],
+                    &[_config.vocab],
                     &self.scratch.logits,
                 ));
             }

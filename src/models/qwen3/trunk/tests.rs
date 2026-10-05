@@ -625,3 +625,51 @@ fn qwen3_trace_keeps_token_major_checkpoints_for_every_prompt_row() {
         std::fs::remove_file(trace).unwrap();
     }
 }
+
+#[test]
+fn hidden_sequence_preserves_every_f32_kv_row() {
+    use crate::core::scratchpad::{KvFormat, KvLifecycle};
+    let model = deterministic_session_model(8);
+    let tokens = [1, 2, 1];
+    let positions = super::positions::qwen_text_positions(tokens.len());
+    let mut batched =
+        Qwen3Session::new_with_kv_state(&model, 8, KvFormat::F32, KvLifecycle::Ephemeral).unwrap();
+    let actual = batched
+        .forward_hidden_sequence(Qwen3Input {
+            token_ids: &tokens,
+            positions: &positions,
+            embeddings: None,
+            deepstack_embeddings: None,
+        })
+        .unwrap();
+    let mut sequential =
+        Qwen3Session::new_with_kv_state(&model, 8, KvFormat::F32, KvLifecycle::Ephemeral).unwrap();
+    let mut expected = Vec::new();
+    for i in 0..tokens.len() {
+        expected.extend(
+            sequential
+                .forward_last_hidden(
+                    Qwen3Input {
+                        token_ids: &tokens[i..i + 1],
+                        positions: &positions[i..i + 1],
+                        embeddings: None,
+                        deepstack_embeddings: None,
+                    },
+                    1,
+                )
+                .unwrap(),
+        );
+    }
+    assert_eq!(
+        actual.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+    );
+    assert!(batched
+        .forward_hidden_sequence(Qwen3Input {
+            token_ids: &tokens,
+            positions: &positions,
+            embeddings: None,
+            deepstack_embeddings: None
+        })
+        .is_err());
+}

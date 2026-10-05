@@ -1,4 +1,5 @@
 pub mod app;
+pub use app::diffusion::read_f32_file;
 pub use app::open_or_exit;
 pub use app::run_or_exit;
 pub use models::qwen3::{get_f32_tensor, Qwen3LayerWeights};
