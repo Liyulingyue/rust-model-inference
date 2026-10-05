@@ -133,6 +133,12 @@ LFM2 / LFM2.5 / Spark / Nemotron-H / Hunyuan / LFM2-MoE），每个 scorer 实�
 - [ ] **讨论：MemoryArena 与 BlockAllocator 组合**
 - [ ] **讨论：GPU 后端架构设计** — Vulkan / wgpu / CUDA 等多后端抽象
 - [ ] **讨论：SIMD 扩展路线** — 当前 AVX2+FMA、NEON。后续可考虑 AVX-512 (高端 CPU)、ARM SVE、AVX-VNNI (int8 dot)
+- [ ] **GLiNER 特性层补齐** — 12 个模型已 byte-exact，但用户可见**特性**未齐。
+      详细清单、划界标准（模型家族特性 vs 框架层）、以及本轮抓到的三个真 bug
+      见 [`glinerTODO.md`](../../glinerTODO.md) 的「特性层待办」一节。
+      当前半成品：F-1 `choices` 解码侧（prefix 已进 prompt 流但无人消费，**优先收尾**）、
+      F-2 `entity_attributes`（两套机制、零 ground truth）、
+      F-3 长文本 `*_long` chunk+merge、F-4 relation 4 阶段 dedup。
 - [ ] **讨论：两套线程调度统一** — ComputePool vs rayon。暂不统一（LLM 热路径不应轻易改动）
 - [ ] **`kquants.py` 的 Q6_K 批大小估算偏低** — `--format q6_k` 量化 783 MB 的
       `gliner2.5-base-v1` 跑 15 分钟未完成（Q4_K 同输入 4.5 分钟）。`_Q6K_BYTES_PER_BLOCK`

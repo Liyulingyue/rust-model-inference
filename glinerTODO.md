@@ -647,6 +647,114 @@ structures/records（`[C]`）；外加 abstention（`null_projection`）与 coun
 
 每条开工前必须先 `modelscope download --model <repo> config.json tokenizer_config.json`（按 model-download skill），读 config 填本文件对应 TODO 的"flag 决策 / 路由 / 架构位置"三栏，再写代码。**不再做"看着像就动手"的盲改**。
 
+## 特性层待办（模型已适配 ≠ 特性齐全）
+
+12 个模型、2 个架构（`span` / `boundary`）都已 byte-exact，**但用户可见特性不等于模型**。
+本节只记「reference 有、我们没有」的语义特性；框架层（批处理、`batch_size`、AMP/`quantize`、
+`torch.compile`、设备管理、LoRA、训练循环）按用户判断**不在本 PR 范围**。
+
+划界标准（用户原话）：**模型家族特性 = 用户在 schema 里声明、影响推理输出的语义**；
+**框架/基础设施 = 批处理、张量并行、线程数、dtype、设备**。
+
+开工前**必须先写 oracle**。这一节的所有条目都踩过同一个坑：不看 reference 源码、
+只凭模型「应该支持某特性」去猜，会漏掉一半。已完成的 5 项全部先跑 oracle 拿真实答案。
+
+### ✅ 已完成（分支 `gliner-features`）
+
+| 特性 | commit | oracle | 备注 |
+|---|---|---|---|
+| `adaptive_threshold`（count head 引导准入） | `1c1466a` | `dump_adaptive_threshold.py` | 4 个 boundary config 全是 `false`，**不影响 12/12**，是给未来 checkpoint 的 |
+| `word_splitter="char"` + 修 `\w` | `e9904c4` | `dump_word_splitter.py` | **修了既有 bug**，见下 |
+| per-entity / per-field / per-relation threshold | `5a22717` | `dump_per_query_thresholds.py` | 三条**互不相通**的通道 |
+| `validators` / `RegexValidator` | `3be43a0` | `dump_regex_validator.py` | 两处 engine 差异**显式记录**而非掩盖 |
+| `choices` prefix 渲染 | `34622d3` | `dump_choice_fields.py` | **半程**，解码侧未做（见 F-1） |
+
+### 🔴 F-1 `choices` 的解码半程（**当前半成品，优先收尾**）
+
+`34622d3` 只做了 prompt 侧：prefix 渲染 + 落在 text 流上 + `EncodedPrompt.text_prefix_len`。
+**没有任何代码消费它** —— prefix 进了 encoder 输入但没被读取。半成品状态最危险，
+因为它会改变 prompt 却对输出无贡献，看起来像「有这特性但没触发」。
+
+待做（`engine.py:656` `_decode_choice_field`）：
+- [ ] 给 choice token 的 `(idx, idx+1)` 打分。参考用 `score_explicit_spans`，**不是**走
+      candidate pool
+- [ ] `sigmoid(logit / pair_temperature)`，再按 `dtype` 分 list / scalar
+- [ ] **索引偏移**：choice 的 `idx` 是 text 流坐标，落回文档要减 `text_prefix_len`。
+      `pool.rs` / `record_head.rs` / `overlap.rs` 三处都消费 span 索引，**改错任一处
+      都会静默偏移所有 span 且不报错**
+- [ ] `_find_choice_idx` 只在 prefix 区内做小写全等匹配（`runtime.py:1206`）
+- [ ] record 路径的 `_record_local_choice_mentions`（`engine.py:595`）：在**原始文本**上跑
+      `(?<!\w)choice(?!\w)` 忽略大小写，归属到最近的前置 anchor，按值去重、保持源序
+- [ ] `field_metadata["<g>.<f>"]["choices"]` 的 JSON 表达（reference 只能从 Python builder
+      传，`to_dict`/`from_dict`/HTTP 都不支持，**形态要自己定**）
+
+**验证缺口**：12 个模型没有一个 schema 用过 `choices`，**零 ground truth**。
+必须先用 oracle 造 fixture，否则只能靠读 reference 自证。
+
+### 🟠 F-2 `entity_attributes` / `AttributeGroup`（工作量最大，无 ground truth）
+
+`schema.py:63-80`、`schema.py:330-392`。属性组用**独立 sigmoid 多标签**解码，
+有 `qualify_labels` / `applies_to` / 独立 `threshold`。
+
+**难在两个架构机制不同**（不是同一特性的两份实现）：
+- span：复用同一 span 处已有的 `raw_logits`（`runtime.py:788-883`）
+- boundary：只对**保留的** span 调 `score_explicit_spans`（`engine.py:379-485`）
+
+校验规则也不轻：组名非空且不撞 `{text,confidence,start,end}`、label 组间不重复、
+属性 label 不得与实体 label 相撞（否则要求 `qualify_labels=True`）。
+`to_dict` **完全不序列化** `entity_attributes`，`from_dict` **没有这条路**。
+
+**零 ground truth**，且要同时覆盖两套机制。先造 fixture 再动手。
+
+### 🟡 F-3 长文本 `*_long` 的 chunk + merge（纯后处理，风险最低）
+
+`chunking.py` 整套。10 个 `*_long` 方法与短文本路径的**六处差异**：
+1. 按**词**切窗（`chunk_size=384` / `chunk_overlap=64`）
+2. 内部**强制** `include_confidence=True, include_spans=True`，与调用方 flag 无关
+3. 强制 `format_results=True`（`batch_extract_long` 直接 `ValueError`）
+4. char offset 加 `chunk.start_char`，且 surface 从**原文**重新切
+5. merge 规则分类型：分类取 max confidence、裸字符串走**多数投票**（平票取最早的 chunk）、
+   list 拼接去重、dict 递归
+6. 非 span 项按**忽略 confidence** 的 canonical key 去重，保留高 confidence 的那个
+
+依赖：char offset 需要 word→char 映射，`word_splitter="char"` 改变了窗口边界
+（`runtime.py:1334` 把模型的 splitter 传进去）。
+
+### 🟡 F-4 relation 4 阶段 dedup canonicalizer
+
+`engine.py:899-1002` `_deduplicate_relation_edges`，`relations.rs` 里确认没有：
+1. 单侧包含关系归一到最长 mention
+2. 精确 `(h0,h1,t0,t1)` 去重，保留最高分
+3. **case / 空白折叠后**的语义文本去重，平票按 token 距离再按分数
+4. token 子集支配关系剔除
+最终按 `(head_start, tail_start, -score)` 排序。
+
+### ⚪ F-5 已确认**不做**的（记录理由，避免以后重复调查）
+
+| 项 | 理由 |
+|---|---|
+| `occurrence_policy`（4 个取值） | **只在建 gold target 时用，推理零影响**。若「实现」它，那是新功能不是对齐 |
+| `joint_ie/` 与 `classification/` 子系统 | 是独立公开库面（`Classifier.from_pretrained` / `JointIE.from_pretrained` → `AutoExtractor`），不是 `span`/`boundary` 架构。带完整约束 DSL + beam/exact 解码 + 温度标定，**建议另开 PR** |
+| `Schema.to_dict()` / `from_dict()` 往返 | reference 自身就不对称（丢 `threshold`/`validators`/`cls_threshold`/`class_act`/`prompt`/`examples`，`entity_attributes` 完全无路径）。对齐它=复制缺陷 |
+| 训练侧旋钮（`SamplingConfig` 15 个 knob、LoRA、`push_to_hub`） | 训练/框架层 |
+| `span` 架构的 NER 头（`span_rep`/`count_embed`/`count_pred`） | 转换器既定范围，**本来就没转**（`weights.rs:6`），不是遗漏 |
+
+### 本轮抓到的三个真 bug（都是「模型适配完成」也发现不了的）
+
+1. **`\w` 语义不一致**（`e9904c4` 修）：Python 的 `\w` = `L*`+`N*`+`_`；
+   rust `regex` 的是 `\p{Alphabetic}`+`\p{M}`+`\p{Nd}`+`\p{Join_Control}`+`\p{Pc}`。
+   **两个方向都错**：`cafe`+U+0301 被误合成一个 token，U+2160/U+00BD 被误拆。
+   存活原因：12 个模型的测试文本里**没有任何组合符**。
+2. **structure validator key 错配**（`3be43a0` 修）：`structure.rs` 用裸字段名查，
+   `score_structures` 用 `<group>.<field>` 建表 —— 永远查不到，且裸名会在两个 group
+   声明同名字段时撞车。**编译通过、测试全绿、特性完全无效**。
+3. **`overlap.rs` 的 `usize` 下溢**（`1c1466a` 修）：reference 的
+   `bisect_right(ends, start, 0, position) - 1` 对 `usize` 减 1。release 下靠二次回绕
+   碰巧正确，**debug 的溢出检查会让 3 个 `overlap_resolution_parity` 测试失败**。
+   之前记的「gliner 82/82」是 release 下测的。
+
+---
+
 ## B 完成的方法论选择
 
 按用户原话"按照工作量，由少到多"执行：**不做架构抽象，先 B 再 C**。理由：
@@ -671,6 +779,9 @@ structures/records（`[C]`）；外加 abstention（`null_projection`）与 coun
 ## 更新规则
 
 - 每条 TODO 完成时，状态从 🟡/🟠/🔴/🔵 改成 ✅，commit 信息里写明改动了哪条 flag / 路由 / 模块
+- **特性层**（上方「特性层待办」一节）开工前**必须先写 oracle**，与模型适配同一条纪律：
+  凭「模型应该支持某特性」去猜会漏掉一半。已完成的 5 项全部先跑 oracle 拿 reference 的真实答案，
+  三个真 bug 也是这么抓到的 —— 它们在「模型 byte-exact 完成」的状态下完全不可见
 - 任何"flag 共用 vs 另开"的决策都要在本文件写理由 + commit hash，半年后回头看不会懵
 - "已下载模型但未完成适配"的中间状态用 ⏸ 标记，列在对应 TODO 下方
 - **族分类写错比不写更糟**——每条开工前必读 config 复核 `architecture` 与 `model_name`
