@@ -93,7 +93,7 @@ pub fn quantize_activation_per_token(x: &[f32]) -> (Vec<i8>, f32) {
     (q, absmax)
 }
 
-/// BitLinear forward (scalar reference):
+/// BitLinear forward:
 ///
 /// ```text
 /// y[j] = Σ_i w[j, i] * x_q[i] * (absmax / 127)
@@ -106,6 +106,15 @@ pub fn quantize_activation_per_token(x: &[f32]) -> (Vec<i8>, f32) {
 /// absmax rescale.
 ///
 /// `y_out.len() == n_out`.
+///
+/// # SIMD dispatch
+///
+/// On x86_64 hosts with AVX2 + FMA the inner dot product is
+/// vectorized via [`forward_avx2::bitlinear_forward_avx2`]
+/// (sign-extend int8 → int16, then `_mm256_madd_epi16` pairwise
+/// multiply-add). The two paths produce **bit-exact identical
+/// outputs** for any input pair (tested in `forward_avx2.rs`).
+/// On other architectures the scalar reference is used.
 pub fn bitlinear_forward(
     weights_i2s: &[u8],
     x_q: &[i8],
@@ -125,6 +134,37 @@ pub fn bitlinear_forward(
     );
     assert_eq!(n_in % QK_I2_S, 0, "n_in must be a multiple of QK_I2_S=128");
 
+    #[cfg(target_arch = "x86_64")]
+    {
+        if crate::ops::has_avx2_fma() {
+            unsafe {
+                crate::ops::bitnet::forward_avx2::bitlinear_forward_avx2(
+                    weights_i2s, x_q, absmax, n_in, n_out, y_out,
+                );
+            }
+            return;
+        }
+    }
+
+    bitlinear_forward_scalar(weights_i2s, x_q, absmax, n_in, n_out, y_out);
+}
+
+/// Scalar reference BitLinear forward (the same math, no SIMD).
+///
+/// Kept separate from [`bitlinear_forward`] so the AVX2 path can
+/// share its dispatch wrapper while the per-row inner loop lives in
+/// one well-tested location. Exposed as `pub` so benchmarks can
+/// measure the scalar cost directly without going through the
+/// dispatcher (which on AVX2+FMA hosts would silently route to the
+/// SIMD kernel).
+pub fn bitlinear_forward_scalar(
+    weights_i2s: &[u8],
+    x_q: &[i8],
+    absmax: f32,
+    n_in: usize,
+    n_out: usize,
+    y_out: &mut [f32],
+) {
     let rescale = absmax / 127.0;
     let mut dequant = vec![0.0f32; n_in];
     for j in 0..n_out {
