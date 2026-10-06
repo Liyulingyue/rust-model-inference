@@ -91,6 +91,35 @@ a k-quant matmul is the shader, not the device. The same table shows the fixed
 submit round trip is about 370 us, which matters for a per-token decode but
 does not explain this -- the whole chunk is one submission.
 
+## 继续收窄：分歧起于「第一个读历史的 attention 输出」
+
+按 row 逐点 dump 后（`YUE2_DUMP_XIN`，临时插桩已回退）：
+
+| pos | CPU embedding | GPU embedding |
+|---|---|---|
+| 36 | 0.028076172, -0.05908203 | **同左，逐位一致** |
+| 37 | -0.021118164, 0.007019043 | -0.023925781, 0.003967285 ← **不同** |
+| 38 | -0.0021209717, 0.013000488 | -0.023925781, 0.003967285 ← **GPU 重复了 37 的值** |
+
+pos=38 的 GPU 值等于 pos=37 的 GPU 值，不是算错而是**下游发散**：pos=37 的输入
+取决于 pos=36 的**28 层输出**，而 pos=36 的 embedding 本身一致。也就是说分歧**不在
+embedding、不在 rms_norm 的输入**，而在 **pos=36 这一行经过 attention 之后的残差流**。
+
+为什么之前测「prefill 的 attention 输出逐位一致」？因为那个 dump 读的是
+`layout.attn` 的 region 起点（第 0 行 = prefix 的 token），不是当前 chunk 的第 36 行。
+所以它一直「一致」，是**读错了行**。同一条记录里 pos=38 重复 pos=37 的值，也是同一个
+坑：region 起点 vs 当前 row。
+
+逐层 trace（`YUE2_TRACE_LAYER`，每层 submit+回读）证实 n=35（prefill 中间）全部层
+逐位一致 —— 但因为每层都同步，GPU trace 只能跑到 n=35，到不了出问题的 n=37，所以
+「逐层第一个偏离点」还没拿到。
+
+⚠️ **这是今晚在这上面踩的第三个读法坑**，值得单独记：arena region 的 `read_f32(region)`
+从 region 起点读，region 大小是 `max_rows * width`，**不是**整条序列。所以
+1) prefill(36行) 时读 region 起点得到 token 0，不是 token 35
+2) decode(1行) 时读 region 起点得到本 chunk 那一行（这个对）
+3) 要看第 k 行必须按 `(k * width)` 偏移自己切片
+
 ## 分歧的精确范围（逐段 dump 实测）
 
 在真实 GGUF 上用临时插桩逐段对比 CPU/GPU（插桩已回退）：
