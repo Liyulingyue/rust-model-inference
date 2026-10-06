@@ -21,7 +21,8 @@ pub mod weights;
 
 pub use config::{Qwen3Config, Qwen3Rope};
 pub use forward::{
-    run_shared_inference, text_encode, Qwen3GenerateOptions, Qwen3Generation, Qwen3Input,
+    run_shared_inference, text_encode, text_encode_with_audio, Qwen3GenerateOptions,
+    Qwen3Generation, Qwen3Input,
 };
 pub use positions::qwen_text_positions;
 pub use rerank::score_qwen3_rerank;

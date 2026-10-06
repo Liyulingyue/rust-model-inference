@@ -283,14 +283,18 @@ impl AukPipeline {
     }
 
     /// End-to-end CFMEdit: take a reference WAV file, run it through the
-    /// Qwen2.5-Omni audio tower to get per-token embeddings, and feed them
-    /// alongside the text prompt to the DiT. Requires the audio tower
-    /// to be loaded (via `load_with_audio_tower`).
+    /// Qwen2.5-Omni audio tower, then have the Qwen text encoder run with
+    /// the audio embeddings substituted for the `<|AUDIO|>` token positions
+    /// (text and audio attend to each other inside the Qwen trunk --
+    /// matching audio.cpp's `conditioning.cpp::build_text_conditioning`).
+    /// The fused per-token hidden states then drive the DiT.
     ///
     /// `wav_samples_16k_mono` must be 16 kHz mono PCM f32 (use
     /// `crate::app::media::decode_audio` to load + resample any input
     /// format). For very long audio, the audio tower chunks into 200-frame
     /// windows internally.
+    ///
+    /// Requires the audio tower to be loaded (via `load_with_audio_tower`).
     pub fn generate_audio_with_reference_wav(
         &self,
         prompt: &str,
@@ -315,7 +319,83 @@ impl AukPipeline {
             t.elapsed().as_secs_f64() * 1000.0,
             audio_tokens,
         );
-        self.generate_audio_with_audio(prompt, &audio_embeddings, audio_tokens, options)
+        self.generate_audio_cfmedit(prompt, &audio_embeddings, audio_tokens, options)
+    }
+
+    /// CFMEdit core: build the CFMEdit prompt template (system + user +
+    /// audio_bos + audio placeholders + audio_eos + assistant), substitute
+    /// the audio tower's per-frame embeddings for the `<|AUDIO|>` positions,
+    /// run the Qwen transformer (text attends to audio via self-attention),
+    /// then drive the DiT with the fused hidden states.
+    pub fn generate_audio_cfmedit(
+        &self,
+        prompt: &str,
+        audio_embeddings: &[f32],
+        audio_tokens: usize,
+        options: &AukOptions,
+    ) -> Result<AukAudio, String> {
+        let total_start = std::time::Instant::now();
+        let encoder = self.text.as_ref().ok_or_else(|| {
+            "AuK CFMEdit requires the Qwen2.5-Omni text encoder (--text-encoder)"
+                .to_string()
+        })?;
+
+        let t = std::time::Instant::now();
+        let (cond_hidden, total_cond_tokens) = if audio_tokens == 0 {
+            // Pure TTS path (no reference audio) -- use the bare-prompt
+            // encoder so we get the same conditioning as generate_audio().
+            let hidden = encoder.encode(prompt)?;
+            let tokens = encoder.last_token_count(&hidden);
+            (hidden, tokens)
+        } else {
+            let hidden = encoder.encode_with_audio(prompt, audio_tokens, audio_embeddings)?;
+            let tokens = encoder.last_token_count(&hidden);
+            (hidden, tokens)
+        };
+        eprintln!(
+            "[auk-stage-profile] qwen_cfmedit_encode={:.1}ms  total_cond_tokens={}",
+            t.elapsed().as_secs_f64() * 1000.0,
+            total_cond_tokens,
+        );
+
+        let t = std::time::Instant::now();
+        let latent = self.dit.denoise(
+            &cond_hidden,
+            total_cond_tokens,
+            &[],
+            0,
+            options,
+        )?;
+        let t_denoise = t.elapsed();
+        let t = std::time::Instant::now();
+        let audio = {
+            let mut min = f32::INFINITY;
+            let mut max = f32::NEG_INFINITY;
+            let mut sum_sq = 0.0_f64;
+            for v in &latent {
+                if *v < min {
+                    min = *v;
+                }
+                if *v > max {
+                    max = *v;
+                }
+                sum_sq += (*v as f64) * (*v as f64);
+            }
+            let rms = (sum_sq / latent.len() as f64).sqrt();
+            eprintln!(
+                "[auk-stage-profile] latent_stats min={:.3} max={:.3} rms={:.3}",
+                min, max, rms
+            );
+            self.vae.decode(&latent, options.sample_rate)?
+        };
+        let t_vae = t.elapsed();
+        eprintln!(
+            "[auk-stage-profile] denoise={:.1}ms  vae_decode={:.1}ms  total={:.1}ms",
+            t_denoise.as_secs_f64() * 1000.0,
+            t_vae.as_secs_f64() * 1000.0,
+            total_start.elapsed().as_secs_f64() * 1000.0,
+        );
+        Ok(audio)
     }
 }
 

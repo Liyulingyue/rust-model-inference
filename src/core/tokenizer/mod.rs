@@ -140,6 +140,41 @@ const QWEN2_ORACLE_SPECIAL_TOKENS: &[&str] = &[
     "<|tms_token|>",
 ];
 
+/// Qwen2.5-Omni-3B special tokens at ids 151643..151664. Replaces the
+/// standard Qwen2 oracle list and adds the audio-related tokens
+/// (`<|AUDIO|>` = 151646, `<|audio_bos|>` = 151647, `<|audio_eos|>` = 151648)
+/// that are required for AuK CFMEdit reference-audio conditioning.
+///
+/// Verified against the Qwen/Qwen2.5-Omni-3B `added_tokens.json`. The
+/// named vocab size shrinks from 32 to 22 tokens because the Qwen2.5-Omni
+/// tokenizer drops 10 of the standard Qwen2 oracle tokens (no
+/// `<|object_ref_*|>`, no `<|image_pad|>`/`<|video_pad|>`, no
+/// `<tool_response>`, no `<|boi_token|>` etc.).
+const QWEN25_OMNI_SPECIAL_TOKENS: &[&str] = &[
+    "<|endoftext|>",       // 151643
+    "<|im_start|>",        // 151644
+    "<|im_end|>",          // 151645
+    "<|AUDIO|>",           // 151646  (CFMEdit audio placeholder)
+    "<|audio_bos|>",       // 151647  (CFMEdit audio begin-of-stream)
+    "<|audio_eos|>",       // 151648  (CFMEdit audio end-of-stream)
+    "<|box_end|>",         // 151649
+    "<|quad_start|>",      // 151650
+    "<|quad_end|>",        // 151651
+    "<|vision_bos|>",      // 151652
+    "<|vision_eos|>",      // 151653
+    "<|vision_pad|>",      // 151654
+    "<|IMAGE|>",           // 151655
+    "<|VIDEO|>",           // 151656
+    "<tool_call>",          // 151657
+    "</tool_call>",         // 151658
+    "<|fim_prefix|>",      // 151659
+    "<|fim_middle|>",      // 151660
+    "<|fim_suffix|>",      // 151661
+    "<|fim_pad|>",         // 151662
+    "<|repo_name|>",       // 151663
+    "<|file_sep|>",        // 151664
+];
+
 const HUNYUAN_SEMANTIC_TOKENS: &[(&str, &str)] = &[
     ("<｜hy_begin▁of▁sentence｜>", "hy_begin"),
     ("<｜hy_User｜>", "hy_user"),
@@ -370,6 +405,124 @@ impl BPETokenizer {
                 "Embedded Qwen vocabulary has {} IDs; expected {MODEL_VOCAB_SIZE}",
                 tokenizer.vocab_size()
             ));
+        }
+        Ok(tokenizer)
+    }
+
+    /// Qwen2.5-Omni-3B tokenizer. Same BPE merges as the Qwen2 base but
+    /// the named-vocab special token list is the Qwen2.5-Omni one (22
+    /// tokens at ids 151643..151664) which includes the audio-related
+    /// markers (`<|AUDIO|>`, `<|audio_bos|>`, `<|audio_eos|>`) needed for
+    /// AuK CFMEdit reference-audio conditioning.
+    pub fn from_qwen25_omni_embedded_merges() -> Result<Self, String> {
+        const ORACLE_NAMED_VOCAB_SIZE: usize = 151_665;
+        const MODEL_VOCAB_SIZE: usize = 151_936;
+        let byte_encoder = build_byte_encoder();
+        let mut tokens = byte_encoder.clone();
+        tokens.sort_by_key(|token| token.chars().next());
+        let mut token_types = vec![TokenType::Normal; tokens.len()];
+        let mut merge_ranks = HashMap::new();
+
+        for (rank, merge) in include_str!("../../models/diffusion/z_image/qwen_merges.txt")
+            .lines()
+            .enumerate()
+        {
+            let (left, right) = merge
+                .split_once(' ')
+                .ok_or_else(|| format!("Invalid embedded Qwen merge at line {}", rank + 1))?;
+            if left.is_empty() || right.is_empty() {
+                return Err(format!("Invalid embedded Qwen merge at line {}", rank + 1));
+            }
+            merge_ranks.insert((left.into(), right.into()), rank as u32);
+            tokens.push(format!("{left}{right}"));
+            token_types.push(TokenType::Normal);
+        }
+
+        for token in QWEN25_OMNI_SPECIAL_TOKENS {
+            tokens.push((*token).into());
+            token_types.push(TokenType::Control);
+        }
+        if tokens.len() != ORACLE_NAMED_VOCAB_SIZE {
+            return Err(format!(
+                "Embedded Qwen2.5-Omni vocabulary has {} named IDs; expected {ORACLE_NAMED_VOCAB_SIZE}",
+                tokens.len()
+            ));
+        }
+        // The pinned oracle names IDs through 151663, while the supplied
+        // model has 151936 embedding rows. Preserve the remaining rows as
+        // deliberately unencodable placeholders instead of inventing
+        // tokenizer semantics.
+        while tokens.len() < MODEL_VOCAB_SIZE {
+            tokens.push(format!("<|reserved_{}|>", tokens.len()));
+            token_types.push(TokenType::Unused);
+        }
+
+        let token_to_id: HashMap<String, u32> = tokens
+            .iter()
+            .zip(&token_types)
+            .enumerate()
+            .filter(|(_, (_, kind))| **kind != TokenType::Unused)
+            .map(|(id, (token, _))| (token.clone(), id as u32))
+            .collect();
+        let mut byte_decoder = HashMap::new();
+        for (byte, token) in byte_encoder.iter().enumerate() {
+            let value = token
+                .chars()
+                .next()
+                .ok_or_else(|| "Invalid embedded Qwen byte symbol".to_string())?;
+            byte_decoder.insert(value, byte as u8);
+        }
+        let mut special_tokens: Vec<_> = QWEN25_OMNI_SPECIAL_TOKENS
+            .iter()
+            .map(|text| SpecialToken {
+                text: (*text).into(),
+                id: *token_to_id
+                    .get(*text)
+                    .expect("embedded special token was just inserted"),
+                kind: TokenType::Control,
+            })
+            .collect();
+        special_tokens.sort_by(|left, right| right.text.len().cmp(&left.text.len()));
+        let semantic_tokens = QWEN_SEMANTIC_TOKENS
+            .iter()
+            .filter_map(|(literal, name)| {
+                token_to_id
+                    .get(*literal)
+                    .map(|id| ((*name).to_string(), *id))
+            })
+            .collect();
+        let eos_id = token_to_id.get("<|endoftext|>").copied();
+        let mut semantic_token_names: HashMap<String, u32> = HashMap::new();
+        semantic_token_names.insert("im_start".into(), token_to_id["<|im_start|>"]);
+        semantic_token_names.insert("im_end".into(), token_to_id["<|im_end|>"]);
+        semantic_token_names.insert("endoftext".into(), token_to_id["<|endoftext|>"]);
+
+        let tokenizer = BPETokenizer {
+            tokens,
+            token_types,
+            token_to_id,
+            merge_ranks,
+            byte_encoder,
+            byte_decoder,
+            pre: PreTokenizer::Qwen2,
+            special_tokens,
+            semantic_tokens,
+            bos_id: eos_id,
+            eos_id,
+            add_bos: false,
+            add_eos: false,
+            byte_fallback: true,
+            normalize_nfc: false,
+        };
+        // Sanity check: every QWEN25_OMNI_SPECIAL_TOKENS text must round-trip.
+        for (i, text) in QWEN25_OMNI_SPECIAL_TOKENS.iter().enumerate() {
+            let id = tokenizer.token_to_id.get(*text).copied();
+            assert_eq!(
+                id,
+                Some(151_643 + i as u32),
+                "QWEN25_OMNI_SPECIAL_TOKENS[{i}] = {text:?} expected id {} got {id:?}",
+                151_643 + i as u32,
+            );
         }
         Ok(tokenizer)
     }

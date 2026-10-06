@@ -203,6 +203,29 @@ pub fn text_encode(
     token_ids: &[u32],
     positions: &[[usize; 4]],
 ) -> Result<Vec<f32>, String> {
+    let n_tokens = token_ids.len();
+    if n_tokens == 0 {
+        return Ok(Vec::new());
+    }
+    let embeddings = model.embed_tokens(token_ids)?;
+    text_encode_forward(model, &embeddings, n_tokens, positions)
+}
+
+/// Qwen2.5-Omni CFMEdit extension: same as [`text_encode`] but with audio
+/// embeddings substituted for specific token positions.
+///
+/// `audio_replacements` is a list of `(position_index, audio_embedding_2048d)`
+/// pairs. For each pair, the embedding at that token position is overwritten
+/// with the corresponding audio tower output (also 2048-dim). The transformer
+/// then runs over the substituted sequence, so text and audio tokens attend
+/// to each other inside the Qwen trunk -- matching audio.cpp's
+/// `conditioning.cpp::build_text_conditioning` behavior.
+pub fn text_encode_with_audio(
+    model: &Qwen3Model,
+    token_ids: &[u32],
+    positions: &[[usize; 4]],
+    audio_replacements: &[(usize, &[f32])],
+) -> Result<Vec<f32>, String> {
     validate_token_ids(token_ids, model.config.vocab)?;
     let n_tokens = token_ids.len();
     if positions.len() != n_tokens {
@@ -215,8 +238,34 @@ pub fn text_encode(
     if n_tokens == 0 {
         return Ok(Vec::new());
     }
+    let n_embd = model.config.n_embd;
+    let mut embeddings = model.embed_tokens(token_ids)?;
+    for (pos, audio_embed) in audio_replacements {
+        if *pos >= n_tokens {
+            return Err(format!(
+                "audio_replacement position {pos} out of bounds (n_tokens={n_tokens})"
+            ));
+        }
+        if audio_embed.len() != n_embd {
+            return Err(format!(
+                "audio embedding length {} != n_embd={n_embd}",
+                audio_embed.len()
+            ));
+        }
+        let off = *pos * n_embd;
+        embeddings[off..off + n_embd].copy_from_slice(audio_embed);
+    }
+    text_encode_forward(model, &embeddings, n_tokens, positions)
+}
 
-    let embeddings = model.embed_tokens(token_ids)?;
+/// Shared forward path for [`text_encode`] and [`text_encode_with_audio`].
+/// Operates on pre-built per-token embeddings of shape `[n_tokens, n_embd]`.
+fn text_encode_forward(
+    model: &Qwen3Model,
+    embeddings: &[f32],
+    n_tokens: usize,
+    positions: &[[usize; 4]],
+) -> Result<Vec<f32>, String> {
     #[cfg(feature = "vulkan")]
     let mut full_model_gpu_failed = false;
     #[cfg(feature = "vulkan")]
@@ -250,7 +299,7 @@ pub fn text_encode(
     let group_size = cfg.n_head / cfg.n_head_kv;
     let kq_scale = 1.0 / (cfg.n_embd_head_k as f32).sqrt();
 
-    let mut hidden = embeddings;
+    let mut hidden = embeddings.to_vec();
 
     for layer_idx in 0..cfg.n_layer {
         let layer = &model.layers[layer_idx];
