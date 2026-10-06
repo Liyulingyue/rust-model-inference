@@ -95,7 +95,7 @@ pub fn get_f32_tensor<S: TensorSource + ?Sized>(
         other => panic!(
             "qwen3::get_f32_tensor {name}: unsupported ggml_type {other:?}; \
              expected F32/BF16 (F16 is reserved for BitNet-only paths \
-             under crate::ops::bitnet::*)"
+             under crate::models::bitnet::*)"
         ),
     }
     output

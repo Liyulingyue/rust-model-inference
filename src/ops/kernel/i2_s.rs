@@ -45,7 +45,7 @@
 //! This module ships the dequant kernel + unit test. The full
 //! BitLinear forward (RMSNorm pre-norm → per-token absmax activation
 //! quant → ternary matmul → rescale by `absmax / 127`) is implemented
-//! in [`crate::ops::bitnet`]. End-to-end qwen3 forward integration
+//! in [`crate::models::bitnet`]. End-to-end qwen3 forward integration
 //! is the remaining piece for BitNet-Embeddings-0.6B to forward at all
 //! in `--embed` mode (see `docs/usage/bitnet_embedding.md` §3).
 

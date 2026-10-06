@@ -38,11 +38,11 @@ BitNet-patched llama.cpp / `microsoft/BitNet` / 本仓库里跑，stock `llama.c
   - `dequant_i2_s_row(bytes, n_elements, &mut [f32])` — 整行 dequant
   - 3 个单测覆盖：所有 2-bit code (0b00=-1, 0b01=0, 0b10=+1, 0b11=reserved→0)、
     多 block 对齐、**真实 GGUF block 读取**
-- **BitLinear 数据类型** (`src/ops/bitnet/slot.rs`):
+- **BitLinear 数据类型** (`src/models/bitnet/slot.rs`):
   - `BitLinearWeights { norm_in, weight, n_in, n_out }`
   - `BitLinearSlot { attn_q/k/v/output, ffn_gate/up/down }`
   - 两个 BitNet trunk (`qwen3_arch` / `gemma3_arch`) 都 `pub use` 共享
-- **BitLinear forward ops** (`src/ops/bitnet/forward.rs`):
+- **BitLinear forward ops** (`src/models/bitnet/forward.rs`):
   - `quantize_activation_per_token(&[f32]) -> (Vec<i8>, f32)` — per-row absmax → int8
   - `bitlinear_forward(weights_i2s, x_q, absmax, n_in, n_out, &mut [f32])` — 标量 reference matmul
   - 4 个单测：zero-sum / constant-input / sparse-weight / dequant-vs-quant 一致性
@@ -81,13 +81,17 @@ BitNet-patched llama.cpp / `microsoft/BitNet` / 本仓库里跑，stock `llama.c
 
 ## 3. Forward 集成
 
-### 3.1 共享基础设施 (`src/ops/bitnet/`)
+### 3.1 共享基础设施 (`src/models/bitnet/`)
 
 ```
-src/ops/bitnet/
-    mod.rs       — crate::ops::bitnet 重导出 + 模块 doc
-    forward.rs   — quantize_activation_per_token + bitlinear_forward + bitlinear_forward_from_f32
-    slot.rs      — BitLinearWeights + BitLinearSlot (shape-only metadata)
+src/models/bitnet/
+    mod.rs            — crate::models::bitnet 重导出 + 模块 doc
+    forward.rs        — quantize_activation_per_token + bitlinear_forward + bitlinear_forward_from_f32
+    forward_avx2.rs   — AVX2 SIMD kernel (`_mm256_madd_epi16`)
+    slot.rs           — BitLinearWeights + BitLinearSlot (shape-only metadata)
+    gemma3_arch/      — Gemma3-arch trunk family
+    qwen3_arch.rs     — Qwen3-arch trunk family
+    embedding.rs      — CLI/--embedding 入口
 ```
 
 `bitnet` 模块名替代了原先的 `bitlinear`，因为 'bitlinear' 是通用术语（任何

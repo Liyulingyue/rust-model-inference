@@ -27,7 +27,7 @@
 
 use super::config::{Gemma3Config, Gemma3Rope};
 use super::weights::{Gemma3LayerWeights, Gemma3Model};
-use crate::ops::bitnet::{
+use crate::models::bitnet::{
     bitlinear_forward_packed, quantize_activation_per_token, BitLinearWeightsPacked,
 };
 use crate::ops::rope::rope_neox_inplace;

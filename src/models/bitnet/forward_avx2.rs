@@ -14,7 +14,7 @@
 //!   from I2_S GGUF once per row, producing 128-element rows of
 //!   `{-1, 0, +1}` as i8)
 //! - activations: int8 in `[-127, 127]` produced by
-//!   [`crate::ops::bitnet::quantize_activation_per_token`]
+//!   [`crate::models::bitnet::quantize_activation_per_token`]
 //!
 //! The natural AVX-VNNI instruction (`_mm256_dpbusd_avx_vnni`,
 //! also spelled `_mm256_dpbusd_epi32`) treats one operand as
@@ -186,7 +186,7 @@ unsafe fn dot_row_avx2(weights_row_i8: &[i8], x_q_i8: &[i8], n_in: usize) -> f32
 
 /// AVX2 BitLinear forward.
 ///
-/// Same contract as [`crate::ops::bitnet::bitlinear_forward`] but
+/// Same contract as [`crate::models::bitnet::bitlinear_forward`] but
 /// the inner dot product is vectorized with `_mm256_madd_epi16`.
 /// Caller must ensure the host supports AVX2 + FMA (the dispatcher
 /// in `forward.rs` does this runtime check).
@@ -246,7 +246,7 @@ pub unsafe fn bitlinear_forward_avx2(
 /// projection's weights are reused 28 (or 18) times.
 ///
 /// Production callers get there via:
-/// [`crate::ops::bitnet::BitLinearWeights::prepack`] (one-time
+/// [`crate::models::bitnet::BitLinearWeights::prepack`] (one-time
 /// per projection at model load) → store the result in the
 /// model's [`BitLinearWeightsPacked`] slots → call this function
 /// in the forward loop. Zero per-call dequant; only the SIMD dot
@@ -270,13 +270,13 @@ pub unsafe fn bitlinear_forward_avx2_packed(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ops::bitnet::bitlinear_forward;
+    use crate::models::bitnet::bitlinear_forward;
 
     fn run_avx2_if_available(weights: &[u8], x: &[f32], n_in: usize, n_out: usize) -> Vec<f32> {
         let mut y = vec![0.0f32; n_out];
         if crate::ops::has_avx2_fma() {
             unsafe {
-                let (x_q, absmax) = crate::ops::bitnet::quantize_activation_per_token(x);
+                let (x_q, absmax) = crate::models::bitnet::quantize_activation_per_token(x);
                 bitlinear_forward_avx2(weights, &x_q, absmax, n_in, n_out, &mut y);
             }
         } else {
@@ -307,7 +307,7 @@ mod tests {
             .collect();
 
         let mut y_scalar = vec![0.0f32; n_out];
-        crate::ops::bitnet::bitlinear_forward_from_f32(&weights, &x, n_in, n_out, &mut y_scalar);
+        crate::models::bitnet::bitlinear_forward_from_f32(&weights, &x, n_in, n_out, &mut y_scalar);
 
         let y_avx2 = run_avx2_if_available(&weights, &x, n_in, n_out);
 
@@ -356,7 +356,7 @@ mod tests {
         }
         let x: Vec<f32> = (0..n_in).map(|i| (i as f32) * 0.001).collect();
         let mut y_scalar = vec![0.0f32; n_out];
-        crate::ops::bitnet::bitlinear_forward_from_f32(&weights, &x, n_in, n_out, &mut y_scalar);
+        crate::models::bitnet::bitlinear_forward_from_f32(&weights, &x, n_in, n_out, &mut y_scalar);
         let y_avx2 = run_avx2_if_available(&weights, &x, n_in, n_out);
         for j in 0..n_out {
             assert_eq!(y_scalar[j].to_bits(), y_avx2[j].to_bits(), "j={j}");
@@ -414,7 +414,7 @@ mod tests {
         let mut y_unpacked = vec![0.0f32; n_out];
         let mut y_packed = vec![0.0f32; n_out];
         unsafe {
-            let (x_q, absmax) = crate::ops::bitnet::quantize_activation_per_token(&x);
+            let (x_q, absmax) = crate::models::bitnet::quantize_activation_per_token(&x);
             bitlinear_forward_avx2(&weights, &x_q, absmax, n_in, n_out, &mut y_unpacked);
             bitlinear_forward_avx2_packed(
                 &weights_packed,

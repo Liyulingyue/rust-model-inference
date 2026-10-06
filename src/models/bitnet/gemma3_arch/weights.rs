@@ -21,7 +21,7 @@
 //!
 //! The 4-norm sandwich and QK-norm make this trunk differ from
 //! the qwen3 trunk; the BitLinear slots are identical in wire
-//! format and dispatch to the shared [`crate::ops::bitnet`]
+//! format and dispatch to the shared [`crate::models::bitnet`]
 //! forward.
 
 use crate::core::loader::GGUFLoader;
@@ -29,7 +29,7 @@ use crate::core::tensor::{GGMLType, TensorSource};
 use crate::ops::float::{bf16_to_f32, f16_to_f32};
 use crate::ops::kernel::{F16Weight, QuantizedTensor};
 
-pub use crate::ops::bitnet::{BitLinearSlotPacked, BitLinearWeights, BitLinearWeightsPacked};
+pub use crate::models::bitnet::{BitLinearSlotPacked, BitLinearWeights, BitLinearWeightsPacked};
 pub use crate::ops::kernel::Weight;
 
 use super::config::{Gemma3Config, Gemma3Rope};

@@ -8,7 +8,7 @@
 //! Two forward paths share this config:
 //!
 //! - **BitNet b1.58** (`cfg.is_bitnet == true`): every projection
-//!   goes through [`crate::ops::bitnet::bitlinear_forward_packed`]
+//!   goes through [`crate::models::bitnet::bitlinear_forward_packed`]
 //!   (pre-dequant `{-1, 0, +1}` int8 SIMD path; the SIMD hot path
 //!   added in afbb172). The `weight` slot in each layer is unused.
 //! - **Standard** (`cfg.is_bitnet == false`): every projection
@@ -62,7 +62,7 @@ pub struct Gemma3Config {
     pub sliding_window: usize,
     /// BitNet b1.58 flag — true when `general.file_type == 40` or
     /// when `*_norm_in` tensors are present. Decides whether the
-    /// forward goes through [`crate::ops::bitnet::bitlinear_forward_packed`]
+    /// forward goes through [`crate::models::bitnet::bitlinear_forward_packed`]
     /// at every projection (vs the standard matmul path).
     pub is_bitnet: bool,
 }

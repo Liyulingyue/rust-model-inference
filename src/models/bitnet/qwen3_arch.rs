@@ -45,7 +45,7 @@
 
 use super::embedding::print_embedding_for_arch;
 use crate::core::tensor::TensorSource;
-use crate::ops::bitnet::{
+use crate::models::bitnet::{
     bitlinear_forward_packed, quantize_activation_per_token, BitLinearSlotPacked,
     BitLinearWeightsPacked,
 };
@@ -364,7 +364,7 @@ fn load_bitlinear_slot(
         expected_bytes
     );
     Some(
-        crate::ops::bitnet::BitLinearWeights {
+        crate::models::bitnet::BitLinearWeights {
             norm_in,
             weight: bytes.to_vec(),
             n_in,

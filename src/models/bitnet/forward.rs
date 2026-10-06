@@ -3,7 +3,7 @@
 //!
 //! These are the **pure ops** in the BitLinear pipeline; the
 //! data shapes (one slot per projection) live in
-//! [`crate::ops::bitnet::slot`] and the per-projection RMSNorm
+//! [`crate::models::bitnet::slot`] and the per-projection RMSNorm
 //! helper lives in
 //! `crate::models::bitnet::*::bitlinear_projection`.
 //!
@@ -138,7 +138,7 @@ pub fn bitlinear_forward(
     {
         if crate::ops::has_avx2_fma() {
             unsafe {
-                crate::ops::bitnet::forward_avx2::bitlinear_forward_avx2(
+                crate::models::bitnet::forward_avx2::bitlinear_forward_avx2(
                     weights_i2s,
                     x_q,
                     absmax,
@@ -210,7 +210,7 @@ pub fn bitlinear_forward_from_f32(
 ///
 /// `weights_i8` is the pre-dequanted int8 weight matrix
 /// (length `n_out * n_in`, row-major) produced by
-/// [`crate::ops::bitnet::BitLinearWeights::prepack`]. Skips the
+/// [`crate::models::bitnet::BitLinearWeights::prepack`]. Skips the
 /// per-call I2_S dequant walk entirely.
 ///
 /// On AVX2+FMA hosts the inner dot is vectorized with
@@ -241,7 +241,7 @@ pub fn bitlinear_forward_packed(
     {
         if crate::ops::has_avx2_fma() {
             unsafe {
-                crate::ops::bitnet::forward_avx2::bitlinear_forward_avx2_packed(
+                crate::models::bitnet::forward_avx2::bitlinear_forward_avx2_packed(
                     weights_i8, x_q, absmax, n_in, n_out, y_out,
                 );
             }

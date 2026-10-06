@@ -23,7 +23,7 @@
 //! Two forward paths share the same loop body:
 //!
 //! - **BitNet b1.58** (`cfg.is_bitnet == true`): every projection
-//!   goes through [`crate::ops::bitnet::bitlinear_forward_packed`]
+//!   goes through [`crate::models::bitnet::bitlinear_forward_packed`]
 //!   (pre-dequant `{-1, 0, +1}` int8 SIMD path; SIMD hot path
 //!   added in afbb172). The `weight` slot in each layer is unused.
 //! - **Standard** (`cfg.is_bitnet == false`): every projection goes
@@ -40,7 +40,7 @@
 
 use super::config::{Gemma3Config, Gemma3Rope};
 use super::weights::{BitLinearWeights, Gemma3LayerWeights, Gemma3Model, Weight};
-use crate::ops::bitnet::{bitlinear_forward, quantize_activation_per_token};
+use crate::models::bitnet::{bitlinear_forward, quantize_activation_per_token};
 use crate::ops::quantize_q8_0_into;
 use crate::ops::rope::rope_neox_inplace_with_factor;
 /// BitLinear per-projection: rms_norm → absmax int8 quant →

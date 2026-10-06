@@ -3,7 +3,7 @@
 //! These types are **shape-only metadata**, not ops — they describe
 //! how one layer's seven BitLinear projections are stored in the
 //! GGUF. The actual activation-quant and matmul ops live in
-//! [`crate::ops::bitnet::forward`].
+//! [`crate::models::bitnet::forward`].
 //!
 //! Used by every trunk under [`crate::models::bitnet`] (currently
 //! the Qwen3-arch and Gemma3-arch BitNet trunks for
@@ -48,9 +48,9 @@ impl BitLinearWeights {
     /// length `n_in × n_out` (row-major: row `j` at offset
     /// `j * n_in`), with each byte holding the corresponding
     /// ternary value in `{-1, 0, +1}`. This is the layout that the
-    /// AVX2 SIMD kernel in [`crate::ops::bitnet::forward_avx2`]
+    /// AVX2 SIMD kernel in [`crate::models::bitnet::forward_avx2`]
     /// consumes directly — calling
-    /// [`crate::ops::bitnet::bitlinear_forward_packed`] with the
+    /// [`crate::models::bitnet::bitlinear_forward_packed`] with the
     /// result skips the per-call dequant-to-int8 walk entirely.
     ///
     /// One-time cost on model load (every projection is pre-packed
@@ -62,7 +62,7 @@ impl BitLinearWeights {
     /// See [`BitLinearWeightsPacked`] for the consumer side.
     pub fn prepack(&self) -> BitLinearWeightsPacked {
         let mut weight_i8 = vec![0i8; self.n_in * self.n_out];
-        crate::ops::bitnet::forward_avx2::dequant_i2_s_to_i8(
+        crate::models::bitnet::forward_avx2::dequant_i2_s_to_i8(
             &self.weight,
             self.n_in,
             self.n_out,
@@ -79,8 +79,8 @@ impl BitLinearWeights {
 
 /// Same shape as [`BitLinearWeights`] but with the weight matrix
 /// pre-dequanted to `{-1, 0, +1}` int8 — the layout that
-/// [`crate::ops::bitnet::bitlinear_forward_packed`] and
-/// [`crate::ops::bitnet::forward_avx2::bitlinear_forward_avx2_packed`]
+/// [`crate::models::bitnet::bitlinear_forward_packed`] and
+/// [`crate::models::bitnet::forward_avx2::bitlinear_forward_avx2_packed`]
 /// consume directly. Produced via [`BitLinearWeights::prepack`]
 /// during model load to skip the per-forward dequant walk.
 #[derive(Debug, Clone)]

@@ -25,19 +25,23 @@
 //! - [`qwen3_arch`] — Qwen3-backbone BitNet (e.g. `bitnet-embedding-0.6b`)
 //! - [`gemma3_arch`] — Gemma3-backbone BitNet (e.g. `bitnet-embedding-270m`)
 //!
-//! Both share the BitLinear data shape ([`crate::ops::bitnet::slot`])
-//! and ops ([`crate::ops::bitnet::forward`]) but have
+//! Both share the BitLinear data shape ([`slot::BitLinearWeights`])
+//! and ops ([`forward::bitlinear_forward`]) but have
 //! architecture-specific forward loops (Qwen3 has a 2-norm
 //! sandwich; Gemma3 has a 4-norm sandwich plus per-head QK-norm).
 //!
-//! # Why this lives in `models/` (not `ops/`)
+//! # Why everything lives in `models/bitnet/` (not split between
+//! `ops/bitnet/` and `models/bitnet/`)
 //!
 //! BitLinear forward is a **composite op**: RMSNorm + absmax int8
-//! quant + ternary matmul + rescale. It needs `eps` from the model
-//! config, knows the residual stream layout, and is therefore a
-//! model-level concern. Putting it under `models/bitnet/` rather
-//! than `ops/` avoids the wrong dependency direction (ops reading
-//! from model config).
+//! quant + ternary matmul + rescale. The math (scalar reference +
+//! SIMD path) doesn't strictly need model config, but the I2_S GGUF
+//! format, the per-projection `*_norm_in` RMSNorm gain, and the
+//! 7-slot-per-layer pattern are all BitNet-specific — there's no
+//! other model family in this engine that uses BitLinear. Keeping
+//! the op primitives and the shape types co-located with the model
+//! wiring makes the family boundary explicit; we can split back
+//! into `ops/` later if a second non-BitNet model ever adopts W1.58A8.
 //!
 //! # Pooling convention
 //!
@@ -47,13 +51,21 @@
 //! BitNet Embedding uses last-token). See `embedding.rs`.
 
 pub mod embedding;
+pub mod forward;
+pub mod forward_avx2;
 pub mod gemma3_arch;
 pub mod qwen3_arch;
+pub mod slot;
 
 pub use embedding::{
     compute_embedding, print_embedding, print_embedding_for_arch, run_embedding,
     run_embedding_tokens,
 };
+pub use forward::{
+    bitlinear_forward, bitlinear_forward_from_f32, bitlinear_forward_packed,
+    bitlinear_forward_scalar, quantize_activation_per_token,
+};
+pub use slot::{BitLinearSlot, BitLinearSlotPacked, BitLinearWeights, BitLinearWeightsPacked};
 
 /// Detect whether a `TensorSource` carries a Microsoft BitNet b1.58
 /// GGUF, irrespective of the inner architecture.
