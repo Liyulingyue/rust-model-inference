@@ -97,28 +97,46 @@ pub fn matmul_q4_k(
         None => true,
     };
     if need_rebuild {
-        let new_max_rows = DEFAULT_MAX_ROWS.max(rows);
+        // Take the max of (current_size, new_size) so the runtime is grown
+        // monotonically across calls. Per-layer dispatch visits each
+        // (n_in, n_out) once on the first token; subsequent tokens reuse the
+        // cached runtime instead of paying the pipeline-creation cost on
+        // every matmul. Without this gemma-2-2b-it paid 11 BatchedLinearRuntime
+        // initialisations per prefill (one per unique shape).
+        let (new_max_rows, new_max_n_in, new_max_n_out) = match guard.as_ref() {
+            Some(rt) => (
+                rt.max_rows.max(rows),
+                rt.max_n_in.max(n_in),
+                rt.max_n_out.max(n_out),
+            ),
+            None => (DEFAULT_MAX_ROWS.max(rows), n_in, n_out),
+        };
         // `BatchedLinearRuntime::new` takes a `'static` reference. The
         // singleton VulkanContext lives in a `OnceLock` for the lifetime of
         // the process, so this transmute is sound — the runtime will drop on
         // first error or normal program shutdown, well within the
         // VulkanContext's lifetime.
-        let static_ctx: &'static VulkanContext = unsafe { std::mem::transmute(context) };
+        let static_ctx: &'static VulkanContext =
+            unsafe { std::mem::transmute(context) };
         match BatchedLinearRuntime::new(
             static_ctx,
             new_max_rows,
-            n_in,
-            n_out,
-            // One descriptor set for the arena plus room for 16 cached weight
-            // tensors; per-layer matmul reuses cache slots efficiently.
-            16,
+            new_max_n_in,
+            new_max_n_out,
+            // One descriptor set for the arena plus room for every Q4_K
+            // weight tensor in the model — gemma-2-2b-it has 26 layers ×
+            // 7 weights (Q/K/V/O/gate/up/down) = 182 unique uploads, and
+            // each entry holds one GPU-resident descriptor set until the
+            // runtime is dropped. 256 leaves headroom for one or two
+            // atypical layers without re-allocation churn.
+            256,
         ) {
             Ok(runtime) => {
                 *guard = Some(Q4KRuntime {
                     runtime,
                     max_rows: new_max_rows,
-                    max_n_in: n_in,
-                    max_n_out: n_out,
+                    max_n_in: new_max_n_in,
+                    max_n_out: new_max_n_out,
                 });
             }
             Err(error) => {
@@ -150,6 +168,7 @@ pub fn matmul_q4_k(
         }
     }
 }
+
 #[cfg(all(test, feature = "vulkan"))]
 mod tests {
     use super::*;

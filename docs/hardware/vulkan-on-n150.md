@@ -126,9 +126,51 @@ acquire the runtime and dispatch:
   `Q4K_GPU_DISABLED` so we don't keep paying the dispatch cost after the
   first cached-runtime miss.
 
-On the N150 this path is still skipped (the software-ICD check returns false
-first), but on real hardware the dominant matmul work now has a GPU
-implementation.
+### Real-hardware dispatch on Intel IGP (added 2026-10-07)
+
+Once `liyulingyue` was added to the `render` and `video` groups (giving
+`/dev/dri/renderD128` access) the Vulkan loader stopped falling back to
+`llvmpipe` and picked `Intel(R) Graphics (ADL-N)` (ANV, Mesa 25.2). With
+that, the `is_software_icd()` gate flipped off and the Q4_K GPU path
+actually fires for every per-layer matmul.
+
+Two early bugs surfaced and got fixed in this commit:
+
+1. **`BatchedLinearRuntime` was rebuilt 11× per prefill** because each
+   `(rows, n_in, n_out)` triple triggered a fresh `BatchedLinearRuntime::new`.
+   Now the runtime is grown monotonically — new sizes are clamped to the max
+   of the cached maxima and the new call's shapes, so by the third matmul
+   the cached runtime fits every shape the model uses.
+2. **`batched linear descriptor capacity exhausted`** after 16 unique weight
+   uploads. gemma-2-2b-it has 26 layers × 7 weights (Q/K/V/O/gate/up/down) =
+   182 unique weight tensors. Bumped the `BatchedLinearRuntime` descriptor
+   capacity from 16 → 256 to fit them all.
+
+### N150 hardware result (Intel ANV on Alder Lake-N)
+
+Even on the real IGP the GPU path is **dramatically slower than the CPU
+path** on this machine:
+
+| mode      | per-token (gemma-2-2b-it Q4_K_M, 14 prompt, 1 tok) |
+|-----------|---------------------------------------------------|
+| CPU, 4 threads     | ~0.11 s |
+| GPU (`--gpu`)        | ~60 s (timeout) |
+
+The per-matmul GPU dispatch takes ~500 ms (driver command-buffer record +
+fence wait + UMA memory traffic). For 156 matmuls/token that's ~78 s of
+GPU dispatch — the AVX2/FMA CPU kernels finish the same workload in ~110 ms.
+
+So on this N150 the engine still prefers the CPU path; the GPU path is
+in place and correct (numeric parity < 2e-3 against the CPU reference, single
+matvec `vk_ops_check` shows GPU ≈ 3 ms vs CPU ≈ 0.013 ms), but the UMA
+memory bandwidth and the ANV driver dispatch overhead are too high for an
+LLM matmul workload. The same code on a discrete GPU with dedicated VRAM
+and a less kernel-bridge-heavy driver is expected to flip the sign.
+
+For now: leave the Q4_K GPU path wired in (correctness on real hardware
+verified), keep the `is_software_icd()` gate in `gpu_matmul_active()`, and
+consider adding a "GPU dispatch slower than CPU" timing-based auto-disable
+as a follow-up if more UMA-class devices show up.
 
 ## What we did not change
 
