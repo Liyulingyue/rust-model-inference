@@ -139,6 +139,7 @@ impl Qwen3Session<'_> {
         &mut self,
         input: &Qwen3Input<'_>,
         batch_size: usize,
+        need_logits: bool,
     ) -> Result<Duration, String> {
         let batch_size = checked_prefill_batch_size(Some(batch_size))?;
         if input.token_ids.is_empty() {
@@ -194,7 +195,8 @@ impl Qwen3Session<'_> {
         let started = Instant::now();
         for range in prefill_chunks(input.token_ids.len(), chunk_size) {
             let base = self.kv_state.seq_len;
-            let project_logits = trace_each_token || range.end == input.token_ids.len();
+            let project_logits =
+                need_logits && (trace_each_token || range.end == input.token_ids.len());
             #[cfg(feature = "vulkan")]
             let gpu_error = if let Some(gpu) = &mut self.gpu {
                 let rows = range.len();
@@ -822,6 +824,18 @@ impl Qwen3Session<'_> {
                 }
             }
 
+            #[cfg(feature = "parity-trace")]
+            if !project_logits {
+                for row in 0..rows {
+                    parity_trace::report(parity_trace::checkpoint_row(
+                        row,
+                        &format!("hidden_sequence.layer.{layer}"),
+                        Some(layer),
+                        &[1, config.n_embd],
+                        &self.prefill_scratch.x[row * config.n_embd..(row + 1) * config.n_embd],
+                    ));
+                }
+            }
             #[cfg(test)]
             if self.fail_cpu_prefill_after_layer == Some(layer) {
                 self.fail_cpu_prefill_after_layer = None;
@@ -835,7 +849,7 @@ impl Qwen3Session<'_> {
         let trace_all = std::env::var_os("RMI_PARITY_TRACE").is_some();
         #[cfg(not(feature = "parity-trace"))]
         let trace_all = false;
-        if project_logits || trace_all {
+        if project_logits {
             for row in if trace_all { 0..rows } else { rows - 1..rows } {
                 let last = row * config.n_embd;
                 self.scratch

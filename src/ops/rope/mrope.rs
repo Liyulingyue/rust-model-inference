@@ -23,7 +23,20 @@ unsafe extern "C" {
 
 #[inline]
 pub(super) fn sin_cos(value: f32) -> (f32, f32) {
+    if crate::ops::scalar_mode() {
+        return (scalar_sin(value), scalar_cos(value));
+    }
     value.sin_cos()
+}
+
+// Separate libm calls: LLVM's sincos fusion changes scalar rounding on macOS.
+#[inline(never)]
+fn scalar_sin(value: f32) -> f32 {
+    value.sin()
+}
+#[inline(never)]
+fn scalar_cos(value: f32) -> f32 {
+    value.cos()
 }
 
 pub fn rope_mrope(
@@ -154,6 +167,15 @@ pub fn rope_mrope_interleaved(
             } else {
                 3
             };
+            if crate::ops::scalar_mode() {
+                let inverse = 1.0 / freq_base.powf(2.0 * pair as f32 / n_rope_dims as f32);
+                let angle = positions[axis] as f32 * inverse;
+                let (sin, cos) = sin_cos(angle);
+                let (a, b) = (head[pair], head[pair + pair_count]);
+                head[pair] = a * cos + (-b) * sin;
+                head[pair + pair_count] = b * cos + a * sin;
+                continue;
+            }
             let (sin, cos) = theta[axis].sin_cos();
             let x0 = head[pair];
             let x1 = head[pair + pair_count];

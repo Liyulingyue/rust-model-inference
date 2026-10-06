@@ -719,8 +719,8 @@ fn forward_bert_layers(
         #[cfg(feature = "parity-trace")]
         for (name, offset, heads, width) in [
             ("bert.q", 0, n_head, head_k),
-            ("bert.k", n_embd_q, n_head_kv, head_k),
-            ("bert.v", n_embd_q + n_embd_gqa, n_head_kv, head_v),
+            ("bert.k", n_embd_q, cfg.n_head_kv, head_k),
+            ("bert.v", n_embd_q + n_embd_gqa, cfg.n_head_kv, head_v),
         ] {
             if crate::parity_trace::enabled(name) {
                 let values: Vec<f32> = qkv_buf

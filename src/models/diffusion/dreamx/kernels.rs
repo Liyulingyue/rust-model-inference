@@ -454,6 +454,26 @@ pub fn attention_scalar(
     value: &[f32],
     spec: AttentionSpec,
 ) -> Result<Vec<f32>, String> {
+    attention_scalar_with_dot(query, key, value, spec, dot_f32)
+}
+
+/// Sequential F32 QK reduction in scalar mode, as used by MageVAE's torch.bmm.
+pub fn attention_scalar_f32(
+    query: &[f32],
+    key: &[f32],
+    value: &[f32],
+    spec: AttentionSpec,
+) -> Result<Vec<f32>, String> {
+    attention_scalar_with_dot(query, key, value, spec, crate::ops::dot_f32_exact)
+}
+
+fn attention_scalar_with_dot(
+    query: &[f32],
+    key: &[f32],
+    value: &[f32],
+    spec: AttentionSpec,
+    dot: fn(&[f32], &[f32], usize) -> f32,
+) -> Result<Vec<f32>, String> {
     spec.validate(query, key, value)?;
     let mut output = vec![0.0; query.len()];
     let mut scores = vec![f32::NEG_INFINITY; spec.key_tokens];
@@ -469,7 +489,7 @@ pub fn attention_scalar(
                     continue;
                 }
                 let key_start = (key_token * spec.key_value_heads + key_head) * spec.head_dim;
-                let score = dot_f32(
+                let score = dot(
                     &query[query_start..query_start + spec.head_dim],
                     &key[key_start..key_start + spec.head_dim],
                     spec.head_dim,
