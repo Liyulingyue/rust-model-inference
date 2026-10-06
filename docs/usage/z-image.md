@@ -131,6 +131,8 @@ descriptor set 与 pipeline 布局在跨 dispatch 复用时的状态**，需要
 改动已回退。留在这里是为了让下一个人不必重走：silu 数值已验证正确，
 卡的是合批机制本身。
 
+> 工程向的完整快照与加速路线见 `docs/develop/ZIMAGE_STATUS.md`。
+
 ### 2026-10-06 在当前 HEAD（合入 #151/#152 后）复测的分解
 
 `[gpu-block-profile]` 是代码里已有的分段计时（`GPU_PHASE_LABELS`），8 步
