@@ -98,6 +98,50 @@ impl<'a> Kernel for Q4_KKernel<'a> {
         ith: usize,
         nth: usize,
     ) {
+        // GPU path: thread 0 submits one fenced dispatch that covers all
+        // rows; the rest of the pool returns. Mirrors the Q8_0 path in
+        // `ops::kernel::q8_0::parallel::matmul_q8_0_quantized_parallel_rows`.
+        #[cfg(feature = "vulkan")]
+        {
+            use std::sync::atomic::Ordering;
+            static Q4K_GPU_DISABLED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !Q4K_GPU_DISABLED.load(Ordering::Relaxed)
+                && crate::ops::gpu_matmul_active()
+            {
+                if let Some(ctx) = crate::ops::get_vulkan_context() {
+                    if ith == 0 {
+                        match crate::vulkan::matmul_q4k::matmul_q4_k(
+                            ctx,
+                            self.weight,
+                            &input_f32[..n_in],
+                            1,
+                            n_in,
+                            n_out,
+                            output,
+                        ) {
+                            Ok(()) => return,
+                            Err(crate::vulkan::VulkanError::UnsupportedShape(_)) => {
+                                // Shape doesn't fit the cached runtime — fall
+                                // back to CPU for this matmul and every
+                                // subsequent one (the runtime is shared
+                                // process-wide).
+                                Q4K_GPU_DISABLED.store(true, Ordering::Relaxed);
+                            }
+                            Err(_) => {
+                                // mark_gpu_broken already happened inside
+                                // matmul_q4_k; the GPU path is gone.
+                                return;
+                            }
+                        }
+                    } else {
+                        // GPU covers all rows; this thread has nothing to do.
+                        return;
+                    }
+                }
+            }
+        }
+
         let per_thread = n_out.div_ceil(nth);
         let start = ith * per_thread;
         let end = (start + per_thread).min(n_out);

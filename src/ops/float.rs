@@ -32,7 +32,9 @@ pub fn gpu_requested() -> bool {
 pub fn gpu_matmul_active() -> bool {
     !crate::core::thread_pool::gpu_matmul_disabled()
         && !crate::vulkan::gpu_broken()
-        && get_vulkan_context().is_some()
+        && get_vulkan_context()
+            .map(|ctx| !ctx.is_software_icd())
+            .unwrap_or(false)
 }
 
 #[cfg(not(feature = "vulkan"))]

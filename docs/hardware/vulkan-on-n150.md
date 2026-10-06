@@ -88,6 +88,48 @@ design.
   through the GPU and almost certainly be faster. The engine has no N150-specific
   code path; the regression is the ICD choice.
 
+## Auto-fallback for software ICDs (added 2026-10-06)
+
+`VulkanContext::is_software_icd()` reports `true` when the loader picks a
+device of type `VK_PHYSICAL_DEVICE_TYPE_CPU` (Mesa `llvmpipe`, Google's
+`swiftshader`, …). `crate::ops::gpu_matmul_active()` short-circuits on that
+flag, so `--gpu` becomes a no-op on software ICDs and the engine stays on the
+AVX2/FMA path. End-to-end on gemma-2-2b-it Q4_K_M with `--gpu` and the
+fallback active:
+
+| mode      | prefill t/s | decode t/s | end-to-end | total |
+|-----------|------------|-----------|------------|-------|
+| CPU (no `--gpu`)  | 9.4 | 9.2 | 3.5 | 2.3s |
+| `--gpu` (auto-fallback) | 8.8 | 9.5 | 3.4 | 2.3s |
+
+The `[GPU] Vulkan device: llvmpipe` line still prints (the loader init runs)
+but no matmul dispatch fires, so the previous 5–20% regression is gone.
+
+## Q4_K GPU matmul (added 2026-10-06)
+
+The K-quant matmul shaders (`shaders/bin/q4_k_matmul.spv` and friends) have
+existed in the codebase since the `qwen3` / `z-image` paths were added, but
+nothing wired them into per-layer LLM dispatch — `Q4_KKernel::forward_prepared`
+was CPU-only, so even on real hardware the dominant per-token matmul (every
+gate / up / down / Q / K / V / O projection in a Q4_K-quantised model) ran
+on the host CPU.
+
+`src/vulkan/matmul_q4k.rs` now wraps `BatchedLinearRuntime` with a
+process-global `OnceLock<Mutex<Option<...>>>` so `Q4_KKernel` can lazily
+acquire the runtime and dispatch:
+
+- `Q4_KKernel::forward_prepared` checks `gpu_matmul_active()` on every call;
+  thread 0 submits one fenced dispatch covering all output rows, threads 1-N
+  return immediately (mirrors the Q8_0 GPU path in
+  `kernel/q8_0/parallel.rs`).
+- `UnsupportedShape` failures disable the Q4_K GPU path process-wide via
+  `Q4K_GPU_DISABLED` so we don't keep paying the dispatch cost after the
+  first cached-runtime miss.
+
+On the N150 this path is still skipped (the software-ICD check returns false
+first), but on real hardware the dominant matmul work now has a GPU
+implementation.
+
 ## What we did not change
 
 - No `cfg`-gated paths added for the N150.
