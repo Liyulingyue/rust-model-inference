@@ -1,6 +1,6 @@
 # 模型支持清单
 
-> 更新于 2026-09-30，DreamX-Creator 代码基线为 `1178200`。本清单以主 CLI `rust-model-inference` 为准。
+> 更新于 2026-10-05。以主 CLI `rust-model-inference` 为准；Mage-Flow 使用明确标注的专用入口。
 
 相同的 `general.architecture` 只表示会进入同一条代码路径，不代表任意同架构 GGUF 都已确认可用。未在“具体型号”表中出现的模型，应先按 `Supported` 或 `Experimental` 看待，不能默认视为 `Verified`。
 
@@ -19,6 +19,12 @@
 
 | 型号 | GGUF architecture | 能力 | 所需组件 | 已验证格式 | 状态 | 证据 / 限制 |
 |---|---|---|---|---|---|---|
+| Mage-Flow-Base | `mage_flow` + `mage_vae` + `qwen3vl`/`clip` | 专用 `mage-flow` CPU 文生图 | DiT + MageVAE + Qwen3-VL 4B text；Edit 另需 vision | DiT/VAE/text BF16，norm/vision F32，F32 KV | `Experimental`（标量计算图已验证） | 真实权重 DiT、VAE、文本/vision 和固定噪声采样按全部 `u32` 位比较；最小 PNG 入口已运行。参考图片到 VL fast processor、默认大图、GPU 与 SIMD/FMA 未对齐。[哈希和验证范围](../../tools/oracle/mage_flow/README.md)。 |
+| Mage-Flow | `mage_flow` + `mage_vae` + `qwen3vl`/`clip` | 专用 `mage-flow` CPU 文生图 | DiT + MageVAE + Qwen3-VL 4B text；Edit 另需 vision | DiT/VAE/text BF16，norm/vision F32，F32 KV | `Experimental`（标量计算图已验证） | 真实权重 DiT、VAE、文本/vision 和固定噪声采样按全部 `u32` 位比较；最小 PNG 入口已运行。参考图片到 VL fast processor、默认大图、GPU 与 SIMD/FMA 未对齐。[哈希和验证范围](../../tools/oracle/mage_flow/README.md)。 |
+| Mage-Flow-Turbo | `mage_flow` + `mage_vae` + `qwen3vl`/`clip` | 专用 `mage-flow` CPU 文生图 | DiT + MageVAE + Qwen3-VL 4B text；Edit 另需 vision | DiT/VAE/text BF16，norm/vision F32，F32 KV | `Experimental`（标量计算图已验证） | 真实权重 DiT、VAE、文本/vision 和固定噪声采样按全部 `u32` 位比较；最小 PNG 入口已运行。参考图片到 VL fast processor、默认大图、GPU 与 SIMD/FMA 未对齐。[哈希和验证范围](../../tools/oracle/mage_flow/README.md)。 |
+| Mage-Flow-Edit-Base | `mage_flow` + `mage_vae` + `qwen3vl`/`clip` | 专用 `mage-flow` CPU 图像编辑 | DiT + MageVAE + Qwen3-VL 4B text；Edit 另需 vision | DiT/VAE/text BF16，norm/vision F32，F32 KV | `Experimental`（标量计算图已验证） | 真实权重 DiT、VAE、文本/vision 和固定噪声采样按全部 `u32` 位比较；最小 PNG 入口已运行。参考图片到 VL fast processor、默认大图、GPU 与 SIMD/FMA 未对齐。[哈希和验证范围](../../tools/oracle/mage_flow/README.md)。 |
+| Mage-Flow-Edit | `mage_flow` + `mage_vae` + `qwen3vl`/`clip` | 专用 `mage-flow` CPU 图像编辑 | DiT + MageVAE + Qwen3-VL 4B text；Edit 另需 vision | DiT/VAE/text BF16，norm/vision F32，F32 KV | `Experimental`（标量计算图已验证） | 真实权重 DiT、VAE、文本/vision 和固定噪声采样按全部 `u32` 位比较；最小 PNG 入口已运行。参考图片到 VL fast processor、默认大图、GPU 与 SIMD/FMA 未对齐。[哈希和验证范围](../../tools/oracle/mage_flow/README.md)。 |
+| Mage-Flow-Edit-Turbo | `mage_flow` + `mage_vae` + `qwen3vl`/`clip` | 专用 `mage-flow` CPU 图像编辑 | DiT + MageVAE + Qwen3-VL 4B text；Edit 另需 vision | DiT/VAE/text BF16，norm/vision F32，F32 KV | `Experimental`（标量计算图已验证） | 真实权重 DiT、VAE、文本/vision 和固定噪声采样按全部 `u32` 位比较；最小 PNG 入口已运行。参考图片到 VL fast processor、默认大图、GPU 与 SIMD/FMA 未对齐。[哈希和验证范围](../../tools/oracle/mage_flow/README.md)。 |
 | Audio8-ASR-Infinite | `audio8_asr_infinite` | 80 ms 时钟、480 ms 延迟的中英 ASR | 单个 BF16 GGUF；16 kHz PCM16 WAV | merged v2 的 938 个 BF16 张量、Qwen2 tokenizer、Voxtral 音频塔和 AdaRMS 文本解码 | `Experimental` | GGUF SHA-256 `1cfe353b4aa074cc3951385052b7e3a074152db4b1d20932fbab1e13195e17c4`；Darwin arm64 上真实 Mel 前 32 帧的 4 个音频/文本组与独立 C 标量参考 257 个 checkpoint 及 4 组完整 logits 原始 F32 位一致；4 秒演示语音与官方 `c8ba8ee` 均输出“一个两个半年，”。WAV→Mel 尚无独立标量逐位证明；音频塔超过 1500 帧明确拒绝。[复现说明](../../tools/converter/audio8/README.md)。 |
 | Qwen3-0.6B | `qwen3` | 文本生成 | 无 | Q8_0 | `Verified` | README 主路径和真实模型推理；其他 Qwen3 尺寸不自动继承此状态。 |
 | Qwen3-Embedding-0.6B | `qwen3` | 文本 Embedding | `--embedding` | Q8_0 | `Verified` | [`tests/embedding_parity.rs`](tests/embedding_parity.rs) 覆盖 pinned llama.cpp 向量和位级对照。 |

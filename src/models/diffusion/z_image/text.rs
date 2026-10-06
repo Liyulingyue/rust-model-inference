@@ -1,3 +1,4 @@
+use crate::ops::rope::rope_neox_inplace;
 use std::sync::Arc;
 
 use crate::core::tensor::{GGMLType, TensorSource};
@@ -7,7 +8,7 @@ use crate::ops::attention_value_reduce;
 use crate::ops::dot_f32;
 use crate::ops::silu_mul_inplace;
 use crate::ops::softmax_inplace;
-use crate::ops::{embedding_lookup, rms_norm, rms_norm_inplace, rope_neox_inplace};
+use crate::ops::{embedding_lookup, rms_norm, rms_norm_inplace};
 
 use super::{linear_into, validate_component, Component, Q8Scratch};
 

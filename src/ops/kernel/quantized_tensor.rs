@@ -109,6 +109,15 @@ pub enum QuantizedTensor<'a> {
         n_cols: usize,
         n_rows: usize,
     },
+    /// Microsoft BitNet b1.58 I2_S ternary weights. See `crate::ops::kernel::i2_s`
+    /// for the block layout; the kernel for this variant is a no-op
+    /// placeholder (the real BitLinear forward uses the raw bytes
+    /// via `BitLinearWeights::weight`).
+    I2S {
+        data: &'a [u8],
+        n_cols: usize,
+        n_rows: usize,
+    },
     Q4_0 {
         data: &'a [u8],
         n_cols: usize,
@@ -291,8 +300,76 @@ impl<'a> QuantizedTensor<'a> {
                 n_cols,
                 n_rows,
             } => Box::new(q1_0::Q1_0Kernel::new(data, *n_cols, *n_rows)),
+            // BitNet b1.58 I2_S. The kernel is intentionally a no-op
+            // — the BitLinear forward in `src/ops/bitnet/forward.rs`
+            // accesses the raw bytes directly via the
+            // `BitLinearWeights::weight` field stored alongside
+            // (see `src/models/qwen3/trunk/weights.rs::BitLinearSlot`).
+            // BitNet model loaders (`load_layers_static` and
+            // `load_layers`) place the actual I2_S payload in
+            // `bitlinear.*.{attn_q,attn_k,...}` and never call
+            // `kernel.forward_prepared` on the standard `wq/wk/...`
+            // paths because `forward.rs` and `embedding.rs` branch
+            // on `cfg.is_bitnet`. The placeholder kernel exists so
+            // `Weight::from_quantized(QuantizedTensor::I2S(...))` can
+            // satisfy the type system without panicking; if it ever
+            // gets called, that's a bug (BitLinear path not taken).
+            Self::I2S { .. } => Box::new(noop::NOOP_KERNEL),
         }
     }
+}
+
+/// Placeholder kernel used for BitNet I2_S weights. The BitLinear
+/// forward path bypasses `kernel.forward_prepared` and uses the raw
+/// bytes via `BitLinearWeights::weight`; this kernel exists only to
+/// satisfy the `Kernel` trait so `Weight::from_quantized` doesn't
+/// panic on GGML_TYPE_I2_S. Forwarding via this kernel would be a
+/// hard bug — `forward` panics with a clear message.
+mod noop {
+    use super::super::{Kernel, QuantizedTensor};
+
+    #[derive(Debug, Clone, Copy)]
+    pub struct NoopKernel;
+
+    impl Kernel for NoopKernel {
+        fn weight_bytes(&self) -> Option<&[u8]> {
+            None
+        }
+        fn forward(&self, _input: &[f32], _output: &mut [f32], _n_in: usize, _n_out: usize) {
+            panic!(
+                "BitNet I2_S Weight kernel is a no-op; the BitLinear forward path \
+                 should use BitLinearWeights::weight directly, not this kernel. \
+                 This is a routing bug — check cfg.is_bitnet branches."
+            );
+        }
+        fn forward_prequantized(
+            &self,
+            _input_q8: &[u8],
+            _input_scales: &[f32],
+            _output: &mut [f32],
+            _n_in: usize,
+            _n_out: usize,
+            _ith: usize,
+            _nth: usize,
+        ) {
+            panic!("BitNet I2_S noop kernel: forward_prequantized should not be called");
+        }
+        fn forward_prepared(
+            &self,
+            _input: &[f32],
+            _input_q8: &[u8],
+            _input_scales: &[f32],
+            _q8_k: Option<&[crate::ops::quant::BlockQ8K]>,
+            _output: &mut [f32],
+            _n_in: usize,
+            _n_out: usize,
+            _ith: usize,
+            _nth: usize,
+        ) {
+            panic!("BitNet I2_S noop kernel: forward_prepared should not be called");
+        }
+    }
+    pub(super) const NOOP_KERNEL: NoopKernel = NoopKernel;
 }
 
 impl<'a> QuantizedTensor<'a> {
@@ -417,6 +494,11 @@ impl<'a> QuantizedTensor<'a> {
                 n_cols: n_in,
                 n_rows: n_out,
             },
+            GGMLType::I2_S => Self::I2S {
+                data,
+                n_cols: n_in,
+                n_rows: n_out,
+            },
             _ => panic!("unsupported weight type {:?} - use Q8_0 model", ggml_type),
         }
     }
@@ -445,6 +527,7 @@ impl<'a> QuantizedTensor<'a> {
             Self::Q5_0 { .. } => GGMLType::Q5_0,
             Self::Q5_K { .. } => GGMLType::Q5K,
             Self::Q1_0 { .. } => GGMLType::Q1_0,
+            Self::I2S { .. } => GGMLType::I2_S,
         }
     }
 
@@ -483,6 +566,7 @@ impl<'a> QuantizedTensor<'a> {
             Self::Q5_0 { n_cols, .. } => *n_cols,
             Self::Q5_K { n_cols, .. } => *n_cols,
             Self::Q1_0 { n_cols, .. } => *n_cols,
+            Self::I2S { n_cols, .. } => *n_cols,
         }
     }
 
@@ -587,6 +671,15 @@ impl<'a> QuantizedTensor<'a> {
                 n_cols,
                 n_rows,
             } => Box::new(q1_0::Q1_0Kernel::new(data, n_cols, n_rows)),
+            // BitNet I2_S — no-op kernel; the BitLinear forward in
+            // `src/ops/bitnet/forward.rs` bypasses this kernel and uses the
+            // raw bytes via `BitLinearWeights::weight`. The kernel
+            // exists so `Weight::from_quantized` can build a `Box<dyn
+            // Kernel>` to satisfy the type system. Forwarding via
+            // this kernel would be a routing bug (BitLinear path not
+            // taken) and would produce garbage — `NOOP_KERNEL.forward*`
+            // panics to flag the bug.
+            Self::I2S { .. } => Box::new(noop::NOOP_KERNEL),
         }
     }
 
@@ -613,7 +706,8 @@ impl<'a> QuantizedTensor<'a> {
             | Self::Q4_K { n_rows, .. }
             | Self::Q5_0 { n_rows, .. }
             | Self::Q5_K { n_rows, .. }
-            | Self::Q1_0 { n_rows, .. } => *n_rows,
+            | Self::Q1_0 { n_rows, .. }
+            | Self::I2S { n_rows, .. } => *n_rows,
         }
     }
 

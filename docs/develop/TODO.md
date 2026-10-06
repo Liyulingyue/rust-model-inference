@@ -141,6 +141,25 @@ LFM2 / LFM2.5 / Spark / Nemotron-H / Hunyuan / LFM2-MoE），每个 scorer 实�
 
 目标：Q4_K_M 从 ~76 t/s → 120-150 t/s。详见 TODO-001 关联。
 
+### BitNet `I2_S` GGML type 的 provenance 与上游兼容性
+
+`GGMLType::I2_S = 36` 和 `general.file_type = 40` (LLAMA_FTYPE_MOSTLY_I2_S) **不是上游
+ggml-org/llama.cpp 的一部分**——它们是 `microsoft/BitNet` 私有 fork 在 `ggml.h` 中加的扩展，
+转换脚本 `utils/convert-hf-to-gguf-bitnet.py` 用 `gguf.GGMLQuantizationType.I2_S`。后果：
+
+- 这两种 BitNet GGUF **只能**在 BitNet-patched llama.cpp / `microsoft/BitNet` build / 本仓库 (`I2_S` 已注册) 里
+  跑，stock `llama.cpp`、`ollama`、`koboldcpp` 等社区 GGML 引擎会在加载时报
+  "unknown tensor type" 直接 abort。
+- 跨生态分发 BitNet 模型时需要在 README / GGUF 描述里明确这一点，避免用户误以为
+  `ollama run bitnet-embedding-0.6b` 能跑（实际上 GGUF 类型会被拒）。
+- 长期：上游 PR 把 `I2_S` 合并进 ggml-org/ggml（需要 bitnet.cpp 团队与 ggml 维护者协调），
+  或者在 GGUF 规范里加一个 `quantization_version` 字段，让 stock llama.cpp 把
+  `file_type=40 + GGMLType=36` 解释成 "需要 BitNet-patched build" 错误并清晰报错。
+
+当前会话的处理：commit message + `src/core/tensor.rs::GGMLType::I2_S = 36` 旁的注释明确写了
+"Microsoft BitNet b1.58 I2_S extension; not upstream ggml"。`docs/usage/bitnet_embedding.md` 第一节
+"已下载并验证的 GGUF" 提示兼容性受限。**没有自动对齐上游的工作；等上游 merge 或社区分流后再调整。**
+
 ## Low Priority
 
 - [ ] 更多量化格式支持（Q4_K, Q5_K 等）
@@ -1047,6 +1066,62 @@ ggml `89c4413f5da6fb20cc796f16033d37f129be81fd`。
 - 待完成：Turbo 独立权重、SIMD/FMA 数值对齐及 512/1024 生成质量验证。
   CPU 路径；尚无 ERNIE Vulkan/GPU 支持验证，不能继承 Z-Image 的加速结论。
 
+### AuK-Base (1.5B, Flux2Edit 音频 DiT) 适配 — 🚧 进行中 (2026-10)
+
+`general.architecture = auk`（audio.cpp 的 community model；GGUF 通过 `transformer.transformer_blocks.0.img_attn.qkv.weight` 这类 tensor 命名探测，参考 `references/audio.cpp/src/community_models/auk/{flow,conditioning,vae,audio_conditioning,session}.cpp` 116 KB 参考实现；HuggingFace 镜像源 `audio-cpp/AuK-Base-and-Flash-GGUF`）
+
+核心架构（`audio.cpp/docs/community_models/auk.md` + `config/auk-base.yaml`）：
+- Backbone = **Flux2Edit**（Flux 风格双流 DiT，跟 `pig` (Z-Image) 同一家族）
+- `dim=1536, heads=24, head_dim=64`，`ff_mult=2 → ffn=3072`
+- 10 个 double blocks（并行 img/txt 注意力 + MLP）+ 20 个 single blocks（仅 img 注意力）
+- `text_hidden_dim=2048`（Qwen2.5-Omni-3B n_embd）
+- VAE = `BigVGANFlowVAE`，64-dim latent，480× 下采样，24 kHz 输出
+- CFMEdit = flow-matching 编辑变体，logistic_normal schedule（P_mean=-0.8, P_std=0.8）
+- AuK-Base：32 Euler 步 + guidance 2.0
+- AuK-Flash：固定 4 步 + guidance 0（蒸馏版；本轮暂不 port）
+
+GGUF 重量（从 `audio-cpp/AuK-Base-and-Flash-GGUF`）：
+- `auk-base-f16.gguf` 2.9 GB（F16 DiT，本轮首选）
+- `auk-base-q8_0.gguf` 1.5 GB（Q8_0 量化）
+- `auk-vae-f32.gguf` 608 MB
+- `qwen2.5-omni-3b-q8_0.gguf` 4.0 GB（**本地已有** `models/Qwen2.5-Omni-3B-GGUF/Qwen2.5-Omni-3B-Q8_0.gguf`）
+
+进度：
+1. ✅ MODEL_LIST.md 加行 + TODO.md 占位
+2. ✅ 下 AuK GGUF + inspect tensor 命名（vs audio.cpp 期望），自校
+3. ✅ `src/models/diffusion/auk/{mod,dit,vae,text}.rs` scaffold（参照 pig 的 Flux 双流 + AuK 专有 CFMEdit 逻辑）
+4. ✅ CLI dispatch + arch detection + 测试钉 contract（6/6 auk_di_t_q4_k_m 通过）
+5. ✅ 端到端冒烟：`--model auk-base-f16.gguf --text-encoder Qwen2.5-Omni-3B-Q8_0.gguf --vae auk-vae-f32.gguf --prompt "..." --out speech.wav`（4 步 ~8.5 min，生成 0.13s 24 kHz mono WAV）
+
+实现要点（commit `899602c..dfd74b9` on `Auk` branch，共 12 commits ~3600 LoC）：
+- DiT：Flux2Edit 10 double + 10 single blocks，6-way AdaLN modulation，joint img+text attention，per-head RMS QK-norm + RoPE，packed gate+up SwiGLU FF
+- Text encoder：Qwen2.5-Omni-3B（直接复用 `qwen3::trunk::Qwen3Model`）
+- Diffusion：linear sigma schedule，Euler step `x_next = x + v * dt`，velocity clipping (band-aid)，CFG with zero-text unconditional pass
+- VAE：BigVGANFlow decoder — conv_pre (64→1536) + 6× upsample stages + 18 resblocks (3/stage) + conv_post (24→1)；weight-norm decomposition；SnakeBeta with GGUF-stored alpha/beta
+- WAV：16-bit PCM mono writer
+
+待优化（follow-up，no rush）：
+- [ ] 数值校准 oracle-diff vs `references/audio.cpp/src/community_models/auk/flow.cpp` — block forward magnitudes drift without the velocity clip
+- [ ] Per-token matmul batching（`linear_into` 一调一次 token，瓶颈；需新增 batched Q8_0 matmul helper 或 thread-local Q8Scratch per rayon worker）
+- [x] **F16 matmul Vulkan path**（done as A：A 任务）— `auk_f16_gpu_runtime`（max_rows=1, max_n_in=4096, max_n_out=9216, descriptor_capacity=4096）+ `f16_gpu_linear_into`（单行 `BatchedLinearRuntime::matmul_rows(format=F16)`）接入 `linear_into_scaled_impl` 的 F16 分支。**pre_quantize F16→Q8_0 workaround（`f4e7879`）已删除**，主路径现在按 GGMLType dispatch——F16 走 F16 GPU，Q8_0 走 Q8 GPU matmul，BF16/Q*_K 走 `QTensorOwned` CPU。消除了 21s 一次性 F16→Q8 load + 1.5 GB cache RAM + post-training quant noise。end-to-end dev 335s（vs 311s baseline Q8 path，持平）。
+- [x] **修掉 `linear_into_dispatched` + `linear_into_dispatch` 两处无限递归** —— 之前在 Q8 miss 时调用 `self.linear_into_dispatched` / `linear_into_dispatch`（实际是无限递归，被 Q8 cache 100% 命中掩盖）。两者现在都改为 `super::linear_into_scaled_impl`。拆掉 pre_quantize 后两个 recursion 都会 stack overflow，所以必须一起改。
+- [ ] VAE resblocks 的 causal padding（当前用 symmetric，lossy 一点；low impact 因 upsample 已用 linear interp）
+- [ ] VAE SnakeBeta 的 FIR up/down filters（audio.cpp 用 `build_activation`，我们 skip；lossy 一点，minor impact）
+- [x] **CFMEdit reference-audio conditioning path**（done as C：C 任务）— `AukPipeline::generate_audio_with_audio(prompt, audio_embeddings, audio_tokens, options)` 接入。`audio_embeddings` 是 `audio_tokens * 2048` 的 f32 buffer（Qwen2.5-Omni audio tower 的隐藏空间），与 text embeddings 拼成 `[img, audio, text]` joint sequence 走 DiT forward。`dit.denoise` 新增 `audio_conditioning` + `audio_tokens` 参数，`predict_velocity_inner` 改用 `cond_tokens = audio_tokens + text_tokens`；joint layout、txt_proj、scratch.prepare 全部按 cond_tokens 处理。零向量 smoke 337ms OK（max_abs=0.95，finite audio）。**Qwen audio tower encoder 还没 port**——端到端 CFMEdit 需要外部提供 audio embeddings（Python 跑 Qwen audio tower 导出 f32 binary 即可）。这是 follow-up 工作，涉及 32 transformer encoder layers + 2 Conv1d + ln_post + proj（1280→2048）。
+- [x] **Qwen2.5-Omni audio tower encoder**（done as audio tower 任务：commits f8accde / c64f1ea）— 新模块 `src/models/qwen3/omni_audio/`（~870 LoC）实现完整 conv1/conv2 + 32 transformer encoder layers + ln_post + proj 1280→2048。Whisper Kokoro mel 提取（复用 qwen3/asr/audio_processor 已有 helpers，16kHz/400/160/128），F16/BF16→F32 反量化在 load 时做。`AukPipeline::load_with_audio_tower` + `AukPipeline::generate_audio_with_reference_wav` 接入。Smoke 测试：0.5s 440Hz 正弦波 → 26 audio tokens, max_abs=3.54, finite。**完整 CFMEdit 路径**（done as commit 03f71b9）：Qwen3Model 新增 `text_encode_with_audio`，在 embedding lookup 阶段把 audio tower 输出替换进 `<|AUDIO|>` token 位置（id 151646），让 Qwen 36 层 transformer 跑整条 sequence，text 和 audio 通过 self-attention 交互。BPETokenizer 新增 `from_qwen25_omni_embedded_merges` 加载 22 个 Qwen2.5-Omni special tokens（含 `<|AUDIO|>=151646`、`<|audio_bos|>=151647`、`<|audio_eos|>=151648`），AukTextEncoder 新增 `encode_with_audio` 构造 CFMEdit 提示模板 + 调 text_encode_with_audio。端到端 smoke 670s dev mode，48 cond_tokens (vs 简化版 27)，3200 samples @ 24kHz finite。
+- [x] **AuK-Flash 蒸馏版（4 步 + guidance 0）**（done as D：D 任务）— **零代码改动**。Flash 跟 AuK-Base 共享同一份架构（Flux2Edit, dim=1536, 24 heads, ff_inner=3072, num_layers=10, num_single_layers=20）+ tensor layout（420 个 tensor，一一对应）。下载 `auk-flash-f16.gguf`（2.9 GB F16 from `audio-cpp/AuK-Base-and-Flash-GGUF`），通过同一份 `AukPipeline::load` 加载；调度切换为 `steps=4, guidance_scale=0.0`（跳过 CFG unconditional run）。Smoke 测试：`tests/auk_flash_smoke.rs`（`#[ignore]`）；dev mode 4 步 323s，3200 samples @ 24 kHz，max_abs=0.95，finite。
+- [x] **16/16 audio.cpp 任务覆盖**（commit `pending`）— 加 `AukAudio::pitch_shift(semitones)` / `speed_change(rate)` / `volume_change(db)` 三个 DSP 编辑（线性重采样，pitch_shift 同时改音高和时长，**真正"音高↑ 时长不变"需要 phase vocoder，是 follow-up**）+ `AukOptions::instruct` 字段 + CFMEdit 提示模板里加 `<instruct=...>\n` 前缀（对齐 audio.cpp 的 instruct-TTS 格式）。audio.cpp 16 任务验证表里的 12 个 reference-audio 任务（zero-shot TTS / speech editing / timbre / emotion / de-accent / whisper / enhance / separate / target speaker 等）和 4 个 text-only / DSP 任务（instruct TTS / pitch / speed / volume）都有 Rust 路径。7 个新单元测试覆盖 DSP 方法（`tests/auk_dsp_unit.rs`）。
+
+性能现状（4 steps + CFG=2.0 + 4 threads + Intel MTL + `--gpu`，**release 模式**）：
+- text_encode: 1.6s（CPU；Qwen2.5-Omni qwen2vl arch 还没 Vulkan）
+- denoise: 40s（F16→Q8_0 pre-quant + Vulkan Q8 GPU matmul；4.1x vs 168s CPU F16）
+- vae_decode: 50s（ComputePool par_chunks over resblocks，已 2.86x vs 166s serial）
+- total: 93s（5.5x vs 515s baseline）
+
+vs 起点（515s/0.13s）：5.5x end-to-end 加速。
+
+注：audio.cpp 的 C++ 代码是 **参考** 而非金标准 — tensor 命名、参数化约定可能跟实际 GGUF 有微小差异（参考 ERNIE-Image 跟 unsloth GGUF 的踩坑先例），以 **GGUF 实际 tensor 名 + shape** 为准。
+
 ### Spark-X2.5-1.7B / 4B-GGUF 适配 — ✅ 已完成（功能）+ ⚠️ 性能待优化
 
 `arch=spark2_5`，Xunfei Spark 2.5 讯飞星火。适配点：
@@ -1210,3 +1285,93 @@ let mut values = [0.0f32; 512];  // attention 长生成时越界 panic
 - TODO-AVX-VNNI / TODO-LLAMA-PER-TOKEN-SIMD 实现后，再跑一遍 K2-Horizon-4B
   对比 `--max-context 8192` vs `--max-context 32768` 的 prefill 时间（验证大 context
   不会因为 KV 随机访问模式变慢）。
+### Standard gemma3 trunk (`src/models/gemma3/trunk/forward.rs`) — DONE for 270M-it
+
+`src/models/gemma3/` 现在服务 **BitNet 270M** (file_type=40) **和**
+**standard gemma3-270m-it** (file_type=15, Q4_K_M mixed) — 两条 forward
+path 共享同一个 `text_encode` 函数体，`cfg.is_bitnet` 在 7 个投影
+（attn_q/k/v/output + ffn_gate/up/down）处分发：
+
+- `is_bitnet=true`  → `bitlinear_projection(...)` (BitNet path，SIMD hot path)
+- `is_bitnet=false` → `standard_projection(...)` (Q4_K/Q5_0/Q6K/Q8_0 matmul，
+  Q8_0-quantized 激活 × mixed-quant 权重，跟 qwen3 trunk 同款)
+
+新增 `Gemma3Config.sliding_window: usize` 字段（默认 0 = full causal），
+`causal_self_attention` 在 mask `j ∈ [0, i + 1 - sliding_window)`。
+Standard gemma3-270m-it 声明 `sliding_window=512`（hybrid local/global attn）。
+
+`Gemma3LayerWeights` 同时存 `bitlinear: BitLinearSlot` 和
+`wq/wk/.../w_down: Option<StdProjection>`（owned `Vec<u8>` + ggml type + shape）。
+Forward 路径在调用 `standard_projection` 时按需构造 `Weight` kernel
+（cheap; kernel 只是 byte buffer 的 view + 维度）。
+
+`static_weight` (`src/models/gemma3/trunk/weights.rs`) 现支持 F16 (BitNet 270M)
+和 Q8_0 (standard gemma3-270m-it，mixed-quant conversion) 两种 token
+embedding。Q8_0 dequant 用 34 bytes / 32-element block layout
+(2-byte F16 scale + 32 signed int8)。
+
+`build_config` (`src/models/gemma3/embedding.rs`) 改：
+- vocab 从 `tokenizer.ggml.tokens` array length 读（standard GGUF 没有
+  `gemma3.vocab_size`；BitNet 仍用 `gemma3.vocab_size` fallback）。
+- `gemma3.context_length` 改 unwrap_or(0)（standard GGUF 总是有，BitNet 也总有；fallback
+  仅为防御）。
+- `gemma3.pooling_type` 改 unwrap_or(1)（standard GGUF 不设，BitNet 设 1）。
+- `gemma3.attention.sliding_window` 新字段。
+
+`app/mod.rs::compute_embedding` / `run_embedding` dispatch 加 `"gemma3"` case
+→ `crate::models::gemma3::compute_embedding` / `run_embedding`（之前默认
+fall through 到 qwen3，不识别 arch）。`models::gemma3` 现在 pub mod。
+
+`models::gemma3::trunk::BitLinearWeights` 引用从 `crate::ops::bitlinear` 改到
+`crate::ops::bitnet`（旧的 `bitlinear/` 模块已不再 pub；commit e011536
+之后一直未更新 gemma3 trunk 的 import，这是 e011536 的 holdout）。
+
+**e2e** (`tests/gemma3_270m_it_e2e_embed.rs`) 5/5：
+shape=640、finite、value range `[-300, 300]`、L2 norm `∈ (0.1, 1000)`、
+byte-deterministic、longer prompt 32 tokens 仍 finite、cooking vs
+software cosine sim < 0.99（IT 模型 + last-token pooling discrimination
+较弱；0.99 threshold 是宽口径，只 catch 完全相同 embedding）。
+
+**性能**：standard gemma3-270m-it Q4_K_M 单 token 4 线程 ~1.0 s；BitNet-270M
+packed SIMD 路径 ~480 ms。两者 forward 时间在同一数量级 — Q4_K matmul
+是 AVX2 + Q8_0-quantized activation，跟 SIMD int8 × int8 dot 在内存带宽上
+类似。
+
+**未做**（4B/12B/27B standard gemma3 的前置）：
+
+1. KV cache + decode loop（生成模式；当前只有 embedding extraction = last-token）。
+2. IT chat template（`tokenizer.chat_template` 已在 contract test 里锁定含
+   `<start_of_turn>{role}
+...<end_of_turn>
+`，但 `run_shared_inference` 仍
+   返回 error）。
+3. **Bit-exact 对照 oracle**：本机没有 cmake/PyTorch/bitnet.cpp build；任何
+   "对得上 llama.cpp b96806d --temp 0 --top-k 1 golden log" 的工作需 cmake
+   工具链，目前不可达。Forward 通过有限 golden test 验证（shape / finite /
+   range / determinism / discrimination）— 跟 BitNet-270M 的 e2e 套件同级别。
+
+针对 gemma-3-270m-it 的 contract test (`tests/gemma3_270m_it_q4_k_m.rs`)
+已 8/8：metadata (arch, file_type=15, dims)、sliding_window=512、
+SPM tokenizer (`model=llama`, no merges, EOS=106)、mixed-quant tensor
+inventory (109 F32 + 81 Q5_0 + 27 Q4K + 9 Q6K + 10 Q8_0 = 236 张量, no I2_S, no norm_in)。
+
+历史：
+
+1. `causal_self_attention` 加 sliding window mask（`gemma3.attention.sliding_window=512`，
+   屏蔽 `|i - j| > sliding_window` 的 K/V）。
+2. 在 `gemma3/trunk/weights.rs` 加非 BitLinear 路径：`attn_q/k/v/output` +
+   `ffn_gate/up/down` 用 `Weight::from_quantized`（Q4_K/Q5_0/Q6K/Q8_0 混合，按张量名匹配），
+   走 `matmul_q8_0_quantized_parallel_rows`（现有的 standard matmul，已在 qwen3 trunk 用过）。
+3. `Gemma3Config::is_bitnet` field 保留作 dispatcher，但加一个
+   `pub fn new_from_source(&self) -> ...` 的 standard gemma3 入口（`text_encode_v2` 或
+   重命名）；`embedding.rs::compute_embedding` 走 `cfg.is_bitnet` 分发两个 path。
+4. IT tokenizer：`tokenizer.chat_template`（含 `<start_of_turn>{role}\n…<end_of_turn>\n`）
+   + EOS=106（不是 BitNet 的 EOS=1）已经在 contract test 锁定；`BPETokenizer` 已经能处理
+   SPM `tokens + scores + token_type`（这是 BitNet-270M 复用过的），IT 模型跟 base 模型
+   tokenizer layout 完全一致，理论上零增量工作量。
+5. KV cache + decode loop（用于 IT generation 而非仅 embedding extraction）。
+
+rough scope: ~400-500 LOC（取决于要不要 KV cache / generation），
+与 `tests/gemma3_270m_it_q4_k_m.rs` 的 8 条 contract test + 端到端 forward parity test 配对
+（参 llama.cpp `--temp 0 --top-k 1` greedy 输出做 32→1 字符串对齐；oracle 见 llama.cpp `b96806d`
+在 `unsloth/gemma-3-270m-it-GGUF` 上的 golden log `main-0319c65`）。

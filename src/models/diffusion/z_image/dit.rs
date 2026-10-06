@@ -1260,6 +1260,12 @@ impl ZImageDit {
         }
         #[cfg(feature = "vulkan")]
         gpu_profile_report(sigmas.len() - 1);
+        #[cfg(feature = "vulkan")]
+        {
+            crate::vulkan::dump_submit_trace();
+            crate::vulkan::ops::dump_dispatch_trace();
+            crate::vulkan::ops::dump_dispatch_log();
+        }
         // 输出累计的 profile
         let t = PROFILE_TIMERS.with(|cell| *cell.borrow());
         let total = t.0 + t.1 + t.2 + t.3 + t.4 + t.5 + t.6 + t.7 + t.8;
@@ -1273,7 +1279,11 @@ impl ZImageDit {
         eprintln!("  rms_norm:              {:8.1}ms ({:5.1}%)", t.1, pct(t.1));
         eprintln!("  scale_modulated:      {:8.1}ms ({:5.1}%)", t.2, pct(t.2));
         eprintln!("  linear qkv:           {:8.1}ms ({:5.1}%)", t.3, pct(t.3));
-        eprintln!("  rope_neox_inplace:    {:8.1}ms ({:5.1}%)", t.4, pct(t.4));
+        eprintln!(
+            "  rope_neox_inplace:                {:8.1}ms ({:5.1}%)",
+            t.4,
+            pct(t.4)
+        );
         eprintln!("  attention_into:       {:8.1}ms ({:5.1}%)", t.5, pct(t.5));
         eprintln!("  linear out:           {:8.1}ms ({:5.1}%)", t.6, pct(t.6));
         eprintln!("  linear ffn (w1+w3+w2): {:8.1}ms ({:5.1}%)", t.7, pct(t.7));
@@ -2677,7 +2687,7 @@ fn run_block_gpu(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "vulkan"))]
 mod tests {
     use super::*;
 

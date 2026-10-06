@@ -5,9 +5,8 @@ use crate::ops::quant::{BlockQ8K, QK_K};
 use crate::ops::{dot_f32, sum_f32, sum_sq_centered_f32, vec_add_into};
 
 pub use crate::ops::{
-    gelu_approx_inplace, gelu_inplace, rms_norm, rms_norm_inplace, rope_neox_inplace,
-    rope_neox_partial, silu_approx_inplace, silu_inplace, silu_mul_approx_inplace,
-    silu_mul_inplace,
+    gelu_approx_inplace, gelu_inplace, rms_norm, rms_norm_inplace, rope_neox_partial,
+    silu_approx_inplace, silu_inplace, silu_mul_approx_inplace, silu_mul_inplace,
 };
 
 pub fn checked_len(name: &str, dimensions: &[usize]) -> Result<usize, String> {
@@ -455,6 +454,26 @@ pub fn attention_scalar(
     value: &[f32],
     spec: AttentionSpec,
 ) -> Result<Vec<f32>, String> {
+    attention_scalar_with_dot(query, key, value, spec, dot_f32)
+}
+
+/// Sequential F32 QK reduction in scalar mode, as used by MageVAE's torch.bmm.
+pub fn attention_scalar_f32(
+    query: &[f32],
+    key: &[f32],
+    value: &[f32],
+    spec: AttentionSpec,
+) -> Result<Vec<f32>, String> {
+    attention_scalar_with_dot(query, key, value, spec, crate::ops::dot_f32_exact)
+}
+
+fn attention_scalar_with_dot(
+    query: &[f32],
+    key: &[f32],
+    value: &[f32],
+    spec: AttentionSpec,
+    dot: fn(&[f32], &[f32], usize) -> f32,
+) -> Result<Vec<f32>, String> {
     spec.validate(query, key, value)?;
     let mut output = vec![0.0; query.len()];
     let mut scores = vec![f32::NEG_INFINITY; spec.key_tokens];
@@ -470,7 +489,7 @@ pub fn attention_scalar(
                     continue;
                 }
                 let key_start = (key_token * spec.key_value_heads + key_head) * spec.head_dim;
-                let score = dot_f32(
+                let score = dot(
                     &query[query_start..query_start + spec.head_dim],
                     &key[key_start..key_start + spec.head_dim],
                     spec.head_dim,

@@ -414,12 +414,14 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             | "phi3"
             | "glm4"
             | "gemma-embedding"
+            | "gemma2"
             | "bert"
             | "jina-bert-v2"
             | "nomic-bert"
             | "nomic-bert-moe"
             | "mistral3"
             | "ernie_image"
+            | "audiocpp"
     ) {
         return Err(format!("Unsupported architecture: {arch}"));
     }
@@ -459,6 +461,33 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             n_head_kv: 32,
             n_embd_head: 128,
             n_ff: 12288,
+            n_ctx: 0,
+            vocab_size: 0,
+            rope_freq_base: 0.0,
+            norm_eps: 1e-6,
+        });
+    }
+    // AuK / audiocpp arch (1.5B Flux2Edit audio DiT). Detection is by
+    // tensor-name presence since the GGUF mis-tags arch as "audiocpp".
+    let auk_by_arch = arch == "audiocpp";
+    let auk_by_tensor = source
+        .tensor_info("transformer.transformer_blocks.0.attn_norm_x.linear.weight")
+        .is_some()
+        && source
+            .tensor_info("transformer.single_transformer_blocks.0.attn_norm.linear.weight")
+            .is_some()
+        && source
+            .tensor_info("transformer.audio_embed.linear.weight")
+            .is_some();
+    if auk_by_arch || auk_by_tensor {
+        return Ok(ModelConfig {
+            n_embd: 1536,
+            n_layer: 10,
+            n_head: 24,
+            n_head_kv: 24,
+            n_embd_head: 64,
+            // n_ff = packed gate+up (6144) + down (3072) summed = 9216
+            n_ff: 9216,
             n_ctx: 0,
             vocab_size: 0,
             rope_freq_base: 0.0,
@@ -637,7 +666,22 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
                 .map(Vec::len)
                 .unwrap_or(0),
         },
-        rope_freq_base: get_f64_opt(&format!("{prefix}.rope.freq_base"), 1_000_000.0)? as f32,
+        rope_freq_base: {
+            // Per-arch rope.freq_base defaults. The loader uses 1e6
+            // as a fallback for any arch that omits the metadata,
+            // but Gemma-2 actually trains with `freq_base = 10000.0`
+            // (HF `google/gemma-2-2b` config) and ships no
+            // `*.rope.freq_base` key in the GGUF — using 1e6 would
+            // silently produce garbage rotations. Hardcode the
+            // Gemma-2 default here; every other arch falls through
+            // to 1e6 unchanged.
+            let default = if prefix == "gemma2" {
+                10_000.0
+            } else {
+                1_000_000.0
+            };
+            get_f64_opt(&format!("{prefix}.rope.freq_base"), default)? as f32
+        },
         norm_eps: get_f64(&format!("{prefix}.attention.layer_norm_epsilon"))
             .or_else(|_| get_f64(&format!("{prefix}.attention.layer_norm_rms_epsilon")))
             .unwrap_or(1e-12) as f32,

@@ -83,7 +83,94 @@ VAE 解码——只跑一次、与步数无关、代码未改——在多次相�
 
 前两列输出逐字节一致。attention 那一列**不逐字节一致**，见下节。
 
-### 画质：attention 上 GPU 没有抬高偏差
+#### 合并 FFN 到单个 command buffer：已尝试，未能完成
+
+目标是把 `run_block_gpu` 里的 w1 → w3 → silu → w2 录进**同一个**
+`TokenCommands`，一次 submit 一次 readback，替掉现在的 3 次
+`project_scaled`（各自 `submit_and_wait`）+ host silu。
+
+`DitGpuSession::record_ffn` 已写出来，逻辑本身在**分开提交**时经逐步
+readback 验证是正确的（Z_DEBUG_FFN=1，512×512，rows=3840）：
+
+```
+after w1  : finite 327680/327680  min -1.73e1  max 1.37e1
+after w3  : finite 327680/327680  min -3.91e1  max 2.69e1
+after silu: finite 327680/327680  min -4.78e2  max 3.44e2
+after w2  : finite 122880/122880  min -1.02e3  max 4.08e3
+```
+
+silu 的输出区间与 CPU 参考一致（按 w1/w3 的实测极值算 silu(gate)*up
+得 [-531.8, 365.8]，设备给出 [-477.8, 343.8]，符号与量级吻合），所以
+**silu shader 本身是对的**，`SILU_MUL_SHADER` + `Layout.gate/up` 这条路
+可行。
+
+**但合成一个 command buffer 后输出全 -inf**，而逐步 submit 的版本正确。
+已排除的解释（都不是原因）：
+
+- 缺 barrier。`compute_barrier` 是 SHADER_WRITE → SHADER_READ | SHADER_WRITE、
+  COMPUTE → COMPUTE，语义正确；在 w1/w3/silu/w2 每步前后都加，仍然全 -inf。
+- descriptor set 混叠。silu 绑 `self.arena_bindings`，投影绑各自的
+  `bindings.descriptor_set`，两者来自同一个 pool 的不同 set。
+- 区域重叠。`Layout` 用 bump allocator，`x/normed/out/qkv/gate/up/q8/
+  q8_scales/q4_1_input_sums/q8k/q8k_scales` 依次 `take()`，尺寸算下来
+  `rows_ffn == rows*FFN_WIDTH`，同为大小但偏移不同。
+- 形状。W1/W3 n_in=HIDDEN n_out=FFN_WIDTH，W2 n_in=FFN_WIDTH n_out=HIDDEN，
+  与 GGUF 里 `(3840,10240)/(10240,3840)/(3840,10240)` 一致；W1/W2/W3 都是
+  Q8_0（GGML type 8），走 tiled Q8_0 + 32 元素量化。
+
+剩下的差异只有"三个 dispatch 挤在一个 buffer 里 vs 各自 submit"。
+`TokenCommands::begin` 复用**同一个** `command_buffer` 并先调
+`recover_commands` + `reset_command_buffer`（`vulkan.rs:420`），而
+`begin` 全程持有 `context.mutex`。分开提交时每次 `read_f32_into` 都会把
+host 读钉在 pipeline 上，等于强制刷新；合批后所有 GPU 阶段只能靠
+barrier 互相可见——而 barrier 已证明加对了。**未定位的可能是
+descriptor set 与 pipeline 布局在跨 dispatch 复用时的状态**，需要
+更细的 trace（例如逐 dispatch 的 `RUST_GPU_SUBMIT_TRACE` + dispatch 计数）
+才能继续。
+
+改动已回退。留在这里是为了让下一个人不必重走：silu 数值已验证正确，
+卡的是合批机制本身。
+
+> 工程向的完整快照与加速路线见 `docs/develop/ZIMAGE_STATUS.md`。
+
+### 2026-10-06 在当前 HEAD（合入 #151/#152 后）复测的分解
+
+`[gpu-block-profile]` 是代码里已有的分段计时（`GPU_PHASE_LABELS`），8 步
+512×512 seed 42，20 线程，合计 107.2 s：
+
+| 阶段 | 8 步 | 占比 |
+|---|---|---|
+| ffn: main stack (gpu) | 50.7 s | 47.3% |
+| out proj (gpu) | 21.8 s | 20.4% |
+| ffn: refiner | 11.5 s | 10.7% |
+| **attention (host)** | 10.9 s | 10.1% |
+| norm+adaln+qkv (gpu) | 10.6 s | 9.9% |
+| **rope (host)** | 1.7 s | 1.6% |
+| modulation (host) | 0.02 s | 0.0% |
+| &nbsp;&nbsp;其中 w1 readback | 3.1 s | 2.9% |
+| &nbsp;&nbsp;其中 **host silu** | **12.3 s** | **11.5%** |
+
+**26% 的时间在 host 上**：attention 10.9 s + rope 1.7 s + w1 readback 3.1 s +
+host silu 12.3 s。标签里的 `(host)` 不是笔误。
+
+同步次数是硬约束：`RUST_GPU_SUBMIT_TRACE=1` 在 3 步上给出 3308 次提交，
+即**每步 1103 次** `submit_and_wait`，而每步只有 320 次 dispatch——平均每
+3.4 次同步才凑一次有意义的 GPU 工作。`queue_submit` 本身 0.009 ms，费用
+全在 `wait_for_fences`。根源是 `run_block_gpu` 每 block 有 5 次 readback
+（QKV、out proj、w1/w3/w2），34 block × 5 ≈ 170 次/步。
+
+`run_block_gpu` 里 w1/w3 投影后在 host 做 silu 再传回给 w2，是纯粹的
+CPU/GPU 边界错配：`SILU_MUL_SHADER` 已经是 pipeline 16（YuE2 AR 在用），
+`Layout` 也已有 `gate`/`up` 区域，所以这段可以整段留在设备上。
+
+⚠️ **但改的时候必须把 w1+w3+silu+w2 录进同一个 command buffer**。
+`project_scaled` 自带 `submit_and_wait`（`dit_gpu.rs:434`），
+`record_projection` 才是"录到在途 buffer、不回读"的那个变体。用
+`session.begin()` 单独录 silu 会让这个 `TokenCommands` 在语句结束时被丢弃
+（drop 不提交），w2 于是读到未激活的 gate——实测 PSNR 掉到 5.11 dB，整张图
+报废。该改动已回退。
+
+## 画质：attention 上 GPU 没有抬高偏差
 
 拿同 seed 的三张图对比（512×512，8 步）：A = 纯 CPU 渲染，B = GPU 路径 +
 CPU attention，C = GPU 路径 + GPU attention。

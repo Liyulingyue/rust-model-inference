@@ -19,6 +19,8 @@ pub(crate) mod qwen3;
 #[cfg(feature = "vulkan")]
 pub(crate) mod qwen35;
 #[cfg(feature = "vulkan")]
+pub(crate) mod yue2;
+#[cfg(feature = "vulkan")]
 mod zimage_probe;
 #[cfg(feature = "vulkan")]
 #[doc(hidden)]
@@ -447,6 +449,10 @@ impl VulkanContext {
     }
 
     fn submit_commands(&self, submission: &mut CommandSubmission) -> Result<(), VulkanError> {
+        #[cfg(feature = "vulkan")]
+        if ops::dispatch_log_enabled() {
+            ops::dispatch_log_new_epoch();
+        }
         let t0 = std::time::Instant::now();
         let result = (|| -> Result<(), VulkanError> {
             unsafe {
