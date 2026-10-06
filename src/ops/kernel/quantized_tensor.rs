@@ -301,7 +301,7 @@ impl<'a> QuantizedTensor<'a> {
                 n_rows,
             } => Box::new(q1_0::Q1_0Kernel::new(data, *n_cols, *n_rows)),
             // BitNet b1.58 I2_S. The kernel is intentionally a no-op
-            // — the BitLinear forward in `src/ops/bitlinear.rs`
+            // — the BitLinear forward in `src/ops/bitnet/forward.rs`
             // accesses the raw bytes directly via the
             // `BitLinearWeights::weight` field stored alongside
             // (see `src/models/qwen3/trunk/weights.rs::BitLinearSlot`).
@@ -672,7 +672,7 @@ impl<'a> QuantizedTensor<'a> {
                 n_rows,
             } => Box::new(q1_0::Q1_0Kernel::new(data, n_cols, n_rows)),
             // BitNet I2_S — no-op kernel; the BitLinear forward in
-            // `src/ops/bitlinear.rs` bypasses this kernel and uses the
+            // `src/ops/bitnet/forward.rs` bypasses this kernel and uses the
             // raw bytes via `BitLinearWeights::weight`. The kernel
             // exists so `Weight::from_quantized` can build a `Box<dyn
             // Kernel>` to satisfy the type system. Forwarding via

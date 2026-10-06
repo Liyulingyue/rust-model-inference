@@ -16,7 +16,7 @@
 //! - `get_f32_tensor`
 //! - `text_encode`, `run_shared_inference`
 //! - `BitLinearSlot`, `BitLinearWeights` (re-exported from
-//!   `crate::ops::bitlinear`)
+//!   `crate::ops::bitnet`)
 //!
 //! Re-exported from `embedding.rs`:
 //! - `compute_embedding`, `run_embedding_tokens`, `print_embedding`,

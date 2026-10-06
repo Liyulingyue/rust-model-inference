@@ -22,8 +22,8 @@
 //! and absorbs the weight scale into the per-projection `*_norm_in`
 //! RMSNorm that precedes the BitLinear forward at inference time
 //! (see `docs/usage/bitnet_embedding.md` for the BitLinear forward
-//! spec, and `src/models/qwen3/trunk/bitlinear.rs` for the BitLinear
-//! integration once that lands).
+//! spec, and `src/models/bitnet/qwen3_arch.rs` for the BitLinear
+//! integration).
 //!
 //! We empirically confirmed the 32-bytes-per-128-elements block size by
 //! diffing adjacent I2_S tensor offsets in the converted GGUF
@@ -45,7 +45,7 @@
 //! This module ships the dequant kernel + unit test. The full
 //! BitLinear forward (RMSNorm pre-norm → per-token absmax activation
 //! quant → ternary matmul → rescale by `absmax / 127`) is implemented
-//! in [`crate::ops::bitlinear`]. End-to-end qwen3 forward integration
+//! in [`crate::ops::bitnet`]. End-to-end qwen3 forward integration
 //! is the remaining piece for BitNet-Embeddings-0.6B to forward at all
 //! in `--embed` mode (see `docs/usage/bitnet_embedding.md` §3).
 
