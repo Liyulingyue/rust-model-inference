@@ -59,6 +59,12 @@ pub struct AukPipeline {
     dit: dit::AukDit,
     vae: vae::BigVGANFlowVae,
     text: Option<text::AukTextEncoder>,
+    /// Optional Qwen2.5-Omni audio tower for CFMEdit reference-audio conditioning.
+    /// Loaded lazily from a separate BF16 Qwen GGUF (which contains the audio
+    /// tower in addition to the text trunk). Required only for end-to-end
+    /// CFMEdit (WAV -> mel -> audio tower -> DiT). The Q8_0 Qwen GGUF is
+    /// insufficient since it omits the audio tower.
+    audio_tower: Option<crate::models::qwen3::omni_audio::AudioTowerModel>,
 }
 
 impl AukPipeline {
@@ -68,16 +74,45 @@ impl AukPipeline {
         text_source: Option<Arc<dyn TensorSource>>,
         n_threads: usize,
     ) -> Result<Self, String> {
+        Self::load_with_audio_tower(diffusion, vae_source, text_source, None, n_threads)
+    }
+
+    /// Load pipeline with optional Qwen2.5-Omni audio tower (BF16 GGUF).
+    /// When `qwen_omni_bf16_source` is provided, the audio tower is loaded
+    /// from it and `generate_audio_with_reference_wav` becomes available.
+    /// When it's `None`, the pipeline is TTS-only (use `generate_audio` or
+    /// `generate_audio_with_audio` with pre-computed audio embeddings).
+    pub fn load_with_audio_tower(
+        diffusion: Arc<dyn TensorSource>,
+        vae_source: Arc<dyn TensorSource>,
+        text_source: Option<Arc<dyn TensorSource>>,
+        qwen_omni_bf16_source: Option<Arc<dyn TensorSource>>,
+        n_threads: usize,
+    ) -> Result<Self, String> {
         validate_component(diffusion.as_ref(), Component::Dit)?;
         let pool = Arc::new(ComputePool::new(n_threads.max(1)));
         let text = match text_source {
             Some(src) => Some(text::AukTextEncoder::load(src, Arc::clone(&pool))?),
             None => None,
         };
+        let audio_tower = match qwen_omni_bf16_source {
+            Some(src) => {
+                eprintln!("[AukDiT] loading Qwen2.5-Omni audio tower (BF16 GGUF)...");
+                let t = std::time::Instant::now();
+                let tower = crate::models::qwen3::omni_audio::AudioTowerModel::from_source(src)?;
+                eprintln!(
+                    "[AukDiT] audio tower loaded in {:.1}s",
+                    t.elapsed().as_secs_f64()
+                );
+                Some(tower)
+            }
+            None => None,
+        };
         Ok(Self {
             dit: dit::AukDit::load(diffusion, Arc::clone(&pool))?,
             vae: vae::BigVGANFlowVae::load(vae_source, pool)?,
             text,
+            audio_tower,
         })
     }
 
@@ -245,6 +280,42 @@ impl AukPipeline {
             total_start.elapsed().as_secs_f64() * 1000.0,
         );
         Ok(audio)
+    }
+
+    /// End-to-end CFMEdit: take a reference WAV file, run it through the
+    /// Qwen2.5-Omni audio tower to get per-token embeddings, and feed them
+    /// alongside the text prompt to the DiT. Requires the audio tower
+    /// to be loaded (via `load_with_audio_tower`).
+    ///
+    /// `wav_samples_16k_mono` must be 16 kHz mono PCM f32 (use
+    /// `crate::app::media::decode_audio` to load + resample any input
+    /// format). For very long audio, the audio tower chunks into 200-frame
+    /// windows internally.
+    pub fn generate_audio_with_reference_wav(
+        &self,
+        prompt: &str,
+        wav_samples_16k_mono: &[f32],
+        options: &AukOptions,
+    ) -> Result<AukAudio, String> {
+        let tower = self.audio_tower.as_ref().ok_or_else(|| {
+            "AukPipeline::generate_audio_with_reference_wav requires the audio tower; \
+             load the pipeline via AukPipeline::load_with_audio_tower with a Qwen2.5-Omni \
+             BF16 GGUF (the Q8_0 GGUF omits the audio tower)"
+                .to_string()
+        })?;
+        if wav_samples_16k_mono.is_empty() {
+            return Err("Reference WAV is empty".into());
+        }
+        let t = std::time::Instant::now();
+        let (audio_embeddings, audio_tokens) = tower
+            .encode_pcm(wav_samples_16k_mono)
+            .map_err(|e| format!("Qwen2.5-Omni audio tower encode: {e}"))?;
+        eprintln!(
+            "[auk-stage-profile] audio_tower_encode={:.1}ms  n_audio_tokens={}",
+            t.elapsed().as_secs_f64() * 1000.0,
+            audio_tokens,
+        );
+        self.generate_audio_with_audio(prompt, &audio_embeddings, audio_tokens, options)
     }
 }
 
