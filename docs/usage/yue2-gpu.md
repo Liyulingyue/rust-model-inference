@@ -91,6 +91,36 @@ a k-quant matmul is the shader, not the device. The same table shows the fixed
 submit round trip is about 370 us, which matters for a per-token decode but
 does not explain this -- the whole chunk is one submission.
 
+## 分歧的精确范围（逐段 dump 实测）
+
+在真实 GGUF 上用临时插桩逐段对比 CPU/GPU（插桩已回退）：
+
+| 段 | n=36 (prefill, rows=36) | n=37 (decode, rows=1) |
+|---|---|---|
+| embedding (x 入口) | 一致 | 一致 |
+| normed = rms_norm(x) | **一致** | **不同** |
+| q = qk_norm_rope(normed) | **一致** | **不同** |
+| KV cache (k,v) | **一致** | 一致 |
+| attention 输出 | **一致** | **不同** |
+| logits | **一致** | **不同** |
+
+即：**分歧出在 rms_norm 之后、qkv 之前的 normed，而且只在 rows=1 的 decode
+chunk 里出现**。因为 normed = rms_norm(x)，KV 和 embedding 又都一致，所以 x
+（28 层残差累积）在第一个 decode chunk 内就已经错了 —— 而 prefill（rows=36）
+整条 x 流是对的。
+
+也就是说：rows>1 时残差流正确，rows=1 时错。最可能的原因是某个 recorder 在
+rows=1 时依赖了跨 chunk 残留的 region 内容（例如 `layout.x` 只写了 rows 行，
+而某个 in-place 的 residual add / 投影读到了上一 chunk 的残留，或 attention/scores
+region 的有效范围在 rows=1 时算错）。
+
+⚠️ 注意：我尝试逐层 dump `x` 时，读 `layout.x` region 起始位置拿到的是 prefix
+残留（第 0 行）而非当前 chunk 的 row，导致一度误读成"GPU base_position 跑偏"。
+逐层 dump 需要按 row 偏移读，不是按 region 起点。这是排查时的一个坑。
+
+下一步应当：在 forward_chunk 内按 row 偏移 dump 每层后的 x（rows=1 时取
+`layout.x + base_position*hidden`），定位第几层的残差开始偏离。
+
 ## 分歧定位：多 token prefill 逐位一致，单 token decode 全错
 
 用 `YUE2_DUMP_LOGITS`（临时插桩，已回退）在真实模型上对比 CPU/GPU 的 AR logits：
