@@ -1585,15 +1585,31 @@ fn decode_choice_fields(
                     indices.push(index + 1);
                 }
                 let candidate = present.len();
+                // `score_spans` returns `0..batch * q_count * c` entries, so
+                // `batch` is a *count* of samples rather than a sample index — it
+                // reads like an index and passing 0 yields no candidates at all.
+                // One sample, one query, `c` choices.
+                let all_valid = vec![true; candidate];
+                // `query_head.forward` reads `query_states` and `query_mask` as
+                // matching `[B, Q]` tensors, and here `query_row` is a *single*
+                // query's state, so the mask must be a single row too. Passing the
+                // full per-batch mask (one row per query) desynchronises the two
+                // and makes the first query of a multi-field group score as though
+                // its own row belonged to a different query.
+                let single_query_mask = vec![vec![query_mask
+                    .first()
+                    .and_then(|row| row.get(query_id))
+                    .copied()
+                    .unwrap_or(true)]];
                 let scored = super::spans::score_spans(
                     model,
                     text_states,
                     text_mask,
                     query_row,
-                    &query_mask[query_id..query_id + 1],
+                    &single_query_mask,
                     &indices,
-                    &[],
-                    0,
+                    &all_valid,
+                    1,
                     1,
                     candidate,
                 );

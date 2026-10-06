@@ -187,9 +187,21 @@ impl<'a> BoundaryProposer<'a> {
             rotary.apply(&mut end_all, boundary_len, boundary_dim);
         }
 
-        // 3. Project query states: start_query (q_dim -> boundary_dim).
-        //    Apply sigmoid to get the gate.
-        let mut gate = vec![0.0f32; batch * q_count * boundary_dim];
+        // 3. Project query states: start_query (q_dim -> gate_dim), then sigmoid.
+        //
+        // `gate_dim` is `boundary_dim / 2` when the rotary endpoint embedding is
+        // on, because that is the width `start_query_projection` is *loaded* at
+        // (see the constructor) — the rotary form is applied afterwards, on the
+        // projected gate, to reach `boundary_dim`. Sizing this buffer at
+        // `boundary_dim` unconditionally asks the projection to write twice what
+        // its bias can offset, which `apply_linear_full` refuses. The two widths
+        // coincide when the flag is off, so the only difference is this one.
+        let gate_dim = if self.enable_rotary_endpoints {
+            boundary_dim / 2
+        } else {
+            boundary_dim
+        };
+        let mut gate = vec![0.0f32; batch * q_count * gate_dim];
         for b in 0..batch {
             for q in 0..q_count {
                 apply_linear_full(
@@ -197,30 +209,32 @@ impl<'a> BoundaryProposer<'a> {
                         [..self.query_dim],
                     &self.start_query,
                     &self.start_query_bias,
-                    &mut gate[b * q_count * boundary_dim + q * boundary_dim..][..boundary_dim],
+                    &mut gate[b * q_count * gate_dim + q * gate_dim..][..gate_dim],
                 );
-                for v in &mut gate[b * q_count * boundary_dim + q * boundary_dim..][..boundary_dim]
-                {
+                for v in &mut gate[b * q_count * gate_dim + q * gate_dim..][..gate_dim] {
                     *v = 1.0 / (1.0 + (-*v).exp()); // sigmoid
                 }
             }
         }
         if self.rotary.is_some() {
             // repeat_interleave(2, dim=-1): [B, Q, d] -> [B, Q, 2*d]
-            let mut expanded = vec![0.0f32; batch * q_count * 2 * boundary_dim];
+            debug_assert_eq!(gate_dim * 2, boundary_dim);
+            let mut expanded = vec![0.0f32; batch * q_count * 2 * gate_dim];
             for b in 0..batch {
                 for q in 0..q_count {
-                    for k in 0..boundary_dim {
-                        expanded[b * q_count * 2 * boundary_dim + q * 2 * boundary_dim + 2 * k] =
-                            gate[b * q_count * boundary_dim + q * boundary_dim + k];
-                        expanded
-                            [b * q_count * 2 * boundary_dim + q * 2 * boundary_dim + 2 * k + 1] =
-                            gate[b * q_count * boundary_dim + q * boundary_dim + k];
+                    for k in 0..gate_dim {
+                        expanded[b * q_count * 2 * gate_dim + q * 2 * gate_dim + 2 * k] =
+                            gate[b * q_count * gate_dim + q * gate_dim + k];
+                        expanded[b * q_count * 2 * gate_dim + q * 2 * gate_dim + 2 * k + 1] =
+                            gate[b * q_count * gate_dim + q * gate_dim + k];
                     }
                 }
             }
             gate = expanded;
         }
+        // Both branches land on `boundary_dim` here: rotary doubles the half-width
+        // projection, and without it the projection is already full width.
+        debug_assert_eq!(gate.len(), batch * q_count * boundary_dim);
 
         // 4. Gather start/end at indices, multiply by gate (start only),
         //    take dot product, scale by 1/sqrt(d).
@@ -238,11 +252,12 @@ impl<'a> BoundaryProposer<'a> {
                         continue;
                     }
                     let mut dot = 0.0f32;
-                    let gate_stride = if self.rotary.is_some() {
-                        2 * boundary_dim
-                    } else {
-                        boundary_dim
-                    };
+                    // The gate is `boundary_dim` wide per query after the rotary
+                    // expansion (2 * gate_dim, with gate_dim == boundary_dim / 2)
+                    // and `boundary_dim` wide without it, so the stride is the same
+                    // either way. Treating the rotary case as `2 * boundary_dim`
+                    // overran the buffer by exactly the projection width.
+                    let gate_stride = boundary_dim;
                     let gate_base = b * q_count * gate_stride + q * gate_stride;
                     for k in 0..boundary_dim {
                         let s = start_all

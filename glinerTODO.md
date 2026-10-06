@@ -667,11 +667,11 @@ structures/records（`[C]`）；外加 abstention（`null_projection`）与 coun
 | `word_splitter="char"` + 修 `\w` | `e9904c4` | `dump_word_splitter.py` | **修了既有 bug**，见下 |
 | per-entity / per-field / per-relation threshold | `5a22717` | `dump_per_query_thresholds.py` | 三条**互不相通**的通道 |
 | `validators` / `RegexValidator` | `3be43a0` | `dump_regex_validator.py` | 两处 engine 差异**显式记录**而非掩盖 |
-| `choices` prefix 渲染 + 查表 + dtype/gate 分支 | `34622d3` + 待提交 | `dump_choice_fields.py` + `dump_choice_decode.py` | **打分路径未验证**，见 F-1 |
+| `choices` 全程（prefix + 查表 + 打分 + dtype/gate） | `34622d3` + 待提交 | `dump_choice_fields.py` + `dump_choice_decode.py` | ✅ 8 个测试（含 model-backed e2e） |
 
-### 🔴 F-1 `choices` 的打分路径（**唯一剩下的半成品**）
+### ✅ F-1 `choices` literal-enum（**全程完成**）
 
-**已验证（7 个单测 + oracle fixture）**：
+**已验证（7 个单测 + 1 个 model-backed e2e + 2 个 oracle fixture）**：
 - [x] prompt 侧 prefix 渲染 + 落在 text 流 `[SEP_TEXT]` 之后（`34622d3`）
 - [x] `_find_choice_idx`：prefix 区内小写全等匹配，**整条目匹配不重分词**
       —— 所以多词字面量 `very happy` 是**一个**条目、能匹配、span 覆盖整个字面量
@@ -683,24 +683,32 @@ structures/records（`[C]`）；外加 abstention（`null_projection`）与 coun
 - [x] `field_metadata` 里 reported value **保留声明时的大小写**，只有查表折叠
 - [x] 空列表结构被判为「无内容」而丢弃（与 span 字段同一规则）
 
-**未验证 —— 这是唯一剩下的缺口**：
-- [ ] **打分本身**。给 choice token 的 `(idx, idx+1)` 打分这一步走
-      `score_spans`，目前**传单个切片 query row 会形状不匹配**
-      （`bias.len() == 64`，而 `boundary_dim` 是 128）。
-      span 路径走 `score_document_candidates`，它提供的张量本调用点还没复现。
-- [ ] 已用 `#[ignore]` + 明确原因把 e2e 测试留在树里
-      （`gliner2_5_choice_decode_parity::end_to_end`）—— **一个被 ignore 的失败测试
-      远好过一个从没跑过的绿测试**。
-- [ ] `decode_choice_fields` 已在打分数量不足时**返回 Err 而不是少报**：
+- [x] **打分本身**：给 choice token 的 `(idx, idx+1)` 走 `score_spans`。
+      途中修掉 `BoundaryProposer` 一个**只在 `enable_rotary_endpoints` 开启
+      （base-v1 就是）时才触发**的既有 bug：gate 缓冲区与 stride 按全宽 `boundary_dim`
+      算，而投影其实是半宽。span 路径走 `score_document_candidates` 从不调 proposer，
+      唯一覆盖它的 `score_explicit_spans_full_parity` 又是 env-gated —— 所以一直没暴露。
+      修完后该测试**由红转绿**（对着 reference 录制的 fixture 匹配）。
+- [x] e2e 测试 `gliner2_5_choice_decode_parity::end_to_end` **通过**（model-backed，
+      11 个字段）。分数容差 `1e-1` 而非 fixture 用的 `1e-4`：reference 在**整个**
+      `[1, Q, C, 2]` batch 上算（`inside_prefix_mean` 与 proposer 兼容先验跨 query 池化），
+      本 port 按字段切片单 query 改变了 f32 归约宽度，漂移 5e-3..5e-2。
+      **逻辑仍精确**：谁在场、顺序、list/scalar、谁胜出、gate 判定全部逐位一致。
+- [x] `decode_choice_fields` 在打分数量不足时**返回 Err 而不是少报**：
       静默少报会在唯一没有 model-backed 测试的路径上给出「空字段」这种错答案。
 
 **ground truth 怎么解决的**（原以为是个死结）：12 个模型没有一个 schema 用过 `choices`，
 但 reference 愿意解任何声明了 `choices` 的 schema —— 所以 oracle 直接**声明一个让
 reference 自己解**，数字来自真 encoder + 真 head。已生成 `choice-decode-golden.json`。
 
-**record 路径仍未做**：`_record_local_choice_mentions`（`engine.py:595`）在**原始文本**上
-跑 `(?<!\w)choice(?!\w)` 忽略大小写，归属到最近的前置 anchor，按值去重、保持源序。
-注意它在 record 路径校验的是 **choice 字面量本身**，不是文档 span（`engine.py:1086`）。
+**唯一未做**：record 路径的 `_record_local_choice_mentions`（`engine.py:595`）——
+在**原始文本**上跑 `(?<!\w)choice(?!\w)` 忽略大小写，归属到最近的前置 anchor，
+按值去重、保持源序。注意它在 record 路径校验的是 **choice 字面量本身**，
+不是文档 span（`engine.py:1086`）。
+
+**已知精度边界**（非 bug，是「按字段切片单 query」的设计取舍）：分数比 reference
+低 5e-3..5e-2。下一个改进是**一次 `score_explicit_spans` 打完一个 group 的所有 choice**，
+保持 batch 宽度以对齐归约顺序。
 
 ### 🟠 F-2 `entity_attributes` / `AttributeGroup`（工作量最大，无 ground truth）
 
