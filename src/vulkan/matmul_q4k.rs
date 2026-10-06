@@ -82,7 +82,10 @@ pub fn matmul_q4_k(
         "Q4_K weight layout is rows × (n_in / 256) blocks × 144 bytes/block"
     );
     debug_assert!(input.len() >= rows * n_in, "input shorter than rows × n_in");
-    debug_assert!(output.len() >= rows * n_out, "output shorter than rows × n_out");
+    debug_assert!(
+        output.len() >= rows * n_out,
+        "output shorter than rows × n_out"
+    );
 
     let slot = runtime_slot();
     let mut guard = slot
@@ -100,8 +103,7 @@ pub fn matmul_q4_k(
         // the process, so this transmute is sound — the runtime will drop on
         // first error or normal program shutdown, well within the
         // VulkanContext's lifetime.
-        let static_ctx: &'static VulkanContext =
-            unsafe { std::mem::transmute(context) };
+        let static_ctx: &'static VulkanContext = unsafe { std::mem::transmute(context) };
         match BatchedLinearRuntime::new(
             static_ctx,
             new_max_rows,
@@ -127,10 +129,15 @@ pub fn matmul_q4_k(
     }
 
     let runtime = guard.as_mut().expect("runtime was just installed");
-    match runtime
-        .runtime
-        .matmul_rows(weight, GpuWeightFormat::Q4_K, input, rows, n_in, n_out, output)
-    {
+    match runtime.runtime.matmul_rows(
+        weight,
+        GpuWeightFormat::Q4_K,
+        input,
+        rows,
+        n_in,
+        n_out,
+        output,
+    ) {
         Ok(()) => Ok(()),
         Err(error) => {
             // UnsupportedShape is a per-call failure: the GPU stays alive for

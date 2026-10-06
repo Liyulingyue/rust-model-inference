@@ -106,9 +106,7 @@ impl<'a> Kernel for Q4_KKernel<'a> {
             use std::sync::atomic::Ordering;
             static Q4K_GPU_DISABLED: std::sync::atomic::AtomicBool =
                 std::sync::atomic::AtomicBool::new(false);
-            if !Q4K_GPU_DISABLED.load(Ordering::Relaxed)
-                && crate::ops::gpu_matmul_active()
-            {
+            if !Q4K_GPU_DISABLED.load(Ordering::Relaxed) && crate::ops::gpu_matmul_active() {
                 if let Some(ctx) = crate::ops::get_vulkan_context() {
                     if ith == 0 {
                         match crate::vulkan::matmul_q4k::matmul_q4_k(

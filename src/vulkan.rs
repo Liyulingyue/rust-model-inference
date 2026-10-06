@@ -13,6 +13,8 @@
 //! memory; discrete GPUs later want a staging → DEVICE_LOCAL upload path.
 
 #[cfg(feature = "vulkan")]
+pub(crate) mod matmul_q4k;
+#[cfg(feature = "vulkan")]
 pub(crate) mod ops;
 #[cfg(feature = "vulkan")]
 pub(crate) mod qwen3;
@@ -20,8 +22,6 @@ pub(crate) mod qwen3;
 pub(crate) mod qwen35;
 #[cfg(feature = "vulkan")]
 mod zimage_probe;
-#[cfg(feature = "vulkan")]
-pub(crate) mod matmul_q4k;
 #[cfg(feature = "vulkan")]
 #[doc(hidden)]
 pub use ops::{dump_dispatch_trace, run_batched_matmul_check, run_qwen3_operator_check};
@@ -347,8 +347,7 @@ impl VulkanContext {
                             shader_float16: candidate.shader_float16,
                             integer_dot_product: candidate.integer_dot_product,
                             limits: candidate.limits,
-                            is_software_icd: candidate.device_type
-                                == vk::PhysicalDeviceType::CPU,
+                            is_software_icd: candidate.device_type == vk::PhysicalDeviceType::CPU,
                             submission_count: std::sync::atomic::AtomicU64::new(0),
                             completed_gen: std::sync::atomic::AtomicU64::new(0),
                         });
