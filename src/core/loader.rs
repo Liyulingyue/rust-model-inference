@@ -421,6 +421,7 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             | "nomic-bert-moe"
             | "mistral3"
             | "ernie_image"
+            | "audiocpp"
     ) {
         return Err(format!("Unsupported architecture: {arch}"));
     }
@@ -460,6 +461,33 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             n_head_kv: 32,
             n_embd_head: 128,
             n_ff: 12288,
+            n_ctx: 0,
+            vocab_size: 0,
+            rope_freq_base: 0.0,
+            norm_eps: 1e-6,
+        });
+    }
+    // AuK / audiocpp arch (1.5B Flux2Edit audio DiT). Detection is by
+    // tensor-name presence since the GGUF mis-tags arch as "audiocpp".
+    let auk_by_arch = arch == "audiocpp";
+    let auk_by_tensor = source
+        .tensor_info("transformer.transformer_blocks.0.attn_norm_x.linear.weight")
+        .is_some()
+        && source
+            .tensor_info("transformer.single_transformer_blocks.0.attn_norm.linear.weight")
+            .is_some()
+        && source
+            .tensor_info("transformer.audio_embed.linear.weight")
+            .is_some();
+    if auk_by_arch || auk_by_tensor {
+        return Ok(ModelConfig {
+            n_embd: 1536,
+            n_layer: 10,
+            n_head: 24,
+            n_head_kv: 24,
+            n_embd_head: 64,
+            // n_ff = packed gate+up (6144) + down (3072) summed = 9216
+            n_ff: 9216,
             n_ctx: 0,
             vocab_size: 0,
             rope_freq_base: 0.0,

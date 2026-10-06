@@ -96,25 +96,68 @@ fn main() {
         eprintln!("{error}");
         std::process::exit(2);
     });
-    app::validate_cli_options(&options).unwrap_or_else(|error| {
-        eprintln!("{error}");
-        std::process::exit(2);
-    });
+    // Early AuK arch detection (must run BEFORE validate_cli_options because
+    // z_image_cli_options errors out when --text-encoder is missing).
+    let early_auk_arch: Option<Arc<dyn TensorSource>> = if !options.model.as_os_str().is_empty()
+        && options.text_encoder.is_none()
+        && options.vae.is_some()
+        && options.out.is_some()
+    {
+        let arch_probe: Arc<dyn TensorSource> =
+            Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+        let arch_name = arch_probe
+            .metadata("general.architecture")
+            .and_then(MetaValue::to_string_val)
+            .unwrap_or_default();
+        let is_auk = arch_name == "audiocpp"
+            || arch_probe
+                .tensor_info("transformer.transformer_blocks.0.attn_norm_x.linear.weight")
+                .is_some();
+        if is_auk {
+            Some(arch_probe)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    // If we already identified the model as AuK, skip the diff-model validators
+    // (z_image_cli_options, dreamx_cli_options, yue2_cli_options) that would
+    // otherwise error out on missing --text-encoder / --dreamx / --yue2.
+    if early_auk_arch.is_some() {
+        // AuK's contract is model + text-encoder (optional, Qwen2.5-Omni for
+        // TTS) + vae + prompt + out + steps + (sample_rate). We have all
+        // those except the optional text-encoder and the no-conflict check
+        // that the diff-model validators would do. Skip them.
+    } else {
+        app::validate_cli_options(&options).unwrap_or_else(|error| {
+            eprintln!("{error}");
+            std::process::exit(2);
+        });
+    }
     let prefill_batch_size = options
         .effective_prefill_batch_size()
         .unwrap_or_else(|error| {
             eprintln!("{error}");
             std::process::exit(2);
         });
-    let dreamx_options = app::dreamx_cli_options(&options).unwrap_or_else(|error| {
-        eprintln!("{error}");
-        std::process::exit(2);
-    });
-    let yue2_options = app::yue2_cli_options(&options).unwrap_or_else(|error| {
-        eprintln!("{error}");
-        std::process::exit(2);
-    });
-    let z_image_options = if yue2_options.is_none() {
+    let dreamx_options = if early_auk_arch.is_some() {
+        None
+    } else {
+        app::dreamx_cli_options(&options).unwrap_or_else(|error| {
+            eprintln!("{error}");
+            std::process::exit(2);
+        })
+    };
+    let yue2_options = if early_auk_arch.is_some() {
+        None
+    } else {
+        app::yue2_cli_options(&options).unwrap_or_else(|error| {
+            eprintln!("{error}");
+            std::process::exit(2);
+        })
+    };
+    let z_image_options = if yue2_options.is_none() && early_auk_arch.is_none() {
         app::z_image_cli_options(&options).unwrap_or_else(|error| {
             eprintln!("{error}");
             std::process::exit(2);
@@ -201,6 +244,80 @@ fn main() {
         DispatchMode::Model => {}
     }
 
+    // AuK dispatch (MUST run before the ERNIE / Z-Image branches below, since
+    // --vae + --out + --model without --text-encoder otherwise errors out as a
+    // malformed Z-Image invocation; we probed the arch earlier).
+    if let Some(arch_probe) = early_auk_arch {
+        if options.gpu {
+            ops::enable_gpu();
+        }
+        let vae: Arc<dyn TensorSource> = Arc::from(open_or_exit(
+            options.vae.as_deref().expect("AuK VAE required"),
+            ComponentRole::Llm,
+        ));
+        let text = match options.text_encoder.as_deref() {
+            Some(path) => Some(Arc::<dyn TensorSource>::from(open_or_exit(
+                path,
+                ComponentRole::Llm,
+            ))),
+            None => None,
+        };
+        app::run_or_exit(app::run_auk_cli(
+            arch_probe,
+            vae,
+            text,
+            options.prompt.as_deref().unwrap_or(""),
+            options.steps.unwrap_or(32),
+            options.resolution.unwrap_or(24000),
+            options.seed.unwrap_or(0),
+            options.out.clone().expect("AuK --out required"),
+            n_threads,
+        ));
+        return;
+    }
+
+    // AuK / audiocpp dispatch: --model (DiT) + --vae + optional --text-encoder
+    // for Qwen2.5-Omni conditioning + --text for the prompt.
+    if !options.model.as_os_str().is_empty() && options.vae.is_some() && options.out.is_some() {
+        let arch_probe: Arc<dyn TensorSource> =
+            Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+        let is_auk = arch_probe
+            .metadata("general.architecture")
+            .and_then(MetaValue::to_string_val)
+            .map(|v| v == "audiocpp")
+            .unwrap_or(false)
+            || arch_probe
+                .tensor_info("transformer.transformer_blocks.0.attn_norm_x.linear.weight")
+                .is_some();
+        if is_auk {
+            if options.gpu {
+                ops::enable_gpu();
+            }
+            let vae: Arc<dyn TensorSource> = Arc::from(open_or_exit(
+                options.vae.as_deref().expect("AuK VAE required"),
+                ComponentRole::Llm,
+            ));
+            let text = match options.text_encoder.as_deref() {
+                Some(path) => Some(Arc::<dyn TensorSource>::from(open_or_exit(
+                    path,
+                    ComponentRole::Llm,
+                ))),
+                None => None,
+            };
+            app::run_or_exit(app::run_auk_cli(
+                arch_probe,
+                vae,
+                text,
+                options.prompt.as_deref().unwrap_or(""),
+                options.steps.unwrap_or(32),
+                options.resolution.unwrap_or(24000),
+                options.seed.unwrap_or(0),
+                options.out.clone().expect("AuK --out required"),
+                n_threads,
+            ));
+            return;
+        }
+    }
     // ERNIE-Image / ERNIE-Image-Turbo dispatch (MUST run before the Z-Image
     // branch below, since both share --model/--text-encoder/--vae; the GGUF
     // signature distinguishes them -- the unsloth export mis-tags
