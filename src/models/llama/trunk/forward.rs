@@ -2838,6 +2838,14 @@ pub(crate) fn attention_head_f16(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Per-query attention helper kept around as a stable entry point
+/// for callers that want to step the per-query attention math
+/// without going through `forward_chunk_batched_real`. Currently
+/// unused (the chunked path bypasses it); kept `pub(crate)` so
+/// future per-query callers (e.g. a debug-only incremental
+/// decoder) can reuse the exact same softcap + sliding-window
+/// wiring without duplicating it.
+#[allow(dead_code)]
 pub(crate) fn run_attention_per_query(
     pool: &Arc<ComputePool>,
     q: &[f32],
@@ -2966,7 +2974,12 @@ attention_head_f16(
 /// (no SIMD intrinsic for tanh on x86_64 stable); per-layer call cost is
 /// `n_layer * n_head * n_cached` f32 ops in attention and `vocab` ops in
 /// the LM head.
-pub(crate) fn softcap_inplace(scores: &mut [f32], cap: f32) {
+/// Public re-export so future models with attn / final logit
+/// softcapping (Gemma-3+, Mistral-derived variants) can reuse the
+/// exact math without duplicating it. Plain llama / mistral / qwen
+/// keep their logits byte-identical (the function is a no-op when
+/// `cap == 0`).
+pub fn softcap_inplace(scores: &mut [f32], cap: f32) {
     if cap <= 0.0 {
         return;
     }
@@ -2987,7 +3000,9 @@ pub(crate) fn softcap_inplace(scores: &mut [f32], cap: f32) {
 /// Used by the F32 attention loops in this trunk; the F16 path
 /// ([`attention_head_f16`]) handles both inline because its online
 /// softmax can't post-correct.
-pub(crate) fn apply_attn_pre_softmax_inplace(
+/// Public re-export so future models with sliding-window
+/// attention + logit softcapping can reuse the same prep helper.
+pub fn apply_attn_pre_softmax_inplace(
     scores: &mut [f32],
     n_cached: usize,
     sliding_window: usize,
