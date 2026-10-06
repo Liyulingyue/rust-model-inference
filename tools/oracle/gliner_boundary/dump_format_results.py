@@ -34,8 +34,9 @@ span as a tuple versus as a dict therefore produces a different payload shape,
 which is the single most surprising thing here and is why both are pinned.
 
 **Empty is not absent.** An empty list under key `entities` becomes `{}`; under
-any other key it stays `[]`. A falsy struct field becomes `None` in
-`format_struct` but is dropped in `format_entity_dict`.
+any other key it stays `[]`. A falsy scalar field becomes `null` in both struct
+formatters — `spans or None` and an explicit `None` agree, so the two formatters
+are *not* distinguished by falsy handling.
 
 **Requested relations are always present.** Every name in
 `requested_relations` gets an entry, empty list if nothing was found, and they
@@ -209,6 +210,24 @@ CASES = [
         },
         {"requested_relations": [], "classification_tasks": []},
     ),
+    # Two spans at the **same** offsets but different casing: this is the case
+    # that actually collapses, and it pins that the survivor is the *first*
+    # occurrence rather than the higher-scoring one. The value is appended, never
+    # replaced, so the lower confidence (0.4) is what ships. The offsets being
+    # in the dedup key is what makes this collapse at all — drop them and the
+    # case stops deduping, which is how the property is verified.
+    (
+        "same_offsets_dedupe_and_the_first_one_wins",
+        {
+            "entities": [
+                {"person": [
+                    span_tuple("Marie", 0.4, 0, 5),
+                    span_tuple("MARIE", 0.9, 0, 5),
+                ]}
+            ]
+        },
+        {"requested_relations": [], "classification_tasks": []},
+    ),
     # An empty-text span is skipped outright by the tuple and dict branches
     # (`if text and ...`), so it never appears in the output.
     (
@@ -241,11 +260,13 @@ CASES = [
         {"record": {"author": "", "role": None}},
         {"requested_relations": [], "classification_tasks": []},
     ),
-    # The same falsy fields through `format_entity_dict`, where a falsy value
-    # is passed straight through instead — so the output differs by which
-    # formatter the key's shape selected.
+    # The same falsy fields through `format_entity_dict`. The two branches read
+    # differently (`spans or None` versus an explicit `None`) but agree: a
+    # falsy value becomes null either way, so the empty string is null here too.
+    # The two formatters are not distinguished by falsy handling at all — that
+    # was the first guess, and the oracle contradicted it.
     (
-        "falsy_entity_fields_pass_through_instead",
+        "falsy_entity_fields_become_none_too",
         {"entities": [{"author": "", "role": None}]},
         {"requested_relations": [], "classification_tasks": []},
     ),
@@ -327,11 +348,25 @@ def main() -> None:
             requested_relations=options.get("requested_relations"),
             classification_tasks=options.get("classification_tasks"),
         )
+        # The stored `results` is the *resolved* input, not the sentinels, so a
+        # reader of the fixture sees the pairs the reference actually saw. The
+        # sentinel only exists to survive the round trip above.
+        resolved = results
+        if keep_lists:
+            resolved = json.loads(encoded)
         cases.append({
             "name": name,
-            "results": results,
+            "results": resolved,
             "options": options,
             "formatted": formatted,
+            # JSON has no `tuple`, and the reference's dispatcher branches on
+            # exactly that (`isinstance(value[0], tuple)`). One case's whole
+            # point is a pair that stays a *list*, so the fixture records which
+            # nested pairs are tuples and which are lists, and the port is told
+            # rather than guessing from shape. Without this the port cannot
+            # reproduce the case at all: `["a", 0.9]` is the same JSON whether
+            # the reference saw a tuple or a list.
+            "tuple_pairs": keep_lists is False,
         })
 
     args.out.parent.mkdir(parents=True, exist_ok=True)

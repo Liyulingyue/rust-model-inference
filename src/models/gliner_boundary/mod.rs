@@ -23,6 +23,7 @@
 pub mod candidate_encoder;
 pub mod content_pooler;
 pub mod extract;
+pub mod formatting;
 pub mod forward;
 pub mod loader;
 pub mod long_document;
