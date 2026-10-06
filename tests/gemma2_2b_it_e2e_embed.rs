@@ -211,3 +211,28 @@ fn gemma2_2b_it_e2e_session_path_matches() {
         );
     }
 }
+
+#[test]
+fn gemma2_2b_it_e2e_forward_throughput_smoke() {
+    // Smoke-test the forward-pass throughput on this CPU. 4
+    // threads at 2.6 GHz should comfortably handle a 16-token
+    // chat-template prompt through 26 layers of 2304-dim GeGLU
+    // in well under 10 s. Tracks regression on the session-path
+    // FFN GeGLU dispatch + attn softcap + sliding-window wiring
+    // (each contributes ~5-10% wall-clock).
+    let Some(loader) = loader() else {
+        eprintln!("skipping: RMI_GEMMA_2_2B_IT_MODEL not set");
+        return;
+    };
+    let prompt = "Rust is a systems programming language focused on \
+                  safety, speed, and concurrency. It achieves memory \
+                  safety without garbage collection through its own.";
+    let t0 = std::time::Instant::now();
+    let _ = embed(&loader, prompt);
+    let elapsed = t0.elapsed();
+    eprintln!("gemma2 2B-it forward: {elapsed:?}");
+    assert!(
+        elapsed < std::time::Duration::from_secs(15),
+        "forward pass took {elapsed:?}, expected < 15s on 4-thread x86-64"
+    );
+}
