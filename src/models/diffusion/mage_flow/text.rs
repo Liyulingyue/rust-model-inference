@@ -1,11 +1,50 @@
 use super::{dit::trace, CONTEXT_DIM};
 use crate::core::scratchpad::{KvFormat, KvLifecycle};
-use crate::core::tokenizer::EncodeOptions;
+use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
+use crate::core::{loader::GGUFLoader, tensor::GGMLType, thread_pool::ComputePool};
+use crate::models::qwen3::vision::VisionEncoder;
 use crate::models::qwen3::{Qwen3Input, Qwen3Model, Qwen3Session};
+use std::sync::Arc;
 
 const SYSTEM: &str = "Describe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:";
 const EDIT_SYSTEM: &str = "Describe the key features of the input image (color, shape, size, texture, objects, background), then explain how the user's text instruction should alter or modify the image. Generate a new image that meets the user's requirements while maintaining consistency with the original input where appropriate.";
 const IMAGE: &str = "<|vision_start|><|image_pad|><|vision_end|>";
+
+pub fn load_text(path: &std::path::Path, pool: Arc<ComputePool>) -> Result<Qwen3Model, String> {
+    let source = Arc::new(GGUFLoader::from_file(path)?);
+    if source
+        .tensors()
+        .iter()
+        .any(|t| !matches!(t.ggml_type, GGMLType::BF16 | GGMLType::F32))
+    {
+        return Err("Mage text conditioning requires lossless BF16/F32 tensors".into());
+    }
+    let tokenizer = Arc::new(BPETokenizer::from_gguf_metadata(|k| {
+        source.metadata(k).cloned()
+    })?);
+    Qwen3Model::from_source(source, tokenizer, pool)
+}
+pub fn load_vision<'a>(
+    source: &'a GGUFLoader,
+    pool: Arc<ComputePool>,
+) -> Result<VisionEncoder<'a>, String> {
+    if source
+        .tensors()
+        .iter()
+        .any(|t| t.ggml_type != GGMLType::F32)
+    {
+        return Err("Mage vision requires lossless F32 mmproj tensors".into());
+    }
+    let mut model = VisionEncoder::from_source(source, pool)?;
+    if model.config.n_embd != 1024
+        || model.config.n_layer != 24
+        || model.config.projection_dim != 2560
+    {
+        return Err("Expected released Qwen3-VL 4B vision model".into());
+    }
+    model.precompute_lossless();
+    Ok(model)
+}
 
 pub struct ReferenceFeatures {
     pub embeddings: Vec<f32>,

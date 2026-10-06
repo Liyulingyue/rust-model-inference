@@ -767,7 +767,7 @@
         "einops": "0.8.2"
       }
     },
-    "source_validation": "Current refactor: all 20 code files match the local source SHA256 manifest; fresh strict-scalar binary reran all 16 Rust trace comparisons and all three edit CLI RGB regressions. See refactor_regression."
+    "source_validation": "Previous independent-bin refactor: all 20 code files matched its source manifest and reran 16 Rust trace comparisons plus three edit RGB regressions. See refactor_regression for that snapshot; current main-CLI integration is recorded separately in cli_integration."
   },
   "limitations": [
     "Fixed F32 noise replaces official GaussianShading RNG.",
@@ -865,5 +865,83 @@
       "edit-cli": "PASS: 16x16 PNG, all 768 RGB bytes equal to the baseline; no trace"
     },
     "generated_rgb": "PASS: 768 RGB bytes identical to the verified baseline"
+  },
+  "cli_integration": {
+    "baseline_main": "b4c40a4",
+    "production_entry": "src/main.rs -> app::run_mage_flow_cli in src/app/diffusion.rs",
+    "removed_entry": "src/bin/mage-flow.rs",
+    "raw_component_entry": "examples/mage_flow_trace.rs (no generate/edit modes)",
+    "contract": "Original BF16/F32 dtype guards, F32 activations/KV, fixed F32 noise, numerical operations and no-clobber publication retained.",
+    "local_checks": {
+      "cli": [
+        "ok. 39 passed; 0 failed; 0 ignored; 0 measured; 1228 filtered out; finished in 0.00s"
+      ],
+      "diffusion_and_atomic_publication": [
+        "ok. 6 passed; 0 failed; 0 ignored; 0 measured; 1261 filtered out; finished in 0.02s"
+      ],
+      "actual_cli_routing": [
+        "ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.66s",
+        "ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s"
+      ],
+      "mage_flow": [
+        "ok. 6 passed; 0 failed; 0 ignored; 0 measured; 1261 filtered out; finished in 0.00s"
+      ],
+      "qwen3": [
+        "ok. 104 passed; 0 failed; 9 ignored; 0 measured; 1154 filtered out; finished in 0.12s"
+      ],
+      "shared_attention": [
+        "ok. 5 passed; 0 failed; 0 ignored; 0 measured; 1262 filtered out; finished in 0.00s"
+      ],
+      "bitnet_scalar": [
+        "ok. 4 passed; 0 failed; 0 ignored; 0 measured; 1263 filtered out; finished in 0.00s"
+      ],
+      "build": "release-fast, strict scalar Rust flags, parity-trace,vulkan, main CLI and mage_flow_trace example compiled; --help passed for both",
+      "cargo_targets": "no mage-flow binary; raw mage_flow_trace example registered",
+      "format": "cargo fmt --check and git diff --check passed",
+      "full_suite": "not run; focused checks do not imply full-suite success",
+      "baseline_repairs": "Made only AVX2 functions conditional on x86_64 so scalar I2_S prepacking compiles on ARM. Updated the stale Z-Image GPU rejection test to match the existing upstream GPU support.",
+      "default_build_check": "cargo check --locked --profile release-fast --bin rust-model-inference --example mage_flow_trace passed on macOS ARM with strict scalar Rust flags and no features"
+    },
+    "target_host_reverification": {
+      "status": "not_run",
+      "reason": "User confirmed the target machine is powered off. SSH connections to 36.150.116.206:32963 closed before key exchange; no current source was uploaded or run on the host."
+    },
+    "historical_precision": "local, remote and refactor_regression above are previous adaptation/refactor evidence, not new main-CLI numerical evidence.",
+    "source_sha256": {
+      "examples/mage_flow_trace.rs": "053277b58fd0701f1b83cf4d467156c8c9658f99c95f316baa1c2fb00af42ff4",
+      "src/app/cli/parse.rs": "1a6af51b162b7f12b1ac992838c220b2a52d84c3def5edd32d3b885afd99089e",
+      "src/app/cli/tests.rs": "c671a4117112d8ba38c6c7cc5573c8d5344bbd7f003ae5dc7adb4c0707e9151b",
+      "src/app/cli/types.rs": "78281977e547e28e5de84cde60ee14b1d7d4cc64cb06a63f50790740742def5d",
+      "src/app/cli/validate.rs": "2a4f79fffc4ac447dc10817c430ac0383ffab6771bb8c90a283931ffeb4e92de",
+      "src/app/diffusion.rs": "eb62dbd2ad62422133b460804d71699aac11d51c24727cde6efb6f428cad494b",
+      "src/app/mod.rs": "ca4fa9a41ea73205a173daa0cd365a7e1221c24c45762a0a341a057df1e93358",
+      "src/lib.rs": "cf6776001d2cab1fd3095ff107d95eff779e472a9fe4f78fb2759e122ebf2f93",
+      "src/main.rs": "fba31225704573eb74a54fcc2a564b6c5ca6ca9473e944ccfafd87c54d7e9597",
+      "src/models/bert_family/compute.rs": "cfd1f2c9d0673643acce8493e61a3a2c6f6b64936ee5c2e372754bae5087ab43",
+      "src/models/bitnet/forward_avx2.rs": "c948a2d8560bcc97ad253240c3ca8c5d06df9cbd891eaf6d4d6aaa9d2b9eeb03",
+      "src/models/diffusion/dreamx/kernels.rs": "84089351c7848c0801b7055eb3dc8c3d05cc5bff87d46a220b1b3d27f928759f",
+      "src/models/diffusion/mage_flow/dit.rs": "7f0eccfef079f9161c00edc3e9e408374479a7300090f359752784cda94e6a12",
+      "src/models/diffusion/mage_flow/mod.rs": "aa8f5f07d12583366f369dbf230ea13e75c667e00506aee6dfcfca63dd933bf5",
+      "src/models/diffusion/mage_flow/text.rs": "f06f5323061116ed9fabcc778f54c5bf3cd0f4fd9db7a8d033fef058711f9293",
+      "src/models/diffusion/mage_flow/vae.rs": "578a3183c576a0e90953fd4d4fbf95c6e48541d63ae115073fe528e57f1d3676",
+      "src/models/diffusion/mod.rs": "30f1bd1a171979836317a0048a8c915217470001bc23bc5a9b4f83602c5ed9ab",
+      "src/models/gemma4/vision/mod.rs": "b430346b3fe6b0897030e9f0b92a49526f0f9416099717d00c8355b45da73ef9",
+      "src/models/qwen3/trunk/prefill.rs": "6a62ee75c52156979ae55c2a2aff03c9156df15d9c085bc3864b625d762bcf90",
+      "src/models/qwen3/trunk/session.rs": "12907c3f976c3840a7317c2ae11197065137666dd82706f9b8c37ed0e36f865a",
+      "src/models/qwen3/trunk/tests.rs": "4023ad0028b21eceda5c33aec47f0595fe972615c90ca29f3f0d91006166c844",
+      "src/models/qwen3/vision/mod.rs": "84f3a3caf6f5ab30502306925db582c864415d1046fce30cc9c96e98f0b4d3f4",
+      "src/ops/float.rs": "8cd31320681dd8cf4d1b6d9b8f2aa17339b3b654ab836be493e4f252782eed49",
+      "src/ops/rope/mrope.rs": "250cb2dedfbae520cc129ea25ceaca184be3caa5280bc1db1d169462a0f3aebf",
+      "tests/mage_flow_cli.rs": "28b0e6856c2076d65f6f8d655d5bfb22fed782cdeff8d29aae3c5fb2969496d0",
+      "tools/converter/mage_flow/convert_mage_flow.py": "1be0d2e9c07c33682cf57d88267b9f02c05ad6cb4269991f43b91a6c8de512be",
+      "tools/oracle/mage_flow/scalar.c": "8dfee92154c3637ff0756d12afb7471a5647714e1f94ca48f98a6870134dfd1e",
+      "tools/oracle/mage_flow/scalar.py": "5fbe9cd6efb2c0678897c50d18bc1158e37a94a08fb6354e3f9cf68a859ee62c",
+      "tools/oracle/mage_flow/trace.py": "df5fa99fd1de4581cf3a1040dcdf6d3d4734167578be68c018c2b76ae6405770"
+    },
+    "verified_at_utc": "2026-10-06T15:54:36.656968+00:00",
+    "binary_sha256": {
+      "target/release-fast/rust-model-inference": "973683d998b582680d6faec9ddb1f0bb6993e7f11842899d55099dcec4818b5c",
+      "target/release-fast/examples/mage_flow_trace": "b128de122cbd40d198b794011ddfe4b9adb16f1140212e64f779a2063d744384"
+    }
   }
 }

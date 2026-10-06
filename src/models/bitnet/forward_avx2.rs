@@ -63,8 +63,6 @@
 //! identical** for any `(weights, x)` pair. Tested in
 //! `forward_avx2.rs`'s `bitlinear_avx2_matches_scalar` test.
 
-#![cfg(target_arch = "x86_64")]
-
 use crate::ops::kernel::i2_s::QK_I2_S;
 
 /// Dequant one I2_S block (32 bytes → 128 int8 ternary values).
@@ -147,6 +145,7 @@ pub fn dequant_i2_s_to_i8(bytes: &[u8], n_in: usize, n_out: usize, out: &mut [i8
 /// produced by [`dequant_i2_s_row_to_i8`] or pre-packed at
 /// model-load time). `x_q_i8` is `n_in` int8 activations. Returns
 /// the scalar sum `Σ_i w[i] * x_q[i]` as f32.
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2", enable = "fma")]
 unsafe fn dot_row_avx2(weights_row_i8: &[i8], x_q_i8: &[i8], n_in: usize) -> f32 {
     use std::arch::x86_64::*;
@@ -213,6 +212,7 @@ unsafe fn dot_row_avx2(weights_row_i8: &[i8], x_q_i8: &[i8], n_in: usize) -> f32
 /// directly from I2_S bytes to int8, skipping the f32 detour that
 /// the scalar reference uses internally — both paths map the same
 /// 2-bit codes to the same ternary values.
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2", enable = "fma")]
 pub unsafe fn bitlinear_forward_avx2(
     weights_i2s: &[u8],
@@ -251,6 +251,7 @@ pub unsafe fn bitlinear_forward_avx2(
 /// model's [`BitLinearWeightsPacked`] slots → call this function
 /// in the forward loop. Zero per-call dequant; only the SIMD dot
 /// runs.
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2", enable = "fma")]
 pub unsafe fn bitlinear_forward_avx2_packed(
     weights_i8: &[i8],
@@ -267,7 +268,7 @@ pub unsafe fn bitlinear_forward_avx2_packed(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_arch = "x86_64"))]
 mod tests {
     use super::*;
     use crate::models::bitnet::bitlinear_forward;

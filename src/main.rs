@@ -13,7 +13,7 @@ use rust_model_inference::DreamXConfig;
 use rust_model_inference::MetaValue;
 use rust_model_inference::TensorSource;
 
-const USAGE: &str = "Usage: rust-model-inference --model <path.gguf-or-ggufrs> [--prompt ...] [--threads N] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--max-context N (default 8192)] [--repetition-penalty α (default 1.0 = disabled)] [--serve [--host 0.0.0.0] [--port 8080]]\n\nRerank mode: --rerank --rerank-query <TEXT> [--rerank-doc <TEXT> ...] | [--rerank-documents <FILE>] [--rerank-instruction <TEXT>] [--rerank-max-tokens N] | cross-encoder scoring; backend picked by GGUF arch (jina-bert-v2 + cls.weight/cls.bias → bert forward, qwen3 + cls.output.weight + pooling_type=4 → qwen3 trunk + 2-class head); one sigmoid'd score per document in [0, 1]\n\nJEV mode: --jev --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | single-forward-pass decision scoring over candidate labels A/B/C/…\n\nJEV grouped: --jev --jev-multi [--jev-option <pos> --jev-option <neg> ...] (pairs) or --jev-block <label> --jev-option <a> [--jev-option <b> ...] (blocks)\n\nServer mode: --serve [--host 0.0.0.0] [--port 8080] --model <path> [--mmproj ...] [--tts] [--embedding]\n\nCLM mode: --jev --clm-head <clm-heads.gguf> --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | cosine scoring via CLM projection heads on the chosen encoder (state = context, blank line, question; candidates verbatim\n\nGLiNER2 mode: --jev --gliner2-decide --model <gliner2-decide.gguf> --jev-context <text> [--gliner2-schema <json> | --jev-question <name> --jev-option <a> [--jev-option <b> ...]] | one DeBERTa-v3 pass scores every label of every task; --gliner2-schema takes a classify_text-shaped mapping: {intent: [a, b], aspects: {labels: [x], multi_label: true, cls_threshold: 0.4}}";
+const USAGE: &str = "Usage: rust-model-inference --model <path.gguf-or-ggufrs> [--prompt ...] [--threads N] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--max-context N (default 8192)] [--repetition-penalty α (default 1.0 = disabled)] [--serve [--host 0.0.0.0] [--port 8080]]\n\nMage-Flow: --model <dit.gguf> --text-encoder <text.gguf> --vae <vae.gguf> --prompt TEXT --out image.png [--resolution N | --width N --height N] [--steps N --cfg N --seed N --noise fixed.f32] [--image reference.png --mmproj vision.gguf --reference another.png]\n\nRerank mode: --rerank --rerank-query <TEXT> [--rerank-doc <TEXT> ...] | [--rerank-documents <FILE>] [--rerank-instruction <TEXT>] [--rerank-max-tokens N] | cross-encoder scoring; backend picked by GGUF arch (jina-bert-v2 + cls.weight/cls.bias → bert forward, qwen3 + cls.output.weight + pooling_type=4 → qwen3 trunk + 2-class head); one sigmoid'd score per document in [0, 1]\n\nJEV mode: --jev --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | single-forward-pass decision scoring over candidate labels A/B/C/…\n\nJEV grouped: --jev --jev-multi [--jev-option <pos> --jev-option <neg> ...] (pairs) or --jev-block <label> --jev-option <a> [--jev-option <b> ...] (blocks)\n\nServer mode: --serve [--host 0.0.0.0] [--port 8080] --model <path> [--mmproj ...] [--tts] [--embedding]\n\nCLM mode: --jev --clm-head <clm-heads.gguf> --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | cosine scoring via CLM projection heads on the chosen encoder (state = context, blank line, question; candidates verbatim\n\nGLiNER2 mode: --jev --gliner2-decide --model <gliner2-decide.gguf> --jev-context <text> [--gliner2-schema <json> | --jev-question <name> --jev-option <a> [--jev-option <b> ...]] | one DeBERTa-v3 pass scores every label of every task; --gliner2-schema takes a classify_text-shaped mapping: {intent: [a, b], aspects: {labels: [x], multi_label: true, cls_threshold: 0.4}}";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DispatchMode {
     DreamX,
@@ -96,40 +96,51 @@ fn main() {
         eprintln!("{error}");
         std::process::exit(2);
     });
-    // Early AuK arch detection (must run BEFORE validate_cli_options because
-    // z_image_cli_options errors out when --text-encoder is missing).
-    let early_auk_arch: Option<Arc<dyn TensorSource>> = if !options.model.as_os_str().is_empty()
-        && options.text_encoder.is_none()
-        && options.vae.is_some()
-        && options.out.is_some()
+    // Resolved thread count for both LLM ComputePool and rayon global pool.
+    let available_threads = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1);
+    let n_threads = app::resolve_thread_count(options.threads, available_threads);
+    // Select Mage before Z-Image's shared-component validation rejects edit inputs.
+    let early_source: Option<Arc<dyn TensorSource>> = if dispatch_mode(&options)
+        == DispatchMode::Model
+        && !options.model.as_os_str().is_empty()
+        && (options.text_encoder.is_some()
+            || options.vae.is_some()
+            || options.out.is_some()
+            || options.width.is_some()
+            || options.height.is_some()
+            || options.cfg.is_some()
+            || options.noise.is_some()
+            || !options.references.is_empty())
     {
-        let arch_probe: Arc<dyn TensorSource> =
-            Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
-        let arch_name = arch_probe
-            .metadata("general.architecture")
-            .and_then(MetaValue::to_string_val)
-            .unwrap_or_default();
-        let is_auk = arch_name == "audiocpp"
-            || arch_probe
-                .tensor_info("transformer.transformer_blocks.0.attn_norm_x.linear.weight")
-                .is_some();
-        if is_auk {
-            Some(arch_probe)
-        } else {
-            None
-        }
+        Some(Arc::from(open_or_exit(&options.model, ComponentRole::Llm)))
     } else {
         None
     };
+    if let Some(source) = early_source.as_ref().filter(|s| {
+        s.metadata("general.architecture")
+            .and_then(MetaValue::to_string_val)
+            == Some("mage_flow")
+    }) {
+        app::run_or_exit(app::run_mage_flow_cli(source.clone(), &options, n_threads));
+        return;
+    }
+    let early_auk_arch = early_source.clone().filter(|s| {
+        options.text_encoder.is_none()
+            && options.vae.is_some()
+            && options.out.is_some()
+            && (s
+                .metadata("general.architecture")
+                .and_then(MetaValue::to_string_val)
+                == Some("audiocpp")
+                || s.tensor_info("transformer.transformer_blocks.0.attn_norm_x.linear.weight")
+                    .is_some())
+    });
     // If we already identified the model as AuK, skip the diff-model validators
     // (z_image_cli_options, dreamx_cli_options, yue2_cli_options) that would
     // otherwise error out on missing --text-encoder / --dreamx / --yue2.
-    if early_auk_arch.is_some() {
-        // AuK's contract is model + text-encoder (optional, Qwen2.5-Omni for
-        // TTS) + vae + prompt + out + steps + (sample_rate). We have all
-        // those except the optional text-encoder and the no-conflict check
-        // that the diff-model validators would do. Skip them.
-    } else {
+    if early_auk_arch.is_none() {
         app::validate_cli_options(&options).unwrap_or_else(|error| {
             eprintln!("{error}");
             std::process::exit(2);
@@ -169,12 +180,6 @@ fn main() {
         eprintln!("{error}");
         std::process::exit(2);
     });
-
-    // Resolved thread count for both LLM ComputePool and rayon global pool.
-    let available_threads = std::thread::available_parallelism()
-        .map(std::num::NonZeroUsize::get)
-        .unwrap_or(1);
-    let n_threads = app::resolve_thread_count(options.threads, available_threads);
     app::init_rayon_global_pool(n_threads);
 
     if options.model.as_os_str().is_empty() {
@@ -279,8 +284,9 @@ fn main() {
     // AuK / audiocpp dispatch: --model (DiT) + --vae + optional --text-encoder
     // for Qwen2.5-Omni conditioning + --text for the prompt.
     if !options.model.as_os_str().is_empty() && options.vae.is_some() && options.out.is_some() {
-        let arch_probe: Arc<dyn TensorSource> =
-            Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+        let arch_probe: Arc<dyn TensorSource> = early_source
+            .clone()
+            .unwrap_or_else(|| Arc::from(open_or_exit(&options.model, ComponentRole::Llm)));
         let is_auk = arch_probe
             .metadata("general.architecture")
             .and_then(MetaValue::to_string_val)
@@ -329,8 +335,9 @@ fn main() {
         && options.out.is_some()
         && options.prompt.is_some()
     {
-        let arch_probe: Arc<dyn TensorSource> =
-            Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+        let arch_probe: Arc<dyn TensorSource> = early_source
+            .clone()
+            .unwrap_or_else(|| Arc::from(open_or_exit(&options.model, ComponentRole::Llm)));
         let arch_name = arch_probe
             .metadata("general.architecture")
             .and_then(MetaValue::to_string_val)
@@ -380,8 +387,9 @@ fn main() {
         if options.gpu {
             ops::enable_gpu();
         }
-        let diffusion: Arc<dyn TensorSource> =
-            Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+        let diffusion: Arc<dyn TensorSource> = early_source
+            .clone()
+            .unwrap_or_else(|| Arc::from(open_or_exit(&options.model, ComponentRole::Llm)));
         let text: Arc<dyn TensorSource> = Arc::from(open_or_exit(
             options
                 .text_encoder
@@ -405,7 +413,8 @@ fn main() {
     }
 
     let model_path = options.model.as_path();
-    let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(model_path, ComponentRole::Llm));
+    let source: Arc<dyn TensorSource> =
+        early_source.unwrap_or_else(|| Arc::from(open_or_exit(model_path, ComponentRole::Llm)));
     // Qwen-Image-2.1 diffusion GGUFs carry no metadata (kv=0), so the route is
     // chosen by tensor-name signature before the metadata-driven LLM path.
     if matches_signature(source.as_ref()) {
@@ -456,6 +465,10 @@ fn main() {
         .metadata("general.architecture")
         .and_then(MetaValue::to_string_val)
         .unwrap_or_default();
+    if arch == "mage_flow" {
+        app::run_or_exit(app::run_mage_flow_cli(source, &options, n_threads));
+        return;
+    }
     if let Err(error) = app::reject_incomplete_z_image_architecture(&arch) {
         app::run_or_exit(Err(error));
         return;

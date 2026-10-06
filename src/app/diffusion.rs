@@ -116,6 +116,262 @@ pub fn run_pig_image(
     Ok(())
 }
 
+pub fn run_mage_flow_cli(
+    source: Arc<dyn TensorSource>,
+    options: &crate::app::CliOptions,
+    n_threads: usize,
+) -> Result<(), String> {
+    use crate::core::loader::GGUFLoader;
+    use crate::format::ggufrs::{open_model_source, ComponentRole};
+    use crate::models::diffusion::mage_flow::{
+        dit::MageFlowDit,
+        text::{encode_prompt, load_text, load_vision, ReferenceFeatures},
+        vae::MageVae,
+    };
+    use crate::models::gemma4::vision::resize_bicubic_pillow;
+    use crate::models::qwen3::vision::{qwen_smart_resize, VisionScratchpad};
+
+    for (present, flag) in [
+        (options.embedding, "--embedding"),
+        (options.rerank, "--rerank"),
+        (options.jev, "--jev"),
+        (options.tts, "--tts"),
+        (options.yue2, "--yue2"),
+        (options.dreamx, "--dreamx"),
+        (options.audio.is_some(), "--audio"),
+        (options.video.is_some(), "--video"),
+        (options.dump_logits, "--dump-logits"),
+        (options.bench, "--bench"),
+        (options.profile, "--profile"),
+        (options.thinking, "--thinking"),
+        (options.language.is_some(), "--language"),
+        (options.lyrics.is_some(), "--lyrics"),
+        (options.max_tokens.is_some(), "--max-tokens"),
+        (options.temperature.is_some(), "--temp/--temperature"),
+        (
+            options.top_k.is_some() || options.top_p.is_some(),
+            "--top-k/--top-p",
+        ),
+        (
+            options.edit,
+            "--edit (use an edit variant and --image/--reference)",
+        ),
+        (options.cfg_scale.is_some(), "--cfg-scale (use --cfg)"),
+        (options.gpu, "--gpu"),
+        (options.overwrite, "--overwrite"),
+        (
+            options.ref_audio.is_some() || options.ref_text.is_some(),
+            "--ref-audio/--ref-text",
+        ),
+        (
+            options.source_audio.is_some()
+                || options.source_text.is_some()
+                || options.target_text.is_some()
+                || options.instruction.is_some()
+                || options.use_xvector_supplied,
+            "--source-audio/--source-text/--target-text/--instruction/--use-xvector",
+        ),
+        (
+            options.planner.is_some() || options.perception.is_some(),
+            "--planner/--perception",
+        ),
+        (options.laya_request.is_some(), "--laya-request"),
+    ] {
+        if present {
+            return Err(format!("Mage-Flow cannot be used with {flag}"));
+        }
+    }
+    let text_path = options
+        .text_encoder
+        .as_deref()
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or("Mage-Flow requires --text-encoder")?;
+    let vae_path = options
+        .vae
+        .as_deref()
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or("Mage-Flow requires --vae")?;
+    let prompt = options
+        .prompt
+        .as_deref()
+        .filter(|p| !p.trim().is_empty())
+        .ok_or("Mage-Flow requires a non-empty --prompt")?;
+    let out = options
+        .out
+        .as_deref()
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or("Mage-Flow requires --out")?;
+    if out.exists() {
+        return Err(format!("Output already exists: {}", out.display()));
+    }
+    let variant = source
+        .metadata("mage_flow.variant")
+        .and_then(crate::core::tensor::MetaValue::to_string_val)
+        .ok_or("Missing Mage variant")?;
+    let refs: Vec<_> = options.image.iter().chain(&options.references).collect();
+    if refs.len() > 3 || refs.iter().any(|p| p.as_os_str().is_empty()) {
+        return Err("Mage supports at most three non-empty reference paths".into());
+    }
+    if variant.starts_with("edit") != !refs.is_empty() {
+        return Err("Mage edit variants require --image/--reference; generation variants require text-only input".into());
+    }
+    if !refs.is_empty()
+        && options
+            .mmproj
+            .as_deref()
+            .is_none_or(|p| p.as_os_str().is_empty())
+    {
+        return Err("Mage edit conditioning requires --mmproj".into());
+    }
+    if refs.is_empty() && options.mmproj.is_some() {
+        return Err("Mage --mmproj requires reference images".into());
+    }
+    let h = options.height.or(options.resolution).unwrap_or(1024);
+    let w = options.width.or(options.resolution).unwrap_or(1024);
+    if h == 0 || w == 0 || h > 2048 || w > 2048 || h % 16 != 0 || w % 16 != 0 {
+        return Err("Pixel sides must be multiples of 16 within 16..=2048".into());
+    }
+    let cfg = options
+        .cfg
+        .unwrap_or(if variant.ends_with("turbo") { 1.0 } else { 5.0 });
+    let steps = options.steps.unwrap_or(if variant.ends_with("turbo") {
+        4
+    } else if variant.ends_with("base") {
+        30
+    } else {
+        20
+    });
+    if !cfg.is_finite() || cfg < 1.0 || steps == 0 || steps > 1000 {
+        return Err("Mage requires finite --cfg >= 1 and --steps in 1..=1000".into());
+    }
+    if options.seed.is_some_and(|s| s < 0) || n_threads == 0 || n_threads > 256 {
+        return Err("Mage requires a non-negative --seed and --threads in 1..=256".into());
+    }
+    crate::app::init_rayon_global_pool(n_threads);
+    let pool = Arc::new(ComputePool::new(n_threads));
+    let dit = MageFlowDit::load(source.as_ref(), pool.clone())?;
+    let vae_source = open_model_source(vae_path, ComponentRole::Llm).map_err(|e| e.to_string())?;
+    let vae = MageVae::load(vae_source.as_ref(), pool.clone())?;
+    let text = load_text(text_path, pool.clone())?;
+    let mut features = Vec::new();
+    if let Some(path) = options.mmproj.as_deref() {
+        let vision = GGUFLoader::from_file(path)?;
+        let encoder = load_vision(&vision, pool.clone())?;
+        for p in &refs {
+            let image = image::open(p).map_err(|e| e.to_string())?.to_rgb8();
+            let (w, h) = image.dimensions();
+            let (mut w, mut h) = (w as usize, h as usize);
+            let mut pixels = image.into_raw();
+            if w.max(h) > 384 {
+                let ratio = 384.0 / w.max(h) as f64;
+                let new_w = (w as f64 * ratio).round_ties_even().max(1.0) as usize;
+                let new_h = (h as f64 * ratio).round_ties_even().max(1.0) as usize;
+                pixels = resize_bicubic_pillow(&pixels, w, h, new_w, new_h)?;
+                (w, h) = (new_w, new_h);
+            }
+            let mut cfg = encoder.config.clone();
+            cfg.image_min_pixels = 65536;
+            cfg.image_max_pixels = 16777216;
+            let grid = qwen_smart_resize(w, h, &cfg)?;
+            let (new_h, new_w) = (grid.image_height(), grid.image_width());
+            let pixels = resize_bicubic_pillow(&pixels, w, h, new_w, new_h)?;
+            let pixels: Vec<_> = pixels
+                .iter()
+                .map(|&v| (v as f32 / 255.0 - 0.5) / 0.5)
+                .collect();
+            if new_h > 512 || new_w > 512 || pixels.iter().any(|v| !v.is_finite()) {
+                return Err("Invalid Mage reference pixels".into());
+            }
+            let mut scratch = VisionScratchpad::new(&encoder.config);
+            encoder.encode_image(&pixels, new_w, new_h, &mut scratch)?;
+            features.push(ReferenceFeatures {
+                embeddings: scratch.projected,
+                deepstack: scratch.deepstack,
+            });
+        }
+    }
+    let context = encode_prompt(&text, prompt, &features)?;
+    let negative = if cfg > 1.0 {
+        Some(encode_prompt(
+            &text,
+            options
+                .negative_prompt
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(" "),
+            &features,
+        )?)
+    } else {
+        None
+    };
+    let (lh, lw) = (h / 16, w / 16);
+    let n = lh * lw;
+    let mut packed = if let Some(path) = options.noise.as_deref() {
+        read_f32_file(path)?
+    } else {
+        use rand::{Rng, SeedableRng};
+        let mut rng = rand::rngs::StdRng::seed_from_u64(options.seed.unwrap_or(42) as u64);
+        (0..n * 128)
+            .map(|_| {
+                let a: f32 = rng.gen_range(f32::MIN_POSITIVE..1.0);
+                let b: f32 = rng.gen_range(0.0..1.0);
+                (-2.0 * a.ln()).sqrt() * (std::f32::consts::TAU * b).cos()
+            })
+            .collect()
+    };
+    if packed.len() != n * 128 {
+        return Err(
+            "Fixed noise must contain H/16*W/16*128 F32 values in token-major order".into(),
+        );
+    }
+    let mut shapes = vec![[lh, lw]];
+    for p in &refs {
+        let image = image::open(p).map_err(|e| e.to_string())?.to_rgb8();
+        let rgb = resize_bicubic_pillow(
+            image.as_raw(),
+            image.width() as usize,
+            image.height() as usize,
+            w,
+            h,
+        )?;
+        let mut pixels = vec![0.0; 3 * h * w];
+        for (i, pixel) in rgb.chunks_exact(3).enumerate() {
+            for c in 0..3 {
+                pixels[c * h * w + i] = (pixel[c] as f32 / 255.0 - 0.5) / 0.5;
+            }
+        }
+        let latent = vae.encode(&pixels, h, w)?;
+        packed.extend((0..n * 128).map(|i| latent[(i % 128) * n + i / 128]));
+        shapes.push([lh, lw]);
+    }
+    let latent = dit.sample(&packed, &shapes, &context, negative.as_deref(), steps, cfg)?;
+    let chw: Vec<_> = (0..n * 128)
+        .map(|i| latent[(i % n) * 128 + i / n])
+        .collect();
+    let pixels = vae.decode(&chw, lh, lw)?;
+    let mut bytes = vec![0; 3 * h * w];
+    for (i, pixel) in bytes.chunks_exact_mut(3).enumerate() {
+        for c in 0..3 {
+            pixel[c] =
+                (127.5 * (pixels[c * h * w + i].clamp(-1.0, 1.0) + 1.0)).clamp(0.0, 255.0) as u8;
+        }
+    }
+    write_png_atomically(
+        out,
+        &ZImageRgb {
+            width: w as u32,
+            height: h as u32,
+            bytes,
+        },
+        false,
+    )?;
+    println!(
+        "Mage-Flow {variant}: saved {w}x{h} image to {}",
+        out.display()
+    );
+    Ok(())
+}
+
 pub fn run_z_image_cli(
     diffusion: Arc<dyn TensorSource>,
     text: Arc<dyn TensorSource>,
@@ -144,7 +400,7 @@ pub fn run_z_image_cli(
             seed,
         },
     )?;
-    write_png_atomically(&out, &rgb)?;
+    write_png_atomically(&out, &rgb, true)?;
     println!(
         "Z-Image PNG saved to {} in {}ms",
         out.display(),
@@ -272,7 +528,7 @@ pub fn run_ernie_image_cli(
         height: rgb.height,
         bytes: rgb.bytes,
     };
-    write_png_atomically(&out, &z_rgb)?;
+    write_png_atomically(&out, &z_rgb, true)?;
     let _ = ErnieImageRgb {
         width: 0,
         height: 0,
@@ -368,7 +624,7 @@ pub fn run_qwen_image_2_1(
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("Create output directory {}: {error}", parent.display()))?;
     }
-    write_sibling_temp_then_rename(&request.out, &bytes)?;
+    write_output_atomically(&request.out, &bytes, true)?;
     println!(
         "Qwen-Image-2.1 velocity written to {} ({} values, context {context_len}, timestep {})",
         request.out.display(),
@@ -378,7 +634,7 @@ pub fn run_qwen_image_2_1(
     Ok(())
 }
 
-pub fn write_png_atomically(path: &Path, rgb: &ZImageRgb) -> Result<(), String> {
+pub fn write_png_atomically(path: &Path, rgb: &ZImageRgb, overwrite: bool) -> Result<(), String> {
     let expected = usize::try_from(rgb.width)
         .ok()
         .and_then(|width| {
@@ -387,10 +643,10 @@ pub fn write_png_atomically(path: &Path, rgb: &ZImageRgb) -> Result<(), String> 
                 .and_then(|height| width.checked_mul(height))
         })
         .and_then(|pixels| pixels.checked_mul(3))
-        .ok_or("Z-Image RGB size overflow")?;
+        .ok_or("RGB size overflow")?;
     if rgb.bytes.len() != expected {
         return Err(format!(
-            "Invalid Z-Image RGB length: expected {expected}, got {}",
+            "Invalid RGB length: expected {expected}, got {}",
             rgb.bytes.len()
         ));
     }
@@ -402,11 +658,11 @@ pub fn write_png_atomically(path: &Path, rgb: &ZImageRgb) -> Result<(), String> 
             rgb.height,
             image::ColorType::Rgb8.into(),
         )
-        .map_err(|error| format!("Encode Z-Image PNG: {error}"))?;
-    write_sibling_temp_then_rename(path, &encoded)
+        .map_err(|error| format!("Encode PNG: {error}"))?;
+    write_output_atomically(path, &encoded, overwrite)
 }
 
-fn write_sibling_temp_then_rename(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub fn write_output_atomically(path: &Path, bytes: &[u8], overwrite: bool) -> Result<(), String> {
     let file_name = path
         .file_name()
         .filter(|name| !name.is_empty())
@@ -439,7 +695,13 @@ fn write_sibling_temp_then_rename(path: &Path, bytes: &[u8]) -> Result<(), Strin
             file.write_all(bytes)?;
             file.sync_all()?;
             drop(file);
-            std::fs::rename(&temp_path, path)
+            if overwrite {
+                std::fs::rename(&temp_path, path)
+            } else {
+                std::fs::hard_link(&temp_path, path)?;
+                let _ = std::fs::remove_file(&temp_path);
+                Ok(())
+            }
         })();
         if let Err(error) = result {
             let _ = std::fs::remove_file(&temp_path);
@@ -661,7 +923,7 @@ mod tests {
             bytes: vec![0; 11],
         };
 
-        assert!(write_png_atomically(&output, &invalid).is_err());
+        assert!(write_png_atomically(&output, &invalid, true).is_err());
         assert_eq!(std::fs::read(&output).unwrap(), b"old");
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
         std::fs::remove_dir_all(dir).unwrap();
@@ -672,7 +934,7 @@ mod tests {
         let dir = test_temp_dir(line!());
         let output = dir.join("image.png");
 
-        write_png_atomically(&output, &valid_rgb()).unwrap();
+        write_png_atomically(&output, &valid_rgb(), true).unwrap();
 
         let decoded = image::open(&output).unwrap().to_rgb8();
         assert_eq!(decoded.dimensions(), (2, 1));
@@ -691,11 +953,13 @@ mod tests {
             bytes: Vec::new(),
         };
 
-        assert!(write_png_atomically(Path::new(""), &valid_rgb()).is_err());
-        assert!(write_png_atomically(&missing_parent, &valid_rgb()).is_err());
-        assert!(write_png_atomically(&dir.join("overflow.png"), &overflow)
-            .unwrap_err()
-            .contains("overflow"));
+        assert!(write_png_atomically(Path::new(""), &valid_rgb(), true).is_err());
+        assert!(write_png_atomically(&missing_parent, &valid_rgb(), true).is_err());
+        assert!(
+            write_png_atomically(&dir.join("overflow.png"), &overflow, true)
+                .unwrap_err()
+                .contains("overflow")
+        );
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -706,8 +970,20 @@ mod tests {
         let output = dir.join("image.png");
         std::fs::create_dir(&output).unwrap();
 
-        assert!(write_png_atomically(&output, &valid_rgb()).is_err());
+        assert!(write_png_atomically(&output, &valid_rgb(), true).is_err());
         assert!(output.is_dir());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn exclusive_publication_keeps_an_existing_output_and_cleans_up() {
+        let dir = test_temp_dir(line!());
+        let output = dir.join("image.png");
+        write_png_atomically(&output, &valid_rgb(), false).unwrap();
+        let original = std::fs::read(&output).unwrap();
+        assert!(write_output_atomically(&output, b"replacement", false).is_err());
+        assert_eq!(std::fs::read(&output).unwrap(), original);
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
         std::fs::remove_dir_all(dir).unwrap();
     }
