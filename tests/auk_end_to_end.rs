@@ -81,6 +81,10 @@ fn pipeline_runs_end_to_end_producing_a_finite_mono_audio_buffer() {
         1,
     )
     .expect("AuK pipeline load");
+    // Enable the Vulkan F16 GPU matmul path so the dispatch tests the
+    // F16 GPU branch (see auk_f16_gpu_runtime in mod.rs). Without this
+    // the test would fall through to F16 CPU and take ~5 min.
+    rust_model_inference::ops::enable_gpu();
     // 1 second of audio at 24 kHz, 2 denoise steps. The smoke test
     // intentionally keeps steps small -- this exercises every code path
     // end-to-end (text encode -> DiT forward -> CFG -> VAE decode -> WAV)

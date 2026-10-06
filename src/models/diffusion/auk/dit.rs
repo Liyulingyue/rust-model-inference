@@ -207,7 +207,17 @@ impl AukDit {
         for layer in 0..NUM_SINGLE_LAYERS {
             single_blocks.push(load_single_block(source_ref, layer)?);
         }
-        let q8_weights = Self::pre_quantize_weights(source.as_ref())?;
+        // No more F16 -> Q8_0 pre-quantization (see commit `f4e7879`).
+        // The Q8 cache is empty; linear_into_dispatched falls through to
+        // super::linear_into_scaled_impl, which dispatches on GGMLType:
+        // - F16 weights -> F16 GPU (via auk_f16_gpu_runtime) or F16 CPU
+        // - Q8_0 weights -> Q8 GPU matmul
+        // - BF16/Q*_K -> QTensorOwned CPU
+        // This respects the GGUF dtype instead of forcing F16 -> Q8_0
+        // quantization at load time (21s amortized + 1.5 GB RAM + quant
+        // noise). Required so we can later oracle-diff against audio.cpp's
+        // F16 numerics without a quantization confound.
+        let q8_weights: HashMap<String, Arc<Vec<u8>>> = HashMap::new();
         Ok(Self {
             q8: Q8Scratch::new(FF_INNER.max(HIDDEN)),
             source: source.clone(),
@@ -888,10 +898,9 @@ modulation: Vec<f32>,
     rope: Vec<f32>,
     normed_buf: Vec<f32>,
     q8: Q8Scratch,
-    /// Pre-quantized Q8_0 weight bytes keyed by GGUF tensor name. Built once
-    /// in `load` from the F16 weights so that the per-token matmul dispatch
-    /// can route through the Q8_0 matmul path (which has a Vulkan backend)
-    /// instead of the F16 SIMD path (CPU only).
+    /// Reserved for future weight-format caches. Currently always empty:
+    /// see the load path in `AukDit::load` for why we removed the F16 ->
+    /// Q8_0 pre-quantization workaround from `f4e7879`.
     q8_weights: HashMap<String, Arc<Vec<u8>>>,
 }
 
@@ -1958,10 +1967,15 @@ pub(crate) fn linear_into_q8_cached(
 }
 
 
-/// Distributed matmul dispatch: try the pre-quantized Q8_0 path (Vulkan
-/// backend) and fall back to F16 (CPU only) if not cached. This is the
+/// Distributed matmul dispatch: try the pre-quantized Q8_0 cache (now always
+/// empty after the f4e7879 workaround was removed) and fall back to F16 GPU
+/// or F16 CPU via `super::linear_into_scaled_impl`. This is the
 /// free-function equivalent of `AukDit::linear_into_dispatched`, used in the
 /// block forward functions that take `&dyn TensorSource` directly.
+///
+/// The previous version of this function had the same infinite recursion bug
+/// as `AukDit::linear_into_dispatched`: it called itself on Q8 miss. That
+/// bug is now fixed by forwarding to `super::linear_into_scaled_impl`.
 #[allow(clippy::too_many_arguments)]
 fn linear_into_dispatch(
     q8_weights: &HashMap<String, Arc<Vec<u8>>>,
@@ -1979,8 +1993,15 @@ fn linear_into_dispatch(
     ) {
         return Ok(());
     }
-    linear_into_dispatch(
-        q8_weights,
-        source, name, n_in, n_out, input, output, q8, pool,
+    super::linear_into_scaled_impl(
+        source,
+        name,
+        n_in,
+        n_out,
+        input,
+        output,
+        q8,
+        pool,
+        1.0,
     )
 }

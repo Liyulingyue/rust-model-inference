@@ -645,11 +645,14 @@ fn auk_f16_gpu_runtime(
 ) -> Option<&'static std::sync::Mutex<BatchedLinearRuntime>> {
     AUK_F16_GPU_RUNTIME
         .get_or_init(|| {
-            // AuK DiT max shape: AdaLN `1536 -> 9216`. We add a small slack
-            // on `max_n_in` (2048) so future AuK variants with wider DiT
-            // widths don't need re-tuning.
+            // AuK DiT max shapes verified against the GGUF:
+            // - AdaLN mod `1536 -> 9216` (n_out = 6 * HIDDEN)
+            // - FF linear_out `3072 -> 1536` (n_in = FF_INNER; HIDDEN
+            //   packed gate+up projections only need n_in=HIDDEN, but the
+            //   linear_out is FF_INNER -> HIDDEN and is the largest n_in).
+            // 4096 gives slack for hypothetical future variants.
             const MAX_ROWS: usize = 1;
-            const MAX_N_IN: usize = 2048;
+            const MAX_N_IN: usize = 4096;
             const MAX_N_OUT: usize = 9216;
             // ~hundreds of unique weight tensors expected across the DiT;
             // 4096 descriptor slots is plenty.

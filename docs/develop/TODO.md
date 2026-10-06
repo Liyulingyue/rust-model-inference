@@ -1082,8 +1082,8 @@ GGUF 重量（从 `audio-cpp/AuK-Base-and-Flash-GGUF`）：
 待优化（follow-up，no rush）：
 - [ ] 数值校准 oracle-diff vs `references/audio.cpp/src/community_models/auk/flow.cpp` — block forward magnitudes drift without the velocity clip
 - [ ] Per-token matmul batching（`linear_into` 一调一次 token，瓶颈；需新增 batched Q8_0 matmul helper 或 thread-local Q8Scratch per rayon worker）
-- [x] **F16 matmul Vulkan path** — 新增 `auk_f16_gpu_runtime` + `f16_gpu_linear_into`，单行 `BatchedLinearRuntime::matmul_rows(format=F16)` 接入 `linear_into_scaled_impl` 的 F16 分支。**当前 path 仍走 Q8 cache 优先**，F16 GPU 仅在 Q8 miss 时降级（实际 0 调用）。下一步把 pre_quantize 拆掉并改用 F16 GPU 直跑以消除 quant noise。
-- [x] **修掉 `linear_into_dispatched` 的无限递归** —— 之前在 Q8 miss 时调用 `self.linear_into_dispatched`（实际是无限递归，被 Q8 cache 100% 命中掩盖）；改为 `super::linear_into_scaled_impl`。
+- [x] **F16 matmul Vulkan path**（done as A：A 任务）— `auk_f16_gpu_runtime`（max_rows=1, max_n_in=4096, max_n_out=9216, descriptor_capacity=4096）+ `f16_gpu_linear_into`（单行 `BatchedLinearRuntime::matmul_rows(format=F16)`）接入 `linear_into_scaled_impl` 的 F16 分支。**pre_quantize F16→Q8_0 workaround（`f4e7879`）已删除**，主路径现在按 GGMLType dispatch——F16 走 F16 GPU，Q8_0 走 Q8 GPU matmul，BF16/Q*_K 走 `QTensorOwned` CPU。消除了 21s 一次性 F16→Q8 load + 1.5 GB cache RAM + post-training quant noise。end-to-end dev 335s（vs 311s baseline Q8 path，持平）。
+- [x] **修掉 `linear_into_dispatched` + `linear_into_dispatch` 两处无限递归** —— 之前在 Q8 miss 时调用 `self.linear_into_dispatched` / `linear_into_dispatch`（实际是无限递归，被 Q8 cache 100% 命中掩盖）。两者现在都改为 `super::linear_into_scaled_impl`。拆掉 pre_quantize 后两个 recursion 都会 stack overflow，所以必须一起改。
 - [ ] VAE resblocks 的 causal padding（当前用 symmetric，lossy 一点；low impact 因 upsample 已用 linear interp）
 - [ ] VAE SnakeBeta 的 FIR up/down filters（audio.cpp 用 `build_activation`，我们 skip；lossy 一点，minor impact）
 - [ ] CFMEdit reference-audio conditioning path
