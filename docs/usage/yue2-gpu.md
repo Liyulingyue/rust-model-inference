@@ -91,6 +91,34 @@ a k-quant matmul is the shader, not the device. The same table shows the fixed
 submit round trip is about 370 us, which matters for a per-token decode but
 does not explain this -- the whole chunk is one submission.
 
+## 修 k-quant shader 的 1/64 lane：5.05× 但正确性未确认（已回退）
+
+诊断（`docs/usage/yue2-gpu.md` 上文）说 Q4_K/Q6_K shader 慢 4.2× 的原因是
+`gl_LocalInvocationID.x != 0u` 让 63/64 个 lane 立即返回，整条 256 元素解包循环
+压在 lane 0。`q8_matmul_tiled_dp4a`（Z-Image 用，跑到 4088–5320 GOP/s）是**每 lane
+一个输出、归约不跨 lane** 的范式，所以照抄：让每个 workgroup 处理 64 个输出行、
+一行一个 lane，host 侧 k-quant 的 dispatch 从 `x=n_out` 改成 `x=ceil(n_out/64)`。
+
+每个 lane 算自己那行的完全相同的求和顺序，**数学上逐位一致**。
+
+**实测：AR 单 token 930 ms → 184 ms，5.05×。**
+
+但**输出验证没通过**（PSNR 16 dB，GPU 与 CPU 音频差异明显），而且用 BF16 GPU
+（不经过 k-quant shader）去比 CPU 也是 PSNR 16 dB、且两次 mean|Δ| 都恰好 ~3763，
+**说明这个差异可能与 k-quant shader 无关，而是 AR 权重张量在 GPU/CPU 两条路径
+本身就有别的分歧**（BF16 GPU 本该最接近 CPU）。
+
+已回退，不留未验证的数值改动。留下的结论：
+
+- k-quant shader 确实有 1/64 lane 的问题，且**按 tiled-dp4a 范式改成每 lane 一行
+  能拿到 5×** —— 这个方向是对的，dispatch 网格推导也自洽
+- 但 YuE2 AR 的 GPU 路径**在 k-quant 之外还有一个独立的正确性问题**，需要先定位它
+  才能放心用 shader 修复。线索：BF16 GPU 与 CPU 也是 16 dB，且 mean|Δ| 在
+  Q4KM-GPU / Q4KM-CPU / BF16-GPU 三者之间都接近 3763，提示差异可能来自 VAE/NAR
+  （仍在 CPU）或 attention kernel 的 CPU/GPU 实现不同，而非 AR 权重本身
+- 下一步应是：把 VAE/NAR 关掉、只跑 AR 单步，逐段对拍 BF16-GPU vs BF16-CPU 的
+  hidden state，定位第一个分歧点，再回来收 shader 修复
+
 ## What would fix it
 
 Split the 256-element inner loop across the workgroup and reduce once, instead
