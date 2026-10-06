@@ -82,6 +82,7 @@ fn cfmedit_end_to_end_synthetic_reference_audio() {
         duration_sec: 1,
         seed: 42,
         guidance_scale: 2.0,
+        instruct: None,
     };
     let audio = pipeline
         .generate_audio_with_reference_wav("Hi", &samples, &options)

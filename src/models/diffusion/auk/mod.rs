@@ -46,13 +46,81 @@ pub struct AukAudio {
     pub channels: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+impl AukAudio {
+    /// Pitch shift by `semitones`. **Changes both pitch and duration by
+    /// the same factor** (output duration = input duration / `2^(semitones/12)`).
+    /// This is the same primitive as [`speed_change`](Self::speed_change)
+    /// with `rate = 2^(semitones/12)` -- a true "preserve-duration" pitch
+    /// shift would need a phase vocoder which we don't have. Output
+    /// sample_rate is preserved; if you want to play the result at the
+    /// original duration, just resample up by `2^(semitones/12)` in your
+    /// WAV writer.
+    pub fn pitch_shift(&self, semitones: f32) -> AukAudio {
+        self.speed_change((semitones / 12.0).exp2())
+    }
+
+    /// Speed change by `rate` (1.0 = unchanged, 1.5 = 1.5x faster).
+    /// Output duration is divided by `rate`; sample_rate is preserved.
+    /// Uses linear interpolation.
+    pub fn speed_change(&self, rate: f32) -> AukAudio {
+        if rate == 1.0 || self.samples.is_empty() {
+            return AukAudio {
+                sample_rate: self.sample_rate,
+                samples: self.samples.clone(),
+                channels: self.channels,
+            };
+        }
+        let input = &self.samples;
+        let output_len = ((input.len() as f64) / rate as f64).round() as usize;
+        let mut output = Vec::with_capacity(output_len);
+        for i in 0..output_len {
+            let src_pos = i as f64 * rate as f64;
+            let lo = src_pos.floor() as usize;
+            let hi = (lo + 1).min(input.len() - 1);
+            let frac = (src_pos - lo as f64) as f32;
+            let sample = input[lo] as f32 * (1.0 - frac) + input[hi] as f32 * frac;
+            output.push(sample as f64);
+        }
+        AukAudio {
+            sample_rate: self.sample_rate,
+            samples: output,
+            channels: self.channels,
+        }
+    }
+
+    /// Volume change by `db` decibels (0 = unchanged, +10 = 10x amplitude).
+    /// Output duration and sample_rate are preserved.
+    pub fn volume_change(&self, db: f32) -> AukAudio {
+        if db == 0.0 || self.samples.is_empty() {
+            return AukAudio {
+                sample_rate: self.sample_rate,
+                samples: self.samples.clone(),
+                channels: self.channels,
+            };
+        }
+        let factor = (10.0f32).powf(db / 20.0);
+        let output: Vec<f64> = self.samples.iter().map(|&s| s * factor as f64).collect();
+        AukAudio {
+            sample_rate: self.sample_rate,
+            samples: output,
+            channels: self.channels,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct AukOptions {
     pub steps: usize,
     pub sample_rate: u32,
     pub duration_sec: usize,
     pub seed: i64,
     pub guidance_scale: f32,
+    /// Optional instruct string for instruct-TTS. When `Some`, the prompt
+    /// template is rebuilt as `<instruct=...>\n<text>` per audio.cpp's
+    /// instruct-TTS path. When `None`, the prompt is the raw `text`
+    /// passed to `generate_audio` (TTS without instruct, matching
+    /// audio.cpp's `<|no_prompt_audio|>` fallback).
+    pub instruct: Option<String>,
 }
 
 pub struct AukPipeline {
@@ -122,15 +190,25 @@ impl AukPipeline {
         options: &AukOptions,
     ) -> Result<AukAudio, String> {
         let total_start = std::time::Instant::now();
+        // Apply instruct prefix to the bare prompt (matches audio.cpp's
+        // instruct-TTS path). We delegate to encode_with_audio with
+        // audio_count=0 so the template + tokenization stays centralized.
         let (text_conditioning, text_tokens) = match self.text.as_ref() {
             Some(encoder) => {
                 let t = std::time::Instant::now();
-                let hidden = encoder.encode(prompt)?;
+                let instruct_ref = options.instruct.as_deref();
+                let hidden = encoder.encode_with_audio(
+                    prompt,
+                    0,
+                    &[],
+                    instruct_ref,
+                )?;
                 let tokens = encoder.last_token_count(&hidden);
                 eprintln!(
-                    "[auk-stage-profile] text_encode={:.1}ms  n_tokens={}",
+                    "[auk-stage-profile] text_encode={:.1}ms  n_tokens={}  instruct={}",
                     t.elapsed().as_secs_f64() * 1000.0,
                     tokens,
+                    if instruct_ref.is_some() { "yes" } else { "no" },
                 );
                 (hidden, tokens)
             }
@@ -205,10 +283,11 @@ impl AukPipeline {
         options: &AukOptions,
     ) -> Result<AukAudio, String> {
         let total_start = std::time::Instant::now();
+        let instruct_ref = options.instruct.as_deref();
         let (text_conditioning, text_tokens) = match self.text.as_ref() {
             Some(encoder) => {
                 let t = std::time::Instant::now();
-                let hidden = encoder.encode(prompt)?;
+                let hidden = encoder.encode_with_audio(prompt, 0, &[], instruct_ref)?;
                 let tokens = encoder.last_token_count(&hidden);
                 eprintln!(
                     "[auk-stage-profile] text_encode={:.1}ms  n_text_tokens={} n_audio_tokens={}",
@@ -341,14 +420,16 @@ impl AukPipeline {
         })?;
 
         let t = std::time::Instant::now();
+        let instruct_ref = options.instruct.as_deref();
         let (cond_hidden, total_cond_tokens) = if audio_tokens == 0 {
             // Pure TTS path (no reference audio) -- use the bare-prompt
             // encoder so we get the same conditioning as generate_audio().
-            let hidden = encoder.encode(prompt)?;
+            let hidden = encoder.encode_with_audio(prompt, 0, &[], instruct_ref)?;
             let tokens = encoder.last_token_count(&hidden);
             (hidden, tokens)
         } else {
-            let hidden = encoder.encode_with_audio(prompt, audio_tokens, audio_embeddings)?;
+            let hidden =
+                encoder.encode_with_audio(prompt, audio_tokens, audio_embeddings, instruct_ref)?;
             let tokens = encoder.last_token_count(&hidden);
             (hidden, tokens)
         };

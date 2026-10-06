@@ -94,16 +94,25 @@ impl AukTextEncoder {
     /// that will be inserted; if `audio_count == 0`, the encoder behaves
     /// like `encode(prompt)` with a no-prompt marker appended (per
     /// audio.cpp's "Zero audio token + reference voice" mode).
+    ///
+    /// When `instruct` is `Some`, the user message is built as
+    /// `<instruct=...>\n{prompt}` per audio.cpp's instruct-TTS path.
     pub(crate) fn encode_with_audio(
         &self,
         prompt: &str,
         audio_count: usize,
         audio_embeddings: &[f32],
+        instruct: Option<&str>,
     ) -> Result<Vec<f32>, String> {
         if audio_count == 0 {
             // No reference audio: just encode the bare prompt with the
             // "<no_prompt_audio>" marker (per audio.cpp's TTS path).
-            return self.encode(prompt);
+            // Instruct prefix is applied here too.
+            let full_prompt = match instruct {
+                Some(ins) if !ins.is_empty() => format!("<instruct={}>\n{}", ins, prompt),
+                _ => prompt.to_string(),
+            };
+            return self.encode(&full_prompt);
         }
         if audio_embeddings.len() != audio_count * TEXT_IN {
             return Err(format!(
@@ -122,6 +131,15 @@ impl AukTextEncoder {
             "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n\
              <|im_start|>user\n",
         );
+        // Instruct prefix: per audio.cpp's instruct-TTS format
+        // (`<instruct=...>\n<text>`) when an instruct string is provided.
+        if let Some(ins) = instruct {
+            if !ins.is_empty() {
+                formatted.push_str("<instruct=");
+                formatted.push_str(ins);
+                formatted.push_str(">\n");
+            }
+        }
         formatted.push_str(prompt);
         formatted.push_str("<|audio_bos|>");
         for _ in 0..audio_count {

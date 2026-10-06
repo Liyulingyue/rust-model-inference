@@ -179,6 +179,7 @@ pub fn run_auk_cli(
             duration_sec,
             seed,
             guidance_scale: 2.0,
+        instruct: None,
         },
     )?;
     write_wav(&out, &audio)?;

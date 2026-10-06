@@ -77,6 +77,7 @@ fn flash_distilled_4_step_zero_guidance_produces_finite_output() {
         duration_sec: 1,
         seed: 42,
         guidance_scale: 0.0,
+        instruct: None,
     };
     let audio = pipeline
         .generate_audio("Hi", &options)
