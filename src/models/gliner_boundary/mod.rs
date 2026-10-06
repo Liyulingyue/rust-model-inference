@@ -25,6 +25,7 @@ pub mod content_pooler;
 pub mod extract;
 pub mod forward;
 pub mod loader;
+pub mod long_document;
 pub mod marginals;
 pub mod matching;
 pub mod overlap;

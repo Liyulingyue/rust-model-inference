@@ -668,7 +668,8 @@ structures/records（`[C]`）；外加 abstention（`null_projection`）与 coun
 | per-entity / per-field / per-relation threshold | `5a22717` | `dump_per_query_thresholds.py` | 三条**互不相通**的通道 |
 | `validators` / `RegexValidator` | `3be43a0` | `dump_regex_validator.py` | 两处 engine 差异**显式记录**而非掩盖 |
 | `choices` 全程（prefix + 查表 + 打分 + dtype/gate） | `34622d3` + 待提交 | `dump_choice_fields.py` + `dump_choice_decode.py` | ✅ 8 个测试（含 model-backed e2e） |
-| `_record_local_choice_mentions`（文档级字面量归属） | 待提交 | `dump_record_choice_mentions.py` | ✅ 5 个测试；两处变异均被抓 |
+| `_record_local_choice_mentions`（文档级字面量归属） | `3fa6645` | `dump_record_choice_mentions.py` | ✅ 5 个测试；两处变异均被抓 |
+| 长文本 `*_long` 的 chunk + merge | 待提交 | `dump_long_document.py` | ✅ 12 个测试；多数投票变异被抓 |
 
 ### ✅ F-1 `choices` literal-enum（**全程完成**）
 
@@ -748,7 +749,21 @@ reference 自己解**，数字来自真 encoder + 真 head。已生成 `choice-d
 
 **零 ground truth**，且要同时覆盖两套机制。先造 fixture 再动手。
 
-### 🟡 F-3 长文本 `*_long` 的 chunk + merge（纯后处理，风险最低）
+### ✅ F-3 长文本 chunk + merge 的**内核**（纯函数部分完成）
+
+`split_text_into_chunks` + `merge_chunk_results` + `remap_result_spans` +
+`_strip_span_metadata` 全部完成（`long_document.rs`，12 个测试）。这些是
+`chunking.py` 里与模型无关的纯函数，fixture 为真值表。
+
+**尚未接线**：`extract_long` / `classify_text_long` 等 10 个 `*_long` 入口本身还没调用
+这套内核 —— 它们在 `runtime.py` 里，把 chunk 文本逐个喂给 `extract` 再合并，
+而本 port 的 `extract` 入口尚未接上长文档驱动。这是一个独立的接线步骤，
+不涉及 kernel，但需要 CLI/HTTP 层的 10 个入口。
+
+已钉的性质：多数投票（平票取**最早** chunk，不是最高分）、classification 取最大
+confidence、span surface **从原文档重切**（不携带 chunk 里的 text）、非 span 项按
+**忽略 confidence** 的 canonical key 去重、enum/choice 字段在无 confidence 时塌成裸字符串
+（这是长文本路径独有的形状）、空文档仍产出一个 chunk。
 
 `chunking.py` 整套。10 个 `*_long` 方法与短文本路径的**六处差异**：
 1. 按**词**切窗（`chunk_size=384` / `chunk_overlap=64`）
