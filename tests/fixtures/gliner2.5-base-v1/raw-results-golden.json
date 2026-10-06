@@ -1,0 +1,525 @@
+{
+ "cases": [
+  {
+   "name": "entities",
+   "text": "Marie Curie worked in Paris.",
+   "schema": {
+    "entities": [
+     "person",
+     "org"
+    ],
+    "entity_descriptions": {
+     "person": "a person",
+     "org": "an organisation"
+    }
+   },
+   "threshold": 0.3,
+   "raw": {
+    "entities": [
+     {
+      "person": [
+       {
+        "text": "Marie Curie",
+        "confidence": 0.997798502445221,
+        "start": 0,
+        "end": 11
+       }
+      ],
+      "org": [
+       {
+        "text": "Paris",
+        "confidence": 0.9948321580886841,
+        "start": 22,
+        "end": 27
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "name": "entities_single_label",
+   "text": "Marie Curie worked in Paris.",
+   "schema": {
+    "entities": [
+     "person"
+    ],
+    "entity_descriptions": {
+     "person": "a person"
+    }
+   },
+   "threshold": 0.3,
+   "raw": {
+    "entities": [
+     {
+      "person": [
+       {
+        "text": "Marie Curie",
+        "confidence": 0.9976626634597778,
+        "start": 0,
+        "end": 11
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "name": "entities_a_mismatched_label_still_reports_a_span",
+   "text": "Marie Curie worked in Paris.",
+   "schema": {
+    "entities": [
+     "person",
+     "company"
+    ],
+    "entity_descriptions": {
+     "person": "a person",
+     "company": "a company"
+    }
+   },
+   "threshold": 0.3,
+   "raw": {
+    "entities": [
+     {
+      "person": [
+       {
+        "text": "Marie Curie",
+        "confidence": 0.997072696685791,
+        "start": 0,
+        "end": 11
+       }
+      ],
+      "company": [
+       {
+        "text": "Paris",
+        "confidence": 0.9885773658752441,
+        "start": 22,
+        "end": 27
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "name": "entities_nothing_clears_the_threshold",
+   "text": "Marie Curie worked in Paris.",
+   "schema": {
+    "entities": [
+     "person"
+    ],
+    "entity_descriptions": {
+     "person": "a person"
+    }
+   },
+   "threshold": 0.999,
+   "raw": {
+    "entities": [
+     {
+      "person": []
+     }
+    ]
+   }
+  },
+  {
+   "name": "entities_offsets_are_characters_not_words",
+   "text": "A meeting in Berlin with Dr. Kwame Nkrumah and Ann.",
+   "schema": {
+    "entities": [
+     "person",
+     "location"
+    ],
+    "entity_descriptions": {
+     "person": "a person",
+     "location": "a place"
+    }
+   },
+   "threshold": 0.3,
+   "raw": {
+    "entities": [
+     {
+      "person": [
+       {
+        "text": "Ann",
+        "confidence": 0.9897056818008423,
+        "start": 47,
+        "end": 50
+       },
+       {
+        "text": "Dr. Kwame Nkrumah",
+        "confidence": 0.9739765524864197,
+        "start": 25,
+        "end": 42
+       }
+      ],
+      "location": [
+       {
+        "text": "Berlin",
+        "confidence": 0.998478353023529,
+        "start": 13,
+        "end": 19
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "name": "entities_offsets_survive_punctuation_and_spacing",
+   "text": "Ada Lovelace, 1815 -- London;  Ada Lovelace again, London.",
+   "schema": {
+    "entities": [
+     "person",
+     "location"
+    ],
+    "entity_descriptions": {
+     "person": "a person",
+     "location": "a place"
+    }
+   },
+   "threshold": 0.3,
+   "raw": {
+    "entities": [
+     {
+      "person": [
+       {
+        "text": "Ada Lovelace",
+        "confidence": 0.9986205101013184,
+        "start": 0,
+        "end": 12
+       },
+       {
+        "text": "Ada Lovelace",
+        "confidence": 0.9979895353317261,
+        "start": 31,
+        "end": 43
+       }
+      ],
+      "location": [
+       {
+        "text": "London",
+        "confidence": 0.9990746974945068,
+        "start": 22,
+        "end": 28
+       },
+       {
+        "text": "London",
+        "confidence": 0.9990596175193787,
+        "start": 51,
+        "end": 57
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "name": "structures",
+   "text": "Deep Learning by Yoshua Bengio.",
+   "schema": {
+    "json_structures": [
+     {
+      "paper": {
+       "title": [],
+       "authors": []
+      }
+     }
+    ],
+    "json_descriptions": {
+     "paper": {
+      "title": "a paper for title",
+      "authors": "a paper for authors"
+     }
+    },
+    "field_metadata": {
+     "paper.title": {
+      "dtype": "str"
+     },
+     "paper.authors": {
+      "dtype": "list"
+     }
+    }
+   },
+   "threshold": 0.3,
+   "raw": {
+    "paper": [
+     {
+      "title": [
+       {
+        "text": "Deep Learning",
+        "confidence": 0.9948765635490417,
+        "start": 0,
+        "end": 13
+       }
+      ],
+      "authors": [
+       {
+        "text": "Yoshua Bengio",
+        "confidence": 0.9960126876831055,
+        "start": 17,
+        "end": 30
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "name": "structures_mixed_dtypes",
+   "text": "Marie Curie worked in Paris with Pierre Curie in London.",
+   "schema": {
+    "json_structures": [
+     {
+      "person": {
+       "name": [],
+       "city": []
+      }
+     }
+    ],
+    "json_descriptions": {
+     "person": {
+      "name": "a person and where they were for name",
+      "city": "a person and where they were for city"
+     }
+    },
+    "field_metadata": {
+     "person.name": {
+      "dtype": "str"
+     },
+     "person.city": {
+      "dtype": "list"
+     }
+    }
+   },
+   "threshold": 0.3,
+   "raw": {
+    "person": [
+     {
+      "name": [
+       {
+        "text": "Marie Curie",
+        "confidence": 0.9987446069717407,
+        "start": 0,
+        "end": 11
+       },
+       {
+        "text": "Pierre Curie",
+        "confidence": 0.9961857199668884,
+        "start": 33,
+        "end": 45
+       }
+      ],
+      "city": [
+       {
+        "text": "London",
+        "confidence": 0.9987488985061646,
+        "start": 49,
+        "end": 55
+       },
+       {
+        "text": "Paris",
+        "confidence": 0.9986540079116821,
+        "start": 22,
+        "end": 27
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "name": "relations",
+   "text": "Marie Curie worked in Paris.",
+   "schema": {
+    "entities": [
+     "person",
+     "org"
+    ],
+    "entity_descriptions": {
+     "person": "a person",
+     "org": "an organisation"
+    },
+    "relations": [
+     {
+      "worked_in": {
+       "head": "person",
+       "tail": "org"
+      }
+     }
+    ]
+   },
+   "threshold": 0.3,
+   "raw": {
+    "worked_in": [
+     {
+      "head": {
+       "text": "Marie Curie",
+       "start": 0,
+       "end": 11,
+       "confidence": 0.9671375751495361
+      },
+      "tail": {
+       "text": "Paris",
+       "start": 22,
+       "end": 27,
+       "confidence": 0.9671375751495361
+      }
+     }
+    ],
+    "entities": [
+     {
+      "person": [
+       {
+        "text": "Marie Curie",
+        "confidence": 0.995418906211853,
+        "start": 0,
+        "end": 11
+       }
+      ],
+      "org": [
+       {
+        "text": "Paris",
+        "confidence": 0.9867922067642212,
+        "start": 22,
+        "end": 27
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "name": "relations_beside_entities",
+   "text": "Marie Curie worked in Paris and later in London.",
+   "schema": {
+    "entities": [
+     "person",
+     "org"
+    ],
+    "entity_descriptions": {
+     "person": "a person",
+     "org": "an organisation"
+    },
+    "relations": [
+     {
+      "worked_in": {
+       "head": "person",
+       "tail": "org"
+      }
+     }
+    ]
+   },
+   "threshold": 0.3,
+   "raw": {
+    "worked_in": [
+     {
+      "head": {
+       "text": "Marie Curie",
+       "start": 0,
+       "end": 11,
+       "confidence": 0.9568127393722534
+      },
+      "tail": {
+       "text": "Paris",
+       "start": 22,
+       "end": 27,
+       "confidence": 0.9568127393722534
+      }
+     },
+     {
+      "head": {
+       "text": "Marie Curie",
+       "start": 0,
+       "end": 11,
+       "confidence": 0.8661525845527649
+      },
+      "tail": {
+       "text": "London",
+       "start": 41,
+       "end": 47,
+       "confidence": 0.8661525845527649
+      }
+     }
+    ],
+    "entities": [
+     {
+      "person": [
+       {
+        "text": "Marie Curie",
+        "confidence": 0.9968156218528748,
+        "start": 0,
+        "end": 11
+       }
+      ],
+      "org": [
+       {
+        "text": "Paris",
+        "confidence": 0.9725843667984009,
+        "start": 22,
+        "end": 27
+       },
+       {
+        "text": "London",
+        "confidence": 0.9645549654960632,
+        "start": 41,
+        "end": 47
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "name": "classifications",
+   "text": "This is a great paper.",
+   "schema": {
+    "classifications": [
+     {
+      "task": "sentiment",
+      "labels": [
+       "positive",
+       "negative"
+      ]
+     }
+    ]
+   },
+   "threshold": 0.3,
+   "raw": {
+    "sentiment": [
+     "positive",
+     0.9999998807907104
+    ]
+   }
+  },
+  {
+   "name": "classifications_multi_label",
+   "text": "This paper is about safety and alignment.",
+   "schema": {
+    "classifications": [
+     {
+      "task": "topics",
+      "labels": [
+       "ml",
+       "safety",
+       "alignment"
+      ],
+      "multi_label": true
+     }
+    ]
+   },
+   "threshold": 0.3,
+   "raw": {
+    "topics": [
+     [
+      "safety",
+      0.9971062541007996
+     ],
+     [
+      "alignment",
+      0.997650682926178
+     ]
+    ]
+   }
+  }
+ ]
+}
