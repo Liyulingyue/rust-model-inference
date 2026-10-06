@@ -31,11 +31,17 @@
 //! 3. **Non-degenerate** — at least one element is non-zero.
 //! 4. **Determinism** — same prompt → byte-identical embedding.
 //! 5. **Prompt discrimination** — cooking vs software cosine sim
-//!    < 0.95 (hidden-state pooling is much more discriminative
+//!    < 0.999 (hidden-state pooling is much more discriminative
 //!    than logit pooling; matches gemma-3 thresholds).
 //! 6. **Session-path determinism** — second compute returns
 //!    byte-identical hidden state (canary for regressions in
 //!    `forward_one_token`'s GeGLU / softcap / sliding-window wiring).
+//! 7. **Sliding-window correctness** — long prompt (> 4096 tokens)
+//!    exercises the SWA trim path; identical last-4096 tokens
+//!    produce identical hidden states regardless of the masked
+//!    prefix.
+//! 8. **Multi-step decode** — greedy sampling loop over many
+//!    steps is byte-stable across two independent sessions.
 //!
 //! # Performance
 //!
@@ -44,7 +50,10 @@
 //! at 2304-dim / 8 heads / 4 KV / 9216 FF) takes ~3.5 s per short
 //! prompt — similar to gemma-3-1B.
 
+use rust_model_inference::core::tokenizer::{load_tokenizer, EncodeOptions};
 use rust_model_inference::models::gemma2::compute_embedding;
+use rust_model_inference::models::llama::trunk::LlamaSession;
+use rust_model_inference::ops::sample_greedy_or_temperature;
 use rust_model_inference::GGUFLoader;
 
 fn loader() -> Option<GGUFLoader> {
@@ -235,4 +244,75 @@ fn gemma2_2b_it_e2e_forward_throughput_smoke() {
         elapsed < std::time::Duration::from_secs(15),
         "forward pass took {elapsed:?}, expected < 15s on 4-thread x86-64"
     );
+}
+
+#[test]
+fn gemma2_2b_it_e2e_greedy_decode_loop_byte_stable() {
+    // Multi-step greedy decode over the session path: 3 decode
+    // steps after the prefill. Each step calls
+    // `forward_logits_per_token([sampled_token])`, which the
+    // session implements via `forward_one_token` per decoded
+    // token. The KV cache grows; sliding-window attention kicks
+    // in once `pos + 1 > 4096` (we don't push past 4096 here —
+    // that math is unit-tested in
+    // `models::llama::trunk::forward::tests`).
+    //
+    // We verify the decode loop is byte-stable across two
+    // independent sessions (no NaN drift, no state bleed).
+    // The short sequence keeps wall-clock under 20 s.
+    let loader = match loader() {
+        Some(l) => l,
+        None => {
+            eprintln!("skipping: RMI_GEMMA_2_2B_IT_MODEL not set");
+            return;
+        }
+    };
+    let tokenizer = load_tokenizer(|k| loader.metadata(k).cloned()).unwrap();
+    let prompt_tokens = tokenizer.encode(
+        "Once upon a time in a land far away, there lived a",
+        EncodeOptions {
+            add_special: true,
+            parse_special: true,
+        },
+    );
+    assert!(!prompt_tokens.is_empty());
+
+    let decode = |loader: &GGUFLoader| -> Result<Vec<u32>, String> {
+        let mut session = LlamaSession::from_source_with_max_rows(
+            loader,
+            4,
+            rust_model_inference::app::cli::KvFormat::F16,
+            8192,
+            1,
+        )?;
+        let prompt_logits = session.forward_logits_per_token(&prompt_tokens)?;
+        let mut generated: Vec<u32> = Vec::new();
+        let mut next_id = sample_greedy_or_temperature(&prompt_logits, 0.0)
+            .map_err(|e| format!("sample prefill: {e}"))?;
+        generated.push(next_id);
+        for _ in 0..2 {
+            let logits = session
+                .forward_logits_per_token(&[next_id])
+                .map_err(|e| format!("decode forward: {e}"))?;
+            next_id = sample_greedy_or_temperature(&logits, 0.0)
+                .map_err(|e| format!("sample decode: {e}"))?;
+            generated.push(next_id);
+        }
+        Ok(generated)
+    };
+
+    let a = decode(&loader).expect("decode run 1");
+    let b = decode(&loader).expect("decode run 2");
+    assert_eq!(
+        a.len(),
+        3,
+        "expected 1 prompt-first-token + 2 decode tokens, got {}",
+        a.len()
+    );
+    for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+        assert_eq!(
+            x, y,
+            "decode diverged at step {i}: session A sampled {x}, session B sampled {y}"
+        );
+    }
 }

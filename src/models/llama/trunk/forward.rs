@@ -2837,135 +2837,6 @@ pub(crate) fn attention_head_f16(
     vec_scale_f32(output, inv_sum);
 }
 
-#[allow(clippy::too_many_arguments)]
-/// Per-query attention helper kept around as a stable entry point
-/// for callers that want to step the per-query attention math
-/// without going through `forward_chunk_batched_real`. Currently
-/// unused (the chunked path bypasses it); kept `pub(crate)` so
-/// future per-query callers (e.g. a debug-only incremental
-/// decoder) can reuse the exact same softcap + sliding-window
-/// wiring without duplicating it.
-#[allow(dead_code)]
-pub(crate) fn run_attention_per_query(
-    pool: &Arc<ComputePool>,
-    q: &[f32],
-    attn_out: &mut [f32],
-    kv_cache: &KvCache,
-    kv_cache_size: usize,
-    n_cached: usize,
-    n_embd_head_k: usize,
-    n_embd_head_v: usize,
-    n_embd_gqa: usize,
-    n_head: usize,
-    group_size: usize,
-    kq_scale: f32,
-    kb: usize,
-    n_threads: usize,
-    max_ctx: usize,
-    attn_softcap: f32,
-    sliding_window: usize,
-) {
-    let attn_out_ptr = attn_out.as_mut_ptr();
-    let q_ptr = q.as_ptr();
-    let n_embd_q = attn_out.len();
-    let score_stride = max_ctx.div_ceil(256) * 256;
-    let mut scores_storage = vec![0.0f32; n_threads * score_stride];
-    let scores_ptr = scores_storage.as_mut_ptr();
-    let is_f16 = matches!(kv_cache, KvCache::F16(_));
-    let k_cache_f16_ptr = match kv_cache {
-        KvCache::F16(c) => c.k.as_ptr() as *const u16,
-        _ => std::ptr::null(),
-    };
-    let v_cache_f16_ptr = match kv_cache {
-        KvCache::F16(c) => c.v.as_ptr() as *const u16,
-        _ => std::ptr::null(),
-    };
-    let k_cache_f32_ptr = match kv_cache {
-        KvCache::F32(c) => c.k.as_ptr() as *const f32,
-        _ => std::ptr::null(),
-    };
-    let v_cache_f32_ptr = match kv_cache {
-        KvCache::F32(c) => c.v.as_ptr() as *const f32,
-        _ => std::ptr::null(),
-    };
-    pool.compute(move |ith: usize, nth: usize| {
-        let h_start = ith * n_head / nth;
-        let h_end = (ith + 1) * n_head / nth;
-        if is_f16 {
-            let k_cache =
-                unsafe { std::slice::from_raw_parts(k_cache_f16_ptr as *const u16, kv_cache_size) };
-            let v_cache =
-                unsafe { std::slice::from_raw_parts(v_cache_f16_ptr as *const u16, kv_cache_size) };
-            let q_local = unsafe { std::slice::from_raw_parts(q_ptr, n_embd_q) };
-            let attn_out_local = unsafe { std::slice::from_raw_parts_mut(attn_out_ptr, n_embd_q) };
-            for h in h_start..h_end {
-                let kv_h = h / group_size;
-                let q_off = h * n_embd_head_k;
-                let out_base = h * n_embd_head_v;
-attention_head_f16(
-                    &q_local[q_off..q_off + n_embd_head_k],
-                    &mut attn_out_local[out_base..out_base + n_embd_head_v],
-                    k_cache,
-                    v_cache,
-                    kb + kv_h * n_embd_head_v,
-                    n_embd_gqa,
-                    n_cached,
-                    kq_scale,
-                    attn_softcap,
-                );
-            }
-        } else {
-            let k_cache =
-                unsafe { std::slice::from_raw_parts(k_cache_f32_ptr as *const f32, kv_cache_size) };
-            let v_cache =
-                unsafe { std::slice::from_raw_parts(v_cache_f32_ptr as *const f32, kv_cache_size) };
-            let q_local = unsafe { std::slice::from_raw_parts(q_ptr, n_embd_q) };
-            let attn_out_local = unsafe { std::slice::from_raw_parts_mut(attn_out_ptr, n_embd_q) };
-            let scores =
-                unsafe { std::slice::from_raw_parts_mut(scores_ptr, n_threads * score_stride) };
-            let n_padded = (n_cached + 255) / 256 * 256;
-            for h in h_start..h_end {
-                let kv_h = h / group_size;
-                let q_off = h * n_embd_head_k;
-                let out_base = h * n_embd_head_v;
-                let s_off = ith * score_stride;
-                for t in 0..n_cached {
-                    scores[s_off + t] = dot_f32(
-                        &q_local[q_off..q_off + n_embd_head_k],
-                        &k_cache[kb + t * n_embd_gqa + kv_h * n_embd_head_v
-                            ..kb + t * n_embd_gqa + kv_h * n_embd_head_v + n_embd_head_k],
-                        n_embd_head_k,
-                    ) * kq_scale;
-                }
-                // Pre-softmax prep: Gemma-2 sliding-window mask + attn
-                // logit softcap. Plain llama has both at 0 so the
-                // helper is a no-op.
-                if attn_softcap > 0.0 || sliding_window > 0 {
-                    apply_attn_pre_softmax_inplace(
-                        &mut scores[s_off..s_off + n_padded],
-                        n_cached,
-                        sliding_window,
-                        attn_softcap,
-                    );
-                }
-                scores[s_off + n_cached..s_off + n_padded].fill(f32::NEG_INFINITY);
-                softmax_inplace(&mut scores[s_off..s_off + n_padded]);
-                let mut values = vec![0.0f32; n_padded];
-                for d in 0..n_embd_head_v {
-                    for t in 0..n_cached {
-                        values[t] = v_cache[kb + t * n_embd_gqa + kv_h * n_embd_head_v + d];
-                    }
-                    attn_out_local[out_base + d] = dot_f32(
-                        &values[..n_padded],
-                        &scores[s_off..s_off + n_padded],
-                        n_cached,
-                    );
-                }
-            }
-        }
-    });
-}
-
 /// Apply logit softcapping in-place: `scores[i] = cap * tanh(scores[i] / cap)`
 /// when `cap > 0`. Gemma-2's `attn_logit_softcapping` (default 50.0 in
 /// pre-trained GGUFs) and `final_logit_softcapping` (default 30.0) both use
@@ -3298,7 +3169,10 @@ pub(crate) fn run_attention_chunked(
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_rope, compute_yarn_thetas, normalization_groups};
+    use super::{
+        apply_attn_pre_softmax_inplace, apply_rope, compute_yarn_thetas,
+        normalization_groups, softcap_inplace,
+    };
     use crate::core::tensor::{MetaValue, TensorInfo, TensorSource};
     use std::collections::HashMap;
 
@@ -3315,6 +3189,94 @@ mod tests {
 
         fn tensor_slice(&self, _name: &str) -> Option<&[u8]> {
             None
+        }
+    }
+
+    /// `softcap_inplace` no-ops when `cap <= 0` (plain llama path).
+    #[test]
+    fn softcap_inplace_zero_cap_is_noop() {
+        let mut scores = vec![1.0f32, -2.0, 3.0, -4.0];
+        let expected = scores.clone();
+        softcap_inplace(&mut scores, 0.0);
+        assert_eq!(scores, expected);
+        softcap_inplace(&mut scores, -1.0);
+        assert_eq!(scores, expected);
+    }
+
+    /// `softcap_inplace` matches the closed-form `cap * tanh(x/cap)`
+    /// for every entry (scalar reference, no SIMD).
+    #[test]
+    fn softcap_inplace_matches_closed_form() {
+        for cap in [1.0f32, 5.0, 30.0, 50.0, 100.0] {
+            let mut scores: Vec<f32> = (-12..=12).map(|i| i as f32 * 0.37).collect();
+            let inv = 1.0f32 / cap;
+            let expected: Vec<f32> = scores.iter().map(|&x| cap * (x * inv).tanh()).collect();
+            softcap_inplace(&mut scores, cap);
+            for (i, (a, b)) in scores.iter().zip(expected.iter()).enumerate() {
+                assert!(
+                    (a - b).abs() < 1e-5,
+                    "lane {i} cap={cap}: softcap_inplace={a} closed_form={b}"
+                );
+            }
+        }
+    }
+
+    /// `apply_attn_pre_softmax_inplace` runs only softcap when
+    /// `sw == 0` (plain llama path: no mask, softcap = 0 no-op).
+    #[test]
+    fn apply_attn_pre_softmax_no_mask_when_sw_zero() {
+        let n_cached = 11;
+        let mut scores: Vec<f32> = (-5..=5).map(|i| i as f32).collect();
+        let original = scores.clone();
+        apply_attn_pre_softmax_inplace(&mut scores, n_cached, 0, 50.0);
+        assert!(scores.iter().all(|x| x.is_finite()));
+        assert!(!scores.iter().any(|x| x.is_infinite()));
+        let mut changed = 0;
+        for (a, b) in scores.iter().zip(original.iter()) {
+            if a != b {
+                changed += 1;
+            }
+        }
+        assert!(changed > 0, "softcap should mutate at least some lanes");
+    }
+
+    /// SWA trim: when `n_cached > sw`, slots `[0, n_cached - sw)`
+    /// become `-inf` so softmax ignores them.
+    #[test]
+    fn apply_attn_pre_softmax_masks_prefix_when_n_cached_exceeds_sw() {
+        let n_cached = 8;
+        let sw = 3;
+        let mut scores: Vec<f32> = (0..n_cached).map(|i| (i + 1) as f32).collect();
+        apply_attn_pre_softmax_inplace(&mut scores, n_cached, sw, 0.0);
+        assert_eq!(
+            &scores[..n_cached - sw],
+            &vec![f32::NEG_INFINITY; n_cached - sw]
+        );
+        assert_eq!(&scores[n_cached - sw..], &vec![6.0, 7.0, 8.0]);
+    }
+
+    /// SWA + softcap combined: only the kept window region is
+    /// softcapped; the masked prefix stays `-inf`.
+    #[test]
+    fn apply_attn_pre_softmax_softcap_only_on_kept_window() {
+        let n_cached = 8;
+        let sw = 3;
+        let cap = 50.0;
+        let mut scores: Vec<f32> = (0..n_cached).map(|i| (i + 1) as f32 * 5.0).collect();
+        let inv = 1.0f32 / cap;
+        let mut expected = vec![f32::NEG_INFINITY; n_cached];
+        for i in (n_cached - sw)..n_cached {
+            let raw = (i + 1) as f32 * 5.0;
+            expected[i] = cap * (raw * inv).tanh();
+        }
+        apply_attn_pre_softmax_inplace(&mut scores, n_cached, sw, cap);
+        for (i, (a, b)) in scores.iter().zip(expected.iter()).enumerate() {
+            let ok = if a.is_infinite() && b.is_infinite() {
+                a == b
+            } else {
+                (a - b).abs() < 1e-5
+            };
+            assert!(ok, "lane {i}: softcap={a} expected={b}");
         }
     }
 
