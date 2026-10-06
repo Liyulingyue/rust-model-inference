@@ -519,7 +519,6 @@ pub fn text_encode(
 
             let mut down_buf = vec![0.0; n_tokens * cfg.n_embd];
             for tok in 0..n_tokens {
-                let down_row = &gate_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff];
                 let blocks = (cfg.n_ff + 31) / 32;
                 let mut q8_buf = vec![0u8; cfg.n_ff];
                 let mut scale_buf = vec![0.0f32; blocks];
