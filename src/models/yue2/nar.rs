@@ -139,7 +139,18 @@ impl<'model> YuE2NarSession<'model> {
         if chunk.ar_tokens.len() + nar_len > model.config().context {
             return Err("YuE2 acoustic chunk exceeds the model context".into());
         }
+        // The AR prefix prefill is a full forward over every AR token in the
+        // chunk (prefix + codec frames + MUSIC_END) across all layers. It is
+        // O(rows) but runs once per chunk before the diffusion loop, and the
+        // CLI previously showed nothing between "NAR chunk 1/1" and step 1, so
+        // the cost was invisible. Time it explicitly.
+        let prefill_started = std::time::Instant::now();
         let prefix_kv = prefix_kv(model, &chunk.ar_tokens);
+        eprintln!(
+            "[yue2:nar] prefix prefill: {} AR tokens -> {:.1}s",
+            chunk.ar_tokens.len(),
+            prefill_started.elapsed().as_secs_f64(),
+        );
         for (layer, (keys, values)) in prefix_kv.iter().enumerate() {
             trace(
                 "yue2.nar.prefix_k",

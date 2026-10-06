@@ -219,7 +219,16 @@ def _chunks(path: Path, absolute_start: int, length: int) -> Iterable[bytes]:
 # at 4 and 32 steps, while the same weights in BF16 are fine. Keeping NAR in
 # BF16 avoids that, at the cost of the AR tokens changing -- a different take
 # rather than a corrupted one.
-QUANT_MODES = ("bf16", "f32", "q8_0", "ar_q8_0", "q4_0", "q4_k_m", "q6_k")
+QUANT_MODES = (
+    "bf16",
+    "f32",
+    "q8_0",
+    "ar_q8_0",
+    "q4_0",
+    "q4_k_m",
+    "ar_q4_k_m",
+    "q6_k",
+)
 
 # Per-mode scope: which per-layer projection stream the mode is allowed to touch.
 _QUANT_STREAMS = {
@@ -229,6 +238,7 @@ _QUANT_STREAMS = {
     "ar_q8_0": ("",),
     "q4_0": ("", "nar_"),
     "q4_k_m": ("", "nar_"),
+    "ar_q4_k_m": ("",),
     "q6_k": ("", "nar_"),
 }
 
@@ -270,7 +280,13 @@ _NAR_GLOBAL_MATRIX_NAMES: tuple[str, ...] = (
 )
 
 # Smallest block any supported encoder needs.
-_MIN_BLOCK_ELEMENTS = {"q8_0": 32, "q4_0": 32, "q4_k_m": 256, "q6_k": 256}
+_MIN_BLOCK_ELEMENTS = {
+    "q8_0": 32,
+    "q4_0": 32,
+    "q4_k_m": 256,
+    "ar_q4_k_m": 256,
+    "q6_k": 256,
+}
 
 
 def _quantizable_names(layers: int, streams: tuple[str, ...] = ("", "nar_")) -> set[str]:
@@ -409,9 +425,13 @@ def _write_atomic(
                     # Same encoder as `q8_0`; only the set of tensors differs,
                     # which is decided by `_quantizable_names`.
                     tensor_type, payload = _quantize_matrix(values, "q8_0")
-                elif quant == "q4_k_m":
+                elif quant in ("q4_k_m", "ar_q4_k_m"):
                     # The mixed mode picks 6-bit for some tensors and 4-bit for
                     # others, so the single-type encoder cannot be used.
+                    # `ar_q4_k_m` is the same encoder with a narrower scope: the
+                    # NAR half stays BF16, because the flow-matching solve
+                    # amplifies weight noise every step and a 4-bit NAR is noise
+                    # by 4 steps. See `QUANT_MODES`.
                     tensor_type = _k_m_type_for(name)
                     payload = (
                         quantize_q6_k(values)

@@ -99,9 +99,140 @@ static DISPATCH_TRACE_ENABLED: std::sync::atomic::AtomicBool =
 static DISPATCH_TRACE_COUNTS: [std::sync::atomic::AtomicU64; OPERATOR_SHADERS.len()] =
     [const { std::sync::atomic::AtomicU64::new(0) }; OPERATOR_SHADERS.len()];
 
-/// Report how many dispatches each operator pipeline recorded. `wait_for_fences`
-/// in `vulkan::dump_submit_trace` shows where the wall-clock went; this shows
-/// which pipeline asked for it.
+/// Per-dispatch trace: what was bound and how big the grid was, in order.
+///
+/// `RUST_GPU_DISPATCH_TRACE=1` only counts, which is enough to attribute time
+/// to a pipeline but not to answer "which dispatch in this sequence went
+/// wrong". `=2` additionally records the ordered call log into a ring buffer
+/// so a failing sequence can be read back dispatch by dispatch.
+#[cfg(feature = "vulkan")]
+const DISPATCH_LOG_CAPACITY: usize = 4096;
+
+#[cfg(feature = "vulkan")]
+struct DispatchLogEntry {
+    pipeline: u32,
+    set: u64,
+    x: u32,
+    y: u32,
+    z: u32,
+    submit_epoch: u32,
+}
+
+#[cfg(feature = "vulkan")]
+static DISPATCH_LOG: [std::sync::atomic::AtomicU64; DISPATCH_LOG_CAPACITY * 3] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; DISPATCH_LOG_CAPACITY * 3];
+
+#[cfg(feature = "vulkan")]
+static DISPATCH_LOG_LEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(feature = "vulkan")]
+static DISPATCH_LOG_EPOCH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Shader names indexed by `OPERATOR_SHADERS` position, for the trace dump.
+#[cfg(feature = "vulkan")]
+const OPERATOR_SHADER_NAMES: [&str; 27] = [
+    "quantize_q8_0",
+    "quantize_q8_k",
+    "q8_matmul_grouped",
+    "q4_0_matmul",
+    "q4_1_matmul",
+    "q4_k_matmul",
+    "q6_k_matmul",
+    "f16_matmul",
+    "bf16_matmul",
+    "rms_norm",
+    "qk_norm_rope",
+    "kv_write",
+    "attention_scores",
+    "softmax",
+    "attention_values",
+    "silu_mul",
+    "add",
+    "qwen35_dense_prepare",
+    "qwen35_attention",
+    "qwen35_recurrent_conv",
+    "qwen35_recurrent_ssm",
+    "q5_k_matmul",
+    "f32_matmul",
+    "adaln_modulate",
+    "q8_matmul_grouped_tiled",
+    "f16_matmul_tiled",
+    "attention_scores_tiled",
+];
+
+/// True when the ordered dispatch log is being collected.
+#[cfg(feature = "vulkan")]
+pub(crate) fn dispatch_log_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("RUST_GPU_DISPATCH_TRACE").as_deref() == Ok("2"))
+}
+
+/// Record one bound dispatch. `pipeline` is the `OPERATOR_SHADERS` index.
+#[cfg(feature = "vulkan")]
+pub(crate) fn dispatch_log_push(pipeline: usize, set: u64, grid: [u32; 3]) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let index = DISPATCH_LOG_LEN.fetch_add(1, Relaxed) as usize;
+    if index >= DISPATCH_LOG_CAPACITY {
+        // Saturate rather than wrap: a wrapped log would silently reorder
+        // exactly the sequence someone is trying to read.
+        return;
+    }
+    let base = index * 3;
+    DISPATCH_LOG[base].store(pipeline as u64, Relaxed);
+    DISPATCH_LOG[base + 1].store(set, Relaxed);
+    DISPATCH_LOG[base + 2].store(
+        (grid[0] as u64)
+            | ((grid[1] as u64) << 32)
+            | ((DISPATCH_LOG_EPOCH.load(Relaxed) as u64) << 20),
+        Relaxed,
+    );
+}
+
+/// Mark a submission boundary in the log, so dispatches can be grouped by the
+/// command buffer they were recorded into.
+#[cfg(feature = "vulkan")]
+pub(crate) fn dispatch_log_new_epoch() {
+    use std::sync::atomic::Ordering::Relaxed;
+    DISPATCH_LOG_EPOCH.fetch_add(1, Relaxed);
+}
+
+/// Forget everything recorded so far.
+#[cfg(feature = "vulkan")]
+pub fn dispatch_log_reset() {
+    use std::sync::atomic::Ordering::Relaxed;
+    DISPATCH_LOG_LEN.store(0, Relaxed);
+    DISPATCH_LOG_EPOCH.store(0, Relaxed);
+    for cell in DISPATCH_LOG.iter() {
+        cell.store(0, Relaxed);
+    }
+}
+
+/// Dump the ordered dispatch log to stderr.
+#[cfg(feature = "vulkan")]
+pub fn dump_dispatch_log() {
+    use std::sync::atomic::Ordering::Relaxed;
+    if !dispatch_log_enabled() {
+        return;
+    }
+    let len = (DISPATCH_LOG_LEN.load(Relaxed) as usize).min(DISPATCH_LOG_CAPACITY);
+    eprintln!("[GPU-DLOG] {len} dispatches recorded");
+    let mut last_epoch = u32::MAX;
+    for index in 0..len {
+        let base = index * 6;
+        let pipeline = DISPATCH_LOG[base].load(Relaxed) as usize;
+        let set = DISPATCH_LOG[base + 1].load(Relaxed);
+        let x = DISPATCH_LOG[base + 2].load(Relaxed);
+        let y = DISPATCH_LOG[base + 3].load(Relaxed);
+        let z = DISPATCH_LOG[base + 4].load(Relaxed);
+        let epoch = DISPATCH_LOG[base + 5].load(Relaxed) as u32;
+        if epoch != last_epoch {
+            eprintln!("  -- submit #{epoch} --");
+            last_epoch = epoch;
+        }
+        let name = OPERATOR_SHADER_NAMES.get(pipeline).copied().unwrap_or("?");
+        eprintln!("  [{index:5}] {name:26} set={set} grid={x}x{y}x{z}");
+    }
+}
+
 #[cfg(feature = "vulkan")]
 pub fn dump_dispatch_trace() {
     if !DISPATCH_TRACE_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
@@ -285,6 +416,28 @@ impl ArenaLayout {
             config.n_embd_head_k,
             config.vocab,
             config.n_layer,
+            capacity,
+            max_rows,
+        )
+    }
+
+    /// Arena for the YuE2 autoregressive decoder. YuE2 is a plain dense
+    /// transformer (no MoE, no SSM, no fused QKV), so the region set is
+    /// exactly the Qwen3 one; only the dimensions differ, including a
+    /// 184704-wide logits row for `lm_head`.
+    pub(crate) fn yue2(
+        config: &crate::models::yue2::YuE2Config,
+        capacity: usize,
+        max_rows: usize,
+    ) -> Result<Self, VulkanError> {
+        Self::build_rows(
+            config.hidden,
+            config.ffn,
+            config.q_heads,
+            config.kv_heads,
+            config.head_dim,
+            config.vocab,
+            config.layers,
             capacity,
             max_rows,
         )
@@ -558,6 +711,17 @@ pub(crate) struct OperatorBindings {
 }
 
 impl OperatorBindings {
+    /// The raw handle, for the dispatch log. `vk::DescriptorSet` is a
+    /// non-primitive newtype with a private field, so the trace reads it here
+    /// rather than reaching into the type.
+    fn descriptor_set_handle(&self) -> u64 {
+        // `vk::DescriptorSet` is #[repr(transparent)] over a handle, so the
+        // transmute is the only way to get a printable identity out of it.
+        #[allow(clippy::unnecessary_cast)]
+        let handle = self.descriptor_set;
+        unsafe { std::mem::transmute::<vk::DescriptorSet, u64>(handle) }
+    }
+
     fn require(&self, index: usize, bytes: usize, label: &str) -> Result<(), VulkanError> {
         let bytes = u64::try_from(bytes).map_err(|_| VulkanError::OutOfMemory)?;
         if self.sizes[index] < bytes {
@@ -1231,6 +1395,9 @@ impl<'a> Qwen3Ops<'a> {
             commands.barrier();
             self.recorded_dispatches
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if dispatch_log_enabled() {
+                dispatch_log_push(pipeline, bindings.descriptor_set_handle(), dispatch);
+            }
         }
         if DISPATCH_TRACE_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
             DISPATCH_TRACE_COUNTS[pipeline].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1580,6 +1747,14 @@ impl<'a> Qwen3Ops<'a> {
                 &quantize_push,
                 quantize_dispatch,
             );
+            // The matmul below reads what the quantize just wrote out of the
+            // arena, so it needs a barrier between them. Every caller used to
+            // end at a `submit_and_wait` right after this pair, which made the
+            // dependency implicit; recording several projections into one
+            // command buffer (the YuE2/Z-Image FFN) exposes it, and without
+            // the barrier the matmul reads stale activation and the layer
+            // produces -inf.
+            unsafe { commands.barrier() };
         }
         self.record_linear_dispatch(commands, Q8_MATMUL_GROUPED_TILED, bindings, &push, dispatch);
         Ok(())
@@ -2873,6 +3048,13 @@ impl<'a> Qwen3Ops<'a> {
             );
             commands.dispatch(x, y, z);
             commands.barrier();
+        }
+        if dispatch_log_enabled() {
+            dispatch_log_push(
+                SILU_MUL,
+                self.arena_bindings.descriptor_set_handle(),
+                [x, y, z],
+            );
         }
         Ok(())
     }
