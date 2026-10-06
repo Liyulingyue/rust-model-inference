@@ -1264,7 +1264,7 @@ impl ZImageDit {
         eprintln!("  scale_modulated:      {:8.1}ms ({:5.1}%)", t.2, pct(t.2));
         eprintln!("  linear qkv:           {:8.1}ms ({:5.1}%)", t.3, pct(t.3));
         eprintln!(
-            "  rope_neox_inplace_with_factor:    {:8.1}ms ({:5.1}%)",
+            "  rope_neox_inplace:                {:8.1}ms ({:5.1}%)",
             t.4,
             pct(t.4)
         );
