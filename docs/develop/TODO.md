@@ -1087,7 +1087,7 @@ GGUF 重量（从 `audio-cpp/AuK-Base-and-Flash-GGUF`）：
 - [ ] VAE resblocks 的 causal padding（当前用 symmetric，lossy 一点；low impact 因 upsample 已用 linear interp）
 - [ ] VAE SnakeBeta 的 FIR up/down filters（audio.cpp 用 `build_activation`，我们 skip；lossy 一点，minor impact）
 - [x] **CFMEdit reference-audio conditioning path**（done as C：C 任务）— `AukPipeline::generate_audio_with_audio(prompt, audio_embeddings, audio_tokens, options)` 接入。`audio_embeddings` 是 `audio_tokens * 2048` 的 f32 buffer（Qwen2.5-Omni audio tower 的隐藏空间），与 text embeddings 拼成 `[img, audio, text]` joint sequence 走 DiT forward。`dit.denoise` 新增 `audio_conditioning` + `audio_tokens` 参数，`predict_velocity_inner` 改用 `cond_tokens = audio_tokens + text_tokens`；joint layout、txt_proj、scratch.prepare 全部按 cond_tokens 处理。零向量 smoke 337ms OK（max_abs=0.95，finite audio）。**Qwen audio tower encoder 还没 port**——端到端 CFMEdit 需要外部提供 audio embeddings（Python 跑 Qwen audio tower 导出 f32 binary 即可）。这是 follow-up 工作，涉及 32 transformer encoder layers + 2 Conv1d + ln_post + proj（1280→2048）。
-- [ ] AuK-Flash 蒸馏版（4 步 + guidance 0）
+- [x] **AuK-Flash 蒸馏版（4 步 + guidance 0）**（done as D：D 任务）— **零代码改动**。Flash 跟 AuK-Base 共享同一份架构（Flux2Edit, dim=1536, 24 heads, ff_inner=3072, num_layers=10, num_single_layers=20）+ tensor layout（420 个 tensor，一一对应）。下载 `auk-flash-f16.gguf`（2.9 GB F16 from `audio-cpp/AuK-Base-and-Flash-GGUF`），通过同一份 `AukPipeline::load` 加载；调度切换为 `steps=4, guidance_scale=0.0`（跳过 CFG unconditional run）。Smoke 测试：`tests/auk_flash_smoke.rs`（`#[ignore]`）；dev mode 4 步 323s，3200 samples @ 24 kHz，max_abs=0.95，finite。
 
 性能现状（4 steps + CFG=2.0 + 4 threads + Intel MTL + `--gpu`，**release 模式**）：
 - text_encode: 1.6s（CPU；Qwen2.5-Omni qwen2vl arch 还没 Vulkan）
