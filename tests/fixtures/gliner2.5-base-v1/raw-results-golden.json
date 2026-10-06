@@ -13,6 +13,7 @@
      "org": "an organisation"
     }
    },
+   "built_with_schema_builder": false,
    "threshold": 0.3,
    "raw": {
     "entities": [
@@ -48,6 +49,7 @@
      "person": "a person"
     }
    },
+   "built_with_schema_builder": false,
    "threshold": 0.3,
    "raw": {
     "entities": [
@@ -77,6 +79,7 @@
      "company": "a company"
     }
    },
+   "built_with_schema_builder": false,
    "threshold": 0.3,
    "raw": {
     "entities": [
@@ -112,6 +115,7 @@
      "person": "a person"
     }
    },
+   "built_with_schema_builder": false,
    "threshold": 0.999,
    "raw": {
     "entities": [
@@ -134,6 +138,7 @@
      "location": "a place"
     }
    },
+   "built_with_schema_builder": false,
    "threshold": 0.3,
    "raw": {
     "entities": [
@@ -177,6 +182,7 @@
      "location": "a place"
     }
    },
+   "built_with_schema_builder": false,
    "threshold": 0.3,
    "raw": {
     "entities": [
@@ -240,6 +246,7 @@
      }
     }
    },
+   "built_with_schema_builder": false,
    "threshold": 0.3,
    "raw": {
     "paper": [
@@ -291,6 +298,7 @@
      }
     }
    },
+   "built_with_schema_builder": false,
    "threshold": 0.3,
    "raw": {
     "person": [
@@ -348,6 +356,7 @@
      }
     ]
    },
+   "built_with_schema_builder": false,
    "threshold": 0.3,
    "raw": {
     "worked_in": [
@@ -409,6 +418,7 @@
      }
     ]
    },
+   "built_with_schema_builder": false,
    "threshold": 0.3,
    "raw": {
     "worked_in": [
@@ -470,6 +480,95 @@
    }
   },
   {
+   "name": "structures_choices_scalar_and_list",
+   "text": "The paper is clearly about safety and less about alignment.",
+   "schema": {
+    "structures": {
+     "paper": {
+      "fields": [
+       {
+        "name": "topic",
+        "dtype": "str",
+        "choices": [
+         "ml",
+         "safety",
+         "vision"
+        ],
+        "description": "the paper's topic"
+       },
+       {
+        "name": "mood",
+        "choices": [
+         "positive",
+         "negative"
+        ],
+        "description": "the paper's mood"
+       }
+      ]
+     }
+    }
+   },
+   "built_with_schema_builder": true,
+   "threshold": 0.3,
+   "raw": {
+    "paper": [
+     {
+      "topic": {
+       "text": "safety",
+       "confidence": 0.999554455280304
+      },
+      "mood": [
+       {
+        "text": "negative",
+        "confidence": 0.9991694688796997
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "name": "entities_scalar_dtype_collapses_to_one_value",
+   "text": "Marie Curie worked in Paris.",
+   "schema": {
+    "entities": {
+     "person": "a person"
+    }
+   },
+   "built_with_schema_builder": true,
+   "threshold": 0.3,
+   "raw": {
+    "entities": [
+     {
+      "person": {
+       "text": "Marie Curie",
+       "confidence": 0.9976626634597778,
+       "start": 0,
+       "end": 11
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "entities_scalar_dtype_with_nothing_to_report",
+   "text": "Marie Curie worked in Paris.",
+   "schema": {
+    "entities": {
+     "person": "a person"
+    }
+   },
+   "built_with_schema_builder": true,
+   "threshold": 0.999,
+   "raw": {
+    "entities": [
+     {
+      "person": null
+     }
+    ]
+   }
+  },
+  {
    "name": "classifications",
    "text": "This is a great paper.",
    "schema": {
@@ -483,6 +582,7 @@
      }
     ]
    },
+   "built_with_schema_builder": false,
    "threshold": 0.3,
    "raw": {
     "sentiment": [
@@ -507,6 +607,7 @@
      }
     ]
    },
+   "built_with_schema_builder": false,
    "threshold": 0.3,
    "raw": {
     "topics": [

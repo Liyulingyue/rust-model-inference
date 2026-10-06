@@ -2,15 +2,15 @@ r"""Oracle for the raw results dict — the layer before `format_results`.
 
 `format_results` (see `dump_format_results.py`) is the last step of an extract
 call. This is the step before it: the **raw** dict the decode stages assemble,
-where a span prediction is still a 4-element sequence in the span case and an
-offset-carrying dict in the structures case, and where the per-group key shapes
-are still whatever each decoder built.
+where predictions are offset-carrying dicts rather than the shaped strings and
+label lists a caller sees, and where the per-group key shapes are still whatever
+each decoder built.
 
 This is the ground truth for the `Extraction` -> raw-results converter that
 F-3 接线 needs. The port's `extract()` returns a typed `Extraction` carrying
 **word** offsets, while the reference's raw dict carries **character** offsets
-(`start_map[start], end_map[end - 1]`, `runtime.py:846`), so the converter has
-to translate coordinates as well as reshape values. Driving the real
+(`start_map[start], end_map[end - 1]`), so the converter has to translate
+coordinates as well as reshape values. Driving the real
 `batch_extract(format_results=False)` pins both at once, which a hand-written
 pure oracle could not.
 
@@ -19,18 +19,18 @@ What this pins
 **The key shape per group type is not uniform, and each is easy to get wrong.**
 
 - `entities` is a list holding **one** map from entity label to its spans. Every
-  declared label appears, including any that found nothing.
+  declared label appears, including any that found nothing — and a label declared
+  `dtype: "str"` is a **dict or `null`, not a list**: it collapses to its single
+  best span, and to `null` when nothing cleared the threshold.
 - A `json_structures` group is keyed by its **own name** at top level (here
   `paper`), not by `json_structures`, and its value is a list holding one field
-  map. The field values are
-  the field values are **dicts carrying `text`/`confidence`/`start`/`end`** — not
-  4-tuples. So the same span serializes as a sequence under `entities` and as a
-  dict under `json_structures`, and the two struct formatters treat those
-  differently.
-- A relation type is keyed at top level with a list of `{head, tail}` objects,
-  where each side is itself an offset-carrying dict. There is no `score` key on
-  the edge: the confidence lives on each side, and both sides report the *same*
-  number because the edge is scored once.
+  map. A span field's value is a list of offset-carrying dicts; a `choices` field
+  has **no `start`/`end` at all**, because a choice has no document location.
+- A relation type is keyed at top level with a list of `{head, tail}` objects.
+  There is no `score` key on the edge: the confidence lives on each side, and
+  **both sides report the same number** because the edge is scored once. Each side
+  is built as `{text, start, end}` with `confidence` *added afterwards*, so its
+  key order differs from a span's even though the content does not.
 - A classification is a bare `(label, score)` **tuple** at top level, not a
   mapping. This is what makes it sniff as a relation in `format_results` unless
   the schema listed it in `classification_tasks`, and it is why the converter
@@ -39,6 +39,25 @@ What this pins
 **Group order follows the schema, and groups the schema did not declare are
 absent entirely** rather than present-and-empty. A schema declaring only
 relations produces no `entities` key at all.
+
+**A plain-dict schema silently discards every piece of metadata.**
+`_build_schema_dicts_and_metadata` (`runtime.py:345`) only reads
+`entity_metadata`, `field_metadata`, `relation_metadata`, `field_orders` and
+`entity_order` off a `Schema` **builder**; handed a dict it writes empty tables
+and proceeds. So writing `entity_metadata: {person: {dtype: "str"}}` into a dict
+schema neither raises nor applies — the label stays a list and the case passes
+for the wrong reason. Three cases here were wrong in exactly that way before the
+builder was used, which is why they are worth recording rather than deleting:
+the failure is silent and the fixture looks fine.
+
+`choices` has the same trap with a different cause: they live *inside* a field's
+value (what `Schema.field` writes), not in a `field_metadata` side table. A
+dict-schema `field_metadata` is dropped before the decoder sees it, so the field
+decodes as an ordinary list field and scores **document spans** instead — a
+result that looks plausible and is not the feature under test.
+
+Cases needing metadata therefore go through the builder, and the fixture records
+`built_with_schema_builder` so a reader knows which those are.
 """
 from __future__ import annotations
 
@@ -51,6 +70,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "target" / "gliner2-oracle"))
 
 from gliner2 import AutoExtractor  # noqa: E402
+from gliner2.inference.schema import Schema  # noqa: E402
 
 # The published checkpoint layout the loader expects: the fine-tuned weights at
 # the top level and the *base* encoder's config under `encoder_config/`. The
@@ -91,6 +111,29 @@ def structure_schema(fields, dtypes=None, description=None, name="paper"):
         schema["field_metadata"] = {
             f"{name}.{field}": {"dtype": dtype} for field, dtype in dtypes.items()
         }
+    return schema
+
+
+def choice_schema():
+    """A `json_structures` group whose two fields are literal enums.
+
+    `StructureBuilder.parent` is the *group name*, not the `Schema`, and
+    `__getattr__` forwards unknown attributes to the parent schema after
+    finishing the builder — so the builder has to be finished by a later call
+    (`build()` does it) rather than by reaching for a parent. Holding the
+    `Schema` in a variable and letting `build()` finish the builder is the shape
+    that works, and it is what the case below uses.
+    """
+    schema = Schema()
+    schema.structure("paper")
+    schema._active_builder.field(
+        "topic", dtype="str", choices=["ml", "safety", "vision"],
+        description="the paper's topic",
+    )
+    schema._active_builder.field(
+        "mood", dtype="list", choices=["positive", "negative"],
+        description="the paper's mood",
+    )
     return schema
 
 
@@ -211,6 +254,44 @@ CASES = [
         0.3,
     ),
     (
+        # A `choices` field, built with the `Schema` builder because a plain
+        # dict cannot express it. This took two attempts to get right, and the
+        # first attempt is the useful part: `choices` written into a
+        # `field_metadata` side table is **silently ignored**, and the field
+        # decodes as an ordinary list field scoring document spans instead. So a
+        # choice field is only a choice field when the choices sit *inside* the
+        # field value, which is what the builder writes.
+        #
+        # The scores are the reference's choice scores, and a choice has no
+        # document location — the shape below is what tells the converter that
+        # `start`/`end` do not exist for this variant, and guessing otherwise
+        # would invent offsets.
+        "structures_choices_scalar_and_list",
+        "The paper is clearly about safety and less about alignment.",
+        choice_schema(),
+        0.3,
+    ),
+    (
+        # A scalar-dtype entity collapses to a single value instead of a list.
+        # Also needs the builder: `entity_metadata` in a plain dict is dropped by
+        # `_build_schema_dicts_and_metadata`, so the dtype silently stays `list`
+        # and the case passes for the wrong reason.
+        "entities_scalar_dtype_collapses_to_one_value",
+        "Marie Curie worked in Paris.",
+        Schema().entities({"person": "a person"}, dtype="str"),
+        0.3,
+    ),
+    (
+        # The same scalar dtype with a threshold nothing clears, so the collapse
+        # lands on `None` — a different JSON type again, which
+        # `format_entity_dict` turns into `null` downstream. Without this,
+        # "collapses to one value" cannot tell "absent" from "present but null".
+        "entities_scalar_dtype_with_nothing_to_report",
+        "Marie Curie worked in Paris.",
+        Schema().entities({"person": "a person"}, dtype="str"),
+        0.999,
+    ),
+    (
         # A classification is a bare `(label, score)` tuple, which is exactly the
         # shape `format_results` sniffs as a relation. Only the schema's
         # `classification_tasks` keeps it out of `relation_extraction`, so the
@@ -266,7 +347,13 @@ def main() -> None:
         cases.append({
             "name": name,
             "text": text,
-            "schema": schema,
+            # A `Schema` builder has no JSON form of its own; `to_dict` is the
+            # prompt-facing schema and loses the metadata, so the fixture records
+            # the *built* dict plus a flag saying metadata was in play. The port
+            # reads metadata from the caller's schema, so a reader needs to know
+            # which cases exercised it.
+            "schema": schema.to_dict() if hasattr(schema, "to_dict") else schema,
+            "built_with_schema_builder": hasattr(schema, "build"),
             "threshold": threshold,
             "raw": raw,
         })
