@@ -91,6 +91,36 @@ a k-quant matmul is the shader, not the device. The same table shows the fixed
 submit round trip is about 370 us, which matters for a per-token decode but
 does not explain this -- the whole chunk is one submission.
 
+## 分歧定位：多 token prefill 逐位一致，单 token decode 全错
+
+用 `YUE2_DUMP_LOGITS`（临时插桩，已回退）在真实模型上对比 CPU/GPU 的 AR logits：
+
+```
+prefill#0 (prefix, 多 token)   SAME   逐位一致
+prefill#1 (第 1 个单 token)     DIFF
+prefill#2+                      DIFF
+```
+
+**#0 完整一致，#1 起全错。** #0 与 #1 的唯一区别是 rows=N vs rows=1，以及 #1 依赖
+#0 写进 KV cache 的内容。由于 #0 逐位一致，权重上传、host 写、量化、28 层前向本身
+都是对的 —— 错的只发生在**单 token decode** 这条路径上（KV carryover 或 rows=1 的
+某个 recorder 分支）。
+
+已排除：
+
+- **host-write 缺失**：forward_chunk 里 `write_f32` 后没有 host→compute 屏障。
+  补上 `host_write_barrier` 后仍然 #1 分歧（逐位一样），所以不是它。
+- **AR 权重本身**：#0 逐位一致说明上传/量化/前向都对。
+- **token 流不同**：同 seed 同 logits(#0) 下采样出同样的 token，#1 的输入相同。
+
+结论：这是 AR **decode（rows=1）** 路径的独立 bug，与 k-quant shader 的 1/64 lane
+问题**无关**（那条是纯性能）。修好 decode 正确性之后，k-quant 的 5× 才敢合。
+
+下一步应直接对拍 rows=1 的单步：用一个测试在 GPU 上只跑一次 rows=1 的
+record_attention_rows / record_kv_write_rows / record_qk_norm_rope_rows，与 CPU 的
+单步 forward 逐层比对，定位第一个分歧的算子。现有 tiny_for_test 走不了 GPU
+（没有 tensor source），所以需要一个真实 GGUF 的对拍 harness。
+
 ## 修 k-quant shader 的 1/64 lane：5.05× 但正确性未确认（已回退）
 
 诊断（`docs/usage/yue2-gpu.md` 上文）说 Q4_K/Q6_K shader 慢 4.2× 的原因是
