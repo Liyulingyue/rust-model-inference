@@ -295,8 +295,18 @@ impl AukDit {
     }
 
     /// Linear matmul dispatch: prefers the pre-quantized Q8_0 path (Vulkan
-    /// backend) and falls back to the F16 path (CPU-only) for any tensor
-    /// we did not pre-quantize.
+    /// Dispatch a linear matmul:
+    /// 1. Try pre-quantized Q8_0 cached path (GPU via matmul_q8_0). The Q8
+    ///    path is the existing optimization from commit `f4e7879` and remains
+    ///    active until the F16 GPU path (line 246 of `super::mod.rs`) is
+    ///    validated end-to-end as a drop-in replacement.
+    /// 2. Fall back to F16 CPU via `super::linear_into_scaled_impl` (which
+    ///    itself tries the F16 GPU path first when `--features vulkan` is on).
+    ///
+    /// The previous version of this function contained an infinite recursion
+    /// (it called `self.linear_into_dispatched` rather than the F16 fallback),
+    /// masked in practice because every F16 tensor in the DiT was always
+    /// pre-quantized into `q8_weights`. The recursion is now fixed.
     pub(crate) fn linear_into_dispatched(
         &self,
         name: &str,
@@ -318,13 +328,17 @@ impl AukDit {
         ) {
             return Ok(());
         }
-        self.linear_into_dispatched(
+        super::linear_into_scaled_impl(
+            self.source.as_ref(),
             name,
             n_in,
             n_out,
             input,
             output,
-            q8)
+            q8,
+            self.pool.as_ref(),
+            1.0,
+        )
     }
 
     /// Run the diffusion loop for `options.steps` Euler steps and return

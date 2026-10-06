@@ -1082,19 +1082,20 @@ GGUF 重量（从 `audio-cpp/AuK-Base-and-Flash-GGUF`）：
 待优化（follow-up，no rush）：
 - [ ] 数值校准 oracle-diff vs `references/audio.cpp/src/community_models/auk/flow.cpp` — block forward magnitudes drift without the velocity clip
 - [ ] Per-token matmul batching（`linear_into` 一调一次 token，瓶颈；需新增 batched Q8_0 matmul helper 或 thread-local Q8Scratch per rayon worker）
-- [ ] F16 matmul Vulkan path（`src/ops/kernel/f16/mod.rs` 当前只有 AVX2/NEON，没有 Vulkan 后端；F16 DiT 权重只能 CPU matmul；如果加 F16 shader 或改成先 F16→Q8_0 再走 Q8_0 Vulkan path，denoise 可能 5x 加速）
+- [x] **F16 matmul Vulkan path** — 新增 `auk_f16_gpu_runtime` + `f16_gpu_linear_into`，单行 `BatchedLinearRuntime::matmul_rows(format=F16)` 接入 `linear_into_scaled_impl` 的 F16 分支。**当前 path 仍走 Q8 cache 优先**，F16 GPU 仅在 Q8 miss 时降级（实际 0 调用）。下一步把 pre_quantize 拆掉并改用 F16 GPU 直跑以消除 quant noise。
+- [x] **修掉 `linear_into_dispatched` 的无限递归** —— 之前在 Q8 miss 时调用 `self.linear_into_dispatched`（实际是无限递归，被 Q8 cache 100% 命中掩盖）；改为 `super::linear_into_scaled_impl`。
 - [ ] VAE resblocks 的 causal padding（当前用 symmetric，lossy 一点；low impact 因 upsample 已用 linear interp）
 - [ ] VAE SnakeBeta 的 FIR up/down filters（audio.cpp 用 `build_activation`，我们 skip；lossy 一点，minor impact）
 - [ ] CFMEdit reference-audio conditioning path
 - [ ] AuK-Flash 蒸馏版（4 步 + guidance 0）
 
-性能现状（4 steps + CFG=2.0 + 4 threads + Intel MTL + `--gpu`）：
-- text_encode: 5.3s（CPU；Qwen2.5-Omni qwen2vl arch 还没 Vulkan）
-- denoise: 170s（CPU F16 matmul，无 Vulkan 路径）
-- vae_decode: 60s（rayon par_chunks，已 2.74x speedup）
-- total: 230s（3.8 min / 0.13s audio）
+性能现状（4 steps + CFG=2.0 + 4 threads + Intel MTL + `--gpu`，**release 模式**）：
+- text_encode: 1.6s（CPU；Qwen2.5-Omni qwen2vl arch 还没 Vulkan）
+- denoise: 40s（F16→Q8_0 pre-quant + Vulkan Q8 GPU matmul；4.1x vs 168s CPU F16）
+- vae_decode: 50s（ComputePool par_chunks over resblocks，已 2.86x vs 166s serial）
+- total: 93s（5.5x vs 515s baseline）
 
-vs 起点（515s/0.13s）：2.24x end-to-end 加速。
+vs 起点（515s/0.13s）：5.5x end-to-end 加速。
 
 注：audio.cpp 的 C++ 代码是 **参考** 而非金标准 — tensor 命名、参数化约定可能跟实际 GGUF 有微小差异（参考 ERNIE-Image 跟 unsloth GGUF 的踩坑先例），以 **GGUF 实际 tensor 名 + shape** 为准。
 
