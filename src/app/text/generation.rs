@@ -23,7 +23,15 @@ pub(crate) fn uses_llama_trunk(arch: &str) -> bool {
         // llama.cpp tensor layout (no BitLinear packing) and adds
         // GeGLU + sliding-window attention + logit softcapping,
         // all detected from `gemma2.*` GGUF metadata inside the trunk.
-        "llama" | "exaone" | "k2-horizon" | "granite" | "nanbeige" | "phi3" | "glm4" | "mistral3" | "gemma2"
+        "llama"
+            | "exaone"
+            | "k2-horizon"
+            | "granite"
+            | "nanbeige"
+            | "phi3"
+            | "glm4"
+            | "mistral3"
+            | "gemma2"
     )
 }
 

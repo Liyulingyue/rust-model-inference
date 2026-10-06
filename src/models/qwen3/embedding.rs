@@ -452,7 +452,8 @@ pub fn run_embedding_tokens(
                     &mut q[h * n_embd_head_k..(h + 1) * n_embd_head_k],
                     t,
                     n_embd_head_k,
-                    freq_base, 1.0_f32,
+                    freq_base,
+                    1.0_f32,
                 );
             }
         }
@@ -463,7 +464,8 @@ pub fn run_embedding_tokens(
                     &mut k[h * n_embd_head_k..(h + 1) * n_embd_head_k],
                     t,
                     n_embd_head_k,
-                    freq_base, 1.0_f32,
+                    freq_base,
+                    1.0_f32,
                 );
             }
         }

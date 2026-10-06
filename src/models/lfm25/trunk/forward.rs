@@ -13,8 +13,8 @@ use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
 use crate::ops::{
     dot_f16_f32, dot_f32, embedding_lookup, quantize_q8_0_into, quantize_row_q8_k_into, rms_norm,
-    rms_norm_inplace, rope_neox_inplace_with_factor, sample_top_k, silu_mul_inplace, softmax_inplace,
-    vec_add_into, vec_mad_f16_f32, vec_mul_inplace, vec_scale_f32,
+    rms_norm_inplace, rope_neox_inplace_with_factor, sample_top_k, silu_mul_inplace,
+    softmax_inplace, vec_add_into, vec_mad_f16_f32, vec_mul_inplace, vec_scale_f32,
 };
 use crate::prompt::{build_lfm2_chat_prompt_with_thinking, Lfm2Message};
 
@@ -673,7 +673,8 @@ fn forward_attention(
                 &mut q[h * n_embd_head_k..(h + 1) * n_embd_head_k],
                 pos,
                 n_embd_head_k,
-                freq_base, 1.0_f32,
+                freq_base,
+                1.0_f32,
             );
         }
         for h in 0..n_head_kv {
@@ -681,7 +682,8 @@ fn forward_attention(
                 &mut k_new[h * n_embd_head_k..(h + 1) * n_embd_head_k],
                 pos,
                 n_embd_head_k,
-                freq_base, 1.0_f32,
+                freq_base,
+                1.0_f32,
             );
         }
     }

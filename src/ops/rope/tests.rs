@@ -2,8 +2,8 @@
 
 use super::{
     neox::{rope_neox_inplace_scalar, rope_neox_inplace_with_table, rope_sin_cos},
-    rope_mrope, rope_neox_inplace_with_factor, rope_neox_sleef, rope_norm, rope_norm_nrot, rope_sin_cos_sleef,
-    rope_sin_cos_sleef_table_with_threads, rope_vision,
+    rope_mrope, rope_neox_inplace_with_factor, rope_neox_sleef, rope_norm, rope_norm_nrot,
+    rope_sin_cos_sleef, rope_sin_cos_sleef_table_with_threads, rope_vision,
 };
 
 #[test]

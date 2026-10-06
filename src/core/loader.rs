@@ -620,7 +620,11 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             // silently produce garbage rotations. Hardcode the
             // Gemma-2 default here; every other arch falls through
             // to 1e6 unchanged.
-            let default = if prefix == "gemma2" { 10_000.0 } else { 1_000_000.0 };
+            let default = if prefix == "gemma2" {
+                10_000.0
+            } else {
+                1_000_000.0
+            };
             get_f64_opt(&format!("{prefix}.rope.freq_base"), default)? as f32
         },
         norm_eps: get_f64(&format!("{prefix}.attention.layer_norm_epsilon"))

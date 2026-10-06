@@ -1787,10 +1787,7 @@ pub fn run_inference_tokens(
                         // `gate_buf <- post-activation` contract.
                         if crate::ops::gpu_matmul_active() {
                             if ith == 0 {
-                                gelu_mul_approx_inplace(
-                                    &gate_buf[..n_ff],
-                                    &mut up_buf[..n_ff],
-                                );
+                                gelu_mul_approx_inplace(&gate_buf[..n_ff], &mut up_buf[..n_ff]);
                                 gate_buf[..n_ff].copy_from_slice(&up_buf[..n_ff]);
                             }
                         } else {
@@ -1801,8 +1798,7 @@ pub fn run_inference_tokens(
                                 &gate_buf[r_start..r_end],
                                 &mut up_buf[r_start..r_end],
                             );
-                            gate_buf[r_start..r_end]
-                                .copy_from_slice(&up_buf[r_start..r_end]);
+                            gate_buf[r_start..r_end].copy_from_slice(&up_buf[r_start..r_end]);
                         }
                     } else if crate::ops::gpu_matmul_active() {
                         // Matmul ran as one fenced GPU dispatch owned by thread 0;
@@ -2634,10 +2630,7 @@ pub fn run_forward_logits_llama_inner(
                     // exact convention).
                     if crate::ops::gpu_matmul_active() {
                         if ith == 0 {
-                            gelu_mul_approx_inplace(
-                                &gate_buf[..n_ff],
-                                &mut up_buf[..n_ff],
-                            );
+                            gelu_mul_approx_inplace(&gate_buf[..n_ff], &mut up_buf[..n_ff]);
                             gate_buf[..n_ff].copy_from_slice(&up_buf[..n_ff]);
                         }
                     } else {
@@ -2648,8 +2641,7 @@ pub fn run_forward_logits_llama_inner(
                             &gate_buf[r_start..r_end],
                             &mut up_buf[r_start..r_end],
                         );
-                        gate_buf[r_start..r_end]
-                            .copy_from_slice(&up_buf[r_start..r_end]);
+                        gate_buf[r_start..r_end].copy_from_slice(&up_buf[r_start..r_end]);
                     }
                 } else if crate::ops::gpu_matmul_active() {
                     if ith == 0 {
@@ -3067,16 +3059,16 @@ pub(crate) fn run_attention_chunked(
                     // instead.
                     let abs_pos = base_position + r;
                     let full_n_cached = abs_pos + 1;
-                    let (eff_n_cached, head_off) = if sliding_window > 0
-                        && full_n_cached > sliding_window
-                    {
-                        (
-                            sliding_window,
-                            kb + (full_n_cached - sliding_window) * n_embd_gqa + kv_h * n_embd_head_v,
-                        )
-                    } else {
-                        (full_n_cached, kb + kv_h * n_embd_head_v)
-                    };
+                    let (eff_n_cached, head_off) =
+                        if sliding_window > 0 && full_n_cached > sliding_window {
+                            (
+                                sliding_window,
+                                kb + (full_n_cached - sliding_window) * n_embd_gqa
+                                    + kv_h * n_embd_head_v,
+                            )
+                        } else {
+                            (full_n_cached, kb + kv_h * n_embd_head_v)
+                        };
                     attention_head_f16(
                         &q_local[r * n_embd_q + q_off..r * n_embd_q + q_off + n_embd_head_k],
                         &mut attn_out_local
@@ -3141,8 +3133,8 @@ pub(crate) fn run_attention_chunked(
                     // Apply attn logit softcap to the kept region
                     // (`[sw_start, abs_pos+1)`) when active.
                     if attn_softcap > 0.0 {
-                        let mut row_view = &mut scores[r * n_padded + sw_start
-                            ..r * n_padded + (abs_pos + 1)];
+                        let mut row_view =
+                            &mut scores[r * n_padded + sw_start..r * n_padded + (abs_pos + 1)];
                         softcap_inplace(&mut row_view, attn_softcap);
                     }
                     // Causal mask padding.
@@ -3170,8 +3162,8 @@ pub(crate) fn run_attention_chunked(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_attn_pre_softmax_inplace, apply_rope, compute_yarn_thetas,
-        normalization_groups, softcap_inplace,
+        apply_attn_pre_softmax_inplace, apply_rope, compute_yarn_thetas, normalization_groups,
+        softcap_inplace,
     };
     use crate::core::tensor::{MetaValue, TensorInfo, TensorSource};
     use std::collections::HashMap;

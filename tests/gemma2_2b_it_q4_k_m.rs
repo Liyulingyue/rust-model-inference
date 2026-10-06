@@ -209,11 +209,7 @@ fn gemma2_2b_it_tensor_inventory_matches_4norm_sandwich() {
         n_total, 288,
         "expected 288 tensors (26 layers × 11 + token_embd + output_norm)"
     );
-    assert_eq!(
-        per_layer_counts.len(),
-        26,
-        "expected 26 layer blocks"
-    );
+    assert_eq!(per_layer_counts.len(), 26, "expected 26 layer blocks");
     for (idx, count) in per_layer_counts.iter() {
         assert_eq!(
             *count, 11,

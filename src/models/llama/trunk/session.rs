@@ -26,13 +26,11 @@ use crate::core::tokenizer::Tokenizer;
 use crate::ops::kernel::{PreparedRows, QuantizedTensor, Weight};
 type DynTokenizer = Box<dyn Tokenizer>;
 use crate::core::tensor::{GGMLType, MetaValue, MetaValueType};
+use crate::models::llama::trunk::forward::{apply_attn_pre_softmax_inplace, softcap_inplace};
 use crate::ops::{
-    dot_f32, embedding_lookup, gelu_mul_approx_inplace, gpu_matmul_active,
-    quantize_q8_0_into, quantize_row_q8_k_into, rms_norm_grouped, rms_norm_inplace,
-    silu_mul_approx_inplace, softmax_inplace, vec_add_into, vec_mad_f32, vec_scale_f32,
-};
-use crate::models::llama::trunk::forward::{
-    apply_attn_pre_softmax_inplace, softcap_inplace,
+    dot_f32, embedding_lookup, gelu_mul_approx_inplace, gpu_matmul_active, quantize_q8_0_into,
+    quantize_row_q8_k_into, rms_norm_grouped, rms_norm_inplace, silu_mul_approx_inplace,
+    softmax_inplace, vec_add_into, vec_mad_f32, vec_scale_f32,
 };
 use std::sync::Arc;
 
@@ -105,9 +103,9 @@ fn read_sliding_window_pattern(
     n_layer: usize,
 ) -> Vec<bool> {
     let mut pattern = vec![true; n_layer];
-    if let Some(MetaValue::Array(MetaValueType::Bool, items)) = source.metadata(&format!(
-        "{arch_prefix}.attention.sliding_window_pattern"
-    )) {
+    if let Some(MetaValue::Array(MetaValueType::Bool, items)) =
+        source.metadata(&format!("{arch_prefix}.attention.sliding_window_pattern"))
+    {
         for (i, item) in items.iter().enumerate() {
             if i >= n_layer {
                 break;
@@ -767,8 +765,8 @@ impl<'a> LlamaSession<'a> {
             // global layers (per `sliding_window_pattern`) skip the
             // trim. We pass the effective `n_cached` + the cache
             // offset per row to `run_attention_chunked`.
-            let layer_swa = sliding_window_global > 0
-                && sw_pattern.get(layer).copied().unwrap_or(true);
+            let layer_swa =
+                sliding_window_global > 0 && sw_pattern.get(layer).copied().unwrap_or(true);
             let layer_attn_softcap = if layer_swa { attn_softcap_global } else { 0.0 };
             let sw = if layer_swa { sliding_window_global } else { 0 };
             crate::models::llama::trunk::forward::run_attention_chunked(
@@ -1287,11 +1285,9 @@ impl<'a> LlamaSession<'a> {
             // only the most-recent `sliding_window` tokens. Global
             // (non-SWA) layers skip the trim via the per-layer
             // pattern (Gemma-2 9B / 27B hybrid attention).
-            let layer_swa = sliding_window_global > 0
-                && sw_pattern.get(layer).copied().unwrap_or(true);
-            let (eff_n_cached, head_off_base) = if layer_swa
-                && n_cached > sliding_window_global
-            {
+            let layer_swa =
+                sliding_window_global > 0 && sw_pattern.get(layer).copied().unwrap_or(true);
+            let (eff_n_cached, head_off_base) = if layer_swa && n_cached > sliding_window_global {
                 (
                     sliding_window_global,
                     kb + (n_cached - sliding_window_global) * n_embd_gqa,
@@ -1522,10 +1518,7 @@ impl<'a> LlamaSession<'a> {
                     );
                     if gpu_matmul_active() {
                         if ith == 0 {
-                            gelu_mul_approx_inplace(
-                                &gate_buf[..n_ff],
-                                &mut up_buf[..n_ff],
-                            );
+                            gelu_mul_approx_inplace(&gate_buf[..n_ff], &mut up_buf[..n_ff]);
                             gate_buf[..n_ff].copy_from_slice(&up_buf[..n_ff]);
                         }
                     } else {
@@ -1536,8 +1529,7 @@ impl<'a> LlamaSession<'a> {
                             &gate_buf[r_start..r_end],
                             &mut up_buf[r_start..r_end],
                         );
-                        gate_buf[r_start..r_end]
-                            .copy_from_slice(&up_buf[r_start..r_end]);
+                        gate_buf[r_start..r_end].copy_from_slice(&up_buf[r_start..r_end]);
                     }
                 } else {
                     lw.w_gate.kernel.forward_prepared(

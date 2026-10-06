@@ -259,7 +259,13 @@ pub fn text_encode(model: &Gemma3Model, token_ids: &[u32]) -> Result<Vec<f32>, S
                 let q_slice = &mut q_all[off..off + cfg.n_embd_head_k];
                 match cfg.rope {
                     Gemma3Rope::Neox => {
-                        rope_neox_inplace_with_factor(q_slice, tok, cfg.n_embd_head_k, cfg.freq_base, 1.0_f32);
+                        rope_neox_inplace_with_factor(
+                            q_slice,
+                            tok,
+                            cfg.n_embd_head_k,
+                            cfg.freq_base,
+                            1.0_f32,
+                        );
                     }
                 }
             }
@@ -268,7 +274,13 @@ pub fn text_encode(model: &Gemma3Model, token_ids: &[u32]) -> Result<Vec<f32>, S
                 let k_slice = &mut k_all[off..off + cfg.n_embd_head_k];
                 match cfg.rope {
                     Gemma3Rope::Neox => {
-                        rope_neox_inplace_with_factor(k_slice, tok, cfg.n_embd_head_k, cfg.freq_base, 1.0_f32);
+                        rope_neox_inplace_with_factor(
+                            k_slice,
+                            tok,
+                            cfg.n_embd_head_k,
+                            cfg.freq_base,
+                            1.0_f32,
+                        );
                     }
                 }
             }

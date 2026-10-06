@@ -475,8 +475,9 @@ fn forward_layer_inplace(
             &mut q[off..off + PRED_HEAD_DIM],
             pos,
             PRED_HEAD_DIM,
-            1_000_000.0, 1.0_f32,
-            );
+            1_000_000.0,
+            1.0_f32,
+        );
     }
     for head in 0..PRED_N_HEAD_KV {
         let off = head * PRED_HEAD_DIM;
@@ -485,8 +486,9 @@ fn forward_layer_inplace(
             &mut k[off..off + PRED_HEAD_DIM],
             pos,
             PRED_HEAD_DIM,
-            1_000_000.0, 1.0_f32,
-            );
+            1_000_000.0,
+            1.0_f32,
+        );
     }
     // Write K/V into THIS layer's cache row at `pos`.
     let cache_row = pos * cache_stride;

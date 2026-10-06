@@ -99,14 +99,9 @@ pub fn compute_embedding(
     // sliding window + 4-norm sandwich). `from_source_with_max_rows`
     // wires all arch-aware behaviour; `max_rows=1` reproduces the
     // legacy per-token forward exactly.
-    let mut session = LlamaSession::from_source_with_max_rows(
-        source,
-        n_threads_arg,
-        kv_format,
-        max_ctx,
-        1,
-    )
-    .map_err(|error| format!("Gemma-2 session init failed: {error}"))?;
+    let mut session =
+        LlamaSession::from_source_with_max_rows(source, n_threads_arg, kv_format, max_ctx, 1)
+            .map_err(|error| format!("Gemma-2 session init failed: {error}"))?;
 
     // `prefill` walks the prompt one token at a time. After it
     // returns, `scratch.x[..n_embd]` holds the post-final-residual

@@ -557,12 +557,24 @@ pub fn text_encode(model: &BitNetQwen3Model, token_ids: &[u32]) -> Result<Vec<f3
             for head in 0..cfg.n_head {
                 let off = tok * n_embd_q + head * cfg.n_embd_head_k;
                 let q_slice = &mut q_all[off..off + cfg.n_embd_head_k];
-                rope_neox_inplace_with_factor(q_slice, tok, cfg.n_embd_head_k, cfg.freq_base, 1.0_f32);
+                rope_neox_inplace_with_factor(
+                    q_slice,
+                    tok,
+                    cfg.n_embd_head_k,
+                    cfg.freq_base,
+                    1.0_f32,
+                );
             }
             for head in 0..cfg.n_head_kv {
                 let off = tok * n_embd_k + head * cfg.n_embd_head_k;
                 let k_slice = &mut k_all[off..off + cfg.n_embd_head_k];
-                rope_neox_inplace_with_factor(k_slice, tok, cfg.n_embd_head_k, cfg.freq_base, 1.0_f32);
+                rope_neox_inplace_with_factor(
+                    k_slice,
+                    tok,
+                    cfg.n_embd_head_k,
+                    cfg.freq_base,
+                    1.0_f32,
+                );
             }
         }
 

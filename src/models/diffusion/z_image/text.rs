@@ -203,8 +203,20 @@ impl Qwen3TextEncoder {
                 for head in scratch.k.chunks_exact_mut(HEAD_WIDTH) {
                     rms_norm_inplace(head, &layer.k_norm, RMS_EPSILON);
                 }
-                rope_neox_inplace_with_factor(&mut scratch.q, position, HEAD_WIDTH, ROPE_BASE, 1.0_f32);
-                rope_neox_inplace_with_factor(&mut scratch.k, position, HEAD_WIDTH, ROPE_BASE, 1.0_f32);
+                rope_neox_inplace_with_factor(
+                    &mut scratch.q,
+                    position,
+                    HEAD_WIDTH,
+                    ROPE_BASE,
+                    1.0_f32,
+                );
+                rope_neox_inplace_with_factor(
+                    &mut scratch.k,
+                    position,
+                    HEAD_WIDTH,
+                    ROPE_BASE,
+                    1.0_f32,
+                );
 
                 let cache_row = (layer_index * token_count + position) * KV_WIDTH;
                 cache.k[cache_row..cache_row + KV_WIDTH].copy_from_slice(&scratch.k);

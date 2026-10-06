@@ -91,11 +91,18 @@ fn gemma2_2b_it_e2e_hidden_state_shape_and_finite() {
         return;
     };
     let v = embed(&loader, "Hello, world!");
-    assert_eq!(v.len(), 2304, "gemma-2-2b-it hidden state must be n_embd=2304");
+    assert_eq!(
+        v.len(),
+        2304,
+        "gemma-2-2b-it hidden state must be n_embd=2304"
+    );
     for (i, x) in v.iter().enumerate() {
         assert!(x.is_finite(), "element {i} must be finite, got {x}");
     }
-    assert!(v.iter().any(|x| *x != 0.0), "embedding must not be all-zero");
+    assert!(
+        v.iter().any(|x| *x != 0.0),
+        "embedding must not be all-zero"
+    );
     // After RMSNorm + residual, hidden-state magnitudes can reach
     // a few thousand for 2304-dim residual streams when the prompt
     // carries large activations (e.g. saturated GeGLU on long input).

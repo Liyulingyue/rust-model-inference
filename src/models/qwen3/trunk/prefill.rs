@@ -483,7 +483,8 @@ impl Qwen3Session<'_> {
                             position[0],
                             config.n_embd_head_k,
                             config.freq_base,
-                        1.0_f32),
+                            1.0_f32,
+                        ),
                         Qwen3Rope::Interleaved { sections, n_dims } => rope_mrope_interleaved(
                             head,
                             position,
@@ -501,7 +502,8 @@ impl Qwen3Session<'_> {
                             position[0],
                             config.n_embd_head_k,
                             config.freq_base,
-                        1.0_f32),
+                            1.0_f32,
+                        ),
                         Qwen3Rope::Interleaved { sections, n_dims } => rope_mrope_interleaved(
                             head,
                             position,
