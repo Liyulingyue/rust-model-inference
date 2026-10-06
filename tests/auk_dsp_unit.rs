@@ -97,11 +97,7 @@ fn volume_change_plus_10db_scales_amplitude() {
         .map(|v| v.abs())
         .fold(0.0_f64, f64::max);
     let out = audio.volume_change(10.0);
-    let max_out: f64 = out
-        .samples
-        .iter()
-        .map(|v| v.abs())
-        .fold(0.0_f64, f64::max);
+    let max_out: f64 = out.samples.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
     let ratio = max_out / max_in;
     // 10 dB = 10^(10/20) = ~3.162
     assert!(

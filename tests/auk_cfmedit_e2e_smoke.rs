@@ -54,19 +54,28 @@ fn cfmedit_end_to_end_synthetic_reference_audio() {
         eprintln!("RMI_QWEN_OMNI_BF16 unset; skipping");
         return;
     };
-    let Some(dit_src) = open_source(&dit) else { return; };
-    let Some(vae_src) = open_source(&vae) else { return; };
-    let Some(text_src) = open_source(&text) else { return; };
-    let Some(omni_bf16_src) = open_source(&omni_bf16) else { return; };
+    let Some(dit_src) = open_source(&dit) else {
+        return;
+    };
+    let Some(vae_src) = open_source(&vae) else {
+        return;
+    };
+    let Some(text_src) = open_source(&text) else {
+        return;
+    };
+    let Some(omni_bf16_src) = open_source(&omni_bf16) else {
+        return;
+    };
 
-    let pipeline = rust_model_inference::models::diffusion::auk::AukPipeline::load_with_audio_tower(
-        dit_src,
-        vae_src,
-        Some(text_src),
-        Some(omni_bf16_src),
-        1,
-    )
-    .expect("AukPipeline load (with audio tower)");
+    let pipeline =
+        rust_model_inference::models::diffusion::auk::AukPipeline::load_with_audio_tower(
+            dit_src,
+            vae_src,
+            Some(text_src),
+            Some(omni_bf16_src),
+            1,
+        )
+        .expect("AukPipeline load (with audio tower)");
     rust_model_inference::ops::enable_gpu();
 
     // 1 second of 16 kHz mono PCM = 16000 samples of 440 Hz sine wave.

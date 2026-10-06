@@ -20,11 +20,11 @@ use std::sync::Arc;
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
+use crate::models::qwen3::trunk::positions::qwen_text_positions;
 use crate::models::qwen3::trunk::{
     text_encode as trunk_text_encode, text_encode_with_audio as trunk_text_encode_with_audio,
     Qwen3Model,
 };
-use crate::models::qwen3::trunk::positions::qwen_text_positions;
 
 const TEXT_IN: usize = 2_048;
 /// Qwen2.5-Omni `<|AUDIO|>` placeholder token id; the audio tower's output
@@ -183,8 +183,7 @@ impl AukTextEncoder {
         if audio_index != audio_count {
             return Err(format!(
                 "AukTextEncoder: token sequence has {} <|AUDIO|> placeholders, expected {}",
-                audio_index,
-                audio_count
+                audio_index, audio_count
             ));
         }
 

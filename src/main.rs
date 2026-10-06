@@ -98,10 +98,7 @@ fn main() {
     });
     // Early AuK arch detection (must run BEFORE validate_cli_options because
     // z_image_cli_options errors out when --text-encoder is missing).
-    let early_auk_arch: Option<Arc<dyn TensorSource>> = if !options
-        .model
-        .as_os_str()
-        .is_empty()
+    let early_auk_arch: Option<Arc<dyn TensorSource>> = if !options.model.as_os_str().is_empty()
         && options.text_encoder.is_none()
         && options.vae.is_some()
         && options.out.is_some()
@@ -116,7 +113,11 @@ fn main() {
             || arch_probe
                 .tensor_info("transformer.transformer_blocks.0.attn_norm_x.linear.weight")
                 .is_some();
-        if is_auk { Some(arch_probe) } else { None }
+        if is_auk {
+            Some(arch_probe)
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -277,10 +278,7 @@ fn main() {
 
     // AuK / audiocpp dispatch: --model (DiT) + --vae + optional --text-encoder
     // for Qwen2.5-Omni conditioning + --text for the prompt.
-    if !options.model.as_os_str().is_empty()
-        && options.vae.is_some()
-        && options.out.is_some()
-    {
+    if !options.model.as_os_str().is_empty() && options.vae.is_some() && options.out.is_some() {
         let arch_probe: Arc<dyn TensorSource> =
             Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
         let is_auk = arch_probe

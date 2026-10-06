@@ -184,11 +184,7 @@ impl AukPipeline {
         })
     }
 
-    pub fn generate_audio(
-        &self,
-        prompt: &str,
-        options: &AukOptions,
-    ) -> Result<AukAudio, String> {
+    pub fn generate_audio(&self, prompt: &str, options: &AukOptions) -> Result<AukAudio, String> {
         let total_start = std::time::Instant::now();
         // Apply instruct prefix to the bare prompt (matches audio.cpp's
         // instruct-TTS path). We delegate to encode_with_audio with
@@ -197,12 +193,7 @@ impl AukPipeline {
             Some(encoder) => {
                 let t = std::time::Instant::now();
                 let instruct_ref = options.instruct.as_deref();
-                let hidden = encoder.encode_with_audio(
-                    prompt,
-                    0,
-                    &[],
-                    instruct_ref,
-                )?;
+                let hidden = encoder.encode_with_audio(prompt, 0, &[], instruct_ref)?;
                 let tokens = encoder.last_token_count(&hidden);
                 eprintln!(
                     "[auk-stage-profile] text_encode={:.1}ms  n_tokens={}  instruct={}",
@@ -217,13 +208,9 @@ impl AukPipeline {
         // No reference audio conditioning in this path (audio_conditioning
         // is exposed via `generate_audio_with_audio`).
         let t = std::time::Instant::now();
-        let latent = self.dit.denoise(
-            &text_conditioning,
-            text_tokens,
-            &[],
-            0,
-            options,
-        )?;
+        let latent = self
+            .dit
+            .denoise(&text_conditioning, text_tokens, &[], 0, options)?;
         let t_denoise = t.elapsed();
         let t = std::time::Instant::now();
         let audio = {
@@ -415,8 +402,7 @@ impl AukPipeline {
     ) -> Result<AukAudio, String> {
         let total_start = std::time::Instant::now();
         let encoder = self.text.as_ref().ok_or_else(|| {
-            "AuK CFMEdit requires the Qwen2.5-Omni text encoder (--text-encoder)"
-                .to_string()
+            "AuK CFMEdit requires the Qwen2.5-Omni text encoder (--text-encoder)".to_string()
         })?;
 
         let t = std::time::Instant::now();
@@ -440,13 +426,9 @@ impl AukPipeline {
         );
 
         let t = std::time::Instant::now();
-        let latent = self.dit.denoise(
-            &cond_hidden,
-            total_cond_tokens,
-            &[],
-            0,
-            options,
-        )?;
+        let latent = self
+            .dit
+            .denoise(&cond_hidden, total_cond_tokens, &[], 0, options)?;
         let t_denoise = t.elapsed();
         let t = std::time::Instant::now();
         let audio = {
@@ -503,7 +485,11 @@ fn validate_dit(source: &dyn TensorSource) -> Result<(), String> {
     let ff_inner = dit::FF_INNER as u64;
     let mod_dim = dit::ADALN_DIM as u64;
     // Audio embed: latent 64 -> hidden 1536
-    require_matrix(source, "transformer.audio_embed.linear.weight", &[64, hidden])?;
+    require_matrix(
+        source,
+        "transformer.audio_embed.linear.weight",
+        &[64, hidden],
+    )?;
     // Time embed: freq_dim 256 -> hidden -> hidden
     require_matrix(
         source,
@@ -516,7 +502,11 @@ fn validate_dit(source: &dyn TensorSource) -> Result<(), String> {
         &[hidden, hidden],
     )?;
     // Text in: text_hidden 2048 -> hidden
-    require_matrix(source, "transformer.txt_proj.weight", &[dit::TEXT_IN as u64, hidden])?;
+    require_matrix(
+        source,
+        "transformer.txt_proj.weight",
+        &[dit::TEXT_IN as u64, hidden],
+    )?;
     // txt_norm: 1-D, hidden (F16 in the unsloth F16 GGUF)
     require_norm_f16(source, "transformer.txt_norm.weight", hidden)?;
     // Final norm: AdaLNContinuous linear (hidden -> 2*hidden) + norm_out.norm
@@ -546,13 +536,21 @@ fn validate_dit(source: &dyn TensorSource) -> Result<(), String> {
             &format!("{prefix}.attn_norm_x.linear.weight"),
             &[hidden, mod_dim],
         )?;
-        require_norm_f16(source, &format!("{prefix}.attn_norm_x.linear.bias"), mod_dim)?;
+        require_norm_f16(
+            source,
+            &format!("{prefix}.attn_norm_x.linear.bias"),
+            mod_dim,
+        )?;
         require_matrix(
             source,
             &format!("{prefix}.attn_norm_c.linear.weight"),
             &[hidden, mod_dim],
         )?;
-        require_norm_f16(source, &format!("{prefix}.attn_norm_c.linear.bias"), mod_dim)?;
+        require_norm_f16(
+            source,
+            &format!("{prefix}.attn_norm_c.linear.bias"),
+            mod_dim,
+        )?;
         // QKV for x-stream (no suffix)
         require_matrix(
             source,
@@ -664,11 +662,7 @@ fn validate_dit(source: &dyn TensorSource) -> Result<(), String> {
 /// stores biases and rotary inv_freq as F16; the F32 GGUF would store
 /// them as F32. Both round-trip cleanly through the F32 normalization in
 /// `load_f32_vector`.
-fn require_norm_f16(
-    source: &dyn TensorSource,
-    name: &str,
-    len: u64,
-) -> Result<(), String> {
+fn require_norm_f16(source: &dyn TensorSource, name: &str, len: u64) -> Result<(), String> {
     let info = source
         .tensor_info(name)
         .ok_or_else(|| format!("Missing tensor: {name}"))?;
@@ -826,9 +820,7 @@ fn linear_into_scaled_impl(
     if info.dims != [n_in as u64, n_out as u64] {
         return Err(format!(
             "Invalid {name} dimensions: expected [{}, {}], got {:?}",
-            n_in,
-            n_out,
-            info.dims
+            n_in, n_out, info.dims
         ));
     }
     let expected = usize::try_from(
@@ -883,9 +875,8 @@ fn linear_into_scaled_impl(
                 let out =
                     unsafe { std::slice::from_raw_parts_mut(output_ptr as *mut f32, output_len) };
                 let buffer = unsafe { &mut *((staging_ptr as *mut Vec<u16>).add(ith)) };
-                crate::ops::kernel::f16::F16Kernel::new(weight).forward_scaled_rows(
-                    values, out, n_in, n_out, scale_copy, buffer, ith, nth,
-                );
+                crate::ops::kernel::f16::F16Kernel::new(weight)
+                    .forward_scaled_rows(values, out, n_in, n_out, scale_copy, buffer, ith, nth);
             });
             Ok(())
         }
@@ -900,19 +891,8 @@ fn linear_into_scaled_impl(
             pool.compute(move |ith, nth| {
                 let values =
                     unsafe { std::slice::from_raw_parts(input_ptr as *const f32, input_len) };
-                let out =
-                    unsafe { std::slice::from_raw_parts_mut(output_ptr as *mut f32, n_out) };
-                tensor.forward_prepared(
-                    values,
-                    &[],
-                    &[],
-                    None,
-                    out,
-                    n_in,
-                    n_out,
-                    ith,
-                    nth,
-                );
+                let out = unsafe { std::slice::from_raw_parts_mut(output_ptr as *mut f32, n_out) };
+                tensor.forward_prepared(values, &[], &[], None, out, n_in, n_out, ith, nth);
                 if scale_copy != 1.0 {
                     for v in out.iter_mut() {
                         *v *= scale_copy;
@@ -937,8 +917,7 @@ fn linear_into_scaled_impl(
                     unsafe { std::slice::from_raw_parts(input_ptr as *const u8, input_len) };
                 let scales =
                     unsafe { std::slice::from_raw_parts(scale_ptr as *const f32, scale_len) };
-                let out =
-                    unsafe { std::slice::from_raw_parts_mut(output_ptr as *mut f32, n_out) };
+                let out = unsafe { std::slice::from_raw_parts_mut(output_ptr as *mut f32, n_out) };
                 matmul_q8_0_quantized_parallel_rows(
                     weight, input, scales, out, n_in, n_out, ith, nth,
                 );

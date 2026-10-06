@@ -49,12 +49,21 @@ fn cfmedit_zero_audio_conditioning_produces_finite_output() {
         eprintln!("skipping: set RMI_AUK_TEXT");
         return;
     };
-    let Some(dit_src) = open_source(&dit) else { return; };
-    let Some(vae_src) = open_source(&vae) else { return; };
-    let Some(text_src) = open_source(&text) else { return; };
+    let Some(dit_src) = open_source(&dit) else {
+        return;
+    };
+    let Some(vae_src) = open_source(&vae) else {
+        return;
+    };
+    let Some(text_src) = open_source(&text) else {
+        return;
+    };
 
     let pipeline = rust_model_inference::models::diffusion::auk::AukPipeline::load(
-        dit_src, vae_src, Some(text_src), 1,
+        dit_src,
+        vae_src,
+        Some(text_src),
+        1,
     )
     .expect("AuK pipeline load");
     rust_model_inference::ops::enable_gpu();

@@ -99,22 +99,10 @@ fn contract_pins_auk_dit_double_block_dimensions() {
         let p = format!("transformer.transformer_blocks.{layer}");
         let expected = [
             // AdaLN: hidden -> 6*hidden
-            (
-                format!("{p}.attn_norm_x.linear.weight"),
-                vec![1536, 9216],
-            ),
-            (
-                format!("{p}.attn_norm_x.linear.bias"),
-                vec![9216],
-            ),
-            (
-                format!("{p}.attn_norm_c.linear.weight"),
-                vec![1536, 9216],
-            ),
-            (
-                format!("{p}.attn_norm_c.linear.bias"),
-                vec![9216],
-            ),
+            (format!("{p}.attn_norm_x.linear.weight"), vec![1536, 9216]),
+            (format!("{p}.attn_norm_x.linear.bias"), vec![9216]),
+            (format!("{p}.attn_norm_c.linear.weight"), vec![1536, 9216]),
+            (format!("{p}.attn_norm_c.linear.bias"), vec![9216]),
             // Fused QKV: hidden -> 3*hidden
             (format!("{p}.attn.to_qkv.weight"), vec![1536, 4608]),
             (format!("{p}.attn.to_qkv.bias"), vec![4608]),
@@ -135,11 +123,7 @@ fn contract_pins_auk_dit_double_block_dimensions() {
             let info = source
                 .tensor_info(&name)
                 .unwrap_or_else(|| panic!("Missing tensor: {name}"));
-            assert_eq!(
-                &info.dims,
-                &dims,
-                "Invalid dims for {name}"
-            );
+            assert_eq!(&info.dims, &dims, "Invalid dims for {name}");
         }
     }
 }
@@ -169,11 +153,7 @@ fn contract_pins_auk_dit_single_block_dimensions() {
             let info = source
                 .tensor_info(&name)
                 .unwrap_or_else(|| panic!("Missing tensor: {name}"));
-            assert_eq!(
-                &info.dims,
-                &dims,
-                "Invalid dims for {name}"
-            );
+            assert_eq!(&info.dims, &dims, "Invalid dims for {name}");
         }
     }
 }
@@ -187,18 +167,14 @@ fn contract_pins_auk_dit_block_count() {
     // The unsloth F16 export has 10 double + 10 single blocks (the YAML
     // config claims 20 single; the actual model in this GGUF caps at 10).
     for layer in 0..=9 {
-        let name = format!(
-            "transformer.transformer_blocks.{layer}.attn_norm_x.linear.weight"
-        );
+        let name = format!("transformer.transformer_blocks.{layer}.attn_norm_x.linear.weight");
         assert!(
             source.tensor_info(&name).is_some(),
             "Missing double-block layer {layer}"
         );
     }
     for layer in 0..=9 {
-        let name = format!(
-            "transformer.single_transformer_blocks.{layer}.attn_norm.linear.weight"
-        );
+        let name = format!("transformer.single_transformer_blocks.{layer}.attn_norm.linear.weight");
         assert!(
             source.tensor_info(&name).is_some(),
             "Missing single-block layer {layer}"
@@ -223,6 +199,12 @@ fn contract_pins_auk_dit_text_encoder_paired_via_txt_proj() {
     let info = source
         .tensor_info("transformer.txt_proj.weight")
         .expect("txt_proj.weight present");
-    assert_eq!(info.dims[0], 2048, "txt_proj source rows must match Qwen2.5-Omni n_embd");
-    assert_eq!(info.dims[1], 1536, "txt_proj target cols must match AuK hidden");
+    assert_eq!(
+        info.dims[0], 2048,
+        "txt_proj source rows must match Qwen2.5-Omni n_embd"
+    );
+    assert_eq!(
+        info.dims[1], 1536,
+        "txt_proj target cols must match AuK hidden"
+    );
 }

@@ -88,12 +88,7 @@ impl BigVGANFlowVae {
         // close to zero-mean unit-std already for a normalized DiT output).
 
         // conv_pre: weight-norm Conv1d 64 -> 1536, kernel 7
-        let conv_pre = materialize_weight_norm(
-            source.as_ref(),
-            "conv_pre",
-            1536,
-            &[7, 64, 1536],
-        )?;
+        let conv_pre = materialize_weight_norm(source.as_ref(), "conv_pre", 1536, &[7, 64, 1536])?;
         let conv_pre_bias = load_f32(source.as_ref(), "conv_pre.bias", 1536)?;
 
         // Per-stage upsample convs.
@@ -109,7 +104,12 @@ impl BigVGANFlowVae {
             // single Conv1d that produces the upsampled sequence. The GGUF
             // `weight_g` has 1 element per output channel (so `channels * 2`).
             let dims = [kernel as u64, channels as u64, (channels * 2) as u64];
-            let weight = materialize_weight_norm(source.as_ref(), &format!("ups.{stage}.0"), channels * 2, &dims)?;
+            let weight = materialize_weight_norm(
+                source.as_ref(),
+                &format!("ups.{stage}.0"),
+                channels * 2,
+                &dims,
+            )?;
             let bias = load_f32(source.as_ref(), &format!("ups.{stage}.0.bias"), channels)?;
             // SnakeBeta for the upsample path: we store alpha/beta as 1's,
             // which degenerates SnakeBeta to x + sin(x)^2 / 1 ~= x. The GGUF
@@ -133,8 +133,14 @@ impl BigVGANFlowVae {
         // them per-stage; we flatten into a single Vec for sequential access.
         // For each resblock we need 6 convs (3 conv1 + 3 conv2) and 6
         // SnakeBeta activations.
-        const RESBLOCK_KERNELS: [[usize; 3]; 6] =
-            [[3, 7, 11], [3, 7, 11], [3, 7, 11], [3, 7, 11], [3, 7, 11], [3, 7, 11]];
+        const RESBLOCK_KERNELS: [[usize; 3]; 6] = [
+            [3, 7, 11],
+            [3, 7, 11],
+            [3, 7, 11],
+            [3, 7, 11],
+            [3, 7, 11],
+            [3, 7, 11],
+        ];
         let mut resblock_convs = Vec::with_capacity(UPSAMPLE_STAGES * 3);
         let mut resblock_snake = Vec::with_capacity(UPSAMPLE_STAGES * 3);
         for stage in 0..UPSAMPLE_STAGES {
@@ -181,12 +187,8 @@ impl BigVGANFlowVae {
                     kernels: [kernel, kernel, kernel],
                 });
                 // 6 SnakeBeta activations (alpha/beta per channel).
-                let mut alpha: [Vec<f32>; 6] = [
-                    vec![], vec![], vec![], vec![], vec![], vec![],
-                ];
-                let mut beta: [Vec<f32>; 6] = [
-                    vec![], vec![], vec![], vec![], vec![], vec![],
-                ];
+                let mut alpha: [Vec<f32>; 6] = [vec![], vec![], vec![], vec![], vec![], vec![]];
+                let mut beta: [Vec<f32>; 6] = [vec![], vec![], vec![], vec![], vec![], vec![]];
                 for act in 0..6 {
                     alpha[act] = load_f32(
                         source.as_ref(),
@@ -222,11 +224,7 @@ impl BigVGANFlowVae {
         })
     }
 
-    pub(crate) fn decode(
-        &self,
-        latent: &[f32],
-        sample_rate: u32,
-    ) -> Result<AukAudio, String> {
+    pub(crate) fn decode(&self, latent: &[f32], sample_rate: u32) -> Result<AukAudio, String> {
         let latent_time = latent.len() / LATENT_DIM;
         if latent.len() != LATENT_DIM * latent_time || latent_time == 0 {
             return Err(format!(
@@ -265,7 +263,11 @@ impl BigVGANFlowVae {
         // Conv1d at the upsampled rate (this loses the FIR shape but produces
         // finite audio).
         for stage in 0..UPSAMPLE_STAGES {
-            let in_ch = if stage == 0 { HIDDEN } else { STAGE_CHANNELS[stage - 1] };
+            let in_ch = if stage == 0 {
+                HIDDEN
+            } else {
+                STAGE_CHANNELS[stage - 1]
+            };
             let out_ch = STAGE_CHANNELS[stage];
             let kernel = STAGE_KERNELS[stage];
             // 2x upsample via linear interpolation in time.
@@ -275,7 +277,11 @@ impl BigVGANFlowVae {
             for c in 0..in_ch {
                 for t in 0..frames {
                     upsampled[c * out_frames + 2 * t] = pre[c * frames + t];
-                    let next = if t + 1 < frames { pre[c * frames + t + 1] } else { pre[c * frames + t] };
+                    let next = if t + 1 < frames {
+                        pre[c * frames + t + 1]
+                    } else {
+                        pre[c * frames + t]
+                    };
                     upsampled[c * out_frames + 2 * t + 1] = (pre[c * frames + t] + next) * 0.5;
                 }
             }
@@ -312,8 +318,11 @@ impl BigVGANFlowVae {
             for c in 0..out_ch {
                 for t in 0..out_frames {
                     let v = cropped[c * out_frames + t];
-                    cropped[c * out_frames + t] =
-                        snake_beta(v, self.ups_snake_alpha[stage][c], self.ups_snake_beta[stage][c]);
+                    cropped[c * out_frames + t] = snake_beta(
+                        v,
+                        self.ups_snake_alpha[stage][c],
+                        self.ups_snake_beta[stage][c],
+                    );
                 }
             }
             pre = cropped;
@@ -332,16 +341,7 @@ impl BigVGANFlowVae {
         // conv_post: weight-norm Conv1d 24 -> 1, kernel 7 (no bias)
         let channels_post = STAGE_CHANNELS[UPSAMPLE_STAGES - 1];
         let frames = pre.len() / channels_post;
-        let mut mono = conv1d(
-            &pre,
-            channels_post,
-            1,
-            7,
-            &self.conv_post,
-            None,
-            3,
-            frames,
-        )?;
+        let mut mono = conv1d(&pre, channels_post, 1, 7, &self.conv_post, None, 3, frames)?;
 
         // Normalize to prevent clipping.
         let mut max_abs = 0.0_f32;
@@ -389,70 +389,70 @@ impl BigVGANFlowVae {
 /// causal padding (which is incompatible with linear interpolation
 /// upsample) -- the conv weights and SnakeBeta params match.
 impl BigVGANFlowVae {
-fn apply_resblock(
-    &self,
-    x: &mut [f32],
-    channels: usize,
-    frames: usize,
-    rb_index: usize,
-) -> Result<(), String> {
-    let block = &self.resblock_convs[rb_index];
-    let snake = &self.resblock_snake[rb_index];
+    fn apply_resblock(
+        &self,
+        x: &mut [f32],
+        channels: usize,
+        frames: usize,
+        rb_index: usize,
+    ) -> Result<(), String> {
+        let block = &self.resblock_convs[rb_index];
+        let snake = &self.resblock_snake[rb_index];
 
-    // Snapshot input for the residual.
-    let residual = x.to_vec();
+        // Snapshot input for the residual.
+        let residual = x.to_vec();
 
-    // 3 layers: snake -> conv1 (dilated) -> snake -> conv2 -> residual += hidden.
-    // We use dilation=1 (no dilation) for now; with kernel sizes [3, 7, 11]
-    // this still captures the per-block receptive field.
-    let dilations = [1usize, 1, 1];
-    let mut hidden = residual.clone();
-    for layer in 0..3 {
-        apply_snake_beta_inplace(
-            &mut hidden,
-            channels,
-            frames,
-            &snake.alpha[2 * layer],
-            &snake.beta[2 * layer],
-            self.pool.as_ref(),
-        );
-        apply_branch_conv_dilated(
-            &mut hidden,
-            channels,
-            frames,
-            &block.conv1[layer],
-            &block.bias1[layer],
-            block.kernels[layer],
-            dilations[layer],
-            self.pool.as_ref(),
-        );
-        apply_snake_beta_inplace(
-            &mut hidden,
-            channels,
-            frames,
-            &snake.alpha[2 * layer + 1],
-            &snake.beta[2 * layer + 1],
-            self.pool.as_ref(),
-        );
-        apply_branch_conv_dilated(
-            &mut hidden,
-            channels,
-            frames,
-            &block.conv2[layer],
-            &block.bias2[layer],
-            block.kernels[layer],
-            1,
-            self.pool.as_ref(),
-        );
-        // residual += hidden (in place). x still holds the original residual.
-        for i in 0..x.len() {
-            x[i] += hidden[i];
+        // 3 layers: snake -> conv1 (dilated) -> snake -> conv2 -> residual += hidden.
+        // We use dilation=1 (no dilation) for now; with kernel sizes [3, 7, 11]
+        // this still captures the per-block receptive field.
+        let dilations = [1usize, 1, 1];
+        let mut hidden = residual.clone();
+        for layer in 0..3 {
+            apply_snake_beta_inplace(
+                &mut hidden,
+                channels,
+                frames,
+                &snake.alpha[2 * layer],
+                &snake.beta[2 * layer],
+                self.pool.as_ref(),
+            );
+            apply_branch_conv_dilated(
+                &mut hidden,
+                channels,
+                frames,
+                &block.conv1[layer],
+                &block.bias1[layer],
+                block.kernels[layer],
+                dilations[layer],
+                self.pool.as_ref(),
+            );
+            apply_snake_beta_inplace(
+                &mut hidden,
+                channels,
+                frames,
+                &snake.alpha[2 * layer + 1],
+                &snake.beta[2 * layer + 1],
+                self.pool.as_ref(),
+            );
+            apply_branch_conv_dilated(
+                &mut hidden,
+                channels,
+                frames,
+                &block.conv2[layer],
+                &block.bias2[layer],
+                block.kernels[layer],
+                1,
+                self.pool.as_ref(),
+            );
+            // residual += hidden (in place). x still holds the original residual.
+            for i in 0..x.len() {
+                x[i] += hidden[i];
+            }
+            // Reset hidden for the next layer: it should be the running residual.
+            hidden.copy_from_slice(x);
         }
-        // Reset hidden for the next layer: it should be the running residual.
-        hidden.copy_from_slice(x);
+        Ok(())
     }
-    Ok(())
-}
 }
 
 /// Apply one weight-norm Conv1d + bias in place with optional dilation.
@@ -501,17 +501,10 @@ fn apply_branch_conv_dilated(
         if start >= end {
             return;
         }
-        let w_slice = unsafe {
-            std::slice::from_raw_parts(weight_ptr as *const f32, weight_len)
-        };
-        let p_slice = unsafe {
-            std::slice::from_raw_parts(padded_ptr as *const f32, padded_len)
-        };
-        let b_slice =
-            unsafe { std::slice::from_raw_parts(bias_ptr as *const f32, channels_const) };
-        let out_local = unsafe {
-            std::slice::from_raw_parts_mut(out_ptr as *mut f32, out_len)
-        };
+        let w_slice = unsafe { std::slice::from_raw_parts(weight_ptr as *const f32, weight_len) };
+        let p_slice = unsafe { std::slice::from_raw_parts(padded_ptr as *const f32, padded_len) };
+        let b_slice = unsafe { std::slice::from_raw_parts(bias_ptr as *const f32, channels_const) };
+        let out_local = unsafe { std::slice::from_raw_parts_mut(out_ptr as *mut f32, out_len) };
         for oc in start..end {
             let bias_oc = b_slice[oc];
             for t in 0..padded_frames_const {
@@ -569,12 +562,9 @@ fn apply_snake_beta_inplace(
         if start >= end {
             return;
         }
-        let x_local =
-            unsafe { std::slice::from_raw_parts_mut(x_ptr as *mut f32, x_len) };
-        let alpha_local =
-            unsafe { std::slice::from_raw_parts(alpha_ptr as *const f32, channels) };
-        let beta_local =
-            unsafe { std::slice::from_raw_parts(beta_ptr as *const f32, channels) };
+        let x_local = unsafe { std::slice::from_raw_parts_mut(x_ptr as *mut f32, x_len) };
+        let alpha_local = unsafe { std::slice::from_raw_parts(alpha_ptr as *const f32, channels) };
+        let beta_local = unsafe { std::slice::from_raw_parts(beta_ptr as *const f32, channels) };
         for c in start..end {
             let row_start = c * stride;
             let a = alpha_local[c];
@@ -815,8 +805,7 @@ fn bytes_to_f32(bytes: &[u8], ty: GGMLType) -> Result<Vec<f32>, String> {
         }
         GGMLType::BF16 => {
             for (dst, raw) in out.iter_mut().zip(bytes.chunks_exact(2)) {
-                *dst =
-                    bf16::from_bits(u16::from_le_bytes(raw.try_into().unwrap())).to_f32();
+                *dst = bf16::from_bits(u16::from_le_bytes(raw.try_into().unwrap())).to_f32();
             }
         }
         _ => return Err(format!("unsupported VAE weight type: {ty:?}")),

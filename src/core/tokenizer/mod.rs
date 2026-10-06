@@ -151,28 +151,28 @@ const QWEN2_ORACLE_SPECIAL_TOKENS: &[&str] = &[
 /// `<|object_ref_*|>`, no `<|image_pad|>`/`<|video_pad|>`, no
 /// `<tool_response>`, no `<|boi_token|>` etc.).
 const QWEN25_OMNI_SPECIAL_TOKENS: &[&str] = &[
-    "<|endoftext|>",       // 151643
-    "<|im_start|>",        // 151644
-    "<|im_end|>",          // 151645
-    "<|AUDIO|>",           // 151646  (CFMEdit audio placeholder)
-    "<|audio_bos|>",       // 151647  (CFMEdit audio begin-of-stream)
-    "<|audio_eos|>",       // 151648  (CFMEdit audio end-of-stream)
-    "<|box_end|>",         // 151649
-    "<|quad_start|>",      // 151650
-    "<|quad_end|>",        // 151651
-    "<|vision_bos|>",      // 151652
-    "<|vision_eos|>",      // 151653
-    "<|vision_pad|>",      // 151654
-    "<|IMAGE|>",           // 151655
-    "<|VIDEO|>",           // 151656
-    "<tool_call>",          // 151657
-    "</tool_call>",         // 151658
-    "<|fim_prefix|>",      // 151659
-    "<|fim_middle|>",      // 151660
-    "<|fim_suffix|>",      // 151661
-    "<|fim_pad|>",         // 151662
-    "<|repo_name|>",       // 151663
-    "<|file_sep|>",        // 151664
+    "<|endoftext|>",  // 151643
+    "<|im_start|>",   // 151644
+    "<|im_end|>",     // 151645
+    "<|AUDIO|>",      // 151646  (CFMEdit audio placeholder)
+    "<|audio_bos|>",  // 151647  (CFMEdit audio begin-of-stream)
+    "<|audio_eos|>",  // 151648  (CFMEdit audio end-of-stream)
+    "<|box_end|>",    // 151649
+    "<|quad_start|>", // 151650
+    "<|quad_end|>",   // 151651
+    "<|vision_bos|>", // 151652
+    "<|vision_eos|>", // 151653
+    "<|vision_pad|>", // 151654
+    "<|IMAGE|>",      // 151655
+    "<|VIDEO|>",      // 151656
+    "<tool_call>",    // 151657
+    "</tool_call>",   // 151658
+    "<|fim_prefix|>", // 151659
+    "<|fim_middle|>", // 151660
+    "<|fim_suffix|>", // 151661
+    "<|fim_pad|>",    // 151662
+    "<|repo_name|>",  // 151663
+    "<|file_sep|>",   // 151664
 ];
 
 const HUNYUAN_SEMANTIC_TOKENS: &[(&str, &str)] = &[

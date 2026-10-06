@@ -46,7 +46,11 @@ fn audio_tower_produces_finite_per_token_embeddings() {
         Arc::clone(&source),
     )
     .expect("Qwen2.5-Omni audio tower load");
-    eprintln!("[load] {:?} elapsed={:?}", model.config(), started.elapsed());
+    eprintln!(
+        "[load] {:?} elapsed={:?}",
+        model.config(),
+        started.elapsed()
+    );
 
     // 1.0 s of 16 kHz mono PCM (a 440 Hz sine wave, the A4 note). Should
     // produce 100 mel frames (1600 / 160 = 10) wait actually 1000/160 ~ 6.

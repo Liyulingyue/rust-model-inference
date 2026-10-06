@@ -165,7 +165,8 @@ pub fn run_auk_cli(
     n_threads: usize,
 ) -> Result<(), String> {
     let started = Instant::now();
-    let pipeline = crate::models::diffusion::auk::AukPipeline::load(diffusion, vae, text, n_threads)?;
+    let pipeline =
+        crate::models::diffusion::auk::AukPipeline::load(diffusion, vae, text, n_threads)?;
     println!(
         "AuK components loaded in {}ms",
         started.elapsed().as_millis()
@@ -179,7 +180,7 @@ pub fn run_auk_cli(
             duration_sec,
             seed,
             guidance_scale: 2.0,
-        instruct: None,
+            instruct: None,
         },
     )?;
     write_wav(&out, &audio)?;
@@ -193,7 +194,10 @@ pub fn run_auk_cli(
     Ok(())
 }
 
-fn write_wav(path: &std::path::Path, audio: &crate::models::diffusion::auk::AukAudio) -> Result<(), String> {
+fn write_wav(
+    path: &std::path::Path,
+    audio: &crate::models::diffusion::auk::AukAudio,
+) -> Result<(), String> {
     use std::io::Write;
     let mut file = std::fs::File::create(path)
         .map_err(|e| format!("Failed to create {}: {e}", path.display()))?;
@@ -206,21 +210,31 @@ fn write_wav(path: &std::path::Path, audio: &crate::models::diffusion::auk::AukA
     let fmt_chunk_size: u32 = 16;
     let riff_size: u32 = 4 + (8 + fmt_chunk_size) + (8 + data_len);
     file.write_all(b"RIFF").map_err(|e| e.to_string())?;
-    file.write_all(&riff_size.to_le_bytes()).map_err(|e| e.to_string())?;
+    file.write_all(&riff_size.to_le_bytes())
+        .map_err(|e| e.to_string())?;
     file.write_all(b"WAVE").map_err(|e| e.to_string())?;
     file.write_all(b"fmt ").map_err(|e| e.to_string())?;
-    file.write_all(&fmt_chunk_size.to_le_bytes()).map_err(|e| e.to_string())?;
-    file.write_all(&1u16.to_le_bytes()).map_err(|e| e.to_string())?; // PCM
-    file.write_all(&channels.to_le_bytes()).map_err(|e| e.to_string())?;
-    file.write_all(&sample_rate.to_le_bytes()).map_err(|e| e.to_string())?;
-    file.write_all(&byte_rate.to_le_bytes()).map_err(|e| e.to_string())?;
-    file.write_all(&block_align.to_le_bytes()).map_err(|e| e.to_string())?;
-    file.write_all(&bits_per_sample.to_le_bytes()).map_err(|e| e.to_string())?;
+    file.write_all(&fmt_chunk_size.to_le_bytes())
+        .map_err(|e| e.to_string())?;
+    file.write_all(&1u16.to_le_bytes())
+        .map_err(|e| e.to_string())?; // PCM
+    file.write_all(&channels.to_le_bytes())
+        .map_err(|e| e.to_string())?;
+    file.write_all(&sample_rate.to_le_bytes())
+        .map_err(|e| e.to_string())?;
+    file.write_all(&byte_rate.to_le_bytes())
+        .map_err(|e| e.to_string())?;
+    file.write_all(&block_align.to_le_bytes())
+        .map_err(|e| e.to_string())?;
+    file.write_all(&bits_per_sample.to_le_bytes())
+        .map_err(|e| e.to_string())?;
     file.write_all(b"data").map_err(|e| e.to_string())?;
-    file.write_all(&data_len.to_le_bytes()).map_err(|e| e.to_string())?;
+    file.write_all(&data_len.to_le_bytes())
+        .map_err(|e| e.to_string())?;
     for sample in &audio.samples {
         let scaled = (*sample * 32_768.0).clamp(-32_768.0, 32_767.0) as i16;
-        file.write_all(&scaled.to_le_bytes()).map_err(|e| e.to_string())?;
+        file.write_all(&scaled.to_le_bytes())
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }

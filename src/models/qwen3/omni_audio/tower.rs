@@ -162,7 +162,11 @@ impl LinearF32 {
             let in_row = &input[r * self.input..(r + 1) * self.input];
             let out_row = &mut output[r * self.output..(r + 1) * self.output];
             for c in 0..self.output {
-                let mut acc = if c < self.bias.len() { self.bias[c] } else { 0.0 };
+                let mut acc = if c < self.bias.len() {
+                    self.bias[c]
+                } else {
+                    0.0
+                };
                 let w_col = &self.weight[c..]; // stride = output
                 for k in 0..self.input {
                     acc += w_col[k * self.output] * in_row[k];
@@ -442,8 +446,7 @@ impl AudioTowerModel {
             ));
         }
         let chunk_in_frames = self.config.chunk_frames;
-        let mut all_output =
-            Vec::with_capacity((mel.frames + 1) / 2 * self.config.proj_dim);
+        let mut all_output = Vec::with_capacity((mel.frames + 1) / 2 * self.config.proj_dim);
         let mut total_tokens = 0usize;
 
         let mut start = 0usize;
@@ -521,8 +524,8 @@ impl AudioTowerModel {
         let mut hidden = vec![0.0f32; tokens * self.config.hidden];
         for t in 0..tokens {
             for h in 0..self.config.hidden {
-                hidden[t * self.config.hidden + h] = stage2[h * tokens + t]
-                    + self.positions[t * self.config.hidden + h];
+                hidden[t * self.config.hidden + h] =
+                    stage2[h * tokens + t] + self.positions[t * self.config.hidden + h];
             }
         }
         require_finite(&hidden, "audio tower after conv+position")?;
@@ -643,8 +646,7 @@ fn conv1d_into(
                     continue;
                 }
                 for c_in in 0..input_channels {
-                    let input_idx =
-                        (input_offset_frames + t_in as usize) * input_channels + c_in;
+                    let input_idx = (input_offset_frames + t_in as usize) * input_channels + c_in;
                     // Weight index: [k, c_in, c_out]
                     let w_idx = k * conv.input * conv.output + c_in * conv.output + c_out;
                     acc += input[input_idx] * conv.weight[w_idx];
@@ -708,9 +710,7 @@ fn load_f32_tensor_named(
             }
             let mut values = Vec::with_capacity(expected_elements);
             for chunk in bytes.chunks_exact(4) {
-                values.push(f32::from_le_bytes([
-                    chunk[0], chunk[1], chunk[2], chunk[3],
-                ]));
+                values.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
             }
             Ok(values)
         }

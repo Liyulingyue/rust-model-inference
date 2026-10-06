@@ -39,9 +39,7 @@ use crate::ops::{
     vec_add_into,
 };
 
-use super::{
-    linear_into, validate_component, Component, Q8Scratch,
-};
+use super::{linear_into, validate_component, Component, Q8Scratch};
 
 // === Architecture constants (from references/audio.cpp/docs/community_models/auk.md
 //    + config/auk-base.yaml, verified against actual GGUF tensor dims) ===
@@ -158,41 +156,20 @@ impl AukDit {
         pool: Arc<ComputePool>,
     ) -> Result<Self, String> {
         let source_ref = source.as_ref();
-        let audio_embed_bias = load_f32_vector(
-            source_ref,
-            "transformer.audio_embed.linear.bias",
-            HIDDEN,
-        )?;
-        let time_mlp_0_bias = load_f32_vector(
-            source_ref,
-            "transformer.time_embed.time_mlp.0.bias",
-            HIDDEN,
-        )?;
-        let time_mlp_2_bias = load_f32_vector(
-            source_ref,
-            "transformer.time_embed.time_mlp.2.bias",
-            HIDDEN,
-        )?;
-        let txt_proj_bias = load_f32_vector(
-            source_ref,
-            "transformer.txt_proj.bias",
-            HIDDEN,
-        )?;
-        let txt_norm_weight = load_f32_vector(
-            source_ref,
-            "transformer.txt_norm.weight",
-            HIDDEN,
-        )?;
+        let audio_embed_bias =
+            load_f32_vector(source_ref, "transformer.audio_embed.linear.bias", HIDDEN)?;
+        let time_mlp_0_bias =
+            load_f32_vector(source_ref, "transformer.time_embed.time_mlp.0.bias", HIDDEN)?;
+        let time_mlp_2_bias =
+            load_f32_vector(source_ref, "transformer.time_embed.time_mlp.2.bias", HIDDEN)?;
+        let txt_proj_bias = load_f32_vector(source_ref, "transformer.txt_proj.bias", HIDDEN)?;
+        let txt_norm_weight = load_f32_vector(source_ref, "transformer.txt_norm.weight", HIDDEN)?;
         let norm_out_bias = load_f32_vector(
             source_ref,
             "transformer.norm_out.linear.bias",
             FINAL_NORM_DIM,
         )?;
-        let proj_out_bias = load_f32_vector(
-            source_ref,
-            "transformer.proj_out.bias",
-            LATENT_DIM,
-        )?;
+        let proj_out_bias = load_f32_vector(source_ref, "transformer.proj_out.bias", LATENT_DIM)?;
         // rotary_embed.inv_freq is stored as F32 with length HEAD_DIM/2 = 32.
         let rotary_inv_freq = load_f32_vector(
             source_ref,
@@ -262,23 +239,53 @@ impl AukDit {
             "transformer.proj_out.weight".to_string(),
         ];
         for layer in 0..NUM_DOUBLE_LAYERS {
-            names.push(format!("transformer.transformer_blocks.{layer}.attn_norm_x.linear.weight"));
-            names.push(format!("transformer.transformer_blocks.{layer}.attn_norm_c.linear.weight"));
-            names.push(format!("transformer.transformer_blocks.{layer}.attn.to_qkv.weight"));
-            names.push(format!("transformer.transformer_blocks.{layer}.attn.to_qkv_c.weight"));
-            names.push(format!("transformer.transformer_blocks.{layer}.attn.to_out.0.weight"));
-            names.push(format!("transformer.transformer_blocks.{layer}.attn.to_out_c.weight"));
-            names.push(format!("transformer.transformer_blocks.{layer}.ff_x.linear_in.weight"));
-            names.push(format!("transformer.transformer_blocks.{layer}.ff_x.linear_out.weight"));
-            names.push(format!("transformer.transformer_blocks.{layer}.ff_c.linear_in.weight"));
-            names.push(format!("transformer.transformer_blocks.{layer}.ff_c.linear_out.weight"));
+            names.push(format!(
+                "transformer.transformer_blocks.{layer}.attn_norm_x.linear.weight"
+            ));
+            names.push(format!(
+                "transformer.transformer_blocks.{layer}.attn_norm_c.linear.weight"
+            ));
+            names.push(format!(
+                "transformer.transformer_blocks.{layer}.attn.to_qkv.weight"
+            ));
+            names.push(format!(
+                "transformer.transformer_blocks.{layer}.attn.to_qkv_c.weight"
+            ));
+            names.push(format!(
+                "transformer.transformer_blocks.{layer}.attn.to_out.0.weight"
+            ));
+            names.push(format!(
+                "transformer.transformer_blocks.{layer}.attn.to_out_c.weight"
+            ));
+            names.push(format!(
+                "transformer.transformer_blocks.{layer}.ff_x.linear_in.weight"
+            ));
+            names.push(format!(
+                "transformer.transformer_blocks.{layer}.ff_x.linear_out.weight"
+            ));
+            names.push(format!(
+                "transformer.transformer_blocks.{layer}.ff_c.linear_in.weight"
+            ));
+            names.push(format!(
+                "transformer.transformer_blocks.{layer}.ff_c.linear_out.weight"
+            ));
         }
         for layer in 0..NUM_SINGLE_LAYERS {
-            names.push(format!("transformer.single_transformer_blocks.{layer}.attn_norm.linear.weight"));
-            names.push(format!("transformer.single_transformer_blocks.{layer}.attn.to_qkv.weight"));
-            names.push(format!("transformer.single_transformer_blocks.{layer}.attn.to_out.0.weight"));
-            names.push(format!("transformer.single_transformer_blocks.{layer}.ff.linear_in.weight"));
-            names.push(format!("transformer.single_transformer_blocks.{layer}.ff.linear_out.weight"));
+            names.push(format!(
+                "transformer.single_transformer_blocks.{layer}.attn_norm.linear.weight"
+            ));
+            names.push(format!(
+                "transformer.single_transformer_blocks.{layer}.attn.to_qkv.weight"
+            ));
+            names.push(format!(
+                "transformer.single_transformer_blocks.{layer}.attn.to_out.0.weight"
+            ));
+            names.push(format!(
+                "transformer.single_transformer_blocks.{layer}.ff.linear_in.weight"
+            ));
+            names.push(format!(
+                "transformer.single_transformer_blocks.{layer}.ff.linear_out.weight"
+            ));
         }
         for name in names {
             let info = match source.tensor_info(&name) {
@@ -493,7 +500,8 @@ impl AukDit {
             HIDDEN,
             &scratch.time_frequency,
             &mut scratch.time_hidden,
-            &mut scratch.q8)?;
+            &mut scratch.q8,
+        )?;
         for (v, b) in scratch.time_hidden.iter_mut().zip(&self.time_mlp_0_bias) {
             *v += *b;
         }
@@ -504,7 +512,8 @@ impl AukDit {
             HIDDEN,
             &scratch.time_hidden_silu,
             &mut scratch.time,
-            &mut scratch.q8)?;
+            &mut scratch.q8,
+        )?;
         for (v, b) in scratch.time.iter_mut().zip(&self.time_mlp_2_bias) {
             *v += *b;
         }
@@ -536,7 +545,8 @@ impl AukDit {
                 HIDDEN,
                 &text_conditioning[token * TEXT_IN..(token + 1) * TEXT_IN],
                 &mut scratch.text[token * HIDDEN..(token + 1) * HIDDEN],
-                &mut scratch.q8)?;
+                &mut scratch.q8,
+            )?;
         }
         // Add bias.
         for token in 0..cond_tokens {
@@ -545,11 +555,7 @@ impl AukDit {
             }
         }
         // RMS norm with txt_norm.
-        rms_norm_inplace_text(
-            &mut scratch.text,
-            &self.txt_norm_weight,
-            cond_tokens,
-        );
+        rms_norm_inplace_text(&mut scratch.text, &self.txt_norm_weight, cond_tokens);
 
         // Concat: image tokens first, then conditioning tokens (audio + text).
         // Both are already in `scratch.img` and `scratch.text` (sized for
@@ -577,7 +583,8 @@ impl AukDit {
                 ADALN_DIM,
                 &scratch.time,
                 &mut scratch.modulation[..ADALN_DIM],
-                &mut scratch.q8)?;
+                &mut scratch.q8,
+            )?;
             for (v, b) in scratch.modulation[..ADALN_DIM]
                 .iter_mut()
                 .zip(&block.adaLN_x_bias)
@@ -590,7 +597,8 @@ impl AukDit {
                 ADALN_DIM,
                 &scratch.time,
                 &mut scratch.modulation[ADALN_DIM..2 * ADALN_DIM],
-                &mut scratch.q8)?;
+                &mut scratch.q8,
+            )?;
             for (v, b) in scratch.modulation[ADALN_DIM..2 * ADALN_DIM]
                 .iter_mut()
                 .zip(&block.adaLN_c_bias)
@@ -618,15 +626,17 @@ impl AukDit {
         }
 
         // Swap joint order from [img, text] (double-block convention) to
-// [text, img] (single-block convention). audio.cpp does this via
-// ConcatModule({1}).build(text, img) before the single-stream stage and
-// resets positions to 0..text+img sequentially.
+        // [text, img] (single-block convention). audio.cpp does this via
+        // ConcatModule({1}).build(text, img) before the single-stream stage and
+        // resets positions to 0..text+img sequentially.
         let total = img_tokens + cond_tokens;
         if img_tokens > 0 && cond_tokens > 0 {
             let mut swapped = vec![0.0_f32; total * HIDDEN];
             for token in 0..cond_tokens {
-                swapped[token * HIDDEN..(token + 1) * HIDDEN]
-                    .copy_from_slice(&scratch.joint[(img_tokens + token) * HIDDEN..(img_tokens + token + 1) * HIDDEN]);
+                swapped[token * HIDDEN..(token + 1) * HIDDEN].copy_from_slice(
+                    &scratch.joint
+                        [(img_tokens + token) * HIDDEN..(img_tokens + token + 1) * HIDDEN],
+                );
             }
             for token in 0..img_tokens {
                 swapped[(cond_tokens + token) * HIDDEN..(cond_tokens + token + 1) * HIDDEN]
@@ -643,7 +653,8 @@ impl AukDit {
                 ADALN_DIM,
                 &scratch.time,
                 &mut scratch.modulation[..ADALN_DIM],
-                &mut scratch.q8)?;
+                &mut scratch.q8,
+            )?;
             for (v, b) in scratch.modulation[..ADALN_DIM]
                 .iter_mut()
                 .zip(&block.adaLN_bias)
@@ -679,7 +690,8 @@ impl AukDit {
             FINAL_NORM_DIM,
             &scratch.time,
             &mut scratch.modulation[..FINAL_NORM_DIM],
-            &mut scratch.q8)?;
+            &mut scratch.q8,
+        )?;
         for (v, b) in scratch.modulation[..FINAL_NORM_DIM]
             .iter_mut()
             .zip(&self.norm_out_bias)
@@ -710,7 +722,8 @@ impl AukDit {
                 LATENT_DIM,
                 &normalized,
                 &mut projected[token * LATENT_DIM..(token + 1) * LATENT_DIM],
-                &mut scratch.q8)?;
+                &mut scratch.q8,
+            )?;
             for (v, b) in projected[token * LATENT_DIM..(token + 1) * LATENT_DIM]
                 .iter_mut()
                 .zip(&self.proj_out_bias)
@@ -732,23 +745,22 @@ impl AukDit {
 }
 
 const IMG_TOKENS_PLACEHOLDER: usize = 0; // placeholder until prepare() is called; the
-// real value depends on `latent_time`. We use a method on AukScratch.
+                                         // real value depends on `latent_time`. We use a method on AukScratch.
 
 // === Helpers (placeholders that compile; full numerical correctness is a
 //    follow-up commit once the scaffold validates and tests pass) ===
 
-fn load_f32_vector(
-    source: &dyn TensorSource,
-    name: &str,
-    len: usize,
-) -> Result<Vec<f32>, String> {
+fn load_f32_vector(source: &dyn TensorSource, name: &str, len: usize) -> Result<Vec<f32>, String> {
     let info = source
         .tensor_info(name)
         .ok_or_else(|| format!("Missing tensor: {name}"))?;
     if info.dims != [len as u64] {
         return Err(format!("Invalid {name} dimensions"));
     }
-    if !matches!(info.ggml_type, GGMLType::F32 | GGMLType::BF16 | GGMLType::F16) {
+    if !matches!(
+        info.ggml_type,
+        GGMLType::F32 | GGMLType::BF16 | GGMLType::F16
+    ) {
         return Err(format!(
             "Invalid {name} type {:?}: expected F32/BF16",
             info.ggml_type
@@ -779,8 +791,8 @@ fn load_f32_vector(
         }
         GGMLType::BF16 => {
             for (dst, chunk) in values.iter_mut().zip(bytes.chunks_exact(2)) {
-                *dst = half::bf16::from_bits(u16::from_le_bytes(chunk.try_into().unwrap()))
-                    .to_f32();
+                *dst =
+                    half::bf16::from_bits(u16::from_le_bytes(chunk.try_into().unwrap())).to_f32();
             }
         }
         _ => unreachable!(),
@@ -884,7 +896,11 @@ struct SplitMix64(u64);
 
 impl SplitMix64 {
     fn new(seed: u64) -> Self {
-        Self(if seed == 0 { 0xdead_beef_cafe_babe } else { seed })
+        Self(if seed == 0 {
+            0xdead_beef_cafe_babe
+        } else {
+            seed
+        })
     }
     fn next_u64(&mut self) -> u64 {
         self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -919,7 +935,7 @@ pub(crate) struct AukScratch {
     qkv_c: Vec<f32>,
     attention: Vec<f32>,
     scores: Vec<f32>,
-modulation: Vec<f32>,
+    modulation: Vec<f32>,
     rope: Vec<f32>,
     normed_buf: Vec<f32>,
     q8: Q8Scratch,
@@ -959,56 +975,16 @@ impl AukScratch {
             return Err("AuK image (latent) token count must be positive".into());
         }
         let total = img_token_count + text_token_count;
-        resize_zeroed(
-            &mut self.img,
-            img_token_count * HIDDEN,
-            "AuK img",
-        )?;
-        resize_zeroed(
-            &mut self.text,
-            (total) * HIDDEN,
-            "AuK text",
-        )?;
-        resize_zeroed(
-            &mut self.joint,
-            total * HIDDEN,
-            "AuK joint",
-        )?;
-        resize_zeroed(
-            &mut self.qkv,
-            total * QKV_DIM,
-            "AuK qkv",
-        )?;
-        resize_zeroed(
-            &mut self.qkv_c,
-            total * QKV_DIM,
-            "AuK qkv_c",
-        )?;
-        resize_zeroed(
-            &mut self.attention,
-            total * HIDDEN,
-            "AuK attention",
-        )?;
-        resize_zeroed(
-            &mut self.scores,
-            total,
-            "AuK scores",
-        )?;
-        resize_zeroed(
-            &mut self.modulation,
-            2 * ADALN_DIM,
-            "AuK modulation",
-        )?;
-        resize_zeroed(
-            &mut self.rope,
-            total * HEAD_DIM,
-            "AuK rope",
-        )?;
-        resize_zeroed(
-            &mut self.normed_buf,
-            total * HIDDEN,
-            "AuK normed_buf",
-        )?;
+        resize_zeroed(&mut self.img, img_token_count * HIDDEN, "AuK img")?;
+        resize_zeroed(&mut self.text, (total) * HIDDEN, "AuK text")?;
+        resize_zeroed(&mut self.joint, total * HIDDEN, "AuK joint")?;
+        resize_zeroed(&mut self.qkv, total * QKV_DIM, "AuK qkv")?;
+        resize_zeroed(&mut self.qkv_c, total * QKV_DIM, "AuK qkv_c")?;
+        resize_zeroed(&mut self.attention, total * HIDDEN, "AuK attention")?;
+        resize_zeroed(&mut self.scores, total, "AuK scores")?;
+        resize_zeroed(&mut self.modulation, 2 * ADALN_DIM, "AuK modulation")?;
+        resize_zeroed(&mut self.rope, total * HEAD_DIM, "AuK rope")?;
+        resize_zeroed(&mut self.normed_buf, total * HIDDEN, "AuK normed_buf")?;
         Ok(())
     }
 }
@@ -1047,7 +1023,9 @@ fn run_audio_embed(
             input[c] = latent[src];
         }
         let out = &mut output[token * HIDDEN..(token + 1) * HIDDEN];
-        linear_into_dispatch(q8_weights, source, weight, LATENT_DIM, HIDDEN, &input, out, q8, pool)?;
+        linear_into_dispatch(
+            q8_weights, source, weight, LATENT_DIM, HIDDEN, &input, out, q8, pool,
+        )?;
         for (v, b) in out.iter_mut().zip(bias) {
             *v += *b;
         }
@@ -1080,11 +1058,7 @@ fn layer_norm_token(input: &[f32], normalized: &mut [f32]) {
     }
 }
 
-fn rms_norm_inplace_text(
-    hidden: &mut [f32],
-    weight: &[f32],
-    n_tokens: usize,
-) {
+fn rms_norm_inplace_text(hidden: &mut [f32], weight: &[f32], n_tokens: usize) {
     for token in 0..n_tokens {
         let start = token * HIDDEN;
         let end = start + HIDDEN;
@@ -1117,12 +1091,7 @@ fn rms_norm_inplace_text(
 /// Apply rotary embedding in-place using a precomputed `inv_freq` table of
 /// length `head_dim/2`. `x` is a single token's head-major slice
 /// `[n_heads * head_dim]` flattened row-major; we apply neox halves.
-fn rope_apply_token(
-    x: &mut [f32],
-    pos: usize,
-    head_dim: usize,
-    inv_freq: &[f32],
-) {
+fn rope_apply_token(x: &mut [f32], pos: usize, head_dim: usize, inv_freq: &[f32]) {
     let half = head_dim / 2;
     if half == 0 || inv_freq.len() != half {
         return;
@@ -1489,7 +1458,9 @@ fn ada_ln_qkv(
     for token in 0..tokens {
         let input = &normed[token * HIDDEN..(token + 1) * HIDDEN];
         let out = &mut qkv_buf[token * QKV_DIM..(token + 1) * QKV_DIM];
-        linear_into_dispatch(q8_weights, source, qkv_weight, HIDDEN, QKV_DIM, input, out, q8, pool)?;
+        linear_into_dispatch(
+            q8_weights, source, qkv_weight, HIDDEN, QKV_DIM, input, out, q8, pool,
+        )?;
         for (v, b) in out.iter_mut().zip(qkv_bias) {
             *v += *b;
         }
@@ -1575,15 +1546,7 @@ fn stream_block_residual_mlp(
         let att_off = (row_range.start + token) * HIDDEN;
         let att_row = &attention[att_off..att_off + HIDDEN];
         linear_into_dispatch(
-        q8_weights,
-        source,
-            out_weight,
-            HIDDEN,
-            HIDDEN,
-            att_row,
-            &mut proj,
-            q8,
-            pool,
+            q8_weights, source, out_weight, HIDDEN, HIDDEN, att_row, &mut proj, q8, pool,
         )?;
         for (v, b) in proj.iter_mut().zip(out_bias) {
             *v += *b;
@@ -1613,8 +1576,8 @@ fn stream_block_residual_mlp(
         }
         // ff_in: 1536 -> 6144 (gate+up packed)
         linear_into_dispatch(
-        q8_weights,
-        source,
+            q8_weights,
+            source,
             ff_in_weight,
             HIDDEN,
             PACKED_FF_IN,
@@ -1633,8 +1596,8 @@ fn stream_block_residual_mlp(
         }
         // ff_out: 3072 -> 1536
         linear_into_dispatch(
-        q8_weights,
-        source,
+            q8_weights,
+            source,
             ff_out_weight,
             FF_INNER,
             HIDDEN,
@@ -1723,7 +1686,17 @@ fn run_single_block(
             normed_token[d] = normed_token[d] * (1.0 + scale_msa[d]) + shift_msa[d];
         }
         let out = &mut qkv_buf[token * QKV_DIM..(token + 1) * QKV_DIM];
-        linear_into_dispatch(q8_weights, source, &block.qkv, HIDDEN, QKV_DIM, &normed_token, out, q8, pool)?;
+        linear_into_dispatch(
+            q8_weights,
+            source,
+            &block.qkv,
+            HIDDEN,
+            QKV_DIM,
+            &normed_token,
+            out,
+            q8,
+            pool,
+        )?;
         for (v, b) in out.iter_mut().zip(&block.qkv_bias) {
             *v += *b;
         }
@@ -1754,7 +1727,12 @@ fn run_single_block(
         );
         let pos = token; // Sequential 0..text_tokens+img_tokens after the [text, img] swap.
         rope_apply_token(&mut qkv_buf[off..off + HIDDEN], pos, HEAD_DIM, inv_freq);
-        rope_apply_token(&mut qkv_buf[off + HIDDEN..off + 2 * HIDDEN], pos, HEAD_DIM, inv_freq);
+        rope_apply_token(
+            &mut qkv_buf[off + HIDDEN..off + 2 * HIDDEN],
+            pos,
+            HEAD_DIM,
+            inv_freq,
+        );
     }
 
     // Single-stream attention.
@@ -1795,15 +1773,7 @@ fn run_single_block(
         let off = token * HIDDEN;
         let att_row = &attention[off..off + HIDDEN];
         linear_into_dispatch(
-        q8_weights,
-        source,
-            &block.out,
-            HIDDEN,
-            HIDDEN,
-            att_row,
-            &mut proj,
-            q8,
-            pool,
+            q8_weights, source, &block.out, HIDDEN, HIDDEN, att_row, &mut proj, q8, pool,
         )?;
         for (v, b) in proj.iter_mut().zip(&block.out_bias) {
             *v += *b;
@@ -1819,8 +1789,8 @@ fn run_single_block(
             normed_token[d] = v * (1.0 + scale_mlp[d]) + shift_mlp[d];
         }
         linear_into_dispatch(
-        q8_weights,
-        source,
+            q8_weights,
+            source,
             &block.ff_in,
             HIDDEN,
             PACKED_FF_IN,
@@ -1836,8 +1806,8 @@ fn run_single_block(
             gated_buf[d] = silu * u;
         }
         linear_into_dispatch(
-        q8_weights,
-        source,
+            q8_weights,
+            source,
             &block.ff_out,
             FF_INNER,
             HIDDEN,
@@ -1865,7 +1835,9 @@ fn pre_quantize_f16_to_q8_0(
     if f16_bytes.len() != n_out * n_in * 2 {
         return Err(format!(
             "F16 weight size {} != n_out({}) * n_in({}) * 2",
-            f16_bytes.len(), n_out, n_in
+            f16_bytes.len(),
+            n_out,
+            n_in
         ));
     }
     if n_in % 32 != 0 {
@@ -1896,14 +1868,9 @@ fn pre_quantize_f16_to_q8_0(
                         // byte_off + 16 <= n_out*n_in*2 - (n_out-r-1)*n_in*2 ...
                         // For r = last row, byte_off + 16 <= (n_out-1)*n_in*2 + n_in*2 - 16
                         //   = n_out*n_in*2 - 16, which is within bounds.
-                        let v = _mm_loadu_si128(
-                            f16_bytes.as_ptr().add(byte_off) as *const __m128i,
-                        );
+                        let v = _mm_loadu_si128(f16_bytes.as_ptr().add(byte_off) as *const __m128i);
                         let f = _mm256_cvtph_ps(v);
-                        _mm256_storeu_ps(
-                            block_f32.as_mut_ptr().add(chunk * 8),
-                            f,
-                        );
+                        _mm256_storeu_ps(block_f32.as_mut_ptr().add(chunk * 8), f);
                     }
                 }
             }
@@ -1911,16 +1878,11 @@ fn pre_quantize_f16_to_q8_0(
             {
                 for lane in 0..32 {
                     let byte_off = (row_off + lane) * 2;
-                    let bits = u16::from_le_bytes([
-                        f16_bytes[byte_off],
-                        f16_bytes[byte_off + 1],
-                    ]);
+                    let bits = u16::from_le_bytes([f16_bytes[byte_off], f16_bytes[byte_off + 1]]);
                     block_f32[lane] = f16::from_bits(bits).to_f32();
                 }
             }
-            crate::ops::quantize_q8_0_into(
-                &block_f32, 32, &mut q8_block, &mut scale_f32,
-            );
+            crate::ops::quantize_q8_0_into(&block_f32, 32, &mut q8_block, &mut scale_f32);
             let dst = r * row_stride + b * 34;
             let scale_f16 = crate::ops::f32_to_f16(scale_f32[0]);
             let scale_bytes = scale_f16.to_le_bytes();
@@ -1952,7 +1914,9 @@ pub(crate) fn linear_into_q8_cached(
     if q8_bytes.len() != (n_in / 32) * 34 * n_out {
         return Err(format!(
             "AuK pre-quantized Q8_0 weight {} has size {} != expected {}",
-            name, q8_bytes.len(), (n_in / 32) * 34 * n_out
+            name,
+            q8_bytes.len(),
+            (n_in / 32) * 34 * n_out
         ));
     }
     if input.len() != n_in {
@@ -1976,21 +1940,16 @@ pub(crate) fn linear_into_q8_cached(
     let scale_len = q8.scales.len();
     let output_ptr = output.as_mut_ptr() as usize;
     pool.compute(move |ith, nth| {
-        let weight =
-            unsafe { std::slice::from_raw_parts(weight_ptr as *const u8, weight_len) };
-        let input =
-            unsafe { std::slice::from_raw_parts(input_ptr as *const u8, input_len) };
-        let scales =
-            unsafe { std::slice::from_raw_parts(scale_ptr as *const f32, scale_len) };
-        let out =
-            unsafe { std::slice::from_raw_parts_mut(output_ptr as *mut f32, n_out) };
+        let weight = unsafe { std::slice::from_raw_parts(weight_ptr as *const u8, weight_len) };
+        let input = unsafe { std::slice::from_raw_parts(input_ptr as *const u8, input_len) };
+        let scales = unsafe { std::slice::from_raw_parts(scale_ptr as *const f32, scale_len) };
+        let out = unsafe { std::slice::from_raw_parts_mut(output_ptr as *mut f32, n_out) };
         crate::ops::matmul_q8_0_quantized_parallel_rows(
             weight, input, scales, out, n_in, n_out, ith, nth,
         );
     });
     Ok(true)
 }
-
 
 /// Distributed matmul dispatch: try the pre-quantized Q8_0 cache (now always
 /// empty after the f4e7879 workaround was removed) and fall back to F16 GPU
@@ -2013,20 +1972,9 @@ fn linear_into_dispatch(
     q8: &mut Q8Scratch,
     pool: &ComputePool,
 ) -> Result<(), String> {
-    if let Ok(true) = linear_into_q8_cached(
-        q8_weights, name, n_in, n_out, input, output, q8, pool,
-    ) {
+    if let Ok(true) = linear_into_q8_cached(q8_weights, name, n_in, n_out, input, output, q8, pool)
+    {
         return Ok(());
     }
-    super::linear_into_scaled_impl(
-        source,
-        name,
-        n_in,
-        n_out,
-        input,
-        output,
-        q8,
-        pool,
-        1.0,
-    )
+    super::linear_into_scaled_impl(source, name, n_in, n_out, input, output, q8, pool, 1.0)
 }

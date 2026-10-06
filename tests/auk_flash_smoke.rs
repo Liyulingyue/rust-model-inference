@@ -50,9 +50,15 @@ fn flash_distilled_4_step_zero_guidance_produces_finite_output() {
         eprintln!("skipping: set RMI_AUK_TEXT");
         return;
     };
-    let Some(dit_src) = open_source(&dit) else { return; };
-    let Some(vae_src) = open_source(&vae) else { return; };
-    let Some(text_src) = open_source(&text) else { return; };
+    let Some(dit_src) = open_source(&dit) else {
+        return;
+    };
+    let Some(vae_src) = open_source(&vae) else {
+        return;
+    };
+    let Some(text_src) = open_source(&text) else {
+        return;
+    };
 
     // Validate architecture tag so we don't silently run on the wrong file.
     let arch = dit_src
@@ -65,7 +71,10 @@ fn flash_distilled_4_step_zero_guidance_produces_finite_output() {
     );
 
     let pipeline = rust_model_inference::models::diffusion::auk::AukPipeline::load(
-        dit_src, vae_src, Some(text_src), 1,
+        dit_src,
+        vae_src,
+        Some(text_src),
+        1,
     )
     .expect("AuK-Flash pipeline load");
     rust_model_inference::ops::enable_gpu();
