@@ -900,7 +900,8 @@
       "format": "cargo fmt --check and git diff --check passed",
       "full_suite": "not run; focused checks do not imply full-suite success",
       "baseline_repairs": "Made only AVX2 functions conditional on x86_64 so scalar I2_S prepacking compiles on ARM. Updated the stale Z-Image GPU rejection test to match the existing upstream GPU support.",
-      "default_build_check": "cargo check --locked --profile release-fast --bin rust-model-inference --example mage_flow_trace passed on macOS ARM with strict scalar Rust flags and no features"
+      "default_build_check": "cargo check --locked --profile release-fast --bin rust-model-inference --example mage_flow_trace passed on macOS ARM with strict scalar Rust flags and no features",
+      "all_examples_build_check": "cargo check --locked --profile release-fast --features vulkan --examples passed on macOS ARM; updated the stale ops::bitnet imports in two pre-existing examples to models::bitnet"
     },
     "target_host_reverification": {
       "status": "not_run",
@@ -908,6 +909,8 @@
     },
     "historical_precision": "local, remote and refactor_regression above are previous adaptation/refactor evidence, not new main-CLI numerical evidence.",
     "source_sha256": {
+      "examples/bitlinear_bench.rs": "44e5224a3633af96a1041aeabe4613b0a16fb612b918b0357681e9fb5affa721",
+      "examples/bitlinear_decompose.rs": "0699461322cf748cb678d92c98fd6a409cfacca2ef3e9f50fd356638269d008b",
       "examples/mage_flow_trace.rs": "053277b58fd0701f1b83cf4d467156c8c9658f99c95f316baa1c2fb00af42ff4",
       "src/app/cli/parse.rs": "1a6af51b162b7f12b1ac992838c220b2a52d84c3def5edd32d3b885afd99089e",
       "src/app/cli/tests.rs": "c671a4117112d8ba38c6c7cc5573c8d5344bbd7f003ae5dc7adb4c0707e9151b",
