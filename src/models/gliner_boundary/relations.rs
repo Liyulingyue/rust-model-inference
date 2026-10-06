@@ -36,6 +36,7 @@
 use crate::core::tensor::TensorSource;
 use crate::models::gliner_boundary::tensor_util::{apply_linear_full, load_vec, load_weight};
 use crate::ops::kernel::Weight;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::settings::BoundarySettings;
 
@@ -813,7 +814,205 @@ pub fn score_relations(
             tail_text,
         });
     }
-    out
+    // The proposals above are a capped head x tail cross-product, so they carry
+    // every occurrence pairing and every contained partial mention. The reference
+    // canonicalizes that before anything is reported, so the caller sees semantic
+    // edges rather than the raw proposal grid.
+    //
+    // Per **relation type**, not across the whole list: `_decode_relations`
+    // buckets edges by type (`edges.setdefault(relation_type, []).append`) and
+    // dedups each bucket on its own. Deduplicating across types lets stages 3 and
+    // 4 compare unrelated edges and drop them, which changes which types are
+    // reported at all.
+    let mut by_type: Vec<(String, Vec<ExtractedRelation>)> = Vec::new();
+    for edge in out {
+        let name = edge.relation_type.clone();
+        match by_type.iter_mut().find(|(existing, _)| *existing == name) {
+            Some((_, bucket)) => bucket.push(edge),
+            None => by_type.push((name, vec![edge])),
+        }
+    }
+    let mut deduped = Vec::new();
+    for (_, bucket) in by_type {
+        // Types keep the order they were first proposed in, because the buckets
+        // fill in proposal order.
+        deduped.extend(deduplicate_relation_edges(&bucket));
+    }
+    deduped
+}
+
+/// `_deduplicate_relation_edges` (`engine.py:899-1002`): collapse the capped
+/// head x tail cross-product into semantic edges.
+///
+/// Relation proposals deliberately score every capped combination, so the raw
+/// list contains each occurrence pairing and each contained partial mention.
+/// Four stages remove four different redundancies, and the order matters because
+/// each feeds the next:
+///
+/// 1. **Per-side containment.** Each mention folds into the *longest* mention
+///    containing it, ties to the earlier start. Head and tail canonicalize
+///    **independently**, so one edge can have its head and tail folded against
+///    different mention sets.
+/// 2. **Exact `(h0, h1, t0, t1)` dedup**, keeping the higher score. The key is
+///    offsets only, so two edges at the same offsets with different surface text
+///    collapse — and the survivor's *score* comes from the winning edge while its
+///    *text* comes from whichever edge last occupied those coordinates.
+/// 3. **Case/whitespace-folded semantic dedup.** Here the rank leads with
+///    **distance** and only then with score, which is the opposite of stage 2, so
+///    a closer pair beats a higher-scoring one. The comparison is strict, so an
+///    exact tie keeps the incumbent, and insertion order makes the first edge at
+///    a key the incumbent.
+/// 4. **Token-subset dominance.** Dropped when one side is a *strict* token subset
+///    of another edge's same side and the other side is exactly equal. Strict is
+///    what stops two equal-token edges deleting each other.
+///
+/// The result is sorted by `(head_start, tail_start, -score)`.
+pub fn deduplicate_relation_edges(edges: &[ExtractedRelation]) -> Vec<ExtractedRelation> {
+    if edges.len() < 2 {
+        return edges.to_vec();
+    }
+
+    // Stage 1. The mention map is keyed by coordinates and the *last* edge at
+    // those coordinates wins, which is what decides the text a canonical
+    // mention carries.
+    /// `(start, end) -> (text, start, end)`: the canonical mention each
+    /// coordinate folds into. Keyed by coordinates because several edges share a
+    /// coordinate and the reference does a lookup, not a positional index.
+    fn canonical(
+        edges: &[ExtractedRelation],
+        side: fn(&ExtractedRelation) -> (&str, usize, usize),
+    ) -> BTreeMap<(usize, usize), (&str, usize, usize)> {
+        // The last edge at a coordinate supplies that mention's text.
+        let mut mentions: BTreeMap<(usize, usize), &str> = BTreeMap::new();
+        for edge in edges {
+            let (text, start, end) = side(edge);
+            mentions.insert((start, end), text);
+        }
+        mentions
+            .iter()
+            .map(|(&coordinates @ (start, end), _)| {
+                let containing = mentions
+                    .keys()
+                    .filter(|(s, e)| *s <= start && *e >= end)
+                    .max_by_key(|(s, e)| (e - s, std::cmp::Reverse(*s)));
+                match containing {
+                    Some(&(s, e)) => (coordinates, (mentions[&(s, e)], s, e)),
+                    None => unreachable!("a mention contains itself"),
+                }
+            })
+            .collect()
+    }
+
+    fn head_of(edge: &ExtractedRelation) -> (&str, usize, usize) {
+        (edge.head_text.as_str(), edge.head_start, edge.head_end)
+    }
+    fn tail_of(edge: &ExtractedRelation) -> (&str, usize, usize) {
+        (edge.tail_text.as_str(), edge.tail_start, edge.tail_end)
+    }
+    let heads = canonical(edges, head_of);
+    let tails = canonical(edges, tail_of);
+
+    // Stage 2. Offsets only, and the higher score replaces the incumbent.
+    let mut exact: Vec<((usize, usize, usize, usize), ExtractedRelation)> = Vec::new();
+    for edge in edges {
+        let (head_text, head_start, head_end) = heads[&(edge.head_start, edge.head_end)].to_owned();
+        let (tail_text, tail_start, tail_end) = tails[&(edge.tail_start, edge.tail_end)].to_owned();
+        let normalized = ExtractedRelation {
+            relation_type: edge.relation_type.clone(),
+            score: edge.score,
+            head_start,
+            head_end,
+            tail_start,
+            tail_end,
+            head_text: head_text.to_string(),
+            tail_text: tail_text.to_string(),
+        };
+        let key = (head_start, head_end, tail_start, tail_end);
+        match exact.iter_mut().find(|(existing, _)| *existing == key) {
+            Some(entry) => {
+                if edge.score > entry.1.score {
+                    entry.1 = normalized;
+                }
+            }
+            None => exact.push((key, normalized)),
+        }
+    }
+
+    // Stage 3. Folded text as the key; the rank leads with distance.
+    let fold = |value: &str| {
+        value
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
+    };
+    let mut semantic: Vec<((String, String), ExtractedRelation)> = Vec::new();
+    for (_, edge) in exact {
+        let key = (fold(&edge.head_text), fold(&edge.tail_text));
+        let rank = |candidate: &ExtractedRelation| {
+            let distance = (candidate.head_start as i64 - candidate.tail_end as i64)
+                .max(candidate.tail_start as i64 - candidate.head_end as i64)
+                .max(0);
+            (
+                distance,
+                -candidate.score,
+                candidate.head_start,
+                candidate.tail_start,
+            )
+        };
+        match semantic.iter_mut().find(|(existing, _)| *existing == key) {
+            Some(entry) => {
+                if rank(&edge) < rank(&entry.1) {
+                    entry.1 = edge;
+                }
+            }
+            None => semantic.push((key, edge)),
+        }
+    }
+
+    // Stage 4. Strict token-subset dominance, against the *whole* surviving set.
+    let tokens = |value: &str| -> std::collections::BTreeSet<String> {
+        fold(value)
+            .split(' ')
+            .map(|word| word.to_string())
+            .collect()
+    };
+    let values: Vec<ExtractedRelation> = semantic.into_iter().map(|(_, edge)| edge).collect();
+    let token_sets: Vec<(BTreeSet<String>, BTreeSet<String>)> = values
+        .iter()
+        .map(|edge| (tokens(&edge.head_text), tokens(&edge.tail_text)))
+        .collect();
+    let kept: Vec<ExtractedRelation> = values
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| {
+            let (head_tokens, tail_tokens) = &token_sets[*index];
+            !token_sets
+                .iter()
+                .enumerate()
+                .any(|(other_index, (other_head, other_tail))| {
+                    if other_index == *index {
+                        return false;
+                    }
+                    (head_tokens.is_subset(other_head)
+                        && head_tokens != other_head
+                        && tail_tokens == other_tail)
+                        || (tail_tokens.is_subset(other_tail)
+                            && tail_tokens != other_tail
+                            && head_tokens == other_head)
+                })
+        })
+        .map(|(_, edge)| edge.clone())
+        .collect();
+
+    let mut sorted = kept;
+    sorted.sort_by(|a, b| {
+        a.head_start
+            .cmp(&b.head_start)
+            .then(a.tail_start.cmp(&b.tail_start))
+            .then(f32_order(b.score, a.score))
+    });
+    sorted
 }
 
 /// `_decode_relations` builds `relation_aliases` as

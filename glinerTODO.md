@@ -669,7 +669,8 @@ structures/records（`[C]`）；外加 abstention（`null_projection`）与 coun
 | `validators` / `RegexValidator` | `3be43a0` | `dump_regex_validator.py` | 两处 engine 差异**显式记录**而非掩盖 |
 | `choices` 全程（prefix + 查表 + 打分 + dtype/gate） | `34622d3` + 待提交 | `dump_choice_fields.py` + `dump_choice_decode.py` | ✅ 8 个测试（含 model-backed e2e） |
 | `_record_local_choice_mentions`（文档级字面量归属） | `3fa6645` | `dump_record_choice_mentions.py` | ✅ 5 个测试；两处变异均被抓 |
-| 长文本 `*_long` 的 chunk + merge | 待提交 | `dump_long_document.py` | ✅ 12 个测试；多数投票变异被抓 |
+| 长文本 `*_long` 的 chunk + merge（内核） | `dcf88d2` | `dump_long_document.py` | ✅ 12 个测试；多数投票变异被抓 |
+| relation 4 阶段 dedup canonicalizer | 待提交 | `dump_relation_dedup.py` | ✅ 5 个测试；三处变异均被抓 |
 
 ### ✅ F-1 `choices` literal-enum（**全程完成**）
 
@@ -777,13 +778,21 @@ confidence、span surface **从原文档重切**（不携带 chunk 里的 text�
 依赖：char offset 需要 word→char 映射，`word_splitter="char"` 改变了窗口边界
 （`runtime.py:1334` 把模型的 splitter 传进去）。
 
-### 🟡 F-4 relation 4 阶段 dedup canonicalizer
+### ✅ F-4 relation 4 阶段 dedup canonicalizer
 
-`engine.py:899-1002` `_deduplicate_relation_edges`，`relations.rs` 里确认没有：
-1. 单侧包含关系归一到最长 mention
-2. 精确 `(h0,h1,t0,t1)` 去重，保留最高分
-3. **case / 空白折叠后**的语义文本去重，平票按 token 距离再按分数
-4. token 子集支配关系剔除
+`engine.py:899-1002`，已接入 `score_relations` 的输出路径（**按 relation type 分桶**
+后各自 dedup —— 跨 type 去重会让 stage 3/4 比较不相关的边并删掉它们，改变**上报哪些
+type**；这一点是 model-backed e2e 抓出来的）。
+
+四阶段，顺序有意义，后一阶段吃前一阶段的结果：
+1. 单侧包含关系归一到**最长** mention（平票取更早 start），head/tail **各自独立**
+2. 精确 `(h0,h1,t0,t1)` 去重，保留最高分。key **只看 offset 不看 text**，所以胜者的
+   **score** 来自高分边而 **text** 来自同坐标的**最后**一条边 —— 这个「来源分裂」很容易
+   漏，fixture 钉住了
+3. **case / 空白折叠**后的语义文本去重，rank 以 **distance 优先**（与 stage 2 相反：
+   更近压过高分），比较是严格 `<`，平票保留先插入者
+4. token **严格**子集支配剔除（`<` 而非 `<=`，所以相等 token 集互不删除）
+
 最终按 `(head_start, tail_start, -score)` 排序。
 
 ### ⚪ F-5 已确认**不做**的（记录理由，避免以后重复调查）
