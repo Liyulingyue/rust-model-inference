@@ -111,34 +111,27 @@ pub fn load_layers<'a>(
     n_ff: usize,
     n_embd_head_k: usize,
 ) -> Vec<Qwen3LayerWeights<'a>> {
-    // The Qwen3-Embedding path (mean pooling, has_qk_norm=true)
-    // carry `blk.{i}.attn_{q,k}_norm.weight`. The legacy `load_layers`
-    // helper predates the BitNet-specific dispatch and hardcodes
-    // qk_norm loading — `load_layers_static` is the modern path that
-    // honours both flags from the GGUF metadata.
-    let has_qk_norm = true;
+    // The qwen3 standard arch always declares qk_norm on every
+    // layer (`blk.{i}.attn_{q,k}_norm.weight`); the legacy
+    // `load_layers` helper predates the BitNet-specific dispatch
+    // and unconditionally loads them. `load_layers_static` is the
+    // modern path that honours `cfg.has_qk_norm` from the GGUF
+    // metadata; new code should use it instead of branching on a
+    // (now-removed) parameter here.
     (0..n_layer)
         .map(|l| Qwen3LayerWeights {
             attn_norm: get_f32_tensor(source, &format!("blk.{}.attn_norm.weight", l), n_embd),
             ffn_norm: get_f32_tensor(source, &format!("blk.{}.ffn_norm.weight", l), n_embd),
-            q_norm: if has_qk_norm {
-                Some(get_f32_tensor(
-                    source,
-                    &format!("blk.{}.attn_q_norm.weight", l),
-                    n_embd_head_k,
-                ))
-            } else {
-                None
-            },
-            k_norm: if has_qk_norm {
-                Some(get_f32_tensor(
-                    source,
-                    &format!("blk.{}.attn_k_norm.weight", l),
-                    n_embd_head_k,
-                ))
-            } else {
-                None
-            },
+            q_norm: Some(get_f32_tensor(
+                source,
+                &format!("blk.{}.attn_q_norm.weight", l),
+                n_embd_head_k,
+            )),
+            k_norm: Some(get_f32_tensor(
+                source,
+                &format!("blk.{}.attn_k_norm.weight", l),
+                n_embd_head_k,
+            )),
             q_bias: None,
             k_bias: None,
             v_bias: None,
