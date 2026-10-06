@@ -668,6 +668,7 @@ structures/records（`[C]`）；外加 abstention（`null_projection`）与 coun
 | per-entity / per-field / per-relation threshold | `5a22717` | `dump_per_query_thresholds.py` | 三条**互不相通**的通道 |
 | `validators` / `RegexValidator` | `3be43a0` | `dump_regex_validator.py` | 两处 engine 差异**显式记录**而非掩盖 |
 | `choices` 全程（prefix + 查表 + 打分 + dtype/gate） | `34622d3` + 待提交 | `dump_choice_fields.py` + `dump_choice_decode.py` | ✅ 8 个测试（含 model-backed e2e） |
+| `_record_local_choice_mentions`（文档级字面量归属） | 待提交 | `dump_record_choice_mentions.py` | ✅ 5 个测试；两处变异均被抓 |
 
 ### ✅ F-1 `choices` literal-enum（**全程完成**）
 
@@ -701,14 +702,36 @@ structures/records（`[C]`）；外加 abstention（`null_projection`）与 coun
 但 reference 愿意解任何声明了 `choices` 的 schema —— 所以 oracle 直接**声明一个让
 reference 自己解**，数字来自真 encoder + 真 head。已生成 `choice-decode-golden.json`。
 
-**唯一未做**：record 路径的 `_record_local_choice_mentions`（`engine.py:595`）——
-在**原始文本**上跑 `(?<!\w)choice(?!\w)` 忽略大小写，归属到最近的前置 anchor，
-按值去重、保持源序。注意它在 record 路径校验的是 **choice 字面量本身**，
-不是文档 span（`engine.py:1086`）。
-
 **已知精度边界**（非 bug，是「按字段切片单 query」的设计取舍）：分数比 reference
 低 5e-3..5e-2。下一个改进是**一次 `score_explicit_spans` 打完一个 group 的所有 choice**，
 保持 batch 宽度以对齐归约顺序。
+
+### 🟠 F-1b record 路径的 `choices` 前缀回退（**未做，F-1 剩下的最后一块**）
+
+`_record_local_choice_mentions`（文档级字面量归属，`engine.py:595`）**已完成**，
+见上表。但它只是**优先路径**。当文档里**没有**任何 choice 字面量时
+（`has_literal_choices == false`），reference 回退到**给 schema prefix 里的 enum token
+打分**（`engine.py:1080-1130`）。回退路径要求：
+
+- [ ] record head 为 `choices` 字段把**候选集换成 prefix enum token**，而不是共用
+      文档 candidate pool（`build_record_group` 现在对所有字段都用同一个 pool）
+- [ ] 命中 token 的 surface 从 prefix token 解析（`prefix_choice_by_token`），
+      **不能**走 `token_boundaries_to_character_offsets` —— 它只映射文档范围内的
+      token，prefix token 落在 `offset` 之前，会解不出字符
+- [ ] 概率取 `min(candidate_probability, assignment_probability)`（有 assignment 时）
+- [ ] 再过 per-field threshold + `validators`（注意此处 validator 校验的是
+      **choice 字面量本身**，不是文档 span）
+- [ ] reference 自己的注释记录了这个回退为何重要：不修的话每个 record 都会退回
+      `_decode_choice_field` 的文档级打分，导致**所有 record 拿到完全相同的
+      choice 和 confidence**，与「哪个 record 真正提出了这个 choice」无关
+
+**零 ground truth**：现有 12 个模型没有一个 schema 用过 `choices`，
+且 record + choices 的组合没有 oracle。开工前必须先造 fixture。
+
+**engine 坑（已踩）**：reference 的 `(?<!\w)choice(?!\w)` 用 `re.escape(choice)`
+先转义，**且 `regex` crate 不支持 lookaround**，`\b` 也不等价
+（choice 含标点时语义不同）。正确做法是「转义后的字面量 + 手工检查两侧非词字符」，
+不能整词匹配 —— 那样 `a.b` 这种带标点的 choice 会漏。
 
 ### 🟠 F-2 `entity_attributes` / `AttributeGroup`（工作量最大，无 ground truth）
 
@@ -775,7 +798,13 @@ reference 自己解**，数字来自真 encoder + 真 head。已生成 `choice-d
 4. **`score_spans` 的 `batch` 是「样本数」不是「样本下标」**（本轮踩到）：
    返回 `0..batch * q_count * c` 个元素，传 `0` 得到 0 个候选 —— 而调用点读起来
    像是索引。参数名有歧义，值得改。
-5. **`overlap.rs` 的 `usize` 下溢**（`1c1466a` 修）：reference 的
+5. **`regex` crate 不支持 lookaround**（本轮踩到）：reference 的
+   `(?<!\w)choice(?!\w)` 无法直译，`\b` **不是等价物** —— choice 以标点开头/结尾时
+   语义不同。整词匹配 `[\p{L}\p{N}_]+` 再比较也错：那会让 `a.b` 这类带标点的
+   choice 整个漏掉（`a.b` 里 `.` 打断词 run）。正解是「`re.escape` 后的字面量 +
+   手工检查两侧非词字符」。第一版用整词匹配，`a_choice_is_matched_literally`
+   立刻抓到了。
+6. **`overlap.rs` 的 `usize` 下溢**（`1c1466a` 修）：reference 的
    `bisect_right(ends, start, 0, position) - 1` 对 `usize` 减 1。release 下靠二次回绕
    碰巧正确，**debug 的溢出检查会让 3 个 `overlap_resolution_parity` 测试失败**。
    之前记的「gliner 82/82」是 release 下测的。

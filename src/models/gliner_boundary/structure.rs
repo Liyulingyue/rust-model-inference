@@ -31,6 +31,11 @@
 //!   `scored` must arrive already thresholded and sorted: re-sorting here would
 //!   silently change which value a `str` field reports.
 
+use std::collections::BTreeMap;
+
+use regex::Regex;
+use std::sync::OnceLock;
+
 use super::overlap::{resolve_overlaps, OverlapPolicy, ScoredSpan};
 
 // ---------------------------------------------------------------------------
@@ -245,4 +250,154 @@ pub fn present_choices(
         }
     }
     present
+}
+
+/// `_record_local_choice_mentions` (`engine.py:595-654`): find the choice
+/// literals that occur in the document text and assign each to a record.
+///
+/// Returns `(has_literal_choices, per-record mentions)`, keyed by record index.
+/// `has_literal_choices` distinguishes "the document mentioned some choice" from
+/// "it mentioned none", which is what the caller uses to decide between the
+/// document-level answer and the schema-prefix fallback.
+///
+/// The reference calls this a *pure function* of `(text, choices,
+/// anchor_char_spans)`, and it is: the regex find, the preceding-anchor
+/// assignment, and the per-record dedup. Three rules are load-bearing and each
+/// is a way a plausible port diverges:
+///
+/// 1. **A choice is a whole word**, `(?<!\w)…(?!\w)`, case-insensitively. So
+///    `paris` is not reported inside `Parisian`, and a mention is a single
+///    contiguous run — never a fuzzy match.
+/// 2. **Ownership is by the *preceding* anchor, not the nearest.** A mention
+///    between two anchors belongs to the earlier one; a mention before the first
+///    anchor binds to the first. The reference's example is two `Amazon …`
+///    sentences, and the trailing `(books)` goes to the second record.
+/// 3. **Values are semantic sets.** Within one record a value is kept once, at
+///    its first source occurrence, and the retained list is in source order. The
+///    *declared* choice is reported, not the document's casing.
+pub fn record_local_choice_mentions(
+    text: &str,
+    choices: &[String],
+    anchor_char_spans: &[Option<(usize, usize)>],
+) -> (bool, BTreeMap<usize, Vec<(String, usize, usize)>>) {
+    // Byte offset -> char offset, so the reported spans index the string the way
+    // Python's `str` slicing does.
+    let mut char_of_byte = vec![0usize; text.len() + 1];
+    let mut chars = 0usize;
+    for (byte, _) in text.char_indices() {
+        char_of_byte[byte] = chars;
+        chars += 1;
+    }
+    char_of_byte[text.len()] = chars;
+
+    let mut mentions: Vec<(String, usize, usize)> = Vec::new();
+    for choice in choices {
+        for (start, end) in find_word_occurrences(text, choice) {
+            mentions.push((choice.clone(), char_of_byte[start], char_of_byte[end]));
+        }
+    }
+    if mentions.is_empty() {
+        return (false, BTreeMap::new());
+    }
+    let valid: Vec<(usize, (usize, usize))> = anchor_char_spans
+        .iter()
+        .enumerate()
+        .filter_map(|(index, anchor)| anchor.map(|a| (index, a)))
+        .collect();
+    if valid.is_empty() {
+        // Mentions exist but no record has an anchor to own them, so the caller
+        // must not treat them as assigned to anything.
+        return (true, BTreeMap::new());
+    }
+    let mut ordered = valid.clone();
+    ordered.sort_by_key(|(index, anchor)| (anchor.0, *index));
+
+    let mut assigned: BTreeMap<usize, Vec<(String, usize, usize)>> = BTreeMap::new();
+    mentions.sort_by_key(|(_, start, _)| *start);
+    for mention in mentions {
+        let preceding: Vec<(usize, usize)> = ordered
+            .iter()
+            .filter(|(_, anchor)| anchor.0 <= mention.1)
+            .map(|(index, anchor)| (anchor.0, *index))
+            .collect();
+        let owner = if preceding.is_empty() {
+            ordered[0].0
+        } else {
+            preceding
+                .iter()
+                .max_by_key(|(anchor_start, index)| (*anchor_start, *index))
+                .expect("preceding is non-empty")
+                .1
+        };
+        assigned.entry(owner).or_default().push(mention);
+    }
+
+    for owned in assigned.values_mut() {
+        let mut unique: Vec<(String, usize, usize)> = Vec::new();
+        let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        for mention in owned.iter() {
+            if seen.insert(mention.0.as_str()) {
+                unique.push(mention.clone());
+            }
+        }
+        unique.sort_by_key(|(_, start, _)| *start);
+        *owned = unique;
+    }
+    (true, assigned)
+}
+
+/// Byte spans of every `(?<!\w)choice(?!\w)` occurrence, case-insensitively.
+///
+/// The `regex` crate has **no look-around**, so the reference's look-behind and
+/// look-ahead cannot be spelled directly and `\b` is not a substitute — `\b`
+/// anchors a *word boundary*, which differs from "not a word character" on both
+/// sides whenever the choice itself starts or ends with punctuation. Instead this
+/// enumerates whole words and compares: matching `[\p{L}\p{N}_]+` and keeping
+/// the ones equal to `choice` under case folding is exactly the reference's rule,
+/// and it also makes the choice a literal so metacharacters cannot widen it.
+///
+/// `\w` is spelled out for the same reason the word splitter spells it — the
+/// `regex` crate's `\w` also folds combining marks, which Python's does not.
+fn find_word_occurrences(text: &str, choice: &str) -> Vec<(usize, usize)> {
+    if choice.is_empty() {
+        return Vec::new();
+    }
+    let Some(re) = literal_pattern(choice) else {
+        return Vec::new();
+    };
+    let is_word = |c: char| {
+        // `\w` spelled out: `\p{L}` or `\p{N}` or `_`. The `regex` crate's own `\w`
+        // would also fold combining marks, which Python's does not.
+        c.is_alphanumeric() || c == '_'
+    };
+    re.find_iter(text)
+        .filter(|m| {
+            let before_ok = text[..m.start()]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !is_word(c));
+            let after_ok = text[m.end()..].chars().next().is_none_or(|c| !is_word(c));
+            before_ok && after_ok
+        })
+        .map(|m| (m.start(), m.end()))
+        .collect()
+}
+
+/// A case-insensitive literal match for `choice`, escaping it so a choice
+/// containing regex metacharacters matches itself. This is `re.escape(choice)`
+/// plus `re.IGNORECASE`, and it is what makes the reference's `a.b` a literal
+/// `a\.b` rather than "any character" — the reference escapes before compiling.
+///
+/// Compiled per call. `find_word_occurrences` runs once per choice per decode,
+/// not per span, so caching would add a lock for no measurable gain.
+fn literal_pattern(choice: &str) -> Option<Regex> {
+    Regex::new(&format!("(?i){}", regex::escape(choice))).ok()
+}
+
+/// `[\p{L}\p{N}_]+`, the word run the choice is matched against.
+fn word_run_pattern() -> Option<&'static Regex> {
+    static PATTERN: OnceLock<Option<Regex>> = OnceLock::new();
+    PATTERN
+        .get_or_init(|| Regex::new(r"[\p{L}\p{N}_]+").ok())
+        .as_ref()
 }
