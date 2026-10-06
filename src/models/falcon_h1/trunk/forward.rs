@@ -18,8 +18,7 @@ use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::{Kernel, Weight};
 use crate::ops::{
-    f32_slice_to_f16, quantize_q8_0_into, rope_norm,
-    sample_llama_cpp, softmax_inplace,
+    f32_slice_to_f16, quantize_q8_0_into, rope_norm, sample_llama_cpp, softmax_inplace,
 };
 
 /// Split the fused `ssm_in` projection into [z, xBC, dt]. Layout matches

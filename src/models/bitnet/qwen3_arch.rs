@@ -44,13 +44,13 @@
 //! below.
 
 use super::embedding::print_embedding_for_arch;
-use crate::ops::rope::rope_neox_inplace;
 use crate::core::tensor::TensorSource;
 use crate::ops::bitnet::{
     bitlinear_forward_packed, quantize_activation_per_token, BitLinearSlotPacked,
     BitLinearWeightsPacked,
 };
 use crate::ops::float::f16_to_f32;
+use crate::ops::rope::rope_neox_inplace;
 /// Per-projection BitLinear, **packed-weight** variant.
 ///
 /// RMSNorm → absmax int8 quant → ternary matmul → rescale, on
@@ -556,20 +556,12 @@ pub fn text_encode(model: &BitNetQwen3Model, token_ids: &[u32]) -> Result<Vec<f3
             for head in 0..cfg.n_head {
                 let off = tok * n_embd_q + head * cfg.n_embd_head_k;
                 let q_slice = &mut q_all[off..off + cfg.n_embd_head_k];
-                rope_neox_inplace(
-                    q_slice,
-                    tok,
-                    cfg.n_embd_head_k,
-                    cfg.freq_base);
+                rope_neox_inplace(q_slice, tok, cfg.n_embd_head_k, cfg.freq_base);
             }
             for head in 0..cfg.n_head_kv {
                 let off = tok * n_embd_k + head * cfg.n_embd_head_k;
                 let k_slice = &mut k_all[off..off + cfg.n_embd_head_k];
-                rope_neox_inplace(
-                    k_slice,
-                    tok,
-                    cfg.n_embd_head_k,
-                    cfg.freq_base);
+                rope_neox_inplace(k_slice, tok, cfg.n_embd_head_k, cfg.freq_base);
             }
         }
 

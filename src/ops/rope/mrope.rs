@@ -37,7 +37,7 @@ pub fn rope_mrope(
     let half = head_dim / 2;
     let total_sections: i32 = sections.iter().sum();
     if total_sections == 0 {
-        rope_neox_inplace(x, positions[0], head_dim, freq_base );
+        rope_neox_inplace(x, positions[0], head_dim, freq_base);
         return;
     }
     let total_sections = total_sections as usize;

@@ -1,5 +1,4 @@
 use super::config::Qwen3Rope;
-use crate::ops::rope::rope_neox_inplace;
 use super::forward::{forward_moe_token, Qwen3Input};
 use super::session::Qwen3Session;
 use super::util::{checked_product, validate_input_shapes, validate_token_ids};
@@ -7,6 +6,7 @@ use super::weights::Qwen3Model;
 use crate::core::prefill::{checked_prefill_batch_size, prefill_chunks};
 use crate::core::scratchpad::KvCache;
 use crate::ops::kernel::{PreparedRows, Weight};
+use crate::ops::rope::rope_neox_inplace;
 use crate::ops::*;
 #[cfg(feature = "parity-trace")]
 use crate::parity_trace;
@@ -483,7 +483,8 @@ impl Qwen3Session<'_> {
                             head,
                             position[0],
                             config.n_embd_head_k,
-                            config.freq_base),
+                            config.freq_base,
+                        ),
                         Qwen3Rope::Interleaved { sections, n_dims } => rope_mrope_interleaved(
                             head,
                             position,
@@ -500,7 +501,8 @@ impl Qwen3Session<'_> {
                             head,
                             position[0],
                             config.n_embd_head_k,
-                            config.freq_base),
+                            config.freq_base,
+                        ),
                         Qwen3Rope::Interleaved { sections, n_dims } => rope_mrope_interleaved(
                             head,
                             position,

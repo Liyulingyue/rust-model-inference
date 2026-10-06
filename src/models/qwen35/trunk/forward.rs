@@ -20,10 +20,8 @@ use crate::core::thread_pool::ComputePool;
 use crate::models::edge0::forward::{forward_edge0_moe_token, normalize_recurrent_qk};
 use crate::models::edge0::weights::Edge0MoeWeights;
 use crate::ops::{
-    rope_neox_inplace,
-    dot_f32, rope_mrope, sigmoid_inplace, silu_approx_inplace,
-    silu_inplace, silu_mul_approx_inplace, silu_mul_inplace, softmax_inplace,
-
+    dot_f32, rope_mrope, rope_neox_inplace, sigmoid_inplace, silu_approx_inplace, silu_inplace,
+    silu_mul_approx_inplace, silu_mul_inplace, softmax_inplace,
 };
 #[cfg(feature = "parity-trace")]
 use crate::parity_trace;
@@ -568,7 +566,8 @@ impl<'a> super::weights::HybridTrunk<'a> {
                         &mut scratch.q_buf[q_off..q_off + cfg.rope_dimension_count],
                         positions[0],
                         cfg.rope_dimension_count,
-                        cfg.rope_freq_base);
+                        cfg.rope_freq_base,
+                    );
                 }
             }
             for h in 0..n_head_kv {
@@ -586,7 +585,8 @@ impl<'a> super::weights::HybridTrunk<'a> {
                         &mut scratch.k_buf[k_off..k_off + cfg.rope_dimension_count],
                         positions[0],
                         cfg.rope_dimension_count,
-                        cfg.rope_freq_base);
+                        cfg.rope_freq_base,
+                    );
                 }
             }
         }

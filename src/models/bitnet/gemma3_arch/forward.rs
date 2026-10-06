@@ -26,11 +26,11 @@
 //! [`crate::models::bitnet`].
 
 use super::config::{Gemma3Config, Gemma3Rope};
-use crate::ops::rope::rope_neox_inplace;
 use super::weights::{Gemma3LayerWeights, Gemma3Model};
 use crate::ops::bitnet::{
     bitlinear_forward_packed, quantize_activation_per_token, BitLinearWeightsPacked,
 };
+use crate::ops::rope::rope_neox_inplace;
 /// Per-projection BitLinear, **packed-weight** variant. Mirrors
 /// `qwen3_arch::bitlinear_projection_packed`. Uses the AVX2
 /// SIMD kernel via [`bitlinear_forward_packed`].
@@ -258,11 +258,7 @@ pub fn text_encode(model: &Gemma3Model, token_ids: &[u32]) -> Result<Vec<f32>, S
                 let q_slice = &mut q_all[off..off + cfg.n_embd_head_k];
                 match cfg.rope {
                     Gemma3Rope::Neox => {
-                        rope_neox_inplace(
-                            q_slice,
-                            tok,
-                            cfg.n_embd_head_k,
-                            cfg.freq_base);
+                        rope_neox_inplace(q_slice, tok, cfg.n_embd_head_k, cfg.freq_base);
                     }
                 }
             }
@@ -271,11 +267,7 @@ pub fn text_encode(model: &Gemma3Model, token_ids: &[u32]) -> Result<Vec<f32>, S
                 let k_slice = &mut k_all[off..off + cfg.n_embd_head_k];
                 match cfg.rope {
                     Gemma3Rope::Neox => {
-                        rope_neox_inplace(
-                            k_slice,
-                            tok,
-                            cfg.n_embd_head_k,
-                            cfg.freq_base);
+                        rope_neox_inplace(k_slice, tok, cfg.n_embd_head_k, cfg.freq_base);
                     }
                 }
             }

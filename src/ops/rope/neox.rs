@@ -82,12 +82,7 @@ pub fn rope_neox_inplace_with_factor(
 /// and broadcast). Apply cost: `O(x.len())` f32 muls + adds
 /// under the per-arch kernel below.
 #[inline]
-fn build_cos_sin_table_and_apply(
-    x: &mut [f32],
-    theta_0: f32,
-    head_dim: usize,
-    freq_base: f32,
-) {
+fn build_cos_sin_table_and_apply(x: &mut [f32], theta_0: f32, head_dim: usize, freq_base: f32) {
     let half = head_dim / 2;
     let n_heads = x.len() / head_dim;
     if half == 0 || n_heads == 0 {
@@ -379,7 +374,7 @@ mod tests {
         values[130] = f32::from_bits(0xbccb_b52e);
         values[138] = f32::from_bits(0xbd7e_afee);
 
-        rope_neox_inplace(&mut values, 1, 256, 10_000.0 );
+        rope_neox_inplace(&mut values, 1, 256, 10_000.0);
 
         assert_eq!(values[2].to_bits(), 0x3e89_3aee);
         assert_eq!(values[10].to_bits(), 0x3e82_1b0c);

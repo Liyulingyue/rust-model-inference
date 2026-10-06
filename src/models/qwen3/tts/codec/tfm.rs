@@ -16,10 +16,8 @@ use crate::ops::kernel::q8_0::dispatch::matmul_q8_0_quantized_range_nrc1;
 #[cfg(not(target_arch = "aarch64"))]
 use crate::ops::matmul_q8_0_quantized_parallel_rows;
 use crate::ops::{
-    rope_neox_inplace,
-    f16_to_f32, f32_slice_to_f16, quantize_q8_0_into, rms_norm,
-    silu, softmax_exp_sum, vec_scale_f32,
-
+    f16_to_f32, f32_slice_to_f16, quantize_q8_0_into, rms_norm, rope_neox_inplace, silu,
+    softmax_exp_sum, vec_scale_f32,
 };
 
 const TFM_N_LAYER: usize = 8;
@@ -362,12 +360,14 @@ fn forward_tfm_layer(
                 &mut q_all[head_start..head_start + TFM_HEAD_DIM],
                 rope_position,
                 TFM_HEAD_DIM,
-                TFM_ROPE_THETA);
+                TFM_ROPE_THETA,
+            );
             rope_neox_inplace(
                 &mut k_all[head_start..head_start + TFM_HEAD_DIM],
                 rope_position,
                 TFM_HEAD_DIM,
-                TFM_ROPE_THETA);
+                TFM_ROPE_THETA,
+            );
         }
     }
     let mut keys = Vec::with_capacity(old_keys.len() + k_all.len());

@@ -13,12 +13,10 @@ use crate::core::tokenizer::{load_tokenizer, EncodeOptions};
 use crate::ops::embedding_lookup;
 use crate::ops::kernel::{QuantizedTensor, Weight};
 use crate::ops::{
-    rope_neox_inplace,
     dot_f16_f32, dot_f32, f32_slice_to_f16, gelu_mul_approx_inplace, quantize_q8_0_into,
-    rms_norm_grouped, rms_norm_inplace, rope_norm,
-    silu_mul_approx_inplace, silu_mul_inplace, softmax_inplace, sum_sq_f32, vec_add_into,
-    vec_mad_f16_f32, vec_mad_f32, vec_scale_f32,
-
+    rms_norm_grouped, rms_norm_inplace, rope_neox_inplace, rope_norm, silu_mul_approx_inplace,
+    silu_mul_inplace, softmax_inplace, sum_sq_f32, vec_add_into, vec_mad_f16_f32, vec_mad_f32,
+    vec_scale_f32,
 };
 use crate::prompt::format_k2_horizon_chat_prompt_with_thinking;
 
@@ -3290,7 +3288,7 @@ mod tests {
         let mut actual = [1.0, 2.0, 3.0, 4.0];
         let mut expected = actual;
         apply_rope("k2-horizon", &mut actual, 7, 4, 10_000_000.0, 4, 1.0, None);
-        crate::ops::rope_neox_inplace(&mut expected, 7, 4, 10_000_000.0 );
+        crate::ops::rope_neox_inplace(&mut expected, 7, 4, 10_000_000.0);
         assert_eq!(actual.map(f32::to_bits), expected.map(f32::to_bits));
     }
 

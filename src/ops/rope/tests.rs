@@ -2,8 +2,8 @@
 
 use super::{
     neox::{rope_neox_inplace_scalar, rope_neox_inplace_with_table, rope_sin_cos},
-    rope_mrope, rope_neox_sleef, rope_norm, rope_norm_nrot,
-    rope_sin_cos_sleef, rope_sin_cos_sleef_table_with_threads, rope_vision,
+    rope_mrope, rope_neox_sleef, rope_norm, rope_norm_nrot, rope_sin_cos_sleef,
+    rope_sin_cos_sleef_table_with_threads, rope_vision,
 };
 use crate::ops::rope::rope_neox_inplace;
 
@@ -139,7 +139,7 @@ fn rope_neox_inplace_simd_matches_scalar_fallback() {
         }
         b.copy_from_slice(&a);
 
-        rope_neox_inplace(&mut a, pos, head_dim, freq_base );
+        rope_neox_inplace(&mut a, pos, head_dim, freq_base);
 
         // Scalar reference uses the same recurrence as the public function's
         // table build, then a plain scalar per-head rotation — the same
