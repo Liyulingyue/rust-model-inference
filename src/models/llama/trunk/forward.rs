@@ -3129,6 +3129,8 @@ pub(crate) fn run_attention_chunked(
     kb: usize,
     n_threads: usize,
     max_ctx: usize,
+    attn_softcap: f32,
+    sliding_window: usize,
 ) {
     let attn_out_ptr = attn_out.as_mut_ptr();
     let q_ptr = q.as_ptr();
@@ -3170,25 +3172,36 @@ pub(crate) fn run_attention_chunked(
                 let q_off = h * n_embd_head_k;
                 let out_base = h * n_embd_head_v;
                 for r in 0..rows {
+                    // Gemma-2 sliding-window trim per row: row `r`
+                    // attends to positions
+                    // `[max(0, base_position+r+1-sw), base_position+r+1)`.
+                    // The F16 path can't post-mask (online softmax
+                    // accumulates via running max), so we trim the
+                    // iteration range and advance the cache pointer
+                    // instead.
+                    let abs_pos = base_position + r;
+                    let full_n_cached = abs_pos + 1;
+                    let (eff_n_cached, head_off) = if sliding_window > 0
+                        && full_n_cached > sliding_window
+                    {
+                        (
+                            sliding_window,
+                            kb + (full_n_cached - sliding_window) * n_embd_gqa + kv_h * n_embd_head_v,
+                        )
+                    } else {
+                        (full_n_cached, kb + kv_h * n_embd_head_v)
+                    };
                     attention_head_f16(
                         &q_local[r * n_embd_q + q_off..r * n_embd_q + q_off + n_embd_head_k],
                         &mut attn_out_local
                             [r * n_embd_q + out_base..r * n_embd_q + out_base + n_embd_head_v],
                         k_cache,
                         v_cache,
-                        kb + kv_h * n_embd_head_v,
+                        head_off,
                         n_embd_gqa,
-                        base_position + r + 1,
+                        eff_n_cached,
                         kq_scale,
-                        // softcap: 0.0 disables Gemma-2's
-                        // `attn_logit_softcapping` (default for every
-                        // non-Gemma arch). The chunked helper is
-                        // shared by all llama-family models, so
-                        // wiring a per-arch dispatch here would
-                        // duplicate `run_attention_chunked`'s
-                        // callers — left as TODO for the session
-                        // path.
-                        0.0,
+                        attn_softcap,
                     );
                 }
             }
@@ -3213,9 +3226,21 @@ pub(crate) fn run_attention_chunked(
                 for r in 0..rows {
                     let q_row =
                         &q_local[r * n_embd_q + q_off..r * n_embd_q + q_off + n_embd_head_k];
+                    let abs_pos = base_position + r;
+                    // Gemma-2 sliding-window trim: only dot-product
+                    // against the most-recent `sliding_window`
+                    // tokens. Earlier positions get -inf so softmax
+                    // ignores them.
+                    let sw_start = if sliding_window > 0 && (abs_pos + 1) > sliding_window {
+                        (abs_pos + 1) - sliding_window
+                    } else {
+                        0
+                    };
                     for t in 0..n_cached_total {
-                        let abs_pos = base_position + r;
                         let score = if t > abs_pos {
+                            f32::NEG_INFINITY
+                        } else if t < sw_start {
+                            // sliding-window mask (gemma2)
                             f32::NEG_INFINITY
                         } else {
                             crate::ops::dot_f32(
@@ -3226,6 +3251,13 @@ pub(crate) fn run_attention_chunked(
                             ) * kq_scale
                         };
                         scores[r * n_padded + t] = score;
+                    }
+                    // Apply attn logit softcap to the kept region
+                    // (`[sw_start, abs_pos+1)`) when active.
+                    if attn_softcap > 0.0 {
+                        let mut row_view = &mut scores[r * n_padded + sw_start
+                            ..r * n_padded + (abs_pos + 1)];
+                        softcap_inplace(&mut row_view, attn_softcap);
                     }
                     // Causal mask padding.
                     for t in n_cached_total..n_padded {

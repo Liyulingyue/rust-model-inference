@@ -27,20 +27,25 @@
 //!
 //! ## Public surface
 //!
-//! - `compute_embedding` — last-token hidden state via the llama
-//!   chunked prefill path. No learnable pooling head; matches the
-//!   convention used by every other decoder-LM "embedding"
-//!   (qwen3 / mistral / phi3 fall-through).
+//! - `compute_embedding` — last-token **hidden state** as the
+//!   embedding vector. Reuses the llama trunk's session-driven
+//!   prefill and reads `scratch.x` after the final residual add —
+//!   `rms_norm_grouped` writes its output to a separate `normed`
+//!   buffer, so the residual stream (last hidden state) is preserved
+//!   in `scratch.x`. Result dim = `n_embd` (2304 for 2B-it).
 
 use crate::app::cli::KvFormat;
 use crate::core::loader::model_config_from_source;
+use crate::core::prefill::ChunkedPrefill;
 use crate::core::tensor::TensorSource;
 use crate::core::tokenizer::{load_tokenizer, EncodeOptions};
-use crate::models::llama::trunk::run_forward_logits_llama_with_batch;
+use crate::models::llama::trunk::LlamaSession;
 
 /// Last-token hidden state as the embedding vector for a Gemma-2
-/// prompt. Reuses the llama chunked prefill (`forward_logits`); no
-/// separate pooling head, matching qwen3 / phi3 fall-through.
+/// prompt. Returns `Vec<f32>` of length `n_embd` (2304 for 2B-it,
+/// 3584 for 4B-it, 4096 for 9B/27B-it). No learnable pooling head —
+/// matches the convention used by every other decoder-LM
+/// "embedding" path.
 pub fn compute_embedding(
     source: &dyn TensorSource,
     prompt: &str,
@@ -59,14 +64,17 @@ pub fn compute_embedding(
         ));
     }
 
-    // Gemma-2-it chat template: <bos><start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n.
-    // The `<start_of_turn>` / `<end_of_turn>` markers are tokenizer
-    // special tokens (`tokenizer.ggml.add_bos_token = true`,
-    // `parse_special = true`); BOS is emitted by `add_special = true`.
-    let prompt_text =
-        format!("<start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n");
+    // Embedding-mode tokenization: raw text + BOS, no chat template
+    // wrap. The CLI / HTTP generation paths wrap prompts in
+    // `<start_of_turn>user\n…<end_of_turn>\n<start_of_turn>model\n`
+    // before tokenization (see `models::llama::trunk::forward`'s
+    // `llama_turn_text` for gemma-2-it chat handling), but the
+    // embedding API takes raw user text so the residual stream at
+    // the last position encodes the prompt rather than the
+    // constant chat-template suffix. Matches
+    // `models::gemma3::encode_embedding_input` byte-for-byte.
     let prompt_tokens = tokenizer.encode(
-        &prompt_text,
+        prompt,
         EncodeOptions {
             add_special: true,
             parse_special: true,
@@ -78,29 +86,39 @@ pub fn compute_embedding(
 
     let config = model_config_from_source(source)
         .map_err(|error| format!("Failed to parse Gemma-2 model config: {error}"))?;
-    // The llama trunk caps KV at `min(n_ctx, max_context)` internally.
+    let n_embd = config.n_embd;
+
+    // The session caps KV at `min(n_ctx, max_context)` internally.
     // Gemma-2-2B declares `context_length = 8192`; cap at that to
     // avoid allocating 2 GiB of KV cache on tiny machines.
     let max_ctx = config.n_ctx.min(8192);
     let kv_format = KvFormat::F16;
-    let (logits, _elapsed) = run_forward_logits_llama_with_batch(
+
+    // Build the session — owns weights, KV cache, scratchpad, and
+    // the gemma-2-specific config (GeGLU dispatch + attn softcap +
+    // sliding window + 4-norm sandwich). `from_source_with_max_rows`
+    // wires all arch-aware behaviour; `max_rows=1` reproduces the
+    // legacy per-token forward exactly.
+    let mut session = LlamaSession::from_source_with_max_rows(
         source,
-        &prompt_tokens,
         n_threads_arg,
         kv_format,
         max_ctx,
         1,
     )
-    .map_err(|error| format!("Gemma-2 chunked prefill failed: {error}"))?;
+    .map_err(|error| format!("Gemma-2 session init failed: {error}"))?;
 
-    // The chunked prefill returns the **logits** at the last prompt
-    // position (vocab-sized), not the hidden state. Downstream
-    // consumers that want a fixed-dim embedding need the hidden state
-    // instead. For now we return the logits as the "embedding"
-    // surrogate; the contract tests pin shape = vocab_size so this
-    // matches `qwen3_compute_embedding`'s default behaviour. (A
-    // proper pooling head would require a separate hidden-state
-    // extraction path — the llama trunk's `forward_logits` doesn't
-    // surface `scratch.x` today.)
-    Ok(logits)
+    // `prefill` walks the prompt one token at a time. After it
+    // returns, `scratch.x[..n_embd]` holds the post-final-residual
+    // stream (= last-token hidden state, BEFORE the optional
+    // `output_norm` + LM-head pass). The session's per-layer loop
+    // applies GeGLU + attn softcap + sliding window + 4-norm sandwich
+    // for gemma2; the per-token decode loop in `forward_one_token`
+    // writes the final logits to `scratch.logits` but leaves `x`
+    // untouched (output_norm reads x, writes to `normed`).
+    session
+        .prefill(&prompt_tokens, 1)
+        .map_err(|error| format!("Gemma-2 session prefill failed: {error}"))?;
+
+    Ok(session.scratch.x[..n_embd].to_vec())
 }
