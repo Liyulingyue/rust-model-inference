@@ -1,0 +1,38 @@
+diff --git a/src/ggml-cpu/ggml-cpu.c b/src/ggml-cpu/ggml-cpu.c
+index af57afe..5fcbbca 100644
+--- a/src/ggml-cpu/ggml-cpu.c
++++ b/src/ggml-cpu/ggml-cpu.c
+@@ -3321,6 +3321,33 @@ static thread_ret_t ggml_graph_compute_thread(void * data) {
+             ggml_compute_forward(&params, node);
+         }
+ 
++        const char * rmi_trace = getenv("RMI_ORACLE_TRACE");
++        if (rmi_trace && strncmp(node->name, "rmi.", 4) == 0) {
++            ggml_barrier(state->threadpool);
++            if (state->ith == 0 && node->type == GGML_TYPE_F32 && ggml_is_contiguous(node)) {
++                char path[512];
++                static char names[1024][GGML_MAX_NAME];
++                static int counts[1024], used;
++                int slot = 0;
++                while (slot < used && strcmp(names[slot], node->name)) ++slot;
++                GGML_ASSERT(slot < 1024);
++                if (slot == used) { snprintf(names[used++], GGML_MAX_NAME, "%s", node->name); }
++                const int occurrence = counts[slot]++;
++                if (occurrence) snprintf(path, sizeof(path), "%s/%s.%d.f32", rmi_trace, node->name, occurrence);
++                else snprintf(path, sizeof(path), "%s/%s.f32", rmi_trace, node->name);
++                FILE * f = fopen(path, "wb");
++                if (f) { fwrite(node->data, 1, ggml_nbytes(node), f); fclose(f); }
++                snprintf(path, sizeof(path), "%s/checkpoints.jsonl", rmi_trace);
++                f = fopen(path, "a");
++                if (f) {
++                    fprintf(f, "{\"name\":\"%s\",\"occurrence\":%d,\"ne\":[%lld,%lld,%lld,%lld]}\n",
++                        node->name, occurrence, (long long)node->ne[0], (long long)node->ne[1], (long long)node->ne[2], (long long)node->ne[3]);
++                    fclose(f);
++                }
++            }
++            ggml_barrier(state->threadpool);
++        }
++
+         if (state->ith == 0 && cplan->abort_callback &&
+                 cplan->abort_callback(cplan->abort_callback_data)) {
+             atomic_store_explicit(&tp->abort, node_n + 1, memory_order_relaxed);

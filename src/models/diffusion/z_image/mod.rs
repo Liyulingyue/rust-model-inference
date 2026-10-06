@@ -349,11 +349,26 @@ fn validate_transformer_vectors(source: &dyn TensorSource, prefix: &str) -> Resu
 }
 
 fn validate_vae(source: &dyn TensorSource) -> Result<(), String> {
+    validate_vae_decoder(source, 16)
+}
+
+pub(crate) fn validate_flux2_vae(source: &dyn TensorSource) -> Result<(), String> {
+    validate_vae_decoder(source, 32)?;
+    require_tensor(
+        source,
+        "post_quant_conv.weight",
+        &[1, 1, 32, 32],
+        GGMLType::F16,
+    )?;
+    require_tensor(source, "post_quant_conv.bias", &[32], GGMLType::F32)
+}
+
+fn validate_vae_decoder(source: &dyn TensorSource, latent_channels: u64) -> Result<(), String> {
     for (name, dims, ggml_type) in [
         ("decoder.conv_in.bias", &[512][..], GGMLType::F32),
         (
             "decoder.conv_in.weight",
-            &[3, 3, 16, 512][..],
+            &[3, 3, latent_channels, 512][..],
             GGMLType::F16,
         ),
         ("decoder.conv_out.bias", &[3][..], GGMLType::F32),
@@ -411,11 +426,21 @@ fn validate_vae_attention(
     channels: u64,
 ) -> Result<(), String> {
     for name in ["k", "proj_out", "q", "v"] {
+        let weight = format!("{prefix}.{name}.weight");
+        let linear = source.tensor_info(&weight).is_some_and(|info| {
+            info.ggml_type == GGMLType::F32 && info.dims == [channels, channels]
+        });
+        let linear_dims = [channels, channels];
+        let conv_dims = [1, 1, channels, channels];
         require_tensor(
             source,
-            &format!("{prefix}.{name}.weight"),
-            &[1, 1, channels, channels],
-            GGMLType::F16,
+            &weight,
+            if linear {
+                &linear_dims[..]
+            } else {
+                &conv_dims[..]
+            },
+            if linear { GGMLType::F32 } else { GGMLType::F16 },
         )?;
         require_tensor(
             source,

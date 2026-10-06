@@ -902,6 +902,29 @@ fn breeze_cfg_scale_parses_and_rejects_invalid_values_or_other_modes() {
 }
 
 #[test]
+fn ernie_image_cfg_scale_accepts_complete_components_and_rejects_nan() {
+    let base = [
+        "rmi",
+        "--model",
+        "ernie-image.gguf",
+        "--text-encoder",
+        "ministral.gguf",
+        "--vae",
+        "flux2.gguf",
+        "--prompt",
+        "a cat",
+        "--out",
+        "cat.png",
+    ];
+    for (scale, valid) in [("5", true), ("1", true), ("NaN", false), ("0", false)] {
+        let mut values = base.to_vec();
+        values.extend(["--cfg-scale", scale]);
+        let options = parse_cli_options(&args(&values)).unwrap();
+        assert_eq!(validate_cli_options(&options).is_ok(), valid);
+    }
+}
+
+#[test]
 fn asr_cli_rejects_conflicting_modes_before_model_load() {
     let mut options = asr_cli_options();
     options.dump_logits = true;

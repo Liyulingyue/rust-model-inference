@@ -106,6 +106,35 @@ fn nearest_int(value: f32) -> i32 {
     ((bits & 0x007f_ffff) as i32) - 0x0040_0000
 }
 
+/// GGML's signed Q8_K activation scale and ties-to-even rounding.
+/// Keep the existing unsigned activation contract for its other callers.
+pub(crate) fn quantize_row_q8_k_ggml_into(input: &[f32], output: &mut [BlockQ8K]) {
+    assert_eq!(input.len() % QK_K, 0);
+    assert_eq!(output.len(), input.len() / QK_K);
+    for (values, block) in input.chunks_exact(QK_K).zip(output) {
+        let mut max = 0f32;
+        for &x in values {
+            if x.abs() > max.abs() {
+                max = x;
+            }
+        }
+        if max == 0. {
+            block.d = 0.;
+            block.qs.fill(0);
+            block.bsums.fill(0);
+            continue;
+        }
+        let scale = -127. / max;
+        for (q, &x) in block.qs.iter_mut().zip(values) {
+            *q = nearest_int(scale * x).min(127) as i8;
+        }
+        for (sum, values) in block.bsums.iter_mut().zip(block.qs.chunks_exact(16)) {
+            *sum = values.iter().map(|&x| x as i16).sum();
+        }
+        block.d = 1. / scale;
+    }
+}
+
 fn quantize_row_q8_k_scalar_into(x: &[f32], buf: &mut [BlockQ8K]) {
     let n = x.len();
     // K-quants require `QK_K`-aligned input. Models whose n_embd /
@@ -251,7 +280,7 @@ pub fn vec_dot_q4k_q8k(q4k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
         return unsafe { vec_dot_q4k_q8k_avx2(q4k_data, q8k) };
     }
     #[cfg(target_arch = "aarch64")]
-    if std::arch::is_aarch64_feature_detected!("dotprod") {
+    if crate::ops::has_neon() && std::arch::is_aarch64_feature_detected!("dotprod") {
         return unsafe { neon_k::vec_dot_q4k_q8k_neon(q4k_data, q8k) };
     }
     vec_dot_q4k_q8k_scalar(q4k_data, q8k)

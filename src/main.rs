@@ -347,8 +347,15 @@ fn main() {
                 .is_some()
                 && arch_probe.tensor_info("text_proj.weight").is_some());
         if is_ernie_image {
+            let turbo = options
+                .model
+                .to_string_lossy()
+                .to_lowercase()
+                .contains("turbo");
             if options.gpu {
-                ops::enable_gpu();
+                app::run_or_exit(Err(
+                    "ERNIE-Image currently supports CPU only; remove --gpu".into()
+                ));
             }
             let text: Arc<dyn TensorSource> = Arc::from(open_or_exit(
                 options
@@ -369,9 +376,10 @@ fn main() {
                     .prompt
                     .as_deref()
                     .expect("ERNIE-Image prompt required"),
-                options.steps.unwrap_or(8),
+                options.steps.unwrap_or(if turbo { 8 } else { 32 }),
                 options.resolution.unwrap_or(512),
                 options.seed.unwrap_or(0),
+                options.cfg_scale.unwrap_or(if turbo { 1.0 } else { 5.0 }),
                 options.out.clone().expect("ERNIE-Image --out required"),
                 n_threads,
             ));
@@ -380,6 +388,11 @@ fn main() {
     }
 
     if let Some(z_image_options) = z_image_options {
+        if options.cfg_scale.is_some() {
+            app::run_or_exit(Err(
+                "--cfg-scale is supported for ERNIE-Image and Breeze TTS".into(),
+            ));
+        }
         // Has to happen here, not at the shared `enable_gpu()` below: this
         // branch returns before reaching it, and the DiT's projections only
         // reach the Vulkan backend once the flag is set.

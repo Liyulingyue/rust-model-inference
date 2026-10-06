@@ -1,26 +1,13 @@
-//! ERNIE-Image text encoder: forward Ministral-3 (mistral3 arch, llama
-//! trunk) up to layer 35 and return the per-token hidden states at the
-//! hidden_size boundary (3072).
-//!
-//! Reference for arch sizes:
-//! - `tests/ministral3_3b_instruct_q4_k_m.rs` (`pick(&loader, "mistral3.embedding_length") == 3072`)
-//!
-//! The forward mirrors `src/models/diffusion/z_image/text.rs` (Qwen3 encoder
-//! for Z-Image) with the model dimensions swapped: this module drives 35
-//! transformer layers with hidden=3072, q_heads=32, kv_heads=8, head_dim=128,
-//! FFN=9216, vocab=65536. We stop after layer 35 because that's where the
-//! LLM's last hidden state lives — running `model.norm` afterward would mix
-//! in a final RMSNorm that the ERNIE-Image text encoder does not need.
+//! ERNIE-Image text encoder: Ministral-3 hidden_states[-2], after 25 of 26
+//! transformer blocks, before the final block and output RMSNorm.
+//! Reference: stable-diffusion.cpp 3f8527a, conditioner.hpp (out_layers={25}).
 
 use std::sync::Arc;
 
-use crate::core::tensor::{GGMLType, MetaValue, TensorSource};
+use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
-use crate::ops::{
-    attention_value_reduce, embedding_lookup, rms_norm, rms_norm_inplace, rope_neox_inplace,
-    silu_mul_inplace,
-};
+use crate::ops::{embedding_lookup, rms_norm, rope_neox_inplace, silu_mul_inplace};
 
 use super::{linear_into, validate_component, Component, Q8Scratch};
 
@@ -31,16 +18,14 @@ const HEAD_WIDTH: usize = super::dit::TEXT_HEAD_DIM; // 128
 const QUERY_WIDTH: usize = QUERY_HEADS * HEAD_WIDTH;
 const KV_WIDTH: usize = KV_HEADS * HEAD_WIDTH;
 const FFN_WIDTH: usize = super::dit::TEXT_FFN; // 9216
-const LAYERS: usize = super::dit::TEXT_NUM_LAYERS; // 35
-const STOP_LAYER: usize = LAYERS - 1;
-const RMS_EPSILON: f32 = 1e-6;
+const LAYERS: usize = super::dit::TEXT_NUM_LAYERS;
+const STOP_LAYER: usize = LAYERS - 2;
+const RMS_EPSILON: f32 = 1e-5;
 const ROPE_BASE: f32 = 1_000_000.0;
 
 struct TextLayer {
     input_norm: Vec<f32>,
     post_attention_norm: Vec<f32>,
-    q_norm: Vec<f32>,
-    k_norm: Vec<f32>,
     q_proj: String,
     k_proj: String,
     v_proj: String,
@@ -83,7 +68,7 @@ impl ErnieImageTextEncoder {
         let total_start = std::time::Instant::now();
         let t_tok = std::time::Instant::now();
         let ids = self.tokenizer.encode(
-            &ernie_image_prompt(prompt),
+            prompt,
             EncodeOptions {
                 add_special: true,
                 parse_special: true,
@@ -118,7 +103,7 @@ impl ErnieImageTextEncoder {
         let token_count = ids.len();
         let output_len = token_count
             .checked_mul(HIDDEN)
-            .ok_or("Ministral-3 layer-35 output size overflow")?;
+            .ok_or("Ministral-3 hidden state size overflow")?;
         let mut output = vec![0.0_f32; output_len];
         let embedding = self
             .source
@@ -135,10 +120,6 @@ impl ErnieImageTextEncoder {
 
         // Embedding lookup for all tokens at once
         for (position, &id) in ids.iter().enumerate() {
-            embedding_lookup(embedding, id, HIDDEN, embd_type, &mut scratch.hidden);
-            // The embedding lookup above overwrites the full hidden buffer
-            // each time -- but Z-Image's pattern is to embed into a row at
-            // `position * HIDDEN`. Re-do with the right offset:
             embedding_lookup(
                 embedding,
                 id,
@@ -148,6 +129,13 @@ impl ErnieImageTextEncoder {
             );
         }
 
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "ernie_image.text.embedding",
+            None,
+            &[token_count, HIDDEN],
+            &scratch.hidden,
+        ));
         // Full forward through all layers in one pass
         for layer_index in 0..=STOP_LAYER {
             forward_layer(
@@ -165,6 +153,13 @@ impl ErnieImageTextEncoder {
                 &mut scratch.q8,
                 self.pool.as_ref(),
             )?;
+            #[cfg(feature = "parity-trace")]
+            crate::parity_trace::report(crate::parity_trace::checkpoint(
+                "ernie_image.text.block",
+                Some(layer_index),
+                &[token_count, HIDDEN],
+                &scratch.hidden,
+            ));
         }
         // The post-stop hidden state is in scratch.hidden, which is exactly
         // `token_count * HIDDEN` elements -- the size of `output`.
@@ -175,7 +170,6 @@ impl ErnieImageTextEncoder {
 
 struct TextScratch {
     hidden: Vec<f32>,
-    normed: Vec<f32>,
     q: Vec<f32>,
     k: Vec<f32>,
     v: Vec<f32>,
@@ -190,7 +184,6 @@ impl TextScratch {
     fn new(n_tokens: usize) -> Self {
         Self {
             hidden: vec![0.0; n_tokens * HIDDEN],
-            normed: vec![0.0; n_tokens * HIDDEN],
             q: vec![0.0; n_tokens * QUERY_WIDTH],
             k: vec![0.0; n_tokens * KV_WIDTH],
             v: vec![0.0; n_tokens * KV_WIDTH],
@@ -244,10 +237,6 @@ fn load_layer(source: &dyn TensorSource, layer: usize) -> Result<TextLayer, Stri
     Ok(TextLayer {
         input_norm: vector("attn_norm.weight", HIDDEN)?,
         post_attention_norm: vector("ffn_norm.weight", HIDDEN)?,
-        // Ministral-3 has NO per-head Q/K RMS norms (only Qwen3 / Qwen3.5 do).
-        // We store empty vectors and skip the RMS step in `forward_layer`.
-        q_norm: Vec::new(),
-        k_norm: Vec::new(),
         q_proj: format!("{prefix}.attn_q.weight"),
         k_proj: format!("{prefix}.attn_k.weight"),
         v_proj: format!("{prefix}.attn_v.weight"),
@@ -256,14 +245,6 @@ fn load_layer(source: &dyn TensorSource, layer: usize) -> Result<TextLayer, Stri
         up_proj: format!("{prefix}.ffn_up.weight"),
         down_proj: format!("{prefix}.ffn_down.weight"),
     })
-}
-
-/// Ministral-3 uses Mistral chat template (see PR #147 / `docs/usage/ministral3.md`).
-/// The exact template is `<s>[INST] {prompt} [/INST]` per Mistral 3's documented
-/// format; we mirror what `src/app/text/generation.rs` already routes for
-/// `mistral3` arch.
-fn ernie_image_prompt(prompt: &str) -> String {
-    format!("<s>[INST] {prompt} [/INST]")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -284,7 +265,19 @@ fn forward_layer(
 ) -> Result<(), String> {
     // attention
     let mut normalized = vec![0.0_f32; n_tokens * HIDDEN];
-    rms_norm(hidden, &layer.input_norm, &mut normalized, RMS_EPSILON);
+    for (input, output) in hidden
+        .chunks_exact(HIDDEN)
+        .zip(normalized.chunks_exact_mut(HIDDEN))
+    {
+        rms_norm(input, &layer.input_norm, output, RMS_EPSILON);
+    }
+    #[cfg(feature = "parity-trace")]
+    crate::parity_trace::report(crate::parity_trace::checkpoint(
+        "ernie_image.text.norm",
+        None,
+        &[n_tokens, HIDDEN],
+        &normalized,
+    ));
     for token in 0..n_tokens {
         let row = &normalized[token * HIDDEN..(token + 1) * HIDDEN];
         linear_into(
@@ -326,56 +319,38 @@ fn forward_layer(
         for head in 0..QUERY_HEADS {
             let q_start = head * HEAD_WIDTH;
             let q_chunk = &mut q_row[q_start..q_start + HEAD_WIDTH];
-            rope_neox_inplace(q_chunk, token, HEAD_WIDTH / 2, ROPE_BASE);
+            rope_neox_inplace(q_chunk, token, HEAD_WIDTH, ROPE_BASE);
         }
         for head in 0..KV_HEADS {
             let k_start = head * HEAD_WIDTH;
             let k_chunk = &mut k_row[k_start..k_start + HEAD_WIDTH];
-            rope_neox_inplace(k_chunk, token, HEAD_WIDTH / 2, ROPE_BASE);
+            rope_neox_inplace(k_chunk, token, HEAD_WIDTH, ROPE_BASE);
         }
     }
 
-    // attention output: A = softmax(Q K^T / sqrt(d)) V
+    for d in 0..KV_WIDTH {
+        for token in 0..n_tokens {
+            gate[d * n_tokens + token] = v_buf[token * KV_WIDTH + d];
+        }
+    }
     let scale = 1.0 / (HEAD_WIDTH as f32).sqrt();
     for head in 0..QUERY_HEADS {
+        let kv_offset = (head / (QUERY_HEADS / KV_HEADS)) * HEAD_WIDTH;
         for query_idx in 0..n_tokens {
-            // Q @ K^T, head-wise.
             let q_offset = query_idx * QUERY_WIDTH + head * HEAD_WIDTH;
             let q = &q_buf[q_offset..q_offset + HEAD_WIDTH];
-            let mut max_score = f32::NEG_INFINITY;
-            for key_idx in 0..n_tokens {
-                let k_offset = key_idx * KV_WIDTH + (head / (QUERY_HEADS / KV_HEADS)) * HEAD_WIDTH;
-                let k = &k_buf[k_offset..k_offset + HEAD_WIDTH];
-                let mut dot = 0.0_f32;
-                for d in 0..HEAD_WIDTH {
-                    dot += q[d] * k[d];
-                }
-                let score = dot * scale;
-                scores[key_idx] = score;
-                if score > max_score {
-                    max_score = score;
-                }
+            let length = query_idx + 1;
+            for key_idx in 0..length {
+                let k_offset = key_idx * KV_WIDTH + kv_offset;
+                scores[key_idx] =
+                    crate::ops::dot_f32(q, &k_buf[k_offset..k_offset + HEAD_WIDTH], HEAD_WIDTH)
+                        * scale;
             }
-            let mut sum = 0.0_f32;
-            for s in scores.iter_mut().take(n_tokens) {
-                *s = (*s - max_score).exp();
-                sum += *s;
-            }
-            let inv = 1.0 / sum;
-            for s in scores.iter_mut().take(n_tokens) {
-                *s *= inv;
-            }
-            // Softmax(Q K^T) @ V.
-            let out_offset = query_idx * QUERY_WIDTH + head * HEAD_WIDTH;
+            crate::ops::softmax_inplace(&mut scores[..length]);
             for d in 0..HEAD_WIDTH {
-                attn[out_offset + d] = 0.0;
-            }
-            for key_idx in 0..n_tokens {
-                let v_offset = key_idx * KV_WIDTH + (head / (QUERY_HEADS / KV_HEADS)) * HEAD_WIDTH;
-                let w = scores[key_idx];
-                for d in 0..HEAD_WIDTH {
-                    attn[out_offset + d] += w * v_buf[v_offset + d];
-                }
+                let column = (kv_offset + d) * n_tokens;
+                attn[query_idx * QUERY_WIDTH + head * HEAD_WIDTH + d] =
+                    crate::ops::dot_f32(&scores[..length], &gate[column..column + length], length);
             }
         }
     }
@@ -404,13 +379,20 @@ fn forward_layer(
         }
     }
 
-    // post-attention norm + MLP
-    rms_norm(
+    #[cfg(feature = "parity-trace")]
+    crate::parity_trace::report(crate::parity_trace::checkpoint(
+        "ernie_image.text.attn_residual",
+        None,
+        &[n_tokens, HIDDEN],
         hidden,
-        &layer.post_attention_norm,
-        &mut normalized,
-        RMS_EPSILON,
-    );
+    ));
+    // post-attention norm + MLP
+    for (input, output) in hidden
+        .chunks_exact(HIDDEN)
+        .zip(normalized.chunks_exact_mut(HIDDEN))
+    {
+        rms_norm(input, &layer.post_attention_norm, output, RMS_EPSILON);
+    }
     for token in 0..n_tokens {
         let row = &normalized[token * HIDDEN..(token + 1) * HIDDEN];
         linear_into(
@@ -441,7 +423,7 @@ fn forward_layer(
             &layer.down_proj,
             FFN_WIDTH,
             HIDDEN,
-            &gate[token * FFN_WIDTH..(token + 1) * FFN_WIDTH],
+            &up[token * FFN_WIDTH..(token + 1) * FFN_WIDTH],
             &mut attn[token * HIDDEN..(token + 1) * HIDDEN],
             q8,
             pool,
@@ -455,7 +437,29 @@ fn forward_layer(
     Ok(())
 }
 
-// Silence unused warning for MetaValue when both #[cfg(feature = "parity-trace")]
-// gates remove the call site.
-#[allow(dead_code)]
-fn _unused_meta_value(_: MetaValue) {}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires the real Ministral GGUF and pinned Oracle fixtures"]
+    fn oracle_text_fixture() {
+        let model = std::env::var("RMI_MINISTRAL_3_3B_INSTRUCT_Q4_K_MODEL").unwrap();
+        let fixtures = std::env::var("RMI_ERNIE_ORACLE_FIXTURES").unwrap();
+        let source = crate::format::ggufrs::open_model_source(
+            std::path::Path::new(&model),
+            crate::format::ggufrs::ComponentRole::Llm,
+        )
+        .unwrap();
+        let encoder =
+            ErnieImageTextEncoder::load(Arc::from(source), Arc::new(ComputePool::new(1))).unwrap();
+        let output = encoder.encode("a lovely cat").unwrap();
+        let expected = std::fs::read(format!("{fixtures}/rmi.ernie.context.f32")).unwrap();
+        assert_eq!(output.len() * 4, expected.len());
+        let mismatch = output
+            .iter()
+            .zip(expected.chunks_exact(4))
+            .position(|(a, b)| a.to_bits() != u32::from_le_bytes(b.try_into().unwrap()));
+        assert_eq!(mismatch, None, "first raw-bit text difference");
+    }
+}

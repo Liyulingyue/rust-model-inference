@@ -1039,30 +1039,32 @@ ComputePool，不是把 LLM 迁去 rayron"。迁移面：
 
 验证：llama.cpp oracle 8/8 步一致。封顶同时惠及 Qwen3.5-2B（原每次运行 KV cache 固定分配 12.9GB）。
 
-### ERNIE-Image-Turbo (8B, single-stream DiT) 适配 — 🚧 进行中 (2026-10)
+### ERNIE-Image / Turbo (8B, single-stream DiT) — CPU 实验支持 (2026-10-05)
 
-`general.architecture = ernie_image`（stable-diffusion.cpp @ `de298c2` 的 `ernie_image.hpp` 是参考实现；GGUF 通过 `model.diffusion_model.layers.0.adaLN_sa_ln.weight` 探测）。
+本次真实文件为 `unsloth/ERNIE-Image-GGUF/ernie-image-Q4_K_M.gguf`，
+5,019,124,416 bytes，SHA256 `ed43d36ab45df0ef24e55d88e72bea241d0d54e4006ce0442386aba071b04c2a`。
+该 GGUF 错标 `general.architecture=wan`，入口根据完整 ERNIE 张量签名识别。
+参考固定在 stable-diffusion.cpp `3f8527a46c54ecf4cb4ed6003da8e8982283c73c`，
+ggml `89c4413f5da6fb20cc796f16033d37f129be81fd`。
 
-核心架构（`ernie_image.hpp::ErnieImageConfig`）：
-- 36 层 / hidden=4096 / heads=32 / head_dim=128 / ffn=12288（gate_proj + up_proj + linear_fc2，**SwiGLU**）
-- in_channels=128, out_channels=128, patch_size=1（latent 像素 1:1 → 4096 tokens @ 1024×1024 latent = 4096×1024 = 4.2 M tokens，远超 RAM）
-- `text_proj` 3072→4096（Ministral-3-3B 的 n_embd=3072 与 text_in_dim=3072 对齐；ELN：cross-attn 不需要，直接 concat image_tokens + text_tokens 后跑 AdaLN block）
-- 共享 AdaLN：`adaLN_modulation.1` hidden→6·hidden → chunk(6) = (shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp)；每个 block 自己 RMSNorm（`adaLN_sa_ln`、`adaLN_mlp_ln`）+ Q/K RMSNorm
-- 3D RoPE：`theta=256`，`axes_dim=[32,48,48]`（时间/temporal、h、w），只在 head_dim 前 32+48+48=128 上应用
-- `final_norm` 是 `AdaLNContinuous`（独立 norm+linear，复用 conditioning `c`）
-- `final_linear`: hidden → patch_size²·out_channels = 128
-
-调度器：flow-matching Euler（8 步 cfg=1.0；EE，支持 `--steps`）。
-
-进度：
-1. ✅ MODEL_LIST.md 加行 + TODO.md 占位
-2. ⏳ `src/models/diffusion/ernie_image/{mod,dit}.rs` scaffold + loader
-3. ⏳ DiT forward（Conv2d in + timestep embed + AdaLN shared modulation + 36 blocks + AdaLNContinuous final + final_linear unpatchify）
-4. ⏳ text encoder（复用 llama trunk `forward_to_block`，拉 Ministral-3 最后一层 hidden）+ `text_proj` matmul
-5. ⏳ CLI dispatch（`--ernie-image ...` 或 `--arch=ernie_image` 自动检测）+ arch 注册 + 测试 contract
-6. ⏳ E2E：拉 `unsloth/ERNIE-Image-Turbo-GGUF`（Q4_K_M 5.02 GB）+ `Ministral-3-3B-Instruct-2512-GGUF`（已有）+ `pig_flux_vae_fp32-f16.gguf`（已有，复用 Z-Image），512×512 跑通。
-
-参考：`references/stable-diffusion.cpp/src/model/diffusion/ernie_image.hpp`（410 行）+ `docs/ernie_image.md`（34 行）；HF mirror README: `https://hf-mirror.com/unsloth/ERNIE-Image-Turbo-GGUF`（Q2_K 3.18 GB → BF16 16.1 GB；152k 下载/月）。
+- DiT：36 层，hidden=4096，32×128 heads，FFN=12288，`GELU(gate) * up`。
+  共享 6 路 AdaLN、RMSNorm、image-first/text-last 联合注意力、3D RoPE [32,48,48] / theta=256。
+- 文本：Ministral-3-3B-Instruct-2512 Q4_K_M，26 层 / 3072 hidden，Tekken，原始 prompt + BOS；取 hidden_states[-2]，只执行前 25 blocks。
+  参考图使用普通 full-width NeoX RoPE / base=1e6、causal attention，输出倒数第二层且不执行 final RMSNorm。
+- VAE：`Comfy-Org/ERNIE-Image/vae/flux2-vae.safetensors`，转换入口
+  `python -m tools.converter.ernie_image.convert_vae INPUT OUTPUT`。
+  Conv 权重 F16，Attention 的四个 Linear 与向量保持 F32。
+  128 packed channels 反归一化 → pixel shuffle → 32 channels → post_quant_conv → 共享 Flux decoder。
+  latent 边长为输出分辨率 / 16；1024×1024 对应 4096 个 image tokens。
+- 采样：discrete flow schedule / shift=4，Euler 积分 velocity；普通模型默认 32 steps / CFG 5，Turbo 默认 8 / CFG 1。
+- 已有主 CLI 入口、真实组件契约测试、RoPE/调度/残差/Flux2 unpack/CFG 检查。
+  64×64、1 步、CFG 1、seed 42、单线程的完整生成链路 93 个检查点 / 6,440,960 个 F32 原始位一致，
+  包含文本编码、噪声、36 层 DiT、Euler latent 和完整 VAE RGB F32。
+- 2 步 / CFG 5 的条件/空提示词两路、完整 DiT、采样和 VAE：261 个检查点 / 16,132,096 个 F32 原始位一致。
+- 远端 256×256 / 32 步 / CFG 5 / seed 42 / 16 线程运行成功，1027.489 s；样图有桌面和窗景但漏猫，质量验证未通过。
+- 可复现工具：`tools/oracle/ernie_image/`，固定版本、隔离插桩、禁用 SIMD/FMA/融合、严格 u32 比较。
+- 待完成：Turbo 独立权重、SIMD/FMA 数值对齐及 512/1024 生成质量验证。
+  CPU 路径；尚无 ERNIE Vulkan/GPU 支持验证，不能继承 Z-Image 的加速结论。
 
 ### AuK-Base (1.5B, Flux2Edit 音频 DiT) 适配 — 🚧 进行中 (2026-10)
 
