@@ -1,4 +1,4 @@
-use rust_model_inference::ops::bitnet::{bitlinear_forward, quantize_activation_per_token};
+use rust_model_inference::models::bitnet::{bitlinear_forward, quantize_activation_per_token};
 use rust_model_inference::ops::kernel::i2_s::{dequant_i2_s_row, BLOCK_I2_S_SIZE, QK_I2_S};
 use std::hint::black_box;
 use std::time::Instant;

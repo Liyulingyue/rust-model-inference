@@ -4,8 +4,8 @@
 //! Run with:
 //!   cargo run --profile release-fast --example bitlinear_bench
 
-use rust_model_inference::ops::bitnet::forward_avx2::dequant_i2_s_to_i8;
-use rust_model_inference::ops::bitnet::{
+use rust_model_inference::models::bitnet::forward_avx2::dequant_i2_s_to_i8;
+use rust_model_inference::models::bitnet::{
     bitlinear_forward, bitlinear_forward_from_f32, bitlinear_forward_packed,
     bitlinear_forward_scalar, quantize_activation_per_token,
 };
