@@ -1601,6 +1601,14 @@ impl<'a> Qwen3Ops<'a> {
                 &quantize_push,
                 quantize_dispatch,
             );
+            // The matmul below reads what the quantize just wrote out of the
+            // arena, so it needs a barrier between them. Every caller used to
+            // end at a `submit_and_wait` right after this pair, which made the
+            // dependency implicit; recording several projections into one
+            // command buffer (the YuE2/Z-Image FFN) exposes it, and without
+            // the barrier the matmul reads stale activation and the layer
+            // produces -inf.
+            unsafe { commands.barrier() };
         }
         self.record_linear_dispatch(commands, Q8_MATMUL_GROUPED_TILED, bindings, &push, dispatch);
         Ok(())
