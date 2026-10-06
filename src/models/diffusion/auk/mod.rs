@@ -33,6 +33,7 @@ use crate::ops::matmul_q8_0_quantized_parallel_rows;
 use crate::vulkan::ops::{BatchedLinearRuntime, GpuWeightFormat};
 #[cfg(feature = "vulkan")]
 use crate::vulkan::VulkanContext;
+use dit::TEXT_IN;
 use std::sync::Arc;
 
 pub(crate) mod dit;
@@ -100,10 +101,118 @@ impl AukPipeline {
             }
             None => return Err("AuK requires --text-encoder (Qwen2.5-Omni-3B) for TTS".into()),
         };
+        // No reference audio conditioning in this path (audio_conditioning
+        // is exposed via `generate_audio_with_audio`).
         let t = std::time::Instant::now();
         let latent = self.dit.denoise(
             &text_conditioning,
             text_tokens,
+            &[],
+            0,
+            options,
+        )?;
+        let t_denoise = t.elapsed();
+        let t = std::time::Instant::now();
+        let audio = {
+            let mut min = f32::INFINITY;
+            let mut max = f32::NEG_INFINITY;
+            let mut sum_sq = 0.0_f64;
+            for v in &latent {
+                if *v < min {
+                    min = *v;
+                }
+                if *v > max {
+                    max = *v;
+                }
+                sum_sq += (*v as f64) * (*v as f64);
+            }
+            let rms = (sum_sq / latent.len() as f64).sqrt();
+            eprintln!(
+                "[auk-stage-profile] latent_stats min={:.3} max={:.3} rms={:.3}",
+                min, max, rms
+            );
+            self.vae.decode(&latent, options.sample_rate)?
+        };
+        let t_vae = t.elapsed();
+        eprintln!(
+            "[auk-stage-profile] denoise={:.1}ms  vae_decode={:.1}ms  total={:.1}ms",
+            t_denoise.as_secs_f64() * 1000.0,
+            t_vae.as_secs_f64() * 1000.0,
+            total_start.elapsed().as_secs_f64() * 1000.0,
+        );
+        Ok(audio)
+    }
+
+    /// Generate audio with optional CFMEdit reference-audio conditioning.
+    ///
+    /// `audio_conditioning` is a flat `audio_tokens * TEXT_IN` f32 buffer in
+    /// Qwen2.5-Omni's hidden space (TEXT_IN=2048). When non-empty, these
+    /// embeddings are prepended to the text encoder output and form the
+    /// conditioning sequence the DiT attends to. Layout:
+    ///
+    /// ```text
+    /// joint = [img_tokens | audio_tokens | text_tokens]
+    /// ```
+    ///
+    /// The audio embeddings are expected to come from Qwen2.5-Omni-3B's
+    /// audio tower (thinker.audio_tower.*), but the audio tower encoder
+    /// itself is NOT yet ported here. To use this API today, supply
+    /// pre-computed audio embeddings (e.g. exported from a Python run of
+    /// the Qwen audio tower on a 16 kHz reference WAV).
+    ///
+    /// For unconditional reference-audio conditioning, pass `&[]` with
+    /// `audio_tokens = 0` (equivalent to TTS without reference audio).
+    pub fn generate_audio_with_audio(
+        &self,
+        prompt: &str,
+        audio_conditioning: &[f32],
+        audio_tokens: usize,
+        options: &AukOptions,
+    ) -> Result<AukAudio, String> {
+        let total_start = std::time::Instant::now();
+        let (text_conditioning, text_tokens) = match self.text.as_ref() {
+            Some(encoder) => {
+                let t = std::time::Instant::now();
+                let hidden = encoder.encode(prompt)?;
+                let tokens = encoder.last_token_count(&hidden);
+                eprintln!(
+                    "[auk-stage-profile] text_encode={:.1}ms  n_text_tokens={} n_audio_tokens={}",
+                    t.elapsed().as_secs_f64() * 1000.0,
+                    tokens,
+                    audio_tokens,
+                );
+                (hidden, tokens)
+            }
+            None => return Err("AuK requires --text-encoder (Qwen2.5-Omni-3B) for TTS".into()),
+        };
+        // Concatenate audio + text embeddings: audio first, then text.
+        // audio_conditioning is in Qwen2.5-Omni's 2048-dim hidden space
+        // (same as text encoder output), so the two concatenate cleanly.
+        let combined;
+        let combined_slice: &[f32] = if audio_tokens > 0 {
+            if audio_conditioning.len() != audio_tokens * TEXT_IN {
+                return Err(format!(
+                    "AuK audio conditioning length {} != audio_tokens*TEXT_IN={}",
+                    audio_conditioning.len(),
+                    audio_tokens * TEXT_IN
+                ));
+            }
+            combined = {
+                let mut buf = Vec::with_capacity((audio_tokens + text_tokens) * TEXT_IN);
+                buf.extend_from_slice(audio_conditioning);
+                buf.extend_from_slice(&text_conditioning);
+                buf
+            };
+            &combined
+        } else {
+            &text_conditioning
+        };
+        let t = std::time::Instant::now();
+        let latent = self.dit.denoise(
+            combined_slice,
+            text_tokens,
+            audio_conditioning,
+            audio_tokens,
             options,
         )?;
         let t_denoise = t.elapsed();

@@ -357,11 +357,21 @@ impl AukDit {
         &self,
         text_conditioning: &[f32],
         text_tokens: usize,
+        audio_conditioning: &[f32],
+        audio_tokens: usize,
         options: &super::AukOptions,
     ) -> Result<Vec<f32>, String> {
         if text_tokens == 0 {
             return Err("AuK text token count must be positive".into());
         }
+        if audio_tokens > 0 && audio_conditioning.len() != audio_tokens * TEXT_IN {
+            return Err(format!(
+                "AuK audio conditioning length {} != audio_tokens*TEXT_IN={}",
+                audio_conditioning.len(),
+                audio_tokens * TEXT_IN
+            ));
+        }
+        let cond_tokens = audio_tokens + text_tokens;
         // Compute latent time from duration / sample rate / downsample rate.
         let downsample_rate = 480;
         let latent_time = options
@@ -381,22 +391,28 @@ impl AukDit {
         let steps = options.steps;
         let mut velocity = vec![0.0_f32; latent_values];
         let mut uncond_velocity = vec![0.0_f32; latent_values];
-        let mut scratch = AukScratch::new(text_tokens, latent_time)?;
+        let mut scratch = AukScratch::new(cond_tokens, latent_time)?;
         // Pre-build the unconditional text conditioning buffer (all zeros,
         // same shape as the encoded prompt). This avoids running the text
-        // encoder twice for the CFG unconditional pass.
-        let uncond_text = vec![0.0_f32; text_tokens * TEXT_IN];
+        // encoder twice for the CFG unconditional pass. Audio conditioning
+        // (if any) is also zeroed in the unconditional pass.
+        let mut uncond_text = vec![0.0_f32; cond_tokens * TEXT_IN];
         let guidance_scale = options.guidance_scale;
         let do_cfg = guidance_scale > 1.0;
         for step in 0..steps {
             let sigma = 1.0 - step as f32 / steps as f32;
             let sigma_next = 1.0 - (step + 1) as f32 / steps as f32;
-            // Conditional forward.
+            // Conditional forward. `text_conditioning` is laid out as
+            // `[audio_tokens | text_tokens]` when audio is present, with
+            // audio embeddings at the front (matching audio.cpp's
+            // conditioning.cpp where audio is concatenated before text in
+            // the joint sequence).
             self.predict_velocity_inner(
                 &mut latent,
                 latent_time,
                 text_conditioning,
-                text_tokens,
+                cond_tokens,
+                audio_tokens,
                 sigma,
                 &mut scratch,
                 &mut velocity,
@@ -410,7 +426,8 @@ impl AukDit {
                     &mut latent,
                     latent_time,
                     &uncond_text,
-                    text_tokens,
+                    cond_tokens,
+                    audio_tokens,
                     sigma,
                     &mut scratch,
                     &mut uncond_velocity,
@@ -446,7 +463,8 @@ impl AukDit {
         latent: &mut [f32],
         latent_time: usize,
         text_conditioning: &[f32],
-        text_tokens: usize,
+        cond_tokens: usize,
+        audio_tokens: usize,
         sigma: f32,
         scratch: &mut AukScratch,
         velocity: &mut [f32],
@@ -465,7 +483,7 @@ impl AukDit {
         // CFMEdit adds a reference audio; this TTS-only path initializes the
         // joint sequence with just text (img tokens come from `latent`).
         // We wire the joint into `scratch.joint` (img tokens then text).
-        scratch.prepare(img_tokens, text_tokens)?;
+        scratch.prepare(img_tokens, cond_tokens)?;
 
         // Time embedding: c ∈ [HIDDEN]
         timestep_embedding(sigma * 1000.0, &mut scratch.time_frequency);
@@ -505,8 +523,13 @@ impl AukDit {
             &mut scratch.q8,
         )?;
 
-        // Text embed: text_in -> hidden, then norm.
-        for token in 0..text_tokens {
+        // Text (and audio) conditioning embed: text_in -> hidden, then norm.
+        // The layout matches audio.cpp's conditioning.cpp: audio embeddings
+        // occupy positions `[0, audio_tokens)` followed by text tokens in
+        // `[audio_tokens, cond_tokens)`. Both go through the same txt_proj
+        // because the Qwen2.5-Omni audio tower projects to TEXT_IN=2048 dim,
+        // the same space as text embeddings.
+        for token in 0..cond_tokens {
             self.linear_into_dispatched(
                 &self.txt_proj_weight,
                 TEXT_IN,
@@ -516,7 +539,7 @@ impl AukDit {
                 &mut scratch.q8)?;
         }
         // Add bias.
-        for token in 0..text_tokens {
+        for token in 0..cond_tokens {
             for d in 0..HIDDEN {
                 scratch.text[token * HIDDEN + d] += self.txt_proj_bias[d];
             }
@@ -525,17 +548,19 @@ impl AukDit {
         rms_norm_inplace_text(
             &mut scratch.text,
             &self.txt_norm_weight,
-            text_tokens,
+            cond_tokens,
         );
 
-        // Concat: image tokens first, then text tokens. Both are already in
-        // `scratch.img` and `scratch.text` (sized for `total_tokens` rows).
+        // Concat: image tokens first, then conditioning tokens (audio + text).
+        // Both are already in `scratch.img` and `scratch.text` (sized for
+        // `total_tokens` rows). Layout matches audio.cpp flow.cpp:
+        //   [img_tokens | audio_tokens | text_tokens]
         let total_tokens = scratch.joint.len() / HIDDEN;
         for token in 0..img_tokens {
             scratch.joint[token * HIDDEN..(token + 1) * HIDDEN]
                 .copy_from_slice(&scratch.img[token * HIDDEN..(token + 1) * HIDDEN]);
         }
-        for token in 0..text_tokens {
+        for token in 0..cond_tokens {
             let dst = img_tokens + token;
             scratch.joint[dst * HIDDEN..(dst + 1) * HIDDEN]
                 .copy_from_slice(&scratch.text[token * HIDDEN..(token + 1) * HIDDEN]);
@@ -578,7 +603,7 @@ impl AukDit {
                 block,
                 &mut scratch.joint,
                 img_tokens,
-                text_tokens,
+                cond_tokens,
                 &self.rotary_inv_freq,
                 &scratch.modulation[..2 * ADALN_DIM],
                 &mut scratch.qkv,
@@ -596,15 +621,15 @@ impl AukDit {
 // [text, img] (single-block convention). audio.cpp does this via
 // ConcatModule({1}).build(text, img) before the single-stream stage and
 // resets positions to 0..text+img sequentially.
-        let total = img_tokens + text_tokens;
-        if img_tokens > 0 && text_tokens > 0 {
+        let total = img_tokens + cond_tokens;
+        if img_tokens > 0 && cond_tokens > 0 {
             let mut swapped = vec![0.0_f32; total * HIDDEN];
-            for token in 0..text_tokens {
+            for token in 0..cond_tokens {
                 swapped[token * HIDDEN..(token + 1) * HIDDEN]
                     .copy_from_slice(&scratch.joint[(img_tokens + token) * HIDDEN..(img_tokens + token + 1) * HIDDEN]);
             }
             for token in 0..img_tokens {
-                swapped[(text_tokens + token) * HIDDEN..(text_tokens + token + 1) * HIDDEN]
+                swapped[(cond_tokens + token) * HIDDEN..(cond_tokens + token + 1) * HIDDEN]
                     .copy_from_slice(&scratch.joint[token * HIDDEN..(token + 1) * HIDDEN]);
             }
             scratch.joint[..total * HIDDEN].copy_from_slice(&swapped);
@@ -631,7 +656,7 @@ impl AukDit {
                 block,
                 &mut scratch.joint,
                 img_tokens,
-                text_tokens,
+                cond_tokens,
                 &self.rotary_inv_freq,
                 &scratch.modulation[..ADALN_DIM],
                 &mut scratch.qkv,
@@ -666,11 +691,11 @@ impl AukDit {
 
         // Apply norm + scale + shift only to image tokens (text is discarded
         // at this stage). After single blocks the joint order is [text, img]
-        // so we must offset by text_tokens.
+        // so we must offset by cond_tokens.
         let mut projected = vec![0.0_f32; img_tokens * LATENT_DIM];
         for token in 0..img_tokens {
             let token_in =
-                &scratch.joint[(text_tokens + token) * HIDDEN..(text_tokens + token + 1) * HIDDEN];
+                &scratch.joint[(cond_tokens + token) * HIDDEN..(cond_tokens + token + 1) * HIDDEN];
             // Apply (1 + scale) * x + shift.
             let mut normalized = vec![0.0_f32; HIDDEN];
             // Identity norm (no final_norm.norm.weight in GGUF).

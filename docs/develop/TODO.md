@@ -1086,7 +1086,7 @@ GGUF 重量（从 `audio-cpp/AuK-Base-and-Flash-GGUF`）：
 - [x] **修掉 `linear_into_dispatched` + `linear_into_dispatch` 两处无限递归** —— 之前在 Q8 miss 时调用 `self.linear_into_dispatched` / `linear_into_dispatch`（实际是无限递归，被 Q8 cache 100% 命中掩盖）。两者现在都改为 `super::linear_into_scaled_impl`。拆掉 pre_quantize 后两个 recursion 都会 stack overflow，所以必须一起改。
 - [ ] VAE resblocks 的 causal padding（当前用 symmetric，lossy 一点；low impact 因 upsample 已用 linear interp）
 - [ ] VAE SnakeBeta 的 FIR up/down filters（audio.cpp 用 `build_activation`，我们 skip；lossy 一点，minor impact）
-- [ ] CFMEdit reference-audio conditioning path
+- [x] **CFMEdit reference-audio conditioning path**（done as C：C 任务）— `AukPipeline::generate_audio_with_audio(prompt, audio_embeddings, audio_tokens, options)` 接入。`audio_embeddings` 是 `audio_tokens * 2048` 的 f32 buffer（Qwen2.5-Omni audio tower 的隐藏空间），与 text embeddings 拼成 `[img, audio, text]` joint sequence 走 DiT forward。`dit.denoise` 新增 `audio_conditioning` + `audio_tokens` 参数，`predict_velocity_inner` 改用 `cond_tokens = audio_tokens + text_tokens`；joint layout、txt_proj、scratch.prepare 全部按 cond_tokens 处理。零向量 smoke 337ms OK（max_abs=0.95，finite audio）。**Qwen audio tower encoder 还没 port**——端到端 CFMEdit 需要外部提供 audio embeddings（Python 跑 Qwen audio tower 导出 f32 binary 即可）。这是 follow-up 工作，涉及 32 transformer encoder layers + 2 Conv1d + ln_post + proj（1280→2048）。
 - [ ] AuK-Flash 蒸馏版（4 步 + guidance 0）
 
 性能现状（4 steps + CFG=2.0 + 4 threads + Intel MTL + `--gpu`，**release 模式**）：
