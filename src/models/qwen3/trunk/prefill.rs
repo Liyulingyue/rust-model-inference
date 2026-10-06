@@ -6,6 +6,7 @@ use super::weights::Qwen3Model;
 use crate::core::prefill::{checked_prefill_batch_size, prefill_chunks};
 use crate::core::scratchpad::KvCache;
 use crate::ops::kernel::{PreparedRows, Weight};
+use crate::ops::rope::rope_neox_inplace;
 use crate::ops::*;
 #[cfg(feature = "parity-trace")]
 use crate::parity_trace;

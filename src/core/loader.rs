@@ -414,6 +414,7 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             | "phi3"
             | "glm4"
             | "gemma-embedding"
+            | "gemma2"
             | "bert"
             | "jina-bert-v2"
             | "nomic-bert"
@@ -637,7 +638,22 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
                 .map(Vec::len)
                 .unwrap_or(0),
         },
-        rope_freq_base: get_f64_opt(&format!("{prefix}.rope.freq_base"), 1_000_000.0)? as f32,
+        rope_freq_base: {
+            // Per-arch rope.freq_base defaults. The loader uses 1e6
+            // as a fallback for any arch that omits the metadata,
+            // but Gemma-2 actually trains with `freq_base = 10000.0`
+            // (HF `google/gemma-2-2b` config) and ships no
+            // `*.rope.freq_base` key in the GGUF — using 1e6 would
+            // silently produce garbage rotations. Hardcode the
+            // Gemma-2 default here; every other arch falls through
+            // to 1e6 unchanged.
+            let default = if prefix == "gemma2" {
+                10_000.0
+            } else {
+                1_000_000.0
+            };
+            get_f64_opt(&format!("{prefix}.rope.freq_base"), default)? as f32
+        },
         norm_eps: get_f64(&format!("{prefix}.attention.layer_norm_epsilon"))
             .or_else(|_| get_f64(&format!("{prefix}.attention.layer_norm_rms_epsilon")))
             .unwrap_or(1e-12) as f32,

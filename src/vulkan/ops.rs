@@ -1,5 +1,6 @@
 use super::{GpuBuffer, VulkanContext, VulkanError};
 use crate::models::qwen3::trunk::Qwen3Config;
+use crate::ops::rope::rope_neox_inplace;
 use ash::vk;
 use std::collections::HashMap;
 #[cfg(test)]

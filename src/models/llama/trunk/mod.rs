@@ -13,8 +13,9 @@ pub mod session;
 pub mod weights;
 
 pub use forward::{
-    build_prompt_tokens, build_prompt_tokens_from_turns, run_forward_logits_llama_with_batch,
-    run_inference, run_inference_tokens, sample_defaults,
+    apply_attn_pre_softmax_inplace, build_prompt_tokens, build_prompt_tokens_from_turns,
+    run_forward_logits_llama_with_batch, run_inference, run_inference_tokens, sample_defaults,
+    softcap_inplace,
 };
 pub use session::{LlamaSession, LlamaSessionConfig, LlamaWeights};
 pub use weights::{get_f32_tensor, load_layers, load_layers_static, LlamaLayerWeights};

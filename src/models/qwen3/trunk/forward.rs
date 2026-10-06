@@ -23,11 +23,13 @@ use crate::app::cli::resolve_thread_count;
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
+use crate::ops::rope::rope_neox_inplace;
 use crate::ops::*;
 use crate::prompt::{build_qwen_chat_prompt, QwenMessage};
 #[cfg(feature = "vulkan")]
 use crate::vulkan::qwen3::Qwen3VulkanSession;
 use std::io::{self, Write};
+
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 

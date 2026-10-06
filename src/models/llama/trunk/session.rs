@@ -25,11 +25,12 @@ use crate::core::tokenizer::load_tokenizer;
 use crate::core::tokenizer::Tokenizer;
 use crate::ops::kernel::{PreparedRows, QuantizedTensor, Weight};
 type DynTokenizer = Box<dyn Tokenizer>;
-use crate::core::tensor::GGMLType;
+use crate::core::tensor::{GGMLType, MetaValue, MetaValueType};
+use crate::models::llama::trunk::forward::{apply_attn_pre_softmax_inplace, softcap_inplace};
 use crate::ops::{
-    dot_f32, embedding_lookup, gpu_matmul_active, quantize_q8_0_into, quantize_row_q8_k_into,
-    rms_norm_grouped, rms_norm_inplace, silu_mul_approx_inplace, softmax_inplace, vec_add_into,
-    vec_mad_f32, vec_scale_f32,
+    dot_f32, embedding_lookup, gelu_mul_approx_inplace, gpu_matmul_active, quantize_q8_0_into,
+    quantize_row_q8_k_into, rms_norm_grouped, rms_norm_inplace, silu_mul_approx_inplace,
+    softmax_inplace, vec_add_into, vec_mad_f32, vec_scale_f32,
 };
 use std::sync::Arc;
 
@@ -55,6 +56,66 @@ pub struct LlamaSession<'a> {
     pub norm_groups: usize,
     pub seq_len: usize,
     pub loop_final_norm: bool,
+    /// Gemma-2 attn logit softcap (`gemma2.attn_logit_softcapping`,
+    /// typically 50.0). `0.0` (default) disables the cap so every
+    /// other llama-family model is bit-identical.
+    pub attn_softcap: f32,
+    /// Gemma-2 final logit softcap (`gemma2.final_logit_softcapping`,
+    /// typically 30.0). `0.0` (default) disables the cap.
+    pub final_logit_softcap: f32,
+    /// Gemma-2 / Gemma-3 sliding-window width. `0` (default)
+    /// disables the window so plain llama / mistral / qwen stay
+    /// full-attention.
+    pub sliding_window: usize,
+    /// Per-layer boolean: `true` if the layer applies sliding-
+    /// window attention; `false` if it's a global / full-attention
+    /// layer (Gemma-2 9B / 27B alternate every N layers). Reads
+    /// `<arch>.attention.sliding_window_pattern` (bool array of
+    /// length `n_layer`) when available; defaults to all-`true`.
+    /// `vec![true; n_layer]` matches plain Gemma-2 2B / 9B / 27B
+    /// when the metadata key is absent.
+    pub sliding_window_pattern: Vec<bool>,
+}
+
+impl LlamaSession<'_> {
+    /// `true` when `layer_idx` should use sliding-window attention.
+    /// Equivalent to `sliding_window > 0 && sliding_window_pattern[layer]`.
+    /// Falls back to all-true when the metadata is missing.
+    pub fn layer_uses_swa(&self, layer_idx: usize) -> bool {
+        self.sliding_window > 0
+            && self
+                .sliding_window_pattern
+                .get(layer_idx)
+                .copied()
+                .unwrap_or(true)
+    }
+}
+
+/// Read `<arch>.attention.sliding_window_pattern` (bool array of
+/// length `n_layer`) and return it as a `Vec<bool>`. Defaults to
+/// `vec![true; n_layer]` when the key is absent so plain Gemma-2
+/// 2B / 9B / 27B all get the sliding-window path. Gemma-2 9B / 27B
+/// declare the array (every-`false` for global layers) so the
+/// hybrid-attention pattern is preserved per layer.
+fn read_sliding_window_pattern(
+    source: &dyn TensorSource,
+    arch_prefix: &str,
+    n_layer: usize,
+) -> Vec<bool> {
+    let mut pattern = vec![true; n_layer];
+    if let Some(MetaValue::Array(MetaValueType::Bool, items)) =
+        source.metadata(&format!("{arch_prefix}.attention.sliding_window_pattern"))
+    {
+        for (i, item) in items.iter().enumerate() {
+            if i >= n_layer {
+                break;
+            }
+            if let MetaValue::Bool(b) = item {
+                pattern[i] = *b;
+            }
+        }
+    }
+    pattern
 }
 
 #[derive(Clone)]
@@ -194,6 +255,27 @@ impl<'a> LlamaSession<'a> {
             .metadata(&format!("{arch_prefix}.logit_scale"))
             .and_then(|v| v.to_f64())
             .unwrap_or(0.0) as f32;
+        // Gemma-2 attention / final logit softcaps + sliding-window
+        // attention. `0.0` defaults keep every non-gemma llama arch
+        // bit-identical to the pre-gemma2 path. See
+        // `models::llama::trunk::forward` for the free-fn mirror.
+        let attn_softcap: f32 = source
+            .metadata(&format!("{arch_prefix}.attn_logit_softcapping"))
+            .and_then(|v| v.to_f64())
+            .map(|v| v as f32)
+            .unwrap_or(0.0);
+        let final_logit_softcap: f32 = source
+            .metadata(&format!("{arch_prefix}.final_logit_softcapping"))
+            .and_then(|v| v.to_f64())
+            .map(|v| v as f32)
+            .unwrap_or(0.0);
+        let sliding_window: usize = source
+            .metadata(&format!("{arch_prefix}.attention.sliding_window"))
+            .and_then(|v| v.to_u64())
+            .map(|v| v as usize)
+            .unwrap_or(0);
+        let sliding_window_pattern =
+            read_sliding_window_pattern(source, &arch_prefix, config.n_layer);
         let output_norm = get_f32_tensor(source, "output_norm.weight", n_embd);
         let embd_info = source
             .tensor_info("token_embd.weight")
@@ -275,6 +357,10 @@ impl<'a> LlamaSession<'a> {
             norm_groups,
             seq_len: 0,
             loop_final_norm,
+            attn_softcap,
+            final_logit_softcap,
+            sliding_window,
+            sliding_window_pattern,
         })
     }
 
@@ -468,6 +554,14 @@ impl<'a> LlamaSession<'a> {
         let norm_groups = self.norm_groups;
         let max_ctx = cfg.max_ctx;
         let vocab = cfg.vocab;
+        // Gemma-2 attention / final-logit softcaps + sliding window.
+        // Bind locals so the `&mut self.kv_cache` /
+        // `&mut self.scratch` borrows below don't collide with
+        // immutable field reads in the per-layer loop.
+        let final_logit_softcap = self.final_logit_softcap;
+        let attn_softcap_global = self.attn_softcap;
+        let sliding_window_global = self.sliding_window;
+        let sw_pattern = self.sliding_window_pattern.clone();
         let _max_n_in = n_embd_q.max(n_ff).max(n_embd * 3);
 
         if base_position != self.seq_len {
@@ -665,6 +759,16 @@ impl<'a> LlamaSession<'a> {
 
             // Causal attention produces `[rows × n_embd_q]` for `wo`.
             let attn_out = &mut scratch.attn_out[..rows * n_embd_q];
+            // Gemma-2 attention per-row sliding-window trim. Each
+            // query at row `r` attends to positions
+            // `[max(0, base_position+r+1-sw), base_position+r+1)`;
+            // global layers (per `sliding_window_pattern`) skip the
+            // trim. We pass the effective `n_cached` + the cache
+            // offset per row to `run_attention_chunked`.
+            let layer_swa =
+                sliding_window_global > 0 && sw_pattern.get(layer).copied().unwrap_or(true);
+            let layer_attn_softcap = if layer_swa { attn_softcap_global } else { 0.0 };
+            let sw = if layer_swa { sliding_window_global } else { 0 };
             crate::models::llama::trunk::forward::run_attention_chunked(
                 pool,
                 q_out,
@@ -684,6 +788,8 @@ impl<'a> LlamaSession<'a> {
                 kb,
                 n_threads,
                 max_ctx,
+                layer_attn_softcap,
+                if layer_swa { sw } else { 0 },
             );
             // ---- Quantise attention output + project through `wo`
             //      via `PreparedRows::matmul_group` ----
@@ -762,6 +868,30 @@ impl<'a> LlamaSession<'a> {
                 // activation (now living in `up_part` after
                 // silu_mul_inplace) into `gate_buf`.
                 gate_buf.copy_from_slice(up_part);
+                down_input = gate_buf;
+            } else if arch == "gemma2" {
+                // Gemma-2 FFN: GeGLU (`up *= gelu(gate)`) instead of
+                // SwiGLU. w_down reads from `gate_buf` for the
+                // post-activation; copy `up_buf` back over `gate_buf`
+                // once the GeGLU lands.
+                let needs_q8_ffn = lw.w_gate.needs_q8_0_activation();
+                let needs_q8k_ffn = lw.w_gate.uses_q8_k();
+                let up_buf = &mut scratch.up_buf[..rows * n_ff];
+                let gate_proj = &mut gate_buf[..];
+                let up_proj = &mut up_buf[..];
+                prepared_rows.prepare(normed, rows, n_embd, needs_q8_ffn, needs_q8k_ffn)?;
+                prepared_rows.matmul_group(
+                    normed,
+                    [(&lw.w_gate, up_proj), (&lw.w_up, gate_proj)],
+                    pool,
+                )?;
+                crate::models::llama::trunk::forward::geglu_mul_rows(
+                    pool, n_threads, gate_proj, up_proj, n_ff,
+                );
+                // GeGLU writes `up = gelu(gate) * up`; copy back to
+                // `gate_buf` so `down_input` matches the SwiGLU
+                // byte-equal convention.
+                gate_buf.copy_from_slice(up_proj);
                 down_input = gate_buf;
             } else {
                 let needs_q8_ffn = lw.w_gate.needs_q8_0_activation();
@@ -888,6 +1018,12 @@ impl<'a> LlamaSession<'a> {
         if logit_scale != 0.0 {
             vec_scale_f32(logits, logit_scale);
         }
+        // Gemma-2 final logit softcap. `softcap_inplace` no-ops when
+        // `cap == 0`; every non-gemma2 llama arch keeps the
+        // pre-gemma2 logits byte-identical.
+        if final_logit_softcap > 0.0 {
+            softcap_inplace(logits, final_logit_softcap);
+        }
         self.seq_len = base_position + rows;
         Ok(())
     }
@@ -921,6 +1057,14 @@ impl<'a> LlamaSession<'a> {
         let residual_scale = self.residual_scale;
         let logit_scale = self.logit_scale;
         let norm_groups = self.norm_groups;
+        // Gemma-2 attention / final-logit softcaps + sliding window.
+        // Bind locals up-front so the `&mut self.kv_cache` /
+        // `&mut self.scratch` borrows below don't collide with
+        // immutable field reads in the per-layer loop.
+        let final_logit_softcap = self.final_logit_softcap;
+        let attn_softcap_global = self.attn_softcap;
+        let sliding_window_global = self.sliding_window;
+        let sw_pattern = self.sliding_window_pattern.clone();
 
         embedding_lookup(
             weights.embd_weight,
@@ -1136,6 +1280,23 @@ impl<'a> LlamaSession<'a> {
             // handles `rows × n_head` queries in one pass.
             let _attn_out = unsafe { std::slice::from_raw_parts_mut(attn_out_ptr, n_embd_q) };
             let n_cached = pos + 1;
+            // Gemma-2 sliding-window pre-trim: advance the cache
+            // offset and clamp the loop count so each query sees
+            // only the most-recent `sliding_window` tokens. Global
+            // (non-SWA) layers skip the trim via the per-layer
+            // pattern (Gemma-2 9B / 27B hybrid attention).
+            let layer_swa =
+                sliding_window_global > 0 && sw_pattern.get(layer).copied().unwrap_or(true);
+            let (eff_n_cached, head_off_base) = if layer_swa && n_cached > sliding_window_global {
+                (
+                    sliding_window_global,
+                    kb + (n_cached - sliding_window_global) * n_embd_gqa,
+                )
+            } else {
+                (n_cached, kb)
+            };
+            let layer_attn_softcap = if layer_swa { attn_softcap_global } else { 0.0 };
+            let sw_local = if layer_swa { sliding_window_global } else { 0 };
             pool.compute(move |ith: usize, nth: usize| {
                 let q = unsafe { std::slice::from_raw_parts(q_ptr, n_embd_q) };
                 let attn_out_local =
@@ -1159,10 +1320,11 @@ impl<'a> LlamaSession<'a> {
                             &mut attn_out_local[out_base..out_base + n_embd_head_v],
                             k_cache,
                             v_cache,
-                            kb + kv_h * n_embd_head_v,
+                            head_off_base + kv_h * n_embd_head_v,
                             n_embd_gqa,
-                            n_cached,
+                            eff_n_cached,
                             kq_scale,
+                            layer_attn_softcap,
                         );
                     }
                 } else {
@@ -1188,6 +1350,17 @@ impl<'a> LlamaSession<'a> {
                                     ..kb + t * n_embd_gqa + kv_h * n_embd_head_v + n_embd_head_k],
                                 n_embd_head_k,
                             ) * kq_scale;
+                        }
+                        // Gemma-2 sliding-window mask + attn logit
+                        // softcap. Plain llama: both are 0 so the
+                        // helper is a no-op.
+                        if layer_attn_softcap > 0.0 || sw_local > 0 {
+                            apply_attn_pre_softmax_inplace(
+                                &mut scores[s_off..s_off + n_padded],
+                                n_cached,
+                                sw_local,
+                                layer_attn_softcap,
+                            );
                         }
                         scores[s_off + n_cached..s_off + n_padded].fill(f32::NEG_INFINITY);
                         softmax_inplace(&mut scores[s_off..s_off + n_padded]);
@@ -1283,6 +1456,13 @@ impl<'a> LlamaSession<'a> {
                 // `arch` here for the same reason `forward.rs`
                 // does. (`up_buf_ptr` is `*mut f32`; we cast for
                 // the 2*n_ff-sized destination.)
+                //
+                // Gemma-2 (`gemma2` arch) uses GeGLU: `up *= gelu(gate)`
+                // rather than `up *= silu(gate)`. The w_down matmul
+                // below reads from gate_buf (the convention for
+                // SwiGLU), so we copy up_buf back over gate_buf after
+                // GeGLU to keep the byte-equal `gate_buf <- post-
+                // activation` contract that matches `forward.rs`.
                 if arch == "glm4" {
                     let ffn_fused =
                         unsafe { std::slice::from_raw_parts_mut(ffn_fused_ptr, 2 * n_ff) };
@@ -1312,6 +1492,44 @@ impl<'a> LlamaSession<'a> {
                             &mut up_part[r_start..r_end],
                         );
                         gate_buf[r_start..r_end].copy_from_slice(&up_part[r_start..r_end]);
+                    }
+                } else if arch == "gemma2" {
+                    lw.w_gate.kernel.forward_prepared(
+                        input,
+                        q8,
+                        sc,
+                        Some(q8k),
+                        up_buf,
+                        n_embd,
+                        n_ff,
+                        ith,
+                        nth,
+                    );
+                    lw.w_up.kernel.forward_prepared(
+                        input,
+                        q8,
+                        sc,
+                        Some(q8k),
+                        gate_buf,
+                        n_embd,
+                        n_ff,
+                        ith,
+                        nth,
+                    );
+                    if gpu_matmul_active() {
+                        if ith == 0 {
+                            gelu_mul_approx_inplace(&gate_buf[..n_ff], &mut up_buf[..n_ff]);
+                            gate_buf[..n_ff].copy_from_slice(&up_buf[..n_ff]);
+                        }
+                    } else {
+                        let per_thread = (n_ff + nth - 1) / nth;
+                        let r_start = ith * per_thread;
+                        let r_end = (r_start + per_thread).min(n_ff);
+                        gelu_mul_approx_inplace(
+                            &gate_buf[r_start..r_end],
+                            &mut up_buf[r_start..r_end],
+                        );
+                        gate_buf[r_start..r_end].copy_from_slice(&up_buf[r_start..r_end]);
                     }
                 } else {
                     lw.w_gate.kernel.forward_prepared(
@@ -1461,6 +1679,14 @@ impl<'a> LlamaSession<'a> {
             let logits = unsafe { std::slice::from_raw_parts_mut(logits_ptr, vocab) };
             vec_scale_f32(logits, logit_scale);
         }
+        // Gemma-2 final logit softcap. Applied after `logit_scale`
+        // so the two are independent. `softcap_inplace` no-ops when
+        // `cap == 0`; every non-gemma2 llama arch keeps the
+        // pre-gemma2 logits byte-identical.
+        if final_logit_softcap > 0.0 {
+            let logits = unsafe { std::slice::from_raw_parts_mut(logits_ptr, vocab) };
+            softcap_inplace(logits, final_logit_softcap);
+        }
 
         self.seq_len = pos + 1;
         Ok(())
@@ -1602,5 +1828,94 @@ mod tests {
         // empty input → empty result, no seq_len change.
         let empty: Vec<u32> = Vec::new();
         assert_eq!(empty.len(), 0);
+    }
+
+    struct PatternSource(HashMap<String, MetaValue>);
+    impl TensorSource for PatternSource {
+        fn metadata(&self, key: &str) -> Option<&MetaValue> {
+            self.0.get(key)
+        }
+        fn tensor_info(&self, _name: &str) -> Option<&TensorInfo> {
+            None
+        }
+        fn tensor_slice(&self, _name: &str) -> Option<&[u8]> {
+            None
+        }
+    }
+
+    #[test]
+    fn read_sliding_window_pattern_defaults_to_all_true() {
+        // No metadata → every layer uses SWA.
+        let src = PatternSource(HashMap::new());
+        let p = read_sliding_window_pattern(&src, "gemma2", 6);
+        assert_eq!(p, vec![true; 6]);
+    }
+
+    #[test]
+    fn read_sliding_window_pattern_hybrid_attention() {
+        // Gemma-2 9B-it declares a 42-layer pattern like
+        //   [true, true, true, true, true, false, ...] repeated
+        // every 6 layers. We use a 12-layer fixture so the test
+        // is small but covers both the early-window-only and the
+        // mid-cycle-false cases.
+        let pattern = vec![
+            true, true, true, true, true, false, true, true, true, true, true, false,
+        ];
+        let mut map = HashMap::new();
+        map.insert(
+            "gemma2.attention.sliding_window_pattern".into(),
+            MetaValue::Array(
+                MetaValueType::Bool,
+                pattern.iter().map(|b| MetaValue::Bool(*b)).collect(),
+            ),
+        );
+        let src = PatternSource(map);
+        let p = read_sliding_window_pattern(&src, "gemma2", 12);
+        assert_eq!(p, pattern);
+        // The global-window layers are at indices 5 and 11.
+        assert!(p[0] && p[4]);
+        assert!(!p[5]);
+        assert!(p[10] && !p[11]);
+    }
+
+    #[test]
+    fn read_sliding_window_pattern_truncates_when_longer_than_n_layer() {
+        // A pattern with more entries than `n_layer` is silently
+        // truncated to `n_layer` so a future GGUF with an extra
+        // sentinel entry doesn't OOB.
+        let mut map = HashMap::new();
+        map.insert(
+            "gemma2.attention.sliding_window_pattern".into(),
+            MetaValue::Array(
+                MetaValueType::Bool,
+                vec![
+                    MetaValue::Bool(true),
+                    MetaValue::Bool(false),
+                    MetaValue::Bool(true),
+                    MetaValue::Bool(false),
+                ],
+            ),
+        );
+        let src = PatternSource(map);
+        let p = read_sliding_window_pattern(&src, "gemma2", 2);
+        assert_eq!(p, vec![true, false]);
+    }
+
+    #[test]
+    fn read_sliding_window_pattern_pads_with_true_when_shorter_than_n_layer() {
+        // A pattern with FEWER entries than `n_layer` is padded
+        // with `true` (every missing entry is treated as SWA),
+        // matching llama.cpp's defaults.
+        let mut map = HashMap::new();
+        map.insert(
+            "gemma2.attention.sliding_window_pattern".into(),
+            MetaValue::Array(
+                MetaValueType::Bool,
+                vec![MetaValue::Bool(false), MetaValue::Bool(true)],
+            ),
+        );
+        let src = PatternSource(map);
+        let p = read_sliding_window_pattern(&src, "gemma2", 4);
+        assert_eq!(p, vec![false, true, true, true]);
     }
 }

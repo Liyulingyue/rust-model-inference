@@ -141,6 +141,25 @@ LFM2 / LFM2.5 / Spark / Nemotron-H / Hunyuan / LFM2-MoE），每个 scorer 实�
 
 目标：Q4_K_M 从 ~76 t/s → 120-150 t/s。详见 TODO-001 关联。
 
+### BitNet `I2_S` GGML type 的 provenance 与上游兼容性
+
+`GGMLType::I2_S = 36` 和 `general.file_type = 40` (LLAMA_FTYPE_MOSTLY_I2_S) **不是上游
+ggml-org/llama.cpp 的一部分**——它们是 `microsoft/BitNet` 私有 fork 在 `ggml.h` 中加的扩展，
+转换脚本 `utils/convert-hf-to-gguf-bitnet.py` 用 `gguf.GGMLQuantizationType.I2_S`。后果：
+
+- 这两种 BitNet GGUF **只能**在 BitNet-patched llama.cpp / `microsoft/BitNet` build / 本仓库 (`I2_S` 已注册) 里
+  跑，stock `llama.cpp`、`ollama`、`koboldcpp` 等社区 GGML 引擎会在加载时报
+  "unknown tensor type" 直接 abort。
+- 跨生态分发 BitNet 模型时需要在 README / GGUF 描述里明确这一点，避免用户误以为
+  `ollama run bitnet-embedding-0.6b` 能跑（实际上 GGUF 类型会被拒）。
+- 长期：上游 PR 把 `I2_S` 合并进 ggml-org/ggml（需要 bitnet.cpp 团队与 ggml 维护者协调），
+  或者在 GGUF 规范里加一个 `quantization_version` 字段，让 stock llama.cpp 把
+  `file_type=40 + GGMLType=36` 解释成 "需要 BitNet-patched build" 错误并清晰报错。
+
+当前会话的处理：commit message + `src/core/tensor.rs::GGMLType::I2_S = 36` 旁的注释明确写了
+"Microsoft BitNet b1.58 I2_S extension; not upstream ggml"。`docs/usage/bitnet_embedding.md` 第一节
+"已下载并验证的 GGUF" 提示兼容性受限。**没有自动对齐上游的工作；等上游 merge 或社区分流后再调整。**
+
 ## Low Priority
 
 - [ ] 更多量化格式支持（Q4_K, Q5_K 等）
@@ -1208,3 +1227,93 @@ let mut values = [0.0f32; 512];  // attention 长生成时越界 panic
 - TODO-AVX-VNNI / TODO-LLAMA-PER-TOKEN-SIMD 实现后，再跑一遍 K2-Horizon-4B
   对比 `--max-context 8192` vs `--max-context 32768` 的 prefill 时间（验证大 context
   不会因为 KV 随机访问模式变慢）。
+### Standard gemma3 trunk (`src/models/gemma3/trunk/forward.rs`) — DONE for 270M-it
+
+`src/models/gemma3/` 现在服务 **BitNet 270M** (file_type=40) **和**
+**standard gemma3-270m-it** (file_type=15, Q4_K_M mixed) — 两条 forward
+path 共享同一个 `text_encode` 函数体，`cfg.is_bitnet` 在 7 个投影
+（attn_q/k/v/output + ffn_gate/up/down）处分发：
+
+- `is_bitnet=true`  → `bitlinear_projection(...)` (BitNet path，SIMD hot path)
+- `is_bitnet=false` → `standard_projection(...)` (Q4_K/Q5_0/Q6K/Q8_0 matmul，
+  Q8_0-quantized 激活 × mixed-quant 权重，跟 qwen3 trunk 同款)
+
+新增 `Gemma3Config.sliding_window: usize` 字段（默认 0 = full causal），
+`causal_self_attention` 在 mask `j ∈ [0, i + 1 - sliding_window)`。
+Standard gemma3-270m-it 声明 `sliding_window=512`（hybrid local/global attn）。
+
+`Gemma3LayerWeights` 同时存 `bitlinear: BitLinearSlot` 和
+`wq/wk/.../w_down: Option<StdProjection>`（owned `Vec<u8>` + ggml type + shape）。
+Forward 路径在调用 `standard_projection` 时按需构造 `Weight` kernel
+（cheap; kernel 只是 byte buffer 的 view + 维度）。
+
+`static_weight` (`src/models/gemma3/trunk/weights.rs`) 现支持 F16 (BitNet 270M)
+和 Q8_0 (standard gemma3-270m-it，mixed-quant conversion) 两种 token
+embedding。Q8_0 dequant 用 34 bytes / 32-element block layout
+(2-byte F16 scale + 32 signed int8)。
+
+`build_config` (`src/models/gemma3/embedding.rs`) 改：
+- vocab 从 `tokenizer.ggml.tokens` array length 读（standard GGUF 没有
+  `gemma3.vocab_size`；BitNet 仍用 `gemma3.vocab_size` fallback）。
+- `gemma3.context_length` 改 unwrap_or(0)（standard GGUF 总是有，BitNet 也总有；fallback
+  仅为防御）。
+- `gemma3.pooling_type` 改 unwrap_or(1)（standard GGUF 不设，BitNet 设 1）。
+- `gemma3.attention.sliding_window` 新字段。
+
+`app/mod.rs::compute_embedding` / `run_embedding` dispatch 加 `"gemma3"` case
+→ `crate::models::gemma3::compute_embedding` / `run_embedding`（之前默认
+fall through 到 qwen3，不识别 arch）。`models::gemma3` 现在 pub mod。
+
+`models::gemma3::trunk::BitLinearWeights` 引用从 `crate::ops::bitlinear` 改到
+`crate::ops::bitnet`（旧的 `bitlinear/` 模块已不再 pub；commit e011536
+之后一直未更新 gemma3 trunk 的 import，这是 e011536 的 holdout）。
+
+**e2e** (`tests/gemma3_270m_it_e2e_embed.rs`) 5/5：
+shape=640、finite、value range `[-300, 300]`、L2 norm `∈ (0.1, 1000)`、
+byte-deterministic、longer prompt 32 tokens 仍 finite、cooking vs
+software cosine sim < 0.99（IT 模型 + last-token pooling discrimination
+较弱；0.99 threshold 是宽口径，只 catch 完全相同 embedding）。
+
+**性能**：standard gemma3-270m-it Q4_K_M 单 token 4 线程 ~1.0 s；BitNet-270M
+packed SIMD 路径 ~480 ms。两者 forward 时间在同一数量级 — Q4_K matmul
+是 AVX2 + Q8_0-quantized activation，跟 SIMD int8 × int8 dot 在内存带宽上
+类似。
+
+**未做**（4B/12B/27B standard gemma3 的前置）：
+
+1. KV cache + decode loop（生成模式；当前只有 embedding extraction = last-token）。
+2. IT chat template（`tokenizer.chat_template` 已在 contract test 里锁定含
+   `<start_of_turn>{role}
+...<end_of_turn>
+`，但 `run_shared_inference` 仍
+   返回 error）。
+3. **Bit-exact 对照 oracle**：本机没有 cmake/PyTorch/bitnet.cpp build；任何
+   "对得上 llama.cpp b96806d --temp 0 --top-k 1 golden log" 的工作需 cmake
+   工具链，目前不可达。Forward 通过有限 golden test 验证（shape / finite /
+   range / determinism / discrimination）— 跟 BitNet-270M 的 e2e 套件同级别。
+
+针对 gemma-3-270m-it 的 contract test (`tests/gemma3_270m_it_q4_k_m.rs`)
+已 8/8：metadata (arch, file_type=15, dims)、sliding_window=512、
+SPM tokenizer (`model=llama`, no merges, EOS=106)、mixed-quant tensor
+inventory (109 F32 + 81 Q5_0 + 27 Q4K + 9 Q6K + 10 Q8_0 = 236 张量, no I2_S, no norm_in)。
+
+历史：
+
+1. `causal_self_attention` 加 sliding window mask（`gemma3.attention.sliding_window=512`，
+   屏蔽 `|i - j| > sliding_window` 的 K/V）。
+2. 在 `gemma3/trunk/weights.rs` 加非 BitLinear 路径：`attn_q/k/v/output` +
+   `ffn_gate/up/down` 用 `Weight::from_quantized`（Q4_K/Q5_0/Q6K/Q8_0 混合，按张量名匹配），
+   走 `matmul_q8_0_quantized_parallel_rows`（现有的 standard matmul，已在 qwen3 trunk 用过）。
+3. `Gemma3Config::is_bitnet` field 保留作 dispatcher，但加一个
+   `pub fn new_from_source(&self) -> ...` 的 standard gemma3 入口（`text_encode_v2` 或
+   重命名）；`embedding.rs::compute_embedding` 走 `cfg.is_bitnet` 分发两个 path。
+4. IT tokenizer：`tokenizer.chat_template`（含 `<start_of_turn>{role}\n…<end_of_turn>\n`）
+   + EOS=106（不是 BitNet 的 EOS=1）已经在 contract test 锁定；`BPETokenizer` 已经能处理
+   SPM `tokens + scores + token_type`（这是 BitNet-270M 复用过的），IT 模型跟 base 模型
+   tokenizer layout 完全一致，理论上零增量工作量。
+5. KV cache + decode loop（用于 IT generation 而非仅 embedding extraction）。
+
+rough scope: ~400-500 LOC（取决于要不要 KV cache / generation），
+与 `tests/gemma3_270m_it_q4_k_m.rs` 的 8 条 contract test + 端到端 forward parity test 配对
+（参 llama.cpp `--temp 0 --top-k 1` greedy 输出做 32→1 字符串对齐；oracle 见 llama.cpp `b96806d`
+在 `unsloth/gemma-3-270m-it-GGUF` 上的 golden log `main-0319c65`）。
