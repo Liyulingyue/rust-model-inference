@@ -1883,6 +1883,7 @@ mod tests {
             input_channels: 1,
             output_channels: 1,
             kernel: 3,
+            linear: None,
         };
         let mut output = [0.0; 4];
         run_bf16_downsample(
