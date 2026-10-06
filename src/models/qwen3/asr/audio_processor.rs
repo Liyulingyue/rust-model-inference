@@ -196,16 +196,16 @@ pub fn decode_pcm16_wav_any(bytes: &[u8]) -> Result<DecodedPcm16Wav, AsrAudioErr
     })
 }
 
-pub(crate) struct MelWindow {
+pub struct MelWindow {
     pub values: Vec<f32>,
     pub frames: usize,
     pub valid_frames: usize,
 }
 
-pub(crate) struct LogMel {
-    pub(crate) raw: Vec<f32>,
-    pub(crate) normalized: Vec<f32>,
-    pub(crate) frames: usize,
+pub struct LogMel {
+    pub raw: Vec<f32>,
+    pub normalized: Vec<f32>,
+    pub frames: usize,
 }
 
 fn zeroed_f32(len: usize) -> Result<Vec<f32>, AsrAudioError> {

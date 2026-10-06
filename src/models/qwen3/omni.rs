@@ -368,8 +368,15 @@ impl Qwen25OmniAudioModel {
         )?;
         apply_gelu_erf(&mut hidden)?;
 
+        let max_position = self.positions.len() / self.config.hidden;
         for token in 0..layout.post_conv_tokens {
-            let position = token % self.config.window;
+            if token >= max_position {
+                return Err(format!(
+                    "Qwen2.5-Omni audio position {} out of range (max {})",
+                    token, max_position
+                ));
+            }
+            let position = token;
             let position_row =
                 &self.positions[position * self.config.hidden..(position + 1) * self.config.hidden];
             let hidden_row =
@@ -397,7 +404,7 @@ impl Qwen25OmniAudioModel {
         let mut update = reserved_f32("Qwen2.5-Omni update", values)?;
         let mut ffn_up = reserved_f32("Qwen2.5-Omni FFN up", ffn_values)?;
         let mut ffn_down = reserved_f32("Qwen2.5-Omni FFN down", values)?;
-        let mut scores = reserved_f32("Qwen2.5-Omni scores", self.config.window)?;
+        let mut scores = reserved_f32("Qwen2.5-Omni scores", layout.post_conv_tokens)?;
         let head_dim = self.config.hidden / self.config.heads;
         for layer in &self.layers {
             layer_norm_rows(
@@ -511,7 +518,28 @@ pub fn encode_audio(
             log_mel_windows(samples).map_err(|error| format!("Audio Mel error: {error:?}"))?;
         return Ok(model.encode(&windows)?.values);
     }
-    Qwen25OmniAudioModel::from_source(source)?.encode(samples, false)
+    // qwen2.5o (Jina v5 Omni audio tower) — split the audio into 30 s
+    // Whisper chunks and run Conv1d + per-chunk full-attention for each.
+    // This mirrors llama.cpp `feat-v5-omni` mtmd split design (line 597
+    // of `tools/mtmd/mtmd-audio.cpp`): 3000 mel frames per chunk, full
+    // attention within each chunk, last-frame replication pad for the
+    // tail. The LLM cross-attends across all audio tokens downstream
+    // for global context, so per-chunk isolation matches the upstream
+    // GGUF behavior. Long audio is bounded by the LLM's max sequence
+    // length (32768 for jina-v5-omni-small → ~22 minutes of pure
+    // audio at 25 tokens/s).
+    let model = Qwen25OmniAudioModel::from_source(source)?;
+    let chunk_samples = WHISPER_CHUNK * HOP;
+    let mut all_projected = Vec::new();
+    let mut start = 0usize;
+    while start < samples.len() {
+        let end = start.saturating_add(chunk_samples).min(samples.len());
+        let chunk = &samples[start..end];
+        let projected = model.encode_whisper_fixed(chunk)?;
+        all_projected.extend_from_slice(&projected);
+        start = end;
+    }
+    Ok(all_projected)
 }
 
 fn load_conv1d(
@@ -1347,5 +1375,31 @@ mod tests {
             error.contains("Qwen3A") || error.contains("Qwen3Audio"),
             "{error}"
         );
+    }
+
+    /// End-to-end check that the new 30 s chunk split actually produces
+    /// `n_chunks × 750 × 1024` audio token embeddings. Requires the Jina
+    /// audio mmproj on disk; gated so unit-test runs without a model do
+    /// not skip due to missing weight data.
+    #[test]
+    #[ignore = "requires Jina audio mmproj; run via tools/oracle/jina_audio/README.md"]
+    fn encode_audio_chunk_split_emits_n_times_30s_chunks() {
+        let mmproj = std::env::var("RMI_JINA_AUDIO_MMPROJ")
+            .expect("set RMI_JINA_AUDIO_MMPROJ to the audio mmproj GGUF path");
+        let source: Arc<dyn TensorSource> =
+            Arc::new(crate::GGUFLoader::from_file(std::path::Path::new(&mmproj)).unwrap());
+        let projection = 1024;
+        let tokens_per_chunk = 750;
+        // 60 s → 2 chunks; 35 s → 2 chunks (second chunk = 5 s padded
+        // to 30 s); 90 s → 3 chunks.
+        for (seconds, expected_chunks) in [(60, 2), (35, 2), (90, 3)] {
+            let samples = vec![0.0f32; seconds * 16_000];
+            let total = encode_audio(source.clone(), &samples, 1).unwrap();
+            assert_eq!(
+                total.len(),
+                expected_chunks * tokens_per_chunk * projection,
+                "{seconds}s should produce {expected_chunks} chunks"
+            );
+        }
     }
 }

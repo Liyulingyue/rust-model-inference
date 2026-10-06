@@ -267,6 +267,29 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                     parse_embedding_output(args.get(i + 1).map(String::as_str))?;
                 i += 1;
             }
+            "--rerank" => options.rerank = true,
+            "--rerank-query" => {
+                options.rerank_query = args.get(i + 1).cloned();
+                i += 1;
+            }
+            "--rerank-doc" => {
+                if let Some(doc) = args.get(i + 1) {
+                    options.rerank_documents.push(doc.clone());
+                    i += 1;
+                }
+            }
+            "--rerank-documents" => {
+                options.rerank_documents_file = args.get(i + 1).cloned().map(PathBuf::from);
+                i += 1;
+            }
+            "--rerank-instruction" => {
+                options.rerank_instruction = args.get(i + 1).cloned();
+                i += 1;
+            }
+            "--rerank-max-tokens" => {
+                options.rerank_max_tokens = args.get(i + 1).and_then(|value| value.parse().ok());
+                i += 1;
+            }
             "--bench" => options.bench = true,
             "--thinking" => options.thinking = true,
             "--no-thinking" => options.thinking = false,
@@ -284,6 +307,19 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
             "--mmproj" => {
                 if i + 1 < args.len() {
                     options.mmproj = Some(args[i + 1].as_str().into());
+                    i += 1;
+                }
+            }
+            "--clm-head" => {
+                if i + 1 < args.len() {
+                    options.clm_head = Some(args[i + 1].as_str().into());
+                    i += 1;
+                }
+            }
+            "--gliner2-decide" => options.gliner2_decide = true,
+            "--gliner2-schema" => {
+                if i + 1 < args.len() {
+                    options.gliner2_schema = Some(args[i + 1].clone());
                     i += 1;
                 }
             }

@@ -839,13 +839,21 @@ fn add_inplace(target: &mut [f32], source: &[f32]) -> Result<(), String> {
     validate_finite("Gemma4 residual", target)
 }
 
-pub(crate) fn resize_bicubic_pillow(
+pub fn resize_bicubic_pillow(
     rgb: &[u8],
     width: usize,
     height: usize,
     target_width: usize,
     target_height: usize,
 ) -> Result<Vec<u8>, String> {
+    if width == 0
+        || height == 0
+        || target_width == 0
+        || target_height == 0
+        || rgb.len() != checked_len("RGB resize", &[width, height, 3])?
+    {
+        return Err("Invalid RGB resize dimensions or payload".into());
+    }
     if width == target_width && height == target_height {
         return Ok(rgb.to_vec());
     }

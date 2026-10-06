@@ -28,6 +28,31 @@ fn f32_test_weight(data: Vec<f32>, n_in: usize, n_out: usize) -> Weight<'static>
 }
 
 #[test]
+fn qwen35_model_rejects_edge0_architecture() {
+    use crate::core::tensor::{MetaValue, TensorInfo, TensorSource};
+
+    struct Edge0Source(MetaValue);
+    impl TensorSource for Edge0Source {
+        fn metadata(&self, key: &str) -> Option<&MetaValue> {
+            (key == "general.architecture").then_some(&self.0)
+        }
+        fn tensor_info(&self, _: &str) -> Option<&TensorInfo> {
+            None
+        }
+        fn tensor_slice(&self, _: &str) -> Option<&[u8]> {
+            None
+        }
+    }
+
+    let source = Edge0Source(MetaValue::String("edge0".into()));
+    let error = match Qwen35Model::from_source(&source) {
+        Ok(_) => panic!("Edge0 must not construct Qwen35Model"),
+        Err(error) => error,
+    };
+    assert!(error.contains("Edge0Model"), "{error}");
+}
+
+#[test]
 fn qwen35_bf16_matmul_rounds_activations_before_dot() {
     use crate::core::tensor::{MetaValue, TensorInfo, TensorSource};
     struct Source(TensorInfo, Vec<u8>);

@@ -397,6 +397,7 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             | "qwen3vl"
             | "qwen3vlmoe"
             | "qwen35"
+            | "edge0"
             | "qwen3tts"
             | "llama"
             | "exaone"
@@ -406,14 +407,21 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             | "pig"
             | "lfm2"
             | "lfm2moe"
+            | "xing4_0"
             | "nanbeige"
             | "nemotron_h"
             | "falcon-h1"
             | "phi3"
             | "glm4"
             | "gemma-embedding"
+            | "gemma2"
             | "bert"
             | "jina-bert-v2"
+            | "nomic-bert"
+            | "nomic-bert-moe"
+            | "mistral3"
+            | "ernie_image"
+            | "audiocpp"
     ) {
         return Err(format!("Unsupported architecture: {arch}"));
     }
@@ -431,6 +439,59 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             vocab_size: 0,
             rope_freq_base: 0.0,
             norm_eps: 1e-5,
+        });
+    }
+    // ERNIE-Image / ERNIE-Image-Turbo DiT uses default config too: it's a
+    // diffusion model whose GGUF metadata only carries general.architecture
+    // = "ernie_image" (see stable-diffusion.cpp @ de298c2). The pipeline
+    // loads its own config from the tensor inventory.
+    // Note: the unsloth GGUF export mis-tags architecture as "wan", so we
+    // fall back to tensor-name detection when the arch key is missing or
+    // mismatched.
+    let ernie_image_by_arch = arch == "ernie_image";
+    let ernie_image_by_tensor = source
+        .tensor_info("layers.0.self_attention.to_q.weight")
+        .is_some()
+        && source.tensor_info("text_proj.weight").is_some();
+    if ernie_image_by_arch || ernie_image_by_tensor {
+        return Ok(ModelConfig {
+            n_embd: 4096,
+            n_layer: 36,
+            n_head: 32,
+            n_head_kv: 32,
+            n_embd_head: 128,
+            n_ff: 12288,
+            n_ctx: 0,
+            vocab_size: 0,
+            rope_freq_base: 0.0,
+            norm_eps: 1e-6,
+        });
+    }
+    // AuK / audiocpp arch (1.5B Flux2Edit audio DiT). Detection is by
+    // tensor-name presence since the GGUF mis-tags arch as "audiocpp".
+    let auk_by_arch = arch == "audiocpp";
+    let auk_by_tensor = source
+        .tensor_info("transformer.transformer_blocks.0.attn_norm_x.linear.weight")
+        .is_some()
+        && source
+            .tensor_info("transformer.single_transformer_blocks.0.attn_norm.linear.weight")
+            .is_some()
+        && source
+            .tensor_info("transformer.audio_embed.linear.weight")
+            .is_some();
+    if auk_by_arch || auk_by_tensor {
+        return Ok(ModelConfig {
+            n_embd: 1536,
+            n_layer: 10,
+            n_head: 24,
+            n_head_kv: 24,
+            n_embd_head: 64,
+            // n_ff = packed gate+up (6144) + down (3072) summed = 9216
+            n_ff: 9216,
+            n_ctx: 0,
+            vocab_size: 0,
+            rope_freq_base: 0.0,
+            norm_eps: 1e-6,
         });
     }
     // Nemotron-3 Nano is a hybrid Mamba-Transformer; n_head / n_ff /
@@ -535,7 +596,7 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
     let as_usize = |key: String| -> Result<usize, String> {
         usize::try_from(get_u64(&key)?).map_err(|_| format!("{key} does not fit usize"))
     };
-    let n_embd_head = if arch == "qwen35" || arch == "nanbeige" {
+    let n_embd_head = if arch == "qwen35" || arch == "edge0" || arch == "nanbeige" {
         if n_head == 0 {
             return Err(format!(
                 "Invalid {prefix} head shape: embedding_length={n_embd}, head_count={n_head}"
@@ -580,7 +641,11 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
                     None => 0,
                 },
             }
-        } else if arch == "bert" || arch == "jina-bert-v2" {
+        } else if arch == "bert"
+            || arch == "jina-bert-v2"
+            || arch == "nomic-bert"
+            || arch == "nomic-bert-moe"
+        {
             // Standard BERT is plain multi-head attention with no GQA, so the
             // converted GGUF omits `attention.head_count_kv` entirely
             // (`references/llama.cpp/src/models/bert.cpp` reads n_embd_gqa as
@@ -601,7 +666,22 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
                 .map(Vec::len)
                 .unwrap_or(0),
         },
-        rope_freq_base: get_f64_opt(&format!("{prefix}.rope.freq_base"), 1_000_000.0)? as f32,
+        rope_freq_base: {
+            // Per-arch rope.freq_base defaults. The loader uses 1e6
+            // as a fallback for any arch that omits the metadata,
+            // but Gemma-2 actually trains with `freq_base = 10000.0`
+            // (HF `google/gemma-2-2b` config) and ships no
+            // `*.rope.freq_base` key in the GGUF — using 1e6 would
+            // silently produce garbage rotations. Hardcode the
+            // Gemma-2 default here; every other arch falls through
+            // to 1e6 unchanged.
+            let default = if prefix == "gemma2" {
+                10_000.0
+            } else {
+                1_000_000.0
+            };
+            get_f64_opt(&format!("{prefix}.rope.freq_base"), default)? as f32
+        },
         norm_eps: get_f64(&format!("{prefix}.attention.layer_norm_epsilon"))
             .or_else(|_| get_f64(&format!("{prefix}.attention.layer_norm_rms_epsilon")))
             .unwrap_or(1e-12) as f32,
@@ -699,6 +779,27 @@ const KNOWN_QWEN3VL_2B_DIMENSIONS: Qwen3AllowedDimensions = Qwen3AllowedDimensio
     n_embd_head_k: 128,
     n_embd_head_v: 128,
     n_ff: 6144,
+    n_ctx: 262_144,
+    norm_eps_bits: 1e-6_f32.to_bits(),
+    freq_base_bits: 5_000_000_f32.to_bits(),
+};
+
+/// `qwen3vl`-arch GGUF for `Qwen3-VL-4B-Instruct` (Qwen/Qwen3-VL-4B-Instruct-GGUF
+/// Q4_K_M, SHA-256 not yet pinned). LLM backbone is the Qwen3-4B dense trunk
+/// (`n_embd=2560, n_layer=36, n_head=32, n_head_kv=8, head_dim=128, n_ff=9728`),
+/// frequency base `5_000_000.0`, norm epsilon `1e-6`, M-RoPE sections
+/// `[24, 20, 20, 0]`. Note: Qwen3 deliberately has `n_embd_head != n_embd /
+/// n_head` (here `32 * 128 = 4096 != 2560`) — there is an explicit output
+/// projection that compresses back. Verified end-to-end 2026-10-01 (see
+/// `tests/qwen3_vl_4b.rs`).
+const KNOWN_QWEN3VL_4B_DIMENSIONS: Qwen3AllowedDimensions = Qwen3AllowedDimensions {
+    n_embd: 2560,
+    n_layer: 36,
+    n_head: 32,
+    n_head_kv: 8,
+    n_embd_head_k: 128,
+    n_embd_head_v: 128,
+    n_ff: 9728,
     n_ctx: 262_144,
     norm_eps_bits: 1e-6_f32.to_bits(),
     freq_base_bits: 5_000_000_f32.to_bits(),
@@ -877,6 +978,8 @@ pub(crate) fn check_qwen3_allowed_dimensions(
     };
     if matches(allowed)
         || (allowed == KNOWN_QWEN3VL_DIMENSIONS && matches(KNOWN_QWEN3VL_2B_DIMENSIONS))
+        || (allowed == KNOWN_QWEN3VL_DIMENSIONS && matches(KNOWN_QWEN3VL_4B_DIMENSIONS))
+        || (allowed == KNOWN_QWEN3VL_2B_DIMENSIONS && matches(KNOWN_QWEN3VL_4B_DIMENSIONS))
     {
         Ok(())
     } else {

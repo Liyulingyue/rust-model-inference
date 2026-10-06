@@ -25,11 +25,12 @@ use crate::core::tokenizer::load_tokenizer;
 use crate::core::tokenizer::Tokenizer;
 use crate::ops::kernel::{PreparedRows, QuantizedTensor, Weight};
 type DynTokenizer = Box<dyn Tokenizer>;
-use crate::core::tensor::GGMLType;
+use crate::core::tensor::{GGMLType, MetaValue, MetaValueType};
+use crate::models::llama::trunk::forward::{apply_attn_pre_softmax_inplace, softcap_inplace};
 use crate::ops::{
-    dot_f32, embedding_lookup, gpu_matmul_active, quantize_q8_0_into, quantize_row_q8_k_into,
-    rms_norm_grouped, rms_norm_inplace, silu_mul_approx_inplace, softmax_inplace, vec_add_into,
-    vec_mad_f32, vec_scale_f32,
+    dot_f32, embedding_lookup, gelu_mul_approx_inplace, gpu_matmul_active, quantize_q8_0_into,
+    quantize_row_q8_k_into, rms_norm_grouped, rms_norm_inplace, silu_mul_approx_inplace,
+    softmax_inplace, vec_add_into, vec_mad_f32, vec_scale_f32,
 };
 use std::sync::Arc;
 
@@ -55,9 +56,69 @@ pub struct LlamaSession<'a> {
     pub norm_groups: usize,
     pub seq_len: usize,
     pub loop_final_norm: bool,
+    /// Gemma-2 attn logit softcap (`gemma2.attn_logit_softcapping`,
+    /// typically 50.0). `0.0` (default) disables the cap so every
+    /// other llama-family model is bit-identical.
+    pub attn_softcap: f32,
+    /// Gemma-2 final logit softcap (`gemma2.final_logit_softcapping`,
+    /// typically 30.0). `0.0` (default) disables the cap.
+    pub final_logit_softcap: f32,
+    /// Gemma-2 / Gemma-3 sliding-window width. `0` (default)
+    /// disables the window so plain llama / mistral / qwen stay
+    /// full-attention.
+    pub sliding_window: usize,
+    /// Per-layer boolean: `true` if the layer applies sliding-
+    /// window attention; `false` if it's a global / full-attention
+    /// layer (Gemma-2 9B / 27B alternate every N layers). Reads
+    /// `<arch>.attention.sliding_window_pattern` (bool array of
+    /// length `n_layer`) when available; defaults to all-`true`.
+    /// `vec![true; n_layer]` matches plain Gemma-2 2B / 9B / 27B
+    /// when the metadata key is absent.
+    pub sliding_window_pattern: Vec<bool>,
 }
 
-#[derive(Clone, Copy)]
+impl LlamaSession<'_> {
+    /// `true` when `layer_idx` should use sliding-window attention.
+    /// Equivalent to `sliding_window > 0 && sliding_window_pattern[layer]`.
+    /// Falls back to all-true when the metadata is missing.
+    pub fn layer_uses_swa(&self, layer_idx: usize) -> bool {
+        self.sliding_window > 0
+            && self
+                .sliding_window_pattern
+                .get(layer_idx)
+                .copied()
+                .unwrap_or(true)
+    }
+}
+
+/// Read `<arch>.attention.sliding_window_pattern` (bool array of
+/// length `n_layer`) and return it as a `Vec<bool>`. Defaults to
+/// `vec![true; n_layer]` when the key is absent so plain Gemma-2
+/// 2B / 9B / 27B all get the sliding-window path. Gemma-2 9B / 27B
+/// declare the array (every-`false` for global layers) so the
+/// hybrid-attention pattern is preserved per layer.
+fn read_sliding_window_pattern(
+    source: &dyn TensorSource,
+    arch_prefix: &str,
+    n_layer: usize,
+) -> Vec<bool> {
+    let mut pattern = vec![true; n_layer];
+    if let Some(MetaValue::Array(MetaValueType::Bool, items)) =
+        source.metadata(&format!("{arch_prefix}.attention.sliding_window_pattern"))
+    {
+        for (i, item) in items.iter().enumerate() {
+            if i >= n_layer {
+                break;
+            }
+            if let MetaValue::Bool(b) = item {
+                pattern[i] = *b;
+            }
+        }
+    }
+    pattern
+}
+
+#[derive(Clone)]
 pub struct LlamaSessionConfig {
     pub max_ctx: usize,
     pub n_embd: usize,
@@ -79,6 +140,16 @@ pub struct LlamaSessionConfig {
     /// Phi-3 / Phi-4 multiply RoPE outputs by this factor; 1.0 means
     /// "no rescaling" (standard llama behaviour).
     pub attn_factor: f32,
+    /// Per-dim YaRN-corrected RoPE thetas (`theta_per_dim[i]` so that
+    /// the final theta at position `pos` is `pos * theta_per_dim[i]`).
+    /// `Some(_)` when the GGUF declares `rope.scaling.type = "yarn"`
+    /// AND `factor > 1.0`; `None` otherwise (plain RoPE). Used by
+    /// Mistral 3 (`mistral3.rope.scaling.{type=factor, factor=16,
+    /// original_context_length=16384, yarn_beta_fast=32,
+    /// yarn_beta_slow=1, yarn_log_multiplier=1}`); see
+    /// `forward::compute_yarn_thetas` for the construction. Length
+    /// is `rope_dim / 2` (i.e. one theta per pair lane).
+    pub yarn_thetas: Option<Vec<f32>>,
     pub vocab: usize,
 }
 
@@ -163,6 +234,13 @@ impl<'a> LlamaSession<'a> {
             .and_then(|v| v.to_f64())
             .map(|v| v as f32)
             .unwrap_or(1.0);
+        // Detect YaRN RoPE and precompute the per-dim thetas.
+        // `compute_yarn_thetas` returns `None` for non-YaRN architectures
+        // (no allocation, no cost); for Mistral 3 it builds a
+        // `Vec<f32>` of length `rope_dim / 2 = 64` once at session
+        // init, so the per-token rotation stays a single multiply
+        // (no position-dependent table lookup).
+        let yarn_thetas = super::forward::compute_yarn_thetas(source, &arch, freq_base, rope_dim);
         let norm_groups = normalization_groups(source, &arch, n_embd)?;
         let arch_prefix = arch.clone();
         let embedding_scale = source
@@ -177,6 +255,27 @@ impl<'a> LlamaSession<'a> {
             .metadata(&format!("{arch_prefix}.logit_scale"))
             .and_then(|v| v.to_f64())
             .unwrap_or(0.0) as f32;
+        // Gemma-2 attention / final logit softcaps + sliding-window
+        // attention. `0.0` defaults keep every non-gemma llama arch
+        // bit-identical to the pre-gemma2 path. See
+        // `models::llama::trunk::forward` for the free-fn mirror.
+        let attn_softcap: f32 = source
+            .metadata(&format!("{arch_prefix}.attn_logit_softcapping"))
+            .and_then(|v| v.to_f64())
+            .map(|v| v as f32)
+            .unwrap_or(0.0);
+        let final_logit_softcap: f32 = source
+            .metadata(&format!("{arch_prefix}.final_logit_softcapping"))
+            .and_then(|v| v.to_f64())
+            .map(|v| v as f32)
+            .unwrap_or(0.0);
+        let sliding_window: usize = source
+            .metadata(&format!("{arch_prefix}.attention.sliding_window"))
+            .and_then(|v| v.to_u64())
+            .map(|v| v as usize)
+            .unwrap_or(0);
+        let sliding_window_pattern =
+            read_sliding_window_pattern(source, &arch_prefix, config.n_layer);
         let output_norm = get_f32_tensor(source, "output_norm.weight", n_embd);
         let embd_info = source
             .tensor_info("token_embd.weight")
@@ -234,6 +333,7 @@ impl<'a> LlamaSession<'a> {
                 freq_base,
                 rope_dim,
                 attn_factor,
+                yarn_thetas,
                 vocab,
             },
             tokenizer,
@@ -257,6 +357,10 @@ impl<'a> LlamaSession<'a> {
             norm_groups,
             seq_len: 0,
             loop_final_norm,
+            attn_softcap,
+            final_logit_softcap,
+            sliding_window,
+            sliding_window_pattern,
         })
     }
 
@@ -442,6 +546,7 @@ impl<'a> LlamaSession<'a> {
         let freq_base = cfg.freq_base;
         let rope_dim = cfg.rope_dim;
         let attn_factor = cfg.attn_factor;
+        let yarn_thetas = cfg.yarn_thetas.as_deref();
         let arch = &self.arch;
         let embedding_scale = self.embedding_scale;
         let residual_scale = self.residual_scale;
@@ -449,6 +554,14 @@ impl<'a> LlamaSession<'a> {
         let norm_groups = self.norm_groups;
         let max_ctx = cfg.max_ctx;
         let vocab = cfg.vocab;
+        // Gemma-2 attention / final-logit softcaps + sliding window.
+        // Bind locals so the `&mut self.kv_cache` /
+        // `&mut self.scratch` borrows below don't collide with
+        // immutable field reads in the per-layer loop.
+        let final_logit_softcap = self.final_logit_softcap;
+        let attn_softcap_global = self.attn_softcap;
+        let sliding_window_global = self.sliding_window;
+        let sw_pattern = self.sliding_window_pattern.clone();
         let _max_n_in = n_embd_q.max(n_ff).max(n_embd * 3);
 
         if base_position != self.seq_len {
@@ -537,6 +650,30 @@ impl<'a> LlamaSession<'a> {
             ];
             prepared_rows.matmul_group(normed, projections, pool)?;
 
+            // GLM-4 ships separate `attn_q/k/v.bias` tensors that must be
+            // added in-place before RoPE; plain llama doesn't. The legacy
+            // CLI path (`forward.rs`) does this dispatch; the session path
+            // forgot it, which broke HTTP generation on GLM-4 (model
+            // produced gibberish like "illard familiarity HodangkanGhost").
+            // For batched prefill (`rows > 1`) the bias is shared across
+            // every row in the chunk — broadcast with `vec_add_into` per
+            // row.
+            if let Some(bq) = lw.bq.as_deref() {
+                for r in 0..rows {
+                    vec_add_into(bq, &mut q_out[r * n_embd_q..(r + 1) * n_embd_q]);
+                }
+            }
+            if let Some(bk) = lw.bk.as_deref() {
+                for r in 0..rows {
+                    vec_add_into(bk, &mut k_out[r * n_embd_gqa..(r + 1) * n_embd_gqa]);
+                }
+            }
+            if let Some(bv) = lw.bv.as_deref() {
+                for r in 0..rows {
+                    vec_add_into(bv, &mut v_out[r * n_embd_gqa..(r + 1) * n_embd_gqa]);
+                }
+            }
+
             // ---- Per-row RoPE ----
             // `apply_rope` writes into a single `[n_embd_head_k *
             // n_heads]` slice in place; for the batched case we
@@ -553,6 +690,7 @@ impl<'a> LlamaSession<'a> {
                     freq_base,
                     rope_dim,
                     attn_factor,
+                    yarn_thetas.as_deref(),
                 );
                 apply_rope(
                     arch.as_str(),
@@ -562,6 +700,7 @@ impl<'a> LlamaSession<'a> {
                     freq_base,
                     rope_dim,
                     attn_factor,
+                    yarn_thetas.as_deref(),
                 );
             }
 
@@ -620,6 +759,16 @@ impl<'a> LlamaSession<'a> {
 
             // Causal attention produces `[rows × n_embd_q]` for `wo`.
             let attn_out = &mut scratch.attn_out[..rows * n_embd_q];
+            // Gemma-2 attention per-row sliding-window trim. Each
+            // query at row `r` attends to positions
+            // `[max(0, base_position+r+1-sw), base_position+r+1)`;
+            // global layers (per `sliding_window_pattern`) skip the
+            // trim. We pass the effective `n_cached` + the cache
+            // offset per row to `run_attention_chunked`.
+            let layer_swa =
+                sliding_window_global > 0 && sw_pattern.get(layer).copied().unwrap_or(true);
+            let layer_attn_softcap = if layer_swa { attn_softcap_global } else { 0.0 };
+            let sw = if layer_swa { sliding_window_global } else { 0 };
             crate::models::llama::trunk::forward::run_attention_chunked(
                 pool,
                 q_out,
@@ -639,6 +788,8 @@ impl<'a> LlamaSession<'a> {
                 kb,
                 n_threads,
                 max_ctx,
+                layer_attn_softcap,
+                if layer_swa { sw } else { 0 },
             );
             // ---- Quantise attention output + project through `wo`
             //      via `PreparedRows::matmul_group` ----
@@ -681,28 +832,107 @@ impl<'a> LlamaSession<'a> {
                 );
             }
             let normed = &mut scratch.normed[..rows * n_embd];
-            let needs_q8_ffn = lw.w_gate.needs_q8_0_activation();
-            let needs_q8k_ffn = lw.w_gate.uses_q8_k();
+            // GLM-4 (`glm4` arch) ships a single fused
+            // `ffn_up.weight` of shape `[n_embd, 2*n_ff]`; the first
+            // half is gate, the second is up. Plain llama uses two
+            // distinct matmuls on separate `w_gate` / `w_up` tensors.
+            // The legacy CLI path (`forward.rs`) dispatches on `arch`
+            // here; the session path was running two matmuls on the
+            // same fused tensor, doubling the work and giving garbage
+            // (this is what produced "illard familiarity HodangkanGhost"
+            // from the HTTP server). We mirror the CLI dispatch:
+            // single matmul on `w_gate` (which weights.rs substitutes
+            // from `ffn_up.weight` for archs without `ffn_gate`),
+            // writing into `scratch.ffn_fused` (sized `[rows × 2*n_ff]`),
+            // then `silu_mul_rows` in place, then copy the post-silu
+            // half into `gate_buf` so `w_down`'s prepared_rows reads
+            // the activation from its expected source.
             let gate_buf = &mut scratch.gate_buf[..rows * n_ff];
-            let up_buf = &mut scratch.up_buf[..rows * n_ff];
-            prepared_rows.prepare(normed, rows, n_embd, needs_q8_ffn, needs_q8k_ffn)?;
-            let gate_proj = &mut gate_buf[..];
-            let up_proj = &mut up_buf[..];
-            prepared_rows.matmul_group(
-                normed,
-                [(&lw.w_gate, up_proj), (&lw.w_up, gate_proj)],
-                pool,
-            )?;
-            // silu_mul per-row (independent; cheap on n_ff).
-            crate::models::llama::trunk::forward::silu_mul_rows(
-                pool, n_threads, gate_proj, up_proj, n_ff,
-            );
+            let down_input: &mut [f32];
+            if arch == "glm4" {
+                let needs_q8_ffn = lw.w_gate.needs_q8_0_activation();
+                let needs_q8k_ffn = lw.w_gate.uses_q8_k();
+                let ffn_fused = &mut scratch.ffn_fused[..rows * 2 * n_ff];
+                prepared_rows.prepare(normed, rows, n_embd, needs_q8_ffn, needs_q8k_ffn)?;
+                prepared_rows.matmul_group(normed, [(&lw.w_gate, ffn_fused)], pool)?;
+                // `silu_mul_rows` writes `silu(gate) * up` into the
+                // up half (i.e. the second `n_ff` chunk of `ffn_fused`).
+                // The CLI path uses `silu_mul_approx_inplace` which
+                // overwrites the second argument; `silu_mul_rows`
+                // overwrites the second arg in a pool-parallel loop.
+                let (gate_part, up_part) = ffn_fused.split_at_mut(rows * n_ff);
+                crate::models::llama::trunk::forward::silu_mul_rows(
+                    pool, n_threads, gate_part, up_part, n_ff,
+                );
+                // `w_down` reads from `gate_buf`; copy the post-silu
+                // activation (now living in `up_part` after
+                // silu_mul_inplace) into `gate_buf`.
+                gate_buf.copy_from_slice(up_part);
+                down_input = gate_buf;
+            } else if arch == "gemma2" {
+                // Gemma-2 FFN: GeGLU (`up *= gelu(gate)`) instead of
+                // SwiGLU. w_down reads from `gate_buf` for the
+                // post-activation; copy `up_buf` back over `gate_buf`
+                // once the GeGLU lands.
+                let needs_q8_ffn = lw.w_gate.needs_q8_0_activation();
+                let needs_q8k_ffn = lw.w_gate.uses_q8_k();
+                let up_buf = &mut scratch.up_buf[..rows * n_ff];
+                let gate_proj = &mut gate_buf[..];
+                let up_proj = &mut up_buf[..];
+                prepared_rows.prepare(normed, rows, n_embd, needs_q8_ffn, needs_q8k_ffn)?;
+                prepared_rows.matmul_group(
+                    normed,
+                    [(&lw.w_gate, up_proj), (&lw.w_up, gate_proj)],
+                    pool,
+                )?;
+                crate::models::llama::trunk::forward::geglu_mul_rows(
+                    pool, n_threads, gate_proj, up_proj, n_ff,
+                );
+                // GeGLU writes `up = gelu(gate) * up`; copy back to
+                // `gate_buf` so `down_input` matches the SwiGLU
+                // byte-equal convention.
+                gate_buf.copy_from_slice(up_proj);
+                down_input = gate_buf;
+            } else {
+                let needs_q8_ffn = lw.w_gate.needs_q8_0_activation();
+                let needs_q8k_ffn = lw.w_gate.uses_q8_k();
+                let up_buf = &mut scratch.up_buf[..rows * n_ff];
+                let gate_proj = &mut gate_buf[..];
+                let up_proj = &mut up_buf[..];
+                prepared_rows.prepare(normed, rows, n_embd, needs_q8_ffn, needs_q8k_ffn)?;
+                prepared_rows.matmul_group(
+                    normed,
+                    [(&lw.w_gate, up_proj), (&lw.w_up, gate_proj)],
+                    pool,
+                )?;
+                crate::models::llama::trunk::forward::silu_mul_rows(
+                    pool, n_threads, gate_proj, up_proj, n_ff,
+                );
+                // `silu_mul_rows(gate, up)` writes the post-silu
+                // tensor into `up`; copy it back into `gate_buf`
+                // so `down_input` points at the fused activation.
+                gate_buf.copy_from_slice(up_proj);
+                down_input = gate_buf;
+            }
             // down via PreparedRows.
             let needs_q8_down = lw.w_down.needs_q8_0_activation();
             let needs_q8k_down = lw.w_down.uses_q8_k();
             let down_buf = &mut scratch.down_buf[..rows * n_embd];
-            prepared_rows.prepare(gate_proj, rows, n_ff, needs_q8_down, needs_q8k_down)?;
-            prepared_rows.matmul_group(gate_proj, [(&lw.w_down, &mut down_buf[..])], pool)?;
+            prepared_rows.prepare(down_input, rows, n_ff, needs_q8_down, needs_q8k_down)?;
+            prepared_rows.matmul_group(down_input, [(&lw.w_down, &mut down_buf[..])], pool)?;
+            // GLM-4 also RMSNorm-s the FFN output before residual add.
+            // Mirror forward.rs's gate. For batched (`rows > 1`) the
+            // norm is applied row-by-row on down_buf; the result
+            // replaces the residual-add input.
+            if let Some(ffn_post_norm) = lw.ffn_post_norm.as_deref() {
+                let normed_pre = &mut scratch.normed[..n_embd];
+                for r in 0..rows {
+                    let off = r * n_embd;
+                    let down_row = &mut down_buf[off..off + n_embd];
+                    normed_pre.copy_from_slice(down_row);
+                    rms_norm_grouped(normed_pre, ffn_post_norm, down_row, norm_groups, eps);
+                }
+            }
             for r in 0..rows {
                 let x_row = &mut scratch.x[r * n_embd..(r + 1) * n_embd];
                 let down_row = &down_buf[r * n_embd..(r + 1) * n_embd];
@@ -788,6 +1018,12 @@ impl<'a> LlamaSession<'a> {
         if logit_scale != 0.0 {
             vec_scale_f32(logits, logit_scale);
         }
+        // Gemma-2 final logit softcap. `softcap_inplace` no-ops when
+        // `cap == 0`; every non-gemma2 llama arch keeps the
+        // pre-gemma2 logits byte-identical.
+        if final_logit_softcap > 0.0 {
+            softcap_inplace(logits, final_logit_softcap);
+        }
         self.seq_len = base_position + rows;
         Ok(())
     }
@@ -821,6 +1057,14 @@ impl<'a> LlamaSession<'a> {
         let residual_scale = self.residual_scale;
         let logit_scale = self.logit_scale;
         let norm_groups = self.norm_groups;
+        // Gemma-2 attention / final-logit softcaps + sliding window.
+        // Bind locals up-front so the `&mut self.kv_cache` /
+        // `&mut self.scratch` borrows below don't collide with
+        // immutable field reads in the per-layer loop.
+        let final_logit_softcap = self.final_logit_softcap;
+        let attn_softcap_global = self.attn_softcap;
+        let sliding_window_global = self.sliding_window;
+        let sw_pattern = self.sliding_window_pattern.clone();
 
         embedding_lookup(
             weights.embd_weight,
@@ -853,6 +1097,7 @@ impl<'a> LlamaSession<'a> {
         let score_stride = scratch.score_stride;
         let gate_buf_ptr = scratch.gate_buf.as_mut_ptr();
         let up_buf_ptr = scratch.up_buf.as_mut_ptr();
+        let ffn_fused_ptr = scratch.ffn_fused.as_mut_ptr();
         let q8_buf_ptr = scratch.q8_buf.as_mut_ptr() as *mut u8;
         let scale_buf_ptr = scratch.scale_buf.as_mut_ptr();
         let q8k_buf_ptr = scratch.q8k_buf.as_mut_ptr();
@@ -873,7 +1118,8 @@ impl<'a> LlamaSession<'a> {
             let normed = unsafe { std::slice::from_raw_parts_mut(normed_ptr, n_embd) };
             let q8_buf = unsafe { std::slice::from_raw_parts_mut(q8_buf_ptr, max_n_in) };
             let scale_buf = unsafe { std::slice::from_raw_parts_mut(scale_buf_ptr, max_n_in / 32) };
-            let q8k_buf = unsafe { std::slice::from_raw_parts_mut(q8k_buf_ptr, max_n_in / 256) };
+            let q8k_buf =
+                unsafe { std::slice::from_raw_parts_mut(q8k_buf_ptr, max_n_in.div_ceil(256)) };
 
             rms_norm_grouped(x, &lw.attn_norm, normed, norm_groups, eps);
             quantize_q8_0_into(
@@ -933,6 +1179,23 @@ impl<'a> LlamaSession<'a> {
                 );
             });
 
+            // GLM-4 ships separate `attn_q/k/v.bias` tensors that must be
+            // added in-place before RoPE; plain llama doesn't. The legacy
+            // CLI path (`forward.rs`) does this dispatch; the session path
+            // forgot it, which broke HTTP generation on GLM-4 (model
+            // produced gibberish like "illard familiarity HodangkanGhost").
+            // `forward_one_token` is per-token (`rows = 1`), so a single
+            // `vec_add_into` per bias suffices.
+            if let Some(bq) = lw.bq.as_deref() {
+                vec_add_into(bq, q);
+            }
+            if let Some(bk) = lw.bk.as_deref() {
+                vec_add_into(bk, k_new);
+            }
+            if let Some(bv) = lw.bv.as_deref() {
+                vec_add_into(bv, v_new);
+            }
+
             // RoPE — note: arch passed by reference for the duration
             // of the closure so the apply_rope helper can pick the
             // right rope schedule (neox vs grouped-norm).
@@ -953,6 +1216,7 @@ impl<'a> LlamaSession<'a> {
                     freq_base,
                     cfg.rope_dim,
                     cfg.attn_factor,
+                    cfg.yarn_thetas.as_deref(),
                 );
             }
             for h in 0..cfg.n_head_kv {
@@ -964,6 +1228,7 @@ impl<'a> LlamaSession<'a> {
                     freq_base,
                     cfg.rope_dim,
                     cfg.attn_factor,
+                    cfg.yarn_thetas.as_deref(),
                 );
             }
 
@@ -1015,6 +1280,23 @@ impl<'a> LlamaSession<'a> {
             // handles `rows × n_head` queries in one pass.
             let _attn_out = unsafe { std::slice::from_raw_parts_mut(attn_out_ptr, n_embd_q) };
             let n_cached = pos + 1;
+            // Gemma-2 sliding-window pre-trim: advance the cache
+            // offset and clamp the loop count so each query sees
+            // only the most-recent `sliding_window` tokens. Global
+            // (non-SWA) layers skip the trim via the per-layer
+            // pattern (Gemma-2 9B / 27B hybrid attention).
+            let layer_swa =
+                sliding_window_global > 0 && sw_pattern.get(layer).copied().unwrap_or(true);
+            let (eff_n_cached, head_off_base) = if layer_swa && n_cached > sliding_window_global {
+                (
+                    sliding_window_global,
+                    kb + (n_cached - sliding_window_global) * n_embd_gqa,
+                )
+            } else {
+                (n_cached, kb)
+            };
+            let layer_attn_softcap = if layer_swa { attn_softcap_global } else { 0.0 };
+            let sw_local = if layer_swa { sliding_window_global } else { 0 };
             pool.compute(move |ith: usize, nth: usize| {
                 let q = unsafe { std::slice::from_raw_parts(q_ptr, n_embd_q) };
                 let attn_out_local =
@@ -1038,10 +1320,11 @@ impl<'a> LlamaSession<'a> {
                             &mut attn_out_local[out_base..out_base + n_embd_head_v],
                             k_cache,
                             v_cache,
-                            kb + kv_h * n_embd_head_v,
+                            head_off_base + kv_h * n_embd_head_v,
                             n_embd_gqa,
-                            n_cached,
+                            eff_n_cached,
                             kq_scale,
+                            layer_attn_softcap,
                         );
                     }
                 } else {
@@ -1067,6 +1350,17 @@ impl<'a> LlamaSession<'a> {
                                     ..kb + t * n_embd_gqa + kv_h * n_embd_head_v + n_embd_head_k],
                                 n_embd_head_k,
                             ) * kq_scale;
+                        }
+                        // Gemma-2 sliding-window mask + attn logit
+                        // softcap. Plain llama: both are 0 so the
+                        // helper is a no-op.
+                        if layer_attn_softcap > 0.0 || sw_local > 0 {
+                            apply_attn_pre_softmax_inplace(
+                                &mut scores[s_off..s_off + n_padded],
+                                n_cached,
+                                sw_local,
+                                layer_attn_softcap,
+                            );
                         }
                         scores[s_off + n_cached..s_off + n_padded].fill(f32::NEG_INFINITY);
                         softmax_inplace(&mut scores[s_off..s_off + n_padded]);
@@ -1116,7 +1410,14 @@ impl<'a> LlamaSession<'a> {
             });
 
             let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
-            let attn_proj = unsafe { std::slice::from_raw_parts(attn_proj_ptr, n_embd) };
+            let attn_proj = unsafe { std::slice::from_raw_parts_mut(attn_proj_ptr, n_embd) };
+            // GLM-4 applies an RMSNorm on the attention output *before*
+            // the residual add. Plain llama skips it. Mirror forward.rs.
+            if let Some(attn_post_norm) = lw.attn_post_norm.as_deref() {
+                let normed_pre = &mut scratch.normed[..n_embd];
+                normed_pre.copy_from_slice(attn_proj);
+                rms_norm_grouped(normed_pre, attn_post_norm, attn_proj, norm_groups, eps);
+            }
             if residual_scale != 0.0 {
                 vec_mad_f32(x, attn_proj, residual_scale);
             } else {
@@ -1143,37 +1444,129 @@ impl<'a> LlamaSession<'a> {
                 let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr_ffn, n_embd / 256) };
                 let gate_buf = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, n_ff) };
                 let up_buf = unsafe { std::slice::from_raw_parts_mut(up_buf_ptr, n_ff) };
-                lw.w_gate.kernel.forward_prepared(
-                    input,
-                    q8,
-                    sc,
-                    Some(q8k),
-                    up_buf,
-                    n_embd,
-                    n_ff,
-                    ith,
-                    nth,
-                );
-                lw.w_up.kernel.forward_prepared(
-                    input,
-                    q8,
-                    sc,
-                    Some(q8k),
-                    gate_buf,
-                    n_embd,
-                    n_ff,
-                    ith,
-                    nth,
-                );
-                if gpu_matmul_active() {
-                    if ith == 0 {
-                        silu_mul_approx_inplace(&up_buf[..n_ff], &mut gate_buf[..n_ff]);
+                // GLM-4 (`glm4` arch) ships a single fused
+                // `ffn_up.weight` of shape `[n_embd, 2*n_ff]`; the
+                // first half is gate, the second is up. Plain llama
+                // uses two distinct matmuls on separate `w_gate` /
+                // `w_up` tensors. weights.rs substitutes `w_gate`
+                // to point at the fused tensor when GLM-4 has no
+                // separate `ffn_gate.weight`, so the unfused path
+                // (two matmuls on w_gate / w_up) reads the same
+                // tensor twice and produces garbage. Dispatch on
+                // `arch` here for the same reason `forward.rs`
+                // does. (`up_buf_ptr` is `*mut f32`; we cast for
+                // the 2*n_ff-sized destination.)
+                //
+                // Gemma-2 (`gemma2` arch) uses GeGLU: `up *= gelu(gate)`
+                // rather than `up *= silu(gate)`. The w_down matmul
+                // below reads from gate_buf (the convention for
+                // SwiGLU), so we copy up_buf back over gate_buf after
+                // GeGLU to keep the byte-equal `gate_buf <- post-
+                // activation` contract that matches `forward.rs`.
+                if arch == "glm4" {
+                    let ffn_fused =
+                        unsafe { std::slice::from_raw_parts_mut(ffn_fused_ptr, 2 * n_ff) };
+                    lw.w_gate.kernel.forward_prepared(
+                        input,
+                        q8,
+                        sc,
+                        Some(q8k),
+                        ffn_fused,
+                        n_embd,
+                        2 * n_ff,
+                        ith,
+                        nth,
+                    );
+                    let (gate_part, up_part) = ffn_fused.split_at_mut(n_ff);
+                    if gpu_matmul_active() {
+                        if ith == 0 {
+                            silu_mul_approx_inplace(gate_part, up_part);
+                            gate_buf.copy_from_slice(&up_part[..n_ff]);
+                        }
+                    } else {
+                        let per_thread = (n_ff + nth - 1) / nth;
+                        let r_start = ith * per_thread;
+                        let r_end = (r_start + per_thread).min(n_ff);
+                        silu_mul_approx_inplace(
+                            &gate_part[r_start..r_end],
+                            &mut up_part[r_start..r_end],
+                        );
+                        gate_buf[r_start..r_end].copy_from_slice(&up_part[r_start..r_end]);
+                    }
+                } else if arch == "gemma2" {
+                    lw.w_gate.kernel.forward_prepared(
+                        input,
+                        q8,
+                        sc,
+                        Some(q8k),
+                        up_buf,
+                        n_embd,
+                        n_ff,
+                        ith,
+                        nth,
+                    );
+                    lw.w_up.kernel.forward_prepared(
+                        input,
+                        q8,
+                        sc,
+                        Some(q8k),
+                        gate_buf,
+                        n_embd,
+                        n_ff,
+                        ith,
+                        nth,
+                    );
+                    if gpu_matmul_active() {
+                        if ith == 0 {
+                            gelu_mul_approx_inplace(&gate_buf[..n_ff], &mut up_buf[..n_ff]);
+                            gate_buf[..n_ff].copy_from_slice(&up_buf[..n_ff]);
+                        }
+                    } else {
+                        let per_thread = (n_ff + nth - 1) / nth;
+                        let r_start = ith * per_thread;
+                        let r_end = (r_start + per_thread).min(n_ff);
+                        gelu_mul_approx_inplace(
+                            &gate_buf[r_start..r_end],
+                            &mut up_buf[r_start..r_end],
+                        );
+                        gate_buf[r_start..r_end].copy_from_slice(&up_buf[r_start..r_end]);
                     }
                 } else {
-                    let per_thread = (n_ff + nth - 1) / nth;
-                    let r_start = ith * per_thread;
-                    let r_end = (r_start + per_thread).min(n_ff);
-                    silu_mul_approx_inplace(&up_buf[r_start..r_end], &mut gate_buf[r_start..r_end]);
+                    lw.w_gate.kernel.forward_prepared(
+                        input,
+                        q8,
+                        sc,
+                        Some(q8k),
+                        up_buf,
+                        n_embd,
+                        n_ff,
+                        ith,
+                        nth,
+                    );
+                    lw.w_up.kernel.forward_prepared(
+                        input,
+                        q8,
+                        sc,
+                        Some(q8k),
+                        gate_buf,
+                        n_embd,
+                        n_ff,
+                        ith,
+                        nth,
+                    );
+                    if gpu_matmul_active() {
+                        if ith == 0 {
+                            silu_mul_approx_inplace(&up_buf[..n_ff], &mut gate_buf[..n_ff]);
+                        }
+                    } else {
+                        let per_thread = (n_ff + nth - 1) / nth;
+                        let r_start = ith * per_thread;
+                        let r_end = (r_start + per_thread).min(n_ff);
+                        silu_mul_approx_inplace(
+                            &up_buf[r_start..r_end],
+                            &mut gate_buf[r_start..r_end],
+                        );
+                    }
                 }
             });
 
@@ -1185,7 +1578,7 @@ impl<'a> LlamaSession<'a> {
             );
             crate::ops::quantize_row_q8_k_into(
                 &scratch.gate_buf[..n_ff],
-                &mut scratch.q8k_buf[..n_ff / 256],
+                &mut scratch.q8k_buf[..n_ff.div_ceil(256)],
             );
             let q8_ptr_down = scratch.q8_buf.as_ptr();
             let sc_ptr_down = scratch.scale_buf.as_ptr();
@@ -1209,6 +1602,20 @@ impl<'a> LlamaSession<'a> {
                 );
             });
 
+            // GLM-4 also RMSNorm-s the FFN output before residual add
+            // (mirrors the chunked path at `forward_chunk_batched_real`).
+            // Without this, the single-token decode path skips the post-norm
+            // and produces non-PLL-of-PLN outputs (e.g. HTTP returning
+            // token-id salad on questions that CLI answers correctly).
+            // Note: `rms_norm_grouped(input, weight, output, groups, eps)`
+            // writes the normalized result into `output`, so we apply it
+            // in-place into `down_buf` via a `normed_post` scratch.
+            if let Some(ffn_post_norm) = lw.ffn_post_norm.as_deref() {
+                let down_buf_mut = unsafe { std::slice::from_raw_parts_mut(down_buf_ptr, n_embd) };
+                let normed_post = unsafe { std::slice::from_raw_parts_mut(normed_ptr, n_embd) };
+                normed_post.copy_from_slice(down_buf_mut);
+                rms_norm_grouped(normed_post, ffn_post_norm, down_buf_mut, norm_groups, eps);
+            }
             let down_buf = unsafe { std::slice::from_raw_parts(down_buf_ptr, n_embd) };
             if residual_scale != 0.0 {
                 vec_mad_f32(x, down_buf, residual_scale);
@@ -1271,6 +1678,14 @@ impl<'a> LlamaSession<'a> {
         if logit_scale != 0.0 {
             let logits = unsafe { std::slice::from_raw_parts_mut(logits_ptr, vocab) };
             vec_scale_f32(logits, logit_scale);
+        }
+        // Gemma-2 final logit softcap. Applied after `logit_scale`
+        // so the two are independent. `softcap_inplace` no-ops when
+        // `cap == 0`; every non-gemma2 llama arch keeps the
+        // pre-gemma2 logits byte-identical.
+        if final_logit_softcap > 0.0 {
+            let logits = unsafe { std::slice::from_raw_parts_mut(logits_ptr, vocab) };
+            softcap_inplace(logits, final_logit_softcap);
         }
 
         self.seq_len = pos + 1;
@@ -1413,5 +1828,94 @@ mod tests {
         // empty input → empty result, no seq_len change.
         let empty: Vec<u32> = Vec::new();
         assert_eq!(empty.len(), 0);
+    }
+
+    struct PatternSource(HashMap<String, MetaValue>);
+    impl TensorSource for PatternSource {
+        fn metadata(&self, key: &str) -> Option<&MetaValue> {
+            self.0.get(key)
+        }
+        fn tensor_info(&self, _name: &str) -> Option<&TensorInfo> {
+            None
+        }
+        fn tensor_slice(&self, _name: &str) -> Option<&[u8]> {
+            None
+        }
+    }
+
+    #[test]
+    fn read_sliding_window_pattern_defaults_to_all_true() {
+        // No metadata → every layer uses SWA.
+        let src = PatternSource(HashMap::new());
+        let p = read_sliding_window_pattern(&src, "gemma2", 6);
+        assert_eq!(p, vec![true; 6]);
+    }
+
+    #[test]
+    fn read_sliding_window_pattern_hybrid_attention() {
+        // Gemma-2 9B-it declares a 42-layer pattern like
+        //   [true, true, true, true, true, false, ...] repeated
+        // every 6 layers. We use a 12-layer fixture so the test
+        // is small but covers both the early-window-only and the
+        // mid-cycle-false cases.
+        let pattern = vec![
+            true, true, true, true, true, false, true, true, true, true, true, false,
+        ];
+        let mut map = HashMap::new();
+        map.insert(
+            "gemma2.attention.sliding_window_pattern".into(),
+            MetaValue::Array(
+                MetaValueType::Bool,
+                pattern.iter().map(|b| MetaValue::Bool(*b)).collect(),
+            ),
+        );
+        let src = PatternSource(map);
+        let p = read_sliding_window_pattern(&src, "gemma2", 12);
+        assert_eq!(p, pattern);
+        // The global-window layers are at indices 5 and 11.
+        assert!(p[0] && p[4]);
+        assert!(!p[5]);
+        assert!(p[10] && !p[11]);
+    }
+
+    #[test]
+    fn read_sliding_window_pattern_truncates_when_longer_than_n_layer() {
+        // A pattern with more entries than `n_layer` is silently
+        // truncated to `n_layer` so a future GGUF with an extra
+        // sentinel entry doesn't OOB.
+        let mut map = HashMap::new();
+        map.insert(
+            "gemma2.attention.sliding_window_pattern".into(),
+            MetaValue::Array(
+                MetaValueType::Bool,
+                vec![
+                    MetaValue::Bool(true),
+                    MetaValue::Bool(false),
+                    MetaValue::Bool(true),
+                    MetaValue::Bool(false),
+                ],
+            ),
+        );
+        let src = PatternSource(map);
+        let p = read_sliding_window_pattern(&src, "gemma2", 2);
+        assert_eq!(p, vec![true, false]);
+    }
+
+    #[test]
+    fn read_sliding_window_pattern_pads_with_true_when_shorter_than_n_layer() {
+        // A pattern with FEWER entries than `n_layer` is padded
+        // with `true` (every missing entry is treated as SWA),
+        // matching llama.cpp's defaults.
+        let mut map = HashMap::new();
+        map.insert(
+            "gemma2.attention.sliding_window_pattern".into(),
+            MetaValue::Array(
+                MetaValueType::Bool,
+                vec![MetaValue::Bool(false), MetaValue::Bool(true)],
+            ),
+        );
+        let src = PatternSource(map);
+        let p = read_sliding_window_pattern(&src, "gemma2", 4);
+        assert_eq!(p, vec![false, true, true, true]);
     }
 }

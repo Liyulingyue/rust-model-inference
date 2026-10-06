@@ -28,6 +28,9 @@ pub struct JevResult {
     pub entropy: f32,
     pub margin: f32,
     pub prefill_ms: u128,
+    /// Labels a multi-label head actually selected. Empty for the modes that
+    /// always answer with a single `choice_label`.
+    pub selected: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -161,16 +164,20 @@ impl serde::Serialize for JevResult {
         let labels_str: Vec<String> = self.labels.iter().map(|c| c.to_string()).collect();
         st.serialize_field("labels", &labels_str)?;
         st.serialize_field("descriptions", &self.descriptions)?;
-        if self.mode == JevMode::Score {
-            st.serialize_field("values", &self.values)?;
-        }
+        // Every JEV backend produces a real-valued score per label, so the
+        // logits are always worth returning; `Score` mode is only where the
+        // older contract promised them.
+        st.serialize_field("values", &self.values)?;
         let mut probs = serde_json::Map::new();
         for (i, p) in self.probabilities.iter().enumerate() {
             probs.insert(self.labels[i].to_string(), serde_json::json!(p));
         }
         st.serialize_field("probabilities", &probs)?;
-        if self.mode == JevMode::Choice {
+        if matches!(self.mode, JevMode::Choice | JevMode::MultiSelect) {
             st.serialize_field("choice", &self.choice_label.map(|c| c.to_string()))?;
+        }
+        if !self.selected.is_empty() {
+            st.serialize_field("selected", &self.selected)?;
         }
         if self.mode == JevMode::Binary {
             st.serialize_field("choice", &self.choice_label.map(|c| c.to_string()))?;

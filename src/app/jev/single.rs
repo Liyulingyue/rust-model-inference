@@ -66,7 +66,13 @@ fn run_jev_decision_data_with_image(
     }
 
     match &*arch {
-        "qwen3" | "qwen3vl" | "qwen3vlmoe" => qwen3::run_jev_decision_qwen3(
+        // `qwen2` covers both Qwen2 (base, ChatML-style since Qwen2.5) and
+        // Qwen2.5-Instruct — both surface `<|im_start|>`/`<|im_end|>` markers
+        // in the tokenizer, so the Qwen3 ChatML scorer handles them. Qwen1 /
+        // Qwen1.5 use a different newline format and are not in scope; if a
+        // user opens such a GGUF with `--jev`, the dispatch will still reach
+        // this branch and the special-token lookup will fail loudly.
+        "qwen2" | "qwen3" | "qwen3vl" | "qwen3vlmoe" => qwen3::run_jev_decision_qwen3(
             source.clone(),
             context,
             &prepared,
@@ -86,16 +92,26 @@ fn run_jev_decision_data_with_image(
             mmproj_path,
             image_path,
         ),
-        "llama" | "k2-horizon" | "granite" | "nanbeige" | "qwen2_2" | "phi3" => {
-            llama::run_jev_decision_llama(
-                source.clone(),
-                context,
-                &prepared,
-                n_threads_arg,
-                prefill_batch_size,
-                false,
-            )
-        }
+        // exaone rides the llama trunk (uses_llama_trunk covers it for
+        // CLI + HTTP); it was missing here, so `--jev` on an
+        // EXAONE GGUF errored out. LlamaJevScorer renders its
+        // `[|user|]` template (see llama.rs).
+        // `mistral3` rides the llama trunk for `--prompt` /
+        // completion; the JEV path uses the same `[INST] … [/INST]`
+        // template that `llama::JevScorer::build_prompt` emits
+        // (per-arch detection: `general.name` contains "mistral" or
+        // "ministral"), so routing it through the llama scorer is
+        // exact. See `tests/ministral3_3b_jev.rs` for the JEV smoke
+        // pin.
+        "llama" | "k2-horizon" | "granite" | "nanbeige" | "qwen2_2" | "phi3" | "exaone"
+        | "glm4" | "mistral3" => llama::run_jev_decision_llama(
+            source.clone(),
+            context,
+            &prepared,
+            n_threads_arg,
+            prefill_batch_size,
+            false,
+        ),
         "gemma4" => gemma4::run_jev_decision_gemma4(
             source.clone(),
             context,
@@ -144,6 +160,14 @@ fn run_jev_decision_data_with_image(
             prefill_batch_size,
             false,
         ),
+        "falcon-h1" => falcon_h1::run_jev_decision_falcon_h1(
+            source.clone(),
+            context,
+            &prepared,
+            n_threads_arg,
+            prefill_batch_size,
+            false,
+        ),
         "hunyuan-dense" => hunyuan::run_jev_decision_hunyuan(
             source.clone(),
             context,
@@ -155,7 +179,7 @@ fn run_jev_decision_data_with_image(
         other => Err(format!(
             "--jev is not yet supported for architecture {:?}; \
              currently supported: qwen3 / qwen3vl / qwen35 / \
-             llama / k2-horizon / granite / nanbeige / qwen2_2 / \
+             llama / k2-horizon / granite / nanbeige / qwen2_2 / glm4 / \
              gemma4 / lfm2 / lfm25 / spark2_5 / hunyuan-dense / nemotron_h",
             other
         )),
@@ -346,6 +370,7 @@ pub fn prepare_jev_questions(
     Ok(per_question)
 }
 
+pub(crate) mod falcon_h1;
 pub(crate) mod gemma4;
 pub(crate) mod hunyuan;
 pub(crate) mod lfm2;
@@ -577,6 +602,7 @@ pub(crate) fn compute_jev_result(
         entropy,
         margin,
         prefill_ms,
+        selected: Vec::new(),
     }
 }
 

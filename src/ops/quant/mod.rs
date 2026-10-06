@@ -62,18 +62,23 @@ fn get_scale_min_k4(j: usize, scales: &[u8]) -> (u8, u8) {
 pub use crate::core::tensor::BlockQ8K;
 
 pub fn quantize_row_q8_k(x: &[f32]) -> Vec<BlockQ8K> {
+    // AVX2 path requires n % QK_K == 0 (uses 256-wide SIMD lanes); fall back
+    // to scalar for non-block-aligned inputs (GLM-4 ffn_down is 13696 =
+    // 53*256 + 128, ffn_gate/up are aligned but ffn_down is not). The
+    // scalar path zero-pads the partial tail per commit bb81dd1.
     #[cfg(target_arch = "x86_64")]
-    if crate::ops::has_avx2_fma() {
+    if crate::ops::has_avx2_fma() && x.len() % QK_K == 0 {
         return unsafe { quantize_row_q8_k_avx2(x) };
     }
     quantize_row_q8_k_scalar(x)
 }
 
 pub fn quantize_row_q8_k_into(x: &[f32], buf: &mut [BlockQ8K]) {
-    let nb = x.len() / QK_K;
+    let nb = x.len().div_ceil(QK_K);
     debug_assert!(buf.len() >= nb);
+    // Same dispatch: AVX2 requires block-aligned lengths.
     #[cfg(target_arch = "x86_64")]
-    if crate::ops::has_avx2_fma() {
+    if crate::ops::has_avx2_fma() && x.len() % QK_K == 0 {
         unsafe { quantize_row_q8_k_avx2_into(x, buf) };
         return;
     }
@@ -99,6 +104,35 @@ fn nearest_int(value: f32) -> i32 {
     debug_assert!(value.abs() <= 4_194_303.0);
     let bits = (value + 12_582_912.0).to_bits();
     ((bits & 0x007f_ffff) as i32) - 0x0040_0000
+}
+
+/// GGML's signed Q8_K activation scale and ties-to-even rounding.
+/// Keep the existing unsigned activation contract for its other callers.
+pub(crate) fn quantize_row_q8_k_ggml_into(input: &[f32], output: &mut [BlockQ8K]) {
+    assert_eq!(input.len() % QK_K, 0);
+    assert_eq!(output.len(), input.len() / QK_K);
+    for (values, block) in input.chunks_exact(QK_K).zip(output) {
+        let mut max = 0f32;
+        for &x in values {
+            if x.abs() > max.abs() {
+                max = x;
+            }
+        }
+        if max == 0. {
+            block.d = 0.;
+            block.qs.fill(0);
+            block.bsums.fill(0);
+            continue;
+        }
+        let scale = -127. / max;
+        for (q, &x) in block.qs.iter_mut().zip(values) {
+            *q = nearest_int(scale * x).min(127) as i8;
+        }
+        for (sum, values) in block.bsums.iter_mut().zip(block.qs.chunks_exact(16)) {
+            *sum = values.iter().map(|&x| x as i16).sum();
+        }
+        block.d = 1. / scale;
+    }
 }
 
 fn quantize_row_q8_k_scalar_into(x: &[f32], buf: &mut [BlockQ8K]) {
@@ -246,7 +280,7 @@ pub fn vec_dot_q4k_q8k(q4k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
         return unsafe { vec_dot_q4k_q8k_avx2(q4k_data, q8k) };
     }
     #[cfg(target_arch = "aarch64")]
-    if std::arch::is_aarch64_feature_detected!("dotprod") {
+    if crate::ops::has_neon() && std::arch::is_aarch64_feature_detected!("dotprod") {
         return unsafe { neon_k::vec_dot_q4k_q8k_neon(q4k_data, q8k) };
     }
     vec_dot_q4k_q8k_scalar(q4k_data, q8k)
@@ -520,7 +554,13 @@ pub fn dequant_weight_q4k(data: &[u8], ti: &TensorInfo) -> Option<Vec<f32>> {
             let scales_off = boff + 4;
             let qs_off = boff + 4 + K_SCALE_SIZE;
 
-            let mut j = 0usize;
+            // ``q`` walks the 128-byte nibble payload four bytes-at-a-time in
+            // 32-byte groups, while each group also advances the output by 64
+            // values (32 from the low nibbles plus 32 from the high ones).
+            // Advancing both by 32 re-read the previous group and left
+            // sub-blocks 5..8 undecoded.
+            let mut q_off = 0usize;
+            let mut out_off = 0usize;
             let mut is = 0usize;
             while is < 8 {
                 let (sc1, m1) = get_scale_min_k4(is, &data[scales_off..scales_off + K_SCALE_SIZE]);
@@ -534,12 +574,13 @@ pub fn dequant_weight_q4k(data: &[u8], ti: &TensorInfo) -> Option<Vec<f32>> {
 
                 let block_out = out_base + bi * QK_K;
                 for l in 0..32 {
-                    let ql = data[qs_off + j + l];
-                    out[block_out + j + l] = d1 * (ql & 0xF) as f32 - m1_eff;
-                    out[block_out + j + l + 32] = d2 * (ql >> 4) as f32 - m2_eff;
+                    let ql = data[qs_off + q_off + l];
+                    out[block_out + out_off + l] = d1 * (ql & 0xF) as f32 - m1_eff;
+                    out[block_out + out_off + l + 32] = d2 * (ql >> 4) as f32 - m2_eff;
                 }
 
-                j += 32;
+                q_off += 32;
+                out_off += 64;
                 is += 2;
             }
         }

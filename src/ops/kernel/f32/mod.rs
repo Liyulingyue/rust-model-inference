@@ -126,7 +126,7 @@ impl Kernel for F32Kernel {
         nth: usize,
     ) {
         if input_f32.len() >= n_in {
-            scalar::forward_f32_rows(&self.weight, input_f32, output, n_in, n_out, ith, nth);
+            forward_f32_rows_dispatch(&self.weight, input_f32, output, n_in, n_out, ith, nth);
         } else {
             self.forward_prequantized(input_q8, input_scales, output, n_in, n_out, ith, nth);
         }
@@ -235,6 +235,29 @@ pub fn matmul_f32_scalar_range(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prepared_f32_uses_the_same_dispatch_as_direct_forward() {
+        let mut input = [0.0f32; 64];
+        input[0] = 16_777_216.0;
+        input[4] = 1.0;
+        input[8] = -16_777_216.0;
+        input[12] = 1.0;
+        let kernel = F32Kernel::new(vec![1.0; 64 * 3], 64, 3);
+        let mut expected = [0.0; 3];
+        kernel.forward(&input, &mut expected, 64, 3);
+        for worker in 0..5 {
+            let mut output = [f32::NAN; 3];
+            kernel.forward_prepared(&input, &[], &[], None, &mut output, 64, 3, worker, 5);
+            for row in 0..3 {
+                if (3 * worker / 5..3 * (worker + 1) / 5).contains(&row) {
+                    assert_eq!(output[row].to_bits(), expected[row].to_bits());
+                } else {
+                    assert!(output[row].is_nan());
+                }
+            }
+        }
+    }
 
     #[test]
     fn f32_kernel_row_sum() {

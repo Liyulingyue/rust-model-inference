@@ -21,11 +21,15 @@ fn encode_vision(
     mmproj_path: &Path,
     image_path: Option<&Path>,
     video_path: Option<&Path>,
+    threads: usize,
 ) -> Result<(MediaKind, Vec<f32>, Vec<usize>), String> {
     let mmproj = open_model_source(mmproj_path, ComponentRole::Mmproj)
         .map_err(|error| format!("Failed to load mmproj {}: {error}", mmproj_path.display()))?;
-    let mut encoder = VisionEncoder::from_source(mmproj.as_ref())
-        .map_err(|error| format!("Failed to load vision encoder: {error}"))?;
+    let mut encoder = VisionEncoder::from_source(
+        mmproj.as_ref(),
+        std::sync::Arc::new(ComputePool::new(threads.max(1))),
+    )
+    .map_err(|error| format!("Failed to load vision encoder: {error}"))?;
     encoder.precompute();
     let mut frames = if let Some(path) = image_path {
         vec![crate::app::media::decode_image(path)?]
@@ -131,9 +135,7 @@ pub fn run_omni_embedding(
     audio_path: Option<&Path>,
     prompt: &str,
     threads: usize,
-    output: EmbeddingOutput,
-) -> Result<(), String> {
-    let started = std::time::Instant::now();
+) -> Result<Vec<f32>, String> {
     let arch = source
         .metadata("general.architecture")
         .and_then(MetaValue::to_string_val)
@@ -156,7 +158,7 @@ pub fn run_omni_embedding(
         let rows = media.len() / 1024;
         (kind, media, vec![rows])
     } else {
-        encode_vision(mmproj_path, image_path, video_path)?
+        encode_vision(mmproj_path, image_path, video_path, threads)?
     };
     let rows = media.len() / 1024;
     if rows == 0 || media.len() % 1024 != 0 {
@@ -193,7 +195,7 @@ pub fn run_omni_embedding(
     );
     #[cfg(feature = "parity-trace")]
     crate::parity_trace::report(crate::parity_trace::token_ids("omni.tokens", &tokens));
-    let embedding = run_embedding_tokens(
+    run_embedding_tokens(
         source,
         &tokens,
         Some(MediaEmbeddings {
@@ -201,9 +203,7 @@ pub fn run_omni_embedding(
             values: &media,
         }),
         threads,
-    )?;
-    print_embedding(&embedding, output, started.elapsed().as_millis());
-    Ok(())
+    )
 }
 
 #[cfg(test)]
@@ -338,7 +338,6 @@ mod tests {
             None,
             "prompt",
             1,
-            EmbeddingOutput::Summary,
         )
         .unwrap_err();
         assert!(error.contains("Jina embedding model"), "{error}");

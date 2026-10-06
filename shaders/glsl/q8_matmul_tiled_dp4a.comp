@@ -1,0 +1,160 @@
+#version 450
+#extension GL_EXT_integer_dot_product : require
+
+// Register-tiled Q8_0 grouped matmul, one weight per (output column, k-block)
+// reused across a tile of tokens.
+//
+// The kernel this replaces gives one workgroup per (token, output column) pair
+// and splits k across the 64 lanes, so every weight byte is loaded, multiplied
+// and discarded for a single token: weight reuse is 1, and the measured result
+// was 108 GOP/s on GB10 against roughly 5900 GOP/s for the same shape in
+// PyTorch. Here a lane owns an output column for the whole k walk and keeps one
+// accumulator per token in the tile, so each weight load feeds TOKENS dots and
+// the cross-lane tree reduction disappears entirely.
+//
+// The k walk is chunked rather than staged whole: a full row of q8 activations
+// is blocks_per_row * 8 words, which is 10 KiB at n_in=10240 and would be 80 KiB
+// for an 8-token tile -- past the shared memory budget. CHUNK_BLOCKS keeps the
+// staging area small enough that the loop stays in cache.
+
+layout(local_size_x = 64) in;
+
+const uint TOKENS = 32u;
+const uint CHUNK_BLOCKS = 16u;
+const uint INPUT_WORDS_PER_BLOCK = 8u;
+
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(std430, binding = 1) readonly buffer W0 { uint data[]; } w0;
+layout(std430, binding = 2) readonly buffer W1 { uint data[]; } w1;
+layout(std430, binding = 3) readonly buffer W2 { uint data[]; } w2;
+layout(push_constant) uniform PC {
+    uint q8_word;
+    uint scales_word;
+    uint n_in;
+    uint blocks_per_row;
+    uint output0_word; uint rows0; uint output0_stride;
+    uint output1_word; uint rows1; uint output1_stride;
+    uint output2_word; uint rows2; uint output2_stride;
+    uint group_count; uint input_sum_word; uint input_stride; uint q8_stride; uint scales_stride; uint input_sum_stride; uint q8k_stride; uint q8k_scales_stride; uint token_rows;
+} pc;
+
+shared uint input_stage[TOKENS * CHUNK_BLOCKS * INPUT_WORDS_PER_BLOCK];
+shared float scale_stage[TOKENS * CHUNK_BLOCKS];
+
+float f16_decode(uint bits) {
+    uint sign = (bits >> 15u) & 1u;
+    int exponent = int((bits >> 10u) & 0x1fu);
+    uint mantissa = bits & 0x3ffu;
+    float value;
+    if (exponent == 0) {
+        value = (float(mantissa) / 1024.0) * exp2(-14.0);
+    } else if (exponent == 31) {
+        return 0.0;
+    } else {
+        value = (1.0 + float(mantissa) / 1024.0) * exp2(float(exponent - 15));
+    }
+    return sign == 0u ? value : -value;
+}
+
+uint weight_word(uint slot, uint index) {
+    if (slot == 0u) return w0.data[index];
+    if (slot == 1u) return w1.data[index];
+    return w2.data[index];
+}
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint slot = gl_WorkGroupID.z % pc.group_count;
+    uint token_tile = gl_WorkGroupID.z / pc.group_count;
+    uint token_base = token_tile * TOKENS;
+    if (token_base >= pc.token_rows) return;
+
+    // One lane, one output column, for the whole k walk. The workgroup covers
+    // 64 consecutive columns, so the tile is 64 wide rather than 1.
+    uint column_base = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 64u;
+    uint column = column_base + lane;
+    uint output_stride = slot == 0u ? pc.output0_stride : (slot == 1u ? pc.output1_stride : pc.output2_stride);
+    uint output_word = slot == 0u ? pc.output0_word : (slot == 1u ? pc.output1_word : pc.output2_word);
+    uint output_rows = slot == 0u ? pc.rows0 : (slot == 1u ? pc.rows1 : pc.rows2);
+    // A partial last tile would put some lanes past the end of the weight
+    // buffer. They cannot return, because the loop below has barriers and
+    // Vulkan requires those in uniform control flow, so clamp their read to a
+    // column that exists and let the store drop the result.
+    uint read_column = min(column, output_rows - 1u);
+
+    float accumulator[TOKENS];
+    for (uint t = 0u; t < TOKENS; t++) {
+        accumulator[t] = 0.0;
+    }
+    uint live = 0u;
+    for (uint t = 0u; t < TOKENS; t++) {
+        if (token_base + t < pc.token_rows) live = t + 1u;
+    }
+    if (live == 0u) return;
+
+    uint weight_row = read_column * pc.blocks_per_row * 34u;
+
+    for (uint chunk = 0u; chunk < pc.blocks_per_row; chunk += CHUNK_BLOCKS) {
+        uint blocks = min(CHUNK_BLOCKS, pc.blocks_per_row - chunk);
+        // Stage this chunk's q8 activations for every live token.
+        uint words = blocks * INPUT_WORDS_PER_BLOCK;
+        for (uint t = 0u; t < live; t++) {
+            uint base = (token_base + t) * pc.q8_stride + chunk * INPUT_WORDS_PER_BLOCK;
+            uint dst = t * CHUNK_BLOCKS * INPUT_WORDS_PER_BLOCK;
+            for (uint index = lane; index < words; index += 64u) {
+                input_stage[dst + index] = arena.data[pc.q8_word + base + index];
+            }
+        }
+        for (uint t = 0u; t < live; t++) {
+            uint base = (token_base + t) * pc.scales_stride + chunk;
+            uint dst = t * CHUNK_BLOCKS;
+            for (uint index = lane; index < blocks; index += 64u) {
+                scale_stage[dst + index] = uintBitsToFloat(arena.data[pc.scales_word + base + index]);
+            }
+        }
+        barrier();
+
+        for (uint b = 0u; b < blocks; b++) {
+            uint block = chunk + b;
+            uint byte_offset = weight_row + block * 34u;
+            uint scale_word = weight_word(slot, byte_offset >> 2u);
+            uint scale_bits = (byte_offset & 3u) == 0u
+                ? scale_word & 0xffffu
+                : (scale_word >> 16u) & 0xffffu;
+            float weight_scale = f16_decode(scale_bits);
+            uint body = byte_offset + 2u;
+            // The 8 packed words of this q8_0 block.
+            uint packed[8];
+            for (uint g = 0u; g < 8u; g++) {
+                uint group_offset = body + g * 4u;
+                uint first = weight_word(slot, group_offset >> 2u);
+                uint shift = (group_offset & 3u) * 8u;
+                if (shift == 0u) {
+                    packed[g] = first;
+                } else {
+                    uint second = weight_word(slot, (group_offset >> 2u) + 1u);
+                    packed[g] = (first >> shift) | (second << (32u - shift));
+                }
+            }
+            // One weight load, TOKENS dots.
+            for (uint t = 0u; t < live; t++) {
+                float block_scale = weight_scale * scale_stage[t * CHUNK_BLOCKS + b];
+                uint base = t * CHUNK_BLOCKS * INPUT_WORDS_PER_BLOCK + b * INPUT_WORDS_PER_BLOCK;
+                float partial = 0.0;
+                for (uint g = 0u; g < 8u; g++) {
+                    int dot = dotPacked4x8EXT(int(packed[g]), int(input_stage[base + g]));
+                    partial += float(dot);
+                }
+                accumulator[t] = fma(partial, block_scale, accumulator[t]);
+            }
+        }
+        barrier();
+    }
+
+    if (column < output_rows) {
+        for (uint t = 0u; t < live; t++) {
+            arena.data[output_word + (token_base + t) * output_stride + column] =
+                floatBitsToUint(accumulator[t]);
+        }
+    }
+}

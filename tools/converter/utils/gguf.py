@@ -31,7 +31,11 @@ GGML_F32 = 0
 GGML_F16 = 1
 GGML_Q4_0 = 2
 GGML_Q8_0 = 8
+GGML_Q4K = 12
+GGML_Q5K = 13
+GGML_Q6K = 14
 GGML_I64 = 27
+GGML_I32 = 26
 GGML_BF16 = 30
 
 GGUF_ALIGNMENT = 32
@@ -44,7 +48,17 @@ _T_UINT64 = 10
 _T_INT64 = 11
 _T_FLOAT64 = 12
 
-_ELEMENT_BYTES = {GGML_F32: 4, GGML_F16: 2, GGML_Q8_0: 0, GGML_Q4_0: 0, GGML_I64: 8, GGML_BF16: 2}
+_ELEMENT_BYTES = {
+    GGML_F32: 4,
+    GGML_F16: 2,
+    GGML_Q8_0: 0,
+    GGML_Q4_0: 0,
+    GGML_I32: 4,
+    GGML_I64: 8,
+    GGML_BF16: 2,
+}
+#: Bytes per 256-value super-block for the k-quants, keyed by GGML type.
+_K_BLOCK_BYTES = {GGML_Q4K: 144, GGML_Q5K: 176, GGML_Q6K: 210}
 
 
 def validated_dir(raw: str, *, must_exist: bool) -> Path:
@@ -318,6 +332,12 @@ def _tensor_nbytes(ggml_type: int, dims: tuple[int, ...]) -> int:
         if n % 32 != 0:
             raise ValueError(f"Q4_0 tensor with {n} elements not divisible by 32")
         return (n // 32) * 18
+    block_bytes = _K_BLOCK_BYTES.get(ggml_type)
+    if block_bytes is not None:
+        n = math.prod(dims)
+        if n % 256 != 0:
+            raise ValueError(f"k-quant tensor with {n} elements not divisible by 256")
+        return (n // 256) * block_bytes
     element_bytes = _ELEMENT_BYTES.get(ggml_type)
     if element_bytes is None:
         raise ValueError(f"unsupported ggml type {ggml_type}")

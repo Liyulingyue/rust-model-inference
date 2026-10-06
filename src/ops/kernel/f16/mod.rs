@@ -60,7 +60,7 @@ impl<'a> F16Kernel<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn forward_scaled_rows(
+    pub(crate) fn forward_scaled_rows(
         &self,
         input: &[f32],
         output: &mut [f32],

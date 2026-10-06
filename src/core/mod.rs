@@ -7,7 +7,11 @@
 //! - [`tensor`]: GGMLType, MetaValue*, TensorInfo, TensorSource trait
 //! - [`loader`]: ByteReader, GGUFLoader, model_config_from_source
 //! - [`model`]: ModelGraph (generic Layer container)
-//! - [`tokenizer`]: BPETokenizer, EncodeOptions, StreamingDecoder
+//! - [`tokenizer`]: BPE + WPM + SPM + UGM tokenizers, `Tokenizer` trait,
+//!   `EncodeOptions`, `StreamingDecoder`, `load_tokenizer` dispatcher.
+//!   Sub-modules: `bpe`, `wpm`, `spm`, `ugm` (the UGM module lives in
+//!   `tokenizer/ugm.rs` since `tokenizer.ggml.model = "t5"` GGUFs need
+//!   a SentencePiece unigram path).
 //! - [`memory`]: BlockAllocator, MemoryArena, PagedKVBlock, KVCacheView
 //! - [`thread_pool`]: ComputePool
 //! - [`scratchpad`]: ExecutionScratchpad, KvCache (F16/F32)
@@ -26,6 +30,7 @@ pub mod memory;
 pub mod model;
 pub mod prefill;
 pub mod scratchpad;
+pub mod sentencepiece;
 pub mod tensor;
 pub mod thread_pool;
 pub mod tokenizer;

@@ -84,7 +84,12 @@ pub fn gelu_ggml_f16(value: f32) -> f32 {
         return value;
     }
     let x = f16_to_f32(f32_to_f16(value));
-    let inner = 0.797_884_6 * x * (0.044_715 * x).mul_add(x, 1.0);
+    let polynomial = if crate::ops::scalar_mode() {
+        1.0 + 0.044_715 * x * x
+    } else {
+        (0.044_715 * x).mul_add(x, 1.0)
+    };
+    let inner = 0.797_884_6 * x * polynomial;
     #[cfg(unix)]
     let activation = unsafe { tanhf(inner) };
     #[cfg(not(unix))]
@@ -95,6 +100,101 @@ pub fn gelu_ggml_f16(value: f32) -> f32 {
 pub fn gelu_ggml_f16_inplace(values: &mut [f32]) {
     for value in values {
         *value = gelu_ggml_f16(*value);
+    }
+}
+
+/// Fused GeGLU: `up[i] = gelu(gate[i]) * up[i]`. Mirrors
+/// `silu_mul_approx_inplace`'s argument order so the llama FFN can dispatch
+/// between SwiGLU and GeGLU with the same row partition math (used by
+/// Gemma-2's FFN which uses GeGLU rather than SwiGLU).
+#[inline(always)]
+pub fn gelu_mul_inplace(gate: &[f32], up: &mut [f32]) {
+    debug_assert_eq!(gate.len(), up.len());
+    for i in 0..gate.len() {
+        up[i] *= gelu(gate[i]);
+    }
+}
+
+#[inline(always)]
+pub fn gelu_mul_approx_inplace(gate: &[f32], up: &mut [f32]) {
+    debug_assert_eq!(gate.len(), up.len());
+    #[cfg(target_arch = "x86_64")]
+    if crate::ops::has_avx2_fma() {
+        unsafe { gelu_mul_approx_inplace_avx2(gate, up) };
+        return;
+    }
+    #[cfg(target_arch = "aarch64")]
+    if crate::ops::has_neon() {
+        unsafe { gelu_mul_approx_inplace_neon(gate, up) };
+        return;
+    }
+    gelu_mul_inplace(gate, up);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2", enable = "fma")]
+unsafe fn gelu_mul_approx_inplace_avx2(gate: &[f32], up: &mut [f32]) {
+    use std::arch::x86_64::*;
+    let sqrt_2_over_pi = (2.0f32 / std::f32::consts::PI).sqrt();
+    let c = _mm256_set1_ps(0.044715);
+    let sq2opi = _mm256_set1_ps(sqrt_2_over_pi);
+    let half = _mm256_set1_ps(0.5);
+    let one = _mm256_set1_ps(1.0);
+    let n8 = gate.len() / 8 * 8;
+    let mut i = 0;
+    while i < n8 {
+        let g = _mm256_loadu_ps(gate.as_ptr().add(i));
+        let u = _mm256_loadu_ps(up.as_ptr().add(i));
+        let g2 = _mm256_mul_ps(g, g);
+        let g3 = _mm256_mul_ps(g2, g);
+        let lin = _mm256_add_ps(g, _mm256_mul_ps(c, g3));
+        let inner = _mm256_mul_ps(sq2opi, lin);
+        let y = super::super::math::tanh::tanh_approx_avx2(inner);
+        let one_plus_y = _mm256_add_ps(one, y);
+        let gelu = _mm256_mul_ps(half, _mm256_mul_ps(g, one_plus_y));
+        let result = _mm256_mul_ps(gelu, u);
+        _mm256_storeu_ps(up.as_mut_ptr().add(i), result);
+        i += 8;
+    }
+    while i < gate.len() {
+        up[i] *= gelu(gate[i]);
+        i += 1;
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn gelu_mul_approx_inplace_neon(gate: &[f32], up: &mut [f32]) {
+    use std::arch::aarch64::*;
+    let sqrt_2_over_pi = (2.0f32 / std::f32::consts::PI).sqrt();
+    let c = vdupq_n_f32(0.044715);
+    let sq2opi = vdupq_n_f32(sqrt_2_over_pi);
+    let half = vdupq_n_f32(0.5);
+    let one = vdupq_n_f32(1.0);
+    let n4 = gate.len() / 4 * 4;
+    let mut i = 0;
+    while i + 4 <= gate.len() {
+        let g = vld1q_f32(gate.as_ptr().add(i));
+        let u = vld1q_f32(up.as_ptr().add(i));
+        let g2 = vmulq_f32(g, g);
+        let g3 = vmulq_f32(g2, g);
+        let lin = vaddq_f32(g, vmulq_f32(c, g3));
+        let inner = vmulq_f32(sq2opi, lin);
+        let mut buf = [0.0f32; 4];
+        vst1q_f32(buf.as_mut_ptr(), inner);
+        for v in &mut buf {
+            *v = v.tanh();
+        }
+        let y = vld1q_f32(buf.as_ptr());
+        let one_plus_y = vaddq_f32(one, y);
+        let gelu = vmulq_f32(half, vmulq_f32(g, one_plus_y));
+        let result = vmulq_f32(gelu, u);
+        vst1q_f32(up.as_mut_ptr().add(i), result);
+        i += 4;
+    }
+    while i < gate.len() {
+        up[i] *= gelu(gate[i]);
+        i += 1;
     }
 }
 
@@ -392,7 +492,14 @@ mod tests {
         let mut values = [f32::from_bits(0xc009_836e), f32::from_bits(0xbfff_e110)];
         gelu_ggml_f16_inplace(&mut values);
         assert_eq!(values[0].to_bits(), 0xbd0a_8000);
-        assert_eq!(values[1].to_bits(), 0xbd3a_6000);
+        // Exhaustive comparison with pinned ggml found this F16 input differs
+        // when the polynomial uses FMA. Scalar parity must use its unfused LUT.
+        let expected = if crate::ops::scalar_mode() {
+            0xbd3a_4000
+        } else {
+            0xbd3a_6000
+        };
+        assert_eq!(values[1].to_bits(), expected);
     }
 
     fn gelu_erf_scalar(values: &[f32]) -> Vec<f32> {
@@ -424,6 +531,40 @@ mod tests {
                 assert!(
                     (actual - expected).abs() < 1e-6,
                     "actual={actual}, expected={expected}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gelu_mul_approx_inplace_matches_scalar() {
+        let gate: Vec<f32> = (0..1024).map(|i| (i as f32 * 0.013).sin() * 4.0).collect();
+        let up_in: Vec<f32> = (0..1024).map(|i| (i as f32 * 0.041).cos() * 2.0).collect();
+        let mut up_simd = up_in.clone();
+        let mut up_scalar = up_in.clone();
+        gelu_mul_approx_inplace(&gate, &mut up_simd);
+        gelu_mul_inplace(&gate, &mut up_scalar);
+        for (i, (actual, expected)) in up_simd.iter().zip(up_scalar.iter()).enumerate() {
+            assert!(
+                (actual - expected).abs() < 2e-3,
+                "lane {i}: simd={actual}, scalar={expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn gelu_mul_approx_inplace_tail_lengths() {
+        for &len in &[1usize, 7, 8, 9, 15, 17, 33, 63, 64] {
+            let gate: Vec<f32> = (0..len).map(|i| (i as f32 * 0.21).sin() * 3.0).collect();
+            let up_in: Vec<f32> = (0..len).map(|i| (i as f32 * 0.13).cos()).collect();
+            let mut up_simd = up_in.clone();
+            let mut up_scalar = up_in.clone();
+            gelu_mul_approx_inplace(&gate, &mut up_simd);
+            gelu_mul_inplace(&gate, &mut up_scalar);
+            for (i, (actual, expected)) in up_simd.iter().zip(up_scalar.iter()).enumerate() {
+                assert!(
+                    (actual - expected).abs() < 2e-3,
+                    "len={len} lane {i}: simd={actual}, scalar={expected}"
                 );
             }
         }

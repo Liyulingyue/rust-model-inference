@@ -377,6 +377,58 @@ per-group softmax（MultiSelect / BlockChoice）：
 | BlockChoice（块级单选） | ✅（实验性，per-group softmax） | ❌ |
 | Batch Score（分组独立打分） | ✅（实验性，per-group `Σ p×value`） | ❌ |
 
+### 11a. 与 RLCD（harshatheg/Qwen-2.5-1B-RLCD）的差异
+
+RLCD 在 MLX 上的 [Parallel Constrained Decoding](https://www.modelscope.cn/models/harshatheg/Qwen-2.5-1B-RLCD)
+走的是 **value-token sub-vocabulary logit slicing**：prefill 一次后把 KV cache
+复制 M 份（每个 schema field 一份），单次 batched forward 评估所有 field 的
+suffix，每个 field 的 logits 只在**候选 value token id 子集**上做 softmax。
+
+JEV 与之的差异在 *scoring target*：
+
+- **RLCD**：打分 `P(P0_CRITICAL | ctx)`、`P(P1_HIGH | ctx)` …… 直接在 value token 上
+- **JEV（本仓库）**：打分 `P(A | ctx)`、`P(B | ctx)` …… 字母 token，再用
+  `--jev-option` 把字母映射回 value
+
+两种 path **都不在模型上加额外的 classification head**，只复用 LM head 的
+next-token 分布；区别只在于 mask 哪一组 vocab。
+
+**为什么 JEV 选字母投票**：
+
+1. **多 token value 是反优势**。`P0_CRITICAL` 是 3 个 token（`P0` / `_` /
+   `CRITICAL`），RLCD 要做 `pick(P0 vs P1) → continue(_ vs _HIGH) →
+   continue(CRITICAL vs HIGH)`，3 次 forward + cache slice + tree
+   disambiguation。字母投票里每个 option 是一个字母 → 永远 1 个 token
+   → 1 次 forward。
+2. **vocab edge case 不存在**。`A`/`B`/.../`Z` 在所有现代 BPE tokenizer
+   里都是单 token，且 100% 在 vocab。Value-token 切片需要 value 的
+   第一个 token 在 vocab 且可枚举，碰到 `<` `/` 等首字符或罕见词会失败。
+3. **letter-following 是 instruction tuning 的标准训练目标**。Qwen /
+   Llama / Mistral 全族 instruction GGUF 都学过高准确率字母对应，
+   实测 Qwen2.5-1.5B-Instruct 在 yes/no 与 positive/negative/neutral
+   上都是 ≥99% 置信度（`tests/qwen2_5_1_5b_jev.rs`，2026-10-03 验证）。
+4. **confidence 数学等价**。字母路径是 `softmax({logits[A], logits[B], ...})`
+   的 K 元分布；RLCD 是 `softmax({logits[tid_1], logits[tid_2], ...})`
+   的 K 元分布。两者都是"vocab softmax over K tokens"，argmax + 概率
+   解释完全等价。
+5. **不影响 batched 路径**。当未来架构补上 batched LLM 时，字母投票
+   直接复用：把 K 路字母 logits 改成 batched forward 的 K 行输出，剩下
+   完全一样。Value-token 切片则要为每 field 维护一个候选 token 列表，
+   多 token 还要写 tree，是额外的实现债。
+
+**何时回过来切 value token**：
+
+- 模型无 instruction tuning（旧 base LLaMA / Qwen-1 / Qwen-1.5 base
+  不严格遵循字母指令）→ RLCD 路径更稳
+- 用户要"原始 value probability" 而不是 "letter probability" → 必须切
+- 多 token value 的概率分布本身有意义（不是只看 argmax）→ 必须切
+
+JEV 当前落在 instruction-tuned GGUF 这条路，不需要切。`harshatheg/Qwen-2.5-1B-RLCD`
+仓库的 README 里用的也是 `mlx-community/Qwen2.5-1.5B-Instruct-4bit`（instruct GGUF），
+他们的切片只在 Apple Silicon + 5-7× latency reduction 那个具体场景里有优势
+（KV broadcast 单 forward 评估 M fields）；在 trunk 复用、跨 arch、
+无 MLX 的仓库里，字母投票是工程权衡上更便宜的等价物。
+
 ## 12. 已知限制
 
 1. **Base model 准确率低**：Qwen3-0.6B 是 base model（不是 Instruct）。
@@ -419,11 +471,18 @@ Choice / Binary / Score 与 MultiSelect / BlockChoice 的代码路径**完全隔
 ## 14. 源码索引
 
 > **Status (2026-09-22)**：JEV 评分已重构。`src/app/text.rs` 从 4597 行
-> 降至 1748 行，所有 JEV 代码迁出至 `src/app/jev/` 子模块，下设三个目录：
+> 降至 1748 行，所有 JEV 代码迁出至 `src/app/jev/` 子模块，下设三组目录：
 > `types.rs`（数据）、`single.rs` + `single/<arch>.rs`（单 question 评分）、
 > `grouped.rs` + `grouped/<arch>.rs`（分组评分）。两个评分 trait
 > `JevScorer` / `JevGroupedScorer` 把原来 ~80% 的 per-arch 复制粘贴
 > 收敛到 9-10 个 arch 各一个小 struct + 一个 dispatch 表项。
+>
+> **Status (2026-09-29)**：新增 `adapters/`。`JevScorer` 的打分本质是
+> `logits[label_token_id]` softmax（见 `compute_jev_result`），要求「因果
+> decoder + chat template + 单 token 的 A..Z label」三者同时成立。违背任一
+> 前提的后端（CLM 是投影空间 cosine，GLiNER2 是 DeBERTa 编码器 + marker
+> 位置过 MLP）套不进去，落到 `adapters/`。它不叫 scorer 因为它不实现
+> trait——只是把结果包成统一的 `Vec<JevResult>`。
 
 | 路径 | 角色 |
 |---|---|
@@ -451,6 +510,9 @@ Choice / Binary / Score 与 MultiSelect / BlockChoice 的代码路径**完全隔
 | `src/app/jev/grouped/lfm25.rs` (91 行) | LFM2.5 grouped scorer |
 | `src/app/jev/grouped/nemotron_h.rs` (79 行) | Nemotron-H grouped scorer |
 | `src/app/jev/grouped/hunyuan.rs` (95 行) | Hunyuan-Dense grouped scorer |
+| `src/app/jev/adapters/mod.rs` | 说明为什么会有这一层：`JevScorer` 表达不了的后端（不同架构 / 不同打分规则）在这里落地，只负责产出统一形状的 `Vec<JevResult>` |
+| `src/app/jev/adapters/gliner2.rs` | GLiNER2.5-Decide adapter：`gliner2_schema` / `schema_from_questions` / `schema_from_label_sets`（构造任务集）、`run_gliner2_scoring` / `run_gliner2_decision`、`load_gliner2_source` |
+| `src/app/jev/clm.rs` | CLM adapter（同类里更早的一个，未迁入 `adapters/`：已合并验证过，搬迁只会产生无收益 churn） |
 | `src/models/*/trunk/forward.rs` 或 `session.rs` | 各 trunk 的 `forward_logits` 实现 |
 | `tests/quantized_inference.rs` | 已有 IQ4_NL parity 测试 |
 

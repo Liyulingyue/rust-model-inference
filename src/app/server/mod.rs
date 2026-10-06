@@ -1,5 +1,6 @@
 pub mod api;
 mod rerank;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use axum::{
@@ -17,11 +18,12 @@ use crate::app::cli::{
     normalize_tts_language, parse_cli_options, validate_cli_options, CliOptions, KvFormat,
 };
 use crate::app::{compute_embedding, open_or_exit};
-use crate::core::tensor::TensorSource;
+use crate::core::tensor::{MetaValue, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
 use crate::format::ggufrs::ComponentRole;
 use crate::format::wav::encode_wav_pcm16_channels;
+use crate::models::audio8::streaming as audio8_streaming;
 use crate::models::qwen3::asr::model::{
     open_bundled_audio_source, AsrRuntime, TranscriptionOptions,
 };
@@ -48,18 +50,66 @@ enum Backend {
     Text(TextBackend),
     Embedding(EmbeddingBackend),
     Asr(AsrBackend),
+    Audio8(Audio8Backend),
     Tts(TtsBackend),
     Rerank(RerankBackend),
+    Clm(ClmBackend),
+    Gliner2(Gliner2Backend),
 }
 
-struct RerankBackend {
-    /// The Qwen3 model loaded with the optional `cls.output.weight`
-    /// rerank head. Leaked to `'static` so per-request `Qwen3Session`s
-    /// can borrow from it without re-loading.
+/// GLiNER2.5-Decide backend: a DeBERTa-v3 encoder with the classifier head in
+/// the same GGUF, named by `--model` plus `--gliner2-decide`.  It scores a
+/// caller-supplied label set, so it exposes the JEV score route and nothing
+/// else.  The tokenizer is built once here; the model itself is
+/// zero-copy views over the mapping and is cheap to rebuild per request.
+struct Gliner2Backend {
+    source: Box<dyn TensorSource>,
+    tokenizer: crate::models::gliner::ModelTokenizer,
+    n_threads: usize,
+}
+
+/// CLM backend: a Qwen3 encoder plus the projection-head GGUF named by
+/// `--clm-head`.  Scores candidates by cosine in projection space, so it
+/// exposes the JEV score route and nothing else.
+struct ClmBackend {
+    /// Kept so the JEV plumbing can hand out an `Arc<dyn TensorSource>`
+    /// the same way it does for `TextBackend`.
+    source: Arc<dyn TensorSource>,
+    /// Leaked for the same reason as `RerankBackend::model`:
+    /// `Qwen3Session` wants a `&'static` model.
     model: Arc<&'static Qwen3Model>,
+    /// Owned, no borrow: the loader copies the weights out.
+    heads: crate::models::clm::ClmHeads,
     tokenizer: Arc<BPETokenizer>,
     prefill_batch_size: usize,
     context_length: usize,
+}
+
+/// The two cross-encoder rerank families this server understands.
+///
+/// `Qwen3` reuses the qwen3 trunk (causal prefill + last-token
+/// classification head). `JinaBertV2` reuses the bert-encoder forward loop
+/// (bidirectional CLS token + `cls.weight` linear projection), which is
+/// structurally different: no causal mask, no Qwen3Session.
+enum RerankKind {
+    Qwen3,
+    JinaBertV2,
+}
+
+struct RerankBackend {
+    /// Qwen3 model loaded with the optional `cls.output.weight` rerank
+    /// head. Leaked to `'static` so per-request `Qwen3Session`s can
+    /// borrow from it without re-loading. `None` for `JinaBertV2`.
+    model: Option<Arc<&'static Qwen3Model>>,
+    tokenizer: Arc<BPETokenizer>,
+    prefill_batch_size: usize,
+    context_length: usize,
+    /// jina-bert-v2 backend keeps the raw `TensorSource` and reuses the
+    /// shared `bert_family::compute_rerank_score` for scoring. `None` for
+    /// `Qwen3` (the qwen3 path doesn't need it).
+    jina_source: Option<Arc<dyn TensorSource>>,
+    /// Selects the per-doc scoring path in `rerank::score_one_doc`.
+    kind: RerankKind,
 }
 
 unsafe impl Send for Backend {}
@@ -98,10 +148,24 @@ unsafe impl Sync for TextBackend {}
 
 struct EmbeddingBackend {
     source: Arc<dyn TensorSource>,
+    mmproj_path: Option<PathBuf>,
 }
 
 struct AsrBackend {
     runtime: Arc<AsrRuntime>,
+}
+
+/// Audio8 ASR backend: a single-model Voxtral-Realtime GGUF that bundles the
+/// audio tower and Qwen2 text decoder. Same wiring as `RerankBackend` —
+/// encoder/decoder are leaked to `'static` so per-request
+/// `StreamingTranscriber`s can borrow from them for the server lifetime.
+struct Audio8Backend {
+    encoder: Arc<&'static crate::models::audio8::Audio8Encoder>,
+    decoder: Arc<&'static crate::models::audio8::text::Audio8TextDecoder>,
+    tokenizer: Arc<BPETokenizer>,
+    specials: crate::models::audio8::streaming::SpecialTokens,
+    language: &'static str,
+    max_tokens: usize,
 }
 
 struct TtsBackend {
@@ -134,9 +198,32 @@ struct ModelInfo {
 struct EmbeddingRequest {
     #[serde(default)]
     model: Option<String>,
-    input: serde_json::Value,
+    /// Text inputs for the text-only embedding path. Optional when
+    /// `audio`/`image`/`video` is present (multimodal path).
+    #[serde(default)]
+    input: Option<serde_json::Value>,
     #[serde(default)]
     encoding_format: Option<String>,
+    /// Optional base64-encoded audio bytes for multimodal embedding
+    /// (jina-v5-omni / qwen3-omni with audio mmproj). When present,
+    /// the server routes through `run_omni_embedding` instead of the
+    /// text-only path. The byte payload may be raw audio (decoded by
+    /// `ffmpeg` via the same WAV/MP3/FLAC/OGG/M4A/OPUS path as the
+    /// CLI `--audio` flag).
+    #[serde(default)]
+    audio: Option<String>,
+    /// Same as `Optional base64-encoded image for multimodal
+    /// embedding. Accepts raw image bytes (jpg/png/webp/...).
+    #[serde(default)]
+    image: Option<String>,
+    /// Optional base64-encoded video bytes. Decoded by ffprobe/ffmpeg.
+    #[serde(default)]
+    video: Option<String>,
+    /// Optional prompt string used as the LLM-side system turn for
+    /// multimodal embedding (e.g. "Query: ..." vs "Respond this
+    /// document ..."). Defaults to "" when omitted.
+    #[serde(default)]
+    prompt: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -236,9 +323,130 @@ async fn embeddings(
         )
             .into_response();
     };
+    // Multimodal path: any of audio/image/video routes the request
+    // through `run_omni_embedding`, which needs mmproj + a temp file
+    // path for the media blob. mmproj is required here (matching the
+    // CLI `--mmproj` requirement).
+    let has_media = req.audio.is_some() || req.image.is_some() || req.video.is_some();
+    if has_media {
+        let Some(mmproj_path) = backend.mmproj_path.clone() else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Multimodal embedding requires --mmproj on server startup".into(),
+                }),
+            )
+                .into_response();
+        };
+        let media_count = usize::from(req.audio.is_some())
+            + usize::from(req.image.is_some())
+            + usize::from(req.video.is_some());
+        if media_count != 1 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Exactly one of audio/image/video may be set per request".into(),
+                }),
+            )
+                .into_response();
+        }
+        let media_b64 = req
+            .audio
+            .as_ref()
+            .or(req.image.as_ref())
+            .or(req.video.as_ref())
+            .cloned()
+            .unwrap();
+        let ext = if req.audio.is_some() {
+            "wav"
+        } else if req.image.is_some() {
+            "jpg"
+        } else {
+            "mp4"
+        };
+        let prompt = req.prompt.unwrap_or_default();
+        let source = backend.source.clone();
+        let result = match tokio::task::spawn_blocking(move || {
+            let temp_path = std::env::temp_dir().join(format!(
+                "rmi-media-{}.{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0),
+                ext
+            ));
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(media_b64.trim())
+                .map_err(|error| format!("Invalid base64 media payload: {error}"))?;
+            std::fs::write(&temp_path, &bytes)
+                .map_err(|error| format!("Failed to write media temp file: {error}"))?;
+            let image_path = if req.image.is_some() {
+                Some(temp_path.as_path())
+            } else {
+                None
+            };
+            let video_path = if req.video.is_some() {
+                Some(temp_path.as_path())
+            } else {
+                None
+            };
+            let audio_path = if req.audio.is_some() {
+                Some(temp_path.as_path())
+            } else {
+                None
+            };
+            let result = crate::app::run_omni_embedding(
+                source.as_ref(),
+                &mmproj_path,
+                image_path,
+                video_path,
+                audio_path,
+                &prompt,
+                0,
+            );
+            let _ = std::fs::remove_file(&temp_path);
+            let embedding = result?;
+            Ok::<_, String>(EmbeddingObject {
+                object: "embedding".to_string(),
+                embedding,
+                index: 0,
+            })
+        })
+        .await
+        {
+            Ok(Ok(object)) => vec![object],
+            Ok(Err(error)) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse { error }),
+                )
+                    .into_response();
+            }
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("embedding worker failed: {error}"),
+                    }),
+                )
+                    .into_response();
+            }
+        };
+        let total_tokens: usize = result.len();
+        let response = EmbeddingResponse {
+            object: "list".to_string(),
+            data: result,
+            model: state.model_name.clone(),
+            usage: EmbeddingUsage {
+                prompt_tokens: total_tokens,
+                total_tokens,
+            },
+        };
+        return (StatusCode::OK, Json(response)).into_response();
+    }
     let inputs: Result<Vec<String>, String> = match req.input {
-        serde_json::Value::String(text) => Ok(vec![text]),
-        serde_json::Value::Array(items) => items
+        Some(serde_json::Value::String(text)) => Ok(vec![text]),
+        Some(serde_json::Value::Array(items)) => items
             .into_iter()
             .map(|item| {
                 item.as_str()
@@ -246,7 +454,8 @@ async fn embeddings(
                     .ok_or_else(|| "embedding input must be string or array of strings".to_string())
             })
             .collect(),
-        _ => Err("embedding input must be string or array of strings".into()),
+        Some(_) => Err("embedding input must be string or array of strings".into()),
+        None => Err("embedding input is required when audio/image/video are not set".into()),
     };
     let inputs = match inputs {
         Ok(value) => value,
@@ -304,15 +513,6 @@ async fn transcriptions(
     State(state): State<AppState>,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
-    let Backend::Asr(backend) = state.model.as_ref() else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "Server is not running an ASR model".into(),
-            }),
-        )
-            .into_response();
-    };
     let mut file_bytes: Option<Vec<u8>> = None;
     let mut language: Option<String> = None;
     let mut prompt: Option<String> = None;
@@ -385,53 +585,14 @@ async fn transcriptions(
                 .into_response();
         }
     };
-    let options = TranscriptionOptions {
-        language: language.clone(),
-        prompt: prompt.clone(),
-        max_new_tokens: 256,
-    };
-    let runtime = backend.runtime.clone();
-    let transcription =
-        match tokio::task::spawn_blocking(move || runtime.transcribe_wav(&wav, &options)).await {
-            Ok(Ok(value)) => value,
-            Ok(Err(error)) => {
-                return (
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    Json(ErrorResponse {
-                        error: error.to_string(),
-                    }),
-                )
-                    .into_response();
-            }
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: format!("asr worker failed: {error}"),
-                    }),
-                )
-                    .into_response();
-            }
-        };
-    let response = TranscriptionResponse {
-        text: transcription.text,
-    };
-    (StatusCode::OK, Json(response)).into_response()
+    let _ = prompt;
+    do_transcribe(&state, wav, language).await
 }
 
 async fn transcriptions_json(
     State(state): State<AppState>,
     Json(req): Json<TranscriptionRequest>,
 ) -> impl IntoResponse {
-    let Backend::Asr(backend) = state.model.as_ref() else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "Server is not running an ASR model".into(),
-            }),
-        )
-            .into_response();
-    };
     let input = match req.input.as_deref() {
         Some(value) => value,
         None => {
@@ -456,38 +617,102 @@ async fn transcriptions_json(
                 .into_response();
         }
     };
-    let options = TranscriptionOptions {
-        language: req.language.clone(),
-        prompt: req.prompt.clone(),
-        max_new_tokens: 256,
-    };
-    let runtime = backend.runtime.clone();
-    let transcription =
-        match tokio::task::spawn_blocking(move || runtime.transcribe_wav(&wav, &options)).await {
-            Ok(Ok(value)) => value,
-            Ok(Err(error)) => {
-                return (
+    do_transcribe(&state, wav, req.language).await
+}
+
+/// Shared transcription worker: branches on backend type so a single
+/// call site covers Qwen3-VL ASR (`AsrRuntime`) and Voxtral Realtime
+/// (`StreamingTranscriber`). Audio8 ignores `prompt`; the Qwen3 path
+/// accepts it as the decoder prompt context.
+async fn do_transcribe(
+    state: &AppState,
+    wav: Vec<u8>,
+    language: Option<String>,
+) -> axum::response::Response {
+    match state.model.as_ref() {
+        Backend::Asr(backend) => {
+            let options = TranscriptionOptions {
+                language: language.clone(),
+                prompt: None,
+                max_new_tokens: 256,
+            };
+            let runtime = backend.runtime.clone();
+            let wav = wav;
+            let result =
+                tokio::task::spawn_blocking(move || runtime.transcribe_wav(&wav, &options)).await;
+            match result {
+                Ok(Ok(value)) => (
+                    StatusCode::OK,
+                    Json(TranscriptionResponse { text: value.text }),
+                )
+                    .into_response(),
+                Ok(Err(error)) => (
                     StatusCode::UNPROCESSABLE_ENTITY,
                     Json(ErrorResponse {
                         error: error.to_string(),
                     }),
                 )
-                    .into_response();
-            }
-            Err(error) => {
-                return (
+                    .into_response(),
+                Err(error) => (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(ErrorResponse {
                         error: format!("asr worker failed: {error}"),
                     }),
                 )
-                    .into_response();
+                    .into_response(),
             }
-        };
-    let response = TranscriptionResponse {
-        text: transcription.text,
-    };
-    (StatusCode::OK, Json(response)).into_response()
+        }
+        Backend::Audio8(backend) => {
+            let encoder = backend.encoder.clone();
+            let decoder = backend.decoder.clone();
+            let specials = backend.specials.clone();
+            let tokenizer = backend.tokenizer.clone();
+            let max_tokens = backend.max_tokens;
+            let default_language = backend.language.to_string();
+            let language = language.unwrap_or(default_language);
+            let result = tokio::task::spawn_blocking(move || {
+                let samples = audio8_streaming::decode_samples(&wav)?;
+                let stream = audio8_streaming::Schedule::new().padded_stream(&samples);
+                let language_token = specials.language(&language)?;
+                let mut transcriber = audio8_streaming::StreamingTranscriber::new(
+                    &*encoder,
+                    &*decoder,
+                    stream,
+                    specials,
+                    language_token,
+                    max_tokens,
+                )?;
+                while transcriber.next_chunk()?.is_some() {}
+                let visible = transcriber.finish();
+                Ok::<_, String>(tokenizer.decode(&visible, false))
+            })
+            .await;
+            match result {
+                Ok(Ok(text)) => {
+                    (StatusCode::OK, Json(TranscriptionResponse { text })).into_response()
+                }
+                Ok(Err(error)) => (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(ErrorResponse { error }),
+                )
+                    .into_response(),
+                Err(error) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("audio8 worker failed: {error}"),
+                    }),
+                )
+                    .into_response(),
+            }
+        }
+        _ => (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Server is not running an ASR model".into(),
+            }),
+        )
+            .into_response(),
+    }
 }
 
 async fn speech(
@@ -651,20 +876,53 @@ fn build_backend(options: &CliOptions) -> Result<Arc<Backend>, String> {
         return Ok(Arc::new(Backend::Tts(build_tts(options)?)));
     }
     if options.audio.is_some() {
+        // ASR disambiguation: Audio8 ships the audio tower in the LLM GGUF
+        // (no `--mmproj`), so the right backend depends on the file's
+        // `general.architecture`. Probed here so a single `--audio` flag
+        // covers both Qwen3-VL ASR and Voxtral Realtime. See
+        // docs/develop/SERVER_BACKEND_SELECTION.md for why this is a probe
+        // rather than a flag.
+        if is_audio8_gguf(&options.model) {
+            return Ok(Arc::new(Backend::Audio8(build_audio8(options)?)));
+        }
         return Ok(Arc::new(Backend::Asr(build_asr(options)?)));
     }
     if options.embedding {
         let source = open_or_exit(&options.model, ComponentRole::Llm);
         return Ok(Arc::new(Backend::Embedding(EmbeddingBackend {
             source: Arc::from(source),
+            mmproj_path: options.mmproj.clone(),
         })));
     }
     // Cross-encoder rerank detection: a GGUF that carries
     // `pooling_type = 4` and a `cls.output.weight` is a Qwen3-style
-    // rerank model. Detected by metadata peek BEFORE the full Text
-    // build (which would load unrelated multimodal state).
-    if is_rerank_gguf(&options.model) {
+    // rerank model; a `jina-bert-v2` arch with `cls.weight` + `cls.bias`
+    // is the jina-bert-v2-style rerank model. Both are detected by
+    // metadata peek BEFORE the full Text build (which would load
+    // unrelated multimodal state).
+    //
+    // This is the only metadata-probed backend in this function; the others are
+    // flag-driven. Why they differ — and why adding a probe is usually the wrong
+    // fix — is in docs/develop/SERVER_BACKEND_SELECTION.md.
+    if is_rerank_gguf(&options.model) || is_jina_rerank_gguf(&options.model) {
+        // The probe outranks the flag-driven backends below, so a caller
+        // who explicitly selected one of them would have it silently
+        // dropped (their flag ignored, the rerank backend served).
+        // Error out instead: the model file and the flag disagree, and
+        // neither resolution is obviously what the caller wanted.
+        if let Some(error) = rerank_probe_flag_conflict(options) {
+            return Err(error);
+        }
         return Ok(Arc::new(Backend::Rerank(build_rerank(options)?)));
+    }
+    // CLM is opted into rather than detected: the encoder is an ordinary
+    // Qwen3 GGUF, and it is `--clm-head` saying "score with these heads"
+    // that makes it a CLM backend.
+    if options.clm_head.is_some() {
+        return Ok(Arc::new(Backend::Clm(build_clm(options)?)));
+    }
+    if options.gliner2_decide {
+        return Ok(Arc::new(Backend::Gliner2(build_gliner2(options)?)));
     }
     Ok(Arc::new(Backend::Text(build_text(options)?)))
 }
@@ -674,6 +932,42 @@ fn build_backend(options: &CliOptions) -> Result<Arc<Backend>, String> {
 /// `<arch>.pooling_type = 4` AND a `cls.output.weight` tensor is
 /// present. Done as a quick metadata probe without holding the file
 /// open.
+/// When the rerank metadata probe fires, the caller may still have
+/// explicitly selected a different backend with a flag. The probe
+/// outranks those backends in `build_backend`, so honoring it would
+/// silently drop the flag. Returns the error message to surface
+/// instead, or `None` when the flags are compatible with rerank.
+///
+/// Pure function of `CliOptions` so the dispatch table can be unit
+/// tested without a GGUF on disk. See
+/// `docs/develop/SERVER_BACKEND_SELECTION.md`.
+fn rerank_probe_flag_conflict(options: &CliOptions) -> Option<String> {
+    let model = options.model.display();
+    let reranker =
+        format!("{model} looks like a Qwen3 reranker (pooling_type=4 + cls.output.weight)");
+    if let Some(head) = &options.clm_head {
+        return Some(format!(
+            "--clm-head selects the CLM backend, but {reranker}; the probe wins and {} \
+             would be dropped. Pass a plain Qwen3 encoder as --model instead",
+            head.display()
+        ));
+    }
+    if options.gliner2_decide {
+        return Some(format!(
+            "--gliner2-decide selects the GLiNER2 backend, but {reranker}; the probe wins \
+             and the flag would be dropped. GLiNER2 needs a DeBERTa GGUF as --model"
+        ));
+    }
+    if let Some(mmproj) = &options.mmproj {
+        return Some(format!(
+            "--mmproj selects multimodal chat, but {reranker}; the probe wins and {} would \
+             be dropped. Pass a chat-capable Qwen3 GGUF as --model instead",
+            mmproj.display()
+        ));
+    }
+    None
+}
+
 fn is_rerank_gguf(path: &std::path::Path) -> bool {
     use crate::MetaValue;
     let loader = match crate::GGUFLoader::from_file(path) {
@@ -697,7 +991,71 @@ fn is_rerank_gguf(path: &std::path::Path) -> bool {
     loader.tensor_info("cls.output.weight").is_some()
 }
 
+/// Returns `true` when the GGUF at `path` looks like a jina-bert-v2
+/// reranker: `arch = jina-bert-v2` AND the `cls.weight` + `cls.bias`
+/// classification tensors are present. Parallel probe to
+/// [`is_rerank_gguf`] — used by the same dispatcher to choose
+/// `RerankKind::JinaBertV2` over `RerankKind::Qwen3`.
+fn is_jina_rerank_gguf(path: &std::path::Path) -> bool {
+    use crate::MetaValue;
+    let Ok(loader) = crate::GGUFLoader::from_file(path) else {
+        return false;
+    };
+    let arch = loader
+        .metadata("general.architecture")
+        .and_then(MetaValue::to_string_val)
+        .unwrap_or_default();
+    if arch != "jina-bert-v2" {
+        return false;
+    }
+    loader.tensor_info("cls.weight").is_some() && loader.tensor_info("cls.bias").is_some()
+}
+
+/// Returns `true` when the GGUF at `name` is an `audio8_asr_infinite`
+/// model (Voxtral Realtime bundled with its Qwen2 text decoder). The
+/// probe fires only inside the `options.audio.is_some()` branch, so it
+/// cannot collide with chat / rerank / GLiNER2 dispatches.
+fn is_audio8_gguf(path: &std::path::Path) -> bool {
+    use crate::MetaValue;
+    let Ok(loader) = crate::GGUFLoader::from_file(path) else {
+        return false;
+    };
+    loader
+        .metadata("general.architecture")
+        .and_then(MetaValue::to_string_val)
+        .is_some_and(|arch| arch == "audio8_asr_infinite")
+}
+
 fn build_rerank(options: &CliOptions) -> Result<RerankBackend, String> {
+    if is_jina_rerank_gguf(&options.model) {
+        // jina-bert-v2 cross-encoder reranker. No qwen3 trunk: the forward
+        // loop lives in `bert_family::compute_rerank_score`, which takes
+        // `&dyn TensorSource` directly. The tokenizer here is unused by
+        // the scoring path itself (compute_rerank_score builds tokens
+        // internally) but we still keep one so future endpoints
+        // (e.g. /v1/rerank echoes the input) can decode.
+        let source: Arc<dyn TensorSource> =
+            Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+        let tokenizer = Arc::new(
+            BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
+                .map_err(|e| format!("init tokenizer: {e}"))?,
+        );
+        let context_length: usize = source
+            .metadata("jina-bert-v2.context_length")
+            .and_then(MetaValue::to_u64)
+            .map(|v| v as usize)
+            .unwrap_or(8192);
+        return Ok(RerankBackend {
+            model: None,
+            tokenizer,
+            prefill_batch_size: 0,
+            context_length,
+            jina_source: Some(source),
+            kind: RerankKind::JinaBertV2,
+        });
+    }
+
+    // Qwen3-style rerank (pooling_type=4 + cls.output.weight).
     let prefill_batch_size = options.effective_prefill_batch_size()?;
     let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
     let tokenizer = Arc::new(BPETokenizer::from_gguf_metadata(|k| {
@@ -715,10 +1073,77 @@ fn build_rerank(options: &CliOptions) -> Result<RerankBackend, String> {
     // on `Qwen3Session` is satisfied for the server lifetime.
     let model: &'static Qwen3Model = Box::leak(Box::new(model));
     Ok(RerankBackend {
-        model: Arc::new(model),
+        model: Some(Arc::new(model)),
         tokenizer,
         prefill_batch_size,
         context_length,
+        jina_source: None,
+        kind: RerankKind::Qwen3,
+    })
+}
+
+fn build_clm(options: &CliOptions) -> Result<ClmBackend, String> {
+    let prefill_batch_size = options.effective_prefill_batch_size()?;
+    let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+    let tokenizer = Arc::new(
+        BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
+            .map_err(|e| format!("init tokenizer: {e}"))?,
+    );
+    let pool = Arc::new(ComputePool::new(options.threads));
+    let model = Qwen3Model::from_source(Arc::clone(&source), Arc::clone(&tokenizer), pool)
+        .map_err(|e| format!("load encoder: {e}"))?;
+    let arch = model.config().architecture.clone();
+    if arch != "qwen3" {
+        return Err(format!(
+            "CLM needs a qwen3 encoder, got {arch:?} (the heads were trained on Qwen3-8B)"
+        ));
+    }
+    // TODO(clm): the heads are encoder-locked, so a quantised base encoder
+    // shifts every score -- functionally fine, but not comparable to the
+    // paper's numbers.  Warn here instead of refusing, since a low-memory
+    // setup may legitimately want a Q4_K_M encoder.
+    let context_length = model.config().n_ctx;
+
+    let head_path = options.clm_head.clone().ok_or("--clm-head is required")?;
+    let head_source: Box<dyn TensorSource> = open_or_exit(&head_path, ComponentRole::Llm);
+    let heads = crate::models::clm::ClmHeads::from_source(head_source.as_ref())
+        .map_err(|e| format!("load CLM heads from {}: {e}", head_path.display()))?;
+    if model.config().n_embd != heads.encoder_dim() {
+        return Err(format!(
+            "encoder hidden size {} does not match the CLM heads (expected {})",
+            model.config().n_embd,
+            heads.encoder_dim()
+        ));
+    }
+
+    let model: &'static Qwen3Model = Box::leak(Box::new(model));
+    Ok(ClmBackend {
+        source,
+        model: Arc::new(model),
+        heads,
+        tokenizer,
+        prefill_batch_size,
+        context_length,
+    })
+}
+
+fn build_gliner2(options: &CliOptions) -> Result<Gliner2Backend, String> {
+    let (source, tokenizer) = crate::app::load_gliner2_source(&options.model)?;
+    // Validate the whole contract once at startup rather than per request.
+    crate::models::gliner::GlinerModel::from_source_with_tokenizer(
+        source.as_ref(),
+        tokenizer.clone(),
+    )
+    .map_err(|e| format!("load GLiNER2 model from {}: {e}", options.model.display()))?;
+    Ok(Gliner2Backend {
+        source,
+        tokenizer,
+        n_threads: crate::app::resolve_thread_count(
+            options.threads,
+            std::thread::available_parallelism()
+                .map(|value| value.get())
+                .unwrap_or(4),
+        ),
     })
 }
 
@@ -861,6 +1286,40 @@ fn build_asr(options: &CliOptions) -> Result<AsrBackend, String> {
         .map_err(|error| error.to_string())?;
     Ok(AsrBackend {
         runtime: Arc::new(runtime),
+    })
+}
+
+fn build_audio8(options: &CliOptions) -> Result<Audio8Backend, String> {
+    if options.mmproj.is_some() {
+        return Err("Audio8 carries its audio tower in --model; omit --mmproj".into());
+    }
+    let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+    let encoder = crate::models::audio8::Audio8Encoder::from_source(Arc::clone(&source))?;
+    let decoder_source = Arc::clone(&source);
+    let tokenizer = Arc::new(BPETokenizer::from_gguf_metadata(|key| {
+        source.metadata(key).cloned()
+    })?);
+    let decoder = crate::models::audio8::text::Audio8TextDecoder::from_source(decoder_source)?;
+    // Validate the whole contract once at startup rather than per request.
+    let specials = audio8_streaming::SpecialTokens::lookup(&tokenizer)?;
+    let language = options.language.as_deref().unwrap_or("zh");
+    if !matches!(language, "zh" | "en") {
+        return Err("Audio8 --language must be zh or en".into());
+    }
+    let language: &'static str = if language == "en" { "en" } else { "zh" };
+    let max_tokens = options.max_tokens.unwrap_or(512);
+    // Pin the encoder and decoder in `Box::leak` so per-request
+    // `StreamingTranscriber`s can hold a borrow for the server lifetime.
+    let encoder: &'static crate::models::audio8::Audio8Encoder = Box::leak(Box::new(encoder));
+    let decoder: &'static crate::models::audio8::text::Audio8TextDecoder =
+        Box::leak(Box::new(decoder));
+    Ok(Audio8Backend {
+        encoder: Arc::new(encoder),
+        decoder: Arc::new(decoder),
+        tokenizer,
+        specials,
+        language,
+        max_tokens,
     })
 }
 
@@ -1024,8 +1483,11 @@ pub fn run_server() {
         Backend::Text(_) => "text",
         Backend::Embedding(_) => "embedding",
         Backend::Asr(_) => "asr",
+        Backend::Audio8(_) => "audio8",
         Backend::Tts(_) => "tts",
         Backend::Rerank(_) => "rerank",
+        Backend::Clm(_) => "clm",
+        Backend::Gliner2(_) => "gliner2",
     };
     eprintln!(
         "Model '{}' loaded (mode={}, host={}, port={})",
@@ -1044,8 +1506,11 @@ pub fn run_server() {
         .route("/v1/models", get(list_models));
     router = match state.model.as_ref() {
         Backend::Text(_) => router.merge(api::routes()),
-        Backend::Embedding(_) => router.route("/v1/embeddings", post(embeddings)),
-        Backend::Asr(_) => router
+        Backend::Embedding(_) => router.route(
+            "/v1/embeddings",
+            post(embeddings).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
+        ),
+        Backend::Asr(_) | Backend::Audio8(_) => router
             .route(
                 "/v1/audio/transcriptions",
                 post(transcriptions).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
@@ -1053,6 +1518,15 @@ pub fn run_server() {
             .route("/v1/audio/transcriptions_json", post(transcriptions_json)),
         Backend::Tts(_) => router.route("/v1/audio/speech", post(speech)),
         Backend::Rerank(_) => router.route("/v1/rerank", post(rerank::rerank)),
+        // CLM scores by cosine, so only the single-question route applies.
+        // Grouped does a per-group softmax that has no cosine analogue,
+        // and the image routes need a vision encoder the heads never saw.
+        // GLiNER2 and CLM both score a caller-supplied label set on one
+        // encoder pass, so the single-question route covers them; grouped mode
+        // (per-group softmax) and the image routes do not apply.
+        Backend::Clm(_) | Backend::Gliner2(_) => {
+            router.route("/v1/jev/score", post(api::jev_score))
+        }
     };
     let app = router.layer(CorsLayer::permissive()).with_state(state);
 
@@ -1095,7 +1569,15 @@ mod tests {
 
 #[cfg(test)]
 mod server_mode_tests {
-    use super::{reject_unsupported_server_modes, CliOptions};
+    use super::{reject_unsupported_server_modes, rerank_probe_flag_conflict, CliOptions};
+    use std::path::PathBuf;
+
+    fn options_with(model: &str) -> CliOptions {
+        CliOptions {
+            model: PathBuf::from(model),
+            ..CliOptions::default()
+        }
+    }
 
     #[test]
     fn dreamx_is_rejected_before_backend_construction() {
@@ -1107,5 +1589,60 @@ mod server_mode_tests {
         assert!(reject_unsupported_server_modes(&options)
             .unwrap_err()
             .contains("--dreamx"));
+    }
+
+    #[test]
+    fn rerank_probe_conflict_is_silent_for_plain_rerank_invocation() {
+        // The documented happy path: no other backend flag, so the probe
+        // owns the dispatch and nothing is dropped.
+        assert!(rerank_probe_flag_conflict(&options_with("Qwen3-Reranker.gguf")).is_none());
+    }
+
+    #[test]
+    fn rerank_probe_conflict_rejects_clm_head() {
+        let options = CliOptions {
+            clm_head: Some(PathBuf::from("heads.gguf")),
+            ..options_with("Qwen3-Reranker.gguf")
+        };
+        let error = rerank_probe_flag_conflict(&options).expect("expected conflict");
+        assert!(error.contains("--clm-head"), "{error}");
+        assert!(error.contains("heads.gguf"), "{error}");
+        assert!(error.contains("Qwen3-Reranker.gguf"), "{error}");
+    }
+
+    #[test]
+    fn rerank_probe_conflict_rejects_gliner2_decide() {
+        let options = CliOptions {
+            gliner2_decide: true,
+            ..options_with("Qwen3-Reranker.gguf")
+        };
+        let error = rerank_probe_flag_conflict(&options).expect("expected conflict");
+        assert!(error.contains("--gliner2-decide"), "{error}");
+        assert!(error.contains("DeBERTa"), "{error}");
+    }
+
+    #[test]
+    fn rerank_probe_conflict_rejects_mmproj() {
+        let options = CliOptions {
+            mmproj: Some(PathBuf::from("vision.gguf")),
+            ..options_with("Qwen3-Reranker.gguf")
+        };
+        let error = rerank_probe_flag_conflict(&options).expect("expected conflict");
+        assert!(error.contains("--mmproj"), "{error}");
+        assert!(error.contains("vision.gguf"), "{error}");
+    }
+
+    #[test]
+    fn rerank_probe_conflict_reports_first_conflicting_flag_only() {
+        // clm_head is checked first; a caller who set both should still
+        // get one actionable message rather than a concatenated wall.
+        let options = CliOptions {
+            clm_head: Some(PathBuf::from("heads.gguf")),
+            gliner2_decide: true,
+            ..options_with("Qwen3-Reranker.gguf")
+        };
+        let error = rerank_probe_flag_conflict(&options).expect("expected conflict");
+        assert!(error.contains("--clm-head"), "{error}");
+        assert!(!error.contains("--gliner2-decide"), "{error}");
     }
 }

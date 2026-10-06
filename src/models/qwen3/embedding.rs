@@ -231,7 +231,7 @@ fn pool_embedding_rows(
     }
 }
 
-fn l2_normalize_embedding(values: &mut [f32]) -> Result<(), String> {
+pub(crate) fn l2_normalize_embedding(values: &mut [f32]) -> Result<(), String> {
     if values.iter().any(|value| !value.is_finite()) {
         return Err("Embedding contains a non-finite value".into());
     }
@@ -326,6 +326,10 @@ pub fn run_embedding_tokens(
         .ok_or("missing token_embd.weight")?;
     let embd_type = embd_info.ggml_type;
 
+    // Note: BitNet models (file_type=40 + per-projection
+    // `*_norm_in` tensors) are dispatched to
+    // [`crate::models::bitnet::qwen3_arch`] in `app::run_embedding`
+    // before reaching this function, so this path is BitNet-free.
     let layers: Vec<Qwen3LayerWeights> = load_layers(
         source,
         n_layer,
@@ -334,7 +338,6 @@ pub fn run_embedding_tokens(
         n_embd_gqa,
         n_ff,
         n_embd_head_k,
-        is_qwen3,
     );
 
     let n_tokens = token_ids.len();

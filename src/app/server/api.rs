@@ -1115,6 +1115,22 @@ mod http_tests {
 struct JevOptionInput {
     text: String,
     options: Vec<String>,
+    /// GLiNER2 only. Marks the head multi-label, so the probabilities are
+    /// independent sigmoids and every label at or above `cls_threshold`
+    /// counts. Ignored by the token-logit scorers.
+    #[serde(default)]
+    multi_label: bool,
+    /// GLiNER2 only. Selection cutoff for a multi-label head.
+    #[serde(default)]
+    cls_threshold: Option<f64>,
+    /// GLiNER2 only. Appended to the head name as the `[P]` prompt, so a
+    /// question over a passage can be phrased.
+    #[serde(default)]
+    prompt: Option<String>,
+    /// GLiNER2 only. One description per option, in the same order; the
+    /// description becomes part of the encoded prompt.
+    #[serde(default)]
+    descriptions: Option<Vec<String>>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1130,7 +1146,7 @@ struct JevGroupedOptionInput {
 }
 
 #[derive(serde::Deserialize)]
-struct JevScoreRequest {
+pub struct JevScoreRequest {
     #[serde(default)]
     context: String,
     questions: Vec<JevOptionInput>,
@@ -1152,7 +1168,7 @@ fn default_grouped_mode() -> String {
     "multi_select".to_string()
 }
 
-async fn jev_score(
+pub async fn jev_score(
     State(state): State<AppState>,
     body: Result<Json<JevScoreRequest>, JsonRejection>,
 ) -> Response {
@@ -1166,6 +1182,54 @@ async fn jev_score(
             "questions must contain at least one item".to_string(),
         );
     }
+    if let Backend::Gliner2(gliner2) = state.model.as_ref() {
+        // The label set is caller-supplied, exactly like the other JEV modes,
+        // so the request shape does not change.  Each question is one task:
+        // the question text is the head name, the options are its labels.
+        let tasks: Vec<crate::app::LabelSet> = req
+            .questions
+            .iter()
+            .map(|q| crate::app::LabelSet {
+                name: q.text.clone(),
+                labels: q.options.clone(),
+                descriptions: q.descriptions.clone(),
+                multi_label: q.multi_label,
+                cls_threshold: q.cls_threshold,
+                prompt: q.prompt.clone(),
+            })
+            .collect();
+        let schema = match crate::app::schema_from_label_sets(&tasks) {
+            Ok(schema) => schema,
+            Err(e) => return jev_error(StatusCode::BAD_REQUEST, e),
+        };
+        let tasks = match crate::app::parse_schema(&schema) {
+            Ok(tasks) => tasks,
+            Err(e) => return jev_error(StatusCode::BAD_REQUEST, e),
+        };
+        let model = match crate::models::gliner::GlinerModel::from_source_with_tokenizer(
+            gliner2.source.as_ref(),
+            gliner2.tokenizer.clone(),
+        ) {
+            Ok(model) => model,
+            Err(e) => return jev_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+        };
+        let results = match crate::app::run_gliner2_scoring(
+            &model,
+            &tasks,
+            &req.context,
+            gliner2.n_threads,
+        ) {
+            Ok(r) => r,
+            Err(e) => return jev_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+        };
+        return Json(json!({
+            "mode": "single",
+            "context": req.context,
+            "results": results,
+        }))
+        .into_response();
+    }
+
     let source = match text_source(&state) {
         Ok(s) => s,
         Err(e) => return jev_error(StatusCode::INTERNAL_SERVER_ERROR, e),
@@ -1183,6 +1247,28 @@ async fn jev_score(
 
     let threads = jev_threads(&state);
     let prefill_batch_size = jev_prefill_batch_size(&state);
+
+    // A CLM backend scores by cosine instead of by label logit.  The
+    // heads come from startup (--clm-head), so the request shape is
+    // unchanged and a caller cannot tell the two apart.
+    if let Backend::Clm(clm) = state.model.as_ref() {
+        let results = match crate::app::run_clm_scoring(
+            clm.model.as_ref(),
+            &clm.tokenizer,
+            &clm.heads,
+            &req.context,
+            &questions,
+        ) {
+            Ok(r) => r,
+            Err(e) => return jev_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+        };
+        return Json(json!({
+            "mode": "single",
+            "context": req.context,
+            "results": results,
+        }))
+        .into_response();
+    }
 
     let results = match crate::app::run_jev_decision_data(
         source,
@@ -1279,6 +1365,8 @@ async fn jev_grouped(
 fn text_source(state: &AppState) -> Result<Arc<dyn crate::core::tensor::TensorSource>, String> {
     match state.model.as_ref() {
         Backend::Text(text) => Ok(Arc::clone(&text.source)),
+        // CLM owns an encoder too; it just scores differently.
+        Backend::Clm(clm) => Ok(Arc::clone(&clm.source)),
         other => Err(format!(
             "/v1/jev/* requires a text backend (got {})",
             backend_label(other)
@@ -1291,24 +1379,28 @@ fn backend_label(b: &Backend) -> &'static str {
         Backend::Text(_) => "text",
         Backend::Embedding(_) => "embedding",
         Backend::Asr(_) => "asr",
+        Backend::Audio8(_) => "audio8",
         Backend::Tts(_) => "tts",
         Backend::Rerank(_) => "rerank",
+        Backend::Clm(_) => "clm",
+        Backend::Gliner2(_) => "gliner2",
     }
 }
 
 fn jev_threads(state: &AppState) -> usize {
-    if let Backend::Text(text) = state.model.as_ref() {
-        text.pool.n_threads()
-    } else {
-        1
+    match state.model.as_ref() {
+        Backend::Text(text) => text.pool.n_threads(),
+        Backend::Clm(clm) => clm.model.pool().n_threads(),
+        Backend::Gliner2(gliner2) => gliner2.n_threads,
+        _ => 1,
     }
 }
 
 fn jev_prefill_batch_size(state: &AppState) -> usize {
-    if let Backend::Text(text) = state.model.as_ref() {
-        text.prefill_batch_size
-    } else {
-        64
+    match state.model.as_ref() {
+        Backend::Text(text) => text.prefill_batch_size,
+        Backend::Clm(clm) => clm.prefill_batch_size,
+        _ => 64,
     }
 }
 

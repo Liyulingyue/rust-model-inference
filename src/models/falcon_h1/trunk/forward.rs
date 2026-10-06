@@ -18,8 +18,7 @@ use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::{Kernel, Weight};
 use crate::ops::{
-    f32_slice_to_f16, quantize_q8_0_into, rope_neox_inplace, rope_norm, sample_llama_cpp,
-    softmax_inplace,
+    f32_slice_to_f16, quantize_q8_0_into, rope_norm, sample_llama_cpp, softmax_inplace,
 };
 
 /// Split the fused `ssm_in` projection into [z, xBC, dt]. Layout matches
@@ -289,8 +288,16 @@ impl FalconH1Model {
         let group_size = n_head / n_head_kv;
         let n_attn_q = n_head * head_dim_k;
         let n_attn_kv = n_head_kv * head_dim_k;
-        let n_attn_v = n_head * head_dim_v;
+        // GQA: the V projection and the V cache carry only `n_head_kv`
+        // heads (llama.cpp `n_embd_v_k = n_head_kv * n_embd_head_v`), while
+        // the attention output concatenates all `n_head` heads. Using one
+        // size for both is the bug that broke every Q6_K / Q8_0 Falcon-H1
+        // checkpoint: `attn_v.weight` is `[n_embd, n_head_kv * head_dim_v]`
+        // (256 wide for the 1.5B) but the w_o matmul reads
+        // `n_head * head_dim_v` (1024). The v-buffer / cache use
+        // `n_attn_v_kv`; the output projection uses `n_attn_o`.
         let n_attn_v_kv = n_head_kv * head_dim_v;
+        let n_attn_o = n_head * head_dim_v;
         // Optional per-stage parity probe (build with `--features parity-trace`,
         // see `.agents/skills/adapting-new-models`). The macro and buffers
         // stay compiled in but expand to nothing without the feature so
@@ -380,7 +387,7 @@ impl FalconH1Model {
             let (q, k, v) = (
                 &mut scratch.q_buf[..n_attn_q],
                 &mut scratch.k_buf[..n_attn_kv],
-                &mut scratch.v_buf[..n_attn_v],
+                &mut scratch.v_buf[..n_attn_v_kv],
             );
             quantize_into(
                 &scratch.normed,
@@ -400,7 +407,15 @@ impl FalconH1Model {
                 n_embd,
                 n_attn_kv,
             );
-            self.run_matmul(&*lw.wv.kernel, &scratch.normed, q8, sc, v, n_embd, n_attn_v);
+            self.run_matmul(
+                &*lw.wv.kernel,
+                &scratch.normed,
+                q8,
+                sc,
+                v,
+                n_embd,
+                n_attn_v_kv,
+            );
             par_push!("Qcur", q);
             par_push!("Vcur", v);
             par_push!("Kcur", k);
@@ -442,12 +457,12 @@ impl FalconH1Model {
                 );
             }
             let k_base = layer_idx * scratch.capacity * n_attn_kv;
-            let v_base = layer_idx * scratch.capacity * n_attn_v;
+            let v_base = layer_idx * scratch.capacity * n_attn_v_kv;
             scratch.k[k_base + position * n_attn_kv..k_base + (position + 1) * n_attn_kv]
                 .copy_from_slice(k);
             // Cache V as f16-rounded (matches ggml cache_v storage).
             for (cached, &value) in scratch.v
-                [v_base + position * n_attn_v..v_base + (position + 1) * n_attn_v]
+                [v_base + position * n_attn_v_kv..v_base + (position + 1) * n_attn_v_kv]
                 .iter_mut()
                 .zip(v.iter())
             {
@@ -457,15 +472,15 @@ impl FalconH1Model {
             f32_slice_to_f16(q, &mut scratch.q_f16[..n_attn_q]);
             // Flat K / V f16 caches, sliced per position.
             let k_flat = &mut scratch.k_f16_storage[..(position + 1) * n_attn_kv];
-            let v_flat = &mut scratch.v_f16_storage[..(position + 1) * n_attn_v];
+            let v_flat = &mut scratch.v_f16_storage[..(position + 1) * n_attn_v_kv];
             for j in 0..=position {
                 f32_slice_to_f16(
                     &scratch.k[k_base + j * n_attn_kv..k_base + (j + 1) * n_attn_kv],
                     &mut k_flat[j * n_attn_kv..(j + 1) * n_attn_kv],
                 );
                 f32_slice_to_f16(
-                    &scratch.v[v_base + j * n_attn_v..v_base + (j + 1) * n_attn_v],
-                    &mut v_flat[j * n_attn_v..(j + 1) * n_attn_v],
+                    &scratch.v[v_base + j * n_attn_v_kv..v_base + (j + 1) * n_attn_v_kv],
+                    &mut v_flat[j * n_attn_v_kv..(j + 1) * n_attn_v_kv],
                 );
             }
             let q_f16 = &scratch.q_f16[..n_attn_q];
@@ -492,21 +507,21 @@ impl FalconH1Model {
                 for d in 0..head_dim_v {
                     let col_off = kv_h * head_dim_v + d;
                     for j in 0..=position {
-                        v_col[j] = v_flat[j * n_attn_v + col_off];
+                        v_col[j] = v_flat[j * n_attn_v_kv + col_off];
                     }
                     head_out[d] = dot_f16_ggml(probs_f16, v_col, position + 1);
                 }
             }
             let attn_proj = &mut scratch.attn_proj[..];
             par_push!("kqv_out-0", attn_out);
-            let blocks2 = (n_attn_v + 31) / 32;
+            let blocks2 = (n_attn_o + 31) / 32;
             quantize_q8_0_into(
                 attn_out,
-                n_attn_v,
-                &mut scratch.q8_buf[..n_attn_v],
+                n_attn_o,
+                &mut scratch.q8_buf[..n_attn_o],
                 &mut scratch.scale_buf[..blocks2],
             );
-            let wo_q8 = &scratch.q8_buf[..n_attn_v];
+            let wo_q8 = &scratch.q8_buf[..n_attn_o];
             let wo_sc = &scratch.scale_buf[..blocks2];
             self.run_matmul(
                 &*lw.wo.kernel,
@@ -514,7 +529,7 @@ impl FalconH1Model {
                 wo_q8,
                 wo_sc,
                 attn_proj,
-                n_attn_v,
+                n_attn_o,
                 n_embd,
             );
             par_push!("attn_out-0", attn_proj);
@@ -1086,7 +1101,8 @@ impl FalconH1Scratch {
         let n_embd = config.n_embd;
         let n_attn_q = config.n_head * config.n_embd_head_k;
         let n_attn_kv = config.n_head_kv * config.n_embd_head_k;
-        let n_attn_v = config.n_head * config.n_embd_head_v;
+        let n_attn_v_kv = config.n_head_kv * config.n_embd_head_v;
+        let n_attn_o = config.n_head * config.n_embd_head_v;
         let conv_cols = config.ssm_conv_cols();
         let n_ff = config.n_ff;
         let n_ssm_head = config.ssm_n_head();
@@ -1096,7 +1112,7 @@ impl FalconH1Scratch {
             hidden: vec![0.0; capacity * n_embd],
             normed: vec![0.0; n_embd],
             k: vec![0.0; config.n_layer * capacity * n_attn_kv],
-            v: vec![0.0; config.n_layer * capacity * n_attn_v],
+            v: vec![0.0; config.n_layer * capacity * n_attn_v_kv],
             q8_buf: vec![0u8; n_embd.max(config.ssm_inner_size).max(n_ff)],
             scale_buf: vec![0.0; n_embd.max(config.ssm_inner_size).max(n_ff).div_ceil(32)],
             ssm_conv_hist: vec![0.0; config.n_layer * (config.ssm_conv_kernel - 1) * conv_cols],
@@ -1108,8 +1124,8 @@ impl FalconH1Scratch {
             logits: vec![0.0; config.vocab_size],
             q_buf: vec![0.0; n_attn_q],
             k_buf: vec![0.0; n_attn_kv],
-            v_buf: vec![0.0; n_attn_v],
-            attn_out: vec![0.0; n_attn_v],
+            v_buf: vec![0.0; n_attn_v_kv],
+            attn_out: vec![0.0; n_attn_o],
             attn_proj: vec![0.0; n_embd],
             ssm_proj: vec![0.0; n_embd],
             ssm_in_out: vec![0.0; config.ssm_in_proj_dim()],
@@ -1126,9 +1142,9 @@ impl FalconH1Scratch {
             q_f16: vec![0u16; n_attn_q],
             probs_f16: vec![0u16; capacity],
             v_col: vec![0u16; capacity],
-            // Each (kv slot) holds n_attn_kv (K) or n_attn_v (V) f16 rows.
+            // Each (kv slot) holds n_attn_kv (K) or n_attn_v_kv (V) f16 rows.
             k_f16_storage: vec![0u16; capacity * n_attn_kv],
-            v_f16_storage: vec![0u16; capacity * n_attn_v],
+            v_f16_storage: vec![0u16; capacity * n_attn_v_kv],
         }
     }
 
@@ -1222,7 +1238,7 @@ pub fn run_inference(
     let decode_started = std::time::Instant::now();
     for step in 0..max_tokens {
         crate::ops::apply_repetition_penalty(&mut logits, &token_counts, repetition_penalty);
-        let next_token = sample_argmax(&logits, temperature);
+        let next_token = sample_falcon_h1(&logits, temperature);
         if Some(next_token) == tokenizer.eos_id() {
             break;
         }
@@ -1253,7 +1269,10 @@ pub fn run_inference(
 
 /// Greedy decode if `temperature <= 0.0`; otherwise sample with
 /// llama.cpp's chain (temperature + top-k 0 + top-p 1.0).
-fn sample_argmax(logits: &[f32], temperature: f32) -> u32 {
+///
+/// Public(`crate`) so the HTTP `TextRuntime` adapter samples identically
+/// to the CLI instead of re-deriving a second sampler that would drift.
+pub(crate) fn sample_falcon_h1(logits: &[f32], temperature: f32) -> u32 {
     if temperature <= 0.0 {
         let mut best = f32::NEG_INFINITY;
         let mut idx = 0u32;

@@ -1,7 +1,7 @@
 //! Qwen3.5 (hybrid Mamba SSM + dense attention) inference.
 //!
 //! Per [`MODEL_ORGANIZATION.md`](../../../../docs/MODEL_ORGANIZATION.md) §2:
-//! - `trunk/` contains the pure LLM decoder (`Qwen35Model` + `Qwen35Session`).
+//! - `trunk/` contains the hybrid attention/SSM decoder shared with Edge0.
 //! - `vision/` is a sibling — vision encoder for VL inputs.
 //!
 //! ## Public surface

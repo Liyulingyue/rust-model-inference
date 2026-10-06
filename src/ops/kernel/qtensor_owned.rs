@@ -56,6 +56,11 @@ pub enum QTensorOwned {
         n_cols: usize,
         n_rows: usize,
     },
+    Q5_0 {
+        data: Vec<u8>,
+        n_cols: usize,
+        n_rows: usize,
+    },
     Q5_K {
         data: Vec<u8>,
         n_cols: usize,
@@ -77,6 +82,7 @@ impl QTensorOwned {
             | Self::BF16 { n_cols, .. }
             | Self::Q8_0 { n_cols, .. }
             | Self::Q4_K { n_cols, .. }
+            | Self::Q5_0 { n_cols, .. }
             | Self::Q5_K { n_cols, .. }
             | Self::Q6_K { n_cols, .. } => *n_cols,
         }
@@ -95,6 +101,7 @@ impl QTensorOwned {
             | Self::BF16 { n_rows, .. }
             | Self::Q8_0 { n_rows, .. }
             | Self::Q4_K { n_rows, .. }
+            | Self::Q5_0 { n_rows, .. }
             | Self::Q5_K { n_rows, .. }
             | Self::Q6_K { n_rows, .. } => *n_rows,
         }
@@ -108,6 +115,7 @@ impl QTensorOwned {
             Self::BF16 { .. } => GGMLType::BF16,
             Self::Q8_0 { .. } => GGMLType::Q8_0,
             Self::Q4_K { .. } => GGMLType::Q4K,
+            Self::Q5_0 { .. } => GGMLType::Q5_0,
             Self::Q5_K { .. } => GGMLType::Q5K,
             Self::Q6_K { .. } => GGMLType::Q6K,
         }
@@ -148,6 +156,11 @@ impl QTensorOwned {
                 n_rows,
             },
             GGMLType::Q4K => Self::Q4_K {
+                data: data.to_vec(),
+                n_cols,
+                n_rows,
+            },
+            GGMLType::Q5_0 => Self::Q5_0 {
                 data: data.to_vec(),
                 n_cols,
                 n_rows,
@@ -203,6 +216,15 @@ impl QTensorOwned {
                 n_cols,
                 n_rows,
             },
+            QuantizedTensor::Q5_0 {
+                data,
+                n_cols,
+                n_rows,
+            } => Self::Q5_0 {
+                data: data.to_vec(),
+                n_cols,
+                n_rows,
+            },
             QuantizedTensor::Q5_K {
                 data,
                 n_cols,
@@ -240,6 +262,15 @@ impl QTensorOwned {
             | QuantizedTensor::IQ1M { .. }
             | QuantizedTensor::IQ1S { .. } => {
                 panic!("Q4_0 / Q4_1 / I-quant not yet supported in QTensorOwned")
+            }
+            // BitNet I2_S — see the BitLinear forward in
+            // `src/ops/bitnet/forward.rs`. The BitLinear path doesn't go
+            // through QTensorOwned (it uses `BitLinearWeights::weight`
+            // raw bytes directly), so `from_quantized(I2S)` is
+            // unreachable in practice. Panic with a clear hint if
+            // it ever fires.
+            QuantizedTensor::I2S { .. } => {
+                panic!("I2_S QTensorOwned unsupported: BitLinear forward uses raw bytes, not this path")
             }
         }
     }
@@ -315,7 +346,7 @@ impl crate::ops::kernel::Kernel for QTensorOwned {
         // Same SIMD dispatch as `QuantizedTensor<'a>` (which routes through
         // `clone_to_kernel`). The data is `.as_slice()` from a Vec, identical
         // SIMD function as borrowed bytes.
-        use crate::ops::kernel::{bf16, f16, f32, q4_k, q5_k, q6_k};
+        use crate::ops::kernel::{bf16, f16, f32, q4_k, q5_0, q5_k, q6_k};
         match self {
             Self::F32 { data, n_cols, .. } => {
                 Box::new(f32::F32Kernel::new(data.clone(), *n_cols, 1)).forward_prequantized(
@@ -363,6 +394,10 @@ impl crate::ops::kernel::Kernel for QTensorOwned {
                     nth,
                 );
             }
+            Self::Q5_0 { data, .. } => {
+                let kernel = q5_0::Q5_0Kernel::new(data.as_slice(), n_in, n_out);
+                kernel.forward_prequantized(input_q8, input_scales, output, n_in, n_out, ith, nth);
+            }
         }
     }
 
@@ -378,7 +413,7 @@ impl crate::ops::kernel::Kernel for QTensorOwned {
         ith: usize,
         nth: usize,
     ) {
-        use crate::ops::kernel::{bf16, f16, f32, q4_k, q5_k, q6_k};
+        use crate::ops::kernel::{bf16, f16, f32, q4_k, q5_0, q5_k, q6_k};
         match self {
             Self::F32 { data, n_cols, .. } => {
                 Box::new(f32::F32Kernel::new(data.clone(), *n_cols, 1)).forward_prepared(
@@ -451,6 +486,20 @@ impl crate::ops::kernel::Kernel for QTensorOwned {
             }
             Self::Q6_K { data, .. } => {
                 Box::new(q6_k::Q6_KKernel::new(data.as_slice(), n_in, n_out)).forward_prepared(
+                    input_f32,
+                    input_q8,
+                    input_scales,
+                    q8_k,
+                    output,
+                    n_in,
+                    n_out,
+                    ith,
+                    nth,
+                );
+            }
+            Self::Q5_0 { data, .. } => {
+                let kernel = q5_0::Q5_0Kernel::new(data.as_slice(), n_in, n_out);
+                kernel.forward_prepared(
                     input_f32,
                     input_q8,
                     input_scales,
@@ -576,6 +625,9 @@ impl QTensorOwned {
                     let row_data = &data[o * blocks_per_row * BLOCK_Q6K_SIZE..];
                     output[o - row_start] = vec_dot_q6k_q8k(row_data, &q8k);
                 }
+            }
+            Self::Q5_0 { .. } => {
+                panic!("Q5_0 matmul_into_with_q8k is unsupported (Q5_0 uses the Q8-prequantized path); see forward_prequantized")
             }
         }
     }
@@ -742,7 +794,11 @@ impl QTensorOwned {
 
         match self {
             Self::Q4_K { n_cols, .. } | Self::Q5_K { n_cols, .. } | Self::Q6_K { n_cols, .. } => {
-                let blocks = *n_cols / crate::ops::quant::QK_K;
+                // n_cols may not be a QK_K multiple (e.g. GLM-4 ffn_down
+                // is 13696 = 53*256 + 128); use div_ceil so the partial
+                // 128-sample tail is handled by the scalar Q8_K
+                // quantizer's zero-pad.
+                let blocks = (*n_cols).div_ceil(crate::ops::quant::QK_K);
                 quantize_row_q8_k_into(input, &mut q8k_buf[..blocks]);
                 self.matmul_with_q8k_into_buf_pooled(&q8k_buf[..blocks], buf, pool);
             }
@@ -803,6 +859,15 @@ impl QTensorOwned {
                         }
                     });
                 }
+            }
+            Self::Q5_0 { .. } => {
+                // Q5_0 goes through the Q8-prequantized forward path
+                // (`forward_prequantized` / `Kernel::forward`). Dispatch
+                // by re-routing to `Kernel::forward` is unnecessary here
+                // because all real callers already use the right entry
+                // point; this arm exists only to satisfy the exhaustive
+                // match contract.
+                panic!("QTensorOwned::Q5_0 should be exercised via Kernel::forward_prequantized, not matmul_into_pooled")
             }
         }
     }
@@ -874,6 +939,9 @@ impl QTensorOwned {
                     n_cols,
                     n_rows,
                 }
+            }
+            Self::Q5_0 { .. } => {
+                panic!("QTensorOwned::dequant_to_f32 for Q5_0 is not yet wired; see q5_0::scalar::matmul_q5_0_scalar_range")
             }
             Self::Q6_K {
                 data,

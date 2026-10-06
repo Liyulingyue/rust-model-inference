@@ -102,7 +102,8 @@ pub fn run_longcat_image_edit(
         trace_longcat("ref_image", &planar, &[side, side, 3, 1])?;
     }
     let text_source: Arc<dyn TensorSource> = Arc::new(LongCatTextSource::open(component_root)?);
-    let mut vision = VisionEncoder::from_source(text_source.as_ref())?;
+    let mut vision =
+        VisionEncoder::from_source(text_source.as_ref(), Arc::clone(&vision_pool))?;
     // LongCat's reference-image preset uses 384^2..560^2 pixels for the VLM.
     vision.config.image_min_pixels = 384 * 384;
     vision.config.image_max_pixels = 560 * 560;
@@ -320,6 +321,141 @@ pub fn run_z_image_cli(
     write_png_atomically(&out, &rgb)?;
     println!(
         "Z-Image PNG saved to {} in {}ms",
+        out.display(),
+        started.elapsed().as_millis()
+    );
+    Ok(())
+}
+
+pub fn run_auk_cli(
+    diffusion: Arc<dyn TensorSource>,
+    vae: Arc<dyn TensorSource>,
+    text: Option<Arc<dyn TensorSource>>,
+    prompt: &str,
+    steps: usize,
+    sample_rate: usize,
+    seed: i64,
+    out: std::path::PathBuf,
+    n_threads: usize,
+) -> Result<(), String> {
+    let started = Instant::now();
+    let pipeline =
+        crate::models::diffusion::auk::AukPipeline::load(diffusion, vae, text, n_threads)?;
+    println!(
+        "AuK components loaded in {}ms",
+        started.elapsed().as_millis()
+    );
+    let duration_sec = 1usize;
+    let audio = pipeline.generate_audio(
+        prompt,
+        &crate::models::diffusion::auk::AukOptions {
+            steps,
+            sample_rate: sample_rate as u32,
+            duration_sec,
+            seed,
+            guidance_scale: 2.0,
+            instruct: None,
+        },
+    )?;
+    write_wav(&out, &audio)?;
+    println!(
+        "AuK audio written to {} ({} samples @ {} Hz) in {}ms",
+        out.display(),
+        audio.samples.len(),
+        audio.sample_rate,
+        started.elapsed().as_millis(),
+    );
+    Ok(())
+}
+
+fn write_wav(
+    path: &std::path::Path,
+    audio: &crate::models::diffusion::auk::AukAudio,
+) -> Result<(), String> {
+    use std::io::Write;
+    let mut file = std::fs::File::create(path)
+        .map_err(|e| format!("Failed to create {}: {e}", path.display()))?;
+    let sample_rate = audio.sample_rate as u32;
+    let channels = audio.channels as u16;
+    let bits_per_sample: u16 = 16;
+    let byte_rate = sample_rate * channels as u32 * bits_per_sample as u32 / 8;
+    let block_align = channels * bits_per_sample / 8;
+    let data_len = (audio.samples.len() * 2) as u32;
+    let fmt_chunk_size: u32 = 16;
+    let riff_size: u32 = 4 + (8 + fmt_chunk_size) + (8 + data_len);
+    file.write_all(b"RIFF").map_err(|e| e.to_string())?;
+    file.write_all(&riff_size.to_le_bytes())
+        .map_err(|e| e.to_string())?;
+    file.write_all(b"WAVE").map_err(|e| e.to_string())?;
+    file.write_all(b"fmt ").map_err(|e| e.to_string())?;
+    file.write_all(&fmt_chunk_size.to_le_bytes())
+        .map_err(|e| e.to_string())?;
+    file.write_all(&1u16.to_le_bytes())
+        .map_err(|e| e.to_string())?; // PCM
+    file.write_all(&channels.to_le_bytes())
+        .map_err(|e| e.to_string())?;
+    file.write_all(&sample_rate.to_le_bytes())
+        .map_err(|e| e.to_string())?;
+    file.write_all(&byte_rate.to_le_bytes())
+        .map_err(|e| e.to_string())?;
+    file.write_all(&block_align.to_le_bytes())
+        .map_err(|e| e.to_string())?;
+    file.write_all(&bits_per_sample.to_le_bytes())
+        .map_err(|e| e.to_string())?;
+    file.write_all(b"data").map_err(|e| e.to_string())?;
+    file.write_all(&data_len.to_le_bytes())
+        .map_err(|e| e.to_string())?;
+    for sample in &audio.samples {
+        let scaled = (*sample * 32_768.0).clamp(-32_768.0, 32_767.0) as i16;
+        file.write_all(&scaled.to_le_bytes())
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+pub fn run_ernie_image_cli(
+    diffusion: Arc<dyn TensorSource>,
+    text: Arc<dyn TensorSource>,
+    vae: Arc<dyn TensorSource>,
+    prompt: &str,
+    steps: usize,
+    resolution: usize,
+    seed: i64,
+    cfg_scale: f32,
+    out: std::path::PathBuf,
+    n_threads: usize,
+) -> Result<(), String> {
+    use crate::models::diffusion::ernie_image::{
+        ErnieImageOptions, ErnieImagePipeline, ErnieImageRgb,
+    };
+    let started = Instant::now();
+    let pipeline = ErnieImagePipeline::load(diffusion, text, vae, n_threads)?;
+    println!(
+        "ERNIE-Image components loaded in {}ms",
+        started.elapsed().as_millis()
+    );
+    let rgb = pipeline.generate_rgb(
+        prompt,
+        &ErnieImageOptions {
+            steps,
+            resolution,
+            seed,
+            cfg_scale,
+        },
+    )?;
+    let z_rgb = ZImageRgb {
+        width: rgb.width,
+        height: rgb.height,
+        bytes: rgb.bytes,
+    };
+    write_png_atomically(&out, &z_rgb)?;
+    let _ = ErnieImageRgb {
+        width: 0,
+        height: 0,
+        bytes: Vec::new(),
+    };
+    println!(
+        "ERNIE-Image PNG saved to {} in {}ms",
         out.display(),
         started.elapsed().as_millis()
     );

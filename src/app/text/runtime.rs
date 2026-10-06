@@ -8,8 +8,7 @@
 //!   MiniCPM5, driving `LlamaSession::forward_logits_per_token`.
 //! * [`Qwen3TextRuntime`] — qwen3 / qwen3vl text-only, driving the existing
 //!   `generate_streaming_until` (already sink-shaped).
-//! * [`Qwen35TextRuntime`] — qwen35, building a per-request session from a
-//!   held `Mutex<Qwen35Model>` (the model needs `&mut self` on step).
+//! * [`HybridTextRuntime`] — qwen35 / edge0, with explicit model dispatch.
 //! * [`Lfm2MoeTextRuntime`] — lfm2moe, driving `forward_token`.
 //!
 //! The HTTP layer calls [`build_text_runtime`] once at startup and then only
@@ -150,10 +149,14 @@ pub fn build_text_runtime(
         // surface (the CLI's `run_qwen3_family_multimodal` covers them too);
         // only the projector family differs, which the image path handles.
         Ok(Box::new(Qwen3TextRuntime::new(options)?))
-    } else if arch == "qwen35" {
-        Ok(Box::new(Qwen35TextRuntime::new(options)?))
+    } else if matches!(arch, "qwen35" | "edge0") {
+        Ok(Box::new(HybridTextRuntime::new(options)?))
     } else if arch == "lfm2moe" {
         Ok(Box::new(Lfm2MoeTextRuntime::new(options)?))
+    } else if arch == "falcon-h1" {
+        Ok(Box::new(
+            crate::models::falcon_h1::runtime::FalconH1TextRuntime::new(options)?,
+        ))
     } else {
         Err(format!("No TextRuntime adapter for architecture {arch}"))
     }
@@ -600,14 +603,12 @@ impl Qwen3TextRuntime {
 }
 
 // ---------------------------------------------------------------------------
-// qwen35
+// qwen35 / edge0
 // ---------------------------------------------------------------------------
 
-pub struct Qwen35TextRuntime {
-    // Qwen35Model needs `&mut self` on step (Vulkan state), so it lives in a
-    // Mutex exactly like the old `TextInner::Qwen35`; a fresh session is
-    // borrowed from it per request because `Qwen35Session` holds `&mut Model`.
-    model: Mutex<crate::models::qwen35::Qwen35Model<'static>>,
+pub struct HybridTextRuntime {
+    // A fresh session borrows the selected model mutably per request.
+    model: Mutex<crate::models::hybrid::HybridTextModel<'static>>,
     _source: Arc<dyn TensorSource>,
     tokenizer: Arc<crate::core::tokenizer::BPETokenizer>,
     pool: Arc<crate::core::thread_pool::ComputePool>,
@@ -618,13 +619,14 @@ pub struct Qwen35TextRuntime {
     arch: String,
 }
 
-impl Qwen35TextRuntime {
+impl HybridTextRuntime {
     pub fn new(options: RuntimeOptions) -> Result<Self, String> {
         let source = options.source.clone();
-        let model = crate::models::qwen35::Qwen35Model::from_source(source.as_ref())?;
+        let model = crate::models::hybrid::HybridTextModel::from_source(source.as_ref())?;
         // SAFETY: source outlives the runtime (see LlamaTextRuntime::new).
-        let model: crate::models::qwen35::Qwen35Model<'static> =
+        let model: crate::models::hybrid::HybridTextModel<'static> =
             unsafe { std::mem::transmute(model) };
+        let arch = arch_of(&source);
         Ok(Self {
             model: Mutex::new(model),
             _source: source,
@@ -633,12 +635,12 @@ impl Qwen35TextRuntime {
             prefill_batch_size: options.prefill_batch_size,
             mmproj: options.mmproj.clone(),
             threads: options.threads,
-            arch: "qwen35".to_string(),
+            arch,
         })
     }
 }
 
-impl TextRuntime for Qwen35TextRuntime {
+impl TextRuntime for HybridTextRuntime {
     fn arch(&self) -> &str {
         &self.arch
     }
@@ -646,7 +648,7 @@ impl TextRuntime for Qwen35TextRuntime {
     fn context_length(&self) -> usize {
         self.model
             .lock()
-            .map(|model| model.config.n_ctx)
+            .map(|model| model.trunk().config.n_ctx)
             .unwrap_or(0)
     }
 
@@ -655,6 +657,9 @@ impl TextRuntime for Qwen35TextRuntime {
         request: &GenerationRequest,
         sink: &mut dyn TokenSink,
     ) -> Result<GeneratedText, String> {
+        if self.arch == "edge0" && !request.images.is_empty() {
+            return Err("Edge0-35B preview contains no vision weights; text input only".into());
+        }
         // Image path: expand the prompt with vision placeholders, inject the
         // projected embeddings, and prefill through `session.step` (which takes
         // embeddings rather than token ids). Mirrors the CLI multimodal path.
@@ -672,8 +677,8 @@ impl TextRuntime for Qwen35TextRuntime {
             self.prepare_image_prefill(&request.token_ids, &request.images)?
         };
         let mut model = self.model.lock().map_err(|e| e.to_string())?;
-        let mut session = crate::models::qwen35::Qwen35Session::new_with_prefill_batch_size(
-            &mut model,
+        let mut session = crate::models::qwen35::trunk::HybridSession::new_with_prefill_batch_size(
+            &mut *model,
             prefill_ids.len() + request.max_new_tokens,
             self.prefill_batch_size,
             self.pool.clone(),
@@ -1010,7 +1015,7 @@ mod tests {
     }
 }
 
-impl Qwen35TextRuntime {
+impl HybridTextRuntime {
     /// Encode the request's images and expand the prompt for vision prefill.
     ///
     /// Returns `(ids, embeddings, positions)`: `ids` is the prompt with
@@ -1037,7 +1042,7 @@ impl Qwen35TextRuntime {
         let n_embd = self
             .model
             .lock()
-            .map(|model| model.config.n_embd)
+            .map(|model| model.trunk().config.n_embd)
             .unwrap_or(0);
         if n_embd == 0 {
             return Err("Qwen3.5 config has n_embd = 0".into());
@@ -1126,7 +1131,7 @@ impl Qwen35TextRuntime {
             .collect::<Result<_, _>>()?;
         let model = self.model.lock().map_err(|e| e.to_string())?;
         let embeddings = crate::app::text::vision::inject_vision_embeddings(
-            &model,
+            model.trunk(),
             &prompt_i32,
             Some(i32::try_from(image_pad).map_err(|_| "image_pad exceeds i32")?),
             &projected,

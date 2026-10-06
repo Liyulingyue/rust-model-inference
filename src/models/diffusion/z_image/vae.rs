@@ -3,6 +3,7 @@ use super::{validate_component, Component, ZImageRgb};
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::ops::{dot_f16_f16_bytes, f32_to_f16, silu_inplace, softmax_inplace};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 const LATENT_CHANNELS: usize = 16;
@@ -15,6 +16,7 @@ struct VaeConv {
     input_channels: usize,
     output_channels: usize,
     kernel: usize,
+    linear: Option<Vec<f32>>,
 }
 
 impl VaeConv {
@@ -25,12 +27,22 @@ impl VaeConv {
         output_channels: usize,
         kernel: usize,
     ) -> Result<Self, String> {
+        let weight = format!("{prefix}.weight");
+        let linear = if source
+            .tensor_info(&weight)
+            .is_some_and(|info| info.ggml_type == crate::core::tensor::GGMLType::F32)
+        {
+            Some(load_f32(source, &weight, input_channels * output_channels)?)
+        } else {
+            None
+        };
         Ok(Self {
-            weight: format!("{prefix}.weight"),
+            weight,
             bias: load_f32(source, &format!("{prefix}.bias"), output_channels)?,
             input_channels,
             output_channels,
             kernel,
+            linear,
         })
     }
 }
@@ -229,6 +241,7 @@ pub(crate) struct FluxVae {
     norm_out: VaeNorm,
     conv_out: VaeConv,
     encoder: Option<FluxVaeEncoder>,
+    post_quant_conv: Option<VaeConv>,
 }
 
 impl FluxVae {
@@ -237,7 +250,7 @@ impl FluxVae {
         pool: Arc<ComputePool>,
     ) -> Result<Self, String> {
         validate_component(source.as_ref(), Component::Vae)?;
-        Self::load_decoder(source, pool)
+        Self::load_decoder(source, pool, 16, None)
     }
 
     pub(crate) fn load_longcat(
@@ -245,13 +258,27 @@ impl FluxVae {
         pool: Arc<ComputePool>,
     ) -> Result<Self, String> {
         let encoder = FluxVaeEncoder::load(source.as_ref())?;
-        let mut vae = Self::load_decoder(source, pool)?;
+        let mut vae = Self::load_decoder(source, pool, 16, None)?;
         vae.encoder = Some(encoder);
         Ok(vae)
     }
 
-    fn load_decoder(source: Arc<dyn TensorSource>, pool: Arc<ComputePool>) -> Result<Self, String> {
-        let conv_in = VaeConv::load(source.as_ref(), "decoder.conv_in", 16, 512, 3)?;
+    pub(crate) fn load_flux2(
+        source: Arc<dyn TensorSource>,
+        pool: Arc<ComputePool>,
+    ) -> Result<Self, String> {
+        super::validate_flux2_vae(source.as_ref())?;
+        let post_quant_conv = VaeConv::load(source.as_ref(), "post_quant_conv", 32, 32, 1)?;
+        Self::load_decoder(source, pool, 32, Some(post_quant_conv))
+    }
+
+    fn load_decoder(
+        source: Arc<dyn TensorSource>,
+        pool: Arc<ComputePool>,
+        channels: usize,
+        post_quant_conv: Option<VaeConv>,
+    ) -> Result<Self, String> {
+        let conv_in = VaeConv::load(source.as_ref(), "decoder.conv_in", channels, 512, 3)?;
         let mid_block_1 = VaeResidualBlock::load(source.as_ref(), "decoder.mid.block_1", 512, 512)?;
         let mid_attention = VaeAttention::load(source.as_ref(), "decoder.mid.attn_1", 512)?;
         let mid_block_2 = VaeResidualBlock::load(source.as_ref(), "decoder.mid.block_2", 512, 512)?;
@@ -302,6 +329,7 @@ impl FluxVae {
             norm_out,
             conv_out,
             encoder: None,
+            post_quant_conv,
         })
     }
 
@@ -427,18 +455,32 @@ impl FluxVae {
         diffusion_latent: &[f32],
         latent_side: usize,
     ) -> Result<ZImageRgb, String> {
+        let mapped: Vec<f32> = diffusion_latent
+            .iter()
+            .copied()
+            .map(diffusion_to_vae)
+            .collect();
+        self.decode_mapped_rgb(&mapped, latent_side)
+    }
+
+    pub(crate) fn decode_mapped_rgb(
+        &self,
+        mapped_latent: &[f32],
+        latent_side: usize,
+    ) -> Result<ZImageRgb, String> {
         if latent_side == 0 {
             return Err("Z-Image VAE latent side must be positive".into());
         }
         let latent_spatial = checked_spatial(latent_side, "VAE latent")?;
-        let expected_latent = checked_feature_len(LATENT_CHANNELS, latent_spatial, "VAE latent")?;
-        if diffusion_latent.len() != expected_latent {
+        let expected_latent =
+            checked_feature_len(self.conv_in.input_channels, latent_spatial, "VAE latent")?;
+        if mapped_latent.len() != expected_latent {
             return Err(format!(
                 "Invalid Z-Image VAE latent length: expected {expected_latent}, got {}",
-                diffusion_latent.len()
+                mapped_latent.len()
             ));
         }
-        if diffusion_latent.iter().any(|value| !value.is_finite()) {
+        if mapped_latent.iter().any(|value| !value.is_finite()) {
             return Err("Z-Image VAE latent contains NaN or infinity".into());
         }
         let output_side = latent_side
@@ -450,8 +492,8 @@ impl FluxVae {
         checked_feature_len(3, output_spatial, "VAE RGB output")?;
 
         let mut current = reserve_f32("VAE mapped latent", expected_latent)?;
-        for (output, input) in current.iter_mut().zip(diffusion_latent) {
-            *output = diffusion_to_vae(*input);
+        for (output, input) in current.iter_mut().zip(mapped_latent) {
+            *output = *input;
             if !output.is_finite() {
                 return Err("Z-Image VAE mapped latent contains NaN or infinity".into());
             }
@@ -460,10 +502,33 @@ impl FluxVae {
         crate::parity_trace::report(crate::parity_trace::checkpoint(
             "z_image.vae.mapped_latent",
             None,
-            &[latent_side, latent_side, LATENT_CHANNELS],
+            &[latent_side, latent_side, self.conv_in.input_channels],
             &current,
         ));
         let mut scratch = VaeScratch::new();
+        if let Some(conv) = &self.post_quant_conv {
+            resize_f32(
+                &mut scratch.first,
+                "Flux2 post-quant output",
+                expected_latent,
+            )?;
+            run_conv(
+                self.source.as_ref(),
+                &self.pool,
+                conv,
+                &current,
+                latent_side,
+                &mut scratch.first,
+            )?;
+            std::mem::swap(&mut current, &mut scratch.first);
+            #[cfg(feature = "parity-trace")]
+            crate::parity_trace::report(crate::parity_trace::checkpoint(
+                "z_image.vae.post_quant",
+                None,
+                &[latent_side, latent_side, self.conv_in.input_channels],
+                &current,
+            ));
+        }
         let t_vae_total = std::time::Instant::now();
         let _t_vae_map = std::time::Instant::now().elapsed();
         let mid_len = checked_feature_len(512, latent_spatial, "VAE middle feature")?;
@@ -778,7 +843,21 @@ impl FluxVae {
             side,
             &mut scratch.v,
         )?;
-        one_head_spatial_attention_into(
+        #[cfg(feature = "parity-trace")]
+        for (name, values) in [
+            ("norm", &scratch.first),
+            ("q", &scratch.q),
+            ("k", &scratch.k),
+            ("v", &scratch.v),
+        ] {
+            crate::parity_trace::report(crate::parity_trace::checkpoint(
+                &format!("z_image.vae.{name}"),
+                None,
+                &[side, side, 512],
+                values,
+            ));
+        }
+        one_head_spatial_attention_parallel_into(
             &scratch.q,
             &scratch.k,
             &scratch.v,
@@ -786,8 +865,16 @@ impl FluxVae {
             spatial,
             &mut scratch.first,
             &mut scratch.scores,
+            &self.pool,
         )?;
-        run_attention_projection(
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "z_image.vae.attention_values",
+            None,
+            &[side, side, 512],
+            &scratch.first,
+        ));
+        run_conv(
             self.source.as_ref(),
             &self.pool,
             &attention.proj_out,
@@ -863,6 +950,41 @@ fn run_conv(
     side: usize,
     output: &mut [f32],
 ) -> Result<(), String> {
+    if let Some(linear) = &conv.linear {
+        let spatial = checked_spatial(side, "VAE linear")?;
+        if side == 0
+            || input.len() != conv.input_channels * spatial
+            || output.len() != conv.output_channels * spatial
+        {
+            return Err("Invalid VAE linear shape".into());
+        }
+        let output_ptr = output.as_mut_ptr() as usize;
+        pool.compute(move |ith, nth| {
+            let mut row = vec![0.; conv.input_channels];
+            for pixel in (ith..spatial).step_by(nth) {
+                for channel in 0..conv.input_channels {
+                    row[channel] = input[channel * spatial + pixel];
+                }
+                for channel in 0..conv.output_channels {
+                    let start = channel * conv.input_channels;
+                    let projected = crate::ops::dot_f32(
+                        &row,
+                        &linear[start..start + conv.input_channels],
+                        conv.input_channels,
+                    );
+                    // Workers own disjoint pixels across every output channel.
+                    unsafe {
+                        *(output_ptr as *mut f32).add(channel * spatial + pixel) =
+                            projected + conv.bias[channel];
+                    }
+                }
+            }
+        });
+        if output.iter().any(|value| !value.is_finite()) {
+            return Err("Non-finite VAE linear output".into());
+        }
+        return Ok(());
+    }
     let weights = source
         .tensor_slice(&conv.weight)
         .ok_or_else(|| format!("Missing tensor data: {}", conv.weight))?;
@@ -1200,7 +1322,6 @@ fn conv_f16_parallel_into(
     let bias_values_usize = bias_values.as_ptr() as usize;
     let bias_values_len = bias_values.len();
     let output_usize = output.as_mut_ptr() as usize;
-    let output_len = output.len();
     let padding = kernel / 2;
     let padding_signed = padding as isize;
     let side_signed = side as isize;
@@ -1219,8 +1340,7 @@ fn conv_f16_parallel_into(
         };
         let bias_values_local =
             unsafe { std::slice::from_raw_parts(bias_values_usize as *const f32, bias_values_len) };
-        let output_local =
-            unsafe { std::slice::from_raw_parts_mut(output_usize as *mut f32, output_len) };
+        let output_ptr = output_usize as *mut f32;
         let mut patch = vec![0u16; patch_len];
         for pixel in start..end {
             let output_y = pixel / side;
@@ -1244,12 +1364,21 @@ fn conv_f16_parallel_into(
                                 kernel_x + kernel * (kernel_y + kernel * input_channel);
                             patch[patch_index] = f32_to_f16(value);
                         }
+                    } else {
+                        for input_channel in 0..input_channels {
+                            let patch_index =
+                                kernel_x + kernel * (kernel_y + kernel * input_channel);
+                            patch[patch_index] = 0;
+                        }
                     }
                 }
             }
             for oc in 0..output_channels {
                 let dot = dot_f16_f16_bytes(&patch, weight_rows_local[oc], patch_len);
-                output_local[oc * spatial + pixel] = dot + bias_values_local[oc];
+                // Workers own disjoint pixels across every output channel.
+                unsafe {
+                    *output_ptr.add(oc * spatial + pixel) = dot + bias_values_local[oc];
+                }
             }
         }
     });
@@ -1439,8 +1568,16 @@ fn one_head_spatial_attention_into(
     output.fill(0.0);
     let scale = 1.0 / (channels as f32).sqrt();
     let scalar = crate::ops::scalar_mode();
+    let mut query = vec![0.; channels];
+    let mut key = vec![0.; channels];
     for query_position in 0..spatial {
+        for channel in 0..channels {
+            query[channel] = q[channel * spatial + query_position];
+        }
         for key_position in 0..spatial {
+            for channel in 0..channels {
+                key[channel] = k[channel * spatial + key_position];
+            }
             let score = if scalar {
                 let mut sum = 0.0f64;
                 for channel in 0..channels {
@@ -1449,12 +1586,7 @@ fn one_head_spatial_attention_into(
                 }
                 sum as f32 * scale
             } else {
-                let mut sum = 0.0f32;
-                for channel in 0..channels {
-                    sum +=
-                        q[channel * spatial + query_position] * k[channel * spatial + key_position];
-                }
-                sum * scale
+                crate::ops::dot_f32(&query, &key, channels) * scale
             };
             if !score.is_finite() {
                 return Err("Non-finite VAE attention score".into());
@@ -1473,17 +1605,116 @@ fn one_head_spatial_attention_into(
                 }
                 sum as f32
             } else {
-                let mut sum = 0.0f32;
-                for key_position in 0..spatial {
-                    sum += scores[key_position] * v[channel * spatial + key_position];
-                }
-                sum
+                crate::ops::dot_f32(
+                    scores,
+                    &v[channel * spatial..(channel + 1) * spatial],
+                    spatial,
+                )
             };
             if !value.is_finite() {
                 return Err("Non-finite VAE attention output".into());
             }
             output[channel * spatial + query_position] = value;
         }
+    }
+    Ok(())
+}
+
+/// Runs the VAE's single-head spatial attention by partitioning query rows.
+///
+/// A query row only reads Q/K/V and writes its own spatial positions in the
+/// output, so query rows are independent. Keeping the dot-product and softmax
+/// loops unchanged preserves the scalar result for each row while allowing
+/// the existing inference pool to process rows concurrently.
+fn one_head_spatial_attention_parallel_into(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    channels: usize,
+    spatial: usize,
+    output: &mut [f32],
+    scores: &mut [f32],
+    pool: &Arc<ComputePool>,
+) -> Result<(), String> {
+    if pool.n_threads() <= 1 {
+        return one_head_spatial_attention_into(q, k, v, channels, spatial, output, scores);
+    }
+    let feature_len = checked_feature_len(channels, spatial, "VAE attention")?;
+    if channels == 0
+        || spatial == 0
+        || q.len() != feature_len
+        || k.len() != feature_len
+        || v.len() != feature_len
+        || output.len() != feature_len
+        || scores.len() != spatial
+    {
+        return Err("Invalid VAE attention buffer length".into());
+    }
+    if q.iter().chain(k).chain(v).any(|value| !value.is_finite()) {
+        return Err("Non-finite VAE attention input".into());
+    }
+    output.fill(0.0);
+    let scale = 1.0 / (channels as f32).sqrt();
+    let output_ptr = output.as_mut_ptr() as usize;
+    let failure = AtomicBool::new(false);
+    let worker_failure = &failure;
+
+    // SAFETY: each worker receives a disjoint query-position range. It only
+    // reads q/k/v and writes output[channel * spatial + query_position] for
+    // positions in that range. The source slices and output outlive compute.
+    pool.compute(move |ith, nth| {
+        let per_thread = spatial.div_ceil(nth);
+        let start = ith * per_thread;
+        let end = (start + per_thread).min(spatial);
+        if start >= end {
+            return;
+        }
+        let mut local_scores = vec![0.0f32; spatial];
+        let mut query = vec![0.; channels];
+        let mut key = vec![0.; channels];
+
+        for query_position in start..end {
+            for channel in 0..channels {
+                query[channel] = q[channel * spatial + query_position];
+            }
+            for key_position in 0..spatial {
+                for channel in 0..channels {
+                    key[channel] = k[channel * spatial + key_position];
+                }
+                let score = crate::ops::dot_f32(&query, &key, channels) * scale;
+                if !score.is_finite() {
+                    worker_failure.store(true, Ordering::Relaxed);
+                    return;
+                }
+                local_scores[key_position] = score;
+            }
+            vae_softmax_inplace(&mut local_scores);
+            if local_scores.iter().any(|value| !value.is_finite()) {
+                worker_failure.store(true, Ordering::Relaxed);
+                return;
+            }
+            for channel in 0..channels {
+                let value = crate::ops::dot_f32(
+                    &local_scores,
+                    &v[channel * spatial..(channel + 1) * spatial],
+                    spatial,
+                );
+                if !value.is_finite() {
+                    worker_failure.store(true, Ordering::Relaxed);
+                    return;
+                }
+                // Write the query element directly so each worker creates no
+                // mutable slice that aliases another worker's disjoint
+                // strided query range.
+                unsafe {
+                    *(output_ptr as *mut f32).add(channel * spatial + query_position) = value;
+                }
+            }
+        }
+    });
+
+    if failure.load(Ordering::Relaxed) || output.iter().any(|value| !value.is_finite()) {
+        return Err("Non-finite VAE attention output".into());
     }
     Ok(())
 }
@@ -2185,6 +2416,85 @@ mod tests {
     }
 
     #[test]
+    fn mid_attention_parallel_matches_scalar_query_partitioning() {
+        for (channels, spatial) in [(1, 1), (4, 5), (7, 17), (512, 33)] {
+            let q = (0..channels * spatial)
+                .map(|index| ((index * 17 % 143) as f32 - 71.0) * 0.03125)
+                .collect::<Vec<_>>();
+            let k = (0..channels * spatial)
+                .map(|index| ((index * 13 % 137) as f32 - 68.0) * -0.046875)
+                .collect::<Vec<_>>();
+            let v = (0..channels * spatial)
+                .map(|index| ((index * 7 % 131) as f32 - 65.0) * 0.0625)
+                .collect::<Vec<_>>();
+            let mut expected = vec![0.0; channels * spatial];
+            let mut scalar_scores = vec![0.0; spatial];
+            one_head_spatial_attention_into(
+                &q,
+                &k,
+                &v,
+                channels,
+                spatial,
+                &mut expected,
+                &mut scalar_scores,
+            )
+            .unwrap();
+            let expected_bits = expected
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>();
+            for threads in [1, 2, 4, 8] {
+                // NaNs make missing query writes fail, including an empty
+                // worker range when there are more threads than queries.
+                let mut actual = vec![f32::NAN; channels * spatial];
+                let mut parallel_scores = vec![0.0; spatial];
+                one_head_spatial_attention_parallel_into(
+                    &q,
+                    &k,
+                    &v,
+                    channels,
+                    spatial,
+                    &mut actual,
+                    &mut parallel_scores,
+                    &Arc::new(ComputePool::new(threads)),
+                )
+                .unwrap();
+                assert_eq!(
+                    actual
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>(),
+                    expected_bits,
+                    "channels={channels}, spatial={spatial}, threads={threads}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mid_attention_parallel_rejects_invalid_and_non_finite_buffers() {
+        let pool = Arc::new(ComputePool::new(4));
+        let mut output = [0.0; 2];
+        let mut scores = [0.0; 2];
+        let mut run = |q: &[f32], k: &[f32], v: &[f32]| {
+            one_head_spatial_attention_parallel_into(q, k, v, 1, 2, &mut output, &mut scores, &pool)
+        };
+        assert_eq!(
+            run(&[0.0], &[0.0; 2], &[0.0; 2]).unwrap_err(),
+            "Invalid VAE attention buffer length"
+        );
+        assert_eq!(
+            run(&[0.0, f32::NAN], &[0.0; 2], &[0.0; 2]).unwrap_err(),
+            "Non-finite VAE attention input"
+        );
+        // Finite inputs can still overflow inside a worker. Reuse the same
+        // pool afterwards to verify the error does not leave workers busy.
+        assert!(run(&[0.0, f32::MAX], &[2.0; 2], &[1.0; 2]).is_err());
+        run(&[0.0; 2], &[0.0; 2], &[1.0, 3.0]).unwrap();
+        assert_eq!(output, [2.0; 2]);
+    }
+
+    #[test]
     fn rgb_bytes_round_clamp_and_interleave_channel_major_output() {
         let bytes = rgb_bytes_from_channels(
             &[
@@ -2261,6 +2571,29 @@ mod tests {
         )
         .unwrap();
         assert_eq!(output, [17.0, 39.0]);
+    }
+
+    #[test]
+    fn convolution_clears_padding_when_reusing_a_patch() {
+        let weights: Vec<u8> = [1.0f32; 9]
+            .iter()
+            .flat_map(|value| f16::from_f32(*value).to_bits().to_le_bytes())
+            .collect();
+        for threads in [1, 2, 4] {
+            let mut output = [0.; 4];
+            padded_conv_f16_into(
+                &[1., 2., 3., 4.],
+                1,
+                2,
+                &weights,
+                1,
+                None,
+                &mut output,
+                &Arc::new(ComputePool::new(threads)),
+            )
+            .unwrap();
+            assert_eq!(output, [10.; 4]);
+        }
     }
 
     #[test]

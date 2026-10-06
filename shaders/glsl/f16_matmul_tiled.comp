@@ -1,0 +1,139 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// Register-tiled F16 grouped matmul, the float-weight counterpart of
+// q8_matmul_tiled_dp4a.
+//
+// The refiner stacks are F16 in the GGUF, and bind_weight only accepts Q8_0, so
+// all four refiner blocks ran their FFN through the per-row CPU path -- 3.7 s of
+// a 14.2 s step, more than the 30-layer main stack costs on the device. The
+// tiling is the same idea as the Q8_0 kernel: a lane owns an output column for
+// the whole k walk, so the staged activation is read once per token rather than
+// once per (token, column).
+//
+// The activation is staged as f32 and rounded to f16 in registers, matching what
+// F16_MATMUL does, so this is a drop-in for that kernel's arithmetic rather than
+// a different rounding.
+
+#include "f16_rounding.glsl"
+
+layout(local_size_x = 64) in;
+
+// 32 accumulators per lane is where the Q8_0 kernel's curve turned, past the
+// register file. The chunk is smaller here because the staged activation is f32
+// rather than one byte per element: 32 * 8 * 256 * 4 = 256 KiB would not fit.
+const uint TOKENS = 32u;
+const uint CHUNK_ELEMENTS = 256u;
+
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(std430, binding = 1) readonly buffer W0 { uint data[]; } w0;
+layout(std430, binding = 2) readonly buffer W1 { uint data[]; } w1;
+layout(std430, binding = 3) readonly buffer W2 { uint data[]; } w2;
+layout(push_constant) uniform PC {
+    uint input_word;
+    uint unused_scales_word;
+    uint n_in;
+    uint elements_per_row;
+    uint output0_word; uint rows0; uint output0_stride;
+    uint output1_word; uint rows1; uint output1_stride;
+    uint output2_word; uint rows2; uint output2_stride;
+    uint group_count; uint input_sum_word; uint input_stride; uint q8_stride; uint scales_stride; uint input_sum_stride; uint q8k_stride; uint q8k_scales_stride; uint token_rows;
+} pc;
+
+// The activation is already rounded to f16 by the time it reaches here, so it
+// is staged packed: the same 256 elements in half the shared memory. The Q8_0
+// kernel stages 16 KB and reaches the bandwidth roof; staging f32 put this one
+// at 32 KB, which is half the per-SM budget and leaves one workgroup per SM to
+// hide any latency with.
+shared uint input_stage[TOKENS * CHUNK_ELEMENTS / 2u];
+
+uint weight_word(uint slot, uint index) {
+    if (slot == 0u) return w0.data[index];
+    if (slot == 1u) return w1.data[index];
+    return w2.data[index];
+}
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint slot = gl_WorkGroupID.z % pc.group_count;
+    uint token_tile = gl_WorkGroupID.z / pc.group_count;
+    uint token_base = token_tile * TOKENS;
+    if (token_base >= pc.token_rows) return;
+
+    // One lane, one output column, for the whole k walk: the workgroup covers
+    // 64 consecutive columns, so the tile is 64 wide rather than 1.
+    uint column_base = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 64u;
+    uint column = column_base + lane;
+    uint output_stride = slot == 0u ? pc.output0_stride : (slot == 1u ? pc.output1_stride : pc.output2_stride);
+    uint output_word = slot == 0u ? pc.output0_word : (slot == 1u ? pc.output1_word : pc.output2_word);
+    uint output_rows = slot == 0u ? pc.rows0 : (slot == 1u ? pc.rows1 : pc.rows2);
+    // A partial last tile would put some lanes past the end of the weight
+    // buffer. They cannot return, because the loop below has a barrier and
+    // Vulkan requires those in uniform control flow, so clamp their read to a
+    // column that exists and let the store drop the result.
+    uint read_column = min(column, output_rows - 1u);
+
+    float accumulator[TOKENS];
+    for (uint t = 0u; t < TOKENS; t++) {
+        accumulator[t] = 0.0;
+    }
+    uint live = 0u;
+    for (uint t = 0u; t < TOKENS; t++) {
+        if (token_base + t < pc.token_rows) live = t + 1u;
+    }
+    if (live == 0u) return;
+
+    for (uint chunk = 0u; chunk < pc.n_in; chunk += CHUNK_ELEMENTS) {
+        uint elements = min(CHUNK_ELEMENTS, pc.n_in - chunk);
+        // Stage this chunk's activations for every live token.
+        for (uint t = 0u; t < live; t++) {
+            uint base = (token_base + t) * pc.input_stride + chunk;
+            uint dst = t * (CHUNK_ELEMENTS / 2u);
+            for (uint pair = lane; pair * 2u + 1u < elements; pair += 64u) {
+                uint low = f32_to_f16_rte(uintBitsToFloat(arena.data[pc.input_word + base + pair * 2u]));
+                uint high = f32_to_f16_rte(uintBitsToFloat(arena.data[pc.input_word + base + pair * 2u + 1u]));
+                input_stage[dst + pair] = low | (high << 16u);
+            }
+            // An odd length leaves a last element that has no partner.
+            if ((elements & 1u) != 0u && lane == 0u) {
+                input_stage[dst + elements / 2u] =
+                    f32_to_f16_rte(uintBitsToFloat(arena.data[pc.input_word + base + elements - 1u]));
+            }
+        }
+        barrier();
+
+        // The row starts even, so its halves come in pairs: one load and one
+        // native conversion per two weights.
+        uint row_base = read_column * pc.elements_per_row + chunk;
+        uint index = 0u;
+        for (; index + 1u < elements; index += 2u) {
+            vec2 pair = unpackHalf2x16(weight_word(slot, (row_base + index) >> 1u));
+            for (uint t = 0u; t < live; t++) {
+                // One shared read covers both halves of the pair.
+                vec2 act = unpackHalf2x16(input_stage[t * (CHUNK_ELEMENTS / 2u) + index / 2u]);
+                accumulator[t] = fma(act.x, pair.x, accumulator[t]);
+                accumulator[t] = fma(act.y, pair.y, accumulator[t]);
+            }
+        }
+        if (index < elements) {
+            // An odd row length leaves the last element in the high half.
+            float odd = unpackHalf2x16(weight_word(slot, (row_base + index) >> 1u)).y;
+            for (uint t = 0u; t < live; t++) {
+                float value = unpackHalf2x16(
+                    input_stage[t * (CHUNK_ELEMENTS / 2u) + index / 2u]
+                )[index & 1u];
+                accumulator[t] = fma(value, odd, accumulator[t]);
+            }
+        }
+        barrier();
+    }
+
+    // `output` is [token][head][width] for the attention-shaped callers and
+    // [token][width] here, so a fixed column's runs are `output_stride` apart.
+    if (column < output_rows) {
+        for (uint t = 0u; t < live; t++) {
+            arena.data[output_word + (token_base + t) * output_stride + column] =
+                floatBitsToUint(accumulator[t]);
+        }
+    }
+}

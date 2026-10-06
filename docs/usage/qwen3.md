@@ -65,6 +65,59 @@ cargo run --release --bin rust-model-inference -- \
   --prompt "描述这张图片"
 ```
 
+`Qwen3-VL-4B-Instruct`（Qwen/Qwen3-VL-4B-Instruct-GGUF Q4_K_M，~2.5 GB）
+在 `src/core/loader.rs:715` 的 `KNOWN_QWEN3VL_4B_DIMENSIONS` 白名单里，
+LLM backbone 是 Qwen3-4B（`n_embd=2560, n_layer=36, n_head=32, n_head_kv=8,
+n_ff=9728, head_dim=128, n_ctx=262144, freq_base=5e6, M-RoPE [24,20,20,0]`）。
+
+**现状（2026-10-01 修通后）**：
+
+- 4 核 CPU + 7.5 GiB RAM 下端到端跑通：128/256/384/512/1024 PNG
+  都能产出准确的图像描述（"This image is a simple, abstract
+  composition of two overlapping circular shapes..."）。
+- **修复**：multimodal 流中 text token 的 M-RoPE 位置从
+  `[next, next, next, 0]` 改成 `[next, 0, 0, 0]` —— 即只把 T 轴当作
+  真正的 1D 位置，H/W/E 轴保持 0 (M-RoPE identity)。
+  改前 256×256 起 LLM 在最后位置预测 `<|im_end|>` 文本为空；改后 ≥256 image
+  文本生成正常。
+- 根因：upstream llama.cpp (`tools/mtmd/mtmd-helper-common.h` 的
+  `set_position_normal`) 走的是 1D legacy path，compat layer 只填
+  `token.pos[0]`，H/W/E 留 0；而我们的 `build_qwen3_media_positions`
+  原本把所有 4 个轴都填 `next`，H/W 多出来的 rotation 会在大 image grid
+  (`next = base + max(grid_h, grid_w) ≥ 12` 时) 累积，导致 LLM 在
+  最后位置 logits 偏向 `<|im_end|>` / ``。
+- **小遗留**：greedy decode 首 token 偶尔会是 ``（被 streaming decoder
+  静默跳过），实际可见输出从第二个 token 开始。若用 sampling (temp=0.7)
+  这个偏置不明显，输出正常。
+- 文本-only 路径在 4 核上约 4 tok/s，与 multimodal 完全无关。
+
+**Qwen3-VL 其它尺寸 (`-2B` / `-8B` / `-32B` / `-30B-A3B` / `-235B-A22B`) 状态**：
+
+- **`-2B`（`-Instruct` 与 `-Thinking` 两个 GGUF 均下载并尝试过）——本仓库未适配**。
+  在 4 核 + 7.5 GiB RAM 上 2B 端到端不工作：
+  - 文本-only + ChatML: 首 token 预测 `151645`（`<|im_end|>` = EOS），0 输出 token；
+  - 文本-only + `--thinking` flag: 工作（首 token 是普通文本）；
+  - 多模态 + ChatML: 首 token 仍预测 `151645`，立即结束；
+  - 多模态 + 字面文字 chat (`\nuser\n…assistant\n` 各种变体): 不预测 EOS，但陷入退化循环
+    —— 反复输出 `\n\n\n...` / `####...` / `sponsorsponsor...` / `mainmainmain...` 等；
+  - 多模态 + 高温度采样 (temp=2.0 + rep_penalty 1.1): 产出 multilingual 乱码
+    （`abandoningดีๆ imorig eloney craz…`），无可用语义。
+  - 根因疑似：2B-Instruct GGUF 的 `tokenizer.chat_template` 用字面文字 `user\n…\nassistant\n`
+    格式而非 ChatML 的 `<|im_start|>…<|im_end|>` tokens；我们的代码走 ChatML。
+    4B 能容忍两种格式，2B 不能。即便换成字面文字也只是把 "首 token = EOS" 问题替换成
+    "生成退化为重复 token"，vision encoder 输出与 2B 的 LLM 主干也可能有交互问题。
+  - 2B 容量 (2.1B) 对 vision encoder embedding 的容错较差也是候选原因之一。
+  - 暂时不打算修，等用户进一步指令。
+
+- **`-8B` / `-32B` / `-30B-A3B` / `-235B-A22B` 等更大尺寸**：Q4_K_M 量化后 ≥ 5 GB，
+  在 4 核 + 7.5 GiB RAM 环境下未做端到端验证。需要更大机器才能跑。
+- 文本-only `-0.6B`（同 `-2B` 等 Instruct 模型）不在 ModelScope 上能找到 GGUF，本仓库未尝试。
+
+限制：
+
+- 当前每种媒体最多一份；同一轮同时给图像和音频时顺序固定为图像、音频、提示词。
+- 音频必须是 16 kHz PCM16 WAV。
+
 限制：
 
 - 当前每种媒体最多一份；同一轮同时给图像和音频时顺序固定为图像、音频、提示词。
@@ -156,7 +209,57 @@ TTS 帧预算自动按 `max(max_tokens * 4, 128).min(1024)` 计算 — 用户传
 
 完整输出验证参考 `models/omni_apple_reply.wav` 等。
 
-## 6. 与 llama.cpp 的数值对齐
+## 6. 跨编码器 Rerank（Qwen3-Reranker 0.6B）
+
+CLI 与 server 都通过 `--rerank` 一站式入口（不再有独立的 `qwen3_rerank` 二进制，
+主 binary 内置 `app::run_rerank`，按 arch 分发）。模型需要是带 `cls.output.weight`
++ `pooling_type = 4` 的 Qwen3 GGUF（即 `ggml-org/Qwen3-Reranker-*-Q8_0-GGUF` 的官方包）。
+本仓库 `models/Qwen3-Reranker-0.6B-GGUF/` 的 unsloth 转换文件没有 cls head，会直接拒绝。
+
+```bash
+# CLI（--rerank-doc 重复多次，或 --rerank-documents <newline-separated FILE>）
+cargo run --release --bin rust-model-inference -- \
+  --model models/Qwen3-Reranker-0.6B-QGUF/qwen3-reranker-0.6b-q8_0.gguf \
+  --rerank --rerank-query "What is the capital of France?" \
+  --rerank-doc "Paris is the capital of France." \
+  --rerank-doc "Berlin is the capital of Germany." \
+  --rerank-doc "Tokyo is the capital of Japan."
+
+# 服务端：自动检测 cls.output.weight + qwen3.pooling_type=4 → POST /v1/rerank
+cargo run --release --bin server -- \
+  --model models/Qwen3-Reranker-0.6B-QGUF/qwen3-reranker-0.6b-q8_0.gguf \
+  --port 8080 --threads 4
+
+curl -s -X POST http://127.0.0.1:8080/v1/rerank \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "What is the capital of France?",
+    "documents": [
+      "Paris is the capital of France.",
+      "Berlin is the capital of Germany.",
+      "Tokyo is the capital of Japan."
+    ],
+    "top_n": 3
+  }'
+```
+
+ChatML prompt（system + `<Instruct>/<Query>/<Document>`）在
+`src/models/qwen3/trunk/rerank.rs` 内置；2 分类头输出 `yes` logit + softmax
+后的 `yes_prob`（`[0, 1]`）。CLI 输出格式与 `/v1/rerank` 响应的
+`relevance_score` 字段对齐：
+
+```
+rank  idx  relevance_score
+0     0     0.938243
+1     1     0.001332
+2     2     0.001107
+```
+
+相关/不相关文档的得分间隔通常 >1000×（Paris vs Berlin 0.938 / 0.001）。详细
+集成测试 `tests/qwen3_rerank.rs`（单元）+ `tests/qwen3_rerank_http.rs`
+（HTTP, 3/3），用合成 cls head GGUF。
+
+## 7. 与 llama.cpp 的数值对齐
 
 ### 通用 scalar 位级对比（Qwen3-0.6B）
 
@@ -197,7 +300,7 @@ llama-bench -ngl 0 -t 8 -m models/Qwen3-0.6B-Q8_0.gguf
 
 复现脚本与机器固定方法见 `docs/OPTIMIZATION.md#rust-与-llamacpp-固定机器对比2026-08-10`。
 
-## 7. 服务端模式（OpenAI 兼容）
+## 8. 服务端模式（OpenAI 兼容）
 
 ```bash
 # 文本
@@ -208,6 +311,11 @@ cargo run --release --bin server -- \
 # Embedding
 cargo run --release --bin server -- \
   --model models/Qwen3-Embedding-0.6B-Q8_0.gguf --embedding
+
+# Rerank（自动检测 cls.output.weight + qwen3.pooling_type=4 → POST /v1/rerank）
+cargo run --release --bin server -- \
+  --model models/Qwen3-Reranker-0.6B-QGUF/qwen3-reranker-0.6b-q8_0.gguf \
+  --port 8080 --threads 4
 
 # ASR
 cargo run --release --bin server -- \
@@ -222,7 +330,7 @@ cargo run --release --bin server -- \
   --tts --language cn
 ```
 
-## 8. 已确认的限制 / 边界
+## 9. 已确认的限制 / 边界
 
 | 范围 | 行为 |
 |------|------|
@@ -231,16 +339,18 @@ cargo run --release --bin server -- \
 | Qwen3-VL 不匹配的维度（除 1024-dim 与 2048-dim 两组白名单外） | 配置阶段拒绝 |
 | GPU 后端（`--features vulkan`） | 可跑，但当前不提供 GPU 位级 Oracle 保证 |
 
-## 9. 相关源码索引
+## 10. 相关源码索引
 
 - `src/models/qwen3/` — 文本 / Embedding / VL / ASR / TTS trunk
+- `src/models/qwen3/trunk/rerank.rs` — Rerank 评分循环（`app::run_rerank` 的 qwen3 分支）
 - `src/app/audio.rs` — ASR 路由
 - `src/app/text.rs` — 文本、Embedding、多模态 CLI 入口
 - `src/app/tts.rs` — TTS CLI 入口
+- `src/app/server/rerank.rs` — `/v1/rerank` HTTP handler（CLI 与 server 共用 rerank.rs 的 per-doc scoring 实现）
 - `src/format/ggufrs.rs` — GGUF / GGUFRS 等价测试
 - `docs/REFERENCE_IMPLEMENTATIONS.md` — Pinned Oracle 与构建脚本
 
-## 10. JEV 决策评分（Qwen3 用法）
+## 11. JEV 决策评分（Qwen3 用法）
 
 `--jev` 是 OpenJEV 风格的 single-forward-pass 决策评分模式 —— 完整协议、
 跨 trunk 实现现状、chat template 差异、限制等全局性内容见

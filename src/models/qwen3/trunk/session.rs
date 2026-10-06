@@ -164,7 +164,7 @@ impl<'model> Qwen3Session<'model> {
                         qs: [0; 256],
                         bsums: [0; 16],
                     };
-                    max_n_in / 256
+                    max_n_in.div_ceil(256)
                 ],
                 score_stride,
                 scores: vec![0.0; score_values],
@@ -242,7 +242,7 @@ impl<'model> Qwen3Session<'model> {
                 self.capacity
             ));
         }
-        let duration = self.prefill(&input, prefill_batch_size)?;
+        let duration = self.prefill(&input, prefill_batch_size, true)?;
         Ok((self.scratch.logits.clone(), duration))
     }
 
@@ -275,7 +275,7 @@ impl<'model> Qwen3Session<'model> {
                 self.capacity
             ));
         }
-        let _duration = self.prefill(&input, prefill_batch_size)?;
+        let _duration = self.prefill(&input, prefill_batch_size, true)?;
         // Ensure the prefill scratch holds at least one row per token
         // so the post-prefill read of `prefill_scratch.x` below cannot
         // index out of bounds even when `capacity == prefill_batch_size`.
@@ -295,6 +295,80 @@ impl<'model> Qwen3Session<'model> {
             self.model.config.eps,
         );
         Ok(self.scratch.normed.clone())
+    }
+
+    /// Prefill `input` and return the final-token post-RMSNorm hidden
+    /// state (length `n_embd`) for ANY Qwen3 checkpoint, not just rerank
+    /// ones.  Identical to [`Self::forward_rerank`] except that it does
+    /// not require `cls.output.weight`.
+    ///
+    /// Used by the CLM projection heads, whose encoder is a plain
+    /// Qwen3-8B: they consume the last-token pooled embedding, so they
+    /// need the hidden state from a base/generative checkpoint.
+    pub fn forward_last_hidden(
+        &mut self,
+        input: Qwen3Input<'_>,
+        prefill_batch_size: usize,
+    ) -> Result<Vec<f32>, String> {
+        if input.token_ids.is_empty() {
+            return Err("Qwen3 forward must contain at least one token".into());
+        }
+        let required = self
+            .kv_state
+            .seq_len
+            .checked_add(input.token_ids.len())
+            .ok_or("Qwen3 prompt length overflow")?;
+        if required > self.capacity {
+            return Err(format!(
+                "Forward pass requires capacity {required}; session has {}",
+                self.capacity
+            ));
+        }
+        let _duration = self.prefill(&input, prefill_batch_size, true)?;
+        self.prefill_scratch
+            .reset_for(input.token_ids.len(), self.model);
+        let n_embd = self.model.config.n_embd;
+        let last_row = input.token_ids.len() - 1;
+        let base = last_row * n_embd;
+        crate::ops::rms_norm(
+            &self.prefill_scratch.x[base..base + n_embd],
+            &self.model.output_norm,
+            &mut self.scratch.normed,
+            self.model.config.eps,
+        );
+        Ok(self.scratch.normed.clone())
+    }
+
+    /// Extract every post-normalization token row, including optional VL DeepStack inputs.
+    /// A fresh F32-KV session preserves conditioning without half-precision KV rounding.
+    pub fn forward_hidden_sequence(&mut self, input: Qwen3Input<'_>) -> Result<Vec<f32>, String> {
+        if self.kv_state.seq_len != 0
+            || input.token_ids.is_empty()
+            || input.token_ids.len() > self.capacity
+            || !matches!(
+                &self.kv_state.cache,
+                crate::core::scratchpad::KvCache::F32(_)
+            )
+        {
+            return Err("Hidden-sequence extraction requires a fresh F32-KV session and a non-empty input within capacity".into());
+        }
+        // This API reads CPU scratch rows; the Vulkan path only exports final logits.
+        #[cfg(feature = "vulkan")]
+        {
+            self.gpu = None;
+        }
+        self.prefill(&input, input.token_ids.len(), false)?;
+        let width = self.model.config.n_embd;
+        let mut output = vec![0.0; input.token_ids.len() * width];
+        for (row, destination) in output.chunks_exact_mut(width).enumerate() {
+            crate::ops::rms_norm(
+                &self.prefill_scratch.x[row * width..(row + 1) * width],
+                &self.model.output_norm,
+                destination,
+                self.model.config.eps,
+            );
+        }
+        Ok(output)
     }
 
     /// Return false from the callback to stop generation. Empty text callbacks
@@ -396,7 +470,7 @@ impl<'model> Qwen3Session<'model> {
             || crate::ops::get_vulkan_context().map_or(0, |ctx| ctx.submission_count());
         #[cfg(feature = "vulkan")]
         let before_prompt = submission_count();
-        let prompt_duration = self.prefill(&input, options.prefill_batch_size)?;
+        let prompt_duration = self.prefill(&input, options.prefill_batch_size, true)?;
         #[cfg(feature = "vulkan")]
         let after_prompt = submission_count();
         #[cfg(feature = "parity-trace")]
@@ -517,7 +591,7 @@ impl<'model> Qwen3Session<'model> {
                 parity_trace::report(parity_trace::checkpoint(
                     "result_output",
                     None,
-                    &[config.vocab],
+                    &[_config.vocab],
                     &self.scratch.logits,
                 ));
             }
@@ -732,7 +806,7 @@ mod vulkan_tests {
             embeddings: None,
             deepstack_embeddings: None,
         };
-        actual.prefill(&prefix, 4).unwrap();
+        actual.prefill(&prefix, 4, true).unwrap();
         assert_eq!(context.submission_count(), 1);
         let committed = snapshot(actual.kv_state());
         let mut expected = Qwen3Session::new(&model, 9).unwrap();
@@ -754,7 +828,7 @@ mod vulkan_tests {
             embeddings: None,
             deepstack_embeddings: None,
         };
-        let error = actual.prefill(&input, 4).unwrap_err();
+        let error = actual.prefill(&input, 4, true).unwrap_err();
         assert!(
             error.contains("CPU prefill failure after layer 0"),
             "{error}"
@@ -819,6 +893,7 @@ mod vulkan_tests {
                     deepstack_embeddings: None,
                 },
                 4,
+                true,
             )
             .unwrap();
         assert_eq!(context.submission_count(), 1);
@@ -895,7 +970,7 @@ mod vulkan_tests {
                 embeddings: None,
                 deepstack_embeddings: None,
             };
-            session.prefill(&input, batch).unwrap();
+            session.prefill(&input, batch, true).unwrap();
             assert!(session.gpu.is_some(), "batch {batch} fell back");
             assert_eq!(
                 context.submission_count() - before,

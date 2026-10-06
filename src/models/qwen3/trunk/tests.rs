@@ -101,6 +101,59 @@ pub(crate) fn qwen3vl_metadata_source() -> MapTensorSource {
     }
 }
 
+/// `qwen3vl` metadata for `Qwen3-VL-4B-Instruct` (Qwen/Qwen3-VL-4B-Instruct-GGUF).
+/// The LLM backbone is the Qwen3-4B dense trunk (`n_embd=2560`, 36 layers,
+/// 32 heads, 8 KV heads, `head_dim=128`, `n_ff=9728`, 256 K context,
+/// `freq_base=5_000_000.0`, `mrope_section=[24, 20, 20]`).
+pub(crate) fn qwen3vl_4b_metadata_source() -> MapTensorSource {
+    MapTensorSource {
+        metadata: HashMap::from([
+            (
+                "general.architecture".into(),
+                MetaValue::String("qwen3vl".into()),
+            ),
+            ("qwen3vl.embedding_length".into(), MetaValue::Uint32(2560)),
+            ("qwen3vl.block_count".into(), MetaValue::Uint32(36)),
+            ("qwen3vl.attention.head_count".into(), MetaValue::Uint32(32)),
+            (
+                "qwen3vl.attention.head_count_kv".into(),
+                MetaValue::Uint32(8),
+            ),
+            (
+                "qwen3vl.attention.key_length".into(),
+                MetaValue::Uint32(128),
+            ),
+            (
+                "qwen3vl.attention.value_length".into(),
+                MetaValue::Uint32(128),
+            ),
+            (
+                "qwen3vl.feed_forward_length".into(),
+                MetaValue::Uint32(9728),
+            ),
+            ("qwen3vl.context_length".into(), MetaValue::Uint32(262_144)),
+            (
+                "qwen3vl.rope.freq_base".into(),
+                MetaValue::Float32(5_000_000.0),
+            ),
+            (
+                "qwen3vl.rope.dimension_sections".into(),
+                MetaValue::Array(
+                    MetaValueType::Int32,
+                    [24, 20, 20, 0].map(MetaValue::Int32).to_vec(),
+                ),
+            ),
+            (
+                "qwen3vl.attention.layer_norm_rms_epsilon".into(),
+                MetaValue::Float32(1e-6),
+            ),
+            ("qwen3vl.n_deepstack_layers".into(), MetaValue::Uint32(3)),
+            ("qwen3vl.vocab_size".into(), MetaValue::Uint32(151_936)),
+        ]),
+        tensors: HashMap::new(),
+    }
+}
+
 pub(crate) fn test_model(tokenizer: Arc<BPETokenizer>, n_ctx: usize, n_embd: usize) -> Qwen3Model {
     assert!(n_embd > 0 && n_embd % 32 == 0);
     let row_bytes = n_embd / 32 * 34;
@@ -326,6 +379,7 @@ fn prefill_qwen3_tokens(
                 deepstack_embeddings: None,
             },
             batch_size,
+            true,
         )
         .map(|_| ())
 }
@@ -433,6 +487,7 @@ fn qwen3_four_axis_positions_and_deepstack_match_across_chunks() {
                     deepstack_embeddings: Some(&deepstack),
                 },
                 batch,
+                true,
             )
             .unwrap();
         (
@@ -589,4 +644,52 @@ fn qwen3_trace_keeps_token_major_checkpoints_for_every_prompt_row() {
         }
         std::fs::remove_file(trace).unwrap();
     }
+}
+
+#[test]
+fn hidden_sequence_preserves_every_f32_kv_row() {
+    use crate::core::scratchpad::{KvFormat, KvLifecycle};
+    let model = deterministic_session_model(8);
+    let tokens = [1, 2, 1];
+    let positions = super::positions::qwen_text_positions(tokens.len());
+    let mut batched =
+        Qwen3Session::new_with_kv_state(&model, 8, KvFormat::F32, KvLifecycle::Ephemeral).unwrap();
+    let actual = batched
+        .forward_hidden_sequence(Qwen3Input {
+            token_ids: &tokens,
+            positions: &positions,
+            embeddings: None,
+            deepstack_embeddings: None,
+        })
+        .unwrap();
+    let mut sequential =
+        Qwen3Session::new_with_kv_state(&model, 8, KvFormat::F32, KvLifecycle::Ephemeral).unwrap();
+    let mut expected = Vec::new();
+    for i in 0..tokens.len() {
+        expected.extend(
+            sequential
+                .forward_last_hidden(
+                    Qwen3Input {
+                        token_ids: &tokens[i..i + 1],
+                        positions: &positions[i..i + 1],
+                        embeddings: None,
+                        deepstack_embeddings: None,
+                    },
+                    1,
+                )
+                .unwrap(),
+        );
+    }
+    assert_eq!(
+        actual.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+    );
+    assert!(batched
+        .forward_hidden_sequence(Qwen3Input {
+            token_ids: &tokens,
+            positions: &positions,
+            embeddings: None,
+            deepstack_embeddings: None
+        })
+        .is_err());
 }

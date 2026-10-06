@@ -15,6 +15,19 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
     {
         return Err("--qwen-timestep must be finite".into());
     }
+    if options.gliner2_decide {
+        if !options.jev {
+            return Err("--gliner2-decide requires --jev".into());
+        }
+        if options.clm_head.is_some() {
+            return Err("--gliner2-decide and --clm-head select different backends".into());
+        }
+        if options.gliner2_schema.is_some() && options.jev_multi {
+            return Err("--gliner2-schema cannot be combined with --jev-multi".into());
+        }
+    } else if options.gliner2_schema.is_some() {
+        return Err("--gliner2-schema requires --gliner2-decide".into());
+    }
     if options.laya_request.is_some() {
         if options.model.as_os_str().is_empty() {
             return Err("--laya-request requires --model".into());
@@ -42,7 +55,9 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
         return Err("--top-p must be finite and in (0, 1]".into());
     }
     if let Some(scale) = options.cfg_scale {
-        if !options.tts || options.edit {
+        let diffusion =
+            options.text_encoder.is_some() && options.vae.is_some() && options.out.is_some();
+        if (!options.tts || options.edit) && !diffusion {
             return Err("--cfg-scale requires Breeze --tts without --edit".into());
         }
         if !scale.is_finite() || scale <= 0.0 {
@@ -185,6 +200,59 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
             .is_none_or(|path| path.as_os_str().is_empty())
         {
             return Err("--video requires --mmproj".into());
+        }
+        return Ok(());
+    }
+    // ---- --rerank: cross-encoder query/document scoring ----
+    // Mirrors the conflict structure of --tts / --audio / --embedding above:
+    // a single dispatch mode wins; --rerank is mutually exclusive with the
+    // other heavyweight modes. Lighter inspection flags (--bench / --profile)
+    // are still allowed because they don't pick a forward path of their own.
+    if options.rerank {
+        if options.model.as_os_str().is_empty() {
+            return Err("--rerank requires --model".into());
+        }
+        let conflict = if options.tts {
+            Some("--tts")
+        } else if options.embedding {
+            Some("--embedding")
+        } else if options.jev {
+            Some("--jev")
+        } else if options.dreamx {
+            Some("--dreamx")
+        } else if options.yue2 {
+            Some("--yue2")
+        } else if options.gliner2_decide {
+            Some("--gliner2-decide")
+        } else if options.clm_head.is_some() {
+            Some("--clm-head")
+        } else if options.dump_logits {
+            Some("--dump-logits")
+        } else if options.audio.is_some() {
+            Some("--audio")
+        } else if options.image.is_some() {
+            Some("--image")
+        } else if options.video.is_some() {
+            Some("--video")
+        } else {
+            None
+        };
+        if let Some(conflict) = conflict {
+            return Err(format!("--rerank cannot be combined with {conflict}"));
+        }
+        if options
+            .rerank_query
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
+        {
+            return Err("--rerank requires --rerank-query <TEXT>".into());
+        }
+        if options.rerank_documents.is_empty() && options.rerank_documents_file.is_none() {
+            return Err(
+                "--rerank requires at least one document (use --rerank-doc <TEXT> repeatedly, \
+                 or --rerank-documents <FILE>)"
+                    .into(),
+            );
         }
         return Ok(());
     }

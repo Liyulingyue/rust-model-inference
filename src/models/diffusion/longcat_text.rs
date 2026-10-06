@@ -621,7 +621,8 @@ mod tests {
             model.config().rope,
             crate::models::qwen3::trunk::Qwen3Rope::Mrope { .. }
         ));
-        let vision = VisionEncoder::from_source(source.as_ref()).unwrap();
+        let vision =
+            VisionEncoder::from_source(source.as_ref(), Arc::new(ComputePool::new(1))).unwrap();
         assert_eq!(vision.config.n_layer, VISION_LAYERS);
     }
 }

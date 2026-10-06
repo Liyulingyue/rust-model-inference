@@ -5,6 +5,8 @@ use unicode_categories::UnicodeCategories;
 
 use crate::core::tensor::{MetaValue, MetaValueType};
 
+pub mod ugm;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EncodeOptions {
     pub add_special: bool,
@@ -136,6 +138,41 @@ const QWEN2_ORACLE_SPECIAL_TOKENS: &[&str] = &[
     "<|eor_token|>",
     "<|bot_token|>",
     "<|tms_token|>",
+];
+
+/// Qwen2.5-Omni-3B special tokens at ids 151643..151664. Replaces the
+/// standard Qwen2 oracle list and adds the audio-related tokens
+/// (`<|AUDIO|>` = 151646, `<|audio_bos|>` = 151647, `<|audio_eos|>` = 151648)
+/// that are required for AuK CFMEdit reference-audio conditioning.
+///
+/// Verified against the Qwen/Qwen2.5-Omni-3B `added_tokens.json`. The
+/// named vocab size shrinks from 32 to 22 tokens because the Qwen2.5-Omni
+/// tokenizer drops 10 of the standard Qwen2 oracle tokens (no
+/// `<|object_ref_*|>`, no `<|image_pad|>`/`<|video_pad|>`, no
+/// `<tool_response>`, no `<|boi_token|>` etc.).
+const QWEN25_OMNI_SPECIAL_TOKENS: &[&str] = &[
+    "<|endoftext|>",  // 151643
+    "<|im_start|>",   // 151644
+    "<|im_end|>",     // 151645
+    "<|AUDIO|>",      // 151646  (CFMEdit audio placeholder)
+    "<|audio_bos|>",  // 151647  (CFMEdit audio begin-of-stream)
+    "<|audio_eos|>",  // 151648  (CFMEdit audio end-of-stream)
+    "<|box_end|>",    // 151649
+    "<|quad_start|>", // 151650
+    "<|quad_end|>",   // 151651
+    "<|vision_bos|>", // 151652
+    "<|vision_eos|>", // 151653
+    "<|vision_pad|>", // 151654
+    "<|IMAGE|>",      // 151655
+    "<|VIDEO|>",      // 151656
+    "<tool_call>",    // 151657
+    "</tool_call>",   // 151658
+    "<|fim_prefix|>", // 151659
+    "<|fim_middle|>", // 151660
+    "<|fim_suffix|>", // 151661
+    "<|fim_pad|>",    // 151662
+    "<|repo_name|>",  // 151663
+    "<|file_sep|>",   // 151664
 ];
 
 const HUNYUAN_SEMANTIC_TOKENS: &[(&str, &str)] = &[
@@ -277,7 +314,7 @@ impl BPETokenizer {
         let mut token_types = vec![TokenType::Normal; tokens.len()];
         let mut merge_ranks = HashMap::new();
 
-        for (rank, merge) in include_str!("../models/diffusion/z_image/qwen_merges.txt")
+        for (rank, merge) in include_str!("../../models/diffusion/z_image/qwen_merges.txt")
             .lines()
             .enumerate()
         {
@@ -372,6 +409,124 @@ impl BPETokenizer {
         Ok(tokenizer)
     }
 
+    /// Qwen2.5-Omni-3B tokenizer. Same BPE merges as the Qwen2 base but
+    /// the named-vocab special token list is the Qwen2.5-Omni one (22
+    /// tokens at ids 151643..151664) which includes the audio-related
+    /// markers (`<|AUDIO|>`, `<|audio_bos|>`, `<|audio_eos|>`) needed for
+    /// AuK CFMEdit reference-audio conditioning.
+    pub fn from_qwen25_omni_embedded_merges() -> Result<Self, String> {
+        const ORACLE_NAMED_VOCAB_SIZE: usize = 151_665;
+        const MODEL_VOCAB_SIZE: usize = 151_936;
+        let byte_encoder = build_byte_encoder();
+        let mut tokens = byte_encoder.clone();
+        tokens.sort_by_key(|token| token.chars().next());
+        let mut token_types = vec![TokenType::Normal; tokens.len()];
+        let mut merge_ranks = HashMap::new();
+
+        for (rank, merge) in include_str!("../../models/diffusion/z_image/qwen_merges.txt")
+            .lines()
+            .enumerate()
+        {
+            let (left, right) = merge
+                .split_once(' ')
+                .ok_or_else(|| format!("Invalid embedded Qwen merge at line {}", rank + 1))?;
+            if left.is_empty() || right.is_empty() {
+                return Err(format!("Invalid embedded Qwen merge at line {}", rank + 1));
+            }
+            merge_ranks.insert((left.into(), right.into()), rank as u32);
+            tokens.push(format!("{left}{right}"));
+            token_types.push(TokenType::Normal);
+        }
+
+        for token in QWEN25_OMNI_SPECIAL_TOKENS {
+            tokens.push((*token).into());
+            token_types.push(TokenType::Control);
+        }
+        if tokens.len() != ORACLE_NAMED_VOCAB_SIZE {
+            return Err(format!(
+                "Embedded Qwen2.5-Omni vocabulary has {} named IDs; expected {ORACLE_NAMED_VOCAB_SIZE}",
+                tokens.len()
+            ));
+        }
+        // The pinned oracle names IDs through 151663, while the supplied
+        // model has 151936 embedding rows. Preserve the remaining rows as
+        // deliberately unencodable placeholders instead of inventing
+        // tokenizer semantics.
+        while tokens.len() < MODEL_VOCAB_SIZE {
+            tokens.push(format!("<|reserved_{}|>", tokens.len()));
+            token_types.push(TokenType::Unused);
+        }
+
+        let token_to_id: HashMap<String, u32> = tokens
+            .iter()
+            .zip(&token_types)
+            .enumerate()
+            .filter(|(_, (_, kind))| **kind != TokenType::Unused)
+            .map(|(id, (token, _))| (token.clone(), id as u32))
+            .collect();
+        let mut byte_decoder = HashMap::new();
+        for (byte, token) in byte_encoder.iter().enumerate() {
+            let value = token
+                .chars()
+                .next()
+                .ok_or_else(|| "Invalid embedded Qwen byte symbol".to_string())?;
+            byte_decoder.insert(value, byte as u8);
+        }
+        let mut special_tokens: Vec<_> = QWEN25_OMNI_SPECIAL_TOKENS
+            .iter()
+            .map(|text| SpecialToken {
+                text: (*text).into(),
+                id: *token_to_id
+                    .get(*text)
+                    .expect("embedded special token was just inserted"),
+                kind: TokenType::Control,
+            })
+            .collect();
+        special_tokens.sort_by(|left, right| right.text.len().cmp(&left.text.len()));
+        let semantic_tokens = QWEN_SEMANTIC_TOKENS
+            .iter()
+            .filter_map(|(literal, name)| {
+                token_to_id
+                    .get(*literal)
+                    .map(|id| ((*name).to_string(), *id))
+            })
+            .collect();
+        let eos_id = token_to_id.get("<|endoftext|>").copied();
+        let mut semantic_token_names: HashMap<String, u32> = HashMap::new();
+        semantic_token_names.insert("im_start".into(), token_to_id["<|im_start|>"]);
+        semantic_token_names.insert("im_end".into(), token_to_id["<|im_end|>"]);
+        semantic_token_names.insert("endoftext".into(), token_to_id["<|endoftext|>"]);
+
+        let tokenizer = BPETokenizer {
+            tokens,
+            token_types,
+            token_to_id,
+            merge_ranks,
+            byte_encoder,
+            byte_decoder,
+            pre: PreTokenizer::Qwen2,
+            special_tokens,
+            semantic_tokens,
+            bos_id: eos_id,
+            eos_id,
+            add_bos: false,
+            add_eos: false,
+            byte_fallback: true,
+            normalize_nfc: false,
+        };
+        // Sanity check: every QWEN25_OMNI_SPECIAL_TOKENS text must round-trip.
+        for (i, text) in QWEN25_OMNI_SPECIAL_TOKENS.iter().enumerate() {
+            let id = tokenizer.token_to_id.get(*text).copied();
+            assert_eq!(
+                id,
+                Some(151_643 + i as u32),
+                "QWEN25_OMNI_SPECIAL_TOKENS[{i}] = {text:?} expected id {} got {id:?}",
+                151_643 + i as u32,
+            );
+        }
+        Ok(tokenizer)
+    }
+
     pub fn from_gguf_metadata(
         get_meta: impl Fn(&str) -> Option<MetaValue>,
     ) -> Result<Self, String> {
@@ -409,6 +564,19 @@ impl BPETokenizer {
                 Some(MetaValue::String(value)) if value == "dbrx" => PreTokenizer::LlamaBpe,
                 Some(MetaValue::String(value)) if value == "pixtral" => PreTokenizer::LlamaBpe,
                 Some(MetaValue::String(value)) if value == "exaone" => PreTokenizer::LlamaBpe,
+                // jina-v1-en / jina-v2-code / roberta-bpe all map to standard
+                // GPT-2 byte-level BPE in llama.cpp
+                // (`llama-vocab.cpp:2239-2245`) with `add_sep = true`. For our
+                // BPETokenizer that maps to `LlamaBpe` (the same regex
+                // LlamaBpe uses) plus `add_bos = add_eos = true`, which the
+                // GGUF ships via `tokenizer.ggml.add_bos_token` /
+                // `tokenizer.ggml.add_eos_token`; the SEP token itself is
+                // identical to the EOS token (`seperator_token_id = 2` in
+                // jina-reranker-v1-turbo-en), so `add_eos` does the right thing
+                // without a separate `add_sep` arm.
+                Some(MetaValue::String(value)) if value == "jina-v1-en" => PreTokenizer::LlamaBpe,
+                Some(MetaValue::String(value)) if value == "jina-v2-code" => PreTokenizer::LlamaBpe,
+                Some(MetaValue::String(value)) if value == "roberta-bpe" => PreTokenizer::LlamaBpe,
                 Some(MetaValue::String(value)) if value == "falcon-h1" => {
                     force_add_bos = true;
                     PreTokenizer::LlamaBpe
@@ -423,9 +591,17 @@ impl BPETokenizer {
                 // fires on GLM-4 inputs that Minicpm5 would handle
                 // differently.
                 Some(MetaValue::String(value)) if value == "glm4" => PreTokenizer::Minicpm5,
+                // Mistral 3 / Tekken (`harshatheg/Ministral-3-3B-Instruct-2512-GGUF`):
+                // vocab is GPT-2 byte-level BPE with a Mistral-flavored
+                // pretokenizer regex. The byte-level BPE encoding is the
+                // same as Llama-3 / pixtral / dbrx, so reusing
+                // `LlamaBpe` is correct. Special-token boundaries
+                // (BOS=1, EOS=2, pad=11) are pinned by the GGUF, no extra
+                // `force_add_bos` needed.
+                Some(MetaValue::String(value)) if value == "tekken" => PreTokenizer::LlamaBpe,
                 Some(MetaValue::String(value)) => {
                     return Err(format!(
-                        "Unsupported tokenizer.ggml.pre {value:?}; expected qwen2 or qwen35, hunyuan, hunyuan-dense, lfm2, llama-bpe, pixtral, falcon-h1, exaone, k2-horizon, minicpm5, gpt-4o, or glm4"
+                        "Unsupported tokenizer.ggml.pre {value:?}; expected qwen2 or qwen35, hunyuan, hunyuan-dense, lfm2, llama-bpe, pixtral, falcon-h1, exaone, jina-v1-en, jina-v2-code, roberta-bpe, k2-horizon, minicpm5, gpt-4o, tekken, or glm4"
                     ));
                 }
                 _ => return Err("Missing or invalid tokenizer.ggml.pre".into()),
@@ -1144,7 +1320,7 @@ impl SPMTokenizer {
             }
         }
 
-        let fragments = self.partition(text, options.parse_special);
+        let fragments = partition_special(&self.special_tokens, text, options.parse_special);
         let mut prev_was_special = true; // mirror llama.cpp: BOS counts as special
         for frag in fragments {
             match frag {
@@ -1166,45 +1342,6 @@ impl SPMTokenizer {
         }
 
         output
-    }
-
-    /// Split input text on CONTROL/USER_DEFINED special token literals so
-    /// each fragment can be tokenized independently. Mirrors
-    /// `tokenizer_st_partition` in llama.cpp.
-    fn partition<'a>(&self, text: &'a str, parse_special: bool) -> Vec<Fragment<'a>> {
-        let mut fragments = Vec::new();
-        let mut remaining = text;
-
-        while !remaining.is_empty() {
-            let best = self
-                .special_tokens
-                .iter()
-                .filter(|token| {
-                    parse_special || !matches!(token.kind, TokenType::Control | TokenType::Unknown)
-                })
-                .filter_map(|token| {
-                    remaining
-                        .find(&token.text)
-                        .map(|position| (position, token))
-                })
-                .min_by(|(left_pos, left), (right_pos, right)| {
-                    left_pos
-                        .cmp(right_pos)
-                        .then_with(|| right.text.len().cmp(&left.text.len()))
-                });
-
-            let Some((position, token)) = best else {
-                fragments.push(Fragment::Text(remaining));
-                break;
-            };
-            if position > 0 {
-                fragments.push(Fragment::Text(&remaining[..position]));
-            }
-            fragments.push(Fragment::Special(token.id));
-            remaining = &remaining[position + token.text.len()..];
-        }
-
-        fragments
     }
 
     /// Encode a single text fragment after applying prefix-space and
@@ -1616,9 +1753,17 @@ impl Tokenizer for SPMTokenizer {
     }
 }
 
-/// Read `tokenizer.ggml.model` from GGUF metadata and dispatch to either the
-/// BPE (`gpt2`, `gemma4`) or SentencePiece (`llama`) implementation. Returns
-/// a trait object so callers can stay agnostic.
+/// Read `tokenizer.ggml.model` from GGUF metadata and dispatch to the
+/// right implementation. Returns a trait object so callers can stay
+/// agnostic. The set of supported model strings:
+///
+///   * `gpt2` / `gemma4`        — BPE
+///   * `llama`                  — SentencePiece (SPM)
+///   * `bert`                   — WordPiece (separate construction
+///                                function, `WPMTokenizer`)
+///   * `t5`                     — SentencePiece unigram with a
+///                                precompiled XCDA normalization map
+///                                (`UgmTokenizer`)
 pub fn load_tokenizer(
     get_meta: impl Fn(&str) -> Option<MetaValue>,
 ) -> Result<Box<dyn Tokenizer>, String> {
@@ -1626,6 +1771,9 @@ pub fn load_tokenizer(
         Some(MetaValue::String(value)) if value == "llama" => {
             Ok(Box::new(SPMTokenizer::from_gguf_metadata(get_meta)?))
         }
+        Some(MetaValue::String(value)) if value == "t5" => Ok(Box::new(
+            ugm::UgmTokenizer::from_gguf_metadata(get_meta).map_err(|e| e.to_string())?,
+        )),
         _ => Ok(Box::new(BPETokenizer::from_gguf_metadata(get_meta)?)),
     }
 }
@@ -2531,15 +2679,14 @@ mod tests {
 //
 // Algorithm (per llama.cpp):
 //   1. Normalize: Unicode NFD, drop combining marks when strip_accents,
-//      lowercase when `lowercase`, then split on whitespace into words
+//      lowercase when `lowercase`, split whitespace, punctuation and CJK
 //      (dropping NUL / U+FFFD / control code points).
 //   2. Prepend the phantom space U+2581 ("▁") to each word.
 //   3. Greedy longest-match left-to-right against the vocab, advancing one
 //      character per failed position. A word that matches nothing at all
 //      emits `unk`.
-//   4. BOS/EOS are appended from `add_bos_token` / `add_eos_token`; for the
-//      BERT family llama.cpp has no bos/eos ids, so `add_sep` supplies the
-//      [CLS]/[SEP] pair the caller expects.
+//   4. `add_special` wraps [CLS]/[SEP], independently of add_bos/add_eos.
+//      CONTROL/USER_DEFINED literals are partitioned before normalization.
 //
 // Unlike a HF BERT loader this never emits `##` continuation pieces: the
 // converted GGUF vocab uses the `▁`-prefixed SentencePiece-style spelling
@@ -2547,9 +2694,49 @@ mod tests {
 // `▁`, zero start with `##`).
 // ============================================================================
 
+fn partition_special<'a>(
+    special_tokens: &[SpecialToken],
+    text: &'a str,
+    parse_special: bool,
+) -> Vec<Fragment<'a>> {
+    let mut fragments = Vec::new();
+    let mut remaining = text;
+
+    while !remaining.is_empty() {
+        let best = special_tokens
+            .iter()
+            .filter(|token| {
+                parse_special || !matches!(token.kind, TokenType::Control | TokenType::Unknown)
+            })
+            .filter_map(|token| {
+                remaining
+                    .find(&token.text)
+                    .map(|position| (position, token))
+            })
+            .min_by(|(left_pos, left), (right_pos, right)| {
+                left_pos
+                    .cmp(right_pos)
+                    .then_with(|| right.text.len().cmp(&left.text.len()))
+            });
+
+        let Some((position, token)) = best else {
+            fragments.push(Fragment::Text(remaining));
+            break;
+        };
+        if position > 0 {
+            fragments.push(Fragment::Text(&remaining[..position]));
+        }
+        fragments.push(Fragment::Special(token.id));
+        remaining = &remaining[position + token.text.len()..];
+    }
+
+    fragments
+}
+
 /// WordPiece tokenizer for `tokenizer.ggml.model = "bert"` GGUFs.
 pub struct WPMTokenizer {
     tokens: Vec<String>,
+    special_tokens: Vec<SpecialToken>,
     token_to_id: std::collections::HashMap<String, u32>,
     /// Longest token length in bytes, used to bound the match loop.
     max_token_len: usize,
@@ -2580,6 +2767,29 @@ impl WPMTokenizer {
 
         let tokens = string_array(get_meta("tokenizer.ggml.tokens"), "tokenizer.ggml.tokens")?;
         let n_tokens = tokens.len();
+        let kinds = match get_meta("tokenizer.ggml.token_type") {
+            Some(meta) => integer_array(Some(meta), "tokenizer.ggml.token_type")?,
+            None => vec![1; n_tokens],
+        };
+        if kinds.len() != n_tokens {
+            return Err("tokenizer.ggml.token_type length must match vocabulary".into());
+        }
+        let mut special_tokens = Vec::new();
+        for (id, (text, kind)) in tokens.iter().zip(kinds).enumerate() {
+            let kind = token_type(kind)?;
+            if !text.is_empty()
+                && matches!(
+                    kind,
+                    TokenType::Control | TokenType::Unknown | TokenType::UserDefined
+                )
+            {
+                special_tokens.push(SpecialToken {
+                    text: text.clone(),
+                    id: id as u32,
+                    kind,
+                });
+            }
+        }
         let token_to_id: std::collections::HashMap<String, u32> = tokens
             .iter()
             .enumerate()
@@ -2607,14 +2817,22 @@ impl WPMTokenizer {
         )?
         .or(Some(100));
         let sep_id = optional_token_id(
-            get_meta("tokenizer.ggml.sep_token_id"),
+            get_meta("tokenizer.ggml.seperator_token_id")
+                .or_else(|| get_meta("tokenizer.ggml.sep_token_id")),
             "tokenizer.ggml.sep_token_id",
         )?
         .or(Some(102));
         let cls_id = optional_token_id(
             get_meta("tokenizer.ggml.cls_token_id"),
             "tokenizer.ggml.cls_token_id",
-        )?;
+        )?
+        // `tokenizer.ggml.cls_token_id` is deprecated — current llama.cpp no
+        // longer reads it at all. For the bert family the `[CLS]` id lives in
+        // `special_bos_id`, whose model-type default is 101
+        // (`llama-vocab.cpp:1982-1996`), so that is the fallback. Without it a
+        // GGUF that omits the key (nomic-embed-text-v1.5 does) leaves
+        // `cls_id = None` and `[CLS]` leaks back out of `decode`.
+        .or(bos_id);
         validate_token_id(bos_id, n_tokens, "tokenizer.ggml.bos_token_id")?;
         validate_token_id(unk_id, n_tokens, "tokenizer.ggml.unknown_token_id")?;
         validate_token_id(sep_id, n_tokens, "tokenizer.ggml.sep_token_id")?;
@@ -2649,6 +2867,7 @@ impl WPMTokenizer {
 
         Ok(Self {
             tokens,
+            special_tokens,
             token_to_id,
             max_token_len,
             bos_id,
@@ -2696,8 +2915,15 @@ impl WPMTokenizer {
                 output.push(bos);
             }
         }
-        for word in self.preprocess(text) {
-            self.encode_word(&word, &mut output);
+        for fragment in partition_special(&self.special_tokens, text, options.parse_special) {
+            match fragment {
+                Fragment::Special(id) => output.push(id),
+                Fragment::Text(text) => {
+                    for word in self.preprocess(text) {
+                        self.encode_word(&word, &mut output);
+                    }
+                }
+            }
         }
         if options.add_special {
             if let Some(sep) = self.sep_id {
@@ -2733,8 +2959,68 @@ impl WPMTokenizer {
         text
     }
 
-    /// Split `text` into normalized, whitespace-delimited words.
+    /// Reuse the installed BERT normalizer and pre-tokenizer (NFD, CJK and punctuation).
+    /// This is the production path — it matches `llama.cpp` b96806d9 exactly.
     fn preprocess(&self, text: &str) -> Vec<String> {
+        use tokenizers::{
+            NormalizedString, Normalizer, OffsetReferential, OffsetType, PreTokenizedString,
+            PreTokenizer,
+        };
+        let mut normalized = NormalizedString::from(text);
+        tokenizers::normalizers::bert::BertNormalizer::new(
+            true,
+            true,
+            Some(self.strip_accents),
+            self.lowercase,
+        )
+        .normalize(&mut normalized)
+        .expect("BERT normalization");
+        let mut split = PreTokenizedString::from(normalized);
+        tokenizers::pre_tokenizers::bert::BertPreTokenizer
+            .pre_tokenize(&mut split)
+            .expect("BERT pre-tokenization");
+        split
+            .get_splits(OffsetReferential::Normalized, OffsetType::Byte)
+            .into_iter()
+            .map(|(word, _, _)| word.to_owned())
+            .collect()
+    }
+
+    /// Pre-`tokenizers`-crate BERT pre-tokenizer (HF-free escape hatch reference).
+    ///
+    /// **NOT production-ready**: this implementation has known gaps vs the HF path
+    /// above and vs `llama.cpp` b96806d9. It is kept here as a reference for
+    /// future maintainers, **not** as a drop-in replacement.
+    ///
+    /// ## What this does correctly
+    /// - Lowercase (when `self.lowercase == true`).
+    /// - Strip combining marks after NFD-like reduction (when `self.strip_accents`).
+    /// - Split on Unicode whitespace.
+    /// - Drop NUL / U+FFFD / control code points.
+    ///
+    /// ## What this gets wrong (vs `preprocess` / `llama.cpp`)
+    /// - **No punctuation splitting**: `"France?"` becomes one word, not two.
+    ///   The HF `BertPreTokenizer` splits on punctuation; this version does not.
+    /// - **No CJK per-character splitting**: `"世界"` stays as one word, not two.
+    ///   The HF `BertNormalizer` wraps CJK in spaces via `handle_chinese_chars`,
+    ///   then the pre-tokenizer splits per character.
+    /// - **NFD is implicit**: it relies on `is_combining_mark` to drop accents
+    ///   without an explicit `unicode-normalization` NFD pass first. For most
+    ///   ASCII-with-diacritics input this matches, but precomposed sequences
+    ///   that decompose to multiple non-combining codepoints are not folded.
+    ///
+    /// ## When to reach for this
+    /// Only if the `tokenizers` crate dependency must be removed entirely for
+    /// licensing / supply-chain / compile-time reasons. In that case, the right
+    /// fix is to **rewrite** this function (or its replacement) with proper
+    /// punctuation + CJK splitting, then swap `preprocess` to call it. Do not
+    /// simply uncomment the call — the output diverges from `llama.cpp`.
+    ///
+    /// `#[allow(dead_code)]` is intentional: the production encoder never calls
+    /// this. The function and its helper `is_combining_mark` exist purely so
+    /// the historical algorithm stays reviewable.
+    #[allow(dead_code)]
+    fn preprocess_legacy(&self, text: &str) -> Vec<String> {
         let mut words: Vec<String> = Vec::new();
         let mut current = String::new();
         for value in text.chars() {
@@ -2790,10 +3076,20 @@ impl WPMTokenizer {
                     i = next;
                 }
                 None => {
-                    // llama.cpp discards the whole word on the first missed
-                    // position; mirror that instead of falling back to UNK.
+                    // `llama-vocab.cpp:829-831`: on the first missed position
+                    // the oracle does `output.resize(current_tokens); break;`
+                    // — it rolls the word back and stops scanning it, but it
+                    // does NOT return. Control falls through to the check
+                    // below, where `current_tokens == output.size()` is now
+                    // true, so the word becomes exactly one `[UNK]`.
+                    //
+                    // Rust's `return` here would skip that check and drop the
+                    // word entirely, which is what this did until
+                    // 2026-09-29: `"🎉🎊"` tokenized to `[CLS, SEP]` and
+                    // `"hello 🎉 world"` to `hello world`, silently losing the
+                    // out-of-vocabulary word instead of emitting `[UNK]`.
                     output.truncate(before);
-                    return;
+                    break;
                 }
             }
         }
@@ -2805,13 +3101,123 @@ impl WPMTokenizer {
     }
 }
 
-/// Combining-mark test used by the NFD accent strip step.
-///
-/// llama.cpp classifies code points with its own unicode tables
-/// (`unicode_cpt_flags_from_cpt().is_accent_mark`); this covers the standard
-/// `Mn`/`Me` general categories, which is what NFD decomposition of Latin
-/// letters produces.
+/// Helper for [`WPMTokenizer::preprocess_legacy`]: does the codepoint classify
+/// as a Unicode combining mark? Used only by the HF-free escape-hatch path;
+/// the production [`WPMTokenizer::preprocess`] delegates to
+/// `tokenizers::BertNormalizer`, which performs its own NFD + combining-mark
+/// stripping internally. Kept here so `preprocess_legacy` can stay bit-for-bit
+/// equivalent to the algorithm it replaced.
+#[allow(dead_code)]
 fn is_combining_mark(value: char) -> bool {
     use unicode_categories::UnicodeCategories;
     value.is_mark_nonspacing() || value.is_mark_enclosing()
 }
+
+#[cfg(test)]
+mod wpm_unk_tests {
+    use super::{EncodeOptions, SpecialToken, TokenType, WPMTokenizer};
+
+    /// Minimal WordPiece vocab covering the ASCII leaves plus the two marker
+    /// tokens, so the out-of-vocabulary path can be exercised without a GGUF.
+    fn tokenizer() -> WPMTokenizer {
+        let tokens: Vec<String> = [
+            "[UNK]", "[CLS]", "[SEP]", "▁hello", "▁world", "hello", "world",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let token_to_id = tokens
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (t.clone(), i as u32))
+            .collect();
+        WPMTokenizer {
+            max_token_len: tokens.iter().map(|t| t.len()).max().unwrap_or(0),
+            tokens,
+            special_tokens: vec![SpecialToken {
+                text: "[SEP]".into(),
+                id: 2,
+                kind: TokenType::Control,
+            }],
+            token_to_id,
+            bos_id: Some(1),
+            unk_id: Some(0),
+            cls_id: Some(1),
+            sep_id: Some(2),
+            add_bos: true,
+            add_eos: true,
+            add_sep: true,
+            lowercase: true,
+            strip_accents: false,
+        }
+    }
+
+    fn encode(text: &str) -> Vec<u32> {
+        tokenizer().encode(
+            text,
+            EncodeOptions {
+                add_special: true,
+                parse_special: true,
+            },
+        )
+    }
+
+    #[test]
+    fn a_word_with_no_matching_piece_becomes_a_single_unk() {
+        // `llama-vocab.cpp:829-833`: the oracle rolls the word back with
+        // `output.resize(current_tokens)` then *falls through* to the
+        // `current_tokens == output.size()` check and pushes exactly one
+        // `token_unk()`. Our version used to `return` there, dropping the word
+        // entirely, so "🎉🎊" came out as just [CLS, SEP].
+        let unk = 0u32;
+        let cls = 1u32;
+        let sep = 2u32;
+        assert_eq!(encode("🎉🎊"), vec![cls, unk, sep]);
+    }
+
+    #[test]
+    fn an_oov_word_between_matching_words_still_gets_an_unk() {
+        // hello (matches) + 🎉 (no match -> one UNK) + world (matches). Before
+        // the fix this was `[CLS, ▁hello, ▁world, SEP]`, silently losing the
+        // emoji instead of emitting [UNK].
+        assert_eq!(encode("hello 🎉 world"), vec![1, 3, 0, 4, 2]);
+    }
+
+    #[test]
+    fn a_partially_matching_word_collapses_to_one_unk() {
+        // "hello🎉" has a matching prefix then an unmatchable character. The
+        // oracle truncates the partial match and emits one UNK for the whole
+        // word, not a mix of real tokens plus UNK.
+        assert_eq!(encode("hello🎉"), vec![1, 0, 2]);
+    }
+
+    #[test]
+    fn whitespace_only_and_empty_inputs_produce_no_unk() {
+        // Whitespace never forms a word in the first place
+        // (`llama-vocab.cpp:849-853` skips empty words), so neither case has
+        // anything to fall back to.
+        assert_eq!(encode("   "), vec![1, 2]);
+        assert_eq!(encode(""), vec![1, 2]);
+    }
+
+    #[test]
+    fn a_fully_matching_word_gets_no_extra_unk() {
+        assert_eq!(encode("hello"), vec![1, 3, 2]);
+        assert_eq!(encode("hello world"), vec![1, 3, 4, 2]);
+    }
+
+    #[test]
+    fn wordpiece_normalizes_accents_and_splits_punctuation_and_cjk() {
+        let mut tok = tokenizer();
+        tok.strip_accents = true;
+        assert_eq!(
+            tok.preprocess("  Héllo\t世界! Café e\u{301}\n🙂"),
+            ["hello", "世", "界", "!", "cafe", "e", "🙂"]
+        );
+    }
+}
+
+/// Re-export the UGM (SentencePiece unigram) tokenizer at the same flat
+/// path level as BPE/SPM/WPM. `load_tokenizer` above routes
+/// `tokenizer.ggml.model = "t5"` GGUFs here.
+pub use ugm::{UgmError, UgmTokenizer};

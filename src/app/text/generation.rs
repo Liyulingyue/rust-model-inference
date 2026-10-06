@@ -14,7 +14,24 @@ pub(super) fn validate_gemma4_temperature(arch: &str, temperature: f32) -> Resul
 pub(crate) fn uses_llama_trunk(arch: &str) -> bool {
     matches!(
         arch,
-        "llama" | "exaone" | "k2-horizon" | "granite" | "nanbeige" | "phi3" | "glm4"
+        // `mistral3` rides the llama trunk; YaRN RoPE is detected from
+        // `rope.scaling.{type,factor,original_context_length,yarn_beta_*,
+        // yarn_log_multiplier}` inside the trunk, so this dispatch is
+        // unconditional — Mistral 3 3B / Shieldstral / Ministral-3
+        // (`harshatheg/Ministral-3-3B-Instruct-2512-GGUF`) all route here.
+        // `gemma2` rides the llama trunk too — it shares the standard
+        // llama.cpp tensor layout (no BitLinear packing) and adds
+        // GeGLU + sliding-window attention + logit softcapping,
+        // all detected from `gemma2.*` GGUF metadata inside the trunk.
+        "llama"
+            | "exaone"
+            | "k2-horizon"
+            | "granite"
+            | "nanbeige"
+            | "phi3"
+            | "glm4"
+            | "mistral3"
+            | "gemma2"
     )
 }
 
@@ -142,6 +159,20 @@ pub fn run_inference(
         )
     } else if uses_llama_trunk(&arch) {
         crate::models::llama::run_inference(
+            source.as_ref(),
+            prompt,
+            max_tokens,
+            temperature,
+            n_threads_arg,
+            bench,
+            profile,
+            kv_format,
+            max_context,
+            repetition_penalty,
+            thinking,
+        )
+    } else if arch == "xing4_0" {
+        crate::models::xing4_0::trunk::run::run_inference(
             source.as_ref(),
             prompt,
             max_tokens,

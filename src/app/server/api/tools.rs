@@ -32,6 +32,12 @@ fn is_qwen35(arch: &str) -> Result<bool, String> {
         // qwen2vl / qwen3vlmoe ride the same Qwen3 ChatML prompt as qwen3;
         // their projector differs, which the runtime's image path handles.
         "qwen3" | "qwen3vl" | "lfm2moe" | "qwen2vl" | "qwen3vlmoe" => Ok(false),
+        // Falcon-H1 uses the same ChatML role markers as Qwen (verified
+        // against the unsloth GGUF: <|im_start|>user\n...
+        // <|im_end|> <|im_start|>assistant\n), so it rides the same
+        // renderer; it has no tool grammar and no vision path, so
+        // build_prompt rejects tools/images before we get here.
+        "falcon-h1" => Ok(false),
         "qwen35" => Ok(true),
         // Llama-family archs go through the CLI prompt builder
         // (`llama::trunk::build_prompt_tokens`) and don't support tool
@@ -42,7 +48,8 @@ fn is_qwen35(arch: &str) -> Result<bool, String> {
         // llama trunk with its own `[gMASK]<sop><|user|>...<|assistant|>`
         // chat template and additionally does post-attention / post-FFN
         // RMSNorm (`attn_post_norm` / `ffn_post_norm`); last user turn only.
-        "llama" | "nanbeige" | "exaone" | "k2-horizon" | "granite" | "phi3" | "glm4" => Ok(false),
+        "llama" | "nanbeige" | "exaone" | "k2-horizon" | "granite" | "phi3" | "glm4"
+        | "mistral3" => Ok(false),
         _ => Err(format!(
             "Tool/chat template is unsupported for architecture {arch}"
         )),
@@ -129,9 +136,21 @@ pub fn build_prompt(
     if arch == "qwen3vl" && !tools.is_empty() {
         return Err("Function tools are unsupported for Qwen3VL text generation".into());
     }
+    // Falcon-H1 speaks Qwen-flavoured ChatML (`{role}`), so it
+    // shares the Qwen-family multi-turn renderer below — but it has no
+    // tool-call grammar and no vision path, so refuse tools here rather
+    // than silently rendering a tool prompt the model ignores.
+    if arch == "falcon-h1" {
+        if !tools.is_empty() {
+            return Err("Function tools are unsupported for Falcon-H1 text generation".into());
+        }
+        if messages.iter().any(|m| !m.images.is_empty()) {
+            return Err("Image input is unsupported for Falcon-H1 text generation".into());
+        }
+    }
     let llama_family = matches!(
         arch,
-        "llama" | "nanbeige" | "exaone" | "k2-horizon" | "granite" | "phi3" | "glm4"
+        "llama" | "nanbeige" | "exaone" | "k2-horizon" | "granite" | "phi3" | "glm4" | "mistral3"
     );
     if llama_family {
         if !tools.is_empty() {
