@@ -43,7 +43,6 @@ use super::weights::{BitLinearWeights, Gemma3LayerWeights, Gemma3Model, Weight};
 use crate::ops::bitnet::{bitlinear_forward, quantize_activation_per_token};
 use crate::ops::quantize_q8_0_into;
 use crate::ops::rope::rope_neox_inplace_with_factor;
-
 /// BitLinear per-projection: rms_norm → absmax int8 quant →
 /// ternary matmul → rescale. Same scalar reference impl as
 /// `qwen3::trunk::forward::bitlinear_projection` — duplicated

@@ -1,4 +1,5 @@
 use super::config::Qwen3Rope;
+use crate::ops::rope::rope_neox_inplace;
 use super::forward::{forward_moe_token, Qwen3Input};
 use super::session::Qwen3Session;
 use super::util::{checked_product, validate_input_shapes, validate_token_ids};
@@ -478,13 +479,11 @@ impl Qwen3Session<'_> {
                 }
                 for head in q.chunks_exact_mut(config.n_embd_head_k) {
                     match config.rope {
-                        Qwen3Rope::Neox => rope_neox_inplace_with_factor(
+                        Qwen3Rope::Neox => rope_neox_inplace(
                             head,
                             position[0],
                             config.n_embd_head_k,
-                            config.freq_base,
-                            1.0_f32,
-                        ),
+                            config.freq_base),
                         Qwen3Rope::Interleaved { sections, n_dims } => rope_mrope_interleaved(
                             head,
                             position,
@@ -497,13 +496,11 @@ impl Qwen3Session<'_> {
                 }
                 for head in k.chunks_exact_mut(config.n_embd_head_k) {
                     match config.rope {
-                        Qwen3Rope::Neox => rope_neox_inplace_with_factor(
+                        Qwen3Rope::Neox => rope_neox_inplace(
                             head,
                             position[0],
                             config.n_embd_head_k,
-                            config.freq_base,
-                            1.0_f32,
-                        ),
+                            config.freq_base),
                         Qwen3Rope::Interleaved { sections, n_dims } => rope_mrope_interleaved(
                             head,
                             position,

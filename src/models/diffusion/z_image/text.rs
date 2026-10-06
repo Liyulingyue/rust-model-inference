@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use crate::ops::rope::rope_neox_inplace;
 
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
@@ -7,7 +8,7 @@ use crate::ops::attention_value_reduce;
 use crate::ops::dot_f32;
 use crate::ops::silu_mul_inplace;
 use crate::ops::softmax_inplace;
-use crate::ops::{embedding_lookup, rms_norm, rms_norm_inplace, rope_neox_inplace_with_factor};
+use crate::ops::{embedding_lookup, rms_norm, rms_norm_inplace};
 
 use super::{linear_into, validate_component, Component, Q8Scratch};
 
@@ -203,20 +204,16 @@ impl Qwen3TextEncoder {
                 for head in scratch.k.chunks_exact_mut(HEAD_WIDTH) {
                     rms_norm_inplace(head, &layer.k_norm, RMS_EPSILON);
                 }
-                rope_neox_inplace_with_factor(
+                rope_neox_inplace(
                     &mut scratch.q,
                     position,
                     HEAD_WIDTH,
-                    ROPE_BASE,
-                    1.0_f32,
-                );
-                rope_neox_inplace_with_factor(
+                    ROPE_BASE);
+                rope_neox_inplace(
                     &mut scratch.k,
                     position,
                     HEAD_WIDTH,
-                    ROPE_BASE,
-                    1.0_f32,
-                );
+                    ROPE_BASE);
 
                 let cache_row = (layer_index * token_count + position) * KV_WIDTH;
                 cache.k[cache_row..cache_row + KV_WIDTH].copy_from_slice(&scratch.k);

@@ -97,13 +97,11 @@ fn parity_rope_neox_inplace_uses_llama_scalar_non_fused_rotation() {
     values[0] = f32::from_bits(0x3f24_bed8);
     values[64] = f32::from_bits(0xbd9d_4940);
 
-    rust_model_inference::ops::rope_neox_inplace_with_factor(
+    rust_model_inference::ops::rope_neox_inplace(
         &mut values,
         1,
         128,
-        1_000_000.0,
-        1.0_f32,
-    );
+        1_000_000.0);
 
     assert_eq!(values[0].to_bits(), 0x3ed3_1cd6);
 }
@@ -115,13 +113,11 @@ fn parity_rope_neox_inplace_uses_llama_combined_sincos() {
     values[14] = f32::from_bits(0xbfcd_db0e);
     values[78] = f32::from_bits(0xc038_7005);
 
-    rust_model_inference::ops::rope_neox_inplace_with_factor(
+    rust_model_inference::ops::rope_neox_inplace(
         &mut values,
         6,
         128,
-        1_000_000.0,
-        1.0_f32,
-    );
+        1_000_000.0);
 
     assert_eq!(
         [values[14], values[78]].map(f32::to_bits),

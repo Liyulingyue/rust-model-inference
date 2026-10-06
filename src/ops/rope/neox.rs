@@ -1,17 +1,34 @@
 //! Neox-style RoPE: rotate lo/hi halves independently.
 //!
-//! Public API:
-//! - [`rope_neox_inplace_with_factor`] — high-level entry point that
-//!   caches the sin/cos table once per token and dispatches to the
-//!   AVX2 / NEON / scalar apply kernel. The `factor` argument is the
-//!   linear-scaling multiplier applied to the effective position;
-//!   pass `1.0` for vanilla RoPE (no wrapper / no hidden multiply).
+//! Public API (vanilla first, scaling last):
+//! - [`rope_neox_inplace`] — vanilla RoPE-Neox. The default for
+//!   every llama-family arch without linear position scaling
+//!   (llama / mistral / qwen / qwen3 / phi-2 / phi-3 / phi-4 /
+//!    gemma2 / gemma3 270M / gemma3 1B / bitnet b1.58 / etc.).
+//!   Builds the sin/cos table once per token and dispatches to
+//!   the AVX2 / NEON / scalar apply kernel. No `pos * factor`
+//!   multiply — callers that don't need linear scaling should
+//!   use this entry point instead of passing `factor = 1.0`
+//!   to [`rope_neox_inplace_with_factor`].
+//! - [`rope_neox_inplace_with_factor`] — same but with linear
+//!   position scaling (`theta_i = pos * factor * freq_base^(-2i/d)`).
+//!   Only gemma3 4B+ / 12B / 27B needs this — they declare
+//!   `gemma3.rope.scaling.factor = 8.0` to extend context 32k
+//!   → 256k. Every other arch passes `1.0` to this entry
+//!   point, but those callers should migrate to
+//!   [`rope_neox_inplace`] to avoid the wasted multiply.
 //!
-//! Private kernels:
+//! Shared private:
+//! - [`build_cos_sin_table_and_apply`] — builds the cos/sin
+//!   table starting from a caller-supplied `theta_0`, then
+//!   dispatches to the AVX2 / NEON / scalar kernel. The two
+//!   public entry points funnel through this helper so the
+//!   per-arch kernels (`rope_neox_inplace_avx2` / `_neon` /
+//!   `_scalar`) live in exactly one place.
 //! - [`rope_neox_inplace_avx2`] / [`rope_neox_inplace_neon`] /
-//!   [`rope_neox_inplace_scalar`] — the actual rotation loop, taking a
-//!   precomputed `(cos, sin)` table. Naming follows the
-//!   `[name]-[inplace]-[arch]` convention from `math/exp.rs`.
+//!   [`rope_neox_inplace_scalar`] — the actual rotation loop.
+//!   Naming follows the `[name]-[inplace]-[arch]` convention
+//!   from `math/exp.rs`.
 
 #[inline]
 pub fn rope_sin_cos(theta: f32) -> (f32, f32) {
@@ -19,21 +36,31 @@ pub fn rope_sin_cos(theta: f32) -> (f32, f32) {
     (cos, sin)
 }
 
-/// RoPE-Neox with optional linear position scaling.
+/// Vanilla RoPE-Neox with no position scaling.
 ///
-/// `factor` is the linear-scaling multiplier applied to the
-/// effective position (`theta_i = pos * factor * freq_base^(-2i/d)`):
+/// `theta_i = pos * freq_base^(-2i/d)`. Use this for plain
+/// llama / mistral / qwen / qwen3 / phi-2 / phi-3 / phi-4 /
+/// gemma2 / gemma3 270M / gemma3 1B / bitnet b1.58 — every arch
+/// that doesn't declare `rope.scaling.factor > 1.0`.
 ///
-/// - `factor = 1.0` — vanilla RoPE (no scaling). All non-gemma3-4B
-///   callers pass 1.0 explicitly; no hidden per-call multiply is
-///   folded into a wrapper that the compiler can't constant-fold
-///   away.
-/// - `factor > 1.0` — linear position scaling. Gemma 3 4B+/
-///   12B/27B declares `gemma3.rope.scaling.factor = 8.0`,
-///   `scaling.type = linear` to extend the effective context
-///   from 32k → 256k. The gemma3 trunk reads `cfg.rope_factor`
-///   from metadata and passes it here. Same form as GPT-NeoX /
-///   PaLM-style RoPE extension.
+/// Equivalent to [`rope_neox_inplace_with_factor`] with
+/// `factor = 1.0` but skips the `pos * factor` multiply (saves
+/// one fmul per call; the rotation loop is the same).
+pub fn rope_neox_inplace(x: &mut [f32], pos: usize, head_dim: usize, freq_base: f32) {
+    // `theta_0 = pos as f32` — no factor multiply.
+    build_cos_sin_table_and_apply(x, pos as f32, head_dim, freq_base);
+}
+
+/// RoPE-Neox with linear position scaling.
+///
+/// `theta_i = pos * factor * freq_base^(-2i/d)`. Currently the
+/// only arch that uses `factor > 1.0` is gemma3 4B+/12B/27B
+/// (`gemma3.rope.scaling.factor = 8.0` to extend context 32k
+/// → 256k); the gemma3 trunk reads `cfg.rope_factor` from
+/// metadata and passes it here. Same form as GPT-NeoX /
+/// PaLM-style RoPE extension. Callers that pass `factor = 1.0`
+/// should migrate to [`rope_neox_inplace`] to avoid the
+/// extra multiply.
 pub fn rope_neox_inplace_with_factor(
     x: &mut [f32],
     pos: usize,
@@ -41,25 +68,41 @@ pub fn rope_neox_inplace_with_factor(
     freq_base: f32,
     factor: f32,
 ) {
+    // `theta_0 = pos as f32 * factor` — this is the only place
+    // the public entry points diverge.
+    build_cos_sin_table_and_apply(x, pos as f32 * factor, head_dim, freq_base);
+}
+
+/// Build the cos/sin table once per token and dispatch to the
+/// SIMD / scalar rotation kernel. The two public entry points
+/// differ only in their `theta_0`; everything below is shared.
+///
+/// Table-build cost: `O(head_dim / 2)` `powf` + `sin_cos` calls
+/// (identical across heads at the same `pos`, so we cache once
+/// and broadcast). Apply cost: `O(x.len())` f32 muls + adds
+/// under the per-arch kernel below.
+#[inline]
+fn build_cos_sin_table_and_apply(
+    x: &mut [f32],
+    theta_0: f32,
+    head_dim: usize,
+    freq_base: f32,
+) {
     let half = head_dim / 2;
     let n_heads = x.len() / head_dim;
     if half == 0 || n_heads == 0 {
         return;
     }
-    // Cache the sin/cos table once: identical across heads at this pos.
-    // Reduces `powf` + `sin_cos` calls from `n_heads × half` to just `half`.
     let mut cos_table = vec![0.0f32; half];
     let mut sin_table = vec![0.0f32; half];
-    let pos_f = pos as f32 * factor;
     let theta_scale = freq_base.powf(-2.0 / head_dim as f32);
-    let mut theta = pos_f;
+    let mut theta = theta_0;
     for i in 0..half {
         let (c, s) = rope_sin_cos(theta);
         cos_table[i] = c;
         sin_table[i] = s;
         theta *= theta_scale;
     }
-
     #[cfg(target_arch = "x86_64")]
     {
         if super::super::has_avx2_fma() {
@@ -336,7 +379,7 @@ mod tests {
         values[130] = f32::from_bits(0xbccb_b52e);
         values[138] = f32::from_bits(0xbd7e_afee);
 
-        rope_neox_inplace_with_factor(&mut values, 1, 256, 10_000.0, 1.0_f32);
+        rope_neox_inplace(&mut values, 1, 256, 10_000.0 );
 
         assert_eq!(values[2].to_bits(), 0x3e89_3aee);
         assert_eq!(values[10].to_bits(), 0x3e82_1b0c);
