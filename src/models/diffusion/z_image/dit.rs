@@ -1250,6 +1250,12 @@ impl ZImageDit {
         }
         #[cfg(feature = "vulkan")]
         gpu_profile_report(sigmas.len() - 1);
+        #[cfg(feature = "vulkan")]
+        {
+            crate::vulkan::dump_submit_trace();
+            crate::vulkan::ops::dump_dispatch_trace();
+            crate::vulkan::ops::dump_dispatch_log();
+        }
         // 输出累计的 profile
         let t = PROFILE_TIMERS.with(|cell| *cell.borrow());
         let total = t.0 + t.1 + t.2 + t.3 + t.4 + t.5 + t.6 + t.7 + t.8;
