@@ -66,8 +66,8 @@ pub(crate) struct AudioEmbeddings {
 }
 
 pub(in crate::models::qwen3) struct LayerNormWeights {
-    weight: Vec<f32>,
-    bias: Vec<f32>,
+    pub weight: Vec<f32>,
+    pub bias: Vec<f32>,
 }
 
 struct AudioTransformerLayer {
