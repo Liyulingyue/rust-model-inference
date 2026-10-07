@@ -98,7 +98,9 @@ void main() {
     }
 
     if (lane == 0u) {
-        precise float scale = partial[0] == 0.0 ? 0.0 : partial[0] / 127.0;
+        precise float scale = partial[0] == 0.0
+            ? 0.0
+            : divide_finite_normal(partial[0], 127.0);
         raw_scale = scale;
         inverse_scale = partial[0] == 0.0
             ? 0.0

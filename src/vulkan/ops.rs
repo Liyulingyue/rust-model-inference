@@ -288,6 +288,8 @@ pub(crate) enum GpuWeightFormat {
     Q5_K,
     Q6_K,
     F16,
+    /// F16 storage/input rounding with dot_f16_f16_bytes' AVX2 reduction.
+    F16Dot,
     BF16,
     /// BF16 storage with the CPU dot_bf16_f32 reduction contract.
     BF16Dot,
@@ -324,7 +326,7 @@ impl GpuWeightFormat {
             Self::Q4_K => (256, 144, Q4_K_MATMUL),
             Self::Q5_K => (256, 176, Q5_K_MATMUL),
             Self::Q6_K => (256, 210, Q6_K_MATMUL),
-            Self::F16 => (1, 2, F16_MATMUL),
+            Self::F16 | Self::F16Dot => (1, 2, F16_MATMUL),
             Self::BF16 | Self::BF16Dot => (1, 2, BF16_MATMUL),
             Self::F32 => (1, 4, F32_MATMUL),
             Self::MlxAffine4 => (64, 36, MLX_AFFINE_MATMUL),
@@ -336,6 +338,7 @@ impl GpuWeightFormat {
         matches!(
             self,
             Self::F16
+                | Self::F16Dot
                 | Self::BF16
                 | Self::BF16Dot
                 | Self::F32
@@ -1572,6 +1575,7 @@ impl<'a> Qwen3Ops<'a> {
         let format = bindings.weight_format(outputs.len())?;
         let (activation, scales, quantize) = match format {
             GpuWeightFormat::F16
+            | GpuWeightFormat::F16Dot
             | GpuWeightFormat::BF16
             | GpuWeightFormat::BF16Dot
             | GpuWeightFormat::F32
@@ -3553,6 +3557,14 @@ fn matmul_rows_push(
         push[19] = push[16];
         push[20] = push[17];
     }
+    if format == GpuWeightFormat::F16Dot {
+        if !crate::ops::has_avx2_fma() || !crate::ops::has_f16c() || n_in < 16 {
+            return Err(VulkanError::UnsupportedShape(
+                "F16 dot offload requires the CPU AVX2/F16C reduction".into(),
+            ));
+        }
+        push[1] = 8;
+    }
     if format == GpuWeightFormat::BF16Dot {
         push[1] = if crate::ops::has_avx2_fma() && n_in >= 8 {
             8
@@ -4507,7 +4519,7 @@ fn check_weight_format(context: &VulkanContext, name: &str) -> Result<(), String
         GpuWeightFormat::Q4_K => 1024,
         GpuWeightFormat::Q5_K => 1024,
         GpuWeightFormat::Q6_K => 1024,
-        GpuWeightFormat::F16 => 1024,
+        GpuWeightFormat::F16 | GpuWeightFormat::F16Dot => 1024,
         GpuWeightFormat::BF16 | GpuWeightFormat::BF16Dot => 1024,
         GpuWeightFormat::F32 => 1024,
         GpuWeightFormat::Q8_0 => 1024,
@@ -4845,7 +4857,7 @@ fn synthetic_weight(format: GpuWeightFormat, n_in: usize, n_out: usize) -> Vec<u
                         .to_le_bytes(),
                     );
                 }
-                GpuWeightFormat::F16 => {
+                GpuWeightFormat::F16 | GpuWeightFormat::F16Dot => {
                     let bits = match block {
                         0 => 0x0000,
                         1 => 0x8000,
@@ -4991,6 +5003,10 @@ fn cpu_weight_matvec(
             let kernel = crate::ops::kernel::f16::F16Kernel::new(weight);
             crate::ops::kernel::Kernel::forward(&kernel, input, &mut output, n_in, n_out);
         }
+        GpuWeightFormat::F16Dot => {
+            let kernel = crate::ops::kernel::f16::F16Kernel::new(weight);
+            kernel.forward_scaled(input, &mut output, n_in, n_out, 1.0, &mut Vec::new());
+        }
         GpuWeightFormat::BF16 => {
             let kernel = crate::ops::kernel::bf16::BF16Kernel::new(weight);
             crate::ops::kernel::Kernel::forward(&kernel, input, &mut output, n_in, n_out);
@@ -5113,11 +5129,16 @@ fn check_quantize_q8_k_exact(context: &VulkanContext) -> Result<(), String> {
 }
 
 fn check_quantize_tie_even(context: &VulkanContext) -> Result<(), String> {
-    let layout = ArenaLayout::for_dims(32, 32, 1, 1, 32).map_err(|error| error.to_string())?;
+    const COUNT: usize = 64;
+    let layout =
+        ArenaLayout::for_dims(COUNT, COUNT, 1, 1, COUNT).map_err(|error| error.to_string())?;
     let ops = Qwen3Ops::new(context, layout, 1).map_err(|error| error.to_string())?;
-    let mut input = [0.0f32; 32];
+    let mut input = vec![0.0f32; COUNT];
     input[0] = f32::from_bits(0xbdbf0aec);
     input[1] = f32::from_bits(0x3f13f10a);
+    // AuK CFG input: division gives 0x3d80d001; multiplying a reciprocal
+    // gives 0x3d80d000 and rounds to a different F16 scale.
+    input[32] = f32::from_bits(0x40ff9cc1);
     ops.write_f32(layout.x, &input)
         .map_err(|error| error.to_string())?;
 
@@ -5135,8 +5156,8 @@ fn check_quantize_tie_even(context: &VulkanContext) -> Result<(), String> {
         .submit_and_wait()
         .map_err(|error| error.to_string())?;
 
-    let mut expected = [0u8; 32];
-    let mut expected_scales = [0.0f32; 1];
+    let mut expected = vec![0u8; COUNT];
+    let mut expected_scales = vec![0.0f32; COUNT / 32];
     crate::ops::quantize_q8_0_into(&input, input.len(), &mut expected, &mut expected_scales);
     let actual = ops
         .read_bytes(layout.q8, input.len())
@@ -5144,15 +5165,33 @@ fn check_quantize_tie_even(context: &VulkanContext) -> Result<(), String> {
     if actual != expected {
         let index = actual
             .iter()
-            .zip(expected)
-            .position(|(actual, expected)| *actual != expected)
+            .zip(&expected)
+            .position(|(actual, expected)| actual != expected)
             .unwrap();
         return Err(format!(
             "quantize tie-even mismatch at {index}: gpu={} cpu={}",
             actual[index] as i8, expected[index] as i8
         ));
     }
-    println!("operator=quantize_tie_even exact=true");
+    let scales = ops
+        .read_f32(layout.q8_scales, expected_scales.len())
+        .map_err(|error| error.to_string())?;
+    if let Some(index) = scales
+        .iter()
+        .zip(&expected_scales)
+        .position(|(actual, expected)| actual.to_bits() != expected.to_bits())
+    {
+        return Err(format!(
+            "quantize Q8 scale mismatch at {index}: input={} gpu={:#010x} cpu={:#010x}",
+            input[index * 32],
+            scales[index].to_bits(),
+            expected_scales[index].to_bits()
+        ));
+    }
+    println!(
+        "operator=quantize_tie_even exact=true scales_exact=true blocks={}",
+        COUNT / 32
+    );
     Ok(())
 }
 

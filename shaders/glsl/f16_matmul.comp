@@ -10,7 +10,7 @@ layout(std430, binding = 2) readonly buffer W1 { uint data[]; } w1;
 layout(std430, binding = 3) readonly buffer W2 { uint data[]; } w2;
 layout(push_constant) uniform PC {
     uint input_word;
-    uint unused_scales_word;
+    uint reduction_lanes;
     uint n_in;
     uint elements_per_row;
     uint output0_word; uint rows0; uint output0_stride;
@@ -18,6 +18,8 @@ layout(push_constant) uniform PC {
     uint output2_word; uint rows2; uint output2_stride;
     uint group_count; uint input_sum_word; uint input_stride; uint q8_stride; uint scales_stride; uint input_sum_stride; uint q8k_stride; uint q8k_scales_stride; uint token_rows;
 } pc;
+
+shared float partial[8];
 
 uint weight_word(uint slot, uint index) {
     if (slot == 0u) return w0.data[index];
@@ -34,6 +36,9 @@ float f16_decode(uint bits) {
     uint sign = (bits >> 15u) & 1u;
     int exponent = int((bits >> 10u) & 0x1fu);
     uint mantissa = bits & 0x3ffu;
+    if (exponent == 31 && pc.reduction_lanes == 8u) {
+        return uintBitsToFloat((sign << 31u) | 0x7f800000u | (mantissa << 13u));
+    }
     float value = exponent == 0
         ? float(mantissa) * exp2(-24.0)
         : (exponent == 31 ? 0.0 : (1.0 + float(mantissa) / 1024.0) * exp2(float(exponent - 15)));
@@ -44,11 +49,42 @@ void main() {
     uint token_row = gl_WorkGroupID.z / pc.group_count; uint slot = gl_WorkGroupID.z % pc.group_count;
     uint row = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
     uint rows = slot == 0u ? pc.rows0 : (slot == 1u ? pc.rows1 : pc.rows2);
-    if (slot >= pc.group_count || row >= rows || gl_LocalInvocationID.x != 0u) return;
+    if (slot >= pc.group_count || row >= rows) return;
 
     precise float sum = 0.0;
     uint row_base = row * pc.elements_per_row;
-    for (uint index = 0u; index < pc.n_in; index++) {
+    uint index = 0u;
+    if (pc.reduction_lanes == 8u) {
+        // Match dot_f16_f16_bytes_avx2, including its separate four-value tail.
+        // ponytail: eight active lanes; tune occupancy after model parity.
+        uint lane = gl_LocalInvocationID.x;
+        uint vector_end = pc.n_in / 8u * 8u;
+        if (lane < 8u) {
+            precise float acc = 0.0;
+            for (uint offset = lane; offset < vector_end; offset += 8u) {
+                float x = round_f16_rte(uintBitsToFloat(arena.data[pc.input_word + token_row * pc.input_stride + offset]));
+                acc = fma(x, f16_decode(weight_f16(slot, row_base + offset)), acc);
+            }
+            partial[lane] = acc;
+        }
+        barrier();
+        if (lane != 0u) return;
+        sum = ((partial[0] + partial[4]) + (partial[1] + partial[5]))
+            + ((partial[2] + partial[6]) + (partial[3] + partial[7]));
+        index = vector_end;
+        if (index + 4u <= pc.n_in) {
+            precise float tail[4];
+            for (uint k = 0u; k < 4u; k++) {
+                float x = round_f16_rte(uintBitsToFloat(arena.data[pc.input_word + token_row * pc.input_stride + index + k]));
+                tail[k] = x * f16_decode(weight_f16(slot, row_base + index + k));
+            }
+            sum += (tail[0] + tail[1]) + (tail[2] + tail[3]);
+            index += 4u;
+        }
+    } else if (gl_LocalInvocationID.x != 0u) {
+        return;
+    }
+    for (; index < pc.n_in; index++) {
         float input_value = round_f16_rte(uintBitsToFloat(arena.data[pc.input_word + token_row * pc.input_stride + index]));
         float weight_value = f16_decode(weight_f16(slot, row_base + index));
         sum += input_value * weight_value;

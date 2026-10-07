@@ -77,7 +77,26 @@ pub(crate) const LATENT_DIM: usize = 64;
 pub(crate) const NUM_DOUBLE_LAYERS: usize = 10;
 
 /// Number of single blocks (sequential img attention + FF).
-pub(crate) const NUM_SINGLE_LAYERS: usize = 10;
+pub(crate) const NUM_SINGLE_LAYERS: usize = 20;
+
+#[cfg(test)]
+mod contract_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires the published audio.cpp DiT GGUF in RMI_AUK_GGUF"]
+    fn published_auk_dit_loads_all_twenty_single_blocks() {
+        let path = std::env::var("RMI_AUK_GGUF").expect("published AuK GGUF required");
+        let source: Arc<dyn TensorSource> = Arc::from(
+            crate::open_model_source(std::path::Path::new(&path), crate::ComponentRole::Llm)
+                .unwrap(),
+        );
+        super::super::validate_dit(source.as_ref()).unwrap();
+        let model = AukDit::load(source, Arc::new(ComputePool::new(1))).unwrap();
+        assert_eq!(model.double_blocks.len(), 10);
+        assert_eq!(model.single_blocks.len(), 20);
+    }
+}
 
 /// Padding multiple for joint sequence length.
 pub(crate) const SEQUENCE_MULTIPLE: usize = 32;
@@ -187,7 +206,7 @@ impl AukDit {
         // No more F16 -> Q8_0 pre-quantization (see commit `f4e7879`).
         // The Q8 cache is empty; linear_into_dispatched falls through to
         // super::linear_into_scaled_impl, which dispatches on GGMLType:
-        // - F16 weights -> F16 GPU (via auk_f16_gpu_runtime) or F16 CPU
+        // - F16 weights -> per-denoise GpuLinear cache or F16 CPU
         // - Q8_0 weights -> Q8 GPU matmul
         // - BF16/Q*_K -> QTensorOwned CPU
         // This respects the GGUF dtype instead of forcing F16 -> Q8_0
@@ -645,7 +664,7 @@ impl AukDit {
             scratch.joint[..total * HIDDEN].copy_from_slice(&swapped);
         }
 
-        // 10 single blocks
+        // Every single block present in the validated export.
         for (layer_index, block) in self.single_blocks.iter().enumerate() {
             self.linear_into_dispatched(
                 &block.adaLN,
