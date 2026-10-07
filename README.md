@@ -153,7 +153,7 @@ Dots 推理复用 `Weight` 和原生 AVX2/NEON/标量内核，不链接 OpenBLAS
 ### Z-Image Turbo
 
 ```bash
-cargo run --release --bin rust-model-inference -- \
+cargo run --release --features vulkan --bin rust-model-inference -- \
   --model models/z-image-gguf/z-image-turbo-q8_0.gguf \
   --text-encoder models/z-image-gguf/qwen3_4b_f32-q8_0.gguf \
   --vae models/z-image-gguf/pig_flux_vae_fp32-f16.gguf \
@@ -161,7 +161,10 @@ cargo run --release --bin rust-model-inference -- \
   --steps 8 --resolution 512 --seed 42 --threads 1 --out fox.png
 ```
 
-当前范围是原生 Rust、CPU、512×512 的 Z-Image Turbo 文生图；暂不支持 Z-Image Base、GPU 或 img2img。
+当前范围是原生 Rust、512×512 的 Z-Image Turbo 文生图；暂不支持 Z-Image Base 或 img2img。
+加 `--gpu` 并以 `--features vulkan` 构建可把 DiT 投影搬上 Vulkan 后端（当前 `Supported`，
+无端到端 GPU 测试）。漏掉 `--features vulkan` 时 `--gpu` 是静默空操作，图照出但全程走 CPU。
+详见 [Z-Image 用法](docs/usage/z-image.md)。
 
 ### Apple Silicon (ARM64)
 

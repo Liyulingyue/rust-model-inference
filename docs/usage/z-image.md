@@ -9,9 +9,12 @@ Z-Image Turbo 是文生图模型，分三个独立 GGUF 组件：
 GGUF `general.architecture = pig`，对应 `src/models/diffusion/pig.rs` 与
 `src/models/diffusion/z_image/`。CLI 入口 `src/app/diffusion.rs::run_z_image_cli`。
 
-> 共用前置：构建 `cargo build --release --bin rust-model-inference`。
-> 当前**仅 CPU**，**仅 512×512**，**仅 txt2img**。
-> img2img、GPU、Z-Image Base 列为 `Unsupported`（SUPPORTED_MODELS.md）。
+> 共用前置：构建 `cargo build --release --features vulkan --bin rust-model-inference`。
+> **`--features vulkan` 不能省**：`default = []`（`Cargo.toml:9`）不含 vulkan，
+> 漏掉时 `gpu_matmul_active()` 硬编码为 `false`（`src/ops/float.rs:40-43`），
+> `--gpu` 变成静默空操作——图照出，但全程走 CPU，无任何报错。
+> 当前**仅 txt2img**。img2img、Z-Image Base 列为 `Unsupported`（SUPPORTED_MODELS.md）。
+> GPU 路径为 `Supported`（见第 4 节），默认关闭，需显式 `--gpu`。
 
 ## 1. 三组件
 
@@ -24,11 +27,16 @@ cargo run --release --bin rust-model-inference -- \
   --steps 8 --resolution 512 --seed 42 --threads 1 --out fox.png
 ```
 
-三个 GGUF 缺任一都会立即拒绝（`src/app/mod.rs:32-37`）：
+三个 GGUF 缺任一都会立即拒绝。加载 `pig` 架构时先过一道聚合检查
+（`reject_incomplete_z_image_architecture`，`src/app/mod.rs:187-192`）：
 
 ```
 Z-Image model requires --text-encoder, --vae, --prompt, and --out
 ```
+
+过了这道之后，参数解析阶段还有逐项检查
+（`z_image_cli_options`，`src/app/cli/options.rs:608-637`），分别报
+`Z-Image requires --text-encoder` / `--vae` / `--out` / `--prompt`。
 
 `--prompt` / `--out` 同样必填。
 
@@ -42,7 +50,9 @@ Z-Image model requires --text-encoder, --vae, --prompt, and --out
 | **本仓库 GPU（`--gpu`）** | 8 | 7 | **150 s** | **16.8 s** |
 | PyTorch 2.11 + CUDA（同一权重） | 9 | 8 | 15.1 s | 1.89 s |
 
-`--steps N` 跑 N-1 次 forward（最后一步是 sigma→0 的收尾）。
+当前 `--steps N` 跑 **N 次** forward：8 步在 `RUST_GPU_DIAG=1` 下打出 8 行 sigma，
+`dispatches` 每步 +300（300→2400）。表中"DiT forwards = N-1"是当时的旧语义，
+最后一步现已真正执行 forward，算单步耗时时不要沿用。
 
 ⚠️ **这一张表的绝对值已经失效**，本机今天实测纯 CPU 就要 496.6 s（denoise
 462.4 s），远高于表里的 466 s / 437 s；GPU 侧同理。差异不是编译 profile
@@ -260,7 +270,7 @@ token 只看自己 block 里的每个 token 一次——而现成的 scores/valu
 
 ## 2. 参数约束
 
-来自 `src/app/cli.rs:447-449`：
+来自 `src/app/cli/options.rs:635-637`（`src/app/cli.rs` 已拆分，旧路径失效）：
 
 - `--steps` 必须正整数
 - `--resolution` 必须正整数且 **divisible by 16**
@@ -304,7 +314,23 @@ VAE 只导出 `decoder.*`（txt2img 是 latent → 像素，编码器用不上�
 | Z-Image Turbo（CPU、512×512、txt2img） | `Verified`（[tests/z_image_reference.rs](../../tests/z_image_reference.rs) 覆盖 pinned Oracle） |
 | Z-Image Base | `Unsupported` |
 | img2img | `Unsupported` |
-| GPU 后端 | `Unsupported`（仓库 CPU-only） |
+| GPU 后端 | `Supported`（需 `--features vulkan` + `--gpu`；无端到端 GPU 测试，故非 `Verified`） |
+
+GPU 一列的判定依据与已知缺口：
+
+- **已跑通**：NVIDIA GB10（`--features vulkan` 构建）上 8 步 512×512 端到端出图，
+  132 s；`RUST_GPU_DIAG=1` 报 `blocks_on_gpu=34`（全部 34 层进入 `run_block_gpu`），
+  每步 170 次 projection。分阶段耗时与本文上方 2026-10-06 的基线吻合
+  （denoise 109.3 s vs 107.2 s，占比一致）。
+- **画质未回归**：同 seed 256×256 2 步，GPU 与 CPU 输出 PSNR **41.9 dB**，
+  mean\|Δ\| 1.46/255。
+- **单测覆盖**：`cargo test --features vulkan --lib` 下 5 个 GPU 正确性测试通过
+  （AdaLN 调制、融合 norm+modulate、batched QKV、W2 scale 抵消、attention 分块逐位一致）。
+- **为什么不是 `Verified`**：仓库里**没有 GPU 端到端测试**——`tests/z_image_reference.rs`
+  是纯 CPU 且 `#[ignore]`。上面的数字来自人工运行，没有可重复的 CI 门禁。
+  按 SUPPORTED_MODELS.md 的状态定义（"无独立的真实 GGUF 端到端记录"）只能算 `Supported`。
+- **已知缺口**：attention 与 RoPE 仍在 host；FFN 的 w1/w3 激活要经 host silu
+  （合批到单 command buffer 的尝试已回退，见第 1 节）。
 
 ## 5. 与 Oracle 的对齐
 
@@ -322,28 +348,44 @@ Pinned Oracle：[leejet/stable-diffusion.cpp](https://github.com/leejet/stable-d
 
 ## 6. CLI 选项速查
 
-| 选项 | 用途 | 必填 |
-|---|---|---|
-| `--model` | DiT GGUF | ✓ |
-| `--text-encoder` | Qwen3 文本编码器 GGUF | ✓ |
-| `--vae` | Flux VAE GGUF | ✓ |
-| `--prompt` | 文生图 prompt | ✓ |
-| `--out` | 输出 PNG 路径 | ✓ |
-| `--steps` | Euler 步数（NFE） | ✓ |
-| `--resolution` | 输出分辨率（divisible by 16） | ✓ |
-| `--seed` | RNG 种子 | — |
-| `--threads` | ComputePool 线程数 | — |
+| 选项 | 用途 | 必填 | 默认 |
+|---|---|---|---|
+| `--model` | DiT GGUF | ✓ | — |
+| `--text-encoder` | Qwen3 文本编码器 GGUF | ✓ | — |
+| `--vae` | Flux VAE GGUF | ✓ | — |
+| `--prompt` | 文生图 prompt | ✓ | — |
+| `--out` | 输出 PNG 路径 | ✓ | — |
+| `--steps` | Euler 步数（NFE） | — | 8 |
+| `--resolution` | 输出分辨率（divisible by 16） | — | 512 |
+| `--seed` | RNG 种子 | — | 0 |
+| `--threads` | ComputePool 线程数 | — | 自动 |
+| `--gpu` | DiT 投影走 Vulkan 后端 | — | 关 |
+
+只有前五项必填（聚合检查在 `src/app/mod.rs:187-192`，逐项检查在
+`src/app/cli/options.rs:608-632`）；`--steps` / `--resolution` 取 `unwrap_or`
+默认值（`:633-634`），旧版本文档把这两个标成必填是错的。
+
+`--gpu` 刻意不在互斥表里（`options.rs:600-604`）：DiT 投影经
+`matmul_q8_0_quantized_parallel_rows` 交给 Vulkan backend，不支持的形状逐个回退，
+所以这个开关在这里是有意义的。该 kernel 之外——attention、norms、VAE 卷积——无论
+是否开 `--gpu` 都在 CPU。
 
 ## 7. 相关源码索引
 
 - `src/app/diffusion.rs` — `run_z_image_cli` 主入口
-- `src/app/mod.rs:32-37` — pig arch 三组件必填检查
-- `src/app/cli.rs:447-449` — `--steps` / `--resolution` 校验
+- `src/app/mod.rs:187-192` — `reject_incomplete_z_image_architecture`（pig 三组件聚合检查）
+- `src/app/cli/options.rs:608-637` — 逐项必填 + `--steps`/`--resolution` 校验
+- `src/ops/float.rs:31-43` — `gpu_matmul_active()`；无 vulkan feature 时恒为 false
+- `src/main.rs:419-424` — `ops::enable_gpu()`（须在 Z-Image 分支内提前调用）
 - `src/models/diffusion/pig.rs` — DiT 模型
-- `src/models/diffusion/z_image/dit.rs` — DiT forward
+- `src/models/diffusion/z_image/dit.rs` — DiT forward（`run_block_gpu` 在 `:2312-2688`）
+- `src/models/diffusion/z_image/dit_gpu.rs` — GPU DiT 会话（`DitGpuSession`）
 - `src/models/diffusion/z_image/text.rs` — Qwen3 文本编码器
 - `src/models/diffusion/z_image/vae.rs` — Flux VAE
-- `tests/z_image_reference.rs` — pinned Oracle 对齐
+- `tests/z_image_reference.rs` — pinned Oracle 对齐（纯 CPU，`#[ignore]`）
 - `docs/REFERENCE_IMPLEMENTATIONS.md` — Oracle pin 与构建脚本
 - `tools/converter/z_image/convert_z_image.py` — safetensors → 三组件 GGUF
 - `tools/converter/z_image/probe_layout.py` — 只读 header，打印张量名/维度分布
+
+> `src/models/diffusion/z_image/dit_gpu_block.rs` 是被取代的旧 GPU 实现，**未在
+> `mod.rs` 里声明**，无任何引用。改动前先确认自己不是在读死代码。
