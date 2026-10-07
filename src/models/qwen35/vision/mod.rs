@@ -67,36 +67,42 @@ fn load_source_weight<'a, S: TensorSource + ?Sized>(
     Ok(weight)
 }
 
+/// Batched matmul for one projection.
+///
+/// `RMI_SCALAR=1` selects the parity contract for both dtypes this encoder
+/// ships: BF16 rounds activations to BF16 and accumulates in F64, F16 does
+/// F16xF16 in an F64 lane accumulator. Outside scalar mode the whole thing
+/// defers to the kernel, which owns the NEON/AVX2 dispatch -- including for
+/// F16, whose `dot_f16_f16_bytes_ggml` has no aarch64 path at all.
 fn matmul_weight_batch(weight: &Weight<'_>, input: &[f32], output: &mut [f32]) {
-    if weight.ggml_type == GGMLType::BF16 && crate::ops::scalar_mode() {
-        let bytes = weight.kernel.weight_bytes().expect("BF16 weight bytes");
-        let mut rounded = vec![0u16; weight.n_in];
-        for (input, output) in input
-            .chunks_exact(weight.n_in)
-            .zip(output.chunks_exact_mut(weight.n_out))
-        {
-            for (&value, bits) in input.iter().zip(&mut rounded) {
-                *bits = crate::ops::f32_to_bf16(value);
-            }
-            for (row, value) in bytes.chunks_exact(weight.n_in * 2).zip(output) {
-                let mut sum = 0.0f64;
-                for (w, x) in row.chunks_exact(2).zip(&rounded) {
-                    let w = crate::ops::bf16_to_f32(u16::from_le_bytes([w[0], w[1]]));
-                    let x = crate::ops::bf16_to_f32(*x);
-                    sum += f64::from(w * x);
+    if crate::ops::scalar_mode() {
+        match weight.ggml_type {
+            GGMLType::BF16 => {
+                let bytes = weight.kernel.weight_bytes().expect("BF16 weight bytes");
+                let mut rounded = vec![0u8; weight.n_in * 2];
+                for (input, output) in input
+                    .chunks_exact(weight.n_in)
+                    .zip(output.chunks_exact_mut(weight.n_out))
+                {
+                    for (bits, &value) in rounded.chunks_exact_mut(2).zip(input) {
+                        bits.copy_from_slice(&crate::ops::f32_to_bf16(value).to_le_bytes());
+                    }
+                    for (row, value) in bytes.chunks_exact(weight.n_in * 2).zip(output) {
+                        *value = crate::ops::kernel::bf16::scalar::dot_bf16(row, &rounded);
+                    }
                 }
-                *value = sum as f32;
+                return;
             }
+            GGMLType::F16 => {
+                let weight_bytes = weight
+                    .kernel
+                    .weight_bytes()
+                    .expect("F16 kernel must expose its storage bytes");
+                matmul_f16_bytes_batch(weight_bytes, weight.n_in, weight.n_out, input, output);
+                return;
+            }
+            _ => {}
         }
-        return;
-    }
-    if weight.ggml_type == GGMLType::F16 {
-        let weight_bytes = weight
-            .kernel
-            .weight_bytes()
-            .expect("F16 kernel must expose its storage bytes");
-        matmul_f16_bytes_batch(weight_bytes, weight.n_in, weight.n_out, input, output);
-        return;
     }
     weight
         .kernel
@@ -3252,6 +3258,48 @@ mod tests {
 
     #[test]
     fn qwen35_vision_f16_matmul_rounds_activations_to_f16() {
+        let mut source = MapTensorSource::default();
+        source.tensors.insert(
+            "v.test.weight".into(),
+            TensorInfo {
+                name: "v.test.weight".into(),
+                dims: vec![8, 1],
+                ggml_type: GGMLType::F16,
+                offset: 0,
+            },
+        );
+        source.data.insert(
+            "v.test.weight".into(),
+            [1.0f32; 8]
+                .into_iter()
+                .flat_map(|value| crate::ops::f32_to_f16(value).to_le_bytes())
+                .collect(),
+        );
+        let weight = load_source_weight(&source, "v.test.weight", &[8, 1], 8, 1).unwrap();
+        let mut output = [0.0];
+
+        // Outside scalar mode the F16 weight defers to F16Kernel, which keeps
+        // the activations in F32 and multiplies F16×F32. 1.0003 therefore
+        // survives instead of rounding to 1.0, giving 8 × 1.0003.
+        matmul_weight_batch(&weight, &[1.0003; 8], &mut output);
+
+        assert!(
+            (output[0] - 8.0024).abs() < 1e-3,
+            "F16xF32 path gave {}",
+            output[0]
+        );
+    }
+
+    /// The F16 parity contract only applies under `RMI_SCALAR=1`: activations
+    /// are rounded to F16 and the product is accumulated in an F64 lane.
+    /// `scalar_mode()` caches the environment on first read, so this cannot
+    /// be toggled from inside the default suite. `scalar_mode()` only reads
+    /// the variable when the `parity-trace` feature is on and is otherwise a
+    /// constant `false`, so run it as
+    /// `RMI_SCALAR=1 cargo test --lib --features parity-trace -- --ignored`.
+    #[test]
+    #[ignore = "requires RMI_SCALAR=1 and --features parity-trace"]
+    fn qwen35_vision_f16_scalar_mode_rounds_activations_to_f16() {
         let mut source = MapTensorSource::default();
         source.tensors.insert(
             "v.test.weight".into(),
