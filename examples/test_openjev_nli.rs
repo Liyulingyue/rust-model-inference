@@ -34,23 +34,23 @@ fn fmt_f(x: f32, decimals: usize) -> String {
 }
 
 fn main() {
-    let source: Arc<dyn rust_model_inference::core::tensor::TensorSource> =
-        Arc::from(open_model_source(
-            std::path::Path::new(GGUF_PATH),
-            ComponentRole::Llm,
-        ).expect("load GGUF"));
-    let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
-        .expect("tokenizer");
+    let source: Arc<dyn rust_model_inference::core::tensor::TensorSource> = Arc::from(
+        open_model_source(std::path::Path::new(GGUF_PATH), ComponentRole::Llm).expect("load GGUF"),
+    );
+    let tokenizer =
+        BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned()).expect("tokenizer");
 
     let samples: &[(&str, &str)] = &[
-        ("The bird is below the centre of the gap.",
-         "The bird is 0.05 below the centre of the gap."),
-        ("A man is playing a guitar.",
-         "Someone is making music."),
-        ("A photograph of a scene: There is no dog in this image.",
-         "There is a dog in the image."),
-        ("The cat is on the mat.",
-         "The sky is blue."),
+        (
+            "The bird is below the centre of the gap.",
+            "The bird is 0.05 below the centre of the gap.",
+        ),
+        ("A man is playing a guitar.", "Someone is making music."),
+        (
+            "A photograph of a scene: There is no dog in this image.",
+            "There is a dog in the image.",
+        ),
+        ("The cat is on the mat.", "The sky is blue."),
     ];
     let labels = ["contradiction", "entailment", "neutral"];
 
@@ -59,7 +59,11 @@ fn main() {
     println!();
 
     for (i, (premise, hypothesis)) in samples.iter().enumerate() {
-        let text = format!("Premise: {}\nHypothesis: {}", premise.trim(), hypothesis.trim());
+        let text = format!(
+            "Premise: {}\nHypothesis: {}",
+            premise.trim(),
+            hypothesis.trim()
+        );
         let token_ids = tokenizer.encode(
             &text,
             rust_model_inference::core::tokenizer::EncodeOptions {
@@ -74,7 +78,8 @@ fn main() {
             rust_model_inference::app::cli::KvFormat::F16,
             8192,
             64,
-        ).expect("classify");
+        )
+        .expect("classify");
         let probs = softmax(&raw_logits);
         let am = probs
             .iter()
@@ -85,7 +90,9 @@ fn main() {
         println!(
             "sample {i}: argmax={} probs=[con={}, ent={}, neu={}] logits={:?} ({}ms)",
             labels[am],
-            fmt_f(probs[0], 4), fmt_f(probs[1], 4), fmt_f(probs[2], 4),
+            fmt_f(probs[0], 4),
+            fmt_f(probs[1], 4),
+            fmt_f(probs[2], 4),
             raw_logits,
             fmt_f(duration.as_secs_f64() as f32, 1),
         );

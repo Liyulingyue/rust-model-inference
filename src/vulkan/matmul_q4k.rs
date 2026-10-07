@@ -116,8 +116,7 @@ pub fn matmul_q4_k(
         // the process, so this transmute is sound — the runtime will drop on
         // first error or normal program shutdown, well within the
         // VulkanContext's lifetime.
-        let static_ctx: &'static VulkanContext =
-            unsafe { std::mem::transmute(context) };
+        let static_ctx: &'static VulkanContext = unsafe { std::mem::transmute(context) };
         match BatchedLinearRuntime::new(
             static_ctx,
             new_max_rows,

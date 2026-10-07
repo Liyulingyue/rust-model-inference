@@ -450,17 +450,9 @@ impl<'a> HybridTrunk<'a> {
         let n_in = self.config.n_embd;
         let n_cls = weight.n_out;
         let mut out = vec![0.0f32; n_cls];
-        weight.kernel.forward_prepared(
-            last_hidden,
-            &[],
-            &[],
-            None,
-            &mut out,
-            n_in,
-            n_cls,
-            0,
-            1,
-        );
+        weight
+            .kernel
+            .forward_prepared(last_hidden, &[], &[], None, &mut out, n_in, n_cls, 0, 1);
         if !self.cls_score_bias.is_empty() {
             if self.cls_score_bias.len() != n_cls {
                 return Err(format!(

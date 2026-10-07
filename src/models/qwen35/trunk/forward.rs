@@ -1198,8 +1198,7 @@ pub fn run_classify_qwen35_with_batch(
         .map_err(|error| format!("Failed to parse Qwen3.5 model: {error}"))?;
     if !model.is_classifier() {
         return Err(
-            "Qwen3.5 model has no cls.output.weight; not an NLI / cross-encoder checkpoint"
-                .into(),
+            "Qwen3.5 model has no cls.output.weight; not an NLI / cross-encoder checkpoint".into(),
         );
     }
     let n_ctx = model.config.n_ctx.min(max_context);
