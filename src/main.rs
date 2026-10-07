@@ -153,6 +153,9 @@ fn main() {
             return;
         }
         DispatchMode::Yue2 => {
+            if options.gpu {
+                ops::enable_gpu();
+            }
             app::run_or_exit(app::run_yue2_cli(
                 yue2_options.expect("validated YuE2 options"),
                 n_threads,

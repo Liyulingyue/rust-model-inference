@@ -4,6 +4,10 @@
 
 相同的 `general.architecture` 只表示会进入同一条代码路径，不代表任意同架构 GGUF 都已确认可用。未在“具体型号”表中出现的模型，应先按 `Supported` 或 `Experimental` 看待，不能默认视为 `Verified`。
 
+2026-10-07：Z-Image VAE、YuE2、Edge0、LFM2/LFM2.5/LFM2MoE 与文本 embedding 的
+Vulkan 投影适配为 **Experimental（代码接入，实机验证待补）**，不改变下表的 CPU 验证等级。
+具体格式、CPU 部分和设备验收命令见 [Vulkan 支持范围](VULKAN.md)。
+
 ## 状态定义
 
 | 状态 | 含义 |

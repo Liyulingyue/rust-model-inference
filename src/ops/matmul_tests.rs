@@ -20,6 +20,95 @@ fn leaked_weight_bytes(bytes: Vec<u8>) -> &'static [u8] {
     Box::leak(bytes.into_boxed_slice())
 }
 
+#[cfg(feature = "vulkan")]
+#[test]
+fn projection_offload_finishes_before_postops_and_recomputes_failed_rows() {
+    use crate::ops::kernel::Kernel;
+    // No device is used: a transport stub modifies output before declining.
+    struct Projection(bool);
+    impl Kernel for Projection {
+        fn try_forward_vulkan_rows(
+            &self,
+            input: &[f32],
+            output: &mut [f32],
+            n_in: usize,
+            n_out: usize,
+            rows: usize,
+        ) -> bool {
+            assert_eq!((n_in, n_out), (2, 2));
+            output.fill(1234.0);
+            if !self.0 {
+                return false;
+            }
+            for row in 0..rows {
+                output[row * 2] = input[row * 2] * 2.0;
+                output[row * 2 + 1] = input[row * 2 + 1] * 3.0;
+            }
+            true
+        }
+        fn forward_prequantized(
+            &self,
+            _: &[u8],
+            _: &[f32],
+            _: &mut [f32],
+            _: usize,
+            _: usize,
+            _: usize,
+            _: usize,
+        ) {
+            panic!("original F32 input required");
+        }
+        fn forward_prepared(
+            &self,
+            input: &[f32],
+            _: &[u8],
+            _: &[f32],
+            _: Option<&[BlockQ8K]>,
+            output: &mut [f32],
+            _: usize,
+            n_out: usize,
+            ith: usize,
+            nth: usize,
+        ) {
+            assert!(
+                !self.0,
+                "successful GPU projection must not run again on CPU"
+            );
+            for column in (ith * n_out.div_ceil(nth))..((ith + 1) * n_out.div_ceil(nth)).min(n_out)
+            {
+                output[column] = input[column] * (column as f32 + 2.0);
+            }
+        }
+    }
+    let weight = |success| Weight {
+        kernel: Box::new(Projection(success)),
+        n_in: 2,
+        n_out: 2,
+        ggml_type: GGMLType::F32,
+    };
+    let success = weight(true);
+    let fallback = weight(false);
+    let pool = ComputePool::new(3);
+    let input = [1.0, 2.0, -3.0, 4.0, 5.0, -6.0];
+    let expected = [2.0, 6.0, -6.0, 12.0, 10.0, -18.0];
+    let mut prepared = PreparedRows::new(3, 2);
+    prepared.prepare(&input, 3, 2, false, false).unwrap();
+    let mut gpu = [f32::NAN; 6];
+    let mut cpu = [f32::NAN; 6];
+    prepared
+        .matmul_group(&input, [(&success, &mut gpu), (&fallback, &mut cpu)], &pool)
+        .unwrap();
+    assert_eq!(gpu, expected);
+    assert_eq!(cpu, expected);
+    for weight in [&success, &fallback] {
+        let mut single = [f32::NAN; 2];
+        weight.matmul_prepared(&input[..2], &[], &[], None, &mut single, &pool);
+        assert_eq!(single, [2.0, 6.0]);
+        crate::ops::silu_mul_inplace(&[1.0; 2], &mut single);
+        assert!(single.iter().all(|value| value.is_finite()));
+    }
+}
+
 fn q8_weight_bytes(rows: usize, blocks_per_row: usize) -> &'static [u8] {
     let mut bytes = vec![1; rows * blocks_per_row * 34];
     for block in bytes.chunks_exact_mut(34) {

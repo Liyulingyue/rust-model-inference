@@ -1,4 +1,8 @@
 
+Z-Image VAE、YuE2、Edge0、LFM2/LFM2.5/LFM2MoE 与文本 embedding 已接入实验性 Vulkan 投影路径，
+新增 GPU 路径尚待实机数值、质量和性能验证；表中已有验证记录仍指原来的执行范围。
+格式与限制见 [Vulkan 文档](develop/VULKAN.md)。
+
 | 模型 | 版本 | 任务类型 | 参考实现 | 原始权重 | 推理权重 | 备注 |
 |---|---|---|---|---|---|---|
 | Audio8-ASR-Infinite | merged v2 | 流式中英 ASR | 官方实现 @ `c8ba8eea829be0339e8d7757f8ca52dac06e1e32` | 待补 | `tools/converter/audio8`（本仓库产出） | Experimental：真实 Mel 的前 4 个音频/文本组在标量路径逐位对齐，含 4 组完整 logits；WAV 前端尚无独立标量逐位证明，超过 1500 个音频帧明确拒绝。[复现说明](../tools/converter/audio8/README.md)。  |

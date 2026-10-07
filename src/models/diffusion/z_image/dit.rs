@@ -2735,6 +2735,7 @@ mod tests {
     /// whatever lands in the input region -- so this is the boundary where a
     /// mismatch would turn into a visibly different image rather than a caught
     /// error.
+    #[cfg(feature = "vulkan")]
     #[test]
     fn gpu_fused_norm_and_modulate_match_the_per_row_cpu_chain() {
         use crate::models::diffusion::z_image::dit_gpu::NormKind;
@@ -3806,6 +3807,7 @@ mod tests {
     /// cycles 150, and is the honest one.
     ///
     /// Ignored because it takes tens of seconds; run it with `--ignored`.
+    #[cfg(feature = "vulkan")]
     #[test]
     #[ignore = "multi-second GPU benchmark, not a correctness gate"]
     fn zimage_tiled_matmul_beats_the_one_token_per_weight_kernel() {
@@ -4006,6 +4008,7 @@ mod tests {
     /// `attention_into` also accumulates the softmax denominator in f64 while the
     /// kernel sums in f32 with a Kahan correction. The reference sums in f64 like
     /// the CPU does, which leaves a residue far below the tolerance.
+    #[cfg(feature = "vulkan")]
     #[test]
     #[ignore = "builds a scores region of rows x HEADS x rows"]
     fn gpu_diy_attention_chain_matches_the_cpu_reference() {
@@ -4114,6 +4117,7 @@ mod tests {
     /// This is the number behind the end-to-end win: attention was the largest
     /// stage in a step, and the chain covers scores, softmax and the value
     /// reduction, so unlike the scores-only measurement it is the whole cost.
+    #[cfg(feature = "vulkan")]
     #[test]
     #[ignore = "benchmark, seconds per shape"]
     fn gpu_diy_attention_chain_beats_the_cpu_attention() {
@@ -4216,6 +4220,7 @@ mod tests {
     /// shape implies -- which would point at the chain's other two stages instead.
     #[test]
     #[ignore = "multi-second GPU benchmark, not a correctness gate"]
+    #[cfg(feature = "vulkan")]
     fn zimage_projection_shapes_stream_at_the_machine_limit() {
         use crate::ops::float::enable_gpu;
 
@@ -4267,6 +4272,7 @@ mod tests {
     /// to see the other two -- and doing that across sessions is how the 1.55 s
     /// "missing time" was invented earlier. This measures each stage on its own,
     /// in one session, at the shape the render uses.
+    #[cfg(feature = "vulkan")]
     #[test]
     #[ignore = "GPU benchmark, not a correctness gate"]
     fn zimage_qkv_norm_and_adaln_cost_at_the_render_shape() {

@@ -223,6 +223,22 @@ impl YuE2Weight {
             self.matmul_bf16(input, bias, output, pool);
             return Ok(());
         }
+        #[cfg(feature = "vulkan")]
+        if self.fast.ggml_type != GGMLType::F16 && self.fast.try_vulkan_rows(input, output, n_rows)
+        {
+            if let Some(bias) = bias {
+                for row in output.chunks_exact_mut(self.n_out) {
+                    for (value, offset) in row.iter_mut().zip(bias) {
+                        *value += offset;
+                    }
+                }
+            }
+            return Ok(());
+        }
+        // NAR F16 consumes Q8-prequantized input; the generic F16 GPU path
+        // rounds raw input to F16, so this contract stays on CPU.
+        #[cfg(feature = "vulkan")]
+        let _cpu_scope = ComputePool::disable_gpu_matmul_for_scope();
         if self.fast.ggml_type == crate::core::tensor::GGMLType::F32 {
             // F32 weights consume raw activations; handing them Q8_0 bytes would
             // silently produce zeros because the F32 kernel's `forward_prepared`
@@ -330,6 +346,16 @@ impl YuE2Weight {
     ) {
         let bytes = self.bf16.unwrap();
         let n_rows = input.len() / self.n_in;
+        #[cfg(feature = "vulkan")]
+        if self.fast.try_vulkan_rows(input, output, n_rows) {
+            for row in output.chunks_exact_mut(self.n_out) {
+                for (column, value) in row.iter_mut().enumerate() {
+                    let sum = bias.map_or(*value, |bias| *value + bias[column]);
+                    *value = half::bf16::from_f32(sum).to_f32();
+                }
+            }
+            return;
+        }
         let batched_rows = n_rows / 4 * 4;
         let output_ptr = output.as_mut_ptr();
         pool.compute(|thread, threads| {
@@ -2125,6 +2151,50 @@ mod performance_tests {
                     }
                 }
             }
+        }
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    #[ignore = "requires a Vulkan device; fails if offload is unavailable"]
+    fn vulkan_yue2_bf16_rounds_after_bias_across_tiles() {
+        crate::ops::enable_gpu();
+        crate::ops::get_vulkan_context().expect("Vulkan device required");
+        let bytes: &'static [u8] = Box::leak(
+            [1.0, 0.0, 0.0, 1.0]
+                .into_iter()
+                .flat_map(|value| half::bf16::from_f32(value).to_bits().to_le_bytes())
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
+        let weight = YuE2Weight {
+            fast: Weight::from_quantized(QuantizedTensor::from_bytes(bytes, GGMLType::BF16, 2, 2)),
+            bf16: Some(bytes),
+            n_in: 2,
+            n_out: 2,
+        };
+        let input: Vec<_> = (0..65)
+            .flat_map(|row| [1.0029296875 + row as f32 * 0.0625, row as f32 * 0.25])
+            .collect();
+        let bias = [0.001953125, -0.001953125];
+        let mut actual = vec![f32::NAN; 130];
+        assert!(
+            weight.fast.try_vulkan_rows(&input, &mut actual, 65),
+            "GPU BF16 projection declined"
+        );
+        weight.matmul_bf16(&input, Some(&bias), &mut actual, &ComputePool::new(2));
+        assert_eq!(actual[0], 1.0078125); // Rounding before bias would yield 1.0.
+        for row in 0..65 {
+            let mut expected = [0.0; 2];
+            torch_bf16_matmul_rows(
+                bytes,
+                &input[row * 2..row * 2 + 2],
+                Some(&bias),
+                &mut expected,
+                2,
+                0,
+            );
+            assert_eq!(actual[row * 2..row * 2 + 2], expected);
         }
     }
 }

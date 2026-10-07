@@ -15,6 +15,8 @@ struct VaeConv {
     input_channels: usize,
     output_channels: usize,
     kernel: usize,
+    #[cfg(feature = "vulkan")]
+    gpu: crate::ops::kernel::vulkan::GpuLinear,
 }
 
 impl VaeConv {
@@ -31,6 +33,8 @@ impl VaeConv {
             input_channels,
             output_channels,
             kernel,
+            #[cfg(feature = "vulkan")]
+            gpu: crate::ops::kernel::vulkan::GpuLinear::default(),
         })
     }
 }
@@ -505,6 +509,8 @@ impl FluxVae {
                 Some(&shortcut.bias),
                 &mut scratch.first,
                 &self.pool,
+                #[cfg(feature = "vulkan")]
+                Some(&shortcut.gpu),
             )?;
             std::mem::swap(current, &mut scratch.first);
         } else {
@@ -677,6 +683,8 @@ fn run_conv(
         Some(&conv.bias),
         output,
         pool,
+        #[cfg(feature = "vulkan")]
+        Some(&conv.gpu),
     )
 }
 
@@ -697,6 +705,7 @@ fn conv_f16_parallel_into(
     bias: Option<&[f32]>,
     output: &mut [f32],
     pool: &Arc<ComputePool>,
+    #[cfg(feature = "vulkan")] gpu: Option<&crate::ops::kernel::vulkan::GpuLinear>,
 ) -> Result<(), String> {
     if side == 0 || !matches!(kernel, 1 | 3) {
         return Err("Invalid VAE convolution shape".into());
@@ -731,6 +740,22 @@ fn conv_f16_parallel_into(
     let pixel_count = side
         .checked_mul(side)
         .ok_or_else(|| "VAE pixel count overflow".to_string())?;
+    #[cfg(feature = "vulkan")]
+    if gpu.is_some_and(|gpu| {
+        try_conv_f16(
+            gpu,
+            input,
+            side,
+            weights,
+            output_channels,
+            kernel,
+            bias,
+            output,
+            patch_len,
+        )
+    }) {
+        return Ok(());
+    }
 
     let weight_rows: Vec<&[u8]> = (0..output_channels)
         .map(|oc| {
@@ -773,6 +798,7 @@ fn conv_f16_parallel_into(
         for pixel in start..end {
             let output_y = pixel / side;
             let output_x = pixel % side;
+            patch.fill(0);
             // Build patch (kernel_x, kernel_y, ic) -> patch_index
             for kernel_y in 0..kernel {
                 let input_y_signed = output_y as isize + kernel_y as isize - padding_signed;
@@ -808,6 +834,73 @@ fn conv_f16_parallel_into(
     Ok(())
 }
 
+#[cfg(any(feature = "vulkan", test))]
+fn conv_patch_into(input: &[f32], side: usize, kernel: usize, pixel: usize, patch: &mut [f32]) {
+    patch.fill(0.0);
+    let spatial = side * side;
+    let padding = (kernel / 2) as isize;
+    for (index, value) in patch.iter_mut().enumerate() {
+        let channel = index / (kernel * kernel);
+        let y = (pixel / side) as isize + ((index / kernel) % kernel) as isize - padding;
+        let x = (pixel % side) as isize + (index % kernel) as isize - padding;
+        if x >= 0 && y >= 0 && x < side as isize && y < side as isize {
+            *value = input[channel * spatial + y as usize * side + x as usize];
+        }
+    }
+}
+
+#[cfg(feature = "vulkan")]
+fn try_conv_f16(
+    gpu: &crate::ops::kernel::vulkan::GpuLinear,
+    input: &[f32],
+    side: usize,
+    weights: &[u8],
+    output_channels: usize,
+    kernel: usize,
+    bias: Option<&[f32]>,
+    output: &mut [f32],
+    patch_len: usize,
+) -> bool {
+    if !crate::ops::kernel::vulkan::offload_enabled() {
+        return false;
+    }
+    let spatial = side * side;
+    let tile_rows = spatial.min(64);
+    let mut patches = vec![0.0; tile_rows * patch_len];
+    let mut projected = vec![0.0; tile_rows * output_channels];
+    for start in (0..spatial).step_by(tile_rows) {
+        let rows = tile_rows.min(spatial - start);
+        for row in 0..rows {
+            conv_patch_into(
+                input,
+                side,
+                kernel,
+                start + row,
+                &mut patches[row * patch_len..(row + 1) * patch_len],
+            );
+        }
+        if !gpu.try_matmul(
+            weights,
+            crate::vulkan::ops::GpuWeightFormat::F16,
+            &patches[..rows * patch_len],
+            &mut projected[..rows * output_channels],
+            patch_len,
+            output_channels,
+            rows,
+        ) {
+            return false;
+        }
+        for row in 0..rows {
+            for channel in 0..output_channels {
+                output[channel * spatial + start + row] = projected
+                    [row * output_channels + channel]
+                    + bias.map_or(0.0, |bias| bias[channel]);
+            }
+        }
+    }
+    output.iter().all(|value| value.is_finite())
+}
+
 fn padded_conv_f16_into(
     input: &[f32],
     input_channels: usize,
@@ -828,6 +921,8 @@ fn padded_conv_f16_into(
         bias,
         output,
         pool,
+        #[cfg(feature = "vulkan")]
+        None,
     )
 }
 
@@ -937,6 +1032,7 @@ fn add_shortcut_residual_into(
     bias: Option<&[f32]>,
     output: &mut [f32],
     pool: &Arc<ComputePool>,
+    #[cfg(feature = "vulkan")] gpu: Option<&crate::ops::kernel::vulkan::GpuLinear>,
 ) -> Result<(), String> {
     conv_f16_parallel_into(
         input,
@@ -948,6 +1044,8 @@ fn add_shortcut_residual_into(
         bias,
         output,
         pool,
+        #[cfg(feature = "vulkan")]
+        gpu,
     )?;
     if residual_branch.len() != output.len() {
         return Err("Invalid VAE shortcut residual length".into());
@@ -1378,13 +1476,135 @@ mod tests {
     }
 
     #[test]
+    fn convolution_zero_padding_is_reset_between_pixels() {
+        let mut output = [0.0; 4];
+        conv_f16_parallel_into(
+            &[1.0, 2.0, 3.0, 4.0],
+            1,
+            2,
+            &f16_bytes(&[1.0; 9]),
+            1,
+            3,
+            None,
+            &mut output,
+            &Arc::new(ComputePool::new(1)),
+            #[cfg(feature = "vulkan")]
+            None,
+        )
+        .unwrap();
+        assert_eq!(output, [10.0; 4]);
+    }
+
+    #[test]
+    fn convolution_patch_keeps_channel_and_kernel_order() {
+        let mut patch = [99.0; 18];
+        conv_patch_into(
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            2,
+            3,
+            0,
+            &mut patch,
+        );
+        assert_eq!(
+            patch,
+            [
+                0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 0.0, 3.0, 4.0, 0.0, 0.0, 0.0, 0.0, 5.0, 6.0, 0.0,
+                7.0, 8.0
+            ]
+        );
+        conv_patch_into(
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            2,
+            3,
+            3,
+            &mut patch,
+        );
+        assert_eq!(
+            patch,
+            [
+                1.0, 2.0, 0.0, 3.0, 4.0, 0.0, 0.0, 0.0, 0.0, 5.0, 6.0, 0.0, 7.0, 8.0, 0.0, 0.0,
+                0.0, 0.0
+            ]
+        );
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    #[ignore = "requires a Vulkan device; fails if offload is unavailable"]
+    fn vulkan_vae_convolution_matches_cpu_across_tiles() {
+        crate::ops::enable_gpu();
+        crate::ops::get_vulkan_context().expect("Vulkan device required");
+        let pool = Arc::new(ComputePool::new(2));
+        let side = 9; // 81 pixels exercise both a full 64-row tile and its tail.
+        let input: Vec<_> = (0..side * side * 2)
+            .map(|i| (i as f32 - 80.0) / 97.0)
+            .collect();
+        let bias = [0.125, -0.25, 0.5];
+        for kernel in [1, 3] {
+            let patch_len = 2 * kernel * kernel;
+            let weights: Vec<_> = (0..patch_len * 3)
+                .flat_map(|i| f32_to_f16((i as f32 % 11.0 - 5.0) / 16.0).to_le_bytes())
+                .collect();
+            let mut expected = vec![0.0; side * side * 3];
+            conv_f16_parallel_into(
+                &input,
+                2,
+                side,
+                &weights,
+                3,
+                kernel,
+                Some(&bias),
+                &mut expected,
+                &pool,
+                None,
+            )
+            .unwrap();
+            let gpu = crate::ops::kernel::vulkan::GpuLinear::default();
+            let mut actual = vec![f32::NAN; expected.len()];
+            assert!(
+                try_conv_f16(
+                    &gpu,
+                    &input,
+                    side,
+                    &weights,
+                    3,
+                    kernel,
+                    Some(&bias),
+                    &mut actual,
+                    patch_len
+                ),
+                "GPU convolution declined"
+            );
+            for (actual, expected) in actual.into_iter().zip(expected) {
+                assert!(
+                    (actual - expected).abs() <= 3e-4 + 3e-4 * expected.abs(),
+                    "gpu={actual} cpu={expected}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn conv_f16_parallel_runs() {
         let input = [1.0, 2.0, 3.0, 4.0];
         let weights = f16_bytes(&[1.0]);
         let mut output = [0.0; 4];
         let pool = Arc::new(ComputePool::new(1));
 
-        conv_f16_parallel_into(&input, 1, 2, &weights, 1, 1, None, &mut output, &pool).unwrap();
+        conv_f16_parallel_into(
+            &input,
+            1,
+            2,
+            &weights,
+            1,
+            1,
+            None,
+            &mut output,
+            &pool,
+            #[cfg(feature = "vulkan")]
+            None,
+        )
+        .unwrap();
         // Verify output values are non-zero (regression check on parallelism).
         assert!(output.iter().any(|&v| v.is_finite()));
     }
@@ -1490,6 +1710,8 @@ mod tests {
             Some(&[f32::from_bits(0xbd69_17db)]),
             &mut output,
             &Arc::new(ComputePool::new(1)),
+            #[cfg(feature = "vulkan")]
+            None,
         )
         .unwrap();
 
@@ -1680,6 +1902,8 @@ mod tests {
             Some(&[5.0]),
             &mut output,
             &Arc::new(ComputePool::new(1)),
+            #[cfg(feature = "vulkan")]
+            None,
         )
         .unwrap();
         assert_eq!(output, [20.0]);

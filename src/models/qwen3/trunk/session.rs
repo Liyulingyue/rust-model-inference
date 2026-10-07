@@ -559,7 +559,7 @@ impl<'model> Qwen3Session<'model> {
                 parity_trace::report(parity_trace::checkpoint(
                     "result_output",
                     None,
-                    &[config.vocab],
+                    &[self.model.config.vocab],
                     &self.scratch.logits,
                 ));
             }

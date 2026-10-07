@@ -6,6 +6,11 @@
 > 推理路径在 `src/models/yue2/`，AR（自回归）与 NAR（非自回归扩散）双流共用一套
 > 28 层权重。
 
+实验性 Vulkan 投影可用 `cargo build --profile release-fast --features vulkan --bin rust-model-inference`
+构建，并在现有生成命令上加 `--gpu`。AR/NAR 的 BF16 投影仍在 bias 后舍入为 BF16，
+attention、音频 VAE 与 NAR F16 的 Q8 activation 路径留在 CPU。当前仅完成代码接入和静态检查，
+实机数值、NAR 稳定性与成品质量待补，详见 [Vulkan 支持范围](../develop/VULKAN.md)。
+
 ## 1. 权重来源
 
 | 用途 | ModelScope | 说明 |
