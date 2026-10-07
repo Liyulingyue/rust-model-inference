@@ -1546,6 +1546,9 @@ pub async fn jev_score(
         positive,
         threads,
         prefill_batch_size,
+        // The JEV HTTP endpoints have no chat-template switch yet; they
+        // keep the hand-built prompt layout.
+        crate::models::chat_template_jinja::Options::default(),
     ) {
         Ok(r) => r,
         Err(e) => return jev_error(StatusCode::INTERNAL_SERVER_ERROR, e),
@@ -1614,6 +1617,7 @@ async fn jev_grouped(
         mode,
         threads,
         prefill_batch_size,
+        crate::models::chat_template_jinja::Options::default(),
     ) {
         Ok(r) => r,
         Err(e) => return jev_error(StatusCode::INTERNAL_SERVER_ERROR, e),

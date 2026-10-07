@@ -22,12 +22,13 @@ pub(crate) fn run_jev_decision_spark(
     n_threads_arg: usize,
     prefill_batch_size: usize,
     output_json: bool,
+    jinja: crate::models::chat_template_jinja::Options,
 ) -> Result<Vec<JevResult>, String> {
     let available_threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
     let n_threads = resolve_thread_count(n_threads_arg, available_threads);
-    let mut scorer = SparkJevScorer::new(source.clone(), n_threads)?;
+    let mut scorer = SparkJevScorer::new(source.clone(), n_threads, &jinja)?;
     if !output_json {
         eprintln!("compute pool: {} threads (Spark)", n_threads);
     }
@@ -40,12 +41,20 @@ pub(crate) fn run_jev_decision_spark(
 /// internally, so the scorer holds the session rather than the
 /// pool + free function.
 pub(crate) struct SparkJevScorer {
+    /// `--jinja` template, resolved once in `new()` where the source is
+    /// available; `build_prompt` then renders per question.
+    pub(crate) jinja: Option<crate::models::chat_template_jinja::JinjaChatTemplate>,
     pub(crate) tokenizer: BPETokenizer,
     pub(crate) session: crate::models::spark::SparkSession,
 }
 
 impl SparkJevScorer {
-    pub(crate) fn new(source: Arc<dyn TensorSource>, n_threads: usize) -> Result<Self, String> {
+    pub(crate) fn new(
+        source: Arc<dyn TensorSource>,
+        n_threads: usize,
+        jinja: &crate::models::chat_template_jinja::Options,
+    ) -> Result<Self, String> {
+        let jinja = crate::models::chat_template_jinja::resolve_optional(jinja, &|k| source.metadata(k).cloned())?;
         let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
             .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
         verify_label_tokens_single(&tokenizer)?;
@@ -54,7 +63,8 @@ impl SparkJevScorer {
             Arc::new(ComputePool::new(n_threads)),
             8192,
         )?;
-        Ok(Self { tokenizer, session })
+        Ok(Self {
+            jinja, tokenizer, session })
     }
 }
 
@@ -73,6 +83,21 @@ impl JevScorer for SparkJevScorer {
         let eos = "<｜end▁of▁sentence｜>";
         let system = jev_system_prompt(q.mode);
         let payload = jev_payload_json(context, q)?;
+        // `--jinja` renders the model's own template. JEV opens the assistant
+        // turn so the next token is the decision being scored, i.e.
+        // `add_generation_prompt = true`, the same value generation uses.
+        // `thinking` off so the scored position does not move into a
+        // reasoning block.
+        if let Some(template) = self.jinja.as_ref() {
+            let ids = crate::models::chat_template_jinja::render_text_conversation(
+                &self.tokenizer,
+                template,
+                Some(system),
+                &payload,
+                false,
+            )?;
+            return Ok((labels, ids));
+        }
         let prompt_text = format!(
             "{sos}<|System|>\n{system}{eos}\
              {sos}<|User|>{payload}{eos}\

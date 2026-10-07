@@ -22,12 +22,13 @@ pub(crate) fn run_jev_decision_hunyuan(
     n_threads_arg: usize,
     prefill_batch_size: usize,
     output_json: bool,
+    jinja: crate::models::chat_template_jinja::Options,
 ) -> Result<Vec<JevResult>, String> {
     let available_threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
     let n_threads = resolve_thread_count(n_threads_arg, available_threads);
-    let mut scorer = HunyuanJevScorer::new(source.clone(), n_threads, prefill_batch_size)?;
+    let mut scorer = HunyuanJevScorer::new(source.clone(), n_threads, prefill_batch_size, &jinja)?;
     if !output_json {
         eprintln!("compute pool: {} threads (Hunyuan)", n_threads);
     }
@@ -39,6 +40,9 @@ pub(crate) fn run_jev_decision_hunyuan(
 /// `build_hunyuan_chat_prompt`; the forward rebuilds a fresh
 /// `Qwen3Session` per question for ephemeral KV.
 pub(crate) struct HunyuanJevScorer {
+    /// `--jinja` template, resolved once in `new()` where the source is
+    /// available; `build_prompt` then renders per question.
+    pub(crate) jinja: Option<crate::models::chat_template_jinja::JinjaChatTemplate>,
     pub(crate) model: crate::models::qwen3::Qwen3Model,
     pub(crate) max_ctx: usize,
     pub(crate) prefill_batch_size: usize,
@@ -49,7 +53,9 @@ impl HunyuanJevScorer {
         source: Arc<dyn TensorSource>,
         n_threads: usize,
         prefill_batch_size: usize,
+        jinja: &crate::models::chat_template_jinja::Options,
     ) -> Result<Self, String> {
+        let jinja = crate::models::chat_template_jinja::resolve_optional(jinja, &|k| source.metadata(k).cloned())?;
         let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
             .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
         verify_label_tokens_single(&tokenizer)?;
@@ -61,6 +67,7 @@ impl HunyuanJevScorer {
         )?;
         let max_ctx = model.config().n_ctx;
         Ok(Self {
+            jinja,
             model,
             max_ctx,
             prefill_batch_size,
@@ -81,6 +88,21 @@ impl JevScorer for HunyuanJevScorer {
         let labels = jev_labels(q);
         let system = jev_system_prompt(q.mode);
         let payload = jev_payload_json(context, q)?;
+        // `--jinja` renders the model's own template. JEV opens the assistant
+        // turn so the next token is the decision being scored, i.e.
+        // `add_generation_prompt = true`, the same value generation uses.
+        // `thinking` off so the scored position does not move into a
+        // reasoning block.
+        if let Some(template) = self.jinja.as_ref() {
+            let ids = crate::models::chat_template_jinja::render_text_conversation(
+                self.model.tokenizer(),
+                template,
+                Some(system),
+                &payload,
+                false,
+            )?;
+            return Ok((labels, ids));
+        }
         let token_ids = build_hunyuan_chat_prompt(
             self.model.tokenizer(),
             &[

@@ -9,6 +9,10 @@ use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 use crate::format::ggufrs::{open_model_source, ComponentRole};
+
+/// The system turn Qwen2.5-Omni requires; shared by the hand-built and
+/// Jinja2 prompt builders so both produce the same conversation.
+const OMNI_SYSTEM_TEXT: &str = "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech.";
 use crate::models::hybrid::HybridTextModel;
 use crate::models::qwen3::vision::{
     qwen_smart_resize as qwen3vl_smart_resize, VisionEncoder as VisionEncoder3vl,
@@ -47,6 +51,7 @@ pub fn run_qwen3_family_multimodal(
     temperature: f32,
     n_threads_arg: usize,
     prefill_batch_size: usize,
+    jinja: &crate::models::chat_template_jinja::Options,
 ) -> Result<String, String> {
     validate_single_qwen_media(
         image_path.is_some(),
@@ -241,6 +246,12 @@ pub fn run_qwen3_family_multimodal(
         BPETokenizer::from_gguf_metadata(|key| llm_source.metadata(key).cloned())
             .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?,
     );
+    // Captured before `model_source` is moved into the model below: the
+    // Jinja2 path needs `tokenizer.chat_template` off the GGUF.
+    let jinja_metadata = {
+        let src = Arc::clone(&model_source);
+        move |k: &str| src.metadata(k).cloned()
+    };
     let model = Qwen3Model::from_source(model_source, Arc::clone(&tokenizer), Arc::clone(&pool))?;
     let width = model.config().n_embd;
     if media.len() % width != 0 {
@@ -280,6 +291,62 @@ pub fn run_qwen3_family_multimodal(
             "Deepstack layer mismatch: model={}, projector={deepstack_layers}",
             model.config().n_deepstack_layers
         ));
+    }
+    // `--jinja` renders the model's own template, which already knows the
+    // `<|vision_start|><|image_pad|><|vision_end|>` shape. The template
+    // writes one `<|image_pad|>` per media item; the projector produced
+    // `rows` grid tokens, so the placeholder is expanded into a contiguous
+    // run first — the contract `build_qwen3_media_positions` documents.
+    // The system turn stays Omni-only, matching the hand-built path below.
+    let media_counts: Vec<usize> = media_grid_shapes
+        .iter()
+        .map(|(h, w)| {
+            (*h).checked_mul(*w).ok_or_else(|| "Media grid shape overflow".to_string())
+        })
+        .collect::<Result<Vec<usize>, String>>()?;
+    let jinja_system = if matches!(family, crate::app::media::ProjectorFamily::Qwen25Omni) {
+        Some(OMNI_SYSTEM_TEXT)
+    } else {
+        None
+    };
+    if let Some(jinja_ids) = crate::models::chat_template_jinja::media_conversation_tokens(
+        tokenizer.as_ref(),
+        jinja,
+        &jinja_metadata,
+        pad,
+        &media_counts,
+        prompt,
+        jinja_system,
+        false,
+    )? {
+        let mut embeddings = model.embed_tokens(&jinja_ids)?;
+        let deepstack_embeddings = inject_qwen_media_embeddings(
+            &jinja_ids,
+            pad,
+            &mut embeddings,
+            &media,
+            &media_deepstack,
+            width,
+        )?;
+        let positions = build_qwen3_media_positions(&jinja_ids, pad, &media_grid_shapes)?;
+        let generation = model.generate(
+            Qwen3Input {
+                token_ids: &jinja_ids,
+                positions: &positions,
+                embeddings: Some(&embeddings),
+                deepstack_embeddings: (!deepstack_embeddings.is_empty())
+                    .then_some(deepstack_embeddings.as_slice()),
+            },
+            Qwen3GenerateOptions {
+                max_new_tokens: max_tokens,
+                temperature,
+                prefill_batch_size,
+            },
+        )?;
+        print!("{}", generation.text);
+        io::stdout().flush().map_err(|error| error.to_string())?;
+        println!();
+        return Ok(generation.text);
     }
     let mut content = vec![start];
     content.extend(std::iter::repeat_n(pad, rows));
@@ -814,6 +881,7 @@ pub fn run_multimodal(
     prefill_batch_size: usize,
     max_context: usize,
     repetition_penalty: f32,
+    jinja: &crate::models::chat_template_jinja::Options,
 ) -> Result<(), String> {
     run_multimodal_with_video_ref(
         llm_source,
@@ -830,6 +898,7 @@ pub fn run_multimodal(
         max_context,
         repetition_penalty,
         None,
+        jinja,
     )
 }
 
@@ -847,6 +916,7 @@ pub fn run_multimodal_with_video(
     prefill_batch_size: usize,
     max_context: usize,
     repetition_penalty: f32,
+    jinja: &crate::models::chat_template_jinja::Options,
 ) -> Result<(), String> {
     let owned_source = Arc::clone(&llm_source);
     run_multimodal_with_video_ref(
@@ -864,6 +934,7 @@ pub fn run_multimodal_with_video(
         max_context,
         repetition_penalty,
         Some(owned_source),
+        jinja,
     )
 }
 
@@ -898,6 +969,7 @@ pub(super) fn run_multimodal_with_video_ref(
     max_context: usize,
     _repetition_penalty: f32,
     model_source: Option<Arc<dyn TensorSource>>,
+    jinja: &crate::models::chat_template_jinja::Options,
 ) -> Result<(), String> {
     let arch = llm_source
         .metadata("general.architecture")
@@ -935,6 +1007,7 @@ pub(super) fn run_multimodal_with_video_ref(
             temperature,
             n_threads_arg,
             prefill_batch_size,
+            jinja,
         )
         .map(|text| {
             // Multimodal text is already printed inside the function;

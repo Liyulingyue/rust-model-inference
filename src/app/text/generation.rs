@@ -353,6 +353,7 @@ pub fn run_interactive_qwen35(
             prefill_batch_size,
             max_context,
             repetition_penalty,
+            &jinja::Options::default(),
         )?;
         println!();
     }

@@ -536,6 +536,7 @@ pub fn run_jev_grouped_decision_data(
     mode: JevMode,
     n_threads_arg: usize,
     prefill_batch_size: usize,
+    jinja: crate::models::chat_template_jinja::Options,
 ) -> Result<Vec<JevGroupedResult>, String> {
     let prepared = prepare_jev_grouped_questions(questions, mode)?;
     let arch = source
@@ -552,6 +553,7 @@ pub fn run_jev_grouped_decision_data(
             n_threads_arg,
             prefill_batch_size,
             false,
+            jinja.clone(),
         )?,
         "qwen35" => qwen35::run_jev_grouped_qwen35(
             source.clone(),
@@ -560,6 +562,7 @@ pub fn run_jev_grouped_decision_data(
             n_threads_arg,
             prefill_batch_size,
             false,
+            jinja.clone(),
         )?,
         "llama" | "k2-horizon" | "granite" | "nanbeige" | "qwen2_2" | "phi3" | "glm4"
         | "mistral3" => llama::run_jev_grouped_llama(
@@ -569,6 +572,7 @@ pub fn run_jev_grouped_decision_data(
             n_threads_arg,
             prefill_batch_size,
             false,
+            jinja.clone(),
         )?,
         "gemma4" => gemma4::run_jev_grouped_gemma4(
             source.clone(),
@@ -577,6 +581,7 @@ pub fn run_jev_grouped_decision_data(
             n_threads_arg,
             prefill_batch_size,
             false,
+            jinja.clone(),
         )?,
         "lfm2" => lfm2::run_jev_grouped_lfm2(
             source.clone(),
@@ -585,6 +590,7 @@ pub fn run_jev_grouped_decision_data(
             n_threads_arg,
             prefill_batch_size,
             false,
+            jinja.clone(),
         )?,
         "lfm25" => lfm25::run_jev_grouped_lfm25(
             source.clone(),
@@ -593,6 +599,7 @@ pub fn run_jev_grouped_decision_data(
             n_threads_arg,
             prefill_batch_size,
             false,
+            jinja.clone(),
         )?,
         "spark2_5" => spark::run_jev_grouped_spark(
             source.clone(),
@@ -601,6 +608,7 @@ pub fn run_jev_grouped_decision_data(
             n_threads_arg,
             prefill_batch_size,
             false,
+            jinja.clone(),
         )?,
         "nemotron_h" => nemotron_h::run_jev_grouped_nemotron_h(
             source.clone(),
@@ -609,6 +617,7 @@ pub fn run_jev_grouped_decision_data(
             n_threads_arg,
             prefill_batch_size,
             false,
+            jinja.clone(),
         )?,
         "hunyuan-dense" => hunyuan::run_jev_grouped_hunyuan(
             source.clone(),
@@ -617,6 +626,7 @@ pub fn run_jev_grouped_decision_data(
             n_threads_arg,
             prefill_batch_size,
             false,
+            jinja.clone(),
         )?,
         other => {
             return Err(format!(
@@ -640,6 +650,7 @@ pub fn run_jev_grouped_decision(
     n_threads_arg: usize,
     prefill_batch_size: usize,
     output_json: bool,
+    jinja: crate::models::chat_template_jinja::Options,
 ) -> Result<(), String> {
     let t0 = Instant::now();
     let results = run_jev_grouped_decision_data(
@@ -649,6 +660,7 @@ pub fn run_jev_grouped_decision(
         mode,
         n_threads_arg,
         prefill_batch_size,
+        jinja,
     )?;
 
     if output_json {

@@ -20,12 +20,13 @@ pub(crate) fn run_jev_decision_lfm2(
     n_threads_arg: usize,
     prefill_batch_size: usize,
     output_json: bool,
+    jinja: crate::models::chat_template_jinja::Options,
 ) -> Result<Vec<JevResult>, String> {
     let available_threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
     let n_threads = resolve_thread_count(n_threads_arg, available_threads);
-    let mut scorer = Lfm2JevScorer::new(source.clone(), n_threads, prefill_batch_size)?;
+    let mut scorer = Lfm2JevScorer::new(source.clone(), n_threads, prefill_batch_size, &jinja)?;
     if !output_json {
         eprintln!("compute pool: {} threads (LFM2)", n_threads);
     }
@@ -41,6 +42,8 @@ pub(crate) struct Lfm2JevScorer {
     pub(crate) source: Arc<dyn TensorSource>,
     pub(crate) n_threads: usize,
     pub(crate) prefill_batch_size: usize,
+    /// `--jinja` template, resolved once in `new()`.
+    pub(crate) jinja: Option<crate::models::chat_template_jinja::JinjaChatTemplate>,
 }
 
 impl Lfm2JevScorer {
@@ -48,15 +51,21 @@ impl Lfm2JevScorer {
         source: Arc<dyn TensorSource>,
         n_threads: usize,
         prefill_batch_size: usize,
+        jinja: &crate::models::chat_template_jinja::Options,
     ) -> Result<Self, String> {
         let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
             .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
         verify_label_tokens_single(&tokenizer)?;
+        let jinja = crate::models::chat_template_jinja::resolve_optional(
+            jinja,
+            &|k| source.metadata(k).cloned(),
+        )?;
         Ok(Self {
             tokenizer,
             source,
             n_threads,
             prefill_batch_size,
+            jinja,
         })
     }
 }
@@ -74,6 +83,20 @@ impl JevScorer for Lfm2JevScorer {
         let labels = jev_labels(q);
         let system = jev_system_prompt(q.mode);
         let payload = jev_payload_json(context, q)?;
+        // `--jinja` renders the model's own template. JEV opens the assistant
+        // turn so the next token is the decision being scored, i.e.
+        // `add_generation_prompt = true`, the same value generation uses.
+        // `thinking` off so the scored position does not move.
+        if let Some(template) = self.jinja.as_ref() {
+            let ids = crate::models::chat_template_jinja::render_text_conversation(
+                &self.tokenizer,
+                template,
+                Some(system),
+                &payload,
+                false,
+            )?;
+            return Ok((labels, ids));
+        }
         let mut token_ids = Vec::new();
         if let Some(bos) = self.tokenizer.bos_id() {
             token_ids.push(bos);

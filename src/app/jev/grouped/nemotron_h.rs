@@ -17,8 +17,9 @@ pub(crate) fn run_jev_grouped_nemotron_h(
     n_threads_arg: usize,
     _prefill_batch_size: usize,
     output_json: bool,
+    jinja: crate::models::chat_template_jinja::Options,
 ) -> Result<Vec<JevGroupedResult>, String> {
-    let mut scorer = NemotronHJevGroupedScorer::new(source.clone(), n_threads_arg)?;
+    let mut scorer = NemotronHJevGroupedScorer::new(source.clone(), n_threads_arg, &jinja)?;
     let _ = output_json;
     run_jev_grouped_core(source, context, per_question, false, &mut scorer)
 }
@@ -30,9 +31,13 @@ struct NemotronHJevGroupedScorer {
 }
 
 impl NemotronHJevGroupedScorer {
-    fn new(source: Arc<dyn TensorSource>, n_threads: usize) -> Result<Self, String> {
+    fn new(
+        source: Arc<dyn TensorSource>,
+        n_threads: usize,
+        jinja: &crate::models::chat_template_jinja::Options,
+    ) -> Result<Self, String> {
         Ok(Self {
-            inner: super::super::single::nemotron_h::NemotronHJevScorer::new(source, n_threads)?,
+            inner: super::super::single::nemotron_h::NemotronHJevScorer::new(source, n_threads, jinja)?,
         })
     }
 }

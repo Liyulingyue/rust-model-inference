@@ -21,12 +21,13 @@ pub(crate) fn run_jev_decision_gemma4(
     n_threads_arg: usize,
     prefill_batch_size: usize,
     output_json: bool,
+    jinja: crate::models::chat_template_jinja::Options,
 ) -> Result<Vec<JevResult>, String> {
     let available_threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
     let n_threads = resolve_thread_count(n_threads_arg, available_threads);
-    let mut scorer = Gemma4JevScorer::new(source.clone(), n_threads, prefill_batch_size)?;
+    let mut scorer = Gemma4JevScorer::new(source.clone(), n_threads, prefill_batch_size, &jinja)?;
     if !output_json {
         eprintln!("compute pool: {} threads (Gemma4)", n_threads);
     }
@@ -37,6 +38,9 @@ pub(crate) fn run_jev_decision_gemma4(
 /// recreated per question to mimic the legacy ephemeral-KV
 /// behaviour (each question is a fresh prefill).
 pub(crate) struct Gemma4JevScorer {
+    /// `--jinja` template, resolved once in `new()` where the source is
+    /// available; `build_prompt` then renders per question.
+    pub(crate) jinja: Option<crate::models::chat_template_jinja::JinjaChatTemplate>,
     pub(crate) tokenizer: BPETokenizer,
     pub(crate) model: crate::models::gemma4::Gemma4Model,
     pub(crate) prefill_batch_size: usize,
@@ -47,13 +51,16 @@ impl Gemma4JevScorer {
         source: Arc<dyn TensorSource>,
         _n_threads: usize,
         prefill_batch_size: usize,
+        jinja: &crate::models::chat_template_jinja::Options,
     ) -> Result<Self, String> {
+        let jinja = crate::models::chat_template_jinja::resolve_optional(jinja, &|k| source.metadata(k).cloned())?;
         let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
             .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
         verify_label_tokens_single(&tokenizer)?;
         let model = crate::models::gemma4::Gemma4Model::from_source(source.clone(), _n_threads)
             .map_err(|e| format!("Failed to load Gemma4 model: {e}"))?;
         Ok(Self {
+            jinja,
             tokenizer,
             model,
             prefill_batch_size,
@@ -74,6 +81,21 @@ impl JevScorer for Gemma4JevScorer {
         let labels = jev_labels(q);
         let system = jev_system_prompt(q.mode);
         let payload = jev_payload_json(context, q)?;
+        // `--jinja` renders the model's own template. JEV opens the assistant
+        // turn so the next token is the decision being scored, i.e.
+        // `add_generation_prompt = true`, the same value generation uses.
+        // `thinking` off so the scored position does not move into a
+        // reasoning block.
+        if let Some(template) = self.jinja.as_ref() {
+            let ids = crate::models::chat_template_jinja::render_text_conversation(
+                &self.tokenizer,
+                template,
+                Some(system),
+                &payload,
+                false,
+            )?;
+            return Ok((labels, ids));
+        }
         let prompt_text = format!("{system}\n\n{payload}\n\n<turn|>\n<|turn>model\n");
         let bos = self
             .tokenizer

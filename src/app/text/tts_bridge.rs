@@ -142,6 +142,9 @@ pub fn run_multimodal_with_video_capture_text(
             temperature,
             n_threads_arg,
             prefill_batch_size,
+            // TTS capture has no chat-template switch; it always uses the
+            // hand-built prompt layout.
+            &crate::models::chat_template_jinja::Options::default(),
         );
     }
     Err(format!(

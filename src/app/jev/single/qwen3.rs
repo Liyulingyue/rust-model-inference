@@ -27,6 +27,7 @@ pub(crate) fn run_jev_decision_qwen3(
     output_json: bool,
     mmproj_path: Option<&Path>,
     image_path: Option<&Path>,
+    jinja: crate::models::chat_template_jinja::Options,
 ) -> Result<Vec<JevResult>, String> {
     let available_threads = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -49,7 +50,7 @@ pub(crate) fn run_jev_decision_qwen3(
             image_path.expect("image_path is Some"),
         );
     }
-    let mut scorer = Qwen3JevScorer::new(source.clone(), n_threads, prefill_batch_size)?;
+    let mut scorer = Qwen3JevScorer::new(source.clone(), n_threads, prefill_batch_size, &jinja)?;
     if !output_json {
         eprintln!("compute pool: {} threads", scorer.pool().n_threads());
     }
@@ -152,6 +153,8 @@ pub(crate) struct Qwen3JevScorer {
     pub(crate) model: crate::models::qwen3::Qwen3Model,
     pub(crate) max_ctx: usize,
     pub(crate) prefill_batch_size: usize,
+    /// `--jinja` template, resolved once in `new()`.
+    pub(crate) jinja: Option<crate::models::chat_template_jinja::JinjaChatTemplate>,
 }
 
 impl Qwen3JevScorer {
@@ -159,7 +162,12 @@ impl Qwen3JevScorer {
         source: Arc<dyn TensorSource>,
         n_threads: usize,
         prefill_batch_size: usize,
+        jinja: &crate::models::chat_template_jinja::Options,
     ) -> Result<Self, String> {
+        let jinja = crate::models::chat_template_jinja::resolve_optional(
+            jinja,
+            &|k| source.metadata(k).cloned(),
+        )?;
         let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
             .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
         verify_label_tokens_single(&tokenizer)?;
@@ -174,6 +182,7 @@ impl Qwen3JevScorer {
             model,
             max_ctx,
             prefill_batch_size,
+            jinja,
         })
     }
 
@@ -193,7 +202,8 @@ impl JevScorer for Qwen3JevScorer {
         q: &PreparedQuestion,
     ) -> Result<(Vec<char>, Vec<u32>), String> {
         let labels = jev_labels(q);
-        let (token_ids, _payload) = build_jev_prompt(self.model.tokenizer(), context, q, false)?;
+        let (token_ids, _payload) =
+            build_jev_prompt(self.model.tokenizer(), context, q, false, self.jinja.as_ref())?;
         Ok((labels, token_ids))
     }
 

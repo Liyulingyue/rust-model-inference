@@ -21,12 +21,13 @@ pub(crate) fn run_jev_grouped_qwen35(
     n_threads_arg: usize,
     prefill_batch_size: usize,
     output_json: bool,
+    jinja: crate::models::chat_template_jinja::Options,
 ) -> Result<Vec<JevGroupedResult>, String> {
     let available_threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
     let n_threads = resolve_thread_count(n_threads_arg, available_threads);
-    let mut scorer = Qwen35JevGroupedScorer::new(source.clone(), n_threads, prefill_batch_size)?;
+    let mut scorer = Qwen35JevGroupedScorer::new(source.clone(), n_threads, prefill_batch_size, &jinja)?;
     if !output_json {
         eprintln!("compute pool: {} threads (Qwen3.5)", n_threads);
     }
@@ -48,6 +49,7 @@ impl Qwen35JevGroupedScorer {
         source: Arc<dyn TensorSource>,
         n_threads: usize,
         prefill_batch_size: usize,
+        jinja: &crate::models::chat_template_jinja::Options,
     ) -> Result<Self, String> {
         let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
             .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;

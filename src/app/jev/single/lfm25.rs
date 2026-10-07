@@ -17,13 +17,14 @@ pub(crate) fn run_jev_decision_lfm25(
     n_threads_arg: usize,
     prefill_batch_size: usize,
     output_json: bool,
+    jinja: crate::models::chat_template_jinja::Options,
 ) -> Result<Vec<JevResult>, String> {
     // LFM2.5 chat format is identical to LFM2 — see [`Lfm2JevScorer`].
     let available_threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
     let n_threads = resolve_thread_count(n_threads_arg, available_threads);
-    let mut scorer = Lfm25JevScorer::new(source.clone(), n_threads, prefill_batch_size)?;
+    let mut scorer = Lfm25JevScorer::new(source.clone(), n_threads, prefill_batch_size, &jinja)?;
     if !output_json {
         eprintln!("compute pool: {} threads (LFM2.5)", n_threads);
     }
@@ -42,9 +43,10 @@ impl Lfm25JevScorer {
         source: Arc<dyn TensorSource>,
         n_threads: usize,
         prefill_batch_size: usize,
+        jinja: &crate::models::chat_template_jinja::Options,
     ) -> Result<Self, String> {
         Ok(Self {
-            inner: Lfm2JevScorer::new(source, n_threads, prefill_batch_size)?,
+            inner: Lfm2JevScorer::new(source, n_threads, prefill_batch_size, jinja)?,
         })
     }
 }

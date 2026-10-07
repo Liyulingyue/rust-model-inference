@@ -742,6 +742,7 @@ fn main() {
             prefill_batch_size,
             options.effective_max_context(),
             options.effective_repetition_penalty(),
+            &jinja_options,
         ));
     } else if !options.jev
         && (explicit_mmproj.is_some() || image.is_some() || video.is_some() || audio.is_some())
@@ -800,6 +801,7 @@ fn main() {
             prefill_batch_size,
             options.effective_max_context(),
             options.effective_repetition_penalty(),
+            &jinja_options,
         ));
     } else if options.jev && options.gliner2_decide {
         // GLiNER2.5-Decide: the encoder and the classifier live in one GGUF, so
@@ -929,6 +931,7 @@ fn main() {
                     n_threads,
                     prefill_batch_size,
                     options.jev_output_json,
+                    jinja_options.clone(),
                 ));
             }
             Ok(Some(app::JevInputs::Single {
@@ -946,6 +949,7 @@ fn main() {
                     options.jev_output_json,
                     explicit_mmproj,
                     image,
+                    jinja_options.clone(),
                 ));
             }
             Ok(None) => {}
@@ -991,6 +995,7 @@ fn main() {
                 prefill_batch_size,
                 options.effective_max_context(),
                 options.effective_repetition_penalty(),
+                &jinja_options,
             ));
         } else if options.embedding {
             app::run_embedding(
