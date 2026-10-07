@@ -992,7 +992,7 @@ pub fn vec_dot_iq4_nl_q8k(iq4nl_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
         return unsafe { self::avx2_k::vec_dot_iq4_nl_q8k_avx2(iq4nl_data, q8k) };
     }
     #[cfg(target_arch = "aarch64")]
-    if std::arch::is_aarch64_feature_detected!("dotprod") {
+    if crate::ops::has_neon() && std::arch::is_aarch64_feature_detected!("dotprod") {
         return unsafe { self::neon_k::vec_dot_iq4_nl_q8k_neon(iq4nl_data, q8k) };
     }
     vec_dot_iq4_nl_q8k_scalar(iq4nl_data, q8k)
@@ -1923,6 +1923,51 @@ pub fn dequantize_row_q6_k(block_bytes: &[u8], output: &mut [f32]) {
             }
         }
     }
+}
+
+/// Whole-tensor Q4_K expansion, shaped like [`dequant_q6k_weight`].
+///
+/// The per-row helper reads from the byte offset onward, so the caller has to
+/// hand it the slice starting at this row rather than the whole buffer; the
+/// extra capacity is harmless because it stops after `QK_K` values.
+pub fn dequant_q4k_weight(data: &[u8], n_cols: usize, n_rows: usize) -> Vec<f32> {
+    let mut out = vec![0.0f32; n_rows * n_cols];
+    let blocks_per_row = n_cols / QK_K;
+    for row in 0..n_rows {
+        let byte_offset = row * blocks_per_row * BLOCK_Q4K_SIZE;
+        dequantize_row_q4_k(
+            &data[byte_offset..],
+            &mut out[row * n_cols..row * n_cols + n_cols],
+        );
+    }
+    out
+}
+
+/// Expand a whole block-quantized tensor to F32.
+///
+/// `n_cols` is the GGUF leading dim (the contiguous one the block format
+/// walks) and `n_rows` the product of the rest, which is how every tensor
+/// here is laid out. The caller has already validated the byte count against
+/// `GGMLType::checked_nbytes`, so the block geometry is consistent by the
+/// time this runs.
+pub fn dequantize_tensor(
+    data: &[u8],
+    ggml_type: crate::core::tensor::GGMLType,
+    n_cols: usize,
+    n_rows: usize,
+) -> Result<Vec<f32>, String> {
+    use crate::core::tensor::GGMLType;
+    Ok(match ggml_type {
+        GGMLType::Q8_0 => dequant_q80_weight(data, n_cols, n_rows),
+        GGMLType::Q4K => dequant_q4k_weight(data, n_cols, n_rows),
+        GGMLType::Q6K => dequant_q6k_weight(data, n_cols, n_rows),
+        other => {
+            return Err(format!(
+                "no whole-tensor decoder for {other:?}; the per-row decoders \
+                 cover the rest"
+            ))
+        }
+    })
 }
 
 pub fn dequant_q6k_weight(data: &[u8], n_cols: usize, n_rows: usize) -> Vec<f32> {
@@ -3526,6 +3571,65 @@ mod q8k_padding_tests {
         assert!(
             result.is_err(),
             "undersized buf must panic rather than write out of bounds"
+        );
+    }
+
+    /// Regression test for the aarch64 scalar-mode dispatch. Before the fix,
+    /// `vec_dot_q4k_q8k` and `vec_dot_iq4_nl_q8k` ran the NEON kernel even
+    /// when `RMI_SCALAR=1` was set, because their gate was the bare
+    /// `is_aarch64_feature_detected!("dotprod")` probe. That broke the audio8
+    /// and any other parity-trace flow on aarch64 the same way the audio8 dot
+    /// fix broke it for `dot_bf16_f32`. The fix wraps the inner probe with
+    /// `crate::ops::has_neon()` (which is `!scalar_mode()`), so scalar mode
+    /// falls through to the scalar implementation regardless of CPU features.
+    ///
+    /// Only meaningful on aarch64; x86 already gates on `has_avx2_fma()` and
+    /// the inner probe is inside the aarch64 cfg arm.
+    #[cfg(all(target_arch = "aarch64", feature = "parity-trace"))]
+    #[test]
+    fn q4k_q8k_dispatch_respects_scalar_mode() {
+        if !crate::ops::scalar_mode() {
+            return;
+        }
+        let weight: Vec<u8> = (0usize..144)
+            .map(|index| index.wrapping_mul(29).wrapping_add(7) as u8)
+            .collect();
+        let input: Vec<f32> = (0..256)
+            .map(|index| ((index as i32 % 23) - 11) as f32 / 7.0)
+            .collect();
+        let q8k = crate::ops::quant::quantize_row_q8_k(&input);
+        let scalar = vec_dot_q4k_q8k_scalar(&weight, &q8k);
+        let dispatched = vec_dot_q4k_q8k(&weight, &q8k);
+        assert_eq!(
+            dispatched.to_bits(),
+            scalar.to_bits(),
+            "vec_dot_q4k_q8k must fall through to scalar under RMI_SCALAR=1"
+        );
+    }
+
+    #[cfg(all(target_arch = "aarch64", feature = "parity-trace"))]
+    #[test]
+    fn iq4_nl_q8k_dispatch_respects_scalar_mode() {
+        if !crate::ops::scalar_mode() {
+            return;
+        }
+        // IQ4_NL block: 2 bytes scales + 128 packed nibbles. Use a
+        // deterministic buffer; scalar-mode result is the reference.
+        let mut weight: Vec<u8> = (0usize..256)
+            .map(|index| index.wrapping_mul(13).wrapping_add(5) as u8)
+            .collect();
+        weight[0] = 0x3c; // d = 1.0 as half-float in the IQ4_NL scale slot
+        weight[1] = 0x00;
+        let input: Vec<f32> = (0..256)
+            .map(|index| ((index as i32 % 19) - 9) as f32 / 5.0)
+            .collect();
+        let q8k = crate::ops::quant::quantize_row_q8_k(&input);
+        let scalar = vec_dot_iq4_nl_q8k_scalar(&weight, &q8k);
+        let dispatched = vec_dot_iq4_nl_q8k(&weight, &q8k);
+        assert_eq!(
+            dispatched.to_bits(),
+            scalar.to_bits(),
+            "vec_dot_iq4_nl_q8k must fall through to scalar under RMI_SCALAR=1"
         );
     }
 }

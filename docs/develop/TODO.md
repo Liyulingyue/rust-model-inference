@@ -135,9 +135,39 @@ LFM2 / LFM2.5 / Spark / Nemotron-H / Hunyuan / LFM2-MoE），每个 scorer 实�
 - [ ] **讨论：MemoryArena 与 BlockAllocator 组合**
 - [ ] **讨论：GPU 后端架构设计** — Vulkan / wgpu / CUDA 等多后端抽象
 - [ ] **讨论：SIMD 扩展路线** — 当前 AVX2+FMA、NEON。后续可考虑 AVX-512 (高端 CPU)、ARM SVE、AVX-VNNI (int8 dot)
+- [ ] **GLiNER 特性层补齐** — 12 个模型已 byte-exact，但用户可见**特性**未齐。
+      详细清单、划界标准（模型家族特性 vs 框架层）、以及本轮抓到的三个真 bug
+      见 [`GLINER_ADAPT_PLAN.md`](GLINER_ADAPT_PLAN.md) 的「特性层待办」一节。
+      当前半成品：F-1 `choices` 解码侧（prefix 已进 prompt 流但无人消费，**优先收尾**）、
+      F-2 `entity_attributes`（两套机制、零 ground truth）、
+      F-3 长文本 `*_long` chunk+merge、F-4 relation 4 阶段 dedup。
 - [ ] **讨论：两套线程调度统一** — ComputePool vs rayon。暂不统一（LLM 热路径不应轻易改动）
+- [ ] **`kquants.py` 的 Q6_K 批大小估算偏低** — `--format q6_k` 量化 783 MB 的
+      `gliner2.5-base-v1` 跑 15 分钟未完成（Q4_K 同输入 4.5 分钟）。`_Q6K_BYTES_PER_BLOCK`
+      记的是 `16 × 19 × 8 × 3`（每个 256 元素 super-block 的 19-candidate scale 搜索），
+      但 `_q6k_batch` 实际还要为整个 `(n, 256)` batch 分配 F32 输入、副本与打包中间量，
+      远不止这个数，于是 `K_SEARCH_BUDGET_BYTES` 形同虚设、批大到吃满内存。修法是让
+      `_Q6K_BYTES_PER_BLOCK` 覆盖真实的瞬时占用（或直接给 `_q6k_batch` 一个独立的
+      批上限），Q4_K 侧同样值得复核。`q4_k` 与 `q8_0` 两条路径已验证，不受此影响。
 - [ ] **Q8_0 与 Q8_K 量化路径按需量化（消除冗余计算，保留两份 buffer）** — dispatch 按 layer 权重格式，省一次量化 pass
 - [ ] **Qwen3.5：借用权重与 FFN gate/up 输入量化复用的取舍** — 中期重构，不阻塞局部 FFN 优化
+- [ ] **删掉三个纯转发的无参 `new()`** — `CollectSink`（`src/ops/generation_runtime.rs:158`）、
+      `DacState`（`src/models/qwen3/tts/codec/dac.rs:115`）、
+      `Lfm2MoeSampler`（`src/ops/sampling.rs:376`）都是
+      `pub fn new() -> Self { Self::default() }`，而类型本身 `#[derive(Default)]`。
+      同一个零值因此有两个名字，调用点又只用其中一个（`new()` 1/3/2 处，
+      `default()` 0 处），`Default` derive 只是为了给 `new()` 转发而留。
+      `Lfm2MoeSampler` 的动机可见：同族 `LlamaSampler::new(40, 0.95)` 必须带参，
+      于是给无参版本也补了个 `new()` 让两行看起来一致 —— 代价是多一个名字。
+      仓库分工应是 `new(args)` = 真构造函数（可带参、可 `Result`，如 `VulkanContext::new()`），
+      `::default()` = derive-`Default` 类型的零值（`CliOptions` 17 处、
+      `ExportOptions` 16 处均如此），两者不互换。已核实：三者均无
+      `Default::default()` / `..Default::default()` 残留，也没有任何外层结构体
+      依赖它们的 `Default`，故清理是每处 3 行（删 `new()` + 删 derive 里的
+      `Default`）。
+      反向教训见 `docs/develop/OPTIMIZATION.md:215` 记的 `KvFormat::default() = F32`
+      （与 CLI 实际想要的 F16 相反）：**`Default` 的零值不成立时才真该用 `new()`**
+      或干脆不给 `Default`。
 
 ### K-quant multi-row tile（vec_dot_q4k_q8k_avx2 / vec_dot_q6k_q8k_avx2）
 

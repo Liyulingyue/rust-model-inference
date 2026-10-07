@@ -35,6 +35,11 @@ pub struct CliOptions {
     /// label-logit scorer. Pairs with `--model` and `--jev`; the model
     /// itself carries the classifier, so there is no side-car flag.
     pub gliner2_decide: bool,
+    /// Score with a GLiNER2.5 BoundaryExtractor model (span extraction)
+    /// instead of the Decide classification head. Same `--model` /
+    /// `--jev-context` / `--gliner2-schema` surface as `--gliner2-decide`;
+    /// the GGUF variant selects the head, so this flag only picks the mode.
+    pub gliner2_boundary: bool,
     /// `classify_text`-shaped task mapping, e.g.
     /// `{"intent":["a","b"],"aspects":{"labels":[...],"multi_label":true}}`.
     /// Defaults to one task built from `--jev-question` + `--jev-option`.

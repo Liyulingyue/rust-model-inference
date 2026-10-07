@@ -31,6 +31,11 @@ pub use adapters::gliner2::{
     gliner2_schema, load_gliner2_source, parse_schema, run_gliner2_decision, run_gliner2_scoring,
     schema_from_label_sets, schema_from_questions, LabelSet,
 };
+pub use adapters::gliner2_boundary::{
+    extract as run_gliner2_boundary_extract, extract_long as extract_long_document,
+    parse_boundary_schema, run_gliner2_boundary, BoundaryDecodeOptions, BoundarySchemaOptions,
+    LongDocumentOptions,
+};
 pub use clm::{run_clm_decision, run_clm_scoring};
 pub use grouped::{
     build_grouped_payload, build_grouped_system, prepare_jev_grouped_questions,

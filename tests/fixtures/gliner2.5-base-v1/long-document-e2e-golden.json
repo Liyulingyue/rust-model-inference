@@ -1,0 +1,496 @@
+{
+ "cases": [
+  {
+   "name": "default_windows",
+   "text": "Marie Curie worked in Paris for many years. She shared a laboratory with Pierre Curie, her husband. Later the family moved to London, and she continued her research there. In 1903 she was awarded the Nobel Prize in Physics. Her notebooks survive in the archives at the University of Paris.",
+   "threshold": 0.3,
+   "chunk_size": 384,
+   "chunk_overlap": 64,
+   "include_confidence": true,
+   "include_spans": true,
+   "merged": {
+    "entities": {
+     "person": [
+      {
+       "text": "Marie Curie",
+       "confidence": 0.9976667165756226,
+       "start": 0,
+       "end": 11
+      },
+      {
+       "text": "Pierre Curie",
+       "confidence": 0.998166024684906,
+       "start": 73,
+       "end": 85
+      }
+     ],
+     "location": [
+      {
+       "text": "Paris",
+       "confidence": 0.9987700581550598,
+       "start": 22,
+       "end": 27
+      },
+      {
+       "text": "London",
+       "confidence": 0.9993767142295837,
+       "start": 126,
+       "end": 132
+      },
+      {
+       "text": "Paris",
+       "confidence": 0.9919264316558838,
+       "start": 283,
+       "end": 288
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "no_flags",
+   "text": "Marie Curie worked in Paris for many years. She shared a laboratory with Pierre Curie, her husband. Later the family moved to London, and she continued her research there. In 1903 she was awarded the Nobel Prize in Physics. Her notebooks survive in the archives at the University of Paris.",
+   "threshold": 0.3,
+   "chunk_size": 384,
+   "chunk_overlap": 64,
+   "include_confidence": false,
+   "include_spans": false,
+   "merged": {
+    "entities": {
+     "person": [
+      "Marie Curie",
+      "Pierre Curie"
+     ],
+     "location": [
+      "Paris",
+      "London",
+      "Paris"
+     ]
+    }
+   }
+  },
+  {
+   "name": "spans_only",
+   "text": "Marie Curie worked in Paris for many years. She shared a laboratory with Pierre Curie, her husband. Later the family moved to London, and she continued her research there. In 1903 she was awarded the Nobel Prize in Physics. Her notebooks survive in the archives at the University of Paris.",
+   "threshold": 0.3,
+   "chunk_size": 384,
+   "chunk_overlap": 64,
+   "include_confidence": false,
+   "include_spans": true,
+   "merged": {
+    "entities": {
+     "person": [
+      {
+       "text": "Marie Curie",
+       "start": 0,
+       "end": 11
+      },
+      {
+       "text": "Pierre Curie",
+       "start": 73,
+       "end": 85
+      }
+     ],
+     "location": [
+      {
+       "text": "Paris",
+       "start": 22,
+       "end": 27
+      },
+      {
+       "text": "London",
+       "start": 126,
+       "end": 132
+      },
+      {
+       "text": "Paris",
+       "start": 283,
+       "end": 288
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "confidence_only",
+   "text": "Marie Curie worked in Paris for many years. She shared a laboratory with Pierre Curie, her husband. Later the family moved to London, and she continued her research there. In 1903 she was awarded the Nobel Prize in Physics. Her notebooks survive in the archives at the University of Paris.",
+   "threshold": 0.3,
+   "chunk_size": 384,
+   "chunk_overlap": 64,
+   "include_confidence": true,
+   "include_spans": false,
+   "merged": {
+    "entities": {
+     "person": [
+      {
+       "text": "Marie Curie",
+       "confidence": 0.9976667165756226
+      },
+      {
+       "text": "Pierre Curie",
+       "confidence": 0.998166024684906
+      }
+     ],
+     "location": [
+      {
+       "text": "Paris",
+       "confidence": 0.9987700581550598
+      },
+      {
+       "text": "London",
+       "confidence": 0.9993767142295837
+      },
+      {
+       "text": "Paris",
+       "confidence": 0.9919264316558838
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "disjoint_windows",
+   "text": "Marie Curie worked in Paris for many years. She shared a laboratory with Pierre Curie, her husband. Later the family moved to London, and she continued her research there. In 1903 she was awarded the Nobel Prize in Physics. Her notebooks survive in the archives at the University of Paris.",
+   "threshold": 0.3,
+   "chunk_size": 16,
+   "chunk_overlap": 0,
+   "include_confidence": true,
+   "include_spans": true,
+   "merged": {
+    "entities": {
+     "person": [
+      {
+       "text": "Marie Curie",
+       "confidence": 0.9989340901374817,
+       "start": 0,
+       "end": 11
+      },
+      {
+       "text": "Pierre Curie",
+       "confidence": 0.9941205382347107,
+       "start": 73,
+       "end": 85
+      },
+      {
+       "text": "her husband",
+       "confidence": 0.5981250405311584,
+       "start": 87,
+       "end": 98
+      },
+      {
+       "text": "she",
+       "confidence": 0.9162032008171082,
+       "start": 180,
+       "end": 183
+      }
+     ],
+     "location": [
+      {
+       "text": "Paris",
+       "confidence": 0.9990630745887756,
+       "start": 22,
+       "end": 27
+      },
+      {
+       "text": "London",
+       "confidence": 0.9986311793327332,
+       "start": 126,
+       "end": 132
+      },
+      {
+       "text": "University of Paris",
+       "confidence": 0.9147382378578186,
+       "start": 269,
+       "end": 288
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "heavy_overlap",
+   "text": "Marie Curie worked in Paris for many years. She shared a laboratory with Pierre Curie, her husband. Later the family moved to London, and she continued her research there. In 1903 she was awarded the Nobel Prize in Physics. Her notebooks survive in the archives at the University of Paris.",
+   "threshold": 0.3,
+   "chunk_size": 8,
+   "chunk_overlap": 4,
+   "include_confidence": true,
+   "include_spans": true,
+   "merged": {
+    "entities": {
+     "person": [
+      {
+       "text": "Marie Curie",
+       "confidence": 0.9983721375465393,
+       "start": 0,
+       "end": 11
+      },
+      {
+       "text": "Pierre Curie",
+       "confidence": 0.9937928915023804,
+       "start": 73,
+       "end": 85
+      },
+      {
+       "text": "her husband",
+       "confidence": 0.860211968421936,
+       "start": 87,
+       "end": 98
+      },
+      {
+       "text": "family",
+       "confidence": 0.9495541453361511,
+       "start": 110,
+       "end": 116
+      },
+      {
+       "text": "she",
+       "confidence": 0.975437343120575,
+       "start": 138,
+       "end": 141
+      },
+      {
+       "text": "she",
+       "confidence": 0.9463738799095154,
+       "start": 180,
+       "end": 183
+      }
+     ],
+     "location": [
+      {
+       "text": "Paris",
+       "confidence": 0.9988442659378052,
+       "start": 22,
+       "end": 27
+      },
+      {
+       "text": "London",
+       "confidence": 0.9993428587913513,
+       "start": 126,
+       "end": 132
+      },
+      {
+       "text": "archives",
+       "confidence": 0.904495894908905,
+       "start": 253,
+       "end": 261
+      },
+      {
+       "text": "University of Paris",
+       "confidence": 0.9405701160430908,
+       "start": 269,
+       "end": 288
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "single_chunk",
+   "text": "Marie Curie worked in Paris.",
+   "threshold": 0.3,
+   "chunk_size": 384,
+   "chunk_overlap": 64,
+   "include_confidence": true,
+   "include_spans": true,
+   "merged": {
+    "entities": {
+     "person": [
+      {
+       "text": "Marie Curie",
+       "confidence": 0.9981659054756165,
+       "start": 0,
+       "end": 11
+      }
+     ],
+     "location": [
+      {
+       "text": "Paris",
+       "confidence": 0.9990484118461609,
+       "start": 22,
+       "end": 27
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "empty_document",
+   "text": "",
+   "threshold": 0.3,
+   "chunk_size": 384,
+   "chunk_overlap": 64,
+   "include_confidence": true,
+   "include_spans": true,
+   "merged": {
+    "entities": {
+     "person": [],
+     "location": []
+    }
+   }
+  },
+  {
+   "name": "scalar_entity_labels",
+   "text": "Marie Curie worked in Paris for many years. She shared a laboratory with Pierre Curie, her husband. Later the family moved to London, and she continued her research there. In 1903 she was awarded the Nobel Prize in Physics. Her notebooks survive in the archives at the University of Paris.",
+   "threshold": 0.3,
+   "chunk_size": 24,
+   "chunk_overlap": 8,
+   "include_confidence": true,
+   "include_spans": true,
+   "merged": {
+    "entities": {
+     "person": {
+      "text": "Marie Curie",
+      "confidence": 0.9988492727279663,
+      "start": 0,
+      "end": 11
+     },
+     "location": {
+      "text": "Paris",
+      "confidence": 0.9990430474281311,
+      "start": 22,
+      "end": 27
+     }
+    }
+   }
+  },
+  {
+   "name": "choices_beside_spans",
+   "text": "This paper studies physics in some detail. The physics of the reaction is described at length. Later sections revisit the physics measurement again. A closing note on physics closes the paper.",
+   "threshold": 0.3,
+   "chunk_size": 32,
+   "chunk_overlap": 8,
+   "include_confidence": true,
+   "include_spans": true,
+   "merged": {
+    "paper": [
+     {
+      "topic": {
+       "text": "physics",
+       "confidence": 0.9985003471374512
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "relations",
+   "text": "Marie Curie worked in Paris for many years. She shared a laboratory with Pierre Curie, her husband. Later the family moved to London, and she continued her research there. In 1903 she was awarded the Nobel Prize in Physics. Her notebooks survive in the archives at the University of Paris.",
+   "threshold": 0.3,
+   "chunk_size": 32,
+   "chunk_overlap": 8,
+   "include_confidence": true,
+   "include_spans": true,
+   "merged": {
+    "entities": {
+     "person": [
+      {
+       "text": "Marie Curie",
+       "confidence": 0.9984173774719238,
+       "start": 0,
+       "end": 11
+      },
+      {
+       "text": "Pierre Curie",
+       "confidence": 0.997885525226593,
+       "start": 73,
+       "end": 85
+      },
+      {
+       "text": "she",
+       "confidence": 0.847238302230835,
+       "start": 138,
+       "end": 141
+      },
+      {
+       "text": "she",
+       "confidence": 0.698279857635498,
+       "start": 180,
+       "end": 183
+      }
+     ],
+     "location": [
+      {
+       "text": "Paris",
+       "confidence": 0.9997406601905823,
+       "start": 22,
+       "end": 27
+      },
+      {
+       "text": "London",
+       "confidence": 0.9998520612716675,
+       "start": 126,
+       "end": 132
+      },
+      {
+       "text": "Paris",
+       "confidence": 0.7880293130874634,
+       "start": 283,
+       "end": 288
+      }
+     ]
+    },
+    "relation_extraction": {
+     "was_in": [
+      {
+       "head": {
+        "text": "Marie Curie",
+        "confidence": 0.9867119789123535,
+        "start": 0,
+        "end": 11
+       },
+       "tail": {
+        "text": "Paris",
+        "confidence": 0.9867119789123535,
+        "start": 22,
+        "end": 27
+       }
+      },
+      {
+       "head": {
+        "text": "notebooks",
+        "confidence": 0.7712419033050537,
+        "start": 228,
+        "end": 237
+       },
+       "tail": {
+        "text": "University of Paris",
+        "confidence": 0.7712419033050537,
+        "start": 269,
+        "end": 288
+       }
+      },
+      {
+       "head": {
+        "text": "archives",
+        "confidence": 0.6236969232559204,
+        "start": 253,
+        "end": 261
+       },
+       "tail": {
+        "text": "University of Paris",
+        "confidence": 0.6236969232559204,
+        "start": 269,
+        "end": 288
+       }
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "classifications",
+   "text": "This paper is clearly about physics. It studies radioactivity in some detail. The experiments described here were repeated many times.",
+   "threshold": 0.3,
+   "chunk_size": 16,
+   "chunk_overlap": 4,
+   "include_confidence": true,
+   "include_spans": true,
+   "merged": {
+    "topic": {
+     "label": "physics",
+     "confidence": 0.9999781847000122
+    }
+   }
+  }
+ ]
+}
