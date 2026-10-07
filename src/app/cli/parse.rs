@@ -116,6 +116,21 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                 );
                 i += 1;
             }
+            "--width" => options.width = Some(required_usize_value(args, &mut i, "--width")?),
+            "--height" => options.height = Some(required_usize_value(args, &mut i, "--height")?),
+            "--cfg" => {
+                options.cfg = Some(
+                    required_string_value(args, &mut i, "--cfg")?
+                        .parse()
+                        .map_err(|error| format!("Invalid --cfg value: {error}"))?,
+                );
+            }
+            "--noise" => options.noise = Some(required_path_value(args, &mut i, "--noise")?),
+            "--reference" => {
+                options
+                    .references
+                    .push(required_path_value(args, &mut i, "--reference")?)
+            }
             "--resolution" | "--size" => {
                 let flag = args[i].clone();
                 let value = args

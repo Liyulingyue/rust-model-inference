@@ -1,6 +1,6 @@
 # Mage-Flow 原生 CPU 适配与标量对齐
 
-专用入口为 `cargo run --profile release-fast --bin mage-flow -- ...`。支持 Microsoft 的 Mage-Flow-Base、Mage-Flow、Mage-Flow-Turbo、Mage-Flow-Edit-Base、Mage-Flow-Edit 和 Mage-Flow-Edit-Turbo。主 CLI 和服务端尚未接入。
+生成和编辑使用主 CLI `cargo run --profile release-fast --bin rust-model-inference -- ...`，按 GGUF 的 `general.architecture=mage_flow` 和 `mage_flow.variant` 自动选择。支持 Microsoft 的 Mage-Flow-Base、Mage-Flow、Mage-Flow-Turbo、Mage-Flow-Edit-Base、Mage-Flow-Edit 和 Mage-Flow-Edit-Turbo。已接入主 CLI 和现有 app/diffusion；服务端尚无图像生成接口。
 
 ## 精度契约
 
@@ -47,29 +47,30 @@ Qwen3-VL 文本/vision GGUF 使用 llama.cpp `11fe02151f79c41d0d4af7da708755d73b
 
 ```sh
 RUSTFLAGS='-C no-vectorize-loops -C no-vectorize-slp' \
-  cargo build --profile release-fast --features parity-trace --bin mage-flow
+  cargo build --profile release-fast --features parity-trace \
+    --bin rust-model-inference --example mage_flow_trace
 
-RMI_SCALAR=1 target/release-fast/mage-flow generate \
+RMI_SCALAR=1 target/release-fast/rust-model-inference \
   --model models/mage-flow/mage-flow-turbo-dit-BF16.gguf \
   --vae models/mage-flow/mage-vae-BF16.gguf \
   --text-encoder models/mage-flow/qwen3vl-text-BF16.gguf \
   --prompt '蓝色的猫。' --height 16 --width 16 \
-  --input target/mage-parity/latent.f32 --steps 4 --cfg 1 \
-  --threads 8 --output generated.png
+  --noise target/mage-parity/latent.f32 --steps 4 --cfg 1 \
+  --threads 8 --out generated.png
 
-RMI_SCALAR=1 target/release-fast/mage-flow edit \
+RMI_SCALAR=1 target/release-fast/rust-model-inference \
   --model models/mage-flow/mage-flow-edit-turbo-dit-BF16.gguf \
   --vae models/mage-flow/mage-vae-BF16.gguf \
   --text-encoder models/mage-flow/qwen3vl-text-BF16.gguf \
-  --vision models/mage-flow/vision-F32.gguf \
-  --reference input.png --prompt '改成蓝色。' \
-  --height 16 --width 16 --input target/mage-parity/latent.f32 \
-  --steps 1 --cfg 1 --threads 8 --output edited.png
+  --mmproj models/mage-flow/vision-F32.gguf \
+  --image input.png --prompt '改成蓝色。' \
+  --height 16 --width 16 --noise target/mage-parity/latent.f32 \
+  --steps 1 --cfg 1 --threads 8 --out edited.png
 ```
 
-默认图像为 1024×1024；Turbo 默认 4 步/CFG 1，Base 30 步/CFG 5，Flow/Edit 20 步/CFG 5。这些默认分辨率和完整步数尚无端到端精度记录。上面的小尺寸命令是实际验证规模，不能代表大分辨率的性能或成图质量。`--reference` 可重复三次；每张参考的 VAE latent 在采样时保持不变。`--input` 是 target token-major F32 初始噪声；不提供时使用 Rust 的 seed/Box–Muller，未对齐官方 GaussianShading RNG。
+默认图像为 1024×1024；Turbo 默认 4 步/CFG 1，Base 30 步/CFG 5，Flow/Edit 20 步/CFG 5。这些默认分辨率和完整步数尚无端到端精度记录。上面的小尺寸命令是实际验证规模，不能代表大分辨率的性能或成图质量。`--image` 为第一张参考图，`--reference` 可重复追加，合计最多三张；每张参考的 VAE latent 在采样时保持不变。`--noise` 是 target token-major F32 初始噪声；不提供时使用 Rust 的 seed/Box–Muller，未对齐官方 GaussianShading RNG。
 
-原始组件入口：`dit`、`sample`、`vae-encode`、`vae-decode`、`vision`、`text`。`dit/sample --shapes` 是 `[target, ref1, ...]` 的 latent 高宽，如 `1x2,2x1,1x1,1x1`；DiT 图像/文本分别为 token-major 128/2560 维。VAE 输入输出是 CHW。Vision 输入是已归一化 HWC RGB，宽高为 32 的倍数且每边不超过 512；`--deepstack` 可保存三层特征。Text 的 `--input`、`--deepstack`、`--reference-count` 可直接载入固定参考特征。输出原子发布且禁止覆盖。
+仅用于对齐的原始组件 example（`target/release-fast/examples/mage_flow_trace`）：`dit`、`sample`、`vae-encode`、`vae-decode`、`vision`、`text`。`dit/sample --shapes` 是 `[target, ref1, ...]` 的 latent 高宽，如 `1x2,2x1,1x1,1x1`；DiT 图像/文本分别为 token-major 128/2560 维。VAE 输入输出是 CHW。Vision 输入是已归一化 HWC RGB，宽高为 32 的倍数且每边不超过 512；`--deepstack` 可保存三层特征。Text 的 `--input`、`--deepstack`、`--reference-count` 可直接载入固定参考特征。输出原子发布且禁止覆盖。
 
 ## 复现标量比较
 
@@ -87,7 +88,7 @@ for name,n,mod,scale in [('latent',128,23,10),('pixels',3*16*16,41,20),
 PY
 
 RMI_SCALAR=1 RMI_PARITY_TRACE=target/mage-parity/check-rust.jsonl \
-  target/release-fast/mage-flow dit \
+  target/release-fast/examples/mage_flow_trace dit \
   --model models/mage-flow/mage-flow-turbo-dit-BF16.gguf \
   --input target/mage-parity/packed.f32 --context target/mage-parity/context.f32 \
   --shapes 1x2,2x1,1x1,1x1 --sigma 0.375 --threads 8 \
@@ -104,4 +105,6 @@ RMI_SCALAR=1 RMI_PARITY_TRACE=target/mage-parity/check-rust.jsonl \
 
 每次使用新的 trace 名和 Oracle 输出目录。其他组件使用同名 `trace.py` 子命令：VAE 指定 `--height/--width`；vision 使用已归一化输入；text 使用 `--prompt`，参考模式另传 `--references`、`--reference-embeddings` 和 `--reference-deepstack`。采样用 `sample --steps N --cfg N`，CFG > 1 还需 `--negative-context`。
 
-已验证结果以 [verification.json](verification.json) 为准，包括六个真实 DiT、共享 VAE/vision/text、固定参考特征、四步采样与最小生成。实际参考图片到 VL fast processor 的 resize/归一化尚未逐位验证；编辑 PNG 当前是入口 smoke。GPU、默认大图、SIMD/FMA 和其他量化不在精度结论内。
+主 CLI 接入的工程检查与历史逐位对齐分开记录在 [verification.json](verification.json) 的 `cli_integration`。用户确认远端已关机，本次尚未上传新源码或复验主 CLI 的真实权重输出；历史记录不作为这次接入的新数值证据。
+
+历史已验证结果以 [verification.json](verification.json) 为准，包括六个真实 DiT、共享 VAE/vision/text、固定参考特征、四步采样与最小生成。实际参考图片到 VL fast processor 的 resize/归一化尚未逐位验证；编辑 PNG 当前是入口 smoke。GPU、默认大图、SIMD/FMA 和其他量化不在精度结论内。

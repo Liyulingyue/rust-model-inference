@@ -63,7 +63,6 @@
 //! identical** for any `(weights, x)` pair. Tested in
 //! `forward_avx2.rs`'s `bitlinear_avx2_matches_scalar` test.
 
-
 use crate::ops::kernel::i2_s::QK_I2_S;
 
 /// Dequant one I2_S block (32 bytes → 128 int8 ternary values).

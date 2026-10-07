@@ -4,6 +4,14 @@ use super::options::{
 use super::types::{normalize_tts_language, CliOptions};
 
 pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
+    if options.width.is_some()
+        || options.height.is_some()
+        || options.cfg.is_some()
+        || options.noise.is_some()
+        || !options.references.is_empty()
+    {
+        return Err("--width/--height/--cfg/--noise/--reference require a Mage-Flow model".into());
+    }
     if options.qwen_latent_width.is_some_and(|value| value == 0)
         || options.qwen_latent_height.is_some_and(|value| value == 0)
     {
