@@ -84,10 +84,6 @@ path = "src/bin/dump_emb.rs"
 name = "ggufrs"
 path = "src/bin/ggufrs.rs"
 
-[[bin]]
-name = "longcat-image-edit"
-path = "src/bin/longcat-image-edit.rs"
-
 # Vulkan example binaries are feature-gated: each starts with
 # `#![cfg(feature = "vulkan")]`, so without the feature the file is
 # empty and `cargo test --examples` complains "main function not found".

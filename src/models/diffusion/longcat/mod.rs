@@ -1,6 +1,31 @@
-//! LongCat latent layout and FlowMatch Euler sampling for Edit and Edit Turbo.
+//! Meituan LongCat-Image-Edit / Edit-Turbo image editing port.
+//!
+//! Reference: `references/stable-diffusion.cpp` Flux-style transformer at
+//! commit `3f8527a`, which is the same checkpoint family the pinned scalar
+//! Oracle in `tools/oracle/longcat` replays.
+//!
+//! Layout:
+//! - [`dit`]     -- the Q8_0 Flux double/single block transformer
+//! - [`text`]    -- Qwen2.5-VL-7B text/vision encoder over safetensors
+//! - [`vae`]     -- HF-name to GGUF-name aliasing over the shared Flux VAE
+//!
+//! This module owns the latent packing and the FlowMatch Euler schedule, and
+//! re-exports the transformer surface so callers can use
+//! `longcat::{LongCatKind, LongCatTransformer}`.
 
-use super::longcat::{LongCatKind, LongCatTransformer, IMAGE_WIDTH, TEXT_WIDTH};
+pub mod dit;
+pub mod text;
+pub mod vae;
+
+pub use dit::{LongCatTransformer, HIDDEN, IMAGE_WIDTH, TEXT_WIDTH};
+
+/// Which of the two published checkpoints is loaded. The two differ in their
+/// Flux schedule, so the choice is not just a weight swap: see [`sigmas`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LongCatKind {
+    Edit,
+    EditTurbo,
+}
 
 const LATENT_CHANNELS: usize = 16;
 

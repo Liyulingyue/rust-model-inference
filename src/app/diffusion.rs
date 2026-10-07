@@ -1,17 +1,16 @@
-use crate::app::cli::ZImageCliOptions;
+use crate::app::cli::{LongCatCliOptions, ZImageCliOptions};
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
 use crate::format::ggufrs::{open_model_source, ComponentRole};
-use crate::models::diffusion::longcat::{LongCatKind, LongCatTransformer};
-use crate::models::diffusion::longcat_pipeline::{
-    denoise as denoise_longcat, pack_latents, unpack_latents,
-};
-use crate::models::diffusion::longcat_text::{
+use crate::models::diffusion::longcat::text::{
     encode_prompt as encode_longcat_prompt, load_tokenizer as load_longcat_tokenizer,
     LongCatTextSource,
 };
-use crate::models::diffusion::longcat_vae::LongCatVaeSource;
+use crate::models::diffusion::longcat::vae::LongCatVaeSource;
+use crate::models::diffusion::longcat::{
+    denoise as denoise_longcat, pack_latents, unpack_latents, LongCatKind, LongCatTransformer,
+};
 use crate::models::diffusion::pig;
 use crate::models::diffusion::qwen_image_2_1::{
     config_from_source, prepare_dit_inputs, validate_dit, QwenImage21Dit,
@@ -52,18 +51,30 @@ fn trace_longcat(name: &str, values: &[f32], shape: &[usize]) -> Result<(), Stri
 }
 
 pub fn run_longcat_image_edit(
-    model_path: &Path,
-    component_root: &Path,
-    input_path: &Path,
-    output_path: &Path,
-    instruction: &str,
-    kind: LongCatKind,
-    side: usize,
-    steps: usize,
-    guidance: f32,
-    seed: u64,
+    options: &LongCatCliOptions,
     threads: usize,
 ) -> Result<(), String> {
+    let LongCatCliOptions {
+        kind,
+        model: model_path,
+        components: component_root,
+        input: input_path,
+        out: output_path,
+        instruction,
+        side,
+        steps,
+        guidance,
+        seed,
+        overwrite,
+    } = options;
+    let (kind, side, steps, guidance, seed) = (*kind, *side, *steps, *guidance, *seed);
+    let (model_path, component_root, input_path, output_path, instruction) = (
+        model_path.as_path(),
+        component_root.as_path(),
+        input_path.as_path(),
+        output_path.as_path(),
+        instruction.as_str(),
+    );
     if instruction.is_empty()
         || side == 0
         || side % 16 != 0
@@ -187,7 +198,7 @@ pub fn run_longcat_image_edit(
     eprintln!("[longcat] denoising complete");
     let latent = unpack_latents(&latent, side / 8, side / 8)?;
     trace_longcat("denoised", &latent, &[side / 8, side / 8, 16, 1])?;
-    write_png_atomically(output_path, &vae.decode_rgb(&latent, side / 8)?, true)
+    write_png_atomically(output_path, &vae.decode_rgb(&latent, side / 8)?, *overwrite)
 }
 
 pub fn run_pig_image(

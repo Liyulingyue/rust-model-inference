@@ -131,6 +131,24 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                     .references
                     .push(required_path_value(args, &mut i, "--reference")?)
             }
+            // LongCat Image Edit. `--components` points at a directory of
+            // safetensors rather than a GGUF, so it has no --text-encoder
+            // equivalent.
+            "--kind" => {
+                options.longcat_kind = Some(required_string_value(args, &mut i, "--kind")?)
+            }
+            "--components" => {
+                options.components = Some(required_path_value(args, &mut i, "--components")?)
+            }
+            "--input" => options.input = Some(required_path_value(args, &mut i, "--input")?),
+            "--side" => options.side = Some(required_usize_value(args, &mut i, "--side")?),
+            "--guidance" => {
+                options.guidance = Some(
+                    required_string_value(args, &mut i, "--guidance")?
+                        .parse()
+                        .map_err(|error| format!("Invalid --guidance value: {error}"))?,
+                )
+            }
             "--resolution" | "--size" => {
                 let flag = args[i].clone();
                 let value = args

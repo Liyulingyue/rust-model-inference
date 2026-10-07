@@ -7,6 +7,7 @@
 //! summation order, so results are no longer bitwise identical to the Oracle.
 
 use crate::core::tensor::{load_f32_tensor, GGMLType, MetaValue, TensorSource};
+use super::LongCatKind;
 use crate::ops;
 use rayon::prelude::*;
 
@@ -15,12 +16,6 @@ pub const TEXT_WIDTH: usize = 3584;
 pub const IMAGE_WIDTH: usize = 64;
 const HEAD_DIM: usize = 128;
 const MLP: usize = 12288;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LongCatKind {
-    Edit,
-    EditTurbo,
-}
 
 fn tensor<'a>(
     source: &'a dyn TensorSource,

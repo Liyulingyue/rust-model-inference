@@ -1,7 +1,88 @@
 use super::types::{
     CliOptions, DreamXCliOptions, DreamXOptions, DreamXRefinerOptions, EmbeddingOutput,
-    PlanningMode, QwenDriveCliOptions, QwenDriveHead, YuE2CliOptions, ZImageCliOptions,
+    LongCatCliOptions, PlanningMode, QwenDriveCliOptions, QwenDriveHead, YuE2CliOptions,
+    ZImageCliOptions,
 };
+use crate::models::diffusion::longcat::LongCatKind;
+
+/// Parse the LongCat Image Edit flags, or `None` when the invocation is not
+/// for LongCat. Selected by `--kind` / `--components`, which no other model
+/// uses, so the discriminator never collides.
+pub fn longcat_cli_options(options: &CliOptions) -> Result<Option<LongCatCliOptions>, String> {
+    let kind = match options.longcat_kind.as_deref() {
+        None => {
+            for (present, flag) in [
+                (options.components.is_some(), "--components"),
+                (options.input.is_some(), "--input"),
+                (options.side.is_some(), "--side"),
+                (options.guidance.is_some(), "--guidance"),
+            ] {
+                if present {
+                    return Err(format!("{flag} requires --kind edit|turbo"));
+                }
+            }
+            return Ok(None);
+        }
+        Some("edit") => LongCatKind::Edit,
+        Some("turbo") => LongCatKind::EditTurbo,
+        Some(other) => return Err(format!("Invalid --kind {other}: expected edit or turbo")),
+    };
+
+    let model = options.model.clone();
+    if model.as_os_str().is_empty() {
+        return Err("LongCat requires --model <transformer.gguf>".into());
+    }
+    let components = options
+        .components
+        .clone()
+        .ok_or("LongCat requires --components <dir>")?;
+    let input = options
+        .input
+        .clone()
+        .ok_or("LongCat requires --input <image.png>")?;
+    let out = options.out.clone().ok_or("LongCat requires --out <image.png>")?;
+    let instruction = options
+        .instruction
+        .clone()
+        .ok_or("LongCat requires --instruction <text>")?;
+    if instruction.trim().is_empty() {
+        return Err("LongCat --instruction must not be empty".into());
+    }
+    let side = options.side.unwrap_or(1024);
+    if side == 0 || side % 16 != 0 {
+        return Err(format!("LongCat --side must be a positive multiple of 16, got {side}"));
+    }
+    // The two checkpoints ship different Flux schedules, so the defaults are
+    // per-kind rather than shared.
+    let steps = options
+        .steps
+        .unwrap_or(if kind == LongCatKind::Edit { 50 } else { 8 });
+    if steps == 0 {
+        return Err("LongCat --steps must be positive".into());
+    }
+    let guidance = options
+        .guidance
+        .unwrap_or(if kind == LongCatKind::Edit { 4.5 } else { 1.0 });
+    if !(guidance.is_finite() && guidance >= 0.0) {
+        return Err(format!("LongCat --guidance must be finite and >= 0, got {guidance}"));
+    }
+    let seed = u64::try_from(options.seed.unwrap_or(42))
+        .map_err(|_| "LongCat --seed must be non-negative".to_string())?;
+
+    Ok(Some(LongCatCliOptions {
+        kind,
+        model,
+        components,
+        input,
+        out,
+        instruction,
+        side,
+        steps,
+        guidance,
+        seed,
+        overwrite: options.overwrite,
+    }))
+}
 
 pub fn yue2_cli_options(options: &CliOptions) -> Result<Option<YuE2CliOptions>, String> {
     if !options.yue2 {
