@@ -17,7 +17,7 @@
 //!    rotary endpoint embeddings), PairScorer (start/end marginals +
 //!    endpoint compat + inside weight), relation_scorer, record_decoder,
 //!    count_head, null_projection. Those are bundled in the GGUF and
-//!    will be implemented in subsequent commits (glinerTODO.md).
+//!    will be implemented in subsequent commits (GLINER_ADAPT_PLAN.md).
 
 use rust_model_inference::core::loader::GGUFLoader;
 use rust_model_inference::core::tensor::TensorSource;

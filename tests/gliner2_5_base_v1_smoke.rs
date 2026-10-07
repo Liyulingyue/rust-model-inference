@@ -19,7 +19,7 @@
 //!
 //! Real byte-exact parity (boundary detection + relation scoring + record
 //! decoding) is out of scope until a Rust BoundaryExtractor forward is
-//! written. See `glinerTODO.md`.
+//! written. See `GLINER_ADAPT_PLAN.md`.
 
 use rust_model_inference::core::loader::GGUFLoader;
 

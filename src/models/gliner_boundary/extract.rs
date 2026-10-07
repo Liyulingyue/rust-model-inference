@@ -22,7 +22,7 @@
 //! Scope: extractive (`[E]`) schemas only. Classification groups (`[C]`) are
 //! scored by the shared `classifier.0`/`classifier.3` head, and relations
 //! (`[R]`) by `relation_scorer`; both are separate heads and are not wired here
-//! (see `glinerTODO.md` 5.2.3 / 5.2.4b). Passing a schema whose fields do not
+//! (see `GLINER_ADAPT_PLAN.md` 5.2.3 / 5.2.4b). Passing a schema whose fields do not
 //! all come from one group would silently mis-route, so the marker is chosen by
 //! the caller rather than inferred.
 

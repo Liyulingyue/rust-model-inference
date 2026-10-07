@@ -17,7 +17,7 @@
 //! See ``target/gliner2-oracle/gliner2/models/boundary/`` for the
 //! reference (8149 lines of Python). The current commit implements the
 //! encoder + boundary state encoding pieces; the proposer / pair scorer /
-//! relation scorer / record decoder are tracked in ``glinerTODO.md`` and
+//! relation scorer / record decoder are tracked in ``GLINER_ADAPT_PLAN.md`` and
 //! will follow in subsequent commits.
 
 pub mod candidate_encoder;

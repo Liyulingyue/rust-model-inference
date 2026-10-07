@@ -135,7 +135,7 @@ LFM2 / LFM2.5 / Spark / Nemotron-H / Hunyuan / LFM2-MoE），每个 scorer 实�
 - [ ] **讨论：SIMD 扩展路线** — 当前 AVX2+FMA、NEON。后续可考虑 AVX-512 (高端 CPU)、ARM SVE、AVX-VNNI (int8 dot)
 - [ ] **GLiNER 特性层补齐** — 12 个模型已 byte-exact，但用户可见**特性**未齐。
       详细清单、划界标准（模型家族特性 vs 框架层）、以及本轮抓到的三个真 bug
-      见 [`glinerTODO.md`](../../glinerTODO.md) 的「特性层待办」一节。
+      见 [`GLINER_ADAPT_PLAN.md`](GLINER_ADAPT_PLAN.md) 的「特性层待办」一节。
       当前半成品：F-1 `choices` 解码侧（prefix 已进 prompt 流但无人消费，**优先收尾**）、
       F-2 `entity_attributes`（两套机制、零 ground truth）、
       F-3 长文本 `*_long` chunk+merge、F-4 relation 4 阶段 dedup。

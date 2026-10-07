@@ -36,7 +36,7 @@
 //! (`BoundaryExtractor.score_explicit_spans`). The document-level inference
 //! path is `DocumentCandidatePool` + `SharedPoolScorer` whenever
 //! `candidate_pool = "shared"` (base-v1's setting), which is tracked
-//! separately in `glinerTODO.md`.
+//! separately in `GLINER_ADAPT_PLAN.md`.
 
 use crate::core::tensor::TensorSource;
 use crate::models::gliner_boundary::tensor_util::{apply_linear_full, load_vec, load_weight};

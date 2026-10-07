@@ -28,7 +28,7 @@
 //!  - the document-level candidate path. `gliner2.5-base-v1` sets
 //!    `candidate_pool = "shared"`, so ordinary inference goes through
 //!    `DocumentCandidatePool` + `SharedPoolScorer` (`boundary/pool.py`)
-//!    rather than this pair scorer. See `glinerTODO.md`.
+//!    rather than this pair scorer. See `GLINER_ADAPT_PLAN.md`.
 
 use super::loader::BoundaryModel;
 use super::pair_scorer::PairScoreInputs;

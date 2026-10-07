@@ -18,7 +18,7 @@
 //! This is the document-level half of record-mode `choices`. The other half —
 //! falling back to the schema-prefix enum tokens when the document mentions no
 //! choice — is a separate stage and is **not** covered here; see
-//! `glinerTODO.md` F-1.
+//! `GLINER_ADAPT_PLAN.md` F-1.
 
 use rust_model_inference::models::gliner_boundary::structure::record_local_choice_mentions;
 

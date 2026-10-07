@@ -19,7 +19,7 @@
 //! three-test version of this file took 43s wall against ~4s for the same work
 //! serialized). Keeping the heavy work in a single test avoids making the
 //! suite pay for that; the underlying contention is a pre-existing engine
-//! characteristic, noted in `glinerTODO.md`.
+//! characteristic, noted in `GLINER_ADAPT_PLAN.md`.
 
 use rust_model_inference::core::loader::GGUFLoader;
 use rust_model_inference::core::tensor::TensorSource;

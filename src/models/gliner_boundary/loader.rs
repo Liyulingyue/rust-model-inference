@@ -14,7 +14,7 @@
 //!   output projection, layer norm, attention blocks, refinement blocks.
 //! - relation_scorer.*: loaded (gated on `enable_relations`)
 //! - record_decoder.*: bundled but not loaded yet
-//!   (Phase 7 in ``glinerTODO.md``).
+//!   (Phase 7 in ``GLINER_ADAPT_PLAN.md``).
 //!
 //! The encoder side of the GGUF is byte-compatible with Decide's
 //! ``crate::models::gliner::weights::load_weights`` apart from the
