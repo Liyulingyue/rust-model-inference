@@ -686,4 +686,56 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
         }
         self.step_with_tokens(token_ids, positions)
     }
+
+    /// Prefill a prompt, then classify the last non-pad token via the
+    /// model's `cls.output.weight` head. Returns one logit per class
+    /// (no softmax — callers apply softmax themselves, mirroring
+    /// `Qwen3Model::score_logits`). Errors if the head isn't loaded.
+    ///
+    /// The session must have `is_classifier()` true. The caller is
+    /// responsible for building mrope `positions`; this method does
+    /// NOT reset KV state, so reuse the session for at most one call or
+    /// recreate it between questions.
+    pub fn forward_classify(
+        &mut self,
+        token_ids: &[u32],
+        positions: &[[usize; 4]],
+    ) -> Result<Vec<f32>, String> {
+        if !self.model.trunk().is_classifier() {
+            return Err("forward_classify requires cls.output.weight".into());
+        }
+        if token_ids.is_empty() {
+            return Err("Qwen3.5 classify prompt must contain at least one token".into());
+        }
+        // Drive the full forward pass (this also produces the lm_head
+        // logits, which we discard — for the 0.8B NLI head the matmul
+        // is a 1024 × 1024 × 248320 step; cheap enough to throw away).
+        let _logits = self.step_with_tokens(token_ids, positions)?;
+        // The classification head expects the **last non-pad token**'s
+        // hidden state (HF `modeling_openjev.py` does the same thing via
+        // `attention_mask.sum(1) - 1`). `Qwen35Session::last_hidden(N)`
+        // returns the FIRST N rows of `normed_buf`, which is wrong here —
+        // for a fixed NLI prompt the first row is dominated by the
+        // shared `Premise:` prefix and is essentially identical across
+        // every premise/hypothesis pair, which would force the head to
+        // produce the same logits regardless of the actual text.
+        let n_embd = self.model.trunk().config.n_embd;
+        let last_offset = (self.last_step_tokens.saturating_sub(1))
+            .checked_mul(n_embd)
+            .ok_or_else(|| "Qwen3.5 last_hidden offset overflow".to_string())?;
+        let scratch_len = self.scratch().normed_buf.len();
+        let hidden = self
+            .scratch()
+            .normed_buf
+            .get(last_offset..last_offset + n_embd)
+            .ok_or_else(|| {
+                format!(
+                    "Qwen3.5 classify last_hidden: scratch len {scratch_len}, \
+                     wanted rows [{}, {})",
+                    last_offset / n_embd,
+                    last_offset / n_embd + 1,
+                )
+            })?;
+        self.model.trunk().score_logits(hidden)
+    }
 }

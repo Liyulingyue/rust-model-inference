@@ -13,6 +13,8 @@
 //! memory; discrete GPUs later want a staging → DEVICE_LOCAL upload path.
 
 #[cfg(feature = "vulkan")]
+pub(crate) mod matmul_q4k;
+#[cfg(feature = "vulkan")]
 pub(crate) mod ops;
 #[cfg(feature = "vulkan")]
 pub(crate) mod qwen3;
@@ -150,6 +152,14 @@ pub struct VulkanContext {
     /// matmul variant can use `dotPacked4x8EXT` instead of four scalar multiplies.
     integer_dot_product: bool,
     limits: vk::PhysicalDeviceLimits,
+    /// True when the chosen physical device is a software ICD
+    /// (`VK_PHYSICAL_DEVICE_TYPE_CPU` — Mesa `llvmpipe`, Google's
+    /// `swiftshader`, etc.). Software ICDs run the compute shaders on
+    /// the host CPU, which is almost always slower than the hand-tuned
+    /// AVX2/FMA kernels we already have; `gpu_matmul_active()` checks
+    /// this and refuses to dispatch, so `--gpu` becomes a no-op on
+    /// such devices and the engine stays on the CPU path.
+    is_software_icd: bool,
     submission_count: std::sync::atomic::AtomicU64,
     /// Completed-matmul generation. Thread 0 bumps it after the fence wait;
     /// other pool threads block on it before touching the matmul output
@@ -339,6 +349,7 @@ impl VulkanContext {
                             shader_float16: candidate.shader_float16,
                             integer_dot_product: candidate.integer_dot_product,
                             limits: candidate.limits,
+                            is_software_icd: candidate.device_type == vk::PhysicalDeviceType::CPU,
                             submission_count: std::sync::atomic::AtomicU64::new(0),
                             completed_gen: std::sync::atomic::AtomicU64::new(0),
                         });
@@ -358,6 +369,17 @@ impl VulkanContext {
 
     pub fn device_name(&self) -> &str {
         &self.device_name
+    }
+
+    /// True when the loader picked a software ICD (Mesa `llvmpipe`,
+    /// Google's `swiftshader`, …). Such devices run the compute shaders
+    /// on the host CPU; on a 4-core machine the hand-tuned AVX2/FMA
+    /// kernels already saturate every core, so a software-Vulkan path
+    /// only adds dispatch overhead. `gpu_matmul_active()` short-circuits
+    /// when this is true, leaving the engine on the CPU path even
+    /// though the user passed `--gpu`.
+    pub fn is_software_icd(&self) -> bool {
+        self.is_software_icd
     }
 
     pub(crate) fn supports_shader_float16(&self) -> bool {

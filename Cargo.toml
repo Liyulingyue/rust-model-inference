@@ -118,3 +118,7 @@ required-features = ["vulkan"]
 name = "dit_vk_bench"
 path = "examples/dit_vk_bench.rs"
 required-features = ["vulkan"]
+
+[[example]]
+name = "test_openjev_nli"
+path = "examples/test_openjev_nli.rs"

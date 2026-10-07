@@ -1171,3 +1171,49 @@ pub fn run_forward_logits_qwen35_with_batch(
         .map_err(|e| format!("Qwen3.5 forward_logits failed: {e}"))?;
     Ok((logits, t0.elapsed()))
 }
+
+/// Free-function variant of `run_forward_logits_qwen35_with_batch` that
+/// returns the 3-class NLI logits from a classifier head
+/// (`cls.output.weight` + optional `cls.output.bias`).
+///
+/// Mirrors the free-fn forward path, but uses `forward_classify` instead
+/// of `forward_logits`: prefill the prompt, then read the last non-pad
+/// hidden state and project through `cls.output.weight`. Returns an
+/// error when the GGUF has no classifier head — callers that gate on
+/// `cls_score.is_some()` should fall back to `run_forward_logits_*` if
+/// they only optionally support classification.
+pub fn run_classify_qwen35_with_batch(
+    source: &dyn TensorSource,
+    prompt_tokens: &[u32],
+    n_threads_arg: usize,
+    _kv_format: KvFormat,
+    max_context: usize,
+    prefill_batch_size: usize,
+) -> Result<(Vec<f32>, std::time::Duration), String> {
+    if prompt_tokens.is_empty() {
+        return Err("Qwen3.5 classify prompt must contain at least one token".into());
+    }
+    let t0 = std::time::Instant::now();
+    let mut model = Qwen35Model::from_source(source)
+        .map_err(|error| format!("Failed to parse Qwen3.5 model: {error}"))?;
+    if !model.is_classifier() {
+        return Err(
+            "Qwen3.5 model has no cls.output.weight; not an NLI / cross-encoder checkpoint".into(),
+        );
+    }
+    let n_ctx = model.config.n_ctx.min(max_context);
+    let pool = ComputePool::new(n_threads_arg);
+    let (positions, _next) =
+        crate::models::qwen35::build_qwen35_positions(prompt_tokens, None, &[])
+            .map_err(|e| format!("Failed to build Qwen3.5 positions: {e}"))?;
+    let mut session = super::session::Qwen35Session::new_with_prefill_batch_size(
+        &mut model,
+        n_ctx.min(prompt_tokens.len() + 1),
+        prefill_batch_size,
+        std::sync::Arc::new(pool),
+    )?;
+    let logits = session
+        .forward_classify(prompt_tokens, &positions)
+        .map_err(|e| format!("Qwen3.5 forward_classify failed: {e}"))?;
+    Ok((logits, t0.elapsed()))
+}

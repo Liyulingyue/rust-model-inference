@@ -41,6 +41,8 @@ GGML_BF16 = 30
 GGUF_ALIGNMENT = 32
 
 _T_UINT32 = 4
+_T_INT32 = 5
+_T_FLOAT32 = 6
 _T_BOOL = 7
 _T_STRING = 8
 _T_ARRAY = 9
@@ -488,6 +490,8 @@ def _read_gguf(path: Path) -> tuple[dict[str, object], dict[str, tuple[int, tupl
             return bool(take("<B"))
         formats = {
             _T_UINT32: "<I",
+            _T_INT32: "<i",
+            _T_FLOAT32: "<f",
             _T_UINT64: "<Q",
             _T_INT64: "<q",
             _T_FLOAT64: "<d",

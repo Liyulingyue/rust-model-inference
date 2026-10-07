@@ -69,6 +69,8 @@ mod tests {
             output_norm: vec![1.0; 2],
             output_weight,
             layers: Vec::new(),
+            cls_score: None,
+            cls_score_bias: Vec::new(),
             #[cfg(feature = "vulkan")]
             gpu: None,
         }

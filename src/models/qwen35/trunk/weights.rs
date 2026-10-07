@@ -62,6 +62,13 @@ pub struct HybridTrunk<'a> {
     pub output_norm: Vec<f32>,
     pub output_weight: Weight<'a>,
     pub layers: Vec<Qwen35LayerWeights<'a>>,
+    /// Optional classification head (cross-encoder / NLI), loaded when the
+    /// GGUF carries `cls.output.weight` (and optionally `cls.output.bias`).
+    /// The shape is `[n_embd, num_labels]` so the same `Weight` matmul used
+    /// by `qwen3::trunk::weights::score_logits` works here; the bias, when
+    /// present, is a separate `Vec<f32>` of length `num_labels`.
+    pub cls_score: Option<Weight<'a>>,
+    pub cls_score_bias: Vec<f32>,
     /// Lazily-initialized Vulkan session. Built on the first decode token
     /// after `--gpu` enables the global Vulkan context. `None` means CPU
     /// fallback (no eligible GPU or Vulkan init failed).
@@ -380,6 +387,8 @@ impl<'a> HybridTrunk<'a> {
             output_norm,
             output_weight,
             layers,
+            cls_score: load_weight(source, "cls.output.weight"),
+            cls_score_bias: load_weight_f32(source, "cls.output.bias").unwrap_or_default(),
             #[cfg(feature = "vulkan")]
             gpu: None,
         })
@@ -407,5 +416,55 @@ impl<'a> HybridTrunk<'a> {
             self.tok_embd.embedding_lookup(token_id, row);
         }
         Ok(embeddings)
+    }
+
+    /// True when the GGUF carried a `cls.output.weight` head. Mirrors
+    /// `Qwen3Model::is_rerank` so callers (server / rerank CLI) can probe
+    /// the model the same way for both backbones.
+    pub fn is_classifier(&self) -> bool {
+        self.cls_score.is_some()
+    }
+
+    /// Project `last_hidden` (length `n_embd`) through the classification
+    /// head, returning one logit per class plus the optional bias. Returns
+    /// an error if the head wasn't loaded.
+    ///
+    /// Same contract as `Qwen3Model::score_logits` but with a `cls_score_bias`
+    /// added on top of the matmul output. The HF `score.weight` is stored
+    /// as `[num_labels, n_embd]` in safetensors; the converter transposes
+    /// it to `[n_embd, num_labels]` for the llama.cpp rerank-packer layout,
+    /// and we add a zero bias when the HF head had no bias (`openjev` does
+    /// not have one; `jina-bert-v2` does).
+    pub fn score_logits(&self, last_hidden: &[f32]) -> Result<Vec<f32>, String> {
+        let weight = self
+            .cls_score
+            .as_ref()
+            .ok_or_else(|| "Qwen3.5 model has no cls.output.weight head".to_string())?;
+        if last_hidden.len() != self.config.n_embd {
+            return Err(format!(
+                "score_logits: hidden size {} does not match n_embd {}",
+                last_hidden.len(),
+                self.config.n_embd
+            ));
+        }
+        let n_in = self.config.n_embd;
+        let n_cls = weight.n_out;
+        let mut out = vec![0.0f32; n_cls];
+        weight
+            .kernel
+            .forward_prepared(last_hidden, &[], &[], None, &mut out, n_in, n_cls, 0, 1);
+        if !self.cls_score_bias.is_empty() {
+            if self.cls_score_bias.len() != n_cls {
+                return Err(format!(
+                    "cls.output.bias length {} does not match num_labels {}",
+                    self.cls_score_bias.len(),
+                    n_cls
+                ));
+            }
+            for (slot, bias) in out.iter_mut().zip(self.cls_score_bias.iter()) {
+                *slot += *bias;
+            }
+        }
+        Ok(out)
     }
 }
