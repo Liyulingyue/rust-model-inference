@@ -23,12 +23,12 @@ use crate::app::cli::resolve_thread_count;
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
+use crate::ops::kernel::f32::scalar::row_range;
 use crate::ops::rope::rope_neox_inplace;
 use crate::ops::*;
 use crate::prompt::{build_qwen_chat_prompt, QwenMessage};
 #[cfg(feature = "vulkan")]
 use crate::vulkan::qwen3::Qwen3VulkanSession;
-use rayon::prelude::*;
 use std::io::{self, Write};
 
 use std::sync::Arc;
@@ -278,6 +278,90 @@ pub fn text_encode_with_audio(
 }
 
 
+/// One weight applied to every token row: the weight, its output width, the
+/// token-major destination, and an optional bias added afterwards.
+struct TokenProjection<'w> {
+    weight: &'w crate::ops::kernel::Weight<'w>,
+    n_out: usize,
+    out: RowsWrap,
+    bias: Option<&'w [f32]>,
+}
+
+/// Quantize each token row once, then apply every projection to it.
+///
+/// Tokens are the unit of work because each token reads the whole weight
+/// matrix, so splitting by token is what lets the pool overlap the weight
+/// streaming. All projections share a single dispatch and reuse one
+/// activation quantization, matching the previous fused loop.
+fn project_tokens(
+    pool: &Arc<ComputePool>,
+    n_tokens: usize,
+    input: &[f32],
+    n_in: usize,
+    projections: Vec<TokenProjection<'_>>,
+) {
+    debug_assert_eq!(input.len(), n_tokens * n_in);
+    if n_tokens == 0 {
+        return;
+    }
+    let input_ptr = input.as_ptr() as usize;
+    pool.compute(move |ith, nth| {
+        let (start, end) = row_range(n_tokens, ith, nth);
+        if start >= end {
+            return;
+        }
+        // SAFETY: `input` outlives the dispatch and every worker reads a
+        // disjoint token range.
+        let input = unsafe { std::slice::from_raw_parts(input_ptr as *const f32, n_tokens * n_in) };
+        for tok in start..end {
+            let row = &input[tok * n_in..(tok + 1) * n_in];
+            let blocks = (n_in + 31) / 32;
+            let mut q8 = vec![0u8; n_in];
+            let mut scales = vec![0.0f32; blocks];
+            quantize_q8_0_into(row, n_in, &mut q8, &mut scales);
+            for projection in &projections {
+                // SAFETY: each worker owns tokens [start, end) and `RowsWrap`
+                // hands out only the row for the token being processed.
+                let out = unsafe { projection.out.rows(tok, tok + 1) };
+                projection.weight.kernel.forward_prepared(
+                    row,
+                    &q8,
+                    &scales,
+                    None,
+                    out,
+                    n_in,
+                    projection.n_out,
+                    0,
+                    1,
+                );
+                if let Some(bias) = projection.bias {
+                    for (value, bias) in out.iter_mut().zip(bias) {
+                        *value += *bias;
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// Row-partitioned view over a token-major output buffer.
+///
+/// [`ComputePool::compute`] takes an `Fn` closure, so a `&mut [f32]` cannot be
+/// moved into it; workers borrow a disjoint token range out of the raw pointer
+/// instead. Same shape as `PtrWrap` in the in-tree ViT attention path and
+/// `OutputWrap` in `qwen35::vision`.
+struct RowsWrap(*mut f32, usize);
+unsafe impl Sync for RowsWrap {}
+unsafe impl Send for RowsWrap {}
+impl RowsWrap {
+    /// # Safety
+    /// The caller must guarantee the buffer holds at least `end * stride`
+    /// elements and that no other view of the same rows is live.
+    unsafe fn rows(&self, start: usize, end: usize) -> &mut [f32] {
+        std::slice::from_raw_parts_mut(self.0.add(start * self.1), (end - start) * self.1)
+    }
+}
+
 /// Shared forward path for [`text_encode`] and [`text_encode_with_audio`].
 /// Operates on pre-built per-token embeddings of shape `[n_tokens, n_embd]`.
 ///
@@ -343,44 +427,32 @@ fn text_encode_forward(
         let mut q_all = vec![0.0; n_tokens * n_embd_q];
         let mut k_all = vec![0.0; n_tokens * n_embd_k];
         let mut v_all = vec![0.0; n_tokens * n_embd_v];
-        q_all
-            .par_chunks_mut(n_embd_q)
-            .zip(k_all.par_chunks_mut(n_embd_k))
-            .zip(v_all.par_chunks_mut(n_embd_v))
-            .enumerate()
-            .for_each(|(tok, ((q_row, k_row), v_row))| {
-                let norm_row = &normed[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd];
-
-                let blocks = (cfg.n_embd + 31) / 32;
-                let mut q8_buf = vec![0u8; cfg.n_embd];
-                let mut scale_buf = vec![0.0f32; blocks];
-                quantize_q8_0_into(norm_row, cfg.n_embd, &mut q8_buf, &mut scale_buf);
-
-                layer.wq.kernel.forward_prepared(
-                    norm_row, &q8_buf, &scale_buf, None, q_row, cfg.n_embd, n_embd_q, 0, 1,
-                );
-                layer.wk.kernel.forward_prepared(
-                    norm_row, &q8_buf, &scale_buf, None, k_row, cfg.n_embd, n_embd_k, 0, 1,
-                );
-                layer.wv.kernel.forward_prepared(
-                    norm_row, &q8_buf, &scale_buf, None, v_row, cfg.n_embd, n_embd_v, 0, 1,
-                );
-                if let Some(bias) = layer.q_bias.as_deref() {
-                    for (value, bias) in q_row.iter_mut().zip(bias) {
-                        *value += *bias;
-                    }
-                }
-                if let Some(bias) = layer.k_bias.as_deref() {
-                    for (value, bias) in k_row.iter_mut().zip(bias) {
-                        *value += *bias;
-                    }
-                }
-                if let Some(bias) = layer.v_bias.as_deref() {
-                    for (value, bias) in v_row.iter_mut().zip(bias) {
-                        *value += *bias;
-                    }
-                }
-            });
+        project_tokens(
+            &model.pool(),
+            n_tokens,
+            &normed,
+            cfg.n_embd,
+            vec![
+                TokenProjection {
+                    weight: &layer.wq,
+                    n_out: n_embd_q,
+                    out: RowsWrap(q_all.as_mut_ptr(), n_embd_q),
+                    bias: layer.q_bias.as_deref(),
+                },
+                TokenProjection {
+                    weight: &layer.wk,
+                    n_out: n_embd_k,
+                    out: RowsWrap(k_all.as_mut_ptr(), n_embd_k),
+                    bias: layer.k_bias.as_deref(),
+                },
+                TokenProjection {
+                    weight: &layer.wv,
+                    n_out: n_embd_v,
+                    out: RowsWrap(v_all.as_mut_ptr(), n_embd_v),
+                    bias: layer.v_bias.as_deref(),
+                },
+            ],
+        );
 
         if let (Some(q_norm), Some(k_norm)) = (layer.q_norm.as_deref(), layer.k_norm.as_deref()) {
             apply_qk_norms(
@@ -523,19 +595,18 @@ fn text_encode_forward(
         }
 
         let mut attn_proj_out = vec![0.0; n_tokens * cfg.n_embd];
-        attn_proj_out
-            .par_chunks_mut(cfg.n_embd)
-            .enumerate()
-            .for_each(|(tok, out_row)| {
-                let attn_row = &attn_out[tok * n_attn..tok * n_attn + n_attn];
-                let blocks = (n_attn + 31) / 32;
-                let mut q8_buf = vec![0u8; n_attn];
-                let mut scale_buf = vec![0.0f32; blocks];
-                quantize_q8_0_into(attn_row, n_attn, &mut q8_buf, &mut scale_buf);
-                layer.wo.kernel.forward_prepared(
-                    attn_row, &q8_buf, &scale_buf, None, out_row, n_attn, cfg.n_embd, 0, 1,
-                );
-            });
+        project_tokens(
+            &model.pool(),
+            n_tokens,
+            &attn_out,
+            n_attn,
+            vec![TokenProjection {
+                weight: &layer.wo,
+                n_out: cfg.n_embd,
+                out: RowsWrap(attn_proj_out.as_mut_ptr(), cfg.n_embd),
+                bias: None,
+            }],
+        );
 
         for tok in 0..n_tokens {
             let off = tok * cfg.n_embd;
@@ -568,23 +639,26 @@ fn text_encode_forward(
         } else {
             let mut gate_buf = vec![0.0; n_tokens * cfg.n_ff];
             let mut up_buf = vec![0.0; n_tokens * cfg.n_ff];
-            gate_buf
-                .par_chunks_mut(cfg.n_ff)
-                .zip(up_buf.par_chunks_mut(cfg.n_ff))
-                .enumerate()
-                .for_each(|(tok, (gate_row, up_row))| {
-                    let ffn_row = &ffn_normed[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd];
-                    let blocks = (cfg.n_embd + 31) / 32;
-                    let mut q8_buf = vec![0u8; cfg.n_embd];
-                    let mut scale_buf = vec![0.0f32; blocks];
-                    quantize_q8_0_into(ffn_row, cfg.n_embd, &mut q8_buf, &mut scale_buf);
-                    layer.w_gate.kernel.forward_prepared(
-                        ffn_row, &q8_buf, &scale_buf, None, gate_row, cfg.n_embd, cfg.n_ff, 0, 1,
-                    );
-                    layer.w_up.kernel.forward_prepared(
-                        ffn_row, &q8_buf, &scale_buf, None, up_row, cfg.n_embd, cfg.n_ff, 0, 1,
-                    );
-                });
+            project_tokens(
+                &model.pool(),
+                n_tokens,
+                &ffn_normed,
+                cfg.n_embd,
+                vec![
+                    TokenProjection {
+                        weight: &layer.w_gate,
+                        n_out: cfg.n_ff,
+                        out: RowsWrap(gate_buf.as_mut_ptr(), cfg.n_ff),
+                        bias: None,
+                    },
+                    TokenProjection {
+                        weight: &layer.w_up,
+                        n_out: cfg.n_ff,
+                        out: RowsWrap(up_buf.as_mut_ptr(), cfg.n_ff),
+                        bias: None,
+                    },
+                ],
+            );
 
             for tok in 0..n_tokens {
                 let off = tok * cfg.n_ff;
@@ -593,32 +667,21 @@ fn text_encode_forward(
                 }
             }
 
+            // The SwiGLU above wrote the activated product back into
+            // `gate_buf`, so that buffer is the down projection's input.
             let mut down_buf = vec![0.0; n_tokens * cfg.n_embd];
-            down_buf
-                .par_chunks_mut(cfg.n_embd)
-                .enumerate()
-                .for_each(|(tok, out_row)| {
-                    let blocks = (cfg.n_ff + 31) / 32;
-                    let mut q8_buf = vec![0u8; cfg.n_ff];
-                    let mut scale_buf = vec![0.0f32; blocks];
-                    quantize_q8_0_into(
-                        &gate_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
-                        cfg.n_ff,
-                        &mut q8_buf,
-                        &mut scale_buf,
-                    );
-                    layer.w_down.kernel.forward_prepared(
-                        &gate_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
-                        &q8_buf,
-                        &scale_buf,
-                        None,
-                        out_row,
-                        cfg.n_ff,
-                        cfg.n_embd,
-                        0,
-                        1,
-                    );
-                });
+            project_tokens(
+                &model.pool(),
+                n_tokens,
+                &gate_buf,
+                cfg.n_ff,
+                vec![TokenProjection {
+                    weight: &layer.w_down,
+                    n_out: cfg.n_embd,
+                    out: RowsWrap(down_buf.as_mut_ptr(), cfg.n_embd),
+                    bias: None,
+                }],
+            );
 
             for tok in 0..n_tokens {
                 let off = tok * cfg.n_embd;
