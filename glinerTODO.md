@@ -708,7 +708,46 @@ reference 自己解**，数字来自真 encoder + 真 head。已生成 `choice-d
 低 5e-3..5e-2。下一个改进是**一次 `score_explicit_spans` 打完一个 group 的所有 choice**，
 保持 batch 宽度以对齐归约顺序。
 
-### 🟠 F-1b record 路径的 `choices` 前缀回退（**未做，F-1 剩下的最后一块**）
+### 🟠 F-1b record 路径的 `choices` 四路分发（oracle 已就位，实现待做）
+
+**oracle 已完成**：`dump_record_choices.py`（6 case，**跑真模型**，确定性已验）。
+reference 的实际结构是**四路分发**而非单一回退，顺序即优先级，且哪一路命中
+**无法从输出形状看出** —— 所以每个 case 命名的是它「应该走到的那一路」：
+
+| 路 | 条件 | surface 来源 | 概率 | **offsets** |
+| --- | --- | --- | --- | --- |
+| 1 prefix token | `choices and te_raw <= offset` | prefix token | `min(candidate, assignment)` | **record 的 anchor span** |
+| 2 文档字面量 | record 有 anchor 且 anchor span 内出现 choice 字面量 | 只重打分这些 choice | `_decode_choice_field` | anchor |
+| 3 surface 匹配 | 路 1 的 surface casefold 命中已声明 choice | 原样 | 原样 | 原样 |
+| 4 字段级回退 | 兜底 | `_decode_choice_field` 全量 | 字段级 | — |
+
+路 4 是整段机制要避免的东西，且**只有 ≥2 个 record 时才可观测**（所有 record 拿到
+完全相同的 value 与 confidence）。oracle 里 `one_record_cannot_reveal_path_four`
+保留单 record case 正是为了让「因为只有一个所以相同」和「因为走了回退所以相同」
+可区分。
+
+**fixture 实测到的、reference 注释里没写的两点**：
+1. **record 的 choice 字段上报的是 anchor 的 offsets**。`natural_mode_anchored_records`
+   里 choice 字段的 span 是 `[18,20]`，与该 record 的 `anchor_span` 完全相同；无 anchor
+   时是 `0,0`（`anchorless` case 就是钉这个的）。
+2. **多个 record 的 choice 字段解析出空的文档切片**（`text: ['']`），因为它们的 span 是
+   prefix token 下标。这个空串是**症状**不是 bug —— 它正是普通 offset 路径的产物，也正是
+   prefix 分支必须存在的原因。
+
+**实现所需的改动面**（都还没动）：
+- [ ] `ExtractedRecord` 需要承载 choice 值：现在 `fields` 是
+      `BTreeMap<query_id, Vec<(usize,usize)>>`，表达不了「字面量 + anchor offsets」。
+      加一个 `choice_fields: BTreeMap<usize, RecordChoice>`（`Scalar(Option<ChoiceValue>)`
+      vs `List(Vec<ChoiceValue>)`，因为 scalar 无字面量时是 `None`、list 是 `[]`）
+- [ ] `decode_group` 需要**分别**吐出 `candidate_probability` 与
+      `assignment_probability`：现在 `assign_logits` 只在函数内部用来算
+      `field_scores`，而路 1 要的是两者的 `min`，只报其一在容差下会被掩盖
+- [ ] `score_records` 需要拿到 encoded prompt（`text_prefix_tokens` 给
+      `_find_choice_idx`、`offset`）与原文（路 2 的字面量归属要用）
+- [ ] 路 2 的 `_record_local_choice_mentions` **已实现但无人调用**（见上表），接线即可
+- [ ] `raw_results.rs` 的 record 渲染：choice 值**没有 offsets**（路 1 报的 anchor
+      offsets 只存在于 record 内部，公开 payload 里 choice 不带位置）
+- [ ] `gliner2_5_base_v1_records_e2e_parity` 需跟着改 `ExtractedRecord` 的形状
 
 `_record_local_choice_mentions`（文档级字面量归属，`engine.py:595`）**已完成**，
 见上表。但它只是**优先路径**。当文档里**没有**任何 choice 字面量时
