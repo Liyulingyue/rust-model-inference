@@ -200,13 +200,23 @@ fn logits_and_spans_match_the_reference() {
             .iter()
             .map(|v| v.as_str().unwrap().to_string())
             .collect();
+        // `decode_spans` takes a per-query threshold vector rather than one
+        // scalar: the reference hands `_group_scored_candidates` a `[B, Q]`
+        // threshold tensor, so a schema can configure one entity label
+        // differently from its neighbour. This fixture declares no
+        // per-query thresholds, so every entry is the case's global one — which
+        // is the reference's own default when the schema is silent. Validators
+        // are empty for the same reason.
+        let thresholds = vec![threshold; names.len()];
         let got = decode_spans(
             &batch,
             &words,
             &names,
             model.settings.pair_temperature,
+            &thresholds,
             threshold,
             Some(policy),
+            &Default::default(),
         );
 
         // `resolved_spans` is the engine's final output: threshold, sort, then

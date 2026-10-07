@@ -33,6 +33,7 @@ pub mod overlap;
 pub mod pair_scorer;
 pub mod pool;
 pub mod proposer;
+pub mod raw_results;
 pub mod record_head;
 pub mod record_spec;
 pub mod relations;

@@ -13,8 +13,17 @@
      "org": "an organisation"
     }
    },
+   "metadata": {
+    "entity_metadata": {},
+    "field_metadata": {},
+    "entity_order": [],
+    "classification_tasks": [],
+    "structure_groups": []
+   },
    "built_with_schema_builder": false,
    "threshold": 0.3,
+   "include_confidence": true,
+   "include_spans": true,
    "raw": {
     "entities": [
      {
@@ -49,8 +58,17 @@
      "person": "a person"
     }
    },
+   "metadata": {
+    "entity_metadata": {},
+    "field_metadata": {},
+    "entity_order": [],
+    "classification_tasks": [],
+    "structure_groups": []
+   },
    "built_with_schema_builder": false,
    "threshold": 0.3,
+   "include_confidence": true,
+   "include_spans": true,
    "raw": {
     "entities": [
      {
@@ -79,8 +97,17 @@
      "company": "a company"
     }
    },
+   "metadata": {
+    "entity_metadata": {},
+    "field_metadata": {},
+    "entity_order": [],
+    "classification_tasks": [],
+    "structure_groups": []
+   },
    "built_with_schema_builder": false,
    "threshold": 0.3,
+   "include_confidence": true,
+   "include_spans": true,
    "raw": {
     "entities": [
      {
@@ -115,8 +142,17 @@
      "person": "a person"
     }
    },
+   "metadata": {
+    "entity_metadata": {},
+    "field_metadata": {},
+    "entity_order": [],
+    "classification_tasks": [],
+    "structure_groups": []
+   },
    "built_with_schema_builder": false,
    "threshold": 0.999,
+   "include_confidence": true,
+   "include_spans": true,
    "raw": {
     "entities": [
      {
@@ -138,8 +174,17 @@
      "location": "a place"
     }
    },
+   "metadata": {
+    "entity_metadata": {},
+    "field_metadata": {},
+    "entity_order": [],
+    "classification_tasks": [],
+    "structure_groups": []
+   },
    "built_with_schema_builder": false,
    "threshold": 0.3,
+   "include_confidence": true,
+   "include_spans": true,
    "raw": {
     "entities": [
      {
@@ -182,8 +227,17 @@
      "location": "a place"
     }
    },
+   "metadata": {
+    "entity_metadata": {},
+    "field_metadata": {},
+    "entity_order": [],
+    "classification_tasks": [],
+    "structure_groups": []
+   },
    "built_with_schema_builder": false,
    "threshold": 0.3,
+   "include_confidence": true,
+   "include_spans": true,
    "raw": {
     "entities": [
      {
@@ -246,8 +300,19 @@
      }
     }
    },
+   "metadata": {
+    "entity_metadata": {},
+    "field_metadata": {},
+    "entity_order": [],
+    "classification_tasks": [],
+    "structure_groups": [
+     "paper"
+    ]
+   },
    "built_with_schema_builder": false,
    "threshold": 0.3,
+   "include_confidence": true,
+   "include_spans": true,
    "raw": {
     "paper": [
      {
@@ -298,8 +363,19 @@
      }
     }
    },
+   "metadata": {
+    "entity_metadata": {},
+    "field_metadata": {},
+    "entity_order": [],
+    "classification_tasks": [],
+    "structure_groups": [
+     "person"
+    ]
+   },
    "built_with_schema_builder": false,
    "threshold": 0.3,
+   "include_confidence": true,
+   "include_spans": true,
    "raw": {
     "person": [
      {
@@ -356,8 +432,17 @@
      }
     ]
    },
+   "metadata": {
+    "entity_metadata": {},
+    "field_metadata": {},
+    "entity_order": [],
+    "classification_tasks": [],
+    "structure_groups": []
+   },
    "built_with_schema_builder": false,
    "threshold": 0.3,
+   "include_confidence": true,
+   "include_spans": true,
    "raw": {
     "worked_in": [
      {
@@ -418,8 +503,17 @@
      }
     ]
    },
+   "metadata": {
+    "entity_metadata": {},
+    "field_metadata": {},
+    "entity_order": [],
+    "classification_tasks": [],
+    "structure_groups": []
+   },
    "built_with_schema_builder": false,
    "threshold": 0.3,
+   "include_confidence": true,
+   "include_spans": true,
    "raw": {
     "worked_in": [
      {
@@ -483,33 +577,69 @@
    "name": "structures_choices_scalar_and_list",
    "text": "The paper is clearly about safety and less about alignment.",
    "schema": {
-    "structures": {
-     "paper": {
-      "fields": [
-       {
-        "name": "topic",
-        "dtype": "str",
+    "json_structures": [
+     {
+      "paper": {
+       "topic": {
+        "value": "",
         "choices": [
          "ml",
          "safety",
          "vision"
-        ],
-        "description": "the paper's topic"
+        ]
        },
-       {
-        "name": "mood",
+       "mood": {
+        "value": "",
         "choices": [
          "positive",
          "negative"
-        ],
-        "description": "the paper's mood"
+        ]
        }
-      ]
+      }
      }
-    }
+    ],
+    "json_descriptions": {
+     "paper": {
+      "topic": "the paper's topic",
+      "mood": "the paper's mood"
+     }
+    },
+    "entity_descriptions": {},
+    "relation_descriptions": {}
+   },
+   "metadata": {
+    "entity_metadata": {},
+    "field_metadata": {
+     "paper.topic": {
+      "dtype": "str",
+      "threshold": null,
+      "choices": [
+       "ml",
+       "safety",
+       "vision"
+      ],
+      "validators": []
+     },
+     "paper.mood": {
+      "dtype": "list",
+      "threshold": null,
+      "choices": [
+       "positive",
+       "negative"
+      ],
+      "validators": []
+     }
+    },
+    "entity_order": [],
+    "classification_tasks": [],
+    "structure_groups": [
+     "paper"
+    ]
    },
    "built_with_schema_builder": true,
    "threshold": 0.3,
+   "include_confidence": true,
+   "include_spans": true,
    "raw": {
     "paper": [
      {
@@ -532,11 +662,33 @@
    "text": "Marie Curie worked in Paris.",
    "schema": {
     "entities": {
+     "person": ""
+    },
+    "json_descriptions": {},
+    "entity_descriptions": {
      "person": "a person"
-    }
+    },
+    "relation_descriptions": {}
+   },
+   "metadata": {
+    "entity_metadata": {
+     "person": {
+      "dtype": "str",
+      "threshold": null,
+      "validators": []
+     }
+    },
+    "field_metadata": {},
+    "entity_order": [
+     "person"
+    ],
+    "classification_tasks": [],
+    "structure_groups": []
    },
    "built_with_schema_builder": true,
    "threshold": 0.3,
+   "include_confidence": true,
+   "include_spans": true,
    "raw": {
     "entities": [
      {
@@ -555,15 +707,218 @@
    "text": "Marie Curie worked in Paris.",
    "schema": {
     "entities": {
+     "person": ""
+    },
+    "json_descriptions": {},
+    "entity_descriptions": {
      "person": "a person"
-    }
+    },
+    "relation_descriptions": {}
+   },
+   "metadata": {
+    "entity_metadata": {
+     "person": {
+      "dtype": "str",
+      "threshold": null,
+      "validators": []
+     }
+    },
+    "field_metadata": {},
+    "entity_order": [
+     "person"
+    ],
+    "classification_tasks": [],
+    "structure_groups": []
    },
    "built_with_schema_builder": true,
    "threshold": 0.999,
+   "include_confidence": true,
+   "include_spans": true,
    "raw": {
     "entities": [
      {
       "person": null
+     }
+    ]
+   }
+  },
+  {
+   "name": "entities_no_flags",
+   "text": "Marie Curie worked in Paris.",
+   "schema": {
+    "entities": [
+     "person",
+     "org"
+    ],
+    "entity_descriptions": {
+     "person": "a person",
+     "org": "an organisation"
+    }
+   },
+   "metadata": {
+    "entity_metadata": {},
+    "field_metadata": {},
+    "entity_order": [],
+    "classification_tasks": [],
+    "structure_groups": []
+   },
+   "built_with_schema_builder": false,
+   "threshold": 0.3,
+   "include_confidence": false,
+   "include_spans": false,
+   "raw": {
+    "entities": [
+     {
+      "person": [
+       "Marie Curie"
+      ],
+      "org": [
+       "Paris"
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "name": "structures_no_flags",
+   "text": "Deep Learning by Yoshua Bengio.",
+   "schema": {
+    "json_structures": [
+     {
+      "paper": {
+       "title": [],
+       "authors": []
+      }
+     }
+    ],
+    "json_descriptions": {
+     "paper": {
+      "title": "a paper for title",
+      "authors": "a paper for authors"
+     }
+    },
+    "field_metadata": {
+     "paper.title": {
+      "dtype": "str"
+     },
+     "paper.authors": {
+      "dtype": "list"
+     }
+    }
+   },
+   "metadata": {
+    "entity_metadata": {},
+    "field_metadata": {},
+    "entity_order": [],
+    "classification_tasks": [],
+    "structure_groups": [
+     "paper"
+    ]
+   },
+   "built_with_schema_builder": false,
+   "threshold": 0.3,
+   "include_confidence": false,
+   "include_spans": false,
+   "raw": {
+    "paper": [
+     {
+      "title": [
+       "Deep Learning"
+      ],
+      "authors": [
+       "Yoshua Bengio"
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "name": "relations_no_flags",
+   "text": "Marie Curie worked in Paris.",
+   "schema": {
+    "entities": [
+     "person",
+     "org"
+    ],
+    "entity_descriptions": {
+     "person": "a person",
+     "org": "an organisation"
+    },
+    "relations": [
+     {
+      "worked_in": {
+       "head": "person",
+       "tail": "org"
+      }
+     }
+    ]
+   },
+   "metadata": {
+    "entity_metadata": {},
+    "field_metadata": {},
+    "entity_order": [],
+    "classification_tasks": [],
+    "structure_groups": []
+   },
+   "built_with_schema_builder": false,
+   "threshold": 0.3,
+   "include_confidence": false,
+   "include_spans": false,
+   "raw": {
+    "worked_in": [
+     [
+      "Marie Curie",
+      "Paris"
+     ]
+    ],
+    "entities": [
+     {
+      "person": [
+       "Marie Curie"
+      ],
+      "org": [
+       "Paris"
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "name": "entities_scalar_dtype_no_flags",
+   "text": "Marie Curie worked in Paris.",
+   "schema": {
+    "entities": {
+     "person": ""
+    },
+    "json_descriptions": {},
+    "entity_descriptions": {
+     "person": "a person"
+    },
+    "relation_descriptions": {}
+   },
+   "metadata": {
+    "entity_metadata": {
+     "person": {
+      "dtype": "str",
+      "threshold": null,
+      "validators": []
+     }
+    },
+    "field_metadata": {},
+    "entity_order": [
+     "person"
+    ],
+    "classification_tasks": [],
+    "structure_groups": []
+   },
+   "built_with_schema_builder": true,
+   "threshold": 0.3,
+   "include_confidence": false,
+   "include_spans": false,
+   "raw": {
+    "entities": [
+     {
+      "person": "Marie Curie"
      }
     ]
    }
@@ -582,8 +937,19 @@
      }
     ]
    },
+   "metadata": {
+    "entity_metadata": {},
+    "field_metadata": {},
+    "entity_order": [],
+    "classification_tasks": [
+     "sentiment"
+    ],
+    "structure_groups": []
+   },
    "built_with_schema_builder": false,
    "threshold": 0.3,
+   "include_confidence": true,
+   "include_spans": true,
    "raw": {
     "sentiment": [
      "positive",
@@ -607,8 +973,19 @@
      }
     ]
    },
+   "metadata": {
+    "entity_metadata": {},
+    "field_metadata": {},
+    "entity_order": [],
+    "classification_tasks": [
+     "topics"
+    ],
+    "structure_groups": []
+   },
    "built_with_schema_builder": false,
    "threshold": 0.3,
+   "include_confidence": true,
+   "include_spans": true,
    "raw": {
     "topics": [
      [

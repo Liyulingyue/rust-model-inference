@@ -90,6 +90,13 @@ fn run_case(
         SchemaOptions {
             record_metadata: meta,
             field_metadata: schema.get("field_metadata"),
+            // These three carry the per-entity, per-relation and `choices`
+            // tables. The fixture's schemas declare none, so they stay `None`
+            // rather than an empty table — the readers treat absent and empty
+            // the same way, but `None` is what the pre-threshold paths passed.
+            entity_metadata: None,
+            relation_metadata: None,
+            schema: None,
         },
     )
     .expect("mixed extraction");

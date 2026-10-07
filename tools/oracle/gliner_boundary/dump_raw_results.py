@@ -292,6 +292,57 @@ CASES = [
         0.999,
     ),
     (
+        # The same schema with `include_confidence` and `include_spans` off. The
+        # flag pair is a *fixture* dimension here rather than a case dimension:
+        # `batch_extract` defaults them to False, so the shapes below are what the
+        # single-document path produces unless the caller opts in — and the
+        # long-document path, which is what this converter exists for, always
+        # passes both. A converter that only handles both-on would look correct on
+        # every other fixture and wrong on all of these.
+        #
+        # `_format_spans` has a fourth branch that returns the surface on its own,
+        # so a span is a bare **string** here rather than a one-key object; a
+        # scalar-dtype entity does the same; and a relation edge becomes a bare
+        # `(head, tail)` pair.
+        "entities_no_flags",
+        "Marie Curie worked in Paris.",
+        {
+            "entities": ["person", "org"],
+            "entity_descriptions": {"person": "a person", "org": "an organisation"},
+        },
+        0.3,
+        False,
+    ),
+    (
+        "structures_no_flags",
+        "Deep Learning by Yoshua Bengio.",
+        structure_schema(
+            ["title", "authors"],
+            {"title": "str", "authors": "list"},
+            description="a paper",
+        ),
+        0.3,
+        False,
+    ),
+    (
+        "relations_no_flags",
+        "Marie Curie worked in Paris.",
+        {
+            "entities": ["person", "org"],
+            "entity_descriptions": {"person": "a person", "org": "an organisation"},
+            "relations": [{"worked_in": {"head": "person", "tail": "org"}}],
+        },
+        0.3,
+        False,
+    ),
+    (
+        "entities_scalar_dtype_no_flags",
+        "Marie Curie worked in Paris.",
+        Schema().entities({"person": "a person"}, dtype="str"),
+        0.3,
+        False,
+    ),
+    (
         # A classification is a bare `(label, score)` tuple, which is exactly the
         # shape `format_results` sniffs as a relation. Only the schema's
         # `classification_tasks` keeps it out of `relation_extraction`, so the
@@ -331,7 +382,11 @@ def main() -> None:
     model = AutoExtractor.from_pretrained(str(view))
 
     cases = []
-    for name, text, schema, threshold in CASES:
+    for case in CASES:
+        name, text, schema, threshold = case[:4]
+        # `flags` defaults to both-on, which is what the long-document path forces
+        # and what every earlier case in this file exercises.
+        flags = case[4] if len(case) > 4 else True
         # `format_results=False` stops before the payload shaping, so this is
         # the raw dict the decode stages assembled. `include_confidence` and
         # `include_spans` are both on, which is the combination the long-document
@@ -341,20 +396,55 @@ def main() -> None:
             [schema],
             threshold=threshold,
             format_results=False,
-            include_confidence=True,
-            include_spans=True,
+            include_confidence=flags,
+            include_spans=flags,
         )
+        builder = hasattr(schema, "build")
+        # A builder and a dict reach the reference by different routes, and the
+        # port needs the pieces of each. `build()` is the prompt-facing schema
+        # the port parses into tasks; the metadata tables are what the builder
+        # additionally carries and a dict cannot express. Both are recorded so a
+        # test can feed the port exactly what the reference saw.
+        prompt_schema = schema.build() if builder else schema
+        if builder:
+            # `build()` emits every container, so a schema that declared only a
+            # structure group also carries `"entities": {}` and
+            # `"classifications": []`. The reference reads those as "nothing
+            # declared" — an empty dict has no keys to route — but the port's
+            # parser rejects an empty `entities` outright, so recording the
+            # empty containers would make the fixture unusable for the thing it
+            # exists to test. They carry no routing information, so they are
+            # dropped rather than special-cased on the consuming side.
+            prompt_schema = {
+                key: value
+                for key, value in prompt_schema.items()
+                if not (
+                    key in ("entities", "relations", "classifications", "json_structures")
+                    and not value
+                )
+            }
+        metadata = {
+            "entity_metadata": schema._entity_metadata if builder else {},
+            "field_metadata": schema._field_metadata if builder else {},
+            "entity_order": list(schema._entity_order) if builder else [],
+            "classification_tasks": [
+                task["task"] for task in prompt_schema.get("classifications", [])
+            ],
+            "structure_groups": [
+                group_name
+                for entry in prompt_schema.get("json_structures", [])
+                for group_name in entry
+            ],
+        }
         cases.append({
             "name": name,
             "text": text,
-            # A `Schema` builder has no JSON form of its own; `to_dict` is the
-            # prompt-facing schema and loses the metadata, so the fixture records
-            # the *built* dict plus a flag saying metadata was in play. The port
-            # reads metadata from the caller's schema, so a reader needs to know
-            # which cases exercised it.
-            "schema": schema.to_dict() if hasattr(schema, "to_dict") else schema,
-            "built_with_schema_builder": hasattr(schema, "build"),
+            "schema": prompt_schema,
+            "metadata": metadata,
+            "built_with_schema_builder": builder,
             "threshold": threshold,
+            "include_confidence": flags,
+            "include_spans": flags,
             "raw": raw,
         })
 

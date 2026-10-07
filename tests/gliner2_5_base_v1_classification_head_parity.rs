@@ -149,7 +149,16 @@ fn the_two_routings_are_disjoint() {
     for (index, case) in fixture["cases"].as_array().unwrap().iter().enumerate() {
         let (tasks, kinds) = tasks_of(case);
         let encoded =
-            encode_mixed_boundary_prompt(&model, &tasks, &kinds, case["text"].as_str().unwrap())
+            // `schema` is passed for the `choices` prefix only; this fixture's schemas
+            // declare no choice field, so `None` is what the pre-choices paths
+            // passed and the prompt is unchanged.
+            encode_mixed_boundary_prompt(
+                &model,
+                &tasks,
+                &kinds,
+                None,
+                case["text"].as_str().unwrap(),
+            )
                 .expect("encode mixed boundary prompt");
 
         assert_eq!(
