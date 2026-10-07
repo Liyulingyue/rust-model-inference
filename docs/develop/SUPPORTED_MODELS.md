@@ -2,13 +2,14 @@
 
 Mage-Flow 已接入主 CLI；下表数值与 PNG 证据来自原适配记录，远端已关机，本次入口迁移的真实权重复验未执行，见 verification.json 的 `cli_integration`。
 
-> 更新于 2026-10-07。以主 CLI `rust-model-inference` 为准。
+> 更新于 2026-10-08。以主 CLI `rust-model-inference` 为准。
 
 相同的 `general.architecture` 只表示会进入同一条代码路径，不代表任意同架构 GGUF 都已确认可用。未在“具体型号”表中出现的模型，应先按 `Supported` 或 `Experimental` 看待，不能默认视为 `Verified`。
 
-2026-10-07：Z-Image VAE、YuE2、Edge0、LFM2/LFM2.5/LFM2MoE 与文本 embedding 的
+2026-10-08：Z-Image VAE、YuE2、Edge0、LFM2/LFM2.5/LFM2MoE、文本 embedding 与 AuK 的
 Vulkan 投影适配为 **Experimental**，不改变下表的 CPU 验证等级。
 RADV 的实际数值、成品、性能和失败范围见 [实机记录](VULKAN_RADV_VALIDATION_2026-10-07.md)；
+AuK Base/Flash 的 F16/Q8_0 投影与原生 Qwen 文本入口见 [AuK 实机记录](VULKAN_AUK_RADV_VALIDATION_2026-10-08.md)；
 具体格式、CPU 部分和设备验收命令见 [Vulkan 支持范围](VULKAN.md)。
 
 ## 状态定义
@@ -61,6 +62,7 @@ RADV 的实际数值、成品、性能和失败范围见 [实机记录](VULKAN_R
 | Fun-ASR-Nano | `funasr-sensevoice-encoder` + `qwen3` | 语音识别 | FunASR encoder mmproj、WAV | F16 encoder + Q8_0 LLM | `Verified` | 真实 GGUF 端到端转写通过（6s sample.wav → "我想问我在滨海新区有房"，与 golden file 一致）；[`docs/usage/funasr.md`](../usage/funasr.md)。 |
 | LFM2.5-1.2B-Instruct | `lfm2` | 文本生成 | 无 | Q8_0 | `Verified` | `docs/TODO.md` 记录 8/8 greedy token 与 llama.cpp 一致。 |
 | LFM2-8B-A1B | `lfm2moe` | MoE 文本生成 | 无 | Q8_0 | `Verified` | 真实 GGUF 可完整生成；与 llama.cpp 前 6 个生成 token 一致，随后在 MoE 近平局处可能分叉。 |
+| LFM2.5-8B-A1B | `lfm2moe` | MoE 文本生成 | 无 | Q8_0、UD-Q4_K_M | `Supported` | 2026-10-07 真实 GGUF 端到端跑通，两个档位均来自 `unsloth/LFM2.5-8B-A1B-GGUF`：`LFM2.5-8B-A1B-Q8_0.gguf`（9,010,196,064 bytes，SHA-256 `ec11666b6129f0b4fe893760b66797f22e1c478a561b40e365f2b6930729b8d2`）与 `LFM2.5-8B-A1B-UD-Q4_K_M.gguf`（5,322,223,200 bytes，SHA-256 `e2c8350d5e6e7c633b2ba4e20805a2c86bc46884cd285e8f3fe36ad917b772c7`）。运行时报出 `n_embd=2048 n_layer=24 n_head=32 n_ff=7168 n_expert=4x32 ff_exp=1792 dense_lead=2 d_conv=2`（前 2 层稠密、其余 MoE），加载 102 ms；Q8_0 在 20 线程 CPU greedy 生成 38.8 t/s。中文提问先出 `<think>` 再输出中文正文，PSO 归因正确（Craig Reynolds 1995/1996）。**未做 llama.cpp 逐位对齐**，故不计入 `Verified`。Vulkan 共享投影为 `Experimental`。既有 NVIDIA GB10 记录中 GPU decode 为 18.5–24.3 t/s（CPU 38.8），prefill 为 19.0 t/s（CPU 36.7）；这些旧路径测量不代表本次适配。当前投影同步完成后才执行 SiLU。RADV Q8_0 固定 prefill + 32 greedy 的 max abs 为 `3.815e-6`、门槛违规 0、32 IDs 一致；CPU / GPU 冷 / 预热为 45.919748 / 18.965203 / 6.666924 s。[权重、范围与单次计时限制](VULKAN_RADV_VALIDATION_2026-10-07.md)。 |
 | Laya multilingual | `laya` | 多语言 choice / score / noul 决策 | 内嵌 tokenizer 与决策头；请求 JSON | F32 GGUF | `Verified` | 固定 HF revision `e4e9ddf21a7b1903b7acffd8814ad4307bf63a67`、官方 Laya `4066d5d5fbf08b66c6757ddeedbd797bd7655bc0`；官方计算图使用独立 C 标量算子，与禁用自动向量化/FMA 的 Rust CLI 对齐。5 个请求、195 个 checkpoint 的 token IDs、marker、shape 及全部中间/最终 logits F32 原始位一致，覆盖三种任务、单候选、结构化输入、160-token 局部注意力边界；未验证加速或量化路径。入口 `--laya-request <json>`；[复现说明](../../tools/oracle/laya/README.md)。 |
 | GLiNER2.5-Decide | `gliner2` | 分类 / 决策 | 内嵌 `tokenizer.json` 与分类头；请求指定标签 | F32 GGUF | `Verified` | 394 个张量载荷与原 Safetensors 逐字节一致；固定 GLiNER2 `55656fb`，4 个请求的 token IDs、120 个检查点和 6,919,181 个 F32 原始位在 `RMI_SCALAR=1` 下逐位一致。覆盖多任务、描述、示例和 142-token 相对位置分桶边界；SIMD、FMA、BLAS、Accelerate、量化路径未对齐。入口 `--jev --gliner2-decide` 与 `/v1/jev/score`；[复现说明](../../tools/oracle/gliner/README.md)。 |
 | Spark-X2.5-1.7B | `spark2_5` | 文本生成、thinking | 无 | BF16 | `Verified` | 真实 GGUF 中英文和算术冒烟通过；尚未完成 XFllama.cpp token 级 Oracle 对齐。 |
@@ -69,7 +71,8 @@ RADV 的实际数值、成品、性能和失败范围见 [实机记录](VULKAN_R
 | Gemma 4 12B | `gemma4` | 文本、音频 | 音频需要 F16 `gemma4ua` mmproj | Q8_0 LLM + F32 KV；F16 `gemma4ua` | `Verified` | [`tests/gemma4_reference.rs`](tests/gemma4_reference.rs) 覆盖三步文本 raw-bit parity，并在 AVX2+FMA+F16C x86_64 CPU 上与 llama.cpp `b96806d` 逐位比较音频 RMSNorm 和 3840 维投影；音频严格要求 16 kHz mono PCM16 WAV。 |
 | LongCat Image Edit / Edit Turbo（Transformer） | `flux`，显式 LongCat 张量契约 | packed latent + 3584 维上下文前向（测试专用） | 当前仅使用各自 Transformer GGUF；输入特征由测试提供 | Q8_0 主干 + BF16 投影，10 double + 20 single blocks | `Verified`（Transformer 标量） | 两个真实 414-tensor 模型各两组输入/位置/timestep；共 176 条 checkpoint / 1,536,640 个 F32 words 与固定 sd.cpp `3f8527a` 完全相同。测试入口 `tests/longcat_reference.rs`，`RMI_SCALAR=1`；关闭 SIMD/FMA/FP16 GELU 查表与外部加速库。[复现与边界](../../tools/oracle/longcat/README.md)。 |
 | LongCat Image Edit / Edit Turbo（完整编辑入口） | `flux`，显式指定 Edit/Turbo | 方形原图 + 指令 → PNG | 两个 GGUF 共用 Edit 的 Qwen2.5-VL-7B、Tokenizer 和 BF16 Flux VAE；scheduler 分别配置 | Q8_0 Transformer + BF16 编码器/VAE | `Experimental` | 固定 32×32 小图、seed 42、CFG 1：Edit 单步和 Turbo 两步的图文条件、VAE latent、采样结果原始 F32 位及最终 RGB 字节均与固定 sd.cpp 相同。默认尺寸、默认步数、非方形输入和加速路径未核验。[运行与限制](../../tools/oracle/longcat/README.md)。 |
-| Z-Image Turbo | `pig` | 文生图 | DiT、Qwen3 文本编码器、Flux VAE | Q8_0 DiT + Q8_0 文本编码器 + F16 VAE | `Verified` | [`tests/z_image_reference.rs`](tests/z_image_reference.rs) 覆盖 pinned Oracle 和 prompt 敏感性；当前范围是 CPU、512×512。 |
+| Z-Image Turbo | `pig` | 文生图 | DiT、Qwen3 文本编码器、Flux VAE | Q8_0 DiT + Q8_0 文本编码器 + F16 VAE | `Verified`（CPU） | [`tests/z_image_reference.rs`](tests/z_image_reference.rs) 覆盖 pinned Oracle 和 prompt 敏感性；当前范围是 512×512。 |
+| Z-Image Turbo GPU 路径 | `pig` | 512×512 文生图，DiT 投影与 F16 VAE 卷积走 Vulkan | 同上 | 同上（需 `--features vulkan` + `--gpu`） | `Experimental` | 既有 NVIDIA GB10 记录为 8 步 512×512 出图 132 s、256×256 CPU/GPU PSNR 41.9 dB。本次 RADV 512×512 八步成图 402.758633 s；128×128 两步 CPU/GPU 为 359.780291 / 26.349318 s，PSNR 39.3589 dB，像素不逐位一致，512×512 CPU 成品未完成。未建立整条图像管线的浮点 parity；attention / RoPE / FFN 激活仍在 host。[RADV 范围与证据](VULKAN_RADV_VALIDATION_2026-10-07.md)。 |
 | Qwen-Image-2.1 7B DiT | 无 metadata；完整 Qwen-Image-2.1 张量契约 | 给定 latent、context、timestep 计算 F32 速度场 | Qwen-Image-2.1 DiT GGUF | Q8_0 矩阵、BF16/F32 混合 GGUF | `Verified`（仅 DiT 前向） | 本地文件 SHA-256 `c0ed4b2ffd56cbe9c3df1e4a4098045256484ebe94ba5a7e4338d35ec046baa5`（7,640,860,384 bytes）；固定 stable-diffusion.cpp `2f886889e6e8b78738d6b87f7191f6018557c551` 与 ggml `4bf5f6000653b7881d00963cd6ddb665ccd62a8d`；16×16 latent、128 行 context、timestep 500 的输入、32 层和最终 16,384 个 F32 速度场值逐位对照，复现入口为 [`parity.sh`](../../tools/oracle/qwen_image_2_1/parity.sh)。主 CLI 使用 `--model ... --out velocity.bin`，尺寸可用 `--qwen-latent-width/--qwen-latent-height` 指定；未提供 latent/context 文件时使用明确标注的确定性 synthetic 输入。无文本编码器、采样器和 VAE 解码，不提供文生图图片。 |
 
 ## 已接入但未达到 Verified 的范围
