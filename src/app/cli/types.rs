@@ -115,6 +115,7 @@ pub struct CliOptions {
     pub out: Option<PathBuf>,
     pub tts_model: Option<PathBuf>,
     pub tts_mmproj: Option<PathBuf>,
+    pub qwen_omni_bf16: Option<PathBuf>,
     pub jev: bool,
     pub laya_request: Option<PathBuf>,
     pub jev_context: Option<String>,

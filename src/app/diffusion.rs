@@ -600,26 +600,53 @@ pub fn run_auk_cli(
     seed: i64,
     out: std::path::PathBuf,
     n_threads: usize,
+    ref_audio: Option<&std::path::Path>,
+    instruct: Option<&str>,
+    duration_seconds: Option<f32>,
+    cfg_scale: Option<f32>,
+    audio_tower: Option<Arc<dyn TensorSource>>,
 ) -> Result<(), String> {
     let started = Instant::now();
-    let pipeline =
-        crate::models::diffusion::auk::AukPipeline::load(diffusion, vae, text, n_threads)?;
+    let pipeline = crate::models::diffusion::auk::AukPipeline::load_with_audio_tower(
+        diffusion,
+        vae,
+        text,
+        audio_tower,
+        n_threads,
+    )?;
     println!(
         "AuK components loaded in {}ms",
         started.elapsed().as_millis()
     );
-    let duration_sec = 1usize;
-    let audio = pipeline.generate_audio(
-        prompt,
-        &crate::models::diffusion::auk::AukOptions {
-            steps,
-            sample_rate: sample_rate as u32,
-            duration_sec,
-            seed,
-            guidance_scale: 2.0,
-            instruct: None,
-        },
-    )?;
+    let duration_sec = duration_seconds
+        .map(|d| d as usize)
+        .unwrap_or(1usize)
+        .max(1);
+    let guidance_scale = cfg_scale.unwrap_or(2.0);
+    let options = crate::models::diffusion::auk::AukOptions {
+        steps,
+        sample_rate: sample_rate as u32,
+        duration_sec,
+        seed,
+        guidance_scale,
+        instruct: instruct.map(|s| s.to_string()),
+    };
+    let audio = match ref_audio {
+        Some(wav_path) => {
+            println!(
+                "[Auk] decoding reference audio {} (16 kHz mono required)",
+                wav_path.display()
+            );
+            let samples = crate::app::media::decode_audio(wav_path)?;
+            println!(
+                "[Auk] running audio tower on {} samples ({:.2}s @ 16 kHz)",
+                samples.len(),
+                samples.len() as f32 / 16_000.0
+            );
+            pipeline.generate_audio_with_reference_wav(prompt, &samples, &options)?
+        }
+        None => pipeline.generate_audio(prompt, &options)?,
+    };
     write_wav(&out, &audio)?;
     println!(
         "AuK audio written to {} ({} samples @ {} Hz) in {}ms",

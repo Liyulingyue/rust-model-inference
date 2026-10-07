@@ -17,6 +17,5 @@ __pycache__/
 .mimosa/
 .omo/
 .DS_Store
-
 .hf-venv/
-/out/
+out/
