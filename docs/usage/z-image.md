@@ -10,8 +10,9 @@ GGUF `general.architecture = pig`，对应 `src/models/diffusion/pig.rs` 与
 `src/models/diffusion/z_image/`。CLI 入口 `src/app/diffusion.rs::run_z_image_cli`。
 
 > 共用前置：构建 `cargo build --release --bin rust-model-inference`。
-> 当前**仅 CPU**，**仅 512×512**，**仅 txt2img**。
-> img2img、GPU、Z-Image Base 列为 `Unsupported`（SUPPORTED_MODELS.md）。
+> CPU 的 pinned Oracle 验证范围为 **512×512、txt2img**。
+> Vulkan 为实验性后端：构建加 `--features vulkan`，运行加 `--gpu`。
+> img2img、Z-Image Base 仍为 `Unsupported`；设备验证见 [RADV 记录](../develop/VULKAN_RADV_VALIDATION_2026-10-07.md)。
 
 ## 1. 三组件
 
@@ -304,7 +305,7 @@ VAE 只导出 `decoder.*`（txt2img 是 latent → 像素，编码器用不上�
 | Z-Image Turbo（CPU、512×512、txt2img） | `Verified`（[tests/z_image_reference.rs](../../tests/z_image_reference.rs) 覆盖 pinned Oracle） |
 | Z-Image Base | `Unsupported` |
 | img2img | `Unsupported` |
-| GPU 后端 | `Unsupported`（仓库 CPU-only） |
+| GPU 后端 | `Experimental`（DiT 与 F16 VAE 卷积 offload；[RADV 记录](../develop/VULKAN_RADV_VALIDATION_2026-10-07.md)） |
 
 ## 5. 与 Oracle 的对齐
 

@@ -8,7 +8,7 @@ layout(std430, binding = 2) readonly buffer W1 { uint data[]; } w1;
 layout(std430, binding = 3) readonly buffer W2 { uint data[]; } w2;
 layout(push_constant) uniform PC {
     uint input_word;
-    uint unused_scales_word;
+    uint reduction_lanes;
     uint n_in;
     uint elements_per_row;
     uint output0_word; uint rows0; uint output0_stride;
@@ -16,6 +16,8 @@ layout(push_constant) uniform PC {
     uint output2_word; uint rows2; uint output2_stride;
     uint group_count; uint input_sum_word; uint input_stride; uint q8_stride; uint scales_stride; uint input_sum_stride; uint q8k_stride; uint q8k_scales_stride; uint token_rows;
 } pc;
+
+shared float partial[8];
 
 uint weight_word(uint slot, uint index) {
     if (slot == 0u) return w0.data[index];
@@ -33,11 +35,35 @@ void main() {
     uint token_row = gl_WorkGroupID.z / pc.group_count; uint slot = gl_WorkGroupID.z % pc.group_count;
     uint row = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
     uint rows = slot == 0u ? pc.rows0 : (slot == 1u ? pc.rows1 : pc.rows2);
-    if (slot >= pc.group_count || row >= rows || gl_LocalInvocationID.x != 0u) return;
+    if (slot >= pc.group_count || row >= rows) return;
 
     precise float sum = 0.0;
     uint row_base = row * pc.elements_per_row;
-    for (uint index = 0u; index < pc.n_in; index++) {
+    uint index = 0u;
+    if (pc.reduction_lanes != 0u) {
+        // Match dot_bf16_f32's FMA streams and horizontal sum, before the tail.
+        // ponytail: 4/8 active lanes in a 64-lane group; tune occupancy after parity.
+        uint lane = gl_LocalInvocationID.x;
+        uint vector_end = pc.n_in / pc.reduction_lanes * pc.reduction_lanes;
+        if (lane < pc.reduction_lanes) {
+            precise float acc = 0.0;
+            for (uint offset = lane; offset < vector_end; offset += pc.reduction_lanes) {
+                float input_value = uintBitsToFloat(arena.data[pc.input_word + token_row * pc.input_stride + offset]);
+                acc = fma(weight_bf16(slot, row_base + offset), input_value, acc);
+            }
+            partial[lane] = acc;
+        }
+        barrier();
+        if (lane != 0u) return;
+        sum = pc.reduction_lanes == 8u
+            ? ((partial[0] + partial[4]) + (partial[1] + partial[5]))
+                + ((partial[2] + partial[6]) + (partial[3] + partial[7]))
+            : (partial[0] + partial[1]) + (partial[2] + partial[3]);
+        index = vector_end;
+    } else if (gl_LocalInvocationID.x != 0u) {
+        return;
+    }
+    for (; index < pc.n_in; index++) {
         float input_value = uintBitsToFloat(arena.data[pc.input_word + token_row * pc.input_stride + index]);
         precise float term = weight_bf16(slot, row_base + index) * input_value;
         sum += term;

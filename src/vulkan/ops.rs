@@ -289,6 +289,8 @@ pub(crate) enum GpuWeightFormat {
     Q6_K,
     F16,
     BF16,
+    /// BF16 storage with the CPU dot_bf16_f32 reduction contract.
+    BF16Dot,
     F32,
     MlxAffine4,
     MlxAffine8,
@@ -323,7 +325,7 @@ impl GpuWeightFormat {
             Self::Q5_K => (256, 176, Q5_K_MATMUL),
             Self::Q6_K => (256, 210, Q6_K_MATMUL),
             Self::F16 => (1, 2, F16_MATMUL),
-            Self::BF16 => (1, 2, BF16_MATMUL),
+            Self::BF16 | Self::BF16Dot => (1, 2, BF16_MATMUL),
             Self::F32 => (1, 4, F32_MATMUL),
             Self::MlxAffine4 => (64, 36, MLX_AFFINE_MATMUL),
             Self::MlxAffine8 => (64, 68, MLX_AFFINE_MATMUL),
@@ -333,7 +335,12 @@ impl GpuWeightFormat {
     fn uses_f32_input(self) -> bool {
         matches!(
             self,
-            Self::F16 | Self::BF16 | Self::F32 | Self::MlxAffine4 | Self::MlxAffine8
+            Self::F16
+                | Self::BF16
+                | Self::BF16Dot
+                | Self::F32
+                | Self::MlxAffine4
+                | Self::MlxAffine8
         )
     }
 }
@@ -1566,6 +1573,7 @@ impl<'a> Qwen3Ops<'a> {
         let (activation, scales, quantize) = match format {
             GpuWeightFormat::F16
             | GpuWeightFormat::BF16
+            | GpuWeightFormat::BF16Dot
             | GpuWeightFormat::F32
             | GpuWeightFormat::MlxAffine4
             | GpuWeightFormat::MlxAffine8 => (input, q8_scales, None),
@@ -3545,6 +3553,15 @@ fn matmul_rows_push(
         push[19] = push[16];
         push[20] = push[17];
     }
+    if format == GpuWeightFormat::BF16Dot {
+        push[1] = if crate::ops::has_avx2_fma() && n_in >= 8 {
+            8
+        } else if crate::ops::has_neon() && n_in >= 4 {
+            4
+        } else {
+            0
+        };
+    }
     // Raw-F32 affine input does not use Q8 stride; this slot carries code width.
     match format {
         GpuWeightFormat::MlxAffine4 => push[16] = 4,
@@ -3583,7 +3600,10 @@ fn matmul_rows_push(
             format,
             GpuWeightFormat::MlxAffine4 | GpuWeightFormat::MlxAffine8
         ) {
-            if bindings.sizes[slot] != bytes as u64 {
+            // upload_static adds a 16-byte guard and rounds to a uint word.
+            // Shape-only validation uses the unpadded payload length.
+            let padded_bytes = bytes.checked_add(19).ok_or(VulkanError::OutOfMemory)? & !3;
+            if bindings.sizes[slot] != bytes as u64 && bindings.sizes[slot] != padded_bytes as u64 {
                 return Err(VulkanError::UnsupportedShape(
                     "MLX planes require the exact matrix row count".into(),
                 ));
@@ -4488,7 +4508,7 @@ fn check_weight_format(context: &VulkanContext, name: &str) -> Result<(), String
         GpuWeightFormat::Q5_K => 1024,
         GpuWeightFormat::Q6_K => 1024,
         GpuWeightFormat::F16 => 1024,
-        GpuWeightFormat::BF16 => 1024,
+        GpuWeightFormat::BF16 | GpuWeightFormat::BF16Dot => 1024,
         GpuWeightFormat::F32 => 1024,
         GpuWeightFormat::Q8_0 => 1024,
         GpuWeightFormat::MlxAffine4 | GpuWeightFormat::MlxAffine8 => 1024,
@@ -4841,7 +4861,7 @@ fn synthetic_weight(format: GpuWeightFormat, n_in: usize, n_out: usize) -> Vec<u
                     };
                     data[offset..offset + 2].copy_from_slice(&bits.to_le_bytes());
                 }
-                GpuWeightFormat::BF16 => {
+                GpuWeightFormat::BF16 | GpuWeightFormat::BF16Dot => {
                     let bits: u16 = match block {
                         0 => 0x0000,
                         1 => 0x8000,
@@ -4974,6 +4994,15 @@ fn cpu_weight_matvec(
         GpuWeightFormat::BF16 => {
             let kernel = crate::ops::kernel::bf16::BF16Kernel::new(weight);
             crate::ops::kernel::Kernel::forward(&kernel, input, &mut output, n_in, n_out);
+        }
+        GpuWeightFormat::BF16Dot => {
+            for (row, value) in output.iter_mut().enumerate() {
+                *value = crate::ops::dot_bf16_f32(
+                    input,
+                    &weight[row * n_in * 2..(row + 1) * n_in * 2],
+                    n_in,
+                );
+            }
         }
         GpuWeightFormat::F32 => {
             let values = weight
@@ -5491,6 +5520,59 @@ fn check_close(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "requires a Vulkan device; checks the canonical Q8 reduction bits"]
+    fn vulkan_q8_grouped_preserves_eight_stream_reduction() {
+        use super::{BatchedLinearRuntime, GpuWeightFormat::Q8_0};
+        const WIDTH: usize = 1024;
+        const OUTPUTS: usize = 65;
+        let context = Box::leak(Box::new(super::VulkanContext::new().unwrap()));
+        let weight = super::synthetic_weight(Q8_0, WIDTH, OUTPUTS);
+        let input: Vec<_> = (0..3 * WIDTH)
+            .map(|i| ((i * 29 % 251) as f32 - 125.0) / 97.0)
+            .collect();
+        let mut expected = Vec::new();
+        for input in input.chunks_exact(WIDTH) {
+            let mut q8 = vec![0; WIDTH];
+            let mut scales = vec![0.0; WIDTH / 32];
+            crate::ops::quantize_q8_0_into(input, WIDTH, &mut q8, &mut scales);
+            for row in weight.chunks_exact(WIDTH / 32 * 34) {
+                let mut acc = [0.0f32; 8];
+                for (block, bytes) in row.chunks_exact(34).enumerate() {
+                    let scale = crate::ops::f16_to_f32(u16::from_le_bytes([bytes[0], bytes[1]]))
+                        * scales[block];
+                    for (group, value) in acc.iter_mut().enumerate() {
+                        let dot: i32 = (0..4)
+                            .map(|i| {
+                                i32::from(bytes[2 + group * 4 + i] as i8)
+                                    * i32::from(q8[block * 32 + group * 4 + i] as i8)
+                            })
+                            .sum();
+                        *value = (dot as f32).mul_add(scale, *value);
+                    }
+                }
+                expected.push(
+                    ((acc[0] + acc[4]) + (acc[1] + acc[5]))
+                        + ((acc[2] + acc[6]) + (acc[3] + acc[7])),
+                );
+            }
+        }
+        let mut runtime = BatchedLinearRuntime::new(context, 3, WIDTH, OUTPUTS, 2).unwrap();
+        let mut actual = vec![f32::NAN; expected.len()];
+        let before = context.submission_count();
+        runtime
+            .matmul_rows(&weight, Q8_0, &input, 3, WIDTH, OUTPUTS, &mut actual)
+            .unwrap();
+        assert_eq!(context.submission_count(), before + 1);
+        for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "Q8 reduction at {index}"
+            );
+        }
+    }
+
     #[test]
     #[ignore = "requires a Vulkan device"]
     fn tiled_attention_limits_preserve_baseline_operators() {
@@ -6512,6 +6594,45 @@ mod tests {
                     )
                 };
                 assert_eq!(prepare(&regions).unwrap().1, [3, 1, (rows * 3) as u32]);
+                if matches!(format, MlxAffine4 | MlxAffine8) {
+                    let padded = OperatorBindings {
+                        sizes: bindings.sizes.map(|size| size + 16),
+                        ..bindings
+                    };
+                    let output = [(regions[3], 3, 20), (regions[4], 2, 16), (regions[5], 1, 8)];
+                    assert_eq!(
+                        matmul_rows_push(
+                            16384,
+                            &limits,
+                            padded,
+                            regions[0],
+                            regions[1],
+                            Some(regions[2]),
+                            &output,
+                            256,
+                            rows,
+                            259,
+                        )
+                        .unwrap()
+                        .1,
+                        [3, 1, (rows * 3) as u32],
+                    );
+                    let mut wrong_rows = padded;
+                    wrong_rows.sizes[0] += ((256 / block) * bytes) as u64;
+                    assert!(matmul_rows_push(
+                        16384,
+                        &limits,
+                        wrong_rows,
+                        regions[0],
+                        regions[1],
+                        Some(regions[2]),
+                        &output,
+                        256,
+                        rows,
+                        259,
+                    )
+                    .is_err());
+                }
                 for index in [0, 1, 2, 3, 4, 5] {
                     if (index == 1 && is_float) || (index == 2 && format != Q4_1) {
                         continue;

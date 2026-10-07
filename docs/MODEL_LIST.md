@@ -1,7 +1,8 @@
 Mage-Flow 已接入主 CLI；下表数值与 PNG 证据来自原适配记录，远端已关机，本次入口迁移的真实权重复验未执行，见 verification.json 的 `cli_integration`。
 
 Z-Image VAE、YuE2、Edge0、LFM2/LFM2.5/LFM2MoE 与文本 embedding 已接入实验性 Vulkan 投影路径，
-新增 GPU 路径尚待实机数值、质量和性能验证；表中已有验证记录仍指原来的执行范围。
+RADV 实机数值、成品和计时范围见 [2026-10-07 验证记录](develop/VULKAN_RADV_VALIDATION_2026-10-07.md)；
+表中已有验证等级仍指原来的执行范围。
 格式与限制见 [Vulkan 文档](develop/VULKAN.md)。
 
 | 模型 | 版本 | 任务类型 | 参考实现 | 原始权重 | 推理权重 | 备注 |

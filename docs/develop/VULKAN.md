@@ -8,7 +8,7 @@ macOS 会自动查找系统 Loader，以及 Homebrew 的 `/opt/homebrew/lib/libv
 
 ## 支持范围
 
-### 2026-10-07 适配范围（实机验证待补）
+### 2026-10-07 适配与实机验证范围
 
 | 路径 | 新接入的 Vulkan 部分 | 保留在 CPU 的部分 |
 |---|---|---|
@@ -21,9 +21,11 @@ macOS 会自动查找系统 Loader，以及 Homebrew 的 `/opt/homebrew/lib/libv
 共享投影支持 F32、F16、BF16、Q8_0、Q4_0、Q4_1、Q4_K、Q5_K、Q6_K；其余格式回退 CPU。
 这些是投影级 offload，Edge0 的整图 Vulkan 资格仍为 false。每个投影持有自己的上传缓存和 arena，
 最多 64 行一批；VAE 只构建当前像素 tile 的 im2col。跨投影共享 arena/pipeline、全图融合及性能优化
-留待实机测量。当前没有这些新增路径的 GPU 数值、成品质量或性能结论，也不保证 CPU/GPU 逐位一致。
+留待测量。真实 RADV 模型、算子、成品和计时记录见
+[2026-10-07 实机验证](VULKAN_RADV_VALIDATION_2026-10-07.md)；其他设备和未列出的格式仍需验证。
 
-合入主线后，YuE2 另有 AR Vulkan 会话执行器；表中的 CPU 部分指共享投影路径。
+YuE2 正常会话使用投影 offload。旧整图 AR 执行器存在 BF16 数值合约和长前缀执行问题，
+已停用；隔离生命周期测试不能证明整图可用。
 Z-Image VAE 的主线 BF16/F32 分支保留原有计算，新增卷积 offload 只接入 F16 分支。
 
 投影在调用线程上同步完成，之后才执行 SiLU、bias 或 residual。GPU 失败或拒绝 shape 时，
@@ -43,20 +45,16 @@ cargo test --profile release-fast --locked --features vulkan --lib \
   vulkan_yue2_bf16_rounds_after_bias_across_tiles -- --ignored --nocapture
 ```
 
-随后以同一 GGUF、prompt/lyrics、seed、batch、context、精度与线程数分别跑 CPU / `--gpu`，
+以同一 GGUF、prompt/lyrics、seed、batch、context、精度与线程数分别跑 CPU / `--gpu`，
 记录设备和驱动、权重 SHA-256、实际 GPU dispatch、逐层数值、greedy token / embedding 排序、
 歌曲和图像质量。用 `RUST_GPU_DISPATCH_TRACE=1` 核对使用的 shader，冷启动上传与预热计时分开记录。
 YuE2 的 BF16 舍入阈值和 NAR 累积误差必须单独验收。
 
-本次本机检查覆盖 default / vulkan / vulkan+parity-trace 的 lib、CLI、server 编译，
-格式、新增 SPIR-V 的 validator / 重编译字节一致性，以及路由、投影回退、形状、MLX、YuE2、LFM
-和 BERT 回归。适配阶段的全量 CPU 测试仍有基线失败；隔离 `60c5209` 基线复现了同一批问题。
-另外修复了 VAE patch 零填充和 F32 行数访问器忽略 `n_out` 的问题。
-全量 `scripts/vulkan-shaders.sh check` 在历史 `q8_matmul_grouped_dp4a.spv` 的重编译字节比对处失败，
-本次与基线相同；没有重写历史二进制。上述检查没有运行新增 GPU 路径。
-
-合入 `origin/main`（`50fd20e`）后，三种配置编译、上述 shader 静态检查及 118 项定向回归通过。
-VAE 的 SiLU 逐位断言仍失败，已在隔离的 `50fd20e` 基线上复现完全相同的差异。
+实机修复了 MLX padding 校验、Q8 分组求和顺序和 YuE2 BF16 投影归约。
+三个修改的 shader 通过 validator 与重编译字节比对，完整 manifest hash 校验通过。
+全量 shader checker 仍在未修改的 `softmax.spv` 重编译字节差异处失败。
+旧单行 F32 零误差检查与 CPU VAE SiLU 逐位断言均在隔离 `50fd20e` 基线上复现；
+没有放宽门槛，也不声明全量测试通过。
 
 ### 已有整图执行器
 
@@ -112,7 +110,7 @@ bash scripts/vulkan-shaders.sh check
 cargo fmt --check
 cargo check --locked --features vulkan --lib
 cargo check --locked --features vulkan --bin rust-model-inference
-cargo check --locked --features vulkan --bin server
+cargo check --locked --features vulkan --bin rust-model-server
 cargo check --locked --features vulkan --examples
 
 cargo run --release --locked --features vulkan --example vk_check

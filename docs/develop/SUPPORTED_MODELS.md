@@ -2,12 +2,13 @@
 
 Mage-Flow 已接入主 CLI；下表数值与 PNG 证据来自原适配记录，远端已关机，本次入口迁移的真实权重复验未执行，见 verification.json 的 `cli_integration`。
 
-> 更新于 2026-10-06。以主 CLI `rust-model-inference` 为准。
+> 更新于 2026-10-07。以主 CLI `rust-model-inference` 为准。
 
 相同的 `general.architecture` 只表示会进入同一条代码路径，不代表任意同架构 GGUF 都已确认可用。未在“具体型号”表中出现的模型，应先按 `Supported` 或 `Experimental` 看待，不能默认视为 `Verified`。
 
 2026-10-07：Z-Image VAE、YuE2、Edge0、LFM2/LFM2.5/LFM2MoE 与文本 embedding 的
-Vulkan 投影适配为 **Experimental（代码接入，实机验证待补）**，不改变下表的 CPU 验证等级。
+Vulkan 投影适配为 **Experimental**，不改变下表的 CPU 验证等级。
+RADV 的实际数值、成品、性能和失败范围见 [实机记录](VULKAN_RADV_VALIDATION_2026-10-07.md)；
 具体格式、CPU 部分和设备验收命令见 [Vulkan 支持范围](VULKAN.md)。
 
 ## 状态定义
@@ -106,7 +107,7 @@ Vulkan 投影适配为 **Experimental（代码接入，实机验证待补）**�
 | Qwen3-ASR + 图像，或非零 temperature | `Unsupported` | CLI 在推理前拒绝。 |
 | Gemma 4 视频输入 | `Unsupported` | 多模态入口明确拒绝 `--video`。 |
 | LongCat 非方形编辑图、非标量数值对齐 | `Unsupported` | 实验入口只处理方形画布；固定 32×32 标量链路已逐位核对，默认尺寸与步数未核验。SIMD/FMA/BLAS/Accelerate 等路径不纳入对齐。 |
-| Z-Image Base、img2img、GPU 路径 | `Unsupported` | 当前仅实现 Z-Image Turbo 的原生 Rust CPU 文生图。 |
+| Z-Image Base、img2img | `Unsupported` | 当前实现 Z-Image Turbo 的 txt2img；Vulkan 为实验性后端。 |
 | DreamX-Creator GPU、未匹配 GGUF pair | `Unsupported` | DreamX 当前只走原生 CPU；pair ID、组件清单、版本或精度 metadata 不匹配会在加载阶段拒绝。 |
 
 ## 架构注册表

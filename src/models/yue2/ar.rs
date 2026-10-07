@@ -18,6 +18,8 @@ use super::protocol::{
 pub(crate) struct YuE2Weight {
     fast: Weight<'static>,
     bf16: Option<&'static [u8]>,
+    #[cfg(feature = "vulkan")]
+    gpu_bf16: crate::ops::kernel::vulkan::GpuLinear,
     n_in: usize,
     n_out: usize,
 }
@@ -131,6 +133,8 @@ impl YuE2Weight {
                 n_out,
             )),
             bf16: (info.ggml_type == GGMLType::BF16).then_some(bytes),
+            #[cfg(feature = "vulkan")]
+            gpu_bf16: Default::default(),
             n_in,
             n_out,
         })
@@ -157,6 +161,8 @@ impl YuE2Weight {
                 bytes, ggml_type, n_in, n_out,
             )),
             bf16: None,
+            #[cfg(feature = "vulkan")]
+            gpu_bf16: Default::default(),
             n_in,
             n_out,
         }
@@ -171,6 +177,8 @@ impl YuE2Weight {
                 n_out,
             }),
             bf16: None,
+            #[cfg(feature = "vulkan")]
+            gpu_bf16: Default::default(),
             n_in,
             n_out,
         }
@@ -363,7 +371,15 @@ impl YuE2Weight {
         let bytes = self.bf16.unwrap();
         let n_rows = input.len() / self.n_in;
         #[cfg(feature = "vulkan")]
-        if self.fast.try_vulkan_rows(input, output, n_rows) {
+        if self.gpu_bf16.try_matmul(
+            bytes,
+            crate::vulkan::ops::GpuWeightFormat::BF16Dot,
+            input,
+            output,
+            self.n_in,
+            self.n_out,
+            n_rows,
+        ) {
             for row in output.chunks_exact_mut(self.n_out) {
                 for (column, value) in row.iter_mut().enumerate() {
                     let sum = bias.map_or(*value, |bias| *value + bias[column]);
@@ -812,9 +828,9 @@ pub struct YuE2ArSession<'model> {
     q8: Vec<u8>,
     scales: Vec<f32>,
     q8k: Vec<BlockQ8K>,
-    /// Device-side mirror of the AR stack, when the build has Vulkan and the
-    /// weights are eligible. Built lazily on the first prefill; `None` after a
-    /// failed attempt so the fallback is not retried per token.
+    /// Experimental whole-AR mirror. Normal sessions keep CPU state operations
+    /// and offload projections: the mirror lacks YuE2's BF16 rounding contract.
+    /// Outer None requests initialization; Some(None) permanently keeps fallback.
     #[cfg(feature = "vulkan")]
     gpu: Option<Option<crate::vulkan::yue2::YuE2VulkanSession<'model>>>,
 }
@@ -916,7 +932,9 @@ impl<'model> YuE2ArSession<'model> {
                 max_input.div_ceil(256)
             ],
             #[cfg(feature = "vulkan")]
-            gpu: None,
+            // ponytail: reuse projection offload until the whole-AR BF16 ops,
+            // KV round trip and long-prefix submissions pass real-model checks.
+            gpu: Some(None),
         })
     }
 
@@ -944,9 +962,9 @@ impl<'model> YuE2ArSession<'model> {
 
         #[cfg(feature = "vulkan")]
         {
-            // Build the session once; a failed attempt is remembered so the
-            // fallback is not retried on every token.
-            if matches!(self.gpu, Some(None)) {
+            // Initialize before the prefix so decode sees its device KV.
+            // Some(None) remembers fallback and must never retry with empty KV.
+            if self.gpu.is_none() {
                 self.gpu = Some(match crate::ops::get_vulkan_context() {
                     Some(context) => crate::vulkan::yue2::YuE2VulkanSession::try_new(
                         self.model,
@@ -2137,6 +2155,45 @@ mod performance_tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    #[cfg(feature = "vulkan")]
+    #[test]
+    #[ignore = "requires a Vulkan device and YUE2_MODEL_GGUF pointing to a BF16 GGUF"]
+    fn vulkan_ar_initializes_before_prefix_and_reuses_session() {
+        let path =
+            std::env::var("YUE2_MODEL_GGUF").expect("set YUE2_MODEL_GGUF to a BF16 YuE2 GGUF");
+        let source: Arc<dyn TensorSource> = Arc::from(
+            crate::open_model_source(std::path::Path::new(&path), crate::ComponentRole::Llm)
+                .unwrap(),
+        );
+        let tokenizer = Arc::new(
+            BPETokenizer::from_gguf_metadata(|key| source.metadata(key).cloned()).unwrap(),
+        );
+        let model =
+            YuE2Model::from_source(source, tokenizer, Arc::new(ComputePool::new(4))).unwrap();
+        crate::ops::enable_gpu();
+        let context = crate::ops::get_vulkan_context().expect("Vulkan required");
+        let before = context.submission_count();
+        let mut session = YuE2ArSession::new(&model, 8).unwrap();
+        assert!(matches!(session.gpu, Some(None)));
+        // Exercise the isolated executor's lifecycle; normal sessions use
+        // projection offload until its numerical contract is validated.
+        session.gpu = None;
+        assert!(session
+            .prefill(&[1, 2, 3, 4])
+            .unwrap()
+            .iter()
+            .all(|v| v.is_finite()));
+        assert!(
+            session.gpu.as_ref().is_some_and(Option::is_some),
+            "the prefix must populate the device KV before incremental decode"
+        );
+        assert_eq!(session.position(), 4);
+        assert_eq!(context.submission_count(), before + 1);
+        assert!(session.prefill(&[5]).unwrap().iter().all(|v| v.is_finite()));
+        assert_eq!(session.position(), 5);
+        assert_eq!(context.submission_count(), before + 2);
+    }
+
     struct CountingKernel {
         inner: Box<dyn Kernel>,
         calls: Arc<AtomicUsize>,
@@ -2243,6 +2300,8 @@ mod performance_tests {
                     n_out,
                 )),
                 bf16: Some(bytes),
+                #[cfg(feature = "vulkan")]
+                gpu_bf16: Default::default(),
                 n_in,
                 n_out,
             };
@@ -2294,7 +2353,7 @@ mod performance_tests {
     #[ignore = "requires a Vulkan device; fails if offload is unavailable"]
     fn vulkan_yue2_bf16_rounds_after_bias_across_tiles() {
         crate::ops::enable_gpu();
-        crate::ops::get_vulkan_context().expect("Vulkan device required");
+        let context = crate::ops::get_vulkan_context().expect("Vulkan device required");
         let bytes: &'static [u8] = Box::leak(
             [1.0, 0.0, 0.0, 1.0]
                 .into_iter()
@@ -2305,6 +2364,7 @@ mod performance_tests {
         let weight = YuE2Weight {
             fast: Weight::from_quantized(QuantizedTensor::from_bytes(bytes, GGMLType::BF16, 2, 2)),
             bf16: Some(bytes),
+            gpu_bf16: Default::default(),
             n_in: 2,
             n_out: 2,
         };
@@ -2314,10 +2374,20 @@ mod performance_tests {
         let bias = [0.001953125, -0.001953125];
         let mut actual = vec![f32::NAN; 130];
         assert!(
-            weight.fast.try_vulkan_rows(&input, &mut actual, 65),
+            weight.gpu_bf16.try_matmul(
+                bytes,
+                crate::vulkan::ops::GpuWeightFormat::BF16Dot,
+                &input,
+                &mut actual,
+                2,
+                2,
+                65
+            ),
             "GPU BF16 projection declined"
         );
+        let before = context.submission_count();
         weight.matmul_bf16(&input, Some(&bias), &mut actual, &ComputePool::new(2));
+        assert_eq!(context.submission_count(), before + 2);
         assert_eq!(actual[0], 1.0078125); // Rounding before bias would yield 1.0.
         for row in 0..65 {
             let mut expected = [0.0; 2];
@@ -2330,6 +2400,49 @@ mod performance_tests {
                 0,
             );
             assert_eq!(actual[row * 2..row * 2 + 2], expected);
+        }
+        // BF16 rounding magnifies a reassociated reduction. CPU SIMD keeps
+        // independent FMA streams, while an ascending scalar sum loses a unit term.
+        for width in [1024, 1027] {
+            let bytes: &'static [u8] = Box::leak([0x80, 0x3f].repeat(width * 2).into_boxed_slice());
+            let weight = YuE2Weight {
+                fast: Weight::from_quantized(QuantizedTensor::from_bytes(
+                    bytes,
+                    GGMLType::BF16,
+                    width,
+                    2,
+                )),
+                bf16: Some(bytes),
+                gpu_bf16: Default::default(),
+                n_in: width,
+                n_out: 2,
+            };
+            let mut input = vec![0.0; 65 * width];
+            for row in input.chunks_exact_mut(width) {
+                row[..4].copy_from_slice(&[33554432.0, 1.0, -33554432.0, 1.0]);
+                row[width - 1] = 0.25;
+            }
+            assert!(weight.gpu_bf16.try_matmul(
+                bytes,
+                crate::vulkan::ops::GpuWeightFormat::BF16Dot,
+                &input,
+                &mut actual,
+                width,
+                2,
+                65
+            ));
+            let before = context.submission_count();
+            weight.matmul_bf16(&input, Some(&bias), &mut actual, &ComputePool::new(2));
+            assert_eq!(context.submission_count(), before + 2);
+            for (row, input) in input.chunks_exact(width).enumerate() {
+                let mut expected = [0.0; 2];
+                torch_bf16_matmul_rows(bytes, input, Some(&bias), &mut expected, width, 0);
+                assert_eq!(
+                    actual[row * 2..row * 2 + 2],
+                    expected,
+                    "width={width} row={row}"
+                );
+            }
         }
     }
 }
