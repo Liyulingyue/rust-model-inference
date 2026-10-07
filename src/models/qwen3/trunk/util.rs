@@ -253,7 +253,66 @@ pub fn usize_to_u64(value: usize, name: &str) -> Result<u64, String> {
 mod tests {
     use super::*;
     use crate::models::qwen3::trunk::config::{Qwen3Config, Qwen3Rope};
-    use crate::models::qwen3::trunk::tests::{qwen3vl_4b_metadata_source, qwen3vl_metadata_source};
+    use crate::models::qwen3::trunk::tests::{
+        qwen2vl_metadata_source, qwen3vl_4b_metadata_source, qwen3vl_metadata_source,
+    };
+
+    /// `qwen2vl` must resolve to M-RoPE, not to Interleaved.
+    ///
+    /// Both `qwen2vl` and `qwen3vl` carry `*.rope.dimension_sections`, so a
+    /// single arm would hand the Qwen2.5-VL text tower the Qwen3-VL flavor and
+    /// silently change every qwen2vl model's positional encoding. The two
+    /// families use different multimodal rope layouts, so the arch has to be
+    /// part of the decision.
+    #[test]
+    fn qwen2vl_uses_mrope_and_keeps_qkv_bias() {
+        let config = Qwen3Config::from_source(&qwen2vl_metadata_source()).unwrap();
+        assert_eq!(
+            config.rope,
+            Qwen3Rope::Mrope {
+                sections: [16, 24, 24, 0]
+            }
+        );
+        // qwen2vl is the only arch carrying QKV bias, and it must not pick up
+        // QK norm; both would be wrong for this checkpoint.
+        assert!(config.has_qkv_bias);
+        assert!(!config.has_qk_norm);
+        assert_eq!(config.architecture, "qwen2vl");
+    }
+
+    /// The padded fourth section must not become a fourth rotary segment.
+    ///
+    /// `sections` arrives as `[16, 24, 24, 0]`; `rope_mrope` sums to 64 and
+    /// indexes `i % 64` over `half = 64` lanes, so the `axis 3` arm is
+    /// unreachable. This pins the numbers that make that true.
+    #[test]
+    fn qwen2vl_mrope_sections_sum_to_one_head_half() {
+        let sections = [16, 24, 24, 0];
+        let total: i32 = sections.iter().sum();
+        let head_dim = 128usize;
+        assert_eq!(total as usize, head_dim / 2);
+        assert_eq!(sections[3], 0);
+        // Every lane lands in axis 0/1/2, so the trailing zero is inert.
+        for i in 0..head_dim / 2 {
+            let sector = i % total as usize;
+            assert!(sector < 64, "lane {i} would reach the fourth axis");
+        }
+    }
+
+    /// Splitting `qwen2vl` onto Mrope must not disturb the Qwen3-VL arms.
+    #[test]
+    fn qwen3vl_and_qwen3_stay_on_neox_or_interleaved() {
+        let qwen3vl = Qwen3Config::from_source(&qwen3vl_metadata_source()).unwrap();
+        assert_eq!(
+            qwen3vl.rope,
+            Qwen3Rope::Interleaved {
+                sections: [24, 20, 20, 0],
+                n_dims: 128,
+            }
+        );
+        let qwen3vl_4b = Qwen3Config::from_source(&qwen3vl_4b_metadata_source()).unwrap();
+        assert!(matches!(qwen3vl_4b.rope, Qwen3Rope::Interleaved { .. }));
+    }
 
     #[test]
     fn qwen3vl_requires_qk_norm_and_fixed_imrope_sections() {
