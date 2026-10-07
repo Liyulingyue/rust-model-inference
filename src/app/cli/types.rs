@@ -62,6 +62,19 @@ pub struct CliOptions {
     pub cfg: Option<f32>,
     pub noise: Option<PathBuf>,
     pub references: Vec<PathBuf>,
+    /// LongCat Image Edit: which published checkpoint to load. The two differ
+    /// in their Flux schedule, so this is not a plain weight swap.
+    pub longcat_kind: Option<String>,
+    /// LongCat Image Edit: directory holding `text_encoder/`, `vae/` and
+    /// `tokenizer/`. These are safetensors, not GGUF, so they do not fit the
+    /// `--text-encoder` / `--vae` pair the other image models use.
+    pub components: Option<PathBuf>,
+    /// LongCat Image Edit: the image being edited.
+    pub input: Option<PathBuf>,
+    /// LongCat Image Edit: square canvas side, must be a multiple of 16.
+    pub side: Option<usize>,
+    /// LongCat Image Edit: classifier-free guidance scale.
+    pub guidance: Option<f32>,
     pub seed: Option<i64>,
     pub duration_seconds: Option<f32>,
     pub fps: Option<usize>,
@@ -174,6 +187,24 @@ pub struct ZImageCliOptions {
     pub resolution: usize,
     pub seed: i64,
     pub out: PathBuf,
+}
+
+/// LongCat Image Edit / Edit Turbo. Unlike the other image models the text
+/// encoder and VAE arrive as a safetensors directory rather than GGUF, so
+/// `components` names a directory instead of a file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LongCatCliOptions {
+    pub kind: crate::models::diffusion::longcat::LongCatKind,
+    pub model: PathBuf,
+    pub components: PathBuf,
+    pub input: PathBuf,
+    pub out: PathBuf,
+    pub instruction: String,
+    pub side: usize,
+    pub steps: usize,
+    pub guidance: f32,
+    pub seed: u64,
+    pub overwrite: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

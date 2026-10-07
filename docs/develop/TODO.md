@@ -69,6 +69,8 @@ NEON on aarch64; no AVX-512).
       `_mm256_dpbssd_epi32`（带 saturate 的三操作数 int8 dot）在
       K2-Horizon / Breeze 等 Q8_0 路径上可省一次 saturate pass。
 - [ ] **Q4_0 kernel 加 FMA + tiling** — 见 [TODO-001](#todo-001-q4_0-avx2-kernel-不使用-fma性能受限)。
+- [ ] **token 维寄存器分块：消除 per-token 权重重读** — 详见 [TODO-019](#todo-019-token-维寄存器分块消除-per-token-权重重读)。
+      文本编码只跑到约 11% 的 NEON 峰值，瓶颈是每个 token 都从 DRAM 重读整个权重矩阵。
       预期 1.5-2× 加速。
 
 ### JEV 决策评分 follow-ups
@@ -997,6 +999,92 @@ ComputePool，不是把 LLM 迁去 rayron"。迁移面：
 - 迁移后 rayron 依赖可整体从 Cargo.toml 移除，第 1 条的"两池对齐"问题随之消失。
 
 注意：**这一条不修第 2 条**（vision 输出已证逐位相同）。它是第 1 条的根治手段。
+
+### TODO-019: token 维寄存器分块，消除 per-token 权重重读
+
+**目标**：让一次权重载入服务多个 token，把权重流量除以分块宽度 NR。图像编辑的文本
+编码与去噪合计占端到端 ~95% 的时间，而算力利用率只有峰值的 ~11%——不是算不动，是
+权重搬不过来。
+
+#### 现状
+
+`BF16Kernel::forward_batched`（`src/ops/kernel/bf16/mod.rs`）与
+`F16Kernel::forward_batched`（`src/ops/kernel/f16/mod.rs`）都是：
+
+```rust
+for token in 0..n_tokens {
+    self.forward(&input[token * n_in..], &mut output[token * n_out..], ...);
+}
+```
+
+每个 token 独立做一次 matmul，**整个权重矩阵每个 token 从 DRAM 重读一遍**。
+`qwen3::trunk::text_encode_forward` 的 `project_tokens`（本分支新加，按 token 分区到
+`ComputePool`）虽然把并行度做上去了，但每个 token 内部仍是
+`forward_prepared(..., 0, 1)` 的单行调用，权重流量一分没省。
+`longcat::dit::Layer::forward` 是同样的 `chunks_exact` 逐 token 结构。
+`qwen35::vision::matmul_weight_batch_pooled` 同理——分区解决并行度，不解决流量。
+
+以 LongCat 文本编码（Qwen2.5-VL-7B，512 token）估算：每层 7 个投影、单投影权重
+3584×3584×2 B ≈ 25.7 MB，512 token × 7 × 25.7 MB ≈ **2.6 TB** 权重流量。
+
+#### 影响
+
+本机（20 核 aarch64，`target-cpu=native`，release-fast）Turbo 32×32 / seed 42 / 20 线程：
+
+| 阶段 | 耗时 |
+|---|---|
+| 文本编码（512 tok） | 158 s |
+| 去噪 | 291 s/步 |
+| vision | 22.6 s |
+| VAE | 0.10 s |
+
+文本编码 158 s 跑约 7.3 TFLOP ≈ **46 GFLOP/s**，相对 20 核 NEON 峰值（~400 GFLOP/s）
+只有 **~11%**。分块宽度 NR=4 理论上把权重流量除以 4。
+
+#### 何时触发
+
+任何 prefill / 多 token 场景（图像编辑的文本编码与去噪、embedding、batched prefill）。
+**autoregressive 单 token decode 不受影响**（n_tokens=1，没有可复用的维度），
+所以这条不影响生成速度，只影响 prefill。
+
+#### 选项
+
+1. **在 kernel 内加 token 分块入口**（推荐）。新增
+   `forward_batched_tiled(&self, input, output, n_in, n_out, ith, nth)`：对每个权重行，
+   一次载入后用 NR 组累加器算 NR 个 token，然后 `ith/nth` 按**输出行**分区。
+   调用方把现有的"按 token 分区"改成"按行分区 + kernel 内部分块"。
+2. **调用方自建分块缓冲**。不改 kernel，在模型层把 NR 个 token 的输入打包成一个
+   `n_in*NR` 的行——但这会改变 matmul 的数学形状（N 那维变成假的），权重布局不匹配，
+   实际等于把权重复制 NR 份。**不可行**。
+3. **转置权重为 token-major**。一次性重排权重让 token 维连续。改动面大、加载变慢，
+   且对 mmap 的 GGUF 不友好。
+
+#### 推荐
+
+选项 1。理由：分块是纯粹的访存优化，不改权重精度、不改输入精度、不改累加顺序之外的
+任何数学，因此**不触碰任何逐位对齐契约**——与本分支已建立的"重结合可以、近似不行"
+原则相容。
+
+实施注意：
+- `project_tokens` 当前按 token 分区，改成按行分区后 dispatch 次数会变多
+  （QKV 从 1 次变 3 次）。需要权衡 dispatch 开销与流量节省，NR=4 时预计净收益为正。
+- Q8_0 路径（`q8_0::dispatch`）已经按 NRC4 一次算 4 个**输出行**，思路相同；
+  缺的是复用同一权重的**多个输入行**，两者是正交的分块维度。
+- 与 [TODO-018](#todo-018-server-的两池超售visionaudio-仍走-rayron) 第 3 条
+  （vision 迁到 ComputePool）相关但**不同**：那条解决线程池归属，这条解决权重流量。
+  建议先做这条——它不依赖线程池迁移。
+- AuK 那边已记了同类问题（"Per-token matmul batching（`linear_into` 一调一次 token，
+  瓶颈）"），两条应共用同一个 kernel 侧分块实现。
+
+#### 关联文件
+
+- `src/ops/kernel/bf16/mod.rs`（`forward_batched`）
+- `src/ops/kernel/f16/mod.rs`（`forward_batched`）
+- `src/ops/kernel/q8_0/dispatch.rs`（已有的 NRC4 输出行分块，可作参照）
+- `src/models/qwen3/trunk/forward.rs`（`project_tokens`、`RowsWrap`、`TokenProjection`）
+- `src/models/diffusion/longcat/dit.rs`（`Layer::forward` 逐 token 结构）
+- `src/models/qwen35/vision/mod.rs`（`matmul_weight_batch` / `..._pooled`）
+- `src/core/thread_pool.rs`（`compute` / `row_range`）
 
 ---
 

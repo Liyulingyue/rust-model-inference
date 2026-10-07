@@ -414,7 +414,7 @@ pub fn dot_bf16_f32(a: &[f32], b: &[u8], n: usize) -> f32 {
     debug_assert!(b.len() >= n * 2);
     #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
     {
-        if has_neon() && n >= 4 {
+        if !super::super::scalar_mode() && has_neon() && n >= 4 {
             return unsafe { dot_bf16_f32_neon(a, b, n) };
         }
     }

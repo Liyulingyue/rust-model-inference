@@ -592,7 +592,12 @@ impl Qwen3Model {
             config.has_qkv_bias,
             config.moe,
         )?;
-        if config.architecture == "qwen3" && crate::ops::scalar_mode() {
+        // Scalar-parity mode needs the raw BF16 bytes for the projections, so
+        // bypass the dequantized kernel and hand BF16 straight to the scalar
+        // kernel. Covers both the plain Qwen3 trunk and the Qwen2.5-VL text
+        // encoder LongCat drives.
+        if matches!(config.architecture.as_str(), "qwen2vl" | "qwen3") && crate::ops::scalar_mode()
+        {
             for (index, layer) in layers.iter_mut().enumerate() {
                 for (name, weight) in [
                     ("attn_q", &mut layer.wq),

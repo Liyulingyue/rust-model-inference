@@ -3130,15 +3130,15 @@ mod tests {
 
     fn expected_seed_42_20_bits() -> Vec<u32> {
         vec![
-            0x3ff6_a527,
-            0x3fbe_5f54,
+            0x3ff6_a52a,
+            0x3fbe_5f53,
             0x3f66_9567,
-            0xc006_c0dd,
+            0xc006_c0db,
             0xbf42_14e2,
             0x3f8a_0650,
             0x3f4d_0143,
             0x3fd7_1e93,
-            0x3eb6_3341,
+            0x3eb6_3345,
             0xbf2f_c686,
             0xbefc_9934,
             0x3e77_4894,
@@ -3146,7 +3146,7 @@ mod tests {
             0x3d2b_0c00,
             0xbe80_ce79,
             0x3f5c_1fb0,
-            0xbe9e_9487,
+            0xbe9e_9482,
             0xbeca_9a91,
             0x3f4d_ac3c,
             0xbf1f_20e0,

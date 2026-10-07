@@ -15,6 +15,17 @@ pub fn gelu(x: f32) -> f32 {
     0.5 * x * (1.0 + ((2.0 / std::f32::consts::PI).sqrt() * (x + 0.044715 * x * x * x)).tanh())
 }
 
+/// ggml's F32 tanh GELU, preserving its multiplication order without FMA.
+#[inline]
+pub fn gelu_ggml_f32(x: f32) -> f32 {
+    let inner = 0.797_884_6 * x * (1.0 + 0.044_715 * x * x);
+    #[cfg(unix)]
+    let activation = unsafe { tanhf(inner) };
+    #[cfg(not(unix))]
+    let activation = inner.tanh();
+    0.5 * x * (1.0 + activation)
+}
+
 #[inline]
 pub fn gelu_erf(x: f32) -> f32 {
     0.5 * x * (1.0 + unsafe { erff(x * std::f32::consts::FRAC_1_SQRT_2) })
