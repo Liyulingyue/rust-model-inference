@@ -528,7 +528,8 @@ fn apply_branch_conv_dilated(
                     }
                     let src = src_signed as usize;
                     for ic in 0..channels_const {
-                        let w = w_slice[k * channels_const * channels_const + ic * channels_const + oc];
+                        let w =
+                            w_slice[k * channels_const * channels_const + ic * channels_const + oc];
                         sum += w * p_slice[ic * padded_frames_const + src];
                     }
                 }
