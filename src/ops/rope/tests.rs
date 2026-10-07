@@ -2,9 +2,10 @@
 
 use super::{
     neox::{rope_neox_inplace_scalar, rope_neox_inplace_with_table, rope_sin_cos},
-    rope_mrope, rope_neox_inplace, rope_neox_sleef, rope_norm, rope_norm_nrot, rope_sin_cos_sleef,
+    rope_mrope, rope_neox_sleef, rope_norm, rope_norm_nrot, rope_sin_cos_sleef,
     rope_sin_cos_sleef_table_with_threads, rope_vision,
 };
+use crate::ops::rope::rope_neox_inplace;
 
 #[test]
 fn sleef_rope_sin_cos_matches_torch_arm_bits() {
@@ -163,6 +164,42 @@ fn rope_neox_inplace_simd_matches_scalar_fallback() {
                 x.to_bits(),
                 y.to_bits(),
                 "head_dim={head_dim} n_heads={n_heads} idx={i}"
+            );
+        }
+    }
+}
+
+/// `rope_neox_inplace` and `rope_neox_inplace_with_factor(..., 1.0)`
+/// must produce byte-identical outputs (the only difference is the
+/// wasted `pos * factor` multiply in the latter). Catches a future
+/// refactor that breaks the equivalence by e.g. drifting the
+/// `theta_0 = pos as f32` vs `theta_0 = pos as f32 * factor` math
+/// (e.g. `pos_f + 1` typo).
+#[test]
+fn rope_neox_inplace_matches_with_factor_one() {
+    use super::rope_neox_inplace_with_factor;
+    for &(head_dim, n_heads, pos, freq_base) in &[
+        (64usize, 1usize, 0usize, 10_000.0f32),
+        (128, 8, 1, 1_000_000.0),
+        (256, 16, 1024, 50_000.0),
+        (96, 2, 3, 100_000.0),
+        // Large pos to exercise the powf chain.
+        (128, 4, 16384, 10_000.0),
+    ] {
+        let mut a = vec![0.0f32; n_heads * head_dim];
+        let mut b = vec![0.0f32; n_heads * head_dim];
+        for (i, slot) in a.iter_mut().enumerate() {
+            *slot = ((i as f32) * 0.0731).sin() * 3.5;
+        }
+        b.copy_from_slice(&a);
+        rope_neox_inplace(&mut a, pos, head_dim, freq_base);
+        rope_neox_inplace_with_factor(&mut b, pos, head_dim, freq_base, 1.0_f32);
+        for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+            assert_eq!(
+                x.to_bits(),
+                y.to_bits(),
+                "head_dim={head_dim} n_heads={n_heads} pos={pos} idx={i}: \
+                 rope_neox_inplace={x} rope_neox_inplace_with_factor(1.0)={y}"
             );
         }
     }

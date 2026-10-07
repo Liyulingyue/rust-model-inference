@@ -376,27 +376,43 @@ impl DecoderBlock {
         frames: usize,
         layer: usize,
     ) -> Result<(Vec<f32>, usize), String> {
+        let stage_timing = std::env::var_os("YUE2_VAE_TIMING").is_some();
+        let block_started = std::time::Instant::now();
+        let snake_time = std::time::Instant::now();
         self.snake.forward(&mut values, frames);
+        let snake_elapsed = snake_time.elapsed().as_secs_f64();
         trace(
             "yue2.vae.decoder.block",
             Some(layer),
             &[1, self.up.input, frames],
             &values,
         );
+        let up_time = std::time::Instant::now();
         let (mut values, frames) = self.up.forward(&values, frames)?;
+        let up_elapsed = up_time.elapsed().as_secs_f64();
         trace(
             "yue2.vae.decoder.block",
             Some(layer),
             &[1, self.up.output, frames],
             &values,
         );
+        let mut residual_time = 0.0f64;
         for residual in &self.residuals {
+            let residual_started = std::time::Instant::now();
             residual.forward(&mut values, frames)?;
+            residual_time += residual_started.elapsed().as_secs_f64();
             trace(
                 "yue2.vae.decoder.block",
                 Some(layer),
                 &[1, self.up.output, frames],
                 &values,
+            );
+        }
+        if stage_timing {
+            eprintln!(
+                "[yue2:vae] block {layer}: snake {snake_elapsed:.1}s up {up_elapsed:.1}s \
+                 residuals {residual_time:.1}s total {:.1}s",
+                block_started.elapsed().as_secs_f64(),
             );
         }
         Ok((values, frames))
@@ -481,8 +497,20 @@ impl YuE2Vae {
             &[1, self.input.output, length],
             &values,
         );
+        // Time each decoder stage. Only the convolutions are parallelized
+        // (rayon); the snake activations, residual adds and the final
+        // channel-major scatter are serial, so without this it is impossible
+        // to tell whether the decode is conv-bound or bound by the serial
+        // elementwise tail.
+        let stage_timing = std::env::var_os("YUE2_VAE_TIMING").is_some();
+        let decode_started = std::time::Instant::now();
+        let mut block_times = Vec::with_capacity(self.blocks.len());
         for (index, block) in self.blocks.iter().enumerate() {
+            let block_started = std::time::Instant::now();
             (values, length) = block.forward(values, length, index + 1)?;
+            if stage_timing {
+                block_times.push(block_started.elapsed().as_secs_f64());
+            }
             trace(
                 "yue2.vae.decoder",
                 Some(index + 1),
@@ -490,7 +518,14 @@ impl YuE2Vae {
                 &values,
             );
         }
+        let snake_started = std::time::Instant::now();
         self.final_snake.forward(&mut values, length);
+        if stage_timing {
+            eprintln!(
+                "[yue2:vae] final snake {:.1}s",
+                snake_started.elapsed().as_secs_f64()
+            );
+        }
         trace(
             "yue2.vae.decoder",
             Some(7),
@@ -498,6 +533,14 @@ impl YuE2Vae {
             &values,
         );
         let (values, length) = self.output.forward(&values, length)?;
+        if stage_timing {
+            eprintln!(
+                "[yue2:vae] blocks {:?} total {:.1}s, output conv, decode {:.1}s",
+                block_times,
+                snake_started.elapsed().as_secs_f64(),
+                decode_started.elapsed().as_secs_f64()
+            );
+        }
         trace(
             "yue2.vae.decoder",
             Some(8),
@@ -540,11 +583,18 @@ impl YuE2Vae {
                 .checked_mul(2)
                 .ok_or("YuE2 VAE tiled output overflow")?
         ];
+        let tile_timing = std::env::var_os("YUE2_VAE_TIMING").is_some();
+        let tiled_started = std::time::Instant::now();
+        let mut tile_times = Vec::new();
         for start in (0..frames).step_by(core) {
+            let tile_started = std::time::Instant::now();
             let end = frames.min(start.saturating_add(core));
             let left = start.saturating_sub(halo);
             let right = frames.min(end.saturating_add(halo));
             let tile = self.decode(&latents[left * 64..right * 64], right - left)?;
+            if tile_timing {
+                tile_times.push(tile_started.elapsed().as_secs_f64());
+            }
             let start_sample = start * self.config.ratio;
             let end_sample = (end * self.config.ratio).min(total);
             let crop = (start - left) * self.config.ratio;
@@ -559,6 +609,14 @@ impl YuE2Vae {
                         &tile[channel * tile_len + crop..channel * tile_len + crop + count],
                     );
             }
+        }
+        if tile_timing {
+            eprintln!(
+                "[yue2:vae] {} tiles {:?} total {:.1}s (serial over tiles)",
+                tile_times.len(),
+                tile_times,
+                tiled_started.elapsed().as_secs_f64()
+            );
         }
         Ok(output)
     }

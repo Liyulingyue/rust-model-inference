@@ -13,7 +13,9 @@ use rust_model_inference::DreamXConfig;
 use rust_model_inference::MetaValue;
 use rust_model_inference::TensorSource;
 
-const USAGE: &str = "Usage: rust-model-inference --model <path.gguf-or-ggufrs> [--prompt ...] [--threads N] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--max-context N (default 8192)] [--repetition-penalty α (default 1.0 = disabled)] [--serve [--host 0.0.0.0] [--port 8080]]\n\nRerank mode: --rerank --rerank-query <TEXT> [--rerank-doc <TEXT> ...] | [--rerank-documents <FILE>] [--rerank-instruction <TEXT>] [--rerank-max-tokens N] | cross-encoder scoring; backend picked by GGUF arch (jina-bert-v2 + cls.weight/cls.bias → bert forward, qwen3 + cls.output.weight + pooling_type=4 → qwen3 trunk + 2-class head); one sigmoid'd score per document in [0, 1]\n\nJEV mode: --jev --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | single-forward-pass decision scoring over candidate labels A/B/C/…\n\nJEV grouped: --jev --jev-multi [--jev-option <pos> --jev-option <neg> ...] (pairs) or --jev-block <label> --jev-option <a> [--jev-option <b> ...] (blocks)\n\nServer mode: --serve [--host 0.0.0.0] [--port 8080] --model <path> [--mmproj ...] [--tts] [--embedding]\n\nCLM mode: --jev --clm-head <clm-heads.gguf> --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | cosine scoring via CLM projection heads on the chosen encoder (state = context, blank line, question; candidates verbatim\n\nGLiNER2 mode: --jev --gliner2-decide --model <gliner2-decide.gguf> --jev-context <text> [--gliner2-schema <json> | --jev-question <name> --jev-option <a> [--jev-option <b> ...]] | one DeBERTa-v3 pass scores every label of every task; --gliner2-schema takes a classify_text-shaped mapping: {intent: [a, b], aspects: {labels: [x], multi_label: true, cls_threshold: 0.4}}";
+const USAGE: &str = "Usage: rust-model-inference --model <path.gguf-or-ggufrs> [--prompt ...] [--threads N] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--max-context N (default 8192)] [--repetition-penalty α (default 1.0 = disabled)] [--serve [--host 0.0.0.0] [--port 8080]]\n\nLongCat Image Edit: --kind edit|turbo --model <transformer.gguf> --components <dir> --input <image.png> --instruction TEXT --out edited.png [--side 1024] [--steps N] [--guidance F32] [--seed N]; <dir> holds text_encoder/, vae/ and tokenizer/ safetensors, shared by both kinds; the two kinds use different Flux schedules so the step/guidance defaults differ (Edit 50/4.5, Turbo 8/1.0)\n\nMage-Flow: --model <dit.gguf> --text-encoder <text.gguf> --vae <vae.gguf> --prompt TEXT --out image.png [--resolution N | --width N --height N] [--steps N --cfg N --seed N --noise fixed.f32] [--image reference.png --mmproj vision.gguf --reference another.png]\n\nRerank mode: --rerank --rerank-query <TEXT> [--rerank-doc <TEXT> ...] | [--rerank-documents <FILE>] [--rerank-instruction <TEXT>] [--rerank-max-tokens N] | cross-encoder scoring; backend picked by GGUF arch (jina-bert-v2 + cls.weight/cls.bias → bert forward, qwen3 + cls.output.weight + pooling_type=4 → qwen3 trunk + 2-class head); one sigmoid'd score per document in [0, 1]\n\nJEV mode: --jev --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | single-forward-pass decision scoring over candidate labels A/B/C/…\n\nJEV grouped: --jev --jev-multi [--jev-option <pos> --jev-option <neg> ...] (pairs) or --jev-block <label> --jev-option <a> [--jev-option <b> ...] (blocks)\n\nServer mode: --serve [--host 0.0.0.0] [--port 8080] --model <path> [--mmproj ...] [--tts] [--embedding]\n\nCLM mode: --jev --clm-head <clm-heads.gguf> --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | cosine scoring via CLM projection heads on the chosen encoder (state = context, blank line, question; candidates verbatim\n\nGLiNER2 mode: --jev --gliner2-decide --model <gliner2-decide.gguf> --jev-context <text> [--gliner2-schema <json> | --jev-question <name> --jev-option <a> [--jev-option <b> ...]] | one DeBERTa-v3 pass scores every label of every task; --gliner2-schema takes a classify_text-shaped mapping: {intent: [a, b], aspects: {labels: [x], multi_label: true, cls_threshold: 0.4}}
+
+AuK TTS mode: --model auk-base-f16.gguf --vae auk-vae-f32.gguf [--text-encoder qwen2.5-omni-3b-q8_0.gguf] --prompt \"<TEXT>\" --out speech.wav [--steps N (default 32)] [--resolution SR (default 24000)] [--duration-seconds N (default 1)] [--cfg-scale α (default 2.0)] [--instruction \"<voice/style>\" (instruct TTS)] [--ref-audio ref.wav (CFMEdit reference voice with audio tower)] | 24 kHz mono speech generation";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DispatchMode {
     DreamX,
@@ -86,7 +88,7 @@ fn main() {
         println!("{USAGE}");
         return;
     }
-    // Server mode: --serve delegates to app::server::run_server which has its
+    // \n\nGLiNER2 boundary mode: --jev --gliner2-boundary --model <gliner2.5-boundary.gguf> --jev-context <text> --gliner2-schema <json> | span extraction; the schema is {\"entities\":[\"person\",\"location\"],\"entity_descriptions\":{...}} (the dict form {\"entities\":{\"person\":[...]}} is also accepted). Output is (start, end) word spans per field; --jev-output json for machine-readable.\n\nServer mode: --serve delegates to app::server::run_server which has its
     // own --host/--port pre-parser and reuses the shared CLI parser for the rest.
     if args.iter().any(|arg| arg == "--serve") {
         app::server::run_server();
@@ -96,25 +98,99 @@ fn main() {
         eprintln!("{error}");
         std::process::exit(2);
     });
-    app::validate_cli_options(&options).unwrap_or_else(|error| {
+    // Resolved thread count for both LLM ComputePool and rayon global pool.
+    let available_threads = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1);
+    let n_threads = app::resolve_thread_count(options.threads, available_threads);
+    // LongCat Image Edit. Selected purely by its own flags rather than by GGUF
+    // architecture, because the transformer advertises generic `flux` metadata
+    // and would otherwise be claimed by the Z-Image branch below. Runs before
+    // the Z-Image option parsing so that validation never sees these flags.
+    match app::longcat_cli_options(&options).unwrap_or_else(|error| {
         eprintln!("{error}");
         std::process::exit(2);
+    }) {
+        Some(longcat_options) => {
+            app::init_rayon_global_pool(n_threads);
+            app::run_or_exit(app::run_longcat_image_edit(&longcat_options, n_threads));
+            return;
+        }
+        None => {}
+    }
+
+    // Select Mage before Z-Image's shared-component validation rejects edit inputs.
+    let early_source: Option<Arc<dyn TensorSource>> = if dispatch_mode(&options)
+        == DispatchMode::Model
+        && !options.model.as_os_str().is_empty()
+        && (options.text_encoder.is_some()
+            || options.vae.is_some()
+            || options.out.is_some()
+            || options.width.is_some()
+            || options.height.is_some()
+            || options.cfg.is_some()
+            || options.noise.is_some()
+            || !options.references.is_empty())
+    {
+        Some(Arc::from(open_or_exit(&options.model, ComponentRole::Llm)))
+    } else {
+        None
+    };
+    if let Some(source) = early_source.as_ref().filter(|s| {
+        s.metadata("general.architecture")
+            .and_then(MetaValue::to_string_val)
+            == Some("mage_flow")
+    }) {
+        app::run_or_exit(app::run_mage_flow_cli(source.clone(), &options, n_threads));
+        return;
+    }
+    // Drop `text_encoder.is_none()` from the filter so AuK can be detected
+    // when --text-encoder is also provided (Qwen2.5-Omni for CFMEdit
+    // reference-audio conditioning). The diff-model validators skip path
+    // below this is gated on `early_auk_arch.is_none()`, so we still need a
+    // positive AuK signal before bypassing them.
+    let early_auk_arch = early_source.clone().filter(|s| {
+        options.vae.is_some()
+            && options.out.is_some()
+            && (s
+                .metadata("general.architecture")
+                .and_then(MetaValue::to_string_val)
+                == Some("audiocpp")
+                || s.tensor_info("transformer.transformer_blocks.0.attn_norm_x.linear.weight")
+                    .is_some())
     });
+    // If we already identified the model as AuK, skip the diff-model validators
+    // (z_image_cli_options, dreamx_cli_options, yue2_cli_options) that would
+    // otherwise error out on missing --text-encoder / --dreamx / --yue2.
+    if early_auk_arch.is_none() {
+        app::validate_cli_options(&options).unwrap_or_else(|error| {
+            eprintln!("{error}");
+            std::process::exit(2);
+        });
+    }
     let prefill_batch_size = options
         .effective_prefill_batch_size()
         .unwrap_or_else(|error| {
             eprintln!("{error}");
             std::process::exit(2);
         });
-    let dreamx_options = app::dreamx_cli_options(&options).unwrap_or_else(|error| {
-        eprintln!("{error}");
-        std::process::exit(2);
-    });
-    let yue2_options = app::yue2_cli_options(&options).unwrap_or_else(|error| {
-        eprintln!("{error}");
-        std::process::exit(2);
-    });
-    let z_image_options = if yue2_options.is_none() {
+    let dreamx_options = if early_auk_arch.is_some() {
+        None
+    } else {
+        app::dreamx_cli_options(&options).unwrap_or_else(|error| {
+            eprintln!("{error}");
+            std::process::exit(2);
+        })
+    };
+    let yue2_options = if early_auk_arch.is_some() {
+        None
+    } else {
+        app::yue2_cli_options(&options).unwrap_or_else(|error| {
+            eprintln!("{error}");
+            std::process::exit(2);
+        })
+    };
+    let z_image_options = if yue2_options.is_none() && early_auk_arch.is_none() {
         app::z_image_cli_options(&options).unwrap_or_else(|error| {
             eprintln!("{error}");
             std::process::exit(2);
@@ -126,12 +202,6 @@ fn main() {
         eprintln!("{error}");
         std::process::exit(2);
     });
-
-    // Resolved thread count for both LLM ComputePool and rayon global pool.
-    let available_threads = std::thread::available_parallelism()
-        .map(std::num::NonZeroUsize::get)
-        .unwrap_or(1);
-    let n_threads = app::resolve_thread_count(options.threads, available_threads);
     app::init_rayon_global_pool(n_threads);
 
     if options.model.as_os_str().is_empty() {
@@ -153,6 +223,9 @@ fn main() {
             return;
         }
         DispatchMode::Yue2 => {
+            // Same reason as the Z-Image branch below: this returns before the
+            // shared `enable_gpu()`, and the AR session only reaches the Vulkan
+            // backend once the flag is set.
             if options.gpu {
                 ops::enable_gpu();
             }
@@ -204,6 +277,105 @@ fn main() {
         DispatchMode::Model => {}
     }
 
+    // AuK dispatch (MUST run before the ERNIE / Z-Image branches below, since
+    // --vae + --out + --model without --text-encoder otherwise errors out as a
+    // malformed Z-Image invocation; we probed the arch earlier).
+    if let Some(arch_probe) = early_auk_arch {
+        if options.gpu {
+            ops::enable_gpu();
+        }
+        let vae: Arc<dyn TensorSource> = Arc::from(open_or_exit(
+            options.vae.as_deref().expect("AuK VAE required"),
+            ComponentRole::Llm,
+        ));
+        let text = match options.text_encoder.as_deref() {
+            Some(path) => Some(Arc::<dyn TensorSource>::from(open_or_exit(
+                path,
+                ComponentRole::Llm,
+            ))),
+            None => None,
+        };
+        let audio_tower = match options.qwen_omni_bf16.as_deref() {
+            Some(path) => Some(Arc::<dyn TensorSource>::from(open_or_exit(
+                path,
+                ComponentRole::Llm,
+            ))),
+            None => None,
+        };
+        app::run_or_exit(app::run_auk_cli(
+            arch_probe,
+            vae,
+            text.clone(),
+            options.prompt.as_deref().unwrap_or(""),
+            options.steps.unwrap_or(32),
+            options.resolution.unwrap_or(24000),
+            options.seed.unwrap_or(0),
+            options.out.clone().expect("AuK --out required"),
+            n_threads,
+            options.ref_audio.as_deref(),
+            options.instruction.as_deref(),
+            options.duration_seconds,
+            options.cfg_scale,
+            audio_tower,
+        ));
+        return;
+    }
+
+    // AuK / audiocpp dispatch: --model (DiT) + --vae + optional --text-encoder
+    // for Qwen2.5-Omni conditioning + --text for the prompt.
+    if !options.model.as_os_str().is_empty() && options.vae.is_some() && options.out.is_some() {
+        let arch_probe: Arc<dyn TensorSource> = early_source
+            .clone()
+            .unwrap_or_else(|| Arc::from(open_or_exit(&options.model, ComponentRole::Llm)));
+        let is_auk = arch_probe
+            .metadata("general.architecture")
+            .and_then(MetaValue::to_string_val)
+            .map(|v| v == "audiocpp")
+            .unwrap_or(false)
+            || arch_probe
+                .tensor_info("transformer.transformer_blocks.0.attn_norm_x.linear.weight")
+                .is_some();
+        if is_auk {
+            if options.gpu {
+                ops::enable_gpu();
+            }
+            let vae: Arc<dyn TensorSource> = Arc::from(open_or_exit(
+                options.vae.as_deref().expect("AuK VAE required"),
+                ComponentRole::Llm,
+            ));
+            let text = match options.text_encoder.as_deref() {
+                Some(path) => Some(Arc::<dyn TensorSource>::from(open_or_exit(
+                    path,
+                    ComponentRole::Llm,
+                ))),
+                None => None,
+            };
+            let audio_tower = match options.qwen_omni_bf16.as_deref() {
+                Some(path) => Some(Arc::<dyn TensorSource>::from(open_or_exit(
+                    path,
+                    ComponentRole::Llm,
+                ))),
+                None => None,
+            };
+            app::run_or_exit(app::run_auk_cli(
+                arch_probe,
+                vae,
+                text.clone(),
+                options.prompt.as_deref().unwrap_or(""),
+                options.steps.unwrap_or(32),
+                options.resolution.unwrap_or(24000),
+                options.seed.unwrap_or(0),
+                options.out.clone().expect("AuK --out required"),
+                n_threads,
+                options.ref_audio.as_deref(),
+                options.instruction.as_deref(),
+                options.duration_seconds,
+                options.cfg_scale,
+                audio_tower,
+            ));
+            return;
+        }
+    }
     // ERNIE-Image / ERNIE-Image-Turbo dispatch (MUST run before the Z-Image
     // branch below, since both share --model/--text-encoder/--vae; the GGUF
     // signature distinguishes them -- the unsloth export mis-tags
@@ -215,8 +387,9 @@ fn main() {
         && options.out.is_some()
         && options.prompt.is_some()
     {
-        let arch_probe: Arc<dyn TensorSource> =
-            Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+        let arch_probe: Arc<dyn TensorSource> = early_source
+            .clone()
+            .unwrap_or_else(|| Arc::from(open_or_exit(&options.model, ComponentRole::Llm)));
         let arch_name = arch_probe
             .metadata("general.architecture")
             .and_then(MetaValue::to_string_val)
@@ -227,8 +400,15 @@ fn main() {
                 .is_some()
                 && arch_probe.tensor_info("text_proj.weight").is_some());
         if is_ernie_image {
+            let turbo = options
+                .model
+                .to_string_lossy()
+                .to_lowercase()
+                .contains("turbo");
             if options.gpu {
-                ops::enable_gpu();
+                app::run_or_exit(Err(
+                    "ERNIE-Image currently supports CPU only; remove --gpu".into()
+                ));
             }
             let text: Arc<dyn TensorSource> = Arc::from(open_or_exit(
                 options
@@ -249,9 +429,10 @@ fn main() {
                     .prompt
                     .as_deref()
                     .expect("ERNIE-Image prompt required"),
-                options.steps.unwrap_or(8),
+                options.steps.unwrap_or(if turbo { 8 } else { 32 }),
                 options.resolution.unwrap_or(512),
                 options.seed.unwrap_or(0),
+                options.cfg_scale.unwrap_or(if turbo { 1.0 } else { 5.0 }),
                 options.out.clone().expect("ERNIE-Image --out required"),
                 n_threads,
             ));
@@ -260,14 +441,20 @@ fn main() {
     }
 
     if let Some(z_image_options) = z_image_options {
+        if options.cfg_scale.is_some() {
+            app::run_or_exit(Err(
+                "--cfg-scale is supported for ERNIE-Image and Breeze TTS".into(),
+            ));
+        }
         // Has to happen here, not at the shared `enable_gpu()` below: this
         // branch returns before reaching it, and the DiT's projections only
         // reach the Vulkan backend once the flag is set.
         if options.gpu {
             ops::enable_gpu();
         }
-        let diffusion: Arc<dyn TensorSource> =
-            Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+        let diffusion: Arc<dyn TensorSource> = early_source
+            .clone()
+            .unwrap_or_else(|| Arc::from(open_or_exit(&options.model, ComponentRole::Llm)));
         let text: Arc<dyn TensorSource> = Arc::from(open_or_exit(
             options
                 .text_encoder
@@ -291,7 +478,8 @@ fn main() {
     }
 
     let model_path = options.model.as_path();
-    let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(model_path, ComponentRole::Llm));
+    let source: Arc<dyn TensorSource> =
+        early_source.unwrap_or_else(|| Arc::from(open_or_exit(model_path, ComponentRole::Llm)));
     // Qwen-Image-2.1 diffusion GGUFs carry no metadata (kv=0), so the route is
     // chosen by tensor-name signature before the metadata-driven LLM path.
     if matches_signature(source.as_ref()) {
@@ -342,6 +530,10 @@ fn main() {
         .metadata("general.architecture")
         .and_then(MetaValue::to_string_val)
         .unwrap_or_default();
+    if arch == "mage_flow" {
+        app::run_or_exit(app::run_mage_flow_cli(source, &options, n_threads));
+        return;
+    }
     if let Err(error) = app::reject_incomplete_z_image_architecture(&arch) {
         app::run_or_exit(Err(error));
         return;
@@ -640,6 +832,52 @@ fn main() {
             options.threads,
             options.jev_output_json,
         ));
+    } else if options.jev && options.gliner2_boundary {
+        // GLiNER2.5 BoundaryExtractor: same flag surface as --gliner2-decide,
+        // but the schema declares fields to *extract* rather than labels to
+        // classify, so the parser differs and the output is spans.
+        let context = match options.jev_context.clone() {
+            Some(context) => context,
+            None => {
+                app::run_or_exit(Err("--jev requires --jev-context <text>".into()));
+                unreachable!()
+            }
+        };
+        let schema: serde_json::Value = match options.gliner2_schema.clone() {
+            Some(raw) => app::unwrap_or_exit(
+                serde_json::from_str(&raw).map_err(|error| format!("--gliner2-schema: {error}")),
+            ),
+            None => {
+                app::run_or_exit(Err("--gliner2-boundary needs --gliner2-schema, e.g. \
+                     '{\"entities\":[\"person\",\"location\"]}' or \
+                 '{\"classifications\":[{\"task\":\"topic\",\"labels\":[\"a\",\"b\"]}]}'"
+                    .to_string()));
+                unreachable!()
+            }
+        };
+        let (tasks, kinds) = app::unwrap_or_exit(
+            app::parse_boundary_schema(&schema)
+                .map_err(|error| format!("--gliner2-schema: {error}")),
+        );
+        app::run_or_exit(app::run_gliner2_boundary(
+            source,
+            &tasks,
+            &kinds,
+            &context,
+            options.threads,
+            app::BoundaryDecodeOptions {
+                threshold: None,
+                // A `json_structures` group only becomes a record when the schema
+                // annotates it with a `mode`; without this the record head never
+                // runs.
+                record_metadata: schema.get("record_metadata"),
+                field_metadata: schema.get("field_metadata"),
+                entity_metadata: schema.get("entity_metadata"),
+                relation_metadata: schema.get("relation_metadata"),
+                schema: Some(&schema),
+                output_json: options.jev_output_json,
+            },
+        ));
     } else if options.jev && options.clm_head.is_some() {
         // CLM: one encoder + a projection-head file, scored by cosine
         // instead of a label logit.  Same --jev flag family, so the
@@ -725,6 +963,14 @@ fn main() {
         return;
     } else if !prompt.is_empty() {
         if matches!(arch, "qwen35" | "edge0") {
+            if options.gpu && arch == "edge0" {
+                // Edge0's mixture-of-experts forward has no Vulkan path, so the
+                // flag cannot do anything here. Say so rather than let it look
+                // like it is working.
+                eprintln!(
+                    "[GPU] --gpu is ignored for edge0: its MoE forward has no Vulkan                      path, so the model runs on the CPU either way."
+                );
+            }
             app::run_or_exit(app::run_multimodal_with_video(
                 Arc::clone(&source),
                 model_path,

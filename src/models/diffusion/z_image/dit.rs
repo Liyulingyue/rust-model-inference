@@ -716,7 +716,11 @@ fn attention_head_block(
     }
 }
 
-fn layer_norm_no_affine(input: &[f32], output: &mut [f32], eps: f32) -> Result<(), String> {
+pub(crate) fn layer_norm_no_affine(
+    input: &[f32],
+    output: &mut [f32],
+    eps: f32,
+) -> Result<(), String> {
     if input.is_empty() || input.len() != output.len() {
         return Err("Invalid Z-Image final LayerNorm buffers".into());
     }
@@ -724,9 +728,15 @@ fn layer_norm_no_affine(input: &[f32], output: &mut [f32], eps: f32) -> Result<(
     let mean = sum / input.len() as f32;
     #[cfg(target_arch = "aarch64")]
     let variance = {
-        let mut chunks = input.chunks_exact(4);
+        let group = if crate::ops::scalar_mode() { 1 } else { 4 };
+        let mut chunks = input.chunks_exact(group);
         let mut sum = 0.0f64;
         for chunk in &mut chunks {
+            if group == 1 {
+                let centered = chunk[0] - mean;
+                sum += f64::from(centered * centered);
+                continue;
+            }
             let centered_0 = chunk[0] - mean;
             let centered_1 = chunk[1] - mean;
             let centered_2 = chunk[2] - mean;
@@ -1250,6 +1260,12 @@ impl ZImageDit {
         }
         #[cfg(feature = "vulkan")]
         gpu_profile_report(sigmas.len() - 1);
+        #[cfg(feature = "vulkan")]
+        {
+            crate::vulkan::dump_submit_trace();
+            crate::vulkan::ops::dump_dispatch_trace();
+            crate::vulkan::ops::dump_dispatch_log();
+        }
         // 输出累计的 profile
         let t = PROFILE_TIMERS.with(|cell| *cell.borrow());
         let total = t.0 + t.1 + t.2 + t.3 + t.4 + t.5 + t.6 + t.7 + t.8;
@@ -1263,7 +1279,11 @@ impl ZImageDit {
         eprintln!("  rms_norm:              {:8.1}ms ({:5.1}%)", t.1, pct(t.1));
         eprintln!("  scale_modulated:      {:8.1}ms ({:5.1}%)", t.2, pct(t.2));
         eprintln!("  linear qkv:           {:8.1}ms ({:5.1}%)", t.3, pct(t.3));
-        eprintln!("  rope_neox_inplace:    {:8.1}ms ({:5.1}%)", t.4, pct(t.4));
+        eprintln!(
+            "  rope_neox_inplace:                {:8.1}ms ({:5.1}%)",
+            t.4,
+            pct(t.4)
+        );
         eprintln!("  attention_into:       {:8.1}ms ({:5.1}%)", t.5, pct(t.5));
         eprintln!("  linear out:           {:8.1}ms ({:5.1}%)", t.6, pct(t.6));
         eprintln!("  linear ffn (w1+w3+w2): {:8.1}ms ({:5.1}%)", t.7, pct(t.7));
@@ -1775,13 +1795,17 @@ impl TorchMt19937 {
         radius * theta.cos()
     }
 
-    fn normal_fill_16(values: &mut [f32]) {
+    fn normal_fill_16(values: &mut [f32], sd_cpp: bool) {
         debug_assert_eq!(values.len(), 16);
         for index in 0..8 {
             let u1 = 1.0 - values[index];
             let u2 = values[index + 8];
             let radius = (-2.0 * u1.ln()).sqrt();
-            let theta = (2.0 * std::f64::consts::PI * f64::from(u2)) as f32;
+            let theta = if sd_cpp {
+                (2.0 * std::f32::consts::PI) * u2
+            } else {
+                (2.0 * std::f64::consts::PI * f64::from(u2)) as f32
+            };
             let (sine, cosine) = theta.sin_cos();
             values[index] = radius * cosine;
             values[index + 8] = radius * sine;
@@ -1789,6 +1813,15 @@ impl TorchMt19937 {
     }
 
     pub(crate) fn fill_normal(&mut self, output: &mut [f32]) {
+        self.fill_normal_impl(output, false);
+    }
+
+    /// stable-diffusion.cpp's CPU RNG rounds 2*pi to F32 before multiplication.
+    pub(crate) fn fill_normal_sd_cpp(&mut self, output: &mut [f32]) {
+        self.fill_normal_impl(output, true);
+    }
+
+    fn fill_normal_impl(&mut self, output: &mut [f32], sd_cpp: bool) {
         if output.len() < 16 {
             for value in output {
                 *value = self.normal_double() as f32;
@@ -1800,14 +1833,14 @@ impl TorchMt19937 {
             *value = Self::uniform_f32(self.rand_u32());
         }
         for start in (0..output.len() - 15).step_by(16) {
-            Self::normal_fill_16(&mut output[start..start + 16]);
+            Self::normal_fill_16(&mut output[start..start + 16], sd_cpp);
         }
         if output.len() % 16 != 0 {
             let tail = output.len() - 16;
             for value in &mut output[tail..] {
                 *value = Self::uniform_f32(self.rand_u32());
             }
-            Self::normal_fill_16(&mut output[tail..]);
+            Self::normal_fill_16(&mut output[tail..], sd_cpp);
         }
     }
 }
@@ -2654,7 +2687,7 @@ fn run_block_gpu(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "vulkan"))]
 mod tests {
     use super::*;
 
@@ -3098,15 +3131,15 @@ mod tests {
 
     fn expected_seed_42_20_bits() -> Vec<u32> {
         vec![
-            0x3ff6_a527,
-            0x3fbe_5f54,
+            0x3ff6_a52a,
+            0x3fbe_5f53,
             0x3f66_9567,
-            0xc006_c0dd,
+            0xc006_c0db,
             0xbf42_14e2,
             0x3f8a_0650,
             0x3f4d_0143,
             0x3fd7_1e93,
-            0x3eb6_3341,
+            0x3eb6_3345,
             0xbf2f_c686,
             0xbefc_9934,
             0x3e77_4894,
@@ -3114,7 +3147,7 @@ mod tests {
             0x3d2b_0c00,
             0xbe80_ce79,
             0x3f5c_1fb0,
-            0xbe9e_9487,
+            0xbe9e_9482,
             0xbeca_9a91,
             0x3f4d_ac3c,
             0xbf1f_20e0,
@@ -3185,6 +3218,20 @@ mod tests {
             0x41d3_f6d2
         };
         assert_eq!(output[0].to_bits(), expected);
+    }
+
+    #[test]
+    fn sd_cpp_cpu_rng_matches_pinned_seed_42() {
+        let mut values = [0.; 2048];
+        TorchMt19937::new(42).fill_normal_sd_cpp(&mut values);
+        assert_eq!(
+            values[..16].iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            [
+                0x3ff6a52a, 0x3fbe5f53, 0x3f669567, 0xc006c0db, 0x3f2dacd5, 0xbf9e0591, 0xbd306787,
+                0xbfcd65ba, 0xbf408bf0, 0x3fd3095b, 0xbec8f2f6, 0xbfb3a967, 0xbf3a566d, 0xbf0f36d1,
+                0xbf44d2a1, 0x3f432f9f,
+            ]
+        );
     }
 
     #[test]

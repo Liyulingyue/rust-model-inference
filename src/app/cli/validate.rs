@@ -4,6 +4,14 @@ use super::options::{
 use super::types::{normalize_tts_language, CliOptions};
 
 pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
+    if options.width.is_some()
+        || options.height.is_some()
+        || options.cfg.is_some()
+        || options.noise.is_some()
+        || !options.references.is_empty()
+    {
+        return Err("--width/--height/--cfg/--noise/--reference require a Mage-Flow model".into());
+    }
     if options.qwen_latent_width.is_some_and(|value| value == 0)
         || options.qwen_latent_height.is_some_and(|value| value == 0)
     {
@@ -15,6 +23,17 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
     {
         return Err("--qwen-timestep must be finite".into());
     }
+    if options.gliner2_boundary {
+        if !options.jev {
+            return Err("--gliner2-boundary requires --jev".into());
+        }
+        if options.gliner2_decide {
+            return Err("--gliner2-boundary and --gliner2-decide select different backends".into());
+        }
+        if options.clm_head.is_some() {
+            return Err("--gliner2-boundary and --clm-head select different backends".into());
+        }
+    }
     if options.gliner2_decide {
         if !options.jev {
             return Err("--gliner2-decide requires --jev".into());
@@ -25,8 +44,8 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
         if options.gliner2_schema.is_some() && options.jev_multi {
             return Err("--gliner2-schema cannot be combined with --jev-multi".into());
         }
-    } else if options.gliner2_schema.is_some() {
-        return Err("--gliner2-schema requires --gliner2-decide".into());
+    } else if options.gliner2_schema.is_some() && !options.gliner2_boundary {
+        return Err("--gliner2-schema requires --gliner2-decide or --gliner2-boundary".into());
     }
     if options.laya_request.is_some() {
         if options.model.as_os_str().is_empty() {
@@ -55,7 +74,9 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
         return Err("--top-p must be finite and in (0, 1]".into());
     }
     if let Some(scale) = options.cfg_scale {
-        if !options.tts || options.edit {
+        let diffusion =
+            options.text_encoder.is_some() && options.vae.is_some() && options.out.is_some();
+        if (!options.tts || options.edit) && !diffusion {
             return Err("--cfg-scale requires Breeze --tts without --edit".into());
         }
         if !scale.is_finite() || scale <= 0.0 {

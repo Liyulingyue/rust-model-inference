@@ -14,6 +14,7 @@
 pub mod asr;
 pub mod embedding;
 pub mod omni;
+pub mod omni_audio;
 pub mod trunk;
 pub mod tts;
 pub mod vision;

@@ -81,14 +81,22 @@ pub fn get_f32_tensor<S: TensorSource + ?Sized>(
         .tensor_slice(name)
         .unwrap_or_else(|| panic!("slice {name} not found"));
     let mut output = vec![0.0; expected_len];
-    if info.ggml_type == GGMLType::F32 {
-        for (value, chunk) in output.iter_mut().zip(bytes.chunks_exact(4)) {
-            *value = f32::from_le_bytes(chunk.try_into().unwrap());
+    match info.ggml_type {
+        GGMLType::F32 => {
+            for (value, chunk) in output.iter_mut().zip(bytes.chunks_exact(4)) {
+                *value = f32::from_le_bytes(chunk.try_into().unwrap());
+            }
         }
-    } else if info.ggml_type == GGMLType::BF16 {
-        for (value, chunk) in output.iter_mut().zip(bytes.chunks_exact(2)) {
-            *value = bf16_to_f32(u16::from_le_bytes([chunk[0], chunk[1]]));
+        GGMLType::BF16 => {
+            for (value, chunk) in output.iter_mut().zip(bytes.chunks_exact(2)) {
+                *value = bf16_to_f32(u16::from_le_bytes([chunk[0], chunk[1]]));
+            }
         }
+        other => panic!(
+            "qwen3::get_f32_tensor {name}: unsupported ggml_type {other:?}; \
+             expected F32/BF16 (F16 is reserved for BitNet-only paths \
+             under crate::models::bitnet::*)"
+        ),
     }
     output
 }
@@ -102,30 +110,28 @@ pub fn load_layers<'a>(
     n_embd_gqa: usize,
     n_ff: usize,
     n_embd_head_k: usize,
-    has_qk_norm: bool,
 ) -> Vec<Qwen3LayerWeights<'a>> {
+    // The qwen3 standard arch always declares qk_norm on every
+    // layer (`blk.{i}.attn_{q,k}_norm.weight`); the legacy
+    // `load_layers` helper predates the BitNet-specific dispatch
+    // and unconditionally loads them. `load_layers_static` is the
+    // modern path that honours `cfg.has_qk_norm` from the GGUF
+    // metadata; new code should use it instead of branching on a
+    // (now-removed) parameter here.
     (0..n_layer)
         .map(|l| Qwen3LayerWeights {
             attn_norm: get_f32_tensor(source, &format!("blk.{}.attn_norm.weight", l), n_embd),
             ffn_norm: get_f32_tensor(source, &format!("blk.{}.ffn_norm.weight", l), n_embd),
-            q_norm: if has_qk_norm {
-                Some(get_f32_tensor(
-                    source,
-                    &format!("blk.{}.attn_q_norm.weight", l),
-                    n_embd_head_k,
-                ))
-            } else {
-                None
-            },
-            k_norm: if has_qk_norm {
-                Some(get_f32_tensor(
-                    source,
-                    &format!("blk.{}.attn_k_norm.weight", l),
-                    n_embd_head_k,
-                ))
-            } else {
-                None
-            },
+            q_norm: Some(get_f32_tensor(
+                source,
+                &format!("blk.{}.attn_q_norm.weight", l),
+                n_embd_head_k,
+            )),
+            k_norm: Some(get_f32_tensor(
+                source,
+                &format!("blk.{}.attn_k_norm.weight", l),
+                n_embd_head_k,
+            )),
             q_bias: None,
             k_bias: None,
             v_bias: None,
@@ -586,7 +592,12 @@ impl Qwen3Model {
             config.has_qkv_bias,
             config.moe,
         )?;
-        if config.architecture == "qwen3" && crate::ops::scalar_mode() {
+        // Scalar-parity mode needs the raw BF16 bytes for the projections, so
+        // bypass the dequantized kernel and hand BF16 straight to the scalar
+        // kernel. Covers both the plain Qwen3 trunk and the Qwen2.5-VL text
+        // encoder LongCat drives.
+        if matches!(config.architecture.as_str(), "qwen2vl" | "qwen3") && crate::ops::scalar_mode()
+        {
             for (index, layer) in layers.iter_mut().enumerate() {
                 for (name, weight) in [
                     ("attn_q", &mut layer.wq),

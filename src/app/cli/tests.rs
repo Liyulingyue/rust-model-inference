@@ -49,6 +49,45 @@ fn default_threads_are_capped_but_explicit_value_wins() {
 }
 
 #[test]
+fn mage_arguments_preserve_reference_order_and_require_values() {
+    let options = parse_cli_options(&args(&[
+        "rmi",
+        "--width",
+        "16",
+        "--height",
+        "32",
+        "--cfg",
+        "5",
+        "--noise",
+        "noise.f32",
+        "--image",
+        "first.png",
+        "--reference",
+        "second.png",
+        "--reference",
+        "third.png",
+    ]))
+    .unwrap();
+    assert_eq!(
+        (options.width, options.height, options.cfg),
+        (Some(16), Some(32), Some(5.0))
+    );
+    assert_eq!(options.noise, Some("noise.f32".into()));
+    assert_eq!(options.image, Some("first.png".into()));
+    assert_eq!(
+        options.references,
+        vec![PathBuf::from("second.png"), PathBuf::from("third.png")]
+    );
+    assert!(validate_cli_options(&options)
+        .unwrap_err()
+        .contains("Mage-Flow"));
+    for flag in ["--width", "--height", "--cfg", "--noise", "--reference"] {
+        assert!(parse_cli_options(&args(&["rmi", flag])).is_err());
+        assert!(parse_cli_options(&args(&["rmi", flag, "--prompt"])).is_err());
+    }
+}
+
+#[test]
 fn qwen_image_cli_parses_latent_shape_and_rejects_nonfinite_timestep() {
     let options = parse_cli_options(&args(&[
         "rmi",
@@ -708,7 +747,6 @@ fn z_image_rejects_other_modes_before_model_loading() {
         (vec!["--dump-logits"], "--dump-logits"),
         (vec!["--bench"], "--bench"),
         (vec!["--profile"], "--profile"),
-        (vec!["--gpu"], "--gpu"),
         (vec!["--thinking"], "--thinking"),
         (vec!["--language", "en"], "--language"),
         (vec!["--max-tokens", "1"], "--max-tokens"),
@@ -720,6 +758,9 @@ fn z_image_rejects_other_modes_before_model_loading() {
         let error = validate_cli_options(&parse_cli_options(&args(&argv)).unwrap()).unwrap_err();
         assert!(error.contains(expected), "{argv:?}: {error}");
     }
+    let mut argv = base.to_vec();
+    argv.push("--gpu");
+    validate_cli_options(&parse_cli_options(&args(&argv)).unwrap()).unwrap();
 }
 
 #[test]
@@ -898,6 +939,29 @@ fn breeze_cfg_scale_parses_and_rejects_invalid_values_or_other_modes() {
         ("--temperature", "bad"),
     ] {
         assert!(parse_cli_options(&args(&["rmi", flag, value])).is_err());
+    }
+}
+
+#[test]
+fn ernie_image_cfg_scale_accepts_complete_components_and_rejects_nan() {
+    let base = [
+        "rmi",
+        "--model",
+        "ernie-image.gguf",
+        "--text-encoder",
+        "ministral.gguf",
+        "--vae",
+        "flux2.gguf",
+        "--prompt",
+        "a cat",
+        "--out",
+        "cat.png",
+    ];
+    for (scale, valid) in [("5", true), ("1", true), ("NaN", false), ("0", false)] {
+        let mut values = base.to_vec();
+        values.extend(["--cfg-scale", scale]);
+        let options = parse_cli_options(&args(&values)).unwrap();
+        assert_eq!(validate_cli_options(&options).is_ok(), valid);
     }
 }
 

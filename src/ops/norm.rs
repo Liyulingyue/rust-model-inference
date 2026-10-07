@@ -34,7 +34,12 @@
 /// `bias` may be empty when a tensor carries only an affine scale.
 pub fn layer_norm(input: &[f32], weight: &[f32], bias: &[f32], eps: f32, output: &mut [f32]) {
     let n = input.len().min(weight.len()).min(output.len());
-    assert_eq!(bias.len(), n, "layer_norm bias must match the row length");
+    // ModernBERT's LayerNorm declares `bias: false`, so the affine step is scale
+    // only. An empty bias means "no bias" rather than a shape mismatch.
+    assert!(
+        bias.is_empty() || bias.len() == n,
+        "layer_norm bias must be empty or match the row length"
+    );
     if n == 0 {
         return;
     }
@@ -64,6 +69,12 @@ pub fn layer_norm(input: &[f32], weight: &[f32], bias: &[f32], eps: f32, output:
         .sum();
     let var = var / n as f64;
     let scale = 1.0f32 / (var as f32 + eps).sqrt();
+    if bias.is_empty() {
+        for i in 0..n {
+            output[i] = (input[i] - mean as f32) * scale * weight[i];
+        }
+        return;
+    }
     for i in 0..n {
         #[cfg(feature = "parity-trace")]
         {

@@ -13,4 +13,5 @@
 
 pub mod ggufrs;
 pub mod load_plan;
+pub mod safetensors;
 pub mod wav;

@@ -23,11 +23,14 @@ use crate::app::cli::resolve_thread_count;
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
+use crate::ops::kernel::f32::scalar::row_range;
+use crate::ops::rope::rope_neox_inplace;
 use crate::ops::*;
 use crate::prompt::{build_qwen_chat_prompt, QwenMessage};
 #[cfg(feature = "vulkan")]
 use crate::vulkan::qwen3::Qwen3VulkanSession;
 use std::io::{self, Write};
+
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -196,12 +199,51 @@ impl Qwen3Model {
     ) -> Result<Vec<f32>, String> {
         text_encode(self, token_ids, positions)
     }
+
+    pub fn text_encode_embeddings(
+        &self,
+        embeddings: Vec<f32>,
+        positions: &[[usize; 4]],
+        key_mask: &[bool],
+    ) -> Result<Vec<f32>, String> {
+        if positions.len() != key_mask.len()
+            || embeddings.len() != positions.len().saturating_mul(self.config.n_embd)
+            || key_mask.first() != Some(&true)
+        {
+            return Err("Invalid Qwen text embeddings or attention mask".into());
+        }
+        let n_tokens = positions.len();
+        text_encode_forward(self, &embeddings, n_tokens, positions, Some(key_mask))
+    }
 }
 
 pub fn text_encode(
     model: &Qwen3Model,
     token_ids: &[u32],
     positions: &[[usize; 4]],
+) -> Result<Vec<f32>, String> {
+    let n_tokens = token_ids.len();
+    if n_tokens == 0 {
+        return Ok(Vec::new());
+    }
+    let embeddings = model.embed_tokens(token_ids)?;
+    text_encode_forward(model, &embeddings, n_tokens, positions, None)
+}
+
+/// Qwen2.5-Omni CFMEdit extension: same as [`text_encode`] but with audio
+/// embeddings substituted for specific token positions.
+///
+/// `audio_replacements` is a list of `(position_index, audio_embedding_2048d)`
+/// pairs. For each pair, the embedding at that token position is overwritten
+/// with the corresponding audio tower output (also 2048-dim). The transformer
+/// then runs over the substituted sequence, so text and audio tokens attend
+/// to each other inside the Qwen trunk -- matching audio.cpp's
+/// `conditioning.cpp::build_text_conditioning` behavior.
+pub fn text_encode_with_audio(
+    model: &Qwen3Model,
+    token_ids: &[u32],
+    positions: &[[usize; 4]],
+    audio_replacements: &[(usize, &[f32])],
 ) -> Result<Vec<f32>, String> {
     validate_token_ids(token_ids, model.config.vocab)?;
     let n_tokens = token_ids.len();
@@ -215,15 +257,130 @@ pub fn text_encode(
     if n_tokens == 0 {
         return Ok(Vec::new());
     }
+    let n_embd = model.config.n_embd;
+    let mut embeddings = model.embed_tokens(token_ids)?;
+    for (pos, audio_embed) in audio_replacements {
+        if *pos >= n_tokens {
+            return Err(format!(
+                "audio_replacement position {pos} out of bounds (n_tokens={n_tokens})"
+            ));
+        }
+        if audio_embed.len() != n_embd {
+            return Err(format!(
+                "audio embedding length {} != n_embd={n_embd}",
+                audio_embed.len()
+            ));
+        }
+        let off = *pos * n_embd;
+        embeddings[off..off + n_embd].copy_from_slice(audio_embed);
+    }
+    text_encode_forward(model, &embeddings, n_tokens, positions, None)
+}
 
-    let embeddings = model.embed_tokens(token_ids)?;
+/// One weight applied to every token row: the weight, its output width, the
+/// token-major destination, and an optional bias added afterwards.
+struct TokenProjection<'w> {
+    weight: &'w crate::ops::kernel::Weight<'w>,
+    n_out: usize,
+    out: RowsWrap,
+    bias: Option<&'w [f32]>,
+}
+
+/// Quantize each token row once, then apply every projection to it.
+///
+/// Tokens are the unit of work because each token reads the whole weight
+/// matrix, so splitting by token is what lets the pool overlap the weight
+/// streaming. All projections share a single dispatch and reuse one
+/// activation quantization, matching the previous fused loop.
+fn project_tokens(
+    pool: &Arc<ComputePool>,
+    n_tokens: usize,
+    input: &[f32],
+    n_in: usize,
+    projections: Vec<TokenProjection<'_>>,
+) {
+    debug_assert_eq!(input.len(), n_tokens * n_in);
+    if n_tokens == 0 {
+        return;
+    }
+    let input_ptr = input.as_ptr() as usize;
+    pool.compute(move |ith, nth| {
+        let (start, end) = row_range(n_tokens, ith, nth);
+        if start >= end {
+            return;
+        }
+        // SAFETY: `input` outlives the dispatch and every worker reads a
+        // disjoint token range.
+        let input = unsafe { std::slice::from_raw_parts(input_ptr as *const f32, n_tokens * n_in) };
+        for tok in start..end {
+            let row = &input[tok * n_in..(tok + 1) * n_in];
+            let blocks = (n_in + 31) / 32;
+            let mut q8 = vec![0u8; n_in];
+            let mut scales = vec![0.0f32; blocks];
+            quantize_q8_0_into(row, n_in, &mut q8, &mut scales);
+            for projection in &projections {
+                // SAFETY: each worker owns tokens [start, end) and `RowsWrap`
+                // hands out only the row for the token being processed.
+                let out = unsafe { projection.out.rows(tok, tok + 1) };
+                projection.weight.kernel.forward_prepared(
+                    row,
+                    &q8,
+                    &scales,
+                    None,
+                    out,
+                    n_in,
+                    projection.n_out,
+                    0,
+                    1,
+                );
+                if let Some(bias) = projection.bias {
+                    for (value, bias) in out.iter_mut().zip(bias) {
+                        *value += *bias;
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// Row-partitioned view over a token-major output buffer.
+///
+/// [`ComputePool::compute`] takes an `Fn` closure, so a `&mut [f32]` cannot be
+/// moved into it; workers borrow a disjoint token range out of the raw pointer
+/// instead. Same shape as `PtrWrap` in the in-tree ViT attention path and
+/// `OutputWrap` in `qwen35::vision`.
+struct RowsWrap(*mut f32, usize);
+unsafe impl Sync for RowsWrap {}
+unsafe impl Send for RowsWrap {}
+impl RowsWrap {
+    /// # Safety
+    /// The caller must guarantee the buffer holds at least `end * stride`
+    /// elements and that no other view of the same rows is live.
+    unsafe fn rows(&self, start: usize, end: usize) -> &mut [f32] {
+        std::slice::from_raw_parts_mut(self.0.add(start * self.1), (end - start) * self.1)
+    }
+}
+
+/// Shared forward path for [`text_encode`] and [`text_encode_with_audio`].
+/// Operates on pre-built per-token embeddings of shape `[n_tokens, n_embd]`.
+///
+/// `key_mask` masks out padded keys. `None` means full bidirectional
+/// attention over every position.
+fn text_encode_forward(
+    model: &Qwen3Model,
+    embeddings: &[f32],
+    n_tokens: usize,
+    positions: &[[usize; 4]],
+    key_mask: Option<&[bool]>,
+) -> Result<Vec<f32>, String> {
     #[cfg(feature = "vulkan")]
     let mut full_model_gpu_failed = false;
     #[cfg(feature = "vulkan")]
-    if positions
-        .iter()
-        .enumerate()
-        .all(|(index, position)| position[0] == index)
+    if key_mask.is_none()
+        && positions
+            .iter()
+            .enumerate()
+            .all(|(index, position)| position[0] == index)
     {
         if let Some(context) = crate::ops::get_vulkan_context() {
             match text_encode_vulkan(model, &embeddings, n_tokens, context) {
@@ -250,7 +407,7 @@ pub fn text_encode(
     let group_size = cfg.n_head / cfg.n_head_kv;
     let kq_scale = 1.0 / (cfg.n_embd_head_k as f32).sqrt();
 
-    let mut hidden = embeddings;
+    let mut hidden = embeddings.to_vec();
 
     for layer_idx in 0..cfg.n_layer {
         let layer = &model.layers[layer_idx];
@@ -269,66 +426,32 @@ pub fn text_encode(
         let mut q_all = vec![0.0; n_tokens * n_embd_q];
         let mut k_all = vec![0.0; n_tokens * n_embd_k];
         let mut v_all = vec![0.0; n_tokens * n_embd_v];
-        for tok in 0..n_tokens {
-            let norm_row = &normed[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd];
-            let q_off = tok * n_embd_q;
-            let k_off = tok * n_embd_k;
-            let v_off = tok * n_embd_v;
-
-            let blocks = (cfg.n_embd + 31) / 32;
-            let mut q8_buf = vec![0u8; cfg.n_embd];
-            let mut scale_buf = vec![0.0f32; blocks];
-            quantize_q8_0_into(norm_row, cfg.n_embd, &mut q8_buf, &mut scale_buf);
-
-            layer.wq.kernel.forward_prepared(
-                norm_row,
-                &q8_buf,
-                &scale_buf,
-                None,
-                &mut q_all[q_off..q_off + n_embd_q],
-                cfg.n_embd,
-                n_embd_q,
-                0,
-                1,
-            );
-            layer.wk.kernel.forward_prepared(
-                norm_row,
-                &q8_buf,
-                &scale_buf,
-                None,
-                &mut k_all[k_off..k_off + n_embd_k],
-                cfg.n_embd,
-                n_embd_k,
-                0,
-                1,
-            );
-            layer.wv.kernel.forward_prepared(
-                norm_row,
-                &q8_buf,
-                &scale_buf,
-                None,
-                &mut v_all[v_off..v_off + n_embd_v],
-                cfg.n_embd,
-                n_embd_v,
-                0,
-                1,
-            );
-            if let Some(bias) = layer.q_bias.as_deref() {
-                for (value, bias) in q_all[q_off..q_off + n_embd_q].iter_mut().zip(bias) {
-                    *value += *bias;
-                }
-            }
-            if let Some(bias) = layer.k_bias.as_deref() {
-                for (value, bias) in k_all[k_off..k_off + n_embd_k].iter_mut().zip(bias) {
-                    *value += *bias;
-                }
-            }
-            if let Some(bias) = layer.v_bias.as_deref() {
-                for (value, bias) in v_all[v_off..v_off + n_embd_v].iter_mut().zip(bias) {
-                    *value += *bias;
-                }
-            }
-        }
+        project_tokens(
+            &model.pool(),
+            n_tokens,
+            &normed,
+            cfg.n_embd,
+            vec![
+                TokenProjection {
+                    weight: &layer.wq,
+                    n_out: n_embd_q,
+                    out: RowsWrap(q_all.as_mut_ptr(), n_embd_q),
+                    bias: layer.q_bias.as_deref(),
+                },
+                TokenProjection {
+                    weight: &layer.wk,
+                    n_out: n_embd_k,
+                    out: RowsWrap(k_all.as_mut_ptr(), n_embd_k),
+                    bias: layer.k_bias.as_deref(),
+                },
+                TokenProjection {
+                    weight: &layer.wv,
+                    n_out: n_embd_v,
+                    out: RowsWrap(v_all.as_mut_ptr(), n_embd_v),
+                    bias: layer.v_bias.as_deref(),
+                },
+            ],
+        );
 
         if let (Some(q_norm), Some(k_norm)) = (layer.q_norm.as_deref(), layer.k_norm.as_deref()) {
             apply_qk_norms(
@@ -353,6 +476,9 @@ pub fn text_encode(
                     Qwen3Rope::Neox => {
                         rope_neox_inplace(q_slice, pos[0], cfg.n_embd_head_k, cfg.freq_base);
                     }
+                    Qwen3Rope::Mrope { sections } => {
+                        rope_mrope(q_slice, pos, sections, cfg.n_embd_head_k, cfg.freq_base);
+                    }
                     Qwen3Rope::Interleaved { sections, n_dims } => {
                         rope_mrope_interleaved(
                             q_slice,
@@ -372,6 +498,9 @@ pub fn text_encode(
                     Qwen3Rope::Neox => {
                         rope_neox_inplace(k_slice, pos[0], cfg.n_embd_head_k, cfg.freq_base);
                     }
+                    Qwen3Rope::Mrope { sections } => {
+                        rope_mrope(k_slice, pos, sections, cfg.n_embd_head_k, cfg.freq_base);
+                    }
                     Qwen3Rope::Interleaved { sections, n_dims } => {
                         rope_mrope_interleaved(
                             k_slice,
@@ -387,6 +516,7 @@ pub fn text_encode(
         }
 
         let mut attn_out = vec![0.0; n_tokens * n_attn];
+        let scalar_qwen2vl = cfg.architecture == "qwen2vl" && crate::ops::scalar_mode();
         for head in 0..cfg.n_head {
             let kv_head = head / group_size;
             let q_off = head * cfg.n_embd_head_k;
@@ -398,6 +528,9 @@ pub fn text_encode(
                 let mut max_val = f32::NEG_INFINITY;
                 let mut scores = vec![0.0; n_tokens];
                 for j in 0..=i {
+                    if key_mask.is_some_and(|mask| !mask[j]) {
+                        continue;
+                    }
                     let q_row =
                         &q_all[i * n_embd_q + q_off..i * n_embd_q + q_off + cfg.n_embd_head_k];
                     let k_row =
@@ -408,44 +541,71 @@ pub fn text_encode(
                     }
                 }
                 let mut exp_sum = 0.0f32;
+                let mut exp_sum_exact = 0.0f64;
                 for j in 0..=i {
+                    if key_mask.is_some_and(|mask| !mask[j]) {
+                        continue;
+                    }
                     scores[j] = (scores[j] - max_val).exp();
-                    exp_sum += scores[j];
+                    if scalar_qwen2vl {
+                        exp_sum_exact += scores[j] as f64;
+                    } else {
+                        exp_sum += scores[j];
+                    }
                 }
+                let inv_sum = if scalar_qwen2vl {
+                    (1.0f64 / exp_sum_exact) as f32
+                } else {
+                    0.0
+                };
                 for j in 0..=i {
-                    scores[j] /= exp_sum;
+                    if key_mask.is_some_and(|mask| !mask[j]) {
+                        continue;
+                    }
+                    if scalar_qwen2vl {
+                        scores[j] *= inv_sum;
+                    } else {
+                        scores[j] /= exp_sum;
+                    }
                 }
                 for dim in 0..cfg.n_embd_head_v {
                     let mut sum = 0.0f32;
+                    let mut sum_exact = 0.0f64;
                     for j in 0..=i {
+                        if key_mask.is_some_and(|mask| !mask[j]) {
+                            continue;
+                        }
                         let v_row =
                             &v_all[j * n_embd_v + v_off..j * n_embd_v + v_off + cfg.n_embd_head_v];
-                        sum += scores[j] * v_row[dim];
+                        let product = scores[j] * v_row[dim];
+                        if scalar_qwen2vl {
+                            sum_exact += product as f64;
+                        } else {
+                            sum += product;
+                        }
                     }
-                    attn_out[i * n_attn + attn_off + dim] = sum;
+                    attn_out[i * n_attn + attn_off + dim] = if scalar_qwen2vl {
+                        sum_exact as f32
+                    } else {
+                        sum
+                    };
                 }
             }
         }
 
         let mut attn_proj_out = vec![0.0; n_tokens * cfg.n_embd];
-        for tok in 0..n_tokens {
-            let attn_row = &attn_out[tok * n_attn..tok * n_attn + n_attn];
-            let blocks = (n_attn + 31) / 32;
-            let mut q8_buf = vec![0u8; n_attn];
-            let mut scale_buf = vec![0.0f32; blocks];
-            quantize_q8_0_into(attn_row, n_attn, &mut q8_buf, &mut scale_buf);
-            layer.wo.kernel.forward_prepared(
-                attn_row,
-                &q8_buf,
-                &scale_buf,
-                None,
-                &mut attn_proj_out[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd],
-                n_attn,
-                cfg.n_embd,
-                0,
-                1,
-            );
-        }
+        project_tokens(
+            &model.pool(),
+            n_tokens,
+            &attn_out,
+            n_attn,
+            vec![TokenProjection {
+                weight: &layer.wo,
+                n_out: cfg.n_embd,
+                out: RowsWrap(attn_proj_out.as_mut_ptr(), cfg.n_embd),
+                bias: None,
+            }],
+        );
 
         for tok in 0..n_tokens {
             let off = tok * cfg.n_embd;
@@ -478,35 +638,26 @@ pub fn text_encode(
         } else {
             let mut gate_buf = vec![0.0; n_tokens * cfg.n_ff];
             let mut up_buf = vec![0.0; n_tokens * cfg.n_ff];
-            for tok in 0..n_tokens {
-                let ffn_row = &ffn_normed[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd];
-                let blocks = (cfg.n_embd + 31) / 32;
-                let mut q8_buf = vec![0u8; cfg.n_embd];
-                let mut scale_buf = vec![0.0f32; blocks];
-                quantize_q8_0_into(ffn_row, cfg.n_embd, &mut q8_buf, &mut scale_buf);
-                layer.w_gate.kernel.forward_prepared(
-                    ffn_row,
-                    &q8_buf,
-                    &scale_buf,
-                    None,
-                    &mut gate_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
-                    cfg.n_embd,
-                    cfg.n_ff,
-                    0,
-                    1,
-                );
-                layer.w_up.kernel.forward_prepared(
-                    ffn_row,
-                    &q8_buf,
-                    &scale_buf,
-                    None,
-                    &mut up_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
-                    cfg.n_embd,
-                    cfg.n_ff,
-                    0,
-                    1,
-                );
-            }
+            project_tokens(
+                &model.pool(),
+                n_tokens,
+                &ffn_normed,
+                cfg.n_embd,
+                vec![
+                    TokenProjection {
+                        weight: &layer.w_gate,
+                        n_out: cfg.n_ff,
+                        out: RowsWrap(gate_buf.as_mut_ptr(), cfg.n_ff),
+                        bias: None,
+                    },
+                    TokenProjection {
+                        weight: &layer.w_up,
+                        n_out: cfg.n_ff,
+                        out: RowsWrap(up_buf.as_mut_ptr(), cfg.n_ff),
+                        bias: None,
+                    },
+                ],
+            );
 
             for tok in 0..n_tokens {
                 let off = tok * cfg.n_ff;
@@ -515,29 +666,21 @@ pub fn text_encode(
                 }
             }
 
+            // The SwiGLU above wrote the activated product back into
+            // `gate_buf`, so that buffer is the down projection's input.
             let mut down_buf = vec![0.0; n_tokens * cfg.n_embd];
-            for tok in 0..n_tokens {
-                let blocks = (cfg.n_ff + 31) / 32;
-                let mut q8_buf = vec![0u8; cfg.n_ff];
-                let mut scale_buf = vec![0.0f32; blocks];
-                quantize_q8_0_into(
-                    &gate_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
-                    cfg.n_ff,
-                    &mut q8_buf,
-                    &mut scale_buf,
-                );
-                layer.w_down.kernel.forward_prepared(
-                    &gate_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
-                    &q8_buf,
-                    &scale_buf,
-                    None,
-                    &mut down_buf[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd],
-                    cfg.n_ff,
-                    cfg.n_embd,
-                    0,
-                    1,
-                );
-            }
+            project_tokens(
+                &model.pool(),
+                n_tokens,
+                &gate_buf,
+                cfg.n_ff,
+                vec![TokenProjection {
+                    weight: &layer.w_down,
+                    n_out: cfg.n_embd,
+                    out: RowsWrap(down_buf.as_mut_ptr(), cfg.n_embd),
+                    bias: None,
+                }],
+            );
 
             for tok in 0..n_tokens {
                 let off = tok * cfg.n_embd;

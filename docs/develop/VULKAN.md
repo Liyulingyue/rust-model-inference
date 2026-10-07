@@ -23,6 +23,9 @@ macOS 会自动查找系统 Loader，以及 Homebrew 的 `/opt/homebrew/lib/libv
 最多 64 行一批；VAE 只构建当前像素 tile 的 im2col。跨投影共享 arena/pipeline、全图融合及性能优化
 留待实机测量。当前没有这些新增路径的 GPU 数值、成品质量或性能结论，也不保证 CPU/GPU 逐位一致。
 
+合入主线后，YuE2 另有 AR Vulkan 会话执行器；表中的 CPU 部分指共享投影路径。
+Z-Image VAE 的主线 BF16/F32 分支保留原有计算，新增卷积 offload 只接入 F16 分支。
+
 投影在调用线程上同步完成，之后才执行 SiLU、bias 或 residual。GPU 失败或拒绝 shape 时，
 CPU 重算该投影的全部输出；不混用已经成功的前几个 tile。`RMI_SCALAR=1`、
 `RMI_PARITY_TRACE` 或显式 CPU scope 会禁止真实投影 offload。
@@ -47,10 +50,13 @@ YuE2 的 BF16 舍入阈值和 NAR 累积误差必须单独验收。
 
 本次本机检查覆盖 default / vulkan / vulkan+parity-trace 的 lib、CLI、server 编译，
 格式、新增 SPIR-V 的 validator / 重编译字节一致性，以及路由、投影回退、形状、MLX、YuE2、LFM
-和 BERT 回归。全量 CPU 测试仍有基线失败；隔离 HEAD 基线复现了同一批问题。
+和 BERT 回归。适配阶段的全量 CPU 测试仍有基线失败；隔离 `60c5209` 基线复现了同一批问题。
 另外修复了 VAE patch 零填充和 F32 行数访问器忽略 `n_out` 的问题。
 全量 `scripts/vulkan-shaders.sh check` 在历史 `q8_matmul_grouped_dp4a.spv` 的重编译字节比对处失败，
 本次与基线相同；没有重写历史二进制。上述检查没有运行新增 GPU 路径。
+
+合入 `origin/main`（`50fd20e`）后，三种配置编译、上述 shader 静态检查及 118 项定向回归通过。
+VAE 的 SiLU 逐位断言仍失败，已在隔离的 `50fd20e` 基线上复现完全相同的差异。
 
 ### 已有整图执行器
 

@@ -1,7 +1,7 @@
 //! ERNIE-Image / ERNIE-Image-Turbo DiT core.
 //!
 //! Reference: `references/stable-diffusion.cpp/src/model/diffusion/ernie_image.hpp`
-//! (commit `de298c2`). The forward loop is:
+//! (commit `3f8527a`). The forward loop is:
 //!
 //! 1. Conv2d `x_embedder.proj` (kernel=patch_size, stride=patch_size) over the
 //!    latent to produce image tokens `[N, image_tokens, hidden]`.
@@ -26,16 +26,15 @@
 //! The whole step runs at flow-matching sigma in `[0, 1]`; the denoise loop
 //! (see [`ErnieImageDit::denoise`]) is Euler flow-matching.
 
-use std::sync::Arc;
-
 use half::f16;
+use std::sync::Arc;
 
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
-use crate::ops::dot_f32;
 use crate::ops::rope::neox::rope_sin_cos;
 use crate::ops::{rms_norm, rms_norm_inplace, silu_inplace};
 
+use super::super::z_image::dit::{layer_norm_no_affine, TorchMt19937};
 use super::{linear_into, Q8Scratch};
 
 // === DiT architecture constants (ERNIE-Image, Baidu) ===
@@ -54,7 +53,7 @@ pub(crate) const HEAD_DIM: usize = HIDDEN / HEADS;
 /// Inner attention dim (`to_q/k/v` output channels).
 pub(crate) const INNER_DIM: usize = HEADS * HEAD_DIM;
 
-/// FFN hidden width (SwiGLU: gate_proj / up_proj / linear_fc2).
+/// FFN hidden width (GELU(gate) * up, followed by linear_fc2).
 pub(crate) const FFN_WIDTH: usize = 12_288;
 
 pub(crate) const NUM_LAYERS: usize = 36;
@@ -81,9 +80,6 @@ pub(crate) const ROPE_AXES: [usize; 3] = [32, 48, 48];
 /// First ROPE_AXES dimensions are rotated; remainder is pass-through. This must
 /// equal HEAD_DIM, but ERNIE-Image's axes happen to sum exactly to it.
 pub(crate) const ROPE_HEAD_WIDTH: usize = 128;
-
-/// Padding multiple for the joint sequence length.
-pub(crate) const SEQUENCE_MULTIPLE: usize = 32;
 
 /// RMS epsilon for the per-block norms and Q/K norms.
 pub(crate) const RMS_EPSILON: f32 = 1e-6;
@@ -130,9 +126,6 @@ pub(crate) struct ErnieImageDit {
     /// text_proj (TEXT_IN_DIM → hidden, no bias) when text_in_dim != hidden.
     text_proj_weight: Option<String>,
     /// Final `AdaLNContinuous` (norm + linear(c) → scale, shift).
-    /// The actual unsloth GGUF export drops the inner `final_norm.norm.weight`
-    /// (norm step is identity in the export), so we treat it as optional.
-    final_norm_weight: Option<Vec<f32>>,
     final_norm_linear_weight: String,
     final_norm_linear_bias: Vec<f32>,
     /// Final linear: hidden → out_channels * patch_area.
@@ -157,10 +150,6 @@ impl ErnieImageDit {
         } else {
             None
         };
-        let final_norm_weight = source_ref
-            .tensor_info("final_norm.norm.weight")
-            .map(|_| load_f32_vector(source_ref, "final_norm.norm.weight", HIDDEN))
-            .transpose()?;
         let final_norm_linear_bias =
             load_f32_vector(source_ref, "final_norm.linear.bias", HIDDEN * 2)?;
         let final_linear_bias =
@@ -184,7 +173,6 @@ impl ErnieImageDit {
             x_embedder_weight: "x_embedder.proj.weight".into(),
             x_embedder_bias,
             text_proj_weight,
-            final_norm_weight,
             final_norm_linear_weight: "final_norm.linear.weight".into(),
             final_norm_linear_bias,
             final_linear_weight: "final_linear.weight".into(),
@@ -194,34 +182,40 @@ impl ErnieImageDit {
     }
 
     /// Run the diffusion loop for `options.steps` Euler steps and return the
-    /// final latent. Sigma schedule is linear in `[1.0, 0.0]`.
+    /// final latent, using the reference discrete schedule with flow shift 4.
     pub(crate) fn denoise(
         &self,
         context: &[f32],
         context_tokens: usize,
+        unconditional: Option<&[f32]>,
         options: &super::ErnieImageOptions,
     ) -> Result<Vec<f32>, String> {
         if context_tokens == 0 {
             return Err("ERNIE-Image context token count must be positive".into());
         }
-        let latent_side = options.resolution / 8;
+        let latent_side = options.resolution / 16;
         if latent_side == 0 || latent_side % PATCH_SIZE != 0 {
-            return Err("ERNIE-Image resolution must be a positive multiple of 8".into());
+            return Err("ERNIE-Image resolution must be a positive multiple of 16".into());
         }
         let latent_values = LATENT_CHANNELS * latent_side * latent_side;
         let mut latent = vec![0.0_f32; latent_values];
         // Seed the latent with N(0, 1) * sigma_max (sigma_max = 1).
-        let mut rng = SplitMix64::new(options.seed as u64);
-        for value in &mut latent {
-            *value = gaussian(&mut rng);
-        }
+        TorchMt19937::new(options.seed as u64).fill_normal_sd_cpp(&mut latent);
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "ernie_image.initial_latent",
+            None,
+            &[latent_side, latent_side, LATENT_CHANNELS],
+            &latent,
+        ));
         let steps = options.steps;
         let mut scratch = ErnieScratch::new(context_tokens, latent_side)?;
         let mut velocity = vec![0.0_f32; latent_values];
+        let mut unconditional_velocity = vec![0.0_f32; latent_values];
 
         for step in 0..steps {
-            let sigma = 1.0 - step as f32 / steps as f32;
-            let sigma_next = 1.0 - (step + 1) as f32 / steps as f32;
+            let sigma = flow_sigma(step, steps);
+            let sigma_next = flow_sigma(step + 1, steps);
             self.predict_flow(
                 &mut latent,
                 latent_side,
@@ -231,7 +225,32 @@ impl ErnieImageDit {
                 &mut scratch,
                 &mut velocity,
             )?;
+            if let Some(unconditional) = unconditional {
+                let tokens = super::context_token_count(unconditional)?;
+                self.predict_flow(
+                    &latent,
+                    latent_side,
+                    unconditional,
+                    tokens,
+                    sigma,
+                    &mut scratch,
+                    &mut unconditional_velocity,
+                )?;
+                for (conditional, unconditional) in velocity.iter_mut().zip(&unconditional_velocity)
+                {
+                    *conditional =
+                        *unconditional + options.cfg_scale * (*conditional - *unconditional);
+                }
+            }
             euler_flow_step(&mut latent, &velocity, sigma, sigma_next)?;
+            #[cfg(feature = "parity-trace")]
+            crate::parity_trace::report(crate::parity_trace::checkpoint(
+                "ernie_image.sample",
+                Some(step),
+                &[latent_side, latent_side, LATENT_CHANNELS],
+                &latent,
+            ));
+            eprintln!("[ernie-image] step {}/{}", step + 1, steps);
         }
         Ok(latent)
     }
@@ -257,15 +276,25 @@ impl ErnieImageDit {
             return Err("Invalid ERNIE-Image latent length".into());
         }
 
-        // Pad the joint sequence to a multiple of SEQUENCE_MULTIPLE so the
-        // attention row partition has no tail. Image tokens are first, text
-        // tokens last.
+        // ERNIE-Image keeps the image tokens first and the text tokens last.
+        // The reference graph accepts the exact joint length; adding zero
+        // padding here would make those artificial tokens participate in
+        // attention and change the model output.
         let image_token_count = latent_side * latent_side;
-        let total_tokens = padded_to_sequence_multiple(image_token_count + context_tokens)?;
+        let total_tokens = image_token_count
+            .checked_add(context_tokens)
+            .ok_or("ERNIE-Image sequence length overflow")?;
         scratch.prepare(total_tokens)?;
 
         // Time embedding: c ∈ [hidden]
         timestep_embedding(sigma * 1000.0, &mut scratch.time_frequency);
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "ernie_image.time_frequency",
+            None,
+            &[HIDDEN],
+            &scratch.time_frequency,
+        ));
         linear_into(
             self.source.as_ref(),
             &self.time_linear_1_weight,
@@ -294,6 +323,13 @@ impl ErnieImageDit {
             *v += *b;
         }
         require_finite(&scratch.time, "time conditioning")?;
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "ernie_image.time",
+            None,
+            &[HIDDEN],
+            &scratch.time,
+        ));
 
         // Shared AdaLN: silu(c) @ W^T + b -> 6 * hidden, then chunk into 6.
         for v in scratch.time_hidden.iter_mut() {
@@ -323,6 +359,13 @@ impl ErnieImageDit {
         }
         // Split into 6 chunks of HIDDEN.
         let chunks = scratch.modulation.chunks_exact(HIDDEN);
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "ernie_image.modulation",
+            None,
+            &[6 * HIDDEN],
+            &scratch.modulation,
+        ));
         assert_eq!(chunks.len(), 6);
         let mod_shift_msa = &scratch.modulation[0..HIDDEN];
         let mod_scale_msa = &scratch.modulation[HIDDEN..2 * HIDDEN];
@@ -384,8 +427,6 @@ impl ErnieImageDit {
         }
 
         // Concat image + text tokens along axis=1 (image first, then text).
-        // Total length is `total_tokens`; padding tokens are zero (the joint
-        // tensor was zero-initialised).
         for token in 0..image_token_count {
             scratch.joint[token * HIDDEN..(token + 1) * HIDDEN]
                 .copy_from_slice(&image_local[token * HIDDEN..(token + 1) * HIDDEN]);
@@ -398,6 +439,13 @@ impl ErnieImageDit {
 
         // 3D RoPE cache.
         ernie_image_rope_into(context_tokens, latent_side, latent_side, &mut scratch.rope)?;
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "ernie_image.prelude",
+            None,
+            &[total_tokens, HIDDEN],
+            &scratch.joint,
+        ));
 
         // Forward the 36 blocks.
         for (layer_index, block) in self.layers.iter().enumerate() {
@@ -423,6 +471,14 @@ impl ErnieImageDit {
                 self.pool.as_ref(),
                 layer_index,
             )?;
+            require_finite(&scratch.joint, "ERNIE-Image block output")?;
+            #[cfg(feature = "parity-trace")]
+            crate::parity_trace::report(crate::parity_trace::checkpoint(
+                "ernie_image.block",
+                Some(layer_index),
+                &[total_tokens, HIDDEN],
+                &scratch.joint,
+            ));
         }
 
         // AdaLNContinuous final norm: scale, shift from c.
@@ -448,24 +504,14 @@ impl ErnieImageDit {
         for token in 0..total_tokens {
             let normalized = &mut scratch.attention[token * HIDDEN..(token + 1) * HIDDEN];
             let source = &scratch.joint[token * HIDDEN..(token + 1) * HIDDEN];
-            // AdaLNContinuous: norm then modulate. The unsloth GGUF export
-            // drops `final_norm.norm.weight` (norm is identity), so we skip
-            // the rms_norm step when the tensor is absent.
-            match &self.final_norm_weight {
-                Some(weight) => {
-                    rms_norm(source, weight, normalized, RMS_EPSILON);
-                }
-                None => {
-                    normalized.copy_from_slice(source);
-                }
-            }
+            layer_norm_no_affine(source, normalized, RMS_EPSILON)?;
             // modulate: norm * (1 + scale) + shift
             for ((v, s), sh) in normalized
                 .iter_mut()
                 .zip(&final_scale[..HIDDEN])
                 .zip(&final_shift[..HIDDEN])
             {
-                *v = *v * (1.0 + *s) + *sh;
+                *v = (*v + *v * *s) + *sh;
             }
             final_norm_out[token * HIDDEN..(token + 1) * HIDDEN].copy_from_slice(normalized);
         }
@@ -511,6 +557,13 @@ impl ErnieImageDit {
             }
         }
 
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "ernie_image.velocity",
+            None,
+            &[OUT_CHANNELS, latent_side, latent_side],
+            velocity,
+        ));
         Ok(())
     }
 }
@@ -554,7 +607,12 @@ fn load_f32_vector(source: &dyn TensorSource, name: &str, len: usize) -> Result<
         }
         GGMLType::F16 | GGMLType::BF16 => {
             for (dst, chunk) in values.iter_mut().zip(bytes.chunks_exact(2)) {
-                *dst = f16::from_bits(u16::from_le_bytes(chunk.try_into().unwrap())).to_f32();
+                let bits = u16::from_le_bytes(chunk.try_into().unwrap());
+                *dst = if info.ggml_type == GGMLType::BF16 {
+                    half::bf16::from_bits(bits).to_f32()
+                } else {
+                    f16::from_bits(bits).to_f32()
+                };
             }
         }
         _ => unreachable!(),
@@ -595,19 +653,20 @@ fn require_finite(values: &[f32], name: &str) -> Result<(), String> {
     }
 }
 
-fn padded_to_sequence_multiple(n: usize) -> Result<usize, String> {
-    if n == 0 {
-        return Err("ERNIE-Image sequence length must be positive".into());
+fn flow_sigma(step: usize, steps: usize) -> f32 {
+    if step == steps {
+        return 0.;
     }
-    n.checked_add(SEQUENCE_MULTIPLE - 1)
-        .map(|v| v / SEQUENCE_MULTIPLE * SEQUENCE_MULTIPLE)
-        .ok_or_else(|| "ERNIE-Image sequence length overflow".into())
+    let t = if steps == 1 {
+        999.
+    } else {
+        999. - (999. / (steps - 1) as f32) * step as f32
+    };
+    let t = (t + 1.) / 1000.;
+    4. * t / (1. + 3. * t)
 }
 
-/// Euler flow-matching step:
-///   v = denoised * c_out + x / sigma (where c_out = -sigma)
-///   dx/dt = (x - denoised) / sigma
-///   x += dx/dt * (sigma_next - sigma)
+/// Preserve the reference's denoised -> derivative -> Euler floating-point order.
 pub(crate) fn euler_flow_step(
     latent: &mut [f32],
     velocity: &[f32],
@@ -617,10 +676,20 @@ pub(crate) fn euler_flow_step(
     if latent.len() != velocity.len() {
         return Err("Invalid ERNIE-Image Euler buffer lengths".into());
     }
+    if !sigma.is_finite()
+        || !sigma_next.is_finite()
+        || sigma <= 0.
+        || sigma > 1.
+        || sigma_next < 0.
+        || sigma_next > sigma
+    {
+        return Err("Invalid ERNIE-Image Euler sigma interval".into());
+    }
     let step = sigma_next - sigma;
     for (x, v) in latent.iter_mut().zip(velocity) {
-        let dx = (*x - *v) / sigma;
-        *x += dx * step;
+        let denoised = *v * -sigma + *x;
+        let derivative = (*x - denoised) / sigma;
+        *x += derivative * step;
     }
     Ok(())
 }
@@ -631,47 +700,15 @@ fn timestep_embedding(t: f32, out: &mut [f32; HIDDEN]) {
     let half = HIDDEN / 2;
     let log_theta = (1e4_f32).ln();
     for i in 0..half {
-        let freq_exp = (i as f32) / (half as f32 - 1.0);
+        let freq_exp = (i as f32) / half as f32;
         let omega = (freq_exp * -log_theta).exp();
         let angle = t * omega;
         let (cosine, sine) = rope_sin_cos(angle);
-        out[2 * i] = cosine;
-        out[2 * i + 1] = sine;
+        // ggml_timestep_embedding emits [sin(freq), cos(freq)] halves and
+        // ERNIE's helper keeps that ordering before the MLP.
+        out[i] = sine;
+        out[half + i] = cosine;
     }
-}
-
-/// Tiny PRNG used to seed the initial latent. We want a deterministic,
-/// reproducible, Gaussian-like initial state and `rand` is not in the
-/// minimal build, so we use a SplitMix64-based normal approximation.
-struct SplitMix64(u64);
-
-impl SplitMix64 {
-    fn new(seed: u64) -> Self {
-        Self(if seed == 0 {
-            0xdead_beef_cafe_babe
-        } else {
-            seed
-        })
-    }
-    fn next_u64(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
-    }
-    fn next_f32(&mut self) -> f32 {
-        (self.next_u64() >> 11) as f32 * (1.0 / (1u64 << 53) as f32)
-    }
-}
-
-/// Box-Muller transform on a uniform SplitMix64 stream.
-fn gaussian(rng: &mut SplitMix64) -> f32 {
-    let u1 = rng.next_f32().max(1e-7);
-    let u2 = rng.next_f32();
-    let r = (-2.0 * u1.ln()).sqrt();
-    let theta = 2.0 * std::f32::consts::PI * u2;
-    r * theta.cos()
 }
 
 /// Per-call scratch buffers reused across timesteps.
@@ -805,89 +842,54 @@ fn run_x_embedder_into(
     if output.len() != image_tokens * HIDDEN {
         return Err("ERNIE-Image x_embedder output length mismatch".into());
     }
-    // PATCH_SIZE = 1: each output token reads IN_CHANNELS input values (one per
-    // latent channel at the same spatial position) and writes HIDDEN values.
-    // PATCH_AREA = 1, so the weight is `[IN_CHANNELS, HIDDEN]` (we read
-    // chunks of IN_CHANNELS as a row).
-    //
-    // The unsloth GGUF stores x_embedder.proj.weight as a 4-D Conv2d kernel
-    // [1, 1, 128, 4096]. We collapse to 2-D by treating the leading 1s as
-    // kernel-size 1 (PATCH_SIZE = 1). The data layout is identical to
-    // a 2-D `[128, 4096]` matrix because the 1×1 kernel doesn't reorder
-    // channels.
-    let weight_info = source
+    let info = source
         .tensor_info(weight)
         .ok_or_else(|| format!("Missing tensor: {weight}"))?;
-    let weight_2d_name = format!("{weight}__flat_2d");
+    let bytes = source
+        .tensor_slice(weight)
+        .ok_or_else(|| format!("Missing tensor data: {weight}"))?;
+    // Oracle Conv2d loads its weights as F16, even from BF16 storage.
+    let converted: Vec<u8> = if info.ggml_type == GGMLType::BF16 {
+        bytes
+            .chunks_exact(2)
+            .flat_map(|b| {
+                let value =
+                    half::bf16::from_bits(u16::from_le_bytes(b.try_into().unwrap())).to_f32();
+                crate::ops::f32_to_f16(value).to_le_bytes()
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let f16_bytes = if converted.is_empty() {
+        bytes
+    } else {
+        &converted
+    };
+    let mut prepared = Vec::new();
     for token in 0..image_tokens {
-        let patch_y = token / latent_side;
-        let patch_x = token % latent_side;
-        let mut input = [0.0_f32; IN_CHANNELS];
+        let mut input = [0.; IN_CHANNELS];
         for c in 0..IN_CHANNELS {
-            let src = (c * latent_side + patch_y) * latent_side + patch_x;
-            input[c] = latent[src];
+            input[c] = latent[c * image_tokens + token];
         }
         let out = &mut output[token * HIDDEN..(token + 1) * HIDDEN];
-        // For the 4-D Conv2d layout, do a manual matmul of the trailing 2-D
-        // weight slice (the GGUF kernel `[kH, kW, in_C, out_C]` is laid out
-        // such that the 2-D slice `[in_C, out_C]` is exactly what we need).
-        if weight_info.dims.len() == 4 {
-            // 4-D Conv2d layout: [kH, kW, in_C*patch_area, out_C].
-            // For PATCH_SIZE = 1, kH = kW = 1, so the relevant slice is
-            // `weight[0, 0, :, :]` which is [in_C*patch_area, out_C].
-            let bytes = source
-                .tensor_slice(weight)
-                .ok_or_else(|| format!("Missing tensor data: {weight}"))?;
-            let inner_dim = IN_CHANNELS * PATCH_AREA;
-            // For BF16/Q8_0 (uniform dtype) the byte size matches
-            // `out_channels * in_channels * dtype_bytes`. We can compute
-            // it from `checked_nbytes / (kH * kW)`.
-            let total_bytes = weight_info
-                .checked_nbytes()
-                .ok_or_else(|| "Invalid x_embedder.proj.weight byte size".to_string())?
-                / 4; // kH * kW
-                     // Per-token matmul: y[h] = sum_c W[0,0,c,h] * input[c]
-                     // We do it as a dot product for each output dim.
-            match weight_info.ggml_type {
-                GGMLType::F16 | GGMLType::BF16 => {
-                    for h in 0..HIDDEN {
-                        let mut acc = 0.0_f32;
-                        for c in 0..inner_dim {
-                            let offset = (c * HIDDEN + h) * 2;
-                            let bits = u16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
-                            let w = if matches!(weight_info.ggml_type, GGMLType::F16) {
-                                half::f16::from_bits(bits).to_f32()
-                            } else {
-                                half::bf16::from_bits(bits).to_f32()
-                            };
-                            acc += w * input[c];
-                        }
-                        out[h] = acc + bias[h];
-                    }
-                }
-                _ => {
-                    return Err(format!(
-                        "Unsupported x_embedder.proj.weight type {:?} for 4-D layout",
-                        weight_info.ggml_type
-                    ));
-                }
+        if info.dims.len() == 4 {
+            if !matches!(info.ggml_type, GGMLType::F16 | GGMLType::BF16) {
+                return Err(format!("Unsupported x_embedder type {:?}", info.ggml_type));
             }
-            let _ = total_bytes;
-            let _ = weight_2d_name;
-        } else {
-            linear_into(
-                source,
-                weight,
-                IN_CHANNELS * PATCH_AREA,
-                HIDDEN,
+            crate::ops::kernel::f16::F16Kernel::new(f16_bytes).forward_scaled(
                 &input,
                 out,
-                q8,
-                pool,
-            )?;
-            for (v, b) in out.iter_mut().zip(bias) {
-                *v += *b;
-            }
+                IN_CHANNELS,
+                HIDDEN,
+                1.,
+                &mut prepared,
+            );
+        } else {
+            linear_into(source, weight, IN_CHANNELS, HIDDEN, &input, out, q8, pool)?;
+        }
+        for (v, b) in out.iter_mut().zip(bias) {
+            *v += *b;
         }
     }
     Ok(())
@@ -916,20 +918,29 @@ fn run_block(
     pool: &ComputePool,
     layer_index: usize,
 ) -> Result<(), String> {
-    let _ = layer_index;
     // 1. attention branch
     for token in 0..total_tokens {
-        let token_slice = &mut tokens[token * HIDDEN..(token + 1) * HIDDEN];
-        // rms_norm + modulate: x_norm * (1 + scale) + shift
-        rms_norm_inplace_with_scratch(token_slice, &block.adaLN_sa_ln, attention);
-        for ((v, s), sh) in token_slice.iter_mut().zip(scale_msa).zip(shift_msa) {
-            *v = *v * (1.0 + *s) + *sh;
-        }
+        modulated_rms_norm(
+            &tokens[token * HIDDEN..(token + 1) * HIDDEN],
+            &block.adaLN_sa_ln,
+            scale_msa,
+            shift_msa,
+            &mut attention[token * HIDDEN..(token + 1) * HIDDEN],
+        );
     }
 
+    #[cfg(feature = "parity-trace")]
+    if layer_index == 0 {
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "ernie_image.norm",
+            None,
+            &[total_tokens, HIDDEN],
+            attention,
+        ));
+    }
     // 2. to_q / to_k / to_v: three matmuls per row
     for token in 0..total_tokens {
-        let input = &tokens[token * HIDDEN..(token + 1) * HIDDEN];
+        let input = &attention[token * HIDDEN..(token + 1) * HIDDEN];
         let row_qkv = &mut qkv[token * 3 * INNER_DIM..(token + 1) * 3 * INNER_DIM];
         linear_into(
             source,
@@ -971,64 +982,78 @@ fn run_block(
             let start = head * HEAD_DIM;
             let query = &mut row_qkv[start..start + HEAD_DIM];
             rms_norm_inplace(query, &block.q_norm, RMS_EPSILON);
-            rotate_interleaved_inplace(query, rotation)?;
+            rotate_neox_inplace(query, rotation)?;
 
             let key_start = INNER_DIM + start;
             let key = &mut row_qkv[key_start..key_start + HEAD_DIM];
             rms_norm_inplace(key, &block.k_norm, RMS_EPSILON);
-            rotate_interleaved_inplace(key, rotation)?;
+            rotate_neox_inplace(key, rotation)?;
         }
     }
 
-    // 4. attention: S = Q K^T / sqrt(d), A = softmax(S) V, write into attention.
-    // We use a simple dot-product attention reduction here (matches the Z-Image
-    // CPU path semantics). For production we'd dispatch to the same GPU +
-    // NEON/AVX2 attention kernels as Z-Image; that lands in a follow-up.
+    #[cfg(feature = "parity-trace")]
+    if layer_index == 0 {
+        for (component, name) in ["ernie_image.q_rot", "ernie_image.k_rot", "ernie_image.v"]
+            .iter()
+            .enumerate()
+        {
+            if crate::parity_trace::enabled(name) {
+                let values: Vec<f32> = qkv
+                    .chunks_exact(3 * INNER_DIM)
+                    .flat_map(|row| {
+                        row[component * INNER_DIM..(component + 1) * INNER_DIM]
+                            .iter()
+                            .copied()
+                    })
+                    .collect();
+                crate::parity_trace::report(crate::parity_trace::checkpoint(
+                    name,
+                    None,
+                    &[total_tokens, INNER_DIM],
+                    &values,
+                ));
+            }
+        }
+    }
+    // Pack V columns once so attention uses the shared F32 dot contract.
+    for d in 0..HIDDEN {
+        for token in 0..total_tokens {
+            ffn_buf[d * total_tokens + token] = qkv[token * 3 * INNER_DIM + 2 * INNER_DIM + d];
+        }
+    }
     let scale_attn = 1.0 / (HEAD_DIM as f32).sqrt();
     for head in 0..HEADS {
-        let head_dim_offset = head * HEAD_DIM;
-        // Compute the per-head attention.
+        let head_offset = head * HEAD_DIM;
         for query_idx in 0..total_tokens {
-            let q_offset = query_idx * 3 * INNER_DIM + head_dim_offset;
+            let q_offset = query_idx * 3 * INNER_DIM + head_offset;
             let q = &qkv[q_offset..q_offset + HEAD_DIM];
-            let mut max_score = f32::NEG_INFINITY;
             for key_idx in 0..total_tokens {
-                let k_offset = key_idx * 3 * INNER_DIM + INNER_DIM + head_dim_offset;
-                let k = &qkv[k_offset..k_offset + HEAD_DIM];
-                let mut dot = 0.0_f32;
-                for d in 0..HEAD_DIM {
-                    dot += q[d] * k[d];
-                }
-                let score = dot * scale_attn;
-                scores[key_idx] = score;
-                if score > max_score {
-                    max_score = score;
-                }
+                let k_offset = key_idx * 3 * INNER_DIM + INNER_DIM + head_offset;
+                scores[key_idx] =
+                    crate::ops::dot_f32(q, &qkv[k_offset..k_offset + HEAD_DIM], HEAD_DIM)
+                        * scale_attn;
             }
-            let mut sum = 0.0_f32;
-            for s in scores.iter_mut().take(total_tokens) {
-                *s = (*s - max_score).exp();
-                sum += *s;
-            }
-            let inv = 1.0 / sum;
-            for s in scores.iter_mut().take(total_tokens) {
-                *s *= inv;
-            }
-            // Weighted sum of values.
-            let attn_offset = query_idx * HIDDEN + head_dim_offset;
+            crate::ops::softmax_inplace(&mut scores[..total_tokens]);
             for d in 0..HEAD_DIM {
-                attention[attn_offset + d] = 0.0;
-            }
-            for key_idx in 0..total_tokens {
-                let v_offset = key_idx * 3 * INNER_DIM + 2 * INNER_DIM + head_dim_offset;
-                let w = scores[key_idx];
-                for d in 0..HEAD_DIM {
-                    attention[attn_offset + d] += w * qkv[v_offset + d];
-                }
+                let column = (head_offset + d) * total_tokens;
+                attention[query_idx * HIDDEN + head_offset + d] = crate::ops::dot_f32(
+                    &scores[..total_tokens],
+                    &ffn_buf[column..column + total_tokens],
+                    total_tokens,
+                );
             }
         }
     }
 
+    #[cfg(feature = "parity-trace")]
+    if layer_index == 0 {
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "ernie_image.attention_values",
+            None,
+            &[total_tokens, HIDDEN],
+            attention,
+        ));
+    }
     // 5. to_out + residual + gate
     for token in 0..total_tokens {
         let input = &attention[token * HIDDEN..(token + 1) * HIDDEN];
@@ -1052,20 +1077,26 @@ fn run_block(
         }
     }
 
+    #[cfg(feature = "parity-trace")]
+    if layer_index == 0 {
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "ernie_image.attn_residual",
+            None,
+            &[total_tokens, HIDDEN],
+            tokens,
+        ));
+    }
     // 6. MLP branch
     for token in 0..total_tokens {
-        let token_slice = &mut tokens[token * HIDDEN..(token + 1) * HIDDEN];
-        rms_norm_inplace_with_scratch(token_slice, &block.adaLN_mlp_ln, mlp_out);
-        // modulate: norm * (1 + scale) + shift, write back into mlp_out's slice.
-        // We use split_at_mut to break the immutable borrow from rms_norm.
+        let token_slice = &tokens[token * HIDDEN..(token + 1) * HIDDEN];
         let token_mlp = &mut mlp_out[token * HIDDEN..(token + 1) * HIDDEN];
-        let mlp_in: Vec<f32> = token_mlp.to_vec();
-        for (v, (in_v, (s, sh))) in token_mlp
-            .iter_mut()
-            .zip(mlp_in.iter().zip(scale_mlp.iter().zip(shift_mlp.iter())))
-        {
-            *v = *in_v * (1.0 + *s) + *sh;
-        }
+        modulated_rms_norm(
+            token_slice,
+            &block.adaLN_mlp_ln,
+            scale_mlp,
+            shift_mlp,
+            token_mlp,
+        );
         // gate_proj → ffn_buf (gate), up_proj → ffn_up (up). Both buffers
         // are sized `total_tokens * FFN_WIDTH` and disjoint.
         linear_into(
@@ -1091,7 +1122,7 @@ fn run_block(
         // gelu(gate) * up -> linear_fc2. Result lands in `mlp_out`.
         let gate = &mut ffn_buf[token * FFN_WIDTH..(token + 1) * FFN_WIDTH];
         for g in gate.iter_mut() {
-            *g = gelu(*g);
+            *g = crate::ops::gelu_ggml_f16(*g);
         }
         for (g, u) in gate
             .iter_mut()
@@ -1122,41 +1153,34 @@ fn run_block(
     Ok(())
 }
 
-/// GeLU (the original `0.5 * x * (1 + erf(x / sqrt(2)))` form, matching the
-/// DiT reference). We use the polynomial-free `tanh` approximation because
-/// the diffusers ERNIE-Image `mlp` block uses `F.gelu` (exact), but a few
-/// percent deviation is acceptable here; the test suite pins this to a fixed
-/// f32 sample to keep us honest.
-fn gelu(x: f32) -> f32 {
-    0.5 * x * (1.0 + ((2.0_f32 / std::f32::consts::PI).sqrt() * (x + 0.044715 * x * x * x)).tanh())
+fn modulated_rms_norm(
+    input: &[f32],
+    weight: &[f32],
+    scale: &[f32],
+    shift: &[f32],
+    output: &mut [f32],
+) {
+    rms_norm(input, weight, output, RMS_EPSILON);
+    for ((value, scale), shift) in output.iter_mut().zip(scale).zip(shift) {
+        *value = (*value + *value * *scale) + *shift;
+    }
 }
 
-fn rms_norm_inplace_with_scratch(input: &mut [f32], weight: &[f32], scratch: &mut [f32]) {
-    let len = input.len();
-    debug_assert_eq!(weight.len(), len);
-    debug_assert!(scratch.len() >= len);
-    let mut mean = 0.0_f32;
-    for v in input.iter() {
-        mean += v * v;
-    }
-    mean = (mean / len as f32 + RMS_EPSILON).sqrt().recip();
-    for ((s, w), v) in scratch.iter_mut().take(len).zip(weight).zip(input.iter()) {
-        *s = v * mean * w;
-    }
-    input.copy_from_slice(&scratch[..len]);
-}
-
-fn rotate_interleaved_inplace(values: &mut [f32], rope: &[f32]) -> Result<(), String> {
+fn rotate_neox_inplace(values: &mut [f32], rope: &[f32]) -> Result<(), String> {
     if values.len() != rope.len() || values.len() % 2 != 0 {
-        return Err("Invalid rotate_interleaved buffers".into());
+        return Err("Invalid ERNIE-Image rotary buffers".into());
     }
-    for (v, r) in values.chunks_exact_mut(2).zip(rope.chunks_exact(2)) {
-        let x0 = v[0];
-        let x1 = v[1];
-        let cos = r[0];
-        let sin = r[1];
-        v[0] = x0 * cos - x1 * sin;
-        v[1] = x0 * sin + x1 * cos;
+    let (first, second) = values.split_at_mut(values.len() / 2);
+    let half = first.len();
+    for (i, (first, second)) in first.iter_mut().zip(second).enumerate() {
+        let x0 = *first;
+        let x1 = *second;
+        // The reference repeats each frequency in adjacent lanes, while
+        // rotate_half pairs the first and second halves of the head.
+        let a = (i / 2) * 2;
+        let b = ((i + half) / 2) * 2;
+        *first = x0 * rope[a] + (-x1) * rope[a + 1];
+        *second = x1 * rope[b] + x0 * rope[b + 1];
     }
     Ok(())
 }
@@ -1196,10 +1220,8 @@ fn ernie_image_rope_into(
     let image_tokens = patch_width
         .checked_mul(patch_height)
         .ok_or("ERNIE-Image image token count overflow")?;
-    let padded_text = padded_to_sequence_multiple(text_tokens)?;
-    let padded_image = padded_to_sequence_multiple(image_tokens)?;
-    let position_count = padded_text
-        .checked_add(padded_image)
+    let position_count = image_tokens
+        .checked_add(text_tokens)
         .ok_or("ERNIE-Image position count overflow")?;
     let output_len = position_count
         .checked_mul(ROPE_HEAD_WIDTH)
@@ -1207,19 +1229,14 @@ fn ernie_image_rope_into(
     resize_zeroed(output, output_len, "ERNIE-Image RoPE")?;
 
     for position_index in 0..position_count {
-        let positions = if position_index < padded_text {
-            [(position_index + 1) as f32, 0.0, 0.0]
+        let positions = if position_index < image_tokens {
+            [
+                text_tokens as f32,
+                (position_index / patch_width) as f32,
+                (position_index % patch_width) as f32,
+            ]
         } else {
-            let image_index = position_index - padded_text;
-            if image_index < image_tokens {
-                [
-                    (padded_text + 1) as f32,
-                    (image_index / patch_width) as f32,
-                    (image_index % patch_width) as f32,
-                ]
-            } else {
-                [0.0, 0.0, 0.0]
-            }
+            [(position_index - image_tokens) as f32, 0.0, 0.0]
         };
         let mut output_index = position_index * ROPE_HEAD_WIDTH;
         for (axis, dimension) in ROPE_AXES.iter().copied().enumerate() {
@@ -1238,4 +1255,110 @@ fn ernie_image_rope_into(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires the real GGUF and pinned Oracle F32 fixtures"]
+    fn oracle_flow_fixture() {
+        let model = std::env::var("RMI_ERNIE_IMAGE_DIT_GGUF").unwrap();
+        let fixtures = std::env::var("RMI_ERNIE_ORACLE_FIXTURES").unwrap();
+        let read = |name: &str| {
+            let bytes = std::fs::read(format!("{fixtures}/{name}.f32")).unwrap();
+            assert_eq!(bytes.len() % 4, 0);
+            bytes
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                .collect::<Vec<_>>()
+        };
+        let latent = read("rmi.ernie.input");
+        let context = read("rmi.ernie.context");
+        let side = ((latent.len() / LATENT_CHANNELS) as f64).sqrt() as usize;
+        assert_eq!(latent.len(), LATENT_CHANNELS * side * side);
+        let tokens = super::super::context_token_count(&context).unwrap();
+        let source = crate::format::ggufrs::open_model_source(
+            std::path::Path::new(&model),
+            crate::format::ggufrs::ComponentRole::Llm,
+        )
+        .unwrap();
+        let dit = ErnieImageDit::load(Arc::from(source), Arc::new(ComputePool::new(1))).unwrap();
+        let mut scratch = ErnieScratch::new(tokens, side).unwrap();
+        let mut velocity = vec![0.; latent.len()];
+        dit.predict_flow(
+            &latent,
+            side,
+            &context,
+            tokens,
+            1.,
+            &mut scratch,
+            &mut velocity,
+        )
+        .unwrap();
+        let expected = read("rmi.ernie.velocity");
+        assert_eq!(velocity.len(), expected.len());
+        let mismatch = velocity
+            .iter()
+            .zip(&expected)
+            .position(|(a, b)| a.to_bits() != b.to_bits());
+        assert_eq!(mismatch, None, "first raw-bit velocity difference");
+    }
+
+    #[test]
+    fn discrete_schedule_uses_shift_four_and_appends_zero() {
+        assert_eq!(flow_sigma(0, 2), 1.);
+        assert_eq!(
+            flow_sigma(1, 2).to_bits(),
+            (4f32 * 0.001 / (1. + 3. * 0.001)).to_bits()
+        );
+        assert_eq!(flow_sigma(2, 2), 0.);
+        assert_eq!([flow_sigma(0, 1), flow_sigma(1, 1)], [1., 0.]);
+    }
+
+    #[test]
+    fn euler_integrates_velocity_instead_of_treating_it_as_denoised() {
+        let mut latent = [4.];
+        euler_flow_step(&mut latent, &[1.], 1., 0.).unwrap();
+        assert_eq!(latent, [3.]);
+        assert!(euler_flow_step(&mut latent, &[1.], 0., 0.).is_err());
+    }
+
+    #[test]
+    fn timestep_zero_is_sine_then_cosine_halves() {
+        let mut output = [0.; HIDDEN];
+        timestep_embedding(0., &mut output);
+        assert!(output[..HIDDEN / 2].iter().all(|v| *v == 0.));
+        assert!(output[HIDDEN / 2..].iter().all(|v| *v == 1.));
+    }
+
+    #[test]
+    fn rope_uses_exact_image_then_text_sequence() {
+        let rope = ernie_image_rope(2, 2, 1).unwrap();
+        assert_eq!(rope.len(), 4 * HEAD_DIM);
+        let (cos, sin) = rope_sin_cos(2.);
+        assert_eq!(&rope[..2], &[cos, sin]);
+        assert_eq!(&rope[2 * HEAD_DIM..2 * HEAD_DIM + 2], &[1., 0.]);
+        assert_eq!(&rope[HEAD_DIM + 80..HEAD_DIM + 82], &{
+            let (cos, sin) = rope_sin_cos(1.);
+            [cos, sin]
+        });
+    }
+
+    #[test]
+    fn rotary_pairs_first_and_second_halves() {
+        let mut values = [1., 2., 3., 4.];
+        rotate_neox_inplace(&mut values, &[0., 1., 1., 0.]).unwrap();
+        assert_eq!(values, [-3., -4., 3., 4.]);
+    }
+
+    #[test]
+    fn branch_norm_preserves_residual_and_writes_the_entire_row() {
+        let input = [2.; 4];
+        let mut output = [f32::NAN; 4];
+        modulated_rms_norm(&input, &[1.; 4], &[2.; 4], &[4.; 4], &mut output);
+        assert_eq!(input, [2.; 4]);
+        assert!(output.iter().all(|v| (v - 7.).abs() < 1e-5));
+    }
 }

@@ -170,6 +170,8 @@ fn tiny_dense_model(k_weight: [f32; 4], v_weight: [f32; 4]) -> Qwen35Model<'stat
         layers: vec![layer],
         #[cfg(feature = "vulkan")]
         gpu: None,
+        cls_score: None,
+        cls_score_bias: Vec::new(),
     }
 }
 
@@ -525,6 +527,8 @@ fn tiny_dense_session_model_with_embedding(
         layers: vec![layer],
         #[cfg(feature = "vulkan")]
         gpu: None,
+        cls_score: None,
+        cls_score_bias: Vec::new(),
     }
 }
 
@@ -626,6 +630,8 @@ fn tiny_q8_session_model() -> Qwen35Model<'static> {
         layers: vec![layer],
         #[cfg(feature = "vulkan")]
         gpu: None,
+        cls_score: None,
+        cls_score_bias: Vec::new(),
     }
 }
 

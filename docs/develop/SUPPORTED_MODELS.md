@@ -1,6 +1,8 @@
 # 模型支持清单
 
-> 更新于 2026-09-30，DreamX-Creator 代码基线为 `1178200`。本清单以主 CLI `rust-model-inference` 为准。
+Mage-Flow 已接入主 CLI；下表数值与 PNG 证据来自原适配记录，远端已关机，本次入口迁移的真实权重复验未执行，见 verification.json 的 `cli_integration`。
+
+> 更新于 2026-10-06。以主 CLI `rust-model-inference` 为准。
 
 相同的 `general.architecture` 只表示会进入同一条代码路径，不代表任意同架构 GGUF 都已确认可用。未在“具体型号”表中出现的模型，应先按 `Supported` 或 `Experimental` 看待，不能默认视为 `Verified`。
 
@@ -23,6 +25,12 @@ Vulkan 投影适配为 **Experimental（代码接入，实机验证待补）**�
 
 | 型号 | GGUF architecture | 能力 | 所需组件 | 已验证格式 | 状态 | 证据 / 限制 |
 |---|---|---|---|---|---|---|
+| Mage-Flow-Base | `mage_flow` + `mage_vae` + `qwen3vl`/`clip` | 主 CLI CPU 文生图 | DiT + MageVAE + Qwen3-VL 4B text；Edit 另需 vision | DiT/VAE/text BF16，norm/vision F32，F32 KV | `Experimental`（标量计算图已验证） | 真实权重 DiT、VAE、文本/vision 和固定噪声采样按全部 `u32` 位比较；最小 PNG 入口已运行。参考图片到 VL fast processor、默认大图、GPU 与 SIMD/FMA 未对齐。[哈希和验证范围](../../tools/oracle/mage_flow/README.md)。 |
+| Mage-Flow | `mage_flow` + `mage_vae` + `qwen3vl`/`clip` | 主 CLI CPU 文生图 | DiT + MageVAE + Qwen3-VL 4B text；Edit 另需 vision | DiT/VAE/text BF16，norm/vision F32，F32 KV | `Experimental`（标量计算图已验证） | 真实权重 DiT、VAE、文本/vision 和固定噪声采样按全部 `u32` 位比较；最小 PNG 入口已运行。参考图片到 VL fast processor、默认大图、GPU 与 SIMD/FMA 未对齐。[哈希和验证范围](../../tools/oracle/mage_flow/README.md)。 |
+| Mage-Flow-Turbo | `mage_flow` + `mage_vae` + `qwen3vl`/`clip` | 主 CLI CPU 文生图 | DiT + MageVAE + Qwen3-VL 4B text；Edit 另需 vision | DiT/VAE/text BF16，norm/vision F32，F32 KV | `Experimental`（标量计算图已验证） | 真实权重 DiT、VAE、文本/vision 和固定噪声采样按全部 `u32` 位比较；最小 PNG 入口已运行。参考图片到 VL fast processor、默认大图、GPU 与 SIMD/FMA 未对齐。[哈希和验证范围](../../tools/oracle/mage_flow/README.md)。 |
+| Mage-Flow-Edit-Base | `mage_flow` + `mage_vae` + `qwen3vl`/`clip` | 主 CLI CPU 图像编辑 | DiT + MageVAE + Qwen3-VL 4B text；Edit 另需 vision | DiT/VAE/text BF16，norm/vision F32，F32 KV | `Experimental`（标量计算图已验证） | 真实权重 DiT、VAE、文本/vision 和固定噪声采样按全部 `u32` 位比较；最小 PNG 入口已运行。参考图片到 VL fast processor、默认大图、GPU 与 SIMD/FMA 未对齐。[哈希和验证范围](../../tools/oracle/mage_flow/README.md)。 |
+| Mage-Flow-Edit | `mage_flow` + `mage_vae` + `qwen3vl`/`clip` | 主 CLI CPU 图像编辑 | DiT + MageVAE + Qwen3-VL 4B text；Edit 另需 vision | DiT/VAE/text BF16，norm/vision F32，F32 KV | `Experimental`（标量计算图已验证） | 真实权重 DiT、VAE、文本/vision 和固定噪声采样按全部 `u32` 位比较；最小 PNG 入口已运行。参考图片到 VL fast processor、默认大图、GPU 与 SIMD/FMA 未对齐。[哈希和验证范围](../../tools/oracle/mage_flow/README.md)。 |
+| Mage-Flow-Edit-Turbo | `mage_flow` + `mage_vae` + `qwen3vl`/`clip` | 主 CLI CPU 图像编辑 | DiT + MageVAE + Qwen3-VL 4B text；Edit 另需 vision | DiT/VAE/text BF16，norm/vision F32，F32 KV | `Experimental`（标量计算图已验证） | 真实权重 DiT、VAE、文本/vision 和固定噪声采样按全部 `u32` 位比较；最小 PNG 入口已运行。参考图片到 VL fast processor、默认大图、GPU 与 SIMD/FMA 未对齐。[哈希和验证范围](../../tools/oracle/mage_flow/README.md)。 |
 | Audio8-ASR-Infinite | `audio8_asr_infinite` | 80 ms 时钟、480 ms 延迟的中英 ASR | 单个 BF16 GGUF；16 kHz PCM16 WAV | merged v2 的 938 个 BF16 张量、Qwen2 tokenizer、Voxtral 音频塔和 AdaRMS 文本解码 | `Experimental` | GGUF SHA-256 `1cfe353b4aa074cc3951385052b7e3a074152db4b1d20932fbab1e13195e17c4`；Darwin arm64 上真实 Mel 前 32 帧的 4 个音频/文本组与独立 C 标量参考 257 个 checkpoint 及 4 组完整 logits 原始 F32 位一致；4 秒演示语音与官方 `c8ba8ee` 均输出“一个两个半年，”。WAV→Mel 尚无独立标量逐位证明；音频塔超过 1500 帧明确拒绝。[复现说明](../../tools/converter/audio8/README.md)。 |
 | Qwen3-0.6B | `qwen3` | 文本生成 | 无 | Q8_0 | `Verified` | README 主路径和真实模型推理；其他 Qwen3 尺寸不自动继承此状态。 |
 | Qwen3-Embedding-0.6B | `qwen3` | 文本 Embedding | `--embedding` | Q8_0 | `Verified` | [`tests/embedding_parity.rs`](tests/embedding_parity.rs) 覆盖 pinned llama.cpp 向量和位级对照。 |
@@ -58,6 +66,8 @@ Vulkan 投影适配为 **Experimental（代码接入，实机验证待补）**�
 | Spark-X2.5-4B | `spark2_5` | 文本生成、thinking | 无 | BF16 | `Verified` | 真实 GGUF 冒烟通过；当前 CPU 路径较慢，尚未完成严格 Oracle 对齐。 |
 | Gemma 4 E2B | `gemma4` | 文本、图像、音频、图像+音频 | 任意媒体输入都需要 F16 mmproj | Q8_0 LLM + F16 mmproj | `Verified` | [`tests/gemma4_reference.rs`](tests/gemma4_reference.rs) 覆盖 pinned llama.cpp、文本及各媒体组合；不支持视频，要求 greedy 解码。 |
 | Gemma 4 12B | `gemma4` | 文本、音频 | 音频需要 F16 `gemma4ua` mmproj | Q8_0 LLM + F32 KV；F16 `gemma4ua` | `Verified` | [`tests/gemma4_reference.rs`](tests/gemma4_reference.rs) 覆盖三步文本 raw-bit parity，并在 AVX2+FMA+F16C x86_64 CPU 上与 llama.cpp `b96806d` 逐位比较音频 RMSNorm 和 3840 维投影；音频严格要求 16 kHz mono PCM16 WAV。 |
+| LongCat Image Edit / Edit Turbo（Transformer） | `flux`，显式 LongCat 张量契约 | packed latent + 3584 维上下文前向（测试专用） | 当前仅使用各自 Transformer GGUF；输入特征由测试提供 | Q8_0 主干 + BF16 投影，10 double + 20 single blocks | `Verified`（Transformer 标量） | 两个真实 414-tensor 模型各两组输入/位置/timestep；共 176 条 checkpoint / 1,536,640 个 F32 words 与固定 sd.cpp `3f8527a` 完全相同。测试入口 `tests/longcat_reference.rs`，`RMI_SCALAR=1`；关闭 SIMD/FMA/FP16 GELU 查表与外部加速库。[复现与边界](../../tools/oracle/longcat/README.md)。 |
+| LongCat Image Edit / Edit Turbo（完整编辑入口） | `flux`，显式指定 Edit/Turbo | 方形原图 + 指令 → PNG | 两个 GGUF 共用 Edit 的 Qwen2.5-VL-7B、Tokenizer 和 BF16 Flux VAE；scheduler 分别配置 | Q8_0 Transformer + BF16 编码器/VAE | `Experimental` | 固定 32×32 小图、seed 42、CFG 1：Edit 单步和 Turbo 两步的图文条件、VAE latent、采样结果原始 F32 位及最终 RGB 字节均与固定 sd.cpp 相同。默认尺寸、默认步数、非方形输入和加速路径未核验。[运行与限制](../../tools/oracle/longcat/README.md)。 |
 | Z-Image Turbo | `pig` | 文生图 | DiT、Qwen3 文本编码器、Flux VAE | Q8_0 DiT + Q8_0 文本编码器 + F16 VAE | `Verified` | [`tests/z_image_reference.rs`](tests/z_image_reference.rs) 覆盖 pinned Oracle 和 prompt 敏感性；当前范围是 CPU、512×512。 |
 | Qwen-Image-2.1 7B DiT | 无 metadata；完整 Qwen-Image-2.1 张量契约 | 给定 latent、context、timestep 计算 F32 速度场 | Qwen-Image-2.1 DiT GGUF | Q8_0 矩阵、BF16/F32 混合 GGUF | `Verified`（仅 DiT 前向） | 本地文件 SHA-256 `c0ed4b2ffd56cbe9c3df1e4a4098045256484ebe94ba5a7e4338d35ec046baa5`（7,640,860,384 bytes）；固定 stable-diffusion.cpp `2f886889e6e8b78738d6b87f7191f6018557c551` 与 ggml `4bf5f6000653b7881d00963cd6ddb665ccd62a8d`；16×16 latent、128 行 context、timestep 500 的输入、32 层和最终 16,384 个 F32 速度场值逐位对照，复现入口为 [`parity.sh`](../../tools/oracle/qwen_image_2_1/parity.sh)。主 CLI 使用 `--model ... --out velocity.bin`，尺寸可用 `--qwen-latent-width/--qwen-latent-height` 指定；未提供 latent/context 文件时使用明确标注的确定性 synthetic 输入。无文本编码器、采样器和 VAE 解码，不提供文生图图片。 |
 
@@ -65,6 +75,7 @@ Vulkan 投影适配为 **Experimental（代码接入，实机验证待补）**�
 
 | 模型 / 范围 | GGUF architecture | 能力 | 所需组件 | 当前覆盖 | 状态 | 证据 / 限制 |
 |---|---|---|---|---|---|---|
+| ERNIE-Image | 错标 `wan`，按完整 ERNIE 张量契约识别 | 文生图 | DiT + Ministral-3-3B 文本编码器 + 转换的 Flux2 VAE | Q4_K_M DiT/Text，VAE Conv F16 / Attention Linear F32 | `Experimental`（CPU） | 固定 stable-diffusion.cpp `3f8527a` / ggml `89c4413`；64×64、seed 42、1 步、CFG 1 的 token IDs、25 层文本输出、36 层 DiT、Euler latent 和完整 VAE RGB F32 共 93 个检查点 / 6,440,960 个值标量逐位一致；2 步 / CFG 5 的两路条件与完整生成另有 261 个检查点 / 16,132,096 个值一致。远端 256×256 / 32 步运行成功，样图漏猫，质量尚未通过。`--gpu` 明确拒绝，Turbo 权重与大尺寸质量未验证。[权重和复现](../../tools/oracle/ernie_image/README.md)。 |
 | 其他 Qwen3 文本 GGUF | `qwen3` | 文本生成 | 无 | 通用 metadata/tensor 分发 | `Supported` | 未逐个验证尺寸和量化组合；应为目标 GGUF 补一次真实推理。 |
 | Gemma 4 12B 图像 | `gemma4` | 图像 | F16 `gemma4uv` mmproj | 图像预处理、投影和生成入口 | `Supported` | 入口已接入，但尚未执行 12B 图像 Oracle 或独立真实冒烟，不继承文本/音频的 `Verified` 状态。 |
 | Qwen3-VL 0.6B / 2B 配置 | `qwen3vl` | 文本、图像、视频 | `qwen3vl_merger` mmproj | 两组主模型维度白名单、视觉编码器和 CLI 路由 | `Supported` | 当前代码接受 1024-dim 与 2048-dim 两组配置；没有独立的生成式 VL Oracle 记录。 |
@@ -94,6 +105,7 @@ Vulkan 投影适配为 **Experimental（代码接入，实机验证待补）**�
 | 带 shared experts 的 `qwen3vlmoe` | `Unsupported` | 权重加载明确返回 shared experts not supported。 |
 | Qwen3-ASR + 图像，或非零 temperature | `Unsupported` | CLI 在推理前拒绝。 |
 | Gemma 4 视频输入 | `Unsupported` | 多模态入口明确拒绝 `--video`。 |
+| LongCat 非方形编辑图、非标量数值对齐 | `Unsupported` | 实验入口只处理方形画布；固定 32×32 标量链路已逐位核对，默认尺寸与步数未核验。SIMD/FMA/BLAS/Accelerate 等路径不纳入对齐。 |
 | Z-Image Base、img2img、GPU 路径 | `Unsupported` | 当前仅实现 Z-Image Turbo 的原生 Rust CPU 文生图。 |
 | DreamX-Creator GPU、未匹配 GGUF pair | `Unsupported` | DreamX 当前只走原生 CPU；pair ID、组件清单、版本或精度 metadata 不匹配会在加载阶段拒绝。 |
 

@@ -13,9 +13,10 @@ use crate::core::tokenizer::{load_tokenizer, EncodeOptions};
 use crate::ops::embedding_lookup;
 use crate::ops::kernel::{QuantizedTensor, Weight};
 use crate::ops::{
-    dot_f16_f32, dot_f32, f32_slice_to_f16, quantize_q8_0_into, rms_norm_grouped, rms_norm_inplace,
-    rope_neox_inplace, rope_norm, silu_mul_approx_inplace, silu_mul_inplace, softmax_inplace,
-    sum_sq_f32, vec_add_into, vec_mad_f16_f32, vec_mad_f32, vec_scale_f32,
+    dot_f16_f32, dot_f32, f32_slice_to_f16, gelu_mul_approx_inplace, quantize_q8_0_into,
+    rms_norm_grouped, rms_norm_inplace, rope_neox_inplace, rope_norm, silu_mul_approx_inplace,
+    silu_mul_inplace, softmax_inplace, sum_sq_f32, vec_add_into, vec_mad_f16_f32, vec_mad_f32,
+    vec_scale_f32,
 };
 use crate::prompt::format_k2_horizon_chat_prompt_with_thinking;
 
@@ -454,7 +455,7 @@ fn rope_norm_with_thetas(
     }
 }
 
-/// Same as `crate::ops::rope::neox::rope_neox_inplace` but optionally
+/// Same as `rope_neox_inplace` but optionally
 /// reads per-dim thetas from `yarn_thetas` (length = `head_dim / 2`)
 /// instead of `pos * freq_base^(-2i/head_dim)`.
 fn rope_neox_inplace_with_thetas(
@@ -678,6 +679,16 @@ pub fn run_inference(
             format!("[INST] {prompt} [/INST]")
         } else if is_zephyr {
             format!("<|user|>\n{prompt}</s>\n<|assistant|>\n")
+        } else if arch == "gemma2" {
+            // Gemma-2-it uses the chat-template special tokens
+            // `<start_of_turn>user\n…<end_of_turn>\n<start_of_turn>model\n`
+            // (the `<bos>` prefix is emitted by the tokenizer via
+            // `add_special=true` + `parse_special=true` recognising
+            // `<start_of_turn>` / `<end_of_turn>` as single ids).
+            // (Ref: google/gemma-2-2b-it tokenizer_config.json
+            // chat_template; the GGUF `tokenizer.chat_template` is
+            // a 1:1 jinja port of the same.)
+            format!("<start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n")
         } else {
             format!("user\n{prompt}\nassistant\n<think>\n")
         };
@@ -708,6 +719,7 @@ pub fn run_inference(
         let (add_special, parse_special) = match arch {
             "nanbeige" => (true, true),
             "k2-horizon" | "granite" | "exaone" | "glm4" => (false, true),
+            "gemma2" => (true, true),
             _ if is_mistral || is_zephyr => (true, true),
             _ => (false, true),
         };
@@ -862,6 +874,20 @@ fn llama_turn_text(
         }
         return format!("<|user|>\n{content}</s>\n<|assistant|>\n");
     }
+    if arch == "gemma2" {
+        // Gemma-2-it chat template: each turn is wrapped by
+        // `<start_of_turn>{role}\n…<end_of_turn>\n` with the role
+        // being `user` or `model` (the `assistant` role is rewritten
+        // to `model` to match the GGUF `tokenizer.chat_template`
+        // jinja). The empty-content assistant turn is the bare
+        // `<start_of_turn>model\n` marker, matching the jinja
+        // template's `add_generation_prompt=True` branch.
+        let role_norm = if role == "assistant" { "model" } else { role };
+        if role == "assistant" && content.is_empty() {
+            return format!("<start_of_turn>{role_norm}\n");
+        }
+        return format!("<start_of_turn>{role_norm}\n{content}<end_of_turn>\n");
+    }
     format!("user\n{content}\nassistant\n{THINK_MARK}\n")
 }
 
@@ -893,7 +919,7 @@ fn llama_supports_multiturn(
     // which llama.cpp renders as repeated `{role}\n{content}\n` blocks, so
     // multi-turn is expressible there too — as repeated turns plus a final
     // assistant prompt, which is what llama.cpp does.
-    matches!(arch, "nanbeige" | "granite" | "llama" | "exaone")
+    matches!(arch, "nanbeige" | "granite" | "llama" | "exaone" | "gemma2")
 }
 
 /// Build the prompt token vector for a llama-family arch from message turns.
@@ -1004,7 +1030,7 @@ pub fn build_prompt_tokens_from_turns(
     }
     eprintln!("[RUST_PROMPT_TEXT] {prompt_text}");
     // Multi-turn BOS handling mirrors the single-turn path.
-    let add_special = arch == "nanbeige";
+    let add_special = matches!(arch, "nanbeige" | "gemma2");
     let mut body = tokenizer.encode(
         &prompt_text,
         crate::core::tokenizer::EncodeOptions {
@@ -1110,6 +1136,35 @@ pub fn run_inference_tokens(
         .metadata(&format!("{arch_prefix}.logit_scale"))
         .and_then(|v| v.to_f64())
         .unwrap_or(0.0) as f32;
+    // Gemma-2 ships `attn_logit_softcapping` (e.g. 50.0) and
+    // `final_logit_softcapping` (e.g. 30.0); Gemma-1 ships
+    // `final_logit_softcapping` too. Both default to 0.0 (no
+    // softcap) on every other arch. Reading via `arch_prefix` keeps
+    // it forward-compatible with future models that reuse the same
+    // metadata keys (e.g. a hypothetical gemma5).
+    //
+    // NOTE: llama.cpp spells the attention softcap key as
+    // `gemma2.attn_logit_softcapping` (NOT `gemma2.attention.*`).
+    // The final softcap is at top-level (`gemma2.final_logit_softcapping`).
+    let attn_softcap: f32 = source
+        .metadata(&format!("{arch_prefix}.attn_logit_softcapping"))
+        .and_then(|v| v.to_f64())
+        .map(|v| v as f32)
+        .unwrap_or(0.0);
+    let final_logit_softcap: f32 = source
+        .metadata(&format!("{arch_prefix}.final_logit_softcapping"))
+        .and_then(|v| v.to_f64())
+        .map(|v| v as f32)
+        .unwrap_or(0.0);
+    // Gemma-2 / Gemma-3 declare a sliding-window attention width (4096
+    // for 2B, 1024 for 4B). Reading via `arch_prefix` so other gemma
+    // revisions Just Work; `0` (no key) disables the window so plain
+    // llama / mistral / qwen stay full-attention.
+    let sliding_window: usize = source
+        .metadata(&format!("{arch_prefix}.attention.sliding_window"))
+        .and_then(|v| v.to_u64())
+        .map(|v| v as usize)
+        .unwrap_or(0);
 
     let output_norm = get_f32_tensor(source, "output_norm.weight", n_embd);
     let embd_info = source
@@ -1436,6 +1491,17 @@ pub fn run_inference_tokens(
                         unsafe { std::slice::from_raw_parts(k_cache_f16_ptr, kv_cache_size) };
                     let v_cache =
                         unsafe { std::slice::from_raw_parts(v_cache_f16_ptr, kv_cache_size) };
+                    // Gemma-2 sliding-window trim: when the cache holds
+                    // more than `sliding_window` tokens, advance the
+                    // head's cache offset and clamp the loop count so
+                    // attention only reads the most-recent window.
+                    let sw = sliding_window;
+                    let n_cached_total = pos + 1;
+                    let (eff_n_cached, head_off_base) = if sw > 0 && n_cached_total > sw {
+                        (sw, kb + (n_cached_total - sw) * n_embd_gqa)
+                    } else {
+                        (n_cached_total, kb)
+                    };
                     for h in h_start..h_end {
                         let kv_h = h / group_size;
                         let q_off = h * n_embd_head_k;
@@ -1445,10 +1511,11 @@ pub fn run_inference_tokens(
                             &mut attn_out[out_base..out_base + n_embd_head_v],
                             k_cache,
                             v_cache,
-                            kb + kv_h * n_embd_head_v,
+                            head_off_base + kv_h * n_embd_head_v,
                             n_embd_gqa,
-                            pos + 1,
+                            eff_n_cached,
                             kq_scale,
+                            attn_softcap,
                         );
                     }
                 } else {
@@ -1473,6 +1540,19 @@ pub fn run_inference_tokens(
                                     ..kb + t * n_embd_gqa + kv_h * n_embd_head_v + n_embd_head_k],
                                 n_embd_head_k,
                             ) * kq_scale;
+                        }
+                        // Pre-softmax prep: Gemma-2 sliding-window mask
+                        // (slots < pos+1-sw → -inf) and attn logit
+                        // softcap (`s = cap * tanh(s/cap)`). Plain
+                        // llama has both at 0 so the helper is a
+                        // no-op.
+                        if attn_softcap > 0.0 || sliding_window > 0 {
+                            apply_attn_pre_softmax_inplace(
+                                &mut scores[s_off..s_off + n_padded],
+                                n_cached,
+                                sliding_window,
+                                attn_softcap,
+                            );
                         }
                         scores[s_off + n_cached..s_off + n_padded].fill(f32::NEG_INFINITY);
                         softmax_inplace(&mut scores[s_off..s_off + n_padded]);
@@ -1698,7 +1778,29 @@ pub fn run_inference_tokens(
                         nth,
                     );
 
-                    if crate::ops::gpu_matmul_active() {
+                    if arch == "gemma2" {
+                        // Gemma-2 FFN is GeGLU: `up *= gelu(gate)`.
+                        // The w_down matmul below reads from gate_buf
+                        // (the existing convention for SwiGLU), so we
+                        // copy up_buf back over gate_buf after the
+                        // GeGLU to preserve the byte-equal
+                        // `gate_buf <- post-activation` contract.
+                        if crate::ops::gpu_matmul_active() {
+                            if ith == 0 {
+                                gelu_mul_approx_inplace(&gate_buf[..n_ff], &mut up_buf[..n_ff]);
+                                gate_buf[..n_ff].copy_from_slice(&up_buf[..n_ff]);
+                            }
+                        } else {
+                            let per_thread = (n_ff + nth - 1) / nth;
+                            let r_start = ith * per_thread;
+                            let r_end = (r_start + per_thread).min(n_ff);
+                            gelu_mul_approx_inplace(
+                                &gate_buf[r_start..r_end],
+                                &mut up_buf[r_start..r_end],
+                            );
+                            gate_buf[r_start..r_end].copy_from_slice(&up_buf[r_start..r_end]);
+                        }
+                    } else if crate::ops::gpu_matmul_active() {
                         // Matmul ran as one fenced GPU dispatch owned by thread 0;
                         // per-thread row slices would race with it.
                         if ith == 0 {
@@ -1862,6 +1964,15 @@ pub fn run_inference_tokens(
             if logit_scale != 0.0 {
                 let logits = unsafe { std::slice::from_raw_parts_mut(logits_ptr, vocab) };
                 vec_scale_f32(logits, logit_scale);
+            }
+            // Gemma-2 / Gemma-1 final-logit softcap (`final_logit_softcapping`,
+            // default 30.0). Applied after the optional logit_scale so
+            // the two are independent: scale multiplies the logits into
+            // the cap's neighbourhood, then the cap squashes them into
+            // (-cap, cap). `softcap_inplace` no-ops when `cap == 0`.
+            if final_logit_softcap > 0.0 {
+                let logits = unsafe { std::slice::from_raw_parts_mut(logits_ptr, vocab) };
+                softcap_inplace(logits, final_logit_softcap);
             }
 
             // DEBUG: print LOGITS for step 0 (first 16 values).
@@ -2101,6 +2212,21 @@ pub fn run_forward_logits_llama_inner(
     let norm_groups = normalization_groups(source, &arch, n_embd)?;
 
     let arch_prefix = &arch;
+    let attn_softcap: f32 = source
+        .metadata(&format!("{arch_prefix}.attn_logit_softcapping"))
+        .and_then(|v| v.to_f64())
+        .map(|v| v as f32)
+        .unwrap_or(0.0);
+    let final_logit_softcap: f32 = source
+        .metadata(&format!("{arch_prefix}.final_logit_softcapping"))
+        .and_then(|v| v.to_f64())
+        .map(|v| v as f32)
+        .unwrap_or(0.0);
+    let sliding_window: usize = source
+        .metadata(&format!("{arch_prefix}.attention.sliding_window"))
+        .and_then(|v| v.to_u64())
+        .map(|v| v as usize)
+        .unwrap_or(0);
     let embedding_scale = source
         .metadata(&format!("{arch_prefix}.embedding_scale"))
         .and_then(|v| v.to_f64())
@@ -2339,6 +2465,16 @@ pub fn run_forward_logits_llama_inner(
                         unsafe { std::slice::from_raw_parts(k_cache_f16_ptr, kv_cache_size) };
                     let v_cache =
                         unsafe { std::slice::from_raw_parts(v_cache_f16_ptr, kv_cache_size) };
+                    // Gemma-2 sliding-window pre-trim: when the cache
+                    // holds more than `sliding_window` tokens, advance
+                    // the head offset and clamp the loop count.
+                    let sw = sliding_window;
+                    let n_cached_total = pos + 1;
+                    let (eff_n_cached, head_off_base) = if sw > 0 && n_cached_total > sw {
+                        (sw, kb + (n_cached_total - sw) * n_embd_gqa)
+                    } else {
+                        (n_cached_total, kb)
+                    };
                     for h in h_start..h_end {
                         let kv_h = h / group_size;
                         let q_off = h * n_embd_head_k;
@@ -2348,10 +2484,11 @@ pub fn run_forward_logits_llama_inner(
                             &mut attn_out[out_base..out_base + n_embd_head_v],
                             k_cache,
                             v_cache,
-                            kb + kv_h * n_embd_head_v,
+                            head_off_base + kv_h * n_embd_head_v,
                             n_embd_gqa,
-                            pos + 1,
+                            eff_n_cached,
                             kq_scale,
+                            attn_softcap,
                         );
                     }
                 } else {
@@ -2376,6 +2513,17 @@ pub fn run_forward_logits_llama_inner(
                                     ..kb + t * n_embd_gqa + kv_h * n_embd_head_v + n_embd_head_k],
                                 n_embd_head_k,
                             ) * kq_scale;
+                        }
+                        // Pre-softmax prep: Gemma-2 sliding-window
+                        // mask + attn logit softcap. Plain llama has
+                        // both at 0 so the helper is a no-op.
+                        if attn_softcap > 0.0 || sliding_window > 0 {
+                            apply_attn_pre_softmax_inplace(
+                                &mut scores[s_off..s_off + n_padded],
+                                n_cached,
+                                sliding_window,
+                                attn_softcap,
+                            );
                         }
                         scores[s_off + n_cached..s_off + n_padded].fill(f32::NEG_INFINITY);
                         softmax_inplace(&mut scores[s_off..s_off + n_padded]);
@@ -2474,7 +2622,28 @@ pub fn run_forward_logits_llama_inner(
                     ith,
                     nth,
                 );
-                if crate::ops::gpu_matmul_active() {
+                if arch == "gemma2" {
+                    // Gemma-2 FFN is GeGLU: `up *= gelu(gate)`. Copy
+                    // back to gate_buf so the w_down matmul below
+                    // reads the post-activation tensor from the
+                    // expected location (matching the SwiGLU byte-
+                    // exact convention).
+                    if crate::ops::gpu_matmul_active() {
+                        if ith == 0 {
+                            gelu_mul_approx_inplace(&gate_buf[..n_ff], &mut up_buf[..n_ff]);
+                            gate_buf[..n_ff].copy_from_slice(&up_buf[..n_ff]);
+                        }
+                    } else {
+                        let per_thread = (n_ff + nth - 1) / nth;
+                        let r_start = ith * per_thread;
+                        let r_end = (r_start + per_thread).min(n_ff);
+                        gelu_mul_approx_inplace(
+                            &gate_buf[r_start..r_end],
+                            &mut up_buf[r_start..r_end],
+                        );
+                        gate_buf[r_start..r_end].copy_from_slice(&up_buf[r_start..r_end]);
+                    }
+                } else if crate::ops::gpu_matmul_active() {
                     if ith == 0 {
                         silu_mul_approx_inplace(&up_buf[..n_ff], &mut gate_buf[..n_ff]);
                     }
@@ -2585,6 +2754,10 @@ pub fn run_forward_logits_llama_inner(
                 let logits = unsafe { std::slice::from_raw_parts_mut(logits_ptr, vocab) };
                 vec_scale_f32(logits, logit_scale);
             }
+            if final_logit_softcap > 0.0 {
+                let logits = unsafe { std::slice::from_raw_parts_mut(logits_ptr, vocab) };
+                softcap_inplace(logits, final_logit_softcap);
+            }
         }
 
         prefill_evals += 1;
@@ -2612,6 +2785,12 @@ pub fn run_forward_logits_llama_inner(
 /// pre-existing shared-trunk math — it must stay exact (libm `exp`), not
 /// the approximate-exp variant, because every llama-family model shares
 /// this path.
+///
+/// `softcap > 0` applies Gemma-2's `attn_logit_softcapping`
+/// (`score = cap * tanh(score / cap)`) before the running-max
+/// bookkeeping. The online softmax can't pre-mask the iteration
+/// range, so sliding-window callers must reduce `n_cached` and
+/// advance `cache_offset` themselves (see the F16 call sites).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn attention_head_f16(
     q: &[f32],
@@ -2622,13 +2801,20 @@ pub(crate) fn attention_head_f16(
     cache_stride: usize,
     n_cached: usize,
     scale: f32,
+    softcap: f32,
 ) {
     let mut ms = 0.0f32;
     let mut s_sum = 0.0f32;
     output.fill(0.0);
+    let cap_inv = if softcap > 0.0 { 1.0f32 / softcap } else { 0.0 };
     for t in 0..n_cached {
         let offset = cache_offset + t * cache_stride;
-        let score = dot_f16_f32(q, &k[offset..offset + q.len()], q.len()) * scale;
+        let raw = dot_f16_f32(q, &k[offset..offset + q.len()], q.len()) * scale;
+        let score = if cap_inv > 0.0 {
+            softcap * (raw * cap_inv).tanh()
+        } else {
+            raw
+        };
         if score > ms {
             let rescale = (ms - score).exp();
             vec_scale_f32(output, rescale);
@@ -2643,111 +2829,58 @@ pub(crate) fn attention_head_f16(
     vec_scale_f32(output, inv_sum);
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn run_attention_per_query(
-    pool: &Arc<ComputePool>,
-    q: &[f32],
-    attn_out: &mut [f32],
-    kv_cache: &KvCache,
-    kv_cache_size: usize,
+/// Apply logit softcapping in-place: `scores[i] = cap * tanh(scores[i] / cap)`
+/// when `cap > 0`. Gemma-2's `attn_logit_softcapping` (default 50.0 in
+/// pre-trained GGUFs) and `final_logit_softcapping` (default 30.0) both use
+/// this transform — it bounds attention logits to `(-cap, cap)` so the
+/// softmax stays well-conditioned for very long contexts. Scalar fallback
+/// (no SIMD intrinsic for tanh on x86_64 stable); per-layer call cost is
+/// `n_layer * n_head * n_cached` f32 ops in attention and `vocab` ops in
+/// the LM head.
+/// Public re-export so future models with attn / final logit
+/// softcapping (Gemma-3+, Mistral-derived variants) can reuse the
+/// exact math without duplicating it. Plain llama / mistral / qwen
+/// keep their logits byte-identical (the function is a no-op when
+/// `cap == 0`).
+pub fn softcap_inplace(scores: &mut [f32], cap: f32) {
+    if cap <= 0.0 {
+        return;
+    }
+    let inv = 1.0f32 / cap;
+    for s in scores.iter_mut() {
+        *s = cap * (*s * inv).tanh();
+    }
+}
+
+/// Apply Gemma-2 sliding-window + softcap mask in-place on a
+/// pre-dot-product score buffer of length `n_cached`.
+///
+///   - `sliding_window > 0 && n_cached > sliding_window`: mask
+///     `scores[..n_cached - sliding_window]` with `-inf` so the softmax
+///     ignores tokens outside the window.
+///   - `softcap > 0`: cap every kept score via [`softcap_inplace`].
+///
+/// Used by the F32 attention loops in this trunk; the F16 path
+/// ([`attention_head_f16`]) handles both inline because its online
+/// softmax can't post-correct.
+/// Public re-export so future models with sliding-window
+/// attention + logit softcapping can reuse the same prep helper.
+pub fn apply_attn_pre_softmax_inplace(
+    scores: &mut [f32],
     n_cached: usize,
-    n_embd_head_k: usize,
-    n_embd_head_v: usize,
-    n_embd_gqa: usize,
-    n_head: usize,
-    group_size: usize,
-    kq_scale: f32,
-    kb: usize,
-    n_threads: usize,
-    max_ctx: usize,
+    sliding_window: usize,
+    softcap: f32,
 ) {
-    let attn_out_ptr = attn_out.as_mut_ptr();
-    let q_ptr = q.as_ptr();
-    let n_embd_q = attn_out.len();
-    let score_stride = max_ctx.div_ceil(256) * 256;
-    let mut scores_storage = vec![0.0f32; n_threads * score_stride];
-    let scores_ptr = scores_storage.as_mut_ptr();
-    let is_f16 = matches!(kv_cache, KvCache::F16(_));
-    let k_cache_f16_ptr = match kv_cache {
-        KvCache::F16(c) => c.k.as_ptr() as *const u16,
-        _ => std::ptr::null(),
-    };
-    let v_cache_f16_ptr = match kv_cache {
-        KvCache::F16(c) => c.v.as_ptr() as *const u16,
-        _ => std::ptr::null(),
-    };
-    let k_cache_f32_ptr = match kv_cache {
-        KvCache::F32(c) => c.k.as_ptr() as *const f32,
-        _ => std::ptr::null(),
-    };
-    let v_cache_f32_ptr = match kv_cache {
-        KvCache::F32(c) => c.v.as_ptr() as *const f32,
-        _ => std::ptr::null(),
-    };
-    pool.compute(move |ith: usize, nth: usize| {
-        let h_start = ith * n_head / nth;
-        let h_end = (ith + 1) * n_head / nth;
-        if is_f16 {
-            let k_cache =
-                unsafe { std::slice::from_raw_parts(k_cache_f16_ptr as *const u16, kv_cache_size) };
-            let v_cache =
-                unsafe { std::slice::from_raw_parts(v_cache_f16_ptr as *const u16, kv_cache_size) };
-            let q_local = unsafe { std::slice::from_raw_parts(q_ptr, n_embd_q) };
-            let attn_out_local = unsafe { std::slice::from_raw_parts_mut(attn_out_ptr, n_embd_q) };
-            for h in h_start..h_end {
-                let kv_h = h / group_size;
-                let q_off = h * n_embd_head_k;
-                let out_base = h * n_embd_head_v;
-                attention_head_f16(
-                    &q_local[q_off..q_off + n_embd_head_k],
-                    &mut attn_out_local[out_base..out_base + n_embd_head_v],
-                    k_cache,
-                    v_cache,
-                    kb + kv_h * n_embd_head_v,
-                    n_embd_gqa,
-                    n_cached,
-                    kq_scale,
-                );
-            }
-        } else {
-            let k_cache =
-                unsafe { std::slice::from_raw_parts(k_cache_f32_ptr as *const f32, kv_cache_size) };
-            let v_cache =
-                unsafe { std::slice::from_raw_parts(v_cache_f32_ptr as *const f32, kv_cache_size) };
-            let q_local = unsafe { std::slice::from_raw_parts(q_ptr, n_embd_q) };
-            let attn_out_local = unsafe { std::slice::from_raw_parts_mut(attn_out_ptr, n_embd_q) };
-            let scores =
-                unsafe { std::slice::from_raw_parts_mut(scores_ptr, n_threads * score_stride) };
-            let n_padded = (n_cached + 255) / 256 * 256;
-            for h in h_start..h_end {
-                let kv_h = h / group_size;
-                let q_off = h * n_embd_head_k;
-                let out_base = h * n_embd_head_v;
-                let s_off = ith * score_stride;
-                for t in 0..n_cached {
-                    scores[s_off + t] = dot_f32(
-                        &q_local[q_off..q_off + n_embd_head_k],
-                        &k_cache[kb + t * n_embd_gqa + kv_h * n_embd_head_v
-                            ..kb + t * n_embd_gqa + kv_h * n_embd_head_v + n_embd_head_k],
-                        n_embd_head_k,
-                    ) * kq_scale;
-                }
-                scores[s_off + n_cached..s_off + n_padded].fill(f32::NEG_INFINITY);
-                softmax_inplace(&mut scores[s_off..s_off + n_padded]);
-                let mut values = vec![0.0f32; n_padded];
-                for d in 0..n_embd_head_v {
-                    for t in 0..n_cached {
-                        values[t] = v_cache[kb + t * n_embd_gqa + kv_h * n_embd_head_v + d];
-                    }
-                    attn_out_local[out_base + d] = dot_f32(
-                        &values[..n_padded],
-                        &scores[s_off..s_off + n_padded],
-                        n_cached,
-                    );
-                }
-            }
+    debug_assert!(n_cached <= scores.len());
+    if sliding_window > 0 && n_cached > sliding_window {
+        let t_start = n_cached - sliding_window;
+        for s in &mut scores[..t_start] {
+            *s = f32::NEG_INFINITY;
         }
-    });
+        softcap_inplace(&mut scores[t_start..n_cached], softcap);
+    } else {
+        softcap_inplace(&mut scores[..n_cached], softcap);
+    }
 }
 
 /// silu_mul dispatched across threads. `gate` and `up` each have
@@ -2779,8 +2912,6 @@ pub(crate) fn silu_mul_rows(
                 );
                 // Exact SiLU via libm `exp` — matches llama.cpp. The
                 // approximate-exp variant is only used on the decode
-                // Exact SiLU via libm `exp` — matches llama.cpp. The
-                // approximate-exp variant is only used on the decode
                 // path where it was already the pre-existing convention.
                 //
                 // Args: `silu_mul_inplace(gate, up)` writes
@@ -2793,6 +2924,42 @@ pub(crate) fn silu_mul_rows(
                 // `g` (gate buffer, read-only here) and `u` (up
                 // buffer, the destination).
                 silu_mul_inplace(g, u);
+            }
+        }
+    });
+}
+
+/// GeGLU (`up *= gelu(gate)`) dispatched across threads. Same row layout
+/// as [`silu_mul_rows`] but uses the tanh-based GELU approximation.
+/// Used by Gemma-2's FFN which uses GeGLU rather than SwiGLU. Reads
+/// `gate` (the gate projection) and overwrites `up` (the up projection)
+/// in place; downstream `w_down` matmul reads from `up` after this
+/// helper returns (or from `gate_buf` after the per-row caller copies
+/// `up` over — see the call sites for the byte-exact semantics).
+pub(crate) fn geglu_mul_rows(
+    pool: &Arc<ComputePool>,
+    n_threads: usize,
+    gate: &[f32],
+    up: &mut [f32],
+    n_ff: usize,
+) {
+    assert_eq!(gate.len(), up.len());
+    let rows = gate.len() / n_ff;
+    let per_thread = (n_ff + n_threads - 1) / n_threads;
+    let gate_ptr = gate.as_ptr();
+    let up_ptr = up.as_mut_ptr();
+    pool.compute(move |ith, _nth| {
+        let r_start = ith * per_thread;
+        let r_end = (r_start + per_thread).min(n_ff);
+        for row in 0..rows {
+            unsafe {
+                let g =
+                    std::slice::from_raw_parts(gate_ptr.add(row * n_ff + r_start), r_end - r_start);
+                let u = std::slice::from_raw_parts_mut(
+                    up_ptr.add(row * n_ff + r_start),
+                    r_end - r_start,
+                );
+                crate::ops::gelu_mul_approx_inplace(g, u);
             }
         }
     });
@@ -2840,6 +3007,8 @@ pub(crate) fn run_attention_chunked(
     kb: usize,
     n_threads: usize,
     max_ctx: usize,
+    attn_softcap: f32,
+    sliding_window: usize,
 ) {
     let attn_out_ptr = attn_out.as_mut_ptr();
     let q_ptr = q.as_ptr();
@@ -2881,16 +3050,36 @@ pub(crate) fn run_attention_chunked(
                 let q_off = h * n_embd_head_k;
                 let out_base = h * n_embd_head_v;
                 for r in 0..rows {
+                    // Gemma-2 sliding-window trim per row: row `r`
+                    // attends to positions
+                    // `[max(0, base_position+r+1-sw), base_position+r+1)`.
+                    // The F16 path can't post-mask (online softmax
+                    // accumulates via running max), so we trim the
+                    // iteration range and advance the cache pointer
+                    // instead.
+                    let abs_pos = base_position + r;
+                    let full_n_cached = abs_pos + 1;
+                    let (eff_n_cached, head_off) =
+                        if sliding_window > 0 && full_n_cached > sliding_window {
+                            (
+                                sliding_window,
+                                kb + (full_n_cached - sliding_window) * n_embd_gqa
+                                    + kv_h * n_embd_head_v,
+                            )
+                        } else {
+                            (full_n_cached, kb + kv_h * n_embd_head_v)
+                        };
                     attention_head_f16(
                         &q_local[r * n_embd_q + q_off..r * n_embd_q + q_off + n_embd_head_k],
                         &mut attn_out_local
                             [r * n_embd_q + out_base..r * n_embd_q + out_base + n_embd_head_v],
                         k_cache,
                         v_cache,
-                        kb + kv_h * n_embd_head_v,
+                        head_off,
                         n_embd_gqa,
-                        base_position + r + 1,
+                        eff_n_cached,
                         kq_scale,
+                        attn_softcap,
                     );
                 }
             }
@@ -2915,9 +3104,21 @@ pub(crate) fn run_attention_chunked(
                 for r in 0..rows {
                     let q_row =
                         &q_local[r * n_embd_q + q_off..r * n_embd_q + q_off + n_embd_head_k];
+                    let abs_pos = base_position + r;
+                    // Gemma-2 sliding-window trim: only dot-product
+                    // against the most-recent `sliding_window`
+                    // tokens. Earlier positions get -inf so softmax
+                    // ignores them.
+                    let sw_start = if sliding_window > 0 && (abs_pos + 1) > sliding_window {
+                        (abs_pos + 1) - sliding_window
+                    } else {
+                        0
+                    };
                     for t in 0..n_cached_total {
-                        let abs_pos = base_position + r;
                         let score = if t > abs_pos {
+                            f32::NEG_INFINITY
+                        } else if t < sw_start {
+                            // sliding-window mask (gemma2)
                             f32::NEG_INFINITY
                         } else {
                             crate::ops::dot_f32(
@@ -2928,6 +3129,13 @@ pub(crate) fn run_attention_chunked(
                             ) * kq_scale
                         };
                         scores[r * n_padded + t] = score;
+                    }
+                    // Apply attn logit softcap to the kept region
+                    // (`[sw_start, abs_pos+1)`) when active.
+                    if attn_softcap > 0.0 {
+                        let mut row_view =
+                            &mut scores[r * n_padded + sw_start..r * n_padded + (abs_pos + 1)];
+                        softcap_inplace(&mut row_view, attn_softcap);
                     }
                     // Causal mask padding.
                     for t in n_cached_total..n_padded {
@@ -2953,7 +3161,10 @@ pub(crate) fn run_attention_chunked(
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_rope, compute_yarn_thetas, normalization_groups};
+    use super::{
+        apply_attn_pre_softmax_inplace, apply_rope, compute_yarn_thetas, normalization_groups,
+        softcap_inplace,
+    };
     use crate::core::tensor::{MetaValue, TensorInfo, TensorSource};
     use std::collections::HashMap;
 
@@ -2970,6 +3181,94 @@ mod tests {
 
         fn tensor_slice(&self, _name: &str) -> Option<&[u8]> {
             None
+        }
+    }
+
+    /// `softcap_inplace` no-ops when `cap <= 0` (plain llama path).
+    #[test]
+    fn softcap_inplace_zero_cap_is_noop() {
+        let mut scores = vec![1.0f32, -2.0, 3.0, -4.0];
+        let expected = scores.clone();
+        softcap_inplace(&mut scores, 0.0);
+        assert_eq!(scores, expected);
+        softcap_inplace(&mut scores, -1.0);
+        assert_eq!(scores, expected);
+    }
+
+    /// `softcap_inplace` matches the closed-form `cap * tanh(x/cap)`
+    /// for every entry (scalar reference, no SIMD).
+    #[test]
+    fn softcap_inplace_matches_closed_form() {
+        for cap in [1.0f32, 5.0, 30.0, 50.0, 100.0] {
+            let mut scores: Vec<f32> = (-12..=12).map(|i| i as f32 * 0.37).collect();
+            let inv = 1.0f32 / cap;
+            let expected: Vec<f32> = scores.iter().map(|&x| cap * (x * inv).tanh()).collect();
+            softcap_inplace(&mut scores, cap);
+            for (i, (a, b)) in scores.iter().zip(expected.iter()).enumerate() {
+                assert!(
+                    (a - b).abs() < 1e-5,
+                    "lane {i} cap={cap}: softcap_inplace={a} closed_form={b}"
+                );
+            }
+        }
+    }
+
+    /// `apply_attn_pre_softmax_inplace` runs only softcap when
+    /// `sw == 0` (plain llama path: no mask, softcap = 0 no-op).
+    #[test]
+    fn apply_attn_pre_softmax_no_mask_when_sw_zero() {
+        let n_cached = 11;
+        let mut scores: Vec<f32> = (-5..=5).map(|i| i as f32).collect();
+        let original = scores.clone();
+        apply_attn_pre_softmax_inplace(&mut scores, n_cached, 0, 50.0);
+        assert!(scores.iter().all(|x| x.is_finite()));
+        assert!(!scores.iter().any(|x| x.is_infinite()));
+        let mut changed = 0;
+        for (a, b) in scores.iter().zip(original.iter()) {
+            if a != b {
+                changed += 1;
+            }
+        }
+        assert!(changed > 0, "softcap should mutate at least some lanes");
+    }
+
+    /// SWA trim: when `n_cached > sw`, slots `[0, n_cached - sw)`
+    /// become `-inf` so softmax ignores them.
+    #[test]
+    fn apply_attn_pre_softmax_masks_prefix_when_n_cached_exceeds_sw() {
+        let n_cached = 8;
+        let sw = 3;
+        let mut scores: Vec<f32> = (0..n_cached).map(|i| (i + 1) as f32).collect();
+        apply_attn_pre_softmax_inplace(&mut scores, n_cached, sw, 0.0);
+        assert_eq!(
+            &scores[..n_cached - sw],
+            &vec![f32::NEG_INFINITY; n_cached - sw]
+        );
+        assert_eq!(&scores[n_cached - sw..], &vec![6.0, 7.0, 8.0]);
+    }
+
+    /// SWA + softcap combined: only the kept window region is
+    /// softcapped; the masked prefix stays `-inf`.
+    #[test]
+    fn apply_attn_pre_softmax_softcap_only_on_kept_window() {
+        let n_cached = 8;
+        let sw = 3;
+        let cap = 50.0;
+        let mut scores: Vec<f32> = (0..n_cached).map(|i| (i + 1) as f32 * 5.0).collect();
+        let inv = 1.0f32 / cap;
+        let mut expected = vec![f32::NEG_INFINITY; n_cached];
+        for i in (n_cached - sw)..n_cached {
+            let raw = (i + 1) as f32 * 5.0;
+            expected[i] = cap * (raw * inv).tanh();
+        }
+        apply_attn_pre_softmax_inplace(&mut scores, n_cached, sw, cap);
+        for (i, (a, b)) in scores.iter().zip(expected.iter()).enumerate() {
+            let ok = if a.is_infinite() && b.is_infinite() {
+                a == b
+            } else {
+                (a - b).abs() < 1e-5
+            };
+            assert!(ok, "lane {i}: softcap={a} expected={b}");
         }
     }
 

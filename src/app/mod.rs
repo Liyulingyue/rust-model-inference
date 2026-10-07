@@ -16,17 +16,19 @@ pub use crate::models::qwen3::embedding::{
 };
 pub use asr::run_asr_cli;
 pub use cli::{
-    dreamx_cli_options, inference_step_budget, init_rayon_global_pool, normalize_tts_language,
-    parse_cli_options, per_second, qwen_drive_cli_options, resolve_cli_generation_options,
-    resolve_thread_count, transcription_options, validate_cli_options,
-    validate_qwen3vl_decoder_mode, yue2_cli_options, z_image_cli_options, CliOptions,
-    DreamXCliOptions, DreamXOptions, DreamXRefinerOptions, EmbeddingOutput, JevBlockInput,
-    KvFormat, LatentUpsampleKind, PlanningMode, QwenDriveCliOptions, QwenDriveHead,
-    RefinerDecoderKind, YuE2CliOptions, ZImageCliOptions, DEFAULT_THREAD_CAP,
+    dreamx_cli_options, inference_step_budget, init_rayon_global_pool, longcat_cli_options,
+    normalize_tts_language, parse_cli_options, per_second, qwen_drive_cli_options,
+    resolve_cli_generation_options, resolve_thread_count, transcription_options,
+    validate_cli_options, validate_qwen3vl_decoder_mode, yue2_cli_options, z_image_cli_options,
+    CliOptions, DreamXCliOptions, DreamXOptions, DreamXRefinerOptions, EmbeddingOutput,
+    JevBlockInput, KvFormat, LatentUpsampleKind, LongCatCliOptions, PlanningMode,
+    QwenDriveCliOptions, QwenDriveHead, RefinerDecoderKind, YuE2CliOptions, ZImageCliOptions,
+    DEFAULT_THREAD_CAP,
 };
 pub use diffusion::{
-    read_f32_file, run_dreamx_cli, run_ernie_image_cli, run_pig_image, run_qwen_image_2_1,
-    run_z_image_cli, write_png_atomically, QwenImage21Request,
+    read_f32_file, run_auk_cli, run_dreamx_cli, run_ernie_image_cli, run_longcat_image_edit,
+    run_mage_flow_cli, run_pig_image, run_qwen_image_2_1, run_z_image_cli, write_output_atomically,
+    write_png_atomically, QwenImage21Request,
 };
 pub use jev::{
     build_grouped_payload, build_grouped_system, build_jev_inputs, gliner2_schema,
@@ -36,6 +38,11 @@ pub use jev::{
     run_jev_grouped_decision, run_jev_grouped_decision_data, schema_from_label_sets,
     schema_from_questions, JevGroupInput, JevGroupedQuestionInput, JevInputs, JevMode,
     JevQuestionInput, JevResult, LabelSet,
+};
+pub use jev::{
+    extract_long_document, parse_boundary_schema, run_gliner2_boundary,
+    run_gliner2_boundary_extract, BoundaryDecodeOptions, BoundarySchemaOptions,
+    LongDocumentOptions,
 };
 pub use media::{validate_mmproj_capabilities, MediaKind, ProjectorFamily};
 pub use omni::run_omni_embedding;
@@ -74,10 +81,24 @@ pub fn compute_embedding(
     prompt: &str,
     n_threads_arg: usize,
 ) -> Result<Vec<f32>, String> {
+    if crate::models::bitnet::detect_is_bitnet(source) {
+        return crate::models::bitnet::compute_embedding(source, prompt, n_threads_arg);
+    }
     match arch_of(source).as_str() {
         "gemma-embedding" => {
             crate::models::gemma_embedding::compute_embedding(source, prompt, n_threads_arg)
         }
+        // gemma3 arch: BitNet b1.58 270M (file_type=40) hits the
+        // detect_is_bitnet gate above; the standard gemma3 270M-it
+        // (and future 1B/4B/12B/27B) falls through to the standard
+        // path here. Both paths live in `models::gemma3` and share
+        // the same SPM tokenizer (`tokenizer.ggml.model = "llama"`,
+        // `pre = "default"`, no merges).
+        "gemma3" => crate::models::gemma3::compute_embedding(source, prompt, n_threads_arg),
+        // gemma2 (standard, non-BitNet). Shares tensor layout with
+        // the llama trunk; arch-specific GeGLU + softcap + sliding
+        // window is wired inside `models::llama::trunk`.
+        "gemma2" => crate::models::gemma2::compute_embedding(source, prompt, n_threads_arg),
         "bert" | "jina-bert-v2" | "nomic-bert" | "nomic-bert-moe" => {
             crate::models::bert_family::compute_embedding(source, prompt, n_threads_arg)
         }
@@ -93,7 +114,8 @@ pub fn run_embedding(
     kv_format: KvFormat,
     output: EmbeddingOutput,
 ) {
-    match arch_of(source).as_str() {
+    let arch = arch_of(source);
+    match arch.as_str() {
         "gemma-embedding" => crate::models::gemma_embedding::run_embedding(
             source,
             prompt,
@@ -101,6 +123,15 @@ pub fn run_embedding(
             kv_format,
             output,
         ),
+        // BitNet b1.58 (file_type=40 + per-projection `*_norm_in`
+        // tensors). Architecture-neutral dispatch inside the BitNet
+        // trunk family: `bitnet::compute_embedding` reads
+        // `general.architecture` and routes to `qwen3_arch` /
+        // `gemma3_arch` accordingly. The qwen3 / gemma3 standard
+        // trunks below are BitNet-free.
+        arch if crate::models::bitnet::detect_is_bitnet(source) => {
+            crate::models::bitnet::run_embedding(source, prompt, n_threads_arg, kv_format, output)
+        }
         "bert" | "jina-bert-v2" | "nomic-bert" | "nomic-bert-moe" => {
             crate::models::bert_family::run_embedding(
                 source,
@@ -109,6 +140,9 @@ pub fn run_embedding(
                 kv_format,
                 output,
             )
+        }
+        "gemma3" => {
+            crate::models::gemma3::run_embedding(source, prompt, n_threads_arg, kv_format, output)
         }
         _ => qwen3_run_embedding(source, prompt, n_threads_arg, kv_format, output),
     }

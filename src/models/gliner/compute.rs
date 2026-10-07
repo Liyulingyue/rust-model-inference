@@ -250,33 +250,81 @@ fn add_bias_rows(values: &mut [f32], width: usize, bias: &[f32]) {
     }
 }
 
-/// Decode one F32 row. The converter only emits F32 for this architecture.
+/// Decode one row of a typed `[rows, width]` table into `out`.
+///
+/// `offset` is an **element** offset (`row * out.len()`), which is what both
+/// call sites already pass. F32 reads the raw bytes; every block-quantized
+/// layout goes through `ops::embedding::embedding_lookup`, the same row-lookup
+/// helper the embedding path uses, so a Q8_0 table decodes identically
+/// whichever way it is read.
+///
+/// The F32 branch is byte-for-byte what it always was, so the F32 GGUF the
+/// converters emit keeps its exact path; the quantized branches only widen
+/// what `encode` accepts.
 fn decode_row(
     bytes: &[u8],
     ggml_type: crate::core::tensor::GGMLType,
     offset: usize,
     out: &mut [f32],
 ) -> Result<(), String> {
-    if !matches!(ggml_type, crate::core::tensor::GGMLType::F32) {
-        return Err(format!("gliner2 tensors must be F32, found {ggml_type:?}"));
+    use crate::core::tensor::GGMLType;
+    let width = out.len();
+    if width == 0 {
+        return Ok(());
     }
-    let needed = (offset + out.len()) * 4;
-    if bytes.len() < needed {
-        return Err(format!(
-            "tensor row at {offset} (+{}) exceeds its data",
-            out.len()
-        ));
+    match ggml_type {
+        GGMLType::F32 => {
+            let needed = (offset + width) * 4;
+            if bytes.len() < needed {
+                return Err(format!(
+                    "tensor row at {offset} (+{width}) exceeds its data"
+                ));
+            }
+            for (index, slot) in out.iter_mut().enumerate() {
+                let base = (offset + index) * 4;
+                *slot = f32::from_le_bytes([
+                    bytes[base],
+                    bytes[base + 1],
+                    bytes[base + 2],
+                    bytes[base + 3],
+                ]);
+            }
+            Ok(())
+        }
+        _ if crate::ops::embedding::is_supported_embedding(ggml_type) => {
+            // The block-quantized layouts address by row, not by element, so
+            // the element offset has to land on a row boundary.
+            if offset % width != 0 {
+                return Err(format!(
+                    "row offset {offset} is not a multiple of the row width {width}"
+                ));
+            }
+            let row = offset / width;
+            // One row of `width` elements. `nbytes` rounds up to whole
+            // blocks, which is exactly the on-disk row stride for these
+            // formats.
+            let row_bytes = ggml_type.nbytes(width);
+            let needed = row
+                .checked_add(1)
+                .and_then(|rows| row_bytes.checked_mul(rows))
+                .ok_or_else(|| format!("row {row} of {width} elements overflows"))?;
+            if bytes.len() < needed {
+                return Err(format!("row {row} exceeds the tensor data"));
+            }
+            crate::ops::embedding::embedding_lookup(
+                bytes,
+                u32::try_from(row).map_err(|_| format!("row {row} does not fit a u32 id"))?,
+                width,
+                ggml_type,
+                out,
+            );
+            Ok(())
+        }
+        other => Err(format!(
+            "gliner2 row decode supports F32 and the block-quantized embedding \
+             types, found {other:?}"
+        )),
     }
-    for (index, slot) in out.iter_mut().enumerate() {
-        let base = (offset + index) * 4;
-        *slot = f32::from_le_bytes([
-            bytes[base],
-            bytes[base + 1],
-            bytes[base + 2],
-            bytes[base + 3],
-        ]);
-    }
-    Ok(())
 }
 
 /// Full-sequence encoder output, `[n_tokens, n_embd]` row-major.

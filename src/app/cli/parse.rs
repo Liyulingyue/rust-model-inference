@@ -116,6 +116,37 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                 );
                 i += 1;
             }
+            "--width" => options.width = Some(required_usize_value(args, &mut i, "--width")?),
+            "--height" => options.height = Some(required_usize_value(args, &mut i, "--height")?),
+            "--cfg" => {
+                options.cfg = Some(
+                    required_string_value(args, &mut i, "--cfg")?
+                        .parse()
+                        .map_err(|error| format!("Invalid --cfg value: {error}"))?,
+                );
+            }
+            "--noise" => options.noise = Some(required_path_value(args, &mut i, "--noise")?),
+            "--reference" => {
+                options
+                    .references
+                    .push(required_path_value(args, &mut i, "--reference")?)
+            }
+            // LongCat Image Edit. `--components` points at a directory of
+            // safetensors rather than a GGUF, so it has no --text-encoder
+            // equivalent.
+            "--kind" => options.longcat_kind = Some(required_string_value(args, &mut i, "--kind")?),
+            "--components" => {
+                options.components = Some(required_path_value(args, &mut i, "--components")?)
+            }
+            "--input" => options.input = Some(required_path_value(args, &mut i, "--input")?),
+            "--side" => options.side = Some(required_usize_value(args, &mut i, "--side")?),
+            "--guidance" => {
+                options.guidance = Some(
+                    required_string_value(args, &mut i, "--guidance")?
+                        .parse()
+                        .map_err(|error| format!("Invalid --guidance value: {error}"))?,
+                )
+            }
             "--resolution" | "--size" => {
                 let flag = args[i].clone();
                 let value = args
@@ -317,6 +348,7 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                 }
             }
             "--gliner2-decide" => options.gliner2_decide = true,
+            "--gliner2-boundary" => options.gliner2_boundary = true,
             "--gliner2-schema" => {
                 if i + 1 < args.len() {
                     options.gliner2_schema = Some(args[i + 1].clone());
@@ -332,6 +364,12 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
             "--tts-mmproj" => {
                 if i + 1 < args.len() {
                     options.tts_mmproj = Some(args[i + 1].as_str().into());
+                    i += 1;
+                }
+            }
+            "--qwen-omni-bf16" => {
+                if i + 1 < args.len() {
+                    options.qwen_omni_bf16 = Some(args[i + 1].as_str().into());
                     i += 1;
                 }
             }

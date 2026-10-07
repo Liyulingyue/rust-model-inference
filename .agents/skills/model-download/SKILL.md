@@ -1,6 +1,6 @@
 ---
 name: model-download
-description: Use when 用户要求下载模型/权重（GGUF、mmproj 等）到 rust-model-inference 的 models 目录时。规定 ModelScope 优先、models/.venv 环境准备与按文件下载的命令模式。
+description: Use when 用户要求下载模型/权重（GGUF、mmproj 等）到 rust-model-inference 的 models 目录时。规定 ModelScope 优先、models/.venv 环境准备、按文件下载的命令模式，以及浏览/枚举 ModelScope 仓库的命令（无需登录）。
 ---
 
 # 模型下载
@@ -10,6 +10,33 @@ description: Use when 用户要求下载模型/权重（GGUF、mmproj 等）到 
 - **ModelScope 优先**：默认从 ModelScope（`modelscope download`）下载，不要默认走 HuggingFace。仅当用户明确要求或仓库在 ModelScope 上不存在时才换源，且换源前先和用户确认。
 - **按需下载文件，不整仓克隆**：只列出需要的文件名（权重 gguf、mmproj、README 等），避免下载整个仓库的冗余大文件。
 - **下载位置固定**：所有模型放在仓库根的 `models/` 下，每个 repo 一个从属于 `models` 的子目录（`--local_dir ./<repo-name>`）。
+
+## 浏览 / 枚举（找可适配的新模型）
+
+ModelScope 网页是 SPA，curl 抓不到列表；`POST /api/v1/models` 又要登录（`user not logged in`）。直接用 CLI 的 `list` / `info`，**两个命令都无需登录**，从 `models/` 工作目录执行：
+
+```bash
+# 列出一个 org / 个人名下所有 repo（按 repo-type 过滤）
+../models/.venv/bin/modelscope list \
+    --repo-type model --owner fastino \
+    --page 1 --page-size 50        # 或者 --all 一次性拿全
+
+# 查看单个 repo 的元数据（license / downloads / tags / 描述）
+../models/.venv/bin/modelscope info --repo-type model fastino/GLiNER2.5-Decide
+```
+
+- `--repo-type` 必填：`model` / `dataset` / `studio` / `skill` / `mcp`。
+- `--owner` 是 org id 或用户 id（不是 repo id）。
+- `--all` 会自动翻页到末尾，省心但量大时慢；用 `--page N --page-size M` 翻页可控。
+- `info` 返回的 `tags` 字段包含 `custom_tag:*`（如 `custom_tag:gliner2`、`custom_tag:qwen3`），用来快速判断架构族。
+
+输出列：`repo_id / visibility / downloads / likes / license`——`list` 末尾会打印 `page X / total Y`。
+
+### 反模式
+
+- 不要 `curl https://www.modelscope.cn/<org>?tab=model`——SPA 没 JS 拿不到列表。
+- 不要 `curl -X POST /api/v1/models`——需要登录。
+- 不要假设某个 repo 在 ModelScope 上——用 `list --owner` 先确认存在再下，缺源时跟用户确认是否换 HF。
 
 ## 环境准备（每次下载前检查）
 
