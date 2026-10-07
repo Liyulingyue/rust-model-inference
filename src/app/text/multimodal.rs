@@ -301,7 +301,8 @@ pub fn run_qwen3_family_multimodal(
     let media_counts: Vec<usize> = media_grid_shapes
         .iter()
         .map(|(h, w)| {
-            (*h).checked_mul(*w).ok_or_else(|| "Media grid shape overflow".to_string())
+            (*h).checked_mul(*w)
+                .ok_or_else(|| "Media grid shape overflow".to_string())
         })
         .collect::<Result<Vec<usize>, String>>()?;
     let jinja_system = if matches!(family, crate::app::media::ProjectorFamily::Qwen25Omni) {

@@ -84,7 +84,7 @@ fn run_jev_decision_data_with_image(
             false,
             mmproj_path,
             image_path,
-                    jinja.clone(),
+            jinja.clone(),
         ),
         "qwen35" => qwen35::run_jev_decision_qwen35(
             source.clone(),
@@ -95,7 +95,7 @@ fn run_jev_decision_data_with_image(
             false,
             mmproj_path,
             image_path,
-                    jinja.clone(),
+            jinja.clone(),
         ),
         // exaone rides the llama trunk (uses_llama_trunk covers it for
         // CLI + HTTP); it was missing here, so `--jev` on an
@@ -116,7 +116,7 @@ fn run_jev_decision_data_with_image(
             n_threads_arg,
             prefill_batch_size,
             false,
-                    jinja.clone(),
+            jinja.clone(),
         ),
         "gemma4" => gemma4::run_jev_decision_gemma4(
             source.clone(),
@@ -125,7 +125,7 @@ fn run_jev_decision_data_with_image(
             n_threads_arg,
             prefill_batch_size,
             false,
-                    jinja.clone(),
+            jinja.clone(),
         ),
         "lfm2" => lfm2::run_jev_decision_lfm2(
             source.clone(),
@@ -161,7 +161,7 @@ fn run_jev_decision_data_with_image(
             n_threads_arg,
             prefill_batch_size,
             false,
-                    jinja.clone(),
+            jinja.clone(),
         ),
         "nemotron_h" => nemotron_h::run_jev_decision_nemotron_h(
             source.clone(),
@@ -170,7 +170,7 @@ fn run_jev_decision_data_with_image(
             n_threads_arg,
             prefill_batch_size,
             false,
-                    jinja.clone(),
+            jinja.clone(),
         ),
         "falcon-h1" => falcon_h1::run_jev_decision_falcon_h1(
             source.clone(),
@@ -179,7 +179,7 @@ fn run_jev_decision_data_with_image(
             n_threads_arg,
             prefill_batch_size,
             false,
-                    jinja.clone(),
+            jinja.clone(),
         ),
         "hunyuan-dense" => hunyuan::run_jev_decision_hunyuan(
             source.clone(),
@@ -188,7 +188,7 @@ fn run_jev_decision_data_with_image(
             n_threads_arg,
             prefill_batch_size,
             false,
-                    jinja.clone(),
+            jinja.clone(),
         ),
         other => Err(format!(
             "--jev is not yet supported for architecture {:?}; \

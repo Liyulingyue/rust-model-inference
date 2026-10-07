@@ -47,9 +47,7 @@ pub fn run_qwen3_inference(
             // `--jinja` / `--chat-template-file` render the model's own
             // template; without them the hand-written builder runs, so
             // default behaviour is byte-for-byte unchanged.
-            if let Some(template) =
-                jinja.resolve(&|k| source.metadata(k).cloned())?
-            {
+            if let Some(template) = jinja.resolve(&|k| source.metadata(k).cloned())? {
                 crate::models::chat_template_jinja::render_tokens(
                     &tokenizer,
                     &template,

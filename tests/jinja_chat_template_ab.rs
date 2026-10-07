@@ -118,7 +118,8 @@ fn qwen3_jinja_matches_hardcoded_builder() {
         );
 
         assert_eq!(
-            jinja_ids, hard_ids,
+            jinja_ids,
+            hard_ids,
             "Qwen3 thinking={thinking}: the Jinja2 path and the hand-written builder \
              disagree, so flipping the model onto Jinja2 would change every token:\n{}",
             describe_divergence("jinja", "hardcoded", &jinja_ids, &hard_ids)
@@ -140,17 +141,14 @@ fn lfm25_jinja_renders_and_tokenizes() {
         panic!("LFM2.5 GGUF must ship tokenizer.chat_template");
     };
 
-    let ids = render_tokens(
-        t,
-        &jinja,
-        &[ChatMessage::text("user", PROMPT)],
-        true,
-        true,
-    )
-    .expect("jinja render");
+    let ids = render_tokens(t, &jinja, &[ChatMessage::text("user", PROMPT)], true, true)
+        .expect("jinja render");
     let text = decode(t, &ids);
 
-    eprintln!("--- LFM2.5 ---\n  ids:  {ids:?}\n  text: {}", text.replace('\n', "\\n"));
+    eprintln!(
+        "--- LFM2.5 ---\n  ids:  {ids:?}\n  text: {}",
+        text.replace('\n', "\\n")
+    );
 
     // The shipped template emits ChatML control tokens, which must survive
     // as single ids rather than being split into punctuation.
@@ -165,7 +163,13 @@ fn lfm25_jinja_renders_and_tokenizes() {
         );
     }
     assert_eq!(
-        t.encode(&text, EncodeOptions { add_special: false, parse_special: true }),
+        t.encode(
+            &text,
+            EncodeOptions {
+                add_special: false,
+                parse_special: true
+            }
+        ),
         ids,
         "jinja render must round-trip through the tokenizer"
     );
@@ -199,14 +203,8 @@ fn lfm25_jinja_known_divergence_from_hardcoded_builder() {
         panic!("LFM2.5 GGUF must ship tokenizer.chat_template");
     };
 
-    let jinja_ids = render_tokens(
-        t,
-        &jinja,
-        &[ChatMessage::text("user", PROMPT)],
-        true,
-        true,
-    )
-    .expect("jinja render");
+    let jinja_ids = render_tokens(t, &jinja, &[ChatMessage::text("user", PROMPT)], true, true)
+        .expect("jinja render");
     let hard_ids = rust_model_inference::prompt::build_lfm25_chat_prompt_with_thinking(
         t,
         &[rust_model_inference::prompt::Lfm2Message {

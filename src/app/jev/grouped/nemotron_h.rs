@@ -37,7 +37,9 @@ impl NemotronHJevGroupedScorer {
         jinja: &crate::models::chat_template_jinja::Options,
     ) -> Result<Self, String> {
         Ok(Self {
-            inner: super::super::single::nemotron_h::NemotronHJevScorer::new(source, n_threads, jinja)?,
+            inner: super::super::single::nemotron_h::NemotronHJevScorer::new(
+                source, n_threads, jinja,
+            )?,
         })
     }
 }

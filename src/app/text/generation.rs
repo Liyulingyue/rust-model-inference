@@ -1,6 +1,6 @@
 use crate::app::cli::{CliOptions, KvFormat};
-use crate::models::chat_template_jinja as jinja;
 use crate::core::tensor::TensorSource;
+use crate::models::chat_template_jinja as jinja;
 use std::io::{self, Write};
 use std::path::Path;
 use std::sync::Arc;

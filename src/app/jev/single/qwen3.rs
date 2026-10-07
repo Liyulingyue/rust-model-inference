@@ -164,10 +164,9 @@ impl Qwen3JevScorer {
         prefill_batch_size: usize,
         jinja: &crate::models::chat_template_jinja::Options,
     ) -> Result<Self, String> {
-        let jinja = crate::models::chat_template_jinja::resolve_optional(
-            jinja,
-            &|k| source.metadata(k).cloned(),
-        )?;
+        let jinja = crate::models::chat_template_jinja::resolve_optional(jinja, &|k| {
+            source.metadata(k).cloned()
+        })?;
         let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
             .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
         verify_label_tokens_single(&tokenizer)?;
@@ -202,8 +201,13 @@ impl JevScorer for Qwen3JevScorer {
         q: &PreparedQuestion,
     ) -> Result<(Vec<char>, Vec<u32>), String> {
         let labels = jev_labels(q);
-        let (token_ids, _payload) =
-            build_jev_prompt(self.model.tokenizer(), context, q, false, self.jinja.as_ref())?;
+        let (token_ids, _payload) = build_jev_prompt(
+            self.model.tokenizer(),
+            context,
+            q,
+            false,
+            self.jinja.as_ref(),
+        )?;
         Ok((labels, token_ids))
     }
 

@@ -251,7 +251,10 @@ pub fn template_from_source(
 ) -> Option<Result<JinjaChatTemplate, String>> {
     let value = metadata("tokenizer.chat_template")?;
     let raw = value.to_string_val()?;
-    Some(JinjaChatTemplate::compile(&raw, "GGUF tokenizer.chat_template"))
+    Some(JinjaChatTemplate::compile(
+        &raw,
+        "GGUF tokenizer.chat_template",
+    ))
 }
 
 /// Load a template from an explicit file path.
@@ -264,9 +267,7 @@ pub fn template_from_file(path: &std::path::Path) -> Result<JinjaChatTemplate, S
 /// Pick the literal control strings for `bos_token` / `eos_token` out of
 /// a tokenizer's special-token table, falling back to the conventional
 /// Qwen spellings when the tokenizer does not name them.
-pub fn special_tokens(
-    lookup: &dyn Fn(&str) -> Option<String>,
-) -> SpecialTokens {
+pub fn special_tokens(lookup: &dyn Fn(&str) -> Option<String>) -> SpecialTokens {
     SpecialTokens {
         bos: lookup("bos_token").unwrap_or_else(|| "<|endoftext|>".to_string()),
         eos: lookup("eos_token").unwrap_or_else(|| "<|im_end|>".to_string()),
@@ -311,10 +312,8 @@ fn special_tokens_from_tokenizer(
     tokenizer: &dyn crate::core::tokenizer::Tokenizer,
 ) -> SpecialTokens {
     let literal = |id: Option<u32>| {
-        id.map(|id| {
-            String::from_utf8_lossy(&tokenizer.token_piece_bytes(id, true)).into_owned()
-        })
-        .unwrap_or_default()
+        id.map(|id| String::from_utf8_lossy(&tokenizer.token_piece_bytes(id, true)).into_owned())
+            .unwrap_or_default()
     };
     SpecialTokens {
         bos: literal(tokenizer.bos_id()),
@@ -542,7 +541,8 @@ pub fn media_conversation_tokens(
         user_text,
         &media_counts,
         enable_thinking,
-    )? else {
+    )?
+    else {
         return Ok(None);
     };
     if media_counts.is_empty() {
@@ -680,7 +680,10 @@ mod tests {
         let src = "{% for m in messages %}<|im_start|>{{ m.role }}\n\
                    {{ m.content }}<|im_end|>\n{% endfor %}\
                    {% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}";
-        assert_eq!(render(src, false, false), "<|im_start|>user\nhi<|im_end|>\n");
+        assert_eq!(
+            render(src, false, false),
+            "<|im_start|>user\nhi<|im_end|>\n"
+        );
     }
 
     #[test]
@@ -735,7 +738,8 @@ mod tests {
             content: Value::String(String::new()),
         }];
         // A message carrying `thinking` must take the defined branch.
-        let ctx = json!({ "messages": [ { "role": "assistant", "content": "", "thinking": "hm" } ] });
+        let ctx =
+            json!({ "messages": [ { "role": "assistant", "content": "", "thinking": "hm" } ] });
         assert_eq!(
             t.env
                 .get_template(TEMPLATE_NAME)
@@ -778,8 +782,10 @@ mod tests {
         // The premise behind rewriting `x.get("k")` as `x["k"]` is that the
         // two agree on truthiness for present / absent / empty values.
         // Assert it directly rather than trusting the argument.
-        let via_get = "{% for m in messages %}{% if m.get(\"content\") %}T{% else %}F{% endif %}{% endfor %}";
-        let via_index = "{% for m in messages %}{% if m[\"content\"] %}T{% else %}F{% endif %}{% endfor %}";
+        let via_get =
+            "{% for m in messages %}{% if m.get(\"content\") %}T{% else %}F{% endif %}{% endfor %}";
+        let via_index =
+            "{% for m in messages %}{% if m[\"content\"] %}T{% else %}F{% endif %}{% endfor %}";
         for content in [Some("hello"), Some(""), None] {
             let a = eval_with_content(via_get, content);
             let b = eval_with_content(via_index, content);
@@ -870,7 +876,10 @@ mod tests {
             file: Some(path.clone()),
         };
         assert!(opts.enabled(), "a template file must imply jinja");
-        let t = opts.resolve(&|_| None).unwrap().expect("template from file");
+        let t = opts
+            .resolve(&|_| None)
+            .unwrap()
+            .expect("template from file");
         assert_eq!(
             t.render(
                 &[ChatMessage::text("user", "x")],
@@ -916,7 +925,10 @@ mod tests {
 
     #[test]
     fn no_media_leaves_the_sequence_untouched() {
-        assert_eq!(expand_vision_placeholders(&[1, 2, 3], 99, &[]).unwrap(), vec![1, 2, 3]);
+        assert_eq!(
+            expand_vision_placeholders(&[1, 2, 3], 99, &[]).unwrap(),
+            vec![1, 2, 3]
+        );
     }
 
     /// A vision template rendered with an image content part must contain
@@ -949,7 +961,10 @@ mod tests {
             Ok(_) => panic!("expected an error"),
             Err(e) => e,
         };
-        assert!(err.contains("frobnicate") || err.contains("invalid chat template"), "{err}");
+        assert!(
+            err.contains("frobnicate") || err.contains("invalid chat template"),
+            "{err}"
+        );
     }
 
     /// Render the template a real GGUF ships, for eyeballing the output
@@ -970,12 +985,10 @@ mod tests {
         };
         // Minimal GGUF metadata walk: find `tokenizer.chat_template`.
         let mut i = 8usize;
-        let u64at = |b: &[u8], o: usize| -> u64 {
-            u64::from_le_bytes(b[o..o + 8].try_into().unwrap())
-        };
-        let u32at = |b: &[u8], o: usize| -> u32 {
-            u32::from_le_bytes(b[o..o + 4].try_into().unwrap())
-        };
+        let u64at =
+            |b: &[u8], o: usize| -> u64 { u64::from_le_bytes(b[o..o + 8].try_into().unwrap()) };
+        let u32at =
+            |b: &[u8], o: usize| -> u32 { u32::from_le_bytes(b[o..o + 4].try_into().unwrap()) };
         let _ = u32at(bytes.as_slice(), 4);
         let n_tensors = u64at(&bytes, 8);
         let n_kv = u64at(&bytes, 16);

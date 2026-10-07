@@ -54,7 +54,9 @@ impl SparkJevScorer {
         n_threads: usize,
         jinja: &crate::models::chat_template_jinja::Options,
     ) -> Result<Self, String> {
-        let jinja = crate::models::chat_template_jinja::resolve_optional(jinja, &|k| source.metadata(k).cloned())?;
+        let jinja = crate::models::chat_template_jinja::resolve_optional(jinja, &|k| {
+            source.metadata(k).cloned()
+        })?;
         let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
             .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
         verify_label_tokens_single(&tokenizer)?;
@@ -64,7 +66,10 @@ impl SparkJevScorer {
             8192,
         )?;
         Ok(Self {
-            jinja, tokenizer, session })
+            jinja,
+            tokenizer,
+            session,
+        })
     }
 }
 

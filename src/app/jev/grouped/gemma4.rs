@@ -25,7 +25,8 @@ pub(crate) fn run_jev_grouped_gemma4(
         .map(|n| n.get())
         .unwrap_or(4);
     let n_threads = resolve_thread_count(n_threads_arg, available_threads);
-    let mut scorer = Gemma4JevGroupedScorer::new(source.clone(), n_threads, prefill_batch_size, &jinja)?;
+    let mut scorer =
+        Gemma4JevGroupedScorer::new(source.clone(), n_threads, prefill_batch_size, &jinja)?;
     if !output_json {
         eprintln!("compute pool: {} threads (Gemma4)", n_threads);
     }
