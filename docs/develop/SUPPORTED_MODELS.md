@@ -104,6 +104,7 @@ Mage-Flow 已接入主 CLI；下表数值与 PNG 证据来自原适配记录，�
 | Qwen3-ASR + 图像，或非零 temperature | `Unsupported` | CLI 在推理前拒绝。 |
 | Gemma 4 视频输入 | `Unsupported` | 多模态入口明确拒绝 `--video`。 |
 | LongCat 非方形编辑图、非标量数值对齐 | `Unsupported` | 实验入口只处理方形画布；固定 32×32 标量链路已逐位核对，默认尺寸与步数未核验。SIMD/FMA/BLAS/Accelerate 等路径不纳入对齐。 |
+| 未接入 Jinja2 chat 模板的模型路径 | `Supported`（仅 Qwen3 文本） | `--jinja` 渲染 GGUF 自带的 `tokenizer.chat_template`（minijinja 2.24）。Qwen3-0.6B 与手写 builder **逐 token 一致**（12 / 16 token 零分歧）；LFM2.5 存在已知分歧（手写 builder 缺 `<|im_end|>`，12 vs 14 token），未修 —— 需先重跑 1.2B 的 llama.cpp parity。llama trunk / LFM2 / Qwen35 / 视觉 / JEV / server 多轮未接入。见 [`docs/usage/chat-template.md`](../usage/chat-template.md)。 |
 | Z-Image Base、img2img | `Unsupported` | 当前仅实现 Z-Image Turbo 的原生 Rust 文生图。GPU 路径已跑通并单列为 `Supported`，见上表。 |
 | DreamX-Creator GPU、未匹配 GGUF pair | `Unsupported` | DreamX 当前只走原生 CPU；pair ID、组件清单、版本或精度 metadata 不匹配会在加载阶段拒绝。 |
 

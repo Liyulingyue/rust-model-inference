@@ -13,7 +13,7 @@ use rust_model_inference::DreamXConfig;
 use rust_model_inference::MetaValue;
 use rust_model_inference::TensorSource;
 
-const USAGE: &str = "Usage: rust-model-inference --model <path.gguf-or-ggufrs> [--prompt ...] [--threads N] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--max-context N (default 8192)] [--repetition-penalty α (default 1.0 = disabled)] [--serve [--host 0.0.0.0] [--port 8080]]\n\nLongCat Image Edit: --kind edit|turbo --model <transformer.gguf> --components <dir> --input <image.png> --instruction TEXT --out edited.png [--side 1024] [--steps N] [--guidance F32] [--seed N]; <dir> holds text_encoder/, vae/ and tokenizer/ safetensors, shared by both kinds; the two kinds use different Flux schedules so the step/guidance defaults differ (Edit 50/4.5, Turbo 8/1.0)\n\nMage-Flow: --model <dit.gguf> --text-encoder <text.gguf> --vae <vae.gguf> --prompt TEXT --out image.png [--resolution N | --width N --height N] [--steps N --cfg N --seed N --noise fixed.f32] [--image reference.png --mmproj vision.gguf --reference another.png]\n\nRerank mode: --rerank --rerank-query <TEXT> [--rerank-doc <TEXT> ...] | [--rerank-documents <FILE>] [--rerank-instruction <TEXT>] [--rerank-max-tokens N] | cross-encoder scoring; backend picked by GGUF arch (jina-bert-v2 + cls.weight/cls.bias → bert forward, qwen3 + cls.output.weight + pooling_type=4 → qwen3 trunk + 2-class head); one sigmoid'd score per document in [0, 1]\n\nJEV mode: --jev --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | single-forward-pass decision scoring over candidate labels A/B/C/…\n\nJEV grouped: --jev --jev-multi [--jev-option <pos> --jev-option <neg> ...] (pairs) or --jev-block <label> --jev-option <a> [--jev-option <b> ...] (blocks)\n\nServer mode: --serve [--host 0.0.0.0] [--port 8080] --model <path> [--mmproj ...] [--tts] [--embedding]\n\nCLM mode: --jev --clm-head <clm-heads.gguf> --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | cosine scoring via CLM projection heads on the chosen encoder (state = context, blank line, question; candidates verbatim\n\nGLiNER2 mode: --jev --gliner2-decide --model <gliner2-decide.gguf> --jev-context <text> [--gliner2-schema <json> | --jev-question <name> --jev-option <a> [--jev-option <b> ...]] | one DeBERTa-v3 pass scores every label of every task; --gliner2-schema takes a classify_text-shaped mapping: {intent: [a, b], aspects: {labels: [x], multi_label: true, cls_threshold: 0.4}}
+const USAGE: &str = "Usage: rust-model-inference --model <path.gguf-or-ggufrs> [--prompt ...] [--threads N] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--max-context N (default 8192)] [--repetition-penalty α (default 1.0 = disabled)] [--serve [--host 0.0.0.0] [--port 8080]]\n\nChat template: --jinja renders the GGUF's own `tokenizer.chat_template` (a Jinja2 program) with minijinja instead of the built-in per-architecture builder; --chat-template-file <path.jinja> overrides it and implies --jinja. --chat-template <name> still selects a built-in preset (chatml/llama3/gemma/lfm2/glm4/exaone/phi/none). Both are off by default, so token ids are unchanged unless you ask; tests/jinja_chat_template_ab.rs pins the two paths to identical token ids.\n\nLongCat Image Edit: --kind edit|turbo --model <transformer.gguf> --components <dir> --input <image.png> --instruction TEXT --out edited.png [--side 1024] [--steps N] [--guidance F32] [--seed N]; <dir> holds text_encoder/, vae/ and tokenizer/ safetensors, shared by both kinds; the two kinds use different Flux schedules so the step/guidance defaults differ (Edit 50/4.5, Turbo 8/1.0)\n\nMage-Flow: --model <dit.gguf> --text-encoder <text.gguf> --vae <vae.gguf> --prompt TEXT --out image.png [--resolution N | --width N --height N] [--steps N --cfg N --seed N --noise fixed.f32] [--image reference.png --mmproj vision.gguf --reference another.png]\n\nRerank mode: --rerank --rerank-query <TEXT> [--rerank-doc <TEXT> ...] | [--rerank-documents <FILE>] [--rerank-instruction <TEXT>] [--rerank-max-tokens N] | cross-encoder scoring; backend picked by GGUF arch (jina-bert-v2 + cls.weight/cls.bias → bert forward, qwen3 + cls.output.weight + pooling_type=4 → qwen3 trunk + 2-class head); one sigmoid'd score per document in [0, 1]\n\nJEV mode: --jev --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | single-forward-pass decision scoring over candidate labels A/B/C/…\n\nJEV grouped: --jev --jev-multi [--jev-option <pos> --jev-option <neg> ...] (pairs) or --jev-block <label> --jev-option <a> [--jev-option <b> ...] (blocks)\n\nServer mode: --serve [--host 0.0.0.0] [--port 8080] --model <path> [--mmproj ...] [--tts] [--embedding]\n\nCLM mode: --jev --clm-head <clm-heads.gguf> --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | cosine scoring via CLM projection heads on the chosen encoder (state = context, blank line, question; candidates verbatim\n\nGLiNER2 mode: --jev --gliner2-decide --model <gliner2-decide.gguf> --jev-context <text> [--gliner2-schema <json> | --jev-question <name> --jev-option <a> [--jev-option <b> ...]] | one DeBERTa-v3 pass scores every label of every task; --gliner2-schema takes a classify_text-shaped mapping: {intent: [a, b], aspects: {labels: [x], multi_label: true, cls_threshold: 0.4}}
 
 AuK TTS mode: --model auk-base-f16.gguf --vae auk-vae-f32.gguf [--text-encoder qwen2.5-omni-3b-q8_0.gguf] --prompt \"<TEXT>\" --out speech.wav [--steps N (default 32)] [--resolution SR (default 24000)] [--duration-seconds N (default 1)] [--cfg-scale α (default 2.0)] [--instruction \"<voice/style>\" (instruct TTS)] [--ref-audio ref.wav (CFMEdit reference voice with audio tower)] | 24 kHz mono speech generation";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -545,6 +545,12 @@ fn main() {
 
     let (max_tokens, temperature) = app::resolve_cli_generation_options(&options);
     let prompt = options.prompt.as_deref().unwrap_or_default();
+    // `--jinja` / `--chat-template-file`. Off unless asked for, so the
+    // hand-written builders keep producing today's exact token ids.
+    let jinja_options = rust_model_inference::models::chat_template_jinja::Options {
+        jinja: options.jinja,
+        file: options.chat_template_file.clone(),
+    };
 
     let explicit_mmproj = options
         .mmproj
@@ -1027,6 +1033,7 @@ fn main() {
                 options.effective_max_context(),
                 options.effective_repetition_penalty(),
                 options.chat_template.as_deref(),
+                &jinja_options,
             ));
         } else {
             app::run_or_exit(app::run_inference(
@@ -1043,6 +1050,7 @@ fn main() {
                 options.effective_max_context(),
                 options.effective_repetition_penalty(),
                 options.chat_template.as_deref(),
+                &jinja_options,
             ));
         }
     } else {

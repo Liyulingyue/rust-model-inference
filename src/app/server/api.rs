@@ -330,6 +330,9 @@ async fn prompt(state: &AppState, request: &Request) -> Result<PromptResult, (u1
     let arch = text.arch.clone();
     let context = text.context_length;
     let source = text.source.clone();
+    // `spawn_blocking` requires `'static`, so move the Arc rather than
+    // borrowing through `state`.
+    let chat_template = text.chat_template.clone();
     let request = request.clone();
     tokio::task::spawn_blocking(move || {
         let mut messages = request.messages.clone();
@@ -353,6 +356,7 @@ async fn prompt(state: &AppState, request: &Request) -> Result<PromptResult, (u1
             &request.tools,
             &request.choice,
             request.enable_thinking,
+            &chat_template,
         )
         .map_err(|e| (400, e))?;
         if ids
@@ -942,6 +946,9 @@ mod http_tests {
                 pool: std::sync::Arc::new(super::super::ComputePool::new(1)),
                 tokenizer: std::sync::Arc::new(
                     super::super::BPETokenizer::from_qwen3_embedded_merges().unwrap(),
+                ),
+                chat_template: std::sync::Arc::new(
+                    crate::models::chat_template_jinja::Options::default(),
                 ),
                 prefill_batch_size: 1,
                 context_length: 1024,

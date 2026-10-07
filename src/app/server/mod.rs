@@ -133,6 +133,9 @@ struct TextBackend {
     arch: String,
     pool: Arc<ComputePool>,
     tokenizer: Arc<BPETokenizer>,
+    /// `--jinja` / `--chat-template-file` for `/v1/chat/completions`.
+    /// `Options` is `Send + Sync` (bool + PathBuf), so it can live here.
+    chat_template: std::sync::Arc<crate::models::chat_template_jinja::Options>,
     prefill_batch_size: usize,
     context_length: usize,
     /// Per-arch generation adapter. `None` = arch has no adapter yet; those
@@ -1315,6 +1318,10 @@ fn build_text(options: &CliOptions) -> Result<TextBackend, String> {
         arch: arch.to_string(),
         pool,
         tokenizer,
+        chat_template: std::sync::Arc::new(crate::models::chat_template_jinja::Options {
+            jinja: options.jinja,
+            file: options.chat_template_file.clone(),
+        }),
         prefill_batch_size,
         context_length,
         runtime,

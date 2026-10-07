@@ -95,7 +95,38 @@ pub fn build_prompt(
     tools: &[Tool],
     choice: &ToolChoice,
     enable_thinking: Option<bool>,
+    jinja: &crate::models::chat_template_jinja::Options,
 ) -> Result<(Vec<u32>, Vec<Vec<u8>>), String> {
+    // `--jinja` renders the model's own chat template for a multi-turn
+    // conversation. Deliberately gated to plain text turns with no tools:
+    //
+    //  * `tools` is not plumbed through the Jinja context yet, so a
+    //    tool-bearing request must keep the hand-written renderer.
+    //  * image turns need `<|vision_start|>` markers and image slicing that
+    //    the template does not describe; dropping the `attached_images`
+    //    return would silently feed the model text only.
+    //
+    // Both are fallbacks, never silent behaviour changes.
+    if tools.is_empty() && !messages.iter().any(|m| !m.images.is_empty()) {
+        let messages: Vec<crate::models::chat_template_jinja::ChatMessage> = messages
+            .iter()
+            .map(|m| crate::models::chat_template_jinja::ChatMessage {
+                role: m.role.clone(),
+                content: serde_json::Value::String(m.text.clone()),
+            })
+            .collect();
+        if let Some(ids) = crate::models::chat_template_jinja::conversation_tokens(
+            tokenizer,
+            jinja,
+            &|k| source.metadata(k).cloned(),
+            &messages,
+            true,
+            enable_thinking.unwrap_or(false),
+        )? {
+            return Ok((ids, Vec::new()));
+        }
+    }
+
     let qwen35 = is_qwen35(arch)?;
     // LFM2 / LFM2.5 have their own `role\n{content}\n` template. Rendering
     // them with qwen ChatML happens to work (the model copes) but diverges
@@ -1119,6 +1150,7 @@ mod tests {
                 &tools(),
                 &ToolChoice::Auto,
                 None,
+                &crate::models::chat_template_jinja::Options::default(),
             )
             .unwrap()
             .0;
@@ -1155,6 +1187,7 @@ mod tests {
             &tools(),
             &ToolChoice::Auto,
             None,
+            &crate::models::chat_template_jinja::Options::default(),
         )
         .unwrap_err()
         .contains("unsupported"));
@@ -1166,6 +1199,7 @@ mod tests {
             &tools(),
             &ToolChoice::Auto,
             None,
+            &crate::models::chat_template_jinja::Options::default(),
         )
         .is_err());
     }
@@ -1199,6 +1233,7 @@ mod tests {
                     &[],
                     &ToolChoice::Auto,
                     None,
+                    &crate::models::chat_template_jinja::Options::default(),
                 )
                 .unwrap()
                 .0,
@@ -1256,6 +1291,7 @@ mod tests {
                         &tools(),
                         &ToolChoice::Auto,
                         None,
+                        &crate::models::chat_template_jinja::Options::default(),
                     )
                     .unwrap()
                     .0,

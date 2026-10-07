@@ -48,6 +48,7 @@ pub fn run_inference(
     max_context: usize,
     repetition_penalty: f32,
     thinking: bool,
+    jinja: &crate::models::chat_template_jinja::Options,
 ) -> Result<(), String> {
     let _ = kv_format;
     let cfg = super::config::Xing4Config::from_source(source)?;
@@ -63,7 +64,31 @@ pub fn run_inference(
     let cfg = runtime.cfg();
     let vocab = cfg.n_vocab;
 
-    let prompt_text = build_xing4_prompt(None, prompt, thinking);
+    // `--jinja` replaces the hand-written builder. The BOS fixup below
+    // only prepends when the first token is not already BOS, so a template
+    // that emits `{{ bos_token }}` itself does not end up with two.
+    let jinja_text = crate::models::chat_template_jinja::single_turn_text(
+        jinja,
+        &|k| source.metadata(k).cloned(),
+        &String::from_utf8_lossy(
+            &tokenizer
+                .bos_id()
+                .map(|id| tokenizer.token_piece_bytes(id, true))
+                .unwrap_or_default(),
+        ),
+        &String::from_utf8_lossy(
+            &tokenizer
+                .eos_id()
+                .map(|id| tokenizer.token_piece_bytes(id, true))
+                .unwrap_or_default(),
+        ),
+        prompt,
+        thinking,
+    )?;
+    let prompt_text = match jinja_text {
+        Some(text) => text,
+        None => build_xing4_prompt(None, prompt, thinking),
+    };
     eprintln!("[RUST_PROMPT_TEXT] {prompt_text}");
     let input_tokens = tokenizer.encode(
         &prompt_text,

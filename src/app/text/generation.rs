@@ -1,4 +1,5 @@
 use crate::app::cli::{CliOptions, KvFormat};
+use crate::models::chat_template_jinja as jinja;
 use crate::core::tensor::TensorSource;
 use std::io::{self, Write};
 use std::path::Path;
@@ -49,6 +50,7 @@ pub fn run_inference(
     max_context: usize,
     repetition_penalty: f32,
     chat_template: Option<&str>,
+    jinja: &crate::models::chat_template_jinja::Options,
 ) -> Result<(), String> {
     // Read arch into an owned String so the borrow of `source.metadata`
     // is released before the phi3 wrap below moves `source`.
@@ -109,6 +111,7 @@ pub fn run_inference(
             prefill_batch_size,
             max_context,
             repetition_penalty,
+            jinja,
         )
     } else if arch == "lfm2" {
         let is_lfm25 = source
@@ -128,6 +131,7 @@ pub fn run_inference(
                 kv_format,
                 max_context,
                 thinking,
+                jinja,
             )
         } else {
             crate::models::lfm2::run_inference(
@@ -141,6 +145,7 @@ pub fn run_inference(
                 max_context,
                 repetition_penalty,
                 thinking,
+                jinja,
             )
         }
     } else if arch == "lfm2moe" {
@@ -155,6 +160,7 @@ pub fn run_inference(
             max_context,
             repetition_penalty,
             thinking,
+            jinja,
             prefill_batch_size,
         )
     } else if uses_llama_trunk(&arch) {
@@ -170,6 +176,7 @@ pub fn run_inference(
             max_context,
             repetition_penalty,
             thinking,
+            jinja,
         )
     } else if arch == "xing4_0" {
         crate::models::xing4_0::trunk::run::run_inference(
@@ -184,6 +191,7 @@ pub fn run_inference(
             max_context,
             repetition_penalty,
             thinking,
+            jinja,
         )
     } else if arch == "spark2_5" {
         crate::models::spark::run_inference(
@@ -196,6 +204,7 @@ pub fn run_inference(
             bench,
             profile,
             kv_format,
+            jinja,
         )
     } else if arch == "nemotron_h" {
         crate::models::nemotron_h::trunk::run_inference(
@@ -207,6 +216,8 @@ pub fn run_inference(
             kv_format,
             repetition_penalty,
             chat_template,
+            thinking,
+            jinja,
         )
     } else if arch == "falcon-h1" {
         crate::models::falcon_h1::trunk::run_inference(
@@ -218,6 +229,8 @@ pub fn run_inference(
             kv_format,
             repetition_penalty,
             chat_template,
+            thinking,
+            jinja,
         )
     } else {
         crate::app::text::run_qwen3_inference(
@@ -233,6 +246,7 @@ pub fn run_inference(
             prefill_batch_size,
             max_context,
             repetition_penalty,
+            jinja,
         )
     }
 }
@@ -288,6 +302,7 @@ pub fn run_interactive(
             CliOptions::DEFAULT_MAX_CONTEXT,
             repetition_penalty,
             None,
+            &jinja::Options::default(),
         )?;
         println!();
     }

@@ -412,6 +412,7 @@ pub fn run_inference(
     _bench: bool,
     _profile: bool,
     _kv_format: KvFormat,
+    jinja: &crate::models::chat_template_jinja::Options,
 ) -> Result<(), String> {
     let started = Instant::now();
     let tokenizer = BPETokenizer::from_gguf_metadata(|key| source.metadata(key).cloned())
@@ -437,14 +438,27 @@ pub fn run_inference(
     // template uses `{{- ... }}` to strip adjacent whitespace, so each
     // role block concatenates directly without `\n` separators between
     // them. The only embedded `\n` is right after `<|System|>`.
-    let prompt_text = format!(
-        "{sos}<|System|>\nyou are a helpful assistant.{eos}\
-         {sos}<|User|>{prompt}{eos}\
-         {sos}<|Bot|>{bot_suffix}",
-        sos = sos,
-        eos = eos,
-        bot_suffix = bot_suffix,
-    );
+    // `--jinja` renders the GGUF's own template, which is what the
+    // hand-transcribed format!() below was approximating. Keep the literal
+    // as the fallback for GGUFs that ship no template.
+    let prompt_text = match crate::models::chat_template_jinja::single_turn_text(
+        jinja,
+        &|k| source.metadata(k).cloned(),
+        sos,
+        eos,
+        prompt,
+        enable_thinking,
+    )? {
+        Some(text) => text,
+        None => format!(
+            "{sos}<|System|>\nyou are a helpful assistant.{eos}\
+             {sos}<|User|>{prompt}{eos}\
+             {sos}<|Bot|>{bot_suffix}",
+            sos = sos,
+            eos = eos,
+            bot_suffix = bot_suffix,
+        ),
+    };
     let mut prompt_tokens = tokenizer.encode(
         &prompt_text,
         EncodeOptions {
