@@ -1,7 +1,10 @@
 //! LongCat Image Edit / Edit Turbo Q8_0 Transformer, packed latent input.
 //! This is explicitly a LongCat contract despite GGUF's generic `flux` metadata.
 //! Full image editing additionally needs Qwen2.5-VL-7B, its mmproj and a Flux VAE.
-//! Scalar ggml arithmetic only: start the process with `RMI_SCALAR=1`.
+//! Scalar arithmetic for the ggml parity contract: start the process with
+//! `RMI_SCALAR=1`. Without it the packed NEON/AVX2 kernels are used instead —
+//! same weight precision, same exact Q8_0 integer accumulation, different
+//! summation order, so results are no longer bitwise identical to the Oracle.
 
 use crate::core::tensor::{load_f32_tensor, GGMLType, MetaValue, TensorSource};
 use crate::ops;
@@ -82,6 +85,11 @@ impl<'a> Linear<'a> {
     }
     fn forward(&self, x: &[f32]) -> Vec<f32> {
         assert_eq!(x.len() % self.input, 0);
+        // `RMI_SCALAR=1` keeps the ggml parity contract (BF16-rounded
+        // activations, F64 accumulation, scalar Q8_0). Without it the packed
+        // NEON/AVX2 kernels run instead: same weight precision, same exact
+        // integer Q8_0 accumulation, different summation order.
+        let scalar = ops::scalar_mode();
         let mut out = vec![0.0; x.len() / self.input * self.output];
         for (x, y) in x
             .chunks_exact(self.input)
@@ -89,42 +97,74 @@ impl<'a> Linear<'a> {
         {
             match self.dtype {
                 GGMLType::BF16 => {
-                    let rounded: Vec<u8> = x
-                        .iter()
-                        .flat_map(|&v| ops::f32_to_bf16(v).to_le_bytes())
-                        .collect();
-                    y.par_chunks_mut(128).enumerate().for_each(|(part, rows)| {
-                        for (offset, value) in rows.iter_mut().enumerate() {
-                            let row = part * 128 + offset;
-                            *value = ops::kernel::bf16::scalar::dot_bf16(
-                                &self.weight[row * self.input * 2..(row + 1) * self.input * 2],
-                                &rounded,
-                            );
-                        }
-                    });
+                    if scalar {
+                        let rounded: Vec<u8> = x
+                            .iter()
+                            .flat_map(|&v| ops::f32_to_bf16(v).to_le_bytes())
+                            .collect();
+                        y.par_chunks_mut(128).enumerate().for_each(|(part, rows)| {
+                            for (offset, value) in rows.iter_mut().enumerate() {
+                                let row = part * 128 + offset;
+                                *value = ops::kernel::bf16::scalar::dot_bf16(
+                                    &self.weight[row * self.input * 2..(row + 1) * self.input * 2],
+                                    &rounded,
+                                );
+                            }
+                        });
+                    } else {
+                        ops::kernel::bf16::matmul_bf16_vs_f32_range(
+                            self.weight,
+                            x,
+                            y,
+                            self.input,
+                            0,
+                            self.output,
+                        );
+                    }
                 }
                 GGMLType::Q8_0 => {
                     let mut q8 = vec![0; self.input];
                     let mut scales = vec![0.0; self.input / 32];
-                    ops::quant::q8_0::quantize_q8_0_into_scalar_range(
-                        x,
-                        self.input,
-                        &mut q8,
-                        &mut scales,
-                        0,
-                        self.input / 32,
-                    );
+                    if scalar {
+                        ops::quant::q8_0::quantize_q8_0_into_scalar_range(
+                            x,
+                            self.input,
+                            &mut q8,
+                            &mut scales,
+                            0,
+                            self.input / 32,
+                        );
+                    } else {
+                        ops::quant::q8_0::quantize_q8_0_into(
+                            x,
+                            self.input,
+                            &mut q8,
+                            &mut scales,
+                        );
+                    }
                     y.par_chunks_mut(128).enumerate().for_each(|(part, rows)| {
                         let start = part * 128;
-                        ops::kernel::q8_0::scalar::matmul_q8_0_quantized_scalar_range(
-                            self.weight,
-                            &q8,
-                            &scales,
-                            rows,
-                            self.input,
-                            start,
-                            start + rows.len(),
-                        );
+                        if scalar {
+                            ops::kernel::q8_0::scalar::matmul_q8_0_quantized_scalar_range(
+                                self.weight,
+                                &q8,
+                                &scales,
+                                rows,
+                                self.input,
+                                start,
+                                start + rows.len(),
+                            );
+                        } else {
+                            ops::kernel::q8_0::dispatch::matmul_q8_0_quantized_range(
+                                self.weight,
+                                &q8,
+                                &scales,
+                                rows,
+                                self.input,
+                                start,
+                                start + rows.len(),
+                            );
+                        }
                     });
                 }
                 _ => unreachable!("validated LongCat dtype"),
@@ -329,9 +369,6 @@ impl<'a> LongCatTransformer<'a> {
         positions: &[[f32; 3]],
         timestep: f32,
     ) -> Result<Vec<f32>, String> {
-        if !ops::scalar_mode() {
-            return Err("LongCat currently requires RMI_SCALAR=1 before process startup".into());
-        }
         let (ni, nt) = validate_input(image, text, positions, timestep)?;
         let pe = rope_embedding(positions);
         let mut img = self.img_in.forward(image);

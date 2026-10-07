@@ -45,7 +45,6 @@ impl<'a> BF16Kernel<'a> {
     pub fn element_count(&self) -> usize {
         self.weight.len() / 2
     }
-
     pub(crate) fn row_range(n_out: usize, ith: usize, nth: usize) -> (usize, usize) {
         let nth = nth.max(1);
         let start = n_out.saturating_mul(ith) / nth;
@@ -176,6 +175,54 @@ impl<'a> BF16Kernel<'a> {
             n_out,
             ith,
             nth,
+        );
+    }
+}
+
+/// Row-range dispatch for a BF16 weight matrix against an F32 input row.
+///
+/// Mirrors `q8_0::dispatch::matmul_q8_0_quantized_range`: the architecture
+/// choice lives here so callers never sniff `target_arch`. Falls back to a
+/// per-row NEON/AVX2 dot product when `n_in` is not a multiple of 8, which the
+/// packed kernels require.
+pub fn matmul_bf16_vs_f32_range(
+    weight: &[u8],
+    input: &[f32],
+    output: &mut [f32],
+    n_in: usize,
+    row_start: usize,
+    row_end: usize,
+) {
+    if row_end <= row_start {
+        return;
+    }
+    debug_assert_eq!(output.len(), row_end - row_start);
+    debug_assert!(input.len() >= n_in);
+    let out = &mut output[row_start..row_end];
+    #[cfg(target_arch = "x86_64")]
+    {
+        if n_in % 8 == 0 && crate::ops::has_avx2_fma() {
+            unsafe {
+                avx2::matmul_bf16_vs_f32_avx2(weight, input, out, n_in, row_start, row_end);
+            }
+            return;
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if crate::ops::has_neon() {
+            unsafe {
+                neon::matmul_bf16_vs_f32_neon(weight, input, out, n_in, row_start, row_end);
+            }
+            return;
+        }
+    }
+    for (out_idx, row) in (row_start..row_end).enumerate() {
+        let row_off = row * n_in * 2;
+        out[out_idx] = crate::ops::dot_bf16_f32(
+            &input[..n_in],
+            &weight[row_off..row_off + n_in * 2],
+            n_in,
         );
     }
 }
