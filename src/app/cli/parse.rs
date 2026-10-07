@@ -335,6 +335,12 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                     i += 1;
                 }
             }
+            "--qwen-omni-bf16" => {
+                if i + 1 < args.len() {
+                    options.qwen_omni_bf16 = Some(args[i + 1].as_str().into());
+                    i += 1;
+                }
+            }
             "--image" => {
                 if i + 1 < args.len() {
                     options.image = Some(args[i + 1].as_str().into());

@@ -13,7 +13,7 @@ use rust_model_inference::DreamXConfig;
 use rust_model_inference::MetaValue;
 use rust_model_inference::TensorSource;
 
-const USAGE: &str = "Usage: rust-model-inference --model <path.gguf-or-ggufrs> [--prompt ...] [--threads N] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--max-context N (default 8192)] [--repetition-penalty α (default 1.0 = disabled)] [--serve [--host 0.0.0.0] [--port 8080]]\n\nRerank mode: --rerank --rerank-query <TEXT> [--rerank-doc <TEXT> ...] | [--rerank-documents <FILE>] [--rerank-instruction <TEXT>] [--rerank-max-tokens N] | cross-encoder scoring; backend picked by GGUF arch (jina-bert-v2 + cls.weight/cls.bias → bert forward, qwen3 + cls.output.weight + pooling_type=4 → qwen3 trunk + 2-class head); one sigmoid'd score per document in [0, 1]\n\nJEV mode: --jev --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | single-forward-pass decision scoring over candidate labels A/B/C/…\n\nJEV grouped: --jev --jev-multi [--jev-option <pos> --jev-option <neg> ...] (pairs) or --jev-block <label> --jev-option <a> [--jev-option <b> ...] (blocks)\n\nServer mode: --serve [--host 0.0.0.0] [--port 8080] --model <path> [--mmproj ...] [--tts] [--embedding]\n\nCLM mode: --jev --clm-head <clm-heads.gguf> --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | cosine scoring via CLM projection heads on the chosen encoder (state = context, blank line, question; candidates verbatim\n\nGLiNER2 mode: --jev --gliner2-decide --model <gliner2-decide.gguf> --jev-context <text> [--gliner2-schema <json> | --jev-question <name> --jev-option <a> [--jev-option <b> ...]] | one DeBERTa-v3 pass scores every label of every task; --gliner2-schema takes a classify_text-shaped mapping: {intent: [a, b], aspects: {labels: [x], multi_label: true, cls_threshold: 0.4}}";
+const USAGE: &str = "Usage: rust-model-inference --model <path.gguf-or-ggufrs> [--prompt ...] [--threads N] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--max-context N (default 8192)] [--repetition-penalty α (default 1.0 = disabled)] [--serve [--host 0.0.0.0] [--port 8080]]\n\nRerank mode: --rerank --rerank-query <TEXT> [--rerank-doc <TEXT> ...] | [--rerank-documents <FILE>] [--rerank-instruction <TEXT>] [--rerank-max-tokens N] | cross-encoder scoring; backend picked by GGUF arch (jina-bert-v2 + cls.weight/cls.bias → bert forward, qwen3 + cls.output.weight + pooling_type=4 → qwen3 trunk + 2-class head); one sigmoid'd score per document in [0, 1]\n\nJEV mode: --jev --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | single-forward-pass decision scoring over candidate labels A/B/C/…\n\nJEV grouped: --jev --jev-multi [--jev-option <pos> --jev-option <neg> ...] (pairs) or --jev-block <label> --jev-option <a> [--jev-option <b> ...] (blocks)\n\nServer mode: --serve [--host 0.0.0.0] [--port 8080] --model <path> [--mmproj ...] [--tts] [--embedding]\n\nCLM mode: --jev --clm-head <clm-heads.gguf> --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | cosine scoring via CLM projection heads on the chosen encoder (state = context, blank line, question; candidates verbatim\n\nGLiNER2 mode: --jev --gliner2-decide --model <gliner2-decide.gguf> --jev-context <text> [--gliner2-schema <json> | --jev-question <name> --jev-option <a> [--jev-option <b> ...]] | one DeBERTa-v3 pass scores every label of every task; --gliner2-schema takes a classify_text-shaped mapping: {intent: [a, b], aspects: {labels: [x], multi_label: true, cls_threshold: 0.4}}\n\nAuK TTS mode: --model auk-base-f16.gguf --vae auk-vae-f32.gguf [--text-encoder qwen2.5-omni-3b-q8_0.gguf] --prompt \"<TEXT>\" --out speech.wav [--steps N (default 32)] [--resolution SR (default 24000)] [--duration-seconds N (default 1)] [--cfg-scale α (default 2.0)] [--instruction \"<voice/style>\" (instruct TTS)] [--ref-audio ref.wav (CFMEdit reference voice with audio tower)] | 24 kHz mono speech generation";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DispatchMode {
     DreamX,
@@ -97,9 +97,9 @@ fn main() {
         std::process::exit(2);
     });
     // Early AuK arch detection (must run BEFORE validate_cli_options because
-    // z_image_cli_options errors out when --text-encoder is missing).
+    // z_image_cli_options errors out when --text-encoder is missing, and also
+    // rejects --ref-audio / --instruction / --duration-seconds / --cfg-scale).
     let early_auk_arch: Option<Arc<dyn TensorSource>> = if !options.model.as_os_str().is_empty()
-        && options.text_encoder.is_none()
         && options.vae.is_some()
         && options.out.is_some()
     {
@@ -268,16 +268,28 @@ fn main() {
             ))),
             None => None,
         };
+        let audio_tower = match options.qwen_omni_bf16.as_deref() {
+            Some(path) => Some(Arc::<dyn TensorSource>::from(open_or_exit(
+                path,
+                ComponentRole::Llm,
+            ))),
+            None => None,
+        };
         app::run_or_exit(app::run_auk_cli(
             arch_probe,
             vae,
-            text,
+            text.clone(),
             options.prompt.as_deref().unwrap_or(""),
             options.steps.unwrap_or(32),
             options.resolution.unwrap_or(24000),
             options.seed.unwrap_or(0),
             options.out.clone().expect("AuK --out required"),
             n_threads,
+            options.ref_audio.as_deref(),
+            options.instruction.as_deref(),
+            options.duration_seconds,
+            options.cfg_scale,
+            audio_tower,
         ));
         return;
     }
@@ -310,16 +322,28 @@ fn main() {
                 ))),
                 None => None,
             };
+            let audio_tower = match options.qwen_omni_bf16.as_deref() {
+                Some(path) => Some(Arc::<dyn TensorSource>::from(open_or_exit(
+                    path,
+                    ComponentRole::Llm,
+                ))),
+                None => None,
+            };
             app::run_or_exit(app::run_auk_cli(
                 arch_probe,
                 vae,
-                text,
+                text.clone(),
                 options.prompt.as_deref().unwrap_or(""),
                 options.steps.unwrap_or(32),
                 options.resolution.unwrap_or(24000),
                 options.seed.unwrap_or(0),
                 options.out.clone().expect("AuK --out required"),
                 n_threads,
+                options.ref_audio.as_deref(),
+                options.instruction.as_deref(),
+                options.duration_seconds,
+                options.cfg_scale,
+                audio_tower,
             ));
             return;
         }
