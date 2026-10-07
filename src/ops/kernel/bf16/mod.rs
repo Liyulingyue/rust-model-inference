@@ -219,11 +219,8 @@ pub fn matmul_bf16_vs_f32_range(
     }
     for (out_idx, row) in (row_start..row_end).enumerate() {
         let row_off = row * n_in * 2;
-        out[out_idx] = crate::ops::dot_bf16_f32(
-            &input[..n_in],
-            &weight[row_off..row_off + n_in * 2],
-            n_in,
-        );
+        out[out_idx] =
+            crate::ops::dot_bf16_f32(&input[..n_in], &weight[row_off..row_off + n_in * 2], n_in);
     }
 }
 

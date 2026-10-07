@@ -16,15 +16,14 @@ pub use crate::models::qwen3::embedding::{
 };
 pub use asr::run_asr_cli;
 pub use cli::{
-    dreamx_cli_options, inference_step_budget, init_rayon_global_pool, normalize_tts_language,
-    longcat_cli_options, parse_cli_options, per_second, qwen_drive_cli_options,
-    resolve_cli_generation_options,
-    resolve_thread_count, transcription_options, validate_cli_options,
-    validate_qwen3vl_decoder_mode, yue2_cli_options, z_image_cli_options, CliOptions,
-    DreamXCliOptions, DreamXOptions, DreamXRefinerOptions, EmbeddingOutput, JevBlockInput,
-    KvFormat, LatentUpsampleKind, LongCatCliOptions, PlanningMode, QwenDriveCliOptions,
-    QwenDriveHead,
-    RefinerDecoderKind, YuE2CliOptions, ZImageCliOptions, DEFAULT_THREAD_CAP,
+    dreamx_cli_options, inference_step_budget, init_rayon_global_pool, longcat_cli_options,
+    normalize_tts_language, parse_cli_options, per_second, qwen_drive_cli_options,
+    resolve_cli_generation_options, resolve_thread_count, transcription_options,
+    validate_cli_options, validate_qwen3vl_decoder_mode, yue2_cli_options, z_image_cli_options,
+    CliOptions, DreamXCliOptions, DreamXOptions, DreamXRefinerOptions, EmbeddingOutput,
+    JevBlockInput, KvFormat, LatentUpsampleKind, LongCatCliOptions, PlanningMode,
+    QwenDriveCliOptions, QwenDriveHead, RefinerDecoderKind, YuE2CliOptions, ZImageCliOptions,
+    DEFAULT_THREAD_CAP,
 };
 pub use diffusion::{
     read_f32_file, run_auk_cli, run_dreamx_cli, run_ernie_image_cli, run_longcat_image_edit,

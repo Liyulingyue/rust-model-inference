@@ -6,8 +6,8 @@
 //! same weight precision, same exact Q8_0 integer accumulation, different
 //! summation order, so results are no longer bitwise identical to the Oracle.
 
-use crate::core::tensor::{load_f32_tensor, GGMLType, MetaValue, TensorSource};
 use super::LongCatKind;
+use crate::core::tensor::{load_f32_tensor, GGMLType, MetaValue, TensorSource};
 use crate::ops;
 use rayon::prelude::*;
 
@@ -130,12 +130,7 @@ impl<'a> Linear<'a> {
                             self.input / 32,
                         );
                     } else {
-                        ops::quant::q8_0::quantize_q8_0_into(
-                            x,
-                            self.input,
-                            &mut q8,
-                            &mut scales,
-                        );
+                        ops::quant::q8_0::quantize_q8_0_into(x, self.input, &mut q8, &mut scales);
                     }
                     y.par_chunks_mut(128).enumerate().for_each(|(part, rows)| {
                         let start = part * 128;

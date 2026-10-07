@@ -134,9 +134,7 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
             // LongCat Image Edit. `--components` points at a directory of
             // safetensors rather than a GGUF, so it has no --text-encoder
             // equivalent.
-            "--kind" => {
-                options.longcat_kind = Some(required_string_value(args, &mut i, "--kind")?)
-            }
+            "--kind" => options.longcat_kind = Some(required_string_value(args, &mut i, "--kind")?),
             "--components" => {
                 options.components = Some(required_path_value(args, &mut i, "--components")?)
             }

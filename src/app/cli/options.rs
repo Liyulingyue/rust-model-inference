@@ -40,7 +40,10 @@ pub fn longcat_cli_options(options: &CliOptions) -> Result<Option<LongCatCliOpti
         .input
         .clone()
         .ok_or("LongCat requires --input <image.png>")?;
-    let out = options.out.clone().ok_or("LongCat requires --out <image.png>")?;
+    let out = options
+        .out
+        .clone()
+        .ok_or("LongCat requires --out <image.png>")?;
     let instruction = options
         .instruction
         .clone()
@@ -50,7 +53,9 @@ pub fn longcat_cli_options(options: &CliOptions) -> Result<Option<LongCatCliOpti
     }
     let side = options.side.unwrap_or(1024);
     if side == 0 || side % 16 != 0 {
-        return Err(format!("LongCat --side must be a positive multiple of 16, got {side}"));
+        return Err(format!(
+            "LongCat --side must be a positive multiple of 16, got {side}"
+        ));
     }
     // The two checkpoints ship different Flux schedules, so the defaults are
     // per-kind rather than shared.
@@ -64,7 +69,9 @@ pub fn longcat_cli_options(options: &CliOptions) -> Result<Option<LongCatCliOpti
         .guidance
         .unwrap_or(if kind == LongCatKind::Edit { 4.5 } else { 1.0 });
     if !(guidance.is_finite() && guidance >= 0.0) {
-        return Err(format!("LongCat --guidance must be finite and >= 0, got {guidance}"));
+        return Err(format!(
+            "LongCat --guidance must be finite and >= 0, got {guidance}"
+        ));
     }
     let seed = u64::try_from(options.seed.unwrap_or(42))
         .map_err(|_| "LongCat --seed must be non-negative".to_string())?;

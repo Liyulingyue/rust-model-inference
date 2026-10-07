@@ -50,10 +50,7 @@ fn trace_longcat(name: &str, values: &[f32], shape: &[usize]) -> Result<(), Stri
     .map_err(|error| error.to_string())
 }
 
-pub fn run_longcat_image_edit(
-    options: &LongCatCliOptions,
-    threads: usize,
-) -> Result<(), String> {
+pub fn run_longcat_image_edit(options: &LongCatCliOptions, threads: usize) -> Result<(), String> {
     let LongCatCliOptions {
         kind,
         model: model_path,
@@ -113,8 +110,7 @@ pub fn run_longcat_image_edit(
         trace_longcat("ref_image", &planar, &[side, side, 3, 1])?;
     }
     let text_source: Arc<dyn TensorSource> = Arc::new(LongCatTextSource::open(component_root)?);
-    let mut vision =
-        VisionEncoder::from_source(text_source.as_ref(), Arc::clone(&vision_pool))?;
+    let mut vision = VisionEncoder::from_source(text_source.as_ref(), Arc::clone(&vision_pool))?;
     // LongCat's reference-image preset uses 384^2..560^2 pixels for the VLM.
     vision.config.image_min_pixels = 384 * 384;
     vision.config.image_max_pixels = 560 * 560;

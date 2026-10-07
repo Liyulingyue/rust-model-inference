@@ -128,11 +128,11 @@ pub(crate) fn qwen2vl_metadata_source() -> MapTensorSource {
                 "qwen2vl.attention.value_length".into(),
                 MetaValue::Uint32(128),
             ),
-            ("qwen2vl.feed_forward_length".into(), MetaValue::Uint32(18_944)),
             (
-                "qwen2vl.context_length".into(),
-                MetaValue::Uint32(32_768),
+                "qwen2vl.feed_forward_length".into(),
+                MetaValue::Uint32(18_944),
             ),
+            ("qwen2vl.context_length".into(), MetaValue::Uint32(32_768)),
             (
                 "qwen2vl.rope.freq_base".into(),
                 MetaValue::Float32(1_000_000.0),

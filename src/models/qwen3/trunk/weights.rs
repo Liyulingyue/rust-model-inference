@@ -596,8 +596,7 @@ impl Qwen3Model {
         // bypass the dequantized kernel and hand BF16 straight to the scalar
         // kernel. Covers both the plain Qwen3 trunk and the Qwen2.5-VL text
         // encoder LongCat drives.
-        if matches!(config.architecture.as_str(), "qwen2vl" | "qwen3")
-            && crate::ops::scalar_mode()
+        if matches!(config.architecture.as_str(), "qwen2vl" | "qwen3") && crate::ops::scalar_mode()
         {
             for (index, layer) in layers.iter_mut().enumerate() {
                 for (name, weight) in [

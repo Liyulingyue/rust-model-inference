@@ -277,7 +277,6 @@ pub fn text_encode_with_audio(
     text_encode_forward(model, &embeddings, n_tokens, positions, None)
 }
 
-
 /// One weight applied to every token row: the weight, its output width, the
 /// token-major destination, and an optional bias added afterwards.
 struct TokenProjection<'w> {

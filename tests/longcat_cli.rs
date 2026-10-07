@@ -67,7 +67,10 @@ fn longcat_flags_are_validated_before_any_weight_is_opened() {
         assert!(!output.status.success(), "{extra:?} unexpectedly succeeded");
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains(expected), "{extra:?}: {stderr}");
-        assert!(!dir.join("out.png").exists(), "{extra:?} wrote an output file");
+        assert!(
+            !dir.join("out.png").exists(),
+            "{extra:?} wrote an output file"
+        );
     }
 }
 
