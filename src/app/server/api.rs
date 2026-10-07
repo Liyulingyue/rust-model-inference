@@ -1217,6 +1217,52 @@ pub(super) async fn jev_boundary(
         Ok(model) => model,
         Err(e) => return jev_error(StatusCode::INTERNAL_SERVER_ERROR, e),
     };
+    // The long-document path returns the reference's *merged, formatted* payload,
+    // which is a different shape from the single-pass response below: no per-span
+    // logit, no query-head diagnostics, no separate relation array. So the two
+    // paths cannot share a response body, and the caller opts in by sending
+    // `chunk_size`.
+    if let Some(chunk_size) = req.chunk_size {
+        let long = crate::app::LongDocumentOptions {
+            chunk_size,
+            chunk_overlap: req.chunk_overlap.unwrap_or(64),
+            include_confidence: req.include_confidence.unwrap_or(true),
+            include_spans: req.include_spans.unwrap_or(true),
+            overlap_policy: None,
+        };
+        let overlap_policy = match crate::models::gliner_boundary::boundary_overlap_policy(&model) {
+            Ok(policy) => policy.as_str().to_string(),
+            Err(e) => return jev_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+        };
+        return match crate::app::extract_long_document(
+            &model,
+            &req.context,
+            &tasks,
+            &kinds,
+            boundary.n_threads,
+            req.threshold,
+            crate::app::BoundarySchemaOptions {
+                record_metadata: req.schema.get("record_metadata"),
+                field_metadata: req.schema.get("field_metadata"),
+                entity_metadata: req.schema.get("entity_metadata"),
+                relation_metadata: req.schema.get("relation_metadata"),
+                schema: Some(&req.schema),
+            },
+            long,
+        ) {
+            Ok(merged) => Json(json!({
+                "mode": "boundary_long_document",
+                "context": req.context,
+                "overlap_policy": overlap_policy,
+                "chunk_size": long.chunk_size,
+                "chunk_overlap": long.chunk_overlap,
+                "result": merged,
+            }))
+            .into_response(),
+            Err(e) => jev_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+        };
+    }
+
     let result = match crate::app::run_gliner2_boundary_extract(
         &model,
         &req.context,
@@ -1360,6 +1406,28 @@ pub(super) struct BoundaryRequest {
     /// Span score threshold. Defaults to the checkpoint's `pair_threshold`.
     #[serde(default)]
     pub threshold: Option<f32>,
+    /// Word window size for the long-document path. Omit to extract the context
+    /// in one pass; set it to scan the document in overlapping windows and merge,
+    /// as `extract_long` does.
+    ///
+    /// Off by default rather than defaulting to the reference's 384 because this
+    /// endpoint's existing contract is a single-pass extraction with per-span
+    /// diagnostics; a silent switch to chunked scanning would change the response
+    /// shape for every current caller.
+    #[serde(default)]
+    pub chunk_size: Option<usize>,
+    /// Words each window shares with the next. Must be smaller than
+    /// `chunk_size`.
+    #[serde(default)]
+    pub chunk_overlap: Option<usize>,
+    /// Keep `confidence` in the merged payload. Defaults to true on the long
+    /// path, matching `strip_span_metadata`'s callers there.
+    #[serde(default)]
+    pub include_confidence: Option<bool>,
+    /// Keep `start`/`end` in the merged payload. Defaults to true on the long
+    /// path.
+    #[serde(default)]
+    pub include_spans: Option<bool>,
 }
 
 pub async fn jev_score(

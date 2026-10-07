@@ -18,6 +18,7 @@ use crate::models::gliner_boundary::extract::{
     apply_abstention, boundary_overlap_policy, decode_spans, run_mixed_extraction,
     ClassificationResult, ExtractedSpan, Extraction, SchemaOptions,
 };
+use crate::models::gliner_boundary::raw_results::{EntityOrder, RawShape};
 use crate::models::gliner_boundary::structure::{ChoiceValue, StructureField, StructureSpan};
 use crate::models::gliner_boundary::BoundaryModel;
 
@@ -620,6 +621,236 @@ pub struct BoundaryDecodeOptions<'a> {
     /// The CLI's raw `--gliner2-schema` value, read for the `choices` prefix.
     pub schema: Option<&'a serde_json::Value>,
     pub output_json: bool,
+}
+
+/// Chunk and overlap knobs for a long document, as `extract_long`'s signature.
+///
+/// Defaults are the reference's: 384-word windows with a 64-word overlap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LongDocumentOptions {
+    pub chunk_size: usize,
+    pub chunk_overlap: usize,
+    /// Applied by `strip_span_metadata` **after** the merge, never per chunk.
+    pub include_confidence: bool,
+    pub include_spans: bool,
+    /// `None` takes the checkpoint's own resolved policy.
+    pub overlap_policy: Option<crate::models::gliner_boundary::overlap::OverlapPolicy>,
+}
+
+impl Default for LongDocumentOptions {
+    fn default() -> Self {
+        LongDocumentOptions {
+            chunk_size: 384,
+            chunk_overlap: 64,
+            include_confidence: true,
+            include_spans: true,
+            overlap_policy: None,
+        }
+    }
+}
+
+/// `batch_extract_long` (`runtime.py:1297`): extract from a long document by
+/// scanning overlapping word windows.
+///
+/// All ten of the reference's `*_long` methods funnel through this one — the
+/// others only build a schema and call it — so this is the single seam rather
+/// than ten copies.
+///
+/// The order is load-bearing and is the reason [`format_results`] and
+/// [`merge_chunk_results`] both exist:
+///
+/// 1. `split_text_into_chunks` over the document, giving overlapping word
+///    windows whose `text` is a slice of the original.
+/// 2. Each chunk goes through the ordinary [`extract`], and its `Extraction`
+///    becomes the reference's raw dict and then its **formatted** payload.
+///    `format_results` runs here, per chunk, with **both** flags forced on
+///    regardless of what the caller asked for — `merge_chunk_results` walks
+///    formatted JSON and shifts `start`/`end` by each chunk's `start_char`, so a
+///    chunk result formatted without offsets would merge into spans with no
+///    position at all.
+/// 3. `merge_chunk_results` merges one document's chunks and
+///    `strip_span_metadata` applies the *caller's* flags, once, at the end.
+///
+/// A consequence worth stating because it looks wrong otherwise: with both flags
+/// off the merged payload can contain **duplicate surfaces**. The merge's dedup
+/// keys on offsets, so two mentions of "Paris" at different positions are
+/// distinct entries, and only the final strip reduces both to the same bare
+/// string. The reference behaves this way and the fixture pins it.
+// Eight parameters because each mirrors a `batch_extract_long` argument: the
+// extraction inputs (`model`, `text`, `tasks`, `kinds`, `n_threads_arg`,
+// `threshold`), the schema tables, and the chunking knobs. The two option structs
+// could be folded into one, but they are threaded independently by the HTTP
+// handler and the single-pass path, and merging them would make the shorter
+// signature carry a struct it ignores on either path.
+#[allow(clippy::too_many_arguments)]
+pub fn extract_long(
+    model: &BoundaryModel<'_>,
+    text: &str,
+    tasks: &[crate::models::gliner::prompt::Task],
+    kinds: &[BoundaryTaskKind],
+    n_threads_arg: usize,
+    threshold: Option<f32>,
+    schema_options: BoundarySchemaOptions<'_>,
+    long: LongDocumentOptions,
+) -> Result<serde_json::Value, String> {
+    use crate::models::gliner::prompt::{normalize_text, WordSplitter};
+    use crate::models::gliner_boundary::formatting::format_results;
+    use crate::models::gliner_boundary::long_document::{
+        merge_chunk_results, split_text_into_chunks,
+    };
+    use crate::models::gliner_boundary::raw_results::{
+        extraction_to_raw_results, ShapeFlags, WordCharSpans,
+    };
+
+    let BoundarySchemaOptions {
+        entity_metadata,
+        schema,
+        ..
+    } = schema_options;
+
+    // Chunks are cut from the caller's text, not the normalized one: the merge
+    // re-slices the *document* by character offset, so those offsets have to be
+    // document-relative or every span lands short by the appended period.
+    let chunks = split_text_into_chunks(
+        text,
+        long.chunk_size,
+        long.chunk_overlap,
+        WordSplitter::Whitespace,
+    )?;
+
+    let specs = crate::models::gliner_boundary::extract::query_layout(tasks, kinds);
+    let shape = raw_shape_for(tasks, kinds, &specs, entity_metadata);
+
+    // Per chunk: extract, convert, then format with both flags on.
+    let mut chunk_results = Vec::with_capacity(chunks.len());
+    for chunk in &chunks {
+        let extraction = extract(
+            model,
+            &chunk.text,
+            tasks,
+            kinds,
+            n_threads_arg,
+            threshold,
+            BoundarySchemaOptions {
+                record_metadata: schema_options.record_metadata,
+                field_metadata: schema_options.field_metadata,
+                entity_metadata: schema_options.entity_metadata,
+                relation_metadata: schema_options.relation_metadata,
+                schema,
+            },
+        )?;
+        let normalized = normalize_text(&chunk.text);
+        let raw = extraction_to_raw_results(
+            &extraction,
+            &WordCharSpans::for_text(&chunk.text),
+            &normalized,
+            &shape,
+            // Forced on: the merge needs the offsets to shift them.
+            ShapeFlags {
+                include_confidence: true,
+                include_spans: true,
+            },
+        );
+        chunk_results.push(format_results(
+            &raw,
+            true,
+            &shape.relation_types,
+            &shape.classification_tasks,
+        ));
+    }
+
+    let policy = match long.overlap_policy {
+        Some(policy) => policy,
+        None => crate::models::gliner_boundary::boundary_overlap_policy(model)?,
+    };
+    merge_chunk_results(
+        text,
+        &chunks,
+        &chunk_results,
+        long.include_confidence,
+        long.include_spans,
+        &shape.entities.scalar,
+        policy,
+    )
+}
+
+/// The schema-level shape the converter needs, resolved the way the prompt
+/// routing already resolves it so the two cannot disagree about query order.
+///
+/// `EntityOrder::scalar` doubles as `_scalar_entity_labels`: the labels declared
+/// non-list, which the merge needs so it collapses them to a single best value.
+/// Passing an empty set would leave them as lists, and that difference shows up
+/// in the *type* the merged payload reports.
+fn raw_shape_for(
+    tasks: &[crate::models::gliner::prompt::Task],
+    kinds: &[BoundaryTaskKind],
+    specs: &[crate::models::gliner_boundary::extract::QuerySpec],
+    entity_metadata: Option<&serde_json::Value>,
+) -> RawShape {
+    let labels: Vec<String> = specs
+        .iter()
+        .filter(|spec| spec.task_type == "entities")
+        .map(|spec| spec.field_name.clone())
+        .collect();
+    // `_scalar_entity_labels`: the labels declared non-list, which the merge
+    // needs so it collapses them to one best value.
+    let scalar: Vec<String> = labels
+        .iter()
+        .filter(|label| {
+            entity_metadata
+                .and_then(|value| value.get(label.as_str()))
+                .and_then(|entry| entry.get("dtype"))
+                .and_then(|dtype| dtype.as_str())
+                == Some("str")
+        })
+        .cloned()
+        .collect();
+
+    let structure_groups: Vec<String> = specs
+        .iter()
+        .filter(|spec| spec.task_type == "json_structures")
+        .map(|spec| spec.task_name.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+
+    // A classification group contributes no boundary query, so it is absent from
+    // `query_layout` and has to come from the task list. Its *prompt* name is the
+    // right key: the raw dict is keyed by `Task::name`, and `format_results`
+    // matches `classification_tasks` against those same keys.
+    let classification_tasks: Vec<String> = tasks
+        .iter()
+        .zip(kinds)
+        .filter(|(_, kind)| **kind == BoundaryTaskKind::Classification)
+        .map(|(task, _)| task.name.clone())
+        .collect();
+
+    // Relation types come from `task_name`, not `field_name`: a relation group
+    // contributes one query **per argument slot**, so `field_name` is `head` or
+    // `tail` and `task_name` is the type. Reading the wrong one hands
+    // `format_results` the strings "head" and "tail" as requested relation types,
+    // and it dutifully appends an empty list for each — so the merged payload
+    // grows `relation_extraction: {was_in: [...], head: [], tail: []}`.
+    //
+    // The alias is stripped because a relation declared with a description
+    // reaches the scorer as `"<name>: <description>"` while the raw dict is keyed
+    // by the bare name.
+    let relation_types: Vec<String> = specs
+        .iter()
+        .filter(|spec| spec.task_type == "relations")
+        .map(|spec| {
+            crate::models::gliner_boundary::relations::resolve_relation_type(&spec.task_name)
+        })
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+
+    RawShape {
+        entities: EntityOrder { labels, scalar },
+        classification_tasks,
+        structure_groups,
+        relation_types,
+    }
 }
 
 /// Load the boundary GGUF and run extraction once. CLI only.

@@ -750,16 +750,36 @@ reference 自己解**，数字来自真 encoder + 真 head。已生成 `choice-d
 
 **零 ground truth**，且要同时覆盖两套机制。先造 fixture 再动手。
 
-### ✅ F-3 长文本 chunk + merge 的**内核**（纯函数部分完成）
+### ✅ F-3 长文本 chunk + merge（内核 + 接线）
 
 `split_text_into_chunks` + `merge_chunk_results` + `remap_result_spans` +
 `_strip_span_metadata` 全部完成（`long_document.rs`，12 个测试）。这些是
 `chunking.py` 里与模型无关的纯函数，fixture 为真值表。
 
-**尚未接线**：`extract_long` / `classify_text_long` 等 10 个 `*_long` 入口本身还没调用
-这套内核 —— 它们在 `runtime.py` 里，把 chunk 文本逐个喂给 `extract` 再合并，
-而本 port 的 `extract` 入口尚未接上长文档驱动。这是一个独立的接线步骤，
-不涉及 kernel，但需要 CLI/HTTP 层的 10 个入口。
+**接线也完成**：`extract_long_document`（`gliner2_boundary.rs`）跑
+chunk → 每 chunk `extract` → `extraction_to_raw_results` → `format_results`
+→ `merge_chunk_results`，HTTP `POST /v1/jev/boundary` 传 `chunk_size` 即切换。
+
+原计划「接 10 个 `*_long` 入口」是**错的估计**：那 10 个方法在 reference 里全部
+只是 `build schema` 后转调同一个 `batch_extract_long`，所以只有**一个**接缝。
+真正缺的是三块中间层，每块都先拿了 oracle 才动手：
+
+| 层 | oracle | 状态 |
+| --- | --- | --- |
+| `format_results` 等 4 个 formatter | `dump_format_results.py`（21 case） | ✅ 11/11，4/5 变异 |
+| `Extraction` → raw results 转换器 | `dump_raw_results.py`（19 case，**跑真模型**） | ✅ 9/9，9/11 变异 |
+| `batch_extract_long` 整条链 | `dump_long_document_e2e.py`（12 case，**跑真模型**） | ✅ 7/7 |
+
+接线时抓到的三个真 bug：
+1. **`relation_types` 取错字段**：relation group 每个**参数槽**一个 query，
+   `field_name` 是 `head`/`tail`、`task_name` 才是类型名。取错会让
+   `format_results` 以为 `head`/`tail` 是被请求的 relation 类型，于是追加两个空
+   列表 → `relation_extraction: {was_in: [...], head: [], tail: []}`。
+2. **`merge_result_dicts` 缺 `relation_extraction` 分支**：reference 有独立的
+   `_merge_relation_maps`，且它 **不带** overlap policy 调用 `_dedupe_items`
+   （用默认值），走通用 `merge_values` 会把调用方的 policy 传进去。
+3. **`char_range` 不拒绝反向区间**：`char_range(4, 2)` 会索引两个合法 word，
+   返回 start > end 的区间，slice 出空串，span 被静默丢弃。
 
 已钉的性质：多数投票（平票取**最早** chunk，不是最高分）、classification 取最大
 confidence、span surface **从原文档重切**（不携带 chunk 里的 text）、非 span 项按

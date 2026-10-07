@@ -38,8 +38,9 @@ pub use jev::{
     JevQuestionInput, JevResult, LabelSet,
 };
 pub use jev::{
-    parse_boundary_schema, run_gliner2_boundary, run_gliner2_boundary_extract,
-    BoundaryDecodeOptions, BoundarySchemaOptions,
+    extract_long_document, parse_boundary_schema, run_gliner2_boundary,
+    run_gliner2_boundary_extract, BoundaryDecodeOptions, BoundarySchemaOptions,
+    LongDocumentOptions,
 };
 pub use media::{validate_mmproj_capabilities, MediaKind, ProjectorFamily};
 pub use omni::run_omni_embedding;

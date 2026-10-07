@@ -228,10 +228,59 @@ fn merge_result_dicts(
             .collect();
         let value = if key == "entities" {
             merge_entity_maps(&values, &scalar, policy)
+        } else if key == "relation_extraction" {
+            // `_merge_relation_maps` is a separate branch in the reference, not a
+            // special case of the generic one, and it differs in two ways that
+            // both matter here. It dedupes **without** an overlap policy — the
+            // reference calls `_dedupe_items(items)` and relies on the default,
+            // while `_merge_values` threads the caller's policy through. And it
+            // skips non-dict values outright, where the generic path would first
+            // run the classification / string / list checks on them.
+            merge_relation_maps(&values)
         } else {
             merge_values(&values, policy)
         };
         merged.insert(key.clone(), value);
+    }
+    serde_json::Value::Object(merged)
+}
+
+/// `_merge_relation_maps` (`chunking.py:199`).
+///
+/// Keyed by relation type, each type's edges concatenated across chunks and then
+/// deduped. Deliberately **not** `merge_values`: that one would pass the caller's
+/// overlap policy into the dedup, and the reference does not — it takes the
+/// default. The two differ for edges, whose `{head, tail}` objects carry their own
+/// `start`/`end` and so are resolved by a different branch of the resolver than the
+/// document spans the policy governs.
+fn merge_relation_maps(values: &[ChunkResult]) -> ChunkResult {
+    let mut labels: Vec<&String> = Vec::new();
+    let mut seen: std::collections::BTreeSet<&String> = std::collections::BTreeSet::new();
+    for value in values {
+        let Some(object) = value.as_object() else {
+            continue;
+        };
+        for label in object.keys() {
+            if seen.insert(label) {
+                labels.push(label);
+            }
+        }
+    }
+    let mut merged = serde_json::Map::new();
+    for label in labels {
+        let mut items: Vec<serde_json::Value> = Vec::new();
+        for value in values {
+            if let Some(found) = value.get(label) {
+                match found {
+                    serde_json::Value::Array(list) => items.extend(list.iter().cloned()),
+                    single => items.push(single.clone()),
+                }
+            }
+        }
+        merged.insert(
+            label.clone(),
+            serde_json::Value::Array(dedupe_items(&items, OverlapPolicy::Disallow)),
+        );
     }
     serde_json::Value::Object(merged)
 }

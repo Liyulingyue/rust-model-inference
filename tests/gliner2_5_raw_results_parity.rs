@@ -181,6 +181,19 @@ fn raw_shape(
             })
             .unwrap_or_default(),
         structure_groups,
+        // The converter does not consult this: `relation_types` is what
+        // `format_results` needs, and this test compares the *raw* dict, which is
+        // shaped before any of that. Filled from the schema's declared relations so
+        // the struct is complete.
+        relation_types: specs
+            .iter()
+            .filter(|spec| spec.task_type == "relations")
+            .map(|spec| {
+                rust_model_inference::models::gliner_boundary::relations::resolve_relation_type(
+                    &spec.field_name,
+                )
+            })
+            .collect(),
     }
 }
 

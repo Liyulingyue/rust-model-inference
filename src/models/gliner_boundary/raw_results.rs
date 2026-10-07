@@ -138,6 +138,16 @@ pub struct RawShape {
     /// Structure group names in report order. A group is keyed by its own name,
     /// not by `json_structures`, so the name has to survive to the output key.
     pub structure_groups: Vec<String>,
+    /// Bare relation type names, passed to `format_results` as its
+    /// `requested_relations`.
+    ///
+    /// This list does two things there: it lets a `{head, tail}` value be routed
+    /// to `relation_extraction` (though the type sniff already does that), and it
+    /// adds an **empty list** for every name that matched nothing. The second
+    /// effect is why it holds the declared names rather than the ones that
+    /// happened to match — reporting only what matched would silently drop the
+    /// empty entries a caller indexing every requested relation relies on.
+    pub relation_types: Vec<String>,
 }
 
 /// The two flags `batch_extract` threads through every shape.

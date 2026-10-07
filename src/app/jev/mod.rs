@@ -32,8 +32,9 @@ pub use adapters::gliner2::{
     schema_from_label_sets, schema_from_questions, LabelSet,
 };
 pub use adapters::gliner2_boundary::{
-    extract as run_gliner2_boundary_extract, parse_boundary_schema, run_gliner2_boundary,
-    BoundaryDecodeOptions, BoundarySchemaOptions,
+    extract as run_gliner2_boundary_extract, extract_long as extract_long_document,
+    parse_boundary_schema, run_gliner2_boundary, BoundaryDecodeOptions, BoundarySchemaOptions,
+    LongDocumentOptions,
 };
 pub use clm::{run_clm_decision, run_clm_scoring};
 pub use grouped::{
