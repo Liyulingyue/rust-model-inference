@@ -18,4 +18,5 @@ __pycache__/
 .omo/
 .DS_Store
 
+.hf-venv/
 /out/
