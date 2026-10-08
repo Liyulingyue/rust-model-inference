@@ -234,10 +234,10 @@ impl JevScorer for Qwen35JevScorer {
                 self.prefill_batch_size,
                 8192,
                 Some(&system),
-                &crate::prompt::jinja::Options {
-                    jinja: self.jinja.is_some(),
-                    file: None,
-                },
+                // The resolved template, so `--chat-template-file` survives.
+                // Rebuilding `Options { file: None, .. }` here silently fell
+                // back to the GGUF's own template.
+                self.jinja.as_ref(),
             );
         }
         run_forward_logits_qwen35_with_batch(

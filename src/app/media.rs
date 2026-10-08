@@ -15,6 +15,26 @@ pub enum MediaKind {
     Audio,
 }
 
+impl MediaKind {
+    /// The `type` a chat template branches on for this kind of attachment.
+    pub fn content_type(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Video => "video",
+            Self::Audio => "audio",
+        }
+    }
+
+    /// `(start, pad, end)` special-token names wrapping the placeholder run.
+    pub fn placeholder_tokens(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            Self::Audio => ("audio_start", "audio_pad", "audio_end"),
+            Self::Image => ("vision_start", "image_pad", "vision_end"),
+            Self::Video => ("vision_start", "video_pad", "vision_end"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectorFamily {
     Qwen3VlMerger,

@@ -24,14 +24,10 @@
 //! A template that references no BOS still gets one from the tokenizer's
 //! `add_bos_token`, so callers must not prepend a second one.
 
-use std::borrow::Cow;
-
 use minijinja::{Environment, UndefinedBehavior};
 use serde_json::{json, Value};
 
-use super::jinja_compat::{
-    rewrite_python_compat, rewrite_string_methods, strip_llamacpp_extensions, trim_py,
-};
+use super::jinja_compat::{python_method, strip_llamacpp_extensions};
 
 /// One chat turn. `content` may be an array of parts for multimodal
 /// templates (the LFM2.5 template branches on `content is string`);
@@ -87,40 +83,18 @@ impl JinjaChatTemplate {
         // pathological template cannot hang a server request.
         env.set_fuel(Some(2_000_000));
         env.set_keep_trailing_newline(true);
-        // A genuine `None` for `.get()` rewrites to fall back to. minijinja's
-        // `none` is a *test*, not a value, so it cannot be used here.
-        env.add_global("__py_none", minijinja::Value::from(()));
-        // String methods that minijinja lacks; `rewrite_python_compat` turns
-        // `x.startswith(p)` into `x|startswith(p)`.
-        env.add_filter("startswith", |s: Cow<'_, str>, p: Cow<'_, str>| {
-            s.starts_with(&*p)
-        });
-        env.add_filter("endswith", |s: Cow<'_, str>, p: Cow<'_, str>| {
-            s.ends_with(&*p)
-        });
-        // minijinja's builtin `split` yields a lazy sequence, which cannot be
-        // indexed negatively, so Python's `s.split(p)[-1]` would silently
-        // return the first element. A real list keeps list semantics.
-        env.add_filter(
-            "split",
-            |s: Cow<'_, str>, pat: Option<Cow<'_, str>>| -> Vec<String> {
-                match pat {
-                    Some(p) => s.split(&*p).map(str::to_string).collect(),
-                    None => s.split_whitespace().map(str::to_string).collect(),
-                }
-            },
-        );
-        // Python's `lstrip`/`rstrip` take an optional set of characters, so
-        // `rstrip('\n')` must be accepted as well as a bare `rstrip()`.
-        env.add_filter("lstrip", |s: Cow<'_, str>, chars: Option<Cow<'_, str>>| {
-            trim_py(&s, chars.as_deref(), true).to_string()
-        });
-        env.add_filter("rstrip", |s: Cow<'_, str>, chars: Option<Cow<'_, str>>| {
-            trim_py(&s, chars.as_deref(), false).to_string()
-        });
-        let source = rewrite_python_compat(&strip_llamacpp_extensions(source));
-        let source = rewrite_string_methods(&source);
-        env.add_template_owned(TEMPLATE_NAME, source)
+        // Python method compatibility. minijinja has no `add_method`, but it
+        // does have this callback, which fires whenever a method call on a map
+        // or string would otherwise raise UnknownMethod. Handling the methods
+        // here instead of rewriting the template *source* is what makes this
+        // safe: a rewriter has to guess where the receiver expression ends,
+        // and every guess that is wrong either mangles the template or panics
+        // on a multibyte character. With the callback the source reaches
+        // minijinja untouched.
+        env.set_unknown_method_callback(python_method);
+        // Own the source: `add_template_owned` takes a `Cow`, and a borrowed
+        // `&str` would tie the template's storage to this function's lifetime.
+        env.add_template_owned(TEMPLATE_NAME, strip_llamacpp_extensions(source))
             .map_err(|e| format!("{origin}: invalid chat template: {e}"))?;
         Ok(Self {
             env,
@@ -428,7 +402,7 @@ fn build_user_content(media: &[MediaPart], user_text: &str) -> Value {
     }
     let mut parts: Vec<Value> = Vec::with_capacity(media.len() + 1);
     for m in media {
-        parts.push(json!({ "type": m.kind.as_str() }));
+        parts.push(json!({ "type": m.content_type }));
     }
     if !user_text.is_empty() {
         parts.push(json!({ "type": "text", "text": user_text }));
@@ -436,43 +410,30 @@ fn build_user_content(media: &[MediaPart], user_text: &str) -> Value {
     Value::Array(parts)
 }
 
-/// What kind of attachment a content part carries.
-///
-/// Templates branch on this: Qwen's emit an image block, while video models
-/// expect `type == "video"`. Every part used to be hard-coded to `image`, so a
-/// non-image model could never render its own template correctly.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MediaKind {
-    Image,
-    Video,
-    Audio,
-}
-
-impl MediaKind {
-    /// The value used in the content part's `type` field.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            MediaKind::Image => "image",
-            MediaKind::Video => "video",
-            MediaKind::Audio => "audio",
-        }
-    }
-}
-
 /// One media attachment in a multimodal prompt.
+///
+/// `content_type` is the `type` a template branches on -- `"image"`, `"video"`
+/// or `"audio"`. It is a plain string rather than an enum on purpose: the
+/// attachment kind is decided once, where the media is decoded
+/// (`crate::app::media::MediaKind`), and duplicating that enum here only
+/// created a second thing that could drift out of sync.
 #[derive(Clone, Copy, Debug)]
 pub struct MediaPart {
-    pub kind: MediaKind,
-    /// How many vision placeholders this attachment expands to.
+    pub content_type: &'static str,
+    /// How many placeholders this attachment expands to.
     pub token_count: usize,
 }
 
 impl MediaPart {
-    pub fn image(token_count: usize) -> Self {
+    pub fn new(content_type: &'static str, token_count: usize) -> Self {
         Self {
-            kind: MediaKind::Image,
+            content_type,
             token_count,
         }
+    }
+
+    pub fn image(token_count: usize) -> Self {
+        Self::new("image", token_count)
     }
 }
 
@@ -486,8 +447,7 @@ impl MediaPart {
 /// hand-built token layout.
 pub fn media_conversation_tokens(
     tokenizer: &dyn crate::core::tokenizer::Tokenizer,
-    opts: &Options,
-    metadata: &dyn Fn(&str) -> Option<crate::core::tensor::MetaValue>,
+    template: Option<&JinjaChatTemplate>,
     placeholder_id: u32,
     media: &[MediaPart],
     user_text: &str,
@@ -497,8 +457,7 @@ pub fn media_conversation_tokens(
     let media_counts: Vec<usize> = media.iter().map(|m| m.token_count).collect();
     let Some(mut ids) = text_conversation_tokens(
         tokenizer,
-        opts,
-        metadata,
+        template,
         system_text,
         user_text,
         media,
@@ -521,16 +480,22 @@ pub fn media_conversation_tokens(
 /// `[system, user]` plus an open assistant turn, because the token after the
 /// prompt is the decision being scored. That is `add_generation_prompt =
 /// true`, the same value live generation uses.
+/// The template is passed already resolved rather than as `Options`.
+///
+/// Resolution reads GGUF metadata or a file, so it belongs once at config time.
+/// Taking `Options` here would let a caller re-resolve with different inputs,
+/// which is how the multimodal path lost `--chat-template-file`: the JEV scorer
+/// kept only the resolved template and then rebuilt `Options { file: None }` to
+/// satisfy this signature, silently falling back to the GGUF's own template.
 pub fn text_conversation_tokens(
     tokenizer: &dyn crate::core::tokenizer::Tokenizer,
-    opts: &Options,
-    metadata: &dyn Fn(&str) -> Option<crate::core::tensor::MetaValue>,
+    template: Option<&JinjaChatTemplate>,
     system_text: Option<&str>,
     user_text: &str,
     media: &[MediaPart],
     enable_thinking: bool,
 ) -> Result<Option<Vec<u32>>, String> {
-    let Some(template) = opts.resolve(metadata)? else {
+    let Some(template) = template else {
         return Ok(None);
     };
     let special = special_tokens_from_tokenizer(tokenizer);
@@ -715,26 +680,6 @@ mod tests {
     }
 
     #[test]
-    fn map_get_preserves_none_semantics() {
-        // The old test only checked truthiness, which made it look like the
-        // rewrite was equivalent. It is not: `x["k"] is none` is false in
-        // minijinja while `x.get("k") is none` is true in Jinja2. This pins
-        // the identity test that actually changed.
-        let via_get = "{% set d = {} %}{% if d.get(\"k\") is none %}NONE{% else %}NOT{% endif %}";
-        let via_index = "{% set d = {} %}{% if d[\"k\"]|default(__py_none) is none %}NONE{% else %}NOT{% endif %}";
-        assert_eq!(render(via_get, true, false), render(via_index, true, false));
-        assert_eq!(render(via_get, true, false), "NONE");
-    }
-
-    #[test]
-    fn map_get_truthiness_is_still_equivalent() {
-        let via_get = "{% set d = {} %}{% if d.get(\"k\") %}T{% else %}F{% endif %}";
-        let via_index =
-            "{% set d = {} %}{% if d[\"k\"]|default(__py_none) %}T{% else %}F{% endif %}";
-        assert_eq!(render(via_get, true, false), render(via_index, true, false));
-    }
-
-    #[test]
     fn get_inside_a_string_literal_is_not_rewritten() {
         // Regression: a naive `find(".get(")` scan rewrote string literals,
         // so this template rendered `the api ["k"] call`.
@@ -804,71 +749,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn get_inside_a_raw_block_is_left_alone() {
-        let src = "{% raw %}d.get(\"k\"){% endraw %}";
-        assert_eq!(render(src, true, false), "d.get(\"k\")");
-    }
-
-    #[test]
-    fn tmp_dbg2() {
-        let src =
-            std::fs::read_to_string("models/Edge0-35B-A3B-preview/chat_template.jinja").unwrap();
-        let out = rewrite_python_compat(&strip_llamacpp_extensions(&src));
-        for (n, l) in out.lines().enumerate() {
-            if n + 1 == 95 || n + 1 == 96 {
-                println!("L{}: {}", n + 1, l);
-            }
-        }
-    }
-
-    #[test]
-    fn tmp_dbg3() {
-        for src in [
-            r#"{% set s = '<think>x' %}{% if s.startswith('<think>') %}T{% else %}F{% endif %}"#,
-            r#"{% set m = [{'c': 'hello'}] %}{% if m[0].c.startswith('he') %}T{% endif %}"#,
-            r#"{{ 'a,b'.split(',')[0] }}"#,
-        ] {
-            println!("IN : {}", src);
-            println!("MID: {}", rewrite_python_compat(src));
-            println!(
-                "OUT: {}",
-                rewrite_string_methods(&rewrite_python_compat(src))
-            );
-        }
-    }
-
-    #[test]
-    fn chained_string_methods_keep_python_semantics() {
-        // Edge0 ships `content.split('</think>')[0].rstrip('\n').split('<think>')[-1]`,
-        // so the rewrite has to survive a chain *and* keep the value right, not
-        // just parse. The expected values are what CPython produces for
-        // c = 'a</think>b<think>c': 'a' and 'b<think>c'.
-        let src = "{% set c = 'a</think>b<think>c' %}\
-                   {% set r = c.split('</think>')[0].rstrip('\n').split('<think>')[-1].lstrip('\n') %}\
-                   {% set t = c.split('</think>')[-1].lstrip('\n') %}\
-                   [{{ r }}][{{ t }}]";
-        assert_eq!(render(src, true, false), "[a][b<think>c]");
-    }
-
-    #[test]
-    fn split_returns_a_real_list() {
-        // minijinja's builtin `split` yields a lazy sequence whose `[-1]`
-        // returns the *first* element; Python needs the last.
-        assert_eq!(render("{{ ['a','b','c'][-1] }}", true, false), "c");
-        assert_eq!(
-            render("{% set s = 'a,b,c' %}{{ (s|split(','))[-1] }}", true, false),
-            "c"
-        );
-    }
-
-    #[test]
-    fn lstrip_and_rstrip_accept_a_character_set() {
-        assert_eq!(render("{{ 'a\n\n'|rstrip('\n') }}", true, false), "a");
-        assert_eq!(render("{{ '\n\na'|lstrip('\n') }}", true, false), "a");
-        assert_eq!(render("{{ '  a  '|rstrip() }}", true, false), "  a");
-    }
-
     /// A media part whose `type` the template can branch on.
     const MEDIA_ECHO: &str = "{% for m in messages %}{% for c in m.content %}\
         [{{ c.type }}]{% endfor %}{% endfor %}";
@@ -911,33 +791,16 @@ mod tests {
             serde_json::json!([{ "type": "image" }, { "type": "text", "text": "hi" }])
         );
         assert_eq!(
-            build_user_content(
-                &[
-                    MediaPart::image(4),
-                    MediaPart {
-                        kind: MediaKind::Video,
-                        token_count: 9,
-                    },
-                ],
-                "",
-            ),
+            build_user_content(&[MediaPart::image(4), MediaPart::new("video", 9)], "",),
             serde_json::json!([{ "type": "image" }, { "type": "video" }])
         );
     }
 
     #[test]
-    fn media_kind_labels_are_stable() {
-        assert_eq!(MediaKind::Image.as_str(), "image");
-        assert_eq!(MediaKind::Video.as_str(), "video");
-        assert_eq!(MediaKind::Audio.as_str(), "audio");
-    }
-
-    #[test]
-    fn two_arg_get_is_left_alone() {
-        // `.get(k, default)` really does change meaning; we must not
-        // rewrite it, and minijinja should be the one to complain.
-        let src = rewrite_python_compat(r#"{% if m.get("k", "d") %}x{% endif %}"#);
-        assert!(src.contains(r#".get("k", "d")"#), "{src}");
+    fn media_part_carries_its_content_type() {
+        assert_eq!(MediaPart::image(4).content_type, "image");
+        assert_eq!(MediaPart::new("video", 4).content_type, "video");
+        assert_eq!(MediaPart::new("audio", 4).content_type, "audio");
     }
 
     #[test]

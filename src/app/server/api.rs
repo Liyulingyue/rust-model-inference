@@ -2267,7 +2267,8 @@ async fn run_multimodal_text_only(
                 prefill_batch_size,
                 max_context,
                 Some(system_prompt.as_str()),
-                &crate::prompt::jinja::Options::default(),
+                // This endpoint has no chat-template switch, so no template.
+                None,
             )
         }
         other => Err(format!(

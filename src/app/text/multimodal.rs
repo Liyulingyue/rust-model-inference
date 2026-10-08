@@ -259,11 +259,7 @@ pub fn run_qwen3_family_multimodal(
             "Media projector width does not match model width {width}"
         ));
     }
-    let (start_name, pad_name, end_name) = match media_kind {
-        crate::app::media::MediaKind::Audio => ("audio_start", "audio_pad", "audio_end"),
-        crate::app::media::MediaKind::Image => ("vision_start", "image_pad", "vision_end"),
-        crate::app::media::MediaKind::Video => ("vision_start", "video_pad", "vision_end"),
-    };
+    let (start_name, pad_name, end_name) = media_kind.placeholder_tokens();
     let start = tokenizer
         .special_token_id(start_name)
         .ok_or_else(|| format!("Required token missing: {start_name}"))?;
@@ -298,26 +294,45 @@ pub fn run_qwen3_family_multimodal(
     // `rows` grid tokens, so the placeholder is expanded into a contiguous
     // run first — the contract `build_qwen3_media_positions` documents.
     // The system turn stays Omni-only, matching the hand-built path below.
-    let media_counts: Vec<usize> = media_grid_shapes
-        .iter()
-        .map(|(h, w)| {
-            (*h).checked_mul(*w)
-                .ok_or_else(|| "Media grid shape overflow".to_string())
-        })
-        .collect::<Result<Vec<usize>, String>>()?;
     let jinja_system = if matches!(family, crate::app::media::ProjectorFamily::Qwen25Omni) {
         Some(OMNI_SYSTEM_TEXT)
     } else {
         None
     };
-    let jinja_media: Vec<crate::prompt::jinja::MediaPart> = media_counts
-        .iter()
-        .map(|&count| crate::prompt::jinja::MediaPart::image(count))
-        .collect();
+    // One part per attachment, and the count is `rows`: the number of
+    // projected tokens divided by the width. Deriving it from the vision grid
+    // shapes instead left audio with an empty list -- Omni audio produces
+    // embeddings but no vision grid -- so the template emitted no content part
+    // and the placeholder count did not match.
+    let mut jinja_media: Vec<crate::prompt::jinja::MediaPart> = Vec::new();
+    if image_path.is_some() {
+        jinja_media.push(crate::prompt::jinja::MediaPart::new(
+            media_kind.content_type(),
+            rows,
+        ));
+    }
+    if video_path.is_some() {
+        // One content part per frame: the vision path pushed one grid shape per
+        // frame, and the template emits a placeholder for each of them.
+        let frames = media_grid_shapes.len().max(1);
+        let per_frame = rows / frames;
+        for _ in 0..frames {
+            jinja_media.push(crate::prompt::jinja::MediaPart::new(
+                media_kind.content_type(),
+                per_frame,
+            ));
+        }
+    }
+    if audio_path.is_some() {
+        jinja_media.push(crate::prompt::jinja::MediaPart::new(
+            media_kind.content_type(),
+            rows,
+        ));
+    }
+    let jinja_template = jinja.resolve(&jinja_metadata)?;
     if let Some(jinja_ids) = crate::prompt::jinja::media_conversation_tokens(
         tokenizer.as_ref(),
-        jinja,
-        &jinja_metadata,
+        jinja_template.as_ref(),
         pad,
         &jinja_media,
         prompt,
@@ -625,11 +640,7 @@ pub fn run_qwen3_family_multimodal_logits(
             "Media projector width does not match model width {width}"
         ));
     }
-    let (start_name, pad_name, end_name) = match media_kind {
-        crate::app::media::MediaKind::Audio => ("audio_start", "audio_pad", "audio_end"),
-        crate::app::media::MediaKind::Image => ("vision_start", "image_pad", "vision_end"),
-        crate::app::media::MediaKind::Video => ("vision_start", "video_pad", "vision_end"),
-    };
+    let (start_name, pad_name, end_name) = media_kind.placeholder_tokens();
     let start = tokenizer
         .special_token_id(start_name)
         .ok_or_else(|| format!("Required token missing: {start_name}"))?;
@@ -712,7 +723,9 @@ pub fn run_qwen35_family_multimodal_logits(
     // their own instructions (the JEV scorer) pass `Some`; the HTTP multimodal
     // endpoints leave it `None` to keep Qwen's default system text.
     system_prompt: Option<&str>,
-    jinja: &crate::prompt::jinja::Options,
+    // Already resolved. Passing `Options` here used to make callers rebuild
+    // them, which is how `--chat-template-file` got dropped on this path.
+    jinja: Option<&crate::prompt::jinja::JinjaChatTemplate>,
 ) -> Result<(Vec<f32>, std::time::Duration), String> {
     use crate::app::media::frame_pairs;
     use crate::models::qwen35::vision::{
@@ -816,11 +829,21 @@ pub fn run_qwen35_family_multimodal_logits(
     // `<|vision_start|><|image_pad|><|vision_end|>`; the placeholder is
     // expanded to a contiguous run so `build_qwen35_positions` (below) sees
     // exactly the layout it documents.
-    let jinja_media = [crate::prompt::jinja::MediaPart::image(n_vis_tokens)];
+    // Video frames are not laid out through this helper's grid list, so report
+    // the single attachment with the kind the caller actually passed. Emitting
+    // `image` for a video would pair `video_pad` with an image content part.
+    let media_kind = if video_path.is_some() {
+        crate::app::media::MediaKind::Video
+    } else {
+        crate::app::media::MediaKind::Image
+    };
+    let jinja_media = [crate::prompt::jinja::MediaPart::new(
+        media_kind.content_type(),
+        n_vis_tokens,
+    )];
     let prompt_ids = match crate::prompt::jinja::media_conversation_tokens(
         &tokenizer,
         jinja,
-        &|k| llm_source.metadata(k).cloned(),
         image_token_id,
         &jinja_media,
         prompt,

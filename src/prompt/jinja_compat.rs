@@ -1,449 +1,38 @@
-//! Rewrites that let Python-flavoured Jinja2 templates run under minijinja.
+//! Python-flavoured Jinja2 constructs that minijinja does not implement.
 //!
-//! This is the only code in the crate that rewrites template *source*. Every
-//! function here is a pure `source -> source` transform, so the whole surface
-//! can be audited on its own: if a prompt comes out wrong, this file is where
-//! to look first.
+//! This used to rewrite template *source*. It no longer does, and that is the
+//! whole point of the file existing in this shape.
 //!
-//! minijinja is not Python and has no `add_method`, so the constructs real
-//! templates use -- `dict.get`, `str.startswith`, `str.split` -- have to be
-//! rewritten rather than registered. Two rules govern everything here:
+//! Rewriting the receiver of `x.foo(...)` requires knowing where the receiver
+//! expression ends. Every version of that guess was wrong somewhere: it
+//! panicked on a multibyte character, it glued `for` and `part` together, it
+//! rewrote `dict.get("k")` inside prose, and it produced unbalanced brackets
+//! for chained calls. minijinja's `Environment::set_unknown_method_callback`
+//! hands us the receiver as an already-evaluated value, so there is nothing
+//! left to parse and the source reaches minijinja untouched.
 //!
-//! - Never change meaning. `x.get("k")` must not become `x["k"]`, because
-//!   Jinja2 returns `None` for a missing key and minijinja returns Undefined,
-//!   and `is none` disagrees between the two.
-//! - When a rewrite cannot be applied confidently, leave the source alone and
-//!   let minijinja raise a real error. A template that fails loudly is
-//!   strictly better than one that renders plausible garbage.
+//! What remains is `strip_llamacpp_extensions`, which removes tags rather
+//! than expressions: llama.cpp's `{% generation %}` is not Jinja2 and must go,
+//! but there is no expression to recover, only a tag to neutralise.
+
+use minijinja::value::Value;
+use minijinja::value::ValueKind;
+use minijinja::{Error, ErrorKind, State};
 
 /// Tags that are llama.cpp extensions rather than Jinja2.
-pub(super) const LLAMACPP_TAGS: [&str; 2] = ["generation", "endgeneration"];
+const LLAMACPP_TAGS: [&str; 2] = ["generation", "endgeneration"];
 
-/// Replace `x.get("k")` with a lookup that keeps Python's `None` result.
+/// Neutralise llama.cpp's `{% generation %}` / `{% endgeneration %}` tags.
 ///
-/// minijinja has no `dict.get`, and it cannot be registered: the extension
-/// points are `add_filter` / `add_test` / `add_function` / `add_global`, none
-/// of which add a method to a map. So the call has to be rewritten.
+/// These are not Jinja2, so minijinja rejects them. They only ever wrap
+/// assistant output that we discard anyway, so replacing them with a comment
+/// is enough. The whitespace-control markers are preserved, because a template
+/// that relies on `{%- generation -%}` to trim surrounding whitespace must
+/// keep trimming it.
 ///
-/// `x["k"]` is *not* an equivalent substitution. Jinja2 gives `None` for a
-/// missing key, so `x.get("k") is none` is true; minijinja's `x["k"]` yields
-/// Undefined, and `Undefined is none` is **false**. Rewriting to an index
-/// silently flips `is none` branches, which is why this injects
-/// `| default(__py_none)` instead: that restores the real `None` the template
-/// expects. (`__py_none` rather than `none`, because minijinja's `none` is a
-/// *test*, not a value.)
-///
-/// The scan is string-literal aware. A previous version matched `.get(`
-/// anywhere in the source and rewrote it inside string literals too, so
-/// `{% set s = 'api .get("k")' %}` became `{% set s = 'api ["k"]' %}`.
-/// Find where the receiver expression of a trailing method call starts.
-///
-/// Handles `foo`, `foo.bar`, `foo[0]`, `messages[i].content` and any chain of
-/// those. Returns `None` when the receiver is not recognisable, so the caller
-/// can leave the call alone and let minijinja raise a real error instead of
-/// mangling the template.
-fn is_expr_byte(c: u8) -> bool {
-    matches!(c,
-        b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'.' | b'|'
-        | b'\'' | b'"' | b' ' | b'\t' | b'\n' | b'\r'
-        | b'(' | b')' | b'[' | b']')
-}
-
-fn is_space(c: u8) -> bool {
-    matches!(c, b' ' | b'\t' | b'\n' | b'\r')
-}
-
-/// The identifier starting at `at`, if there is one.
-fn leading_word(text: &str, at: usize) -> Option<&str> {
-    let bytes = text.as_bytes();
-    let mut end = at;
-    while end < text.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
-        end += 1;
-    }
-    if end == at {
-        return None;
-    }
-    Some(&text[at..end])
-}
-
-/// Tag words that can sit immediately before an expression.
-pub(super) const JINJA_KEYWORDS: &[&str] = &[
-    "if", "elif", "else", "endif", "for", "endfor", "in", "is", "not", "and", "or", "set",
-    "endset", "when", "endwhen", "with", "as", "by", "macro", "endmacro", "call", "filter",
-    "block", "include", "extends", "import", "from", "do", "true", "false", "none",
-];
-
-/// True when every bracket in `text` is closed, in order.
-fn is_balanced(text: &str) -> bool {
-    let mut depth = 0i32;
-    for c in text.bytes() {
-        match c {
-            b'(' | b'[' => depth += 1,
-            b')' | b']' => {
-                depth -= 1;
-                if depth < 0 {
-                    return false;
-                }
-            }
-            _ => {}
-        }
-    }
-    depth == 0
-}
-
-/// Where the receiver of the method call ending at `text` starts.
-///
-/// The capture must be bracket-balanced; an unbalanced prefix means the scan
-/// landed inside an expression it cannot describe, and rewriting it would
-/// corrupt the template, so it is rejected and the call is left verbatim.
-fn receiver_start(text: &str) -> Option<usize> {
-    let bytes = text.as_bytes();
-    let mut start = text.len();
-    let mut depth = 0i32;
-    while start > 0 {
-        let c = bytes[start - 1];
-        if c == b')' || c == b']' {
-            depth += 1;
-            start -= 1;
-            continue;
-        }
-        if c == b'(' || c == b'[' {
-            if depth == 0 {
-                break;
-            }
-            depth -= 1;
-            start -= 1;
-            continue;
-        }
-        // Step back over a whole string literal: a comma inside `'a,b'` would
-        // otherwise look like an operator and truncate the receiver.
-        if depth == 0 && (c == b'\'' || c == b'"') {
-            let mut k = start - 2;
-            let mut found = false;
-            while k > 0 {
-                k -= 1;
-                match bytes[k] {
-                    d if d == c => {
-                        start = k;
-                        found = true;
-                        break;
-                    }
-                    b'\\' if k > 0 => k -= 1,
-                    _ => {}
-                }
-            }
-            if !found {
-                return None;
-            }
-            continue;
-        }
-        // `{`, `}`, `%` and operators end the receiver. In practice `%}` stops
-        // the scan at the end of the enclosing `{% ... %}` block, so a capture
-        // cannot escape the current expression.
-        if depth == 0 && !is_expr_byte(c) {
-            break;
-        }
-        start -= 1;
-    }
-    let mut head = start;
-    while head < text.len() && (is_space(bytes[head]) || bytes[head] == b'.') {
-        head += 1;
-    }
-    if head >= text.len() || head == 0 {
-        return None;
-    }
-    // `{% if s.startswith(p) %}`: the scan stops at `%}` and the capture would
-    // otherwise start at the `if`. Keywords belong to the tag, not the
-    // receiver.
-    while let Some(word) = leading_word(text, head) {
-        if !JINJA_KEYWORDS.contains(&word) {
-            break;
-        }
-        let mut next = head + word.len();
-        while next < text.len() && is_space(bytes[next]) {
-            next += 1;
-        }
-        if next >= text.len() {
-            return None;
-        }
-        head = next;
-    }
-    if !is_balanced(&text[head..]) {
-        return None;
-    }
-    let first = bytes[head];
-    if !(first.is_ascii_alphanumeric()
-        || first == b'_'
-        || first == b'\''
-        || first == b'"'
-        || first == b'(')
-    {
-        return None;
-    }
-    Some(head)
-}
-
-/// Remove fully enclosing parentheses so nesting does not grow on each pass.
-fn strip_outer_parens(text: &str) -> &str {
-    let mut s = text.trim();
-    loop {
-        let Some(inner) = s.strip_prefix('(') else {
-            break;
-        };
-        let Some(rest) = inner.strip_suffix(')') else {
-            break;
-        };
-        let _ = rest;
-        let body = &inner[..inner.len() - 1];
-        if !is_balanced(body) {
-            break;
-        }
-        s = body.trim();
-    }
-    s
-}
-
-/// Python's `str.lstrip`/`str.rstrip`: with no argument they strip whitespace,
-/// with one they strip any of the given characters.
-pub(super) fn trim_py<'a>(s: &'a str, chars: Option<&str>, left: bool) -> &'a str {
-    match chars {
-        Some(set) => {
-            let set: Vec<char> = set.chars().collect();
-            let pred = |c: char| set.contains(&c);
-            if left {
-                s.trim_start_matches(pred)
-            } else {
-                s.trim_end_matches(pred)
-            }
-        }
-        None => {
-            if left {
-                s.trim_start()
-            } else {
-                s.trim_end()
-            }
-        }
-    }
-}
-
-/// Python string methods that Jinja2 templates call but that minijinja has no
-/// method for. Each is rewritten to the identically named filter.
-pub(super) const STRING_METHODS: &[&str] = &["startswith", "endswith", "lstrip", "rstrip", "split"];
-
-/// Rewrite the Python-flavoured constructs that minijinja cannot run.
-///
-/// minijinja has no `dict.get`, and it cannot be registered as a method: the
-/// extension points are `add_filter` / `add_test` / `add_function` /
-/// `add_global`, none of which add a method to a map or string. So the call
-/// has to be rewritten.
-///
-/// `x.get("k")` must NOT become `x["k"]`: Jinja2 returns `None` for a missing
-/// key, so `x.get("k") is none` is true, while minijinja's `x["k"]` yields
-/// Undefined and `Undefined is none` is **false**. Rewriting to an index
-/// silently flips `is none` branches, so this emits
-/// `x["k"]|default(__py_none)` instead, which restores the `None`.
-///
-/// The scan is string-literal aware, because a naive `find(".get(")` also
-/// rewrote inside string literals -- `{% set s = 'api .get("k")' %}` became
-/// `{% set s = 'api ["k"]' %}`. Only `{# #}` comments and `{% raw %}` blocks
-/// are skipped wholesale; `{% ... %}` and `{{ ... }}` are code and are
-/// scanned, since `{% if d.get("k") %}` needs the rewrite too.
-pub(super) fn rewrite_python_compat(source: &str) -> String {
-    let bytes = source.as_bytes();
-    let mut out = String::with_capacity(source.len());
-    let mut i = 0usize;
-    while i < bytes.len() {
-        let b = bytes[i];
-        // `{# ... #}` is a Jinja comment: verbatim.
-        if b == b'{' && i + 1 < bytes.len() && bytes[i + 1] == b'#' {
-            let end = source[i..]
-                .find("#}")
-                .map(|p| i + p + 2)
-                .unwrap_or(bytes.len());
-            out.push_str(&source[i..end]);
-            i = end;
-            continue;
-        }
-        // `{% raw %}` ... `{% endraw %}` is literal text, not code.
-        if source[i..].starts_with("{% raw")
-            || source[i..].starts_with("{%- raw")
-            || source[i..].starts_with("{%+ raw")
-        {
-            let end = source[i..]
-                .find("{% endraw")
-                .or_else(|| source[i..].find("{%- endraw"))
-                .map(|p| i + p)
-                .and_then(|p| source[p..].find("%}").map(|q| p + q + 2))
-                .unwrap_or(bytes.len());
-            out.push_str(&source[i..end]);
-            i = end;
-            continue;
-        }
-        // String literals are verbatim wherever they appear.
-        if b == b'\'' || b == b'"' {
-            let quote = b;
-            let start = i;
-            i += 1;
-            while i < bytes.len() {
-                if bytes[i] == b'\\' {
-                    i += 2;
-                    continue;
-                }
-                if bytes[i] == quote {
-                    i += 1;
-                    break;
-                }
-                i += 1;
-            }
-            out.push_str(&source[start..i]);
-            continue;
-        }
-        if b == b'.' {
-            // `x.get("k")` -> `x["k"]|default(__py_none)`
-            if source[i..].starts_with(".get(") {
-                let arg_start = i + ".get(".len();
-                if let Some(rel) = source[arg_start..].find(')') {
-                    let close = arg_start + rel;
-                    let arg = source[arg_start..close].trim();
-                    let quoted = match arg.as_bytes().first() {
-                        Some(q @ (b'"' | b'\'')) if arg.len() >= 2 && arg.ends_with(*q as char) => {
-                            !arg[1..arg.len() - 1].contains(*q as char)
-                        }
-                        _ => false,
-                    };
-                    if quoted {
-                        // The filter must sit outside the brackets: a filter
-                        // inside them decorates the *key*, leaving `x["k"]`
-                        // and `is none` false again.
-                        out.push('[');
-                        out.push_str(arg);
-                        out.push_str("]|default(__py_none)");
-                        i = close + 1;
-                        continue;
-                    }
-                    // Multi-arg `.get(k, d)` really does change meaning; leave
-                    // it for minijinja to report rather than rewrite it.
-                }
-            }
-        }
-        let ch = source[i..].chars().next().unwrap();
-        out.push(ch);
-        i += ch.len_utf8();
-    }
-    out
-}
-
-/// Rewrite one `x.method(args)` call into `x|filter(args)`, if `name` is a
-/// supported Python string method and the receiver can be identified.
-fn rewrite_one_string_method(
-    text: &str,
-    start: usize,
-    dot: usize,
-    name: &str,
-    arg_start: usize,
-    close: usize,
-) -> Option<String> {
-    let receiver = &text[start..dot];
-    let expr = strip_outer_parens(receiver);
-    if expr.is_empty() {
-        return None;
-    }
-    let args = rewrite_string_methods(&text[arg_start..close]);
-    let mut out = String::with_capacity(text.len() + 8);
-    // The receiver goes in parentheses: `a|b[0]` does not parse, so a filter
-    // has to bind to a grouped expression when the chain also subscripts.
-    out.push_str(&text[..start]);
-    // The group must close *after* the filter call. `(a)|split(p)[0]` does not
-    // parse -- minijinja binds `[0]` to the filter name -- so a following
-    // subscript has to apply to `(a|split(p))`.
-    out.push('(');
-    out.push_str(expr);
-    out.push('|');
-    out.push_str(name);
-    out.push('(');
-    out.push_str(&args);
-    out.push_str("))");
-    out.push_str(&text[close + 1..]);
-    Some(out)
-}
-
-/// One left-to-right pass that rewrites the first resolvable string-method
-/// call it finds, leaving everything else untouched.
-fn rewrite_string_methods_once(text: &str) -> Option<String> {
-    let bytes = text.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if b == b'{' && i + 1 < bytes.len() && bytes[i + 1] == b'#' {
-            i = text[i..]
-                .find("#}")
-                .map(|p| i + p + 2)
-                .unwrap_or(bytes.len());
-            continue;
-        }
-        if text[i..].starts_with("{% raw") || text[i..].starts_with("{%- raw") {
-            i = text[i..]
-                .find("{% endraw")
-                .or_else(|| text[i..].find("{%- endraw"))
-                .map(|p| i + p)
-                .and_then(|p| text[p..].find("%}").map(|q| p + q + 2))
-                .unwrap_or(bytes.len());
-            continue;
-        }
-        if b == b'\'' || b == b'"' {
-            let quote = b;
-            i += 1;
-            while i < bytes.len() {
-                if bytes[i] == b'\\' {
-                    i += 2;
-                    continue;
-                }
-                if bytes[i] == quote {
-                    i += 1;
-                    break;
-                }
-                i += 1;
-            }
-            continue;
-        }
-        if b == b'.' {
-            if let Some(name) = STRING_METHODS
-                .iter()
-                .find(|name| text[i..].starts_with(&format!(".{name}(")))
-            {
-                let arg_start = i + name.len() + 2;
-                if let Some(rel) = text[arg_start..].find(')') {
-                    let close = arg_start + rel;
-                    if let Some(start) = receiver_start(&text[..i]) {
-                        return rewrite_one_string_method(text, start, i, name, arg_start, close);
-                    }
-                }
-            }
-        }
-        i += 1;
-    }
-    None
-}
-
-/// Rewrite every supported Python string method call into a filter call.
-///
-/// This has to be iterative. Handlers chain -- Edge0 ships
-/// `content.split('</think>')[0].rstrip('\n').split('<think>')[-1]` -- and each
-/// rewrite re-scans the result, so the receiver is always read from text whose
-/// rewritten parts are already parenthesised. Every pass strictly reduces the
-/// number of remaining method calls, so it terminates.
-pub(super) fn rewrite_string_methods(source: &str) -> String {
-    let mut text = source.to_string();
-    // Bounded: each pass removes at least one call, and templates are small.
-    for _ in 0..256 {
-        match rewrite_string_methods_once(&text) {
-            Some(next) => text = next,
-            None => break,
-        }
-    }
-    text
-}
-
+/// This walks the source with `find` and slices at the resulting boundaries,
+/// so multibyte text is safe: every index here comes from a substring search
+/// and therefore lands on a char boundary.
 pub(super) fn strip_llamacpp_extensions(source: &str) -> String {
     let mut out = String::with_capacity(source.len());
     let mut rest = source;
@@ -487,14 +76,142 @@ pub(super) fn strip_llamacpp_extensions(source: &str) -> String {
     }
 }
 
+/// Python's `str.lstrip` / `str.rstrip`: with no argument they strip
+/// whitespace, with one they strip any of the given characters.
+fn trim_py<'a>(s: &'a str, chars: Option<&str>, left: bool) -> &'a str {
+    match chars {
+        Some(set) => {
+            let set: Vec<char> = set.chars().collect();
+            let pred = |c: char| set.contains(&c);
+            if left {
+                s.trim_start_matches(pred)
+            } else {
+                s.trim_end_matches(pred)
+            }
+        }
+        None => {
+            if left {
+                s.trim_start()
+            } else {
+                s.trim_end()
+            }
+        }
+    }
+}
+
+fn as_str(value: &Value) -> Result<&str, Error> {
+    value
+        .as_str()
+        .ok_or_else(|| Error::from(ErrorKind::InvalidOperation))
+}
+
+/// A single string argument, as Python would take it.
+fn one_str(args: &[Value]) -> Result<&str, Error> {
+    let [arg] = args else {
+        return Err(Error::from(ErrorKind::InvalidOperation));
+    };
+    as_str(arg)
+}
+
+/// Dispatch a Python method call that minijinja does not implement.
+///
+/// `value` is the already-evaluated receiver, which is why this can exist at
+/// all: no source-level parsing is involved.
+///
+/// `dict.get` is the subtle one. Python returns `None` for a missing key, so
+/// `x.get("k") is none` is true. minijinja distinguishes None from Undefined,
+/// and `Undefined is none` is false, so the missing case must produce a real
+/// `None` -- returning Undefined here would silently flip every `is none`
+/// branch in the template.
+pub(super) fn python_method(
+    _state: &State,
+    value: &Value,
+    method: &str,
+    args: &[Value],
+) -> Result<Value, Error> {
+    match value.kind() {
+        ValueKind::Map => {
+            if method != "get" {
+                return Err(Error::from(ErrorKind::UnknownMethod));
+            }
+            // Python's `get` takes a key, and optionally a default.
+            let (key, default) = match args {
+                [key] => (key, None),
+                [key, default] => (key, Some(default)),
+                _ => return Err(Error::from(ErrorKind::InvalidOperation)),
+            };
+            // Templates key maps with strings; anything else goes through
+            // `get_item`, which hashes arbitrary values.
+            let found = match key.as_str() {
+                Some(name) => value.get_attr(name).ok(),
+                None => value.get_item(key).ok(),
+            }
+            .filter(|v| !v.is_undefined());
+            match found {
+                Some(found) => Ok(found),
+                // Python's `.get(key, default)` only applies the default on a
+                // miss; a present key returns the value even if it is falsy.
+                None if let Some(default) = default => Ok(default.clone()),
+                // `Value::from(())` is a genuine None. minijinja's `none` is a
+                // test, not a value, so it cannot be used for this.
+                None => Ok(Value::from(())),
+            }
+        }
+        ValueKind::String => {
+            let s = as_str(value)?;
+            Ok(match method {
+                "startswith" => Value::from(s.starts_with(one_str(args)?)),
+                "endswith" => Value::from(s.ends_with(one_str(args)?)),
+                "lstrip" => Value::from(trim_py(s, args.first().and_then(|v| v.as_str()), true)),
+                "rstrip" => Value::from(trim_py(s, args.first().and_then(|v| v.as_str()), false)),
+                // A real list, not minijinja's lazy `split`: Python's
+                // `s.split(p)[-1]` has to give the last element.
+                "split" => Value::from_iter(match args.first().and_then(|v| v.as_str()) {
+                    Some(pat) => s.split(pat).map(str::to_string).collect::<Vec<_>>(),
+                    None => s.split_whitespace().map(str::to_string).collect::<Vec<_>>(),
+                }),
+                // Common enough in templates, and trivial while we are here.
+                "lower" => Value::from(s.to_lowercase()),
+                "upper" => Value::from(s.to_uppercase()),
+                "strip" => Value::from(s.trim()),
+                "replace" => Value::from(s.replace(one_str(args)?, &from_str(args, 1)?)),
+                "count" => Value::from(match args.first().and_then(|v| v.as_str()) {
+                    Some(pat) => s.matches(pat).count(),
+                    None => 0,
+                }),
+                _ => return Err(Error::from(ErrorKind::UnknownMethod)),
+            })
+        }
+        _ => Err(Error::from(ErrorKind::UnknownMethod)),
+    }
+}
+
+/// Optional second string argument, for `replace(old, new)`.
+fn from_str(args: &[Value], index: usize) -> Result<String, Error> {
+    match args.get(index).and_then(|v| v.as_str()) {
+        Some(s) => Ok(s.to_string()),
+        None => Err(Error::from(ErrorKind::InvalidOperation)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{rewrite_python_compat, rewrite_string_methods, strip_llamacpp_extensions};
+    use super::{python_method, strip_llamacpp_extensions};
+    use minijinja::{Environment, UndefinedBehavior};
 
-    /// These assert on the rewritten *source text*, not on a rendered prompt.
-    /// The end-to-end behaviour is covered in `super::jinja`, where the filters
-    /// and globals are actually registered; duplicating that setup here would
-    /// test the harness rather than the rewriter.
+    /// Compile and render with `context` (JSON) as the whole variable scope.
+    fn render(source: &str, context: &str) -> Result<String, String> {
+        let mut env = Environment::new();
+        env.set_undefined_behavior(UndefinedBehavior::Lenient);
+        env.set_unknown_method_callback(python_method);
+        let ctx: minijinja::Value = serde_json::from_str(context).map_err(|e| e.to_string())?;
+        env.add_template_owned("t", strip_llamacpp_extensions(source))
+            .map_err(|e| e.to_string())?;
+        env.get_template("t")
+            .map_err(|e| e.to_string())?
+            .render(&ctx)
+            .map_err(|e| e.to_string())
+    }
 
     #[test]
     fn generation_tag_becomes_a_comment_and_keeps_trim_markers() {
@@ -508,70 +225,136 @@ mod tests {
         );
     }
 
+    /// Regression: the old source rewriter sliced at byte offsets that could
+    /// land inside a multibyte character and panic. Chinese prompts are the
+    /// common case, so this has to hold.
     #[test]
-    fn get_is_rewritten_inside_a_statement_but_not_inside_a_literal() {
-        // `{% ... %}` is code, so `if x.get(k)` must be rewritten...
-        assert_eq!(
-            rewrite_python_compat("{% if x.get(\"k\") %}y{% endif %}"),
-            // The filter goes *outside* the brackets: inside them it would
-            // decorate the key and leave `x["k"]`, so `is none` is false again.
-            "{% if x[\"k\"]|default(__py_none) %}y{% endif %}"
-        );
-        // ...but a string literal is data.
-        assert_eq!(
-            rewrite_python_compat("{% set s = 'api .get(\"k\")' %}"),
-            "{% set s = 'api .get(\"k\")' %}"
-        );
+    fn multibyte_text_around_tags_does_not_panic() {
+        for (src, ctx) in [
+            ("你好{{ m }}", "{}"),
+            ("{{ m }}中文", "{}"),
+            ("{% generation %}中文内容{% endgeneration %}", "{}"),
+            ("🎉🎉{{ m }}🎉", "{}"),
+            ("Grüße {{ m }}", "{}"),
+            ("{{ m }}", r#"{"m":"日本語"}"#),
+        ] {
+            assert!(render(src, ctx).is_ok(), "{src:?} failed");
+        }
     }
 
+    /// Regression: `dict.get("k")` in prose used to be rewritten, because the
+    /// scan did not know which parts of the source were template code.
     #[test]
-    fn get_accepts_single_quotes() {
+    fn plain_prose_containing_get_is_untouched() {
         assert_eq!(
-            rewrite_python_compat("{{ m.get('k') }}"),
-            "{{ m['k']|default(__py_none) }}"
-        );
-    }
-
-    #[test]
-    fn get_in_a_raw_block_is_left_alone() {
-        let src = "{% raw %}x.get(\"k\"){% endraw %}";
-        assert_eq!(rewrite_python_compat(src), src);
-    }
-
-    #[test]
-    fn multi_arg_get_is_left_alone() {
-        // `d.get(k, default)` genuinely changes meaning; rewritting it would
-        // silently drop the default.
-        let src = "{% if m.get(\"k\", \"d\") %}x{% endif %}";
-        assert_eq!(rewrite_python_compat(src), src);
-    }
-
-    #[test]
-    fn string_methods_become_parenthesised_filter_calls() {
-        assert_eq!(
-            rewrite_string_methods("{% if s.startswith('a') %}y{% endif %}"),
-            "{% if (s|startswith('a')) %}y{% endif %}"
-        );
-        assert_eq!(
-            rewrite_string_methods("{{ m[0].c.split(',')|join('') }}"),
-            "{{ (m[0].c|split(','))|join('') }}"
+            render(r#"{{ 'Use dict.get("key");' }}"#, "{}").unwrap(),
+            "Use dict.get(\"key\");"
         );
     }
 
     #[test]
-    fn a_chain_is_rewritten_everywhere_and_converges() {
+    fn get_on_an_indexed_map_can_still_be_indexed() {
+        // Regression: the rewrite produced `...|default(none)[0]`, which does
+        // not parse.
         assert_eq!(
-            rewrite_string_methods("{{ c.split('a')[0].rstrip('\\n') }}"),
-            "{{ ((c|split('a'))[0]|rstrip('\\n')) }}"
+            render(
+                "{{ messages[0].get('content')[0] }}",
+                r#"{"messages":[{"content":"ab"}]}"#
+            )
+            .unwrap(),
+            "a"
         );
     }
 
     #[test]
-    fn an_unrecognised_receiver_is_left_verbatim() {
-        // Losing the receiver must not drop the dot: `s` + `startswith` glued
-        // together would be a silently different template.
-        let src = "{{ 1 + 2.startswith('a') }}";
-        let out = rewrite_string_methods(src);
-        assert!(out.contains("startswith"), "{out}");
+    fn get_keeps_python_none_semantics() {
+        // A missing key must satisfy `is none`, which Undefined does not.
+        assert_eq!(
+            render(
+                "{% if m.get('k') is none %}NONE{% else %}NOT{% endif %}",
+                r#"{"m":{}}"#
+            )
+            .unwrap(),
+            "NONE"
+        );
+        assert_eq!(
+            render(
+                "{% if m.get('k') is none %}NONE{% else %}NOT{% endif %}",
+                r#"{"m":{"k":1}}"#
+            )
+            .unwrap(),
+            "NOT"
+        );
+    }
+
+    #[test]
+    fn get_honours_an_explicit_default() {
+        assert_eq!(
+            render("{{ m.get('k', 'fallback') }}", r#"{"m":{}}"#).unwrap(),
+            "fallback"
+        );
+        // A present key wins even when the default differs.
+        assert_eq!(
+            render("{{ m.get('k', 'fallback') }}", r#"{"m":{"k":"real"}}"#).unwrap(),
+            "real"
+        );
+    }
+
+    /// Regression: the rewriter ate the space in `for part in ...`, producing
+    /// `forpart in ...`.
+    #[test]
+    fn a_method_call_in_a_for_target_compiles() {
+        assert_eq!(
+            render(
+                "{% for part in text.split(',') %}{{ part }};{% endfor %}",
+                r#"{"text":"a,b"}"#
+            )
+            .unwrap(),
+            "a;b;"
+        );
+    }
+
+    #[test]
+    fn chained_methods_keep_python_semantics() {
+        // CPython: 'a</think>b<think>c'.split('</think>')[-1] -> 'b<think>c'
+        assert_eq!(
+            render(
+                "{{ c.split('</think>')[-1].lstrip('\\n') }}",
+                r#"{"c":"a</think>b<think>c"}"#
+            )
+            .unwrap(),
+            "b<think>c"
+        );
+    }
+
+    #[test]
+    fn string_methods_dispatch() {
+        // minijinja 2.24 renders booleans Python-style, as "True"/"False".
+        let cases: [(&str, &str, &str); 8] = [
+            ("{{ s.startswith('ab') }}", "True", "abc"),
+            ("{{ s.endswith('bc') }}", "True", "abc"),
+            ("{{ s.upper() }}", "AB", "ab"),
+            ("{{ s.lower() }}", "ab", "AB"),
+            ("{{ s.strip() }}", "a", " a "),
+            ("{{ s.rstrip('\\n') }}", "a", "a\n\n"),
+            ("{{ s.lstrip('x') }}", "a", "xxa"),
+            ("{{ s.split(',')|join('|') }}", "a|b", "a,b"),
+        ];
+        for (tpl, want, input) in cases {
+            let ctx = serde_json::json!({ "s": input }).to_string();
+            assert_eq!(render(tpl, &ctx).unwrap(), want, "{tpl} on {input:?}");
+        }
+        // The false branch has to be reachable too.
+        assert_eq!(
+            render("{{ s.startswith('zz') }}", r#"{"s":"abc"}"#).unwrap(),
+            "False"
+        );
+    }
+
+    #[test]
+    fn an_unimplemented_method_still_errors() {
+        // Silently answering anything would hide real gaps.
+        assert!(render("{{ s.nope() }}", r#"{"s":"a"}"#).is_err());
+        assert!(render("{{ m.get('k') }}", "{}").is_err());
     }
 }
