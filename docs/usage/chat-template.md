@@ -242,8 +242,8 @@ Value** 交出来，所以不需要解析源码。
 |---|---|---|
 | `x.get(k)` / `x.get(k, default)` | `UnknownMethod`（map 没有 `get`） | 命中返回值；缺失返回真正的 `None` |
 | `x.startswith(p)` / `x.endswith(p)` | 同上 | bool |
-| `x.lstrip(s?)` / `x.rstrip(s?)` | 同上 | Python 的可选字符集语义 |
-| `x.split(p?)` | 同上（内置 filter 是惰性序列，`[-1]` 会拿到**第一个**元素） | 真 list |
+| `x.lstrip(s?)` / `x.rstrip(s?)` / `x.strip(s?)` | 同上 | Python 的可选字符集语义 |
+| `x.split(p?, n?)` | 同上（内置 filter 是惰性序列，`[-1]` 会拿到**第一个**元素） | 真 list，maxsplit 也照做 |
 | `x.lower/upper/strip/replace/count` | 部分有 | 补齐；`replace` 需两个参数 |
 
 **`is none` 语义是关键。** Jinja2 对缺失 key 返回 `None`，`x.get("k") is none`
@@ -258,7 +258,14 @@ Value** 交出来，所以不需要解析源码。
 panic）、receiver 提取吃掉 `for part in` 的空格、prose 里的 `dict.get("key")` 也被
 改、链式调用产出括号不匹配的语法错误。回调让这些整类问题从根上消失 —— 源码原样
 交给 minijinja。**当前只改写一处**：llama.cpp 的 `{% generation %}` 标签转成注释
-（保留 trim 标记），因为那是标签而非表达式，没有可恢复的语义。
+（保留 trim 标记），因为那是标签而非表达式，没有可恢复的语义。这个扫描会跳过
+字符串字面量、`{# #}` 注释和 `{% raw %}` 块 —— 早期版本直接搜 `{%`，
+把 `{{ '{% generation %}' }}` 里的文本也换成了注释。
+
+**参数个数要严格。** 不支持的签名报错而不是猜测：`strip('x')` 必须按字符集
+而不是 `trim()`（真实 Qwen3 模板用的是 `reasoning_content.strip('\n')`，
+按 `trim()` 会多删思考内容的前导空格、改变 prompt）；`split(',',1)` 的
+maxsplit 必须生效；`split(1)` 报错而非退化成按空白切分。
 
 多模态 content part 带 `type`（image/video/audio），此前一律硬编码 `"image"`，
 视频会与 `video_pad` 配不上。只要有 media 就一定是数组：早期版本会把单个 part

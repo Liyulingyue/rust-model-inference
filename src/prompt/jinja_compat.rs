@@ -34,46 +34,103 @@ const LLAMACPP_TAGS: [&str; 2] = ["generation", "endgeneration"];
 /// so multibyte text is safe: every index here comes from a substring search
 /// and therefore lands on a char boundary.
 pub(super) fn strip_llamacpp_extensions(source: &str) -> String {
+    let bytes = source.as_bytes();
     let mut out = String::with_capacity(source.len());
-    let mut rest = source;
-    loop {
-        let Some(open) = rest.find("{%") else {
-            out.push_str(rest);
-            return out;
-        };
-        let Some(close_rel) = rest[open + 2..].find("%}") else {
-            out.push_str(rest);
-            return out;
-        };
-        let close = open + 2 + close_rel;
-        out.push_str(&rest[..open]);
-
-        // Read the trim markers off the *raw* tag body before stripping
-        // them, otherwise `{%- generation -%}` loses its left trim.
-        let raw_inner = rest[open + 2..close].trim();
-        let ltrim = raw_inner.starts_with('-');
-        let rtrim = raw_inner.ends_with('-');
-        let name = raw_inner
-            .trim_start_matches('-')
-            .trim_end_matches('-')
-            .trim()
-            .split_whitespace()
-            .next()
-            .unwrap_or("");
-
-        if LLAMACPP_TAGS.contains(&name) {
-            // Mirror the original trim markers onto a comment.
-            match (ltrim, rtrim) {
-                (true, true) => out.push_str("{#- -#}"),
-                (true, false) => out.push_str("{#- #}"),
-                (false, true) => out.push_str("{# -#}"),
-                (false, false) => out.push_str("{# #}"),
+    // Everything in `source[..copied]` has already been emitted.
+    let mut copied = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        // A string literal is data. Searching for `{%` without checking this
+        // turned `{{ '{% generation %}' }}` into a comment instead of text.
+        if b == b'\'' || b == b'"' {
+            let quote = b;
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\\' {
+                    // Step over the escaped character whole, so `i` stays on a
+                    // char boundary for multibyte content.
+                    i += 1;
+                    match source.get(i..).and_then(|rest| rest.chars().next()) {
+                        Some(c) => i += c.len_utf8(),
+                        None => break,
+                    }
+                    continue;
+                }
+                if bytes[i] == quote {
+                    i += 1;
+                    break;
+                }
+                i += 1;
             }
-        } else {
-            out.push_str(&rest[open..=close + 1]);
+            continue;
         }
-        rest = &rest[close + 2..];
+        // `{# ... #}` is already a comment.
+        if b == b'{' && bytes.get(i + 1) == Some(&b'#') {
+            i = match source[i..].find("#}") {
+                Some(p) => i + p + 2,
+                None => bytes.len(),
+            };
+            continue;
+        }
+        // `{% raw %} ... {% endraw %}` is literal text, tags included.
+        if source[i..].starts_with("{% raw")
+            || source[i..].starts_with("{%- raw")
+            || source[i..].starts_with("{%+ raw")
+        {
+            i = match raw_block_end(&source[i..]) {
+                Some(end) => end,
+                None => bytes.len(),
+            };
+            continue;
+        }
+        if b == b'{' && bytes.get(i + 1) == Some(&b'%') {
+            let Some(close_rel) = source[i + 2..].find("%}") else {
+                break;
+            };
+            let close = i + 2 + close_rel;
+            let tag_start = i;
+            let after_tag = close + 2;
+            // Read the whitespace-control markers off the raw tag body before
+            // stripping them, otherwise `{%- generation -%}` loses its trim.
+            let raw_inner = source[i + 2..close].trim();
+            let ltrim = raw_inner.starts_with('-') || raw_inner.starts_with('+');
+            let rtrim = raw_inner.ends_with('-') || raw_inner.ends_with('+');
+            let name = raw_inner
+                .trim_matches(|c: char| c == '-' || c == '+' || c.is_whitespace())
+                .split_whitespace()
+                .next()
+                .unwrap_or("");
+            i = after_tag;
+            if LLAMACPP_TAGS.contains(&name) {
+                out.push_str(&source[copied..tag_start]);
+                out.push_str(match (ltrim, rtrim) {
+                    (true, true) => "{#- -#}",
+                    (true, false) => "{#- #}",
+                    (false, true) => "{# -#}",
+                    (false, false) => "{# #}",
+                });
+                copied = after_tag;
+            }
+            continue;
+        }
+        // Advance a whole character so `i` stays on a char boundary.
+        match source[i..].chars().next() {
+            Some(c) => i += c.len_utf8(),
+            None => break,
+        }
     }
+    out.push_str(&source[copied..]);
+    out
+}
+
+/// End offset (relative to the slice) just past the `{% endraw %}` tag.
+fn raw_block_end(slice: &str) -> Option<usize> {
+    let start = slice
+        .find("{% endraw")
+        .or_else(|| slice.find("{%- endraw"))?;
+    let close = slice[start..].find("%}")?;
+    Some(start + close + 2)
 }
 
 /// Python's `str.lstrip` / `str.rstrip`: with no argument they strip
@@ -173,15 +230,51 @@ pub(super) fn python_method(
                 "lstrip" => Value::from(trim_py(s, args.first().and_then(|v| v.as_str()), true)),
                 "rstrip" => Value::from(trim_py(s, args.first().and_then(|v| v.as_str()), false)),
                 // A real list, not minijinja's lazy `split`: Python's
-                // `s.split(p)[-1]` has to give the last element.
-                "split" => Value::from_iter(match args.first().and_then(|v| v.as_str()) {
-                    Some(pat) => s.split(pat).map(str::to_string).collect::<Vec<_>>(),
-                    None => s.split_whitespace().map(str::to_string).collect::<Vec<_>>(),
-                }),
+                // `s.split(p)[-1]` has to give the last element. Python also
+                // takes an optional maxsplit, which has to be honoured or the
+                // tail is joined into one element.
+                "split" => {
+                    let (sep, maxsplit) = match args {
+                        [] => (None, None),
+                        // A non-string separator is a type error in Python, not
+                        // a request to split on whitespace.
+                        [sep] => (Some(as_str(sep)?), None),
+                        [sep, limit] => (
+                            Some(as_str(sep)?),
+                            Some(
+                                limit
+                                    .as_usize()
+                                    .ok_or_else(|| Error::from(ErrorKind::InvalidOperation))?,
+                            ),
+                        ),
+                        _ => return Err(Error::from(ErrorKind::InvalidOperation)),
+                    };
+                    let parts: Vec<String> = match (sep, maxsplit) {
+                        (Some(pat), Some(limit)) => {
+                            s.splitn(limit + 1, pat).map(str::to_string).collect()
+                        }
+                        (Some(pat), None) => s.split(pat).map(str::to_string).collect(),
+                        (None, None) => s.split_whitespace().map(str::to_string).collect(),
+                        // Unreachable: a separator is required whenever a
+                        // maxsplit is given, but keep the arm total.
+                        (None, Some(_)) => {
+                            return Err(Error::from(ErrorKind::InvalidOperation));
+                        }
+                    };
+                    Value::from_iter(parts)
+                }
                 // Common enough in templates, and trivial while we are here.
                 "lower" => Value::from(s.to_lowercase()),
                 "upper" => Value::from(s.to_uppercase()),
-                "strip" => Value::from(s.trim()),
+                // Python's `strip(chars)` takes an optional character set.
+                // Ignoring it and calling `trim()` would also eat spaces: the
+                // real Qwen3 template does `reasoning_content.strip('\n')`,
+                // so `"\n  foo"` must keep its two leading spaces.
+                "strip" => {
+                    let set = args.first().and_then(|v| v.as_str());
+                    let front = trim_py(s, set, true);
+                    Value::from(trim_py(front, set, false))
+                }
                 // Python requires both arguments; dispatching through
                 // `one_str` here would reject every valid call, since it
                 // matches exactly one argument.
@@ -362,6 +455,124 @@ mod tests {
         assert!(render("{{ s.replace('a') }}", r#"{"s":"abc"}"#).is_err());
         assert!(render("{{ s.startswith() }}", r#"{"s":"abc"}"#).is_err());
         assert!(render("{{ s.count() }}", r#"{"s":"abc"}"#).is_err());
+    }
+
+    /// The real Qwen3 template does `reasoning_content.strip('\n')`. Ignoring
+    /// the character set and calling `trim()` also removed leading spaces,
+    /// which changes the prompt for any reasoning text that starts with them.
+    #[test]
+    fn strip_honours_its_character_set() {
+        // CPython: '\thi'.strip(' ') == '\thi', '\n hi '.strip('\n') == ' hi '
+        assert_eq!(
+            render("[{{ s.strip(' ') }}]", "{\"s\":\"\\thi\"}").unwrap(),
+            "[\thi]"
+        );
+        assert_eq!(
+            render("[{{ s.strip('\\n') }}]", "{\"s\":\"\\n hi \"}").unwrap(),
+            "[ hi ]"
+        );
+        // Bare `strip()` still means whitespace.
+        assert_eq!(
+            render("[{{ s.strip() }}]", "{\"s\":\" \\thi \"}").unwrap(),
+            "[hi]"
+        );
+    }
+
+    #[test]
+    fn split_honours_maxsplit() {
+        // CPython: 'a,b,c'.split(',', 1) == ['a', 'b,c']
+        assert_eq!(
+            render("{{ s.split(',',1)|join('|') }}", r#"{"s":"a,b,c"}"#).unwrap(),
+            "a|b,c"
+        );
+        assert_eq!(
+            render("{{ s.split(',')|join('|') }}", r#"{"s":"a,b,c"}"#).unwrap(),
+            "a|b|c"
+        );
+        // `str.split(None, n)` is not valid Python.
+        assert!(render("{{ s.split()|length }}", r#"{"s":"a b"}"#).is_ok());
+        assert!(render("{{ s.split(1) }}", r#"{"s":"a b"}"#).is_err());
+    }
+
+    /// Regression: the tag search did not know a string literal is data, so
+    /// `{{ '{% generation %}' }}` rendered a comment instead of the text.
+    #[test]
+    fn a_generation_tag_inside_a_string_literal_survives() {
+        assert_eq!(
+            render("{{ '{% generation %}' }}", "{}").unwrap(),
+            "{% generation %}"
+        );
+        assert_eq!(
+            render(r#"{{ "{%- generation -%}" }}"#, "{}").unwrap(),
+            "{%- generation -%}"
+        );
+    }
+
+    /// Regression: `{% raw %}` is literal text, so a tag inside it must not be
+    /// rewritten either.
+    #[test]
+    fn a_generation_tag_inside_a_raw_block_survives() {
+        assert_eq!(
+            render("{% raw %}{% generation %}{% endraw %}", "{}").unwrap(),
+            "{% generation %}"
+        );
+        assert_eq!(
+            render("{% raw %}{%- endgeneration -%}{% endraw %}", "{}").unwrap(),
+            "{%- endgeneration -%}"
+        );
+    }
+
+    /// The scan must not mistake a quote inside a comment or a tag for the
+    /// start of a string literal.
+    #[test]
+    fn a_quote_inside_a_comment_does_not_hide_a_tag() {
+        assert_eq!(
+            render("{# it's fine #}{% generation %}x{% endgeneration %}", "{}").unwrap(),
+            "x"
+        );
+    }
+
+    /// Multibyte text must survive the scan; the previous implementation
+    /// advanced by bytes and could land inside a character.
+    #[test]
+    fn multibyte_text_around_generation_tags_survives() {
+        assert_eq!(
+            render("你好{% generation %}世界{% endgeneration %}尾", "{}").unwrap(),
+            "你好世界尾"
+        );
+    }
+
+    #[test]
+    fn tmp_review_repro() {
+        let show = |label: &str, tpl: &str, ctx: &str| {
+            println!("{label} => {:?}", render(tpl, ctx));
+        };
+        show(
+            "[1a replace 2 args]",
+            "{{ s.replace('a','x') }}",
+            r#"{"s":"banana"}"#,
+        );
+        show(
+            "[1b strip set]     ",
+            "[{{ s.strip(' ') }}]",
+            r#"{"s":"  hi  "}"#,
+        );
+        show(
+            "[1b strip newline] ",
+            "[{{ s.strip('\n') }}]",
+            r#"{"s":"\n hi "}"#,
+        );
+        show(
+            "[1c split maxsplit]",
+            "{{ s.split(',',1)|join('|') }}",
+            r#"{"s":"a,b,c"}"#,
+        );
+        show("[2a literal tag]   ", "{{ '{% generation %}' }}", "{}");
+        show(
+            "[2b raw block]     ",
+            "{% raw %}{% generation %}{% endraw %}",
+            "{}",
+        );
     }
 
     #[test]
