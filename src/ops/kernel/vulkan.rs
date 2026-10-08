@@ -27,6 +27,21 @@ pub(crate) fn offload_enabled() -> bool {
 }
 
 impl GpuLinear {
+    pub(crate) fn tile_rows(
+        format: GpuWeightFormat,
+        n_in: usize,
+        n_out: usize,
+        rows: usize,
+    ) -> usize {
+        let limit = if format == GpuWeightFormat::F16 {
+            // Target 16 MiB of host input/output while amortizing fence waits.
+            (4 * 1024 * 1024 / n_in.saturating_add(n_out).max(1)).clamp(1, 4096)
+        } else {
+            64
+        };
+        rows.min(limit)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn try_matmul(
         &self,
@@ -56,9 +71,7 @@ impl GpuLinear {
         let Some(context) = crate::ops::get_vulkan_context() else {
             return false;
         };
-        // ponytail: one arena per projection, 64-row tiles bound scratch memory;
-        // share a model arena if target-machine measurements show memory pressure.
-        let tile_rows = rows.min(64);
+        let tile_rows = Self::tile_rows(format, n_in, n_out, rows);
         let key = (weight.as_ptr() as usize, weight.len());
         let mut state = self.state.lock().unwrap();
         let result = (|| {
@@ -108,6 +121,29 @@ impl GpuLinear {
                 *state = None;
                 false
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn f16_batches_bound_memory_and_preserve_dot_contracts() {
+        assert_eq!(
+            GpuLinear::tile_rows(GpuWeightFormat::F16, 512, 512, 4225),
+            4096
+        );
+        assert_eq!(GpuLinear::tile_rows(GpuWeightFormat::F16, 512, 512, 17), 17);
+        let rows = GpuLinear::tile_rows(GpuWeightFormat::F16, 4608, 512, 4096);
+        assert!(rows > 64 && rows * (4608 + 512) * 4 <= 16 * 1024 * 1024);
+        for format in [
+            GpuWeightFormat::F16Dot,
+            GpuWeightFormat::BF16Dot,
+            GpuWeightFormat::Q8_0,
+        ] {
+            assert_eq!(GpuLinear::tile_rows(format, 512, 512, 1089), 64);
         }
     }
 }

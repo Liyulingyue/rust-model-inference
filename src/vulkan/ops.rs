@@ -19,6 +19,7 @@ const Q8_MATMUL_GROUPED_DP4A_SHADER: &[u8] =
 const Q8_MATMUL_GROUPED_TILED_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/q8_matmul_tiled_dp4a.spv");
 const F16_MATMUL_TILED_SHADER: &[u8] = include_bytes!("../../shaders/bin/f16_matmul_tiled.spv");
+
 const ATTENTION_SCORES_TILED_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/attention_scores_tiled.spv");
 const Q4_0_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_0_matmul.spv");
@@ -989,7 +990,13 @@ impl BatchedLinearRuntime {
             bindings
         };
         self.ops.write_f32(self.layout.input, input)?;
-        self.ops.record_weight_matmul_rows(
+        let recorder = if format == GpuWeightFormat::F16 && n_in % 2 == 0 && rows >= 32 {
+            Qwen3Ops::record_weight_matmul_tiled_rows
+        } else {
+            Qwen3Ops::record_weight_matmul_rows
+        };
+        recorder(
+            &self.ops,
             &commands,
             bindings,
             self.layout.input,
@@ -1099,11 +1106,6 @@ impl<'a> Qwen3Ops<'a> {
             .map(|(index, shader)| {
                 if index == Q8_MATMUL_GROUPED && force_dp4a {
                     Q8_MATMUL_GROUPED_DP4A_SHADER
-                } else if index == F16_MATMUL_TILED && !force_dp4a {
-                    // The F16 tiled kernel is not tied to integer dot product,
-                    // but it is only used from the tiled path, which is gated on
-                    // that support, so keep the slot consistent with it.
-                    F16_MATMUL_SHADER
                 } else if index == Q8_MATMUL_GROUPED_TILED && !force_dp4a {
                     // The tiled kernel needs `dotPacked4x8EXT`, so on a device
                     // without it the slot falls back to the plain grouped shader
@@ -1641,9 +1643,8 @@ impl<'a> Qwen3Ops<'a> {
     /// the only difference is which pipeline is recorded and how the workgroups
     /// are shaped.
     ///
-    /// Requires integer dot product; without it the tiled slot holds a different
-    /// shader, so this returns an error rather than silently computing the
-    /// wrong thing.
+    /// Quantized weights require integer dot product. F16 uses a separate
+    /// float kernel and does not require that device feature.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn record_weight_matmul_tiled_rows(
         &self,
@@ -1660,11 +1661,6 @@ impl<'a> Qwen3Ops<'a> {
         token_rows: usize,
         input_stride: usize,
     ) -> Result<(), VulkanError> {
-        if !self.context.supports_integer_dot_product() {
-            return Err(VulkanError::UnsupportedShape(
-                "tiled Q8_0 matmul needs integer dot product".into(),
-            ));
-        }
         let format = bindings.weight_format(outputs.len())?;
         // F16 weights take the float tiled kernel: no quantize dispatch, and the
         // activation is read from the arena as f32 and rounded in registers.
@@ -1673,6 +1669,11 @@ impl<'a> Qwen3Ops<'a> {
             if format != GpuWeightFormat::F16 {
                 return Err(VulkanError::UnsupportedShape(
                     "tiled float matmul is only implemented for F16 weights".into(),
+                ));
+            }
+            if n_in % 2 != 0 {
+                return Err(VulkanError::UnsupportedShape(
+                    "tiled F16 matmul requires even weight row starts".into(),
                 ));
             }
             let (push, _) = matmul_rows_push(
@@ -1699,6 +1700,11 @@ impl<'a> Qwen3Ops<'a> {
             )?;
             self.record_linear_dispatch(commands, F16_MATMUL_TILED, bindings, &push, dispatch);
             return Ok(());
+        }
+        if !self.context.supports_integer_dot_product() {
+            return Err(VulkanError::UnsupportedShape(
+                "tiled Q8_0 matmul needs integer dot product".into(),
+            ));
         }
         let (activation, scales, quantize) = match format {
             GpuWeightFormat::Q4_K | GpuWeightFormat::Q5_K | GpuWeightFormat::Q6_K => {

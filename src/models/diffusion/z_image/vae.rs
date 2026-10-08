@@ -1326,6 +1326,7 @@ fn conv_f16_parallel_into(
             bias,
             output,
             patch_len,
+            pool,
         )
     }) {
         return Ok(());
@@ -1420,12 +1421,19 @@ fn conv_patch_into(input: &[f32], side: usize, kernel: usize, pixel: usize, patc
     patch.fill(0.0);
     let spatial = side * side;
     let padding = (kernel / 2) as isize;
-    for (index, value) in patch.iter_mut().enumerate() {
-        let channel = index / (kernel * kernel);
-        let y = (pixel / side) as isize + ((index / kernel) % kernel) as isize - padding;
-        let x = (pixel % side) as isize + (index % kernel) as isize - padding;
-        if x >= 0 && y >= 0 && x < side as isize && y < side as isize {
-            *value = input[channel * spatial + y as usize * side + x as usize];
+    let top = (pixel / side) as isize - padding;
+    let left = (pixel % side) as isize - padding;
+    let start_x = left.max(0) as usize;
+    let end_x = (left + kernel as isize).min(side as isize) as usize;
+    for (channel, patch) in patch.chunks_exact_mut(kernel * kernel).enumerate() {
+        for ky in 0..kernel {
+            let y = top + ky as isize;
+            if y >= 0 && y < side as isize {
+                let source = channel * spatial + y as usize * side;
+                let destination = ky * kernel + (start_x as isize - left) as usize;
+                patch[destination..destination + end_x - start_x]
+                    .copy_from_slice(&input[source + start_x..source + end_x]);
+            }
         }
     }
 }
@@ -1441,28 +1449,41 @@ fn try_conv_f16(
     bias: Option<&[f32]>,
     output: &mut [f32],
     patch_len: usize,
+    pool: &ComputePool,
 ) -> bool {
-    // ponytail: 64-row tiles wait per submission; keep VAE opt-in until they are batched.
-    if !crate::ops::kernel::vulkan::offload_enabled()
-        || std::env::var("RUST_GPU_VAE").as_deref() != Ok("1")
-    {
+    if !crate::ops::kernel::vulkan::offload_enabled() {
         return false;
     }
     let spatial = side * side;
-    let tile_rows = spatial.min(64);
+    let tile_rows = crate::ops::kernel::vulkan::GpuLinear::tile_rows(
+        crate::vulkan::ops::GpuWeightFormat::F16,
+        patch_len,
+        output_channels,
+        spatial,
+    );
     let mut patches = vec![0.0; tile_rows * patch_len];
     let mut projected = vec![0.0; tile_rows * output_channels];
     for start in (0..spatial).step_by(tile_rows) {
         let rows = tile_rows.min(spatial - start);
-        for row in 0..rows {
-            conv_patch_into(
-                input,
-                side,
-                kernel,
-                start + row,
-                &mut patches[row * patch_len..(row + 1) * patch_len],
-            );
-        }
+        let patches_ptr = patches.as_mut_ptr() as usize;
+        pool.compute(move |ith, nth| {
+            let per_thread = rows.div_ceil(nth);
+            let first = ith * per_thread;
+            let end = (first + per_thread).min(rows);
+            if first >= end {
+                return;
+            }
+            // Each worker owns disjoint pixel rows; compute joins before the GPU upload.
+            let patches = unsafe {
+                std::slice::from_raw_parts_mut(
+                    (patches_ptr as *mut f32).add(first * patch_len),
+                    (end - first) * patch_len,
+                )
+            };
+            for (row, patch) in patches.chunks_exact_mut(patch_len).enumerate() {
+                conv_patch_into(input, side, kernel, start + first + row, patch);
+            }
+        });
         if !gpu.try_matmul(
             weights,
             crate::vulkan::ops::GpuWeightFormat::F16,
@@ -1474,13 +1495,24 @@ fn try_conv_f16(
         ) {
             return false;
         }
-        for row in 0..rows {
-            for channel in 0..output_channels {
-                output[channel * spatial + start + row] = projected
-                    [row * output_channels + channel]
-                    + bias.map_or(0.0, |bias| bias[channel]);
+        let output_ptr = output.as_mut_ptr() as usize;
+        let projected = &projected[..rows * output_channels];
+        pool.compute(move |ith, nth| {
+            let per_thread = output_channels.div_ceil(nth);
+            for channel in ith * per_thread..((ith + 1) * per_thread).min(output_channels) {
+                // Each worker owns separate channel planes; only this completed tile is written.
+                let output = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        (output_ptr as *mut f32).add(channel * spatial + start),
+                        rows,
+                    )
+                };
+                let bias = bias.map_or(0.0, |bias| bias[channel]);
+                for (row, value) in output.iter_mut().enumerate() {
+                    *value = projected[row * output_channels + channel] + bias;
+                }
             }
-        }
+        });
     }
     output.iter().all(|value| value.is_finite())
 }
@@ -1912,10 +1944,89 @@ fn rgb_bytes_from_channels(values: &[f32], side: usize) -> Result<Vec<u8>, Strin
 mod tests {
     use super::*;
     use crate::core::tensor::{GGMLType, MetaValue, TensorInfo, TensorSource};
+    #[cfg(feature = "vulkan")]
+    use crate::ops::f16_to_f32;
     use half::f16;
     use std::collections::HashMap;
     use std::sync::Arc;
 
+    #[cfg(feature = "vulkan")]
+    #[test]
+    #[ignore = "requires a Vulkan device and Z_IMAGE_VAE pointing to the real F16 decoder"]
+    fn vulkan_vae_real_weights_decode_matches_cpu() {
+        let source = Arc::new(
+            crate::core::loader::GGUFLoader::from_file(
+                std::env::var("Z_IMAGE_VAE").expect("missing Z_IMAGE_VAE"),
+            )
+            .unwrap(),
+        );
+        let vae = FluxVae::load(source, Arc::new(ComputePool::new(8))).unwrap();
+        let mut latent = vec![0.0; 16 * 64 * 64];
+        TorchMt19937::new(42).fill_normal(&mut latent);
+        let start = std::time::Instant::now();
+        let cpu = {
+            let _disabled = ComputePool::disable_gpu_matmul_for_scope();
+            vae.decode_rgb(&latent, 64).unwrap()
+        };
+        eprintln!(
+            "[vae-bench] cpu_cold={:.6}s threads=8",
+            start.elapsed().as_secs_f64()
+        );
+        assert_eq!(
+            (cpu.width, cpu.height, cpu.bytes.len()),
+            (512, 512, 512 * 512 * 3)
+        );
+        eprintln!(
+            "[vae-bench] cpu_gpu_requested={}",
+            crate::ops::gpu_requested()
+        );
+        let mut cpu_times = Vec::new();
+        for run in 0..3 {
+            let _disabled = ComputePool::disable_gpu_matmul_for_scope();
+            let start = std::time::Instant::now();
+            let actual = vae.decode_rgb(&latent, 64).unwrap();
+            let seconds = start.elapsed().as_secs_f64();
+            assert_eq!(actual.bytes, cpu.bytes);
+            eprintln!("[vae-bench] cpu_warm_run={run} seconds={seconds:.6}");
+            cpu_times.push(seconds);
+        }
+        crate::ops::enable_gpu();
+        let context = crate::ops::get_vulkan_context().expect("Vulkan device required");
+        let mut gpu_times = Vec::new();
+        for run in 0..4 {
+            let before = context.submission_count();
+            let start = std::time::Instant::now();
+            let actual = vae.decode_rgb(&latent, 64).unwrap();
+            let seconds = start.elapsed().as_secs_f64();
+            assert!(!crate::vulkan::gpu_broken());
+            assert!(context.submission_count() > before);
+            assert_eq!(actual.bytes.len(), cpu.bytes.len());
+            let mut maximum = 0.0f64;
+            let mut absolute = 0.0;
+            let mut squared = 0.0;
+            for (&a, &b) in actual.bytes.iter().zip(&cpu.bytes) {
+                let error = (a as f64 - b as f64).abs();
+                maximum = maximum.max(error);
+                absolute += error;
+                squared += error * error;
+            }
+            let mae = absolute / cpu.bytes.len() as f64;
+            let psnr = 10.0 * (255.0 * 255.0 / (squared / cpu.bytes.len() as f64)).log10();
+            eprintln!("[vae-bench] gpu_run={run} seconds={seconds:.6} submissions={} max_byte_error={maximum} mae={mae:.6} psnr={psnr:.3}dB", context.submission_count() - before);
+            assert!(psnr > 40.0, "VAE CPU/GPU PSNR={psnr}dB");
+            if run > 0 {
+                gpu_times.push(seconds);
+            }
+        }
+        cpu_times.sort_by(f64::total_cmp);
+        gpu_times.sort_by(f64::total_cmp);
+        eprintln!(
+            "[vae-bench] warm_median cpu={:.6}s gpu={:.6}s",
+            cpu_times[1], gpu_times[1]
+        );
+        crate::vulkan::dump_submit_trace();
+        crate::vulkan::ops::dump_dispatch_trace();
+    }
     #[test]
     fn vae_f16_dot_uses_double_accumulator() {
         let weights: Vec<u8> = [1.0, 2.0f32.powi(-24), 2.0f32.powi(-24)]
@@ -2255,91 +2366,99 @@ mod tests {
     #[test]
     #[ignore = "requires a Vulkan device; fails if offload is unavailable"]
     fn vulkan_vae_convolution_matches_cpu_across_tiles() {
-        struct RestoreVaeEnv(Option<std::ffi::OsString>);
-        impl Drop for RestoreVaeEnv {
-            fn drop(&mut self) {
-                match self.0.take() {
-                    Some(value) => std::env::set_var("RUST_GPU_VAE", value),
-                    None => std::env::remove_var("RUST_GPU_VAE"),
-                }
-            }
-        }
-        let _restore = RestoreVaeEnv(std::env::var_os("RUST_GPU_VAE"));
         crate::ops::enable_gpu();
         let context = crate::ops::get_vulkan_context().expect("Vulkan device required");
-        let pool = Arc::new(ComputePool::new(2));
-        let side = 9; // 81 pixels exercise both a full 64-row tile and its tail.
-        let input: Vec<_> = (0..side * side * 2)
-            .map(|i| (i as f32 - 80.0) / 97.0)
-            .collect();
-        let bias = [0.125, -0.25, 0.5];
-        for kernel in [1, 3] {
-            let patch_len = 2 * kernel * kernel;
-            let weights: Vec<_> = (0..patch_len * 3)
-                .flat_map(|i| f32_to_f16((i as f32 % 11.0 - 5.0) / 16.0).to_le_bytes())
+        let pool = Arc::new(ComputePool::new(8));
+        for (side, input_channels, output_channels) in [(9, 2, 3), (65, 32, 65), (65, 1, 3)] {
+            let spatial = side * side;
+            let input: Vec<_> = (0..spatial * input_channels)
+                .map(|i| ((i * 29 % 251) as f32 - 125.0) / 97.0)
                 .collect();
-            let mut expected = vec![0.0; side * side * 3];
-            conv_f16_parallel_into(
-                &input,
-                2,
-                side,
-                &weights,
-                3,
-                kernel,
-                Some(&bias),
-                &mut expected,
-                &pool,
-                None,
-            )
-            .unwrap();
-            let gpu = crate::ops::kernel::vulkan::GpuLinear::default();
-            for setting in [None, Some("0"), Some("1")] {
-                match setting {
-                    Some(value) => std::env::set_var("RUST_GPU_VAE", value),
-                    None => std::env::remove_var("RUST_GPU_VAE"),
+            let bias: Vec<_> = (0..output_channels)
+                .map(|i| (i as f32 - 1.0) / 8.0)
+                .collect();
+            for kernel in [1, 3] {
+                let patch_len = input_channels * kernel * kernel;
+                let weights: Vec<_> = (0..patch_len * output_channels)
+                    .flat_map(|i| f32_to_f16((i as f32 % 11.0 - 5.0) / 16.0).to_le_bytes())
+                    .collect();
+                let mut expected = vec![0.0; spatial * output_channels];
+                conv_f16_parallel_into(
+                    &input,
+                    input_channels,
+                    side,
+                    &weights,
+                    output_channels,
+                    kernel,
+                    Some(&bias),
+                    &mut expected,
+                    &pool,
+                    None,
+                )
+                .unwrap();
+                // AArch64's CPU kernel accumulates in FP16; check GPU FP32 against an independent sum.
+                let mut reference = vec![0.0; expected.len()];
+                let mut patch = vec![0.0; patch_len];
+                for pixel in 0..spatial {
+                    conv_patch_into(&input, side, kernel, pixel, &mut patch);
+                    for (channel, weight) in weights.chunks_exact(patch_len * 2).enumerate() {
+                        let sum: f64 = patch
+                            .iter()
+                            .zip(weight.chunks_exact(2))
+                            .map(|(&x, w)| {
+                                f64::from(f16_to_f32(f32_to_f16(x)))
+                                    * f64::from(f16_to_f32(u16::from_le_bytes([w[0], w[1]])))
+                            })
+                            .sum();
+                        reference[channel * spatial + pixel] = sum as f32 + bias[channel];
+                    }
                 }
+                let gpu = crate::ops::kernel::vulkan::GpuLinear::default();
                 let submissions = context.submission_count();
                 let mut actual = vec![f32::NAN; expected.len()];
-                let offloaded = try_conv_f16(
+                assert!(try_conv_f16(
                     &gpu,
                     &input,
                     side,
                     &weights,
-                    3,
+                    output_channels,
                     kernel,
                     Some(&bias),
                     &mut actual,
                     patch_len,
+                    &pool,
+                ));
+                assert_eq!(
+                    context.submission_count() - submissions,
+                    spatial.div_ceil(4096) as u64
                 );
-                assert_eq!(offloaded, setting == Some("1"), "RUST_GPU_VAE={setting:?}");
-                if offloaded {
-                    assert!(context.submission_count() > submissions);
-                    for (actual, expected) in actual.into_iter().zip(&expected) {
-                        assert!(
-                            (actual - expected).abs() <= 3e-4 + 3e-4 * expected.abs(),
-                            "gpu={actual} cpu={expected}"
-                        );
-                    }
-                } else {
-                    conv_f16_parallel_into(
-                        &input,
-                        2,
-                        side,
-                        &weights,
-                        3,
-                        kernel,
-                        Some(&bias),
-                        &mut actual,
-                        &pool,
-                        Some(&gpu),
-                    )
-                    .unwrap();
-                    assert_eq!(context.submission_count(), submissions);
-                    assert!(actual
-                        .iter()
-                        .zip(&expected)
-                        .all(|(actual, expected)| { actual.to_bits() == expected.to_bits() }));
+                for (actual, expected) in actual.iter().zip(&reference) {
+                    assert!(
+                        (actual - expected).abs() <= 3e-4 + 3e-4 * expected.abs(),
+                        "side={side} kernel={kernel} channels={input_channels}/{output_channels} gpu={actual} reference={expected}"
+                    );
                 }
+                let _disabled = ComputePool::disable_gpu_matmul_for_scope();
+                let submissions = context.submission_count();
+                actual.fill(f32::NAN);
+                conv_f16_parallel_into(
+                    &input,
+                    input_channels,
+                    side,
+                    &weights,
+                    output_channels,
+                    kernel,
+                    Some(&bias),
+                    &mut actual,
+                    &pool,
+                    Some(&gpu),
+                )
+                .unwrap();
+                assert_eq!(context.submission_count(), submissions);
+                assert!(actual
+                    .iter()
+                    .zip(&expected)
+                    .all(|(a, e)| a.to_bits() == e.to_bits()));
             }
         }
     }

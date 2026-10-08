@@ -1,5 +1,6 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_control_flow_attributes : require
 
 // Register-tiled F16 grouped matmul, the float-weight counterpart of
 // q8_matmul_tiled_dp4a.
@@ -108,7 +109,9 @@ void main() {
         uint index = 0u;
         for (; index + 1u < elements; index += 2u) {
             vec2 pair = unpackHalf2x16(weight_word(slot, (row_base + index) >> 1u));
-            for (uint t = 0u; t < live; t++) {
+            // Unroll tokens so the compiler can keep each accumulator in a register.
+            [[unroll]] for (uint t = 0u; t < TOKENS; t++) {
+                if (t >= live) continue;
                 // One shared read covers both halves of the pair.
                 vec2 act = unpackHalf2x16(input_stage[t * (CHUNK_ELEMENTS / 2u) + index / 2u]);
                 accumulator[t] = fma(act.x, pair.x, accumulator[t]);

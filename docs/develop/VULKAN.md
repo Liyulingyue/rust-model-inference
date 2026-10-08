@@ -12,7 +12,7 @@ macOS 会自动查找系统 Loader，以及 Homebrew 的 `/opt/homebrew/lib/libv
 
 | 路径 | 新接入的 Vulkan 部分 | 保留在 CPU 的部分 |
 |---|---|---|
-| Z-Image | DiT；VAE 的 F16 1×1 / 3×3 卷积需显式 `RUST_GPU_VAE=1`，包括 shortcut 与 upsample 后卷积 | 默认全部 VAE；显式开启后仍保留归一化、激活、空间 attention、最近邻上采样 |
+| Z-Image | 已有 DiT 路径之外，VAE 的 F16 1×1 / 3×3 卷积，包括 shortcut 与 upsample 后卷积 | VAE 归一化、激活、空间 attention、最近邻上采样 |
 | YuE2 | AR/NAR 投影，BF16 投影加 bias 后仍舍入为 BF16；`--yue2 --gpu` 可进入加载入口 | attention、状态更新、音频 VAE；NAR F16 的 Q8 activation 合约暂留 CPU |
 | Edge0 | MLX affine 4/8-bit（group=64，BF16 scale/bias）投影与 MoE 专家投影；普通 GGUF 矩阵复用已有 shader | LoRA 的低秩修正、recurrent/attention 状态与 MoE 路由合并 |
 | LFM2 / LFM2.5 / LFM2MoE | Q/K/V、输出、FFN、专家、shortconv 输入/输出投影及 LM head | shortconv 状态与卷积、attention、归一化、激活、采样 |
@@ -30,9 +30,17 @@ YuE2 正常会话使用投影 offload。旧整图 AR 执行器存在 BF16 数值
 BF16 dot 投影现已打包独立输出行，四帧共享权重读取，并保留原 FMA/归约顺序。
 RADV 的 256 帧 NAR 重复调用从 33.60 降到 12.42 秒；AR 耗时基本不变，
 详见 [YuE2 优化记录](VULKAN_YUE2_OPTIMIZATION_2026-10-08.md)。
-Z-Image VAE 默认保持 CPU，`--gpu` 继续启用 DiT。F16 卷积 offload 每 64 行都同步等待，
-大分辨率上可能显著慢于 CPU；仅 `RUST_GPU_VAE=1` 显式启用，BF16/F32 分支保留原有计算。
-后续优化必须同时处理 VAE 的 im2col 分块和共享投影内的 64 行分块，单改外层 tile 不能减少同步。
+Z-Image VAE 的 F16 卷积复用 register-tiled F16 shader；每组覆盖 32 个像素、64 个输出通道，
+共享投影与 im2col 使用同一分块规则，最多 4096 行，以 16 MiB host 输入/输出作为分块预算。
+奇数点积宽度与不足 32 行的尾块保留原 shader；F16Dot 的 AVX2 归约合约不变。
+Token 累加循环显式展开；im2col 与按通道回写复用 ComputePool 并行，空闲 GPU 模式线程让出 CPU。
+Apple M3 Max / MoltenVK 上，真实 F16 VAE、seed 42 的 16×64×64 latent → 512×512，
+8 线程 release 的三次 warm 中位数为 CPU 13.311761 s、Vulkan 17.282959 s，后者仍慢约 30%。
+CPU 对照在启用 GPU 前独立预热；CPU 使用现有 ARM FP16 累加，GPU 使用 FP32 累加。
+每次解码实际提交 1447 次（1423 tiled、24 小尾块），RGB PSNR 61.536 dB、最大字节误差 2。
+这些是 VAE-only 实测；原 GPU VAE 完整运行曾被中止，不能给出完整修复前后的倍率。
+远程文生图与 PyTorch 对比尚未复测。
+BF16/F32 VAE 分支、归一化、激活、空间 attention 和上采样保留原有计算。
 AuK 的 F16 点积模式要求 CPU AVX2/F16C/FMA，其他 CPU 后端保持原计算；没有 F16→Q8_0
 重编码。DiT 上传缓存随每次 denoise 的 scratch 释放，重复生成需要重新上传 DiT 权重。
 实机结果与现有音频模型质量边界见 [AuK 验证记录](VULKAN_AUK_RADV_VALIDATION_2026-10-08.md)。
@@ -50,6 +58,10 @@ cargo test --profile release-fast --locked --features vulkan --lib \
   vulkan_mlx_affine_rows_include_lora_and_tile_tails -- --ignored --nocapture
 cargo test --profile release-fast --locked --features vulkan --lib \
   vulkan_vae_convolution_matches_cpu_across_tiles -- --ignored --nocapture --test-threads=1
+Z_IMAGE_VAE=models/z-image-gguf/pig_flux_vae_fp32-f16.gguf \
+RUST_GPU_SUBMIT_TRACE=1 RUST_GPU_DISPATCH_TRACE=1 \
+cargo test --release --locked --features vulkan --lib \
+  vulkan_vae_real_weights_decode_matches_cpu -- --ignored --nocapture --test-threads=1
 cargo test --profile release-fast --locked --features vulkan --lib \
   vulkan_yue2_bf16_rounds_after_bias_across_tiles -- --ignored --nocapture
 cargo test --profile release-fast --locked --features vulkan --lib \

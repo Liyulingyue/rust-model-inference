@@ -205,7 +205,6 @@ Q8 主栈、F16 refiner 与 QKV），**GPU 路径从来就不是逐位精确的*
 | `RUST_GPU_ATTENTION` | `1` | `0` 把 DiT attention 放回 CPU 逐行路径 |
 | `RUST_GPU_F16_REF` | `1` | `0` 把 refiner 栈放回 CPU |
 | `RUST_GPU_TILED` | `1` | `0` 关掉 Q8_0 tiled matmul |
-| `RUST_GPU_VAE` | 关 | 仅 `1` 显式启用 F16 VAE 卷积 offload；需 `--gpu`，可能显著变慢 |
 | `RUST_GPU_DIAG` | 关 | 打印每步 GPU 上的 block / dispatch 数 |
 
 在重建绝对基线之前，不要用这些数字与 PyTorch 的 1.89 s/forward 算比值。
@@ -313,7 +312,7 @@ VAE 只导出 `decoder.*`（txt2img 是 latent → 像素，编码器用不上�
 | Z-Image Turbo（CPU、512×512、txt2img） | `Verified`（[tests/z_image_reference.rs](../../tests/z_image_reference.rs) 覆盖 pinned Oracle） |
 | Z-Image Base | `Unsupported` |
 | img2img | `Unsupported` |
-| GPU 后端 | `Experimental`（DiT offload；F16 VAE 卷积需 `RUST_GPU_VAE=1`；[RADV 记录](../develop/VULKAN_RADV_VALIDATION_2026-10-07.md)） |
+| GPU 后端 | `Experimental`（DiT 与 F16 VAE 卷积 offload；[RADV 记录](../develop/VULKAN_RADV_VALIDATION_2026-10-07.md)） |
 
 GPU 一列的判定依据与已知缺口：
 
@@ -359,7 +358,7 @@ Pinned Oracle：[leejet/stable-diffusion.cpp](https://github.com/leejet/stable-d
 | `--resolution` | 输出分辨率（divisible by 16） | — | 512 |
 | `--seed` | RNG 种子 | — | 0 |
 | `--threads` | ComputePool 线程数 | — | 自动 |
-| `--gpu` | DiT 投影走 Vulkan 后端，VAE 默认 CPU | — | 关 |
+| `--gpu` | DiT 投影与 F16 VAE 卷积走 Vulkan 后端 | — | 关 |
 
 只有前五项必填（聚合检查在 `src/app/mod.rs:187-192`，逐项检查在
 `src/app/cli/options.rs:608-632`）；`--steps` / `--resolution` 取 `unwrap_or`
@@ -367,10 +366,8 @@ Pinned Oracle：[leejet/stable-diffusion.cpp](https://github.com/leejet/stable-d
 
 `--gpu` 刻意不在互斥表里（`options.rs:600-604`）：DiT 投影经
 `matmul_q8_0_quantized_parallel_rows` 交给 Vulkan backend，不支持的形状逐个回退，
-所以这个开关在这里是有意义的。VAE 默认使用 CPU：F16 卷积 offload 每 64 个像素
-就提交并等待一次，512×512 的单层卷积会产生 4096 次同步，可能抵消 DiT 的加速。
-仅在显式设置 `RUST_GPU_VAE=1` 时，F16 VAE 的 1×1 / 3×3 卷积才进入 Vulkan；
-VAE attention、norms 与 BF16/F32 分支保持 CPU 执行。
+所以这个开关在这里是有意义的。F16 VAE 的 1×1 / 3×3 卷积也可 offload；
+attention、norms 与 VAE 的 BF16/F32 分支保持 CPU 执行。
 
 ## 7. 相关源码索引
 
