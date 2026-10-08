@@ -1,4 +1,5 @@
 pub mod jinja;
+mod jinja_compat;
 pub mod legacy;
 
 /// Single-user Nanbeige4.2 chat template, including the embedded default system turn.
