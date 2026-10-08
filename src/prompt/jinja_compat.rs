@@ -113,6 +113,14 @@ fn one_str(args: &[Value]) -> Result<&str, Error> {
     as_str(arg)
 }
 
+/// Exactly two string arguments, e.g. `s.replace(old, new)`.
+fn two_strs(args: &[Value]) -> Result<(&str, &str), Error> {
+    let [first, second] = args else {
+        return Err(Error::from(ErrorKind::InvalidOperation));
+    };
+    Ok((as_str(first)?, as_str(second)?))
+}
+
 /// Dispatch a Python method call that minijinja does not implement.
 ///
 /// `value` is the already-evaluated receiver, which is why this can exist at
@@ -174,23 +182,18 @@ pub(super) fn python_method(
                 "lower" => Value::from(s.to_lowercase()),
                 "upper" => Value::from(s.to_uppercase()),
                 "strip" => Value::from(s.trim()),
-                "replace" => Value::from(s.replace(one_str(args)?, &from_str(args, 1)?)),
-                "count" => Value::from(match args.first().and_then(|v| v.as_str()) {
-                    Some(pat) => s.matches(pat).count(),
-                    None => 0,
-                }),
+                // Python requires both arguments; dispatching through
+                // `one_str` here would reject every valid call, since it
+                // matches exactly one argument.
+                "replace" => {
+                    let (old, new) = two_strs(args)?;
+                    Value::from(s.replace(old, new))
+                }
+                "count" => Value::from(s.matches(one_str(args)?).count()),
                 _ => return Err(Error::from(ErrorKind::UnknownMethod)),
             })
         }
         _ => Err(Error::from(ErrorKind::UnknownMethod)),
-    }
-}
-
-/// Optional second string argument, for `replace(old, new)`.
-fn from_str(args: &[Value], index: usize) -> Result<String, Error> {
-    match args.get(index).and_then(|v| v.as_str()) {
-        Some(s) => Ok(s.to_string()),
-        None => Err(Error::from(ErrorKind::InvalidOperation)),
     }
 }
 
@@ -330,7 +333,8 @@ mod tests {
     #[test]
     fn string_methods_dispatch() {
         // minijinja 2.24 renders booleans Python-style, as "True"/"False".
-        let cases: [(&str, &str, &str); 8] = [
+        let cases: [(&str, &str, &str); 9] = [
+            ("{{ s.replace('a', 'Z') }}", "Zbc", "abc"),
             ("{{ s.startswith('ab') }}", "True", "abc"),
             ("{{ s.endswith('bc') }}", "True", "abc"),
             ("{{ s.upper() }}", "AB", "ab"),
@@ -349,6 +353,15 @@ mod tests {
             render("{{ s.startswith('zz') }}", r#"{"s":"abc"}"#).unwrap(),
             "False"
         );
+    }
+
+    #[test]
+    fn methods_with_the_wrong_arity_error() {
+        // Regression: `replace` dispatched through a one-argument helper, so
+        // every valid `s.replace(old, new)` call failed.
+        assert!(render("{{ s.replace('a') }}", r#"{"s":"abc"}"#).is_err());
+        assert!(render("{{ s.startswith() }}", r#"{"s":"abc"}"#).is_err());
+        assert!(render("{{ s.count() }}", r#"{"s":"abc"}"#).is_err());
     }
 
     #[test]

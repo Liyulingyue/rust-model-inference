@@ -154,8 +154,16 @@ impl JinjaChatTemplate {
 pub fn template_from_source(
     metadata: &dyn Fn(&str) -> Option<crate::core::tensor::MetaValue>,
 ) -> Option<Result<JinjaChatTemplate, String>> {
+    // `None` means the key is absent: the caller falls back. A key that is
+    // present but not a string is malformed metadata, and quietly treating it
+    // as absent would make an explicit `--jinja` silently use the hand-written
+    // builder instead of reporting the problem.
     let value = metadata("tokenizer.chat_template")?;
-    let raw = value.to_string_val()?;
+    let Some(raw) = value.to_string_val() else {
+        return Some(Err(
+            "GGUF tokenizer.chat_template is present but is not a string".to_string(),
+        ));
+    };
     Some(JinjaChatTemplate::compile(
         &raw,
         "GGUF tokenizer.chat_template",
@@ -201,11 +209,24 @@ pub fn render_tokens(
     let special = special_tokens_from_tokenizer(tokenizer);
     let text = template.render(messages, add_generation_prompt, enable_thinking, &special)?;
     let options = crate::core::tokenizer::EncodeOptions {
-        // The template owns the BOS decision; see the doc comment.
+        // Never let `add_special` decide: it would add BOS to models whose
+        // template already emitted one. The tokenizer's intent is honoured
+        // below instead, and only when the template left it out.
         add_special: false,
         parse_special: true,
     };
-    Ok(tokenizer.encode(&text, options))
+    let mut ids = tokenizer.encode(&text, options);
+    // A template that renders `{{ bos_token }}` has already produced it, so
+    // only add it when the tokenizer asks for it *and* the result does not
+    // start with it. Ministral3 is the case that matters: its GGUF sets
+    // `add_bos_token = true` and its `[INST]` template never mentions BOS, so
+    // with a blanket `add_special: false` the prompt lost its `<s>`.
+    if tokenizer.add_bos() && ids.first().copied() != tokenizer.bos_id() {
+        if let Some(bos) = tokenizer.bos_id() {
+            ids.insert(0, bos);
+        }
+    }
+    Ok(ids)
 }
 
 /// Look up the literal BOS/EOS spellings a template may interpolate, from

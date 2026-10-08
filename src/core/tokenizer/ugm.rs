@@ -171,6 +171,9 @@ impl crate::core::tokenizer::Tokenizer for UgmTokenizer {
     fn eos_id(&self) -> Option<u32> {
         UgmTokenizer::eos_id(self)
     }
+    fn add_bos(&self) -> bool {
+        false
+    }
     fn vocab_size(&self) -> usize {
         self.vocab_size()
     }

@@ -1579,6 +1579,11 @@ impl SPMTokenizer {
         self.eos_id
     }
 
+    /// SPM GGUFs do not record `add_bos_token`; the SPM convention adds none.
+    pub fn add_bos(&self) -> bool {
+        false
+    }
+
     pub fn unk_id(&self) -> Option<u32> {
         self.unk_id
     }
@@ -1696,6 +1701,12 @@ pub trait Tokenizer: Send + Sync {
     fn special_token_id(&self, semantic_name: &str) -> Option<u32>;
     fn bos_id(&self) -> Option<u32>;
     fn eos_id(&self) -> Option<u32>;
+    /// Whether the tokenizer expects callers to prepend BOS themselves.
+    ///
+    /// Templates that render `{{ bos_token }}` do it themselves, but models
+    /// like Ministral get their `<s>` from `add_special=true` against a
+    /// template that never mentions BOS at all.
+    fn add_bos(&self) -> bool;
     fn vocab_size(&self) -> usize;
 }
 
@@ -1735,6 +1746,9 @@ impl Tokenizer for MockTokenizer {
     fn eos_id(&self) -> Option<u32> {
         None
     }
+    fn add_bos(&self) -> bool {
+        false
+    }
     fn vocab_size(&self) -> usize {
         256
     }
@@ -1762,6 +1776,9 @@ impl Tokenizer for BPETokenizer {
     fn eos_id(&self) -> Option<u32> {
         BPETokenizer::eos_id(self)
     }
+    fn add_bos(&self) -> bool {
+        BPETokenizer::add_bos(self)
+    }
     fn vocab_size(&self) -> usize {
         BPETokenizer::vocab_size(self)
     }
@@ -1788,6 +1805,9 @@ impl Tokenizer for SPMTokenizer {
     }
     fn eos_id(&self) -> Option<u32> {
         SPMTokenizer::eos_id(self)
+    }
+    fn add_bos(&self) -> bool {
+        false
     }
     fn vocab_size(&self) -> usize {
         SPMTokenizer::vocab_size(self)

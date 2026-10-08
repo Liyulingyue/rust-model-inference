@@ -809,15 +809,25 @@ pub fn run_qwen35_family_multimodal_logits(
 
     let tokenizer = BPETokenizer::from_gguf_metadata(|k| llm_source.metadata(k).cloned())
         .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
+    // Video and image use different pad tokens, so all three ids follow the
+    // media kind. Hardcoding `image_pad` here made the Jinja path expand
+    // looking for a token the template never emitted (it emits `video_pad` for
+    // a video), so the placeholder count came out zero.
+    let media_kind = if is_video {
+        crate::app::media::MediaKind::Video
+    } else {
+        crate::app::media::MediaKind::Image
+    };
+    let (start_name, pad_name, end_name) = media_kind.placeholder_tokens();
     let image_token_id = tokenizer
-        .special_token_id("image_pad")
-        .ok_or("Required token missing: <|image_pad|>")?;
+        .special_token_id(pad_name)
+        .ok_or_else(|| format!("Required token missing: <|{pad_name}|>"))?;
     let vision_start = tokenizer
-        .special_token_id("vision_start")
-        .ok_or("Required token missing: <|vision_start|>")?;
+        .special_token_id(start_name)
+        .ok_or_else(|| format!("Required token missing: <|{start_name}|>"))?;
     let vision_end = tokenizer
-        .special_token_id("vision_end")
-        .ok_or("Required token missing: <|vision_end|>")?;
+        .special_token_id(end_name)
+        .ok_or_else(|| format!("Required token missing: <|{end_name}|>"))?;
     let image_grids: Vec<VisionGrid> = vec![VisionGrid {
         grid_t: grid.grid_t,
         grid_h: grid.grid_h,
@@ -829,14 +839,6 @@ pub fn run_qwen35_family_multimodal_logits(
     // `<|vision_start|><|image_pad|><|vision_end|>`; the placeholder is
     // expanded to a contiguous run so `build_qwen35_positions` (below) sees
     // exactly the layout it documents.
-    // Video frames are not laid out through this helper's grid list, so report
-    // the single attachment with the kind the caller actually passed. Emitting
-    // `image` for a video would pair `video_pad` with an image content part.
-    let media_kind = if video_path.is_some() {
-        crate::app::media::MediaKind::Video
-    } else {
-        crate::app::media::MediaKind::Image
-    };
     let jinja_media = [crate::prompt::jinja::MediaPart::new(
         media_kind.content_type(),
         n_vis_tokens,

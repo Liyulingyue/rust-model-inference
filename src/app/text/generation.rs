@@ -1,6 +1,5 @@
 use crate::app::cli::{CliOptions, KvFormat};
 use crate::core::tensor::TensorSource;
-use crate::prompt::jinja;
 use std::io::{self, Write};
 use std::path::Path;
 use std::sync::Arc;
@@ -267,6 +266,10 @@ pub fn run_interactive(
     n_threads_arg: usize,
     prefill_batch_size: usize,
     repetition_penalty: f32,
+    // Threaded through so `--jinja` / `--chat-template-file` are honoured in
+    // the REPL. Hardcoding `Options::default()` here accepted both flags and
+    // silently ignored them.
+    jinja: &crate::prompt::jinja::Options,
 ) -> Result<(), String> {
     println!("=== RustModelInference Interactive Mode ===");
     println!("Type your prompt and press Enter. Ctrl+C to exit.\n");
@@ -302,7 +305,7 @@ pub fn run_interactive(
             CliOptions::DEFAULT_MAX_CONTEXT,
             repetition_penalty,
             None,
-            &jinja::Options::default(),
+            jinja,
         )?;
         println!();
     }
@@ -319,6 +322,8 @@ pub fn run_interactive_qwen35(
     prefill_batch_size: usize,
     max_context: usize,
     repetition_penalty: f32,
+    // See `run_interactive`: the REPL must honour the chat-template flags.
+    jinja: &crate::prompt::jinja::Options,
 ) -> Result<(), String> {
     println!("=== RustModelInference Interactive Mode (qwen35) ===");
     println!("Type your prompt and press Enter. Ctrl+C to exit.\n");
@@ -353,7 +358,7 @@ pub fn run_interactive_qwen35(
             prefill_batch_size,
             max_context,
             repetition_penalty,
-            &jinja::Options::default(),
+            jinja,
         )?;
         println!();
     }

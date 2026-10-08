@@ -44,17 +44,22 @@ struct Loaded {
     source: Arc<dyn TensorSource>,
 }
 
-fn load(path: &Path) -> Option<Loaded> {
+/// `Err` means the file is configured but unusable, which must fail the test:
+/// an earlier version turned a load error into `None`, so a malformed or
+/// incompatible GGUF made these A/B tests pass without asserting anything.
+/// Only a missing file is a skip.
+fn load(path: &Path) -> Result<Option<Loaded>, String> {
     if !path.is_file() {
         eprintln!("skipped: {} not present", path.display());
-        return None;
+        return Ok(None);
     }
-    let source: Arc<dyn TensorSource> =
-        Arc::from(open_model_source(path, ComponentRole::Llm).ok()?);
+    let source: Arc<dyn TensorSource> = Arc::from(
+        open_model_source(path, ComponentRole::Llm)
+            .map_err(|e| format!("open {}: {e}", path.display()))?,
+    );
     let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
-        .map_err(|e| format!("tokenizer: {e}"))
-        .ok()?;
-    Some(Loaded { tokenizer, source })
+        .map_err(|e| format!("tokenizer {}: {e}", path.display()))?;
+    Ok(Some(Loaded { tokenizer, source }))
 }
 
 fn decode(t: &BPETokenizer, ids: &[u32]) -> String {
@@ -82,7 +87,9 @@ fn qwen3_jinja_matches_hardcoded_builder() {
         eprintln!("skipped: JINJA_AB_QWEN3 not set");
         return;
     };
-    let Some(loaded) = load(&path) else { return };
+    let Some(loaded) = load(&path).unwrap_or_else(|e| panic!("{e}")) else {
+        return;
+    };
     let t = &loaded.tokenizer;
 
     let jinja_src = template_from_source(&|k| loaded.source.metadata(k).cloned());
@@ -132,7 +139,9 @@ fn lfm25_jinja_renders_and_tokenizes() {
         eprintln!("skipped: JINJA_AB_LFM25 not set");
         return;
     };
-    let Some(loaded) = load(&path) else { return };
+    let Some(loaded) = load(&path).unwrap_or_else(|e| panic!("{e}")) else {
+        return;
+    };
     let t = &loaded.tokenizer;
 
     let Some(Ok(jinja)) = template_from_source(&|k| loaded.source.metadata(k).cloned()) else {
@@ -195,7 +204,9 @@ fn lfm25_jinja_known_divergence_from_hardcoded_builder() {
         eprintln!("skipped: JINJA_AB_LFM25 not set");
         return;
     };
-    let Some(loaded) = load(&path) else { return };
+    let Some(loaded) = load(&path).unwrap_or_else(|e| panic!("{e}")) else {
+        return;
+    };
     let t = &loaded.tokenizer;
     let Some(Ok(jinja)) = template_from_source(&|k| loaded.source.metadata(k).cloned()) else {
         panic!("LFM2.5 GGUF must ship tokenizer.chat_template");

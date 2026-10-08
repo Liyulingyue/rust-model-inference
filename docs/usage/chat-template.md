@@ -4,7 +4,7 @@ GGUF 在 `tokenizer.chat_template` 里自带模型的 chat 模板。它是一段
 源码**，不是字符串拼接。仓库里有两套更早的实现：
 
 - `src/prompt.rs` —— 14 个按模型手写的 builder
-- `src/models/chat_template.rs` —— 7 个 `ChatTemplate` 预设
+- `src/prompt/legacy.rs` —— 7 个 `ChatTemplate` 预设
   （`chatml` / `llama3` / `gemma` / `lfm2` / `glm4` / `exaone` / `phi4`）
 
 `chat_template.rs:36-40` 当初明确写了"不引入 minijinja / tera"，理由是
@@ -14,7 +14,7 @@ GLM-4、GLiNER 这类指令模型，而真实模板的复杂度也远超手写 b
 范围（Qwen3-0.6B 4905 字符，LFM2.5-8B-A1B 4621 字符，含 `{% macro %}`、
 `namespace()`、`|tojson`、切片、`is mapping/string/defined/none`、空白控制）。
 
-因此新增 `src/models/chat_template_jinja.rs`，用 **minijinja 2.24**（Rust 的
+因此新增 `src/prompt/jinja.rs`，用 **minijinja 2.24**（Rust 的
 Jinja2 协议实现）渲染模型自带的模板。
 
 > Jinja2 是模板语言规范，minijinja 是它在 Rust 的一个实现。规范与实现要分开
@@ -230,38 +230,45 @@ system 是 `jev_system_prompt(mode)`、user 是 `jev_payload_json(...)`，都由
 的 Jinja 分支先返回纯文本 id，导致 `pending` 没被设置、forward 走了文本路径，
 **图片被静默忽略**。判定收敛到 `plan_prompt()`，`has_image` 优先于模板分支。
 
-### Python 兼容层：三条预处理
+### Python 兼容层：方法回调，不是源码改写
 
-minijinja 不是 Python/Jinja2。实测会直接报错的构造：
+真实模板会调 minijinja 没有的 Python 方法。minijinja 2.24 没有 `add_method`，
+但有 `Environment::set_unknown_method_callback` —— 它把 receiver 作为**已求值的
+Value** 交出来，所以不需要解析源码。
 
-| 构造 | minijinja | 处理 |
+实现见 `src/prompt/jinja_compat.rs` 的 `python_method`：
+
+| 方法 | minijinja 原生 | 处理 |
 |---|---|---|
-| `x.get("k")` | `UnknownMethod`（map 没有 `get`） | `x["k"]\|default(__py_none)` |
-| `x.startswith(p)` | `UnknownMethod`（string 没有该方法） | `x\|startswith(p)` |
-| `x.endswith/lstrip/rstrip/split` | 同上 | 对应 filter |
+| `x.get(k)` / `x.get(k, default)` | `UnknownMethod`（map 没有 `get`） | 命中返回值；缺失返回真正的 `None` |
+| `x.startswith(p)` / `x.endswith(p)` | 同上 | bool |
+| `x.lstrip(s?)` / `x.rstrip(s?)` | 同上 | Python 的可选字符集语义 |
+| `x.split(p?)` | 同上（内置 filter 是惰性序列，`[-1]` 会拿到**第一个**元素） | 真 list |
+| `x.lower/upper/strip/replace/count` | 部分有 | 补齐；`replace` 需两个参数 |
 
-minijinja 的扩展点只有 `add_filter` / `add_test` / `add_function` / `add_global`，
-**没有 `add_method`**，所以 map/string 的方法调用只能改写。三条规则：
+**`is none` 语义是关键。** Jinja2 对缺失 key 返回 `None`，`x.get("k") is none`
+为真；minijinja 的 `x["k"]` 是 Undefined，`is none` 为**假**。所以缺失时返回
+`Value::from(())`（真 None）—— minijinja 的 `none` 是个 *test*，不是值，不能用。
+`.get(k, default)` 只在 miss 时用 default，命中时即使值为 falsy 也返回原值。
 
-1. **`{% generation %}`** → 注释，保留 trim 标记（llama.cpp 扩展）。
-2. **`x.get("k")`** → `x["k"]|default(__py_none)`。**不能写成 `x["k"]`**：
-   Jinja2 对缺失 key 返回 `None`，`x.get("k") is none` 为真；minijinja 的
-   `x["k"]` 是 Undefined，`is none` 为**假** —— 这会让 `is none` 分支整个翻转。
-   `__py_none` 是真正注册的 `Value::from(())`（minijinja 的 `none` 是个
-   *test*，不是值，不能用）。
-3. **字符串方法** → filter。注意 `split` 必须覆盖成真 list：minijinja 内置的
-   `split` 返回惰性序列，`[-1]` 会拿到**第一个**元素，而 Python 要最后一个。
+未实现的方法照旧返回 `UnknownMethod`，不静默兜底 —— 真实缺口要暴露出来。
 
-扫描是 token-aware 的：跳过字符串字面量、`{# #}` 注释、`{% raw %}`，但**不跳过
-`{% ... %}`**（`{% if x.get("k") %}` 里的表达式同样要改写）。只跳过 `%}` 之前的
-内容就能保证 capture 不会跑出当前表达式。receiver 必须括号平衡，否则宁可不改写、
-让 minijinja 报错，也不产出坏模板。链式调用
-（Edge0 的 `content.split('</think>')[0].rstrip('\n').split('<think>')[-1]`）
-用迭代改写，每轮至少消掉一个调用，因此必然收敛。
+**为什么不用改写源码。** 之前 `0c953d3` 是改写源码（`x.get("k")` → `x["k"]|...`）。
+所有版本都在某处出错：按字节切片会落在多字节字符中间（`你好{{ ... }}` 直接
+panic）、receiver 提取吃掉 `for part in` 的空格、prose 里的 `dict.get("key")` 也被
+改、链式调用产出括号不匹配的语法错误。回调让这些整类问题从根上消失 —— 源码原样
+交给 minijinja。**当前只改写一处**：llama.cpp 的 `{% generation %}` 标签转成注释
+（保留 trim 标记），因为那是标签而非表达式，没有可恢复的语义。
 
-多模态 content part 现在带类型（`MediaKind::{Image,Video,Audio}`），此前一律
-硬编码 `"image"`。**只要有 media 就一定是数组**：早期版本会把单个 part 折回裸
-字符串，于是"只有图片、没有文字"的 turn 里 `.get("text")` 取不到，图片被整个丢掉。
+多模态 content part 带 `type`（image/video/audio），此前一律硬编码 `"image"`，
+视频会与 `video_pad` 配不上。只要有 media 就一定是数组：早期版本会把单个 part
+折回裸字符串，于是"只有图片、没有文字"的 turn 里图片被整个丢掉。占位符数量取
+`rows`（投影 token 数 / width），三种媒体都适用 —— 取 vision grid 的话 Omni
+音频（不产生 grid）会拿到空列表。
+
+**BOS。** `add_special` 恒为 `false`，BOS 由模板负责。但模板有时压根不提 BOS
+（Ministral3 的 `[INST]` 模板就是如此，靠 `add_bos_token=true` 拿 `<s>`）。所以
+tokenizer 要求 `add_bos` 时，若结果开头不是 BOS 就补一个 —— 模板自己渲染过就不补。
 
 ### 其他边界
 
@@ -273,8 +280,12 @@ minijinja 的扩展点只有 `add_filter` / `add_test` / `add_function` / `add_g
 
 ## 源码索引
 
-- `src/models/chat_template_jinja.rs` —— 渲染器、`Options`、三条预处理（generation 标签 / `dict.get` / Python 字符串方法）、41 个单测
-- `tests/jinja_chat_template_ab.rs` —— 真实 GGUF 的 A/B 逐 token 比对
-- `src/app/text/qwen3.rs` —— 唯一接入点；不开 flag 时走原 builder
+- `src/prompt/jinja.rs` —— 渲染器、`Options`、`MediaPart`、BOS 处理
+- `src/prompt/jinja_compat.rs` —— `set_unknown_method_callback` 的 `python_method`，以及 `{% generation %}` 标签改写
+- `src/prompt/legacy.rs` —— falcon_h1 / nemotron_h 在 Jinja 关闭时的手写 formatter
+- `src/prompt/mod.rs` —— 手写 prompt builder
+- `src/app/text/{qwen3,generation,multimodal}.rs` —— 文本 / REPL / 多模态接入点
+- `src/app/jev/single/*.rs` + `src/app/jev/grouped.rs` —— 11/11 arch 的 JEV 接入
+- `src/app/server/api/tools.rs` —— server 多轮接入（带 tools / 带图片时回落手写）
 - `src/app/cli/{types,parse}.rs` —— `--jinja` / `--chat-template-file`
-- `src/models/chat_template.rs` —— 旧预设表，保留为 fallback
+- `tests/jinja_chat_template_ab.rs` —— 真实 GGUF 的 A/B 比对（Qwen3 逐 token 一致；LFM2.5 记录**已知分歧**）
