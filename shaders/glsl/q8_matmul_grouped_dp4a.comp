@@ -57,19 +57,16 @@ void main() {
     uint rows = slot == 0u ? pc.rows0 : (slot == 1u ? pc.rows1 : pc.rows2);
     if (row >= rows) return;
 
-    // Partition the blocks of this row across the 64 invocations: each lane
-    // accumulates its own slice and the partial products are reduced through
-    // shared memory. Reducing everything on lane 0 left 63 of the 64 lanes
-    // idle and made every matmul a serial 1024-wide multiply, which is why the
-    // GPU ran ~10x slower than the 8-thread AVX2 CPU path.
+    // Preserve the eight FMA streams and final reduction used by the
+    // standalone Q8 shader. Tiny reassociation errors can cross the next
+    // activation's quantization boundary and change an entire model's output.
+    // ponytail: eight active lanes preserve this contract; tile tokens if
+    // profiling warrants more parallelism without changing reduction order.
     uint blocks_per_row = pc.blocks_per_row;
-    uint blocks_per_lane = (blocks_per_row + 63u) / 64u;
     uint row_offset = row * blocks_per_row * 34u;
 
     precise float partial = 0.0;
-    for (uint n = 0u; n < blocks_per_lane; n++) {
-        uint block = lane * blocks_per_lane + n;
-        if (block >= blocks_per_row) break;
+    for (uint block = 0u; lane < 8u && block < blocks_per_row; block++) {
         uint byte_offset = row_offset + block * 34u;
         uint scale_word = weight_word(slot, byte_offset >> 2u);
         uint scale_bits = (byte_offset & 3u) == 0u
@@ -81,30 +78,22 @@ void main() {
         );
         float block_scale = weight_scale * input_scale;
         uint body = byte_offset + 2u;
-        for (uint group = 0u; group < 8u; group++) {
-            uint group_offset = body + group * 4u;
-            uint first = weight_word(slot, group_offset >> 2u);
-            uint second = weight_word(slot, (group_offset >> 2u) + 1u);
-            uint shift = (group_offset & 3u) * 8u;
-            uint packed = shift == 0u ? first : ((first >> shift) | (second << (32u - shift)));
-            uint input_value = input_words[block * 8u + group];
-            int dot = dotPacked4x8EXT(int(packed), int(input_value));
-            partial = fma(float(dot), block_scale, partial);
-        }
+        uint group_offset = body + lane * 4u;
+        uint first = weight_word(slot, group_offset >> 2u);
+        uint second = weight_word(slot, (group_offset >> 2u) + 1u);
+        uint shift = (group_offset & 3u) * 8u;
+        uint packed = shift == 0u ? first : ((first >> shift) | (second << (32u - shift)));
+        uint input_value = input_words[block * 8u + lane];
+        int dot = dotPacked4x8EXT(int(packed), int(input_value));
+        partial = fma(float(dot), block_scale, partial);
     }
     reduction[lane] = partial;
     barrier();
 
-    // Tree reduction: 64 lanes log2(64) = 6 steps, one lane active per pair.
-    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
-        if (lane < stride) {
-            reduction[lane] += reduction[lane + stride];
-        }
-        barrier();
-    }
     if (lane != 0u) return;
-
-    precise float sum = reduction[0];
+    precise float sum01 = (reduction[0] + reduction[4]) + (reduction[1] + reduction[5]);
+    precise float sum23 = (reduction[2] + reduction[6]) + (reduction[3] + reduction[7]);
+    precise float sum = sum01 + sum23;
     uint output_word = slot == 0u
         ? pc.output0_word
         : (slot == 1u ? pc.output1_word : pc.output2_word);

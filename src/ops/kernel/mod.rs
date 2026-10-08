@@ -41,6 +41,8 @@ pub mod simd_avx2;
 mod qtensor_owned;
 mod quantized_tensor;
 mod trait_;
+#[cfg(feature = "vulkan")]
+pub(crate) mod vulkan;
 
 pub(crate) struct PreparedRows {
     max_rows: usize,
@@ -194,17 +196,32 @@ impl PreparedRows {
 
         let blocks = self.n_in.div_ceil(32);
         let q8k_blocks = self.n_in / crate::ops::quant::QK_K;
-        let projections = projections.map(|(weight, output)| (weight, output.as_mut_ptr()));
+        let projections = projections.map(|(weight, output)| {
+            #[cfg(feature = "vulkan")]
+            let gpu_done = weight.try_vulkan_rows(input, output, self.rows);
+            #[cfg(not(feature = "vulkan"))]
+            let gpu_done = false;
+            (weight, output.as_mut_ptr(), gpu_done)
+        });
+        if projections.iter().all(|(_, _, done)| *done) {
+            return Ok(());
+        }
+        #[cfg(feature = "vulkan")]
+        let _cpu_scope = crate::core::thread_pool::ComputePool::disable_gpu_matmul_for_scope();
         // ARM Q4_0 uses the scalar dot contract. Other kernels, including the
         // x86 AVX2 contract, retain their original per-row execution.
         let batched_q4 = self.rows >= 4
             && self.need_q8
             && projections
                 .iter()
-                .all(|(weight, _)| weight.kernel.scalar_q4_0_bytes().is_some());
+                .filter(|(_, _, done)| !done)
+                .all(|(weight, _, _)| weight.kernel.scalar_q4_0_bytes().is_some());
         pool.compute(|ith, nth| {
             if batched_q4 {
-                for (weight, output_ptr) in projections {
+                for (weight, output_ptr, gpu_done) in projections {
+                    if gpu_done {
+                        continue;
+                    }
                     // SAFETY: output lengths were checked above. Each worker
                     // owns disjoint columns in every row; no full-output
                     // mutable slice is constructed while workers are active.
@@ -224,7 +241,7 @@ impl PreparedRows {
                 }
                 return;
             }
-            let mut output_ptrs = projections.map(|(_, output_ptr)| output_ptr);
+            let mut output_ptrs = projections.map(|(_, output_ptr, _)| output_ptr);
             for row in 0..self.rows {
                 let input_row = &input[row * self.n_in..(row + 1) * self.n_in];
                 let q8 = if self.need_q8 {
@@ -237,7 +254,11 @@ impl PreparedRows {
                 } else {
                     &[]
                 };
-                for ((weight, _), output_ptr) in projections.iter().zip(&mut output_ptrs) {
+                for ((weight, _, gpu_done), output_ptr) in projections.iter().zip(&mut output_ptrs)
+                {
+                    if *gpu_done {
+                        continue;
+                    }
                     let q8k = weight
                         .uses_q8_k()
                         .then(|| &self.q8k[row * q8k_blocks..(row + 1) * q8k_blocks]);
@@ -311,8 +332,11 @@ impl<'a> Weight<'a> {
         let ggml_type = tensor.ggml_type();
         let n_in = tensor.n_in();
         let n_out = tensor.n_rows();
+        let kernel = tensor.into_kernel();
+        #[cfg(feature = "vulkan")]
+        let kernel = vulkan::VulkanKernel::wrap(kernel, ggml_type);
         Self {
-            kernel: tensor.into_kernel(),
+            kernel,
             ggml_type,
             n_in,
             n_out,
@@ -376,6 +400,12 @@ impl<'a> Weight<'a> {
 
         let n_in = input.len();
         let n_out = self.n_out;
+        #[cfg(feature = "vulkan")]
+        if self.try_vulkan_rows(input, output, 1) {
+            return;
+        }
+        #[cfg(feature = "vulkan")]
+        let _cpu_scope = crate::core::thread_pool::ComputePool::disable_gpu_matmul_for_scope();
         let (input_q8, input_scales, q8_k) = match self.ggml_type {
             GGMLType::F32 | GGMLType::F16 | GGMLType::BF16 | GGMLType::I32 => {
                 (&[][..], &[][..], None)
@@ -433,6 +463,46 @@ impl<'a> Weight<'a> {
         let mut output = vec![0.0; n_out];
         self.kernel.forward(input, &mut output, input.len(), n_out);
         output
+    }
+
+    #[cfg(feature = "vulkan")]
+    pub(crate) fn try_vulkan_rows(&self, input: &[f32], output: &mut [f32], rows: usize) -> bool {
+        self.kernel
+            .try_forward_vulkan_rows(input, output, self.n_in, self.n_out, rows)
+    }
+
+    /// Finish a whole projection before callers apply activations or residuals.
+    pub(crate) fn matmul_prepared(
+        &self,
+        input: &[f32],
+        q8: &[u8],
+        scales: &[f32],
+        q8k: Option<&[crate::ops::quant::BlockQ8K]>,
+        output: &mut [f32],
+        pool: &crate::core::thread_pool::ComputePool,
+    ) {
+        #[cfg(feature = "vulkan")]
+        if self.try_vulkan_rows(input, output, 1) {
+            return;
+        }
+        #[cfg(feature = "vulkan")]
+        let _cpu_scope = crate::core::thread_pool::ComputePool::disable_gpu_matmul_for_scope();
+        let output_ptr = output.as_mut_ptr();
+        let n_out = output.len();
+        pool.compute(|ith, nth| {
+            let output = unsafe { std::slice::from_raw_parts_mut(output_ptr, n_out) };
+            self.kernel.forward_prepared(
+                input,
+                q8,
+                scales,
+                q8k,
+                output,
+                input.len(),
+                n_out,
+                ith,
+                nth,
+            );
+        });
     }
 
     pub fn embedding_lookup(&self, token_id: u32, out: &mut [f32]) {

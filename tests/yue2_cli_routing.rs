@@ -1,6 +1,29 @@
 use std::process::Command;
 
 #[test]
+fn yue2_gpu_reaches_model_loading() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rust-model-inference"))
+        .args([
+            "--yue2",
+            "--gpu",
+            "--model",
+            "missing.gguf",
+            "--vae",
+            "missing-vae.gguf",
+            "--prompt",
+            "jazz",
+            "--lyrics",
+            "hello",
+            "--out",
+            "song.wav",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Failed to load YuE2 main component"));
+}
+
+#[test]
 fn yue2_cli_rejects_chat_template_before_loading_models() {
     let output = Command::new(env!("CARGO_BIN_EXE_rust-model-inference"))
         .args([

@@ -220,6 +220,10 @@ pub fn run_inference_with_batch(
     // marked so a future `Lfm2MoESession` + `ChunkedPrefill`
     // impl is a drop-in replacement.
     let _prefill_chunks = crate::core::prefill::prefill_chunks(input_tokens.len(), 1);
+    let output_pw = crate::ops::kernel::Weight::from_quantized(
+        crate::ops::kernel::QuantizedTensor::from_bytes(output_weight, output_type, n_embd, vocab),
+    );
+
     for step in 0..total_steps {
         let eval_started = Instant::now();
         let token_id = if step < input_tokens.len() {
@@ -309,34 +313,16 @@ pub fn run_inference_with_batch(
         let q8k = &q8k_buf[..n_embd / 256];
 
         // Build the output weight lazily once.
-        let output_pw = crate::ops::kernel::Weight::from_quantized(
-            crate::ops::kernel::QuantizedTensor::from_bytes(
-                output_weight,
-                output_type,
-                n_embd,
-                vocab,
-            ),
-        );
 
         let logits_ptr = scratch.logits.as_mut_ptr();
-        pool.compute(move |ith, nth| {
+        {
             let input = unsafe { std::slice::from_raw_parts(normed.as_ptr(), n_embd) };
             let q8 = unsafe { std::slice::from_raw_parts(q8.as_ptr(), n_embd) };
             let sc = unsafe { std::slice::from_raw_parts(sc.as_ptr(), n_embd / 32) };
             let q8k = unsafe { std::slice::from_raw_parts(q8k.as_ptr(), n_embd / 256) };
             let logits = unsafe { std::slice::from_raw_parts_mut(logits_ptr, vocab) };
-            output_pw.kernel.forward_prepared(
-                input,
-                q8,
-                sc,
-                Some(q8k),
-                logits,
-                n_embd,
-                vocab,
-                ith,
-                nth,
-            );
-        });
+            output_pw.matmul_prepared(input, q8, sc, Some(q8k), logits, &pool);
+        }
 
         let eval_elapsed = eval_started.elapsed();
         if step < input_tokens.len() {
@@ -525,6 +511,10 @@ pub fn run_forward_logits_lfm2moe_with_batch(
     }
 
     // ---- Per-step prefill loop (mirrors `run_inference` lines 200..330) ----
+    let output_pw = crate::ops::kernel::Weight::from_quantized(
+        crate::ops::kernel::QuantizedTensor::from_bytes(output_weight, output_type, n_embd, vocab),
+    );
+
     for step in 0..prompt_tokens.len() {
         let token_id = prompt_tokens[step];
         let pos = step;
@@ -597,34 +587,15 @@ pub fn run_forward_logits_lfm2moe_with_batch(
         let sc = &scale_buf[..n_embd / 32];
         let q8k = &q8k_buf[..n_embd / 256];
 
-        let output_pw = crate::ops::kernel::Weight::from_quantized(
-            crate::ops::kernel::QuantizedTensor::from_bytes(
-                output_weight,
-                output_type,
-                n_embd,
-                vocab,
-            ),
-        );
-
         let logits_ptr = scratch.logits.as_mut_ptr();
-        pool.compute(move |ith, nth| {
+        {
             let input = unsafe { std::slice::from_raw_parts(normed.as_ptr(), n_embd) };
             let q8 = unsafe { std::slice::from_raw_parts(q8.as_ptr(), n_embd) };
             let sc = unsafe { std::slice::from_raw_parts(sc.as_ptr(), n_embd / 32) };
             let q8k = unsafe { std::slice::from_raw_parts(q8k.as_ptr(), n_embd / 256) };
             let logits = unsafe { std::slice::from_raw_parts_mut(logits_ptr, vocab) };
-            output_pw.kernel.forward_prepared(
-                input,
-                q8,
-                sc,
-                Some(q8k),
-                logits,
-                n_embd,
-                vocab,
-                ith,
-                nth,
-            );
-        });
+            output_pw.matmul_prepared(input, q8, sc, Some(q8k), logits, &pool);
+        }
     }
 
     let logits = scratch.logits.clone();
@@ -793,61 +764,25 @@ pub(super) fn forward_layer(
         return;
     }
 
-    // Q8 matmul (gate + up + scalar silu_mul) inside one parallel pass.
+    // Finish gate/up projections before applying SiLU.
     let w_gate = lw.w_gate.as_ref().unwrap();
     let w_up = lw.w_up.as_ref().unwrap();
-    pool.compute({
+    {
         let input_ptr = normed_ptr;
         let q8_ptr = q8.as_ptr();
         let sc_ptr = sc.as_ptr();
         let q8k_ptr = q8k.as_ptr();
-        let gate_buf_ptr = gate_buf_ptr;
-        let up_buf_ptr = up_buf_ptr;
-        move |ith, nth| {
-            let input = unsafe { std::slice::from_raw_parts(input_ptr, n_embd) };
-            let q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_embd) };
-            let sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_embd / 32) };
-            let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, n_embd / 256) };
-            let gate_buf = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, n_ff) };
-            let up_buf = unsafe { std::slice::from_raw_parts_mut(up_buf_ptr, n_ff) };
-            w_gate.kernel.forward_prepared(
-                input,
-                q8,
-                sc,
-                Some(q8k),
-                up_buf,
-                n_embd,
-                n_ff,
-                ith,
-                nth,
-            );
-            w_up.kernel.forward_prepared(
-                input,
-                q8,
-                sc,
-                Some(q8k),
-                gate_buf,
-                n_embd,
-                n_ff,
-                ith,
-                nth,
-            );
-            if crate::ops::gpu_matmul_active() {
-                // Matmul ran as one fenced GPU dispatch owned by thread 0.
-                if ith == 0 {
-                    silu_mul_inplace(&up_buf[..n_ff], &mut gate_buf[..n_ff]);
-                }
-            } else {
-                // Must match the matmul kernel's ceil row partition exactly: a floor
-                // split races with the kernel when n_ff % nth != 0 (silu would
-                // read rows the matmul hasn't written yet).
-                let per_thread = (n_ff + nth - 1) / nth;
-                let r_start = ith * per_thread;
-                let r_end = (r_start + per_thread).min(n_ff);
-                silu_mul_inplace(&up_buf[r_start..r_end], &mut gate_buf[r_start..r_end]);
-            }
-        }
-    });
+
+        let input = unsafe { std::slice::from_raw_parts(input_ptr, n_embd) };
+        let q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_embd) };
+        let sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_embd / 32) };
+        let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, n_embd / 256) };
+        let gate_buf = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, n_ff) };
+        let up_buf = unsafe { std::slice::from_raw_parts_mut(up_buf_ptr, n_ff) };
+        w_gate.matmul_prepared(input, q8, sc, Some(q8k), up_buf, pool);
+        w_up.matmul_prepared(input, q8, sc, Some(q8k), gate_buf, pool);
+        silu_mul_inplace(&up_buf[..n_ff], &mut gate_buf[..n_ff]);
+    }
 
     let gate_buf = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, n_ff) };
     dbg_out(step, layer, "ffn_h", gate_buf);
@@ -865,31 +800,18 @@ pub(super) fn forward_layer(
     let sc = &scale_buf[..n_ff / 32];
     let q8k = &q8k_buf[..n_ff / 256];
     let w_down = lw.w_down.as_ref().unwrap();
-    pool.compute({
-        let gate_buf_ptr = gate_buf_ptr;
+    {
         let q8_ptr = q8.as_ptr();
         let sc_ptr = sc.as_ptr();
         let q8k_ptr = q8k.as_ptr();
-        let down_buf_ptr = down_buf_ptr;
-        move |ith, nth| {
-            let input = unsafe { std::slice::from_raw_parts(gate_buf_ptr, n_ff) };
-            let q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_ff) };
-            let sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_ff / 32) };
-            let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, n_ff / 256) };
-            let down_buf = unsafe { std::slice::from_raw_parts_mut(down_buf_ptr, n_embd) };
-            w_down.kernel.forward_prepared(
-                input,
-                q8,
-                sc,
-                Some(q8k),
-                down_buf,
-                n_ff,
-                n_embd,
-                ith,
-                nth,
-            );
-        }
-    });
+
+        let input = unsafe { std::slice::from_raw_parts(gate_buf_ptr, n_ff) };
+        let q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_ff) };
+        let sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_ff / 32) };
+        let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, n_ff / 256) };
+        let down_buf = unsafe { std::slice::from_raw_parts_mut(down_buf_ptr, n_embd) };
+        w_down.matmul_prepared(input, q8, sc, Some(q8k), down_buf, pool);
+    }
 
     let down_buf = unsafe { std::slice::from_raw_parts(down_buf_ptr, n_embd) };
     dbg_out(step, layer, "ffn_down_out", down_buf);
@@ -1002,47 +924,39 @@ fn forward_moe_ffn(
             step, layer, selected, weights
         );
     }
-    pool.compute({
+    {
         let selected = selected.clone();
-        move |ith, nth| {
-            for (k, &e) in selected.iter().enumerate() {
-                let out_base = k * n_ff_exp;
-                let input = unsafe { std::slice::from_raw_parts(normed_ptr, n_embd) };
-                let input_q8 = unsafe { std::slice::from_raw_parts(input_q8_ptr, n_embd) };
-                let input_sc = unsafe { std::slice::from_raw_parts(input_sc_ptr, n_embd / 32) };
-                let input_q8k = unsafe { std::slice::from_raw_parts(input_q8k_ptr, n_embd / 256) };
-                // w_gate writes to the up slot, w_up to the gate slot (the
-                // lfm2 trunk convention): silu_mul then turns the gate slot
-                // into h = silu(W_gate @ x) * (W_up @ x).
-                let up =
-                    unsafe { std::slice::from_raw_parts_mut(up_buf_ptr.add(out_base), n_ff_exp) };
-                let gate =
-                    unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr.add(out_base), n_ff_exp) };
-                lw.experts_gate[e].kernel.forward_prepared(
-                    input,
-                    input_q8,
-                    input_sc,
-                    Some(input_q8k),
-                    up,
-                    n_embd,
-                    n_ff_exp,
-                    ith,
-                    nth,
-                );
-                lw.experts_up[e].kernel.forward_prepared(
-                    input,
-                    input_q8,
-                    input_sc,
-                    Some(input_q8k),
-                    gate,
-                    n_embd,
-                    n_ff_exp,
-                    ith,
-                    nth,
-                );
-            }
+
+        for (k, &e) in selected.iter().enumerate() {
+            let out_base = k * n_ff_exp;
+            let input = unsafe { std::slice::from_raw_parts(normed_ptr, n_embd) };
+            let input_q8 = unsafe { std::slice::from_raw_parts(input_q8_ptr, n_embd) };
+            let input_sc = unsafe { std::slice::from_raw_parts(input_sc_ptr, n_embd / 32) };
+            let input_q8k = unsafe { std::slice::from_raw_parts(input_q8k_ptr, n_embd / 256) };
+            // w_gate writes to the up slot, w_up to the gate slot (the
+            // lfm2 trunk convention): silu_mul then turns the gate slot
+            // into h = silu(W_gate @ x) * (W_up @ x).
+            let up = unsafe { std::slice::from_raw_parts_mut(up_buf_ptr.add(out_base), n_ff_exp) };
+            let gate =
+                unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr.add(out_base), n_ff_exp) };
+            lw.experts_gate[e].matmul_prepared(
+                input,
+                input_q8,
+                input_sc,
+                Some(input_q8k),
+                up,
+                pool,
+            );
+            lw.experts_up[e].matmul_prepared(
+                input,
+                input_q8,
+                input_sc,
+                Some(input_q8k),
+                gate,
+                pool,
+            );
         }
-    });
+    }
 
     // silu(gate) * up per expert slot.
     for (k, _) in selected.iter().enumerate() {
@@ -1066,24 +980,14 @@ fn forward_moe_ffn(
         let h_q8k = unsafe { std::slice::from_raw_parts_mut(quant_q8k_ptr, n_ff_exp / 256) };
         quantize_q8_0_into(h, n_ff_exp, h_q8, &mut h_sc[..n_ff_exp / 32]);
         quantize_row_q8_k_into(h, &mut h_q8k[..n_ff_exp / 256]);
-        pool.compute(move |ith, nth| {
+        {
             let input = unsafe { std::slice::from_raw_parts(gate_buf_ptr.add(out_base), n_ff_exp) };
             let q8 = unsafe { std::slice::from_raw_parts(quant_ptr, n_ff_exp) };
             let sc = unsafe { std::slice::from_raw_parts(quant_sc_ptr, n_ff_exp / 32) };
             let q8k = unsafe { std::slice::from_raw_parts(quant_q8k_ptr, n_ff_exp / 256) };
             let down = unsafe { std::slice::from_raw_parts_mut(down_buf_ptr, n_embd) };
-            lw.experts_down[e].kernel.forward_prepared(
-                input,
-                q8,
-                sc,
-                Some(q8k),
-                down,
-                n_ff_exp,
-                n_embd,
-                ith,
-                nth,
-            );
-        });
+            lw.experts_down[e].matmul_prepared(input, q8, sc, Some(q8k), down, pool);
+        }
         let down_buf = unsafe { std::slice::from_raw_parts(down_buf_ptr, n_embd) };
         if first {
             moe_dump.copy_from_slice(down_buf);
@@ -1146,57 +1050,32 @@ fn forward_attention(
     let q8k = &q8k_buf[..n_embd / 256];
 
     // Q8 matmul (Q/K/V) — parallel scalar path.
-    pool.compute({
+    {
         let input_ptr = normed_ptr;
         let q8_ptr = q8.as_ptr();
         let sc_ptr = sc.as_ptr();
         let q8k_ptr = q8k.as_ptr();
-        let q_ptr = q_ptr;
-        let k_ptr = k_ptr;
-        let v_ptr = v_ptr;
-        move |ith, nth| {
-            let input = unsafe { std::slice::from_raw_parts(input_ptr, n_embd) };
-            let q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_embd) };
-            let sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_embd / 32) };
-            let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, n_embd / 256) };
-            let q = unsafe { std::slice::from_raw_parts_mut(q_ptr, n_embd_q) };
-            let k_new = unsafe { std::slice::from_raw_parts_mut(k_ptr, n_embd_gqa) };
-            let v_new = unsafe { std::slice::from_raw_parts_mut(v_ptr, n_embd_gqa) };
-            lw.wq.as_ref().unwrap().kernel.forward_prepared(
-                input,
-                q8,
-                sc,
-                Some(q8k),
-                q,
-                n_embd,
-                n_embd_q,
-                ith,
-                nth,
-            );
-            lw.wk.as_ref().unwrap().kernel.forward_prepared(
-                input,
-                q8,
-                sc,
-                Some(q8k),
-                k_new,
-                n_embd,
-                n_embd_gqa,
-                ith,
-                nth,
-            );
-            lw.wv.as_ref().unwrap().kernel.forward_prepared(
-                input,
-                q8,
-                sc,
-                Some(q8k),
-                v_new,
-                n_embd,
-                n_embd_gqa,
-                ith,
-                nth,
-            );
-        }
-    });
+
+        let input = unsafe { std::slice::from_raw_parts(input_ptr, n_embd) };
+        let q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_embd) };
+        let sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_embd / 32) };
+        let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, n_embd / 256) };
+        let q = unsafe { std::slice::from_raw_parts_mut(q_ptr, n_embd_q) };
+        let k_new = unsafe { std::slice::from_raw_parts_mut(k_ptr, n_embd_gqa) };
+        let v_new = unsafe { std::slice::from_raw_parts_mut(v_ptr, n_embd_gqa) };
+        lw.wq
+            .as_ref()
+            .unwrap()
+            .matmul_prepared(input, q8, sc, Some(q8k), q, pool);
+        lw.wk
+            .as_ref()
+            .unwrap()
+            .matmul_prepared(input, q8, sc, Some(q8k), k_new, pool);
+        lw.wv
+            .as_ref()
+            .unwrap()
+            .matmul_prepared(input, q8, sc, Some(q8k), v_new, pool);
+    }
 
     // Q/K norm + RoPE.
     unsafe {
@@ -1422,31 +1301,21 @@ fn forward_attention(
     let q8k = &q8k_buf[..n_embd_q / 256];
 
     // Q8 matmul (output projection) — parallel scalar path.
-    pool.compute({
-        let attn_out_ptr = attn_out_ptr;
+    {
         let q8_ptr = q8.as_ptr();
         let sc_ptr = sc.as_ptr();
         let q8k_ptr = q8k.as_ptr();
-        let attn_proj_ptr = attn_proj_ptr;
-        move |ith, nth| {
-            let input = unsafe { std::slice::from_raw_parts(attn_out_ptr, n_embd_q) };
-            let q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_embd_q) };
-            let sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_embd_q / 32) };
-            let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, n_embd_q / 256) };
-            let attn_proj = unsafe { std::slice::from_raw_parts_mut(attn_proj_ptr, n_embd) };
-            lw.wo.as_ref().unwrap().kernel.forward_prepared(
-                input,
-                q8,
-                sc,
-                Some(q8k),
-                attn_proj,
-                n_embd_q,
-                n_embd,
-                ith,
-                nth,
-            );
-        }
-    });
+
+        let input = unsafe { std::slice::from_raw_parts(attn_out_ptr, n_embd_q) };
+        let q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_embd_q) };
+        let sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_embd_q / 32) };
+        let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, n_embd_q / 256) };
+        let attn_proj = unsafe { std::slice::from_raw_parts_mut(attn_proj_ptr, n_embd) };
+        lw.wo
+            .as_ref()
+            .unwrap()
+            .matmul_prepared(input, q8, sc, Some(q8k), attn_proj, pool);
+    }
     dbg_out(step, layer, "self_attn.out_proj", unsafe {
         std::slice::from_raw_parts(attn_proj_ptr, n_embd)
     });
@@ -1508,31 +1377,22 @@ fn forward_shortconv(
     let q8k = &q8k_buf[..n_embd / 256];
 
     // Q8 matmul (in_proj) — parallel scalar path.
-    pool.compute({
+    {
         let input_ptr = normed_ptr;
         let q8_ptr = q8.as_ptr();
         let sc_ptr = sc.as_ptr();
         let q8k_ptr = q8k.as_ptr();
-        let gate_buf_ptr = gate_buf_ptr;
-        move |ith, nth| {
-            let input = unsafe { std::slice::from_raw_parts(input_ptr, n_embd) };
-            let q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_embd) };
-            let sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_embd / 32) };
-            let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, n_embd / 256) };
-            let bcx = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, three_n) };
-            lw.shortconv_in.as_ref().unwrap().kernel.forward_prepared(
-                input,
-                q8,
-                sc,
-                Some(q8k),
-                bcx,
-                n_embd,
-                three_n,
-                ith,
-                nth,
-            );
-        }
-    });
+
+        let input = unsafe { std::slice::from_raw_parts(input_ptr, n_embd) };
+        let q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_embd) };
+        let sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_embd / 32) };
+        let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, n_embd / 256) };
+        let bcx = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, three_n) };
+        lw.shortconv_in
+            .as_ref()
+            .unwrap()
+            .matmul_prepared(input, q8, sc, Some(q8k), bcx, pool);
+    }
 
     // Step 2: bx = b * x (per-channel); conv1d over (state || bx); multiply by c; out_proj.
     let bcx = unsafe { std::slice::from_raw_parts(gate_buf_ptr, three_n) };
@@ -1641,30 +1501,22 @@ fn forward_shortconv(
     let sc = &scale_buf[..n_embd / 32];
     let q8k = &q8k_buf[..n_embd / 256];
     let mut out: Vec<f32> = vec![0.0; n_embd];
-    pool.compute({
+    {
         let q8_ptr = q8.as_ptr();
         let sc_ptr = sc.as_ptr();
         let q8k_ptr = q8k.as_ptr();
         let out_ptr = out.as_mut_ptr();
-        move |ith, nth| {
-            let input = &conv_out[..];
-            let q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_embd) };
-            let sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_embd / 32) };
-            let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, n_embd / 256) };
-            let o = unsafe { std::slice::from_raw_parts_mut(out_ptr, n_embd) };
-            lw.shortconv_out.as_ref().unwrap().kernel.forward_prepared(
-                input,
-                q8,
-                sc,
-                Some(q8k),
-                o,
-                n_embd,
-                n_embd,
-                ith,
-                nth,
-            );
-        }
-    });
+
+        let input = &conv_out[..];
+        let q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_embd) };
+        let sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_embd / 32) };
+        let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, n_embd / 256) };
+        let o = unsafe { std::slice::from_raw_parts_mut(out_ptr, n_embd) };
+        lw.shortconv_out
+            .as_ref()
+            .unwrap()
+            .matmul_prepared(input, q8, sc, Some(q8k), o, pool);
+    }
 
     dbg_out(step, layer_idx, "conv.out_proj", &out);
     let _ = pos;

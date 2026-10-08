@@ -973,14 +973,6 @@ fn main() {
         return;
     } else if !prompt.is_empty() {
         if matches!(arch, "qwen35" | "edge0") {
-            if options.gpu && arch == "edge0" {
-                // Edge0's mixture-of-experts forward has no Vulkan path, so the
-                // flag cannot do anything here. Say so rather than let it look
-                // like it is working.
-                eprintln!(
-                    "[GPU] --gpu is ignored for edge0: its MoE forward has no Vulkan                      path, so the model runs on the CPU either way."
-                );
-            }
             app::run_or_exit(app::run_multimodal_with_video(
                 Arc::clone(&source),
                 model_path,

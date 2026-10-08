@@ -1,12 +1,72 @@
 # Vulkan GPU 后端（实验性）
 
-状态：**实验性**。`--features vulkan` 编译，`--gpu` 启用；缺少任一项都保持原 CPU 行为。
+状态：**实验性**。`--features vulkan` 编译，`--gpu` 启用；缺少任一项都保持 CPU 执行。
 
 macOS 会自动查找系统 Loader，以及 Homebrew 的 `/opt/homebrew/lib/libvulkan.dylib` 和
 `/usr/local/lib/libvulkan.dylib`。`VK_ICD_FILENAMES`、`VK_DRIVER_FILES` 和
 `DYLD_LIBRARY_PATH` 只用于排障，不是正常启动的必需配置。
 
 ## 支持范围
+
+### 2026-10-07 适配与实机验证范围
+
+| 路径 | 新接入的 Vulkan 部分 | 保留在 CPU 的部分 |
+|---|---|---|
+| Z-Image | 已有 DiT 路径之外，VAE 的 F16 1×1 / 3×3 卷积，包括 shortcut 与 upsample 后卷积 | VAE 归一化、激活、空间 attention、最近邻上采样 |
+| YuE2 | AR/NAR 投影，BF16 投影加 bias 后仍舍入为 BF16；`--yue2 --gpu` 可进入加载入口 | attention、状态更新、音频 VAE；NAR F16 的 Q8 activation 合约暂留 CPU |
+| Edge0 | MLX affine 4/8-bit（group=64，BF16 scale/bias）投影与 MoE 专家投影；普通 GGUF 矩阵复用已有 shader | LoRA 的低秩修正、recurrent/attention 状态与 MoE 路由合并 |
+| LFM2 / LFM2.5 / LFM2MoE | Q/K/V、输出、FFN、专家、shortconv 输入/输出投影及 LM head | shortconv 状态与卷积、attention、归一化、激活、采样 |
+| Embedding | 通过共享 `Weight` / `PreparedRows` 的 BERT、EmbeddingGemma、Qwen 文本编码投影 | embedding lookup、归一化、pooling，以及未接入该入口的多模态编码器 |
+| AuK Base / Flash | DiT F16 / Q8_0 投影；F16 activation 舍入后匹配 CPU AVX2/F16C 点积归约；配套 Qwen2.5-Omni Q8_0 文本投影 | DiT attention、归一化、Euler/CFG、BigVGANFlow F32 VAE，以及参考音频 tower |
+
+共享投影支持 F32、F16、BF16、Q8_0、Q4_0、Q4_1、Q4_K、Q5_K、Q6_K；其余格式回退 CPU。
+这些是投影级 offload，Edge0 的整图 Vulkan 资格仍为 false。每个投影持有自己的上传缓存和 arena，
+最多 64 行一批；VAE 只构建当前像素 tile 的 im2col。跨投影共享 arena/pipeline、全图融合及性能优化
+留待测量。真实 RADV 模型、算子、成品和计时记录见
+[2026-10-07 实机验证](VULKAN_RADV_VALIDATION_2026-10-07.md)；其他设备和未列出的格式仍需验证。
+
+YuE2 正常会话使用投影 offload。旧整图 AR 执行器存在 BF16 数值合约和长前缀执行问题，
+已停用；隔离生命周期测试不能证明整图可用。
+BF16 dot 投影现已打包独立输出行，四帧共享权重读取，并保留原 FMA/归约顺序。
+RADV 的 256 帧 NAR 重复调用从 33.60 降到 12.42 秒；AR 耗时基本不变，
+详见 [YuE2 优化记录](VULKAN_YUE2_OPTIMIZATION_2026-10-08.md)。
+Z-Image VAE 的主线 BF16/F32 分支保留原有计算，新增卷积 offload 只接入 F16 分支。
+AuK 的 F16 点积模式要求 CPU AVX2/F16C/FMA，其他 CPU 后端保持原计算；没有 F16→Q8_0
+重编码。DiT 上传缓存随每次 denoise 的 scratch 释放，重复生成需要重新上传 DiT 权重。
+实机结果与现有音频模型质量边界见 [AuK 验证记录](VULKAN_AUK_RADV_VALIDATION_2026-10-08.md)。
+
+投影在调用线程上同步完成，之后才执行 SiLU、bias 或 residual。GPU 失败或拒绝 shape 时，
+CPU 重算该投影的全部输出；不混用已经成功的前几个 tile。`RMI_SCALAR=1`、
+`RMI_PARITY_TRACE` 或显式 CPU scope 会禁止真实投影 offload。
+
+新增的实机检查必须显式运行；无 Vulkan 设备或实际 offload 被拒绝都会失败：
+
+```bash
+cargo run --profile release-fast --locked --features vulkan --example vk_ops_check -- \
+  --formats mlx4,mlx8,bf16,f16 --rows 3
+cargo test --profile release-fast --locked --features vulkan --lib \
+  vulkan_mlx_affine_rows_include_lora_and_tile_tails -- --ignored --nocapture
+cargo test --profile release-fast --locked --features vulkan --lib \
+  vulkan_vae_convolution_matches_cpu_across_tiles -- --ignored --nocapture
+cargo test --profile release-fast --locked --features vulkan --lib \
+  vulkan_yue2_bf16_rounds_after_bias_across_tiles -- --ignored --nocapture
+cargo test --profile release-fast --locked --features vulkan --lib \
+  vulkan_auk_projections_preserve_cpu_contract_and_cache_lifetime \
+  -- --ignored --nocapture --test-threads=1
+```
+
+以同一 GGUF、prompt/lyrics、seed、batch、context、精度与线程数分别跑 CPU / `--gpu`，
+记录设备和驱动、权重 SHA-256、实际 GPU dispatch、逐层数值、greedy token / embedding 排序、
+歌曲和图像质量。用 `RUST_GPU_DISPATCH_TRACE=1` 核对使用的 shader，冷启动上传与预热计时分开记录。
+YuE2 的 BF16 舍入阈值和 NAR 累积误差必须单独验收。
+
+实机修复了 MLX padding 校验、Q8 分组求和顺序和 YuE2 BF16 投影归约。
+三个修改的 shader 通过 validator 与重编译字节比对，完整 manifest hash 校验通过。
+全量 shader checker 仍在未修改的 `softmax.spv` 重编译字节差异处失败。
+旧单行 F32 零误差检查与 CPU VAE SiLU 逐位断言均在隔离 `50fd20e` 基线上复现；
+没有放宽门槛，也不声明全量测试通过。
+
+### 已有整图执行器
 
 - dense、Neox RoPE、无 QKV bias 的 Qwen3 Q8_0、Q4_0、Q4_1、Q4_K、Q6_K 和 F16 模型支持完整 token Vulkan 执行。
 - Qwen3.5 BF16 文本模型使用独立 executor，覆盖 dense attention、recurrent convolution/SSM、
@@ -16,8 +76,8 @@ macOS 会自动查找系统 Loader，以及 Homebrew 的 `/opt/homebrew/lib/libv
   shadow KV，Qwen3.5 同步 F32 shadow KV 与 recurrent state。
 - `text_encode` 对整模符合资格、标准递增位置的模型逐 token 返回最终 RMSNorm hidden row，
   不录制 logits matvec；初始化或执行失败时丢弃 GPU 结果并用原 CPU 路径重算完整序列。
-- Vulkan token 失败时从上一个已提交 KV 状态在 CPU 重算；不符合资格的模型直接使用 CPU，
-  不会静默混用不支持的 Vulkan 算子。
+- Vulkan token 失败时从上一个已提交 KV 状态在 CPU 重算；不符合整图资格的模型使用 CPU 控制流，
+  已支持的矩阵投影可以通过上述共享入口单独 offload。
 - Q5_K 目前只完成合成 kernel parity，尚未纳入端到端模型支持矩阵；同一组 gate/up 权重格式不一致，
   或 Qwen3.5 存在未录制算子时，模型整体回退 CPU。
 
@@ -60,7 +120,7 @@ bash scripts/vulkan-shaders.sh check
 cargo fmt --check
 cargo check --locked --features vulkan --lib
 cargo check --locked --features vulkan --bin rust-model-inference
-cargo check --locked --features vulkan --bin server
+cargo check --locked --features vulkan --bin rust-model-server
 cargo check --locked --features vulkan --examples
 
 cargo run --release --locked --features vulkan --example vk_check
