@@ -829,6 +829,20 @@ const KNOWN_QWEN3VL_4B_DIMENSIONS: Qwen3AllowedDimensions = Qwen3AllowedDimensio
     freq_base_bits: 5_000_000_f32.to_bits(),
 };
 
+/// Released Qwen3-VL-8B text backbone used by Qwen-Image-2.1.
+const KNOWN_QWEN3VL_8B_DIMENSIONS: Qwen3AllowedDimensions = Qwen3AllowedDimensions {
+    n_embd: 4096,
+    n_layer: 36,
+    n_head: 32,
+    n_head_kv: 8,
+    n_embd_head_k: 128,
+    n_embd_head_v: 128,
+    n_ff: 12288,
+    n_ctx: 262_144,
+    norm_eps_bits: 1e-6_f32.to_bits(),
+    freq_base_bits: 5_000_000_f32.to_bits(),
+};
+
 /// Resolve the Qwen3-family knobs from `general.architecture`.
 ///
 /// This is the **single** place where architecture dispatch happens. It is
@@ -1004,6 +1018,7 @@ pub(crate) fn check_qwen3_allowed_dimensions(
         || (allowed == KNOWN_QWEN3VL_DIMENSIONS && matches(KNOWN_QWEN3VL_2B_DIMENSIONS))
         || (allowed == KNOWN_QWEN3VL_DIMENSIONS && matches(KNOWN_QWEN3VL_4B_DIMENSIONS))
         || (allowed == KNOWN_QWEN3VL_2B_DIMENSIONS && matches(KNOWN_QWEN3VL_4B_DIMENSIONS))
+        || (allowed == KNOWN_QWEN3VL_DIMENSIONS && matches(KNOWN_QWEN3VL_8B_DIMENSIONS))
     {
         Ok(())
     } else {

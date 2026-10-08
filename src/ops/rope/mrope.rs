@@ -22,7 +22,7 @@ unsafe extern "C" {
 }
 
 #[inline]
-pub(super) fn sin_cos(value: f32) -> (f32, f32) {
+pub(crate) fn sin_cos(value: f32) -> (f32, f32) {
     if crate::ops::scalar_mode() {
         return (scalar_sin(value), scalar_cos(value));
     }
@@ -167,20 +167,16 @@ pub fn rope_mrope_interleaved(
             } else {
                 3
             };
-            if crate::ops::scalar_mode() {
-                let inverse = 1.0 / freq_base.powf(2.0 * pair as f32 / n_rope_dims as f32);
-                let angle = positions[axis] as f32 * inverse;
-                let (sin, cos) = sin_cos(angle);
-                let (a, b) = (head[pair], head[pair + pair_count]);
-                head[pair] = a * cos + (-b) * sin;
-                head[pair + pair_count] = b * cos + a * sin;
-                continue;
-            }
-            let (sin, cos) = theta[axis].sin_cos();
+            let (sin, cos) = sin_cos(theta[axis]);
             let x0 = head[pair];
             let x1 = head[pair + pair_count];
-            head[pair] = x0.mul_add(cos, -(x1 * sin));
-            head[pair + pair_count] = x0.mul_add(sin, x1 * cos);
+            if crate::ops::scalar_mode() {
+                head[pair] = x0 * cos - x1 * sin;
+                head[pair + pair_count] = x0 * sin + x1 * cos;
+            } else {
+                head[pair] = x0.mul_add(cos, -(x1 * sin));
+                head[pair + pair_count] = x0.mul_add(sin, x1 * cos);
+            }
             for value in &mut theta {
                 *value *= theta_scale;
             }

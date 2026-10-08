@@ -342,6 +342,22 @@ impl<'model> Qwen3Session<'model> {
     /// Extract every post-normalization token row, including optional VL DeepStack inputs.
     /// A fresh F32-KV session preserves conditioning without half-precision KV rounding.
     pub fn forward_hidden_sequence(&mut self, input: Qwen3Input<'_>) -> Result<Vec<f32>, String> {
+        self.hidden_sequence(input, true)
+    }
+
+    /// Last transformer layer before the output RMSNorm, as used by Qwen-Image-2.1.
+    pub fn forward_hidden_sequence_raw(
+        &mut self,
+        input: Qwen3Input<'_>,
+    ) -> Result<Vec<f32>, String> {
+        self.hidden_sequence(input, false)
+    }
+
+    fn hidden_sequence(
+        &mut self,
+        input: Qwen3Input<'_>,
+        normalize: bool,
+    ) -> Result<Vec<f32>, String> {
         if self.kv_state.seq_len != 0
             || input.token_ids.is_empty()
             || input.token_ids.len() > self.capacity
@@ -359,6 +375,9 @@ impl<'model> Qwen3Session<'model> {
         }
         self.prefill(&input, input.token_ids.len(), false)?;
         let width = self.model.config.n_embd;
+        if !normalize {
+            return Ok(self.prefill_scratch.x[..input.token_ids.len() * width].to_vec());
+        }
         let mut output = vec![0.0; input.token_ids.len() * width];
         for (row, destination) in output.chunks_exact_mut(width).enumerate() {
             crate::ops::rms_norm(

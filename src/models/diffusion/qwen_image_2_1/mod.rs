@@ -9,8 +9,25 @@
 use crate::core::tensor::{GGMLType, TensorInfo, TensorSource};
 
 pub mod dit;
+mod pipeline;
+pub mod text;
+pub mod vae;
+
+pub(crate) use pipeline::sample;
+pub use pipeline::{flow_sigmas, rgba_bytes};
 
 pub(crate) use dit::QwenImage21Dit;
+
+pub(crate) struct Condition {
+    pub values: Vec<f32>,
+    pub image_slots: Vec<usize>,
+}
+
+pub(crate) struct ReferenceLatent {
+    pub values: Vec<f32>,
+    pub width: usize,
+    pub height: usize,
+}
 
 /// Prefix every tensor in the diffusion GGUF carries.
 pub(crate) const PREFIX: &str = "model.diffusion_model";

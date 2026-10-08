@@ -21,6 +21,7 @@ mod partial;
 mod sleef_math;
 mod sleef_rope;
 
+pub(crate) use mrope::sin_cos as ggml_sin_cos;
 pub use mrope::{rope_mrope, rope_mrope_interleaved, rope_vision};
 pub use neox::{
     rope_neox_inplace, rope_neox_inplace_with_factor, rope_neox_inplace_with_table, rope_sin_cos,

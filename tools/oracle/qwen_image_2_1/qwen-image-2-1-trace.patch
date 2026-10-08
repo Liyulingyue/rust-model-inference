@@ -1,219 +1,3 @@
---- a/src/model/diffusion/qwen_image_2_1.hpp
-+++ b/src/model/diffusion/qwen_image_2_1.hpp
-@@ -2,6 +2,8 @@
- #define __SD_MODEL_DIFFUSION_QWEN_IMAGE_2_1_H__
-
- #include "model/diffusion/qwen_image.hpp"
-+
-+#include "qwen_image_2_1_trace.hpp"
-
- namespace Qwen {
-
-@@ -162,8 +164,11 @@
-
-         ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) {
-             x = std::dynamic_pointer_cast<QwenImage21ZeroCenterRMSNorm>(blocks["text_norm"])->forward(ctx, x);
-+            ctx->capture_tensor("qwen.debug.txt_norm", x);
-             x = std::dynamic_pointer_cast<Linear>(blocks["in_layer"])->forward(ctx, x);
-+            ctx->capture_tensor("qwen.debug.txt_in_layer", x);
-             x = ggml_ext_gelu(ctx->ggml_ctx, x);
-+            ctx->capture_tensor("qwen.debug.txt_gelu", x);
-             return std::dynamic_pointer_cast<Linear>(blocks["out_layer"])->forward(ctx, x);
-         }
-     };
-@@ -190,6 +195,8 @@
-             k      = std::dynamic_pointer_cast<RMSNorm>(blocks["norm_k"])->forward(ctx, k);
-             q      = Rope::apply_rope(ctx->ggml_ctx, q, pe);
-             k      = Rope::apply_rope(ctx->ggml_ctx, k, pe);
-+            ctx->capture_tensor("qwen.debug.attn.q", q);
-+            ctx->capture_tensor("qwen.debug.attn.k", k);
-             if (cache.mode == QwenImage21PrefixCache::Mode::STORE) {
-                 // Preserve query-first attention evaluation while writing each layer's
-                 // prefix before its full-sequence K/V can accumulate across layers.
-@@ -239,6 +246,7 @@
-                     auto sk             = ggml_ext_slice(ctx->ggml_ctx, k, 1, 0, segment.end);
-                     auto sv             = ggml_ext_slice(ctx->ggml_ctx, v, 2, 0, segment.end);
-                     auto out            = attend(sq, sk, sv, masks[i]);
-+                    ctx->capture_tensor("qwen.debug.attn.seg" + std::to_string(i), out);
-                     result              = result == nullptr ? out : ggml_concat(ctx->ggml_ctx, result, out, 1);
-                 }
-             }
-@@ -282,11 +290,16 @@
-         ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x, const std::vector<ggml_tensor*>& modulation, ggml_tensor* pe, const QwenImage21Layout& layout, const std::vector<ggml_tensor*>& masks, const QwenImage21PrefixCache& cache) {
-             const int64_t prefix_length = cache.mode == QwenImage21PrefixCache::Mode::REUSE ? 0 : layout.prefix_length;
-             auto h                      = std::dynamic_pointer_cast<LayerNorm>(blocks["img_norm1"])->forward(ctx, x);
-+            ctx->capture_tensor("qwen.debug.b.norm1", h);
-             h                           = modulate(ctx->ggml_ctx, h, modulation[0], prefix_length);
-+            ctx->capture_tensor("qwen.debug.b.mod1", h);
-             h                           = std::dynamic_pointer_cast<QwenImage21Attention>(blocks["attn"])->forward(ctx, h, pe, layout.segments, masks, cache);
-+            ctx->capture_tensor("qwen.debug.b.attn", h);
-             x                           = ggml_add(ctx->ggml_ctx, x, modulate(ctx->ggml_ctx, h, modulation[1], prefix_length, true));
-+            ctx->capture_tensor("qwen.debug.b.res1", x);
-             h                           = std::dynamic_pointer_cast<LayerNorm>(blocks["img_norm2"])->forward(ctx, x);
-             h                           = modulate(ctx->ggml_ctx, h, modulation[2], prefix_length);
-+            ctx->capture_tensor("qwen.debug.b.mod2", h);
-             ggml_tensor* gate;
-             auto fused = blocks.find("img_mlp.gate_up");
-             if (fused != blocks.end()) {
-@@ -300,7 +313,8 @@
-             }
-             h = ggml_mul(ctx->ggml_ctx, h, ggml_silu(ctx->ggml_ctx, gate));
-             h = std::dynamic_pointer_cast<Linear>(blocks["img_mlp.out"])->forward(ctx, h);
--            return ggml_add(ctx->ggml_ctx, x, modulate(ctx->ggml_ctx, h, modulation[3], prefix_length, true));
-+            auto out = ggml_add(ctx->ggml_ctx, x, modulate(ctx->ggml_ctx, h, modulation[3], prefix_length, true));
-+            return out;
-         }
-     };
-
-@@ -326,9 +340,12 @@
-             auto time = ggml_concat(ctx->ggml_ctx, timestep, ggml_ext_zeros_like(ctx->ggml_ctx, timestep), 0);
-             // Runtime flow timesteps already use the [0, 1000] scale.
-             time               = ggml_ext_timestep_embedding(ctx->ggml_ctx, time, 256, 10000, 1.f);
-+            ctx->capture_tensor("qwen.debug.time", time);
-             time               = std::dynamic_pointer_cast<TimestepEmbedding>(blocks["time_text_embed.timestep_embedder"])->forward(ctx, time);
-+            ctx->capture_tensor("qwen.time_embed", time);
-             time               = ggml_silu(ctx->ggml_ctx, time);
-             auto modulation    = std::dynamic_pointer_cast<Linear>(blocks["modulation.1"])->forward(ctx, time);
-+            ctx->capture_tensor("qwen.modulation", modulation);
-             auto mod           = ggml_ext_chunk(ctx->ggml_ctx, modulation, 4, 0);
-             auto img_in        = std::dynamic_pointer_cast<Linear>(blocks["img_in"]);
-             ggml_tensor* joint = nullptr;
-@@ -336,6 +353,7 @@
-                 joint = img_in->forward(ctx, DiT::patchify(ctx->ggml_ctx, x, 1, 1));
-             } else {
-                 auto text = std::dynamic_pointer_cast<QwenImage21TextProjection>(blocks["txt_in"])->forward(ctx, context);
-+                ctx->capture_tensor("qwen.txt_in", text);
-                 for (const auto& segment : layout.segments) {
-                     ggml_tensor* h;
-                     if (segment.image_index < 0) {
-@@ -347,6 +365,7 @@
-                     }
-                     joint = joint == nullptr ? h : ggml_concat(ctx->ggml_ctx, joint, h, 1);
-                 }
-+                ctx->capture_tensor("qwen.joint", joint);
-             }
-             sd::ggml_graph_cut::mark_graph_cut(joint, "qwen_image_2_1.prelude", "joint");
-             for (int i = 0; i < config.num_layers; ++i) {
-@@ -356,15 +375,20 @@
-                 layer_cache.cut_group   = "qwen_image_2_1." + layer;
-                 auto block              = std::dynamic_pointer_cast<QwenImage21TransformerBlock>(blocks[layer]);
-                 joint                   = block->forward(ctx, joint, mod, pe, layout, masks, layer_cache);
-+                ctx->capture_tensor("qwen.block." + std::to_string(i), joint);
-                 sd::ggml_graph_cut::mark_graph_cut(joint, layer_cache.cut_group, "joint");
-             }
-             if (cache.mode != QwenImage21PrefixCache::Mode::REUSE) {
-                 joint = ggml_ext_slice(ctx->ggml_ctx, joint, 1, layout.prefix_length, joint->ne[1]);
-+                ctx->capture_tensor("qwen.joint_final", joint);
-             }
-             auto scale = std::dynamic_pointer_cast<Linear>(blocks["norm_out.linear"])->forward(ctx, ggml_ext_chunk(ctx->ggml_ctx, time, 2, 1)[0]);
-+            ctx->capture_tensor("qwen.scale", scale);
-             joint      = std::dynamic_pointer_cast<LayerNorm>(blocks["norm_out.norm"])->forward(ctx, joint);
-             joint      = ggml_mul(ctx->ggml_ctx, joint, ggml_scale_bias(ctx->ggml_ctx, scale, 1.f, 1.f));
-+            ctx->capture_tensor("qwen.norm_out", joint);
-             joint      = std::dynamic_pointer_cast<Linear>(blocks["proj_out"])->forward(ctx, joint);
-+            ctx->capture_tensor("qwen.out", joint);
-             return DiT::unpatchify_and_crop(ctx->ggml_ctx, joint, x->ne[1], x->ne[0], 1, 1);
-         }
-     };
-@@ -518,6 +542,9 @@
-                 }
-                 embedding.values = Rope::embed_nd(embedding.ids, 1, 10000.f, config.axes_dim, embedding.layout, &embedding.frequencies);
-                 pe_data          = finish_rope_pe(std::move(embedding));
-+                if (!cached) {
-+                    qwen_image_2_1_trace_f32("qwen.pe", pe_data.data(), pe_data.size(), {2, 2, config.head_dim / 2, static_cast<int64_t>(pe_data.size() / (4 * config.head_dim / 2))});
-+                }
-                 mask_data.clear();
-                 if (!cached) {
-                     for (const auto& segment : layout.segments) {
-@@ -586,6 +613,9 @@
-                     LOG_DEBUG("Qwen Image 2.1: cached prefix %" PRIu64 " (%" PRId64 " tokens, %s)", extra->prefix_id, layout.prefix_length, ggml_type_name(cache.type));
-                 }
-             }
-+            qwen_image_2_1_trace_f32("qwen.input.x", x.values(), x.shape());
-+            qwen_image_2_1_trace_f32("qwen.input.context", context.values(), context.shape());
-+            qwen_image_2_1_trace_f32("qwen.input.timesteps", tensor_or_empty(inputs.timesteps).values(), tensor_or_empty(inputs.timesteps).shape());
-             return result;
-         }
-     };
---- a/src/qwen_image_2_1_trace.hpp
-+++ b/src/qwen_image_2_1_trace.hpp
-@@ -0,0 +1,76 @@
-+#pragma once
-+
-+// Parity-trace helper for the Qwen-Image-2.1 oracle harness. Writes JSONL
-+// records with f32 sidecar binaries, mirroring tools/oracle/z_image.
-+#include <cstdint>
-+#include <cstdlib>
-+#include <fstream>
-+#include <map>
-+#include <mutex>
-+#include <string>
-+#include <vector>
-+
-+inline const char* qwen_image_2_1_trace_path() {
-+    return std::getenv("QWEN_IMAGE_2_1_ORACLE_TRACE");
-+}
-+
-+inline std::string qwen_image_2_1_trace_json_string(const std::string& value) {
-+    std::string out = "\"";
-+    for (char ch : value) {
-+        if (ch == '\\' || ch == '\"') out += '\\';
-+        out += ch;
-+    }
-+    return out + "\"";
-+}
-+
-+inline bool qwen_image_2_1_trace_raw(const std::string& name,
-+                                     const void* data,
-+                                     size_t element_size,
-+                                     size_t count,
-+                                     std::vector<int64_t> shape,
-+                                     const char* type) {
-+    const char* trace = qwen_image_2_1_trace_path();
-+    if (trace == nullptr) return true;
-+    while (shape.size() > 1 && shape.back() == 1) shape.pop_back();
-+    size_t expected = 1;
-+    for (int64_t dimension : shape) {
-+        if (dimension < 0) return false;
-+        expected *= static_cast<size_t>(dimension);
-+    }
-+    if (expected != count) return false;
-+
-+    static std::mutex mutex;
-+    static std::map<std::string, size_t> occurrences;
-+    std::lock_guard<std::mutex> lock(mutex);
-+    size_t occurrence = occurrences[name]++;
-+    std::string sidecar = std::string(trace) + "." + name;
-+    if (occurrence != 0) sidecar += "." + std::to_string(occurrence);
-+    sidecar += "." + std::string(type);
-+
-+    std::ofstream binary(sidecar, std::ios::binary | std::ios::trunc);
-+    binary.write(static_cast<const char*>(data), static_cast<std::streamsize>(count * element_size));
-+    if (!binary) return false;
-+
-+    std::ofstream json(trace, std::ios::app);
-+    json << "{\"name\":" << qwen_image_2_1_trace_json_string(name) << ",\"shape\":[";
-+    for (size_t i = 0; i < shape.size(); ++i) {
-+        if (i != 0) json << ',';
-+        json << shape[i];
-+    }
-+    json << "],\"len\":" << count << ",\"occurrence\":" << occurrence
-+         << ",\"binary_path\":" << qwen_image_2_1_trace_json_string(sidecar) << "}\n";
-+    return static_cast<bool>(json);
-+}
-+
-+inline bool qwen_image_2_1_trace_f32(const std::string& name,
-+                                     const std::vector<float>& values,
-+                                     std::vector<int64_t> shape) {
-+    return qwen_image_2_1_trace_raw(name, values.data(), sizeof(float), values.size(), std::move(shape), "f32");
-+}
-+
-+inline bool qwen_image_2_1_trace_f32(const std::string& name,
-+                                     const float* values,
-+                                     size_t count,
-+                                     std::vector<int64_t> shape) {
-+    return qwen_image_2_1_trace_raw(name, values, sizeof(float), count, std::move(shape), "f32");
-+}
 --- a/examples/CMakeLists.txt
 +++ b/examples/CMakeLists.txt
 @@ -1,4 +1,5 @@
@@ -224,7 +8,7 @@
  add_subdirectory(server)
 --- a/examples/qwen_image_2_1_trace/CMakeLists.txt
 +++ b/examples/qwen_image_2_1_trace/CMakeLists.txt
-@@ -0,0 +1,15 @@
+@@ -0,0 +1,22 @@
 +set(TARGET qwen-image-2-1-oracle)
 +
 +add_executable(${TARGET}
@@ -240,6 +24,13 @@
 +install(TARGETS ${TARGET} RUNTIME)
 +target_link_libraries(${TARGET} PRIVATE stable-diffusion ${CMAKE_THREAD_LIBS_INIT})
 +target_compile_features(${TARGET} PUBLIC c_std_11 cxx_std_17)
++add_executable(qwen-image-2-1-components components.cpp)
++target_include_directories(qwen-image-2-1-components PRIVATE "${PROJECT_SOURCE_DIR}/src")
++target_link_libraries(qwen-image-2-1-components PRIVATE stable-diffusion ${CMAKE_THREAD_LIBS_INIT})
++target_compile_features(qwen-image-2-1-components PUBLIC cxx_std_17)
++if(APPLE)
++    sd_set_macos_rpaths(qwen-image-2-1-components)
++endif()
 --- a/examples/qwen_image_2_1_trace/main.cpp
 +++ b/examples/qwen_image_2_1_trace/main.cpp
 @@ -0,0 +1,409 @@
@@ -652,6 +443,27 @@
 +    ggml_backend_free(backend);
 +    return 0;
 +}
+--- a/src/conditioning/conditioner.hpp
++++ b/src/conditioning/conditioner.hpp
+@@ -9,6 +9,7 @@
+ #include <sstream>
+ #include <stdexcept>
+ #include "core/ggml_tensor_utils.h"
++#include "qwen_image_2_1_trace.hpp"
+
+ #include "core/tensor_ggml.hpp"
+ #include "core/util.h"
+@@ -2186,6 +2187,10 @@
+         auto& tokens             = std::get<0>(tokens_weights_mask);
+         auto& weights            = std::get<1>(tokens_weights_mask);
+         auto& mask               = std::get<2>(tokens_weights_mask);
++        if (version == VERSION_QWEN_IMAGE_2_1) {
++            std::vector<float> ids(tokens.begin(), tokens.end());
++            qwen_image_2_1_trace_f32("qwen.text.tokens", ids, {static_cast<int64_t>(ids.size())});
++        }
+
+         if (tokens.empty()) {
+             return {};
 --- a/src/core/ggml_runner.cpp
 +++ b/src/core/ggml_runner.cpp
 @@ -10,6 +10,7 @@
@@ -680,6 +492,17 @@
              print_sd_tensor(debug_tensor, false, entry.second.c_str());
          }
      }
+--- a/src/core/ggml_runner.h
++++ b/src/core/ggml_runner.h
+@@ -94,6 +94,8 @@
+         snapshot              = ggml_cpy(ggml_ctx, snapshot, dst);
+         ggml_set_output(snapshot);
+         debug_tensors->push_back({snapshot, name});
++        // Snapshot before any subsequent in-place operation mutates the source.
++        if (graph != nullptr) ggml_build_forward_expand(graph, snapshot);
+     }
+
+     ggml_tensor* load_cache_tensor(const std::string& name) const {
 --- a/src/core/segment_weight_pipeline.cpp
 +++ b/src/core/segment_weight_pipeline.cpp
 @@ -104,12 +104,13 @@
@@ -700,6 +523,26 @@
          }
          if (!manager->prepare_params(segment_params_[segment_index])) {
              return false;
+--- a/src/model/common/ggml_block.hpp
++++ b/src/model/common/ggml_block.hpp
+@@ -494,7 +494,7 @@
+             forward_params.conv2d.scale      = scale;
+             return ctx->weight_adapter->forward_with_lora(ctx->ggml_ctx, ctx->backend, x, w, b, prefix, forward_params);
+         }
+-        return ggml_ext_conv_2d(ctx->ggml_ctx,
++        auto traced_output = ggml_ext_conv_2d(ctx->ggml_ctx,
+                                 x,
+                                 w,
+                                 b,
+@@ -508,6 +508,8 @@
+                                 ctx->circular_x_enabled,
+                                 ctx->circular_y_enabled,
+                                 scale);
++        if (std::string(ggml_get_name(w)).rfind("first_stage_model.", 0) == 0) ctx->capture_tensor(std::string("vae.conv.") + ggml_get_name(w), traced_output);
++        return traced_output;
+     }
+ };
+
 --- a/src/model/diffusion/qwen_image.hpp
 +++ b/src/model/diffusion/qwen_image.hpp
 @@ -86,7 +86,9 @@
@@ -712,3 +555,379 @@
              sample = linear_2->forward(ctx, sample);
              return sample;
          }
+--- a/src/model/diffusion/qwen_image_2_1.hpp
++++ b/src/model/diffusion/qwen_image_2_1.hpp
+@@ -2,6 +2,8 @@
+ #define __SD_MODEL_DIFFUSION_QWEN_IMAGE_2_1_H__
+
+ #include "model/diffusion/qwen_image.hpp"
++
++#include "qwen_image_2_1_trace.hpp"
+
+ namespace Qwen {
+
+@@ -162,8 +164,11 @@
+
+         ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) {
+             x = std::dynamic_pointer_cast<QwenImage21ZeroCenterRMSNorm>(blocks["text_norm"])->forward(ctx, x);
++            ctx->capture_tensor("qwen.debug.txt_norm", x);
+             x = std::dynamic_pointer_cast<Linear>(blocks["in_layer"])->forward(ctx, x);
++            ctx->capture_tensor("qwen.debug.txt_in_layer", x);
+             x = ggml_ext_gelu(ctx->ggml_ctx, x);
++            ctx->capture_tensor("qwen.debug.txt_gelu", x);
+             return std::dynamic_pointer_cast<Linear>(blocks["out_layer"])->forward(ctx, x);
+         }
+     };
+@@ -190,6 +195,8 @@
+             k      = std::dynamic_pointer_cast<RMSNorm>(blocks["norm_k"])->forward(ctx, k);
+             q      = Rope::apply_rope(ctx->ggml_ctx, q, pe);
+             k      = Rope::apply_rope(ctx->ggml_ctx, k, pe);
++            ctx->capture_tensor("qwen.debug.attn.q", q);
++            ctx->capture_tensor("qwen.debug.attn.k", k);
+             if (cache.mode == QwenImage21PrefixCache::Mode::STORE) {
+                 // Preserve query-first attention evaluation while writing each layer's
+                 // prefix before its full-sequence K/V can accumulate across layers.
+@@ -239,6 +246,7 @@
+                     auto sk             = ggml_ext_slice(ctx->ggml_ctx, k, 1, 0, segment.end);
+                     auto sv             = ggml_ext_slice(ctx->ggml_ctx, v, 2, 0, segment.end);
+                     auto out            = attend(sq, sk, sv, masks[i]);
++                    ctx->capture_tensor("qwen.debug.attn.seg" + std::to_string(i), out);
+                     result              = result == nullptr ? out : ggml_concat(ctx->ggml_ctx, result, out, 1);
+                 }
+             }
+@@ -282,11 +290,16 @@
+         ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x, const std::vector<ggml_tensor*>& modulation, ggml_tensor* pe, const QwenImage21Layout& layout, const std::vector<ggml_tensor*>& masks, const QwenImage21PrefixCache& cache) {
+             const int64_t prefix_length = cache.mode == QwenImage21PrefixCache::Mode::REUSE ? 0 : layout.prefix_length;
+             auto h                      = std::dynamic_pointer_cast<LayerNorm>(blocks["img_norm1"])->forward(ctx, x);
++            ctx->capture_tensor("qwen.debug.b.norm1", h);
+             h                           = modulate(ctx->ggml_ctx, h, modulation[0], prefix_length);
++            ctx->capture_tensor("qwen.debug.b.mod1", h);
+             h                           = std::dynamic_pointer_cast<QwenImage21Attention>(blocks["attn"])->forward(ctx, h, pe, layout.segments, masks, cache);
++            ctx->capture_tensor("qwen.debug.b.attn", h);
+             x                           = ggml_add(ctx->ggml_ctx, x, modulate(ctx->ggml_ctx, h, modulation[1], prefix_length, true));
++            ctx->capture_tensor("qwen.debug.b.res1", x);
+             h                           = std::dynamic_pointer_cast<LayerNorm>(blocks["img_norm2"])->forward(ctx, x);
+             h                           = modulate(ctx->ggml_ctx, h, modulation[2], prefix_length);
++            ctx->capture_tensor("qwen.debug.b.mod2", h);
+             ggml_tensor* gate;
+             auto fused = blocks.find("img_mlp.gate_up");
+             if (fused != blocks.end()) {
+@@ -300,7 +313,8 @@
+             }
+             h = ggml_mul(ctx->ggml_ctx, h, ggml_silu(ctx->ggml_ctx, gate));
+             h = std::dynamic_pointer_cast<Linear>(blocks["img_mlp.out"])->forward(ctx, h);
+-            return ggml_add(ctx->ggml_ctx, x, modulate(ctx->ggml_ctx, h, modulation[3], prefix_length, true));
++            auto out = ggml_add(ctx->ggml_ctx, x, modulate(ctx->ggml_ctx, h, modulation[3], prefix_length, true));
++            return out;
+         }
+     };
+
+@@ -326,9 +340,12 @@
+             auto time = ggml_concat(ctx->ggml_ctx, timestep, ggml_ext_zeros_like(ctx->ggml_ctx, timestep), 0);
+             // Runtime flow timesteps already use the [0, 1000] scale.
+             time               = ggml_ext_timestep_embedding(ctx->ggml_ctx, time, 256, 10000, 1.f);
++            ctx->capture_tensor("qwen.debug.time", time);
+             time               = std::dynamic_pointer_cast<TimestepEmbedding>(blocks["time_text_embed.timestep_embedder"])->forward(ctx, time);
++            ctx->capture_tensor("qwen.time_embed", time);
+             time               = ggml_silu(ctx->ggml_ctx, time);
+             auto modulation    = std::dynamic_pointer_cast<Linear>(blocks["modulation.1"])->forward(ctx, time);
++            ctx->capture_tensor("qwen.modulation", modulation);
+             auto mod           = ggml_ext_chunk(ctx->ggml_ctx, modulation, 4, 0);
+             auto img_in        = std::dynamic_pointer_cast<Linear>(blocks["img_in"]);
+             ggml_tensor* joint = nullptr;
+@@ -336,6 +353,7 @@
+                 joint = img_in->forward(ctx, DiT::patchify(ctx->ggml_ctx, x, 1, 1));
+             } else {
+                 auto text = std::dynamic_pointer_cast<QwenImage21TextProjection>(blocks["txt_in"])->forward(ctx, context);
++                ctx->capture_tensor("qwen.txt_in", text);
+                 for (const auto& segment : layout.segments) {
+                     ggml_tensor* h;
+                     if (segment.image_index < 0) {
+@@ -347,6 +365,7 @@
+                     }
+                     joint = joint == nullptr ? h : ggml_concat(ctx->ggml_ctx, joint, h, 1);
+                 }
++                ctx->capture_tensor("qwen.joint", joint);
+             }
+             sd::ggml_graph_cut::mark_graph_cut(joint, "qwen_image_2_1.prelude", "joint");
+             for (int i = 0; i < config.num_layers; ++i) {
+@@ -356,15 +375,20 @@
+                 layer_cache.cut_group   = "qwen_image_2_1." + layer;
+                 auto block              = std::dynamic_pointer_cast<QwenImage21TransformerBlock>(blocks[layer]);
+                 joint                   = block->forward(ctx, joint, mod, pe, layout, masks, layer_cache);
++                ctx->capture_tensor("qwen.block." + std::to_string(i), joint);
+                 sd::ggml_graph_cut::mark_graph_cut(joint, layer_cache.cut_group, "joint");
+             }
+             if (cache.mode != QwenImage21PrefixCache::Mode::REUSE) {
+                 joint = ggml_ext_slice(ctx->ggml_ctx, joint, 1, layout.prefix_length, joint->ne[1]);
++                ctx->capture_tensor("qwen.joint_final", joint);
+             }
+             auto scale = std::dynamic_pointer_cast<Linear>(blocks["norm_out.linear"])->forward(ctx, ggml_ext_chunk(ctx->ggml_ctx, time, 2, 1)[0]);
++            ctx->capture_tensor("qwen.scale", scale);
+             joint      = std::dynamic_pointer_cast<LayerNorm>(blocks["norm_out.norm"])->forward(ctx, joint);
+             joint      = ggml_mul(ctx->ggml_ctx, joint, ggml_scale_bias(ctx->ggml_ctx, scale, 1.f, 1.f));
++            ctx->capture_tensor("qwen.norm_out", joint);
+             joint      = std::dynamic_pointer_cast<Linear>(blocks["proj_out"])->forward(ctx, joint);
++            ctx->capture_tensor("qwen.out", joint);
+             return DiT::unpatchify_and_crop(ctx->ggml_ctx, joint, x->ne[1], x->ne[0], 1, 1);
+         }
+     };
+@@ -518,6 +542,9 @@
+                 }
+                 embedding.values = Rope::embed_nd(embedding.ids, 1, 10000.f, config.axes_dim, embedding.layout, &embedding.frequencies);
+                 pe_data          = finish_rope_pe(std::move(embedding));
++                if (!cached) {
++                    qwen_image_2_1_trace_f32("qwen.pe", pe_data.data(), pe_data.size(), {2, 2, config.head_dim / 2, static_cast<int64_t>(pe_data.size() / (4 * config.head_dim / 2))});
++                }
+                 mask_data.clear();
+                 if (!cached) {
+                     for (const auto& segment : layout.segments) {
+@@ -586,6 +613,9 @@
+                     LOG_DEBUG("Qwen Image 2.1: cached prefix %" PRIu64 " (%" PRId64 " tokens, %s)", extra->prefix_id, layout.prefix_length, ggml_type_name(cache.type));
+                 }
+             }
++            qwen_image_2_1_trace_f32("qwen.input.x", x.values(), x.shape());
++            qwen_image_2_1_trace_f32("qwen.input.context", context.values(), context.shape());
++            qwen_image_2_1_trace_f32("qwen.input.timesteps", tensor_or_empty(inputs.timesteps).values(), tensor_or_empty(inputs.timesteps).shape());
+             return result;
+         }
+     };
+--- a/src/model/te/llm.hpp
++++ b/src/model/te/llm.hpp
+@@ -1293,11 +1293,13 @@
+             auto merger      = std::dynamic_pointer_cast<VisionPatchMerger>(blocks["merger"]);
+
+             auto x = patch_embed->forward(ctx, pixel_values);
++            ctx->capture_tensor("qwen.vision.patch", x);
+             sd::ggml_graph_cut::mark_graph_cut(x, "llm.vision.prelude", "x");
+             if (pos_embeds != nullptr) {
+                 x = ggml_add(ctx->ggml_ctx, x, pos_embeds);
+             }
+
++            ctx->capture_tensor("qwen.vision.embedding", x);
+             if (window_index != nullptr) {
+                 x = ggml_reshape_4d(ctx->ggml_ctx, x, x->ne[0] * spatial_merge_size * spatial_merge_size, x->ne[1] / spatial_merge_size / spatial_merge_size, x->ne[2], x->ne[3]);
+                 x = ggml_get_rows(ctx->ggml_ctx, x, window_index);
+@@ -1313,16 +1315,19 @@
+                     mask = nullptr;
+                 }
+                 x                 = block->forward(ctx, x, pe, mask);
++                ctx->capture_tensor("qwen.vision.block." + std::to_string(i), x);
+                 auto deepstack_it = std::find(deepstack_visual_indexes.begin(), deepstack_visual_indexes.end(), i);
+                 if (deepstack_it != deepstack_visual_indexes.end()) {
+                     size_t deepstack_index = static_cast<size_t>(std::distance(deepstack_visual_indexes.begin(), deepstack_it));
+                     auto deepstack_merger  = std::dynamic_pointer_cast<Qwen3VLDeepStackMerger>(blocks["deepstack_merger_list." + std::to_string(deepstack_index)]);
+                     deepstack_outputs.push_back(deepstack_merger->forward(ctx, x));
++                    ctx->capture_tensor("qwen.vision.deepstack." + std::to_string(deepstack_index), deepstack_outputs.back());
+                 }
+                 sd::ggml_graph_cut::mark_graph_cut(x, "llm.vision.blocks." + std::to_string(i), "x");
+             }
+
+             x = merger->forward(ctx, x);
++            ctx->capture_tensor("qwen.vision.output", x);
+             sd::ggml_graph_cut::mark_graph_cut(x, "llm.vision.final", "x");
+
+             if (window_inverse_index != nullptr) {
+@@ -1455,6 +1460,9 @@
+                 v = k_eq_v ? k : v_proj->forward(ctx, x);  // [N, n_token, num_kv_heads*head_dim]
+             }
+
++            ctx->capture_tensor("qwen.text.debug.qraw", q);
++            ctx->capture_tensor("qwen.text.debug.kraw", k);
++            ctx->capture_tensor("qwen.text.debug.v", v);
+             q = ggml_reshape_4d(ctx->ggml_ctx, q, head_dim, num_heads, n_token, N);     // [N, n_token, num_heads, head_dim]
+             k = ggml_reshape_4d(ctx->ggml_ctx, k, head_dim, num_kv_heads, n_token, N);  // [N, n_token, num_kv_heads, head_dim]
+             v = ggml_reshape_4d(ctx->ggml_ctx, v, head_dim, num_kv_heads, n_token, N);  // [N, n_token, num_kv_heads, head_dim]
+@@ -1466,6 +1474,8 @@
+                 q = q_norm->forward(ctx, q);
+                 k = k_norm->forward(ctx, k);
+             }
++            ctx->capture_tensor("qwen.text.debug.qnorm", q);
++            ctx->capture_tensor("qwen.text.debug.knorm", k);
+             if (v_norm) {
+                 // Gemma 4 normalizes V with a weightless RMS norm, and never rotates it.
+                 v = ggml_rms_norm(ctx->ggml_ctx, v, rms_norm_eps);
+@@ -1638,6 +1648,8 @@
+                 k               = ggml_rope_multi(ctx->ggml_ctx, k, input_pos, nullptr, head_dim, sections, GGML_ROPE_TYPE_MROPE, 128000, 1000000.f, 1.f, 0.f, 1.f, 32.f, 1.f);
+             }
+
++            ctx->capture_tensor("qwen.text.debug.qrope", q);
++            ctx->capture_tensor("qwen.text.debug.krope", k);
+             if (unscaled_attention) {
+                 // Gemma 4 attends with scaling=1.0; undo the helper's own 1/sqrt(head_dim).
+                 q = ggml_ext_scale(ctx->ggml_ctx, q, std::sqrt(static_cast<float>(head_dim)));
+@@ -1672,6 +1684,7 @@
+                 x = ggml_ext_attention_ext(ctx, q, k, v, num_heads, attention_mask, true, ctx->flash_attn_enabled);  // [N, n_token, hidden_size]
+             }
+
++            ctx->capture_tensor("qwen.text.debug.kqv", x);
+             x = out_proj->forward(ctx, x);  // [N, n_token, hidden_size]
+             return x;
+         }
+@@ -1768,14 +1781,18 @@
+
+             auto residual = x;
+             x             = input_layernorm->forward(ctx, x);
++            ctx->capture_tensor("qwen.text.debug.norm", x);
+             x             = self_attn->forward(ctx, x, input_pos, block_attention_mask, rope_index);
++            ctx->capture_tensor("qwen.text.debug.attn", x);
+             if (post_attention_norm != nullptr) {
+                 x = post_attention_norm->forward(ctx, x);
+             }
+             x = ggml_add_inplace(ctx->ggml_ctx, x, residual);
+
++            ctx->capture_tensor("qwen.text.debug.res1", x);
+             residual = x;
+             x        = pre_ffw_norm->forward(ctx, x);
++            ctx->capture_tensor("qwen.text.debug.ffn_norm", x);
+             if (arch == LLMArch::GPT_OSS_20B) {
+                 auto mlp = std::dynamic_pointer_cast<GPTOSSMLP>(blocks["mlp"]);
+                 x        = mlp->forward(ctx, x);
+@@ -1854,6 +1871,7 @@
+                 if (return_all_hidden_states || out_layers.size() > 1) {
+                     x = ggml_cont(ctx->ggml_ctx, x);
+                 }
++                ctx->capture_tensor("qwen.text.block." + std::to_string(i), x);
+                 sd::ggml_graph_cut::mark_graph_cut(x, "llm.text.layers." + std::to_string(i), "x");
+                 if (return_all_hidden_states) {
+                     if (i + 1 < num_layers) {
+@@ -1899,6 +1917,7 @@
+             // return: [N, n_token, hidden_size]
+             auto x = embed(ctx, input_ids);
+             x      = splice_image_embeds(ctx, x, image_embeds);
++            ctx->capture_tensor("qwen.text.embeddings", x);
+             return forward_embeds(ctx,
+                                   x,
+                                   input_pos,
+@@ -2381,7 +2400,7 @@
+                 set_backend_tensor_data(sliding_attention_mask, sliding_attention_mask_vec.data());
+             }
+
+-            auto runner_ctx = get_context();
++            auto runner_ctx = get_context(gf);
+
+             ggml_tensor* hidden_states = forward(&runner_ctx,
+                                                  input_ids,
+@@ -2523,7 +2542,7 @@
+             ggml_cgraph* gf    = new_graph_custom(LLM_GRAPH_SIZE);
+             ggml_tensor* image = make_input(image_tensor);
+
+-            auto runner_ctx = get_context();
++            auto runner_ctx = get_context(gf);
+             auto outputs    = encode_image_outputs(&runner_ctx, image);
+             GGML_ASSERT(!outputs.empty());
+             auto combined = outputs[0];
+--- a/src/model/vae/wan_vae.hpp
++++ b/src/model/vae/wan_vae.hpp
+@@ -138,6 +138,7 @@
+             h              = ggml_mul(ctx->ggml_ctx, h, w);
+             h              = ggml_ext_cont(ctx->ggml_ctx, ggml_ext_torch_permute(ctx->ggml_ctx, h, 1, 2, 3, 0));
+
++            ctx->capture_tensor(std::string("vae.norm.") + ggml_get_name(w), h);
+             return h;
+         }
+     };
+@@ -638,6 +639,7 @@
+
+             auto qkv     = to_qkv->forward(ctx, x);
+             auto qkv_vec = split_image_qkv(ctx->ggml_ctx, qkv);
++            ctx->capture_tensor("qwen.vae.attention.qkv", qkv);
+
+             auto q = qkv_vec[0];
+             q      = ggml_ext_cont(ctx->ggml_ctx, ggml_ext_torch_permute(ctx->ggml_ctx, q, 2, 0, 1, 3));  // [t, h, w, c]
+@@ -656,6 +658,7 @@
+             x = ggml_ext_cont(ctx->ggml_ctx, ggml_permute(ctx->ggml_ctx, x, 1, 0, 2, 3));  // [t, c, h * w]
+             x = ggml_reshape_4d(ctx->ggml_ctx, x, w, h, c, n);                             // [t, c, h, w]
+
++            ctx->capture_tensor("qwen.vae.attention.values", x);
+             x = proj->forward(ctx, x);
+
+             x = ggml_ext_cont(ctx->ggml_ctx, ggml_ext_torch_permute(ctx->ggml_ctx, x, 0, 1, 3, 2));  // (c, t, h, w)
+@@ -1440,7 +1443,7 @@
+             ggml_cgraph* gf = new_graph_custom(10240 * z_tensor.shape()[2]);
+             ggml_tensor* z  = make_input(z_tensor);
+
+-            auto runner_ctx = get_context();
++            auto runner_ctx = get_context(gf);
+
+             ggml_tensor* out = decode_graph ? ae.decode(&runner_ctx, z) : ae.encode(&runner_ctx, z);
+
+--- a/src/qwen_image_2_1_trace.hpp
++++ b/src/qwen_image_2_1_trace.hpp
+@@ -0,0 +1,76 @@
++#pragma once
++
++// Parity-trace helper for the Qwen-Image-2.1 oracle harness. Writes JSONL
++// records with f32 sidecar binaries, mirroring tools/oracle/z_image.
++#include <cstdint>
++#include <cstdlib>
++#include <fstream>
++#include <map>
++#include <mutex>
++#include <string>
++#include <vector>
++
++inline const char* qwen_image_2_1_trace_path() {
++    return std::getenv("QWEN_IMAGE_2_1_ORACLE_TRACE");
++}
++
++inline std::string qwen_image_2_1_trace_json_string(const std::string& value) {
++    std::string out = "\"";
++    for (char ch : value) {
++        if (ch == '\\' || ch == '\"') out += '\\';
++        out += ch;
++    }
++    return out + "\"";
++}
++
++inline bool qwen_image_2_1_trace_raw(const std::string& name,
++                                     const void* data,
++                                     size_t element_size,
++                                     size_t count,
++                                     std::vector<int64_t> shape,
++                                     const char* type) {
++    const char* trace = qwen_image_2_1_trace_path();
++    if (trace == nullptr) return true;
++    while (shape.size() > 1 && shape.back() == 1) shape.pop_back();
++    size_t expected = 1;
++    for (int64_t dimension : shape) {
++        if (dimension < 0) return false;
++        expected *= static_cast<size_t>(dimension);
++    }
++    if (expected != count) return false;
++
++    static std::mutex mutex;
++    static std::map<std::string, size_t> occurrences;
++    std::lock_guard<std::mutex> lock(mutex);
++    size_t occurrence = occurrences[name]++;
++    std::string sidecar = std::string(trace) + "." + name;
++    if (occurrence != 0) sidecar += "." + std::to_string(occurrence);
++    sidecar += "." + std::string(type);
++
++    std::ofstream binary(sidecar, std::ios::binary | std::ios::trunc);
++    binary.write(static_cast<const char*>(data), static_cast<std::streamsize>(count * element_size));
++    if (!binary) return false;
++
++    std::ofstream json(trace, std::ios::app);
++    json << "{\"name\":" << qwen_image_2_1_trace_json_string(name) << ",\"shape\":[";
++    for (size_t i = 0; i < shape.size(); ++i) {
++        if (i != 0) json << ',';
++        json << shape[i];
++    }
++    json << "],\"len\":" << count << ",\"occurrence\":" << occurrence
++         << ",\"binary_path\":" << qwen_image_2_1_trace_json_string(sidecar) << "}\n";
++    return static_cast<bool>(json);
++}
++
++inline bool qwen_image_2_1_trace_f32(const std::string& name,
++                                     const std::vector<float>& values,
++                                     std::vector<int64_t> shape) {
++    return qwen_image_2_1_trace_raw(name, values.data(), sizeof(float), values.size(), std::move(shape), "f32");
++}
++
++inline bool qwen_image_2_1_trace_f32(const std::string& name,
++                                     const float* values,
++                                     size_t count,
++                                     std::vector<int64_t> shape) {
++    return qwen_image_2_1_trace_raw(name, values, sizeof(float), count, std::move(shape), "f32");
++}

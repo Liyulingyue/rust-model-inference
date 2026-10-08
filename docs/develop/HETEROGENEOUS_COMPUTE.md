@@ -62,7 +62,7 @@ dtype 轴是 **dequant + matmul** 的内层选择；op 轴是 **element-wise + a
 | 标量为底 | `kernel/q8_0/scalar.rs`、`activation/*::scalar_*`、`quant/scalar` 等，每个 dtype kernel 都有 scalar fallback | ✅ |
 | 启动期探测 | `has_avx2_fma()` / `has_neon()` / `has_f16c()` / `get_vulkan_context()` 在 `ops/float.rs` 一次性 `init_cpu_features()` 写死 | ✅ |
 | GPU 后端可插拔 | `vulkan.rs` 暴露 `VulkanContext`，`wgpu.rs` 暴露 `WgpuContext`；都通过 `OnceLock` 懒初始化 | ✅（仅 vulkan 有生产路径；wgpu 是 operator-check 级别的原型，见 §3.6） |
-| 正确性参照 | `parity_trace.rs` 落盘 SIMD/GPU 输出与 scalar 对比；`RMI_SCALAR`（仅 `feature=parity-trace` 构建生效）把 `has_avx2_fma()` / `has_neon()` 打成 `false`，所有 `if has_avx2_fma()` 派发点透明回落到 scalar 参照路径，kernel 本身不改，见 §3.7 | ✅ |
+| 正确性参照 | `parity_trace.rs` 在 `feature=parity-trace` 下落盘输出；所有构建均可用 `RMI_SCALAR=1` 把 `has_avx2_fma()` / `has_neon()` 打成 `false`，CPU SIMD 派发点透明回落到 scalar 参照路径，kernel 本身不改，见 §3.7 | ✅ |
 | dtype 抽象 | `Kernel` trait（`forward_prequantized / forward_prepared`）+ 13 个 dtype 实现 + `QuantizedTensor` 枚举 + `Weight<'a>` 持 `Box<dyn Kernel>` | ✅ |
 | GPU 会话 | `Qwen3VulkanSession`（`src/vulkan/qwen3.rs`）、`Qwen35VulkanSession`（`src/vulkan/qwen35.rs`），启动期 `check_eligibility` + 整段 forward 上 GPU | ✅ |
 | 模型级 GPU 开关 | `gpu_matmul_active()` / `disable_gpu_matmul_for_scope()` / `GPU_BROKEN` 三层组合：模型决策 + RAII 作用域 + 进程级熔断 | ✅ |
@@ -335,4 +335,4 @@ src/vulkan/
 * **不接管模型级 GPU Session 的生命周期。** `Qwen3VulkanSession` / `Qwen35VulkanSession` 由 `models/{qwen3,qwen35}/trunk/session.rs` 创建与销毁；Backend Registry 只承载 per-op backend。
 * **不强制 wgpu 接入生产路径。** wgpu 当前是 operator-check 级别的实验后端，与 vulkan 不是平级关系。
 * **不重写 dtype 轴。** `Kernel` trait + 13 个 dtype kernel + `QuantizedTensor` + `Weight<'a>` 已稳定，是 op 轴的统一依赖面；Backend Registry 是 op 轴的薄包装，不是 `Kernel` 的替代。
-* **`parity_trace` 不仅是落盘**——`feature=parity-trace` 构建下 `RMI_SCALAR=1` 会把 `has_avx2_fma()` / `has_neon()` 打成 `false`（`ops/float.rs::scalar_mode`），令所有 `if has_avx2_fma()` 派发点透明回落到 scalar 参照路径。这不是编译期 `#[cfg]` 强制，而是运行期环境变量开关，机制与调用方式见 §3.7。Backend Registry 收敛后这一行为必须保留。
+* **标量精度开关独立于落盘功能**——所有构建下 `RMI_SCALAR=1` 都会把 `has_avx2_fma()` / `has_neon()` 打成 `false`（`ops/float.rs::scalar_mode`），令 CPU SIMD 派发点透明回落到 scalar 参照路径；仅捕获检查点需要 `feature=parity-trace`。这是启动时读取并缓存的运行期环境变量开关，机制与调用方式见 §3.7。Backend Registry 收敛后这一行为必须保留。
