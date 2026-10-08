@@ -82,9 +82,7 @@ impl Qwen35JevScorer {
         image_path: Option<&Path>,
         jinja: &crate::models::chat_template_jinja::Options,
     ) -> Result<Self, String> {
-        let jinja = crate::models::chat_template_jinja::resolve_optional(jinja, &|k| {
-            source.metadata(k).cloned()
-        })?;
+        let jinja = jinja.resolve(&|k| source.metadata(k).cloned())?;
         let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
             .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
         verify_label_tokens_single(&tokenizer)?;
@@ -104,6 +102,49 @@ impl Qwen35JevScorer {
     }
 }
 
+/// What `build_prompt` decided to do with a turn.
+enum PromptPlan {
+    /// Render the prompt here; these are the token ids.
+    Rendered(Vec<u32>),
+    /// Defer to the multimodal forward, which owns the vision placeholders.
+    /// `build_prompt` sets `pending` and returns no ids so `forward_logits`
+    /// takes this branch.
+    Multimodal,
+}
+
+/// Decide how to build the scored prompt.
+///
+/// The image check has to come first. `--jev --image --jinja` used to render
+/// the text through the template and return those ids without setting
+/// `pending`, so `forward_logits` never reached the multimodal path: the
+/// question was scored while the image was silently ignored.
+fn plan_prompt(
+    has_image: bool,
+    tokenizer: &dyn crate::core::tokenizer::Tokenizer,
+    jinja: Option<&crate::models::chat_template_jinja::JinjaChatTemplate>,
+    system: &str,
+    payload: &str,
+) -> Result<PromptPlan, String> {
+    if has_image {
+        return Ok(PromptPlan::Multimodal);
+    }
+    // `--jinja` renders the model's own template. JEV opens the assistant turn
+    // so the next token is the decision being scored, i.e.
+    // `add_generation_prompt = true`. `thinking` is off so the scored position
+    // does not move into a reasoning block.
+    if let Some(template) = jinja {
+        let ids = crate::models::chat_template_jinja::render_text_conversation(
+            tokenizer,
+            template,
+            Some(system),
+            payload,
+            false,
+        )?;
+        return Ok(PromptPlan::Rendered(ids));
+    }
+    Ok(PromptPlan::Multimodal)
+}
+
 impl JevScorer for Qwen35JevScorer {
     fn scorer_label(&self) -> &'static str {
         "Qwen3.5"
@@ -117,20 +158,28 @@ impl JevScorer for Qwen35JevScorer {
         let labels = jev_labels(q);
         let system = jev_system_prompt(q.mode);
         let payload = jev_payload_json(context, q)?;
-        // `--jinja` renders the model's own template. JEV opens the assistant
-        // turn so the next token is the decision being scored, i.e.
-        // `add_generation_prompt = true`, the same value generation uses.
-        // `thinking` off so the scored position does not move into a
-        // reasoning block.
-        if let Some(template) = self.jinja.as_ref() {
-            let ids = crate::models::chat_template_jinja::render_text_conversation(
-                &self.tokenizer,
-                template,
-                Some(system),
-                &payload,
-                false,
-            )?;
-            return Ok((labels, ids));
+        // With an image the prompt is not built here at all: `pending` is set
+        // and the empty token list makes `forward_logits` route to the
+        // multimodal logits helper, which owns the vision placeholders and
+        // applies the template itself.
+        match plan_prompt(
+            self.image.is_some(),
+            &self.tokenizer,
+            self.jinja.as_ref(),
+            system,
+            &payload,
+        )? {
+            PromptPlan::Rendered(ids) => return Ok((labels, ids)),
+            // With an image the prompt is not built here at all: `pending` is
+            // set and the empty token list makes `forward_logits` route to the
+            // multimodal logits helper, which owns the vision placeholders and
+            // applies the template itself.
+            PromptPlan::Multimodal => {
+                if self.image.is_some() {
+                    self.pending = Some((system.to_string(), payload));
+                    return Ok((labels, Vec::new()));
+                }
+            }
         }
         let encoding = EncodeOptions {
             add_special: false,
@@ -185,6 +234,10 @@ impl JevScorer for Qwen35JevScorer {
                 self.prefill_batch_size,
                 8192,
                 Some(&system),
+                &crate::models::chat_template_jinja::Options {
+                    jinja: self.jinja.is_some(),
+                    file: None,
+                },
             );
         }
         run_forward_logits_qwen35_with_batch(
@@ -200,5 +253,48 @@ impl JevScorer for Qwen35JevScorer {
 
     fn tokenizer(&self) -> &BPETokenizer {
         &self.tokenizer
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{plan_prompt, PromptPlan};
+    use crate::core::tokenizer::{MockTokenizer, Tokenizer};
+    use crate::models::chat_template_jinja::JinjaChatTemplate;
+
+    fn marker_template() -> JinjaChatTemplate {
+        JinjaChatTemplate::compile("MARK-{{ messages[0].content }}", "test").unwrap()
+    }
+
+    /// The regression: with an image *and* `--jinja`, `build_prompt` used to
+    /// return the rendered text ids and leave `pending` unset, so
+    /// `forward_logits` scored the text and the image was silently ignored.
+    #[test]
+    fn image_wins_over_the_jinja_text_path() {
+        let tok = MockTokenizer::new();
+        let plan = plan_prompt(true, &tok, Some(&marker_template()), "SYS", "PAY").unwrap();
+        assert!(
+            matches!(plan, PromptPlan::Multimodal),
+            "an image must route to the multimodal forward even with --jinja"
+        );
+    }
+
+    #[test]
+    fn image_without_jinja_also_routes_to_multimodal() {
+        let tok = MockTokenizer::new();
+        let plan = plan_prompt(true, &tok, None, "SYS", "PAY").unwrap();
+        assert!(matches!(plan, PromptPlan::Multimodal));
+    }
+
+    #[test]
+    fn text_only_with_jinja_renders_the_template() {
+        let tok = MockTokenizer::new();
+        let plan = plan_prompt(false, &tok, Some(&marker_template()), "SYS", "PAY").unwrap();
+        match plan {
+            PromptPlan::Rendered(ids) => {
+                assert_eq!(tok.decode(&ids, false), "MARK-SYS");
+            }
+            PromptPlan::Multimodal => panic!("text-only turn must render here"),
+        }
     }
 }

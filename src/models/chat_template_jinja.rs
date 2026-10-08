@@ -25,6 +25,8 @@
 //! A template that references no BOS still gets one from the tokenizer's
 //! `add_bos_token`, so callers must not prepend a second one.
 
+use std::borrow::Cow;
+
 use minijinja::{Environment, UndefinedBehavior};
 use serde_json::{json, Value};
 
@@ -74,66 +76,431 @@ const TEMPLATE_NAME: &str = "chat";
 /// Tags that are llama.cpp extensions rather than Jinja2.
 const LLAMACPP_TAGS: [&str; 2] = ["generation", "endgeneration"];
 
-/// Rewrite `x.get("key")` into `x["key"]`.
+/// Replace `x.get("k")` with a lookup that keeps Python's `None` result.
 ///
-/// Templates authored against Python's Jinja2 reach for `dict.get`, which
-/// minijinja does not implement on maps. For a truthiness test the two are
-/// equivalent under `UndefinedBehavior::Lenient`: a missing key yields
-/// Undefined (falsy) either way, and Python's `None` is falsy too. That
-/// equivalence is pinned by `map_get_rewrites_match_truthiness` below.
+/// minijinja has no `dict.get`, and it cannot be registered: the extension
+/// points are `add_filter` / `add_test` / `add_function` / `add_global`, none
+/// of which add a method to a map. So the call has to be rewritten.
 ///
-/// Only the single string-literal argument form is rewritten. `.get("k", d)`
-/// (a real default) is left alone so minijinja reports it rather than us
-/// silently changing what the template means.
-fn rewrite_map_get(source: &str) -> String {
-    let mut out = String::with_capacity(source.len());
-    let mut rest = source;
-    loop {
-        let Some(at) = rest.find(".get(") else {
-            out.push_str(rest);
-            return out;
-        };
-        out.push_str(&rest[..at]);
-        let after = &rest[at + ".get(".len()..];
-        // Require exactly `"..."` then `)`.
-        let Some(close) = after.find(')') else {
-            out.push_str(".get(");
-            rest = after;
-            continue;
-        };
-        let arg = &after[..close];
-        let single_string_literal = arg.len() >= 2
-            && arg.starts_with('"')
-            && arg.ends_with('"')
-            && !arg[1..arg.len() - 1].contains('"');
-        if single_string_literal {
-            out.push('[');
-            out.push_str(arg);
-            out.push(']');
-        } else {
-            out.push_str(".get(");
-            out.push_str(arg);
-            out.push(')');
+/// `x["k"]` is *not* an equivalent substitution. Jinja2 gives `None` for a
+/// missing key, so `x.get("k") is none` is true; minijinja's `x["k"]` yields
+/// Undefined, and `Undefined is none` is **false**. Rewriting to an index
+/// silently flips `is none` branches, which is why this injects
+/// `| default(__py_none)` instead: that restores the real `None` the template
+/// expects. (`__py_none` rather than `none`, because minijinja's `none` is a
+/// *test*, not a value.)
+///
+/// The scan is string-literal aware. A previous version matched `.get(`
+/// anywhere in the source and rewrote it inside string literals too, so
+/// `{% set s = 'api .get("k")' %}` became `{% set s = 'api ["k"]' %}`.
+/// Find where the receiver expression of a trailing method call starts.
+///
+/// Handles `foo`, `foo.bar`, `foo[0]`, `messages[i].content` and any chain of
+/// those. Returns `None` when the receiver is not recognisable, so the caller
+/// can leave the call alone and let minijinja raise a real error instead of
+/// mangling the template.
+fn is_expr_byte(c: u8) -> bool {
+    matches!(c,
+        b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'.' | b'|'
+        | b'\'' | b'"' | b' ' | b'\t' | b'\n' | b'\r'
+        | b'(' | b')' | b'[' | b']')
+}
+
+fn is_space(c: u8) -> bool {
+    matches!(c, b' ' | b'\t' | b'\n' | b'\r')
+}
+
+/// The identifier starting at `at`, if there is one.
+fn leading_word(text: &str, at: usize) -> Option<&str> {
+    let bytes = text.as_bytes();
+    let mut end = at;
+    while end < text.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
+        end += 1;
+    }
+    if end == at {
+        return None;
+    }
+    Some(&text[at..end])
+}
+
+/// Tag words that can sit immediately before an expression.
+const JINJA_KEYWORDS: &[&str] = &[
+    "if", "elif", "else", "endif", "for", "endfor", "in", "is", "not", "and", "or", "set",
+    "endset", "when", "endwhen", "with", "as", "by", "macro", "endmacro", "call", "filter",
+    "block", "include", "extends", "import", "from", "do", "true", "false", "none",
+];
+
+/// True when every bracket in `text` is closed, in order.
+fn is_balanced(text: &str) -> bool {
+    let mut depth = 0i32;
+    for c in text.bytes() {
+        match c {
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => {
+                depth -= 1;
+                if depth < 0 {
+                    return false;
+                }
+            }
+            _ => {}
         }
-        rest = &after[close + 1..];
+    }
+    depth == 0
+}
+
+/// Where the receiver of the method call ending at `text` starts.
+///
+/// The capture must be bracket-balanced; an unbalanced prefix means the scan
+/// landed inside an expression it cannot describe, and rewriting it would
+/// corrupt the template, so it is rejected and the call is left verbatim.
+fn receiver_start(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut start = text.len();
+    let mut depth = 0i32;
+    while start > 0 {
+        let c = bytes[start - 1];
+        if c == b')' || c == b']' {
+            depth += 1;
+            start -= 1;
+            continue;
+        }
+        if c == b'(' || c == b'[' {
+            if depth == 0 {
+                break;
+            }
+            depth -= 1;
+            start -= 1;
+            continue;
+        }
+        // Step back over a whole string literal: a comma inside `'a,b'` would
+        // otherwise look like an operator and truncate the receiver.
+        if depth == 0 && (c == b'\'' || c == b'"') {
+            let mut k = start - 2;
+            let mut found = false;
+            while k > 0 {
+                k -= 1;
+                match bytes[k] {
+                    d if d == c => {
+                        start = k;
+                        found = true;
+                        break;
+                    }
+                    b'\\' if k > 0 => k -= 1,
+                    _ => {}
+                }
+            }
+            if !found {
+                return None;
+            }
+            continue;
+        }
+        // `{`, `}`, `%` and operators end the receiver. In practice `%}` stops
+        // the scan at the end of the enclosing `{% ... %}` block, so a capture
+        // cannot escape the current expression.
+        if depth == 0 && !is_expr_byte(c) {
+            break;
+        }
+        start -= 1;
+    }
+    let mut head = start;
+    while head < text.len() && (is_space(bytes[head]) || bytes[head] == b'.') {
+        head += 1;
+    }
+    if head >= text.len() || head == 0 {
+        return None;
+    }
+    // `{% if s.startswith(p) %}`: the scan stops at `%}` and the capture would
+    // otherwise start at the `if`. Keywords belong to the tag, not the
+    // receiver.
+    while let Some(word) = leading_word(text, head) {
+        if !JINJA_KEYWORDS.contains(&word) {
+            break;
+        }
+        let mut next = head + word.len();
+        while next < text.len() && is_space(bytes[next]) {
+            next += 1;
+        }
+        if next >= text.len() {
+            return None;
+        }
+        head = next;
+    }
+    if !is_balanced(&text[head..]) {
+        return None;
+    }
+    let first = bytes[head];
+    if !(first.is_ascii_alphanumeric()
+        || first == b'_'
+        || first == b'\''
+        || first == b'"'
+        || first == b'(')
+    {
+        return None;
+    }
+    Some(head)
+}
+
+/// Remove fully enclosing parentheses so nesting does not grow on each pass.
+fn strip_outer_parens(text: &str) -> &str {
+    let mut s = text.trim();
+    loop {
+        let Some(inner) = s.strip_prefix('(') else {
+            break;
+        };
+        let Some(rest) = inner.strip_suffix(')') else {
+            break;
+        };
+        let _ = rest;
+        let body = &inner[..inner.len() - 1];
+        if !is_balanced(body) {
+            break;
+        }
+        s = body.trim();
+    }
+    s
+}
+
+/// Python's `str.lstrip`/`str.rstrip`: with no argument they strip whitespace,
+/// with one they strip any of the given characters.
+fn trim_py<'a>(s: &'a str, chars: Option<&str>, left: bool) -> &'a str {
+    match chars {
+        Some(set) => {
+            let set: Vec<char> = set.chars().collect();
+            let pred = |c: char| set.contains(&c);
+            if left {
+                s.trim_start_matches(pred)
+            } else {
+                s.trim_end_matches(pred)
+            }
+        }
+        None => {
+            if left {
+                s.trim_start()
+            } else {
+                s.trim_end()
+            }
+        }
     }
 }
 
-/// Rewrite llama.cpp-only template tags into no-op comments.
+/// Python string methods that Jinja2 templates call but that minijinja has no
+/// method for. Each is rewritten to the identically named filter.
+const STRING_METHODS: &[&str] = &["startswith", "endswith", "lstrip", "rstrip", "split"];
+
+/// Rewrite the Python-flavoured constructs that minijinja cannot run.
 ///
-/// LFM2.5-8B-A1B's shipped template uses `{% generation %}` /
-/// `{% endgeneration %}` to bracket the span the model is expected to
-/// produce. That is llama.cpp bookkeeping (generation detection,
-/// spec-decode masks, `CONTINUE_FINAL_MESSAGE_TAG` handling) and it emits
-/// nothing, so dropping it cannot change a single-pass render.
+/// minijinja has no `dict.get`, and it cannot be registered as a method: the
+/// extension points are `add_filter` / `add_test` / `add_function` /
+/// `add_global`, none of which add a method to a map or string. So the call
+/// has to be rewritten.
 ///
-/// Whitespace control must survive. `{%- generation -%}` trims whitespace
-/// on both sides, so it becomes the comment `{#- -#}` — a comment carrying
-/// the same trim markers — rather than plain nothing.
+/// `x.get("k")` must NOT become `x["k"]`: Jinja2 returns `None` for a missing
+/// key, so `x.get("k") is none` is true, while minijinja's `x["k"]` yields
+/// Undefined and `Undefined is none` is **false**. Rewriting to an index
+/// silently flips `is none` branches, so this emits
+/// `x["k"]|default(__py_none)` instead, which restores the `None`.
 ///
-/// Only these two tags are rewritten. Every other statement is left alone
-/// so minijinja reports anything it does not understand, instead of us
-/// silently mangling a template we failed to parse.
+/// The scan is string-literal aware, because a naive `find(".get(")` also
+/// rewrote inside string literals -- `{% set s = 'api .get("k")' %}` became
+/// `{% set s = 'api ["k"]' %}`. Only `{# #}` comments and `{% raw %}` blocks
+/// are skipped wholesale; `{% ... %}` and `{{ ... }}` are code and are
+/// scanned, since `{% if d.get("k") %}` needs the rewrite too.
+fn rewrite_python_compat(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut out = String::with_capacity(source.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        // `{# ... #}` is a Jinja comment: verbatim.
+        if b == b'{' && i + 1 < bytes.len() && bytes[i + 1] == b'#' {
+            let end = source[i..]
+                .find("#}")
+                .map(|p| i + p + 2)
+                .unwrap_or(bytes.len());
+            out.push_str(&source[i..end]);
+            i = end;
+            continue;
+        }
+        // `{% raw %}` ... `{% endraw %}` is literal text, not code.
+        if source[i..].starts_with("{% raw")
+            || source[i..].starts_with("{%- raw")
+            || source[i..].starts_with("{%+ raw")
+        {
+            let end = source[i..]
+                .find("{% endraw")
+                .or_else(|| source[i..].find("{%- endraw"))
+                .map(|p| i + p)
+                .and_then(|p| source[p..].find("%}").map(|q| p + q + 2))
+                .unwrap_or(bytes.len());
+            out.push_str(&source[i..end]);
+            i = end;
+            continue;
+        }
+        // String literals are verbatim wherever they appear.
+        if b == b'\'' || b == b'"' {
+            let quote = b;
+            let start = i;
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\\' {
+                    i += 2;
+                    continue;
+                }
+                if bytes[i] == quote {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            out.push_str(&source[start..i]);
+            continue;
+        }
+        if b == b'.' {
+            // `x.get("k")` -> `x["k"]|default(__py_none)`
+            if source[i..].starts_with(".get(") {
+                let arg_start = i + ".get(".len();
+                if let Some(rel) = source[arg_start..].find(')') {
+                    let close = arg_start + rel;
+                    let arg = source[arg_start..close].trim();
+                    let quoted = match arg.as_bytes().first() {
+                        Some(q @ (b'"' | b'\'')) if arg.len() >= 2 && arg.ends_with(*q as char) => {
+                            !arg[1..arg.len() - 1].contains(*q as char)
+                        }
+                        _ => false,
+                    };
+                    if quoted {
+                        // The filter must sit outside the brackets: a filter
+                        // inside them decorates the *key*, leaving `x["k"]`
+                        // and `is none` false again.
+                        out.push('[');
+                        out.push_str(arg);
+                        out.push_str("]|default(__py_none)");
+                        i = close + 1;
+                        continue;
+                    }
+                    // Multi-arg `.get(k, d)` really does change meaning; leave
+                    // it for minijinja to report rather than rewrite it.
+                }
+            }
+        }
+        let ch = source[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// Rewrite one `x.method(args)` call into `x|filter(args)`, if `name` is a
+/// supported Python string method and the receiver can be identified.
+fn rewrite_one_string_method(
+    text: &str,
+    start: usize,
+    dot: usize,
+    name: &str,
+    arg_start: usize,
+    close: usize,
+) -> Option<String> {
+    let receiver = &text[start..dot];
+    let expr = strip_outer_parens(receiver);
+    if expr.is_empty() {
+        return None;
+    }
+    let args = rewrite_string_methods(&text[arg_start..close]);
+    let mut out = String::with_capacity(text.len() + 8);
+    // The receiver goes in parentheses: `a|b[0]` does not parse, so a filter
+    // has to bind to a grouped expression when the chain also subscripts.
+    out.push_str(&text[..start]);
+    // The group must close *after* the filter call. `(a)|split(p)[0]` does not
+    // parse -- minijinja binds `[0]` to the filter name -- so a following
+    // subscript has to apply to `(a|split(p))`.
+    out.push('(');
+    out.push_str(expr);
+    out.push('|');
+    out.push_str(name);
+    out.push('(');
+    out.push_str(&args);
+    out.push_str("))");
+    out.push_str(&text[close + 1..]);
+    Some(out)
+}
+
+/// One left-to-right pass that rewrites the first resolvable string-method
+/// call it finds, leaving everything else untouched.
+fn rewrite_string_methods_once(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'{' && i + 1 < bytes.len() && bytes[i + 1] == b'#' {
+            i = text[i..]
+                .find("#}")
+                .map(|p| i + p + 2)
+                .unwrap_or(bytes.len());
+            continue;
+        }
+        if text[i..].starts_with("{% raw") || text[i..].starts_with("{%- raw") {
+            i = text[i..]
+                .find("{% endraw")
+                .or_else(|| text[i..].find("{%- endraw"))
+                .map(|p| i + p)
+                .and_then(|p| text[p..].find("%}").map(|q| p + q + 2))
+                .unwrap_or(bytes.len());
+            continue;
+        }
+        if b == b'\'' || b == b'"' {
+            let quote = b;
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\\' {
+                    i += 2;
+                    continue;
+                }
+                if bytes[i] == quote {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if b == b'.' {
+            if let Some(name) = STRING_METHODS
+                .iter()
+                .find(|name| text[i..].starts_with(&format!(".{name}(")))
+            {
+                let arg_start = i + name.len() + 2;
+                if let Some(rel) = text[arg_start..].find(')') {
+                    let close = arg_start + rel;
+                    if let Some(start) = receiver_start(&text[..i]) {
+                        return rewrite_one_string_method(text, start, i, name, arg_start, close);
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Rewrite every supported Python string method call into a filter call.
+///
+/// This has to be iterative. Handlers chain -- Edge0 ships
+/// `content.split('</think>')[0].rstrip('\n').split('<think>')[-1]` -- and each
+/// rewrite re-scans the result, so the receiver is always read from text whose
+/// rewritten parts are already parenthesised. Every pass strictly reduces the
+/// number of remaining method calls, so it terminates.
+fn rewrite_string_methods(source: &str) -> String {
+    let mut text = source.to_string();
+    // Bounded: each pass removes at least one call, and templates are small.
+    for _ in 0..256 {
+        match rewrite_string_methods_once(&text) {
+            Some(next) => text = next,
+            None => break,
+        }
+    }
+    text
+}
+
 fn strip_llamacpp_extensions(source: &str) -> String {
     let mut out = String::with_capacity(source.len());
     let mut rest = source;
@@ -188,7 +555,39 @@ impl JinjaChatTemplate {
         // pathological template cannot hang a server request.
         env.set_fuel(Some(2_000_000));
         env.set_keep_trailing_newline(true);
-        let source = rewrite_map_get(&strip_llamacpp_extensions(source));
+        // A genuine `None` for `.get()` rewrites to fall back to. minijinja's
+        // `none` is a *test*, not a value, so it cannot be used here.
+        env.add_global("__py_none", minijinja::Value::from(()));
+        // String methods that minijinja lacks; `rewrite_python_compat` turns
+        // `x.startswith(p)` into `x|startswith(p)`.
+        env.add_filter("startswith", |s: Cow<'_, str>, p: Cow<'_, str>| {
+            s.starts_with(&*p)
+        });
+        env.add_filter("endswith", |s: Cow<'_, str>, p: Cow<'_, str>| {
+            s.ends_with(&*p)
+        });
+        // minijinja's builtin `split` yields a lazy sequence, which cannot be
+        // indexed negatively, so Python's `s.split(p)[-1]` would silently
+        // return the first element. A real list keeps list semantics.
+        env.add_filter(
+            "split",
+            |s: Cow<'_, str>, pat: Option<Cow<'_, str>>| -> Vec<String> {
+                match pat {
+                    Some(p) => s.split(&*p).map(str::to_string).collect(),
+                    None => s.split_whitespace().map(str::to_string).collect(),
+                }
+            },
+        );
+        // Python's `lstrip`/`rstrip` take an optional set of characters, so
+        // `rstrip('\n')` must be accepted as well as a bare `rstrip()`.
+        env.add_filter("lstrip", |s: Cow<'_, str>, chars: Option<Cow<'_, str>>| {
+            trim_py(&s, chars.as_deref(), true).to_string()
+        });
+        env.add_filter("rstrip", |s: Cow<'_, str>, chars: Option<Cow<'_, str>>| {
+            trim_py(&s, chars.as_deref(), false).to_string()
+        });
+        let source = rewrite_python_compat(&strip_llamacpp_extensions(source));
+        let source = rewrite_string_methods(&source);
         env.add_template_owned(TEMPLATE_NAME, source)
             .map_err(|e| format!("{origin}: invalid chat template: {e}"))?;
         Ok(Self {
@@ -336,7 +735,14 @@ impl Options {
         self.jinja || self.file.is_some()
     }
 
-    /// Resolve against a GGUF source, or `Fallback` when Jinja2 is off.
+    /// Resolve to the template that applies, or `None` when the caller should
+    /// fall back to its hand-written builder.
+    ///
+    /// Precedence matches llama.cpp: an explicit `--chat-template-file` wins,
+    /// then the GGUF's own `tokenizer.chat_template`. Jinja2 is never used
+    /// unless asked for: turning it on by default would change the token ids
+    /// of every model whose template disagrees with our builder, which is
+    /// exactly the kind of silent change the A/B test exists to catch.
     pub fn resolve(
         &self,
         metadata: &dyn Fn(&str) -> Option<crate::core::tensor::MetaValue>,
@@ -344,54 +750,17 @@ impl Options {
         if !self.enabled() {
             return Ok(None);
         }
-        Ok(resolve(self.file.as_deref(), self.jinja, metadata)?.jinja())
-    }
-}
-
-/// Which chat template to use, and why.
-///
-/// Precedence, matching llama.cpp: an explicit file wins, then the GGUF's
-/// own `tokenizer.chat_template`, then `None` meaning "let the caller fall
-/// back to the hand-written builder".
-pub enum Resolved {
-    /// Render this template.
-    Jinja(Box<JinjaChatTemplate>),
-    /// No Jinja2 template is available; use the existing builder.
-    Fallback,
-}
-
-impl Resolved {
-    pub fn jinja(self) -> Option<JinjaChatTemplate> {
-        match self {
-            Self::Jinja(t) => Some(*t),
-            Self::Fallback => None,
+        if let Some(path) = self.file.as_deref() {
+            return template_from_file(path).map(Some);
+        }
+        // `template_from_source` reports "the model ships no template" as
+        // `None`, and a broken one as `Err`.
+        match template_from_source(metadata) {
+            Some(Ok(template)) => Ok(Some(template)),
+            Some(Err(error)) => Err(error),
+            None => Ok(None),
         }
     }
-}
-
-/// Decide which template applies.
-///
-/// `file` is `--chat-template-file` (implies Jinja2). `use_jinja` is
-/// `--jinja`, i.e. "use whatever the GGUF ships". Jinja2 is never used
-/// unless asked for: turning it on by default would change the token ids
-/// of every model whose template disagrees with our builder, which is
-/// exactly the kind of silent change the A/B test exists to catch.
-pub fn resolve(
-    file: Option<&std::path::Path>,
-    use_jinja: bool,
-    metadata: &dyn Fn(&str) -> Option<crate::core::tensor::MetaValue>,
-) -> Result<Resolved, String> {
-    if let Some(path) = file {
-        return Ok(Resolved::Jinja(Box::new(template_from_file(path)?)));
-    }
-    if use_jinja {
-        return match template_from_source(metadata) {
-            Some(Ok(t)) => Ok(Resolved::Jinja(Box::new(t))),
-            Some(Err(e)) => Err(e),
-            None => Ok(Resolved::Fallback),
-        };
-    }
-    Ok(Resolved::Fallback)
 }
 
 /// Render a one-turn conversation to token ids, or `None` when Jinja2 was
@@ -514,9 +883,70 @@ pub fn expand_vision_placeholders(
     Ok(out)
 }
 
+/// Build the `content` field for the user turn.
+///
+/// With no media this is a plain string, the shape templates treat as "no
+/// media at all". With media it is always an array: collapsing a lone part back
+/// to a bare string used to drop an image-only message entirely, because the
+/// single part was `{"type": "image"}`, `.get("text")` was absent, and it
+/// silently became `""`.
+fn build_user_content(media: &[MediaPart], user_text: &str) -> Value {
+    if media.is_empty() {
+        return Value::String(user_text.to_string());
+    }
+    let mut parts: Vec<Value> = Vec::with_capacity(media.len() + 1);
+    for m in media {
+        parts.push(json!({ "type": m.kind.as_str() }));
+    }
+    if !user_text.is_empty() {
+        parts.push(json!({ "type": "text", "text": user_text }));
+    }
+    Value::Array(parts)
+}
+
+/// What kind of attachment a content part carries.
+///
+/// Templates branch on this: Qwen's emit an image block, while video models
+/// expect `type == "video"`. Every part used to be hard-coded to `image`, so a
+/// non-image model could never render its own template correctly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MediaKind {
+    Image,
+    Video,
+    Audio,
+}
+
+impl MediaKind {
+    /// The value used in the content part's `type` field.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MediaKind::Image => "image",
+            MediaKind::Video => "video",
+            MediaKind::Audio => "audio",
+        }
+    }
+}
+
+/// One media attachment in a multimodal prompt.
+#[derive(Clone, Copy, Debug)]
+pub struct MediaPart {
+    pub kind: MediaKind,
+    /// How many vision placeholders this attachment expands to.
+    pub token_count: usize,
+}
+
+impl MediaPart {
+    pub fn image(token_count: usize) -> Self {
+        Self {
+            kind: MediaKind::Image,
+            token_count,
+        }
+    }
+}
+
 /// Render one user turn carrying media, expanding the vision placeholder.
 ///
-/// `media_counts[i]` is the number of grid tokens the projector produced
+/// `media[i].token_count` is the number of grid tokens the projector produced
 /// for the i-th media item. The template emits one placeholder per item, so
 /// [`expand_vision_placeholders`] lines them up.
 ///
@@ -527,19 +957,19 @@ pub fn media_conversation_tokens(
     opts: &Options,
     metadata: &dyn Fn(&str) -> Option<crate::core::tensor::MetaValue>,
     placeholder_id: u32,
-    media_counts: &[usize],
+    media: &[MediaPart],
     user_text: &str,
     system_text: Option<&str>,
     enable_thinking: bool,
 ) -> Result<Option<Vec<u32>>, String> {
-    let media_counts = media_counts.to_vec();
+    let media_counts: Vec<usize> = media.iter().map(|m| m.token_count).collect();
     let Some(mut ids) = text_conversation_tokens(
         tokenizer,
         opts,
         metadata,
         system_text,
         user_text,
-        &media_counts,
+        media,
         enable_thinking,
     )?
     else {
@@ -565,7 +995,7 @@ pub fn text_conversation_tokens(
     metadata: &dyn Fn(&str) -> Option<crate::core::tensor::MetaValue>,
     system_text: Option<&str>,
     user_text: &str,
-    media_counts: &[usize],
+    media: &[MediaPart],
     enable_thinking: bool,
 ) -> Result<Option<Vec<u32>>, String> {
     let Some(template) = opts.resolve(metadata)? else {
@@ -576,25 +1006,7 @@ pub fn text_conversation_tokens(
     if let Some(system) = system_text.filter(|s| !s.trim().is_empty()) {
         messages.push(ChatMessage::text("system", system));
     }
-    let mut parts: Vec<Value> = Vec::with_capacity(media_counts.len() + 1);
-    for _ in media_counts {
-        parts.push(json!({ "type": "image" }));
-    }
-    if !user_text.is_empty() {
-        parts.push(json!({ "type": "text", "text": user_text }));
-    }
-    let content = if media_counts.is_empty() {
-        // No media: hand the template a plain string, the shape it treats
-        // as "no media at all".
-        Value::String(user_text.to_string())
-    } else if parts.len() == 1 {
-        parts[0]
-            .get("text")
-            .cloned()
-            .unwrap_or(Value::String(String::new()))
-    } else {
-        Value::Array(parts)
-    };
+    let content = build_user_content(media, user_text);
     messages.push(ChatMessage {
         role: "user".into(),
         content,
@@ -613,13 +1025,6 @@ pub fn text_conversation_tokens(
 /// The JEV scorers resolve in their constructor (the only place with the
 /// `TensorSource` to hand) and then render per question, so the template is
 /// stored rather than re-resolved.
-pub fn resolve_optional(
-    opts: &Options,
-    metadata: &dyn Fn(&str) -> Option<crate::core::tensor::MetaValue>,
-) -> Result<Option<JinjaChatTemplate>, String> {
-    opts.resolve(metadata)
-}
-
 /// Render `[system?, user]` with an already-resolved template, opening the
 /// assistant turn.
 ///
@@ -778,26 +1183,228 @@ mod tests {
     }
 
     #[test]
-    fn map_get_rewrites_match_truthiness() {
-        // The premise behind rewriting `x.get("k")` as `x["k"]` is that the
-        // two agree on truthiness for present / absent / empty values.
-        // Assert it directly rather than trusting the argument.
-        let via_get =
-            "{% for m in messages %}{% if m.get(\"content\") %}T{% else %}F{% endif %}{% endfor %}";
+    fn map_get_preserves_none_semantics() {
+        // The old test only checked truthiness, which made it look like the
+        // rewrite was equivalent. It is not: `x["k"] is none` is false in
+        // minijinja while `x.get("k") is none` is true in Jinja2. This pins
+        // the identity test that actually changed.
+        let via_get = "{% set d = {} %}{% if d.get(\"k\") is none %}NONE{% else %}NOT{% endif %}";
+        let via_index = "{% set d = {} %}{% if d[\"k\"]|default(__py_none) is none %}NONE{% else %}NOT{% endif %}";
+        assert_eq!(render(via_get, true, false), render(via_index, true, false));
+        assert_eq!(render(via_get, true, false), "NONE");
+    }
+
+    #[test]
+    fn map_get_truthiness_is_still_equivalent() {
+        let via_get = "{% set d = {} %}{% if d.get(\"k\") %}T{% else %}F{% endif %}";
         let via_index =
-            "{% for m in messages %}{% if m[\"content\"] %}T{% else %}F{% endif %}{% endfor %}";
-        for content in [Some("hello"), Some(""), None] {
-            let a = eval_with_content(via_get, content);
-            let b = eval_with_content(via_index, content);
-            assert_eq!(a, b, "content={content:?}: {a} vs {b}");
+            "{% set d = {} %}{% if d[\"k\"]|default(__py_none) %}T{% else %}F{% endif %}";
+        assert_eq!(render(via_get, true, false), render(via_index, true, false));
+    }
+
+    #[test]
+    fn get_inside_a_string_literal_is_not_rewritten() {
+        // Regression: a naive `find(".get(")` scan rewrote string literals,
+        // so this template rendered `the api ["k"] call`.
+        let src = "{% set s = 'the api .get(\"k\") call' %}{{ s }}";
+        assert_eq!(render(src, true, false), "the api .get(\"k\") call");
+    }
+
+    #[test]
+    fn get_with_single_quotes_is_handled() {
+        // Gemma4's template uses single-quoted keys; the first version of the
+        // rewrite only recognised double quotes and left these to fail with
+        // "unknown method: map has no method named get".
+        let src = "{% set d = {'k': 'v'} %}{{ d.get('k') }}";
+        assert_eq!(render(src, true, false), "v");
+    }
+
+    #[test]
+    fn startswith_on_a_variable_works() {
+        // Qwen3.5's template calls `.startswith(...)`, which minijinja
+        // rejects with "unknown method: string has no method named
+        // startswith". It has no `add_method`, so the call is rewritten to the
+        // registered `startswith` filter.
+        let src = "{% set s = '<think>x' %}{% if s.startswith('<think>') %}T{% else %}F{% endif %}";
+        assert_eq!(render(src, true, false), "T");
+    }
+
+    #[test]
+    fn startswith_on_an_indexed_field_works() {
+        let src =
+            "{% set m = [{'c': 'hello'}] %}{% if m[0].c.startswith('he') %}T{% else %}F{% endif %}";
+        assert_eq!(render(src, true, false), "T");
+    }
+
+    #[test]
+    fn startswith_false_branch_is_reachable() {
+        let src = "{% set s = 'nope' %}{% if s.startswith('yes') %}T{% else %}F{% endif %}";
+        assert_eq!(render(src, true, false), "F");
+    }
+
+    #[test]
+    fn endswith_lstrip_rstrip_and_split_work() {
+        // Each of these is a Python string method that minijinja has no method
+        // for; they are rewritten onto registered filters.
+        assert_eq!(
+            render(
+                "{% set s = 'x.py' %}{% if s.endswith('.py') %}T{% else %}F{% endif %}",
+                true,
+                false
+            ),
+            "T"
+        );
+        assert_eq!(
+            render("{% set s = '  a,b  ' %}[{{ s.lstrip() }}]", true, false),
+            "[a,b  ]"
+        );
+        assert_eq!(
+            render("{% set s = '  a,b  ' %}[{{ s.rstrip() }}]", true, false),
+            "[  a,b]"
+        );
+        assert_eq!(
+            render(
+                "{% set s = '  a,b  ' %}{{ s.split(',')|join('|') }}",
+                true,
+                false
+            ),
+            "  a|b  "
+        );
+    }
+
+    #[test]
+    fn get_inside_a_raw_block_is_left_alone() {
+        let src = "{% raw %}d.get(\"k\"){% endraw %}";
+        assert_eq!(render(src, true, false), "d.get(\"k\")");
+    }
+
+    #[test]
+    fn tmp_dbg2() {
+        let src =
+            std::fs::read_to_string("models/Edge0-35B-A3B-preview/chat_template.jinja").unwrap();
+        let out = rewrite_python_compat(&strip_llamacpp_extensions(&src));
+        for (n, l) in out.lines().enumerate() {
+            if n + 1 == 95 || n + 1 == 96 {
+                println!("L{}: {}", n + 1, l);
+            }
         }
+    }
+
+    #[test]
+    fn tmp_dbg3() {
+        for src in [
+            r#"{% set s = '<think>x' %}{% if s.startswith('<think>') %}T{% else %}F{% endif %}"#,
+            r#"{% set m = [{'c': 'hello'}] %}{% if m[0].c.startswith('he') %}T{% endif %}"#,
+            r#"{{ 'a,b'.split(',')[0] }}"#,
+        ] {
+            println!("IN : {}", src);
+            println!("MID: {}", rewrite_python_compat(src));
+            println!(
+                "OUT: {}",
+                rewrite_string_methods(&rewrite_python_compat(src))
+            );
+        }
+    }
+
+    #[test]
+    fn chained_string_methods_keep_python_semantics() {
+        // Edge0 ships `content.split('</think>')[0].rstrip('\n').split('<think>')[-1]`,
+        // so the rewrite has to survive a chain *and* keep the value right, not
+        // just parse. The expected values are what CPython produces for
+        // c = 'a</think>b<think>c': 'a' and 'b<think>c'.
+        let src = "{% set c = 'a</think>b<think>c' %}\
+                   {% set r = c.split('</think>')[0].rstrip('\n').split('<think>')[-1].lstrip('\n') %}\
+                   {% set t = c.split('</think>')[-1].lstrip('\n') %}\
+                   [{{ r }}][{{ t }}]";
+        assert_eq!(render(src, true, false), "[a][b<think>c]");
+    }
+
+    #[test]
+    fn split_returns_a_real_list() {
+        // minijinja's builtin `split` yields a lazy sequence whose `[-1]`
+        // returns the *first* element; Python needs the last.
+        assert_eq!(render("{{ ['a','b','c'][-1] }}", true, false), "c");
+        assert_eq!(
+            render("{% set s = 'a,b,c' %}{{ (s|split(','))[-1] }}", true, false),
+            "c"
+        );
+    }
+
+    #[test]
+    fn lstrip_and_rstrip_accept_a_character_set() {
+        assert_eq!(render("{{ 'a\n\n'|rstrip('\n') }}", true, false), "a");
+        assert_eq!(render("{{ '\n\na'|lstrip('\n') }}", true, false), "a");
+        assert_eq!(render("{{ '  a  '|rstrip() }}", true, false), "  a");
+    }
+
+    /// A media part whose `type` the template can branch on.
+    const MEDIA_ECHO: &str = "{% for m in messages %}{% for c in m.content %}\
+        [{{ c.type }}]{% endfor %}{% endfor %}";
+
+    #[test]
+    fn media_kind_is_preserved() {
+        let t = JinjaChatTemplate::compile(MEDIA_ECHO, "t").unwrap();
+        let rendered = t
+            .render(
+                &[ChatMessage {
+                    role: "user".into(),
+                    content: serde_json::json!([
+                        { "type": "image" },
+                        { "type": "video" },
+                        { "type": "text", "text": "hi" }
+                    ]),
+                }],
+                true,
+                false,
+                &SpecialTokens::default(),
+            )
+            .unwrap();
+        assert_eq!(rendered, "[image][video][text]");
+    }
+
+    #[test]
+    fn image_only_turn_keeps_its_image() {
+        // Regression: a single image with no user text used to collapse to `""`
+        // and the attachment disappeared from the prompt entirely.
+        let content = build_user_content(&[MediaPart::image(4)], "");
+        assert_eq!(content, serde_json::json!([{ "type": "image" }]));
+    }
+
+    #[test]
+    fn content_shapes() {
+        assert_eq!(build_user_content(&[], "hi"), Value::String("hi".into()));
+        assert_eq!(build_user_content(&[], ""), Value::String("".into()));
+        assert_eq!(
+            build_user_content(&[MediaPart::image(4)], "hi"),
+            serde_json::json!([{ "type": "image" }, { "type": "text", "text": "hi" }])
+        );
+        assert_eq!(
+            build_user_content(
+                &[
+                    MediaPart::image(4),
+                    MediaPart {
+                        kind: MediaKind::Video,
+                        token_count: 9,
+                    },
+                ],
+                "",
+            ),
+            serde_json::json!([{ "type": "image" }, { "type": "video" }])
+        );
+    }
+
+    #[test]
+    fn media_kind_labels_are_stable() {
+        assert_eq!(MediaKind::Image.as_str(), "image");
+        assert_eq!(MediaKind::Video.as_str(), "video");
+        assert_eq!(MediaKind::Audio.as_str(), "audio");
     }
 
     #[test]
     fn two_arg_get_is_left_alone() {
         // `.get(k, default)` really does change meaning; we must not
         // rewrite it, and minijinja should be the one to complain.
-        let src = rewrite_map_get(r#"{% if m.get("k", "d") %}x{% endif %}"#);
+        let src = rewrite_python_compat(r#"{% if m.get("k", "d") %}x{% endif %}"#);
         assert!(src.contains(r#".get("k", "d")"#), "{src}");
     }
 

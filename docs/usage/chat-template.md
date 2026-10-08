@@ -147,6 +147,8 @@ Mistral / Zephyr / Granite / Nanbeige 判定链 —— 模板本身就是规范�
 
 | 多模态 qwen3vl | `qwen2vl` / `qwen3vl` / `qwen3vlmoe` | `src/app/text/multimodal.rs`（`run_qwen3_family_multimodal`） |
 | 多模态 qwen35 | `qwen35` | `src/app/text/multimodal.rs`（logits 变体，同一契约） |
+| JEV grouped | 9 个 grouped wrapper | `src/app/jev/grouped.rs::grouped_prompt_via_jinja` |
+| JEV qwen35 带图 | `qwen35` | `src/app/jev/single/qwen35.rs::plan_prompt` |
 
 ### 多模态：模板已经知道怎么写，我们之前只是没用
 
@@ -208,16 +210,58 @@ system 是 `jev_system_prompt(mode)`、user 是 `jev_payload_json(...)`，都由
 
 **11/11 arch 全部接入**：`gemma4` / `nemotron_h` / `spark` / `llama` /
 `qwen35` / `qwen3` / `hunyuan` / `falcon_h1` / `lfm2` / `lfm2.5` / `lfm2moe`。
-grouped scorer 委托给 single 的 `build_prompt`，所以改动集中在 single 实现；
-`qwen3` 走共享的 `build_jev_prompt`（`single.rs:461`），改一处同时覆盖 single
-与 grouped。
-
 模板在 `new()` 里解析一次存成 `Option<JinjaChatTemplate>`（那里才有
 `TensorSource`），`build_prompt` 只负责渲染 —— 因此每个 scorer 的改动是
 「一个字段 + 一个构造参数 + 一个分支」。
 
+**注意：grouped 不委托 single 的 `build_prompt`。** grouped 在
+`build_grouped_prompt` 里自己出 prompt，走自由函数
+`grouped.rs::grouped_prompt_via_jinja`（`hunyuan` 另有分支）。早期版本把模板
+字段存进 scorer 后**再没读过**，于是 9 个 grouped 实现里 `--jinja` 全是 no-op；
+现在每个 grouped wrapper 都把 `self.inner.jinja` 传进去。
+`qwen3` 走共享的 `build_jev_prompt`（`single.rs:461`）。
+
 **未接入**：JEV 的 HTTP 端点（`/v1/jev/score`、`/v1/jev/grouped`）显式传
 `Options::default()`，与 CLI 行为分开 —— 它们没有 chat-template 开关。
+
+**`--jev --image --jinja` 必须走多模态 forward。** 带图时 `build_prompt` 不再
+渲染文本，而是设 `pending` 并返回空 id，由 `forward_logits` 路由到
+`run_qwen35_family_multimodal_logits`（占位符展开 + 模板都在那里）。早期版本
+的 Jinja 分支先返回纯文本 id，导致 `pending` 没被设置、forward 走了文本路径，
+**图片被静默忽略**。判定收敛到 `plan_prompt()`，`has_image` 优先于模板分支。
+
+### Python 兼容层：三条预处理
+
+minijinja 不是 Python/Jinja2。实测会直接报错的构造：
+
+| 构造 | minijinja | 处理 |
+|---|---|---|
+| `x.get("k")` | `UnknownMethod`（map 没有 `get`） | `x["k"]\|default(__py_none)` |
+| `x.startswith(p)` | `UnknownMethod`（string 没有该方法） | `x\|startswith(p)` |
+| `x.endswith/lstrip/rstrip/split` | 同上 | 对应 filter |
+
+minijinja 的扩展点只有 `add_filter` / `add_test` / `add_function` / `add_global`，
+**没有 `add_method`**，所以 map/string 的方法调用只能改写。三条规则：
+
+1. **`{% generation %}`** → 注释，保留 trim 标记（llama.cpp 扩展）。
+2. **`x.get("k")`** → `x["k"]|default(__py_none)`。**不能写成 `x["k"]`**：
+   Jinja2 对缺失 key 返回 `None`，`x.get("k") is none` 为真；minijinja 的
+   `x["k"]` 是 Undefined，`is none` 为**假** —— 这会让 `is none` 分支整个翻转。
+   `__py_none` 是真正注册的 `Value::from(())`（minijinja 的 `none` 是个
+   *test*，不是值，不能用）。
+3. **字符串方法** → filter。注意 `split` 必须覆盖成真 list：minijinja 内置的
+   `split` 返回惰性序列，`[-1]` 会拿到**第一个**元素，而 Python 要最后一个。
+
+扫描是 token-aware 的：跳过字符串字面量、`{# #}` 注释、`{% raw %}`，但**不跳过
+`{% ... %}`**（`{% if x.get("k") %}` 里的表达式同样要改写）。只跳过 `%}` 之前的
+内容就能保证 capture 不会跑出当前表达式。receiver 必须括号平衡，否则宁可不改写、
+让 minijinja 报错，也不产出坏模板。链式调用
+（Edge0 的 `content.split('</think>')[0].rstrip('\n').split('<think>')[-1]`）
+用迭代改写，每轮至少消掉一个调用，因此必然收敛。
+
+多模态 content part 现在带类型（`MediaKind::{Image,Video,Audio}`），此前一律
+硬编码 `"image"`。**只要有 media 就一定是数组**：早期版本会把单个 part 折回裸
+字符串，于是"只有图片、没有文字"的 turn 里 `.get("text")` 取不到，图片被整个丢掉。
 
 ### 其他边界
 
@@ -229,7 +273,7 @@ grouped scorer 委托给 single 的 `build_prompt`，所以改动集中在 singl
 
 ## 源码索引
 
-- `src/models/chat_template_jinja.rs` —— 渲染器、`Options`、两条预处理、18 个单测
+- `src/models/chat_template_jinja.rs` —— 渲染器、`Options`、三条预处理（generation 标签 / `dict.get` / Python 字符串方法）、41 个单测
 - `tests/jinja_chat_template_ab.rs` —— 真实 GGUF 的 A/B 逐 token 比对
 - `src/app/text/qwen3.rs` —— 唯一接入点；不开 flag 时走原 builder
 - `src/app/cli/{types,parse}.rs` —— `--jinja` / `--chat-template-file`

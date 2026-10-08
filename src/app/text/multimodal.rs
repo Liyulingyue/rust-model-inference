@@ -310,12 +310,16 @@ pub fn run_qwen3_family_multimodal(
     } else {
         None
     };
+    let jinja_media: Vec<crate::models::chat_template_jinja::MediaPart> = media_counts
+        .iter()
+        .map(|&count| crate::models::chat_template_jinja::MediaPart::image(count))
+        .collect();
     if let Some(jinja_ids) = crate::models::chat_template_jinja::media_conversation_tokens(
         tokenizer.as_ref(),
         jinja,
         &jinja_metadata,
         pad,
-        &media_counts,
+        &jinja_media,
         prompt,
         jinja_system,
         false,
@@ -708,6 +712,7 @@ pub fn run_qwen35_family_multimodal_logits(
     // their own instructions (the JEV scorer) pass `Some`; the HTTP multimodal
     // endpoints leave it `None` to keep Qwen's default system text.
     system_prompt: Option<&str>,
+    jinja: &crate::models::chat_template_jinja::Options,
 ) -> Result<(Vec<f32>, std::time::Duration), String> {
     use crate::app::media::frame_pairs;
     use crate::models::qwen35::vision::{
@@ -800,33 +805,6 @@ pub fn run_qwen35_family_multimodal_logits(
     let vision_end = tokenizer
         .special_token_id("vision_end")
         .ok_or("Required token missing: <|vision_end|>")?;
-    let mut content_tokens = vec![vision_start];
-    content_tokens.extend(std::iter::repeat(image_token_id).take(n_vis_tokens));
-    content_tokens.push(vision_end);
-    content_tokens.extend(tokenizer.encode(
-        prompt,
-        EncodeOptions {
-            add_special: false,
-            parse_special: false,
-        },
-    ));
-    let mut prompt_ids = Vec::new();
-    if let Some(system_text) = system_prompt {
-        append_qwen_message_tokens(
-            &mut prompt_ids,
-            &tokenizer,
-            "system",
-            &tokenizer.encode(
-                system_text,
-                EncodeOptions {
-                    add_special: false,
-                    parse_special: false,
-                },
-            ),
-        )?;
-    }
-    append_qwen_message_tokens(&mut prompt_ids, &tokenizer, "user", &content_tokens)?;
-    append_qwen_assistant_prefix(&mut prompt_ids, &tokenizer, false)?;
     let image_grids: Vec<VisionGrid> = vec![VisionGrid {
         grid_t: grid.grid_t,
         grid_h: grid.grid_h,
@@ -834,6 +812,55 @@ pub fn run_qwen35_family_multimodal_logits(
         patch_size: grid.patch_size,
         merge_size: grid.merge_size,
     }];
+    // `--jinja`: the shipped Qwen3-VL template already emits
+    // `<|vision_start|><|image_pad|><|vision_end|>`; the placeholder is
+    // expanded to a contiguous run so `build_qwen35_positions` (below) sees
+    // exactly the layout it documents.
+    let jinja_media = [crate::models::chat_template_jinja::MediaPart::image(
+        n_vis_tokens,
+    )];
+    let prompt_ids = match crate::models::chat_template_jinja::media_conversation_tokens(
+        &tokenizer,
+        jinja,
+        &|k| llm_source.metadata(k).cloned(),
+        image_token_id,
+        &jinja_media,
+        prompt,
+        system_prompt,
+        false,
+    )? {
+        Some(ids) => ids,
+        None => {
+            let mut content_tokens = vec![vision_start];
+            content_tokens.extend(std::iter::repeat(image_token_id).take(n_vis_tokens));
+            content_tokens.push(vision_end);
+            content_tokens.extend(tokenizer.encode(
+                prompt,
+                EncodeOptions {
+                    add_special: false,
+                    parse_special: false,
+                },
+            ));
+            let mut prompt_ids = Vec::new();
+            if let Some(system_text) = system_prompt {
+                append_qwen_message_tokens(
+                    &mut prompt_ids,
+                    &tokenizer,
+                    "system",
+                    &tokenizer.encode(
+                        system_text,
+                        EncodeOptions {
+                            add_special: false,
+                            parse_special: false,
+                        },
+                    ),
+                )?;
+            }
+            append_qwen_message_tokens(&mut prompt_ids, &tokenizer, "user", &content_tokens)?;
+            append_qwen_assistant_prefix(&mut prompt_ids, &tokenizer, false)?;
+            prompt_ids
+        }
+    };
     let image_token_id_u32 = image_token_id;
     let image_token_id_i32 = i32::try_from(image_token_id_u32)
         .map_err(|_| format!("Token ID {image_token_id_u32} exceeds i32"))?;

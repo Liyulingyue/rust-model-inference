@@ -49,9 +49,7 @@ impl NemotronHJevScorer {
         n_threads: usize,
         jinja: &crate::models::chat_template_jinja::Options,
     ) -> Result<Self, String> {
-        let jinja = crate::models::chat_template_jinja::resolve_optional(jinja, &|k| {
-            source.metadata(k).cloned()
-        })?;
+        let jinja = jinja.resolve(&|k| source.metadata(k).cloned())?;
         let tokenizer = crate::models::nemotron_h::trunk::load_nemotron_tokenizer(source.as_ref())?;
         verify_label_tokens_single(&tokenizer)?;
         Ok(Self {

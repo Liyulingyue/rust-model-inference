@@ -193,12 +193,41 @@ fn allocate_group_labels(q: &PreparedGroupedQuestion) -> Vec<Vec<char>> {
     all
 }
 
+/// Render the grouped prompt through the model's own template.
+///
+/// Grouped scorers build their prompt here rather than in the single-mode
+/// `build_prompt`, which is why `--jinja` used to be stored on the scorer and
+/// then never read: grouped JEV silently ignored the flag. Returns `None` when
+/// Jinja2 is off, so the caller keeps its hand-built ChatML.
+fn grouped_prompt_via_jinja(
+    tokenizer: &dyn crate::core::tokenizer::Tokenizer,
+    system: &str,
+    payload: &str,
+    jinja: Option<&crate::models::chat_template_jinja::JinjaChatTemplate>,
+) -> Result<Option<Vec<u32>>, String> {
+    let Some(template) = jinja else {
+        return Ok(None);
+    };
+    crate::models::chat_template_jinja::render_text_conversation(
+        tokenizer,
+        template,
+        Some(system),
+        payload,
+        false,
+    )
+    .map(Some)
+}
+
 fn build_jev_token_ids_for_arch(
     arch: &str,
     tokenizer: &BPETokenizer,
     system: &str,
     payload: &str,
+    jinja: Option<&crate::models::chat_template_jinja::JinjaChatTemplate>,
 ) -> Result<Vec<u32>, String> {
+    if let Some(ids) = grouped_prompt_via_jinja(tokenizer, system, payload, jinja)? {
+        return Ok(ids);
+    }
     match arch {
         "qwen3" | "qwen3vl" | "hunyuan-dense" => {
             let mut token_ids = Vec::new();
@@ -717,4 +746,39 @@ fn print_grouped_result_text(r: &JevGroupedResult) {
         );
     }
     println!("prefill: {} ms", r.prefill_ms);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::grouped_prompt_via_jinja;
+    use crate::core::tokenizer::{MockTokenizer, Tokenizer};
+    use crate::models::chat_template_jinja::JinjaChatTemplate;
+
+    /// Grouped JEV used to store `--jinja` on the scorer and then never read
+    /// it, because the prompt is built by this free function rather than by the
+    /// single-mode `build_prompt`. The marker text proves the template shaped
+    /// the prompt.
+    #[test]
+    fn grouped_prompt_uses_the_jinja_template() {
+        let template = JinjaChatTemplate::compile(
+            "JINJA-MARKER|{{ messages[0].content }}|{{ messages[1].content }}",
+            "test",
+        )
+        .unwrap();
+        let tok = MockTokenizer::new();
+        let ids = grouped_prompt_via_jinja(&tok, "SYS", "PAY", Some(&template))
+            .unwrap()
+            .expect("jinja path must render");
+        assert_eq!(tok.decode(&ids, false), "JINJA-MARKER|SYS|PAY");
+    }
+
+    #[test]
+    fn grouped_prompt_without_jinja_is_left_to_the_caller() {
+        // `None` means "keep hand-building ChatML", so enabling the flag never
+        // changes the default prompts.
+        let tok = MockTokenizer::new();
+        assert!(grouped_prompt_via_jinja(&tok, "SYS", "PAY", None)
+            .unwrap()
+            .is_none());
+    }
 }

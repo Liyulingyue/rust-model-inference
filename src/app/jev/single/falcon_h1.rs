@@ -65,9 +65,7 @@ impl FalconH1JevScorer {
         n_threads: usize,
         jinja: &crate::models::chat_template_jinja::Options,
     ) -> Result<Self, String> {
-        let jinja = crate::models::chat_template_jinja::resolve_optional(jinja, &|k| {
-            source.metadata(k).cloned()
-        })?;
+        let jinja = jinja.resolve(&|k| source.metadata(k).cloned())?;
         let model = FalconH1Model::from_source(source.clone(), n_threads)
             .map_err(|error| format!("Failed to load Falcon-H1 model: {error}"))?;
         let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())

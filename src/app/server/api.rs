@@ -2269,6 +2269,7 @@ async fn run_multimodal_text_only(
                 prefill_batch_size,
                 max_context,
                 Some(system_prompt.as_str()),
+                &crate::models::chat_template_jinja::Options::default(),
             )
         }
         other => Err(format!(

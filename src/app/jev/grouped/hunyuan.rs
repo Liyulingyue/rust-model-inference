@@ -3,8 +3,8 @@
 use super::super::single::JevScorer;
 use super::super::types::{JevGroupedResult, PreparedGroupedQuestion};
 use super::{
-    allocate_group_labels, build_grouped_payload, build_grouped_system, run_jev_grouped_core,
-    JevGroupedScorer,
+    allocate_group_labels, build_grouped_payload, build_grouped_system, grouped_prompt_via_jinja,
+    run_jev_grouped_core, JevGroupedScorer,
 };
 use crate::app::cli::resolve_thread_count;
 use crate::core::tensor::TensorSource;
@@ -70,6 +70,17 @@ impl JevGroupedScorer for HunyuanJevGroupedScorer {
         let group_labels = allocate_group_labels(q);
         let system = build_grouped_system();
         let payload = build_grouped_payload(context, q)?;
+        // `--jinja`: this grouped scorer builds its prompt with its own
+        // builder instead of the shared arch helper, so the template has to be
+        // honoured here too or the flag is silently ignored for Hunyuan.
+        if let Some(ids) = grouped_prompt_via_jinja(
+            self.inner.model.tokenizer(),
+            system,
+            &payload,
+            self.inner.jinja.as_ref(),
+        )? {
+            return Ok((group_labels, ids));
+        }
         let token_ids = build_hunyuan_chat_prompt(
             self.inner.model.tokenizer(),
             &[

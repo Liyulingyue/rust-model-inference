@@ -70,8 +70,13 @@ impl JevGroupedScorer for Gemma4JevGroupedScorer {
         let group_labels = allocate_group_labels(q);
         let system = build_grouped_system();
         let payload = build_grouped_payload(context, q)?;
-        let token_ids =
-            build_jev_token_ids_for_arch("gemma4", self.inner.tokenizer(), system, &payload)?;
+        let token_ids = build_jev_token_ids_for_arch(
+            "gemma4",
+            self.inner.tokenizer(),
+            system,
+            &payload,
+            self.inner.jinja.as_ref(),
+        )?;
         Ok((group_labels, token_ids))
     }
 

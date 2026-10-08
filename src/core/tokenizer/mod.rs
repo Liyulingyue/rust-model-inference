@@ -1699,6 +1699,47 @@ pub trait Tokenizer: Send + Sync {
     fn vocab_size(&self) -> usize;
 }
 
+/// A byte-per-token stand-in used by tests that need a `Tokenizer` without a
+/// GGUF on disk. Every byte becomes its own token, which makes encoded ids
+/// trivially predictable.
+#[cfg(test)]
+pub(crate) struct MockTokenizer;
+
+#[cfg(test)]
+impl MockTokenizer {
+    pub(crate) fn new() -> Self {
+        MockTokenizer
+    }
+}
+
+#[cfg(test)]
+impl Tokenizer for MockTokenizer {
+    fn encode(&self, text: &str, _options: EncodeOptions) -> Vec<u32> {
+        text.bytes().map(|b| b as u32).collect()
+    }
+    fn decode_bytes(&self, ids: &[u32], _render_special: bool) -> Vec<u8> {
+        ids.iter().map(|&i| i as u8).collect()
+    }
+    fn token_piece_bytes(&self, id: u32, _render_special: bool) -> Vec<u8> {
+        vec![id as u8]
+    }
+    fn token_id(&self, _literal: &str) -> Option<u32> {
+        None
+    }
+    fn special_token_id(&self, _semantic_name: &str) -> Option<u32> {
+        None
+    }
+    fn bos_id(&self) -> Option<u32> {
+        None
+    }
+    fn eos_id(&self) -> Option<u32> {
+        None
+    }
+    fn vocab_size(&self) -> usize {
+        256
+    }
+}
+
 impl Tokenizer for BPETokenizer {
     fn encode(&self, text: &str, options: EncodeOptions) -> Vec<u32> {
         BPETokenizer::encode(self, text, options)

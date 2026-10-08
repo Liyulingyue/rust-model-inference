@@ -56,9 +56,7 @@ impl Lfm2JevScorer {
         let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
             .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
         verify_label_tokens_single(&tokenizer)?;
-        let jinja = crate::models::chat_template_jinja::resolve_optional(jinja, &|k| {
-            source.metadata(k).cloned()
-        })?;
+        let jinja = jinja.resolve(&|k| source.metadata(k).cloned())?;
         Ok(Self {
             tokenizer,
             source,

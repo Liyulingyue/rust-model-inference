@@ -74,6 +74,7 @@ impl JevGroupedScorer for LlamaJevGroupedScorer {
             self.inner.tokenizer(),
             system,
             &payload,
+            self.inner.jinja.as_ref(),
         )?;
         Ok((group_labels, token_ids))
     }
