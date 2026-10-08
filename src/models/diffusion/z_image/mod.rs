@@ -1,5 +1,6 @@
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
+use crate::models::diffusion::DiffusionPipeline;
 use crate::ops::kernel::f16::F16Kernel;
 use crate::ops::matmul_q8_0_quantized_parallel_rows;
 use std::sync::Arc;
@@ -75,6 +76,27 @@ impl ZImagePipeline {
             total_start.elapsed().as_secs_f64() * 1000.0,
         );
         Ok(rgb)
+    }
+}
+
+impl DiffusionPipeline for ZImagePipeline {
+    type Options = ZImageOptions;
+
+    fn load(
+        diffusion: Arc<dyn TensorSource>,
+        text: Arc<dyn TensorSource>,
+        vae: Arc<dyn TensorSource>,
+        n_threads: usize,
+    ) -> Result<Self, String> {
+        Self::load(diffusion, text, vae, n_threads)
+    }
+
+    fn generate_rgb(
+        &self,
+        prompt: &str,
+        options: &ZImageOptions,
+    ) -> Result<crate::models::diffusion::DiffusionRgb, String> {
+        self.generate_rgb(prompt, options)
     }
 }
 

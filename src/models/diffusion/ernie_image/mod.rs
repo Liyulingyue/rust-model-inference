@@ -17,6 +17,7 @@
 
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
+use crate::models::diffusion::DiffusionPipeline;
 use crate::ops::kernel::f16::F16Kernel;
 use crate::ops::matmul_q8_0_quantized_parallel_rows;
 use std::sync::Arc;
@@ -25,11 +26,10 @@ pub(crate) mod dit;
 pub(crate) mod text;
 mod vae;
 
-pub struct ErnieImageRgb {
-    pub width: u32,
-    pub height: u32,
-    pub bytes: Vec<u8>,
-}
+/// Decoded RGB image bytes for ERNIE-Image output. Structurally identical to
+/// [`crate::models::diffusion::z_image::ZImageRgb`] (width/height/bytes);
+/// kept as a distinct type so call sites can document intent.
+pub type ErnieImageRgb = crate::models::diffusion::z_image::ZImageRgb;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct ErnieImageOptions {
@@ -88,11 +88,6 @@ impl ErnieImagePipeline {
         let latent_side = validate_latent_shape(&latent, options.resolution)?;
         let rgb = self.vae.decode_rgb(&latent, latent_side)?;
         let t_vae = t.elapsed();
-        let rgb = ErnieImageRgb {
-            width: rgb.width,
-            height: rgb.height,
-            bytes: rgb.bytes,
-        };
         validate_decoded_rgb(&rgb, options.resolution)?;
         eprintln!(
             "[ernie-image-stage-profile] text_encode={:.1}ms  denoise={:.1}ms  vae_decode={:.1}ms  total={:.1}ms",
@@ -102,6 +97,30 @@ impl ErnieImagePipeline {
             total_start.elapsed().as_secs_f64() * 1000.0,
         );
         Ok(rgb)
+    }
+}
+
+impl DiffusionPipeline for ErnieImagePipeline {
+    type Options = ErnieImageOptions;
+
+    fn load(
+        diffusion: Arc<dyn TensorSource>,
+        text: Arc<dyn TensorSource>,
+        vae: Arc<dyn TensorSource>,
+        n_threads: usize,
+    ) -> Result<Self, String> {
+        Self::load(diffusion, text, vae, n_threads)
+    }
+
+    fn generate_rgb(
+        &self,
+        prompt: &str,
+        options: &ErnieImageOptions,
+    ) -> Result<crate::models::diffusion::DiffusionRgb, String> {
+        // `ErnieImageRgb` is now a type alias of `ZImageRgb` (which itself
+        // is the type alias for `DiffusionRgb`), so this is a direct
+        // delegation -- no field conversion needed.
+        Self::generate_rgb(self, prompt, options)
     }
 }
 
