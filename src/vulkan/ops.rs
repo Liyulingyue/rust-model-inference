@@ -3637,7 +3637,19 @@ fn matmul_rows_push(
         push[6 + slot * 3] = as_u32(stride_bytes / 4, "matmul output stride")?;
         max_output_rows = max_output_rows.max(n_out);
     }
-    let dispatch = matmul_dispatch(max_output_rows, token_rows, outputs.len(), limits)?;
+    // BF16 dot streams occupy 4/8 lanes; use the rest for independent outputs.
+    let output_groups = if format == GpuWeightFormat::BF16Dot && push[1] != 0 {
+        max_output_rows.div_ceil(64 / push[1] as usize)
+    } else {
+        max_output_rows
+    };
+    // Four tokens share each weight load; incomplete batches stay masked in shader.
+    let token_groups = if format == GpuWeightFormat::BF16Dot && push[1] != 0 && token_rows >= 4 {
+        token_rows.div_ceil(4)
+    } else {
+        token_rows
+    };
+    let dispatch = matmul_dispatch(output_groups, token_groups, outputs.len(), limits)?;
     Ok((push, dispatch))
 }
 
@@ -6537,6 +6549,50 @@ mod tests {
                 block
             )
             .is_err());
+        }
+    }
+
+    #[test]
+    fn bf16_dot_dispatch_packs_independent_output_rows() {
+        use super::{matmul_rows_push, ArenaRegion, GpuWeightFormat::*, OperatorBindings};
+        let limits = super::vk::PhysicalDeviceLimits {
+            max_compute_work_group_count: [8, 16, 16],
+            ..Default::default()
+        };
+        for (format, rows) in [(BF16, 3), (BF16Dot, 3), (BF16, 5), (BF16Dot, 5)] {
+            let region = |offset, size| ArenaRegion { offset, size };
+            let bindings = OperatorBindings {
+                descriptor_set: super::vk::DescriptorSet::null(),
+                sizes: [65, 28, 8].map(|rows| rows * 16 * 2),
+                weight_formats: [Some(format); 3],
+            };
+            let (push, dispatch) = matmul_rows_push(
+                32768,
+                &limits,
+                bindings,
+                region(0, rows * 16 * 4),
+                region(0, 0),
+                None,
+                &[
+                    (region(4096, rows * 65 * 4), 65, 65 * 4),
+                    (region(8192, rows * 28 * 4), 28, 28 * 4),
+                    (region(12288, rows * 8 * 4), 8, 8 * 4),
+                ],
+                16,
+                rows,
+                16,
+            )
+            .unwrap();
+            let expected = match (format, push[1], rows) {
+                (BF16Dot, 8, 3) => [8, 2, 9],
+                (BF16Dot, 4, 3) => [5, 1, 9],
+                (BF16Dot, 8, 5) => [8, 2, 6],
+                (BF16Dot, 4, 5) => [5, 1, 6],
+                (_, _, 3) => [8, 9, 9],
+                _ => [8, 9, 15],
+            };
+            assert_eq!(dispatch, expected, "format={format:?}");
+            assert_eq!([push[5], push[8], push[11]], [65, 28, 8]);
         }
     }
 

@@ -2403,21 +2403,24 @@ mod performance_tests {
         }
         // BF16 rounding magnifies a reassociated reduction. CPU SIMD keeps
         // independent FMA streams, while an ascending scalar sum loses a unit term.
-        for width in [1024, 1027] {
-            let bytes: &'static [u8] = Box::leak([0x80, 0x3f].repeat(width * 2).into_boxed_slice());
+        for (width, n_out, token_rows) in [(1024, 2, 65), (1027, 65, 65), (1027, 65, 69)] {
+            let bytes: &'static [u8] =
+                Box::leak([0x80, 0x3f].repeat(width * n_out).into_boxed_slice());
             let weight = YuE2Weight {
                 fast: Weight::from_quantized(QuantizedTensor::from_bytes(
                     bytes,
                     GGMLType::BF16,
                     width,
-                    2,
+                    n_out,
                 )),
                 bf16: Some(bytes),
                 gpu_bf16: Default::default(),
                 n_in: width,
-                n_out: 2,
+                n_out,
             };
-            let mut input = vec![0.0; 65 * width];
+            let bias: Vec<_> = (0..n_out).map(|column| bias[column % 2]).collect();
+            let mut actual = vec![f32::NAN; token_rows * n_out];
+            let mut input = vec![0.0; token_rows * width];
             for row in input.chunks_exact_mut(width) {
                 row[..4].copy_from_slice(&[33554432.0, 1.0, -33554432.0, 1.0]);
                 row[width - 1] = 0.25;
@@ -2428,17 +2431,17 @@ mod performance_tests {
                 &input,
                 &mut actual,
                 width,
-                2,
-                65
+                n_out,
+                token_rows
             ));
             let before = context.submission_count();
             weight.matmul_bf16(&input, Some(&bias), &mut actual, &ComputePool::new(2));
             assert_eq!(context.submission_count(), before + 2);
             for (row, input) in input.chunks_exact(width).enumerate() {
-                let mut expected = [0.0; 2];
+                let mut expected = vec![0.0; n_out];
                 torch_bf16_matmul_rows(bytes, input, Some(&bias), &mut expected, width, 0);
                 assert_eq!(
-                    actual[row * 2..row * 2 + 2],
+                    actual[row * n_out..(row + 1) * n_out],
                     expected,
                     "width={width} row={row}"
                 );

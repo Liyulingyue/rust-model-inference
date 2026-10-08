@@ -17,7 +17,7 @@ layout(push_constant) uniform PC {
     uint group_count; uint input_sum_word; uint input_stride; uint q8_stride; uint scales_stride; uint input_sum_stride; uint q8k_stride; uint q8k_scales_stride; uint token_rows;
 } pc;
 
-shared float partial[8];
+shared vec4 partial[64];
 
 uint weight_word(uint slot, uint index) {
     if (slot == 0u) return w0.data[index];
@@ -32,45 +32,70 @@ float weight_bf16(uint slot, uint index) {
 }
 
 void main() {
-    uint token_row = gl_WorkGroupID.z / pc.group_count; uint slot = gl_WorkGroupID.z % pc.group_count;
+    uint batch_rows = pc.reduction_lanes != 0u && pc.token_rows >= 4u ? 4u : 1u;
+    uint token_row = gl_WorkGroupID.z / pc.group_count * batch_rows;
+    uint slot = gl_WorkGroupID.z % pc.group_count;
     uint row = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
     uint rows = slot == 0u ? pc.rows0 : (slot == 1u ? pc.rows1 : pc.rows2);
-    if (slot >= pc.group_count || row >= rows) return;
+    if (slot >= pc.group_count) return;
 
-    precise float sum = 0.0;
-    uint row_base = row * pc.elements_per_row;
+    precise vec4 sum = vec4(0.0);
     uint index = 0u;
     if (pc.reduction_lanes != 0u) {
         // Match dot_bf16_f32's FMA streams and horizontal sum, before the tail.
-        // ponytail: 4/8 active lanes in a 64-lane group; tune occupancy after parity.
-        uint lane = gl_LocalInvocationID.x;
+        // Pack independent output rows without changing any row's reduction.
+        uint invocation = gl_LocalInvocationID.x;
+        uint lane = invocation % pc.reduction_lanes;
+        row = row * (64u / pc.reduction_lanes) + invocation / pc.reduction_lanes;
         uint vector_end = pc.n_in / pc.reduction_lanes * pc.reduction_lanes;
-        if (lane < pc.reduction_lanes) {
-            precise float acc = 0.0;
+        precise vec4 acc = vec4(0.0);
+        if (row < rows) {
+            uint row_base = row * pc.elements_per_row;
             for (uint offset = lane; offset < vector_end; offset += pc.reduction_lanes) {
                 float input_value = uintBitsToFloat(arena.data[pc.input_word + token_row * pc.input_stride + offset]);
-                acc = fma(weight_bf16(slot, row_base + offset), input_value, acc);
+                float weight = weight_bf16(slot, row_base + offset);
+                acc.x = fma(weight, input_value, acc.x);
+                // Reuse each weight for four token rows, as in the CPU batch.
+                if (batch_rows == 4u) {
+                    if (token_row + 1u < pc.token_rows) {
+                        float value = uintBitsToFloat(arena.data[pc.input_word + (token_row + 1u) * pc.input_stride + offset]);
+                        acc.y = fma(weight, value, acc.y);
+                    }
+                    if (token_row + 2u < pc.token_rows) {
+                        float value = uintBitsToFloat(arena.data[pc.input_word + (token_row + 2u) * pc.input_stride + offset]);
+                        acc.z = fma(weight, value, acc.z);
+                    }
+                    if (token_row + 3u < pc.token_rows) {
+                        float value = uintBitsToFloat(arena.data[pc.input_word + (token_row + 3u) * pc.input_stride + offset]);
+                        acc.w = fma(weight, value, acc.w);
+                    }
+                }
             }
-            partial[lane] = acc;
         }
+        // Inactive rows still participate in the workgroup barrier.
+        partial[invocation] = acc;
         barrier();
-        if (lane != 0u) return;
+        if (lane != 0u || row >= rows) return;
         sum = pc.reduction_lanes == 8u
-            ? ((partial[0] + partial[4]) + (partial[1] + partial[5]))
-                + ((partial[2] + partial[6]) + (partial[3] + partial[7]))
-            : (partial[0] + partial[1]) + (partial[2] + partial[3]);
+            ? ((partial[invocation] + partial[invocation + 4u]) + (partial[invocation + 1u] + partial[invocation + 5u]))
+                + ((partial[invocation + 2u] + partial[invocation + 6u]) + (partial[invocation + 3u] + partial[invocation + 7u]))
+            : (partial[invocation] + partial[invocation + 1u]) + (partial[invocation + 2u] + partial[invocation + 3u]);
         index = vector_end;
-    } else if (gl_LocalInvocationID.x != 0u) {
+    } else if (gl_LocalInvocationID.x != 0u || row >= rows) {
         return;
     }
-    for (; index < pc.n_in; index++) {
-        float input_value = uintBitsToFloat(arena.data[pc.input_word + token_row * pc.input_stride + index]);
-        precise float term = weight_bf16(slot, row_base + index) * input_value;
-        sum += term;
-    }
-
     uint output_word = slot == 0u
         ? pc.output0_word
         : (slot == 1u ? pc.output1_word : pc.output2_word);
-    arena.data[output_word + token_row * (slot == 0u ? pc.output0_stride : (slot == 1u ? pc.output1_stride : pc.output2_stride)) + row] = floatBitsToUint(sum);
+    uint output_stride = slot == 0u ? pc.output0_stride : (slot == 1u ? pc.output1_stride : pc.output2_stride);
+    uint row_base = row * pc.elements_per_row;
+    for (uint batch = 0u; batch < batch_rows && token_row + batch < pc.token_rows; batch++) {
+        precise float value = sum[batch];
+        for (uint tail = index; tail < pc.n_in; tail++) {
+            float input_value = uintBitsToFloat(arena.data[pc.input_word + (token_row + batch) * pc.input_stride + tail]);
+            precise float term = weight_bf16(slot, row_base + tail) * input_value;
+            value += term;
+        }
+        arena.data[output_word + (token_row + batch) * output_stride + row] = floatBitsToUint(value);
+    }
 }

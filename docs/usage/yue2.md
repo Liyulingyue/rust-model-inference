@@ -8,8 +8,9 @@
 
 实验性 Vulkan 投影可用 `cargo build --profile release-fast --features vulkan --bin rust-model-inference`
 构建，并在现有生成命令上加 `--gpu`。AR/NAR 的 BF16 投影仍在 bias 后舍入为 BF16，
-attention、音频 VAE 与 NAR F16 的 Q8 activation 路径留在 CPU。当前仅完成代码接入和静态检查，
-实机数值、NAR 稳定性与成品质量待补，详见 [Vulkan 支持范围](../develop/VULKAN.md)。
+attention、音频 VAE 与 NAR F16 的 Q8 activation 路径留在 CPU。
+RADV 固定样例的 AR/NAR 和完整波形已与 CPU 逐位对齐；其它设备和成品质量仍需验证，
+详见 [Vulkan 支持范围](../develop/VULKAN.md)。
 
 ## 1. 权重来源
 
@@ -176,6 +177,12 @@ bias 加法和 BF16 舍入保持不变；不足四帧的尾部和单 token 解�
 AR prefill 只计算最后一个输入 token 的最终 norm 和词表 logits，中间 token
 仍完整更新 KV cache。`parity-trace` 构建保留所有中间 logits/checkpoint，
 因此正常推理测速不要开启该 feature。
+
+Vulkan BF16 dot 路径在 64 线程组中打包独立输出行，并让四帧共享权重读取，
+每个输出仍保留 CPU 的 FMA 流、归约顺序和标量尾部。RADV NAVI31 上，256 帧
+NAR velocity 的重复调用从 33.60 降到 12.42 秒，输出原始位一致；AR 耗时基本不变，
+该 NAR 样例仍略慢于四线程 CPU。计时条件与完整生成检查见
+[YuE2 Vulkan 优化记录](../develop/VULKAN_YUE2_OPTIMIZATION_2026-10-08.md)。
 
 这些优化不更换权重、不减少扩散步数，也不修改采样参数。可用以下回归检查
 逐位一致性及中间 logits 的省略行为（不需要下载模型）：

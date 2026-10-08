@@ -27,6 +27,9 @@ macOS 会自动查找系统 Loader，以及 Homebrew 的 `/opt/homebrew/lib/libv
 
 YuE2 正常会话使用投影 offload。旧整图 AR 执行器存在 BF16 数值合约和长前缀执行问题，
 已停用；隔离生命周期测试不能证明整图可用。
+BF16 dot 投影现已打包独立输出行，四帧共享权重读取，并保留原 FMA/归约顺序。
+RADV 的 256 帧 NAR 重复调用从 33.60 降到 12.42 秒；AR 耗时基本不变，
+详见 [YuE2 优化记录](VULKAN_YUE2_OPTIMIZATION_2026-10-08.md)。
 Z-Image VAE 的主线 BF16/F32 分支保留原有计算，新增卷积 offload 只接入 F16 分支。
 AuK 的 F16 点积模式要求 CPU AVX2/F16C/FMA，其他 CPU 后端保持原计算；没有 F16→Q8_0
 重编码。DiT 上传缓存随每次 denoise 的 scratch 释放，重复生成需要重新上传 DiT 权重。
