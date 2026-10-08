@@ -947,9 +947,7 @@ mod http_tests {
                 tokenizer: std::sync::Arc::new(
                     super::super::BPETokenizer::from_qwen3_embedded_merges().unwrap(),
                 ),
-                chat_template: std::sync::Arc::new(
-                    crate::models::chat_template_jinja::Options::default(),
-                ),
+                chat_template: std::sync::Arc::new(crate::prompt::jinja::Options::default()),
                 prefill_batch_size: 1,
                 context_length: 1024,
                 source: std::sync::Arc::new(UnimplementedSource),
@@ -1548,7 +1546,7 @@ pub async fn jev_score(
         prefill_batch_size,
         // The JEV HTTP endpoints have no chat-template switch yet; they
         // keep the hand-built prompt layout.
-        crate::models::chat_template_jinja::Options::default(),
+        crate::prompt::jinja::Options::default(),
     ) {
         Ok(r) => r,
         Err(e) => return jev_error(StatusCode::INTERNAL_SERVER_ERROR, e),
@@ -1617,7 +1615,7 @@ async fn jev_grouped(
         mode,
         threads,
         prefill_batch_size,
-        crate::models::chat_template_jinja::Options::default(),
+        crate::prompt::jinja::Options::default(),
     ) {
         Ok(r) => r,
         Err(e) => return jev_error(StatusCode::INTERNAL_SERVER_ERROR, e),
@@ -2269,7 +2267,7 @@ async fn run_multimodal_text_only(
                 prefill_batch_size,
                 max_context,
                 Some(system_prompt.as_str()),
-                &crate::models::chat_template_jinja::Options::default(),
+                &crate::prompt::jinja::Options::default(),
             )
         }
         other => Err(format!(

@@ -95,7 +95,7 @@ pub fn build_prompt(
     tools: &[Tool],
     choice: &ToolChoice,
     enable_thinking: Option<bool>,
-    jinja: &crate::models::chat_template_jinja::Options,
+    jinja: &crate::prompt::jinja::Options,
 ) -> Result<(Vec<u32>, Vec<Vec<u8>>), String> {
     // `--jinja` renders the model's own chat template for a multi-turn
     // conversation. Deliberately gated to plain text turns with no tools:
@@ -108,14 +108,14 @@ pub fn build_prompt(
     //
     // Both are fallbacks, never silent behaviour changes.
     if tools.is_empty() && !messages.iter().any(|m| !m.images.is_empty()) {
-        let messages: Vec<crate::models::chat_template_jinja::ChatMessage> = messages
+        let messages: Vec<crate::prompt::jinja::ChatMessage> = messages
             .iter()
-            .map(|m| crate::models::chat_template_jinja::ChatMessage {
+            .map(|m| crate::prompt::jinja::ChatMessage {
                 role: m.role.clone(),
                 content: serde_json::Value::String(m.text.clone()),
             })
             .collect();
-        if let Some(ids) = crate::models::chat_template_jinja::conversation_tokens(
+        if let Some(ids) = crate::prompt::jinja::conversation_tokens(
             tokenizer,
             jinja,
             &|k| source.metadata(k).cloned(),
@@ -1150,7 +1150,7 @@ mod tests {
                 &tools(),
                 &ToolChoice::Auto,
                 None,
-                &crate::models::chat_template_jinja::Options::default(),
+                &crate::prompt::jinja::Options::default(),
             )
             .unwrap()
             .0;
@@ -1187,7 +1187,7 @@ mod tests {
             &tools(),
             &ToolChoice::Auto,
             None,
-            &crate::models::chat_template_jinja::Options::default(),
+            &crate::prompt::jinja::Options::default(),
         )
         .unwrap_err()
         .contains("unsupported"));
@@ -1199,7 +1199,7 @@ mod tests {
             &tools(),
             &ToolChoice::Auto,
             None,
-            &crate::models::chat_template_jinja::Options::default(),
+            &crate::prompt::jinja::Options::default(),
         )
         .is_err());
     }
@@ -1233,7 +1233,7 @@ mod tests {
                     &[],
                     &ToolChoice::Auto,
                     None,
-                    &crate::models::chat_template_jinja::Options::default(),
+                    &crate::prompt::jinja::Options::default(),
                 )
                 .unwrap()
                 .0,
@@ -1291,7 +1291,7 @@ mod tests {
                         &tools(),
                         &ToolChoice::Auto,
                         None,
-                        &crate::models::chat_template_jinja::Options::default(),
+                        &crate::prompt::jinja::Options::default(),
                     )
                     .unwrap()
                     .0,

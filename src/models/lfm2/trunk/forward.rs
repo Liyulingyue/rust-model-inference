@@ -67,14 +67,14 @@ pub fn run_inference(
     max_context: usize,
     repetition_penalty: f32,
     thinking: bool,
-    jinja: &crate::models::chat_template_jinja::Options,
+    jinja: &crate::prompt::jinja::Options,
 ) -> Result<(), String> {
     let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
         .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
     // `--jinja` renders the model's own template. For LFM2.5 that is not
     // cosmetic: the hand-written builder omits `<|im_end|>` entirely, so the
     // two paths genuinely differ. See docs/usage/chat-template.md.
-    let input_tokens = match crate::models::chat_template_jinja::single_turn_tokens(
+    let input_tokens = match crate::prompt::jinja::single_turn_tokens(
         &tokenizer,
         jinja,
         &|k| source.metadata(k).cloned(),

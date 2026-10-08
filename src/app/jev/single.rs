@@ -27,7 +27,7 @@ pub fn run_jev_decision_data(
     positive: Option<&str>,
     n_threads_arg: usize,
     prefill_batch_size: usize,
-    jinja: crate::models::chat_template_jinja::Options,
+    jinja: crate::prompt::jinja::Options,
 ) -> Result<Vec<JevResult>, String> {
     run_jev_decision_data_with_image(
         source,
@@ -51,7 +51,7 @@ fn run_jev_decision_data_with_image(
     prefill_batch_size: usize,
     mmproj_path: Option<&Path>,
     image_path: Option<&Path>,
-    jinja: crate::models::chat_template_jinja::Options,
+    jinja: crate::prompt::jinja::Options,
 ) -> Result<Vec<JevResult>, String> {
     let prepared = prepare_jev_questions(questions, positive)?;
 
@@ -210,7 +210,7 @@ pub fn run_jev_decision(
     output_json: bool,
     mmproj_path: Option<&Path>,
     image_path: Option<&Path>,
-    jinja: crate::models::chat_template_jinja::Options,
+    jinja: crate::prompt::jinja::Options,
 ) -> Result<(), String> {
     let t0 = Instant::now();
     let results = run_jev_decision_data_with_image(
@@ -479,7 +479,7 @@ pub(crate) fn build_jev_prompt(
     context: &str,
     q: &PreparedQuestion,
     _output_json: bool,
-    jinja: Option<&crate::models::chat_template_jinja::JinjaChatTemplate>,
+    jinja: Option<&crate::prompt::jinja::JinjaChatTemplate>,
 ) -> Result<(Vec<u32>, String), String> {
     let system = jev_system_prompt(q.mode);
     let _labels = jev_labels(q);
@@ -488,7 +488,7 @@ pub(crate) fn build_jev_prompt(
     // turn so the next token is the decision being scored, i.e.
     // `add_generation_prompt = true` — the same value generation uses.
     if let Some(template) = jinja {
-        let ids = crate::models::chat_template_jinja::render_text_conversation(
+        let ids = crate::prompt::jinja::render_text_conversation(
             tokenizer,
             template,
             Some(system),

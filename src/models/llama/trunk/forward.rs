@@ -534,7 +534,7 @@ pub fn run_inference(
     max_context: usize,
     repetition_penalty: f32,
     thinking: bool,
-    jinja: &crate::models::chat_template_jinja::Options,
+    jinja: &crate::prompt::jinja::Options,
 ) -> Result<(), String> {
     let input_tokens = {
         let tokenizer = load_tokenizer(|k| source.metadata(k).cloned())
@@ -544,7 +544,7 @@ pub fn run_inference(
         // arch-heuristic chain below. When the model ships a template, that
         // template *is* the spec; everything after this point is the
         // fallback for models that ship none.
-        if let Some(ids) = crate::models::chat_template_jinja::single_turn_tokens(
+        if let Some(ids) = crate::prompt::jinja::single_turn_tokens(
             tokenizer.as_ref(),
             jinja,
             &|k| source.metadata(k).cloned(),

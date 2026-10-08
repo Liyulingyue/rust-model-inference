@@ -35,7 +35,7 @@ pub fn run_inference(
     kv_format: KvFormat,
     max_context: usize,
     thinking: bool,
-    jinja: &crate::models::chat_template_jinja::Options,
+    jinja: &crate::prompt::jinja::Options,
 ) -> Result<(), String> {
     let t0 = Instant::now();
     let cfg = Lfm25Config::from_source(source)?;
@@ -77,7 +77,7 @@ pub fn run_inference(
     // `--jinja` renders the model's own template. For LFM2.5 that is not
     // cosmetic: the hand-written builder omits `<|im_end|>` entirely, so the
     // two paths genuinely differ. See docs/usage/chat-template.md.
-    let input_tokens = match crate::models::chat_template_jinja::single_turn_tokens(
+    let input_tokens = match crate::prompt::jinja::single_turn_tokens(
         &tokenizer,
         jinja,
         &|k| source.metadata(k).cloned(),

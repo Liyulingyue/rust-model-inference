@@ -20,7 +20,7 @@ pub(crate) fn run_jev_decision_lfm2(
     n_threads_arg: usize,
     prefill_batch_size: usize,
     output_json: bool,
-    jinja: crate::models::chat_template_jinja::Options,
+    jinja: crate::prompt::jinja::Options,
 ) -> Result<Vec<JevResult>, String> {
     let available_threads = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -43,7 +43,7 @@ pub(crate) struct Lfm2JevScorer {
     pub(crate) n_threads: usize,
     pub(crate) prefill_batch_size: usize,
     /// `--jinja` template, resolved once in `new()`.
-    pub(crate) jinja: Option<crate::models::chat_template_jinja::JinjaChatTemplate>,
+    pub(crate) jinja: Option<crate::prompt::jinja::JinjaChatTemplate>,
 }
 
 impl Lfm2JevScorer {
@@ -51,7 +51,7 @@ impl Lfm2JevScorer {
         source: Arc<dyn TensorSource>,
         n_threads: usize,
         prefill_batch_size: usize,
-        jinja: &crate::models::chat_template_jinja::Options,
+        jinja: &crate::prompt::jinja::Options,
     ) -> Result<Self, String> {
         let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
             .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
@@ -85,7 +85,7 @@ impl JevScorer for Lfm2JevScorer {
         // `add_generation_prompt = true`, the same value generation uses.
         // `thinking` off so the scored position does not move.
         if let Some(template) = self.jinja.as_ref() {
-            let ids = crate::models::chat_template_jinja::render_text_conversation(
+            let ids = crate::prompt::jinja::render_text_conversation(
                 &self.tokenizer,
                 template,
                 Some(system),

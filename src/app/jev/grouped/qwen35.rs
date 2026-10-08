@@ -21,7 +21,7 @@ pub(crate) fn run_jev_grouped_qwen35(
     n_threads_arg: usize,
     prefill_batch_size: usize,
     output_json: bool,
-    jinja: crate::models::chat_template_jinja::Options,
+    jinja: crate::prompt::jinja::Options,
 ) -> Result<Vec<JevGroupedResult>, String> {
     let available_threads = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -44,7 +44,7 @@ pub(crate) struct Qwen35JevGroupedScorer {
     pub(crate) n_threads: usize,
     pub(crate) prefill_batch_size: usize,
     /// `--jinja` template, resolved once in `new()`.
-    pub(crate) jinja: Option<crate::models::chat_template_jinja::JinjaChatTemplate>,
+    pub(crate) jinja: Option<crate::prompt::jinja::JinjaChatTemplate>,
 }
 
 impl Qwen35JevGroupedScorer {
@@ -52,7 +52,7 @@ impl Qwen35JevGroupedScorer {
         source: Arc<dyn TensorSource>,
         n_threads: usize,
         prefill_batch_size: usize,
-        jinja: &crate::models::chat_template_jinja::Options,
+        jinja: &crate::prompt::jinja::Options,
     ) -> Result<Self, String> {
         let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
             .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;

@@ -19,7 +19,7 @@ pub(crate) fn run_jev_grouped_spark(
     n_threads_arg: usize,
     _prefill_batch_size: usize,
     output_json: bool,
-    jinja: crate::models::chat_template_jinja::Options,
+    jinja: crate::prompt::jinja::Options,
 ) -> Result<Vec<JevGroupedResult>, String> {
     let available_threads = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -42,7 +42,7 @@ impl SparkJevGroupedScorer {
     fn new(
         source: Arc<dyn TensorSource>,
         n_threads: usize,
-        jinja: &crate::models::chat_template_jinja::Options,
+        jinja: &crate::prompt::jinja::Options,
     ) -> Result<Self, String> {
         Ok(Self {
             inner: super::super::single::spark::SparkJevScorer::new(source, n_threads, jinja)?,

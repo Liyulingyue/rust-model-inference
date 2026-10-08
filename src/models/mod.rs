@@ -2,8 +2,6 @@ pub mod audio8;
 pub mod bert_family;
 pub mod bitnet;
 pub mod breeze;
-pub mod chat_template;
-pub mod chat_template_jinja;
 pub mod clm;
 pub mod diffusion;
 pub mod dots;

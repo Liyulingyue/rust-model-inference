@@ -48,7 +48,7 @@ pub fn run_inference(
     max_context: usize,
     repetition_penalty: f32,
     thinking: bool,
-    jinja: &crate::models::chat_template_jinja::Options,
+    jinja: &crate::prompt::jinja::Options,
 ) -> Result<(), String> {
     let _ = kv_format;
     let cfg = super::config::Xing4Config::from_source(source)?;
@@ -67,7 +67,7 @@ pub fn run_inference(
     // `--jinja` replaces the hand-written builder. The BOS fixup below
     // only prepends when the first token is not already BOS, so a template
     // that emits `{{ bos_token }}` itself does not end up with two.
-    let jinja_text = crate::models::chat_template_jinja::single_turn_text(
+    let jinja_text = crate::prompt::jinja::single_turn_text(
         jinja,
         &|k| source.metadata(k).cloned(),
         &String::from_utf8_lossy(

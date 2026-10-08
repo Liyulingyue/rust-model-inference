@@ -18,7 +18,7 @@ pub(crate) fn run_jev_grouped_lfm2(
     n_threads_arg: usize,
     prefill_batch_size: usize,
     output_json: bool,
-    jinja: crate::models::chat_template_jinja::Options,
+    jinja: crate::prompt::jinja::Options,
 ) -> Result<Vec<JevGroupedResult>, String> {
     let available_threads = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -45,7 +45,7 @@ impl Lfm2JevGroupedScorer {
         source: Arc<dyn TensorSource>,
         n_threads: usize,
         prefill_batch_size: usize,
-        jinja: &crate::models::chat_template_jinja::Options,
+        jinja: &crate::prompt::jinja::Options,
     ) -> Result<Self, String> {
         Ok(Self {
             inner: super::super::single::lfm2::Lfm2JevScorer::new(

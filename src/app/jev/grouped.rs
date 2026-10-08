@@ -203,12 +203,12 @@ fn grouped_prompt_via_jinja(
     tokenizer: &dyn crate::core::tokenizer::Tokenizer,
     system: &str,
     payload: &str,
-    jinja: Option<&crate::models::chat_template_jinja::JinjaChatTemplate>,
+    jinja: Option<&crate::prompt::jinja::JinjaChatTemplate>,
 ) -> Result<Option<Vec<u32>>, String> {
     let Some(template) = jinja else {
         return Ok(None);
     };
-    crate::models::chat_template_jinja::render_text_conversation(
+    crate::prompt::jinja::render_text_conversation(
         tokenizer,
         template,
         Some(system),
@@ -223,7 +223,7 @@ fn build_jev_token_ids_for_arch(
     tokenizer: &BPETokenizer,
     system: &str,
     payload: &str,
-    jinja: Option<&crate::models::chat_template_jinja::JinjaChatTemplate>,
+    jinja: Option<&crate::prompt::jinja::JinjaChatTemplate>,
 ) -> Result<Vec<u32>, String> {
     if let Some(ids) = grouped_prompt_via_jinja(tokenizer, system, payload, jinja)? {
         return Ok(ids);
@@ -565,7 +565,7 @@ pub fn run_jev_grouped_decision_data(
     mode: JevMode,
     n_threads_arg: usize,
     prefill_batch_size: usize,
-    jinja: crate::models::chat_template_jinja::Options,
+    jinja: crate::prompt::jinja::Options,
 ) -> Result<Vec<JevGroupedResult>, String> {
     let prepared = prepare_jev_grouped_questions(questions, mode)?;
     let arch = source
@@ -679,7 +679,7 @@ pub fn run_jev_grouped_decision(
     n_threads_arg: usize,
     prefill_batch_size: usize,
     output_json: bool,
-    jinja: crate::models::chat_template_jinja::Options,
+    jinja: crate::prompt::jinja::Options,
 ) -> Result<(), String> {
     let t0 = Instant::now();
     let results = run_jev_grouped_decision_data(
@@ -752,7 +752,7 @@ fn print_grouped_result_text(r: &JevGroupedResult) {
 mod tests {
     use super::grouped_prompt_via_jinja;
     use crate::core::tokenizer::{MockTokenizer, Tokenizer};
-    use crate::models::chat_template_jinja::JinjaChatTemplate;
+    use crate::prompt::jinja::JinjaChatTemplate;
 
     /// Grouped JEV used to store `--jinja` on the scorer and then never read
     /// it, because the prompt is built by this free function rather than by the

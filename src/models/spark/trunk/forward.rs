@@ -412,7 +412,7 @@ pub fn run_inference(
     _bench: bool,
     _profile: bool,
     _kv_format: KvFormat,
-    jinja: &crate::models::chat_template_jinja::Options,
+    jinja: &crate::prompt::jinja::Options,
 ) -> Result<(), String> {
     let started = Instant::now();
     let tokenizer = BPETokenizer::from_gguf_metadata(|key| source.metadata(key).cloned())
@@ -441,7 +441,7 @@ pub fn run_inference(
     // `--jinja` renders the GGUF's own template, which is what the
     // hand-transcribed format!() below was approximating. Keep the literal
     // as the fallback for GGUFs that ship no template.
-    let prompt_text = match crate::models::chat_template_jinja::single_turn_text(
+    let prompt_text = match crate::prompt::jinja::single_turn_text(
         jinja,
         &|k| source.metadata(k).cloned(),
         sos,

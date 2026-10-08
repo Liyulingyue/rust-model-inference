@@ -27,7 +27,7 @@ pub(crate) fn run_jev_decision_qwen3(
     output_json: bool,
     mmproj_path: Option<&Path>,
     image_path: Option<&Path>,
-    jinja: crate::models::chat_template_jinja::Options,
+    jinja: crate::prompt::jinja::Options,
 ) -> Result<Vec<JevResult>, String> {
     let available_threads = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -154,7 +154,7 @@ pub(crate) struct Qwen3JevScorer {
     pub(crate) max_ctx: usize,
     pub(crate) prefill_batch_size: usize,
     /// `--jinja` template, resolved once in `new()`.
-    pub(crate) jinja: Option<crate::models::chat_template_jinja::JinjaChatTemplate>,
+    pub(crate) jinja: Option<crate::prompt::jinja::JinjaChatTemplate>,
 }
 
 impl Qwen3JevScorer {
@@ -162,7 +162,7 @@ impl Qwen3JevScorer {
         source: Arc<dyn TensorSource>,
         n_threads: usize,
         prefill_batch_size: usize,
-        jinja: &crate::models::chat_template_jinja::Options,
+        jinja: &crate::prompt::jinja::Options,
     ) -> Result<Self, String> {
         let jinja = jinja.resolve(&|k| source.metadata(k).cloned())?;
         let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())

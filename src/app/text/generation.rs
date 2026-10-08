@@ -1,6 +1,6 @@
 use crate::app::cli::{CliOptions, KvFormat};
 use crate::core::tensor::TensorSource;
-use crate::models::chat_template_jinja as jinja;
+use crate::prompt::jinja;
 use std::io::{self, Write};
 use std::path::Path;
 use std::sync::Arc;
@@ -50,7 +50,7 @@ pub fn run_inference(
     max_context: usize,
     repetition_penalty: f32,
     chat_template: Option<&str>,
-    jinja: &crate::models::chat_template_jinja::Options,
+    jinja: &crate::prompt::jinja::Options,
 ) -> Result<(), String> {
     // Read arch into an owned String so the borrow of `source.metadata`
     // is released before the phi3 wrap below moves `source`.

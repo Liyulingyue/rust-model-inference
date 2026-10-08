@@ -1,3 +1,6 @@
+pub mod jinja;
+pub mod legacy;
+
 /// Single-user Nanbeige4.2 chat template, including the embedded default system turn.
 pub fn build_nanbeige_chat_prompt(prompt: &str, thinking: bool) -> String {
     let suffix = if thinking {

@@ -25,9 +25,7 @@ use std::sync::Arc;
 use rust_model_inference::core::tensor::TensorSource;
 use rust_model_inference::core::tokenizer::{BPETokenizer, EncodeOptions};
 use rust_model_inference::format::ggufrs::{open_model_source, ComponentRole};
-use rust_model_inference::models::chat_template_jinja::{
-    render_tokens, template_from_source, ChatMessage,
-};
+use rust_model_inference::prompt::jinja::{render_tokens, template_from_source, ChatMessage};
 use rust_model_inference::prompt::{build_qwen_chat_prompt, QwenMessage};
 
 const PROMPT: &str = "Capital of France?";

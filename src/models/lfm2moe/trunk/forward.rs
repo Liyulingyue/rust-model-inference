@@ -77,7 +77,7 @@ pub fn run_inference_with_batch(
     max_context: usize,
     repetition_penalty: f32,
     thinking: bool,
-    jinja: &crate::models::chat_template_jinja::Options,
+    jinja: &crate::prompt::jinja::Options,
     batch_size: usize,
 ) -> Result<(), String> {
     let _ = batch_size;
@@ -122,7 +122,7 @@ pub fn run_inference_with_batch(
     // `--jinja` renders the model's own template. For LFM2.5 that is not
     // cosmetic: the hand-written builder omits `<|im_end|>` entirely, so the
     // two paths genuinely differ. See docs/usage/chat-template.md.
-    let input_tokens = match crate::models::chat_template_jinja::single_turn_tokens(
+    let input_tokens = match crate::prompt::jinja::single_turn_tokens(
         &tokenizer,
         jinja,
         &|k| source.metadata(k).cloned(),

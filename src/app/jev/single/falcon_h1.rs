@@ -37,7 +37,7 @@ pub(crate) fn run_jev_decision_falcon_h1(
     n_threads_arg: usize,
     _prefill_batch_size: usize,
     output_json: bool,
-    jinja: crate::models::chat_template_jinja::Options,
+    jinja: crate::prompt::jinja::Options,
 ) -> Result<Vec<JevResult>, String> {
     let available_threads = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -53,7 +53,7 @@ pub(crate) fn run_jev_decision_falcon_h1(
 pub(crate) struct FalconH1JevScorer {
     /// `--jinja` template, resolved once in `new()` where the source is
     /// available; `build_prompt` then renders per question.
-    pub(crate) jinja: Option<crate::models::chat_template_jinja::JinjaChatTemplate>,
+    pub(crate) jinja: Option<crate::prompt::jinja::JinjaChatTemplate>,
     model: FalconH1Model,
     scratch: FalconH1Scratch,
     tokenizer: BPETokenizer,
@@ -63,7 +63,7 @@ impl FalconH1JevScorer {
     pub(crate) fn new(
         source: Arc<dyn TensorSource>,
         n_threads: usize,
-        jinja: &crate::models::chat_template_jinja::Options,
+        jinja: &crate::prompt::jinja::Options,
     ) -> Result<Self, String> {
         let jinja = jinja.resolve(&|k| source.metadata(k).cloned())?;
         let model = FalconH1Model::from_source(source.clone(), n_threads)
@@ -103,7 +103,7 @@ impl JevScorer for FalconH1JevScorer {
         // `thinking` off so the scored position does not move into a
         // reasoning block.
         if let Some(template) = self.jinja.as_ref() {
-            let ids = crate::models::chat_template_jinja::render_text_conversation(
+            let ids = crate::prompt::jinja::render_text_conversation(
                 &self.tokenizer,
                 template,
                 Some(system),

@@ -547,7 +547,7 @@ fn main() {
     let prompt = options.prompt.as_deref().unwrap_or_default();
     // `--jinja` / `--chat-template-file`. Off unless asked for, so the
     // hand-written builders keep producing today's exact token ids.
-    let jinja_options = rust_model_inference::models::chat_template_jinja::Options {
+    let jinja_options = rust_model_inference::prompt::jinja::Options {
         jinja: options.jinja,
         file: options.chat_template_file.clone(),
     };

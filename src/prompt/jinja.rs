@@ -2,9 +2,8 @@
 //!
 //! GGUF files ship the model's own chat template in the
 //! `tokenizer.chat_template` metadata key as a Jinja2 source string. The
-//! hand-written builders in [`crate::prompt`] and
-//! [`crate::models::chat_template`] can only cover a handful of formats,
-//! and they drift: LFM2.5's real template is a 4.6 kB Jinja program with
+//! hand-written builders in [`super`] and [`super::legacy`] can only cover
+//! a handful of formats, and they drift: LFM2.5's real template is a 4.6 kB Jinja program with
 //! macros, `namespace()` and `tojson`, which no hand-rolled `format!` can
 //! track. This module renders the shipped template instead.
 //!

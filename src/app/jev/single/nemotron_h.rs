@@ -19,7 +19,7 @@ pub(crate) fn run_jev_decision_nemotron_h(
     n_threads_arg: usize,
     prefill_batch_size: usize,
     output_json: bool,
-    jinja: crate::models::chat_template_jinja::Options,
+    jinja: crate::prompt::jinja::Options,
 ) -> Result<Vec<JevResult>, String> {
     let _ = prefill_batch_size;
     let mut scorer = NemotronHJevScorer::new(source.clone(), n_threads_arg, &jinja)?;
@@ -37,7 +37,7 @@ pub(crate) fn run_jev_decision_nemotron_h(
 pub(crate) struct NemotronHJevScorer {
     /// `--jinja` template, resolved once in `new()` where the source is
     /// available; `build_prompt` then renders per question.
-    pub(crate) jinja: Option<crate::models::chat_template_jinja::JinjaChatTemplate>,
+    pub(crate) jinja: Option<crate::prompt::jinja::JinjaChatTemplate>,
     pub(crate) tokenizer: BPETokenizer,
     pub(crate) source: Arc<dyn TensorSource>,
     pub(crate) n_threads: usize,
@@ -47,7 +47,7 @@ impl NemotronHJevScorer {
     pub(crate) fn new(
         source: Arc<dyn TensorSource>,
         n_threads: usize,
-        jinja: &crate::models::chat_template_jinja::Options,
+        jinja: &crate::prompt::jinja::Options,
     ) -> Result<Self, String> {
         let jinja = jinja.resolve(&|k| source.metadata(k).cloned())?;
         let tokenizer = crate::models::nemotron_h::trunk::load_nemotron_tokenizer(source.as_ref())?;
@@ -80,7 +80,7 @@ impl JevScorer for NemotronHJevScorer {
         // `thinking` off so the scored position does not move into a
         // reasoning block.
         if let Some(template) = self.jinja.as_ref() {
-            let ids = crate::models::chat_template_jinja::render_text_conversation(
+            let ids = crate::prompt::jinja::render_text_conversation(
                 &self.tokenizer,
                 template,
                 Some(system),

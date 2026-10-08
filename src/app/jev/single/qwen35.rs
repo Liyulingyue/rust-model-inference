@@ -31,7 +31,7 @@ pub(crate) fn run_jev_decision_qwen35(
     output_json: bool,
     mmproj_path: Option<&Path>,
     image_path: Option<&Path>,
-    jinja: crate::models::chat_template_jinja::Options,
+    jinja: crate::prompt::jinja::Options,
 ) -> Result<Vec<JevResult>, String> {
     let available_threads = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -59,7 +59,7 @@ pub(crate) fn run_jev_decision_qwen35(
 pub(crate) struct Qwen35JevScorer {
     /// `--jinja` template, resolved once in `new()` where the source is
     /// available; `build_prompt` then renders per question.
-    pub(crate) jinja: Option<crate::models::chat_template_jinja::JinjaChatTemplate>,
+    pub(crate) jinja: Option<crate::prompt::jinja::JinjaChatTemplate>,
     pub(crate) tokenizer: BPETokenizer,
     pub(crate) source: Arc<dyn TensorSource>,
     pub(crate) n_threads: usize,
@@ -80,7 +80,7 @@ impl Qwen35JevScorer {
         prefill_batch_size: usize,
         mmproj_path: Option<&Path>,
         image_path: Option<&Path>,
-        jinja: &crate::models::chat_template_jinja::Options,
+        jinja: &crate::prompt::jinja::Options,
     ) -> Result<Self, String> {
         let jinja = jinja.resolve(&|k| source.metadata(k).cloned())?;
         let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
@@ -121,7 +121,7 @@ enum PromptPlan {
 fn plan_prompt(
     has_image: bool,
     tokenizer: &dyn crate::core::tokenizer::Tokenizer,
-    jinja: Option<&crate::models::chat_template_jinja::JinjaChatTemplate>,
+    jinja: Option<&crate::prompt::jinja::JinjaChatTemplate>,
     system: &str,
     payload: &str,
 ) -> Result<PromptPlan, String> {
@@ -133,7 +133,7 @@ fn plan_prompt(
     // `add_generation_prompt = true`. `thinking` is off so the scored position
     // does not move into a reasoning block.
     if let Some(template) = jinja {
-        let ids = crate::models::chat_template_jinja::render_text_conversation(
+        let ids = crate::prompt::jinja::render_text_conversation(
             tokenizer,
             template,
             Some(system),
@@ -234,7 +234,7 @@ impl JevScorer for Qwen35JevScorer {
                 self.prefill_batch_size,
                 8192,
                 Some(&system),
-                &crate::models::chat_template_jinja::Options {
+                &crate::prompt::jinja::Options {
                     jinja: self.jinja.is_some(),
                     file: None,
                 },
@@ -260,7 +260,7 @@ impl JevScorer for Qwen35JevScorer {
 mod tests {
     use super::{plan_prompt, PromptPlan};
     use crate::core::tokenizer::{MockTokenizer, Tokenizer};
-    use crate::models::chat_template_jinja::JinjaChatTemplate;
+    use crate::prompt::jinja::JinjaChatTemplate;
 
     fn marker_template() -> JinjaChatTemplate {
         JinjaChatTemplate::compile("MARK-{{ messages[0].content }}", "test").unwrap()

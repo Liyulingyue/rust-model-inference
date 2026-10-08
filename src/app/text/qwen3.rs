@@ -30,7 +30,7 @@ pub fn run_qwen3_inference(
     prefill_batch_size: usize,
     max_context: usize,
     repetition_penalty: f32,
-    jinja: &crate::models::chat_template_jinja::Options,
+    jinja: &crate::prompt::jinja::Options,
 ) -> Result<(), String> {
     let input_tokens = {
         let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
@@ -48,12 +48,10 @@ pub fn run_qwen3_inference(
             // template; without them the hand-written builder runs, so
             // default behaviour is byte-for-byte unchanged.
             if let Some(template) = jinja.resolve(&|k| source.metadata(k).cloned())? {
-                crate::models::chat_template_jinja::render_tokens(
+                crate::prompt::jinja::render_tokens(
                     &tokenizer,
                     &template,
-                    &[crate::models::chat_template_jinja::ChatMessage::text(
-                        "user", prompt,
-                    )],
+                    &[crate::prompt::jinja::ChatMessage::text("user", prompt)],
                     true,
                     thinking,
                 )?
@@ -95,14 +93,14 @@ pub fn run_hunyuan_inference(
     prefill_batch_size: usize,
     max_context: usize,
     repetition_penalty: f32,
-    jinja: &crate::models::chat_template_jinja::Options,
+    jinja: &crate::prompt::jinja::Options,
 ) -> Result<(), String> {
     let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
         .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
     // `--jinja` first: Hy-MT's GGUF ships a template, and the 1.8B / 7B
     // split below (control tokens vs raw passthrough) is exactly the kind of
     // per-quantisation guesswork the template replaces.
-    let input_tokens = match crate::models::chat_template_jinja::single_turn_tokens(
+    let input_tokens = match crate::prompt::jinja::single_turn_tokens(
         &tokenizer,
         jinja,
         &|k| source.metadata(k).cloned(),

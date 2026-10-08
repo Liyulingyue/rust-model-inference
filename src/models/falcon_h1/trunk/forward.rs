@@ -1175,7 +1175,7 @@ pub fn run_inference(
     repetition_penalty: f32,
     chat_template: Option<&str>,
     thinking: bool,
-    jinja: &crate::models::chat_template_jinja::Options,
+    jinja: &crate::prompt::jinja::Options,
 ) -> Result<(), String> {
     use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
     use std::collections::HashMap;
@@ -1200,7 +1200,7 @@ pub fn run_inference(
     // tests against llama.cpp still match byte-for-byte.
     // `--jinja` renders the GGUF's own template; the preset table is the
     // fallback for models that ship none.
-    let formatted_prompt = match crate::models::chat_template_jinja::single_turn_text(
+    let formatted_prompt = match crate::prompt::jinja::single_turn_text(
         jinja,
         &|k| source.metadata(k).cloned(),
         "",
@@ -1209,12 +1209,10 @@ pub fn run_inference(
         thinking,
     )? {
         Some(text) => text,
-        None => crate::models::chat_template::format_chat(
-            &model.config.architecture,
-            chat_template,
-            prompt,
-        )
-        .unwrap_or_else(|| prompt.to_string()),
+        None => {
+            crate::prompt::legacy::format_chat(&model.config.architecture, chat_template, prompt)
+                .unwrap_or_else(|| prompt.to_string())
+        }
     };
     if formatted_prompt != prompt {
         let preset_name = chat_template.unwrap_or("auto");

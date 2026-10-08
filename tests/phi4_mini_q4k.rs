@@ -122,7 +122,7 @@ fn q4_tensor_shapes_match_loader_contract() {
 
 #[test]
 fn q4_chat_template_uses_role_end_tokens() {
-    use rust_model_inference::models::chat_template::{default_template, ChatTemplate};
+    use rust_model_inference::prompt::legacy::{default_template, ChatTemplate};
     let template = default_template("phi3").expect("phi3 must have a default chat template");
     let rendered = template.render("What is the capital of France?");
     assert!(rendered.contains("<|user|>"), "got {rendered:?}");

@@ -113,7 +113,7 @@ mod tests {
             crate::core::prefill::DEFAULT_PREFILL_BATCH_SIZE,
             CliOptions::DEFAULT_MAX_CONTEXT,
             1.0,
-            &crate::models::chat_template_jinja::Options::default(),
+            &crate::prompt::jinja::Options::default(),
         )
         .unwrap_err();
         assert!(error.contains("--temp"), "{error}");

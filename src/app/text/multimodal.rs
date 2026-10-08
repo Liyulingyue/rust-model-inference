@@ -51,7 +51,7 @@ pub fn run_qwen3_family_multimodal(
     temperature: f32,
     n_threads_arg: usize,
     prefill_batch_size: usize,
-    jinja: &crate::models::chat_template_jinja::Options,
+    jinja: &crate::prompt::jinja::Options,
 ) -> Result<String, String> {
     validate_single_qwen_media(
         image_path.is_some(),
@@ -310,11 +310,11 @@ pub fn run_qwen3_family_multimodal(
     } else {
         None
     };
-    let jinja_media: Vec<crate::models::chat_template_jinja::MediaPart> = media_counts
+    let jinja_media: Vec<crate::prompt::jinja::MediaPart> = media_counts
         .iter()
-        .map(|&count| crate::models::chat_template_jinja::MediaPart::image(count))
+        .map(|&count| crate::prompt::jinja::MediaPart::image(count))
         .collect();
-    if let Some(jinja_ids) = crate::models::chat_template_jinja::media_conversation_tokens(
+    if let Some(jinja_ids) = crate::prompt::jinja::media_conversation_tokens(
         tokenizer.as_ref(),
         jinja,
         &jinja_metadata,
@@ -712,7 +712,7 @@ pub fn run_qwen35_family_multimodal_logits(
     // their own instructions (the JEV scorer) pass `Some`; the HTTP multimodal
     // endpoints leave it `None` to keep Qwen's default system text.
     system_prompt: Option<&str>,
-    jinja: &crate::models::chat_template_jinja::Options,
+    jinja: &crate::prompt::jinja::Options,
 ) -> Result<(Vec<f32>, std::time::Duration), String> {
     use crate::app::media::frame_pairs;
     use crate::models::qwen35::vision::{
@@ -816,10 +816,8 @@ pub fn run_qwen35_family_multimodal_logits(
     // `<|vision_start|><|image_pad|><|vision_end|>`; the placeholder is
     // expanded to a contiguous run so `build_qwen35_positions` (below) sees
     // exactly the layout it documents.
-    let jinja_media = [crate::models::chat_template_jinja::MediaPart::image(
-        n_vis_tokens,
-    )];
-    let prompt_ids = match crate::models::chat_template_jinja::media_conversation_tokens(
+    let jinja_media = [crate::prompt::jinja::MediaPart::image(n_vis_tokens)];
+    let prompt_ids = match crate::prompt::jinja::media_conversation_tokens(
         &tokenizer,
         jinja,
         &|k| llm_source.metadata(k).cloned(),
@@ -909,7 +907,7 @@ pub fn run_multimodal(
     prefill_batch_size: usize,
     max_context: usize,
     repetition_penalty: f32,
-    jinja: &crate::models::chat_template_jinja::Options,
+    jinja: &crate::prompt::jinja::Options,
 ) -> Result<(), String> {
     run_multimodal_with_video_ref(
         llm_source,
@@ -944,7 +942,7 @@ pub fn run_multimodal_with_video(
     prefill_batch_size: usize,
     max_context: usize,
     repetition_penalty: f32,
-    jinja: &crate::models::chat_template_jinja::Options,
+    jinja: &crate::prompt::jinja::Options,
 ) -> Result<(), String> {
     let owned_source = Arc::clone(&llm_source);
     run_multimodal_with_video_ref(
@@ -997,7 +995,7 @@ pub(super) fn run_multimodal_with_video_ref(
     max_context: usize,
     _repetition_penalty: f32,
     model_source: Option<Arc<dyn TensorSource>>,
-    jinja: &crate::models::chat_template_jinja::Options,
+    jinja: &crate::prompt::jinja::Options,
 ) -> Result<(), String> {
     let arch = llm_source
         .metadata("general.architecture")

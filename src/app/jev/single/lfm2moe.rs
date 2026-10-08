@@ -17,7 +17,7 @@ pub(crate) fn run_jev_decision_lfm2moe(
     n_threads_arg: usize,
     prefill_batch_size: usize,
     output_json: bool,
-    jinja: crate::models::chat_template_jinja::Options,
+    jinja: crate::prompt::jinja::Options,
 ) -> Result<Vec<JevResult>, String> {
     // LFM2-MoE chat format is identical to LFM2 / LFM2.5 — only the
     // forward module differs (`crate::models::lfm2moe`).
@@ -44,7 +44,7 @@ impl Lfm2MoeJevScorer {
         source: Arc<dyn TensorSource>,
         n_threads: usize,
         prefill_batch_size: usize,
-        jinja: &crate::models::chat_template_jinja::Options,
+        jinja: &crate::prompt::jinja::Options,
     ) -> Result<Self, String> {
         Ok(Self {
             inner: Lfm2JevScorer::new(source, n_threads, prefill_batch_size, jinja)?,
