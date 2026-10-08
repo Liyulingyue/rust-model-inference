@@ -13,6 +13,20 @@
 //! retain the Q8_0 path.
 
 pub trait Kernel: Send + Sync {
+    /// Opt in to synchronous projection offload before entering ComputePool.
+    /// A false result requires the caller to recompute the entire output on CPU.
+    #[cfg(feature = "vulkan")]
+    fn try_forward_vulkan_rows(
+        &self,
+        _input: &[f32],
+        _output: &mut [f32],
+        _n_in: usize,
+        _n_out: usize,
+        _rows: usize,
+    ) -> bool {
+        false
+    }
+
     /// Returns the backing F32 values for model-local native-F32 contracts.
     fn f32_slice(&self) -> Option<&[f32]> {
         None

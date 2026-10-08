@@ -2,10 +2,8 @@
 //! file loaded from disk. Mirrors the pattern in
 //! `tests/ernie_image_di_t_q4_k_m.rs`:
 //!
-//! - The `loader` helper returns `None` when `RMI_AUK_GGUF` is unset or the
-//!   file is missing, so the tests silently no-op on CI.
-//! - The `loaded` helper returns `None` if the GGUF couldn't be parsed
-//!   (e.g. wrong file). Subsequent tests then bail out without panicking.
+//! Set `RMI_AUK_GGUF` to a published audio-cpp Base/Flash GGUF. Tests skip
+//! only when it is unset; a supplied missing or malformed file fails.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -18,9 +16,11 @@ fn env_path() -> Option<PathBuf> {
         return None;
     }
     let path = PathBuf::from(raw);
-    if !path.is_file() {
-        return None;
-    }
+    assert!(
+        path.is_file(),
+        "RMI_AUK_GGUF is not a file: {}",
+        path.display()
+    );
     Some(path)
 }
 
@@ -31,7 +31,7 @@ fn loader() -> Option<Arc<dyn TensorSource>> {
             &path,
             rust_model_inference::format::ggufrs::ComponentRole::Llm,
         )
-        .ok()?,
+        .expect("RMI_AUK_GGUF must be a valid GGUF"),
     ))
 }
 
@@ -95,7 +95,7 @@ fn contract_pins_auk_dit_double_block_dimensions() {
         return;
     };
     // Per-double-block (10 layers) tensor inventory with expected dims.
-    for layer in [0, 1, 9] {
+    for layer in 0..10 {
         let p = format!("transformer.transformer_blocks.{layer}");
         let expected = [
             // AdaLN: hidden -> 6*hidden
@@ -134,7 +134,7 @@ fn contract_pins_auk_dit_single_block_dimensions() {
         eprintln!("skipping: set RMI_AUK_GGUF to a real AuK GGUF");
         return;
     };
-    for layer in [0, 1, 9] {
+    for layer in 0..20 {
         let p = format!("transformer.single_transformer_blocks.{layer}");
         let expected = [
             (format!("{p}.attn_norm.linear.weight"), vec![1536, 9216]),
@@ -164,8 +164,7 @@ fn contract_pins_auk_dit_block_count() {
         eprintln!("skipping: set RMI_AUK_GGUF to a real AuK GGUF");
         return;
     };
-    // The unsloth F16 export has 10 double + 10 single blocks (the YAML
-    // config claims 20 single; the actual model in this GGUF caps at 10).
+    // Published audio-cpp Base/Flash GGUFs contain 10 double + 20 single blocks.
     for layer in 0..=9 {
         let name = format!("transformer.transformer_blocks.{layer}.attn_norm_x.linear.weight");
         assert!(
@@ -173,19 +172,19 @@ fn contract_pins_auk_dit_block_count() {
             "Missing double-block layer {layer}"
         );
     }
-    for layer in 0..=9 {
+    for layer in 0..20 {
         let name = format!("transformer.single_transformer_blocks.{layer}.attn_norm.linear.weight");
         assert!(
             source.tensor_info(&name).is_some(),
             "Missing single-block layer {layer}"
         );
     }
-    // Sanity: layer 10 should NOT exist for either.
+    // The next block must be absent for both streams.
     assert!(source
         .tensor_info("transformer.transformer_blocks.10.attn_norm_x.linear.weight")
         .is_none());
     assert!(source
-        .tensor_info("transformer.single_transformer_blocks.10.attn_norm.linear.weight")
+        .tensor_info("transformer.single_transformer_blocks.20.attn_norm.linear.weight")
         .is_none());
 }
 

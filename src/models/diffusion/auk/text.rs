@@ -17,7 +17,7 @@
 
 use std::sync::Arc;
 
-use crate::core::tensor::TensorSource;
+use crate::core::tensor::{GGMLType, MetaValue, MetaValueType, TensorInfo, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
 use crate::models::qwen3::trunk::positions::qwen_text_positions;
@@ -45,6 +45,15 @@ impl AukTextEncoder {
         // to the standard Qwen2 oracle list). Required for CFMEdit audio
         // conditioning via the Qwen text encoder.
         let tokenizer = Arc::new(BPETokenizer::from_qwen25_omni_embedded_merges()?);
+        let source = if source
+            .metadata("general.architecture")
+            .and_then(MetaValue::to_string_val)
+            == Some("audiocpp")
+        {
+            Arc::new(NativeQwenSource::new(source)?) as Arc<dyn TensorSource>
+        } else {
+            source
+        };
         let model = Qwen3Model::from_source(source, tokenizer, Arc::clone(&pool))?;
         Ok(Self { model, pool })
     }
@@ -205,5 +214,182 @@ impl AukTextEncoder {
     /// Number of tokens in the last encoded sequence.
     pub(crate) fn last_token_count(&self, hidden: &[f32]) -> usize {
         hidden.len() / TEXT_IN
+    }
+}
+
+/// The audio.cpp GGUF retains HF tensor names but omits the Thinker config.
+/// This view preserves its bytes; the fixed 3B signature is checked before use.
+struct NativeQwenSource {
+    source: Arc<dyn TensorSource>,
+    metadata: std::collections::HashMap<String, MetaValue>,
+    tensors: std::collections::HashMap<String, (String, TensorInfo)>,
+}
+
+impl NativeQwenSource {
+    fn new(source: Arc<dyn TensorSource>) -> Result<Self, String> {
+        let mut view = Self {
+            source,
+            metadata: Default::default(),
+            tensors: Default::default(),
+        };
+        view.alias(
+            "token_embd.weight",
+            "thinker.model.embed_tokens.weight",
+            &[2048, 151936],
+        )?;
+        // Encoder-only exports omit the LM head; text_encode never computes logits.
+        if view.source.tensor_info("thinker.lm_head.weight").is_some() {
+            view.alias("output.weight", "thinker.lm_head.weight", &[2048, 151936])?;
+        }
+        view.alias("output_norm.weight", "thinker.model.norm.weight", &[2048])?;
+        for layer in 0..36 {
+            for (alias, native, dims) in [
+                ("attn_norm.weight", "input_layernorm.weight", vec![2048]),
+                (
+                    "ffn_norm.weight",
+                    "post_attention_layernorm.weight",
+                    vec![2048],
+                ),
+                ("attn_q.weight", "self_attn.q_proj.weight", vec![2048, 2048]),
+                ("attn_k.weight", "self_attn.k_proj.weight", vec![2048, 256]),
+                ("attn_v.weight", "self_attn.v_proj.weight", vec![2048, 256]),
+                (
+                    "attn_output.weight",
+                    "self_attn.o_proj.weight",
+                    vec![2048, 2048],
+                ),
+                ("attn_q.bias", "self_attn.q_proj.bias", vec![2048]),
+                ("attn_k.bias", "self_attn.k_proj.bias", vec![256]),
+                ("attn_v.bias", "self_attn.v_proj.bias", vec![256]),
+                ("ffn_gate.weight", "mlp.gate_proj.weight", vec![2048, 11008]),
+                ("ffn_up.weight", "mlp.up_proj.weight", vec![2048, 11008]),
+                ("ffn_down.weight", "mlp.down_proj.weight", vec![11008, 2048]),
+            ] {
+                view.alias(
+                    &format!("blk.{layer}.{alias}"),
+                    &format!("thinker.model.layers.{layer}.{native}"),
+                    &dims,
+                )?;
+            }
+        }
+        if view
+            .source
+            .tensor_info("thinker.model.layers.36.self_attn.q_proj.weight")
+            .is_some()
+        {
+            return Err("AuK native text encoder must have exactly 36 layers".into());
+        }
+        // Qwen/Qwen2.5-Omni-3B config.json -> thinker_config.text_config.
+        view.metadata.insert(
+            "general.architecture".into(),
+            MetaValue::String("qwen2vl".into()),
+        );
+        for (key, value) in [
+            ("embedding_length", 2048),
+            ("block_count", 36),
+            ("attention.head_count", 16),
+            ("attention.head_count_kv", 2),
+            ("feed_forward_length", 11008),
+            ("context_length", 32768),
+            ("vocab_size", 151936),
+        ] {
+            view.metadata
+                .insert(format!("qwen2vl.{key}"), MetaValue::Uint32(value));
+        }
+        view.metadata.insert(
+            "qwen2vl.rope.freq_base".into(),
+            MetaValue::Float32(1_000_000.0),
+        );
+        view.metadata.insert(
+            "qwen2vl.attention.layer_norm_rms_epsilon".into(),
+            MetaValue::Float32(1e-6),
+        );
+        view.metadata.insert(
+            "qwen2vl.rope.dimension_sections".into(),
+            MetaValue::Array(
+                MetaValueType::Int32,
+                [16, 24, 24, 0].into_iter().map(MetaValue::Int32).collect(),
+            ),
+        );
+        Ok(view)
+    }
+
+    fn alias(&mut self, alias: &str, native: &str, dims: &[u64]) -> Result<(), String> {
+        let mut info = self
+            .source
+            .tensor_info(native)
+            .ok_or_else(|| format!("Missing AuK native Qwen tensor: {native}"))?
+            .clone();
+        let supported = if dims.len() == 1 {
+            matches!(info.ggml_type, GGMLType::F32 | GGMLType::BF16)
+        } else {
+            matches!(
+                info.ggml_type,
+                GGMLType::F16 | GGMLType::BF16 | GGMLType::Q8_0
+            )
+        };
+        if info.dims != dims || !supported {
+            return Err(format!(
+                "Unsupported AuK native Qwen tensor {native}: {:?} {:?}",
+                info.dims, info.ggml_type
+            ));
+        }
+        let bytes = self
+            .source
+            .tensor_slice(native)
+            .ok_or_else(|| format!("Missing AuK native Qwen bytes: {native}"))?;
+        if info.checked_nbytes() != Some(bytes.len() as u64) {
+            return Err(format!("Invalid AuK native Qwen byte length: {native}"));
+        }
+        info.name = alias.into();
+        self.tensors.insert(alias.into(), (native.into(), info));
+        Ok(())
+    }
+}
+
+impl TensorSource for NativeQwenSource {
+    fn metadata(&self, key: &str) -> Option<&MetaValue> {
+        self.metadata.get(key).or_else(|| self.source.metadata(key))
+    }
+    fn tensor_info(&self, name: &str) -> Option<&TensorInfo> {
+        self.tensors.get(name).map(|(_, info)| info)
+    }
+    fn tensor_slice(&self, name: &str) -> Option<&[u8]> {
+        self.tensors
+            .get(name)
+            .and_then(|(native, _)| self.source.tensor_slice(native))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires the published audio.cpp Qwen GGUF in RMI_AUK_NATIVE_TEXT"]
+    fn native_auk_qwen_signature_preserves_original_tensor_bytes() {
+        let path = std::env::var("RMI_AUK_NATIVE_TEXT").expect("native Qwen GGUF required");
+        let source: Arc<dyn TensorSource> = Arc::from(
+            crate::open_model_source(std::path::Path::new(&path), crate::ComponentRole::Llm)
+                .unwrap(),
+        );
+        let view = NativeQwenSource::new(source.clone()).unwrap();
+        let config = crate::models::qwen3::trunk::Qwen3Config::from_source(&view).unwrap();
+        assert_eq!(
+            (
+                config.n_embd,
+                config.n_layer,
+                config.n_head,
+                config.n_head_kv
+            ),
+            (2048, 36, 16, 2)
+        );
+        for (alias, (native, info)) in &view.tensors {
+            assert_eq!(&info.name, alias);
+            assert_eq!(
+                view.tensor_slice(alias).unwrap().as_ptr(),
+                source.tensor_slice(native).unwrap().as_ptr()
+            );
+        }
     }
 }

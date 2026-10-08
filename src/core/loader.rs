@@ -271,6 +271,30 @@ impl GGUFLoader {
             });
         }
 
+        // audio.cpp stores long tensor names as _audiocpp.N and records the
+        // original names in this parallel array. Restore names without copying data.
+        if let Some((_, value)) = metadata
+            .iter()
+            .find(|(key, _)| key == "audiocpp.tensor_names")
+        {
+            let MetaValue::Array(MetaValueType::String, names) = value else {
+                return Err("audiocpp.tensor_names must be a string array".into());
+            };
+            if names.len() != tensors.len() {
+                return Err("audiocpp.tensor_names count must match tensor count".into());
+            }
+            let mut unique = std::collections::HashSet::new();
+            for (tensor, name) in tensors.iter_mut().zip(names) {
+                let MetaValue::String(name) = name else {
+                    return Err("audiocpp.tensor_names must contain strings".into());
+                };
+                if name.is_empty() || !unique.insert(name) {
+                    return Err("audiocpp.tensor_names must be nonempty and unique".into());
+                }
+                tensor.name.clone_from(name);
+            }
+        }
+
         let alignment = metadata
             .iter()
             .find(|(k, _)| k == "general.alignment")
@@ -1197,6 +1221,54 @@ mod tests {
         let path = dir.join(format!("test_{}_{}.gguf", std::process::id(), id));
         std::fs::write(&path, data).map_err(|e| e.to_string())?;
         GGUFLoader::from_file(path.to_str().unwrap())
+    }
+
+    #[test]
+    fn audiocpp_logical_names_preserve_tensor_offsets_and_reject_bad_maps() {
+        let encoded = |names: &[&str]| {
+            let mut b = Vec::new();
+            push_u32(&mut b, u32::from_le_bytes(*b"GGUF"));
+            push_u32(&mut b, 3);
+            push_u64(&mut b, 2);
+            push_u64(&mut b, 1);
+            push_kv(&mut b, "audiocpp.tensor_names", MetaValueType::Array, |b| {
+                push_i32(b, MetaValueType::String as i32);
+                push_u64(b, names.len() as u64);
+                for name in names {
+                    push_str(b, name);
+                }
+            });
+            for (name, offset) in [("_audiocpp.0", 0), ("short", 4)] {
+                push_str(&mut b, name);
+                push_u32(&mut b, 1);
+                push_u64(&mut b, 1);
+                push_i32(&mut b, GGMLType::F32 as i32);
+                push_u64(&mut b, offset);
+            }
+            while b.len() % 32 != 0 {
+                b.push(0);
+            }
+            push_f32(&mut b, 1.25);
+            push_f32(&mut b, -2.5);
+            b
+        };
+        let long = "transformer.single_transformer_blocks.19.attn_norm.linear.weight";
+        let loader = parse_temp(&encoded(&[long, "short"])).unwrap();
+        assert_eq!(loader.tensor_info(long).unwrap().offset, 0);
+        assert_eq!(loader.tensor_info("short").unwrap().offset, 4);
+        assert_eq!(loader.tensor_slice(long).unwrap(), &1.25f32.to_le_bytes());
+        assert_eq!(
+            loader.tensor_slice("short").unwrap(),
+            &(-2.5f32).to_le_bytes()
+        );
+        assert_eq!(loader.tensor_slice(long).unwrap().as_ptr(), unsafe {
+            loader.mmap.as_ptr().add(loader.data_offset)
+        });
+        for names in [&["short"][..], &["short", "short"][..], &["", "short"][..]] {
+            assert!(parse_temp(&encoded(names))
+                .unwrap_err()
+                .contains("audiocpp.tensor_names"));
+        }
     }
 
     #[test]

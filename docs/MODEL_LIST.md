@@ -1,5 +1,10 @@
 Mage-Flow 已接入主 CLI；下表数值与 PNG 证据来自原适配记录，远端已关机，本次入口迁移的真实权重复验未执行，见 verification.json 的 `cli_integration`。
 
+Z-Image VAE、YuE2、Edge0、LFM2/LFM2.5/LFM2MoE、文本 embedding 与 AuK 已接入实验性 Vulkan 投影路径，
+RADV 实机数值、成品和计时范围见 [2026-10-07 验证记录](develop/VULKAN_RADV_VALIDATION_2026-10-07.md)；
+表中已有验证等级仍指原来的执行范围。
+AuK Base/Flash 记录见 [2026-10-08 验证](develop/VULKAN_AUK_RADV_VALIDATION_2026-10-08.md)；格式与限制见 [Vulkan 文档](develop/VULKAN.md)。
+
 | 模型 | 版本 | 任务类型 | 参考实现 | 原始权重 | 推理权重 | 备注 |
 |---|---|---|---|---|---|---|
 | Mage-Flow-Base | Base | 文生图 | microsoft/Mage @ `76bec2bb` | https://www.modelscope.cn/models/microsoft/Mage-Flow-Base | `tools/converter/mage_flow`（无损 BF16） | 主 CLI `rust-model-inference` CPU 入口；真实 DiT 与共享组件按标量原始 F32 位对齐，PNG 仅最小尺寸验证。[范围与复现](../tools/oracle/mage_flow/README.md)。 |
@@ -36,7 +41,7 @@ Mage-Flow 已接入主 CLI；下表数值与 PNG 证据来自原适配记录，�
 | Llama-3.2-1B-Instruct | 1B | 文本 | llama.cpp | https://www.modelscope.cn/models/unsloth/Llama-3.2-1B-Instruct | https://modelscope.cn/models/unsloth/Llama-3.2-1B-Instruct-GGUF | √ |
 | Phi-4-mini-Instruct | 3.8B | 文本 | llama.cpp | https://www.modelscope.cn/models/microsoft/Phi-4-mini-instruct | https://modelscope.cn/models/unsloth/Phi-4-mini-instruct-GGUF | √ |
 | LFM2 | 350M / 700M / 1.2B / 8B-A1B | 文本 | llama.cpp | https://www.modelscope.cn/models/LiquidAI/LFM2-8B-A1B | https://www.modelscope.cn/models/unsloth/LFM2-8B-A1B-GGUF | √ 8B-A1B 为 `lfm2moe`，Q8_0 已与 llama.cpp 对齐前 6 个 greedy token。 |
-| LFM2.5 | 230M / 1.2B / 1.2B-Thinking / 2.6B / 8B-A1B | 文本 | llama.cpp | https://www.modelscope.cn/models/LiquidAI/LFM2.5-1.2B-Instruct | https://www.modelscope.cn/models/unsloth/LFM2.5-1.2B-Instruct-GGUF<br>https://www.modelscope.cn/models/unsloth/LFM2.5-8B-A1B-GGUF | √ 稠密档（230M/1.2B/2.6B）走 `lfm2`；8B-A1B 走 `lfm2moe`，2026-10-07 以 Q8_0 与 UD-Q4_K_M 两个真实 GGUF 跑通，状态 `Supported`——未做 llama.cpp 逐位对齐。`--gpu` 可用但不逐位等价于 CPU 且更慢，不要开。 |
+| LFM2.5 | 230M / 1.2B / 1.2B-Thinking / 2.6B / 8B-A1B | 文本 | llama.cpp | https://www.modelscope.cn/models/LiquidAI/LFM2.5-1.2B-Instruct | https://www.modelscope.cn/models/unsloth/LFM2.5-1.2B-Instruct-GGUF<br>https://www.modelscope.cn/models/unsloth/LFM2.5-8B-A1B-GGUF | √ 稠密档（230M/1.2B/2.6B）走 `lfm2`；8B-A1B 走 `lfm2moe`，2026-10-07 以 Q8_0 与 UD-Q4_K_M 两个真实 GGUF 跑通，状态 `Supported`——未做 llama.cpp 逐位对齐。Vulkan 投影为 `Experimental`；RADV Q8_0 固定样例通过原数值门槛、32 greedy IDs 一致，性能依赖设备与用例，见 [实机记录](develop/VULKAN_RADV_VALIDATION_2026-10-07.md)。 |
 | LFM2.5-VL | 450M / 1.6B / 3B | 文本、图像 | llama.cpp | https://www.modelscope.cn/models/LiquidAI/LFM2.5-VL-3B | https://www.modelscope.cn/models/unsloth/LFM2.5-VL-3B-GGUF | √ |
 | CLM-v0.1-8B | 8B（冻结 Qwen3-8B encoder） | 候选打分（非生成） | Contrastive-LM/CLM `bb42c6c` + llama.cpp `b96806d` | https://www.modelscope.cn/models/Contrastive-LM/CLM-v0.1-8B | `tools/converter/clm`（本仓库产出） | √（F32 双头 + Qwen3-8B BF16；两组真实文本评分的编码器与投影头 F32 值标量逐位一致；CLI 与 HTTP `/v1/jev/score` 已接入，HTTP 精度未单独验证；[用法](usage/clm.md)、[复现](../tools/oracle/clm/README.md)） |
 | GLiNER2.5-Decide | 340M（DeBERTa-v3-large encoder + ReLU MLP 头） | 分类 / 决策（非生成） | fastino-ai/GLiNER2 @ `55656fb` | https://www.modelscope.cn/models/fastino/GLiNER2.5-Decide | `tools/converter/gliner`（本仓库产出） | √（`gliner2` F32 GGUF；当前发布的 `tokenizer.json` 已内嵌；4 个请求的 token IDs、120 个检查点和 6,919,181 个 F32 值在标量路径上逐位一致。SIMD、FMA、BLAS、Accelerate、量化路径未对齐；`--jev --gliner2-decide` + `POST /v1/jev/score`；[用法](usage/gliner2-decide.md)、[复现](../tools/oracle/gliner/README.md)） |

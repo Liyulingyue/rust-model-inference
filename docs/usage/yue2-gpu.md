@@ -1,8 +1,18 @@
-# YuE2 AR on the GPU: the k-quant matmul shaders use 1 of 64 lanes
+# YuE2 Vulkan: projection offload and the legacy AR executor
 
-`--gpu --yue2` runs the AR half on the device (`src/vulkan/yue2.rs`). It is
-correct end to end, and it is much slower than the CPU. This file records the
-profile, the cause, and what has to change.
+Normal `--gpu --yue2` sessions offload matrix projections while retaining CPU
+attention, state operations and the BF16 rounding boundaries. See the
+[2026-10-07 RADV verification](../develop/VULKAN_RADV_VALIDATION_2026-10-07.md).
+
+The legacy whole-AR executor (`src/vulkan/yue2.rs`) is disabled in normal
+sessions: its delayed initialization dropped the prefix KV, and after fixing
+initialization a real 56-token prefix triggered RADV device loss. Its F32
+normalization and residual operations also lack YuE2's BF16 rounding contract.
+The initialization regression covers an isolated four-token prefix; it does
+not establish numerical parity or make the whole executor eligible.
+
+The measurements below are historical profiles of that executor. They do not
+establish correctness or performance of the current projection path.
 
 ## The measurement
 

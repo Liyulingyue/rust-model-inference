@@ -685,7 +685,13 @@ impl<'a> QuantizedTensor<'a> {
 
     pub fn n_rows(&self) -> usize {
         match self {
-            Self::F32 { data, .. } => usize::from(!data.is_empty()),
+            Self::F32 { data, n_out, .. } => {
+                if *n_out != 0 {
+                    *n_out
+                } else {
+                    usize::from(!data.is_empty())
+                }
+            }
             Self::F16(weight) => weight.n_out,
             Self::BF16(weight) => weight.n_out,
             Self::Q8_0 { n_rows, .. } => *n_rows,
