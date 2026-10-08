@@ -43,19 +43,51 @@ if [[ ! -d "$work" ]]; then
     (cd "$work" && git apply "$script_dir/qwen-image-2-1-trace.patch")
 fi
 
-cmake -S "$work" -B "$work/build" \
+cp "$script_dir/components.cpp" "$work/examples/qwen_image_2_1_trace/components.cpp"
+if ! rg -q 'qwen-image-2-1-components' "$work/examples/qwen_image_2_1_trace/CMakeLists.txt"; then
+    cat >> "$work/examples/qwen_image_2_1_trace/CMakeLists.txt" <<'CMAKE'
+add_executable(qwen-image-2-1-components components.cpp)
+target_include_directories(qwen-image-2-1-components PRIVATE "${PROJECT_SOURCE_DIR}/src")
+target_link_libraries(qwen-image-2-1-components PRIVATE stable-diffusion ${CMAKE_THREAD_LIBS_INIT})
+target_compile_features(qwen-image-2-1-components PUBLIC cxx_std_17)
+if(APPLE)
+    sd_set_macos_rpaths(qwen-image-2-1-components)
+endif()
+CMAKE
+fi
+
+# Disable vector reductions, architecture kernels, contraction, and fused trig
+# together. RMI_SCALAR=1 uses the same scalar arithmetic contract.
+flags='-ffp-contract=off -fno-builtin-sinf -fno-builtin-cosf -U__ARM_NEON -U__ARM_FEATURE_FP16_VECTOR_ARITHMETIC -U__ARM_FEATURE_SVE -U__ARM_FEATURE_FMA'
+if "${CXX:-c++}" --version | rg -qi clang; then
+    flags+=' -fno-vectorize -fno-slp-vectorize'
+else
+    flags+=' -fno-tree-vectorize'
+fi
+build="$work/build-scalar"
+cmake -S "$work" -B "$build" \
     -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_C_FLAGS="-fno-vectorize -fno-slp-vectorize" \
-    -DCMAKE_CXX_FLAGS="-fno-vectorize -fno-slp-vectorize" \
+    -DCMAKE_C_FLAGS="$flags" \
+    -DCMAKE_CXX_FLAGS="$flags" \
     -DSD_METAL=OFF \
     -DGGML_METAL=OFF \
     -DGGML_ACCELERATE=OFF \
     -DGGML_BLAS=OFF \
+    -DGGML_CCACHE=OFF \
+    -DGGML_NATIVE=OFF \
+    -DGGML_SSE42=OFF \
+    -DGGML_AVX=OFF \
+    -DGGML_AVX2=OFF \
+    -DGGML_AVX512=OFF \
+    -DGGML_AVX512_VBMI=OFF \
+    -DGGML_AVX512_VNNI=OFF \
+    -DGGML_FMA=OFF \
+    -DGGML_F16C=OFF \
     -DGGML_CUDA=OFF \
     -DGGML_VULKAN=OFF \
     -DSD_BUILD_EXAMPLES=ON >&2
-cmake --build "$work/build" --target qwen-image-2-1-oracle --config Release --parallel "${RMI_BUILD_JOBS:-4}" >&2
+cmake --build "$build" --target qwen-image-2-1-oracle qwen-image-2-1-components --config Release --parallel "${RMI_BUILD_JOBS:-4}" >&2
 
-bin="$work/build/bin/qwen-image-2-1-oracle"
+bin="$build/bin/qwen-image-2-1-oracle"
 [[ -x "$bin" ]] || { echo "oracle build did not produce $bin" >&2; exit 1; }
 printf '%s\n' "$bin"
