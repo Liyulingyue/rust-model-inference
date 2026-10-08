@@ -1442,7 +1442,10 @@ fn try_conv_f16(
     output: &mut [f32],
     patch_len: usize,
 ) -> bool {
-    if !crate::ops::kernel::vulkan::offload_enabled() {
+    // ponytail: 64-row tiles wait per submission; keep VAE opt-in until they are batched.
+    if !crate::ops::kernel::vulkan::offload_enabled()
+        || std::env::var("RUST_GPU_VAE").as_deref() != Ok("1")
+    {
         return false;
     }
     let spatial = side * side;
@@ -2252,8 +2255,18 @@ mod tests {
     #[test]
     #[ignore = "requires a Vulkan device; fails if offload is unavailable"]
     fn vulkan_vae_convolution_matches_cpu_across_tiles() {
+        struct RestoreVaeEnv(Option<std::ffi::OsString>);
+        impl Drop for RestoreVaeEnv {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => std::env::set_var("RUST_GPU_VAE", value),
+                    None => std::env::remove_var("RUST_GPU_VAE"),
+                }
+            }
+        }
+        let _restore = RestoreVaeEnv(std::env::var_os("RUST_GPU_VAE"));
         crate::ops::enable_gpu();
-        crate::ops::get_vulkan_context().expect("Vulkan device required");
+        let context = crate::ops::get_vulkan_context().expect("Vulkan device required");
         let pool = Arc::new(ComputePool::new(2));
         let side = 9; // 81 pixels exercise both a full 64-row tile and its tail.
         let input: Vec<_> = (0..side * side * 2)
@@ -2280,9 +2293,14 @@ mod tests {
             )
             .unwrap();
             let gpu = crate::ops::kernel::vulkan::GpuLinear::default();
-            let mut actual = vec![f32::NAN; expected.len()];
-            assert!(
-                try_conv_f16(
+            for setting in [None, Some("0"), Some("1")] {
+                match setting {
+                    Some(value) => std::env::set_var("RUST_GPU_VAE", value),
+                    None => std::env::remove_var("RUST_GPU_VAE"),
+                }
+                let submissions = context.submission_count();
+                let mut actual = vec![f32::NAN; expected.len()];
+                let offloaded = try_conv_f16(
                     &gpu,
                     &input,
                     side,
@@ -2291,15 +2309,37 @@ mod tests {
                     kernel,
                     Some(&bias),
                     &mut actual,
-                    patch_len
-                ),
-                "GPU convolution declined"
-            );
-            for (actual, expected) in actual.into_iter().zip(expected) {
-                assert!(
-                    (actual - expected).abs() <= 3e-4 + 3e-4 * expected.abs(),
-                    "gpu={actual} cpu={expected}"
+                    patch_len,
                 );
+                assert_eq!(offloaded, setting == Some("1"), "RUST_GPU_VAE={setting:?}");
+                if offloaded {
+                    assert!(context.submission_count() > submissions);
+                    for (actual, expected) in actual.into_iter().zip(&expected) {
+                        assert!(
+                            (actual - expected).abs() <= 3e-4 + 3e-4 * expected.abs(),
+                            "gpu={actual} cpu={expected}"
+                        );
+                    }
+                } else {
+                    conv_f16_parallel_into(
+                        &input,
+                        2,
+                        side,
+                        &weights,
+                        3,
+                        kernel,
+                        Some(&bias),
+                        &mut actual,
+                        &pool,
+                        Some(&gpu),
+                    )
+                    .unwrap();
+                    assert_eq!(context.submission_count(), submissions);
+                    assert!(actual
+                        .iter()
+                        .zip(&expected)
+                        .all(|(actual, expected)| { actual.to_bits() == expected.to_bits() }));
+                }
             }
         }
     }

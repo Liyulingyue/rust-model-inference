@@ -12,7 +12,7 @@ macOS 会自动查找系统 Loader，以及 Homebrew 的 `/opt/homebrew/lib/libv
 
 | 路径 | 新接入的 Vulkan 部分 | 保留在 CPU 的部分 |
 |---|---|---|
-| Z-Image | 已有 DiT 路径之外，VAE 的 F16 1×1 / 3×3 卷积，包括 shortcut 与 upsample 后卷积 | VAE 归一化、激活、空间 attention、最近邻上采样 |
+| Z-Image | DiT；VAE 的 F16 1×1 / 3×3 卷积需显式 `RUST_GPU_VAE=1`，包括 shortcut 与 upsample 后卷积 | 默认全部 VAE；显式开启后仍保留归一化、激活、空间 attention、最近邻上采样 |
 | YuE2 | AR/NAR 投影，BF16 投影加 bias 后仍舍入为 BF16；`--yue2 --gpu` 可进入加载入口 | attention、状态更新、音频 VAE；NAR F16 的 Q8 activation 合约暂留 CPU |
 | Edge0 | MLX affine 4/8-bit（group=64，BF16 scale/bias）投影与 MoE 专家投影；普通 GGUF 矩阵复用已有 shader | LoRA 的低秩修正、recurrent/attention 状态与 MoE 路由合并 |
 | LFM2 / LFM2.5 / LFM2MoE | Q/K/V、输出、FFN、专家、shortconv 输入/输出投影及 LM head | shortconv 状态与卷积、attention、归一化、激活、采样 |
@@ -30,7 +30,9 @@ YuE2 正常会话使用投影 offload。旧整图 AR 执行器存在 BF16 数值
 BF16 dot 投影现已打包独立输出行，四帧共享权重读取，并保留原 FMA/归约顺序。
 RADV 的 256 帧 NAR 重复调用从 33.60 降到 12.42 秒；AR 耗时基本不变，
 详见 [YuE2 优化记录](VULKAN_YUE2_OPTIMIZATION_2026-10-08.md)。
-Z-Image VAE 的主线 BF16/F32 分支保留原有计算，新增卷积 offload 只接入 F16 分支。
+Z-Image VAE 默认保持 CPU，`--gpu` 继续启用 DiT。F16 卷积 offload 每 64 行都同步等待，
+大分辨率上可能显著慢于 CPU；仅 `RUST_GPU_VAE=1` 显式启用，BF16/F32 分支保留原有计算。
+后续优化必须同时处理 VAE 的 im2col 分块和共享投影内的 64 行分块，单改外层 tile 不能减少同步。
 AuK 的 F16 点积模式要求 CPU AVX2/F16C/FMA，其他 CPU 后端保持原计算；没有 F16→Q8_0
 重编码。DiT 上传缓存随每次 denoise 的 scratch 释放，重复生成需要重新上传 DiT 权重。
 实机结果与现有音频模型质量边界见 [AuK 验证记录](VULKAN_AUK_RADV_VALIDATION_2026-10-08.md)。
@@ -47,7 +49,7 @@ cargo run --profile release-fast --locked --features vulkan --example vk_ops_che
 cargo test --profile release-fast --locked --features vulkan --lib \
   vulkan_mlx_affine_rows_include_lora_and_tile_tails -- --ignored --nocapture
 cargo test --profile release-fast --locked --features vulkan --lib \
-  vulkan_vae_convolution_matches_cpu_across_tiles -- --ignored --nocapture
+  vulkan_vae_convolution_matches_cpu_across_tiles -- --ignored --nocapture --test-threads=1
 cargo test --profile release-fast --locked --features vulkan --lib \
   vulkan_yue2_bf16_rounds_after_bias_across_tiles -- --ignored --nocapture
 cargo test --profile release-fast --locked --features vulkan --lib \
