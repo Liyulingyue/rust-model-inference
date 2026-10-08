@@ -237,6 +237,8 @@ impl VaeScratch {
 pub(crate) struct FluxVae {
     source: Arc<dyn TensorSource>,
     pool: Arc<ComputePool>,
+    #[cfg(feature = "vulkan")]
+    gpu_conv: crate::ops::kernel::vulkan::GpuConv,
     conv_in: VaeConv,
     mid_block_1: VaeResidualBlock,
     mid_attention: VaeAttention,
@@ -325,6 +327,8 @@ impl FluxVae {
         Ok(Self {
             source,
             pool,
+            #[cfg(feature = "vulkan")]
+            gpu_conv: crate::ops::kernel::vulkan::GpuConv::default(),
             conv_in,
             mid_block_1,
             mid_attention,
@@ -369,6 +373,8 @@ impl FluxVae {
             &current,
             side,
             &mut scratch.first,
+            #[cfg(feature = "vulkan")]
+            Some(&self.gpu_conv),
         )?;
         std::mem::swap(&mut current, &mut scratch.first);
         let mut feature_side = side;
@@ -440,6 +446,8 @@ impl FluxVae {
             &scratch.first,
             feature_side,
             &mut moments,
+            #[cfg(feature = "vulkan")]
+            Some(&self.gpu_conv),
         )?;
         let mut noise = vec![0.0; 16 * latent_spatial];
         TorchMt19937::new(seed).fill_normal(&mut noise);
@@ -523,6 +531,8 @@ impl FluxVae {
                 &current,
                 latent_side,
                 &mut scratch.first,
+                #[cfg(feature = "vulkan")]
+                Some(&self.gpu_conv),
             )?;
             std::mem::swap(&mut current, &mut scratch.first);
             #[cfg(feature = "parity-trace")]
@@ -545,6 +555,8 @@ impl FluxVae {
             &current,
             latent_side,
             &mut scratch.first,
+            #[cfg(feature = "vulkan")]
+            Some(&self.gpu_conv),
         )?;
         std::mem::swap(&mut current, &mut scratch.first);
         #[cfg(feature = "parity-trace")]
@@ -619,6 +631,8 @@ impl FluxVae {
                     &scratch.first,
                     next_side,
                     &mut scratch.second,
+                    #[cfg(feature = "vulkan")]
+                    Some(&self.gpu_conv),
                 )?;
                 std::mem::swap(&mut current, &mut scratch.second);
                 side = next_side;
@@ -657,6 +671,8 @@ impl FluxVae {
             &scratch.first,
             output_side,
             &mut scratch.second,
+            #[cfg(feature = "vulkan")]
+            Some(&self.gpu_conv),
         )?;
         std::mem::swap(&mut current, &mut scratch.second);
         if current.len() != rgb_len || current.iter().any(|value| !value.is_finite()) {
@@ -724,6 +740,8 @@ impl FluxVae {
             &scratch.first,
             side,
             &mut scratch.second,
+            #[cfg(feature = "vulkan")]
+            Some(&self.gpu_conv),
         )?;
         resize_f32(
             &mut scratch.first,
@@ -746,48 +764,27 @@ impl FluxVae {
             &scratch.first,
             side,
             &mut scratch.second,
+            #[cfg(feature = "vulkan")]
+            Some(&self.gpu_conv),
         )?;
 
         if let Some(shortcut) = &block.shortcut {
-            resize_f32(&mut scratch.first, "VAE projected shortcut", output_len)?;
-            if self
-                .source
-                .tensor_info(&shortcut.weight)
-                .map(|info| info.ggml_type)
-                == Some(GGMLType::BF16)
-            {
-                run_conv(
-                    self.source.as_ref(),
-                    &self.pool,
-                    shortcut,
-                    current,
-                    side,
-                    &mut scratch.first,
-                )?;
-                for (output, branch) in scratch.first.iter_mut().zip(&scratch.second) {
-                    *output += branch;
-                    if !output.is_finite() {
-                        return Err("Non-finite VAE shortcut residual".into());
-                    }
+            resize_f32(&mut scratch.first, "VAE shortcut", output_len)?;
+            run_conv(
+                self.source.as_ref(),
+                &self.pool,
+                shortcut,
+                current,
+                side,
+                &mut scratch.first,
+                #[cfg(feature = "vulkan")]
+                Some(&self.gpu_conv),
+            )?;
+            for (output, branch) in scratch.first.iter_mut().zip(&scratch.second) {
+                *output += branch;
+                if !output.is_finite() {
+                    return Err("Non-finite VAE shortcut residual".into());
                 }
-            } else {
-                let weights = self
-                    .source
-                    .tensor_slice(&shortcut.weight)
-                    .ok_or_else(|| format!("Missing tensor data: {}", shortcut.weight))?;
-                add_shortcut_residual_into(
-                    current,
-                    &scratch.second,
-                    block.input_channels,
-                    block.output_channels,
-                    side,
-                    weights,
-                    Some(&shortcut.bias),
-                    &mut scratch.first,
-                    &self.pool,
-                    #[cfg(feature = "vulkan")]
-                    Some(&shortcut.gpu),
-                )?;
             }
             std::mem::swap(current, &mut scratch.first);
         } else {
@@ -832,6 +829,8 @@ impl FluxVae {
             &scratch.first,
             side,
             &mut scratch.q,
+            #[cfg(feature = "vulkan")]
+            Some(&self.gpu_conv),
         )?;
         run_attention_projection(
             self.source.as_ref(),
@@ -840,6 +839,8 @@ impl FluxVae {
             &scratch.first,
             side,
             &mut scratch.k,
+            #[cfg(feature = "vulkan")]
+            Some(&self.gpu_conv),
         )?;
         run_attention_projection(
             self.source.as_ref(),
@@ -848,6 +849,8 @@ impl FluxVae {
             &scratch.first,
             side,
             &mut scratch.v,
+            #[cfg(feature = "vulkan")]
+            Some(&self.gpu_conv),
         )?;
         #[cfg(feature = "parity-trace")]
         for (name, values) in [
@@ -887,6 +890,8 @@ impl FluxVae {
             &scratch.first,
             side,
             &mut scratch.second,
+            #[cfg(feature = "vulkan")]
+            Some(&self.gpu_conv),
         )?;
         for (projected, residual) in scratch.second.iter_mut().zip(current.iter()) {
             *projected += residual;
@@ -955,6 +960,7 @@ fn run_conv(
     input: &[f32],
     side: usize,
     output: &mut [f32],
+    #[cfg(feature = "vulkan")] gpu: Option<&crate::ops::kernel::vulkan::GpuConv>,
 ) -> Result<(), String> {
     if let Some(linear) = &conv.linear {
         let spatial = checked_spatial(side, "VAE linear")?;
@@ -999,19 +1005,36 @@ fn run_conv(
         .ok_or_else(|| format!("Missing tensor info: {}", conv.weight))?
         .ggml_type;
     match dtype {
-        GGMLType::F16 => conv_f16_parallel_into(
-            input,
-            conv.input_channels,
-            side,
-            weights,
-            conv.output_channels,
-            conv.kernel,
-            Some(&conv.bias),
-            output,
-            pool,
+        GGMLType::F16 => {
             #[cfg(feature = "vulkan")]
-            Some(&conv.gpu),
-        ),
+            if gpu.is_some_and(|gpu| {
+                gpu.try_conv_f16(
+                    weights,
+                    input,
+                    output,
+                    conv.input_channels,
+                    conv.output_channels,
+                    side,
+                    conv.kernel,
+                    Some(&conv.bias),
+                )
+            }) {
+                return Ok(());
+            }
+            conv_f16_parallel_into(
+                input,
+                conv.input_channels,
+                side,
+                weights,
+                conv.output_channels,
+                conv.kernel,
+                Some(&conv.bias),
+                output,
+                pool,
+                #[cfg(feature = "vulkan")]
+                Some(&conv.gpu),
+            )
+        }
         GGMLType::BF16 => conv_bf16_parallel_into(
             input,
             conv.input_channels,
@@ -1035,12 +1058,22 @@ fn run_attention_projection(
     input: &[f32],
     side: usize,
     output: &mut [f32],
+    #[cfg(feature = "vulkan")] gpu: Option<&crate::ops::kernel::vulkan::GpuConv>,
 ) -> Result<(), String> {
     if conv.kernel != 1 {
         return Err("Invalid VAE attention projection kernel".into());
     }
     if source.tensor_info(&conv.weight).map(|info| info.ggml_type) != Some(GGMLType::BF16) {
-        return run_conv(source, pool, conv, input, side, output);
+        return run_conv(
+            source,
+            pool,
+            conv,
+            input,
+            side,
+            output,
+            #[cfg(feature = "vulkan")]
+            gpu,
+        );
     }
     let weights = source
         .tensor_slice(&conv.weight)
@@ -1638,6 +1671,7 @@ fn silu_inplace_checked(values: &mut [f32]) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(test)]
 fn add_shortcut_residual_into(
     input: &[f32],
     residual_branch: &[f32],
@@ -2369,7 +2403,26 @@ mod tests {
         crate::ops::enable_gpu();
         let context = crate::ops::get_vulkan_context().expect("Vulkan device required");
         let pool = Arc::new(ComputePool::new(8));
-        for (side, input_channels, output_channels) in [(9, 2, 3), (65, 32, 65), (65, 1, 3)] {
+        assert!(matches!(
+            crate::vulkan::ops::Conv2dRuntime::new(context, (u32::MAX as usize / 4 + 1, 1, 1)),
+            Err(crate::vulkan::VulkanError::UnsupportedShape(_))
+        ));
+        let shapes = [(9, 2, 3), (65, 32, 65), (65, 1, 3)];
+        let weight_storage: Vec<Vec<u8>> = shapes
+            .iter()
+            .flat_map(|&(_, input_channels, output_channels)| {
+                [1, 3].map(move |kernel| {
+                    let patch_len = input_channels * kernel * kernel;
+                    (0..patch_len * output_channels)
+                        .flat_map(|i| f32_to_f16((i as f32 % 11.0 - 5.0) / 16.0).to_le_bytes())
+                        .collect()
+                })
+            })
+            .collect();
+        let direct = crate::ops::kernel::vulkan::GpuConv::default();
+        // Keep immutable weights alive while the shared arena grows, then reuse the first weights.
+        for shape_index in [0, 1, 2, 0] {
+            let (side, input_channels, output_channels) = shapes[shape_index];
             let spatial = side * side;
             let input: Vec<_> = (0..spatial * input_channels)
                 .map(|i| ((i * 29 % 251) as f32 - 125.0) / 97.0)
@@ -2377,11 +2430,9 @@ mod tests {
             let bias: Vec<_> = (0..output_channels)
                 .map(|i| (i as f32 - 1.0) / 8.0)
                 .collect();
-            for kernel in [1, 3] {
+            for (kernel_index, kernel) in [1, 3].into_iter().enumerate() {
                 let patch_len = input_channels * kernel * kernel;
-                let weights: Vec<_> = (0..patch_len * output_channels)
-                    .flat_map(|i| f32_to_f16((i as f32 % 11.0 - 5.0) / 16.0).to_le_bytes())
-                    .collect();
+                let weights = &weight_storage[shape_index * 2 + kernel_index];
                 let mut expected = vec![0.0; spatial * output_channels];
                 conv_f16_parallel_into(
                     &input,
@@ -2438,8 +2489,91 @@ mod tests {
                         "side={side} kernel={kernel} channels={input_channels}/{output_channels} gpu={actual} reference={expected}"
                     );
                 }
+                let submissions = context.submission_count();
+                let mut direct_output = vec![f32::NAN; actual.len()];
+                assert!(direct.try_conv_f16(
+                    &weights,
+                    &input,
+                    &mut direct_output,
+                    input_channels,
+                    output_channels,
+                    side,
+                    kernel,
+                    Some(&bias),
+                ));
+                assert_eq!(
+                    context.submission_count() - submissions,
+                    1,
+                    "a convolution must finish in one submission without host im2col tiles"
+                );
+                for (direct, tiled) in direct_output.iter().zip(&actual) {
+                    assert_eq!(
+                        direct.to_bits(),
+                        tiled.to_bits(),
+                        "direct convolution must retain the tiled GPU arithmetic"
+                    );
+                }
+                let submissions = context.submission_count();
+                assert!(direct.try_conv_f16(
+                    &weights,
+                    &input,
+                    &mut direct_output,
+                    input_channels,
+                    output_channels,
+                    side,
+                    kernel,
+                    None,
+                ));
+                assert_eq!(context.submission_count() - submissions, 1);
+                for (i, &value) in direct_output.iter().enumerate() {
+                    assert!(
+                        (value - (reference[i] - bias[i / spatial])).abs()
+                            <= 3e-4 + 3e-4 * reference[i].abs()
+                    );
+                }
+                let submissions = context.submission_count();
+                let unchanged: Vec<_> = direct_output.iter().map(|v| v.to_bits()).collect();
+                assert!(!direct.try_conv_f16(
+                    &weights,
+                    &input,
+                    &mut direct_output,
+                    input_channels,
+                    output_channels,
+                    side,
+                    kernel,
+                    Some(&bias[..bias.len() - 1]),
+                ));
+                assert!(!direct.try_conv_f16(
+                    &weights,
+                    &input,
+                    &mut direct_output,
+                    usize::MAX,
+                    output_channels,
+                    side,
+                    kernel,
+                    Some(&bias),
+                ));
+                assert_eq!(context.submission_count(), submissions);
+                assert_eq!(
+                    direct_output
+                        .iter()
+                        .map(|v| v.to_bits())
+                        .collect::<Vec<_>>(),
+                    unchanged
+                );
+                assert!(!crate::vulkan::gpu_broken());
                 let _disabled = ComputePool::disable_gpu_matmul_for_scope();
                 let submissions = context.submission_count();
+                assert!(!direct.try_conv_f16(
+                    &weights,
+                    &input,
+                    &mut direct_output,
+                    input_channels,
+                    output_channels,
+                    side,
+                    kernel,
+                    Some(&bias),
+                ));
                 actual.fill(f32::NAN);
                 conv_f16_parallel_into(
                     &input,

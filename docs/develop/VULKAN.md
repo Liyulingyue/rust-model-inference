@@ -20,9 +20,9 @@ macOS 会自动查找系统 Loader，以及 Homebrew 的 `/opt/homebrew/lib/libv
 | AuK Base / Flash | DiT F16 / Q8_0 投影；F16 activation 舍入后匹配 CPU AVX2/F16C 点积归约；配套 Qwen2.5-Omni Q8_0 文本投影 | DiT attention、归一化、Euler/CFG、BigVGANFlow F32 VAE，以及参考音频 tower |
 
 共享投影支持 F32、F16、BF16、Q8_0、Q4_0、Q4_1、Q4_K、Q5_K、Q6_K；其余格式回退 CPU。
-这些是投影级 offload，Edge0 的整图 Vulkan 资格仍为 false。每个投影持有自己的上传缓存和 arena，
-最多 64 行一批；VAE 只构建当前像素 tile 的 im2col。跨投影共享 arena/pipeline、全图融合及性能优化
-留待测量。真实 RADV 模型、算子、成品和计时记录见
+这些是投影级 offload，Edge0 的整图 Vulkan 资格仍为 false。共享投影按格式和 host 输入/输出预算
+分块，各投影持有自己的上传缓存和 arena；Z-Image VAE 的 F16 卷积独立共享 CHW arena。
+全图融合仍需测量。真实 RADV 模型、算子、成品和计时记录见
 [2026-10-07 实机验证](VULKAN_RADV_VALIDATION_2026-10-07.md)；其他设备和未列出的格式仍需验证。
 
 YuE2 正常会话使用投影 offload。旧整图 AR 执行器存在 BF16 数值合约和长前缀执行问题，
@@ -30,16 +30,18 @@ YuE2 正常会话使用投影 offload。旧整图 AR 执行器存在 BF16 数值
 BF16 dot 投影现已打包独立输出行，四帧共享权重读取，并保留原 FMA/归约顺序。
 RADV 的 256 帧 NAR 重复调用从 33.60 降到 12.42 秒；AR 耗时基本不变，
 详见 [YuE2 优化记录](VULKAN_YUE2_OPTIMIZATION_2026-10-08.md)。
-Z-Image VAE 的 F16 卷积复用 register-tiled F16 shader；每组覆盖 32 个像素、64 个输出通道，
-共享投影与 im2col 使用同一分块规则，最多 4096 行，以 16 MiB host 输入/输出作为分块预算。
-奇数点积宽度与不足 32 行的尾块保留原 shader；F16Dot 的 AVX2 归约合约不变。
-Token 累加循环显式展开；im2col 与按通道回写复用 ComputePool 并行，空闲 GPU 模式线程让出 CPU。
+Z-Image VAE 的 F16 卷积复用 register-tiled F16 shader，每组覆盖 32 个像素、64 个输出通道。
+GPU 直接读取 CHW 的 1×1 / 3×3 输入并零填边界，融合 bias 后按 CHW 写回，省去 CPU im2col
+和输出转置。整个 VAE 共享可增长的 arena 与最多 64 份不可变权重缓存；常规设备每层只提交一次。
+超出 storage buffer、dispatch 或权重缓存上限时保留原分块 GPU 后备，最多 4096 行，
+以 16 MiB host 输入/输出为预算；真实 GPU 故障则在 CPU 重算完整输出。
+直接卷积保留原 GPU 的 F16 输入舍入、FP32 FMA 顺序和奇数 packed 权重寻址；F16Dot 的归约合约不变。
 Apple M3 Max / MoltenVK 上，真实 F16 VAE、seed 42 的 16×64×64 latent → 512×512，
-8 线程 release 的三次 warm 中位数为 CPU 13.311761 s、Vulkan 17.282959 s，后者仍慢约 30%。
+8 线程 release 的三次 warm 中位数为 CPU 12.569687 s、Vulkan 7.605713 s，GPU 耗时少约 39.5%。
+同机已测的分块 GPU 路径为 17.282959 s、1447 次提交；新路径为 39 次提交，耗时下降约 56.0%。
 CPU 对照在启用 GPU 前独立预热；CPU 使用现有 ARM FP16 累加，GPU 使用 FP32 累加。
-每次解码实际提交 1447 次（1423 tiled、24 小尾块），RGB PSNR 61.536 dB、最大字节误差 2。
-这些是 VAE-only 实测；原 GPU VAE 完整运行曾被中止，不能给出完整修复前后的倍率。
-远程文生图与 PyTorch 对比尚未复测。
+RGB 最大字节误差 2、MAE 0.045631、PSNR 61.536 dB，与分块 GPU 的已测指标一致。
+这些是 VAE-only 实测；远程文生图、其他设备与 PyTorch 对比尚未复测。
 BF16/F32 VAE 分支、归一化、激活、空间 attention 和上采样保留原有计算。
 AuK 的 F16 点积模式要求 CPU AVX2/F16C/FMA，其他 CPU 后端保持原计算；没有 F16→Q8_0
 重编码。DiT 上传缓存随每次 denoise 的 scratch 释放，重复生成需要重新上传 DiT 权重。
@@ -79,6 +81,11 @@ YuE2 的 BF16 舍入阈值和 NAR 累积误差必须单独验收。
 全量 shader checker 仍在未修改的 `softmax.spv` 重编译字节差异处失败。
 旧单行 F32 零误差检查与 CPU VAE SiLU 逐位断言均在隔离 `50fd20e` 基线上复现；
 没有放宽门槛，也不声明全量测试通过。
+
+本次 Z-Image 直接卷积的 release 设备测试覆盖共享 arena 扩容与权重复用、奇数宽度和尾块，
+输出与分块 GPU 逐位一致。共享 runtime 的九种权重格式与故障恢复检查通过。
+完整 Vulkan lib suite 为 1156 passed / 36 failed / 120 ignored；隔离未修改的 `930ae19`
+复现同一失败名单与断言内容，本次没有新增失败，也没有放宽精度门槛。
 
 ### 已有整图执行器
 

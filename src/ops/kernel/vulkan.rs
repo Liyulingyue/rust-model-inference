@@ -3,7 +3,7 @@
 use super::Kernel;
 use crate::core::tensor::GGMLType;
 use crate::ops::quant::BlockQ8K;
-use crate::vulkan::ops::{BatchedLinearRuntime, GpuWeightFormat};
+use crate::vulkan::ops::{BatchedLinearRuntime, Conv2dRuntime, GpuWeightFormat};
 use std::sync::Mutex;
 
 #[derive(Default)]
@@ -109,6 +109,98 @@ impl GpuLinear {
             if output.iter().any(|value| !value.is_finite()) {
                 return Err(crate::vulkan::VulkanError::InitFailed(
                     "non-finite projection output".into(),
+                ));
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => true,
+            Err(crate::vulkan::VulkanError::UnsupportedShape(_)) => false,
+            Err(error) => {
+                crate::vulkan::mark_gpu_broken(&error.to_string());
+                *state = None;
+                false
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct GpuConv {
+    state: Mutex<Option<Conv2dRuntime>>,
+}
+
+impl GpuConv {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn try_conv_f16(
+        &self,
+        weight: &[u8],
+        input: &[f32],
+        output: &mut [f32],
+        input_channels: usize,
+        output_channels: usize,
+        side: usize,
+        kernel: usize,
+        bias: Option<&[f32]>,
+    ) -> bool {
+        let Some(spatial) = side.checked_mul(side) else {
+            return false;
+        };
+        if !offload_enabled()
+            || side == 0
+            || input_channels == 0
+            || output_channels == 0
+            || !matches!(kernel, 1 | 3)
+            || input_channels.checked_mul(spatial) != Some(input.len())
+            || output_channels.checked_mul(spatial) != Some(output.len())
+            || input_channels
+                .checked_mul(kernel)
+                .and_then(|n| n.checked_mul(kernel))
+                .and_then(|n| n.checked_mul(output_channels))
+                .and_then(|n| n.checked_mul(2))
+                != Some(weight.len())
+            || bias.is_some_and(|bias| {
+                bias.len() != output_channels || bias.iter().any(|v| !v.is_finite())
+            })
+            || input.iter().any(|v| !v.is_finite())
+            || output_channels
+                > std::env::var("RUST_GPU_MAX_ROWS")
+                    .ok()
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(usize::MAX)
+        {
+            return false;
+        }
+        let Some(context) = crate::ops::get_vulkan_context() else {
+            return false;
+        };
+        let mut state = self.state.lock().unwrap();
+        let result = (|| {
+            let old = state.as_ref().map_or((0, 0, 0), |runtime| runtime.capacity);
+            if input.len() > old.0 || output.len() > old.1 || output_channels > old.2 {
+                *state = None;
+                *state = Some(Conv2dRuntime::new(
+                    context,
+                    (
+                        input.len().max(old.0),
+                        output.len().max(old.1),
+                        output_channels.max(old.2),
+                    ),
+                )?);
+            }
+            state.as_mut().unwrap().conv_f16(
+                weight,
+                input,
+                output,
+                input_channels,
+                output_channels,
+                side,
+                kernel,
+                bias,
+            )?;
+            if output.iter().any(|value| !value.is_finite()) {
+                return Err(crate::vulkan::VulkanError::InitFailed(
+                    "non-finite convolution output".into(),
                 ));
             }
             Ok(())
