@@ -27,7 +27,8 @@
 //! Only the TTS path is wired in this commit; the CFMEdit reference-audio
 //! path is tracked in `docs/develop/TODO.md`.
 
-use std::collections::HashMap;
+use super::linear::AukLinearSession;
+use crate::ops::kernel::{F16Weight, QuantizedTensor, Weight};
 use std::sync::Arc;
 
 use half::f16;
@@ -143,11 +144,6 @@ pub(crate) struct AukDit {
     double_blocks: Vec<DoubleBlockWeights>,
     single_blocks: Vec<SingleBlockWeights>,
     q8: Q8Scratch,
-    /// Pre-quantized Q8_0 weight bytes keyed by GGUF tensor name. Built once
-    /// in `load` from the F16 weights so that the per-token matmul dispatch
-    /// can route through the Q8_0 matmul path (which has a Vulkan backend)
-    /// instead of the F16 SIMD path (CPU only).
-    q8_weights: HashMap<String, Arc<Vec<u8>>>,
 }
 
 impl AukDit {
@@ -184,22 +180,10 @@ impl AukDit {
         for layer in 0..NUM_SINGLE_LAYERS {
             single_blocks.push(load_single_block(source_ref, layer)?);
         }
-        // No more F16 -> Q8_0 pre-quantization (see commit `f4e7879`).
-        // The Q8 cache is empty; linear_into_dispatched falls through to
-        // super::linear_into_scaled_impl, which dispatches on GGMLType:
-        // - F16 weights -> F16 GPU (via auk_f16_gpu_runtime) or F16 CPU
-        // - Q8_0 weights -> Q8 GPU matmul
-        // - BF16/Q*_K -> QTensorOwned CPU
-        // This respects the GGUF dtype instead of forcing F16 -> Q8_0
-        // quantization at load time (21s amortized + 1.5 GB RAM + quant
-        // noise). Required so we can later oracle-diff against audio.cpp's
-        // F16 numerics without a quantization confound.
-        let q8_weights: HashMap<String, Arc<Vec<u8>>> = HashMap::new();
         Ok(Self {
             q8: Q8Scratch::new(FF_INNER.max(HIDDEN)),
             source: source.clone(),
             pool: pool.clone(),
-            q8_weights,
             audio_embed_weight: "transformer.audio_embed.linear.weight".into(),
             audio_embed_bias,
             time_mlp_0_weight: "transformer.time_embed.time_mlp.0.weight".into(),
@@ -219,17 +203,9 @@ impl AukDit {
         })
     }
 
-    /// Pre-quantize all F16 DiT weights to Q8_0 at load time. This shrinks
-    /// the per-step weight bandwidth (F16 14 MB -> Q8_0 ~7 MB per weight)
-    /// and unlocks the GPU matmul path (`matmul_q8_0_quantized_parallel_rows`
-    /// has a Vulkan backend; the F16 `F16Kernel` path is CPU-only).
-    fn pre_quantize_weights(
-        source: &dyn TensorSource,
-    ) -> Result<HashMap<String, Arc<Vec<u8>>>, String> {
-        let mut out = HashMap::new();
-        // The set of weight tensor names that are F16. We enumerate them
-        // explicitly (rather than walking the GGUF) so the load stays
-        // deterministic and avoids spurious entries.
+    fn linear_weights(&self) -> Result<Vec<(String, Weight<'_>)>, String> {
+        let source = self.source.as_ref();
+        let mut out = Vec::new();
         let mut names: Vec<String> = vec![
             "transformer.audio_embed.linear.weight".to_string(),
             "transformer.time_embed.time_mlp.0.weight".to_string(),
@@ -305,57 +281,12 @@ impl AukDit {
                 Some(b) => b,
                 None => continue,
             };
-            let q8 = pre_quantize_f16_to_q8_0(bytes, n_out, n_in)?;
-            out.insert(name, Arc::new(q8));
+            out.push((
+                name,
+                Weight::from_quantized(QuantizedTensor::F16(F16Weight { bytes, n_in, n_out })),
+            ));
         }
         Ok(out)
-    }
-
-    /// Linear matmul dispatch: prefers the pre-quantized Q8_0 path (Vulkan
-    /// Dispatch a linear matmul:
-    /// 1. Try pre-quantized Q8_0 cached path (GPU via matmul_q8_0). The Q8
-    ///    path is the existing optimization from commit `f4e7879` and remains
-    ///    active until the F16 GPU path (line 246 of `super::mod.rs`) is
-    ///    validated end-to-end as a drop-in replacement.
-    /// 2. Fall back to F16 CPU via `super::linear_into_scaled_impl` (which
-    ///    itself tries the F16 GPU path first when `--features vulkan` is on).
-    ///
-    /// The previous version of this function contained an infinite recursion
-    /// (it called `self.linear_into_dispatched` rather than the F16 fallback),
-    /// masked in practice because every F16 tensor in the DiT was always
-    /// pre-quantized into `q8_weights`. The recursion is now fixed.
-    pub(crate) fn linear_into_dispatched(
-        &self,
-        name: &str,
-        n_in: usize,
-        n_out: usize,
-        input: &[f32],
-        output: &mut [f32],
-        q8: &mut Q8Scratch,
-    ) -> Result<(), String> {
-        if let Ok(true) = linear_into_q8_cached(
-            &self.q8_weights,
-            name,
-            n_in,
-            n_out,
-            input,
-            output,
-            q8,
-            self.pool.as_ref(),
-        ) {
-            return Ok(());
-        }
-        super::linear_into_scaled_impl(
-            self.source.as_ref(),
-            name,
-            n_in,
-            n_out,
-            input,
-            output,
-            q8,
-            self.pool.as_ref(),
-            1.0,
-        )
     }
 
     /// Run the diffusion loop for `options.steps` Euler steps and return
@@ -399,6 +330,12 @@ impl AukDit {
         let mut velocity = vec![0.0_f32; latent_values];
         let mut uncond_velocity = vec![0.0_f32; latent_values];
         let mut scratch = AukScratch::new(cond_tokens, latent_time)?;
+        let weights = self.linear_weights()?;
+        let linear = AukLinearSession::new(
+            &weights,
+            crate::compute::ComputePolicy::legacy(),
+            self.pool.clone(),
+        )?;
         // Pre-build the unconditional text conditioning buffer (all zeros,
         // same shape as the encoded prompt). This avoids running the text
         // encoder twice for the CFG unconditional pass. Audio conditioning
@@ -415,6 +352,7 @@ impl AukDit {
             // conditioning.cpp where audio is concatenated before text in
             // the joint sequence).
             self.predict_velocity_inner(
+                &linear,
                 &mut latent,
                 latent_time,
                 text_conditioning,
@@ -430,6 +368,7 @@ impl AukDit {
             // otherwise; velocity already is the conditional prediction.
             if do_cfg {
                 self.predict_velocity_inner(
+                    &linear,
                     &mut latent,
                     latent_time,
                     &uncond_text,
@@ -467,6 +406,7 @@ impl AukDit {
     #[allow(clippy::too_many_arguments)]
     fn predict_velocity_inner(
         &self,
+        linear: &AukLinearSession<'_, '_>,
         latent: &mut [f32],
         latent_time: usize,
         text_conditioning: &[f32],
@@ -494,25 +434,31 @@ impl AukDit {
 
         // Time embedding: c ∈ [HIDDEN]
         timestep_embedding(sigma * 1000.0, &mut scratch.time_frequency);
-        self.linear_into_dispatched(
+        linear_into_dispatch(
+            linear,
+            self.source.as_ref(),
             &self.time_mlp_0_weight,
             FREQ_DIM,
             HIDDEN,
             &scratch.time_frequency,
             &mut scratch.time_hidden,
             &mut scratch.q8,
+            self.pool.as_ref(),
         )?;
         for (v, b) in scratch.time_hidden.iter_mut().zip(&self.time_mlp_0_bias) {
             *v += *b;
         }
         silu_mul_inplace(&mut scratch.time_hidden, &mut scratch.time_hidden_silu);
-        self.linear_into_dispatched(
+        linear_into_dispatch(
+            linear,
+            self.source.as_ref(),
             &self.time_mlp_2_weight,
             HIDDEN,
             HIDDEN,
             &scratch.time_hidden_silu,
             &mut scratch.time,
             &mut scratch.q8,
+            self.pool.as_ref(),
         )?;
         for (v, b) in scratch.time.iter_mut().zip(&self.time_mlp_2_bias) {
             *v += *b;
@@ -521,7 +467,7 @@ impl AukDit {
 
         // Image (audio latent) embed: latent -> hidden
         run_audio_embed(
-            &self.q8_weights,
+            linear,
             self.source.as_ref(),
             &self.audio_embed_weight,
             &self.audio_embed_bias,
@@ -539,13 +485,16 @@ impl AukDit {
         // because the Qwen2.5-Omni audio tower projects to TEXT_IN=2048 dim,
         // the same space as text embeddings.
         for token in 0..cond_tokens {
-            self.linear_into_dispatched(
+            linear_into_dispatch(
+                linear,
+                self.source.as_ref(),
                 &self.txt_proj_weight,
                 TEXT_IN,
                 HIDDEN,
                 &text_conditioning[token * TEXT_IN..(token + 1) * TEXT_IN],
                 &mut scratch.text[token * HIDDEN..(token + 1) * HIDDEN],
                 &mut scratch.q8,
+                self.pool.as_ref(),
             )?;
         }
         // Add bias.
@@ -577,13 +526,16 @@ impl AukDit {
         for (layer_index, block) in self.double_blocks.iter().enumerate() {
             // Project time_emb through per-block AdaLN linear layers (each
             // produces 9216 = 6*1536 modulation values).
-            self.linear_into_dispatched(
+            linear_into_dispatch(
+                linear,
+                self.source.as_ref(),
                 &block.adaLN_x,
                 HIDDEN,
                 ADALN_DIM,
                 &scratch.time,
                 &mut scratch.modulation[..ADALN_DIM],
                 &mut scratch.q8,
+                self.pool.as_ref(),
             )?;
             for (v, b) in scratch.modulation[..ADALN_DIM]
                 .iter_mut()
@@ -591,13 +543,16 @@ impl AukDit {
             {
                 *v += *b;
             }
-            self.linear_into_dispatched(
+            linear_into_dispatch(
+                linear,
+                self.source.as_ref(),
                 &block.adaLN_c,
                 HIDDEN,
                 ADALN_DIM,
                 &scratch.time,
                 &mut scratch.modulation[ADALN_DIM..2 * ADALN_DIM],
                 &mut scratch.q8,
+                self.pool.as_ref(),
             )?;
             for (v, b) in scratch.modulation[ADALN_DIM..2 * ADALN_DIM]
                 .iter_mut()
@@ -606,7 +561,7 @@ impl AukDit {
                 *v += *b;
             }
             run_double_block(
-                &self.q8_weights,
+                linear,
                 self.source.as_ref(),
                 block,
                 &mut scratch.joint,
@@ -647,13 +602,16 @@ impl AukDit {
 
         // 10 single blocks
         for (layer_index, block) in self.single_blocks.iter().enumerate() {
-            self.linear_into_dispatched(
+            linear_into_dispatch(
+                linear,
+                self.source.as_ref(),
                 &block.adaLN,
                 HIDDEN,
                 ADALN_DIM,
                 &scratch.time,
                 &mut scratch.modulation[..ADALN_DIM],
                 &mut scratch.q8,
+                self.pool.as_ref(),
             )?;
             for (v, b) in scratch.modulation[..ADALN_DIM]
                 .iter_mut()
@@ -662,7 +620,7 @@ impl AukDit {
                 *v += *b;
             }
             run_single_block(
-                &self.q8_weights,
+                linear,
                 self.source.as_ref(),
                 block,
                 &mut scratch.joint,
@@ -684,13 +642,16 @@ impl AukDit {
         // The unsloth/ERNIE-Image case shows that the AdaLNContinuous inner
         // norm (final_norm.norm.weight) is often dropped -- we treat it as
         // identity here.
-        self.linear_into_dispatched(
+        linear_into_dispatch(
+            linear,
+            self.source.as_ref(),
             &self.norm_out_weight,
             HIDDEN,
             FINAL_NORM_DIM,
             &scratch.time,
             &mut scratch.modulation[..FINAL_NORM_DIM],
             &mut scratch.q8,
+            self.pool.as_ref(),
         )?;
         for (v, b) in scratch.modulation[..FINAL_NORM_DIM]
             .iter_mut()
@@ -716,13 +677,16 @@ impl AukDit {
                 normalized[d] = normalized[d] * (1.0 + final_scale[d]) + final_shift[d];
             }
             // proj_out: hidden -> latent_dim
-            self.linear_into_dispatched(
+            linear_into_dispatch(
+                linear,
+                self.source.as_ref(),
                 &self.proj_out_weight,
                 HIDDEN,
                 LATENT_DIM,
                 &normalized,
                 &mut projected[token * LATENT_DIM..(token + 1) * LATENT_DIM],
                 &mut scratch.q8,
+                self.pool.as_ref(),
             )?;
             for (v, b) in projected[token * LATENT_DIM..(token + 1) * LATENT_DIM]
                 .iter_mut()
@@ -939,10 +903,6 @@ pub(crate) struct AukScratch {
     rope: Vec<f32>,
     normed_buf: Vec<f32>,
     q8: Q8Scratch,
-    /// Reserved for future weight-format caches. Currently always empty:
-    /// see the load path in `AukDit::load` for why we removed the F16 ->
-    /// Q8_0 pre-quantization workaround from `f4e7879`.
-    q8_weights: HashMap<String, Arc<Vec<u8>>>,
 }
 
 impl AukScratch {
@@ -966,7 +926,6 @@ impl AukScratch {
             rope: Vec::new(),
             normed_buf: Vec::new(),
             q8: Q8Scratch::new(FF_INNER.max(HIDDEN)),
-            q8_weights: HashMap::new(),
         })
     }
 
@@ -1002,7 +961,7 @@ fn resize_zeroed(dst: &mut Vec<f32>, len: usize, name: &str) -> Result<(), Strin
 /// parallel and store it as `[image_tokens, hidden]`.
 #[allow(clippy::too_many_arguments)]
 fn run_audio_embed(
-    q8_weights: &HashMap<String, Arc<Vec<u8>>>,
+    linear: &AukLinearSession<'_, '_>,
     source: &dyn TensorSource,
     weight: &str,
     bias: &[f32],
@@ -1024,7 +983,7 @@ fn run_audio_embed(
         }
         let out = &mut output[token * HIDDEN..(token + 1) * HIDDEN];
         linear_into_dispatch(
-            q8_weights, source, weight, LATENT_DIM, HIDDEN, &input, out, q8, pool,
+            linear, source, weight, LATENT_DIM, HIDDEN, &input, out, q8, pool,
         )?;
         for (v, b) in out.iter_mut().zip(bias) {
             *v += *b;
@@ -1160,7 +1119,7 @@ fn softmax_inplace(scores: &mut [f32], n: usize) {
 
 #[allow(clippy::too_many_arguments)]
 fn run_double_block(
-    q8_weights: &HashMap<String, Arc<Vec<u8>>>,
+    linear: &AukLinearSession<'_, '_>,
     source: &dyn TensorSource,
     block: &DoubleBlockWeights,
     joint: &mut [f32],
@@ -1211,7 +1170,7 @@ fn run_double_block(
     // === Pass 1: per-stream RMSNorm + AdaLN modulation + QKV projection ===
     // Stream x (img) — occupies joint rows [0, img_tokens)
     ada_ln_qkv(
-        q8_weights,
+        linear,
         source,
         &block.adaLN_x,
         &block.adaLN_x_bias,
@@ -1227,7 +1186,7 @@ fn run_double_block(
     )?;
     // Stream c (text) — occupies joint rows [img_tokens, total)
     ada_ln_qkv(
-        q8_weights,
+        linear,
         source,
         &block.adaLN_c,
         &block.adaLN_c_bias,
@@ -1359,7 +1318,7 @@ fn run_double_block(
 
     // === Pass 3: per-stream output projection + residual + MLP ===
     stream_block_residual_mlp(
-        q8_weights,
+        linear,
         source,
         &block.out_x,
         &block.out_x_bias,
@@ -1374,7 +1333,7 @@ fn run_double_block(
         pool,
     )?;
     stream_block_residual_mlp(
-        q8_weights,
+        linear,
         source,
         &block.out_c,
         &block.out_c_bias,
@@ -1394,7 +1353,7 @@ fn run_double_block(
 
 #[allow(clippy::too_many_arguments)]
 fn ada_ln_qkv(
-    q8_weights: &HashMap<String, Arc<Vec<u8>>>,
+    linear: &AukLinearSession<'_, '_>,
     source: &dyn TensorSource,
     ada_weight: &str,
     ada_bias: &[f32],
@@ -1459,7 +1418,7 @@ fn ada_ln_qkv(
         let input = &normed[token * HIDDEN..(token + 1) * HIDDEN];
         let out = &mut qkv_buf[token * QKV_DIM..(token + 1) * QKV_DIM];
         linear_into_dispatch(
-            q8_weights, source, qkv_weight, HIDDEN, QKV_DIM, input, out, q8, pool,
+            linear, source, qkv_weight, HIDDEN, QKV_DIM, input, out, q8, pool,
         )?;
         for (v, b) in out.iter_mut().zip(qkv_bias) {
             *v += *b;
@@ -1518,7 +1477,7 @@ fn project_qk_with_rope(
 
 #[allow(clippy::too_many_arguments)]
 fn stream_block_residual_mlp(
-    q8_weights: &HashMap<String, Arc<Vec<u8>>>,
+    linear: &AukLinearSession<'_, '_>,
     source: &dyn TensorSource,
     out_weight: &str,
     out_bias: &[f32],
@@ -1546,7 +1505,7 @@ fn stream_block_residual_mlp(
         let att_off = (row_range.start + token) * HIDDEN;
         let att_row = &attention[att_off..att_off + HIDDEN];
         linear_into_dispatch(
-            q8_weights, source, out_weight, HIDDEN, HIDDEN, att_row, &mut proj, q8, pool,
+            linear, source, out_weight, HIDDEN, HIDDEN, att_row, &mut proj, q8, pool,
         )?;
         for (v, b) in proj.iter_mut().zip(out_bias) {
             *v += *b;
@@ -1576,7 +1535,7 @@ fn stream_block_residual_mlp(
         }
         // ff_in: 1536 -> 6144 (gate+up packed)
         linear_into_dispatch(
-            q8_weights,
+            linear,
             source,
             ff_in_weight,
             HIDDEN,
@@ -1596,7 +1555,7 @@ fn stream_block_residual_mlp(
         }
         // ff_out: 3072 -> 1536
         linear_into_dispatch(
-            q8_weights,
+            linear,
             source,
             ff_out_weight,
             FF_INNER,
@@ -1625,7 +1584,7 @@ fn dot32(a: &[f32], b: &[f32]) -> f32 {
 
 #[allow(clippy::too_many_arguments)]
 fn run_single_block(
-    q8_weights: &HashMap<String, Arc<Vec<u8>>>,
+    linear: &AukLinearSession<'_, '_>,
     source: &dyn TensorSource,
     block: &SingleBlockWeights,
     joint: &mut [f32],
@@ -1687,7 +1646,7 @@ fn run_single_block(
         }
         let out = &mut qkv_buf[token * QKV_DIM..(token + 1) * QKV_DIM];
         linear_into_dispatch(
-            q8_weights,
+            linear,
             source,
             &block.qkv,
             HIDDEN,
@@ -1773,7 +1732,7 @@ fn run_single_block(
         let off = token * HIDDEN;
         let att_row = &attention[off..off + HIDDEN];
         linear_into_dispatch(
-            q8_weights, source, &block.out, HIDDEN, HIDDEN, att_row, &mut proj, q8, pool,
+            linear, source, &block.out, HIDDEN, HIDDEN, att_row, &mut proj, q8, pool,
         )?;
         for (v, b) in proj.iter_mut().zip(&block.out_bias) {
             *v += *b;
@@ -1789,7 +1748,7 @@ fn run_single_block(
             normed_token[d] = v * (1.0 + scale_mlp[d]) + shift_mlp[d];
         }
         linear_into_dispatch(
-            q8_weights,
+            linear,
             source,
             &block.ff_in,
             HIDDEN,
@@ -1806,7 +1765,7 @@ fn run_single_block(
             gated_buf[d] = silu * u;
         }
         linear_into_dispatch(
-            q8_weights,
+            linear,
             source,
             &block.ff_out,
             FF_INNER,
@@ -1823,146 +1782,9 @@ fn run_single_block(
     require_finite(joint, "AuK single block output")
 }
 
-/// Convert F16 weight bytes (laid out as [n_out, n_in] row-major; each F16
-/// value is 2 bytes little-endian) to Q8_0 weight bytes (laid out as
-/// [n_out, n_in/32 blocks per row, 34 bytes per block] where each block
-/// is `F16_scale | 32 int8_quantized_values`).
-fn pre_quantize_f16_to_q8_0(
-    f16_bytes: &[u8],
-    n_out: usize,
-    n_in: usize,
-) -> Result<Vec<u8>, String> {
-    if f16_bytes.len() != n_out * n_in * 2 {
-        return Err(format!(
-            "F16 weight size {} != n_out({}) * n_in({}) * 2",
-            f16_bytes.len(),
-            n_out,
-            n_in
-        ));
-    }
-    if n_in % 32 != 0 {
-        return Err(format!(
-            "AuK Q8_0 quantization requires n_in % 32 == 0; got {}",
-            n_in
-        ));
-    }
-    let blocks_per_row = n_in / 32;
-    let row_stride = blocks_per_row * 34;
-    let mut out = vec![0u8; n_out * row_stride];
-    let mut block_f32 = vec![0.0f32; 32];
-    let mut q8_block = vec![0u8; 32];
-    let mut scale_f32 = [0.0f32; 1];
-    // F16->F32 with AVX2+F16C: process 8 F16 (16 bytes) -> 8 F32 (32 bytes)
-    // per iteration. n_in is always a multiple of 32 (DiT weights).
-    for r in 0..n_out {
-        for b in 0..blocks_per_row {
-            let row_off = r * n_in + b * 32;
-            #[cfg(target_arch = "x86_64")]
-            {
-                use std::arch::x86_64::*;
-                unsafe {
-                    // 4 chunks of 8 F16 = 32 values.
-                    for chunk in 0..4 {
-                        let byte_off = (row_off + chunk * 8) * 2;
-                        // Safe: f16_bytes is &[u8] of length n_out*n_in*2;
-                        // byte_off + 16 <= n_out*n_in*2 - (n_out-r-1)*n_in*2 ...
-                        // For r = last row, byte_off + 16 <= (n_out-1)*n_in*2 + n_in*2 - 16
-                        //   = n_out*n_in*2 - 16, which is within bounds.
-                        let v = _mm_loadu_si128(f16_bytes.as_ptr().add(byte_off) as *const __m128i);
-                        let f = _mm256_cvtph_ps(v);
-                        _mm256_storeu_ps(block_f32.as_mut_ptr().add(chunk * 8), f);
-                    }
-                }
-            }
-            #[cfg(not(target_arch = "x86_64"))]
-            {
-                for lane in 0..32 {
-                    let byte_off = (row_off + lane) * 2;
-                    let bits = u16::from_le_bytes([f16_bytes[byte_off], f16_bytes[byte_off + 1]]);
-                    block_f32[lane] = f16::from_bits(bits).to_f32();
-                }
-            }
-            crate::ops::quantize_q8_0_into(&block_f32, 32, &mut q8_block, &mut scale_f32);
-            let dst = r * row_stride + b * 34;
-            let scale_f16 = crate::ops::f32_to_f16(scale_f32[0]);
-            let scale_bytes = scale_f16.to_le_bytes();
-            out[dst] = scale_bytes[0];
-            out[dst + 1] = scale_bytes[1];
-            out[dst + 2..dst + 34].copy_from_slice(&q8_block);
-        }
-    }
-    Ok(out)
-}
-
-/// Linear matmul that uses a pre-quantized Q8_0 weight (looked up by name
-/// in `AukDit::q8_weights`). Falls back to the F16 path if the weight
-/// wasn't pre-quantized (e.g., the GGUF has non-F16 dtype).
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn linear_into_q8_cached(
-    q8_weights: &HashMap<String, Arc<Vec<u8>>>,
-    name: &str,
-    n_in: usize,
-    n_out: usize,
-    input: &[f32],
-    output: &mut [f32],
-    q8: &mut Q8Scratch,
-    pool: &ComputePool,
-) -> Result<bool, String> {
-    let Some(q8_bytes) = q8_weights.get(name) else {
-        return Ok(false);
-    };
-    if q8_bytes.len() != (n_in / 32) * 34 * n_out {
-        return Err(format!(
-            "AuK pre-quantized Q8_0 weight {} has size {} != expected {}",
-            name,
-            q8_bytes.len(),
-            (n_in / 32) * 34 * n_out
-        ));
-    }
-    if input.len() != n_in {
-        return Err(format!(
-            "Invalid linear input length for {name}: expected {n_in}, got {}",
-            input.len()
-        ));
-    }
-    if output.len() != n_out {
-        return Err(format!(
-            "Invalid linear output length for {name}: expected {n_out}, got {}",
-            output.len()
-        ));
-    }
-    q8.prepare(input, n_in)?;
-    let weight_ptr = q8_bytes.as_ptr() as usize;
-    let weight_len = q8_bytes.len();
-    let input_ptr = q8.values.as_ptr() as usize;
-    let input_len = q8.values.len();
-    let scale_ptr = q8.scales.as_ptr() as usize;
-    let scale_len = q8.scales.len();
-    let output_ptr = output.as_mut_ptr() as usize;
-    pool.compute(move |ith, nth| {
-        let weight = unsafe { std::slice::from_raw_parts(weight_ptr as *const u8, weight_len) };
-        let input = unsafe { std::slice::from_raw_parts(input_ptr as *const u8, input_len) };
-        let scales = unsafe { std::slice::from_raw_parts(scale_ptr as *const f32, scale_len) };
-        let out = unsafe { std::slice::from_raw_parts_mut(output_ptr as *mut f32, n_out) };
-        crate::ops::matmul_q8_0_quantized_parallel_rows(
-            weight, input, scales, out, n_in, n_out, ith, nth,
-        );
-    });
-    Ok(true)
-}
-
-/// Distributed matmul dispatch: try the pre-quantized Q8_0 cache (now always
-/// empty after the f4e7879 workaround was removed) and fall back to F16 GPU
-/// or F16 CPU via `super::linear_into_scaled_impl`. This is the
-/// free-function equivalent of `AukDit::linear_into_dispatched`, used in the
-/// block forward functions that take `&dyn TensorSource` directly.
-///
-/// The previous version of this function had the same infinite recursion bug
-/// as `AukDit::linear_into_dispatched`: it called itself on Q8 miss. That
-/// bug is now fixed by forwarding to `super::linear_into_scaled_impl`.
 #[allow(clippy::too_many_arguments)]
 fn linear_into_dispatch(
-    q8_weights: &HashMap<String, Arc<Vec<u8>>>,
+    linear: &AukLinearSession<'_, '_>,
     source: &dyn TensorSource,
     name: &str,
     n_in: usize,
@@ -1972,8 +1794,10 @@ fn linear_into_dispatch(
     q8: &mut Q8Scratch,
     pool: &ComputePool,
 ) -> Result<(), String> {
-    if let Ok(true) = linear_into_q8_cached(q8_weights, name, n_in, n_out, input, output, q8, pool)
-    {
+    if input.len() != n_in || output.len() != n_out {
+        return Err(format!("Invalid {name} linear shape"));
+    }
+    if linear.run(name, input, output, 1.0)? {
         return Ok(());
     }
     super::linear_into_scaled_impl(source, name, n_in, n_out, input, output, q8, pool, 1.0)

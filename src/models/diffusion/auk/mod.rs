@@ -29,14 +29,11 @@ use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::{Kernel, QTensorOwned};
 use crate::ops::matmul_q8_0_quantized_parallel_rows;
-#[cfg(feature = "vulkan")]
-use crate::vulkan::ops::{BatchedLinearRuntime, GpuWeightFormat};
-#[cfg(feature = "vulkan")]
-use crate::vulkan::VulkanContext;
 use dit::TEXT_IN;
 use std::sync::Arc;
 
 pub(crate) mod dit;
+mod linear;
 pub(crate) mod text;
 pub(crate) mod vae;
 
@@ -836,24 +833,6 @@ fn linear_into_scaled_impl(
     }
     match info.ggml_type {
         GGMLType::F16 => {
-            // Try F16 GPU path first. Single-row `matmul_rows` reuses the
-            // F16-aware Vulkan shader stack (see `auk_f16_gpu_runtime`).
-            // Synchronous dispatch -- `matmul_rows` fences its own submission.
-            #[cfg(feature = "vulkan")]
-            {
-                match f16_gpu_linear_into(bytes, input, output, n_in, n_out) {
-                    Ok(true) => {
-                        if scale != 1.0 {
-                            for v in output.iter_mut() {
-                                *v *= scale;
-                            }
-                        }
-                        return Ok(());
-                    }
-                    Ok(false) => {} // Vulkan disabled / runtime uninit -> CPU
-                    Err(e) => eprintln!("[AukDiT] {}", e),
-                }
-            }
             let weight_ptr = bytes.as_ptr() as usize;
             let weight_len = bytes.len();
             let input_ptr = input.as_ptr() as usize;
@@ -941,104 +920,4 @@ impl Q8Scratch {
         crate::ops::quantize_q8_0_into(input, n_in, &mut self.values, &mut self.scales);
         Ok(())
     }
-}
-
-/// Lazily-initialized `BatchedLinearRuntime` configured for single-row F16
-/// GPU matmul. The runtime owns an arena sized for the largest single matmul
-/// in the AuK DiT (AdaLN `1536 -> 9216`) and a descriptor pool that holds
-/// entries keyed by `(weight_ptr, weight_len)`.
-///
-/// We use `BatchedLinearRuntime::matmul_rows` with `rows=1` and
-/// `format=F16` so the existing F16-aware Vulkan shader handles the matmul
-/// on GPU. This eliminates the F16 -> Q8_0 dynamic-quantization workaround
-/// (`f4e7879`) at the cost of one new global `OnceLock`.
-///
-/// Falls back to the caller's CPU path on any error so this layer never
-/// forces the model into a hard failure mode.
-#[cfg(feature = "vulkan")]
-static AUK_F16_GPU_RUNTIME: std::sync::OnceLock<Option<std::sync::Mutex<BatchedLinearRuntime>>> =
-    std::sync::OnceLock::new();
-
-#[cfg(feature = "vulkan")]
-fn auk_f16_gpu_runtime(
-    ctx: &'static VulkanContext,
-) -> Option<&'static std::sync::Mutex<BatchedLinearRuntime>> {
-    AUK_F16_GPU_RUNTIME
-        .get_or_init(|| {
-            // AuK DiT max shapes verified against the GGUF:
-            // - AdaLN mod `1536 -> 9216` (n_out = 6 * HIDDEN)
-            // - FF linear_out `3072 -> 1536` (n_in = FF_INNER; HIDDEN
-            //   packed gate+up projections only need n_in=HIDDEN, but the
-            //   linear_out is FF_INNER -> HIDDEN and is the largest n_in).
-            // 4096 gives slack for hypothetical future variants.
-            const MAX_ROWS: usize = 1;
-            const MAX_N_IN: usize = 4096;
-            const MAX_N_OUT: usize = 9216;
-            // ~hundreds of unique weight tensors expected across the DiT;
-            // 4096 descriptor slots is plenty.
-            const DESCRIPTOR_CAPACITY: usize = 4096;
-            unsafe {
-                match BatchedLinearRuntime::new(
-                    ctx,
-                    MAX_ROWS,
-                    MAX_N_IN,
-                    MAX_N_OUT,
-                    DESCRIPTOR_CAPACITY,
-                ) {
-                    Ok(rt) => {
-                        eprintln!(
-                            "[AukDiT] F16 GPU matmul runtime ready (max_rows={MAX_ROWS}, \
-                             max_n_in={MAX_N_IN}, max_n_out={MAX_N_OUT}, \
-                             descriptor_capacity={DESCRIPTOR_CAPACITY})"
-                        );
-                        Some(std::sync::Mutex::new(rt))
-                    }
-                    Err(e) => {
-                        eprintln!("[AukDiT] F16 GPU matmul runtime init failed: {:?}", e);
-                        None
-                    }
-                }
-            }
-        })
-        .as_ref()
-}
-
-/// Try to dispatch a single-row F16 GPU matmul. Returns:
-/// - `Ok(true)` if the matmul succeeded on GPU (caller should skip CPU path).
-/// - `Ok(false)` if Vulkan is disabled or the runtime failed to init (caller
-///   should fall back to CPU without surfacing an error).
-/// - `Err(msg)` if the GPU dispatch itself failed at runtime; the caller
-///   should also fall back, but the message will be logged.
-#[cfg(feature = "vulkan")]
-fn f16_gpu_linear_into(
-    weight: &[u8],
-    input: &[f32],
-    output: &mut [f32],
-    n_in: usize,
-    n_out: usize,
-) -> Result<bool, String> {
-    let Some(ctx) = crate::ops::get_vulkan_context() else {
-        return Ok(false);
-    };
-    let Some(runtime_mutex) = auk_f16_gpu_runtime(ctx) else {
-        return Ok(false);
-    };
-    if crate::core::thread_pool::gpu_matmul_disabled() || crate::vulkan::gpu_broken() {
-        return Ok(false);
-    }
-    let mut runtime = runtime_mutex
-        .lock()
-        .map_err(|e| format!("AuK F16 GPU runtime lock poisoned: {}", e))?;
-    runtime
-        .matmul_rows(
-            weight,
-            GpuWeightFormat::F16,
-            input,
-            /*rows=*/ 1,
-            n_in,
-            n_out,
-            output,
-        )
-        .map_err(|e| format!("AuK F16 GPU matmul failed: {:?}", e))?;
-    Ok(true)
 }
