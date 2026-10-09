@@ -12,6 +12,7 @@
 //! when the heap offers it). On UMA iGPUs (Intel Xe) this is zero-copy system
 //! memory; discrete GPUs later want a staging → DEVICE_LOCAL upload path.
 
+pub(crate) mod dense;
 #[cfg(feature = "vulkan")]
 pub(crate) mod matmul_q4k;
 #[cfg(feature = "vulkan")]

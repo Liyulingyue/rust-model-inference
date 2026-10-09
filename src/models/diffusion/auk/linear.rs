@@ -122,7 +122,10 @@ mod tests {
                 })),
             )];
             let session = AukLinearSession::new(&weights, policy, pool.clone()).unwrap();
-            assert_eq!(session.executor.as_ref().unwrap().borrow().uses_vulkan(), policy == crate::compute::ComputePolicy::Vulkan);
+            assert_eq!(
+                session.executor.as_ref().unwrap().borrow().uses_vulkan(),
+                policy == crate::compute::ComputePolicy::Vulkan
+            );
             for scale in [1.0, 4.0, 0.25] {
                 let input = [1.0003, -0.12345];
                 let mut expected = [0.0];

@@ -394,469 +394,549 @@ impl Qwen3Session<'_> {
 
         for layer in 0..config.n_layer {
             let weights = &model.layers[layer];
-            for row in 0..rows {
-                rms_norm(
-                    &self.prefill_scratch.x[row * config.n_embd..(row + 1) * config.n_embd],
-                    &weights.attn_norm,
-                    &mut self.prefill_scratch.normed
-                        [row * config.n_embd..(row + 1) * config.n_embd],
-                    config.eps,
-                );
-            }
-            #[cfg(feature = "parity-trace")]
-            if layer == 0 {
-                for row in 0..rows {
-                    parity_trace::report(parity_trace::checkpoint_row(
-                        row,
-                        "attn_norm-0",
-                        Some(0),
-                        &[1, config.n_embd],
-                        &self.prefill_scratch.normed
-                            [row * config.n_embd..(row + 1) * config.n_embd],
-                    ));
-                }
-            }
-
-            let normed = &self.prefill_scratch.normed[..rows * config.n_embd];
-            matmul_group_rows(
-                &mut self.prefill_scratch.prepared,
-                [
-                    (&weights.wq, &mut self.prefill_scratch.q[..rows * n_q]),
-                    (&weights.wk, &mut self.prefill_scratch.k[..rows * n_k]),
-                    (&weights.wv, &mut self.prefill_scratch.v[..rows * n_v]),
-                ],
-                normed,
-                rows,
-                config.n_embd,
-                model,
-            )?;
-
-            for row in 0..rows {
-                let token = range.start + row;
-                let position = input.positions[token];
-                let q = &mut self.prefill_scratch.q[row * n_q..(row + 1) * n_q];
-                let k = &mut self.prefill_scratch.k[row * n_k..(row + 1) * n_k];
-                let v = &mut self.prefill_scratch.v[row * n_v..(row + 1) * n_v];
-                if let Some(bias) = weights.q_bias.as_deref() {
-                    for (value, bias) in q.iter_mut().zip(bias) {
-                        *value += *bias;
-                    }
-                }
-                if let Some(bias) = weights.k_bias.as_deref() {
-                    for (value, bias) in k.iter_mut().zip(bias) {
-                        *value += *bias;
-                    }
-                }
-                if let Some(bias) = weights.v_bias.as_deref() {
-                    for (value, bias) in v.iter_mut().zip(bias) {
-                        *value += *bias;
-                    }
-                }
-                if let (Some(q_norm), Some(k_norm)) =
-                    (weights.q_norm.as_deref(), weights.k_norm.as_deref())
-                {
-                    for head in q.chunks_exact_mut(config.n_embd_head_k) {
-                        rms_norm_inplace(head, q_norm, config.eps);
-                    }
-                    for head in k.chunks_exact_mut(config.n_embd_head_k) {
-                        rms_norm_inplace(head, k_norm, config.eps);
-                    }
-                }
-                #[cfg(feature = "parity-trace")]
-                if layer == 0 {
-                    parity_trace::report(parity_trace::checkpoint_row(
-                        row,
-                        "Qcur_normed-0",
-                        Some(0),
-                        &[config.n_head, config.n_embd_head_k],
-                        q,
-                    ));
-                    parity_trace::report(parity_trace::checkpoint_row(
-                        row,
-                        "Kcur_normed-0",
-                        Some(0),
-                        &[config.n_head_kv, config.n_embd_head_k],
-                        k,
-                    ));
-                }
-                for head in q.chunks_exact_mut(config.n_embd_head_k) {
-                    match config.rope {
-                        Qwen3Rope::Neox => rope_neox_inplace(
-                            head,
-                            position[0],
-                            config.n_embd_head_k,
-                            config.freq_base,
-                        ),
-                        Qwen3Rope::Mrope { sections } => rope_mrope(
-                            head,
-                            position,
-                            sections,
-                            config.n_embd_head_k,
-                            config.freq_base,
-                        ),
-                        Qwen3Rope::Interleaved { sections, n_dims } => rope_mrope_interleaved(
-                            head,
-                            position,
-                            sections,
-                            config.n_embd_head_k,
-                            config.freq_base,
-                            n_dims,
-                        ),
-                    }
-                }
-                for head in k.chunks_exact_mut(config.n_embd_head_k) {
-                    match config.rope {
-                        Qwen3Rope::Neox => rope_neox_inplace(
-                            head,
-                            position[0],
-                            config.n_embd_head_k,
-                            config.freq_base,
-                        ),
-                        Qwen3Rope::Mrope { sections } => rope_mrope(
-                            head,
-                            position,
-                            sections,
-                            config.n_embd_head_k,
-                            config.freq_base,
-                        ),
-                        Qwen3Rope::Interleaved { sections, n_dims } => rope_mrope_interleaved(
-                            head,
-                            position,
-                            sections,
-                            config.n_embd_head_k,
-                            config.freq_base,
-                            n_dims,
-                        ),
-                    }
-                }
-                #[cfg(feature = "parity-trace")]
-                if layer == 0 {
-                    parity_trace::report(parity_trace::checkpoint_row(
-                        row,
-                        "Qcur-0",
-                        Some(0),
-                        &[config.n_head, config.n_embd_head_k],
-                        q,
-                    ));
-                    parity_trace::report(parity_trace::checkpoint_row(
-                        row,
-                        "Kcur-0",
-                        Some(0),
-                        &[config.n_head_kv, config.n_embd_head_k],
-                        k,
-                    ));
-                }
-
-                let physical_row = base_position + row;
-                let layer_base = layer * capacity * kv_stride;
-                match kv_ptrs {
-                    KvPtrs::F16 { k: k_ptr, v: v_ptr } => {
-                        let k_cache =
-                            unsafe { std::slice::from_raw_parts_mut(k_ptr, kv_cache_size) };
-                        let v_cache =
-                            unsafe { std::slice::from_raw_parts_mut(v_ptr, kv_cache_size) };
-                        for head in 0..config.n_head_kv {
-                            let k_offset = head * config.n_embd_head_k;
-                            let v_offset = head * config.n_embd_head_v;
-                            let cache_row = layer_base + physical_row * kv_stride;
-                            f32_slice_to_f16(
-                                &k[k_offset..k_offset + config.n_embd_head_k],
-                                &mut k_cache[cache_row + k_offset
-                                    ..cache_row + k_offset + config.n_embd_head_k],
-                            );
-                            f32_slice_to_f16(
-                                &v[v_offset..v_offset + config.n_embd_head_v],
-                                &mut v_cache[cache_row + v_offset
-                                    ..cache_row + v_offset + config.n_embd_head_v],
-                            );
-                        }
-                    }
-                    KvPtrs::F32 { k: k_ptr, v: v_ptr } => {
-                        let k_cache =
-                            unsafe { std::slice::from_raw_parts_mut(k_ptr, kv_cache_size) };
-                        let v_cache =
-                            unsafe { std::slice::from_raw_parts_mut(v_ptr, kv_cache_size) };
-                        for head in 0..config.n_head_kv {
-                            let k_offset = head * config.n_embd_head_k;
-                            let v_offset = head * config.n_embd_head_v;
-                            let cache_row = layer_base + physical_row * kv_stride;
-                            k_cache
-                                [cache_row + k_offset..cache_row + k_offset + config.n_embd_head_k]
-                                .copy_from_slice(&k[k_offset..k_offset + config.n_embd_head_k]);
-                            v_cache
-                                [cache_row + v_offset..cache_row + v_offset + config.n_embd_head_v]
-                                .copy_from_slice(&v[v_offset..v_offset + config.n_embd_head_v]);
-                        }
-                    }
-                }
-            }
-
-            let q_ptr = self.prefill_scratch.q.as_ptr();
-            let attn_ptr = self.prefill_scratch.attn.as_mut_ptr();
-            let scores_ptr = self.scratch.scores.as_mut_ptr();
-            let score_stride = self.scratch.score_stride;
-            model.pool.compute(move |thread, threads| {
-                let scores = unsafe {
-                    std::slice::from_raw_parts_mut(
-                        scores_ptr.add(thread * score_stride),
-                        score_stride,
-                    )
-                };
-                let f16_scratch = scores.as_mut_ptr().cast::<u16>();
-                let head_start = thread * config.n_head / threads;
-                let head_end = (thread + 1) * config.n_head / threads;
-                let layer_base = layer * capacity * kv_stride;
-                for row in 0..rows {
-                    let physical_row = base_position + row;
-                    let visible = physical_row + 1;
-                    let n_padded = visible.div_ceil(256) * 256;
-                    let q = unsafe { std::slice::from_raw_parts(q_ptr.add(row * n_q), n_q) };
-                    let attn = unsafe {
-                        std::slice::from_raw_parts_mut(attn_ptr.add(row * n_attn), n_attn)
-                    };
-                    match kv_ptrs {
-                        KvPtrs::F16 { k: k_ptr, v: v_ptr } => {
-                            let k_cache =
-                                unsafe { std::slice::from_raw_parts(k_ptr, kv_cache_size) };
-                            let v_cache =
-                                unsafe { std::slice::from_raw_parts(v_ptr, kv_cache_size) };
-                            for head in head_start..head_end {
-                                let kv_head = head / group_size;
-                                let q_offset = head * config.n_embd_head_k;
-                                let output_offset = head * config.n_embd_head_v;
-                                let output =
-                                    &mut attn[output_offset..output_offset + config.n_embd_head_v];
-                                let query = unsafe {
-                                    std::slice::from_raw_parts_mut(
-                                        output.as_mut_ptr().cast::<u16>(),
-                                        config.n_embd_head_k,
-                                    )
-                                };
-                                f32_slice_to_f16(
-                                    &q[q_offset..q_offset + config.n_embd_head_k],
-                                    query,
+            crate::compute::dense::run_dense_layer(
+                &mut |_: usize, step| -> Result<(), String> {
+                    use crate::compute::dense::DenseStep;
+                    match step {
+                        DenseStep::AttnNorm => {
+                            for row in 0..rows {
+                                rms_norm(
+                                    &self.prefill_scratch.x
+                                        [row * config.n_embd..(row + 1) * config.n_embd],
+                                    &weights.attn_norm,
+                                    &mut self.prefill_scratch.normed
+                                        [row * config.n_embd..(row + 1) * config.n_embd],
+                                    config.eps,
                                 );
-                                scores[..n_padded].fill(f32::NEG_INFINITY);
-                                for token in 0..visible {
-                                    let cache_row = layer_base + token * kv_stride;
-                                    let key_offset = cache_row + kv_head * config.n_embd_head_k;
-                                    scores[token] = dot_f16(
-                                        query,
-                                        &k_cache[key_offset..key_offset + config.n_embd_head_k],
-                                        config.n_embd_head_k,
-                                    ) * kq_scale;
+                            }
+                            #[cfg(feature = "parity-trace")]
+                            if layer == 0 {
+                                for row in 0..rows {
+                                    parity_trace::report(parity_trace::checkpoint_row(
+                                        row,
+                                        "attn_norm-0",
+                                        Some(0),
+                                        &[1, config.n_embd],
+                                        &self.prefill_scratch.normed
+                                            [row * config.n_embd..(row + 1) * config.n_embd],
+                                    ));
                                 }
-                                softmax_inplace(&mut scores[..n_padded]);
-                                for index in 0..n_padded {
-                                    unsafe {
-                                        *f16_scratch.add(index) = f32_to_f16(scores[index]);
+                            }
+                        }
+                        DenseStep::Qkv => {
+                            let normed = &self.prefill_scratch.normed[..rows * config.n_embd];
+                            matmul_group_rows(
+                                &mut self.prefill_scratch.prepared,
+                                [
+                                    (&weights.wq, &mut self.prefill_scratch.q[..rows * n_q]),
+                                    (&weights.wk, &mut self.prefill_scratch.k[..rows * n_k]),
+                                    (&weights.wv, &mut self.prefill_scratch.v[..rows * n_v]),
+                                ],
+                                normed,
+                                rows,
+                                config.n_embd,
+                                model,
+                            )?;
+                        }
+                        DenseStep::QkNormRope => {
+                            for row in 0..rows {
+                                let token = range.start + row;
+                                let position = input.positions[token];
+                                let q = &mut self.prefill_scratch.q[row * n_q..(row + 1) * n_q];
+                                let k = &mut self.prefill_scratch.k[row * n_k..(row + 1) * n_k];
+                                let v = &mut self.prefill_scratch.v[row * n_v..(row + 1) * n_v];
+                                if let Some(bias) = weights.q_bias.as_deref() {
+                                    for (value, bias) in q.iter_mut().zip(bias) {
+                                        *value += *bias;
                                     }
                                 }
-                                let weights =
-                                    unsafe { std::slice::from_raw_parts(f16_scratch, n_padded) };
-                                let values = unsafe {
+                                if let Some(bias) = weights.k_bias.as_deref() {
+                                    for (value, bias) in k.iter_mut().zip(bias) {
+                                        *value += *bias;
+                                    }
+                                }
+                                if let Some(bias) = weights.v_bias.as_deref() {
+                                    for (value, bias) in v.iter_mut().zip(bias) {
+                                        *value += *bias;
+                                    }
+                                }
+                                if let (Some(q_norm), Some(k_norm)) =
+                                    (weights.q_norm.as_deref(), weights.k_norm.as_deref())
+                                {
+                                    for head in q.chunks_exact_mut(config.n_embd_head_k) {
+                                        rms_norm_inplace(head, q_norm, config.eps);
+                                    }
+                                    for head in k.chunks_exact_mut(config.n_embd_head_k) {
+                                        rms_norm_inplace(head, k_norm, config.eps);
+                                    }
+                                }
+                                #[cfg(feature = "parity-trace")]
+                                if layer == 0 {
+                                    parity_trace::report(parity_trace::checkpoint_row(
+                                        row,
+                                        "Qcur_normed-0",
+                                        Some(0),
+                                        &[config.n_head, config.n_embd_head_k],
+                                        q,
+                                    ));
+                                    parity_trace::report(parity_trace::checkpoint_row(
+                                        row,
+                                        "Kcur_normed-0",
+                                        Some(0),
+                                        &[config.n_head_kv, config.n_embd_head_k],
+                                        k,
+                                    ));
+                                }
+                                for head in q.chunks_exact_mut(config.n_embd_head_k) {
+                                    match config.rope {
+                                        Qwen3Rope::Neox => rope_neox_inplace(
+                                            head,
+                                            position[0],
+                                            config.n_embd_head_k,
+                                            config.freq_base,
+                                        ),
+                                        Qwen3Rope::Mrope { sections } => rope_mrope(
+                                            head,
+                                            position,
+                                            sections,
+                                            config.n_embd_head_k,
+                                            config.freq_base,
+                                        ),
+                                        Qwen3Rope::Interleaved { sections, n_dims } => {
+                                            rope_mrope_interleaved(
+                                                head,
+                                                position,
+                                                sections,
+                                                config.n_embd_head_k,
+                                                config.freq_base,
+                                                n_dims,
+                                            )
+                                        }
+                                    }
+                                }
+                                for head in k.chunks_exact_mut(config.n_embd_head_k) {
+                                    match config.rope {
+                                        Qwen3Rope::Neox => rope_neox_inplace(
+                                            head,
+                                            position[0],
+                                            config.n_embd_head_k,
+                                            config.freq_base,
+                                        ),
+                                        Qwen3Rope::Mrope { sections } => rope_mrope(
+                                            head,
+                                            position,
+                                            sections,
+                                            config.n_embd_head_k,
+                                            config.freq_base,
+                                        ),
+                                        Qwen3Rope::Interleaved { sections, n_dims } => {
+                                            rope_mrope_interleaved(
+                                                head,
+                                                position,
+                                                sections,
+                                                config.n_embd_head_k,
+                                                config.freq_base,
+                                                n_dims,
+                                            )
+                                        }
+                                    }
+                                }
+                                #[cfg(feature = "parity-trace")]
+                                if layer == 0 {
+                                    parity_trace::report(parity_trace::checkpoint_row(
+                                        row,
+                                        "Qcur-0",
+                                        Some(0),
+                                        &[config.n_head, config.n_embd_head_k],
+                                        q,
+                                    ));
+                                    parity_trace::report(parity_trace::checkpoint_row(
+                                        row,
+                                        "Kcur-0",
+                                        Some(0),
+                                        &[config.n_head_kv, config.n_embd_head_k],
+                                        k,
+                                    ));
+                                }
+                            }
+                        }
+                        DenseStep::AppendKv => {
+                            for row in 0..rows {
+                                let k = &self.prefill_scratch.k[row * n_k..(row + 1) * n_k];
+                                let v = &self.prefill_scratch.v[row * n_v..(row + 1) * n_v];
+                                let physical_row = base_position + row;
+                                let layer_base = layer * capacity * kv_stride;
+                                match kv_ptrs {
+                                    KvPtrs::F16 { k: k_ptr, v: v_ptr } => {
+                                        let k_cache = unsafe {
+                                            std::slice::from_raw_parts_mut(k_ptr, kv_cache_size)
+                                        };
+                                        let v_cache = unsafe {
+                                            std::slice::from_raw_parts_mut(v_ptr, kv_cache_size)
+                                        };
+                                        for head in 0..config.n_head_kv {
+                                            let k_offset = head * config.n_embd_head_k;
+                                            let v_offset = head * config.n_embd_head_v;
+                                            let cache_row = layer_base + physical_row * kv_stride;
+                                            f32_slice_to_f16(
+                                                &k[k_offset..k_offset + config.n_embd_head_k],
+                                                &mut k_cache[cache_row + k_offset
+                                                    ..cache_row + k_offset + config.n_embd_head_k],
+                                            );
+                                            f32_slice_to_f16(
+                                                &v[v_offset..v_offset + config.n_embd_head_v],
+                                                &mut v_cache[cache_row + v_offset
+                                                    ..cache_row + v_offset + config.n_embd_head_v],
+                                            );
+                                        }
+                                    }
+                                    KvPtrs::F32 { k: k_ptr, v: v_ptr } => {
+                                        let k_cache = unsafe {
+                                            std::slice::from_raw_parts_mut(k_ptr, kv_cache_size)
+                                        };
+                                        let v_cache = unsafe {
+                                            std::slice::from_raw_parts_mut(v_ptr, kv_cache_size)
+                                        };
+                                        for head in 0..config.n_head_kv {
+                                            let k_offset = head * config.n_embd_head_k;
+                                            let v_offset = head * config.n_embd_head_v;
+                                            let cache_row = layer_base + physical_row * kv_stride;
+                                            k_cache[cache_row + k_offset
+                                                ..cache_row + k_offset + config.n_embd_head_k]
+                                                .copy_from_slice(
+                                                    &k[k_offset..k_offset + config.n_embd_head_k],
+                                                );
+                                            v_cache[cache_row + v_offset
+                                                ..cache_row + v_offset + config.n_embd_head_v]
+                                                .copy_from_slice(
+                                                    &v[v_offset..v_offset + config.n_embd_head_v],
+                                                );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        DenseStep::Attention => {
+                            let q_ptr = self.prefill_scratch.q.as_ptr();
+                            let attn_ptr = self.prefill_scratch.attn.as_mut_ptr();
+                            let scores_ptr = self.scratch.scores.as_mut_ptr();
+                            let score_stride = self.scratch.score_stride;
+                            model.pool.compute(move |thread, threads| {
+                                let scores = unsafe {
                                     std::slice::from_raw_parts_mut(
-                                        f16_scratch.add(score_stride),
-                                        n_padded,
+                                        scores_ptr.add(thread * score_stride),
+                                        score_stride,
                                     )
                                 };
-                                values[visible..].fill(0);
-                                for dimension in 0..config.n_embd_head_v {
-                                    for token in 0..visible {
-                                        let cache_row = layer_base + token * kv_stride;
-                                        values[token] = v_cache[cache_row
-                                            + kv_head * config.n_embd_head_v
-                                            + dimension];
+                                let f16_scratch = scores.as_mut_ptr().cast::<u16>();
+                                let head_start = thread * config.n_head / threads;
+                                let head_end = (thread + 1) * config.n_head / threads;
+                                let layer_base = layer * capacity * kv_stride;
+                                for row in 0..rows {
+                                    let physical_row = base_position + row;
+                                    let visible = physical_row + 1;
+                                    let n_padded = visible.div_ceil(256) * 256;
+                                    let q = unsafe {
+                                        std::slice::from_raw_parts(q_ptr.add(row * n_q), n_q)
+                                    };
+                                    let attn = unsafe {
+                                        std::slice::from_raw_parts_mut(
+                                            attn_ptr.add(row * n_attn),
+                                            n_attn,
+                                        )
+                                    };
+                                    match kv_ptrs {
+                                        KvPtrs::F16 { k: k_ptr, v: v_ptr } => {
+                                            let k_cache = unsafe {
+                                                std::slice::from_raw_parts(k_ptr, kv_cache_size)
+                                            };
+                                            let v_cache = unsafe {
+                                                std::slice::from_raw_parts(v_ptr, kv_cache_size)
+                                            };
+                                            for head in head_start..head_end {
+                                                let kv_head = head / group_size;
+                                                let q_offset = head * config.n_embd_head_k;
+                                                let output_offset = head * config.n_embd_head_v;
+                                                let output = &mut attn[output_offset
+                                                    ..output_offset + config.n_embd_head_v];
+                                                let query = unsafe {
+                                                    std::slice::from_raw_parts_mut(
+                                                        output.as_mut_ptr().cast::<u16>(),
+                                                        config.n_embd_head_k,
+                                                    )
+                                                };
+                                                f32_slice_to_f16(
+                                                    &q[q_offset..q_offset + config.n_embd_head_k],
+                                                    query,
+                                                );
+                                                scores[..n_padded].fill(f32::NEG_INFINITY);
+                                                for token in 0..visible {
+                                                    let cache_row = layer_base + token * kv_stride;
+                                                    let key_offset =
+                                                        cache_row + kv_head * config.n_embd_head_k;
+                                                    scores[token] = dot_f16(
+                                                        query,
+                                                        &k_cache[key_offset
+                                                            ..key_offset + config.n_embd_head_k],
+                                                        config.n_embd_head_k,
+                                                    ) * kq_scale;
+                                                }
+                                                softmax_inplace(&mut scores[..n_padded]);
+                                                for index in 0..n_padded {
+                                                    unsafe {
+                                                        *f16_scratch.add(index) =
+                                                            f32_to_f16(scores[index]);
+                                                    }
+                                                }
+                                                let weights = unsafe {
+                                                    std::slice::from_raw_parts(
+                                                        f16_scratch,
+                                                        n_padded,
+                                                    )
+                                                };
+                                                let values = unsafe {
+                                                    std::slice::from_raw_parts_mut(
+                                                        f16_scratch.add(score_stride),
+                                                        n_padded,
+                                                    )
+                                                };
+                                                values[visible..].fill(0);
+                                                for dimension in 0..config.n_embd_head_v {
+                                                    for token in 0..visible {
+                                                        let cache_row =
+                                                            layer_base + token * kv_stride;
+                                                        values[token] = v_cache[cache_row
+                                                            + kv_head * config.n_embd_head_v
+                                                            + dimension];
+                                                    }
+                                                    output[dimension] =
+                                                        dot_f16(values, weights, n_padded);
+                                                }
+                                            }
+                                        }
+                                        KvPtrs::F32 { k: k_ptr, v: v_ptr } => {
+                                            let k_cache = unsafe {
+                                                std::slice::from_raw_parts(k_ptr, kv_cache_size)
+                                            };
+                                            let v_cache = unsafe {
+                                                std::slice::from_raw_parts(v_ptr, kv_cache_size)
+                                            };
+                                            for head in head_start..head_end {
+                                                let kv_head = head / group_size;
+                                                let q_offset = head * config.n_embd_head_k;
+                                                let output_offset = head * config.n_embd_head_v;
+                                                let output = &mut attn[output_offset
+                                                    ..output_offset + config.n_embd_head_v];
+                                                let query =
+                                                    &q[q_offset..q_offset + config.n_embd_head_k];
+                                                scores[..n_padded].fill(f32::NEG_INFINITY);
+                                                for token in 0..visible {
+                                                    let cache_row = layer_base + token * kv_stride;
+                                                    let key_offset =
+                                                        cache_row + kv_head * config.n_embd_head_k;
+                                                    scores[token] = dot_f32(
+                                                        query,
+                                                        &k_cache[key_offset
+                                                            ..key_offset + config.n_embd_head_k],
+                                                        config.n_embd_head_k,
+                                                    ) * kq_scale;
+                                                }
+                                                softmax_inplace(&mut scores[..n_padded]);
+                                                let weights = &scores[..n_padded];
+                                                for dimension in 0..config.n_embd_head_v {
+                                                    let mut value = 0.0;
+                                                    for token in 0..visible {
+                                                        let cache_row =
+                                                            layer_base + token * kv_stride;
+                                                        value += weights[token]
+                                                            * v_cache[cache_row
+                                                                + kv_head * config.n_embd_head_v
+                                                                + dimension];
+                                                    }
+                                                    output[dimension] = value;
+                                                }
+                                            }
+                                        }
                                     }
-                                    output[dimension] = dot_f16(values, weights, n_padded);
+                                }
+                            });
+
+                            #[cfg(feature = "parity-trace")]
+                            if layer == 0 {
+                                for row in 0..rows {
+                                    parity_trace::report(parity_trace::checkpoint_row(
+                                        row,
+                                        "kqv_out-0",
+                                        Some(0),
+                                        &[config.n_head, config.n_embd_head_v],
+                                        &self.prefill_scratch.attn
+                                            [row * n_attn..(row + 1) * n_attn],
+                                    ));
                                 }
                             }
                         }
-                        KvPtrs::F32 { k: k_ptr, v: v_ptr } => {
-                            let k_cache =
-                                unsafe { std::slice::from_raw_parts(k_ptr, kv_cache_size) };
-                            let v_cache =
-                                unsafe { std::slice::from_raw_parts(v_ptr, kv_cache_size) };
-                            for head in head_start..head_end {
-                                let kv_head = head / group_size;
-                                let q_offset = head * config.n_embd_head_k;
-                                let output_offset = head * config.n_embd_head_v;
-                                let output =
-                                    &mut attn[output_offset..output_offset + config.n_embd_head_v];
-                                let query = &q[q_offset..q_offset + config.n_embd_head_k];
-                                scores[..n_padded].fill(f32::NEG_INFINITY);
-                                for token in 0..visible {
-                                    let cache_row = layer_base + token * kv_stride;
-                                    let key_offset = cache_row + kv_head * config.n_embd_head_k;
-                                    scores[token] = dot_f32(
-                                        query,
-                                        &k_cache[key_offset..key_offset + config.n_embd_head_k],
-                                        config.n_embd_head_k,
-                                    ) * kq_scale;
-                                }
-                                softmax_inplace(&mut scores[..n_padded]);
-                                let weights = &scores[..n_padded];
-                                for dimension in 0..config.n_embd_head_v {
-                                    let mut value = 0.0;
-                                    for token in 0..visible {
-                                        let cache_row = layer_base + token * kv_stride;
-                                        value += weights[token]
-                                            * v_cache[cache_row
-                                                + kv_head * config.n_embd_head_v
-                                                + dimension];
-                                    }
-                                    output[dimension] = value;
+                        DenseStep::AttnOut => {
+                            let mut prepared_for = None;
+                            matmul_rows(
+                                &mut self.prefill_scratch.prepared,
+                                &mut prepared_for,
+                                &weights.wo,
+                                &self.prefill_scratch.attn[..rows * n_attn],
+                                &mut self.prefill_scratch.projection[..rows * config.n_embd],
+                                rows,
+                                n_attn,
+                                model,
+                            )?;
+                        }
+                        DenseStep::AttnResidual => {
+                            for row in 0..rows {
+                                let row_start = row * config.n_embd;
+                                let row_end = row_start + config.n_embd;
+                                for (hidden, projection) in self.prefill_scratch.x
+                                    [row_start..row_end]
+                                    .iter_mut()
+                                    .zip(&self.prefill_scratch.projection[row_start..row_end])
+                                {
+                                    *hidden += *projection;
                                 }
                             }
                         }
+                        DenseStep::FfnNorm => {
+                            for row in 0..rows {
+                                let row_start = row * config.n_embd;
+                                let row_end = row_start + config.n_embd;
+                                rms_norm(
+                                    &self.prefill_scratch.x[row_start..row_end],
+                                    &weights.ffn_norm,
+                                    &mut self.prefill_scratch.normed[row_start..row_end],
+                                    config.eps,
+                                );
+                            }
+                        }
+                        DenseStep::GateUp => {
+                            if weights.moe_router.is_none() {
+                                matmul_group_rows(
+                                    &mut self.prefill_scratch.prepared,
+                                    [
+                                        (
+                                            &weights.w_gate,
+                                            &mut self.prefill_scratch.up[..rows * config.n_ff],
+                                        ),
+                                        (
+                                            &weights.w_up,
+                                            &mut self.prefill_scratch.gate[..rows * config.n_ff],
+                                        ),
+                                    ],
+                                    &self.prefill_scratch.normed[..rows * config.n_embd],
+                                    rows,
+                                    config.n_embd,
+                                    model,
+                                )?;
+                            }
+                        }
+                        DenseStep::SiluMul => {
+                            if weights.moe_router.is_none() {
+                                for row in 0..rows {
+                                    let start = row * config.n_ff;
+                                    let end = start + config.n_ff;
+                                    silu_mul_approx_inplace(
+                                        &self.prefill_scratch.up[start..end],
+                                        &mut self.prefill_scratch.gate[start..end],
+                                    );
+                                }
+                            }
+                        }
+                        DenseStep::Down => {
+                            if weights.moe_router.is_some() {
+                                for row in 0..rows {
+                                    forward_moe_token(
+                                        &self.prefill_scratch.normed
+                                            [row * config.n_embd..(row + 1) * config.n_embd],
+                                        weights,
+                                        config,
+                                        &mut self.prefill_scratch.down
+                                            [row * config.n_embd..(row + 1) * config.n_embd],
+                                    )?;
+                                }
+                            } else {
+                                let mut prepared_for = None;
+                                matmul_rows(
+                                    &mut self.prefill_scratch.prepared,
+                                    &mut prepared_for,
+                                    &weights.w_down,
+                                    &self.prefill_scratch.gate[..rows * config.n_ff],
+                                    &mut self.prefill_scratch.down[..rows * config.n_embd],
+                                    rows,
+                                    config.n_ff,
+                                    model,
+                                )?;
+                            }
+                        }
+                        DenseStep::FfnResidual => {
+                            #[cfg(feature = "parity-trace")]
+                            if layer == 0 {
+                                for row in 0..rows {
+                                    parity_trace::report(parity_trace::checkpoint_row(
+                                        row,
+                                        "ffn_out-0",
+                                        Some(0),
+                                        &[1, config.n_embd],
+                                        &self.prefill_scratch.down
+                                            [row * config.n_embd..(row + 1) * config.n_embd],
+                                    ));
+                                }
+                            }
+                            for row in 0..rows {
+                                let start = row * config.n_embd;
+                                let end = start + config.n_embd;
+                                for (hidden, projection) in self.prefill_scratch.x[start..end]
+                                    .iter_mut()
+                                    .zip(&self.prefill_scratch.down[start..end])
+                                {
+                                    *hidden += *projection;
+                                }
+                                if layer < config.n_deepstack_layers {
+                                    if let Some(deepstack) = input.deepstack_embeddings {
+                                        add_deepstack_embedding(
+                                            &mut self.prefill_scratch.x[start..end],
+                                            deepstack,
+                                            layer,
+                                            range.start + row,
+                                            input.token_ids.len(),
+                                            config.n_embd,
+                                        );
+                                    }
+                                }
+                            }
+
+                            #[cfg(feature = "parity-trace")]
+                            if !project_logits {
+                                for row in 0..rows {
+                                    parity_trace::report(parity_trace::checkpoint_row(
+                                        row,
+                                        &format!("hidden_sequence.layer.{layer}"),
+                                        Some(layer),
+                                        &[1, config.n_embd],
+                                        &self.prefill_scratch.x
+                                            [row * config.n_embd..(row + 1) * config.n_embd],
+                                    ));
+                                }
+                            }
+                            #[cfg(test)]
+                            if self.fail_cpu_prefill_after_layer == Some(layer) {
+                                self.fail_cpu_prefill_after_layer = None;
+                                return Err(format!(
+                                    "injected Qwen3 CPU prefill failure after layer {layer}"
+                                )
+                                .into());
+                            }
+                        }
                     }
-                }
-            });
-
-            #[cfg(feature = "parity-trace")]
-            if layer == 0 {
-                for row in 0..rows {
-                    parity_trace::report(parity_trace::checkpoint_row(
-                        row,
-                        "kqv_out-0",
-                        Some(0),
-                        &[config.n_head, config.n_embd_head_v],
-                        &self.prefill_scratch.attn[row * n_attn..(row + 1) * n_attn],
-                    ));
-                }
-            }
-            let mut prepared_for = None;
-            matmul_rows(
-                &mut self.prefill_scratch.prepared,
-                &mut prepared_for,
-                &weights.wo,
-                &self.prefill_scratch.attn[..rows * n_attn],
-                &mut self.prefill_scratch.projection[..rows * config.n_embd],
-                rows,
-                n_attn,
-                model,
-            )?;
-            for row in 0..rows {
-                let row_start = row * config.n_embd;
-                let row_end = row_start + config.n_embd;
-                for (hidden, projection) in self.prefill_scratch.x[row_start..row_end]
-                    .iter_mut()
-                    .zip(&self.prefill_scratch.projection[row_start..row_end])
-                {
-                    *hidden += *projection;
-                }
-                rms_norm(
-                    &self.prefill_scratch.x[row_start..row_end],
-                    &weights.ffn_norm,
-                    &mut self.prefill_scratch.normed[row_start..row_end],
-                    config.eps,
-                );
-            }
-
-            if weights.moe_router.is_some() {
-                for row in 0..rows {
-                    forward_moe_token(
-                        &self.prefill_scratch.normed
-                            [row * config.n_embd..(row + 1) * config.n_embd],
-                        weights,
-                        config,
-                        &mut self.prefill_scratch.down
-                            [row * config.n_embd..(row + 1) * config.n_embd],
-                    )?;
-                }
-            } else {
-                matmul_group_rows(
-                    &mut self.prefill_scratch.prepared,
-                    [
-                        (
-                            &weights.w_gate,
-                            &mut self.prefill_scratch.up[..rows * config.n_ff],
-                        ),
-                        (
-                            &weights.w_up,
-                            &mut self.prefill_scratch.gate[..rows * config.n_ff],
-                        ),
-                    ],
-                    &self.prefill_scratch.normed[..rows * config.n_embd],
-                    rows,
-                    config.n_embd,
-                    model,
-                )?;
-                for row in 0..rows {
-                    let start = row * config.n_ff;
-                    let end = start + config.n_ff;
-                    silu_mul_approx_inplace(
-                        &self.prefill_scratch.up[start..end],
-                        &mut self.prefill_scratch.gate[start..end],
-                    );
-                }
-                let mut prepared_for = None;
-                matmul_rows(
-                    &mut self.prefill_scratch.prepared,
-                    &mut prepared_for,
-                    &weights.w_down,
-                    &self.prefill_scratch.gate[..rows * config.n_ff],
-                    &mut self.prefill_scratch.down[..rows * config.n_embd],
-                    rows,
-                    config.n_ff,
-                    model,
-                )?;
-            }
-
-            #[cfg(feature = "parity-trace")]
-            if layer == 0 {
-                for row in 0..rows {
-                    parity_trace::report(parity_trace::checkpoint_row(
-                        row,
-                        "ffn_out-0",
-                        Some(0),
-                        &[1, config.n_embd],
-                        &self.prefill_scratch.down[row * config.n_embd..(row + 1) * config.n_embd],
-                    ));
-                }
-            }
-            for row in 0..rows {
-                let start = row * config.n_embd;
-                let end = start + config.n_embd;
-                for (hidden, projection) in self.prefill_scratch.x[start..end]
-                    .iter_mut()
-                    .zip(&self.prefill_scratch.down[start..end])
-                {
-                    *hidden += *projection;
-                }
-                if layer < config.n_deepstack_layers {
-                    if let Some(deepstack) = input.deepstack_embeddings {
-                        add_deepstack_embedding(
-                            &mut self.prefill_scratch.x[start..end],
-                            deepstack,
-                            layer,
-                            range.start + row,
-                            input.token_ids.len(),
-                            config.n_embd,
-                        );
-                    }
-                }
-            }
-
-            #[cfg(feature = "parity-trace")]
-            if !project_logits {
-                for row in 0..rows {
-                    parity_trace::report(parity_trace::checkpoint_row(
-                        row,
-                        &format!("hidden_sequence.layer.{layer}"),
-                        Some(layer),
-                        &[1, config.n_embd],
-                        &self.prefill_scratch.x[row * config.n_embd..(row + 1) * config.n_embd],
-                    ));
-                }
-            }
-            #[cfg(test)]
-            if self.fail_cpu_prefill_after_layer == Some(layer) {
-                self.fail_cpu_prefill_after_layer = None;
-                return Err(format!(
-                    "injected Qwen3 CPU prefill failure after layer {layer}"
-                ));
-            }
+                    Ok(())
+                },
+                layer,
+            )
+            .map_err(|error| error.to_string())?;
         }
 
         #[cfg(feature = "parity-trace")]

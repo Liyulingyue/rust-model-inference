@@ -1,5 +1,6 @@
 //! Session-local compute selection; CPU kernels retain their own ISA dispatch.
 
+pub(crate) mod dense;
 pub(crate) mod linear;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

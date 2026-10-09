@@ -1,3 +1,4 @@
+use super::dense::{record_dense_layer, DenseShape, LayerBindings, QkvBindings};
 use crate::core::scratchpad::{KvCache, KvState};
 use crate::core::tensor::GGMLType;
 use crate::models::qwen3::trunk::{Qwen3Config, Qwen3Model, Qwen3Rope};
@@ -215,23 +216,6 @@ pub(crate) struct GpuChunkResult<'a> {
     pub(crate) logits: &'a [f32],
     pub(crate) k_delta: &'a [f32],
     pub(crate) v_delta: &'a [f32],
-}
-
-#[derive(Clone, Copy)]
-enum QkvBindings {
-    Grouped(OperatorBindings),
-    Split([OperatorBindings; 3]),
-}
-
-#[derive(Clone, Copy)]
-struct LayerBindings {
-    attn_norm: OperatorBindings,
-    qkv: QkvBindings,
-    qk_norm: OperatorBindings,
-    wo: OperatorBindings,
-    ffn_norm: OperatorBindings,
-    gate_up: OperatorBindings,
-    down: OperatorBindings,
 }
 
 pub(crate) struct UploadedBuffers {
@@ -558,29 +542,15 @@ impl Qwen3VulkanSession {
         n_in: usize,
         rows: usize,
     ) -> Result<(), VulkanError> {
-        let outputs: Vec<_> = outputs
-            .iter()
-            .map(|&(region, width)| {
-                Ok((
-                    region,
-                    width,
-                    width.checked_mul(4).ok_or(VulkanError::OutOfMemory)?,
-                ))
-            })
-            .collect::<Result<_, VulkanError>>()?;
-        self.ops.record_weight_matmul_rows(
+        super::dense::record_weights(
+            &self.ops,
+            &self.layout,
             commands,
             bindings,
             input,
-            self.layout.q8,
-            self.layout.q8_scales,
-            self.layout.q4_1_input_sums,
-            self.layout.q8k,
-            self.layout.q8k_scales,
-            &outputs,
+            outputs,
             n_in,
             rows,
-            n_in,
         )
     }
 
@@ -605,17 +575,9 @@ impl Qwen3VulkanSession {
                 self.max_rows
             )));
         }
-        let q_count = config
-            .n_head
-            .checked_mul(config.n_embd_head_k)
-            .ok_or(VulkanError::OutOfMemory)?;
         let kv_count = config
             .n_head_kv
             .checked_mul(config.n_embd_head_k)
-            .ok_or(VulkanError::OutOfMemory)?;
-        let attn_count = config
-            .n_head
-            .checked_mul(config.n_embd_head_v)
             .ok_or(VulkanError::OutOfMemory)?;
         // Acquire the shared submission guard before touching mapped arena bytes.
         let commands = TokenCommands::begin(self.context)?;
@@ -640,74 +602,28 @@ impl Qwen3VulkanSession {
         }
         self.ops
             .write_f32(self.layout.rope, &self.rope[..rows * config.n_embd_head_k])?;
+        let shape = DenseShape {
+            n_embd: config.n_embd,
+            n_ff: config.n_ff,
+            n_layer: config.n_layer,
+            n_head: config.n_head,
+            n_head_kv: config.n_head_kv,
+            n_embd_head_k: config.n_embd_head_k,
+            n_embd_head_v: config.n_embd_head_v,
+            eps: config.eps,
+            has_qk_norm: config.has_qk_norm,
+        };
         for (layer_index, bindings) in self.layers.iter().enumerate() {
-            self.ops.record_rms_norm_rows(
+            record_dense_layer(
+                &self.ops,
                 &commands,
-                bindings.attn_norm,
-                self.layout.x,
-                self.layout.normed,
-                config.n_embd,
-                config.eps,
-                rows,
-                config.n_embd,
-                config.n_embd,
-            )?;
-            let outputs = [
-                (self.layout.q, q_count),
-                (self.layout.k, kv_count),
-                (self.layout.v, kv_count),
-            ];
-            match bindings.qkv {
-                QkvBindings::Grouped(grouped) => self.record_weights(
-                    &commands,
-                    grouped,
-                    self.layout.normed,
-                    &outputs,
-                    config.n_embd,
-                    rows,
-                )?,
-                QkvBindings::Split(split) => {
-                    for (binding, output) in split.iter().zip(outputs) {
-                        self.record_weights(
-                            &commands,
-                            *binding,
-                            self.layout.normed,
-                            &[output],
-                            config.n_embd,
-                            rows,
-                        )?;
-                    }
-                }
-            }
-            self.ops.record_qk_norm_rope_rows(
-                &commands,
-                bindings.qk_norm,
-                self.layout.q,
-                self.layout.k,
-                config.n_head,
-                config.n_head_kv,
-                config.n_embd_head_k,
-                self.layout.rope,
-                config.eps,
-                config.has_qk_norm,
-                config.has_qk_norm,
-                rows,
-            )?;
-            self.ops.record_kv_write_rows(
-                &commands,
-                self.layout.k,
-                self.layout.v,
-                self.layout.kv_k,
-                self.layout.kv_v,
-                self.layout.kv_delta_k,
-                self.layout.kv_delta_v,
+                &self.layout,
+                bindings,
+                &shape,
                 layer_index,
-                base_position,
-                config.n_layer,
                 self.capacity,
-                kv_count,
+                base_position,
                 rows,
-                kv_count,
             )?;
             #[cfg(test)]
             if let Some(row) = failure {
@@ -716,81 +632,6 @@ impl Qwen3VulkanSession {
                     "injected Qwen3 GPU failure after row {row}"
                 )));
             }
-            self.ops.record_attention_rows(
-                &commands,
-                self.layout.q,
-                self.layout.kv_k,
-                self.layout.kv_v,
-                self.layout.scores,
-                self.layout.attn,
-                layer_index,
-                config.n_layer,
-                base_position,
-                self.capacity,
-                config.n_head,
-                config.n_head_kv,
-                config.n_embd_head_k,
-                rows,
-            )?;
-            self.record_weights(
-                &commands,
-                bindings.wo,
-                self.layout.attn,
-                &[(self.layout.projection, config.n_embd)],
-                attn_count,
-                rows,
-            )?;
-            self.ops.record_add_rows(
-                &commands,
-                self.layout.x,
-                self.layout.projection,
-                config.n_embd,
-                rows,
-            )?;
-            self.ops.record_rms_norm_rows(
-                &commands,
-                bindings.ffn_norm,
-                self.layout.x,
-                self.layout.normed,
-                config.n_embd,
-                config.eps,
-                rows,
-                config.n_embd,
-                config.n_embd,
-            )?;
-            self.record_weights(
-                &commands,
-                bindings.gate_up,
-                self.layout.normed,
-                &[
-                    (self.layout.gate, config.n_ff),
-                    (self.layout.up, config.n_ff),
-                ],
-                config.n_embd,
-                rows,
-            )?;
-            self.ops.record_silu_mul_rows(
-                &commands,
-                self.layout.gate,
-                self.layout.up,
-                config.n_ff,
-                rows,
-            )?;
-            self.record_weights(
-                &commands,
-                bindings.down,
-                self.layout.gate,
-                &[(self.layout.down, config.n_embd)],
-                config.n_ff,
-                rows,
-            )?;
-            self.ops.record_add_rows(
-                &commands,
-                self.layout.x,
-                self.layout.down,
-                config.n_embd,
-                rows,
-            )?;
         }
         let last_offset = (rows - 1)
             .checked_mul(config.n_embd)
