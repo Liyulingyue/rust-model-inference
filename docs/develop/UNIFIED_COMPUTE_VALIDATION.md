@@ -40,7 +40,7 @@ VAE 继续舍入 F16 输入并 F32 累加；AuK/YuE 保留 Dot 的架构资格�
 | RMI_SCALAR=1 相关回归 | 40 passed / 0 failed / 7 ignored |
 | 真实 GPU/state/VAE | 68 passed / 1 failed；唯一失败为 main 已复现的 AuK ARM fixture，要求不支持的 AVX2/F16C Dot 提交 |
 | 构建与格式 | CPU lib/bins、Vulkan + parity-trace lib/bins/examples check、rustfmt、diff whitespace 通过 |
-| Shader | 62 项 manifest、31 个 SPIR-V 验证通过，修改的 SiLU 重建字节一致；完整重建仍在未修改的 softmax.spv byte 13 失败 |
+| Shader | 62 项 manifest、31 个 SPIR-V 验证通过；使用 CI 的 glslang 15.1.0 完整重建，全部 31 个 shader 字节一致 |
 
 新增 operand 表达式和 mode API 测试先编译失败，再实现并通过；CPU scratch 的别名拒绝、
 组校验与错误后视图恢复有数值测试。设备用例验证独立 SiLU 输出地址不改输入、不额外提交，
@@ -52,6 +52,11 @@ CPU bits/FFN 角色、失败前缀和 VAE 卷积数值断言保持原门槛。
 B=1/64 的 token-major checkpoint、shape 和二进制逐位比较通过；Gemma trace 的缺失
 checkpoint 是原有失败，没有放宽断言或声称已修复。独立全改动审查无重要/严重发现；
 审查后按测试反馈补齐 Qwen fixture并验证 RED→GREEN。
+
+PR CI 暴露本机 glslang 16.6 与 CI 15.1.0 的生成物差异（SiLU 的 SPIR-V
+header byte 13）。在仓库 `target/shader-tools` 内构建 15.1.0，重新生成 SiLU
+并更新 manifest，完整 `scripts/vulkan-shaders.sh check` 通过。未修改 CI
+或降低字节一致性门槛；此前 softmax 重建差异也由同一工具链版本解释。
 
 本轮证明受支持模型的前向表达可以由两后端共用，没有重新测量真实模型速度、
 x86/独显或外部 oracle，没有扩大模型资格或开放新的 Auto workload。
