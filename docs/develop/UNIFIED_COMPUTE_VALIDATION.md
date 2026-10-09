@@ -83,7 +83,7 @@ prompt `A red fox sleeping beneath a pine tree`、seed 42、512×512、8 线程�
 | --- | --- | --- |
 | 首次非有限边界 | 第二步 sigma=0.003，noise refiner 0 中 387 个 NaN，首个索引 492758 | 两步的全部 14 个边界 checkpoint 有限 |
 | 后续传播 | noise refiner 1 全部 3932160 个 NaN，flow 全部 65536 个 NaN，退出 1 | 正常退出并写出 512×512 PNG |
-| 实际 GPU 范围 | 每步 34 block / 170 projection / 300 dispatch | 相同，没有 CPU 回退 |
+| 实际 GPU 范围 | 每步 34 block / 170 projection，main session 的 dispatch 计数每步 +300 | 相同，没有 projection 回退 |
 
 原错误日志的 `-inf=65536` 是 NaN 的负号也被计入 infinity；原始二进制 trace
 确认 flow 的实际 infinity 数为 0。诊断现在只对 `is_infinite()` 分正负计数，
@@ -105,9 +105,22 @@ prompt `A red fox sleeping beneath a pine tree`、seed 42、512×512、8 线程�
 | qwen3_4b_f32-q8_0.gguf | `aeaeb1222b858fc98fa01f31bdfdceb8a5b1719a9b91a3909774a85ecf8930fe` |
 | pig_flux_vae_fp32-f16.gguf | `7e9b2072ef8d8bde202804362b273a96233e54e4b52c820662cdc70b3e08b27a` |
 
-日志、完整 trace、失败名称对照和 PNG 保留在上述本轮忽略目录的 `zimage-*` 文件。
-本次证明数值回归已修复；未据此开放 Auto workload，未做像素 oracle/PSNR 或跨设备
-性能准入。用户完整 8 步的 release 命令另行验证，不能把上述 2 步结果算作 8 步。
+随后按用户的 `cargo build --release --features vulkan --bin rust-model-inference`
+构建（没有 parity-trace），完整执行 **512×512、8 步、seed 42、8 线程、`--gpu`**。
+只将模型/输出路径换成上述本机文件和本轮忽略目录，并加 `RUST_GPU_DIAG=1` 记录计数。
+进程正常退出，8 次 forward 均通过 flow/Euler 有限值检查，包含末步 sigma=0.003；
+VAE 解码完成，生成有效 512×512 PNG。每步 34 个 GPU block、170 次 projection，
+main session 的 dispatch 计数从 300 到 2400（不含 text、refiner 和 VAE 的提交）。
+
+本次新进程单次观测：text_encode 14.5571 s、denoise 227.6172 s、VAE 8.7364 s，
+阶段总计 250.9107 s；模型页缓存和驱动缓存已由此前验证预热。这是 M3 Max 上的成功
+验收，不是性能准入，不能与截图的其他设备耗时直接比较。
+release binary SHA-256：`b4bbe2edf62980ba6a1700cf3593e1e8b81efe00564362805f36267b1568b6fb`。
+PNG SHA-256：`852ae7c0a0351e113fe2b5d7df62a9426562cf15f6bd8178ab42b395bc180cd9`。
+
+日志、完整 trace、失败名称对照、release provenance/result 和 PNG 保留在上述本轮
+忽略目录的 `zimage-*` 文件。本次证明数值回归已修复；未据此开放 Auto workload，
+未做像素 oracle/PSNR、GB10/x86/其他驱动复测或跨设备性能准入。
 
 ## main 合并验收（2026-10-09）
 
