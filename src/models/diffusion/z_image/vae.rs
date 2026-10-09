@@ -1489,7 +1489,8 @@ fn try_conv_f16(
     }
     let spatial = side * side;
     let tile_rows = crate::ops::kernel::vulkan::GpuLinear::tile_rows(
-        crate::vulkan::ops::GpuWeightFormat::F16F32,
+        crate::vulkan::ops::GpuWeightFormat::F16
+            .with_mode(crate::vulkan::ops::GpuMatmulMode::RoundedInputF32),
         patch_len,
         output_channels,
         spatial,
@@ -1519,7 +1520,8 @@ fn try_conv_f16(
         });
         if !gpu.try_matmul(
             weights,
-            crate::vulkan::ops::GpuWeightFormat::F16F32,
+            crate::vulkan::ops::GpuWeightFormat::F16
+                .with_mode(crate::vulkan::ops::GpuMatmulMode::RoundedInputF32),
             &patches[..rows * patch_len],
             &mut projected[..rows * output_channels],
             patch_len,

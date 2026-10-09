@@ -55,7 +55,7 @@ GPU 直接读取 CHW 的 1×1 / 3×3 输入并零填边界，融合 bias 后按 
 和输出转置。整个 VAE 共享可增长的 arena 与最多 64 份不可变权重缓存；常规设备每层只提交一次。
 超出 storage buffer、dispatch 或权重缓存上限时保留原分块 GPU 后备，最多 4096 行，
 以 16 MiB host 输入/输出为预算；真实 GPU 故障则在 CPU 重算完整输出。
-直接卷积保留原 GPU 的 F16 输入舍入、FP32 FMA 顺序和奇数 packed 权重寻址；F16Dot 的归约合约不变。
+直接卷积保留原 GPU 的 F16 输入舍入、FP32 FMA 顺序和奇数 packed 权重寻址；`F16 + Dot` 的归约合约不变。
 Apple M3 Max / MoltenVK 上，真实 F16 VAE、seed 42 的 16×64×64 latent → 512×512，
 8 线程 release 的三次 warm 中位数为 CPU 12.569687 s、Vulkan 7.605713 s，GPU 耗时少约 39.5%。
 同机已测的分块 GPU 路径为 17.282959 s、1447 次提交；新路径为 39 次提交，耗时下降约 56.0%。
@@ -324,3 +324,16 @@ MoltenVK 路径是正确性后端，不宣称比 4-thread CPU 更快。
 - shader 唯一源码位于 `shaders/glsl/`；运行 `bash scripts/vulkan-shaders.sh update`
   重新生成，运行 `bash scripts/vulkan-shaders.sh check` 校验源码、SPIR-V 和 manifest。
 - wgpu 后端（`--features wgpu`）当前未接入新分发路径，保持 CPU。
+
+### 共享 dense 表达与数值模式
+
+Qwen3 和标准 Llama 的会话共用 `compute::dense::run_dense_layer`：表达式携带
+张量输入/输出与权重角色，CPU 共用 `DenseCpu`，Vulkan 记录同样的算子连接。
+新增受支持算子的组合可以复用后端实现；新增算子仍需各后端实现自己的 kernel。
+GPU 提交与状态回退仍在 chunk 边界。
+
+权重存储由 `GpuWeightFormat` 表示，数值契约由独立的 `GpuMatmulMode` 表示。
+F16 storage + RoundedInputF32 是 VAE 的输入 F16 舍入、F32 累加；F16/BF16 storage
++ Dot 保留对应 CPU dot 的归约契约及设备资格。不会仅凭权重 dtype 替换计算精度。
+本次复用没有开放新的 Auto workload，当前验证与限制见
+[共享算子验收](UNIFIED_COMPUTE_VALIDATION.md#共享算子表达验收2026-10-09)。

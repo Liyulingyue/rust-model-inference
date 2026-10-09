@@ -2,7 +2,7 @@
 use super::ops::{fill_rope_coefficients, GpuWeightFormat, RopeLayout};
 use super::ops::{ArenaLayout, ArenaRegion, OperatorBindings, Qwen3Ops, TokenCommands};
 use super::{GpuBuffer, VulkanContext, VulkanError};
-use crate::compute::dense::{run_dense_layer, DenseStep};
+use crate::compute::dense::{run_dense_layer, DenseMatrix, DenseNorm, DenseOp, DenseTensor};
 use crate::compute::state::TokenCommitState;
 use crate::core::tensor::GGMLType;
 
@@ -99,37 +99,86 @@ pub(crate) fn record_dense_layer(
         .n_head
         .checked_mul(config.n_embd_head_v)
         .ok_or(VulkanError::OutOfMemory)?;
+    let regions = [
+        layout.x,
+        layout.normed,
+        layout.q,
+        layout.k,
+        layout.v,
+        layout.attn,
+        layout.projection,
+        layout.gate,
+        layout.up,
+        layout.down,
+    ];
+    let widths = [
+        config.n_embd,
+        config.n_embd,
+        q_count,
+        kv_count,
+        kv_count,
+        attn_count,
+        config.n_embd,
+        config.n_ff,
+        config.n_ff,
+        config.n_embd,
+    ];
+    let region = |tensor: DenseTensor| regions[tensor as usize];
+    let width = |tensor: DenseTensor| widths[tensor as usize];
     run_dense_layer(
-        &mut |_: usize, step| -> Result<(), VulkanError> {
-            match step {
-                DenseStep::AttnNorm => {
+        &mut |_: usize, op| -> Result<(), VulkanError> {
+            match op {
+                DenseOp::RmsNorm {
+                    input,
+                    weight,
+                    output,
+                } => {
+                    let binding = match weight {
+                        DenseNorm::Attn => bindings.attn_norm,
+                        DenseNorm::Ffn => bindings.ffn_norm,
+                    };
                     ops.record_rms_norm_rows(
-                        &commands,
-                        bindings.attn_norm,
-                        layout.x,
-                        layout.normed,
-                        config.n_embd,
+                        commands,
+                        binding,
+                        region(input),
+                        region(output),
+                        width(input),
                         config.eps,
                         rows,
-                        config.n_embd,
-                        config.n_embd,
+                        width(input),
+                        width(output),
                     )?;
                 }
-                DenseStep::Qkv => {
-                    let outputs = [
-                        (layout.q, q_count),
-                        (layout.k, kv_count),
-                        (layout.v, kv_count),
-                    ];
-                    match bindings.qkv {
-                        QkvBindings::Grouped(grouped) => record_weights(
+                DenseOp::Linear { input, projections } => {
+                    let mut outputs = [(layout.x, 0); 3];
+                    for ((_, output), slot) in projections.iter().zip(&mut outputs) {
+                        *slot = (region(*output), width(*output));
+                    }
+                    let outputs = &outputs[..projections.len()];
+                    let binding = match projections {
+                        [(DenseMatrix::Q, _), (DenseMatrix::K, _), (DenseMatrix::V, _)] => {
+                            bindings.qkv
+                        }
+                        [(DenseMatrix::Gate, _), (DenseMatrix::Up, _)] => {
+                            QkvBindings::Grouped(bindings.gate_up)
+                        }
+                        [(DenseMatrix::AttnOut, _)] => QkvBindings::Grouped(bindings.wo),
+                        [(DenseMatrix::Down, _)] => QkvBindings::Grouped(bindings.down),
+                        _ => {
+                            return Err(VulkanError::UnsupportedShape(
+                                "unsupported dense projection group".into(),
+                            ))
+                        }
+                    };
+                    match binding {
+                        QkvBindings::Grouped(binding) => record_weights(
                             ops,
                             layout,
-                            &commands,
-                            grouped,
-                            layout.normed,
-                            &outputs,
-                            config.n_embd,
+                            commands,
+                            binding,
+                            region(input),
+                            outputs,
+                            width(input),
                             rows,
                         )?,
                         QkvBindings::Split(split) => {
@@ -137,18 +186,18 @@ pub(crate) fn record_dense_layer(
                                 record_weights(
                                     ops,
                                     layout,
-                                    &commands,
+                                    commands,
                                     *binding,
-                                    layout.normed,
-                                    &[output],
-                                    config.n_embd,
+                                    region(input),
+                                    &[*output],
+                                    width(input),
                                     rows,
                                 )?;
                             }
                         }
                     }
                 }
-                DenseStep::QkNormRope => {
+                DenseOp::QkNormRope => {
                     ops.record_qk_norm_rope_layout_rows(
                         &commands,
                         bindings.qk_norm,
@@ -165,7 +214,7 @@ pub(crate) fn record_dense_layer(
                         config.rope_layout,
                     )?;
                 }
-                DenseStep::AppendKv => {
+                DenseOp::AppendKv => {
                     ops.record_kv_write_rows(
                         &commands,
                         layout.k,
@@ -183,7 +232,7 @@ pub(crate) fn record_dense_layer(
                         kv_count,
                     )?;
                 }
-                DenseStep::Attention => {
+                DenseOp::Attention => {
                     ops.record_attention_rows(
                         &commands,
                         layout.q,
@@ -201,74 +250,35 @@ pub(crate) fn record_dense_layer(
                         rows,
                     )?;
                 }
-                DenseStep::AttnOut => {
-                    record_weights(
-                        ops,
-                        layout,
-                        &commands,
-                        bindings.wo,
-                        layout.attn,
-                        &[(layout.projection, config.n_embd)],
-                        attn_count,
-                        rows,
-                    )?;
-                }
-                DenseStep::AttnResidual => {
+                DenseOp::Add { input, output } => {
                     ops.record_add_rows(
-                        &commands,
-                        layout.x,
-                        layout.projection,
-                        config.n_embd,
+                        commands,
+                        region(output),
+                        region(input),
+                        width(output),
                         rows,
                     )?;
                 }
-                DenseStep::FfnNorm => {
-                    ops.record_rms_norm_rows(
-                        &commands,
-                        bindings.ffn_norm,
-                        layout.x,
-                        layout.normed,
-                        config.n_embd,
-                        config.eps,
-                        rows,
-                        config.n_embd,
-                        config.n_embd,
-                    )?;
-                }
-                DenseStep::GateUp => {
-                    record_weights(
-                        ops,
-                        layout,
-                        &commands,
-                        bindings.gate_up,
-                        layout.normed,
-                        &[(layout.gate, config.n_ff), (layout.up, config.n_ff)],
-                        config.n_embd,
+                DenseOp::SiluMul { gate, up } => {
+                    ops.record_silu_mul_rows_into(
+                        commands,
+                        region(gate),
+                        region(up),
+                        region(up),
+                        width(gate),
                         rows,
                     )?;
                 }
-                DenseStep::SiluMul => {
-                    ops.record_silu_mul_rows(&commands, layout.gate, layout.up, config.n_ff, rows)?;
-                }
-                DenseStep::Down => {
-                    record_weights(
-                        ops,
-                        layout,
-                        &commands,
-                        bindings.down,
-                        layout.gate,
-                        &[(layout.down, config.n_embd)],
-                        config.n_ff,
-                        rows,
-                    )?;
-                }
-                DenseStep::FfnResidual => {
-                    ops.record_add_rows(&commands, layout.x, layout.down, config.n_embd, rows)?;
+                DenseOp::Moe { .. } => {
+                    return Err(VulkanError::UnsupportedShape(
+                        "dense Vulkan MoE is unsupported".into(),
+                    ))
                 }
             }
             Ok(())
         },
         layer_index,
+        false,
     )
 }
 

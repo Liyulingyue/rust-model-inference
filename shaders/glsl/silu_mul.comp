@@ -9,6 +9,7 @@ layout(push_constant) uniform PC {
     uint count;
     uint rows;
     uint row_stride;
+    uint output_word;
 } pc;
 
 float exp_approx(float x) {
@@ -42,5 +43,5 @@ void main() {
     precise float activated = gate / denominator;
     precise float residual = fma(-denominator, activated, gate);
     activated = fma(residual, 1.0 / denominator, activated);
-    arena.data[pc.gate_word + index] = floatBitsToUint(activated * up);
+    arena.data[pc.output_word + index] = floatBitsToUint(activated * up);
 }

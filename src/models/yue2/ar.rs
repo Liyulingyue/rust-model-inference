@@ -373,7 +373,8 @@ impl YuE2Weight {
         #[cfg(feature = "vulkan")]
         if self.gpu_bf16.try_matmul(
             bytes,
-            crate::vulkan::ops::GpuWeightFormat::BF16Dot,
+            crate::vulkan::ops::GpuWeightFormat::BF16
+                .with_mode(crate::vulkan::ops::GpuMatmulMode::Dot),
             input,
             output,
             self.n_in,
@@ -2376,7 +2377,8 @@ mod performance_tests {
         assert!(
             weight.gpu_bf16.try_matmul(
                 bytes,
-                crate::vulkan::ops::GpuWeightFormat::BF16Dot,
+                crate::vulkan::ops::GpuWeightFormat::BF16
+                    .with_mode(crate::vulkan::ops::GpuMatmulMode::Dot),
                 &input,
                 &mut actual,
                 2,
@@ -2427,7 +2429,8 @@ mod performance_tests {
             }
             assert!(weight.gpu_bf16.try_matmul(
                 bytes,
-                crate::vulkan::ops::GpuWeightFormat::BF16Dot,
+                crate::vulkan::ops::GpuWeightFormat::BF16
+                    .with_mode(crate::vulkan::ops::GpuMatmulMode::Dot),
                 &input,
                 &mut actual,
                 width,

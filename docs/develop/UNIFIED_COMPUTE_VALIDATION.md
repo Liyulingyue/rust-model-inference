@@ -8,6 +8,56 @@
 真实 Qwen 权重仍未通过既定 logits 门槛；原始版本能复现相同偏差。
 全量测试也有基线失败，不能把本分支描述为“全绿”或“Vulkan 全面可用”。
 
+## 共享算子表达验收（2026-10-09）
+
+本轮基线：`409c2f19b240dd126f8cdb4b9246ff3b2b059cfc`。
+[实施范围与验收条件](../superpowers/plans/2026-10-09-shared-dense-operators.md)。
+
+`DenseOp` 携带张量输入、输出及权重角色，`run_dense_layer` 唯一表达 dense
+前向的连接和 FFN 公式。Qwen3、标准 Llama 的 CPU 适配器共用 `DenseCpu` 的
+RMSNorm、prepared grouped linear、residual 和 SiLU；Vulkan 消费同一表达式，
+保留既有 arena、上传和 chunk 提交。各后端的 kernel 仍独立实现。
+
+保留 Qwen 的反向 gate/up scratch 命名、逐行 approximate SiLU、MoE、deepstack、
+不同 K/V head 维度和全部 trace；Llama 保留单行 approximate / 多行 exact SiLU。
+SiLU shader 新增输出地址，原调用仍写 gate，共享表达式写 up，down 读取同一个逻辑 up。
+没有新增每算子提交、读回、activation 拷贝、全局缓存或依赖。
+
+`GpuWeightFormat` 现在只表示存储；`GpuMatmulMode` 独立表示 Prepared、
+RoundedInputF32 或 Dot，`GpuMatmulSpec` 组合两者，由算子校验并选择 shader。
+旧 `F16F32` 对应 `F16 + RoundedInputF32`，旧 `F16Dot` / `BF16Dot` 对应
+相应存储加 Dot。缓存同时验证格式与 mode；非法组合及缓存 mode 变化保留输出。
+VAE 继续舍入 F16 输入并 F32 累加；AuK/YuE 保留 Dot 的架构资格与原有归约。
+
+设备：Apple M3 Max / ARM64 NEON / macOS / MoltenVK 1.4.2 / Rust 1.98.1。
+构建统一使用 repo-local CARGO_HOME，`--offline --locked --profile release-fast`。
+
+| 验证 | 结果与边界 |
+| --- | --- |
+| CPU 全库 | 1165 passed / 23 failed / 78 ignored；失败名称与合并基线完全相同 |
+| Vulkan + parity-trace 全库 | 1263 passed / 29 failed / 137 ignored；原 Vulkan 28 项失败加独立基线也失败的 Gemma trace 用例 |
+| 本轮相关 CPU/trace/shape | 50 passed / 0 failed / 8 ignored |
+| RMI_SCALAR=1 相关回归 | 40 passed / 0 failed / 7 ignored |
+| 真实 GPU/state/VAE | 68 passed / 1 failed；唯一失败为 main 已复现的 AuK ARM fixture，要求不支持的 AVX2/F16C Dot 提交 |
+| 构建与格式 | CPU lib/bins、Vulkan + parity-trace lib/bins/examples check、rustfmt、diff whitespace 通过 |
+| Shader | 62 项 manifest、31 个 SPIR-V 验证通过，修改的 SiLU 重建字节一致；完整重建仍在未修改的 softmax.spv byte 13 失败 |
+
+新增 operand 表达式和 mode API 测试先编译失败，再实现并通过；CPU scratch 的别名拒绝、
+组校验与错误后视图恢复有数值测试。设备用例验证独立 SiLU 输出地址不改输入、不额外提交，
+以及数值 mode 变化不污染缓存或 host 输出。现有 Qwen B=1/3/64 logits/KV/提交、Llama
+CPU bits/FFN 角色、失败前缀和 VAE 卷积数值断言保持原门槛。
+
+组合 feature 全库最初有两个额外 trace 失败，在单独源码/target 构建的上述基线上
+均复现。Qwen fixture 遗漏 main 新增的 raw Q/K checkpoint，本轮补齐预期，
+B=1/64 的 token-major checkpoint、shape 和二进制逐位比较通过；Gemma trace 的缺失
+checkpoint 是原有失败，没有放宽断言或声称已修复。独立全改动审查无重要/严重发现；
+审查后按测试反馈补齐 Qwen fixture并验证 RED→GREEN。
+
+本轮证明受支持模型的前向表达可以由两后端共用，没有重新测量真实模型速度、
+x86/独显或外部 oracle，没有扩大模型资格或开放新的 Auto workload。
+历史真实 Qwen 的误差与 GPU 较慢结果仍是原有门禁，不能把本轮结构复用说成已测加速。
+原始日志保留在本轮忽略的 `.superpowers/sdd/2026-10-09-shared-dense-operators/`。
+
 ## main 合并验收（2026-10-09）
 
 合并前分支为 `4994bd22a56a127a7c23199db30f0e979baf0a8a`，同步的 main 为
@@ -20,7 +70,7 @@ AuK 20 层结构和新增 Vulkan projection/VAE 卷积，同时保留共享执�
 - `VulkanKernel` 转发 `supports_f16_strict`，避免包装器误拒绝原本支持的严格 F16。
   已有 rounding 测试先失败，补上转发后通过。
 - F16 shader 同时保留 ARM prepared half 累加与 main 的 AVX2/F16C dot reduction。
-  VAE 明确使用 `F16F32` 契约，保留 F16 输入舍入及 F32 累加；卷积不继承 ARM prepared
+  合并时 VAE 明确使用 `F16F32` 契约（本轮拆为 `F16 + RoundedInputF32`），保留 F16 输入舍入及 F32 累加；卷积不继承 ARM prepared
   half 累加。合并后的 VAE 设备测试先失败，修复后通过，继续使用 tiled/direct GPU 路径。
 
 新增 raw hidden-sequence 集成测试，验证逐行输出 RMSNorm 的 raw-bit 对应关系、KV 提交长度，

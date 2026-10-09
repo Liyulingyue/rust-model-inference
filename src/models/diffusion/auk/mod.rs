@@ -820,7 +820,7 @@ fn linear_into_scaled_impl(
                 if gpu_input.iter().all(|value| value.abs() <= 65504.0)
                     && q8.gpu.entry(name.to_owned()).or_default().try_matmul(
                         bytes,
-                        GpuWeightFormat::F16Dot,
+                        GpuWeightFormat::F16.with_mode(crate::vulkan::ops::GpuMatmulMode::Dot),
                         gpu_input,
                         output,
                         n_in,

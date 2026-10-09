@@ -118,22 +118,6 @@ fn matmul_rows(
     prepared.matmul(weight, input, output, &model.pool)
 }
 
-fn matmul_group_rows<const N: usize>(
-    prepared: &mut PreparedRows,
-    projections: [(&Weight<'_>, &mut [f32]); N],
-    input: &[f32],
-    rows: usize,
-    n_in: usize,
-    model: &Qwen3Model,
-) -> Result<(), String> {
-    let need_q8 = projections
-        .iter()
-        .any(|(weight, _)| weight.needs_q8_0_activation());
-    let need_q8k = projections.iter().any(|(weight, _)| weight.uses_q8_k());
-    prepared.prepare(input, rows, n_in, need_q8, need_q8k)?;
-    prepared.matmul_group(input, projections, &model.pool)
-}
-
 impl Qwen3Session<'_> {
     pub(super) fn prefill(
         &mut self,
@@ -411,50 +395,30 @@ impl Qwen3Session<'_> {
         for layer in 0..config.n_layer {
             let weights = &model.layers[layer];
             crate::compute::dense::run_dense_layer(
-                &mut |_: usize, step| -> Result<(), String> {
-                    use crate::compute::dense::DenseStep;
-                    match step {
-                        DenseStep::AttnNorm => {
+                &mut |_: usize, op| -> Result<(), String> {
+                    use crate::compute::dense::{DenseCpu, DenseNorm, DenseOp, DenseTensor};
+                    let final_residual = op
+                        == DenseOp::Add {
+                            input: DenseTensor::Down,
+                            output: DenseTensor::X,
+                        };
+                    if final_residual {
+                        #[cfg(feature = "parity-trace")]
+                        if layer == 0 {
                             for row in 0..rows {
-                                rms_norm(
-                                    &self.prefill_scratch.x
+                                parity_trace::report(parity_trace::checkpoint_row(
+                                    row,
+                                    "ffn_out-0",
+                                    Some(0),
+                                    &[1, config.n_embd],
+                                    &self.prefill_scratch.down
                                         [row * config.n_embd..(row + 1) * config.n_embd],
-                                    &weights.attn_norm,
-                                    &mut self.prefill_scratch.normed
-                                        [row * config.n_embd..(row + 1) * config.n_embd],
-                                    config.eps,
-                                );
-                            }
-                            #[cfg(feature = "parity-trace")]
-                            if layer == 0 {
-                                for row in 0..rows {
-                                    parity_trace::report(parity_trace::checkpoint_row(
-                                        row,
-                                        "attn_norm-0",
-                                        Some(0),
-                                        &[1, config.n_embd],
-                                        &self.prefill_scratch.normed
-                                            [row * config.n_embd..(row + 1) * config.n_embd],
-                                    ));
-                                }
+                                ));
                             }
                         }
-                        DenseStep::Qkv => {
-                            let normed = &self.prefill_scratch.normed[..rows * config.n_embd];
-                            matmul_group_rows(
-                                &mut self.prefill_scratch.prepared,
-                                [
-                                    (&weights.wq, &mut self.prefill_scratch.q[..rows * n_q]),
-                                    (&weights.wk, &mut self.prefill_scratch.k[..rows * n_k]),
-                                    (&weights.wv, &mut self.prefill_scratch.v[..rows * n_v]),
-                                ],
-                                normed,
-                                rows,
-                                config.n_embd,
-                                model,
-                            )?;
-                        }
-                        DenseStep::QkNormRope => {
+                    }
+                    match op {
+                        DenseOp::QkNormRope => {
                             for row in 0..rows {
                                 let token = range.start + row;
                                 let position = input.positions[token];
@@ -593,7 +557,7 @@ impl Qwen3Session<'_> {
                                 }
                             }
                         }
-                        DenseStep::AppendKv => {
+                        DenseOp::AppendKv => {
                             for row in 0..rows {
                                 let k = &self.prefill_scratch.k[row * n_k..(row + 1) * n_k];
                                 let v = &self.prefill_scratch.v[row * n_v..(row + 1) * n_v];
@@ -649,7 +613,7 @@ impl Qwen3Session<'_> {
                                 }
                             }
                         }
-                        DenseStep::Attention => {
+                        DenseOp::Attention => {
                             let q_ptr = self.prefill_scratch.q.as_ptr();
                             let attn_ptr = self.prefill_scratch.attn.as_mut_ptr();
                             let scores_ptr = self.scratch.scores.as_mut_ptr();
@@ -818,166 +782,118 @@ impl Qwen3Session<'_> {
                                 }
                             }
                         }
-                        DenseStep::AttnOut => {
-                            let mut prepared_for = None;
-                            matmul_rows(
-                                &mut self.prefill_scratch.prepared,
-                                &mut prepared_for,
-                                &weights.wo,
-                                &self.prefill_scratch.attn[..rows * n_attn],
-                                &mut self.prefill_scratch.projection[..rows * config.n_embd],
-                                rows,
-                                n_attn,
-                                model,
-                            )?;
-                        }
-                        DenseStep::AttnResidual => {
+                        DenseOp::Moe {
+                            input: DenseTensor::Normed,
+                            output: DenseTensor::Down,
+                        } => {
                             for row in 0..rows {
-                                let row_start = row * config.n_embd;
-                                let row_end = row_start + config.n_embd;
-                                for (hidden, projection) in self.prefill_scratch.x
-                                    [row_start..row_end]
-                                    .iter_mut()
-                                    .zip(&self.prefill_scratch.projection[row_start..row_end])
-                                {
-                                    *hidden += *projection;
-                                }
-                            }
-                        }
-                        DenseStep::FfnNorm => {
-                            for row in 0..rows {
-                                let row_start = row * config.n_embd;
-                                let row_end = row_start + config.n_embd;
-                                rms_norm(
-                                    &self.prefill_scratch.x[row_start..row_end],
-                                    &weights.ffn_norm,
-                                    &mut self.prefill_scratch.normed[row_start..row_end],
-                                    config.eps,
-                                );
-                            }
-                        }
-                        DenseStep::GateUp => {
-                            if weights.moe_router.is_none() {
-                                matmul_group_rows(
-                                    &mut self.prefill_scratch.prepared,
-                                    [
-                                        (
-                                            &weights.w_gate,
-                                            &mut self.prefill_scratch.up[..rows * config.n_ff],
-                                        ),
-                                        (
-                                            &weights.w_up,
-                                            &mut self.prefill_scratch.gate[..rows * config.n_ff],
-                                        ),
-                                    ],
-                                    &self.prefill_scratch.normed[..rows * config.n_embd],
-                                    rows,
-                                    config.n_embd,
-                                    model,
+                                forward_moe_token(
+                                    &self.prefill_scratch.normed
+                                        [row * config.n_embd..(row + 1) * config.n_embd],
+                                    weights,
+                                    config,
+                                    &mut self.prefill_scratch.down
+                                        [row * config.n_embd..(row + 1) * config.n_embd],
                                 )?;
                             }
                         }
-                        DenseStep::SiluMul => {
-                            if weights.moe_router.is_none() {
-                                for row in 0..rows {
-                                    let start = row * config.n_ff;
-                                    let end = start + config.n_ff;
-                                    silu_mul_approx_inplace(
-                                        &self.prefill_scratch.up[start..end],
-                                        &mut self.prefill_scratch.gate[start..end],
+                        op => DenseCpu {
+                            buffers: [
+                                &mut self.prefill_scratch.x[..rows * config.n_embd],
+                                &mut self.prefill_scratch.normed[..rows * config.n_embd],
+                                &mut self.prefill_scratch.q[..rows * n_q],
+                                &mut self.prefill_scratch.k[..rows * n_k],
+                                &mut self.prefill_scratch.v[..rows * n_v],
+                                &mut self.prefill_scratch.attn[..rows * n_attn],
+                                &mut self.prefill_scratch.projection[..rows * config.n_embd],
+                                // Historical scratch names are reversed relative to the weight roles.
+                                &mut self.prefill_scratch.up[..rows * config.n_ff],
+                                &mut self.prefill_scratch.gate[..rows * config.n_ff],
+                                &mut self.prefill_scratch.down[..rows * config.n_embd],
+                            ],
+                            matrices: [
+                                &weights.wq,
+                                &weights.wk,
+                                &weights.wv,
+                                &weights.wo,
+                                &weights.w_gate,
+                                &weights.w_up,
+                                &weights.w_down,
+                            ],
+                            norms: [&weights.attn_norm, &weights.ffn_norm],
+                            prepared: &mut self.prefill_scratch.prepared,
+                            pool: &model.pool,
+                            rows,
+                            eps: config.eps,
+                            approximate_silu: true,
+                        }
+                        .execute(op)?,
+                    }
+                    if matches!(
+                        op,
+                        DenseOp::RmsNorm {
+                            weight: DenseNorm::Attn,
+                            ..
+                        }
+                    ) {
+                        #[cfg(feature = "parity-trace")]
+                        if layer == 0 {
+                            for row in 0..rows {
+                                parity_trace::report(parity_trace::checkpoint_row(
+                                    row,
+                                    "attn_norm-0",
+                                    Some(0),
+                                    &[1, config.n_embd],
+                                    &self.prefill_scratch.normed
+                                        [row * config.n_embd..(row + 1) * config.n_embd],
+                                ));
+                            }
+                        }
+                    }
+                    if final_residual {
+                        for row in 0..rows {
+                            let start = row * config.n_embd;
+                            let end = start + config.n_embd;
+                            if layer < config.n_deepstack_layers {
+                                if let Some(deepstack) = input.deepstack_embeddings {
+                                    add_deepstack_embedding(
+                                        &mut self.prefill_scratch.x[start..end],
+                                        deepstack,
+                                        layer,
+                                        range.start + row,
+                                        input.token_ids.len(),
+                                        config.n_embd,
                                     );
                                 }
                             }
                         }
-                        DenseStep::Down => {
-                            if weights.moe_router.is_some() {
-                                for row in 0..rows {
-                                    forward_moe_token(
-                                        &self.prefill_scratch.normed
-                                            [row * config.n_embd..(row + 1) * config.n_embd],
-                                        weights,
-                                        config,
-                                        &mut self.prefill_scratch.down
-                                            [row * config.n_embd..(row + 1) * config.n_embd],
-                                    )?;
-                                }
-                            } else {
-                                let mut prepared_for = None;
-                                matmul_rows(
-                                    &mut self.prefill_scratch.prepared,
-                                    &mut prepared_for,
-                                    &weights.w_down,
-                                    &self.prefill_scratch.gate[..rows * config.n_ff],
-                                    &mut self.prefill_scratch.down[..rows * config.n_embd],
-                                    rows,
-                                    config.n_ff,
-                                    model,
-                                )?;
+
+                        #[cfg(feature = "parity-trace")]
+                        if !project_logits {
+                            for row in 0..rows {
+                                parity_trace::report(parity_trace::checkpoint_row(
+                                    row,
+                                    &format!("hidden_sequence.layer.{layer}"),
+                                    Some(layer),
+                                    &[1, config.n_embd],
+                                    &self.prefill_scratch.x
+                                        [row * config.n_embd..(row + 1) * config.n_embd],
+                                ));
                             }
                         }
-                        DenseStep::FfnResidual => {
-                            #[cfg(feature = "parity-trace")]
-                            if layer == 0 {
-                                for row in 0..rows {
-                                    parity_trace::report(parity_trace::checkpoint_row(
-                                        row,
-                                        "ffn_out-0",
-                                        Some(0),
-                                        &[1, config.n_embd],
-                                        &self.prefill_scratch.down
-                                            [row * config.n_embd..(row + 1) * config.n_embd],
-                                    ));
-                                }
-                            }
-                            for row in 0..rows {
-                                let start = row * config.n_embd;
-                                let end = start + config.n_embd;
-                                for (hidden, projection) in self.prefill_scratch.x[start..end]
-                                    .iter_mut()
-                                    .zip(&self.prefill_scratch.down[start..end])
-                                {
-                                    *hidden += *projection;
-                                }
-                                if layer < config.n_deepstack_layers {
-                                    if let Some(deepstack) = input.deepstack_embeddings {
-                                        add_deepstack_embedding(
-                                            &mut self.prefill_scratch.x[start..end],
-                                            deepstack,
-                                            layer,
-                                            range.start + row,
-                                            input.token_ids.len(),
-                                            config.n_embd,
-                                        );
-                                    }
-                                }
-                            }
-
-                            #[cfg(feature = "parity-trace")]
-                            if !project_logits {
-                                for row in 0..rows {
-                                    parity_trace::report(parity_trace::checkpoint_row(
-                                        row,
-                                        &format!("hidden_sequence.layer.{layer}"),
-                                        Some(layer),
-                                        &[1, config.n_embd],
-                                        &self.prefill_scratch.x
-                                            [row * config.n_embd..(row + 1) * config.n_embd],
-                                    ));
-                                }
-                            }
-                            #[cfg(test)]
-                            if self.fail_cpu_prefill_after_layer == Some(layer) {
-                                self.fail_cpu_prefill_after_layer = None;
-                                return Err(format!(
-                                    "injected Qwen3 CPU prefill failure after layer {layer}"
-                                )
-                                .into());
-                            }
+                        #[cfg(test)]
+                        if self.fail_cpu_prefill_after_layer == Some(layer) {
+                            self.fail_cpu_prefill_after_layer = None;
+                            return Err(format!(
+                                "injected Qwen3 CPU prefill failure after layer {layer}"
+                            )
+                            .into());
                         }
                     }
                     Ok(())
                 },
                 layer,
+                weights.moe_router.is_some(),
             )
             .map_err(|error| error.to_string())?;
         }

@@ -1,6 +1,6 @@
 //! Standard dense adapter; the shared recipe owns the execution order.
 use super::session::LlamaSession;
-use crate::compute::dense::{run_dense_layer, DenseStep};
+use crate::compute::dense::{run_dense_layer, DenseCpu, DenseOp};
 use crate::core::scratchpad::KvCache;
 use crate::ops::kernel::{QuantizedTensor, Weight};
 
@@ -65,41 +65,9 @@ pub(super) fn forward_cpu(
     }
     for (layer, l) in s.weights.layers.iter().enumerate() {
         run_dense_layer(
-            &mut |_: usize, step| -> Result<(), String> {
-                match step {
-                    DenseStep::AttnNorm | DenseStep::FfnNorm => {
-                        let norm = if step == DenseStep::AttnNorm {
-                            &l.attn_norm
-                        } else {
-                            &l.ffn_norm
-                        };
-                        for (x, n) in scratch.x[..x_len]
-                            .chunks_exact(width)
-                            .zip(scratch.normed[..x_len].chunks_exact_mut(width))
-                        {
-                            crate::ops::rms_norm(x, norm, n, c.eps);
-                        }
-                    }
-                    DenseStep::Qkv => {
-                        let weights = [&l.wq, &l.wk, &l.wv];
-                        prepared.prepare(
-                            &scratch.normed[..x_len],
-                            rows,
-                            width,
-                            weights.iter().any(|w| w.needs_q8_0_activation()),
-                            weights.iter().any(|w| w.uses_q8_k()),
-                        )?;
-                        prepared.matmul_group(
-                            &scratch.normed[..x_len],
-                            [
-                                (&l.wq, &mut scratch.q[..rows * q_width]),
-                                (&l.wk, &mut scratch.k_new[..rows * kv_width]),
-                                (&l.wv, &mut scratch.v_new[..rows * kv_width]),
-                            ],
-                            pool,
-                        )?;
-                    }
-                    DenseStep::QkNormRope => {
+            &mut |_: usize, op| -> Result<(), String> {
+                match op {
+                    DenseOp::QkNormRope => {
                         for row in 0..rows {
                             for values in [
                                 &mut scratch.q[row * q_width..(row + 1) * q_width],
@@ -118,7 +86,7 @@ pub(super) fn forward_cpu(
                             }
                         }
                     }
-                    DenseStep::AppendKv => {
+                    DenseOp::AppendKv => {
                         let start = (layer * c.max_ctx + base) * kv_width;
                         let end = start + rows * kv_width;
                         let k = &scratch.k_new[..rows * kv_width];
@@ -134,7 +102,7 @@ pub(super) fn forward_cpu(
                             }
                         }
                     }
-                    DenseStep::Attention => super::forward::run_attention_chunked(
+                    DenseOp::Attention => super::forward::run_attention_chunked(
                         pool,
                         &scratch.q[..rows * q_width],
                         &mut scratch.attn_out[..rows * q_width],
@@ -156,76 +124,33 @@ pub(super) fn forward_cpu(
                         0.0,
                         0,
                     ),
-                    DenseStep::AttnOut => {
-                        prepared.prepare(
-                            &scratch.attn_out[..rows * q_width],
-                            rows,
-                            q_width,
-                            l.wo.needs_q8_0_activation(),
-                            l.wo.uses_q8_k(),
-                        )?;
-                        prepared.matmul_group(
-                            &scratch.attn_out[..rows * q_width],
-                            [(&l.wo, &mut scratch.attn_proj[..x_len])],
-                            pool,
-                        )?;
+                    op => DenseCpu {
+                        buffers: [
+                            &mut scratch.x[..x_len],
+                            &mut scratch.normed[..x_len],
+                            &mut scratch.q[..rows * q_width],
+                            &mut scratch.k_new[..rows * kv_width],
+                            &mut scratch.v_new[..rows * kv_width],
+                            &mut scratch.attn_out[..rows * q_width],
+                            &mut scratch.attn_proj[..x_len],
+                            &mut scratch.gate_buf[..rows * ff],
+                            &mut scratch.up_buf[..rows * ff],
+                            &mut scratch.down_buf[..x_len],
+                        ],
+                        matrices: [&l.wq, &l.wk, &l.wv, &l.wo, &l.w_gate, &l.w_up, &l.w_down],
+                        norms: [&l.attn_norm, &l.ffn_norm],
+                        prepared,
+                        pool,
+                        rows,
+                        eps: c.eps,
+                        approximate_silu: rows == 1,
                     }
-                    DenseStep::AttnResidual => crate::ops::vec_add_into(
-                        &scratch.attn_proj[..x_len],
-                        &mut scratch.x[..x_len],
-                    ),
-                    DenseStep::GateUp => {
-                        prepared.prepare(
-                            &scratch.normed[..x_len],
-                            rows,
-                            width,
-                            l.w_gate.needs_q8_0_activation() || l.w_up.needs_q8_0_activation(),
-                            l.w_gate.uses_q8_k() || l.w_up.uses_q8_k(),
-                        )?;
-                        prepared.matmul_group(
-                            &scratch.normed[..x_len],
-                            [
-                                (&l.w_gate, &mut scratch.gate_buf[..rows * ff]),
-                                (&l.w_up, &mut scratch.up_buf[..rows * ff]),
-                            ],
-                            pool,
-                        )?;
-                    }
-                    DenseStep::SiluMul => {
-                        if rows == 1 {
-                            crate::ops::silu_mul_approx_inplace(
-                                &scratch.gate_buf[..ff],
-                                &mut scratch.up_buf[..ff],
-                            );
-                        } else {
-                            crate::ops::silu_mul_inplace(
-                                &scratch.gate_buf[..rows * ff],
-                                &mut scratch.up_buf[..rows * ff],
-                            );
-                        }
-                    }
-                    DenseStep::Down => {
-                        prepared.prepare(
-                            &scratch.up_buf[..rows * ff],
-                            rows,
-                            ff,
-                            l.w_down.needs_q8_0_activation(),
-                            l.w_down.uses_q8_k(),
-                        )?;
-                        prepared.matmul_group(
-                            &scratch.up_buf[..rows * ff],
-                            [(&l.w_down, &mut scratch.down_buf[..x_len])],
-                            pool,
-                        )?;
-                    }
-                    DenseStep::FfnResidual => crate::ops::vec_add_into(
-                        &scratch.down_buf[..x_len],
-                        &mut scratch.x[..x_len],
-                    ),
+                    .execute(op)?,
                 }
                 Ok(())
             },
             layer,
+            false,
         )?;
     }
     if !project_logits {

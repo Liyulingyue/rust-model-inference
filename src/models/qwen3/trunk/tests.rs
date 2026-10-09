@@ -639,6 +639,8 @@ fn qwen3_trace_keeps_token_major_checkpoints_for_every_prompt_row() {
     let expected_row = [
         "model.input_embed",
         "attn_norm-0",
+        "Qcur_raw-0",
+        "Kcur_raw-0",
         "Qcur_normed-0",
         "Kcur_normed-0",
         "Qcur-0",
