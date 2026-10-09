@@ -299,7 +299,7 @@ pub(crate) enum GpuWeightFormat {
 pub(crate) enum GpuMatmulMode {
     #[default]
     Prepared,
-    /// Round F16 activations, then accumulate in F32 (VAE contract).
+    /// Round F16 activations, then accumulate in F32 (diffusion contract).
     RoundedInputF32,
     /// Match dot_f16_f16_bytes / dot_bf16_f32 reduction.
     Dot,
@@ -1494,7 +1494,7 @@ impl<'a> Qwen3Ops<'a> {
         self.bind_weight_buffers_mode(buffers, formats, GpuMatmulMode::Prepared)
     }
 
-    fn bind_weight_buffers_mode(
+    pub(crate) fn bind_weight_buffers_mode(
         &mut self,
         buffers: &[GpuBuffer],
         formats: &[GpuWeightFormat],

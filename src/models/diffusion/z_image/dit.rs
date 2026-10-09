@@ -198,11 +198,11 @@ fn require_finite(values: &[f32], name: &str) -> Result<(), String> {
         let n_inf = values.iter().filter(|v| v.is_infinite()).count();
         let n_neg = values
             .iter()
-            .filter(|v| v.is_finite() == false && v.is_sign_negative())
+            .filter(|v| v.is_infinite() && v.is_sign_negative())
             .count();
         let n_pos = values
             .iter()
-            .filter(|v| v.is_finite() == false && v.is_sign_positive())
+            .filter(|v| v.is_infinite() && v.is_sign_positive())
             .count();
         let (min, max) = values
             .iter()
@@ -3824,10 +3824,15 @@ mod tests {
     #[test]
     fn dit_boundaries_reject_non_finite_values() {
         assert!(require_finite(&[0.0, -1.0], "context").is_ok());
-        for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        for (value, counts) in [
+            (f32::NAN, "nan=1, inf=0 (+inf=0, -inf=0)"),
+            (f32::from_bits(0xffc0_0000), "nan=1, inf=0 (+inf=0, -inf=0)"),
+            (f32::INFINITY, "nan=0, inf=1 (+inf=1, -inf=0)"),
+            (f32::NEG_INFINITY, "nan=0, inf=1 (+inf=0, -inf=1)"),
+        ] {
             assert_eq!(
                 require_finite(&[0.0, value], "context").unwrap_err(),
-                "Non-finite Z-Image context"
+                format!("Non-finite Z-Image context: len=2, {counts}, finite_range=[0.000,0.000], first_bad_idx=1")
             );
         }
     }

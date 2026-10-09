@@ -333,7 +333,7 @@ Qwen3 和标准 Llama 的会话共用 `compute::dense::run_dense_layer`：表达
 GPU 提交与状态回退仍在 chunk 边界。
 
 权重存储由 `GpuWeightFormat` 表示，数值契约由独立的 `GpuMatmulMode` 表示。
-F16 storage + RoundedInputF32 是 VAE 的输入 F16 舍入、F32 累加；F16/BF16 storage
+F16 storage + RoundedInputF32 保留 VAE 和 Z-Image refiner 的输入 F16 舍入、F32 累加；F16/BF16 storage
 + Dot 保留对应 CPU dot 的归约契约及设备资格。不会仅凭权重 dtype 替换计算精度。
 本次复用没有开放新的 Auto workload，当前验证与限制见
 [共享算子验收](UNIFIED_COMPUTE_VALIDATION.md#共享算子表达验收2026-10-09)。

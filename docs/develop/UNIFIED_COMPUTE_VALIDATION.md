@@ -63,6 +63,52 @@ x86/独显或外部 oracle，没有扩大模型资格或开放新的 Auto worklo
 历史真实 Qwen 的误差与 GPU 较慢结果仍是原有门禁，不能把本轮结构复用说成已测加速。
 原始日志保留在本轮忽略的 `.superpowers/sdd/2026-10-09-shared-dense-operators/`。
 
+## Z-Image refiner 数值回归修复（2026-10-09）
+
+统一分支的 Z-Image DiT refiner 仍把 F16 权重绑定为默认 Prepared，导致 ARM
+设备从原有 F32 累加切换成 CPU prepared 的半精度归约，并退出原有 tiled 路径。
+这是遗漏的数值契约迁移。现在 `DitGpuSession::bind_weight_as` 为 F16 明确绑定
+RoundedInputF32，保留 F16 输入舍入和 F32 累加；Q8_0 继续 Prepared。
+未关闭 refiner、改用 CPU 或修改默认开关，Qwen/Llama 的 Prepared 契约保持不变。
+
+设备回归使用实际 W2 形状 `10240 → 3840`、32 行、F16 权重 1，输入
+`-256.0625` 舍入为 `-256`：修复前输出 `-inf`，修复后 grouped 和 tiled
+输出均精确为 `-2621440`。该用例显式初始化真实设备，不允许无设备静默跳过。
+
+完整权重复现使用 Apple M3 Max / MoltenVK、`release-fast` + Vulkan + parity-trace，
+prompt `A red fox sleeping beneath a pine tree`、seed 42、512×512、8 线程、`--gpu`。
+为了定位首次坏值，先把用户的 8 步缩到 2 步；其余参数相同。
+
+| 2 步真实 CLI | 修复前 `78c79b70` | 修复后 |
+| --- | --- | --- |
+| 首次非有限边界 | 第二步 sigma=0.003，noise refiner 0 中 387 个 NaN，首个索引 492758 | 两步的全部 14 个边界 checkpoint 有限 |
+| 后续传播 | noise refiner 1 全部 3932160 个 NaN，flow 全部 65536 个 NaN，退出 1 | 正常退出并写出 512×512 PNG |
+| 实际 GPU 范围 | 每步 34 block / 170 projection / 300 dispatch | 相同，没有 CPU 回退 |
+
+原错误日志的 `-inf=65536` 是 NaN 的负号也被计入 infinity；原始二进制 trace
+确认 flow 的实际 infinity 数为 0。诊断现在只对 `is_infinite()` 分正负计数，
+并以正/负 NaN、正/负 infinity 测试完整错误文本，保留非有限值拒绝。
+
+| 当前回归 | 结果 |
+| --- | --- |
+| CPU 全库 | 1165 passed / 23 failed / 78 ignored；失败名称不变 |
+| Vulkan + parity-trace 全库 | 1264 passed / 28 failed / 138 ignored；没有新增失败，修复原有诊断 fixture 失败 |
+| 共享执行、事务、VAE、refiner 设备套件 | 70 passed / 1 failed；仍为原有 AuK ARM fixture |
+| Z-Image 原有五项 GPU 正确性 | 5 passed；AdaLN、QKV、W2、融合 norm/modulation 与 ignored attention |
+| 构建与格式 | Vulkan + parity-trace lib/bins/examples check、rustfmt、diff check 通过 |
+
+复现模型均使用本机已有文件，未下载或转换权重：
+
+| GGUF | SHA-256 |
+| --- | --- |
+| z-image-turbo-q8_0.gguf | `39674cec3b98e737276443cbf02f29b0aea616164e465c731f19903b00363cfd` |
+| qwen3_4b_f32-q8_0.gguf | `aeaeb1222b858fc98fa01f31bdfdceb8a5b1719a9b91a3909774a85ecf8930fe` |
+| pig_flux_vae_fp32-f16.gguf | `7e9b2072ef8d8bde202804362b273a96233e54e4b52c820662cdc70b3e08b27a` |
+
+日志、完整 trace、失败名称对照和 PNG 保留在上述本轮忽略目录的 `zimage-*` 文件。
+本次证明数值回归已修复；未据此开放 Auto workload，未做像素 oracle/PSNR 或跨设备
+性能准入。用户完整 8 步的 release 命令另行验证，不能把上述 2 步结果算作 8 步。
+
 ## main 合并验收（2026-10-09）
 
 合并前分支为 `4994bd22a56a127a7c23199db30f0e979baf0a8a`，同步的 main 为
