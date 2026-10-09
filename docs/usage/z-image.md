@@ -47,36 +47,44 @@ prompt "A red fox sleeping beneath a pine tree"（16 token），seed 42，`--thr
 
 | 阶段 | CPU | GPU（`--gpu`） |
 |---|---|---|
-| text_encode | 0.6 s | **0.65 s**（见下方 gate）|
-| denoise | 563.3 s | **63.9 s** |
+| text_encode | 0.6 s | **0.65–0.74 s**（见下方 gate）|
+| denoise | 563.3 s | **50.3 s** |
 | vae_decode | 10.6 s | **6.0 s** |
-| **总计** | **574.6 s** | **70.6 s** |
+| **总计** | **574.6 s** | **60.1 s** |
 
-denoise 8.8×、端到端 8.1×。默认配置三次运行输出逐字节一致；`RUST_GPU_TEXT=1`
-输出亦逐字节一致（text gate 只改执行位置不改算术）。`RUST_GPU_ATTENTION=0` **不**
-逐字节一致（PSNR 31.4 dB）——这是该开关本身的语义，见下文「GPU 路径从来就不是
-逐位精确的」。
+denoise 11.2×、端到端 9.6×。默认配置多次运行输出逐字节一致；
+`RUST_GPU_TEXT=1` 输出亦逐字节一致（text gate 只改执行位置不改算术）。
+`RUST_GPU_ATTENTION=0` **不**逐字节一致（PSNR 31.4 dB）——这是该开关本身的语义，
+见下文「GPU 路径从来就不是逐位精确的」。
 
 当前 `--steps N` 跑 **N 次** forward：8 步在 `RUST_GPU_DIAG=1` 下打出 8 行 sigma，
 `dispatches` 每步 +300（300→2400）。
 
-denoise 分段（`[gpu-block-profile]`，8 步合计 61.5 s）：
+denoise 分段（`[gpu-block-profile]`，8 步合计 50.3 s）：
 
 | 阶段 | 8 步 | 占比 | 位置 |
 |---|---|---|---|
-| ffn: main stack | 30.8 s | 50.0% | GPU（Q8_0 tiled）|
-| **attention** | 10.8 s | 17.5% | **GPU** |
-| out proj | 8.7 s | 14.2% | GPU |
-| norm+adaln+qkv | 7.6 s | 12.4% | GPU |
-| ffn: refiner | 2.7 s | 4.4% | GPU（F16 tiled）|
-| &nbsp;&nbsp;其中 host silu | 4.7 s | 7.7% | **host**（w1/w3 之间）|
-| &nbsp;&nbsp;其中 w1 readback | 2.3 s | 3.8% | **host** |
-| rope | 0.9 s | 1.4% | host |
+| ffn: main stack | 25.4 s | 50.5% | GPU（Q8_0 tiled）|
+| **attention** | 10.8 s | 21.5% | **GPU** |
+| norm+adaln+qkv | 7.7 s | 15.4% | GPU |
+| out proj | 3.0 s | 6.0% | GPU |
+| ffn: refiner | 2.4 s | 4.8% | GPU（F16 tiled）|
+| &nbsp;&nbsp;其中 host silu | 4.8 s | 9.6% | **host**（w1/w3 之间）|
+| &nbsp;&nbsp;其中 w1 readback | 2.4 s | 4.7% | **host** |
+| rope | 0.9 s | 1.8% | host |
 | modulation | 0.02 s | 0.0% | host |
 
-**真正在 host 的是 15.1 s / 61.5 s = 24.6%**，其中 host silu + w1 readback 合计 7.1 s
-——`run_block_gpu` 把 w1 投影回读、在 host 做 silu、再传给 w2。三者合并到单个
-command buffer 的尝试曾输出全 `-inf` 而回退（见下方「绝对值不可信」一节）。
+**真正在 host 的是 8.1 s / 50.3 s = 16.1%**，其中 host silu + w1 readback 合计
+7.2 s——`run_block_gpu` 把 w1 投影回读、在 host 做 silu、再传给 w2。三者合并到单个
+command buffer 的尝试曾输出全 `-inf` 而回退（见下方「历史归档」一节）。
+
+> **out proj 曾经有一大块没被 profile 单独统计的 host 开销。** slot 4 同时包住
+> GPU 投影、回读，以及一个 `for row in 0..3840` 的单线程循环——每行做一次
+> `rms_norm_inplace` 加一次 `add_modulated_residual`，后者的带 gate 分支逐元素调用
+> `gate.tanh()`。每 block 跑两次（out proj 后、FFN 后），512×512 下合计约 2900 万次
+> tanh，全部落在调用线程上。`readback_norm_and_residual_rows` 把它按行分片到
+> ComputePool：行是各缓冲的互不相交切片，所以这是纯重分区，**输出逐字节一致**
+> （已验证），denoise 63.9 s → 50.3 s，slot 4 由 8.7 s 降到 3.0 s。
 
 > ⚠️ **`attention (gpu)` 这一行的标签曾经是错的**。`GPU_PHASE_LABELS` 曾把 slot 3
 > 硬编码成 `attention (host)`，而该计时器同时包住 GPU 与 CPU 两个分支。实测
@@ -377,9 +385,13 @@ GPU 一列的判定依据与已知缺口：
 - **已知缺口**：
   - **DiT attention 已在 GPU**（默认 `RUST_GPU_ATTENTION=1`，实测 10.8 s/8 步；
     关掉后 27.0 s）。旧版本文档与 `GPU_PHASE_LABELS` 曾误标为 host，标签已修正。
-  - **RoPE 与 AdaLN modulation 仍在 host**（合计 0.9 s / 61.5 s，可忽略）。
-  - **FFN 的 w1/w3 激活要经 host silu + 回读**，合计 7.1 s / 61.5 s = 11.5%。
-    合批到单 command buffer 的尝试曾输出全 `-inf` 而回退，根因未定位。
+  - **RoPE 与 AdaLN modulation 仍在 host**（合计 0.9 s / 50.3 s，可忽略）。
+  - **FFN 的 w1/w3 激活要经 host silu + 回读**，合计 7.2 s / 50.3 s = 14.3%，
+    是 denoise 剩余最大的一块 host 开销。合批到单 command buffer 的尝试曾输出
+    全 `-inf` 而回退，根因未定位——**修它需要先独立诊断那个 bug**，风险与收益
+    不对等。
+  - **QKV 每 block 重新上传 ~48 MB**（RoPE 在 host，旋转后的行要送回设备）。
+    8 步约 13 GB，被包在 attention 那一档里。若 RoPE 上设备可省，但尚未评估。
   - **Qwen3 文本编码器默认在 CPU 上跑**（临时 gate，见第 1 节环境变量表）。
   - **VAE 只 offload 卷积**：GroupNorm、SiLU、nearest upsample 与 VAE 内 attention
     仍在 CPU。当前 VAE 6.0 s 已优于 CPU 的 10.6 s，故非瓶颈。
