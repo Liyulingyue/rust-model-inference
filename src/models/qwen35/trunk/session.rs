@@ -614,8 +614,7 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
             };
 
             #[cfg(feature = "vulkan")]
-            let _gpu_matmul_scope = (self.full_model_gpu_failed || trace_each_token)
-                .then(ComputePool::disable_gpu_matmul_for_scope);
+            let _gpu_matmul_scope = ComputePool::disable_gpu_matmul_for_scope();
             self.scratch.x[..rows * n_embd].copy_from_slice(chunk_embeddings);
             // Preserve the existing CPU decode path; only a failed GPU chunk needs a retry snapshot.
             let direct_decode = n_tokens == 1;

@@ -365,6 +365,14 @@ fn checked_elements(rows: usize, width: usize) -> Result<usize, ComputeError> {
 }
 fn gpu_compatible(binding: LinearBinding<'_, '_>) -> Result<(), ComputeError> {
     use crate::GGMLType;
+    if binding.weight.ggml_type == GGMLType::F16
+        && crate::ops::f16_uses_half_accumulators(binding.weight.n_in)
+        && !binding.weight.n_in.is_multiple_of(32)
+    {
+        return Err(ComputeError::Unsupported(
+            "F16 half accumulation with an F64 tail requires CPU".into(),
+        ));
+    }
     if binding.mode == LinearMode::F16Strict
         || (binding.mode == LinearMode::Forward && binding.weight.ggml_type == GGMLType::F16)
     {
@@ -583,6 +591,55 @@ mod tests {
             pool()
         )
         .is_err());
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn f16_prepared_device_preserves_half_accumulation_bits() {
+        if !crate::ops::has_neon() {
+            return;
+        }
+        for n_in in [32, 256, 512, 2048] {
+            let bytes: Vec<_> = (0..n_in * 9)
+                .flat_map(|i| {
+                    crate::ops::f32_to_f16(((i * 17 % 101) as f32 - 50.0) / 47.0).to_le_bytes()
+                })
+                .collect();
+            let weight = Weight::from_quantized(QuantizedTensor::F16(F16Weight {
+                bytes: &bytes,
+                n_in,
+                n_out: 9,
+            }));
+            let bindings = vec![LinearBinding {
+                weight: &weight,
+                mode: LinearMode::Prepared,
+            }];
+            let mut cpu =
+                LinearExecutor::new(ComputePolicy::Cpu, bindings.clone(), 64, pool()).unwrap();
+            let mut gpu = LinearExecutor::new(ComputePolicy::Vulkan, bindings, 64, pool()).unwrap();
+            for rows in [1, 3, 64] {
+                let input: Vec<_> = (0..rows * n_in)
+                    .map(|i| ((i * 29 % 251) as f32 - 125.0) / 97.0)
+                    .collect();
+                let mut expected = vec![0.0; rows * 9];
+                let mut actual = expected.clone();
+                cpu.run(cpu.id(0).unwrap(), &input, rows, &mut expected)
+                    .unwrap();
+                assert_eq!(
+                    gpu.run(gpu.id(0).unwrap(), &input, rows, &mut actual)
+                        .unwrap(),
+                    UsedBackend::Vulkan
+                );
+                for (i, (&a, &b)) in actual.iter().zip(&expected).enumerate() {
+                    assert_eq!(
+                        a.to_bits(),
+                        b.to_bits(),
+                        "n_in={n_in} rows={rows} index={i}: {a} vs {b}"
+                    );
+                }
+            }
+        }
     }
 
     #[cfg(feature = "vulkan")]

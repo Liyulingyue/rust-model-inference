@@ -2890,15 +2890,15 @@ pub fn apply_attn_pre_softmax_inplace(
 pub(crate) fn silu_mul_rows(
     pool: &Arc<ComputePool>,
     n_threads: usize,
-    gate: &mut [f32],
-    up: &[f32],
+    gate: &[f32],
+    up: &mut [f32],
     n_ff: usize,
 ) {
     assert_eq!(gate.len(), up.len());
     let rows = gate.len() / n_ff;
     let per_thread = (n_ff + n_threads - 1) / n_threads;
-    let gate_ptr = gate.as_mut_ptr();
-    let up_ptr = up.as_ptr();
+    let gate_ptr = gate.as_ptr();
+    let up_ptr = up.as_mut_ptr();
     pool.compute(move |ith, _nth| {
         let r_start = ith * per_thread;
         let r_end = (r_start + per_thread).min(n_ff);
@@ -2907,7 +2907,7 @@ pub(crate) fn silu_mul_rows(
                 let g =
                     std::slice::from_raw_parts(gate_ptr.add(row * n_ff + r_start), r_end - r_start);
                 let u = std::slice::from_raw_parts_mut(
-                    up_ptr.add(row * n_ff + r_start) as *mut f32,
+                    up_ptr.add(row * n_ff + r_start),
                     r_end - r_start,
                 );
                 // Exact SiLU via libm `exp` — matches llama.cpp. The

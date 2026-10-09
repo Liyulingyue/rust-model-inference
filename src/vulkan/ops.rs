@@ -324,6 +324,32 @@ impl GpuWeightFormat {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RopeLayout {
+    Neox,
+    Interleaved,
+}
+
+pub(crate) fn fill_rope_coefficients(
+    coefficients: &mut [f32],
+    position: usize,
+    freq_base: f32,
+    layout: RopeLayout,
+) {
+    if layout == RopeLayout::Neox {
+        return fill_rope_neox(coefficients, position, freq_base);
+    }
+    let half = coefficients.len() / 2;
+    let scale = freq_base.powf(-2.0 / coefficients.len() as f32);
+    let mut theta = position as f32;
+    for i in 0..half {
+        let (c, s) = crate::ops::rope_sin_cos(theta);
+        coefficients[i] = c;
+        coefficients[i + half] = s;
+        theta *= scale;
+    }
+}
+
 pub(crate) fn fill_rope_neox(coefficients: &mut [f32], position: usize, freq_base: f32) {
     debug_assert!(!coefficients.is_empty() && coefficients.len() % 2 == 0);
     let half = coefficients.len() / 2;
@@ -460,7 +486,7 @@ impl ArenaLayout {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn build_rows(
+    pub(crate) fn build_rows(
         n_embd: usize,
         n_ff: usize,
         n_head: usize,
@@ -1678,6 +1704,22 @@ impl<'a> Qwen3Ops<'a> {
                     "tiled float matmul is only implemented for F16 weights".into(),
                 ));
             }
+            if crate::ops::f16_uses_half_accumulators(n_in) {
+                return self.record_weight_matmul_rows(
+                    commands,
+                    bindings,
+                    activation,
+                    q8,
+                    q8_scales,
+                    q4_1_input_sums,
+                    q8k,
+                    q8k_scales,
+                    outputs,
+                    n_in,
+                    token_rows,
+                    input_stride,
+                );
+            }
             let (push, _) = matmul_rows_push(
                 self.arena.size as usize,
                 &self.context.limits,
@@ -2063,6 +2105,40 @@ impl<'a> Qwen3Ops<'a> {
         normalize_k: bool,
         rows: usize,
     ) -> Result<(), VulkanError> {
+        self.record_qk_norm_rope_layout_rows(
+            commands,
+            bindings,
+            q,
+            k,
+            q_heads,
+            k_heads,
+            head_dim,
+            rope,
+            eps,
+            normalize_q,
+            normalize_k,
+            rows,
+            RopeLayout::Neox,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_qk_norm_rope_layout_rows(
+        &self,
+        commands: &TokenCommands<'_>,
+        bindings: OperatorBindings,
+        q: ArenaRegion,
+        k: ArenaRegion,
+        q_heads: usize,
+        k_heads: usize,
+        head_dim: usize,
+        rope: ArenaRegion,
+        eps: f32,
+        normalize_q: bool,
+        normalize_k: bool,
+        rows: usize,
+        layout: RopeLayout,
+    ) -> Result<(), VulkanError> {
         if q_heads == 0 || k_heads == 0 || head_dim == 0 || head_dim % 2 != 0 {
             return Err(VulkanError::UnsupportedShape(
                 "Q/K heads and even head dimension must be nonzero".into(),
@@ -2089,7 +2165,9 @@ impl<'a> Qwen3Ops<'a> {
             as_u32(k_heads, "K head count")?,
             as_u32(head_dim, "Q/K head dimension")?,
             self.f32_rows_word(rope, rows, head_dim, head_dim, "RoPE coefficients")?,
-            u32::from(normalize_q) | (u32::from(normalize_k) << 1),
+            u32::from(normalize_q)
+                | (u32::from(normalize_k) << 1)
+                | (u32::from(layout == RopeLayout::Interleaved) << 2),
             eps.to_bits(),
             as_u32(rows, "Q/K rows")?,
             as_u32(q_count, "Q stride")?,
@@ -3529,6 +3607,15 @@ fn matmul_rows_push(
     );
     let blocks = n_in / block_elements;
     let mut push = [0; 22];
+    if format == GpuWeightFormat::F16 && crate::ops::f16_uses_half_accumulators(n_in) {
+        if !n_in.is_multiple_of(32) {
+            return Err(VulkanError::UnsupportedShape(
+                "F16 half accumulation with an F64 tail is not implemented on Vulkan".into(),
+            ));
+        }
+        // F16 does not use activation scales; this word selects its reduction.
+        push[1] = 1;
+    }
     push[0] = if is_float {
         row_word(
             arena_size,

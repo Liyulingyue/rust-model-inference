@@ -1,14 +1,8 @@
-use super::dense::{record_dense_layer, DenseShape, LayerBindings, QkvBindings};
-use crate::compute::state::TokenCommitState;
+use super::dense::{DenseLayer, DenseShape, DenseWeight, DenseWeights};
+use super::{VulkanContext, VulkanError};
 use crate::core::scratchpad::{KvCache, KvState};
 use crate::core::tensor::GGMLType;
-use crate::models::qwen3::trunk::{Qwen3Config, Qwen3Model, Qwen3Rope};
-
-use super::ops::{
-    fill_rope_neox, ArenaLayout, ArenaRegion, GpuWeightFormat, OperatorBindings, Qwen3Ops,
-    TokenCommands,
-};
-use super::{GpuBuffer, VulkanContext, VulkanError};
+use crate::models::qwen3::trunk::{Qwen3Model, Qwen3Rope};
 
 #[derive(Debug, Clone)]
 pub(crate) struct EligibilityFacts {
@@ -88,137 +82,24 @@ pub(crate) fn commit_shadow_kv_chunk(
         .arch
         .n_head_kv
         .checked_mul(state.arch.n_embd_head_k.max(state.arch.n_embd_head_v))
-        .ok_or_else(|| "KV stride overflow".to_string())?;
-    let delta_len = state
-        .arch
-        .n_layer
-        .checked_mul(stride)
-        .and_then(|len| len.checked_mul(rows))
-        .ok_or_else(|| "KV delta length overflow".to_string())?;
-    if rows == 0
-        || position != state.seq_len
-        || position
-            .checked_add(rows)
-            .is_none_or(|end| end > state.capacity)
-        || k_delta.len() != delta_len
-        || v_delta.len() != delta_len
-        || k_delta.iter().chain(v_delta).any(|value| {
-            !value.is_finite()
-                || (matches!(state.cache, KvCache::F16(_))
-                    && crate::ops::f32_to_f16(*value) & 0x7c00 == 0x7c00)
-        })
-    {
-        return Err(format!(
-            "Invalid Vulkan KV delta: position={position}/{} k={} v={} expected={delta_len}",
-            state.capacity,
-            k_delta.len(),
-            v_delta.len()
-        ));
-    }
-    let cache_len = state
-        .arch
-        .n_layer
-        .checked_mul(state.capacity)
-        .and_then(|len| len.checked_mul(stride))
-        .ok_or_else(|| "KV cache length overflow".to_string())?;
-    let cache_lengths_match = match &state.cache {
-        KvCache::F16(cache) => cache.k.len() == cache_len && cache.v.len() == cache_len,
-        KvCache::F32(cache) => cache.k.len() == cache_len && cache.v.len() == cache_len,
-    };
-    if !cache_lengths_match {
-        return Err("Invalid CPU shadow KV cache length".into());
-    }
-
-    match &mut state.cache {
-        KvCache::F16(cache) => {
-            for layer in 0..state.arch.n_layer {
-                let source = layer * rows * stride;
-                let target = (layer * state.capacity + position) * stride;
-                for index in 0..rows * stride {
-                    cache.k[target + index] = crate::ops::f32_to_f16(k_delta[source + index]);
-                    cache.v[target + index] = crate::ops::f32_to_f16(v_delta[source + index]);
-                }
-            }
-        }
-        KvCache::F32(cache) => {
-            for layer in 0..state.arch.n_layer {
-                let source = layer * rows * stride;
-                let target = (layer * state.capacity + position) * stride;
-                cache.k[target..target + rows * stride]
-                    .copy_from_slice(&k_delta[source..source + rows * stride]);
-                cache.v[target..target + rows * stride]
-                    .copy_from_slice(&v_delta[source..source + rows * stride]);
-            }
-        }
-    }
+        .ok_or("KV stride overflow")?;
+    crate::compute::state::commit_kv_cache(
+        &mut state.cache,
+        state.arch.n_layer,
+        state.capacity,
+        stride,
+        state.seq_len,
+        position,
+        rows,
+        k_delta,
+        v_delta,
+    )?;
     state.seq_len = position + rows;
     state.update_access();
     Ok(())
 }
 
-pub(crate) struct GpuChunkResult<'a> {
-    pub(crate) logits: &'a [f32],
-    pub(crate) k_delta: &'a [f32],
-    pub(crate) v_delta: &'a [f32],
-}
-
-pub(crate) struct UploadedBuffers {
-    context: &'static VulkanContext,
-    values: Vec<GpuBuffer>,
-}
-
-impl UploadedBuffers {
-    pub(crate) fn new(context: &'static VulkanContext) -> Self {
-        Self {
-            context,
-            values: Vec::new(),
-        }
-    }
-
-    pub(crate) fn upload(&mut self, bytes: &[u8]) -> Result<GpuBuffer, VulkanError> {
-        let buffer = unsafe { self.context.upload_static(bytes)? };
-        self.values.push(buffer);
-        Ok(buffer)
-    }
-
-    pub(crate) fn upload_f32(&mut self, values: &[f32]) -> Result<GpuBuffer, VulkanError> {
-        self.upload(bytemuck::cast_slice(values))
-    }
-
-    fn upload_tensor(&mut self, model: &Qwen3Model, name: &str) -> Result<GpuBuffer, VulkanError> {
-        let bytes = model
-            .source
-            .tensor_slice(name)
-            .ok_or_else(|| VulkanError::UnsupportedShape(format!("missing Qwen3 tensor {name}")))?;
-        self.upload(bytes)
-    }
-}
-
-impl Drop for UploadedBuffers {
-    fn drop(&mut self) {
-        let _ = unsafe { self.context.destroy_completed_buffers(&self.values) };
-    }
-}
-
-pub(crate) struct Qwen3VulkanSession {
-    context: &'static VulkanContext,
-    ops: Qwen3Ops<'static>,
-    _buffers: UploadedBuffers,
-    layers: Vec<LayerBindings>,
-    output_norm: OperatorBindings,
-    output: OperatorBindings,
-    layout: ArenaLayout,
-    config: Qwen3Config,
-    capacity: usize,
-    max_rows: usize,
-    #[cfg(test)]
-    pub(crate) fail_after_row: Option<usize>,
-    commit_state: TokenCommitState,
-    rope: Vec<f32>,
-    logits: Vec<f32>,
-    k_delta: Vec<f32>,
-    v_delta: Vec<f32>,
-}
+pub(crate) use super::dense::{DenseVulkanSession as Qwen3VulkanSession, UploadedBuffers};
 
 impl Qwen3VulkanSession {
     pub(crate) fn try_new(
@@ -226,177 +107,21 @@ impl Qwen3VulkanSession {
         capacity: usize,
         context: &'static VulkanContext,
     ) -> Result<Option<Self>, VulkanError> {
-        Self::try_new_rows(
-            model,
+        if let Err(reason) = check_device_eligibility(context.supports_shader_float16())
+            .and_then(|()| eligibility_facts(model).and_then(|facts| check_eligibility(&facts)))
+        {
+            eprintln!("[GPU] Qwen3 Vulkan unavailable: {reason}. Falling back to CPU.");
+            return Ok(None);
+        }
+        let shape = dense_shape(model);
+        Self::new(
+            shape,
+            &dense_weights(model)?,
             capacity,
             capacity.min(crate::core::prefill::DEFAULT_PREFILL_BATCH_SIZE),
             context,
         )
-    }
-
-    fn try_new_rows(
-        model: &Qwen3Model,
-        capacity: usize,
-        max_rows: usize,
-        context: &'static VulkanContext,
-    ) -> Result<Option<Self>, VulkanError> {
-        if let Err(reason) = check_device_eligibility(context.supports_shader_float16()) {
-            eprintln!("[GPU] Qwen3 Vulkan unavailable: {reason}. Falling back to CPU.");
-            return Ok(None);
-        }
-        let facts = match eligibility_facts(model) {
-            Ok(facts) => facts,
-            Err(reason) => {
-                eprintln!("[GPU] Qwen3 Vulkan unavailable: {reason}. Falling back to CPU.");
-                return Ok(None);
-            }
-        };
-        if let Err(reason) = check_eligibility(&facts) {
-            eprintln!("[GPU] Qwen3 Vulkan unavailable: {reason}. Falling back to CPU.");
-            return Ok(None);
-        }
-        let config = model.config.clone();
-        if config.n_embd_head_k != config.n_embd_head_v
-            || config.n_head_kv == 0
-            || config.n_head % config.n_head_kv != 0
-        {
-            eprintln!(
-                "[GPU] Qwen3 Vulkan unavailable: unsupported attention shape. Falling back to CPU."
-            );
-            return Ok(None);
-        }
-
-        let layout = ArenaLayout::qwen3(&config, capacity, max_rows)?;
-        let descriptor_capacity = config
-            .n_layer
-            .checked_mul(9)
-            .and_then(|count| count.checked_add(3))
-            .ok_or(VulkanError::OutOfMemory)?;
-        let mut ops = Qwen3Ops::new(context, layout, descriptor_capacity)?;
-        let mut buffers = UploadedBuffers::new(context);
-        let mut layers = Vec::with_capacity(config.n_layer);
-
-        for (layer_index, layer) in model.layers.iter().enumerate() {
-            let attn_norm_buffer = buffers.upload_f32(&layer.attn_norm)?;
-            let attn_norm = ops.bind_buffers(&[attn_norm_buffer])?;
-
-            let qkv_buffers = [
-                buffers.upload_tensor(model, &format!("blk.{layer_index}.attn_q.weight"))?,
-                buffers.upload_tensor(model, &format!("blk.{layer_index}.attn_k.weight"))?,
-                buffers.upload_tensor(model, &format!("blk.{layer_index}.attn_v.weight"))?,
-            ];
-            let qkv_formats = [
-                GpuWeightFormat::from_ggml_type(layer.wq.ggml_type)?,
-                GpuWeightFormat::from_ggml_type(layer.wk.ggml_type)?,
-                GpuWeightFormat::from_ggml_type(layer.wv.ggml_type)?,
-            ];
-            let qkv = if qkv_formats.iter().all(|format| *format == qkv_formats[0]) {
-                QkvBindings::Grouped(ops.bind_weight_buffers(&qkv_buffers, &qkv_formats)?)
-            } else {
-                QkvBindings::Split([
-                    ops.bind_weight_buffers(&qkv_buffers[0..1], &qkv_formats[0..1])?,
-                    ops.bind_weight_buffers(&qkv_buffers[1..2], &qkv_formats[1..2])?,
-                    ops.bind_weight_buffers(&qkv_buffers[2..3], &qkv_formats[2..3])?,
-                ])
-            };
-
-            let qk_norm = match (&layer.q_norm, &layer.k_norm) {
-                (Some(q_norm), Some(k_norm)) => {
-                    let q_norm = buffers.upload_f32(q_norm)?;
-                    let k_norm = buffers.upload_f32(k_norm)?;
-                    ops.bind_buffers(&[q_norm, k_norm])?
-                }
-                (None, None) => ops.bind_buffers(&[])?,
-                _ => {
-                    return Err(VulkanError::UnsupportedShape(format!(
-                        "layer {layer_index} has incomplete Q/K norm weights"
-                    )))
-                }
-            };
-
-            let wo_buffer =
-                buffers.upload_tensor(model, &format!("blk.{layer_index}.attn_output.weight"))?;
-            let wo = ops.bind_weight_buffers(
-                &[wo_buffer],
-                &[GpuWeightFormat::from_ggml_type(layer.wo.ggml_type)?],
-            )?;
-
-            let ffn_norm_buffer = buffers.upload_f32(&layer.ffn_norm)?;
-            let ffn_norm = ops.bind_buffers(&[ffn_norm_buffer])?;
-
-            let gate_up_buffers = [
-                buffers.upload_tensor(model, &format!("blk.{layer_index}.ffn_gate.weight"))?,
-                buffers.upload_tensor(model, &format!("blk.{layer_index}.ffn_up.weight"))?,
-            ];
-            let gate_up = ops.bind_weight_buffers(
-                &gate_up_buffers,
-                &[
-                    GpuWeightFormat::from_ggml_type(layer.w_gate.ggml_type)?,
-                    GpuWeightFormat::from_ggml_type(layer.w_up.ggml_type)?,
-                ],
-            )?;
-
-            let down_buffer =
-                buffers.upload_tensor(model, &format!("blk.{layer_index}.ffn_down.weight"))?;
-            let down = ops.bind_weight_buffers(
-                &[down_buffer],
-                &[GpuWeightFormat::from_ggml_type(layer.w_down.ggml_type)?],
-            )?;
-            layers.push(LayerBindings {
-                attn_norm,
-                qkv,
-                qk_norm,
-                wo,
-                ffn_norm,
-                gate_up,
-                down,
-            });
-        }
-
-        let output_norm_buffer = buffers.upload_f32(&model.output_norm)?;
-        let output_norm = ops.bind_buffers(&[output_norm_buffer])?;
-        let output_name = output_tensor_name(model);
-        let output_buffer = buffers.upload_tensor(model, output_name)?;
-        let output = ops.bind_weight_buffers(
-            &[output_buffer],
-            &[GpuWeightFormat::from_ggml_type(model.output.ggml_type)?],
-        )?;
-        let kv_count = config
-            .n_head_kv
-            .checked_mul(config.n_embd_head_k)
-            .ok_or(VulkanError::OutOfMemory)?;
-        let delta_count = config
-            .n_layer
-            .checked_mul(kv_count)
-            .and_then(|count| count.checked_mul(max_rows))
-            .ok_or(VulkanError::OutOfMemory)?;
-        let vocab = config.vocab;
-        let head_dim = config.n_embd_head_k;
-
-        Ok(Some(Self {
-            context,
-            ops,
-            _buffers: buffers,
-            layers,
-            output_norm,
-            output,
-            layout,
-            config,
-            capacity,
-            max_rows,
-            #[cfg(test)]
-            fail_after_row: None,
-            commit_state: TokenCommitState::new(0, capacity),
-            rope: vec![
-                0.0;
-                head_dim
-                    .checked_mul(max_rows)
-                    .ok_or(VulkanError::OutOfMemory)?
-            ],
-            logits: vec![0.0; vocab],
-            k_delta: vec![0.0; delta_count],
-            v_delta: vec![0.0; delta_count],
-        }))
+        .map(Some)
     }
 
     pub(crate) fn reserve_rows(
@@ -404,263 +129,67 @@ impl Qwen3VulkanSession {
         model: &Qwen3Model,
         rows: usize,
     ) -> Result<(), VulkanError> {
-        if rows <= self.max_rows {
-            return Ok(());
-        }
-        // ponytail: growing beyond the initial chunk capacity reuploads weights;
-        // retain uploads separately if resizing becomes frequent.
-        let mut replacement = Self::try_new_rows(model, self.capacity, rows, self.context)?
-            .ok_or_else(|| {
-                VulkanError::UnsupportedShape("Qwen3 Vulkan eligibility changed".into())
-            })?;
-        let count = self.layout.kv_k.size / 4;
-        replacement.ops.write_f32(
-            replacement.layout.kv_k,
-            self.ops.read_f32(self.layout.kv_k, count)?,
-        )?;
-        replacement.ops.write_f32(
-            replacement.layout.kv_v,
-            self.ops.read_f32(self.layout.kv_v, count)?,
-        )?;
-        replacement.commit_state = self.commit_state;
-        #[cfg(test)]
-        {
-            replacement.fail_after_row = self.fail_after_row;
-        }
-        *self = replacement;
-        Ok(())
+        self.reserve_dense_rows(&dense_weights(model)?, rows)
     }
+}
 
-    pub(crate) fn forward_token<'a>(
-        &'a mut self,
-        input: &[f32],
-        position: usize,
-    ) -> Result<GpuChunkResult<'a>, VulkanError> {
-        self.forward_chunk(input, position, 1, true)
+fn dense_shape(model: &Qwen3Model) -> DenseShape {
+    let c = &model.config;
+    DenseShape {
+        n_embd: c.n_embd,
+        n_ff: c.n_ff,
+        n_layer: c.n_layer,
+        n_head: c.n_head,
+        n_head_kv: c.n_head_kv,
+        n_embd_head_k: c.n_embd_head_k,
+        n_embd_head_v: c.n_embd_head_v,
+        eps: c.eps,
+        has_qk_norm: c.has_qk_norm,
+        vocab: c.vocab,
+        freq_base: c.freq_base,
+        rope_layout: super::ops::RopeLayout::Neox,
     }
-
-    pub(crate) fn forward_chunk<'a>(
-        &'a mut self,
-        input: &[f32],
-        base_position: usize,
-        rows: usize,
-        project_logits: bool,
-    ) -> Result<GpuChunkResult<'a>, VulkanError> {
-        if let Err(error) = self.commit_state.begin(base_position, rows) {
-            self.commit_state.abort();
-            return Err(VulkanError::UnsupportedShape(error));
-        }
-        if let Err(error) = self.forward_chunk_inner(input, base_position, rows, project_logits) {
-            self.commit_state.abort();
-            return Err(error);
-        }
-        let count = self.config.n_layer * rows * self.config.n_head_kv * self.config.n_embd_head_k;
-        Ok(GpuChunkResult {
-            logits: if project_logits { &self.logits } else { &[] },
-            k_delta: &self.k_delta[..count],
-            v_delta: &self.v_delta[..count],
+}
+fn dense_weights(model: &Qwen3Model) -> Result<DenseWeights<'_>, VulkanError> {
+    let view = |name: &str,
+                weight: &crate::ops::kernel::Weight<'_>|
+     -> Result<DenseWeight<'_>, VulkanError> {
+        let bytes = model
+            .source
+            .tensor_slice(name)
+            .ok_or_else(|| VulkanError::UnsupportedShape(format!("missing Qwen3 tensor {name}")))?;
+        Ok(DenseWeight {
+            bytes,
+            ggml_type: weight.ggml_type,
+            n_in: weight.n_in,
+            n_out: weight.n_out,
         })
-    }
-
-    pub(crate) fn forward_hidden_token<'a>(
-        &'a mut self,
-        input: &[f32],
-        position: usize,
-    ) -> Result<&'a [f32], VulkanError> {
-        self.forward_chunk(input, position, 1, false)?;
-        match self.ops.read_f32(self.layout.normed, self.config.n_embd) {
-            Ok(hidden) => Ok(hidden),
-            Err(error) => {
-                self.commit_state.abort();
-                Err(error)
-            }
-        }
-    }
-
-    fn record_weights(
-        &self,
-        commands: &TokenCommands<'_>,
-        bindings: OperatorBindings,
-        input: ArenaRegion,
-        outputs: &[(ArenaRegion, usize)],
-        n_in: usize,
-        rows: usize,
-    ) -> Result<(), VulkanError> {
-        super::dense::record_weights(
-            &self.ops,
-            &self.layout,
-            commands,
-            bindings,
-            input,
-            outputs,
-            n_in,
-            rows,
-        )
-    }
-
-    fn forward_chunk_inner(
-        &mut self,
-        input: &[f32],
-        base_position: usize,
-        rows: usize,
-        project_logits: bool,
-    ) -> Result<(), VulkanError> {
-        let config = &self.config;
-        let input_count = rows
-            .checked_mul(config.n_embd)
-            .ok_or(VulkanError::OutOfMemory)?;
-        if input.len() != input_count
-            || rows > self.max_rows
-            || input.iter().any(|value| !value.is_finite())
-        {
-            return Err(VulkanError::UnsupportedShape(format!(
-                "invalid Qwen3 chunk input={} rows={rows}/{}",
-                input.len(),
-                self.max_rows
-            )));
-        }
-        let kv_count = config
-            .n_head_kv
-            .checked_mul(config.n_embd_head_k)
-            .ok_or(VulkanError::OutOfMemory)?;
-        // Acquire the shared submission guard before touching mapped arena bytes.
-        let commands = TokenCommands::begin(self.context)?;
-        self.ops.write_f32(self.layout.x, input)?;
-        #[cfg(test)]
-        let failure = match self.fail_after_row.take() {
-            Some(row) if row < rows => Some(row),
-            Some(row) => {
-                self.fail_after_row = Some(row - rows);
-                None
-            }
-            None => None,
-        };
-        #[cfg(test)]
-        let rows = failure.map_or(rows, |row| row + 1);
-        for row in 0..rows {
-            fill_rope_neox(
-                &mut self.rope[row * config.n_embd_head_k..(row + 1) * config.n_embd_head_k],
-                base_position + row,
-                config.freq_base,
-            );
-        }
-        self.ops
-            .write_f32(self.layout.rope, &self.rope[..rows * config.n_embd_head_k])?;
-        let shape = DenseShape {
-            n_embd: config.n_embd,
-            n_ff: config.n_ff,
-            n_layer: config.n_layer,
-            n_head: config.n_head,
-            n_head_kv: config.n_head_kv,
-            n_embd_head_k: config.n_embd_head_k,
-            n_embd_head_v: config.n_embd_head_v,
-            eps: config.eps,
-            has_qk_norm: config.has_qk_norm,
-        };
-        for (layer_index, bindings) in self.layers.iter().enumerate() {
-            record_dense_layer(
-                &self.ops,
-                &commands,
-                &self.layout,
-                bindings,
-                &shape,
-                layer_index,
-                self.capacity,
-                base_position,
-                rows,
-            )?;
-            #[cfg(test)]
-            if let Some(row) = failure {
-                commands.submit_and_wait()?;
-                return Err(VulkanError::UnsupportedShape(format!(
-                    "injected Qwen3 GPU failure after row {row}"
-                )));
-            }
-        }
-        let last_offset = (rows - 1)
-            .checked_mul(config.n_embd)
-            .and_then(|count| count.checked_mul(4))
-            .ok_or(VulkanError::OutOfMemory)?;
-        let last = ArenaRegion {
-            offset: self
-                .layout
-                .x
-                .offset
-                .checked_add(last_offset)
-                .ok_or(VulkanError::OutOfMemory)?,
-            size: self
-                .layout
-                .x
-                .size
-                .checked_sub(last_offset)
-                .ok_or(VulkanError::OutOfMemory)?,
-        };
-        self.ops.record_rms_norm(
-            &commands,
-            self.output_norm,
-            last,
-            self.layout.normed,
-            config.n_embd,
-            config.eps,
-        )?;
-        if project_logits {
-            self.record_weights(
-                &commands,
-                self.output,
-                self.layout.normed,
-                &[(self.layout.logits, config.vocab)],
-                config.n_embd,
-                1,
-            )?;
-        }
-        commands.submit_and_wait()?;
-        if project_logits {
-            self.logits
-                .copy_from_slice(self.ops.read_f32(self.layout.logits, config.vocab)?);
-        }
-        let delta_count = config
-            .n_layer
-            .checked_mul(rows)
-            .and_then(|count| count.checked_mul(kv_count))
-            .ok_or(VulkanError::OutOfMemory)?;
-        self.k_delta[..delta_count]
-            .copy_from_slice(self.ops.read_f32(self.layout.kv_delta_k, delta_count)?);
-        self.v_delta[..delta_count]
-            .copy_from_slice(self.ops.read_f32(self.layout.kv_delta_v, delta_count)?);
-        if self.k_delta[..delta_count]
-            .iter()
-            .chain(&self.v_delta[..delta_count])
-            .any(|value| !value.is_finite())
-            || self
-                .ops
-                .read_f32(self.layout.x, input_count)?
-                .iter()
-                .any(|value| !value.is_finite())
-            || self
-                .ops
-                .read_f32(self.layout.normed, config.n_embd)?
-                .iter()
-                .any(|value| !value.is_finite())
-            || (project_logits && self.logits.iter().any(|value| !value.is_finite()))
-        {
-            return Err(VulkanError::UnsupportedShape(
-                "Qwen3 Vulkan chunk produced non-finite output".into(),
-            ));
-        }
-        Ok(())
-    }
-
-    pub(crate) fn commit_token(&mut self) {
-        self.commit_state.commit();
-    }
-
-    pub(crate) fn abort_token(&mut self) {
-        self.commit_state.abort();
-    }
-
-    pub(crate) fn reset(&mut self) {
-        self.commit_state.reset();
-    }
+    };
+    let layers = model
+        .layers
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            Ok(DenseLayer {
+                attn_norm: &l.attn_norm,
+                ffn_norm: &l.ffn_norm,
+                q_norm: l.q_norm.as_deref(),
+                k_norm: l.k_norm.as_deref(),
+                wq: view(&format!("blk.{i}.attn_q.weight"), &l.wq)?,
+                wk: view(&format!("blk.{i}.attn_k.weight"), &l.wk)?,
+                wv: view(&format!("blk.{i}.attn_v.weight"), &l.wv)?,
+                wo: view(&format!("blk.{i}.attn_output.weight"), &l.wo)?,
+                w_gate: view(&format!("blk.{i}.ffn_gate.weight"), &l.w_gate)?,
+                w_up: view(&format!("blk.{i}.ffn_up.weight"), &l.w_up)?,
+                w_down: view(&format!("blk.{i}.ffn_down.weight"), &l.w_down)?,
+            })
+        })
+        .collect::<Result<_, VulkanError>>()?;
+    Ok(DenseWeights {
+        layers,
+        output_norm: &model.output_norm,
+        output: view(output_tensor_name(model), &model.output)?,
+    })
 }
 
 fn eligibility_facts(model: &Qwen3Model) -> Result<EligibilityFacts, String> {

@@ -90,3 +90,76 @@ mod tests {
         state.begin(0, 3).unwrap();
     }
 }
+
+/// Validate every layer before publishing any part of a device KV delta.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn commit_kv_cache(
+    cache: &mut crate::core::scratchpad::KvCache,
+    n_layer: usize,
+    capacity: usize,
+    stride: usize,
+    committed_len: usize,
+    position: usize,
+    rows: usize,
+    k_delta: &[f32],
+    v_delta: &[f32],
+) -> Result<(), String> {
+    use crate::core::scratchpad::KvCache;
+    let delta_len = n_layer
+        .checked_mul(stride)
+        .and_then(|len| len.checked_mul(rows))
+        .ok_or_else(|| "KV delta length overflow".to_string())?;
+    if rows == 0
+        || position != committed_len
+        || position.checked_add(rows).is_none_or(|end| end > capacity)
+        || k_delta.len() != delta_len
+        || v_delta.len() != delta_len
+        || k_delta.iter().chain(v_delta).any(|value| {
+            !value.is_finite()
+                || (matches!(cache, KvCache::F16(_))
+                    && crate::ops::f32_to_f16(*value) & 0x7c00 == 0x7c00)
+        })
+    {
+        return Err(format!(
+            "Invalid Vulkan KV delta: position={position}/{} k={} v={} expected={delta_len}",
+            capacity,
+            k_delta.len(),
+            v_delta.len()
+        ));
+    }
+    let cache_len = n_layer
+        .checked_mul(capacity)
+        .and_then(|len| len.checked_mul(stride))
+        .ok_or_else(|| "KV cache length overflow".to_string())?;
+    let cache_lengths_match = match &*cache {
+        KvCache::F16(cache) => cache.k.len() == cache_len && cache.v.len() == cache_len,
+        KvCache::F32(cache) => cache.k.len() == cache_len && cache.v.len() == cache_len,
+    };
+    if !cache_lengths_match {
+        return Err("Invalid CPU shadow KV cache length".into());
+    }
+
+    match cache {
+        KvCache::F16(cache) => {
+            for layer in 0..n_layer {
+                let source = layer * rows * stride;
+                let target = (layer * capacity + position) * stride;
+                for index in 0..rows * stride {
+                    cache.k[target + index] = crate::ops::f32_to_f16(k_delta[source + index]);
+                    cache.v[target + index] = crate::ops::f32_to_f16(v_delta[source + index]);
+                }
+            }
+        }
+        KvCache::F32(cache) => {
+            for layer in 0..n_layer {
+                let source = layer * rows * stride;
+                let target = (layer * capacity + position) * stride;
+                cache.k[target..target + rows * stride]
+                    .copy_from_slice(&k_delta[source..source + rows * stride]);
+                cache.v[target..target + rows * stride]
+                    .copy_from_slice(&v_delta[source..source + rows * stride]);
+            }
+        }
+    }
+    Ok(())
+}

@@ -148,10 +148,17 @@ impl<'model> Qwen3Session<'model> {
         let _ = kv_bytes;
 
         #[cfg(feature = "vulkan")]
-        let (gpu, full_model_gpu_failed) = match compute_policy
-            .context()
-            .map_err(|error| error.to_string())?
-        {
+        let context = if kv_format == KvFormat::F16 {
+            compute_policy
+                .context()
+                .map_err(|error| error.to_string())?
+        } else if compute_policy == ComputePolicy::Vulkan {
+            return Err("Qwen3 Vulkan currently requires F16 KV".into());
+        } else {
+            None
+        };
+        #[cfg(feature = "vulkan")]
+        let (gpu, full_model_gpu_failed) = match context {
             Some(context) => match Qwen3VulkanSession::try_new(model, capacity, context) {
                 Ok(None) if compute_policy == ComputePolicy::Vulkan => {
                     return Err("Qwen3 configuration is unsupported for full-model Vulkan".into());

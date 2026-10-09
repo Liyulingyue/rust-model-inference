@@ -10,7 +10,7 @@ layout(std430, binding = 2) readonly buffer W1 { uint data[]; } w1;
 layout(std430, binding = 3) readonly buffer W2 { uint data[]; } w2;
 layout(push_constant) uniform PC {
     uint input_word;
-    uint unused_scales_word;
+    uint half_accumulation;
     uint n_in;
     uint elements_per_row;
     uint output0_word; uint rows0; uint output0_stride;
@@ -31,27 +31,66 @@ uint weight_f16(uint slot, uint index) {
 }
 
 float f16_decode(uint bits) {
-    uint sign = (bits >> 15u) & 1u;
-    int exponent = int((bits >> 10u) & 0x1fu);
-    uint mantissa = bits & 0x3ffu;
-    float value = exponent == 0
-        ? float(mantissa) * exp2(-24.0)
-        : (exponent == 31 ? 0.0 : (1.0 + float(mantissa) / 1024.0) * exp2(float(exponent - 15)));
-    return sign == 0u ? value : -value;
+    return unpackHalf2x16(bits).x;
 }
+
+// Half products are exact in float; TwoSum prevents double rounding at half ties.
+float half_fma(float a, float b, float c) {
+    precise float p = a * b;
+    precise float s = p + c;
+    precise float v = s - p;
+    precise float error = (p - (s - v)) + (c - v);
+    uint bits = floatBitsToUint(s);
+    uint exponent = (bits >> 23u) & 255u;
+    if (error != 0.0 && exponent >= 102u && exponent <= 142u) {
+        uint shift = exponent <= 112u ? 126u - exponent : 13u;
+        uint mantissa = (bits & 0x7fffffu) | 0x800000u;
+        if ((mantissa & ((1u << shift) - 1u)) == (1u << (shift - 1u))) {
+            bits += ((error < 0.0) == (s < 0.0)) ? 1u : 0xffffffffu;
+        }
+    }
+    return round_f16_rte(uintBitsToFloat(bits));
+}
+
+shared float partial[32];
 
 void main() {
     uint token_row = gl_WorkGroupID.z / pc.group_count; uint slot = gl_WorkGroupID.z % pc.group_count;
     uint row = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
     uint rows = slot == 0u ? pc.rows0 : (slot == 1u ? pc.rows1 : pc.rows2);
-    if (slot >= pc.group_count || row >= rows || gl_LocalInvocationID.x != 0u) return;
+    if (slot >= pc.group_count || row >= rows) return;
 
     precise float sum = 0.0;
     uint row_base = row * pc.elements_per_row;
-    for (uint index = 0u; index < pc.n_in; index++) {
-        float input_value = round_f16_rte(uintBitsToFloat(arena.data[pc.input_word + token_row * pc.input_stride + index]));
-        float weight_value = f16_decode(weight_f16(slot, row_base + index));
-        sum += input_value * weight_value;
+    uint lane = gl_LocalInvocationID.x;
+    if (pc.half_accumulation != 0u) {
+        if (lane < 32u) {
+            for (uint index = lane; index < pc.n_in; index += 32u) {
+                float input_value = round_f16_rte(uintBitsToFloat(arena.data[pc.input_word + token_row * pc.input_stride + index]));
+                sum = half_fma(input_value, f16_decode(weight_f16(slot, row_base + index)), sum);
+            }
+            partial[lane] = sum;
+        }
+        barrier();
+        if (lane < 8u) {
+            precise float a = partial[lane] + partial[lane + 16u];
+            precise float b = partial[lane + 8u] + partial[lane + 24u];
+            partial[lane] = round_f16_rte(round_f16_rte(a) + round_f16_rte(b));
+        }
+        barrier();
+        if (lane != 0u) return;
+        precise float a = partial[0] + partial[4];
+        precise float b = partial[1] + partial[5];
+        precise float c = partial[2] + partial[6];
+        precise float d = partial[3] + partial[7];
+        sum = (a + b) + (c + d);
+    } else {
+        if (lane != 0u) return;
+        for (uint index = 0u; index < pc.n_in; index++) {
+            float input_value = round_f16_rte(uintBitsToFloat(arena.data[pc.input_word + token_row * pc.input_stride + index]));
+            float weight_value = f16_decode(weight_f16(slot, row_base + index));
+            sum += input_value * weight_value;
+        }
     }
 
     uint output_word = slot == 0u

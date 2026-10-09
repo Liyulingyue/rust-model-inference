@@ -34,6 +34,7 @@ struct Arguments {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Qwen3,
+    Llama,
     Qwen35,
     Embedding,
 }
@@ -42,12 +43,13 @@ enum Mode {
 fn arguments() -> Result<Arguments, String> {
     let mut args = std::env::args().skip(1);
     let mode = match args.next().as_deref() {
+        Some("llama") => Mode::Llama,
         Some("qwen3") => Mode::Qwen3,
         Some("qwen35") => Mode::Qwen35,
         Some("embedding") => Mode::Embedding,
         _ => {
             return Err(
-                "usage: vk_model_check <qwen3|qwen35|embedding> --model PATH [--benchmark] [--compare-prefill-batches 1,64]".into(),
+                "usage: vk_model_check <llama|qwen3|qwen35|embedding> --model PATH [--benchmark] [--compare-prefill-batches 1,64]".into(),
             )
         }
     };
@@ -854,9 +856,91 @@ fn run_embedding(arguments: &Arguments) -> Result<(), String> {
 }
 
 #[cfg(feature = "vulkan")]
+fn run_llama(arguments: &Arguments) -> Result<(), String> {
+    use rust_model_inference::{
+        compute::{ComputePolicy, UsedBackend},
+        core::scratchpad::{KvCache, KvFormat},
+        models::llama::trunk::LlamaSession,
+    };
+    let source = open_model_source(&arguments.model, ComponentRole::Llm)
+        .map_err(|error| error.to_string())?;
+    let batches = arguments
+        .compare_prefill_batches
+        .as_deref()
+        .unwrap_or(&[1, 3, 64]);
+    for &batch in batches {
+        let mut cpu = LlamaSession::from_source_with_compute(
+            source.as_ref(),
+            4,
+            KvFormat::F16,
+            512,
+            batch,
+            ComputePolicy::Cpu,
+        )?;
+        let mut gpu = LlamaSession::from_source_with_compute(
+            source.as_ref(),
+            4,
+            KvFormat::F16,
+            512,
+            batch,
+            ComputePolicy::Vulkan,
+        )?;
+        let tokens = cpu.tokenizer.encode(
+            &PROMPT.repeat(12),
+            EncodeOptions {
+                add_special: true,
+                parse_special: true,
+            },
+        );
+        for repeat in 0..2 {
+            let mut a = cpu.forward_logits_chunked(&tokens, batch)?;
+            let mut b = gpu.forward_logits_chunked(&tokens, batch)?;
+            assert_close("llama_prefill", &b, &a)?;
+            for step in 0..GREEDY_TOKENS {
+                let best = |v: &[f32]| {
+                    v.iter()
+                        .enumerate()
+                        .max_by(|a, b| a.1.total_cmp(b.1))
+                        .unwrap()
+                        .0 as u32
+                };
+                let token = best(&a);
+                if best(&b) != token {
+                    return Err(format!("Llama greedy mismatch at {step}"));
+                }
+                a = cpu.forward_logits_chunked(&[token], 1)?;
+                b = gpu.forward_logits_chunked(&[token], 1)?;
+                assert_close("llama_decode", &b, &a)?;
+            }
+            if gpu.used_backend() != UsedBackend::Vulkan {
+                return Err("Llama GPU check fell back".into());
+            }
+            if let (KvCache::F16(a), KvCache::F16(b)) = (&cpu.kv_cache, &gpu.kv_cache) {
+                let av: Vec<_> =
+                    a.k.iter()
+                        .chain(&a.v)
+                        .map(|&v| rust_model_inference::ops::f16_to_f32(v))
+                        .collect();
+                let bv: Vec<_> =
+                    b.k.iter()
+                        .chain(&b.v)
+                        .map(|&v| rust_model_inference::ops::f16_to_f32(v))
+                        .collect();
+                assert_close("llama_kv", &bv, &av)?;
+            }
+            println!("model=llama scope=resident_decoder backend=Vulkan batch={batch} repeat={repeat} prompt={} greedy_tokens={GREEDY_TOKENS}",tokens.len());
+            cpu.reset();
+            gpu.reset();
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "vulkan")]
 fn run() -> Result<(), String> {
     let arguments = arguments()?;
     match arguments.mode {
+        Mode::Llama => run_llama(&arguments),
         Mode::Qwen3 => run_qwen3(&arguments),
         Mode::Qwen35 => run_qwen35(&arguments),
         Mode::Embedding => run_embedding(&arguments),

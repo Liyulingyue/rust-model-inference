@@ -396,9 +396,8 @@ impl Qwen3Session<'_> {
         }
 
         #[cfg(feature = "vulkan")]
-        let _gpu_matmul_scope = self
-            .full_model_gpu_failed
-            .then(crate::core::thread_pool::ComputePool::disable_gpu_matmul_for_scope);
+        let _gpu_matmul_scope =
+            crate::core::thread_pool::ComputePool::disable_gpu_matmul_for_scope();
 
         for layer in 0..config.n_layer {
             let weights = &model.layers[layer];
