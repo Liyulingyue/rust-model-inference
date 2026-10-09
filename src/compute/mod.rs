@@ -1,5 +1,7 @@
 //! Session-local compute selection; CPU kernels retain their own ISA dispatch.
 
+pub(crate) mod linear;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ComputePolicy {
     #[default]
@@ -35,6 +37,16 @@ impl std::fmt::Display for ComputeError {
 }
 
 impl std::error::Error for ComputeError {}
+
+#[cfg(feature = "vulkan")]
+impl From<crate::vulkan::VulkanError> for ComputeError {
+    fn from(error: crate::vulkan::VulkanError) -> Self {
+        match error {
+            crate::vulkan::VulkanError::UnsupportedShape(message) => Self::Unsupported(message),
+            other => Self::Device(other.to_string()),
+        }
+    }
+}
 
 impl ComputePolicy {
     fn context_with<T>(
@@ -117,7 +129,6 @@ mod tests {
 
     #[test]
     fn cpu_auto_sessions_do_not_share_policy() {
-        crate::ops::enable_gpu();
         for (policy, expected) in [
             (ComputePolicy::Auto, Some(7)),
             (ComputePolicy::Cpu, None),

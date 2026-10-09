@@ -883,10 +883,42 @@ pub(crate) struct BatchedLinearRuntime {
     weights: HashMap<(usize, usize), (GpuBuffer, OperatorBindings)>,
     weight_capacity: usize,
     #[cfg(test)]
-    begin_commands: fn(&'static VulkanContext) -> Result<TokenCommands<'static>, VulkanError>,
+    pub(crate) begin_commands:
+        fn(&'static VulkanContext) -> Result<TokenCommands<'static>, VulkanError>,
 }
 
 impl BatchedLinearRuntime {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn validate(
+        &self,
+        weight: &[u8],
+        format: GpuWeightFormat,
+        input_len: usize,
+        rows: usize,
+        n_in: usize,
+        n_out: usize,
+        output_len: usize,
+    ) -> Result<(), VulkanError> {
+        self.layout.validate(
+            &self.ops.context.limits,
+            weight.len(),
+            format,
+            input_len,
+            rows,
+            n_in,
+            n_out,
+            output_len,
+        )?;
+        if let Some((_, binding)) = self.weights.get(&(weight.as_ptr() as usize, weight.len())) {
+            if binding.weight_format(1)? != format {
+                return Err(VulkanError::UnsupportedShape(
+                    "cached batched linear weight format changed".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn new(
         context: &'static VulkanContext,
         max_rows: usize,
@@ -6154,7 +6186,7 @@ mod tests {
     fn batched_linear_device_rows_match_and_reuse_weights() {
         use super::{BatchedLinearRuntime, GpuWeightFormat::*};
         let context = Box::leak(Box::new(super::VulkanContext::new().unwrap()));
-        let mut runtime = BatchedLinearRuntime::new(context, 3, 513, 65, 10).unwrap();
+        let mut runtime = BatchedLinearRuntime::new(context, 64, 513, 65, 10).unwrap();
         // Keep every source allocation alive: the cache keys are stable slices.
         let weights: Vec<_> = [F32, F16, BF16, Q8_0, Q4_0, Q4_1, Q4_K, Q5_K, Q6_K]
             .into_iter()
@@ -6234,7 +6266,40 @@ mod tests {
                 arena_before
             );
             assert_eq!(runtime.weights.len(), slot + 1);
-            println!("batched_linear format={format:?} rows=3 exact_bits=true cached=true");
+            let input64 = input
+                .iter()
+                .copied()
+                .cycle()
+                .take(64 * 512)
+                .collect::<Vec<_>>();
+            let mut rows64 = vec![0.0; 64 * 65];
+            runtime
+                .matmul_rows(weight, *format, &input64, 64, 512, 65, &mut rows64)
+                .unwrap();
+            for row in [0, 63] {
+                let mut single = [0.0; 65];
+                runtime
+                    .matmul_rows(
+                        weight,
+                        *format,
+                        &input64[row * 512..(row + 1) * 512],
+                        1,
+                        512,
+                        65,
+                        &mut single,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    rows64[row * 65..(row + 1) * 65]
+                        .iter()
+                        .map(|x| x.to_bits())
+                        .collect::<Vec<_>>(),
+                    single.map(f32::to_bits)
+                );
+            }
+            assert_eq!(runtime.weights.len(), slot + 1);
+            assert_eq!(runtime.weights[&key].0.buffer, buffer);
+            println!("batched_linear format={format:?} rows=1,3,64 exact_bits=true cached=true");
         }
         let extra_weight = vec![0u8; 512 * 65 * 4];
         assert!(runtime

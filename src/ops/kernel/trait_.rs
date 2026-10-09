@@ -13,6 +13,11 @@
 //! retain the Q8_0 path.
 
 pub trait Kernel: Send + Sync {
+    /// Capability query before a strict group can modify any output.
+    fn supports_f16_strict(&self) -> bool {
+        false
+    }
+
     /// Returns the backing F32 values for model-local native-F32 contracts.
     fn f32_slice(&self) -> Option<&[f32]> {
         None
