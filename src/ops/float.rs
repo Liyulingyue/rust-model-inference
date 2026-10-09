@@ -76,9 +76,19 @@ use std::sync::Mutex;
 
 #[cfg(feature = "vulkan")]
 pub fn get_vulkan_context() -> Option<&'static VulkanContext> {
-    if !GPU_ENABLED.load(Ordering::Relaxed) {
+    if !GPU_ENABLED.load(Ordering::Relaxed) || crate::core::thread_pool::gpu_matmul_disabled() {
         return None;
     }
+    shared_vulkan_context()
+        .map_err(|e| {
+            eprintln!("[GPU] Vulkan init failed: {e}. Falling back to CPU.");
+        })
+        .ok()
+}
+
+/// Device initialization is shared; choosing this device belongs to each session.
+#[cfg(feature = "vulkan")]
+pub(crate) fn shared_vulkan_context() -> Result<&'static VulkanContext, String> {
     // Warmup runs INSIDE the init closure: the driver JITs the compute
     // pipeline on first dispatch (seconds on Meteor Lake), and any thread
     // reaching a dispatch before that completes wedges the watchdog. The
@@ -102,13 +112,7 @@ pub fn get_vulkan_context() -> Option<&'static VulkanContext> {
             }
             Err(e) => Err(e),
         });
-    match result {
-        Ok(ctx) => Some(ctx),
-        Err(e) => {
-            eprintln!("[GPU] Vulkan init failed: {}. Falling back to CPU.", e);
-            None
-        }
-    }
+    result.as_ref().map_err(Clone::clone)
 }
 
 #[cfg(feature = "wgpu")]
