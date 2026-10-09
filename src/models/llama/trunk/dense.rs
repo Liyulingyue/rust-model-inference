@@ -199,6 +199,8 @@ pub(super) fn gpu_shape(s: &LlamaSession<'_>) -> crate::vulkan::dense::DenseShap
         vocab: c.vocab,
         freq_base: c.freq_base,
         rope_layout: crate::vulkan::ops::RopeLayout::Interleaved,
+        approximate_silu_multiline: false,
+        attention_mode: crate::vulkan::ops::AttentionMode::OnlineF32,
     }
 }
 

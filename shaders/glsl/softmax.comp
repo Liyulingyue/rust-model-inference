@@ -22,29 +22,7 @@ shared float partial_error[64];
 shared float row_max;
 shared float inverse_sum;
 
-float exp_accurate(float x) {
-    precise float z = fma(x, uintBitsToFloat(0x3fb8aa3bu), uintBitsToFloat(0x4b400000u));
-    precise float n = z - uintBitsToFloat(0x4b400000u);
-    precise float reduced = fma(-n, uintBitsToFloat(0x3f317200u), x);
-    reduced = fma(-n, uintBitsToFloat(0x35bfbe8eu), reduced);
-    uint exponent = floatBitsToUint(z) << 23u;
-    precise float scale = uintBitsToFloat(exponent + floatBitsToUint(1.0));
-    precise float polynomial = uintBitsToFloat(0x39500d01u);
-    polynomial = fma(polynomial, reduced, uintBitsToFloat(0x3ab60b61u));
-    polynomial = fma(polynomial, reduced, uintBitsToFloat(0x3c088889u));
-    polynomial = fma(polynomial, reduced, uintBitsToFloat(0x3d2aaaabu));
-    polynomial = fma(polynomial, reduced, uintBitsToFloat(0x3e2aaaabu));
-    polynomial = fma(polynomial, reduced, uintBitsToFloat(0x3f000000u));
-    polynomial = fma(polynomial, reduced, uintBitsToFloat(0x3f800000u));
-    polynomial = fma(polynomial, reduced, uintBitsToFloat(0x3f800000u));
-    if (abs(n) <= 126.0) return scale * polynomial;
-
-    uint adjust = n <= 0.0 ? 0x82000000u : 0u;
-    precise float scale1 = uintBitsToFloat(adjust + 0x7f000000u);
-    precise float scale2 = uintBitsToFloat(exponent - adjust);
-    if (abs(n) > 192.0) return scale1 * scale1;
-    return scale2 * polynomial * scale1;
-}
+#include "exp_accurate.glsl"
 
 void add_pair(
     inout float high,

@@ -1,6 +1,9 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 #include "f16_rounding.glsl"
+#include "f16_dot.glsl"
+#include "exp_accurate.glsl"
+#include "f32_divide.glsl"
 layout(local_size_x = 64) in;
 
 layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
@@ -18,6 +21,7 @@ layout(push_constant) uniform PC {
     uint rows;
     /// Nonzero when every token is visible; see `softmax.comp`.
     uint full_attention;
+    uint reduction_mode;
 } pc;
 
 void add_pair(inout float high, inout float low, float value) {
@@ -39,8 +43,39 @@ void main() {
     uint head = index / pc.head_dim;
     uint dimension = index - head * pc.head_dim;
     uint kv_head = head / (pc.q_heads / pc.kv_heads);
+    if ((pc.reduction_mode & 256u) != 0u) {
+        // Llama keeps query/probabilities in F32 and rescales its online sum.
+        precise float maximum = 0.0;
+        precise float sum = 0.0;
+        precise float output_value = 0.0;
+        bool fused = (pc.reduction_mode & 255u) != 0u && dimension < pc.head_dim / 4u * 4u;
+        for (uint token = 0u; token < visible; token++) {
+            float score = uintBitsToFloat(arena.data[
+                pc.scores_word + (row * pc.q_heads + head) * pc.sequence_length + token]);
+            if (score > maximum) {
+                float rescale = exp_accurate(maximum - score);
+                output_value *= rescale;
+                sum *= rescale;
+                maximum = score;
+            }
+            float probability = exp_accurate(score - maximum);
+            uint value_index = pc.cache_v_word
+                + (pc.layer * pc.capacity + token) * (pc.kv_heads * pc.head_dim)
+                + kv_head * pc.head_dim + dimension;
+            float value = round_f16_rte(uintBitsToFloat(arena.data[value_index]));
+            precise float product = value * probability;
+            output_value = fused ? fma(value, probability, output_value) : output_value + product;
+            sum += probability;
+        }
+        precise float result = output_value * divide_finite_normal(1.0, sum);
+        arena.data[pc.output_word + row * total + index] = floatBitsToUint(result);
+        return;
+    }
     precise float sum = 0.0;
     precise float correction = 0.0;
+    precise float accumulators[32];
+    for (uint i = 0u; i < 32u; i++) accumulators[i] = 0.0;
+    uint width = pc.reduction_mode == 1u ? 32u : 8u;
     for (uint token = 0u; token < visible; token++) {
         float score = round_f16_rte(uintBitsToFloat(
             arena.data[pc.scores_word + (row * pc.q_heads + head) * pc.sequence_length + token]
@@ -50,7 +85,18 @@ void main() {
             + kv_head * pc.head_dim + dimension;
         float value = round_f16_rte(uintBitsToFloat(arena.data[value_index]));
         precise float product = score * value;
-        add_pair(sum, correction, product);
+        if (pc.reduction_mode != 0u) {
+            uint lane = token % width;
+            accumulators[lane] = pc.reduction_mode == 1u
+                ? half_fma(score, value, accumulators[lane])
+                : fma(score, value, accumulators[lane]);
+        } else {
+            add_pair(sum, correction, product);
+        }
+    }
+    if (pc.reduction_mode != 0u) {
+        sum = pc.reduction_mode == 1u
+            ? reduce_half32(accumulators) : reduce_float8(accumulators);
     }
     arena.data[pc.output_word + row * total + index] = floatBitsToUint(sum + correction);
 }

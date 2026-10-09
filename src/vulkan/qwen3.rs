@@ -148,6 +148,8 @@ fn dense_shape(model: &Qwen3Model) -> DenseShape {
         vocab: c.vocab,
         freq_base: c.freq_base,
         rope_layout: super::ops::RopeLayout::Neox,
+        approximate_silu_multiline: true,
+        attention_mode: crate::vulkan::ops::AttentionMode::PreparedF16,
     }
 }
 fn dense_weights(model: &Qwen3Model) -> Result<DenseWeights<'_>, VulkanError> {

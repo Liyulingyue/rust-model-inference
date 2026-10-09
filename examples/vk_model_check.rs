@@ -29,6 +29,7 @@ struct Arguments {
     benchmark: bool,
     cpu_benchmark: bool,
     compare_prefill_batches: Option<Vec<usize>>,
+    prompt_repeats: usize,
 }
 
 #[cfg(feature = "vulkan")]
@@ -58,11 +59,21 @@ fn arguments() -> Result<Arguments, String> {
     let mut benchmark = false;
     let mut cpu_benchmark = false;
     let mut compare_prefill_batches = None;
+    let mut prompt_repeats = 1;
     while let Some(argument) = args.next() {
         match argument.as_str() {
             "--cpu-benchmark" if mode == Mode::Qwen3 => cpu_benchmark = true,
             "--model" => model = Some(PathBuf::from(args.next().ok_or("--model needs a path")?)),
             "--benchmark" if matches!(mode, Mode::Qwen3 | Mode::Llama) => benchmark = true,
+            "--prompt-repeats" if mode == Mode::Qwen3 => {
+                prompt_repeats = args
+                    .next()
+                    .ok_or("--prompt-repeats needs a positive integer")?
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|&count| (1..=256).contains(&count))
+                    .ok_or("--prompt-repeats must be in 1..=256")?;
+            }
             "--compare-prefill-batches" if mode != Mode::Embedding => {
                 compare_prefill_batches =
                     Some(parse_prefill_batches(&args.next().ok_or(
@@ -78,6 +89,7 @@ fn arguments() -> Result<Arguments, String> {
         benchmark,
         cpu_benchmark,
         compare_prefill_batches,
+        prompt_repeats,
     })
 }
 
@@ -497,7 +509,7 @@ fn run_qwen3(arguments: &Arguments) -> Result<(), String> {
     let prompt = if arguments.compare_prefill_batches.is_some() {
         PROMPT.repeat(33)
     } else {
-        PROMPT.to_string()
+        PROMPT.repeat(arguments.prompt_repeats)
     };
     let prompt_tokens = build_simple_prompt(&tokenizer, &prompt);
     let positions = qwen_text_positions(prompt_tokens.len());

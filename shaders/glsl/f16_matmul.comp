@@ -1,6 +1,7 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 #include "f16_rounding.glsl"
+#include "f16_dot.glsl"
 
 layout(local_size_x = 64) in;
 
@@ -32,24 +33,6 @@ uint weight_f16(uint slot, uint index) {
 
 float f16_decode(uint bits) {
     return unpackHalf2x16(bits).x;
-}
-
-// Half products are exact in float; TwoSum prevents double rounding at half ties.
-float half_fma(float a, float b, float c) {
-    precise float p = a * b;
-    precise float s = p + c;
-    precise float v = s - p;
-    precise float error = (p - (s - v)) + (c - v);
-    uint bits = floatBitsToUint(s);
-    uint exponent = (bits >> 23u) & 255u;
-    if (error != 0.0 && exponent >= 102u && exponent <= 142u) {
-        uint shift = exponent <= 112u ? 126u - exponent : 13u;
-        uint mantissa = (bits & 0x7fffffu) | 0x800000u;
-        if ((mantissa & ((1u << shift) - 1u)) == (1u << (shift - 1u))) {
-            bits += ((error < 0.0) == (s < 0.0)) ? 1u : 0xffffffffu;
-        }
-    }
-    return round_f16_rte(uintBitsToFloat(bits));
 }
 
 shared float partial[32];

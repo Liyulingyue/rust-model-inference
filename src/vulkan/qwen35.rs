@@ -1,4 +1,6 @@
-use super::ops::{ArenaRegion, GpuWeightFormat, OperatorBindings, Qwen3Ops, TokenCommands};
+use super::ops::{
+    ArenaRegion, GpuMatmulSpec, GpuWeightFormat, OperatorBindings, Qwen3Ops, TokenCommands,
+};
 use super::qwen3::UploadedBuffers;
 use super::{GpuBuffer, VulkanContext, VulkanError};
 use crate::compute::state::TokenCommitState;
@@ -422,8 +424,9 @@ fn fill_mrope(
                 3
             }
         };
-        coefficients[index] = theta[axis].cos();
-        coefficients[index + half] = theta[axis].sin();
+        let (cosine, sine) = crate::ops::rope_sin_cos(theta[axis]);
+        coefficients[index] = cosine;
+        coefficients[index + half] = sine;
         for value in &mut theta {
             *value *= theta_scale;
         }
@@ -1190,8 +1193,8 @@ fn upload_weight(
     buffers: &mut UploadedBuffers,
     weight: &Weight<'_>,
     label: &str,
-) -> Result<(GpuBuffer, GpuWeightFormat), VulkanError> {
-    let format = GpuWeightFormat::from_ggml_type(weight.ggml_type)?;
+) -> Result<(GpuBuffer, GpuMatmulSpec), VulkanError> {
+    let format = GpuMatmulSpec::prepared(weight)?;
     let bytes = validated_weight_bytes(weight, label)?;
     Ok((buffers.upload(bytes)?, format))
 }
@@ -1232,7 +1235,11 @@ fn bind_weight(
     label: &str,
 ) -> Result<OperatorBindings, VulkanError> {
     let (buffer, format) = upload_weight(buffers, weight, label)?;
-    ops.bind_weight_buffers(std::slice::from_ref(&buffer), std::slice::from_ref(&format))
+    ops.bind_weight_buffers_mode(
+        std::slice::from_ref(&buffer),
+        std::slice::from_ref(&format.format),
+        format.mode,
+    )
 }
 
 fn bind_weight_group<const N: usize>(
@@ -1249,7 +1256,11 @@ fn bind_weight_group<const N: usize>(
     }
     if formats.iter().all(|format| *format == formats[0]) {
         return ops
-            .bind_weight_buffers(&gpu_buffers, &formats)
+            .bind_weight_buffers_mode(
+                &gpu_buffers,
+                &formats.iter().map(|spec| spec.format).collect::<Vec<_>>(),
+                formats[0].mode,
+            )
             .map(WeightBindings::Grouped);
     }
 
@@ -1257,7 +1268,11 @@ fn bind_weight_group<const N: usize>(
         .iter()
         .zip(&formats)
         .map(|(buffer, format)| {
-            ops.bind_weight_buffers(std::slice::from_ref(buffer), std::slice::from_ref(format))
+            ops.bind_weight_buffers_mode(
+                std::slice::from_ref(buffer),
+                std::slice::from_ref(&format.format),
+                format.mode,
+            )
         })
         .collect::<Result<Vec<_>, _>>()?
         .try_into()
@@ -1605,7 +1620,13 @@ mod tests {
                 super::upload_weight(&mut buffers, weight, label).unwrap()
             })
             .unzip();
-        let bindings = ops.bind_weight_buffers(&gpu_buffers, &formats).unwrap();
+        let bindings = ops
+            .bind_weight_buffers_mode(
+                &gpu_buffers,
+                &formats.iter().map(|spec| spec.format).collect::<Vec<_>>(),
+                formats[0].mode,
+            )
+            .unwrap();
         let outputs: Vec<_> = [layout.projection, layout.gate, layout.up]
             .into_iter()
             .zip(weights)
@@ -1844,5 +1865,18 @@ mod tests {
             2.0f32.mul_add(coefficients[3], 4.0 * coefficients[1]),
         ];
         assert_eq!(actual.map(f32::to_bits), expected.map(f32::to_bits));
+        for dim in [32, 64, 128] {
+            for positions in [[0; 4], [3; 4], [7, 11, 13, 17]] {
+                let mut coefficients = vec![0.0; dim];
+                fill_mrope(&mut coefficients, positions, [16, 24, 24, 0], 1_000_000.0).unwrap();
+                let mut expected = vec![0.0; dim];
+                expected[..dim / 2].fill(1.0);
+                crate::ops::rope_mrope(&mut expected, positions, [16, 24, 24, 0], dim, 1_000_000.0);
+                assert_eq!(
+                    coefficients.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                    expected.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+                );
+            }
+        }
     }
 }

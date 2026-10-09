@@ -12,41 +12,78 @@ uint weight_word(uint slot, uint index) { return slot == 0u ? w0.data[index] : (
 uint weight_byte(uint slot, uint index) { return (weight_word(slot, index >> 2u) >> ((index & 3u) * 8u)) & 0xffu; }
 int weight_i8(uint slot, uint index) { uint value = weight_byte(slot, index); return value >= 128u ? int(value) - 256 : int(value); }
 int q8(uint index) { uint value = (arena.data[pc.q8_word + (gl_WorkGroupID.z / pc.group_count) * pc.q8_stride + (index >> 2u)] >> ((index & 3u) * 8u)) & 0xffu; return value >= 128u ? int(value) - 256 : int(value); }
+int weight_scale(uint slot, uint offset, uint local) {
+    uint section = local / 128u;
+    uint quarter = (local % 128u) / 32u;
+    return weight_i8(slot, offset + 192u + section * 8u + (local % 32u) / 16u + quarter * 2u);
+}
+
+int weight_code(uint slot, uint offset, uint local) {
+    uint section = local / 128u;
+    uint quarter = (local % 128u) / 32u;
+    uint l = local % 32u;
+    uint ql = section * 64u + l + (quarter == 1u || quarter == 3u ? 32u : 0u);
+    uint qh = section * 32u + l;
+    uint low = quarter < 2u ? weight_byte(slot, offset + ql) & 15u : weight_byte(slot, offset + ql) >> 4u;
+    uint high = (weight_byte(slot, offset + 128u + qh) >> (quarter * 2u)) & 3u;
+    return int(low | (high << 4u));
+}
+
+shared float partial_sums[64];
+
 void main() {
-    uint token_row = gl_WorkGroupID.z / pc.group_count; uint slot = gl_WorkGroupID.z % pc.group_count;
-    uint row = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint token_row = gl_WorkGroupID.z / pc.group_count;
+    uint slot = gl_WorkGroupID.z % pc.group_count;
+    uint invocation = gl_LocalInvocationID.x;
+    uint lane = invocation % 8u;
+    uint row = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 8u + invocation / 8u;
     uint rows = slot == 0u ? pc.rows0 : (slot == 1u ? pc.rows1 : pc.rows2);
-    if (slot >= pc.group_count || row >= rows || gl_LocalInvocationID.x != 0u) return;
-    precise float sums[8] = float[8](0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-    for (uint block = 0u; block < pc.blocks_per_row; ++block) {
-        uint offset = row * pc.blocks_per_row * 210u + block * 210u;
-        precise float q6_scale = f16_decode(weight_byte(slot, offset + 208u) | (weight_byte(slot, offset + 209u) << 8u));
-        precise float q8_scale = uintBitsToFloat(arena.data[pc.scales_word + token_row * pc.scales_stride + block]);
-        precise float scale = q6_scale * q8_scale;
-        int partial[8] = int[8](0, 0, 0, 0, 0, 0, 0, 0);
-        int offset_partial[8] = int[8](0, 0, 0, 0, 0, 0, 0, 0);
-        for (uint local = 0u; local < 256u; ++local) {
-            uint section = local / 128u;
-            uint quarter = (local % 128u) / 32u;
-            uint l = local % 32u;
-            uint ql = section * 64u + l + (quarter == 1u || quarter == 3u ? 32u : 0u);
-            uint qh = section * 32u + l;
-            uint low = quarter < 2u ? weight_byte(slot, offset + ql) & 15u : weight_byte(slot, offset + ql) >> 4u;
-            uint high = (weight_byte(slot, offset + 128u + qh) >> (quarter * 2u)) & 3u;
-            int value = int(low | (high << 4u));
-            int weight_scale = weight_i8(slot, offset + 192u + section * 8u + (l / 16u) + quarter * 2u);
-            int activation = q8(block * 256u + local);
-            partial[(local & 31u) >> 2u] += weight_scale * activation * value;
-            offset_partial[local >> 5u] += weight_scale * activation;
-        }
-        for (uint lane = 0u; lane < 8u; ++lane) {
-            partial[lane] -= offset_partial[lane] << 5;
-            sums[lane] = fma(scale, float(partial[lane]), sums[lane]);
+    precise float sum = 0.0;
+    if (slot < pc.group_count && row < rows) {
+        for (uint block = 0u; block < pc.blocks_per_row; ++block) {
+            uint offset = (row * pc.blocks_per_row + block) * 210u;
+            precise float scale = f16_decode(weight_byte(slot, offset + 208u) | (weight_byte(slot, offset + 209u) << 8u))
+                * uintBitsToFloat(arena.data[pc.scales_word + token_row * pc.scales_stride + block]);
+            int dot = 0;
+            if (pc.input_sum_word != 0u) {
+                for (uint i = 0u; i < 32u; i++) {
+                    uint local = lane + i * 8u;
+                    dot += weight_scale(slot, offset, local) * q8(block * 256u + local)
+                        * (weight_code(slot, offset, local) - 32);
+                }
+                precise float term = scale * float(dot);
+                sum += term;
+                continue;
+            }
+            for (uint group = 0u; group < 8u; group++) {
+                for (uint i = 0u; i < 4u; i++) {
+                    uint local = group * 32u + lane * 4u + i;
+                    dot += weight_scale(slot, offset, local) * q8(block * 256u + local)
+                        * weight_code(slot, offset, local);
+                }
+            }
+            int correction = 0;
+            for (uint i = 0u; i < 32u; i++) {
+                uint local = lane * 32u + i;
+                correction += weight_scale(slot, offset, local) * q8(block * 256u + local);
+            }
+            dot -= correction << 5;
+            sum = fma(scale, float(dot), sum);
         }
     }
-    precise float sum01 = (sums[0] + sums[4]) + (sums[1] + sums[5]);
-    precise float sum23 = (sums[2] + sums[6]) + (sums[3] + sums[7]);
-    precise float sum = sum01 + sum23;
+    partial_sums[invocation] = sum;
+    barrier();
+    if (lane != 0u || slot >= pc.group_count || row >= rows) return;
+    precise float result = 0.0;
+    if (pc.input_sum_word != 0u) {
+        for (uint i = 0u; i < 8u; i++) result += partial_sums[invocation + i];
+    } else {
+        result = ((partial_sums[invocation] + partial_sums[invocation + 4u])
+        + (partial_sums[invocation + 1u] + partial_sums[invocation + 5u]))
+        + ((partial_sums[invocation + 2u] + partial_sums[invocation + 6u])
+        + (partial_sums[invocation + 3u] + partial_sums[invocation + 7u]));
+    }
     uint output_word = slot == 0u ? pc.output0_word : (slot == 1u ? pc.output1_word : pc.output2_word);
-    arena.data[output_word + token_row * (slot == 0u ? pc.output0_stride : (slot == 1u ? pc.output1_stride : pc.output2_stride)) + row] = floatBitsToUint(sum);
+    uint output_stride = slot == 0u ? pc.output0_stride : (slot == 1u ? pc.output1_stride : pc.output2_stride);
+    arena.data[output_word + token_row * output_stride + row] = floatBitsToUint(result);
 }

@@ -1,4 +1,5 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 
 layout(local_size_x = 64) in;
 
@@ -21,6 +22,7 @@ layout(push_constant) uniform PC {
     uint head_dim;
     float eps;
     uint rows;
+    uint reduction_lanes;
 } pc;
 
 shared float output_values[128];
@@ -28,25 +30,12 @@ shared float inverse_rms;
 shared float decay;
 shared float beta_value;
 
-float exp_approx(float x) {
-    precise float z = fma(x, uintBitsToFloat(0x3fb8aa3bu), uintBitsToFloat(0x4b400000u));
-    precise float n = z - uintBitsToFloat(0x4b400000u);
-    precise float reduced = fma(-n, uintBitsToFloat(0x3f317200u), x);
-    reduced = fma(-n, uintBitsToFloat(0x35bfbe8eu), reduced);
-    uint exponent = floatBitsToUint(z) << 23u;
-    precise float scale = uintBitsToFloat(exponent + floatBitsToUint(1.0));
-    precise float square = reduced * reduced;
-    precise float low = fma(uintBitsToFloat(0x3e2aaf33u), reduced, uintBitsToFloat(0x3efffedbu));
-    precise float high = fma(uintBitsToFloat(0x3c072010u), reduced, uintBitsToFloat(0x3d2b9f17u));
-    precise float polynomial = fma(high, square, low);
-    polynomial = fma(polynomial, square, uintBitsToFloat(0x3f7ffff6u) * reduced);
-    if (abs(n) <= 126.0) return fma(scale, polynomial, scale);
-    uint adjust = n <= 0.0 ? 0x82000000u : 0u;
-    precise float scale1 = uintBitsToFloat(adjust + 0x7f000000u);
-    precise float scale2 = uintBitsToFloat(exponent - adjust);
-    if (abs(n) > 192.0) return scale1 * scale1;
-    return fma(scale2, polynomial, scale2) * scale1;
-}
+#include "exp_approx_neon.glsl"
+
+#include "f32_dot.glsl"
+#include "exp_accurate.glsl"
+#include "f32_divide.glsl"
+#include "f32_norm.glsl"
 
 void main() {
     uint value_head = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
@@ -66,43 +55,66 @@ void main() {
     for (uint token = 0u; token < pc.rows; token++) {
         if (lane == 0u) {
             float beta_raw = uintBitsToFloat(arena.data[pc.beta_word + token * pc.v_heads + value_head]);
-            beta_value = 1.0 / (1.0 + exp(-beta_raw));
+            beta_value = divide_finite_normal(1.0, 1.0 + exp_accurate(-beta_raw));
             float alpha_raw = uintBitsToFloat(arena.data[pc.alpha_word + token * pc.v_heads + value_head]);
-            float biased = alpha_raw + uintBitsToFloat(dt_bias.data[value_head]);
-            float softplus = biased > 20.0 ? biased : log(1.0 + exp(biased));
-            decay = exp(softplus * uintBitsToFloat(a_weight.data[value_head]));
+            precise float biased = alpha_raw + uintBitsToFloat(dt_bias.data[value_head]);
+            float softplus = biased > 20.0 ? biased : log(1.0 + exp_accurate(biased));
+            precise float gate = softplus * uintBitsToFloat(a_weight.data[value_head]);
+            decay = exp_accurate(gate);
         }
         barrier();
 
         for (uint row = lane; row < pc.head_dim; row += 64u) {
             uint row_base = (row / 64u) * pc.head_dim;
             uint key_base = pc.k_word + (token * pc.k_heads + key_head) * pc.head_dim;
+            precise float key_acc[16];
             precise float state_key = 0.0;
+            uint vector_end = pc.reduction_lanes == 0u ? 0u
+                : pc.head_dim / pc.reduction_lanes * pc.reduction_lanes;
+            for (uint i = 0u; i < 16u; i++) key_acc[i] = 0.0;
             for (uint column = 0u; column < pc.head_dim; column++) {
-                float state = state_values[row_base + column] * decay;
+                precise float state = state_values[row_base + column] * decay;
                 state_values[row_base + column] = state;
-                state_key = fma(state, uintBitsToFloat(arena.data[key_base + column]), state_key);
+                float key = uintBitsToFloat(arena.data[key_base + column]);
+                if (column < vector_end) {
+                    uint stream = column % pc.reduction_lanes;
+                    key_acc[stream] = fma(state, key, key_acc[stream]);
+                }
+            }
+            if (pc.reduction_lanes != 0u) state_key = reduce_f32_dot(key_acc, pc.reduction_lanes);
+            for (uint column = vector_end; column < pc.head_dim; column++) {
+                precise float term = state_values[row_base + column]
+                    * uintBitsToFloat(arena.data[key_base + column]);
+                state_key += term;
             }
             float value = uintBitsToFloat(
                 arena.data[pc.v_word + (token * pc.v_heads + value_head) * pc.head_dim + row]
             );
-            float delta = (value - state_key) * beta_value;
+            precise float delta = (value - state_key) * beta_value;
+            precise float output_acc[16];
+            for (uint i = 0u; i < 16u; i++) output_acc[i] = 0.0;
             precise float output_value = 0.0;
             uint q_base = pc.q_word + (token * pc.k_heads + key_head) * pc.head_dim;
             for (uint column = 0u; column < pc.head_dim; column++) {
-                float state = fma(
-                    uintBitsToFloat(arena.data[key_base + column]),
-                    delta,
-                    state_values[row_base + column]
-                );
+                float key = uintBitsToFloat(arena.data[key_base + column]);
+                precise float term = key * delta;
+                precise float state = pc.reduction_lanes != 0u && column < pc.head_dim / 4u * 4u
+                    ? fma(key, delta, state_values[row_base + column])
+                    : state_values[row_base + column] + term;
                 state_values[row_base + column] = state;
-                output_value = fma(
-                    state,
-                    uintBitsToFloat(arena.data[q_base + column]),
-                    output_value
-                );
+                float query = uintBitsToFloat(arena.data[q_base + column]);
+                if (column < vector_end) {
+                    uint stream = column % pc.reduction_lanes;
+                    output_acc[stream] = fma(state, query, output_acc[stream]);
+                }
             }
-            output_values[row] = output_value * inversesqrt(float(pc.head_dim));
+            if (pc.reduction_lanes != 0u) output_value = reduce_f32_dot(output_acc, pc.reduction_lanes);
+            for (uint column = vector_end; column < pc.head_dim; column++) {
+                precise float term = state_values[row_base + column]
+                    * uintBitsToFloat(arena.data[q_base + column]);
+                output_value += term;
+            }
+            output_values[row] = output_value * inverse_sqrt_f32(float(pc.head_dim));
         }
         barrier();
 
@@ -117,17 +129,17 @@ void main() {
                     : (square - next) + sum;
                 sum = next;
             }
-            inverse_rms = inversesqrt((sum + correction) / float(pc.head_dim) + pc.eps);
+            inverse_rms = inverse_sqrt_f32((sum + correction) / float(pc.head_dim) + pc.eps);
         }
         barrier();
 
         for (uint row = lane; row < pc.head_dim; row += 64u) {
-            float normalized = output_values[row] * inverse_rms
+            precise float normalized = output_values[row] * inverse_rms
                 * uintBitsToFloat(norm_weight.data[row]);
             float gate = uintBitsToFloat(
                 arena.data[pc.z_word + (token * pc.v_heads + value_head) * pc.head_dim + row]
             );
-            float activated = gate / (1.0 + exp_approx(-gate));
+            precise float activated = divide_finite_normal(gate, 1.0 + exp_approx_neon(-gate));
             arena.data[pc.output_word + (token * pc.v_heads + value_head) * pc.head_dim + row] =
                 floatBitsToUint(normalized * activated);
         }

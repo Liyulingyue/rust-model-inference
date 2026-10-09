@@ -4,9 +4,99 @@
 实施计划：[八阶段计划](../superpowers/plans/2026-10-08-unified-compute-dispatch.md)。
 
 统一入口、两个 linear 消费者、共享 dense 执行、事务回退及 CLI/HTTP 策略已实现。
-**尚未证明真实模型的自动 GPU 加速收益，因此没有开放新的 Auto workload。**
-真实 Qwen 权重仍未通过既定 logits 门槛；原始版本能复现相同偏差。
+真实 Qwen3 Q4_0 在本机的已测 bucket 获得端到端收益，但没有把任何新增 bucket
+切换为默认 Auto；Q4_K_M 未达到性能门槛，现有 Auto 资格保持不变。
+真实 Qwen 权重的数值偏差已修复，Qwen3 Q4_0/Q4_K_M 和 Qwen3.5 BF16
+已通过既定 logits 与 32-token greedy 门槛。最终 release 性能和回归结果见最新验收章。
 全量测试也有基线失败，不能把本分支描述为“全绿”或“Vulkan 全面可用”。
+
+## 真实权重数值与性能门禁修复（2026-10-09）
+
+本轮基线 `8d7fcf6a34659e3d111dfa49ee62a33873b9b7b3`，设备仍为 Apple M3 Max /
+ARM64 NEON / MoltenVK 1.4.2 / Rust 1.98.1。下面旧章节是历史验收，不代表本轮结论。
+
+修复 CPU 数值契约遗漏：Q8_0 scale/division 和舍入边界、ARM/x86 Q8_K 激活契约、
+Q4_K/Q6_K integer reduction、F16 attention 的半精度归约、SiLU 的 ISA approximation、
+RMS/QK normalization、RoPE 的角度递推和 FMA、Qwen3.5 convolution/SSM 的运算顺序。
+共享 GLSL include 收敛 division、normalization、exp 和 dot；manifest 现在覆盖 includes。
+Q4/Q5 每 lane 独立输出，Q6_K 每 8 lanes 合作一个输出，BF16 按 native streams 打包，
+保留输出尾行、barrier、grouped stride 和设备地址校验。
+
+Qwen3.5 BF16 kernel 还声明激活 BF16 舍入。`GpuMatmulSpec::prepared` 从 kernel capability
+选择 `RoundedBf16`；上传、grouped binding 和缓存同时验证 storage 与 mode。
+宽度 261、65 输出、3 行的强制 Vulkan fixture 与 CPU 逐位一致，未舍入的参照确实不同。
+其 compensated F32 sum 已通过下列 fixture/权重；这不是全指数范围 FP64 等价证明，
+shader 明确记录该限制。没有把 BF16/Q4 权重重新量化成 Q8。
+
+最终设备套件暴露 Llama 的 attention 契约差异：CPU F16 KV 使用 F32 query、在线 softmax
+rescale 和 F32 accumulation，不能套用 Qwen 的 prepared F16 dot/probability 舍入。
+`AttentionMode::OnlineF32` 由适配器声明，复用 scores/values shader；同一 `DenseOp::Attention`
+表达仍被两后端消费，层内没有额外提交或 host 读回。Llama 的单行 approximate / 多行 exact
+SiLU 也传递到 GPU；SIMD SiLU 的尾部保留准确 exp 路径。B=1/3/64、32 decode、两次 reset、
+完整 KV 和失败恢复回归在原门槛下 RED→GREEN。
+
+长输入验收进一步发现 Qwen3 的 F16 softmax 舍入边界：第 0 层 token 106 的
+107 个 score 输入相同，但指数近似导致一个 probability 差一个 F16 ULP，随后投影和
+激活量化放大差异。提取真实 score 的独立 fixture 在原实现失败；指数的 range reduction
+和 polynomial 保留 F32 高低项后逐位通过，没有放宽 logits 门槛，也没有增加 host 读回。
+两种真实 Qwen3 权重的 128/132/136-token 输入随后都通过 prefill logits 逐位比较与
+32-token greedy 比较。该 fixture 不构成跨平台 libc `expf` 全输入逐位等价证明。
+
+| 当前验证 | 结果与边界 |
+| --- | --- |
+| CPU 全库 | 1165 passed / 23 failed / 78 ignored；失败名称与基线完全相同 |
+| Vulkan + parity-trace 全库（沙箱） | 1264 passed / 28 failed / 139 ignored；失败名称与同环境基线完全相同 |
+| 真实设备套件 | 76 passed / 1 failed；唯一失败仍为 main 已复现的 AuK ARM fixture，要求不支持的 AVX2/F16C Dot |
+| Qwen3 Q4_0 / Q4_K_M | 4/128/132/136 tokens 的 prefill logits 逐位一致，32 个 greedy token 一致；强制 Vulkan 实际提交 |
+| Qwen3 Q4_K_M B=1/64，132 tokens | 各后端内部跨 batch 的 logits、prompt/decode KV、32 tokens 均逐位一致；prefill 提交 132→3；跨 CPU/GPU 证据为上一行 |
+| Qwen3.5 BF16 | prefill logits 逐位一致，32 个 greedy token 一致；没有 CPU fallback |
+| Qwen3.5 BF16 B=1/64，80 tokens | logits、dense KV、conv/SSM、greedy 和 decode state 全部逐位一致；prefill 提交 560→14 |
+| Qwen3.5 UD-Q8_K_XL | 强制 Vulkan 明确拒绝 unsupported；未增加该 storage shader，也未把 CPU oracle 写成 GPU 成功 |
+
+另运行了允许全库初始化 GPU 的环境：当前 1258 passed / 34 failed / 139 ignored，
+保留的共享算子改动前二进制为 1255 passed / 35 failed / 135 ignored，不能与沙箱结果混用。
+Qwen3.5 hidden/failure 和 Q8 thread partition 等失败在该基线复现。当前新增两项全库失败
+是 DOTS Q8 convolution 和 owned/borrowed Q8 equality；两者在基线与当前版独立运行均通过。
+涉及的旧 Q8 自动路由和 context `(ptr,len)` 权重缓存未在本轮修改，完整运行顺序差异
+尚未完成归因。本轮限定设备套件和真实模型 CLI 通过，不宣称全进程旧 GPU
+路由的全部测试通过；该环境对照与隔离结果也保留在验收日志中。
+
+门槛维持 `abs <= 2e-3 + 2e-3 * abs(CPU)`，已有 bits fixture 仍要求逐位一致。
+真实模型在哈希扫描后加载，因此不宣称 OS 冷页缓存；CPU 作为当前实现的 oracle，
+不是新增的外部 llama.cpp/PyTorch 正确性证明。Llama 目前只有合成模型设备回归。
+
+最终 release 使用 `release` + fat LTO、Vulkan、Rust 1.98.1，硬件为 Apple M3 Max /
+ARM64 NEON / MoltenVK 1.4.2 / 64 GiB。所有 Qwen3 性能样本均为独立进程、warmup 后
+五轮 CPU/GPU 交替测量，正确性先于计时；峰值 RSS、footprint 和 device buffer 分开记录。
+
+| release workload | CPU median | Vulkan median | 墙钟变化 | 正确性/Auto |
+| --- | ---: | ---: | ---: | --- |
+| Q4_0，4 tokens | 2166 ms | 1934 ms | +10.7% | 通过；仅显式 Vulkan 验收 |
+| Q4_0，128 tokens | 11320 ms | 4469 ms | +60.5% | 通过；相邻形状也通过 |
+| Q4_0，132 tokens | 11701 ms | 4706 ms | +59.8% | 通过；相邻形状也通过 |
+| Q4_0，136 tokens | 11968 ms | 4449 ms | +62.8% | 通过；相邻形状也通过 |
+| Q4_K_M，4 tokens | 2320 ms | 6361 ms | -174.2% | 通过；不准入 Auto |
+| Q4_K_M，128 tokens | 5206 ms | 19407 ms | -272.8% | 通过；不准入 Auto |
+| Q4_K_M，132 tokens | 5296 ms | 19536 ms | -268.9% | 通过；不准入 Auto |
+| Q4_K_M，136 tokens | 5312 ms | 19812 ms | -273.0% | 通过；不准入 Auto |
+
+Q4_0 的 GPU prefill 是主要收益来源，decode 吞吐略低于 CPU；Q4_K_M 的当前 Vulkan
+路径明显更慢，因此没有扩大默认策略。CPU 同配置基线为 Q4_0 `739.992→716.932 ms`
+（-3.12%）、Q4_K_M `678.878→688.590 ms`（+1.43%），均在 ≤5% 退化门槛内。
+Qwen3.5 BF16 的 80-token batch 1/64 检查和 Qwen3 Q4_K_M 的 132-token batch 1/64
+检查通过；前者 prefill 提交 560→14，后者 132→3。
+
+用户给定的 Z-Image 512×512、8 步、seed 42、8 线程、`--gpu` 也用最终 release 重跑：
+8 次 denoise 全部 finite，dispatch 从 300 到 2400、每步 34 GPU blocks/170 projections，
+VAE 完成并生成有效 512×512 RGB PNG。阶段耗时为 text 15.100 s、denoise 240.426 s、
+VAE 9.206 s、总计 264.733 s；PNG SHA-256 为
+`ab9754ddfed1355eb37fecc75b779d01dd34578227680801bdd200722cc89735`。
+
+没有新增 Auto bucket；现有实验性 Auto 行为按原资格运行，新 Llama Auto 仍固定 CPU。
+未覆盖 x86、独显、其他 Vulkan 驱动、真实 Llama 权重或外部 oracle。
+
+原始命令、日志、失败名称对照和二进制/模型 provenance 保留在忽略目录
+`.superpowers/sdd/2026-10-09-auto-admission/`。
 
 ## 共享算子表达验收（2026-10-09）
 
@@ -24,7 +114,7 @@ SiLU shader 新增输出地址，原调用仍写 gate，共享表达式写 up，
 没有新增每算子提交、读回、activation 拷贝、全局缓存或依赖。
 
 `GpuWeightFormat` 现在只表示存储；`GpuMatmulMode` 独立表示 Prepared、
-RoundedInputF32 或 Dot，`GpuMatmulSpec` 组合两者，由算子校验并选择 shader。
+RoundedInputF32、RoundedBf16 或 Dot，`GpuMatmulSpec` 组合两者，由算子校验并选择 shader。
 旧 `F16F32` 对应 `F16 + RoundedInputF32`，旧 `F16Dot` / `BF16Dot` 对应
 相应存储加 Dot。缓存同时验证格式与 mode；非法组合及缓存 mode 变化保留输出。
 VAE 继续舍入 F16 输入并 F32 累加；AuK/YuE 保留 Dot 的架构资格与原有归约。
@@ -112,11 +202,11 @@ prompt `A red fox sleeping beneath a pine tree`、seed 42、512×512、8 线程�
 VAE 解码完成，生成有效 512×512 PNG。每步 34 个 GPU block、170 次 projection，
 main session 的 dispatch 计数从 300 到 2400（不含 text、refiner 和 VAE 的提交）。
 
-本次新进程单次观测：text_encode 14.5571 s、denoise 227.6172 s、VAE 8.7364 s，
-阶段总计 250.9107 s；模型页缓存和驱动缓存已由此前验证预热。这是 M3 Max 上的成功
+本次最终 release 新进程单次观测：text_encode 15.1001 s、denoise 240.4261 s、VAE 9.2063 s，
+阶段总计 264.7325 s；模型页缓存和驱动缓存已由此前验证预热。这是 M3 Max 上的成功
 验收，不是性能准入，不能与截图的其他设备耗时直接比较。
-release binary SHA-256：`b4bbe2edf62980ba6a1700cf3593e1e8b81efe00564362805f36267b1568b6fb`。
-PNG SHA-256：`852ae7c0a0351e113fe2b5d7df62a9426562cf15f6bd8178ab42b395bc180cd9`。
+release binary SHA-256：`66e3710b4b1b5a78770259e80b4ca53aae10561840ef0181e3c99e1393a1092b`。
+PNG SHA-256：`ab9754ddfed1355eb37fecc75b779d01dd34578227680801bdd200722cc89735`。
 
 日志、完整 trace、失败名称对照、release provenance/result 和 PNG 保留在上述本轮
 忽略目录的 `zimage-*` 文件。本次证明数值回归已修复；未据此开放 Auto workload，

@@ -264,6 +264,9 @@ impl Kernel for VulkanKernel<'_> {
     fn supports_f16_strict(&self) -> bool {
         self.inner.supports_f16_strict()
     }
+    fn rounds_bf16_input(&self) -> bool {
+        self.inner.rounds_bf16_input()
+    }
 
     fn try_forward_vulkan_rows(
         &self,

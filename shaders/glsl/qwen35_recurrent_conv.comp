@@ -1,4 +1,5 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 
 layout(local_size_x = 64) in;
 
@@ -26,25 +27,9 @@ layout(push_constant) uniform PC {
 shared float inverse_q;
 shared float inverse_k;
 
-float exp_approx(float x) {
-    precise float z = fma(x, uintBitsToFloat(0x3fb8aa3bu), uintBitsToFloat(0x4b400000u));
-    precise float n = z - uintBitsToFloat(0x4b400000u);
-    precise float reduced = fma(-n, uintBitsToFloat(0x3f317200u), x);
-    reduced = fma(-n, uintBitsToFloat(0x35bfbe8eu), reduced);
-    uint exponent = floatBitsToUint(z) << 23u;
-    precise float scale = uintBitsToFloat(exponent + floatBitsToUint(1.0));
-    precise float square = reduced * reduced;
-    precise float low = fma(uintBitsToFloat(0x3e2aaf33u), reduced, uintBitsToFloat(0x3efffedbu));
-    precise float high = fma(uintBitsToFloat(0x3c072010u), reduced, uintBitsToFloat(0x3d2b9f17u));
-    precise float polynomial = fma(high, square, low);
-    polynomial = fma(polynomial, square, uintBitsToFloat(0x3f7ffff6u) * reduced);
-    if (abs(n) <= 126.0) return fma(scale, polynomial, scale);
-    uint adjust = n <= 0.0 ? 0x82000000u : 0u;
-    precise float scale1 = uintBitsToFloat(adjust + 0x7f000000u);
-    precise float scale2 = uintBitsToFloat(exponent - adjust);
-    if (abs(n) > 192.0) return scale1 * scale1;
-    return fma(scale2, polynomial, scale2) * scale1;
-}
+#include "exp_approx_neon.glsl"
+#include "f32_divide.glsl"
+#include "f32_norm.glsl"
 
 void main() {
     uint group = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
@@ -61,9 +46,10 @@ void main() {
                 float input_value = uintBitsToFloat(source < pc.d_conv
                     ? arena.data[state_base + source * pc.conv_dim + channel]
                     : arena.data[pc.qkv_word + (source - pc.d_conv) * pc.conv_dim + channel]);
-                value = fma(uintBitsToFloat(conv_weight.data[channel * pc.d_conv + tap]), input_value, value);
+                precise float term = uintBitsToFloat(conv_weight.data[channel * pc.d_conv + tap]) * input_value;
+                value += term;
             }
-            float activated = value / (1.0 + exp_approx(-value));
+            precise float activated = divide_finite_normal(value, 1.0 + exp_approx_neon(-value));
             uint output_word = channel < pc.key_dim
                 ? pc.q_word + row * pc.key_dim + channel
                 : channel < 2u * pc.key_dim
@@ -106,8 +92,8 @@ void main() {
                     : (k_square - k_next) + k_sum;
                 k_sum = k_next;
             }
-            inverse_q = 1.0 / max(sqrt(q_sum + q_correction), pc.eps);
-            inverse_k = 1.0 / max(sqrt(k_sum + k_correction), pc.eps);
+            inverse_q = divide_finite_normal(1.0, max(sqrt_f32(q_sum + q_correction), pc.eps));
+            inverse_k = divide_finite_normal(1.0, max(sqrt_f32(k_sum + k_correction), pc.eps));
         }
         barrier();
 

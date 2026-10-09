@@ -303,7 +303,7 @@ impl<'model, 'weights> LinearExecutor<'model, 'weights> {
         rows: usize,
         outputs: &mut [&mut [f32]; N],
     ) -> Result<(), ComputeError> {
-        use crate::vulkan::ops::GpuWeightFormat;
+        use crate::vulkan::ops::GpuMatmulSpec;
         let runtime = self.runtime.as_mut().unwrap();
         let mut total = 0usize;
         // Validate the entire group before the first upload or output write.
@@ -326,7 +326,7 @@ impl<'model, 'weights> LinearExecutor<'model, 'weights> {
             }
             runtime.validate(
                 w.kernel.weight_bytes().unwrap(),
-                GpuWeightFormat::from_ggml_type(w.ggml_type)?,
+                GpuMatmulSpec::prepared(w)?,
                 input.len(),
                 rows,
                 w.n_in,
@@ -343,7 +343,7 @@ impl<'model, 'weights> LinearExecutor<'model, 'weights> {
             let w = binding.weight;
             runtime.matmul_rows(
                 w.kernel.weight_bytes().unwrap(),
-                GpuWeightFormat::from_ggml_type(w.ggml_type)?,
+                GpuMatmulSpec::prepared(w)?,
                 input,
                 rows,
                 w.n_in,
@@ -426,6 +426,63 @@ mod tests {
 
     fn pool() -> Arc<ComputePool> {
         Arc::new(ComputePool::new(2))
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn rounded_bf16_prepared_linear_matches_cpu_with_tails() {
+        const WIDTH: usize = 261;
+        const OUTPUTS: usize = 65;
+        const ROWS: usize = 3;
+        let bytes: Vec<u8> = (0..WIDTH * OUTPUTS)
+            .flat_map(|index| {
+                crate::ops::f32_to_bf16(((index * 17 % 97) as f32 - 48.0) / 19.0).to_le_bytes()
+            })
+            .collect();
+        let rounded = Weight {
+            kernel: Box::new(crate::ops::kernel::bf16::BF16Kernel::with_bf16_input(
+                &bytes,
+            )),
+            ggml_type: crate::GGMLType::BF16,
+            n_in: WIDTH,
+            n_out: OUTPUTS,
+        };
+        let input: Vec<_> = (0..ROWS * WIDTH)
+            .map(|index| ((index * 43 % 191) as f32 - 95.0) / 37.0)
+            .collect();
+        let run = |policy| {
+            let mut executor = LinearExecutor::new(
+                policy,
+                vec![LinearBinding {
+                    weight: &rounded,
+                    mode: LinearMode::Prepared,
+                }],
+                ROWS,
+                pool(),
+            )
+            .unwrap();
+            let mut output = vec![0.0; ROWS * OUTPUTS];
+            let backend = executor
+                .run(executor.id(0).unwrap(), &input, ROWS, &mut output)
+                .unwrap();
+            (backend, output)
+        };
+        let (cpu_backend, expected) = run(ComputePolicy::Cpu);
+        let (gpu_backend, actual) = run(ComputePolicy::Vulkan);
+        assert_eq!(cpu_backend, UsedBackend::Cpu);
+        assert_eq!(gpu_backend, UsedBackend::Vulkan);
+        assert_eq!(
+            actual.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+        );
+        let raw = crate::ops::kernel::bf16::BF16Kernel::new(&bytes);
+        let mut unrounded = vec![0.0; OUTPUTS];
+        crate::ops::kernel::Kernel::forward(&raw, &input[..WIDTH], &mut unrounded, WIDTH, OUTPUTS);
+        assert!(unrounded
+            .iter()
+            .zip(&expected)
+            .any(|(a, b)| a.to_bits() != b.to_bits()));
     }
 
     #[test]

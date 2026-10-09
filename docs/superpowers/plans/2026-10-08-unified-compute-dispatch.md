@@ -355,6 +355,15 @@ pub(crate) fn run_dense_layer(
 
 **完成条件:** Auto 在目标验收组合获得实测收益；若 GPU 未胜出，保留统一入口和显式选项，如实标记加速目标尚未达成。
 
+### 当前交付状态（2026-10-09）
+
+Task 1–7 的统一策略、linear/dense 表达、事务回退、第二个 dense 模型、CLI/诊断和
+main 冲突修复已实现并通过对应 focused/设备回归。Task 8 已按固定模型、输入、五轮
+交替样本完成 release 验收：Qwen3 Q4_0 的 4/128/132/136-token bucket 达到门槛，
+Q4_K_M 的相同 bucket 未达到；默认 Auto 因此保持不变，显式 Vulkan 和验证日志保留。
+CPU 同配置退化均低于 5%，Z-Image 8 步 finite/PNG 回归通过。完整数字和失败边界见
+[统一计算验收报告](../../develop/UNIFIED_COMPUTE_VALIDATION.md)。
+
 ## 6. 验证命令与矩阵
 
 以下命令在实施阶段运行，本次编写未执行。无设备/权重时记录“未运行”，不把 skipped 当通过。

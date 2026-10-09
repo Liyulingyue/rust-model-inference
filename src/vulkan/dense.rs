@@ -20,6 +20,8 @@ pub(crate) struct DenseShape {
     pub vocab: usize,
     pub freq_base: f32,
     pub rope_layout: RopeLayout,
+    pub approximate_silu_multiline: bool,
+    pub attention_mode: super::ops::AttentionMode,
 }
 
 #[derive(Clone, Copy)]
@@ -248,6 +250,7 @@ pub(crate) fn record_dense_layer(
                         config.n_head_kv,
                         config.n_embd_head_k,
                         rows,
+                        config.attention_mode,
                     )?;
                 }
                 DenseOp::Add { input, output } => {
@@ -267,6 +270,7 @@ pub(crate) fn record_dense_layer(
                         region(up),
                         width(gate),
                         rows,
+                        rows == 1 || config.approximate_silu_multiline,
                     )?;
                 }
                 DenseOp::Moe { .. } => {

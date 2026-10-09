@@ -13,6 +13,10 @@
 //! retain the Q8_0 path.
 
 pub trait Kernel: Send + Sync {
+    /// Prepared BF16 kernels may also round activations before their wide dot.
+    fn rounds_bf16_input(&self) -> bool {
+        false
+    }
     /// Capability query before a strict group can modify any output.
     fn supports_f16_strict(&self) -> bool {
         false

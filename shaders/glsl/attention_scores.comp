@@ -1,6 +1,7 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 #include "f16_rounding.glsl"
+#include "f16_dot.glsl"
 layout(local_size_x = 64) in;
 
 layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
@@ -17,6 +18,8 @@ layout(push_constant) uniform PC {
     float scale;
     uint base_position;
     uint rows;
+    uint full_attention;
+    uint reduction_mode;
 } pc;
 
 void add_pair(inout float high, inout float low, float value) {
@@ -44,12 +47,31 @@ void main() {
         + kv_head * pc.head_dim;
     precise float sum = 0.0;
     precise float correction = 0.0;
+    precise float accumulators[32];
+    for (uint i = 0u; i < 32u; i++) accumulators[i] = 0.0;
+    bool online = (pc.reduction_mode & 256u) != 0u;
+    uint mode = pc.reduction_mode & 255u;
+    uint width = mode == 1u ? 32u : mode == 4u ? 4u : 8u;
+    uint prefix = mode == 0u ? 0u : pc.head_dim / width * width;
     for (uint dimension = 0u; dimension < pc.head_dim; dimension++) {
         float query = uintBitsToFloat(arena.data[q_base + dimension]);
-        query = round_f16_rte(query);
+        if (!online) query = round_f16_rte(query);
         float key = round_f16_rte(uintBitsToFloat(arena.data[key_base + dimension]));
         precise float product = query * key;
-        add_pair(sum, correction, product);
+        if (dimension < prefix) {
+            uint lane = dimension % width;
+            accumulators[lane] = mode == 1u
+                ? half_fma(query, key, accumulators[lane])
+                : fma(query, key, accumulators[lane]);
+            if (dimension + 1u == prefix) {
+                sum = mode == 1u ? reduce_half32(accumulators)
+                    : mode == 4u ? (accumulators[0] + accumulators[1]) + (accumulators[2] + accumulators[3])
+                    : reduce_float8(accumulators);
+            }
+        } else {
+            if (online) sum += product;
+            else add_pair(sum, correction, product);
+        }
     }
     arena.data[pc.scores_word + row * total + index] = floatBitsToUint((sum + correction) * pc.scale);
 }
