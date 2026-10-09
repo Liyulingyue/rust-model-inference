@@ -9,6 +9,10 @@ use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 use crate::format::ggufrs::{open_model_source, ComponentRole};
+
+/// The system turn Qwen2.5-Omni requires; shared by the hand-built and
+/// Jinja2 prompt builders so both produce the same conversation.
+const OMNI_SYSTEM_TEXT: &str = "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech.";
 use crate::models::hybrid::HybridTextModel;
 use crate::models::qwen3::vision::{
     qwen_smart_resize as qwen3vl_smart_resize, VisionEncoder as VisionEncoder3vl,
@@ -47,6 +51,7 @@ pub fn run_qwen3_family_multimodal(
     temperature: f32,
     n_threads_arg: usize,
     prefill_batch_size: usize,
+    jinja: &crate::prompt::jinja::Options,
 ) -> Result<String, String> {
     validate_single_qwen_media(
         image_path.is_some(),
@@ -241,6 +246,12 @@ pub fn run_qwen3_family_multimodal(
         BPETokenizer::from_gguf_metadata(|key| llm_source.metadata(key).cloned())
             .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?,
     );
+    // Captured before `model_source` is moved into the model below: the
+    // Jinja2 path needs `tokenizer.chat_template` off the GGUF.
+    let jinja_metadata = {
+        let src = Arc::clone(&model_source);
+        move |k: &str| src.metadata(k).cloned()
+    };
     let model = Qwen3Model::from_source(model_source, Arc::clone(&tokenizer), Arc::clone(&pool))?;
     let width = model.config().n_embd;
     if media.len() % width != 0 {
@@ -248,11 +259,7 @@ pub fn run_qwen3_family_multimodal(
             "Media projector width does not match model width {width}"
         ));
     }
-    let (start_name, pad_name, end_name) = match media_kind {
-        crate::app::media::MediaKind::Audio => ("audio_start", "audio_pad", "audio_end"),
-        crate::app::media::MediaKind::Image => ("vision_start", "image_pad", "vision_end"),
-        crate::app::media::MediaKind::Video => ("vision_start", "video_pad", "vision_end"),
-    };
+    let (start_name, pad_name, end_name) = media_kind.placeholder_tokens();
     let start = tokenizer
         .special_token_id(start_name)
         .ok_or_else(|| format!("Required token missing: {start_name}"))?;
@@ -280,6 +287,86 @@ pub fn run_qwen3_family_multimodal(
             "Deepstack layer mismatch: model={}, projector={deepstack_layers}",
             model.config().n_deepstack_layers
         ));
+    }
+    // `--jinja` renders the model's own template, which already knows the
+    // `<|vision_start|><|image_pad|><|vision_end|>` shape. The template
+    // writes one `<|image_pad|>` per media item; the projector produced
+    // `rows` grid tokens, so the placeholder is expanded into a contiguous
+    // run first — the contract `build_qwen3_media_positions` documents.
+    // The system turn stays Omni-only, matching the hand-built path below.
+    let jinja_system = if matches!(family, crate::app::media::ProjectorFamily::Qwen25Omni) {
+        Some(OMNI_SYSTEM_TEXT)
+    } else {
+        None
+    };
+    // One part per attachment, and the count is `rows`: the number of
+    // projected tokens divided by the width. Deriving it from the vision grid
+    // shapes instead left audio with an empty list -- Omni audio produces
+    // embeddings but no vision grid -- so the template emitted no content part
+    // and the placeholder count did not match.
+    let mut jinja_media: Vec<crate::prompt::jinja::MediaPart> = Vec::new();
+    if image_path.is_some() {
+        jinja_media.push(crate::prompt::jinja::MediaPart::new(
+            media_kind.content_type(),
+            rows,
+        ));
+    }
+    if video_path.is_some() {
+        // One content part per frame: the vision path pushed one grid shape per
+        // frame, and the template emits a placeholder for each of them.
+        let frames = media_grid_shapes.len().max(1);
+        let per_frame = rows / frames;
+        for _ in 0..frames {
+            jinja_media.push(crate::prompt::jinja::MediaPart::new(
+                media_kind.content_type(),
+                per_frame,
+            ));
+        }
+    }
+    if audio_path.is_some() {
+        jinja_media.push(crate::prompt::jinja::MediaPart::new(
+            media_kind.content_type(),
+            rows,
+        ));
+    }
+    let jinja_template = jinja.resolve(&jinja_metadata)?;
+    if let Some(jinja_ids) = crate::prompt::jinja::media_conversation_tokens(
+        tokenizer.as_ref(),
+        jinja_template.as_ref(),
+        pad,
+        &jinja_media,
+        prompt,
+        jinja_system,
+        false,
+    )? {
+        let mut embeddings = model.embed_tokens(&jinja_ids)?;
+        let deepstack_embeddings = inject_qwen_media_embeddings(
+            &jinja_ids,
+            pad,
+            &mut embeddings,
+            &media,
+            &media_deepstack,
+            width,
+        )?;
+        let positions = build_qwen3_media_positions(&jinja_ids, pad, &media_grid_shapes)?;
+        let generation = model.generate(
+            Qwen3Input {
+                token_ids: &jinja_ids,
+                positions: &positions,
+                embeddings: Some(&embeddings),
+                deepstack_embeddings: (!deepstack_embeddings.is_empty())
+                    .then_some(deepstack_embeddings.as_slice()),
+            },
+            Qwen3GenerateOptions {
+                max_new_tokens: max_tokens,
+                temperature,
+                prefill_batch_size,
+            },
+        )?;
+        print!("{}", generation.text);
+        io::stdout().flush().map_err(|error| error.to_string())?;
+        println!();
+        return Ok(generation.text);
     }
     let mut content = vec![start];
     content.extend(std::iter::repeat_n(pad, rows));
@@ -553,11 +640,7 @@ pub fn run_qwen3_family_multimodal_logits(
             "Media projector width does not match model width {width}"
         ));
     }
-    let (start_name, pad_name, end_name) = match media_kind {
-        crate::app::media::MediaKind::Audio => ("audio_start", "audio_pad", "audio_end"),
-        crate::app::media::MediaKind::Image => ("vision_start", "image_pad", "vision_end"),
-        crate::app::media::MediaKind::Video => ("vision_start", "video_pad", "vision_end"),
-    };
+    let (start_name, pad_name, end_name) = media_kind.placeholder_tokens();
     let start = tokenizer
         .special_token_id(start_name)
         .ok_or_else(|| format!("Required token missing: {start_name}"))?;
@@ -640,6 +723,9 @@ pub fn run_qwen35_family_multimodal_logits(
     // their own instructions (the JEV scorer) pass `Some`; the HTTP multimodal
     // endpoints leave it `None` to keep Qwen's default system text.
     system_prompt: Option<&str>,
+    // Already resolved. Passing `Options` here used to make callers rebuild
+    // them, which is how `--chat-template-file` got dropped on this path.
+    jinja: Option<&crate::prompt::jinja::JinjaChatTemplate>,
 ) -> Result<(Vec<f32>, std::time::Duration), String> {
     use crate::app::media::frame_pairs;
     use crate::models::qwen35::vision::{
@@ -723,42 +809,25 @@ pub fn run_qwen35_family_multimodal_logits(
 
     let tokenizer = BPETokenizer::from_gguf_metadata(|k| llm_source.metadata(k).cloned())
         .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
+    // Video and image use different pad tokens, so all three ids follow the
+    // media kind. Hardcoding `image_pad` here made the Jinja path expand
+    // looking for a token the template never emitted (it emits `video_pad` for
+    // a video), so the placeholder count came out zero.
+    let media_kind = if is_video {
+        crate::app::media::MediaKind::Video
+    } else {
+        crate::app::media::MediaKind::Image
+    };
+    let (start_name, pad_name, end_name) = media_kind.placeholder_tokens();
     let image_token_id = tokenizer
-        .special_token_id("image_pad")
-        .ok_or("Required token missing: <|image_pad|>")?;
+        .special_token_id(pad_name)
+        .ok_or_else(|| format!("Required token missing: <|{pad_name}|>"))?;
     let vision_start = tokenizer
-        .special_token_id("vision_start")
-        .ok_or("Required token missing: <|vision_start|>")?;
+        .special_token_id(start_name)
+        .ok_or_else(|| format!("Required token missing: <|{start_name}|>"))?;
     let vision_end = tokenizer
-        .special_token_id("vision_end")
-        .ok_or("Required token missing: <|vision_end|>")?;
-    let mut content_tokens = vec![vision_start];
-    content_tokens.extend(std::iter::repeat(image_token_id).take(n_vis_tokens));
-    content_tokens.push(vision_end);
-    content_tokens.extend(tokenizer.encode(
-        prompt,
-        EncodeOptions {
-            add_special: false,
-            parse_special: false,
-        },
-    ));
-    let mut prompt_ids = Vec::new();
-    if let Some(system_text) = system_prompt {
-        append_qwen_message_tokens(
-            &mut prompt_ids,
-            &tokenizer,
-            "system",
-            &tokenizer.encode(
-                system_text,
-                EncodeOptions {
-                    add_special: false,
-                    parse_special: false,
-                },
-            ),
-        )?;
-    }
-    append_qwen_message_tokens(&mut prompt_ids, &tokenizer, "user", &content_tokens)?;
-    append_qwen_assistant_prefix(&mut prompt_ids, &tokenizer, false)?;
+        .special_token_id(end_name)
+        .ok_or_else(|| format!("Required token missing: <|{end_name}|>"))?;
     let image_grids: Vec<VisionGrid> = vec![VisionGrid {
         grid_t: grid.grid_t,
         grid_h: grid.grid_h,
@@ -766,6 +835,55 @@ pub fn run_qwen35_family_multimodal_logits(
         patch_size: grid.patch_size,
         merge_size: grid.merge_size,
     }];
+    // `--jinja`: the shipped Qwen3-VL template already emits
+    // `<|vision_start|><|image_pad|><|vision_end|>`; the placeholder is
+    // expanded to a contiguous run so `build_qwen35_positions` (below) sees
+    // exactly the layout it documents.
+    let jinja_media = [crate::prompt::jinja::MediaPart::new(
+        media_kind.content_type(),
+        n_vis_tokens,
+    )];
+    let prompt_ids = match crate::prompt::jinja::media_conversation_tokens(
+        &tokenizer,
+        jinja,
+        image_token_id,
+        &jinja_media,
+        prompt,
+        system_prompt,
+        false,
+    )? {
+        Some(ids) => ids,
+        None => {
+            let mut content_tokens = vec![vision_start];
+            content_tokens.extend(std::iter::repeat(image_token_id).take(n_vis_tokens));
+            content_tokens.push(vision_end);
+            content_tokens.extend(tokenizer.encode(
+                prompt,
+                EncodeOptions {
+                    add_special: false,
+                    parse_special: false,
+                },
+            ));
+            let mut prompt_ids = Vec::new();
+            if let Some(system_text) = system_prompt {
+                append_qwen_message_tokens(
+                    &mut prompt_ids,
+                    &tokenizer,
+                    "system",
+                    &tokenizer.encode(
+                        system_text,
+                        EncodeOptions {
+                            add_special: false,
+                            parse_special: false,
+                        },
+                    ),
+                )?;
+            }
+            append_qwen_message_tokens(&mut prompt_ids, &tokenizer, "user", &content_tokens)?;
+            append_qwen_assistant_prefix(&mut prompt_ids, &tokenizer, false)?;
+            prompt_ids
+        }
+    };
     let image_token_id_u32 = image_token_id;
     let image_token_id_i32 = i32::try_from(image_token_id_u32)
         .map_err(|_| format!("Token ID {image_token_id_u32} exceeds i32"))?;
@@ -814,6 +932,7 @@ pub fn run_multimodal(
     prefill_batch_size: usize,
     max_context: usize,
     repetition_penalty: f32,
+    jinja: &crate::prompt::jinja::Options,
 ) -> Result<(), String> {
     run_multimodal_with_video_ref(
         llm_source,
@@ -830,6 +949,7 @@ pub fn run_multimodal(
         max_context,
         repetition_penalty,
         None,
+        jinja,
     )
 }
 
@@ -847,6 +967,7 @@ pub fn run_multimodal_with_video(
     prefill_batch_size: usize,
     max_context: usize,
     repetition_penalty: f32,
+    jinja: &crate::prompt::jinja::Options,
 ) -> Result<(), String> {
     let owned_source = Arc::clone(&llm_source);
     run_multimodal_with_video_ref(
@@ -864,6 +985,7 @@ pub fn run_multimodal_with_video(
         max_context,
         repetition_penalty,
         Some(owned_source),
+        jinja,
     )
 }
 
@@ -898,6 +1020,7 @@ pub(super) fn run_multimodal_with_video_ref(
     max_context: usize,
     _repetition_penalty: f32,
     model_source: Option<Arc<dyn TensorSource>>,
+    jinja: &crate::prompt::jinja::Options,
 ) -> Result<(), String> {
     let arch = llm_source
         .metadata("general.architecture")
@@ -935,6 +1058,7 @@ pub(super) fn run_multimodal_with_video_ref(
             temperature,
             n_threads_arg,
             prefill_batch_size,
+            jinja,
         )
         .map(|text| {
             // Multimodal text is already printed inside the function;

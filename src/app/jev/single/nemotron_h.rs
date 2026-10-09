@@ -19,9 +19,10 @@ pub(crate) fn run_jev_decision_nemotron_h(
     n_threads_arg: usize,
     prefill_batch_size: usize,
     output_json: bool,
+    jinja: crate::prompt::jinja::Options,
 ) -> Result<Vec<JevResult>, String> {
     let _ = prefill_batch_size;
-    let mut scorer = NemotronHJevScorer::new(source.clone(), n_threads_arg)?;
+    let mut scorer = NemotronHJevScorer::new(source.clone(), n_threads_arg, &jinja)?;
     let _ = output_json;
     run_jev_decision_core(context, per_question, false, &mut scorer)
 }
@@ -34,16 +35,25 @@ pub(crate) fn run_jev_decision_nemotron_h(
 /// `prefill_batch_size` is ignored because Nemotron-H's per-step
 /// body still walks the per-token path.
 pub(crate) struct NemotronHJevScorer {
+    /// `--jinja` template, resolved once in `new()` where the source is
+    /// available; `build_prompt` then renders per question.
+    pub(crate) jinja: Option<crate::prompt::jinja::JinjaChatTemplate>,
     pub(crate) tokenizer: BPETokenizer,
     pub(crate) source: Arc<dyn TensorSource>,
     pub(crate) n_threads: usize,
 }
 
 impl NemotronHJevScorer {
-    pub(crate) fn new(source: Arc<dyn TensorSource>, n_threads: usize) -> Result<Self, String> {
+    pub(crate) fn new(
+        source: Arc<dyn TensorSource>,
+        n_threads: usize,
+        jinja: &crate::prompt::jinja::Options,
+    ) -> Result<Self, String> {
+        let jinja = jinja.resolve(&|k| source.metadata(k).cloned())?;
         let tokenizer = crate::models::nemotron_h::trunk::load_nemotron_tokenizer(source.as_ref())?;
         verify_label_tokens_single(&tokenizer)?;
         Ok(Self {
+            jinja,
             tokenizer,
             source,
             n_threads,
@@ -64,6 +74,21 @@ impl JevScorer for NemotronHJevScorer {
         let labels = jev_labels(q);
         let system = jev_system_prompt(q.mode);
         let payload = jev_payload_json(context, q)?;
+        // `--jinja` renders the model's own template. JEV opens the assistant
+        // turn so the next token is the decision being scored, i.e.
+        // `add_generation_prompt = true`, the same value generation uses.
+        // `thinking` off so the scored position does not move into a
+        // reasoning block.
+        if let Some(template) = self.jinja.as_ref() {
+            let ids = crate::prompt::jinja::render_text_conversation(
+                &self.tokenizer,
+                template,
+                Some(system),
+                &payload,
+                false,
+            )?;
+            return Ok((labels, ids));
+        }
         let prompt_text = format!("{system}\n\n{payload}\n\nAnswer:");
         let token_ids = self.tokenizer.encode(
             &prompt_text,

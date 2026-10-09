@@ -19,12 +19,13 @@ pub(crate) fn run_jev_grouped_spark(
     n_threads_arg: usize,
     _prefill_batch_size: usize,
     output_json: bool,
+    jinja: crate::prompt::jinja::Options,
 ) -> Result<Vec<JevGroupedResult>, String> {
     let available_threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
     let n_threads = resolve_thread_count(n_threads_arg, available_threads);
-    let mut scorer = SparkJevGroupedScorer::new(source.clone(), n_threads)?;
+    let mut scorer = SparkJevGroupedScorer::new(source.clone(), n_threads, &jinja)?;
     if !output_json {
         eprintln!("compute pool: {} threads (Spark)", n_threads);
     }
@@ -38,9 +39,13 @@ struct SparkJevGroupedScorer {
 }
 
 impl SparkJevGroupedScorer {
-    fn new(source: Arc<dyn TensorSource>, n_threads: usize) -> Result<Self, String> {
+    fn new(
+        source: Arc<dyn TensorSource>,
+        n_threads: usize,
+        jinja: &crate::prompt::jinja::Options,
+    ) -> Result<Self, String> {
         Ok(Self {
-            inner: super::super::single::spark::SparkJevScorer::new(source, n_threads)?,
+            inner: super::super::single::spark::SparkJevScorer::new(source, n_threads, jinja)?,
         })
     }
 }
@@ -58,8 +63,13 @@ impl JevGroupedScorer for SparkJevGroupedScorer {
         let group_labels = allocate_group_labels(q);
         let system = build_grouped_system();
         let payload = build_grouped_payload(context, q)?;
-        let token_ids =
-            build_jev_token_ids_for_arch("spark2_5", self.inner.tokenizer(), system, &payload)?;
+        let token_ids = build_jev_token_ids_for_arch(
+            "spark2_5",
+            self.inner.tokenizer(),
+            system,
+            &payload,
+            self.inner.jinja.as_ref(),
+        )?;
         Ok((group_labels, token_ids))
     }
 

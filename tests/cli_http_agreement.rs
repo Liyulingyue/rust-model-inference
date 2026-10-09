@@ -181,6 +181,8 @@ fn http_text(
         &[],
         &rust_model_inference::app::server::api::protocol::ToolChoice::Auto,
         thinking,
+        &rust_model_inference::prompt::jinja::Options::default(),
+        None,
     )
     .expect("prompt build");
     let request = GenerationRequest {

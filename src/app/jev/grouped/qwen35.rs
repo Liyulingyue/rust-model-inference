@@ -21,12 +21,14 @@ pub(crate) fn run_jev_grouped_qwen35(
     n_threads_arg: usize,
     prefill_batch_size: usize,
     output_json: bool,
+    jinja: crate::prompt::jinja::Options,
 ) -> Result<Vec<JevGroupedResult>, String> {
     let available_threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
     let n_threads = resolve_thread_count(n_threads_arg, available_threads);
-    let mut scorer = Qwen35JevGroupedScorer::new(source.clone(), n_threads, prefill_batch_size)?;
+    let mut scorer =
+        Qwen35JevGroupedScorer::new(source.clone(), n_threads, prefill_batch_size, &jinja)?;
     if !output_json {
         eprintln!("compute pool: {} threads (Qwen3.5)", n_threads);
     }
@@ -41,6 +43,8 @@ pub(crate) struct Qwen35JevGroupedScorer {
     pub(crate) source: Arc<dyn TensorSource>,
     pub(crate) n_threads: usize,
     pub(crate) prefill_batch_size: usize,
+    /// `--jinja` template, resolved once in `new()`.
+    pub(crate) jinja: Option<crate::prompt::jinja::JinjaChatTemplate>,
 }
 
 impl Qwen35JevGroupedScorer {
@@ -48,15 +52,18 @@ impl Qwen35JevGroupedScorer {
         source: Arc<dyn TensorSource>,
         n_threads: usize,
         prefill_batch_size: usize,
+        jinja: &crate::prompt::jinja::Options,
     ) -> Result<Self, String> {
         let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
             .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
         verify_label_tokens_single(&tokenizer)?;
+        let jinja = jinja.resolve(&|k| source.metadata(k).cloned())?;
         Ok(Self {
             tokenizer,
             source,
             n_threads,
             prefill_batch_size,
+            jinja,
         })
     }
 }
@@ -74,7 +81,13 @@ impl JevGroupedScorer for Qwen35JevGroupedScorer {
         let group_labels = allocate_group_labels(q);
         let system = build_grouped_system();
         let payload = build_grouped_payload(context, q)?;
-        let token_ids = build_jev_token_ids_for_arch("qwen35", &self.tokenizer, system, &payload)?;
+        let token_ids = build_jev_token_ids_for_arch(
+            "qwen35",
+            &self.tokenizer,
+            system,
+            &payload,
+            self.jinja.as_ref(),
+        )?;
         Ok((group_labels, token_ids))
     }
 

@@ -20,12 +20,13 @@ pub(crate) fn run_jev_decision_llama(
     n_threads_arg: usize,
     prefill_batch_size: usize,
     output_json: bool,
+    jinja: crate::prompt::jinja::Options,
 ) -> Result<Vec<JevResult>, String> {
     let available_threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
     let n_threads = resolve_thread_count(n_threads_arg, available_threads);
-    let mut scorer = LlamaJevScorer::new(source.clone(), n_threads, prefill_batch_size)?;
+    let mut scorer = LlamaJevScorer::new(source.clone(), n_threads, prefill_batch_size, &jinja)?;
     if !output_json {
         eprintln!("compute pool: {} threads (Llama-family)", n_threads);
     }
@@ -37,6 +38,9 @@ pub(crate) fn run_jev_decision_llama(
 /// but the forward path is uniform
 /// (`run_forward_logits_llama_with_batch`).
 pub(crate) struct LlamaJevScorer {
+    /// `--jinja` template, resolved once in `new()` where the source is
+    /// available; `build_prompt` then renders per question.
+    pub(crate) jinja: Option<crate::prompt::jinja::JinjaChatTemplate>,
     pub(crate) tokenizer: BPETokenizer,
     pub(crate) source: Arc<dyn TensorSource>,
     pub(crate) arch: String,
@@ -49,7 +53,9 @@ impl LlamaJevScorer {
         source: Arc<dyn TensorSource>,
         n_threads: usize,
         prefill_batch_size: usize,
+        jinja: &crate::prompt::jinja::Options,
     ) -> Result<Self, String> {
+        let jinja = jinja.resolve(&|k| source.metadata(k).cloned())?;
         let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
             .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
         verify_label_tokens_single(&tokenizer)?;
@@ -59,6 +65,7 @@ impl LlamaJevScorer {
             .unwrap_or_default()
             .to_string();
         Ok(Self {
+            jinja,
             tokenizer,
             source,
             arch,
@@ -81,6 +88,21 @@ impl JevScorer for LlamaJevScorer {
         let labels = jev_labels(q);
         let system = jev_system_prompt(q.mode);
         let payload = jev_payload_json(context, q)?;
+        // `--jinja` renders the model's own template. JEV opens the assistant
+        // turn so the next token is the decision being scored, i.e.
+        // `add_generation_prompt = true`, the same value generation uses.
+        // `thinking` off so the scored position does not move into a
+        // reasoning block.
+        if let Some(template) = self.jinja.as_ref() {
+            let ids = crate::prompt::jinja::render_text_conversation(
+                &self.tokenizer,
+                template,
+                Some(system),
+                &payload,
+                false,
+            )?;
+            return Ok((labels, ids));
+        }
         // Per-arch chat template; mirrors `llama::trunk::forward::run_inference`.
         let prompt_text = if self.arch == "k2-horizon" {
             format!(

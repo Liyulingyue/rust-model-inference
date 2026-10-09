@@ -48,5 +48,6 @@ pub use ops::quant::{dequant_weight_q4k, dequantize_q4_k_weight, BlockQ8K, QK_K}
 pub use ops::*;
 pub use prompt::{
     append_qwen_assistant_prefix, append_qwen_message_tokens, build_hunyuan_chat_prompt,
-    build_qwen_chat_prompt, build_simple_prompt, HunyuanMessage, QwenMessage,
+    build_lfm25_chat_prompt_with_thinking, build_qwen_chat_prompt, build_simple_prompt,
+    HunyuanMessage, Lfm2Message, QwenMessage,
 };

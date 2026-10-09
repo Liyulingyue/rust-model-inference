@@ -49,6 +49,7 @@ pub fn run_inference(
     max_context: usize,
     repetition_penalty: f32,
     chat_template: Option<&str>,
+    jinja: &crate::prompt::jinja::Options,
 ) -> Result<(), String> {
     // Read arch into an owned String so the borrow of `source.metadata`
     // is released before the phi3 wrap below moves `source`.
@@ -109,6 +110,7 @@ pub fn run_inference(
             prefill_batch_size,
             max_context,
             repetition_penalty,
+            jinja,
         )
     } else if arch == "lfm2" {
         let is_lfm25 = source
@@ -128,6 +130,7 @@ pub fn run_inference(
                 kv_format,
                 max_context,
                 thinking,
+                jinja,
             )
         } else {
             crate::models::lfm2::run_inference(
@@ -141,6 +144,7 @@ pub fn run_inference(
                 max_context,
                 repetition_penalty,
                 thinking,
+                jinja,
             )
         }
     } else if arch == "lfm2moe" {
@@ -155,6 +159,7 @@ pub fn run_inference(
             max_context,
             repetition_penalty,
             thinking,
+            jinja,
             prefill_batch_size,
         )
     } else if uses_llama_trunk(&arch) {
@@ -170,6 +175,7 @@ pub fn run_inference(
             max_context,
             repetition_penalty,
             thinking,
+            jinja,
         )
     } else if arch == "xing4_0" {
         crate::models::xing4_0::trunk::run::run_inference(
@@ -184,6 +190,7 @@ pub fn run_inference(
             max_context,
             repetition_penalty,
             thinking,
+            jinja,
         )
     } else if arch == "spark2_5" {
         crate::models::spark::run_inference(
@@ -196,6 +203,7 @@ pub fn run_inference(
             bench,
             profile,
             kv_format,
+            jinja,
         )
     } else if arch == "nemotron_h" {
         crate::models::nemotron_h::trunk::run_inference(
@@ -207,6 +215,8 @@ pub fn run_inference(
             kv_format,
             repetition_penalty,
             chat_template,
+            thinking,
+            jinja,
         )
     } else if arch == "falcon-h1" {
         crate::models::falcon_h1::trunk::run_inference(
@@ -218,6 +228,8 @@ pub fn run_inference(
             kv_format,
             repetition_penalty,
             chat_template,
+            thinking,
+            jinja,
         )
     } else {
         crate::app::text::run_qwen3_inference(
@@ -233,6 +245,7 @@ pub fn run_inference(
             prefill_batch_size,
             max_context,
             repetition_penalty,
+            jinja,
         )
     }
 }
@@ -253,6 +266,10 @@ pub fn run_interactive(
     n_threads_arg: usize,
     prefill_batch_size: usize,
     repetition_penalty: f32,
+    // Threaded through so `--jinja` / `--chat-template-file` are honoured in
+    // the REPL. Hardcoding `Options::default()` here accepted both flags and
+    // silently ignored them.
+    jinja: &crate::prompt::jinja::Options,
 ) -> Result<(), String> {
     println!("=== RustModelInference Interactive Mode ===");
     println!("Type your prompt and press Enter. Ctrl+C to exit.\n");
@@ -288,6 +305,7 @@ pub fn run_interactive(
             CliOptions::DEFAULT_MAX_CONTEXT,
             repetition_penalty,
             None,
+            jinja,
         )?;
         println!();
     }
@@ -304,6 +322,8 @@ pub fn run_interactive_qwen35(
     prefill_batch_size: usize,
     max_context: usize,
     repetition_penalty: f32,
+    // See `run_interactive`: the REPL must honour the chat-template flags.
+    jinja: &crate::prompt::jinja::Options,
 ) -> Result<(), String> {
     println!("=== RustModelInference Interactive Mode (qwen35) ===");
     println!("Type your prompt and press Enter. Ctrl+C to exit.\n");
@@ -338,6 +358,7 @@ pub fn run_interactive_qwen35(
             prefill_batch_size,
             max_context,
             repetition_penalty,
+            jinja,
         )?;
         println!();
     }
