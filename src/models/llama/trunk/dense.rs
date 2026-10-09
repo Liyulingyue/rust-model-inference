@@ -34,7 +34,11 @@ pub(super) fn eligible(s: &LlamaSession<'_>) -> Result<(), String> {
     Ok(())
 }
 
-pub(super) fn forward_cpu(s: &mut LlamaSession<'_>, tokens: &[u32]) -> Result<(), String> {
+pub(super) fn forward_cpu(
+    s: &mut LlamaSession<'_>,
+    tokens: &[u32],
+    project_logits: bool,
+) -> Result<(), String> {
     let c = &s.config;
     let rows = tokens.len();
     let base = s.seq_len;
@@ -224,6 +228,9 @@ pub(super) fn forward_cpu(s: &mut LlamaSession<'_>, tokens: &[u32]) -> Result<()
             layer,
         )?;
     }
+    if !project_logits {
+        return Ok(());
+    }
     crate::ops::rms_norm(
         &scratch.x[(rows - 1) * width..x_len],
         &s.weights.output_norm,
@@ -344,7 +351,11 @@ impl LlamaSession<'_> {
         crate::compute::UsedBackend::Cpu
     }
 
-    pub(super) fn compute_chunk(&mut self, tokens: &[u32]) -> Result<(), String> {
+    pub(super) fn compute_chunk(
+        &mut self,
+        tokens: &[u32],
+        project_logits: bool,
+    ) -> Result<(), String> {
         use crate::compute::ComputePolicy;
         let rows = tokens.len();
         let base = self.seq_len;
@@ -386,7 +397,7 @@ impl LlamaSession<'_> {
                         );
                     }
                     let result = gpu
-                        .forward_chunk(&self.scratch.x[..rows * width], base, rows, true)
+                        .forward_chunk(&self.scratch.x[..rows * width], base, rows, project_logits)
                         .map_err(|e| e.to_string())?;
                     crate::compute::state::commit_kv_cache(
                         &mut self.kv_cache,
@@ -399,7 +410,9 @@ impl LlamaSession<'_> {
                         result.k_delta,
                         result.v_delta,
                     )?;
-                    self.scratch.logits.copy_from_slice(result.logits);
+                    if project_logits {
+                        self.scratch.logits.copy_from_slice(result.logits);
+                    }
                     gpu.commit_token();
                     Ok::<_, String>(())
                 })();
@@ -430,11 +443,11 @@ impl LlamaSession<'_> {
         // A CPU chunk must never re-enter legacy per-matmul GPU dispatch.
         let _cpu = ComputePolicy::Cpu.cpu_scope();
         let result = if eligible(self).is_ok() {
-            forward_cpu(self, tokens)
+            forward_cpu(self, tokens, project_logits)
         } else if rows == 1 {
-            self.forward_one_token(tokens[0])
+            self.forward_one_token(tokens[0], project_logits)
         } else {
-            self.forward_chunk_batched_real(tokens, rows, base, true)
+            self.forward_chunk_batched_real(tokens, rows, base, project_logits)
         };
         self.seq_len = base;
         let result = result.and_then(|()| {
@@ -451,7 +464,10 @@ impl LlamaSession<'_> {
                     KvCache::F32(c) => finite(&c.k[range.clone()]) && finite(&c.v[range]),
                 }
             });
-            if valid && finite(&self.scratch.logits) {
+            if valid
+                && finite(&self.scratch.x[..rows * self.config.n_embd])
+                && (!project_logits || finite(&self.scratch.logits))
+            {
                 Ok(())
             } else {
                 Err("Llama chunk produced non-finite state".into())

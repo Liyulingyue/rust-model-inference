@@ -1,5 +1,7 @@
 use super::session::LlamaSession;
 use crate::app::cli::KvFormat;
+use crate::compute::ComputePolicy;
+use crate::core::prefill::ChunkedPrefill;
 use crate::core::tensor::{GGMLType, MetaValue, MetaValueType, TensorInfo, TensorSource};
 use std::collections::HashMap;
 
@@ -202,7 +204,7 @@ fn llama_dense_recipe_preserves_original_cpu_bits() {
             LlamaSession::from_source_with_max_rows(&source, 1, KvFormat::F16, 96, rows).unwrap();
         let tokens = &[1, 2, 3][..rows];
         if rows == 1 {
-            legacy.forward_one_token(1).unwrap();
+            legacy.forward_one_token(1, true).unwrap();
         } else {
             legacy
                 .forward_chunk_batched_real(tokens, rows, 0, true)
@@ -231,6 +233,104 @@ fn llama_dense_recipe_preserves_original_cpu_bits() {
             _ => unreachable!(),
         }
     }
+}
+
+fn check_unused_prefill_logits(policy: ComputePolicy, residual_scale: f32) {
+    let mut source = fixture();
+    source.metadata.insert(
+        "llama.residual_scale".into(),
+        MetaValue::Float32(residual_scale),
+    );
+    for rows in [1, 3] {
+        let new_session = || {
+            LlamaSession::from_source_with_compute(&source, 1, KvFormat::F16, 96, rows, policy)
+                .unwrap()
+        };
+        let mut skipped = new_session();
+        let mut projected = new_session();
+        let input: Vec<_> = (0..rows * 2).map(|i| (i % 8) as u32).collect();
+        skipped.scratch.logits.fill(f32::NAN);
+        assert!(skipped
+            .forward_chunk(&input, rows, 0, false)
+            .unwrap()
+            .is_none());
+        assert!(skipped.scratch.logits.iter().all(|v| v.is_nan()));
+        assert_eq!(skipped.seq_len, rows);
+        projected.forward_chunk(&input, rows, 0, true).unwrap();
+        let actual = skipped
+            .forward_chunk(&input, rows, rows, true)
+            .unwrap()
+            .unwrap();
+        let expected = projected
+            .forward_chunk(&input, rows, rows, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            actual.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+        );
+        if let (
+            crate::core::scratchpad::KvCache::F16(a),
+            crate::core::scratchpad::KvCache::F16(b),
+        ) = (&skipped.kv_cache, &projected.kv_cache)
+        {
+            assert_eq!(a.k, b.k);
+            assert_eq!(a.v, b.v);
+        } else {
+            unreachable!();
+        }
+    }
+}
+
+fn check_prefill_projection_errors(policy: ComputePolicy) {
+    for tensor in ["output.weight", "blk.1.ffn_down.weight"] {
+        let mut source = fixture();
+        for value in source
+            .tensors
+            .get_mut(tensor)
+            .unwrap()
+            .1
+            .chunks_exact_mut(2)
+        {
+            value.copy_from_slice(&crate::ops::f32_to_f16(f32::NAN).to_le_bytes());
+        }
+        for rows in [1, 3] {
+            let mut session =
+                LlamaSession::from_source_with_compute(&source, 1, KvFormat::F16, 96, rows, policy)
+                    .unwrap();
+            let input = vec![1; rows * 2];
+            if tensor == "output.weight" {
+                assert!(session.forward_logits_chunked(&input, rows).is_err());
+                assert_eq!(
+                    session.seq_len, rows,
+                    "only the final chunk projects logits"
+                );
+            } else {
+                assert!(session.forward_chunk(&input, rows, 0, false).is_err());
+                assert_eq!(session.seq_len, 0, "invalid hidden state must not commit");
+            }
+        }
+    }
+}
+
+#[test]
+fn llama_prefill_skips_unused_cpu_logits() {
+    for residual_scale in [0.0, 0.5] {
+        check_unused_prefill_logits(ComputePolicy::Cpu, residual_scale);
+    }
+}
+
+#[test]
+fn llama_prefill_cpu_projection_errors_preserve_prefix() {
+    check_prefill_projection_errors(ComputePolicy::Cpu);
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
+#[ignore = "requires a Vulkan device"]
+fn llama_prefill_skips_unused_device_logits() {
+    check_unused_prefill_logits(ComputePolicy::Vulkan, 0.0);
+    check_prefill_projection_errors(ComputePolicy::Vulkan);
 }
 
 #[cfg(feature = "vulkan")]

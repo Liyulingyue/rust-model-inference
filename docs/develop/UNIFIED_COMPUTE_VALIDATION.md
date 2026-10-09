@@ -72,7 +72,7 @@ Qwen3.5 的 80-token prompt 在 CPU 三种 batch 下保持 logits、dense KV、c
 560/189/14，加 32 步 decode 后为 784/413/238；logits、dense KV、conv/SSM、greedy token、decode 状态逐位一致。
 这些同后端分块检查与 CPU/GPU 跨后端比较分别记账。
 
-集中真实设备 fixture 共 **61 项通过**，覆盖九格式上传缓存、整组 fallback、F16 raw bits、
+集中真实设备 fixture 共 **64 项通过**，覆盖九格式上传缓存、整组 fallback、F16 raw bits、
 Qwen3/Llama dense、Gemma4/AuK、非零前缀/第二 chunk 失败、双错误保留、reset、
 CPU/Auto 会话隔离及不确定资源保留。直接 F16 检查覆盖输入宽度 32/256/512/2048 × rows 1/3/64。
 Llama 的纯 F16 与混合 Q8_0/Q4_0/Q4_K fixture 通过 32 步 greedy、KV 和 reset；属于合成验证。
@@ -94,12 +94,12 @@ trace 分别确认 CPU 和 resident Vulkan。该检查验证路由一致性，�
 
 | 检查 | 原始版本 | 本分支 | 结论 |
 | --- | --- | --- | --- |
-| 无 feature 库测试 | 1072 pass / 24 fail / 74 ignored | 1094 / 23 / 74 | 无新增失败名称 |
-| Vulkan 库测试（沙箱内） | 1150 / 35 / 110 | 1176 / 30 / 119 | 无新增失败名称 |
+| 无 feature 库测试 | 1072 pass / 24 fail / 74 ignored | 1096 / 23 / 74 | 无新增失败名称 |
+| Vulkan 库测试（沙箱内） | 1150 / 35 / 110 | 1178 / 30 / 120 | 无新增失败名称 |
 | app 定向测试 | — | 155 pass / 3 ignored | 通过 |
 | CLI 参数表 | — | 42 pass | 通过 |
 | `RMI_SCALAR=1` + parity-trace + compute | — | 30 pass | 独立 scalar 进程通过 |
-| 真实设备集中 fixture | — | 61 pass | 通过 |
+| 真实设备集中 fixture | — | 64 pass | 通过 |
 | benchmark/数值检查 example 单测 | — | 6 pass | 包含非有限 CPU 参照拒绝及分段提交 |
 
 Vulkan 的 RoPE coefficient raw-bit 与五项额外 Z-Image 失败都已在原始版本复现。
@@ -111,6 +111,34 @@ shader manifest 哈希及所有 SPIR-V 的 `spirv-val` 通过；修改的两个 
 完整 shader rebuild check 在**未修改**的 `q8_matmul_grouped_dp4a.spv` 第 9 字节失败，
 属于本机工具链复现差异，未通过重生成无关二进制掩盖。
 无 feature 全 examples 编译仍被原有 `vk_mem_info` 未加 feature guard 的 import 阻断。
+
+## 最终复审与收尾修复
+
+独立全分支复审覆盖 `ce17cd5d..afffc3bd`，未发现新的 Critical/Important 问题，
+列出两项 Minor；复审另行通过 34 项无 feature 定向测试和 diff 空白检查。
+作者按性能目标将其中的 Llama 中间 chunk 多算 logits 提升为 Important 并修复。
+
+`project_logits` 现在贯通 Llama 共享 CPU、兼容 CPU 与 resident Vulkan 路径，
+普通 chunked prefill 只在最后一个 chunk 做输出 norm/投影和 logits 回读；
+逐 token 调试入口继续为每个 token 产生 logits。
+跳过投影时不再检查或覆盖旧 logits，仍验证本 chunk 的 hidden/KV 有限性才提交进度。
+
+两项 CPU 回归先复现失败：关闭投影仍覆盖 logits；坏的输出权重让第一块就失败，
+未保留本应成功的非末尾前缀。修复后 Llama CPU 定向 **6/6 通过**，
+覆盖 rows 1/3、标准/带 residual scale 的兼容路径、最终 logits/KV raw-bit 一致、
+输出头失败保留前缀，以及不投影时拒绝非有限 hidden。
+
+修复后的真实设备集中测试 **64/64 通过**，其中 Llama 的 11 项全部通过，
+包含 Vulkan 不投影/最后投影、失败前缀、F16/混合量化、32 步 decode 与 reset。
+全量测试对照原始失败名称：CPU 全量 1096 pass / 23 fail / 74 ignored，
+Vulkan 全量 1178 / 30 / 120，均无新增失败；这是基线回归比较通过，并非全量全绿。
+
+**Deferred minor：** Qwen3.5 CPU 直接 single-token decode 在输出 `hybrid_decoder` trace 前返回，
+该快速路径缺少逐块后端 trace；推理与状态不受影响，本轮未修改。
+
+性能数据采集于 `afffc3bd`；最后的投影修复仅影响 Llama，未重跑不受影响的 Qwen 性能样本。
+由于没有真实 Llama 权重，不能给此修复附上实测加速幅度，也没有据此开放 Auto。
+按照执行流程完成一次作者修复与回归，不再派发第二轮复审。
 
 ## 性能判据与测量方式
 
@@ -281,3 +309,11 @@ vulkan::tests::initializes_with_homebrew_moltenvk
 - Ruling: Keep the local validation workspace and raw failure logs after review — full-suite and hardware gates have inherited failures, and their exact baseline evidence remains useful for follow-up — cost if wrong: extra local disk use; no generated artifacts are committed.
 
 - Ruling: Mark Task 8 implementation/measurement complete with the acceleration objective unmet — both tested GPU workloads are slower and fail baseline numerical gates; the plan explicitly permits retaining the unified API and forced diagnostics without Auto admission — cost if wrong: users gain execution consistency, not a promised speedup, until later kernel/numerical work is validated.
+
+- Final: Ruling: Regrade the Llama unused intermediate logits finding as Important for this performance refactor — long prefill pays unnecessary vocabulary projection and GPU readback on every chunk; preserve the existing project_logits contract through all Llama paths — cost if wrong: added flag plumbing and final-hidden validation overhead; real-model timing benefit remains unmeasured.
+
+- Final: Ruling: The review set aside reproduced logits, quantizer, shader rebuild and whole-suite baseline failures — keep their failing status and prohibit new Auto admission; this branch does not claim to repair them — cost if wrong: existing experimental GPU numerical differences and baseline test failures remain visible to users.
+
+- Final: Ruling: The review set aside absent real Llama/AuK artifacts and x86/discrete/other-driver coverage — fixture results are bounded to the recorded Apple/MoltenVK environment — cost if wrong: portability and real-model failures may remain undiscovered; do not claim those gates passed.
+
+- Final: Ruling: The review did not quantify the extra Llama projection cost — remove the proven redundant work and verify state/logit equivalence without publishing an inferred speedup — cost if wrong: the actual benefit may be small; no Auto rule can be enabled from this fix.

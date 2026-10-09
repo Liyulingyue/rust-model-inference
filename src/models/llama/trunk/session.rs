@@ -420,7 +420,7 @@ impl<'a> LlamaSession<'a> {
     pub fn forward_logits_per_token(&mut self, prompt_tokens: &[u32]) -> Result<Vec<f32>, String> {
         let mut last_logits = None;
         for &token_id in prompt_tokens {
-            self.compute_chunk(&[token_id])?;
+            self.compute_chunk(&[token_id], true)?;
             if std::env::var_os("RUST_LLAMA_DUMP").is_some() {
                 let top: Vec<(usize, f32)> = {
                     let mut indexed: Vec<(usize, f32)> = self
@@ -461,7 +461,8 @@ impl<'a> LlamaSession<'a> {
             return Err("Llama prompt exceeds capacity or vocabulary".into());
         }
         for range in prefill_chunks(prompt_tokens.len(), batch) {
-            self.compute_chunk(&prompt_tokens[range])?;
+            let project_logits = range.end == prompt_tokens.len();
+            self.compute_chunk(&prompt_tokens[range], project_logits)?;
         }
         Ok(if prompt_tokens.is_empty() {
             Vec::new()
@@ -492,7 +493,6 @@ impl<'a> LlamaSession<'a> {
         base_position: usize,
         project_logits: bool,
     ) -> Result<(), String> {
-        let _ = project_logits;
         let cfg = &self.config;
         let scratch = &mut self.scratch;
         let pool = &self.pool;
@@ -919,6 +919,10 @@ impl<'a> LlamaSession<'a> {
             }
         }
 
+        if !project_logits {
+            self.seq_len = base_position + rows;
+            return Ok(());
+        }
         // ---- Output norm + LM-head projection ----
         // Output norm is per-row; LM-head projects only the last
         // row's hidden state to `vocab`.
@@ -999,7 +1003,11 @@ impl<'a> LlamaSession<'a> {
     /// `forward_chunk` can call it `rows` times when `rows = 1`.
     /// This is a straight extraction of the inner body of the
     /// original `for step in 0..prompt_tokens.len()` loop.
-    pub(super) fn forward_one_token(&mut self, token_id: u32) -> Result<(), String> {
+    pub(super) fn forward_one_token(
+        &mut self,
+        token_id: u32,
+        project_logits: bool,
+    ) -> Result<(), String> {
         let cfg = &self.config;
         let pos = self.seq_len;
         let scratch = &mut self.scratch;
@@ -1597,6 +1605,10 @@ impl<'a> LlamaSession<'a> {
             }
         }
 
+        if !project_logits {
+            self.seq_len = pos + 1;
+            return Ok(());
+        }
         // Output norm + LM-head projection.
         let x = &mut scratch.x[..n_embd];
         let normed = &mut scratch.normed[..n_embd];
@@ -1719,7 +1731,7 @@ impl<'a> ChunkedPrefill for LlamaSession<'a> {
         let tokens = input
             .get(base_position..base_position + rows)
             .ok_or("Llama chunk input range")?;
-        self.compute_chunk(tokens)?;
+        self.compute_chunk(tokens, project_logits)?;
         Ok(project_logits.then(|| self.scratch.logits.clone()))
     }
 
