@@ -269,8 +269,8 @@ impl ErnieImageDit {
         if !sigma.is_finite() || !(0.0..=1.0).contains(&sigma) {
             return Err("ERNIE-Image sigma must be finite and within [0, 1]".into());
         }
-        require_finite(latent, "latent")?;
-        require_finite(context, "context")?;
+        super::super::common::require_finite(latent, "latent")?;
+        super::super::common::require_finite(context, "context")?;
         let latent_values = LATENT_CHANNELS * latent_side * latent_side;
         if latent.len() != latent_values {
             return Err("Invalid ERNIE-Image latent length".into());
@@ -322,7 +322,7 @@ impl ErnieImageDit {
         for (v, b) in scratch.time.iter_mut().zip(&self.time_linear_2_bias) {
             *v += *b;
         }
-        require_finite(&scratch.time, "time conditioning")?;
+        super::super::common::require_finite(&scratch.time, "time conditioning")?;
         #[cfg(feature = "parity-trace")]
         crate::parity_trace::report(crate::parity_trace::checkpoint(
             "ernie_image.time",
@@ -471,7 +471,7 @@ impl ErnieImageDit {
                 self.pool.as_ref(),
                 layer_index,
             )?;
-            require_finite(&scratch.joint, "ERNIE-Image block output")?;
+            super::super::common::require_finite(&scratch.joint, "ERNIE-Image block output")?;
             #[cfg(feature = "parity-trace")]
             crate::parity_trace::report(crate::parity_trace::checkpoint(
                 "ernie_image.block",
@@ -645,14 +645,6 @@ fn load_block(source: &dyn TensorSource, layer: usize) -> Result<ErnieImageBlock
     })
 }
 
-fn require_finite(values: &[f32], name: &str) -> Result<(), String> {
-    if values.iter().all(|v| v.is_finite()) {
-        Ok(())
-    } else {
-        Err(format!("Non-finite {name}"))
-    }
-}
-
 fn flow_sigma(step: usize, steps: usize) -> f32 {
     if step == steps {
         return 0.;
@@ -772,55 +764,59 @@ impl ErnieScratch {
     }
 
     fn prepare(&mut self, total_tokens: usize) -> Result<(), String> {
-        resize_zeroed(
+        super::super::common::resize_zeroed(
             &mut self.image,
             total_tokens * HIDDEN,
             "ERNIE-Image image tokens",
         )?;
-        resize_zeroed(
+        super::super::common::resize_zeroed(
             &mut self.text,
             total_tokens * HIDDEN,
             "ERNIE-Image text tokens",
         )?;
-        resize_zeroed(
+        super::super::common::resize_zeroed(
             &mut self.joint,
             total_tokens * HIDDEN,
             "ERNIE-Image joint tokens",
         )?;
-        resize_zeroed(
+        super::super::common::resize_zeroed(
             &mut self.qkv,
             total_tokens * 3 * INNER_DIM,
             "ERNIE-Image QKV",
         )?;
-        resize_zeroed(
+        super::super::common::resize_zeroed(
             &mut self.attention,
             total_tokens * HIDDEN,
             "ERNIE-Image attention",
         )?;
-        resize_zeroed(&mut self.ffn, total_tokens * FFN_WIDTH, "ERNIE-Image FFN")?;
-        resize_zeroed(
+        super::super::common::resize_zeroed(
+            &mut self.ffn,
+            total_tokens * FFN_WIDTH,
+            "ERNIE-Image FFN",
+        )?;
+        super::super::common::resize_zeroed(
             &mut self.ffn_up,
             total_tokens * FFN_WIDTH,
             "ERNIE-Image FFN up",
         )?;
-        resize_zeroed(&mut self.mlp_out, total_tokens * HIDDEN, "ERNIE-Image MLP")?;
-        resize_zeroed(&mut self.scores, total_tokens, "ERNIE-Image scores")?;
-        resize_zeroed(&mut self.modulation, HIDDEN * 6, "ERNIE-Image modulation")?;
-        resize_zeroed(
+        super::super::common::resize_zeroed(
+            &mut self.mlp_out,
+            total_tokens * HIDDEN,
+            "ERNIE-Image MLP",
+        )?;
+        super::super::common::resize_zeroed(&mut self.scores, total_tokens, "ERNIE-Image scores")?;
+        super::super::common::resize_zeroed(
+            &mut self.modulation,
+            HIDDEN * 6,
+            "ERNIE-Image modulation",
+        )?;
+        super::super::common::resize_zeroed(
             &mut self.rope,
             total_tokens * ROPE_HEAD_WIDTH,
             "ERNIE-Image RoPE",
         )?;
         Ok(())
     }
-}
-
-fn resize_zeroed(dst: &mut Vec<f32>, len: usize, name: &str) -> Result<(), String> {
-    dst.clear();
-    dst.try_reserve_exact(len)
-        .map_err(|e| format!("Failed to allocate {name}: {e}"))?;
-    dst.resize(len, 0.0);
-    Ok(())
 }
 
 /// Compute the x_embedder Conv2d: a 1×1 conv over `IN_CHANNELS = 128` channels
@@ -1226,7 +1222,7 @@ fn ernie_image_rope_into(
     let output_len = position_count
         .checked_mul(ROPE_HEAD_WIDTH)
         .ok_or("ERNIE-Image RoPE output size overflow")?;
-    resize_zeroed(output, output_len, "ERNIE-Image RoPE")?;
+    super::super::common::resize_zeroed(output, output_len, "ERNIE-Image RoPE")?;
 
     for position_index in 0..position_count {
         let positions = if position_index < image_tokens {

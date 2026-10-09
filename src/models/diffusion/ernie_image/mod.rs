@@ -209,38 +209,6 @@ pub(crate) fn validate_component(
     }
 }
 
-fn require_tensor(
-    source: &dyn TensorSource,
-    name: &str,
-    dims: &[u64],
-    ggml_type: GGMLType,
-) -> Result<(), String> {
-    let info = source
-        .tensor_info(name)
-        .ok_or_else(|| format!("Missing tensor: {name}"))?;
-    if info.dims != dims {
-        return Err(format!("Invalid {name} dimensions"));
-    }
-    if info.ggml_type != ggml_type {
-        return Err(format!(
-            "Invalid {name} type: expected {ggml_type:?}, got {:?}",
-            info.ggml_type
-        ));
-    }
-    let expected = usize::try_from(
-        info.checked_nbytes()
-            .ok_or_else(|| format!("Invalid {name} byte size"))?,
-    )
-    .map_err(|_| format!("Invalid {name} byte size"))?;
-    let bytes = source
-        .tensor_slice(name)
-        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
-    if bytes.len() != expected {
-        return Err(format!("Invalid {name} byte length"));
-    }
-    Ok(())
-}
-
 /// A 2-D projection the reader can execute: either the quantized kernel or the
 /// F16 one. The dispatch happens in [`linear_into_scaled_impl`], so the loader
 /// should not pin one dtype here -- F16 additionally gives an unquantized
@@ -381,7 +349,7 @@ fn validate_text(source: &dyn TensorSource) -> Result<(), String> {
             require_matrix(source, &format!("{prefix}.{suffix}"), &dims)?;
         }
         for (suffix, dims) in [("attn_norm.weight", hidden), ("ffn_norm.weight", hidden)] {
-            require_tensor(
+            super::common::require_tensor(
                 source,
                 &format!("{prefix}.{suffix}"),
                 &[dims],
@@ -390,9 +358,9 @@ fn validate_text(source: &dyn TensorSource) -> Result<(), String> {
         }
     }
     if source.tensor_info("output_norm.weight").is_some() {
-        require_tensor(source, "output_norm.weight", &[hidden], GGMLType::F32)?;
+        super::common::require_tensor(source, "output_norm.weight", &[hidden], GGMLType::F32)?;
     } else {
-        require_tensor(source, "model.norm.weight", &[hidden], GGMLType::F32)?;
+        super::common::require_tensor(source, "model.norm.weight", &[hidden], GGMLType::F32)?;
     }
     Ok(())
 }
@@ -411,7 +379,7 @@ fn validate_dit(source: &dyn TensorSource) -> Result<(), String> {
         ("x_embedder.proj.bias", hidden),
         ("x_embedder.proj.bias", hidden),
     ] {
-        require_tensor(source, name, &[dims], GGMLType::F32)?;
+        super::common::require_tensor(source, name, &[dims], GGMLType::F32)?;
     }
     for (name, dims) in [
         ("adaLN_modulation.1.weight", [hidden, 6 * hidden]),
@@ -436,25 +404,25 @@ fn validate_dit(source: &dyn TensorSource) -> Result<(), String> {
     }
     for layer in 0..dit::NUM_LAYERS {
         let prefix = format!("layers.{layer}");
-        require_tensor(
+        super::common::require_tensor(
             source,
             &format!("{prefix}.adaLN_sa_ln.weight"),
             &[hidden],
             GGMLType::F32,
         )?;
-        require_tensor(
+        super::common::require_tensor(
             source,
             &format!("{prefix}.adaLN_mlp_ln.weight"),
             &[hidden],
             GGMLType::F32,
         )?;
-        require_tensor(
+        super::common::require_tensor(
             source,
             &format!("{prefix}.self_attention.norm_q.weight"),
             &[dit::ROPE_HEAD_WIDTH as u64],
             GGMLType::F32,
         )?;
-        require_tensor(
+        super::common::require_tensor(
             source,
             &format!("{prefix}.self_attention.norm_k.weight"),
             &[dit::ROPE_HEAD_WIDTH as u64],

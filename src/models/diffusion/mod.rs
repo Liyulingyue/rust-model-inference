@@ -21,6 +21,7 @@
 //! for new pipelines.
 
 pub mod auk;
+pub(crate) mod common;
 pub mod dreamx;
 pub mod ernie_image;
 pub mod longcat;

@@ -184,38 +184,6 @@ pub(crate) fn validate_component(
     }
 }
 
-fn require_tensor(
-    source: &dyn TensorSource,
-    name: &str,
-    dims: &[u64],
-    ggml_type: GGMLType,
-) -> Result<(), String> {
-    let info = source
-        .tensor_info(name)
-        .ok_or_else(|| format!("Missing tensor: {name}"))?;
-    if info.dims != dims {
-        return Err(format!("Invalid {name} dimensions"));
-    }
-    if info.ggml_type != ggml_type {
-        return Err(format!(
-            "Invalid {name} type: expected {ggml_type:?}, got {:?}",
-            info.ggml_type
-        ));
-    }
-    let expected = usize::try_from(
-        info.checked_nbytes()
-            .ok_or_else(|| format!("Invalid {name} byte size"))?,
-    )
-    .map_err(|_| format!("Invalid {name} byte size"))?;
-    let bytes = source
-        .tensor_slice(name)
-        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
-    if bytes.len() != expected {
-        return Err(format!("Invalid {name} byte length"));
-    }
-    Ok(())
-}
-
 /// A 2-D projection the reader can execute: either the quantized kernel or the
 /// F16 one. The dispatch happens in [`linear_into_scaled_impl`], so the loader
 /// should not pin one dtype here -- F16 additionally gives an unquantized
@@ -257,7 +225,7 @@ fn validate_text(source: &dyn TensorSource) -> Result<(), String> {
             ("self_attn.k_norm.weight", 128),
             ("self_attn.q_norm.weight", 128),
         ] {
-            require_tensor(
+            super::common::require_tensor(
                 source,
                 &format!("{prefix}.{suffix}"),
                 &[dims],
@@ -265,7 +233,7 @@ fn validate_text(source: &dyn TensorSource) -> Result<(), String> {
             )?;
         }
     }
-    require_tensor(source, "model.norm.weight", &[2560], GGMLType::F32)
+    super::common::require_tensor(source, "model.norm.weight", &[2560], GGMLType::F32)
 }
 
 fn validate_dit(source: &dyn TensorSource) -> Result<(), String> {
@@ -278,7 +246,7 @@ fn validate_dit(source: &dyn TensorSource) -> Result<(), String> {
         ("t_embedder.mlp.2.bias", 256),
         ("x_embedder.bias", 3840),
     ] {
-        require_tensor(source, name, &[dims], GGMLType::F32)?;
+        super::common::require_tensor(source, name, &[dims], GGMLType::F32)?;
     }
     for (name, dims) in [
         ("cap_embedder.1.weight", [2560, 3840]),
@@ -290,7 +258,7 @@ fn validate_dit(source: &dyn TensorSource) -> Result<(), String> {
         ("x_embedder.weight", [64, 3840]),
         ("x_pad_token", [3840, 1]),
     ] {
-        require_tensor(source, name, &dims, GGMLType::F16)?;
+        super::common::require_tensor(source, name, &dims, GGMLType::F16)?;
     }
     for layer in 0..2 {
         validate_refiner(source, &format!("context_refiner.{layer}"), false)?;
@@ -298,7 +266,7 @@ fn validate_dit(source: &dyn TensorSource) -> Result<(), String> {
     }
     for layer in 0..30 {
         let prefix = format!("layers.{layer}");
-        require_tensor(
+        super::common::require_tensor(
             source,
             &format!("{prefix}.adaLN_modulation.0.bias"),
             &[15360],
@@ -332,7 +300,7 @@ fn validate_refiner(
             &format!("{prefix}.adaLN_modulation.0.weight"),
             &[256, 15360],
         )?;
-        require_tensor(
+        super::common::require_tensor(
             source,
             &format!("{prefix}.adaLN_modulation.0.bias"),
             &[15360],
@@ -360,7 +328,7 @@ fn validate_transformer_vectors(source: &dyn TensorSource, prefix: &str) -> Resu
         ("ffn_norm1.weight", 3840),
         ("ffn_norm2.weight", 3840),
     ] {
-        require_tensor(
+        super::common::require_tensor(
             source,
             &format!("{prefix}.{suffix}"),
             &[dims],
@@ -376,13 +344,13 @@ fn validate_vae(source: &dyn TensorSource) -> Result<(), String> {
 
 pub(crate) fn validate_flux2_vae(source: &dyn TensorSource) -> Result<(), String> {
     validate_vae_decoder(source, 32)?;
-    require_tensor(
+    super::common::require_tensor(
         source,
         "post_quant_conv.weight",
         &[1, 1, 32, 32],
         GGMLType::F16,
     )?;
-    require_tensor(source, "post_quant_conv.bias", &[32], GGMLType::F32)
+    super::common::require_tensor(source, "post_quant_conv.bias", &[32], GGMLType::F32)
 }
 
 fn validate_vae_decoder(source: &dyn TensorSource, latent_channels: u64) -> Result<(), String> {
@@ -402,7 +370,7 @@ fn validate_vae_decoder(source: &dyn TensorSource, latent_channels: u64) -> Resu
         ("decoder.norm_out.bias", &[128][..], GGMLType::F32),
         ("decoder.norm_out.weight", &[128][..], GGMLType::F32),
     ] {
-        require_tensor(source, name, dims, ggml_type)?;
+        super::common::require_tensor(source, name, dims, ggml_type)?;
     }
     validate_vae_attention(source, "decoder.mid.attn_1", 512)?;
     validate_vae_block(source, "decoder.mid.block_1", 512, 512, false)?;
@@ -425,13 +393,13 @@ fn validate_vae_decoder(source: &dyn TensorSource, latent_channels: u64) -> Resu
             )?;
         }
         if stage != 0 {
-            require_tensor(
+            super::common::require_tensor(
                 source,
                 &format!("decoder.up.{stage}.upsample.conv.weight"),
                 &[3, 3, output_channels, output_channels],
                 GGMLType::F16,
             )?;
-            require_tensor(
+            super::common::require_tensor(
                 source,
                 &format!("decoder.up.{stage}.upsample.conv.bias"),
                 &[output_channels],
@@ -454,7 +422,7 @@ fn validate_vae_attention(
         });
         let linear_dims = [channels, channels];
         let conv_dims = [1, 1, channels, channels];
-        require_tensor(
+        super::common::require_tensor(
             source,
             &weight,
             if linear {
@@ -464,20 +432,20 @@ fn validate_vae_attention(
             },
             if linear { GGMLType::F32 } else { GGMLType::F16 },
         )?;
-        require_tensor(
+        super::common::require_tensor(
             source,
             &format!("{prefix}.{name}.bias"),
             &[channels],
             GGMLType::F32,
         )?;
     }
-    require_tensor(
+    super::common::require_tensor(
         source,
         &format!("{prefix}.norm.weight"),
         &[channels],
         GGMLType::F32,
     )?;
-    require_tensor(
+    super::common::require_tensor(
         source,
         &format!("{prefix}.norm.bias"),
         &[channels],
@@ -496,13 +464,13 @@ fn validate_vae_block(
         ("conv1", [3, 3, input_channels, output_channels]),
         ("conv2", [3, 3, output_channels, output_channels]),
     ] {
-        require_tensor(
+        super::common::require_tensor(
             source,
             &format!("{prefix}.{name}.weight"),
             &dims,
             GGMLType::F16,
         )?;
-        require_tensor(
+        super::common::require_tensor(
             source,
             &format!("{prefix}.{name}.bias"),
             &[output_channels],
@@ -510,13 +478,13 @@ fn validate_vae_block(
         )?;
     }
     for (name, channels) in [("norm1", input_channels), ("norm2", output_channels)] {
-        require_tensor(
+        super::common::require_tensor(
             source,
             &format!("{prefix}.{name}.weight"),
             &[channels],
             GGMLType::F32,
         )?;
-        require_tensor(
+        super::common::require_tensor(
             source,
             &format!("{prefix}.{name}.bias"),
             &[channels],
@@ -524,13 +492,13 @@ fn validate_vae_block(
         )?;
     }
     if has_shortcut {
-        require_tensor(
+        super::common::require_tensor(
             source,
             &format!("{prefix}.nin_shortcut.weight"),
             &[1, 1, input_channels, output_channels],
             GGMLType::F16,
         )?;
-        require_tensor(
+        super::common::require_tensor(
             source,
             &format!("{prefix}.nin_shortcut.bias"),
             &[output_channels],

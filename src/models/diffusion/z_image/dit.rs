@@ -186,8 +186,12 @@ fn checked_product(left: usize, right: usize, name: &str) -> Result<usize, Strin
         .ok_or_else(|| format!("Z-Image {name} shape overflow"))
 }
 
+/// Reports nan/inf counts, the finite range and the first bad index, which is
+/// strictly more than the shared check in [`super::common`]. That one only
+/// supplies the predicate; the diagnostics stay here because they are the point
+/// of this version.
 fn require_finite(values: &[f32], name: &str) -> Result<(), String> {
-    if values.iter().all(|value| value.is_finite()) {
+    if super::super::common::all_finite(values) {
         Ok(())
     } else {
         let n_nan = values.iter().filter(|v| v.is_nan()).count();
