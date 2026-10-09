@@ -55,6 +55,12 @@ pub struct CliOptions {
     pub lyrics: Option<String>,
     pub negative_prompt: Option<String>,
     pub chat_template: Option<String>,
+    /// Render the GGUF's own `tokenizer.chat_template` with minijinja
+    /// instead of the hand-written per-arch builder. Mirrors llama.cpp's
+    /// `--jinja`.
+    pub jinja: bool,
+    /// Override the chat template with a Jinja2 file. Implies `--jinja`.
+    pub chat_template_file: Option<PathBuf>,
     pub language: Option<String>,
     pub max_tokens: Option<usize>,
     pub max_context: Option<usize>,

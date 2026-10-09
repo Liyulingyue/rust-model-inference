@@ -35,6 +35,7 @@ pub fn run_inference(
     kv_format: KvFormat,
     max_context: usize,
     thinking: bool,
+    jinja: &crate::prompt::jinja::Options,
 ) -> Result<(), String> {
     let t0 = Instant::now();
     let cfg = Lfm25Config::from_source(source)?;
@@ -73,14 +74,26 @@ pub fn run_inference(
         arch, n_embd, n_layer, n_head, n_ff, cfg.d_conv, load_ms
     );
 
-    let input_tokens = build_lfm2_chat_prompt_with_thinking(
+    // `--jinja` renders the model's own template. For LFM2.5 that is not
+    // cosmetic: the hand-written builder omits `<|im_end|>` entirely, so the
+    // two paths genuinely differ. See docs/usage/chat-template.md.
+    let input_tokens = match crate::prompt::jinja::single_turn_tokens(
         &tokenizer,
-        &[Lfm2Message {
-            role: "user",
-            content: prompt,
-        }],
+        jinja,
+        &|k| source.metadata(k).cloned(),
+        prompt,
         thinking,
-    )?;
+    )? {
+        Some(ids) => ids,
+        None => build_lfm2_chat_prompt_with_thinking(
+            &tokenizer,
+            &[Lfm2Message {
+                role: "user",
+                content: prompt,
+            }],
+            thinking,
+        )?,
+    };
     eprintln!(
         "[RUST_TOKENS] n={} ids={:?}",
         input_tokens.len(),

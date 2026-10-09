@@ -64,6 +64,14 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                     i += 1;
                 }
             }
+            "--chat-template-file" => {
+                options.chat_template_file = Some(PathBuf::from(required_string_value(
+                    args,
+                    &mut i,
+                    "--chat-template-file",
+                )?));
+            }
+            "--jinja" => options.jinja = true,
             "--negative-prompt" => {
                 let value = args
                     .get(i + 1)

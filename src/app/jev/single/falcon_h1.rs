@@ -37,12 +37,13 @@ pub(crate) fn run_jev_decision_falcon_h1(
     n_threads_arg: usize,
     _prefill_batch_size: usize,
     output_json: bool,
+    jinja: crate::prompt::jinja::Options,
 ) -> Result<Vec<JevResult>, String> {
     let available_threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
     let n_threads = resolve_thread_count(n_threads_arg, available_threads);
-    let mut scorer = FalconH1JevScorer::new(source.clone(), n_threads)?;
+    let mut scorer = FalconH1JevScorer::new(source.clone(), n_threads, &jinja)?;
     if !output_json {
         eprintln!("compute pool: {} threads (Falcon-H1)", n_threads);
     }
@@ -50,13 +51,21 @@ pub(crate) fn run_jev_decision_falcon_h1(
 }
 
 pub(crate) struct FalconH1JevScorer {
+    /// `--jinja` template, resolved once in `new()` where the source is
+    /// available; `build_prompt` then renders per question.
+    pub(crate) jinja: Option<crate::prompt::jinja::JinjaChatTemplate>,
     model: FalconH1Model,
     scratch: FalconH1Scratch,
     tokenizer: BPETokenizer,
 }
 
 impl FalconH1JevScorer {
-    pub(crate) fn new(source: Arc<dyn TensorSource>, n_threads: usize) -> Result<Self, String> {
+    pub(crate) fn new(
+        source: Arc<dyn TensorSource>,
+        n_threads: usize,
+        jinja: &crate::prompt::jinja::Options,
+    ) -> Result<Self, String> {
+        let jinja = jinja.resolve(&|k| source.metadata(k).cloned())?;
         let model = FalconH1Model::from_source(source.clone(), n_threads)
             .map_err(|error| format!("Failed to load Falcon-H1 model: {error}"))?;
         let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
@@ -67,6 +76,7 @@ impl FalconH1JevScorer {
         // cover the longest prompt.
         let scratch = FalconH1Scratch::new(&model.config, model.config.n_ctx.max(1));
         Ok(Self {
+            jinja,
             model,
             scratch,
             tokenizer,
@@ -87,6 +97,21 @@ impl JevScorer for FalconH1JevScorer {
         let labels = jev_labels(q);
         let system = jev_system_prompt(q.mode);
         let payload = jev_payload_json(context, q)?;
+        // `--jinja` renders the model's own template. JEV opens the assistant
+        // turn so the next token is the decision being scored, i.e.
+        // `add_generation_prompt = true`, the same value generation uses.
+        // `thinking` off so the scored position does not move into a
+        // reasoning block.
+        if let Some(template) = self.jinja.as_ref() {
+            let ids = crate::prompt::jinja::render_text_conversation(
+                &self.tokenizer,
+                template,
+                Some(system),
+                &payload,
+                false,
+            )?;
+            return Ok((labels, ids));
+        }
         // Same turns `prompt::build_qwen_chat_prompt` emits for HTTP:
         // system + user, then a bare assistant prefix.
         let mut prompt_text = String::new();

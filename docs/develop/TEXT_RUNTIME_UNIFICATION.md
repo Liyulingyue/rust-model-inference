@@ -43,7 +43,7 @@ qwen2 全部能加载但请求 501，与 `README.md:414-416` 的宣称矛盾。
 ### 1.3 其他重复面
 
 - **prompt 三条路径**：`src/prompt.rs` 7 个 builder（CLI 各 trunk 自选）、
-  `src/models/chat_template.rs` 5 个 preset（无 Jinja 引擎，`chat_template.rs:3-5`
+  `src/prompt/legacy.rs` 5 个 preset（无 Jinja 引擎，`chat_template.rs:3-5`
   明说无法渲染 GGUF 里的 Jinja 源）、HTTP 自己的 `api/tools.rs::build_prompt`
   （硬编码 `enable_thinking=false`）。
 - **采样三套实现**：CLI 的 `src/ops/sampling.rs` 链、qwen3 trunk 内部、

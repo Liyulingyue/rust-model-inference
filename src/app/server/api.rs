@@ -330,6 +330,12 @@ async fn prompt(state: &AppState, request: &Request) -> Result<PromptResult, (u1
     let arch = text.arch.clone();
     let context = text.context_length;
     let source = text.source.clone();
+    // `spawn_blocking` requires `'static`, so move the Arc rather than
+    // borrowing through `state`.
+    let chat_template = text.chat_template.clone();
+    // Resolved at load time; passing this avoids recompiling the template on
+    // every request.
+    let compiled_chat_template = text.compiled_chat_template.clone();
     let request = request.clone();
     tokio::task::spawn_blocking(move || {
         let mut messages = request.messages.clone();
@@ -353,6 +359,8 @@ async fn prompt(state: &AppState, request: &Request) -> Result<PromptResult, (u1
             &request.tools,
             &request.choice,
             request.enable_thinking,
+            &chat_template,
+            compiled_chat_template.as_ref().as_ref(),
         )
         .map_err(|e| (400, e))?;
         if ids
@@ -943,6 +951,8 @@ mod http_tests {
                 tokenizer: std::sync::Arc::new(
                     super::super::BPETokenizer::from_qwen3_embedded_merges().unwrap(),
                 ),
+                chat_template: std::sync::Arc::new(crate::prompt::jinja::Options::default()),
+                compiled_chat_template: std::sync::Arc::new(None),
                 prefill_batch_size: 1,
                 context_length: 1024,
                 source: std::sync::Arc::new(UnimplementedSource),
@@ -1539,6 +1549,9 @@ pub async fn jev_score(
         positive,
         threads,
         prefill_batch_size,
+        // The JEV HTTP endpoints have no chat-template switch yet; they
+        // keep the hand-built prompt layout.
+        crate::prompt::jinja::Options::default(),
     ) {
         Ok(r) => r,
         Err(e) => return jev_error(StatusCode::INTERNAL_SERVER_ERROR, e),
@@ -1607,6 +1620,7 @@ async fn jev_grouped(
         mode,
         threads,
         prefill_batch_size,
+        crate::prompt::jinja::Options::default(),
     ) {
         Ok(r) => r,
         Err(e) => return jev_error(StatusCode::INTERNAL_SERVER_ERROR, e),
@@ -2258,6 +2272,8 @@ async fn run_multimodal_text_only(
                 prefill_batch_size,
                 max_context,
                 Some(system_prompt.as_str()),
+                // This endpoint has no chat-template switch, so no template.
+                None,
             )
         }
         other => Err(format!(

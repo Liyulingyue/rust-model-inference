@@ -800,6 +800,8 @@ pub fn run_inference(
     _kv_format: crate::app::cli::KvFormat,
     repetition_penalty: f32,
     chat_template: Option<&str>,
+    thinking: bool,
+    jinja: &crate::prompt::jinja::Options,
 ) -> Result<(), String> {
     use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
     use std::collections::HashMap;
@@ -822,26 +824,40 @@ pub fn run_inference(
     // `--chat-template <preset>` overrides the per-arch default; an
     // unknown architecture stays in raw base-model mode so parity
     // tests against llama.cpp still match byte-for-byte.
-    let formatted_prompt = crate::models::chat_template::format_chat(
-        &model.config.architecture,
-        chat_template,
-        prompt,
-    )
-    .unwrap_or_else(|| prompt.to_string());
-    if formatted_prompt != prompt {
+    // `--jinja` renders the GGUF's own template; the preset table below is
+    // the fallback for models that ship none.
+    let jinja_template = jinja.resolve(&|k| source.metadata(k).cloned())?;
+    if jinja_template.is_none() {
         let preset_name = chat_template.unwrap_or("auto");
         eprintln!(
             "Nemotron: chat-template preset = {preset_name} (resolved via {})",
             model.config.architecture
         );
     }
-    let prompt_ids = tokenizer.encode(
-        &formatted_prompt,
-        EncodeOptions {
-            add_special: true,
-            parse_special: true,
-        },
-    );
+    // Rendered through `render_tokens` rather than encoding rendered text with
+    // `add_special: true`: that would prepend a BOS to a template that already
+    // emitted `{{ bos_token }}`. `render_tokens` adds BOS only when the
+    // tokenizer asks for one and the ids do not already start with it.
+    let prompt_ids = if let Some(template) = jinja_template.as_ref() {
+        crate::prompt::jinja::render_tokens(
+            &tokenizer,
+            template,
+            &[crate::prompt::jinja::ChatMessage::text("user", prompt)],
+            true,
+            thinking,
+        )?
+    } else {
+        let formatted_prompt =
+            crate::prompt::legacy::format_chat(&model.config.architecture, chat_template, prompt)
+                .unwrap_or_else(|| prompt.to_string());
+        tokenizer.encode(
+            &formatted_prompt,
+            EncodeOptions {
+                add_special: true,
+                parse_special: true,
+            },
+        )
+    };
     if prompt_ids.is_empty() {
         return Err("Nemotron prompt produced no tokens".into());
     }
