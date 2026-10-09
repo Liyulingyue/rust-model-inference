@@ -1680,6 +1680,19 @@ const GPU_PHASE_LABELS: [&str; 9] = [
     "  host silu (of ffn)",
 ];
 
+/// Slot 3 wraps both the device and the CPU attention branch, so its host/gpu
+/// suffix cannot be a constant. `RUST_GPU_ATTENTION=0` moves ~27 s of the step
+/// (measured: 10.8 s -> 27.0 s over 8 steps at 512x512, seed 42) into this slot,
+/// which is what the runtime value reports.
+#[cfg(feature = "vulkan")]
+fn gpu_phase_label(slot: usize) -> &'static str {
+    match slot {
+        3 if gpu_attention_enabled() => "attention (gpu)",
+        3 => "attention (host)",
+        _ => GPU_PHASE_LABELS[slot],
+    }
+}
+
 #[cfg(feature = "vulkan")]
 fn gpu_profile_add(slot: usize, started: std::time::Instant) {
     GPU_PROFILE_TIMERS.with(|cell| {
@@ -1705,11 +1718,13 @@ fn gpu_profile_report(steps: usize) {
     }
     let pct = |x: f64| x / total * 100.0;
     eprintln!("\n[gpu-block-profile over {steps} denoise steps] total={total:.1}ms");
-    for (label, value) in GPU_PHASE_LABELS.iter().zip(t.iter()) {
-        if *value == 0.0 && label.starts_with("  ") {
+    for (slot, label) in GPU_PHASE_LABELS.iter().enumerate() {
+        let label = gpu_phase_label(slot);
+        let value = t[slot];
+        if value == 0.0 && label.starts_with("  ") {
             continue;
         }
-        eprintln!("  {label:22} {value:9.1}ms ({:5.1}%)", pct(*value));
+        eprintln!("  {label:22} {value:9.1}ms ({:5.1}%)", pct(value));
     }
 }
 

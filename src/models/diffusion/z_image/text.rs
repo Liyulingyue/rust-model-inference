@@ -93,6 +93,22 @@ impl Qwen3TextEncoder {
         })
     }
 
+    /// Whether the Qwen3 text encoder keeps its projections on the device.
+    ///
+    /// Off by default: see the `TODO(z-image)` at the call site in
+    /// `encode_layer_35` for why, and for the equivalent fix that should retire
+    /// this gate. `RUST_GPU_TEXT=1` opts back in so that optimization has
+    /// something to measure against.
+    #[cfg(feature = "vulkan")]
+    fn text_encoder_on_gpu() -> bool {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ENABLED.get_or_init(|| {
+            std::env::var("RUST_GPU_TEXT")
+                .map(|value| value != "0")
+                .unwrap_or(false)
+        })
+    }
+
     pub(crate) fn encode_layer_35(&self, prompt: &str) -> Result<Vec<f32>, String> {
         let total_start = std::time::Instant::now();
         let t_tok = std::time::Instant::now();
@@ -110,6 +126,38 @@ impl Qwen3TextEncoder {
         crate::parity_trace::report(crate::parity_trace::token_ids("z_image.prompt_ids", &ids));
         let t_tok = t_tok.elapsed();
         let t_fwd = std::time::Instant::now();
+        // TODO(z-image): keep the Qwen3 text encoder on the CPU for now. This is a
+        // temporary gate, not a decision that the text encoder belongs on the CPU.
+        //
+        // `forward_to_block` loops token-outer / layer-inner, so every (token, layer)
+        // pair issues 7 single-row projections. Each one reaches the GPU through
+        // `matmul_q8_0_quantized_parallel_rows`, which is guarded only by an
+        // `n_in` upper bound, so a 16-token prompt produces 16*35*7 = 3920 fenced
+        // single-row submissions. Each re-uploads 10-25 MB of Q8_0 weights for one
+        // row of real work, which measures ~5.0 s on GPU versus ~0.65 s on the
+        // 8-thread CPU pool -- the same "one fence per dispatch" shape that made the
+        // VAE convolution offload 76x slower than CPU in #164.
+        //
+        // Equivalent fix, to revisit before long prompts or batched text encoding
+        // make the prefill heavy: batch the prefill. The projections are plain
+        // row-independent GEMMs and `attention` already reads the strictly causal
+        // `scores[..=position]` window, so swapping the loop nesting to
+        // layer-outer / token-inner (or simply projecting all tokens for a layer at
+        // once) is numerically equivalent while turning 3920 one-row dispatches into
+        // 35*7 = 245 batched ones, with each weight upload amortized over all tokens.
+        // That needs no model or cache-layout change: the `cache[(layer*token_count +
+        // position)]` layout is shared by both nestings.
+        //
+        // The guard is thread-local and scoped to this forward pass. It must not be
+        // lifted into `matmul_q8_0_quantized_parallel_rows`, which is shared with the
+        // Z-Image DiT (--gpu is an 8.9x win there and must not regress).
+        //
+        // `RUST_GPU_TEXT=1` restores the pre-gate GPU path. It exists so the batched
+        // prefill above can be measured against the behavior it replaces; without it
+        // any attempt at that optimization would have to delete this guard first.
+        #[cfg(feature = "vulkan")]
+        let _text_encoder_on_cpu = (!Self::text_encoder_on_gpu())
+            .then(ComputePool::disable_gpu_matmul_for_scope);
         let output = self.forward_to_block(&ids, LAYER_35_BLOCKS)?;
         let t_fwd = t_fwd.elapsed();
         eprintln!(
