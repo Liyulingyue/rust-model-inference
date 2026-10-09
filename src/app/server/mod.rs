@@ -1321,21 +1321,26 @@ fn build_text(options: &CliOptions) -> Result<TextBackend, String> {
             }
             Err(_) => (None, 0),
         };
+    // Built once: the `Options` and the compiled template below must always
+    // agree, and constructing both from separate literals is how a new flag
+    // would end up on one and not the other.
+    //
+    // Resolving here is why a broken `--chat-template-file` fails startup
+    // instead of every request. That is deliberate: it only happens when the
+    // user explicitly asked for a template, and a config error should surface
+    // at startup rather than on the first request.
+    let chat_template = std::sync::Arc::new(crate::prompt::jinja::Options {
+        jinja: options.jinja,
+        file: options.chat_template_file.clone(),
+    });
+    let compiled_chat_template =
+        std::sync::Arc::new(chat_template.resolve(&|k| source.metadata(k).cloned())?);
     Ok(TextBackend {
         arch: arch.to_string(),
         pool,
         tokenizer,
-        chat_template: std::sync::Arc::new(crate::prompt::jinja::Options {
-            jinja: options.jinja,
-            file: options.chat_template_file.clone(),
-        }),
-        compiled_chat_template: std::sync::Arc::new(
-            crate::prompt::jinja::Options {
-                jinja: options.jinja,
-                file: options.chat_template_file.clone(),
-            }
-            .resolve(&|k| source.metadata(k).cloned())?,
-        ),
+        chat_template,
+        compiled_chat_template,
         prefill_batch_size,
         context_length,
         runtime,

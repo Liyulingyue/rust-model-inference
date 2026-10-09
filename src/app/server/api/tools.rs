@@ -1117,6 +1117,99 @@ mod tests {
         std::sync::Arc::new(TestSource)
     }
 
+    fn user_message() -> Vec<Message> {
+        vec![Message {
+            role: "user".into(),
+            text: "question".into(),
+            calls: vec![],
+            call_id: None,
+            images: vec![],
+        }]
+    }
+
+    /// The compiled template has to be what renders, not a fresh resolve.
+    ///
+    /// Before, the request path folded the fallback into `Option::or`, whose
+    /// argument is evaluated eagerly, so the template was re-read from disk on
+    /// every request even on a cache hit. Deleting the file after startup is
+    /// the observable form of that: the cached copy must still answer, and the
+    /// uncached path must fail, proving the two really differ.
+    #[test]
+    fn the_compiled_template_answers_without_touching_disk_again() {
+        let dir = std::env::temp_dir().join("rust_model_inference_jinja_cache_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("chat.jinja");
+        std::fs::write(&path, "CACHED-MARKER|{{ messages[0].content }}").unwrap();
+
+        let opts = crate::prompt::jinja::Options {
+            jinja: false,
+            file: Some(path.clone()),
+        };
+        let template = opts.resolve(&|_| None).unwrap().expect("file must resolve");
+
+        // Startup would have compiled this once; now the file disappears.
+        std::fs::remove_file(&path).unwrap();
+
+        let tokenizer = tokenizer();
+        let messages = user_message();
+
+        // Cached: still works, and the marker proves the template was used.
+        let (ids, images) = build_prompt(
+            source().as_ref(),
+            &tokenizer,
+            "qwen3",
+            &messages,
+            &[],
+            &ToolChoice::Auto,
+            None,
+            &opts,
+            Some(&template),
+        )
+        .expect("the compiled template must not need the file");
+        assert!(images.is_empty());
+        let text = tokenizer.decode(&ids, true);
+        assert!(text.contains("CACHED-MARKER"), "{text}");
+
+        // Uncached: the same call must fail, since the file is gone. This is
+        // what the eager `Option::or` fallback would have done on every
+        // request even when the cache hit.
+        assert!(
+            build_prompt(
+                source().as_ref(),
+                &tokenizer,
+                "qwen3",
+                &messages,
+                &[],
+                &ToolChoice::Auto,
+                None,
+                &opts,
+                None,
+            )
+            .is_err(),
+            "resolving from a deleted file must fail, proving the two paths differ"
+        );
+    }
+
+    /// A cache hit must not depend on the GGUF still being readable either.
+    #[test]
+    fn jinja_off_keeps_the_hand_written_renderer() {
+        let tokenizer = tokenizer();
+        let (ids, _) = build_prompt(
+            source().as_ref(),
+            &tokenizer,
+            "qwen3",
+            &user_message(),
+            &[],
+            &ToolChoice::Auto,
+            None,
+            &crate::prompt::jinja::Options::default(),
+            None,
+        )
+        .unwrap();
+        let text = tokenizer.decode(&ids, true);
+        assert!(text.contains("<|im_start|>user"), "{text}");
+    }
+
     #[test]
     fn native_prompts_preserve_tools_history_and_chatml_boundaries() {
         let tokenizer = tokenizer();
