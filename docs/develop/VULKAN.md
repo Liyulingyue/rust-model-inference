@@ -290,6 +290,17 @@ MoltenVK 路径是正确性后端，不宣称比 4-thread CPU 更快。
 - **ANV/Meteor Lake 偶发 wedge**：层 matmul dispatch 间歇性阻塞在驱动内部
   （`vkWaitForFences` 超时不生效）。看门狗超时后放弃该调用并 CPU 重算，进程不再挂死；
   被放弃的线程可能在驱动内持续自旋（占用 1 核直到进程退出）。
+- **共享 GEMV 入口缺少行数下界**：`matmul_q8_0_quantized_parallel_rows` 只有
+  `n_in` 上界，`rows = 1` 的调用也会上设备并各自 fence 一次。当某个模型的
+  forward 是逐 token / 逐像素的细粒度循环时，这会比 CPU 慢一个数量级——
+  Z-Image 文本编码器（16 token × 35 层 × 7 投影 = 3920 次单行提交，
+  GPU 5.42 s vs CPU 0.65 s）就是因此加了临时 gate；VAE 卷积曾以 76× 倒挂
+  出现在 `#161`，由 `#164` 修复。**新增 offload 前应先确认 `rows` 足够大**，
+  否则会在共享算子里给别的模型（如 DiT，8.8× 收益）埋下同类问题。
+  临时解法是调用侧加作用域守卫（`ComputePool::disable_gpu_matmul_for_scope`），
+  不要在共享算子里按模型加分支。
+- `RUST_GPU_TEXT=1`：恢复 Z-Image Qwen3 文本编码器的 GPU 投影（默认关，
+  见 `docs/usage/z-image.md` 的 gate 说明）。
 - `RUST_GPU_TRACE=1`：打印每次 dispatch 的序号/形状/耗时。
 - `RUST_GPU_MAX_ROWS=<n>`：超过 n 行的 matmul 回退 CPU（0 = 全 CPU）。
 - `RUST_GPU_TIMEOUT_MS=<n>`：单次 GPU 调用看门狗超时（默认 5000）。

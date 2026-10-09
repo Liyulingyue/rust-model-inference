@@ -38,43 +38,73 @@ Z-Image model requires --text-encoder, --vae, --prompt, and --out
 
 `--prompt` / `--out` 同样必填。
 
-### 实测耗时（20 核 DGX Spark，512×512，8 步）
+### 实测耗时（NVIDIA GB10，20 核，512×512，8 步）
 
-同机三条路径，prompt 为 "a red fox sleeping beneath a pine tree"，seed 42。
+prompt "A red fox sleeping beneath a pine tree"（16 token），seed 42，`--threads 8`，
+`cargo build --release --features vulkan`。2026-10-09，`#165` 之后。
 
-| 路径 | 步数 | DiT forwards | 总耗时 | 每次 forward |
-|---|---|---|---|---|
-| 本仓库 CPU | 8 | 7 | 466 s | 62.4 s |
-| **本仓库 GPU（`--gpu`）** | 8 | 7 | **150 s** | **16.8 s** |
-| PyTorch 2.11 + CUDA（同一权重） | 9 | 8 | 15.1 s | 1.89 s |
+同一二进制、只切开关的同会话对照：
+
+| 阶段 | CPU | GPU（`--gpu`） |
+|---|---|---|
+| text_encode | 0.6 s | **0.65–0.74 s**（见下方 gate）|
+| denoise | 563.3 s | **50.3 s** |
+| vae_decode | 10.6 s | **6.0 s** |
+| **总计** | **574.6 s** | **60.1 s** |
+
+denoise 11.2×、端到端 9.6×。默认配置多次运行输出逐字节一致；
+`RUST_GPU_TEXT=1` 输出亦逐字节一致（text gate 只改执行位置不改算术）。
+`RUST_GPU_ATTENTION=0` **不**逐字节一致（PSNR 31.4 dB）——这是该开关本身的语义，
+见下文「GPU 路径从来就不是逐位精确的」。
 
 当前 `--steps N` 跑 **N 次** forward：8 步在 `RUST_GPU_DIAG=1` 下打出 8 行 sigma，
-`dispatches` 每步 +300（300→2400）。表中"DiT forwards = N-1"是当时的旧语义，
-最后一步现已真正执行 forward，算单步耗时时不要沿用。
+`dispatches` 每步 +300（300→2400）。
 
-⚠️ **这一张表的绝对值已经失效**，本机今天实测纯 CPU 就要 496.6 s（denoise
-462.4 s），远高于表里的 466 s / 437 s；GPU 侧同理。差异不是编译 profile
-（`release` 与 `release-fast` 只差 0.1 s），而是机器状态漂移——同一份未改动的
-VAE 解码代码在重复运行里就给出 34.5 / 44.8 / 77.2 s。**请只使用下方"绝对值
-不可信"一节里的同会话 A/B 差值**，并重新测量 PyTorch 之后再谈比值：表里的
-1.89 s/forward 与 8.9× 同样是历史数字。
+denoise 分段（`[gpu-block-profile]`，8 步合计 50.3 s）：
 
-单步分解（GPU；attention 已上设备，见下表与下方 A/B）：
+| 阶段 | 8 步 | 占比 | 位置 |
+|---|---|---|---|
+| ffn: main stack | 25.4 s | 50.5% | GPU（Q8_0 tiled）|
+| **attention** | 10.8 s | 21.5% | **GPU** |
+| norm+adaln+qkv | 7.7 s | 15.4% | GPU |
+| out proj | 3.0 s | 6.0% | GPU |
+| ffn: refiner | 2.4 s | 4.8% | GPU（F16 tiled）|
+| &nbsp;&nbsp;其中 host silu | 4.8 s | 9.6% | **host**（w1/w3 之间）|
+| &nbsp;&nbsp;其中 w1 readback | 2.4 s | 4.7% | **host** |
+| rope | 0.9 s | 1.8% | host |
+| modulation | 0.02 s | 0.0% | host |
 
-| 阶段 | 单步 | 备注 |
-|---|---|---|
-| FFN 主栈 | 3.86 s | Q8_0 tiled，105% 理论地板，别碰 |
-| rms_norm + AdaLN + QKV | 2.09 s | 单 command buffer；其中约 1.4 s 去向未查明 |
-| 输出投影 | 1.24 s | |
-| FFN refiner | 1.42 s | F16 tiled，原生解码 + packed staging 后 2.54× |
-| attention | 0.31 s | GPU 整链：tiled scores + softmax + value reduction |
-| RoPE + 调制 | 0.11 s | 仍在 CPU |
+**真正在 host 的是 8.1 s / 50.3 s = 16.1%**，其中 host silu + w1 readback 合计
+7.2 s——`run_block_gpu` 把 w1 投影回读、在 host 做 silu、再传给 w2。三者合并到单个
+command buffer 的尝试曾输出全 `-inf` 而回退（见下方「历史归档」一节）。
 
-> **线程数也非越多越好**：16 线程首步 269.3 s，反而慢于 8 线程的 140.5 s。
+> **out proj 曾经有一大块没被 profile 单独统计的 host 开销。** slot 4 同时包住
+> GPU 投影、回读，以及一个 `for row in 0..3840` 的单线程循环——每行做一次
+> `rms_norm_inplace` 加一次 `add_modulated_residual`，后者的带 gate 分支逐元素调用
+> `gate.tanh()`。每 block 跑两次（out proj 后、FFN 后），512×512 下合计约 2900 万次
+> tanh，全部落在调用线程上。`readback_norm_and_residual_rows` 把它按行分片到
+> ComputePool：行是各缓冲的互不相交切片，所以这是纯重分区，**输出逐字节一致**
+> （已验证），denoise 63.9 s → 50.3 s，slot 4 由 8.7 s 降到 3.0 s。
+
+> ⚠️ **`attention (gpu)` 这一行的标签曾经是错的**。`GPU_PHASE_LABELS` 曾把 slot 3
+> 硬编码成 `attention (host)`，而该计时器同时包住 GPU 与 CPU 两个分支。实测
+> `RUST_GPU_ATTENTION=0` 后 slot 3 从 10.8 s 涨到 **27.0 s**（单步 3.4 s），确认
+> 默认走的是 GPU。标签已改为按 `gpu_attention_enabled()` 动态取值。
 
 ### ⚠️ 绝对值不可信，只有 A/B 差值可信
 
-历史文档写 14.7 s/步。本机今天实测**纯净 HEAD（9a831ee）已经是 23.07 s/步**，
+历史表格（GPU 150 s / 单步 16.8 s、CPU 466 s、PyTorch 1.89 s/forward）已全部作废，
+不要引用。上表的 70.6 s 是**同会话 A/B**，只有它与它的比值可用。PyTorch 未在本次
+重测，任何与它的比值仍需重新测量。
+
+> **线程数也非越多越好**：16 线程首步 269.3 s，反而慢于 8 线程的 140.5 s。
+
+### 历史归档：DiT GPU 化过程（2026-10-06 之前的 A/B）
+
+以下记录 DiT 上 GPU 期间每次改造的相对收益，**当时的绝对值均已作废**，当前基线见上文。
+保留是为了说明「为什么这些改动存在」，不要用它和今天的 70.6 s 直接比较。
+
+历史文档写 14.7 s/步。本机当时实测**纯净 HEAD（9a831ee）已经是 23.07 s/步**，
 `release`（fat LTO）与 `release-fast` 相差 0.1 s，所以**不是编译 profile**。旁证
 VAE 解码——只跑一次、与步数无关、代码未改——在多次相同运行里分别是
 34.5 / 44.8 / 77.2 s，本身带 2.2× 噪声，**不能用于任何归因**。
@@ -206,8 +236,32 @@ Q8 主栈、F16 refiner 与 QKV），**GPU 路径从来就不是逐位精确的*
 | `RUST_GPU_F16_REF` | `1` | `0` 把 refiner 栈放回 CPU |
 | `RUST_GPU_TILED` | `1` | `0` 关掉 Q8_0 tiled matmul |
 | `RUST_GPU_DIAG` | 关 | 打印每步 GPU 上的 block / dispatch 数 |
+| `RUST_GPU_TEXT` | `0` | `1` 把 Qwen3 文本编码器的投影放回 GPU（**默认关，见下**）|
 
 在重建绝对基线之前，不要用这些数字与 PyTorch 的 1.89 s/forward 算比值。
+
+#### ⚠️ Qwen3 文本编码器默认在 CPU 上跑
+
+这是**有意为之的临时 gate**，不是「文本编码器不适合 GPU」的结论。
+
+`Qwen3TextEncoder::forward_to_block` 的循环是 token 在外、层在内，所以每个
+`(token, layer)` 组合发出 7 次**单行**投影。它们经
+`matmul_q8_0_quantized_parallel_rows` 上设备，而该入口只有 `n_in` 上界、没有行数
+下界，于是 16 token 的 prompt 产生 `16×35×7 = 3920` 次 fenced 单行提交——每次为
+一行真实计算重传 10-25 MB Q8_0 权重。实测 **GPU 5.42 s vs CPU 0.65 s**（8 线程）。
+
+这与 `#164` 修掉的 VAE「一次 dispatch 一个 fence」是同一种形状（那次是 76× 倒挂）。
+守卫是 thread-local 且只覆盖这一次 forward，**没有下沉到
+`matmul_q8_0_quantized_parallel_rows`**——那个算子与 Z-Image DiT 共用，`--gpu`
+在 DiT 上是 8.8× 收益，不能被牵连。
+
+等价的修法（待做）：把 prefill 批量化。投影本身是逐行无关的 GEMM，且 `attention`
+已经只读严格因果的 `scores[..=position]` 窗口，所以把循环嵌套换成 layer 外 /
+token 内（或直接一层一次投影全部 token）**数值等价**，3920 次单行 dispatch 变
+`35×7=245` 次批量 dispatch，每次权重上传被所有 token 摊薄。**不需要改模型或
+cache 布局**——`cache[(layer*token_count + position)]` 两种嵌套共用。
+
+`RUST_GPU_TEXT=1` 保留旧行为，供上述优化做对照测量。
 
 ### 让 GPU 路径快起来的四件事
 
@@ -317,19 +371,30 @@ VAE 只导出 `decoder.*`（txt2img 是 latent → 像素，编码器用不上�
 GPU 一列的判定依据与已知缺口：
 
 - **已跑通**：NVIDIA GB10（`--features vulkan` 构建）上 8 步 512×512 端到端出图，
-  132 s；`RUST_GPU_DIAG=1` 报 `blocks_on_gpu=34`（全部 34 层进入 `run_block_gpu`），
-  每步 170 次 projection。分阶段耗时与本文上方 2026-10-06 的基线吻合
-  （denoise 109.3 s vs 107.2 s，占比一致）。
-- **画质未回归**：同 seed 256×256 2 步，GPU 与 CPU 输出 PSNR **41.9 dB**，
-  mean\|Δ\| 1.46/255。
+  **70.6 s**（同会话 CPU 574.6 s，8.1×）；`RUST_GPU_DIAG=1` 报 `blocks_on_gpu=34`
+  （全部 34 层进入 `run_block_gpu`），每步 170 次 projection。
+- **画质**：同 seed 512×512 8 步，GPU 与 CPU 输出 PSNR **33.34 dB**，
+  mean\|Δ\| 2.81/255。`RUST_GPU_TEXT=1` 的输出与默认配置逐字节一致；
+  `RUST_GPU_ATTENTION=0` 与默认相差 PSNR 31.4 dB（该开关按设计改变浮点路径）。
 - **单测覆盖**：`cargo test --features vulkan --lib` 下 5 个 GPU 正确性测试通过
   （AdaLN 调制、融合 norm+modulate、batched QKV、W2 scale 抵消、attention 分块逐位一致）。
-- **新增 RADV 记录**：512×512 八步出图 402.758633 s；128×128 两步 CPU/GPU
+- **RADV 记录**：512×512 八步出图 402.758633 s；128×128 两步 CPU/GPU
   为 359.780291 / 26.349318 s，PSNR 39.3589 dB。权重与执行范围见链接，和 GB10 记录分开看待。
 - **验证边界**：`tests/z_image_reference.rs` 是纯 CPU 且 `#[ignore]`。
   GPU 成图来自实机运行；像素不逐位一致，512×512 CPU 成品对比和整条浮点管线 parity 尚未完成。
-- **已知缺口**：attention 与 RoPE 仍在 host；FFN 的 w1/w3 激活要经 host silu
-  （合批到单 command buffer 的尝试已回退，见第 1 节）。
+- **已知缺口**：
+  - **DiT attention 已在 GPU**（默认 `RUST_GPU_ATTENTION=1`，实测 10.8 s/8 步；
+    关掉后 27.0 s）。旧版本文档与 `GPU_PHASE_LABELS` 曾误标为 host，标签已修正。
+  - **RoPE 与 AdaLN modulation 仍在 host**（合计 0.9 s / 50.3 s，可忽略）。
+  - **FFN 的 w1/w3 激活要经 host silu + 回读**，合计 7.2 s / 50.3 s = 14.3%，
+    是 denoise 剩余最大的一块 host 开销。合批到单 command buffer 的尝试曾输出
+    全 `-inf` 而回退，根因未定位——**修它需要先独立诊断那个 bug**，风险与收益
+    不对等。
+  - **QKV 每 block 重新上传 ~48 MB**（RoPE 在 host，旋转后的行要送回设备）。
+    8 步约 13 GB，被包在 attention 那一档里。若 RoPE 上设备可省，但尚未评估。
+  - **Qwen3 文本编码器默认在 CPU 上跑**（临时 gate，见第 1 节环境变量表）。
+  - **VAE 只 offload 卷积**：GroupNorm、SiLU、nearest upsample 与 VAE 内 attention
+    仍在 CPU。当前 VAE 6.0 s 已优于 CPU 的 10.6 s，故非瓶颈。
 
 ## 5. 与 Oracle 的对齐
 
