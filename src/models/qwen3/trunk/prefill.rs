@@ -476,6 +476,23 @@ impl Qwen3Session<'_> {
                                         *value += *bias;
                                     }
                                 }
+                                #[cfg(feature = "parity-trace")]
+                                if layer == 0 {
+                                    parity_trace::report(parity_trace::checkpoint_row(
+                                        row,
+                                        "Qcur_raw-0",
+                                        Some(0),
+                                        &[config.n_head, config.n_embd_head_k],
+                                        q,
+                                    ));
+                                    parity_trace::report(parity_trace::checkpoint_row(
+                                        row,
+                                        "Kcur_raw-0",
+                                        Some(0),
+                                        &[config.n_head_kv, config.n_embd_head_k],
+                                        k,
+                                    ));
+                                }
                                 if let (Some(q_norm), Some(k_norm)) =
                                     (weights.q_norm.as_deref(), weights.k_norm.as_deref())
                                 {
@@ -761,15 +778,25 @@ impl Qwen3Session<'_> {
                                                 let weights = &scores[..n_padded];
                                                 for dimension in 0..config.n_embd_head_v {
                                                     let mut value = 0.0;
+                                                    let mut exact = 0.0f64;
                                                     for token in 0..visible {
                                                         let cache_row =
                                                             layer_base + token * kv_stride;
-                                                        value += weights[token]
+                                                        let product = weights[token]
                                                             * v_cache[cache_row
                                                                 + kv_head * config.n_embd_head_v
                                                                 + dimension];
+                                                        if scalar_mode() {
+                                                            exact += f64::from(product);
+                                                        } else {
+                                                            value += product;
+                                                        }
                                                     }
-                                                    output[dimension] = value;
+                                                    output[dimension] = if scalar_mode() {
+                                                        exact as f32
+                                                    } else {
+                                                        value
+                                                    };
                                                 }
                                             }
                                         }

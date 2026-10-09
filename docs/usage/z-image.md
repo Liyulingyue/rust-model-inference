@@ -10,11 +10,9 @@ GGUF `general.architecture = pig`，对应 `src/models/diffusion/pig.rs` 与
 `src/models/diffusion/z_image/`。CLI 入口 `src/app/diffusion.rs::run_z_image_cli`。
 
 > 共用前置：构建 `cargo build --release --features vulkan --bin rust-model-inference`。
-> **`--features vulkan` 不能省**：`default = []`（`Cargo.toml:9`）不含 vulkan，
-> 漏掉时 `gpu_matmul_active()` 硬编码为 `false`（`src/ops/float.rs:40-43`），
-> `--gpu` 变成静默空操作——图照出，但全程走 CPU，无任何报错。
-> 当前**仅 txt2img**。img2img、Z-Image Base 列为 `Unsupported`（SUPPORTED_MODELS.md）。
-> GPU 路径为 `Supported`（见第 4 节），默认关闭，需显式 `--gpu`。
+> CPU 的 pinned Oracle 验证范围为 **512×512、txt2img**。
+> Vulkan 为实验性后端，运行加 `--gpu`。`default = []` 不含 Vulkan，省略构建 feature 时仍走 CPU。
+> img2img、Z-Image Base 仍为 `Unsupported`；设备验证见 [RADV 记录](../develop/VULKAN_RADV_VALIDATION_2026-10-07.md)。
 
 ## 1. 三组件
 
@@ -314,7 +312,7 @@ VAE 只导出 `decoder.*`（txt2img 是 latent → 像素，编码器用不上�
 | Z-Image Turbo（CPU、512×512、txt2img） | `Verified`（[tests/z_image_reference.rs](../../tests/z_image_reference.rs) 覆盖 pinned Oracle） |
 | Z-Image Base | `Unsupported` |
 | img2img | `Unsupported` |
-| GPU 后端 | `Supported`（需 `--features vulkan` + `--gpu`；无端到端 GPU 测试，故非 `Verified`） |
+| GPU 后端 | `Experimental`（DiT 与 F16 VAE 卷积 offload；[RADV 记录](../develop/VULKAN_RADV_VALIDATION_2026-10-07.md)） |
 
 GPU 一列的判定依据与已知缺口：
 
@@ -326,9 +324,10 @@ GPU 一列的判定依据与已知缺口：
   mean\|Δ\| 1.46/255。
 - **单测覆盖**：`cargo test --features vulkan --lib` 下 5 个 GPU 正确性测试通过
   （AdaLN 调制、融合 norm+modulate、batched QKV、W2 scale 抵消、attention 分块逐位一致）。
-- **为什么不是 `Verified`**：仓库里**没有 GPU 端到端测试**——`tests/z_image_reference.rs`
-  是纯 CPU 且 `#[ignore]`。上面的数字来自人工运行，没有可重复的 CI 门禁。
-  按 SUPPORTED_MODELS.md 的状态定义（"无独立的真实 GGUF 端到端记录"）只能算 `Supported`。
+- **新增 RADV 记录**：512×512 八步出图 402.758633 s；128×128 两步 CPU/GPU
+  为 359.780291 / 26.349318 s，PSNR 39.3589 dB。权重与执行范围见链接，和 GB10 记录分开看待。
+- **验证边界**：`tests/z_image_reference.rs` 是纯 CPU 且 `#[ignore]`。
+  GPU 成图来自实机运行；像素不逐位一致，512×512 CPU 成品对比和整条浮点管线 parity 尚未完成。
 - **已知缺口**：attention 与 RoPE 仍在 host；FFN 的 w1/w3 激活要经 host silu
   （合批到单 command buffer 的尝试已回退，见第 1 节）。
 
@@ -359,7 +358,7 @@ Pinned Oracle：[leejet/stable-diffusion.cpp](https://github.com/leejet/stable-d
 | `--resolution` | 输出分辨率（divisible by 16） | — | 512 |
 | `--seed` | RNG 种子 | — | 0 |
 | `--threads` | ComputePool 线程数 | — | 自动 |
-| `--gpu` | DiT 投影走 Vulkan 后端 | — | 关 |
+| `--gpu` | DiT 投影与 F16 VAE 卷积走 Vulkan 后端 | — | 关 |
 
 只有前五项必填（聚合检查在 `src/app/mod.rs:187-192`，逐项检查在
 `src/app/cli/options.rs:608-632`）；`--steps` / `--resolution` 取 `unwrap_or`
@@ -367,8 +366,8 @@ Pinned Oracle：[leejet/stable-diffusion.cpp](https://github.com/leejet/stable-d
 
 `--gpu` 刻意不在互斥表里（`options.rs:600-604`）：DiT 投影经
 `matmul_q8_0_quantized_parallel_rows` 交给 Vulkan backend，不支持的形状逐个回退，
-所以这个开关在这里是有意义的。该 kernel 之外——attention、norms、VAE 卷积——无论
-是否开 `--gpu` 都在 CPU。
+所以这个开关在这里是有意义的。F16 VAE 的 1×1 / 3×3 卷积也可 offload；
+attention、norms 与 VAE 的 BF16/F32 分支保持 CPU 执行。
 
 ## 7. 相关源码索引
 

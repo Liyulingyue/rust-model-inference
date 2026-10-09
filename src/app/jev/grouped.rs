@@ -193,12 +193,41 @@ fn allocate_group_labels(q: &PreparedGroupedQuestion) -> Vec<Vec<char>> {
     all
 }
 
+/// Render the grouped prompt through the model's own template.
+///
+/// Grouped scorers build their prompt here rather than in the single-mode
+/// `build_prompt`, which is why `--jinja` used to be stored on the scorer and
+/// then never read: grouped JEV silently ignored the flag. Returns `None` when
+/// Jinja2 is off, so the caller keeps its hand-built ChatML.
+fn grouped_prompt_via_jinja(
+    tokenizer: &dyn crate::core::tokenizer::Tokenizer,
+    system: &str,
+    payload: &str,
+    jinja: Option<&crate::prompt::jinja::JinjaChatTemplate>,
+) -> Result<Option<Vec<u32>>, String> {
+    let Some(template) = jinja else {
+        return Ok(None);
+    };
+    crate::prompt::jinja::render_text_conversation(
+        tokenizer,
+        template,
+        Some(system),
+        payload,
+        false,
+    )
+    .map(Some)
+}
+
 fn build_jev_token_ids_for_arch(
     arch: &str,
     tokenizer: &BPETokenizer,
     system: &str,
     payload: &str,
+    jinja: Option<&crate::prompt::jinja::JinjaChatTemplate>,
 ) -> Result<Vec<u32>, String> {
+    if let Some(ids) = grouped_prompt_via_jinja(tokenizer, system, payload, jinja)? {
+        return Ok(ids);
+    }
     match arch {
         "qwen3" | "qwen3vl" | "hunyuan-dense" => {
             let mut token_ids = Vec::new();
@@ -536,6 +565,7 @@ pub fn run_jev_grouped_decision_data(
     mode: JevMode,
     n_threads_arg: usize,
     prefill_batch_size: usize,
+    jinja: crate::prompt::jinja::Options,
 ) -> Result<Vec<JevGroupedResult>, String> {
     let prepared = prepare_jev_grouped_questions(questions, mode)?;
     let arch = source
@@ -552,6 +582,7 @@ pub fn run_jev_grouped_decision_data(
             n_threads_arg,
             prefill_batch_size,
             false,
+            jinja.clone(),
         )?,
         "qwen35" => qwen35::run_jev_grouped_qwen35(
             source.clone(),
@@ -560,6 +591,7 @@ pub fn run_jev_grouped_decision_data(
             n_threads_arg,
             prefill_batch_size,
             false,
+            jinja.clone(),
         )?,
         "llama" | "k2-horizon" | "granite" | "nanbeige" | "qwen2_2" | "phi3" | "glm4"
         | "mistral3" => llama::run_jev_grouped_llama(
@@ -569,6 +601,7 @@ pub fn run_jev_grouped_decision_data(
             n_threads_arg,
             prefill_batch_size,
             false,
+            jinja.clone(),
         )?,
         "gemma4" => gemma4::run_jev_grouped_gemma4(
             source.clone(),
@@ -577,6 +610,7 @@ pub fn run_jev_grouped_decision_data(
             n_threads_arg,
             prefill_batch_size,
             false,
+            jinja.clone(),
         )?,
         "lfm2" => lfm2::run_jev_grouped_lfm2(
             source.clone(),
@@ -585,6 +619,7 @@ pub fn run_jev_grouped_decision_data(
             n_threads_arg,
             prefill_batch_size,
             false,
+            jinja.clone(),
         )?,
         "lfm25" => lfm25::run_jev_grouped_lfm25(
             source.clone(),
@@ -593,6 +628,7 @@ pub fn run_jev_grouped_decision_data(
             n_threads_arg,
             prefill_batch_size,
             false,
+            jinja.clone(),
         )?,
         "spark2_5" => spark::run_jev_grouped_spark(
             source.clone(),
@@ -601,6 +637,7 @@ pub fn run_jev_grouped_decision_data(
             n_threads_arg,
             prefill_batch_size,
             false,
+            jinja.clone(),
         )?,
         "nemotron_h" => nemotron_h::run_jev_grouped_nemotron_h(
             source.clone(),
@@ -609,6 +646,7 @@ pub fn run_jev_grouped_decision_data(
             n_threads_arg,
             prefill_batch_size,
             false,
+            jinja.clone(),
         )?,
         "hunyuan-dense" => hunyuan::run_jev_grouped_hunyuan(
             source.clone(),
@@ -617,6 +655,7 @@ pub fn run_jev_grouped_decision_data(
             n_threads_arg,
             prefill_batch_size,
             false,
+            jinja.clone(),
         )?,
         other => {
             return Err(format!(
@@ -640,6 +679,7 @@ pub fn run_jev_grouped_decision(
     n_threads_arg: usize,
     prefill_batch_size: usize,
     output_json: bool,
+    jinja: crate::prompt::jinja::Options,
 ) -> Result<(), String> {
     let t0 = Instant::now();
     let results = run_jev_grouped_decision_data(
@@ -649,6 +689,7 @@ pub fn run_jev_grouped_decision(
         mode,
         n_threads_arg,
         prefill_batch_size,
+        jinja,
     )?;
 
     if output_json {
@@ -705,4 +746,39 @@ fn print_grouped_result_text(r: &JevGroupedResult) {
         );
     }
     println!("prefill: {} ms", r.prefill_ms);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::grouped_prompt_via_jinja;
+    use crate::core::tokenizer::{MockTokenizer, Tokenizer};
+    use crate::prompt::jinja::JinjaChatTemplate;
+
+    /// Grouped JEV used to store `--jinja` on the scorer and then never read
+    /// it, because the prompt is built by this free function rather than by the
+    /// single-mode `build_prompt`. The marker text proves the template shaped
+    /// the prompt.
+    #[test]
+    fn grouped_prompt_uses_the_jinja_template() {
+        let template = JinjaChatTemplate::compile(
+            "JINJA-MARKER|{{ messages[0].content }}|{{ messages[1].content }}",
+            "test",
+        )
+        .unwrap();
+        let tok = MockTokenizer::new();
+        let ids = grouped_prompt_via_jinja(&tok, "SYS", "PAY", Some(&template))
+            .unwrap()
+            .expect("jinja path must render");
+        assert_eq!(tok.decode(&ids, false), "JINJA-MARKER|SYS|PAY");
+    }
+
+    #[test]
+    fn grouped_prompt_without_jinja_is_left_to_the_caller() {
+        // `None` means "keep hand-building ChatML", so enabling the flag never
+        // changes the default prompts.
+        let tok = MockTokenizer::new();
+        assert!(grouped_prompt_via_jinja(&tok, "SYS", "PAY", None)
+            .unwrap()
+            .is_none());
+    }
 }

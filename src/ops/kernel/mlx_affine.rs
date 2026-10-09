@@ -11,6 +11,10 @@ pub struct MlxAffineKernel<'a> {
     n_out: usize,
     bits: usize,
     lora: Option<(&'a [u8], &'a [u8], usize, f32)>,
+    #[cfg(feature = "vulkan")]
+    gpu: super::vulkan::GpuLinear,
+    #[cfg(feature = "vulkan")]
+    gpu_payload: std::sync::OnceLock<Vec<u8>>,
 }
 
 impl<'a> MlxAffineKernel<'a> {
@@ -42,8 +46,12 @@ impl<'a> MlxAffineKernel<'a> {
                 packed.len(), scales.len(), biases.len()
             ));
         }
-        if let Some((a, b, rank, _)) = lora {
-            if rank == 0 || a.len() != rank * n_in * 2 || b.len() != n_out * rank * 2 {
+        if let Some((a, b, rank, scale)) = lora {
+            if rank == 0
+                || !scale.is_finite()
+                || rank.checked_mul(n_in).and_then(|n| n.checked_mul(2)) != Some(a.len())
+                || n_out.checked_mul(rank).and_then(|n| n.checked_mul(2)) != Some(b.len())
+            {
                 return Err("MLX affine LoRA shape mismatch".into());
             }
         }
@@ -55,6 +63,10 @@ impl<'a> MlxAffineKernel<'a> {
             n_out,
             bits,
             lora,
+            #[cfg(feature = "vulkan")]
+            gpu: super::vulkan::GpuLinear::default(),
+            #[cfg(feature = "vulkan")]
+            gpu_payload: std::sync::OnceLock::new(),
         })
     }
 
@@ -101,6 +113,61 @@ impl<'a> MlxAffineKernel<'a> {
 }
 
 impl Kernel for MlxAffineKernel<'_> {
+    #[cfg(feature = "vulkan")]
+    fn try_forward_vulkan_rows(
+        &self,
+        input: &[f32],
+        output: &mut [f32],
+        n_in: usize,
+        n_out: usize,
+        rows: usize,
+    ) -> bool {
+        if (n_in, n_out) != (self.n_in, self.n_out)
+            || !super::vulkan::offload_enabled()
+            || crate::ops::get_vulkan_context().is_none()
+        {
+            return false;
+        }
+        let payload = self
+            .gpu_payload
+            .get_or_init(|| [self.packed, self.scales, self.biases].concat());
+        let format = if self.bits == 4 {
+            crate::vulkan::ops::GpuWeightFormat::MlxAffine4
+        } else {
+            crate::vulkan::ops::GpuWeightFormat::MlxAffine8
+        };
+        if !self
+            .gpu
+            .try_matmul(payload, format, input, output, n_in, n_out, rows)
+        {
+            return false;
+        }
+        // The small LoRA correction retains the original F32-input CPU dot contract.
+        if let Some((a, b, rank, scale)) = self.lora {
+            let mut decoded = vec![0.0; n_in.max(rank)];
+            for (input, output) in input.chunks_exact(n_in).zip(output.chunks_exact_mut(n_out)) {
+                let low: Vec<_> = (0..rank)
+                    .map(|row| {
+                        Self::dot_f16(
+                            input,
+                            &a[row * n_in * 2..(row + 1) * n_in * 2],
+                            &mut decoded,
+                        )
+                    })
+                    .collect();
+                for (row, value) in output.iter_mut().enumerate() {
+                    *value += scale
+                        * Self::dot_f16(
+                            &low,
+                            &b[row * rank * 2..(row + 1) * rank * 2],
+                            &mut decoded,
+                        );
+                }
+            }
+        }
+        output.iter().all(|value| value.is_finite())
+    }
+
     fn forward_prequantized(
         &self,
         _input_q8: &[u8],
@@ -182,6 +249,84 @@ impl Kernel for MlxAffineKernel<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    #[ignore = "requires a Vulkan device; fails if offload is unavailable"]
+    fn vulkan_mlx_affine_rows_include_lora_and_tile_tails() {
+        crate::ops::enable_gpu();
+        crate::ops::get_vulkan_context().expect("Vulkan device required");
+        for (bits, n_in) in [(4, 64), (8, 128)] {
+            let n_out = 3;
+            let groups = n_in / 64 * n_out;
+            let packed: Vec<_> = (0..n_in * n_out * bits / 8)
+                .map(|i| (i * 37 + 3) as u8)
+                .collect();
+            let scales: Vec<_> = (0..groups)
+                .flat_map(|i| {
+                    half::bf16::from_f32(0.003 + i as f32 * 0.002)
+                        .to_bits()
+                        .to_le_bytes()
+                })
+                .collect();
+            let biases: Vec<_> = (0..groups)
+                .flat_map(|i| {
+                    half::bf16::from_f32(-0.25 + i as f32 * 0.03125)
+                        .to_bits()
+                        .to_le_bytes()
+                })
+                .collect();
+            let a: Vec<_> = (0..2 * n_in)
+                .flat_map(|i| {
+                    f16::from_f32((i as f32 % 7.0 - 3.0) / 32.0)
+                        .to_bits()
+                        .to_le_bytes()
+                })
+                .collect();
+            let b: Vec<_> = (0..n_out * 2)
+                .flat_map(|i| {
+                    f16::from_f32((i as f32 - 3.0) / 16.0)
+                        .to_bits()
+                        .to_le_bytes()
+                })
+                .collect();
+            let input: Vec<_> = (0..65 * n_in)
+                .map(|i| ((i * 29 % 251) as f32 - 125.0) / 97.0)
+                .collect();
+            for lora in [None, Some((a.as_slice(), b.as_slice(), 2, 1.5))] {
+                let kernel =
+                    MlxAffineKernel::new(&packed, &scales, &biases, n_in, n_out, bits, lora)
+                        .unwrap();
+                let mut expected = vec![0.0; 65 * n_out];
+                kernel.forward_batched(&input, &mut expected, n_in, n_out);
+                let mut actual = vec![f32::NAN; expected.len()];
+                assert!(
+                    kernel.try_forward_vulkan_rows(&input, &mut actual, n_in, n_out, 65),
+                    "GPU affine projection declined"
+                );
+                for (actual, expected) in actual.into_iter().zip(expected) {
+                    assert!(
+                        (actual - expected).abs() <= 3e-4 + 3e-4 * expected.abs(),
+                        "bits={bits} gpu={actual} cpu={expected}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn affine_rejects_overflowing_lora_shape() {
+        assert!(MlxAffineKernel::new(
+            &[0; 32],
+            &[0; 2],
+            &[0; 2],
+            64,
+            1,
+            4,
+            Some((&[], &[], usize::MAX, 1.0))
+        )
+        .is_err());
+    }
 
     #[test]
     fn affine_and_lora_use_shared_dot_dispatch() {

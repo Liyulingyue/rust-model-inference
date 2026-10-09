@@ -17,6 +17,7 @@
 
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
+use crate::models::diffusion::DiffusionPipeline;
 use crate::ops::kernel::f16::F16Kernel;
 use crate::ops::matmul_q8_0_quantized_parallel_rows;
 use std::sync::Arc;
@@ -25,11 +26,10 @@ pub(crate) mod dit;
 pub(crate) mod text;
 mod vae;
 
-pub struct ErnieImageRgb {
-    pub width: u32,
-    pub height: u32,
-    pub bytes: Vec<u8>,
-}
+/// Decoded RGB image bytes for ERNIE-Image output. Structurally identical to
+/// [`crate::models::diffusion::z_image::ZImageRgb`] (width/height/bytes);
+/// kept as a distinct type so call sites can document intent.
+pub type ErnieImageRgb = crate::models::diffusion::z_image::ZImageRgb;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct ErnieImageOptions {
@@ -88,11 +88,6 @@ impl ErnieImagePipeline {
         let latent_side = validate_latent_shape(&latent, options.resolution)?;
         let rgb = self.vae.decode_rgb(&latent, latent_side)?;
         let t_vae = t.elapsed();
-        let rgb = ErnieImageRgb {
-            width: rgb.width,
-            height: rgb.height,
-            bytes: rgb.bytes,
-        };
         validate_decoded_rgb(&rgb, options.resolution)?;
         eprintln!(
             "[ernie-image-stage-profile] text_encode={:.1}ms  denoise={:.1}ms  vae_decode={:.1}ms  total={:.1}ms",
@@ -102,6 +97,30 @@ impl ErnieImagePipeline {
             total_start.elapsed().as_secs_f64() * 1000.0,
         );
         Ok(rgb)
+    }
+}
+
+impl DiffusionPipeline for ErnieImagePipeline {
+    type Options = ErnieImageOptions;
+
+    fn load(
+        diffusion: Arc<dyn TensorSource>,
+        text: Arc<dyn TensorSource>,
+        vae: Arc<dyn TensorSource>,
+        n_threads: usize,
+    ) -> Result<Self, String> {
+        Self::load(diffusion, text, vae, n_threads)
+    }
+
+    fn generate_rgb(
+        &self,
+        prompt: &str,
+        options: &ErnieImageOptions,
+    ) -> Result<crate::models::diffusion::DiffusionRgb, String> {
+        // `ErnieImageRgb` is now a type alias of `ZImageRgb` (which itself
+        // is the type alias for `DiffusionRgb`), so this is a direct
+        // delegation -- no field conversion needed.
+        Self::generate_rgb(self, prompt, options)
     }
 }
 
@@ -188,38 +207,6 @@ pub(crate) fn validate_component(
         Component::Text => validate_text(source),
         Component::Dit => validate_dit(source),
     }
-}
-
-fn require_tensor(
-    source: &dyn TensorSource,
-    name: &str,
-    dims: &[u64],
-    ggml_type: GGMLType,
-) -> Result<(), String> {
-    let info = source
-        .tensor_info(name)
-        .ok_or_else(|| format!("Missing tensor: {name}"))?;
-    if info.dims != dims {
-        return Err(format!("Invalid {name} dimensions"));
-    }
-    if info.ggml_type != ggml_type {
-        return Err(format!(
-            "Invalid {name} type: expected {ggml_type:?}, got {:?}",
-            info.ggml_type
-        ));
-    }
-    let expected = usize::try_from(
-        info.checked_nbytes()
-            .ok_or_else(|| format!("Invalid {name} byte size"))?,
-    )
-    .map_err(|_| format!("Invalid {name} byte size"))?;
-    let bytes = source
-        .tensor_slice(name)
-        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
-    if bytes.len() != expected {
-        return Err(format!("Invalid {name} byte length"));
-    }
-    Ok(())
 }
 
 /// A 2-D projection the reader can execute: either the quantized kernel or the
@@ -362,7 +349,7 @@ fn validate_text(source: &dyn TensorSource) -> Result<(), String> {
             require_matrix(source, &format!("{prefix}.{suffix}"), &dims)?;
         }
         for (suffix, dims) in [("attn_norm.weight", hidden), ("ffn_norm.weight", hidden)] {
-            require_tensor(
+            super::common::require_tensor(
                 source,
                 &format!("{prefix}.{suffix}"),
                 &[dims],
@@ -371,9 +358,9 @@ fn validate_text(source: &dyn TensorSource) -> Result<(), String> {
         }
     }
     if source.tensor_info("output_norm.weight").is_some() {
-        require_tensor(source, "output_norm.weight", &[hidden], GGMLType::F32)?;
+        super::common::require_tensor(source, "output_norm.weight", &[hidden], GGMLType::F32)?;
     } else {
-        require_tensor(source, "model.norm.weight", &[hidden], GGMLType::F32)?;
+        super::common::require_tensor(source, "model.norm.weight", &[hidden], GGMLType::F32)?;
     }
     Ok(())
 }
@@ -392,7 +379,7 @@ fn validate_dit(source: &dyn TensorSource) -> Result<(), String> {
         ("x_embedder.proj.bias", hidden),
         ("x_embedder.proj.bias", hidden),
     ] {
-        require_tensor(source, name, &[dims], GGMLType::F32)?;
+        super::common::require_tensor(source, name, &[dims], GGMLType::F32)?;
     }
     for (name, dims) in [
         ("adaLN_modulation.1.weight", [hidden, 6 * hidden]),
@@ -417,25 +404,25 @@ fn validate_dit(source: &dyn TensorSource) -> Result<(), String> {
     }
     for layer in 0..dit::NUM_LAYERS {
         let prefix = format!("layers.{layer}");
-        require_tensor(
+        super::common::require_tensor(
             source,
             &format!("{prefix}.adaLN_sa_ln.weight"),
             &[hidden],
             GGMLType::F32,
         )?;
-        require_tensor(
+        super::common::require_tensor(
             source,
             &format!("{prefix}.adaLN_mlp_ln.weight"),
             &[hidden],
             GGMLType::F32,
         )?;
-        require_tensor(
+        super::common::require_tensor(
             source,
             &format!("{prefix}.self_attention.norm_q.weight"),
             &[dit::ROPE_HEAD_WIDTH as u64],
             GGMLType::F32,
         )?;
-        require_tensor(
+        super::common::require_tensor(
             source,
             &format!("{prefix}.self_attention.norm_k.weight"),
             &[dit::ROPE_HEAD_WIDTH as u64],

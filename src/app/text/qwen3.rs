@@ -30,6 +30,7 @@ pub fn run_qwen3_inference(
     prefill_batch_size: usize,
     max_context: usize,
     repetition_penalty: f32,
+    jinja: &crate::prompt::jinja::Options,
 ) -> Result<(), String> {
     let input_tokens = {
         let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
@@ -43,14 +44,27 @@ pub fn run_qwen3_inference(
                 },
             )
         } else {
-            build_qwen_chat_prompt(
-                &tokenizer,
-                &[QwenMessage {
-                    role: "user",
-                    content: prompt,
-                }],
-                thinking,
-            )?
+            // `--jinja` / `--chat-template-file` render the model's own
+            // template; without them the hand-written builder runs, so
+            // default behaviour is byte-for-byte unchanged.
+            if let Some(template) = jinja.resolve(&|k| source.metadata(k).cloned())? {
+                crate::prompt::jinja::render_tokens(
+                    &tokenizer,
+                    &template,
+                    &[crate::prompt::jinja::ChatMessage::text("user", prompt)],
+                    true,
+                    thinking,
+                )?
+            } else {
+                build_qwen_chat_prompt(
+                    &tokenizer,
+                    &[QwenMessage {
+                        role: "user",
+                        content: prompt,
+                    }],
+                    thinking,
+                )?
+            }
         }
     };
     run_qwen3_inference_tokens(
@@ -79,17 +93,30 @@ pub fn run_hunyuan_inference(
     prefill_batch_size: usize,
     max_context: usize,
     repetition_penalty: f32,
+    jinja: &crate::prompt::jinja::Options,
 ) -> Result<(), String> {
     let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
         .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
-    let input_tokens = build_hunyuan_chat_prompt(
+    // `--jinja` first: Hy-MT's GGUF ships a template, and the 1.8B / 7B
+    // split below (control tokens vs raw passthrough) is exactly the kind of
+    // per-quantisation guesswork the template replaces.
+    let input_tokens = match crate::prompt::jinja::single_turn_tokens(
         &tokenizer,
-        &[HunyuanMessage {
-            role: "user",
-            content: prompt,
-        }],
-        true,
-    )?;
+        jinja,
+        &|k| source.metadata(k).cloned(),
+        prompt,
+        false,
+    )? {
+        Some(ids) => ids,
+        None => build_hunyuan_chat_prompt(
+            &tokenizer,
+            &[HunyuanMessage {
+                role: "user",
+                content: prompt,
+            }],
+            true,
+        )?,
+    };
     run_qwen3_inference_tokens(
         source,
         input_tokens,

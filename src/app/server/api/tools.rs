@@ -95,7 +95,58 @@ pub fn build_prompt(
     tools: &[Tool],
     choice: &ToolChoice,
     enable_thinking: Option<bool>,
+    jinja: &crate::prompt::jinja::Options,
+    // `jinja` resolved once at load time. Rendering through this instead of
+    // re-resolving keeps a server request from recompiling the template.
+    compiled_jinja: Option<&crate::prompt::jinja::JinjaChatTemplate>,
 ) -> Result<(Vec<u32>, Vec<Vec<u8>>), String> {
+    // `--jinja` renders the model's own chat template for a multi-turn
+    // conversation. Deliberately gated to plain text turns with no tools:
+    //
+    //  * `tools` is not plumbed through the Jinja context yet, so a
+    //    tool-bearing request must keep the hand-written renderer.
+    //  * image turns need `<|vision_start|>` markers and image slicing that
+    //    the template does not describe; dropping the `attached_images`
+    //    return would silently feed the model text only.
+    //
+    // Both are fallbacks, never silent behaviour changes.
+    if tools.is_empty() && !messages.iter().any(|m| !m.images.is_empty()) {
+        let messages: Vec<crate::prompt::jinja::ChatMessage> = messages
+            .iter()
+            .map(|m| crate::prompt::jinja::ChatMessage {
+                role: m.role.clone(),
+                content: serde_json::Value::String(m.text.clone()),
+            })
+            .collect();
+        let ids = crate::prompt::jinja::conversation_tokens_with(
+            tokenizer,
+            compiled_jinja,
+            &messages,
+            true,
+            enable_thinking.unwrap_or(false),
+        )?;
+        // Return the cached result before resolving anything. `Option::or`
+        // takes its argument by value, so folding the fallback into it ran
+        // the compile on every request even on a cache hit -- defeating the
+        // cache -- and made a `--chat-template-file` request fail after
+        // startup if the file was removed.
+        if let Some(ids) = ids {
+            return Ok((ids, Vec::new()));
+        }
+        // Fallback for callers that did not pre-resolve (the JEV HTTP
+        // endpoints pass no compiled template).
+        if let Some(ids) = crate::prompt::jinja::conversation_tokens(
+            tokenizer,
+            jinja,
+            &|k| source.metadata(k).cloned(),
+            &messages,
+            true,
+            enable_thinking.unwrap_or(false),
+        )? {
+            return Ok((ids, Vec::new()));
+        }
+    }
+
     let qwen35 = is_qwen35(arch)?;
     // LFM2 / LFM2.5 have their own `role\n{content}\n` template. Rendering
     // them with qwen ChatML happens to work (the model copes) but diverges
@@ -1066,6 +1117,99 @@ mod tests {
         std::sync::Arc::new(TestSource)
     }
 
+    fn user_message() -> Vec<Message> {
+        vec![Message {
+            role: "user".into(),
+            text: "question".into(),
+            calls: vec![],
+            call_id: None,
+            images: vec![],
+        }]
+    }
+
+    /// The compiled template has to be what renders, not a fresh resolve.
+    ///
+    /// Before, the request path folded the fallback into `Option::or`, whose
+    /// argument is evaluated eagerly, so the template was re-read from disk on
+    /// every request even on a cache hit. Deleting the file after startup is
+    /// the observable form of that: the cached copy must still answer, and the
+    /// uncached path must fail, proving the two really differ.
+    #[test]
+    fn the_compiled_template_answers_without_touching_disk_again() {
+        let dir = std::env::temp_dir().join("rust_model_inference_jinja_cache_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("chat.jinja");
+        std::fs::write(&path, "CACHED-MARKER|{{ messages[0].content }}").unwrap();
+
+        let opts = crate::prompt::jinja::Options {
+            jinja: false,
+            file: Some(path.clone()),
+        };
+        let template = opts.resolve(&|_| None).unwrap().expect("file must resolve");
+
+        // Startup would have compiled this once; now the file disappears.
+        std::fs::remove_file(&path).unwrap();
+
+        let tokenizer = tokenizer();
+        let messages = user_message();
+
+        // Cached: still works, and the marker proves the template was used.
+        let (ids, images) = build_prompt(
+            source().as_ref(),
+            &tokenizer,
+            "qwen3",
+            &messages,
+            &[],
+            &ToolChoice::Auto,
+            None,
+            &opts,
+            Some(&template),
+        )
+        .expect("the compiled template must not need the file");
+        assert!(images.is_empty());
+        let text = tokenizer.decode(&ids, true);
+        assert!(text.contains("CACHED-MARKER"), "{text}");
+
+        // Uncached: the same call must fail, since the file is gone. This is
+        // what the eager `Option::or` fallback would have done on every
+        // request even when the cache hit.
+        assert!(
+            build_prompt(
+                source().as_ref(),
+                &tokenizer,
+                "qwen3",
+                &messages,
+                &[],
+                &ToolChoice::Auto,
+                None,
+                &opts,
+                None,
+            )
+            .is_err(),
+            "resolving from a deleted file must fail, proving the two paths differ"
+        );
+    }
+
+    /// A cache hit must not depend on the GGUF still being readable either.
+    #[test]
+    fn jinja_off_keeps_the_hand_written_renderer() {
+        let tokenizer = tokenizer();
+        let (ids, _) = build_prompt(
+            source().as_ref(),
+            &tokenizer,
+            "qwen3",
+            &user_message(),
+            &[],
+            &ToolChoice::Auto,
+            None,
+            &crate::prompt::jinja::Options::default(),
+            None,
+        )
+        .unwrap();
+        let text = tokenizer.decode(&ids, true);
+        assert!(text.contains("<|im_start|>user"), "{text}");
+    }
+
     #[test]
     fn native_prompts_preserve_tools_history_and_chatml_boundaries() {
         let tokenizer = tokenizer();
@@ -1119,6 +1263,8 @@ mod tests {
                 &tools(),
                 &ToolChoice::Auto,
                 None,
+                &crate::prompt::jinja::Options::default(),
+                None,
             )
             .unwrap()
             .0;
@@ -1155,6 +1301,8 @@ mod tests {
             &tools(),
             &ToolChoice::Auto,
             None,
+            &crate::prompt::jinja::Options::default(),
+            None,
         )
         .unwrap_err()
         .contains("unsupported"));
@@ -1165,6 +1313,8 @@ mod tests {
             &messages,
             &tools(),
             &ToolChoice::Auto,
+            None,
+            &crate::prompt::jinja::Options::default(),
             None,
         )
         .is_err());
@@ -1198,6 +1348,8 @@ mod tests {
                     &messages,
                     &[],
                     &ToolChoice::Auto,
+                    None,
+                    &crate::prompt::jinja::Options::default(),
                     None,
                 )
                 .unwrap()
@@ -1255,6 +1407,8 @@ mod tests {
                         &messages,
                         &tools(),
                         &ToolChoice::Auto,
+                        None,
+                        &crate::prompt::jinja::Options::default(),
                         None,
                     )
                     .unwrap()

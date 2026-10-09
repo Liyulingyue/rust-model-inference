@@ -1,12 +1,62 @@
 # 统一计算执行：实现与验收记录
 
-日期：2026-10-09。基线：`ce17cd5d04076e13f7e72b40bb58713630ac16c3`。
+日期：2026-10-09。实施基线：`ce17cd5d04076e13f7e72b40bb58713630ac16c3`。
 实施计划：[八阶段计划](../superpowers/plans/2026-10-08-unified-compute-dispatch.md)。
 
 统一入口、两个 linear 消费者、共享 dense 执行、事务回退及 CLI/HTTP 策略已实现。
 **尚未证明真实模型的自动 GPU 加速收益，因此没有开放新的 Auto workload。**
 真实 Qwen 权重仍未通过既定 logits 门槛；原始版本能复现相同偏差。
 全量测试也有基线失败，不能把本分支描述为“全绿”或“Vulkan 全面可用”。
+
+## main 合并验收（2026-10-09）
+
+合并前分支为 `4994bd22a56a127a7c23199db30f0e979baf0a8a`，同步的 main 为
+`9fb52fc9802a5ae8da8ccb4e11bc43de3ccafbcf`（共同祖先为上述实施基线）。
+解决 12 个冲突文件，保留 main 的 Jinja、DiffusionPipeline、Qwen-Image-2.1、
+AuK 20 层结构和新增 Vulkan projection/VAE 卷积，同时保留共享执行与事务策略。
+
+合并验证修复了两个接口/数值兼容点：
+
+- `VulkanKernel` 转发 `supports_f16_strict`，避免包装器误拒绝原本支持的严格 F16。
+  已有 rounding 测试先失败，补上转发后通过。
+- F16 shader 同时保留 ARM prepared half 累加与 main 的 AVX2/F16C dot reduction。
+  VAE 明确使用 `F16F32` 契约，保留 F16 输入舍入及 F32 累加；卷积不继承 ARM prepared
+  half 累加。合并后的 VAE 设备测试先失败，修复后通过，继续使用 tiled/direct GPU 路径。
+
+新增 raw hidden-sequence 集成测试，验证逐行输出 RMSNorm 的 raw-bit 对应关系、KV 提交长度，
+以及 raw/normalized 两个 API 对强制 Vulkan 的共同拒绝行为。
+
+| 当前合并结果检查 | 结果 |
+| --- | --- |
+| CPU 库全量 | 1164 pass / 23 fail / 78 ignored |
+| Vulkan 库全量（沙箱） | 1251 pass / 28 fail / 132 ignored |
+| 严格 F16 与 raw hidden API 定向检查 | 2/2 pass |
+| `RMI_SCALAR=1`、parity-trace 定向检查 | 38/38 pass |
+| 原有设备套件与 main 新增 VAE 卷积 | 65/65 pass |
+| main 新增 AuK projection/cache ignored 测试 | 1 fail，在 main 原始源码同设备复现 |
+| CPU lib/bins；Vulkan lib/bins/examples 编译 | pass |
+| rustfmt、diff 空白、完整 manifest、全部已提交 SPIR-V | pass |
+| 合并 F16 shader 字节重建 | pass |
+| 完整 shader 重编译 | fail：未改动的 `softmax.spv` 在 byte 13 不同 |
+
+全量失败名称均在合并前的基线对照中出现，没有新增失败名称。
+main 的 AuK ignored 用例无条件要求 F16Dot 提交，但该模式目前要求 AVX2/F16C；
+本机 ARM 会回退 CPU，提交数断言失败。没有放宽断言或以 CPU 回退宣称 GPU 验收通过。
+VAE 同一用例在 main 原始源码通过，在合并结果也通过。
+shader 全量检查已越过原有 grouped-dp4a 差异，当前失败点为 main 原样保留的 softmax。
+
+对照源码由 `git archive 9fb52fc9` 导出。一次共用 target 的对照构建污染了测试缓存，
+该轮结果已作废；清除冲突 fingerprint 后重新编译当前工作树，确认最终二进制包含
+本分支的 compute 和 raw hidden 回归用例，才运行上述最终 Vulkan/设备检查。
+
+main 带入已锁定的 minijinja/memo-map 依赖；为验证下载的依赖放在仓库
+`target/merge-cargo-home`，未修改系统环境。合并记录与日志在本地
+`.superpowers/sdd/2026-10-08-unified-compute-dispatch/merge-main/`。
+复现上述 Cargo 检查时使用 `CARGO_HOME="$PWD/target/merge-cargo-home"` 与 `--offline --locked`。
+
+**以下既有章节中的真实模型数值、CLI/HTTP 与 release 性能数据采集于合并前；
+本次没有重新测量真实模型性能，也没有据旧数据开放新 Auto workload。**
+当前设备证据限于 Apple M3 Max/MoltenVK；未验证新增 AVX2/F16C shader 模式的 x86 实机行为。
 
 ## 实现范围
 

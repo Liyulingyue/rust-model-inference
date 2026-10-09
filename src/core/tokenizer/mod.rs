@@ -1579,6 +1579,13 @@ impl SPMTokenizer {
         self.eos_id
     }
 
+    /// SPM GGUFs do record `tokenizer.ggml.add_bos_token`, and `encode`
+    /// already honours it. Hardcoding `false` here made the Jinja path drop
+    /// BOS for every SPM model whose template relies on it.
+    pub fn add_bos(&self) -> bool {
+        self.add_bos
+    }
+
     pub fn unk_id(&self) -> Option<u32> {
         self.unk_id
     }
@@ -1696,7 +1703,101 @@ pub trait Tokenizer: Send + Sync {
     fn special_token_id(&self, semantic_name: &str) -> Option<u32>;
     fn bos_id(&self) -> Option<u32>;
     fn eos_id(&self) -> Option<u32>;
+    /// Whether the tokenizer expects callers to prepend BOS themselves.
+    ///
+    /// Templates that render `{{ bos_token }}` do it themselves, but models
+    /// like Ministral get their `<s>` from `add_special=true` against a
+    /// template that never mentions BOS at all.
+    ///
+    /// Defaults to `false` so adding it is not a breaking change for
+    /// implementations outside this crate.
+    fn add_bos(&self) -> bool {
+        false
+    }
     fn vocab_size(&self) -> usize;
+}
+
+/// A byte-per-token stand-in used by tests that need a `Tokenizer` without a
+/// GGUF on disk. Every byte becomes its own token, which makes encoded ids
+/// trivially predictable.
+#[cfg(test)]
+pub(crate) struct MockTokenizer {
+    /// Lets a test exercise the tokenizer's BOS contract, which the byte-per-token
+    /// default cannot express.
+    bos: Option<u32>,
+    add_bos: bool,
+    bos_text: Option<String>,
+}
+
+#[cfg(test)]
+impl MockTokenizer {
+    pub(crate) fn new() -> Self {
+        MockTokenizer {
+            bos: None,
+            add_bos: false,
+            bos_text: None,
+        }
+    }
+
+    /// A tokenizer whose GGUF asked for `add_bos_token` and supplies a BOS id.
+    pub(crate) fn with_bos(bos: u32, add_bos: bool) -> Self {
+        MockTokenizer {
+            bos: Some(bos),
+            add_bos,
+            bos_text: Some("<s>".to_string()),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Tokenizer for MockTokenizer {
+    fn encode(&self, text: &str, options: EncodeOptions) -> Vec<u32> {
+        let mut ids = Vec::new();
+        let mut rest = text;
+        // Honour `parse_special` for the BOS literal so a test can simulate a
+        // template that renders `{{ bos_token }}`.
+        if options.parse_special {
+            if let Some(bos) = self.bos {
+                if let Some(bos_text) = self.bos_text.as_ref() {
+                    while let Some(at) = rest.find(bos_text) {
+                        let (head, tail) = rest.split_at(at);
+                        ids.extend(head.bytes().map(|b| b as u32));
+                        ids.push(bos);
+                        rest = &tail[bos_text.len()..];
+                    }
+                }
+            }
+        }
+        ids.extend(rest.bytes().map(|b| b as u32));
+        ids
+    }
+    fn decode_bytes(&self, ids: &[u32], _render_special: bool) -> Vec<u8> {
+        ids.iter().map(|&i| i as u8).collect()
+    }
+    fn token_piece_bytes(&self, id: u32, _render_special: bool) -> Vec<u8> {
+        vec![id as u8]
+    }
+    fn token_id(&self, _literal: &str) -> Option<u32> {
+        None
+    }
+    fn special_token_id(&self, semantic_name: &str) -> Option<u32> {
+        match semantic_name {
+            "bos_token" => self.bos,
+            _ => None,
+        }
+    }
+    fn bos_id(&self) -> Option<u32> {
+        self.bos
+    }
+    fn eos_id(&self) -> Option<u32> {
+        None
+    }
+    fn add_bos(&self) -> bool {
+        self.add_bos
+    }
+    fn vocab_size(&self) -> usize {
+        256
+    }
 }
 
 impl Tokenizer for BPETokenizer {
@@ -1720,6 +1821,9 @@ impl Tokenizer for BPETokenizer {
     }
     fn eos_id(&self) -> Option<u32> {
         BPETokenizer::eos_id(self)
+    }
+    fn add_bos(&self) -> bool {
+        BPETokenizer::add_bos(self)
     }
     fn vocab_size(&self) -> usize {
         BPETokenizer::vocab_size(self)
@@ -1747,6 +1851,9 @@ impl Tokenizer for SPMTokenizer {
     }
     fn eos_id(&self) -> Option<u32> {
         SPMTokenizer::eos_id(self)
+    }
+    fn add_bos(&self) -> bool {
+        SPMTokenizer::add_bos(self)
     }
     fn vocab_size(&self) -> usize {
         SPMTokenizer::vocab_size(self)

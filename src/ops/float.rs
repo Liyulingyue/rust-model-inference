@@ -2,7 +2,6 @@
 
 use std::sync::atomic::Ordering;
 
-#[cfg(any(feature = "parity-trace", feature = "vulkan", feature = "wgpu"))]
 use std::sync::OnceLock;
 
 #[cfg(target_arch = "x86_64")]
@@ -229,13 +228,9 @@ pub fn has_neon() -> bool {
     !scalar_mode()
 }
 
-/// Opt-in scalar dispatch for bitwise Oracle comparisons; absent in normal builds.
-///
-/// Two gates must both be satisfied:
-/// 1. the `parity-trace` cargo feature (without it this compiles to a
-///    constant `false`), and
-/// 2. the `RMI_SCALAR` environment variable, which forces the scalar
-///    reference path for llama.cpp bitwise comparisons.
+/// Opt-in scalar dispatch for reproducible inference and bitwise Oracle comparisons.
+/// Set `RMI_SCALAR=1` before starting the process. This also works in ordinary
+/// builds; the `parity-trace` feature is only needed to capture checkpoints.
 ///
 /// The effect is *implicit*: `has_avx2_fma()` / `has_neon()` report
 /// `false` while this returns `true`, so every `if has_avx2_fma()`
@@ -251,15 +246,8 @@ pub fn has_neon() -> bool {
 /// this per-test — the first caller wins.
 #[inline]
 pub fn scalar_mode() -> bool {
-    #[cfg(feature = "parity-trace")]
-    {
-        static SCALAR: std::sync::OnceLock<bool> = OnceLock::new();
-        *SCALAR.get_or_init(|| std::env::var_os("RMI_SCALAR").is_some())
-    }
-    #[cfg(not(feature = "parity-trace"))]
-    {
-        false
-    }
+    static SCALAR: OnceLock<bool> = OnceLock::new();
+    *SCALAR.get_or_init(|| std::env::var_os("RMI_SCALAR").is_some())
 }
 
 #[cfg(not(target_arch = "aarch64"))]

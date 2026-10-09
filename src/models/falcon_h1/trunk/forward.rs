@@ -1174,6 +1174,8 @@ pub fn run_inference(
     _kv_format: crate::app::cli::KvFormat,
     repetition_penalty: f32,
     chat_template: Option<&str>,
+    thinking: bool,
+    jinja: &crate::prompt::jinja::Options,
 ) -> Result<(), String> {
     use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
     use std::collections::HashMap;
@@ -1196,26 +1198,42 @@ pub fn run_inference(
     // `--chat-template <preset>` overrides the per-arch default; an
     // unknown architecture stays in raw base-model mode so parity
     // tests against llama.cpp still match byte-for-byte.
-    let formatted_prompt = crate::models::chat_template::format_chat(
-        &model.config.architecture,
-        chat_template,
-        prompt,
-    )
-    .unwrap_or_else(|| prompt.to_string());
-    if formatted_prompt != prompt {
+    // `--jinja` renders the GGUF's own template; the preset table is the
+    // fallback for models that ship none.
+    let jinja_template = jinja.resolve(&|k| source.metadata(k).cloned())?;
+    if jinja_template.is_none() {
         let preset_name = chat_template.unwrap_or("auto");
         eprintln!(
             "Falcon-H1: chat-template preset = {preset_name} (resolved via {})",
             model.config.architecture
         );
     }
-    let prompt_ids = tokenizer.encode(
-        &formatted_prompt,
-        EncodeOptions {
-            add_special: true,
-            parse_special: true,
-        },
-    );
+    // The Jinja branch renders tokens directly rather than going through the
+    // `add_special: true` encode below. Falcon-H1 forces add_bos, so encoding
+    // text that already contains `{{ bos_token }}` would start the prompt with
+    // two BOS tokens. `render_tokens` encodes with add_special disabled and
+    // prepends BOS only when the tokenizer asks for it and the ids do not
+    // already start with it.
+    let prompt_ids = if let Some(template) = jinja_template.as_ref() {
+        crate::prompt::jinja::render_tokens(
+            &tokenizer,
+            template,
+            &[crate::prompt::jinja::ChatMessage::text("user", prompt)],
+            true,
+            thinking,
+        )?
+    } else {
+        let formatted_prompt =
+            crate::prompt::legacy::format_chat(&model.config.architecture, chat_template, prompt)
+                .unwrap_or_else(|| prompt.to_string());
+        tokenizer.encode(
+            &formatted_prompt,
+            EncodeOptions {
+                add_special: true,
+                parse_special: true,
+            },
+        )
+    };
     if prompt_ids.is_empty() {
         return Err("Falcon-H1 prompt produced no tokens".into());
     }

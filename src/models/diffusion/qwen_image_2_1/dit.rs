@@ -1,7 +1,7 @@
 //! Qwen-Image-2.1 DiT forward pass, numerically aligned with the pinned
 //! stable-diffusion.cpp oracle's ggml CPU kernels (see tools/oracle/qwen_image_2_1).
 
-use super::{QwenImage21Config, PREFIX};
+use super::{Condition, QwenImage21Config, ReferenceLatent, PREFIX};
 use crate::core::tensor::TensorSource;
 use rayon::prelude::*;
 use std::sync::Arc;
@@ -10,63 +10,17 @@ const RMS_EPS: f32 = 1e-6;
 const LAYER_NORM_EPS: f32 = 1e-6;
 const ATTENTION_OUT_SCALE: f32 = 1.0 / 32.0;
 
-/// ggml `ggml_compute_fp32_to_bf16`: round-to-nearest-even with carry.
-fn fp32_to_bf16(value: f32) -> u16 {
-    let bits = value.to_bits();
-    if bits & 0x7fff_ffff > 0x7f80_0000 {
-        return ((bits >> 16) | 64) as u16;
-    }
-    let rounding_bias = 0x7fff + ((bits >> 16) & 1);
-    (bits.wrapping_add(rounding_bias) >> 16) as u16
-}
-
-/// ggml `ggml_vec_dot_bf16` on aarch64: no NEON branch, scalar f64
-/// accumulation of single-precision products. Both operands are BF16; the
-/// activation row is rounded once by the mul_mat `from_float` step.
-fn bf16_dot(w_bf16: &[u16], act_bf16: &[u16], n: usize) -> f32 {
-    let mut sumf = 0.0f64;
-    for i in 0..n {
-        let product = crate::ops::bf16_to_f32(w_bf16[i]) * crate::ops::bf16_to_f32(act_bf16[i]);
-        sumf += f64::from(product);
-    }
-    sumf as f32
-}
-
-/// Lane-wise replica of ggml's NEON `ggml_v_expf` polynomial approximation.
 fn rms_norm_mul_inplace(x: &mut [f32], w: &[f32]) {
     crate::ops::rms_norm_inplace(x, w, RMS_EPS);
 }
 
-/// ggml `ggml_compute_forward_norm_f32` (LayerNorm, no affine): f64 mean,
-/// 4-wide centered variance summed pairwise into f64, then one scale multiply.
+/// ggml LayerNorm without affine, using the shared scalar/SIMD reductions.
 fn layer_norm_row(x: &[f32], y: &mut [f32]) {
-    let mut sum = 0.0f64;
-    for value in x.iter() {
-        sum += f64::from(*value);
+    let mean = crate::ops::sum_f32(x) as f32 / x.len() as f32;
+    for (value, output) in x.iter().zip(y.iter_mut()) {
+        *output = *value - mean;
     }
-    let mean = (sum as f32) / x.len() as f32;
-    let mut variance_sum = 0.0f64;
-    let mut quad = [0.0f32; 4];
-    let mut i = 0;
-    while i + 4 <= x.len() {
-        for lane in 0..4 {
-            quad[lane] = x[i + lane] - mean;
-        }
-        y[i..i + 4].copy_from_slice(&quad);
-        quad[0] *= quad[0];
-        quad[1] *= quad[1];
-        quad[2] *= quad[2];
-        quad[3] *= quad[3];
-        variance_sum += f64::from((quad[0] + quad[1]) + (quad[2] + quad[3]));
-        i += 4;
-    }
-    while i < x.len() {
-        let centered = x[i] - mean;
-        y[i] = centered;
-        variance_sum += f64::from(centered * centered);
-        i += 1;
-    }
-    let variance = (variance_sum / x.len() as f64) as f32;
+    let variance = (crate::ops::sum_sq_f32(y) / x.len() as f64) as f32;
     let scale = 1.0f32 / (variance + LAYER_NORM_EPS).sqrt();
     for value in y.iter_mut() {
         *value *= scale;
@@ -80,7 +34,7 @@ fn timestep_embedding_row(timestep: f32, output: &mut [f32]) {
     for j in 0..half {
         let freq = (neg_log_period * j as f32 / half as f32).exp();
         let arg = timestep * freq;
-        let (sin_value, cos_value) = arg.sin_cos();
+        let (sin_value, cos_value) = crate::ops::rope::ggml_sin_cos(arg);
         output[j] = cos_value;
         output[j + half] = sin_value;
     }
@@ -245,20 +199,23 @@ impl QwenImage21Dit {
         if tokens * n_out != output.len() {
             return Err(format!("Invalid {name} output length"));
         }
-        let weight: Vec<u16> = weight
+        let weight: Vec<f32> = weight
             .chunks_exact(2)
-            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .map(|pair| crate::ops::bf16_to_f32(u16::from_le_bytes([pair[0], pair[1]])))
             .collect();
-        let mut act = Vec::with_capacity(input.len());
-        for value in input {
-            act.push(fp32_to_bf16(*value));
-        }
-        for token in 0..tokens {
-            let row = &act[token * n_in..(token + 1) * n_in];
-            for o in 0..n_out {
-                output[token * n_out + o] = bf16_dot(&weight[o * n_in..(o + 1) * n_in], row, n_in);
-            }
-        }
+        let act: Vec<_> = input
+            .iter()
+            .map(|&v| crate::ops::bf16_to_f32(crate::ops::f32_to_bf16(v)))
+            .collect();
+        self.thread_pool.install(|| {
+            output.par_iter_mut().enumerate().for_each(|(i, value)| {
+                *value = crate::ops::dot_f32(
+                    &weight[i % n_out * n_in..],
+                    &act[i / n_out * n_in..],
+                    n_in,
+                );
+            })
+        });
         Ok(())
     }
 
@@ -283,13 +240,15 @@ impl QwenImage21Dit {
             .chunks_exact(4)
             .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
             .collect();
-        for token in 0..tokens {
-            let row = &input[token * n_in..(token + 1) * n_in];
-            for o in 0..n_out {
-                output[token * n_out + o] =
-                    crate::ops::dot_f32(&weight[o * n_in..(o + 1) * n_in], row, n_in);
-            }
-        }
+        self.thread_pool.install(|| {
+            output.par_iter_mut().enumerate().for_each(|(i, value)| {
+                *value = crate::ops::dot_f32(
+                    &weight[i % n_out * n_in..],
+                    &input[i / n_out * n_in..],
+                    n_in,
+                );
+            })
+        });
         Ok(())
     }
 
@@ -326,6 +285,33 @@ impl QwenImage21Dit {
         context_len: usize,
         timestep: f32,
     ) -> Result<Vec<f32>, String> {
+        if context_len.checked_mul(4096) != Some(context.len()) {
+            return Err("Invalid context length".into());
+        }
+        self.forward_conditioned(
+            latent,
+            width,
+            height,
+            &Condition {
+                values: context.to_vec(),
+                image_slots: Vec::new(),
+            },
+            &[],
+            timestep,
+        )
+    }
+
+    pub(crate) fn forward_conditioned(
+        &mut self,
+        latent: &[f32],
+        width: usize,
+        height: usize,
+        condition: &Condition,
+        references: &[ReferenceLatent],
+        timestep: f32,
+    ) -> Result<Vec<f32>, String> {
+        let context = &condition.values;
+        let context_len = context.len() / 4096;
         let config = self.config.clone();
         let hidden = config.hidden_size;
         let heads = hidden / config.head_dim;
@@ -335,9 +321,15 @@ impl QwenImage21Dit {
         let image_tokens = width
             .checked_mul(height)
             .ok_or("Qwen-Image-2.1 latent dimensions overflow")?;
-        let seq = context_len
-            .checked_add(image_tokens)
-            .ok_or("Qwen-Image-2.1 sequence length overflow")?;
+        let layout = Layout::build(
+            context_len,
+            &condition.image_slots,
+            references,
+            width,
+            height,
+        )?;
+        let seq = layout.positions.len();
+        let prefix_length = layout.prefix_length;
         if context_len == 0 {
             return Err("Qwen-Image-2.1 context must not be empty".into());
         }
@@ -370,12 +362,13 @@ impl QwenImage21Dit {
             ));
         }
         let report = |name: &str, shape: &[usize], values: &[f32]| {
+            let _ = (name, shape, values);
             #[cfg(feature = "parity-trace")]
             crate::parity_trace::report(crate::parity_trace::checkpoint(name, None, shape, values));
         };
         // The RoPE table depends only on dimensions and precedes the model
         // projections in the oracle trace.
-        let pe = self.build_pe(width, height, context_len, seq)?;
+        let pe = self.build_pe(&layout.positions)?;
         report("qwen.pe", &[2, 2, config.head_dim / 2, seq], &pe);
 
         // --- timestep embedding: [cos; sin] concat, silu, then modulation. ---
@@ -425,26 +418,36 @@ impl QwenImage21Dit {
 
         // --- joint sequence: text rows then image rows. ---
         let mut joint = vec![0.0f32; hidden * seq];
-        joint[..hidden * context_len].copy_from_slice(&text);
-        let mut patchified = vec![0.0f32; config.in_channels * image_tokens];
-        for h in 0..height {
-            for w in 0..width {
-                let token = h * width + w;
-                for c in 0..config.in_channels {
-                    patchified[token * config.in_channels + c] =
-                        latent[w + width * h + width * height * c];
+        for segment in &layout.segments {
+            let target = &mut joint[segment.start * hidden..segment.end * hidden];
+            if let Some(index) = segment.image {
+                let (data, w, h) = if index == references.len() {
+                    (latent, width, height)
+                } else {
+                    let r = &references[index];
+                    (r.values.as_slice(), r.width, r.height)
+                };
+                let count = w * h;
+                let mut rows = vec![0.0; 64 * count];
+                for token in 0..count {
+                    for c in 0..64 {
+                        rows[token * 64 + c] = data[c * count + token];
+                    }
                 }
+                self.bf16_linear(
+                    &format!("{PREFIX}.img_in.weight"),
+                    64,
+                    hidden,
+                    &rows,
+                    target,
+                )?;
+            } else {
+                target.copy_from_slice(
+                    &text[segment.context_start * hidden
+                        ..(segment.context_start + segment.end - segment.start) * hidden],
+                );
             }
         }
-        let mut img_in_out = vec![0.0f32; hidden * image_tokens];
-        self.bf16_linear(
-            &format!("{PREFIX}.img_in.weight"),
-            config.in_channels,
-            hidden,
-            &patchified,
-            &mut img_in_out,
-        )?;
-        joint[hidden * context_len..].copy_from_slice(&img_in_out);
         report("qwen.joint", &[hidden, seq], &joint);
 
         // --- transformer blocks. ---
@@ -459,14 +462,15 @@ impl QwenImage21Dit {
                 heads,
                 config.head_dim,
                 seq,
-                context_len,
+                prefix_length,
+                &layout.segments,
             )?;
             report(&format!("qwen.block.{layer}"), &[hidden, seq], &joint);
         }
 
         // --- final layer over the image rows only. ---
-        let joint_final = &joint[hidden * context_len..];
-        let image_rows = seq - context_len;
+        let joint_final = &joint[hidden * prefix_length..];
+        let image_rows = image_tokens;
         report("qwen.joint_final", &[hidden, image_rows], joint_final);
 
         let mut scale = vec![0.0f32; hidden];
@@ -530,6 +534,7 @@ impl QwenImage21Dit {
 
     fn txt_in(&mut self, context: &[f32], output: &mut [f32]) -> Result<(), String> {
         let report = |name: &str, shape: &[usize], values: &[f32]| {
+            let _ = (name, shape, values);
             #[cfg(feature = "parity-trace")]
             crate::parity_trace::report(crate::parity_trace::checkpoint(name, None, shape, values));
         };
@@ -572,36 +577,17 @@ impl QwenImage21Dit {
     }
 
     /// Builds the [2, 2, head_dim/2, seq] RoPE table row by row.
-    fn build_pe(
-        &self,
-        width: usize,
-        height: usize,
-        context_len: usize,
-        seq: usize,
-    ) -> Result<Vec<f32>, String> {
-        let omega0 = rope_frequencies(16, 10_000.0);
-        let omega1 = rope_frequencies(56, 10_000.0);
-        let omega2 = rope_frequencies(56, 10_000.0);
-        let mut pe = vec![0.0f32; seq * 256];
-        for token in 0..seq {
-            let (axis0, axis1, axis2) = if token < context_len {
-                let position = token as f32;
-                (position, position, position)
-            } else {
-                let image_token = token - context_len;
-                let h = (image_token / width) as f32;
-                let w = (image_token % width) as f32;
-                (
-                    context_len as f32,
-                    h - (height - height / 2) as f32,
-                    w - (width - width / 2) as f32,
-                )
-            };
-            let mut row = Vec::with_capacity(256);
-            row.extend(rope_axis_block(axis0, &omega0));
-            row.extend(rope_axis_block(axis1, &omega1));
-            row.extend(rope_axis_block(axis2, &omega2));
-            pe[token * 256..(token + 1) * 256].copy_from_slice(&row);
+    fn build_pe(&self, positions: &[[f32; 3]]) -> Result<Vec<f32>, String> {
+        let omega = [
+            rope_frequencies(16, 10_000.0),
+            rope_frequencies(56, 10_000.0),
+            rope_frequencies(56, 10_000.0),
+        ];
+        let mut pe = Vec::with_capacity(positions.len() * 256);
+        for position in positions {
+            for axis in 0..3 {
+                pe.extend(rope_axis_block(position[axis], &omega[axis]));
+            }
         }
         Ok(pe)
     }
@@ -618,12 +604,14 @@ impl QwenImage21Dit {
         head_dim: usize,
         seq: usize,
         prefix_length: usize,
+        segments: &[Segment],
     ) -> Result<(), String> {
         let config = self.config.clone();
 
         // img_norm1 (no affine) then modulate: image rows use the timestep row
         // (column 0), text rows the zero-timestep row (column 1).
         let report = |name: &str, values: &[f32]| {
+            let _ = (name, values);
             #[cfg(feature = "parity-trace")]
             crate::parity_trace::report(crate::parity_trace::checkpoint(
                 name,
@@ -702,16 +690,32 @@ impl QwenImage21Dit {
         let mut attn_out = vec![0.0f32; hidden * seq];
         let mut scores = vec![0.0f32; seq];
         let mut probs = vec![0.0f32; seq];
-        report("qwen.debug.attn.q", &q);
-        report("qwen.debug.attn.k", &k);
+        #[cfg(feature = "parity-trace")]
+        for (name, values) in [("qwen.debug.attn.q", &q), ("qwen.debug.attn.k", &k)] {
+            let transposed: Vec<_> = (0..hidden * seq)
+                .map(|i| {
+                    values[(i / head_dim % seq) * hidden
+                        + i / (seq * head_dim) * head_dim
+                        + i % head_dim]
+                })
+                .collect();
+            crate::parity_trace::report(crate::parity_trace::checkpoint(
+                name,
+                None,
+                &[head_dim, seq, heads],
+                &transposed,
+            ));
+        }
         // Text queries attend causally to the text keys; image queries attend
         // to the whole sequence.
-        for (query_start, query_end, key_end, causal) in [
-            (0usize, prefix_length, prefix_length, true),
-            (prefix_length, seq, seq, false),
-        ]
-        .into_iter()
-        {
+        for (index, segment) in segments.iter().enumerate() {
+            let _ = index;
+            let (query_start, query_end, key_end, causal) = (
+                segment.start,
+                segment.end,
+                segment.end,
+                segment.image.is_none(),
+            );
             for token in query_start..query_end {
                 for head in 0..heads {
                     let q_base = token * hidden + head * head_dim;
@@ -739,6 +743,13 @@ impl QwenImage21Dit {
                     }
                 }
             }
+            #[cfg(feature = "parity-trace")]
+            crate::parity_trace::report(crate::parity_trace::checkpoint(
+                &format!("qwen.debug.attn.seg{index}"),
+                None,
+                &[hidden, query_end - query_start],
+                &attn_out[query_start * hidden..query_end * hidden],
+            ));
         }
 
         // to_out.0 carries the ggml Linear scale workaround: input * 1/32
@@ -783,6 +794,7 @@ impl QwenImage21Dit {
             }
         }
         let mut gate_up = vec![0.0f32; 2 * config.intermediate_size * seq];
+        report("qwen.debug.b.mod2", &h);
         self.q8_linear(
             &format!("{prefix}.img_mlp.gate_up.weight"),
             hidden,
@@ -830,4 +842,137 @@ fn modulation_row<'a>(
     let total = 4 * hidden;
     let row = if zero_row { 1 } else { 0 };
     &modulation[row * total + part * hidden..row * total + (part + 1) * hidden]
+}
+
+struct Segment {
+    start: usize,
+    end: usize,
+    context_start: usize,
+    image: Option<usize>,
+}
+struct Layout {
+    segments: Vec<Segment>,
+    positions: Vec<[f32; 3]>,
+    prefix_length: usize,
+}
+impl Layout {
+    fn build(
+        text_len: usize,
+        slots: &[usize],
+        references: &[ReferenceLatent],
+        width: usize,
+        height: usize,
+    ) -> Result<Self, String> {
+        if !slots.is_empty() && slots.len() != text_len {
+            return Err("Invalid Qwen image slot count".into());
+        }
+        let mut layout = Self {
+            segments: Vec::new(),
+            positions: Vec::new(),
+            prefix_length: 0,
+        };
+        let mut position = 0usize;
+        let mut image = 0;
+        let mut i = 0;
+        while i < text_len {
+            let tag = slots.get(i).copied().unwrap_or(0);
+            let begin = i;
+            i += 1;
+            while i < text_len && slots.get(i).copied().unwrap_or(0) == tag {
+                i += 1;
+            }
+            if tag == 0 {
+                let start = layout.positions.len();
+                layout.segments.push(Segment {
+                    start,
+                    end: start + i - begin,
+                    context_start: begin,
+                    image: None,
+                });
+                for _ in begin..i {
+                    let p = position as f32;
+                    layout.positions.push([p, p, p]);
+                    position += 1;
+                }
+            } else {
+                let r = references
+                    .get(image)
+                    .ok_or("Qwen image slot has no reference")?;
+                let count = r
+                    .width
+                    .checked_mul(r.height)
+                    .ok_or("Reference size overflow")?;
+                if tag != image + 1
+                    || (i - begin).checked_mul(4) != Some(count)
+                    || count.checked_mul(64) != Some(r.values.len())
+                    || r.values.iter().any(|v| !v.is_finite())
+                {
+                    return Err("Qwen vision slots and reference latents must match".into());
+                }
+                layout.append_image(image, begin, r.width, r.height, &mut position)?;
+                image += 1;
+            }
+        }
+        if image != references.len() {
+            return Err("Missing Qwen reference image slots".into());
+        }
+        layout.prefix_length = layout.positions.len();
+        layout.append_image(image, text_len, width, height, &mut position)?;
+        Ok(layout)
+    }
+    fn append_image(
+        &mut self,
+        image: usize,
+        context_start: usize,
+        w: usize,
+        h: usize,
+        position: &mut usize,
+    ) -> Result<(), String> {
+        let count = w
+            .checked_mul(h)
+            .filter(|&n| n > 0)
+            .ok_or("Qwen image size overflow")?;
+        let start = self.positions.len();
+        let end = start.checked_add(count).ok_or("Qwen sequence overflow")?;
+        self.segments.push(Segment {
+            start,
+            end,
+            context_start,
+            image: Some(image),
+        });
+        for y in 0..h {
+            for x in 0..w {
+                self.positions.push([
+                    *position as f32,
+                    y as f32 - (h - h / 2) as f32,
+                    x as f32 - (w - w / 2) as f32,
+                ]);
+            }
+        }
+        *position = position
+            .checked_add(h.max(w))
+            .ok_or("Qwen position overflow")?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+    #[test]
+    fn references_replace_vision_slots_and_bound_attention_segments() {
+        let refs = [ReferenceLatent {
+            values: vec![0.; 64 * 8],
+            width: 4,
+            height: 2,
+        }];
+        let layout = Layout::build(5, &[0, 1, 1, 0, 0], &refs, 2, 2).unwrap();
+        assert_eq!(layout.prefix_length, 11);
+        assert_eq!(
+            layout.segments.iter().map(|s| s.end).collect::<Vec<_>>(),
+            [1, 9, 11, 15]
+        );
+        assert_eq!(layout.positions[9], [5., 5., 5.]);
+        assert!(Layout::build(5, &[0, 1, 0, 0, 0], &refs, 2, 2).is_err());
+    }
 }

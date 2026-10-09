@@ -144,6 +144,16 @@ struct TextBackend {
     arch: String,
     pool: Arc<ComputePool>,
     tokenizer: Arc<BPETokenizer>,
+    /// `--jinja` / `--chat-template-file` for `/v1/chat/completions`.
+    /// `Options` is `Send + Sync` (bool + PathBuf), so it can live here.
+    chat_template: std::sync::Arc<crate::prompt::jinja::Options>,
+    /// The template `chat_template` resolves to, compiled once at load time.
+    ///
+    /// Resolving per request re-read the GGUF metadata and recompiled the
+    /// Jinja source on every `/v1/chat/completions` call. `None` means Jinja
+    /// is off or the model ships no template, which is also `None` in
+    /// `chat_template`, so this cannot disagree with it.
+    compiled_chat_template: std::sync::Arc<Option<crate::prompt::jinja::JinjaChatTemplate>>,
     prefill_batch_size: usize,
     context_length: usize,
     /// Per-arch generation adapter. `None` = arch has no adapter yet; those
@@ -1335,10 +1345,26 @@ fn build_text(options: &CliOptions) -> Result<TextBackend, String> {
                 (None, 0)
             }
         };
+    // Built once: the `Options` and the compiled template below must always
+    // agree, and constructing both from separate literals is how a new flag
+    // would end up on one and not the other.
+    //
+    // Resolving here is why a broken `--chat-template-file` fails startup
+    // instead of every request. That is deliberate: it only happens when the
+    // user explicitly asked for a template, and a config error should surface
+    // at startup rather than on the first request.
+    let chat_template = std::sync::Arc::new(crate::prompt::jinja::Options {
+        jinja: options.jinja,
+        file: options.chat_template_file.clone(),
+    });
+    let compiled_chat_template =
+        std::sync::Arc::new(chat_template.resolve(&|k| source.metadata(k).cloned())?);
     Ok(TextBackend {
         arch: arch.to_string(),
         pool,
         tokenizer,
+        chat_template,
+        compiled_chat_template,
         prefill_batch_size,
         context_length,
         runtime,

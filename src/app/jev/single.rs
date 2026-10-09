@@ -27,6 +27,7 @@ pub fn run_jev_decision_data(
     positive: Option<&str>,
     n_threads_arg: usize,
     prefill_batch_size: usize,
+    jinja: crate::prompt::jinja::Options,
 ) -> Result<Vec<JevResult>, String> {
     run_jev_decision_data_with_image(
         source,
@@ -37,6 +38,7 @@ pub fn run_jev_decision_data(
         prefill_batch_size,
         None,
         None,
+        jinja,
     )
 }
 
@@ -49,6 +51,7 @@ fn run_jev_decision_data_with_image(
     prefill_batch_size: usize,
     mmproj_path: Option<&Path>,
     image_path: Option<&Path>,
+    jinja: crate::prompt::jinja::Options,
 ) -> Result<Vec<JevResult>, String> {
     let prepared = prepare_jev_questions(questions, positive)?;
 
@@ -81,6 +84,7 @@ fn run_jev_decision_data_with_image(
             false,
             mmproj_path,
             image_path,
+            jinja.clone(),
         ),
         "qwen35" => qwen35::run_jev_decision_qwen35(
             source.clone(),
@@ -91,6 +95,7 @@ fn run_jev_decision_data_with_image(
             false,
             mmproj_path,
             image_path,
+            jinja.clone(),
         ),
         // exaone rides the llama trunk (uses_llama_trunk covers it for
         // CLI + HTTP); it was missing here, so `--jev` on an
@@ -111,6 +116,7 @@ fn run_jev_decision_data_with_image(
             n_threads_arg,
             prefill_batch_size,
             false,
+            jinja.clone(),
         ),
         "gemma4" => gemma4::run_jev_decision_gemma4(
             source.clone(),
@@ -119,6 +125,7 @@ fn run_jev_decision_data_with_image(
             n_threads_arg,
             prefill_batch_size,
             false,
+            jinja.clone(),
         ),
         "lfm2" => lfm2::run_jev_decision_lfm2(
             source.clone(),
@@ -127,6 +134,7 @@ fn run_jev_decision_data_with_image(
             n_threads_arg,
             prefill_batch_size,
             false,
+            jinja.clone(),
         ),
         "lfm25" => lfm25::run_jev_decision_lfm25(
             source.clone(),
@@ -135,6 +143,7 @@ fn run_jev_decision_data_with_image(
             n_threads_arg,
             prefill_batch_size,
             false,
+            jinja.clone(),
         ),
         "lfm2moe" => lfm2moe::run_jev_decision_lfm2moe(
             source.clone(),
@@ -143,6 +152,7 @@ fn run_jev_decision_data_with_image(
             n_threads_arg,
             prefill_batch_size,
             false,
+            jinja.clone(),
         ),
         "spark2_5" => spark::run_jev_decision_spark(
             source.clone(),
@@ -151,6 +161,7 @@ fn run_jev_decision_data_with_image(
             n_threads_arg,
             prefill_batch_size,
             false,
+            jinja.clone(),
         ),
         "nemotron_h" => nemotron_h::run_jev_decision_nemotron_h(
             source.clone(),
@@ -159,6 +170,7 @@ fn run_jev_decision_data_with_image(
             n_threads_arg,
             prefill_batch_size,
             false,
+            jinja.clone(),
         ),
         "falcon-h1" => falcon_h1::run_jev_decision_falcon_h1(
             source.clone(),
@@ -167,6 +179,7 @@ fn run_jev_decision_data_with_image(
             n_threads_arg,
             prefill_batch_size,
             false,
+            jinja.clone(),
         ),
         "hunyuan-dense" => hunyuan::run_jev_decision_hunyuan(
             source.clone(),
@@ -175,6 +188,7 @@ fn run_jev_decision_data_with_image(
             n_threads_arg,
             prefill_batch_size,
             false,
+            jinja.clone(),
         ),
         other => Err(format!(
             "--jev is not yet supported for architecture {:?}; \
@@ -196,6 +210,7 @@ pub fn run_jev_decision(
     output_json: bool,
     mmproj_path: Option<&Path>,
     image_path: Option<&Path>,
+    jinja: crate::prompt::jinja::Options,
 ) -> Result<(), String> {
     let t0 = Instant::now();
     let results = run_jev_decision_data_with_image(
@@ -207,6 +222,7 @@ pub fn run_jev_decision(
         prefill_batch_size,
         mmproj_path,
         image_path,
+        jinja,
     )?;
 
     if output_json {
@@ -463,10 +479,24 @@ pub(crate) fn build_jev_prompt(
     context: &str,
     q: &PreparedQuestion,
     _output_json: bool,
+    jinja: Option<&crate::prompt::jinja::JinjaChatTemplate>,
 ) -> Result<(Vec<u32>, String), String> {
     let system = jev_system_prompt(q.mode);
     let _labels = jev_labels(q);
     let payload = jev_payload_json(context, q)?;
+    // `--jinja` renders the model's own template. JEV opens the assistant
+    // turn so the next token is the decision being scored, i.e.
+    // `add_generation_prompt = true` — the same value generation uses.
+    if let Some(template) = jinja {
+        let ids = crate::prompt::jinja::render_text_conversation(
+            tokenizer,
+            template,
+            Some(system),
+            &payload,
+            false,
+        )?;
+        return Ok((ids, payload));
+    }
 
     let mut token_ids = Vec::new();
     append_qwen_message_tokens(

@@ -162,8 +162,9 @@ cargo run --release --features vulkan --bin rust-model-inference -- \
 ```
 
 当前范围是原生 Rust、512×512 的 Z-Image Turbo 文生图；暂不支持 Z-Image Base 或 img2img。
-加 `--gpu` 并以 `--features vulkan` 构建可把 DiT 投影搬上 Vulkan 后端（当前 `Supported`，
-无端到端 GPU 测试）。漏掉 `--features vulkan` 时 `--gpu` 是静默空操作，图照出但全程走 CPU。
+加 `--gpu` 并以 `--features vulkan` 构建可把 DiT 投影与 F16 VAE 卷积搬上实验性 Vulkan 后端；
+RADV 已成图，CPU/GPU 像素有差异，验证范围见 [实机记录](docs/develop/VULKAN_RADV_VALIDATION_2026-10-07.md)。
+漏掉 `--features vulkan` 时仍走 CPU。
 详见 [Z-Image 用法](docs/usage/z-image.md)。
 
 ### Apple Silicon (ARM64)

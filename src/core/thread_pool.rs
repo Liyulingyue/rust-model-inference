@@ -374,11 +374,12 @@ fn worker_loop(tid: usize, n_threads: usize, inner: &Inner) {
             if inner.shutdown.load(Ordering::Acquire) {
                 return;
             }
-            // While the GPU matmul path is active the CPU workers have no
-            // hot-path role (one fenced GPU dispatch covers all rows), so the
-            // idle spin here only competes with the driver's submission
-            // threads — observed to hang ANV/Meteor Lake. Despin when GPU is
-            // on; the pure-CPU path keeps the tight spin.
+            // Yield idle GPU-mode workers so they do not compete with driver threads.
+            #[cfg(feature = "vulkan")]
+            if crate::ops::gpu_requested() {
+                std::thread::yield_now();
+                continue;
+            }
             std::hint::spin_loop();
         }
         my_epoch = inner.epoch.load(Ordering::Acquire);

@@ -18,6 +18,7 @@ const Q8_MATMUL_GROUPED_DP4A_SHADER: &[u8] =
 const Q8_MATMUL_GROUPED_TILED_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/q8_matmul_tiled_dp4a.spv");
 const F16_MATMUL_TILED_SHADER: &[u8] = include_bytes!("../../shaders/bin/f16_matmul_tiled.spv");
+
 const ATTENTION_SCORES_TILED_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/attention_scores_tiled.spv");
 const Q4_0_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_0_matmul.spv");
@@ -28,6 +29,7 @@ const Q6_K_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q6_k_matmul.
 const F16_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/f16_matmul.spv");
 const BF16_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/bf16_matmul.spv");
 const F32_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/f32_matmul.spv");
+const MLX_AFFINE_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/mlx_affine_matmul.spv");
 const RMS_NORM_SHADER: &[u8] = include_bytes!("../../shaders/bin/rms_norm.spv");
 const QK_NORM_ROPE_SHADER: &[u8] = include_bytes!("../../shaders/bin/qk_norm_rope.spv");
 const KV_WRITE_SHADER: &[u8] = include_bytes!("../../shaders/bin/kv_write.spv");
@@ -72,6 +74,7 @@ const ADALN_MODULATE: usize = 23;
 const Q8_MATMUL_GROUPED_TILED: usize = 24;
 const F16_MATMUL_TILED: usize = 25;
 const ATTENTION_SCORES_TILED: usize = 26;
+const MLX_AFFINE_MATMUL: usize = 27;
 
 pub(crate) fn require_tiled_attention(context: &VulkanContext) -> Result<(), VulkanError> {
     let limits = &context.limits;
@@ -245,7 +248,7 @@ pub fn dump_dispatch_trace() {
     }
 }
 
-const OPERATOR_SHADERS: [&[u8]; 27] = [
+const OPERATOR_SHADERS: [&[u8]; 28] = [
     QUANTIZE_Q8_0_SHADER,
     QUANTIZE_Q8_K_SHADER,
     Q8_MATMUL_GROUPED_SHADER,
@@ -273,6 +276,7 @@ const OPERATOR_SHADERS: [&[u8]; 27] = [
     Q8_MATMUL_GROUPED_TILED_SHADER,
     F16_MATMUL_TILED_SHADER,
     ATTENTION_SCORES_TILED_SHADER,
+    MLX_AFFINE_MATMUL_SHADER,
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -284,8 +288,16 @@ pub(crate) enum GpuWeightFormat {
     Q5_K,
     Q6_K,
     F16,
+    /// F16 storage/input rounding with F32 accumulation, as used by VAE convolutions.
+    F16F32,
+    /// F16 storage/input rounding with dot_f16_f16_bytes' AVX2 reduction.
+    F16Dot,
     BF16,
+    /// BF16 storage with the CPU dot_bf16_f32 reduction contract.
+    BF16Dot,
     F32,
+    MlxAffine4,
+    MlxAffine8,
 }
 
 impl GpuWeightFormat {
@@ -316,10 +328,26 @@ impl GpuWeightFormat {
             Self::Q4_K => (256, 144, Q4_K_MATMUL),
             Self::Q5_K => (256, 176, Q5_K_MATMUL),
             Self::Q6_K => (256, 210, Q6_K_MATMUL),
-            Self::F16 => (1, 2, F16_MATMUL),
-            Self::BF16 => (1, 2, BF16_MATMUL),
+            Self::F16 | Self::F16F32 | Self::F16Dot => (1, 2, F16_MATMUL),
+            Self::BF16 | Self::BF16Dot => (1, 2, BF16_MATMUL),
             Self::F32 => (1, 4, F32_MATMUL),
+            Self::MlxAffine4 => (64, 36, MLX_AFFINE_MATMUL),
+            Self::MlxAffine8 => (64, 68, MLX_AFFINE_MATMUL),
         }
+    }
+
+    fn uses_f32_input(self) -> bool {
+        matches!(
+            self,
+            Self::F16
+                | Self::F16F32
+                | Self::F16Dot
+                | Self::BF16
+                | Self::BF16Dot
+                | Self::F32
+                | Self::MlxAffine4
+                | Self::MlxAffine8
+        )
     }
 }
 
@@ -859,7 +887,7 @@ impl BatchedLinearLayout {
             ));
         }
         let (block, _, _) = format.layout();
-        if block != 1 {
+        if !format.uses_f32_input() {
             quantize_rows_push(
                 self.size,
                 self.input,
@@ -887,7 +915,11 @@ impl BatchedLinearLayout {
             self.size,
             limits,
             bindings,
-            if block == 1 { self.input } else { self.q8 },
+            if format.uses_f32_input() {
+                self.input
+            } else {
+                self.q8
+            },
             self.scales,
             Some(self.sums),
             &[(self.output, n_out, f32_bytes(n_out)?)],
@@ -1018,7 +1050,16 @@ impl BatchedLinearRuntime {
             bindings
         };
         self.ops.write_f32(self.layout.input, input)?;
-        self.ops.record_weight_matmul_rows(
+        let recorder = if matches!(format, GpuWeightFormat::F16 | GpuWeightFormat::F16F32)
+            && n_in % 2 == 0
+            && rows >= 32
+        {
+            Qwen3Ops::record_weight_matmul_tiled_rows
+        } else {
+            Qwen3Ops::record_weight_matmul_rows
+        };
+        recorder(
+            &self.ops,
             &commands,
             bindings,
             self.layout.input,
@@ -1050,6 +1091,151 @@ impl Drop for BatchedLinearRuntime {
             return;
         }
         // Qwen3Ops acquires the same mutex in Drop.
+        unsafe { std::mem::ManuallyDrop::drop(&mut self.ops) };
+    }
+}
+
+/// One shared CHW arena for a VAE; immutable weights retain stable source addresses.
+pub(crate) struct Conv2dRuntime {
+    ops: std::mem::ManuallyDrop<Qwen3Ops<'static>>,
+    input: ArenaRegion,
+    output: ArenaRegion,
+    bias: ArenaRegion,
+    pub(crate) capacity: (usize, usize, usize),
+    weights: HashMap<(usize, usize), (GpuBuffer, OperatorBindings)>,
+}
+
+impl Conv2dRuntime {
+    pub(crate) fn new(
+        context: &'static VulkanContext,
+        capacity: (usize, usize, usize),
+    ) -> Result<Self, VulkanError> {
+        if capacity.0 == 0 || capacity.1 == 0 || capacity.2 == 0 {
+            return Err(VulkanError::UnsupportedShape(
+                "empty convolution arena".into(),
+            ));
+        }
+        let mut size = 0;
+        let input = f32_region(&mut size, capacity.0)?;
+        let output = f32_region(&mut size, capacity.1)?;
+        let bias = f32_region(&mut size, capacity.2)?;
+        if size > context.limits.max_storage_buffer_range as usize {
+            return Err(VulkanError::UnsupportedShape(
+                "convolution arena exceeds device storage range".into(),
+            ));
+        }
+        Ok(Self {
+            ops: std::mem::ManuallyDrop::new(Qwen3Ops::new_with_size(context, size, 65)?),
+            input,
+            output,
+            bias,
+            capacity,
+            weights: HashMap::new(),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn conv_f16(
+        &mut self,
+        weights: &[u8],
+        input: &[f32],
+        output: &mut [f32],
+        input_channels: usize,
+        output_channels: usize,
+        side: usize,
+        kernel: usize,
+        bias: Option<&[f32]>,
+    ) -> Result<(), VulkanError> {
+        let spatial = product("convolution pixels", &[side, side])?;
+        let n_in = product("convolution width", &[input_channels, kernel, kernel])?;
+        if side == 0
+            || !matches!(kernel, 1 | 3)
+            || input_channels == 0
+            || output_channels == 0
+            || input.len() != product("convolution input", &[input_channels, spatial])?
+            || output.len() != product("convolution output", &[output_channels, spatial])?
+            || weights.len() != product("convolution weights", &[n_in, output_channels, 2])?
+            || bias.is_some_and(|bias| bias.len() != output_channels)
+        {
+            return Err(VulkanError::UnsupportedShape(
+                "invalid CHW convolution shape".into(),
+            ));
+        }
+        let input_word = self
+            .ops
+            .f32_word(self.input, input.len(), "convolution input")?;
+        let output_word = self
+            .ops
+            .f32_word(self.output, output.len(), "convolution output")?;
+        let bias_word = self
+            .ops
+            .f32_word(self.bias, output_channels, "convolution bias")?;
+        let dispatch = row_dispatch(
+            output_channels.div_ceil(64),
+            spatial.div_ceil(32),
+            &self.ops.context.limits,
+        )?;
+        // The F16 shader's reserved fourth group selects CHW gather/store.
+        let mut push = [0u32; 22];
+        push[0] = input_word;
+        push[1] = bias_word;
+        push[2] = as_u32(n_in, "convolution width")?;
+        push[3] = push[2];
+        push[4] = output_word;
+        push[5] = as_u32(output_channels, "convolution channels")?;
+        push[13] = 4;
+        push[15] = as_u32(side, "convolution side")?;
+        push[16] = as_u32(kernel, "convolution kernel")?;
+        push[21] = as_u32(spatial, "convolution pixels")?;
+        // Recover any incomplete dispatch before overwriting mapped host memory.
+        let commands = TokenCommands::begin(self.ops.context)?;
+        let key = (weights.as_ptr() as usize, weights.len());
+        let bindings = if let Some((_, bindings)) = self.weights.get(&key) {
+            *bindings
+        } else {
+            if self.weights.len() == 64 {
+                return Err(VulkanError::UnsupportedShape(
+                    "convolution weight cache full".into(),
+                ));
+            }
+            let buffer = unsafe { self.ops.context.upload_static(weights)? };
+            let bindings = match self
+                .ops
+                .bind_weight_buffers(&[buffer], &[GpuWeightFormat::F16F32])
+            {
+                Ok(bindings) => bindings,
+                Err(error) => {
+                    unsafe { self.ops.context.destroy_buffer(&buffer) };
+                    return Err(error);
+                }
+            };
+            self.weights.insert(key, (buffer, bindings));
+            bindings
+        };
+        self.ops.write_f32(self.input, input)?;
+        if let Some(bias) = bias {
+            self.ops.write_f32(self.bias, bias)?;
+        } else {
+            self.ops.write_f32(self.bias, &vec![0.0; output_channels])?;
+        }
+        self.ops
+            .record_linear_dispatch(&commands, F16_MATMUL_TILED, bindings, &push, dispatch);
+        commands.submit_and_wait()?;
+        output.copy_from_slice(self.ops.read_f32(self.output, output.len())?);
+        Ok(())
+    }
+}
+
+impl Drop for Conv2dRuntime {
+    fn drop(&mut self) {
+        let context = self.ops.context;
+        if unsafe {
+            context.destroy_completed_buffers(self.weights.values().map(|(buffer, _)| buffer))
+        }
+        .is_err()
+        {
+            return;
+        }
         unsafe { std::mem::ManuallyDrop::drop(&mut self.ops) };
     }
 }
@@ -1128,11 +1314,6 @@ impl<'a> Qwen3Ops<'a> {
             .map(|(index, shader)| {
                 if index == Q8_MATMUL_GROUPED && force_dp4a {
                     Q8_MATMUL_GROUPED_DP4A_SHADER
-                } else if index == F16_MATMUL_TILED && !force_dp4a {
-                    // The F16 tiled kernel is not tied to integer dot product,
-                    // but it is only used from the tiled path, which is gated on
-                    // that support, so keep the slot consistent with it.
-                    F16_MATMUL_SHADER
                 } else if index == Q8_MATMUL_GROUPED_TILED && !force_dp4a {
                     // The tiled kernel needs `dotPacked4x8EXT`, so on a device
                     // without it the slot falls back to the plain grouped shader
@@ -1625,9 +1806,14 @@ impl<'a> Qwen3Ops<'a> {
     ) -> Result<(), VulkanError> {
         let format = bindings.weight_format(outputs.len())?;
         let (activation, scales, quantize) = match format {
-            GpuWeightFormat::F16 | GpuWeightFormat::BF16 | GpuWeightFormat::F32 => {
-                (input, q8_scales, None)
-            }
+            GpuWeightFormat::F16
+            | GpuWeightFormat::F16F32
+            | GpuWeightFormat::F16Dot
+            | GpuWeightFormat::BF16
+            | GpuWeightFormat::BF16Dot
+            | GpuWeightFormat::F32
+            | GpuWeightFormat::MlxAffine4
+            | GpuWeightFormat::MlxAffine8 => (input, q8_scales, None),
             GpuWeightFormat::Q4_K | GpuWeightFormat::Q5_K | GpuWeightFormat::Q6_K => {
                 let push = quantize_rows_push(
                     self.arena.size as usize,
@@ -1688,9 +1874,8 @@ impl<'a> Qwen3Ops<'a> {
     /// the only difference is which pipeline is recorded and how the workgroups
     /// are shaped.
     ///
-    /// Requires integer dot product; without it the tiled slot holds a different
-    /// shader, so this returns an error rather than silently computing the
-    /// wrong thing.
+    /// Quantized weights require integer dot product. F16 uses a separate
+    /// float kernel and does not require that device feature.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn record_weight_matmul_tiled_rows(
         &self,
@@ -1707,25 +1892,17 @@ impl<'a> Qwen3Ops<'a> {
         token_rows: usize,
         input_stride: usize,
     ) -> Result<(), VulkanError> {
-        if !self.context.supports_integer_dot_product() {
-            return Err(VulkanError::UnsupportedShape(
-                "tiled Q8_0 matmul needs integer dot product".into(),
-            ));
-        }
         let format = bindings.weight_format(outputs.len())?;
         // F16 weights take the float tiled kernel: no quantize dispatch, and the
         // activation is read from the arena as f32 and rounded in registers.
         // This is what lets the F16 refiner stacks leave the CPU.
-        if matches!(
-            format,
-            GpuWeightFormat::F16 | GpuWeightFormat::BF16 | GpuWeightFormat::F32
-        ) {
-            if format != GpuWeightFormat::F16 {
+        if format.uses_f32_input() {
+            if !matches!(format, GpuWeightFormat::F16 | GpuWeightFormat::F16F32) {
                 return Err(VulkanError::UnsupportedShape(
                     "tiled float matmul is only implemented for F16 weights".into(),
                 ));
             }
-            if crate::ops::f16_uses_half_accumulators(n_in) {
+            if format == GpuWeightFormat::F16 && crate::ops::f16_uses_half_accumulators(n_in) {
                 return self.record_weight_matmul_rows(
                     commands,
                     bindings,
@@ -1740,6 +1917,11 @@ impl<'a> Qwen3Ops<'a> {
                     token_rows,
                     input_stride,
                 );
+            }
+            if n_in % 2 != 0 {
+                return Err(VulkanError::UnsupportedShape(
+                    "tiled F16 matmul requires even weight row starts".into(),
+                ));
             }
             let (push, _) = matmul_rows_push(
                 self.arena.size as usize,
@@ -1765,6 +1947,11 @@ impl<'a> Qwen3Ops<'a> {
             )?;
             self.record_linear_dispatch(commands, F16_MATMUL_TILED, bindings, &push, dispatch);
             return Ok(());
+        }
+        if !self.context.supports_integer_dot_product() {
+            return Err(VulkanError::UnsupportedShape(
+                "tiled Q8_0 matmul needs integer dot product".into(),
+            ));
         }
         let (activation, scales, quantize) = match format {
             GpuWeightFormat::Q4_K | GpuWeightFormat::Q5_K | GpuWeightFormat::Q6_K => {
@@ -3622,10 +3809,7 @@ fn matmul_rows_push(
             "invalid Vulkan matmul input width/stride".into(),
         ));
     }
-    let is_float = matches!(
-        format,
-        GpuWeightFormat::F16 | GpuWeightFormat::BF16 | GpuWeightFormat::F32
-    );
+    let is_float = format.uses_f32_input();
     let blocks = n_in / block_elements;
     let mut push = [0; 22];
     if format == GpuWeightFormat::F16 && crate::ops::f16_uses_half_accumulators(n_in) {
@@ -3671,6 +3855,29 @@ fn matmul_rows_push(
         push[19] = push[16];
         push[20] = push[17];
     }
+    if format == GpuWeightFormat::F16Dot {
+        if !crate::ops::has_avx2_fma() || !crate::ops::has_f16c() || n_in < 16 {
+            return Err(VulkanError::UnsupportedShape(
+                "F16 dot offload requires the CPU AVX2/F16C reduction".into(),
+            ));
+        }
+        push[1] = 8;
+    }
+    if format == GpuWeightFormat::BF16Dot {
+        push[1] = if crate::ops::has_avx2_fma() && n_in >= 8 {
+            8
+        } else if crate::ops::has_neon() && n_in >= 4 {
+            4
+        } else {
+            0
+        };
+    }
+    // Raw-F32 affine input does not use Q8 stride; this slot carries code width.
+    match format {
+        GpuWeightFormat::MlxAffine4 => push[16] = 4,
+        GpuWeightFormat::MlxAffine8 => push[16] = 8,
+        _ => {}
+    }
     if format == GpuWeightFormat::Q4_1 {
         let sums = sums
             .ok_or_else(|| VulkanError::UnsupportedShape("Q4_1 input sums are required".into()))?;
@@ -3699,6 +3906,23 @@ fn matmul_rows_push(
         bindings.require(slot, bytes, "Vulkan weight")?;
         // Quantized shaders form byte offsets in uint before loading words.
         as_u32(bytes, "Vulkan weight byte span")?;
+        if matches!(
+            format,
+            GpuWeightFormat::MlxAffine4 | GpuWeightFormat::MlxAffine8
+        ) {
+            // upload_static adds a 16-byte guard and rounds to a uint word.
+            // Shape-only validation uses the unpadded payload length.
+            let padded_bytes = bytes.checked_add(19).ok_or(VulkanError::OutOfMemory)? & !3;
+            if bindings.sizes[slot] != bytes as u64 && bindings.sizes[slot] != padded_bytes as u64 {
+                return Err(VulkanError::UnsupportedShape(
+                    "MLX planes require the exact matrix row count".into(),
+                ));
+            }
+            as_u32(
+                n_out.checked_mul(n_in).ok_or(VulkanError::OutOfMemory)?,
+                "MLX code span",
+            )?;
+        }
         push[4 + slot * 3] = row_word(
             arena_size,
             region,
@@ -3711,7 +3935,19 @@ fn matmul_rows_push(
         push[6 + slot * 3] = as_u32(stride_bytes / 4, "matmul output stride")?;
         max_output_rows = max_output_rows.max(n_out);
     }
-    let dispatch = matmul_dispatch(max_output_rows, token_rows, outputs.len(), limits)?;
+    // BF16 dot streams occupy 4/8 lanes; use the rest for independent outputs.
+    let output_groups = if format == GpuWeightFormat::BF16Dot && push[1] != 0 {
+        max_output_rows.div_ceil(64 / push[1] as usize)
+    } else {
+        max_output_rows
+    };
+    // Four tokens share each weight load; incomplete batches stay masked in shader.
+    let token_groups = if format == GpuWeightFormat::BF16Dot && push[1] != 0 && token_rows >= 4 {
+        token_rows.div_ceil(4)
+    } else {
+        token_rows
+    };
+    let dispatch = matmul_dispatch(output_groups, token_groups, outputs.len(), limits)?;
     Ok((push, dispatch))
 }
 
@@ -3781,6 +4017,8 @@ pub fn run_batched_matmul_check(
             "f16" => GpuWeightFormat::F16,
             "bf16" => GpuWeightFormat::BF16,
             "f32" => GpuWeightFormat::F32,
+            "mlx4" => GpuWeightFormat::MlxAffine4,
+            "mlx8" => GpuWeightFormat::MlxAffine8,
             _ => return Err(format!("unsupported Vulkan weight format {name}")),
         };
         check_weight_matmul_rows(context, format, rows, 512, 515)
@@ -4010,6 +4248,11 @@ fn check_weight_matmul_rows(
             ));
             let weight = if format == GpuWeightFormat::Q8_0 {
                 synthetic_q8_weight(n_in, n_out, 3 + slot * 4)
+            } else if matches!(
+                format,
+                GpuWeightFormat::MlxAffine4 | GpuWeightFormat::MlxAffine8
+            ) {
+                synthetic_weight(format, n_in, n_out)
             } else {
                 let (block, bytes, _) = format.layout();
                 let weight = synthetic_weight(format, n_in, n_out + slot);
@@ -4575,6 +4818,8 @@ fn check_weight_format(context: &VulkanContext, name: &str) -> Result<(), String
             .map_err(|error| error.to_string())?,
         "f32" => GpuWeightFormat::from_ggml_type(crate::core::tensor::GGMLType::F32)
             .map_err(|error| error.to_string())?,
+        "mlx4" => GpuWeightFormat::MlxAffine4,
+        "mlx8" => GpuWeightFormat::MlxAffine8,
         "q8_0" => GpuWeightFormat::Q8_0,
         _ => return Err(format!("unsupported Vulkan weight format {name}")),
     };
@@ -4584,10 +4829,11 @@ fn check_weight_format(context: &VulkanContext, name: &str) -> Result<(), String
         GpuWeightFormat::Q4_K => 1024,
         GpuWeightFormat::Q5_K => 1024,
         GpuWeightFormat::Q6_K => 1024,
-        GpuWeightFormat::F16 => 1024,
-        GpuWeightFormat::BF16 => 1024,
+        GpuWeightFormat::F16 | GpuWeightFormat::F16F32 | GpuWeightFormat::F16Dot => 1024,
+        GpuWeightFormat::BF16 | GpuWeightFormat::BF16Dot => 1024,
         GpuWeightFormat::F32 => 1024,
         GpuWeightFormat::Q8_0 => 1024,
+        GpuWeightFormat::MlxAffine4 | GpuWeightFormat::MlxAffine8 => 1024,
     };
     check_weight_matvec(context, name, format, n_in, 65)
 }
@@ -4775,6 +5021,31 @@ fn synthetic_weight(format: GpuWeightFormat, n_in: usize, n_out: usize) -> Vec<u
     let (elements, bytes, _) = format.layout();
     let blocks = n_in / elements;
     let mut data = vec![0; n_out * blocks * bytes];
+    if matches!(
+        format,
+        GpuWeightFormat::MlxAffine4 | GpuWeightFormat::MlxAffine8
+    ) {
+        let packed_len = n_in
+            * n_out
+            * if format == GpuWeightFormat::MlxAffine4 {
+                1
+            } else {
+                2
+            }
+            / 2;
+        for (index, code) in data[..packed_len].iter_mut().enumerate() {
+            *code = ((index * 37 + index / 19 + 3) & 255) as u8;
+        }
+        for index in 0..n_out * blocks {
+            let scale = half::bf16::from_f32(0.003 + (index % 11) as f32 * 0.0005).to_bits();
+            let bias = half::bf16::from_f32(-0.25 + (index % 7) as f32 * 0.03125).to_bits();
+            let offset = packed_len + index * 2;
+            data[offset..offset + 2].copy_from_slice(&scale.to_le_bytes());
+            let offset = offset + n_out * blocks * 2;
+            data[offset..offset + 2].copy_from_slice(&bias.to_le_bytes());
+        }
+        return data;
+    }
     for row in 0..n_out {
         for block in 0..blocks {
             let offset = (row * blocks + block) * bytes;
@@ -4896,7 +5167,7 @@ fn synthetic_weight(format: GpuWeightFormat, n_in: usize, n_out: usize) -> Vec<u
                         .to_le_bytes(),
                     );
                 }
-                GpuWeightFormat::F16 => {
+                GpuWeightFormat::F16 | GpuWeightFormat::F16F32 | GpuWeightFormat::F16Dot => {
                     let bits = match block {
                         0 => 0x0000,
                         1 => 0x8000,
@@ -4912,7 +5183,7 @@ fn synthetic_weight(format: GpuWeightFormat, n_in: usize, n_out: usize) -> Vec<u
                     };
                     data[offset..offset + 2].copy_from_slice(&bits.to_le_bytes());
                 }
-                GpuWeightFormat::BF16 => {
+                GpuWeightFormat::BF16 | GpuWeightFormat::BF16Dot => {
                     let bits: u16 = match block {
                         0 => 0x0000,
                         1 => 0x8000,
@@ -4945,6 +5216,7 @@ fn synthetic_weight(format: GpuWeightFormat, n_in: usize, n_out: usize) -> Vec<u
                         *value = ((row * 11 + block * 7 + index * 3 + 1) & 255) as u8;
                     }
                 }
+                GpuWeightFormat::MlxAffine4 | GpuWeightFormat::MlxAffine8 => unreachable!(),
             }
         }
     }
@@ -4962,6 +5234,21 @@ fn cpu_weight_matvec(
 ) -> Vec<f32> {
     let mut output = vec![0.0; n_out];
     match format {
+        GpuWeightFormat::MlxAffine4 | GpuWeightFormat::MlxAffine8 => {
+            let bits = if format == GpuWeightFormat::MlxAffine4 {
+                4
+            } else {
+                8
+            };
+            let packed_len = n_in * n_out * bits / 8;
+            let (packed, metadata) = weight.split_at(packed_len);
+            let (scales, biases) = metadata.split_at(n_in / 64 * n_out * 2);
+            let kernel = crate::ops::kernel::mlx_affine::MlxAffineKernel::new(
+                packed, scales, biases, n_in, n_out, bits, None,
+            )
+            .unwrap();
+            crate::ops::kernel::Kernel::forward(&kernel, input, &mut output, n_in, n_out);
+        }
         GpuWeightFormat::Q4_0 => {
             let kernel = crate::ops::kernel::q4_0::Q4_0Kernel::new(weight, n_in, n_out);
             crate::ops::kernel::Kernel::forward_prepared(
@@ -5026,9 +5313,34 @@ fn cpu_weight_matvec(
             let kernel = crate::ops::kernel::f16::F16Kernel::new(weight);
             crate::ops::kernel::Kernel::forward(&kernel, input, &mut output, n_in, n_out);
         }
+        GpuWeightFormat::F16F32 => {
+            for (row, value) in output.iter_mut().enumerate() {
+                *value = input
+                    .iter()
+                    .zip(weight[row * n_in * 2..(row + 1) * n_in * 2].chunks_exact(2))
+                    .map(|(&x, w)| {
+                        f64::from(crate::ops::f16_to_f32(crate::ops::f32_to_f16(x)))
+                            * f64::from(crate::ops::f16_to_f32(u16::from_le_bytes([w[0], w[1]])))
+                    })
+                    .sum::<f64>() as f32;
+            }
+        }
+        GpuWeightFormat::F16Dot => {
+            let kernel = crate::ops::kernel::f16::F16Kernel::new(weight);
+            kernel.forward_scaled(input, &mut output, n_in, n_out, 1.0, &mut Vec::new());
+        }
         GpuWeightFormat::BF16 => {
             let kernel = crate::ops::kernel::bf16::BF16Kernel::new(weight);
             crate::ops::kernel::Kernel::forward(&kernel, input, &mut output, n_in, n_out);
+        }
+        GpuWeightFormat::BF16Dot => {
+            for (row, value) in output.iter_mut().enumerate() {
+                *value = crate::ops::dot_bf16_f32(
+                    input,
+                    &weight[row * n_in * 2..(row + 1) * n_in * 2],
+                    n_in,
+                );
+            }
         }
         GpuWeightFormat::F32 => {
             let values = weight
@@ -5139,11 +5451,16 @@ fn check_quantize_q8_k_exact(context: &VulkanContext) -> Result<(), String> {
 }
 
 fn check_quantize_tie_even(context: &VulkanContext) -> Result<(), String> {
-    let layout = ArenaLayout::for_dims(32, 32, 1, 1, 32).map_err(|error| error.to_string())?;
+    const COUNT: usize = 64;
+    let layout =
+        ArenaLayout::for_dims(COUNT, COUNT, 1, 1, COUNT).map_err(|error| error.to_string())?;
     let ops = Qwen3Ops::new(context, layout, 1).map_err(|error| error.to_string())?;
-    let mut input = [0.0f32; 32];
+    let mut input = vec![0.0f32; COUNT];
     input[0] = f32::from_bits(0xbdbf0aec);
     input[1] = f32::from_bits(0x3f13f10a);
+    // AuK CFG input: division gives 0x3d80d001; multiplying a reciprocal
+    // gives 0x3d80d000 and rounds to a different F16 scale.
+    input[32] = f32::from_bits(0x40ff9cc1);
     ops.write_f32(layout.x, &input)
         .map_err(|error| error.to_string())?;
 
@@ -5161,8 +5478,8 @@ fn check_quantize_tie_even(context: &VulkanContext) -> Result<(), String> {
         .submit_and_wait()
         .map_err(|error| error.to_string())?;
 
-    let mut expected = [0u8; 32];
-    let mut expected_scales = [0.0f32; 1];
+    let mut expected = vec![0u8; COUNT];
+    let mut expected_scales = vec![0.0f32; COUNT / 32];
     crate::ops::quantize_q8_0_into(&input, input.len(), &mut expected, &mut expected_scales);
     let actual = ops
         .read_bytes(layout.q8, input.len())
@@ -5170,15 +5487,33 @@ fn check_quantize_tie_even(context: &VulkanContext) -> Result<(), String> {
     if actual != expected {
         let index = actual
             .iter()
-            .zip(expected)
-            .position(|(actual, expected)| *actual != expected)
+            .zip(&expected)
+            .position(|(actual, expected)| actual != expected)
             .unwrap();
         return Err(format!(
             "quantize tie-even mismatch at {index}: gpu={} cpu={}",
             actual[index] as i8, expected[index] as i8
         ));
     }
-    println!("operator=quantize_tie_even exact=true");
+    let scales = ops
+        .read_f32(layout.q8_scales, expected_scales.len())
+        .map_err(|error| error.to_string())?;
+    if let Some(index) = scales
+        .iter()
+        .zip(&expected_scales)
+        .position(|(actual, expected)| actual.to_bits() != expected.to_bits())
+    {
+        return Err(format!(
+            "quantize Q8 scale mismatch at {index}: input={} gpu={:#010x} cpu={:#010x}",
+            input[index * 32],
+            scales[index].to_bits(),
+            expected_scales[index].to_bits()
+        ));
+    }
+    println!(
+        "operator=quantize_tie_even exact=true scales_exact=true blocks={}",
+        COUNT / 32
+    );
     Ok(())
 }
 
@@ -5546,6 +5881,59 @@ fn check_close(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "requires a Vulkan device; checks the canonical Q8 reduction bits"]
+    fn vulkan_q8_grouped_preserves_eight_stream_reduction() {
+        use super::{BatchedLinearRuntime, GpuWeightFormat::Q8_0};
+        const WIDTH: usize = 1024;
+        const OUTPUTS: usize = 65;
+        let context = Box::leak(Box::new(super::VulkanContext::new().unwrap()));
+        let weight = super::synthetic_weight(Q8_0, WIDTH, OUTPUTS);
+        let input: Vec<_> = (0..3 * WIDTH)
+            .map(|i| ((i * 29 % 251) as f32 - 125.0) / 97.0)
+            .collect();
+        let mut expected = Vec::new();
+        for input in input.chunks_exact(WIDTH) {
+            let mut q8 = vec![0; WIDTH];
+            let mut scales = vec![0.0; WIDTH / 32];
+            crate::ops::quantize_q8_0_into(input, WIDTH, &mut q8, &mut scales);
+            for row in weight.chunks_exact(WIDTH / 32 * 34) {
+                let mut acc = [0.0f32; 8];
+                for (block, bytes) in row.chunks_exact(34).enumerate() {
+                    let scale = crate::ops::f16_to_f32(u16::from_le_bytes([bytes[0], bytes[1]]))
+                        * scales[block];
+                    for (group, value) in acc.iter_mut().enumerate() {
+                        let dot: i32 = (0..4)
+                            .map(|i| {
+                                i32::from(bytes[2 + group * 4 + i] as i8)
+                                    * i32::from(q8[block * 32 + group * 4 + i] as i8)
+                            })
+                            .sum();
+                        *value = (dot as f32).mul_add(scale, *value);
+                    }
+                }
+                expected.push(
+                    ((acc[0] + acc[4]) + (acc[1] + acc[5]))
+                        + ((acc[2] + acc[6]) + (acc[3] + acc[7])),
+                );
+            }
+        }
+        let mut runtime = BatchedLinearRuntime::new(context, 3, WIDTH, OUTPUTS, 2).unwrap();
+        let mut actual = vec![f32::NAN; expected.len()];
+        let before = context.submission_count();
+        runtime
+            .matmul_rows(&weight, Q8_0, &input, 3, WIDTH, OUTPUTS, &mut actual)
+            .unwrap();
+        assert_eq!(context.submission_count(), before + 1);
+        for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "Q8 reduction at {index}"
+            );
+        }
+    }
+
     #[test]
     #[ignore = "requires a Vulkan device"]
     fn tiled_attention_limits_preserve_baseline_operators() {
@@ -6120,7 +6508,9 @@ mod tests {
             ..Default::default()
         };
         let layout = BatchedLinearLayout::new(3, 513, 65).unwrap();
-        for format in [F32, F16, BF16, Q8_0, Q4_0, Q4_1, Q4_K, Q5_K, Q6_K] {
+        for format in [
+            F32, F16, BF16, Q8_0, Q4_0, Q4_1, Q4_K, Q5_K, Q6_K, MlxAffine4, MlxAffine8,
+        ] {
             let (block, bytes, _) = format.layout();
             let weight_len = 512 / block * bytes * 65;
             for rows in 1..=3 {
@@ -6545,6 +6935,50 @@ mod tests {
     }
 
     #[test]
+    fn bf16_dot_dispatch_packs_independent_output_rows() {
+        use super::{matmul_rows_push, ArenaRegion, GpuWeightFormat::*, OperatorBindings};
+        let limits = super::vk::PhysicalDeviceLimits {
+            max_compute_work_group_count: [8, 16, 16],
+            ..Default::default()
+        };
+        for (format, rows) in [(BF16, 3), (BF16Dot, 3), (BF16, 5), (BF16Dot, 5)] {
+            let region = |offset, size| ArenaRegion { offset, size };
+            let bindings = OperatorBindings {
+                descriptor_set: super::vk::DescriptorSet::null(),
+                sizes: [65, 28, 8].map(|rows| rows * 16 * 2),
+                weight_formats: [Some(format); 3],
+            };
+            let (push, dispatch) = matmul_rows_push(
+                32768,
+                &limits,
+                bindings,
+                region(0, rows * 16 * 4),
+                region(0, 0),
+                None,
+                &[
+                    (region(4096, rows * 65 * 4), 65, 65 * 4),
+                    (region(8192, rows * 28 * 4), 28, 28 * 4),
+                    (region(12288, rows * 8 * 4), 8, 8 * 4),
+                ],
+                16,
+                rows,
+                16,
+            )
+            .unwrap();
+            let expected = match (format, push[1], rows) {
+                (BF16Dot, 8, 3) => [8, 2, 9],
+                (BF16Dot, 4, 3) => [5, 1, 9],
+                (BF16Dot, 8, 5) => [8, 2, 6],
+                (BF16Dot, 4, 5) => [5, 1, 6],
+                (_, _, 3) => [8, 9, 9],
+                _ => [8, 9, 15],
+            };
+            assert_eq!(dispatch, expected, "format={format:?}");
+            assert_eq!([push[5], push[8], push[11]], [65, 28, 8]);
+        }
+    }
+
+    #[test]
     fn batched_matmul_dispatch_checks_device_z_limit() {
         let limits = super::vk::PhysicalDeviceLimits {
             max_compute_work_group_count: [65535, 65535, 6],
@@ -6582,9 +7016,11 @@ mod tests {
             ..Default::default()
         };
         for rows in [1, 2, 3] {
-            for format in [F32, F16, BF16, Q8_0, Q4_0, Q4_1, Q4_K, Q5_K, Q6_K] {
+            for format in [
+                F32, F16, BF16, Q8_0, Q4_0, Q4_1, Q4_K, Q5_K, Q6_K, MlxAffine4, MlxAffine8,
+            ] {
                 let (block, bytes, _) = format.layout();
-                let is_float = matches!(format, F32 | F16 | BF16);
+                let is_float = format.uses_f32_input();
                 let mut regions = [
                     ArenaRegion {
                         offset: 0,
@@ -6617,7 +7053,7 @@ mod tests {
                 ];
                 let bindings = OperatorBindings {
                     descriptor_set: super::vk::DescriptorSet::null(),
-                    sizes: [((256 / block) * bytes * 3) as u64; 3],
+                    sizes: [3, 2, 1].map(|rows| ((256 / block) * bytes * rows) as u64),
                     weight_formats: [Some(format); 3],
                 };
                 let prepare = |r: &[ArenaRegion; 6]| {
@@ -6635,6 +7071,45 @@ mod tests {
                     )
                 };
                 assert_eq!(prepare(&regions).unwrap().1, [3, 1, (rows * 3) as u32]);
+                if matches!(format, MlxAffine4 | MlxAffine8) {
+                    let padded = OperatorBindings {
+                        sizes: bindings.sizes.map(|size| size + 16),
+                        ..bindings
+                    };
+                    let output = [(regions[3], 3, 20), (regions[4], 2, 16), (regions[5], 1, 8)];
+                    assert_eq!(
+                        matmul_rows_push(
+                            16384,
+                            &limits,
+                            padded,
+                            regions[0],
+                            regions[1],
+                            Some(regions[2]),
+                            &output,
+                            256,
+                            rows,
+                            259,
+                        )
+                        .unwrap()
+                        .1,
+                        [3, 1, (rows * 3) as u32],
+                    );
+                    let mut wrong_rows = padded;
+                    wrong_rows.sizes[0] += ((256 / block) * bytes) as u64;
+                    assert!(matmul_rows_push(
+                        16384,
+                        &limits,
+                        wrong_rows,
+                        regions[0],
+                        regions[1],
+                        Some(regions[2]),
+                        &output,
+                        256,
+                        rows,
+                        259,
+                    )
+                    .is_err());
+                }
                 for index in [0, 1, 2, 3, 4, 5] {
                     if (index == 1 && is_float) || (index == 2 && format != Q4_1) {
                         continue;

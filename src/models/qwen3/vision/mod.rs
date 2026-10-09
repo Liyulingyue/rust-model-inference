@@ -145,6 +145,7 @@ fn checked_len(label: &str, factors: &[usize]) -> Result<usize, String> {
 struct Q8Weight {
     data: Vec<u8>,
     f32_data: Option<Vec<f32>>,
+    f16_data: Option<Vec<u8>>,
     n_in: usize,
     n_out: usize,
 }
@@ -155,6 +156,7 @@ impl Q8Weight {
             return Self {
                 data: Vec::new(),
                 f32_data: Some(weight.to_vec()),
+                f16_data: None,
                 n_in,
                 n_out,
             };
@@ -179,6 +181,7 @@ impl Q8Weight {
         Q8Weight {
             data,
             f32_data: None,
+            f16_data: None,
             n_in,
             n_out,
         }
@@ -195,6 +198,10 @@ impl Q8Weight {
     ) {
         let n_in = self.n_in;
         let n_out = self.n_out;
+        if let Some(weight) = &self.f16_data {
+            matmul_f16_weight(pool, weight, input, output, n_tokens, n_in, n_out);
+            return;
+        }
         if let Some(weight) = &self.f32_data {
             matmul_f32_weight(pool, weight, input, output, n_tokens, n_in, n_out);
             return;
@@ -256,6 +263,10 @@ impl Q8Weight {
         q8_buf: &mut [u8],
         scale_buf: &mut [f32],
     ) {
+        if self.f16_data.is_some() {
+            self.matmul_batch(pool, input, output, 1, q8_buf, scale_buf);
+            return;
+        }
         let n_in = self.n_in;
         let n_out = self.n_out;
         if let Some(weight) = &self.f32_data {
@@ -273,6 +284,30 @@ impl Q8Weight {
             n_out,
         );
     }
+}
+
+fn matmul_f16_weight(
+    pool: &ComputePool,
+    weight: &[u8],
+    input: &[f32],
+    output: &mut [f32],
+    tokens: usize,
+    n_in: usize,
+    n_out: usize,
+) {
+    let input: Vec<_> = input.iter().map(|&v| crate::ops::f32_to_f16(v)).collect();
+    let output_ptr = output.as_mut_ptr();
+    pool.compute(move |ith, nth| {
+        let (start, end) = crate::ops::kernel::f32::scalar::row_range(tokens * n_out, ith, nth);
+        for i in start..end {
+            let row = &weight[i % n_out * n_in * 2..(i % n_out + 1) * n_in * 2];
+            let activation = &input[i / n_out * n_in..(i / n_out + 1) * n_in];
+            // Workers own disjoint output elements.
+            unsafe {
+                *output_ptr.add(i) = crate::ops::dot::dot_f16_f16_bytes_ggml(activation, row, n_in);
+            }
+        }
+    });
 }
 
 fn matmul_f32_weight(
@@ -338,6 +373,7 @@ pub struct VisionEncoder<'a> {
 
 pub struct VisionPrecomputed {
     lossless: bool,
+    ggml_f16: bool,
     qkv_weights: Vec<Q8Weight>,
     qkv_biases: Vec<Option<Vec<f32>>>,
     out_weights: Vec<Q8Weight>,
@@ -577,20 +613,39 @@ impl<'a> VisionEncoder<'a> {
     }
 
     pub fn precompute(&mut self) {
-        self.precompute_impl(false);
+        self.precompute_impl(false, false);
     }
 
     /// Keep widened weights and activations in F32, without Q8 quantization.
     pub fn precompute_lossless(&mut self) {
-        self.precompute_impl(true);
+        self.precompute_impl(true, false);
     }
 
-    fn precompute_impl(&mut self, lossless: bool) {
+    /// Preserve GGML F16 weights and round activations at each linear boundary.
+    pub fn precompute_ggml_f16(&mut self) {
+        self.precompute_impl(true, true);
+    }
+
+    fn precompute_impl(&mut self, lossless: bool, ggml_f16: bool) {
         let weight = |values: &[f32], n_in, n_out| {
-            if lossless {
+            if ggml_f16 {
+                Q8Weight {
+                    data: Vec::new(),
+                    f32_data: None,
+                    f16_data: Some(
+                        values
+                            .iter()
+                            .flat_map(|&v| crate::ops::f32_to_f16(v).to_le_bytes())
+                            .collect(),
+                    ),
+                    n_in,
+                    n_out,
+                }
+            } else if lossless {
                 Q8Weight {
                     data: Vec::new(),
                     f32_data: Some(values.to_vec()),
+                    f16_data: None,
                     n_in,
                     n_out,
                 }
@@ -668,6 +723,7 @@ impl<'a> VisionEncoder<'a> {
 
         self.precomputed = Some(VisionPrecomputed {
             lossless,
+            ggml_f16,
             qkv_weights,
             qkv_biases,
             out_weights,
@@ -849,6 +905,7 @@ impl<'a> VisionEncoder<'a> {
                             bias,
                             cfg.eps,
                             self.precomputed.as_ref().is_some_and(|pc| pc.lossless),
+                            self.precomputed.as_ref().is_some_and(|pc| pc.ggml_f16),
                         );
                     } else {
                         layer_norm_without_bias(
@@ -872,6 +929,7 @@ impl<'a> VisionEncoder<'a> {
                     &bias,
                     cfg.eps,
                     self.precomputed.as_ref().is_some_and(|pc| pc.lossless),
+                    self.precomputed.as_ref().is_some_and(|pc| pc.ggml_f16),
                 );
             }
         }
@@ -929,6 +987,45 @@ impl<'a> VisionEncoder<'a> {
         }
         let w0 = &scratch.patch_weight_buf;
         let w1 = scratch.patch_weight_1_buf.as_deref();
+
+        if self.precomputed.as_ref().is_some_and(|pc| pc.ggml_f16) {
+            let width = 3 * ps * ps;
+            let tokens = (img_w / ps) * (img_h / ps);
+            let mut second = vec![0.0; tokens * n_embd];
+            for (frame, weights, output) in [
+                (
+                    frame_a,
+                    w0.as_slice(),
+                    &mut scratch.patch_embd[..tokens * n_embd],
+                ),
+                (frame_b, w1.unwrap_or(w0.as_slice()), second.as_mut_slice()),
+            ] {
+                let mut patches = Vec::with_capacity(tokens * width);
+                for py in 0..img_h / ps {
+                    for px in 0..img_w / ps {
+                        for c in 0..3 {
+                            for y in 0..ps {
+                                for x in 0..ps {
+                                    patches
+                                        .push(frame[((py * ps + y) * img_w + px * ps + x) * 3 + c]);
+                                }
+                            }
+                        }
+                    }
+                }
+                let weights: Vec<_> = weights
+                    .iter()
+                    .flat_map(|&v| crate::ops::f32_to_f16(v).to_le_bytes())
+                    .collect();
+                matmul_f16_weight(
+                    &self.pool, &weights, &patches, output, tokens, width, n_embd,
+                );
+            }
+            for (value, other) in scratch.patch_embd.iter_mut().zip(second) {
+                *value += other;
+            }
+            return;
+        }
 
         if self.precomputed.as_ref().is_some_and(|pc| pc.lossless) {
             let width = 3 * 2 * ps * ps;
@@ -1010,6 +1107,7 @@ impl<'a> VisionEncoder<'a> {
                 n_patches_y,
                 n_patches_x,
                 self.precomputed.as_ref().is_some_and(|pc| pc.lossless),
+                self.precomputed.as_ref().is_some_and(|pc| pc.ggml_f16),
             );
         }
 
@@ -1071,6 +1169,7 @@ impl<'a> VisionEncoder<'a> {
                         b,
                         eps,
                         self.precomputed.as_ref().is_some_and(|pc| pc.lossless),
+                        self.precomputed.as_ref().is_some_and(|pc| pc.ggml_f16),
                     );
                 }
             } else {
@@ -1113,6 +1212,7 @@ impl<'a> VisionEncoder<'a> {
                         &b,
                         eps,
                         false,
+                        self.precomputed.as_ref().is_some_and(|pc| pc.ggml_f16),
                     );
                 }
             } else {
@@ -1171,9 +1271,15 @@ impl<'a> VisionEncoder<'a> {
                             ..base + h * n_tokens * d_head + (t + 1) * d_head];
                         for pair in 0..d_head / 2 {
                             let axis = pair / (d_head / 4);
-                            let freq = 1.0
-                                / 10000.0f32
-                                    .powf((2 * (pair % (d_head / 4))) as f32 / (d_head / 2) as f32);
+                            let exponent =
+                                if self.precomputed.as_ref().is_some_and(|pc| pc.ggml_f16) {
+                                    let dim = (d_head / 2) as f32;
+                                    let step = ((dim - 2.0) / dim) / (d_head / 4 - 1) as f32;
+                                    (pair % (d_head / 4)) as f32 * step
+                                } else {
+                                    (2 * (pair % (d_head / 4))) as f32 / (d_head / 2) as f32
+                                };
+                            let freq = 1.0 / 10000.0f32.powf(exponent);
                             let angle = mrope_positions[t][axis] as f32 * freq;
                             let (a, b) = (row[pair], row[pair + d_head / 2]);
                             let (cos, sin) = crate::ops::rope_sin_cos(angle);
@@ -1234,6 +1340,7 @@ impl<'a> VisionEncoder<'a> {
 
         let sw = PtrWrap(scores);
         let ow = PtrWrap(out_buf);
+        let ggml_f16 = self.precomputed.as_ref().is_some_and(|pc| pc.ggml_f16);
 
         // Head-partitioned attention: each `h` writes a disjoint score row
         // band and a disjoint output band, so the same partition is exact
@@ -1258,23 +1365,30 @@ impl<'a> VisionEncoder<'a> {
                         let q_ptr = attn_buf.as_ptr().add(q_base + t * d_head);
                         for s in 0..n_tokens {
                             let k_ptr = attn_buf.as_ptr().add(k_base + s * d_head);
-                            let mut sum = 0.0f32;
-                            for i in 0..d_head {
-                                sum += *q_ptr.add(i) * *k_ptr.add(i);
-                            }
+                            let sum = if ggml_f16 {
+                                crate::ops::dot_f32(
+                                    std::slice::from_raw_parts(q_ptr, d_head),
+                                    std::slice::from_raw_parts(k_ptr, d_head),
+                                    d_head,
+                                )
+                            } else {
+                                (0..d_head)
+                                    .map(|i| *q_ptr.add(i) * *k_ptr.add(i))
+                                    .sum::<f32>()
+                            };
                             score_slice[t * n_tokens + s] = sum * scale;
                         }
                         softmax_inplace(&mut score_slice[t * n_tokens..t * n_tokens + n_tokens]);
 
                         for d in 0..d_head {
-                            out_slice[t * d_head + d] = 0.0;
-                        }
-                        for s in 0..n_tokens {
-                            let sc = score_slice[t * n_tokens + s];
-                            let v_ptr = attn_buf.as_ptr().add(v_base + s * d_head);
-                            for d in 0..d_head {
-                                out_slice[t * d_head + d] += sc * *v_ptr.add(d);
-                            }
+                            let products = (0..n_tokens).map(|s| {
+                                score_slice[t * n_tokens + s] * attn_buf[v_base + s * d_head + d]
+                            });
+                            out_slice[t * d_head + d] = if ggml_f16 {
+                                products.map(f64::from).sum::<f64>() as f32
+                            } else {
+                                products.sum::<f32>()
+                            };
                         }
                     }
                 }
@@ -1351,6 +1465,7 @@ impl<'a> VisionEncoder<'a> {
                         b,
                         eps,
                         self.precomputed.as_ref().is_some_and(|pc| pc.lossless),
+                        self.precomputed.as_ref().is_some_and(|pc| pc.ggml_f16),
                     );
                 }
             } else {
@@ -1391,6 +1506,7 @@ impl<'a> VisionEncoder<'a> {
                         &b,
                         eps,
                         false,
+                        self.precomputed.as_ref().is_some_and(|pc| pc.ggml_f16),
                     );
                 }
             } else {
@@ -1424,7 +1540,13 @@ impl<'a> VisionEncoder<'a> {
         t_ln2_ffn = t_ln2_start.elapsed().as_secs_f64();
 
         let t_act_start = std::time::Instant::now();
-        gelu_inplace(&mut scratch.ffn_buf[..n_tokens * cfg.n_ff]);
+        if self.precomputed.as_ref().is_some_and(|pc| pc.ggml_f16) {
+            for value in &mut scratch.ffn_buf[..n_tokens * cfg.n_ff] {
+                *value = crate::ops::gelu_ggml_f16(*value);
+            }
+        } else {
+            gelu_inplace(&mut scratch.ffn_buf[..n_tokens * cfg.n_ff]);
+        }
         t_act = t_act_start.elapsed().as_secs_f64();
 
         let t_ffn_down_start = std::time::Instant::now();
@@ -1640,6 +1762,7 @@ impl<'a> VisionEncoder<'a> {
                 &weights.norm_bias,
                 self.config.eps,
                 self.precomputed.as_ref().is_some_and(|pc| pc.lossless),
+                self.precomputed.as_ref().is_some_and(|pc| pc.ggml_f16),
             );
         }
         weights.fc1_weight.matmul_batch(
@@ -1779,12 +1902,42 @@ fn bilinear_resize_2d(
     dst_h: usize,
     dst_w: usize,
     lossless: bool,
+    ggml: bool,
 ) -> Vec<f32> {
     let dst_size = dst_h * dst_w;
     let mut output = vec![0.0f32; dst_size * n_embd];
 
     for dy in 0..dst_h {
         for dx in 0..dst_w {
+            if ggml {
+                let y = if dst_h > 1 {
+                    (src_h - 1) as f64 * dy as f64 / (dst_h - 1) as f64
+                } else {
+                    0.0
+                };
+                let x = if dst_w > 1 {
+                    (src_w - 1) as f64 * dx as f64 / (dst_w - 1) as f64
+                } else {
+                    0.0
+                };
+                let (y0, x0) = (y.floor() as usize, x.floor() as usize);
+                let (y1, x1) = ((y0 + 1).min(src_h - 1), (x0 + 1).min(src_w - 1));
+                let (fy, fx) = (y - y0 as f64, x - x0 as f64);
+                let weights = [
+                    ((1.0 - fy) * (1.0 - fx)) as f32,
+                    ((1.0 - fy) * fx) as f32,
+                    (fy * (1.0 - fx)) as f32,
+                    (fy * fx) as f32,
+                ];
+                for e in 0..n_embd {
+                    output[(dy * dst_w + dx) * n_embd + e] = input[(y0 * src_w + x0) * n_embd + e]
+                        * weights[0]
+                        + input[(y0 * src_w + x1) * n_embd + e] * weights[1]
+                        + input[(y1 * src_w + x0) * n_embd + e] * weights[2]
+                        + input[(y1 * src_w + x1) * n_embd + e] * weights[3];
+                }
+                continue;
+            }
             let src_y = if dst_h > 1 {
                 if lossless {
                     hf_linspace((src_h - 1) as f32, dst_h, dy)
@@ -1955,10 +2108,15 @@ impl VisionScratchpad {
     }
 }
 
-fn layer_norm_with_bias(x: &mut [f32], w: &[f32], b: &[f32], eps: f32, lossless: bool) {
+fn layer_norm_with_bias(x: &mut [f32], w: &[f32], b: &[f32], eps: f32, lossless: bool, ggml: bool) {
     let n = x.len().min(w.len()).min(b.len());
     let n_f64 = n as f64;
-    let mean = (sum_f32(&x[..n]) / n_f64) as f32;
+    let sum = sum_f32(&x[..n]);
+    let mean = if ggml {
+        sum as f32 / n as f32
+    } else {
+        (sum / n_f64) as f32
+    };
     let var = (sum_sq_centered_f32(&x[..n], mean) / n_f64) as f32;
     let inv = 1.0 / (var + eps).sqrt();
     let offset = inv * mean;
@@ -2158,9 +2316,28 @@ fn hf_linspace(end: f32, n: usize, i: usize) -> f32 {
 fn vision_checkpoint(encoder: &VisionEncoder<'_>, name: &str, values: &[f32]) {
     #[cfg(feature = "parity-trace")]
     if encoder.precomputed.as_ref().is_some_and(|pc| pc.lossless) {
-        let name = format!("mage_flow.vision.{name}");
+        let qwen = encoder.precomputed.as_ref().is_some_and(|pc| pc.ggml_f16);
+        let dim = if name == "output" || name.starts_with("deepstack.") {
+            encoder.config.projection_dim
+        } else {
+            encoder.config.n_embd
+        };
+        let name = if qwen {
+            format!(
+                "qwen.vision.{}",
+                name.replace("input", "embedding")
+                    .replace("blocks.", "block.")
+            )
+        } else {
+            format!("mage_flow.vision.{name}")
+        };
         if crate::parity_trace::enabled(&name) {
-            crate::parity_trace::checkpoint(&name, None, &[1, values.len()], values)
+            let shape = if qwen {
+                [dim, values.len() / dim]
+            } else {
+                [1, values.len()]
+            };
+            crate::parity_trace::checkpoint(&name, None, &shape, values)
                 .expect("vision trace write failed");
         }
     }

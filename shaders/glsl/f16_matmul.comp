@@ -10,7 +10,7 @@ layout(std430, binding = 2) readonly buffer W1 { uint data[]; } w1;
 layout(std430, binding = 3) readonly buffer W2 { uint data[]; } w2;
 layout(push_constant) uniform PC {
     uint input_word;
-    uint half_accumulation;
+    uint reduction_mode;
     uint n_in;
     uint elements_per_row;
     uint output0_word; uint rows0; uint output0_stride;
@@ -63,7 +63,7 @@ void main() {
     precise float sum = 0.0;
     uint row_base = row * pc.elements_per_row;
     uint lane = gl_LocalInvocationID.x;
-    if (pc.half_accumulation != 0u) {
+    if (pc.reduction_mode == 1u) {
         if (lane < 32u) {
             for (uint index = lane; index < pc.n_in; index += 32u) {
                 float input_value = round_f16_rte(uintBitsToFloat(arena.data[pc.input_word + token_row * pc.input_stride + index]));
@@ -84,6 +84,35 @@ void main() {
         precise float c = partial[2] + partial[6];
         precise float d = partial[3] + partial[7];
         sum = (a + b) + (c + d);
+    } else if (pc.reduction_mode == 8u) {
+        // Match the CPU AVX2/F16C dot, including its separate four-value tail.
+        uint vector_end = pc.n_in / 8u * 8u;
+        if (lane < 8u) {
+            precise float acc = 0.0;
+            for (uint offset = lane; offset < vector_end; offset += 8u) {
+                float x = round_f16_rte(uintBitsToFloat(arena.data[pc.input_word + token_row * pc.input_stride + offset]));
+                acc = fma(x, f16_decode(weight_f16(slot, row_base + offset)), acc);
+            }
+            partial[lane] = acc;
+        }
+        barrier();
+        if (lane != 0u) return;
+        sum = ((partial[0] + partial[4]) + (partial[1] + partial[5]))
+            + ((partial[2] + partial[6]) + (partial[3] + partial[7]));
+        uint index = vector_end;
+        if (index + 4u <= pc.n_in) {
+            precise float tail[4];
+            for (uint k = 0u; k < 4u; k++) {
+                float x = round_f16_rte(uintBitsToFloat(arena.data[pc.input_word + token_row * pc.input_stride + index + k]));
+                tail[k] = x * f16_decode(weight_f16(slot, row_base + index + k));
+            }
+            sum += (tail[0] + tail[1]) + (tail[2] + tail[3]);
+            index += 4u;
+        }
+        for (; index < pc.n_in; index++) {
+            float x = round_f16_rte(uintBitsToFloat(arena.data[pc.input_word + token_row * pc.input_stride + index]));
+            sum += x * f16_decode(weight_f16(slot, row_base + index));
+        }
     } else {
         if (lane != 0u) return;
         for (uint index = 0u; index < pc.n_in; index++) {

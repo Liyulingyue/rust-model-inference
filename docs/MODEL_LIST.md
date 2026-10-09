@@ -1,5 +1,10 @@
 Mage-Flow 已接入主 CLI；下表数值与 PNG 证据来自原适配记录，远端已关机，本次入口迁移的真实权重复验未执行，见 verification.json 的 `cli_integration`。
 
+Z-Image VAE、YuE2、Edge0、LFM2/LFM2.5/LFM2MoE、文本 embedding 与 AuK 已接入实验性 Vulkan 投影路径，
+RADV 实机数值、成品和计时范围见 [2026-10-07 验证记录](develop/VULKAN_RADV_VALIDATION_2026-10-07.md)；
+表中已有验证等级仍指原来的执行范围。
+AuK Base/Flash 记录见 [2026-10-08 验证](develop/VULKAN_AUK_RADV_VALIDATION_2026-10-08.md)；格式与限制见 [Vulkan 文档](develop/VULKAN.md)。
+
 | 模型 | 版本 | 任务类型 | 参考实现 | 原始权重 | 推理权重 | 备注 |
 |---|---|---|---|---|---|---|
 | Mage-Flow-Base | Base | 文生图 | microsoft/Mage @ `76bec2bb` | https://www.modelscope.cn/models/microsoft/Mage-Flow-Base | `tools/converter/mage_flow`（无损 BF16） | 主 CLI `rust-model-inference` CPU 入口；真实 DiT 与共享组件按标量原始 F32 位对齐，PNG 仅最小尺寸验证。[范围与复现](../tools/oracle/mage_flow/README.md)。 |
@@ -36,7 +41,7 @@ Mage-Flow 已接入主 CLI；下表数值与 PNG 证据来自原适配记录，�
 | Llama-3.2-1B-Instruct | 1B | 文本 | llama.cpp | https://www.modelscope.cn/models/unsloth/Llama-3.2-1B-Instruct | https://modelscope.cn/models/unsloth/Llama-3.2-1B-Instruct-GGUF | √ |
 | Phi-4-mini-Instruct | 3.8B | 文本 | llama.cpp | https://www.modelscope.cn/models/microsoft/Phi-4-mini-instruct | https://modelscope.cn/models/unsloth/Phi-4-mini-instruct-GGUF | √ |
 | LFM2 | 350M / 700M / 1.2B / 8B-A1B | 文本 | llama.cpp | https://www.modelscope.cn/models/LiquidAI/LFM2-8B-A1B | https://www.modelscope.cn/models/unsloth/LFM2-8B-A1B-GGUF | √ 8B-A1B 为 `lfm2moe`，Q8_0 已与 llama.cpp 对齐前 6 个 greedy token。 |
-| LFM2.5 | 230M / 1.2B / 1.2B-Thinking / 2.6B / 8B-A1B | 文本 | llama.cpp | https://www.modelscope.cn/models/LiquidAI/LFM2.5-1.2B-Instruct | https://www.modelscope.cn/models/unsloth/LFM2.5-1.2B-Instruct-GGUF<br>https://www.modelscope.cn/models/unsloth/LFM2.5-8B-A1B-GGUF | √ 稠密档（230M/1.2B/2.6B）走 `lfm2`；8B-A1B 走 `lfm2moe`，2026-10-07 以 Q8_0 与 UD-Q4_K_M 两个真实 GGUF 跑通，状态 `Supported`——未做 llama.cpp 逐位对齐。`--gpu` 可用但不逐位等价于 CPU 且更慢，不要开。 |
+| LFM2.5 | 230M / 1.2B / 1.2B-Thinking / 2.6B / 8B-A1B | 文本 | llama.cpp | https://www.modelscope.cn/models/LiquidAI/LFM2.5-1.2B-Instruct | https://www.modelscope.cn/models/unsloth/LFM2.5-1.2B-Instruct-GGUF<br>https://www.modelscope.cn/models/unsloth/LFM2.5-8B-A1B-GGUF | √ 稠密档（230M/1.2B/2.6B）走 `lfm2`；8B-A1B 走 `lfm2moe`，2026-10-07 以 Q8_0 与 UD-Q4_K_M 两个真实 GGUF 跑通，状态 `Supported`——未做 llama.cpp 逐位对齐。Vulkan 投影为 `Experimental`；RADV Q8_0 固定样例通过原数值门槛、32 greedy IDs 一致，性能依赖设备与用例，见 [实机记录](develop/VULKAN_RADV_VALIDATION_2026-10-07.md)。 |
 | LFM2.5-VL | 450M / 1.6B / 3B | 文本、图像 | llama.cpp | https://www.modelscope.cn/models/LiquidAI/LFM2.5-VL-3B | https://www.modelscope.cn/models/unsloth/LFM2.5-VL-3B-GGUF | √ |
 | CLM-v0.1-8B | 8B（冻结 Qwen3-8B encoder） | 候选打分（非生成） | Contrastive-LM/CLM `bb42c6c` + llama.cpp `b96806d` | https://www.modelscope.cn/models/Contrastive-LM/CLM-v0.1-8B | `tools/converter/clm`（本仓库产出） | √（F32 双头 + Qwen3-8B BF16；两组真实文本评分的编码器与投影头 F32 值标量逐位一致；CLI 与 HTTP `/v1/jev/score` 已接入，HTTP 精度未单独验证；[用法](usage/clm.md)、[复现](../tools/oracle/clm/README.md)） |
 | GLiNER2.5-Decide | 340M（DeBERTa-v3-large encoder + ReLU MLP 头） | 分类 / 决策（非生成） | fastino-ai/GLiNER2 @ `55656fb` | https://www.modelscope.cn/models/fastino/GLiNER2.5-Decide | `tools/converter/gliner`（本仓库产出） | √（`gliner2` F32 GGUF；当前发布的 `tokenizer.json` 已内嵌；4 个请求的 token IDs、120 个检查点和 6,919,181 个 F32 值在标量路径上逐位一致。SIMD、FMA、BLAS、Accelerate、量化路径未对齐；`--jev --gliner2-decide` + `POST /v1/jev/score`；[用法](usage/gliner2-decide.md)、[复现](../tools/oracle/gliner/README.md)） |
@@ -77,7 +82,7 @@ Mage-Flow 已接入主 CLI；下表数值与 PNG 证据来自原适配记录，�
 | Qwen3.8 | 27B | 多模态 | llama.cpp @ `b96806d` | 待补 | 待补 | 待核验。两列权重来源均未定位。 |
 | Edge0-35B-A3B-preview | 35B / 3B active | 文本 | Edge0 @ `fb4cd2c` | https://www.modelscope.cn/models/edge0/Edge0-35B-A3B-preview | `tools/converter/edge0`（本仓库产出） | 标量 CPU 四步 greedy 与官方文本一致；固定文本样本的 16 次 forward、全部 40 层及 logits F32 逐位核验；不含视觉权重，未接入 prerouter；[范围与命令](../tools/oracle/edge0/README.md) |
 | Qwen-Drive-1.0 | 4B | 自动驾驶多模态感知 / 规划 | 官方实现 @ `28091c1`；llama.cpp @ `b96806d` | https://www.modelscope.cn/models/Qwen/Qwen-Drive-1.0-4B | `tools/converter/qwen_drive`（本仓库产出） | BF16 VLM、mmproj、SFT/RL planner 与 F32 perception 已导出；Tokenizer、规划 checkpoint 和感知 BF16 算子逐位核验；CUDA 端到端感知尚未核验；[导出、哈希与限制](../tools/oracle/qwen_drive/README.md) |
-| Qwen-Image-2.1 | 7B | DiT 速度场前向计算 | stable-diffusion.cpp @ `2f886889` | https://www.modelscope.cn/models/Qwen/Qwen-Image-2.1 | 待补 | 本地 Q8_0 GGUF 的 16×16 latent、128 行 context、timestep 500 CPU 前向逐位对齐；CLI 可用 `--qwen-latent-width/--qwen-latent-height` 指定尺寸；当前入口输出原始 F32 速度场，不含文本编码、采样器或 VAE 解码。  |
+| Qwen-Image-2.1 | 7B DiT + 8B 文本编码器 | CPU 文生图、单图/多图参考编辑、RGBA 输出 | stable-diffusion.cpp @ `2f886889` | https://www.modelscope.cn/models/Qwen/Qwen-Image-2.1 | CPU 标量逐位验证 | 主 CLI 已接通 Qwen3-VL 文本/视觉及 DeepStack、专用 RGBA VAE 编解码、CFG、调度与 Euler 采样；Q8_0 DiT/文本 + F16 mmproj + F32 VAE 的三个完整场景共 8,062 检查点、835,046,229 个 F32 原始位模式及最终 PNG 像素完全一致。使用 `RMI_SCALAR=1` 运行已验证精度；默认 SIMD 可生成/编辑，但未逐位对齐，GPU 未支持。保留原始速度场入口。组件、命令与验证边界见 [报告](develop/QWEN_IMAGE_2_1.md)。 |
 | Spark-X2.5 | 1.7B / 4B | 文本 | XHToken/llama.cpp | https://www.modelscope.cn/models/XHToken/Spark-X2.5-4B | https://www.modelscope.cn/models/XHToken/Spark-X2.5-4B-GGUF | √ |
 | VibeVoice-ASR | 7B | ASR |  | https://www.modelscope.cn/models/microsoft/VibeVoice-ASR | `tools/converter/vibevoice`（本仓库产出） | 待核验 |
 | LongCat-Image-Edit / Edit-Turbo | Q8_0 | 图片编辑 | leejet/stable-diffusion.cpp @ `3f8527a` | - | 两个 GGUF，共用本地 Qwen2.5-VL/Tokenizer/VAE | `longcat-image-edit` 实验入口串接方形输入、图文编码、VAE、各自 scheduler 和 PNG 输出。Transformer 已逐位对齐；固定 32×32 小图的 Edit 单步、Turbo 两步完整标量路径及最终 RGB 也与 Oracle 一致。默认尺寸、默认步数及加速路径未核验；[范围与复现](../tools/oracle/longcat/README.md) |

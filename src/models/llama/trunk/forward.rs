@@ -534,10 +534,36 @@ pub fn run_inference(
     max_context: usize,
     repetition_penalty: f32,
     thinking: bool,
+    jinja: &crate::prompt::jinja::Options,
 ) -> Result<(), String> {
     let input_tokens = {
         let tokenizer = load_tokenizer(|k| source.metadata(k).cloned())
             .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
+
+        // `--jinja` / `--chat-template-file` short-circuit the whole
+        // arch-heuristic chain below. When the model ships a template, that
+        // template *is* the spec; everything after this point is the
+        // fallback for models that ship none.
+        if let Some(ids) = crate::prompt::jinja::single_turn_tokens(
+            tokenizer.as_ref(),
+            jinja,
+            &|k| source.metadata(k).cloned(),
+            prompt,
+            thinking,
+        )? {
+            return run_inference_tokens(
+                source,
+                ids,
+                max_tokens,
+                temperature,
+                n_threads_arg,
+                bench,
+                profile,
+                kv_format,
+                max_context,
+                repetition_penalty,
+            );
+        }
 
         let arch = source
             .metadata("general.architecture")

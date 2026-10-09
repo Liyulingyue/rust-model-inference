@@ -29,6 +29,8 @@ use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::{Kernel, QTensorOwned};
 use crate::ops::matmul_q8_0_quantized_parallel_rows;
+#[cfg(feature = "vulkan")]
+use crate::vulkan::ops::GpuWeightFormat;
 use dit::TEXT_IN;
 use std::sync::Arc;
 
@@ -125,10 +127,9 @@ pub struct AukPipeline {
     vae: vae::BigVGANFlowVae,
     text: Option<text::AukTextEncoder>,
     /// Optional Qwen2.5-Omni audio tower for CFMEdit reference-audio conditioning.
-    /// Loaded lazily from a separate BF16 Qwen GGUF (which contains the audio
-    /// tower in addition to the text trunk). Required only for end-to-end
-    /// CFMEdit (WAV -> mel -> audio tower -> DiT). The Q8_0 Qwen GGUF is
-    /// insufficient since it omits the audio tower.
+    /// Loaded from an optional BF16 Qwen source for end-to-end CFMEdit
+    /// (WAV -> mel -> audio tower -> DiT). The published Q8_0 source also
+    /// contains audio tensors, but that tower path has not been validated.
     audio_tower: Option<crate::models::qwen3::omni_audio::AudioTowerModel>,
 }
 
@@ -683,38 +684,6 @@ fn validate_vae(_source: &dyn TensorSource) -> Result<(), String> {
     Ok(())
 }
 
-fn require_tensor(
-    source: &dyn TensorSource,
-    name: &str,
-    dims: &[u64],
-    ggml_type: GGMLType,
-) -> Result<(), String> {
-    let info = source
-        .tensor_info(name)
-        .ok_or_else(|| format!("Missing tensor: {name}"))?;
-    if info.dims != dims {
-        return Err(format!("Invalid {name} dimensions"));
-    }
-    if info.ggml_type != ggml_type {
-        return Err(format!(
-            "Invalid {name} type: expected {ggml_type:?}, got {:?}",
-            info.ggml_type
-        ));
-    }
-    let expected = usize::try_from(
-        info.checked_nbytes()
-            .ok_or_else(|| format!("Invalid {name} byte size"))?,
-    )
-    .map_err(|_| format!("Tensor byte size does not fit usize: {name}"))?;
-    let bytes = source
-        .tensor_slice(name)
-        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
-    if bytes.len() != expected {
-        return Err(format!("Invalid {name} byte length"));
-    }
-    Ok(())
-}
-
 /// Accept F16 / BF16 / Q8_0 / Q*_K dtypes. The actual matmul dispatch in
 /// `linear_into_scaled_impl` covers the full set.
 fn require_matrix(source: &dyn TensorSource, name: &str, dims: &[u64]) -> Result<(), String> {
@@ -756,6 +725,9 @@ pub(crate) struct Q8Scratch {
     f16_inputs: Vec<Vec<u16>>,
     values: Vec<u8>,
     scales: Vec<f32>,
+    // ponytail: uploads last one denoise; move to AukDit if repeated-call profiling warrants it.
+    #[cfg(feature = "vulkan")]
+    gpu: std::collections::HashMap<String, crate::ops::kernel::vulkan::GpuLinear>,
 }
 
 impl Q8Scratch {
@@ -767,6 +739,8 @@ impl Q8Scratch {
             f16_inputs: Vec::new(),
             values: vec![0; n_in],
             scales: vec![0.0; n_in.div_ceil(32)],
+            #[cfg(feature = "vulkan")]
+            gpu: Default::default(),
         }
     }
 }
@@ -833,6 +807,33 @@ fn linear_into_scaled_impl(
     }
     match info.ggml_type {
         GGMLType::F16 => {
+            #[cfg(feature = "vulkan")]
+            if crate::ops::kernel::vulkan::offload_enabled() {
+                let gpu_input = if scale == 1.0 {
+                    input
+                } else {
+                    q8.scaled.clear();
+                    q8.scaled.extend(input.iter().map(|value| value * scale));
+                    &q8.scaled
+                };
+                // Input conversion overflow must retain the CPU F16 semantics.
+                if gpu_input.iter().all(|value| value.abs() <= 65504.0)
+                    && q8.gpu.entry(name.to_owned()).or_default().try_matmul(
+                        bytes,
+                        GpuWeightFormat::F16Dot,
+                        gpu_input,
+                        output,
+                        n_in,
+                        n_out,
+                        1,
+                    )
+                {
+                    for value in output.iter_mut() {
+                        *value *= scale.recip();
+                    }
+                    return Ok(());
+                }
+            }
             let weight_ptr = bytes.as_ptr() as usize;
             let weight_len = bytes.len();
             let input_ptr = input.as_ptr() as usize;
@@ -881,6 +882,27 @@ fn linear_into_scaled_impl(
             Ok(())
         }
         GGMLType::Q8_0 => {
+            #[cfg(feature = "vulkan")]
+            {
+                if scale == 1.0
+                    && crate::ops::kernel::vulkan::offload_enabled()
+                    && q8.gpu.entry(name.to_owned()).or_default().try_matmul(
+                        bytes,
+                        GpuWeightFormat::Q8_0,
+                        input,
+                        output,
+                        n_in,
+                        n_out,
+                        1,
+                    )
+                {
+                    return Ok(());
+                }
+            }
+            // A declined projection must recompute on CPU rather than enter
+            // the legacy process-global pointer cache in the row kernel.
+            #[cfg(feature = "vulkan")]
+            let _cpu = ComputePool::disable_gpu_matmul_for_scope();
             q8.prepare(input, n_in)?;
             let weight_ptr = bytes.as_ptr() as usize;
             let weight_len = bytes.len();
@@ -919,5 +941,221 @@ impl Q8Scratch {
         self.scales.resize(n_in.div_ceil(32), 0.0);
         crate::ops::quantize_q8_0_into(input, n_in, &mut self.values, &mut self.scales);
         Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "vulkan"))]
+mod vulkan_tests {
+    use super::*;
+    use crate::core::tensor::{MetaValue, TensorInfo};
+
+    #[test]
+    #[ignore = "requires Vulkan plus RMI_AUK_GGUF and RMI_AUK_NATIVE_TEXT; run alone"]
+    fn vulkan_auk_real_components_match_cpu() {
+        crate::ops::enable_gpu();
+        let context = crate::ops::get_vulkan_context().expect("Vulkan device required");
+        let source = |key: &str| -> Arc<dyn TensorSource> {
+            Arc::from(
+                crate::open_model_source(
+                    std::path::Path::new(&std::env::var(key).unwrap()),
+                    crate::ComponentRole::Llm,
+                )
+                .unwrap(),
+            )
+        };
+        let pool = Arc::new(ComputePool::new(8));
+        let text = text::AukTextEncoder::load(source("RMI_AUK_NATIVE_TEXT"), pool.clone()).unwrap();
+        let dit_source = source("RMI_AUK_GGUF");
+        let guidance_scale = if dit_source
+            .tensor_info("transformer.single_transformer_blocks.0.attn.to_qkv.weight")
+            .unwrap()
+            .ggml_type
+            == GGMLType::Q8_0
+        {
+            2.0
+        } else {
+            0.0
+        };
+        let dit = dit::AukDit::load(dit_source, pool).unwrap();
+        let options = AukOptions {
+            steps: 4,
+            sample_rate: 24_000,
+            duration_sec: 1,
+            seed: 42,
+            guidance_scale,
+            instruct: None,
+        };
+        let (cpu_text, cpu_latent) = {
+            let _cpu = ComputePool::disable_gpu_matmul_for_scope();
+            let hidden = text.encode("Hi").unwrap();
+            let latent = dit
+                .denoise(&hidden, hidden.len() / TEXT_IN, &[], 0, &options)
+                .unwrap();
+            (hidden, latent)
+        };
+        let before = context.submission_count();
+        let gpu_text = text.encode("Hi").unwrap();
+        // Hold conditioning fixed to distinguish text drift from DiT drift.
+        let gpu_latent = dit
+            .denoise(&cpu_text, cpu_text.len() / TEXT_IN, &[], 0, &options)
+            .unwrap();
+        let cpu_multi = {
+            let _cpu = ComputePool::disable_gpu_matmul_for_scope();
+            text.encode("Hello, this is a Vulkan test.").unwrap()
+        };
+        let gpu_multi = text.encode("Hello, this is a Vulkan test.").unwrap();
+        assert!(context.submission_count() > before);
+        for (label, cpu, gpu) in [
+            ("text", cpu_text, gpu_text),
+            ("latent", cpu_latent, gpu_latent),
+            ("multi-token text", cpu_multi, gpu_multi),
+        ] {
+            assert_eq!(cpu.len(), gpu.len(), "AuK {label} shape drift");
+            let differences = cpu
+                .iter()
+                .zip(&gpu)
+                .filter(|(a, b)| a.to_bits() != b.to_bits())
+                .count();
+            let max_abs = cpu
+                .iter()
+                .zip(&gpu)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f32, f32::max);
+            eprintln!(
+                "AuK {label}: values={} bit_diff={differences} max_abs={max_abs}",
+                cpu.len()
+            );
+            assert_eq!(differences, 0, "AuK {label} projection drift");
+        }
+    }
+
+    struct Source {
+        info: TensorInfo,
+        bytes: Vec<u8>,
+    }
+
+    impl TensorSource for Source {
+        fn metadata(&self, _: &str) -> Option<&MetaValue> {
+            None
+        }
+        fn tensor_info(&self, name: &str) -> Option<&TensorInfo> {
+            (name == self.info.name).then_some(&self.info)
+        }
+        fn tensor_slice(&self, name: &str) -> Option<&[u8]> {
+            (name == self.info.name).then_some(self.bytes.as_slice())
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device; run alone with --test-threads=1"]
+    fn vulkan_auk_projections_preserve_cpu_contract_and_cache_lifetime() {
+        crate::ops::enable_gpu();
+        let context = crate::ops::get_vulkan_context().expect("Vulkan device required");
+        let pool = ComputePool::new(2);
+        for (kind, width) in [
+            (GGMLType::F16, 1024),
+            (GGMLType::F16, 1027),
+            (GGMLType::F16, 1031),
+            (GGMLType::Q8_0, 1024),
+        ] {
+            let mut source = Source {
+                info: TensorInfo {
+                    name: "projection".into(),
+                    dims: vec![width as u64, 65],
+                    ggml_type: kind,
+                    offset: 0,
+                },
+                bytes: [0x00, 0x3c].repeat(width * 65),
+            };
+            if kind == GGMLType::Q8_0 {
+                source.bytes = [0x00, 0x3c]
+                    .into_iter()
+                    .chain([1; 32])
+                    .cycle()
+                    .take(width / 32 * 34 * 65)
+                    .collect();
+            } else {
+                for row in source.bytes.chunks_exact_mut(width * 2) {
+                    for col in [0, 2] {
+                        row[col * 2..col * 2 + 2]
+                            .copy_from_slice(&half::f16::from_f32(1024.0).to_bits().to_le_bytes());
+                    }
+                }
+            }
+            let mut input = vec![0.0; width];
+            input[..4].copy_from_slice(&[32768.0, 1.0, -32768.0, 1.0]);
+            input[width - 1] = 0.125;
+            let mut expected = vec![f32::NAN; 65];
+            let mut actual = expected.clone();
+            // Keep the same allocation while replacing its model-owned cache.
+            // A process-global pointer cache would reuse the old weight upload.
+            for revision in 0..2 {
+                if revision == 1 {
+                    if kind == GGMLType::Q8_0 {
+                        source.bytes[2] = 2;
+                    } else {
+                        source.bytes[2..4]
+                            .copy_from_slice(&half::f16::from_f32(2.0).to_bits().to_le_bytes());
+                    }
+                }
+                let mut scratch = Q8Scratch::new(width);
+                let scales: &[f32] = if kind == GGMLType::F16 {
+                    &[1.0, 0.125]
+                } else {
+                    &[1.0]
+                };
+                for &scale in scales {
+                    {
+                        let _cpu = ComputePool::disable_gpu_matmul_for_scope();
+                        linear_into_scaled_impl(
+                            &source,
+                            "projection",
+                            width,
+                            65,
+                            &input,
+                            &mut expected,
+                            &mut scratch,
+                            &pool,
+                            scale,
+                        )
+                        .unwrap();
+                    }
+                    let before = context.submission_count();
+                    linear_into_scaled_impl(
+                        &source,
+                        "projection",
+                        width,
+                        65,
+                        &input,
+                        &mut actual,
+                        &mut scratch,
+                        &pool,
+                        scale,
+                    )
+                    .unwrap();
+                    assert_eq!(context.submission_count(), before + 1);
+                    assert_eq!(
+                        actual.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                        expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                        "kind={kind:?} width={width} scale={scale} revision={revision}"
+                    );
+                }
+                std::env::set_var("RMI_PARITY_TRACE", "1");
+                let before = context.submission_count();
+                linear_into(
+                    &source,
+                    "projection",
+                    width,
+                    65,
+                    &input,
+                    &mut actual,
+                    &mut scratch,
+                    &pool,
+                )
+                .unwrap();
+                std::env::remove_var("RMI_PARITY_TRACE");
+                assert_eq!(context.submission_count(), before, "trace must stay on CPU");
+            }
+        }
     }
 }

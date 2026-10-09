@@ -78,7 +78,26 @@ pub(crate) const LATENT_DIM: usize = 64;
 pub(crate) const NUM_DOUBLE_LAYERS: usize = 10;
 
 /// Number of single blocks (sequential img attention + FF).
-pub(crate) const NUM_SINGLE_LAYERS: usize = 10;
+pub(crate) const NUM_SINGLE_LAYERS: usize = 20;
+
+#[cfg(test)]
+mod contract_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires the published audio.cpp DiT GGUF in RMI_AUK_GGUF"]
+    fn published_auk_dit_loads_all_twenty_single_blocks() {
+        let path = std::env::var("RMI_AUK_GGUF").expect("published AuK GGUF required");
+        let source: Arc<dyn TensorSource> = Arc::from(
+            crate::open_model_source(std::path::Path::new(&path), crate::ComponentRole::Llm)
+                .unwrap(),
+        );
+        super::super::validate_dit(source.as_ref()).unwrap();
+        let model = AukDit::load(source, Arc::new(ComputePool::new(1))).unwrap();
+        assert_eq!(model.double_blocks.len(), 10);
+        assert_eq!(model.single_blocks.len(), 20);
+    }
+}
 
 /// Padding multiple for joint sequence length.
 pub(crate) const SEQUENCE_MULTIPLE: usize = 32;
@@ -421,7 +440,7 @@ impl AukDit {
         if !sigma.is_finite() || !(0.0..=1.0).contains(&sigma) {
             return Err("AuK sigma must be finite and within [0, 1]".into());
         }
-        require_finite(latent, "latent")?;
+        super::super::common::require_finite(latent, "latent")?;
         let latent_values = LATENT_DIM * latent_time;
         if latent.len() != latent_values {
             return Err("Invalid AuK latent length".into());
@@ -463,7 +482,7 @@ impl AukDit {
         for (v, b) in scratch.time.iter_mut().zip(&self.time_mlp_2_bias) {
             *v += *b;
         }
-        require_finite(&scratch.time, "time conditioning")?;
+        super::super::common::require_finite(&scratch.time, "time conditioning")?;
 
         // Image (audio latent) embed: latent -> hidden
         run_audio_embed(
@@ -600,7 +619,7 @@ impl AukDit {
             scratch.joint[..total * HIDDEN].copy_from_slice(&swapped);
         }
 
-        // 10 single blocks
+        // Every single block present in the validated export.
         for (layer_index, block) in self.single_blocks.iter().enumerate() {
             linear_into_dispatch(
                 linear,
@@ -816,14 +835,6 @@ fn load_single_block(
     })
 }
 
-fn require_finite(values: &[f32], name: &str) -> Result<(), String> {
-    if values.iter().all(|v| v.is_finite()) {
-        Ok(())
-    } else {
-        Err(format!("Non-finite {name}"))
-    }
-}
-
 fn euler_flow_step(
     latent: &mut [f32],
     velocity: &[f32],
@@ -934,26 +945,22 @@ impl AukScratch {
             return Err("AuK image (latent) token count must be positive".into());
         }
         let total = img_token_count + text_token_count;
-        resize_zeroed(&mut self.img, img_token_count * HIDDEN, "AuK img")?;
-        resize_zeroed(&mut self.text, (total) * HIDDEN, "AuK text")?;
-        resize_zeroed(&mut self.joint, total * HIDDEN, "AuK joint")?;
-        resize_zeroed(&mut self.qkv, total * QKV_DIM, "AuK qkv")?;
-        resize_zeroed(&mut self.qkv_c, total * QKV_DIM, "AuK qkv_c")?;
-        resize_zeroed(&mut self.attention, total * HIDDEN, "AuK attention")?;
-        resize_zeroed(&mut self.scores, total, "AuK scores")?;
-        resize_zeroed(&mut self.modulation, 2 * ADALN_DIM, "AuK modulation")?;
-        resize_zeroed(&mut self.rope, total * HEAD_DIM, "AuK rope")?;
-        resize_zeroed(&mut self.normed_buf, total * HIDDEN, "AuK normed_buf")?;
+        super::super::common::resize_zeroed(&mut self.img, img_token_count * HIDDEN, "AuK img")?;
+        super::super::common::resize_zeroed(&mut self.text, (total) * HIDDEN, "AuK text")?;
+        super::super::common::resize_zeroed(&mut self.joint, total * HIDDEN, "AuK joint")?;
+        super::super::common::resize_zeroed(&mut self.qkv, total * QKV_DIM, "AuK qkv")?;
+        super::super::common::resize_zeroed(&mut self.qkv_c, total * QKV_DIM, "AuK qkv_c")?;
+        super::super::common::resize_zeroed(&mut self.attention, total * HIDDEN, "AuK attention")?;
+        super::super::common::resize_zeroed(&mut self.scores, total, "AuK scores")?;
+        super::super::common::resize_zeroed(&mut self.modulation, 2 * ADALN_DIM, "AuK modulation")?;
+        super::super::common::resize_zeroed(&mut self.rope, total * HEAD_DIM, "AuK rope")?;
+        super::super::common::resize_zeroed(
+            &mut self.normed_buf,
+            total * HIDDEN,
+            "AuK normed_buf",
+        )?;
         Ok(())
     }
-}
-
-fn resize_zeroed(dst: &mut Vec<f32>, len: usize, name: &str) -> Result<(), String> {
-    dst.clear();
-    dst.try_reserve_exact(len)
-        .map_err(|e| format!("Failed to allocate {name}: {e}"))?;
-    dst.resize(len, 0.0);
-    Ok(())
 }
 
 /// Audio embed: `latent_dim -> hidden` for each latent frame. The latent is
@@ -1348,7 +1355,7 @@ fn run_double_block(
         pool,
     )?;
 
-    require_finite(joint, "AuK double block output")
+    super::super::common::require_finite(joint, "AuK double block output")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1779,7 +1786,7 @@ fn run_single_block(
             joint[off + d] += ff[d] * gate_mlp[d];
         }
     }
-    require_finite(joint, "AuK single block output")
+    super::super::common::require_finite(joint, "AuK single block output")
 }
 
 #[allow(clippy::too_many_arguments)]

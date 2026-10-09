@@ -553,6 +553,44 @@ pub fn run_mage_flow_cli(
     Ok(())
 }
 
+/// Generic CLI dispatcher for any [`crate::models::diffusion::DiffusionPipeline`].
+///
+/// Opens the three model components via `P::load`, runs `P::generate_rgb`,
+/// writes the PNG atomically, and prints stage timings. Callers (e.g.
+/// `run_z_image_cli`, `run_ernie_image_cli`) are now thin wrappers that
+/// translate their CLI option struct into `P::Options` and forward here.
+///
+/// `name` is printed in log messages (e.g. `"Z-Image"`, `"ERNIE-Image"`).
+pub fn run_diffusion_cli<P>(
+    name: &str,
+    diffusion: Arc<dyn TensorSource>,
+    text: Arc<dyn TensorSource>,
+    vae: Arc<dyn TensorSource>,
+    prompt: &str,
+    pipeline_options: &P::Options,
+    out: &std::path::Path,
+    overwrite: bool,
+    n_threads: usize,
+) -> Result<(), String>
+where
+    P: crate::models::diffusion::DiffusionPipeline,
+{
+    let started = Instant::now();
+    let pipeline = P::load(diffusion, text, vae, n_threads)?;
+    println!(
+        "{name} components loaded in {}ms",
+        started.elapsed().as_millis()
+    );
+    let rgb = pipeline.generate_rgb(prompt, pipeline_options)?;
+    write_png_atomically(out, &rgb, overwrite)?;
+    println!(
+        "{name} PNG saved to {} in {}ms",
+        out.display(),
+        started.elapsed().as_millis()
+    );
+    Ok(())
+}
+
 pub fn run_z_image_cli(
     diffusion: Arc<dyn TensorSource>,
     text: Arc<dyn TensorSource>,
@@ -561,33 +599,27 @@ pub fn run_z_image_cli(
     options: ZImageCliOptions,
     n_threads: usize,
 ) -> Result<(), String> {
-    let started = Instant::now();
     let ZImageCliOptions {
         steps,
         resolution,
         seed,
         out,
     } = options;
-    let pipeline = ZImagePipeline::load(diffusion, text, vae, n_threads)?;
-    println!(
-        "Z-Image components loaded in {}ms",
-        started.elapsed().as_millis()
-    );
-    let rgb = pipeline.generate_rgb(
+    run_diffusion_cli::<ZImagePipeline>(
+        "Z-Image",
+        diffusion,
+        text,
+        vae,
         prompt,
         &ZImageOptions {
             steps,
             resolution,
             seed,
         },
-    )?;
-    write_png_atomically(&out, &rgb, true)?;
-    println!(
-        "Z-Image PNG saved to {} in {}ms",
-        out.display(),
-        started.elapsed().as_millis()
-    );
-    Ok(())
+        &out,
+        true,
+        n_threads,
+    )
 }
 
 pub fn run_auk_cli(
@@ -715,16 +747,12 @@ pub fn run_ernie_image_cli(
     out: std::path::PathBuf,
     n_threads: usize,
 ) -> Result<(), String> {
-    use crate::models::diffusion::ernie_image::{
-        ErnieImageOptions, ErnieImagePipeline, ErnieImageRgb,
-    };
-    let started = Instant::now();
-    let pipeline = ErnieImagePipeline::load(diffusion, text, vae, n_threads)?;
-    println!(
-        "ERNIE-Image components loaded in {}ms",
-        started.elapsed().as_millis()
-    );
-    let rgb = pipeline.generate_rgb(
+    use crate::models::diffusion::ernie_image::{ErnieImageOptions, ErnieImagePipeline};
+    run_diffusion_cli::<ErnieImagePipeline>(
+        "ERNIE-Image",
+        diffusion,
+        text,
+        vae,
         prompt,
         &ErnieImageOptions {
             steps,
@@ -732,24 +760,10 @@ pub fn run_ernie_image_cli(
             seed,
             cfg_scale,
         },
-    )?;
-    let z_rgb = ZImageRgb {
-        width: rgb.width,
-        height: rgb.height,
-        bytes: rgb.bytes,
-    };
-    write_png_atomically(&out, &z_rgb, true)?;
-    let _ = ErnieImageRgb {
-        width: 0,
-        height: 0,
-        bytes: Vec::new(),
-    };
-    println!(
-        "ERNIE-Image PNG saved to {} in {}ms",
-        out.display(),
-        started.elapsed().as_millis()
-    );
-    Ok(())
+        &out,
+        true,
+        n_threads,
+    )
 }
 
 pub struct QwenImage21Request {
@@ -759,6 +773,320 @@ pub struct QwenImage21Request {
     pub latent_height: usize,
     pub timestep: f32,
     pub out: PathBuf,
+}
+
+pub fn run_qwen_image_2_1_cli(
+    source: Arc<dyn TensorSource>,
+    options: &crate::app::CliOptions,
+    n_threads: usize,
+) -> Result<(), String> {
+    use crate::models::diffusion::qwen_image_2_1::{
+        rgba_bytes, sample,
+        text::{ReferenceFeatures, TextConditioner},
+        vae::QwenImage21Vae,
+        Condition, ReferenceLatent,
+    };
+    let out = options
+        .out
+        .as_deref()
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or("Qwen-Image-2.1 requires --out")?;
+    let image_mode = options.text_encoder.is_some()
+        || options.vae.is_some()
+        || options.prompt.is_some()
+        || options.width.is_some()
+        || options.height.is_some()
+        || options.steps.is_some()
+        || options.resolution.is_some()
+        || options.image.is_some()
+        || !options.references.is_empty()
+        || options.mmproj.is_some()
+        || options.cfg.is_some()
+        || options.cfg_scale.is_some()
+        || options.negative_prompt.is_some()
+        || options.noise.is_some();
+    if options.gpu {
+        return Err("Qwen-Image-2.1 currently supports CPU execution".into());
+    }
+    if !image_mode {
+        return run_qwen_image_2_1(
+            source,
+            QwenImage21Request {
+                latent: options
+                    .qwen_latent_file
+                    .as_deref()
+                    .map(read_f32_file)
+                    .transpose()?,
+                context: options
+                    .qwen_context_file
+                    .as_deref()
+                    .map(read_f32_file)
+                    .transpose()?,
+                latent_width: options.qwen_latent_width.unwrap_or(16),
+                latent_height: options.qwen_latent_height.unwrap_or(16),
+                timestep: options.qwen_timestep.unwrap_or(500.0),
+                out: out.to_path_buf(),
+            },
+            n_threads,
+        );
+    }
+    for (present, flag) in [
+        (options.gpu, "--gpu"),
+        (
+            options.tts || options.jev || options.embedding || options.bench || options.dump_logits,
+            "text/audio modes",
+        ),
+        (
+            options.qwen_timestep.is_some()
+                || options.qwen_latent_width.is_some()
+                || options.qwen_latent_height.is_some(),
+            "DiT-only timestep/dimensions",
+        ),
+    ] {
+        if present {
+            return Err(format!("Qwen-Image-2.1 generation cannot use {flag}"));
+        }
+    }
+    if out
+        .extension()
+        .and_then(|s| s.to_str())
+        .is_none_or(|s| !s.eq_ignore_ascii_case("png"))
+    {
+        return Err("Qwen-Image-2.1 image output requires a .png path".into());
+    }
+    if out.exists() && !options.overwrite {
+        return Err(format!("Output already exists: {}", out.display()));
+    }
+    let width = options.width.or(options.resolution).unwrap_or(512);
+    let height = options.height.or(options.resolution).unwrap_or(512);
+    if width == 0 || height == 0 || width % 32 != 0 || height % 32 != 0 {
+        return Err("Qwen-Image-2.1 pixel dimensions must be positive multiples of 32".into());
+    }
+    if u32::try_from(width).is_err()
+        || u32::try_from(height).is_err()
+        || width
+            .checked_mul(height)
+            .and_then(|n| n.checked_mul(4))
+            .is_none()
+    {
+        return Err("Qwen-Image-2.1 RGBA image dimensions overflow".into());
+    }
+    let cfg = options.cfg.or(options.cfg_scale).unwrap_or(6.0);
+    let steps = options.steps.unwrap_or(30);
+    if !cfg.is_finite() || cfg < 1.0 || steps == 0 || steps > 1000 {
+        return Err("Qwen-Image-2.1 requires CFG >= 1 and 1..=1000 steps".into());
+    }
+    let vae_path = options.vae.as_deref().ok_or("Qwen-Image-2.1 generation requires --vae (dedicated VAE safetensors and sibling config.json)")?;
+    let paths: Vec<_> = options
+        .image
+        .iter()
+        .chain(options.references.iter())
+        .collect();
+    if paths.is_empty() && options.mmproj.is_some() {
+        return Err("Qwen-Image-2.1 --mmproj requires a reference image".into());
+    }
+    if !paths.is_empty()
+        && (options.qwen_context_file.is_some()
+            || options.text_encoder.is_none()
+            || options.mmproj.is_none())
+    {
+        return Err("Qwen-Image-2.1 editing requires --text-encoder, --mmproj and a prompt".into());
+    }
+    if options.qwen_context_file.is_some() {
+        if cfg != 1.0
+            || options.text_encoder.is_some()
+            || options.prompt.is_some()
+            || options.negative_prompt.is_some()
+        {
+            return Err("Explicit --qwen-context-file generation requires --cfg 1 and no --prompt/--negative-prompt/--text-encoder".into());
+        }
+    } else {
+        if options.text_encoder.is_none() {
+            return Err(
+                "Qwen-Image-2.1 generation requires --text-encoder (Qwen3-VL-8B GGUF)".into(),
+            );
+        }
+        if options
+            .prompt
+            .as_deref()
+            .is_none_or(|s| s.trim().is_empty())
+        {
+            return Err("Qwen-Image-2.1 generation requires a nonempty --prompt".into());
+        }
+    }
+    if options.noise.is_some() && options.qwen_latent_file.is_some() {
+        return Err("Use only one of --noise and --qwen-latent-file".into());
+    }
+    validate_dit(source.as_ref())?;
+    let vae = QwenImage21Vae::open(vae_path, n_threads)?;
+    let mut reference_latents = Vec::new();
+    let mut features = Vec::new();
+    if !paths.is_empty() {
+        use crate::models::qwen3::vision::{VisionEncoder, VisionScratchpad};
+        let vision_source = crate::open_model_source(
+            options.mmproj.as_deref().unwrap(),
+            crate::format::ggufrs::ComponentRole::Mmproj,
+        )
+        .map_err(|e| e.to_string())?;
+        let mut vision = VisionEncoder::from_source(
+            vision_source.as_ref(),
+            Arc::new(ComputePool::new(n_threads)),
+        )?;
+        if vision.config.n_embd != 1152
+            || vision.config.n_layer != 27
+            || vision.config.projection_dim != 4096
+            || vision.config.patch_size != 16
+            || vision.config.spatial_merge_size != 2
+        {
+            return Err("Qwen-Image-2.1 requires the released Qwen3-VL-8B vision projector".into());
+        }
+        vision.precompute_ggml_f16();
+        let mut scratch = VisionScratchpad::new(&vision.config);
+        let mut total_tokens = 0usize;
+        for path in paths {
+            let image = image::open(path)
+                .map_err(|e| format!("Read {}: {e}", path.display()))?
+                .to_rgba8();
+            let w = ((image.width() as usize + 16) / 32).max(1) * 32;
+            let h = ((image.height() as usize + 16) / 32).max(1) * 32;
+            let pixels = w.checked_mul(h).ok_or("Reference size overflow")?;
+            total_tokens = total_tokens
+                .checked_add(pixels / 1024)
+                .ok_or("Reference token overflow")?;
+            if total_tokens > 2000 {
+                return Err(
+                    "Qwen reference images exceed the 2048-token conditioning limit".into(),
+                );
+            }
+            let image = image::imageops::resize(
+                &image,
+                w as u32,
+                h as u32,
+                image::imageops::FilterType::Triangle,
+            );
+            let mut rgba = vec![0.0; pixels * 4];
+            let mut rgb = Vec::with_capacity(pixels * 3);
+            for (p, pixel) in image.pixels().enumerate() {
+                let a = pixel[3] as f32 / 255.0;
+                for c in 0..4 {
+                    rgba[c * pixels + p] = 2.0 * (pixel[c] as f32 / 255.0) - 1.0;
+                }
+                for c in 0..3 {
+                    rgb.push(2.0 * ((pixel[c] as f32 / 255.0) * a + 1.0 - a) - 1.0);
+                }
+            }
+            let values = vae.encode(&rgba, w, h)?;
+            reference_latents.push(ReferenceLatent {
+                values,
+                width: w / 16,
+                height: h / 16,
+            });
+            let grid = vision.encode_image(&rgb, w, h, &mut scratch)?;
+            features.push(ReferenceFeatures {
+                embeddings: scratch.projected.clone(),
+                deepstack: scratch.deepstack.clone(),
+                grid_h: grid.grid_h,
+                grid_w: grid.grid_w,
+            });
+        }
+    }
+    let (positive, negative) = if let Some(path) = options.qwen_context_file.as_deref() {
+        (
+            Condition {
+                values: read_f32_file(path)?,
+                image_slots: Vec::new(),
+            },
+            Condition {
+                values: Vec::new(),
+                image_slots: Vec::new(),
+            },
+        )
+    } else {
+        let path = options
+            .text_encoder
+            .as_deref()
+            .ok_or("Qwen-Image-2.1 generation requires --text-encoder (Qwen3-VL-8B GGUF)")?;
+        let prompt = options
+            .prompt
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .ok_or("Qwen-Image-2.1 generation requires a nonempty --prompt")?;
+        let text_source = Arc::from(
+            crate::open_model_source(path, crate::format::ggufrs::ComponentRole::Llm)
+                .map_err(|e| e.to_string())?,
+        );
+        let text = TextConditioner::load(text_source, Arc::new(ComputePool::new(n_threads)))?;
+        (
+            text.encode(prompt, &features)?,
+            if cfg == 1.0 {
+                Condition {
+                    values: Vec::new(),
+                    image_slots: Vec::new(),
+                }
+            } else {
+                text.encode(options.negative_prompt.as_deref().unwrap_or(""), &features)?
+            },
+        )
+    };
+    if positive.values.is_empty() || positive.values.len() % 4096 != 0 {
+        return Err("Qwen context must have nonempty rows of 4096 floats".into());
+    }
+    let w = width / 16;
+    let h = height / 16;
+    let len = w
+        .checked_mul(h)
+        .and_then(|n| n.checked_mul(64))
+        .ok_or("Qwen latent size overflow")?;
+    let latent = if let Some(path) = options
+        .noise
+        .as_deref()
+        .or(options.qwen_latent_file.as_deref())
+    {
+        let values = read_f32_file(path)?;
+        if values.len() != len {
+            return Err(format!(
+                "Qwen noise requires {len} values, got {}",
+                values.len()
+            ));
+        }
+        values
+    } else {
+        let mut values = vec![0.0; len];
+        crate::models::diffusion::z_image::dit::TorchMt19937::new(options.seed.unwrap_or(42) as u64).fill_normal_sd_cpp(&mut values);
+        values
+    };
+    let mut dit = QwenImage21Dit::load(source, n_threads)?;
+    let latent = sample(
+        &mut dit,
+        latent,
+        w,
+        h,
+        &positive,
+        &negative,
+        &reference_latents,
+        steps,
+        cfg,
+    )?;
+    let rgba = vae.decode(&latent, w, h)?;
+    let bytes = rgba_bytes(&rgba, width, height)?;
+    let mut encoded = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut encoded)
+        .write_image(
+            &bytes,
+            u32::try_from(width).map_err(|e| e.to_string())?,
+            u32::try_from(height).map_err(|e| e.to_string())?,
+            image::ColorType::Rgba8.into(),
+        )
+        .map_err(|e| e.to_string())?;
+    if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    write_output_atomically(out, &encoded, options.overwrite)?;
+    println!(
+        "Qwen-Image-2.1 RGBA PNG saved to {} ({width}x{height})",
+        out.display()
+    );
+    Ok(())
 }
 
 /// Reads a file of raw little-endian f32 values for a diffusion model input.

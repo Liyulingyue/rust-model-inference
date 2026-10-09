@@ -19,12 +19,14 @@ pub(crate) fn run_jev_grouped_qwen3(
     n_threads_arg: usize,
     prefill_batch_size: usize,
     output_json: bool,
+    jinja: crate::prompt::jinja::Options,
 ) -> Result<Vec<JevGroupedResult>, String> {
     let available_threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
     let n_threads = resolve_thread_count(n_threads_arg, available_threads);
-    let mut scorer = Qwen3JevGroupedScorer::new(source.clone(), n_threads, prefill_batch_size)?;
+    let mut scorer =
+        Qwen3JevGroupedScorer::new(source.clone(), n_threads, prefill_batch_size, &jinja)?;
     if !output_json {
         eprintln!("compute pool: {} threads", scorer.pool().n_threads());
     }
@@ -42,12 +44,14 @@ impl Qwen3JevGroupedScorer {
         source: Arc<dyn TensorSource>,
         n_threads: usize,
         prefill_batch_size: usize,
+        jinja: &crate::prompt::jinja::Options,
     ) -> Result<Self, String> {
         Ok(Self {
             inner: super::super::single::qwen3::Qwen3JevScorer::new(
                 source,
                 n_threads,
                 prefill_batch_size,
+                jinja,
             )?,
         })
     }
@@ -70,8 +74,13 @@ impl JevGroupedScorer for Qwen3JevGroupedScorer {
         let group_labels = allocate_group_labels(q);
         let system = build_grouped_system();
         let payload = build_grouped_payload(context, q)?;
-        let token_ids =
-            build_jev_token_ids_for_arch("qwen3", self.inner.model.tokenizer(), system, &payload)?;
+        let token_ids = build_jev_token_ids_for_arch(
+            "qwen3",
+            self.inner.model.tokenizer(),
+            system,
+            &payload,
+            self.inner.jinja.as_ref(),
+        )?;
         Ok((group_labels, token_ids))
     }
 
