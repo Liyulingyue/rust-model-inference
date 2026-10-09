@@ -156,8 +156,8 @@ impl Qwen3TextEncoder {
         // prefill above can be measured against the behavior it replaces; without it
         // any attempt at that optimization would have to delete this guard first.
         #[cfg(feature = "vulkan")]
-        let _text_encoder_on_cpu = (!Self::text_encoder_on_gpu())
-            .then(ComputePool::disable_gpu_matmul_for_scope);
+        let _text_encoder_on_cpu =
+            (!Self::text_encoder_on_gpu()).then(ComputePool::disable_gpu_matmul_for_scope);
         let output = self.forward_to_block(&ids, LAYER_35_BLOCKS)?;
         let t_fwd = t_fwd.elapsed();
         eprintln!(
