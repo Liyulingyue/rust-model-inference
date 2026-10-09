@@ -19,6 +19,7 @@ const Q8_MATMUL_GROUPED_DP4A_SHADER: &[u8] =
 const Q8_MATMUL_GROUPED_TILED_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/q8_matmul_tiled_dp4a.spv");
 const F16_MATMUL_TILED_SHADER: &[u8] = include_bytes!("../../shaders/bin/f16_matmul_tiled.spv");
+
 const ATTENTION_SCORES_TILED_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/attention_scores_tiled.spv");
 const Q4_0_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_0_matmul.spv");
@@ -989,7 +990,13 @@ impl BatchedLinearRuntime {
             bindings
         };
         self.ops.write_f32(self.layout.input, input)?;
-        self.ops.record_weight_matmul_rows(
+        let recorder = if format == GpuWeightFormat::F16 && n_in % 2 == 0 && rows >= 32 {
+            Qwen3Ops::record_weight_matmul_tiled_rows
+        } else {
+            Qwen3Ops::record_weight_matmul_rows
+        };
+        recorder(
+            &self.ops,
             &commands,
             bindings,
             self.layout.input,
@@ -1021,6 +1028,151 @@ impl Drop for BatchedLinearRuntime {
             return;
         }
         // Qwen3Ops acquires the same mutex in Drop.
+        unsafe { std::mem::ManuallyDrop::drop(&mut self.ops) };
+    }
+}
+
+/// One shared CHW arena for a VAE; immutable weights retain stable source addresses.
+pub(crate) struct Conv2dRuntime {
+    ops: std::mem::ManuallyDrop<Qwen3Ops<'static>>,
+    input: ArenaRegion,
+    output: ArenaRegion,
+    bias: ArenaRegion,
+    pub(crate) capacity: (usize, usize, usize),
+    weights: HashMap<(usize, usize), (GpuBuffer, OperatorBindings)>,
+}
+
+impl Conv2dRuntime {
+    pub(crate) fn new(
+        context: &'static VulkanContext,
+        capacity: (usize, usize, usize),
+    ) -> Result<Self, VulkanError> {
+        if capacity.0 == 0 || capacity.1 == 0 || capacity.2 == 0 {
+            return Err(VulkanError::UnsupportedShape(
+                "empty convolution arena".into(),
+            ));
+        }
+        let mut size = 0;
+        let input = f32_region(&mut size, capacity.0)?;
+        let output = f32_region(&mut size, capacity.1)?;
+        let bias = f32_region(&mut size, capacity.2)?;
+        if size > context.limits.max_storage_buffer_range as usize {
+            return Err(VulkanError::UnsupportedShape(
+                "convolution arena exceeds device storage range".into(),
+            ));
+        }
+        Ok(Self {
+            ops: std::mem::ManuallyDrop::new(Qwen3Ops::new_with_size(context, size, 65)?),
+            input,
+            output,
+            bias,
+            capacity,
+            weights: HashMap::new(),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn conv_f16(
+        &mut self,
+        weights: &[u8],
+        input: &[f32],
+        output: &mut [f32],
+        input_channels: usize,
+        output_channels: usize,
+        side: usize,
+        kernel: usize,
+        bias: Option<&[f32]>,
+    ) -> Result<(), VulkanError> {
+        let spatial = product("convolution pixels", &[side, side])?;
+        let n_in = product("convolution width", &[input_channels, kernel, kernel])?;
+        if side == 0
+            || !matches!(kernel, 1 | 3)
+            || input_channels == 0
+            || output_channels == 0
+            || input.len() != product("convolution input", &[input_channels, spatial])?
+            || output.len() != product("convolution output", &[output_channels, spatial])?
+            || weights.len() != product("convolution weights", &[n_in, output_channels, 2])?
+            || bias.is_some_and(|bias| bias.len() != output_channels)
+        {
+            return Err(VulkanError::UnsupportedShape(
+                "invalid CHW convolution shape".into(),
+            ));
+        }
+        let input_word = self
+            .ops
+            .f32_word(self.input, input.len(), "convolution input")?;
+        let output_word = self
+            .ops
+            .f32_word(self.output, output.len(), "convolution output")?;
+        let bias_word = self
+            .ops
+            .f32_word(self.bias, output_channels, "convolution bias")?;
+        let dispatch = row_dispatch(
+            output_channels.div_ceil(64),
+            spatial.div_ceil(32),
+            &self.ops.context.limits,
+        )?;
+        // The F16 shader's reserved fourth group selects CHW gather/store.
+        let mut push = [0u32; 22];
+        push[0] = input_word;
+        push[1] = bias_word;
+        push[2] = as_u32(n_in, "convolution width")?;
+        push[3] = push[2];
+        push[4] = output_word;
+        push[5] = as_u32(output_channels, "convolution channels")?;
+        push[13] = 4;
+        push[15] = as_u32(side, "convolution side")?;
+        push[16] = as_u32(kernel, "convolution kernel")?;
+        push[21] = as_u32(spatial, "convolution pixels")?;
+        // Recover any incomplete dispatch before overwriting mapped host memory.
+        let commands = TokenCommands::begin(self.ops.context)?;
+        let key = (weights.as_ptr() as usize, weights.len());
+        let bindings = if let Some((_, bindings)) = self.weights.get(&key) {
+            *bindings
+        } else {
+            if self.weights.len() == 64 {
+                return Err(VulkanError::UnsupportedShape(
+                    "convolution weight cache full".into(),
+                ));
+            }
+            let buffer = unsafe { self.ops.context.upload_static(weights)? };
+            let bindings = match self
+                .ops
+                .bind_weight_buffers(&[buffer], &[GpuWeightFormat::F16])
+            {
+                Ok(bindings) => bindings,
+                Err(error) => {
+                    unsafe { self.ops.context.destroy_buffer(&buffer) };
+                    return Err(error);
+                }
+            };
+            self.weights.insert(key, (buffer, bindings));
+            bindings
+        };
+        self.ops.write_f32(self.input, input)?;
+        if let Some(bias) = bias {
+            self.ops.write_f32(self.bias, bias)?;
+        } else {
+            self.ops.write_f32(self.bias, &vec![0.0; output_channels])?;
+        }
+        self.ops
+            .record_linear_dispatch(&commands, F16_MATMUL_TILED, bindings, &push, dispatch);
+        commands.submit_and_wait()?;
+        output.copy_from_slice(self.ops.read_f32(self.output, output.len())?);
+        Ok(())
+    }
+}
+
+impl Drop for Conv2dRuntime {
+    fn drop(&mut self) {
+        let context = self.ops.context;
+        if unsafe {
+            context.destroy_completed_buffers(self.weights.values().map(|(buffer, _)| buffer))
+        }
+        .is_err()
+        {
+            return;
+        }
         unsafe { std::mem::ManuallyDrop::drop(&mut self.ops) };
     }
 }
@@ -1099,11 +1251,6 @@ impl<'a> Qwen3Ops<'a> {
             .map(|(index, shader)| {
                 if index == Q8_MATMUL_GROUPED && force_dp4a {
                     Q8_MATMUL_GROUPED_DP4A_SHADER
-                } else if index == F16_MATMUL_TILED && !force_dp4a {
-                    // The F16 tiled kernel is not tied to integer dot product,
-                    // but it is only used from the tiled path, which is gated on
-                    // that support, so keep the slot consistent with it.
-                    F16_MATMUL_SHADER
                 } else if index == Q8_MATMUL_GROUPED_TILED && !force_dp4a {
                     // The tiled kernel needs `dotPacked4x8EXT`, so on a device
                     // without it the slot falls back to the plain grouped shader
@@ -1641,9 +1788,8 @@ impl<'a> Qwen3Ops<'a> {
     /// the only difference is which pipeline is recorded and how the workgroups
     /// are shaped.
     ///
-    /// Requires integer dot product; without it the tiled slot holds a different
-    /// shader, so this returns an error rather than silently computing the
-    /// wrong thing.
+    /// Quantized weights require integer dot product. F16 uses a separate
+    /// float kernel and does not require that device feature.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn record_weight_matmul_tiled_rows(
         &self,
@@ -1660,11 +1806,6 @@ impl<'a> Qwen3Ops<'a> {
         token_rows: usize,
         input_stride: usize,
     ) -> Result<(), VulkanError> {
-        if !self.context.supports_integer_dot_product() {
-            return Err(VulkanError::UnsupportedShape(
-                "tiled Q8_0 matmul needs integer dot product".into(),
-            ));
-        }
         let format = bindings.weight_format(outputs.len())?;
         // F16 weights take the float tiled kernel: no quantize dispatch, and the
         // activation is read from the arena as f32 and rounded in registers.
@@ -1673,6 +1814,11 @@ impl<'a> Qwen3Ops<'a> {
             if format != GpuWeightFormat::F16 {
                 return Err(VulkanError::UnsupportedShape(
                     "tiled float matmul is only implemented for F16 weights".into(),
+                ));
+            }
+            if n_in % 2 != 0 {
+                return Err(VulkanError::UnsupportedShape(
+                    "tiled F16 matmul requires even weight row starts".into(),
                 ));
             }
             let (push, _) = matmul_rows_push(
@@ -1699,6 +1845,11 @@ impl<'a> Qwen3Ops<'a> {
             )?;
             self.record_linear_dispatch(commands, F16_MATMUL_TILED, bindings, &push, dispatch);
             return Ok(());
+        }
+        if !self.context.supports_integer_dot_product() {
+            return Err(VulkanError::UnsupportedShape(
+                "tiled Q8_0 matmul needs integer dot product".into(),
+            ));
         }
         let (activation, scales, quantize) = match format {
             GpuWeightFormat::Q4_K | GpuWeightFormat::Q5_K | GpuWeightFormat::Q6_K => {

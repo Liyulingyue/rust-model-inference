@@ -3,7 +3,7 @@
 use super::Kernel;
 use crate::core::tensor::GGMLType;
 use crate::ops::quant::BlockQ8K;
-use crate::vulkan::ops::{BatchedLinearRuntime, GpuWeightFormat};
+use crate::vulkan::ops::{BatchedLinearRuntime, Conv2dRuntime, GpuWeightFormat};
 use std::sync::Mutex;
 
 #[derive(Default)]
@@ -27,6 +27,21 @@ pub(crate) fn offload_enabled() -> bool {
 }
 
 impl GpuLinear {
+    pub(crate) fn tile_rows(
+        format: GpuWeightFormat,
+        n_in: usize,
+        n_out: usize,
+        rows: usize,
+    ) -> usize {
+        let limit = if format == GpuWeightFormat::F16 {
+            // Target 16 MiB of host input/output while amortizing fence waits.
+            (4 * 1024 * 1024 / n_in.saturating_add(n_out).max(1)).clamp(1, 4096)
+        } else {
+            64
+        };
+        rows.min(limit)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn try_matmul(
         &self,
@@ -56,9 +71,7 @@ impl GpuLinear {
         let Some(context) = crate::ops::get_vulkan_context() else {
             return false;
         };
-        // ponytail: one arena per projection, 64-row tiles bound scratch memory;
-        // share a model arena if target-machine measurements show memory pressure.
-        let tile_rows = rows.min(64);
+        let tile_rows = Self::tile_rows(format, n_in, n_out, rows);
         let key = (weight.as_ptr() as usize, weight.len());
         let mut state = self.state.lock().unwrap();
         let result = (|| {
@@ -108,6 +121,121 @@ impl GpuLinear {
                 *state = None;
                 false
             }
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct GpuConv {
+    state: Mutex<Option<Conv2dRuntime>>,
+}
+
+impl GpuConv {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn try_conv_f16(
+        &self,
+        weight: &[u8],
+        input: &[f32],
+        output: &mut [f32],
+        input_channels: usize,
+        output_channels: usize,
+        side: usize,
+        kernel: usize,
+        bias: Option<&[f32]>,
+    ) -> bool {
+        let Some(spatial) = side.checked_mul(side) else {
+            return false;
+        };
+        if !offload_enabled()
+            || side == 0
+            || input_channels == 0
+            || output_channels == 0
+            || !matches!(kernel, 1 | 3)
+            || input_channels.checked_mul(spatial) != Some(input.len())
+            || output_channels.checked_mul(spatial) != Some(output.len())
+            || input_channels
+                .checked_mul(kernel)
+                .and_then(|n| n.checked_mul(kernel))
+                .and_then(|n| n.checked_mul(output_channels))
+                .and_then(|n| n.checked_mul(2))
+                != Some(weight.len())
+            || bias.is_some_and(|bias| {
+                bias.len() != output_channels || bias.iter().any(|v| !v.is_finite())
+            })
+            || input.iter().any(|v| !v.is_finite())
+            || output_channels
+                > std::env::var("RUST_GPU_MAX_ROWS")
+                    .ok()
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(usize::MAX)
+        {
+            return false;
+        }
+        let Some(context) = crate::ops::get_vulkan_context() else {
+            return false;
+        };
+        let mut state = self.state.lock().unwrap();
+        let result = (|| {
+            let old = state.as_ref().map_or((0, 0, 0), |runtime| runtime.capacity);
+            if input.len() > old.0 || output.len() > old.1 || output_channels > old.2 {
+                *state = None;
+                *state = Some(Conv2dRuntime::new(
+                    context,
+                    (
+                        input.len().max(old.0),
+                        output.len().max(old.1),
+                        output_channels.max(old.2),
+                    ),
+                )?);
+            }
+            state.as_mut().unwrap().conv_f16(
+                weight,
+                input,
+                output,
+                input_channels,
+                output_channels,
+                side,
+                kernel,
+                bias,
+            )?;
+            if output.iter().any(|value| !value.is_finite()) {
+                return Err(crate::vulkan::VulkanError::InitFailed(
+                    "non-finite convolution output".into(),
+                ));
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => true,
+            Err(crate::vulkan::VulkanError::UnsupportedShape(_)) => false,
+            Err(error) => {
+                crate::vulkan::mark_gpu_broken(&error.to_string());
+                *state = None;
+                false
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn f16_batches_bound_memory_and_preserve_dot_contracts() {
+        assert_eq!(
+            GpuLinear::tile_rows(GpuWeightFormat::F16, 512, 512, 4225),
+            4096
+        );
+        assert_eq!(GpuLinear::tile_rows(GpuWeightFormat::F16, 512, 512, 17), 17);
+        let rows = GpuLinear::tile_rows(GpuWeightFormat::F16, 4608, 512, 4096);
+        assert!(rows > 64 && rows * (4608 + 512) * 4 <= 16 * 1024 * 1024);
+        for format in [
+            GpuWeightFormat::F16Dot,
+            GpuWeightFormat::BF16Dot,
+            GpuWeightFormat::Q8_0,
+        ] {
+            assert_eq!(GpuLinear::tile_rows(format, 512, 512, 1089), 64);
         }
     }
 }

@@ -33,7 +33,7 @@ trace_filter='qwen.pe,qwen.time_embed,qwen.modulation,qwen.txt_in,qwen.joint,qwe
 for layer in {0..31}; do
     trace_filter+=",qwen.block.${layer}"
 done
-RMI_PARITY_FILTER="$trace_filter" RMI_PARITY_TRACE="$rust_trace" "$rust_bin" \
+RMI_SCALAR=1 RMI_PARITY_FILTER="$trace_filter" RMI_PARITY_TRACE="$rust_trace" "$rust_bin" \
     --model "$dit" --out "$trace_root/rust.bin" --threads "$threads" \
     > "$trace_root/rust.log" 2>&1
 [[ -s "$rust_trace" ]] || { echo "Rust binary produced no parity trace; build it with --features parity-trace" >&2; exit 1; }
