@@ -1209,6 +1209,18 @@ pub(super) fn run_multimodal_with_video_ref(
                 scratch.projected.clone(),
             )
         } else {
+            // The qwen35 branch used to skip `validate_mmproj_capabilities`
+            // entirely, so a `qwen3vl_merger` projector (what LensVLM-9B
+            // ships) was fed to the Omni encoder without anyone recording the
+            // pairing. It happened to work because both encoders merge with
+            // `mm.2` into `projection_dim`, but nothing checked it, so a
+            // genuinely mismatched projector would have been accepted the same
+            // way. Validate here, on the path that actually runs.
+            crate::app::media::validate_mmproj_capabilities(
+                arch,
+                mmproj_source.as_ref(),
+                crate::app::media::MediaKind::Image,
+            )?;
             let (grid, projected) =
                 encode_qwen35_image(mmproj_source.as_ref(), image_path, n_threads_arg)?;
             (Some(grid), projected)
