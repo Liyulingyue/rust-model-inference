@@ -1,6 +1,7 @@
 use super::ops::{ArenaRegion, GpuWeightFormat, OperatorBindings, Qwen3Ops, TokenCommands};
-use super::qwen3::{TokenCommitState, UploadedBuffers};
+use super::qwen3::UploadedBuffers;
 use super::{GpuBuffer, VulkanContext, VulkanError};
+use crate::compute::state::TokenCommitState;
 use crate::core::scratchpad::KvCache;
 use crate::core::tensor::GGMLType;
 use crate::models::qwen35::{Qwen35Config, Qwen35Model};

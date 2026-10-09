@@ -141,6 +141,11 @@ impl Qwen3Session<'_> {
         batch_size: usize,
         need_logits: bool,
     ) -> Result<Duration, String> {
+        let _scope = self.compute_policy.cpu_scope();
+        #[cfg(feature = "vulkan")]
+        if self.compute_policy == crate::compute::ComputePolicy::Vulkan && self.gpu.is_none() {
+            return Err("Vulkan session unavailable; create a new session to retry".into());
+        }
         let batch_size = checked_prefill_batch_size(Some(batch_size))?;
         if input.token_ids.is_empty() {
             return Err("Qwen3 prompt must contain at least one token".into());
@@ -248,9 +253,12 @@ impl Qwen3Session<'_> {
                     Ok(()) => continue,
                     Err(error) => {
                         gpu.abort_token();
-                        eprintln!("[GPU] Qwen3 Vulkan chunk {}..{} failed: {error}. Recomputing the whole chunk on CPU.", range.start, range.end);
                         self.gpu = None;
                         self.full_model_gpu_failed = true;
+                        if self.compute_policy == crate::compute::ComputePolicy::Vulkan {
+                            return Err(error);
+                        }
+                        eprintln!("[GPU] Qwen3 Vulkan chunk {}..{} failed: {error}. Recomputing the whole chunk on CPU.", range.start, range.end);
                         Some(error)
                     }
                 }

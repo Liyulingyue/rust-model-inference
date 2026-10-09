@@ -2,6 +2,7 @@
 
 pub(crate) mod dense;
 pub(crate) mod linear;
+pub(crate) mod state;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ComputePolicy {
@@ -72,6 +73,9 @@ impl ComputePolicy {
         self,
     ) -> Result<Option<&'static crate::vulkan::VulkanContext>, ComputeError> {
         self.context_with(|| {
+            if crate::core::thread_pool::gpu_matmul_disabled() {
+                return Err("Vulkan is disabled in the current CPU scope".into());
+            }
             if crate::vulkan::gpu_broken() {
                 return Err("Vulkan device is disabled after a queue failure".into());
             }
@@ -81,6 +85,13 @@ impl ComputePolicy {
             }
             Ok(context)
         })
+    }
+
+    pub(crate) fn check_build(self) -> Result<(), String> {
+        if self == Self::Vulkan && !cfg!(feature = "vulkan") {
+            return Err("Vulkan requires a build with --features vulkan".into());
+        }
+        Ok(())
     }
 
     /// Compatibility constructors still honor the legacy request, within a CPU scope.
@@ -137,6 +148,23 @@ mod tests {
         ] {
             assert_eq!(policy.context_with(|| Ok(7)).unwrap(), expected);
         }
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn cpu_scope_restores_nested_main_and_worker_policy() {
+        use crate::core::thread_pool::{gpu_matmul_disabled, ComputePool};
+        let pool = ComputePool::new(3);
+        assert!(!gpu_matmul_disabled());
+        {
+            let _outer = ComputePolicy::Cpu.cpu_scope();
+            {
+                let _inner = ComputePolicy::Cpu.cpu_scope();
+                pool.compute(|_, _| assert!(gpu_matmul_disabled()));
+            }
+            pool.compute(|_, _| assert!(gpu_matmul_disabled()));
+        }
+        pool.compute(|_, _| assert!(!gpu_matmul_disabled()));
     }
 
     #[test]
