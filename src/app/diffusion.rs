@@ -553,6 +553,44 @@ pub fn run_mage_flow_cli(
     Ok(())
 }
 
+/// Generic CLI dispatcher for any [`crate::models::diffusion::DiffusionPipeline`].
+///
+/// Opens the three model components via `P::load`, runs `P::generate_rgb`,
+/// writes the PNG atomically, and prints stage timings. Callers (e.g.
+/// `run_z_image_cli`, `run_ernie_image_cli`) are now thin wrappers that
+/// translate their CLI option struct into `P::Options` and forward here.
+///
+/// `name` is printed in log messages (e.g. `"Z-Image"`, `"ERNIE-Image"`).
+pub fn run_diffusion_cli<P>(
+    name: &str,
+    diffusion: Arc<dyn TensorSource>,
+    text: Arc<dyn TensorSource>,
+    vae: Arc<dyn TensorSource>,
+    prompt: &str,
+    pipeline_options: &P::Options,
+    out: &std::path::Path,
+    overwrite: bool,
+    n_threads: usize,
+) -> Result<(), String>
+where
+    P: crate::models::diffusion::DiffusionPipeline,
+{
+    let started = Instant::now();
+    let pipeline = P::load(diffusion, text, vae, n_threads)?;
+    println!(
+        "{name} components loaded in {}ms",
+        started.elapsed().as_millis()
+    );
+    let rgb = pipeline.generate_rgb(prompt, pipeline_options)?;
+    write_png_atomically(out, &rgb, overwrite)?;
+    println!(
+        "{name} PNG saved to {} in {}ms",
+        out.display(),
+        started.elapsed().as_millis()
+    );
+    Ok(())
+}
+
 pub fn run_z_image_cli(
     diffusion: Arc<dyn TensorSource>,
     text: Arc<dyn TensorSource>,
@@ -561,33 +599,27 @@ pub fn run_z_image_cli(
     options: ZImageCliOptions,
     n_threads: usize,
 ) -> Result<(), String> {
-    let started = Instant::now();
     let ZImageCliOptions {
         steps,
         resolution,
         seed,
         out,
     } = options;
-    let pipeline = ZImagePipeline::load(diffusion, text, vae, n_threads)?;
-    println!(
-        "Z-Image components loaded in {}ms",
-        started.elapsed().as_millis()
-    );
-    let rgb = pipeline.generate_rgb(
+    run_diffusion_cli::<ZImagePipeline>(
+        "Z-Image",
+        diffusion,
+        text,
+        vae,
         prompt,
         &ZImageOptions {
             steps,
             resolution,
             seed,
         },
-    )?;
-    write_png_atomically(&out, &rgb, true)?;
-    println!(
-        "Z-Image PNG saved to {} in {}ms",
-        out.display(),
-        started.elapsed().as_millis()
-    );
-    Ok(())
+        &out,
+        true,
+        n_threads,
+    )
 }
 
 pub fn run_auk_cli(
@@ -715,16 +747,12 @@ pub fn run_ernie_image_cli(
     out: std::path::PathBuf,
     n_threads: usize,
 ) -> Result<(), String> {
-    use crate::models::diffusion::ernie_image::{
-        ErnieImageOptions, ErnieImagePipeline, ErnieImageRgb,
-    };
-    let started = Instant::now();
-    let pipeline = ErnieImagePipeline::load(diffusion, text, vae, n_threads)?;
-    println!(
-        "ERNIE-Image components loaded in {}ms",
-        started.elapsed().as_millis()
-    );
-    let rgb = pipeline.generate_rgb(
+    use crate::models::diffusion::ernie_image::{ErnieImageOptions, ErnieImagePipeline};
+    run_diffusion_cli::<ErnieImagePipeline>(
+        "ERNIE-Image",
+        diffusion,
+        text,
+        vae,
         prompt,
         &ErnieImageOptions {
             steps,
@@ -732,24 +760,10 @@ pub fn run_ernie_image_cli(
             seed,
             cfg_scale,
         },
-    )?;
-    let z_rgb = ZImageRgb {
-        width: rgb.width,
-        height: rgb.height,
-        bytes: rgb.bytes,
-    };
-    write_png_atomically(&out, &z_rgb, true)?;
-    let _ = ErnieImageRgb {
-        width: 0,
-        height: 0,
-        bytes: Vec::new(),
-    };
-    println!(
-        "ERNIE-Image PNG saved to {} in {}ms",
-        out.display(),
-        started.elapsed().as_millis()
-    );
-    Ok(())
+        &out,
+        true,
+        n_threads,
+    )
 }
 
 pub struct QwenImage21Request {

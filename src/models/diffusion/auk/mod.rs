@@ -683,38 +683,6 @@ fn validate_vae(_source: &dyn TensorSource) -> Result<(), String> {
     Ok(())
 }
 
-fn require_tensor(
-    source: &dyn TensorSource,
-    name: &str,
-    dims: &[u64],
-    ggml_type: GGMLType,
-) -> Result<(), String> {
-    let info = source
-        .tensor_info(name)
-        .ok_or_else(|| format!("Missing tensor: {name}"))?;
-    if info.dims != dims {
-        return Err(format!("Invalid {name} dimensions"));
-    }
-    if info.ggml_type != ggml_type {
-        return Err(format!(
-            "Invalid {name} type: expected {ggml_type:?}, got {:?}",
-            info.ggml_type
-        ));
-    }
-    let expected = usize::try_from(
-        info.checked_nbytes()
-            .ok_or_else(|| format!("Invalid {name} byte size"))?,
-    )
-    .map_err(|_| format!("Tensor byte size does not fit usize: {name}"))?;
-    let bytes = source
-        .tensor_slice(name)
-        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
-    if bytes.len() != expected {
-        return Err(format!("Invalid {name} byte length"));
-    }
-    Ok(())
-}
-
 /// Accept F16 / BF16 / Q8_0 / Q*_K dtypes. The actual matmul dispatch in
 /// `linear_into_scaled_impl` covers the full set.
 fn require_matrix(source: &dyn TensorSource, name: &str, dims: &[u64]) -> Result<(), String> {
