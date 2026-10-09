@@ -67,9 +67,5 @@ pub trait DiffusionPipeline {
         Self: Sized;
 
     /// Encode `prompt`, denoise, decode, and return the RGB image.
-    fn generate_rgb(
-        &self,
-        prompt: &str,
-        options: &Self::Options,
-    ) -> Result<DiffusionRgb, String>;
+    fn generate_rgb(&self, prompt: &str, options: &Self::Options) -> Result<DiffusionRgb, String>;
 }
