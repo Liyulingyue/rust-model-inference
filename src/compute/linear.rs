@@ -40,6 +40,17 @@ pub(crate) struct LinearExecutor<'model, 'weights> {
 }
 
 impl<'model, 'weights> LinearExecutor<'model, 'weights> {
+    pub(crate) fn uses_vulkan(&self) -> bool {
+        #[cfg(feature = "vulkan")]
+        {
+            self.runtime.is_some()
+        }
+        #[cfg(not(feature = "vulkan"))]
+        {
+            false
+        }
+    }
+
     pub(crate) fn new(
         policy: ComputePolicy,
         bindings: Vec<LinearBinding<'model, 'weights>>,
@@ -193,7 +204,7 @@ impl<'model, 'weights> LinearExecutor<'model, 'weights> {
         }
         let bindings = ids.map(|id| self.bindings[id.slot]);
         #[cfg(feature = "vulkan")]
-        if self.runtime.is_some() {
+        if self.runtime.is_some() && !crate::core::thread_pool::gpu_matmul_disabled() {
             let attempt = self.run_gpu(&bindings, input, rows, &mut outputs);
             match attempt {
                 Ok(()) => return Ok([UsedBackend::Vulkan; N]),
@@ -205,6 +216,11 @@ impl<'model, 'weights> LinearExecutor<'model, 'weights> {
                     }
                 }
             }
+        }
+        if self.policy == ComputePolicy::Vulkan {
+            return Err(ComputeError::Unsupported(
+                "Vulkan execution is unavailable in this scope".into(),
+            ));
         }
         // The legacy Q8 kernel must not dispatch GPU again from a CPU fallback.
         let _scope = ComputePolicy::Cpu.cpu_scope();
@@ -281,10 +297,16 @@ impl<'model, 'weights> LinearExecutor<'model, 'weights> {
             let w = binding.weight;
             let bytes = w.kernel.weight_bytes().unwrap();
             for previous in &bindings[..index] {
-                if previous.weight.kernel.weight_bytes().is_some_and(|other| std::ptr::eq(other, bytes))
+                if previous
+                    .weight
+                    .kernel
+                    .weight_bytes()
+                    .is_some_and(|other| std::ptr::eq(other, bytes))
                     && previous.weight.ggml_type != w.ggml_type
                 {
-                    return Err(ComputeError::Unsupported("aliased weights have different Vulkan formats".into()));
+                    return Err(ComputeError::Unsupported(
+                        "aliased weights have different Vulkan formats".into(),
+                    ));
                 }
             }
             runtime.validate(
