@@ -96,6 +96,9 @@ pub fn build_prompt(
     choice: &ToolChoice,
     enable_thinking: Option<bool>,
     jinja: &crate::prompt::jinja::Options,
+    // `jinja` resolved once at load time. Rendering through this instead of
+    // re-resolving keeps a server request from recompiling the template.
+    compiled_jinja: Option<&crate::prompt::jinja::JinjaChatTemplate>,
 ) -> Result<(Vec<u32>, Vec<Vec<u8>>), String> {
     // `--jinja` renders the model's own chat template for a multi-turn
     // conversation. Deliberately gated to plain text turns with no tools:
@@ -115,14 +118,21 @@ pub fn build_prompt(
                 content: serde_json::Value::String(m.text.clone()),
             })
             .collect();
-        if let Some(ids) = crate::prompt::jinja::conversation_tokens(
+        let ids = crate::prompt::jinja::conversation_tokens_with(
+            tokenizer,
+            compiled_jinja,
+            &messages,
+            true,
+            enable_thinking.unwrap_or(false),
+        )?;
+        if let Some(ids) = ids.or(crate::prompt::jinja::conversation_tokens(
             tokenizer,
             jinja,
             &|k| source.metadata(k).cloned(),
             &messages,
             true,
             enable_thinking.unwrap_or(false),
-        )? {
+        )?) {
             return Ok((ids, Vec::new()));
         }
     }
@@ -1151,6 +1161,7 @@ mod tests {
                 &ToolChoice::Auto,
                 None,
                 &crate::prompt::jinja::Options::default(),
+                None,
             )
             .unwrap()
             .0;
@@ -1188,6 +1199,7 @@ mod tests {
             &ToolChoice::Auto,
             None,
             &crate::prompt::jinja::Options::default(),
+            None,
         )
         .unwrap_err()
         .contains("unsupported"));
@@ -1200,6 +1212,7 @@ mod tests {
             &ToolChoice::Auto,
             None,
             &crate::prompt::jinja::Options::default(),
+            None,
         )
         .is_err());
     }
@@ -1234,6 +1247,7 @@ mod tests {
                     &ToolChoice::Auto,
                     None,
                     &crate::prompt::jinja::Options::default(),
+                    None,
                 )
                 .unwrap()
                 .0,
@@ -1292,6 +1306,7 @@ mod tests {
                         &ToolChoice::Auto,
                         None,
                         &crate::prompt::jinja::Options::default(),
+                        None,
                     )
                     .unwrap()
                     .0,

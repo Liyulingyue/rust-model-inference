@@ -78,13 +78,14 @@ CLI 层同样验证过：Qwen3-0.6B 加 `--jinja` 与不加，prompt 均为 16 t
 
 | 构造 | 出现处 | 处理 |
 |---|---|---|
-| `{% generation %}` / `{% endgeneration %}` | 仅 LFM2.5 | llama.cpp 扩展，标记"模型该生成哪一段"，单次渲染不产生输出。改写成同 trim 标记的注释 `{#- -#}` —— 若直接删除会丢掉 `{%- -%}` 的空白控制，模板每轮之间会多出空行。 |
-| `x.get("k")` | 仅 LFM2.5（2 处） | Python `dict.get`，minijinja 的 map 没有这个方法。改写成 `x["k"]`，仅限单字符串字面量参数形式。 |
+| `{% generation %}` / `{% endgeneration %}` | LFM2.5 等 | llama.cpp 扩展，标记"模型该生成哪一段"，单次渲染不产生输出。改写成同 trim 标记的注释 `{#- -#}` —— 若直接删除会丢掉 `{%- -%}` 的空白控制，模板每轮之间会多出空行。 |
+| `x.get("k")` / `x.startswith(p)` / `x.split(p, n)` 等 Python 方法 | LFM2.5、Qwen3、Edge0 等 | **不改写源码**。minijinja 没有 `add_method`，但有 `set_unknown_method_callback`，它把 receiver 作为已求值的 `Value` 交出来，所以不需要解析表达式。详见下方"Python 兼容层"。 |
 
-两点都有单测钉住（`generation_tag_keeps_whitespace_control`、
-`map_get_rewrites_match_truthiness`、`two_arg_get_is_left_alone`）。后者验证了
-`x.get("k")` 与 `x["k"]` 在"存在 / 缺失 / 空串"三种情况下真值判断一致 —— 这个
-等价关系是被测出来的，不是推断的。
+单测钉住这两点：`generation_tag_keeps_whitespace_control`（trim 标记保留）、
+`generation_tag_becomes_a_comment_and_keeps_trim_markers`、
+`get_keeps_python_none_semantics`、`strip_honours_its_character_set`、
+`split_honours_maxsplit`、`a_generation_tag_inside_a_string_literal_survives`、
+`a_raw_block_after_a_prefix_compiles`、`an_apostrophe_in_prose_does_not_hide_a_tag`。
 
 **其他未识别的语句一律不动**，交给 minijinja 报错，避免我们静默改写一个没看懂
 的模板（`unknown_statement_is_not_mangled` 守住这条）。
@@ -289,7 +290,7 @@ tokenizer 要求 `add_bos` 时，若结果开头不是 BOS 就补一个 —— �
 
 - `src/prompt/jinja.rs` —— 渲染器、`Options`、`MediaPart`、BOS 处理
 - `src/prompt/jinja_compat.rs` —— `set_unknown_method_callback` 的 `python_method`，以及 `{% generation %}` 标签改写
-- `src/prompt/legacy.rs` —— falcon_h1 / nemotron_h 在 Jinja 关闭时的手写 formatter
+- `src/prompt/legacy.rs` —— falcon_h1 / nemotron_h 在 Jinja 关闭时的手写 formatter（旧路径 `models::chat_template` 保留为 `#[deprecated]` 转发）
 - `src/prompt/mod.rs` —— 手写 prompt builder
 - `src/app/text/{qwen3,generation,multimodal}.rs` —— 文本 / REPL / 多模态接入点
 - `src/app/jev/single/*.rs` + `src/app/jev/grouped.rs` —— 11/11 arch 的 JEV 接入

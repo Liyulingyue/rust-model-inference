@@ -1579,9 +1579,11 @@ impl SPMTokenizer {
         self.eos_id
     }
 
-    /// SPM GGUFs do not record `add_bos_token`; the SPM convention adds none.
+    /// SPM GGUFs do record `tokenizer.ggml.add_bos_token`, and `encode`
+    /// already honours it. Hardcoding `false` here made the Jinja path drop
+    /// BOS for every SPM model whose template relies on it.
     pub fn add_bos(&self) -> bool {
-        false
+        self.add_bos
     }
 
     pub fn unk_id(&self) -> Option<u32> {
@@ -1706,7 +1708,12 @@ pub trait Tokenizer: Send + Sync {
     /// Templates that render `{{ bos_token }}` do it themselves, but models
     /// like Ministral get their `<s>` from `add_special=true` against a
     /// template that never mentions BOS at all.
-    fn add_bos(&self) -> bool;
+    ///
+    /// Defaults to `false` so adding it is not a breaking change for
+    /// implementations outside this crate.
+    fn add_bos(&self) -> bool {
+        false
+    }
     fn vocab_size(&self) -> usize;
 }
 
@@ -1745,9 +1752,6 @@ impl Tokenizer for MockTokenizer {
     }
     fn eos_id(&self) -> Option<u32> {
         None
-    }
-    fn add_bos(&self) -> bool {
-        false
     }
     fn vocab_size(&self) -> usize {
         256
@@ -1807,7 +1811,7 @@ impl Tokenizer for SPMTokenizer {
         SPMTokenizer::eos_id(self)
     }
     fn add_bos(&self) -> bool {
-        false
+        SPMTokenizer::add_bos(self)
     }
     fn vocab_size(&self) -> usize {
         SPMTokenizer::vocab_size(self)

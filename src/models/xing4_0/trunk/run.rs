@@ -67,21 +67,12 @@ pub fn run_inference(
     // `--jinja` replaces the hand-written builder. The BOS fixup below
     // only prepends when the first token is not already BOS, so a template
     // that emits `{{ bos_token }}` itself does not end up with two.
+    let special = crate::prompt::jinja::special_token_literals(tokenizer.as_ref());
     let jinja_text = crate::prompt::jinja::single_turn_text(
         jinja,
         &|k| source.metadata(k).cloned(),
-        &String::from_utf8_lossy(
-            &tokenizer
-                .bos_id()
-                .map(|id| tokenizer.token_piece_bytes(id, true))
-                .unwrap_or_default(),
-        ),
-        &String::from_utf8_lossy(
-            &tokenizer
-                .eos_id()
-                .map(|id| tokenizer.token_piece_bytes(id, true))
-                .unwrap_or_default(),
-        ),
+        &special.bos,
+        &special.eos,
         prompt,
         thinking,
     )?;

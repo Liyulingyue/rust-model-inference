@@ -136,6 +136,13 @@ struct TextBackend {
     /// `--jinja` / `--chat-template-file` for `/v1/chat/completions`.
     /// `Options` is `Send + Sync` (bool + PathBuf), so it can live here.
     chat_template: std::sync::Arc<crate::prompt::jinja::Options>,
+    /// The template `chat_template` resolves to, compiled once at load time.
+    ///
+    /// Resolving per request re-read the GGUF metadata and recompiled the
+    /// Jinja source on every `/v1/chat/completions` call. `None` means Jinja
+    /// is off or the model ships no template, which is also `None` in
+    /// `chat_template`, so this cannot disagree with it.
+    compiled_chat_template: std::sync::Arc<Option<crate::prompt::jinja::JinjaChatTemplate>>,
     prefill_batch_size: usize,
     context_length: usize,
     /// Per-arch generation adapter. `None` = arch has no adapter yet; those
@@ -1322,6 +1329,13 @@ fn build_text(options: &CliOptions) -> Result<TextBackend, String> {
             jinja: options.jinja,
             file: options.chat_template_file.clone(),
         }),
+        compiled_chat_template: std::sync::Arc::new(
+            crate::prompt::jinja::Options {
+                jinja: options.jinja,
+                file: options.chat_template_file.clone(),
+            }
+            .resolve(&|k| source.metadata(k).cloned())?,
+        ),
         prefill_batch_size,
         context_length,
         runtime,

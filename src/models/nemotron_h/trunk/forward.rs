@@ -826,11 +826,14 @@ pub fn run_inference(
     // tests against llama.cpp still match byte-for-byte.
     // `--jinja` renders the GGUF's own template; the preset table below is
     // the fallback for models that ship none.
+    // Derive the literals the template may interpolate; empty strings made a
+    // template using `{{ bos_token }}` lose the control token.
+    let special = crate::prompt::jinja::special_token_literals(&tokenizer);
     let formatted_prompt = match crate::prompt::jinja::single_turn_text(
         jinja,
         &|k| source.metadata(k).cloned(),
-        "",
-        "",
+        &special.bos,
+        &special.eos,
         prompt,
         thinking,
     )? {

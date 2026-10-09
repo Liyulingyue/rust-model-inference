@@ -333,6 +333,9 @@ async fn prompt(state: &AppState, request: &Request) -> Result<PromptResult, (u1
     // `spawn_blocking` requires `'static`, so move the Arc rather than
     // borrowing through `state`.
     let chat_template = text.chat_template.clone();
+    // Resolved at load time; passing this avoids recompiling the template on
+    // every request.
+    let compiled_chat_template = text.compiled_chat_template.clone();
     let request = request.clone();
     tokio::task::spawn_blocking(move || {
         let mut messages = request.messages.clone();
@@ -357,6 +360,7 @@ async fn prompt(state: &AppState, request: &Request) -> Result<PromptResult, (u1
             &request.choice,
             request.enable_thinking,
             &chat_template,
+            compiled_chat_template.as_ref().as_ref(),
         )
         .map_err(|e| (400, e))?;
         if ids
@@ -948,6 +952,7 @@ mod http_tests {
                     super::super::BPETokenizer::from_qwen3_embedded_merges().unwrap(),
                 ),
                 chat_template: std::sync::Arc::new(crate::prompt::jinja::Options::default()),
+                compiled_chat_template: std::sync::Arc::new(None),
                 prefill_batch_size: 1,
                 context_length: 1024,
                 source: std::sync::Arc::new(UnimplementedSource),

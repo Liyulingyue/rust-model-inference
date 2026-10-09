@@ -2,6 +2,15 @@ pub mod audio8;
 pub mod bert_family;
 pub mod bitnet;
 pub mod breeze;
+/// Renamed to [`crate::prompt::legacy`].
+///
+/// Kept as a deprecated re-export so moving the module was not a breaking
+/// change for anyone importing `rust_model_inference::models::chat_template`.
+#[deprecated(note = "use crate::prompt::legacy instead")]
+pub mod chat_template {
+    pub use crate::prompt::legacy::*;
+}
+
 pub mod clm;
 pub mod diffusion;
 pub mod dots;

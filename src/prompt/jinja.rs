@@ -229,6 +229,16 @@ pub fn render_tokens(
     Ok(ids)
 }
 
+/// The literal BOS/EOS spellings, for callers that render text and then encode
+/// it themselves.
+///
+/// Templates may interpolate `{{ bos_token }}` / `{{ eos_token }}`, so handing
+/// them empty strings silently drops those control tokens. Public because
+/// three call sites used to each open-code this lookup.
+pub fn special_token_literals(tokenizer: &dyn crate::core::tokenizer::Tokenizer) -> SpecialTokens {
+    special_tokens_from_tokenizer(tokenizer)
+}
+
 /// Look up the literal BOS/EOS spellings a template may interpolate, from
 /// the vocabulary itself rather than a hardcoded guess.
 ///
@@ -288,6 +298,30 @@ impl Options {
             None => Ok(None),
         }
     }
+}
+
+/// Render a conversation with an already-resolved template.
+///
+/// `conversation_tokens` resolves `Options` on every call, which re-reads the
+/// GGUF metadata and re-compiles the template. A long-lived caller such as the
+/// server's `TextBackend` should resolve once at load time and use this.
+pub fn conversation_tokens_with(
+    tokenizer: &dyn crate::core::tokenizer::Tokenizer,
+    template: Option<&JinjaChatTemplate>,
+    messages: &[ChatMessage],
+    add_generation_prompt: bool,
+    enable_thinking: bool,
+) -> Result<Option<Vec<u32>>, String> {
+    let Some(template) = template else {
+        return Ok(None);
+    };
+    Ok(Some(render_tokens(
+        tokenizer,
+        template,
+        messages,
+        add_generation_prompt,
+        enable_thinking,
+    )?))
 }
 
 /// Render a one-turn conversation to token ids, or `None` when Jinja2 was
@@ -354,16 +388,17 @@ pub fn conversation_tokens(
     add_generation_prompt: bool,
     enable_thinking: bool,
 ) -> Result<Option<Vec<u32>>, String> {
-    let Some(template) = opts.resolve(metadata)? else {
-        return Ok(None);
-    };
-    let special = special_tokens_from_tokenizer(tokenizer);
-    let text = template.render(messages, add_generation_prompt, enable_thinking, &special)?;
-    let options = crate::core::tokenizer::EncodeOptions {
-        add_special: false,
-        parse_special: true,
-    };
-    Ok(Some(tokenizer.encode(&text, options)))
+    let template = opts.resolve(metadata)?;
+    // Routed through `render_tokens` so the tokenizer's BOS contract applies
+    // here too. Encoding inline duplicated the path and skipped the fixup,
+    // which cost the server chat route its `<s>` on models like Ministral.
+    conversation_tokens_with(
+        tokenizer,
+        template.as_ref(),
+        messages,
+        add_generation_prompt,
+        enable_thinking,
+    )
 }
 
 /// Expand the single vision placeholder a template emits into the
@@ -557,18 +592,16 @@ pub fn render_text_conversation(
     user_text: &str,
     enable_thinking: bool,
 ) -> Result<Vec<u32>, String> {
-    let special = special_tokens_from_tokenizer(tokenizer);
     let mut messages: Vec<ChatMessage> = Vec::new();
     if let Some(system) = system_text.filter(|s| !s.trim().is_empty()) {
         messages.push(ChatMessage::text("system", system));
     }
     messages.push(ChatMessage::text("user", user_text));
-    let text = template.render(&messages, true, enable_thinking, &special)?;
-    let options = crate::core::tokenizer::EncodeOptions {
-        add_special: false,
-        parse_special: true,
-    };
-    Ok(tokenizer.encode(&text, options))
+    // Same reason as `conversation_tokens`: the BOS fixup lives in
+    // `render_tokens`. This path is what every JEV scorer uses, including the
+    // mistral3 one, so an inline encode silently diverged from the tokenizer
+    // contract.
+    render_tokens(tokenizer, template, &messages, true, enable_thinking)
 }
 
 #[cfg(test)]

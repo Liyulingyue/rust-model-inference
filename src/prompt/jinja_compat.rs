@@ -41,78 +41,85 @@ pub(super) fn strip_llamacpp_extensions(source: &str) -> String {
     let mut i = 0usize;
     while i < bytes.len() {
         let b = bytes[i];
-        // A string literal is data. Searching for `{%` without checking this
-        // turned `{{ '{% generation %}' }}` into a comment instead of text.
-        if b == b'\'' || b == b'"' {
-            let quote = b;
-            i += 1;
-            while i < bytes.len() {
-                if bytes[i] == b'\\' {
-                    // Step over the escaped character whole, so `i` stays on a
-                    // char boundary for multibyte content.
-                    i += 1;
-                    match source.get(i..).and_then(|rest| rest.chars().next()) {
-                        Some(c) => i += c.len_utf8(),
-                        None => break,
-                    }
-                    continue;
-                }
-                if bytes[i] == quote {
-                    i += 1;
+        match b {
+            // `{# ... #}` is already a comment.
+            b'{' if bytes.get(i + 1) == Some(&b'#') => {
+                i = match source[i..].find("#}") {
+                    Some(p) => i + p + 2,
+                    None => bytes.len(),
+                };
+                continue;
+            }
+            // `{% raw %} ... {% endraw %}` is literal text, tags included.
+            b'{' if is_raw_open(&source[i..]) => {
+                // `raw_block_end` is relative to the slice it is given, so the
+                // offset has to be added back: assigning it directly rewound
+                // the cursor and looped forever on any raw block that did not
+                // start at offset 0.
+                i = match raw_block_end(&source[i..]) {
+                    Some(end) => i + end,
+                    None => bytes.len(),
+                };
+                continue;
+            }
+            b'{' if bytes.get(i + 1) == Some(&b'%') => {
+                let Some(close_rel) = source[i + 2..].find("%}") else {
                     break;
+                };
+                let close = i + 2 + close_rel;
+                let tag_start = i;
+                let after_tag = close + 2;
+                // Read the whitespace-control markers off the raw tag body
+                // before stripping them, otherwise `{%- generation -%}` loses
+                // its trim.
+                let raw_inner = source[i + 2..close].trim();
+                let ltrim = raw_inner.starts_with('-') || raw_inner.starts_with('+');
+                let rtrim = raw_inner.ends_with('-') || raw_inner.ends_with('+');
+                let name = raw_inner
+                    .trim_matches(|c: char| c == '-' || c == '+' || c.is_whitespace())
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("");
+                i = after_tag;
+                if LLAMACPP_TAGS.contains(&name) {
+                    out.push_str(&source[copied..tag_start]);
+                    out.push_str(match (ltrim, rtrim) {
+                        (true, true) => "{#- -#}",
+                        (true, false) => "{#- #}",
+                        (false, true) => "{# -#}",
+                        (false, false) => "{# #}",
+                    });
+                    copied = after_tag;
                 }
+                continue;
+            }
+            // Quotes delimit strings only inside Jinja markup. Treating every
+            // apostrophe in rendered prose as an opening quote made
+            // `It's fine{% generation %}` skip past the tag, which then
+            // reached minijinja unstripped and failed to compile.
+            b'\'' | b'"' if inside_jinja_markup(source, i) => {
+                let quote = b;
                 i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == b'\\' {
+                        // Step over the escaped character whole, so `i` stays
+                        // on a char boundary for multibyte content.
+                        i += 1;
+                        match source.get(i..).and_then(|rest| rest.chars().next()) {
+                            Some(c) => i += c.len_utf8(),
+                            None => break,
+                        }
+                        continue;
+                    }
+                    if bytes[i] == quote {
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+                continue;
             }
-            continue;
-        }
-        // `{# ... #}` is already a comment.
-        if b == b'{' && bytes.get(i + 1) == Some(&b'#') {
-            i = match source[i..].find("#}") {
-                Some(p) => i + p + 2,
-                None => bytes.len(),
-            };
-            continue;
-        }
-        // `{% raw %} ... {% endraw %}` is literal text, tags included.
-        if source[i..].starts_with("{% raw")
-            || source[i..].starts_with("{%- raw")
-            || source[i..].starts_with("{%+ raw")
-        {
-            i = match raw_block_end(&source[i..]) {
-                Some(end) => end,
-                None => bytes.len(),
-            };
-            continue;
-        }
-        if b == b'{' && bytes.get(i + 1) == Some(&b'%') {
-            let Some(close_rel) = source[i + 2..].find("%}") else {
-                break;
-            };
-            let close = i + 2 + close_rel;
-            let tag_start = i;
-            let after_tag = close + 2;
-            // Read the whitespace-control markers off the raw tag body before
-            // stripping them, otherwise `{%- generation -%}` loses its trim.
-            let raw_inner = source[i + 2..close].trim();
-            let ltrim = raw_inner.starts_with('-') || raw_inner.starts_with('+');
-            let rtrim = raw_inner.ends_with('-') || raw_inner.ends_with('+');
-            let name = raw_inner
-                .trim_matches(|c: char| c == '-' || c == '+' || c.is_whitespace())
-                .split_whitespace()
-                .next()
-                .unwrap_or("");
-            i = after_tag;
-            if LLAMACPP_TAGS.contains(&name) {
-                out.push_str(&source[copied..tag_start]);
-                out.push_str(match (ltrim, rtrim) {
-                    (true, true) => "{#- -#}",
-                    (true, false) => "{#- #}",
-                    (false, true) => "{# -#}",
-                    (false, false) => "{# #}",
-                });
-                copied = after_tag;
-            }
-            continue;
+            _ => {}
         }
         // Advance a whole character so `i` stays on a char boundary.
         match source[i..].chars().next() {
@@ -124,11 +131,40 @@ pub(super) fn strip_llamacpp_extensions(source: &str) -> String {
     out
 }
 
-/// End offset (relative to the slice) just past the `{% endraw %}` tag.
+fn is_raw_open(slice: &str) -> bool {
+    slice.starts_with("{% raw") || slice.starts_with("{%- raw") || slice.starts_with("{%+ raw")
+}
+
+/// Whether `at` sits inside a `{{ ... }}` or `{% ... %}` region.
+///
+/// Used to decide if a quote starts a Jinja string. Scanning backwards for the
+/// nearest unclosed `{{`/`{%` is enough: Jinja does not nest output blocks, and
+/// an unclosed one means minijinja will reject the template anyway.
+fn inside_jinja_markup(source: &str, at: usize) -> bool {
+    let before = &source[..at];
+    match (
+        before.rfind("{{"),
+        before.rfind("{%"),
+        before.rfind("{#"),
+        before.rfind("}}"),
+        before.rfind("%}"),
+        before.rfind("#}"),
+    ) {
+        (Some(open), _, _, Some(close), _, _) if close > open => false,
+        (_, Some(open), _, _, Some(close), _) if close > open => false,
+        (_, _, Some(open), _, _, Some(close)) if close > open => false,
+        (Some(_), None, None, _, _, _) => true,
+        (_, Some(_), None, _, _, _) => true,
+        _ => false,
+    }
+}
+
+/// End offset, relative to the slice, just past the `{% endraw %}` tag.
 fn raw_block_end(slice: &str) -> Option<usize> {
     let start = slice
         .find("{% endraw")
-        .or_else(|| slice.find("{%- endraw"))?;
+        .or_else(|| slice.find("{%- endraw"))
+        .or_else(|| slice.find("{%+ endraw"))?;
     let close = slice[start..].find("%}")?;
     Some(start + close + 2)
 }
@@ -445,6 +481,45 @@ mod tests {
         assert_eq!(
             render("{{ s.startswith('zz') }}", r#"{"s":"abc"}"#).unwrap(),
             "False"
+        );
+    }
+
+    /// Regression: `raw_block_end` returns a slice-relative offset and it was
+    /// assigned to the absolute cursor, so any raw block after a non-empty
+    /// prefix rewound the scan and looped forever. The earlier tests all put
+    /// `{% raw %}` at offset 0, which hid it.
+    #[test]
+    fn a_raw_block_after_a_prefix_compiles() {
+        for src in [
+            "0123456789{% raw %}{% generation %}{% endraw %}tail",
+            "{{ m }}{% raw %}a{% generation %}b{% endraw %}{{ m }}",
+            "{%- if m -%}x{% endif %}{% raw %}{% generation %}{% endraw %}",
+        ] {
+            assert!(render(src, "{\"m\":\"v\"}").is_ok(), "{src} failed");
+        }
+        assert_eq!(
+            render("0123456789{% raw %}{% generation %}{% endraw %}tail", "{}").unwrap(),
+            "0123456789{% generation %}tail"
+        );
+    }
+
+    /// Regression: every apostrophe in rendered prose used to open a Jinja
+    /// string, hiding the tags that followed it.
+    #[test]
+    fn an_apostrophe_in_prose_does_not_hide_a_tag() {
+        assert_eq!(
+            render("It's fine{% generation %}x{% endgeneration %}", "{}").unwrap(),
+            "It's finex"
+        );
+        assert_eq!(
+            render(r#"He said "hi"{% generation %}y{% endgeneration %}"#, "{}").unwrap(),
+            r#"He said "hi"y"#
+        );
+        // Inside markup the quote still delimits, so a tag-shaped string there
+        // must survive.
+        assert_eq!(
+            render("{{ '{% generation %}' }}", "{}").unwrap(),
+            "{% generation %}"
         );
     }
 
