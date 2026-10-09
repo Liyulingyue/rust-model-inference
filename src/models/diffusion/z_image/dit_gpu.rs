@@ -932,3 +932,190 @@ impl Drop for DitGpuSession {
         }
     }
 }
+
+#[cfg(all(test, feature = "vulkan"))]
+mod tests {
+    use super::*;
+
+    /// Q8_0 bytes for one FFN projection: `n_out` rows of `n_in / 32` blocks,
+    /// each an f16 scale followed by 32 int8 lanes. Deterministic in `salt` so
+    /// W1/W2/W3 differ without needing a GGUF file.
+    fn synthetic_ffn_weight(n_in: usize, n_out: usize, salt: usize) -> Vec<u8> {
+        let blocks_per_row = n_in / 32;
+        let mut bytes = vec![0u8; n_out * blocks_per_row * 34];
+        for row in 0..n_out {
+            for block in 0..blocks_per_row {
+                let offset = (row * blocks_per_row + block) * 34;
+                let scale = 0.004 + ((row + block + salt) % 13) as f32 * 0.0003;
+                bytes[offset..offset + 2]
+                    .copy_from_slice(&half::f16::from_f32(scale).to_bits().to_le_bytes());
+                for lane in 0..32 {
+                    let quant = ((row * 17 + block * 11 + lane * 5 + salt) % 41) as i8 - 20;
+                    bytes[offset + 2 + lane] = quant as u8;
+                }
+            }
+        }
+        bytes
+    }
+
+    /// Does recording the whole FFN (w1 -> w3 -> silu -> w2) into one command
+    /// buffer drop its tail on this driver?
+    ///
+    /// `TokenCommands::flush` exists because drivers "can silently drop the
+    /// trailing dispatches of a very long command buffer"; Qwen3.5 hit it at
+    /// ~230 dispatches and chunks at 16. The reverted Z-Image FFN batching
+    /// reported an all `-inf` activation where submitting the same chain one
+    /// dispatch at a time was correct -- the same signature, and it was blamed
+    /// on descriptor-set reuse rather than on dispatch chunking.
+    ///
+    /// This runs the real four-dispatch chain both ways on the real FFN shape.
+    /// Matching means this driver honours the batch here, so the reported
+    /// `-inf` had another cause and batching is safe to retry. Diverging means
+    /// batching needs `flush` chunking first. Either way it is measured.
+    #[test]
+    fn batched_ffn_chain_matches_incremental_submission() {
+        crate::ops::float::enable_gpu();
+        let Some(context) = crate::ops::get_vulkan_context() else {
+            eprintln!("skipped: no Vulkan context");
+            return;
+        };
+
+        let rows = 256usize;
+        let (n_in, n_out) = (HIDDEN, FFN_WIDTH);
+        let mut session = DitGpuSession::new(context, rows).expect("session");
+        session
+            .bind_weight(0, Projection::W1, &synthetic_ffn_weight(n_in, n_out, 3))
+            .expect("bind w1");
+        session
+            .bind_weight(0, Projection::W3, &synthetic_ffn_weight(n_in, n_out, 5))
+            .expect("bind w3");
+        session
+            .bind_weight(0, Projection::W2, &synthetic_ffn_weight(n_out, n_in, 7))
+            .expect("bind w2");
+
+        let layout = *session.layout();
+        let input: Vec<f32> = (0..rows * n_in)
+            .map(|i| ((i % 251) as f32 - 125.0) / 97.0)
+            .collect();
+        session.ops().write_f32(layout.x, &input).expect("write x");
+
+        let record_chain = |session: &DitGpuSession, commands: &mut TokenCommands<'_>| {
+            session
+                .record_projection(
+                    commands,
+                    session.binding_for(0, Projection::W1).unwrap(),
+                    Projection::W1,
+                    layout.x,
+                    layout.gate,
+                )
+                .expect("w1");
+            session
+                .record_projection(
+                    commands,
+                    session.binding_for(0, Projection::W3).unwrap(),
+                    Projection::W3,
+                    layout.x,
+                    layout.up,
+                )
+                .expect("w3");
+            session
+                .ops()
+                .record_silu_mul(commands, layout.gate, layout.up, rows * n_out)
+                .expect("silu");
+            session
+                .record_projection(
+                    commands,
+                    session.binding_for(0, Projection::W2).unwrap(),
+                    Projection::W2,
+                    layout.gate,
+                    layout.out,
+                )
+                .expect("w2");
+        };
+
+        // Batched: all four dispatched once, submitted once.
+        let before = context.submission_count();
+        let mut batched = vec![0.0f32; rows * n_in];
+        {
+            let mut commands = TokenCommands::begin(context).expect("begin");
+            record_chain(&session, &mut commands);
+            commands.submit_and_wait().expect("submit");
+        }
+        session
+            .ops()
+            .read_f32_into(layout.out, &mut batched)
+            .expect("read batched");
+        let batched_submissions = context.submission_count() - before;
+
+        // Incremental: the same four dispatches, one submission each.
+        let before = context.submission_count();
+        let mut incremental = vec![0.0f32; rows * n_in];
+        for step in 0..4 {
+            let mut commands = TokenCommands::begin(context).expect("begin");
+            match step {
+                0 => session
+                    .record_projection(
+                        &mut commands,
+                        session.binding_for(0, Projection::W1).unwrap(),
+                        Projection::W1,
+                        layout.x,
+                        layout.gate,
+                    )
+                    .expect("w1"),
+                1 => session
+                    .record_projection(
+                        &mut commands,
+                        session.binding_for(0, Projection::W3).unwrap(),
+                        Projection::W3,
+                        layout.x,
+                        layout.up,
+                    )
+                    .expect("w3"),
+                2 => session
+                    .ops()
+                    .record_silu_mul(&commands, layout.gate, layout.up, rows * n_out)
+                    .expect("silu"),
+                _ => session
+                    .record_projection(
+                        &mut commands,
+                        session.binding_for(0, Projection::W2).unwrap(),
+                        Projection::W2,
+                        layout.gate,
+                        layout.out,
+                    )
+                    .expect("w2"),
+            }
+            commands.submit_and_wait().expect("submit");
+        }
+        session
+            .ops()
+            .read_f32_into(layout.out, &mut incremental)
+            .expect("read incremental");
+        let incremental_submissions = context.submission_count() - before;
+
+        let finite = batched.iter().filter(|value| value.is_finite()).count();
+        let first_bad = batched
+            .iter()
+            .zip(incremental.iter())
+            .position(|(&a, &b)| !a.is_finite() || (a - b).abs() > 1e-3);
+        // `submission_count` is process-global, so concurrent GPU tests inflate
+        // these deltas. Report them rather than assert on them; the batching
+        // claim rests on the element-wise comparison.
+        eprintln!(
+            "batched ffn rows={rows} finite={finite}/{} submissions batched={batched_submissions} incremental={incremental_submissions} batched[0]={:.6} incremental[0]={:.6} first_bad={first_bad:?}",
+            batched.len(),
+            batched[0],
+            incremental[0],
+        );
+        assert_eq!(
+            finite,
+            batched.len(),
+            "batched FFN produced {} non-finite values",
+            batched.len() - finite
+        );
+        assert_eq!(
+            first_bad, None,
+            "batched FFN diverges from incremental submission"
+        );
+    }
+}

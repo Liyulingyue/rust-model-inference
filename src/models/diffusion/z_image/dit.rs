@@ -447,6 +447,77 @@ pub(crate) fn add_modulated_residual(
     Ok(())
 }
 
+/// Row-partitioned form of the `copy -> rms_norm -> add_modulated_residual`
+/// tail that `run_block_gpu` runs after each projection it reads back.
+///
+/// `normed` holds the readback of a projection, `tokens` is the residual
+/// accumulator it is added into, and `weight` / `gates` are this block's norm
+/// gamma and AdaLN gate (both length `HIDDEN`).
+///
+/// The gated branch of `add_modulated_residual` is a scalar loop calling
+/// `gate.tanh()` once per element, and at 512x512 each invocation covers
+/// `rows * HIDDEN` = 3840 * 3840 elements. `run_block_gpu` does this twice per
+/// block (after the output projection and after the FFN), so one denoise step
+/// pays for it 34 * 2 times on the calling thread. Rows are disjoint slices of
+/// every buffer, so splitting them across the pool is a pure re-partition: the
+/// arithmetic per element, and therefore the result, is unchanged.
+fn readback_norm_and_residual_rows(
+    pool: &ComputePool,
+    tokens: &mut [f32],
+    normed: &mut [f32],
+    projected: &[f32],
+    weight: &[f32],
+    gates: Option<&[f32]>,
+    rows: usize,
+) -> Result<(), String> {
+    let width = HIDDEN;
+    if projected.len() != rows * width
+        || normed.len() != projected.len()
+        || tokens.len() != projected.len()
+        || weight.len() != width
+        || gates.is_some_and(|values| values.len() != width)
+    {
+        return Err("Invalid Z-Image readback residual shapes".into());
+    }
+    // Raw pointers keep the closure independent of the borrow checker: each
+    // worker only touches the rows it owns.
+    let tokens_ptr = tokens.as_mut_ptr() as usize;
+    let normed_ptr = normed.as_mut_ptr() as usize;
+    let projected_ptr = projected.as_ptr() as usize;
+    let weight_ptr = weight.as_ptr() as usize;
+    let gates_ptr = gates.map_or(0, |values| values.as_ptr() as usize);
+    pool.compute(move |ith, nth| {
+        let per_worker = rows.div_ceil(nth);
+        let start = (ith * per_worker).min(rows);
+        let end = (start + per_worker).min(rows);
+        if start >= end {
+            return;
+        }
+        // SAFETY: row r is only visited by the worker owning it, and the four
+        // row buffers are `rows * width` long and verified above. `projected`,
+        // `weight` and the gates are read-only.
+        let tokens =
+            unsafe { std::slice::from_raw_parts_mut(tokens_ptr as *mut f32, rows * width) };
+        let normed =
+            unsafe { std::slice::from_raw_parts_mut(normed_ptr as *mut f32, rows * width) };
+        let projected =
+            unsafe { std::slice::from_raw_parts(projected_ptr as *const f32, rows * width) };
+        let weight = unsafe { std::slice::from_raw_parts(weight_ptr as *const f32, width) };
+        let gates = (gates_ptr != 0)
+            .then(|| unsafe { std::slice::from_raw_parts(gates_ptr as *const f32, width) });
+        for row in start..end {
+            let begin = row * width;
+            let end = begin + width;
+            let out = &mut normed[begin..end];
+            out.copy_from_slice(&projected[begin..end]);
+            rms_norm_inplace(out, weight, RMS_EPSILON);
+            add_modulated_residual(&mut tokens[begin..end], out, gates)
+                .expect("row shapes checked above");
+        }
+    });
+    Ok(())
+}
+
 fn real_image_row<'a>(
     tokens: &'a [f32],
     padded_text_rows: usize,
@@ -1680,6 +1751,19 @@ const GPU_PHASE_LABELS: [&str; 9] = [
     "  host silu (of ffn)",
 ];
 
+/// Slot 3 wraps both the device and the CPU attention branch, so its host/gpu
+/// suffix cannot be a constant. `RUST_GPU_ATTENTION=0` moves ~27 s of the step
+/// (measured: 10.8 s -> 27.0 s over 8 steps at 512x512, seed 42) into this slot,
+/// which is what the runtime value reports.
+#[cfg(feature = "vulkan")]
+fn gpu_phase_label(slot: usize) -> &'static str {
+    match slot {
+        3 if gpu_attention_enabled() => "attention (gpu)",
+        3 => "attention (host)",
+        _ => GPU_PHASE_LABELS[slot],
+    }
+}
+
 #[cfg(feature = "vulkan")]
 fn gpu_profile_add(slot: usize, started: std::time::Instant) {
     GPU_PROFILE_TIMERS.with(|cell| {
@@ -1705,11 +1789,13 @@ fn gpu_profile_report(steps: usize) {
     }
     let pct = |x: f64| x / total * 100.0;
     eprintln!("\n[gpu-block-profile over {steps} denoise steps] total={total:.1}ms");
-    for (label, value) in GPU_PHASE_LABELS.iter().zip(t.iter()) {
-        if *value == 0.0 && label.starts_with("  ") {
+    for (slot, label) in GPU_PHASE_LABELS.iter().enumerate() {
+        let label = gpu_phase_label(slot);
+        let value = t[slot];
+        if value == 0.0 && label.starts_with("  ") {
             continue;
         }
-        eprintln!("  {label:22} {value:9.1}ms ({:5.1}%)", pct(*value));
+        eprintln!("  {label:22} {value:9.1}ms ({:5.1}%)", pct(value));
     }
 }
 
@@ -2484,16 +2570,15 @@ fn run_block_gpu(
             )
             .map_err(|e| format!("Z-Image DiT out dispatch failed: {e}"))?;
         let projected = session.readback(hidden_len);
-        for row in 0..rows {
-            let out = &mut qkv[row * HIDDEN..(row + 1) * HIDDEN];
-            out.copy_from_slice(&projected[row * HIDDEN..(row + 1) * HIDDEN]);
-            rms_norm_inplace(out, &block.attention_norm2, RMS_EPSILON);
-            add_modulated_residual(
-                &mut tokens[row * HIDDEN..(row + 1) * HIDDEN],
-                out,
-                modulations.map(|values| values.gate_msa),
-            )?;
-        }
+        readback_norm_and_residual_rows(
+            pool,
+            tokens,
+            &mut qkv[..hidden_len],
+            projected,
+            &block.attention_norm2,
+            modulations.map(|values| values.gate_msa),
+            rows,
+        )?;
     } else {
         for row in 0..rows {
             let out = &mut qkv[row * HIDDEN..(row + 1) * HIDDEN];
@@ -2594,16 +2679,15 @@ fn run_block_gpu(
                 .project_scaled(layer, Projection::W2, layout.gate, &gate, layout.out, 1.0)
                 .map_err(|e| format!("Z-Image DiT w2 dispatch failed: {e}"))?;
             let down = session.readback(hidden_len);
-            for row in 0..rows {
-                let out = &mut attention[row * HIDDEN..(row + 1) * HIDDEN];
-                out.copy_from_slice(&down[row * HIDDEN..(row + 1) * HIDDEN]);
-                rms_norm_inplace(out, &block.ffn_norm2, RMS_EPSILON);
-                add_modulated_residual(
-                    &mut tokens[row * HIDDEN..(row + 1) * HIDDEN],
-                    out,
-                    modulations.map(|values| values.gate_mlp),
-                )?;
-            }
+            readback_norm_and_residual_rows(
+                pool,
+                tokens,
+                &mut attention[..hidden_len],
+                down,
+                &block.ffn_norm2,
+                modulations.map(|values| values.gate_mlp),
+                rows,
+            )?;
         } else {
             for row in 0..rows {
                 let out = &mut attention[row * HIDDEN..(row + 1) * HIDDEN];

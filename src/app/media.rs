@@ -46,28 +46,35 @@ pub fn validate_mmproj_capabilities(
     mmproj: &dyn TensorSource,
     media: MediaKind,
 ) -> Result<ProjectorFamily, String> {
-    let family = match llm_arch {
-        "qwen3vl" | "qwen3vlmoe" => ProjectorFamily::Qwen3VlMerger,
-        "qwen2vl" | "qwen35" => ProjectorFamily::Qwen25Omni,
-        other => return Err(format!("Unsupported multimodal architecture: {other}")),
+    // Which projector family to use is decided by `clip.projector_type` when
+    // the mmproj declares one, not by the language tower's architecture.
+    //
+    // They are not the same axis. LensVLM-9B pairs a `qwen35` language tower
+    // with a `qwen3vl_merger` projector, so deriving the family from the arch
+    // alone rejected a pairing that the engine actually runs. The arch is still
+    // checked, because an unknown tower has no text path to fall back to.
+    let declared = mmproj
+        .metadata("clip.projector_type")
+        .and_then(|v| v.to_string_val());
+    let family = match declared.as_deref() {
+        Some("qwen3vl_merger") => ProjectorFamily::Qwen3VlMerger,
+        Some("qwen2.5o" | "qwen2.5vl_merger") => ProjectorFamily::Qwen25Omni,
+        Some(other) => {
+            return Err(format!("Unsupported clip.projector_type: {other}"));
+        }
+        // No declared type: fall back to the architecture, which is what the
+        // pre-existing GGUF shapes rely on.
+        None => match llm_arch {
+            "qwen3vl" | "qwen3vlmoe" => ProjectorFamily::Qwen3VlMerger,
+            "qwen2vl" | "qwen35" => ProjectorFamily::Qwen25Omni,
+            other => return Err(format!("Unsupported multimodal architecture: {other}")),
+        },
     };
+    if !matches!(llm_arch, "qwen3vl" | "qwen3vlmoe" | "qwen2vl" | "qwen35") {
+        return Err(format!("Unsupported multimodal architecture: {llm_arch}"));
+    }
     if llm_arch == "qwen3vl" && media == MediaKind::Audio {
         return Err("Qwen3-VL does not support audio input".into());
-    }
-    if let Some(projector) = mmproj
-        .metadata("clip.projector_type")
-        .and_then(|v| v.to_string_val())
-    {
-        let allowed: &[&str] = match family {
-            ProjectorFamily::Qwen3VlMerger => &["qwen3vl_merger"],
-            ProjectorFamily::Qwen25Omni => &["qwen2.5o", "qwen2.5vl_merger"],
-        };
-        if !allowed.iter().any(|p| *p == projector) {
-            return Err(format!(
-                "{llm_arch} requires one of {:?}, got {projector}",
-                allowed
-            ));
-        }
     }
     let has_encoder = match media {
         MediaKind::Audio => "clip.has_audio_encoder",
@@ -323,4 +330,146 @@ pub fn normalize_resized_image(
         }
     }
     Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::tensor::{MetaValue, TensorInfo, TensorSource};
+    use std::sync::Arc;
+
+    /// A mmproj stub exposing only the metadata and tensors a test names.
+    struct Stub {
+        meta: Vec<(String, MetaValue)>,
+        #[allow(dead_code)]
+        tensors: Vec<String>,
+    }
+
+    impl Stub {
+        fn with(meta: Vec<(&str, MetaValue)>, tensors: &[&str]) -> Arc<dyn TensorSource> {
+            Arc::new(Stub {
+                meta: meta.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+                tensors: tensors.iter().map(|s| s.to_string()).collect(),
+            })
+        }
+
+        fn merger() -> Arc<dyn TensorSource> {
+            Stub::with(
+                vec![
+                    (
+                        "clip.projector_type",
+                        MetaValue::String("qwen3vl_merger".into()),
+                    ),
+                    ("clip.has_vision_encoder", MetaValue::Bool(true)),
+                ],
+                &["mm.2.weight", "v.patch_embd.weight"],
+            )
+        }
+
+        fn omni() -> Arc<dyn TensorSource> {
+            Stub::with(
+                vec![
+                    (
+                        "clip.projector_type",
+                        MetaValue::String("qwen2.5vl_merger".into()),
+                    ),
+                    ("clip.has_vision_encoder", MetaValue::Bool(true)),
+                ],
+                &["mm.2.weight"],
+            )
+        }
+    }
+
+    impl TensorSource for Stub {
+        fn metadata(&self, key: &str) -> Option<&MetaValue> {
+            self.meta.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+        }
+        fn tensor_info(&self, name: &str) -> Option<&TensorInfo> {
+            None
+        }
+        fn tensor_slice(&self, name: &str) -> Option<&[u8]> {
+            None
+        }
+    }
+
+    /// LensVLM-9B pairs a `qwen35` language tower with a `qwen3vl_merger`
+    /// projector. `qwen35` was hardcoded to the Omni family, so this pairing
+    /// would be rejected -- while the qwen35 multimodal path bypasses this
+    /// check entirely and ran the merger encoder anyway. That is exactly the
+    /// silent fallback this function exists to prevent.
+    #[test]
+    fn qwen35_accepts_the_qwen3vl_merger_projector() {
+        let family =
+            validate_mmproj_capabilities("qwen35", Stub::merger().as_ref(), MediaKind::Image)
+                .expect("LensVLM-9B pairing must be accepted");
+        assert_eq!(family, ProjectorFamily::Qwen3VlMerger);
+    }
+
+    /// The reverse pairing is a genuine mismatch and must stay an error: a
+    /// `qwen3vl` language tower cannot consume an Omni projector.
+    /// qwen3vl with an Omni projector is a legal pairing that the repo already
+    /// routes (Qwen3-VL drives the Omni encoder), so it must keep working.
+    #[test]
+    fn qwen3vl_with_the_omni_projector_still_works() {
+        let family =
+            validate_mmproj_capabilities("qwen3vl", Stub::omni().as_ref(), MediaKind::Image)
+                .expect("this pairing already worked before");
+        assert_eq!(family, ProjectorFamily::Qwen25Omni);
+    }
+
+    /// An unrecognised projector type is refused rather than guessed at, which
+    /// is the whole point of the check.
+    #[test]
+    fn an_unknown_projector_type_is_rejected() {
+        let stub = Stub::with(
+            vec![
+                (
+                    "clip.projector_type",
+                    MetaValue::String("mystery_proj".into()),
+                ),
+                ("clip.has_vision_encoder", MetaValue::Bool(true)),
+            ],
+            &[],
+        );
+        let error =
+            validate_mmproj_capabilities("qwen35", stub.as_ref(), MediaKind::Image).unwrap_err();
+        assert!(error.contains("mystery_proj"), "{error}");
+    }
+
+    /// The architecture is still gated even though the projector decides the
+    /// family: an unknown tower has no text path to fall back on.
+    #[test]
+    fn a_known_projector_does_not_admit_an_unknown_tower() {
+        assert!(validate_mmproj_capabilities(
+            "mystery-tower",
+            Stub::merger().as_ref(),
+            MediaKind::Image
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn unknown_architecture_is_rejected() {
+        assert!(validate_mmproj_capabilities(
+            "not-a-model",
+            Stub::merger().as_ref(),
+            MediaKind::Image
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn a_mmproj_without_a_vision_encoder_is_rejected_for_images() {
+        let stub = Stub::with(
+            vec![
+                (
+                    "clip.projector_type",
+                    MetaValue::String("qwen3vl_merger".into()),
+                ),
+                ("clip.has_vision_encoder", MetaValue::Bool(false)),
+            ],
+            &[],
+        );
+        assert!(validate_mmproj_capabilities("qwen3vl", stub.as_ref(), MediaKind::Image).is_err());
+    }
 }
