@@ -608,6 +608,7 @@ pub fn render_text_conversation(
 mod tests {
     use super::*;
     use crate::core::tensor::MetaValue;
+    use crate::core::tokenizer::MockTokenizer;
 
     fn render(src: &str, agp: bool, thinking: bool) -> String {
         let t = JinjaChatTemplate::compile(src, "test").unwrap();
@@ -855,6 +856,32 @@ mod tests {
         assert_eq!(MediaPart::image(4).content_type, "image");
         assert_eq!(MediaPart::new("video", 4).content_type, "video");
         assert_eq!(MediaPart::new("audio", 4).content_type, "audio");
+    }
+
+    /// A tokenizer that asks for BOS must still end up with exactly one, whether
+    /// the template emits `{{ bos_token }}` itself or not.
+    ///
+    /// Falcon-H1 forces `add_bos`, and its Jinja text used to be encoded with
+    /// `add_special: true`, so a template emitting `{{ bos_token }}` produced two
+    /// BOS tokens. All four combinations are pinned here.
+    #[test]
+    fn bos_is_added_at_most_once() {
+        let asks = MockTokenizer::with_bos(1, true);
+        let silent = MockTokenizer::with_bos(1, false);
+        let emitting = JinjaChatTemplate::compile("<s>{{ messages[0].content }}", "t").unwrap();
+        let plain = JinjaChatTemplate::compile("{{ messages[0].content }}", "t").unwrap();
+        let count_bos = |tok: &MockTokenizer, tpl: &JinjaChatTemplate| {
+            let ids =
+                render_tokens(tok, tpl, &[ChatMessage::text("user", "hi")], true, false).unwrap();
+            ids.iter().filter(|&&t| t == 1).count()
+        };
+
+        // Template emits BOS: one, regardless of what the tokenizer wants.
+        assert_eq!(count_bos(&silent, &emitting), 1);
+        assert_eq!(count_bos(&asks, &emitting), 1);
+        // Template is silent: only added when the tokenizer asks.
+        assert_eq!(count_bos(&silent, &plain), 0);
+        assert_eq!(count_bos(&asks, &plain), 1);
     }
 
     #[test]

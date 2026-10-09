@@ -125,14 +125,24 @@ pub fn build_prompt(
             true,
             enable_thinking.unwrap_or(false),
         )?;
-        if let Some(ids) = ids.or(crate::prompt::jinja::conversation_tokens(
+        // Return the cached result before resolving anything. `Option::or`
+        // takes its argument by value, so folding the fallback into it ran
+        // the compile on every request even on a cache hit -- defeating the
+        // cache -- and made a `--chat-template-file` request fail after
+        // startup if the file was removed.
+        if let Some(ids) = ids {
+            return Ok((ids, Vec::new()));
+        }
+        // Fallback for callers that did not pre-resolve (the JEV HTTP
+        // endpoints pass no compiled template).
+        if let Some(ids) = crate::prompt::jinja::conversation_tokens(
             tokenizer,
             jinja,
             &|k| source.metadata(k).cloned(),
             &messages,
             true,
             enable_thinking.unwrap_or(false),
-        )?) {
+        )? {
             return Ok((ids, Vec::new()));
         }
     }

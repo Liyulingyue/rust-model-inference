@@ -1721,19 +1721,55 @@ pub trait Tokenizer: Send + Sync {
 /// GGUF on disk. Every byte becomes its own token, which makes encoded ids
 /// trivially predictable.
 #[cfg(test)]
-pub(crate) struct MockTokenizer;
+pub(crate) struct MockTokenizer {
+    /// Lets a test exercise the tokenizer's BOS contract, which the byte-per-token
+    /// default cannot express.
+    bos: Option<u32>,
+    add_bos: bool,
+    bos_text: Option<String>,
+}
 
 #[cfg(test)]
 impl MockTokenizer {
     pub(crate) fn new() -> Self {
-        MockTokenizer
+        MockTokenizer {
+            bos: None,
+            add_bos: false,
+            bos_text: None,
+        }
+    }
+
+    /// A tokenizer whose GGUF asked for `add_bos_token` and supplies a BOS id.
+    pub(crate) fn with_bos(bos: u32, add_bos: bool) -> Self {
+        MockTokenizer {
+            bos: Some(bos),
+            add_bos,
+            bos_text: Some("<s>".to_string()),
+        }
     }
 }
 
 #[cfg(test)]
 impl Tokenizer for MockTokenizer {
-    fn encode(&self, text: &str, _options: EncodeOptions) -> Vec<u32> {
-        text.bytes().map(|b| b as u32).collect()
+    fn encode(&self, text: &str, options: EncodeOptions) -> Vec<u32> {
+        let mut ids = Vec::new();
+        let mut rest = text;
+        // Honour `parse_special` for the BOS literal so a test can simulate a
+        // template that renders `{{ bos_token }}`.
+        if options.parse_special {
+            if let Some(bos) = self.bos {
+                if let Some(bos_text) = self.bos_text.as_ref() {
+                    while let Some(at) = rest.find(bos_text) {
+                        let (head, tail) = rest.split_at(at);
+                        ids.extend(head.bytes().map(|b| b as u32));
+                        ids.push(bos);
+                        rest = &tail[bos_text.len()..];
+                    }
+                }
+            }
+        }
+        ids.extend(rest.bytes().map(|b| b as u32));
+        ids
     }
     fn decode_bytes(&self, ids: &[u32], _render_special: bool) -> Vec<u8> {
         ids.iter().map(|&i| i as u8).collect()
@@ -1744,14 +1780,20 @@ impl Tokenizer for MockTokenizer {
     fn token_id(&self, _literal: &str) -> Option<u32> {
         None
     }
-    fn special_token_id(&self, _semantic_name: &str) -> Option<u32> {
-        None
+    fn special_token_id(&self, semantic_name: &str) -> Option<u32> {
+        match semantic_name {
+            "bos_token" => self.bos,
+            _ => None,
+        }
     }
     fn bos_id(&self) -> Option<u32> {
-        None
+        self.bos
     }
     fn eos_id(&self) -> Option<u32> {
         None
+    }
+    fn add_bos(&self) -> bool {
+        self.add_bos
     }
     fn vocab_size(&self) -> usize {
         256

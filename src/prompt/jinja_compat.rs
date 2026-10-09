@@ -135,28 +135,33 @@ fn is_raw_open(slice: &str) -> bool {
     slice.starts_with("{% raw") || slice.starts_with("{%- raw") || slice.starts_with("{%+ raw")
 }
 
-/// Whether `at` sits inside a `{{ ... }}` or `{% ... %}` region.
+/// Whether `at` sits inside a Jinja block, i.e. a `{{ ... }}` or `{% ... %}`
+/// region that has not been closed yet.
 ///
-/// Used to decide if a quote starts a Jinja string. Scanning backwards for the
-/// nearest unclosed `{{`/`{%` is enough: Jinja does not nest output blocks, and
-/// an unclosed one means minijinja will reject the template anyway.
+/// Only the *most recent* opener matters. Checking each delimiter kind
+/// independently let an older closed `{% ... %}` mask a newer open `{{ ... }}`,
+/// so in `{% set x = 1 %}{{ '{% generation %}' }}` the quote was treated as
+/// prose and the tag-shaped string literal was rewritten.
 fn inside_jinja_markup(source: &str, at: usize) -> bool {
     let before = &source[..at];
-    match (
-        before.rfind("{{"),
-        before.rfind("{%"),
-        before.rfind("{#"),
-        before.rfind("}}"),
-        before.rfind("%}"),
-        before.rfind("#}"),
-    ) {
-        (Some(open), _, _, Some(close), _, _) if close > open => false,
-        (_, Some(open), _, _, Some(close), _) if close > open => false,
-        (_, _, Some(open), _, _, Some(close)) if close > open => false,
-        (Some(_), None, None, _, _, _) => true,
-        (_, Some(_), None, _, _, _) => true,
-        _ => false,
+    let mut best: Option<(usize, bool)> = None; // (offset, is_comment)
+    for (open, close, is_comment) in [("{{", "}}", false), ("{%", "%}", false), ("{#", "#}", true)]
+    {
+        let Some(o) = before.rfind(open) else {
+            continue;
+        };
+        let c = before.rfind(close).unwrap_or(0);
+        // Already closed before this position, so this opener does not span
+        // `at`.
+        if c > o {
+            continue;
+        }
+        if best.is_none_or(|(b, _)| o > b) {
+            best = Some((o, is_comment));
+        }
     }
+    // Inside a comment is not inside markup we need to skip strings for.
+    best.is_some_and(|(_, is_comment)| !is_comment)
 }
 
 /// End offset, relative to the slice, just past the `{% endraw %}` tag.
@@ -567,6 +572,25 @@ mod tests {
         // `str.split(None, n)` is not valid Python.
         assert!(render("{{ s.split()|length }}", r#"{"s":"a b"}"#).is_ok());
         assert!(render("{{ s.split(1) }}", r#"{"s":"a b"}"#).is_err());
+    }
+
+    /// Regression: an older closed block masked a newer open one, so the quote
+    /// was read as prose and the tag-shaped literal was rewritten.
+    #[test]
+    fn an_older_closed_block_does_not_mask_a_newer_open_one() {
+        assert_eq!(
+            render("{% set x = 1 %}{{ '{% generation %}' }}", "{}").unwrap(),
+            "{% generation %}"
+        );
+        assert_eq!(
+            render("{{ '{% generation %}' }}{% set x = 1 %}", "{}").unwrap(),
+            "{% generation %}"
+        );
+        // A tag inside markup is still rewritten; only literals are spared.
+        assert_eq!(
+            render("{% set x = 1 %}{% generation %}y{% endgeneration %}", "{}").unwrap(),
+            "y"
+        );
     }
 
     /// Regression: the tag search did not know a string literal is data, so
