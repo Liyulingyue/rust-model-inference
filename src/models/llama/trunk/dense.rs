@@ -406,6 +406,11 @@ impl LlamaSession<'_> {
                 match result {
                     Ok(()) => {
                         self.seq_len = end;
+                        self.compute_policy.trace(
+                            "resident_decoder",
+                            crate::compute::UsedBackend::Vulkan,
+                            rows,
+                        );
                         return Ok(());
                     }
                     Err(error) => {
@@ -460,6 +465,8 @@ impl LlamaSession<'_> {
             return Err(error);
         }
         self.seq_len = end;
+        self.compute_policy
+            .trace("decoder", crate::compute::UsedBackend::Cpu, rows);
         Ok(())
     }
 }

@@ -3,7 +3,6 @@ use crate::models::qwen3::trunk::Qwen3Config;
 use crate::ops::rope::rope_neox_inplace;
 use ash::vk;
 use std::collections::HashMap;
-#[cfg(test)]
 use std::sync::atomic::Ordering;
 use std::sync::MutexGuard;
 
@@ -1304,7 +1303,13 @@ impl<'a> Qwen3Ops<'a> {
                     f32_bytes(values.len())? as u64,
                 );
             }
-            return commands.submit_and_wait();
+            let mut commands = commands;
+            self.context.submit_transfer_commands(&mut commands.guard)?;
+            self.context
+                .counters
+                .host_write_bytes
+                .fetch_add((values.len() * 4) as u64, Ordering::Relaxed);
+            return Ok(());
         }
         unsafe {
             std::ptr::copy_nonoverlapping(
@@ -1313,6 +1318,10 @@ impl<'a> Qwen3Ops<'a> {
                 values.len(),
             );
         }
+        self.context
+            .counters
+            .host_write_bytes
+            .fetch_add((values.len() * 4) as u64, Ordering::Relaxed);
         Ok(())
     }
 
@@ -1327,6 +1336,10 @@ impl<'a> Qwen3Ops<'a> {
                 "device arena requires read_f32_into".into(),
             ));
         }
+        self.context
+            .counters
+            .host_read_bytes
+            .fetch_add((count * 4) as u64, Ordering::Relaxed);
         Ok(unsafe {
             std::slice::from_raw_parts(self.arena.mapped.add(region.offset).cast::<f32>(), count)
         })
@@ -1355,7 +1368,11 @@ impl<'a> Qwen3Ops<'a> {
                     f32_bytes(output.len())? as u64,
                 );
             }
-            self.context.submit_commands(&mut commands.guard)?;
+            self.context.submit_transfer_commands(&mut commands.guard)?;
+            self.context
+                .counters
+                .host_read_bytes
+                .fetch_add((output.len() * 4) as u64, Ordering::Relaxed);
             // Keep the guard through the host copy, so another transfer cannot
             // reuse staging between the fence and this read.
             unsafe {
@@ -1382,6 +1399,10 @@ impl<'a> Qwen3Ops<'a> {
                 "device arena cannot expose mapped bytes".into(),
             ));
         }
+        self.context
+            .counters
+            .host_read_bytes
+            .fetch_add(count as u64, Ordering::Relaxed);
         Ok(unsafe { std::slice::from_raw_parts(self.arena.mapped.add(region.offset), count) })
     }
 
@@ -6266,6 +6287,45 @@ mod tests {
         context.fail_wait_idle.store(false, Ordering::Relaxed);
         unsafe { context.destroy_completed_buffers(&[buffer]).unwrap() };
         assert!(!context.mutex.lock().unwrap().uncertain);
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn compute_device_metrics_count_upload_reuse_and_copies() {
+        let context = Box::leak(Box::new(super::VulkanContext::new().unwrap()));
+        let initial = context.compute_stats();
+        {
+            let mut runtime = super::BatchedLinearRuntime::new(context, 1, 4, 1, 2).unwrap();
+            let bytes = bytemuck::cast_slice(&[1.0f32; 4]);
+            let before = context.compute_stats();
+            for _ in 0..2 {
+                let mut output = [0.0];
+                runtime
+                    .matmul_rows(
+                        bytes,
+                        super::GpuWeightFormat::F32,
+                        &[1.0; 4],
+                        1,
+                        4,
+                        1,
+                        &mut output,
+                    )
+                    .unwrap();
+                assert_eq!(output, [4.0]);
+            }
+            let delta = context.compute_stats().since(before);
+            assert_eq!(delta.static_uploads, 1);
+            assert_eq!(delta.static_upload_bytes, 16);
+            assert_eq!(delta.host_write_bytes, 32);
+            assert_eq!(delta.host_read_bytes, 8);
+            assert_eq!(delta.submissions, 2);
+            assert_eq!(delta.transfer_submissions, 0);
+            assert!(delta.peak_allocation_bytes >= delta.live_allocation_bytes);
+        }
+        assert_eq!(
+            context.compute_stats().live_allocation_bytes,
+            initial.live_allocation_bytes
+        );
     }
 
     #[test]

@@ -18,6 +18,23 @@ pub enum UsedBackend {
     Vulkan,
 }
 
+thread_local! {
+    static LEGACY_POLICY: std::cell::Cell<Option<ComputePolicy>> = const { std::cell::Cell::new(None) };
+}
+
+/// Synchronous compatibility scope for entry points with pre-policy signatures.
+pub struct LegacyComputeScope {
+    previous: Option<ComputePolicy>,
+    _cpu: ComputeScope,
+    _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl Drop for LegacyComputeScope {
+    fn drop(&mut self) {
+        LEGACY_POLICY.with(|policy| policy.set(self.previous));
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ComputeError {
     InvalidInput(String),
@@ -51,6 +68,45 @@ impl From<crate::vulkan::VulkanError> for ComputeError {
 }
 
 impl ComputePolicy {
+    pub(crate) fn trace(self, scope: &str, backend: UsedBackend, rows: usize) {
+        if std::env::var_os("RMI_COMPUTE_TRACE").is_some() {
+            eprintln!("compute requested={self:?} scope={scope} backend={backend:?} rows={rows}");
+            #[cfg(feature = "vulkan")]
+            if backend == UsedBackend::Vulkan {
+                if let Ok(context) = crate::ops::float::shared_vulkan_context() {
+                    eprintln!(
+                        "compute counters=device_cumulative {:?}",
+                        context.compute_stats()
+                    );
+                }
+            }
+        }
+    }
+    pub fn validate_text_arch(self, arch: &str) -> Result<(), String> {
+        if self == Self::Vulkan && !matches!(arch, "llama" | "qwen3" | "qwen35") {
+            return Err(format!("full Vulkan text decoding is not supported for {arch}; local linear offload does not satisfy this request"));
+        }
+        Ok(())
+    }
+
+    pub fn enter_legacy_scope(self) -> LegacyComputeScope {
+        LegacyComputeScope {
+            previous: LEGACY_POLICY.with(|policy| policy.replace(Some(self))),
+            _cpu: self.cpu_scope(),
+            _thread_bound: std::marker::PhantomData,
+        }
+    }
+
+    pub fn configure_cli(self) -> Result<LegacyComputeScope, String> {
+        self.check_build()?;
+        if self == Self::Auto {
+            #[cfg(feature = "vulkan")]
+            crate::ops::enable_gpu();
+            #[cfg(not(feature = "vulkan"))]
+            eprintln!("compute requested=Auto backend=Cpu reason=build_without_vulkan");
+        }
+        Ok(self.enter_legacy_scope())
+    }
     fn context_with<T>(
         self,
         initialize: impl FnOnce() -> Result<T, String>,
@@ -61,7 +117,7 @@ impl ComputePolicy {
         match initialize() {
             Ok(context) => Ok(Some(context)),
             Err(error) if self == Self::Auto => {
-                log::info!("compute: CPU fallback: {error}");
+                eprintln!("compute requested=Auto backend=Cpu reason={error}");
                 Ok(None)
             }
             Err(error) => Err(ComputeError::Device(error)),
@@ -100,6 +156,9 @@ impl ComputePolicy {
         if crate::core::thread_pool::gpu_matmul_disabled() {
             return Self::Cpu;
         }
+        if let Some(policy) = LEGACY_POLICY.with(|policy| policy.get()) {
+            return policy;
+        }
         if crate::ops::gpu_requested() {
             Self::Auto
         } else {
@@ -125,6 +184,23 @@ pub(crate) struct ComputeScope {
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn legacy_policy_scope_restores_and_rejects_partial_model_requests() {
+        let original = ComputePolicy::legacy();
+        {
+            let _cpu = ComputePolicy::Cpu.enter_legacy_scope();
+            assert_eq!(ComputePolicy::legacy(), ComputePolicy::Cpu);
+        }
+        assert_eq!(ComputePolicy::legacy(), original);
+        for arch in ["gemma4", "edge0", "qwen3vl", "auk", "unknown"] {
+            assert!(ComputePolicy::Vulkan.validate_text_arch(arch).is_err());
+            assert!(ComputePolicy::Auto.validate_text_arch(arch).is_ok());
+        }
+        for arch in ["llama", "qwen3", "qwen35"] {
+            assert!(ComputePolicy::Vulkan.validate_text_arch(arch).is_ok());
+        }
+    }
 
     #[test]
     fn cpu_policy_never_initializes_vulkan() {

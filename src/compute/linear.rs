@@ -203,11 +203,25 @@ impl<'model, 'weights> LinearExecutor<'model, 'weights> {
             return Err(invalid("linear input contains non-finite values"));
         }
         let bindings = ids.map(|id| self.bindings[id.slot]);
+        if std::env::var_os("RMI_COMPUTE_TRACE").is_some() {
+            for binding in &bindings {
+                eprintln!(
+                    "compute scope=host_linear mode={:?} format={:?} shape={}x{} rows={rows}",
+                    binding.mode,
+                    binding.weight.ggml_type,
+                    binding.weight.n_out,
+                    binding.weight.n_in
+                );
+            }
+        }
         #[cfg(feature = "vulkan")]
         if self.runtime.is_some() && !crate::core::thread_pool::gpu_matmul_disabled() {
             let attempt = self.run_gpu(&bindings, input, rows, &mut outputs);
             match attempt {
-                Ok(()) => return Ok([UsedBackend::Vulkan; N]),
+                Ok(()) => {
+                    self.policy.trace("host_linear", UsedBackend::Vulkan, rows);
+                    return Ok([UsedBackend::Vulkan; N]);
+                }
                 Err(error) if self.policy == ComputePolicy::Vulkan => return Err(error),
                 Err(error) => {
                     log::info!("compute linear: CPU fallback: {error}");
@@ -277,6 +291,7 @@ impl<'model, 'weights> LinearExecutor<'model, 'weights> {
                 }
             }
         }
+        self.policy.trace("host_linear", UsedBackend::Cpu, rows);
         Ok([UsedBackend::Cpu; N])
     }
 

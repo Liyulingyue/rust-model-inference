@@ -250,7 +250,14 @@ impl Qwen3Session<'_> {
                     Ok(())
                 })();
                 match result {
-                    Ok(()) => continue,
+                    Ok(()) => {
+                        self.compute_policy.trace(
+                            "resident_decoder",
+                            crate::compute::UsedBackend::Vulkan,
+                            range.len(),
+                        );
+                        continue;
+                    }
                     Err(error) => {
                         gpu.abort_token();
                         self.gpu = None;
@@ -277,6 +284,8 @@ impl Qwen3Session<'_> {
                 return Err(error);
             }
             self.kv_state.seq_len = base + range.len();
+            self.compute_policy
+                .trace("decoder", crate::compute::UsedBackend::Cpu, range.len());
             self.kv_state.update_access();
         }
         let elapsed = started.elapsed();

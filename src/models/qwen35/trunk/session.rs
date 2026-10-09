@@ -594,6 +594,11 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
                     Ok(()) => {
                         self.processed_tokens += rows;
                         self.next_position = chunk_positions[rows - 1][0].saturating_add(1);
+                        self.compute_policy.trace(
+                            "resident_hybrid_decoder",
+                            crate::compute::UsedBackend::Vulkan,
+                            rows,
+                        );
                         continue;
                     }
                     Err(error) => {
@@ -684,6 +689,8 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
             };
             self.scratch.conv_states = working_conv;
             self.scratch.ssm_states = working_ssm;
+            self.compute_policy
+                .trace("hybrid_decoder", crate::compute::UsedBackend::Cpu, rows);
             self.processed_tokens += rows;
             self.next_position = chunk_positions[rows - 1][0].saturating_add(1);
             self.last_step_tokens = rows;

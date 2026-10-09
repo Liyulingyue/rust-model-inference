@@ -7,6 +7,53 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 
+#[test]
+fn compute_policy_options_are_shared_and_unambiguous() {
+    use crate::compute::ComputePolicy::{Auto, Cpu, Vulkan};
+    for (flags, expected) in [
+        (vec!["rmi"], Cpu),
+        (vec!["rmi", "--gpu"], Auto),
+        (vec!["rmi", "--compute", "cpu"], Cpu),
+        (vec!["rmi", "--compute", "auto"], Auto),
+        (vec!["rmi", "--compute", "vulkan"], Vulkan),
+    ] {
+        assert_eq!(
+            parse_cli_options(&args(&flags)).unwrap().compute_policy(),
+            expected
+        );
+    }
+    for flags in [
+        vec!["rmi", "--compute"],
+        vec!["rmi", "--compute", "bogus"],
+        vec!["rmi", "--compute", "--gpu"],
+        vec!["rmi", "--gpu", "--compute", "cpu"],
+        vec!["rmi", "--compute", "auto", "--gpu"],
+        vec!["rmi", "--compute", "cpu", "--compute", "vulkan"],
+    ] {
+        assert!(parse_cli_options(&args(&flags)).is_err(), "{flags:?}");
+    }
+}
+
+#[test]
+fn compute_vulkan_rejects_unmigrated_modes_before_loading() {
+    for mode in [
+        "--embedding",
+        "--jev",
+        "--tts",
+        "--yue2",
+        "--dreamx",
+        "--dump-logits",
+        "--bench",
+        "--profile",
+    ] {
+        let options = parse_cli_options(&args(&["rmi", "--compute", "vulkan", mode])).unwrap();
+        assert!(options.validate_compute_mode().is_err(), "{mode}");
+    }
+    let options = parse_cli_options(&args(&["rmi", "--compute", "vulkan"])).unwrap();
+    assert!(options.validate_compute_model("gemma4").is_err());
+    assert!(options.validate_compute_model("qwen3").is_ok());
+}
+
 struct TestTensorSource {
     info: TensorInfo,
     bytes: Vec<u8>,

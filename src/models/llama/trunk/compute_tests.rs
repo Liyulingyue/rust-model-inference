@@ -22,6 +22,31 @@ fn fixture() -> DenseFixture {
     fixture_with_scale(0.0005)
 }
 
+#[cfg(feature = "vulkan")]
+#[test]
+#[ignore = "requires a Vulkan device"]
+fn llama_cli_forced_policy_reaches_shared_session() {
+    use crate::compute::ComputePolicy;
+    let source = fixture();
+    let _scope = ComputePolicy::Vulkan.enter_legacy_scope();
+    let context = ComputePolicy::Vulkan.context().unwrap().unwrap();
+    let before = context.submission_count();
+    super::forward::run_inference_tokens(
+        &source,
+        vec![1, 2, 3],
+        2,
+        0.0,
+        2,
+        false,
+        false,
+        KvFormat::F16,
+        96,
+        1.0,
+    )
+    .unwrap();
+    assert!(context.submission_count() > before);
+}
+
 fn fixture_with_scale(scale: f32) -> DenseFixture {
     let mut source = DenseFixture {
         metadata: HashMap::new(),

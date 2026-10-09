@@ -104,6 +104,7 @@ pub struct CliOptions {
     pub profile: bool,
     pub kv_format: KvFormat,
     pub gpu: bool,
+    pub compute: Option<crate::compute::ComputePolicy>,
     pub tts: bool,
     pub edit: bool,
     pub source_audio: Option<PathBuf>,
@@ -163,6 +164,49 @@ pub struct JevBlockInput {
 }
 
 impl CliOptions {
+    pub fn compute_policy(&self) -> crate::compute::ComputePolicy {
+        self.compute.unwrap_or(if self.gpu {
+            crate::compute::ComputePolicy::Auto
+        } else {
+            crate::compute::ComputePolicy::Cpu
+        })
+    }
+
+    pub fn validate_compute_mode(&self) -> Result<(), String> {
+        use crate::compute::ComputePolicy;
+        if self.gpu && self.compute.is_some() {
+            return Err("--gpu and --compute cannot be combined".into());
+        }
+        if self.compute_policy() == ComputePolicy::Vulkan
+            && (self.embedding
+                || self.jev
+                || self.rerank
+                || self.tts
+                || self.yue2
+                || self.dreamx
+                || self.audio.is_some()
+                || self.image.is_some()
+                || self.video.is_some()
+                || self.mmproj.is_some()
+                || self.vae.is_some()
+                || self.text_encoder.is_some()
+                || self.planner.is_some()
+                || self.perception.is_some()
+                || self.laya_request.is_some()
+                || self.longcat_kind.is_some()
+                || self.dump_logits
+                || self.bench
+                || self.profile)
+        {
+            return Err("--compute vulkan supports plain text decoder generation only; this mode has no complete Vulkan execution path".into());
+        }
+        Ok(())
+    }
+
+    pub fn validate_compute_model(&self, arch: &str) -> Result<(), String> {
+        self.validate_compute_mode()?;
+        self.compute_policy().validate_text_arch(arch)
+    }
     pub fn effective_prefill_batch_size(&self) -> Result<usize, String> {
         crate::core::prefill::checked_prefill_batch_size(self.prefill_batch_size)
     }

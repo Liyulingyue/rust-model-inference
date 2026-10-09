@@ -162,6 +162,7 @@ pub struct VulkanContext {
     /// such devices and the engine stays on the CPU path.
     is_software_icd: bool,
     submission_count: std::sync::atomic::AtomicU64,
+    counters: ComputeCounters,
     /// Completed-matmul generation. Thread 0 bumps it after the fence wait;
     /// other pool threads block on it before touching the matmul output
     /// (their post-matmul work — silu, residual — must see the GPU result).
@@ -219,11 +220,59 @@ impl Default for IoState {
     }
 }
 
+/// Device-wide counters. Host bytes include mapped UMA copies; allocation peaks
+/// count Vulkan buffers, not process RSS or total driver memory.
+#[cfg(feature = "vulkan")]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ComputeStats {
+    pub submissions: u64,
+    pub static_uploads: u64,
+    pub static_upload_bytes: u64,
+    pub host_write_bytes: u64,
+    pub host_read_bytes: u64,
+    pub transfer_submissions: u64,
+    pub live_allocation_bytes: u64,
+    pub peak_allocation_bytes: u64,
+}
+#[cfg(feature = "vulkan")]
+impl ComputeStats {
+    pub fn since(self, before: Self) -> Self {
+        Self {
+            submissions: self.submissions.saturating_sub(before.submissions),
+            static_uploads: self.static_uploads.saturating_sub(before.static_uploads),
+            static_upload_bytes: self
+                .static_upload_bytes
+                .saturating_sub(before.static_upload_bytes),
+            host_write_bytes: self
+                .host_write_bytes
+                .saturating_sub(before.host_write_bytes),
+            host_read_bytes: self.host_read_bytes.saturating_sub(before.host_read_bytes),
+            transfer_submissions: self
+                .transfer_submissions
+                .saturating_sub(before.transfer_submissions),
+            live_allocation_bytes: self.live_allocation_bytes,
+            peak_allocation_bytes: self.peak_allocation_bytes,
+        }
+    }
+}
+#[cfg(feature = "vulkan")]
+#[derive(Default)]
+struct ComputeCounters {
+    static_uploads: AtomicU64,
+    static_upload_bytes: AtomicU64,
+    host_write_bytes: AtomicU64,
+    host_read_bytes: AtomicU64,
+    transfer_submissions: AtomicU64,
+    live_allocation_bytes: AtomicU64,
+    peak_allocation_bytes: AtomicU64,
+}
+
 #[cfg(feature = "vulkan")]
 pub(crate) struct GpuBuffer {
     pub(crate) buffer: vk::Buffer,
     pub(crate) memory: vk::DeviceMemory,
     pub(crate) size: u64,
+    allocation_bytes: u64,
     pub(crate) mapped: *mut u8,
 }
 
@@ -352,6 +401,7 @@ impl VulkanContext {
                             limits: candidate.limits,
                             is_software_icd: candidate.device_type == vk::PhysicalDeviceType::CPU,
                             submission_count: std::sync::atomic::AtomicU64::new(0),
+                            counters: ComputeCounters::default(),
                             completed_gen: std::sync::atomic::AtomicU64::new(0),
                         });
                     }
@@ -423,6 +473,38 @@ impl VulkanContext {
 
     pub fn submission_count(&self) -> u64 {
         self.submission_count.load(Ordering::Relaxed)
+    }
+
+    pub fn compute_stats(&self) -> ComputeStats {
+        ComputeStats {
+            submissions: self.submission_count(),
+            static_uploads: self.counters.static_uploads.load(Ordering::Relaxed),
+            static_upload_bytes: self.counters.static_upload_bytes.load(Ordering::Relaxed),
+            host_write_bytes: self.counters.host_write_bytes.load(Ordering::Relaxed),
+            host_read_bytes: self.counters.host_read_bytes.load(Ordering::Relaxed),
+            transfer_submissions: self.counters.transfer_submissions.load(Ordering::Relaxed),
+            live_allocation_bytes: self.counters.live_allocation_bytes.load(Ordering::Relaxed),
+            peak_allocation_bytes: self.counters.peak_allocation_bytes.load(Ordering::Relaxed),
+        }
+    }
+
+    fn submit_transfer_commands(
+        &self,
+        submission: &mut CommandSubmission,
+    ) -> Result<(), VulkanError> {
+        let before = self.submission_count();
+        let result = self.submit_commands(submission);
+        self.counters
+            .transfer_submissions
+            .fetch_add(self.submission_count() - before, Ordering::Relaxed);
+        result
+    }
+
+    fn count_upload(&self, bytes: usize) {
+        self.counters.static_uploads.fetch_add(1, Ordering::Relaxed);
+        self.counters
+            .static_upload_bytes
+            .fetch_add(bytes as u64, Ordering::Relaxed);
     }
 
     fn recover_commands(&self, submission: &mut CommandSubmission) -> Result<(), VulkanError> {
@@ -620,6 +702,10 @@ impl VulkanContext {
         std::ptr::copy_nonoverlapping(input_q8.as_ptr(), in_map, input_q8.len());
         let scale_map = scale_buffer.mapped as *mut f32;
         std::ptr::copy_nonoverlapping(input_scales.as_ptr(), scale_map, input_scales.len());
+        self.counters.host_write_bytes.fetch_add(
+            (input_q8.len() + input_scales.len() * 4) as u64,
+            Ordering::Relaxed,
+        );
 
         // 4. Bind and dispatch.
         self.update_descriptor_sets(
@@ -669,6 +755,9 @@ impl VulkanContext {
         // 5. Read results out of the persistently mapped output buffer.
         let out_map = output_buffer.mapped as *const f32;
         std::ptr::copy_nonoverlapping(out_map, output.as_mut_ptr(), n_out);
+        self.counters
+            .host_read_bytes
+            .fetch_add((n_out * 4) as u64, Ordering::Relaxed);
 
         Ok(())
     }
@@ -728,6 +817,7 @@ impl VulkanContext {
         };
         std::ptr::copy_nonoverlapping(weight.as_ptr(), buf.mapped, weight.len());
         std::ptr::write_bytes(buf.mapped.add(weight.len()), 0, size - weight.len());
+        self.count_upload(weight.len());
         self.weight_cache.lock().unwrap().insert(key, buf);
         Ok(*self.weight_cache.lock().unwrap().get(&key).unwrap())
     }
@@ -814,15 +904,27 @@ impl VulkanContext {
             std::ptr::null_mut()
         };
 
+        let live = self
+            .counters
+            .live_allocation_bytes
+            .fetch_add(mem_reqs.size, Ordering::Relaxed)
+            + mem_reqs.size;
+        self.counters
+            .peak_allocation_bytes
+            .fetch_max(live, Ordering::Relaxed);
         Ok(GpuBuffer {
             buffer,
             memory,
             size,
+            allocation_bytes: mem_reqs.size,
             mapped,
         })
     }
 
     pub(crate) unsafe fn destroy_buffer(&self, buf: &GpuBuffer) {
+        self.counters
+            .live_allocation_bytes
+            .fetch_sub(buf.allocation_bytes, Ordering::Relaxed);
         if !buf.mapped.is_null() {
             self.device.unmap_memory(buf.memory);
         }
@@ -856,6 +958,7 @@ impl VulkanContext {
         let buffer = self.alloc_persistently_mapped(size)?;
         std::ptr::copy_nonoverlapping(data.as_ptr(), buffer.mapped, data.len());
         std::ptr::write_bytes(buffer.mapped.add(data.len()), 0, size as usize - data.len());
+        self.count_upload(data.len());
         Ok(buffer)
     }
 
@@ -876,6 +979,7 @@ impl VulkanContext {
             Ok(buffer) => buffer,
             Err(VulkanError::OutOfMemory) => {
                 // A full VRAM heap must preserve the shared-memory fallback.
+                self.count_upload(data.len());
                 return Ok(staging);
             }
             Err(error) => {
@@ -890,7 +994,7 @@ impl VulkanContext {
                 .map_err(|_| VulkanError::InitFailed("Vulkan command mutex poisoned".into()))?;
             self.begin_commands(&mut submission)?;
             self.record_buffer_copy(self.command_buffer, staging, buffer, 0, 0, size as u64);
-            self.submit_commands(&mut submission)
+            self.submit_transfer_commands(&mut submission)
         })();
         if let Err(error) = result {
             // A failed fence wait does not prove these buffers are idle.
@@ -898,6 +1002,7 @@ impl VulkanContext {
             return Err(error);
         }
         self.destroy_buffer(&staging);
+        self.count_upload(data.len());
         Ok(buffer)
     }
 
@@ -949,7 +1054,7 @@ impl VulkanContext {
                 .map_err(|_| VulkanError::InitFailed("Vulkan command mutex poisoned".into()))?;
             self.begin_commands(&mut submission)?;
             self.record_buffer_copy(self.command_buffer, host, arena, 0, 0, size as u64);
-            self.submit_commands(&mut submission)
+            self.submit_transfer_commands(&mut submission)
         })();
         if let Err(error) = result {
             let _ = self.destroy_completed_buffers([&host, &arena]);
