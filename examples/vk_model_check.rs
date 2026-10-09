@@ -27,6 +27,7 @@ struct Arguments {
     mode: Mode,
     model: PathBuf,
     benchmark: bool,
+    cpu_benchmark: bool,
     compare_prefill_batches: Option<Vec<usize>>,
 }
 
@@ -49,17 +50,19 @@ fn arguments() -> Result<Arguments, String> {
         Some("embedding") => Mode::Embedding,
         _ => {
             return Err(
-                "usage: vk_model_check <llama|qwen3|qwen35|embedding> --model PATH [--benchmark] [--compare-prefill-batches 1,64]".into(),
+                "usage: vk_model_check <llama|qwen3|qwen35|embedding> --model PATH [--benchmark | --cpu-benchmark (qwen3)] [--compare-prefill-batches 1,64]".into(),
             )
         }
     };
     let mut model = None;
     let mut benchmark = false;
+    let mut cpu_benchmark = false;
     let mut compare_prefill_batches = None;
     while let Some(argument) = args.next() {
         match argument.as_str() {
+            "--cpu-benchmark" if mode == Mode::Qwen3 => cpu_benchmark = true,
             "--model" => model = Some(PathBuf::from(args.next().ok_or("--model needs a path")?)),
-            "--benchmark" if mode == Mode::Qwen3 => benchmark = true,
+            "--benchmark" if matches!(mode, Mode::Qwen3 | Mode::Llama) => benchmark = true,
             "--compare-prefill-batches" if mode != Mode::Embedding => {
                 compare_prefill_batches =
                     Some(parse_prefill_batches(&args.next().ok_or(
@@ -73,6 +76,7 @@ fn arguments() -> Result<Arguments, String> {
         mode,
         model: model.ok_or("--model is required")?,
         benchmark,
+        cpu_benchmark,
         compare_prefill_batches,
     })
 }
@@ -252,6 +256,8 @@ fn generate(
 struct BenchmarkSample {
     prompt: f64,
     decode: f64,
+    wall_ms: f64,
+    stats: rust_model_inference::vulkan::ComputeStats,
 }
 
 #[cfg(feature = "vulkan")]
@@ -272,6 +278,9 @@ fn benchmark_once(
     token_ids: &[u32],
     positions: &[[usize; 4]],
 ) -> Result<BenchmarkSample, String> {
+    let context = rust_model_inference::ops::get_vulkan_context();
+    let before = context.map(|c| c.compute_stats()).unwrap_or_default();
+    let started = std::time::Instant::now();
     session.reset_kv();
     let generation = generate(session, token_ids, positions, GREEDY_TOKENS + 1)?;
     generation
@@ -281,6 +290,10 @@ fn benchmark_once(
     Ok(BenchmarkSample {
         prompt: per_second(token_ids.len(), generation.prompt_duration),
         decode: per_second(GREEDY_TOKENS, generation.decode_duration),
+        wall_ms: started.elapsed().as_secs_f64() * 1000.0,
+        stats: context
+            .map(|c| c.compute_stats().since(before))
+            .unwrap_or_default(),
     })
 }
 
@@ -290,60 +303,77 @@ fn benchmark(
     gpu: &mut Qwen3Session<'_>,
     token_ids: &[u32],
     positions: &[[usize; 4]],
+    correctness: bool,
 ) -> Result<(), String> {
-    benchmark_once(cpu, token_ids, positions)?;
-    benchmark_once(gpu, token_ids, positions)?;
-    println!("benchmark warmup=complete backends=cpu,gpu");
+    paired_benchmark(correctness, |use_gpu| {
+        if use_gpu {
+            benchmark_once(gpu, token_ids, positions)
+        } else {
+            benchmark_once(cpu, token_ids, positions)
+        }
+    })
+}
 
-    let mut cpu_samples = Vec::with_capacity(5);
-    let mut gpu_samples = Vec::with_capacity(5);
-    for sample in 1..=5 {
-        let cpu_sample = benchmark_once(cpu, token_ids, positions)?;
-        println!(
-            "benchmark sample={sample} backend=cpu prompt_tps={:.3} decode_tps={:.3}",
-            cpu_sample.prompt, cpu_sample.decode
-        );
-        cpu_samples.push(cpu_sample);
-
-        let gpu_sample = benchmark_once(gpu, token_ids, positions)?;
-        println!(
-            "benchmark sample={sample} backend=gpu prompt_tps={:.3} decode_tps={:.3}",
-            gpu_sample.prompt, gpu_sample.decode
-        );
-        gpu_samples.push(gpu_sample);
+#[cfg(feature = "vulkan")]
+fn benchmark_order(round: usize) -> [bool; 2] {
+    if round % 2 == 0 {
+        [false, true]
+    } else {
+        [true, false]
     }
+}
 
-    let cpu_prompt = median(
-        &cpu_samples
+#[cfg(feature = "vulkan")]
+fn auto_gain_passes(cpu_wall: &[f64], gpu_wall: &[f64], correctness: bool) -> bool {
+    correctness
+        && cpu_wall.len() >= 5
+        && gpu_wall.len() == cpu_wall.len()
+        && cpu_wall
             .iter()
-            .map(|sample| sample.prompt)
-            .collect::<Vec<_>>(),
-    );
-    let cpu_decode = median(
-        &cpu_samples
-            .iter()
-            .map(|sample| sample.decode)
-            .collect::<Vec<_>>(),
-    );
-    let gpu_prompt = median(
-        &gpu_samples
-            .iter()
-            .map(|sample| sample.prompt)
-            .collect::<Vec<_>>(),
-    );
-    let gpu_decode = median(
-        &gpu_samples
-            .iter()
-            .map(|sample| sample.decode)
-            .collect::<Vec<_>>(),
-    );
-    let prompt_speedup = gpu_prompt / cpu_prompt;
-    let decode_speedup = gpu_decode / cpu_decode;
-    println!("benchmark median backend=cpu prompt_tps={cpu_prompt:.3} decode_tps={cpu_decode:.3}");
-    println!("benchmark median backend=gpu prompt_tps={gpu_prompt:.3} decode_tps={gpu_decode:.3}");
+            .chain(gpu_wall)
+            .all(|v| v.is_finite() && *v > 0.0)
+        && median(gpu_wall) <= 0.9 * median(cpu_wall)
+}
+
+#[cfg(feature = "vulkan")]
+fn paired_benchmark(
+    correctness: bool,
+    mut run: impl FnMut(bool) -> Result<BenchmarkSample, String>,
+) -> Result<(), String> {
+    run(false)?;
+    run(true)?;
+    println!("benchmark warmup=complete rounds=5 order=alternating correctness={correctness} scope=resident_decoder rss=external_process_peak");
+    let mut samples = [Vec::new(), Vec::new()];
+    for round in 0..5 {
+        for gpu in benchmark_order(round) {
+            let sample = run(gpu)?;
+            let backend = if gpu { "vulkan" } else { "cpu" };
+            println!("benchmark round={} backend={backend} prompt_tps={:.3} decode_tps={:.3} wall_ms={:.3} compute_submissions={} transfers={} uploads={} upload_bytes={} host_write_bytes={} host_read_bytes={} device_buffer_peak_bytes={}",
+                round+1, sample.prompt, sample.decode, sample.wall_ms,
+                sample.stats.submissions - sample.stats.transfer_submissions, sample.stats.transfer_submissions,
+                sample.stats.static_uploads, sample.stats.static_upload_bytes, sample.stats.host_write_bytes,
+                sample.stats.host_read_bytes, sample.stats.peak_allocation_bytes);
+            if !gpu && sample.stats.submissions != 0 {
+                return Err("CPU benchmark unexpectedly submitted Vulkan work".into());
+            }
+            samples[gpu as usize].push(sample);
+        }
+    }
+    for (i, name) in ["cpu", "vulkan"].iter().enumerate() {
+        let s = &samples[i];
+        println!(
+            "benchmark median backend={name} prompt_tps={:.3} decode_tps={:.3} wall_ms={:.3}",
+            median(&s.iter().map(|s| s.prompt).collect::<Vec<_>>()),
+            median(&s.iter().map(|s| s.decode).collect::<Vec<_>>()),
+            median(&s.iter().map(|s| s.wall_ms).collect::<Vec<_>>())
+        );
+    }
+    let cpu: Vec<_> = samples[0].iter().map(|s| s.wall_ms).collect();
+    let gpu: Vec<_> = samples[1].iter().map(|s| s.wall_ms).collect();
     println!(
-        "benchmark prompt_speedup={prompt_speedup:.3} decode_speedup={decode_speedup:.3} acceleration={}",
-        prompt_speedup > 1.0 && decode_speedup > 1.0
+        "benchmark wall_improvement_percent={:.3} threshold_passed={} auto_rule_enabled=false",
+        (1.0 - median(&gpu) / median(&cpu)) * 100.0,
+        auto_gain_passes(&cpu, &gpu, correctness)
     );
     Ok(())
 }
@@ -364,7 +394,7 @@ fn assert_close(name: &str, gpu: &[f32], cpu: &[f32]) -> Result<(), String> {
         let relative = absolute / cpu.abs().max(f32::MIN_POSITIVE);
         max_absolute = max_absolute.max(absolute);
         max_relative = max_relative.max(relative);
-        if !gpu.is_finite() || absolute > LOGIT_ABS + LOGIT_REL * cpu.abs() {
+        if !gpu.is_finite() || !cpu.is_finite() || absolute > LOGIT_ABS + LOGIT_REL * cpu.abs() {
             return Err(format!(
                 "{name} mismatch at {index}: gpu={gpu} cpu={cpu} abs={absolute} rel={relative}"
             ));
@@ -456,7 +486,12 @@ fn print_formats(model: &Qwen3Model, source: &dyn TensorSource) -> Result<(), St
 
 #[cfg(feature = "vulkan")]
 fn run_qwen3(arguments: &Arguments) -> Result<(), String> {
+    let started = std::time::Instant::now();
     let (source, tokenizer, model) = load_model(arguments)?;
+    println!(
+        "cold model_load_ms={:.3}",
+        started.elapsed().as_secs_f64() * 1000.0
+    );
     print_formats(&model, source.as_ref())?;
     // Exercise a committed prefix and a short tail in the batch-64 comparison.
     let prompt = if arguments.compare_prefill_batches.is_some() {
@@ -475,16 +510,53 @@ fn run_qwen3(arguments: &Arguments) -> Result<(), String> {
         .checked_add(GREEDY_TOKENS + 1)
         .ok_or("session capacity overflow")?;
 
-    let mut cpu = Qwen3Session::new(&model, capacity)?;
+    let started = std::time::Instant::now();
+    let mut cpu = Qwen3Session::new_with_compute(
+        &model,
+        capacity,
+        rust_model_inference::core::scratchpad::KvFormat::F16,
+        rust_model_inference::KvLifecycle::Ephemeral,
+        rust_model_inference::compute::ComputePolicy::Cpu,
+    )?;
+    println!("cold backend=cpu session_init_ms={:.3} kv=f16 threads=4 batch=64 context={capacity} input_ids={prompt_tokens:?}", started.elapsed().as_secs_f64()*1000.0);
+    if arguments.cpu_benchmark {
+        benchmark_once(&mut cpu, &prompt_tokens, &positions)?;
+        for round in 0..5 {
+            let sample = benchmark_once(&mut cpu, &prompt_tokens, &positions)?;
+            println!(
+                "cpu_benchmark round={round} prompt_tps={:.3} decode_tps={:.3} wall_ms={:.3}",
+                sample.prompt, sample.decode, sample.wall_ms
+            );
+        }
+        return Ok(());
+    }
     generate(&mut cpu, &prompt_tokens, &positions, 1)?;
     let cpu_logits = cpu.last_logits().to_vec();
     cpu.reset_kv();
     let cpu_tokens = generate(&mut cpu, &prompt_tokens, &positions, GREEDY_TOKENS + 1)?.token_ids;
 
+    let started = std::time::Instant::now();
     rust_model_inference::ops::enable_gpu();
     let context = rust_model_inference::ops::get_vulkan_context()
         .ok_or("Vulkan backend did not initialize")?;
-    let mut gpu = Qwen3Session::new(&model, capacity)?;
+    println!(
+        "cold context_init_ms={:.3}",
+        started.elapsed().as_secs_f64() * 1000.0
+    );
+    let started = std::time::Instant::now();
+    let before_upload = context.compute_stats();
+    let mut gpu = Qwen3Session::new_with_compute(
+        &model,
+        capacity,
+        rust_model_inference::core::scratchpad::KvFormat::F16,
+        rust_model_inference::KvLifecycle::Ephemeral,
+        rust_model_inference::compute::ComputePolicy::Vulkan,
+    )?;
+    println!(
+        "cold backend=vulkan session_init_ms={:.3} stats={:?}",
+        started.elapsed().as_secs_f64() * 1000.0,
+        context.compute_stats().since(before_upload)
+    );
     generate(&mut gpu, &prompt_tokens, &positions, 1)?;
     let gpu_logits = gpu.last_logits().to_vec();
     gpu.reset_kv();
@@ -492,38 +564,50 @@ fn run_qwen3(arguments: &Arguments) -> Result<(), String> {
     let gpu_tokens = generate(&mut gpu, &prompt_tokens, &positions, GREEDY_TOKENS + 1)?.token_ids;
     let submissions = context.submission_count() - before;
 
-    assert_close("prefill_logits", &gpu_logits, &cpu_logits)?;
-    let cpu_tokens = cpu_tokens
-        .get(..GREEDY_TOKENS)
-        .ok_or("CPU stopped before 32 greedy tokens")?;
-    let gpu_tokens = gpu_tokens
-        .get(..GREEDY_TOKENS)
-        .ok_or("Vulkan stopped before 32 greedy tokens")?;
-    if gpu_tokens != cpu_tokens {
-        return Err(format!(
-            "greedy token mismatch: gpu={gpu_tokens:?} cpu={cpu_tokens:?}"
-        ));
+    let correctness = (|| {
+        assert_close("prefill_logits", &gpu_logits, &cpu_logits)?;
+        let cpu_tokens = cpu_tokens
+            .get(..GREEDY_TOKENS)
+            .ok_or("CPU stopped before 32 greedy tokens")?;
+        let gpu_tokens = gpu_tokens
+            .get(..GREEDY_TOKENS)
+            .ok_or("Vulkan stopped before 32 greedy tokens")?;
+        if gpu_tokens != cpu_tokens {
+            return Err(format!(
+                "greedy token mismatch: gpu={gpu_tokens:?} cpu={cpu_tokens:?}"
+            ));
+        }
+        let expected_submissions = prompt_tokens
+            .len()
+            .div_ceil(rust_model_inference::core::prefill::DEFAULT_PREFILL_BATCH_SIZE)
+            + GREEDY_TOKENS;
+        if submissions != expected_submissions as u64 {
+            return Err(format!(
+                "expected one submission per token ({expected_submissions}), got {submissions}"
+            ));
+        }
+        println!(
+            "device={} prompt_tokens={} greedy_tokens={} submissions={submissions}",
+            context.device_name(),
+            prompt_tokens.len(),
+            GREEDY_TOKENS
+        );
+        println!("tokens={gpu_tokens:?}");
+        Ok(())
+    })();
+    if let Err(error) = &correctness {
+        eprintln!("correctness_failed: {error}");
     }
-    let expected_submissions = prompt_tokens
-        .len()
-        .div_ceil(rust_model_inference::core::prefill::DEFAULT_PREFILL_BATCH_SIZE)
-        + GREEDY_TOKENS;
-    if submissions != expected_submissions as u64 {
-        return Err(format!(
-            "expected one submission per token ({expected_submissions}), got {submissions}"
-        ));
-    }
-    println!(
-        "device={} prompt_tokens={} greedy_tokens={} submissions={submissions}",
-        context.device_name(),
-        prompt_tokens.len(),
-        GREEDY_TOKENS
-    );
-    println!("tokens={gpu_tokens:?}");
     if arguments.benchmark {
-        benchmark(&mut cpu, &mut gpu, &prompt_tokens, &positions)?;
+        benchmark(
+            &mut cpu,
+            &mut gpu,
+            &prompt_tokens,
+            &positions,
+            correctness.is_ok(),
+        )?;
     }
-    Ok(())
+    correctness
 }
 
 #[cfg(feature = "vulkan")]
@@ -567,6 +651,18 @@ fn qwen35_state_bits(session: &Qwen35Session<'_, '_>) -> Vec<u32> {
 }
 
 #[cfg(feature = "vulkan")]
+fn check_qwen35_submissions(actual: u64, chunks: usize, gpu: bool) -> Result<(), String> {
+    // Qwen3.5 flushes long command buffers between layers for driver correctness.
+    if (gpu && actual >= chunks as u64) || (!gpu && actual == 0) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Qwen3.5 submissions={actual}, chunks={chunks}, gpu={gpu}"
+        ))
+    }
+}
+
+#[cfg(feature = "vulkan")]
 fn compare_qwen35_prefill_batches(
     model: &mut Qwen35Model<'_>,
     tokens: &[u32],
@@ -596,21 +692,22 @@ fn compare_qwen35_prefill_batches(
     let pool = Arc::new(ComputePool::new(4));
     let mut baseline = None;
     for &batch in batches {
-        let mut session =
-            Qwen35Session::new_with_prefill_batch_size(model, capacity, batch, Arc::clone(&pool))?;
+        let mut session = Qwen35Session::new_with_compute(
+            model,
+            capacity,
+            batch,
+            Arc::clone(&pool),
+            if gpu {
+                rust_model_inference::compute::ComputePolicy::Vulkan
+            } else {
+                rust_model_inference::compute::ComputePolicy::Cpu
+            },
+        )?;
         let before = submissions();
         let mut logits = session.step_with_tokens(tokens, positions)?;
         let prefill_submissions = submissions() - before;
-        let expected = if gpu {
-            tokens.len().div_ceil(batch) as u64
-        } else {
-            0
-        };
-        if prefill_submissions != expected {
-            return Err(format!(
-                "batch={batch} expected {expected} prefill submissions, got {prefill_submissions}"
-            ));
-        }
+        let chunks = tokens.len().div_ceil(batch);
+        check_qwen35_submissions(prefill_submissions, chunks, gpu)?;
         let prompt_logits = logits
             .iter()
             .map(|value| value.to_bits())
@@ -629,12 +726,7 @@ fn compare_qwen35_prefill_batches(
             logits = session.step_with_tokens(&[token], &[[position, position, position, 0]])?;
         }
         let total_submissions = submissions() - before;
-        let expected_decode = if gpu { GREEDY_TOKENS as u64 } else { 0 };
-        if total_submissions != expected + expected_decode {
-            return Err(format!(
-                "batch={batch} decode submission count changed: {total_submissions}"
-            ));
-        }
+        check_qwen35_submissions(total_submissions - prefill_submissions, GREEDY_TOKENS, gpu)?;
         let result = (
             prompt_logits,
             prompt_state,
@@ -689,7 +781,13 @@ fn run_qwen35(arguments: &Arguments) -> Result<(), String> {
         .ok_or("session capacity overflow")?;
     let pool = Arc::new(ComputePool::new(4));
 
-    let mut cpu = Qwen35Session::new(&mut model, capacity, Arc::clone(&pool))?;
+    let mut cpu = Qwen35Session::new_with_compute(
+        &mut model,
+        capacity,
+        64,
+        Arc::clone(&pool),
+        rust_model_inference::compute::ComputePolicy::Cpu,
+    )?;
     let cpu_logits = cpu.step_with_tokens(&prompt_tokens, &positions)?;
     cpu.reset();
     let cpu_tokens = qwen35_generate(&mut cpu, &prompt_tokens, &positions, GREEDY_TOKENS + 1)?;
@@ -698,7 +796,13 @@ fn run_qwen35(arguments: &Arguments) -> Result<(), String> {
     rust_model_inference::ops::enable_gpu();
     let context = rust_model_inference::ops::get_vulkan_context()
         .ok_or("Vulkan backend did not initialize")?;
-    let mut gpu = Qwen35Session::new(&mut model, capacity, pool)?;
+    let mut gpu = Qwen35Session::new_with_compute(
+        &mut model,
+        capacity,
+        64,
+        pool,
+        rust_model_inference::compute::ComputePolicy::Vulkan,
+    )?;
     let gpu_logits = gpu.step_with_tokens(&prompt_tokens, &positions)?;
     assert_close("prefill_logits", &gpu_logits, &cpu_logits)?;
     gpu.reset();
@@ -721,11 +825,7 @@ fn run_qwen35(arguments: &Arguments) -> Result<(), String> {
         .len()
         .div_ceil(rust_model_inference::core::prefill::DEFAULT_PREFILL_BATCH_SIZE)
         + GREEDY_TOKENS;
-    if submissions != expected_submissions as u64 {
-        return Err(format!(
-            "expected one submission per prompt chunk and decode token ({expected_submissions}), got {submissions}"
-        ));
-    }
+    check_qwen35_submissions(submissions, expected_submissions, true)?;
     println!("formats=matmul={{BF16}};auxiliary={{F32}};backend=vulkan");
     println!(
         "device={} prompt_tokens={} greedy_tokens={} submissions={submissions}",
@@ -869,6 +969,7 @@ fn run_llama(arguments: &Arguments) -> Result<(), String> {
         .as_deref()
         .unwrap_or(&[1, 3, 64]);
     for &batch in batches {
+        let started = std::time::Instant::now();
         let mut cpu = LlamaSession::from_source_with_compute(
             source.as_ref(),
             4,
@@ -877,6 +978,11 @@ fn run_llama(arguments: &Arguments) -> Result<(), String> {
             batch,
             ComputePolicy::Cpu,
         )?;
+        println!(
+            "cold model=llama backend=cpu session_init_ms={:.3} batch={batch}",
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+        let started = std::time::Instant::now();
         let mut gpu = LlamaSession::from_source_with_compute(
             source.as_ref(),
             4,
@@ -885,6 +991,10 @@ fn run_llama(arguments: &Arguments) -> Result<(), String> {
             batch,
             ComputePolicy::Vulkan,
         )?;
+        println!(
+            "cold model=llama backend=vulkan session_init_including_context_ms={:.3} batch={batch}",
+            started.elapsed().as_secs_f64() * 1000.0
+        );
         let tokens = cpu.tokenizer.encode(
             &PROMPT.repeat(12),
             EncodeOptions {
@@ -932,6 +1042,36 @@ fn run_llama(arguments: &Arguments) -> Result<(), String> {
             cpu.reset();
             gpu.reset();
         }
+        if arguments.benchmark {
+            rust_model_inference::ops::enable_gpu();
+            let context =
+                rust_model_inference::ops::get_vulkan_context().ok_or("Vulkan context missing")?;
+            println!("benchmark model=llama kv=f16 threads=4 batch={batch} context=512 input_ids={tokens:?}");
+            paired_benchmark(true, |use_gpu| {
+                let session = if use_gpu { &mut gpu } else { &mut cpu };
+                let before = context.compute_stats();
+                let started = std::time::Instant::now();
+                session.reset();
+                let mut logits = session.forward_logits_chunked(&tokens, batch)?;
+                let prompt_time = started.elapsed();
+                let decode_started = std::time::Instant::now();
+                for _ in 0..GREEDY_TOKENS {
+                    let token = logits
+                        .iter()
+                        .enumerate()
+                        .max_by(|a, b| a.1.total_cmp(b.1))
+                        .unwrap()
+                        .0 as u32;
+                    logits = session.forward_logits_chunked(&[token], 1)?;
+                }
+                Ok(BenchmarkSample {
+                    prompt: per_second(tokens.len(), prompt_time),
+                    decode: per_second(GREEDY_TOKENS, decode_started.elapsed()),
+                    wall_ms: started.elapsed().as_secs_f64() * 1000.0,
+                    stats: context.compute_stats().since(before),
+                })
+            })?;
+        }
     }
     Ok(())
 }
@@ -939,6 +1079,23 @@ fn run_llama(arguments: &Arguments) -> Result<(), String> {
 #[cfg(feature = "vulkan")]
 fn run() -> Result<(), String> {
     let arguments = arguments()?;
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut file = std::fs::File::open(&arguments.model).map_err(|e| e.to_string())?;
+    let mut hash = Sha256::new();
+    let mut chunk = vec![0u8; 1024 * 1024];
+    loop {
+        let n = file.read(&mut chunk).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        hash.update(&chunk[..n]);
+    }
+    println!(
+        "model={} sha256={:x} cold_io=hash_scan_precedes_load",
+        arguments.model.display(),
+        hash.finalize()
+    );
     match arguments.mode {
         Mode::Llama => run_llama(&arguments),
         Mode::Qwen3 => run_qwen3(&arguments),
@@ -1010,5 +1167,35 @@ mod tests {
     fn benchmark_statistics_use_sorted_middle_and_elapsed_seconds() {
         assert_eq!(median(&[9.0, 1.0, 5.0, 3.0, 7.0]), 5.0);
         assert_eq!(per_second(8, Duration::from_millis(500)), 16.0);
+    }
+
+    #[test]
+    fn logit_check_rejects_non_finite_reference_and_output() {
+        for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert!(super::assert_close("fixture", &[1.0], &[invalid]).is_err());
+            assert!(super::assert_close("fixture", &[invalid], &[1.0]).is_err());
+        }
+    }
+
+    #[test]
+    fn qwen35_submission_check_allows_driver_safety_flushes_without_cpu_offload() {
+        assert!(super::check_qwen35_submissions(0, 80, false).is_ok());
+        assert!(super::check_qwen35_submissions(1, 80, false).is_err());
+        assert!(super::check_qwen35_submissions(80, 80, true).is_ok());
+        assert!(super::check_qwen35_submissions(560, 80, true).is_ok());
+        assert!(super::check_qwen35_submissions(79, 80, true).is_err());
+        assert!(super::check_qwen35_submissions(0, 80, true).is_err());
+    }
+
+    #[test]
+    fn auto_gate_requires_correctness_five_pairs_and_ten_percent_wall_gain() {
+        assert!(super::auto_gain_passes(&[100.0; 5], &[90.0; 5], true));
+        assert!(!super::auto_gain_passes(&[100.0; 5], &[91.0; 5], true));
+        assert!(!super::auto_gain_passes(&[100.0; 5], &[80.0; 5], false));
+        assert!(!super::auto_gain_passes(&[100.0; 4], &[80.0; 4], true));
+        assert!(!super::auto_gain_passes(&[100.0; 5], &[f64::NAN; 5], true));
+        assert_eq!(super::benchmark_order(0), [false, true]);
+        assert_eq!(super::benchmark_order(1), [true, false]);
+        assert_eq!(super::benchmark_order(4), [false, true]);
     }
 }

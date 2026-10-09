@@ -47,6 +47,26 @@ fn llama_cli_forced_policy_reaches_shared_session() {
     assert!(context.submission_count() > before);
 }
 
+#[cfg(feature = "vulkan")]
+#[test]
+#[ignore = "requires a Vulkan device"]
+fn llama_auto_keeps_unmeasured_workloads_on_cpu() {
+    use crate::compute::{ComputePolicy, UsedBackend};
+    ComputePolicy::Vulkan.context().unwrap().unwrap();
+    let source = fixture();
+    let mut session = LlamaSession::from_source_with_compute(
+        &source,
+        2,
+        KvFormat::F16,
+        96,
+        3,
+        ComputePolicy::Auto,
+    )
+    .unwrap();
+    session.forward_logits_chunked(&[1, 2, 3], 3).unwrap();
+    assert_eq!(session.used_backend(), UsedBackend::Cpu);
+}
+
 fn fixture_with_scale(scale: f32) -> DenseFixture {
     let mut source = DenseFixture {
         metadata: HashMap::new(),

@@ -387,8 +387,11 @@ impl<'a> LlamaSession<'a> {
             sliding_window,
             sliding_window_pattern,
         };
+        if compute_policy == crate::compute::ComputePolicy::Auto {
+            eprintln!("compute requested=Auto scope=llama_decoder backend=Cpu reason=no_validated_performance_bucket");
+        }
         #[cfg(feature = "vulkan")]
-        if compute_policy != crate::compute::ComputePolicy::Cpu {
+        if compute_policy == crate::compute::ComputePolicy::Vulkan {
             let attempt = (|| {
                 super::dense::eligible(&session)?;
                 if kv_format != KvFormat::F16 {
@@ -408,13 +411,7 @@ impl<'a> LlamaSession<'a> {
                 .map(Some)
                 .map_err(|e| e.to_string())
             })();
-            match attempt {
-                Ok(gpu) => session.gpu = gpu,
-                Err(error) if compute_policy == crate::compute::ComputePolicy::Vulkan => {
-                    return Err(error)
-                }
-                Err(error) => log::info!("compute Llama: CPU fallback: {error}"),
-            }
+            session.gpu = attempt?;
         }
         Ok(session)
     }
