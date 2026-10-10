@@ -1,14 +1,123 @@
 # 统一计算执行：实现与验收记录
 
-日期：2026-10-09。实施基线：`ce17cd5d04076e13f7e72b40bb58713630ac16c3`。
-实施计划：[八阶段计划](../superpowers/plans/2026-10-08-unified-compute-dispatch.md)。
+日期：2026-10-10。实施基线：`ce17cd5d04076e13f7e72b40bb58713630ac16c3`。
+实施采用八阶段计划；规划文件只在本地保留，不随 PR 提交。
 
 统一入口、两个 linear 消费者、共享 dense 执行、事务回退及 CLI/HTTP 策略已实现。
-真实 Qwen3 Q4_0 在本机的已测 bucket 获得端到端收益，但没有把任何新增 bucket
-切换为默认 Auto；Q4_K_M 未达到性能门槛，现有 Auto 资格保持不变。
-真实 Qwen 权重的数值偏差已修复，Qwen3 Q4_0/Q4_K_M 和 Qwen3.5 BF16
-已通过既定 logits 与 32-token greedy 门槛。最终 release 性能和回归结果见最新验收章。
-全量测试也有基线失败，不能把本分支描述为“全绿”或“Vulkan 全面可用”。
+本轮修复纯 Q8 在 ARM 上的真实模型偏差，以及 x86 的 Q8 激活量化边界。
+下面最新章节分别记录通过与失败：不能把短输入通过、相同 greedy token 或统一表达式
+当成所有 GPU 数值与模型均已通过。AMD 的长输入门禁仍未通过；PR 保持 Draft。
+
+## Q8 CPU 契约与自动分发复验（2026-10-10）
+
+本轮基线 `1f54d3affaf6841b4673f0087968f07c5ecb2b11`。
+本机 Apple M3 Max / ARM64 NEON / MoltenVK；远程 AMD EPYC 9334（128 logical CPUs）/
+AMD Radeon Graphics（RADV NAVI31）。两端使用 Rust 1.98.1、`release-fast`、Vulkan，
+没有改变 CPU kernel、logits 容差、Auto 资格或原权重存储格式。
+
+真实 fixture 为 `Qwen3-0.6B-Q8_0.gguf`，639446688 bytes，SHA-256：
+`9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031`。
+本机与远程逐文件校验一致；28 层的 Q/K/V/O、gate/up/down 和 output 均为 Q8_0。
+
+### 根因与修复
+
+原 Q8 shader 固定使用八路 FMA 流及 AVX2 的最终归约；ARM CPU 热路径先求完整
+32 元素块的整数 dot，再做一次 FMA。原设备测试也硬编码八路结果为 oracle，
+因此没有发现 ARM 契约遗漏。本机真实 prefill 的修复前首个 logit 为
+GPU `3.361459` / CPU `3.2769063`，绝对误差 `0.084552765`。
+逐层诊断发现 layer 0 差异约 1e-6，layer 1 attention 的 F16 舍入开始放大，
+随后 FFN 的激活量化放大；DP4A 与非 DP4A 均复现。
+
+现在 standalone / grouped、DP4A / 非 DP4A 使用同一个 CPU mode：
+AVX2 保留八路 FMA，NEON 使用整块整数 dot 后 FMA，scalar 使用整块整数 dot 后独立乘加。
+模式通过原未使用的 push 字段传递，模型调用方不增加 ISA/格式判断。
+Q8 设备回归直接使用独立的生产 CPU dispatch 作 oracle，检查 standalone 与 grouped
+的 raw bits，并保留 grouped 一次提交断言。原 standalone 回归先失败（2 ULP），修复后通过。
+
+远程继续暴露 Q8 激活量化的边界：AVX2 的倒数为 `127/amax`，NEON/scalar 为
+`1/(amax/127)`；前者与后者的 F32 舍入可以使结果从 -20 变成 -21。
+scalar 的整数舍入又是 ties away，SIMD 是 ties even。GPU quantizer 现在遵循同一 CPU mode。
+新增回归包含实际失败输入、F16 scale 舍入边界、正负半整数及其前驱、全零块；
+修复前 scalar 回归失败，修复后两端 quantized bytes、scale bits 均相同。
+
+两个改动过的 DP4A GLSL 使用 `GL_EXT_spirv_intrinsics` 发出原有 signed packed OpSDot，
+可用 CI 的 glslang 15.1.0 从源码重建，不再依赖该 compiler 不支持的 GLSL dot extension。
+
+### 数值与设备证据
+
+| 检查 | Apple M3 Max | EPYC / RADV NAVI31 |
+| --- | --- | --- |
+| 两个 Q8 CPU oracle 设备回归 | raw bits 一致 | raw bits 一致 |
+| `RMI_SCALAR=1` 两个 Q8 回归 | 2/2 pass | 2/2 pass |
+| `RUST_GPU_DP4A=0` 两个 Q8 回归 | grouped 非 DP4A，2/2 pass | grouped 非 DP4A，2/2 pass |
+| 真实 Q8，5-token prefill + 32 greedy | logits max_abs/max_rel=0；33 submissions | logits max_abs/max_rel=0；33 submissions |
+| 真实 Q8，129-token prefill + 32 greedy | logits max_abs/max_rel=0；35 submissions | **失败**：首个 logit abs=0.020405293，超出原门槛 |
+| 真实 Q8，133 tokens，B=1/64 | 各后端内部 logits、prompt/decode KV、greedy 逐位一致；prefill 133→3 submits | 未复验 |
+| `vk_ops_check --all-formats --rows 3` | pass | Q8/全格式 batched、量化、attention-score 通过后，**long softmax 失败** |
+| 相关设备/state/失败回退回归 | 23/23 pass | 22/22 pass；`vk_ops_check` 的 long-softmax 门禁失败 |
+
+133-token B=1/64 证明同一个后端内部跨 batch 一致；它不能替代 CPU/GPU 跨后端门禁。
+所有模型门槛仍为 `abs <= 2e-3 + 2e-3 * abs(CPU)`；已有 raw-bit 检查没有放宽。
+初始化真实模型的 static uploads 为 310，633495552 bytes；decode 不重新上传权重。
+
+### 真实 CLI 的自动分发
+
+两端独立进程使用相同真实模型、prompt “法国的首都是”、`--max-tokens 32 --temp 0
+--threads 8 --kv-cache f16`，实际生成 8 个输出 token。
+
+- `--compute cpu`：`backend=Cpu`，没有 Vulkan 初始化。
+- `--compute auto`：`scope=resident_decoder backend=Vulkan`；实际执行 GPU。
+- `--compute vulkan`：同样使用 resident Vulkan，没有 CPU fallback。
+- 三者生成文本相同。GPU cumulative submissions 从 prefill 后的 2 增至 10，
+  static uploads 始终为 311；与模型检查的 310 差一个 warmup upload，计数口径不同。
+- 本机以无效 `VK_ICD_FILENAMES` 在新进程复验：Auto 明确记录初始化失败并在 CPU 完成，
+  强制 Vulkan 返回错误、exit 1；没有把回退算作 GPU 通过。
+- 默认 F32 KV 的 Auto 在 CPU 执行；强制 Vulkan 明确要求 F16 KV，不会悄悄改变 KV 精度。
+
+本轮只验证现有路由与数值，没有测量/准入新的性能 bucket；上述 CLI 耗时受并行验证
+和缓存状态影响，不作为端到端性能结论。
+
+### 保留的失败与下一步
+
+RADV 的 107-score 独立回归在 index 20 输出 GPU `0x3c32c000` / CPU `0x3c32e000`，
+相差一个 F16 ULP。诊断确认指数与求和的 CPU 参照正确，GPU sum high/low 为
+`9.338327407836914` / `-1.525040715932846e-7`，与完整 CPU sum 相同；
+GPU 最终归一化倒数为 `0x3ddb4fac`，CPU 为 `0x3ddb4fad`，随后概率跨过 F16 舍入边界。
+该失败已保留为独立 ignored 设备回归，没有更改 expected 或容差。
+本机候选 shader 探针不构成 AMD 修复证明；远程 SSH 随后连续断开，候选修复尚未完成
+目标设备验证。不能声称 AMD 长输入、其他驱动或所有量化格式真实模型已通过。
+
+本机 Vulkan 全库在禁用全局 GPU 路由的环境下为
+1261 passed / 27 failed / 137 ignored；与本轮量化修复前运行的失败名称相同。
+其中 `initializes_with_homebrew_moltenvk` 因故意禁用 ICD 失败；其余 26 个名称也出现在
+下方历史失败列表。没有为本轮重新构建独立 HEAD 基线，因此不宣称已排除所有新增失败。
+新增 long-softmax 回归为 ignored，并不掩盖上述远程失败。
+
+Shader manifest、全部 SPIR-V 验证、改动 shader 的字节重建及完整 check 脚本通过；
+未改动的 tiled DP4A 在 15.1.0 缺少其 GLSL extension 时仍按原脚本跳过重建。
+没有重新运行 Z-Image 整图、MoE/VL 接入、其他真实量化模型、外部 llama.cpp/PyTorch oracle。
+临时 layer/softmax trace 已清理，`docs/superpowers/` 和生成日志不提交。
+
+复现（使用本机路径；远程 fixture 位于 repo `target/q8-fixtures/`）：
+
+```bash
+cargo build --locked --profile release-fast --features vulkan \
+  --example vk_ops_check --example vk_model_check --bin rust-model-inference
+cargo test --locked --profile release-fast --features vulkan --lib \
+  vulkan_q8_ -- --ignored --test-threads=1
+RMI_SCALAR=1 cargo test --locked --profile release-fast --features vulkan --lib \
+  vulkan_q8_ -- --ignored --test-threads=1
+
+target/release-fast/examples/vk_model_check qwen3 \
+  --model models/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf
+target/release-fast/examples/vk_model_check qwen3 \
+  --model models/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf --prompt-repeats 32
+RMI_COMPUTE_TRACE=1 target/release-fast/rust-model-inference \
+  --model models/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf --prompt '法国的首都是' \
+  --max-tokens 32 --temp 0 --threads 8 --kv-cache f16 --compute auto
+```
+
+以下各节为此前的验收记录，只按对应日期、设备和源码解释。
 
 ## 真实权重数值与性能门禁修复（2026-10-09）
 
@@ -101,7 +210,7 @@ VAE 9.206 s、总计 264.733 s；PNG SHA-256 为
 ## 共享算子表达验收（2026-10-09）
 
 本轮基线：`409c2f19b240dd126f8cdb4b9246ff3b2b059cfc`。
-[实施范围与验收条件](../superpowers/plans/2026-10-09-shared-dense-operators.md)。
+实施范围与验收条件保存在本地规划文件中，不随 PR 提交。
 
 `DenseOp` 携带张量输入、输出及权重角色，`run_dense_layer` 唯一表达 dense
 前向的连接和 FFN 公式。Qwen3、标准 Llama 的 CPU 适配器共用 `DenseCpu` 的

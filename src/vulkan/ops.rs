@@ -3855,7 +3855,7 @@ fn quantize_rows_push(
     rows: usize,
     input_stride: usize,
     block_elements: usize,
-) -> Result<[u32; 10], VulkanError> {
+) -> Result<[u32; 11], VulkanError> {
     if !matches!(block_elements, 32 | 256) || count == 0 || count % block_elements != 0 {
         return Err(VulkanError::UnsupportedShape(
             "invalid Vulkan quantization width".into(),
@@ -3906,6 +3906,7 @@ fn quantize_rows_push(
             blocks,
             blocks,
             rows_u32,
+            q8_dot_mode(),
         ])
     } else {
         Ok([
@@ -3918,6 +3919,7 @@ fn quantize_rows_push(
             blocks,
             rows_u32,
             u32::from(crate::ops::has_avx2_fma()),
+            0,
             0,
         ])
     }
@@ -3951,6 +3953,17 @@ fn attention_dot_mode(width: usize) -> u32 {
         1
     } else if width >= 8 && crate::ops::has_avx2_fma() && crate::ops::has_f16c() {
         8
+    } else {
+        0
+    }
+}
+
+// Q8's CPU kernel reduces a whole integer block on NEON, but keeps eight AVX2 streams.
+pub(super) fn q8_dot_mode() -> u32 {
+    if crate::ops::has_avx2_fma() {
+        8
+    } else if crate::ops::has_neon() {
+        1
     } else {
         0
     }
@@ -4079,6 +4092,9 @@ fn matmul_rows_push(
             f32_bytes(blocks)?,
             "Q4_1 input sums",
         )?;
+    }
+    if format == GpuWeightFormat::Q8_0 {
+        push[14] = q8_dot_mode();
     }
     push[2] = as_u32(n_in, "matmul width")?;
     push[3] = as_u32(blocks, "matmul blocks")?;
@@ -5984,7 +6000,7 @@ fn check_quantize_q8_k_exact(context: &VulkanContext) -> Result<(), String> {
 }
 
 fn check_quantize_tie_even(context: &VulkanContext) -> Result<(), String> {
-    const COUNT: usize = 64;
+    const COUNT: usize = 128;
     let layout =
         ArenaLayout::for_dims(COUNT, COUNT, 1, 1, COUNT).map_err(|error| error.to_string())?;
     let ops = Qwen3Ops::new(context, layout, 1).map_err(|error| error.to_string())?;
@@ -5994,6 +6010,16 @@ fn check_quantize_tie_even(context: &VulkanContext) -> Result<(), String> {
     // AuK CFG input: division gives 0x3d80d001; multiplying a reciprocal
     // gives 0x3d80d000 and rounds to a different F16 scale.
     input[32] = f32::from_bits(0x40ff9cc1);
+    // Exact ties and their predecessors distinguish scalar rounding from SIMD.
+    input[64..71].copy_from_slice(&[
+        127.0,
+        0.5,
+        -0.5,
+        20.5,
+        -20.5,
+        f32::from_bits(0x3effffff),
+        -f32::from_bits(0x3effffff),
+    ]);
     ops.write_f32(layout.x, &input)
         .map_err(|error| error.to_string())?;
 
@@ -6463,8 +6489,15 @@ fn check_close(
 #[cfg(test)]
 mod tests {
     #[test]
-    #[ignore = "requires a Vulkan device; checks the canonical Q8 reduction bits"]
-    fn vulkan_q8_grouped_preserves_eight_stream_reduction() {
+    #[ignore = "requires a Vulkan device; compares Q8 quantization to the CPU kernel"]
+    fn vulkan_q8_quantization_matches_cpu_bits() {
+        let context = crate::vulkan::VulkanContext::new().unwrap();
+        super::check_quantize_tie_even(&context).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device; compares to the production CPU Q8 kernel"]
+    fn vulkan_q8_matches_cpu_reduction_bits() {
         use super::{BatchedLinearRuntime, GpuWeightFormat::Q8_0};
         const WIDTH: usize = 1024;
         const OUTPUTS: usize = 65;
@@ -6473,29 +6506,28 @@ mod tests {
         let input: Vec<_> = (0..3 * WIDTH)
             .map(|i| ((i * 29 % 251) as f32 - 125.0) / 97.0)
             .collect();
-        let mut expected = Vec::new();
-        for input in input.chunks_exact(WIDTH) {
+        let mut expected = vec![0.0; 3 * OUTPUTS];
+        let mut single = vec![f32::NAN; OUTPUTS];
+        for (input, expected) in input
+            .chunks_exact(WIDTH)
+            .zip(expected.chunks_exact_mut(OUTPUTS))
+        {
             let mut q8 = vec![0; WIDTH];
             let mut scales = vec![0.0; WIDTH / 32];
             crate::ops::quantize_q8_0_into(input, WIDTH, &mut q8, &mut scales);
-            for row in weight.chunks_exact(WIDTH / 32 * 34) {
-                let mut acc = [0.0f32; 8];
-                for (block, bytes) in row.chunks_exact(34).enumerate() {
-                    let scale = crate::ops::f16_to_f32(u16::from_le_bytes([bytes[0], bytes[1]]))
-                        * scales[block];
-                    for (group, value) in acc.iter_mut().enumerate() {
-                        let dot: i32 = (0..4)
-                            .map(|i| {
-                                i32::from(bytes[2 + group * 4 + i] as i8)
-                                    * i32::from(q8[block * 32 + group * 4 + i] as i8)
-                            })
-                            .sum();
-                        *value = (dot as f32).mul_add(scale, *value);
-                    }
-                }
-                expected.push(
-                    ((acc[0] + acc[4]) + (acc[1] + acc[5]))
-                        + ((acc[2] + acc[6]) + (acc[3] + acc[7])),
+            crate::ops::kernel::q8_0::dispatch::matmul_q8_0_quantized_range(
+                &weight, &q8, &scales, expected, WIDTH, 0, OUTPUTS,
+            );
+            unsafe {
+                context
+                    .matmul_q8_0(&weight, &q8, &scales, &mut single, WIDTH, OUTPUTS)
+                    .unwrap();
+            }
+            for (index, (actual, expected)) in single.iter().zip(expected).enumerate() {
+                assert_eq!(
+                    actual.to_bits(),
+                    expected.to_bits(),
+                    "standalone Q8 reduction at {index}"
                 );
             }
         }
@@ -6510,7 +6542,7 @@ mod tests {
             assert_eq!(
                 actual.to_bits(),
                 expected.to_bits(),
-                "Q8 reduction at {index}"
+                "grouped Q8 reduction at {index}"
             );
         }
     }

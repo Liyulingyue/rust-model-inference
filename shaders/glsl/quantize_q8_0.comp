@@ -16,6 +16,7 @@ layout(push_constant) uniform PC {
     uint scales_stride;
     uint input_sums_stride;
     uint token_rows;
+    uint cpu_mode;
 } pc;
 
 shared float values[32];
@@ -26,6 +27,13 @@ shared float inverse_scale;
 shared float raw_scale;
 
 #include "f32_divide.glsl"
+
+int round_away(float value) {
+    float magnitude = abs(value);
+    float integral = floor(magnitude);
+    // Adding 0.5 first incorrectly rounds its predecessor up to 1.0.
+    return int(sign(value) * (integral + (magnitude - integral >= 0.5 ? 1.0 : 0.0)));
+}
 
 void main() {
     uint row = gl_WorkGroupID.z;
@@ -55,8 +63,10 @@ void main() {
         raw_scale = scale;
         inverse_scale = partial[0] == 0.0
             ? 0.0
-            // Match CPU's rounded scale before taking its reciprocal.
-            : divide_finite_normal(1.0, scale);
+            // AVX2 divides directly; NEON/scalar use the rounded scale's reciprocal.
+            : (pc.cpu_mode == 8u
+                ? divide_finite_normal(127.0, partial[0])
+                : divide_finite_normal(1.0, scale));
         float stored_scale = round_f16_rte(scale);
         arena.data[pc.scales_word + scales_base + block] = floatBitsToUint(stored_scale);
     }
@@ -67,7 +77,7 @@ void main() {
         for (uint byte_index = 0u; byte_index < 4u; byte_index++) {
             uint value_index = lane * 4u + byte_index;
             precise float scaled = values[value_index] * inverse_scale;
-            int quantized = int(roundEven(scaled));
+            int quantized = pc.cpu_mode == 0u ? round_away(scaled) : int(roundEven(scaled));
             quantized = clamp(quantized, -128, 127);
             quantized_values[value_index] = quantized;
             packed |= (uint(quantized) & 0xffu) << (byte_index * 8u);

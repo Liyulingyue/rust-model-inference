@@ -1,5 +1,8 @@
 #version 450
-#extension GL_EXT_integer_dot_product : require
+#extension GL_EXT_spirv_intrinsics : require
+// glslang 15 lacks the GLSL dot extension; emit its signed packed SPIR-V instruction.
+spirv_instruction(extensions = ["SPV_KHR_integer_dot_product"], capabilities = [6018, 6019], id = 4450)
+int dotPacked4x8EXT(int a, int b, spirv_literal uint format);
 // dp4a variant: inner loop uses packed 4x int8 dot products.
 layout(local_size_x = 64) in;
 layout(std430, binding = 0) readonly buffer W  { uint w_data[]; };
@@ -33,30 +36,34 @@ void main() {
     uint row = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
     if (row >= dims.y) return;
     uint row_off = row * dims.w;
-    // Match the CPU's eight independent FMA streams, including their reduction.
-    // ponytail: eight active lanes; preserve this order when tuning occupancy.
+    // NEON/scalar reduce the integer block first; AVX2 keeps eight FMA streams.
+    uint streams = dims.x == 8u ? 8u : 1u;
     precise float acc = 0.0;
-    for (uint block = 0u; lid < 8u && block < bpr; block++) {
+    for (uint block = 0u; lid < streams && block < bpr; block++) {
         uint w_off = row_off + block * 34u;
         uint s_word = w_data[w_off >> 2u];
         uint s_bits = ((w_off & 3u) == 0u) ? (s_word & 0xFFFFu) : ((s_word >> 16u) & 0xFFFFu);
         float w_scale = f16_decode(s_bits);
         uint w_body = w_off + 2u;
-        uint g_off = w_body + lid * 4u;
-        uint w0 = w_data[g_off >> 2u];
-        uint w1 = w_data[(g_off >> 2u) + 1u];
-        uint sh = (g_off & 3u) * 8u;
-        uint packed = (sh == 0u) ? w0 : ((w0 >> sh) | (w1 << (32u - sh)));
-        uint i_word = s_input[block * 8u + lid];
-        int dot = dotPacked4x8EXT(int(packed), int(i_word));
+        int dot = 0;
+        for (uint group = lid; group < 8u; group += streams) {
+            uint g_off = w_body + group * 4u;
+            uint w0 = w_data[g_off >> 2u];
+            uint w1 = w_data[(g_off >> 2u) + 1u];
+            uint sh = (g_off & 3u) * 8u;
+            uint packed = (sh == 0u) ? w0 : ((w0 >> sh) | (w1 << (32u - sh)));
+            uint i_word = s_input[block * 8u + group];
+            dot += dotPacked4x8EXT(int(packed), int(i_word), 0u);
+        }
         float scale = w_scale * i_scales[block];
-        acc = fma(float(dot), scale, acc);
+        precise float product = float(dot) * scale;
+        acc = dims.x == 0u ? acc + product : fma(float(dot), scale, acc);
     }
     if (lid < 8u) s_red[lid] = acc;
     barrier();
     if (lid == 0u) {
         precise float sum01 = (s_red[0] + s_red[4]) + (s_red[1] + s_red[5]);
         precise float sum23 = (s_red[2] + s_red[6]) + (s_red[3] + s_red[7]);
-        o_data[row] = sum01 + sum23;
+        o_data[row] = streams == 8u ? sum01 + sum23 : s_red[0];
     }
 }

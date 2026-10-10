@@ -729,10 +729,10 @@ impl VulkanContext {
             &[],
         );
 
-        // dims = [n_in, n_out, blocks_per_row, row_stride_bytes]; the shader
+        // dims = [reduction_mode, n_out, blocks_per_row, row_stride_bytes]; the shader
         // addresses `weight` with byte offsets extracted from u32 words.
         let push_constants: [u32; 4] = [
-            n_in as u32,
+            ops::q8_dot_mode(),
             n_out as u32,
             blocks_per_row as u32,
             (blocks_per_row * 34) as u32,
