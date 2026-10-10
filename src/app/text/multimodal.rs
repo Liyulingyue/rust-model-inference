@@ -115,32 +115,22 @@ pub fn run_qwen3_family_multimodal(
                 (grid.image_width(), grid.image_height())
             }
             crate::app::media::ProjectorFamily::Qwen25Omni => {
-                let mut encoder = VisionEncoder35::from_source(
-                    mmproj.as_ref(),
-                    std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(
-                        n_threads_arg.max(1),
-                    )),
-                )
-                .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
+                let mut config = VisionEncoder35::load_config_only(mmproj.as_ref())
+                    .map_err(|error| format!("Failed to parse vision config: {error}"))?;
                 if is_video {
-                    encoder.config.image_min_pixels = encoder.config.video_min_pixels;
-                    encoder.config.image_max_pixels = encoder.config.video_max_pixels;
+                    config.image_min_pixels = config.video_min_pixels;
+                    config.image_max_pixels = config.video_max_pixels;
                 }
-                let grid = qwen35_smart_resize(first_w, first_h, &encoder.config)?;
+                let grid = qwen35_smart_resize(first_w, first_h, &config)?;
                 (grid.image_width(), grid.image_height())
             }
             crate::app::media::ProjectorFamily::NemotronV2Vl => {
                 // Upstream uses `mtmd_image_preprocessor_fixed_size`, so the
                 // projector always sees the config's image_size regardless of
                 // the input aspect ratio.
-                let encoder = ZdtVisionEncoder::from_source(
-                    mmproj.as_ref(),
-                    std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(
-                        n_threads_arg.max(1),
-                    )),
-                )
-                .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
-                (encoder.config.image_size, encoder.config.image_size)
+                let config = ZdtVisionEncoder::load_config_only(mmproj.as_ref())
+                    .map_err(|error| format!("Failed to parse ZDT vision config: {error}"))?;
+                (config.image_size, config.image_size)
             }
         };
         let (mean, std) = match family {
@@ -155,24 +145,14 @@ pub fn run_qwen3_family_multimodal(
                 (encoder.config.image_mean, encoder.config.image_std)
             }
             crate::app::media::ProjectorFamily::Qwen25Omni => {
-                let encoder = VisionEncoder35::from_source(
-                    mmproj.as_ref(),
-                    std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(
-                        n_threads_arg.max(1),
-                    )),
-                )
-                .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
-                (encoder.config.image_mean, encoder.config.image_std)
+                let config = VisionEncoder35::load_config_only(mmproj.as_ref())
+                    .map_err(|error| format!("Failed to parse vision config: {error}"))?;
+                (config.image_mean, config.image_std)
             }
             crate::app::media::ProjectorFamily::NemotronV2Vl => {
-                let encoder = ZdtVisionEncoder::from_source(
-                    mmproj.as_ref(),
-                    std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(
-                        n_threads_arg.max(1),
-                    )),
-                )
-                .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
-                (encoder.config.image_mean, encoder.config.image_std)
+                let config = ZdtVisionEncoder::load_config_only(mmproj.as_ref())
+                    .map_err(|error| format!("Failed to parse ZDT vision config: {error}"))?;
+                (config.image_mean, config.image_std)
             }
         };
         let normalized = frames
@@ -576,42 +556,27 @@ pub fn run_qwen3_family_multimodal_logits(
                 (grid.image_width(), grid.image_height())
             }
             crate::app::media::ProjectorFamily::Qwen25Omni => {
-                let mut encoder = VisionEncoder35::from_source(
-                    mmproj.as_ref(),
-                    std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(
-                        n_threads_arg.max(1),
-                    )),
-                )
-                .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
+                let mut config = VisionEncoder35::load_config_only(mmproj.as_ref())
+                    .map_err(|error| format!("Failed to parse vision config: {error}"))?;
                 if is_video {
-                    encoder.config.image_min_pixels = encoder.config.video_min_pixels;
-                    encoder.config.image_max_pixels = encoder.config.video_max_pixels;
+                    config.image_min_pixels = config.video_min_pixels;
+                    config.image_max_pixels = config.video_max_pixels;
                 }
-                let grid = qwen35_smart_resize(first_w, first_h, &encoder.config)?;
+                let grid = qwen35_smart_resize(first_w, first_h, &config)?;
                 (grid.image_width(), grid.image_height())
             }
             crate::app::media::ProjectorFamily::NemotronV2Vl => {
-                let encoder = ZdtVisionEncoder::from_source(
-                    mmproj.as_ref(),
-                    std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(
-                        n_threads_arg.max(1),
-                    )),
-                )
-                .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
                 // `mtmd_image_preprocessor_fixed_size`: always the config size.
-                (encoder.config.image_size, encoder.config.image_size)
+                let config = ZdtVisionEncoder::load_config_only(mmproj.as_ref())
+                    .map_err(|error| format!("Failed to parse ZDT vision config: {error}"))?;
+                (config.image_size, config.image_size)
             }
         };
         let norm_stats = match family {
             crate::app::media::ProjectorFamily::NemotronV2Vl => {
-                let encoder = ZdtVisionEncoder::from_source(
-                    mmproj.as_ref(),
-                    std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(
-                        n_threads_arg.max(1),
-                    )),
-                )
-                .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
-                (encoder.config.image_mean, encoder.config.image_std)
+                let config = ZdtVisionEncoder::load_config_only(mmproj.as_ref())
+                    .map_err(|error| format!("Failed to parse ZDT vision config: {error}"))?;
+                (config.image_mean, config.image_std)
             }
             _ => ([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
         };

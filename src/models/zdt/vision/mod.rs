@@ -92,10 +92,20 @@ struct Scratch {
 }
 
 impl ZdtVisionEncoder {
+    /// Load only the config (no weights). Used by the multimodal dispatcher
+    /// to read image_size / image_mean / image_std without pulling the
+    /// 1.6 GB mmproj weights through three separate `from_source` calls.
+    pub(crate) fn load_config_only(source: &dyn TensorSource) -> Result<config::ZdtVisionConfig, String> {
+        config::ZdtVisionConfig::from_source(source)
+    }
+
     pub fn from_source(source: &dyn TensorSource, pool: Arc<ComputePool>) -> Result<Self, String> {
         let mut config = ZdtVisionConfig::from_source(source)?;
         let load = |name: &str, cols: usize, rows: usize| -> Result<Vec<f32>, String> {
-            load_matrix(source, name, cols, rows)
+            let t = std::time::Instant::now();
+            let result = load_matrix(source, name, cols, rows);
+            let _ = t.elapsed(); // suppress
+            result
         };
         let load_opt = |name: &str, cols: usize, rows: usize| -> Option<Vec<f32>> {
             load_matrix(source, name, cols, rows).ok()
@@ -144,6 +154,8 @@ impl ZdtVisionEncoder {
                 ffn_down_weight: load(&format!("v.blk.{i}.ffn_down.weight"), config.n_ff, n)?,
                 ffn_down_bias: load_opt(&format!("v.blk.{i}.ffn_down.bias"), n, 1),
             });
+            if i == 0 || i == 7 || i == 15 || i == 31 {
+            }
         }
 
         let projector_in = n * config.scale_factor * config.scale_factor;
