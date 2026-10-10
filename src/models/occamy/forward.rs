@@ -128,7 +128,12 @@ pub(crate) fn forward_occamy_moe_token(
     prepared.matmul_group(
         input,
         [
-            (&moe.shared_gate, &mut shared_scalar),
+            // shared_gate is the per-channel SiLU gate projection; shared_scalar
+            // is the sigmoid gate scalar (different output shapes). The
+            // previous wiring wrote shared_gate -> shared_scalar, leaving
+            // shared_gate_proj at zero and making the entire shared expert
+            // contribute nothing to the output (the WIP "expert FFN wrong").
+            (&moe.shared_gate, &mut shared_gate_proj),
             (&moe.shared_up, &mut shared_up_proj),
         ],
         pool,
