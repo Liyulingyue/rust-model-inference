@@ -102,10 +102,7 @@ impl ZdtVisionEncoder {
     pub fn from_source(source: &dyn TensorSource, pool: Arc<ComputePool>) -> Result<Self, String> {
         let mut config = ZdtVisionConfig::from_source(source)?;
         let load = |name: &str, cols: usize, rows: usize| -> Result<Vec<f32>, String> {
-            let t = std::time::Instant::now();
-            let result = load_matrix(source, name, cols, rows);
-            let _ = t.elapsed(); // suppress
-            result
+            load_matrix(source, name, cols, rows)
         };
         let load_opt = |name: &str, cols: usize, rows: usize| -> Option<Vec<f32>> {
             load_matrix(source, name, cols, rows).ok()
