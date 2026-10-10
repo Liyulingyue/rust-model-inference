@@ -1277,9 +1277,21 @@ fn eligibility_facts(model: &Qwen35Model<'_>) -> EligibilityFacts {
     }
     for (layer_index, layer) in model.layers.iter().enumerate() {
         facts.weight_formats.extend([
-            layer.ffn_gate.ggml_type,
-            layer.ffn_up.ggml_type,
-            layer.ffn_down.ggml_type,
+            layer
+                .ffn_gate
+                .as_ref()
+                .map(|w| w.ggml_type)
+                .unwrap_or_default(),
+            layer
+                .ffn_up
+                .as_ref()
+                .map(|w| w.ggml_type)
+                .unwrap_or_default(),
+            layer
+                .ffn_down
+                .as_ref()
+                .map(|w| w.ggml_type)
+                .unwrap_or_default(),
         ]);
         if model.config.is_recurrent[layer_index] {
             let weights = [

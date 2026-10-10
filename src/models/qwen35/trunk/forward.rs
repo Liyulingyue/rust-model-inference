@@ -46,6 +46,7 @@ impl<'a> super::weights::HybridTrunk<'a> {
         scratch: &mut super::scratch::Qwen35Scratchpad,
         pool: &ComputePool,
         mrope_positions: &[[usize; 4]],
+        occamy_moe: Option<&[crate::models::occamy::weights::OccamyMoeWeights<'_>]>,
     ) -> Result<Vec<f32>, String> {
         self.forward_impl(
             n_tokens,
@@ -55,6 +56,7 @@ impl<'a> super::weights::HybridTrunk<'a> {
             pool,
             mrope_positions,
             None,
+            occamy_moe,
         )
     }
 
@@ -66,6 +68,7 @@ impl<'a> super::weights::HybridTrunk<'a> {
         scratch: &mut super::scratch::Qwen35Scratchpad,
         pool: &ComputePool,
         mrope_positions: &[[usize; 4]],
+        occamy_moe: Option<&[crate::models::occamy::weights::OccamyMoeWeights<'_>]>,
     ) -> Result<Vec<f32>, String> {
         self.forward_impl(
             n_tokens,
@@ -75,6 +78,7 @@ impl<'a> super::weights::HybridTrunk<'a> {
             pool,
             mrope_positions,
             None,
+            occamy_moe,
         )
     }
 
@@ -87,6 +91,7 @@ impl<'a> super::weights::HybridTrunk<'a> {
         pool: &ComputePool,
         mrope_positions: &[[usize; 4]],
         edge0_moe: Option<&[Edge0MoeWeights<'_>]>,
+        occamy_moe: Option<&[crate::models::occamy::weights::OccamyMoeWeights<'_>]>,
     ) -> Result<Vec<f32>, String> {
         let edge0 = edge0_moe.is_some();
         if mrope_positions.len() != n_tokens {
@@ -342,12 +347,31 @@ impl<'a> super::weights::HybridTrunk<'a> {
             let buf_len = n_tokens * n_embd;
             let ffn_input = unsafe { std::slice::from_raw_parts(buf_ptr, buf_len) };
             let edge0_input = edge0_moe.map(|_| ffn_input.to_vec());
-            self.forward_ffn_parallel(layer, ffn_input, n_tokens, scratch, pool, edge0);
+            let occamy_input = occamy_moe.map(|_| ffn_input.to_vec());
+            if edge0_moe.is_none() && occamy_moe.is_none() {
+                self.forward_ffn_parallel(layer, ffn_input, n_tokens, scratch, pool, edge0);
+            }
             if let Some(moe) = edge0_moe.map(|layers| &layers[il]) {
                 let ffn_input = edge0_input.as_ref().unwrap();
                 for token in 0..n_tokens {
                     let offset = token * n_embd;
                     forward_edge0_moe_token(
+                        moe,
+                        &ffn_input[offset..offset + n_embd],
+                        &mut scratch.buf[offset..offset + n_embd],
+                        &mut scratch.prepared,
+                        pool,
+                        il,
+                        token,
+                    )?;
+                }
+            } else if let Some(moe) = occamy_moe.map(|layers| &layers[il]) {
+                // Occamy shares the trunk but gates its shared expert through a
+                // sigmoid, so it cannot ride the Edge0 path.
+                let ffn_input = occamy_input.as_ref().unwrap();
+                for token in 0..n_tokens {
+                    let offset = token * n_embd;
+                    crate::models::occamy::forward::forward_occamy_moe_token(
                         moe,
                         &ffn_input[offset..offset + n_embd],
                         &mut scratch.buf[offset..offset + n_embd],
@@ -1063,17 +1087,33 @@ impl<'a> super::weights::HybridTrunk<'a> {
         pool: &ComputePool,
         edge0: bool,
     ) {
+        // MoE towers carry no dense FFN; the caller routes them to the expert
+        // path instead, so reaching here without weights is a hard error.
+        let (Some(ffn_gate), Some(ffn_up), Some(ffn_down)) = (
+            layer.ffn_gate.as_ref(),
+            layer.ffn_up.as_ref(),
+            layer.ffn_down.as_ref(),
+        ) else {
+            panic!("dense FFN weights missing on a layer that took the dense path");
+        };
         let n_embd = self.config.n_embd;
         let n_ff = self.config.n_ff;
-        let q8k_required = layer.ffn_gate.uses_q8_k() || layer.ffn_up.uses_q8_k();
+        let q8k_required = layer.ffn_gate.as_ref().is_some_and(|w| w.uses_q8_k())
+            || layer.ffn_up.as_ref().is_some_and(|w| w.uses_q8_k());
         assert!(
             !q8k_required || n_embd % crate::ops::quant::QK_K == 0,
             "Qwen3.5 FFN input width {n_embd} must be a multiple of {} for K-quant weights",
             crate::ops::quant::QK_K
         );
 
-        let need_q8 =
-            layer.ffn_gate.needs_q8_0_activation() || layer.ffn_up.needs_q8_0_activation();
+        let need_q8 = layer
+            .ffn_gate
+            .as_ref()
+            .is_some_and(|w| w.needs_q8_0_activation())
+            || layer
+                .ffn_up
+                .as_ref()
+                .is_some_and(|w| w.needs_q8_0_activation());
         scratch
             .prepared
             .prepare(hidden, n_tokens, n_embd, need_q8, q8k_required)
@@ -1083,11 +1123,8 @@ impl<'a> super::weights::HybridTrunk<'a> {
             .matmul_group(
                 hidden,
                 [
-                    (
-                        &layer.ffn_gate,
-                        &mut scratch.ffn_gate_buf[..n_tokens * n_ff],
-                    ),
-                    (&layer.ffn_up, &mut scratch.ffn_up_buf[..n_tokens * n_ff]),
+                    (ffn_gate, &mut scratch.ffn_gate_buf[..n_tokens * n_ff]),
+                    (ffn_up, &mut scratch.ffn_up_buf[..n_tokens * n_ff]),
                 ],
                 pool,
             )
@@ -1112,14 +1149,17 @@ impl<'a> super::weights::HybridTrunk<'a> {
                 down_input,
                 n_tokens,
                 n_ff,
-                layer.ffn_down.needs_q8_0_activation(),
-                layer.ffn_down.uses_q8_k(),
+                layer
+                    .ffn_down
+                    .as_ref()
+                    .is_some_and(|w| w.needs_q8_0_activation()),
+                layer.ffn_down.as_ref().is_some_and(|w| w.uses_q8_k()),
             )
             .expect("validated Qwen3.5 FFN output shape");
         scratch
             .prepared
             .matmul(
-                &layer.ffn_down,
+                ffn_down,
                 down_input,
                 &mut scratch.buf[..n_tokens * n_embd],
                 pool,

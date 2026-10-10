@@ -31,6 +31,7 @@ pub mod lfm25;
 pub mod lfm2moe;
 pub mod llama;
 pub mod nemotron_h;
+pub mod occamy;
 pub mod phi3;
 pub mod qwen3;
 pub mod qwen35;
