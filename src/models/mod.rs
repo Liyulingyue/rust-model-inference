@@ -39,3 +39,4 @@ pub mod spark;
 pub mod vibevoice_asr;
 pub mod xing4_0;
 pub mod yue2;
+pub mod zdt;
