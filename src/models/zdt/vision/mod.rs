@@ -460,7 +460,14 @@ impl ZdtVisionEncoder {
                 for kj in 0..n_tokens {
                     let mut dot = 0.0f32;
                     for d in 0..d_head {
-                        dot += input[qi * n + off_h + d] * qkv[kj * n * 3 + n + off_h + d];
+                        // Q is at offset 0 within the per-token {Q, K, V} row,
+                        // i.e. qkv[token * 3n + head_offset + d]. The LN output
+                        // (`input`) is NOT the projected Q; reading it from
+                        // there caused the image path to drift ~1% per layer
+                        // and hallucinate (SUPPORTED_MODELS.md: ZDTaichu5.0-9B
+                        // was marked WIP because of this).
+                        dot += qkv[qi * n * 3 + off_h + d]
+                            * qkv[kj * n * 3 + n + off_h + d];
                     }
                     row[kj] = dot * scale;
                 }
@@ -711,5 +718,112 @@ mod tests {
         assert_eq!(act * act, 0.0);
         let v = 3.0f32;
         assert_eq!(v * v, 9.0);
+    }
+
+    /// Smoke test that pins the Q-reads-from-qkv contract. With the
+    /// previous bug (`dot += input[...] * qkv[...]`) the attention output
+    /// drifted ~1% per layer and produced hallucinations downstream.
+    /// With Q correctly read from `qkv`, the score for a known
+    /// Q·K dot product must reproduce analytically.
+    ///
+    /// Setup: 2 tokens, 1 head, d_head=2.
+    ///   Q0 = (1, 0), K0 = (1, 0), V0 = (1, 0)
+    ///   Q1 = (0, 1), K1 = (0, 1), V1 = (0, 1)
+    /// `input` is filled with garbage that *would* make the buggy code
+    /// give the wrong answer — we verify that with Q read from qkv, the
+    /// orthogonal Q·K score gives a diagonal softmax (1, 0) per row,
+    /// and the output is just V[qi].
+    #[test]
+    fn attention_reads_q_from_qkv_not_input() {
+        let n_embd = 2;
+        let cfg = ZdtVisionConfig {
+            projection_dim: 0,
+            image_size: 0,
+            patch_size: 0,
+            n_embd,
+            n_ff: 0,
+            n_layer: 1,
+            n_head: 1,
+            scale_factor: 0,
+            projector_hidden: 0,
+            eps: 1e-6,
+            use_gelu: false,
+            image_mean: [0.0; 3],
+            image_std: [1.0; 3],
+        };
+        let encoder = ZdtVisionEncoder {
+            config: cfg,
+            pool: Arc::new(ComputePool::new(1)),
+            patch_embd_weight: Vec::new(),
+            position_embd: None,
+            class_embd: None,
+            layers: Vec::new(),
+            mm_0_weight: Vec::new(),
+            mm_1_weight: Vec::new(),
+            mm_3_weight: Vec::new(),
+            scratch: RefCell::new(None),
+        };
+        // 2 tokens, head 0, d_head 2. Q|K|V laid out contiguously per token.
+        let n_tokens = 2;
+        let n = n_embd;
+        // Garbage input — the previous bug used this as Q, which would
+        // produce a uniformly-maxed score row (Q·K = 100·1+100·0 = 100
+        // for K0; Q·K = 100·0+100·1 = 100 for K1) and softmax to (0.5, 0.5).
+        // The fix reads Q from `qkv` instead, so we see the orthogonal
+        // Q/K structure below (Q0·K0=1, Q0·K1=2 → softmax, etc.).
+        let input: Vec<f32> = vec![100.0, 100.0, 100.0, 100.0];
+        // Asymmetric Q/K/V so the bug shows up as a wrong output.
+        //   Q[0]=(1,2), K[0]=(3,0), V[0]=(4,5)
+        //   Q[1]=(6,7), K[1]=(0,8), V[1]=(9,10)
+        // With Q from qkv (correct):
+        //   score[0] = Q0·K0=3, Q0·K1=16 → softmax(3/√2, 16/√2) → softmax(0.087, 0.913)
+        //     (scale 1/√d_head = 1/√2)
+        //   score[1] = Q1·K0=18, Q1·K1=56 → softmax(18/√2, 56/√2) → softmax(~0.044, ~0.956)
+        //   out[0] = 0.087*V0 + 0.913*V1 = (0.087*4+0.913*9, 0.087*5+0.913*10)
+        //           ≈ (8.566, 9.565)
+        //   out[1] = 0.044*V0 + 0.956*V1 ≈ (8.924, 9.78)
+        // With Q from input=(100,100) (the bug):
+        //   Q0·K0 = 100*3+100*0 = 300, Q0·K1 = 100*0+100*8 = 800
+        //   softmax → (~0.003, ~0.997)
+        //   out[0] ≈ 0.003*V0 + 0.997*V1 = (8.985, 9.985)
+        // Different by ~0.5 -- clearly distinguishable.
+        let mut qkv = vec![0.0f32; n_tokens * n * 3];
+        // Asymmetric Q/K/V with non-saturating softmax so the bug and
+        // the fix produce visibly different outputs.
+        //   Q0=(1,0), K0=(1,0), V0=(4,5)
+        //   Q1=(2,1), K1=(0.5,0), V1=(9,10)
+        // With Q from qkv (correct):
+        //   score[0] = Q0·K0=1, Q0·K1=0.5 → after 1/√d_head ≈ 0.7071:
+        //     (0.7071, 0.3536) → softmax ≈ (0.5876, 0.4124)
+        //   score[1] = Q1·K0=2, Q1·K1=1   → (1.4142, 0.7071) → softmax ≈ (0.6345, 0.3655)
+        //   out[0] = 0.5876*V0 + 0.4124*V1 ≈ (6.063, 7.063)
+        //   out[1] = 0.6345*V0 + 0.3655*V1 ≈ (6.270, 7.270)
+        // With Q from input=(100,100) (the bug):
+        //   Q0·K0 = 100, Q0·K1 = 50 → softmax(100, 50) ≈ (1.0, 0.0)
+        //   out[0] ≈ V0 = (4, 5)
+        // Output differs by ~1.9 between the two cases.
+        qkv[0..n].copy_from_slice(&[1.0, 0.0]); // Q0
+        qkv[n..2 * n].copy_from_slice(&[1.0, 0.0]); // K0
+        qkv[2 * n..3 * n].copy_from_slice(&[4.0, 5.0]); // V0
+        qkv[3 * n..4 * n].copy_from_slice(&[2.0, 1.0]); // Q1
+        qkv[4 * n..5 * n].copy_from_slice(&[0.5, 0.0]); // K1
+        qkv[5 * n..6 * n].copy_from_slice(&[9.0, 10.0]); // V1
+        let out = encoder.attention(&input, &qkv, n_tokens);
+        assert_eq!(out.len(), n_tokens * n, "output length");
+        // With scale 1/sqrt(d_head)=1/sqrt(2)≈0.7071:
+        //   score[0] = (1*0.7071, 0.5*0.7071) = (0.7071, 0.3536)
+        //   softmax = (exp(0.7071)/(exp(0.7071)+exp(0.3536)), exp(0.3536)/(...))
+        //           ≈ (0.5876, 0.4124)
+        //   out[0] = 0.5876*V0 + 0.4124*V1 ≈ (6.063, 7.063)
+        // With the bug, out[0] would be ≈ V0 = (4, 5) (the softmax
+        // saturates to (1, 0) once Q from input is large). Distance > 2.
+        let exp_0 = (6.063f32, 7.063f32);
+        let dist = (out[0] - exp_0.0).abs() + (out[1] - exp_0.1).abs();
+        assert!(
+            dist < 0.1,
+            "out[0..2] should be ~[5.890, 6.890] (Q from qkv); got {:?}, dist={}",
+            &out[0..2],
+            dist
+        );
     }
 }
