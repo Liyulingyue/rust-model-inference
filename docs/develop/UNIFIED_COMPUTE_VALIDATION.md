@@ -446,10 +446,78 @@ GPU 在这两组小 prompt/decode 工作负载分别约为 CPU 的 **5.87 倍 / 
 冷初始化与 warm 数据分别记录；不能把以上初始化加上 warm 中位数宣称 OS 冷启动端到端时间。
 无真实 Llama 产物，所以新 Llama benchmark 入口未取得实机性能数据。
 
+## arm64 实机真实权重验证（2026-10-09）
+
+上文全部记录来自 Apple M3 Max / MoltenVK，第「未覆盖与后续门禁」一节原先声明
+没有其他架构与驱动的运行结果。本节补上 arm64 Linux 主机，并首次用**真实权重**
+而非合成 fixture 检验统一分发契约。
+
+主机：aarch64，20 核；设备为 NVIDIA GB10（驱动 580.173.02，Vulkan 经
+`nvidia_icd.json`）；`release` 构建，`--features vulkan`。
+
+| 文件 | SHA-256 |
+| --- | --- |
+| `Qwen3-0.6B-Q8_0.gguf` | `e150ed544dfe6016930c026a93913a5e3184181ebfe6ab2223ae01dd0491784c` |
+| `LFM2.5-8B-A1B-Q8_0.gguf` | `ec11666b6129f0b4fe893760b66797f22e1c478a561b40e365f2b6930729b8d2` |
+| `mmproj-Qwen3VL-2B-Instruct-Q8_0.gguf` | `f9a68fabba69c3b81e153367b2c7521030b0fa8bb0de400c9599c8e6725f9c82` |
+
+### 统一分发契约成立
+
+`Qwen3-0.6B-Q8_0.gguf`，7 个 projection **全部 Q8_0，无格式混用**。模型代码零改动，
+`RMI_COMPUTE_TRACE=1` 下每 token 一行：
+
+```
+compute requested=Auto scope=resident_decoder backend=Vulkan rows=1
+compute counters=device_cumulative ComputeStats { submissions: N, static_uploads: 311,
+  static_upload_bytes: 633496640, host_write_bytes: ..., host_read_bytes: ...,
+  transfer_submissions: 0, live_allocation_bytes: 2569210288 }
+```
+
+prefill 1 次提交，随后每个 decode token 恰好 +1 submission；权重 310 次上传发生在
+session 初始化，一次覆盖全程。这正是「模型逻辑实现一次、自动获得 GPU 支持」的目标形态，
+**分发层与观测层没有缺口**。
+
+### 前提 5 在 Q8_0 上尚未成立
+
+`vk_model_check qwen3` 的 logits 门禁（阈值 `abs <= 2e-3 + 2e-3*abs(cpu)`）失败，
+两次独立运行逐位复现，CPU 侧完全一致：
+
+| 分支 | GPU logit[0] | CPU logit[0] | abs | rel | 超阈值 |
+| --- | --- | --- | --- | --- | --- |
+| `codex/unified-compute-dispatch` (`da5ed52`) | 2.4578545 | 2.4099877 | 0.0479 | 0.0199 | ~10× |
+| `main` (`1c71e52`) | 2.5236745 | 2.4099877 | 0.1137 | 0.0472 | ~24× |
+
+CPU 侧两个分支同为 2.4099877，说明差异全部来自 GPU 路径；GPU 侧两次重跑逐位相同，
+不是噪声。**分支比 `main` 改善 2.4 倍**（abs 0.1137 → 0.0479），统一分发的工作方向
+正确但未完成。
+
+Greedy token 序列一致（`法国的首都是**巴黎**。`），但按门禁定义这**不算**验收通过——
+正是本文件反复强调的「CPU 通过只能说明模型逻辑正确，不能证明 Vulkan kernel」。
+
+### 另两个权重当前无法用于验证
+
+| 权重 | 结果 | 原因 |
+| --- | --- | --- |
+| `LFM2.5-8B-A1B-Q8_0.gguf` | `Unsupported Qwen3-family architecture: lfm2moe` | MoE 未接入统一 Linear 契约 |
+| `mmproj-Qwen3VL-2B-Instruct-Q8_0.gguf` | `Missing or invalid tokenizer.ggml.model` | vision projector，非自包含文本模型 |
+
+二者都是**尚未接入**而非失败，与上文「Qwen3.5 保持独立 conv/SSM」同属待办。
+
+### 对「Q8 matmul 已接近这个形态」这一判断的修正
+
+分发、观测、格式声明三项在真实 Q8_0 权重上成立；但**数值一致性尚未通过**，
+所以「接近」只在结构层面成立。补齐这项需要单独定位 GPU 侧 Q8_0 的
+scale/舍入契约差异——这与 `c82f453` 为 refiner 做的 F32 累加修复同类，
+参见 `docs/usage/z-image.md` 的「两个 `-inf` 不是同一个问题」。
+
 ## 未覆盖与后续门禁
 
-- 没有真实 Llama、F16 embedding、Qwen3 Q8_0 或 AuK 产物；这些模型未取得真实端到端证明。
-- 没有 x86 AVX2、独显、ANV/RADV/NVIDIA 运行结果；不从 MoltenVK 外推。
+- 没有真实 Llama、F16 embedding、AuK 产物；这些模型未取得真实端到端证明。
+  （Qwen3 Q8_0 已由本节补上真实权重数据，但门禁未过。）
+- 除本节的 arm64 Linux 主机外，没有 ANV/RADV 或其他驱动的运行结果；不从
+  MoltenVK 或本节外推。
+- Qwen3 Q8_0 的 GPU logits 门禁在 arm64 Linux 上未过（abs 0.0479，阈值 ~0.0048）；
+  `main` 同模型更差（abs 0.1137）。这是本分支距离「前提 5」最近的未决项。
 - Llama 原有极端 attention 分数下的 CPU 下溢问题未处理；新增 fixture 与 gate/up 回归单独覆盖。
 - 真实模型 logits、完整 quantizer 和 shader 重编译基线问题仍需单独修复，随后再运行 Auto 准入。
 - 未运行全仓所有 ignored 模型测试、全部 integration/all-targets 或外部 llama.cpp oracle。
