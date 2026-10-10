@@ -447,6 +447,11 @@ impl ZdtVisionEncoder {
         let scale = 1.0 / (d_head as f32).sqrt();
         let mut out = vec![0.0f32; n_tokens * n];
 
+        // The fused projection produces one row of 3*n_embd per token, laid out
+        // Q | K | V. llama.cpp views the V block out of that {3n, n_tok}
+        // tensor with `offset = 2*n_head*d_head`, so element (head h, token t,
+        // dim d) sits at `t * 3n + 2n + h*d_head + d`. The 3n stride is
+        // required; dropping it silently reads K for V.
         let mut scores = vec![0.0f32; n_tokens * n_tokens];
         for head in 0..cfg.n_head {
             let off_h = head * d_head;
