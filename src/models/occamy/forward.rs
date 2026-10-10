@@ -57,11 +57,14 @@ pub(crate) fn forward_occamy_moe_token(
             .then_with(|| a.cmp(&b))
     });
     let chosen = &indices[..moe.used];
-    // This GGUF declares neither `expert_weights_norm` nor
-    // `expert_weights_scale`, so upstream keeps the raw softmax
-    // probabilities and does not renormalise across the chosen experts.
+    // llama.cpp hardcodes `norm_w=true` for qwen35moe
+    // (`references/llama.cpp/src/models/qwen35moe.cpp:505`) regardless of
+    // whether the GGUF declares `expert_weights_norm`, so we default to
+    // renormalising across the chosen experts too. Edge0 does the same
+    // unconditionally. Only an explicit `expert_weights_norm=false`
+    // metadata would skip this step.
     let scale = hparams.expert_weights_scale.unwrap_or(1.0);
-    let renormalise = hparams.expert_weights_norm.unwrap_or(false);
+    let renormalise = hparams.expert_weights_norm.unwrap_or(true);
     let chosen_total = if renormalise {
         chosen
             .iter()
