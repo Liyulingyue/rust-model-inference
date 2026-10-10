@@ -1431,7 +1431,7 @@ fn cpu_scope_prevents_model_from_creating_a_second_vulkan_session() {
     scratch.x[..256].copy_from_slice(&model.embed_tokens(&[0]).unwrap());
     let _scope = ComputePool::disable_gpu_matmul_for_scope();
     model
-        .forward(1, &mut cache, &mut scratch, &pool, &[[0; 4]])
+        .forward(1, &mut cache, &mut scratch, &pool, &[[0; 4]], None)
         .unwrap();
     assert!(
         model.gpu.is_none(),
