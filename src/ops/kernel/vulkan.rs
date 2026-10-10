@@ -3,7 +3,7 @@
 use super::Kernel;
 use crate::core::tensor::GGMLType;
 use crate::ops::quant::BlockQ8K;
-use crate::vulkan::ops::{BatchedLinearRuntime, Conv2dRuntime, GpuWeightFormat};
+use crate::vulkan::ops::{BatchedLinearRuntime, Conv2dRuntime, GpuMatmulSpec, GpuWeightFormat};
 use std::sync::Mutex;
 
 #[derive(Default)]
@@ -13,7 +13,7 @@ pub(crate) struct GpuLinear {
 
 struct LinearState {
     weight: (usize, usize),
-    format: GpuWeightFormat,
+    spec: GpuMatmulSpec,
     shape: (usize, usize, usize),
     runtime: BatchedLinearRuntime,
 }
@@ -28,12 +28,12 @@ pub(crate) fn offload_enabled() -> bool {
 
 impl GpuLinear {
     pub(crate) fn tile_rows(
-        format: GpuWeightFormat,
+        spec: impl Into<GpuMatmulSpec>,
         n_in: usize,
         n_out: usize,
         rows: usize,
     ) -> usize {
-        let limit = if format == GpuWeightFormat::F16 {
+        let limit = if spec.into().uses_tiled_f16() {
             // Target 16 MiB of host input/output while amortizing fence waits.
             (4 * 1024 * 1024 / n_in.saturating_add(n_out).max(1)).clamp(1, 4096)
         } else {
@@ -46,13 +46,14 @@ impl GpuLinear {
     pub(crate) fn try_matmul(
         &self,
         weight: &[u8],
-        format: GpuWeightFormat,
+        spec: impl Into<GpuMatmulSpec>,
         input: &[f32],
         output: &mut [f32],
         n_in: usize,
         n_out: usize,
         rows: usize,
     ) -> bool {
+        let spec = spec.into();
         if !offload_enabled()
             || rows == 0
             || n_in == 0
@@ -71,13 +72,13 @@ impl GpuLinear {
         let Some(context) = crate::ops::get_vulkan_context() else {
             return false;
         };
-        let tile_rows = Self::tile_rows(format, n_in, n_out, rows);
+        let tile_rows = Self::tile_rows(spec, n_in, n_out, rows);
         let key = (weight.as_ptr() as usize, weight.len());
         let mut state = self.state.lock().unwrap();
         let result = (|| {
             if state.as_ref().is_none_or(|cached| {
                 cached.weight != key
-                    || cached.format != format
+                    || cached.spec != spec
                     || cached.shape.0 < tile_rows
                     || cached.shape.1 != n_in
                     || cached.shape.2 != n_out
@@ -86,7 +87,7 @@ impl GpuLinear {
                 let runtime = BatchedLinearRuntime::new(context, tile_rows, n_in, n_out, 2)?;
                 *state = Some(LinearState {
                     weight: key,
-                    format,
+                    spec,
                     shape: (tile_rows, n_in, n_out),
                     runtime,
                 });
@@ -98,7 +99,7 @@ impl GpuLinear {
             {
                 runtime.matmul_rows(
                     weight,
-                    format,
+                    spec,
                     input,
                     input.len() / n_in,
                     n_in,
@@ -231,9 +232,9 @@ mod tests {
         let rows = GpuLinear::tile_rows(GpuWeightFormat::F16, 4608, 512, 4096);
         assert!(rows > 64 && rows * (4608 + 512) * 4 <= 16 * 1024 * 1024);
         for format in [
-            GpuWeightFormat::F16Dot,
-            GpuWeightFormat::BF16Dot,
-            GpuWeightFormat::Q8_0,
+            GpuWeightFormat::F16.with_mode(crate::vulkan::ops::GpuMatmulMode::Dot),
+            GpuWeightFormat::BF16.with_mode(crate::vulkan::ops::GpuMatmulMode::Dot),
+            GpuWeightFormat::Q8_0.into(),
         ] {
             assert_eq!(GpuLinear::tile_rows(format, 512, 512, 1089), 64);
         }
@@ -260,6 +261,13 @@ impl<'a> VulkanKernel<'a> {
 }
 
 impl Kernel for VulkanKernel<'_> {
+    fn supports_f16_strict(&self) -> bool {
+        self.inner.supports_f16_strict()
+    }
+    fn rounds_bf16_input(&self) -> bool {
+        self.inner.rounds_bf16_input()
+    }
+
     fn try_forward_vulkan_rows(
         &self,
         input: &[f32],

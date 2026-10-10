@@ -249,6 +249,16 @@ unsafe fn dot_f16_avx2(a: &[u16], b: &[u16], n: usize) -> f32 {
     sum
 }
 
+pub(crate) fn f16_uses_half_accumulators(n: usize) -> bool {
+    #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+    return n >= 32 && has_neon() && std::arch::is_aarch64_feature_detected!("fp16");
+    #[cfg(not(all(target_arch = "aarch64", target_endian = "little")))]
+    {
+        let _ = n;
+        false
+    }
+}
+
 pub fn dot_f16_f16_bytes(a: &[u16], b: &[u8], n: usize) -> f32 {
     debug_assert!(a.len() >= n && b.len() >= n * 2);
     #[cfg(target_arch = "x86_64")]
@@ -260,7 +270,7 @@ pub fn dot_f16_f16_bytes(a: &[u16], b: &[u8], n: usize) -> f32 {
     #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
     let (mut sum, tail_start) = {
         let prefix = n & !31;
-        if has_neon() && prefix > 0 && std::arch::is_aarch64_feature_detected!("fp16") {
+        if f16_uses_half_accumulators(n) {
             (
                 f64::from(unsafe { dot_f16_neon(a.as_ptr(), b.as_ptr().cast::<u16>(), prefix) }),
                 prefix,

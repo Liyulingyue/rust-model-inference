@@ -1,6 +1,26 @@
 # Vulkan GPU 后端（实验性）
 
-状态：**实验性**。`--features vulkan` 编译，`--gpu` 启用；缺少任一项都保持 CPU 执行。
+状态：**实验性**。以 `--features vulkan` 编译。默认 CPU；
+`--compute cpu|auto|vulkan` 在 CLI/server 共用，`--gpu` 是 Auto 别名，二者不能同时给出。
+无 Vulkan feature 或可用设备时 Auto 可回 CPU，强制 Vulkan 报错。
+
+本轮实现与证据见 [统一计算验证记录](UNIFIED_COMPUTE_VALIDATION.md)。
+本文 2026-09-04 的硬件/模型表为历史记录，不代表当前分支复测结果。
+新增 Llama 的 Auto 尚未开放，没有通用的“检测到 GPU 就加速”规则。
+
+```bash
+cargo run --release --features vulkan -- --model model.gguf --prompt 'Hello' --compute vulkan --kv-cache f16
+# HTTP 使用同一策略；不支持的构造会在启动时报错。
+cargo run --release --features vulkan --bin rust-model-server -- --model model.gguf --compute cpu
+# 可选的实际执行范围与设备累计计数：
+RMI_COMPUTE_TRACE=1 cargo run --release --features vulkan -- --model model.gguf --prompt 'Hello' --compute auto
+```
+
+强制模型 Vulkan 当前声明范围为 plain-text decoder：标准 Llama、Qwen3、
+受支持的 Qwen3.5。embedding lookup、tokenizer 和采样仍在主机。
+Qwen3/Llama 需 F16 KV；不静默更改默认 F32 KV。Gemma4/AuK 局部 projection
+不满足强制完整 decoder；多模态、JEV、embedding、交互 CLI 等未迁移模式明确拒绝。
+强制模式的任何设备失败都返回错误，Auto 才能重算并回 CPU。
 
 macOS 会自动查找系统 Loader，以及 Homebrew 的 `/opt/homebrew/lib/libvulkan.dylib` 和
 `/usr/local/lib/libvulkan.dylib`。`VK_ICD_FILENAMES`、`VK_DRIVER_FILES` 和
@@ -35,7 +55,7 @@ GPU 直接读取 CHW 的 1×1 / 3×3 输入并零填边界，融合 bias 后按 
 和输出转置。整个 VAE 共享可增长的 arena 与最多 64 份不可变权重缓存；常规设备每层只提交一次。
 超出 storage buffer、dispatch 或权重缓存上限时保留原分块 GPU 后备，最多 4096 行，
 以 16 MiB host 输入/输出为预算；真实 GPU 故障则在 CPU 重算完整输出。
-直接卷积保留原 GPU 的 F16 输入舍入、FP32 FMA 顺序和奇数 packed 权重寻址；F16Dot 的归约合约不变。
+直接卷积保留原 GPU 的 F16 输入舍入、FP32 FMA 顺序和奇数 packed 权重寻址；`F16 + Dot` 的归约合约不变。
 Apple M3 Max / MoltenVK 上，真实 F16 VAE、seed 42 的 16×64×64 latent → 512×512，
 8 线程 release 的三次 warm 中位数为 CPU 12.569687 s、Vulkan 7.605713 s，GPU 耗时少约 39.5%。
 同机已测的分块 GPU 路径为 17.282959 s、1447 次提交；新路径为 39 次提交，耗时下降约 56.0%。
@@ -89,25 +109,28 @@ YuE2 的 BF16 舍入阈值和 NAR 累积误差必须单独验收。
 
 ### 已有整图执行器
 
-- dense、Neox RoPE、无 QKV bias 的 Qwen3 Q8_0、Q4_0、Q4_1、Q4_K、Q6_K 和 F16 模型支持完整 token Vulkan 执行。
+以下是代码可执行范围，**不代表真实模型数值验收通过**。本轮三个 Qwen 权重均复现了基线 logits 偏差，见验证记录。
+
+- dense、Neox RoPE、无 QKV bias 的 Qwen3 Q8_0、Q4_0、Q4_1、Q4_K、Q6_K 和 F16 模型可走完整 token Vulkan 执行。
+- 标准 Llama session 复用同一 dense recipe 和驻留 runtime；当前只有合成数值/状态验证，Auto 留在 CPU。
 - Qwen3.5 BF16 文本模型使用独立 executor，覆盖 dense attention、recurrent convolution/SSM、
   mRoPE、FFN 和 logits；BF16 matmul 权重与 F32 辅助张量均在 Vulkan 路径执行。
-- 权重、F32 activation 和 GPU KV cache 常驻设备；每个 token 只提交一次 command buffer、
-  等待一次 fence。embedding lookup 和 greedy sampling 仍在 CPU；提交成功后，Qwen3 同步 F16
+- 权重、F32 activation 和 GPU KV cache 常驻设备；共享 Qwen3/Llama dense runtime 每个 chunk 录制一次主计算提交。
+  Qwen3.5 保留原有按 dispatch 数分段 flush，规避长 command buffer 的驱动正确性问题，不能承诺每 chunk 只提交一次。
+  初始化、扩容及独显 staging 的 transfer 提交单独计数。embedding lookup 和 greedy sampling 仍在 CPU；提交成功后，Qwen3 同步 F16
   shadow KV，Qwen3.5 同步 F32 shadow KV 与 recurrent state。
-- `text_encode` 对整模符合资格、标准递增位置的模型逐 token 返回最终 RMSNorm hidden row，
-  不录制 logits matvec；初始化或执行失败时丢弃 GPU 结果并用原 CPU 路径重算完整序列。
-- Vulkan token 失败时从上一个已提交 KV 状态在 CPU 重算；不符合整图资格的模型使用 CPU 控制流，
-  已支持的矩阵投影可以通过上述共享入口单独 offload。
-- Q5_K 目前只完成合成 kernel parity，尚未纳入端到端模型支持矩阵；同一组 gate/up 权重格式不一致，
-  或 Qwen3.5 存在未录制算子时，模型整体回退 CPU。
+- hidden-row/text_encode 路径当前使用 CPU scratch；强制 Vulkan 拒绝该模式。
+- Auto 的失败 chunk 从已提交 KV/shadow 前缀重算；CPU 重试也失败时保留两个错误来源。
+  强制 Vulkan 失败后丢弃不安全的 GPU session，保留前缀并返回错误。
+- Q5_K 目前只有合成 kernel 证据，尚未纳入端到端模型验收矩阵；同一组 gate/up 权重格式不一致，
+  或 Qwen3.5 存在未录制算子时，Auto 整体回退 CPU，强制 Vulkan 报错。
 
 ## 架构
 
-- **完整 token 提交**：每层的 RMSNorm、动态 Q8_0 activation 量化、Q/K/V、RoPE、KV 写入、
-  attention、FFN 和 residual add 依次录入同一 command buffer，最终 logits 后统一提交。
+- **dense chunk 提交**：每层的 RMSNorm、动态 activation 准备、Q/K/V、RoPE、KV 写入、
+  attention、FFN 和 residual add 依次录入同一 command buffer，最终 logits 后统一提交；Qwen3.5 的分段规则见上。
 - **F16 权重**：activation 先按 CPU contract 舍入为 F16，shader 从 `uint` storage buffer
-  解包权重并复现 ARM64 FP16 累加/归约顺序，不要求 `storageBuffer16BitAccess`。
+  解包权重并分别保留 ARM64 FP16 和 AVX2/F16C 的累加/归约顺序，不要求 `storageBuffer16BitAccess`。
 - **BF16 权重**：shader 从 `uint` storage buffer 解包 16-bit lane，并按
   `uintBitsToFloat(bits << 16)` 还原 BF16，不要求 16-bit storage feature。
 - **Qwen3.5 token 事务**：dense KV delta、recurrent convolution state 和 SSM state 只在
@@ -119,9 +142,9 @@ YuE2 的 BF16 舍入阈值和 NAR 累积误差必须单独验收。
   baseline 不要求 Vulkan 1.3、`shaderInt64` 或整数点积，整数点积可用时选用 dp4a，
   否则使用 baseline pipeline。
 - **预热**：上下文创建后立即跑一次 32×32 dummy matmul，吸收驱动首次 dispatch 的 JIT。
-- **看门狗**：每次 GPU 调用有可配置超时（`RUST_GPU_TIMEOUT_MS`，默认 5 s；fence 等待
-  内层 60 s）。超时/错误时标记 GPU broken → 该次 matmul 由线程 0 全量 CPU 重算
-  （其余线程已返回，必须全量而非按行区间，否则留下未计算的行）→ 后续调用走 CPU。
+- **恢复**：只有设备/队列不安全才触发共享熔断；局部格式、配置、分配或 session 错误
+  不等于设备损坏。idle 未确认的资源不能释放。legacy matvec 保留原看门狗；
+  新会话按 Cpu/Auto/Vulkan 分别执行 CPU、事务回退、显式报错。
 
 ## 跨厂商统一验收流程
 
@@ -179,7 +202,7 @@ cargo run --release --locked --features vulkan --example vk_model_check -- \
 | Qwen3-Embedding-0.6B-f16.gguf | 1,197,629,632 | `421a27e58d165478cc7acb984a688c2aa41404968b0203e7cd743ece44c54340` |
 | Qwen3.5-0.8B-BF16.gguf | 1,516,744,736 | `cedf89af31c9041b601fa58303285bc46d99c51baee1b13f5e919626ca526ee5` |
 
-## 硬件矩阵（2026-09-04）
+## 历史硬件矩阵（2026-09-04）
 
 | Vulkan 栈 | GPU | shader / 五 shape | 完整算子 | 五模型 | 交替基准中位数（CPU → GPU，prompt/decode） | 状态 |
 |---|---|---|---|---|---|---|
@@ -189,7 +212,7 @@ cargo run --release --locked --features vulkan --example vk_model_check -- \
 | NVIDIA Vulkan | 未采集 | 未运行 | 未运行 | 未运行 | 未运行 | 未验证 |
 
 Apple 行的 `vulkaninfo --summary` 为 Vulkan API 1.4.357、integrated GPU、driver ID
-`DRIVER_ID_MOLTENVK`。本次五模型结果为：Q8_0、Q4_0、Q4_K_M 的 prefill 最大绝对误差均为
+`DRIVER_ID_MOLTENVK`。当时五模型结果为：Q8_0、Q4_0、Q4_K_M 的 prefill 最大绝对误差均为
 0，且各自 32/32 greedy token 相同（submission 分别为 37、36、36）；F16 embedding 的三个
 向量最大绝对误差为 `4.267e-4`、`4.156e-4`、`6.245e-4`，排序一致且共 26 submissions；
 Qwen3.5 BF16 prefill 最大绝对误差为 `2.956e-5`，32/32 token 相同，共 36 submissions。
@@ -248,7 +271,7 @@ cargo run --release --locked --features vulkan --example vk_model_check -- \
 prompt token 加 32 个 decode token 共 36 次 Vulkan submission。输出格式摘要为
 `matmul={BF16};auxiliary={F32};backend=vulkan`。
 
-## 交替基准
+## 历史交替基准（2026-09-04）
 
 ```bash
 cargo run --release --locked --features vulkan --example vk_model_check -- \
@@ -312,3 +335,16 @@ MoltenVK 路径是正确性后端，不宣称比 4-thread CPU 更快。
 - shader 唯一源码位于 `shaders/glsl/`；运行 `bash scripts/vulkan-shaders.sh update`
   重新生成，运行 `bash scripts/vulkan-shaders.sh check` 校验源码、SPIR-V 和 manifest。
 - wgpu 后端（`--features wgpu`）当前未接入新分发路径，保持 CPU。
+
+### 共享 dense 表达与数值模式
+
+Qwen3 和标准 Llama 的会话共用 `compute::dense::run_dense_layer`：表达式携带
+张量输入/输出与权重角色，CPU 共用 `DenseCpu`，Vulkan 记录同样的算子连接。
+新增受支持算子的组合可以复用后端实现；新增算子仍需各后端实现自己的 kernel。
+GPU 提交与状态回退仍在 chunk 边界。
+
+权重存储由 `GpuWeightFormat` 表示，数值契约由独立的 `GpuMatmulMode` 表示。
+F16 storage + RoundedInputF32 保留 VAE 和 Z-Image refiner 的输入 F16 舍入、F32 累加；F16/BF16 storage
++ Dot 保留对应 CPU dot 的归约契约及设备资格。不会仅凭权重 dtype 替换计算精度。
+本次复用没有开放新的 Auto workload，当前验证与限制见
+[共享算子验收](UNIFIED_COMPUTE_VALIDATION.md#共享算子表达验收2026-10-09)。

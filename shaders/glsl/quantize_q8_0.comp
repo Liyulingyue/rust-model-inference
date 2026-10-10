@@ -16,6 +16,7 @@ layout(push_constant) uniform PC {
     uint scales_stride;
     uint input_sums_stride;
     uint token_rows;
+    uint cpu_mode;
 } pc;
 
 shared float values[32];
@@ -25,55 +26,13 @@ shared int partial_sum[32];
 shared float inverse_scale;
 shared float raw_scale;
 
-float divide_finite_normal(float numerator, float denominator) {
-    uint numerator_bits = floatBitsToUint(numerator);
-    uint denominator_bits = floatBitsToUint(denominator);
-    uint sign = (numerator_bits ^ denominator_bits) & 0x80000000u;
-    uint numerator_exponent = (numerator_bits >> 23u) & 0xffu;
-    uint denominator_exponent = (denominator_bits >> 23u) & 0xffu;
-    if (numerator_exponent == 0u || numerator_exponent == 0xffu
-        || denominator_exponent == 0u || denominator_exponent == 0xffu) {
-        return numerator / denominator;
-    }
+#include "f32_divide.glsl"
 
-    uint numerator_mantissa = (numerator_bits & 0x007fffffu) | 0x00800000u;
-    uint denominator_mantissa = (denominator_bits & 0x007fffffu) | 0x00800000u;
-    int exponent = int(numerator_exponent) - int(denominator_exponent);
-    if (numerator_mantissa < denominator_mantissa) {
-        numerator_mantissa <<= 1u;
-        exponent -= 1;
-    }
-
-    uint quotient = 1u;
-    uint remainder = numerator_mantissa - denominator_mantissa;
-    for (uint bit = 0u; bit < 23u; ++bit) {
-        quotient <<= 1u;
-        remainder <<= 1u;
-        if (remainder >= denominator_mantissa) {
-            remainder -= denominator_mantissa;
-            quotient |= 1u;
-        }
-    }
-
-    remainder <<= 1u;
-    bool guard = remainder >= denominator_mantissa;
-    if (guard) remainder -= denominator_mantissa;
-    bool sticky = remainder != 0u;
-    if (guard && (sticky || (quotient & 1u) != 0u)) {
-        quotient += 1u;
-        if (quotient == 0x01000000u) {
-            quotient >>= 1u;
-            exponent += 1;
-        }
-    }
-
-    int result_exponent = exponent + 127;
-    if (result_exponent <= 0 || result_exponent >= 255) {
-        return numerator / denominator;
-    }
-    return uintBitsToFloat(
-        sign | (uint(result_exponent) << 23u) | (quotient & 0x007fffffu)
-    );
+int round_away(float value) {
+    float magnitude = abs(value);
+    float integral = floor(magnitude);
+    // Adding 0.5 first incorrectly rounds its predecessor up to 1.0.
+    return int(sign(value) * (integral + (magnitude - integral >= 0.5 ? 1.0 : 0.0)));
 }
 
 void main() {
@@ -104,7 +63,10 @@ void main() {
         raw_scale = scale;
         inverse_scale = partial[0] == 0.0
             ? 0.0
-            : divide_finite_normal(127.0, partial[0]);
+            // AVX2 divides directly; NEON/scalar use the rounded scale's reciprocal.
+            : (pc.cpu_mode == 8u
+                ? divide_finite_normal(127.0, partial[0])
+                : divide_finite_normal(1.0, scale));
         float stored_scale = round_f16_rte(scale);
         arena.data[pc.scales_word + scales_base + block] = floatBitsToUint(stored_scale);
     }
@@ -115,7 +77,7 @@ void main() {
         for (uint byte_index = 0u; byte_index < 4u; byte_index++) {
             uint value_index = lane * 4u + byte_index;
             precise float scaled = values[value_index] * inverse_scale;
-            int quantized = int(roundEven(scaled));
+            int quantized = pc.cpu_mode == 0u ? round_away(scaled) : int(roundEven(scaled));
             quantized = clamp(quantized, -128, 127);
             quantized_values[value_index] = quantized;
             packed |= (uint(quantized) & 0xffu) << (byte_index * 8u);

@@ -16,10 +16,11 @@ uint minimum(uint slot, uint offset, uint index) { return index < 4u ? weight_by
 
 void main() {
     uint token_row = gl_WorkGroupID.z / pc.group_count; uint slot = gl_WorkGroupID.z % pc.group_count;
-    uint row = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint row = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 64u + gl_LocalInvocationID.x;
     uint rows = slot == 0u ? pc.rows0 : (slot == 1u ? pc.rows1 : pc.rows2);
-    if (slot >= pc.group_count || row >= rows || gl_LocalInvocationID.x != 0u) return;
+    if (slot >= pc.group_count || row >= rows) return;
     precise float sums[8] = float[8](0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    precise float block_total = 0.0;
     precise float minimum_sums[4] = float[4](0.0, 0.0, 0.0, 0.0);
     for (uint block = 0u; block < pc.blocks_per_row; ++block) {
         uint offset = row * pc.blocks_per_row * 144u + block * 144u;
@@ -37,6 +38,16 @@ void main() {
             minimum_partial[group >> 1u] += int(minimum(slot, offset, group)) * activation;
         }
         precise float factor = q8_scale * q4_scale;
+        if (pc.input_sum_word == 1u) {
+            int main_dot = 0;
+            int minimum_dot = 0;
+            for (uint lane = 0u; lane < 8u; lane++) main_dot += partial[lane];
+            for (uint lane = 0u; lane < 4u; lane++) minimum_dot += minimum_partial[lane];
+            precise float main_term = factor * float(main_dot);
+            precise float minimum_term = (-q4_min * q8_scale) * float(minimum_dot);
+            block_total += main_term + minimum_term;
+            continue;
+        }
         for (uint lane = 0u; lane < 8u; ++lane) {
             sums[lane] = fma(factor, float(partial[lane]), sums[lane]);
         }
@@ -55,7 +66,7 @@ void main() {
     precise float minimum02 = minimum_sums[0] + minimum_sums[2];
     precise float minimum13 = minimum_sums[1] + minimum_sums[3];
     precise float minimum_sum = minimum02 + minimum13;
-    precise float sum = main_sum + minimum_sum;
+    precise float sum = pc.input_sum_word == 1u ? block_total : main_sum + minimum_sum;
     uint output_word = slot == 0u ? pc.output0_word : (slot == 1u ? pc.output1_word : pc.output2_word);
     arena.data[output_word + token_row * (slot == 0u ? pc.output0_stride : (slot == 1u ? pc.output1_stride : pc.output2_stride)) + row] = floatBitsToUint(sum);
 }

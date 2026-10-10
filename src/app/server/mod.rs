@@ -32,7 +32,7 @@ use crate::models::qwen3::tts::speaker::{reference_wav_to_mel, Qwen3TtsSpeakerEn
 use crate::models::qwen3::tts::{predictor_top_k, Qwen3TtsTalker, TtsPrompt, TtsSession};
 use crate::models::qwen3::Qwen3Model;
 
-const USAGE: &str = "Usage: rust-model-server --model <path.gguf-or-ggufrs> [--mmproj ...] [--audio ...] [--image ...] [--tts] [--embedding] [--host 0.0.0.0] [--port 8080] [--threads 4] [--prefill-batch-size N (default 64)] [--allow-remote-images]";
+const USAGE: &str = "Usage: rust-model-server --model <path.gguf-or-ggufrs> [--mmproj ...] [--audio ...] [--image ...] [--tts] [--embedding] [--host 0.0.0.0] [--port 8080] [--threads 4] [--compute cpu|auto|vulkan (default cpu); --gpu aliases auto] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--allow-remote-images]";
 
 // =============================================================================
 // Backend types
@@ -40,10 +40,21 @@ const USAGE: &str = "Usage: rust-model-server --model <path.gguf-or-ggufrs> [--m
 
 #[derive(Clone)]
 struct AppState {
+    compute: crate::compute::ComputePolicy,
     model: Arc<Backend>,
     model_name: String,
     responses: Arc<Mutex<api::ResponsesStore>>,
     generation_slot: Arc<tokio::sync::Semaphore>,
+}
+
+fn compute_task<T: Send + 'static>(
+    policy: crate::compute::ComputePolicy,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> tokio::task::JoinHandle<T> {
+    tokio::task::spawn_blocking(move || {
+        let _scope = policy.enter_legacy_scope();
+        work()
+    })
 }
 
 enum Backend {
@@ -390,7 +401,7 @@ async fn embeddings(
         };
         let prompt = req.prompt.unwrap_or_default();
         let source = backend.source.clone();
-        let result = match tokio::task::spawn_blocking(move || {
+        let result = match compute_task(state.compute, move || {
             let temp_path = std::env::temp_dir().join(format!(
                 "rmi-media-{}.{}",
                 std::time::SystemTime::now()
@@ -488,7 +499,7 @@ async fn embeddings(
         }
     };
     let source = backend.source.clone();
-    let result = match tokio::task::spawn_blocking(move || {
+    let result = match compute_task(state.compute, move || {
         let mut data = Vec::with_capacity(inputs.len());
         for (index, prompt) in inputs.iter().enumerate() {
             let embedding = compute_embedding(source.as_ref(), prompt, 0)?;
@@ -662,8 +673,10 @@ async fn do_transcribe(
             };
             let runtime = backend.runtime.clone();
             let wav = wav;
-            let result =
-                tokio::task::spawn_blocking(move || runtime.transcribe_wav(&wav, &options)).await;
+            let result = compute_task(state.compute, move || {
+                runtime.transcribe_wav(&wav, &options)
+            })
+            .await;
             match result {
                 Ok(Ok(value)) => (
                     StatusCode::OK,
@@ -694,7 +707,7 @@ async fn do_transcribe(
             let max_tokens = backend.max_tokens;
             let default_language = backend.language.to_string();
             let language = language.unwrap_or(default_language);
-            let result = tokio::task::spawn_blocking(move || {
+            let result = compute_task(state.compute, move || {
                 let samples = audio8_streaming::decode_samples(&wav)?;
                 let stream = audio8_streaming::Schedule::new().padded_stream(&samples);
                 let language_token = specials.language(&language)?;
@@ -799,7 +812,7 @@ async fn speech(
     let temperature = backend.temperature;
     let max_tokens = backend.max_tokens;
     let input = req.input.clone();
-    let wav_bytes = match tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
+    let wav_bytes = match compute_task(state.compute, move || -> Result<Vec<u8>, String> {
         let speaker = if let Some(wav) = ref_wav_bytes.as_deref() {
             let mel = reference_wav_to_mel(wav)?;
             Some(Qwen3TtsSpeakerEncoder::from_source(mmproj.as_ref())?.encode(&mel)?)
@@ -896,6 +909,9 @@ fn synthesize_tts_frames(
 // =============================================================================
 
 fn build_backend(options: &CliOptions) -> Result<Arc<Backend>, String> {
+    options.validate_compute_mode()?;
+    options.compute_policy().check_build()?;
+    let _scope = options.compute_policy().enter_legacy_scope();
     if options.tts {
         return Ok(Arc::new(Backend::Tts(build_tts(options)?)));
     }
@@ -1309,6 +1325,8 @@ fn build_text(options: &CliOptions) -> Result<TextBackend, String> {
         pool.clone(),
         tokenizer.clone(),
     )
+    .with_compute(options.compute_policy())
+    .with_kv_format(options.kv_format)
     .with_threads(options.threads)
     .with_max_context(options.effective_max_context())
     .with_prefill_batch_size(prefill_batch_size)
@@ -1319,7 +1337,13 @@ fn build_text(options: &CliOptions) -> Result<TextBackend, String> {
                 let context = runtime.context_length();
                 (Some(std::sync::Mutex::new(runtime)), context)
             }
-            Err(_) => (None, 0),
+            Err(error) if options.compute_policy() == crate::compute::ComputePolicy::Vulkan => {
+                return Err(error)
+            }
+            Err(error) => {
+                log::info!("text runtime unavailable: {error}");
+                (None, 0)
+            }
         };
     // Built once: the `Options` and the compiled template below must always
     // agree, and constructing both from separate literals is how a new flag
@@ -1440,10 +1464,9 @@ fn build_tts(options: &CliOptions) -> Result<TtsBackend, String> {
 // main
 // =============================================================================
 
-fn configure_gpu(options: &CliOptions) {
-    if options.gpu {
-        crate::ops::enable_gpu();
-    }
+fn configure_gpu(options: &CliOptions) -> Result<crate::compute::LegacyComputeScope, String> {
+    options.validate_compute_mode()?;
+    options.compute_policy().configure_cli()
 }
 
 fn reject_unsupported_server_modes(options: &CliOptions) -> Result<(), String> {
@@ -1555,7 +1578,10 @@ pub fn run_server() {
         std::process::exit(1);
     }
 
-    configure_gpu(&options);
+    let _compute_scope = configure_gpu(&options).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(2);
+    });
     let backend = match build_backend(&options) {
         Ok(value) => value,
         Err(error) => {
@@ -1587,6 +1613,7 @@ pub fn run_server() {
     );
 
     let state = AppState {
+        compute: options.compute_policy(),
         model: backend,
         model_name,
         responses: Arc::new(Mutex::new(api::ResponsesStore::default())),
@@ -1627,6 +1654,20 @@ pub fn run_server() {
         // "this server does not do that".
         Backend::Gliner2Boundary(_) => router.route("/v1/jev/boundary", post(api::jev_boundary)),
     };
+    if options.compute_policy() == crate::compute::ComputePolicy::Vulkan {
+        router = router.layer(axum::middleware::from_fn(
+            |request: axum::extract::Request, next: axum::middleware::Next| async move {
+                if request.uri().path().starts_with("/v1/jev/") {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        "JEV has no complete Vulkan execution path",
+                    )
+                        .into_response();
+                }
+                next.run(request).await
+            },
+        ));
+    }
     let app = router.layer(CorsLayer::permissive()).with_state(state);
 
     let addr = format!("{}:{}", host, port);
@@ -1654,13 +1695,37 @@ mod tests {
     use super::{configure_gpu, CliOptions};
 
     #[test]
+    fn compute_request_scope_reaches_blocking_workers() {
+        use crate::compute::ComputePolicy;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            super::compute_task(ComputePolicy::Cpu, || {
+                assert_eq!(ComputePolicy::legacy(), ComputePolicy::Cpu);
+                let pool = crate::ComputePool::new(2);
+                pool.compute(|_, _| assert!(crate::core::thread_pool::gpu_matmul_disabled()));
+            })
+            .await
+            .unwrap();
+            super::compute_task(ComputePolicy::Vulkan, || {
+                assert_eq!(ComputePolicy::legacy(), ComputePolicy::Vulkan);
+                assert!(!crate::core::thread_pool::gpu_matmul_disabled());
+            })
+            .await
+            .unwrap();
+        });
+    }
+
+    #[test]
     fn gpu_flag_reaches_shared_switch() {
         let options = CliOptions {
             gpu: true,
             ..CliOptions::default()
         };
 
-        configure_gpu(&options);
+        let _scope = configure_gpu(&options).unwrap();
 
         assert!(crate::ops::float::gpu_requested());
     }

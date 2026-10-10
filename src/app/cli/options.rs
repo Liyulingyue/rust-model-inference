@@ -452,8 +452,8 @@ pub fn dreamx_cli_options(options: &CliOptions) -> Result<Option<DreamXCliOption
         Some("--bench")
     } else if options.profile {
         Some("--profile")
-    } else if options.gpu {
-        Some("--gpu")
+    } else if options.compute_policy() != crate::compute::ComputePolicy::Cpu {
+        Some("--gpu/--compute")
     } else if options.thinking {
         Some("--thinking")
     } else if options.language.is_some() {

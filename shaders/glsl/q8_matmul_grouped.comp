@@ -14,7 +14,7 @@ layout(push_constant) uniform PC {
     uint output0_word; uint rows0; uint output0_stride;
     uint output1_word; uint rows1; uint output1_stride;
     uint output2_word; uint rows2; uint output2_stride;
-    uint group_count; uint input_sum_word; uint input_stride; uint q8_stride; uint scales_stride; uint input_sum_stride; uint q8k_stride; uint q8k_scales_stride; uint token_rows;
+    uint group_count; uint reduction_mode; uint input_stride; uint q8_stride; uint scales_stride; uint input_sum_stride; uint q8k_stride; uint q8k_scales_stride; uint token_rows;
 } pc;
 
 shared uint input_words[4096];
@@ -61,16 +61,13 @@ void main() {
     uint rows = slot == 0u ? pc.rows0 : (slot == 1u ? pc.rows1 : pc.rows2);
     if (row >= rows) return;
 
-    // Preserve the eight FMA streams and final reduction used by the
-    // standalone Q8 shader. Tiny reassociation errors can cross the next
-    // activation's quantization boundary and change an entire model's output.
-    // ponytail: eight active lanes preserve this contract; tile tokens if
-    // profiling warrants more parallelism without changing reduction order.
+    // NEON/scalar reduce a 32-element integer block before scaling; AVX2 keeps eight streams.
+    uint streams = pc.reduction_mode == 8u ? 8u : 1u;
     uint blocks_per_row = pc.blocks_per_row;
     uint row_offset = row * blocks_per_row * 34u;
 
     precise float partial = 0.0;
-    for (uint block = 0u; lane < 8u && block < blocks_per_row; block++) {
+    for (uint block = 0u; lane < streams && block < blocks_per_row; block++) {
         uint byte_offset = row_offset + block * 34u;
         uint scale_word = weight_word(slot, byte_offset >> 2u);
         uint scale_bits = (byte_offset & 3u) == 0u
@@ -82,17 +79,21 @@ void main() {
         );
         float block_scale = weight_scale * input_scale;
         uint body = byte_offset + 2u;
-        uint group_offset = body + lane * 4u;
-        uint first = weight_word(slot, group_offset >> 2u);
-        uint second = weight_word(slot, (group_offset >> 2u) + 1u);
-        uint shift = (group_offset & 3u) * 8u;
-        uint packed = shift == 0u ? first : ((first >> shift) | (second << (32u - shift)));
-        uint input_value = input_words[block * 8u + lane];
-        int dot = i8_of(packed, 0u) * i8_of(input_value, 0u)
-            + i8_of(packed, 1u) * i8_of(input_value, 1u)
-            + i8_of(packed, 2u) * i8_of(input_value, 2u)
-            + i8_of(packed, 3u) * i8_of(input_value, 3u);
-        partial = fma(float(dot), block_scale, partial);
+        int dot = 0;
+        for (uint group = lane; group < 8u; group += streams) {
+            uint group_offset = body + group * 4u;
+            uint first = weight_word(slot, group_offset >> 2u);
+            uint second = weight_word(slot, (group_offset >> 2u) + 1u);
+            uint shift = (group_offset & 3u) * 8u;
+            uint packed = shift == 0u ? first : ((first >> shift) | (second << (32u - shift)));
+            uint input_value = input_words[block * 8u + group];
+            dot += i8_of(packed, 0u) * i8_of(input_value, 0u)
+                + i8_of(packed, 1u) * i8_of(input_value, 1u)
+                + i8_of(packed, 2u) * i8_of(input_value, 2u)
+                + i8_of(packed, 3u) * i8_of(input_value, 3u);
+        }
+        precise float product = float(dot) * block_scale;
+        partial = pc.reduction_mode == 0u ? partial + product : fma(float(dot), block_scale, partial);
     }
     reduction[lane] = partial;
     barrier();
@@ -100,7 +101,7 @@ void main() {
     if (lane != 0u) return;
     precise float sum01 = (reduction[0] + reduction[4]) + (reduction[1] + reduction[5]);
     precise float sum23 = (reduction[2] + reduction[6]) + (reduction[3] + reduction[7]);
-    precise float sum = sum01 + sum23;
+    precise float sum = streams == 8u ? sum01 + sum23 : reduction[0];
     uint output_word = slot == 0u
         ? pc.output0_word
         : (slot == 1u ? pc.output1_word : pc.output2_word);

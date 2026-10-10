@@ -41,21 +41,27 @@ Z-Image model requires --text-encoder, --vae, --prompt, and --out
 ### 实测耗时（NVIDIA GB10，20 核，512×512，8 步）
 
 prompt "A red fox sleeping beneath a pine tree"（16 token），seed 42，`--threads 8`，
-`cargo build --release --features vulkan`。2026-10-09，`#165` 之后。
+`cargo build --release --features vulkan`。2026-10-09。
 
 同一二进制、只切开关的同会话对照：
 
 | 阶段 | CPU | GPU（`--gpu`） |
 |---|---|---|
-| text_encode | 0.6 s | **0.65–0.74 s**（见下方 gate）|
-| denoise | 563.3 s | **50.3 s** |
-| vae_decode | 10.6 s | **6.0 s** |
-| **总计** | **574.6 s** | **60.1 s** |
+| text_encode | 0.6 s | **0.56–0.74 s**（见下方 gate）|
+| denoise | 563.3 s | **50.3–55.1 s** |
+| vae_decode | 10.6 s | **6.0–6.3 s** |
+| **总计** | **574.6 s** | **60.1–61.8 s** |
 
-denoise 11.2×、端到端 9.6×。默认配置多次运行输出逐字节一致；
+denoise 10.2–11.2×、端到端 9.3–9.6×。默认配置多次运行输出逐字节一致；
 `RUST_GPU_TEXT=1` 输出亦逐字节一致（text gate 只改执行位置不改算术）。
 `RUST_GPU_ATTENTION=0` **不**逐字节一致（PSNR 31.4 dB）——这是该开关本身的语义，
 见下文「GPU 路径从来就不是逐位精确的」。
+
+> `denoise` 50.3 s 与 55.1 s 的差距来自两个分支：`zimage`（50.3 s）与
+> `codex/unified-compute-dispatch` 的 `da5ed52`（54.1–55.1 s）。后者为修复
+> refiner 累加契约引入了额外的 F32 累加路径（见下节），代价约 4 s。
+> 两分支对 CPU 基线的 PSNR 分别为 33.34 dB 与 32.08 dB，**互不相同**——
+> F16 → F32 的累加契约变化会改变末位精度，不要假设两分支逐字节一致。
 
 当前 `--steps N` 跑 **N 次** forward：8 步在 `RUST_GPU_DIAG=1` 下打出 8 行 sigma，
 `dispatches` 每步 +300（300→2400）。
@@ -76,7 +82,8 @@ denoise 分段（`[gpu-block-profile]`，8 步合计 50.3 s）：
 
 **真正在 host 的是 8.1 s / 50.3 s = 16.1%**，其中 host silu + w1 readback 合计
 7.2 s——`run_block_gpu` 把 w1 投影回读、在 host 做 silu、再传给 w2。三者合并到单个
-command buffer 的尝试曾输出全 `-inf` 而回退（见下方「历史归档」一节）。
+command buffer 的尝试**仍未完成**；注意那次失败与本文档另一处已修复的 `-inf`
+**不是同一个问题**，见「两个 `-inf` 不是同一个问题」。
 
 > **out proj 曾经有一大块没被 profile 单独统计的 host 开销。** slot 4 同时包住
 > GPU 投影、回读，以及一个 `for row in 0..3840` 的单线程循环——每行做一次
@@ -161,13 +168,49 @@ silu 的输出区间与 CPU 参考一致（按 w1/w3 的实测极值算 silu(gat
 `recover_commands` + `reset_command_buffer`（`vulkan.rs:420`），而
 `begin` 全程持有 `context.mutex`。分开提交时每次 `read_f32_into` 都会把
 host 读钉在 pipeline 上，等于强制刷新；合批后所有 GPU 阶段只能靠
-barrier 互相可见——而 barrier 已证明加对了。**未定位的可能是
-descriptor set 与 pipeline 布局在跨 dispatch 复用时的状态**，需要
-更细的 trace（例如逐 dispatch 的 `RUST_GPU_SUBMIT_TRACE` + dispatch 计数）
-才能继续。
+barrier 互相可见——而 barrier 已证明加对了。
 
 改动已回退。留在这里是为了让下一个人不必重走：silu 数值已验证正确，
 卡的是合批机制本身。
+
+> ⚠️ **本节末尾曾猜测「根因是 descriptor set 与 pipeline 布局在跨 dispatch
+> 复用时的状态」——这个猜测是错的，请不要沿用。** 见下面「两个 `-inf` 不是
+> 同一个问题」。
+
+### 两个 `-inf` 不是同一个问题
+
+历史上出现过两次形态相似、**成因完全不同**的 `-inf`。混为一谈会一直查错方向。
+
+| | FFN 合批（下方「历史归档」）| refiner F32 累加 |
+|---|---|---|
+| 现象 | 合批单 buffer 时 activation 全 `-inf` | 第 6 步后 `predicted flow` 全 `-inf` |
+| 触发条件 | 合批进同一 command buffer | **任何** `--gpu` 运行，无需合批 |
+| 当时结论 | 「根因未定位，怀疑 descriptor set」| 无人注意 |
+| 真实成因 | **至今未定位**（见下方独立测试）| refiner 权重用 `GpuMatmulMode::Prepared` 绑定，累加契约与 CPU 不符 |
+| 状态 | 未完成 | **已修复**（`c82f453`）|
+
+第二个的真实成因：`DitGpuSession::bind_weight_as` 之前对 F16 refiner 权重调用
+`bind_weight_buffers`，走默认的 `GpuMatmulMode::Prepared`。refiner 需要的是
+「F16 输入舍入 + **F32** 累加」，而 `Prepared` 的累加顺序不同，数值溢出成 `-inf`，
+逐层放大后在 denoise 中段炸掉。修复是让 F16 权重显式绑到
+`GpuMatmulMode::RoundedInputF32`（`dit_gpu.rs` 的 `bind_weight_as`），
+并补了 `f16_refiner_projection_keeps_f32_accumulation` 测试守住契约。
+
+**它在 `codex/unified-compute-dispatch` 的 `409c2f1` 上 100% 复现**（连跑三次都是
+第 6 步报 `Non-finite Z-Image predicted flow: len=65536, nan=65536, -inf=65536`），
+`da5ed52` 之后消失。这是它最有用的地方：一个稳定的最小复现，而 FFN 合批那个
+至今只在特定合批路径下偶发。
+
+### FFN 合批已排除的假设
+
+`batched_ffn_chain_matches_incremental_submission`
+（`dit_gpu.rs`，随 `9e9015b` 加入）在真实 FFN 形状上跑完整四 dispatch 链
+（w1 → w3 → silu → w2），合批一次提交与逐个提交对比：GB10 上 983040 个元素
+**全部有限且逐元素一致**。所以「驱动丢弃长 command buffer 尾部」这个假设在
+FFN 上被证伪——FFN 只有 4 个 dispatch，比 Qwen3.5 触发该问题的 ~230 少三个数量级。
+
+那个测试是将来任何人重试 FFN 合批的前置安全网，同时它记录了「合批在真机上
+已验证正确」。
 
 > 工程向的完整快照与加速路线见 `docs/develop/ZIMAGE_STATUS.md`。
 
@@ -387,9 +430,9 @@ GPU 一列的判定依据与已知缺口：
     关掉后 27.0 s）。旧版本文档与 `GPU_PHASE_LABELS` 曾误标为 host，标签已修正。
   - **RoPE 与 AdaLN modulation 仍在 host**（合计 0.9 s / 50.3 s，可忽略）。
   - **FFN 的 w1/w3 激活要经 host silu + 回读**，合计 7.2 s / 50.3 s = 14.3%，
-    是 denoise 剩余最大的一块 host 开销。合批到单 command buffer 的尝试曾输出
-    全 `-inf` 而回退，根因未定位——**修它需要先独立诊断那个 bug**，风险与收益
-    不对等。
+    是 denoise 剩余最大的一块 host 开销。把 w1 → silu → w2 合批进单个
+    command buffer 的尝试仍**未完成**（见下方「历史归档」一节）。
+  - **refiner 的 F32 累加契约曾导致整条流程 `-inf`**（已修复，见下）。
   - **QKV 每 block 重新上传 ~48 MB**（RoPE 在 host，旋转后的行要送回设备）。
     8 步约 13 GB，被包在 attention 那一档里。若 RoPE 上设备可省，但尚未评估。
   - **Qwen3 文本编码器默认在 CPU 上跑**（临时 gate，见第 1 节环境变量表）。

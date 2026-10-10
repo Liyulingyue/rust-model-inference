@@ -11,7 +11,7 @@ use rust_model_inference::DreamXConfig;
 use rust_model_inference::MetaValue;
 use rust_model_inference::TensorSource;
 
-const USAGE: &str = "Usage: rust-model-inference --model <path.gguf-or-ggufrs> [--prompt ...] [--threads N] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--max-context N (default 8192)] [--repetition-penalty α (default 1.0 = disabled)] [--serve [--host 0.0.0.0] [--port 8080]]\n\nChat template: --jinja renders the GGUF's own `tokenizer.chat_template` (a Jinja2 program) with minijinja instead of the built-in per-architecture builder; --chat-template-file <path.jinja> overrides it and implies --jinja. --chat-template <name> still selects a built-in preset (chatml/llama3/gemma/lfm2/glm4/exaone/phi/none). Both are off by default, so token ids are unchanged unless you ask. tests/jinja_chat_template_ab.rs compares the two paths on real GGUFs: Qwen3 is asserted to match token for token, and LFM2.5 records a known divergence where the template is the correct one.\n\nLongCat Image Edit: --kind edit|turbo --model <transformer.gguf> --components <dir> --input <image.png> --instruction TEXT --out edited.png [--side 1024] [--steps N] [--guidance F32] [--seed N]; <dir> holds text_encoder/, vae/ and tokenizer/ safetensors, shared by both kinds; the two kinds use different Flux schedules so the step/guidance defaults differ (Edit 50/4.5, Turbo 8/1.0)\n\nQwen-Image-2.1: --model <qwen-image-2.1-Q8_0.gguf> --text-encoder <Qwen3-VL-8B.gguf> --vae <Qwen-Image-2.1/vae/diffusion_pytorch_model.safetensors> --prompt TEXT --out image.png [--width N --height N --steps N --cfg N --seed N] [--image reference.png --mmproj vision.gguf --reference another.png]\n\nMage-Flow: --model <dit.gguf> --text-encoder <text.gguf> --vae <vae.gguf> --prompt TEXT --out image.png [--resolution N | --width N --height N] [--steps N --cfg N --seed N --noise fixed.f32] [--image reference.png --mmproj vision.gguf --reference another.png]\n\nRerank mode: --rerank --rerank-query <TEXT> [--rerank-doc <TEXT> ...] | [--rerank-documents <FILE>] [--rerank-instruction <TEXT>] [--rerank-max-tokens N] | cross-encoder scoring; backend picked by GGUF arch (jina-bert-v2 + cls.weight/cls.bias → bert forward, qwen3 + cls.output.weight + pooling_type=4 → qwen3 trunk + 2-class head); one sigmoid'd score per document in [0, 1]\n\nJEV mode: --jev --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | single-forward-pass decision scoring over candidate labels A/B/C/…\n\nJEV grouped: --jev --jev-multi [--jev-option <pos> --jev-option <neg> ...] (pairs) or --jev-block <label> --jev-option <a> [--jev-option <b> ...] (blocks)\n\nServer mode: --serve [--host 0.0.0.0] [--port 8080] --model <path> [--mmproj ...] [--tts] [--embedding]\n\nCLM mode: --jev --clm-head <clm-heads.gguf> --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | cosine scoring via CLM projection heads on the chosen encoder (state = context, blank line, question; candidates verbatim\n\nGLiNER2 mode: --jev --gliner2-decide --model <gliner2-decide.gguf> --jev-context <text> [--gliner2-schema <json> | --jev-question <name> --jev-option <a> [--jev-option <b> ...]] | one DeBERTa-v3 pass scores every label of every task; --gliner2-schema takes a classify_text-shaped mapping: {intent: [a, b], aspects: {labels: [x], multi_label: true, cls_threshold: 0.4}}
+const USAGE: &str = "Usage: rust-model-inference --model <path.gguf-or-ggufrs> [--prompt ...] [--threads N] [--compute cpu|auto|vulkan (default cpu); --gpu aliases auto] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--max-context N (default 8192)] [--repetition-penalty α (default 1.0 = disabled)] [--serve [--host 0.0.0.0] [--port 8080]]\n\nChat template: --jinja renders the GGUF's own `tokenizer.chat_template` (a Jinja2 program) with minijinja instead of the built-in per-architecture builder; --chat-template-file <path.jinja> overrides it and implies --jinja. --chat-template <name> still selects a built-in preset (chatml/llama3/gemma/lfm2/glm4/exaone/phi/none). Both are off by default, so token ids are unchanged unless you ask. tests/jinja_chat_template_ab.rs compares the two paths on real GGUFs: Qwen3 is asserted to match token for token, and LFM2.5 records a known divergence where the template is the correct one.\n\nLongCat Image Edit: --kind edit|turbo --model <transformer.gguf> --components <dir> --input <image.png> --instruction TEXT --out edited.png [--side 1024] [--steps N] [--guidance F32] [--seed N]; <dir> holds text_encoder/, vae/ and tokenizer/ safetensors, shared by both kinds; the two kinds use different Flux schedules so the step/guidance defaults differ (Edit 50/4.5, Turbo 8/1.0)\n\nQwen-Image-2.1: --model <qwen-image-2.1-Q8_0.gguf> --text-encoder <Qwen3-VL-8B.gguf> --vae <Qwen-Image-2.1/vae/diffusion_pytorch_model.safetensors> --prompt TEXT --out image.png [--width N --height N --steps N --cfg N --seed N] [--image reference.png --mmproj vision.gguf --reference another.png]\n\nMage-Flow: --model <dit.gguf> --text-encoder <text.gguf> --vae <vae.gguf> --prompt TEXT --out image.png [--resolution N | --width N --height N] [--steps N --cfg N --seed N --noise fixed.f32] [--image reference.png --mmproj vision.gguf --reference another.png]\n\nRerank mode: --rerank --rerank-query <TEXT> [--rerank-doc <TEXT> ...] | [--rerank-documents <FILE>] [--rerank-instruction <TEXT>] [--rerank-max-tokens N] | cross-encoder scoring; backend picked by GGUF arch (jina-bert-v2 + cls.weight/cls.bias → bert forward, qwen3 + cls.output.weight + pooling_type=4 → qwen3 trunk + 2-class head); one sigmoid'd score per document in [0, 1]\n\nJEV mode: --jev --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | single-forward-pass decision scoring over candidate labels A/B/C/…\n\nJEV grouped: --jev --jev-multi [--jev-option <pos> --jev-option <neg> ...] (pairs) or --jev-block <label> --jev-option <a> [--jev-option <b> ...] (blocks)\n\nServer mode: --serve [--host 0.0.0.0] [--port 8080] --model <path> [--mmproj ...] [--tts] [--embedding]\n\nCLM mode: --jev --clm-head <clm-heads.gguf> --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | cosine scoring via CLM projection heads on the chosen encoder (state = context, blank line, question; candidates verbatim\n\nGLiNER2 mode: --jev --gliner2-decide --model <gliner2-decide.gguf> --jev-context <text> [--gliner2-schema <json> | --jev-question <name> --jev-option <a> [--jev-option <b> ...]] | one DeBERTa-v3 pass scores every label of every task; --gliner2-schema takes a classify_text-shaped mapping: {intent: [a, b], aspects: {labels: [x], multi_label: true, cls_threshold: 0.4}}
 
 AuK TTS mode: --model auk-base-f16.gguf --vae auk-vae-f32.gguf [--text-encoder qwen2.5-omni-3b-q8_0.gguf] --prompt \"<TEXT>\" --out speech.wav [--steps N (default 32)] [--resolution SR (default 24000)] [--duration-seconds N (default 1)] [--cfg-scale α (default 2.0)] [--instruction \"<voice/style>\" (instruct TTS)] [--ref-audio ref.wav (CFMEdit reference voice with audio tower)] | 24 kHz mono speech generation";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,6 +96,14 @@ fn main() {
         eprintln!("{error}");
         std::process::exit(2);
     });
+    app::run_or_exit(options.validate_compute_mode());
+    let _compute_scope = options
+        .compute_policy()
+        .configure_cli()
+        .unwrap_or_else(|error| {
+            eprintln!("{error}");
+            std::process::exit(2);
+        });
     // Resolved thread count for both LLM ComputePool and rayon global pool.
     let available_threads = std::thread::available_parallelism()
         .map(std::num::NonZeroUsize::get)
@@ -233,12 +241,6 @@ fn main() {
             return;
         }
         DispatchMode::Yue2 => {
-            // Same reason as the Z-Image branch below: this returns before the
-            // shared `enable_gpu()`, and the AR session only reaches the Vulkan
-            // backend once the flag is set.
-            if options.gpu {
-                ops::enable_gpu();
-            }
             app::run_or_exit(app::run_yue2_cli(
                 yue2_options.expect("validated YuE2 options"),
                 n_threads,
@@ -291,9 +293,6 @@ fn main() {
     // --vae + --out + --model without --text-encoder otherwise errors out as a
     // malformed Z-Image invocation; we probed the arch earlier).
     if let Some(arch_probe) = early_auk_arch {
-        if options.gpu {
-            ops::enable_gpu();
-        }
         let vae: Arc<dyn TensorSource> = Arc::from(open_or_exit(
             options.vae.as_deref().expect("AuK VAE required"),
             ComponentRole::Llm,
@@ -346,9 +345,6 @@ fn main() {
                 .tensor_info("transformer.transformer_blocks.0.attn_norm_x.linear.weight")
                 .is_some();
         if is_auk {
-            if options.gpu {
-                ops::enable_gpu();
-            }
             let vae: Arc<dyn TensorSource> = Arc::from(open_or_exit(
                 options.vae.as_deref().expect("AuK VAE required"),
                 ComponentRole::Llm,
@@ -410,15 +406,14 @@ fn main() {
                 .is_some()
                 && arch_probe.tensor_info("text_proj.weight").is_some());
         if is_ernie_image {
+            let _cpu = rust_model_inference::compute::ComputePolicy::Cpu.enter_legacy_scope();
             let turbo = options
                 .model
                 .to_string_lossy()
                 .to_lowercase()
                 .contains("turbo");
-            if options.gpu {
-                app::run_or_exit(Err(
-                    "ERNIE-Image currently supports CPU only; remove --gpu".into()
-                ));
+            if options.compute_policy() != rust_model_inference::compute::ComputePolicy::Cpu {
+                eprintln!("compute scope=ernie_image backend=Cpu reason=unmigrated_model");
             }
             let text: Arc<dyn TensorSource> = Arc::from(open_or_exit(
                 options
@@ -456,12 +451,6 @@ fn main() {
                 "--cfg-scale is supported for ERNIE-Image and Breeze TTS".into(),
             ));
         }
-        // Has to happen here, not at the shared `enable_gpu()` below: this
-        // branch returns before reaching it, and the DiT's projections only
-        // reach the Vulkan backend once the flag is set.
-        if options.gpu {
-            ops::enable_gpu();
-        }
         let diffusion: Arc<dyn TensorSource> = early_source
             .clone()
             .unwrap_or_else(|| Arc::from(open_or_exit(&options.model, ComponentRole::Llm)));
@@ -490,6 +479,14 @@ fn main() {
     let model_path = options.model.as_path();
     let source: Arc<dyn TensorSource> =
         early_source.unwrap_or_else(|| Arc::from(open_or_exit(model_path, ComponentRole::Llm)));
+    app::run_or_exit(
+        options.validate_compute_model(
+            source
+                .metadata("general.architecture")
+                .and_then(MetaValue::to_string_val)
+                .unwrap_or_default(),
+        ),
+    );
     // Qwen-Image-2.1 diffusion GGUFs carry no metadata (kv=0), so the route is
     // chosen by tensor-name signature before the metadata-driven LLM path.
     if matches_signature(source.as_ref()) {
@@ -508,10 +505,6 @@ fn main() {
     if let Err(error) = app::reject_incomplete_z_image_architecture(&arch) {
         app::run_or_exit(Err(error));
         return;
-    }
-
-    if options.gpu {
-        ops::enable_gpu();
     }
 
     let (max_tokens, temperature) = app::resolve_cli_generation_options(&options);
@@ -1022,6 +1015,12 @@ fn main() {
             ));
         }
     } else {
+        if options.compute_policy() == rust_model_inference::compute::ComputePolicy::Vulkan {
+            app::run_or_exit(Err(
+                "--compute vulkan requires --prompt; interactive mode is not migrated".into(),
+            ));
+            return;
+        }
         app::run_or_exit(app::validate_qwen3vl_decoder_mode(
             &arch,
             options.dump_logits,

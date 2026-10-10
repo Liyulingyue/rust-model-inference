@@ -3,10 +3,10 @@
 //! `run_block` in `src/models/diffusion/z_image/dit.rs` calls `linear_into`
 //! once per sequence row, so a 512x512 step issues 1536 x 30 x 4 = 184,320
 //! dispatches at ~926 us each -- 150.3 s/step, slower than the 140.5 s CPU
-//! path. `Qwen3Ops::record_weight_matmul_rows` already accepts an input
+//! path. `Qwen3Ops::record_weight_matmul_tiled_rows` already accepts an input
 //! *matrix* (`token_rows` x `input_stride`) and quantizes it on the GPU, which
 //! is exactly what batching would need, but it is `pub(crate)` and wired only
-//! for Qwen3's prefill, so an example cannot reach it.
+//! for the production paths, so an example cannot reach it.
 //!
 //! This drives it directly with the DiT's real QKV projection shape and
 //! compares against the row-at-a-time path the DiT uses today. One question:
@@ -136,11 +136,22 @@ fn run_probe() -> Result<(), String> {
     let arena_bytes = cursor.next_power_of_two();
     eprintln!("arena: {:.1} MiB", arena_bytes as f64 / 1048576.0);
 
-    let mut ops = Qwen3Ops::new_with_size(&context, arena_bytes, 8).map_err(|e| e.to_string())?;
+    let mut ops = Qwen3Ops::new_device_local_with_size(&context, arena_bytes, 8)
+        .map_err(|e| e.to_string())?;
     let weight_buffer = unsafe { context.upload_static(&weight) }.map_err(|e| e.to_string())?;
     let bindings = ops
         .bind_weight_buffers(&[weight_buffer], &[GpuWeightFormat::Q8_0])
         .map_err(|e| e.to_string())?;
+
+    let use_tiled = context.supports_integer_dot_product();
+    eprintln!(
+        "batched kernel: {}",
+        if use_tiled {
+            "tiled packed int8 dot product"
+        } else {
+            "grouped scalar int8 fallback"
+        }
+    );
 
     // The first call pays shader JIT plus a {:.0} MiB host->device arena
     // upload. The DiT issues 96 of these per step and 8 steps per render, but
@@ -154,23 +165,44 @@ fn run_probe() -> Result<(), String> {
         let t0 = Instant::now();
         ops.write_f32(x, &input).map_err(|e| e.to_string())?;
         let mut commands = TokenCommands::begin(&context).map_err(|e| e.to_string())?;
-        ops.record_weight_matmul_rows(
-            &commands,
-            bindings,
-            x,
-            q8,
-            q8_scales,
-            q4_1_input_sums,
-            q8k,
-            q8k_scales,
-            &[(out, QKV, QKV * 4)],
-            HIDDEN,
-            ROWS,
-            HIDDEN,
-        )
-        .map_err(|e| e.to_string())?;
+        if use_tiled {
+            ops.record_weight_matmul_tiled_rows(
+                &commands,
+                bindings,
+                x,
+                q8,
+                q8_scales,
+                q4_1_input_sums,
+                q8k,
+                q8k_scales,
+                &[(out, QKV, QKV * 4)],
+                HIDDEN,
+                ROWS,
+                HIDDEN,
+            )
+            .map_err(|e| e.to_string())?;
+        } else {
+            ops.record_weight_matmul_rows(
+                &commands,
+                bindings,
+                x,
+                q8,
+                q8_scales,
+                q4_1_input_sums,
+                q8k,
+                q8k_scales,
+                &[(out, QKV, QKV * 4)],
+                HIDDEN,
+                ROWS,
+                HIDDEN,
+            )
+            .map_err(|e| e.to_string())?;
+        }
         commands.submit_and_wait().map_err(|e| e.to_string())?;
-        head_value = ops.read_f32(out, 1).map_err(|e| e.to_string())?[0];
+        let mut head = [0.0f32; 1];
+        ops.read_f32_into(out, &mut head)
+            .map_err(|e| e.to_string())?;
+        head_value = head[0];
         let elapsed = t0.elapsed().as_secs_f64();
         if pass == 0 {
             first_s = elapsed;

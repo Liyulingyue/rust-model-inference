@@ -36,6 +36,9 @@ use std::sync::Arc;
 
 pub struct LlamaSession<'a> {
     pub arch: String,
+    pub(crate) compute_policy: crate::compute::ComputePolicy,
+    #[cfg(feature = "vulkan")]
+    pub(crate) gpu: Option<crate::vulkan::dense::DenseVulkanSession>,
     pub config: LlamaSessionConfig,
     pub tokenizer: DynTokenizer,
     pub weights: LlamaWeights<'a>,
@@ -178,11 +181,7 @@ impl<'a> LlamaSession<'a> {
     /// footprint exactly; `max_rows > 1` widens the per-row
     /// buffers so a [`forward_chunk`](Self::forward_chunk)
     /// call can hold `rows × width` activations and Q/K/V at
-    /// once. The chunked prefill math
-    /// ([`forward_chunk`](Self::forward_chunk) today still
-    /// falls back to per-token for `rows > 1`; the
-    /// `max_rows` reservation just reserves the memory
-    /// needed for future batched implementations.
+    /// once. Standard dense models share the CPU/Vulkan recipe.
     pub fn from_source_with_max_rows(
         source: &'a dyn TensorSource,
         n_threads_arg: usize,
@@ -190,6 +189,29 @@ impl<'a> LlamaSession<'a> {
         max_context: usize,
         max_rows: usize,
     ) -> Result<Self, String> {
+        Self::from_source_with_compute(
+            source,
+            n_threads_arg,
+            kv_format,
+            max_context,
+            max_rows,
+            crate::compute::ComputePolicy::legacy(),
+        )
+    }
+
+    pub fn from_source_with_compute(
+        source: &'a dyn TensorSource,
+        n_threads_arg: usize,
+        kv_format: KvFormat,
+        max_context: usize,
+        max_rows: usize,
+        compute_policy: crate::compute::ComputePolicy,
+    ) -> Result<Self, String> {
+        compute_policy.check_build()?;
+        let _scope = compute_policy.cpu_scope();
+        if max_rows == 0 || max_context == 0 {
+            return Err("Llama rows/context must be nonzero".into());
+        }
         use crate::core::loader::model_config_from_source;
         let config = model_config_from_source(source)
             .map_err(|error| format!("Failed to parse model config: {error}"))?;
@@ -315,8 +337,11 @@ impl<'a> LlamaSession<'a> {
             .map(|v| v as f32);
         let kq_scale =
             attention_scale_meta.unwrap_or_else(|| 1.0f32 / (n_embd_head_k as f32).sqrt());
-        Ok(Self {
+        let mut session = Self {
             arch,
+            compute_policy,
+            #[cfg(feature = "vulkan")]
+            gpu: None,
             config: LlamaSessionConfig {
                 max_ctx,
                 n_embd,
@@ -361,19 +386,41 @@ impl<'a> LlamaSession<'a> {
             final_logit_softcap,
             sliding_window,
             sliding_window_pattern,
-        })
+        };
+        if compute_policy == crate::compute::ComputePolicy::Auto {
+            eprintln!("compute requested=Auto scope=llama_decoder backend=Cpu reason=no_validated_performance_bucket");
+        }
+        #[cfg(feature = "vulkan")]
+        if compute_policy == crate::compute::ComputePolicy::Vulkan {
+            let attempt = (|| {
+                super::dense::eligible(&session)?;
+                if kv_format != KvFormat::F16 {
+                    return Err("dense Vulkan currently requires F16 KV".into());
+                }
+                let Some(context) = compute_policy.context().map_err(|e| e.to_string())? else {
+                    return Ok(None);
+                };
+                let weights = super::dense::gpu_weights(&session).map_err(|e| e.to_string())?;
+                crate::vulkan::dense::DenseVulkanSession::new(
+                    super::dense::gpu_shape(&session),
+                    &weights,
+                    max_ctx,
+                    max_rows,
+                    context,
+                )
+                .map(Some)
+                .map_err(|e| e.to_string())
+            })();
+            session.gpu = attempt?;
+        }
+        Ok(session)
     }
 
-    /// Run the legacy per-token prefill over `prompt_tokens`, then
-    /// return the final logits. Kept around as the single-source-of-
-    /// truth for `forward_chunk` so the trait-driven path stays
-    /// bit-identical at `B = 1`.
+    /// Process new tokens in one-row transactions and return the final logits.
     pub fn forward_logits_per_token(&mut self, prompt_tokens: &[u32]) -> Result<Vec<f32>, String> {
         let mut last_logits = None;
         for &token_id in prompt_tokens {
-            self.forward_one_token(token_id)?;
-            // `forward_one_token` writes `scratch.logits` only on
-            // every step (matches the legacy loop); capture the last.
+            self.compute_chunk(&[token_id], true)?;
             if std::env::var_os("RUST_LLAMA_DUMP").is_some() {
                 let top: Vec<(usize, f32)> = {
                     let mut indexed: Vec<(usize, f32)> = self
@@ -394,92 +441,34 @@ impl<'a> LlamaSession<'a> {
         Ok(last_logits.unwrap_or_default())
     }
 
-    /// Trait-driven entry point. Returns the final logits for
-    /// `prompt_tokens` after a chunked prefill at the requested
-    /// `batch_size`. Equivalent to
-    /// [`forward_logits_per_token`](Self::forward_logits_per_token)
-    /// when `batch_size == 1` (the default `ChunkedPrefill::prefill`
-    /// loop with `rows = 1` collapses to the legacy per-token
-    /// walk). For `batch_size > 1`, the trait default dispatches
-    /// `forward_chunk` per chunk; `forward_chunk` calls
-    /// [`forward_chunk_rows`](Self::forward_chunk_rows) which
-    /// uses [`PreparedRows::matmul_group`] for the Q/K/V / wo /
-    /// gate / up / down projections and falls back to the
-    /// legacy per-row flash-attention loop for the attention
-    /// sub-step.
+    /// Append new tokens in bounded chunks, preserving each committed prefix.
     pub fn forward_logits_chunked(
         &mut self,
         prompt_tokens: &[u32],
         batch_size: usize,
     ) -> Result<Vec<f32>, String> {
-        // Real batched prefill via the [`ChunkedPrefill`] trait's
-        // default `prefill()` driver. This walks the input in
-        // `batch_size`-sized chunks and calls
-        // [`forward_chunk_batched_real`](Self::forward_chunk_batched_real)
-        // — single Q8_0 + Q8_K quantise pass per layer, Q/K/V / wo /
-        // gate / up / down projections through
-        // [`PreparedRows::matmul_group`], and an LM-head projection
-        // only on the last chunk's last row.
-        //
-        // Falls back to the legacy per-token path when the session
-        // was built with `max_rows == 1` (no batched scratchpad
-        // reserved) so the `from_source` legacy constructor still
-        // works for callers that didn't opt in.
-        if self.prepared_rows.max_rows() > 1 {
-            let owned = prompt_tokens.to_vec();
-            return <Self as ChunkedPrefill>::prefill(self, &owned, batch_size)
-                .map(|opt| opt.unwrap_or_default());
+        let batch =
+            checked_prefill_batch_size(Some(batch_size))?.min(self.prepared_rows.max_rows());
+        let end = self
+            .seq_len
+            .checked_add(prompt_tokens.len())
+            .ok_or("Llama input length overflow")?;
+        if end > self.config.max_ctx
+            || prompt_tokens
+                .iter()
+                .any(|&t| t as usize >= self.config.vocab)
+        {
+            return Err("Llama prompt exceeds capacity or vocabulary".into());
         }
-        self.forward_logits_per_token(prompt_tokens)
-    }
-
-    /// Multi-row chunked forward. `rows` tokens at consecutive
-    /// absolute positions `[base, base + rows)`. Falls back to
-    /// `rows` × `forward_one_token` when `rows == 1` (the common
-    /// case) so the legacy per-token path stays as the single
-    /// source of truth for the attention math.
-    ///
-    /// For `rows > 1` this is a **real** batched prefill step:
-    /// the activations live in `[rows × n_embd]` row-major
-    /// scratch slices (see
-    /// [`ExecutionScratchpad::new_batched`]); each layer
-    /// quantises the activation once via
-    /// [`PreparedRows::prepare`] and dispatches every Q/K/V / wo
-    /// / gate / up / down projection in one
-    /// [`PreparedRows::matmul_group`] call so the per-row Q8_0 +
-    /// Q8_K quantisation and the dispatch overhead are amortised
-    /// across `rows` rows. Attention, RoPE, RMSNorm and the KV-
-    /// cache append remain per-row because (a) the per-token state
-    /// update in `seq_len` is sequential, (b) RoPE depends on the
-    /// absolute position, and (c) the existing flash-attention
-    /// loop already reuses the cached K/V load across heads.
-    fn forward_chunk_rows(
-        &mut self,
-        input: &[u32],
-        rows: usize,
-        base_position: usize,
-        project_logits: bool,
-    ) -> Result<Option<Vec<f32>>, String> {
-        if rows == 1 {
-            // B=1 fast path: reuse the legacy per-token forward
-            // verbatim. This keeps the B=1 ablation identical to
-            // the pre-chunked-prefill llama path so the trait-
-            // driven dispatch is bit-exact at rows=1.
-            let owned: Vec<u32> = input[base_position..base_position + 1].to_vec();
-            self.forward_logits_chunked_chunk(&owned, base_position, project_logits)?;
-            if project_logits {
-                Ok(Some(self.scratch.logits.clone()))
-            } else {
-                Ok(None)
-            }
+        for range in prefill_chunks(prompt_tokens.len(), batch) {
+            let project_logits = range.end == prompt_tokens.len();
+            self.compute_chunk(&prompt_tokens[range], project_logits)?;
+        }
+        Ok(if prompt_tokens.is_empty() {
+            Vec::new()
         } else {
-            self.forward_chunk_batched_real(input, rows, base_position, project_logits)?;
-            if project_logits {
-                Ok(Some(self.scratch.logits.clone()))
-            } else {
-                Ok(None)
-            }
-        }
+            self.scratch.logits.clone()
+        })
     }
 
     /// Clear KV cache and reset sequence length so the session is ready
@@ -489,43 +478,21 @@ impl<'a> LlamaSession<'a> {
     pub fn reset(&mut self) {
         self.seq_len = 0;
         self.kv_cache.clear();
-    }
-
-    /// B=1 fallback used by [`forward_chunk_rows`] when the chunk
-    /// contains a single token. Runs the legacy per-token forward
-    /// for the token at absolute position `base_position` without
-    /// going through the trait dispatch.
-    fn forward_logits_chunked_chunk(
-        &mut self,
-        prompt_tokens: &[u32],
-        base_position: usize,
-        project_logits: bool,
-    ) -> Result<(), String> {
-        // `forward_one_token` advances `self.seq_len` by one each
-        // call. `base_position` must equal `self.seq_len` at entry.
-        if base_position != self.seq_len {
-            return Err(format!(
-                "Llama chunked prefill base_position {base_position} != session seq_len {}",
-                self.seq_len
-            ));
+        #[cfg(feature = "vulkan")]
+        if let Some(gpu) = &mut self.gpu {
+            gpu.reset();
         }
-        for &token_id in prompt_tokens {
-            self.forward_one_token(token_id)?;
-        }
-        let _ = project_logits;
-        Ok(())
     }
 
     /// True batched prefill step for `rows > 1`. See
     /// [`forward_chunk_rows`] for the high-level shape.
-    fn forward_chunk_batched_real(
+    pub(super) fn forward_chunk_batched_real(
         &mut self,
         input: &[u32],
         rows: usize,
         base_position: usize,
         project_logits: bool,
     ) -> Result<(), String> {
-        let _ = project_logits;
         let cfg = &self.config;
         let scratch = &mut self.scratch;
         let pool = &self.pool;
@@ -578,7 +545,7 @@ impl<'a> LlamaSession<'a> {
             let x = &mut scratch.x[..rows * n_embd];
             for r in 0..rows {
                 let abs_pos = base_position + r;
-                let token_id = input[abs_pos];
+                let token_id = input[r];
                 let row = &mut x[r * n_embd..(r + 1) * n_embd];
                 embedding_lookup(
                     weights.embd_weight,
@@ -902,7 +869,7 @@ impl<'a> LlamaSession<'a> {
                 prepared_rows.prepare(normed, rows, n_embd, needs_q8_ffn, needs_q8k_ffn)?;
                 prepared_rows.matmul_group(
                     normed,
-                    [(&lw.w_gate, up_proj), (&lw.w_up, gate_proj)],
+                    [(&lw.w_gate, &mut *gate_proj), (&lw.w_up, &mut *up_proj)],
                     pool,
                 )?;
                 crate::models::llama::trunk::forward::silu_mul_rows(
@@ -952,6 +919,10 @@ impl<'a> LlamaSession<'a> {
             }
         }
 
+        if !project_logits {
+            self.seq_len = base_position + rows;
+            return Ok(());
+        }
         // ---- Output norm + LM-head projection ----
         // Output norm is per-row; LM-head projects only the last
         // row's hidden state to `vocab`.
@@ -1032,7 +1003,11 @@ impl<'a> LlamaSession<'a> {
     /// `forward_chunk` can call it `rows` times when `rows = 1`.
     /// This is a straight extraction of the inner body of the
     /// original `for step in 0..prompt_tokens.len()` loop.
-    fn forward_one_token(&mut self, token_id: u32) -> Result<(), String> {
+    pub(super) fn forward_one_token(
+        &mut self,
+        token_id: u32,
+        project_logits: bool,
+    ) -> Result<(), String> {
         let cfg = &self.config;
         let pos = self.seq_len;
         let scratch = &mut self.scratch;
@@ -1630,6 +1605,10 @@ impl<'a> LlamaSession<'a> {
             }
         }
 
+        if !project_logits {
+            self.seq_len = pos + 1;
+            return Ok(());
+        }
         // Output norm + LM-head projection.
         let x = &mut scratch.x[..n_embd];
         let normed = &mut scratch.normed[..n_embd];
@@ -1749,17 +1728,15 @@ impl<'a> ChunkedPrefill for LlamaSession<'a> {
                 input.len()
             ));
         }
-        // `forward_chunk_rows` keeps the B=1 path bit-identical
-        // to the legacy per-token forward and lifts the
-        // Q/K/V / wo / gate / up / down projections into a
-        // single `PreparedRows::matmul_group` call when
-        // `rows > 1`. See [`forward_chunk_batched_real`] for
-        // the full math shape.
-        self.forward_chunk_rows(input, rows, base_position, project_logits)
+        let tokens = input
+            .get(base_position..base_position + rows)
+            .ok_or("Llama chunk input range")?;
+        self.compute_chunk(tokens, project_logits)?;
+        Ok(project_logits.then(|| self.scratch.logits.clone()))
     }
 
     fn max_chunk_size(&self) -> usize {
-        self.config.max_ctx
+        self.prepared_rows.max_rows()
     }
 
     fn seq_len(&self) -> usize {
@@ -1775,21 +1752,10 @@ impl<'a> ChunkedPrefill for LlamaSession<'a> {
         input: &Self::Input,
         batch_size: usize,
     ) -> Result<Option<Vec<f32>>, String> {
-        let batch_size = checked_prefill_batch_size(Some(batch_size))?;
-        let total = Self::input_len(input);
-        if total == 0 {
+        if input.is_empty() {
             return Ok(None);
         }
-        let mut last_logits: Option<Vec<f32>> = None;
-        for chunk in prefill_chunks(total, batch_size) {
-            let rows = chunk.len();
-            let base = self.seq_len();
-            let is_last = chunk.end == total;
-            last_logits = self.forward_chunk(input, rows, base, is_last)?;
-            // `forward_chunk` already advances `self.seq_len` per
-            // token, so no extra `set_seq_len` call is needed.
-        }
-        Ok(last_logits)
+        self.forward_logits_chunked(input, batch_size).map(Some)
     }
 }
 

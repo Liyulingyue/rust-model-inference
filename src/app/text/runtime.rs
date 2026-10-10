@@ -65,6 +65,7 @@ const MAX_VISION_TOKENS: usize = 2048;
 /// caller actually wants to change; the remaining fields carry the defaults
 /// above, so the server, tests, and any future front-end cannot disagree.
 pub struct RuntimeOptions {
+    pub compute: crate::compute::ComputePolicy,
     pub threads: usize,
     pub kv_format: KvFormat,
     pub max_context: usize,
@@ -89,6 +90,7 @@ impl RuntimeOptions {
         tokenizer: Arc<crate::core::tokenizer::BPETokenizer>,
     ) -> Self {
         Self {
+            compute: crate::compute::ComputePolicy::Cpu,
             threads: defaults::THREADS,
             kv_format: defaults::KV_FORMAT,
             max_context: defaults::MAX_CONTEXT,
@@ -98,6 +100,11 @@ impl RuntimeOptions {
             tokenizer,
             mmproj: None,
         }
+    }
+
+    pub fn with_compute(mut self, policy: crate::compute::ComputePolicy) -> Self {
+        self.compute = policy;
+        self
     }
 
     pub fn with_mmproj(mut self, mmproj: Option<Arc<dyn TensorSource>>) -> Self {
@@ -142,23 +149,55 @@ pub fn build_text_runtime(
     arch: &str,
     options: RuntimeOptions,
 ) -> Result<Box<dyn TextRuntime>, String> {
-    if crate::app::text::uses_llama_trunk(arch) {
-        Ok(Box::new(LlamaTextRuntime::new(options)?))
+    let policy = options.compute;
+    policy.check_build()?;
+    policy.validate_text_arch(arch)?;
+    if policy == crate::compute::ComputePolicy::Vulkan && options.mmproj.is_some() {
+        return Err("full Vulkan runtime supports text input only".into());
+    }
+    let _scope = policy.enter_legacy_scope();
+    let inner: Box<dyn TextRuntime> = if crate::app::text::uses_llama_trunk(arch) {
+        Box::new(LlamaTextRuntime::new(options)?)
     } else if matches!(arch, "qwen3" | "qwen3vl" | "qwen2vl" | "qwen3vlmoe") {
         // qwen2vl / qwen3vlmoe share the Qwen3 model + session + Qwen3Input
         // surface (the CLI's `run_qwen3_family_multimodal` covers them too);
         // only the projector family differs, which the image path handles.
-        Ok(Box::new(Qwen3TextRuntime::new(options)?))
+        Box::new(Qwen3TextRuntime::new(options)?)
     } else if matches!(arch, "qwen35" | "edge0") {
-        Ok(Box::new(HybridTextRuntime::new(options)?))
+        Box::new(HybridTextRuntime::new(options)?)
     } else if arch == "lfm2moe" {
-        Ok(Box::new(Lfm2MoeTextRuntime::new(options)?))
+        Box::new(Lfm2MoeTextRuntime::new(options)?)
     } else if arch == "falcon-h1" {
-        Ok(Box::new(
-            crate::models::falcon_h1::runtime::FalconH1TextRuntime::new(options)?,
-        ))
+        Box::new(crate::models::falcon_h1::runtime::FalconH1TextRuntime::new(
+            options,
+        )?)
     } else {
-        Err(format!("No TextRuntime adapter for architecture {arch}"))
+        return Err(format!("No TextRuntime adapter for architecture {arch}"));
+    };
+    Ok(Box::new(ComputeTextRuntime { inner, policy }))
+}
+
+struct ComputeTextRuntime {
+    inner: Box<dyn TextRuntime>,
+    policy: crate::compute::ComputePolicy,
+}
+impl TextRuntime for ComputeTextRuntime {
+    fn arch(&self) -> &str {
+        self.inner.arch()
+    }
+    fn context_length(&self) -> usize {
+        self.inner.context_length()
+    }
+    fn generate(
+        &mut self,
+        request: &GenerationRequest,
+        sink: &mut dyn TokenSink,
+    ) -> Result<GeneratedText, String> {
+        if self.policy == crate::compute::ComputePolicy::Vulkan && !request.images.is_empty() {
+            return Err("full Vulkan runtime supports text input only".into());
+        }
+        let _scope = self.policy.enter_legacy_scope();
+        self.inner.generate(request, sink)
     }
 }
 
@@ -204,6 +243,11 @@ pub struct LlamaTextRuntime {
 
 impl LlamaTextRuntime {
     pub fn new(options: RuntimeOptions) -> Result<Self, String> {
+        options.compute.check_build()?;
+        options
+            .compute
+            .validate_text_arch(&arch_of(&options.source))?;
+        let _scope = options.compute.enter_legacy_scope();
         let source = options.source.clone();
         // Use batched prefill (`max_rows = prefill_batch_size`) when the
         // caller opts in (>= 2). Phi-4's per-head RoPE bug was fixed by
@@ -212,12 +256,13 @@ impl LlamaTextRuntime {
         // stays as a safe fallback when the operator keeps the legacy
         // single-row scratchpad.
         let prefill_rows = options.prefill_batch_size.max(1);
-        let session = LlamaSession::from_source_with_max_rows(
+        let session = LlamaSession::from_source_with_compute(
             source.as_ref(),
             options.threads,
             options.kv_format,
             options.max_context,
             prefill_rows,
+            options.compute,
         )?;
         // SAFETY: `source` is held by the runtime for its whole lifetime, so
         // borrowing session data from it for `'static` stays valid.
@@ -337,12 +382,26 @@ pub struct Qwen3TextRuntime {
 
 impl Qwen3TextRuntime {
     pub fn new(options: RuntimeOptions) -> Result<Self, String> {
+        options.compute.check_build()?;
+        options
+            .compute
+            .validate_text_arch(&arch_of(&options.source))?;
+        let _scope = options.compute.enter_legacy_scope();
         let arch = arch_of(&options.source);
         let model = crate::models::qwen3::Qwen3Model::from_source(
             options.source.clone(),
             options.tokenizer.clone(),
             options.pool.clone(),
         )?;
+        if options.compute == crate::compute::ComputePolicy::Vulkan {
+            crate::models::qwen3::Qwen3Session::new_with_compute(
+                &model,
+                options.capacity_for(model.config().n_ctx),
+                options.kv_format,
+                crate::KvLifecycle::Ephemeral,
+                options.compute,
+            )?;
+        }
         Ok(Self {
             model: Arc::new(model),
             tokenizer: options.tokenizer.clone(),
@@ -369,12 +428,19 @@ impl TextRuntime for Qwen3TextRuntime {
         request: &GenerationRequest,
         sink: &mut dyn TokenSink,
     ) -> Result<GeneratedText, String> {
+        let _scope = self.options.compute.enter_legacy_scope();
+        if self.options.compute == crate::compute::ComputePolicy::Vulkan
+            && !request.images.is_empty()
+        {
+            return Err("full Vulkan runtime supports text input only".into());
+        }
         let capacity = self.options.capacity_for(self.model.config().n_ctx);
-        let mut session = crate::models::qwen3::Qwen3Session::new_with_kv_state(
+        let mut session = crate::models::qwen3::Qwen3Session::new_with_compute(
             &self.model,
             capacity,
             self.options.kv_format,
             crate::KvLifecycle::Ephemeral,
+            self.options.compute,
         )?;
         // Image path for qwen3vl: encode through the Qwen3-VL projector, splice
         // the placeholder run into the user turn, then inject the projected
@@ -607,6 +673,7 @@ impl Qwen3TextRuntime {
 // ---------------------------------------------------------------------------
 
 pub struct HybridTextRuntime {
+    compute: crate::compute::ComputePolicy,
     // A fresh session borrows the selected model mutably per request.
     model: Mutex<crate::models::hybrid::HybridTextModel<'static>>,
     _source: Arc<dyn TensorSource>,
@@ -621,13 +688,29 @@ pub struct HybridTextRuntime {
 
 impl HybridTextRuntime {
     pub fn new(options: RuntimeOptions) -> Result<Self, String> {
+        options.compute.check_build()?;
+        options
+            .compute
+            .validate_text_arch(&arch_of(&options.source))?;
+        let _scope = options.compute.enter_legacy_scope();
         let source = options.source.clone();
-        let model = crate::models::hybrid::HybridTextModel::from_source(source.as_ref())?;
+        let mut model = crate::models::hybrid::HybridTextModel::from_source(source.as_ref())?;
+        if options.compute == crate::compute::ComputePolicy::Vulkan {
+            let capacity = options.capacity_for(model.trunk().config.n_ctx);
+            crate::models::qwen35::trunk::HybridSession::new_with_compute(
+                &mut model,
+                capacity,
+                options.prefill_batch_size,
+                options.pool.clone(),
+                options.compute,
+            )?;
+        }
         // SAFETY: source outlives the runtime (see LlamaTextRuntime::new).
         let model: crate::models::hybrid::HybridTextModel<'static> =
             unsafe { std::mem::transmute(model) };
         let arch = arch_of(&source);
         Ok(Self {
+            compute: options.compute,
             model: Mutex::new(model),
             _source: source,
             tokenizer: options.tokenizer,
@@ -657,6 +740,10 @@ impl TextRuntime for HybridTextRuntime {
         request: &GenerationRequest,
         sink: &mut dyn TokenSink,
     ) -> Result<GeneratedText, String> {
+        let _scope = self.compute.enter_legacy_scope();
+        if self.compute == crate::compute::ComputePolicy::Vulkan && !request.images.is_empty() {
+            return Err("full Vulkan runtime supports text input only".into());
+        }
         if self.arch == "edge0" && !request.images.is_empty() {
             return Err("Edge0-35B preview contains no vision weights; text input only".into());
         }
@@ -677,11 +764,12 @@ impl TextRuntime for HybridTextRuntime {
             self.prepare_image_prefill(&request.token_ids, &request.images)?
         };
         let mut model = self.model.lock().map_err(|e| e.to_string())?;
-        let mut session = crate::models::qwen35::trunk::HybridSession::new_with_prefill_batch_size(
+        let mut session = crate::models::qwen35::trunk::HybridSession::new_with_compute(
             &mut *model,
             prefill_ids.len() + request.max_new_tokens,
             self.prefill_batch_size,
             self.pool.clone(),
+            self.compute,
         )?;
         let eos_id = self.tokenizer.eos_id();
         let im_end_id = self.tokenizer.special_token_id("im_end");
@@ -738,6 +826,7 @@ impl TextRuntime for HybridTextRuntime {
 // ---------------------------------------------------------------------------
 
 pub struct Lfm2MoeTextRuntime {
+    compute: crate::compute::ComputePolicy,
     session: Mutex<crate::models::lfm2moe::Lfm2MoeSession<'static>>,
     _source: Arc<dyn TensorSource>,
     tokenizer: Arc<crate::core::tokenizer::BPETokenizer>,
@@ -748,6 +837,11 @@ pub struct Lfm2MoeTextRuntime {
 
 impl Lfm2MoeTextRuntime {
     pub fn new(options: RuntimeOptions) -> Result<Self, String> {
+        options.compute.check_build()?;
+        options
+            .compute
+            .validate_text_arch(&arch_of(&options.source))?;
+        let _scope = options.compute.enter_legacy_scope();
         let source = options.source.clone();
         let session = crate::models::lfm2moe::Lfm2MoeSession::from_source(
             source.as_ref(),
@@ -762,6 +856,7 @@ impl Lfm2MoeTextRuntime {
         let session: crate::models::lfm2moe::Lfm2MoeSession<'static> =
             unsafe { std::mem::transmute(session) };
         Ok(Self {
+            compute: options.compute,
             session: Mutex::new(session),
             _source: source,
             tokenizer: options.tokenizer,
@@ -788,6 +883,10 @@ impl TextRuntime for Lfm2MoeTextRuntime {
         request: &GenerationRequest,
         sink: &mut dyn TokenSink,
     ) -> Result<GeneratedText, String> {
+        let _scope = self.compute.enter_legacy_scope();
+        if self.compute == crate::compute::ComputePolicy::Vulkan && !request.images.is_empty() {
+            return Err("full Vulkan runtime supports text input only".into());
+        }
         let mut session = self.session.lock().map_err(|e| e.to_string())?;
         session.reset();
         let eos_id = self.tokenizer.eos_id();
@@ -888,6 +987,47 @@ mod tests {
     /// The whole point of `RuntimeOptions::defaults`: they must equal what the
     /// CLI resolves for the same (absent) flags. If the CLI changes a default,
     /// this test fails and forces both to move together.
+    #[test]
+    fn compute_runtime_scope_restores_on_error_and_rejects_images() {
+        use super::*;
+        use crate::compute::ComputePolicy;
+        struct Probe;
+        impl TextRuntime for Probe {
+            fn arch(&self) -> &str {
+                "probe"
+            }
+            fn context_length(&self) -> usize {
+                4
+            }
+            fn generate(
+                &mut self,
+                _: &GenerationRequest,
+                _: &mut dyn TokenSink,
+            ) -> Result<GeneratedText, String> {
+                assert_eq!(ComputePolicy::legacy(), ComputePolicy::Cpu);
+                Err("probe error".into())
+            }
+        }
+        let _outer = ComputePolicy::Auto.enter_legacy_scope();
+        let mut runtime = ComputeTextRuntime {
+            inner: Box::new(Probe),
+            policy: ComputePolicy::Cpu,
+        };
+        let mut request = GenerationRequest::new(vec![1], 1);
+        let mut sink = crate::ops::generation_runtime::CollectSink::new();
+        assert_eq!(
+            runtime.generate(&request, &mut sink).unwrap_err(),
+            "probe error"
+        );
+        assert_eq!(ComputePolicy::legacy(), ComputePolicy::Auto);
+        runtime.policy = ComputePolicy::Vulkan;
+        request.images.push(vec![1]);
+        assert!(runtime
+            .generate(&request, &mut sink)
+            .unwrap_err()
+            .contains("text input only"));
+    }
+
     #[test]
     fn runtime_options_match_cli_defaults() {
         let options = cli_defaults();

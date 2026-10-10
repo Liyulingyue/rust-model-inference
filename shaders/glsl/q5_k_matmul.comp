@@ -16,9 +16,9 @@ uint minimum(uint slot, uint offset, uint index) { return index < 4u ? weight_by
 
 void main() {
     uint token_row = gl_WorkGroupID.z / pc.group_count; uint slot = gl_WorkGroupID.z % pc.group_count;
-    uint row = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint row = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 64u + gl_LocalInvocationID.x;
     uint rows = slot == 0u ? pc.rows0 : (slot == 1u ? pc.rows1 : pc.rows2);
-    if (slot >= pc.group_count || row >= rows || gl_LocalInvocationID.x != 0u) return;
+    if (slot >= pc.group_count || row >= rows) return;
     precise float sums[8] = float[8](0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
     precise float minimum_sums[4] = float[4](0.0, 0.0, 0.0, 0.0);
     for (uint block = 0u; block < pc.blocks_per_row; ++block) {

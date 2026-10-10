@@ -639,6 +639,8 @@ fn qwen3_trace_keeps_token_major_checkpoints_for_every_prompt_row() {
     let expected_row = [
         "model.input_embed",
         "attn_norm-0",
+        "Qcur_raw-0",
+        "Kcur_raw-0",
         "Qcur_normed-0",
         "Kcur_normed-0",
         "Qcur-0",
@@ -699,6 +701,65 @@ fn qwen3_trace_keeps_token_major_checkpoints_for_every_prompt_row() {
             std::fs::remove_file(record["binary_path"].as_str().unwrap()).unwrap();
         }
         std::fs::remove_file(trace).unwrap();
+    }
+}
+
+#[test]
+fn raw_hidden_sequence_preserves_normalization_and_compute_policy() {
+    use crate::compute::ComputePolicy;
+    use crate::core::scratchpad::{KvFormat, KvLifecycle};
+    let model = deterministic_session_model(8);
+    let tokens = [1, 2, 1];
+    let positions = super::positions::qwen_text_positions(tokens.len());
+    let input = || Qwen3Input {
+        token_ids: &tokens,
+        positions: &positions,
+        embeddings: None,
+        deepstack_embeddings: None,
+    };
+    let session = || {
+        Qwen3Session::new_with_compute(
+            &model,
+            8,
+            KvFormat::F32,
+            KvLifecycle::Ephemeral,
+            ComputePolicy::Cpu,
+        )
+        .unwrap()
+    };
+    let mut raw_session = session();
+    let raw = raw_session.forward_hidden_sequence_raw(input()).unwrap();
+    let mut normalized_session = session();
+    let normalized = normalized_session.forward_hidden_sequence(input()).unwrap();
+    assert_eq!(raw_session.kv_state().seq_len, tokens.len());
+    assert_eq!(normalized_session.kv_state().seq_len, tokens.len());
+    assert!(raw
+        .iter()
+        .zip(&normalized)
+        .any(|(a, b)| a.to_bits() != b.to_bits()));
+    let width = model.config.n_embd;
+    let mut expected = vec![0.0; normalized.len()];
+    for (source, destination) in raw
+        .chunks_exact(width)
+        .zip(expected.chunks_exact_mut(width))
+    {
+        crate::ops::rms_norm(source, &model.output_norm, destination, model.config.eps);
+    }
+    assert_eq!(
+        expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        normalized.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+    );
+    for raw in [false, true] {
+        let mut forced = session();
+        // Check the shared API guard without initializing a physical device.
+        forced.compute_policy = ComputePolicy::Vulkan;
+        let result = if raw {
+            forced.forward_hidden_sequence_raw(input())
+        } else {
+            forced.forward_hidden_sequence(input())
+        };
+        assert!(result.unwrap_err().contains("Vulkan"));
+        assert_eq!(forced.kv_state().seq_len, 0);
     }
 }
 

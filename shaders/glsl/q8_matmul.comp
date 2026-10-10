@@ -3,7 +3,7 @@
 //   weight layout: rows of [f16 scale][32 x int8] blocks, 34 bytes per block,
 //   byte-addressed through a u32 array (matches the GGUF Q8_0 byte layout).
 //   input layout: 32 x int8 per block + f32 scale per block.
-// dims: x = n_in (unused), y = n_out, z = blocks_per_row, w = row stride bytes.
+// dims: x = CPU reduction mode (0 scalar, 1 NEON, 8 AVX2), y = n_out, z = blocks_per_row, w = row stride bytes.
 // The per-row input is cooperatively staged into shared memory once.
 
 layout(local_size_x = 64) in;
@@ -64,6 +64,7 @@ void main() {
 
         uint w_body = w_off + 2u;
         uint in_base = block * 32u;
+        int block_dot = 0;
         for (uint g = 0u; g < 8u; g++) {
             uint g_off = w_body + g * 4u;
             uint w0 = w_data[g_off >> 2u];
@@ -76,11 +77,15 @@ void main() {
                 + i8_of(packed, 2u) * i8_of(i_word, 2u)
                 + i8_of(packed, 3u) * i8_of(i_word, 3u);
             float scale = w_scale * i_scales[block];
-            acc[g] = fma(float(dot), scale, acc[g]);
+            if (dims.x == 8u) acc[g] = fma(float(dot), scale, acc[g]);
+            else block_dot += dot;
         }
+        float scale = w_scale * i_scales[block];
+        precise float product = float(block_dot) * scale;
+        if (dims.x != 8u) acc[0] = dims.x == 0u ? acc[0] + product : fma(float(block_dot), scale, acc[0]);
     }
 
     precise float sum01 = (acc[0] + acc[4]) + (acc[1] + acc[5]);
     precise float sum23 = (acc[2] + acc[6]) + (acc[3] + acc[7]);
-    o_data[row] = sum01 + sum23;
+    o_data[row] = dims.x == 8u ? sum01 + sum23 : acc[0];
 }

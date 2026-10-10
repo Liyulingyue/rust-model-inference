@@ -1,4 +1,5 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 
 layout(local_size_x = 64) in;
 
@@ -9,6 +10,8 @@ layout(push_constant) uniform PC {
     uint count;
     uint rows;
     uint row_stride;
+    uint output_word;
+    uint exp_mode;
 } pc;
 
 float exp_approx(float x) {
@@ -29,6 +32,10 @@ float exp_approx(float x) {
     return (1.0 + polynomial) * scale;
 }
 
+#include "exp_approx_neon.glsl"
+#include "exp_accurate.glsl"
+#include "f32_divide.glsl"
+
 void main() {
     uint row = gl_WorkGroupID.z;
     if (row >= pc.rows) return;
@@ -38,9 +45,16 @@ void main() {
     index += row * pc.row_stride;
     float gate = uintBitsToFloat(arena.data[pc.gate_word + index]);
     float up = uintBitsToFloat(arena.data[pc.up_word + index]);
-    precise float denominator = 1.0 + exp_approx(0.0 - gate);
-    precise float activated = gate / denominator;
-    precise float residual = fma(-denominator, activated, gate);
-    activated = fma(residual, 1.0 / denominator, activated);
-    arena.data[pc.gate_word + index] = floatBitsToUint(activated * up);
+    uint column = index - row * pc.row_stride;
+    float exponential = pc.exp_mode == 1u && column < (pc.count / 4u) * 4u
+        ? exp_approx_neon(0.0 - gate)
+        : pc.exp_mode == 0u && column < (pc.count / 8u) * 8u
+        ? exp_approx(0.0 - gate) : exp_accurate(0.0 - gate);
+    precise float denominator = 1.0 + exponential;
+    precise float activated = divide_finite_normal(gate, denominator);
+    precise float product = activated * up;
+    uint bits = product == 0.0
+        ? (floatBitsToUint(gate) ^ floatBitsToUint(up)) & 0x80000000u
+        : floatBitsToUint(product);
+    arena.data[pc.output_word + index] = bits;
 }

@@ -1072,6 +1072,64 @@ pub fn build_prompt_tokens_from_turns(
     eprintln!("[RUST_TOKENS] n={} ids={:?}", body.len(), body);
     Ok(body)
 }
+fn run_resident_inference_tokens(
+    source: &dyn TensorSource,
+    tokens: &[u32],
+    max_tokens: usize,
+    temperature: f32,
+    threads: usize,
+    kv_format: KvFormat,
+    max_context: usize,
+    repetition_penalty: f32,
+) -> Result<(), String> {
+    let mut session = super::session::LlamaSession::from_source_with_compute(
+        source,
+        threads,
+        kv_format,
+        max_context,
+        1,
+        crate::compute::ComputePolicy::Vulkan,
+    )?;
+    let tokenizer = load_tokenizer(|k| source.metadata(k).cloned())?;
+    let (top_k, top_p) = sample_defaults(source);
+    let mut sampler = crate::ops::sampling::LlamaSampler::new(top_k, top_p);
+    sampler.prime(tokens);
+    let mut decoder = crate::core::tokenizer::StreamingDecoder::new(&*tokenizer, false);
+    let started = Instant::now();
+    let mut logits = session.forward_logits_per_token(tokens)?;
+    let mut generated = 0;
+    print!("Output: ");
+    while generated < max_tokens {
+        let token = sampler.sample(&mut logits, temperature, repetition_penalty);
+        if crate::ops::generation_runtime::stop_after_sample(
+            token,
+            generated,
+            max_tokens,
+            false,
+            tokenizer.eos_id(),
+            tokenizer.special_token_id("im_end"),
+        ) != crate::ops::generation_runtime::StepAction::Continue
+        {
+            break;
+        }
+        print!("{}", decoder.push(token));
+        io::stdout().flush().map_err(|e| e.to_string())?;
+        generated += 1;
+        if generated < max_tokens {
+            logits = session.forward_logits_per_token(&[token])?;
+        }
+    }
+    println!("{}", decoder.finish());
+    eprintln!(
+        "compute scope=resident_decoder backend={:?} prompt={} output={} wall_ms={:.3}",
+        session.used_backend(),
+        tokens.len(),
+        generated,
+        started.elapsed().as_secs_f64() * 1000.0
+    );
+    Ok(())
+}
+
 pub fn run_inference_tokens(
     source: &dyn TensorSource,
     input_tokens: Vec<u32>,
@@ -1084,6 +1142,21 @@ pub fn run_inference_tokens(
     max_context: usize,
     repetition_penalty: f32,
 ) -> Result<(), String> {
+    if crate::compute::ComputePolicy::legacy() == crate::compute::ComputePolicy::Vulkan {
+        if bench || profile {
+            return Err("Vulkan Llama profiling uses vk_model_check --benchmark".into());
+        }
+        return run_resident_inference_tokens(
+            source,
+            &input_tokens,
+            max_tokens,
+            temperature,
+            n_threads_arg,
+            kv_format,
+            max_context,
+            repetition_penalty,
+        );
+    }
     #[cfg(feature = "parity-trace")]
     crate::parity_trace::report(crate::parity_trace::token_ids("prompt_ids", &input_tokens));
     let t0 = Instant::now();
@@ -2916,15 +2989,15 @@ pub fn apply_attn_pre_softmax_inplace(
 pub(crate) fn silu_mul_rows(
     pool: &Arc<ComputePool>,
     n_threads: usize,
-    gate: &mut [f32],
-    up: &[f32],
+    gate: &[f32],
+    up: &mut [f32],
     n_ff: usize,
 ) {
     assert_eq!(gate.len(), up.len());
     let rows = gate.len() / n_ff;
     let per_thread = (n_ff + n_threads - 1) / n_threads;
-    let gate_ptr = gate.as_mut_ptr();
-    let up_ptr = up.as_ptr();
+    let gate_ptr = gate.as_ptr();
+    let up_ptr = up.as_mut_ptr();
     pool.compute(move |ith, _nth| {
         let r_start = ith * per_thread;
         let r_end = (r_start + per_thread).min(n_ff);
@@ -2933,7 +3006,7 @@ pub(crate) fn silu_mul_rows(
                 let g =
                     std::slice::from_raw_parts(gate_ptr.add(row * n_ff + r_start), r_end - r_start);
                 let u = std::slice::from_raw_parts_mut(
-                    up_ptr.add(row * n_ff + r_start) as *mut f32,
+                    up_ptr.add(row * n_ff + r_start),
                     r_end - r_start,
                 );
                 // Exact SiLU via libm `exp` — matches llama.cpp. The

@@ -19,7 +19,9 @@
 //! numerics.
 use std::collections::HashMap;
 
-use crate::vulkan::ops::{ArenaRegion, GpuWeightFormat, OperatorBindings, Qwen3Ops, TokenCommands};
+use crate::vulkan::ops::{
+    ArenaRegion, GpuMatmulMode, GpuWeightFormat, OperatorBindings, Qwen3Ops, TokenCommands,
+};
 use crate::vulkan::{GpuBuffer, VulkanContext, VulkanError};
 
 use super::dit::{FFN_WIDTH, HEADS, HIDDEN, QKV_WIDTH, ROPE_HEAD_WIDTH};
@@ -339,16 +341,23 @@ impl DitGpuSession {
             return Ok(());
         }
         let buffer = unsafe { self.context.upload_device_static(bytes) }?;
-        let bindings = match self
-            .ops
-            .bind_weight_buffers(std::slice::from_ref(&buffer), &[format])
-        {
-            Ok(bindings) => bindings,
-            Err(error) => {
-                unsafe { self.context.destroy_buffer(&buffer) };
-                return Err(error);
-            }
+        // Refiner projections retain their F16 input rounding and F32 reduction.
+        let mode = if format == GpuWeightFormat::F16 {
+            GpuMatmulMode::RoundedInputF32
+        } else {
+            GpuMatmulMode::Prepared
         };
+        let bindings =
+            match self
+                .ops
+                .bind_weight_buffers_mode(std::slice::from_ref(&buffer), &[format], mode)
+            {
+                Ok(bindings) => bindings,
+                Err(error) => {
+                    unsafe { self.context.destroy_buffer(&buffer) };
+                    return Err(error);
+                }
+            };
         self.weights
             .insert((layer, projection), BoundWeight { buffer, bindings });
         Ok(())
@@ -850,6 +859,61 @@ impl DitGpuSession {
 
     pub(crate) fn layout(&self) -> &Layout {
         &self.layout
+    }
+}
+
+#[cfg(test)]
+mod f16_contract_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn f16_refiner_projection_keeps_f32_accumulation() {
+        let context = Box::leak(Box::new(VulkanContext::new().unwrap()));
+        let rows = 32;
+        let mut session = DitGpuSession::new(context, rows).unwrap();
+        let weight: Vec<u8> = (0..FFN_WIDTH * HIDDEN)
+            .flat_map(|_| crate::ops::f32_to_f16(1.0).to_le_bytes())
+            .collect();
+        session
+            .bind_weight_as(0, Projection::W2, &weight, GpuWeightFormat::F16)
+            .unwrap();
+        let layout = *session.layout();
+        // Finite F16 operands can overflow a half reduction. The historical
+        // refiner rounds its input to F16 but keeps the accumulation in F32.
+        let input = vec![-256.0625; rows * FFN_WIDTH];
+        session.ops.write_f32(layout.gate, &input).unwrap();
+        let bindings = session.binding_for(0, Projection::W2).unwrap();
+        let mut output = vec![0.0; rows * HIDDEN];
+        for tiled in [false, true] {
+            let mut commands = TokenCommands::begin(context).unwrap();
+            if tiled {
+                session.record_projection_tiled(
+                    &mut commands,
+                    bindings,
+                    Projection::W2,
+                    layout.gate,
+                    layout.out,
+                )
+            } else {
+                session.record_projection_grouped(
+                    &mut commands,
+                    bindings,
+                    Projection::W2,
+                    layout.gate,
+                    layout.out,
+                )
+            }
+            .unwrap();
+            commands.submit_and_wait().unwrap();
+            session.ops.read_f32_into(layout.out, &mut output).unwrap();
+            let expected = -256.0 * FFN_WIDTH as f32;
+            assert!(
+                output.iter().all(|&value| value == expected),
+                "tiled={tiled}, expected={expected}, first={}",
+                output[0],
+            );
+        }
     }
 }
 
