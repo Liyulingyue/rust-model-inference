@@ -463,8 +463,10 @@ struct LayerBindings {
     attention_norm: OperatorBindings,
     attention: AttentionBindings,
     post_attention_norm: OperatorBindings,
-    gate_up: WeightBindings<2>,
-    down: OperatorBindings,
+    // None for MoE-only blocks (Occamy-1.0); the CPU MoE trunk handles
+    // their FFN. The Vulkan layer forward skips FFN when both are None.
+    gate_up: Option<WeightBindings<2>>,
+    down: Option<OperatorBindings>,
 }
 
 pub(crate) struct Qwen35GpuChunkResult<'a> {
@@ -551,12 +553,12 @@ impl Qwen35VulkanSession {
                     &mut ops,
                     &mut buffers,
                     [
-                        (wqkv, "Qwen3.5 recurrent QKV"),
-                        (gate, "Qwen3.5 recurrent gate"),
-                        (beta, "Qwen3.5 recurrent beta"),
+                        (Some(wqkv), "Qwen3.5 recurrent QKV"),
+                        (Some(gate), "Qwen3.5 recurrent gate"),
+                        (Some(beta), "Qwen3.5 recurrent beta"),
                     ],
                 )?;
-                let alpha = bind_weight(&mut ops, &mut buffers, alpha, "Qwen3.5 recurrent alpha")?;
+                let alpha = bind_weight(&mut ops, &mut buffers, Some(alpha), "Qwen3.5 recurrent alpha")?;
                 let conv_weight = layer.ssm_conv1d.as_ref().ok_or_else(|| {
                     VulkanError::UnsupportedShape(format!(
                         "missing Qwen3.5 layer {layer_index} convolution weight"
@@ -586,13 +588,14 @@ impl Qwen35VulkanSession {
                 ];
                 let ssm = ops.bind_buffers(&ssm_buffers)?;
                 let output =
-                    bind_weight(&mut ops, &mut buffers, output, "Qwen3.5 recurrent output")?;
+                    bind_weight(&mut ops, &mut buffers, Some(output), "Qwen3.5 recurrent output")?;
                 AttentionBindings::Recurrent(RecurrentBindings {
-                    qkv_gate_beta,
-                    alpha,
+                    qkv_gate_beta: qkv_gate_beta
+                        .expect("recurrent qkv/gate/beta bindings always present"),
+                    alpha: alpha.expect("recurrent alpha bindings always present"),
                     convolution,
                     ssm,
-                    output,
+                    output: output.expect("recurrent output bindings always present"),
                 })
             } else {
                 let wq = required_weight(layer.wq.as_ref(), layer_index, "attn_q")?;
@@ -603,9 +606,9 @@ impl Qwen35VulkanSession {
                     &mut ops,
                     &mut buffers,
                     [
-                        (wq, "Qwen3.5 dense Q"),
-                        (wk, "Qwen3.5 dense K"),
-                        (wv, "Qwen3.5 dense V"),
+                        (Some(wq), "Qwen3.5 dense Q"),
+                        (Some(wk), "Qwen3.5 dense K"),
+                        (Some(wv), "Qwen3.5 dense V"),
                     ],
                 )?;
                 let q_norm = layer.attn_q_norm.as_ref().ok_or_else(|| {
@@ -620,11 +623,11 @@ impl Qwen35VulkanSession {
                 })?;
                 let prepare_buffers = [buffers.upload_f32(q_norm)?, buffers.upload_f32(k_norm)?];
                 let prepare = ops.bind_buffers(&prepare_buffers)?;
-                let output = bind_weight(&mut ops, &mut buffers, wo, "Qwen3.5 dense output")?;
+                let output = bind_weight(&mut ops, &mut buffers, Some(wo), "Qwen3.5 dense output")?;
                 AttentionBindings::Dense(DenseBindings {
-                    qkv,
+                    qkv: qkv.expect("dense QKV bindings always present"),
                     prepare,
-                    output,
+                    output: output.expect("dense output bindings always present"),
                 })
             };
 
@@ -634,11 +637,11 @@ impl Qwen35VulkanSession {
                 &mut ops,
                 &mut buffers,
                 [
-                    (&layer.ffn_gate, "Qwen3.5 FFN gate"),
-                    (&layer.ffn_up, "Qwen3.5 FFN up"),
+                    (layer.ffn_gate.as_ref(), "Qwen3.5 FFN gate"),
+                    (layer.ffn_up.as_ref(), "Qwen3.5 FFN up"),
                 ],
             )?;
-            let down = bind_weight(&mut ops, &mut buffers, &layer.ffn_down, "Qwen3.5 FFN down")?;
+            let down = bind_weight(&mut ops, &mut buffers, layer.ffn_down.as_ref(), "Qwen3.5 FFN down")?;
             layers.push(LayerBindings {
                 attention_norm,
                 attention,
@@ -653,9 +656,10 @@ impl Qwen35VulkanSession {
         let output = bind_weight(
             &mut ops,
             &mut buffers,
-            &model.output_weight,
+            Some(&model.output_weight),
             "Qwen3.5 output",
-        )?;
+        )?
+        .expect("output projection bindings always present");
         let dense_kv = config
             .n_head_kv
             .checked_mul(config.n_embd_head())
@@ -1057,39 +1061,45 @@ impl Qwen35VulkanSession {
                 config.n_embd,
                 config.n_embd,
             )?;
-            self.record_weight_group(
-                &commands,
-                bindings.gate_up,
-                self.layout.normed,
-                [
-                    (self.layout.ffn_gate, config.n_ff),
-                    (self.layout.ffn_up, config.n_ff),
-                ],
-                config.n_embd,
-                rows,
-            )?;
-            self.ops.record_silu_mul_rows(
-                &commands,
-                self.layout.ffn_gate,
-                self.layout.ffn_up,
-                config.n_ff,
-                rows,
-            )?;
-            self.record_weights(
-                &commands,
-                bindings.down,
-                self.layout.ffn_gate,
-                &[(self.layout.down, config.n_embd)],
-                config.n_ff,
-                rows,
-            )?;
-            self.ops.record_add_rows(
-                &commands,
-                self.layout.x,
-                self.layout.down,
-                config.n_embd,
-                rows,
-            )?;
+            // MoE-only blocks (Occamy-1.0, all 40 layers are MoE with no
+            // dense FFN) skip this entire Vulkan FFN block; the CPU MoE
+            // trunk handles their FFN. Vulkan still records attention,
+            // norms, and the residual add below, so x is preserved.
+            if let (Some(gate_up), Some(down)) = (bindings.gate_up, bindings.down) {
+                self.record_weight_group(
+                    &commands,
+                    gate_up,
+                    self.layout.normed,
+                    [
+                        (self.layout.ffn_gate, config.n_ff),
+                        (self.layout.ffn_up, config.n_ff),
+                    ],
+                    config.n_embd,
+                    rows,
+                )?;
+                self.ops.record_silu_mul_rows(
+                    &commands,
+                    self.layout.ffn_gate,
+                    self.layout.ffn_up,
+                    config.n_ff,
+                    rows,
+                )?;
+                self.record_weights(
+                    &commands,
+                    down,
+                    self.layout.ffn_gate,
+                    &[(self.layout.down, config.n_embd)],
+                    config.n_ff,
+                    rows,
+                )?;
+                self.ops.record_add_rows(
+                    &commands,
+                    self.layout.x,
+                    self.layout.down,
+                    config.n_embd,
+                    rows,
+                )?;
+            }
         }
 
         let last_offset = (rows - 1) * config.n_embd * 4;
@@ -1227,21 +1237,32 @@ fn validated_weight_bytes<'a>(
 fn bind_weight(
     ops: &mut Qwen3Ops<'_>,
     buffers: &mut UploadedBuffers,
-    weight: &Weight<'_>,
+    weight: Option<&Weight<'_>>,
     label: &str,
-) -> Result<OperatorBindings, VulkanError> {
+) -> Result<Option<OperatorBindings>, VulkanError> {
+    let Some(weight) = weight else {
+        return Ok(None);
+    };
     let (buffer, format) = upload_weight(buffers, weight, label)?;
     ops.bind_weight_buffers(std::slice::from_ref(&buffer), std::slice::from_ref(&format))
+        .map(Some)
 }
 
 fn bind_weight_group<const N: usize>(
     ops: &mut Qwen3Ops<'_>,
     buffers: &mut UploadedBuffers,
-    weights: [(&Weight<'_>, &str); N],
-) -> Result<WeightBindings<N>, VulkanError> {
+    weights: [(Option<&Weight<'_>>, &str); N],
+) -> Result<Option<WeightBindings<N>>, VulkanError> {
+    // MoE-only blocks (Occamy-1.0) have no dense FFN; skip binding entirely.
+    // The CPU trunk handles MoE FFN via the hybrid `expert_*` hook; the
+    // Vulkan layer forward is never invoked for such layers.
+    if weights.iter().all(|(w, _)| w.is_none()) {
+        return Ok(None);
+    }
     let mut gpu_buffers = Vec::with_capacity(N);
     let mut formats = Vec::with_capacity(N);
     for (weight, label) in weights {
+        let weight = weight.expect("non-None weight in a partially-populated FFN group");
         let (buffer, format) = upload_weight(buffers, weight, label)?;
         gpu_buffers.push(buffer);
         formats.push(format);
@@ -1249,7 +1270,7 @@ fn bind_weight_group<const N: usize>(
     if formats.iter().all(|format| *format == formats[0]) {
         return ops
             .bind_weight_buffers(&gpu_buffers, &formats)
-            .map(WeightBindings::Grouped);
+            .map(|b| Some(WeightBindings::Grouped(b)));
     }
 
     let split = gpu_buffers
@@ -1261,7 +1282,7 @@ fn bind_weight_group<const N: usize>(
         .collect::<Result<Vec<_>, _>>()?
         .try_into()
         .map_err(|_| VulkanError::OutOfMemory)?;
-    Ok(WeightBindings::Split(split))
+    Ok(Some(WeightBindings::Split(split)))
 }
 
 fn eligibility_facts(model: &Qwen35Model<'_>) -> EligibilityFacts {
@@ -1277,9 +1298,21 @@ fn eligibility_facts(model: &Qwen35Model<'_>) -> EligibilityFacts {
     }
     for (layer_index, layer) in model.layers.iter().enumerate() {
         facts.weight_formats.extend([
-            layer.ffn_gate.ggml_type,
-            layer.ffn_up.ggml_type,
-            layer.ffn_down.ggml_type,
+            layer
+                .ffn_gate
+                .as_ref()
+                .map(|w| w.ggml_type)
+                .unwrap_or_default(),
+            layer
+                .ffn_up
+                .as_ref()
+                .map(|w| w.ggml_type)
+                .unwrap_or_default(),
+            layer
+                .ffn_down
+                .as_ref()
+                .map(|w| w.ggml_type)
+                .unwrap_or_default(),
         ]);
         if model.config.is_recurrent[layer_index] {
             let weights = [

@@ -177,6 +177,19 @@ pub fn run_inference(
             thinking,
             jinja,
         )
+    } else if arch == "qwen35moe" {
+        crate::models::occamy::run::run_inference(
+            source.clone(),
+            prompt,
+            max_tokens,
+            temperature,
+            n_threads_arg,
+            bench,
+            kv_format,
+            max_context,
+            repetition_penalty,
+            jinja,
+        )
     } else if arch == "xing4_0" {
         crate::models::xing4_0::trunk::run::run_inference(
             source.as_ref(),

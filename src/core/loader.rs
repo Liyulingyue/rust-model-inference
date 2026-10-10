@@ -421,6 +421,7 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             | "qwen3vl"
             | "qwen3vlmoe"
             | "qwen35"
+            | "qwen35moe"
             | "edge0"
             | "qwen3tts"
             | "llama"
@@ -679,7 +680,10 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             as_usize(format!("{prefix}.attention.head_count_kv"))?
         },
         n_embd_head,
-        n_ff: as_usize(format!("{prefix}.feed_forward_length"))?,
+        // A MoE-only tower publishes the expert width and leaves
+        // `feed_forward_length` unset, since no layer has a dense FFN.
+        n_ff: as_usize(format!("{prefix}.feed_forward_length"))
+            .or_else(|_| as_usize(format!("{prefix}.expert_feed_forward_length")))?,
         n_ctx: as_usize(format!("{prefix}.context_length"))?,
         vocab_size: match get_u64(&format!("{prefix}.vocab_size")) {
             Ok(value) => usize::try_from(value)
@@ -864,6 +868,7 @@ pub fn qwen3_arch_knobs<S: TensorSource + ?Sized>(source: &S) -> Result<Qwen3Arc
             | "qwen3vl"
             | "qwen3vlmoe"
             | "qwen35"
+            | "qwen35moe"
             | "qwen3tts"
             | "llama"
             | "hunyuan-dense"

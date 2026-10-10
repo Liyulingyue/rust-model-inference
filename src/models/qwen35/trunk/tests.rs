@@ -158,9 +158,9 @@ fn tiny_dense_model(k_weight: [f32; 4], v_weight: [f32; 4]) -> Qwen35Model<'stat
         ssm_alpha: None,
         ssm_norm: None,
         ssm_out: None,
-        ffn_gate: identity(),
-        ffn_up: identity(),
-        ffn_down: identity(),
+        ffn_gate: Some(identity()),
+        ffn_up: Some(identity()),
+        ffn_down: Some(identity()),
     };
     Qwen35Model {
         config,
@@ -230,8 +230,8 @@ fn qwen35_non_k_quant_weights_do_not_receive_q8_k_input() {
     layer.wq = Some(reject_q8k_weight(2, 4));
     layer.wk = Some(reject_q8k_weight(2, 2));
     layer.wv = Some(reject_q8k_weight(2, 2));
-    layer.ffn_gate = reject_q8k_weight(2, 2);
-    layer.ffn_up = reject_q8k_weight(2, 2);
+    layer.ffn_gate = Some(reject_q8k_weight(2, 2));
+    layer.ffn_up = Some(reject_q8k_weight(2, 2));
 
     let mut scratch = Qwen35Scratchpad::new(&model.config, 1);
     let mut kv_cache = KvCache::new_f32(1, model.config.n_ctx, 2);
@@ -240,7 +240,7 @@ fn qwen35_non_k_quant_weights_do_not_receive_q8_k_input() {
 
     scratch.x[..2].copy_from_slice(&hidden);
     model
-        .forward(1, &mut kv_cache, &mut scratch, &pool, &[[0; 4]])
+        .forward(1, &mut kv_cache, &mut scratch, &pool, &[[0; 4]], None)
         .unwrap();
 }
 
@@ -256,7 +256,7 @@ fn qwen35_k_quant_weights_reject_non_block_width() {
     let mut kv_cache = KvCache::new_f32(1, model.config.n_ctx, 2);
     let pool = ComputePool::new(1);
     scratch.x[..2].copy_from_slice(&[1.0, 0.0]);
-    let _ = model.forward(1, &mut kv_cache, &mut scratch, &pool, &[[0; 4]]);
+    let _ = model.forward(1, &mut kv_cache, &mut scratch, &pool, &[[0; 4]], None);
 }
 
 #[test]
@@ -515,9 +515,9 @@ fn tiny_dense_session_model_with_embedding(
         ssm_alpha: None,
         ssm_norm: None,
         ssm_out: None,
-        ffn_gate: mk_weight(n_embd),
-        ffn_up: mk_weight(n_embd),
-        ffn_down: mk_weight(n_embd),
+        ffn_gate: Some(mk_weight(n_embd)),
+        ffn_up: Some(mk_weight(n_embd)),
+        ffn_down: Some(mk_weight(n_embd)),
     };
     Qwen35Model {
         config,
@@ -612,9 +612,9 @@ fn tiny_q8_session_model() -> Qwen35Model<'static> {
         ssm_alpha: None,
         ssm_norm: None,
         ssm_out: None,
-        ffn_gate: q8_weight(256),
-        ffn_up: q8_weight(256),
-        ffn_down: q8_weight(256),
+        ffn_gate: Some(q8_weight(256)),
+        ffn_up: Some(q8_weight(256)),
+        ffn_down: Some(q8_weight(256)),
     };
     Qwen35Model {
         config,
@@ -1357,7 +1357,7 @@ fn last_hidden_borrows_all_final_norm_rows_from_the_last_step() {
     let mut model = tiny_dense_session_model();
     model.config.norm_eps = 0.0;
     model.layers[0].wo = Some(f32_test_weight(vec![0.0; 16], 4, 4));
-    model.layers[0].ffn_down = f32_test_weight(vec![0.0; 16], 4, 4);
+    model.layers[0].ffn_down = Some(f32_test_weight(vec![0.0; 16], 4, 4));
     let mut session = Qwen35Session::new(&mut model, 2, session_pool()).unwrap();
     session
         .step(
@@ -1431,7 +1431,7 @@ fn cpu_scope_prevents_model_from_creating_a_second_vulkan_session() {
     scratch.x[..256].copy_from_slice(&model.embed_tokens(&[0]).unwrap());
     let _scope = ComputePool::disable_gpu_matmul_for_scope();
     model
-        .forward(1, &mut cache, &mut scratch, &pool, &[[0; 4]])
+        .forward(1, &mut cache, &mut scratch, &pool, &[[0; 4]], None)
         .unwrap();
     assert!(
         model.gpu.is_none(),

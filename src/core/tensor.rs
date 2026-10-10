@@ -27,6 +27,11 @@ pub struct BlockQ8K {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(i32)]
 pub enum GGMLType {
+    /// `Default::default()` returns `F32`. This is the safe placeholder
+    /// weight-type used by Vulkan bookkeeping when a weight slot is absent
+    /// (e.g. the dense FFN in a MoE-only layer like Occamy-1.0); the slot
+    /// is skipped at compute time so the placeholder type never leaks
+    /// into a kernel dispatch.
     F32 = 0,
     F16 = 1,
     Q4_0 = 2,
@@ -149,6 +154,12 @@ impl GGMLType {
         let (block_size, type_size) = self.type_traits();
         let n_blocks = (n_elements + block_size - 1) / block_size;
         n_blocks * type_size
+    }
+}
+
+impl Default for GGMLType {
+    fn default() -> Self {
+        GGMLType::F32
     }
 }
 
