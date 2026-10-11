@@ -164,26 +164,26 @@ fn log_mel_features(pcm16: &[i16]) -> Vec<f32> {
         for v in fft_imag.iter_mut() {
             *v = 0.0;
         }
-        // Naive DFT (slow but correct). For 30s audio at 16kHz: ~3000 frames
-        // × 400 × 400 ops = ~480M ops. Acceptable for testing.
+        // Naive DFT (slow but correct). Use separate input/output buffers to avoid
+        // in-place corruption of real[t] while computing.
         let n = n_fft;
-        let mut real = fft_real.clone();
-        let mut imag = fft_imag.clone();
+        let mut real_out = vec![0.0f32; n];
+        let mut imag_out = vec![0.0f32; n];
         for k in 0..n {
             let mut sum_r = 0.0f32;
             let mut sum_i = 0.0f32;
             for t in 0..n {
                 let angle = -2.0 * std::f32::consts::PI * t as f32 * k as f32 / n as f32;
-                sum_r += real[t] * angle.cos();
-                sum_i += real[t] * angle.sin();
+                sum_r += fft_real[t] * angle.cos();
+                sum_i += fft_real[t] * angle.sin();
             }
-            real[k] = sum_r;
-            imag[k] = sum_i;
+            real_out[k] = sum_r;
+            imag_out[k] = sum_i;
         }
-        // Power spectrum.
+        // Power spectrum (real^2 + imag^2, no sqrt).
         let mut power = vec![0.0f32; n / 2 + 1];
         for k in 0..power.len() {
-            power[k] = (real[k] * real[k] + imag[k] * imag[k]).sqrt();
+            power[k] = real_out[k] * real_out[k] + imag_out[k] * imag_out[k];
         }
         // Apply triangular mel filterbank (128 bins).
         let mut mel = vec![0.0f32; n_mels];
@@ -542,12 +542,13 @@ impl EmbeddingGemmaAudioModel {
                 conv_out[t * h + ch] = s;
             }
         }
-        // conv_norm.
-        crate::ops::norm::rms_norm_inplace(
-            &mut conv_out[..n_frames * h],
-            &layer.lconv1d_conv_norm,
-            RMS_NORM_EPS,
-        );
+        // conv_norm: affine y = x * w + b (per-channel), not RMSNorm.
+        for t in 0..n_frames {
+            for ch in 0..h {
+                let v = conv_out[t * h + ch] * layer.lconv1d_conv_norm[ch];
+                conv_out[t * h + ch] = v;
+            }
+        }
         // linear_start (h → 2h) + GLU: out = sigmoid(gate) ⊙ up.
         let mut linear_start_out = vec![0.0f32; n_frames * 2 * h];
         let mut tmp_ls = vec![0.0f32; 2 * h];
@@ -676,17 +677,12 @@ impl EmbeddingGemmaAudioModel {
                 RMS_NORM_EPS,
             );
             layer.ff1_ffw_layer_1.forward(&src_normed, &mut ffw1_inter);
-            // SwiGLU.
+            // SiLU activation (plain silu, not silu*x).
             for j in 0..cfg.ffn_hidden_size {
-                ffw1_inter[j] = crate::ops::silu(ffw1_inter[j]) * ffw1_inter[j];
+                ffw1_inter[j] = crate::ops::silu(ffw1_inter[j]);
             }
             layer.ff1_ffw_layer_2.forward(&ffw1_inter, &mut tmp_ff1_inter);
-            // post_layer_norm.
-            crate::ops::norm::rms_norm_inplace(
-                &mut tmp_ff1_inter,
-                &layer.ff1_post_layer_norm,
-                RMS_NORM_EPS,
-            );
+            // No post_layer_norm after FFN (llama.cpp conformer.cpp reference doesn't apply one).
             for j in 0..h {
                 x_ff1[t * h + j] = 0.5 * tmp_ff1_inter[j] + src[j]; // Conformer residual
             }
@@ -705,14 +701,9 @@ impl EmbeddingGemmaAudioModel {
             );
             layer.ff2_ffw_layer_1.forward(&src_normed, &mut ffw1_inter);
             for j in 0..cfg.ffn_hidden_size {
-                ffw1_inter[j] = crate::ops::silu(ffw1_inter[j]) * ffw1_inter[j];
+                ffw1_inter[j] = crate::ops::silu(ffw1_inter[j]);
             }
             layer.ff2_ffw_layer_2.forward(&ffw1_inter, &mut tmp_ff2);
-            crate::ops::norm::rms_norm_inplace(
-                &mut tmp_ff2,
-                &layer.ff2_post_layer_norm,
-                RMS_NORM_EPS,
-            );
             for j in 0..h {
                 x_ff2[t * h + j] = 0.5 * tmp_ff2[j] + src[j];
             }

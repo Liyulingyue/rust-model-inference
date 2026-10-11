@@ -23,23 +23,26 @@ fn audio_forward_returns_correct_shape_finite_values() {
     // Generate 1 second of 16 kHz sine-wave audio (the embedding path
     // doesn't care about content, only that values are finite).
     let sample_count = 16000;
-    let pcm16: Vec<i16> = (0..sample_count)
-        .map(|i| ((i as f32 / 100.0).sin() * 16000.0) as i16)
+    // 440 Hz sine — produces clear energy at k=11 (440 Hz bin).
+    let pcm_440: Vec<i16> = (0..sample_count)
+        .map(|i| ((i as f32 * 2.0 * std::f32::consts::PI * 440.0 / 16000.0).sin() * 16000.0) as i16)
         .collect();
-    let tokens = model.encode(&pcm16).expect("audio encode");
-    // n_frames after stride-4 subsample = (16000 - 400) / 160 / 4 = 24
-    let n_frames = (sample_count - 400) / 160 / 4;
+    let tokens = model.encode(&pcm_440).expect("audio encode 440Hz");
+    // Different signal — 1000 Hz sine, should produce different embeddings.
+    let pcm_1000: Vec<i16> = (0..sample_count)
+        .map(|i| ((i as f32 * 2.0 * std::f32::consts::PI * 1000.0 / 16000.0).sin() * 16000.0) as i16)
+        .collect();
+    let tokens_alt = model.encode(&pcm_1000).expect("audio encode 1000Hz");
+    // Verify different inputs produce different embeddings.
+    let diff: f32 = tokens.iter().zip(tokens_alt.iter())
+        .map(|(a, b)| (a - b).abs())
+        .sum();
+    assert!(diff > 0.0, "two different signals produced identical embeddings (diff={diff})");
+    // Without center padding: n_frames = (16000 - 400) / 160 = 97 hops + offset 0 = 98 frames.
+    // n_hidden = n_frames / 4 = 24 (integer division).
+    let n_frames = 98 / 4;
     assert_eq!(tokens.len(), n_frames * cfg.projection_dim);
-    // NaN/inf checks disabled — our naive log-mel pipeline produces 
-    // values that may overflow the conformer's tanh/silu activations. 
-    // TODO: re-test after replacing the log-mel pipeline with a proper
-    // Slaney-mel filterbank.
+    // Verify all outputs are finite.
     let n_finite = tokens.iter().filter(|x| x.is_finite()).count();
-    let n_total = tokens.len();
-    eprintln!(
-        "audio smoke: {}/{} finite outputs ({} non-finite)",
-        n_finite,
-        n_total,
-        n_total - n_finite
-    );
+    assert_eq!(n_finite, tokens.len(), "non-finite values in audio output");
 }
