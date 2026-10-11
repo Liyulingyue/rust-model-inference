@@ -652,6 +652,9 @@ impl EmbeddingGemmaTextModel {
             &layer.attn_norm,
             EPS,
         );
+        if il == 0 {
+            let mx = normed[..n_tokens * n_embd].iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        }
 
         // Step c: Q/K/V projections on `normed`.
         let q_len = n_tokens * n_head * head_dim;
@@ -768,10 +771,21 @@ impl EmbeddingGemmaTextModel {
         // Step f: output projection.
         let mut proj_out = vec![0.0f32; n_tokens * n_embd];
         let mut tmp_o = vec![0.0f32; n_embd];
+        if il == 0 {
+            // Try a single forward manually
+            let src = &attn_out[0..attn_dim];
+            layer.attn_output.forward(src, &mut tmp_o);
+
+
+            let tmp_o_max = tmp_o.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        }
         for t in 0..n_tokens {
             let src = &attn_out[t * attn_dim..(t + 1) * attn_dim];
             layer.attn_output.forward(src, &mut tmp_o);
             proj_out[t * n_embd..(t + 1) * n_embd].copy_from_slice(&tmp_o);
+        }
+        if il == 0 {
+            let proj_max = proj_out[..n_tokens * n_embd].iter().cloned().fold(f32::NEG_INFINITY, f32::max);
         }
 
         // Step g: post_attention_norm + residual.
@@ -794,6 +808,9 @@ impl EmbeddingGemmaTextModel {
         );
 
         // Step i: GeGLU FFN (per llama.cpp gemma4.cpp line 357: LLM_FFN_GELU, LLM_FFN_PAR).
+        if il == 0 {
+        }
+        
         // gelu(gate) * up, then ffn_down.
         let mut ffn_out = vec![0.0f32; n_tokens * n_embd];
         let mut tmp_g = vec![0.0f32; n_ff];

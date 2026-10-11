@@ -54,19 +54,16 @@ fn text_forward_matches_huggingface_oracle() {
         }
         let l2 = diff_sq.sqrt();
         let denom = (a_norm_sq * b_norm_sq).sqrt();
-        let cosine_sim = if denom > 0.0 {
-            dot / denom
-        } else {
-            0.0
-        };
-
-
-
-        let a_norm = a_norm_sq.sqrt();
-        // Element-wise diff sample
-        for i in 0..5 {
-        }
-        // Tolerance: GGUF stores BF16 weights, so ~3% relative error per dimension.
+        let cosine_sim = if denom > 0.0 { dot / denom } else { 0.0 };
+        eprintln!(
+            "Oracle [{name}] \"{text}\": L2={l2:.4}, cos_sim={cosine_sim:.6}, dim={}",
+            actual.len()
+        );
+        eprintln!("  expected[:5] = {:?}", &expected[..5]);
+        eprintln!("  actual  [:5] = {:?}", &actual[..5]);
+        eprintln!("  expected norm = {}", b_norm_sq.sqrt());
+        eprintln!("  actual norm   = {}", a_norm_sq.sqrt());
+        // Tolerance: GGUF stores BF16 weights, ~2% per-dim quantization error.
         // After mean-pool over 8 tokens the error compounds, expect cos_sim > 0.99.
         assert!(cosine_sim > 0.99,
             "{name}: cosine similarity {cosine_sim:.6} < 0.99 (text=\"{text}\")");
