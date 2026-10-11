@@ -59,10 +59,13 @@ fn text_forward_matches_huggingface_oracle() {
         } else {
             0.0
         };
-        eprintln!(
-            "Oracle [{name}] \"{text}\": L2={l2:.4}, cos_sim={cosine_sim:.6}, dim={}",
-            actual.len()
-        );
+
+
+
+        let a_norm = a_norm_sq.sqrt();
+        // Element-wise diff sample
+        for i in 0..5 {
+        }
         // Tolerance: GGUF stores BF16 weights, so ~3% relative error per dimension.
         // After mean-pool over 8 tokens the error compounds, expect cos_sim > 0.99.
         assert!(cosine_sim > 0.99,

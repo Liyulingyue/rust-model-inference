@@ -213,10 +213,11 @@ Q8_0_BLOCK_BYTES = 34  # f16 scale + 32 x int8
 
 
 def quantize_q8_0(values: np.ndarray) -> bytes:
-    """GGML Q8_0: per 32-element block, f16 scale = amax/127, int8 payload.
+    """GGML Q8_0: per 32-element block, bf16 scale = amax/127, int8 payload.
 
     Rounding is round-half-away-from-zero to match ggml's roundf, and a zero
-    block encodes a zero scale.
+    block encodes a zero scale. The bf16 representation is the high 16 bits
+    of the f32 (truncation toward zero, equivalent to IEEE round-toward-zero).
     """
     flat = np.ascontiguousarray(values, dtype=np.float32).reshape(-1)
     if flat.size % Q8_0_BLOCK:
@@ -225,9 +226,14 @@ def quantize_q8_0(values: np.ndarray) -> bytes:
         )
     blocks = flat.reshape(-1, Q8_0_BLOCK)
     amax = np.max(np.abs(blocks), axis=1)
-    scale = (amax / 127.0).astype(np.float16)
-    scale_f32 = scale.astype(np.float32)
-    safe = np.where(scale_f32 == 0.0, np.float32(1.0), scale_f32)
+    # Convert scale to bf16 by truncating the f32 mantissa (top 16 bits).
+    # This is bf16 truncation, not IEEE round-to-nearest.
+    scale_f32 = amax / 127.0
+    scale_bf16_bits = scale_f32.view(np.uint32) >> 16
+    scale = scale_bf16_bits.astype(np.uint16)
+    # Use bf16 scale for actual quantization (with rounding via the bf16 value).
+    scale_f32_back = (scale.astype(np.uint32) << 16).view(np.float32)
+    safe = np.where(scale_f32_back == 0.0, np.float32(1.0), scale_f32_back)
     scaled = blocks / safe[:, None]
     q = (np.floor(np.abs(scaled) + 0.5) * np.sign(scaled)).clip(-127, 127).astype(np.int8)
     out = np.empty((blocks.shape[0], Q8_0_BLOCK_BYTES), dtype=np.uint8)
@@ -283,7 +289,9 @@ def bf16_bytes_to_q8_0(raw_bf16: bytes) -> bytes:
     words = np.frombuffer(raw_bf16, dtype="<u2")
     f32 = np.empty(words.size, dtype=np.float32)
     for i, bits in enumerate(words):
-        f32[i] = struct.unpack("<f", struct.pack("<I", bits << 16))[0]
+        # Convert to Python int first to avoid np.uint16 << 16 overflow.
+        b = int(bits)
+        f32[i] = struct.unpack("<f", struct.pack("<I", b << 16))[0]
     return quantize_q8_0(f32)
 
 
