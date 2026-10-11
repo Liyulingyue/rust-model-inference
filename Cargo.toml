@@ -123,3 +123,6 @@ required-features = ["vulkan"]
 [[example]]
 name = "test_openjev_nli"
 path = "examples/test_openjev_nli.rs"
+
+[dev-dependencies]
+flate2 = "1"

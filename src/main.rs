@@ -57,7 +57,8 @@ fn dispatch_audio_arch(arch: &str) -> Result<AudioRoute, String> {
         | "qwen2"
         | "sensevoice-small"
         | "paraformer"
-        | "audio8_asr_infinite" => Ok(AudioRoute::Asr),
+        | "audio8_asr_infinite"
+        | "whistle" => Ok(AudioRoute::Asr),
         "qwen2vl" | "qwen3vlmoe" => Ok(AudioRoute::Multimodal),
         "gemma4" => Ok(AudioRoute::Gemma4),
         _ => Err(format!(

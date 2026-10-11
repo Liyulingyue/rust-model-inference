@@ -37,5 +37,6 @@ pub mod qwen35;
 pub mod qwen_drive;
 pub mod spark;
 pub mod vibevoice_asr;
+pub mod whistle;
 pub mod xing4_0;
 pub mod yue2;

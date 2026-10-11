@@ -9,6 +9,7 @@
 mod audio8;
 mod funasr;
 mod vibevoice;
+mod whistle;
 
 use crate::app::cli::{resolve_thread_count, transcription_options};
 use crate::app::open_or_exit;
@@ -37,9 +38,16 @@ pub fn run_asr_cli(
             .metadata("general.architecture")
             .and_then(|value| value.to_string_val())
             == Some("audio8_asr_infinite");
+        let is_whistle = probe
+            .metadata("general.architecture")
+            .and_then(|value| value.to_string_val())
+            == Some("whistle");
         drop(probe);
         if is_audio8 {
             return audio8::run_audio8_cli(options);
+        }
+        if is_whistle {
+            return whistle::run_whistle_cli(options);
         }
         if is_sensevoice {
             return funasr::run_sensevoice_cli(options);
