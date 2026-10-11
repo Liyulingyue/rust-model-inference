@@ -1,10 +1,3 @@
-Mage-Flow 已接入主 CLI；下表数值与 PNG 证据来自原适配记录，远端已关机，本次入口迁移的真实权重复验未执行，见 verification.json 的 `cli_integration`。
-
-Z-Image VAE、YuE2、Edge0、LFM2/LFM2.5/LFM2MoE、文本 embedding 与 AuK 已接入实验性 Vulkan 投影路径，
-RADV 实机数值、成品和计时范围见 [2026-10-07 验证记录](develop/VULKAN_RADV_VALIDATION_2026-10-07.md)；
-表中已有验证等级仍指原来的执行范围。
-AuK Base/Flash 记录见 [2026-10-08 验证](develop/VULKAN_AUK_RADV_VALIDATION_2026-10-08.md)；格式与限制见 [Vulkan 文档](develop/VULKAN.md)。
-
 | 模型 | 版本 | 任务类型 | 参考实现 | 原始权重 | 推理权重 | 备注 |
 |---|---|---|---|---|---|---|
 | Mage-Flow-Base | Base | 文生图 | microsoft/Mage @ `76bec2bb` | https://www.modelscope.cn/models/microsoft/Mage-Flow-Base | `tools/converter/mage_flow`（无损 BF16） | 主 CLI `rust-model-inference` CPU 入口；真实 DiT 与共享组件按标量原始 F32 位对齐，PNG 仅最小尺寸验证。[范围与复现](../tools/oracle/mage_flow/README.md)。 |
@@ -78,6 +71,9 @@ AuK Base/Flash 记录见 [2026-10-08 验证](develop/VULKAN_AUK_RADV_VALIDATION_
 | Qwen3-Omni-MoE |  | 多模态 |  | 待补 | 待补 | 待核验。两列权重来源均未定位。 |
 | Qwen3-TTS | 12Hz-1.7B-Base | TTS | llama.cpp @ `201e50c` | https://www.modelscope.cn/models/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice | https://www.modelscope.cn/models/ggml-org/Qwen3-TTS-12Hz-1.7B-Base-GGUF | √ |
 | Qwen3-VL                      | 4B           | 文本、图像        | llama.cpp | -                                                          | https://www.modelscope.cn/models/Qwen/Qwen3-VL-4B-Instruct-GGUF | √ |
+| PhysBrain1.5 | 2B | 文本、图像 | 自研转换（`tools/converter/physbrain`） | https://www.modelscope.cn/models/DeepCybo/PhysBrain1.5-2B | 同左（HF 无 GGUF，本仓库 safetensors→GGUF） | Qwen3-VL-2B-Instruct 微调，扩展词表 168576（ActionPiece + 视觉-状态 token），`qwen3vl` + `qwen3vl_merger` 既有路径，零新增代码；`tests/physbrain_1_5_2b.rs` 12 项契约。未做 e2e llama.cpp 逐位对齐。 |
+| Intern-Decision | 0.8B / 4B | 文本、图像 | 自研转换（`tools/converter/intern_decision`） | https://www.modelscope.cn/models/Shanghai_AI_Laboratory/Intern-Decision-0.8B | 同左（HF 多分片 safetensors，本仓库 → GGUF） | Qwen3.5 hybrid（linear + 每 4 层 full attention）+ `qwen3vl_merger` mmproj；`tests/intern_decision_0_8b.rs` 10 项契约。0.8B 形状与 Qwen3.5-0.8B 一致，4B 形状与 Qwen3.5-4B 一致（待下载验证）。仓库零新增模型代码。 |
+| EmbeddingGemma-2 | 多模态嵌入（text + image + audio） | text + vision + audio forward 路径**已实现**；audio 数学尚需 fix | 自研转换（`tools/converter/embeddinggemma2`） | https://www.modelscope.cn/models/google/embeddinggemma-2 | 同左（HF 单 1.5 GB safetensors） | 24 层 `gemma4-embedding` 文本（PLE block + 双向 + 5-norm + sliding window + per-layer head_dim 256/512 + kv_heads 2/1 + `layer_scalar` + mean-pool → 768-dim）+ 16 层 SigLIP-style `gemma4-vision`（axial RoPE，rope_theta=100.0，patch_size=16，merge=3，280 soft tokens/image）+ 12 层 Conformer `gemma4-audio`（subsample + lconv1d + self_attn + FFN + TensorRT-LLM FP8 校准统计）。三路径 forward 都已实现：`tests/embeddinggemma_2.rs` 15 项契约 + `tests/embeddinggemma_2_smoke.rs` text e2e（13.83 s/run）+ `tests/embeddinggemma_2_vision_smoke.rs` vision e2e（10.51 s/run）+ `tests/embeddinggemma_2_audio_smoke.rs` audio e2e（42 s/run，且当前报告 0/36864 finite —— 需修复 log-mel/SwiGLU 实现，详见 `docs/develop/TODO.md` `EmbeddingGemma2 audio forward math sanity`）。 |
 | LensVLM | 9B | 文本、图像 | llama.cpp @ `b11081`（转换侧） | https://www.modelscope.cn/models/apple/LensVLM-9B | https://www.modelscope.cn/models/bartowski/LensVLM-9B-GGUF | 语言塔 `qwen35` + 视觉塔 `qwen3vl_merger`，两者均复用既有实现，未新增模型代码；真实 GGUF 冒烟通过（文本生成 + 纯色方块判色）。**未做 llama.cpp 逐位对齐**。 |
 | ZDTaichu5.0 | 9B | 文本；图像结果错误 | llama.cpp（`references/llama.cpp` 752, build 245） | https://www.modelscope.cn/models/TaichuAI/ZDTaichu5.0-9B | HF `ngquocvinh/ZDTaichu5.0-9B-GGUF`（需 hf-mirror） | 语言塔 `qwen35` + 视觉塔 `nemotron_v2_vl`；**WIP：图像输出幻觉，勿用**。详见 SUPPORTED_MODELS.md。 |
 | Qwen3.5 | 0.8B / 2B / 4B | 文本、图像 | llama.cpp @ `b96806d` | https://www.modelscope.cn/models/Qwen/Qwen3.5-4B | https://www.modelscope.cn/models/unsloth/Qwen3.5-4B-GGUF | √ |

@@ -197,6 +197,26 @@ ggml-org/llama.cpp 的一部分**——它们是 `microsoft/BitNet` 私有 fork 
 - [ ] 更多量化格式支持（Q4_K, Q5_K 等）
 - [ ] 完善 GGUfRS 导出功能
 - [ ] GGUF 导出支持
+- [ ] **EmbeddingGemma2 audio forward math sanity**——text/vision/audio 三个 forward 路径都已实现（`src/models/embeddinggemma2/{text,vision,audio}.rs`），契约测试 15/15 通过，e2e smoke（text + vision 10 + audio 42s/run dev 模式）输出形状正确。但 audio smoke 当前报告 0/36864 finite 输出（log-mel 后第 12 层 conformer 的 tanh/silu 链产生了溢出）。最小修复：
+    - 替换 `audio.rs::log_mel_features` 的手写朴素 DFT + 线性 mel filterbank 为 Slaney 风格 mel filterbank + log compression（HuggingFace `transformers.feature_extraction_utils` 的 `MelSpectrogram`）
+    - 加 Conformer 流中的 clamp / 数值稳定（rms_norm_inplace 之前 clamp 到 [-30, 30] 之类）
+    - 替换 Conformer FFN 的 SwiGLU 实现（当前 `silu(x) * x` 应为 `silu(gate) * up`，其中 `gate` 是 ffw_layer_1 的上半部分、`up` 是下半部分）
+    - end-to-end Oracle：跑 HuggingFace `transformers` 的 sentence-transformers 输出逐位对齐（vs embeddinggemma-1 那条没有跨模型比对就只标 Verified 一样）
+    - **vision tested (vision smoke 测试 pass，10s/run)，text fully verified (e2e 输出 finite + 不同输入产生不同嵌入)**
+    触发条件：用户要 embedding 任务（语义检索 / rerank / 多模态 RAG）且 embeddinggemma-1（纯文本 300M）不够用时开工。
+- [ ] **RLCD constrained-decoding 调度器**（harshatheg/Qwen-2.5-1B-RLCD 的 value-token 切片路径）。
+      **不做**：权重（复用 `Qwen2.5-1.5B-Instruct-Q4_K_M.gguf`，已 Verified）。
+      **不做**：转换器（`tools/converter/rlcd/` 不存在意义——RLCD 没有 LoRA/分类头/微调 checkpoint，
+      只有调度逻辑）。
+      **可能要做**：~200 行 Rust 调度器——KV cache broadcast（M 份复制，每 field 一份）+
+      sub-vocab logit mask（`P(field_value | ctx) = softmax(logits[field_token_ids])`）+
+      多 token value 的 tree disambiguation。
+      **当前等价替代**：JEV 字母投票（`docs/develop/jev.md:380-430`，`P(A|ctx)/P(B|ctx)/...`），
+      数学上与 RLCD value-token 切片等价（都是 `softmax` over K tokens），单 token value /
+      instruction-tuned 模型下完全够用。
+      **触发条件**：用户要"原始 value 概率"、或模型无 instruction tuning（旧 base LLaMA/Qwen-1
+      /Qwen-1.5 base 不严格遵循字母指令）、或多 token value 的概率分布本身有意义——三个条件
+      任一成立时再开工。
 
 ---
 
