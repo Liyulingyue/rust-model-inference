@@ -197,12 +197,14 @@ ggml-org/llama.cpp 的一部分**——它们是 `microsoft/BitNet` 私有 fork 
 - [ ] 更多量化格式支持（Q4_K, Q5_K 等）
 - [ ] 完善 GGUfRS 导出功能
 - [ ] GGUF 导出支持
-- [ ] **EmbeddingGemma2 text forward numerical parity**——Oracle test (`tests/embeddinggemma_2_text_oracle.rs`) 对比 HF `transformers` 5.19 参考实现，3 个文本（hello/fox/embed）当前 **cosine sim ≈ 0.0（应当 ≥ 0.99）**。已修复合计 12 处 bug，attn_output / Wo 投影已与 HF 层输出对齐，但 final embedding 仍是 HF 的 ~47%。剩余 ~50% 偏差可能来源：
-    1. RMSNorm 中 `(1.0 / sqrt(mean_sq + eps))` 与 HF 的 `mean_squared ** -0.5`（数学等价，数值可能有差异）
-    2. 某些 norm 应用顺序或权重共享（HuggingFace 与 llama.cpp 实现细节）
-    3. PLE 投影输出后是否应用 per_layer_post_norm（HF 是，参考实现是，但中间 norm 类型可能不同）
-    4. 测试信号未充分覆盖：当前只测 1 token、8 tokens 文本，可能特定长度下表现不同
-    关键发现：**Q8_0 块格式用 fp16 而非 bf16 写 scale** 是最严重的 bug（14 个数量级偏差），已修复：ggml dequant 用 `bf16_bits << 16` 而非 `fp16 → f32` 转换；之前用 `numpy.astype(np.float16)` 写入 fp16，ggml 读出后乘到 weight 上变成 ~1e-29。修复后 attn_output 已有非零输出。下一步：聚焦 FFN / PLE 层的逐项核对。
+- [x] **EmbeddingGemma2 text forward numerical parity**——Oracle test (`tests/embeddinggemma_2_text_oracle.rs`) 对比 HF `transformers` 5.19 参考实现，3 个文本（hello/fox/embed）**cosine sim = 0.999972 / 0.999722 / 0.999965，全部 ≥ 0.99**。关键 bug 链：
+    1. **Q8_0 scale 格式**：ggml 写 fp16、读 fp16（之前误用 bf16 << 16，导致 14 个数量级偏差）
+    2. **Q8_0 块 stride**：GGUF 块按 PyTorch `[n_out, n_in]` 排布，每行 `n_in/32` 个块（之前误用 `n_out/32`）
+    3. **BF16 dequant 不转置**：所有 Linear weight 的 raw bytes 都是 PyTorch `[n_out, n_in]` flat（不需 `[n_in, n_out] → [n_out, n_in]` 转置）
+    4. **RMSNorm per-token**：每次只能 norm 一个 token；`rms_norm_inplace` 用 `min(x.len(), weight.len())`，所以对 `x[n_tokens * n_embd]` 调用时只有前 n_embd 元素被 norm（之前是 bug root cause）
+    5. **`attn_q.forward()` 漏调用**：之前 layer 0 attn_q 全零，修改无依据
+    6. **`EmbeddingGemma2Attention.scaling = 1.0`**：per llama.cpp `gemma4.cpp` `hparams.f_attention_scale = 1.0f`，不需要 `1 / sqrt(head_dim)`
+    7. **`text_embproj.weight` 加载时手写转置到错误形状**：HF nn.Linear(512, 768).weight = `[768, 512]` = `[out, in]`，但代码转置成 `[n_embd, EMBEDDING_DIM] = [512, 768]` 并传给 `Linear{matrix, n_in=512, n_out=768}`，matrix 排列与 Linear.forward 访问模式 `[o * n_in + ...]` 错位。修复：直接当 PyTorch layout 解码，无转置。
 
 - [x] **EmbeddingGemma2 audio forward math sanity**——text/vision/audio 三个 forward 路径都已实现（`src/models/embeddinggemma2/{text,vision,audio}.rs`），契约测试 15/15 通过，e2e smoke（text 14s + vision 10s + audio 77s/run dev 模式）输出形状正确且 **36864/36864 finite**。修复了 5 处 bug：
     1. **DFT in-place corruption**：原代码 `let mut real = fft_real.clone(); ... real[k] = sum_r; ... sum_r += real[t]` —— 在 `real[k]` 已被覆写后 `t=k` 索引读到的是上一步的输出而非输入，导致 power 谱全 inf。改为独立的 `real_out`/`imag_out` 缓冲。

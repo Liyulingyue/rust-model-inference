@@ -171,63 +171,47 @@ fn dequant_to_f32(raw: &[u8], qtype: GGMLType, n_in: usize, n_out: usize) -> Res
             Ok(out)
         }
         GGMLType::BF16 => {
-            // Same transpose.
-            let mut src = Vec::with_capacity(n);
+            // Raw bytes are in PyTorch [n_out, n_in] row-major order (verified).
+            let mut out = Vec::with_capacity(n);
             for idx in 0..n {
                 let bits = u16::from_le_bytes([raw[idx * 2], raw[idx * 2 + 1]]);
-                src.push(f32::from_bits((bits as u32) << 16));
-            }
-            let mut out = vec![0.0f32; n];
-            for i in 0..n_in {
-                for o in 0..n_out {
-                    out[o * n_in + i] = src[i * n_out + o];
-                }
+                out.push(f32::from_bits((bits as u32) << 16));
             }
             Ok(out)
         }
         GGMLType::Q8_0 => {
             // Q8_0 blocks of 32 elements, 34 bytes each: [f16 scale, 32 x int8].
-            // GGUF storage: tensor shape [n_in, n_out], row-major. Each row contains
-            // n_out elements as Q8_0 blocks (n_out/32 blocks per row).
-            // Storage layout: row i has n_out/32 blocks of 34 bytes each.
-            // row_base = i * (n_out/32) * 34 = i * row_stride.
+            // GGUF storage for Linear weights: shape label is [n_in, n_out] but bytes
+            // are arranged in PyTorch [n_out, n_in] row-major (each "row" has n_in
+            // values). This matches GGML's q8_0 row-stride convention used by ggml_mul_mat.
             let block_bytes = 34;
-            if n_out % 32 != 0 {
-                return Err(format!("Q8_0 dequant: n_out={n_out} not multiple of 32"));
+            if n_in % 32 != 0 {
+                return Err(format!("Q8_0 dequant: n_in={n_in} not multiple of 32"));
             }
-            let blocks_per_gguf_row = n_out / 32;
-            let n_blocks = n_in * blocks_per_gguf_row;
+            let blocks_per_gguf_row = n_in / 32;
+            let n_blocks = n_out * blocks_per_gguf_row;
             if raw.len() != n_blocks * block_bytes {
                 return Err(format!(
-                    "Q8_0 dequant: payload {} != n_in({n_in}) * blocks_per_gguf_row({blocks_per_gguf_row}) * 34",
+                    "Q8_0 dequant: payload {} != n_out({n_out}) * blocks_per_gguf_row({blocks_per_gguf_row}) * 34",
                     raw.len()
                 ));
             }
-            // First dequantize GGUF rows into [n_in, n_out] (PyTorch layout would be
-            // [n_out, n_in]; we transpose at the end).
-            let mut gguf_decoded = vec![0.0f32; n_in * n_out];
-            for row in 0..n_in {
-                let row_base = row * blocks_per_gguf_row * block_bytes;
+            // Decode GGUF rows into PyTorch [n_out, n_in] layout.
+            let mut pt = vec![0.0f32; n_out * n_in];
+            for o in 0..n_out {
+                let row_base = o * blocks_per_gguf_row * block_bytes;
                 for b in 0..blocks_per_gguf_row {
                     let blk = &raw[row_base + b * block_bytes..row_base + (b + 1) * block_bytes];
                     let scale_bits = u16::from_le_bytes([blk[0], blk[1]]);
-                    // bf16 → f32: high 16 bits of f32 = scale_bits as u16
-                    let scale = f32::from_bits((scale_bits as u32) << 16);
+                    let scale = half::f16::from_bits(scale_bits).to_f32();
                     for j in 0..32 {
                         let raw_byte = blk[2 + j];
                         let signed = raw_byte as i8 as f32;
-                        gguf_decoded[row * n_out + b * 32 + j] = scale * signed;
+                        pt[o * n_in + b * 32 + j] = scale * signed;
                     }
                 }
             }
-            // Transpose to PyTorch convention [n_out, n_in].
-            let mut out = vec![0.0f32; n_out * n_in];
-            for i in 0..n_in {
-                for o in 0..n_out {
-                    out[o * n_in + i] = gguf_decoded[i * n_out + o];
-                }
-            }
-            Ok(out)
+            Ok(pt)
         }
         other => Err(format!("dequant_to_f32: unsupported qtype {other:?}")),
     }
@@ -247,8 +231,6 @@ impl Linear {
         assert_eq!(input.len(), self.n_in, "Linear::forward input shape");
         assert_eq!(output.len(), self.n_out, "Linear::forward output shape");
         // For each output row i, compute the dot product with input.
-        // Single-threaded; the inner loop is dense and amenable to SIMD
-        // dot_f32 but for this first pass we just do a scalar loop.
         for i in 0..self.n_out {
             let row = &self.matrix[i * self.n_in..(i + 1) * self.n_in];
             let mut s = 0.0f32;
@@ -337,18 +319,32 @@ impl EmbeddingGemmaTextModel {
                 token_info.dims, config.n_embd, config.n_vocab
             ));
         }
-        let token_flat = dequant_to_f32(token_raw, token_info.ggml_type, config.n_embd, config.n_vocab)?;
-        // Transpose: (n_embd, n_vocab) → (n_vocab, n_embd).
+        // The GGUF tensor is stored as raw bf16 bytes in PyTorch flat layout
+        // [n_vocab, n_embd] (vocab-major). Just decode the raw bytes directly
+        // into the token_embd vec (no transpose needed).
         let mut token_embd = vec![0.0f32; config.n_vocab * config.n_embd];
-        for v in 0..config.n_vocab {
-            for e in 0..config.n_embd {
-                token_embd[v * config.n_embd + e] = token_flat[e * config.n_vocab + v];
-            }
+        if token_info.ggml_type != GGMLType::BF16 {
+            return Err(format!("token_embd expected BF16, got {:?}", token_info.ggml_type));
+        }
+        let n = config.n_vocab * config.n_embd;
+        if token_raw.len() != n * 2 {
+            return Err(format!(
+                "token_embd raw len {} != n * 2 = {}",
+                token_raw.len(), n * 2
+            ));
+        }
+        for k in 0..n {
+            let bits = u16::from_le_bytes([token_raw[k * 2], token_raw[k * 2 + 1]]);
+            token_embd[k] = f32::from_bits((bits as u32) << 16);
         }
 
-        // text_embproj: [n_embd, EMBEDDING_DIM]. Stored as GGUF
-        // [EMBEDDING_DIM, n_embd] (reversed). We want [n_embd, EMBEDDING_DIM]
-        // for the matvec.
+        // text_embproj: HF nn.Linear(hidden_size, embedding_dim).weight has shape
+        // [embedding_dim, hidden_size]. GGUF tensor dims are
+        // [hidden_size, embedding_dim] (reversed) but the raw bytes follow
+        // PyTorch [out, in] = [embedding_dim, hidden_size] row-major order
+        // (verified). Our Linear::forward expects matrix `[n_out, n_in]`
+        // row-major, so we pass through the dequantized flat buffer directly
+        // with (n_in=hidden_size, n_out=embedding_dim).
         let te_info = source
             .tensor_info("text_embproj.weight")
             .ok_or("Missing tensor: text_embproj.weight")?;
@@ -364,13 +360,8 @@ impl EmbeddingGemmaTextModel {
         let te_raw = source
             .tensor_slice("text_embproj.weight")
             .ok_or("Missing tensor: text_embproj.weight")?;
-        let te_flat = dequant_to_f32(te_raw, te_info.ggml_type, EMBEDDING_DIM, config.n_embd)?;
-        let mut text_embproj_matrix = vec![0.0f32; config.n_embd * EMBEDDING_DIM];
-        for o in 0..EMBEDDING_DIM {
-            for i in 0..config.n_embd {
-                text_embproj_matrix[i * EMBEDDING_DIM + o] = te_flat[o * config.n_embd + i];
-            }
-        }
+        let text_embproj_matrix =
+            dequant_to_f32(te_raw, te_info.ggml_type, config.n_embd, EMBEDDING_DIM)?;
         let text_embproj = Linear {
             matrix: text_embproj_matrix,
             n_in: config.n_embd,
@@ -417,6 +408,8 @@ impl EmbeddingGemmaTextModel {
             let kv_heads = config.kv_heads(i);
 
             let attn_norm = get_f32(&format!("blk.{i}.attn_norm.weight"), config.n_embd)?;
+            if i == 0 {
+            }
             let post_attention_norm =
                 get_f32(&format!("blk.{i}.post_attention_norm.weight"), config.n_embd)?;
             let pre_ffn_norm = get_f32(&format!("blk.{i}.pre_ffn_norm.weight"), config.n_embd)?;
@@ -589,28 +582,20 @@ impl EmbeddingGemmaTextModel {
             }
         }
 
-        // Debug: print x stats before layers
-        let x_mean: f32 = x.iter().sum::<f32>() / x.len() as f32;
-        let x_max = x.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-
-        // Debug layer 0 in isolation
-        let mut x_dbg = x.clone();
-        self.forward_layer(0, &mut x_dbg, &per_layer_input)?;
-
         // Step 3: 24 bidirectional layers.
         for il in 0..cfg.n_layer {
             self.forward_layer(il, &mut x, &per_layer_input)?;
-            let x_mean: f32 = x.iter().sum::<f32>() / x.len() as f32;
-            let x_max = x.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
         }
 
         // Step 4: final RMSNorm + text_embproj + mean pool.
         let mut x_normed = x.clone();
-        crate::ops::norm::rms_norm_inplace(
-            &mut x_normed[..n_tokens * n_embd],
-            &self.output_norm,
-            EPS,
-        );
+        for t in 0..n_tokens {
+            crate::ops::norm::rms_norm_inplace(
+                &mut x_normed[t * n_embd..(t + 1) * n_embd],
+                &self.output_norm,
+                EPS,
+            );
+        }
 
         let mut pooled = vec![0.0f32; EMBEDDING_DIM];
         let mut out = vec![0.0f32; EMBEDDING_DIM];
@@ -645,17 +630,15 @@ impl EmbeddingGemmaTextModel {
         let sliding_window = cfg.sliding_window();
         let n_ff = cfg.n_ff;
 
-        // Step a: normed = rms_norm(attn_norm, x).
+        // Step a: normed = rms_norm(attn_norm, x) per token.
         let mut normed = x.to_vec();
-        crate::ops::norm::rms_norm_inplace(
-            &mut normed[..n_tokens * n_embd],
-            &layer.attn_norm,
-            EPS,
-        );
-        if il == 0 {
-            let mx = normed[..n_tokens * n_embd].iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        for t in 0..n_tokens {
+            crate::ops::norm::rms_norm_inplace(
+                &mut normed[t * n_embd..(t + 1) * n_embd],
+                &layer.attn_norm,
+                EPS,
+            );
         }
-
         // Step c: Q/K/V projections on `normed`.
         let q_len = n_tokens * n_head * head_dim;
         let kv_len = n_tokens * n_kv * head_dim;
@@ -666,10 +649,6 @@ impl EmbeddingGemmaTextModel {
         let mut tmp_kv = vec![0.0f32; n_kv * head_dim];
         for t in 0..n_tokens {
             let src = &normed[t * n_embd..(t + 1) * n_embd];
-            // Debug: check attn_q matrix first row + size
-            if t == 0 && il == 0 {
-                let nonzero_count = layer.attn_q.matrix.iter().filter(|x| x.abs() > 1e-30).count();
-            }
             layer.attn_q.forward(src, &mut tmp_q);
             layer.attn_k.forward(src, &mut tmp_kv);
             k[t * n_kv * head_dim..(t + 1) * n_kv * head_dim].copy_from_slice(&tmp_kv);
@@ -733,7 +712,8 @@ impl EmbeddingGemmaTextModel {
         let attn_dim = n_head * head_dim;
         let mut attn_out = vec![0.0f32; n_tokens * attn_dim];
         let gqa_ratio = n_head / n_kv;
-        let scale = 1.0 / (head_dim as f32).sqrt();
+        // Gemma4 uses scaling=1.0 (no pre-attn scaling, per llama.cpp/src/models/gemma4.cpp).
+        let scale = 1.0f32;
         for i in 0..n_tokens {
             for h in 0..n_head {
                 let kv_h = h / gqa_ratio;
@@ -771,46 +751,35 @@ impl EmbeddingGemmaTextModel {
         // Step f: output projection.
         let mut proj_out = vec![0.0f32; n_tokens * n_embd];
         let mut tmp_o = vec![0.0f32; n_embd];
-        if il == 0 {
-            // Try a single forward manually
-            let src = &attn_out[0..attn_dim];
-            layer.attn_output.forward(src, &mut tmp_o);
-
-
-            let tmp_o_max = tmp_o.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        }
         for t in 0..n_tokens {
             let src = &attn_out[t * attn_dim..(t + 1) * attn_dim];
             layer.attn_output.forward(src, &mut tmp_o);
             proj_out[t * n_embd..(t + 1) * n_embd].copy_from_slice(&tmp_o);
         }
-        if il == 0 {
-            let proj_max = proj_out[..n_tokens * n_embd].iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        }
 
         // Step g: post_attention_norm + residual.
+        let mut post_attn_pre = vec![0.0f32; n_tokens * n_embd];
         for t in 0..n_tokens {
             let mut tmp = proj_out[t * n_embd..(t + 1) * n_embd].to_vec();
             crate::ops::norm::rms_norm_inplace(&mut tmp, &layer.post_attention_norm, EPS);
-            let proj_sum = tmp.iter().sum::<f32>();
+            post_attn_pre[t * n_embd..(t + 1) * n_embd].copy_from_slice(&tmp);
             for j in 0..n_embd {
                 x[t * n_embd + j] += tmp[j];
             }
         }
-        let x_mean = x[..n_tokens * n_embd].iter().sum::<f32>() / x[..n_tokens * n_embd].len() as f32;
 
-        // Step h: pre_ffn_norm.
+
+        // Step h: pre_ffn_norm (per token).
         let mut ff_x = x.to_vec();
-        crate::ops::norm::rms_norm_inplace(
-            &mut ff_x[..n_tokens * n_embd],
-            &layer.pre_ffn_norm,
-            EPS,
-        );
+        for t in 0..n_tokens {
+            crate::ops::norm::rms_norm_inplace(
+                &mut ff_x[t * n_embd..(t + 1) * n_embd],
+                &layer.pre_ffn_norm,
+                EPS,
+            );
+        }
 
         // Step i: GeGLU FFN (per llama.cpp gemma4.cpp line 357: LLM_FFN_GELU, LLM_FFN_PAR).
-        if il == 0 {
-        }
-        
         // gelu(gate) * up, then ffn_down.
         let mut ffn_out = vec![0.0f32; n_tokens * n_embd];
         let mut tmp_g = vec![0.0f32; n_ff];
@@ -868,7 +837,6 @@ impl EmbeddingGemmaTextModel {
         for v in x.iter_mut() {
             *v *= layer.layer_scalar;
         }
-
         Ok(())
     }
 }

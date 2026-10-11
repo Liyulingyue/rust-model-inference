@@ -149,7 +149,8 @@ def _emit_bf16_q8_0(gguf: GgufWriter, name: str, raw: bytes, shape: tuple) -> No
         raise ValueError(
             f"{name}: shape {shape} ({n}) != bf16 payload {len(raw) // 2}"
         )
-    gguf.add_tensor(name, GGML_Q8_0, gguf_dims(shape), bf16_bytes_to_q8_0(raw))
+    q8 = bf16_bytes_to_q8_0(raw)
+    gguf.add_tensor(name, GGML_Q8_0, gguf_dims(shape), q8)
 
 
 def _emit_bf16(gguf: GgufWriter, name: str, raw: bytes, shape: tuple) -> None:
