@@ -237,34 +237,114 @@ def hadamard_mlp(x: np.ndarray, layer_idx: int) -> np.ndarray:
     return d4 * z3
 
 
+def _lane_offsets(layer_idx: int, n: int = 4) -> tuple[np.ndarray, np.ndarray]:
+    """`pre_off = 8 * lane - 4`, `post_off = -4 * (1 - lane)`, cycling per layer.
+
+    Reproduces cactus-compute/needle `_lane_offsets` for the active layer.
+    """
+    lane = np.zeros(n, dtype=np.float32)
+    lane[layer_idx % n] = 1.0
+    return 8 * lane - 4, -4 * (1 - lane)
+
+
+def _sinkhorn(logits, iters: int = 20) -> np.ndarray:
+    """Sinkhorn-Knopp: alternating log-row/col normalisation."""
+    log_K = logits.copy()
+    for _ in range(iters):
+        log_K = log_K - np.log(np.exp(log_K).sum(axis=-1, keepdims=True) + 1e-30)
+        log_K = log_K - np.log(np.exp(log_K).sum(axis=-2, keepdims=True) + 1e-30)
+    return np.exp(log_K)
+
+
+def _rms_unit(x: np.ndarray, eps: float = 1e-6) -> np.ndarray:
+    """Per-token RMS unit norm (no affine): x / sqrt(mean(x²) + eps)."""
+    return x / np.sqrt((x * x).mean(axis=-1, keepdims=True) + eps)
+
+
+def encoder_advance(stream: np.ndarray, layer_idx: int) -> np.ndarray:
+    """Real multi-lane hyper-connection (`mhc_lanes=4`) + encoder block.
+
+    Reproduces `Stack._advance` from cactus-compute/needle/model/architecture.py,
+    applied to a single encoder layer. `stream` shape `[B, T, 4, 512]`.
+    Returns new stream of the same shape (cumulative across layers).
+    """
+    B, T, n, C = stream.shape
+    assert n == 4 and C == HIDDEN
+    dt = stream.dtype
+    xf = stream.astype(np.float32)
+    nx = _rms_unit(stream.reshape(B, T, n * C)).astype(np.float32)
+
+    pre_off, post_off = _lane_offsets(layer_idx, n)
+    # Pre-gate: hpre = sigmoid(a_pre * (nx @ phi_pre) + b_pre + pre_off)
+    a_pre = W["encoder/mhc_a_pre"][layer_idx]
+    phi_pre = W["encoder/mhc_phi_pre"][layer_idx]
+    b_pre = W["encoder/mhc_b_pre"][layer_idx]
+    hpre = 1.0 / (
+        1.0 + np.exp(-(a_pre * (nx @ phi_pre) + b_pre + pre_off))
+    )  # [B, T, 4]
+
+    # u = sum(hpre[..., None] * xf, axis=2)  (weighted sum of 4 lanes)
+    u = (hpre[..., None] * xf).sum(axis=2)  # [B, T, 512]
+
+    # Inner encoder block (ZCRMSNorm → attention → ZCRMSNorm → attn_gate →
+    # ZCRMSNorm → HadamardMLP → residual)
+    p2 = "encoder/layers/block"
+    skip = u
+    pre_norm = rms_norm(u, W[p2 + "/ZCRMSNorm_0/scale"][layer_idx])
+    attn = gqa_attention(
+        pre_norm, None, layer_idx,
+        w_q=W[p2 + "/self_attn/q_proj/kernel"][layer_idx],
+        w_k=W[p2 + "/self_attn/k_proj/kernel"][layer_idx],
+        w_v=W[p2 + "/self_attn/v_proj/kernel"][layer_idx],
+        w_out=W[p2 + "/self_attn/out_proj/kernel"][layer_idx],
+        q_norm_scale=W[p2 + "/self_attn/q_norm/scale"][layer_idx],
+        k_norm_scale=W[p2 + "/self_attn/k_norm/scale"][layer_idx],
+        attn_gate=W[p2 + "/attn_gate"][layer_idx],
+    )
+    h = skip + attn
+    skip = h
+    h_norm = rms_norm(h, W[p2 + "/post_attn_norm/scale"][layer_idx])
+    mlp = hadamard_mlp(h_norm, layer_idx)
+    h = skip + mlp
+
+    # y = block output - input (skip-style residual)
+    y = h - u
+
+    # Post-gate: hpost = 2 * sigmoid(a_post * (nx @ phi_post) + b_post + post_off)
+    a_post = W["encoder/mhc_a_post"][layer_idx]
+    phi_post = W["encoder/mhc_phi_post"][layer_idx]
+    b_post = W["encoder/mhc_b_post"][layer_idx]
+    hpost = 2.0 / (
+        1.0 + np.exp(-(a_post * (nx @ phi_post) + b_post + post_off))
+    )  # [B, T, 4]
+
+    # Res gate: sinkhorn(a_res * (nx @ phi_res).reshape(n, n) + b_res)
+    a_res = W["encoder/mhc_a_res"][layer_idx]
+    phi_res = W["encoder/mhc_phi_res"][layer_idx]
+    b_res = W["encoder/mhc_b_res"][layer_idx]
+    res_logits = a_res * (nx @ phi_res).reshape(B, T, n, n) + b_res
+    hres = _sinkhorn(res_logits)  # [B, T, 4, 4]
+
+    # new_stream = einsum("btij,btjc->btic", hres, xf) + hpost[..., None] * y[..., None, :]
+    new_xf = np.einsum("btij,btjc->btic", hres, xf) + hpost[..., None] * y[..., None, :]
+    return new_xf.astype(dt)
+
+
 def mhc_skip(x: np.ndarray, layer_idx: int) -> np.ndarray:
-    """Mixed Hadamard Conv residual: φ-pre/φ-post/φ-res gates."""
-    # Stub: scalar scale per layer
+    """Legacy placeholder; use `encoder_advance` for the real algorithm."""
     a = W["encoder/mhc_a_res"][layer_idx]
     return a * x
 
 
 def encoder_block(x: np.ndarray, layer_idx: int) -> np.ndarray:
-    """One encoder block:
-        zc_rms_in → attn → hadamard_mlp → mhc_skip → dw_1d_conv_residual
+    """Real encoder block on a fresh `[B, T, 512]` input.
+
+    For parity with the multi-lane hyper-connection each call broadcasts
+    to `[B, T, 4, 512]`, runs `_advance`, and returns `mean(stream, axis=2)`.
     """
-    p = "encoder/layers/block"
-    pre_norm = rms_norm(x, W[p + "/ZCRMSNorm_0/scale"][layer_idx])
-    attn = gqa_attention(
-        pre_norm, None, layer_idx,
-        w_q=W[p + "/self_attn/q_proj/kernel"][layer_idx],
-        w_k=W[p + "/self_attn/k_proj/kernel"][layer_idx],
-        w_v=W[p + "/self_attn/v_proj/kernel"][layer_idx],
-        w_out=W[p + "/self_attn/out_proj/kernel"][layer_idx],
-        q_norm_scale=W[p + "/self_attn/q_norm/scale"][layer_idx],
-        k_norm_scale=W[p + "/self_attn/k_norm/scale"][layer_idx],
-        attn_gate=W[p + "/attn_gate"][layer_idx],
-    )
-    h = x + attn
-    h_norm = rms_norm(h, W[p + "/post_attn_norm/scale"][layer_idx])
-    mlp = hadamard_mlp(h_norm, layer_idx)
-    h = h + mlp + mhc_skip(h_norm, layer_idx)
-    return h
+    B, T, H = x.shape
+    stream = np.broadcast_to(x[:, :, None, :], (B, T, 4, H)).astype(np.float32)
+    return encoder_advance(stream, layer_idx).mean(axis=2)
 
 
 def save_reference():
@@ -281,11 +361,17 @@ def save_reference():
     out_path = Path("/tmp/whistle-probe/oracle_reference.npz")
     layer_inputs = []
     layer_outputs = []
+    # Cumulative multi-lane stream: broadcast initial x to [B,T,4,512]
+    stream = np.broadcast_to(
+        x[:, :, None, :], (B, T, 4, HIDDEN)
+    ).astype(np.float32)
     for i in range(8):
-        layer_inputs.append(x.copy())
-        x = encoder_block(x, i)
-        layer_outputs.append(x.copy())
-    enc_out = rms_norm(x, W["encoder/final_norm/scale"])
+        # What Rust sees as `layer_in` is the previous stream's mean.
+        layer_inputs.append(stream.mean(axis=2).copy())
+        stream = encoder_advance(stream, i)
+        layer_outputs.append(stream.mean(axis=2).copy())
+    x_final = stream.mean(axis=2)
+    enc_out = rms_norm(x_final, W["encoder/final_norm/scale"])
 
     text_tokens = np.array([[1, 2, 3, 4, 5]], dtype=np.int64)
     text_emb = W["embedding/embedding"][text_tokens]

@@ -17,12 +17,14 @@
 
 pub mod attention;
 pub mod hadamard;
+pub mod mhc;
 pub mod norm;
 pub mod stack;
 pub mod stem;
 
 pub use attention::{gqa_cross_attention, gqa_self_attention};
 pub use hadamard::hadamard_mlp;
+pub use mhc::{forward_one, load_mhc_layer, EncoderLayerWeights, MhcLayer, MHC_LANES};
 pub use norm::{zc_rms_norm_placeholder, ZcRmsNormPlaceholder};
 pub use stack::{final_rms_norm, load_stack_layer, StackLayer};
 pub use stem::placeholder_stem_output;
@@ -83,7 +85,7 @@ pub const TEXT_VOCAB: usize = 8199;
 
 /// One full encoder block layer, holding the per-layer weight tensors
 /// needed for: zc_rms_in → attn → post_attn_norm → hadamard_mlp + skip.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct EncoderLayer {
     pub zc_in_scale: Vec<f32>,     // [NUM_LAYERS, HIDDEN]
     pub post_attn_scale: Vec<f32>, // [NUM_LAYERS, HIDDEN]
@@ -95,7 +97,6 @@ pub struct EncoderLayer {
     pub q_norm_scale: Vec<f32>,    // [NUM_LAYERS, HEAD_DIM_Q] (per-layer)
     pub k_norm_scale: Vec<f32>,    // [NUM_LAYERS, HEAD_DIM_K] (per-layer)
     pub attn_gate: Vec<f32>,       // [NUM_LAYERS]
-    pub mhc_a_res: Vec<f32>,       // [NUM_LAYERS] (placeholder: scalar mhc skip)
     pub hadamard: HadamardLayer,
 }
 
@@ -159,8 +160,6 @@ pub fn load_encoder_layer(source: &dyn TensorSource, layer_idx: usize) -> Encode
         .expect("k_norm_scale"),
         attn_gate: load_f32_tensor(source, &format!("{p}/attn_gate"), &[NUM_LAYERS as u64])
             .expect("attn_gate"),
-        mhc_a_res: load_f32_tensor(source, "encoder/mhc_a_res", &[NUM_LAYERS as u64])
-            .expect("mhc_a_res"),
         hadamard: HadamardLayer {
             w1a: load_layer_kernel_nd(
                 source,
@@ -265,10 +264,10 @@ impl EncoderLayer {
         let mut mlp = vec![0.0f32; batch * seq_len * HIDDEN];
         hadamard_mlp(&h, &self.hadamard, layer_idx, batch, seq_len, &mut mlp);
 
-        // out += mlp + skip(mhc placeholder)
-        let mhc_coef = self.mhc_a_res[layer_idx];
+        // out += mlp (skip-style residual is taken by the surrounding mhc;
+        // this inner-block path is only used by `mhc::run_inner_block`).
         for i in 0..(batch * seq_len * HIDDEN) {
-            out[i] += mlp[i] + mhc_coef * h[i];
+            out[i] += mlp[i];
         }
     }
 }

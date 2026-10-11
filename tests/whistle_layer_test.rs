@@ -16,6 +16,9 @@ use std::sync::Arc;
 use rust_model_inference::core::tensor::{GGMLType, MetaValue, TensorInfo, TensorSource};
 use rust_model_inference::models::whistle::load_encoder_layer;
 use rust_model_inference::models::whistle::zc_rms_norm_placeholder;
+use rust_model_inference::models::whistle::{
+    final_rms_norm, load_mhc_layer, EncoderLayerWeights, MhcLayer, MHC_LANES,
+};
 
 const SAFETENSORS_PATH: &str =
     "/tmp/whistle-probe/checkpoints/whistle.safetensors";
@@ -246,8 +249,20 @@ fn parse_npy_f32(buf: &[u8]) -> Vec<f32> {
 fn whistle_encoder_layer_parity_against_oracle() {
     let source = Arc::new(SafetensorsSource::new(SAFETENSORS_PATH).expect("safetensors"));
     let layer = load_encoder_layer(&*source, 0);
-    eprintln!("attn_gate[0]={}", layer.attn_gate[0]);
-    eprintln!("q_norm_scale[0..3]={:?}", &layer.q_norm_scale[0..3]);
+    let mhc = load_mhc_layer(&*source);
+
+    let layer_w = EncoderLayerWeights {
+        zc_in_scale: &layer.zc_in_scale,
+        post_attn_scale: &layer.post_attn_scale,
+        q_proj: &layer.q_proj,
+        k_proj: &layer.k_proj,
+        v_proj: &layer.v_proj,
+        out_proj: &layer.out_proj,
+        q_norm_scale: &layer.q_norm_scale,
+        k_norm_scale: &layer.k_norm_scale,
+        attn_gate: &layer.attn_gate,
+        hadamard: layer.hadamard.clone(),
+    };
 
     // Encoder input from Oracle (B=1, T=16, H=512) — slice the
     // [8, 1, 16, 512] stacked inputs to just layer 0's input.
@@ -256,45 +271,38 @@ fn whistle_encoder_layer_parity_against_oracle() {
     let layer_0_in = 1 * 16 * 512;
     let oracle_in = &oracle_in_all[0..layer_0_in];
     let mut out = vec![0.0f32; 1 * 16 * 512];
-    layer.forward(oracle_in, /*layer_idx*/ 0, 1, 16, &mut out);
-    let mean = out.iter().sum::<f32>() / out.len() as f32;
+    rust_model_inference::models::whistle::forward_one(
+        &layer_w,
+        &mhc,
+        oracle_in,
+        /*layer_idx*/ 0,
+        1,
+        16,
+        &mut out,
+    );
+    
     let max = out.iter().fold(f32::NEG_INFINITY, |a, &x| a.max(x));
     let min = out.iter().fold(f32::INFINITY, |a, &x| a.min(x));
-    eprintln!("rust layer 0 output: mean={mean} min={min} max={max} first3={:?}", &out[0..3]);
 
     // Numerical parity vs Python Oracle output (same placeholder ops).
     let oracle_out = load_oracle_layer_out(ORACLE_REFERENCE, 0);
     assert_eq!(oracle_out.len(), out.len());
     let mut max_abs_diff = 0.0f32;
-    let mut max_diff_idx = 0usize;
-    for (i, (a, b)) in out.iter().zip(oracle_out.iter()).enumerate() {
+    for (a, b) in out.iter().zip(oracle_out.iter()) {
         let d = (a - b).abs();
         if d > max_abs_diff {
             max_abs_diff = d;
-            max_diff_idx = i;
         }
     }
-    eprintln!("layer-0 max abs diff vs oracle: {max_abs_diff} at idx={max_diff_idx}");
-    eprintln!("  rust={} oracle={}", out[max_diff_idx], oracle_out[max_diff_idx]);
-    eprintln!("  rust[0..3]={:?} oracle[0..3]={:?}", &out[0..3], &oracle_out[0..3]);
-    // Print stats
-    let r_mean = out.iter().sum::<f32>() / out.len() as f32;
-    let o_mean = oracle_out.iter().sum::<f32>() / oracle_out.len() as f32;
-    let r_std = (out.iter().map(|x| (x - r_mean).powi(2)).sum::<f32>() / out.len() as f32).sqrt();
-    let o_std = (oracle_out.iter().map(|x| (x - o_mean).powi(2)).sum::<f32>() / oracle_out.len() as f32).sqrt();
-    eprintln!("  rust mean={r_mean:.4} std={r_std:.4}");
-    eprintln!("  oracle mean={o_mean:.4} std={o_std:.4}");
     assert!(
         max_abs_diff < 1e-2,
-        "placeholder encoder layer should be bit-close to Python Oracle (1 ULP ≈ 7e-3 f32); got {max_abs_diff}"
+        "encoder layer should be bit-close to Python Oracle (1 ULP ≈ 7e-3 f32); got {max_abs_diff}"
     );
 
-    // Sanity: not all zeros.
+    // Sanity: not all zeros, and outputs span ±100s from the attn_gate gate.
     let n_nonzero = out.iter().filter(|x| x.abs() > 1e-6).count();
     assert!(n_nonzero > out.len() / 2, "most output cells should be active");
-    let max = out.iter().fold(f32::NEG_INFINITY, |a, &x| a.max(x));
-    let min = out.iter().fold(f32::INFINITY, |a, &x| a.min(x));
-    assert!(max > 100.0, "expected whistle-like attn_gate ~13 to amplify output");
+    assert!(max > 100.0, "expected attn_gate ~13 to amplify output");
     assert!(min < -100.0, "expected bidirectional output");
 }
 
@@ -303,12 +311,56 @@ fn whistle_full_encoder_parity_against_oracle() {
     let source = Arc::new(SafetensorsSource::new(SAFETENSORS_PATH).expect("safetensors"));
     let oracle_in_all = load_oracle_npz(ORACLE_REFERENCE);
     assert_eq!(oracle_in_all.len(), 8 * 1 * 16 * 512);
-    let mut x = oracle_in_all[0..1 * 16 * 512].to_vec();
+    // Cumulative multi-lane stream: broadcast initial x to [B,T,4,512]
+    let plane_4 = 1 * 16 * MHC_LANES * 512;
+    let mut stream: Vec<f32> = {
+        let x_initial = &oracle_in_all[0..1 * 16 * 512];
+        let mut s = vec![0.0f32; plane_4];
+        for bt in 0..(1 * 16) {
+            for lane in 0..MHC_LANES {
+                let dst = &mut s[bt * MHC_LANES * 512 + lane * 512..][..512];
+                dst.copy_from_slice(&x_initial[bt * 512..bt * 512 + 512]);
+            }
+        }
+        s
+    };
+    let mhc = load_mhc_layer(&*source);
     for i in 0..8 {
         let layer = load_encoder_layer(&*source, i);
-        let mut next = vec![0.0f32; x.len()];
-        layer.forward(&x, i, 1, 16, &mut next);
-        x = next;
+        let layer_w = EncoderLayerWeights {
+            zc_in_scale: &layer.zc_in_scale,
+            post_attn_scale: &layer.post_attn_scale,
+            q_proj: &layer.q_proj,
+            k_proj: &layer.k_proj,
+            v_proj: &layer.v_proj,
+            out_proj: &layer.out_proj,
+            q_norm_scale: &layer.q_norm_scale,
+            k_norm_scale: &layer.k_norm_scale,
+            attn_gate: &layer.attn_gate,
+            hadamard: layer.hadamard.clone(),
+        };
+        let mut next_stream = vec![0.0f32; plane_4];
+        rust_model_inference::models::whistle::mhc::forward_one_stream(
+            &layer_w,
+            &mhc,
+            &stream,
+            i,
+            1,
+            16,
+            &mut next_stream,
+        );
+        stream = next_stream;
+    }
+    // mean across lanes → [B, T, 512]
+    let mut x = vec![0.0f32; 1 * 16 * 512];
+    for bt in 0..(1 * 16) {
+        for h in 0..512 {
+            let mut sum = 0.0f32;
+            for lane in 0..MHC_LANES {
+                sum += stream[bt * MHC_LANES * 512 + lane * 512 + h];
+            }
+            x[bt * 512 + h] = sum / MHC_LANES as f32;
+        }
     }
     // Apply encoder final_norm (single shared scale [512] for all tokens)
     let final_scale = rust_model_inference::core::tensor::load_f32_tensor(
@@ -336,7 +388,6 @@ fn whistle_full_encoder_parity_against_oracle() {
         .zip(oracle_final.iter())
         .map(|(a, b)| (a - b).abs())
         .fold(0.0f32, f32::max);
-    eprintln!("8-layer encoder_final max abs diff: {max_abs_diff}");
     // Real ZCRMSNorm gains are larger than the RMSNorm-placeholder case, so
 // 8 layers of float32 accumulation against magnitudes in the 1000s drifts
 // to ~tens of ULPs (~5). The single-layer test already pins down the
@@ -353,14 +404,50 @@ fn whistle_decoder_logits_parity_against_oracle() {
         final_rms_norm, load_stack_layer,
     };
     let source = Arc::new(SafetensorsSource::new(SAFETENSORS_PATH).expect("safetensors"));
-    // Encoder 8 layers + final_norm (same as full encoder test)
+    // Encoder 8 layers + final_norm (cumulative multi-lane stream)
     let oracle_in_all = load_oracle_npz(ORACLE_REFERENCE);
-    let mut enc = oracle_in_all[0..1 * 16 * 512].to_vec();
+    let plane_4 = 1 * 16 * MHC_LANES * 512;
+    let mut stream: Vec<f32> = {
+        let x_initial = &oracle_in_all[0..1 * 16 * 512];
+        let mut s = vec![0.0f32; plane_4];
+        for bt in 0..(1 * 16) {
+            for lane in 0..MHC_LANES {
+                let dst = &mut s[bt * MHC_LANES * 512 + lane * 512..][..512];
+                dst.copy_from_slice(&x_initial[bt * 512..bt * 512 + 512]);
+            }
+        }
+        s
+    };
+    let mhc = load_mhc_layer(&*source);
     for i in 0..8 {
         let layer = load_encoder_layer(&*source, i);
-        let mut next = vec![0.0f32; enc.len()];
-        layer.forward(&enc, i, 1, 16, &mut next);
-        enc = next;
+        let layer_w = EncoderLayerWeights {
+            zc_in_scale: &layer.zc_in_scale,
+            post_attn_scale: &layer.post_attn_scale,
+            q_proj: &layer.q_proj,
+            k_proj: &layer.k_proj,
+            v_proj: &layer.v_proj,
+            out_proj: &layer.out_proj,
+            q_norm_scale: &layer.q_norm_scale,
+            k_norm_scale: &layer.k_norm_scale,
+            attn_gate: &layer.attn_gate,
+            hadamard: layer.hadamard.clone(),
+        };
+        let mut next_stream = vec![0.0f32; plane_4];
+        rust_model_inference::models::whistle::mhc::forward_one_stream(
+            &layer_w, &mhc, &stream, i, 1, 16, &mut next_stream,
+        );
+        stream = next_stream;
+    }
+    let mut enc = vec![0.0f32; 1 * 16 * 512];
+    for bt in 0..(1 * 16) {
+        for h in 0..512 {
+            let mut sum = 0.0f32;
+            for lane in 0..MHC_LANES {
+                sum += stream[bt * MHC_LANES * 512 + lane * 512 + h];
+            }
+            enc[bt * 512 + h] = sum / MHC_LANES as f32;
+        }
     }
     let final_scale = rust_model_inference::core::tensor::load_f32_tensor(
         &*source,
@@ -425,12 +512,10 @@ fn whistle_decoder_logits_parity_against_oracle() {
         .zip(oracle_text_emb.iter())
         .map(|(a, b)| (a - b).abs())
         .fold(0.0f32, f32::max);
-    eprintln!("text_emb max abs diff: {text_emb_diff}");
     assert!(text_emb_diff < 1e-5, "text emb lookup should be exact");
 
     // Sanity: logits finite, non-degenerate
     let max_logit = logits.iter().fold(f32::NEG_INFINITY, |a, &x| a.max(x));
     let min_logit = logits.iter().fold(f32::INFINITY, |a, &x| a.min(x));
-    eprintln!("logits: min={min_logit:.2} max={max_logit:.2}");
     assert!(max_logit.is_finite() && min_logit.is_finite());
 }

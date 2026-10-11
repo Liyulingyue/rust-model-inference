@@ -16,7 +16,7 @@
 
 use super::HIDDEN;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HadamardLayer {
     pub w1a: Vec<f32>,
     pub w1b: Vec<f32>,
