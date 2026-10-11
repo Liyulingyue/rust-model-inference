@@ -197,13 +197,12 @@ ggml-org/llama.cpp 的一部分**——它们是 `microsoft/BitNet` 私有 fork 
 - [ ] 更多量化格式支持（Q4_K, Q5_K 等）
 - [ ] 完善 GGUfRS 导出功能
 - [ ] GGUF 导出支持
-- [ ] **EmbeddingGemma2 text forward numerical parity**——Oracle test (`tests/embeddinggemma_2_text_oracle.rs`) 对比 HF `transformers` 5.19 参考实现，3 个文本（hello/fox/embed）当前 **cosine sim ≈ 0.035（应当 ≥ 0.99）**。修复了 5 处结构 bug（token emb × sqrt(n_embd)、GeGLU 而非 silu*up、PLE block 移至 FFN 之后、layer_scalar 一次性应用、Linear 矩阵从 GGUF `[n_in,n_out]` 转置到 PyTorch `[n_out,n_in]`），以及 2 处 attention bug（K/V projection 顺序、V rms_unit_inplace、per_layer_input 24 层切片）。仍 ~0.035 而非 ≥0.99——可能根因包括：
-    - 注意力 bidirectional vs causal 切换逻辑（HF 双向 vs llama.cpp SWA-only 双向）
-    - RMSNorm 前置 vs 后置顺序与权重重用
-    - 文本平均池化方向（按 token 维 vs hidden 维）
-    - FFN 后 post-norm 应用顺序（参考代码 rms_norm(ffn_post_norm) → add，方向相反？）
-    - PLE block 的 per_layer_input 加法（EmbeddingGemma 无 per_layer_tok_embd，但 /sqrt(2) 缩放是否仍应用）
-    建议下一步：在 HF transformers 5.19 中打印 EmbeddingGemma2Model 的中间结果（per_layer_input、单层输出）与本仓库对比，定位数值偏移。触发条件：cosine sim ≥ 0.99 后即标 `Verified (architecture + numerical)`。
+- [ ] **EmbeddingGemma2 text forward numerical parity**——Oracle test (`tests/embeddinggemma_2_text_oracle.rs`) 对比 HF `transformers` 5.19 参考实现，3 个文本（hello/fox/embed）当前 **cosine sim ≈ 0.0（应当 ≥ 0.99）**。已修复合计 12 处 bug，attn_output / Wo 投影已与 HF 层输出对齐，但 final embedding 仍是 HF 的 ~47%。剩余 ~50% 偏差可能来源：
+    1. RMSNorm 中 `(1.0 / sqrt(mean_sq + eps))` 与 HF 的 `mean_squared ** -0.5`（数学等价，数值可能有差异）
+    2. 某些 norm 应用顺序或权重共享（HuggingFace 与 llama.cpp 实现细节）
+    3. PLE 投影输出后是否应用 per_layer_post_norm（HF 是，参考实现是，但中间 norm 类型可能不同）
+    4. 测试信号未充分覆盖：当前只测 1 token、8 tokens 文本，可能特定长度下表现不同
+    关键发现：**Q8_0 块格式用 fp16 而非 bf16 写 scale** 是最严重的 bug（14 个数量级偏差），已修复：ggml dequant 用 `bf16_bits << 16` 而非 `fp16 → f32` 转换；之前用 `numpy.astype(np.float16)` 写入 fp16，ggml 读出后乘到 weight 上变成 ~1e-29。修复后 attn_output 已有非零输出。下一步：聚焦 FFN / PLE 层的逐项核对。
 
 - [x] **EmbeddingGemma2 audio forward math sanity**——text/vision/audio 三个 forward 路径都已实现（`src/models/embeddinggemma2/{text,vision,audio}.rs`），契约测试 15/15 通过，e2e smoke（text 14s + vision 10s + audio 77s/run dev 模式）输出形状正确且 **36864/36864 finite**。修复了 5 处 bug：
     1. **DFT in-place corruption**：原代码 `let mut real = fft_real.clone(); ... real[k] = sum_r; ... sum_r += real[t]` —— 在 `real[k]` 已被覆写后 `t=k` 索引读到的是上一步的输出而非输入，导致 power 谱全 inf。改为独立的 `real_out`/`imag_out` 缓冲。
