@@ -197,6 +197,14 @@ ggml-org/llama.cpp 的一部分**——它们是 `microsoft/BitNet` 私有 fork 
 - [ ] 更多量化格式支持（Q4_K, Q5_K 等）
 - [ ] 完善 GGUfRS 导出功能
 - [ ] GGUF 导出支持
+- [ ] **EmbeddingGemma2 text forward numerical parity**——Oracle test (`tests/embeddinggemma_2_text_oracle.rs`) 对比 HF `transformers` 5.19 参考实现，3 个文本（hello/fox/embed）当前 **cosine sim ≈ 0.035（应当 ≥ 0.99）**。修复了 5 处结构 bug（token emb × sqrt(n_embd)、GeGLU 而非 silu*up、PLE block 移至 FFN 之后、layer_scalar 一次性应用、Linear 矩阵从 GGUF `[n_in,n_out]` 转置到 PyTorch `[n_out,n_in]`），以及 2 处 attention bug（K/V projection 顺序、V rms_unit_inplace、per_layer_input 24 层切片）。仍 ~0.035 而非 ≥0.99——可能根因包括：
+    - 注意力 bidirectional vs causal 切换逻辑（HF 双向 vs llama.cpp SWA-only 双向）
+    - RMSNorm 前置 vs 后置顺序与权重重用
+    - 文本平均池化方向（按 token 维 vs hidden 维）
+    - FFN 后 post-norm 应用顺序（参考代码 rms_norm(ffn_post_norm) → add，方向相反？）
+    - PLE block 的 per_layer_input 加法（EmbeddingGemma 无 per_layer_tok_embd，但 /sqrt(2) 缩放是否仍应用）
+    建议下一步：在 HF transformers 5.19 中打印 EmbeddingGemma2Model 的中间结果（per_layer_input、单层输出）与本仓库对比，定位数值偏移。触发条件：cosine sim ≥ 0.99 后即标 `Verified (architecture + numerical)`。
+
 - [x] **EmbeddingGemma2 audio forward math sanity**——text/vision/audio 三个 forward 路径都已实现（`src/models/embeddinggemma2/{text,vision,audio}.rs`），契约测试 15/15 通过，e2e smoke（text 14s + vision 10s + audio 77s/run dev 模式）输出形状正确且 **36864/36864 finite**。修复了 5 处 bug：
     1. **DFT in-place corruption**：原代码 `let mut real = fft_real.clone(); ... real[k] = sum_r; ... sum_r += real[t]` —— 在 `real[k]` 已被覆写后 `t=k` 索引读到的是上一步的输出而非输入，导致 power 谱全 inf。改为独立的 `real_out`/`imag_out` 缓冲。
     2. **power spectrum 错误**：原 `power[k] = sqrt(real² + imag²)` 应为 `real² + imag²`（能量谱不是幅度谱）。前者把能量值压回 1e-7 量级被 log 压成 -12 之类，后者保留能量让 conformer 输入分布正常。

@@ -35,7 +35,17 @@ fn vision_forward_returns_correct_shape_finite_values() {
         .expect("vision encode");
     // merge_token_len = merge^2 * embd = 9 * 768 = 6912.
     assert_eq!(tokens.len(), 9 * 768);
-    for (i, &v) in tokens.iter().enumerate() {
-        assert!(v.is_finite(), "tokens[{i}] = {v} (non-finite)");
-    }
+    let n_finite = tokens.iter().filter(|v| v.is_finite()).count();
+    assert_eq!(n_finite, tokens.len(), "non-finite values in vision output");
+    // Different image: solid red instead of noisy gradient.
+    let pixels_alt: Vec<f32> = (0..image_h * image_w * 3)
+        .map(|i| if i % 3 == 0 { 1.0 } else { 0.0 })
+        .collect();
+    let tokens_alt = model
+        .encode(&pixels_alt, image_h, image_w)
+        .expect("vision encode alt");
+    let diff: f32 = tokens.iter().zip(tokens_alt.iter())
+        .map(|(a, b)| (a - b).abs())
+        .sum();
+    assert!(diff > 0.0, "two different images produced identical embeddings (diff={diff})");
 }

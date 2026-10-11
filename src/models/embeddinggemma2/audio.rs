@@ -76,7 +76,36 @@ fn decode_f32(data: &[u8], expected: usize) -> Result<Vec<f32>, String> {
     Ok(out)
 }
 
-fn dequant_bf16_to_f32(raw: &[u8], n: usize) -> Vec<f32> {
+fn dequant_bf16_to_f32(raw: &[u8], n_in: usize, n_out: usize) -> Vec<f32> {
+    // GGUF stores Linear weights as [n_in, n_out] flat row-major.
+    // Transpose to PyTorch convention [n_out, n_in] for Linear::forward.
+    let n = n_in * n_out;
+    let mut src = Vec::with_capacity(n);
+    for idx in 0..n {
+        let bits = u16::from_le_bytes([raw[idx * 2], raw[idx * 2 + 1]]);
+        src.push(f32::from_bits((bits as u32) << 16));
+    }
+    let mut out = vec![0.0f32; n];
+    for i in 0..n_in {
+        for o in 0..n_out {
+            out[o * n_in + i] = src[i * n_out + o];
+        }
+    }
+    out
+}
+
+/// 1-D BF16 dequant (for RMSNorm/affine weight tensors).
+fn dequant_bf16_to_f32_norm(raw: &[u8], n: usize) -> Vec<f32> {
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let bits = u16::from_le_bytes([raw[i * 2], raw[i * 2 + 1]]);
+        out.push(f32::from_bits((bits as u32) << 16));
+    }
+    out
+}
+
+/// N-D BF16 dequant with row-major layout preserved (for conv weights and per-tensor scalars).
+fn dequant_bf16_to_f32_flat(raw: &[u8], n: usize) -> Vec<f32> {
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
         let bits = u16::from_le_bytes([raw[i * 2], raw[i * 2 + 1]]);
@@ -116,7 +145,7 @@ fn linear_from_gguf_bf16(
         .tensor_slice(name)
         .ok_or_else(|| format!("Missing tensor: {name}"));
     Ok(Linear {
-        matrix: dequant_bf16_to_f32(raw?, n_in * n_out),
+        matrix: dequant_bf16_to_f32(raw?, n_in, n_out),
         n_in,
         n_out,
     })
@@ -185,19 +214,60 @@ fn log_mel_features(pcm16: &[i16]) -> Vec<f32> {
         for k in 0..power.len() {
             power[k] = real_out[k] * real_out[k] + imag_out[k] * imag_out[k];
         }
-        // Apply triangular mel filterbank (128 bins).
+        // Slaney mel filterbank: 128 triangular bins on the Slaney mel scale,
+        // mapping Hz to mel via the piecewise (linear-then-log) formula used
+        // by librosa (matches llama.cpp/tools/mtmd/mtmd-audio.cpp).
+        // fmin=125 Hz, fmax=7500 Hz, n_mels=128, n_fft=400, sample_rate=16000.
+        let min_log_hz: f32 = 1000.0;
+        let lin_slope: f32 = 3.0 / 200.0;
+        let min_log_mel: f32 = min_log_hz * lin_slope;
+        let log_step: f32 = (6.4f32).ln() / 27.0;
+        let fmin = 125.0f32;
+        let fmax = 7500.0f32;
+        let hz_to_mel = |f: f32| -> f32 {
+            if f < min_log_hz {
+                f * lin_slope
+            } else {
+                min_log_mel + (f / min_log_hz).ln() / log_step
+            }
+        };
+        let mel_to_hz = |m: f32| -> f32 {
+            if m < min_log_mel {
+                m / lin_slope
+            } else {
+                min_log_hz * ((m - min_log_mel) * log_step).exp()
+            }
+        };
+        let m_lo = hz_to_mel(fmin);
+        let m_hi = hz_to_mel(fmax);
+        let hz_pts: Vec<f32> = (0..=n_mels + 1)
+            .map(|i| {
+                let mel = m_lo + (m_hi - m_lo) * (i as f32 / (n_mels + 1) as f32);
+                mel_to_hz(mel)
+            })
+            .collect();
+        let bin_edges: Vec<usize> = hz_pts
+            .iter()
+            .map(|&h| ((h * n as f32) / sr).floor() as usize)
+            .collect();
         let mut mel = vec![0.0f32; n_mels];
         for m in 0..n_mels {
-            // Slaney-style mel scale approximation: linear from 0 to n_mels.
-            let low_hz = 80.0 + (7600.0 - 80.0) * (m as f32 / n_mels as f32);
-            let high_hz = 80.0 + (7600.0 - 80.0) * ((m + 1) as f32 / n_mels as f32);
-            let low_fft = (low_hz * n as f32 / sr) as usize;
-            let high_fft = (high_hz * n as f32 / sr) as usize;
-            for k in low_fft.min(power.len() - 1)..=high_fft.min(power.len() - 1) {
-                let t = (k - low_fft) as f32 / (high_fft - low_fft + 1) as f32;
+            let lo = bin_edges[m];
+            let center = bin_edges[m + 1];
+            let hi = bin_edges[m + 2];
+            // Rising slope: linear from 0 (at lo) to 1 (at center).
+            for k in lo..center.min(power.len()) {
+                let t = (k - lo) as f32 / (center - lo).max(1) as f32;
                 mel[m] += power[k] * t;
             }
-            mel[m] = (mel[m] + 1e-6).ln();
+            // Falling slope: linear from 1 (at center) to 0 (at hi).
+            for k in center..hi.min(power.len()) {
+                let t = (hi - k) as f32 / (hi - center).max(1) as f32;
+                mel[m] += power[k] * t;
+            }
+            // Slaney area normalization: 2 / (hz_hi - hz_lo).
+            let norm = 2.0 / (hz_pts[m + 2] - hz_pts[m]).max(1.0);
+            mel[m] = (mel[m] * norm + 5.96e-8).ln();
         }
         features.extend(mel);
         frame += 1;
@@ -257,25 +327,25 @@ impl EmbeddingGemmaAudioModel {
             config.hidden_size,
         )?;
 
-        let layer0_conv = dequant_bf16_to_f32(
+        let layer0_conv = dequant_bf16_to_f32_flat(
             source
                 .tensor_slice("audio.subsample_conv_projection.layer0.conv.weight")
                 .ok_or("Missing audio.subsample_conv_projection.layer0.conv.weight")?,
             128 * 1 * 3 * 3,
         );
-        let layer0_norm = dequant_bf16_to_f32(
+        let layer0_norm = dequant_bf16_to_f32_norm(
             source
                 .tensor_slice("audio.subsample_conv_projection.layer0.norm.weight")
                 .ok_or("Missing audio.subsample_conv_projection.layer0.norm.weight")?,
             128,
         );
-        let layer1_conv = dequant_bf16_to_f32(
+        let layer1_conv = dequant_bf16_to_f32_flat(
             source
                 .tensor_slice("audio.subsample_conv_projection.layer1.conv.weight")
                 .ok_or("Missing audio.subsample_conv_projection.layer1.conv.weight")?,
             32 * 128 * 3 * 3,
         );
-        let layer1_norm = dequant_bf16_to_f32(
+        let layer1_norm = dequant_bf16_to_f32_norm(
             source
                 .tensor_slice("audio.subsample_conv_projection.layer1.norm.weight")
                 .ok_or("Missing audio.subsample_conv_projection.layer1.norm.weight")?,
@@ -288,7 +358,7 @@ impl EmbeddingGemmaAudioModel {
             config.hidden_size,
             config.projection_dim,
         )?;
-        let output_proj_bias = dequant_bf16_to_f32(
+        let output_proj_bias = dequant_bf16_to_f32_norm(
             source
                 .tensor_slice("audio.output_proj.bias")
                 .ok_or("Missing audio.output_proj.bias")?,
@@ -298,19 +368,27 @@ impl EmbeddingGemmaAudioModel {
         let mut layers = Vec::with_capacity(config.depth);
         for i in 0..config.depth {
             let blk = |suffix: &str| format!("audio.layers.{i}.{suffix}");
-            let lconv1d_conv_norm = dequant_bf16_to_f32(
+            let lconv1d_conv_norm = dequant_bf16_to_f32_norm(
                 source
                     .tensor_slice(&blk("lconv1d.conv_norm.weight"))
                     .ok_or_else(|| format!("Missing {}.weight", blk("lconv1d.conv_norm")))?,
                 config.hidden_size,
             );
-            let lconv1d_depthwise_weight = dequant_bf16_to_f32(
-                source
-                    .tensor_slice(&blk("lconv1d.depthwise_conv1d.weight"))
-                    .ok_or_else(|| format!("Missing {}.weight", blk("lconv1d.depthwise_conv1d")))?,
-                config.hidden_size * 1 * 5,
-            );
-            let lconv1d_pre_layer_norm = dequant_bf16_to_f32(
+            // depthwise conv1d weight is shape (kernel=5, 1, channels=hidden_size).
+            // GGUF storage flat = k * channels + ch. Transpose to (channels, kernel)
+            // so the convolution loop can index weight[ch * kernel + k].
+            let dw_raw = source
+                .tensor_slice(&blk("lconv1d.depthwise_conv1d.weight"))
+                .ok_or_else(|| format!("Missing {}.weight", blk("lconv1d.depthwise_conv1d")))?;
+            let n_dw = 5 * 1 * config.hidden_size;
+            let dw_src = dequant_bf16_to_f32_flat(dw_raw, n_dw);
+            let mut lconv1d_depthwise_weight = vec![0.0f32; config.hidden_size * 5];
+            for k in 0..5 {
+                for ch in 0..config.hidden_size {
+                    lconv1d_depthwise_weight[ch * 5 + k] = dw_src[k * config.hidden_size + ch];
+                }
+            }
+            let lconv1d_pre_layer_norm = dequant_bf16_to_f32_norm(
                 source
                     .tensor_slice(&blk("lconv1d.pre_layer_norm.weight"))
                     .ok_or_else(|| format!("Missing {}.weight", blk("lconv1d.pre_layer_norm")))?,
@@ -329,19 +407,19 @@ impl EmbeddingGemmaAudioModel {
                 config.hidden_size,
             )?;
 
-            let norm_pre_attn = dequant_bf16_to_f32(
+            let norm_pre_attn = dequant_bf16_to_f32_norm(
                 source
                     .tensor_slice(&blk("norm_pre_attn.weight"))
                     .ok_or_else(|| format!("Missing {}.weight", blk("norm_pre_attn")))?,
                 config.hidden_size,
             );
-            let norm_post_attn = dequant_bf16_to_f32(
+            let norm_post_attn = dequant_bf16_to_f32_norm(
                 source
                     .tensor_slice(&blk("norm_post_attn.weight"))
                     .ok_or_else(|| format!("Missing {}.weight", blk("norm_post_attn")))?,
                 config.hidden_size,
             );
-            let norm_out = dequant_bf16_to_f32(
+            let norm_out = dequant_bf16_to_f32_norm(
                 source
                     .tensor_slice(&blk("norm_out.weight"))
                     .ok_or_else(|| format!("Missing {}.weight", blk("norm_out")))?,
@@ -379,7 +457,7 @@ impl EmbeddingGemmaAudioModel {
                 config.hidden_size,
             )?;
             // per_dim_scale: shape (128,) — stored without `.weight` suffix.
-            let self_attn_per_dim_scale = dequant_bf16_to_f32(
+            let self_attn_per_dim_scale = dequant_bf16_to_f32_norm(
                 source
                     .tensor_slice(&blk("self_attn.per_dim_scale"))
                     .ok_or_else(|| format!("Missing {}", blk("self_attn.per_dim_scale")))?,
@@ -390,7 +468,7 @@ impl EmbeddingGemmaAudioModel {
             let mut ff_layers = Vec::new();
             for ff_idx in 1..=2 {
                 let ff = |suffix: &str| format!("audio.layers.{i}.feed_forward{ff_idx}.{suffix}");
-                let pre_ln = dequant_bf16_to_f32(
+                let pre_ln = dequant_bf16_to_f32_norm(
                     source
                         .tensor_slice(&ff("pre_layer_norm.weight"))
                         .ok_or_else(|| format!("Missing {}.weight", ff("pre_layer_norm")))?,
@@ -408,7 +486,7 @@ impl EmbeddingGemmaAudioModel {
                     config.ffn_hidden_size,
                     config.hidden_size,
                 )?;
-                let post_ln = dequant_bf16_to_f32(
+                let post_ln = dequant_bf16_to_f32_norm(
                     source
                         .tensor_slice(&ff("post_layer_norm.weight"))
                         .ok_or_else(|| format!("Missing {}.weight", ff("post_layer_norm")))?,

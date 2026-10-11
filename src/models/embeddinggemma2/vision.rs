@@ -103,6 +103,7 @@ fn decode_f32(data: &[u8], expected: usize) -> Result<Vec<f32>, String> {
     Ok(out)
 }
 
+/// 1-D BF16 dequant (for RMSNorm/affine weights and 1-D scalars).
 fn dequant_bf16_to_f32(raw: &[u8], n: usize) -> Vec<f32> {
     if raw.len() < n * 2 {
         panic!("dequant_bf16_to_f32: payload {} bytes < {} expected", raw.len(), n * 2);
@@ -111,6 +112,20 @@ fn dequant_bf16_to_f32(raw: &[u8], n: usize) -> Vec<f32> {
     for i in 0..n {
         let bits = u16::from_le_bytes([raw[i * 2], raw[i * 2 + 1]]);
         out.push(f32::from_bits((bits as u32) << 16));
+    }
+    out
+}
+
+/// Linear weight dequant. GGUF stores as `[n_in, n_out]` row-major;
+/// transpose to PyTorch `[n_out, n_in]` for our Linear::forward loop.
+fn dequant_bf16_to_f32_linear(raw: &[u8], n_in: usize, n_out: usize) -> Vec<f32> {
+    let n = n_in * n_out;
+    let mut src = dequant_bf16_to_f32(raw, n);
+    let mut out = vec![0.0f32; n];
+    for i in 0..n_in {
+        for o in 0..n_out {
+            out[o * n_in + i] = src[i * n_out + o];
+        }
     }
     out
 }
@@ -148,9 +163,8 @@ fn linear_from_gguf_bf16(
     let raw = source
         .tensor_slice(name)
         .ok_or_else(|| format!("Missing tensor: {name}"))?;
-    // Stored as `[n_out, n_in]` in GGUF storage order; dequant and use
-    // row-major.
-    let matrix = dequant_bf16_to_f32(raw, n_in * n_out);
+    // Stored as `[n_in, n_out]` in GGUF; transpose to `[n_out, n_in]`.
+    let matrix = dequant_bf16_to_f32_linear(raw, n_in, n_out);
     Ok(Linear {
         matrix,
         n_in,
