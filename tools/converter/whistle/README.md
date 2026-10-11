@@ -38,33 +38,59 @@ src/models/whistle/
 ├── hadamard.rs           # 4-stage Hadamard MLP (placeholder weights)
 ├── norm.rs               # RMSNorm placeholder for ZCRMSNorm
 ├── stack.rs              # StackLayer (self-attn + cross-attn + final_norm)
-└── stem.rs               # placeholder stem (no-op)
-src/app/asr/whistle.rs    # CLI driver (placeholder stem)
+├── stem.rs               # placeholder stem (no-op)
+└── mhc.rs                # multi-lane hyper-connection (mhc_lanes=4) + Sinkhorn
+src/app/asr/whistle.rs    # CLI driver (two backends: pure Rust, libneedle3.so)
+src/needle_ffi.rs        # FFI bindings to libneedle3.so (dlopen/dlsym)
 tests/whistle_layer_test.rs  # parity tests against oracle.py
+models/whistle-probe/
+├── whistle.cact          # closed-source Cactus binary (audio + LLM)
+├── whistle.f32.gguf      # F32 GGUF port of the safetensors weights
+└── libneedle3.so         # C++ runtime for the FFI backend
 ```
 
 ## Running
 
 ```bash
-# 1. Pull the safetensors from ModelScope (16 MB GGUF artifact, but we
-#    use the 221 MB safetensors for full fidelity).
+# 1. Pull the safetensors + .cact + libneedle3.so
+#    (or use ModelScope's models/.venv).
 models/.venv/bin/modelscope download --model Cactus-Compute/whistle \
     --include "config.json" --include "checkpoints/whistle.safetensors" \
+    --include "whistle.cact" \
     --local_dir /tmp/whistle-probe
 
+# Cactus ships the C++ runtime as a private wheel. Grab it from
+# ModelScope under Cactus-Compute/needle3 and copy libneedle3.so
+# into models/whistle-probe/.
+source models/.venv/bin/activate
+python3 -c "from modelscope import snapshot_download; \
+    p = snapshot_download('Cactus-Compute/needle3', cache_dir='/tmp/needle-ms', \
+        allow_patterns=['python/*.whl']); \
+    print(p + '/python/cactus_needle-3.3.0-py3-none-manylinux2014_x86_64.whl')"
+# Extract libneedle3.so
+python3 -c "import zipfile; \
+    z = zipfile.ZipFile('/tmp/needle-ms/models/Cactus-Compute--needle3/snapshots/master/python/cactus_needle-3.3.0-py3-none-manylinux2014_x86_64.whl'); \
+    open('models/whistle-probe/libneedle3.so','wb').write(z.read('needle/libneedle3.so'))"
+
 # 2. Convert safetensors → F32 GGUF (no quant yet).
-. .hf-venv/bin/activate
 python3 tools/converter/whistle/convert_whistle.py \
     --safetensors /tmp/whistle-probe/checkpoints/whistle.safetensors \
     --config     /tmp/whistle-probe/config.json \
     --out        models/whistle-probe/whistle.f32.gguf
 
-# 3. Run the parity tests.
-cargo test --test whistle_layer_test -- --nocapture
+# 3. Parity tests against the in-tree Python Oracle.
+cargo test --test whistle_layer_test
 
-# 4. CLI smoke. Output is meaningless because the stem is a no-op.
+# 4. CLI smoke (pure-Rust port, placeholder stem).
 ./target/debug/rust-model-inference \
     --model models/whistle-probe/whistle.f32.gguf --audio whistle
+
+# 5. Real transcripts through the closed C++ runtime.
+WHISTLE_NEEDLE_RUNTIME=1 \
+    ./target/debug/rust-model-inference \
+        --model models/whistle-probe/whistle.f32.gguf \
+        --audio whistle \
+        --audio /path/to/speech.wav
 ```
 
 ## Reference data layout
