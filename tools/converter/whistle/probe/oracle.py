@@ -74,9 +74,9 @@ TEXT_VOCAB = 8199
 
 
 def rms_norm(x: np.ndarray, scale: np.ndarray, eps: float = 1e-6) -> np.ndarray:
-    """RMSNorm(x) = x / sqrt(mean(x**2) + eps) * scale."""
-    var = (x * x).mean(-1, keepdims=True)
-    return x / np.sqrt(var + eps) * scale
+    """Real ZCRMSNorm: out = (1 + scale) * x / sqrt(mean(x²) + eps)."""
+    rms = np.sqrt((x * x).mean(-1, keepdims=True) + eps)
+    return (1.0 + scale) * x / rms
 
 
 def apply_qk_norm(
@@ -155,22 +155,39 @@ def gqa_attention(
     return attn_gate * out
 
 
+def _hada_blocks(n: int) -> tuple[int, int]:
+    b = 1 << ((n - 1).bit_length() // 2)
+    return b, n // b
+
+
+def _hada_perms(n: int, seed: int) -> np.ndarray:
+    """Reproduce cactus-compute/needle `_hada_perms`. The random perms are
+    seeded by `_HADA_PERM_SEEDS = (11, 13)` in architecture.py."""
+    return np.random.RandomState(seed).permutation(n)
+
+
+def _kron_apply(z: np.ndarray, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """`z` shape `[..., a_dim, b_dim]`. Return `a.T @ z @ b` reshaped to
+    `[..., a_dim * b_dim]`. Equivalent to (a ⊗ b) @ vec(z)."""
+    lead = z.shape[:-2]
+    z = z.reshape(*lead, a.shape[0], b.shape[0])
+    out = np.einsum("...ij,ik,jl->...kl", z, a, b)
+    return out.reshape(*lead, a.shape[0] * b.shape[0])
+
+
 def hadamard_mlp(x: np.ndarray, layer_idx: int) -> np.ndarray:
-    """Hadamard-style MLP (Cactus Compute sketch).
+    """Real HadamardMLP from cactus-compute/needle/model/architecture.py.
 
-    Input [B, T, 512]. Splits 512 into 16 dim-chunks then 32 dim-chunks and
-    runs an asymmetric Hadamard product (per-ch) plus per-channel
-    conditioner (cond_u, cond_v, b2, d1..d4).
+    Stages:
+      z = pad(x)                                  # n - d_model, usually 0
+      z = kron_apply(d1 * z, *factors[0])[..., p1]
+      z = kron_apply(silu(d2 * cond * z + b2), *factors[1])[..., p2]
+      z = kron_apply(d3 * z, *factors[2])
+      return (d4 * z)[..., :d_model]
 
-    Output [B, T, 512]. The shape invariants per layer are:
-        w1a, w2a, w3a: [16, 16]   (per 16-chunk)
-        w1b, w2b, w3b: [32, 32]   (per 32-chunk)
-        d1..d4: [512]             (per-channel scale/offset)
-        b2: [512]                 (bias)
-        cond_u: [8, 512]          (rank-8 left conditioner)
-        cond_v: [512, 8]          (rank-8 right conditioner)
+    `cond = 1 + softmax(x @ cond_v) @ cond_u`.
     """
-    p = f"encoder/layers/block/hadamard_mlp"
+    p = "encoder/layers/block/hadamard_mlp"
     w1a = W[p + "/w1a"][layer_idx]
     w1b = W[p + "/w1b"][layer_idx]
     w2a = W[p + "/w2a"][layer_idx]
@@ -185,49 +202,39 @@ def hadamard_mlp(x: np.ndarray, layer_idx: int) -> np.ndarray:
     cond_u = W[p + "/cond_u"][layer_idx]  # [8, 512]
     cond_v = W[p + "/cond_v"][layer_idx]  # [512, 8]
 
+    ba, bb = _hada_blocks(x.shape[-1])  # (16, 32) for d=512
+    p1 = _hada_perms(x.shape[-1], 11)
+    p2 = _hada_perms(x.shape[-1], 13)
+
     b, t, h = x.shape
-    assert h == 512
 
-    # cond = x @ cond_u @ cond_v → [B, T, 512] (full hidden-dim signal,
-    # used as per-channel conditioner)
-    cond = (x @ cond_u.T) @ cond_v.T  # [B, T, 512]
+    # cond = 1 + softmax(x @ cond_v) @ cond_u
+    cond_logits = x @ cond_v  # [B, T, 8]
+    cond_softmax = np.exp(cond_logits - cond_logits.max(-1, keepdims=True))
+    cond_softmax /= cond_softmax.sum(-1, keepdims=True)
+    cond = 1.0 + cond_softmax @ cond_u  # [B, T, 512]
 
-    # 16-chunk stage: split hidden into 32 chunks of 16; each chunk × w1a.
-    x_16 = x.reshape(b, t, 32, 16)
-    s1 = x_16 @ w1a.T  # [B, T, 32, 16]
-    s1 = s1 + d1.reshape(32, 16) * cond.reshape(b, t, 32, 16)
+    z = x  # n == d_model, no pad
 
-    # 32-chunk stage: re-chunk 32 chunks of 16 → 16 chunks of 32
-    s1_32 = s1.reshape(b, t, 16, 32)
-    s2 = s1_32 @ w1b.T  # [B, T, 16, 32]
-    s2 = s2 + d2.reshape(16, 32) * cond.reshape(b, t, 16, 32)
+    # Stage 1: kron_apply(d1 * z, w1a, w1b) then permute by p1
+    z1 = d1 * z
+    z1 = z1.reshape(b, t, ba, bb)
+    z1 = _kron_apply(z1, w1a, w1b)
+    z1 = z1[..., p1]
 
-    # 16-chunk stage 2
-    s2_16 = s2.reshape(b, t, 32, 16)
-    s3 = s2_16 @ w2a.T
-    s3 = s3 + d3.reshape(32, 16) * cond.reshape(b, t, 32, 16)
+    # Stage 2: silu(d2 * cond * z1 + b2) -> kron_apply(w2a, w2b) -> permute p2
+    z2_raw = d2 * cond * z1 + b2
+    z2 = z2_raw * (1.0 / (1.0 + np.exp(-z2_raw)))  # silu
+    z2 = z2.reshape(b, t, ba, bb)
+    z2 = _kron_apply(z2, w2a, w2b)
+    z2 = z2[..., p2]
 
-    # 32-chunk stage 2
-    s3_32 = s3.reshape(b, t, 16, 32)
-    s4 = s3_32 @ w2b.T
-    s4 = s4 + d4.reshape(16, 32) * cond.reshape(b, t, 16, 32)
+    # Stage 3: kron_apply(d3 * z2, w3a, w3b) — no permute
+    z3 = d3 * z2
+    z3 = z3.reshape(b, t, ba, bb)
+    z3 = _kron_apply(z3, w3a, w3b)
 
-    # Final stage
-    s4_16 = s4.reshape(b, t, 32, 16)
-    s5 = s4_16 @ w3a.T
-    s5_32 = s5.reshape(b, t, 16, 32)
-    s6 = s5_32 @ w3b.T
-    s6 = s6.reshape(b, t, h) + b2
-
-    # Residual cond skip (mhc_phi_res: [8, 2048, 16])
-    phi = W["encoder/mhc_phi_pre"][layer_idx]  # [2048, 4]
-    phi_post = W["encoder/mhc_phi_post"][layer_idx]  # [2048, 4]
-    a_pre = W["encoder/mhc_a_pre"][layer_idx]  # [8]
-    b_pre = W["encoder/mhc_b_pre"][layer_idx]  # [4]
-    a_post = W["encoder/mhc_a_post"][layer_idx]  # [8]
-    b_post = W["encoder/mhc_b_post"][layer_idx]  # [4]
-
-    return s6  # stub: cond gate added separately in mhc branch
+    return d4 * z3
 
 
 def mhc_skip(x: np.ndarray, layer_idx: int) -> np.ndarray:

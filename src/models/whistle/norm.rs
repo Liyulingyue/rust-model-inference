@@ -1,23 +1,25 @@
-// ZCRMSNorm placeholder = plain RMSNorm (per-layer scale).
+// Real ZCRMSNorm — `out = (1 + scale) * x / rms(x)`.
 //
-// Real Cactus-compute ZCRMSNorm is the next phase; we collapse it to
-// RMSNorm here so the rest of the model port is shape-stable while the
-// mel pipeline and Hadamard MLP / mhc / taps kernels are landing.
+// The official cactus-compute/needle definition is in
+// `needle/model/architecture.py` class `ZCRMSNorm`:
+//   scale = param("scale", jinit.zeros, (x.shape[-1],))
+//   rms = sqrt(mean(x²) + eps)
+//   out = (1 + scale) * x / rms
 //
-// All norm scales in the safetensors are [num_layers, hidden] — i.e.
-// per-layer scale (not per-head, not per-token). The function picks
-// the layer-row slice then applies RMSNorm with that scale.
+// `scale` is initialised to zeros so the first forward at init is
+// identical to plain RMSNorm, but trained checkpoints learn a
+// per-channel gain — and the whistle checkpoint carries a non-zero
+// scale tensor.
+//
+// All norm scales in the safetensors are `[num_layers, hidden]`
+// (per-layer, not per-head). The function picks the layer-row slice
+// and applies the `(1 + scale)` affine.
 
-use crate::ops::norm::rms_norm;
 use super::HIDDEN;
 use super::NUM_LAYERS;
 
 pub struct ZcRmsNormPlaceholder;
 
-/// RMSNorm(x) = x / sqrt(mean(x²) + eps) * scale.
-///
-/// `scale` is the full [NUM_LAYERS, HIDDEN] scale tensor; `layer_idx`
-/// selects which row applies for this call.
 pub fn zc_rms_norm_placeholder(
     input: &[f32],
     scale: &[f32],
@@ -35,12 +37,17 @@ pub fn zc_rms_norm_placeholder(
     for b in 0..batch {
         for t in 0..seq_len {
             let base = (b * seq_len + t) * HIDDEN;
-            rms_norm(
-                &input[base..base + HIDDEN],
-                scale_row,
-                &mut output[base..base + HIDDEN],
-                1e-6,
-            );
+            let x = &input[base..base + HIDDEN];
+
+            let mut sum_sq = 0.0f32;
+            for &v in x {
+                sum_sq += v * v;
+            }
+            let rms = 1.0f32 / (sum_sq / HIDDEN as f32 + 1e-6).sqrt();
+
+            for i in 0..HIDDEN {
+                output[base + i] = (1.0 + scale_row[i]) * x[i] * rms;
+            }
         }
     }
 }

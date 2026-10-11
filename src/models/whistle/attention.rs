@@ -16,9 +16,13 @@ use super::{
     HEAD_DIM_K, HEAD_DIM_Q, HEAD_DIM_V, HIDDEN, NUM_HEADS, NUM_KV_HEADS,
 };
 
-/// Apply per-head RMSNorm where the scale is **shared** across heads
+/// Apply per-head ZCRMSNorm where the scale is **shared** across heads
 /// (single `[head_dim]` vector). The norm is computed per-head slice,
 /// then the same scale is applied to every head.
+///
+/// Real algorithm (per cactus-compute/needle `architecture.py`
+/// `ZCRMSNorm`):
+///   out = (1 + scale) * x / rms(x)
 #[inline]
 fn apply_qk_norm(
     proj: &[f32],
@@ -42,7 +46,7 @@ fn apply_qk_norm(
         let rms = 1.0f32 / (sum_sq / head_dim as f32 + 1e-6).sqrt();
 
         for i in 0..head_dim {
-            out[base + i] = chunk[i] * rms * scale[i];
+            out[base + i] = (1.0 + scale[i]) * chunk[i] * rms;
         }
     }
 }

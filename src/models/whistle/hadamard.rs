@@ -1,16 +1,18 @@
-// Hadamard-style MLP (Cactus-Compute sketch).
+// Real Hadamard-style MLP from cactus-compute/needle/model/architecture.py.
 //
-// Input hidden 512 splits into 32 chunks of 16, then re-chunks into
-// 16 chunks of 32, alternating with per-channel diagonal conditioner
-// `cond = x @ cond_u^T @ cond_v^T` (shape [B, T, HIDDEN]).
+// Stages:
+//   cond = 1 + softmax(x @ cond_v) @ cond_u
+//   z = pad(x)                                          # n == d_model, no pad
+//   z = kron_apply(d1 * z, w1a, w1b)[..., p1]
+//   z = kron_apply(silu(d2 * cond * z + b2), w2a, w2b)[..., p2]
+//   z = kron_apply(d3 * z, w3a, w3b)
+//   return d4 * z
 //
-// Shapes per layer:
-//   w1a, w2a, w3a: [NUM_LAYERS, 16, 16]
-//   w1b, w2b, w3b: [NUM_LAYERS, 32, 32]
-//   d1, d2, d3, d4: [NUM_LAYERS, HIDDEN]
-//   b2:            [NUM_LAYERS, HIDDEN]
-//   cond_u:        [NUM_LAYERS, 8, HIDDEN]
-//   cond_v:        [NUM_LAYERS, HIDDEN, 8]
+// `_kron_apply(z, a, b)` reshapes z to `[..., a_dim, b_dim]` and
+// computes `a.T @ z @ b`, which equals `(a ⊗ b) @ vec(z)`.
+//
+// Permutations p1, p2 are seeded by 11 and 13 (see
+// `_HADA_PERM_SEEDS = (11, 13)` in architecture.py).
 
 use super::HIDDEN;
 
@@ -33,72 +35,161 @@ pub struct HadamardLayer {
 
 const CHUNK_16: usize = 16;
 const CHUNK_32: usize = 32;
-const CHUNKS_16: usize = HIDDEN / CHUNK_16; // 32
-const CHUNKS_32: usize = HIDDEN / CHUNK_32; // 16
 const COND_RANK: usize = 8;
 
-/// `input` is x of shape [HIDDEN]. `layer.cond_u` and `layer.cond_v`
-/// are already the **layer-row** slices (8 × HIDDEN and HIDDEN × 8),
-/// so no per-layer offset is applied here.
-#[inline]
+/// Pre-computed `np.random.RandomState(seed).permutation(512)` tables.
+/// Matches cactus-compute/needle's `_hada_perms` with seed 11 and 13.
+static PERM_512_11: [usize; 512] = [
+    396, 445, 60, 115, 423, 146, 410, 329, 285, 199, 339, 139, 394, 323, 174,
+    267, 237, 135, 129, 383, 53, 228, 311, 484, 429, 463, 57, 444, 200, 270,
+    344, 279, 255, 450, 376, 354, 319, 247, 407, 369, 342, 39, 469, 153, 292,
+    470, 365, 220, 499, 232, 87, 70, 491, 179, 165, 211, 214, 155, 426, 16,
+    117, 460, 347, 88, 325, 230, 435, 387, 419, 243, 196, 170, 4, 415, 477,
+    137, 26, 83, 278, 290, 104, 44, 20, 476, 173, 271, 432, 61, 33, 219, 266,
+    504, 123, 250, 486, 113, 143, 86, 258, 431, 288, 7, 386, 496, 475, 398,
+    162, 136, 21, 14, 378, 345, 56, 272, 169, 188, 495, 498, 340, 94, 404,
+    510, 307, 74, 31, 483, 317, 471, 128, 216, 297, 251, 121, 294, 451, 259,
+    218, 502, 381, 210, 324, 189, 101, 54, 55, 464, 41, 203, 144, 296, 336,
+    175, 352, 424, 474, 348, 257, 353, 49, 124, 509, 11, 406, 305, 207, 150,
+    240, 12, 229, 239, 102, 158, 204, 202, 184, 28, 180, 106, 364, 449, 382,
+    281, 82, 190, 52, 134, 130, 201, 98, 274, 262, 234, 372, 421, 217, 126,
+    295, 105, 316, 505, 9, 103, 212, 414, 77, 277, 8, 452, 198, 2, 333, 221,
+    331, 393, 268, 197, 25, 284, 298, 195, 467, 350, 50, 446, 85, 159, 164,
+    425, 22, 62, 455, 99, 69, 443, 186, 402, 182, 349, 405, 112, 308, 205,
+    95, 151, 183, 466, 304, 29, 389, 357, 238, 503, 472, 310, 500, 479, 116,
+    276, 315, 368, 46, 3, 318, 235, 30, 154, 420, 291, 51, 36, 97, 282, 13,
+    163, 58, 63, 233, 462, 379, 485, 265, 494, 78, 45, 157, 24, 320, 256, 428,
+    346, 427, 289, 355, 322, 122, 66, 194, 177, 206, 127, 351, 309, 341, 0,
+    226, 461, 453, 249, 108, 193, 5, 260, 454, 313, 413, 447, 59, 47, 302,
+    507, 120, 286, 246, 375, 166, 312, 377, 209, 358, 222, 299, 213, 395,
+    359, 457, 42, 399, 458, 434, 76, 400, 459, 73, 412, 391, 436, 366, 152,
+    32, 15, 107, 497, 147, 254, 437, 35, 225, 172, 384, 17, 343, 156, 493,
+    390, 481, 489, 430, 371, 208, 64, 10, 442, 111, 473, 456, 397, 93, 482,
+    293, 261, 100, 167, 65, 314, 241, 360, 418, 6, 149, 487, 401, 367, 480,
+    362, 148, 403, 433, 252, 321, 185, 141, 132, 356, 118, 244, 287, 374,
+    119, 490, 38, 440, 501, 306, 84, 224, 19, 72, 75, 380, 361, 488, 417,
+    264, 40, 438, 110, 303, 465, 48, 18, 43, 273, 422, 90, 373, 511, 275,
+    334, 160, 114, 328, 68, 215, 392, 131, 1, 187, 227, 178, 327, 181, 133,
+    223, 248, 283, 168, 448, 335, 506, 263, 142, 245, 300, 27, 441, 138, 363,
+    89, 478, 411, 23, 96, 79, 492, 192, 242, 370, 171, 326, 67, 145, 408,
+    508, 81, 468, 231, 37, 330, 385, 140, 34, 388, 125, 236, 301, 416, 253,
+    176, 92, 109, 280, 338, 71, 161, 332, 269, 439, 337, 91, 80, 191, 409,
+];
+
+static PERM_512_13: [usize; 512] = [
+    458, 437, 29, 0, 58, 152, 269, 482, 263, 134, 485, 7, 266, 71, 200, 118,
+    205, 151, 441, 456, 388, 105, 494, 33, 273, 393, 133, 140, 423, 65, 358,
+    457, 440, 349, 198, 76, 224, 67, 292, 214, 227, 386, 223, 162, 218,
+    341, 93, 27, 381, 353, 192, 439, 462, 501, 107, 210, 436, 506, 231,
+    397, 330, 490, 98, 154, 177, 469, 2, 196, 401, 259, 394, 491, 298, 106,
+    321, 357, 136, 183, 320, 270, 425, 459, 399, 35, 346, 39, 428, 324, 287,
+    409, 157, 235, 114, 142, 30, 125, 69, 168, 380, 90, 78, 44, 322, 51, 267,
+    66, 12, 226, 101, 366, 18, 444, 465, 367, 73, 337, 238, 135, 79, 422,
+    193, 404, 449, 495, 418, 155, 334, 165, 61, 97, 13, 159, 110, 351, 197,
+    413, 161, 37, 415, 452, 466, 356, 221, 274, 352, 492, 487, 340, 215,
+    119, 304, 265, 170, 481, 319, 464, 100, 310, 392, 382, 489, 360, 307,
+    277, 240, 169, 476, 383, 112, 242, 503, 333, 279, 268, 82, 371, 312,
+    398, 234, 92, 370, 407, 54, 207, 233, 109, 191, 498, 435, 124, 219,
+    467, 99, 326, 477, 46, 408, 432, 405, 163, 475, 237, 379, 34, 396, 9,
+    249, 254, 335, 158, 127, 131, 395, 264, 400, 62, 83, 199, 80, 68, 350,
+    53, 504, 294, 347, 362, 451, 453, 187, 271, 10, 241, 323, 246, 150, 433,
+    275, 385, 167, 148, 364, 252, 41, 375, 121, 363, 23, 497, 172, 52, 348,
+    484, 70, 32, 43, 108, 245, 84, 185, 302, 194, 374, 286, 257, 55, 502,
+    417, 63, 42, 336, 5, 129, 471, 284, 17, 36, 496, 289, 220, 318, 45, 128,
+    446, 87, 95, 116, 299, 40, 4, 448, 86, 60, 473, 463, 212, 28, 181, 295,
+    493, 64, 376, 316, 38, 248, 472, 216, 6, 414, 201, 184, 225, 203, 313,
+    175, 359, 20, 455, 206, 143, 424, 288, 15, 228, 117, 511, 345, 272, 402,
+    72, 171, 188, 145, 474, 19, 282, 115, 479, 426, 96, 416, 211, 209, 251,
+    182, 300, 325, 174, 434, 384, 454, 293, 186, 488, 21, 102, 8, 306, 49,
+    94, 372, 122, 507, 89, 247, 14, 103, 208, 510, 480, 31, 283, 232, 301,
+    77, 387, 253, 88, 343, 132, 48, 111, 204, 47, 361, 104, 56, 311, 406,
+    202, 447, 250, 178, 137, 285, 508, 281, 3, 339, 189, 390, 91, 260, 443,
+    411, 276, 291, 419, 50, 57, 195, 445, 164, 239, 377, 309, 500, 59, 26,
+    144, 369, 25, 427, 468, 303, 141, 421, 328, 315, 156, 81, 130, 355, 499,
+    297, 173, 217, 431, 85, 256, 261, 147, 222, 420, 190, 317, 278, 365,
+    478, 138, 368, 166, 342, 243, 460, 262, 123, 391, 327, 429, 113, 255,
+    24, 305, 213, 344, 378, 179, 120, 389, 373, 180, 290, 22, 314, 332, 296,
+    11, 412, 280, 146, 1, 75, 470, 139, 486, 149, 403, 160, 258, 308, 331,
+    329, 509, 461, 229, 438, 430, 450, 126, 505, 410, 483, 442, 236, 153,
+    244, 354, 230, 16, 74, 176, 338,
+];
+
+fn perm_512_11() -> &'static [usize] {
+    &PERM_512_11
+}
+fn perm_512_13() -> &'static [usize] {
+    &PERM_512_13
+}
+
+/// `z` `[..., a_dim, b_dim]` → `a.T @ z @ b` → `[..., a_dim * b_dim]`.
+fn kron_apply(z: &[f32], a: &[f32], b: &[f32], out: &mut [f32]) {
+    let a_dim = CHUNK_16; // 16
+    let b_dim = CHUNK_32; // 32
+    debug_assert_eq!(a.len(), a_dim * a_dim);
+    debug_assert_eq!(b.len(), b_dim * b_dim);
+    debug_assert_eq!(z.len(), out.len());
+    let plane = a_dim * b_dim; // 512
+    debug_assert_eq!(z.len() % plane, 0);
+    let lead = z.len() / plane;
+    for l in 0..lead {
+        let z_base = l * plane;
+        for oa in 0..a_dim {
+            for ob in 0..b_dim {
+                let mut acc = 0.0f32;
+                for ia in 0..a_dim {
+                    let a_val = a[ia * a_dim + oa];
+                    for ib in 0..b_dim {
+                        let b_val = b[ib * b_dim + ob];
+                        acc += z[z_base + ia * b_dim + ib] * a_val * b_val;
+                    }
+                }
+                out[z_base + oa * b_dim + ob] = acc;
+            }
+        }
+    }
+}
+
 fn conditioner(input: &[f32], layer: &HadamardLayer, out: &mut [f32]) {
-    // step 1: x @ cond_u^T → [COND_RANK]
-    let mut mid = [0.0f32; COND_RANK];
+    // cond_v: [HIDDEN, COND_RANK] = [512, 8]
+    // cond_u: [COND_RANK, HIDDEN] = [8, 512]
+    // step 1: logits = x @ cond_v → [COND_RANK]
+    let mut logits = [0.0f32; COND_RANK];
     for r in 0..COND_RANK {
         let mut acc = 0.0f32;
         for i in 0..HIDDEN {
-            acc += input[i] * layer.cond_u[r * HIDDEN + i];
+            acc += input[i] * layer.cond_v[i * COND_RANK + r];
         }
-        mid[r] = acc;
+        logits[r] = acc;
     }
-    // step 2: mid @ cond_v^T → [HIDDEN]
+    // softmax over r
+    let max = logits.iter().fold(0.0f32, |a, &x| a.max(x));
+    let mut exps = [0.0f32; COND_RANK];
+    let mut sum = 0.0f32;
+    for r in 0..COND_RANK {
+        let e = (logits[r] - max).exp();
+        exps[r] = e;
+        sum += e;
+    }
+    // step 2: cond = 1 + softmax @ cond_u → [HIDDEN]
     for o in 0..HIDDEN {
-        let mut acc = 0.0f32;
+        let mut acc = 1.0f32; // the "1 +" part
         for r in 0..COND_RANK {
-            acc += mid[r] * layer.cond_v[o * COND_RANK + r];
+            acc += (exps[r] / sum) * layer.cond_u[r * HIDDEN + o];
         }
         out[o] = acc;
     }
 }
 
-/// Apply a single [16, 16] matrix to every 16-chunk of `input`.
-/// The weight is shared across chunks (per-layer Hadamard matrix).
-/// Inner product matches `chunk @ w.T` (PyTorch-style), i.e. `w[o, k]`.
 #[inline]
-fn matmul_chunked_16(weight: &[f32], input: &[f32], out: &mut [f32]) {
-    debug_assert_eq!(weight.len(), CHUNK_16 * CHUNK_16);
-    for c in 0..CHUNKS_16 {
-        let base = c * CHUNK_16;
-        for o in 0..CHUNK_16 {
-            let mut acc = 0.0f32;
-            for k in 0..CHUNK_16 {
-                acc += input[base + k] * weight[o * CHUNK_16 + k];
-            }
-            out[base + o] = acc;
-        }
-    }
-}
-
-/// Apply a single [32, 32] matrix to every 32-chunk of `input`.
-#[inline]
-fn matmul_chunked_32(weight: &[f32], input: &[f32], out: &mut [f32]) {
-    debug_assert_eq!(weight.len(), CHUNK_32 * CHUNK_32);
-    for c in 0..CHUNKS_32 {
-        let base = c * CHUNK_32;
-        for o in 0..CHUNK_32 {
-            let mut acc = 0.0f32;
-            for k in 0..CHUNK_32 {
-                acc += input[base + k] * weight[o * CHUNK_32 + k];
-            }
-            out[base + o] = acc;
-        }
-    }
+fn silu(x: f32) -> f32 {
+    // x * sigmoid(x) = x / (1 + exp(-x))
+    x / (1.0 + (-x).exp())
 }
 
 pub fn hadamard_mlp(
     input: &[f32],
     layer: &HadamardLayer,
-    _layer_idx: usize,
+    layer_idx: usize,
     batch: usize,
     seq_len: usize,
     output: &mut [f32],
@@ -106,46 +197,73 @@ pub fn hadamard_mlp(
     debug_assert_eq!(input.len(), batch * seq_len * HIDDEN);
     debug_assert_eq!(output.len(), batch * seq_len * HIDDEN);
 
-    // layer d1..d4/b2 are already per-layer rows (load_layer_kernel_nd)
+    // d1..d4/b2 are already per-layer rows (load_layer_kernel_nd).
+    let perm1: &[usize] = perm_512_11();
+    let perm2: &[usize] = perm_512_13();
+    let plane = HIDDEN; // 512
+
+    // Per-token scratch space (worst case: 2 × plane + kron output plane).
+    let mut scratch_a = vec![0.0f32; batch * seq_len * plane];
+    let mut scratch_b = vec![0.0f32; batch * seq_len * plane];
 
     for b in 0..batch {
         for t in 0..seq_len {
             let base = (b * seq_len + t) * HIDDEN;
             let x = &input[base..base + HIDDEN];
 
+            // cond = 1 + softmax(x @ cond_v) @ cond_u  →  [HIDDEN]
             let mut cond = [0.0f32; HIDDEN];
             conditioner(x, layer, &mut cond);
 
-            let mut s1 = [0.0f32; HIDDEN];
-            matmul_chunked_16(&layer.w1a, x, &mut s1);
+            // Stage 1: z1 = kron_apply(d1 * x, w1a, w1b)[..., p1]
+            // d1 * x
             for i in 0..HIDDEN {
-                s1[i] += layer.d1[i] * cond[i];
+                scratch_a[base + i] = layer.d1[i] * x[i];
             }
-
-            let mut s2 = [0.0f32; HIDDEN];
-            matmul_chunked_32(&layer.w1b, &s1, &mut s2);
+            // kron apply: scratch_a[base..] shape (16, 32) → output to scratch_b[base..]
+            kron_apply(
+                &scratch_a[base..base + HIDDEN],
+                &layer.w1a,
+                &layer.w1b,
+                &mut scratch_b[base..base + HIDDEN],
+            );
+            // permute by p1 → write back to scratch_a (in-place permute)
             for i in 0..HIDDEN {
-                s2[i] += layer.d2[i] * cond[i];
+                scratch_a[base + i] = scratch_b[base + perm1[i]];
             }
+            let z1 = &scratch_a[base..base + HIDDEN];
 
-            let mut s3 = [0.0f32; HIDDEN];
-            matmul_chunked_16(&layer.w2a, &s2, &mut s3);
+            // Stage 2: silu(d2 * cond * z1 + b2) → kron_apply(w2a, w2b) → permute p2
             for i in 0..HIDDEN {
-                s3[i] += layer.d3[i] * cond[i];
+                let v = layer.d2[i] * cond[i] * z1[i] + layer.b2[i];
+                scratch_b[base + i] = silu(v);
             }
-
-            let mut s4 = [0.0f32; HIDDEN];
-            matmul_chunked_32(&layer.w2b, &s3, &mut s4);
+            kron_apply(
+                &scratch_b[base..base + HIDDEN],
+                &layer.w2a,
+                &layer.w2b,
+                &mut scratch_a[base..base + HIDDEN],
+            );
+            // permute by p2 → write back to scratch_b
             for i in 0..HIDDEN {
-                s4[i] += layer.d4[i] * cond[i];
+                scratch_b[base + i] = scratch_a[base + perm2[i]];
             }
+            let z2 = &scratch_b[base..base + HIDDEN];
 
-            let mut s5 = [0.0f32; HIDDEN];
-            matmul_chunked_16(&layer.w3a, &s4, &mut s5);
-            let mut s6 = [0.0f32; HIDDEN];
-            matmul_chunked_32(&layer.w3b, &s5, &mut s6);
+            // Stage 3: d3 * z2 → kron_apply(w3a, w3b) → no permute
             for i in 0..HIDDEN {
-                output[base + i] = s6[i] + layer.b2[i];
+                scratch_a[base + i] = layer.d3[i] * z2[i];
+            }
+            kron_apply(
+                &scratch_a[base..base + HIDDEN],
+                &layer.w3a,
+                &layer.w3b,
+                &mut scratch_b[base..base + HIDDEN],
+            );
+
+            // Final: d4 * z3
+            for i in 0..HIDDEN {
+                output[base + i] = layer.d4[i] * scratch_b[base + i];
             }
         }
     }

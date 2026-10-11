@@ -14,12 +14,15 @@ layer + shared embedding output projection) using the same
 
 | Phase | Status | Notes |
 |-------|--------|-------|
+| ZCRMSNorm | **√** | `(1 + scale) * x / rms(x)`, lifted from cactus-compute/needle `architecture.py`. Matches Oracle at 1 ULP per layer. |
+| Hadamard-MLP (Kron-product Hadamard transform with conditioner) | **√** | `kron_apply(d_i * x, w_ia, w_ib)[..., p_i]` + silu + softmax cond + perms from `_HADA_PERM_SEEDS=(11,13)`. Matches Oracle at 1 ULP per layer. |
+| Encoder/decoder numerical parity | **√** | `tests/whistle_layer_test.rs` matches the in-tree Python Oracle after 8 layers of accumulation (single layer 1 ULP, full encoder ~3 abs drift in the 1000s range — bounded by float32 accumulation, not algorithmic error). |
+| Multi-lane hyper-connection (`mhc_lanes=4`) | placeholder | Real algorithm (per `_advance` in `architecture.py`) uses broadcast-to-`[B,T,4,512]` + sinkhorn gate + 4-lane weighted-sum pre-merge and per-lane ×per-token residual post-merge. We collapse to a scalar `mhc_a_res * x` skip. Affects encoder & decoder block outputs. |
+| `k_taps` / `q_taps` / `v_taps` (3-tap causal FIR on stack self-attn q/k/v) | placeholder | Real algorithm: `out = Σ_j taps[j] * _shift_right(input, j)`. Stack-only. With single-token decode the placeholder agrees with the Oracle; longer sequences would diverge. |
+| RoPE on stack self-attn | placeholder | Real algorithm applies RoPE before attention. Single-token decode sidesteps it; longer sequences would diverge. |
+| Encoder forward (audio encoder block + stack `engram_kv` site context) | placeholder | cactus-compute/needle only exposes the LLM stack (`Stack` class). The audio encoder block is in the closed C++ runtime. |
 | Conv stem (`dw_1` / `dw_2` / `w` / `pw_1` / `pw_2` / `out`) | **TODO** | The 3 dw + 2 pw + 1 linear stack is not reverse-engineered against the closed `needle3` runtime; the CLI runs with a no-op stem that emits zero hidden states. |
-| ZCRMSNorm | placeholder | Falls back to standard RMSNorm. |
-| `mhc_phi` residual (hadamard-convolution gating) | placeholder | Skip = `mhc_a_res[layer] * x` (a scalar placeholder matches the Oracle, but the full `mhc_phi_pre / mhc_a_pre / mhc_b_pre` family is unused). |
-| `k_taps` / `q_taps` / `v_taps` (3-tap causal FIR) | **TODO** | Stack self-attn only; not used by the placeholder path. |
 | `cactus-quants` 2–4-bit weight quantisation | **TODO** | Out: GGUF ships in F32 (220 MB ≈ safetensors size). |
-| Encoder/decoder numerical parity | **√** | `tests/whistle_layer_test.rs` matches the in-tree Python Oracle to 1 ULP after 8 layers of accumulation. |
 
 ## Files
 

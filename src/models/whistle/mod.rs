@@ -265,7 +265,7 @@ impl EncoderLayer {
         let mut mlp = vec![0.0f32; batch * seq_len * HIDDEN];
         hadamard_mlp(&h, &self.hadamard, layer_idx, batch, seq_len, &mut mlp);
 
-        // out += mlp + skip(mhc_placeholder)
+        // out += mlp + skip(mhc placeholder)
         let mhc_coef = self.mhc_a_res[layer_idx];
         for i in 0..(batch * seq_len * HIDDEN) {
             out[i] += mlp[i] + mhc_coef * h[i];
