@@ -1,4 +1,5 @@
 use super::dense::{DenseLayer, DenseShape, DenseWeight, DenseWeights};
+use super::ops::{required_activation_contracts, GpuWeightFormat};
 use super::{VulkanContext, VulkanError};
 use crate::core::scratchpad::{KvCache, KvState};
 use crate::core::tensor::GGMLType;
@@ -31,20 +32,11 @@ pub(crate) fn check_eligibility(facts: &EligibilityFacts) -> Result<(), String> 
     if facts.rope != Qwen3Rope::Neox {
         return Err("rope layout is not supported".into());
     }
-    if facts.weight_formats.is_empty()
-        || facts.weight_formats.iter().any(|&format| {
-            !matches!(
-                format,
-                GGMLType::Q8_0
-                    | GGMLType::Q4_0
-                    | GGMLType::Q4_1
-                    | GGMLType::Q4K
-                    | GGMLType::Q6K
-                    | GGMLType::F16
-            )
-        })
-    {
-        return Err("unsupported Vulkan weight format".into());
+    if facts.weight_formats.is_empty() {
+        return Err("unsupported Vulkan weight format: no weights".into());
+    }
+    for &format in &facts.weight_formats {
+        GpuWeightFormat::from_ggml_type(format).map_err(|error| error.to_string())?;
     }
     if facts
         .gate_up_formats
@@ -107,11 +99,33 @@ impl Qwen3VulkanSession {
         capacity: usize,
         context: &'static VulkanContext,
     ) -> Result<Option<Self>, VulkanError> {
+        let facts = match eligibility_facts(model) {
+            Ok(facts) => facts,
+            Err(reason) => {
+                eprintln!("[GPU] Qwen3 Vulkan unavailable: {reason}. Falling back to CPU.");
+                return Ok(None);
+            }
+        };
         if let Err(reason) = check_device_eligibility(context.supports_shader_float16())
-            .and_then(|()| eligibility_facts(model).and_then(|facts| check_eligibility(&facts)))
+            .and_then(|()| check_eligibility(&facts))
         {
             eprintln!("[GPU] Qwen3 Vulkan unavailable: {reason}. Falling back to CPU.");
             return Ok(None);
+        }
+        context
+            .validate_qwen3_core_contract()
+            .map_err(VulkanError::UnsupportedShape)?;
+        let contracts = required_activation_contracts(&facts.weight_formats)
+            .map_err(VulkanError::UnsupportedShape)?;
+        if contracts.q8_0 {
+            context
+                .validate_q8_0_activation_contract()
+                .map_err(VulkanError::UnsupportedShape)?;
+        }
+        if contracts.q8_k {
+            context
+                .validate_q8_k_activation_contract()
+                .map_err(VulkanError::UnsupportedShape)?;
         }
         let shape = dense_shape(model);
         Self::new(
@@ -273,6 +287,38 @@ mod tests {
     }
 
     #[test]
+    fn activation_contracts_follow_the_weight_formats() {
+        assert_eq!(
+            required_activation_contracts(&[GGMLType::Q4K, GGMLType::Q6K]).unwrap(),
+            super::super::ops::ActivationContracts {
+                q8_0: false,
+                q8_k: true,
+            }
+        );
+        assert_eq!(
+            required_activation_contracts(&[GGMLType::Q4_0, GGMLType::Q4_1]).unwrap(),
+            super::super::ops::ActivationContracts {
+                q8_0: true,
+                q8_k: false,
+            }
+        );
+        assert_eq!(
+            required_activation_contracts(&[GGMLType::Q4_0, GGMLType::Q6K]).unwrap(),
+            super::super::ops::ActivationContracts {
+                q8_0: true,
+                q8_k: true,
+            }
+        );
+        assert_eq!(
+            required_activation_contracts(&[GGMLType::F16, GGMLType::BF16]).unwrap(),
+            super::super::ops::ActivationContracts {
+                q8_0: false,
+                q8_k: false,
+            }
+        );
+    }
+
+    #[test]
     fn qwen3_full_model_requires_shader_float16() {
         assert!(check_device_eligibility(false)
             .expect_err("full-model Qwen3 must stay on CPU without shaderFloat16")
@@ -333,14 +379,14 @@ mod tests {
             (
                 "weight format",
                 EligibilityFacts {
-                    weight_formats: vec![GGMLType::BF16],
+                    weight_formats: vec![GGMLType::Q5_0],
                     ..eligible_facts()
                 },
             ),
             (
                 "weight format",
                 EligibilityFacts {
-                    weight_formats: vec![GGMLType::Q5K],
+                    weight_formats: vec![GGMLType::Q8K],
                     ..eligible_facts()
                 },
             ),

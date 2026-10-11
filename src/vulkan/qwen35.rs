@@ -1,5 +1,6 @@
 use super::ops::{
-    ArenaRegion, GpuMatmulSpec, GpuWeightFormat, OperatorBindings, Qwen3Ops, TokenCommands,
+    required_activation_contracts, ArenaRegion, GpuMatmulSpec, GpuWeightFormat, OperatorBindings,
+    Qwen3Ops, TokenCommands,
 };
 use super::qwen3::UploadedBuffers;
 use super::{GpuBuffer, VulkanContext, VulkanError};
@@ -20,22 +21,11 @@ fn check_eligibility(facts: &EligibilityFacts) -> Result<(), String> {
     if facts.architecture != "qwen35" {
         return Err(format!("unsupported architecture {}", facts.architecture));
     }
-    if facts.weight_formats.is_empty()
-        || facts.weight_formats.iter().any(|&format| {
-            !matches!(
-                format,
-                GGMLType::BF16
-                    | GGMLType::F32
-                    | GGMLType::Q8_0
-                    | GGMLType::Q4_0
-                    | GGMLType::Q4_1
-                    | GGMLType::Q4K
-                    | GGMLType::Q5K
-                    | GGMLType::Q6K
-            )
-        })
-    {
-        return Err("unsupported Qwen3.5 Vulkan weight format".into());
+    if facts.weight_formats.is_empty() {
+        return Err("unsupported Qwen3.5 Vulkan weight format: no weights".into());
+    }
+    for &format in &facts.weight_formats {
+        GpuWeightFormat::from_ggml_type(format).map_err(|error| error.to_string())?;
     }
     if let Some(operation) = facts.unrecorded_operations.first() {
         return Err(format!(
@@ -528,6 +518,21 @@ impl Qwen35VulkanSession {
         if let Err(reason) = validate_executor_shape(&model.config, capacity) {
             eprintln!("[GPU] Qwen3.5 Vulkan unavailable: {reason}. Falling back to CPU.");
             return Ok(None);
+        }
+        context
+            .validate_qwen3_core_contract()
+            .map_err(VulkanError::UnsupportedShape)?;
+        let contracts = required_activation_contracts(&facts.weight_formats)
+            .map_err(VulkanError::UnsupportedShape)?;
+        if contracts.q8_0 {
+            context
+                .validate_q8_0_activation_contract()
+                .map_err(VulkanError::UnsupportedShape)?;
+        }
+        if contracts.q8_k {
+            context
+                .validate_q8_k_activation_contract()
+                .map_err(VulkanError::UnsupportedShape)?;
         }
 
         let config = model.config.clone();
@@ -1488,6 +1493,7 @@ mod tests {
             vec![GGMLType::Q5K],
             vec![GGMLType::Q8_0, GGMLType::Q5K, GGMLType::Q6K],
             vec![GGMLType::F32],
+            vec![GGMLType::F16],
             vec![GGMLType::Q4_0, GGMLType::Q5K, GGMLType::F32],
         ] {
             let facts = EligibilityFacts {

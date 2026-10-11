@@ -167,11 +167,12 @@ pub struct VulkanContext {
     /// other pool threads block on it before touching the matmul output
     /// (their post-matmul work — silu, residual — must see the GPU result).
     completed_gen: std::sync::atomic::AtomicU64,
-    /// Cached Qwen3 core operator contract check. A Vulkan device can execute
-    /// the kernels while still disagreeing with the CPU oracle, so Auto must
-    /// validate the full attention/quantization boundary once before
-    /// admitting the model path.
+    /// Cached Qwen3 operator contracts. The common attention boundary is
+    /// independent of weight storage; activation quantizers are checked only
+    /// when a model actually dispatches through that path.
     qwen3_core_contract: OnceLock<Result<(), String>>,
+    q8_0_activation_contract: OnceLock<Result<(), String>>,
+    q8_k_activation_contract: OnceLock<Result<(), String>>,
 }
 
 /// Persistent activation staging buffers. Capacities grow to the largest
@@ -409,6 +410,8 @@ impl VulkanContext {
                             counters: ComputeCounters::default(),
                             completed_gen: std::sync::atomic::AtomicU64::new(0),
                             qwen3_core_contract: OnceLock::new(),
+                            q8_0_activation_contract: OnceLock::new(),
+                            q8_k_activation_contract: OnceLock::new(),
                         });
                     }
                     Err(error) => failures.push(format!("{}: {error}", candidate.name)),
@@ -447,6 +450,20 @@ impl VulkanContext {
         self.qwen3_core_contract
             .get_or_init(|| ops::check_qwen3_core_contract(self))
             .clone()
+    }
+
+    pub(crate) fn validate_q8_0_activation_contract(&self) -> Result<(), String> {
+        self.q8_0_activation_contract
+            .get_or_init(|| ops::check_q8_0_activation_contract(self))
+            .clone()
+            .map_err(|error| format!("Q8_0 activation path: {error}"))
+    }
+
+    pub(crate) fn validate_q8_k_activation_contract(&self) -> Result<(), String> {
+        self.q8_k_activation_contract
+            .get_or_init(|| ops::check_q8_k_activation_contract(self))
+            .clone()
+            .map_err(|error| format!("Q8_K activation path: {error}"))
     }
 
     /// Human-readable memory heaps for diagnosing allocation performance.

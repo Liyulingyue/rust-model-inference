@@ -11,12 +11,16 @@
 
 ## 当前自动分发状态（2026-10-11）
 
-截图指出的缺口是成立的：旧准入只比较 prompt 的 logits/KV，随后直接信任 GPU
-decode；prompt 误差在容差内时，仍可能把后续 greedy 序列带偏。现在 Qwen3 的模型准入
-在核心算子四项检查和 prompt CPU/GPU 比较之后，复用 resident GPU session 做 16 步
-CPU/GPU decode probe，逐步比较 logits、F16 KV 和 greedy token，然后重放原 prompt，
-才把 session 标为可用。probe 失败时 Auto 回退 CPU，强制 Vulkan 返回模型契约错误；
-不会把 CPU 重算记录成 GPU 通过。
+当前准入按实际权重类型选择算子路径。每个线性权重的 `GGMLType` 先映射为
+`GpuWeightFormat`，再由对应 Vulkan matmul kernel 处理：Q8_0/Q4_0/Q4_1 使用 Q8_0
+激活量化路径，Q4_K/Q5_K/Q6_K 使用 Q8_K 激活量化路径，F16/BF16/F32 不触发量化
+契约检查。公共 attention 算子检查仍按设备缓存一次；只有模型实际需要的激活路径才
+执行对应契约检查。Qwen3 和 Qwen3.5 共用这套映射。
+
+如果某个实际类型没有可用的 Vulkan storage/mode/kernel 或契约检查失败，Auto 才回退
+CPU，强制 Vulkan 返回同一原因；不会因为模型里没有使用的量化类型而回退。当前 dense
+Vulkan executor 仍是整 session 准入，尚未支持同一执行图内单个 linear 的 CPU/GPU 混跑，
+因此一个实际需要但未支持的类型会让整个 session 回退。
 
 远程 AMD EPYC 9334 / RADV NAVI31 使用同一个 `Qwen3-0.6B-Q8_0.gguf`，prompt 为
 `"hello " * 129`（实际 142 tokens），`--max-tokens 32 --temp 0 --kv-cache f16

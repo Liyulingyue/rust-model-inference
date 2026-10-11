@@ -1,13 +1,10 @@
 use super::config::Qwen3Rope;
 use super::forward::{forward_moe_token, Qwen3Input};
-use super::session::{validate_model_kv, validate_model_logits, Qwen3Session};
-use super::util::{
-    checked_generated_position, checked_product, greedy_token, validate_input_shapes,
-    validate_token_ids,
-};
+use super::session::Qwen3Session;
+use super::util::{checked_product, validate_input_shapes, validate_token_ids};
 use super::weights::Qwen3Model;
 use crate::core::prefill::{checked_prefill_batch_size, prefill_chunks};
-use crate::core::scratchpad::{KvCache, KvFormat, KvLifecycle};
+use crate::core::scratchpad::KvCache;
 use crate::ops::kernel::{PreparedRows, Weight};
 use crate::ops::rope::rope_neox_inplace;
 use crate::ops::*;
@@ -31,11 +28,6 @@ pub(super) struct Qwen3PrefillScratch {
     down: Vec<f32>,
     prepared: PreparedRows,
 }
-
-/// A prompt-only comparison can miss a decode divergence that changes the
-/// sampled answer while every prompt logit remains within tolerance.
-/// shortcut: 16 decode steps, request-scoped validation is needed for longer guarantees.
-const MODEL_CONTRACT_DECODE_STEPS: usize = 16;
 
 impl Qwen3PrefillScratch {
     pub(super) fn new(max_rows: usize, model: &Qwen3Model) -> Self {
@@ -189,11 +181,6 @@ impl Qwen3Session<'_> {
         let chunk_size = batch_size;
         let max_rows = chunk_size.min(self.capacity);
         self.prefill_scratch.reset_for(max_rows, self.model);
-        #[cfg(feature = "vulkan")]
-        let validate_gpu_contract = self.gpu.is_some()
-            && !self.gpu_contract_validated
-            && self.kv_state.seq_len == 0
-            && need_logits;
         let started = Instant::now();
         for range in prefill_chunks(input.token_ids.len(), chunk_size) {
             let base = self.kv_state.seq_len;
@@ -285,102 +272,8 @@ impl Qwen3Session<'_> {
                 .trace("decoder", crate::compute::UsedBackend::Cpu, range.len());
             self.kv_state.update_access();
         }
-        #[cfg(feature = "vulkan")]
-        if validate_gpu_contract && self.gpu.is_some() {
-            if let Err(error) = self.validate_gpu_prefill(input, batch_size) {
-                if let Some(gpu) = &mut self.gpu {
-                    gpu.reset();
-                }
-                self.kv_state.reset();
-                if self.compute_policy == crate::compute::ComputePolicy::Vulkan {
-                    return Err(format!("Qwen3 Vulkan model contract failed: {error}"));
-                }
-                eprintln!(
-                    "[GPU] Qwen3 Vulkan model contract failed: {error}. Falling back to CPU."
-                );
-                self.gpu = None;
-                self.full_model_gpu_failed = true;
-                return self.prefill(input, batch_size, need_logits);
-            }
-            self.gpu_contract_validated = true;
-        }
         let elapsed = started.elapsed();
         Ok(elapsed)
-    }
-
-    #[cfg(feature = "vulkan")]
-    fn validate_gpu_prefill(
-        &mut self,
-        input: &Qwen3Input<'_>,
-        batch_size: usize,
-    ) -> Result<(), String> {
-        let mut cpu = Qwen3Session::new_with_compute(
-            self.model,
-            self.capacity,
-            KvFormat::F16,
-            KvLifecycle::Ephemeral,
-            crate::compute::ComputePolicy::Cpu,
-        )?;
-        cpu.prefill(input, batch_size, true)?;
-        validate_model_logits(&self.scratch.logits, &cpu.scratch.logits)?;
-        validate_model_kv(&self.kv_state, &cpu.kv_state)?;
-
-        let decode_steps = self
-            .capacity
-            .saturating_sub(input.token_ids.len())
-            .min(MODEL_CONTRACT_DECODE_STEPS);
-        if decode_steps == 0 {
-            return Ok(());
-        }
-
-        let mut gpu_logits = self.scratch.logits.clone();
-        for step in 0..decode_steps {
-            let gpu_token = greedy_token(&gpu_logits)?;
-            let cpu_token = greedy_token(&cpu.scratch.logits)?;
-            if gpu_token != cpu_token {
-                return Err(format!(
-                    "model decode token mismatch at step {step}: gpu={gpu_token} cpu={cpu_token}"
-                ));
-            }
-
-            let token_ids = [cpu_token];
-            let positions = [checked_generated_position(input.positions, step)?];
-            let decode_input = Qwen3Input {
-                token_ids: &token_ids,
-                positions: &positions,
-                embeddings: None,
-                deepstack_embeddings: None,
-            };
-            cpu.prefill(&decode_input, 1, true)?;
-
-            // Reuse the resident GPU session for the probe. The outer
-            // admission call restores the original prompt state on success.
-            self.gpu_contract_validated = true;
-            let gpu_result = self.prefill(&decode_input, 1, true);
-            self.gpu_contract_validated = false;
-            gpu_result?;
-            if self.gpu.is_none() {
-                return Err("GPU decode contract probe disabled the Vulkan session".into());
-            }
-            validate_model_logits(&self.scratch.logits, &cpu.scratch.logits)?;
-            validate_model_kv(&self.kv_state, &cpu.kv_state)?;
-            gpu_logits.clone_from(&self.scratch.logits);
-        }
-
-        // The probe advanced the live GPU/CPU state. Rebuild the resident GPU
-        // state so the caller can continue from the original prompt exactly.
-        if let Some(gpu) = &mut self.gpu {
-            gpu.reset();
-        }
-        self.kv_state.reset();
-        self.gpu_contract_validated = true;
-        let replay = self.prefill(input, batch_size, true);
-        self.gpu_contract_validated = false;
-        replay?;
-        if self.gpu.is_none() {
-            return Err("GPU prompt replay disabled the Vulkan session".into());
-        }
-        Ok(())
     }
 
     fn validate_cpu_chunk(

@@ -391,6 +391,37 @@ impl GpuWeightFormat {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ActivationContracts {
+    pub(crate) q8_0: bool,
+    pub(crate) q8_k: bool,
+}
+
+pub(crate) fn required_activation_contracts(
+    formats: &[crate::core::tensor::GGMLType],
+) -> Result<ActivationContracts, String> {
+    if formats.is_empty() {
+        return Err("unsupported Vulkan weight format".into());
+    }
+    let mut contracts = ActivationContracts::default();
+    for &format in formats {
+        match GpuWeightFormat::from_ggml_type(format).map_err(|error| error.to_string())? {
+            GpuWeightFormat::Q8_0 | GpuWeightFormat::Q4_0 | GpuWeightFormat::Q4_1 => {
+                contracts.q8_0 = true;
+            }
+            GpuWeightFormat::Q4_K | GpuWeightFormat::Q5_K | GpuWeightFormat::Q6_K => {
+                contracts.q8_k = true;
+            }
+            GpuWeightFormat::F16
+            | GpuWeightFormat::BF16
+            | GpuWeightFormat::F32
+            | GpuWeightFormat::MlxAffine4
+            | GpuWeightFormat::MlxAffine8 => {}
+        }
+    }
+    Ok(contracts)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RopeLayout {
     Neox,
@@ -4589,11 +4620,24 @@ fn check_weight_matmul_rows(
 }
 
 pub(crate) fn check_qwen3_core_contract(context: &VulkanContext) -> Result<(), String> {
-    check_quantize_tie_even(context)?;
     check_attention_scores_match_cpu_reduction(context)?;
     check_softmax_f16_rounding(context)?;
     check_attention_value_reduction(context)?;
     Ok(())
+}
+
+/// Validate the activation quantizer used by Q8_0, Q4_0 and Q4_1 matmuls.
+///
+/// This is deliberately separate from [`check_qwen3_core_contract`]: K-quants
+/// use Q8_K activations and must not be rejected because a device rounds the
+/// unrelated Q8_0 scale differently.
+pub(crate) fn check_q8_0_activation_contract(context: &VulkanContext) -> Result<(), String> {
+    check_quantize_tie_even(context)
+}
+
+/// Validate the activation quantizer used by Q4_K, Q5_K and Q6_K matmuls.
+pub(crate) fn check_q8_k_activation_contract(context: &VulkanContext) -> Result<(), String> {
+    check_quantize_q8_k_exact(context)
 }
 
 pub fn run_qwen3_operator_check(context: &VulkanContext, formats: &[&str]) -> Result<(), String> {
@@ -4603,8 +4647,17 @@ pub fn run_qwen3_operator_check(context: &VulkanContext, formats: &[&str]) -> Re
     for &format in formats {
         check_weight_format(context, format)?;
     }
-    if formats.contains(&"q4_k") || formats.contains(&"q5_k") || formats.contains(&"q6_k") {
-        check_quantize_q8_k_exact(context)?;
+    if formats
+        .iter()
+        .any(|format| matches!(*format, "q8_0" | "q4_0" | "q4_1"))
+    {
+        check_q8_0_activation_contract(context)?;
+    }
+    if formats
+        .iter()
+        .any(|format| matches!(*format, "q4_k" | "q5_k" | "q6_k"))
+    {
+        check_q8_k_activation_contract(context)?;
     }
     check_qwen35_conv_exact(context)?;
     check_qwen35_ssm_reduction(context)?;
