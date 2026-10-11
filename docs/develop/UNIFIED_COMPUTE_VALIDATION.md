@@ -41,6 +41,44 @@ Qwen3.5 独立 convolution 仍有 `gpu=0xb788d769` / `cpu=0xb788d768` 的 1 ULP
 Z-Image 512×512 命令的三份 GGUF，因此不把历史 Z-Image 记录当作本轮远端整图证据；
 远端 AMD 的 `f16_refiner_projection_keeps_f32_accumulation` 设备回归仍为 1 passed。
 
+### 本次本机性能与 Auto 路由复验（2026-10-11）
+
+验证使用源码基线 `8c9a0c32` 加当前工作树的 Qwen3 模型准入修复，
+`cargo build --locked --profile release-fast --features vulkan` 生成的
+`target/release-fast`，设备为 Apple M3 Max / MoltenVK。Q4_0、Q4_K_M、Qwen3.5
+BF16 的模型 SHA-256 分别为
+`33bcc57074ec7b6eada5a90651ee546ec0c2b271002c22baf9f1b2dd1e8f75cb`、
+`ac2d97712095a558e31573f62f466a3f9d93990898b0ec79d7c974c1780d524a`、
+`cedf89af31c9041b601fa58303285bc46d99c51baee1b13f5e919626ca526ee5`；以下命令均使用共享模型目录中的原始 GGUF。
+
+Q4_0 的强制 Vulkan 检查在实际权重需要的 Q8_0 激活路径上拒绝：
+`gpu=-21`、`cpu=-20` 的 tie-even 量化字节不一致，进程以错误退出。主 CLI 的
+`--compute auto` 随后记录 `backend=Cpu` 并完成生成，证明这是按实际契约失败回退，
+不是把失败伪装成 GPU 成功。
+
+Q4_K_M 的强制 Vulkan 检查通过：prefill logits 的 `max_abs=0`、`max_rel=0`，
+32 个 greedy token 一致，驻留 decoder 提交 33 次。相同进程完成 warmup 后交替运行
+5 轮（4-token prompt、F16 KV、4 个计算线程）的中位数如下：
+
+| 后端 | prompt | decode | wall time |
+| --- | ---: | ---: | ---: |
+| CPU | 109.669 tok/s | 57.956 tok/s | 594.348 ms |
+| Vulkan | 39.563 tok/s | 11.889 tok/s | 2793.712 ms |
+
+墙钟变化为 `-370.046%`，`threshold_passed=false`。主 CLI 的 Q4_K_M Auto trace
+仍为 `scope=resident_decoder backend=Vulkan`；当前实现只有数值准入，没有把性能结果
+作为自动回退条件，因此该格式是“数值正确但当前设备上明显更慢”。
+
+Qwen3.5 BF16 的模型检查通过 prefill logits 和 32 个 greedy token，实际格式为
+`BF16`，Auto trace 为 `scope=resident_hybrid_decoder backend=Vulkan`。在同一 16-token
+prompt、32 个输出 token、`--temp 0 --threads 8 --kv-cache f32` 的独立 CLI 进程中，
+CPU 为 `7.8 tok/s` 端到端，Auto 为 `12.8 tok/s` 端到端；这是包含各自模型加载和
+GPU 初始化/权重上传的冷进程观察，不替代驻留 session 基准。
+
+因此本轮性能结论是：自动分发已经能按类型和数值契约选择或回退，但 Q4_K_M 的
+Vulkan 性能仍不能视为收益；若要让 Auto 对该格式做性能回退，需要先按设备和工作负载
+建立可复现的驻留性能 bucket，再把门槛接入准入策略。当前没有新增这一策略。
+
 ## Q8 CPU 契约与自动分发复验（历史基线，2026-10-10）
 
 本轮基线 `1f54d3affaf6841b4673f0087968f07c5ecb2b11`。
