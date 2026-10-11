@@ -33,7 +33,7 @@ fn text_forward_matches_huggingface_oracle() {
     let model = rust_model_inference::models::embeddinggemma2::EmbeddingGemmaTextModel::from_source(&source)
         .expect("EmbeddingGemmaTextModel::from_source");
 
-    let cases = ["hello", "fox", "embed"];
+    let cases = ["hello", "fox", "embed", "long"];
     for name in &cases {
         let (token_ids, expected, text) = load_oracle(name);
         let actual = model.forward(&token_ids).expect("text forward");
