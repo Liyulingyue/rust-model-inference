@@ -35,6 +35,62 @@ int round_away(float value) {
     return int(sign(value) * (integral + (magnitude - integral >= 0.5 ? 1.0 : 0.0)));
 }
 
+float multiply_finite_normal(float left, float right) {
+    uint left_bits = floatBitsToUint(left);
+    uint right_bits = floatBitsToUint(right);
+    uint left_exp = (left_bits >> 23u) & 0xffu;
+    uint right_exp = (right_bits >> 23u) & 0xffu;
+    if (left_exp == 0u || left_exp == 0xffu || right_exp == 0u || right_exp == 0xffu) {
+        return left * right;
+    }
+    uint sign_bits = (left_bits ^ right_bits) & 0x80000000u;
+    uint left_mantissa = (left_bits & 0x007fffffu) | 0x00800000u;
+    uint right_mantissa = (right_bits & 0x007fffffu) | 0x00800000u;
+    uint left_low = left_mantissa & 0xffffu;
+    uint left_high = left_mantissa >> 16u;
+    uint right_low = right_mantissa & 0xffffu;
+    uint right_high = right_mantissa >> 16u;
+    uint product_00 = left_low * right_low;
+    uint product_01 = left_low * right_high;
+    uint product_10 = left_high * right_low;
+    uint product_11 = left_high * right_high;
+    uint middle = (product_00 >> 16u) + (product_01 & 0xffffu) + (product_10 & 0xffffu);
+    uint product_low = (product_00 & 0xffffu) | ((middle & 0xffffu) << 16u);
+    uint product_high = product_11 + (product_01 >> 16u) + (product_10 >> 16u) + (middle >> 16u);
+    bool top = (product_high & 0x8000u) != 0u;
+    uint shift = top ? 24u : 23u;
+    int exponent = int(left_exp) - 127 + int(right_exp) - 127 + (top ? 1 : 0);
+    uint mantissa = (product_high << (32u - shift)) | (product_low >> shift);
+    uint remainder_mask = (1u << (shift - 1u)) - 1u;
+    bool guard = ((product_low >> (shift - 1u)) & 1u) != 0u;
+    bool sticky = (product_low & remainder_mask) != 0u;
+    if (guard && (sticky || (mantissa & 1u) != 0u)) mantissa += 1u;
+    if (mantissa == 0x01000000u) {
+        mantissa >>= 1u;
+        exponent += 1;
+    }
+    int result_exp = exponent + 127;
+    if (result_exp <= 0 || result_exp >= 255) return left * right;
+    return uintBitsToFloat(sign_bits | (uint(result_exp) << 23u) | (mantissa & 0x007fffffu));
+}
+
+int round_even_stable(float value, float scaled, float amax, uint cpu_mode) {
+    float magnitude = abs(scaled);
+    float integral = floor(magnitude);
+    float midpoint = integral + 0.5;
+    // AMD's fast F32 multiply can land one ULP on either side of a Q8
+    // half-integer. Recompute only this rare boundary with the CPU's exact
+    // F32 division and multiplication order; ordinary values stay fast.
+    precise float ulp = max(1.0, midpoint) * 0.0000002384185791015625;
+    if (abs(magnitude - midpoint) <= ulp) {
+        precise float inverse = cpu_mode == 8u
+            ? divide_finite_normal(127.0, amax)
+            : divide_finite_normal(1.0, amax / 127.0);
+        scaled = multiply_finite_normal(value, inverse);
+    }
+    return int(roundEven(scaled));
+}
+
 void main() {
     uint row = gl_WorkGroupID.z;
     uint block = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
@@ -65,7 +121,7 @@ void main() {
             ? 0.0
             // AVX2 divides directly; NEON/scalar use the rounded scale's reciprocal.
             : (pc.cpu_mode == 8u
-                ? divide_finite_normal(127.0, partial[0])
+                ? 127.0 / partial[0]
                 : divide_finite_normal(1.0, scale));
         float stored_scale = round_f16_rte(scale);
         arena.data[pc.scales_word + scales_base + block] = floatBitsToUint(stored_scale);
@@ -77,7 +133,9 @@ void main() {
         for (uint byte_index = 0u; byte_index < 4u; byte_index++) {
             uint value_index = lane * 4u + byte_index;
             precise float scaled = values[value_index] * inverse_scale;
-            int quantized = pc.cpu_mode == 0u ? round_away(scaled) : int(roundEven(scaled));
+            int quantized = pc.cpu_mode == 0u
+                ? round_away(scaled)
+                : round_even_stable(values[value_index], scaled, partial[0], pc.cpu_mode);
             quantized = clamp(quantized, -128, 127);
             quantized_values[value_index] = quantized;
             packed |= (uint(quantized) & 0xffu) << (byte_index * 8u);

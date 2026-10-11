@@ -34,7 +34,7 @@ use ash::vk;
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 #[cfg(feature = "vulkan")]
 const SHADER: &[u8] = include_bytes!("../shaders/bin/q8_matmul.spv");
@@ -167,6 +167,11 @@ pub struct VulkanContext {
     /// other pool threads block on it before touching the matmul output
     /// (their post-matmul work — silu, residual — must see the GPU result).
     completed_gen: std::sync::atomic::AtomicU64,
+    /// Cached Qwen3 core operator contract check. A Vulkan device can execute
+    /// the kernels while still disagreeing with the CPU oracle, so Auto must
+    /// validate the full attention/quantization boundary once before
+    /// admitting the model path.
+    qwen3_core_contract: OnceLock<Result<(), String>>,
 }
 
 /// Persistent activation staging buffers. Capacities grow to the largest
@@ -403,6 +408,7 @@ impl VulkanContext {
                             submission_count: std::sync::atomic::AtomicU64::new(0),
                             counters: ComputeCounters::default(),
                             completed_gen: std::sync::atomic::AtomicU64::new(0),
+                            qwen3_core_contract: OnceLock::new(),
                         });
                     }
                     Err(error) => failures.push(format!("{}: {error}", candidate.name)),
@@ -435,6 +441,12 @@ impl VulkanContext {
 
     pub(crate) fn supports_shader_float16(&self) -> bool {
         self.shader_float16
+    }
+
+    pub(crate) fn validate_qwen3_core_contract(&self) -> Result<(), String> {
+        self.qwen3_core_contract
+            .get_or_init(|| ops::check_qwen3_core_contract(self))
+            .clone()
     }
 
     /// Human-readable memory heaps for diagnosing allocation performance.

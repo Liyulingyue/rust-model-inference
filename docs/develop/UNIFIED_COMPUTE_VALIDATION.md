@@ -5,10 +5,39 @@
 
 统一入口、两个 linear 消费者、共享 dense 执行、事务回退及 CLI/HTTP 策略已实现。
 本轮修复纯 Q8 在 ARM 上的真实模型偏差，以及 x86 的 Q8 激活量化边界。
-下面最新章节分别记录通过与失败：不能把短输入通过、相同 greedy token 或统一表达式
-当成所有 GPU 数值与模型均已通过。AMD 的长输入门禁仍未通过；PR 保持 Draft。
+下面分别标出当前结果和历史基线：不能把单个短输入、相同 greedy token 或统一表达式
+当成所有 GPU 数值与模型均已通过。当前 AMD Qwen3 Q8 的确定性长输入已通过自动分发，
+但这仍不代表其他权重格式、驱动或 Z-Image 全链路已经通过。
 
-## Q8 CPU 契约与自动分发复验（2026-10-10）
+## 当前自动分发状态（2026-10-11）
+
+截图指出的缺口是成立的：旧准入只比较 prompt 的 logits/KV，随后直接信任 GPU
+decode；prompt 误差在容差内时，仍可能把后续 greedy 序列带偏。现在 Qwen3 的模型准入
+在核心算子四项检查和 prompt CPU/GPU 比较之后，复用 resident GPU session 做 16 步
+CPU/GPU decode probe，逐步比较 logits、F16 KV 和 greedy token，然后重放原 prompt，
+才把 session 标为可用。probe 失败时 Auto 回退 CPU，强制 Vulkan 返回模型契约错误；
+不会把 CPU 重算记录成 GPU 通过。
+
+远程 AMD EPYC 9334 / RADV NAVI31 使用同一个 `Qwen3-0.6B-Q8_0.gguf`，prompt 为
+`"hello " * 129`（实际 142 tokens），`--max-tokens 32 --temp 0 --kv-cache f16
+--threads 8` 的三条 CLI 结果完全相同：
+
+```text
+Hello! I'm sorry, but I can't see any text in your message. Could you please provide a question or a request in a different format?
+```
+
+`--compute auto` 的 trace 在 probe 后仍为
+`compute requested=Auto scope=resident_decoder backend=Vulkan`；`--compute vulkan`
+同样成功，`--compute cpu` 没有初始化 Vulkan。该复验只证明当前 fixture、设备和
+确定性 greedy 路径；16 步 probe 是有界门禁，温度采样不能用文本逐字相等作为数值
+证明，且一次性 probe/replay 的耗时尚未纳入性能准入。
+
+Qwen3.5 独立 convolution 仍有 `gpu=0xb788d769` / `cpu=0xb788d768` 的 1 ULP
+检查失败；它没有被这次 Qwen3 decode gate 掩盖。当前工作树也没有可复跑用户完整
+Z-Image 512×512 命令的三份 GGUF，因此不把历史 Z-Image 记录当作本轮远端整图证据；
+远端 AMD 的 `f16_refiner_projection_keeps_f32_accumulation` 设备回归仍为 1 passed。
+
+## Q8 CPU 契约与自动分发复验（历史基线，2026-10-10）
 
 本轮基线 `1f54d3affaf6841b4673f0087968f07c5ecb2b11`。
 本机 Apple M3 Max / ARM64 NEON / MoltenVK；远程 AMD EPYC 9334（128 logical CPUs）/
@@ -43,6 +72,14 @@ scalar 的整数舍入又是 ties away，SIMD 是 ties even。GPU quantizer 现�
 两个改动过的 DP4A GLSL 使用 `GL_EXT_spirv_intrinsics` 发出原有 signed packed OpSDot，
 可用 CI 的 glslang 15.1.0 从源码重建，不再依赖该 compiler 不支持的 GLSL dot extension。
 
+本轮又收口了 x86 激活量化的最后一个边界：AVX2 的逆尺度在 GLSL 中改为硬件
+`127.0 / amax`，与生产 CPU kernel 的除法舍入保持同一条路径；NEON/scalar 仍使用
+舍入后 scale 的倒数。更新后的 `quantize_q8_0.spv` 和 manifest 已同步。Qwen3 会话现在
+把 Q8 tie-even、attention score、长 softmax F16 舍入、attention value 四个检查合并为
+一次按设备缓存的核心契约；Auto 只在四项都通过时启用 resident Vulkan，强制 Vulkan
+则返回具体的契约失败。核心检查通过后，模型准入探针固定顺序执行 16 个 token，
+逐 token 比较 GPU 与 CPU logits，覆盖 KV/多 token attention；单 token 探针不再作为准入依据。
+
 ### 数值与设备证据
 
 | 检查 | Apple M3 Max | EPYC / RADV NAVI31 |
@@ -53,8 +90,8 @@ scalar 的整数舍入又是 ties away，SIMD 是 ties even。GPU quantizer 现�
 | 真实 Q8，5-token prefill + 32 greedy | logits max_abs/max_rel=0；33 submissions | logits max_abs/max_rel=0；33 submissions |
 | 真实 Q8，129-token prefill + 32 greedy | logits max_abs/max_rel=0；35 submissions | **失败**：首个 logit abs=0.020405293，超出原门槛 |
 | 真实 Q8，133 tokens，B=1/64 | 各后端内部 logits、prompt/decode KV、greedy 逐位一致；prefill 133→3 submits | 未复验 |
-| `vk_ops_check --all-formats --rows 3` | pass | Q8/全格式 batched、量化、attention-score 通过后，**long softmax 失败** |
-| 相关设备/state/失败回退回归 | 23/23 pass | 22/22 pass；`vk_ops_check` 的 long-softmax 门禁失败 |
+| `vk_ops_check --formats q8_0 --rows 3` | pass | Q8 batched、量化、attention/long-softmax 核心检查通过；随后独立 Qwen3.5 conv 仍差 1 ULP |
+| 相关设备/state/失败回退回归 | 23/23 pass | 22/22 pass；模型准入仍按 logit 契约回退 |
 
 133-token B=1/64 证明同一个后端内部跨 batch 一致；它不能替代 CPU/GPU 跨后端门禁。
 所有模型门槛仍为 `abs <= 2e-3 + 2e-3 * abs(CPU)`；已有 raw-bit 检查没有放宽。
@@ -62,7 +99,7 @@ scalar 的整数舍入又是 ties away，SIMD 是 ties even。GPU quantizer 现�
 
 ### 真实 CLI 的自动分发
 
-两端独立进程使用相同真实模型、prompt “法国的首都是”、`--max-tokens 32 --temp 0
+Apple M3 Max 上独立进程使用真实模型、prompt “法国的首都是”、`--max-tokens 32 --temp 0
 --threads 8 --kv-cache f16`，实际生成 8 个输出 token。
 
 - `--compute cpu`：`backend=Cpu`，没有 Vulkan 初始化。
@@ -74,26 +111,35 @@ scalar 的整数舍入又是 ties away，SIMD 是 ties even。GPU quantizer 现�
   强制 Vulkan 返回错误、exit 1；没有把回退算作 GPU 通过。
 - 默认 F32 KV 的 Auto 在 CPU 执行；强制 Vulkan 明确要求 F16 KV，不会悄悄改变 KV 精度。
 
+远程 AMD RADV NAVI31 用 `Qwen3-0.6B-Q8_0.gguf`、`hello`、`--max-tokens 1`、F16 KV
+复验：核心算子门禁通过后，模型准入在 token 0 的 logit index 1 失败
+（GPU `4.476106`、CPU `4.4538846`、abs `0.022221565`）；`--compute auto` exit 0
+回退 CPU，`--compute vulkan` 以同一原因 exit 1。两条路径都没有把 CPU fallback 记作 GPU 通过。
+
 本轮只验证现有路由与数值，没有测量/准入新的性能 bucket；上述 CLI 耗时受并行验证
 和缓存状态影响，不作为端到端性能结论。
 
 ### 保留的失败与下一步
 
-RADV 的 107-score 独立回归在 index 20 输出 GPU `0x3c32c000` / CPU `0x3c32e000`，
-相差一个 F16 ULP。诊断确认指数与求和的 CPU 参照正确，GPU sum high/low 为
-`9.338327407836914` / `-1.525040715932846e-7`，与完整 CPU sum 相同；
-GPU 最终归一化倒数为 `0x3ddb4fac`，CPU 为 `0x3ddb4fad`，随后概率跨过 F16 舍入边界。
-该失败已保留为独立 ignored 设备回归，没有更改 expected 或容差。
-本机候选 shader 探针不构成 AMD 修复证明；远程 SSH 随后连续断开，候选修复尚未完成
-目标设备验证。不能声称 AMD 长输入、其他驱动或所有量化格式真实模型已通过。
+本轮用 glslang 15.1 生成的 softmax shader 已在 RADV 重新验证：Q8 quantization
+tie-even、attention score、107-score long softmax 和 attention value 均通过。修复点是
+显式保留 compensated low 项，并在相邻 F32 倒数中按补偿乘积选择最近值；没有放宽
+expected 或 logits 容差。完整 `vk_ops_check --formats q8_0 --rows 3` 随后暴露出
+独立的 Qwen3.5 convolution 1 ULP 差异（`gpu=0xb788d769` / `cpu=0xb788d768`），
+它不属于 Qwen3 core admission 的四项检查。
+因此 AMD 上新的 Qwen3 `--compute auto` 仍在模型准入失败后回退 CPU，强制
+`--compute vulkan` 仍 exit 1；这证明了自动分发的安全门禁，不能声称 AMD 真实模型
+已经通过 GPU。Apple M3 Max 的 16-token 顺序模型准入探针以及真实 Q8 CLI 仍实际选择
+resident Vulkan 并通过；这不等于 AMD 长输入或其他驱动已经通过。
 
 本机 Vulkan 全库在禁用全局 GPU 路由的环境下为
 1261 passed / 27 failed / 137 ignored；与本轮量化修复前运行的失败名称相同。
 其中 `initializes_with_homebrew_moltenvk` 因故意禁用 ICD 失败；其余 26 个名称也出现在
 下方历史失败列表。没有为本轮重新构建独立 HEAD 基线，因此不宣称已排除所有新增失败。
-新增 long-softmax 回归为 ignored，并不掩盖上述远程失败。
+long-softmax 回归仍保留为 ignored 设备测试；它在本轮 AMD 复验通过，模型准入失败也没有被掩盖。
 
-Shader manifest、全部 SPIR-V 验证、改动 shader 的字节重建及完整 check 脚本通过；
+Shader manifest、全部 SPIR-V 验证和改动 shader 的字节重建使用 repo-local glslang 15.1
+通过；本机默认 glslang 16.6 仍可能产生字节差异，未用无关二进制重生成掩盖。
 未改动的 tiled DP4A 在 15.1.0 缺少其 GLSL extension 时仍按原脚本跳过重建。
 没有重新运行 Z-Image 整图、MoE/VL 接入、其他真实量化模型、外部 llama.cpp/PyTorch oracle。
 临时 layer/softmax trace 已清理，`docs/superpowers/` 和生成日志不提交。

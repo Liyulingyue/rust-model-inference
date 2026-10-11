@@ -4588,11 +4588,16 @@ fn check_weight_matmul_rows(
     result.and(cleanup).map_err(|error| error.to_string())
 }
 
-pub fn run_qwen3_operator_check(context: &VulkanContext, formats: &[&str]) -> Result<(), String> {
+pub(crate) fn check_qwen3_core_contract(context: &VulkanContext) -> Result<(), String> {
     check_quantize_tie_even(context)?;
     check_attention_scores_match_cpu_reduction(context)?;
     check_softmax_f16_rounding(context)?;
     check_attention_value_reduction(context)?;
+    Ok(())
+}
+
+pub fn run_qwen3_operator_check(context: &VulkanContext, formats: &[&str]) -> Result<(), String> {
+    check_qwen3_core_contract(context)?;
     check_rms_norm_exact(context)?;
     check_rope_exact(context)?;
     for &format in formats {
@@ -6010,6 +6015,10 @@ fn check_quantize_tie_even(context: &VulkanContext) -> Result<(), String> {
     // AuK CFG input: division gives 0x3d80d001; multiplying a reciprocal
     // gives 0x3d80d000 and rounds to a different F16 scale.
     input[32] = f32::from_bits(0x40ff9cc1);
+    // Exact -63.5 on AVX2: a driver may round the reciprocal/multiply just
+    // below the tie, so the shader must recover the CPU ties-even result.
+    input[96] = 0.14697265625;
+    input[97] = -0.073486328125;
     // Exact ties and their predecessors distinguish scalar rounding from SIMD.
     input[64..71].copy_from_slice(&[
         127.0,
@@ -6333,7 +6342,6 @@ fn check_softmax_f16_rounding(context: &VulkanContext) -> Result<(), String> {
             expected[index].to_bits()
         ));
     }
-    println!("operator=softmax_f16_rounding exact=true");
     Ok(())
 }
 
