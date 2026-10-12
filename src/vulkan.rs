@@ -1662,6 +1662,9 @@ impl VulkanContext {
         pipeline_layout: vk::PipelineLayout,
         shader: &[u8],
     ) -> Result<vk::Pipeline, VulkanError> {
+        // include_bytes! only guarantees byte alignment; Vulkan requires u32 words.
+        let words = ash::util::read_spv(&mut std::io::Cursor::new(shader))
+            .map_err(|error| VulkanError::ShaderCompileFailed(error.to_string()))?;
         let shader_module = unsafe {
             device
                 .create_shader_module(
@@ -1670,7 +1673,7 @@ impl VulkanContext {
                         p_next: std::ptr::null(),
                         flags: Default::default(),
                         code_size: shader.len(),
-                        p_code: shader.as_ptr() as *const u32,
+                        p_code: words.as_ptr(),
                     },
                     None,
                 )
@@ -2005,6 +2008,61 @@ mod tests {
     };
     use ash::vk;
     use std::sync::atomic::Ordering;
+
+    #[test]
+    fn shader_module_receives_aligned_spirv_words() {
+        unsafe extern "system" fn create_shader_module(
+            _: vk::Device,
+            info: *const vk::ShaderModuleCreateInfo,
+            _: *const vk::AllocationCallbacks,
+            _: *mut vk::ShaderModule,
+        ) -> vk::Result {
+            let info = &*info;
+            if info.p_code.align_offset(std::mem::align_of::<u32>()) != 0 {
+                return vk::Result::ERROR_UNKNOWN;
+            }
+            let bytes = std::slice::from_raw_parts(info.p_code.cast::<u8>(), info.code_size);
+            if bytes != super::SHADER {
+                return vk::Result::ERROR_INVALID_SHADER_NV;
+            }
+            // Stop at the driver boundary after checking alignment and every byte.
+            vk::Result::ERROR_INITIALIZATION_FAILED
+        }
+
+        unsafe extern "system" fn get_device_proc_addr(
+            _: vk::Device,
+            name: *const std::ffi::c_char,
+        ) -> vk::PFN_vkVoidFunction {
+            if std::ffi::CStr::from_ptr(name).to_bytes() == b"vkCreateShaderModule" {
+                Some(std::mem::transmute(
+                    create_shader_module as vk::PFN_vkCreateShaderModule,
+                ))
+            } else {
+                None
+            }
+        }
+
+        let instance_fn = vk::InstanceFnV1_0::load(|name| {
+            if name.to_bytes() == b"vkGetDeviceProcAddr" {
+                get_device_proc_addr as *const () as *const std::ffi::c_void
+            } else {
+                std::ptr::null()
+            }
+        });
+        let device = unsafe { ash::Device::load(&instance_fn, vk::Device::null()) };
+        let mut storage = vec![0u8; super::SHADER.len() + 4];
+        let offset = (5 - (storage.as_ptr() as usize % 4)) % 4;
+        let shader = &mut storage[offset..offset + super::SHADER.len()];
+        shader.copy_from_slice(super::SHADER);
+        assert_eq!(shader.as_ptr() as usize % 4, 1);
+        let error =
+            VulkanContext::create_pipeline_for_device(&device, vk::PipelineLayout::null(), shader)
+                .unwrap_err();
+        assert!(
+            matches!(error, super::VulkanError::ShaderCompileFailed(ref message)
+            if message == &vk::Result::ERROR_INITIALIZATION_FAILED.to_string())
+        );
+    }
 
     #[test]
     #[ignore = "requires a Vulkan device"]

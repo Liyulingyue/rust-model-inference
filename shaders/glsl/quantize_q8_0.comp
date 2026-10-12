@@ -85,7 +85,7 @@ int round_even_stable(float value, float scaled, float amax, uint cpu_mode) {
     if (abs(magnitude - midpoint) <= ulp) {
         precise float inverse = cpu_mode == 8u
             ? divide_finite_normal(127.0, amax)
-            : divide_finite_normal(1.0, amax / 127.0);
+            : inverse_scale;
         scaled = multiply_finite_normal(value, inverse);
     }
     return int(roundEven(scaled));

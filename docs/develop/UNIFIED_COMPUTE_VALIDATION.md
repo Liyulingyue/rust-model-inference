@@ -1,6 +1,6 @@
 # 统一计算执行：实现与验收记录
 
-日期：2026-10-10。实施基线：`ce17cd5d04076e13f7e72b40bb58713630ac16c3`。
+日期：2026-10-12。实施基线：`ce17cd5d04076e13f7e72b40bb58713630ac16c3`。
 实施采用八阶段计划；规划文件只在本地保留，不随 PR 提交。
 
 统一入口、两个 linear 消费者、共享 dense 执行、事务回退及 CLI/HTTP 策略已实现。
@@ -9,7 +9,99 @@
 当成所有 GPU 数值与模型均已通过。当前 AMD Qwen3 Q8 的确定性长输入已通过自动分发，
 但这仍不代表其他权重格式、驱动或 Z-Image 全链路已经通过。
 
-## 当前自动分发状态（2026-10-11）
+## GB10 崩溃报告与本机复现（2026-10-12）
+
+用户报告 NVIDIA GB10 / ARM64 Linux / 驱动 580.173.02 在 `c59986de` 的 Qwen3
+Auto、强制 Vulkan、`vk_model_check qwen3` 和 Z-Image GPU 入口退出 133（SIGTRAP），
+gdb 栈位于 `libnvidia-gpucomp.so.580.173.02`；CPU 正常、`vk_ops_check` 通过。
+截图中最后可用提交为 `da5ed52`。该机器已关闭，当前没有 SSH 或原始日志，
+所以下面的本机检查不能证明 NVIDIA 崩溃已修复。
+
+本机为 Apple M3 Max（40-core GPU、64 GB）/ macOS 27.0.1 / MoltenVK /
+Rust 1.98.1。在明确指定的当前源码目录，对 `c59986de` 执行：
+
+```sh
+cargo build --locked --release --features vulkan \
+  --bin rust-model-inference --example vk_model_check --example vk_ops_check
+```
+
+Q8_0 fixture 的 SHA-256 为
+`9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031`；Q4_K_M
+fixture 与下一节相同。CLI 使用 `--max-tokens 32 --temp 0 --threads 8 --kv-cache f16`，
+短 prompt 为 `The capital of France is`，长 prompt 为 `"hello " * 129`。
+共 13 个运行均未出现 SIGTRAP，其中：
+
+| 当前提交入口 | 本机修复前结果 |
+| --- | --- |
+| 默认 `vk_ops_check` | 退出 0 |
+| Q8_0 CPU，短 prompt | 退出 0 |
+| Q8_0 Auto，短/长 prompt | 退出 0，但 trace 为 CPU 回退 |
+| Q8_0 强制 Vulkan，短/长 prompt | 退出 1：激活量化 `gpu=-21 / cpu=-20` |
+| Q8_0 model check，短/长 prompt、关闭 DP4A | 同一激活门禁退出 1 |
+| Q8_0 model check，`RMI_SCALAR=1` | 退出 0 |
+| Q4_K_M Auto、强制 Vulkan、model check | 退出 0，实际驻留 Vulkan；prefill logits 逐位一致 |
+
+本机定位了三个具体问题：
+
+- Q8_0 的半整数修正分支重新使用普通 `amax / 127`，与主路径精确计算出的尺度不同，
+  将 CPU 的 `-20.5` 改成略小于 `-20.5`。NEON 分支现在复用 workgroup 中已经精确
+  计算的 `inverse_scale`；AVX2 的倒数语义不变。只重建该 shader 和对应 manifest 项。
+- 默认算子检查的 batched 部分选择 Q8_0，legacy 部分却收到空格式列表，跳过 Q8_0
+  激活契约。这解释了本机“算子工具通过、真实模型被拒绝”的差异；两部分现在接收
+  同一份实际格式列表。
+- shader 加载把 `include_bytes!` 的字节地址直接转为 `*const u32`。修复前 release
+  CLI/model checker 的 31 份内嵌 SPIR-V 全部未按 4 字节对齐，operator checker
+  为 28/31。共享加载入口现在用已有 ash `read_spv` 生成对齐的 `Vec<u32>`，保留
+  shader 字节和 Vulkan 错误传播。驱动边界回归验证了不对齐输入被正确转换；此问题
+  尚未被证实是 NVIDIA SIGTRAP 的原因。
+
+另从 `git archive da5ed52` 导出独立源码，通过该目录的 `--manifest-path` 编译
+`release-fast` checker。本机没有崩溃，但其 Q8 prefill 首个 logit 为
+GPU `3.361459` / CPU `3.2769063`，检查失败；这是设备和 profile 有限的历史对照，
+不构成 GB10 修复或性能 A/B 证据。
+
+### 修复后的本机结果
+
+从同一当前源码目录重新构建完整 `release`。默认算子检查、三种 Qwen3 权重的
+Auto / 强制 Vulkan / model checker、Q8 CPU 与 Auto 长 prompt、133-token model
+checker 和驻留 benchmark 共 15 项运行全部退出 0。Q8_0 / Q4_0 / Q4_K_M 的
+Auto trace 均为 `scope=resident_decoder backend=Vulkan`，没有通过 CPU 回退完成。
+三种权重的 prefill logits 均为 `max_abs=0, max_rel=0`，32 个 greedy token 与 CPU
+相同；Q8 的 133-token 检查也逐位一致，并使用 35 次计算提交完成 32-token 生成。
+
+```sh
+q8_model=models/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf
+./target/release/examples/vk_ops_check
+./target/release/examples/vk_model_check qwen3 --model "$q8_model" --prompt-repeats 33
+./target/release/examples/vk_model_check qwen3 --model "$q8_model" --benchmark
+```
+
+两个 Q8 设备回归通过；shader 对齐回归由修复前失败转为通过。Vulkan 入口相关
+单测为 7 passed / 2 ignored，31 份 shader 的重建、SPIR-V 校验和 manifest 校验、
+Rustfmt 与 diff check 均通过。未运行完整测试套件。`release-fast` 的关闭 DP4A 和
+`RMI_SCALAR=1` Q8 model checker 也通过。
+
+性能仍有明显问题。当前 Q8_0、5-token prompt、32 greedy、F16 KV、4 个 CPU 线程，
+同一进程预热后交替 5 轮的驻留中位数为：
+
+| 后端 | prompt tok/s | decode tok/s | wall ms |
+| --- | ---: | ---: | ---: |
+| CPU | 285.143 | 142.014 | 248.820 |
+| Vulkan | 5.697 | 4.073 | 8742.455 |
+
+GPU 约慢 35.14 倍，`threshold_passed=false`；当前 Auto 不使用性能门槛，仍按类型与
+数值契约准入。预热后驻留计算仍慢，不能仅归因于加载或首次 probe。142-token 长
+prompt 的独立 release CLI 进程墙钟为 CPU 0.677 s / Auto Vulkan 58.693 s；这是
+各一次的进程观察，包含本进程初始化，模型已在 OS 页缓存中，不是稳定性能 A/B。
+这些都是本轮同一源码的 CPU/GPU 后端比较，不能用于声称整个 PR 相对 main 性能不变。
+
+扩展的 `release-fast --prompt-repeats 129` 实际是 517-token prompt，model checker
+在 240 秒限时内未完成，最后日志仍在记录驻留 Vulkan 的 64-row 提交；它没有产生
+SIGTRAP，但没有通过完整正确性检查。不能把 133-token 的通过推广到所有上下文长度。
+GB10 驱动崩溃仍未完成实机复验，且本地缺少用户 Z-Image 命令所需的三份 GGUF，
+所以 Z-Image 整图未复验。
+
+## 历史自动分发状态（2026-10-11）
 
 当前准入按实际权重类型选择算子路径。每个线性权重的 `GGMLType` 先映射为
 `GpuWeightFormat`，再由对应 Vulkan matmul kernel 处理：Q8_0/Q4_0/Q4_1 使用 Q8_0
@@ -72,20 +164,19 @@ Q4_K_M 的强制 Vulkan 检查通过：prefill logits 的 `max_abs=0`、`max_rel
 Qwen3.5 BF16 的模型检查通过 prefill logits 和 32 个 greedy token，实际格式为
 `BF16`，Auto trace 为 `scope=resident_hybrid_decoder backend=Vulkan`。在同一 16-token
 prompt、32 个输出 token、`--temp 0 --threads 8 --kv-cache f32` 的独立 CLI 进程中，
-CPU 为 `7.8 tok/s` 端到端，Auto 为 `12.8 tok/s` 端到端；这是包含各自模型加载和
-GPU 初始化/权重上传的冷进程观察，不替代驻留 session 基准。
+CPU 的 CLI `end-to-end` 指标为 `7.8 tok/s`，Auto 为 `12.8 tok/s`。这两个值来自
+独立进程，但没有另行测量进程墙钟，不能据此声称包含模型加载、GPU 初始化和权重上传，
+也不能替代驻留 session 基准。
 
 因此本轮性能结论是：自动分发已经能按类型和数值契约选择或回退，但 Q4_K_M 的
 Vulkan 性能仍不能视为收益；若要让 Auto 对该格式做性能回退，需要先按设备和工作负载
 建立可复现的驻留性能 bucket，再把门槛接入准入策略。当前没有新增这一策略。
 
-为区分 PR 自身影响，另用父提交 `8c9a0c32` 编译了同配置的基线二进制，并对同一个
-Q4_K_M GGUF 做了相同的 5 轮交替驻留 benchmark：基线 CPU/Vulkan 中位数为
-`616.742/2835.613 ms`，当前 PR 为 `594.348/2793.712 ms`。两条后端分别只快
-约 3.6% 和 1.5%，且方向相反、没有独立重复样本，不能归因于 PR；相对 CPU 的 Vulkan
-慢速结论没有改变（约 4.6–4.7 倍）。Q4_0 在父提交和当前 PR 都因已有 Q8_0 激活
-契约失败回退 CPU，因此本 PR 没有把它从 GPU 性能改成 CPU 性能；Qwen3.5 也不在本 PR
-的代码改动范围内。
+撤回上一版的父提交 A/B 结论：虽然创建了 `8c9a0c32` 工作树，构建命令的实际工作目录
+仍是当前工作树，两份二进制因此来自同一份源码。原先标作父提交的
+`616.742/2835.613 ms` 不能作为 PR 前后的对照。上面的当前 CPU/Vulkan 对比仍是
+同一源码的后端观察，但本 PR 相对未包含它的 main 是性能提升、下降还是不变，尚未验证。
+`8c9a0c32` 本身也在本 PR 内，不能代表整个 PR 合入前的 main。
 
 ## Q8 CPU 契约与自动分发复验（历史基线，2026-10-10）
 
