@@ -17,9 +17,9 @@ layer + shared embedding output projection) using the same
 | ZCRMSNorm | **√** | `(1 + scale) * x / rms(x)`, lifted from cactus-compute/needle `architecture.py`. Matches Oracle at 1 ULP per layer. |
 | Hadamard-MLP (Kron-product Hadamard transform with conditioner) | **√** | `kron_apply(d_i * x, w_ia, w_ib)[..., p_i]` + silu + softmax cond + perms from `_HADA_PERM_SEEDS=(11,13)`. Matches Oracle at 1 ULP per layer. |
 | Multi-lane hyper-connection (`mhc_lanes=4`) | **√** | `_advance` (per `architecture.py`): broadcast to `[B,T,4,512]`, `rms_unit`, pre/post-gates `sigmoid(a_pre/post * (nx @ phi_pre/post) + b_pre/post + pre/post_off)`, Sinkhorn-Knopp 4×4 res-mix matrix, mean across 4 lanes. Per-layer pre_offset cycles by lane (`8*lane-4`, `-4*(1-lane)`). Cumulative stream across 8 layers, then per-layer mean is the encoder-block output. Matches Oracle at 1 ULP per layer. |
-| Encoder/decoder numerical parity | **√** | `tests/whistle_layer_test.rs` matches the in-tree Python Oracle after 8 layers of accumulation (single layer 1 ULP, full encoder ~3 abs drift in the 1000s range — bounded by float32 accumulation, not algorithmic error). |
-| `k_taps` / `q_taps` / `v_taps` (3-tap causal FIR on stack self-attn q/k/v) | placeholder | Real algorithm: `out = Σ_j taps[j] * _shift_right(input, j)`. Stack-only. With single-token decode the placeholder agrees with the Oracle; longer sequences would diverge. |
-| RoPE on stack self-attn | placeholder | Real algorithm applies RoPE before attention. Single-token decode sidesteps it; longer sequences would diverge. |
+| Encoder/decoder numerical parity | **√** | `tests/whistle_oracle_parity.rs` matches the in-tree Python Oracle after 8 layers of accumulation (single layer 1 ULP, full encoder ~3 abs drift in the 1000s range — bounded by float32 accumulation, not algorithmic error). |
+| `k_taps` / `q_taps` / `v_taps` (3-tap causal FIR on stack self-attn q/k/v) | **√** | Real algorithm: `out = Σ_j taps[j] * _shift_right(input, j)`. Stack-only. Matches Oracle at 1 ULP across 5 tokens (`whistle_stack_multi_token_parity_against_oracle`). |
+| RoPE on stack self-attn | **√** | Real algorithm applies RoPE before attention. Matches Oracle at 1 ULP across 5 tokens (`whistle_stack_multi_token_parity_against_oracle`). |
 | Encoder forward (audio encoder block + stack `engram_kv` site context) | placeholder | cactus-compute/needle only exposes the LLM stack (`Stack` class). The audio encoder block is in the closed C++ runtime. |
 | Conv stem (`dw_1` / `dw_2` / `w` / `pw_1` / `pw_2` / `out`) | **TODO** | The 3 dw + 2 pw + 1 linear stack is not reverse-engineered against the closed `needle3` runtime; the CLI runs with a no-op stem that emits zero hidden states. |
 | `cactus-quants` 2–4-bit weight quantisation | **TODO** | Out: GGUF ships in F32 (220 MB ≈ safetensors size). |
@@ -42,7 +42,7 @@ src/models/whistle/
 └── mhc.rs                # multi-lane hyper-connection (mhc_lanes=4) + Sinkhorn
 src/app/asr/whistle.rs    # CLI driver (two backends: pure Rust, libneedle3.so)
 src/needle_ffi.rs        # FFI bindings to libneedle3.so (dlopen/dlsym)
-tests/whistle_layer_test.rs  # parity tests against oracle.py
+tests/whistle_oracle_parity.rs  # parity tests against oracle.py (only test binary that pulls flate2 dev-dep)
 models/whistle-probe/
 ├── whistle.cact          # closed-source Cactus binary (audio + LLM)
 ├── whistle.f32.gguf      # F32 GGUF port of the safetensors weights
@@ -79,7 +79,10 @@ python3 tools/converter/whistle/convert_whistle.py \
     --out        models/whistle-probe/whistle.f32.gguf
 
 # 3. Parity tests against the in-tree Python Oracle.
-cargo test --test whistle_layer_test
+#    This is the only test binary that depends on `flate2` (it inflates
+#    the .npz reference data). Run any other `cargo test` target to skip
+#    the dev-dependency download entirely.
+cargo test --test whistle_oracle_parity
 
 # 4. CLI smoke (pure-Rust port, placeholder stem).
 ./target/debug/rust-model-inference \
