@@ -22,11 +22,13 @@ pub mod norm;
 pub mod stack;
 pub mod stem;
 
-pub use attention::{gqa_cross_attention, gqa_self_attention};
+pub use attention::{
+    gqa_cross_attention, gqa_self_attention, gqa_self_attention_with_taps_and_rope,
+};
 pub use hadamard::hadamard_mlp;
 pub use mhc::{forward_one, load_mhc_layer, EncoderLayerWeights, MhcLayer, MHC_LANES};
 pub use norm::{zc_rms_norm_placeholder, ZcRmsNormPlaceholder};
-pub use stack::{final_rms_norm, load_stack_layer, StackLayer};
+pub use stack::{final_rms_norm, load_stack_layer, precompute_rope, StackLayer};
 pub use stem::placeholder_stem_output;
 
 use crate::core::tensor::{load_f32_tensor, TensorSource};
@@ -42,7 +44,9 @@ fn load_layer_kernel_2d(
     inner: &[u64],
 ) -> Vec<f32> {
     let outer = NUM_LAYERS as u64;
-    let full_dims = std::iter::once(outer).chain(inner.iter().copied()).collect::<Vec<_>>();
+    let full_dims = std::iter::once(outer)
+        .chain(inner.iter().copied())
+        .collect::<Vec<_>>();
     let raw = load_f32_tensor(source, name, &full_dims).expect(name);
     // `inner` is `[HIDDEN, OUT]` for this helper.
     let out_dim: usize = inner[1..].iter().product::<u64>().try_into().unwrap();
@@ -66,7 +70,9 @@ fn load_layer_kernel_nd(
     inner: &[u64],
 ) -> Vec<f32> {
     let outer = NUM_LAYERS as u64;
-    let full_dims = std::iter::once(outer).chain(inner.iter().copied()).collect::<Vec<_>>();
+    let full_dims = std::iter::once(outer)
+        .chain(inner.iter().copied())
+        .collect::<Vec<_>>();
     let raw = load_f32_tensor(source, name, &full_dims).expect(name);
     let inner_count: usize = inner.iter().product::<u64>().try_into().unwrap();
     raw[layer_idx * inner_count..(layer_idx + 1) * inner_count].to_vec()
@@ -197,11 +203,36 @@ pub fn load_encoder_layer(source: &dyn TensorSource, layer_idx: usize) -> Encode
                 layer_idx,
                 &[32, 32],
             ),
-            d1: load_layer_kernel_nd(source, &format!("{p}/hadamard_mlp/d1"), layer_idx, &[HIDDEN as u64]),
-            d2: load_layer_kernel_nd(source, &format!("{p}/hadamard_mlp/d2"), layer_idx, &[HIDDEN as u64]),
-            d3: load_layer_kernel_nd(source, &format!("{p}/hadamard_mlp/d3"), layer_idx, &[HIDDEN as u64]),
-            d4: load_layer_kernel_nd(source, &format!("{p}/hadamard_mlp/d4"), layer_idx, &[HIDDEN as u64]),
-            b2: load_layer_kernel_nd(source, &format!("{p}/hadamard_mlp/b2"), layer_idx, &[HIDDEN as u64]),
+            d1: load_layer_kernel_nd(
+                source,
+                &format!("{p}/hadamard_mlp/d1"),
+                layer_idx,
+                &[HIDDEN as u64],
+            ),
+            d2: load_layer_kernel_nd(
+                source,
+                &format!("{p}/hadamard_mlp/d2"),
+                layer_idx,
+                &[HIDDEN as u64],
+            ),
+            d3: load_layer_kernel_nd(
+                source,
+                &format!("{p}/hadamard_mlp/d3"),
+                layer_idx,
+                &[HIDDEN as u64],
+            ),
+            d4: load_layer_kernel_nd(
+                source,
+                &format!("{p}/hadamard_mlp/d4"),
+                layer_idx,
+                &[HIDDEN as u64],
+            ),
+            b2: load_layer_kernel_nd(
+                source,
+                &format!("{p}/hadamard_mlp/b2"),
+                layer_idx,
+                &[HIDDEN as u64],
+            ),
             cond_u: load_layer_kernel_nd(
                 source,
                 &format!("{p}/hadamard_mlp/cond_u"),
@@ -259,7 +290,14 @@ impl EncoderLayer {
 
         // post_attn_norm + hadamard_mlp + residual
         let mut h = vec![0.0f32; batch * seq_len * HIDDEN];
-        zc_rms_norm_placeholder(out, &self.post_attn_scale, layer_idx, batch, seq_len, &mut h);
+        zc_rms_norm_placeholder(
+            out,
+            &self.post_attn_scale,
+            layer_idx,
+            batch,
+            seq_len,
+            &mut h,
+        );
 
         let mut mlp = vec![0.0f32; batch * seq_len * HIDDEN];
         hadamard_mlp(&h, &self.hadamard, layer_idx, batch, seq_len, &mut mlp);

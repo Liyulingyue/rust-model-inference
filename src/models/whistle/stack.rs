@@ -12,20 +12,19 @@
 
 use crate::core::tensor::{load_f32_tensor, TensorSource};
 use crate::models::whistle::attention::{
-    gqa_cross_attention, gqa_self_attention,
+    gqa_cross_attention, gqa_self_attention_with_taps_and_rope,
 };
 use crate::models::whistle::hadamard::HadamardLayer;
 use crate::models::whistle::norm::zc_rms_norm_placeholder;
 
-use super::{
-    HIDDEN, NUM_HEADS, NUM_LAYERS, NUM_KV_HEADS, HEAD_DIM_K, HEAD_DIM_Q,
-    HEAD_DIM_V,
-};
+use super::{HEAD_DIM_K, HEAD_DIM_Q, HEAD_DIM_V, HIDDEN, NUM_HEADS, NUM_KV_HEADS, NUM_LAYERS};
+
+const TAPS_LEN: usize = 3;
 
 /// Stack layer weights (single layer for the placeholder decoder).
 #[derive(Debug)]
 pub struct StackLayer {
-    pub zc_in_scale: Vec<f32>,     // [NUM_LAYERS, HIDDEN]
+    pub zc_in_scale: Vec<f32>,      // [NUM_LAYERS, HIDDEN]
     pub cross_norm_scale: Vec<f32>, // [NUM_LAYERS, HIDDEN]
     pub self_q_proj: Vec<f32>,
     pub self_k_proj: Vec<f32>,
@@ -34,6 +33,9 @@ pub struct StackLayer {
     pub self_q_norm_scale: Vec<f32>, // [NUM_LAYERS, HEAD_DIM_Q]
     pub self_k_norm_scale: Vec<f32>, // [NUM_LAYERS, HEAD_DIM_K]
     pub self_attn_gate: Vec<f32>,    // [NUM_LAYERS]
+    pub self_q_taps: Vec<f32>,       // [NUM_LAYERS, TAPS_LEN, NUM_HEADS * HEAD_DIM_Q]
+    pub self_k_taps: Vec<f32>,       // [NUM_LAYERS, TAPS_LEN, NUM_KV_HEADS * HEAD_DIM_K]
+    pub self_v_taps: Vec<f32>,       // [NUM_LAYERS, TAPS_LEN, NUM_KV_HEADS * HEAD_DIM_V]
     pub cross_q_proj: Vec<f32>,
     pub cross_k_proj: Vec<f32>,
     pub cross_v_proj: Vec<f32>,
@@ -41,6 +43,26 @@ pub struct StackLayer {
     pub cross_q_norm_scale: Vec<f32>,
     pub cross_k_norm_scale: Vec<f32>,
     pub cross_gate: Vec<f32>,
+}
+
+/// Pre-compute RoPE cos/sin for `head_dim` and `seq_len` (theta=100000
+/// per cactus-compute/needle `architecture.py` default).
+pub fn precompute_rope(head_dim: usize, seq_len: usize) -> (Vec<f32>, Vec<f32>) {
+    let half = head_dim / 2;
+    let mut freqs = vec![0.0f32; half];
+    for i in 0..half {
+        let exponent = (2 * i) as f32 / head_dim as f32;
+        freqs[i] = 1.0 / 100000.0f32.powf(exponent);
+    }
+    let mut angles = vec![0.0f32; seq_len * half];
+    for t in 0..seq_len {
+        for i in 0..half {
+            angles[t * half + i] = t as f32 * freqs[i];
+        }
+    }
+    let cos: Vec<f32> = angles.iter().map(|a| a.cos()).collect();
+    let sin: Vec<f32> = angles.iter().map(|a| a.sin()).collect();
+    (cos, sin)
 }
 
 fn load_kernel_2d(
@@ -68,6 +90,9 @@ fn load_kernel_2d(
 
 pub fn load_stack_layer(source: &dyn TensorSource, layer_idx: usize) -> StackLayer {
     let p = "stack/layers/block";
+    let q_dim = NUM_HEADS * HEAD_DIM_Q;
+    let kv_q_dim = NUM_KV_HEADS * HEAD_DIM_K;
+    let kv_v_dim = NUM_KV_HEADS * HEAD_DIM_V;
     StackLayer {
         zc_in_scale: load_f32_tensor(
             source,
@@ -117,12 +142,26 @@ pub fn load_stack_layer(source: &dyn TensorSource, layer_idx: usize) -> StackLay
             &[NUM_LAYERS as u64, HEAD_DIM_K as u64],
         )
         .expect("self_k_norm_scale"),
-        self_attn_gate: load_f32_tensor(
+        self_attn_gate: load_f32_tensor(source, &format!("{p}/attn_gate"), &[NUM_LAYERS as u64])
+            .expect("attn_gate"),
+        self_q_taps: load_f32_tensor(
             source,
-            &format!("{p}/attn_gate"),
-            &[NUM_LAYERS as u64],
+            &format!("{p}/self_attn/q_taps"),
+            &[NUM_LAYERS as u64, TAPS_LEN as u64, q_dim as u64],
         )
-        .expect("attn_gate"),
+        .expect("self_q_taps"),
+        self_k_taps: load_f32_tensor(
+            source,
+            &format!("{p}/self_attn/k_taps"),
+            &[NUM_LAYERS as u64, TAPS_LEN as u64, kv_q_dim as u64],
+        )
+        .expect("self_k_taps"),
+        self_v_taps: load_f32_tensor(
+            source,
+            &format!("{p}/self_attn/v_taps"),
+            &[NUM_LAYERS as u64, TAPS_LEN as u64, kv_v_dim as u64],
+        )
+        .expect("self_v_taps"),
         cross_q_proj: load_kernel_2d(
             source,
             &format!("{p}/cross_attn/q_proj/kernel"),
@@ -181,7 +220,7 @@ impl StackLayer {
         debug_assert_eq!(enc_out.len(), batch * kv_seq * HIDDEN);
         debug_assert_eq!(out.len(), batch * q_seq * HIDDEN);
 
-        // 1) ZCRMSNorm + self-attn
+        // 1) ZCRMSNorm + self-attn (with 3-tap causal FIR + RoPE on q/k).
         let mut normed = vec![0.0f32; batch * q_seq * HIDDEN];
         zc_rms_norm_placeholder(
             text_emb,
@@ -192,22 +231,35 @@ impl StackLayer {
             &mut normed,
         );
 
-        let q_scale_off = layer_idx * HEAD_DIM_Q;
-        let k_scale_off = layer_idx * HEAD_DIM_K;
-        let mut sa = vec![0.0f32; batch * q_seq * HIDDEN];
-        gqa_self_attention(
-            &normed,
-            &self.self_q_proj,
-            &self.self_k_proj,
-            &self.self_v_proj,
-            &self.self_out_proj,
-            &self.self_q_norm_scale[q_scale_off..q_scale_off + HEAD_DIM_Q],
-            &self.self_k_norm_scale[k_scale_off..k_scale_off + HEAD_DIM_K],
-            self.self_attn_gate[layer_idx],
-            batch,
-            q_seq,
-            &mut sa,
-        );
+let q_scale_off = layer_idx * HEAD_DIM_Q;
+    let k_scale_off = layer_idx * HEAD_DIM_K;
+    let taps_q_off = layer_idx * TAPS_LEN * (NUM_HEADS * HEAD_DIM_Q);
+    let taps_k_off = layer_idx * TAPS_LEN * (NUM_KV_HEADS * HEAD_DIM_K);
+    let taps_v_off = layer_idx * TAPS_LEN * (NUM_KV_HEADS * HEAD_DIM_V);
+    let taps_dim_q = TAPS_LEN * (NUM_HEADS * HEAD_DIM_Q);
+    let taps_dim_k = TAPS_LEN * (NUM_KV_HEADS * HEAD_DIM_K);
+    let taps_dim_v = TAPS_LEN * (NUM_KV_HEADS * HEAD_DIM_V);
+    // Pre-compute RoPE for this layer's q_seq length.
+    let (cos, sin) = precompute_rope(HEAD_DIM_Q, q_seq);
+    let mut sa = vec![0.0f32; batch * q_seq * HIDDEN];
+    gqa_self_attention_with_taps_and_rope(
+        &normed,
+        &self.self_q_proj,
+        &self.self_k_proj,
+        &self.self_v_proj,
+        &self.self_out_proj,
+        &self.self_q_norm_scale[q_scale_off..q_scale_off + HEAD_DIM_Q],
+        &self.self_k_norm_scale[k_scale_off..k_scale_off + HEAD_DIM_K],
+        self.self_attn_gate[layer_idx],
+        batch,
+        q_seq,
+        &self.self_q_taps[taps_q_off..taps_q_off + taps_dim_q],
+        &self.self_k_taps[taps_k_off..taps_k_off + taps_dim_k],
+        &self.self_v_taps[taps_v_off..taps_v_off + taps_dim_v],
+        &cos,
+        &sin,
+        &mut sa,
+    );
         // residual
         for i in 0..out.len() {
             out[i] = text_emb[i] + sa[i];

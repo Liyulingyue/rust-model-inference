@@ -32,16 +32,18 @@ mod imp {
     use super::*;
 
     #[derive(Clone, Copy)]
-struct Handle(*mut std::ffi::c_void);
-impl Handle {
-    fn is_null(&self) -> bool { self.0.is_null() }
-}
-// SAFETY: the underlying libneedle3.so runtime is documented as not
-// thread-safe per process; we only call into it from a single worker
-// at a time. The handle is Send so we can stash it inside the
-// `OnceLock<Result<Lib, String>>`.
-unsafe impl Send for Handle {}
-unsafe impl Sync for Handle {}
+    struct Handle(*mut std::ffi::c_void);
+    impl Handle {
+        fn is_null(&self) -> bool {
+            self.0.is_null()
+        }
+    }
+    // SAFETY: the underlying libneedle3.so runtime is documented as not
+    // thread-safe per process; we only call into it from a single worker
+    // at a time. The handle is Send so we can stash it inside the
+    // `OnceLock<Result<Lib, String>>`.
+    unsafe impl Send for Handle {}
+    unsafe impl Sync for Handle {}
 
     extern "C" {
         fn dlopen(filename: *const c_char, flag: c_int) -> *mut std::ffi::c_void;
@@ -51,14 +53,14 @@ unsafe impl Sync for Handle {}
     }
     const RTLD_LAZY: c_int = 0x00001;
 
-pub(super) struct Lib {
-    pub(super) init: NeedleInit,
-    pub(super) load: NeedleLoad,
-    pub(super) last_error: NeedleLastError,
-    pub(super) reset: NeedleReset,
-    pub(super) transcribe: NeedleTranscribe,
-    _handle: Handle,
-}
+    pub(super) struct Lib {
+        pub(super) init: NeedleInit,
+        pub(super) load: NeedleLoad,
+        pub(super) last_error: NeedleLastError,
+        pub(super) reset: NeedleReset,
+        pub(super) transcribe: NeedleTranscribe,
+        _handle: Handle,
+    }
 
     fn lookup<T>(handle: Handle, name: &[u8]) -> Result<T, String> {
         let ptr = unsafe { dlsym(handle, name.as_ptr() as *const c_char) };
@@ -80,11 +82,9 @@ pub(super) struct Lib {
         let raw = unsafe { dlopen(path_c.as_ptr() as *const c_char, RTLD_LAZY) };
         let handle = Handle(raw);
         if handle.is_null() {
-            return Err(format!(
-                "dlopen({}): {}",
-                path.display(),
-                unsafe { std::str::from_utf8_unchecked(std::ffi::CStr::from_ptr(dlerror()).to_bytes()) }
-            ));
+            return Err(format!("dlopen({}): {}", path.display(), unsafe {
+                std::str::from_utf8_unchecked(std::ffi::CStr::from_ptr(dlerror()).to_bytes())
+            }));
         }
         let init: NeedleInit = lookup(handle, b"needle_init\0")?;
         let load: NeedleLoad = lookup(handle, b"needle_load\0")?;
@@ -92,16 +92,14 @@ pub(super) struct Lib {
         let reset: NeedleReset = lookup(handle, b"needle_reset\0")?;
         let transcribe: NeedleTranscribe = lookup(handle, b"needle_transcribe\0")?;
         Ok(Lib {
-        init,
-        load,
-        last_error,
-        reset,
-        transcribe,
-        _handle: handle,
-    })
+            init,
+            load,
+            last_error,
+            reset,
+            transcribe,
+            _handle: handle,
+        })
     }
-
-
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -155,15 +153,13 @@ unsafe fn last_error(lib: &imp::Lib) -> String {
 pub fn load(weights_path: &Path) -> Result<(), String> {
     let path = lib_path();
     let lib = open_library(&path)?;
-    let data = std::fs::read(weights_path)
-        .map_err(|e| format!("read {}: {e}", weights_path.display()))?;
+    let data =
+        std::fs::read(weights_path).map_err(|e| format!("read {}: {e}", weights_path.display()))?;
     let rc = unsafe { (lib.load)(data.as_ptr() as *const c_char, data.len() as u64) };
     if rc < 0 {
-        return Err(format!(
-            "needle_load ({} bytes): {}",
-            data.len(),
-            unsafe { last_error(lib) }
-        ));
+        return Err(format!("needle_load ({} bytes): {}", data.len(), unsafe {
+            last_error(lib)
+        }));
     }
     Ok(())
 }
@@ -203,16 +199,12 @@ pub fn transcribe(
         )
     };
     if rc < 0 {
-        return Err(format!(
-            "needle_transcribe: {}",
-            unsafe { last_error(lib) }
-        ));
+        return Err(format!("needle_transcribe: {}", unsafe { last_error(lib) }));
     }
     let s = std::str::from_utf8(&buf).map_err(|e| format!("non-utf8 output: {e}"))?;
     let end = s.find('\0').unwrap_or(s.len());
     let json = &s[..end];
-    serde_json::from_str::<TranscribeResult>(json)
-        .map_err(|e| format!("json decode {json:?}: {e}"))
+    serde_json::from_str::<TranscribeResult>(json).map_err(|e| format!("json decode {json:?}: {e}"))
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]

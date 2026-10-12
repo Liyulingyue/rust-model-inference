@@ -23,8 +23,7 @@ use crate::app::open_or_exit;
 use crate::core::tensor::TensorSource;
 use crate::format::ggufrs::ComponentRole;
 use crate::models::whistle::{
-    final_rms_norm, load_encoder_layer, load_mhc_layer, EncoderLayerWeights, MhcLayer,
-    MHC_LANES,
+    final_rms_norm, load_encoder_layer, load_mhc_layer, EncoderLayerWeights, MhcLayer, MHC_LANES,
 };
 use crate::needle_ffi;
 
@@ -40,7 +39,10 @@ fn cact_path() -> PathBuf {
     let manifest = std::path::PathBuf::from(
         std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string()),
     );
-    manifest.join("models").join("whistle-probe").join("whistle.cact")
+    manifest
+        .join("models")
+        .join("whistle-probe")
+        .join("whistle.cact")
 }
 
 /// Read a 16-bit / 16kHz mono PCM WAV into mono `f32` in `[-1, 1]`.
@@ -59,7 +61,12 @@ fn read_wav_mono_16k(path: &std::path::Path) -> Result<Vec<f32>, String> {
     let mut data_len = 0usize;
     while pos + 8 <= bytes.len() {
         let tag = &bytes[pos..pos + 4];
-        let size = u32::from_le_bytes([bytes[pos + 4], bytes[pos + 5], bytes[pos + 6], bytes[pos + 7]]) as usize;
+        let size = u32::from_le_bytes([
+            bytes[pos + 4],
+            bytes[pos + 5],
+            bytes[pos + 6],
+            bytes[pos + 7],
+        ]) as usize;
         if tag == b"fmt " {
             audio_format = u16::from_le_bytes([bytes[pos + 8], bytes[pos + 9]]);
             channels = u16::from_le_bytes([bytes[pos + 10], bytes[pos + 11]]);
@@ -115,8 +122,7 @@ pub fn run_whistle_cli(options: &CliOptions) -> Result<(), String> {
     // hands us a `CliOptions` already decided. We re-check the
     // architecture just to give a clear error if the user mis-routed.
     let model_path = &options.model;
-    let source: Arc<dyn TensorSource> =
-        Arc::from(open_or_exit(model_path, ComponentRole::Llm));
+    let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(model_path, ComponentRole::Llm));
     let arch = source
         .metadata("general.architecture")
         .and_then(|v| v.to_string_val())
@@ -142,7 +148,9 @@ pub fn run_whistle_cli(options: &CliOptions) -> Result<(), String> {
     eprintln!(
         "whistle (pure Rust): loading metadata from {} (engine={:?})",
         model_path.display(),
-        source.metadata("whistle.engine").and_then(|v| v.to_string_val())
+        source
+            .metadata("whistle.engine")
+            .and_then(|v| v.to_string_val())
     );
 
     let enc_layers: Vec<_> = (0..8).map(|i| load_encoder_layer(&*source, i)).collect();
@@ -212,7 +220,13 @@ pub fn run_whistle_cli(options: &CliOptions) -> Result<(), String> {
         };
         let mut next_stream = vec![0.0f32; plane_4];
         crate::models::whistle::mhc::forward_one_stream(
-            &layer_w, &mhc, &stream, i, 1, seq_len, &mut next_stream,
+            &layer_w,
+            &mhc,
+            &stream,
+            i,
+            1,
+            seq_len,
+            &mut next_stream,
         );
         stream = next_stream;
     }
@@ -280,13 +294,13 @@ fn run_whistle_needle_runtime(options: &CliOptions) -> Result<(), String> {
     let cact = cact_path();
     needle_ffi::load(&cact)?;
 
-    let language = std::env::var("WHISTLE_LANG").ok().or_else(|| Some("en".into()));
+    let language = std::env::var("WHISTLE_LANG")
+        .ok()
+        .or_else(|| Some("en".into()));
     let result = needle_ffi::transcribe(&samples, language.as_deref(), None, false)?;
     eprintln!(
         "whistle (needle runtime): ttft={:.1} ms decode_tps={:.0} lang={:?}",
-        result.ttft_ms,
-        result.decode_tps,
-        result.language
+        result.ttft_ms, result.decode_tps, result.language
     );
     println!("{}", result.text);
     Ok(())

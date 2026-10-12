@@ -20,8 +20,8 @@
 use crate::ops::norm::rms_norm;
 
 use super::{
-    gqa_self_attention, hadamard_mlp, zc_rms_norm_placeholder, HadamardLayer, HIDDEN,
-    HEAD_DIM_Q, HEAD_DIM_K, NUM_LAYERS, NUM_HEADS, NUM_KV_HEADS,
+    gqa_self_attention, hadamard_mlp, zc_rms_norm_placeholder, HadamardLayer, HEAD_DIM_K,
+    HEAD_DIM_Q, HIDDEN, NUM_HEADS, NUM_KV_HEADS, NUM_LAYERS,
 };
 
 pub const MHC_LANES: usize = 4;
@@ -91,15 +91,15 @@ fn sinkhorn(logits: &mut [f32], batch: usize, seq_len: usize) {
 
 #[derive(Debug)]
 pub struct MhcLayer {
-    pub phi_pre: Vec<f32>,  // [NUM_LAYERS, PHI_CHANNELS, PHI_PRE_OUT] = [8, 2048, 4]
+    pub phi_pre: Vec<f32>, // [NUM_LAYERS, PHI_CHANNELS, PHI_PRE_OUT] = [8, 2048, 4]
     pub phi_post: Vec<f32>, // [8, 2048, 4]
-    pub phi_res: Vec<f32>,  // [8, 2048, 16]
-    pub b_pre: Vec<f32>,    // [8, 4]
-    pub b_post: Vec<f32>,   // [8, 4]
-    pub b_res: Vec<f32>,    // [8, 4, 4]
-    pub a_pre: Vec<f32>,    // [8]
-    pub a_post: Vec<f32>,   // [8]
-    pub a_res: Vec<f32>,    // [8]
+    pub phi_res: Vec<f32>, // [8, 2048, 16]
+    pub b_pre: Vec<f32>,   // [8, 4]
+    pub b_post: Vec<f32>,  // [8, 4]
+    pub b_res: Vec<f32>,   // [8, 4, 4]
+    pub a_pre: Vec<f32>,   // [8]
+    pub a_post: Vec<f32>,  // [8]
+    pub a_res: Vec<f32>,   // [8]
 }
 
 /// Load mhc weights from the source.
@@ -198,8 +198,7 @@ pub fn forward_one(
     for bt in 0..(batch * seq_len) {
         let src = &x[bt * HIDDEN..bt * HIDDEN + HIDDEN];
         for lane in 0..MHC_LANES {
-            let dst = &mut stream[bt * MHC_LANES * HIDDEN + lane * HIDDEN..]
-                [..HIDDEN];
+            let dst = &mut stream[bt * MHC_LANES * HIDDEN + lane * HIDDEN..][..HIDDEN];
             dst.copy_from_slice(src);
         }
     }
@@ -339,7 +338,8 @@ pub fn forward_one_stream(
             }
             let r = out_k / n;
             let c2 = out_k % n;
-            res_logits[bt * (n * n) + r * n + c2] = a_res * dot + mhc.b_res[phi_res_b_off + r * n + c2];
+            res_logits[bt * (n * n) + r * n + c2] =
+                a_res * dot + mhc.b_res[phi_res_b_off + r * n + c2];
         }
     }
     // Apply sinkhorn per (B, T)
@@ -352,8 +352,7 @@ pub fn forward_one_stream(
             for h in 0..c {
                 let mut acc = 0.0f32;
                 for j in 0..n {
-                    acc += res_logits[bt * (n * n) + i * n + j]
-                        * stream[bt * n * c + j * c + h];
+                    acc += res_logits[bt * (n * n) + i * n + j] * stream[bt * n * c + j * c + h];
                 }
                 acc += hpost[bt * n + i] * y[bt * c + h];
                 stream_out[bt * n * c + i * c + h] = acc;
@@ -429,7 +428,14 @@ fn run_inner_block(
 
     // mlp = hadamard_mlp(h_norm, layer_idx)
     let mut mlp = vec![0.0f32; plane * HIDDEN];
-    hadamard_mlp(&h_norm, &layer.hadamard, layer_idx, batch, seq_len, &mut mlp);
+    hadamard_mlp(
+        &h_norm,
+        &layer.hadamard,
+        layer_idx,
+        batch,
+        seq_len,
+        &mut mlp,
+    );
 
     // block_out = skip + mlp
     for k in 0..(plane * HIDDEN) {

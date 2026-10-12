@@ -105,8 +105,13 @@ def gqa_attention(
     k_norm_scale: np.ndarray,
     attn_gate: float,
     is_cross: bool = False,
+    q_taps: np.ndarray | None = None,
+    k_taps: np.ndarray | None = None,
+    v_taps: np.ndarray | None = None,
+    rope: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> np.ndarray:
-    """Standard GQA / MHA attention with per-head RMSNorm on q/k.
+    """GQA / MHA attention with per-head RMSNorm on q/k, optional
+    3-tap causal FIR on q/k/v, and optional RoPE.
 
     Self-attn (encoder/decoder): GQA 4:1 (q=8, kv=2).
     Cross-attn (decoder): full MHA (q=kv=8).
@@ -132,6 +137,14 @@ def gqa_attention(
     k_raw = kv_source @ w_k
     v_raw = kv_source @ w_v
 
+    # Optional 3-tap causal FIR on q/k/v (stack self-attn only).
+    if q_taps is not None:
+        q_raw = _taps(q_raw, q_taps)
+    if k_taps is not None:
+        k_raw = _taps(k_raw, k_taps)
+    if v_taps is not None:
+        v_raw = _taps(v_raw, v_taps)
+
     q = apply_qk_norm(q_raw, q_norm_scale, seq_q, NUM_HEADS, HEAD_DIM_Q)
     k = apply_qk_norm(k_raw, k_norm_scale, seq_k, n_kv, HEAD_DIM_K)
     v = v_raw.reshape(b, seq_k, n_kv, HEAD_DIM_V)
@@ -139,6 +152,12 @@ def gqa_attention(
     q = q.reshape(b, seq_q, NUM_HEADS, HEAD_DIM_Q).transpose(0, 2, 1, 3)
     k = k.reshape(b, seq_k, n_kv, HEAD_DIM_K).transpose(0, 2, 1, 3)
     v = v.reshape(b, seq_k, n_kv, HEAD_DIM_V).transpose(0, 2, 1, 3)
+
+    # Optional RoPE on q/k.
+    if rope is not None:
+        cos, sin = rope
+        q = _apply_rope(q, cos, sin)
+        k = _apply_rope(k, cos, sin)
 
     if not is_cross:
         rep = NUM_HEADS // NUM_KV_HEADS
@@ -254,6 +273,58 @@ def _sinkhorn(logits, iters: int = 20) -> np.ndarray:
         log_K = log_K - np.log(np.exp(log_K).sum(axis=-1, keepdims=True) + 1e-30)
         log_K = log_K - np.log(np.exp(log_K).sum(axis=-2, keepdims=True) + 1e-30)
     return np.exp(log_K)
+
+
+def _shift_right(x: np.ndarray, offset: int) -> np.ndarray:
+    """Causal shift-right by `offset` positions, zero-pad on the left.
+
+    Used by the 3-tap causal FIR in stack self-attn. `x` is `[B, T, ...]`.
+    """
+    if offset == 0:
+        return x
+    pad_shape = (x.shape[0], offset) + x.shape[2:]
+    pad = np.zeros(pad_shape, dtype=x.dtype)
+    return np.concatenate([pad, x[:, : x.shape[1] - offset]], axis=1)
+
+
+def _precompute_rope(head_dim: int, seq_len: int, theta: float = 100000.0):
+    """Reproduce `precompute_rope_freqs` from cactus-compute/needle."""
+    freqs = 1.0 / (theta ** (np.arange(0, head_dim, 2, dtype=np.float32) / head_dim))
+    angles = np.arange(seq_len, dtype=np.float32)[:, None] * freqs[None, :]
+    return np.cos(angles), np.sin(angles)
+
+
+def _apply_rope(x: np.ndarray, cos: np.ndarray, sin: np.ndarray) -> np.ndarray:
+    """Reproduce `apply_rope` from cactus-compute/needle (architecture_mlx.py).
+
+    `x` shape `[B, H, T, D]`. Splits D into halves; rotates first half by
+    (cos, sin) against the second half, equivalent to:
+
+        x1 * cos - x2 * sin, x2 * cos + x1 * sin
+
+    Per-position rotation. With `theta = 100000.0`, the
+    multi-second-decoder-friendly 5B-model rope schedule.
+    """
+    T = x.shape[2]
+    half = x.shape[-1] // 2
+    cos = cos[:T][None, None, :, :]
+    sin = sin[:T][None, None, :, :]
+    x1, x2 = x[..., :half], x[..., half:]
+    return np.concatenate(
+        [x1 * cos - x2 * sin, x2 * cos + x1 * sin], axis=-1,
+    ).astype(x.dtype)
+
+
+def _taps(z: np.ndarray, tap_w: np.ndarray) -> np.ndarray:
+    """3-tap causal FIR on q/k/v from cactus-compute/needle.
+
+    `tap_w` shape `[n_taps, dim]`. `z` shape `[B, T, dim]`. Returns
+    `Σ_j tap_w[j] * _shift_right(z, j)`.
+    """
+    out = np.zeros_like(z)
+    for j in range(tap_w.shape[0]):
+        out = out + tap_w[j] * _shift_right(z, j)
+    return out
 
 
 def _rms_unit(x: np.ndarray, eps: float = 1e-6) -> np.ndarray:
@@ -373,8 +444,49 @@ def save_reference():
     x_final = stream.mean(axis=2)
     enc_out = rms_norm(x_final, W["encoder/final_norm/scale"])
 
+    # Decoder reference: multi-token self-attn + cross-attn over real
+    # 5-token prompt with RoPE + 3-tap causal FIR. The placeholder
+    # path (no taps / no RoPE) agreed at 1-token; this exercises the
+    # multi-token parity case for the lifted implementations.
     text_tokens = np.array([[1, 2, 3, 4, 5]], dtype=np.int64)
     text_emb = W["embedding/embedding"][text_tokens]
+
+    # Pre-compute RoPE for the stack self-attn sequence length (5 tokens).
+    rope = _precompute_rope(HEAD_DIM_Q, seq_len=text_emb.shape[1])
+    # Pull per-layer taps weights (shape [num_layers, n_taps, dim]).
+    p_stack = "stack/layers/block"
+    sa_taps_q = W[p_stack + "/self_attn/q_taps"][0]
+    sa_taps_k = W[p_stack + "/self_attn/k_taps"][0]
+    sa_taps_v = W[p_stack + "/self_attn/v_taps"][0]
+    pre = rms_norm(text_emb, W[p_stack + "/ZCRMSNorm_0/scale"][0])
+    sa = gqa_attention(
+        pre, None, 0,
+        w_q=W[p_stack + "/self_attn/q_proj/kernel"][0],
+        w_k=W[p_stack + "/self_attn/k_proj/kernel"][0],
+        w_v=W[p_stack + "/self_attn/v_proj/kernel"][0],
+        w_out=W[p_stack + "/self_attn/out_proj/kernel"][0],
+        q_norm_scale=W[p_stack + "/self_attn/q_norm/scale"][0],
+        k_norm_scale=W[p_stack + "/self_attn/k_norm/scale"][0],
+        attn_gate=W[p_stack + "/attn_gate"][0],
+        q_taps=sa_taps_q, k_taps=sa_taps_k, v_taps=sa_taps_v,
+        rope=rope,
+    )
+    h_stack = text_emb + sa
+    cross_pre = rms_norm(h_stack, W[p_stack + "/cross_norm/scale"][0])
+    cross = gqa_attention(
+        cross_pre, enc_out, 0,
+        w_q=W[p_stack + "/cross_attn/q_proj/kernel"][0],
+        w_k=W[p_stack + "/cross_attn/k_proj/kernel"][0],
+        w_v=W[p_stack + "/cross_attn/v_proj/kernel"][0],
+        w_out=W[p_stack + "/cross_attn/out_proj/kernel"][0],
+        q_norm_scale=W[p_stack + "/cross_attn/q_norm/scale"][0],
+        k_norm_scale=W[p_stack + "/cross_attn/k_norm/scale"][0],
+        attn_gate=W[p_stack + "/cross_gate"][0],
+        is_cross=True,
+    )
+    h_stack = h_stack + cross
+    logits_emb_stack = rms_norm(h_stack, W["stack/final_norm/scale"])
+    logits_stack = logits_emb_stack @ W["embedding/embedding"].T
 
     np.savez(
         out_path,
@@ -384,10 +496,12 @@ def save_reference():
         encoder_final=enc_out,
         text_tokens=text_tokens,
         text_emb=text_emb,
-        # saved tensors are consumed by the Rust unit test
+        # Multi-token decoder reference (RoPE + taps applied).
+        stack_sa_hidden=h_stack,
+        stack_logits=logits_stack,
+        stack_final_norm=logits_emb_stack,
     )
     print(f"saved reference: {out_path} ({out_path.stat().st_size} bytes)")
-
 
 def main():
     # Synthetic input: random mel-spec-like feature already through conv stem
