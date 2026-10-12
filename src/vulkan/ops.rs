@@ -17,6 +17,8 @@ const Q8_MATMUL_GROUPED_DP4A_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/q8_matmul_grouped_dp4a.spv");
 const Q8_MATMUL_GROUPED_TILED_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/q8_matmul_tiled_dp4a.spv");
+const Q8_MATMUL_COOPERATIVE_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/q8_matmul_cooperative_dp4a.spv");
 const F16_MATMUL_TILED_SHADER: &[u8] = include_bytes!("../../shaders/bin/f16_matmul_tiled.spv");
 
 const ATTENTION_SCORES_TILED_SHADER: &[u8] =
@@ -75,6 +77,7 @@ const Q8_MATMUL_GROUPED_TILED: usize = 24;
 const F16_MATMUL_TILED: usize = 25;
 const ATTENTION_SCORES_TILED: usize = 26;
 const MLX_AFFINE_MATMUL: usize = 27;
+const Q8_MATMUL_COOPERATIVE: usize = 28;
 
 pub(crate) fn tiled_matmul_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -120,18 +123,8 @@ static DISPATCH_TRACE_COUNTS: [std::sync::atomic::AtomicU64; OPERATOR_SHADERS.le
 const DISPATCH_LOG_CAPACITY: usize = 4096;
 
 #[cfg(feature = "vulkan")]
-struct DispatchLogEntry {
-    pipeline: u32,
-    set: u64,
-    x: u32,
-    y: u32,
-    z: u32,
-    submit_epoch: u32,
-}
-
-#[cfg(feature = "vulkan")]
-static DISPATCH_LOG: [std::sync::atomic::AtomicU64; DISPATCH_LOG_CAPACITY * 3] =
-    [const { std::sync::atomic::AtomicU64::new(0) }; DISPATCH_LOG_CAPACITY * 3];
+static DISPATCH_LOG: [std::sync::atomic::AtomicU64; DISPATCH_LOG_CAPACITY * 6] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; DISPATCH_LOG_CAPACITY * 6];
 
 #[cfg(feature = "vulkan")]
 static DISPATCH_LOG_LEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -140,7 +133,7 @@ static DISPATCH_LOG_EPOCH: std::sync::atomic::AtomicU32 = std::sync::atomic::Ato
 
 /// Shader names indexed by `OPERATOR_SHADERS` position, for the trace dump.
 #[cfg(feature = "vulkan")]
-const OPERATOR_SHADER_NAMES: [&str; 27] = [
+const OPERATOR_SHADER_NAMES: [&str; OPERATOR_SHADERS.len()] = [
     "quantize_q8_0",
     "quantize_q8_k",
     "q8_matmul_grouped",
@@ -168,6 +161,8 @@ const OPERATOR_SHADER_NAMES: [&str; 27] = [
     "q8_matmul_grouped_tiled",
     "f16_matmul_tiled",
     "attention_scores_tiled",
+    "mlx_affine_matmul",
+    "q8_matmul_cooperative",
 ];
 
 /// True when the ordered dispatch log is being collected.
@@ -187,15 +182,13 @@ pub(crate) fn dispatch_log_push(pipeline: usize, set: u64, grid: [u32; 3]) {
         // exactly the sequence someone is trying to read.
         return;
     }
-    let base = index * 3;
+    let base = index * 6;
     DISPATCH_LOG[base].store(pipeline as u64, Relaxed);
     DISPATCH_LOG[base + 1].store(set, Relaxed);
-    DISPATCH_LOG[base + 2].store(
-        (grid[0] as u64)
-            | ((grid[1] as u64) << 32)
-            | ((DISPATCH_LOG_EPOCH.load(Relaxed) as u64) << 20),
-        Relaxed,
-    );
+    DISPATCH_LOG[base + 2].store(grid[0] as u64, Relaxed);
+    DISPATCH_LOG[base + 3].store(grid[1] as u64, Relaxed);
+    DISPATCH_LOG[base + 4].store(grid[2] as u64, Relaxed);
+    DISPATCH_LOG[base + 5].store(DISPATCH_LOG_EPOCH.load(Relaxed) as u64, Relaxed);
 }
 
 /// Mark a submission boundary in the log, so dispatches can be grouped by the
@@ -257,7 +250,7 @@ pub fn dump_dispatch_trace() {
     }
 }
 
-const OPERATOR_SHADERS: [&[u8]; 28] = [
+const OPERATOR_SHADERS: [&[u8]; 29] = [
     QUANTIZE_Q8_0_SHADER,
     QUANTIZE_Q8_K_SHADER,
     Q8_MATMUL_GROUPED_SHADER,
@@ -286,6 +279,7 @@ const OPERATOR_SHADERS: [&[u8]; 28] = [
     F16_MATMUL_TILED_SHADER,
     ATTENTION_SCORES_TILED_SHADER,
     MLX_AFFINE_MATMUL_SHADER,
+    Q8_MATMUL_COOPERATIVE_SHADER,
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1414,7 +1408,9 @@ impl<'a> Qwen3Ops<'a> {
             .map(|(index, shader)| {
                 if index == Q8_MATMUL_GROUPED && force_dp4a {
                     Q8_MATMUL_GROUPED_DP4A_SHADER
-                } else if index == Q8_MATMUL_GROUPED_TILED && !q8_tiled {
+                } else if matches!(index, Q8_MATMUL_GROUPED_TILED | Q8_MATMUL_COOPERATIVE)
+                    && !q8_tiled
+                {
                     // The tiled kernel needs `dotPacked4x8EXT`, so on a device
                     // without it the slot falls back to the plain grouped shader
                     // and the recorder selects ordinary GPU work instead of
@@ -1754,11 +1750,32 @@ impl<'a> Qwen3Ops<'a> {
     fn record_linear_dispatch(
         &self,
         commands: &TokenCommands<'_>,
-        pipeline: usize,
+        mut pipeline: usize,
         bindings: OperatorBindings,
         push: &[u32],
-        dispatch: [u32; 3],
+        mut dispatch: [u32; 3],
     ) {
+        if pipeline == Q8_MATMUL_GROUPED
+            && self.q8_tiled
+            && tiled_matmul_enabled()
+            && push.len() == 22
+            && push[21] == 1
+            && push[2] >= 256
+        {
+            let columns = push[5].max(push[8]).max(push[11]) as usize;
+            // Small matvecs gain parallel block loads; wide heads retain the row kernel.
+            if columns <= 4096 {
+                if let Ok(grid) = matmul_dispatch(
+                    columns.div_ceil(2),
+                    1,
+                    push[13] as usize,
+                    &self.context.limits,
+                ) {
+                    pipeline = Q8_MATMUL_COOPERATIVE;
+                    dispatch = grid;
+                }
+            }
+        }
         unsafe {
             commands.bind(
                 self.pipelines[pipeline],
@@ -6833,101 +6850,224 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a Vulkan device and RUST_GPU_DISPATCH_TRACE=2; run in isolation"]
+    fn vulkan_q8_cooperative_selection_preserves_gpu_alternatives() {
+        use super::*;
+        use std::sync::atomic::Ordering::Relaxed;
+        assert!(dispatch_log_enabled());
+        for (width, outputs, rows, limited_grid, expected_pipeline, expected_grid) in [
+            (224, 33, 1, false, Q8_MATMUL_GROUPED, [1, 1, 1]),
+            (256, 4096, 1, false, Q8_MATMUL_COOPERATIVE, [2048, 1, 1]),
+            (256, 4097, 1, false, Q8_MATMUL_GROUPED, [65, 1, 1]),
+            (256, 33, 2, false, Q8_MATMUL_GROUPED, [1, 1, 2]),
+            (256, 33, 1, true, Q8_MATMUL_GROUPED, [1, 1, 1]),
+        ] {
+            let mut context = VulkanContext::new().unwrap();
+            if limited_grid {
+                context.limits.max_compute_work_group_count[..2].fill(1);
+            }
+            let layout = BatchedLinearLayout::new(rows, width, outputs).unwrap();
+            let mut ops = Qwen3Ops::new_with_size(&context, layout.size, 2).unwrap();
+            let block: Vec<_> = [0x00, 0x3c].into_iter().chain([1; 32]).collect();
+            let weight = block.repeat(width / 32 * outputs);
+            let buffer = unsafe { context.upload_static(&weight) }.unwrap();
+            let bindings = ops
+                .bind_weight_buffers(&[buffer], &[GpuWeightFormat::Q8_0])
+                .unwrap();
+            ops.write_f32(
+                layout.q8,
+                &vec![f32::from_bits(0x0101_0101); rows * width / 4],
+            )
+            .unwrap();
+            ops.write_f32(layout.scales, &vec![1.0; rows * width / 32])
+                .unwrap();
+            ops.write_f32(layout.output, &vec![f32::NAN; rows * outputs])
+                .unwrap();
+            let (push, grid) = matmul_rows_push(
+                layout.size,
+                &context.limits,
+                bindings,
+                layout.q8,
+                layout.scales,
+                None,
+                &[(layout.output, outputs, outputs * 4)],
+                width,
+                rows,
+                width,
+            )
+            .unwrap();
+            let (expected_pipeline, expected_grid) = if ops.q8_tiled && tiled_matmul_enabled() {
+                (expected_pipeline, expected_grid)
+            } else {
+                (Q8_MATMUL_GROUPED, grid)
+            };
+            dispatch_log_reset();
+            let before = context.submission_count();
+            let commands = TokenCommands::begin(&context).unwrap();
+            ops.record_linear_dispatch(&commands, Q8_MATMUL_GROUPED, bindings, &push, grid);
+            commands.submit_and_wait().unwrap();
+            assert_eq!(context.submission_count(), before + 1);
+            assert_eq!(DISPATCH_LOG_LEN.load(Relaxed), 1);
+            assert_eq!(DISPATCH_LOG[0].load(Relaxed), expected_pipeline as u64);
+            for (cell, expected) in DISPATCH_LOG[2..5].iter().zip(expected_grid) {
+                assert_eq!(cell.load(Relaxed), expected as u64);
+            }
+            assert!(ops
+                .read_f32(layout.output, rows * outputs)
+                .unwrap()
+                .iter()
+                .all(|&value| value.to_bits() == (width as f32).to_bits()));
+            unsafe { context.destroy_completed_buffers(&[buffer]) }.unwrap();
+        }
+        dispatch_log_reset();
+    }
+
+    #[test]
+    #[ignore = "mutates the global dispatch log; run in isolation"]
+    fn dispatch_log_preserves_grid_epoch_and_capacity() {
+        use super::*;
+        use std::sync::atomic::Ordering::Relaxed;
+        dispatch_log_reset();
+        for index in 0..=DISPATCH_LOG_CAPACITY {
+            dispatch_log_new_epoch();
+            dispatch_log_push(
+                Q8_MATMUL_COOPERATIVE,
+                0x0123_4567_89ab_cdef,
+                [0x3210_0000 + index as u32, 12345, 123],
+            );
+        }
+        for index in [0, DISPATCH_LOG_CAPACITY - 1] {
+            let actual: Vec<_> = DISPATCH_LOG[index * 6..index * 6 + 6]
+                .iter()
+                .map(|cell| cell.load(Relaxed))
+                .collect();
+            assert_eq!(
+                actual,
+                [
+                    Q8_MATMUL_COOPERATIVE as u64,
+                    0x0123_4567_89ab_cdef,
+                    0x3210_0000 + index as u64,
+                    12345,
+                    123,
+                    index as u64 + 1,
+                ]
+            );
+        }
+        dump_dispatch_log();
+        dispatch_log_reset();
+        assert_eq!(DISPATCH_LOG_LEN.load(Relaxed), 0);
+        assert_eq!(DISPATCH_LOG_EPOCH.load(Relaxed), 0);
+    }
+
+    #[test]
     #[ignore = "requires a Vulkan device; checks scalar, NEON and AVX2 reduction contracts"]
     fn vulkan_q8_reduction_modes_match_golden_bits() {
         use super::*;
-        const WIDTH: usize = 96;
         const OUTPUTS: usize = 65;
         const ROWS: usize = 5;
-        let mut context = VulkanContext::new().unwrap();
-        context.limits.max_compute_work_group_count[0] = 1;
-        let mut cursor = 0;
-        let q8 = region(&mut cursor, ROWS * WIDTH).unwrap();
-        let scales = f32_region(&mut cursor, ROWS * 3 * 4).unwrap();
-        let output = f32_region(&mut cursor, ROWS * OUTPUTS * 4).unwrap();
-        let mut ops = Qwen3Ops::new_with_size(&context, cursor, 2).unwrap();
-        let coefficients = [
-            [47i8, -89, 13, 102, -63, 7, -31, 19],
-            [-101, 37, 83, -11, 59, -73, 23, -5],
-            [11, 61, -107, 29, -17, 97, -43, 3],
-        ];
-        let row: Vec<u8> = coefficients
-            .iter()
-            .flat_map(|groups| {
-                [0x00, 0x3c]
-                    .into_iter()
-                    .chain(groups.iter().flat_map(|&value| [value as u8; 4]))
-            })
-            .collect();
-        let weight = row.repeat(OUTPUTS);
-        let buffer = unsafe { context.upload_static(&weight) }.unwrap();
-        let bindings = ops
-            .bind_weight_buffers(&[buffer], &[GpuWeightFormat::Q8_0])
-            .unwrap();
-        let input: Vec<f32> = (1..=ROWS as u8)
-            .flat_map(|value| [f32::from_bits(u32::from_le_bytes([value; 4])); WIDTH / 4])
-            .collect();
-        ops.write_f32(q8, &input).unwrap();
-        ops.write_f32(scales, &[0.13f32, 0.19, 0.37].repeat(ROWS))
-            .unwrap();
-        // Fixed IEEE-754 results distinguish block FMA, unfused adds and eight streams.
-        for (mode, expected) in [
-            (
-                0,
-                [0x427828f6, 0x42f828f6, 0x433a1eb9, 0x437828f6, 0x439b199a],
-            ),
+        // Independent f32/fmaf oracle, including four cooperative chunks.
+        for (repeat, expected_bits) in [
             (
                 1,
-                [0x427828f6, 0x42f828f6, 0x433a1eb8, 0x437828f6, 0x439b199a],
+                [
+                    [0x427828f6, 0x42f828f6, 0x433a1eb9, 0x437828f6, 0x439b199a],
+                    [0x427828f6, 0x42f828f6, 0x433a1eb8, 0x437828f6, 0x439b199a],
+                    [0x427828f2, 0x42f828f2, 0x433a1eb8, 0x437828f2, 0x439b1998],
+                ],
             ),
             (
-                8,
-                [0x427828f2, 0x42f828f2, 0x433a1eb8, 0x437828f2, 0x439b1998],
+                33,
+                [
+                    [0x44ffea31, 0x457fea31, 0x45bfefa8, 0x45ffea31, 0x461ff265],
+                    [0x44ffea31, 0x457fea31, 0x45bfefa8, 0x45ffea31, 0x461ff265],
+                    [0x44ffea3e, 0x457fea3e, 0x45bfefa6, 0x45ffea3e, 0x461ff263],
+                ],
             ),
         ] {
-            for tiled in [false, true] {
-                if tiled && !ops.q8_tiled {
-                    continue;
-                }
-                let (mut push, mut dispatch) = matmul_rows_push(
-                    cursor,
-                    &context.limits,
-                    bindings,
-                    q8,
-                    scales,
-                    None,
-                    &[(output, OUTPUTS, OUTPUTS * 4)],
-                    WIDTH,
-                    ROWS,
-                    WIDTH,
-                )
+            let width = repeat * 96;
+            let mut context = VulkanContext::new().unwrap();
+            context.limits.max_compute_work_group_count[0] = 1;
+            let mut cursor = 0;
+            let q8 = region(&mut cursor, ROWS * width).unwrap();
+            let scales = f32_region(&mut cursor, ROWS * width / 32 * 4).unwrap();
+            let output = f32_region(&mut cursor, ROWS * OUTPUTS * 4).unwrap();
+            let mut ops = Qwen3Ops::new_with_size(&context, cursor, 2).unwrap();
+            let coefficients = [
+                [47i8, -89, 13, 102, -63, 7, -31, 19],
+                [-101, 37, 83, -11, 59, -73, 23, -5],
+                [11, 61, -107, 29, -17, 97, -43, 3],
+            ];
+            let row: Vec<u8> = coefficients
+                .iter()
+                .flat_map(|groups| {
+                    [0x00, 0x3c]
+                        .into_iter()
+                        .chain(groups.iter().flat_map(|&value| [value as u8; 4]))
+                })
+                .collect();
+            let weight = row.repeat(repeat * OUTPUTS);
+            let buffer = unsafe { context.upload_static(&weight) }.unwrap();
+            let bindings = ops
+                .bind_weight_buffers(&[buffer], &[GpuWeightFormat::Q8_0])
                 .unwrap();
-                push[14] = mode;
-                let pipeline = if tiled {
-                    let tokens = if mode == 8 { 4 } else { 32 };
-                    dispatch = row_dispatch(2, ROWS.div_ceil(tokens), &context.limits).unwrap();
-                    Q8_MATMUL_GROUPED_TILED
-                } else {
-                    Q8_MATMUL_GROUPED
-                };
-                ops.write_f32(output, &vec![f32::NAN; ROWS * OUTPUTS])
+            let input: Vec<f32> = (1..=ROWS as u8)
+                .flat_map(|value| {
+                    std::iter::repeat_n(f32::from_bits(u32::from_le_bytes([value; 4])), width / 4)
+                })
+                .collect();
+            ops.write_f32(q8, &input).unwrap();
+            ops.write_f32(scales, &[0.13f32, 0.19, 0.37].repeat(repeat * ROWS))
+                .unwrap();
+            // Fixed IEEE-754 results distinguish block FMA, unfused adds and eight streams.
+            for (mode, expected) in [0, 1, 8].into_iter().zip(expected_bits) {
+                for pipeline in [
+                    Q8_MATMUL_GROUPED,
+                    Q8_MATMUL_GROUPED_TILED,
+                    Q8_MATMUL_COOPERATIVE,
+                ] {
+                    if pipeline != Q8_MATMUL_GROUPED && !ops.q8_tiled {
+                        continue;
+                    }
+                    let (mut push, mut dispatch) = matmul_rows_push(
+                        cursor,
+                        &context.limits,
+                        bindings,
+                        q8,
+                        scales,
+                        None,
+                        &[(output, OUTPUTS, OUTPUTS * 4)],
+                        width,
+                        ROWS,
+                        width,
+                    )
                     .unwrap();
-                let commands = TokenCommands::begin(&context).unwrap();
-                ops.record_linear_dispatch(&commands, pipeline, bindings, &push, dispatch);
-                commands.submit_and_wait().unwrap();
-                let actual = ops.read_f32(output, ROWS * OUTPUTS).unwrap();
-                for (token, row) in actual.chunks_exact(OUTPUTS).enumerate() {
-                    for (column, value) in row.iter().enumerate() {
-                        assert_eq!(
-                            value.to_bits(),
-                            expected[token],
-                            "mode={mode} tiled={tiled} token={token} column={column}"
-                        );
+                    push[14] = mode;
+                    if pipeline == Q8_MATMUL_GROUPED_TILED {
+                        let tokens = if mode == 8 { 4 } else { 32 };
+                        dispatch = row_dispatch(2, ROWS.div_ceil(tokens), &context.limits).unwrap();
+                    } else if pipeline == Q8_MATMUL_COOPERATIVE {
+                        dispatch =
+                            matmul_dispatch(OUTPUTS.div_ceil(2), ROWS, 1, &context.limits).unwrap();
+                    }
+                    ops.write_f32(output, &vec![f32::NAN; ROWS * OUTPUTS])
+                        .unwrap();
+                    let commands = TokenCommands::begin(&context).unwrap();
+                    ops.record_linear_dispatch(&commands, pipeline, bindings, &push, dispatch);
+                    commands.submit_and_wait().unwrap();
+                    let actual = ops.read_f32(output, ROWS * OUTPUTS).unwrap();
+                    for (token, row) in actual.chunks_exact(OUTPUTS).enumerate() {
+                        for (column, value) in row.iter().enumerate() {
+                            assert_eq!(
+                                value.to_bits(),
+                                expected[token],
+                                "width={width} mode={mode} pipeline={pipeline} token={token} column={column}",
+                            );
+                        }
                     }
                 }
             }
+            unsafe { context.destroy_completed_buffers(&[buffer]) }.unwrap();
         }
-        unsafe { context.destroy_completed_buffers(&[buffer]) }.unwrap();
     }
 
     #[test]

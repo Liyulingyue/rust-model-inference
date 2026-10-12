@@ -5,10 +5,170 @@
 
 统一入口、两个 linear 消费者、共享 dense 执行、事务回退及 CLI/HTTP 策略已实现。
 本轮修复纯 Q8 在 ARM 上的真实模型偏差，以及 x86 的 Q8 激活量化边界，
-并优化共享 Q8 GPU kernel 与多行自动选路。
+并优化共享 Q8 GPU kernel 与单/多行自动选路。
 下面分别标出当前结果和历史基线：不能把单个短输入、相同 greedy token 或统一表达式
 当成所有 GPU 数值与模型均已通过。历史 AMD Qwen3 Q8 的确定性长输入曾通过自动分发，
 本次新的 Q8 kernel 仅在本机复验，不代表 AMD、其他驱动或 Z-Image 全链路已经通过。
+
+## Q8 单 token 内核优化（2026-10-12，合并 main 后）
+
+本轮继续处理 GPU 单 token decode 热点。A/B 基线为已合并 main 的
+`3435dcb4a0a75b10984eb9fe2bb6f203b5c3f702`，测量环境沿用 Apple M3 Max /
+MoltenVK；这里仍是本轮修改前后的比较。此前记录的 10.069 倍属于前一轮优化。
+
+共享 Q8 recorder 自动选择新 cooperative kernel：64 个线程先并行计算独立整数
+block dot，再用原来的顺序完成浮点累加。一个 workgroup 计算两个输出，按 32 个
+block 分块，shared memory 为 3520 bytes。mode 0 的独立乘加、mode 1 的逐块 FMA、
+mode 8 的八流 FMA 和最终归约顺序均保持原样。
+
+选择条件是 Q8_0 grouped、启用 DP4A、设备支持 packed integer dot、沿用现有
+18432-byte capability gate、`RUST_GPU_TILED` 未关闭、只有一个 token、输入宽度
+至少 256、最大 grouped 输出宽度不超过 4096，且设备接受新 grid。宽输出和多 token
+继续使用各自现有的 GPU kernel；这些选择都位于共享算子入口。
+
+详细 dispatch log 的历史 writer 按三字段存储，reader 按六字段读取，会损坏 grid/
+epoch，长日志会越界。本轮改为一致的六字段存储，并令 shader 名称表长度与 pipeline
+表一致；4096 条日志容量、最后一条、额外写入和 reset 均有隔离回归。
+
+### 完整 release 性能对照
+
+相同 Qwen3-0.6B Q8_0 权重、5 prompt tokens、32 greedy tokens、F16 KV、4 CPU
+threads、batch 64、context 38。每个进程分别预热 CPU/GPU，再交替执行五轮，以下为
+驻留推理中位数。正式对照时没有并行编译或本任务其他推理；桌面应用仍运行，结果仅
+代表本机工作负载。加载前扫描 GGUF 哈希，文件已在 OS 页缓存；cold 是进程首次初始化。
+
+| 版本 / 后端 | prompt tok/s | decode tok/s | 驻留 wall ms |
+| --- | ---: | ---: | ---: |
+| before cpu | 295.468 | 149.359 | 236.827 |
+| before vulkan | 98.415 | 39.736 | 859.760 |
+| after cpu | 294.869 | 150.503 | 235.485 |
+| after vulkan | 97.815 | 55.813 | 627.404 |
+
+GPU 墙钟下降 **27.026%**，速度为原来的 **1.370 倍**，
+超过本轮要求的至少 10% 改善。优化后仍为同版 CPU 的
+**2.664 倍**，没有达到短输入 CPU 的速度。
+两版 prefill logits 均逐位一致、32 greedy tokens 相同。每轮 warm GPU 均为 33 次
+compute submissions、0 transfers、0 static uploads，host write/read 为
+170496 / 28829184 bytes，device buffer peak 为 657554384 bytes，均与基线相同。
+
+完整 benchmark 进程（初始化、正确性检查、预热、全部 CPU/GPU 样本）的墙钟为
+10.14 → 9.82 s，user+sys 为
+30.30 → 27.79 s，最大 RSS 为
+1439072256 → 1440497664 bytes，peak footprint 为
+985581320 → 987023136 bytes。
+单次 cold context/session 初始化分别为 37.167/224.100 → 494.142/682.889 ms；
+驱动初始化、缓存和桌面负载影响这些单次数字，不能把 warm 收益直接等同于冷启动收益。
+
+### 真实 CLI 自动选路
+
+CPU/Auto 各为独立进程，完整 release、`The capital of France is`、max tokens 32、
+温度 0、8 threads、F16 KV、max context 128。实际 prompt 为 17 tokens，生成 9 tokens。
+三种权重两版均与各自 CPU 输出文本及 token 数相同，Auto trace 均为
+`scope=resident_decoder backend=Vulkan`。实际 pipeline/grid 的选择另由设备回归
+检查；CLI 的 compute trace 提供 backend 和 device counters。
+
+| 权重 | before CPU / Auto 墙钟 s | after CPU / Auto 墙钟 s |
+| --- | ---: | ---: |
+| Q8_0 | 0.21 / 1.44 | 0.21 / 1.24 |
+| Q4_0 | 0.73 / 1.50 | 0.42 / 1.52 |
+| Q4_K_M | 0.75 / 3.11 | 0.27 / 3.14 |
+
+这是每项一次的完整进程观察，含模型准入与初始化，不代替驻留五轮 A/B；Q4_0/Q4_K_M
+没有显示可据以确认的加速。当前这些短输入的 Auto 仍比 CPU 慢。完整 CPU 时间、RSS、
+footprint、生成文本和命令保存在 `cli-comparison-final.json`。
+
+### 验证边界
+
+五项 Q8 GPU 回归分别在默认、DP4A=0、TILED=0、scalar 四个独立进程运行，
+共 20/20 通过。新增选路检查读取实际记录的 pipeline 和 grid，提交/readback 后再
+检查结果，覆盖宽度 224/256、输出 4096/4097、单/双 token，以及新 grid 不可用时
+保留普通 GPU。固定 IEEE-754 oracle 覆盖 3/99 blocks、mode 0/1/8、65 输出、五行
+和 2D grid；99 blocks 包含四个 cooperative chunks 与最后三块。
+
+release-fast 检查中，Q8_0、Q4_0、Q4_K_M 三份真实权重均为 prefill logits
+`max_abs=0, max_rel=0`、32 个 greedy tokens 与 CPU 相同。九格式、33-row 算子检查，
+Z-Image 合成 FFN chain（983040/983040 有限值、batched 1 / incremental 4 submissions）
+和 F16 refiner F32 累加回归通过。
+
+正式 release 的 21 个进程全部 exit 0：两版 benchmark、十二项 CPU/Auto CLI、
+九格式算子、517-token Q8、Q4_0/Q4_K_M 与三种 Q8 调试开关检查。
+517-token Q8 为 logits 逐位一致、32 greedy tokens 相同、41 submissions，
+完整检查进程 20.43 s。32 份 shader 用与 CI 相同的 glslang 15.1.0 真正重建、
+SPIR-V 校验和 manifest/二进制字节比较通过；Rustfmt 和 diff check 通过。
+
+最终串行全库结果是 1261 passed / 32 failed / 141 ignored。原基线为 1260 / 33 / 140，
+所有最终失败名称都已在基线出现；基线的一个 Q8 CPU uniform-weight 失败本次未出现，
+CPU 计算没有修改，因此不把它视作已修复。基线测试二进制包含一个未执行的临时 ignored
+probe；最终源码去掉该 probe 并新增两个 ignored 回归，解释 ignored 数量差异。
+
+本轮尚未复验 NVIDIA GB10、其他 GPU/驱动、x86 GPU 实机和 Z-Image 原始 GGUF
+整图。这些 golden 与合成 FFN 证据只覆盖相应契约，不替代这些运行。
+
+最终 32 项继承失败名称：
+
+```text
+models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length
+models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32
+models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms
+models::clm::tests::matches_reference_golden_vectors
+models::clm::tests::rejects_wrong_embedding_width
+models::diffusion::z_image::dit::tests::attention_matches_the_ggml_neon_softmax_and_value_reduction
+models::diffusion::z_image::dit::tests::silu_mul_inplace_matches_ggml_neon_activation_dit
+models::diffusion::z_image::dit::tests::torch_mt19937_recomputes_the_final_sixteen_values
+models::diffusion::z_image::text::tests::qwen_attention_softmax_matches_the_pinned_ggml_neon_reduction
+models::diffusion::z_image::text::tests::silu_mul_inplace_matches_pinned_ggml_neon_activation
+models::diffusion::z_image::vae::tests::silu_matches_pinned_ggml_neon_vector_path
+models::dots::weights::tests::flattened_q8_convolution_loads_without_dequantizing_and_runs_batched
+models::funasr::encoder::parity_tests::fsmn_rounds_product_before_adding_like_ggml
+models::funasr::encoder::parity_tests::layernorm_accumulates_variance_in_ggml_neon_groups
+models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix
+models::gemma4::trunk::tests::per_layer_bf16_projection_matches_pinned_scalar_dot_bits
+models::gemma4::trunk::tests::per_layer_projection_rejects_non_bf16_weight
+models::gemma4::trunk::tests::per_layer_projection_rejects_wrong_bf16_storage_length
+models::qwen35::trunk::config::tests::qwen35_config_rejects_invalid_tensor_dimensions
+models::qwen35::trunk::tests::last_hidden_borrows_all_final_norm_rows_from_the_last_step
+models::qwen35::trunk::tests::qwen35_failed_chunk_keeps_dense_and_recurrent_state
+models::qwen35::vision::tests::layer_norm_stats_match_ggml_grouped_f32_variance
+models::yue2::tests::per_row_and_direct_kernel_agree_for_one_row
+ops::argmax::tests::all_negative
+ops::argmax::tests::large_random
+ops::argmax::tests::middle_max
+ops::argmax::tests::tail_handles_non_aligned_lengths
+ops::argmax::tests::ties_pick_lowest_index
+ops::kernel::q8_0::tests::q8_kernel_thread_partition
+ops::kernel::qtensor_owned::qtensor_owned_tests::qtensor_owned_kernel_matches_borrowed_kernel_bit_exact
+ops::matmul::neon_tests::neon_softmax_matches_ggml_vector_exp_and_f64_sum
+ops::rope::tests::rope_neox_inplace_simd_matches_scalar_fallback
+```
+
+证据目录为本地 `target/q8-next/`，不随提交上传：
+`baseline-provenance.json`、`candidate-final-provenance.json`、
+`speedup-final-comparison.json`、`cli-comparison-final.json`、
+`release-core-final.json`、`focused-final-checks.json`、`suite-comparison-final.json`。
+两版 release checker SHA-256 分别为
+`973ad4542ab4bcf12f7c120ec1fa598574335590d032c9dcef895d16b99346f4` /
+`c712f14c5282d5d138444c2bbd610735cab5de12a7733abd39f085e23b56ebe4`。
+静态复查没有 Critical/Important；先前缺少的真实 pipeline 和 mode 8 多 chunk
+检查已补上。用户原有的八份 `.codex/` 文件哈希未变，`docs/superpowers/` 不提交。
+
+```sh
+cargo build --locked --release --features vulkan \
+  --bin rust-model-inference --example vk_model_check --example vk_ops_check
+q8_model=models/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf
+./target/release/examples/vk_model_check qwen3 --model "$q8_model" --benchmark
+./target/release/examples/vk_model_check qwen3 --model "$q8_model" --prompt-repeats 129
+./target/release/examples/vk_ops_check \
+  --formats q8_0,q4_0,q4_1,q4_k,q5_k,q6_k,f16,bf16,f32 --rows 33
+RUST_GPU_DISPATCH_TRACE=2 cargo test --locked --profile release-fast \
+  --features vulkan --lib vulkan_q8 -- --ignored --test-threads=1
+RUST_GPU_DISPATCH_TRACE=2 cargo test --locked --profile release-fast \
+  --features vulkan --lib dispatch_log_preserves_grid_epoch_and_capacity \
+  -- --ignored --test-threads=1
+RMI_COMPUTE_TRACE=1 ./target/release/rust-model-inference \
+  --model "$q8_model" --prompt 'The capital of France is' --max-tokens 32 \
+  --temp 0 --threads 8 --kv-cache f16 --max-context 128 --compute auto
+bash scripts/vulkan-shaders.sh check
+```
 
 ## Q8 共享算子性能优化与最终复验（2026-10-12）
 
