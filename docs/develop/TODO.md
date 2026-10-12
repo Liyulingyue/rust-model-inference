@@ -1608,3 +1608,35 @@ host 侧 3700 万次 exp」。denoise 52.7 s → 42.5 s，端到端 59.9 s → 4
 
 **遗留**：合批后与 CPU 基线 PSNR 31.52 dB（改动前 33.34 dB），差异来自 TODO-020
 风险 1 的 silu 饱和，尚未追平。
+
+### TODO-022: Z-Image Q/K norm + 交错 RoPE 上设备 — ✅ 已合入
+
+`qk_norm_rope.comp` 是 **NeoX** 布局（`lane` 与 `lane + head_dim/2` 配对），DiT 的
+`rotate_interleaved_inplace` 是**交错**相邻对（`chunks_exact(2)`），两者索引不同，
+不能复用。新增 `shaders/glsl/qk_norm_rope_interleaved.comp`：norm 段逐行照抄
+NeoX 版（含保持 CPU 逐位一致的串行 Kahan 归约），只把旋转索引换成 `2*lane` / `2*lane+1`。
+
+管线索引 `QK_NORM_ROPE_INTERLEAVED = 28`，**追加**在数组末尾——`OPERATOR_SHADERS`
+每个位置都是硬编码常量，插入会静默改绑别人的 SPIR-V。
+
+**收益**：QKV 不再往返。`rope (host)` 893.8 ms → 0.3 ms，denoise 43.1 → 42.0 s。
+比先前「传输值 1.9–3.9 s」的估计低：177 MB 单向传输在这台机器上约 0.4 s。
+
+**风险 1（已修）：跨块行步长 ≠ 行内 span。**
+DiT 的 QKV 是**逐行交错** `[Q|K|V]`（`QKV_WIDTH`），而 Qwen3 是**分块** `[整块Q|整块K]`。
+照搬分块语义把 `q_heads*head_dim` 当成行跨度传进去，着色器按 `q_stride=3840` 寻址，
+而真实间距是 `QKV_WIDTH=11520`——于是**只有第 0 行落在正确位置**，其余行整体错位。
+因为行跨度整除缓冲长度，**不会越界报错**，只会静默写坏 K 和 V。
+修复：record 函数新增显式 `q_row_stride` / `k_row_stride` 参数。
+
+**风险 2（已修）：行内 Q→K 跨度。**
+Q 与 K 同属一个 region，仅靠 `k_word` 无法区分，K 每行基址还缺 `HIDDEN` 的偏移。
+修复：push constant 新增 `k_base`。
+
+两条都是自检抓到的，不是渲染对比发现的。**若只做「整图看起来一样」的核对，
+这两个 bug 都可能以「V 被污染但肉眼看不出」的形式溜过去。**
+
+`gpu_interleaved_qk_norm_rope_matches_the_host_chain` 钉住：
+生产规模（3840 token × 30 head × 128）下与 host 的 `rms_norm_inplace` +
+`rotate_interleaved_inplace` **逐位一致**，并额外断言 **V 与输入逐位相同**
+（V 未被触碰是 K 基址算错的唯一可观测信号）。

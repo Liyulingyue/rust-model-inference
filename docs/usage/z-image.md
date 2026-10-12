@@ -41,16 +41,17 @@ Z-Image model requires --text-encoder, --vae, --prompt, and --out
 ### 实测耗时（NVIDIA GB10，20 核，512×512，8 步）
 
 prompt "A red fox sleeping beneath a pine tree"（16 token），seed 42，`--threads 8`，
-`cargo build --release --features vulkan`。2026-10-12，FFN 合批 + SiLU 饱和修复之后。
+`cargo build --release --features vulkan`。2026-10-12，FFN 合批 + SiLU 饱和修复 +
+Q/K norm 与交错 RoPE 上设备之后。
 
 同一二进制、只切开关的同会话对照：
 
 | 阶段 | CPU | GPU（`--gpu`） |
 |---|---|---|
 | text_encode | 0.6 s | **0.65–0.84 s**（见下方 gate）|
-| denoise | 563.3 s | **42.5 s** |
-| vae_decode | 10.6 s | **6.0 s** |
-| **总计** | **574.6 s** | **49.7 s** |
+| denoise | 563.3 s | **42.0 s** |
+| vae_decode | 10.6 s | **6.1 s** |
+| **总计** | **574.6 s** | **49.0 s** |
 
 denoise 13.2×、端到端 11.6×。多次运行输出逐字节一致。
 `RUST_GPU_TEXT=1` 输出亦逐字节一致（text gate 只改执行位置不改算术）。
@@ -71,7 +72,7 @@ denoise 分段（`[gpu-block-profile]`，8 步合计 50.3 s）：
 | ffn: refiner | 2.4 s | 4.8% | GPU（F16 tiled）|
 | &nbsp;&nbsp;其中 host silu | 4.8 s | 9.6% | **host**（w1/w3 之间）|
 | &nbsp;&nbsp;其中 w1 readback | 2.4 s | 4.7% | **host** |
-| rope | 0.9 s | 1.8% | host |
+| &nbsp;&nbsp;其中 rope | 0.9 s | 1.8% | ~~host~~ → **GPU**（已融合进 norm+adaln+qkv）|
 | modulation | 0.02 s | 0.0% | host |
 
 **真正在 host 的是 8.1 s / 50.3 s = 16.1%**，其中 host silu + w1 readback 合计
@@ -385,7 +386,10 @@ GPU 一列的判定依据与已知缺口：
 - **已知缺口**：
   - **DiT attention 已在 GPU**（默认 `RUST_GPU_ATTENTION=1`，实测 10.8 s/8 步；
     关掉后 27.0 s）。旧版本文档与 `GPU_PHASE_LABELS` 曾误标为 host，标签已修正。
-  - **RoPE 与 AdaLN modulation 仍在 host**（合计 0.9 s / 50.3 s，可忽略）。
+  - **RoPE 已上设备**：`qk_norm_rope_interleaved.comp` 把 Q/K 的 rms_norm 与
+    交错 RoPE 融进 QKV 的同一个 command buffer，QKV 不再回 host
+    （`rope (host)` 893.8 ms → 0.3 ms，denoise 43.1 → 42.0 s）。
+    **AdaLN modulation 仍在 host**（0.02 s，可忽略）。
   - **FFN 的 w1/w3 激活要经 host silu + 回读**，合计 7.2 s / 50.3 s = 14.3%，
     是 denoise 剩余最大的一块 host 开销。合批到单 command buffer 后这部分
     **完全消失**（host silu 从 profile 里消失，`ffn: main stack` 25.4 → 16.3 s，
@@ -455,8 +459,9 @@ act = fma(res, 1/den, act);   // 需要 1/den 是正规数
 
 ### 其余已知缺口
 
-  - **QKV 每 block 重新上传 ~48 MB**（RoPE 在 host，旋转后的行要送回设备）。
-    8 步约 13 GB，被包在 attention 那一档里。若 RoPE 上设备可省，但尚未评估。
+  - ~~QKV 每 block 重新上传~~ **已消除**：RoPE 上设备后 QKV 不再往返
+    （原先每 block 下 177 MB + 上 177 MB，实测合计只值约 1.3 s——这台机器上
+    177 MB 的单向传输约 0.4 s，先前「传输值 1.9–3.9 s」的估计偏高）。
   - **Qwen3 文本编码器默认在 CPU 上跑**（临时 gate，见第 1 节环境变量表）。
   - **VAE 只 offload 卷积**：GroupNorm、SiLU、nearest upsample 与 VAE 内 attention
     仍在 CPU。当前 VAE 6.0 s 已优于 CPU 的 10.6 s，故非瓶颈。

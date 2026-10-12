@@ -2472,14 +2472,28 @@ fn run_block_gpu(
         // through to `scale_modulated_branch`; unwrapping it here turned a
         // legitimate shape into an error, and the error latched the GPU off for
         // every remaining step of the render.
+        // When attention also runs on the device, Q/K norm and RoPE fold into the
+        // same command buffer and the projection never reaches the host. The CPU
+        // attention path still needs it there, and still rotates it below.
+        let fused_qk_rope = attention_on_gpu;
+        if fused_qk_rope {
+            session
+                .ensure_rope(rope, rows)
+                .map_err(|e| format!("Z-Image DiT RoPE table upload failed: {e}"))?;
+        }
         session
             .record_attention_qkv(
                 layer,
                 &block.attention_norm1,
                 modulations.map(|values| values.scale_msa),
+                &block.q_norm,
+                &block.k_norm,
+                fused_qk_rope,
             )
             .map_err(|e| format!("Z-Image DiT fused QKV dispatch failed: {e}"))?;
-        qkv[..qkv_len].copy_from_slice(session.readback(qkv_len));
+        if !fused_qk_rope {
+            qkv[..qkv_len].copy_from_slice(session.readback(qkv_len));
+        }
     } else {
         for row in 0..rows {
             let token = &tokens[row * HIDDEN..(row + 1) * HIDDEN];
@@ -2505,18 +2519,24 @@ fn run_block_gpu(
     let t_phase = std::time::Instant::now();
 
     // --- RoPE on Q and K, per row and per head, same as the CPU path ----------
-    for row in 0..rows {
-        let rotation = &rope[row * ROPE_HEAD_WIDTH..(row + 1) * ROPE_HEAD_WIDTH];
-        let row_qkv = &mut qkv[row * QKV_WIDTH..(row + 1) * QKV_WIDTH];
-        for head in 0..HEADS {
-            let start = head * ROPE_HEAD_WIDTH;
-            let query = &mut row_qkv[start..start + ROPE_HEAD_WIDTH];
-            rms_norm_inplace(query, &block.q_norm, QK_RMS_EPSILON);
-            rotate_interleaved_inplace(query, rotation)?;
-            let key_start = HIDDEN + start;
-            let key = &mut row_qkv[key_start..key_start + ROPE_HEAD_WIDTH];
-            rms_norm_inplace(key, &block.k_norm, QK_RMS_EPSILON);
-            rotate_interleaved_inplace(key, rotation)?;
+    //
+    // Already applied on the device by `record_attention_qkv` when attention is
+    // fused; this loop is the CPU attention path and the no-GPU path.
+    let qkv_normed_on_device = bound.contains(&Projection::Qkv) && attention_on_gpu;
+    if !qkv_normed_on_device {
+        for row in 0..rows {
+            let rotation = &rope[row * ROPE_HEAD_WIDTH..(row + 1) * ROPE_HEAD_WIDTH];
+            let row_qkv = &mut qkv[row * QKV_WIDTH..(row + 1) * QKV_WIDTH];
+            for head in 0..HEADS {
+                let start = head * ROPE_HEAD_WIDTH;
+                let query = &mut row_qkv[start..start + ROPE_HEAD_WIDTH];
+                rms_norm_inplace(query, &block.q_norm, QK_RMS_EPSILON);
+                rotate_interleaved_inplace(query, rotation)?;
+                let key_start = HIDDEN + start;
+                let key = &mut row_qkv[key_start..key_start + ROPE_HEAD_WIDTH];
+                rms_norm_inplace(key, &block.k_norm, QK_RMS_EPSILON);
+                rotate_interleaved_inplace(key, rotation)?;
+            }
         }
     }
 
@@ -2532,10 +2552,14 @@ fn run_block_gpu(
         // Copy the regions out first: `layout()` borrows the session, and the
         // recording below needs it mutably.
         let regions = *session.layout();
-        session
-            .ops()
-            .write_f32(regions.qkv, &qkv[..qkv_len])
-            .map_err(|error| error.to_string())?;
+        // The fused path leaves the normed, rotated QKV in the arena already.
+        // Uploading the host copy on top of it would undo the fusion.
+        if !qkv_normed_on_device {
+            session
+                .ops()
+                .write_f32(regions.qkv, &qkv[..qkv_len])
+                .map_err(|error| error.to_string())?;
+        }
         session
             .record_diy_attention(rows, regions.attention_scores, regions.attention_out)
             .map_err(|error| error.to_string())?;
@@ -2823,6 +2847,144 @@ fn run_block_gpu(
 #[cfg(all(test, feature = "vulkan"))]
 mod tests {
     use super::*;
+
+    /// The fused interleaved Q/K norm + RoPE must match the host chain exactly.
+    ///
+    /// `qk_norm_rope` is the NeoX layout and cannot serve the DiT, so this pins
+    /// the variant that can: the same serial norm reduction, but a rotation that
+    /// pairs *adjacent* elements the way `rotate_interleaved_inplace` does.
+    ///
+    /// Two properties this has to get right, which a comparison that only checks
+    /// "the picture still looks fine" would not catch:
+    ///
+    /// * the rotation pairing -- NeoX reads `lane` against `lane + 64`, interleaved
+    ///   reads `2 * lane` against `2 * lane + 1`;
+    /// * that V, the third span of the row, is left completely alone. The shader
+    ///   only ever receives the Q and K regions, so a mis-derived K base would
+    ///   silently land on V instead of failing.
+    ///
+    /// The comparison is bitwise. The kernel copies the norm reduction verbatim
+    /// from the NeoX one precisely so that holds; if a future change relaxes
+    /// that, this test should fail loudly rather than a downstream render
+    /// quietly drifting.
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn gpu_interleaved_qk_norm_rope_matches_the_host_chain() {
+        use crate::ops::float::enable_gpu;
+
+        enable_gpu();
+        let Some(context) = crate::ops::get_vulkan_context() else {
+            eprintln!("skipped: no Vulkan context");
+            return;
+        };
+
+        // The production shape, not a toy one: the whole point of the 512x512
+        // block is 3840 tokens across 30 heads, and a stride or span mistake that
+        // happens to survive a handful of rows does not necessarily survive
+        // 3840 of them.
+        let dim = ROPE_HEAD_WIDTH;
+        let heads = HEADS;
+        let q_span = HEADS * ROPE_HEAD_WIDTH;
+        let qkv_width = QKV_WIDTH;
+        // `z_image_rope` pads the text run to its own alignment, so the token
+        // count is read off the table rather than assumed -- deriving it the
+        // other way round silently asks for a table of the wrong length.
+        let rope = z_image_rope(512, 52 * PATCH_SIZE, 64 * PATCH_SIZE).expect("rope table");
+        let rows = rope.len() / ROPE_HEAD_WIDTH;
+        assert_eq!(rows * ROPE_HEAD_WIDTH, rope.len());
+        let qkv_len = rows * qkv_width;
+
+        // Deterministic spread over a few orders of magnitude, so the norm
+        // reduction sees a realistic mix instead of values clustered near 1.
+        let input: Vec<f32> = (0..qkv_len)
+            .map(|i| {
+                let a = ((i * 2654435761usize) % 4096) as f32 / 4096.0;
+                let b = ((i / 7 + 13) % 4096) as f32 / 4096.0;
+                (a * 2.0 - 1.0) * (0.125 + 1.875 * b)
+            })
+            .collect();
+        let q_norm: Vec<f32> = (0..dim)
+            .map(|i| 0.8 + 0.4 * ((i * 31 % 97) as f32 / 97.0))
+            .collect();
+        let k_norm: Vec<f32> = (0..dim)
+            .map(|i| 0.7 + 0.5 * ((i * 17 % 89) as f32 / 89.0))
+            .collect();
+
+        let mut expected = input.clone();
+        for row in 0..rows {
+            let rotation = &rope[row * dim..(row + 1) * dim];
+            let row_qkv = &mut expected[row * qkv_width..(row + 1) * qkv_width];
+            for head in 0..heads {
+                let start = head * dim;
+                let query = &mut row_qkv[start..start + dim];
+                rms_norm_inplace(query, &q_norm, QK_RMS_EPSILON);
+                rotate_interleaved_inplace(query, rotation).expect("host rope");
+                let key_start = q_span + start;
+                let key = &mut row_qkv[key_start..key_start + dim];
+                rms_norm_inplace(key, &k_norm, QK_RMS_EPSILON);
+                rotate_interleaved_inplace(key, rotation).expect("host rope");
+            }
+        }
+
+        let mut ops = crate::vulkan::ops::Qwen3Ops::new_with_size(
+            context,
+            (qkv_len * 4 + rope.len() * 4).next_multiple_of(1 << 20) + (1 << 20),
+            8,
+        )
+        .expect("ops");
+        let qkv = crate::vulkan::ops::ArenaRegion {
+            offset: 0,
+            size: qkv_len * 4,
+        };
+        let table = crate::vulkan::ops::ArenaRegion {
+            offset: qkv_len * 4,
+            size: rope.len() * 4,
+        };
+        ops.write_f32(qkv, &input).expect("write qkv");
+        ops.write_f32(table, &rope).expect("write rope");
+
+        let upload = |values: &[f32]| unsafe {
+            context.upload_static(&values.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>())
+        };
+        let bindings = ops
+            .bind_buffers(&[upload(&q_norm).expect("q"), upload(&k_norm).expect("k")])
+            .expect("bind norms");
+
+        let commands = crate::vulkan::ops::TokenCommands::begin(context).expect("begin");
+        ops.record_qk_norm_rope_interleaved_rows(
+            &commands, bindings, qkv, qkv, heads, heads, dim, table, qkv_width, qkv_width, q_span,
+            QK_RMS_EPSILON, true, true, rows,
+        )
+        .expect("record");
+        commands.submit_and_wait().expect("submit");
+
+        let got = ops.read_f32(qkv, qkv_len).expect("read");
+        let bad: Vec<usize> = got
+            .iter()
+            .zip(&expected)
+            .enumerate()
+            .filter(|(_, (a, b))| a.to_bits() != b.to_bits())
+            .map(|(i, _)| i)
+            .take(8)
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "interleaved Q/K norm+RoPE diverges from the host chain at {bad:?} \
+             (rows={rows} heads={heads} dim={dim}, first got {:?} expected {:?})",
+            bad.iter()
+                .map(|&i| got[i])
+                .collect::<Vec<_>>(),
+            bad.iter().map(|&i| expected[i]).collect::<Vec<_>>()
+        );
+
+        // V must be bit-identical to the input: the shader is only handed the Q
+        // and K regions, so this is what catches a mis-derived K base.
+        for row in 0..rows {
+            let v = &got[row * qkv_width + 2 * q_span..row * qkv_width + 3 * q_span];
+            let v_in = &input[row * qkv_width + 2 * q_span..row * qkv_width + 3 * q_span];
+            assert_eq!(v, v_in, "row {row}: V was modified");
+        }
+    }
 
     /// The fused AdaLN modulation must match `scale_modulated_branch` exactly.
     ///

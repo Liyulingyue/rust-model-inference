@@ -33,6 +33,8 @@ const F32_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/f32_matmul.sp
 const MLX_AFFINE_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/mlx_affine_matmul.spv");
 const RMS_NORM_SHADER: &[u8] = include_bytes!("../../shaders/bin/rms_norm.spv");
 const QK_NORM_ROPE_SHADER: &[u8] = include_bytes!("../../shaders/bin/qk_norm_rope.spv");
+const QK_NORM_ROPE_INTERLEAVED_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/qk_norm_rope_interleaved.spv");
 const KV_WRITE_SHADER: &[u8] = include_bytes!("../../shaders/bin/kv_write.spv");
 const ATTENTION_SCORES_SHADER: &[u8] = include_bytes!("../../shaders/bin/attention_scores.spv");
 const SOFTMAX_SHADER: &[u8] = include_bytes!("../../shaders/bin/softmax.spv");
@@ -59,6 +61,8 @@ const F16_MATMUL: usize = 7;
 const BF16_MATMUL: usize = 8;
 const RMS_NORM: usize = 9;
 const QK_NORM_ROPE: usize = 10;
+/// `OPERATOR_SHADERS` index of `qk_norm_rope_interleaved.spv`, appended last (28).
+const QK_NORM_ROPE_INTERLEAVED: usize = 28;
 const KV_WRITE: usize = 11;
 const ATTENTION_SCORES: usize = 12;
 const SOFTMAX: usize = 13;
@@ -132,7 +136,7 @@ static DISPATCH_LOG_EPOCH: std::sync::atomic::AtomicU32 = std::sync::atomic::Ato
 
 /// Shader names indexed by `OPERATOR_SHADERS` position, for the trace dump.
 #[cfg(feature = "vulkan")]
-const OPERATOR_SHADER_NAMES: [&str; 27] = [
+const OPERATOR_SHADER_NAMES: [&str; 29] = [
     "quantize_q8_0",
     "quantize_q8_k",
     "q8_matmul_grouped",
@@ -160,6 +164,10 @@ const OPERATOR_SHADER_NAMES: [&str; 27] = [
     "q8_matmul_grouped_tiled",
     "f16_matmul_tiled",
     "attention_scores_tiled",
+    "mlx_affine_matmul",
+    // Appended, never inserted: every operator above is a hard-coded index and
+    // reordering the array would silently rebind the wrong SPIR-V to each.
+    "qk_norm_rope_interleaved",
 ];
 
 /// True when the ordered dispatch log is being collected.
@@ -249,7 +257,7 @@ pub fn dump_dispatch_trace() {
     }
 }
 
-const OPERATOR_SHADERS: [&[u8]; 28] = [
+const OPERATOR_SHADERS: [&[u8]; 29] = [
     QUANTIZE_Q8_0_SHADER,
     QUANTIZE_Q8_K_SHADER,
     Q8_MATMUL_GROUPED_SHADER,
@@ -278,6 +286,8 @@ const OPERATOR_SHADERS: [&[u8]; 28] = [
     F16_MATMUL_TILED_SHADER,
     ATTENTION_SCORES_TILED_SHADER,
     MLX_AFFINE_MATMUL_SHADER,
+    // Appended last so every hard-coded operator index above keeps its SPIR-V.
+    QK_NORM_ROPE_INTERLEAVED_SHADER,
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2196,6 +2206,102 @@ impl<'a> Qwen3Ops<'a> {
         )
     }
     #[allow(clippy::too_many_arguments)]
+    /// Q/K norm plus interleaved RoPE, for the Z-Image DiT.
+    ///
+    /// Same kernel as [`Self::record_qk_norm_rope_rows`] except that the
+    /// rotation pairs adjacent elements, matching `rotate_interleaved_inplace`.
+    ///
+    /// Unlike the NeoX entry point this takes explicit `q_row_stride` and
+    /// `k_row_stride`, because the DiT does not store Q and K as two blocks.
+    /// Its QKV projection emits one row of `Q | K | V`, so consecutive tokens
+    /// are `QKV_WIDTH` apart, not `q_heads * head_dim`. Passing the span as the
+    /// stride -- which is what the block layout would lead you to do -- lands
+    /// every row after the first on the wrong span, and since the row length
+    /// divides the span that stays inside the buffer and corrupts V instead of
+    /// faulting. Both regions are the same whole-row region here.
+    ///
+    /// `rope` is the (cos, sin) table, `head_dim` entries per row, shared by
+    /// every head of that row.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_qk_norm_rope_interleaved_rows(
+        &self,
+        commands: &TokenCommands<'_>,
+        bindings: OperatorBindings,
+        q: ArenaRegion,
+        k: ArenaRegion,
+        q_heads: usize,
+        k_heads: usize,
+        head_dim: usize,
+        rope: ArenaRegion,
+        q_row_stride: usize,
+        k_row_stride: usize,
+        k_span_offset: usize,
+        eps: f32,
+        normalize_q: bool,
+        normalize_k: bool,
+        rows: usize,
+    ) -> Result<(), VulkanError> {
+        if q_heads == 0 || k_heads == 0 || head_dim == 0 || head_dim % 2 != 0 {
+            return Err(VulkanError::UnsupportedShape(
+                "Q/K heads and even head dimension must be nonzero".into(),
+            ));
+        }
+        let q_count = q_heads
+            .checked_mul(head_dim)
+            .ok_or(VulkanError::OutOfMemory)?;
+        let k_count = k_heads
+            .checked_mul(head_dim)
+            .ok_or(VulkanError::OutOfMemory)?;
+        if q_row_stride < q_count || k_row_stride < k_count {
+            return Err(VulkanError::UnsupportedShape(
+                "Q/K row stride must cover the span it steps over".into(),
+            ));
+        }
+        if normalize_q {
+            bindings.require(0, f32_bytes(head_dim)?, "Q norm weight")?;
+        }
+        if normalize_k {
+            bindings.require(1, f32_bytes(head_dim)?, "K norm weight")?;
+        }
+        let push = [
+            self.f32_rows_word(q, rows, q_row_stride, q_count, "Q vector")?,
+            self.f32_rows_word(k, rows, k_row_stride, k_count, "K vector")?,
+            0,
+            0,
+            as_u32(q_heads, "Q head count")?,
+            as_u32(k_heads, "K head count")?,
+            as_u32(head_dim, "Q/K head dimension")?,
+            self.f32_rows_word(rope, rows, head_dim, head_dim, "RoPE coefficients")?,
+            u32::from(normalize_q) | (u32::from(normalize_k) << 1),
+            eps.to_bits(),
+            as_u32(rows, "Q/K rows")?,
+            as_u32(q_row_stride, "Q stride")?,
+            as_u32(k_row_stride, "K stride")?,
+            as_u32(head_dim, "RoPE stride")?,
+            as_u32(k_span_offset, "K span offset")?,
+        ];
+        let z = row_dispatch(1, rows, &self.context.limits)?[2];
+        if q_heads > self.context.limits.max_compute_work_group_count[0] as usize
+            || k_heads > self.context.limits.max_compute_work_group_count[0] as usize
+            || self.context.limits.max_compute_work_group_count[1] < 2
+        {
+            return Err(VulkanError::UnsupportedShape(
+                "Q/K head count exceeds device dispatch limits".into(),
+            ));
+        }
+        unsafe {
+            commands.bind(
+                self.pipelines[QK_NORM_ROPE_INTERLEAVED],
+                self.context.pipeline_layout,
+                &[bindings.descriptor_set],
+                bytemuck::cast_slice(&push),
+            );
+            commands.dispatch(q_heads.max(k_heads) as u32, 2, z);
+            commands.barrier();
+        }
+        Ok(())
+    }
+
     pub(crate) fn record_qk_norm_rope_rows(
         &self,
         commands: &TokenCommands<'_>,
