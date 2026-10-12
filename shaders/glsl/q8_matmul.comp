@@ -1,5 +1,5 @@
 #version 450
-// Q8_0 matmul: one workgroup (64 invocations) per output row.
+// Q8_0 matmul: each workgroup covers 64 output rows, one per invocation.
 //   weight layout: rows of [f16 scale][32 x int8] blocks, 34 bytes per block,
 //   byte-addressed through a u32 array (matches the GGUF Q8_0 byte layout).
 //   input layout: 32 x int8 per block + f32 scale per block.
@@ -15,7 +15,9 @@ layout(std430, binding = 3) writeonly buffer OU { float o_data[]; };
 
 layout(push_constant) uniform PC { uvec4 dims; };
 
-shared uint s_input[4096];  // up to 512 blocks -> n_in <= 16384
+const uint CHUNK_BLOCKS = 64u;
+shared uint s_input[CHUNK_BLOCKS * 8u];
+shared float s_scales[CHUNK_BLOCKS];
 
 float f16_decode(uint bits) {
     uint sign = (bits >> 15u) & 1u;
@@ -40,51 +42,52 @@ int i8_of(uint word, uint byte_idx) {
 void main() {
     uint bpr = dims.z;
     uint lid = gl_LocalInvocationID.x;
-    uint in_words = bpr * 8u;
+    uint row = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 64u + lid;
+    uint read_row = min(row, dims.y - 1u);
 
-    // cooperative input staging (bpr*8 words <= 4096 guarded by the host)
-    for (uint w = lid; w < in_words; w += 64u) {
-        s_input[w] = i_data[w];
-    }
-    barrier();
-
-    uint row = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
-    if (row >= dims.y) return;
-    if (lid != 0u) return;
-
-    uint row_off = row * dims.w;
+    uint row_off = read_row * dims.w;
     precise float acc[8];
     for (uint lane = 0u; lane < 8u; lane++) acc[lane] = 0.0;
 
-    for (uint block = 0u; block < bpr; block++) {
-        uint w_off = row_off + block * 34u;
-        uint s_word = w_data[w_off >> 2u];
-        uint s_bits = ((w_off & 3u) == 0u) ? (s_word & 0xFFFFu) : ((s_word >> 16u) & 0xFFFFu);
-        float w_scale = f16_decode(s_bits);
-
-        uint w_body = w_off + 2u;
-        uint in_base = block * 32u;
-        int block_dot = 0;
-        for (uint g = 0u; g < 8u; g++) {
-            uint g_off = w_body + g * 4u;
-            uint w0 = w_data[g_off >> 2u];
-            uint w1 = w_data[(g_off >> 2u) + 1u];
-            uint sh = (g_off & 3u) * 8u;
-            uint packed = (sh == 0u) ? w0 : ((w0 >> sh) | (w1 << (32u - sh)));
-            uint i_word = s_input[(in_base + g * 4u) >> 2u];
-            int dot = i8_of(packed, 0u) * i8_of(i_word, 0u)
-                + i8_of(packed, 1u) * i8_of(i_word, 1u)
-                + i8_of(packed, 2u) * i8_of(i_word, 2u)
-                + i8_of(packed, 3u) * i8_of(i_word, 3u);
-            float scale = w_scale * i_scales[block];
-            if (dims.x == 8u) acc[g] = fma(float(dot), scale, acc[g]);
-            else block_dot += dot;
+    for (uint chunk = 0u; chunk < bpr; chunk += CHUNK_BLOCKS) {
+        uint blocks = min(CHUNK_BLOCKS, bpr - chunk);
+        for (uint word = lid; word < blocks * 8u; word += 64u) {
+            s_input[word] = i_data[chunk * 8u + word];
         }
-        float scale = w_scale * i_scales[block];
-        precise float product = float(block_dot) * scale;
-        if (dims.x != 8u) acc[0] = dims.x == 0u ? acc[0] + product : fma(float(block_dot), scale, acc[0]);
-    }
+        if (lid < blocks) s_scales[lid] = i_scales[chunk + lid];
+        barrier();
+        for (uint local_block = 0u; local_block < blocks; local_block++) {
+            uint block = chunk + local_block;
+            uint w_off = row_off + block * 34u;
+            uint s_word = w_data[w_off >> 2u];
+            uint s_bits = ((w_off & 3u) == 0u) ? (s_word & 0xFFFFu) : ((s_word >> 16u) & 0xFFFFu);
+            float w_scale = f16_decode(s_bits);
 
+            uint w_body = w_off + 2u;
+            uint in_base = local_block * 32u;
+            int block_dot = 0;
+            for (uint g = 0u; g < 8u; g++) {
+                uint g_off = w_body + g * 4u;
+                uint w0 = w_data[g_off >> 2u];
+                uint w1 = w_data[(g_off >> 2u) + 1u];
+                uint sh = (g_off & 3u) * 8u;
+                uint packed = (sh == 0u) ? w0 : ((w0 >> sh) | (w1 << (32u - sh)));
+                uint i_word = s_input[(in_base + g * 4u) >> 2u];
+                int dot = i8_of(packed, 0u) * i8_of(i_word, 0u)
+                    + i8_of(packed, 1u) * i8_of(i_word, 1u)
+                    + i8_of(packed, 2u) * i8_of(i_word, 2u)
+                    + i8_of(packed, 3u) * i8_of(i_word, 3u);
+                float scale = w_scale * s_scales[local_block];
+                if (dims.x == 8u) acc[g] = fma(float(dot), scale, acc[g]);
+                else block_dot += dot;
+            }
+            float scale = w_scale * s_scales[local_block];
+            precise float product = float(block_dot) * scale;
+            if (dims.x != 8u) acc[0] = dims.x == 0u ? acc[0] + product : fma(float(block_dot), scale, acc[0]);
+        }
+        if (chunk + CHUNK_BLOCKS < bpr) barrier();
+    }
+    if (row >= dims.y) return;
     precise float sum01 = (acc[0] + acc[4]) + (acc[1] + acc[5]);
     precise float sum23 = (acc[2] + acc[6]) + (acc[3] + acc[7]);
     o_data[row] = dims.x == 8u ? sum01 + sum23 : acc[0];

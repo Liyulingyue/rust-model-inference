@@ -704,9 +704,7 @@ impl VulkanContext {
             .map_err(|_| VulkanError::InitFailed("Vulkan command mutex poisoned".into()))?;
         let blocks_per_row = n_in / 32;
         if blocks_per_row > 512 {
-            // shader stages the input row in 4096 shared words (16 KiB);
-            // UnsupportedShape lets the caller fall back to CPU for this
-            // matmul while keeping the GPU alive for the rest.
+            // Keep the legacy width contract consistent with the row recorder.
             return Err(VulkanError::UnsupportedShape(format!(
                 "n_in {n_in} exceeds shader shared-memory capacity"
             )));
@@ -773,7 +771,7 @@ impl VulkanContext {
             0,
             bytemuck::cast_slice(&push_constants),
         );
-        let (groups_x, groups_y) = dispatch_grid(n_out, &self.limits)?;
+        let (groups_x, groups_y) = dispatch_grid(n_out.div_ceil(64), &self.limits)?;
         self.device
             .cmd_dispatch(self.command_buffer, groups_x, groups_y, 1);
 

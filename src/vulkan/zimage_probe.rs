@@ -22,7 +22,7 @@ use crate::core::thread_pool::ComputePool;
 use crate::ops::float::enable_gpu;
 use crate::ops::get_vulkan_context;
 use crate::ops::kernel::q8_0::parallel::matmul_q8_0_quantized_parallel_rows;
-use crate::vulkan::ops::{GpuWeightFormat, Qwen3Ops, TokenCommands};
+use crate::vulkan::ops::{tiled_matmul_enabled, GpuWeightFormat, Qwen3Ops, TokenCommands};
 
 const HIDDEN: usize = 3840;
 const QKV: usize = HIDDEN * 3;
@@ -143,13 +143,13 @@ fn run_probe() -> Result<(), String> {
         .bind_weight_buffers(&[weight_buffer], &[GpuWeightFormat::Q8_0])
         .map_err(|e| e.to_string())?;
 
-    let use_tiled = context.supports_integer_dot_product();
+    let use_tiled = ops.supports_tiled_q8() && tiled_matmul_enabled();
     eprintln!(
         "batched kernel: {}",
         if use_tiled {
             "tiled packed int8 dot product"
         } else {
-            "grouped scalar int8 fallback"
+            "ordinary Q8_0 GPU"
         }
     );
 
@@ -182,7 +182,7 @@ fn run_probe() -> Result<(), String> {
             )
             .map_err(|e| e.to_string())?;
         } else {
-            ops.record_weight_matmul_rows(
+            ops.record_weight_matmul_ordinary_rows(
                 &commands,
                 bindings,
                 x,

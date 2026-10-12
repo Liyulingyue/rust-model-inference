@@ -20,7 +20,8 @@
 use std::collections::HashMap;
 
 use crate::vulkan::ops::{
-    ArenaRegion, GpuMatmulMode, GpuWeightFormat, OperatorBindings, Qwen3Ops, TokenCommands,
+    tiled_matmul_enabled, ArenaRegion, GpuMatmulMode, GpuWeightFormat, OperatorBindings, Qwen3Ops,
+    TokenCommands,
 };
 use crate::vulkan::{GpuBuffer, VulkanContext, VulkanError};
 
@@ -79,24 +80,6 @@ impl Projection {
 struct BoundWeight {
     buffer: GpuBuffer,
     bindings: OperatorBindings,
-}
-
-/// Whether to use the register-tiled Q8_0 kernel, which measured 11.8x faster
-/// on Z-Image's W2 shape (64.4 ms against 757.6 ms, streaming eight distinct
-/// weight matrices) while agreeing with the old kernel to 9.5e-7 relative, and
-/// which brings a 1-step render from 148 s of denoise to 84 s.
-///
-/// `RUST_GPU_TILED=0` falls back to the one-token-per-weight kernel, which is
-/// the escape hatch for a device without integer dot product and the other half
-/// of the measurement in
-/// `zimage_tiled_matmul_beats_the_one_token_per_weight_kernel`.
-fn tiled_matmul_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("RUST_GPU_TILED")
-            .map(|value| value != "0")
-            .unwrap_or(true)
-    })
 }
 
 /// Which gamma a norm binding holds. Each needs its own descriptor set: the
@@ -486,7 +469,7 @@ impl DitGpuSession {
         input_region: ArenaRegion,
         output_region: ArenaRegion,
     ) -> Result<(), VulkanError> {
-        self.ops.record_weight_matmul_rows(
+        self.ops.record_weight_matmul_ordinary_rows(
             commands,
             bindings,
             input_region,

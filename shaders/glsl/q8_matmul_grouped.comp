@@ -17,8 +17,9 @@ layout(push_constant) uniform PC {
     uint group_count; uint reduction_mode; uint input_stride; uint q8_stride; uint scales_stride; uint input_sum_stride; uint q8k_stride; uint q8k_scales_stride; uint token_rows;
 } pc;
 
-shared uint input_words[4096];
-shared float reduction[64];
+const uint CHUNK_BLOCKS = 64u;
+shared uint input_words[CHUNK_BLOCKS * 8u];
+shared float input_scales[CHUNK_BLOCKS];
 
 float f16_decode(uint bits) {
     uint sign = (bits >> 15u) & 1u;
@@ -49,59 +50,64 @@ uint weight_word(uint slot, uint index) {
 void main() {
     uint lane = gl_LocalInvocationID.x;
     uint token_row = gl_WorkGroupID.z / pc.group_count;
-    uint input_word_count = pc.blocks_per_row * 8u;
-    for (uint index = lane; index < input_word_count; index += 64u) {
-        input_words[index] = arena.data[pc.q8_word + token_row * pc.q8_stride + index];
-    }
-    barrier();
-
     uint slot = gl_WorkGroupID.z % pc.group_count;
     if (slot >= pc.group_count) return;
-    uint row = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint row = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 64u + lane;
     uint rows = slot == 0u ? pc.rows0 : (slot == 1u ? pc.rows1 : pc.rows2);
-    if (row >= rows) return;
+    uint read_row = min(row, rows - 1u);
 
-    // NEON/scalar reduce a 32-element integer block before scaling; AVX2 keeps eight streams.
-    uint streams = pc.reduction_mode == 8u ? 8u : 1u;
+    // Each lane owns an output, preserving the CPU reduction inside that lane.
     uint blocks_per_row = pc.blocks_per_row;
-    uint row_offset = row * blocks_per_row * 34u;
+    uint row_offset = read_row * blocks_per_row * 34u;
 
-    precise float partial = 0.0;
-    for (uint block = 0u; lane < streams && block < blocks_per_row; block++) {
-        uint byte_offset = row_offset + block * 34u;
-        uint scale_word = weight_word(slot, byte_offset >> 2u);
-        uint scale_bits = (byte_offset & 3u) == 0u
-            ? scale_word & 0xffffu
-            : (scale_word >> 16u) & 0xffffu;
-        float weight_scale = f16_decode(scale_bits);
-        float input_scale = uintBitsToFloat(
-            arena.data[pc.scales_word + token_row * pc.scales_stride + block]
-        );
-        float block_scale = weight_scale * input_scale;
-        uint body = byte_offset + 2u;
-        int dot = 0;
-        for (uint group = lane; group < 8u; group += streams) {
-            uint group_offset = body + group * 4u;
-            uint first = weight_word(slot, group_offset >> 2u);
-            uint second = weight_word(slot, (group_offset >> 2u) + 1u);
-            uint shift = (group_offset & 3u) * 8u;
-            uint packed = shift == 0u ? first : ((first >> shift) | (second << (32u - shift)));
-            uint input_value = input_words[block * 8u + group];
-            dot += i8_of(packed, 0u) * i8_of(input_value, 0u)
-                + i8_of(packed, 1u) * i8_of(input_value, 1u)
-                + i8_of(packed, 2u) * i8_of(input_value, 2u)
-                + i8_of(packed, 3u) * i8_of(input_value, 3u);
+    precise float acc[8];
+    for (uint group = 0u; group < 8u; group++) acc[group] = 0.0;
+    for (uint chunk = 0u; chunk < blocks_per_row; chunk += CHUNK_BLOCKS) {
+        uint blocks = min(CHUNK_BLOCKS, blocks_per_row - chunk);
+        for (uint index = lane; index < blocks * 8u; index += 64u) {
+            input_words[index] = arena.data[pc.q8_word + token_row * pc.q8_stride + chunk * 8u + index];
         }
-        precise float product = float(dot) * block_scale;
-        partial = pc.reduction_mode == 0u ? partial + product : fma(float(dot), block_scale, partial);
+        if (lane < blocks) {
+            input_scales[lane] = uintBitsToFloat(arena.data[pc.scales_word + token_row * pc.scales_stride + chunk + lane]);
+        }
+        barrier();
+        for (uint local_block = 0u; local_block < blocks; local_block++) {
+            uint block = chunk + local_block;
+            uint byte_offset = row_offset + block * 34u;
+            uint scale_word = weight_word(slot, byte_offset >> 2u);
+            uint scale_bits = (byte_offset & 3u) == 0u
+                ? scale_word & 0xffffu
+                : (scale_word >> 16u) & 0xffffu;
+            float weight_scale = f16_decode(scale_bits);
+            float input_scale = input_scales[local_block];
+            precise float block_scale = weight_scale * input_scale;
+            uint body = byte_offset + 2u;
+            int block_dot = 0;
+            for (uint group = 0u; group < 8u; group++) {
+                uint group_offset = body + group * 4u;
+                uint first = weight_word(slot, group_offset >> 2u);
+                uint second = weight_word(slot, (group_offset >> 2u) + 1u);
+                uint shift = (group_offset & 3u) * 8u;
+                uint packed = shift == 0u ? first : ((first >> shift) | (second << (32u - shift)));
+                uint input_value = input_words[local_block * 8u + group];
+                int dot = i8_of(packed, 0u) * i8_of(input_value, 0u)
+                    + i8_of(packed, 1u) * i8_of(input_value, 1u)
+                    + i8_of(packed, 2u) * i8_of(input_value, 2u)
+                    + i8_of(packed, 3u) * i8_of(input_value, 3u);
+                if (pc.reduction_mode == 8u) acc[group] = fma(float(dot), block_scale, acc[group]);
+                else block_dot += dot;
+            }
+            precise float product = float(block_dot) * block_scale;
+            if (pc.reduction_mode != 8u) {
+                acc[0] = pc.reduction_mode == 0u ? acc[0] + product : fma(float(block_dot), block_scale, acc[0]);
+            }
+        }
+        if (chunk + CHUNK_BLOCKS < blocks_per_row) barrier();
     }
-    reduction[lane] = partial;
-    barrier();
-
-    if (lane != 0u) return;
-    precise float sum01 = (reduction[0] + reduction[4]) + (reduction[1] + reduction[5]);
-    precise float sum23 = (reduction[2] + reduction[6]) + (reduction[3] + reduction[7]);
-    precise float sum = streams == 8u ? sum01 + sum23 : reduction[0];
+    if (row >= rows) return;
+    precise float sum01 = (acc[0] + acc[4]) + (acc[1] + acc[5]);
+    precise float sum23 = (acc[2] + acc[6]) + (acc[3] + acc[7]);
+    precise float sum = pc.reduction_mode == 8u ? sum01 + sum23 : acc[0];
     uint output_word = slot == 0u
         ? pc.output0_word
         : (slot == 1u ? pc.output1_word : pc.output2_word);

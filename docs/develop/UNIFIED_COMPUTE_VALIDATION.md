@@ -4,12 +4,128 @@
 实施采用八阶段计划；规划文件只在本地保留，不随 PR 提交。
 
 统一入口、两个 linear 消费者、共享 dense 执行、事务回退及 CLI/HTTP 策略已实现。
-本轮修复纯 Q8 在 ARM 上的真实模型偏差，以及 x86 的 Q8 激活量化边界。
+本轮修复纯 Q8 在 ARM 上的真实模型偏差，以及 x86 的 Q8 激活量化边界，
+并优化共享 Q8 GPU kernel 与多行自动选路。
 下面分别标出当前结果和历史基线：不能把单个短输入、相同 greedy token 或统一表达式
-当成所有 GPU 数值与模型均已通过。当前 AMD Qwen3 Q8 的确定性长输入已通过自动分发，
-但这仍不代表其他权重格式、驱动或 Z-Image 全链路已经通过。
+当成所有 GPU 数值与模型均已通过。历史 AMD Qwen3 Q8 的确定性长输入曾通过自动分发，
+本次新的 Q8 kernel 仅在本机复验，不代表 AMD、其他驱动或 Z-Image 全链路已经通过。
 
-## GB10 崩溃报告与本机复现（2026-10-12）
+## Q8 共享算子性能优化与最终复验（2026-10-12）
+
+本次 A/B 比较优化前的 `2aa564b8698c9535a1dd46c1ebdd24fa27d33fd3` 与其上的
+Q8 优化，**不是整个 PR 相对 main 的比较**。设备为 Apple M3 Max（40-core GPU、
+64 GB）/ macOS 27.0.1 / MoltenVK / Rust 1.98.1。两版都使用完整 `release`、
+同一 Qwen3-0.6B Q8_0 GGUF（SHA-256 见下一节）、5-token prompt、32 greedy
+tokens、F16 KV、4 个 CPU 线程、batch 64。同一进程分别预热 CPU/GPU 后交替跑 5 轮，
+取驻留推理中位数；两版顺序运行，没有并行构建或其他推理测试。桌面应用仍在运行，
+这些数字是本机工作负载观察，不是设备的吞吐上限。
+
+### 改动与收益
+
+普通 Q8 standalone/grouped、DP4A/非 DP4A kernel 改为每个 lane 计算一个输出，
+一个 workgroup 覆盖 64 个输出；原 NEON 模式只有一个 lane 完成 dot。
+输入按 64 个量化 block 分块暂存，shared memory 从 16384 bytes 降到 2304 bytes。
+scalar 的独立乘加、NEON 的逐块 FMA、AVX2 的八路 FMA 和最终归约顺序均保留。
+
+共享 `record_weight_matmul_rows` 根据 Q8_0 类型、多行输入、设备能力和原有开关
+自动选择 tiled；NEON/scalar 的 token tile 为 32，AVX2 为 4，每个输出仍用八路累加。
+tiled 要求启用 DP4A、设备整数 dot 和至少 18432 bytes shared memory。
+不满足能力条件的 explicit tiled 请求使用普通 **GPU** kernel；其他权重格式仍走其
+对应的 typed GPU kernel。`RUST_GPU_DP4A=0`、`RUST_GPU_TILED=0` 保持有效，
+F16 的原选路与累加语义不变。Z-Image 的普通路径基准使用明确的 ordinary 入口，
+避免基准两边都自动选择 tiled。
+
+| 源码 / 后端 | prompt tok/s | decode tok/s | 驻留 wall ms |
+| --- | ---: | ---: | ---: |
+| 优化前 CPU | 275.911 | 129.200 | 271.558 |
+| 优化前 Vulkan | 5.576 | 4.006 | 8890.652 |
+| 优化后 CPU | 276.477 | 132.744 | 264.861 |
+| 优化后 Vulkan | 100.257 | 38.665 | 882.998 |
+
+GPU 本次快 **10.069 倍**，驻留墙钟下降 **90.068%**；CPU 的小幅差异不足以说明
+CPU 性能发生变化，其计算代码没有修改。优化后 GPU 仍比同版 CPU 慢 **3.334 倍**，
+`threshold_passed=false`。Auto 仍按类型、设备和数值契约准入，没有新增性能回退策略。
+两版的 prefill logits 均为 `max_abs=0, max_rel=0`，32 个 greedy tokens 与 CPU 相同。
+
+每个 warm GPU 样本均为 33 次 compute submissions、0 transfers、0 static uploads，
+host write/read 分别为 170496 / 28829184 bytes，device buffer peak 为 657554384 bytes；
+两版相同。初始化上传均为 310 次、633495552 bytes。
+
+完整 benchmark **进程**墙钟为 74.09 → 11.61 s，user+sys CPU 时间为
+215.38 → 31.56 s，最大 RSS 为 1438121984 → 1439252480 bytes，macOS peak memory
+footprint 为 984762096 → 985663240 bytes。该进程包含初始化、正确性检查、预热和
+所有 CPU/GPU 轮次，不能把进程墙钟当成单次生成耗时，也不能把 RSS 当成 footprint。
+GGUF 在加载前先扫描 SHA-256，已经进入 OS 页缓存；日志里的 `cold` 表示本进程首次
+初始化，不是物理冷 IO。GPU context/session 初始化分别为 423.523/733.225 →
+69.668/261.391 ms，驱动缓存与桌面负载会影响这些单次数字。
+
+### 精度、真实 Auto 与回归边界
+
+完整 release 的 15 个进程运行全部 exit 0：两版 benchmark、9 格式算子检查、
+517-token Q8 model checker、Q4_0/Q4_K_M model checker、三种 Q8 开关配置，
+以及三种权重的 CPU/Auto CLI。9 格式的 33-row batched 检查全部 raw bits 一致，
+覆盖 padding、非连续 stride、分组和大输出；legacy 检查通过原有容差。
+Q4_0/Q4_K_M 及关闭 DP4A、关闭 tiled、scalar 的 Q8 模型均为 prefill logits 逐位一致、
+32 greedy tokens 一致。517-token Q8 检查为 `max_abs=0, max_rel=0`、41 submissions，
+完整检查进程约 21.24 s；下一节的 240 s 超时是优化前记录。
+
+真实 CLI 使用 `The capital of France is`、`--max-tokens 32 --temp 0 --threads 8
+--kv-cache f16`，实际 prompt 为 17 tokens，生成 9 tokens。Q8_0、Q4_0、Q4_K_M
+的 Auto trace 全部为 `scope=resident_decoder backend=Vulkan`，CPU 不初始化 Vulkan，
+三者生成文本均与各自 CPU 相同。比较只提取生成文本和 token 数，加载/生成耗时以及
+GPU operator 日志不参与文本相等检查。
+
+| 权重 | CPU / Auto 独立 CLI 进程墙钟 s |
+| --- | ---: |
+| Q8_0 | 0.92 / 1.85 |
+| Q4_0 | 0.47 / 1.82 |
+| Q4_K_M | 0.35 / 3.47 |
+
+每项 CLI 只运行一次，包含初始化和模型准入，不能替代上面的驻留 A/B。
+当前三个小模型的 Auto 都更慢。CLI 使用默认 context 容量，GPU arena 比 checker 的
+38-token context 大；Q8 Auto 的最大 RSS/footprint 分别为 4761747456/4308832720 bytes，
+device buffer peak 为 2569210288 bytes，不能与 checker 的容量和内存直接比较。
+
+最终源码的四个 Q8 GPU 回归在默认、scalar、DP4A=0、TILED=0 四种配置下共 **16/16**
+通过。CPU production oracle 覆盖宽度 1024/3584/16384、65 输出、1/3/33/64/65 行，
+并压低 host x-grid 上限以覆盖二维 dispatch；固定 golden bits 检查 mode 0/1/8 和
+AVX2 的 4+1 token 尾 tile。其他回归覆盖最大输出位于第二个 grouped slot，以及
+shared-memory 不足时使用普通 GPU。mode 8 的本机 golden 检查不等于 x86 GPU 实机复验。
+F16 refiner 与 Z-Image 合成 FFN chain 分别在默认和 DP4A=0 下通过。
+Z-Image W2 合成 streaming 8 matrices（1056×10240×3840，release-fast）为普通
+162.08 ms / tiled 135.03 ms，1.20 倍，`max|Δ|=0`；这不是整图或完整 release 性能结论。
+
+31 份 shader 的真实重建、SPIR-V/manifest 检查、Rustfmt 和 diff check 通过。
+完整 `release-fast --no-fail-fast` 曾报告 11 个失败 target，含需要缺失模型环境变量的
+GLINER/HTTP fixture；该运行在最后两处收尾修正之前，不能称为最终源码全套通过。
+最终源码重新跑串行全库为 1260 passed / 33 failed / 139 ignored；从 `git archive
+2aa564b8` 导出的真实独立基线为 1259 passed / 33 failed / 137 ignored，失败名称完全
+相同，没有新增名称。两项 `quantized_inference` 失败也在独立基线重现；未排除所有
+integration target 的新增失败。共享 target 曾错误复用当前测试二进制，该无效基线已
+弃用；有效基线使用独立 target 并清除项目 fingerprints 后编译。
+
+证据保存在本地 `target/q8-perf/`：`baseline.json`、`release-build-provenance.json`、
+`bench-final.json`、`benchmark-analysis-final.json`、`core-final.json`、
+`cli-comparison-final.json`、`gpu-focused-final.json`、`suite-comparison-serial.json`。
+优化前/后的 release checker SHA-256 分别为
+`ca1457d0ed1f36862d9e9ef0d0bc3a2902095d91e2d8ee3281c2e5bac6ef33f6` /
+`3168cc62c902174d99248232cad536579c9386421c5d53356ba141c9384913f5`。
+
+```sh
+cargo build --locked --release --features vulkan \
+  --bin rust-model-inference --example vk_model_check --example vk_ops_check
+q8_model=models/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf
+./target/release/examples/vk_model_check qwen3 --model "$q8_model" --benchmark
+./target/release/examples/vk_model_check qwen3 --model "$q8_model" --prompt-repeats 129
+./target/release/examples/vk_ops_check \
+  --formats q8_0,q4_0,q4_1,q4_k,q5_k,q6_k,f16,bf16,f32 --rows 33
+cargo test --locked --profile release-fast --features vulkan --lib vulkan_q8 \
+  -- --ignored --nocapture --test-threads=1
+```
+
+NVIDIA GB10 SIGTRAP、整个 PR 相对 main 的性能、Z-Image 原始 GGUF 整图仍未验证。
+
+## GB10 崩溃报告与本机复现（Q8 性能优化前，2026-10-12）
 
 用户报告 NVIDIA GB10 / ARM64 Linux / 驱动 580.173.02 在 `c59986de` 的 Qwen3
 Auto、强制 Vulkan、`vk_model_check qwen3` 和 Z-Image GPU 入口退出 133（SIGTRAP），
@@ -60,7 +176,7 @@ fixture 与下一节相同。CLI 使用 `--max-tokens 32 --temp 0 --threads 8 --
 GPU `3.361459` / CPU `3.2769063`，检查失败；这是设备和 profile 有限的历史对照，
 不构成 GB10 修复或性能 A/B 证据。
 
-### 修复后的本机结果
+### 量化与对齐修复后的本机结果（Q8 性能优化前）
 
 从同一当前源码目录重新构建完整 `release`。默认算子检查、三种 Qwen3 权重的
 Auto / 强制 Vulkan / model checker、Q8 CPU 与 Auto 长 prompt、133-token model
@@ -81,7 +197,7 @@ q8_model=models/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf
 Rustfmt 与 diff check 均通过。未运行完整测试套件。`release-fast` 的关闭 DP4A 和
 `RMI_SCALAR=1` Q8 model checker 也通过。
 
-性能仍有明显问题。当前 Q8_0、5-token prompt、32 greedy、F16 KV、4 个 CPU 线程，
+以下性能数字来自 `2aa564b8`，尚未包含本次 Q8 性能优化。Q8_0、5-token prompt、32 greedy、F16 KV、4 个 CPU 线程，
 同一进程预热后交替 5 轮的驻留中位数为：
 
 | 后端 | prompt tok/s | decode tok/s | wall ms |
@@ -95,7 +211,7 @@ prompt 的独立 release CLI 进程墙钟为 CPU 0.677 s / Auto Vulkan 58.693 s�
 各一次的进程观察，包含本进程初始化，模型已在 OS 页缓存中，不是稳定性能 A/B。
 这些都是本轮同一源码的 CPU/GPU 后端比较，不能用于声称整个 PR 相对 main 性能不变。
 
-扩展的 `release-fast --prompt-repeats 129` 实际是 517-token prompt，model checker
+优化前扩展的 `release-fast --prompt-repeats 129` 实际是 517-token prompt，model checker
 在 240 秒限时内未完成，最后日志仍在记录驻留 Vulkan 的 64-row 提交；它没有产生
 SIGTRAP，但没有通过完整正确性检查。不能把 133-token 的通过推广到所有上下文长度。
 GB10 驱动崩溃仍未完成实机复验，且本地缺少用户 Z-Image 命令所需的三份 GGUF，

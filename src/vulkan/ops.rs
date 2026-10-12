@@ -76,6 +76,15 @@ const F16_MATMUL_TILED: usize = 25;
 const ATTENTION_SCORES_TILED: usize = 26;
 const MLX_AFFINE_MATMUL: usize = 27;
 
+pub(crate) fn tiled_matmul_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("RUST_GPU_TILED")
+            .map(|value| value != "0")
+            .unwrap_or(true)
+    })
+}
+
 pub(crate) fn require_tiled_attention(context: &VulkanContext) -> Result<(), VulkanError> {
     let limits = &context.limits;
     // attention_scores_tiled.comp uses eight groups of 32 lanes. Its 12 KiB
@@ -1334,6 +1343,7 @@ pub(crate) struct Qwen3Ops<'a> {
     descriptor_pool: vk::DescriptorPool,
     arena_bindings: OperatorBindings,
     pipelines: [vk::Pipeline; OPERATOR_SHADERS.len()],
+    q8_tiled: bool,
     recorded_dispatches: std::sync::atomic::AtomicUsize,
 }
 
@@ -1395,17 +1405,20 @@ impl<'a> Qwen3Ops<'a> {
         let force_dp4a = std::env::var("RUST_GPU_DP4A")
             .map(|value| value != "0")
             .unwrap_or(context.supports_integer_dot_product());
+        let q8_tiled = force_dp4a
+            && context.supports_integer_dot_product()
+            && context.limits.max_compute_shared_memory_size >= 18_432;
         let operators: Vec<&[u8]> = OPERATOR_SHADERS
             .iter()
             .enumerate()
             .map(|(index, shader)| {
                 if index == Q8_MATMUL_GROUPED && force_dp4a {
                     Q8_MATMUL_GROUPED_DP4A_SHADER
-                } else if index == Q8_MATMUL_GROUPED_TILED && !force_dp4a {
+                } else if index == Q8_MATMUL_GROUPED_TILED && !q8_tiled {
                     // The tiled kernel needs `dotPacked4x8EXT`, so on a device
                     // without it the slot falls back to the plain grouped shader
-                    // and `record_weight_matmul_tiled_rows` refuses instead of
-                    // recording a dispatch whose semantics it cannot honour.
+                    // and the recorder selects ordinary GPU work instead of
+                    // dispatching this placeholder with a tiled grid.
                     Q8_MATMUL_GROUPED_SHADER
                 } else if index == ATTENTION_SCORES_TILED
                     && require_tiled_attention(context).is_err()
@@ -1511,6 +1524,7 @@ impl<'a> Qwen3Ops<'a> {
             descriptor_pool,
             arena_bindings,
             pipelines,
+            q8_tiled,
             recorded_dispatches: std::sync::atomic::AtomicUsize::new(0),
         })
     }
@@ -1774,6 +1788,10 @@ impl<'a> Qwen3Ops<'a> {
             .fetch_add(0, std::sync::atomic::Ordering::Relaxed)
     }
 
+    pub(crate) fn supports_tiled_q8(&self) -> bool {
+        self.q8_tiled
+    }
+
     pub(crate) fn record_rms_norm(
         &self,
         commands: &TokenCommands<'_>,
@@ -1906,6 +1924,60 @@ impl<'a> Qwen3Ops<'a> {
         input_stride: usize,
     ) -> Result<(), VulkanError> {
         let format = bindings.weight_format(outputs.len())?;
+        if format == GpuWeightFormat::Q8_0
+            && token_rows > 1
+            && self.q8_tiled
+            && tiled_matmul_enabled()
+        {
+            return self.record_weight_matmul_tiled_rows(
+                commands,
+                bindings,
+                input,
+                q8,
+                q8_scales,
+                q4_1_input_sums,
+                q8k,
+                q8k_scales,
+                outputs,
+                n_in,
+                token_rows,
+                input_stride,
+            );
+        }
+        self.record_weight_matmul_ordinary_rows(
+            commands,
+            bindings,
+            input,
+            q8,
+            q8_scales,
+            q4_1_input_sums,
+            q8k,
+            q8k_scales,
+            outputs,
+            n_in,
+            token_rows,
+            input_stride,
+        )
+    }
+
+    /// Explicit ordinary GPU path, also used as the untiled benchmark baseline.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_weight_matmul_ordinary_rows(
+        &self,
+        commands: &TokenCommands<'_>,
+        bindings: OperatorBindings,
+        input: ArenaRegion,
+        q8: ArenaRegion,
+        q8_scales: ArenaRegion,
+        q4_1_input_sums: ArenaRegion,
+        q8k: ArenaRegion,
+        q8k_scales: ArenaRegion,
+        outputs: &[(ArenaRegion, usize, usize)],
+        n_in: usize,
+        token_rows: usize,
+        input_stride: usize,
+    ) -> Result<(), VulkanError> {
+        let format = bindings.weight_format(outputs.len())?;
         let (activation, scales, quantize) = match format {
             GpuWeightFormat::F16
             | GpuWeightFormat::BF16
@@ -1965,15 +2037,8 @@ impl<'a> Qwen3Ops<'a> {
 
     /// Grouped Q8_0 matmul, register-tiled over tokens.
     ///
-    /// Same inputs, same output, same quantization as
-    /// `record_weight_matmul_rows` -- only the tiling differs. The caller is
-    /// responsible for having run the quantize step, which this reuses by
-    /// construction: the push constant and the staged layout are identical, so
-    /// the only difference is which pipeline is recorded and how the workgroups
-    /// are shaped.
-    ///
-    /// Quantized weights require integer dot product. F16 uses a separate
-    /// float kernel and does not require that device feature.
+    /// Records the same quantization as the ordinary path. Unavailable Q8
+    /// tiling uses the ordinary GPU kernel. F16 has a separate float kernel.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn record_weight_matmul_tiled_rows(
         &self,
@@ -2004,7 +2069,7 @@ impl<'a> Qwen3Ops<'a> {
                 && bindings.weight_mode == GpuMatmulMode::Prepared
                 && crate::ops::f16_uses_half_accumulators(n_in)
             {
-                return self.record_weight_matmul_rows(
+                return self.record_weight_matmul_ordinary_rows(
                     commands,
                     bindings,
                     activation,
@@ -2049,49 +2114,40 @@ impl<'a> Qwen3Ops<'a> {
             self.record_linear_dispatch(commands, F16_MATMUL_TILED, bindings, &push, dispatch);
             return Ok(());
         }
-        if !self.context.supports_integer_dot_product() {
-            return Err(VulkanError::UnsupportedShape(
-                "tiled Q8_0 matmul needs integer dot product".into(),
-            ));
+        if format != GpuWeightFormat::Q8_0 || !self.q8_tiled {
+            return self.record_weight_matmul_ordinary_rows(
+                commands,
+                bindings,
+                activation,
+                q8,
+                q8_scales,
+                q4_1_input_sums,
+                q8k,
+                q8k_scales,
+                outputs,
+                n_in,
+                token_rows,
+                input_stride,
+            );
         }
-        let (activation, scales, quantize) = match format {
-            GpuWeightFormat::Q4_K | GpuWeightFormat::Q5_K | GpuWeightFormat::Q6_K => {
-                let push = quantize_rows_push(
-                    self.arena.size as usize,
-                    activation,
-                    q8k,
-                    q8k_scales,
-                    None,
-                    n_in,
-                    token_rows,
-                    input_stride,
-                    256,
-                )?;
-                let dispatch = row_dispatch(n_in / 256, token_rows, &self.context.limits)?;
-                (q8k, q8k_scales, Some((QUANTIZE_K, push, dispatch)))
-            }
-            _ => {
-                let push = quantize_rows_push(
-                    self.arena.size as usize,
-                    activation,
-                    q8,
-                    q8_scales,
-                    Some(q4_1_input_sums),
-                    n_in,
-                    token_rows,
-                    input_stride,
-                    32,
-                )?;
-                let dispatch = row_dispatch(n_in / 32, token_rows, &self.context.limits)?;
-                (q8, q8_scales, Some((QUANTIZE, push, dispatch)))
-            }
-        };
+        let quantize_push = quantize_rows_push(
+            self.arena.size as usize,
+            activation,
+            q8,
+            q8_scales,
+            Some(q4_1_input_sums),
+            n_in,
+            token_rows,
+            input_stride,
+            32,
+        )?;
+        let quantize_dispatch = row_dispatch(n_in / 32, token_rows, &self.context.limits)?;
         let (push, _) = matmul_rows_push(
             self.arena.size as usize,
             &self.context.limits,
             bindings,
-            activation,
-            scales,
+            q8,
+            q8_scales,
             Some(q4_1_input_sums),
             outputs,
             n_in,
@@ -2099,14 +2155,10 @@ impl<'a> Qwen3Ops<'a> {
             input_stride,
         )?;
         // One lane per output column, TOKENS tokens per workgroup.
-        let columns =
-            outputs
-                .first()
-                .map(|(_, n_out, _)| *n_out)
-                .ok_or(VulkanError::UnsupportedShape(
-                    "tiled matmul has no output".into(),
-                ))?;
-        // Must match `TOKENS` in shaders/glsl/q8_matmul_tiled_dp4a.comp: the
+        let columns = outputs.iter().map(|(_, n_out, _)| *n_out).max().ok_or(
+            VulkanError::UnsupportedShape("tiled matmul has no output".into()),
+        )?;
+        // Must match the token tile in shaders/glsl/q8_matmul_tiled_dp4a.comp: the
         // shader derives the token tile from the workgroup id, so a mismatch
         // here would read and write the wrong rows rather than fail.
         //
@@ -2114,31 +2166,23 @@ impl<'a> Qwen3Ops<'a> {
         // weight matrices: 8 -> 64.4 ms, 16 -> 32.0 ms, 32 -> 20.6 ms,
         // 64 -> 48.9 ms. Sixty-four accumulators per lane is past what the
         // register file holds, so 32 is where the curve turns.
-        const TOKENS: usize = 32;
-        let tiles = token_rows.div_ceil(TOKENS);
+        // AVX2 needs eight accumulators per output; four tokens fit the same
+        // 32-register budget as NEON/scalar's 32 tokens.
+        let tokens = if push[14] == 8 { 4 } else { 32 };
+        let tiles = token_rows.div_ceil(tokens);
         let dispatch = row_dispatch(
             columns.div_ceil(64),
             tiles * outputs.len(),
             &self.context.limits,
         )?;
         // Validation is complete before the first command is recorded.
-        if let Some((pipeline, quantize_push, quantize_dispatch)) = quantize {
-            self.record_linear_dispatch(
-                commands,
-                pipeline,
-                self.arena_bindings,
-                &quantize_push,
-                quantize_dispatch,
-            );
-            // The matmul below reads what the quantize just wrote out of the
-            // arena, so it needs a barrier between them. Every caller used to
-            // end at a `submit_and_wait` right after this pair, which made the
-            // dependency implicit; recording several projections into one
-            // command buffer (the YuE2/Z-Image FFN) exposes it, and without
-            // the barrier the matmul reads stale activation and the layer
-            // produces -inf.
-            unsafe { commands.barrier() };
-        }
+        self.record_linear_dispatch(
+            commands,
+            QUANTIZE,
+            self.arena_bindings,
+            &quantize_push,
+            quantize_dispatch,
+        );
         self.record_linear_dispatch(commands, Q8_MATMUL_GROUPED_TILED, bindings, &push, dispatch);
         Ok(())
     }
@@ -4183,6 +4227,7 @@ fn matmul_rows_push(
             | GpuWeightFormat::Q4_1
             | GpuWeightFormat::Q4_K
             | GpuWeightFormat::Q5_K
+            | GpuWeightFormat::Q8_0
     ) {
         // Each lane owns an output row, preserving its serial reduction.
         max_output_rows.div_ceil(64)
@@ -4487,7 +4532,7 @@ fn check_weight_matmul_rows(
         let q8k = region(&mut cursor, row_span(rows, n_in, n_in)?)?;
         let k_scales = f32_region(&mut cursor, row_span(rows, n_in / 256, n_in / 256)?)?;
         let mut outputs = Vec::new();
-        for (slot, n_out) in [65, 33, 17].into_iter().enumerate() {
+        for (slot, n_out) in [33, 65, 17].into_iter().enumerate() {
             let stride = (n_out + (slot + 1) * 3) * 4;
             outputs.push((
                 region(&mut cursor, row_span(rows, stride, n_out * 4)?)?,
@@ -6560,52 +6605,236 @@ mod tests {
     #[ignore = "requires a Vulkan device; compares to the production CPU Q8 kernel"]
     fn vulkan_q8_matches_cpu_reduction_bits() {
         use super::{BatchedLinearRuntime, GpuWeightFormat::Q8_0};
-        const WIDTH: usize = 1024;
         const OUTPUTS: usize = 65;
-        let context = Box::leak(Box::new(super::VulkanContext::new().unwrap()));
-        let weight = super::synthetic_weight(Q8_0, WIDTH, OUTPUTS);
-        let input: Vec<_> = (0..3 * WIDTH)
+        const ROWS: usize = 65;
+        let mut context = super::VulkanContext::new().unwrap();
+        context.limits.max_compute_work_group_count[0] = 1;
+        let context = Box::leak(Box::new(context));
+        // Cover single and multiple 64-block chunks, the width limit and a 2D grid.
+        for width in [1024, 3584, 16384] {
+            let weight = super::synthetic_weight(Q8_0, width, OUTPUTS);
+            let input: Vec<_> = (0..ROWS * width)
+                .map(|i| ((i * 29 % 251) as f32 - 125.0) / 97.0)
+                .collect();
+            let mut expected = vec![0.0; ROWS * OUTPUTS];
+            let mut single = vec![f32::NAN; OUTPUTS];
+            for (input, expected) in input
+                .chunks_exact(width)
+                .zip(expected.chunks_exact_mut(OUTPUTS))
+            {
+                let mut q8 = vec![0; width];
+                let mut scales = vec![0.0; width / 32];
+                crate::ops::quantize_q8_0_into(input, width, &mut q8, &mut scales);
+                crate::ops::kernel::q8_0::dispatch::matmul_q8_0_quantized_range(
+                    &weight, &q8, &scales, expected, width, 0, OUTPUTS,
+                );
+                unsafe {
+                    context
+                        .matmul_q8_0(&weight, &q8, &scales, &mut single, width, OUTPUTS)
+                        .unwrap();
+                }
+                for (index, (actual, expected)) in single.iter().zip(expected).enumerate() {
+                    assert_eq!(
+                        actual.to_bits(),
+                        expected.to_bits(),
+                        "standalone Q8 width={width} at {index}"
+                    );
+                }
+            }
+            let mut runtime = BatchedLinearRuntime::new(context, ROWS, width, OUTPUTS, 2).unwrap();
+            for rows in [1, 3, 33, 64, 65] {
+                let mut actual = vec![f32::NAN; rows * OUTPUTS];
+                let before = context.submission_count();
+                runtime
+                    .matmul_rows(
+                        &weight,
+                        Q8_0,
+                        &input[..rows * width],
+                        rows,
+                        width,
+                        OUTPUTS,
+                        &mut actual,
+                    )
+                    .unwrap();
+                assert_eq!(context.submission_count(), before + 1);
+                for (index, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
+                    assert_eq!(
+                        actual.to_bits(),
+                        expected.to_bits(),
+                        "grouped Q8 width={width} rows={rows} at {index}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device; checks ordinary GPU fallback for unavailable tiling"]
+    fn vulkan_q8_tiled_falls_back_to_ordinary_gpu() {
+        use super::*;
+        const WIDTH: usize = 96;
+        const OUTPUTS: usize = 65;
+        const ROWS: usize = 5;
+        let mut context = VulkanContext::new().unwrap();
+        context.limits.max_compute_shared_memory_size = 16_384;
+        let mut cursor = 0;
+        let input = f32_region(&mut cursor, ROWS * WIDTH * 4).unwrap();
+        let q8 = region(&mut cursor, ROWS * WIDTH).unwrap();
+        let scales = f32_region(&mut cursor, ROWS * WIDTH / 32 * 4).unwrap();
+        let sums = f32_region(&mut cursor, ROWS * WIDTH / 32 * 4).unwrap();
+        let output = f32_region(&mut cursor, ROWS * OUTPUTS * 4).unwrap();
+        let mut ops = Qwen3Ops::new_with_size(&context, cursor, 2).unwrap();
+        assert!(!ops.q8_tiled);
+        let weight = synthetic_weight(GpuWeightFormat::Q8_0, WIDTH, OUTPUTS);
+        let buffer = unsafe { context.upload_static(&weight) }.unwrap();
+        let bindings = ops
+            .bind_weight_buffers(&[buffer], &[GpuWeightFormat::Q8_0])
+            .unwrap();
+        let values: Vec<_> = (0..ROWS * WIDTH)
             .map(|i| ((i * 29 % 251) as f32 - 125.0) / 97.0)
             .collect();
-        let mut expected = vec![0.0; 3 * OUTPUTS];
-        let mut single = vec![f32::NAN; OUTPUTS];
-        for (input, expected) in input
+        ops.write_f32(input, &values).unwrap();
+        ops.write_f32(output, &vec![f32::NAN; ROWS * OUTPUTS])
+            .unwrap();
+        let before = context.submission_count();
+        let commands = TokenCommands::begin(&context).unwrap();
+        ops.record_weight_matmul_tiled_rows(
+            &commands,
+            bindings,
+            input,
+            q8,
+            scales,
+            sums,
+            q8,
+            scales,
+            &[(output, OUTPUTS, OUTPUTS * 4)],
+            WIDTH,
+            ROWS,
+            WIDTH,
+        )
+        .unwrap();
+        commands.submit_and_wait().unwrap();
+        assert_eq!(context.submission_count(), before + 1);
+        assert_eq!(ops.recorded_dispatch_count(), 2);
+        let mut expected = vec![0.0; ROWS * OUTPUTS];
+        for (input, expected) in values
             .chunks_exact(WIDTH)
             .zip(expected.chunks_exact_mut(OUTPUTS))
         {
-            let mut q8 = vec![0; WIDTH];
+            let mut packed = vec![0; WIDTH];
             let mut scales = vec![0.0; WIDTH / 32];
-            crate::ops::quantize_q8_0_into(input, WIDTH, &mut q8, &mut scales);
+            crate::ops::quantize_q8_0_into(input, WIDTH, &mut packed, &mut scales);
             crate::ops::kernel::q8_0::dispatch::matmul_q8_0_quantized_range(
-                &weight, &q8, &scales, expected, WIDTH, 0, OUTPUTS,
+                &weight, &packed, &scales, expected, WIDTH, 0, OUTPUTS,
             );
-            unsafe {
-                context
-                    .matmul_q8_0(&weight, &q8, &scales, &mut single, WIDTH, OUTPUTS)
-                    .unwrap();
-            }
-            for (index, (actual, expected)) in single.iter().zip(expected).enumerate() {
-                assert_eq!(
-                    actual.to_bits(),
-                    expected.to_bits(),
-                    "standalone Q8 reduction at {index}"
-                );
-            }
         }
-        let mut runtime = BatchedLinearRuntime::new(context, 3, WIDTH, OUTPUTS, 2).unwrap();
-        let mut actual = vec![f32::NAN; expected.len()];
-        let before = context.submission_count();
-        runtime
-            .matmul_rows(&weight, Q8_0, &input, 3, WIDTH, OUTPUTS, &mut actual)
+        for (actual, expected) in ops
+            .read_f32(output, ROWS * OUTPUTS)
+            .unwrap()
+            .iter()
+            .zip(expected)
+        {
+            assert_eq!(actual.to_bits(), expected.to_bits());
+        }
+        unsafe { context.destroy_completed_buffers(&[buffer]) }.unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device; checks scalar, NEON and AVX2 reduction contracts"]
+    fn vulkan_q8_reduction_modes_match_golden_bits() {
+        use super::*;
+        const WIDTH: usize = 96;
+        const OUTPUTS: usize = 65;
+        const ROWS: usize = 5;
+        let mut context = VulkanContext::new().unwrap();
+        context.limits.max_compute_work_group_count[0] = 1;
+        let mut cursor = 0;
+        let q8 = region(&mut cursor, ROWS * WIDTH).unwrap();
+        let scales = f32_region(&mut cursor, ROWS * 3 * 4).unwrap();
+        let output = f32_region(&mut cursor, ROWS * OUTPUTS * 4).unwrap();
+        let mut ops = Qwen3Ops::new_with_size(&context, cursor, 2).unwrap();
+        let coefficients = [
+            [47i8, -89, 13, 102, -63, 7, -31, 19],
+            [-101, 37, 83, -11, 59, -73, 23, -5],
+            [11, 61, -107, 29, -17, 97, -43, 3],
+        ];
+        let row: Vec<u8> = coefficients
+            .iter()
+            .flat_map(|groups| {
+                [0x00, 0x3c]
+                    .into_iter()
+                    .chain(groups.iter().flat_map(|&value| [value as u8; 4]))
+            })
+            .collect();
+        let weight = row.repeat(OUTPUTS);
+        let buffer = unsafe { context.upload_static(&weight) }.unwrap();
+        let bindings = ops
+            .bind_weight_buffers(&[buffer], &[GpuWeightFormat::Q8_0])
             .unwrap();
-        assert_eq!(context.submission_count(), before + 1);
-        for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
-            assert_eq!(
-                actual.to_bits(),
-                expected.to_bits(),
-                "grouped Q8 reduction at {index}"
-            );
+        let input: Vec<f32> = (1..=ROWS as u8)
+            .flat_map(|value| [f32::from_bits(u32::from_le_bytes([value; 4])); WIDTH / 4])
+            .collect();
+        ops.write_f32(q8, &input).unwrap();
+        ops.write_f32(scales, &[0.13f32, 0.19, 0.37].repeat(ROWS))
+            .unwrap();
+        // Fixed IEEE-754 results distinguish block FMA, unfused adds and eight streams.
+        for (mode, expected) in [
+            (
+                0,
+                [0x427828f6, 0x42f828f6, 0x433a1eb9, 0x437828f6, 0x439b199a],
+            ),
+            (
+                1,
+                [0x427828f6, 0x42f828f6, 0x433a1eb8, 0x437828f6, 0x439b199a],
+            ),
+            (
+                8,
+                [0x427828f2, 0x42f828f2, 0x433a1eb8, 0x437828f2, 0x439b1998],
+            ),
+        ] {
+            for tiled in [false, true] {
+                if tiled && !ops.q8_tiled {
+                    continue;
+                }
+                let (mut push, mut dispatch) = matmul_rows_push(
+                    cursor,
+                    &context.limits,
+                    bindings,
+                    q8,
+                    scales,
+                    None,
+                    &[(output, OUTPUTS, OUTPUTS * 4)],
+                    WIDTH,
+                    ROWS,
+                    WIDTH,
+                )
+                .unwrap();
+                push[14] = mode;
+                let pipeline = if tiled {
+                    let tokens = if mode == 8 { 4 } else { 32 };
+                    dispatch = row_dispatch(2, ROWS.div_ceil(tokens), &context.limits).unwrap();
+                    Q8_MATMUL_GROUPED_TILED
+                } else {
+                    Q8_MATMUL_GROUPED
+                };
+                ops.write_f32(output, &vec![f32::NAN; ROWS * OUTPUTS])
+                    .unwrap();
+                let commands = TokenCommands::begin(&context).unwrap();
+                ops.record_linear_dispatch(&commands, pipeline, bindings, &push, dispatch);
+                commands.submit_and_wait().unwrap();
+                let actual = ops.read_f32(output, ROWS * OUTPUTS).unwrap();
+                for (token, row) in actual.chunks_exact(OUTPUTS).enumerate() {
+                    for (column, value) in row.iter().enumerate() {
+                        assert_eq!(
+                            value.to_bits(),
+                            expected[token],
+                            "mode={mode} tiled={tiled} token={token} column={column}"
+                        );
+                    }
+                }
+            }
         }
+        unsafe { context.destroy_completed_buffers(&[buffer]) }.unwrap();
     }
 
     #[test]
@@ -7611,6 +7840,40 @@ mod tests {
     }
 
     #[test]
+    fn q8_matmul_fits_output_tiles_into_device_grid() {
+        use super::{matmul_rows_push, ArenaRegion, GpuWeightFormat::Q8_0, OperatorBindings};
+        let limits = super::vk::PhysicalDeviceLimits {
+            max_compute_work_group_count: [2, 1, 6],
+            ..Default::default()
+        };
+        let bindings = OperatorBindings {
+            descriptor_set: super::vk::DescriptorSet::null(),
+            sizes: [65, 33, 17].map(|rows| rows * 34),
+            weight_formats: [Some(Q8_0); 3],
+            weight_mode: super::GpuMatmulMode::Prepared,
+        };
+        let region = |offset, size| ArenaRegion { offset, size };
+        let (_, dispatch) = matmul_rows_push(
+            4096,
+            &limits,
+            bindings,
+            region(0, 64),
+            region(64, 8),
+            None,
+            &[
+                (region(256, 520), 65, 260),
+                (region(1024, 264), 33, 132),
+                (region(2048, 136), 17, 68),
+            ],
+            32,
+            2,
+            32,
+        )
+        .expect("65 Q8 outputs must fit two workgroups, including the final partial tile");
+        assert_eq!(dispatch, [2, 1, 6]);
+    }
+
+    #[test]
     fn bf16_dot_dispatch_packs_independent_output_rows() {
         use super::{
             matmul_rows_push, ArenaRegion, GpuMatmulMode, GpuWeightFormat::*, OperatorBindings,
@@ -7761,7 +8024,7 @@ mod tests {
                     )
                 };
                 let output_groups = match format {
-                    Q4_0 | Q4_1 | Q4_K | Q5_K | Q6_K => 1,
+                    Q8_0 | Q4_0 | Q4_1 | Q4_K | Q5_K | Q6_K => 1,
                     BF16 if crate::ops::has_neon() || crate::ops::has_avx2_fma() => 1,
                     _ => 3,
                 };

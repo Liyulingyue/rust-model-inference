@@ -3969,6 +3969,10 @@ mod tests {
         let mut session =
             crate::models::diffusion::z_image::dit_gpu::DitGpuSession::new(context, rows)
                 .expect("session");
+        if !session.ops().supports_tiled_q8() {
+            eprintln!("skipped: tiled Q8_0 is unavailable on this device or disabled by DP4A=0");
+            return;
+        }
         for layer in 0..LAYERS {
             let (_, weight) = tiled_bench_synthetic(rows + layer, n_in, n_out);
             session
