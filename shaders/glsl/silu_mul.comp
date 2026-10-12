@@ -12,7 +12,27 @@ layout(push_constant) uniform PC {
 } pc;
 
 float exp_approx(float x) {
-    x = max(min(x, uintBitsToFloat(0x42b0c0a5u)), -uintBitsToFloat(0x42b0c0a5u));
+    // SATURATION BOUNDARY -- this value is load-bearing, do not "raise it back
+    // to the exp overflow point" without reading TODO.md (silu saturation).
+    //
+    // Clamp to +/-80, not to the exp overflow point near 88.7. silu divides by
+    // (1 + exp(-x)) and then recovers the residual with `fma(-den, act, gate)`
+    // followed by `fma(residual, 1/den, act)`, so it needs 1/den to stay a
+    // *normal* float. At 88.376 that reciprocal is 4.16e-39, below the normal
+    // floor of 1.18e-38, and the correction degenerates: measured on GB10,
+    // every activation at or below -88 came back NaN from the whole Z-Image
+    // FFN, 16 009 509 of 37 324 800 values non-finite, and the render aborted
+    // with "Non-finite Z-Image predicted flow". At 80 the reciprocal is
+    // 1.8e-35 and the correction stays exact over the range that matters.
+    //
+    // PARITY NOTE: this is a deliberate divergence from the CPU SiLU, which
+    // clamps nowhere and reaches -0 as gate -> -inf. Here gate below -80
+    // saturates: exp is evaluated at 80, so the result is gate/exp(80) rather
+    // than gate/exp(-gate). The two agree to ~1e-35 relative -- far under the
+    // activation's own magnitude -- but they are not bit-identical, and on the
+    // Z-Image 512x512 render that costs about 1.8 dB of PSNR against the CPU
+    // path (33.34 -> 31.52). See TODO.md before changing either side.
+    x = max(min(x, 80.0), -80.0);
     precise float z = x * uintBitsToFloat(0x3fb8aa3cu) + uintBitsToFloat(0x4b400000u);
     precise float n = z - uintBitsToFloat(0x4b400000u);
     precise float reduced = x - n * uintBitsToFloat(0x3f318000u);

@@ -68,6 +68,12 @@ NEON on aarch64; no AVX-512).
       当前 Q8_0 × Q8_0 matmul 已用 `_mm256_maddubs_epi16` (AVX2)，但 AVX-VNNI 的
       `_mm256_dpbssd_epi32`（带 saturate 的三操作数 int8 dot）在
       K2-Horizon / Breeze 等 Q8_0 路径上可省一次 saturate pass。
+- [x] ✅ **Vulkan SiLU 的 f32 次正规数缺陷** (2026-10-12) — `exp_approx` clamp 在 exp
+      溢出点导致 `1/den` 落进次正规数、silu 修正项产出 NaN，Z-Image FFN 43% 激活损坏。
+      **算子从未在生产规模验证过**（自检只覆盖 96 个元素，真实是 3800 万）。
+      clamp 改 `±80` + 新增生产规模门禁。⚠️ **clamp 值不可调回 88.376**，且
+      GPU SiLU 已与 CPU 不再逐位一致（PSNR 33.34 → 31.52 dB）。
+      详见 [TODO-020](#todo-020-vulkan-silu-的-f32-次正规数缺陷--已修复但饱和边界不可回退)。
 - [ ] **Q4_0 kernel 加 FMA + tiling** — 见 [TODO-001](#todo-001-q4_0-avx2-kernel-不使用-fma性能受限)。
 - [ ] **token 维寄存器分块：消除 per-token 权重重读** — 详见 [TODO-019](#todo-019-token-维寄存器分块消除-per-token-权重重读)。
       文本编码只跑到约 11% 的 NEON 峰值，瓶颈是每个 token 都从 DRAM 重读整个权重矩阵。
@@ -1493,3 +1499,103 @@ rough scope: ~400-500 LOC（取决于要不要 KV cache / generation），
 与 `tests/gemma3_270m_it_q4_k_m.rs` 的 8 条 contract test + 端到端 forward parity test 配对
 （参 llama.cpp `--temp 0 --top-k 1` greedy 输出做 32→1 字符串对齐；oracle 见 llama.cpp `b96806d`
 在 `unsloth/gemma-3-270m-it-GGUF` 上的 golden log `main-0319c65`）。
+
+---
+
+### TODO-020: Vulkan SiLU 的 f32 次正规数缺陷 — ✅ 已修复，但饱和边界不可回退
+
+#### 现象
+
+`record_silu_mul` 一旦被写进同一 command buffer 的 dispatch 链（Z-Image DiT 的 FFN
+合批），整幅渲染产出全 `-inf`：
+
+```
+Inference error: Non-finite Z-Image predicted flow: len=65536, nan=65536, -inf=65536
+```
+
+而同样的算子在**分开提交**时完全正确。历史上这个失败被归因为「descriptor set 与
+pipeline 布局在跨 dispatch 复用时的状态」，并标注「根因未定位」——**那个归因是错的**。
+
+#### 根因
+
+`shaders/glsl/silu_mul.comp` 的 `exp_approx` 把 exp 输入 clamp 在 `±88.376`
+（exp 的溢出点）。但 silu 的补偿算法需要 `1/denominator` 落在 f32 **正规数**范围：
+
+```glsl
+den = 1 + exp(-gate);
+act = gate / den;
+res = fma(-den, act, gate);     // 灾难性抵消，res 是残差
+act = fma(res, 1/den, act);     // 用 1/den 修正
+```
+
+| clamp | `den` | `1/den` | 状态 |
+|---|---|---|---|
+| 88.376 | 2.406e38 | **4.157e-39** | **低于正规数下限 1.175e-38** → 修正项退化 |
+| 80 | 5.541e34 | 1.805e-35 | 正规数 → 精确 |
+
+`gate ≤ -88` 时修正项产生 NaN。Z-Image FFN 的 gate 实测 amax 到 962、
+min 到 -197，所以必然踩中。
+
+**为什么藏了这么久**：自检 `check_operator_chain` 用 `N_FF = 96` 覆盖这个 shader，
+而真实 FFN 是 `3840 × 9728 = 37 324 800`——**38.9 万倍**，且小 fixture 的输入从未
+接近边界。**这个算子在生产规模下从未被验证过**，任何模型在 GPU 上调用它都会中招
+（`record_silu_mul` 是共享算子，不只 Z-Image 用）。
+
+#### 修复
+
+clamp 从 `±88.376` 改为 `±80`，让 `1/den` 保持正规数。新增
+`silu_ffn_scale_probe`（`src/vulkan/ops.rs`）用 FFN 真实规模跑，断言零非有限，
+并挂进 `run_qwen3_operator_check` 作为常规门禁。
+
+修复前 `16 009 509 / 37 324 800` 非有限（43% 损坏），修复后为 0。
+
+```bash
+SILU_ONLY=1 ./target/release/examples/vk_ops_check   # 只跑这一项
+```
+
+#### ⚠️ 风险 1：与 CPU SiLU 不再逐位一致（已发生）
+
+CPU 侧不 clamp，`gate → -∞` 时自然趋于 `-0`。GPU 侧现在对 `gate < -80` 饱和，
+返回 `gate/exp(80)` 而非 `gate/exp(-gate)`。
+
+两者相对误差 ~1e-35，远低于激活自身量级，但**不是逐位相同**。实测代价：Z-Image
+512×512 与 CPU 路径的 PSNR 从 **33.34 dB 降到 31.52 dB**（mean|Δ| 2.81 → 3.61）。
+
+**若 33+ dB 是硬门槛**，改法是对超大 |gate| 直接返回 0（数学上 `silu(gate) → 0`
+当 `gate → -∞`），这样正常值不受截断影响。**未做**，等有人判定 33 dB 是门槛。
+
+#### ⚠️ 风险 2：clamp 值不可随手调高
+
+看到「88.376 是 exp 溢出点，调回去更精确」是很自然的直觉——**那正是这个 bug**。
+`1/den` 必须是正规数，这是硬约束，不是保守取值。
+
+#### ⚠️ 风险 3：任何模型在 GPU 上用 SiLU 都继承这个饱和
+
+`record_silu_mul` 是共享算子。新增模型或新路径调用它时，**不能假设它与 CPU SiLU
+等价**。代码注释（`silu_mul.comp` 的 PARITY NOTE）已写明。
+
+#### 关联文件
+
+- `shaders/glsl/silu_mul.comp` — `exp_approx` 的 clamp + SATURATION BOUNDARY 注释
+- `src/vulkan/ops.rs` — `silu_ffn_scale_probe`（生产规模门禁）
+- `src/models/diffusion/z_image/dit_gpu.rs` — `record_ffn`（FFN 合批，依赖本修复）
+- `docs/usage/z-image.md` — 「FFN 合批的 `-inf`：已定位」记录排查全过程
+
+---
+
+### TODO-021: Z-Image FFN 合批 `record_ffn` — 已合入，依赖 TODO-020
+
+一次 command buffer 录 w1 → w3 → SiLU → w2，取代原来「3 次 submit + 2 次 readback +
+host 侧 3700 万次 exp」。denoise 52.7 s → 42.5 s，端到端 59.9 s → 49.7 s
+（512×512，8 步，seed 42，NVIDIA GB10）。
+
+**与 TODO-020 是同一件事的两端**：旧 clamp + 合批必然 `-inf`，两者必须一起看。
+
+排查时已排除（别重复）：barrier 覆盖范围、提交粒度、Q8 暂存别名（w3 已加独立
+`q8_up`）、region 重叠（bump allocator 不重叠）、validation layer（零警告，代码合规）。
+真正的根因在 silu 的数值，不在调度。
+
+`FFN_BATCH_MAX=<n>` 可限制合批生效的层数（默认全部），用于二分定位。
+
+**遗留**：合批后与 CPU 基线 PSNR 31.52 dB（改动前 33.34 dB），差异来自 TODO-020
+风险 1 的 silu 饱和，尚未追平。

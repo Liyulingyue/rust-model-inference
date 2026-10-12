@@ -4224,8 +4224,97 @@ fn check_weight_matmul_rows(
     result.and(cleanup).map_err(|error| error.to_string())
 }
 
+/// SiLU at the size the Z-Image FFN actually uses.
+///
+/// `check_operator_chain` covers this shader with `N_FF = 96`. The DiT FFN
+/// records it with `ffn_len` = rows * FFN_WIDTH, which is 37 324 800 at 512x512
+/// -- six orders of magnitude more, and a dispatch wide enough that
+/// `dispatch_grid` has to split it across x and y. If the shader only works at
+/// the small size, nothing upstream notices until a render comes out `-inf`.
+///
+/// That is exactly what happened: `exp_approx` clamped at the exp overflow
+/// point, where `1/(1 + exp(-gate))` drops below the f32 normal range and the
+/// residual correction turns to NaN. The small fixture never reached a gate
+/// anywhere near the boundary, so it passed while every production render
+/// failed. The values fed here (1e-17, 0.4, 20, 103, 962, -197.4, 0) bracket
+/// the range the DiT actually produces.
+///
+/// Kept as a gate in `run_qwen3_operator_check`: any change to the saturation
+/// clamp in `silu_mul.comp` has to keep this at zero. See TODO.md.
+///
+/// Returns the number of non-finite outputs, so a caller can assert on it
+/// without treating corruption as an error string.
+#[cfg(feature = "vulkan")]
+pub fn silu_ffn_scale_probe(context: &VulkanContext) -> Result<usize, String> {
+    // 3840 rows * 9728 columns, the Z-Image Turbo FFN activation.
+    const ROWS: usize = 3840;
+    const WIDTH: usize = 9728;
+    let count = ROWS * WIDTH;
+    // `for_dims` sizes the Q8 staging for `n_in`, not for two FFN-wide feature
+    // buffers, so gate and up need their own arena sized for both.
+    let bytes = (count * 4 * 2).next_multiple_of(1 << 20) + (1 << 20);
+    let ops = Qwen3Ops::new_device_local_with_size(context, bytes, 16)
+        .map_err(|error| error.to_string())?;
+    let gate_region = ArenaRegion {
+        offset: 0,
+        size: count * 4,
+    };
+    let up_region = ArenaRegion {
+        offset: count * 4,
+        size: count * 4,
+    };
+
+    // Values spanning the range the DiT produces: small, moderate, and large
+    // enough that silu(gate) * up reaches ~1e5, which is what the fused FFN
+    // sees after w1 and w3.
+    let mut gate = vec![0.0f32; count];
+    let mut up = vec![0.0f32; count];
+    for (index, slot) in gate.iter_mut().enumerate() {
+        let phase = index % 7;
+        let magnitude = match phase {
+            0 => 1e-17,
+            1 => 0.4,
+            2 => 20.0,
+            3 => 103.0,
+            4 => 962.0,
+            5 => -197.4,
+            _ => 0.0,
+        };
+        *slot = if index % 2 == 0 { magnitude } else { -magnitude };
+        up[index] = ((index % 11) as f32 - 5.0) * 0.37;
+    }
+    ops.write_f32(gate_region, &gate)
+        .map_err(|error| error.to_string())?;
+    ops.write_f32(up_region, &up)
+        .map_err(|error| error.to_string())?;
+
+    let commands = TokenCommands::begin(context).map_err(|error| error.to_string())?;
+    ops.record_silu_mul(&commands, gate_region, up_region, count)
+        .map_err(|error| error.to_string())?;
+    commands
+        .submit_and_wait()
+        .map_err(|error| error.to_string())?;
+
+    let after = ops
+        .read_f32(gate_region, count)
+        .map_err(|error| error.to_string())?;
+    let nonfinite = after.iter().filter(|value| !value.is_finite()).count();
+    Ok(nonfinite)
+}
+
 pub fn run_qwen3_operator_check(context: &VulkanContext, formats: &[&str]) -> Result<(), String> {
     check_quantize_tie_even(context)?;
+    if std::env::var("SILU_SCALE_ONLY").is_err() {
+        match silu_ffn_scale_probe(context) {
+            Ok(0) => println!("operator=silu_mul_ffn_scale rows=3840 width=9728 finite=true"),
+            Ok(nonfinite) => {
+                return Err(format!(
+                    "silu_mul produced {nonfinite} non-finite values at the Z-Image FFN shape (3840 x 9728)"
+                ))
+            }
+            Err(error) => return Err(format!("silu_mul FFN-scale check: {error}")),
+        }
+    }
     check_attention_scores_match_cpu_reduction(context)?;
     check_softmax_f16_rounding(context)?;
     check_attention_value_reduction(context)?;
