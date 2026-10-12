@@ -26,12 +26,16 @@ float exp_approx(float x) {
     // 1.8e-35 and the correction stays exact over the range that matters.
     //
     // PARITY NOTE: this is a deliberate divergence from the CPU SiLU, which
-    // clamps nowhere and reaches -0 as gate -> -inf. Here gate below -80
-    // saturates: exp is evaluated at 80, so the result is gate/exp(80) rather
-    // than gate/exp(-gate). The two agree to ~1e-35 relative -- far under the
-    // activation's own magnitude -- but they are not bit-identical, and on the
-    // Z-Image 512x512 render that costs about 1.8 dB of PSNR against the CPU
-    // path (33.34 -> 31.52). See TODO.md before changing either side.
+    // clamps nowhere and reaches -0 as gate -> -inf. Two regimes, not one:
+    // for |gate| < 80 the two are bit-identical, because nothing here is
+    // clamped and the compensation is exact. Past that the CPU path is *also*
+    // wrong -- 1 + exp(103) overflows f32, so it computes gate/inf and lands
+    // on -0 -- while this saturates at exp(80) and lands near -1.9e-33. The
+    // absolute gap is ~1e-33, which is noise floor in f32 and cannot
+    // contaminate a downstream matmul, but the two do not agree *relatively*
+    // and any test comparing them must use an absolute tolerance there.
+    // On the Z-Image 512x512 render this costs about 1.8 dB of PSNR against
+    // the CPU path (33.34 -> 31.52). See TODO.md before changing either side.
     x = max(min(x, 80.0), -80.0);
     precise float z = x * uintBitsToFloat(0x3fb8aa3cu) + uintBitsToFloat(0x4b400000u);
     precise float n = z - uintBitsToFloat(0x4b400000u);
