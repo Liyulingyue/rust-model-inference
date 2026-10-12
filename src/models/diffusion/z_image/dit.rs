@@ -2616,7 +2616,53 @@ fn run_block_gpu(
     }
 
     let ffn_start = std::time::Instant::now();
-    if gate_on_gpu {
+    let batch_limit: usize = std::env::var("FFN_BATCH_MAX")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(usize::MAX);
+    if gate_on_gpu && up_on_gpu && down_on_gpu && layer < batch_limit {
+        // One command buffer for the whole FFN. All three projections run at
+        // scale 1.0, so nothing has to cross the bus between w1, w3, the SiLU
+        // product and w2 -- the gate/up buffers are `ffn_len` wide and reading
+        // them back was the single largest host cost in the step.
+        //
+        // `x` has to be refreshed here. The unfused path uploaded the current
+        // activations into it on every `project_scaled` call, but slot 1 and
+        // slot 4 both write regions that overlap `x` in time, so whatever the
+        // fused QKV chain left there is stale by now. Without this the batched
+        // chain multiplies the wrong input and the render comes out at ~5 dB.
+        session
+            .ops()
+            .write_f32(layout.x, &attention[..hidden_len])
+            .map_err(|e| format!("Z-Image DiT FFN activation upload failed: {e}"))?;
+        let commands = session
+            .begin()
+            .map_err(|e| format!("Z-Image DiT FFN begin failed: {e}"))?;
+        let commands = session
+            .record_ffn(commands, layer, ffn_len)
+            .map_err(|e| format!("Z-Image DiT FFN record failed: {e}"))?;
+        commands
+            .submit_and_wait()
+            .map_err(|e| format!("Z-Image DiT FFN submit failed: {e}"))?;
+        // `readback` returns whatever the last `read_into` staged, and a
+        // recorded-but-not-read dispatch never stages anything -- so without
+        // this the norm+residual tail consumes the out-projection's leftovers.
+        session
+            .read_projection(Projection::W2, layout.out)
+            .map_err(|e| format!("Z-Image DiT FFN readback failed: {e}"))?;
+        let t_ffn = std::time::Instant::now();
+        let down = session.readback(hidden_len);
+        readback_norm_and_residual_rows(
+            pool,
+            tokens,
+            &mut attention[..hidden_len],
+            down,
+            &block.ffn_norm2,
+            modulations.map(|values| values.gate_mlp),
+            rows,
+        )?;
+        gpu_profile_add(7, t_ffn);
+    } else if gate_on_gpu {
         // w1's output is the silu'd side, so it goes to the `gate` region and
         // the product is formed on the host before w2 sees it.
         session

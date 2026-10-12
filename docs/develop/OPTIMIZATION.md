@@ -3,10 +3,10 @@
 > **文档用途：** 本文是项目的优化档案。包含：SIMD/数值正确性的工程教训、量化 kernel 矩阵、固定机器基线、已验证无效方向、未达成门禁与下一批目标。
 >
 > 文档分两类章节：
-> - **经验性**（长期有效，不随代码迭代失效）：§1 SIMD 浮点舍入、§2 已验证无效方向、§3 paritty test 配方
+> - **经验性**（长期有效，不随代码迭代失效）：§1 浮点舍入与算子自检规模、§2 已验证无效方向、§3 paritty test 配方
 > - **状态性**（随代码迭代需刷新）：§4 量化 kernel 矩阵、§5 固定机器基线、§6 多模型适配、§7 异构后端基线、§8 未达成门禁
 >
-> 最近一次刷新：2026-09-18（与 ARCHITECTURE.md 同步）。下一次刷新门槛：任何量化 kernel 状态变更、任何 Vulkan/NEON 后端新模型支持、新一轮固定机器对比。
+> 最近一次刷新：2026-10-12（新增 §1.2 Vulkan SiLU 次正规数缺陷与「小 fixture 掩盖生产规模」的方法论）。下一次刷新门槛：任何量化 kernel 状态变更、任何 Vulkan/NEON 后端新模型支持、新一轮固定机器对比。
 
 ---
 
@@ -51,7 +51,53 @@ assert!(diff_bits == 0, "AVX2 diverged by {} ULP", diff_bits);
 
 K-quant/I-quant 走 `0.25 * sum(d_i*b_i)`（C 末尾乘）vs `sum(0.25 * d_i*b_i)`（Rust 每 block 乘），f32 累加顺序不同。已用 f64 block accumulator 修复大部分情况（IQ3_XXS 完全恢复），IQ2_XXS 仍残留偏差——可能与 2-bit 量化精度边界有关，待查。
 
-### 1.2 已知未完全修复
+### 1.2 小 fixture 会掩盖生产规模的算子缺陷（2026-10-12，Vulkan SiLU）
+
+**问题**：`record_silu_mul` 一直有 GPU 实现，但只在 `check_operator_chain` 里用
+`N_FF = 96` 覆盖过。Z-Image 把它接进 FFN 合批后，整幅渲染产出全 `-inf`
+（`nan=65536`），而同样的算子**分开提交时完全正确**。
+
+**根因**：不是调度问题，是算术问题。`silu_mul.comp` 的 `exp_approx` 把 exp 输入
+clamp 在 `±88.376`（exp 的 f32 溢出点），但 silu 用了补偿算法：
+
+```glsl
+res = fma(-den, act, gate);     // 两项几乎完全抵消，只剩舍入残差
+act = fma(res, 1/den, act);     // 需要 1/den 是【正规数】
+```
+
+clamp=88.376 时 `1/den = 4.157e-39`，**低于 f32 正规数下限 1.175e-38**，落进
+次正规数区间，修正项退化 → NaN。实测 FFN 真实规模（3840×9728 = 37 324 800 个激活）
+下 **43% 非有限**。
+
+**为什么小 fixture 抓不到**：
+
+| | 小 fixture | 生产规模 |
+|---|---|---|
+| 元素数 | 96 | 37 324 800（**38.9 万倍**）|
+| 输入范围 | 合成，集中在 [-3, 3] | 实测 amax 962、min -197 |
+| `1/den` | 始终正规数 | 大量落入次正规数 |
+
+三条独立的小 fixture 维度（规模、输入分布、dispatch 网格）**同时掩盖了同一个缺陷**。
+
+**两条可迁移的结论**：
+
+1. **算子自检必须跑生产形状**，至少覆盖三个维度：元素数量级、输入数值分布
+   （含极值）、dispatch 是否跨设备上限（`dispatch_grid` 会把超大 grid 拆到 x/y，
+   小 fixture 走不到那条路）。
+2. **"合批/融合后才出错"是算子缺陷的典型信号，不是调度缺陷的信号**。分开提交
+   正常、合批出错时，先怀疑被合批的那个算子的**数值边界**，而不是 barrier /
+   descriptor set / 提交粒度。详见 [`TODO.md`](TODO.md) TODO-020/021 记录的
+   完整排查路径——barrier access mask、提交粒度、暂存区别名、region 重叠、
+   validation layer（零警告）全部排除后，根因才落在算术上。
+
+**新增守护**：`silu_ffn_scale_probe`（`src/vulkan/ops.rs`）用 FFN 真实规模跑并断言
+零非有限，已挂进 `run_qwen3_operator_check`。改任何 saturate/clamp 前必须先过它：
+
+```bash
+SILU_ONLY=1 ./target/release/examples/vk_ops_check
+```
+
+### 1.3 已知未完全修复
 
 - **Q6_K AVX2** 仍有 1-2 ULP drift（commit `acb0a2b` 调查根因）：scalar `sumf += sums[l]` 是线性累加，AVX2 `hsum_ps` 是树形 reduction；f32 加法不满足结合律。尝试过多种缓解（FMA→mul+add 拆解、scalar 改 `mul_add`），均无改善——属于 IEEE 754 不可避免现象。生产验证：Q6_K / Q4_K_M / Q8_0 均输出 "The capital of France is **Paris**"（scalar 与 AVX2 一致）。
   - 2026-09-18 复现：`Q6_KKernel::forward_prepared` → `vec_dot_q6k_q8k_avx2` 与 `vec_dot_q6k_q8k_scalar` 在 `tests/quantized_inference.rs::q6_k_prepared_path_matches_existing_scalar_dot_bits` 差 1 ULP。**当前无生产影响**：Q6_K fused path 未接入任何模型，实际 Qwen3-0.6B-Q6_K 文本推理走 `forward_prequantized` → `matmul_q6_k_scalar_range` 全 scalar 路径（实测 55.3 t/s，产出 "Paris"）。`embedding_lookup_q6_k` 与 `dequantize_row_q6_k` bit-exact 一致。详见 [`TODO.md`](TODO.md) high-priority 第一条（已划 ✅）。
@@ -72,6 +118,7 @@ K-quant/I-quant 走 `0.25 * sum(d_i*b_i)`（C 末尾乘）vs `sum(0.25 * d_i*b_i
 - **结果**：输出乱码 + 变慢（9.6→6.6 tok/s）。
 - **原因**：silu activation 需要在 gate/up matmul 完成后才能执行，合并改变了数据流。
 - **结论**：需更仔细的依赖分析；当前 §Quant Kernel 补全的 `QTensorOwned::fuse_vstack` 是约束更窄的"vstack 合并"，结果正确。
+- **2026-10-12 补充**：Vulkan 侧的同类操作（`DitGpuSession::record_ffn` 把 w1→w3→silu→w2 合进一个 command buffer）**是成功的**，denoise 52.7→42.5 s。区别在于它保留了 silu 作为设备侧的独立 dispatch、没有改变数据流顺序——即"合并提交"可行，"合并计算"不可行。参见 §1.2：合批后暴露出的 `-inf` 是 SiLU 算子自身的次正规数缺陷，与合批无关。
 
 ### 2.3 Persistent Workers 架构 ⚠️ 已废弃（2025-07-31）
 - **做法**：重写 `ComputePool`，让 worker 线程永不退出，在 `worker_loop` 中遍历所有 ops。用 `work_ready` flag + exit_barrier + reenter_barrier 三阶段同步。
