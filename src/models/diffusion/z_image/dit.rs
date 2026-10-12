@@ -2617,7 +2617,9 @@ fn run_block_gpu(
 
     let ffn_start = std::time::Instant::now();
     let batch_limit: usize = std::env::var("FFN_BATCH_MAX")
-        .ok().and_then(|v| v.parse().ok()).unwrap_or(usize::MAX);
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(usize::MAX);
     if gate_on_gpu && up_on_gpu && down_on_gpu && layer < batch_limit {
         // One command buffer for the whole FFN. All three projections run at
         // scale 1.0, so nothing has to cross the bus between w1, w3, the SiLU

@@ -1031,7 +1031,11 @@ mod tests {
             return;
         };
 
-        let rows = if std::env::var("BIG_ROWS").is_ok() { 3840 } else { 256 };
+        let rows = if std::env::var("BIG_ROWS").is_ok() {
+            3840
+        } else {
+            256
+        };
         let (n_in, n_out) = (HIDDEN, FFN_WIDTH);
         let mut session = DitGpuSession::new(context, rows).expect("session");
         session

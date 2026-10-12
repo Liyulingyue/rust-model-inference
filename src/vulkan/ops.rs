@@ -4280,7 +4280,11 @@ pub fn silu_ffn_scale_probe(context: &VulkanContext) -> Result<usize, String> {
             5 => -197.4,
             _ => 0.0,
         };
-        *slot = if index % 2 == 0 { magnitude } else { -magnitude };
+        *slot = if index % 2 == 0 {
+            magnitude
+        } else {
+            -magnitude
+        };
         up[index] = ((index % 11) as f32 - 5.0) * 0.37;
     }
     ops.write_f32(gate_region, &gate)
