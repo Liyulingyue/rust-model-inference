@@ -20,7 +20,11 @@ fn loader() -> Option<GGUFLoader> {
 }
 
 fn pick(loader: &GGUFLoader, key: &str) -> usize {
-    loader.metadata(key).and_then(|v| v.to_u64()).map(|v| v as usize).unwrap_or(0)
+    loader
+        .metadata(key)
+        .and_then(|v| v.to_u64())
+        .map(|v| v as usize)
+        .unwrap_or(0)
 }
 
 fn pick_str<'a>(loader: &'a GGUFLoader, key: &str) -> Option<&'a str> {
@@ -37,7 +41,10 @@ fn shape<'a>(loader: &'a GGUFLoader, name: &str) -> Option<&'a TensorInfo> {
 #[test]
 fn arch_is_gemma4_embedding() {
     let Some(loader) = loader() else { return };
-    assert_eq!(pick_str(&loader, "general.architecture"), Some("gemma4-embedding"));
+    assert_eq!(
+        pick_str(&loader, "general.architecture"),
+        Some("gemma4-embedding")
+    );
 }
 
 #[test]
@@ -60,7 +67,10 @@ fn text_per_layer_config_dispatch_indices_5_11_17_23() {
         .metadata("gemma4-embedding.full_attention_layers")
         .and_then(|v| v.to_arr())
         .expect("gemma4-embedding.full_attention_layers");
-    let idx: Vec<i64> = layers.iter().filter_map(|v| v.to_u64().map(|x| x as i64)).collect();
+    let idx: Vec<i64> = layers
+        .iter()
+        .filter_map(|v| v.to_u64().map(|x| x as i64))
+        .collect();
     assert_eq!(idx, vec![5, 11, 17, 23]);
 
     // GGUF string arrays round-trip as `String` MetaValues, not Uint —
@@ -81,9 +91,15 @@ fn text_per_layer_config_dispatch_indices_5_11_17_23() {
     assert_eq!(hd.len(), 24);
     for (i, &d) in hd.iter().enumerate() {
         if [5, 11, 17, 23].contains(&i) {
-            assert_eq!(d, 512, "layer {i} should have head_dim=512 (full attention)");
+            assert_eq!(
+                d, 512,
+                "layer {i} should have head_dim=512 (full attention)"
+            );
         } else {
-            assert_eq!(d, 256, "layer {i} should have head_dim=256 (sliding attention)");
+            assert_eq!(
+                d, 256,
+                "layer {i} should have head_dim=256 (sliding attention)"
+            );
         }
     }
     let kh = parse_int_array("gemma4-embedding.attention.head_count_kv_per_layer");
@@ -139,16 +155,32 @@ fn text_per_layer_block_inventory_complete() {
     let Some(loader) = loader() else { return };
     // Every block must carry: 4 norms + layer_scalar + 3 PLE tensors + 6 attn + 3 ffn.
     let expected = [
-        "attn_norm", "post_attention_norm", "pre_ffn_norm", "post_ffn_norm",
-        "layer_scalar", "ple_input_gate", "ple_projection", "ple_post_norm",
-        "attn_q", "attn_k", "attn_v", "attn_output",
-        "attn_q_norm", "attn_k_norm",
-        "ffn_gate", "ffn_up", "ffn_down",
+        "attn_norm",
+        "post_attention_norm",
+        "pre_ffn_norm",
+        "post_ffn_norm",
+        "layer_scalar",
+        "ple_input_gate",
+        "ple_projection",
+        "ple_post_norm",
+        "attn_q",
+        "attn_k",
+        "attn_v",
+        "attn_output",
+        "attn_q_norm",
+        "attn_k_norm",
+        "ffn_gate",
+        "ffn_up",
+        "ffn_down",
     ];
     for i in 0..24 {
         for name in expected {
             // `layer_scalar` is a 1-value tensor without `.weight` suffix.
-            let suffix = if name == "layer_scalar" { "" } else { ".weight" };
+            let suffix = if name == "layer_scalar" {
+                ""
+            } else {
+                ".weight"
+            };
             let key = format!("blk.{i}.{name}{suffix}");
             assert!(shape(&loader, &key).is_some(), "missing {key}");
         }
@@ -186,14 +218,35 @@ fn text_sliding_vs_full_attention_q_shape_differs() {
 fn vision_dims_match_gemma4_vision() {
     let Some(loader) = loader() else { return };
     assert_eq!(pick(&loader, "gemma4-embedding.vision.depth"), 16);
-    assert_eq!(pick(&loader, "gemma4-embedding.vision.embedding_length"), 768);
-    assert_eq!(pick(&loader, "gemma4-embedding.vision.feed_forward_length"), 3072);
-    assert_eq!(pick(&loader, "gemma4-embedding.vision.attention.head_count"), 12);
+    assert_eq!(
+        pick(&loader, "gemma4-embedding.vision.embedding_length"),
+        768
+    );
+    assert_eq!(
+        pick(&loader, "gemma4-embedding.vision.feed_forward_length"),
+        3072
+    );
+    assert_eq!(
+        pick(&loader, "gemma4-embedding.vision.attention.head_count"),
+        12
+    );
     assert_eq!(pick(&loader, "gemma4-embedding.vision.patch_size"), 16);
-    assert_eq!(pick(&loader, "gemma4-embedding.vision.spatial_merge_size"), 3);
-    assert_eq!(pick(&loader, "gemma4-embedding.vision.projection_dim"), 1536);
-    assert_eq!(pick(&loader, "gemma4-embedding.vision.position_embedding_size"), 10_240);
-    assert_eq!(pick(&loader, "gemma4-embedding.vision.default_output_length"), 280);
+    assert_eq!(
+        pick(&loader, "gemma4-embedding.vision.spatial_merge_size"),
+        3
+    );
+    assert_eq!(
+        pick(&loader, "gemma4-embedding.vision.projection_dim"),
+        1536
+    );
+    assert_eq!(
+        pick(&loader, "gemma4-embedding.vision.position_embedding_size"),
+        10_240
+    );
+    assert_eq!(
+        pick(&loader, "gemma4-embedding.vision.default_output_length"),
+        280
+    );
 }
 
 #[test]
@@ -209,10 +262,19 @@ fn vision_axial_rope_type_marker() {
 fn vision_block_inventory_complete() {
     let Some(loader) = loader() else { return };
     let expected = [
-        "ln1", "pre_ffn_norm", "post_attention_norm", "post_ffn_norm",
-        "attn_q", "attn_k", "attn_v", "attn_output",
-        "attn_q_norm", "attn_k_norm",
-        "ffn_gate", "ffn_up", "ffn_down",
+        "ln1",
+        "pre_ffn_norm",
+        "post_attention_norm",
+        "post_ffn_norm",
+        "attn_q",
+        "attn_k",
+        "attn_v",
+        "attn_output",
+        "attn_q_norm",
+        "attn_k_norm",
+        "ffn_gate",
+        "ffn_up",
+        "ffn_down",
     ];
     for i in 0..16 {
         for name in expected {
@@ -223,7 +285,8 @@ fn vision_block_inventory_complete() {
         }
     }
     assert!(shape(&loader, "vision.patch_input_proj.weight").is_some());
-    let pos = shape(&loader, "vision.position_embedding_table").expect("vision.position_embedding_table");
+    let pos =
+        shape(&loader, "vision.position_embedding_table").expect("vision.position_embedding_table");
     // Position embedding: (hidden_size, position_embedding_size, 2)
     assert_eq!(pos.dims, vec![768, 10_240, 2]);
 }
@@ -233,7 +296,10 @@ fn audio_dims_match_gemma4_audio() {
     let Some(loader) = loader() else { return };
     assert_eq!(pick(&loader, "gemma4-embedding.audio.depth"), 12);
     assert_eq!(pick(&loader, "gemma4-embedding.audio.hidden_size"), 1024);
-    assert_eq!(pick(&loader, "gemma4-embedding.audio.ffn_hidden_size"), 4096);
+    assert_eq!(
+        pick(&loader, "gemma4-embedding.audio.ffn_hidden_size"),
+        4096
+    );
     assert_eq!(pick(&loader, "gemma4-embedding.audio.projection_dim"), 1536);
 }
 
@@ -243,7 +309,7 @@ fn audio_block_inventory_is_complete() {
     // Each Conformer layer carries: lconv1d.{conv_norm,depthwise_conv1d,
     // linear_start,linear_end}.linear.weight + pre_layer_norm + norm_out +
     // norm_pre_attn + norm_post_attn + self_attn.{q,k,v,post}.linear.weight
-    // + self_attn.per_dim_scale + self_attn.relative_k_proj.weight + 
+    // + self_attn.per_dim_scale + self_attn.relative_k_proj.weight +
     // feed_forward1/2.{pre_layer_norm,ffw_layer_1,ffw_layer_2,post_layer_norm}.linear.weight
     for i in 0..12 {
         for suffix in [
@@ -276,9 +342,21 @@ fn audio_block_inventory_is_complete() {
         }
     }
     // Conformer subsampling convolution (input projection).
-    assert!(shape(&loader, "audio.subsample_conv_projection.input_proj_linear.weight").is_some());
-    assert!(shape(&loader, "audio.subsample_conv_projection.layer0.conv.weight").is_some());
-    assert!(shape(&loader, "audio.subsample_conv_projection.layer0.norm.weight").is_some());
+    assert!(shape(
+        &loader,
+        "audio.subsample_conv_projection.input_proj_linear.weight"
+    )
+    .is_some());
+    assert!(shape(
+        &loader,
+        "audio.subsample_conv_projection.layer0.conv.weight"
+    )
+    .is_some());
+    assert!(shape(
+        &loader,
+        "audio.subsample_conv_projection.layer0.norm.weight"
+    )
+    .is_some());
     // Audio output projection to projection_dim=1536.
     assert!(shape(&loader, "audio.output_proj.weight").is_some());
     assert!(shape(&loader, "audio.output_proj.bias").is_some());

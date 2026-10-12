@@ -558,7 +558,12 @@ impl Qwen35VulkanSession {
                         (Some(beta), "Qwen3.5 recurrent beta"),
                     ],
                 )?;
-                let alpha = bind_weight(&mut ops, &mut buffers, Some(alpha), "Qwen3.5 recurrent alpha")?;
+                let alpha = bind_weight(
+                    &mut ops,
+                    &mut buffers,
+                    Some(alpha),
+                    "Qwen3.5 recurrent alpha",
+                )?;
                 let conv_weight = layer.ssm_conv1d.as_ref().ok_or_else(|| {
                     VulkanError::UnsupportedShape(format!(
                         "missing Qwen3.5 layer {layer_index} convolution weight"
@@ -587,8 +592,12 @@ impl Qwen35VulkanSession {
                     buffers.upload_f32(norm)?,
                 ];
                 let ssm = ops.bind_buffers(&ssm_buffers)?;
-                let output =
-                    bind_weight(&mut ops, &mut buffers, Some(output), "Qwen3.5 recurrent output")?;
+                let output = bind_weight(
+                    &mut ops,
+                    &mut buffers,
+                    Some(output),
+                    "Qwen3.5 recurrent output",
+                )?;
                 AttentionBindings::Recurrent(RecurrentBindings {
                     qkv_gate_beta: qkv_gate_beta
                         .expect("recurrent qkv/gate/beta bindings always present"),
@@ -641,7 +650,12 @@ impl Qwen35VulkanSession {
                     (layer.ffn_up.as_ref(), "Qwen3.5 FFN up"),
                 ],
             )?;
-            let down = bind_weight(&mut ops, &mut buffers, layer.ffn_down.as_ref(), "Qwen3.5 FFN down")?;
+            let down = bind_weight(
+                &mut ops,
+                &mut buffers,
+                layer.ffn_down.as_ref(),
+                "Qwen3.5 FFN down",
+            )?;
             layers.push(LayerBindings {
                 attention_norm,
                 attention,

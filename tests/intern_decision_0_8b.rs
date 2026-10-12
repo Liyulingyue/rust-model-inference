@@ -25,7 +25,11 @@ fn mmproj_loader() -> Option<GGUFLoader> {
 }
 
 fn pick(loader: &GGUFLoader, key: &str) -> usize {
-    loader.metadata(key).and_then(|v| v.to_u64()).map(|v| v as usize).unwrap_or(0)
+    loader
+        .metadata(key)
+        .and_then(|v| v.to_u64())
+        .map(|v| v as usize)
+        .unwrap_or(0)
 }
 
 fn pick_str<'a>(loader: &'a GGUFLoader, key: &str) -> Option<&'a str> {
@@ -102,17 +106,33 @@ fn text_hybrid_layer_dispatch_full_vs_linear() {
     // Linear-attention (SSM) layers must carry ssm_* tensors and lack
     // attn_{q,k,v,output}.
     for i in [0usize, 1, 2, 4, 5, 6] {
-        for name in ["attn_qkv", "attn_gate", "ssm_alpha", "ssm_beta",
-                     "ssm_conv1d", "ssm_norm", "ssm_out", "ssm_a", "ssm_dt.bias"] {
+        for name in [
+            "attn_qkv",
+            "attn_gate",
+            "ssm_alpha",
+            "ssm_beta",
+            "ssm_conv1d",
+            "ssm_norm",
+            "ssm_out",
+            "ssm_a",
+            "ssm_dt.bias",
+        ] {
             assert!(
                 shape(&loader, &format!("blk.{i}.{name}.weight")).is_some()
                     || shape(&loader, &format!("blk.{i}.{name}")).is_some()
-                    || name == "ssm_a" || name == "ssm_dt.bias",
+                    || name == "ssm_a"
+                    || name == "ssm_dt.bias",
                 "linear block {i} missing {name}",
             );
         }
-        for name in ["attn_q", "attn_k", "attn_v", "attn_output",
-                     "attn_q_norm", "attn_k_norm"] {
+        for name in [
+            "attn_q",
+            "attn_k",
+            "attn_v",
+            "attn_output",
+            "attn_q_norm",
+            "attn_k_norm",
+        ] {
             assert!(
                 shape(&loader, &format!("blk.{i}.{name}.weight")).is_none(),
                 "linear block {i} should NOT carry {name}",
@@ -122,8 +142,14 @@ fn text_hybrid_layer_dispatch_full_vs_linear() {
 
     // Full-attention layers must carry q/k/v/o + q/k_norm but lack ssm_*.
     for i in [3usize, 7, 11, 15, 19, 23] {
-        for name in ["attn_q", "attn_k", "attn_v", "attn_output",
-                     "attn_q_norm", "attn_k_norm"] {
+        for name in [
+            "attn_q",
+            "attn_k",
+            "attn_v",
+            "attn_output",
+            "attn_q_norm",
+            "attn_k_norm",
+        ] {
             assert!(
                 shape(&loader, &format!("blk.{i}.{name}.weight")).is_some(),
                 "full block {i} missing {name}.weight",
@@ -143,8 +169,13 @@ fn text_hybrid_layer_dispatch_full_vs_linear() {
 fn text_ffn_present_for_every_block() {
     let Some(loader) = text_loader() else { return };
     for i in 0..24 {
-        for name in ["attn_norm", "post_attention_norm",
-                     "ffn_gate", "ffn_up", "ffn_down"] {
+        for name in [
+            "attn_norm",
+            "post_attention_norm",
+            "ffn_gate",
+            "ffn_up",
+            "ffn_down",
+        ] {
             assert!(
                 shape(&loader, &format!("blk.{i}.{name}.weight")).is_some(),
                 "missing blk.{i}.{name}.weight",
@@ -156,7 +187,9 @@ fn text_ffn_present_for_every_block() {
 
 #[test]
 fn mmproj_arch_is_clip_with_qwen3vl_merger() {
-    let Some(loader) = mmproj_loader() else { return };
+    let Some(loader) = mmproj_loader() else {
+        return;
+    };
     assert_eq!(pick_str(&loader, "general.architecture"), Some("clip"));
     assert_eq!(
         pick_str(&loader, "clip.projector_type"),
@@ -164,16 +197,15 @@ fn mmproj_arch_is_clip_with_qwen3vl_merger() {
     );
     let has_ve = loader
         .metadata("clip.has_vision_encoder")
-        .is_some_and(|v| matches!(
-            v,
-            rust_model_inference::core::tensor::MetaValue::Bool(true)
-        ));
+        .is_some_and(|v| matches!(v, rust_model_inference::core::tensor::MetaValue::Bool(true)));
     assert!(has_ve, "clip.has_vision_encoder must be Bool(true)");
 }
 
 #[test]
 fn mmproj_vision_dims_match_intern_decision() {
-    let Some(loader) = mmproj_loader() else { return };
+    let Some(loader) = mmproj_loader() else {
+        return;
+    };
     assert_eq!(pick(&loader, "clip.vision.embedding_length"), 768);
     assert_eq!(pick(&loader, "clip.vision.feed_forward_length"), 3072);
     assert_eq!(pick(&loader, "clip.vision.block_count"), 12);
@@ -186,7 +218,9 @@ fn mmproj_vision_dims_match_intern_decision() {
 
 #[test]
 fn mmproj_deepstack_disabled_for_every_layer() {
-    let Some(loader) = mmproj_loader() else { return };
+    let Some(loader) = mmproj_loader() else {
+        return;
+    };
     let arr = loader
         .metadata("clip.vision.is_deepstack_layers")
         .and_then(|v| v.to_arr())
@@ -200,12 +234,17 @@ fn mmproj_deepstack_disabled_for_every_layer() {
         })
         .collect();
     assert_eq!(bools.len(), 12);
-    assert!(bools.iter().all(|&b| b == 0), "no deepstack layers in Intern-Decision");
+    assert!(
+        bools.iter().all(|&b| b == 0),
+        "no deepstack layers in Intern-Decision"
+    );
 }
 
 #[test]
 fn mmproj_conv3d_split_and_merger_shape() {
-    let Some(loader) = mmproj_loader() else { return };
+    let Some(loader) = mmproj_loader() else {
+        return;
+    };
     let w0 = shape(&loader, "v.patch_embd.weight").expect("v.patch_embd.weight");
     let w1 = shape(&loader, "v.patch_embd.weight.1").expect("v.patch_embd.weight.1");
     // Intern-Decision vision out_channels=768 (vs 1024 for PhysBrain).

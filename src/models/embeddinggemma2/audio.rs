@@ -187,7 +187,8 @@ fn log_mel_features(pcm16: &[i16]) -> Vec<f32> {
             } else {
                 0.0
             };
-            let hann = 0.5 - 0.5 * ((2.0 * std::f32::consts::PI * i as f32) / (window_size - 1) as f32).cos();
+            let hann = 0.5
+                - 0.5 * ((2.0 * std::f32::consts::PI * i as f32) / (window_size - 1) as f32).cos();
             *val = sample * hann;
         }
         for v in fft_imag.iter_mut() {
@@ -614,8 +615,7 @@ impl EmbeddingGemmaAudioModel {
                     if tt < 0 || tt >= n_frames as i32 {
                         continue;
                     }
-                    s += x[tt as usize * h + ch]
-                        * layer.lconv1d_depthwise_weight[ch * 5 + k];
+                    s += x[tt as usize * h + ch] * layer.lconv1d_depthwise_weight[ch * 5 + k];
                 }
                 conv_out[t * h + ch] = s;
             }
@@ -759,7 +759,9 @@ impl EmbeddingGemmaAudioModel {
             for j in 0..cfg.ffn_hidden_size {
                 ffw1_inter[j] = crate::ops::silu(ffw1_inter[j]);
             }
-            layer.ff1_ffw_layer_2.forward(&ffw1_inter, &mut tmp_ff1_inter);
+            layer
+                .ff1_ffw_layer_2
+                .forward(&ffw1_inter, &mut tmp_ff1_inter);
             // No post_layer_norm after FFN (llama.cpp conformer.cpp reference doesn't apply one).
             for j in 0..h {
                 x_ff1[t * h + j] = 0.5 * tmp_ff1_inter[j] + src[j]; // Conformer residual

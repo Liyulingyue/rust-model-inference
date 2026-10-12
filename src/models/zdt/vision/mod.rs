@@ -95,7 +95,9 @@ impl ZdtVisionEncoder {
     /// Load only the config (no weights). Used by the multimodal dispatcher
     /// to read image_size / image_mean / image_std without pulling the
     /// 1.6 GB mmproj weights through three separate `from_source` calls.
-    pub(crate) fn load_config_only(source: &dyn TensorSource) -> Result<config::ZdtVisionConfig, String> {
+    pub(crate) fn load_config_only(
+        source: &dyn TensorSource,
+    ) -> Result<config::ZdtVisionConfig, String> {
         config::ZdtVisionConfig::from_source(source)
     }
 
@@ -151,8 +153,7 @@ impl ZdtVisionEncoder {
                 ffn_down_weight: load(&format!("v.blk.{i}.ffn_down.weight"), config.n_ff, n)?,
                 ffn_down_bias: load_opt(&format!("v.blk.{i}.ffn_down.bias"), n, 1),
             });
-            if i == 0 || i == 7 || i == 15 || i == 31 {
-            }
+            if i == 0 || i == 7 || i == 15 || i == 31 {}
         }
 
         let projector_in = n * config.scale_factor * config.scale_factor;
@@ -475,8 +476,7 @@ impl ZdtVisionEncoder {
                         // there caused the image path to drift ~1% per layer
                         // and hallucinate (SUPPORTED_MODELS.md: ZDTaichu5.0-9B
                         // was marked WIP because of this).
-                        dot += qkv[qi * n * 3 + off_h + d]
-                            * qkv[kj * n * 3 + n + off_h + d];
+                        dot += qkv[qi * n * 3 + off_h + d] * qkv[kj * n * 3 + n + off_h + d];
                     }
                     row[kj] = dot * scale;
                 }

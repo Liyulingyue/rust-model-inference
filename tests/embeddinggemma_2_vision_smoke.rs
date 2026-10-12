@@ -7,11 +7,16 @@ use std::sync::Arc;
 
 #[test]
 fn vision_forward_returns_correct_shape_finite_values() {
-    let Some(path) = std::env::var_os("RMI_EMBEDDINGGEMMA_2") else { return };
+    let Some(path) = std::env::var_os("RMI_EMBEDDINGGEMMA_2") else {
+        return;
+    };
     let loader = rust_model_inference::GGUFLoader::from_file(path).expect("load GGUF");
     let source: Arc<dyn rust_model_inference::TensorSource> = Arc::new(loader);
 
-    let model = rust_model_inference::models::embeddinggemma2::EmbeddingGemmaVisionModel::from_source(&source)
+    let model =
+        rust_model_inference::models::embeddinggemma2::EmbeddingGemmaVisionModel::from_source(
+            &source,
+        )
         .expect("EmbeddingGemmaVisionModel::from_source");
 
     let cfg = &model.config;
@@ -44,8 +49,13 @@ fn vision_forward_returns_correct_shape_finite_values() {
     let tokens_alt = model
         .encode(&pixels_alt, image_h, image_w)
         .expect("vision encode alt");
-    let diff: f32 = tokens.iter().zip(tokens_alt.iter())
+    let diff: f32 = tokens
+        .iter()
+        .zip(tokens_alt.iter())
         .map(|(a, b)| (a - b).abs())
         .sum();
-    assert!(diff > 0.0, "two different images produced identical embeddings (diff={diff})");
+    assert!(
+        diff > 0.0,
+        "two different images produced identical embeddings (diff={diff})"
+    );
 }

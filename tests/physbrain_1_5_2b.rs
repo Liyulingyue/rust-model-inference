@@ -178,7 +178,9 @@ fn text_tokenizer_vocab_is_extended_to_168576() {
 
 #[test]
 fn mmproj_arch_is_clip_with_qwen3vl_merger() {
-    let Some(loader) = mmproj_loader() else { return };
+    let Some(loader) = mmproj_loader() else {
+        return;
+    };
     assert_eq!(pick_str(&loader, "general.architecture"), Some("clip"));
     assert_eq!(
         pick_str(&loader, "clip.projector_type"),
@@ -189,16 +191,15 @@ fn mmproj_arch_is_clip_with_qwen3vl_merger() {
     // Read the bool directly via `Bool(true)`.
     let has_ve = loader
         .metadata("clip.has_vision_encoder")
-        .is_some_and(|v| matches!(
-            v,
-            rust_model_inference::core::tensor::MetaValue::Bool(true)
-        ));
+        .is_some_and(|v| matches!(v, rust_model_inference::core::tensor::MetaValue::Bool(true)));
     assert!(has_ve, "clip.has_vision_encoder must be Bool(true)");
 }
 
 #[test]
 fn mmproj_vision_dims_match_qwen3_vl_2b() {
-    let Some(loader) = mmproj_loader() else { return };
+    let Some(loader) = mmproj_loader() else {
+        return;
+    };
     assert_eq!(pick(&loader, "clip.vision.embedding_length"), 1024);
     assert_eq!(pick(&loader, "clip.vision.feed_forward_length"), 4096);
     assert_eq!(pick(&loader, "clip.vision.block_count"), 24);
@@ -211,7 +212,9 @@ fn mmproj_vision_dims_match_qwen3_vl_2b() {
 
 #[test]
 fn mmproj_deepstack_indexes_match_physbrain_5_11_17() {
-    let Some(loader) = mmproj_loader() else { return };
+    let Some(loader) = mmproj_loader() else {
+        return;
+    };
     let arr = loader
         .metadata("clip.vision.is_deepstack_layers")
         .and_then(|v| v.to_arr())
@@ -232,7 +235,9 @@ fn mmproj_deepstack_indexes_match_physbrain_5_11_17() {
 
 #[test]
 fn mmproj_deepstack_tensors_exist_for_each_index() {
-    let Some(loader) = mmproj_loader() else { return };
+    let Some(loader) = mmproj_loader() else {
+        return;
+    };
     for i in [5usize, 11, 17] {
         for kind in ["norm", "fc1", "fc2"] {
             assert!(
@@ -253,7 +258,9 @@ fn mmproj_conv3d_split_into_two_conv2d_weights() {
     // splits along the temporal axis into `v.patch_embd.weight` and
     // `.weight.1`. Both must be shape (16, 16, 3, 1024) after the
     // (kH, kW, in, out) GGUF reorder.
-    let Some(loader) = mmproj_loader() else { return };
+    let Some(loader) = mmproj_loader() else {
+        return;
+    };
     // gguf_dims reverses torch dims into GGUF storage order; the reader
     // returns the storage order verbatim, so torch (1024, 3, 16, 16) shows
     // up here as (16, 16, 3, 1024).
@@ -267,7 +274,9 @@ fn mmproj_conv3d_split_into_two_conv2d_weights() {
 
 #[test]
 fn mmproj_merger_tensors_match_qwen3vl_merger_contract() {
-    let Some(loader) = mmproj_loader() else { return };
+    let Some(loader) = mmproj_loader() else {
+        return;
+    };
     let mm0 = shape(&loader, "mm.0.weight").expect("mm.0.weight");
     let mm2 = shape(&loader, "mm.2.weight").expect("mm.2.weight");
     // mm.0: [merged_embd, merged_embd] = [n_embd*merge*merge, n_embd*merge*merge] = [4096, 4096]
@@ -278,4 +287,3 @@ fn mmproj_merger_tensors_match_qwen3vl_merger_contract() {
     // post_ln operates per-token on n_embd=1024; weight must be 1024 long.
     assert_eq!(post_ln.dims, vec![1024]);
 }
-

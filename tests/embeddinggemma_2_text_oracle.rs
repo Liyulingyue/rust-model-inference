@@ -13,32 +13,50 @@ use std::sync::Arc;
 
 fn load_oracle(name: &str) -> (Vec<u32>, Vec<f32>, String) {
     let path = format!("tests/oracle/embeddinggemma2_{name}.json");
-    let data = std::fs::read_to_string(&path)
-        .unwrap_or_else(|_| panic!("missing oracle file: {path}"));
+    let data =
+        std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing oracle file: {path}"));
     let v: serde_json::Value = serde_json::from_str(&data).expect("parse oracle JSON");
     let text = v["text"].as_str().unwrap().to_string();
-    let token_ids: Vec<u32> = v["token_ids"].as_array().unwrap()
-        .iter().map(|x| x.as_u64().unwrap() as u32).collect();
-    let embedding: Vec<f32> = v["embedding"].as_array().unwrap()
-        .iter().map(|x| x.as_f64().unwrap() as f32).collect();
+    let token_ids: Vec<u32> = v["token_ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_u64().unwrap() as u32)
+        .collect();
+    let embedding: Vec<f32> = v["embedding"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_f64().unwrap() as f32)
+        .collect();
     (token_ids, embedding, text)
 }
 
 #[test]
 fn text_forward_matches_huggingface_oracle() {
-    let Some(path) = std::env::var_os("RMI_EMBEDDINGGEMMA_2") else { return };
+    let Some(path) = std::env::var_os("RMI_EMBEDDINGGEMMA_2") else {
+        return;
+    };
     let loader = rust_model_inference::GGUFLoader::from_file(path).expect("load GGUF");
     let source: Arc<dyn rust_model_inference::TensorSource> = Arc::new(loader);
 
-    let model = rust_model_inference::models::embeddinggemma2::EmbeddingGemmaTextModel::from_source(&source)
+    let model =
+        rust_model_inference::models::embeddinggemma2::EmbeddingGemmaTextModel::from_source(
+            &source,
+        )
         .expect("EmbeddingGemmaTextModel::from_source");
 
     let cases = ["hello", "fox", "embed", "long"];
     for name in &cases {
         let (token_ids, expected, text) = load_oracle(name);
         let actual = model.forward(&token_ids).expect("text forward");
-        assert_eq!(actual.len(), expected.len(),
-            "{name}: embedding dim mismatch ({} vs {})", actual.len(), expected.len());
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "{name}: embedding dim mismatch ({} vs {})",
+            actual.len(),
+            expected.len()
+        );
         // Compute L2 distance and cosine similarity.
         let mut dot = 0.0f64;
         let mut a_norm_sq = 0.0f64;
@@ -65,7 +83,9 @@ fn text_forward_matches_huggingface_oracle() {
         eprintln!("  actual norm   = {}", a_norm_sq.sqrt());
         // Tolerance: GGUF stores BF16 weights, ~2% per-dim quantization error.
         // After mean-pool over 8 tokens the error compounds, expect cos_sim > 0.99.
-        assert!(cosine_sim > 0.99,
-            "{name}: cosine similarity {cosine_sim:.6} < 0.99 (text=\"{text}\")");
+        assert!(
+            cosine_sim > 0.99,
+            "{name}: cosine similarity {cosine_sim:.6} < 0.99 (text=\"{text}\")"
+        );
     }
 }

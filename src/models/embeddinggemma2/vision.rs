@@ -58,10 +58,8 @@ impl EmbeddingGemmaVisionConfig {
         let patch_size = get("gemma4-embedding.vision.patch_size")?;
         let merge = get("gemma4-embedding.vision.spatial_merge_size")?;
         let projection_dim = get("gemma4-embedding.vision.projection_dim")?;
-        let position_embedding_size =
-            get("gemma4-embedding.vision.position_embedding_size")?;
-        let default_output_length =
-            get("gemma4-embedding.vision.default_output_length")?;
+        let position_embedding_size = get("gemma4-embedding.vision.position_embedding_size")?;
+        let default_output_length = get("gemma4-embedding.vision.default_output_length")?;
         let image_mean = [0.5f32, 0.5, 0.5];
         let image_std = [0.5f32, 0.5, 0.5];
         Ok(Self {
@@ -106,7 +104,11 @@ fn decode_f32(data: &[u8], expected: usize) -> Result<Vec<f32>, String> {
 /// 1-D BF16 dequant (for RMSNorm/affine weights and 1-D scalars).
 fn dequant_bf16_to_f32(raw: &[u8], n: usize) -> Vec<f32> {
     if raw.len() < n * 2 {
-        panic!("dequant_bf16_to_f32: payload {} bytes < {} expected", raw.len(), n * 2);
+        panic!(
+            "dequant_bf16_to_f32: payload {} bytes < {} expected",
+            raw.len(),
+            n * 2
+        );
     }
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
@@ -230,8 +232,7 @@ impl EmbeddingGemmaVisionModel {
         let mut patch_input_proj = vec![0.0f32; embd * in_features_usize];
         for o in 0..embd {
             for i in 0..in_features_usize {
-                patch_input_proj[o * in_features_usize + i] =
-                    pe_flat[o * in_features_usize + i];
+                patch_input_proj[o * in_features_usize + i] = pe_flat[o * in_features_usize + i];
             }
         }
         let patch_input_proj = Linear {
@@ -251,9 +252,8 @@ impl EmbeddingGemmaVisionModel {
 
         let mut layers = Vec::with_capacity(config.depth);
         for i in 0..config.depth {
-            let blk = |suffix: &str| -> Result<String, String> {
-                Ok(format!("vision.blk.{i}.{suffix}"))
-            };
+            let blk =
+                |suffix: &str| -> Result<String, String> { Ok(format!("vision.blk.{i}.{suffix}")) };
             let ln1 = decode_f32(
                 source
                     .tensor_slice(&blk("ln1.weight")?)
@@ -261,30 +261,14 @@ impl EmbeddingGemmaVisionModel {
                 embd,
             )?;
             // attn_q/k/v are separate (not fused QKV).
-            let attn_q_w = linear_from_gguf_bf16(
-                source.as_ref(),
-                &blk("attn_q.weight")?,
-                embd,
-                embd,
-            )?;
-            let attn_k_w = linear_from_gguf_bf16(
-                source.as_ref(),
-                &blk("attn_k.weight")?,
-                embd,
-                embd,
-            )?;
-            let attn_v_w = linear_from_gguf_bf16(
-                source.as_ref(),
-                &blk("attn_v.weight")?,
-                embd,
-                embd,
-            )?;
-            let out = linear_from_gguf_bf16(
-                source.as_ref(),
-                &blk("attn_output.weight")?,
-                embd,
-                embd,
-            )?;
+            let attn_q_w =
+                linear_from_gguf_bf16(source.as_ref(), &blk("attn_q.weight")?, embd, embd)?;
+            let attn_k_w =
+                linear_from_gguf_bf16(source.as_ref(), &blk("attn_k.weight")?, embd, embd)?;
+            let attn_v_w =
+                linear_from_gguf_bf16(source.as_ref(), &blk("attn_v.weight")?, embd, embd)?;
+            let out =
+                linear_from_gguf_bf16(source.as_ref(), &blk("attn_output.weight")?, embd, embd)?;
             let qn = decode_f32(
                 source
                     .tensor_slice(&blk("attn_q_norm.weight")?)
@@ -368,7 +352,12 @@ impl EmbeddingGemmaVisionModel {
     /// in RGB order. For our test path we accept any shape that's a
     /// multiple of `patch_size` and equal in both dims (the default
     /// produces `default_output_length` merged tokens).
-    pub fn encode(&self, image_pixels: &[f32], image_h: usize, image_w: usize) -> Result<Vec<f32>, String> {
+    pub fn encode(
+        &self,
+        image_pixels: &[f32],
+        image_h: usize,
+        image_w: usize,
+    ) -> Result<Vec<f32>, String> {
         let cfg = &self.config;
         let ps = cfg.patch_size;
         if image_h % ps != 0 || image_w % ps != 0 {
@@ -434,8 +423,8 @@ impl EmbeddingGemmaVisionModel {
             // w table: row `px`, col `0..embd` (offset position_embedding_size * embd).
             let w_off = cfg.position_embedding_size * embd + px * embd;
             for e in 0..embd {
-                patches[p * embd + e] +=
-                    self.position_embedding_table[h_off + e] + self.position_embedding_table[w_off + e];
+                patches[p * embd + e] += self.position_embedding_table[h_off + e]
+                    + self.position_embedding_table[w_off + e];
             }
         }
 
@@ -648,11 +637,7 @@ impl EmbeddingGemmaVisionModel {
         // Step i: post_ffn_norm + residual.
         for p in 0..n_patches {
             let mut tmp = ffn_out[p * embd..(p + 1) * embd].to_vec();
-            crate::ops::norm::rms_norm_inplace(
-                &mut tmp,
-                &layer.post_ffn_norm,
-                RMS_NORM_EPS,
-            );
+            crate::ops::norm::rms_norm_inplace(&mut tmp, &layer.post_ffn_norm, RMS_NORM_EPS);
             for e in 0..embd {
                 x[p * embd + e] += tmp[e];
             }

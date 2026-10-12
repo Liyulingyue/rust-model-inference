@@ -143,16 +143,30 @@ impl EmbeddingGemmaTextConfig {
 
 fn decode_f32(data: &[u8], expected: usize) -> Vec<f32> {
     let n = data.len() / 4;
-    assert_eq!(n, expected, "f32 payload length mismatch: {} != {expected}", n);
+    assert_eq!(
+        n, expected,
+        "f32 payload length mismatch: {} != {expected}",
+        n
+    );
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
-        let bits = u32::from_le_bytes([data[i * 4], data[i * 4 + 1], data[i * 4 + 2], data[i * 4 + 3]]);
+        let bits = u32::from_le_bytes([
+            data[i * 4],
+            data[i * 4 + 1],
+            data[i * 4 + 2],
+            data[i * 4 + 3],
+        ]);
         out.push(f32::from_bits(bits));
     }
     out
 }
 
-fn dequant_to_f32(raw: &[u8], qtype: GGMLType, n_in: usize, n_out: usize) -> Result<Vec<f32>, String> {
+fn dequant_to_f32(
+    raw: &[u8],
+    qtype: GGMLType,
+    n_in: usize,
+    n_out: usize,
+) -> Result<Vec<f32>, String> {
     // GGUF stores Linear weights as `[n_in, n_out]` flat row-major.
     // We dequantize to PyTorch convention `[n_out, n_in]` so the
     // downstream Linear::forward can iterate `matrix[out * n_in + in]`.
@@ -242,7 +256,12 @@ impl Linear {
     }
 }
 
-fn linear_from_gguf(source: &dyn TensorSource, name: &str, n_in: usize, n_out: usize) -> Result<Linear, String> {
+fn linear_from_gguf(
+    source: &dyn TensorSource,
+    name: &str,
+    n_in: usize,
+    n_out: usize,
+) -> Result<Linear, String> {
     let info = source
         .tensor_info(name)
         .ok_or_else(|| format!("Missing tensor: {name}"))?;
@@ -324,13 +343,17 @@ impl EmbeddingGemmaTextModel {
         // into the token_embd vec (no transpose needed).
         let mut token_embd = vec![0.0f32; config.n_vocab * config.n_embd];
         if token_info.ggml_type != GGMLType::BF16 {
-            return Err(format!("token_embd expected BF16, got {:?}", token_info.ggml_type));
+            return Err(format!(
+                "token_embd expected BF16, got {:?}",
+                token_info.ggml_type
+            ));
         }
         let n = config.n_vocab * config.n_embd;
         if token_raw.len() != n * 2 {
             return Err(format!(
                 "token_embd raw len {} != n * 2 = {}",
-                token_raw.len(), n * 2
+                token_raw.len(),
+                n * 2
             ));
         }
         for k in 0..n {
@@ -385,21 +408,14 @@ impl EmbeddingGemmaTextModel {
             .ok_or("Missing tensor: per_layer_model_proj.weight")?;
         // GGUF shape: [n_embd, per_layer_width * n_layer].
         let ple_n_out = config.per_layer_width * config.n_layer;
-        let per_layer_model_proj_matrix = dequant_to_f32(
-            ple_raw,
-            ple_info.ggml_type,
-            config.n_embd,
-            ple_n_out,
-        )?;
+        let per_layer_model_proj_matrix =
+            dequant_to_f32(ple_raw, ple_info.ggml_type, config.n_embd, ple_n_out)?;
         let per_layer_model_proj = Linear {
             matrix: per_layer_model_proj_matrix,
             n_in: config.n_embd,
             n_out: config.per_layer_width * config.n_layer,
         };
-        let per_layer_proj_norm = get_f32(
-            "per_layer_proj_norm.weight",
-            config.per_layer_width,
-        )?;
+        let per_layer_proj_norm = get_f32("per_layer_proj_norm.weight", config.per_layer_width)?;
         let output_norm = get_f32("output_norm.weight", config.n_embd)?;
 
         let mut layers = Vec::with_capacity(config.n_layer);
@@ -408,10 +424,11 @@ impl EmbeddingGemmaTextModel {
             let kv_heads = config.kv_heads(i);
 
             let attn_norm = get_f32(&format!("blk.{i}.attn_norm.weight"), config.n_embd)?;
-            if i == 0 {
-            }
-            let post_attention_norm =
-                get_f32(&format!("blk.{i}.post_attention_norm.weight"), config.n_embd)?;
+            if i == 0 {}
+            let post_attention_norm = get_f32(
+                &format!("blk.{i}.post_attention_norm.weight"),
+                config.n_embd,
+            )?;
             let pre_ffn_norm = get_f32(&format!("blk.{i}.pre_ffn_norm.weight"), config.n_embd)?;
             let post_ffn_norm = get_f32(&format!("blk.{i}.post_ffn_norm.weight"), config.n_embd)?;
 
@@ -445,10 +462,7 @@ impl EmbeddingGemmaTextModel {
                 config.n_embd,
             )?;
             // ple_post_norm: per-layer, [n_embd] (norm on the per-layer-input-gate output).
-            let ple_post_norm = get_f32(
-                &format!("blk.{i}.ple_post_norm.weight"),
-                config.n_embd,
-            )?;
+            let ple_post_norm = get_f32(&format!("blk.{i}.ple_post_norm.weight"), config.n_embd)?;
 
             let attn_q = linear_from_gguf(
                 source.as_ref(),
@@ -746,7 +760,7 @@ impl EmbeddingGemmaTextModel {
                 attn_out[dst_off..dst_off + head_dim].copy_from_slice(&out_vec);
             }
         }
-        let _ = (full_attn, sliding_window);  // suppress unused-variable warnings
+        let _ = (full_attn, sliding_window); // suppress unused-variable warnings
 
         // Step f: output projection.
         let mut proj_out = vec![0.0f32; n_tokens * n_embd];
@@ -767,7 +781,6 @@ impl EmbeddingGemmaTextModel {
                 x[t * n_embd + j] += tmp[j];
             }
         }
-
 
         // Step h: pre_ffn_norm (per token).
         let mut ff_x = x.to_vec();

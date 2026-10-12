@@ -9,12 +9,17 @@ use std::sync::Arc;
 
 #[test]
 fn text_forward_returns_768_dim_finite_embedding() {
-    let Some(path) = std::env::var_os("RMI_EMBEDDINGGEMMA_2") else { return };
+    let Some(path) = std::env::var_os("RMI_EMBEDDINGGEMMA_2") else {
+        return;
+    };
     let loader = rust_model_inference::GGUFLoader::from_file(path).expect("load GGUF");
     let source: Arc<dyn rust_model_inference::TensorSource> = Arc::new(loader);
 
     // Build the model.
-    let model = rust_model_inference::models::embeddinggemma2::EmbeddingGemmaTextModel::from_source(&source)
+    let model =
+        rust_model_inference::models::embeddinggemma2::EmbeddingGemmaTextModel::from_source(
+            &source,
+        )
         .expect("EmbeddingGemmaTextModel::from_source");
 
     // Sanity: config matches the converter contract.
@@ -37,7 +42,10 @@ fn text_forward_returns_768_dim_finite_embedding() {
     let tokens = vec![1u32, 5, 9, 47, 91];
     let emb = model.forward(&tokens).expect("forward");
 
-    assert_eq!(emb.len(), rust_model_inference::models::embeddinggemma2::text::EMBEDDING_DIM);
+    assert_eq!(
+        emb.len(),
+        rust_model_inference::models::embeddinggemma2::text::EMBEDDING_DIM
+    );
     assert_eq!(emb.len(), 768);
 
     for (i, &v) in emb.iter().enumerate() {
@@ -45,11 +53,22 @@ fn text_forward_returns_768_dim_finite_embedding() {
     }
 
     let norm: f32 = emb.iter().map(|x| x * x).sum::<f32>().sqrt();
-    assert!(norm > 1e-6, "embedding has near-zero norm ({norm}) — check forward math");
+    assert!(
+        norm > 1e-6,
+        "embedding has near-zero norm ({norm}) — check forward math"
+    );
 
     // Run with a different token sequence; embeddings should differ.
     let tokens2 = vec![100u32, 200, 300];
     let emb2 = model.forward(&tokens2).expect("forward");
-    let diff: f32 = emb.iter().zip(emb2.iter()).map(|(a, b)| (a - b) * (a - b)).sum::<f32>().sqrt();
-    assert!(diff > 1e-4, "different inputs produced identical embeddings ({diff})");
+    let diff: f32 = emb
+        .iter()
+        .zip(emb2.iter())
+        .map(|(a, b)| (a - b) * (a - b))
+        .sum::<f32>()
+        .sqrt();
+    assert!(
+        diff > 1e-4,
+        "different inputs produced identical embeddings ({diff})"
+    );
 }
