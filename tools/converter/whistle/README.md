@@ -40,13 +40,13 @@ src/models/whistle/
 ├── stack.rs              # StackLayer (self-attn + cross-attn + final_norm)
 ├── stem.rs               # placeholder stem (no-op)
 └── mhc.rs                # multi-lane hyper-connection (mhc_lanes=4) + Sinkhorn
-src/app/asr/whistle.rs    # CLI driver (two backends: pure Rust, libneedle3.so)
-src/needle_ffi.rs        # FFI bindings to libneedle3.so (dlopen/dlsym)
+src/app/asr/whistle.rs    # CLI driver (pure-Rust smoke test, no FFI)
+tools/needle_ffi/main.rs  # standalone dev tool: dlopen libneedle3.so for oracle transcripts
 tests/whistle_oracle_parity.rs  # parity tests against oracle.py (only test binary that pulls flate2 dev-dep)
 models/whistle-probe/
 ├── whistle.cact          # closed-source Cactus binary (audio + LLM)
 ├── whistle.f32.gguf      # F32 GGUF port of the safetensors weights
-└── libneedle3.so         # C++ runtime for the FFI backend
+└── libneedle3.so         # C++ runtime (used only by tools/needle_ffi, not by the CLI)
 ```
 
 ## Running
@@ -88,12 +88,12 @@ cargo test --test whistle_oracle_parity
 ./target/debug/rust-model-inference \
     --model models/whistle-probe/whistle.f32.gguf --audio whistle
 
-# 5. Real transcripts through the closed C++ runtime.
-WHISTLE_NEEDLE_RUNTIME=1 \
-    ./target/debug/rust-model-inference \
-        --model models/whistle-probe/whistle.f32.gguf \
-        --audio whistle \
-        --audio /path/to/speech.wav
+# 5. Real transcripts — dev only, uses the closed C++ runtime.
+#    This is a separate standalone tool, NOT part of the main crate, so
+#    the release binary stays pure Rust. Build once with rustc, then
+#    invoke directly. See tools/needle_ffi/README.md for details.
+rustc tools/needle_ffi/main.rs -o /tmp/needle-ffi --edition 2021
+/tmp/needle-ffi /path/to/whistle.cact /path/to/speech.wav | jq .text
 ```
 
 ## Reference data layout

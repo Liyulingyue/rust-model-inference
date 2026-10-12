@@ -5,7 +5,6 @@ pub use models::qwen3::{get_f32_tensor, Qwen3LayerWeights};
 pub mod core;
 pub mod format;
 pub mod models;
-pub mod needle_ffi;
 pub mod ops;
 #[cfg(feature = "parity-trace")]
 #[doc(hidden)]

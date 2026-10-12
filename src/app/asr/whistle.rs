@@ -1,121 +1,30 @@
-//! Whistle CLI driver — two backends:
+//! Whistle CLI driver (pure-Rust port).
 //!
-//! 1. **Pure Rust port** (default). Runs the encoder + decoder logits
-//!    that we have lifted to `models::whistle` (ZCRMSNorm + HadamardMLP
-//!    + multi-lane MHC at 1 ULP parity with the in-tree Python Oracle).
-//!    The conv stem is still a placeholder, so output is not a real
-//!    transcript yet.
+//! Runs the encoder + decoder logits we have lifted to
+//! `models::whistle` (ZCRMSNorm + HadamardMLP + multi-lane MHC at 1 ULP
+//! parity with the in-tree Python Oracle). The conv stem is still a
+//! placeholder, so this path is a smoke test for the encoder+decoder
+//! wiring rather than a real ASR — output is a placeholder token id, not
+//! a transcript.
 //!
-//! 2. **Cactus needle runtime** (set `--needle-runtime`). Calls the
-//!    closed `libneedle3.so` via the FFI bindings in `crate::needle_ffi`
-//!    to produce real transcripts through the .cact binary. The Rust
-//!    CLI orchestrates WAV decode and language selection; the runtime
-//!    runs the actual audio encoder + conv stem in C++.
-//!
-//! Both paths are exercised through `--audio whistle` so the user can
-//! compare and decide which to ship.
+//! For a real transcript today, the closed Cactus runtime
+//! (`libneedle3.so`) has to be invoked from a separate dev-only tool
+//! at `tools/needle_ffi/main.rs` (not part of this crate). Build it
+//! once with `rustc` and pipe the JSON through `jq .text`. See
+//! `tools/needle_ffi/README.md` for the workflow.
 
-use std::fs;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::app::open_or_exit;
 use crate::core::tensor::TensorSource;
 use crate::format::ggufrs::ComponentRole;
 use crate::models::whistle::{
-    final_rms_norm, load_encoder_layer, load_mhc_layer, EncoderLayerWeights, MhcLayer, MHC_LANES,
+    final_rms_norm, load_encoder_layer, load_mhc_layer, EncoderLayerWeights, MHC_LANES,
 };
-use crate::needle_ffi;
 
 use crate::app::cli::CliOptions;
 
 const WHISTLE_HIDDEN: usize = 512;
-
-/// Where the .cact binary lives. Defaults to `models/whistle-probe/whistle.cact`.
-fn cact_path() -> PathBuf {
-    if let Ok(p) = std::env::var("WHISTLE_CACT_PATH") {
-        return PathBuf::from(p);
-    }
-    let manifest = std::path::PathBuf::from(
-        std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string()),
-    );
-    manifest
-        .join("models")
-        .join("whistle-probe")
-        .join("whistle.cact")
-}
-
-/// Read a 16-bit / 16kHz mono PCM WAV into mono `f32` in `[-1, 1]`.
-fn read_wav_mono_16k(path: &std::path::Path) -> Result<Vec<f32>, String> {
-    let bytes = fs::read(path).map_err(|e| format!("read {path:?}: {e}"))?;
-    if bytes.len() < 44 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
-        return Err(format!("{path:?}: not a RIFF/WAVE file"));
-    }
-    // Walk chunks to find `fmt ` and `data`.
-    let mut pos = 12;
-    let mut sample_rate = 0u32;
-    let mut channels = 0u16;
-    let mut bits_per_sample = 0u16;
-    let mut audio_format = 0u16;
-    let mut data_off = 0usize;
-    let mut data_len = 0usize;
-    while pos + 8 <= bytes.len() {
-        let tag = &bytes[pos..pos + 4];
-        let size = u32::from_le_bytes([
-            bytes[pos + 4],
-            bytes[pos + 5],
-            bytes[pos + 6],
-            bytes[pos + 7],
-        ]) as usize;
-        if tag == b"fmt " {
-            audio_format = u16::from_le_bytes([bytes[pos + 8], bytes[pos + 9]]);
-            channels = u16::from_le_bytes([bytes[pos + 10], bytes[pos + 11]]);
-            sample_rate = u32::from_le_bytes([
-                bytes[pos + 12],
-                bytes[pos + 13],
-                bytes[pos + 14],
-                bytes[pos + 15],
-            ]);
-            bits_per_sample = u16::from_le_bytes([bytes[pos + 22], bytes[pos + 23]]);
-        } else if tag == b"data" {
-            data_off = pos + 8;
-            data_len = size;
-            break;
-        }
-        pos += 8 + size + (size & 1); // word-align
-    }
-    if data_off == 0 {
-        return Err(format!("{path:?}: no `data` chunk"));
-    }
-    if sample_rate != 16000 {
-        return Err(format!(
-            "{path:?}: 16 kHz mono required, got {sample_rate} Hz"
-        ));
-    }
-    if bits_per_sample != 16 {
-        return Err(format!(
-            "{path:?}: 16-bit PCM required, got {bits_per_sample} bits"
-        ));
-    }
-    if audio_format != 1 {
-        return Err(format!("{path:?}: PCM required (format={audio_format})"));
-    }
-    if channels == 0 || channels > 8 {
-        return Err(format!("{path:?}: unsupported channel count {channels}"));
-    }
-    let samples = data_len / (channels as usize * 2);
-    let mut out = Vec::with_capacity(samples);
-    for s in 0..samples {
-        let mut acc = 0i32;
-        for c in 0..channels as usize {
-            let p = data_off + (s * channels as usize + c) * 2;
-            let raw = i16::from_le_bytes([bytes[p], bytes[p + 1]]);
-            acc += raw as i32;
-        }
-        out.push(acc as f32 / (channels as f32 * 32768.0));
-    }
-    Ok(out)
-}
 
 pub fn run_whistle_cli(options: &CliOptions) -> Result<(), String> {
     // The flag wiring lives in main.rs; the dispatcher in src/app/asr/mod.rs
@@ -133,18 +42,6 @@ pub fn run_whistle_cli(options: &CliOptions) -> Result<(), String> {
         ));
     }
 
-    // Optional: route to the closed Cactus runtime instead of the
-    // placeholder-stem Rust port. Enabled by setting
-    // `WHISTLE_NEEDLE_RUNTIME=1` (the CLI doesn't have a dedicated flag
-    // because the runtime path requires a real .cact + libneedle3.so
-    // pair to be present in the sandbox; the placeholder path is the
-    // sensible default). The runtime produces real transcripts; the
-    // Rust port currently emits a placeholder token.
-    if std::env::var("WHISTLE_NEEDLE_RUNTIME").as_deref() == Ok("1") {
-        return run_whistle_needle_runtime(options);
-    }
-
-    // Pure-Rust port (placeholder stem).
     eprintln!(
         "whistle (pure Rust): loading metadata from {} (engine={:?})",
         model_path.display(),
@@ -182,14 +79,13 @@ pub fn run_whistle_cli(options: &CliOptions) -> Result<(), String> {
     .map_err(|e| format!("missing embedding/embedding: {e}"))?;
 
     eprintln!(
-        "whistle: loaded 8 encoder layers + 1 stack layer (stem=placeholder); use --needle-runtime for real transcripts"
+        "whistle: loaded 8 encoder layers + 1 stack layer (stem=placeholder); this path is a smoke test for the encoder+decoder wiring"
     );
 
     let hidden = vec![0.0f32; 50 * WHISTLE_HIDDEN];
     let seq_len = hidden.len() / WHISTLE_HIDDEN;
     eprintln!(
-        "whistle: stem placeholder produced seq_len={seq_len} frames; \
-         this path is a smoke test for the encoder+decoder wiring"
+        "whistle: stem placeholder produced seq_len={seq_len} frames"
     );
 
     // Cumulative multi-lane stream
@@ -269,39 +165,8 @@ pub fn run_whistle_cli(options: &CliOptions) -> Result<(), String> {
         .map(|(i, _)| i)
         .unwrap_or(0);
     eprintln!(
-        "whistle (pure Rust): placeholder ASR produced token id={argmax} (stem is not a real mel pipeline)"
+        "whistle (pure Rust): placeholder ASR produced token id={argmax} (stem is not a real mel pipeline; see tools/needle_ffi/ for the closed-runtime dev path)"
     );
 
-    Ok(())
-}
-
-/// Dispatch through `libneedle3.so`. Loads the .cact binary and runs
-/// `needle_transcribe` on the decoded 16 kHz mono PCM.
-fn run_whistle_needle_runtime(options: &CliOptions) -> Result<(), String> {
-    let wav_path = options
-        .audio
-        .as_ref()
-        .ok_or_else(|| "WHISTLE_NEEDLE_RUNTIME=1 needs --audio <wav>".to_string())?;
-    let wav = std::path::Path::new(wav_path);
-    let samples = read_wav_mono_16k(wav)?;
-    eprintln!(
-        "whistle (needle runtime): loaded {} samples ({} s) from {}",
-        samples.len(),
-        samples.len() as f32 / 16000.0,
-        wav.display()
-    );
-
-    let cact = cact_path();
-    needle_ffi::load(&cact)?;
-
-    let language = std::env::var("WHISTLE_LANG")
-        .ok()
-        .or_else(|| Some("en".into()));
-    let result = needle_ffi::transcribe(&samples, language.as_deref(), None, false)?;
-    eprintln!(
-        "whistle (needle runtime): ttft={:.1} ms decode_tps={:.0} lang={:?}",
-        result.ttft_ms, result.decode_tps, result.language
-    );
-    println!("{}", result.text);
     Ok(())
 }

@@ -46,17 +46,19 @@ matching `encoder_frame_ms=80`," but this is *speculative*.
 Until the stem is reverse-engineered, callers that need real ASR can
 take a hybrid path:
 
-1. Use `cactus-compute/needle` Python API to compute the encoder
-   hidden states from a WAV file (this uses the closed C++ runtime,
-   so it is a black box from our side).
+1. Use the standalone dev tool at `tools/needle_ffi/main.rs` to run
+   the closed C++ runtime against a WAV and capture the transcript
+   (or, once `--dump-encoder-hidden` is added, the encoder hidden
+   states as `.npy`). This tool is intentionally outside the main
+   crate — the main framework stays pure Rust.
 2. Save the encoder hidden states to a small `.npy` and pass them via
    a future `--inject-mel-hidden` CLI option (currently not
    implemented).
 3. The Rust port then drives the encoder + stack + decoder logits
    from that precomputed tensor.
 
-For end-to-end ASR today, `needle.transcribe("clip.wav")` is still the
-only path that produces real transcripts. Our Rust port is a partial
-implementation: full coverage of the LLM half, all layers 1 ULP
-accurate against the Python reference, but the audio front-end
+For end-to-end ASR today, the dev tool at `tools/needle_ffi/main.rs`
+is the only path that produces real transcripts. Our Rust port is a
+partial implementation: full coverage of the LLM half, all layers
+1 ULP accurate against the Python reference, but the audio front-end
 remains the open piece.
