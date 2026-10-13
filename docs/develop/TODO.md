@@ -1945,3 +1945,205 @@ if let Some(mut session) = take_gpu_session(scratch, total_tokens, &mut gpu_enab
 
 所以这条路线的真实收益上限，取决于能否把残差真正留在设备上跨 34 层累积。
 这需要一个比「每层 take 一次 session」更清晰的 session 所有权模型。
+
+### TODO-028: f32 的 aarch64 NEON kernel 名不副实，BGE 在 ARM 上拿不到 SIMD 加速
+
+在 `codex/bge-embedding-gguf` 上审 BGE embedding 支持时发现。BGE 的 decoder 变体
+（Mistral / Qwen2 / Gemma2）走 `LlamaSession`（`src/models/decoder_embedding.rs`），
+f32 权重落到 `src/ops/kernel/f32/neon.rs::matmul_f32_vs_f32_neon`。
+
+**SIMD 路径是有的**（`forward_f32_rows_dispatch` 会分派过去，`dot_f32` 也有 NEON
+实现），所以不是「缺 SIMD 路径」，而是**那个 kernel 基本不是 SIMD kernel**：
+
+```rust
+let product = vmulq_f32(
+    vld1q_f32(weight_ptr.add(row_off + index)),
+    vld1q_f32(input_ptr.add(index)),
+);
+total += vget_lane_f32(vget_low_f32(product), 0);   // 立刻拆回标量
+total += vget_lane_f32(vget_low_f32(product), 1);
+total += vget_lane_f32(vget_high_f32(product), 0);
+total += vget_lane_f32(vget_high_f32(product), 1);
+```
+
+文件头写着「4-wide FMA per inner iteration」，但实现里**没有向量累加器、没有 FMA**：
+每 4 个元素做一次 SIMD 乘，紧接着 4 次 `vget_lane` 把结果抽回标量相加。
+相对纯标量只省了乘法，省不掉抽取开销和标量累加。
+
+同仓库的姊妹 kernel 是对的：
+
+| kernel | 向量累加器 |
+|---|---|
+| `f32/avx2.rs`（`avx2_matmul_packed!` 宏）| `_mm256_fmadd_ps` + 双累加器 |
+| `bf16/neon.rs` | `vdupq_n_f32` + `vfmaq_f32` + `vaddvq_f32` |
+| **`f32/neon.rs`** | **无**，逐 lane 抽回标量 |
+
+`f32/neon.rs` 自己写着：
+
+> `TODO-005: once a CI target exposes aarch64, validate against the scalar reference`
+
+而本仓库 CI（见 TODO-026）**没有任何 aarch64 runner**，所以这个 kernel 从未被验证过。
+
+#### 为什么写成这样（不能直接当 bug 改）
+
+代码里有明确的动机：
+
+> Keep the scalar left-to-right accumulation contract. A vector accumulator
+> changes the rounding order enough to cross BF16 boundaries in the autoregressive
+> depth decoder.
+
+改成 `vfmaq_f32` 会改变求和结合律 → 数值不再与标量一致。所以这是**有意的精度选择
+换来的性能放弃**，不是疏忽。
+
+#### 影响面
+
+- **BGE embedding 在 aarch64 上拿不到 f32 SIMD 加速**，性能接近标量
+- 同样影响任何 f32 权重走这个 kernel 的 decoder 模型（本机是 aarch64）
+
+#### 三个方案（未实施）
+
+1. **照 `bf16/neon.rs` 用 `vfmaq_f32` + 4 累加器** —— 最快，但求和顺序改变，
+   结果**不再 bit-exact**。embedding 的 cosine 相似度通常不受影响，但这是需要
+   实测确认的判断，不是可以假定的。
+2. **维持现状** —— 数值契约不动，aarch64 上没有 f32 SIMD 收益。
+3. **分路径**：保留严格标量路径给自回归解码，另加一条 embedding 专用的 SIMD 路径。
+   **这个方案最稳**——embedding 的容差天然比逐 token 解码宽，
+   且不需要牺牲 decoder 的精度契约。
+
+若要推进，先做实测：同一批文本比对三种方案的 embedding 余弦相似度与端到端
+检索一致性，再决定。**不要在没有实测的情况下放宽 decoder 的求和契约。**
+
+### TODO-029: BGE decoder embedding 路径的 logits 投影是死代码，且穿透读取内部 scratch
+
+审 `codex/bge-embedding-gguf` 的 `bafc23c` 时发现。该提交把
+`LlamaSession::forward_one_token` 的函数体抽成 `forward_input`，加了三个入口：
+
+```rust
+forward_one_token        → forward_input(token_id, None, None, /*project_logits*/ true)
+forward_embedding        → forward_input(0, Some(emb), None, false)
+forward_embedding_mrope  → forward_input(0, Some(emb), Some(mrope), false)
+```
+
+重构本身是对的（参数化优于复制三份），`mrope` 的 section 之和必须等于
+`n_embd_head_k / 2` 这个校验也写对了。以下两点是「可以更好」，都不影响正确性。
+
+#### 问题 1：`project_logits=false` 对 embedding 路径是死代码
+
+`decoder_embedding.rs` 走的是 `session.prefill(&tokens, 1)`，而 `prefill` 是：
+
+```rust
+last_logits = self.forward_chunk(input, rows, base, is_last)?;
+```
+
+**不是** `forward_one_token`。`project_logits` 的实参是 `is_last`，即**最后一个 token
+仍然会投影出完整 logits**（vocab 通常 32K–150K 宽），而 `decoder_embedding` 只要
+`session.scratch.x`，这批 logits 算完直接丢弃。
+
+新加的 `if project_logits { ... }` 包裹只对 `forward_one_token` 有意义，而那条路恒传
+`true`。所以 embedding 场景省不下任何东西。
+
+**要真正省掉**：需要让 `prefill` 的最后一个 chunk 也能传 `project_logits=false`，
+即 `prefill` 增加一个「只要 hidden state」的入口。当前 API 表达不了这个意图。
+
+**收益可量化**：每次 embedding 请求省一次 `n_embd × vocab` 的投影。0.6B 级模型
+vocab 约 150K、n_embd 1024，即 1.5 亿次乘加，而 embedding 的实际计算量只有几层 decoder。
+
+#### 问题 2：`decoder_embedding` 穿透读取 `session.scratch.x`
+
+```rust
+rms_norm_grouped(
+    &session.scratch.x[..n_embd],   // 跨模块读 impl 的内部字段
+    &session.weights.output_norm,
+    ...
+);
+```
+
+两处问题：
+
+1. **封装**：`scratch` 是 `LlamaSession` 的内部状态，从 `decoder_embedding.rs` 直接
+   穿透访问，读的是「forward 恰好停在某个中间态」的隐含约定。
+2. **重复计算**：`forward_input` 内部已经算过 `rms_norm_grouped`（结果在 `normed`），
+   embedding 侧又从 `scratch.x` 重算一遍同样的 norm。
+
+**更干净的做法**：session 暴露一个 `last_hidden(&self) -> &[f32]`，
+或者在 `forward_input` 尾部把 pooled 后的结果落到一个专门的字段。
+既不用穿透 `scratch`，也不用重算 norm。
+
+#### 与 TODO-028 的关系
+
+`TODO-028` 记录了 f32 在 aarch64 上拿不到 SIMD 加速。
+本条的「省掉 logits 投影」和它是同一个方向的两端：一个是**别做多余的计算**，
+一个是**把要做的算快**。对 BGE 这类 embedding 负载，前者的收益可能更直接——
+vocab 投影通常比 decoder 层本身更贵。
+
+### TODO-030: Visualized BGE 的 embedding 构造复制了 `populate_embeddings`，且 CLS 位置是隐含假设
+
+`bafc23c` 给 `bert_family` 加了视觉分支（`run_embedding_tokens_with_image`）。
+核心重构是**对的**：`ec62356` 把 embedding LayerNorm 从 `populate_embeddings`
+搬到 `forward_bert_layers` 开头，因为视觉路径要自己构造 `hidden`，而 LayerNorm 是
+两条路共用的。搬完之后 text 与 visual 共享同一份 LayerNorm，并保留了
+`bert.cpp:92` 的溯源。同一个提交里 `n_ctx_train` 的长度检查从 `token_ids.len()`
+改成含图像行的 `n_tokens`，也是必要修正 —— 原来只查文本 token 数，加了图像会漏检。
+
+以下两点是维护隐患，不影响当前正确性。
+
+#### 问题 1：embedding 构造有两份实现
+
+`populate_embeddings`（text）与 visual 分支的内联代码，各自实现了一遍
+「token embedding + segment + position」：
+
+```rust
+// visual 分支内联手写
+embedding_lookup(weights.token_embd, *id, h, weights.token_embd_ggml_type, row);
+for j in 0..h {
+    row[j] += segment.as_ref().map(|s| s[j]).unwrap_or(0.0);
+    row[j] += position[t * h + j];
+}
+```
+
+风险不在于现在会算错，而在于**改了一处另一处不会跟着变，而且不会有编译错误**。
+不同 BGE 变体的 position/segment 规则未必相同（图像 token 是否加 segment、
+segment 是否只加给文本），这类差异正是最容易只改一边的。
+
+**建议**：抽出一个共用 helper，visual 只额外传「哪些行是图像」：
+
+```rust
+fn populate_embeddings_with_overrides(
+    cfg: &BertConfig,
+    weights: &BertWeights<'_>,
+    token_ids: &[u32],
+    image: Option<&[f32]>,
+    image_rows: usize,
+    hidden: &mut [f32],
+) -> Result<(), String>
+```
+
+#### 问题 2：token 位置映射依赖未被断言的 CLS 假设
+
+```rust
+for (i, id) in token_ids.iter().enumerate() {
+    let t = if i == 0 { 0 } else { i + image_rows };
+    ...
+}
+```
+
+`i == 0` 的特殊处理隐含假设 **token 0 永远是 CLS**，但代码里没有任何地方检查。
+布局本身自洽（图像占 `1..=image_rows`，文本从 `image_rows + 1` 起），可一旦某个
+tokenizer 不加 CLS、或加了别的 prefix token，映射就会静默错位 —— 不报错，
+embedding 全错，且这类错误通常要到检索结果变差时才被发现。
+
+**建议**：显式校验 token 数与图像行数的对应关系，并把「token 0 是 CLS」写成
+一条可读的断言或注释约定，而不是只靠 `if i == 0` 这个分支表达。
+
+#### 一个正面观察
+
+`position` 表的校验写得很严，值得保留：
+
+```rust
+if info.dims.len() != 2 || info.dims[0] != h as u64 || info.dims[1] < n_tokens as u64 {
+    return Err("invalid Visualized BGE position table".into());
+}
+```
+
+dims 数量、宽度、以及**行数是否覆盖 `n_tokens`** 三者都查了 —— 这正是
+「不查就会静默越界」的地方。

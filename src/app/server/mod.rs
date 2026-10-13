@@ -347,13 +347,20 @@ async fn embeddings(
         )
             .into_response();
     };
-    // Multimodal path: any of audio/image/video routes the request
-    // through `run_omni_embedding`, which needs mmproj + a temp file
-    // path for the media blob. mmproj is required here (matching the
-    // CLI `--mmproj` requirement).
     let has_media = req.audio.is_some() || req.image.is_some() || req.video.is_some();
     if has_media {
-        let Some(mmproj_path) = backend.mmproj_path.clone() else {
+        let bge_visual = crate::models::bge_vl::is_visual(backend.source.as_ref());
+        if bge_visual && (req.audio.is_some() || req.video.is_some()) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "BGE visual embedding accepts an image".into(),
+                }),
+            )
+                .into_response();
+        }
+        let mmproj_path = backend.mmproj_path.clone();
+        if !bge_visual && mmproj_path.is_none() {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
@@ -361,7 +368,7 @@ async fn embeddings(
                 }),
             )
                 .into_response();
-        };
+        }
         let media_count = usize::from(req.audio.is_some())
             + usize::from(req.image.is_some())
             + usize::from(req.video.is_some());
@@ -419,15 +426,21 @@ async fn embeddings(
             } else {
                 None
             };
-            let result = crate::app::run_omni_embedding(
-                source.as_ref(),
-                &mmproj_path,
-                image_path,
-                video_path,
-                audio_path,
-                &prompt,
-                0,
-            );
+            let result = if bge_visual {
+                crate::models::bge_vl::compute_embedding(source.as_ref(), &prompt, image_path, 0)
+            } else {
+                crate::app::run_omni_embedding(
+                    source.as_ref(),
+                    mmproj_path
+                        .as_deref()
+                        .ok_or("Multimodal embedding requires --mmproj")?,
+                    image_path,
+                    video_path,
+                    audio_path,
+                    &prompt,
+                    0,
+                )
+            };
             let _ = std::fs::remove_file(&temp_path);
             let embedding = result?;
             Ok::<_, String>(EmbeddingObject {

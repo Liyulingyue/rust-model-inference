@@ -16,13 +16,19 @@ pub fn forward_f32_rows(
     nth: usize,
 ) {
     let (start, end) = row_range(n_out, ith, nth);
+    let strict_scalar = crate::ops::scalar_mode();
     for out_idx in start..end {
         let row_off = out_idx * n_in;
-        let mut sum = 0.0f32;
-        for col in 0..n_in {
-            sum += weight[row_off + col] * input[col];
+        // Oracle mode uses the shared GGML reduction; keep the ordinary F32 sum.
+        if strict_scalar {
+            output[out_idx] = crate::ops::dot_f32(&weight[row_off..row_off + n_in], input, n_in);
+        } else {
+            let mut sum = 0.0f32;
+            for col in 0..n_in {
+                sum += weight[row_off + col] * input[col];
+            }
+            output[out_idx] = sum;
         }
-        output[out_idx] = sum;
     }
 }
 
