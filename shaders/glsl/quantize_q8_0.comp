@@ -102,9 +102,16 @@ void main() {
             ? 0.0
             : divide_finite_normal(partial[0], 127.0);
         raw_scale = scale;
-        inverse_scale = partial[0] == 0.0
+        // `1.0 / scale`, not `127.0 / amax`. The two agree mathematically but
+        // differ by an ulp, and that ulp is enough to turn an exact .5 tie into
+        // a non-tie -- `127.0 / amax` lands one ulp high, the product comes out
+        // at -20.500002 instead of -20.5, and the tie rounds away from the
+        // answer the CPU reference gives. Deriving the reciprocal from the
+        // already-rounded `scale` is what the CPU path does, and it costs the
+        // same single exact division either way.
+        inverse_scale = scale == 0.0
             ? 0.0
-            : divide_finite_normal(127.0, partial[0]);
+            : divide_finite_normal(1.0, scale);
         float stored_scale = round_f16_rte(scale);
         arena.data[pc.scales_word + scales_base + block] = floatBitsToUint(stored_scale);
     }

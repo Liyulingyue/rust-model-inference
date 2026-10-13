@@ -2728,8 +2728,22 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(output[0].to_bits(), 0xbeb5_c582);
-        assert_eq!(output[1].to_bits(), 0x3e7d_324b);
+        // This test existed to pin ggml's f16-accumulating im2col dot. The
+        // default build now accumulates that dot in f32 (`FMLAL`), so the pinned
+        // values move; accuracy is proven one level down by
+        // `neon_f16_attention_dot_accumulates_in_f32` and
+        // `f16_dot_dispatch_matches_platform_reduction_contract`, both of which
+        // compare against an f64 reference rather than against ggml. TODO-025.
+        #[cfg(feature = "ggml-f16-dot-parity")]
+        {
+            assert_eq!(output[0].to_bits(), 0xbeb5_c582);
+            assert_eq!(output[1].to_bits(), 0x3e7d_324b);
+        }
+        #[cfg(not(feature = "ggml-f16-dot-parity"))]
+        {
+            assert_eq!(output[0].to_bits(), 0xbeb5_be0d);
+            assert_eq!(output[1].to_bits(), 0x3e7c_d47f);
+        }
     }
 
     #[test]
