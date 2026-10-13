@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use crate::vulkan::ops::{ArenaRegion, GpuWeightFormat, OperatorBindings, Qwen3Ops, TokenCommands};
 use crate::vulkan::{GpuBuffer, VulkanContext, VulkanError};
 
-use super::dit::{FFN_WIDTH, HEADS, HIDDEN, QK_RMS_EPSILON, QKV_WIDTH, ROPE_HEAD_WIDTH};
+use super::dit::{FFN_WIDTH, HEADS, HIDDEN, QKV_WIDTH, QK_RMS_EPSILON, ROPE_HEAD_WIDTH};
 
 /// A projection the DiT performs, named the way `BlockWeights` names it.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -378,15 +378,14 @@ impl DitGpuSession {
                 return Err(error);
             }
         };
-        self.weights
-            .insert(
-                (layer, projection),
-                BoundWeight {
-                    buffer,
-                    extra: None,
-                    bindings,
-                },
-            );
+        self.weights.insert(
+            (layer, projection),
+            BoundWeight {
+                buffer,
+                extra: None,
+                bindings,
+            },
+        );
         Ok(())
     }
 
@@ -1036,9 +1035,7 @@ impl DitGpuSession {
         let bindings = self
             .ops
             .bind_buffers(&[q_buffer, k_buffer])
-            .map_err(|error| {
-                error
-            })?;
+            .map_err(|error| error)?;
         self.qk_norms.insert(
             layer,
             BoundWeight {
@@ -1139,8 +1136,16 @@ impl Drop for DitGpuSession {
                     .chain(self.norms.values().map(|bound| &bound.buffer))
                     .chain(self.qk_norms.values().map(|bound| &bound.buffer))
                     .chain(self.modulation.iter().map(|bound| &bound.buffer))
-                    .chain(self.qk_norms.values().filter_map(|bound| bound.extra.as_ref()))
-                    .chain(self.weights.values().filter_map(|bound| bound.extra.as_ref()))
+                    .chain(
+                        self.qk_norms
+                            .values()
+                            .filter_map(|bound| bound.extra.as_ref()),
+                    )
+                    .chain(
+                        self.weights
+                            .values()
+                            .filter_map(|bound| bound.extra.as_ref()),
+                    )
                     .chain(self.norms.values().filter_map(|bound| bound.extra.as_ref())),
             );
         }

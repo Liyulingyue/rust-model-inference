@@ -4349,26 +4349,26 @@ fn check_weight_matmul_rows(
 /// clamp in `silu_mul.comp` has to keep this at zero. See TODO.md.
 ///
 /// The values above, not the shape, are what make this gate work.
-    ///
-    /// `silu_mul.comp` is elementwise: no shared memory, no barrier, no
-    /// lane-to-lane dependency, and each output reads only the same-index gate
-    /// and up. So the count is a multiplier and every element gets identical
-    /// treatment; `-197.4` is the value that reaches the regime that produced the
-    /// NaN, and it is present.
-    ///
-    /// Worth stating because it looks like the opposite is true. A check whose
-    /// fidelity depends on matching production exactly is the pattern that let a
-    /// 96-element fixture hide a production-scale defect in the first place. Here
-    /// the width genuinely does not matter -- both 9728 and 10240 are exact
-    /// multiples of the 64-wide dispatch, so neither exercises a ragged tail
-    /// either -- and the constant is pinned to the model's so that stays true.
-    ///
-    /// The property is a property of the current kernel. If SiLU is ever
-    /// rewritten to share a row across lanes, the count starts to matter and
-    /// this stops representing production without saying so.
-    ///
-    /// Returns the number of non-finite outputs, so a caller can assert on it
-    /// without treating corruption as an error string.
+///
+/// `silu_mul.comp` is elementwise: no shared memory, no barrier, no
+/// lane-to-lane dependency, and each output reads only the same-index gate
+/// and up. So the count is a multiplier and every element gets identical
+/// treatment; `-197.4` is the value that reaches the regime that produced the
+/// NaN, and it is present.
+///
+/// Worth stating because it looks like the opposite is true. A check whose
+/// fidelity depends on matching production exactly is the pattern that let a
+/// 96-element fixture hide a production-scale defect in the first place. Here
+/// the width genuinely does not matter -- both 9728 and 10240 are exact
+/// multiples of the 64-wide dispatch, so neither exercises a ragged tail
+/// either -- and the constant is pinned to the model's so that stays true.
+///
+/// The property is a property of the current kernel. If SiLU is ever
+/// rewritten to share a row across lanes, the count starts to matter and
+/// this stops representing production without saying so.
+///
+/// Returns the number of non-finite outputs, so a caller can assert on it
+/// without treating corruption as an error string.
 /// Width of the Z-Image Turbo FFN activation at 512x512.
 ///
 /// The probe below used to hard-code 9728 next to a comment claiming it was the
@@ -5529,9 +5529,7 @@ fn check_quantize_q8_k_exact(context: &VulkanContext) -> Result<(), String> {
 fn reference_dot_f16(a: &[u16], b: &[u16]) -> f64 {
     a.iter()
         .zip(b)
-        .map(|(&x, &y)| {
-            f64::from(crate::ops::f16_to_f32(x)) * f64::from(crate::ops::f16_to_f32(y))
-        })
+        .map(|(&x, &y)| f64::from(crate::ops::f16_to_f32(x)) * f64::from(crate::ops::f16_to_f32(y)))
         .sum()
 }
 

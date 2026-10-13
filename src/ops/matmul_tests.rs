@@ -1153,10 +1153,13 @@ fn f16_dot_dispatch_matches_platform_reduction_contract() {
     /// Exact sum of the pinned inputs in f64, so the accuracy assertion above is
     /// anchored to arithmetic rather than to another implementation.
     fn exact_sum((x, y): &(Vec<u16>, Vec<u8>)) -> f64 {
-        let sum = x.iter().zip(y.chunks_exact(2)).fold(0.0f64, |acc, (&a, b)| {
-            let b = u16::from_le_bytes([b[0], b[1]]);
-            acc + f64::from(f16_to_f32(a)) * f64::from(f16_to_f32(b))
-        });
+        let sum = x
+            .iter()
+            .zip(y.chunks_exact(2))
+            .fold(0.0f64, |acc, (&a, b)| {
+                let b = u16::from_le_bytes([b[0], b[1]]);
+                acc + f64::from(f16_to_f32(a)) * f64::from(f16_to_f32(b))
+            });
         sum
     }
     let expected: [(usize, u32); 3] = if native_fp16 {
@@ -1533,4 +1536,3 @@ fn rope_norm_rotates_adjacent_pairs_with_ggml_recurrence() {
         [0x3e97_713b, 0x403e_3d4f, 0xbee2_971d, 0x3e6d_9079],
     );
 }
-

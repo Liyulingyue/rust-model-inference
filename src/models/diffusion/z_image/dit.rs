@@ -2944,7 +2944,12 @@ mod tests {
         ops.write_f32(table, &rope).expect("write rope");
 
         let upload = |values: &[f32]| unsafe {
-            context.upload_static(&values.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>())
+            context.upload_static(
+                &values
+                    .iter()
+                    .flat_map(|v| v.to_le_bytes())
+                    .collect::<Vec<u8>>(),
+            )
         };
         let bindings = ops
             .bind_buffers(&[upload(&q_norm).expect("q"), upload(&k_norm).expect("k")])
@@ -2952,8 +2957,21 @@ mod tests {
 
         let commands = crate::vulkan::ops::TokenCommands::begin(context).expect("begin");
         ops.record_qk_norm_rope_interleaved_rows(
-            &commands, bindings, qkv, qkv, heads, heads, dim, table, qkv_width, qkv_width, q_span,
-            QK_RMS_EPSILON, true, true, rows,
+            &commands,
+            bindings,
+            qkv,
+            qkv,
+            heads,
+            heads,
+            dim,
+            table,
+            qkv_width,
+            qkv_width,
+            q_span,
+            QK_RMS_EPSILON,
+            true,
+            true,
+            rows,
         )
         .expect("record");
         commands.submit_and_wait().expect("submit");
@@ -2971,9 +2989,7 @@ mod tests {
             bad.is_empty(),
             "interleaved Q/K norm+RoPE diverges from the host chain at {bad:?} \
              (rows={rows} heads={heads} dim={dim}, first got {:?} expected {:?})",
-            bad.iter()
-                .map(|&i| got[i])
-                .collect::<Vec<_>>(),
+            bad.iter().map(|&i| got[i]).collect::<Vec<_>>(),
             bad.iter().map(|&i| expected[i]).collect::<Vec<_>>()
         );
 
