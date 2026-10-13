@@ -118,6 +118,13 @@ pub fn gelu_mul_inplace(gate: &[f32], up: &mut [f32]) {
 #[inline(always)]
 pub fn gelu_mul_approx_inplace(gate: &[f32], up: &mut [f32]) {
     debug_assert_eq!(gate.len(), up.len());
+    if crate::ops::scalar_mode() {
+        // ggml uses its F16 GELU table even for F32 GeGLU activations.
+        for (gate, up) in gate.iter().zip(up.iter_mut()) {
+            *up *= gelu_ggml_f16(*gate);
+        }
+        return;
+    }
     #[cfg(target_arch = "x86_64")]
     if crate::ops::has_avx2_fma() {
         unsafe { gelu_mul_approx_inplace_avx2(gate, up) };
@@ -534,6 +541,20 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn scalar_geglu_matches_pinned_ggml_table_bits() {
+        if !crate::ops::scalar_mode() {
+            return;
+        }
+        let gate = [0.1, 0.7, -1.3, 2.1];
+        let mut up = [1.0; 4];
+        gelu_mul_approx_inplace(&gate, &mut up);
+        assert_eq!(
+            up.map(f32::to_bits),
+            [0x3d5d0000, 0x3f07e000, 0xbe012000, 0x40040000]
+        );
     }
 
     #[test]

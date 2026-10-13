@@ -136,7 +136,8 @@ fn read_meta(source: &dyn TensorSource) -> Result<BertConfig, String> {
 
 /// Build the per-token hidden states for a tokenized input: token embedding
 /// (token + optional segment row 0 for jina + optional absolute position for
-/// bert), then the embedding LayerNorm. `hidden` is sized `[n_tokens * n_embd]`
+/// bert). `hidden` is sized `[n_tokens * n_embd]`; `forward_bert_layers` applies
+/// the embedding LayerNorm to this raw sum.
 /// and fully populated on return. Shared by [`run_embedding_tokens`] and
 /// [`compute_rerank_score`].
 fn populate_embeddings(
@@ -187,18 +188,9 @@ fn populate_embeddings(
         }
     }
 
-    // ---- embedding LayerNorm (`bert.cpp:92`, `LLM_NORM` with bias)
-    let mut normed = vec![0.0f32; n_embd];
-    for row in hidden.chunks_exact_mut(n_embd) {
-        layer_norm(
-            row,
-            &weights.tok_norm.weight,
-            &weights.tok_norm.bias,
-            cfg.eps,
-            &mut normed,
-        );
-        row.copy_from_slice(&normed);
-    }
+    // The embedding LayerNorm is applied at the start of
+    // `forward_bert_layers`, matching `bert.cpp:92`; keep this helper's
+    // output as the raw token/type/position sum for rerank and embedding.
     Ok(())
 }
 

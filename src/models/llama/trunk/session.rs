@@ -767,7 +767,7 @@ impl<'a> LlamaSession<'a> {
             // offset per row to `run_attention_chunked`.
             let layer_swa =
                 sliding_window_global > 0 && sw_pattern.get(layer).copied().unwrap_or(true);
-            let layer_attn_softcap = if layer_swa { attn_softcap_global } else { 0.0 };
+            let layer_attn_softcap = attn_softcap_global;
             let sw = if layer_swa { sliding_window_global } else { 0 };
             crate::models::llama::trunk::forward::run_attention_chunked(
                 pool,
@@ -1295,7 +1295,7 @@ impl<'a> LlamaSession<'a> {
             } else {
                 (n_cached, kb)
             };
-            let layer_attn_softcap = if layer_swa { attn_softcap_global } else { 0.0 };
+            let layer_attn_softcap = attn_softcap_global;
             let sw_local = if layer_swa { sliding_window_global } else { 0 };
             pool.compute(move |ith: usize, nth: usize| {
                 let q = unsafe { std::slice::from_raw_parts(q_ptr, n_embd_q) };
