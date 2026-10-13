@@ -1945,3 +1945,70 @@ if let Some(mut session) = take_gpu_session(scratch, total_tokens, &mut gpu_enab
 
 所以这条路线的真实收益上限，取决于能否把残差真正留在设备上跨 34 层累积。
 这需要一个比「每层 take 一次 session」更清晰的 session 所有权模型。
+
+### TODO-028: f32 的 aarch64 NEON kernel 名不副实，BGE 在 ARM 上拿不到 SIMD 加速
+
+在 `codex/bge-embedding-gguf` 上审 BGE embedding 支持时发现。BGE 的 decoder 变体
+（Mistral / Qwen2 / Gemma2）走 `LlamaSession`（`src/models/decoder_embedding.rs`），
+f32 权重落到 `src/ops/kernel/f32/neon.rs::matmul_f32_vs_f32_neon`。
+
+**SIMD 路径是有的**（`forward_f32_rows_dispatch` 会分派过去，`dot_f32` 也有 NEON
+实现），所以不是「缺 SIMD 路径」，而是**那个 kernel 基本不是 SIMD kernel**：
+
+```rust
+let product = vmulq_f32(
+    vld1q_f32(weight_ptr.add(row_off + index)),
+    vld1q_f32(input_ptr.add(index)),
+);
+total += vget_lane_f32(vget_low_f32(product), 0);   // 立刻拆回标量
+total += vget_lane_f32(vget_low_f32(product), 1);
+total += vget_lane_f32(vget_high_f32(product), 0);
+total += vget_lane_f32(vget_high_f32(product), 1);
+```
+
+文件头写着「4-wide FMA per inner iteration」，但实现里**没有向量累加器、没有 FMA**：
+每 4 个元素做一次 SIMD 乘，紧接着 4 次 `vget_lane` 把结果抽回标量相加。
+相对纯标量只省了乘法，省不掉抽取开销和标量累加。
+
+同仓库的姊妹 kernel 是对的：
+
+| kernel | 向量累加器 |
+|---|---|
+| `f32/avx2.rs`（`avx2_matmul_packed!` 宏）| `_mm256_fmadd_ps` + 双累加器 |
+| `bf16/neon.rs` | `vdupq_n_f32` + `vfmaq_f32` + `vaddvq_f32` |
+| **`f32/neon.rs`** | **无**，逐 lane 抽回标量 |
+
+`f32/neon.rs` 自己写着：
+
+> `TODO-005: once a CI target exposes aarch64, validate against the scalar reference`
+
+而本仓库 CI（见 TODO-026）**没有任何 aarch64 runner**，所以这个 kernel 从未被验证过。
+
+#### 为什么写成这样（不能直接当 bug 改）
+
+代码里有明确的动机：
+
+> Keep the scalar left-to-right accumulation contract. A vector accumulator
+> changes the rounding order enough to cross BF16 boundaries in the autoregressive
+> depth decoder.
+
+改成 `vfmaq_f32` 会改变求和结合律 → 数值不再与标量一致。所以这是**有意的精度选择
+换来的性能放弃**，不是疏忽。
+
+#### 影响面
+
+- **BGE embedding 在 aarch64 上拿不到 f32 SIMD 加速**，性能接近标量
+- 同样影响任何 f32 权重走这个 kernel 的 decoder 模型（本机是 aarch64）
+
+#### 三个方案（未实施）
+
+1. **照 `bf16/neon.rs` 用 `vfmaq_f32` + 4 累加器** —— 最快，但求和顺序改变，
+   结果**不再 bit-exact**。embedding 的 cosine 相似度通常不受影响，但这是需要
+   实测确认的判断，不是可以假定的。
+2. **维持现状** —— 数值契约不动，aarch64 上没有 f32 SIMD 收益。
+3. **分路径**：保留严格标量路径给自回归解码，另加一条 embedding 专用的 SIMD 路径。
+   **这个方案最稳**——embedding 的容差天然比逐 token 解码宽，
+   且不需要牺牲 decoder 的精度契约。
+
+若要推进，先做实测：同一批文本比对三种方案的 embedding 余弦相似度与端到端
+检索一致性，再决定。**不要在没有实测的情况下放宽 decoder 的求和契约。**
