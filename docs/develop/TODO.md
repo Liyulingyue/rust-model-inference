@@ -1670,15 +1670,48 @@ Q 与 K 同属一个 region，仅靠 `k_word` 无法区分，K 每行基址还�
 注意 GPU 修复前后两图之间 PSNR 只有 30.01 dB：扩散 8 步会把任何微小差异放大成
 完全不同的轨迹，**不能用「与上一版 GPU 比」判断好坏，只能对 CPU 参考比**。
 
-### TODO-024: attention score 归约无法与 CPU 逐位一致 — 不修，记录
+### TODO-024: attention 相关自检的容差是照 x86 标定的，在 aarch64 上原理性过不了
 
-修完 TODO-023 后 operator check 往下走，暴露下一个失败：
+修完 TODO-023 后 operator check 继续往下走，依次暴露两个 attention 检查失败。
+**都不是 GPU 算错，是参考实现的精度与架构相关，而容差只按一种架构标定过。**
 
-    attention score reduction mismatch: gpu=-0.12506104 cpu=-0.12512207
+#### 已解决：attention score reduction
 
-相对误差约 5e-4。这是 **NEON 的 FMA 树形累加** 与 shader 的**并行归约**之间的
-固有差异，不是逻辑错误。要逐位匹配就得在 shader 里复刻 NEON 的 lane 分区、
-FMA 收缩顺序和水平加法树——既不现实也不值得。
+`gpu=-0.12506104 cpu=-0.12512207`，相对误差 4.9e-4。
 
-正确做法是给这个 check 设**相对容差**并写明理由，而不是改 shader。
-但放宽自检的判据是另一件事，**留给用户决定**，本次不动。
+逐位核算（HEAD_DIM=64，只有 2 个非零项，f32 下均可精确表示）：
+
+    精确 f32 乘加      -1.0004883409
+    shader             -1.00048832     偏差 2.1e-08   ← 实质精确
+    CPU 参考          -1.00097656     偏差 4.9e-04   ← 恰好一个 f16 ulp
+
+分歧根源是**两边累加精度不同，而且是故意的**：
+
+| | 实现 | 累加 |
+|---|---|---|
+| CPU `dot_f16_neon` | `fmla v0.8h`，4 个 f16 累加器，末尾才 `fcvtl` 升 f32 | **f16** |
+| Vulkan shader | — | **f32** |
+
+`dot_f16` 的 f16 累加**不是疏忽**：`neon_f16_attention_dot_matches_ggml_four_accumulator_reduction`
+逐位钉住了 ggml 的四累加器结果。要逐位一致只能让 shader 也用 f16 累加，
+那是拿精度换一个本来就比 GPU 差的结果。因此改为**相对容差 2e-3**
+（约为实测 4.9e-4 的 4 倍），并把上述理由写在代码里。
+
+#### 未解决：`attention_scores` 检查
+
+容差 3e-5，实测相对误差 **6.6e-3**，差 220 倍。同一个成因，但这里的参考
+`cpu_attention_scores` 走 `dot_f16`，而
+
+| 架构 | `dot_f16` | 累加 |
+|---|---|---|
+| x86_64 | `_mm256_cvtph_ps` + `_mm256_fmadd_ps` | **f32** |
+| aarch64 | `fmla .8h` | **f16** |
+
+也就是说 **3e-5 是照 x86 的 f32 参考标定的**；在 ARM 上参考自带约 `sqrt(head_dim)*eps_f16`
+的误差，head_dim=128 时正好是 5e-3 量级——与实测吻合。
+
+**建议做法**（未实施）：把容差按参考实际累加精度选择，`cfg(target_arch)` 分支，
+aarch64 用 f16 累加的误差界，x86 保持 3e-5。理由写清楚。
+
+**但本次没有动**：这要同时放宽 `attention_scores` / `attention_values` 等多处，
+等于整体降低自检强度，属于需要显式决定的事，不宜顺手做掉。
