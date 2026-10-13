@@ -1835,3 +1835,113 @@ chunk 边界的 prefill。满负载时线程调度/分块顺序变化可能触�
    失败重跑一次再判定——先把「有测试」这件事建立起来，重试策略随后再加
 5. **方法论固化**：在 `docs/develop/OPTIMIZATION.md` 或本文档里写明
    **禁止用单轮全量回归做回归判定**，需要至少 3 轮且失败集合稳定才可下结论
+
+### TODO-027: FFN 尾部的 norm/gate/residual 融合上设备 — ❌ 未完成，实现已丢弃，但四个坑要记住
+
+目标：`readback_norm_and_residual_rows` 在每个 block 末尾把投影结果下载到 host、
+做 rms_norm + 门控残差加、再传回设备。512×512 下每 block 每 site 是 59 MB 下行 +
+59 MB 上行，一个 step 走两次。融合成单个 kernel 可以省掉其中一次。
+
+**实现已完成到「自检通过」这一步，但接进主路径后成图是坏的（PSNR 10.03 dB，
+改动前 GPU↔CPU 是 33.5 dB），因此没有提交。** kernel 本身在生产规模下是逐位正确的，
+自检钉住了这一点；错的是它周围的接线。下面四个坑每一个都真实造成过可观测的失败，
+而且**每一个的失败方式都不是「报错了」，而是「继续跑出一个看起来合理的错结果」**。
+
+#### 坑 1：等长的两个 bound buffer 会被 glslang 折叠成一个
+
+gamma 和 gate 都是 `HIDDEN` 宽、从 slot 1 和 slot 2 绑定、offset push 常量都是 0、
+读取长度相同——编译器因此证明两次读等价，把 gate buffer 从 SPIR-V 里整个删掉：
+
+    $ spirv-dis shaders/bin/fused_norm_gate_residual.spv | grep Binding
+    OpDecorate %arena Binding 0
+    OpDecorate %weight Binding 1        # Gate 整个不见了
+
+于是 shader 用 gamma 当 gate 读，产出一张 PSNR 9.9 dB 但**结构完整**的图。
+试过把索引写成不同表达式（`channel = offset % pc.width` 而不是 `offset`），
+**无效**——折叠与表达式无关。最后把两个都改成从 arena 读、用各自的 word offset 才解决。
+
+> **教训**：新增一个 bound buffer 后，用 `spirv-dis ... | grep Binding` 确认它还在。
+> 这一步不能省，也不能靠肉眼 review shader。
+
+#### 坑 2：`ArenaRegion.size` 是字节，不是元素数
+
+`Layout::build` 里写 `gate_tanh: take(HIDDEN)?` 而其他行宽区域写的是
+`rows * HIDDEN * 4`。`take` 收的是元素数，所以 3840 元素被登记成 3840 字节，
+而 `write_f32` 要 15360 字节。结果每层都失败并 fallback：
+
+    [GPU] Z-Image block 0 fell back to the CPU: ... host write region
+          offset=8785664 size=3840 cannot hold 15360 bytes
+
+denoise 从 41 s 变成 **3176 s**（77 倍）。自检里没暴露，因为自检用了一个
+`region(slot, elements) -> size: elements * 4` 的闭包，**而 session 里是手写的字面量**。
+
+> **教训**：这类错误自检抓不到，因为自检和生产用了两套不同的写法。让它们共用同一个分配函数。
+
+#### 坑 3：`bind_buffers` 从一个永不回收的 pool 分配
+
+在每 block 的调用里 `bind_buffers(&[])` 拿一个新 descriptor set。pool 是固定大小、
+分配后不释放，所以第 19 层开始 `ERROR_OUT_OF_POOL_MEMORY`，之后每一层都 fallback。
+profile 里表现为「前 18 层正常、之后全崩」。
+
+现有的 `bind_norm` / `bind_modulation` 就是 per-(layer, kind) 缓存的，照抄即可。
+
+> **教训**：`bind_*` 一律 per-layer 缓存。这在仓库里已有先例，不必重新发现。
+
+#### 坑 4：`take_gpu_session` 会把 session **取走**
+
+每步开头需要把残差上传到 arena，我这样写：
+
+```rust
+if let Some(mut session) = take_gpu_session(scratch, total_tokens, &mut gpu_enabled) {
+    session.upload_residual(...)?;      // session 在这里被 drop
+}                                       // 没有放回 scratch
+```
+
+`take_gpu_session` 的最后一句是 `scratch.gpu.remove(&rows)`——它**移除**而非借用。
+作用域结束 session 被丢弃，循环里每次 `take_gpu_session` 都新建一个，于是
+**残差永不跨层累积**，每层都从初始 latent 重新开始。
+
+> **教训**：`take_gpu_session` / `put_gpu_session` 这对「借出」语义的函数，调用后必须归还。
+> 名字里的 `take` 已经暗示了，但很容易读成「获取一个引用」。
+
+#### 还有一个没定位的错误
+
+修完上面四个，PSNR 仍是 10.03 dB。**没有找到根因**，不排除还有第五个接线问题。
+没有继续猜下去——按前面 TODO-025 的教训，猜测式修复在这里已经失败过一次。
+
+已确认与改动无关的对照：CPU 路径正常（459.7 s 出图正常）。
+
+#### 已经确认正确、可以复用的部分
+
+这些是这次调查的确定结论，即使实现被丢弃也有价值：
+
+1. **参考必须是 `rms_norm.comp`，不是 `rms_norm_inplace`。**
+   `rms_norm_inplace` 经由 `sum_sq_f32` 归约，而它返回 **f64** 并保持 64 位累加器
+   （NEON 路径）。这是比任何 f32 GPU kernel 都更准的归约，**逐位一致根本达不到**——
+   现有的 `rms_norm.comp` 从第一个元素就和它不一致。
+   真正该对齐的是 `rms_norm.comp`：它是未融合路径实际跑的 kernel，
+   也是残差流的来源。对齐它，融合才是数值上的 no-op。
+   （本条修正了最初的假设，最初以为可以对齐 CPU 参考，结果自检永远过不了。）
+
+2. **`tanh` 必须留在 host。** gate 是逐通道的（`HIDDEN` 宽，不是每行一个），
+   而 GLSL 的 `tanh` 不保证和 Rust 的 `f32::tanh` 同位模式。在 host 算好再上传即可，
+   代价只有 3840 次 tanh。
+
+3. **无 AdaLN gate 的 refiner 用全 1 填充是数学等价的**：`add_modulated_residual`
+   的 `None` 分支是 `tokens[i] += residual[i]`，而 `residual * 1.0 == residual`。
+
+4. **数据流是自洽的**：`record_ffn` 之前会把 `attention` 重新上传到 `layout.x`，
+   所以 FFN 输入不是 block 开头的那个陈旧值。
+
+5. **normed 输出对主栈是死的**：`record_ffn` 直接吃 GPU 上的 `layout.x`，
+   两个 site 写进 `attention` / `qkv` 的 normed 值，主栈都不读。
+   真正需要回 host 的只有残差流。这决定了融合的价值上限。
+
+#### 性能（实现本身是有效的，只是没跑对）
+
+`w1 readback` 从 **1109 ms → 346 ms**。denoise 净持平（41.2 → 41.3 s），
+因为省下的投影回读换成了残差回读——**除非残差也能跨层常驻**，
+而那要求 session 在整个 step 生命周期内不被取走（见坑 4）。
+
+所以这条路线的真实收益上限，取决于能否把残差真正留在设备上跨 34 层累积。
+这需要一个比「每层 take 一次 session」更清晰的 session 所有权模型。
