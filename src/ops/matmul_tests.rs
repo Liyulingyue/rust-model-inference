@@ -829,7 +829,53 @@ fn neon_dot_f32_matches_ggml_four_accumulator_reduction() {
     );
 }
 
-#[cfg(target_arch = "aarch64")]
+/// The default NEON f16 dot accumulates in f32 (`FMLAL`), so on the same inputs
+/// it must sit far closer to an exact sum than the f16-accumulating form does.
+///
+/// The comparison is deliberately against f64 and not against ggml: this is the
+/// path the Vulkan operator check uses as its reference, and a reference that is
+/// itself off by an f16 ulp cannot certify anything finer than that. TODO-024.
+#[cfg(all(target_arch = "aarch64", not(feature = "ggml-f16-dot-parity")))]
+#[test]
+fn neon_f16_attention_dot_accumulates_in_f32() {
+    let q_bits: Vec<u16> = (0..128)
+        .map(|index| {
+            ((if index % 3 == 0 { 0x8000 } else { 0 })
+                | ((14 + index % 3) << 10)
+                | ((index * 73 + 19) & 0x03ff)) as u16
+        })
+        .collect();
+    let k: Vec<u16> = (0..128)
+        .map(|index| {
+            ((if matches!(index % 5, 1 | 2) {
+                0x8000
+            } else {
+                0
+            }) | ((13 + index % 4) << 10)
+                | ((index * 151 + 7) & 0x03ff)) as u16
+        })
+        .collect();
+
+    let exact: f64 = q_bits
+        .iter()
+        .zip(&k)
+        .map(|(&a, &b)| f64::from(f16_to_f32(a)) * f64::from(f16_to_f32(b)))
+        .sum();
+    let got = f64::from(dot_f16(&q_bits, &k, q_bits.len()));
+    let relative = (got - exact).abs() / exact.abs();
+
+    // The pinned f16-accumulating value for these inputs is 0x41d5_9c00 =
+    // 26.701171875, against an exact 18.0 -- a 48% error. Anything near f32
+    // rounding proves the f32 accumulator is the one running.
+    assert!(
+        relative < 1e-6,
+        "FMLAL dot drifted from the exact sum: got={got} exact={exact} relative={relative}"
+    );
+}
+
+/// The f16-accumulating dot only exists behind `ggml-f16-dot-parity`, where it
+/// is reproduced bit for bit. TODO-025 explains why it is not the default.
+#[cfg(all(target_arch = "aarch64", feature = "ggml-f16-dot-parity"))]
 #[test]
 fn neon_f16_attention_dot_matches_ggml_four_accumulator_reduction() {
     let q_bits: Vec<u16> = (0..128)
@@ -1094,8 +1140,27 @@ fn f16_dot_dispatch_matches_platform_reduction_contract() {
         && std::arch::is_x86_feature_detected!("f16c");
     #[cfg(not(target_arch = "x86_64"))]
     let avx_f16 = false;
+    // The aarch64 contract depends on `ggml-f16-dot-parity`: with it the dot
+    // reproduces ggml's f16 accumulator, without it the dot accumulates in f32
+    // and lands next to the x86 values instead. Both are pinned, because both
+    // are reachable builds. TODO-025.
+    #[cfg(feature = "ggml-f16-dot-parity")]
+    let f16_accumulating: [(usize, u32); 3] =
+        [(32, 0xc086_b000), (37, 0x4035_3bf4), (64, 0x4122_9e00)];
+    #[cfg(not(feature = "ggml-f16-dot-parity"))]
+    let f16_accumulating: [(usize, u32); 3] =
+        [(32, 0xc086_612d), (37, 0x4035_d99a), (64, 0x4122_a162)];
+    /// Exact sum of the pinned inputs in f64, so the accuracy assertion above is
+    /// anchored to arithmetic rather than to another implementation.
+    fn exact_sum((x, y): &(Vec<u16>, Vec<u8>)) -> f64 {
+        let sum = x.iter().zip(y.chunks_exact(2)).fold(0.0f64, |acc, (&a, b)| {
+            let b = u16::from_le_bytes([b[0], b[1]]);
+            acc + f64::from(f16_to_f32(a)) * f64::from(f16_to_f32(b))
+        });
+        sum
+    }
     let expected: [(usize, u32); 3] = if native_fp16 {
-        [(32, 0xc086_b000), (37, 0x4035_3bf4), (64, 0x4122_9e00)]
+        f16_accumulating
     } else if avx_f16 {
         [(32, 0xc086_612e), (37, 0x4035_d998), (64, 0x4122_a160)]
     } else {
@@ -1104,6 +1169,18 @@ fn f16_dot_dispatch_matches_platform_reduction_contract() {
     for (n, expected) in expected {
         let (x, y) = pinned_inputs(n);
         assert_eq!(dot_f16_f16_bytes(&x, &y, n).to_bits(), expected, "n={n}");
+        // The bit pattern alone only proves determinism, so also pin accuracy:
+        // this is what makes a silent regression to a narrower accumulator
+        // visible here rather than three layers downstream. TODO-025.
+        #[cfg(not(feature = "ggml-f16-dot-parity"))]
+        {
+            let got = f64::from(dot_f16_f16_bytes(&x, &y, n));
+            let reference = exact_sum(&pinned_inputs(n));
+            assert!(
+                (got - reference).abs() / reference.abs() < 1e-6,
+                "n={n} drifted from the exact sum: got={got} exact={reference}"
+            );
+        }
     }
 
     if avx_f16 {
@@ -1126,7 +1203,14 @@ fn f16_dot_dispatch_matches_platform_reduction_contract() {
     y[..2].copy_from_slice(&0x3c00u16.to_le_bytes());
     x[32] = 0x0475;
     y[64..66].copy_from_slice(&0x472eu16.to_le_bytes());
-    assert_eq!(dot_f16_f16_bytes(&x, &y, 64).to_bits(), 0x3f80_2000);
+    // 1.0 + 6.8e-05 * 7.18 = 1.00048828125 exactly. The f16 accumulator rounds
+    // that last term against 1.0 and lands on 0x3f80_2000, one f16 ulp high --
+    // the sparse case is where the narrow accumulator shows most clearly.
+    #[cfg(feature = "ggml-f16-dot-parity")]
+    let sparse = 0x3f80_2000u32;
+    #[cfg(not(feature = "ggml-f16-dot-parity"))]
+    let sparse = 0x3f80_1000u32;
+    assert_eq!(dot_f16_f16_bytes(&x, &y, 64).to_bits(), sparse);
 }
 
 fn valid_q8_weights(n_in: usize, n_out: usize) -> Vec<u8> {
@@ -1449,3 +1533,4 @@ fn rope_norm_rotates_adjacent_pairs_with_ggml_recurrence() {
         [0x3e97_713b, 0x403e_3d4f, 0xbee2_971d, 0x3e6d_9079],
     );
 }
+

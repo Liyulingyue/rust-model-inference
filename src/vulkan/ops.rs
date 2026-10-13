@@ -5490,6 +5490,24 @@ fn check_quantize_q8_k_exact(context: &VulkanContext) -> Result<(), String> {
     Ok(())
 }
 
+/// Exact sum of two f16 vectors, in f64.
+///
+/// The operator checks must not use `dot_f16` as their oracle. That is a fast
+/// implementation whose accumulator width is a build option
+/// (`ggml-f16-dot-parity`), so an oracle built on it gets weaker whenever the
+/// flag is flipped -- and even at its best it asks "do two lossy implementations
+/// happen to agree" instead of "is the shader right". Measuring against plain
+/// arithmetic is what makes a regression visible here rather than three layers
+/// downstream. TODO-024.
+fn reference_dot_f16(a: &[u16], b: &[u16]) -> f64 {
+    a.iter()
+        .zip(b)
+        .map(|(&x, &y)| {
+            f64::from(crate::ops::f16_to_f32(x)) * f64::from(crate::ops::f16_to_f32(y))
+        })
+        .sum()
+}
+
 fn check_quantize_tie_even(context: &VulkanContext) -> Result<(), String> {
     const COUNT: usize = 64;
     let layout =
@@ -5603,32 +5621,17 @@ fn check_attention_scores_match_cpu_reduction(context: &VulkanContext) -> Result
         .iter()
         .map(|&value| crate::ops::f32_to_f16(value))
         .collect::<Vec<_>>();
-    let expected = crate::ops::dot_f16(&query_f16, &key_f16, HEAD_DIM) / (HEAD_DIM as f32).sqrt();
-    // Compared with a tolerance, not bitwise, and the reason is that the two
-    // sides accumulate in different precisions on purpose.
-    //
-    // `dot_f16` is a deliberate ggml replica: `dot_f16_neon` uses `fmla v.8h`,
-    // four f16 accumulators widened to f32 only at the end, which is what
-    // ggml's attention dot does. `neon_f16_attention_dot_matches_ggml_four_accumulator_reduction`
-    // pins that behaviour bitwise, so it is not an accident to be fixed here.
-    // The shader accumulates in f32 instead.
-    //
-    // On this input the exact f32 value is -0.1250610426068306; the shader
-    // returns -0.12506104 (2.1e-08 off, i.e. correct to f32) and the ggml-faithful
-    // CPU path returns -0.12512207 -- 4.88e-04 off, which is exactly one f16 ulp.
-    // Making the shader bit-exact would mean accumulating the score in f16, which
-    // is strictly worse numerically, so the tolerance stands in for the
-    // difference instead.
-    //
-    // 2e-3 is the repo's usual relative tolerance and sits about 4x above the
-    // observed 4.9e-4, while remaining far below the O(1) error any real
-    // indexing or layout mistake in this kernel would produce.
+    let expected = (reference_dot_f16(&query_f16, &key_f16) / (HEAD_DIM as f64).sqrt()) as f32;
+    // Against the f64 reference rather than `dot_f16`, and with the repo's usual
+    // tight tolerance. This started as a 2e-3 band because the oracle accumulated
+    // in f16 and was itself off by an f16 ulp; that is fixed in TODO-025, so the
+    // band goes back to what the rest of the checks use.
     check_close(
         "attention_score_reduction",
         &[actual],
         &[expected],
-        1e-6,
-        2e-3,
+        3e-5,
+        3e-5,
     )
 }
 
@@ -5682,7 +5685,7 @@ fn check_attention_value_reduction(context: &VulkanContext) -> Result<(), String
         .iter()
         .map(|&value| crate::ops::f32_to_f16(value))
         .collect::<Vec<_>>();
-    let expected = crate::ops::dot_f16(&probabilities_f16, &values_f16, SEQUENCE);
+    let expected = reference_dot_f16(&probabilities_f16, &values_f16) as f32;
     if actual.to_bits() != expected.to_bits() {
         return Err(format!(
             "attention value reduction mismatch: gpu={actual} cpu={expected} gpu_bits={:#010x} cpu_bits={:#010x}",
@@ -5851,7 +5854,7 @@ fn cpu_attention_scores(
                 .map(|&value| crate::ops::f32_to_f16(value))
                 .collect();
             scores[head * sequence_length + token] =
-                crate::ops::dot_f16(&query, &key, head_dim) * scale;
+                (reference_dot_f16(&query, &key) * f64::from(scale)) as f32;
         }
     }
     scores
@@ -5885,7 +5888,7 @@ fn cpu_attention_values(
                     values[token * kv_width + kv_head * head_dim + dimension],
                 );
             }
-            output[head * head_dim + dimension] = crate::ops::dot_f16(&column, &weights, padded);
+            output[head * head_dim + dimension] = reference_dot_f16(&column, &weights) as f32;
         }
     }
     output

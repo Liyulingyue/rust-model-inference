@@ -1670,48 +1670,117 @@ Q 与 K 同属一个 region，仅靠 `k_word` 无法区分，K 每行基址还�
 注意 GPU 修复前后两图之间 PSNR 只有 30.01 dB：扩散 8 步会把任何微小差异放大成
 完全不同的轨迹，**不能用「与上一版 GPU 比」判断好坏，只能对 CPU 参考比**。
 
-### TODO-024: attention 相关自检的容差是照 x86 标定的，在 aarch64 上原理性过不了
+### TODO-024: attention 相关自检的容差是照 x86 标定的 — ✅ 由 TODO-025 一并解决
 
-修完 TODO-023 后 operator check 继续往下走，依次暴露两个 attention 检查失败。
-**都不是 GPU 算错，是参考实现的精度与架构相关，而容差只按一种架构标定过。**
-
-#### 已解决：attention score reduction
-
-`gpu=-0.12506104 cpu=-0.12512207`，相对误差 4.9e-4。
-
-逐位核算（HEAD_DIM=64，只有 2 个非零项，f32 下均可精确表示）：
-
-    精确 f32 乘加      -1.0004883409
-    shader             -1.00048832     偏差 2.1e-08   ← 实质精确
-    CPU 参考          -1.00097656     偏差 4.9e-04   ← 恰好一个 f16 ulp
-
-分歧根源是**两边累加精度不同，而且是故意的**：
-
-| | 实现 | 累加 |
-|---|---|---|
-| CPU `dot_f16_neon` | `fmla v0.8h`，4 个 f16 累加器，末尾才 `fcvtl` 升 f32 | **f16** |
-| Vulkan shader | — | **f32** |
-
-`dot_f16` 的 f16 累加**不是疏忽**：`neon_f16_attention_dot_matches_ggml_four_accumulator_reduction`
-逐位钉住了 ggml 的四累加器结果。要逐位一致只能让 shader 也用 f16 累加，
-那是拿精度换一个本来就比 GPU 差的结果。因此改为**相对容差 2e-3**
-（约为实测 4.9e-4 的 4 倍），并把上述理由写在代码里。
-
-#### 未解决：`attention_scores` 检查
-
-容差 3e-5，实测相对误差 **6.6e-3**，差 220 倍。同一个成因，但这里的参考
-`cpu_attention_scores` 走 `dot_f16`，而
+**根因**：`cpu_attention_scores` / `cpu_attention_values` /
+`check_attention_scores_match_cpu_reduction` 拿 `dot_f16` 当 oracle，而
 
 | 架构 | `dot_f16` | 累加 |
 |---|---|---|
 | x86_64 | `_mm256_cvtph_ps` + `_mm256_fmadd_ps` | **f32** |
 | aarch64 | `fmla .8h` | **f16** |
 
-也就是说 **3e-5 是照 x86 的 f32 参考标定的**；在 ARM 上参考自带约 `sqrt(head_dim)*eps_f16`
-的误差，head_dim=128 时正好是 5e-3 量级——与实测吻合。
+容差是照 **x86 的 f32 参考**标定的（`attention_scores` 用 3e-5），在 ARM 上参考自带
+`sqrt(head_dim) * eps_f16` 误差（head_dim=128 时约 5e-3），与实测 6.6e-3 吻合——
+**原理上过不了**。
 
-**建议做法**（未实施）：把容差按参考实际累加精度选择，`cfg(target_arch)` 分支，
-aarch64 用 f16 累加的误差界，x86 保持 3e-5。理由写清楚。
+**解法不在放宽容差，在换 oracle**：统一改用 `reference_dot_f16`（f64 精确求和）。
+oracle 是精确算术后，容差自然回到 3e-5 并且真的成立。详见 TODO-025。
 
-**但本次没有动**：这要同时放宽 `attention_scores` / `attention_values` 等多处，
-等于整体降低自检强度，属于需要显式决定的事，不宜顺手做掉。
+**教训**：一个有损的参考值，会让「校验 GPU」这件事悄悄变成「比较两个有损实现」。
+前者能发现 bug，后者只能发现巧合——而且它同时把容差推大到连真正的 GPU 回归都测不出来。
+
+### TODO-025: `dot_f16` 在 aarch64 上用 f16 累加 — ✅ 已改，`ggml-f16-dot-parity` 保留旧行为
+
+新增 Cargo feature `ggml-f16-dot-parity`（默认关闭）：
+
+| | 累加 | 指令 | 吞吐(n=4096) | 相对误差 |
+|---|---|---|---|---|
+| 默认 | **f32** | `FMLAL` | 31 GFLOP/s | **8.5e-08** |
+| `--features ggml-f16-dot-parity` | f16 | `fmla .8h` | **122 GFLOP/s** | 2.3e-03 ~ 3.4e-03 |
+
+**吞吐代价实测约 4 倍**，这台机器的 FP16 单元确实比 f32 宽。所以这不是免费的
+正确性提升，而是一个需要按调用点分别权衡的取舍——feature 就是为此留的：
+校验/参考路径用默认档，吞吐敏感的推理路径可以显式打开旧行为。
+
+（测量用的是逐点测试，n=4096、2 万次迭代；FMLAL 档每 32 元素用 8 次 `.4h`
+装载而非 4 次 `.8h`，装载指令是 2 倍，因此其中一部分差距可能来自装载而非
+FMLAL 本身吞吐。）
+
+#### 「保留 16 精度」不等于「保留 16 位累加」
+
+现状把两件事捆在一起了，但它们可以分开：
+
+- **f16 存储**：模型格式与 ggml 对齐的要求，**任何配置下都不变**，带宽与显存
+  收益完全保留。
+- **f16 累加**：实现细节，**不是对齐要求**。决定性证据是 x86 路径
+  （`_mm256_cvtph_ps` + `_mm256_fmadd_ps`）**从来不**做 f16 累加。同一份 ggml
+  语义，两个架构行为不一致，说明这从来不是「对齐 ggml」，而是各自挑了个实现，
+  再被一个逐位测试冻住。把 `fmla .8h` 当作对齐的代价保留下来，等于主动接受一个
+  和 x86、和 GPU shader 都不一致的数值行为，只因为它先被写下来了。
+
+`FMLAL` 是 Armv8.2 里「f16 乘、f32 累加」的正规指令，与 `fmla .8h` 同属 FEAT_FP16，
+**不引入新的架构要求**。
+
+#### 顺带修好的：自检参考不再依赖 build flag
+
+原先 `cpu_attention_scores` / `cpu_attention_values` / `check_attention_scores_match_cpu_reduction`
+拿 `dot_f16` 当 oracle——也就是拿一个「快速实现」当标准答案。累加器宽度一旦变成
+构建选项，**打开 flag 就会让检查自动变弱**，而且它问的本来就不是「shader 对不对」，
+而是「两个有损实现会不会碰巧对上」。
+
+现在统一改用 `reference_dot_f16`（f64 精确求和）。结果：
+
+| 检查 | 改前 | 改后 |
+|---|---|---|
+| attention_score_reduction | 容差被迫放大到 2e-3（现收回 3e-5）| **max_rel 0.000e0** |
+| attention_scores | 容差 3e-5，实测 6.6e-3 失败 | **max_rel 3.4e-07** |
+| attention_values | — | **max_rel 0.000e0** |
+| quantize_tie_even | 自 621c622 起一直红 | exact=true |
+
+`vk_ops_check` 现在 **exit 0、25 个算子全过**（连跑多次稳定）。
+
+#### 被推翻的 pinned 测试
+
+以下测试原本钉死 ggml 的 f16 累加结果，现改为按 feature 钉两套值，并补上
+**对 f64 参考的精度断言**（只钉 bit 只能证明可复现，证明不了正确）：
+
+- `neon_f16_attention_dot_matches_ggml_four_accumulator_reduction`
+  → 仅在 `ggml-f16-dot-parity` 下编译；新增
+  `neon_f16_attention_dot_accumulates_in_f32`（默认档，对 f64 参考 rel < 1e-6）
+- `f16_dot_dispatch_matches_platform_reduction_contract` → 两套值 + f64 精度断言
+- `f16_kernel_matches_ggml_scaled_input_contract`、
+  `f16_kernel_scaled_path_matches_ggml_f16_input_and_native_accumulation`
+  → 两套值 + 新增 `assert_f32_accumulated` helper
+- `z_image::vae::conv_f16_matches_pinned_ggml_im2col_dot_and_post_bias`
+  → 两套值（该测试**只**钉了值未补 f64 断言；精度由上一层的 dot 级测试保证）
+
+#### 回归
+
+`cargo test --lib`：默认与 `ggml-f16-dot-parity` 两个配置均为
+**1137 passed / 29 failed**，与父提交**完全一致**，零新增失败。
+
+#### 端到端代价（512×512 8 步，Z-Image）
+
+| 阶段 | 改动前 | 改动后 |
+|---|---|---|
+| CPU vae_decode | 11.6 s | **15.2 / 15.9 s（+34%）** |
+| CPU denoise | 波动极大 | 无关（本就不走 `dot_f16`）|
+| GPU 端到端 | 48.99 s | 48.59 s（不变）|
+
+**VAE 的 +34% 是真实回退**，两次复测都稳定复现：VAE 的 f16 conv 走
+`F16Kernel::forward_scaled` → `dot_f16`，正好落在 FMLAL 慢 4 倍的那一档。
+GPU 端到端不受影响，因为 DiT 走 Q8_0 matmul。
+
+同时 **GPU/CPU 一致性改善**：PSNR 32.21 → **33.50 dB**，mean|Δ| 3.01 → **2.87**。
+CPU 侧少了一个 f16 累加的误差源，自然更靠近 GPU。
+
+所以这一档的取舍是明确的：**CPU VAE 多花 34% 时间，换 CPU/GPU 差 1.3 dB**。
+两次 CPU 渲染逐字节一致，结果可复现。
+
+#### 尚未验证
+
+- ASR（gemma4 / qwen3 mel encoder）与 MLX LoRA 的端到端数值未跑（缺模型）。
+  这些是 `dot_f16` 的真实调用方，其中 ASR 的 mel encoder 可能落在算力敏感区，
+  4 倍差距是否可接受需要实测决定。
+- FMLAL 档的装载指令数是否为瓶颈（见上）。
