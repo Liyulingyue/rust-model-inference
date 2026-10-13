@@ -10,6 +10,7 @@ Usage::
     .venv/bin/python -m tools.converter.bge.convert_bge models/BAAI-bge-small-en-v1-5 \
         models/bge-small-en-v1.5-F32.gguf --quant F32
 """
+
 from __future__ import annotations
 
 import argparse
@@ -187,6 +188,7 @@ class _TorchUnpickler(pickle.Unpickler):
             "_rebuild_tensor_v2",
             "_rebuild_tensor_v3",
         }:
+
             def rebuild(storage, offset, size, stride, *rest):  # noqa: ANN001
                 del rest
                 return _TorchTensorRef(
@@ -219,14 +221,18 @@ def _canonical_tensor_name(name: str) -> str:
 def _torch_tensor_bytes(tensor: _TorchTensorRef) -> tuple[str, tuple[int, ...], bytes]:
     storage = tensor.storage
     item_bytes = _TORCH_DTYPE_BYTES[storage.dtype]
-    if any(value < 0 for value in tensor.shape) or any(value < 0 for value in tensor.stride):
+    if any(value < 0 for value in tensor.shape) or any(
+        value < 0 for value in tensor.stride
+    ):
         raise ValueError("negative PyTorch tensor shape or stride")
     count = math.prod(tensor.shape)
     if count == 0:
         return storage.dtype, tensor.shape, b""
     max_index = tensor.offset
     if tensor.shape:
-        max_index += sum((size - 1) * stride for size, stride in zip(tensor.shape, tensor.stride))
+        max_index += sum(
+            (size - 1) * stride for size, stride in zip(tensor.shape, tensor.stride)
+        )
     if tensor.offset < 0 or max_index >= storage.numel:
         raise ValueError(
             f"PyTorch tensor view exceeds storage: offset={tensor.offset} shape={tensor.shape}"
@@ -262,6 +268,9 @@ class TensorStore:
     """Index one safetensors file or a standard HF shard set."""
 
     def __init__(self, model_dir: Path) -> None:
+        if model_dir.is_file():
+            self._load_torch_bin(model_dir)
+            return
         index_path = model_dir / "model.safetensors.index.json"
         if index_path.exists():
             index = json.loads(index_path.read_text())
@@ -306,10 +315,14 @@ class TensorStore:
                     # Position ids and the optional pooler are registered in
                     # many HF checkpoints but never enter the embedding graph.
                     continue
-                if dtype not in _DTYPE_BYTES or not shape or not offsets:
+                if dtype not in _DTYPE_BYTES or not offsets:
                     raise ValueError(f"invalid safetensors entry {name}: {info}")
                 start, end = offsets
-                if start < 0 or end < start or end > source.file_size - source.data_offset:
+                if (
+                    start < 0
+                    or end < start
+                    or end > source.file_size - source.data_offset
+                ):
                     raise ValueError(f"invalid byte range for {name}: {offsets}")
                 expected = math.prod(shape) * _DTYPE_BYTES[dtype]
                 if end - start != expected:
@@ -319,11 +332,15 @@ class TensorStore:
                 self._tensors[name] = SourceTensor(
                     name, dtype, shape, source.path, start, end, source.data_offset
                 )
-        expected_names = set(weight_map) - _DROP if weight_map is not None else set(self._tensors)
+        expected_names = (
+            set(weight_map) - _DROP if weight_map is not None else set(self._tensors)
+        )
         if weight_map is not None and expected_names != set(self._tensors):
             missing = sorted(expected_names - set(self._tensors))
             extra = sorted(set(self._tensors) - expected_names)
-            raise ValueError(f"safetensors index inventory mismatch: missing={missing[:3]} extra={extra[:3]}")
+            raise ValueError(
+                f"safetensors index inventory mismatch: missing={missing[:3]} extra={extra[:3]}"
+            )
 
     def _load_torch_bin(self, path: Path) -> None:
         """Index a torch.save ZIP using only stdlib pickle/zipfile support."""
@@ -332,9 +349,13 @@ class TensorStore:
         try:
             archive = zipfile.ZipFile(path)
         except zipfile.BadZipFile as exc:
-            raise ValueError(f"{path}: legacy non-ZIP PyTorch checkpoints are unsupported") from exc
+            raise ValueError(
+                f"{path}: legacy non-ZIP PyTorch checkpoints are unsupported"
+            ) from exc
         try:
-            pickle_name = next(name for name in archive.namelist() if name.endswith("/data.pkl"))
+            pickle_name = next(
+                name for name in archive.namelist() if name.endswith("/data.pkl")
+            )
             prefix = pickle_name[: -len("data.pkl")]
             obj = _TorchUnpickler(archive.read(pickle_name), archive, prefix).load()
         finally:
@@ -360,7 +381,7 @@ class TensorStore:
             if name in _DROP:
                 continue
             dtype, shape, raw = _torch_tensor_bytes(tensor)
-            if not shape or dtype not in _DTYPE_BYTES:
+            if dtype not in _DTYPE_BYTES:
                 raise ValueError(f"invalid PyTorch tensor {name}: {dtype}{shape}")
             self._tensors[name] = SourceTensor(
                 name,
@@ -373,7 +394,18 @@ class TensorStore:
                 raw,
             )
         if not self._tensors:
-            raise ValueError(f"{path}: no usable tensors found after dropping auxiliary heads")
+            raise ValueError(
+                f"{path}: no usable tensors found after dropping auxiliary heads"
+            )
+
+    def select(self, mapping: dict[str, str]) -> TensorStore:
+        selected = object.__new__(TensorStore)
+        selected._files = self._files
+        selected._tensors = {
+            target: replace(self[source], name=target)
+            for target, source in mapping.items()
+        }
+        return selected
 
     def __contains__(self, name: str) -> bool:
         return name in self._tensors
@@ -425,7 +457,9 @@ def _validate_config(config: dict) -> tuple[str, int, int, int, int, int, int, i
     if any(not isinstance(value, int) or value <= 0 for value in values):
         raise ValueError(f"invalid BGE encoder dimensions: {values}")
     if hidden % heads:
-        raise ValueError(f"hidden_size {hidden} is not divisible by num_attention_heads {heads}")
+        raise ValueError(
+            f"hidden_size {hidden} is not divisible by num_attention_heads {heads}"
+        )
     if config.get("position_embedding_type", "absolute") != "absolute":
         raise ValueError("only absolute-position BGE encoders are supported")
     if config.get("hidden_act", "gelu") not in {"gelu", "gelu_new"}:
@@ -534,7 +568,27 @@ def _added_tokens(
 def _read_tokens(model_dir: Path, model_type: str) -> TokenizerSpec:
     """Read tokenizer JSON/ModelProto into GGUF tokenizer metadata."""
     tokenizer_json = _load_json(model_dir, "tokenizer.json", required=False)
-    tokenizer_config = _load_json(model_dir, "tokenizer_config.json", required=False) or {}
+    tokenizer_config = (
+        _load_json(model_dir, "tokenizer_config.json", required=False) or {}
+    )
+    if tokenizer_json is None and (model_dir / "vocab.json").exists():
+        vocab = _load_json(model_dir, "vocab.json")
+        merges = [
+            line
+            for line in (model_dir / "merges.txt").read_text().splitlines()
+            if line and not line.startswith("#")
+        ]
+        added = [
+            dict(value, id=int(index))
+            for index, value in sorted(
+                tokenizer_config.get("added_tokens_decoder", {}).items(),
+                key=lambda item: int(item[0]),
+            )
+        ]
+        tokenizer_json = {
+            "model": {"type": "BPE", "vocab": vocab, "merges": merges},
+            "added_tokens": added,
+        }
     specials = {}
     for semantic in ("unk", "bos", "eos", "pad", "cls", "sep", "mask"):
         value = tokenizer_config.get(f"{semantic}_token")
@@ -551,11 +605,23 @@ def _read_tokens(model_dir: Path, model_type: str) -> TokenizerSpec:
     # BPE compatibility view in tokenizer.json back into SPM pieces/scores.
     sentencepiece_path = model_dir / "tokenizer.model"
     if sentencepiece_path.exists() and model_type in {"mistral", "gemma2"}:
-        tokens, scores, token_types = map(list, _read_sentencepiece_model(sentencepiece_path))
+        tokens, scores, token_types = map(
+            list, _read_sentencepiece_model(sentencepiece_path)
+        )
         if tokenizer_json is not None:
-            _added_tokens(tokens, scores, token_types, tokenizer_json.get("added_tokens"))
+            _added_tokens(
+                tokens, scores, token_types, tokenizer_json.get("added_tokens")
+            )
         return TokenizerSpec(
-            "llama", tokens, scores, specials, None, [], token_types, add_bos, add_eos,
+            "llama",
+            tokens,
+            scores,
+            specials,
+            None,
+            [],
+            token_types,
+            add_bos,
+            add_eos,
             model_type != "gemma2",
         )
 
@@ -563,13 +629,17 @@ def _read_tokens(model_dir: Path, model_type: str) -> TokenizerSpec:
         model = tokenizer_json.get("model") or {}
         charsmap = None
         normalizer = tokenizer_json.get("normalizer")
-        normalizers = normalizer.get("normalizers", []) if isinstance(normalizer, dict) else []
+        normalizers = (
+            normalizer.get("normalizers", []) if isinstance(normalizer, dict) else []
+        )
         if isinstance(normalizers, list):
             for item in normalizers:
                 if isinstance(item, dict) and item.get("type") == "Precompiled":
                     encoded = item.get("precompiled_charsmap")
                     if not isinstance(encoded, str):
-                        raise ValueError("tokenizer.json Precompiled normalizer has no charsmap")
+                        raise ValueError(
+                            "tokenizer.json Precompiled normalizer has no charsmap"
+                        )
                     charsmap = base64.b64decode(encoded, validate=True)
                     break
         model_kind = model.get("type")
@@ -594,18 +664,38 @@ def _read_tokens(model_dir: Path, model_type: str) -> TokenizerSpec:
                 else:
                     tokens.append("▁" + token)
             return TokenizerSpec(
-                "bert", tokens, [0.0] * len(tokens), specials, None, [], None, False, False
+                "bert",
+                tokens,
+                [0.0] * len(tokens),
+                specials,
+                None,
+                [],
+                None,
+                False,
+                False,
             )
         if model_kind == "Unigram":
             vocab = model.get("vocab")
-            if not isinstance(vocab, list) or any(not isinstance(item, list) or len(item) != 2 for item in vocab):
+            if not isinstance(vocab, list) or any(
+                not isinstance(item, list) or len(item) != 2 for item in vocab
+            ):
                 raise ValueError("tokenizer.json Unigram model has invalid vocab")
             tokens = [str(item[0]) for item in vocab]
             scores = [float(item[1]) for item in vocab]
             token_types = [1] * len(tokens)
-            _added_tokens(tokens, scores, token_types, tokenizer_json.get("added_tokens"))
+            _added_tokens(
+                tokens, scores, token_types, tokenizer_json.get("added_tokens")
+            )
             return TokenizerSpec(
-                "t5", tokens, scores, specials, charsmap, [], token_types, add_bos, add_eos
+                "t5",
+                tokens,
+                scores,
+                specials,
+                charsmap,
+                [],
+                token_types,
+                add_bos,
+                add_eos,
             )
         if model_kind == "BPE":
             vocab = model.get("vocab")
@@ -618,7 +708,9 @@ def _read_tokens(model_dir: Path, model_type: str) -> TokenizerSpec:
             tokens = [token for _, token in by_id]
             scores = [0.0] * len(tokens)
             token_types = [1] * len(tokens)
-            _added_tokens(tokens, scores, token_types, tokenizer_json.get("added_tokens"))
+            _added_tokens(
+                tokens, scores, token_types, tokenizer_json.get("added_tokens")
+            )
             merge_strings = []
             for merge in merges:
                 if isinstance(merge, str):
@@ -628,19 +720,44 @@ def _read_tokens(model_dir: Path, model_type: str) -> TokenizerSpec:
                 else:
                     raise ValueError(f"invalid BPE merge {merge!r}")
             return TokenizerSpec(
-                "gpt2", tokens, scores, specials, None, merge_strings, token_types, add_bos, add_eos
+                "gpt2",
+                tokens,
+                scores,
+                specials,
+                None,
+                merge_strings,
+                token_types,
+                add_bos,
+                add_eos,
             )
         raise ValueError(f"unsupported tokenizer.json model type {model_kind!r}")
 
     vocab_path = model_dir / "vocab.txt"
     if vocab_path.exists():
         tokens = [line.rstrip("\n\r") for line in vocab_path.read_text().splitlines()]
-        tokens = [token[2:] if token.startswith("##") else token if token.startswith("[") and token.endswith("]") else "▁" + token for token in tokens]
-        return TokenizerSpec("bert", tokens, [0.0] * len(tokens), specials, None, [], None, False, False)
-    raise FileNotFoundError(f"{model_dir}: tokenizer.json, tokenizer.model, or vocab.txt is required")
+        tokens = [
+            (
+                token[2:]
+                if token.startswith("##")
+                else (
+                    token
+                    if token.startswith("[") and token.endswith("]")
+                    else "▁" + token
+                )
+            )
+            for token in tokens
+        ]
+        return TokenizerSpec(
+            "bert", tokens, [0.0] * len(tokens), specials, None, [], None, False, False
+        )
+    raise FileNotFoundError(
+        f"{model_dir}: tokenizer.json, tokenizer.model, or vocab.txt is required"
+    )
 
 
-def _special_token_ids(tokens: list[str], names: dict[str, int | str]) -> dict[str, int]:
+def _special_token_ids(
+    tokens: list[str], names: dict[str, int | str]
+) -> dict[str, int]:
     ids: dict[str, int] = {}
     for semantic, value in names.items():
         if isinstance(value, str):
@@ -683,7 +800,9 @@ def _token_types(
     return types
 
 
-def _source_names(model_type: str, layer_count: int, type_vocab_size: int) -> dict[str, str]:
+def _source_names(
+    model_type: str, layer_count: int, type_vocab_size: int
+) -> dict[str, str]:
     names = {
         "token_embd.weight": "embeddings.word_embeddings.weight",
         "position_embd.weight": "embeddings.position_embeddings.weight",
@@ -753,7 +872,9 @@ def _decoder_mapping(model_type: str, layer_count: int) -> dict[str, str]:
             mapping[f"{dst}.ffn_norm.weight"] = f"{src}.post_attention_layernorm.weight"
         if model_type == "qwen2":
             for projection in ("q", "k", "v"):
-                mapping[f"{dst}.attn_{projection}.bias"] = f"{src}.self_attn.{projection}_proj.bias"
+                mapping[f"{dst}.attn_{projection}.bias"] = (
+                    f"{src}.self_attn.{projection}_proj.bias"
+                )
         if model_type == "qwen3":
             mapping.update(
                 {
@@ -776,7 +897,9 @@ def _decoder_arch_metadata(config: dict, model_type: str) -> dict[str, object]:
     if any(not isinstance(value, int) or value <= 0 for value in values):
         raise ValueError(f"invalid BGE decoder dimensions: {values}")
     if hidden % heads or heads % kv_heads:
-        raise ValueError(f"invalid decoder head shape: hidden={hidden}, heads={heads}, kv={kv_heads}")
+        raise ValueError(
+            f"invalid decoder head shape: hidden={hidden}, heads={heads}, kv={kv_heads}"
+        )
     head_dim = int(config.get("head_dim", hidden // heads))
     if head_dim <= 0:
         raise ValueError(f"invalid decoder head_dim {head_dim}")
@@ -824,7 +947,11 @@ def _chunks(store: TensorStore, tensor: SourceTensor, quant: str) -> Iterable[by
                 tensor.start + offset,
                 tensor.start + offset + length,
                 tensor.data_offset,
-                tensor.raw[offset : offset + length] if tensor.raw is not None else None,
+                (
+                    tensor.raw[offset : offset + length]
+                    if tensor.raw is not None
+                    else None
+                ),
             )
         )
         if len(raw) != length:
@@ -837,13 +964,17 @@ def _chunks(store: TensorStore, tensor: SourceTensor, quant: str) -> Iterable[by
         else:
             values = np.frombuffer(f32, dtype="<f4")
             if values.size % 32:
-                raise ValueError(f"{tensor.name}: Q8_0 requires a multiple of 32 values")
+                raise ValueError(
+                    f"{tensor.name}: Q8_0 requires a multiple of 32 values"
+                )
             yield quantize_q8_0(values)
         remaining -= length
         offset += length
 
 
-def _tensor_shape(target: str, tensor: SourceTensor, hidden: int, type_vocab_size: int) -> tuple[int, ...]:
+def _tensor_shape(
+    target: str, tensor: SourceTensor, hidden: int, type_vocab_size: int
+) -> tuple[int, ...]:
     if target == "token_types.weight" and type_vocab_size == 1:
         if math.prod(tensor.shape) != hidden:
             raise ValueError(f"{target}: expected {hidden} values, got {tensor.shape}")
@@ -884,8 +1015,12 @@ def _trim_position_rows(tensor: SourceTensor, offset: int) -> SourceTensor:
     start = tensor.start + offset * row_bytes
     end = start + shape[0] * row_bytes
     if end > tensor.end:
-        raise ValueError(f"{tensor.name}: position table payload is shorter than its shape")
-    return SourceTensor(tensor.name, tensor.dtype, shape, tensor.path, start, end, tensor.data_offset)
+        raise ValueError(
+            f"{tensor.name}: position table payload is shorter than its shape"
+        )
+    return SourceTensor(
+        tensor.name, tensor.dtype, shape, tensor.path, start, end, tensor.data_offset
+    )
 
 
 def _sha256(paths: Iterable[Path]) -> str:
@@ -899,7 +1034,8 @@ def _sha256(paths: Iterable[Path]) -> str:
 
 def _source_sha256(store: TensorStore) -> str:
     return _sha256(
-        source if isinstance(source, Path) else source.path for source in store._files.values()
+        source if isinstance(source, Path) else source.path
+        for source in store._files.values()
     )
 
 
@@ -912,7 +1048,9 @@ def _write_tokenizer_metadata(
     type_vocab_count: int | None = None,
 ) -> None:
     if len(spec.tokens) != vocab:
-        raise ValueError(f"tokenizer vocabulary {len(spec.tokens)} != config vocab_size {vocab}")
+        raise ValueError(
+            f"tokenizer vocabulary {len(spec.tokens)} != config vocab_size {vocab}"
+        )
     token_types = _token_types(spec.kind, spec.tokens, special_ids, spec.token_types)
     _add_meta(writer, "tokenizer.ggml.model", spec.kind)
     _add_meta(writer, "tokenizer.ggml.tokens", spec.tokens)
@@ -925,8 +1063,12 @@ def _write_tokenizer_metadata(
 
     if spec.kind == "bert":
         _add_meta(writer, "tokenizer.ggml.pre", "jina-v2-en")
-        _add_meta(writer, "tokenizer.ggml.unknown_token_id", special_ids.get("unk", 100))
-        _add_meta(writer, "tokenizer.ggml.seperator_token_id", special_ids.get("sep", 102))
+        _add_meta(
+            writer, "tokenizer.ggml.unknown_token_id", special_ids.get("unk", 100)
+        )
+        _add_meta(
+            writer, "tokenizer.ggml.seperator_token_id", special_ids.get("sep", 102)
+        )
         _add_meta(writer, "tokenizer.ggml.padding_token_id", special_ids.get("pad", 0))
         _add_meta(writer, "tokenizer.ggml.cls_token_id", special_ids.get("cls", 101))
         _add_meta(writer, "tokenizer.ggml.mask_token_id", special_ids.get("mask", 103))
@@ -938,12 +1080,24 @@ def _write_tokenizer_metadata(
     if spec.kind == "t5":
         _add_meta(writer, "tokenizer.ggml.pre", "default")
         _add_meta(writer, "tokenizer.ggml.scores", MetaArray(6, tuple(spec.scores)))
-        _add_meta(writer, "tokenizer.ggml.bos_token_id", special_ids.get("bos", special_ids.get("cls", 0)))
-        _add_meta(writer, "tokenizer.ggml.eos_token_id", special_ids.get("eos", special_ids.get("sep", 2)))
+        _add_meta(
+            writer,
+            "tokenizer.ggml.bos_token_id",
+            special_ids.get("bos", special_ids.get("cls", 0)),
+        )
+        _add_meta(
+            writer,
+            "tokenizer.ggml.eos_token_id",
+            special_ids.get("eos", special_ids.get("sep", 2)),
+        )
         _add_meta(writer, "tokenizer.ggml.unknown_token_id", special_ids.get("unk", 3))
         _add_meta(writer, "tokenizer.ggml.padding_token_id", special_ids.get("pad", 1))
-        _add_meta(writer, "tokenizer.ggml.seperator_token_id", special_ids.get("sep", 2))
-        _add_meta(writer, "tokenizer.ggml.mask_token_id", special_ids.get("mask", vocab - 1))
+        _add_meta(
+            writer, "tokenizer.ggml.seperator_token_id", special_ids.get("sep", 2)
+        )
+        _add_meta(
+            writer, "tokenizer.ggml.mask_token_id", special_ids.get("mask", vocab - 1)
+        )
         _add_meta(writer, "tokenizer.ggml.add_bos_token", True)
         _add_meta(writer, "tokenizer.ggml.add_eos_token", True)
         _add_meta(writer, "tokenizer.ggml.add_sep_token", True)
@@ -951,7 +1105,11 @@ def _write_tokenizer_metadata(
         _add_meta(writer, "tokenizer.ggml.remove_extra_whitespaces", True)
         _add_meta(writer, "tokenizer.ggml.treat_whitespace_as_suffix", False)
         if spec.charsmap is not None:
-            _add_meta(writer, "tokenizer.ggml.precompiled_charsmap", MetaArray(0, tuple(spec.charsmap)))
+            _add_meta(
+                writer,
+                "tokenizer.ggml.precompiled_charsmap",
+                MetaArray(0, tuple(spec.charsmap)),
+            )
         return
     if spec.kind == "llama":
         _add_meta(writer, "tokenizer.ggml.pre", "default")
@@ -970,7 +1128,11 @@ def _write_tokenizer_metadata(
         _add_meta(writer, "tokenizer.ggml.bos_token_id", special_ids.get("bos", 0))
         _add_meta(writer, "tokenizer.ggml.eos_token_id", special_ids.get("eos", 0))
         _add_meta(writer, "tokenizer.ggml.unknown_token_id", special_ids.get("unk", 0))
-        _add_meta(writer, "tokenizer.ggml.padding_token_id", special_ids.get("pad", special_ids.get("eos", 0)))
+        _add_meta(
+            writer,
+            "tokenizer.ggml.padding_token_id",
+            special_ids.get("pad", special_ids.get("eos", 0)),
+        )
         _add_meta(writer, "tokenizer.ggml.add_bos_token", spec.add_bos)
         _add_meta(writer, "tokenizer.ggml.add_eos_token", spec.add_eos)
         return
@@ -990,19 +1152,39 @@ def _add_mapped_tensors(
     for target, source_name in mapping.items():
         tensor = store[source_name]
         if model_type == "gemma2" and "norm.weight" in source_name:
-            values = np.frombuffer(_to_f32(store.read(tensor), tensor.dtype), dtype="<f4") + np.float32(1)
+            values = np.frombuffer(
+                _to_f32(store.read(tensor), tensor.dtype), dtype="<f4"
+            ) + np.float32(1)
             raw = values.tobytes()
-            tensor = replace(tensor, dtype="F32", start=0, end=len(raw), data_offset=0, raw=raw)
-        elif model_type == "mistral" and target.endswith(("attn_q.weight", "attn_k.weight")):
-            heads = int(dims["kv_heads"] if target.endswith("attn_k.weight") else dims["heads"])
-            values = np.frombuffer(_to_f32(store.read(tensor), tensor.dtype), dtype="<f4")
+            tensor = replace(
+                tensor, dtype="F32", start=0, end=len(raw), data_offset=0, raw=raw
+            )
+        elif model_type == "mistral" and target.endswith(
+            ("attn_q.weight", "attn_k.weight")
+        ):
+            heads = int(
+                dims["kv_heads"] if target.endswith("attn_k.weight") else dims["heads"]
+            )
+            values = np.frombuffer(
+                _to_f32(store.read(tensor), tensor.dtype), dtype="<f4"
+            )
             # HF splits each RoPE head in halves; GGUF llama interleaves its pairs.
-            raw = values.reshape(heads, 2, -1, tensor.shape[1]).swapaxes(1, 2).reshape(tensor.shape).tobytes()
-            tensor = replace(tensor, dtype="F32", start=0, end=len(raw), data_offset=0, raw=raw)
+            raw = (
+                values.reshape(heads, 2, -1, tensor.shape[1])
+                .swapaxes(1, 2)
+                .reshape(tensor.shape)
+                .tobytes()
+            )
+            tensor = replace(
+                tensor, dtype="F32", start=0, end=len(raw), data_offset=0, raw=raw
+            )
         quant_tensor = quant == "Q8_0" and (
             (quantize_embeddings and target == "token_embd.weight")
-            or (target.startswith("blk.") and target.endswith(".weight")
-                and "norm" not in target)
+            or (
+                target.startswith("blk.")
+                and target.endswith(".weight")
+                and "norm" not in target
+            )
             or target == "output.weight"
         )
         tensor_quant = "Q8_0" if quant_tensor else "F32"
@@ -1016,17 +1198,27 @@ def _add_mapped_tensors(
             ggml_type,
             gguf_dims(tensor.shape),
             nbytes,
-            lambda tensor=tensor, tensor_quant=tensor_quant: _chunks(store, tensor, tensor_quant),
+            lambda tensor=tensor, tensor_quant=tensor_quant: _chunks(
+                store, tensor, tensor_quant
+            ),
         )
 
 
-def _convert_decoder(model_dir: Path, output: Path, config: dict, quant: str) -> None:
+def _decoder_writer(
+    model_dir: Path,
+    output: Path,
+    config: dict,
+    quant: str,
+    store: TensorStore,
+    *,
+    architecture: str | None = None,
+) -> GgufWriter:
     model_type = str(config.get("model_type"))
     dims = _decoder_arch_metadata(config, model_type)
     layers = int(dims["layers"])
     vocab = int(dims["vocab"])
     spec = _read_tokens(model_dir, model_type)
-    if len(spec.tokens) < vocab and spec.kind == "gpt2":
+    if len(spec.tokens) < vocab:
         # Qwen3 reserves a tail of embedding rows that is intentionally absent
         # from tokenizer.json. Keep the ids addressable in GGUF while leaving
         # them unused by normal text tokenization.
@@ -1036,12 +1228,15 @@ def _convert_decoder(model_dir: Path, output: Path, config: dict, quant: str) ->
         if spec.token_types is not None:
             spec.token_types.extend([5] * (vocab - start))
     if len(spec.tokens) != vocab:
-        raise ValueError(f"tokenizer vocabulary {len(spec.tokens)} != config vocab_size {vocab}")
+        raise ValueError(
+            f"tokenizer vocabulary {len(spec.tokens)} != config vocab_size {vocab}"
+        )
     special_ids = _special_token_ids(spec.tokens, spec.special_names)
-    store = TensorStore(model_dir)
     mapping = _decoder_mapping(model_type, layers)
     if "embed_tokens.weight" in store:
-        mapping = {target: name.removeprefix("model.") for target, name in mapping.items()}
+        mapping = {
+            target: name.removeprefix("model.") for target, name in mapping.items()
+        }
     # A tied embedding is sufficient for embedding extraction; an LM head is
     # accepted when present but never required by the embedding entry point.
     lm_head = "lm_head.weight"
@@ -1050,10 +1245,14 @@ def _convert_decoder(model_dir: Path, output: Path, config: dict, quant: str) ->
     required = set(mapping.values())
     missing = sorted(required - store.names())
     if missing:
-        raise ValueError(f"checkpoint is missing required decoder tensors: {missing[:5]}")
+        raise ValueError(
+            f"checkpoint is missing required decoder tensors: {missing[:5]}"
+        )
     allowed = required | {
-        name for name in store.names()
-        if name.endswith(".rotary_emb.inv_freq") or name.endswith(".rotary_emb.cos_cached")
+        name
+        for name in store.names()
+        if name.endswith(".rotary_emb.inv_freq")
+        or name.endswith(".rotary_emb.cos_cached")
     }
     # Gemma2 GGUF always ties its output to token_embd; an independent LM
     # head would be an unused tensor rejected by llama.cpp's loader.
@@ -1061,28 +1260,41 @@ def _convert_decoder(model_dir: Path, output: Path, config: dict, quant: str) ->
         allowed.add(lm_head)
     unexpected = sorted(store.names() - allowed)
     if unexpected:
-        raise ValueError(f"unsupported BGE decoder tensors would be dropped: {unexpected[:5]}")
+        raise ValueError(
+            f"unsupported BGE decoder tensors would be dropped: {unexpected[:5]}"
+        )
 
     hidden, ff, head_dim = (int(dims[key]) for key in ("hidden", "ff", "head_dim"))
     query, kv = int(dims["heads"]) * head_dim, int(dims["kv_heads"]) * head_dim
     shapes = {
-        "token_embd.weight": (vocab, hidden), "output.weight": (vocab, hidden),
-        "output_norm.weight": (hidden,), "attn_norm.weight": (hidden,),
-        "post_attention_norm.weight": (hidden,), "ffn_norm.weight": (hidden,),
+        "token_embd.weight": (vocab, hidden),
+        "output.weight": (vocab, hidden),
+        "output_norm.weight": (hidden,),
+        "attn_norm.weight": (hidden,),
+        "post_attention_norm.weight": (hidden,),
+        "ffn_norm.weight": (hidden,),
         "post_ffw_norm.weight": (hidden,),
-        "attn_q.weight": (query, hidden), "attn_k.weight": (kv, hidden),
-        "attn_v.weight": (kv, hidden), "attn_output.weight": (hidden, query),
-        "attn_q.bias": (query,), "attn_k.bias": (kv,), "attn_v.bias": (kv,),
-        "ffn_gate.weight": (ff, hidden), "ffn_up.weight": (ff, hidden),
+        "attn_q.weight": (query, hidden),
+        "attn_k.weight": (kv, hidden),
+        "attn_v.weight": (kv, hidden),
+        "attn_output.weight": (hidden, query),
+        "attn_q.bias": (query,),
+        "attn_k.bias": (kv,),
+        "attn_v.bias": (kv,),
+        "ffn_gate.weight": (ff, hidden),
+        "ffn_up.weight": (ff, hidden),
         "ffn_down.weight": (hidden, ff),
-        "attn_q_norm.weight": (head_dim,), "attn_k_norm.weight": (head_dim,),
+        "attn_q_norm.weight": (head_dim,),
+        "attn_k_norm.weight": (head_dim,),
     }
     for target, name in mapping.items():
         expected = shapes[".".join(target.split(".")[-2:])]
         if store[name].shape != expected:
-            raise ValueError(f"{name}: shape {store[name].shape} != expected {expected}")
+            raise ValueError(
+                f"{name}: shape {store[name].shape} != expected {expected}"
+            )
 
-    arch = "llama" if model_type == "mistral" else model_type
+    arch = architecture or ("llama" if model_type == "mistral" else model_type)
     writer = GgufWriter(output.with_suffix(output.suffix + ".tmp"))
     _add_meta(writer, "general.architecture", arch)
     _add_meta(writer, "general.name", model_dir.name)
@@ -1105,18 +1317,38 @@ def _convert_decoder(model_dir: Path, output: Path, config: dict, quant: str) ->
     _add_meta(writer, f"{arch}.attention.value_length", int(dims["head_dim"]))
     if model_type == "gemma2":
         _add_meta(writer, "gemma2.embedding_scale", math.sqrt(hidden))
-        _add_meta(writer, "gemma2.attention.scale", 1.0 / math.sqrt(config.get("query_pre_attn_scalar", head_dim)))
-        _add_meta(writer, "gemma2.attention.sliding_window_pattern", MetaArray(7, tuple(layer % 2 == 0 for layer in range(layers))))
-        _add_meta(writer, "gemma2.attn_logit_softcapping", float(config.get("attn_logit_softcapping", 50.0)))
-        _add_meta(writer, "gemma2.final_logit_softcapping", float(config.get("final_logit_softcapping", 30.0)))
-        _add_meta(writer, "gemma2.attention.sliding_window", int(config.get("sliding_window", 4096)))
+        _add_meta(
+            writer,
+            "gemma2.attention.scale",
+            1.0 / math.sqrt(config.get("query_pre_attn_scalar", head_dim)),
+        )
+        _add_meta(
+            writer,
+            "gemma2.attention.sliding_window_pattern",
+            MetaArray(7, tuple(layer % 2 == 0 for layer in range(layers))),
+        )
+        _add_meta(
+            writer,
+            "gemma2.attn_logit_softcapping",
+            float(config.get("attn_logit_softcapping", 50.0)),
+        )
+        _add_meta(
+            writer,
+            "gemma2.final_logit_softcapping",
+            float(config.get("final_logit_softcapping", 30.0)),
+        )
+        _add_meta(
+            writer,
+            "gemma2.attention.sliding_window",
+            int(config.get("sliding_window", 4096)),
+        )
     elif model_type == "mistral" and config.get("sliding_window"):
-        _add_meta(writer, "llama.attention.sliding_window", int(config["sliding_window"]))
+        _add_meta(
+            writer, "llama.attention.sliding_window", int(config["sliding_window"])
+        )
     _write_tokenizer_metadata(writer, spec, special_ids, vocab)
     _add_mapped_tensors(writer, store, mapping, quant, model_type, dims)
-    writer.write()
-    writer.path.replace(output)
-    print(output)
+    return writer
 
 
 def convert(model_dir: Path, output: Path, quant: str = "F32") -> None:
@@ -1125,13 +1357,29 @@ def convert(model_dir: Path, output: Path, quant: str = "F32") -> None:
     if quant not in {"F32", "Q8_0"}:
         raise ValueError(f"unsupported quantization {quant!r}")
     config = _load_json(model_dir, "config.json")
-    if config.get("model_type") in {"mistral", "qwen2", "qwen3", "gemma2"}:
-        _convert_decoder(model_dir, output, config, quant)
-        return
-    model_type, hidden, layers, heads, ff, vocab, context, type_vocab_size = _validate_config(config)
+    store = TensorStore(model_dir)
+    build = (
+        _decoder_writer
+        if config.get("model_type") in {"mistral", "qwen2", "qwen3", "gemma2"}
+        else _encoder_writer
+    )
+    writer = build(model_dir, output, config, quant, store)
+    writer.write()
+    writer.path.replace(output)
+    print(output)
+
+
+def _encoder_writer(
+    model_dir: Path, output: Path, config: dict, quant: str, store: TensorStore
+) -> GgufWriter:
+    model_type, hidden, layers, heads, ff, vocab, context, type_vocab_size = (
+        _validate_config(config)
+    )
     spec = _read_tokens(model_dir, model_type)
     if len(spec.tokens) != vocab:
-        raise ValueError(f"tokenizer vocabulary {len(spec.tokens)} != config vocab_size {vocab}")
+        raise ValueError(
+            f"tokenizer vocabulary {len(spec.tokens)} != config vocab_size {vocab}"
+        )
     special_ids = _special_token_ids(spec.tokens, spec.special_names)
     if spec.kind == "bert":
         required = {"unk": 100, "cls": 101, "sep": 102, "pad": 0}
@@ -1139,7 +1387,6 @@ def convert(model_dir: Path, output: Path, quant: str = "F32") -> None:
             if special_ids.get(name, index) != index:
                 raise ValueError(f"BERT special token {name} must be id {index}")
 
-    store = TensorStore(model_dir)
     mapping = _source_names(model_type, layers, type_vocab_size)
     source_required = set(mapping.values())
     missing = sorted(source_required - store.names())
@@ -1153,22 +1400,37 @@ def convert(model_dir: Path, output: Path, quant: str = "F32") -> None:
         "token_embd.weight": (vocab, hidden),
         "position_embd.weight": (context, hidden),
         "token_types.weight": (type_vocab_size, hidden),
-        "token_embd_norm.weight": (hidden,), "token_embd_norm.bias": (hidden,),
-        "attn_q.weight": (hidden, hidden), "attn_q.bias": (hidden,),
-        "attn_k.weight": (hidden, hidden), "attn_k.bias": (hidden,),
-        "attn_v.weight": (hidden, hidden), "attn_v.bias": (hidden,),
-        "attn_output.weight": (hidden, hidden), "attn_output.bias": (hidden,),
-        "attn_output_norm.weight": (hidden,), "attn_output_norm.bias": (hidden,),
-        "ffn_up.weight": (ff, hidden), "ffn_up.bias": (ff,),
-        "ffn_down.weight": (hidden, ff), "ffn_down.bias": (hidden,),
-        "layer_output_norm.weight": (hidden,), "layer_output_norm.bias": (hidden,),
+        "token_embd_norm.weight": (hidden,),
+        "token_embd_norm.bias": (hidden,),
+        "attn_q.weight": (hidden, hidden),
+        "attn_q.bias": (hidden,),
+        "attn_k.weight": (hidden, hidden),
+        "attn_k.bias": (hidden,),
+        "attn_v.weight": (hidden, hidden),
+        "attn_v.bias": (hidden,),
+        "attn_output.weight": (hidden, hidden),
+        "attn_output.bias": (hidden,),
+        "attn_output_norm.weight": (hidden,),
+        "attn_output_norm.bias": (hidden,),
+        "ffn_up.weight": (ff, hidden),
+        "ffn_up.bias": (ff,),
+        "ffn_down.weight": (hidden, ff),
+        "ffn_down.bias": (hidden,),
+        "layer_output_norm.weight": (hidden,),
+        "layer_output_norm.bias": (hidden,),
     }
     for target, name in mapping.items():
         expected = shapes[".".join(target.split(".")[-2:])]
-        if target == "token_types.weight" and type_vocab_size == 1 and store[name].shape == (hidden,):
+        if (
+            target == "token_types.weight"
+            and type_vocab_size == 1
+            and store[name].shape == (hidden,)
+        ):
             continue
         if store[name].shape != expected:
-            raise ValueError(f"{name}: shape {store[name].shape} != expected {expected}")
+            raise ValueError(
+                f"{name}: shape {store[name].shape} != expected {expected}"
+            )
 
     position_offset = 0
     if model_type == "xlm-roberta":
@@ -1178,7 +1440,9 @@ def convert(model_dir: Path, output: Path, quant: str = "F32") -> None:
         # larger than the learned table actually supports.
         pad_token_id = config.get("pad_token_id")
         if not isinstance(pad_token_id, int) or pad_token_id < 0:
-            raise ValueError(f"XLM-R config must define a non-negative pad_token_id, got {pad_token_id!r}")
+            raise ValueError(
+                f"XLM-R config must define a non-negative pad_token_id, got {pad_token_id!r}"
+            )
         position_offset = 1 + pad_token_id
         position = store[mapping["position_embd.weight"]]
         if len(position.shape) != 2 or position.shape[1] != hidden:
@@ -1193,14 +1457,17 @@ def convert(model_dir: Path, output: Path, quant: str = "F32") -> None:
             )
         context -= position_offset
         if context <= 0:
-            raise ValueError(f"XLM-R position offset {position_offset} leaves no usable context")
+            raise ValueError(
+                f"XLM-R position offset {position_offset} leaves no usable context"
+            )
 
     writer = GgufWriter(output.with_suffix(output.suffix + ".tmp"))
     _add_meta(writer, "general.architecture", "bert")
     _add_meta(writer, "general.name", model_dir.name)
     _add_meta(writer, "general.file_type", 0 if quant == "F32" else 7)
     _add_meta(writer, "general.quantization_version", 2)
-    _add_meta(writer,
+    _add_meta(
+        writer,
         "general.source_sha256",
         _source_sha256(store),
     )
@@ -1209,18 +1476,30 @@ def convert(model_dir: Path, output: Path, quant: str = "F32") -> None:
     _add_meta(writer, "bert.embedding_length", hidden)
     _add_meta(writer, "bert.feed_forward_length", ff)
     _add_meta(writer, "bert.attention.head_count", heads)
-    _add_meta(writer, "bert.attention.layer_norm_epsilon", float(config.get("layer_norm_eps", 1e-12)))
+    _add_meta(
+        writer,
+        "bert.attention.layer_norm_epsilon",
+        float(config.get("layer_norm_eps", 1e-12)),
+    )
     _add_meta(writer, "bert.attention.causal", False)
     _add_meta(writer, "bert.pooling_type", 2)
     _add_meta(writer, "bert.vocab_size", vocab)
 
-    _write_tokenizer_metadata(writer, spec, special_ids, vocab, type_vocab_count=type_vocab_size)
+    _write_tokenizer_metadata(
+        writer, spec, special_ids, vocab, type_vocab_count=type_vocab_size
+    )
     if spec.kind == "bert":
-        tokenizer_config = _load_json(model_dir, "tokenizer_config.json", required=False) or {}
+        tokenizer_config = (
+            _load_json(model_dir, "tokenizer_config.json", required=False) or {}
+        )
         lowercase = bool(tokenizer_config.get("do_lower_case", True))
         strip_accents = tokenizer_config.get("strip_accents")
-        _add_meta(writer, "tokenizer.ggml.normalizer_lowercase", lowercase)
-        _add_meta(writer, "tokenizer.ggml.normalizer_strip_accents", lowercase if strip_accents is None else bool(strip_accents))
+        _add_meta(writer, "tokenizer.ggml.normalizer.lowercase", lowercase)
+        _add_meta(
+            writer,
+            "tokenizer.ggml.normalizer.strip_accents",
+            lowercase if strip_accents is None else bool(strip_accents),
+        )
     # `_write_tokenizer_metadata` already emitted the XLM-R UGM charsmap and
     # score arrays above; no model-specific tokenizer fields remain here.
 
@@ -1233,8 +1512,11 @@ def convert(model_dir: Path, output: Path, quant: str = "F32") -> None:
         # [out, in] order; GGUF's reversed dimensions preserve the bytes.
         quant_tensor = quant == "Q8_0" and (
             target == "token_embd.weight"
-            or (target.startswith("blk.") and target.endswith(".weight")
-                and not target.endswith("_norm.weight"))
+            or (
+                target.startswith("blk.")
+                and target.endswith(".weight")
+                and not target.endswith("_norm.weight")
+            )
         )
         tensor_quant = "Q8_0" if quant_tensor else "F32"
         ggml_type = GGML_Q8_0 if quant_tensor else GGML_F32
@@ -1247,12 +1529,12 @@ def convert(model_dir: Path, output: Path, quant: str = "F32") -> None:
             ggml_type,
             gguf_dims(shape),
             nbytes,
-            lambda tensor=tensor, tensor_quant=tensor_quant: _chunks(store, tensor, tensor_quant),
+            lambda tensor=tensor, tensor_quant=tensor_quant: _chunks(
+                store, tensor, tensor_quant
+            ),
         )
 
-    writer.write()
-    writer.path.replace(output)
-    print(output)
+    return writer
 
 
 def main() -> None:

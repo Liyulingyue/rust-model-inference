@@ -1,5 +1,6 @@
 pub mod audio8;
 pub mod bert_family;
+pub mod bge_vl;
 pub mod bitnet;
 pub mod breeze;
 /// Renamed to [`crate::prompt::legacy`].

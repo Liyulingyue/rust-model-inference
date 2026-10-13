@@ -89,6 +89,9 @@ pub fn compute_embedding(
     prompt: &str,
     n_threads_arg: usize,
 ) -> Result<Vec<f32>, String> {
+    if crate::models::bge_vl::is_visual(source) {
+        return crate::models::bge_vl::compute_embedding(source, prompt, None, n_threads_arg);
+    }
     if crate::models::bitnet::detect_is_bitnet(source) {
         return crate::models::bitnet::compute_embedding(source, prompt, n_threads_arg);
     }
@@ -132,6 +135,15 @@ pub fn run_embedding(
     kv_format: KvFormat,
     output: EmbeddingOutput,
 ) {
+    if crate::models::bge_vl::is_visual(source) {
+        compute_embedding(source, prompt, n_threads_arg)
+            .map(|values| crate::models::bert_family::print_embedding(&values, output))
+            .unwrap_or_else(|error| {
+                eprintln!("{error}");
+                std::process::exit(1);
+            });
+        return;
+    }
     let arch = arch_of(source);
     match arch.as_str() {
         "gemma-embedding" => crate::models::gemma_embedding::run_embedding(

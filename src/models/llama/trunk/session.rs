@@ -1033,6 +1033,44 @@ impl<'a> LlamaSession<'a> {
     /// This is a straight extraction of the inner body of the
     /// original `for step in 0..prompt_tokens.len()` loop.
     fn forward_one_token(&mut self, token_id: u32) -> Result<(), String> {
+        self.forward_input(token_id, None, None, true)
+    }
+
+    pub(crate) fn forward_embedding(&mut self, embedding: &[f32]) -> Result<(), String> {
+        if embedding.len() != self.config.n_embd || embedding.iter().any(|v| !v.is_finite()) {
+            return Err("invalid decoder input embedding".into());
+        }
+        self.forward_input(0, Some(embedding), None, false)
+    }
+
+    pub(crate) fn forward_embedding_mrope(
+        &mut self,
+        embedding: &[f32],
+        positions: [usize; 4],
+        sections: [i32; 4],
+    ) -> Result<(), String> {
+        if self.arch != "qwen2vl"
+            || embedding.len() != self.config.n_embd
+            || embedding.iter().any(|v| !v.is_finite())
+            || sections.iter().any(|s| *s < 0)
+            || sections.iter().map(|s| *s as usize).sum::<usize>() != self.config.n_embd_head_k / 2
+        {
+            return Err("invalid Qwen2-VL embedding/M-RoPE input".into());
+        }
+        self.forward_input(0, Some(embedding), Some((positions, sections)), false)
+    }
+
+    fn forward_input(
+        &mut self,
+        token_id: u32,
+        embedding: Option<&[f32]>,
+        mrope: Option<([usize; 4], [i32; 4])>,
+        project_logits: bool,
+    ) -> Result<(), String> {
+        if self.seq_len >= self.config.max_ctx {
+            return Err("decoder input exceeds context length".into());
+        }
+
         let cfg = &self.config;
         let pos = self.seq_len;
         let scratch = &mut self.scratch;
@@ -1066,13 +1104,17 @@ impl<'a> LlamaSession<'a> {
         let sliding_window_global = self.sliding_window;
         let sw_pattern = self.sliding_window_pattern.clone();
 
-        embedding_lookup(
-            weights.embd_weight,
-            token_id,
-            n_embd,
-            weights.embd_type,
-            &mut scratch.x,
-        );
+        if let Some(embedding) = embedding {
+            scratch.x[..n_embd].copy_from_slice(embedding);
+        } else {
+            embedding_lookup(
+                weights.embd_weight,
+                token_id,
+                n_embd,
+                weights.embd_type,
+                &mut scratch.x,
+            );
+        }
         if embedding_scale != 0.0 {
             vec_scale_f32(&mut scratch.x, embedding_scale);
         }
@@ -1207,29 +1249,34 @@ impl<'a> LlamaSession<'a> {
             // `rope_dim` elements of the buffer (head 0's lanes) and skip every
             // other head — which is what caused Phi-4's session path to diverge
             // from the CLI path (top token was EOS instead of "2").
-            for h in 0..cfg.n_head {
-                apply_rope(
-                    arch_for_rope,
-                    &mut q[h * n_embd_head_k..(h + 1) * n_embd_head_k],
-                    pos,
-                    n_embd_head_k,
-                    freq_base,
-                    cfg.rope_dim,
-                    cfg.attn_factor,
-                    cfg.yarn_thetas.as_deref(),
-                );
-            }
-            for h in 0..cfg.n_head_kv {
-                apply_rope(
-                    arch_for_rope,
-                    &mut k_new[h * n_embd_head_k..(h + 1) * n_embd_head_k],
-                    pos,
-                    n_embd_head_k,
-                    freq_base,
-                    cfg.rope_dim,
-                    cfg.attn_factor,
-                    cfg.yarn_thetas.as_deref(),
-                );
+            if let Some((positions, sections)) = mrope {
+                crate::ops::rope_mrope(q, positions, sections, n_embd_head_k, freq_base);
+                crate::ops::rope_mrope(k_new, positions, sections, n_embd_head_k, freq_base);
+            } else {
+                for h in 0..cfg.n_head {
+                    apply_rope(
+                        arch_for_rope,
+                        &mut q[h * n_embd_head_k..(h + 1) * n_embd_head_k],
+                        pos,
+                        n_embd_head_k,
+                        freq_base,
+                        cfg.rope_dim,
+                        cfg.attn_factor,
+                        cfg.yarn_thetas.as_deref(),
+                    );
+                }
+                for h in 0..cfg.n_head_kv {
+                    apply_rope(
+                        arch_for_rope,
+                        &mut k_new[h * n_embd_head_k..(h + 1) * n_embd_head_k],
+                        pos,
+                        n_embd_head_k,
+                        freq_base,
+                        cfg.rope_dim,
+                        cfg.attn_factor,
+                        cfg.yarn_thetas.as_deref(),
+                    );
+                }
             }
 
             // KV cache append — same as legacy.
@@ -1638,56 +1685,57 @@ impl<'a> LlamaSession<'a> {
         let scale_buf = &mut scratch.scale_buf;
         let q8k_buf = &mut scratch.q8k_buf;
         rms_norm_grouped(x, &weights.output_norm, normed, norm_groups, eps);
-        quantize_q8_0_into(
-            normed,
-            n_embd,
-            &mut q8_buf[..n_embd],
-            &mut scale_buf[..n_embd / 32],
-        );
-        crate::ops::quantize_row_q8_k_into(normed, &mut q8k_buf[..n_embd / 256]);
-        let input = normed.as_ptr();
-        let output_weight = weights.output_weight;
-        let output_type = weights.output_type;
-        let output_pw = Weight::from_quantized(QuantizedTensor::from_bytes(
-            output_weight,
-            output_type,
-            n_embd,
-            vocab,
-        ));
-        let q8_ptr_out = q8_buf.as_ptr();
-        let sc_ptr_out = scale_buf.as_ptr();
-        let q8k_ptr_out = q8k_buf.as_ptr();
-        pool.compute(move |ith, nth| {
-            let input = unsafe { std::slice::from_raw_parts(input, n_embd) };
-            let q8 = unsafe { std::slice::from_raw_parts(q8_ptr_out, n_embd) };
-            let sc = unsafe { std::slice::from_raw_parts(sc_ptr_out, n_embd / 32) };
-            let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr_out, n_embd / 256) };
-            let logits = unsafe { std::slice::from_raw_parts_mut(logits_ptr, vocab) };
-            output_pw.kernel.forward_prepared(
-                input,
-                q8,
-                sc,
-                Some(q8k),
-                logits,
+        if project_logits {
+            quantize_q8_0_into(
+                normed,
+                n_embd,
+                &mut q8_buf[..n_embd],
+                &mut scale_buf[..n_embd / 32],
+            );
+            crate::ops::quantize_row_q8_k_into(normed, &mut q8k_buf[..n_embd / 256]);
+            let input = normed.as_ptr();
+            let output_weight = weights.output_weight;
+            let output_type = weights.output_type;
+            let output_pw = Weight::from_quantized(QuantizedTensor::from_bytes(
+                output_weight,
+                output_type,
                 n_embd,
                 vocab,
-                ith,
-                nth,
-            );
-        });
-        if logit_scale != 0.0 {
-            let logits = unsafe { std::slice::from_raw_parts_mut(logits_ptr, vocab) };
-            vec_scale_f32(logits, logit_scale);
+            ));
+            let q8_ptr_out = q8_buf.as_ptr();
+            let sc_ptr_out = scale_buf.as_ptr();
+            let q8k_ptr_out = q8k_buf.as_ptr();
+            pool.compute(move |ith, nth| {
+                let input = unsafe { std::slice::from_raw_parts(input, n_embd) };
+                let q8 = unsafe { std::slice::from_raw_parts(q8_ptr_out, n_embd) };
+                let sc = unsafe { std::slice::from_raw_parts(sc_ptr_out, n_embd / 32) };
+                let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr_out, n_embd / 256) };
+                let logits = unsafe { std::slice::from_raw_parts_mut(logits_ptr, vocab) };
+                output_pw.kernel.forward_prepared(
+                    input,
+                    q8,
+                    sc,
+                    Some(q8k),
+                    logits,
+                    n_embd,
+                    vocab,
+                    ith,
+                    nth,
+                );
+            });
+            if logit_scale != 0.0 {
+                let logits = unsafe { std::slice::from_raw_parts_mut(logits_ptr, vocab) };
+                vec_scale_f32(logits, logit_scale);
+            }
+            // Gemma-2 final logit softcap. Applied after `logit_scale`
+            // so the two are independent. `softcap_inplace` no-ops when
+            // `cap == 0`; every non-gemma2 llama arch keeps the
+            // pre-gemma2 logits byte-identical.
+            if final_logit_softcap > 0.0 {
+                let logits = unsafe { std::slice::from_raw_parts_mut(logits_ptr, vocab) };
+                softcap_inplace(logits, final_logit_softcap);
+            }
         }
-        // Gemma-2 final logit softcap. Applied after `logit_scale`
-        // so the two are independent. `softcap_inplace` no-ops when
-        // `cap == 0`; every non-gemma2 llama arch keeps the
-        // pre-gemma2 logits byte-identical.
-        if final_logit_softcap > 0.0 {
-            let logits = unsafe { std::slice::from_raw_parts_mut(logits_ptr, vocab) };
-            softcap_inplace(logits, final_logit_softcap);
-        }
-
         self.seq_len = pos + 1;
         Ok(())
     }

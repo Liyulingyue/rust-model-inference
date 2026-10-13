@@ -38,4 +38,7 @@
 pub mod compute;
 pub mod weights;
 
-pub use compute::{compute_embedding, compute_rerank_score, print_embedding, run_embedding};
+pub use compute::{
+    compute_embedding, compute_rerank_score, encode_embedding_input, print_embedding,
+    run_embedding, run_embedding_tokens_with_image,
+};

@@ -202,13 +202,6 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
             return Err("--embedding accepts only one of --image, --video, or --audio".into());
         }
         if media_count == 1 {
-            if options
-                .mmproj
-                .as_deref()
-                .is_none_or(|path| path.as_os_str().is_empty())
-            {
-                return Err("media embedding requires --mmproj".into());
-            }
             return Ok(());
         }
     }
