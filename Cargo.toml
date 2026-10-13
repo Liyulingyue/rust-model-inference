@@ -8,6 +8,10 @@ license = "MIT"
 [features]
 default = []
 parity-trace = []
+# Reproduce ggml's f16-accumulating NEON dot bit for bit instead of
+# accumulating in f32. Off by default: see TODO-025. The f16 *storage* is
+# unaffected either way -- this only picks the accumulator width.
+ggml-f16-dot-parity = []
 vulkan = ["dep:ash", "dep:raw-window-handle"]
 wgpu = ["dep:wgpu"]
 
