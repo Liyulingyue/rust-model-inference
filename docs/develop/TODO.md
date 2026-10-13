@@ -2075,3 +2075,75 @@ rms_norm_grouped(
 本条的「省掉 logits 投影」和它是同一个方向的两端：一个是**别做多余的计算**，
 一个是**把要做的算快**。对 BGE 这类 embedding 负载，前者的收益可能更直接——
 vocab 投影通常比 decoder 层本身更贵。
+
+### TODO-030: Visualized BGE 的 embedding 构造复制了 `populate_embeddings`，且 CLS 位置是隐含假设
+
+`bafc23c` 给 `bert_family` 加了视觉分支（`run_embedding_tokens_with_image`）。
+核心重构是**对的**：`ec62356` 把 embedding LayerNorm 从 `populate_embeddings`
+搬到 `forward_bert_layers` 开头，因为视觉路径要自己构造 `hidden`，而 LayerNorm 是
+两条路共用的。搬完之后 text 与 visual 共享同一份 LayerNorm，并保留了
+`bert.cpp:92` 的溯源。同一个提交里 `n_ctx_train` 的长度检查从 `token_ids.len()`
+改成含图像行的 `n_tokens`，也是必要修正 —— 原来只查文本 token 数，加了图像会漏检。
+
+以下两点是维护隐患，不影响当前正确性。
+
+#### 问题 1：embedding 构造有两份实现
+
+`populate_embeddings`（text）与 visual 分支的内联代码，各自实现了一遍
+「token embedding + segment + position」：
+
+```rust
+// visual 分支内联手写
+embedding_lookup(weights.token_embd, *id, h, weights.token_embd_ggml_type, row);
+for j in 0..h {
+    row[j] += segment.as_ref().map(|s| s[j]).unwrap_or(0.0);
+    row[j] += position[t * h + j];
+}
+```
+
+风险不在于现在会算错，而在于**改了一处另一处不会跟着变，而且不会有编译错误**。
+不同 BGE 变体的 position/segment 规则未必相同（图像 token 是否加 segment、
+segment 是否只加给文本），这类差异正是最容易只改一边的。
+
+**建议**：抽出一个共用 helper，visual 只额外传「哪些行是图像」：
+
+```rust
+fn populate_embeddings_with_overrides(
+    cfg: &BertConfig,
+    weights: &BertWeights<'_>,
+    token_ids: &[u32],
+    image: Option<&[f32]>,
+    image_rows: usize,
+    hidden: &mut [f32],
+) -> Result<(), String>
+```
+
+#### 问题 2：token 位置映射依赖未被断言的 CLS 假设
+
+```rust
+for (i, id) in token_ids.iter().enumerate() {
+    let t = if i == 0 { 0 } else { i + image_rows };
+    ...
+}
+```
+
+`i == 0` 的特殊处理隐含假设 **token 0 永远是 CLS**，但代码里没有任何地方检查。
+布局本身自洽（图像占 `1..=image_rows`，文本从 `image_rows + 1` 起），可一旦某个
+tokenizer 不加 CLS、或加了别的 prefix token，映射就会静默错位 —— 不报错，
+embedding 全错，且这类错误通常要到检索结果变差时才被发现。
+
+**建议**：显式校验 token 数与图像行数的对应关系，并把「token 0 是 CLS」写成
+一条可读的断言或注释约定，而不是只靠 `if i == 0` 这个分支表达。
+
+#### 一个正面观察
+
+`position` 表的校验写得很严，值得保留：
+
+```rust
+if info.dims.len() != 2 || info.dims[0] != h as u64 || info.dims[1] < n_tokens as u64 {
+    return Err("invalid Visualized BGE position table".into());
+}
+```
+
+dims 数量、宽度、以及**行数是否覆盖 `n_tokens`** 三者都查了 —— 这正是
+「不查就会静默越界」的地方。
