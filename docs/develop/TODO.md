@@ -1784,3 +1784,54 @@ CPU 侧少了一个 f16 累加的误差源，自然更靠近 GPU。
   这些是 `dot_f16` 的真实调用方，其中 ASR 的 mel encoder 可能落在算力敏感区，
   4 倍差距是否可接受需要实测决定。
 - FMLAL 档的装载指令数是否为瓶颈（见上）。
+
+### TODO-026: 测试套件在满负载下有 flaky，且 CI 根本不跑测试
+
+#### 现象
+
+同一个未改动的提交，重复跑全量 `cargo test --lib --features vulkan`，失败集合会变。
+2026-10-13 在 `ZImage3`（`8297e19`）上实测三次：
+
+| 轮次 | 相对首次基线多出的失败 |
+|---|---|
+| 1 | 无 |
+| 2 | `models::dots::vocoder::q8_convolution_matches_scalar_layout_bias_stride_dilation_and_batch_tail` |
+| 3 | `models::qwen3::trunk::qwen3_cpu_prefill_matches_batch_one_at_chunk_boundaries` |
+
+两个测试**单独跑时 13/13 全过**（改动前后各 8 次与 5 次），只有全量并行时才偶发。
+已确认至少这两个，**完整 flaky 集合尚未枚举**。
+
+#### 为什么这条比看起来严重
+
+全量回归目前只能给出「与基线比对」这种相对结论，而这个基线本身在漂。于是：
+
+- 任何一次单轮全量回归的结论都不可靠 —— 改坏了分不清是真回归还是 flaky，没坏也可能是 flaky 抵消了真回归
+- 已经在实践中造成误判：本次差点把 `--features vulkan` 的结果（1220 passed / 39 failed）
+  去比**不带** vulkan 的基线（1137 / 29），把 10 个正常差异当成回归；之后又差点把
+  `qwen3_cpu_prefill` 的偶发失败归到自己的改动上，实际它在基线上同样会飘
+- 新增测试的通过率也不可信：`silu_probe_uses_the_production_ffn_width` 这类断言，
+  理论上「一次通过」不构成证据
+
+#### 为什么一直没被发现
+
+`.github/workflows/ci.yml` 只有两个 job：`fmt`（`cargo fmt --check`）和
+`vulkan`（shader 校验 + `cargo check` 若干 target）。**没有任何 job 跑测试。**
+所以这类问题只能靠本地人工回归撞上，而人工回归恰恰是最容易漏判的场景。
+
+#### 推测成因（未验证）
+
+两者都涉及线程池与分块边界：一个是 `ComputePool` 下的分块量化卷积，一个是
+chunk 边界的 prefill。满负载时线程调度/分块顺序变化可能触发只在特定顺序下
+才成立的假设。需要看代码确认，暂不下结论。
+
+#### 待办
+
+1. **枚举 flaky 集合**：对全量套件连续跑 N 轮（如 10），统计每个测试的失败频次，
+   产出「偶发失败」名单
+2. **定位根因**：逐个看名单上的测试是否依赖线程调度/分块顺序；能修则修
+3. **暂时隔离**：修不了的先用 `#[ignore]` 或加显式注释说明已知偶发，
+   并在名字/注释里写清触发条件，避免下一个人当回归查
+4. **CI 补测试 job**：`cargo test --lib`（带/不带 `--features vulkan` 各一），
+   失败重跑一次再判定——先把「有测试」这件事建立起来，重试策略随后再加
+5. **方法论固化**：在 `docs/develop/OPTIMIZATION.md` 或本文档里写明
+   **禁止用单轮全量回归做回归判定**，需要至少 3 轮且失败集合稳定才可下结论
