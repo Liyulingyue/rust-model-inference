@@ -75,7 +75,7 @@ void main() {
     precise float correction = 0.0;
     precise float accumulators[32];
     for (uint i = 0u; i < 32u; i++) accumulators[i] = 0.0;
-    uint width = pc.reduction_mode == 1u ? 32u : 8u;
+    uint width = pc.reduction_mode == 1u ? 32u : pc.reduction_mode == 2u ? 16u : 8u;
     for (uint token = 0u; token < visible; token++) {
         float score = round_f16_rte(uintBitsToFloat(
             arena.data[pc.scores_word + (row * pc.q_heads + head) * pc.sequence_length + token]
@@ -96,7 +96,8 @@ void main() {
     }
     if (pc.reduction_mode != 0u) {
         sum = pc.reduction_mode == 1u
-            ? reduce_half32(accumulators) : reduce_float8(accumulators);
+            ? reduce_half32(accumulators) : pc.reduction_mode == 2u
+            ? reduce_float16(accumulators) : reduce_float8(accumulators);
     }
     arena.data[pc.output_word + row * total + index] = floatBitsToUint(sum + correction);
 }

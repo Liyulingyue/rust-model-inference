@@ -51,8 +51,8 @@ void main() {
     for (uint i = 0u; i < 32u; i++) accumulators[i] = 0.0;
     bool online = (pc.reduction_mode & 256u) != 0u;
     uint mode = pc.reduction_mode & 255u;
-    uint width = mode == 1u ? 32u : mode == 4u ? 4u : 8u;
-    uint prefix = mode == 0u ? 0u : pc.head_dim / width * width;
+    uint width = mode == 1u ? 32u : mode == 2u ? 16u : mode == 4u ? 4u : 8u;
+    uint prefix = mode == 0u ? 0u : mode == 2u ? pc.head_dim / 32u * 32u : pc.head_dim / width * width;
     for (uint dimension = 0u; dimension < pc.head_dim; dimension++) {
         float query = uintBitsToFloat(arena.data[q_base + dimension]);
         if (!online) query = round_f16_rte(query);
@@ -65,6 +65,7 @@ void main() {
                 : fma(query, key, accumulators[lane]);
             if (dimension + 1u == prefix) {
                 sum = mode == 1u ? reduce_half32(accumulators)
+                    : mode == 2u ? reduce_float16(accumulators)
                     : mode == 4u ? (accumulators[0] + accumulators[1]) + (accumulators[2] + accumulators[3])
                     : reduce_float8(accumulators);
             }

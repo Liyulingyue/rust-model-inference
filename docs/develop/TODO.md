@@ -1606,5 +1606,342 @@ host 侧 3700 万次 exp」。denoise 52.7 s → 42.5 s，端到端 59.9 s → 4
 
 `FFN_BATCH_MAX=<n>` 可限制合批生效的层数（默认全部），用于二分定位。
 
-**遗留**：合批后与 CPU 基线 PSNR 31.52 dB（改动前 33.34 dB），差异来自 TODO-020
-风险 1 的 silu 饱和，尚未追平。
+**遗留**：合批后与 CPU 基线 PSNR 31.61 dB（改动前 33.34 dB），差异来自 TODO-020
+风险 1 的 silu 饱和。TODO-023 的 quantize reciprocal 修复已把该值从 31.52 拉回
+32.21 dB（mean|Δ| 3.44 → 3.01），剩余差距仍主要来自 silu 饱和边界。
+
+### TODO-022: Z-Image Q/K norm + 交错 RoPE 上设备 — ✅ 已合入
+
+`qk_norm_rope.comp` 是 **NeoX** 布局（`lane` 与 `lane + head_dim/2` 配对），DiT 的
+`rotate_interleaved_inplace` 是**交错**相邻对（`chunks_exact(2)`），两者索引不同，
+不能复用。新增 `shaders/glsl/qk_norm_rope_interleaved.comp`：norm 段逐行照抄
+NeoX 版（含保持 CPU 逐位一致的串行 Kahan 归约），只把旋转索引换成 `2*lane` / `2*lane+1`。
+
+管线索引 `QK_NORM_ROPE_INTERLEAVED = 28`，**追加**在数组末尾——`OPERATOR_SHADERS`
+每个位置都是硬编码常量，插入会静默改绑别人的 SPIR-V。
+
+**收益**：QKV 不再往返。`rope (host)` 893.8 ms → 0.3 ms，denoise 43.1 → 42.0 s。
+比先前「传输值 1.9–3.9 s」的估计低：177 MB 单向传输在这台机器上约 0.4 s。
+
+**风险 1（已修）：跨块行步长 ≠ 行内 span。**
+DiT 的 QKV 是**逐行交错** `[Q|K|V]`（`QKV_WIDTH`），而 Qwen3 是**分块** `[整块Q|整块K]`。
+照搬分块语义把 `q_heads*head_dim` 当成行跨度传进去，着色器按 `q_stride=3840` 寻址，
+而真实间距是 `QKV_WIDTH=11520`——于是**只有第 0 行落在正确位置**，其余行整体错位。
+因为行跨度整除缓冲长度，**不会越界报错**，只会静默写坏 K 和 V。
+修复：record 函数新增显式 `q_row_stride` / `k_row_stride` 参数。
+
+**风险 2（已修）：行内 Q→K 跨度。**
+Q 与 K 同属一个 region，仅靠 `k_word` 无法区分，K 每行基址还缺 `HIDDEN` 的偏移。
+修复：push constant 新增 `k_base`。
+
+两条都是自检抓到的，不是渲染对比发现的。**若只做「整图看起来一样」的核对，
+这两个 bug 都可能以「V 被污染但肉眼看不出」的形式溜过去。**
+
+`gpu_interleaved_qk_norm_rope_matches_the_host_chain` 钉住：
+生产规模（3840 token × 30 head × 128）下与 host 的 `rms_norm_inplace` +
+`rotate_interleaved_inplace` **逐位一致**，并额外断言 **V 与输入逐位相同**
+（V 未被触碰是 K 基址算错的唯一可观测信号）。
+
+### TODO-023: Vulkan Q8_0 量化倒数与 CPU 参考差 1 ulp — ✅ 已修复
+
+`vk_ops_check` 的 `check_quantize_tie_even` 一直失败：
+`mismatch at 0: gpu=-21 cpu=-20`。与 RoPE 那次不同，这次**不是新引入的**，
+自 2026-09-08 的 `621c622` 起就在失败。
+
+**根因**：倒数算的形式不同。
+
+| | scale | inverse |
+|---|---|---|
+| CPU (`quantize_q8_0_into`) | `amax / 127.0` | `1.0 / scale` |
+| GPU (`quantize_q8_0.comp`) | `divide(amax, 127.0)` | `divide(127.0, amax)` |
+
+两者数学上相等，但 `1/(amax/127)` 与 `127/amax` 差 1 ulp。对测试输入
+`0xbdbf0aec / 0x3f13f10a`，这个 ulp 让乘积从**恰好 -20.5** 变成 -20.500002——
+本来是个 tie，round-to-even 应给 -20（与 CPU 一致），现在不再是 tie，直接给 -21。
+
+**修复**：inverse 改为从已算出的 `scale` 出发，`divide_finite_normal(1.0, scale)`。
+`divide_finite_normal` 本身是精确舍入除法，与 CPU 的硬件除法一致。
+
+**代价为零**：两种写法都恰好做两次精确除法（算 scale 一次、算 inverse 一次），
+只是第二次除法的形式变了。
+
+**收益**：GPU 量化与 CPU 参考逐位一致，且**整体画质变好**——512×512 8 步同 seed
+对比 CPU 渲染，PSNR **31.61 → 32.21 dB**，mean|Δ| **3.44 → 3.01**（降 12%）。
+注意 GPU 修复前后两图之间 PSNR 只有 30.01 dB：扩散 8 步会把任何微小差异放大成
+完全不同的轨迹，**不能用「与上一版 GPU 比」判断好坏，只能对 CPU 参考比**。
+
+### TODO-024: attention 相关自检的容差是照 x86 标定的 — ✅ 由 TODO-025 一并解决
+
+**根因**：`cpu_attention_scores` / `cpu_attention_values` /
+`check_attention_scores_match_cpu_reduction` 拿 `dot_f16` 当 oracle，而
+
+| 架构 | `dot_f16` | 累加 |
+|---|---|---|
+| x86_64 | `_mm256_cvtph_ps` + `_mm256_fmadd_ps` | **f32** |
+| aarch64 | `fmla .8h` | **f16** |
+
+容差是照 **x86 的 f32 参考**标定的（`attention_scores` 用 3e-5），在 ARM 上参考自带
+`sqrt(head_dim) * eps_f16` 误差（head_dim=128 时约 5e-3），与实测 6.6e-3 吻合——
+**原理上过不了**。
+
+**解法不在放宽容差，在换 oracle**：统一改用 `reference_dot_f16`（f64 精确求和）。
+oracle 是精确算术后，容差自然回到 3e-5 并且真的成立。详见 TODO-025。
+
+**教训**：一个有损的参考值，会让「校验 GPU」这件事悄悄变成「比较两个有损实现」。
+前者能发现 bug，后者只能发现巧合——而且它同时把容差推大到连真正的 GPU 回归都测不出来。
+
+### TODO-025: `dot_f16` 在 aarch64 上用 f16 累加 — ✅ 已改，`ggml-f16-dot-parity` 保留旧行为
+
+新增 Cargo feature `ggml-f16-dot-parity`（默认关闭）：
+
+| | 累加 | 指令 | 吞吐(n=4096) | 相对误差 |
+|---|---|---|---|---|
+| 默认 | **f32** | `FMLAL` | 31 GFLOP/s | **8.5e-08** |
+| `--features ggml-f16-dot-parity` | f16 | `fmla .8h` | **122 GFLOP/s** | 2.3e-03 ~ 3.4e-03 |
+
+**吞吐代价实测约 4 倍**，这台机器的 FP16 单元确实比 f32 宽。所以这不是免费的
+正确性提升，而是一个需要按调用点分别权衡的取舍——feature 就是为此留的：
+校验/参考路径用默认档，吞吐敏感的推理路径可以显式打开旧行为。
+
+（测量用的是逐点测试，n=4096、2 万次迭代；FMLAL 档每 32 元素用 8 次 `.4h`
+装载而非 4 次 `.8h`，装载指令是 2 倍，因此其中一部分差距可能来自装载而非
+FMLAL 本身吞吐。）
+
+#### 「保留 16 精度」不等于「保留 16 位累加」
+
+现状把两件事捆在一起了，但它们可以分开：
+
+- **f16 存储**：模型格式与 ggml 对齐的要求，**任何配置下都不变**，带宽与显存
+  收益完全保留。
+- **f16 累加**：实现细节，**不是对齐要求**。决定性证据是 x86 路径
+  （`_mm256_cvtph_ps` + `_mm256_fmadd_ps`）**从来不**做 f16 累加。同一份 ggml
+  语义，两个架构行为不一致，说明这从来不是「对齐 ggml」，而是各自挑了个实现，
+  再被一个逐位测试冻住。把 `fmla .8h` 当作对齐的代价保留下来，等于主动接受一个
+  和 x86、和 GPU shader 都不一致的数值行为，只因为它先被写下来了。
+
+`FMLAL` 是 Armv8.2 里「f16 乘、f32 累加」的正规指令，与 `fmla .8h` 同属 FEAT_FP16，
+**不引入新的架构要求**。
+
+#### 顺带修好的：自检参考不再依赖 build flag
+
+原先 `cpu_attention_scores` / `cpu_attention_values` / `check_attention_scores_match_cpu_reduction`
+拿 `dot_f16` 当 oracle——也就是拿一个「快速实现」当标准答案。累加器宽度一旦变成
+构建选项，**打开 flag 就会让检查自动变弱**，而且它问的本来就不是「shader 对不对」，
+而是「两个有损实现会不会碰巧对上」。
+
+现在统一改用 `reference_dot_f16`（f64 精确求和）。结果：
+
+| 检查 | 改前 | 改后 |
+|---|---|---|
+| attention_score_reduction | 容差被迫放大到 2e-3（现收回 3e-5）| **max_rel 0.000e0** |
+| attention_scores | 容差 3e-5，实测 6.6e-3 失败 | **max_rel 3.4e-07** |
+| attention_values | — | **max_rel 0.000e0** |
+| quantize_tie_even | 自 621c622 起一直红 | exact=true |
+
+`vk_ops_check` 现在 **exit 0、25 个算子全过**（连跑多次稳定）。
+
+#### 被推翻的 pinned 测试
+
+以下测试原本钉死 ggml 的 f16 累加结果，现改为按 feature 钉两套值，并补上
+**对 f64 参考的精度断言**（只钉 bit 只能证明可复现，证明不了正确）：
+
+- `neon_f16_attention_dot_matches_ggml_four_accumulator_reduction`
+  → 仅在 `ggml-f16-dot-parity` 下编译；新增
+  `neon_f16_attention_dot_accumulates_in_f32`（默认档，对 f64 参考 rel < 1e-6）
+- `f16_dot_dispatch_matches_platform_reduction_contract` → 两套值 + f64 精度断言
+- `f16_kernel_matches_ggml_scaled_input_contract`、
+  `f16_kernel_scaled_path_matches_ggml_f16_input_and_native_accumulation`
+  → 两套值 + 新增 `assert_f32_accumulated` helper
+- `z_image::vae::conv_f16_matches_pinned_ggml_im2col_dot_and_post_bias`
+  → 两套值（该测试**只**钉了值未补 f64 断言；精度由上一层的 dot 级测试保证）
+
+#### 回归
+
+`cargo test --lib`：默认与 `ggml-f16-dot-parity` 两个配置均为
+**1137 passed / 29 failed**，与父提交**完全一致**，零新增失败。
+
+#### 端到端代价（512×512 8 步，Z-Image）
+
+| 阶段 | 改动前 | 改动后 |
+|---|---|---|
+| CPU vae_decode | 11.6 s | **15.2 / 15.9 s（+34%）** |
+| CPU denoise | 波动极大 | 无关（本就不走 `dot_f16`）|
+| GPU 端到端 | 48.99 s | 48.59 s（不变）|
+
+**VAE 的 +34% 是真实回退**，两次复测都稳定复现：VAE 的 f16 conv 走
+`F16Kernel::forward_scaled` → `dot_f16`，正好落在 FMLAL 慢 4 倍的那一档。
+GPU 端到端不受影响，因为 DiT 走 Q8_0 matmul。
+
+同时 **GPU/CPU 一致性改善**：PSNR 32.21 → **33.50 dB**，mean|Δ| 3.01 → **2.87**。
+CPU 侧少了一个 f16 累加的误差源，自然更靠近 GPU。
+
+所以这一档的取舍是明确的：**CPU VAE 多花 34% 时间，换 CPU/GPU 差 1.3 dB**。
+两次 CPU 渲染逐字节一致，结果可复现。
+
+#### 尚未验证
+
+- ASR（gemma4 / qwen3 mel encoder）与 MLX LoRA 的端到端数值未跑（缺模型）。
+  这些是 `dot_f16` 的真实调用方，其中 ASR 的 mel encoder 可能落在算力敏感区，
+  4 倍差距是否可接受需要实测决定。
+- FMLAL 档的装载指令数是否为瓶颈（见上）。
+
+### TODO-026: 测试套件在满负载下有 flaky，且 CI 根本不跑测试
+
+#### 现象
+
+同一个未改动的提交，重复跑全量 `cargo test --lib --features vulkan`，失败集合会变。
+2026-10-13 在 `ZImage3`（`8297e19`）上实测三次：
+
+| 轮次 | 相对首次基线多出的失败 |
+|---|---|
+| 1 | 无 |
+| 2 | `models::dots::vocoder::q8_convolution_matches_scalar_layout_bias_stride_dilation_and_batch_tail` |
+| 3 | `models::qwen3::trunk::qwen3_cpu_prefill_matches_batch_one_at_chunk_boundaries` |
+
+两个测试**单独跑时 13/13 全过**（改动前后各 8 次与 5 次），只有全量并行时才偶发。
+已确认至少这两个，**完整 flaky 集合尚未枚举**。
+
+#### 为什么这条比看起来严重
+
+全量回归目前只能给出「与基线比对」这种相对结论，而这个基线本身在漂。于是：
+
+- 任何一次单轮全量回归的结论都不可靠 —— 改坏了分不清是真回归还是 flaky，没坏也可能是 flaky 抵消了真回归
+- 已经在实践中造成误判：本次差点把 `--features vulkan` 的结果（1220 passed / 39 failed）
+  去比**不带** vulkan 的基线（1137 / 29），把 10 个正常差异当成回归；之后又差点把
+  `qwen3_cpu_prefill` 的偶发失败归到自己的改动上，实际它在基线上同样会飘
+- 新增测试的通过率也不可信：`silu_probe_uses_the_production_ffn_width` 这类断言，
+  理论上「一次通过」不构成证据
+
+#### 为什么一直没被发现
+
+`.github/workflows/ci.yml` 只有两个 job：`fmt`（`cargo fmt --check`）和
+`vulkan`（shader 校验 + `cargo check` 若干 target）。**没有任何 job 跑测试。**
+所以这类问题只能靠本地人工回归撞上，而人工回归恰恰是最容易漏判的场景。
+
+#### 推测成因（未验证）
+
+两者都涉及线程池与分块边界：一个是 `ComputePool` 下的分块量化卷积，一个是
+chunk 边界的 prefill。满负载时线程调度/分块顺序变化可能触发只在特定顺序下
+才成立的假设。需要看代码确认，暂不下结论。
+
+#### 待办
+
+1. **枚举 flaky 集合**：对全量套件连续跑 N 轮（如 10），统计每个测试的失败频次，
+   产出「偶发失败」名单
+2. **定位根因**：逐个看名单上的测试是否依赖线程调度/分块顺序；能修则修
+3. **暂时隔离**：修不了的先用 `#[ignore]` 或加显式注释说明已知偶发，
+   并在名字/注释里写清触发条件，避免下一个人当回归查
+4. **CI 补测试 job**：`cargo test --lib`（带/不带 `--features vulkan` 各一），
+   失败重跑一次再判定——先把「有测试」这件事建立起来，重试策略随后再加
+5. **方法论固化**：在 `docs/develop/OPTIMIZATION.md` 或本文档里写明
+   **禁止用单轮全量回归做回归判定**，需要至少 3 轮且失败集合稳定才可下结论
+
+### TODO-027: FFN 尾部的 norm/gate/residual 融合上设备 — ❌ 未完成，实现已丢弃，但四个坑要记住
+
+目标：`readback_norm_and_residual_rows` 在每个 block 末尾把投影结果下载到 host、
+做 rms_norm + 门控残差加、再传回设备。512×512 下每 block 每 site 是 59 MB 下行 +
+59 MB 上行，一个 step 走两次。融合成单个 kernel 可以省掉其中一次。
+
+**实现已完成到「自检通过」这一步，但接进主路径后成图是坏的（PSNR 10.03 dB，
+改动前 GPU↔CPU 是 33.5 dB），因此没有提交。** kernel 本身在生产规模下是逐位正确的，
+自检钉住了这一点；错的是它周围的接线。下面四个坑每一个都真实造成过可观测的失败，
+而且**每一个的失败方式都不是「报错了」，而是「继续跑出一个看起来合理的错结果」**。
+
+#### 坑 1：等长的两个 bound buffer 会被 glslang 折叠成一个
+
+gamma 和 gate 都是 `HIDDEN` 宽、从 slot 1 和 slot 2 绑定、offset push 常量都是 0、
+读取长度相同——编译器因此证明两次读等价，把 gate buffer 从 SPIR-V 里整个删掉：
+
+    $ spirv-dis shaders/bin/fused_norm_gate_residual.spv | grep Binding
+    OpDecorate %arena Binding 0
+    OpDecorate %weight Binding 1        # Gate 整个不见了
+
+于是 shader 用 gamma 当 gate 读，产出一张 PSNR 9.9 dB 但**结构完整**的图。
+试过把索引写成不同表达式（`channel = offset % pc.width` 而不是 `offset`），
+**无效**——折叠与表达式无关。最后把两个都改成从 arena 读、用各自的 word offset 才解决。
+
+> **教训**：新增一个 bound buffer 后，用 `spirv-dis ... | grep Binding` 确认它还在。
+> 这一步不能省，也不能靠肉眼 review shader。
+
+#### 坑 2：`ArenaRegion.size` 是字节，不是元素数
+
+`Layout::build` 里写 `gate_tanh: take(HIDDEN)?` 而其他行宽区域写的是
+`rows * HIDDEN * 4`。`take` 收的是元素数，所以 3840 元素被登记成 3840 字节，
+而 `write_f32` 要 15360 字节。结果每层都失败并 fallback：
+
+    [GPU] Z-Image block 0 fell back to the CPU: ... host write region
+          offset=8785664 size=3840 cannot hold 15360 bytes
+
+denoise 从 41 s 变成 **3176 s**（77 倍）。自检里没暴露，因为自检用了一个
+`region(slot, elements) -> size: elements * 4` 的闭包，**而 session 里是手写的字面量**。
+
+> **教训**：这类错误自检抓不到，因为自检和生产用了两套不同的写法。让它们共用同一个分配函数。
+
+#### 坑 3：`bind_buffers` 从一个永不回收的 pool 分配
+
+在每 block 的调用里 `bind_buffers(&[])` 拿一个新 descriptor set。pool 是固定大小、
+分配后不释放，所以第 19 层开始 `ERROR_OUT_OF_POOL_MEMORY`，之后每一层都 fallback。
+profile 里表现为「前 18 层正常、之后全崩」。
+
+现有的 `bind_norm` / `bind_modulation` 就是 per-(layer, kind) 缓存的，照抄即可。
+
+> **教训**：`bind_*` 一律 per-layer 缓存。这在仓库里已有先例，不必重新发现。
+
+#### 坑 4：`take_gpu_session` 会把 session **取走**
+
+每步开头需要把残差上传到 arena，我这样写：
+
+```rust
+if let Some(mut session) = take_gpu_session(scratch, total_tokens, &mut gpu_enabled) {
+    session.upload_residual(...)?;      // session 在这里被 drop
+}                                       // 没有放回 scratch
+```
+
+`take_gpu_session` 的最后一句是 `scratch.gpu.remove(&rows)`——它**移除**而非借用。
+作用域结束 session 被丢弃，循环里每次 `take_gpu_session` 都新建一个，于是
+**残差永不跨层累积**，每层都从初始 latent 重新开始。
+
+> **教训**：`take_gpu_session` / `put_gpu_session` 这对「借出」语义的函数，调用后必须归还。
+> 名字里的 `take` 已经暗示了，但很容易读成「获取一个引用」。
+
+#### 还有一个没定位的错误
+
+修完上面四个，PSNR 仍是 10.03 dB。**没有找到根因**，不排除还有第五个接线问题。
+没有继续猜下去——按前面 TODO-025 的教训，猜测式修复在这里已经失败过一次。
+
+已确认与改动无关的对照：CPU 路径正常（459.7 s 出图正常）。
+
+#### 已经确认正确、可以复用的部分
+
+这些是这次调查的确定结论，即使实现被丢弃也有价值：
+
+1. **参考必须是 `rms_norm.comp`，不是 `rms_norm_inplace`。**
+   `rms_norm_inplace` 经由 `sum_sq_f32` 归约，而它返回 **f64** 并保持 64 位累加器
+   （NEON 路径）。这是比任何 f32 GPU kernel 都更准的归约，**逐位一致根本达不到**——
+   现有的 `rms_norm.comp` 从第一个元素就和它不一致。
+   真正该对齐的是 `rms_norm.comp`：它是未融合路径实际跑的 kernel，
+   也是残差流的来源。对齐它，融合才是数值上的 no-op。
+   （本条修正了最初的假设，最初以为可以对齐 CPU 参考，结果自检永远过不了。）
+
+2. **`tanh` 必须留在 host。** gate 是逐通道的（`HIDDEN` 宽，不是每行一个），
+   而 GLSL 的 `tanh` 不保证和 Rust 的 `f32::tanh` 同位模式。在 host 算好再上传即可，
+   代价只有 3840 次 tanh。
+
+3. **无 AdaLN gate 的 refiner 用全 1 填充是数学等价的**：`add_modulated_residual`
+   的 `None` 分支是 `tokens[i] += residual[i]`，而 `residual * 1.0 == residual`。
+
+4. **数据流是自洽的**：`record_ffn` 之前会把 `attention` 重新上传到 `layout.x`，
+   所以 FFN 输入不是 block 开头的那个陈旧值。
+
+5. **normed 输出对主栈是死的**：`record_ffn` 直接吃 GPU 上的 `layout.x`，
+   两个 site 写进 `attention` / `qkv` 的 normed 值，主栈都不读。
+   真正需要回 host 的只有残差流。这决定了融合的价值上限。
+
+#### 性能（实现本身是有效的，只是没跑对）
+
+`w1 readback` 从 **1109 ms → 346 ms**。denoise 净持平（41.2 → 41.3 s），
+因为省下的投影回读换成了残差回读——**除非残差也能跨层常驻**，
+而那要求 session 在整个 step 生命周期内不被取走（见坑 4）。
+
+所以这条路线的真实收益上限，取决于能否把残差真正留在设备上跨 34 层累积。
+这需要一个比「每层 take 一次 session」更清晰的 session 所有权模型。

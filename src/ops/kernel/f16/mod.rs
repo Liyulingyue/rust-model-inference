@@ -671,7 +671,15 @@ mod tests {
 
         F16Kernel::new(&weight).forward_scaled(&input, &mut output, 32, 1, 1.0, &mut Vec::new());
 
+        // `ggml-f16-dot-parity` accumulates the dot in f16 and lands one f16 ulp
+        // away; the default accumulates in f32. Both are pinned because both are
+        // reachable builds, and the accuracy assertion below keeps the f32 value
+        // honest rather than merely self-consistent. TODO-025.
+        #[cfg(feature = "ggml-f16-dot-parity")]
         assert_eq!(output[0].to_bits(), 0xbf92_1000);
+        #[cfg(not(feature = "ggml-f16-dot-parity"))]
+        assert_eq!(output[0].to_bits(), 0xbf92_15e0);
+        assert_f32_accumulated(&weight, &input, 1.0, output[0]);
     }
 
     #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
@@ -731,6 +739,48 @@ mod tests {
             &mut Vec::new(),
         );
 
+        #[cfg(feature = "ggml-f16-dot-parity")]
         assert_eq!(output[0].to_bits(), 0xc2c1_c587);
+        #[cfg(not(feature = "ggml-f16-dot-parity"))]
+        assert_eq!(output[0].to_bits(), 0xc2c1_c08b);
+        assert_f32_accumulated(&weight, &input, 1.0 / 128.0, output[0]);
+    }
+
+    /// `forward_scaled_rows` computes `dot(input -> f16, weight) / scale`, so the
+    /// exact result is reproducible from the repo's own conversion helpers. On the
+    /// default build that dot accumulates in f32 and has to agree with this to f32
+    /// rounding; under `ggml-f16-dot-parity` it cannot, and the bound is the f16
+    /// accumulation error instead.
+    fn assert_f32_accumulated(weight: &[u8], input: &[f32], scale: f32, got: f32) {
+        let weights: Vec<u16> = weight
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        let scaled: Vec<u16> = input
+            .iter()
+            .map(|&value| crate::ops::f32_to_f16(value * scale))
+            .collect();
+        let reference: f64 = scaled
+            .iter()
+            .zip(&weights)
+            .map(|(&a, &b)| {
+                f64::from(crate::ops::f16_to_f32(a)) * f64::from(crate::ops::f16_to_f32(b))
+            })
+            .sum();
+        let reference = reference / f64::from(scale);
+        let got = f64::from(got);
+        let relative = (got - reference).abs() / reference.abs();
+        if cfg!(feature = "ggml-f16-dot-parity") {
+            // f16 accumulation over 32 terms: allow the ulp it costs.
+            assert!(
+                relative < 5e-3,
+                "f16-accumulated dot drifted further than expected: got={got} exact={reference} relative={relative}"
+            );
+        } else {
+            assert!(
+                relative < 1e-6,
+                "FMLAL dot drifted from the exact sum: got={got} exact={reference} relative={relative}"
+            );
+        }
     }
 }

@@ -194,7 +194,7 @@ pub fn dot_f16(a: &[u16], b: &[u16], n: usize) -> f32 {
     #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
     let (mut sum, tail_start) = {
         let prefix = n & !31;
-        if has_neon() && prefix > 0 && std::arch::is_aarch64_feature_detected!("fp16") {
+        if f16_uses_neon_accumulators(n) {
             (
                 f64::from(unsafe { dot_f16_neon(a.as_ptr(), b.as_ptr(), prefix) }),
                 prefix,
@@ -249,9 +249,15 @@ unsafe fn dot_f16_avx2(a: &[u16], b: &[u16], n: usize) -> f32 {
     sum
 }
 
-pub(crate) fn f16_uses_half_accumulators(n: usize) -> bool {
+pub(crate) fn f16_uses_neon_accumulators(n: usize) -> bool {
     #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
-    return n >= 32 && has_neon() && std::arch::is_aarch64_feature_detected!("fp16");
+    return n >= 32
+        && has_neon()
+        && if cfg!(feature = "ggml-f16-dot-parity") {
+            std::arch::is_aarch64_feature_detected!("fp16")
+        } else {
+            std::arch::is_aarch64_feature_detected!("fhm")
+        };
     #[cfg(not(all(target_arch = "aarch64", target_endian = "little")))]
     {
         let _ = n;
@@ -270,7 +276,7 @@ pub fn dot_f16_f16_bytes(a: &[u16], b: &[u8], n: usize) -> f32 {
     #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
     let (mut sum, tail_start) = {
         let prefix = n & !31;
-        if f16_uses_half_accumulators(n) {
+        if f16_uses_neon_accumulators(n) {
             (
                 f64::from(unsafe { dot_f16_neon(a.as_ptr(), b.as_ptr().cast::<u16>(), prefix) }),
                 prefix,
@@ -629,10 +635,24 @@ unsafe fn _mm_hsum_ps_4(v: std::arch::x86_64::__m128) -> std::arch::x86_64::__m1
     _mm_add_ps(sums, shuf2)
 }
 
-#[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+#[cfg(all(
+    target_arch = "aarch64",
+    target_endian = "little",
+    feature = "ggml-f16-dot-parity"
+))]
 unsafe fn dot_f16_neon(x: *const u16, y: *const u16, n: usize) -> f32 {
     debug_assert_eq!(n % 32, 0);
     let bits: u32;
+    // `fmla v.8h`: four **f16** accumulators, widened to f32 only at the end.
+    // Bit-for-bit what ggml's NEON attention dot does, and what
+    // `neon_f16_attention_dot_matches_ggml_four_accumulator_reduction` pins.
+    //
+    // Kept behind `ggml-f16-dot-parity` because it is not free of accuracy:
+    // the whole sum carries f16 precision, which costs about
+    // `sqrt(head_dim) * eps_f16` and can overflow to inf past 65504. The x86
+    // path never did this -- `_mm256_cvtph_ps` then `_mm256_fmadd_ps` -- so
+    // leaving this on by default also made the same function mean two different
+    // things depending on the host. TODO-025.
     asm!(
         "movi v0.8h, #0", "movi v1.8h, #0",
         "movi v2.8h, #0", "movi v3.8h, #0",
@@ -663,6 +683,83 @@ unsafe fn dot_f16_neon(x: *const u16, y: *const u16, n: usize) -> f32 {
         out("v0") _, out("v1") _, out("v2") _, out("v3") _,
         out("v4") _, out("v5") _, out("v6") _, out("v7") _,
         out("v16") _, out("v17") _, out("v18") _, out("v19") _,
+        options(nostack, readonly),
+    );
+    f32::from_bits(bits)
+}
+
+/// `FMLAL`: f16 operands, **f32** accumulator.
+///
+/// This is the instruction the operation actually wants. The operands stay f16,
+/// so storage, load bandwidth and the decode cost are unchanged; only the
+/// accumulator widens, which is what removes the ~`sqrt(n) * eps_f16` drift,
+/// the 65504 overflow and the subnormal underflow that the `fmla .8h` form
+/// carries. It matches what the x86 path has always done, so the same function
+/// stops meaning two different things per architecture.
+///
+/// FMLAL requires FEAT_FHM; the shared dispatch checks it before entering here.
+#[cfg(all(
+    target_arch = "aarch64",
+    target_endian = "little",
+    not(feature = "ggml-f16-dot-parity")
+))]
+unsafe fn dot_f16_neon(x: *const u16, y: *const u16, n: usize) -> f32 {
+    debug_assert_eq!(n % 32, 0);
+    let bits: u32;
+    // Loads are four halves at a time rather than eight: `fmlal` consumes a
+    // `.4h` view, and A64 has no way to name the upper half of a register that
+    // was loaded as `.8h`. Loading `.4h` keeps the lane mapping obvious and
+    // costs one extra load instruction per 32 elements against a full-rate FMA.
+    //
+    // Four accumulators, same shape as the parity version, so the summation tree
+    // is a tree rather than a chain.
+    asm!(
+        "movi v0.4s, #0", "movi v1.4s, #0",
+        "movi v2.4s, #0", "movi v3.4s, #0",
+        "cbz {n}, 2f",
+        "1:",
+        "ld1 {{v4.4h}}, [{x}], #8",
+        "ld1 {{v16.4h}}, [{y}], #8",
+        "fmlal v0.4s, v4.4h, v16.4h",
+        "ld1 {{v5.4h}}, [{x}], #8",
+        "ld1 {{v17.4h}}, [{y}], #8",
+        "fmlal v1.4s, v5.4h, v17.4h",
+        "ld1 {{v6.4h}}, [{x}], #8",
+        "ld1 {{v18.4h}}, [{y}], #8",
+        "fmlal v2.4s, v6.4h, v18.4h",
+        "ld1 {{v7.4h}}, [{x}], #8",
+        "ld1 {{v19.4h}}, [{y}], #8",
+        "fmlal v3.4s, v7.4h, v19.4h",
+        "ld1 {{v8.4h}}, [{x}], #8",
+        "ld1 {{v20.4h}}, [{y}], #8",
+        "fmlal v0.4s, v8.4h, v20.4h",
+        "ld1 {{v9.4h}}, [{x}], #8",
+        "ld1 {{v21.4h}}, [{y}], #8",
+        "fmlal v1.4s, v9.4h, v21.4h",
+        "ld1 {{v10.4h}}, [{x}], #8",
+        "ld1 {{v22.4h}}, [{y}], #8",
+        "fmlal v2.4s, v10.4h, v22.4h",
+        "ld1 {{v11.4h}}, [{x}], #8",
+        "ld1 {{v23.4h}}, [{y}], #8",
+        "fmlal v3.4s, v11.4h, v23.4h",
+        "subs {n}, {n}, #32",
+        "b.ne 1b",
+        "2:",
+        "fadd v0.4s, v0.4s, v1.4s",
+        "fadd v2.4s, v2.4s, v3.4s",
+        "fadd v0.4s, v0.4s, v2.4s",
+        "faddp v0.4s, v0.4s, v0.4s",
+        "faddp s0, v0.2s",
+        "fmov {bits:w}, s0",
+        x = inout(reg) x => _,
+        y = inout(reg) y => _,
+        n = inout(reg) n => _,
+        bits = lateout(reg) bits,
+        out("v0") _, out("v1") _, out("v2") _, out("v3") _,
+        out("v4") _, out("v5") _, out("v6") _, out("v7") _,
+        out("v8") _, out("v9") _, out("v10") _, out("v11") _,
+        out("v16") _, out("v17") _, out("v18") _, out("v19") _,
+        out("v20") _, out("v21") _, out("v22") _, out("v23") _,
         options(nostack, readonly),
     );
     f32::from_bits(bits)

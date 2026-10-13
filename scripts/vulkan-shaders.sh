@@ -21,6 +21,7 @@ shader_names=(
     mlx_affine_matmul
     rms_norm
     qk_norm_rope
+    qk_norm_rope_interleaved
     kv_write
     attention_scores
     softmax

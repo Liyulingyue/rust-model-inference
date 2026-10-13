@@ -768,7 +768,7 @@ impl DenseWeight<'_> {
             || n_out == 0
             || !n_in.is_multiple_of(block)
             || (self.ggml_type == GGMLType::F16
-                && crate::ops::f16_uses_half_accumulators(n_in)
+                && crate::ops::f16_uses_neon_accumulators(n_in)
                 && !n_in.is_multiple_of(32))
             || length != Some(self.bytes.len())
         {

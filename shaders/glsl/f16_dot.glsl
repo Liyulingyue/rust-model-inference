@@ -35,3 +35,13 @@ float reduce_float8(float lanes[32]) {
         + ((lanes[2] + lanes[6]) + (lanes[3] + lanes[7]));
     return result;
 }
+
+// Match the four four-lane FMLAL accumulators of the default NEON dot.
+float reduce_float16(float lanes[32]) {
+    precise float a = (lanes[0] + lanes[4]) + (lanes[8] + lanes[12]);
+    precise float b = (lanes[1] + lanes[5]) + (lanes[9] + lanes[13]);
+    precise float c = (lanes[2] + lanes[6]) + (lanes[10] + lanes[14]);
+    precise float d = (lanes[3] + lanes[7]) + (lanes[11] + lanes[15]);
+    precise float result = (a + b) + (c + d);
+    return result;
+}

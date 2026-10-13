@@ -67,6 +67,21 @@ void main() {
         precise float c = partial[2] + partial[6];
         precise float d = partial[3] + partial[7];
         sum = (a + b) + (c + d);
+    } else if (pc.reduction_mode == 2u) {
+        if (lane < 16u) {
+            for (uint index = lane; index < pc.n_in; index += 16u) {
+                float input_value = round_f16_rte(uintBitsToFloat(arena.data[pc.input_word + token_row * pc.input_stride + index]));
+                sum = fma(input_value, f16_decode(weight_f16(slot, row_base + index)), sum);
+            }
+            partial[lane] = sum;
+        }
+        barrier();
+        if (lane != 0u) return;
+        precise float a = (partial[0] + partial[4]) + (partial[8] + partial[12]);
+        precise float b = (partial[1] + partial[5]) + (partial[9] + partial[13]);
+        precise float c = (partial[2] + partial[6]) + (partial[10] + partial[14]);
+        precise float d = (partial[3] + partial[7]) + (partial[11] + partial[15]);
+        sum = (a + b) + (c + d);
     } else if (pc.reduction_mode == 8u) {
         // Match the CPU AVX2/F16C dot, including its separate four-value tail.
         uint vector_end = pc.n_in / 8u * 8u;

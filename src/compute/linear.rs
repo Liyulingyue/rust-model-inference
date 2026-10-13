@@ -381,11 +381,11 @@ fn checked_elements(rows: usize, width: usize) -> Result<usize, ComputeError> {
 fn gpu_compatible(binding: LinearBinding<'_, '_>) -> Result<(), ComputeError> {
     use crate::GGMLType;
     if binding.weight.ggml_type == GGMLType::F16
-        && crate::ops::f16_uses_half_accumulators(binding.weight.n_in)
+        && crate::ops::f16_uses_neon_accumulators(binding.weight.n_in)
         && !binding.weight.n_in.is_multiple_of(32)
     {
         return Err(ComputeError::Unsupported(
-            "F16 half accumulation with an F64 tail requires CPU".into(),
+            "F16 NEON reduction with an F64 tail requires CPU".into(),
         ));
     }
     if binding.mode == LinearMode::F16Strict

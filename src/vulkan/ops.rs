@@ -34,6 +34,8 @@ const F32_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/f32_matmul.sp
 const MLX_AFFINE_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/mlx_affine_matmul.spv");
 const RMS_NORM_SHADER: &[u8] = include_bytes!("../../shaders/bin/rms_norm.spv");
 const QK_NORM_ROPE_SHADER: &[u8] = include_bytes!("../../shaders/bin/qk_norm_rope.spv");
+const QK_NORM_ROPE_INTERLEAVED_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/qk_norm_rope_interleaved.spv");
 const KV_WRITE_SHADER: &[u8] = include_bytes!("../../shaders/bin/kv_write.spv");
 const ATTENTION_SCORES_SHADER: &[u8] = include_bytes!("../../shaders/bin/attention_scores.spv");
 const SOFTMAX_SHADER: &[u8] = include_bytes!("../../shaders/bin/softmax.spv");
@@ -60,6 +62,8 @@ const F16_MATMUL: usize = 7;
 const BF16_MATMUL: usize = 8;
 const RMS_NORM: usize = 9;
 const QK_NORM_ROPE: usize = 10;
+/// Appended after the cooperative Q8 kernel to preserve existing indices.
+const QK_NORM_ROPE_INTERLEAVED: usize = 29;
 const KV_WRITE: usize = 11;
 const ATTENTION_SCORES: usize = 12;
 const SOFTMAX: usize = 13;
@@ -163,6 +167,7 @@ const OPERATOR_SHADER_NAMES: [&str; OPERATOR_SHADERS.len()] = [
     "attention_scores_tiled",
     "mlx_affine_matmul",
     "q8_matmul_cooperative",
+    "qk_norm_rope_interleaved",
 ];
 
 /// True when the ordered dispatch log is being collected.
@@ -250,7 +255,7 @@ pub fn dump_dispatch_trace() {
     }
 }
 
-const OPERATOR_SHADERS: [&[u8]; 29] = [
+const OPERATOR_SHADERS: [&[u8]; 30] = [
     QUANTIZE_Q8_0_SHADER,
     QUANTIZE_Q8_K_SHADER,
     Q8_MATMUL_GROUPED_SHADER,
@@ -280,6 +285,7 @@ const OPERATOR_SHADERS: [&[u8]; 29] = [
     ATTENTION_SCORES_TILED_SHADER,
     MLX_AFFINE_MATMUL_SHADER,
     Q8_MATMUL_COOPERATIVE_SHADER,
+    QK_NORM_ROPE_INTERLEAVED_SHADER,
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2084,7 +2090,7 @@ impl<'a> Qwen3Ops<'a> {
             }
             if format == GpuWeightFormat::F16
                 && bindings.weight_mode == GpuMatmulMode::Prepared
-                && crate::ops::f16_uses_half_accumulators(n_in)
+                && crate::ops::f16_uses_neon_accumulators(n_in)
             {
                 return self.record_weight_matmul_ordinary_rows(
                     commands,
@@ -2463,6 +2469,102 @@ impl<'a> Qwen3Ops<'a> {
         )
     }
     #[allow(clippy::too_many_arguments)]
+    /// Q/K norm plus interleaved RoPE, for the Z-Image DiT.
+    ///
+    /// Same kernel as [`Self::record_qk_norm_rope_rows`] except that the
+    /// rotation pairs adjacent elements, matching `rotate_interleaved_inplace`.
+    ///
+    /// Unlike the NeoX entry point this takes explicit `q_row_stride` and
+    /// `k_row_stride`, because the DiT does not store Q and K as two blocks.
+    /// Its QKV projection emits one row of `Q | K | V`, so consecutive tokens
+    /// are `QKV_WIDTH` apart, not `q_heads * head_dim`. Passing the span as the
+    /// stride -- which is what the block layout would lead you to do -- lands
+    /// every row after the first on the wrong span, and since the row length
+    /// divides the span that stays inside the buffer and corrupts V instead of
+    /// faulting. Both regions are the same whole-row region here.
+    ///
+    /// `rope` is the (cos, sin) table, `head_dim` entries per row, shared by
+    /// every head of that row.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_qk_norm_rope_interleaved_rows(
+        &self,
+        commands: &TokenCommands<'_>,
+        bindings: OperatorBindings,
+        q: ArenaRegion,
+        k: ArenaRegion,
+        q_heads: usize,
+        k_heads: usize,
+        head_dim: usize,
+        rope: ArenaRegion,
+        q_row_stride: usize,
+        k_row_stride: usize,
+        k_span_offset: usize,
+        eps: f32,
+        normalize_q: bool,
+        normalize_k: bool,
+        rows: usize,
+    ) -> Result<(), VulkanError> {
+        if q_heads == 0 || k_heads == 0 || head_dim == 0 || head_dim % 2 != 0 {
+            return Err(VulkanError::UnsupportedShape(
+                "Q/K heads and even head dimension must be nonzero".into(),
+            ));
+        }
+        let q_count = q_heads
+            .checked_mul(head_dim)
+            .ok_or(VulkanError::OutOfMemory)?;
+        let k_count = k_heads
+            .checked_mul(head_dim)
+            .ok_or(VulkanError::OutOfMemory)?;
+        if q_row_stride < q_count || k_row_stride < k_count {
+            return Err(VulkanError::UnsupportedShape(
+                "Q/K row stride must cover the span it steps over".into(),
+            ));
+        }
+        if normalize_q {
+            bindings.require(0, f32_bytes(head_dim)?, "Q norm weight")?;
+        }
+        if normalize_k {
+            bindings.require(1, f32_bytes(head_dim)?, "K norm weight")?;
+        }
+        let push = [
+            self.f32_rows_word(q, rows, q_row_stride, q_count, "Q vector")?,
+            self.f32_rows_word(k, rows, k_row_stride, k_count, "K vector")?,
+            0,
+            0,
+            as_u32(q_heads, "Q head count")?,
+            as_u32(k_heads, "K head count")?,
+            as_u32(head_dim, "Q/K head dimension")?,
+            self.f32_rows_word(rope, rows, head_dim, head_dim, "RoPE coefficients")?,
+            u32::from(normalize_q) | (u32::from(normalize_k) << 1),
+            eps.to_bits(),
+            as_u32(rows, "Q/K rows")?,
+            as_u32(q_row_stride, "Q stride")?,
+            as_u32(k_row_stride, "K stride")?,
+            as_u32(head_dim, "RoPE stride")?,
+            as_u32(k_span_offset, "K span offset")?,
+        ];
+        let z = row_dispatch(1, rows, &self.context.limits)?[2];
+        if q_heads > self.context.limits.max_compute_work_group_count[0] as usize
+            || k_heads > self.context.limits.max_compute_work_group_count[0] as usize
+            || self.context.limits.max_compute_work_group_count[1] < 2
+        {
+            return Err(VulkanError::UnsupportedShape(
+                "Q/K head count exceeds device dispatch limits".into(),
+            ));
+        }
+        unsafe {
+            commands.bind(
+                self.pipelines[QK_NORM_ROPE_INTERLEAVED],
+                self.context.pipeline_layout,
+                &[bindings.descriptor_set],
+                bytemuck::cast_slice(&push),
+            );
+            commands.dispatch(q_heads.max(k_heads) as u32, 2, z);
+            commands.barrier();
+        }
+        Ok(())
+    }
+
     pub(crate) fn record_qk_norm_rope_rows(
         &self,
         commands: &TokenCommands<'_>,
@@ -4041,8 +4143,12 @@ impl AttentionMode {
 }
 
 fn attention_dot_mode(width: usize) -> u32 {
-    if crate::ops::f16_uses_half_accumulators(width) {
-        1
+    if crate::ops::f16_uses_neon_accumulators(width) {
+        if cfg!(feature = "ggml-f16-dot-parity") {
+            1
+        } else {
+            2
+        }
     } else if width >= 8 && crate::ops::has_avx2_fma() && crate::ops::has_f16c() {
         8
     } else {
@@ -4091,15 +4197,15 @@ fn matmul_rows_push(
     let mut push = [0; 22];
     if format == GpuWeightFormat::F16
         && bindings.weight_mode == GpuMatmulMode::Prepared
-        && crate::ops::f16_uses_half_accumulators(n_in)
+        && crate::ops::f16_uses_neon_accumulators(n_in)
     {
         if !n_in.is_multiple_of(32) {
             return Err(VulkanError::UnsupportedShape(
-                "F16 half accumulation with an F64 tail is not implemented on Vulkan".into(),
+                "F16 NEON reduction with an F64 tail is not implemented on Vulkan".into(),
             ));
         }
         // F16 does not use activation scales; this word selects its reduction.
-        push[1] = 1;
+        push[1] = attention_dot_mode(n_in);
     }
     push[0] = if is_float {
         row_word(
@@ -4699,14 +4805,41 @@ fn check_weight_matmul_rows(
 /// Kept as a gate in `run_qwen3_operator_check`: any change to the saturation
 /// clamp in `silu_mul.comp` has to keep this at zero. See TODO.md.
 ///
+/// The values above, not the shape, are what make this gate work.
+///
+/// `silu_mul.comp` is elementwise: no shared memory, no barrier, no
+/// lane-to-lane dependency, and each output reads only the same-index gate
+/// and up. So the count is a multiplier and every element gets identical
+/// treatment; `-197.4` is the value that reaches the regime that produced the
+/// NaN, and it is present.
+///
+/// Worth stating because it looks like the opposite is true. A check whose
+/// fidelity depends on matching production exactly is the pattern that let a
+/// 96-element fixture hide a production-scale defect in the first place. Here
+/// the width genuinely does not matter -- both 9728 and 10240 are exact
+/// multiples of the 64-wide dispatch, so neither exercises a ragged tail
+/// either -- and the constant is pinned to the model's so that stays true.
+///
+/// The property is a property of the current kernel. If SiLU is ever
+/// rewritten to share a row across lanes, the count starts to matter and
+/// this stops representing production without saying so.
+///
 /// Returns the number of non-finite outputs, so a caller can assert on it
 /// without treating corruption as an error string.
+/// Width of the Z-Image Turbo FFN activation at 512x512.
+///
+/// The probe below used to hard-code 9728 next to a comment claiming it was the
+/// production shape, when the real width is 10240. Reading it from the model
+/// makes that class of drift impossible. `dit::FFN_WIDTH` is not reachable from
+/// here without pulling the model in, so `silu_probe_uses_the_production_ffn_width`
+/// asserts the two agree.
+#[cfg(feature = "vulkan")]
+const Z_IMAGE_FFN_WIDTH: usize = 10_240;
+
 #[cfg(feature = "vulkan")]
 pub fn silu_ffn_scale_probe(context: &VulkanContext) -> Result<usize, String> {
-    // 3840 rows * 9728 columns, the Z-Image Turbo FFN activation.
     const ROWS: usize = 3840;
-    const WIDTH: usize = 9728;
-    let count = ROWS * WIDTH;
+    let count = ROWS * Z_IMAGE_FFN_WIDTH;
     // `for_dims` sizes the Q8 staging for `n_in`, not for two FFN-wide feature
     // buffers, so gate and up need their own arena sized for both.
     let bytes = (count * 4 * 2).next_multiple_of(1 << 20) + (1 << 20);
@@ -4788,10 +4921,10 @@ pub fn run_qwen3_operator_check(context: &VulkanContext, formats: &[&str]) -> Re
     check_qwen3_core_contract(context)?;
     if std::env::var("SILU_SCALE_ONLY").is_err() {
         match silu_ffn_scale_probe(context) {
-            Ok(0) => println!("operator=silu_mul_ffn_scale rows=3840 width=9728 finite=true"),
+            Ok(0) => println!("operator=silu_mul_ffn_scale rows=3840 width={Z_IMAGE_FFN_WIDTH} finite=true"),
             Ok(nonfinite) => {
                 return Err(format!(
-                    "silu_mul produced {nonfinite} non-finite values at the Z-Image FFN shape (3840 x 9728)"
+                    "silu_mul produced {nonfinite} non-finite values at the Z-Image FFN shape (3840 x {Z_IMAGE_FFN_WIDTH})"
                 ))
             }
             Err(error) => return Err(format!("silu_mul FFN-scale check: {error}")),
@@ -6212,6 +6345,15 @@ fn check_quantize_q8_k_exact(context: &VulkanContext) -> Result<(), String> {
     Ok(())
 }
 
+/// Independent F64 accuracy reference, separate from CPU reduction parity.
+/// Changing `ggml-f16-dot-parity` must not change this reference. TODO-024.
+fn reference_dot_f16(a: &[u16], b: &[u16]) -> f64 {
+    a.iter()
+        .zip(b)
+        .map(|(&x, &y)| f64::from(crate::ops::f16_to_f32(x)) * f64::from(crate::ops::f16_to_f32(y)))
+        .sum()
+}
+
 fn check_quantize_tie_even(context: &VulkanContext) -> Result<(), String> {
     const COUNT: usize = 128;
     let layout =
@@ -6339,16 +6481,28 @@ fn check_attention_scores_match_cpu_reduction(context: &VulkanContext) -> Result
         .iter()
         .map(|&value| crate::ops::f32_to_f16(value))
         .collect::<Vec<_>>();
-    let expected = crate::ops::dot_f16(&query_f16, &key_f16, HEAD_DIM) / (HEAD_DIM as f32).sqrt();
+    let expected =
+        crate::ops::dot_f16(&query_f16, &key_f16, HEAD_DIM) * (1.0 / (HEAD_DIM as f32).sqrt());
     if actual.to_bits() != expected.to_bits() {
         return Err(format!(
             "attention score reduction mismatch: gpu={actual} cpu={expected} gpu_bits={:#010x} cpu_bits={:#010x}",
-            actual.to_bits(),
-            expected.to_bits()
+            actual.to_bits(), expected.to_bits()
         ));
     }
-    println!("operator=attention_score_reduction exact=true");
-    Ok(())
+    let reference = (reference_dot_f16(&query_f16, &key_f16) / (HEAD_DIM as f64).sqrt()) as f32;
+    // The explicit ggml parity build retains its original half-precision error.
+    let tolerance = if cfg!(feature = "ggml-f16-dot-parity") {
+        5e-3
+    } else {
+        3e-5
+    };
+    check_close(
+        "attention_score_reduction",
+        &[actual],
+        &[reference],
+        tolerance,
+        tolerance,
+    )
 }
 
 fn check_attention_value_reduction(context: &VulkanContext) -> Result<(), String> {
@@ -6702,8 +6856,79 @@ fn check_close(
     }
 }
 
+#[cfg(all(test, feature = "vulkan"))]
+/// The SiLU probe is only meaningful at a shape close to production, so pin the
+/// one number that used to drift. This is a compile-time constant on both sides,
+/// so it costs nothing and cannot be forgotten.
+#[test]
+fn silu_probe_uses_the_production_ffn_width() {
+    assert_eq!(
+        Z_IMAGE_FFN_WIDTH,
+        crate::models::diffusion::z_image::dit::FFN_WIDTH,
+        "the SiLU probe no longer runs at the production FFN width"
+    );
+}
+
 #[cfg(test)]
 mod tests {
+    #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+    #[test]
+    #[ignore = "requires a Vulkan device and NEON half operands"]
+    fn vulkan_f16_neon_prepared_matches_cpu_bits() {
+        use super::*;
+        if !crate::ops::f16_uses_neon_accumulators(32) {
+            eprintln!("skipped: this CPU has no selected NEON F16 dot path");
+            return;
+        }
+        const ROWS: usize = 3;
+        const OUTPUTS: usize = 5;
+        let context = Box::leak(Box::new(VulkanContext::new().unwrap()));
+        check_qwen3_core_contract(context).unwrap();
+        for width in [32, 128, 256] {
+            let weight: Vec<u8> = (0..width * OUTPUTS)
+                .flat_map(|index| {
+                    crate::ops::f32_to_f16(((index * 31 % 127) as f32 - 63.0) / 32.0).to_le_bytes()
+                })
+                .collect();
+            let input: Vec<f32> = (0..ROWS * width)
+                .map(|index| {
+                    let bits = 0x3e80_0000 + ((index as u32 * 47_113) % 0x0200_0000);
+                    f32::from_bits(bits) * if index % 3 == 0 { -1.0 } else { 1.0 }
+                })
+                .collect();
+            let mut expected = Vec::new();
+            for row in input.chunks_exact(width) {
+                let rounded: Vec<_> = row
+                    .iter()
+                    .map(|&value| crate::ops::f32_to_f16(value))
+                    .collect();
+                for weights in weight.chunks_exact(width * 2) {
+                    expected.push(crate::ops::dot_f16_f16_bytes(&rounded, weights, width));
+                }
+            }
+            let mut runtime = BatchedLinearRuntime::new(context, ROWS, width, OUTPUTS, 2).unwrap();
+            let mut actual = vec![f32::NAN; ROWS * OUTPUTS];
+            runtime
+                .matmul_rows(
+                    &weight,
+                    GpuWeightFormat::F16,
+                    &input,
+                    ROWS,
+                    width,
+                    OUTPUTS,
+                    &mut actual,
+                )
+                .unwrap();
+            for (index, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
+                assert_eq!(
+                    actual.to_bits(),
+                    expected.to_bits(),
+                    "F16 width={width} at {index}"
+                );
+            }
+        }
+    }
+
     #[test]
     #[ignore = "requires a Vulkan device; compares Q8 quantization to the CPU kernel"]
     fn vulkan_q8_quantization_matches_cpu_bits() {
@@ -8493,7 +8718,15 @@ mod tests {
         assert_eq!(push_for(GpuMatmulMode::RoundedInputF32)[1], 0);
         assert_eq!(
             push_for(GpuMatmulMode::Prepared)[1],
-            u32::from(crate::ops::f16_uses_half_accumulators(32))
+            if crate::ops::f16_uses_neon_accumulators(32) {
+                if cfg!(feature = "ggml-f16-dot-parity") {
+                    1
+                } else {
+                    2
+                }
+            } else {
+                0
+            }
         );
         assert!(layout
             .validate(
