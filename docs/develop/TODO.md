@@ -2012,3 +2012,66 @@ total += vget_lane_f32(vget_high_f32(product), 1);
 
 若要推进，先做实测：同一批文本比对三种方案的 embedding 余弦相似度与端到端
 检索一致性，再决定。**不要在没有实测的情况下放宽 decoder 的求和契约。**
+
+### TODO-029: BGE decoder embedding 路径的 logits 投影是死代码，且穿透读取内部 scratch
+
+审 `codex/bge-embedding-gguf` 的 `bafc23c` 时发现。该提交把
+`LlamaSession::forward_one_token` 的函数体抽成 `forward_input`，加了三个入口：
+
+```rust
+forward_one_token        → forward_input(token_id, None, None, /*project_logits*/ true)
+forward_embedding        → forward_input(0, Some(emb), None, false)
+forward_embedding_mrope  → forward_input(0, Some(emb), Some(mrope), false)
+```
+
+重构本身是对的（参数化优于复制三份），`mrope` 的 section 之和必须等于
+`n_embd_head_k / 2` 这个校验也写对了。以下两点是「可以更好」，都不影响正确性。
+
+#### 问题 1：`project_logits=false` 对 embedding 路径是死代码
+
+`decoder_embedding.rs` 走的是 `session.prefill(&tokens, 1)`，而 `prefill` 是：
+
+```rust
+last_logits = self.forward_chunk(input, rows, base, is_last)?;
+```
+
+**不是** `forward_one_token`。`project_logits` 的实参是 `is_last`，即**最后一个 token
+仍然会投影出完整 logits**（vocab 通常 32K–150K 宽），而 `decoder_embedding` 只要
+`session.scratch.x`，这批 logits 算完直接丢弃。
+
+新加的 `if project_logits { ... }` 包裹只对 `forward_one_token` 有意义，而那条路恒传
+`true`。所以 embedding 场景省不下任何东西。
+
+**要真正省掉**：需要让 `prefill` 的最后一个 chunk 也能传 `project_logits=false`，
+即 `prefill` 增加一个「只要 hidden state」的入口。当前 API 表达不了这个意图。
+
+**收益可量化**：每次 embedding 请求省一次 `n_embd × vocab` 的投影。0.6B 级模型
+vocab 约 150K、n_embd 1024，即 1.5 亿次乘加，而 embedding 的实际计算量只有几层 decoder。
+
+#### 问题 2：`decoder_embedding` 穿透读取 `session.scratch.x`
+
+```rust
+rms_norm_grouped(
+    &session.scratch.x[..n_embd],   // 跨模块读 impl 的内部字段
+    &session.weights.output_norm,
+    ...
+);
+```
+
+两处问题：
+
+1. **封装**：`scratch` 是 `LlamaSession` 的内部状态，从 `decoder_embedding.rs` 直接
+   穿透访问，读的是「forward 恰好停在某个中间态」的隐含约定。
+2. **重复计算**：`forward_input` 内部已经算过 `rms_norm_grouped`（结果在 `normed`），
+   embedding 侧又从 `scratch.x` 重算一遍同样的 norm。
+
+**更干净的做法**：session 暴露一个 `last_hidden(&self) -> &[f32]`，
+或者在 `forward_input` 尾部把 pooled 后的结果落到一个专门的字段。
+既不用穿透 `scratch`，也不用重算 norm。
+
+#### 与 TODO-028 的关系
+
+`TODO-028` 记录了 f32 在 aarch64 上拿不到 SIMD 加速。
+本条的「省掉 logits 投影」和它是同一个方向的两端：一个是**别做多余的计算**，
+一个是**把要做的算快**。对 BGE 这类 embedding 负载，前者的收益可能更直接——
+vocab 投影通常比 decoder 层本身更贵。
