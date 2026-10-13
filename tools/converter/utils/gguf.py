@@ -40,6 +40,10 @@ GGML_BF16 = 30
 
 GGUF_ALIGNMENT = 32
 
+_T_UINT8 = 0
+_T_INT8 = 1
+_T_UINT16 = 2
+_T_INT16 = 3
 _T_UINT32 = 4
 _T_INT32 = 5
 _T_FLOAT32 = 6
@@ -76,6 +80,22 @@ class Tensor:
     dtype: str
     shape: tuple[int, ...]
     raw: bytes
+
+
+@dataclass(frozen=True)
+class MetaArray:
+    """Metadata array with an explicit GGUF element type."""
+
+    element_type: int
+    values: tuple
+
+
+@dataclass(frozen=True)
+class MetaScalar:
+    """Metadata scalar with an explicit GGUF element type."""
+
+    element_type: int
+    value: object
 
 
 @dataclass
@@ -292,7 +312,37 @@ def _gguf_str(value: str) -> bytes:
     return struct.pack("<Q", len(raw)) + raw
 
 
+def _gguf_scalar(value_type: int, value: object) -> bytes:
+    formats = {
+        _T_UINT8: ("<B", int),
+        _T_INT8: ("<b", int),
+        _T_UINT16: ("<H", int),
+        _T_INT16: ("<h", int),
+        _T_UINT32: ("<I", int),
+        _T_INT32: ("<i", int),
+        _T_FLOAT32: ("<f", float),
+        _T_BOOL: ("<B", bool),
+        _T_UINT64: ("<Q", int),
+        _T_INT64: ("<q", int),
+        _T_FLOAT64: ("<d", float),
+    }
+    fmt, converter = formats.get(value_type, (None, None))
+    if fmt is None:
+        raise ValueError(f"unsupported GGUF metadata element type {value_type}")
+    return struct.pack(fmt, converter(value))
+
+
 def _gguf_meta_value(value) -> bytes:
+    if isinstance(value, MetaScalar):
+        return struct.pack("<I", value.element_type) + _gguf_scalar(value.element_type, value.value)
+    if isinstance(value, MetaArray):
+        payload = b"".join(_gguf_scalar(value.element_type, item) for item in value.values)
+        return (
+            struct.pack("<I", _T_ARRAY)
+            + struct.pack("<I", value.element_type)
+            + struct.pack("<Q", len(value.values))
+            + payload
+        )
     if isinstance(value, str):
         return struct.pack("<I", _T_STRING) + _gguf_str(value)
     if isinstance(value, bool):
@@ -489,6 +539,10 @@ def _read_gguf(path: Path) -> tuple[dict[str, object], dict[str, tuple[int, tupl
         if value_type == _T_BOOL:
             return bool(take("<B"))
         formats = {
+            _T_UINT8: "<B",
+            _T_INT8: "<b",
+            _T_UINT16: "<H",
+            _T_INT16: "<h",
             _T_UINT32: "<I",
             _T_INT32: "<i",
             _T_FLOAT32: "<f",
@@ -598,6 +652,8 @@ __all__ = [
     "Q8_0_BLOCK",
     "Q8_0_BLOCK_BYTES",
     "Tensor",
+    "MetaArray",
+    "MetaScalar",
     "Safetensors",
     "open_safetensors",
     "validated_dir",

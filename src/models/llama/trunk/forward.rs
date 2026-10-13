@@ -225,7 +225,8 @@ pub(crate) fn apply_rope(
     // reduce to the plain RoPE table; for long contexts the thetas
     // diverge per `rope.scaling.yarn_beta_*` ramps. See
     // `compute_yarn_thetas` for the construction.
-    let neox_layout = arch == "phi3"
+    let neox_layout = arch == "qwen2"
+        || arch == "phi3"
         || arch == "phi2"
         || arch == "phimoe"
         || arch == "gemma"
@@ -3369,6 +3370,15 @@ mod tests {
             };
             assert!(ok, "lane {i}: softcap={a} expected={b}");
         }
+    }
+
+    #[test]
+    fn qwen2_uses_neox_rope() {
+        let mut actual = [1.0, 2.0, 3.0, 4.0];
+        let mut expected = actual;
+        apply_rope("qwen2", &mut actual, 7, 4, 10_000.0, 4, 1.0, None);
+        crate::ops::rope_neox_inplace(&mut expected, 7, 4, 10_000.0);
+        assert_eq!(actual.map(f32::to_bits), expected.map(f32::to_bits));
     }
 
     #[test]

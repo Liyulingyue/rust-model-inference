@@ -567,6 +567,13 @@ pub fn run_embedding_tokens(
     }
 
     let mut pooled = pool_embedding_rows(&hidden, n_tokens, n_embd, embedding_cfg.pooling)?;
+    #[cfg(feature = "parity-trace")]
+    crate::parity_trace::report(crate::parity_trace::checkpoint(
+        "embedding.pooled",
+        None,
+        &[n_embd],
+        &pooled,
+    ));
     l2_normalize_embedding(&mut pooled)?;
     #[cfg(feature = "parity-trace")]
     crate::parity_trace::report(crate::parity_trace::checkpoint(

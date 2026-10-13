@@ -2961,13 +2961,17 @@ impl WPMTokenizer {
             "tokenizer.ggml.add_eos_token",
         )?;
 
-        // `normalizer_lowercase` defaults to true in llama.cpp and drives
+        // `normalizer.lowercase` defaults to true in llama.cpp and drives
         // `strip_accents` unless the latter is set explicitly.
-        let lowercase = match get_meta("tokenizer.ggml.normalizer_lowercase") {
+        let lowercase = match get_meta("tokenizer.ggml.normalizer.lowercase")
+            .or_else(|| get_meta("tokenizer.ggml.normalizer_lowercase"))
+        {
             Some(MetaValue::Bool(v)) => v,
             _ => true,
         };
-        let strip_accents = match get_meta("tokenizer.ggml.normalizer_strip_accents") {
+        let strip_accents = match get_meta("tokenizer.ggml.normalizer.strip_accents")
+            .or_else(|| get_meta("tokenizer.ggml.normalizer_strip_accents"))
+        {
             Some(MetaValue::Bool(v)) => v,
             _ => lowercase,
         };
@@ -3311,6 +3315,39 @@ mod wpm_unk_tests {
     fn a_fully_matching_word_gets_no_extra_unk() {
         assert_eq!(encode("hello"), vec![1, 3, 2]);
         assert_eq!(encode("hello world"), vec![1, 3, 4, 2]);
+    }
+
+    #[test]
+    fn wordpiece_reads_standard_normalizer_keys_before_legacy_keys() {
+        use crate::core::tensor::{MetaValue, MetaValueType};
+        for standard in [false, true] {
+            let tok = WPMTokenizer::from_gguf_metadata(|key| match key {
+                "tokenizer.ggml.model" => Some(MetaValue::String("bert".into())),
+                "tokenizer.ggml.tokens" => Some(MetaValue::Array(
+                    MetaValueType::String,
+                    tokenizer()
+                        .tokens
+                        .into_iter()
+                        .map(MetaValue::String)
+                        .collect(),
+                )),
+                "tokenizer.ggml.bos_token_id" => Some(MetaValue::Uint32(1)),
+                "tokenizer.ggml.unknown_token_id" => Some(MetaValue::Uint32(0)),
+                "tokenizer.ggml.seperator_token_id" => Some(MetaValue::Uint32(2)),
+                "tokenizer.ggml.normalizer.lowercase" => Some(MetaValue::Bool(standard)),
+                "tokenizer.ggml.normalizer_lowercase" => Some(MetaValue::Bool(!standard)),
+                "tokenizer.ggml.normalizer.strip_accents" => Some(MetaValue::Bool(standard)),
+                "tokenizer.ggml.normalizer_strip_accents" => Some(MetaValue::Bool(!standard)),
+                _ => None,
+            })
+            .unwrap();
+            assert_eq!(tok.lowercase, standard);
+            assert_eq!(tok.strip_accents, standard);
+            assert_eq!(
+                tok.preprocess("Héllo"),
+                [if standard { "hello" } else { "Héllo" }]
+            );
+        }
     }
 
     #[test]

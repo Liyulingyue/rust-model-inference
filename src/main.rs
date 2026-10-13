@@ -548,11 +548,38 @@ fn main() {
         return;
     }
 
+    if options.embedding && rust_model_inference::models::bge_vl::is_visual(source.as_ref()) {
+        if video.is_some() || audio.is_some() {
+            app::run_or_exit(Err("BGE visual embedding accepts an image".into()));
+            return;
+        }
+        let started = std::time::Instant::now();
+        let embedding = rust_model_inference::models::bge_vl::compute_embedding(
+            source.as_ref(),
+            prompt,
+            image,
+            options.threads,
+        )
+        .unwrap_or_else(|error| {
+            eprintln!("Inference error: {error}");
+            std::process::exit(1);
+        });
+        print_embedding(
+            &embedding,
+            options.embedding_output,
+            started.elapsed().as_millis(),
+        );
+        return;
+    }
+
     if options.embedding && (image.is_some() || video.is_some() || audio.is_some()) {
         let started = std::time::Instant::now();
         let embedding = match app::run_omni_embedding(
             source.as_ref(),
-            explicit_mmproj.expect("validated media embedding mmproj"),
+            explicit_mmproj.unwrap_or_else(|| {
+                eprintln!("media embedding requires --mmproj");
+                std::process::exit(1);
+            }),
             image,
             video,
             audio,
