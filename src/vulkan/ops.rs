@@ -4348,14 +4348,41 @@ fn check_weight_matmul_rows(
 /// Kept as a gate in `run_qwen3_operator_check`: any change to the saturation
 /// clamp in `silu_mul.comp` has to keep this at zero. See TODO.md.
 ///
-/// Returns the number of non-finite outputs, so a caller can assert on it
-/// without treating corruption as an error string.
+/// The values above, not the shape, are what make this gate work.
+    ///
+    /// `silu_mul.comp` is elementwise: no shared memory, no barrier, no
+    /// lane-to-lane dependency, and each output reads only the same-index gate
+    /// and up. So the count is a multiplier and every element gets identical
+    /// treatment; `-197.4` is the value that reaches the regime that produced the
+    /// NaN, and it is present.
+    ///
+    /// Worth stating because it looks like the opposite is true. A check whose
+    /// fidelity depends on matching production exactly is the pattern that let a
+    /// 96-element fixture hide a production-scale defect in the first place. Here
+    /// the width genuinely does not matter -- both 9728 and 10240 are exact
+    /// multiples of the 64-wide dispatch, so neither exercises a ragged tail
+    /// either -- and the constant is pinned to the model's so that stays true.
+    ///
+    /// The property is a property of the current kernel. If SiLU is ever
+    /// rewritten to share a row across lanes, the count starts to matter and
+    /// this stops representing production without saying so.
+    ///
+    /// Returns the number of non-finite outputs, so a caller can assert on it
+    /// without treating corruption as an error string.
+/// Width of the Z-Image Turbo FFN activation at 512x512.
+///
+/// The probe below used to hard-code 9728 next to a comment claiming it was the
+/// production shape, when the real width is 10240. Reading it from the model
+/// makes that class of drift impossible. `dit::FFN_WIDTH` is not reachable from
+/// here without pulling the model in, so `silu_probe_uses_the_production_ffn_width`
+/// asserts the two agree.
+#[cfg(feature = "vulkan")]
+const Z_IMAGE_FFN_WIDTH: usize = 10_240;
+
 #[cfg(feature = "vulkan")]
 pub fn silu_ffn_scale_probe(context: &VulkanContext) -> Result<usize, String> {
-    // 3840 rows * 9728 columns, the Z-Image Turbo FFN activation.
     const ROWS: usize = 3840;
-    const WIDTH: usize = 9728;
-    let count = ROWS * WIDTH;
+    let count = ROWS * Z_IMAGE_FFN_WIDTH;
     // `for_dims` sizes the Q8 staging for `n_in`, not for two FFN-wide feature
     // buffers, so gate and up need their own arena sized for both.
     let bytes = (count * 4 * 2).next_multiple_of(1 << 20) + (1 << 20);
@@ -4416,10 +4443,10 @@ pub fn run_qwen3_operator_check(context: &VulkanContext, formats: &[&str]) -> Re
     check_quantize_tie_even(context)?;
     if std::env::var("SILU_SCALE_ONLY").is_err() {
         match silu_ffn_scale_probe(context) {
-            Ok(0) => println!("operator=silu_mul_ffn_scale rows=3840 width=9728 finite=true"),
+            Ok(0) => println!("operator=silu_mul_ffn_scale rows=3840 width={Z_IMAGE_FFN_WIDTH} finite=true"),
             Ok(nonfinite) => {
                 return Err(format!(
-                    "silu_mul produced {nonfinite} non-finite values at the Z-Image FFN shape (3840 x 9728)"
+                    "silu_mul produced {nonfinite} non-finite values at the Z-Image FFN shape (3840 x {Z_IMAGE_FFN_WIDTH})"
                 ))
             }
             Err(error) => return Err(format!("silu_mul FFN-scale check: {error}")),
@@ -5937,6 +5964,19 @@ fn check_close(
     } else {
         Ok(())
     }
+}
+
+#[cfg(all(test, feature = "vulkan"))]
+/// The SiLU probe is only meaningful at a shape close to production, so pin the
+/// one number that used to drift. This is a compile-time constant on both sides,
+/// so it costs nothing and cannot be forgotten.
+#[test]
+fn silu_probe_uses_the_production_ffn_width() {
+    assert_eq!(
+        Z_IMAGE_FFN_WIDTH,
+        crate::models::diffusion::z_image::dit::FFN_WIDTH,
+        "the SiLU probe no longer runs at the production FFN width"
+    );
 }
 
 #[cfg(test)]
