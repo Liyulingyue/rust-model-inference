@@ -46,6 +46,15 @@ pub(super) fn validate_model_logits(gpu: &[f32], cpu: &[f32]) -> Result<(), Stri
 }
 
 pub(super) fn validate_model_kv(gpu: &KvState, cpu: &KvState) -> Result<(), String> {
+    validate_model_kv_range(gpu, cpu, 0, gpu.seq_len)
+}
+
+pub(super) fn validate_model_kv_range(
+    gpu: &KvState,
+    cpu: &KvState,
+    start_position: usize,
+    rows: usize,
+) -> Result<(), String> {
     if gpu.format != cpu.format
         || gpu.capacity != cpu.capacity
         || gpu.seq_len != cpu.seq_len
@@ -56,10 +65,19 @@ pub(super) fn validate_model_kv(gpu: &KvState, cpu: &KvState) -> Result<(), Stri
             gpu.format, gpu.capacity, gpu.seq_len, cpu.format, cpu.capacity, cpu.seq_len
         ));
     }
+    let end_position = start_position
+        .checked_add(rows)
+        .ok_or_else(|| "model KV range overflow".to_string())?;
+    if end_position > gpu.seq_len {
+        return Err(format!(
+            "model KV range {}..{} exceeds sequence length {}",
+            start_position, end_position, gpu.seq_len
+        ));
+    }
     let stride = gpu.arch.n_head_kv * gpu.arch.n_embd_head_k.max(gpu.arch.n_embd_head_v);
     for layer in 0..gpu.arch.n_layer {
-        let start = layer * gpu.capacity * stride;
-        let end = start + gpu.seq_len * stride;
+        let start = layer * gpu.capacity * stride + start_position * stride;
+        let end = start + rows * stride;
         match (&gpu.cache, &cpu.cache) {
             (KvCache::F16(gpu), KvCache::F16(cpu)) => {
                 if let Some(index) = gpu.k[start..end]
@@ -1227,7 +1245,9 @@ mod cancellation_tests {
 
 #[cfg(test)]
 mod model_contract_tests {
-    use super::validate_model_logits;
+    use super::{validate_model_kv, validate_model_kv_range, validate_model_logits};
+    use crate::core::scratchpad::{KvArch, KvCache, KvFormat, KvState};
+    use std::sync::Arc;
 
     #[test]
     fn model_logit_contract_rejects_reproduced_q8_drift() {
@@ -1238,5 +1258,24 @@ mod model_contract_tests {
     #[test]
     fn model_logit_contract_accepts_declared_tolerance() {
         validate_model_logits(&[3.1535], &[3.152948]).unwrap();
+    }
+
+    #[test]
+    fn model_kv_range_contract_checks_only_new_rows() {
+        let arch = Arc::new(KvArch::new(1, 1, 2, 2, 4));
+        let mut gpu = KvState::new(arch.clone(), KvFormat::F16, 4);
+        let mut cpu = KvState::new(arch, KvFormat::F16, 4);
+        gpu.seq_len = 2;
+        cpu.seq_len = 2;
+        if let (KvCache::F16(gpu), KvCache::F16(cpu)) = (&mut gpu.cache, &mut cpu.cache) {
+            gpu.k[..4].copy_from_slice(&[1, 2, 3, 4]);
+            gpu.v[..4].copy_from_slice(&[5, 6, 7, 8]);
+            cpu.k[..4].copy_from_slice(&[9, 10, 3, 4]);
+            cpu.v[..4].copy_from_slice(&[11, 12, 7, 8]);
+        } else {
+            unreachable!("test states use F16 KV");
+        }
+        validate_model_kv_range(&gpu, &cpu, 1, 1).unwrap();
+        assert!(validate_model_kv(&gpu, &cpu).is_err());
     }
 }

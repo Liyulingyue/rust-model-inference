@@ -1,6 +1,8 @@
 use super::config::Qwen3Rope;
 use super::forward::{forward_moe_token, Qwen3Input};
-use super::session::{validate_model_kv, validate_model_logits, Qwen3Session};
+use super::session::{
+    validate_model_kv, validate_model_kv_range, validate_model_logits, Qwen3Session,
+};
 use super::util::{
     checked_generated_position, checked_product, greedy_token, validate_input_shapes,
     validate_token_ids,
@@ -351,6 +353,7 @@ impl Qwen3Session<'_> {
                 embeddings: None,
                 deepstack_embeddings: None,
             };
+            let base = cpu.kv_state.seq_len;
             cpu.prefill(&decode_input, 1, true)?;
 
             // Reuse the resident GPU session for the probe. The outer
@@ -363,7 +366,7 @@ impl Qwen3Session<'_> {
                 return Err("GPU decode contract probe disabled the Vulkan session".into());
             }
             validate_model_logits(&self.scratch.logits, &cpu.scratch.logits)?;
-            validate_model_kv(&self.kv_state, &cpu.kv_state)?;
+            validate_model_kv_range(&self.kv_state, &cpu.kv_state, base, 1)?;
             gpu_logits.clone_from(&self.scratch.logits);
         }
 

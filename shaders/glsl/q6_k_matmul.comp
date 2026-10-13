@@ -30,6 +30,7 @@ int weight_code(uint slot, uint offset, uint local) {
 }
 
 shared float partial_sums[64];
+shared int input_q8[256];
 
 void main() {
     uint token_row = gl_WorkGroupID.z / pc.group_count;
@@ -38,9 +39,19 @@ void main() {
     uint lane = invocation % 8u;
     uint row = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 8u + invocation / 8u;
     uint rows = slot == 0u ? pc.rows0 : (slot == 1u ? pc.rows1 : pc.rows2);
+    bool valid_row = slot < pc.group_count && row < rows;
+    // Small projections are cache-friendly on UMA; amortize staging barriers
+    // only for genuinely wide activation rows.
+    bool shared_input = pc.n_in >= 4096u;
     precise float sum = 0.0;
-    if (slot < pc.group_count && row < rows) {
-        for (uint block = 0u; block < pc.blocks_per_row; ++block) {
+    for (uint block = 0u; block < pc.blocks_per_row; ++block) {
+        if (shared_input) {
+            for (uint local = invocation; local < 256u; local += 64u) {
+                input_q8[local] = q8(block * 256u + local);
+            }
+            barrier();
+        }
+        if (valid_row) {
             uint offset = (row * pc.blocks_per_row + block) * 210u;
             precise float scale = f16_decode(weight_byte(slot, offset + 208u) | (weight_byte(slot, offset + 209u) << 8u))
                 * uintBitsToFloat(arena.data[pc.scales_word + token_row * pc.scales_stride + block]);
@@ -48,32 +59,36 @@ void main() {
             if (pc.input_sum_word != 0u) {
                 for (uint i = 0u; i < 32u; i++) {
                     uint local = lane + i * 8u;
-                    dot += weight_scale(slot, offset, local) * q8(block * 256u + local)
+                    dot += weight_scale(slot, offset, local)
+                        * (shared_input ? input_q8[local] : q8(block * 256u + local))
                         * (weight_code(slot, offset, local) - 32);
                 }
                 precise float term = scale * float(dot);
                 sum += term;
-                continue;
-            }
-            for (uint group = 0u; group < 8u; group++) {
-                for (uint i = 0u; i < 4u; i++) {
-                    uint local = group * 32u + lane * 4u + i;
-                    dot += weight_scale(slot, offset, local) * q8(block * 256u + local)
-                        * weight_code(slot, offset, local);
+            } else {
+                for (uint group = 0u; group < 8u; group++) {
+                    for (uint i = 0u; i < 4u; i++) {
+                        uint local = group * 32u + lane * 4u + i;
+                        dot += weight_scale(slot, offset, local)
+                            * (shared_input ? input_q8[local] : q8(block * 256u + local))
+                            * weight_code(slot, offset, local);
+                    }
                 }
+                int correction = 0;
+                for (uint i = 0u; i < 32u; i++) {
+                    uint local = lane * 32u + i;
+                    correction += weight_scale(slot, offset, local)
+                        * (shared_input ? input_q8[local] : q8(block * 256u + local));
+                }
+                dot -= correction << 5;
+                sum = fma(scale, float(dot), sum);
             }
-            int correction = 0;
-            for (uint i = 0u; i < 32u; i++) {
-                uint local = lane * 32u + i;
-                correction += weight_scale(slot, offset, local) * q8(block * 256u + local);
-            }
-            dot -= correction << 5;
-            sum = fma(scale, float(dot), sum);
         }
+        if (shared_input) barrier();
     }
     partial_sums[invocation] = sum;
     barrier();
-    if (lane != 0u || slot >= pc.group_count || row >= rows) return;
+    if (lane != 0u || !valid_row) return;
     precise float result = 0.0;
     if (pc.input_sum_word != 0u) {
         for (uint i = 0u; i < 8u; i++) result += partial_sums[invocation + i];
