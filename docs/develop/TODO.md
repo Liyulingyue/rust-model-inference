@@ -1606,8 +1606,9 @@ host 侧 3700 万次 exp」。denoise 52.7 s → 42.5 s，端到端 59.9 s → 4
 
 `FFN_BATCH_MAX=<n>` 可限制合批生效的层数（默认全部），用于二分定位。
 
-**遗留**：合批后与 CPU 基线 PSNR 31.52 dB（改动前 33.34 dB），差异来自 TODO-020
-风险 1 的 silu 饱和，尚未追平。
+**遗留**：合批后与 CPU 基线 PSNR 31.61 dB（改动前 33.34 dB），差异来自 TODO-020
+风险 1 的 silu 饱和。TODO-023 的 quantize reciprocal 修复已把该值从 31.52 拉回
+32.21 dB（mean|Δ| 3.44 → 3.01），剩余差距仍主要来自 silu 饱和边界。
 
 ### TODO-022: Z-Image Q/K norm + 交错 RoPE 上设备 — ✅ 已合入
 
@@ -1640,3 +1641,44 @@ Q 与 K 同属一个 region，仅靠 `k_word` 无法区分，K 每行基址还�
 生产规模（3840 token × 30 head × 128）下与 host 的 `rms_norm_inplace` +
 `rotate_interleaved_inplace` **逐位一致**，并额外断言 **V 与输入逐位相同**
 （V 未被触碰是 K 基址算错的唯一可观测信号）。
+
+### TODO-023: Vulkan Q8_0 量化倒数与 CPU 参考差 1 ulp — ✅ 已修复
+
+`vk_ops_check` 的 `check_quantize_tie_even` 一直失败：
+`mismatch at 0: gpu=-21 cpu=-20`。与 RoPE 那次不同，这次**不是新引入的**，
+自 2026-09-08 的 `621c622` 起就在失败。
+
+**根因**：倒数算的形式不同。
+
+| | scale | inverse |
+|---|---|---|
+| CPU (`quantize_q8_0_into`) | `amax / 127.0` | `1.0 / scale` |
+| GPU (`quantize_q8_0.comp`) | `divide(amax, 127.0)` | `divide(127.0, amax)` |
+
+两者数学上相等，但 `1/(amax/127)` 与 `127/amax` 差 1 ulp。对测试输入
+`0xbdbf0aec / 0x3f13f10a`，这个 ulp 让乘积从**恰好 -20.5** 变成 -20.500002——
+本来是个 tie，round-to-even 应给 -20（与 CPU 一致），现在不再是 tie，直接给 -21。
+
+**修复**：inverse 改为从已算出的 `scale` 出发，`divide_finite_normal(1.0, scale)`。
+`divide_finite_normal` 本身是精确舍入除法，与 CPU 的硬件除法一致。
+
+**代价为零**：两种写法都恰好做两次精确除法（算 scale 一次、算 inverse 一次），
+只是第二次除法的形式变了。
+
+**收益**：GPU 量化与 CPU 参考逐位一致，且**整体画质变好**——512×512 8 步同 seed
+对比 CPU 渲染，PSNR **31.61 → 32.21 dB**，mean|Δ| **3.44 → 3.01**（降 12%）。
+注意 GPU 修复前后两图之间 PSNR 只有 30.01 dB：扩散 8 步会把任何微小差异放大成
+完全不同的轨迹，**不能用「与上一版 GPU 比」判断好坏，只能对 CPU 参考比**。
+
+### TODO-024: attention score 归约无法与 CPU 逐位一致 — 不修，记录
+
+修完 TODO-023 后 operator check 往下走，暴露下一个失败：
+
+    attention score reduction mismatch: gpu=-0.12506104 cpu=-0.12512207
+
+相对误差约 5e-4。这是 **NEON 的 FMA 树形累加** 与 shader 的**并行归约**之间的
+固有差异，不是逻辑错误。要逐位匹配就得在 shader 里复刻 NEON 的 lane 分区、
+FMA 收缩顺序和水平加法树——既不现实也不值得。
+
+正确做法是给这个 check 设**相对容差**并写明理由，而不是改 shader。
+但放宽自检的判据是另一件事，**留给用户决定**，本次不动。

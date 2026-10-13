@@ -308,13 +308,27 @@ cache 布局**——`cache[(layer*token_count + position)]` 两种嵌套共用�
 > `zimage_tiled_matmul_beats_the_one_token_per_weight_kernel`，它轮流读取 8 个
 > 不同权重矩阵以绕开 L2，单矩阵热缓存下会报出 10 万 GOP/s 的假数字。
 
-### 还没搬上 GPU 的
+### 还在 host 上的
 
-attention 仍占单步 23%，在 CPU 上跑。它比 GEMM 难搬：DiT 没有 KV cache——每个
-token 只看自己 block 里的每个 token 一次——而现成的 scores/values operator
-按 decoder 的 `[layer][position][head][dim]` 缓存布局索引，需要给
-`kv_write` 和 `attention_scores` 加源 stride，并且要确认 softmax 归约的轴。
-另外它有和 GEMM 同样的 514 GB K 重读，必须一并做 token 分块才有意义。
+DiT 的整条链现在都在设备上：rms_norm、AdaLN 调制、QKV 投影、Q/K norm、
+交错 RoPE、attention、out proj、FFN 四个投影、SiLU。剩下真正跑在 CPU 的只有：
+
+| 阶段 | 耗时 | 说明 |
+|---|---|---|
+| FFN 的 W2 输出回读 | 1.38 s / 8 步 | 回读后接 norm + 门控残差 |
+| AdaLN modulation | 0.02 s | 每 block 的 scale/shift 向量 |
+| rope | 0.3 ms | 已在设备，只是 profile 槽位仍标 host |
+
+**回读那一项是剩下最大的一块。** W2 的输出要进 `readback_norm_and_residual_rows`
+做 ffn_norm2 和门控残差，两者都作用在 `HIDDEN` 宽的整行上而不是 FFN 宽度，
+所以搬上设备要先确认这条链在 F16 arena 上的舍入契约。
+
+attention 早期确实搬不动——DiT 没有 KV cache（每个 token 只看自己 block 里的每个
+token 一次），而现成的 scores/values operator 按 decoder 的
+`[layer][position][head][dim]` 缓存布局索引。现在通过给 `kv_write` 和
+`attention_scores` 加源 stride、并让整段序列作为单个 block 走 `full_attention`
+（去掉 decoder 依赖的 causal 上限）解决；scores 用的是 tiled kernel，
+带 `QUERY_TILE` 的 query 分块。
 
 > `RUST_GPU_DIAG=1` 会逐步打印 `blocks_on_gpu` 与 `projections`。这个计数器
 > 抓到过一次静默故障：block 0 报错后 `mark_gpu_broken` 把设备锁死，而 block
@@ -374,8 +388,8 @@ GPU 一列的判定依据与已知缺口：
 - **已跑通**：NVIDIA GB10（`--features vulkan` 构建）上 8 步 512×512 端到端出图，
   **70.6 s**（同会话 CPU 574.6 s，8.1×）；`RUST_GPU_DIAG=1` 报 `blocks_on_gpu=34`
   （全部 34 层进入 `run_block_gpu`），每步 170 次 projection。
-- **画质**：同 seed 512×512 8 步，GPU 与 CPU 输出 PSNR **33.34 dB**，
-  mean\|Δ\| 2.81/255。`RUST_GPU_TEXT=1` 的输出与默认配置逐字节一致；
+- **画质**：同 seed 512×512 8 步，GPU 与 CPU 输出 PSNR **32.21 dB**，
+  mean\|Δ\| 3.01/255（Q8_0 倒数对齐 CPU 后；此前 31.61 dB / 3.44）。`RUST_GPU_TEXT=1` 的输出与默认配置逐字节一致；
   `RUST_GPU_ATTENTION=0` 与默认相差 PSNR 31.4 dB（该开关按设计改变浮点路径）。
 - **单测覆盖**：`cargo test --features vulkan --lib` 下 5 个 GPU 正确性测试通过
   （AdaLN 调制、融合 norm+modulate、batched QKV、W2 scale 抵消、attention 分块逐位一致）。
@@ -454,7 +468,7 @@ act = fma(res, 1/den, act);   // 需要 1/den 是正规数
   破坏者。
 
 **已修复**：clamp 改 `±80`，并新增生产规模门禁。⚠️ clamp 值不可调回 88.376，
-且 GPU SiLU 自此与 CPU 不再逐位一致（PSNR 33.34 → 31.52 dB）。
+且 GPU SiLU 自此与 CPU 不再逐位一致（PSNR 33.34 → 31.61 dB）。
 完整风险登记见 [`docs/develop/TODO.md`](../develop/TODO.md) TODO-020。
 
 ### 其余已知缺口
