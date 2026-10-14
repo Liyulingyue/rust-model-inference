@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use serde_json::Value;
 use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
 
 use super::kernels::{
@@ -41,6 +42,33 @@ struct TextDimensions {
     layers: usize,
     vocab: usize,
     buckets: usize,
+}
+
+struct TextPrefixSource {
+    source: Arc<dyn TensorSource>,
+}
+
+impl TextPrefixSource {
+    fn mapped(&self, name: &str) -> String {
+        name.strip_prefix("dreamx.text")
+            .filter(|suffix| suffix.is_empty() || suffix.starts_with('.'))
+            .map(|suffix| format!("astronex.text{suffix}"))
+            .unwrap_or_else(|| name.to_owned())
+    }
+}
+
+impl TensorSource for TextPrefixSource {
+    fn metadata(&self, key: &str) -> Option<&crate::core::tensor::MetaValue> {
+        self.source.metadata(key)
+    }
+
+    fn tensor_info(&self, name: &str) -> Option<&crate::core::tensor::TensorInfo> {
+        self.source.tensor_info(&self.mapped(name))
+    }
+
+    fn tensor_slice(&self, name: &str) -> Option<&[u8]> {
+        self.source.tensor_slice(&self.mapped(name))
+    }
 }
 
 impl TextDimensions {
@@ -185,7 +213,15 @@ impl TextBlock {
 
         let normed = rms_norm_rows(hidden, tokens, &self.norm2, TEXT_EPSILON)?;
         let mut gate = self.gate.forward(pool, &normed, tokens)?;
-        gelu_inplace(&mut gate);
+        // UMT5's frozen config selects `gelu_new` (the tanh approximation).
+        // Keep the strict parity path on the same scalar operation ordering as
+        // the independent Oracle; the generic activation helper may dispatch to
+        // NEON even when RMI_SCALAR is set and uses a computed sqrt constant.
+        if crate::ops::scalar_mode() {
+            gelu_new_scalar_inplace(&mut gate);
+        } else {
+            gelu_inplace(&mut gate);
+        }
         let up = self.up.forward(pool, &normed, tokens)?;
         for (gate, up) in gate.iter_mut().zip(up) {
             *gate *= up;
@@ -195,6 +231,21 @@ impl TextBlock {
             *hidden += residual;
         }
         Ok(())
+    }
+}
+
+#[inline]
+fn gelu_new_scalar_inplace(values: &mut [f32]) {
+    // This is the NewGELU formula used by transformers' `gelu_new`.  Spell the
+    // operations out to match tools/oracle/astronex_world/scalar.c: the
+    // constant is intentionally the rounded F32 form of sqrt(2/pi), and the
+    // cube is evaluated before multiplying by 0.044715.
+    const SQRT_2_OVER_PI: f32 = 0.797_884_560_802_865_4_f32;
+    for value in values {
+        let x = *value;
+        let cube = (x * x) * x;
+        let z = SQRT_2_OVER_PI * (x + 0.044_715f32 * cube);
+        *value = 0.5f32 * x * (1.0f32 + z.tanh());
     }
 }
 
@@ -224,6 +275,38 @@ impl DreamXTextEncoder {
             &tokenizer_json,
             pool,
             TextDimensions::RELEASED,
+        )
+    }
+
+    /// Load the frozen UMT5-xxl component used by Astronex-World.
+    ///
+    /// The source is converted to the existing DreamX suffix contract by the
+    /// small prefix adapter above. This keeps the public encoder and all old
+    /// DreamX callers unchanged while making the Astronex contract explicit.
+    pub fn load_astronex(
+        source: Arc<dyn TensorSource>,
+        pool: Arc<ComputePool>,
+    ) -> Result<Self, String> {
+        let tokenizer_json = source
+            .metadata("astronex.tokenizer.json")
+            .and_then(|value| value.to_string_val())
+            .ok_or("Invalid Astronex metadata astronex.tokenizer.json: expected string")?
+            .to_owned();
+        let config_json = source
+            .metadata("astronex.text.config_json")
+            .or_else(|| source.metadata("astronex.text.config.json"))
+            .or_else(|| source.metadata("astronex.text.config"))
+            .and_then(|value| value.to_string_val())
+            .ok_or("Invalid Astronex metadata astronex.text.config_json: expected string")?;
+        let dimensions = astronex_text_dimensions(config_json)?;
+        let prefixed: Arc<dyn TensorSource> = Arc::new(TextPrefixSource { source });
+        let source_ref: &'static dyn TensorSource = unsafe { &*Arc::as_ptr(&prefixed) };
+        Self::load_with_dimensions(
+            Some(prefixed),
+            source_ref,
+            &tokenizer_json,
+            pool,
+            dimensions,
         )
     }
 
@@ -303,10 +386,28 @@ impl DreamXTextEncoder {
                 &mut hidden[row * self.dimensions.dim..(row + 1) * self.dimensions.dim],
             )?;
         }
-        for block in &self.blocks {
+        trace_text_checkpoint(
+            "astronex.text.embedding",
+            None,
+            &[tokens.real_len, self.dimensions.dim],
+            &hidden,
+        )?;
+        for (layer, block) in self.blocks.iter().enumerate() {
             block.forward(&self.pool, &mut hidden, tokens.real_len, self.dimensions)?;
+            trace_text_checkpoint(
+                &format!("astronex.text.blocks.{layer}.residual2"),
+                Some(layer),
+                &[tokens.real_len, self.dimensions.dim],
+                &hidden,
+            )?;
         }
         let hidden = rms_norm_rows(&hidden, tokens.real_len, &self.norm, TEXT_EPSILON)?;
+        trace_text_checkpoint(
+            "astronex.text.output",
+            None,
+            &[tokens.real_len, self.dimensions.dim],
+            &hidden,
+        )?;
         output[..hidden.len()].copy_from_slice(&hidden);
         Ok(output)
     }
@@ -359,6 +460,83 @@ impl DreamXTextEncoder {
             pool: Arc::new(ComputePool::new(2)),
         })
     }
+}
+
+fn astronex_text_dimensions(config_json: &str) -> Result<TextDimensions, String> {
+    let config: Value = serde_json::from_str(config_json)
+        .map_err(|error| format!("Invalid Astronex UMT5 config JSON: {error}"))?;
+    let require_usize = |name: &str| {
+        config[name]
+            .as_u64()
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| format!("Astronex UMT5 config missing integer {name}"))
+    };
+    let dimensions = TextDimensions {
+        context: 512,
+        dim: require_usize("d_model")?,
+        ffn: require_usize("d_ff")?,
+        heads: require_usize("num_heads")?,
+        layers: require_usize("num_layers")?,
+        vocab: require_usize("vocab_size")?,
+        buckets: require_usize("relative_attention_num_buckets")?,
+    };
+    dimensions.validate()?;
+    if dimensions.context != TextDimensions::RELEASED.context
+        || dimensions.dim != TextDimensions::RELEASED.dim
+        || dimensions.ffn != TextDimensions::RELEASED.ffn
+        || dimensions.heads != TextDimensions::RELEASED.heads
+        || dimensions.layers != TextDimensions::RELEASED.layers
+        || dimensions.vocab != TextDimensions::RELEASED.vocab
+        || dimensions.buckets != TextDimensions::RELEASED.buckets
+    {
+        return Err("Astronex UMT5 config dimensions do not match UMT5-XXL".into());
+    }
+    let check = |name: &str, expected: &str| {
+        (config[name].as_str() == Some(expected))
+            .then_some(())
+            .ok_or_else(|| format!("Astronex UMT5 config {name} must be {expected}"))
+    };
+    check("model_type", "umt5")?;
+    check("dense_act_fn", "gelu_new")?;
+    check("feed_forward_proj", "gated-gelu")?;
+    if config["architectures"]
+        .as_array()
+        .is_none_or(|values| !values.iter().any(|value| value == "UMT5EncoderModel"))
+        || config["d_kv"].as_u64() != Some(64)
+        || config["relative_attention_max_distance"].as_u64() != Some(128)
+        || config["pad_token_id"].as_u64() != Some(0)
+        || config["layer_norm_epsilon"]
+            .as_f64()
+            .map(|value| value as f32)
+            != Some(TEXT_EPSILON)
+    {
+        return Err("Astronex UMT5 config does not match the frozen encoder contract".into());
+    }
+    Ok(dimensions)
+}
+
+#[cfg(feature = "parity-trace")]
+fn trace_text_checkpoint(
+    name: &str,
+    layer: Option<usize>,
+    shape: &[usize],
+    values: &[f32],
+) -> Result<(), String> {
+    if crate::parity_trace::enabled(name) {
+        crate::parity_trace::checkpoint(name, layer, shape, values)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "parity-trace"))]
+fn trace_text_checkpoint(
+    _name: &str,
+    _layer: Option<usize>,
+    _shape: &[usize],
+    _values: &[f32],
+) -> Result<(), String> {
+    Ok(())
 }
 
 fn configured_tokenizer(json: &str, context: usize) -> Result<Tokenizer, String> {
@@ -461,5 +639,62 @@ mod tests {
         assert!(out.negative[TINY_TEXT_DIM..]
             .iter()
             .all(|&value| value == 0.0));
+    }
+
+    #[test]
+    fn astronex_text_prefix_is_explicit() {
+        struct Empty;
+        impl TensorSource for Empty {
+            fn metadata(&self, _key: &str) -> Option<&crate::core::tensor::MetaValue> {
+                None
+            }
+            fn tensor_info(&self, _name: &str) -> Option<&crate::core::tensor::TensorInfo> {
+                None
+            }
+            fn tensor_slice(&self, _name: &str) -> Option<&[u8]> {
+                None
+            }
+        }
+        let source = TextPrefixSource {
+            source: Arc::new(Empty),
+        };
+        assert_eq!(
+            source.mapped("dreamx.text.blocks.0.attn.q.weight"),
+            "astronex.text.blocks.0.attn.q.weight"
+        );
+        assert_eq!(
+            source.mapped("dreamx.textual.weight"),
+            "dreamx.textual.weight"
+        );
+    }
+
+    #[test]
+    fn astronex_text_config_rejects_nearby_architectures() {
+        let config = r#"{
+            "model_type":"t5",
+            "architectures":["T5EncoderModel"],
+            "d_model":4096,
+            "d_ff":10240,
+            "d_kv":64,
+            "num_heads":64,
+            "num_layers":24,
+            "vocab_size":256384,
+            "relative_attention_num_buckets":32,
+            "relative_attention_max_distance":128,
+            "pad_token_id":0,
+            "dense_act_fn":"gelu_new",
+            "feed_forward_proj":"gated-gelu"
+        }"#;
+        assert!(astronex_text_dimensions(config).is_err());
+    }
+
+    #[test]
+    fn scalar_gelu_new_matches_oracle_bits() {
+        let mut values = [1.0f32, -1.0, 5.0, -5.0];
+        gelu_new_scalar_inplace(&mut values);
+        assert_eq!(
+            values.map(f32::to_bits),
+            [0x3f57_585c, 0xbe22_9e90, 0x409f_ffff, 0xb4a0_0000]
+        );
     }
 }

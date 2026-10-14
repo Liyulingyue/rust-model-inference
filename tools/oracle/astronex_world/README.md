@@ -1,0 +1,68 @@
+# Astronex-World scalar Oracle
+
+This directory is an independent raw-bit gate for the pinned official graph.
+`scalar.c` is compiled at run time with `-ffp-contract=off`,
+`-fno-vectorize`, and `-fno-slp-vectorize`; no BLAS, fused attention, CUDA,
+approximate operator, or Rust implementation is used to produce Oracle values.
+The graph is CPU F32 after loading weights. The only wider arithmetic allowed is
+the official F64/complex RoPE and time-frequency path; its result is rounded to
+F32 at the graph boundary. Any other floating operator or BF16/F16 cast fails
+closed.
+
+The reference checkout must be clean at
+`27584bf1a89da01ef35a03b48d83bc818d2adf2b`. If a contract checkout is supplied,
+it must be clean at `dec4ec502f7113a1ab07b78ae40a7ac1b88b2eeb`. The runner does
+not edit either checkout.
+
+## Commands
+
+```sh
+.venv/bin/python tools/oracle/astronex_world/trace_official.py self-test
+.venv/bin/python tools/oracle/astronex_world/trace_official.py fixture /tmp/astronex-fixture
+.venv/bin/python tools/oracle/astronex_world/trace_official.py trace \
+  --weights models/Astronex-World --contract references/astronex-world-contract \
+  /tmp/astronex-oracle
+.venv/bin/python tools/oracle/astronex_world/trace_official.py compare \
+  /tmp/astronex-oracle /tmp/astronex-native
+```
+
+`fixture` is an operator contract only. It proves sequential reductions,
+materialized softmax attention, 3-D convolution, token IDs, trace ordering,
+and first-divergence reporting; it is not a model-weight result. `trace` refuses
+to start until all indexed denoiser shards, `tokenizer/`, `text_encoder/`, and
+`vae/` are present and complete. The real trace uses a fixed prompt, fixed
+CPU noise, 32x32 latent geometry, camera matrices, action vectors, an initial
+bidirectional-style denoiser call, a cache continuation call, VAE encode/decode,
+and the official UniPC sampler. It records the text/tokenizer, non-causal
+bidirectional Wan stage, causal cache stage (including camera/action inputs),
+VAE encode/decode, and UniPC stages in one ordered stream. The current native
+route intentionally implements only the base `WanModel` graph; the causal cache,
+camera/action, and `clip_fea/y` records remain diagnostic coverage and are not
+claimed as native parity.
+
+## Trace contract
+
+Each line in `trace.jsonl` contains `name`, zero-based `occurrence`, `kind`, and
+`shape`. Floating checkpoints contain one little-endian F32 file and an exact
+element `count`; token checkpoints contain integer `values`. The comparator
+requires both traces to have nonzero equal counts, identical names/order,
+occurrences, kinds, shapes, token IDs, and file lengths. It then compares raw
+`u32` bits and reports the first divergent checkpoint/index with both hex words.
+Missing, empty, duplicate, truncated, or extra checkpoints are errors. Cache
+continuations intentionally repeat stable names with occurrence `1` rather
+than silently replacing occurrence `0`.
+
+The converter's mapping is preserved: official `model.<suffix>` becomes
+`astronex.<suffix>` in the native trace, while the Oracle hooks the official
+module names (`astronex.text.*`, `astronex.denoiser.*`, and `astronex.vae.*`).
+The native side must normalize those names to this same order before running
+`compare`. Approximate GELU, SIMD/FMA and quantized kernels, platform `ln`/
+`exp_m1`, UniPC scheduler arithmetic, GPU execution, and the causal-only paths
+are excluded from the raw-bit gate; they require separate tolerance or behavior
+tests.
+
+The independent small-graph tests cover those same official module classes
+without weights. Real-weight execution remains fail-closed: every indexed shard
+must be complete and an `.incomplete` shard is deliberately rejected. A real
+causal trace can take substantially longer than the supported 32x32 native
+smoke, so an interrupted run is not a parity result.
