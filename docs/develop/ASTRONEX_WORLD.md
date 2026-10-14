@@ -66,11 +66,13 @@ native-size probes measured 7360x3072 -> 14336 BF16 projection at approximately
 attention at 2.73-3.23 seconds. The attention arena is 633,077,760 bytes, independent
 of total video duration. These are kernel probes, not full-video timings.
 
-The actual M3 Max
-GGUF CLI completed 32x32, five-frame MP4 generation in 135.20 seconds, including
-an internally generated eight-latent-frame block. That result verifies the media
-chain, not production-resolution visual quality. Native 720p full generation
-is still under validation; do not infer its runtime from that tiny clip.
+The current release binary completed real-GGUF 512x288, 29-frame, 24-FPS MP4
+generation on the M3 Max. ffprobe confirms 1.208333 seconds and full ffmpeg
+decoding confirms 29 distinct frame hashes. Six inspected frames show a boat,
+water, mountains and continuous scene changes. The command took 826.11 seconds,
+with 18,814,550,016 bytes maximum RSS and 18,249,758,144 bytes peak footprint.
+It ran alongside the 720p task and caused memory paging; this is not an isolated
+performance benchmark. Native 720p full generation is still under validation.
 
 Optional validation artifacts: `RMI_ASTRONEX_PROFILE=1` logs each layer;
 `RMI_ASTRONEX_LATENT_OUT=path` saves C,T,H,W as four little-endian u64 values,
