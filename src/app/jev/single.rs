@@ -190,11 +190,21 @@ fn run_jev_decision_data_with_image(
             false,
             jinja.clone(),
         ),
+        "mellum" => mellum::run_jev_decision_mellum(
+            source.clone(),
+            context,
+            &prepared,
+            n_threads_arg,
+            prefill_batch_size,
+            false,
+            jinja.clone(),
+        ),
         other => Err(format!(
             "--jev is not yet supported for architecture {:?}; \
              currently supported: qwen3 / qwen3vl / qwen35 / \
              llama / k2-horizon / granite / nanbeige / qwen2_2 / glm4 / \
-             gemma4 / lfm2 / lfm25 / spark2_5 / hunyuan-dense / nemotron_h",
+             gemma4 / lfm2 / lfm25 / mellum / spark2_5 / hunyuan-dense / \
+             nemotron_h / exaone / mistral3 / falcon-h1",
             other
         )),
     }
@@ -393,6 +403,7 @@ pub(crate) mod lfm2;
 pub(crate) mod lfm25;
 pub(crate) mod lfm2moe;
 pub(crate) mod llama;
+pub(crate) mod mellum;
 pub(crate) mod nemotron_h;
 pub(crate) mod qwen3;
 pub(crate) mod qwen35;
