@@ -318,19 +318,19 @@ fn validate_edge0_trunk(trunk: &HybridTrunk<'_>) -> Result<(), String> {
         let prefix = format!("layer {index}");
         require(
             &format!("{prefix} shared gate"),
-            Some(&layer.ffn_gate),
+            layer.ffn_gate.as_ref(),
             trunk.config.n_embd,
             trunk.config.n_ff,
         )?;
         require(
             &format!("{prefix} shared up"),
-            Some(&layer.ffn_up),
+            layer.ffn_up.as_ref(),
             trunk.config.n_embd,
             trunk.config.n_ff,
         )?;
         require(
             &format!("{prefix} shared down"),
-            Some(&layer.ffn_down),
+            layer.ffn_down.as_ref(),
             trunk.config.n_ff,
             trunk.config.n_embd,
         )?;

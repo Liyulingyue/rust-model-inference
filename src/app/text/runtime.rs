@@ -149,7 +149,7 @@ pub fn build_text_runtime(
         // surface (the CLI's `run_qwen3_family_multimodal` covers them too);
         // only the projector family differs, which the image path handles.
         Ok(Box::new(Qwen3TextRuntime::new(options)?))
-    } else if matches!(arch, "qwen35" | "edge0") {
+    } else if matches!(arch, "qwen35" | "edge0" | "qwen35moe") {
         Ok(Box::new(HybridTextRuntime::new(options)?))
     } else if arch == "lfm2moe" {
         Ok(Box::new(Lfm2MoeTextRuntime::new(options)?))

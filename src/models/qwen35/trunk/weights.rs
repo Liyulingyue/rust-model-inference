@@ -48,9 +48,11 @@ pub struct Qwen35LayerWeights<'a> {
     pub ssm_alpha: Option<Weight<'a>>,
     pub ssm_norm: Option<Vec<f32>>,
     pub ssm_out: Option<Weight<'a>>,
-    pub ffn_gate: Weight<'a>,
-    pub ffn_up: Weight<'a>,
-    pub ffn_down: Weight<'a>,
+    /// Dense SwiGLU FFN. Absent on MoE-only towers, where every layer routes
+    /// through experts instead and the weights are unused.
+    pub ffn_gate: Option<Weight<'a>>,
+    pub ffn_up: Option<Weight<'a>>,
+    pub ffn_down: Option<Weight<'a>>,
 }
 
 /// Shared Qwen3.5/Edge0 attention and SSM weights + parsed config.
@@ -202,13 +204,15 @@ impl<'a> HybridTrunk<'a> {
         if arch == Some("edge0") {
             return Err("Edge0 architecture requires Edge0Model::from_source".into());
         }
-        if arch != Some("qwen35") {
+        // qwen35moe shares every attention and SSM tensor with qwen35; only the
+        // FFN differs, and OccamyModel supplies the MoE half.
+        if arch != Some("qwen35") && arch != Some("qwen35moe") {
             return Err(format!(
                 "Qwen35Model requires general.architecture=qwen35, got {arch:?}"
             ));
         }
-        let config = Qwen35Config::from_source(source)?;
-        Self::load_trunk(source, config, false)
+        let config = Qwen35Config::from_source_for_arch(source, "qwen35moe")?;
+        Self::load_trunk(source, config, true)
     }
 
     pub(crate) fn load_trunk(
@@ -351,12 +355,16 @@ impl<'a> HybridTrunk<'a> {
                 }
             }
 
-            let ffn_gate = load_weight(source, &format!("blk.{}.ffn_gate.weight", i))
-                .ok_or_else(|| format!("Missing blk.{}.ffn_gate.weight", i))?;
-            let ffn_up = load_weight(source, &format!("blk.{}.ffn_up.weight", i))
-                .ok_or_else(|| format!("Missing blk.{}.ffn_up.weight", i))?;
-            let ffn_down = load_weight(source, &format!("blk.{}.ffn_down.weight", i))
-                .ok_or_else(|| format!("Missing blk.{}.ffn_down.weight", i))?;
+            let ffn_gate = load_weight(source, &format!("blk.{}.ffn_gate.weight", i));
+            let ffn_up = load_weight(source, &format!("blk.{}.ffn_up.weight", i));
+            let ffn_down = load_weight(source, &format!("blk.{}.ffn_down.weight", i));
+            if ffn_gate.is_none() && ffn_up.is_none() && ffn_down.is_none() {
+                // MoE-only tower; the expert weights live in a separate loader.
+            } else if ffn_gate.is_none() || ffn_up.is_none() || ffn_down.is_none() {
+                return Err(format!(
+                    "blk.{i} has a partial dense FFN; all three of ffn_gate/ffn_up/ffn_down are required"
+                ));
+            }
             layers.push(Qwen35LayerWeights {
                 attn_norm,
                 attn_post_norm,

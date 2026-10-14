@@ -233,10 +233,11 @@ Q8_0_BLOCK_BYTES = 34  # f16 scale + 32 x int8
 
 
 def quantize_q8_0(values: np.ndarray) -> bytes:
-    """GGML Q8_0: per 32-element block, f16 scale = amax/127, int8 payload.
+    """GGML Q8_0: per 32-element block, fp16 (IEEE half) scale = amax/127, int8 payload.
 
     Rounding is round-half-away-from-zero to match ggml's roundf, and a zero
-    block encodes a zero scale.
+    block encodes a zero scale. The fp16 representation matches what ggml reads
+    via GGML_FP16_TO_FP32 (NOT bf16 — see ggml-quants.c:dequantize_row_q8_0).
     """
     flat = np.ascontiguousarray(values, dtype=np.float32).reshape(-1)
     if flat.size % Q8_0_BLOCK:
@@ -245,13 +246,16 @@ def quantize_q8_0(values: np.ndarray) -> bytes:
         )
     blocks = flat.reshape(-1, Q8_0_BLOCK)
     amax = np.max(np.abs(blocks), axis=1)
-    scale = (amax / 127.0).astype(np.float16)
-    scale_f32 = scale.astype(np.float32)
-    safe = np.where(scale_f32 == 0.0, np.float32(1.0), scale_f32)
+    scale_f32 = amax / 127.0
+    # Convert scale to IEEE fp16 via numpy (round-to-nearest-even, matches ggml_fp32_to_fp16).
+    scale_bits = scale_f32.astype(np.float16).view(np.uint16)
+    scale_f32_back = scale_bits.view(np.float16).astype(np.float32)
+    safe = np.where(scale_f32_back == 0.0, np.float32(1.0), scale_f32_back)
     scaled = blocks / safe[:, None]
     q = (np.floor(np.abs(scaled) + 0.5) * np.sign(scaled)).clip(-127, 127).astype(np.int8)
     out = np.empty((blocks.shape[0], Q8_0_BLOCK_BYTES), dtype=np.uint8)
-    out[:, 0:2] = scale.view(np.uint8).reshape(-1, 2)
+    scale_bytes = np.frombuffer(scale_bits.tobytes(), dtype=np.uint8).reshape(-1, 2)
+    out[:, 0:2] = scale_bytes
     out[:, 2:] = q.view(np.uint8).reshape(-1, Q8_0_BLOCK)
     return out.tobytes()
 
@@ -300,10 +304,18 @@ def quantize_q4_0(values: np.ndarray) -> bytes:
 
 
 def bf16_bytes_to_q8_0(raw_bf16: bytes) -> bytes:
+    """Quantize BF16 weights to Q8_0 blocks.
+
+    Input raw_bf16 bytes are in PyTorch row-major layout. GGUF Q8_0 storage uses
+    the same row-major layout (the first dim of the tensor shape determines row stride,
+    but the bytes are laid out sequentially).
+    """
     words = np.frombuffer(raw_bf16, dtype="<u2")
     f32 = np.empty(words.size, dtype=np.float32)
     for i, bits in enumerate(words):
-        f32[i] = struct.unpack("<f", struct.pack("<I", bits << 16))[0]
+        # Convert to Python int first to avoid np.uint16 << 16 overflow.
+        b = int(bits)
+        f32[i] = struct.unpack("<f", struct.pack("<I", b << 16))[0]
     return quantize_q8_0(f32)
 
 

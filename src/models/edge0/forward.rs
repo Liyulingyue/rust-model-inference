@@ -45,6 +45,7 @@ impl<'a> Edge0Model<'a> {
             pool,
             mrope_positions,
             Some(&self.moe),
+            None,
         )
     }
 }

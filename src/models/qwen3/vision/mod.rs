@@ -286,7 +286,7 @@ impl Q8Weight {
     }
 }
 
-fn matmul_f16_weight(
+pub(crate) fn matmul_f16_weight(
     pool: &ComputePool,
     weight: &[u8],
     input: &[f32],
@@ -310,7 +310,7 @@ fn matmul_f16_weight(
     });
 }
 
-fn matmul_f32_weight(
+pub(crate) fn matmul_f32_weight(
     pool: &ComputePool,
     weight: &[f32],
     input: &[f32],

@@ -39,6 +39,9 @@ impl MediaKind {
 pub enum ProjectorFamily {
     Qwen3VlMerger,
     Qwen25Omni,
+    /// RADIOv4-H tower plus a ReLU-squared MLP head, as shipped by
+    /// ZDTaichu5.0-9B. See `models::zdt::vision`.
+    NemotronV2Vl,
 }
 
 pub fn validate_mmproj_capabilities(
@@ -59,6 +62,7 @@ pub fn validate_mmproj_capabilities(
     let family = match declared.as_deref() {
         Some("qwen3vl_merger") => ProjectorFamily::Qwen3VlMerger,
         Some("qwen2.5o" | "qwen2.5vl_merger") => ProjectorFamily::Qwen25Omni,
+        Some("nemotron_v2_vl") => ProjectorFamily::NemotronV2Vl,
         Some(other) => {
             return Err(format!("Unsupported clip.projector_type: {other}"));
         }
@@ -70,8 +74,20 @@ pub fn validate_mmproj_capabilities(
             other => return Err(format!("Unsupported multimodal architecture: {other}")),
         },
     };
+    // The RADIO projector is only wired to the Qwen3.5 tower it was
+    // converted with; do not let it attach to an unrelated one.
+    if family == ProjectorFamily::NemotronV2Vl && llm_arch != "qwen35" {
+        return Err(format!(
+            "clip.projector_type nemotron_v2_vl is not supported with architecture {llm_arch}"
+        ));
+    }
     if !matches!(llm_arch, "qwen3vl" | "qwen3vlmoe" | "qwen2vl" | "qwen35") {
         return Err(format!("Unsupported multimodal architecture: {llm_arch}"));
+    }
+    if family == ProjectorFamily::NemotronV2Vl && media != MediaKind::Image {
+        return Err(format!(
+            "clip.projector_type nemotron_v2_vl does not support {media:?} input"
+        ));
     }
     if llm_arch == "qwen3vl" && media == MediaKind::Audio {
         return Err("Qwen3-VL does not support audio input".into());
@@ -471,5 +487,59 @@ mod tests {
             &[],
         );
         assert!(validate_mmproj_capabilities("qwen3vl", stub.as_ref(), MediaKind::Image).is_err());
+    }
+
+    /// ZDTaichu5.0-9B pairs a `qwen3_5_text` tower with a `nemotron_v2_vl`
+    /// projector (a RADIOv4-H vision tower plus a ReLU-squared MLP head).
+    #[test]
+    fn nemotron_v2_vl_is_its_own_projector_family() {
+        let stub = Stub::with(
+            vec![
+                (
+                    "clip.projector_type",
+                    MetaValue::String("nemotron_v2_vl".into()),
+                ),
+                ("clip.has_vision_encoder", MetaValue::Bool(true)),
+            ],
+            &[],
+        );
+        assert_eq!(
+            validate_mmproj_capabilities("qwen35", stub.as_ref(), MediaKind::Image).unwrap(),
+            ProjectorFamily::NemotronV2Vl
+        );
+    }
+
+    /// The pairing has to be checked, not inferred from the tower: a
+    /// `qwen3vl` tower with the RADIO projector is not a combination either
+    /// side supports.
+    #[test]
+    fn nemotron_v2_vl_does_not_pair_with_an_unrelated_tower() {
+        let stub = Stub::with(
+            vec![
+                (
+                    "clip.projector_type",
+                    MetaValue::String("nemotron_v2_vl".into()),
+                ),
+                ("clip.has_vision_encoder", MetaValue::Bool(true)),
+            ],
+            &[],
+        );
+        assert!(validate_mmproj_capabilities("qwen3vl", stub.as_ref(), MediaKind::Image).is_err());
+    }
+
+    /// `nemotron_v2_vl` is an image projector; audio is a different path.
+    #[test]
+    fn nemotron_v2_vl_is_not_an_audio_projector() {
+        let stub = Stub::with(
+            vec![
+                (
+                    "clip.projector_type",
+                    MetaValue::String("nemotron_v2_vl".into()),
+                ),
+                ("clip.has_audio_encoder", MetaValue::Bool(true)),
+            ],
+            &[],
+        );
+        assert!(validate_mmproj_capabilities("qwen35", stub.as_ref(), MediaKind::Audio).is_err());
     }
 }

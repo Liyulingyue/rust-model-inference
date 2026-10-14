@@ -156,6 +156,7 @@ impl<'m> HybridTrunkModel<'m> for HybridTrunk<'m> {
             scratch,
             pool,
             positions,
+            None,
         )
     }
     #[cfg(feature = "vulkan")]
