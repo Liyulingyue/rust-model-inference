@@ -19,6 +19,11 @@ const Q8_MATMUL_GROUPED_TILED_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/q8_matmul_tiled_dp4a.spv");
 const Q8_MATMUL_COOPERATIVE_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/q8_matmul_cooperative_dp4a.spv");
+/// Static 32-token variant for NEON/scalar reductions. The generic tiled
+/// shader also supports the four-token AVX2 reduction, but the runtime token
+/// bound prevents some ARM drivers from unrolling the wide-token loop.
+const Q8_MATMUL_GROUPED_TILED_WIDE_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/q8_matmul_tiled_dp4a_wide.spv");
 const F16_MATMUL_TILED_SHADER: &[u8] = include_bytes!("../../shaders/bin/f16_matmul_tiled.spv");
 
 const ATTENTION_SCORES_TILED_SHADER: &[u8] =
@@ -82,6 +87,7 @@ const F16_MATMUL_TILED: usize = 25;
 const ATTENTION_SCORES_TILED: usize = 26;
 const MLX_AFFINE_MATMUL: usize = 27;
 const Q8_MATMUL_COOPERATIVE: usize = 28;
+const Q8_MATMUL_GROUPED_TILED_WIDE: usize = 30;
 
 pub(crate) fn tiled_matmul_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -168,6 +174,7 @@ const OPERATOR_SHADER_NAMES: [&str; OPERATOR_SHADERS.len()] = [
     "mlx_affine_matmul",
     "q8_matmul_cooperative",
     "qk_norm_rope_interleaved",
+    "q8_matmul_tiled_dp4a_wide",
 ];
 
 /// True when the ordered dispatch log is being collected.
@@ -255,7 +262,7 @@ pub fn dump_dispatch_trace() {
     }
 }
 
-const OPERATOR_SHADERS: [&[u8]; 30] = [
+const OPERATOR_SHADERS: [&[u8]; 31] = [
     QUANTIZE_Q8_0_SHADER,
     QUANTIZE_Q8_K_SHADER,
     Q8_MATMUL_GROUPED_SHADER,
@@ -286,6 +293,7 @@ const OPERATOR_SHADERS: [&[u8]; 30] = [
     MLX_AFFINE_MATMUL_SHADER,
     Q8_MATMUL_COOPERATIVE_SHADER,
     QK_NORM_ROPE_INTERLEAVED_SHADER,
+    Q8_MATMUL_GROUPED_TILED_WIDE_SHADER,
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1414,8 +1422,10 @@ impl<'a> Qwen3Ops<'a> {
             .map(|(index, shader)| {
                 if index == Q8_MATMUL_GROUPED && force_dp4a {
                     Q8_MATMUL_GROUPED_DP4A_SHADER
-                } else if matches!(index, Q8_MATMUL_GROUPED_TILED | Q8_MATMUL_COOPERATIVE)
-                    && !q8_tiled
+                } else if matches!(
+                    index,
+                    Q8_MATMUL_GROUPED_TILED | Q8_MATMUL_COOPERATIVE | Q8_MATMUL_GROUPED_TILED_WIDE
+                ) && !q8_tiled
                 {
                     // The tiled kernel needs `dotPacked4x8EXT`, so on a device
                     // without it the slot falls back to the plain grouped shader
@@ -2206,7 +2216,14 @@ impl<'a> Qwen3Ops<'a> {
             &quantize_push,
             quantize_dispatch,
         );
-        self.record_linear_dispatch(commands, Q8_MATMUL_GROUPED_TILED, bindings, &push, dispatch);
+        // Keep the 32-token ARM/scalar path statically bounded. AVX2 uses the
+        // generic shader because it needs its four-token reduction layout.
+        let tiled_pipeline = if push[14] == 8 {
+            Q8_MATMUL_GROUPED_TILED
+        } else {
+            Q8_MATMUL_GROUPED_TILED_WIDE
+        };
+        self.record_linear_dispatch(commands, tiled_pipeline, bindings, &push, dispatch);
         Ok(())
     }
 
@@ -7249,7 +7266,11 @@ mod tests {
                     Q8_MATMUL_GROUPED,
                     Q8_MATMUL_GROUPED_TILED,
                     Q8_MATMUL_COOPERATIVE,
+                    Q8_MATMUL_GROUPED_TILED_WIDE,
                 ] {
+                    if pipeline == Q8_MATMUL_GROUPED_TILED_WIDE && mode == 8 {
+                        continue;
+                    }
                     if pipeline != Q8_MATMUL_GROUPED && !ops.q8_tiled {
                         continue;
                     }
@@ -7270,6 +7291,8 @@ mod tests {
                     if pipeline == Q8_MATMUL_GROUPED_TILED {
                         let tokens = if mode == 8 { 4 } else { 32 };
                         dispatch = row_dispatch(2, ROWS.div_ceil(tokens), &context.limits).unwrap();
+                    } else if pipeline == Q8_MATMUL_GROUPED_TILED_WIDE {
+                        dispatch = row_dispatch(2, ROWS.div_ceil(32), &context.limits).unwrap();
                     } else if pipeline == Q8_MATMUL_COOPERATIVE {
                         dispatch =
                             matmul_dispatch(OUTPUTS.div_ceil(2), ROWS, 1, &context.limits).unwrap();

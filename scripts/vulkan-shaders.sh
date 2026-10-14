@@ -34,6 +34,7 @@ shader_names=(
     add
     adaln_modulate
     q8_matmul_tiled_dp4a
+    q8_matmul_tiled_dp4a_wide
     f16_matmul_tiled
     attention_scores_tiled
 )
