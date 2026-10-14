@@ -446,6 +446,7 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             | "mistral3"
             | "ernie_image"
             | "audiocpp"
+            | "mellum"
     ) {
         return Err(format!("Unsupported architecture: {arch}"));
     }
@@ -620,25 +621,26 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
     let as_usize = |key: String| -> Result<usize, String> {
         usize::try_from(get_u64(&key)?).map_err(|_| format!("{key} does not fit usize"))
     };
-    let n_embd_head = if arch == "qwen35" || arch == "edge0" || arch == "nanbeige" {
-        if n_head == 0 {
-            return Err(format!(
-                "Invalid {prefix} head shape: embedding_length={n_embd}, head_count={n_head}"
-            ));
-        }
-        let head_dim = as_usize(format!("{prefix}.attention.key_length"))?;
-        if head_dim == 0 {
-            return Err(format!("Invalid {prefix}.attention.key_length: 0"));
-        }
-        head_dim
-    } else {
-        if n_head == 0 || n_embd % n_head != 0 {
-            return Err(format!(
-                "Invalid {prefix} head shape: embedding_length={n_embd}, head_count={n_head}"
-            ));
-        }
-        n_embd / n_head
-    };
+    let n_embd_head =
+        if arch == "qwen35" || arch == "edge0" || arch == "nanbeige" || arch == "mellum" {
+            if n_head == 0 {
+                return Err(format!(
+                    "Invalid {prefix} head shape: embedding_length={n_embd}, head_count={n_head}"
+                ));
+            }
+            let head_dim = as_usize(format!("{prefix}.attention.key_length"))?;
+            if head_dim == 0 {
+                return Err(format!("Invalid {prefix}.attention.key_length: 0"));
+            }
+            head_dim
+        } else {
+            if n_head == 0 || n_embd % n_head != 0 {
+                return Err(format!(
+                    "Invalid {prefix} head shape: embedding_length={n_embd}, head_count={n_head}"
+                ));
+            }
+            n_embd / n_head
+        };
 
     Ok(ModelConfig {
         n_embd,
