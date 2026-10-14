@@ -71,10 +71,12 @@ impl AstronexOptions {
     pub fn validate(&self) -> Result<(), String> {
         if self.width == 0
             || self.height == 0
-            || !self.width.is_multiple_of(16)
-            || !self.height.is_multiple_of(16)
+            || !self.width.is_multiple_of(32)
+            || !self.height.is_multiple_of(32)
         {
-            return Err("Astronex width and height must be positive multiples of 16".into());
+            return Err(
+                "Astronex width and height must be positive multiples of 32 (VAE compression plus 2x2 latent patches)".into(),
+            );
         }
         if self.frames == 0 || (self.frames - 1) % 4 != 0 {
             return Err("Astronex frame count must be 1 plus a multiple of 4".into());
@@ -352,6 +354,26 @@ mod tests {
         let mut options = AstronexOptions::default();
         options.frames = 10;
         assert!(options.validate().is_err());
+    }
+
+    #[test]
+    fn options_require_complete_spatial_patches() {
+        for (width, height) in [(0, 32), (32, 0), (16, 32), (32, 16), (1280, 720)] {
+            let options = AstronexOptions {
+                width,
+                height,
+                ..AstronexOptions::default()
+            };
+            assert!(options.validate().is_err(), "{width}x{height}");
+        }
+        for (width, height) in [(32, 32), (832, 480), (1280, 736)] {
+            let options = AstronexOptions {
+                width,
+                height,
+                ..AstronexOptions::default()
+            };
+            assert!(options.validate().is_ok(), "{width}x{height}");
+        }
     }
 
     #[test]
