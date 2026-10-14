@@ -623,12 +623,8 @@ fn astronex_cli_requires_explicit_pair_prompt_and_mp4() {
 #[test]
 fn astronex_cli_rejects_non_contract_frames_steps_and_routes() {
     for (extra, expected) in [
-        (vec!["--width", "16"], "multiples of 32"),
-        (
-            vec!["--width", "1280", "--height", "720"],
-            "multiples of 32",
-        ),
-        (vec!["--video-frames", "10"], "frame count"),
+        (vec!["--width", "15"], "multiples of 16"),
+        (vec!["--video-frames", "0"], "frame count"),
         (vec!["--steps", "4"], "8-step"),
         (
             vec!["--video-frames", "9", "--steps", "8", "--dreamx"],

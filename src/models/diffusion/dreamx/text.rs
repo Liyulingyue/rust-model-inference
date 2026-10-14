@@ -628,6 +628,52 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires the actual Astronex components GGUF"]
+    fn astronex_checkpoint_tokenizer_matches_official_ids_masks_and_truncation() {
+        let source =
+            crate::GGUFLoader::from_file("models/Astronex-World/mmproj-Astronex-World.gguf")
+                .unwrap();
+        let json = source
+            .metadata("astronex.tokenizer.json")
+            .unwrap()
+            .to_string_val()
+            .unwrap();
+        let tokenizer = configured_tokenizer(json, 512).unwrap();
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../../tools/oracle/astronex_world/fixtures/tokenizer_ids.json"
+        ))
+        .unwrap();
+        let cases = fixture["cases"].as_array().unwrap();
+        assert!(!cases.is_empty());
+        for case in cases {
+            let encoding = tokenizer
+                .encode(case["text"].as_str().unwrap(), true)
+                .unwrap();
+            let expected: Vec<u32> = case["ids"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|id| id.as_u64().unwrap() as u32)
+                .collect();
+            let length = case["real_len"].as_u64().unwrap() as usize;
+            assert_eq!(encoding.get_ids().len(), 512);
+            assert_eq!(
+                &encoding.get_ids()[..length],
+                expected.as_slice(),
+                "{}",
+                case["name"]
+            );
+            assert!(encoding.get_ids()[length..].iter().all(|&id| id == 0));
+            assert!(encoding.get_attention_mask()[..length]
+                .iter()
+                .all(|&mask| mask == 1));
+            assert!(encoding.get_attention_mask()[length..]
+                .iter()
+                .all(|&mask| mask == 0));
+        }
+    }
+
+    #[test]
     fn text_encoder_returns_positive_and_negative_context() {
         let out = tiny_text_encoder().encode("rain", "static").unwrap();
         assert_eq!(out.positive.len(), 512 * TINY_TEXT_DIM);

@@ -4,12 +4,23 @@ use super::super::dreamx::kernels::{
     attention_scalar_f32, checked_len, conv3d_with_options, gelu_approx_inplace, load_float_values,
     AttentionSpec, Conv3dSpec, Linear,
 };
+use super::cache::KvCache;
 use super::{
     DIM, FFN, FREQ_DIM, HEADS, HEAD_DIM, LATENT_CHANNELS, LAYERS, PATCH, TEXT_DIM, TEXT_LEN,
 };
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use std::sync::Arc;
+
+pub(super) struct BranchCache {
+    context: Vec<f32>,
+    layers: Vec<BlockCache>,
+}
+
+struct BlockCache {
+    kv: KvCache,
+    cross: Option<(Vec<f32>, Vec<f32>)>,
+}
 
 struct Block {
     norm3_weight: Vec<f32>,
@@ -202,12 +213,32 @@ impl Denoiser {
         for value in &mut time {
             *value = *value / (1.0 + (-*value).exp());
         }
-        let mut time = self.time_2.forward(pool, &time, 1)?;
-        for value in &mut time {
+        let time = self.time_2.forward(pool, &time, 1)?;
+        let mut projection_input = time.clone();
+        for value in &mut projection_input {
             *value = *value / (1.0 + (-*value).exp());
         }
-        let projected = self.time_projection.forward(pool, &time, 1)?;
+        let projected = self.time_projection.forward(pool, &projection_input, 1)?;
         Ok((time, projected))
+    }
+
+    pub(super) fn prepare_branch(
+        &self,
+        context: &[f32],
+        frame_tokens: usize,
+    ) -> Result<BranchCache, String> {
+        Ok(BranchCache {
+            context: self.embed_text(&self.pool, context)?,
+            layers: (0..LAYERS)
+                .map(|_| BlockCache {
+                    kv: KvCache::new(
+                        frame_tokens * DIM,
+                        crate::ops::gpu_requested() && !crate::ops::scalar_mode(),
+                    ),
+                    cross: None,
+                })
+                .collect(),
+        })
     }
 
     pub(super) fn forward(
@@ -215,38 +246,48 @@ impl Denoiser {
         latent: &[f32],
         shape: [usize; 4],
         timestep: f32,
-        context: &[f32],
-        context_tokens: usize,
+        branch: &mut BranchCache,
+        start_frame: usize,
+        reference_frame: bool,
     ) -> Result<Vec<f32>, String> {
         let (mut x, grid) = self.patch(latent, shape)?;
         let tokens = x.len() / DIM;
-        let context = self.embed_text(&self.pool, context)?;
-        if context_tokens == 0 || context_tokens > TEXT_LEN {
-            return Err("Astronex text context length is out of range".into());
-        }
         // The official Wan T2V graph pads UMT5 to all 512 positions and calls
         // cross-attention without a key-length mask. Padding embeddings are
         // zeroed by the text encoder, but those zero keys still participate in
         // the softmax denominator. Keep the full context here for bit-level
-        // graph parity; `context_tokens` remains a contract check.
-        let context = &context[..TEXT_LEN * DIM];
-        let (time, time_mod) = self.embed_time(&self.pool, timestep)?;
-        let (frames, height, width) = (grid[0], grid[1], grid[2]);
-        for block in &self.blocks {
-            x = block.forward(&self.pool, x, tokens, grid, &time_mod, context, TEXT_LEN)?;
+        // graph parity.
+        let context = &branch.context;
+        let (base_time, base_mod) = self.embed_time(&self.pool, timestep)?;
+        let mut time = base_time.repeat(grid[0]);
+        let mut time_mod = base_mod.repeat(grid[0]);
+        if reference_frame {
+            let (reference_time, reference_mod) = self.embed_time(&self.pool, 0.0)?;
+            time[..DIM].copy_from_slice(&reference_time);
+            time_mod[..6 * DIM].copy_from_slice(&reference_mod);
         }
-        let mut modulated = x.clone();
-        // Head::forward consumes the unprojected time embedding `e`, while
-        // blocks consume the six-way `time_projection(e)` modulation.
-        let hmod = &self.head_modulation[..DIM];
-        let smod = &self.head_modulation[DIM..2 * DIM];
-        let normed = norm_no_affine(&x, tokens, 1e-6)?;
-        for row in 0..tokens {
-            for c in 0..DIM {
-                modulated[row * DIM + c] =
-                    normed[row * DIM + c] * (1.0 + smod[c]) + hmod[c] + time[c];
+        let (frames, height, width) = (grid[0], grid[1], grid[2]);
+        for (index, (block, cache)) in self.blocks.iter().zip(&mut branch.layers).enumerate() {
+            let started = std::time::Instant::now();
+            x = block.forward(
+                &self.pool,
+                x,
+                tokens,
+                grid,
+                &time_mod,
+                context,
+                TEXT_LEN,
+                cache,
+                start_frame,
+            )?;
+            if std::env::var_os("RMI_ASTRONEX_PROFILE").is_some() {
+                eprintln!("[Astronex] frame={start_frame} timestep={timestep} layer={index} elapsed={:.3}s", started.elapsed().as_secs_f64());
             }
         }
+        // Head::forward consumes the unprojected time embedding `e`, while
+        // blocks consume the six-way `time_projection(e)` modulation.
+        let mut modulated = norm_no_affine(&x, tokens, 1e-6)?;
+        modulate_head(&mut modulated, &self.head_modulation, &time);
         let output = self.head.forward(&self.pool, &modulated, tokens)?;
         let mut video = vec![0.0; checked_len("Astronex denoiser output", &shape)?];
         for f in 0..frames {
@@ -277,6 +318,34 @@ impl Denoiser {
     }
 }
 
+fn modulate_head(normed: &mut [f32], modulation: &[f32], time: &[f32]) {
+    let dim = modulation.len() / 2;
+    let frame_tokens = normed.len() / time.len();
+    for (index, row) in normed.chunks_exact_mut(dim).enumerate() {
+        let time = &time[index / frame_tokens * dim..];
+        for c in 0..dim {
+            row[c] = row[c] * (1.0 + (modulation[dim + c] + time[c])) + (modulation[c] + time[c]);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn head_matches_official_time_shift_and_scale() {
+        // Pinned Head/CausalHead modulation with identity projection.
+        let mut x = [1.0, -1.0, 2.0, -2.0];
+        modulate_head(
+            &mut x,
+            &[0.5, 1.0, 0.25, -0.5, 0.125, -0.25, 0.5, 1.0],
+            &[-2.0, 0.5, 1.0, 2.0],
+        );
+        assert_eq!(x, [-2.375, 0.25, 6.25, -6.5]);
+    }
+}
+
 impl Block {
     fn forward(
         &self,
@@ -287,14 +356,17 @@ impl Block {
         time: &[f32],
         context: &[f32],
         context_tokens: usize,
+        cache: &mut BlockCache,
+        start_frame: usize,
     ) -> Result<Vec<f32>, String> {
         let mut norm = norm_no_affine(&x, tokens, 1e-6)?;
-        let mut e = self.modulation.clone();
-        for i in 0..6 * DIM {
-            e[i] += time[i];
+        let mut e = self.modulation.repeat(grid[0]);
+        for (value, time) in e.iter_mut().zip(time) {
+            *value += time;
         }
         let mut q_in = norm.clone();
         for row in 0..tokens {
+            let e = &e[row / (grid[1] * grid[2]) * 6 * DIM..];
             for c in 0..DIM {
                 q_in[row * DIM + c] = norm[row * DIM + c] * (1.0 + e[DIM + c]) + e[c];
             }
@@ -304,17 +376,16 @@ impl Block {
         let v = self.self_v.forward(pool, &q_in, tokens)?;
         rms_norm_in_rows(&mut q, tokens, &self.self_norm_q, 1e-6);
         rms_norm_in_rows(&mut k, tokens, &self.self_norm_k, 1e-6);
-        apply_rope(&mut q, &mut k, grid);
-        // The bidirectional Wan graph uses the complete clip as its key/value
-        // set (`window_size=(-1, -1)`).  A local temporal window belongs to the
-        // separate causal pipeline and silently changes the released graph.
+        let (mut k, v, resident_frames) = cache.kv.update(start_frame, grid[0], &k, &v)?;
+        apply_rope(&mut q, grid, resident_frames - grid[0]);
+        apply_rope(&mut k, [resident_frames, grid[1], grid[2]], 0);
         let attended = attention_scalar_f32(
             &q,
             &k,
             &v,
             AttentionSpec {
                 query_tokens: tokens,
-                key_tokens: tokens,
+                key_tokens: resident_frames * grid[1] * grid[2],
                 query_heads: HEADS,
                 key_value_heads: HEADS,
                 head_dim: HEAD_DIM,
@@ -324,6 +395,7 @@ impl Block {
         )?;
         let attn = self.self_o.forward(pool, &attended, tokens)?;
         for row in 0..tokens {
+            let e = &e[row / (grid[1] * grid[2]) * 6 * DIM..];
             for c in 0..DIM {
                 x[row * DIM + c] += attn[row * DIM + c] * e[2 * DIM + c];
             }
@@ -331,11 +403,15 @@ impl Block {
 
         norm = layer_norm_affine(&x, tokens, &self.norm3_weight, &self.norm3_bias, 1e-6)?;
         let q = self.cross_q.forward(pool, &norm, tokens)?;
-        let mut k = self.cross_k.forward(pool, context, context_tokens)?;
-        let v = self.cross_v.forward(pool, context, context_tokens)?;
+        if cache.cross.is_none() {
+            let mut k = self.cross_k.forward(pool, context, context_tokens)?;
+            let v = self.cross_v.forward(pool, context, context_tokens)?;
+            rms_norm_in_rows(&mut k, context_tokens, &self.cross_norm_k, 1e-6);
+            cache.cross = Some((k, v));
+        }
+        let (k, v) = cache.cross.as_ref().unwrap();
         let mut q = q;
         rms_norm_in_rows(&mut q, tokens, &self.cross_norm_q, 1e-6);
-        rms_norm_in_rows(&mut k, context_tokens, &self.cross_norm_k, 1e-6);
         let cross = attention_scalar_f32(
             &q,
             &k,
@@ -359,6 +435,7 @@ impl Block {
 
         norm = norm_no_affine(&x, tokens, 1e-6)?;
         for row in 0..tokens {
+            let e = &e[row / (grid[1] * grid[2]) * 6 * DIM..];
             for c in 0..DIM {
                 norm[row * DIM + c] = norm[row * DIM + c] * (1.0 + e[4 * DIM + c]) + e[3 * DIM + c];
             }
@@ -367,6 +444,7 @@ impl Block {
         gelu_approx_inplace(&mut ff);
         let ff = self.ffn_down.forward(pool, &ff, tokens)?;
         for row in 0..tokens {
+            let e = &e[row / (grid[1] * grid[2]) * 6 * DIM..];
             for c in 0..DIM {
                 x[row * DIM + c] += ff[row * DIM + c] * e[5 * DIM + c];
             }
@@ -429,14 +507,14 @@ fn rms_norm_in_rows(values: &mut [f32], rows: usize, weight: &[f32], eps: f32) {
     }
 }
 
-fn apply_rope(q: &mut [f32], k: &mut [f32], grid: [usize; 3]) {
+fn apply_rope(data: &mut [f32], grid: [usize; 3], start_frame: usize) {
     let (frames, height, width) = (grid[0], grid[1], grid[2]);
     let splits = [22usize, 21, 21];
     for f in 0..frames {
         for h in 0..height {
             for w in 0..width {
                 let token = (f * height + h) * width + w;
-                let positions = [f, h, w];
+                let positions = [f + start_frame, h, w];
                 let mut offset = 0;
                 for axis in 0..3 {
                     for i in 0..splits[axis] {
@@ -451,12 +529,10 @@ fn apply_rope(q: &mut [f32], k: &mut [f32], grid: [usize; 3]) {
                         let (sin, cos) = angle.sin_cos();
                         for head in 0..HEADS {
                             let base = token * DIM + head * HEAD_DIM + 2 * dim;
-                            for data in [&mut *q, &mut *k] {
-                                let a = data[base] as f64;
-                                let b = data[base + 1] as f64;
-                                data[base] = (a * cos - b * sin) as f32;
-                                data[base + 1] = (a * sin + b * cos) as f32;
-                            }
+                            let a = data[base] as f64;
+                            let b = data[base + 1] as f64;
+                            data[base] = (a * cos - b * sin) as f32;
+                            data[base + 1] = (a * sin + b * cos) as f32;
                         }
                     }
                     offset += splits[axis];

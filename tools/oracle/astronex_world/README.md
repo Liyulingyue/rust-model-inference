@@ -24,7 +24,17 @@ not edit either checkout.
   /tmp/astronex-oracle
 .venv/bin/python tools/oracle/astronex_world/trace_official.py compare \
   /tmp/astronex-oracle /tmp/astronex-native
+cargo test --profile release-fast --lib astronex_checkpoint_tokenizer -- --ignored
 ```
+
+The ignored checkpoint-tokenizer test reads `astronex.tokenizer.json` from the
+actual components GGUF and compares its token IDs and all 512 mask/padding
+positions with `fixtures/tokenizer_ids.json`. The seven cases include empty,
+English, Chinese, whitespace, Unicode, special tokens and truncation. Expected
+IDs were produced by the pinned official `AutoTokenizer.from_pretrained` call
+with `padding="max_length"`, `max_length=512`, `truncation=True` and special
+tokens enabled. The fixture records the input tokenizer SHA256; this is a real
+checkpoint tokenizer check, separate from synthetic floating-operator fixtures.
 
 `fixture` is an operator contract only. It proves sequential reductions,
 materialized softmax attention, 3-D convolution, token IDs, trace ordering,
@@ -35,10 +45,10 @@ CPU noise, 32x32 latent geometry, camera matrices, action vectors, an initial
 bidirectional-style denoiser call, a cache continuation call, VAE encode/decode,
 and the official UniPC sampler. It records the text/tokenizer, non-causal
 bidirectional Wan stage, causal cache stage (including camera/action inputs),
-VAE encode/decode, and UniPC stages in one ordered stream. The current native
-route intentionally implements only the base `WanModel` graph; the causal cache,
-camera/action, and `clip_fea/y` records remain diagnostic coverage and are not
-claimed as native parity.
+VAE encode/decode, and UniPC stages in one ordered stream. The native route now implements the no-control causal KV continuation graph.
+Camera/action and `clip_fea/y` records remain diagnostic coverage and are not
+claimed as native parity. Causal cache behavior and GPU kernels have separate
+behavior/error tests; they are not retroactively treated as raw-bit parity.
 
 ## Trace contract
 

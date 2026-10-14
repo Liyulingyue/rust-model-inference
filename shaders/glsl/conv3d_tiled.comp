@@ -1,0 +1,63 @@
+#version 450
+#extension GL_EXT_control_flow_attributes : require
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(push_constant) uniform PC {
+    uint input_word; uint weight_word; uint bias_word; uint output_word;
+    uint input_channels; uint output_channels;
+    uint depth; uint height; uint width;
+    uint output_depth; uint output_height; uint output_width;
+    uint kd; uint kh; uint kw;
+    uint sd; uint sh; uint sw;
+    uint pd; uint ph; uint pw;
+    uint dd; uint dh; uint dw;
+} pc;
+const uint TOKENS = 32u;
+const uint CHUNK = 128u;
+shared float stage[TOKENS * CHUNK];
+float activation(uint token, uint element) {
+    uint kernel = pc.kd * pc.kh * pc.kw;
+    uint channel = element / kernel;
+    uint k = element % kernel;
+    int z = int(token / (pc.output_height * pc.output_width) * pc.sd + k / (pc.kh * pc.kw) * pc.dd) - int(pc.pd);
+    int y = int(token / pc.output_width % pc.output_height * pc.sh + k / pc.kw % pc.kh * pc.dh) - int(pc.ph);
+    int x = int(token % pc.output_width * pc.sw + k % pc.kw * pc.dw) - int(pc.pw);
+    if (z < 0 || y < 0 || x < 0 || z >= int(pc.depth) || y >= int(pc.height) || x >= int(pc.width)) return 0.0;
+    uint index = ((channel * pc.depth + uint(z)) * pc.height + uint(y)) * pc.width + uint(x);
+    return uintBitsToFloat(arena.data[pc.input_word + index]);
+}
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint column_base = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 64u;
+    uint column = column_base + lane;
+    uint token_base = gl_WorkGroupID.z * TOKENS;
+    uint spatial = pc.output_depth * pc.output_height * pc.output_width;
+    uint live = min(TOKENS, spatial - token_base);
+    uint n_in = pc.input_channels * pc.kd * pc.kh * pc.kw;
+    uint row_base = min(column, pc.output_channels - 1u) * n_in;
+    float acc[TOKENS];
+    for (uint t = 0u; t < TOKENS; t++) acc[t] = 0.0;
+    for (uint chunk = 0u; chunk < n_in; chunk += CHUNK) {
+        uint count = min(CHUNK, n_in - chunk);
+        for (uint t = 0u; t < live; t++) {
+            for (uint i = lane; i < count; i += 64u) stage[t * CHUNK + i] = activation(token_base + t, chunk + i);
+        }
+        barrier();
+        for (uint i = 0u; i < count; i++) {
+            float w = uintBitsToFloat(arena.data[pc.weight_word + row_base + chunk + i]);
+            [[unroll]] for (uint t = 0u; t < TOKENS; t++) {
+                if (t < live) acc[t] = fma(w, stage[t * CHUNK + i], acc[t]);
+            }
+        }
+        barrier();
+    }
+    float bias = uintBitsToFloat(arena.data[pc.bias_word + min(column, pc.output_channels - 1u)]);
+    for (uint t = 0u; t < live; t++) stage[lane * TOKENS + t] = acc[t] + bias;
+    barrier();
+    uint t = lane % TOKENS;
+    for (uint c = lane / TOKENS; c < 64u; c += 2u) {
+        if (t < live && column_base + c < pc.output_channels) {
+            arena.data[pc.output_word + (column_base + c) * spatial + token_base + t] = floatBitsToUint(stage[c * TOKENS + t]);
+        }
+    }
+}

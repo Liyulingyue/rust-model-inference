@@ -129,6 +129,17 @@ impl<'a> Linear<'a> {
             return Err("Invalid DreamX linear input shape".into());
         }
         let mut output = vec![0.0; checked_len("DreamX linear output", &[rows, self.n_out()])?];
+        #[cfg(feature = "vulkan")]
+        if self.weight.try_vulkan_rows(input, &mut output, rows) {
+            if let Some(bias) = &self.bias {
+                for row in output.chunks_exact_mut(self.n_out()) {
+                    vec_add_into(bias, row);
+                }
+            }
+            return Ok(output);
+        }
+        #[cfg(feature = "vulkan")]
+        let _cpu_scope = ComputePool::disable_gpu_matmul_for_scope();
         if let Some(weight) = self.weight.kernel.bf16_bytes() {
             linear_bf16(
                 pool,
@@ -535,6 +546,12 @@ fn attention_scalar_with_bias(
     dot: fn(&[f32], &[f32], usize) -> f32,
 ) -> Result<Vec<f32>, String> {
     spec.validate(query, key, value)?;
+    #[cfg(feature = "vulkan")]
+    if bias.is_none() {
+        if let Some(output) = crate::ops::kernel::vulkan::try_attention(query, key, value, spec) {
+            return Ok(output);
+        }
+    }
     if let Some(bias) = bias {
         let expected = checked_len(
             "DreamX attention bias",
@@ -603,6 +620,10 @@ pub fn attention_online(
         return attention_scalar_f32(query, key, value, spec);
     }
     spec.validate(query, key, value)?;
+    #[cfg(feature = "vulkan")]
+    if let Some(output) = crate::ops::kernel::vulkan::try_attention(query, key, value, spec) {
+        return Ok(output);
+    }
     let mut output = vec![0.0; query.len()];
     let group_size = spec.query_heads / spec.key_value_heads;
     for query_token in 0..spec.query_tokens {
@@ -798,6 +819,19 @@ pub fn conv3d_with_options(
     let output_shape = [output_channels, output_depth, output_height, output_width];
     let output_len = checked_len("DreamX Conv3D output", &output_shape)?;
     let mut output = vec![0.0; output_len];
+    #[cfg(feature = "vulkan")]
+    if crate::ops::kernel::vulkan::try_conv3d(
+        input,
+        weight,
+        bias,
+        &mut output,
+        input_shape,
+        weight_shape,
+        output_shape,
+        spec,
+    ) {
+        return Ok((output, output_shape));
+    }
     let output_address = output.as_mut_ptr() as usize;
     let output_channels_per_group = output_channels / spec.groups;
     let strict = crate::ops::scalar_mode();

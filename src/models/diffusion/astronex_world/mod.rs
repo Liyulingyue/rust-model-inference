@@ -28,6 +28,7 @@ const PATCH: [usize; 3] = [1, 2, 2];
 const SOURCE_REVISION: &str = "dec4ec502f7113a1ab07b78ae40a7ac1b88b2eeb";
 const ORACLE_COMMIT: &str = "27584bf1a89da01ef35a03b48d83bc818d2adf2b";
 
+mod cache;
 mod denoiser;
 mod scheduler;
 
@@ -71,15 +72,15 @@ impl AstronexOptions {
     pub fn validate(&self) -> Result<(), String> {
         if self.width == 0
             || self.height == 0
-            || !self.width.is_multiple_of(32)
-            || !self.height.is_multiple_of(32)
+            || !self.width.is_multiple_of(16)
+            || !self.height.is_multiple_of(16)
         {
             return Err(
-                "Astronex width and height must be positive multiples of 32 (VAE compression plus 2x2 latent patches)".into(),
+                "Astronex width and height must be positive multiples of 16; latent patches are padded to 32 and cropped after decoding".into(),
             );
         }
-        if self.frames == 0 || (self.frames - 1) % 4 != 0 {
-            return Err("Astronex frame count must be 1 plus a multiple of 4".into());
+        if self.frames == 0 {
+            return Err("Astronex frame count must be positive".into());
         }
         if self.fps == 0 || self.steps == 0 {
             return Err("Astronex fps and steps must be positive".into());
@@ -92,6 +93,7 @@ impl AstronexOptions {
         if !self.guidance_scale.is_finite() || self.guidance_scale <= 0.0 {
             return Err("Astronex guidance scale must be finite and positive".into());
         }
+        generation_geometry(self)?;
         Ok(())
     }
 }
@@ -243,7 +245,7 @@ impl AstronexPipeline {
     }
 
     pub fn generate(
-        &self,
+        self,
         prompt: &str,
         image: Option<&RgbImage>,
         options: &AstronexOptions,
@@ -252,75 +254,173 @@ impl AstronexPipeline {
         if options.mode == AstronexMode::ImageToVideo && image.is_none() {
             return Err("Astronex image-to-video requires an input image".into());
         }
-        let latent_height = options.height / 16;
-        let latent_width = options.width / 16;
-        let latent_shape = [
-            LATENT_CHANNELS,
-            options.frames.div_ceil(4),
-            latent_height,
-            latent_width,
-        ];
-        let mut latent = gaussian(options.seed, checked_len("Astronex latent", &latent_shape)?)?;
-        let mut reference = None;
-        if let Some(frame) = image {
-            let encoded = self.vae.encode_first_frame(frame)?;
-            if encoded.shape() != [LATENT_CHANNELS, 1, latent_height, latent_width] {
-                return Err("Astronex reference image latent shape mismatch".into());
-            }
+        let Self {
+            text,
+            denoiser,
+            vae,
+            ..
+        } = self;
+        let (width, height, latent_frames) = generation_geometry(options)?;
+        let latent_shape = [LATENT_CHANNELS, latent_frames, height / 16, width / 16];
+        let plane = latent_shape[2] * latent_shape[3];
+        let noise = gaussian(options.seed, checked_len("Astronex latent", &latent_shape)?)?;
+        let reference = image
+            .map(|image| {
+                let mut padded = RgbImage::new(width as u32, height as u32);
+                for (x, y, pixel) in padded.enumerate_pixels_mut() {
+                    *pixel = *image.get_pixel(x.min(image.width() - 1), y.min(image.height() - 1));
+                }
+                vae.encode_first_frame(&padded)
+            })
+            .transpose()?;
+        let encoded = text.encode(prompt, NEGATIVE_PROMPT)?;
+        drop(text);
+        let frame_tokens = (height / 32) * (width / 32);
+        let mut positive = denoiser.prepare_branch(&encoded.positive, frame_tokens)?;
+        let mut negative = denoiser.prepare_branch(&encoded.negative, frame_tokens)?;
+        drop(encoded);
+        let mut latent = vec![0.0; noise.len()];
+        let block_shape = [LATENT_CHANNELS, 8, height / 16, width / 16];
+        eprintln!("[Astronex] causal generation {width}x{height}, {latent_frames} latent frames, block=8 window=20 sink=4");
+        for start in (0..latent_frames).step_by(8) {
+            let started = std::time::Instant::now();
+            let mut block = vec![0.0; LATENT_CHANNELS * 8 * plane];
             for c in 0..LATENT_CHANNELS {
-                for h in 0..latent_height {
-                    for w in 0..latent_width {
-                        latent[(c * latent_shape[1]) * latent_height * latent_width
-                            + h * latent_width
-                            + w] = encoded.as_slice()[(c * latent_height + h) * latent_width + w];
+                block[c * 8 * plane..(c + 1) * 8 * plane].copy_from_slice(
+                    &noise[(c * latent_frames + start) * plane
+                        ..(c * latent_frames + start + 8) * plane],
+                );
+            }
+            let restore_reference = |block: &mut [f32]| {
+                if start == 0 {
+                    if let Some(reference) = &reference {
+                        for c in 0..LATENT_CHANNELS {
+                            block[c * 8 * plane..c * 8 * plane + plane]
+                                .copy_from_slice(&reference.as_slice()[c * plane..(c + 1) * plane]);
+                        }
                     }
                 }
-            }
-            reference = Some(encoded);
-        }
-        let positive = self.text.encode(prompt, "")?;
-        let negative = self.text.encode("", "")?;
-        let positive_len = positive.positive_len;
-        let negative_len = negative.negative_len;
-        let positive = positive.positive;
-        let negative = negative.negative;
-        let mut scheduler = FlowUniPc::new(options.steps, 5.0)?;
-        for step in 0..options.steps {
-            let timestep = scheduler.timesteps[step];
-            let t = timestep as f32;
-            let model_input = if let Some(ref frame) = reference {
-                let mut input = latent.clone();
-                let plane = latent_height * latent_width;
-                for c in 0..LATENT_CHANNELS {
-                    input[c * latent_shape[1] * plane..c * latent_shape[1] * plane + plane]
-                        .copy_from_slice(&frame.as_slice()[c * plane..(c + 1) * plane]);
-                }
-                input
-            } else {
-                latent.clone()
             };
-            let cond =
-                self.denoiser
-                    .forward(&model_input, latent_shape, t, &positive, positive_len)?;
-            let uncond =
-                self.denoiser
-                    .forward(&model_input, latent_shape, t, &negative, negative_len)?;
-            let mut flow = vec![0.0; latent.len()];
-            for ((value, &unconditional), &conditional) in flow.iter_mut().zip(&uncond).zip(&cond) {
-                *value = unconditional + options.guidance_scale * (conditional - unconditional);
-            }
-            latent = scheduler.step(&flow, timestep, &latent)?;
-            if let Some(ref frame) = reference {
-                let plane = latent_height * latent_width;
-                for c in 0..LATENT_CHANNELS {
-                    latent[c * latent_shape[1] * plane..c * latent_shape[1] * plane + plane]
-                        .copy_from_slice(&frame.as_slice()[c * plane..(c + 1) * plane]);
+            restore_reference(&mut block);
+            let mut scheduler = FlowUniPc::new(options.steps, 10.0)?;
+            for step in 0..options.steps {
+                let timestep = scheduler.timesteps[step];
+                let cond = denoiser.forward(
+                    &block,
+                    block_shape,
+                    timestep as f32,
+                    &mut positive,
+                    start,
+                    start == 0 && reference.is_some(),
+                )?;
+                let mut flow = denoiser.forward(
+                    &block,
+                    block_shape,
+                    timestep as f32,
+                    &mut negative,
+                    start,
+                    start == 0 && reference.is_some(),
+                )?;
+                for (value, &conditional) in flow.iter_mut().zip(&cond) {
+                    *value += options.guidance_scale * (conditional - *value);
                 }
+                block = scheduler.step(&flow, timestep, &block)?;
+                restore_reference(&mut block);
+                eprintln!(
+                    "[Astronex] block {}/{} step {}/{} elapsed={:.3}s",
+                    start / 8 + 1,
+                    latent_frames / 8,
+                    step + 1,
+                    options.steps,
+                    started.elapsed().as_secs_f64()
+                );
             }
+            for c in 0..LATENT_CHANNELS {
+                latent
+                    [(c * latent_frames + start) * plane..(c * latent_frames + start + 8) * plane]
+                    .copy_from_slice(&block[c * 8 * plane..(c + 1) * 8 * plane]);
+            }
+            if start + 8 < latent_frames {
+                // Only clean context is visible to the next block.
+                denoiser.forward(
+                    &block,
+                    block_shape,
+                    0.0,
+                    &mut positive,
+                    start,
+                    start == 0 && reference.is_some(),
+                )?;
+                denoiser.forward(
+                    &block,
+                    block_shape,
+                    0.0,
+                    &mut negative,
+                    start,
+                    start == 0 && reference.is_some(),
+                )?;
+            }
+        }
+        drop(noise);
+        drop(positive);
+        drop(negative);
+        drop(denoiser);
+        if let Some(path) = std::env::var_os("RMI_ASTRONEX_LATENT_OUT") {
+            let file =
+                std::fs::File::create(path).map_err(|e| format!("Create Astronex latent: {e}"))?;
+            let mut file = std::io::BufWriter::new(file);
+            use std::io::Write;
+            for dimension in latent_shape {
+                file.write_all(&(dimension as u64).to_le_bytes())
+                    .map_err(|e| e.to_string())?;
+            }
+            for value in &latent {
+                file.write_all(&value.to_le_bytes())
+                    .map_err(|e| e.to_string())?;
+            }
+            file.flush().map_err(|e| e.to_string())?;
         }
         let latent = super::dreamx::video_vae::VideoLatent::new(latent, latent_shape)?;
-        self.vae.decode_frames(&latent)
+        eprintln!("[Astronex] sampling complete; decoding VAE");
+        let mut frames = vae.decode_frames(&latent)?;
+        frames.truncate(options.frames);
+        if width != options.width || height != options.height {
+            frames = frames
+                .iter()
+                .map(|frame| {
+                    image::imageops::crop_imm(
+                        frame,
+                        0,
+                        0,
+                        options.width as u32,
+                        options.height as u32,
+                    )
+                    .to_image()
+                })
+                .collect();
+        }
+        Ok(frames)
     }
+}
+
+const NEGATIVE_PROMPT: &str = "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走";
+
+fn generation_geometry(options: &AstronexOptions) -> Result<(usize, usize, usize), String> {
+    let align = |n: usize, unit: usize| {
+        n.checked_add(unit - 1)
+            .and_then(|n| (n / unit).checked_mul(unit))
+            .ok_or("Astronex generation geometry overflow".to_string())
+    };
+    let width = align(options.width, 32)?;
+    let height = align(options.height, 32)?;
+    if width > u32::MAX as usize || height > u32::MAX as usize {
+        return Err("Astronex dimensions exceed the image format".into());
+    }
+    let frames = options
+        .frames
+        .checked_add(3)
+        .ok_or("Astronex frame count overflow")?
+        .div_ceil(4);
+    Ok((width, height, align(frames, 8)?))
 }
 
 fn gaussian(seed: u64, len: usize) -> Result<Vec<f32>, String> {
@@ -350,15 +450,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn options_reject_non_contract_frame_boundaries() {
+    fn conventional_720p_15_seconds_aligns_then_crops_without_scaling() {
+        let options = AstronexOptions {
+            width: 1280,
+            height: 720,
+            frames: 360,
+            ..AstronexOptions::default()
+        };
+        assert!(options.validate().is_ok());
+        assert_eq!(generation_geometry(&options).unwrap(), (1280, 736, 96));
+        for options in [
+            AstronexOptions {
+                frames: usize::MAX,
+                ..options.clone()
+            },
+            AstronexOptions {
+                width: usize::MAX - 15,
+                ..options
+            },
+        ] {
+            assert!(options.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn options_accept_trimmed_frame_boundaries() {
         let mut options = AstronexOptions::default();
         options.frames = 10;
+        assert!(options.validate().is_ok());
+        options.frames = 0;
         assert!(options.validate().is_err());
     }
 
     #[test]
     fn options_require_complete_spatial_patches() {
-        for (width, height) in [(0, 32), (32, 0), (16, 32), (32, 16), (1280, 720)] {
+        for (width, height) in [(0, 32), (32, 0), (15, 32), (32, 15)] {
             let options = AstronexOptions {
                 width,
                 height,
@@ -366,7 +492,14 @@ mod tests {
             };
             assert!(options.validate().is_err(), "{width}x{height}");
         }
-        for (width, height) in [(32, 32), (832, 480), (1280, 736)] {
+        for (width, height) in [
+            (16, 32),
+            (32, 16),
+            (32, 32),
+            (832, 480),
+            (1280, 720),
+            (1280, 736),
+        ] {
             let options = AstronexOptions {
                 width,
                 height,
@@ -389,5 +522,9 @@ mod tests {
             [999, 972, 937, 892, 833, 749, 624, 416]
         );
         assert_eq!(scheduler.sigmas.last().copied(), Some(0.0));
+        assert_eq!(
+            FlowUniPc::new(8, 10.0).unwrap().timesteps,
+            [999, 985, 967, 943, 908, 856, 768, 587]
+        );
     }
 }
