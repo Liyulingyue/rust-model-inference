@@ -49,6 +49,12 @@ excluded from the raw-bit gate. Real 5B end-to-end raw-bit parity is not claimed
 The actual components-GGUF tokenizer matches the official tokenizer's IDs,
 512-position masks/padding and truncation for seven English/Chinese/Unicode,
 whitespace, special-token and empty-input cases.
+Twelve real-weight exact-operator cases compare original safetensors through an
+independent no-FMA/no-SIMD scalar C Oracle against the actual paired GGUFs:
+nine denoiser/UMT5 projections, two Conv3D operations and six embedding rows.
+All 137,984 selected F32 output values match raw bits. These are isolated operator
+checks; approximate activations and the full causal generation graph are outside
+that result. Reproduction commands are in the Oracle README.
 
 GPU tests exercise BF16/F32 range preservation, partial tiles, GQA/masks,
 1024-channel VAE attention, and Conv3D stride/padding/dilation. They also cover

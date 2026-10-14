@@ -25,6 +25,10 @@ not edit either checkout.
 .venv/bin/python tools/oracle/astronex_world/trace_official.py compare \
   /tmp/astronex-oracle /tmp/astronex-native
 cargo test --profile release-fast --lib astronex_checkpoint_tokenizer -- --ignored
+.venv/bin/python tools/oracle/astronex_world/checkpoint_operators.py \
+  artifacts/astronex-checkpoint-operators
+RMI_SCALAR=1 cargo test --profile release-fast --test astronex_checkpoint_operators \
+  -- --ignored --nocapture
 ```
 
 The ignored checkpoint-tokenizer test reads `astronex.tokenizer.json` from the
@@ -35,6 +39,18 @@ IDs were produced by the pinned official `AutoTokenizer.from_pretrained` call
 with `padding="max_length"`, `max_length=512`, `truncation=True` and special
 tokens enabled. The fixture records the input tokenizer SHA256; this is a real
 checkpoint tokenizer check, separate from synthetic floating-operator fixtures.
+
+`checkpoint_operators.py` reads raw BF16/F32 values from the original safetensors
+and computes independent scalar C results using the same no-FMA/no-vectorization
+flags. The ignored Rust test loads the actual paired GGUFs and compares every
+output bit for twelve cases: nine denoiser/UMT5 projections, patch and VAE
+convolutions, and six embedding rows including the last vocabulary entry.
+On the local checkpoint, all 137,984 F32 output values match. Serialized inputs,
+tensor names/shapes, source-byte hashes, pinned reference commit and conversion
+contract revision make the cases reproducible; the Rust test checks that revision
+against the GGUF metadata. Approximate activations, normalization, solver and
+GPU arithmetic are absent. This is real-weight operator parity, not a whole-model
+causal or 5B end-to-end parity result.
 
 `fixture` is an operator contract only. It proves sequential reductions,
 materialized softmax attention, 3-D convolution, token IDs, trace ordering,
