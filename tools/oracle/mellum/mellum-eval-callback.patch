@@ -1,0 +1,448 @@
+--- a/examples/eval-callback/eval-callback.cpp
++++ b/examples/eval-callback/eval-callback.cpp
+@@ -1,89 +1,388 @@
++// Mellum bit-parity oracle: replays a prompt one token at a time through the
++// upstream `mellum` graph and dumps every named checkpoint as raw F32 bits.
++//
++// The `mellum` graph already labels its intermediate tensors through
++// `llm_graph_context::cb(...)` (`src/models/mellum.cpp`), so no graph source
++// patch is required: this binary only has to select those names.
++
+ #include "arg.h"
+ #include "common.h"
+-#include "debug.h"
+ #include "log.h"
+ #include "llama.h"
+ 
++#include <algorithm>
++#include <array>
++#include <cmath>
+ #include <clocale>
++#include <cstdint>
++#include <cstdlib>
++#include <cstring>
++#include <fstream>
++#include <map>
++#include <stdexcept>
+ #include <string>
+ #include <vector>
+ 
+-static bool run(llama_context * ctx, const common_params & params) {
+-    const llama_model * model = llama_get_model(ctx);
+-    const llama_vocab * vocab = llama_model_get_vocab(model);
+-
+-    const bool add_bos = llama_vocab_get_add_bos(vocab);
+-
+-    std::vector<llama_token> tokens = common_tokenize(ctx, params.prompt, add_bos, true);
+-
+-    if (tokens.empty()) {
+-        LOG_ERR("%s : there are not input tokens to process - (try to provide a prompt with '-p')\n", __func__);
+-        return false;
++struct tensor_snapshot {
++    std::array<int64_t, GGML_MAX_DIMS> ne{};
++    std::vector<float> values;
++    std::vector<int32_t> ints;
++};
++
++// Layer checkpoints emitted by `src/models/mellum.cpp` and the shared
++// `build_attn` / `build_moe_ffn` helpers it calls.
++static const char * const LAYER_CHECKPOINTS[] = {
++    "attn_norm",
++    "Qcur_normed",
++    "Kcur_normed",
++    "Qcur",
++    "Kcur",
++    "Vcur",
++    "kq",
++    "kq_soft_max",
++    "kqv",
++    "kqv_out",
++    "ffn_inp",
++    "ffn_norm",
++    "ffn_moe_logits",
++    "ffn_moe_probs",
++    "ffn_moe_topk",
++    "ffn_moe_weights",
++    "ffn_moe_weights_norm",
++    "ffn_moe_up",
++    "ffn_moe_gate",
++    "ffn_moe_swiglu",
++    "ffn_moe_down",
++    "ffn_moe_weighted",
++    "ffn_moe_out",
++    "ffn_out",
++    "l_out",
++};
++
++static const char * const GLOBAL_CHECKPOINTS[] = {
++    "embd",
++    "result_norm",
++    "result_output",
++};
++
++static bool selected_tensor(const std::string & name) {
++    for (const char * candidate : GLOBAL_CHECKPOINTS) {
++        if (name == candidate) {
++            return true;
++        }
+     }
+-
+-    LOG_INF("number of input tokens = %zu\n", tokens.size());
+-    for (size_t i = 0; i < tokens.size(); ++i) {
+-        LOG_INF("  %d\n", tokens[i]);
++    // Layer checkpoints are named "<name>-<il>" by llm_graph_context::cb.
++    const size_t dash = name.rfind('-');
++    if (dash == std::string::npos) {
++        return false;
+     }
+-
+-    common_batch batch = common_batch_get_one(ctx, tokens);
+-    if (llama_process(ctx, LLAMA_PROCESS_TYPE_DECODE, batch.get())) {
+-        LOG_ERR("%s : failed to eval\n", __func__);
++    const std::string base = name.substr(0, dash);
++    const std::string index = name.substr(dash + 1);
++    if (index.empty() || index.find_first_not_of("0123456789") != std::string::npos) {
+         return false;
+     }
+-
+-    return true;
++    return std::any_of(std::begin(LAYER_CHECKPOINTS), std::end(LAYER_CHECKPOINTS),
++            [&](const char * candidate) { return base == candidate; });
+ }
+ 
+-int main(int argc, char ** argv) {
+-    std::setlocale(LC_NUMERIC, "C");
+-
+-    common_debug_cb_user_data cb_data;
++static std::string json_escape(const std::string & value) {
++    std::string result;
++    for (char ch : value) {
++        if (ch == '\\' || ch == '"') {
++            result.push_back('\\');
++        }
++        result.push_back(ch);
++    }
++    return result;
++}
+ 
+-    common_params params;
++class parity_trace {
++public:
++    explicit parity_trace(const char * path) : path_(path ? path : ""), manifest_(path_, std::ios::trunc) {
++        if (path_.empty() || !manifest_) {
++            throw std::runtime_error("RMI_PARITY_TRACE must name a writable manifest");
++        }
++    }
+ 
+-    common_init();
++    void clear_step() {
++        tensors_.clear();
++    }
+ 
+-    if (!common_params_parse(argc, argv, params, LLAMA_EXAMPLE_COMMON)) {
+-        return 1;
++    void capture(const ggml_tensor * tensor) {
++        // `ffn_moe_topk` is the I32 argsort result; everything else is F32.
++        if (tensor->type != GGML_TYPE_F32 && tensor->type != GGML_TYPE_I32) {
++            throw std::runtime_error(std::string("selected tensor has unexpected type: ") + tensor->name);
++        }
++        std::vector<uint8_t> bytes(ggml_nbytes(tensor));
++        ggml_backend_tensor_get(tensor, bytes.data(), 0, bytes.size());
++
++        tensor_snapshot snapshot;
++        std::copy(tensor->ne, tensor->ne + GGML_MAX_DIMS, snapshot.ne.begin());
++        if (tensor->type == GGML_TYPE_I32) {
++            const size_t count = ggml_nelements(tensor);
++            snapshot.ints.resize(count);
++            std::memcpy(snapshot.ints.data(), bytes.data(), count * sizeof(int32_t));
++            tensors_[tensor->name] = std::move(snapshot);
++            return;
++        }
++        snapshot.values.reserve(ggml_nelements(tensor));
++        for (int64_t i3 = 0; i3 < tensor->ne[3]; ++i3) {
++            for (int64_t i2 = 0; i2 < tensor->ne[2]; ++i2) {
++                for (int64_t i1 = 0; i1 < tensor->ne[1]; ++i1) {
++                    for (int64_t i0 = 0; i0 < tensor->ne[0]; ++i0) {
++                        const size_t offset = i3 * tensor->nb[3] + i2 * tensor->nb[2]
++                            + i1 * tensor->nb[1] + i0 * tensor->nb[0];
++                        float value;
++                        std::memcpy(&value, bytes.data() + offset, sizeof(value));
++                        snapshot.values.push_back(value);
++                    }
++                }
++            }
++        }
++        tensors_[tensor->name] = std::move(snapshot);
+     }
+ 
+-    llama_backend_init();
+-    llama_numa_init(params.numa);
++    void write_tokens(const char * name, const std::vector<llama_token> & tokens) {
++        manifest_ << "{\"name\":\"" << name << "\",\"token_ids\":[";
++        for (size_t i = 0; i < tokens.size(); ++i) {
++            if (i) {
++                manifest_ << ',';
++            }
++            manifest_ << tokens[i];
++        }
++        manifest_ << "]}\n";
++        manifest_.flush();
++    }
+ 
+-    // pass the callback to the backend scheduler
+-    // it will be executed for each node during the graph computation
+-    params.cb_eval = common_debug_cb_eval;
+-    params.cb_eval_user_data = &cb_data;
+-    params.warmup = false;
++    void write_step(int step) {
++        for (const char * name : GLOBAL_CHECKPOINTS) {
++            const auto found = tensors_.find(name);
++            if (found == tensors_.end()) {
++                throw std::runtime_error(std::string("missing global checkpoint: ") + name);
++            }
++            write_tensor(name, -1, step, shape_of(found->second), found->second);
++        }
++        for (const char * base : LAYER_CHECKPOINTS) {
++            for (int64_t layer = 0; layer < n_layer_; ++layer) {
++                const std::string key = std::string(base) + "-" + std::to_string(layer);
++                const auto found = tensors_.find(key);
++                if (found == tensors_.end()) {
++                    continue;
++                }
++                write_tensor(key.c_str(), static_cast<int>(layer), step,
++                        shape_of(found->second), found->second);
++            }
++        }
++    }
+ 
+-    // init
+-    auto llama_init = common_init_from_params(params);
++    void set_shape_info(int64_t n_layer, int64_t n_vocab) {
++        n_layer_ = n_layer;
++        n_vocab_ = n_vocab;
++    }
+ 
+-    auto * model = llama_init->model();
+-    auto * ctx   = llama_init->context();
++private:
++    static std::vector<int64_t> shape_of(const tensor_snapshot & snapshot) {
++        std::vector<int64_t> shape;
++        for (int64_t dim : snapshot.ne) {
++            if (dim != 1) {
++                shape.push_back(dim);
++            }
++        }
++        if (shape.empty()) {
++            shape.push_back(1);
++        }
++        return shape;
++    }
+ 
+-    if (model == nullptr || ctx == nullptr) {
+-        LOG_ERR("%s : failed to init\n", __func__);
+-        return 1;
++    void write_tensor(
++            const char * name, int layer, int step, const std::vector<int64_t> & shape,
++            const tensor_snapshot & snapshot) {
++        const size_t len = snapshot.values.empty() ? snapshot.ints.size() : snapshot.values.size();
++        size_t expected = 1;
++        for (int64_t dimension : shape) {
++            expected *= size_t(dimension);
++        }
++        if (expected != len) {
++            throw std::runtime_error(std::string("shape mismatch for ") + name);
++        }
++        if (!snapshot.ints.empty()) {
++            manifest_ << "{\"name\":\"" << name << "\",\"layer\":";
++            if (layer < 0) {
++                manifest_ << "null";
++            } else {
++                manifest_ << layer;
++            }
++            manifest_ << ",\"step\":" << step << ",\"shape\":[";
++            for (size_t i = 0; i < shape.size(); ++i) {
++                if (i) {
++                    manifest_ << ',';
++                }
++                manifest_ << shape[i];
++            }
++            manifest_ << "],\"len\":" << len << ",\"int_ids\":[";
++            for (size_t i = 0; i < snapshot.ints.size(); ++i) {
++                if (i) {
++                    manifest_ << ',';
++                }
++                manifest_ << snapshot.ints[i];
++            }
++            manifest_ << "]}\n";
++            manifest_.flush();
++            return;
++        }
++        const std::vector<float> & values = snapshot.values;
++
++        const size_t occurrence = occurrences_[name]++;
++        std::string binary_path = path_ + "." + name;
++        if (occurrence) {
++            binary_path += "." + std::to_string(occurrence);
++        }
++        binary_path += ".f32";
++
++        std::ofstream binary(binary_path, std::ios::binary | std::ios::trunc);
++        for (float value : values) {
++            uint32_t bits;
++            std::memcpy(&bits, &value, sizeof(bits));
++            const char bytes[] = {
++                char(bits), char(bits >> 8), char(bits >> 16), char(bits >> 24),
++            };
++            binary.write(bytes, sizeof(bytes));
++        }
++        if (!binary) {
++            throw std::runtime_error("failed to write " + binary_path);
++        }
++
++        manifest_ << "{\"name\":\"" << name << "\",\"layer\":";
++        if (layer < 0) {
++            manifest_ << "null";
++        } else {
++            manifest_ << layer;
++        }
++        manifest_ << ",\"step\":" << step << ",\"shape\":[";
++        for (size_t i = 0; i < shape.size(); ++i) {
++            if (i) {
++                manifest_ << ',';
++            }
++            manifest_ << shape[i];
++        }
++        manifest_ << "],\"len\":" << values.size() << ",\"occurrence\":" << occurrence
++                  << ",\"binary_path\":\"" << json_escape(binary_path) << "\"}\n";
++        manifest_.flush();
+     }
+ 
+-    // print system information
+-    {
+-        LOG_INF("\n");
+-        LOG_INF("%s\n", common_params_get_system_info(params).c_str());
+-        LOG_INF("\n");
++    std::string path_;
++    std::ofstream manifest_;
++    std::map<std::string, tensor_snapshot> tensors_;
++    std::map<std::string, size_t> occurrences_;
++    int64_t n_layer_ = 0;
++    int64_t n_vocab_ = 0;
++};
++
++static bool parity_eval_callback(ggml_tensor * tensor, bool ask, void * user_data) {
++    if (ask) {
++        return selected_tensor(tensor->name);
+     }
++    static_cast<parity_trace *>(user_data)->capture(tensor);
++    return true;
++}
+ 
+-    bool OK = run(ctx, params);
+-    if (!OK) {
+-        return 1;
++static llama_token greedy_token(llama_context * ctx, int n_vocab) {
++    const float * logits = llama_get_logits_ith(ctx, -1);
++    int best = 0;
++    for (int token = 1; token < n_vocab; ++token) {
++        if (logits[token] > logits[best]) {
++            best = token;
++        }
+     }
++    return best;
++}
+ 
+-    LOG("\n");
+-    llama_perf_context_print(ctx);
++static bool decode_one(llama_context * ctx, parity_trace & trace, llama_token token, int step) {
++    trace.clear_step();
++    auto batch = common_batch_get_one(ctx, &token, 1);
++    if (llama_process(ctx, LLAMA_PROCESS_TYPE_DECODE, batch.get())) {
++        LOG_ERR("failed to evaluate token %d at step %d\n", token, step);
++        return false;
++    }
++    trace.write_step(step);
++    return true;
++}
+ 
+-    llama_backend_free();
++static bool run(llama_context * ctx, const common_params & params, parity_trace & trace) {
++    const llama_model * model = llama_get_model(ctx);
++    const llama_vocab * vocab = llama_model_get_vocab(model);
++    const int n_vocab = llama_vocab_n_tokens(vocab);
++    const int max_tokens = std::max(0, params.n_predict);
++    trace.set_shape_info(llama_model_n_layer(model), n_vocab);
++
++    std::vector<llama_token> prompt = common_tokenize(
++            ctx, params.prompt, llama_vocab_get_add_bos(vocab), true);
++    if (prompt.empty()) {
++        LOG_ERR("prompt produced no tokens\n");
++        return false;
++    }
++    trace.write_tokens("prompt_ids", prompt);
+ 
+-    return 0;
++    int step = 0;
++    std::vector<llama_token> generated;
++    for (llama_token token : prompt) {
++        if (!decode_one(ctx, trace, token, step++)) {
++            return false;
++        }
++    }
++    if (max_tokens > 0) {
++        generated.push_back(greedy_token(ctx, n_vocab));
++    }
++    for (int index = 0; index < max_tokens; ++index) {
++        if (!decode_one(ctx, trace, generated[index], step++)) {
++            return false;
++        }
++        if (int(generated.size()) < max_tokens) {
++            generated.push_back(greedy_token(ctx, n_vocab));
++        }
++    }
++    trace.write_tokens("generated_ids", generated);
++    return true;
+ }
++
++int main(int argc, char ** argv) {
++    std::setlocale(LC_NUMERIC, "C");
++    try {
++        common_params params;
++        common_init();
++        if (!common_params_parse(argc, argv, params, LLAMA_EXAMPLE_COMMON)) {
++            return 1;
++        }
++
++        parity_trace trace(std::getenv("RMI_PARITY_TRACE"));
++        params.cpuparams.n_threads = 1;
++        params.cpuparams_batch.n_threads = 1;
++        params.n_batch = 1;
++        params.n_ubatch = 1;
++        params.n_ctx = 2048;
++        params.n_gpu_layers = 0;
++        params.fit_params = false;
++        params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
++        params.cache_type_k = GGML_TYPE_F32;
++        params.cache_type_v = GGML_TYPE_F32;
++        params.no_extra_bufts = true;
++        params.no_op_offload = true;
++        params.warmup = false;
++        params.cb_eval = parity_eval_callback;
++        params.cb_eval_user_data = &trace;
++
++        llama_backend_init();
++        llama_numa_init(params.numa);
++        auto llama_init = common_init_from_params(params);
++        auto * ctx = llama_init->context();
++        if (!ctx) { return 1; }
++        if (!ctx || !run(ctx, params, trace)) {
++            return 1;
++        }
++        llama_backend_free();
++        return 0;
++    } catch (const std::exception & error) {
++        LOG_ERR("mellum parity oracle: %s\n", error.what());
++        return 1;
++    }
++}
+\ 文件末尾没有换行符
