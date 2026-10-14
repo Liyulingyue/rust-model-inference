@@ -380,12 +380,22 @@ pub fn encode_tile(
             }
         }
     }
-    // + learned positional embedding, indexed by ggml's row order
+    // + learned positional embedding. The table is 70x70, so each axis is
+    // bucketed into 70 slots with `floor(70 * i / pos)` before the row index is
+    // formed — this is not a raster walk of the table.
+    const POS_GRID: usize = 70;
+    let bucket = |i: usize, n: usize| -> usize {
+        if n == 0 {
+            return 0;
+        }
+        ((i * POS_GRID) / n).min(POS_GRID - 1)
+    };
+    let table = weights.n_positions.min(POS_GRID * POS_GRID);
     for ty in 0..ny {
         for tx in 0..nx {
-            let pos = ty * nx + tx;
-            let token = pos;
-            let base = pos.min(weights.n_positions.saturating_sub(1)) * dim;
+            let pos = (bucket(ty, ny) * POS_GRID + bucket(tx, nx)).min(table.saturating_sub(1));
+            let token = ty * nx + tx;
+            let base = pos * dim;
             for i in 0..dim {
                 hidden[token * dim + i] += weights.position_embd[base + i];
             }
