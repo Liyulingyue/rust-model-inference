@@ -70,6 +70,7 @@ pub(crate) mod hunyuan;
 pub(crate) mod lfm2;
 pub(crate) mod lfm25;
 pub(crate) mod llama;
+pub(crate) mod mellum;
 pub(crate) mod nemotron_h;
 pub(crate) mod qwen3;
 pub(crate) mod qwen35;
@@ -301,6 +302,21 @@ fn build_jev_token_ids_for_arch(
         // bias documented in `docs/usage/ministral3.md` §3.1 applies
         // to the JSON instruction shape; call out here so future
         // maintainers don't think a mistral3 arm is missing by mistake.
+        // Mellum 2.x: the `mellum2` GGUF template is ChatML without the
+        // `<|im_start|>` markers — `role\n content\n` plus an `assistant\n`
+        // generation prompt, with `add_bos_token = false`. This mirrors
+        // `crate::models::mellum::build_mellum_prompt` and the single-mode
+        // scorer in `src/app/jev/single/mellum.rs`.
+        "mellum" => {
+            let prompt = format!("system\n{system}\nuser\n{payload}\nassistant\n");
+            Ok(tokenizer.encode(
+                &prompt,
+                EncodeOptions {
+                    add_special: false,
+                    parse_special: false,
+                },
+            ))
+        }
         "mistral3" => {
             let prompt = format!("[INST] {system} {payload} [/INST]");
             Ok(tokenizer.encode(
@@ -657,12 +673,21 @@ pub fn run_jev_grouped_decision_data(
             false,
             jinja.clone(),
         )?,
+        "mellum" => mellum::run_jev_grouped_mellum(
+            source.clone(),
+            context,
+            &prepared,
+            n_threads_arg,
+            prefill_batch_size,
+            false,
+            jinja.clone(),
+        )?,
         other => {
             return Err(format!(
                 "--jev grouped is not yet supported for architecture {:?}; \
                  currently supported: qwen3 / qwen3vl / qwen35 / llama / k2-horizon / \
-                 granite / nanbeige / qwen2_2 / gemma4 / lfm2 / lfm25 / spark2_5 / \
-                 mistral3 / hunyuan-dense / nemotron_h",
+                 granite / nanbeige / qwen2_2 / gemma4 / lfm2 / lfm25 / mellum / \
+                 spark2_5 / mistral3 / hunyuan-dense / nemotron_h",
                 other
             ));
         }

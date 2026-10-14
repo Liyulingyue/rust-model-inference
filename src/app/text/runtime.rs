@@ -171,6 +171,8 @@ pub fn build_text_runtime(
         Box::new(crate::models::falcon_h1::runtime::FalconH1TextRuntime::new(
             options,
         )?)
+    } else if arch == "mellum" {
+        Box::new(crate::models::mellum::trunk::runtime::MellumTextRuntime::new(options)?)
     } else {
         return Err(format!("No TextRuntime adapter for architecture {arch}"));
     };

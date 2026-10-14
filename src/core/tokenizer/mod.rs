@@ -46,6 +46,15 @@ enum PreTokenizer {
     /// `i` + `Phone`) and digits are chunked 1-3 at a time. Mirrors
     /// llama.cpp's `LLAMA_VOCAB_PRE_TYPE_GPT4O`.
     Gpt4o,
+    /// JetBrains Mellum 2.1 (`tokenizer.ggml.pre = "mellum2"`). Mirrors
+    /// llama.cpp's `LLAMA_VOCAB_PRE_TYPE_MELLUM2`, which splits the text
+    /// with `\p{N}` **first** and then applies the StarCoder/refact word
+    /// regex. Because the first pass isolates every digit on its own,
+    /// multi-digit runs become one pre-token per digit — unlike
+    /// [`PreTokenizer::LlamaBpe`], which keeps `123` together. The word
+    /// regex is also lowercase-only for contractions (`'s`, `'re`, ...),
+    /// so `'S` splits into `'` + `S` instead of a single piece.
+    Mellum2,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -599,9 +608,13 @@ impl BPETokenizer {
                 // (BOS=1, EOS=2, pad=11) are pinned by the GGUF, no extra
                 // `force_add_bos` needed.
                 Some(MetaValue::String(value)) if value == "tekken" => PreTokenizer::LlamaBpe,
+                // JetBrains Mellum 2.1 (`tokenizer.ggml.pre = "mellum2"`).
+                // llama.cpp splits `\p{N}` out before the StarCoder word
+                // regex, so every digit becomes its own pre-token.
+                Some(MetaValue::String(value)) if value == "mellum2" => PreTokenizer::Mellum2,
                 Some(MetaValue::String(value)) => {
                     return Err(format!(
-                        "Unsupported tokenizer.ggml.pre {value:?}; expected qwen2 or qwen35, hunyuan, hunyuan-dense, lfm2, llama-bpe, pixtral, falcon-h1, exaone, jina-v1-en, jina-v2-code, roberta-bpe, k2-horizon, minicpm5, gpt-4o, tekken, or glm4"
+                        "Unsupported tokenizer.ggml.pre {value:?}; expected qwen2 or qwen35, hunyuan, hunyuan-dense, lfm2, llama-bpe, pixtral, falcon-h1, exaone, jina-v1-en, jina-v2-code, roberta-bpe, k2-horizon, minicpm5, gpt-4o, tekken, mellum2, or glm4"
                     ));
                 }
                 _ => return Err("Missing or invalid tokenizer.ggml.pre".into()),
@@ -1923,19 +1936,45 @@ fn spark2_5_splits_punct_before_letter(values: &[char], pos: usize) -> bool {
     }
 }
 
-fn contraction_len(chars: &[char], pos: usize) -> Option<usize> {
+/// Length of an English contraction starting at `pos`, if one is there.
+///
+/// llama.cpp spells the contraction alternatives lowercase-only for the
+/// StarCoder/refact/Exaone/MELLUM2 family (`'s|'t|'re|'ve|'m|'ll|'d`) and
+/// case-insensitively for the Qwen2 / Qwen3 / Hunyuan families
+/// (`(?:'[sS]|'[tT]|...)`). `pre` selects which spelling applies so
+/// `'S` stays one piece for Qwen and splits into `'` + `S` for Mellum.
+fn contraction_len(chars: &[char], pos: usize, pre: PreTokenizer) -> Option<usize> {
     if chars.get(pos) != Some(&'\'') {
         return None;
     }
-    let one = chars.get(pos + 1)?.to_ascii_lowercase();
+    let fold = |value: Option<&char>| -> Option<char> {
+        let value = *value?;
+        Some(if contractions_are_case_insensitive(pre) {
+            value.to_ascii_lowercase()
+        } else {
+            value
+        })
+    };
+    let one = fold(chars.get(pos + 1))?;
     if matches!(one, 's' | 't' | 'm' | 'd') {
         return Some(2);
     }
-    let two = chars.get(pos + 2)?.to_ascii_lowercase();
+    let two = fold(chars.get(pos + 2))?;
     if matches!((one, two), ('r', 'e') | ('v', 'e') | ('l', 'l')) {
         return Some(3);
     }
     None
+}
+
+/// Pre-tokenizers whose llama.cpp regex spells contractions with an
+/// explicit upper-case alternative (`(?:'[sS]|'[tT]|...)`).
+///
+/// `Mellum2` is the exception: llama.cpp's `LLAMA_VOCAB_PRE_TYPE_MELLUM2`
+/// reuses the StarCoder regex, which is lowercase-only, so `'S` is `'` + `S`.
+/// `LlamaBpe` keeps folding case here because that is its already-verified
+/// behaviour for the models that route through it.
+fn contractions_are_case_insensitive(pre: PreTokenizer) -> bool {
+    !matches!(pre, PreTokenizer::Mellum2)
 }
 
 fn scan_qwen_ranges(text: &str, pre: PreTokenizer) -> Vec<Range<usize>> {
@@ -1954,7 +1993,7 @@ fn scan_qwen_ranges(text: &str, pre: PreTokenizer) -> Vec<Range<usize>> {
         let start = pos;
         let current = values[pos];
 
-        if let Some(length) = contraction_len(&values, pos) {
+        if let Some(length) = contraction_len(&values, pos, pre) {
             pos += length;
             ranges.push(byte_at(start)..byte_at(pos));
             continue;
@@ -1969,6 +2008,13 @@ fn scan_qwen_ranges(text: &str, pre: PreTokenizer) -> Vec<Range<usize>> {
                 !current.is_whitespace() && !is_word_char(current, pre) && !is_number(current);
             let starts_word = if pre == PreTokenizer::Spark2_5 && current_is_punct_only {
                 false
+            } else if pre == PreTokenizer::Mellum2 {
+                // Mellum2's word regex is `'s|'t|…| ?\p{L}+| ?\p{N}+|
+                // ?[^\s\p{L}\p{N}]+|\s+(?!\S)` — the optional prefix in front of
+                // a word run is a *space*, not an arbitrary single character
+                // (that is the Qwen `[^\r\n\p{L}\p{N}]?\p{L}+` form). So `'S`
+                // splits into `'` + `S` rather than one piece.
+                is_word_char(current, pre) || current == ' '
             } else {
                 is_word_char(current, pre)
                     || values
@@ -2048,16 +2094,27 @@ fn scan_qwen_ranges(text: &str, pre: PreTokenizer) -> Vec<Range<usize>> {
 
         if is_number(current) {
             pos += 1;
-            // K2Horizon, Minicpm5, and Gpt4o all chunk digit runs into 1-3
-            // digit pieces. llama.cpp implements Minicpm5 by first
-            // running `\\p{N}{1,3}` over the text, then the standard
-            // GPT-2 split; the chunk-size cap is equivalent for the
-            // second pass. Gpt4o is `\\p{N}{1,3}` directly.
+            // Digit runs are one pre-token by default (`\p{N}+` in the GPT-2
+            // style word regex).
+            //
+            // K2Horizon / Minicpm5 / Gpt4o chunk them into 1-3 digit pieces:
+            // llama.cpp implements Minicpm5 by first running `\p{N}{1,3}` over
+            // the text and then the standard GPT-2 split, and Gpt4o is
+            // `\p{N}{1,3}` directly.
+            //
+            // Mellum2 splits them into *single* digits: llama.cpp applies
+            // `\p{N}` as a separate first pass
+            // (`LLAMA_VOCAB_PRE_TYPE_MELLUM2`), so the word regex never sees a
+            // multi-digit run. `pos += 1` above already left exactly one digit.
             if matches!(
                 pre,
                 PreTokenizer::K2Horizon | PreTokenizer::Minicpm5 | PreTokenizer::Gpt4o
             ) {
                 while pos - start < 3 && values.get(pos).copied().is_some_and(is_number) {
+                    pos += 1;
+                }
+            } else if pre != PreTokenizer::Mellum2 {
+                while values.get(pos).copied().is_some_and(is_number) {
                     pos += 1;
                 }
             }
@@ -2234,6 +2291,49 @@ mod tests {
             scan_qwen_words("a  b", PreTokenizer::Qwen2),
             vec!["a", " ", " b"]
         );
+    }
+
+    /// `mellum2` runs llama.cpp's `\p{N}` split **before** the StarCoder word
+    /// regex, so every digit becomes its own pre-token. `LlamaBpe` shares the
+    /// word regex but keeps `123` whole — the two must not be conflated.
+    #[test]
+    fn mellum2_scanner_splits_every_digit() {
+        assert_eq!(
+            scan_qwen_words("a 12345 b", PreTokenizer::Mellum2),
+            vec!["a", " ", "1", "2", "3", "4", "5", " b"]
+        );
+        assert_eq!(
+            scan_qwen_words("12345", PreTokenizer::Mellum2),
+            vec!["1", "2", "3", "4", "5"]
+        );
+        // A digit run glued to punctuation still splits per digit, and the
+        // leading space stays attached to the following word piece.
+        assert_eq!(
+            scan_qwen_words("a 678", PreTokenizer::Mellum2),
+            vec!["a", " ", "6", "7", "8"]
+        );
+        assert_eq!(
+            scan_qwen_words("a 12345 b", PreTokenizer::LlamaBpe),
+            vec!["a", " ", "12345", " b"]
+        );
+    }
+
+    /// The StarCoder-family regex spells contractions lowercase-only
+    /// (`'s|'t|'re|'ve|'m|'ll|'d`), so `'S` is `'` + `S`; the Qwen family
+    /// spells them with an explicit upper-case alternative and keeps `'S` whole.
+    /// `LlamaBpe` shares the lowercase-only regex but predates this split and
+    /// keeps folding case, so it is pinned here as-is.
+    #[test]
+    fn mellum2_contractions_are_case_sensitive() {
+        assert_eq!(scan_qwen_words("'S", PreTokenizer::Mellum2), vec!["'", "S"]);
+        assert_eq!(scan_qwen_words("'s", PreTokenizer::Mellum2), vec!["'s"]);
+        assert_eq!(scan_qwen_words("'S", PreTokenizer::LlamaBpe), vec!["'S"]);
+        assert_eq!(scan_qwen_words("'S", PreTokenizer::Qwen2), vec!["'S"]);
+    }
+
+    #[test]
+    fn mellum2_pre_is_accepted_by_the_bpe_loader() {
+        assert!(tokenizer_with_pre(Some("mellum2")).is_ok());
     }
 
     #[test]
