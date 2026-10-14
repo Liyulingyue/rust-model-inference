@@ -39,6 +39,10 @@ impl MediaKind {
 pub enum ProjectorFamily {
     Qwen3VlMerger,
     Qwen25Omni,
+    /// MiniCPM-V 4.7: a SigLIP tower whose `vit_merger` is spliced in at
+    /// `wa_layer_indexes[0]`, plus two 2x2 merges and per-tile separator rows
+    /// from `v.tok_embd_sep`.
+    MiniCpmV47,
 }
 
 pub fn validate_mmproj_capabilities(
@@ -59,6 +63,9 @@ pub fn validate_mmproj_capabilities(
     let family = match declared.as_deref() {
         Some("qwen3vl_merger") => ProjectorFamily::Qwen3VlMerger,
         Some("qwen2.5o" | "qwen2.5vl_merger") => ProjectorFamily::Qwen25Omni,
+        Some(other) if other == crate::models::minicpmv::PROJECTOR_TYPE => {
+            ProjectorFamily::MiniCpmV47
+        }
         Some(other) => {
             return Err(format!("Unsupported clip.projector_type: {other}"));
         }
