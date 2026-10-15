@@ -231,6 +231,20 @@ pub fn run_inference(
             thinking,
             jinja,
         )
+    } else if arch == "mellum" {
+        crate::models::mellum::trunk::run::run_inference(
+            source.clone(),
+            prompt,
+            max_tokens,
+            temperature,
+            n_threads_arg,
+            profile,
+            kv_format,
+            max_context,
+            repetition_penalty,
+            thinking,
+            jinja,
+        )
     } else {
         crate::app::text::run_qwen3_inference(
             source.clone(),
