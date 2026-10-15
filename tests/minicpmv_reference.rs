@@ -292,3 +292,70 @@ fn tower_shape_matches_the_oracle_checkpoint_dump() {
         27
     );
 }
+
+/// Diagnostic: run the 35B tower over a pinned token sequence and dump the
+/// final-position logits, so they can be compared against the oracle's
+/// `RMI_LLAMA_LOGITS_DIR` output for the same tokens.
+///
+/// RMI_MOE_LOGITS_PROMPT_IDS : comma-separated token ids (default: the
+///                             llama.cpp `-p` tokenisation of
+///                             `user\nWhat is 2+2?\nassistant\n<think>\n\n</think>\n\n`)
+/// RMI_MOE_LOGITS_MODEL     : path to the 35B GGUF
+/// RMI_MOE_LOGITS_OUT       : output file for the raw f32 logits
+#[test]
+#[ignore = "writes parity dumps; needs the 35B model"]
+fn dump_qwen35moe_logits() {
+    let model_path = match std::env::var("RMI_MOE_LOGITS_MODEL") {
+        Ok(path) => path,
+        Err(_) => {
+            eprintln!("skipping: set RMI_MOE_LOGITS_MODEL");
+            return;
+        }
+    };
+    let ids: Vec<u32> = std::env::var("RMI_MOE_LOGITS_PROMPT_IDS")
+        .unwrap_or_else(|_| {
+            "0,846,198,3710,369,220,17,10,17,30,198,74455,198,248068,271,248069,271".into()
+        })
+        .split(',')
+        .filter_map(|part| part.trim().parse().ok())
+        .collect();
+
+    let loader = GGUFLoader::from_file(&model_path).expect("open 35B GGUF");
+    let source: Arc<dyn TensorSource> = Arc::new(loader);
+    // Dump the input embedding of the final prompt token so it can be compared
+    // against the oracle's `model.input_embed`.
+    {
+        use rust_model_inference::models::qwen35::Qwen35Model;
+        let model = Qwen35Model::from_source(source.as_ref()).expect("load 35B");
+        let n_embd = model.config.n_embd;
+        let embd = model.embed_tokens(&ids).expect("embed");
+        let out = std::env::var("RMI_MOE_LOGITS_OUT").unwrap_or_else(|_| ".".into());
+        let bytes: Vec<u8> = embd.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let _ = std::fs::write(format!("{out}/embed_all.bin"), bytes);
+        eprintln!("embed rows={}", embd.len() / n_embd);
+    }
+
+    let logits = rust_model_inference::models::qwen35::trunk::run_forward_logits_qwen35_with_batch(
+        source.as_ref(),
+        &ids,
+        8,
+        rust_model_inference::core::scratchpad::KvFormat::F32,
+        1024,
+        1,
+    )
+    .expect("forward logits")
+    .0;
+    assert_eq!(logits.len(), 248144, "vocab size");
+    let _ = &logits;
+    let out = std::env::var("RMI_MOE_LOGITS_OUT").unwrap_or_else(|_| "logits.bin".into());
+    let bytes: Vec<u8> = logits.iter().flat_map(|v| v.to_le_bytes()).collect();
+    std::fs::write(&out, bytes).expect("write logits");
+    let mut top: Vec<usize> = (0..logits.len()).collect();
+    top.sort_by(|&a, &b| logits[b].total_cmp(&logits[a]));
+    let summary: Vec<String> = top
+        .iter()
+        .take(10)
+        .map(|&i| format!("{i}:{:.5}", logits[i]))
+        .collect();
+    eprintln!("rust top10: {}", summary.join(" "));
+}

@@ -139,6 +139,51 @@ SwiGLU. The MoE variant needs:
    stay behind `Weight` and no call site inspects `ggml_type`.
 5. The shared expert with the nested residual above.
 
+## Comparing against the oracle
+
+`llama-cli` takes `-p` as **raw text**, which tokenizes without the chat
+markers, while this repo's CLI wraps the prompt in the GGUF template. Comparing
+the two directly compares different token sequences. `llama-tokenize` makes the
+difference visible:
+
+```text
+llama.cpp -p : 0 846 198 3710 369 220 17 10 17 30 198 74455 198 248068 271 248069 271
+this repo    : 248045 846 198 3710 369 220 17 10 17 30 248046 198 248045 74455 198 ...
+```
+
+So `tests/minicpmv_reference.rs::dump_qwen35moe_logits` takes the token ids
+explicitly (`RMI_MOE_LOGITS_PROMPT_IDS`) and dumps the final logits, and the
+oracle side needs a scheduler eval callback that writes `result_output`.
+
+Two gotchas, both learned the hard way:
+
+* `common::common.h` declares `params.logits_output_dir` and `arg.cpp` accepts
+  `--logits-output-dir`, but **nothing reads it** — the flag silently produces
+  no file.
+* `ggml_backend_sched_set_eval_callback` has to be installed *after*
+  `ggml_backend_sched_reset`, because the graph-reuse path resets it on every
+  decode step and would otherwise clobber it. It must also be installed
+  unconditionally (not in an `else if (cb_eval == nullptr)` branch) and must
+  return `true` so the walk continues.
+
+`RMI_MOE_DUMP` additionally writes the per-token router logits, probabilities,
+routed sum, shared sum and combined output, so the MoE can be bisected against
+the oracle's `ffn_moe_logits-*` / `ffn_moe_out-*` / `ffn_shexp_gated-*`.
+
+### What matches today
+
+| stage | result |
+|---|---|
+| input embedding | **bit-exact** on all 2048 components of the pinned token |
+| routing | picks the **same experts** (e.g. 67, 140, 206) |
+| generation | coherent and correct ("2 + 2 = 4") |
+
+The router logits still drift by O(0.1) versus the oracle, so the final top-10
+differs. Whether that is Q8_0 expert quantisation and f32 summation order, or a
+remaining bug upstream of the router, has **not** been isolated — the oracle's
+`attn_post_norm-*` checkpoint would settle it and needs a matching dump on this
+side.
+
 ## Verification plan
 
 Per the project's bar, the first milestone is the **text-only** path: get the

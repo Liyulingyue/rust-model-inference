@@ -85,6 +85,9 @@ pub(crate) fn forward_qwen35moe_token(
     let chosen = &order[..cfg.n_expert_used.min(moe.n_expert)];
     let chosen_total: f32 = chosen.iter().map(|&i| probabilities[i]).sum();
 
+    // RMI_PARITY: dump the router / routed / shared terms for layer-0 token 0.
+    let dump = std::env::var("RMI_MOE_DUMP").ok();
+
     let mut routed = vec![0.0f32; n_embd];
     for &expert in chosen {
         let gate_w = moe.gate(expert);
@@ -170,6 +173,33 @@ pub(crate) fn forward_qwen35moe_token(
     // cur = moe_out + ffn_shexp * sigmoid(gate_inp_shexp . cur).
     for (o, shared) in out.iter_mut().zip(&shared_acc) {
         *o += scale * shared;
+    }
+    if let Some(dir) = &dump {
+        if cfg.n_expert == 256 && cfg.n_expert_used == 8 {
+            let w = |v: &[f32]| -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() };
+            use std::io::Write as _;
+            let mut open = |name: &str| {
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(format!("{dir}/{name}"))
+            };
+            if let Ok(mut f) = open("router.bin") {
+                let _ = f.write_all(&w(&logits));
+            }
+            if let Ok(mut f) = open("routed.bin") {
+                let _ = f.write_all(&w(&routed));
+            }
+            if let Ok(mut f) = open("shared.bin") {
+                let _ = f.write_all(&w(&shared_acc));
+            }
+            if let Ok(mut f) = open("out.bin") {
+                let _ = f.write_all(&w(out));
+            }
+            if let Ok(mut f) = open("scale.bin") {
+                let _ = f.write_all(&w(&[scale]));
+            }
+        }
     }
     Ok(())
 }
