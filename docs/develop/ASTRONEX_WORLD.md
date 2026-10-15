@@ -16,18 +16,20 @@ passes through the second SiLU.
 Widths/heights must be positive multiples of 16. The model pads internally to
 32-pixel patch boundaries and crops after decoding. Arbitrary positive frame
 counts are accepted: the model generates complete blocks and trims the decoded
-sequence. For 720p, 24 FPS, 15 seconds this means 1280x736 and 96 latent frames,
-then a spatial crop and temporal trim to 1280x720, 360 generated frames.
+sequence. For 720p, 24 FPS, 5 seconds this means 1280x736 and 32 latent frames,
+then a spatial crop and temporal trim to 1280x720, 120 generated frames. A
+15-second request uses the same geometry with 96 latent frames and 360 output
+frames.
 No upscaling, repeated frames or FPS change is used to manufacture the duration.
 
 ```sh
-cargo build --release --features vulkan --bin rust-model-inference
-target/release/rust-model-inference --gpu --astronex \
+cargo build --profile release-fast --features vulkan --bin rust-model-inference
+target/release-fast/rust-model-inference --gpu --astronex \
   --model models/Astronex-World/Astronex-World-BF16.gguf \
   --mmproj models/Astronex-World/mmproj-Astronex-World.gguf \
   --prompt 'A small wooden boat glides along a calm river, surrounded by green mountains, natural morning light, continuous gentle motion.' \
-  --out artifacts/astronex-720p-15s.mp4 \
-  --width 1280 --height 720 --video-frames 360 --fps 24 \
+  --out artifacts/astronex-720p-5s.mp4 \
+  --width 1280 --height 720 --video-frames 120 --fps 24 \
   --steps 8 --cfg-scale 3 --seed 42 --threads 1
 ```
 
@@ -36,7 +38,9 @@ weights with F32 activations/accumulation; online attention has bounded shared
 workspace and no materialized N-squared matrix. The VAE's F32 3D convolutions
 gather directly on GPU. GPU KV storage rounds to BF16 to fit shared memory;
 scalar CPU KV remains F32. Text encoder allocations are dropped after encoding,
-and denoiser/CFG caches are dropped before VAE decoding.
+and no-longer-needed text/denoiser CFG caches are released only after sampling,
+before VAE decoding; projection weights and GPU workspaces remain retained for
+reuse across blocks.
 
 ## Validation boundary
 
@@ -72,7 +76,20 @@ decoding confirms 29 distinct frame hashes. Six inspected frames show a boat,
 water, mountains and continuous scene changes. The command took 826.11 seconds,
 with 18,814,550,016 bytes maximum RSS and 18,249,758,144 bytes peak footprint.
 It ran alongside the 720p task and caused memory paging; this is not an isolated
-performance benchmark. Native 720p full generation is still under validation.
+performance benchmark.
+
+The same release-fast binary then completed an isolated real-GGUF 1280x720,
+120-frame, 24-FPS MP4 on the M3 Max. The model generated 1280x736 internally,
+decoded four causal blocks, cropped to 1280x720, and wrote
+`artifacts/astronex-720p-5s.mp4`. `ffprobe` reports H.264 yuv420p, 1280x720,
+24/1 FPS, 120 frames and 5.000000 seconds. Full `ffmpeg` decoding passed, and
+the framemd5 check found 120 unique frame hashes; sampled frames show the boat,
+water and mountains with continuous motion. The single command took
+37,815.30 seconds by `/usr/bin/time -l`, with 36,547,870,720 bytes maximum RSS
+and 34,092,037,792 bytes peak footprint. No second inference, compile or preview
+job was launched; no per-block cache cleanup was used. The run is a correctness
+and production-size smoke check, not a throughput baseline because macOS paging
+was observed.
 
 Optional validation artifacts: `RMI_ASTRONEX_PROFILE=1` logs each layer;
 `RMI_ASTRONEX_LATENT_OUT=path` saves C,T,H,W as four little-endian u64 values,
@@ -80,5 +97,5 @@ followed by CTHW F32 values, for independent decoding without repeating sampling
 
 PRoPE camera input, action conditioning/output, event prompts, retrieval-window
 selection and non-eight-step sampling are unsupported. The no-control T2V and
-first-frame I2V routes remain experimental until production-size visual and
-reference comparisons are complete.
+first-frame I2V routes remain experimental; 15-second production-size generation
+and full end-to-end raw-bit parity remain unvalidated.
