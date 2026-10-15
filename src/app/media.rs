@@ -73,11 +73,14 @@ pub fn validate_mmproj_capabilities(
         // pre-existing GGUF shapes rely on.
         None => match llm_arch {
             "qwen3vl" | "qwen3vlmoe" => ProjectorFamily::Qwen3VlMerger,
-            "qwen2vl" | "qwen35" => ProjectorFamily::Qwen25Omni,
+            "qwen2vl" | "qwen35" | "qwen35moe" => ProjectorFamily::Qwen25Omni,
             other => return Err(format!("Unsupported multimodal architecture: {other}")),
         },
     };
-    if !matches!(llm_arch, "qwen3vl" | "qwen3vlmoe" | "qwen2vl" | "qwen35") {
+    if !matches!(
+        llm_arch,
+        "qwen3vl" | "qwen3vlmoe" | "qwen2vl" | "qwen35" | "qwen35moe"
+    ) {
         return Err(format!("Unsupported multimodal architecture: {llm_arch}"));
     }
     if llm_arch == "qwen3vl" && media == MediaKind::Audio {
@@ -373,6 +376,19 @@ mod tests {
             )
         }
 
+        fn minicpmv() -> Arc<dyn TensorSource> {
+            Stub::with(
+                vec![
+                    (
+                        "clip.projector_type",
+                        MetaValue::String(crate::models::minicpmv::PROJECTOR_TYPE.into()),
+                    ),
+                    ("clip.has_vision_encoder", MetaValue::Bool(true)),
+                ],
+                &["mm.0.weight", "v.patch_embd.weight"],
+            )
+        }
+
         fn omni() -> Arc<dyn TensorSource> {
             Stub::with(
                 vec![
@@ -410,6 +426,19 @@ mod tests {
             validate_mmproj_capabilities("qwen35", Stub::merger().as_ref(), MediaKind::Image)
                 .expect("LensVLM-9B pairing must be accepted");
         assert_eq!(family, ProjectorFamily::Qwen3VlMerger);
+    }
+
+    /// MiniCPM-V 4.7 ships as two towers: 1B is `qwen35`, 35B-A3B is
+    /// `qwen35moe`. Both carry the same `minicpmv4_7` mmproj, and the projector
+    /// resolves from `clip.projector_type` regardless -- so the arch allowlist
+    /// has to know about `qwen35moe` or the 35B pairing is refused even though
+    /// the family was already decided correctly.
+    #[test]
+    fn qwen35moe_accepts_the_minicpmv_projector() {
+        let family =
+            validate_mmproj_capabilities("qwen35moe", Stub::minicpmv().as_ref(), MediaKind::Image)
+                .expect("MiniCPM-V 4.7 35B-A3B pairing must be accepted");
+        assert_eq!(family, ProjectorFamily::MiniCpmV47);
     }
 
     /// The reverse pairing is a genuine mismatch and must stay an error: a
