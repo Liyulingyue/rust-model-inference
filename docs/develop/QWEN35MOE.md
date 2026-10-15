@@ -251,7 +251,9 @@ whose token identity is unambiguous:
 | `v_conv_predelta` | L1 3e-5 |
 | `beta_sigmoid` | **bit-exact** |
 | `gate` (softplus x ssm_a) | **bit-exact** |
-| `attn_output` from a **zero state** | 0.0045% |
+| `attn_output` from a zero state | 0.0045% |
+| naive vs chunked recurrence, same inputs and state | 0.0063% |
+| naive vs chunked recurrence, same inputs and state | 0.0063% |
 
 The recurrence itself is also verified index-for-index against the oracle's
 `build_delta_net_autoregressive`: decay, then `s^T k`, then `(v - sk) * beta`,
@@ -266,34 +268,29 @@ then the `k (x) d` outer product, then `s^T q / sqrt(S_k)`. The three ops in
 version clamped the denominator from below with `max`, which only differs for
 near-zero head vectors but those are exactly the least stable ones.
 
-### The one open discrepancy
+### There is no chunked-vs-sequential gap
 
-Against a multi-token prefill, my `attn_output` differs from the oracle by ~14%.
-The cause is *not* isolated, but the search has been narrowed to a single
-hypothesis:
+An earlier revision of this file claimed ~14% on multi-token prefill and
+blamed `build_delta_net_chunking`. That was wrong, and so was the measurement.
 
-* For `n_seq_tokens == 1` the oracle dispatches to
-  `build_delta_net_autoregressive`, which is what this repo implements, and the
-  two agree to 0.0045%.
-* For `n_seq_tokens > 1` it dispatches to `build_delta_net_chunking`, the
-  chunked WY parallel algorithm. That is a different numerical path for the same
-  recurrence, so this repo's sequential form can be expected to drift from it.
-* Decode -- the phase that actually produces the tokens -- runs one token per
-  ubatch, i.e. the autoregressive path, so it is the path that was verified.
+llama.cpp pads prefill ubatches: a 3-token prompt produces a 9-row ubatch laid
+out `[pad, pad, pad, tok1, tok2, tok3, pad, pad, pad]`, with the real tokens at
+rows 3..5. Comparing "my token *i*" against "oracle row *i*" therefore compares
+two different state trajectories, and no amount of care about which algorithm
+runs fixes it.
 
-Two things make this hard to settle from the dumps alone:
+The way out is the oracle's own `state_predelta` checkpoint, which is the state
+entering the ubatch. Feeding the oracle's exact inputs into a plain sequential
+recurrence from that state reproduces its chunked output:
 
-* llama.cpp pads prefill ubatches with **three real-embedding tokens at each
-  end**, so the state entering the first real token is not zero. On the 33-token
-  probe the ubatch is 39 rows with the real tokens at rows 3..35, and the
-  zero-state closed form `beta * (k.q) * v / sqrt(n)` misses the oracle's row 3
-  by 52% purely because of that pollution. `-fa off` does not remove the padding.
-* `llama-cli -ub 1` forces the autoregressive path but introduces its own
-  padding ubatches ahead of the prompt, so it is worse, not better.
+| comparison | result |
+|---|---|
+| naive recurrence from `state_predelta` vs oracle `attn_output` | **avg 0.0063%, max 0.0786%** |
+| Python naive recurrence vs this repo's `attn_out` | avg 0.0052%, max 0.0403% |
 
-End to end the model is correct: on the 33-token probe it answers "That is the
-**NATO Phonetic Alphabet** (also known as the International Radiotelephony
-Spelling Alphabet)", and on `What is 2+2?` it answers `2 + 2 = 4`.
+So the chunked WY formulation and the sequential recurrence agree here, and
+this repo implements the sequential one. There is no algorithmic discrepancy to
+close.
 
 ## Verification plan
 
@@ -310,8 +307,6 @@ numbers live (see [`tools/oracle/minicpmv/README.md`](../../tools/oracle/minicpm
 * The oracle's tensor table can build an MTP draft head; this GGUF has no
   `nextn.*` tensors, so that path is dead here but may still need to load
   cleanly if the arch gains it later.
-* The ~14% multi-token prefill gap is narrowed to the chunked-vs-sequential
-  recurrence question but not closed. See "The one open discrepancy" above.
 * Vulkan: `src/vulkan/qwen35.rs` still gates on `architecture == "qwen35"`, so
   the 35B runs on the scalar/SIMD CPU path only.
 
