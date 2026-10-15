@@ -184,6 +184,9 @@ pub(crate) fn forward_qwen35moe_token(
                     .append(true)
                     .open(format!("{dir}/{name}"))
             };
+            if let Ok(mut f) = open("input.bin") {
+                let _ = f.write_all(&w(input));
+            }
             if let Ok(mut f) = open("router.bin") {
                 let _ = f.write_all(&w(&logits));
             }

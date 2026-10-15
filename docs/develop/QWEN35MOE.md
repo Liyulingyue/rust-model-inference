@@ -170,6 +170,55 @@ Two gotchas, both learned the hard way:
 routed sum, shared sum and combined output, so the MoE can be bisected against
 the oracle's `ffn_moe_logits-*` / `ffn_moe_out-*` / `ffn_shexp_gated-*`.
 
+Prompt processing runs several ubatches, and the eval callback wrote every one
+of them to `<name>.bin` with `trunc`, so each ubatch erased its predecessor and
+only the last survived on disk. Worse, the surviving rows could not be mapped
+back to token positions, which made every comparison inconclusive: the "best
+match" L1 against my own rows was 923 while the median L1 *between* two of my
+own adjacent tokens was 956 -- i.e. matching a random unrelated token scored as
+well as matching the right one.
+
+The callback now appends a per-invocation sequence number to the filename, so
+each ubatch lands in its own file. `model.input_embed` matches my embedding
+**bit-exactly**, which makes it usable as an identity map: matching oracle rows
+against my embeddings assigns 18 of 21 rows to specific token indices.
+
+### The SSM path is where this diverges
+
+With that map in hand, comparing the oracle's `attn_post_norm-0` (the
+post-SSM normalised residual that feeds the router) against my own layer-0
+rows is decisive:
+
+| oracle row | my token | exact | L1 | max |
+|---|---|---|---|---|
+| 2 | 2 | 0/2048 | 1416.99 | 11.61 |
+| 9 | 7 | 0/2048 | 983.50 | 32.50 |
+| 15 | 13 | 0/2048 | 958.00 | 47.51 |
+| 17 | 15 | 0/2048 | 1011.55 | 47.39 |
+
+So: the input embedding is bit-exact, and the layer-0 SSM output is wrong by an
+order of magnitude. The drift I attributed to "Q8_0 expert quantisation and
+f32 summation order" is not that -- it is a genuine bug upstream of the router,
+in the SSM. The MoE routing still picks the same experts only because the
+residual stream stays in roughly the right direction.
+
+Worth noting: the 1B model's SSM was never numerically verified against the
+oracle either, only checked for coherent output, so this may not be
+35B-specific.
+
+SSM tensor shapes do scale consistently between the two models, so this is not a
+binding/slice problem:
+
+| tensor | 1B | 35B |
+|---|---|---|
+| `ssm_a` | `[16]` | `[32]` |
+| `ssm_alpha.weight` | `[1024, 16]` | `[2048, 32]` |
+| `ssm_beta.weight` | `[1024, 16]` | `[2048, 32]` |
+| `ssm_conv1d.weight` | `[4, 6144]` | `[4, 8192]` |
+| `ssm_dt.bias` | `[16]` | `[32]` |
+| `ssm_norm.weight` | `[128]` | `[128]` |
+| `ssm_out.weight` | `[2048, 1024]` | `[4096, 2048]` |
+
 ### What matches today
 
 | stage | result |
