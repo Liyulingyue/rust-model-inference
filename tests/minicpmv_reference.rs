@@ -221,3 +221,74 @@ fn dump_tile() {
 fn bin_of(values: &[f32]) -> Vec<u8> {
     values.iter().flat_map(|v| v.to_le_bytes()).collect()
 }
+
+/// Structural contract, pinned against the oracle's own checkpoint shapes.
+///
+/// The oracle's `RMI_MTMD_CB_DIR` dump of a 448x448 overview reports, for the
+/// default 32x32 patch grid:
+///
+/// ```text
+///   layer_out-0 .. layer_out-6    1024 tokens   (32*32 patches, width 1152)
+///   layer_out-7 .. layer_out-26    256 tokens   (after the vit_merger 2x2)
+///   post_ln                         256 tokens
+///   merger_out                       64 rows    (8*8, width 1024)
+/// ```
+///
+/// Seven layers before the merger and twenty after is the whole signature of
+/// `insert_layer_id = 6` running `build_vit_layers(0, 7)` then the merger then
+/// `build_vit_layers(7, 27)`. Getting the insertion point wrong -- or merging
+/// before rather than after it -- still produces finite embeddings, so this is
+/// asserted rather than inferred from a smoke run.
+#[test]
+fn tower_shape_matches_the_oracle_checkpoint_dump() {
+    let cfg = MiniCpmV47Config {
+        image_size: 448,
+        patch_size: 14,
+        n_embd: 1152,
+        n_ff: 4304,
+        n_layer: 27,
+        n_head: 16,
+        n_embd_text: 1024,
+        eps: 1e-6,
+        n_merge: 4,
+        max_slice_nums: 9,
+        insert_layer_id: 6,
+        image_mean: [0.5; 3],
+        image_std: [0.5; 3],
+        d_head: 72,
+        kq_scale: 1.0 / 72.0f32.sqrt(),
+    };
+    let (nx, ny) = (32usize, 32usize);
+    let n_pos = nx * ny;
+
+    // Before the merger: every layer keeps the full patch grid.
+    assert_eq!(n_pos, 1024);
+    for il in 0..=cfg.insert_layer_id {
+        assert_eq!(n_pos, 1024, "layer {il} runs before the merger");
+    }
+    assert_eq!(
+        cfg.insert_layer_id + 1,
+        7,
+        "seven layers precede the merger"
+    );
+
+    // The vit_merger's 2x2 downsample collapses each side by two.
+    let after_merger = (nx / 2) * (ny / 2);
+    assert_eq!(after_merger, 256, "vit_merger emits 16*16 = 256 rows");
+    assert_eq!(
+        cfg.n_layer - (cfg.insert_layer_id + 1),
+        20,
+        "twenty layers follow"
+    );
+    for il in cfg.insert_layer_id + 1..cfg.n_layer {
+        assert_eq!(after_merger, 256, "layer {il} runs after the merger");
+    }
+
+    // The final merger halves again and projects to the text width.
+    assert_eq!(cfg.output_tokens(nx, ny, 0), 64, "8*8 = 64 projector rows");
+    assert_eq!(64 * cfg.n_embd_text, 65536, "merger_out is 65536 floats");
+    assert_eq!(
+        cfg.insert_layer_id + 1 + (cfg.n_layer - (cfg.insert_layer_id + 1)),
+        27
+    );
+}

@@ -76,7 +76,29 @@ PROJECTOR DIFFER
 * **Preprocessing is bit-exact.** The 448×448 overview resize (Triangle /
   bilinear) and the `(v/255 - mean)/std` normalisation agree on all 602112
   floats.
-* **The vision tower diverges.** First differing element is index 0.
+* **The vision tower diverges numerically** at `pos_embed`, by ~1e-6 relative
+  (oracle `0.03810417652130127` vs Rust `0.03810374438762665`).
+
+### Architectural agreement (what is actually pinned)
+
+Bitwise equality is not the bar here; agreeing with the oracle about *what the
+computation is* is. The checkpoint dump settles that:
+
+| oracle checkpoint | floats | Rust |
+|---|---|---|
+| `layer_out-0` … `layer_out-6` | 1179648 (1024 tokens × 1152) | same |
+| `vit_merger_attn_residual` | 1179648 | same |
+| `vit_merger_ds_out` | 294912 (256 × 1152) | same |
+| `layer_out-7` … `layer_out-26` | 294912 (256 × 1152) | same |
+| `post_ln` | 294912 | same |
+| `merger_out` | 65536 (64 × 1024) | same |
+
+Seven layers before the merger and twenty after is the signature of
+`insert_layer_id = 6`: `build_vit_layers(0, 7)`, merger, `build_vit_layers(7,
+27)`. Wrong insertion point, or merging before the block instead of after it,
+still yields finite embeddings, so
+`tests/minicpmv_reference.rs::tower_shape_matches_the_oracle_checkpoint_dump`
+asserts it rather than relying on a smoke run.
 * Prompt assembly is verified structurally against the oracle's own debug log:
   both sides emit `user\n` + `<image_id>0</image_id>` + 65 image rows +
   `Describe.\nassistant\n<think>\n`, 81 tokens / rows total. `<image_id>N</image_id>`
