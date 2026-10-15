@@ -28,7 +28,7 @@
 //! | `q8_buf`       | `n_embd * 3`       (quantize the shortconv in_proj output)
 //! | `scale_buf`    | `n_ff`             (FFN Q8_0 scales, n_ff / 32 floats)
 //! | `q8k_buf`      | `n_ff`             (FFN Q8_K blocks, n_ff / 256 blocks)
-//! | `gate_buf`     | `max(n_ff, 3*n_embd)` (dense FFN gate, OR shortconv in_proj → b∥c∥x)
+//! | `gate_buf`     | `max(n_ff, 3*n_embd)` (dense FFN gate, OR shortconv in_proj �?b∥c∥x)
 //! | `up_buf`       | `max(n_ff, 3*n_embd)` (dense FFN up   OR shortconv in_proj scratch)
 //!
 //! All three local `max_n_in` calculations in `forward_layer`,
@@ -56,6 +56,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::config::Lfm2MoeConfig;
+use super::trace;
 use super::weights::{get_f32_tensor, load_layers, Lfm2MoeLayerWeights};
 
 /// Run the LFM2-MoE prefill + autoregressive decode loop.
@@ -214,7 +215,7 @@ pub fn run_inference_with_batch(
     print!("Output: ");
     io::stdout().flush().unwrap();
 
-    // Chunked prefill dispatch — see `core::prefill` and
+    // Chunked prefill dispatch �?see `core::prefill` and
     // `docs/develop/PREFILL_ABSTRACTION.md`. Per-step body is
     // the legacy per-token forward; the outer loop is
     // marked so a future `Lfm2MoESession` + `ChunkedPrefill`
@@ -234,6 +235,7 @@ pub fn run_inference_with_batch(
         let pos = step;
 
         embedding_lookup(embd_weight, token_id, n_embd, embd_type, &mut scratch.x);
+        trace::global("embd", step, &scratch.x);
 
         let is_prefill = step < input_tokens.len();
         for layer in 0..n_layer {
@@ -323,6 +325,10 @@ pub fn run_inference_with_batch(
             let logits = unsafe { std::slice::from_raw_parts_mut(logits_ptr, vocab) };
             output_pw.matmul_prepared(input, q8, sc, Some(q8k), logits, &pool);
         }
+        trace::global("result_norm", step, normed);
+        trace::global("result_output", step, unsafe {
+            std::slice::from_raw_parts(logits_ptr, vocab)
+        });
 
         let eval_elapsed = eval_started.elapsed();
         if step < input_tokens.len() {
@@ -423,7 +429,7 @@ pub fn run_inference_with_batch(
 /// logits entry point. Mirrors the per-step body of
 /// [`run_inference_with_batch`] minus the autoregressive sampling
 /// loop. The `batch_size` argument is accepted for trait
-/// compatibility but ignored at runtime — the LFM2-MoE prefill
+/// compatibility but ignored at runtime �?the LFM2-MoE prefill
 /// walks the per-token path today (the MoE router hidden state
 /// and the SSM shortconv state both step one token at a time).
 pub fn run_forward_logits_lfm2moe_with_batch(
@@ -520,6 +526,7 @@ pub fn run_forward_logits_lfm2moe_with_batch(
         let pos = step;
 
         embedding_lookup(embd_weight, token_id, n_embd, embd_type, &mut scratch.x);
+        trace::global("embd", step, &scratch.x);
 
         let is_prefill = true;
         for layer in 0..n_layer {
@@ -596,6 +603,10 @@ pub fn run_forward_logits_lfm2moe_with_batch(
             let logits = unsafe { std::slice::from_raw_parts_mut(logits_ptr, vocab) };
             output_pw.matmul_prepared(input, q8, sc, Some(q8k), logits, &pool);
         }
+        trace::global("result_norm", step, normed);
+        trace::global("result_output", step, unsafe {
+            std::slice::from_raw_parts(logits_ptr, vocab)
+        });
     }
 
     let logits = scratch.logits.clone();
@@ -660,7 +671,7 @@ pub(super) fn forward_layer(
     let q8_buf_ptr = scratch.q8_buf.as_mut_ptr() as *mut u8;
     let scale_buf_ptr = scratch.scale_buf.as_mut_ptr();
     let q8k_buf_ptr = scratch.q8k_buf.as_mut_ptr();
-    // Scratch Q8 / scale / q8k slice width — must equal the value used in
+    // Scratch Q8 / scale / q8k slice width �?must equal the value used in
     // ExecutionScratchpad::new and in forward_attention/forward_shortconv.
     // See the module-level "Scratch buffer sizing invariant" table.
     let max_n_in = (cfg.n_embd * 3).max(n_embd_q).max(cfg.n_ff);
@@ -674,6 +685,7 @@ pub(super) fn forward_layer(
         let normed = std::slice::from_raw_parts_mut(normed_ptr, n_embd);
         rms_norm(x, &lw.attn_norm, normed, eps);
         dbg_out(step, layer, "operator_norm", normed);
+        trace::layer_1d("attn_norm", layer, step, normed);
         quantize_q8_0_into(
             normed,
             n_embd,
@@ -722,12 +734,20 @@ pub(super) fn forward_layer(
         vec_add_into(&cur, x);
     }
 
+    trace::layer_1d(
+        "post_attn_residual",
+        layer,
+        step,
+        unsafe { std::slice::from_raw_parts(x_ptr, n_embd) },
+    );
+
     // ---- FFN: dense (leading blocks) or MoE (remaining blocks) ----
     unsafe {
         let x = std::slice::from_raw_parts_mut(x_ptr, n_embd);
         let normed = std::slice::from_raw_parts_mut(normed_ptr, n_embd);
         rms_norm(x, &lw.ffn_norm, normed, eps);
         dbg_out(step, layer, "ffn_out", normed);
+        trace::layer_1d("ffn_norm", layer, step, normed);
         quantize_q8_0_into(
             normed,
             n_embd,
@@ -781,6 +801,11 @@ pub(super) fn forward_layer(
         let up_buf = unsafe { std::slice::from_raw_parts_mut(up_buf_ptr, n_ff) };
         w_gate.matmul_prepared(input, q8, sc, Some(q8k), up_buf, pool);
         w_up.matmul_prepared(input, q8, sc, Some(q8k), gate_buf, pool);
+        // The trunk swaps the two slots (llm lfm2 convention): `up_buf` holds
+        // `W_gate @ x` (llama.cpp's `ffn_gate`) and `gate_buf` holds
+        // `W_up @ x` (llama.cpp's `ffn_up`).
+        trace::layer_1d("ffn_gate", layer, step, &up_buf[..n_ff]);
+        trace::layer_1d("ffn_up", layer, step, &gate_buf[..n_ff]);
         silu_mul_inplace(&up_buf[..n_ff], &mut gate_buf[..n_ff]);
     }
 
@@ -789,6 +814,7 @@ pub(super) fn forward_layer(
     dbg_out(step, layer, "ffn_up_raw", unsafe {
         std::slice::from_raw_parts(up_buf_ptr, n_ff)
     });
+    trace::layer_1d("ffn_swiglu", layer, step, &gate_buf[..n_ff]);
     quantize_q8_0_into(
         gate_buf,
         n_ff,
@@ -815,20 +841,22 @@ pub(super) fn forward_layer(
 
     let down_buf = unsafe { std::slice::from_raw_parts(down_buf_ptr, n_embd) };
     dbg_out(step, layer, "ffn_down_out", down_buf);
+    trace::layer_1d("ffn_down", layer, step, down_buf);
     let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
     vec_add_into(down_buf, x);
     dbg_out(step, layer, "l_out", x);
+    trace::layer_1d("l_out", layer, step, x);
 }
 
 /// MoE FFN: sigmoid-gated top-k expert routing with renormalized weights,
 /// mirroring llama.cpp `build_moe_ffn(gating_op=sigmoid, norm_w=true)`.
 ///
 /// The caller has already computed `normed = ffn_norm(x)` and quantized it
-/// (`input_q8/sc/q8k`, sized `n_embd`) — the gate/up pass consumes those.
+/// (`input_q8/sc/q8k`, sized `n_embd`) �?the gate/up pass consumes those.
 /// Expert gate/up outputs share the `gate_buf`/`up_buf` scratch in
 /// `n_expert_used * n_ff_exp` slots. The scratch is sized
 /// `max(n_ff, n_embd * 3)` (see module header), so we additionally rely on
-/// `n_ff >= n_expert_used * n_ff_exp` being true for MoE layers — this is
+/// `n_ff >= n_expert_used * n_ff_exp` being true for MoE layers �?this is
 /// an architectural invariant of LFM2-MoE, not something we enforce here.
 /// If you change the model definition or scratch sizing, double-check both
 /// the dense-FFN path AND the MoE experts still fit in `gate_buf`/`up_buf`.
@@ -877,6 +905,7 @@ fn forward_moe_ffn(
         .map(|e| dot_f32(&lw.router[e * n_embd..(e + 1) * n_embd], normed, n_embd))
         .collect();
     dbg_out(step, layer, "ffn_moe_logits", &logits);
+    trace::layer_1d("ffn_moe_logits", layer, step, &logits);
     let probs: Vec<f32> = match cfg.expert_gating_func {
         // softmax over all expert logits
         1 => {
@@ -894,8 +923,9 @@ fn forward_moe_ffn(
             sigmoid_inplace(&mut probs);
             probs
         }
-        other => panic!("unsupported expert_gating_func {other}"),
+other => panic!("unsupported expert_gating_func {other}"),
     };
+    trace::layer_1d("ffn_moe_probs", layer, step, &probs);
 
     // Selection scores add the bias; the expert weights use the unbiased probs.
     let mut selection: Vec<(usize, f32)> = probs
@@ -904,20 +934,29 @@ fn forward_moe_ffn(
         .enumerate()
         .map(|(e, (&p, &b))| (e, p + b))
         .collect();
+    let biased: Vec<f32> = selection.iter().map(|&(_, score)| score).collect();
+    trace::layer_1d("ffn_moe_probs_biased", layer, step, &biased);
     selection.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
     selection.truncate(n_used);
 
     let mut weights: Vec<f32> = selection.iter().map(|&(e, _)| probs[e]).collect();
-    let w_sum: f32 = weights.iter().sum();
+    trace::layer_1d("ffn_moe_weights", layer, step, &weights);
+    // `ggml_sum_rows` reduces in `ggml_float` (f64), the clamp and the divide
+    // are f32. An f32 accumulator drifts ~2 ULP and lands on the wrong side of
+    // several expert weights, so the layer output diverges visibly.
+    let w_sum: f64 = weights.iter().map(|w| f64::from(*w)).sum();
     // llama.cpp clamps the sum to the smallest positive F16 to avoid / 0.
-    let w_sum = w_sum.max(6.103515625e-5);
+    let w_sum = (w_sum as f32).max(6.103515625e-5);
     for w in weights.iter_mut() {
         *w /= w_sum;
     }
     dbg_out(step, layer, "ffn_moe_weights_norm", &weights);
+    trace::layer_1d("ffn_moe_weights_norm", layer, step, &weights);
 
     // ---- Selected experts: gate/up for all experts in one parallel pass ----
     let selected: Vec<usize> = selection.iter().map(|&(e, _)| e).collect();
+    let selected_ids: Vec<u32> = selected.iter().map(|&e| e as u32).collect();
+    trace::ids("ffn_moe_topk", layer, step, &selected_ids);
     if std::env::var_os("RUST_LFM2MOE_DEBUG").is_some() {
         eprintln!(
             "[RUST_MOE_SEL] step={} il={} sel={:?} w={:?}",
@@ -958,6 +997,23 @@ fn forward_moe_ffn(
         }
     }
 
+    // Same slot swap as the dense path: `up_buf` = W_gate @ x (llama.cpp
+    // `ffn_moe_gate`), `gate_buf` = W_up @ x (llama.cpp `ffn_moe_up`).
+    trace::checkpoint(
+        "ffn_moe_gate",
+        Some(layer),
+        step,
+        &[n_ff_exp, n_used],
+        unsafe { std::slice::from_raw_parts(up_buf_ptr, n_used * n_ff_exp) },
+    );
+    trace::checkpoint(
+        "ffn_moe_up",
+        Some(layer),
+        step,
+        &[n_ff_exp, n_used],
+        unsafe { std::slice::from_raw_parts(gate_buf_ptr, n_used * n_ff_exp) },
+    );
+
     // silu(gate) * up per expert slot.
     for (k, _) in selected.iter().enumerate() {
         let out_base = k * n_ff_exp;
@@ -965,6 +1021,13 @@ fn forward_moe_ffn(
         let gate = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr.add(out_base), n_ff_exp) };
         silu_mul_inplace(up, gate);
     }
+    trace::checkpoint(
+        "ffn_moe_swiglu",
+        Some(layer),
+        step,
+        &[n_ff_exp, n_used],
+        unsafe { std::slice::from_raw_parts(gate_buf_ptr, n_used * n_ff_exp) },
+    );
 
     // ---- Per-expert down projection, weighted-accumulate into x ----
     let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
@@ -972,6 +1035,9 @@ fn forward_moe_ffn(
     let moe_acc_ptr = moe_acc.as_ptr() as *mut f32;
     let mut moe_dump: Vec<f32> = vec![0.0; n_embd];
     let mut first = true;
+    let mut downs: Vec<f32> = trace::trace_enabled("ffn_moe_down")
+        .then(|| vec![0.0f32; n_embd * n_used])
+        .unwrap_or_default();
     for (k, &e) in selected.iter().enumerate() {
         let out_base = k * n_ff_exp;
         let h = unsafe { std::slice::from_raw_parts(gate_buf_ptr.add(out_base), n_ff_exp) };
@@ -989,6 +1055,9 @@ fn forward_moe_ffn(
             lw.experts_down[e].matmul_prepared(input, q8, sc, Some(q8k), down, pool);
         }
         let down_buf = unsafe { std::slice::from_raw_parts(down_buf_ptr, n_embd) };
+        if !downs.is_empty() {
+            downs[k * n_embd..(k + 1) * n_embd].copy_from_slice(down_buf);
+        }
         if first {
             moe_dump.copy_from_slice(down_buf);
             for v in moe_dump.iter_mut() {
@@ -1000,9 +1069,21 @@ fn forward_moe_ffn(
         }
         let _ = moe_acc_ptr;
     }
+    if !downs.is_empty() {
+        trace::checkpoint("ffn_moe_down", Some(layer), step, &[n_embd, n_used], &downs);
+        let mut weighted = vec![0.0f32; n_embd * n_used];
+        for (k, &w) in weights.iter().enumerate() {
+            for i in 0..n_embd {
+                weighted[k * n_embd + i] = downs[k * n_embd + i] * w;
+            }
+        }
+        trace::checkpoint("ffn_moe_weighted", Some(layer), step, &[n_embd, n_used], &weighted);
+    }
     dbg_out(step, layer, "ffn_moe_out", &moe_dump);
+    trace::layer_1d("ffn_moe_out", layer, step, &moe_dump);
     vec_add_into(&moe_dump, x);
     dbg_out(step, layer, "l_out", x);
+    trace::layer_1d("l_out", layer, step, x);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1049,7 +1130,7 @@ fn forward_attention(
     let sc = &scale_buf[..n_embd / 32];
     let q8k = &q8k_buf[..n_embd / 256];
 
-    // Q8 matmul (Q/K/V) — parallel scalar path.
+    // Q8 matmul (Q/K/V) �?parallel scalar path.
     {
         let input_ptr = normed_ptr;
         let q8_ptr = q8.as_ptr();
@@ -1097,6 +1178,9 @@ fn forward_attention(
             "Vcur",
             std::slice::from_raw_parts(v_ptr, n_embd_gqa),
         );
+        trace::layer_1d("q_proj", layer, step, std::slice::from_raw_parts(q_ptr, n_embd_q));
+        trace::layer_1d("k_proj", layer, step, std::slice::from_raw_parts(k_ptr, n_embd_gqa));
+        trace::layer_1d("v_proj", layer, step, std::slice::from_raw_parts(v_ptr, n_embd_gqa));
         let q = std::slice::from_raw_parts_mut(q_ptr, n_embd_q);
         let k_new = std::slice::from_raw_parts_mut(k_ptr, n_embd_gqa);
         let qn = lw.q_norm.as_deref().unwrap();
@@ -1111,6 +1195,8 @@ fn forward_attention(
                 eps,
             );
         }
+        trace::layer_1d("q_norm", layer, step, q);
+        trace::layer_1d("k_norm", layer, step, k_new);
         for h in 0..n_head {
             rope_neox_inplace(
                 &mut q[h * n_embd_head_k..(h + 1) * n_embd_head_k],
@@ -1127,6 +1213,8 @@ fn forward_attention(
                 freq_base,
             );
         }
+        trace::layer_1d("q_rope", layer, step, q);
+        trace::layer_1d("k_rope", layer, step, k_new);
     }
 
     // KV cache write.
@@ -1238,6 +1326,11 @@ fn forward_attention(
             let n_padded = (n_cached + 255) / 256 * 256;
             let score_stride = scratch.score_stride;
             let scores_ptr = scratch.scores.as_mut_ptr();
+            let tracing = trace::trace_enabled("attn_scores");
+            let mut trace_scores: Vec<f32> = if tracing { vec![0.0f32; n_head * n_cached] } else { Vec::new() };
+            let mut trace_probs: Vec<f32> = if tracing { vec![0.0f32; n_head * n_cached] } else { Vec::new() };
+            let trace_scores_ptr = trace_scores.as_mut_ptr();
+            let trace_probs_ptr = trace_probs.as_mut_ptr();
             pool.compute({
                 let q_ptr = q_ptr;
                 let attn_out_ptr = attn_out_ptr;
@@ -1267,10 +1360,28 @@ fn forward_attention(
                                 n_embd_head_k,
                             ) * kq_scale;
                         }
+                        if tracing {
+                            let dst = unsafe {
+                                std::slice::from_raw_parts_mut(
+                                    trace_scores_ptr.add(h * n_cached),
+                                    n_cached,
+                                )
+                            };
+                            dst.copy_from_slice(&scores[..n_cached]);
+                        }
                         for v in &mut scores[n_cached..n_padded] {
                             *v = f32::NEG_INFINITY;
                         }
                         softmax_inplace(&mut scores[..n_padded]);
+                        if tracing {
+                            let dst = unsafe {
+                                std::slice::from_raw_parts_mut(
+                                    trace_probs_ptr.add(h * n_cached),
+                                    n_cached,
+                                )
+                            };
+                            dst.copy_from_slice(&scores[..n_cached]);
+                        }
                         let mut values = vec![0.0f32; max_ctx];
                         for d in 0..n_embd_head_v {
                             for t in 0..n_cached {
@@ -1283,12 +1394,29 @@ fn forward_attention(
                     }
                 }
             });
+            if tracing {
+                trace::checkpoint(
+                    "attn_scores",
+                    Some(layer),
+                    step,
+                    &[n_head, n_cached],
+                    &trace_scores,
+                );
+                trace::checkpoint(
+                    "attn_probs",
+                    Some(layer),
+                    step,
+                    &[n_head, n_cached],
+                    &trace_probs,
+                );
+            }
         }
     }
 
     // Output projection.
     let attn_out = unsafe { std::slice::from_raw_parts(attn_out_ptr, n_embd_q) };
     dbg_out(step, layer, "attn_out", attn_out);
+    trace::layer_1d("attn_values", layer, step, attn_out);
     quantize_q8_0_into(
         attn_out,
         n_embd_q,
@@ -1300,7 +1428,7 @@ fn forward_attention(
     let sc = &scale_buf[..n_embd_q / 32];
     let q8k = &q8k_buf[..n_embd_q / 256];
 
-    // Q8 matmul (output projection) — parallel scalar path.
+    // Q8 matmul (output projection) �?parallel scalar path.
     {
         let q8_ptr = q8.as_ptr();
         let sc_ptr = sc.as_ptr();
@@ -1319,6 +1447,12 @@ fn forward_attention(
     dbg_out(step, layer, "self_attn.out_proj", unsafe {
         std::slice::from_raw_parts(attn_proj_ptr, n_embd)
     });
+    trace::layer_1d(
+        "attn_proj",
+        layer,
+        step,
+        unsafe { std::slice::from_raw_parts(attn_proj_ptr, n_embd) },
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1349,7 +1483,7 @@ fn forward_shortconv(
 
     // Keep in sync with forward_layer and forward_attention (see module header).
     // Note: shortconv never touches the QKV/QK matmul path, so n_embd_q drops
-    // out — only the FFN width (n_ff) and the in_proj output (3*n_embd) matter.
+    // out �?only the FFN width (n_ff) and the in_proj output (3*n_embd) matter.
     let max_n_in = (n_embd * 3).max(cfg.n_ff);
     let q8_buf = unsafe { std::slice::from_raw_parts_mut(q8_buf_ptr, max_n_in) };
     let scale_buf = unsafe { std::slice::from_raw_parts_mut(scale_buf_ptr, max_n_in / 32) };
@@ -1376,7 +1510,7 @@ fn forward_shortconv(
     let sc = &scale_buf[..n_embd / 32];
     let q8k = &q8k_buf[..n_embd / 256];
 
-    // Q8 matmul (in_proj) — parallel scalar path.
+    // Q8 matmul (in_proj) �?parallel scalar path.
     {
         let input_ptr = normed_ptr;
         let q8_ptr = q8.as_ptr();
@@ -1397,11 +1531,12 @@ fn forward_shortconv(
     // Step 2: bx = b * x (per-channel); conv1d over (state || bx); multiply by c; out_proj.
     let bcx = unsafe { std::slice::from_raw_parts(gate_buf_ptr, three_n) };
     dbg_out(step, layer_idx, "conv.in_proj", bcx);
+    trace::layer_1d("conv_in_proj", layer_idx, step, bcx);
     let b = &bcx[..n_embd];
     let c = &bcx[n_embd..2 * n_embd];
     let x = &bcx[2 * n_embd..3 * n_embd];
 
-    // bx = b * x. SIMD: copy b → bx (memcpy), then bx *= x (vec_mul_inplace).
+    // bx = b * x. SIMD: copy b �?bx (memcpy), then bx *= x (vec_mul_inplace).
     let mut bx: Vec<f32> = b.to_vec();
     vec_mul_inplace(x, bx.as_mut_slice());
 
@@ -1443,14 +1578,20 @@ fn forward_shortconv(
         bx_buf[ci * l_buf + d_conv] = bx[ci];
     }
 
-    // Update state: sliding window — shift left one row, append b*x as the
+    // Update state: sliding window �?shift left one row, append b*x as the
     // newest entry (matches llama.cpp's new_conv = last d_conv columns of
-    // (state ‖ bx)). During prefill, the post-state is reconstructed by the
+    // (state �?bx)). During prefill, the post-state is reconstructed by the
     // caller from the accumulated b*x history.
-    if !is_prefill {
-        state.copy_within(n_embd..d_conv * n_embd, 0);
-        state[(d_conv - 1) * n_embd..d_conv * n_embd].copy_from_slice(&bx);
-    }
+    // Update state: sliding window — shift left one row, append b*x as the
+    // newest entry (llama.cpp's new_conv = the last d_conv columns of
+    // (state ‖ bx)). This runs on *every* step, prefill included: the caller
+    // rebuilds the state from the accumulated b*x history before each prefill
+    // token, so the prefill slides are overwritten anyway — but the *last*
+    // prefill token has no successor to rebuild it, and the first decode step
+    // reads the state directly. Skipping the slide there left the conv window
+    // one token stale, which diverged from the oracle on the first decode.
+    state.copy_within(n_embd..d_conv * n_embd, 0);
+    state[(d_conv - 1) * n_embd..d_conv * n_embd].copy_from_slice(&bx);
 
     // SSM conv: input bx_buf [l_buf, n_embd], kernel [l_cache, n_embd].
     // For single token: l_buf=3, l_cache=3, output has 1 position (3-3+1=1).
@@ -1486,6 +1627,7 @@ fn forward_shortconv(
     }
 
     dbg_out(step, layer_idx, "conv.conv", &conv_out);
+    trace::layer_1d("conv_conv", layer_idx, step, &conv_out);
     // y = c * conv_out (per-channel gating, SIMD via vec_mul_inplace).
     vec_mul_inplace(c, conv_out.as_mut_slice());
 
@@ -1519,6 +1661,7 @@ fn forward_shortconv(
     }
 
     dbg_out(step, layer_idx, "conv.out_proj", &out);
+    trace::layer_1d("conv_out_proj", layer_idx, step, &out);
     let _ = pos;
     let _ = layer_idx;
     (out, bx)

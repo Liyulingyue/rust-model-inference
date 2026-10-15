@@ -1,0 +1,580 @@
+diff --git a/examples/eval-callback/eval-callback.cpp b/examples/eval-callback/eval-callback.cpp
+index 4ce8d60..8aadac1 100644
+--- a/examples/eval-callback/eval-callback.cpp
++++ b/examples/eval-callback/eval-callback.cpp
+@@ -1,88 +1,430 @@
+ #include "arg.h"
+ #include "common.h"
+-#include "debug.h"
+ #include "log.h"
+ #include "llama.h"
+ 
++#include <algorithm>
++#include <array>
++#include <cmath>
+ #include <clocale>
++#include <cstdint>
++#include <cstdlib>
++#include <cstring>
++#include <fstream>
++#include <map>
++#include <stdexcept>
+ #include <string>
+ #include <vector>
+ 
+-static bool run(llama_context * ctx, const common_params & params) {
+-    const llama_model * model = llama_get_model(ctx);
+-    const llama_vocab * vocab = llama_model_get_vocab(model);
++// Bit-exact parity oracle for `general.architecture = "lfm2moe"`
++// (LFM2.5-24B-A2B). Every tensor the model graph labels through
++// `llm_graph_context::cb()` is dumped as raw little-endian F32 plus a JSONL
++// manifest record `{"name","layer","step","shape","len","binary_path"}`;
++// `tools/oracle/lfm2moe/check_scalar.py` joins the two manifests on
++// `(name, layer, step)` and diffs the raw words with no tolerance.
++//
++// The only model-side edit is canonical checkpoint names in
++// `src/models/lfm2.cpp` (see tools/oracle/lfm2moe/README.md).
+ 
+-    const bool add_bos = llama_vocab_get_add_bos(vocab);
++struct tensor_snapshot {
++    std::array<int64_t, GGML_MAX_DIMS> ne{};
++    std::vector<float> values;
++    std::vector<int32_t> int_values;
++};
+ 
+-    std::vector<llama_token> tokens = common_tokenize(ctx, params.prompt, add_bos, true);
++static bool selected_tensor(const std::string & name) {
++    // `embd`, `result_norm`, `result_output` carry no layer suffix.
++    static const char * exact[] = {"embd", "result_norm", "result_output"};
++    for (const char * candidate : exact) {
++        if (name == candidate) {
++            return true;
++        }
++    }
++    static const char * prefixes[] = {
++        "attn_norm-", "Qcur-", "Kcur-", "Vcur-", "q_norm-", "k_norm-", "q_rope-", "k_rope-",
++        "kq-", "kq_soft_max-", "kqv-", "attn_proj-", "post_attn_residual-",
++        "conv_in_proj-", "conv_conv-", "conv_out_proj-",
++        "ffn_norm-", "ffn_up-", "ffn_gate-", "ffn_swiglu-", "ffn_down-",
++        "ffn_moe_logits-", "ffn_moe_probs-", "ffn_moe_probs_biased-", "ffn_moe_topk-",
++        "ffn_moe_weights-", "ffn_moe_weights_sum-", "ffn_moe_weights_sum_clamped-",
++        "ffn_moe_weights_norm-", "ffn_moe_up-", "ffn_moe_gate-", "ffn_moe_swiglu-",
++        "ffn_moe_down-", "ffn_moe_weighted-", "ffn_moe_out-",
++        "post_ffn_residual-", "l_out-", "ffn_out-",
++    };
++    for (const char * prefix : prefixes) {
++        if (name.rfind(prefix, 0) == 0) {
++            return true;
++        }
++    }
++    return false;
++}
+ 
+-    if (tokens.empty()) {
+-        LOG_ERR("%s : there are not input tokens to process - (try to provide a prompt with '-p')\n", __func__);
+-        return false;
++static std::string json_escape(const std::string & value) {
++    std::string result;
++    for (char ch : value) {
++        if (ch == '\\' || ch == '"') {
++            result.push_back('\\');
++        }
++        result.push_back(ch);
+     }
++    return result;
++}
+ 
+-    LOG_INF("number of input tokens = %zu\n", tokens.size());
+-    for (size_t i = 0; i < tokens.size(); ++i) {
+-        LOG_INF("  %d\n", tokens[i]);
++class parity_trace {
++public:
++    explicit parity_trace(const char * path) : path_(path ? path : ""), manifest_(path_, std::ios::trunc) {
++        if (path_.empty() || !manifest_) {
++            throw std::runtime_error("RMI_PARITY_TRACE must name a writable manifest");
++        }
+     }
+ 
+-    if (llama_decode(ctx, llama_batch_get_one(tokens.data(), tokens.size()))) {
+-        LOG_ERR("%s : failed to eval\n", __func__);
+-        return false;
++    void clear_step() {
++        tensors_.clear();
+     }
+ 
+-    return true;
+-}
++    void capture(const ggml_tensor * tensor) {
++        std::vector<uint8_t> bytes(ggml_nbytes(tensor));
++        ggml_backend_tensor_get(tensor, bytes.data(), 0, bytes.size());
+ 
+-int main(int argc, char ** argv) {
+-    std::setlocale(LC_NUMERIC, "C");
++        tensor_snapshot snapshot;
++        std::copy(tensor->ne, tensor->ne + GGML_MAX_DIMS, snapshot.ne.begin());
+ 
+-    common_debug_cb_user_data cb_data;
++        const bool is_int = tensor->type == GGML_TYPE_I32;
++        if (!is_int && tensor->type != GGML_TYPE_F32) {
++            throw std::runtime_error(std::string("selected tensor is not F32/I32: ") + tensor->name);
++        }
+ 
+-    common_params params;
++        for (int64_t i3 = 0; i3 < tensor->ne[3]; ++i3) {
++            for (int64_t i2 = 0; i2 < tensor->ne[2]; ++i2) {
++                for (int64_t i1 = 0; i1 < tensor->ne[1]; ++i1) {
++                    for (int64_t i0 = 0; i0 < tensor->ne[0]; ++i0) {
++                        const size_t offset = i3 * tensor->nb[3] + i2 * tensor->nb[2]
++                            + i1 * tensor->nb[1] + i0 * tensor->nb[0];
++                        if (is_int) {
++                            int32_t value;
++                            std::memcpy(&value, bytes.data() + offset, sizeof(value));
++                            snapshot.int_values.push_back(value);
++                        } else {
++                            float value;
++                            std::memcpy(&value, bytes.data() + offset, sizeof(value));
++                            snapshot.values.push_back(value);
++                        }
++                    }
++                }
++            }
++        }
++        tensors_[tensor->name] = std::move(snapshot);
++    }
+ 
+-    common_init();
++    void write_tokens(const char * name, const std::vector<llama_token> & tokens) {
++        manifest_ << "{\"name\":\"" << name << "\",\"token_ids\":[";
++        for (size_t i = 0; i < tokens.size(); ++i) {
++            if (i) {
++                manifest_ << ',';
++            }
++            manifest_ << tokens[i];
++        }
++        manifest_ << "]}\n";
++        manifest_.flush();
++    }
+ 
+-    if (!common_params_parse(argc, argv, params, LLAMA_EXAMPLE_COMMON)) {
+-        return 1;
++    void write_input(llama_token token) {
++        write_tokens("input_token", {token});
+     }
+ 
+-    llama_backend_init();
+-    llama_numa_init(params.numa);
++    void write_step(int step, int n_layer) {
++        for (int layer = 0; layer < n_layer; ++layer) {
++            write_layer(step, layer);
++        }
++        for (const char * global : {"embd", "result_norm", "result_output"}) {
++            // `embd` is the get_rows input embedding: it is a graph input on
++            // later decodes, so only the freshly computed tail nodes are
++            // guaranteed here.
++            if (has(global)) {
++                write_tensor(global, -1, step, get(global));
++            }
++        }
++    }
+ 
+-    // pass the callback to the backend scheduler
+-    // it will be executed for each node during the graph computation
+-    params.cb_eval = common_debug_cb_eval;
+-    params.cb_eval_user_data = &cb_data;
+-    params.warmup = false;
++private:
++    const tensor_snapshot & get(const std::string & name) const {
++        const auto found = tensors_.find(name);
++        if (found == tensors_.end()) {
++            throw std::runtime_error("missing callback tensor: " + name);
++        }
++        return found->second;
++    }
+ 
+-    // init
+-    auto llama_init = common_init_from_params(params);
++    bool has(const std::string & name) const {
++        return tensors_.count(name) != 0;
++    }
+ 
+-    auto * model = llama_init->model();
+-    auto * ctx   = llama_init->context();
++    // `kq` is dumped at ggml's padded KV width and carries the *unscaled*
++    // scores (ggml folds 1/sqrt(head_dim) into soft_max_ext). Trim to the live
++    // window and apply the scale here so the record is directly comparable
++    // with the Rust side, which scales before its own softmax.
++    std::vector<float> trim_scores(
++            const tensor_snapshot & source, int64_t n_cached, float scale) const {
++        const int64_t stride = source.ne[0];
++        const int64_t n_head  = source.ne[2];
++        if (source.ne[1] != 1 || stride < n_cached) {
++            throw std::runtime_error("unexpected kq shape");
++        }
++        std::vector<float> result;
++        result.reserve(n_head * n_cached);
++        for (int64_t head = 0; head < n_head; ++head) {
++            for (int64_t token = 0; token < n_cached; ++token) {
++                result.push_back(source.values[head * stride + token] * scale);
++            }
++        }
++        return result;
++    }
+ 
+-    if (model == nullptr || ctx == nullptr) {
+-        LOG_ERR("%s : failed to init\n", __func__);
+-        return 1;
++    void write_layer(int step, int layer) {
++        const std::string suffix = "-" + std::to_string(layer);
++        const int64_t n_cached = step + 1;
++        const bool has_attn = has("Qcur" + suffix);
++        const bool has_conv = has("conv_in_proj" + suffix);
++        if (!has_attn && !has_conv) {
++            return;
++        }
++
++        write_tensor("attn_norm", layer, step, get("attn_norm" + suffix));
++
++        if (has_attn) {
++            const int64_t head_dim = get("q_norm" + suffix).ne[0];
++            // n_head is the *query* head count; Kcur only holds n_head_kv of them.
++            const int64_t n_head    = int64_t(get("Qcur" + suffix).values.size()) / head_dim;
++
++            write_tensor("q_proj", layer, step, get("Qcur" + suffix));
++            write_tensor("k_proj", layer, step, get("Kcur" + suffix));
++            write_tensor("v_proj", layer, step, get("Vcur" + suffix));
++            write_tensor("q_norm", layer, step, get("q_norm" + suffix));
++            write_tensor("k_norm", layer, step, get("k_norm" + suffix));
++            write_tensor("q_rope", layer, step, get("q_rope" + suffix));
++            write_tensor("k_rope", layer, step, get("k_rope" + suffix));
++            write_values("attn_scores", layer, step, {n_head, n_cached},
++                    trim_scores(get("kq" + suffix), n_cached, 1.0f / std::sqrt(float(head_dim))));
++            write_values("attn_probs", layer, step, {n_head, n_cached},
++                    trim_scores(get("kq_soft_max" + suffix), n_cached, 1.0f));
++            write_tensor("attn_values", layer, step, get("kqv" + suffix));
++            write_tensor("attn_proj", layer, step, get("attn_proj" + suffix));
++        } else {
++            write_tensor("conv_in_proj", layer, step, get("conv_in_proj" + suffix));
++            write_tensor("conv_conv", layer, step, get("conv_conv" + suffix));
++            write_tensor("conv_out_proj", layer, step, get("conv_out_proj" + suffix));
++        }
++
++        write_tensor("post_attn_residual", layer, step, get("post_attn_residual" + suffix));
++        write_tensor("ffn_norm", layer, step, get("ffn_norm" + suffix));
++
++        if (has("ffn_moe_logits" + suffix)) {
++            write_tensor("ffn_moe_logits", layer, step, get("ffn_moe_logits" + suffix));
++            write_tensor("ffn_moe_probs", layer, step, get("ffn_moe_probs" + suffix));
++            write_tensor("ffn_moe_probs_biased", layer, step, get("ffn_moe_probs_biased" + suffix));
++            write_ints("ffn_moe_topk", layer, step, get("ffn_moe_topk" + suffix).int_values);
++            write_tensor("ffn_moe_weights", layer, step, get("ffn_moe_weights" + suffix));
++            write_tensor("ffn_moe_weights_norm", layer, step, get("ffn_moe_weights_norm" + suffix));
++            write_tensor("ffn_moe_up", layer, step, get("ffn_moe_up" + suffix));
++            write_tensor("ffn_moe_gate", layer, step, get("ffn_moe_gate" + suffix));
++            write_tensor("ffn_moe_swiglu", layer, step, get("ffn_moe_swiglu" + suffix));
++            write_tensor("ffn_moe_down", layer, step, get("ffn_moe_down" + suffix));
++            write_tensor("ffn_moe_weighted", layer, step, get("ffn_moe_weighted" + suffix));
++            write_tensor("ffn_moe_out", layer, step, get("ffn_moe_out" + suffix));
++        } else {
++            write_tensor("ffn_up", layer, step, get("ffn_up" + suffix));
++            write_tensor("ffn_gate", layer, step, get("ffn_gate" + suffix));
++            write_tensor("ffn_swiglu", layer, step, get("ffn_swiglu" + suffix));
++            write_tensor("ffn_down", layer, step, get("ffn_down" + suffix));
++        }
++
++        write_tensor("l_out", layer, step, get("l_out" + suffix));
+     }
+ 
+-    // print system information
+-    {
+-        LOG_INF("\n");
+-        LOG_INF("%s\n", common_params_get_system_info(params).c_str());
+-        LOG_INF("\n");
++    void write_tensor(const char * name, int layer, int step, const tensor_snapshot & snapshot) {
++        std::vector<int64_t> shape(snapshot.ne.begin(), snapshot.ne.begin() + GGML_MAX_DIMS);
++        while (!shape.empty() && shape.back() == 1) {
++            shape.pop_back();
++        }
++        write_values(name, layer, step, shape, snapshot.values);
+     }
+ 
+-    bool OK = run(ctx, params);
+-    if (!OK) {
+-        return 1;
++    void write_values(
++            const char * name, int layer, int step,
++            const std::vector<int64_t> & shape, const std::vector<float> & values) {
++        size_t expected = 1;
++        for (int64_t dimension : shape) {
++            expected *= size_t(dimension);
++        }
++        if (expected != values.size()) {
++            throw std::runtime_error(std::string("shape mismatch for ") + name);
++        }
++        write_sidecar(name, layer, step, shape, values, std::vector<int32_t>());
++    }
++
++    void write_ints(const char * name, int layer, int step, const std::vector<int32_t> & values) {
++        write_sidecar(name, layer, step, {(int64_t) values.size()}, std::vector<float>(), values);
++    }
++
++    void write_sidecar(
++            const char * name, int layer, int step, const std::vector<int64_t> & shape,
++            const std::vector<float> & values, const std::vector<int32_t> & int_values) {
++        const size_t occurrence = occurrences_[name]++;
++        std::string binary_path = path_ + "." + name;
++        if (occurrence) {
++            binary_path += "." + std::to_string(occurrence);
++        }
++        binary_path += ".f32";
++
++        {
++            std::ofstream binary(binary_path, std::ios::binary | std::ios::trunc);
++            const size_t count = int_values.empty() ? values.size() : int_values.size();
++            for (size_t i = 0; i < count; ++i) {
++                uint32_t bits;
++                if (!int_values.empty()) {
++                    const int32_t raw = int_values[i];
++                    std::memcpy(&bits, &raw, sizeof(bits));
++                } else {
++                    const float raw = values[i];
++                    std::memcpy(&bits, &raw, sizeof(bits));
++                }
++                const char bytes[] = {char(bits), char(bits >> 8), char(bits >> 16), char(bits >> 24)};
++                binary.write(bytes, sizeof(bytes));
++            }
++            if (!binary) {
++                throw std::runtime_error("failed to write " + binary_path);
++            }
++        }
++
++        manifest_ << "{\"name\":\"" << name << "\",\"layer\":";
++        if (layer < 0) {
++            manifest_ << "null";
++        } else {
++            manifest_ << layer;
++        }
++        manifest_ << ",\"step\":" << step << ",\"shape\":[";
++        for (size_t i = 0; i < shape.size(); ++i) {
++            if (i) {
++                manifest_ << ',';
++            }
++            manifest_ << shape[i];
++        }
++        manifest_ << "],\"len\":" << (int_values.empty() ? values.size() : int_values.size())
++                  << ",\"occurrence\":" << occurrence
++                  << ",\"binary_path\":\"" << json_escape(binary_path) << "\"}\n";
++        manifest_.flush();
++    }
++
++    std::string path_;
++    std::ofstream manifest_;
++    std::map<std::string, tensor_snapshot> tensors_;
++    std::map<std::string, size_t> occurrences_;
++};
++
++static bool parity_eval_callback(ggml_tensor * tensor, bool ask, void * user_data) {
++    if (ask) {
++        return selected_tensor(tensor->name);
++    }
++    static_cast<parity_trace *>(user_data)->capture(tensor);
++    return true;
++}
++
++static llama_token greedy_token(llama_context * ctx, int n_vocab) {
++    const float * logits = llama_get_logits_ith(ctx, -1);
++    int best = 0;
++    for (int token = 1; token < n_vocab; ++token) {
++        if (logits[token] > logits[best]) {
++            best = token;
++        }
+     }
++    return best;
++}
+ 
+-    LOG("\n");
+-    llama_perf_context_print(ctx);
++static bool decode_one(llama_context * ctx, parity_trace & trace, llama_token token, int step, int n_layer) {
++    trace.clear_step();
++    trace.write_input(token);
++    if (llama_decode(ctx, llama_batch_get_one(&token, 1))) {
++        LOG_ERR("failed to evaluate token at step %d\n", step);
++        return false;
++    }
++    trace.write_step(step, n_layer);
++    return true;
++}
+ 
+-    llama_backend_free();
++static bool run(llama_context * ctx, const common_params & params, parity_trace & trace) {
++    const llama_model * model = llama_get_model(ctx);
++    const llama_vocab * vocab = llama_model_get_vocab(model);
++    const int n_layer = llama_model_n_layer(model);
++    const int n_vocab = llama_vocab_n_tokens(vocab);
++    const int max_tokens = std::max(0, params.n_predict);
+ 
+-    return 0;
++    std::vector<llama_token> prompt = common_tokenize(
++            ctx, params.prompt, llama_vocab_get_add_bos(vocab), true);
++    if (prompt.empty()) {
++        LOG_ERR("prompt produced no tokens\n");
++        return false;
++    }
++    trace.write_tokens("prompt_ids", prompt);
++
++    int step = 0;
++    std::vector<llama_token> generated;
++    for (llama_token token : prompt) {
++        if (!decode_one(ctx, trace, token, step++, n_layer)) {
++            return false;
++        }
++    }
++    if (max_tokens > 0) {
++        generated.push_back(greedy_token(ctx, n_vocab));
++    }
++    for (int index = 0; index < max_tokens; ++index) {
++        if (!decode_one(ctx, trace, generated[index], step++, n_layer)) {
++            return false;
++        }
++        if (int(generated.size()) < max_tokens) {
++            generated.push_back(greedy_token(ctx, n_vocab));
++        }
++    }
++    trace.write_tokens("generated_ids", generated);
++    return true;
++}
++
++int main(int argc, char ** argv) {
++    std::setlocale(LC_NUMERIC, "C");
++    try {
++        common_params params;
++        common_init();
++        if (!common_params_parse(argc, argv, params, LLAMA_EXAMPLE_COMMON)) {
++            return 1;
++        }
++
++        parity_trace trace(std::getenv("RMI_PARITY_TRACE"));
++        params.cpuparams.n_threads = 1;
++        params.cpuparams_batch.n_threads = 1;
++        params.n_batch = 1;
++        params.n_ubatch = 1;
++        params.n_ctx = 512;
++        params.n_gpu_layers = 0;
++        params.fit_params = false;
++        params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
++        params.cache_type_k = GGML_TYPE_F32;
++        params.cache_type_v = GGML_TYPE_F32;
++        params.no_extra_bufts = true;
++        params.no_op_offload = true;
++        params.warmup = false;
++        params.cb_eval = parity_eval_callback;
++        params.cb_eval_user_data = &trace;
++
++        llama_backend_init();
++        llama_numa_init(params.numa);
++        auto llama_init = common_init_from_params(params);
++        auto * ctx = llama_init->context();
++        if (!ctx || !run(ctx, params, trace)) {
++            return 1;
++        }
++        llama_backend_free();
++        return 0;
++    } catch (const std::exception & error) {
++        LOG_ERR("parity oracle: %s\n", error.what());
++        return 1;
++    }
+ }
+diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
+index 5212e19..690dec5 100644
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -1854,7 +1854,7 @@ ggml_tensor * llm_graph_context::build_ffn(
+         }
+     }
+ 
+-    if (down_b) {
++    if (down || down_b) {
+         cb(cur, "ffn_down", il);
+     }
+ 
+diff --git a/src/models/lfm2.cpp b/src/models/lfm2.cpp
+index 9a42955..dc016c7 100644
+--- a/src/models/lfm2.cpp
++++ b/src/models/lfm2.cpp
+@@ -138,21 +138,23 @@ llama_model_lfm2::graph<iswa>::graph(const llama_model & model, const llm_graph_
+ 
+         // qk norm
+         q = build_norm(q, model.layers[il].attn_q_norm, NULL, LLM_NORM_RMS, il);
+-        cb(q, "model.layers.{}.self_attn.q_layernorm", il);
++        cb(q, "q_norm", il);
+         k = build_norm(k, model.layers[il].attn_k_norm, NULL, LLM_NORM_RMS, il);
+-        cb(k, "model.layers.{}.self_attn.k_layernorm", il);
++        cb(k, "k_norm", il);
+ 
+         // RoPE
+         q = ggml_rope_ext(ctx0, q, inp_pos, nullptr, n_rot, rope_type, n_ctx_orig, freq_base, freq_scale, ext_factor,
+                           attn_factor, beta_fast, beta_slow);
+         k = ggml_rope_ext(ctx0, k, inp_pos, nullptr, n_rot, rope_type, n_ctx_orig, freq_base, freq_scale, ext_factor,
+                           attn_factor, beta_fast, beta_slow);
++        cb(q, "q_rope", il);
++        cb(k, "k_rope", il);
+ 
+         cur = build_attn(inp_attn,
+                 model.layers[il].wo, NULL, model.layers[il].wo_s,
+                 q, k, v, nullptr, nullptr, nullptr, 1.0f / sqrtf(float(n_embd_head)), il);
+ 
+-        cb(cur, "model.layers.{}.self_attn.out_proj", il);
++        cb(cur, "attn_proj", il);
+ 
+         return cur;
+     };
+@@ -174,7 +176,7 @@ llama_model_lfm2::graph<iswa>::graph(const llama_model & model, const llm_graph_
+         cur = ggml_reshape_3d(ctx0, cur, cur->ne[0], n_seq_tokens, n_seqs);
+ 
+         auto * bcx = build_lora_mm(model.layers[il].shortconv.in_proj, cur);
+-        cb(bcx, "model.layers.{}.conv.in_proj", il);
++        cb(bcx, "conv_in_proj", il);
+ 
+         constexpr auto n_chunks = 3;
+         GGML_ASSERT(bcx->ne[0] % n_chunks == 0);
+@@ -221,11 +223,11 @@ llama_model_lfm2::graph<iswa>::graph(const llama_model & model, const llm_graph_
+ 
+         auto * conv_kernel = model.layers[il].shortconv.conv;
+         auto * conv_out    = ggml_ssm_conv(ctx0, bx, conv_kernel);
+-        cb(conv_out, "model.layers.{}.conv.conv", il);
++        cb(conv_out, "conv_conv", il);
+ 
+         auto * y = ggml_mul(ctx0, c, conv_out);
+         y        = build_lora_mm(model.layers[il].shortconv.out_proj, y);
+-        cb(y, "model.layers.{}.conv.out_proj", il);
++        cb(y, "conv_out_proj", il);
+         // {n_embd, n_seq_tokens, n_seqs} => {n_embd, n_tokens}
+         y = ggml_reshape_2d(ctx0, y, y->ne[0], n_seq_tokens * n_seqs);
+ 
+@@ -255,7 +257,7 @@ llama_model_lfm2::graph<iswa>::graph(const llama_model & model, const llm_graph_
+ 
+         auto * prev_cur = cur;
+         cur             = build_norm(cur, model.layers[il].attn_norm, NULL, LLM_NORM_RMS, il);
+-        cb(cur, "model.layers.{}.operator_norm", il);
++        cb(cur, "attn_norm", il);
+ 
+         cur = hparams.is_recr(il) ? build_shortconv_block(cur, inp_hybrid->get_recr(), il) :
+                                     build_attn_block(cur, inp_pos, inp_hybrid->get_attn(), il);
+@@ -266,13 +268,16 @@ llama_model_lfm2::graph<iswa>::graph(const llama_model & model, const llm_graph_
+         }
+ 
+         cur = ggml_add(ctx0, prev_cur, cur);
++        cb(cur, "post_attn_residual", il);
+ 
+         auto * ffn_norm_out = build_norm(cur, model.layers[il].ffn_norm, NULL, LLM_NORM_RMS, il);
+-        cb(ffn_norm_out, "model.layers.{}.ffn_norm", il);
++        cb(ffn_norm_out, "ffn_norm", il);
+ 
+         ggml_tensor * ffn_out =
+             is_moe_layer ? build_moe_feed_forward(ffn_norm_out, il) : build_dense_feed_forward(ffn_norm_out, il);
+-        cb(ffn_norm_out, "model.layers.{}.ffn_out", il);
++        // No cb() here: for a dense layer this tensor is already labelled
++        // "ffn_down" inside build_ffn(), for a MoE layer it is "ffn_moe_out".
++        // A second label would overwrite the first, because cb() renames the node.
+ 
+         cur = ggml_add(ctx0, cur, ffn_out);
+ 

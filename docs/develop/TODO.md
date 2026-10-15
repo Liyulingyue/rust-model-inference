@@ -37,13 +37,25 @@ NEON on aarch64; no AVX-512).
       `{%- if enable_thinking is defined and enable_thinking is false %}`，未定义即不注入空块，
       与 `unwrap_or(true)` 等价。**改动会翻转现有 thinking 模型的 HTTP 默认输出**，需先确认
       是否有依赖当前行为的调用方。
-- [ ] **lfm2moe 残余 1-ULP 贪心翻转** — forward 路径分裂**已修**
-      （`Lfm2MoeSession::prompt_len` + `is_prefill = pos < prompt_len`；原先硬编码 `true`，
-      decode 阶段把整段 b*x 历史塞回短卷积窗口）。修复后两侧首 token 与前 ~30 字符一致，
-      剩余差异为第 ~30 字符处 `says "` vs `says: "` — greedy 下 top-2 logits 极接近时的
-      1-ULP 翻转（同类现象见 `tests/quantized_inference.rs` 的 q4_k/q6_k 预存失败）。
-      精确定位需逐层 logits 对比 llama.cpp oracle（`RUST_LFM2MOE_DEBUG_LOGITS` 已有），
-      属独立任务。守卫：`tests/cli_http_agreement.rs`。
+- [x] **lfm2moe 残余 1-ULP 贪心翻转** — ✅ **已定位根因并修复**（2026-10-15，LFM2.5-24B-A2B 适配期间）
+      **先前的判断是错的**：它不是「greedy 下 top-2 logits 极接近时的 1-ULP 翻转」，而是一个
+      **确定性的 shortconv 状态 bug**。完整 oracle 逐位对齐后，首个分歧 checkpoint 精确落在
+      layer 0 的 `conv_conv`（step 8 = 首个 decode 步），其输入 `conv_in_proj` 逐位一致 ——
+      即卷积**输入**没错，**状态窗口**错了。
+      根因：`forward_shortconv` 只在 `!is_prefill` 时滑动 conv 状态。最后一个 prefill token 之后
+      没有任何调用方重建状态，调用方的重建发生在**每个 prefill token 之前**，所以状态停留在
+      `[bx_{t-2}, bx_{t-1}]`，缺少最后一步的 `bx_t`，第一个 decode 步的窗口整体错位一格。
+      修复：状态滑动**每步都执行**（prefill 期间的滑动会被下一步的重建覆盖，无副作用）。
+      顺带收益：decode 4.7 → **18.0 t/s**（3.8×，此前 decode 一直在用过期的窗口做无用功）。
+      影响面：**所有 lfm2 / lfm2moe / lfm25 家族**的首次生成 token。
+      证据：12 步 9 912 个 checkpoint 全部逐位一致，见
+      [`tools/oracle/lfm2moe/README.md`](../../tools/oracle/lfm2moe/README.md)。
+      守卫：`tests/lfm2moe_reference.rs`（真实权重 + 逐位 oracle）。
+- [ ] **把同款 oracle 对齐扩展到 lfm2 / lfm25 稠密档与 8B-A1B** — 本次只验证了 24B-A2B。
+      shortconv 状态修复与 Q8_K signed 契约修复都是**全家族生效**的改动，但 `lfm2`、`lfm25`、
+      `lfm2moe` 的 8B-A1B 都还没有真实 GGUF 的逐位证据。复用 `tools/oracle/lfm2moe/` 的
+      eval-callback（它已覆盖 `src/models/lfm2.cpp`，稠密档与 MoE 档共用同一张图），只需换模型
+      与期望 checkpoint 集合。
 - [ ] **HTTP 多模态图片输入（OpenAI 兼容）** — `/v1/chat/completions` 现在**完全不支持图片**：
       `protocol.rs::text_content` 只接受 string / `type:"text"` block，带 `image_url` 的请求实测
       返回 400 `unsupported content block`。CLI 侧 `--mmproj --image` 能力完备（`app/text/
@@ -95,6 +107,45 @@ NEON on aarch64; no AVX-512).
 - [ ] **token 维寄存器分块：消除 per-token 权重重读** — 详见 [TODO-019](#todo-019-token-维寄存器分块消除-per-token-权重重读)。
       文本编码只跑到约 11% 的 NEON 峰值，瓶颈是每个 token 都从 DRAM 重读整个权重矩阵。
       预期 1.5-2× 加速。
+
+- [x] **LFM2.5-24B-A2B 适配 + 标量逐位对齐** — ✅ 已完成 (2026-10-15)。
+      24B 总 / 2B 激活的 MoE，`lfm2moe` 架构：40 层 × 2048 宽 × 32 头（head_dim 64），注意力层
+      `[2,6,…,38]`（每 4 层一个），前 2 层 dense SwiGLU（`feed_forward_length=11776`），其余 38 层
+      MoE（64 选 4，`expert_feed_forward_length=1536`，sigmoid 路由），`l_cache=3` shortconv，
+      `rope.freq_base=1e7`，ctx 131072，词表 128000，Q6_K `token_embd` + Q4_0 其余。
+      **未新增模型代码** —— 现有 `src/models/lfm2moe/` 直接跑通真实权重（QAD-Q4_0，SHA-256
+      `d1c03f73…f8a5`）。对固定 llama.cpp `749f688` 的标量 oracle：12 步（8 prompt + 4 greedy）
+      token IDs 一致、**9 912 / 9 912 个 checkpoint 原始 F32 位完全相同（0 mismatch）**、
+      `generated_ids` 一致。CLI 实测 `"What is 2+2?"` → `"2+2 equals 4."`。
+      ⚠ 未覆盖：Q4_K_M/Q5_K_M/Q6_K/Q8_0/F16/BF16 档；SIMD 路径；批量 prefill；F16 KV；
+      JEV / embedding 入口。
+      [oracle 说明、复现命令与边界](../../tools/oracle/lfm2moe/README.md)。
+- [ ] **oracle 构建脚本有一处静默陷阱，`GGML_NATIVE=OFF` 不等于关掉 SIMD 变体** — 本次对齐初期
+      83% 的 checkpoint 全错，最根本的原因是 **oracle 侧**：`GGML_NATIVE=OFF` 只去掉
+      `-march=native`，这一版 llama.cpp 的 `GGML_AVX2` / `GGML_FMA` / `GGML_F16C` 仍默认 `ON`，
+      于是 `arch/x86/quants.c` 的 `#if defined(__AVX2__)` 分支被编译进去，Q4_0 点积用
+      `_mm256_fmadd_ps` 累加，与参考实现差 ~2 ULP。**逐位对齐必须显式
+      `-DGGML_AVX2=OFF -DGGML_FMA=OFF -DGGML_F16C=OFF -DGGML_CPU_ALL_VARIANTS=OFF`**，
+      否则得到的是一个「看起来能跑」的 SIMD oracle。
+      `tools/oracle/shared/build_llama_oracle.sh`（既有 mellum 等用的那份）**没有**这些开关，
+      只有 `GGML_NATIVE=OFF` —— 已在本次的新脚本 `tools/oracle/lfm2moe/build_lfm2moe_oracle.sh`
+      补齐，**但共享脚本尚未同步**，其中所有 arch 的既有「逐位对齐」结论都应复核一遍是否真的
+      跑在标量路径上。⚠ 优先级取决于复核结果：若 mellum 等当时确实跑在 AVX2 上，它们的
+      0-mismatch 结论就与本次的构造方式不一致。
+- [ ] **标量 Q8_K 激活量化器与 ggml 契约不一致（已修，但调用面比想象的大）** — ✅ 已修（2026-10-15）：
+      `quantize_row_q8_k_scalar_into` 用的是对称 `d = amax/127` + `f32::round()`，
+      而 ggml 的 `quantize_row_q8_K_ref` 是 `iscale = -127/max`（`max` 是**带符号**的最大幅值元素）、
+      `d = 1/iscale`、取整用 `nearest_int()`（12582912.0 技巧，**ties-to-even**），钳位是
+      `min(127, v)`（只有上界）。负值主导的 block 因此符号相反、`d` 反号，Q6_K 的每个点积都差
+      ~2 ULP。仓库里其实**已经**有一份正确实现 `quantize_row_q8_k_ggml_into`（ERNIE 在用），
+      标量路径只是没跟上 —— 说明同一契约存在两份实现且会漂移。
+      **待办：收敛成单一实现**，让 `quantize_row_q8_k_into` 的标量分支直接走 ggml 版本，
+      删掉重复代码；否则下次改动仍可能只改一处。
+      守卫：`ops::quant::q8k_padding_tests::scalar_quantizer_matches_the_signed_ggml_contract`。
+- [ ] **MoE 权重归一化的累加精度** — ✅ 已修（2026-10-15）：归一化用的 sum 必须像
+      `ggml_sum_rows` 一样在 **f64** 中累加，然后转 f32 再做 f32 除法。用 f32 累加会让专家权重
+      差 2 ULP，在近平局处直接换专家。`src/models/lfm2moe/trunk/forward.rs` 已修；
+      **待查** `mellum`、`qwen3vlmoe` 等其它 MoE trunk 是否也用 f32 累加。
 
 ### JEV 决策评分 follow-ups
 
