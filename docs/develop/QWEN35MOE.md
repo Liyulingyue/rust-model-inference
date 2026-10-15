@@ -303,12 +303,26 @@ unambiguously the router's or the projector's. The projector is already verified
 and can be switched on afterwards with `--mmproj`, which is where its own parity
 numbers live (see [`tools/oracle/minicpmv/README.md`](../../tools/oracle/minicpmv/README.md)).
 
-## Known gaps at the time of writing
+## Known gaps
 
-* Nothing in the language tower is implemented yet — this file records the
-  contract, not a result.
 * `expert_weights_scale` is read from the GGUF but its value has not been
   confirmed against the oracle for this checkpoint.
 * The oracle's tensor table can build an MTP draft head; this GGUF has no
   `nextn.*` tensors, so that path is dead here but may still need to load
   cleanly if the arch gains it later.
+* The ~14% multi-token prefill gap is narrowed to the chunked-vs-sequential
+  recurrence question but not closed. See "The one open discrepancy" above.
+* Vulkan: `src/vulkan/qwen35.rs` still gates on `architecture == "qwen35"`, so
+  the 35B runs on the scalar/SIMD CPU path only.
+
+## What is implemented
+
+* `Qwen35Config` carries an optional `Qwen35Moe` block.
+* `src/core/loader.rs` registers `qwen35moe` and falls back to
+  `expert_feed_forward_length` when the dense `feed_forward_length` is absent.
+* `src/models/qwen35/trunk/weights.rs` holds borrowed slices plus per-expert
+  `Weight` views, so the 30,720 expert kernels are not all built up front.
+* `src/models/qwen35/trunk/moe.rs` implements the routed and shared experts.
+* `qwen35moe` is accepted by the multimodal arch allowlist, the chat template
+  map, and the MiniCPM-V 4.7 canvas path, so `--mmproj --image` works on the
+  35B as well as the 1B.
