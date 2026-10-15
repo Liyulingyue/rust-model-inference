@@ -37,10 +37,9 @@ Apple GPU execution reuses ash/Vulkan through MoltenVK. Projection uses BF16
 weights with F32 activations/accumulation; online attention has bounded shared
 workspace and no materialized N-squared matrix. The VAE's F32 3D convolutions
 gather directly on GPU. GPU KV storage rounds to BF16 to fit shared memory;
-scalar CPU KV remains F32. Text encoder allocations are dropped after encoding,
-and no-longer-needed text/denoiser CFG caches are released only after sampling,
-before VAE decoding; projection weights and GPU workspaces remain retained for
-reuse across blocks.
+scalar CPU KV remains F32. Text encoder allocations are dropped after encoding;
+denoiser/CFG state is dropped after sampling and before VAE decoding. Projection
+weights and GPU workspaces remain retained for reuse across blocks.
 
 ## Validation boundary
 
@@ -78,7 +77,7 @@ with 18,814,550,016 bytes maximum RSS and 18,249,758,144 bytes peak footprint.
 It ran alongside the 720p task and caused memory paging; this is not an isolated
 performance benchmark.
 
-The same release-fast binary then completed an isolated real-GGUF 1280x720,
+The release-fast Vulkan binary completed an isolated real-GGUF 1280x720,
 120-frame, 24-FPS MP4 on the M3 Max. The model generated 1280x736 internally,
 decoded four causal blocks, cropped to 1280x720, and wrote
 `artifacts/astronex-720p-5s.mp4`. `ffprobe` reports H.264 yuv420p, 1280x720,
