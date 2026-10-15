@@ -1302,7 +1302,7 @@ pub(super) fn run_multimodal_with_video_ref(
     if arch == "edge0" && (image_path.is_some() || video_path.is_some()) {
         return Err("Edge0-35B preview contains no vision weights; text input only".into());
     }
-    if arch != "qwen35" && arch != "qwen3vl" && arch != "edge0" {
+    if arch != "qwen35" && arch != "qwen35moe" && arch != "qwen3vl" && arch != "edge0" {
         return Err(format!(
             "Only qwen35, qwen3vl, and edge0 architectures are supported for multimodal, got: {arch}"
         ));

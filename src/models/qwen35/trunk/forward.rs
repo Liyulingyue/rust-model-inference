@@ -342,7 +342,26 @@ impl<'a> super::weights::HybridTrunk<'a> {
             let buf_len = n_tokens * n_embd;
             let ffn_input = unsafe { std::slice::from_raw_parts(buf_ptr, buf_len) };
             let edge0_input = edge0_moe.map(|_| ffn_input.to_vec());
+            // qwen35moe replaces the dense FFN wholesale, so snapshot the input
+            // the same way: `forward_ffn_parallel` returns early without writing
+            // `buf`, and the routed + shared expert output replaces it there.
+            let qwen35moe = layer.moe.as_ref().zip(self.config.moe.as_ref());
+            let qwen35moe_input = qwen35moe.map(|_| ffn_input.to_vec());
             self.forward_ffn_parallel(layer, ffn_input, n_tokens, scratch, pool, edge0);
+            if let (Some((moe, cfg)), Some(input)) = (qwen35moe, &qwen35moe_input) {
+                for token in 0..n_tokens {
+                    let offset = token * n_embd;
+                    super::moe::forward_qwen35moe_token(
+                        moe,
+                        cfg,
+                        cfg.weights_scale,
+                        &input[offset..offset + n_embd],
+                        &mut scratch.buf[offset..offset + n_embd],
+                        &mut scratch.prepared,
+                        pool,
+                    )?;
+                }
+            }
             if let Some(moe) = edge0_moe.map(|layers| &layers[il]) {
                 let ffn_input = edge0_input.as_ref().unwrap();
                 for token in 0..n_tokens {
@@ -1065,15 +1084,20 @@ impl<'a> super::weights::HybridTrunk<'a> {
     ) {
         let n_embd = self.config.n_embd;
         let n_ff = self.config.n_ff;
-        let q8k_required = layer.ffn_gate.uses_q8_k() || layer.ffn_up.uses_q8_k();
+        // qwen35moe has no dense FFN: the routed + shared experts replace it.
+        let (Some(ffn_gate), Some(ffn_up), Some(ffn_down)) =
+            (&layer.ffn_gate, &layer.ffn_up, &layer.ffn_down)
+        else {
+            return;
+        };
+        let q8k_required = ffn_gate.uses_q8_k() || ffn_up.uses_q8_k();
         assert!(
             !q8k_required || n_embd % crate::ops::quant::QK_K == 0,
             "Qwen3.5 FFN input width {n_embd} must be a multiple of {} for K-quant weights",
             crate::ops::quant::QK_K
         );
 
-        let need_q8 =
-            layer.ffn_gate.needs_q8_0_activation() || layer.ffn_up.needs_q8_0_activation();
+        let need_q8 = ffn_gate.needs_q8_0_activation() || ffn_up.needs_q8_0_activation();
         scratch
             .prepared
             .prepare(hidden, n_tokens, n_embd, need_q8, q8k_required)
@@ -1083,11 +1107,8 @@ impl<'a> super::weights::HybridTrunk<'a> {
             .matmul_group(
                 hidden,
                 [
-                    (
-                        &layer.ffn_gate,
-                        &mut scratch.ffn_gate_buf[..n_tokens * n_ff],
-                    ),
-                    (&layer.ffn_up, &mut scratch.ffn_up_buf[..n_tokens * n_ff]),
+                    (ffn_gate, &mut scratch.ffn_gate_buf[..n_tokens * n_ff]),
+                    (ffn_up, &mut scratch.ffn_up_buf[..n_tokens * n_ff]),
                 ],
                 pool,
             )
@@ -1112,14 +1133,14 @@ impl<'a> super::weights::HybridTrunk<'a> {
                 down_input,
                 n_tokens,
                 n_ff,
-                layer.ffn_down.needs_q8_0_activation(),
-                layer.ffn_down.uses_q8_k(),
+                ffn_down.needs_q8_0_activation(),
+                ffn_down.uses_q8_k(),
             )
             .expect("validated Qwen3.5 FFN output shape");
         scratch
             .prepared
             .matmul(
-                &layer.ffn_down,
+                ffn_down,
                 down_input,
                 &mut scratch.buf[..n_tokens * n_embd],
                 pool,
