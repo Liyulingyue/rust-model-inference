@@ -96,11 +96,51 @@ window_idx[k++] = (2*wi + 1) * pos_w + (2*wj + 1);
 
 Getting this wrong changes the output but is not sufficient to match.
 
-## Known gaps
+## Stage-by-stage bisection
 
-* The checkpoint callback does not fire, so there is no stage-by-stage
-  bisection yet; the next divergence has to be found by reasoning about the
-  graph or by a smaller targeted patch.
+`GGML_SCHED_DEBUG` does not cover the clip graph, but the scheduler eval callback
+does — once two things are right:
+
+1. set it **unconditionally**, not inside an `else if (cb_eval == nullptr)`
+   branch;
+2. return `true` from the callback so the walk continues to the next node.
+
+With those, `RMI_MTMD_CB_DIR` yields ~880 labelled checkpoints (`pos_embed`,
+`attn_out-N`, `ffn_out-N`, `vit_merger_*`, `post_ln`, `merger_out`, ...).
+`RMI_MINICPMV_STAGE_DIR` writes the matching `pos_embed.f32` on the Rust side.
+
+Current bisection:
+
+| stage | result |
+|---|---|
+| normalized pixels | 1179648 values, **0 differ** |
+| `pos_embed` | **1178892 differ** — first divergence |
+
+The `pos_embed` gap is small: oracle `0.03810417652130127` vs Rust
+`0.03810374438762665`, i.e. ~1e-6 relative, so the structure is right and only
+the accumulation differs.
+
+### Hypotheses already ruled out
+
+* **F32-product-then-widening vs widening-then-multiplying.** ggml's
+  `ggml_vec_dot_f32` uses `(ggml_float)a[i] * (ggml_float)b[i]`, whereas the
+  shared `crate::ops::dot_f32` computes the product in f32 and only then
+  widens. Measured both: `0.03810374` (f32-first) vs `0.03810373` (widen-first)
+  against the oracle's `0.03810418`. Neither matches, and they agree with each
+  other, so this is **not** the cause.
+* **im2col order in `ggml_conv_2d`.** Gathering the patch x-fastest (matching
+  `ggml_conv_2d`'s kw-major im2col) instead of channel-major gave `0.00302`,
+  two orders of magnitude worse — channel-major is correct here.
+
+The next candidate is ggml's own summation shape: `ggml_vec_dot_f32` keeps
+`GGML_F32_ARR` partial sums (4 by default) and adds them at the end, rather than
+one sequential accumulator. That would need a local reimplementation inside
+`encode_tile`, not a change to the shared `dot_f32`.
+
+## Other known gaps
+
 * Only `Q8_0` + `mmproj-model-f16` are covered.
 * `MARKER_SLOT` (the KV slot the `<|image_pad|>` marker occupies, which sets the
   canvas origin `pos_0 - 1`) is still an assumption.
+* Everything after `pos_embed` is untested: the split means the 27 ViT blocks,
+  the `vit_merger` and the final projector have never been compared at all.

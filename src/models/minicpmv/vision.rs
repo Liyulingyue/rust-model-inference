@@ -402,6 +402,12 @@ pub fn encode_tile(
         }
     }
 
+    // RMI_PARITY stage dump, mirroring the oracle's `pos_embed` callback.
+    if let Ok(dir) = std::env::var("RMI_MINICPMV_STAGE_DIR") {
+        let bytes: Vec<u8> = hidden.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let _ = std::fs::write(format!("{dir}/pos_embed.f32"), bytes);
+    }
+
     let insert = cfg.insert_layer_id;
     for il in 0..=insert.min(cfg.n_layer - 1) {
         vit_block(cfg, scratch, pool, &weights.layers[il], &mut hidden, nx);
