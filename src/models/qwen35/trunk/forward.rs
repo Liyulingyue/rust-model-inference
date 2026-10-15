@@ -816,6 +816,23 @@ impl<'a> super::weights::HybridTrunk<'a> {
                     softplus_f32(a_biased) * ssm_a[v % ssm_a.len()];
             }
         }
+        if std::env::var("RMI_SSM_DUMP").is_ok() && il == 0 {
+            use std::io::Write as _;
+            let nb = n_tokens * num_v_heads;
+            for (nm, buf) in [
+                ("beta_sigmoid", &scratch.beta_buf[..nb]),
+                ("a_softplus", &scratch.alpha_buf[..nb]),
+            ] {
+                let bytes: Vec<u8> = buf.iter().flat_map(|v| v.to_le_bytes()).collect();
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(format!("rust_{nm}.bin"))
+                {
+                    let _ = f.write_all(&bytes);
+                }
+            }
+        }
         #[cfg(feature = "parity-trace")]
         if edge0 && trace_layer {
             parity_trace::report(parity_trace::checkpoint_rows(
@@ -897,6 +914,22 @@ impl<'a> super::weights::HybridTrunk<'a> {
                 } else {
                     l2_norm(q, eps);
                     l2_norm(k, eps);
+                }
+            }
+        }
+        if std::env::var("RMI_SSM_DUMP").is_ok() && il == 0 {
+            use std::io::Write as _;
+            for (nm, buf) in [
+                ("q_conv_predelta", &scratch.q_buf[..n_tokens * key_dim]),
+                ("k_conv_predelta", &scratch.k_buf2[..n_tokens * key_dim]),
+            ] {
+                let bytes: Vec<u8> = buf.iter().flat_map(|v| v.to_le_bytes()).collect();
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(format!("rust_{nm}.bin"))
+                {
+                    let _ = f.write_all(&bytes);
                 }
             }
         }

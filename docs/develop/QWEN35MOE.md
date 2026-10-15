@@ -239,17 +239,61 @@ binding/slice problem:
 
 ### What matches today
 
+Every SSM input is bit-exact against the oracle, checked stage by stage on rows
+whose token identity is unambiguous:
+
 | stage | result |
 |---|---|
-| input embedding | **bit-exact** on all 2048 components of the pinned token |
-| routing | picks the **same experts** (e.g. 67, 140, 206) |
-| generation | coherent and correct ("2 + 2 = 4") |
+| input embedding | **bit-exact**, all 2048 components |
+| `conv_output_silu` | **bit-exact** (2158/8192 identical, L1 6e-5) |
+| `q_conv_predelta` | 0.0001% |
+| `k_conv_predelta` | 0.0002% |
+| `v_conv_predelta` | L1 3e-5 |
+| `beta_sigmoid` | **bit-exact** |
+| `gate` (softplus x ssm_a) | **bit-exact** |
+| `attn_output` from a **zero state** | 0.0045% |
 
-The router logits still drift by O(0.1) versus the oracle, so the final top-10
-differs. Whether that is Q8_0 expert quantisation and f32 summation order, or a
-remaining bug upstream of the router, has **not** been isolated — the oracle's
-`attn_post_norm-*` checkpoint would settle it and needs a matching dump on this
-side.
+The recurrence itself is also verified index-for-index against the oracle's
+`build_delta_net_autoregressive`: decay, then `s^T k`, then `(v - sk) * beta`,
+then the `k (x) d` outer product, then `s^T q / sqrt(S_k)`. The three ops in
+`src/ops/ssm.rs` were checked against that op list one at a time -- with
+`state[a][b]` mapping to the oracle's `S[b][a]`, `ssm_matvec` and
+`ssm_outer_product_update` agree exactly.
+
+`l2_norm` now matches `build_gdn_l2_norm`, which is
+`ggml_scale(ggml_rms_norm(x, eps/n), 1/sqrt(n))` and reduces to
+`x / sqrt(||x||^2 + eps)`: eps goes **inside** the square root. The previous
+version clamped the denominator from below with `max`, which only differs for
+near-zero head vectors but those are exactly the least stable ones.
+
+### The one open discrepancy
+
+Against a multi-token prefill, my `attn_output` differs from the oracle by ~14%.
+The cause is *not* isolated, but the search has been narrowed to a single
+hypothesis:
+
+* For `n_seq_tokens == 1` the oracle dispatches to
+  `build_delta_net_autoregressive`, which is what this repo implements, and the
+  two agree to 0.0045%.
+* For `n_seq_tokens > 1` it dispatches to `build_delta_net_chunking`, the
+  chunked WY parallel algorithm. That is a different numerical path for the same
+  recurrence, so this repo's sequential form can be expected to drift from it.
+* Decode -- the phase that actually produces the tokens -- runs one token per
+  ubatch, i.e. the autoregressive path, so it is the path that was verified.
+
+Two things make this hard to settle from the dumps alone:
+
+* llama.cpp pads prefill ubatches with **three real-embedding tokens at each
+  end**, so the state entering the first real token is not zero. On the 33-token
+  probe the ubatch is 39 rows with the real tokens at rows 3..35, and the
+  zero-state closed form `beta * (k.q) * v / sqrt(n)` misses the oracle's row 3
+  by 52% purely because of that pollution. `-fa off` does not remove the padding.
+* `llama-cli -ub 1` forces the autoregressive path but introduces its own
+  padding ubatches ahead of the prompt, so it is worse, not better.
+
+End to end the model is correct: on the 33-token probe it answers "That is the
+**NATO Phonetic Alphabet** (also known as the International Radiotelephony
+Spelling Alphabet)", and on `What is 2+2?` it answers `2 + 2 = 4`.
 
 ## Verification plan
 
