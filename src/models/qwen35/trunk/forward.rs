@@ -916,6 +916,20 @@ impl<'a> super::weights::HybridTrunk<'a> {
             ));
         }
 
+        if std::env::var("RMI_SSM_DUMP").is_ok() && il == 0 {
+            let bytes: Vec<u8> = scratch.qkv_buf[..n_tokens * conv_dim]
+                .iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect();
+            use std::io::Write as _;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("rust_conv_silu.bin")
+            {
+                let _ = f.write_all(&bytes);
+            }
+        }
         let tc = tc0.elapsed().as_secs_f64();
 
         let ts0 = std::time::Instant::now();
@@ -943,11 +957,7 @@ impl<'a> super::weights::HybridTrunk<'a> {
                 let gate_val = scratch.alpha_buf[t * num_v_heads + v_h];
                 let beta_val = scratch.beta_buf[t * num_v_heads + v_h];
                 let state_off = v_h * head_v_dim * head_v_dim;
-                let k_h = if edge0 {
-                    v_h / (num_v_heads / num_k_heads)
-                } else {
-                    v_h % num_k_heads
-                };
+                let k_h = v_h % num_k_heads;
                 let decay = gate_val.exp();
                 crate::ops::ssm_state_decay(
                     &mut ssm_state[state_off..state_off + head_v_dim * head_v_dim],
@@ -1002,6 +1012,20 @@ impl<'a> super::weights::HybridTrunk<'a> {
             }
         }
 
+        if std::env::var("RMI_SSM_DUMP").is_ok() && il == 0 {
+            let bytes: Vec<u8> = scratch.attn_out_buf[..n_tokens * value_dim]
+                .iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect();
+            use std::io::Write as _;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("rust_ssm_out.bin")
+            {
+                let _ = f.write_all(&bytes);
+            }
+        }
         let tssm = ts0.elapsed().as_secs_f64();
         let tn0 = std::time::Instant::now();
         for t in 0..n_tokens {

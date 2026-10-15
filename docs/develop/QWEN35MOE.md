@@ -196,8 +196,26 @@ rows is decisive:
 | 15 | 13 | 0/2048 | 958.00 | 47.51 |
 | 17 | 15 | 0/2048 | 1011.55 | 47.39 |
 
-So: the input embedding is bit-exact, and the layer-0 SSM output is wrong by an
-order of magnitude. The drift I attributed to "Q8_0 expert quantisation and
+A caution on that table: the row-to-token map built from exact embedding
+matches is ambiguous, because the prompt contains repeated tokens (`17`, `198`
+and `271` each appear more than once) and matching each oracle row to the
+*first* candidate collapses them onto one index. Row identity has to come from
+a monotonic alignment instead.
+
+Redone that way, the conv path comes out **bit-exact** (2158/8192 components
+identical, L1 6e-5) for every row with an unambiguous mapping, while
+`attn_post_norm` over those same rows still differs by L1 ~1000 and max ~48.
+So the divergence is *after* the conv: in the QK L2 norm, `v_conv`, the
+recurrence, or the gated norm plus output projection -- not in the input
+projection or the conv, as the table above appeared to say.
+
+Also found and fixed: the `edge0` path indexed the K head as
+`v_h / (num_v_heads / num_k_heads)`, which interleaves heads (0,0,1,1,...).
+The oracle's `ggml_repeat_4d` tiles the whole block, so output head j reads
+input head `j % num_k_heads`. The default path already did this correctly,
+which is why the bug did not show up in these runs.
+
+### Summary so far The drift I attributed to "Q8_0 expert quantisation and
 f32 summation order" is not that -- it is a genuine bug upstream of the router,
 in the SSM. The MoE routing still picks the same experts only because the
 residual stream stays in roughly the right direction.
