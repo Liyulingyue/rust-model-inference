@@ -253,7 +253,6 @@ whose token identity is unambiguous:
 | `gate` (softplus x ssm_a) | **bit-exact** |
 | `attn_output` from a zero state | 0.0045% |
 | naive vs chunked recurrence, same inputs and state | 0.0063% |
-| naive vs chunked recurrence, same inputs and state | 0.0063% |
 
 The recurrence itself is also verified index-for-index against the oracle's
 `build_delta_net_autoregressive`: decay, then `s^T k`, then `(v - sk) * beta`,
