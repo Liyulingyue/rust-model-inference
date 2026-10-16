@@ -51,11 +51,37 @@ NEON on aarch64; no AVX-512).
       证据：12 步 9 912 个 checkpoint 全部逐位一致，见
       [`tools/oracle/lfm2moe/README.md`](../../tools/oracle/lfm2moe/README.md)。
       守卫：`tests/lfm2moe_reference.rs`（真实权重 + 逐位 oracle）。
-- [ ] **把同款 oracle 对齐扩展到 lfm2 / lfm25 稠密档与 8B-A1B** — 本次只验证了 24B-A2B。
-      shortconv 状态修复与 Q8_K signed 契约修复都是**全家族生效**的改动，但 `lfm2`、`lfm25`、
-      `lfm2moe` 的 8B-A1B 都还没有真实 GGUF 的逐位证据。复用 `tools/oracle/lfm2moe/` 的
-      eval-callback（它已覆盖 `src/models/lfm2.cpp`，稠密档与 MoE 档共用同一张图），只需换模型
-      与期望 checkpoint 集合。
+- [ ] **`lfm2` / `lfm25` 的 trunk 选择靠 `general.basename` 判断——判据不成立** —
+      `src/app/text/generation.rs` 用 `source.metadata("general.basename").contains("2.5")` 决定走哪个 trunk。
+      这是**来源/命名字段**而非架构字段：Liquid 的 QAD 量化管线写它，
+      llama.cpp 的 `convert_hf_to_gguf.py` 不写。实测 15 个稠密 GGUF：只有 QAD 档带这个 key，
+      其余的 Q4_K_M / Q5_K_M / Q6_K / Q8_0 / F16 / BF16 全部走 lfm2 trunk。
+      llama.cpp 根本没有这个选择：`llama-arch.cpp` 只定义 `LLM_ARCH_LFM2` 与
+      `LLM_ARCH_LFM2MOE`，所有稠密生成都走唯一的 `src/models/lfm2.cpp`，**无 2.5 分支**。
+      **当前不会算错**：`dense_trunks_produce_identical_logits` 实测两个 trunk 在同一 GGUF 上
+      输入同一批 token ids 后 logits 逐位相同（65536 项零差异）。两份 trunk 的
+      `config.rs` 只差一个 struct 名。
+      **但这是碎弱性而非正确性**：同一个模型的计算路径取决于谁做的量化，
+      一旦任何一侧发生漂移就会静默切换数学实现。
+      **建议改法**：删掉 `src/models/lfm25/` 这份重复实现，统一走 `lfm2`（与 llama.cpp 一致）；
+      若因历史原因保留两份，则至少把判据换成真正的架构信号（如 `n_rot`、
+      `block_count`、头数布局），并加测试锁定两个 trunk 的 logits 逐位一致。
+      注意它们的**内置 chat 模板**也不同（CLI 分别打印 `N tokens` 与 `N items`），
+      但只是打印措辞差异，实际 token 数一致。
+- [x] **把同款 oracle 对齐扩展到 lfm2 / lfm25 稠密档** — ✅ **已完成**（2026-10-16）。
+      15 个稠密 LFM2 GGUF 全部与固定 oracle（llama.cpp `749f688`，`-n 24 --temp 0 -c 512`，
+      `RMI_SCALAR=1`）的 greedy token ids **逐个一致**：
+      `LFM2.5-230M` 的 QAD-Q4_0 / Q4_K_M / Q5_K_M / Q6_K / Q8_0 / F16 / BF16（7）、
+      `LFM2.5-1.2B-Instruct` 的 QAD-Q4_0 / Q4_K_M / Q6_K / Q8_0（4）、
+      `LFM2.5-2.6B` 的 QAD-Q4_0 / Q4_K_M / Q6_K / Q8_0（4）。
+      另外 `LFM2.5-2.6B-Q4_K_M` 做了逐层逐位对比：35 步、**75 240 个 checkpoint 零失配**，
+      包含每步完整的 128 000 项 `result_output`。
+      稠密 trunk 新增 `src/models/lfm2/trunk/trace.rs`（24 个检查点，命名与 oracle 对齐）。
+      工具链 `tests/lfm2_dense_trunk_agreement.rs`（验证两个 trunk 逐位一致 + greedy 对拍）。
+      遗留：CLI 的增量 decode 路径不在该 harness 覆盖范围（harness 重做 prefill）；
+      `lfm2moe` 的 8B-A1B 仍未做逐位对比。
+      会课到的三个临时脚本陷阱均已写进 commit message（重新选取二进制、按
+      mtime 选二进制、缺记录当作匹配）。
 - [ ] **HTTP 多模态图片输入（OpenAI 兼容）** — `/v1/chat/completions` 现在**完全不支持图片**：
       `protocol.rs::text_content` 只接受 string / `type:"text"` block，带 `image_url` 的请求实测
       返回 400 `unsupported content block`。CLI 侧 `--mmproj --image` 能力完备（`app/text/
