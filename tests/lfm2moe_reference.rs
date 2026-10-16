@@ -12,6 +12,22 @@
 //! binary with `RMI_SCALAR=1`, and build the oracle with the scalar flags in
 //! `tools/oracle/lfm2moe/build_lfm2moe_oracle.sh`.
 //!
+//! # Coverage
+//!
+//! Verified bitwise against the pinned oracle on three checkpoints:
+//!
+//! | model | checkpoints | result |
+//! |---|---|---|
+//! | `LFM2.5-24B-A2B-QAD-Q4_0` | 9 912 | 0 mismatches |
+//! | `LFM2.5-8B-A1B-Q4_0` | 7 840 | 0 mismatches |
+//! | `LFM2.5-8B-A1B-Q4_K_M` | 7 840 | 0 mismatches |
+//!
+//! 8B-A1B-Q4_0 is what surfaced the shortconv accumulation bug recorded at
+//! `src/models/lfm2moe/trunk/forward.rs`: the `l_cache == 3` unrolled branch
+//! folded its first product into the initialiser, which disagrees with ggml
+//! whenever every product is a signed zero. 24B never hit it — it needs a
+//! channel whose `b*x` is exactly zero.
+//!
 //! The test is skipped (green) unless `RMI_LFM2MOE_MODEL` points at a real
 //! GGUF, matching the other `*_reference.rs` harnesses in this repo.
 

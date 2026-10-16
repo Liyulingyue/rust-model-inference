@@ -1635,7 +1635,19 @@ fn forward_shortconv(
             let w0 = kernel[k_off];
             let w1 = kernel[k_off + 1];
             let w2 = kernel[k_off + 2];
-            conv_out[c_idx] = a0 * w0 + a1 * w1 + a2 * w2;
+            // Accumulate from 0.0, one product at a time, exactly like the
+            // generic branch below and ggml's ssm conv. Folding the first
+            // product into the initialiser — `a0*w0 + a1*w1 + a2*w2` — is
+            // numerically the same except when every product is a signed
+            // zero: this form yields -0.0 where the generic one yields +0.0,
+            // because `0.0 + (-0.0) == +0.0`. It only bites on channels whose
+            // `b*x` is exactly zero, which is why 8B-A1B-Q4_0 hit it (104 of
+            // 2048 channels on layer 0) while 24B-A2B never did.
+            let mut acc = 0.0f32;
+            acc += a0 * w0;
+            acc += a1 * w1;
+            acc += a2 * w2;
+            conv_out[c_idx] = acc;
         }
     } else {
         for c_idx in 0..n_embd {
