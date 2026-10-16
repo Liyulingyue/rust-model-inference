@@ -3630,7 +3630,8 @@ mod q8k_padding_tests {
 
     /// The buffer-size contract: `buf.len() >= nb` where `nb = len.div_ceil(QK_K)`.
     #[test]
-    fn undersized_buffer_panics() {        let input = vec![0.5f32; 13696];
+    fn undersized_buffer_panics() {
+        let input = vec![0.5f32; 13696];
         let mut buf = vec![
             BlockQ8K {
                 d: 0.0,

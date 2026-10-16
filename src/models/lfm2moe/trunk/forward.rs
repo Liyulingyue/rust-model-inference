@@ -734,12 +734,9 @@ pub(super) fn forward_layer(
         vec_add_into(&cur, x);
     }
 
-    trace::layer_1d(
-        "post_attn_residual",
-        layer,
-        step,
-        unsafe { std::slice::from_raw_parts(x_ptr, n_embd) },
-    );
+    trace::layer_1d("post_attn_residual", layer, step, unsafe {
+        std::slice::from_raw_parts(x_ptr, n_embd)
+    });
 
     // ---- FFN: dense (leading blocks) or MoE (remaining blocks) ----
     unsafe {
@@ -923,7 +920,7 @@ fn forward_moe_ffn(
             sigmoid_inplace(&mut probs);
             probs
         }
-other => panic!("unsupported expert_gating_func {other}"),
+        other => panic!("unsupported expert_gating_func {other}"),
     };
     trace::layer_1d("ffn_moe_probs", layer, step, &probs);
 
@@ -1077,7 +1074,13 @@ other => panic!("unsupported expert_gating_func {other}"),
                 weighted[k * n_embd + i] = downs[k * n_embd + i] * w;
             }
         }
-        trace::checkpoint("ffn_moe_weighted", Some(layer), step, &[n_embd, n_used], &weighted);
+        trace::checkpoint(
+            "ffn_moe_weighted",
+            Some(layer),
+            step,
+            &[n_embd, n_used],
+            &weighted,
+        );
     }
     dbg_out(step, layer, "ffn_moe_out", &moe_dump);
     trace::layer_1d("ffn_moe_out", layer, step, &moe_dump);
@@ -1178,9 +1181,24 @@ fn forward_attention(
             "Vcur",
             std::slice::from_raw_parts(v_ptr, n_embd_gqa),
         );
-        trace::layer_1d("q_proj", layer, step, std::slice::from_raw_parts(q_ptr, n_embd_q));
-        trace::layer_1d("k_proj", layer, step, std::slice::from_raw_parts(k_ptr, n_embd_gqa));
-        trace::layer_1d("v_proj", layer, step, std::slice::from_raw_parts(v_ptr, n_embd_gqa));
+        trace::layer_1d(
+            "q_proj",
+            layer,
+            step,
+            std::slice::from_raw_parts(q_ptr, n_embd_q),
+        );
+        trace::layer_1d(
+            "k_proj",
+            layer,
+            step,
+            std::slice::from_raw_parts(k_ptr, n_embd_gqa),
+        );
+        trace::layer_1d(
+            "v_proj",
+            layer,
+            step,
+            std::slice::from_raw_parts(v_ptr, n_embd_gqa),
+        );
         let q = std::slice::from_raw_parts_mut(q_ptr, n_embd_q);
         let k_new = std::slice::from_raw_parts_mut(k_ptr, n_embd_gqa);
         let qn = lw.q_norm.as_deref().unwrap();
@@ -1327,8 +1345,16 @@ fn forward_attention(
             let score_stride = scratch.score_stride;
             let scores_ptr = scratch.scores.as_mut_ptr();
             let tracing = trace::trace_enabled("attn_scores");
-            let mut trace_scores: Vec<f32> = if tracing { vec![0.0f32; n_head * n_cached] } else { Vec::new() };
-            let mut trace_probs: Vec<f32> = if tracing { vec![0.0f32; n_head * n_cached] } else { Vec::new() };
+            let mut trace_scores: Vec<f32> = if tracing {
+                vec![0.0f32; n_head * n_cached]
+            } else {
+                Vec::new()
+            };
+            let mut trace_probs: Vec<f32> = if tracing {
+                vec![0.0f32; n_head * n_cached]
+            } else {
+                Vec::new()
+            };
             let trace_scores_ptr = trace_scores.as_mut_ptr();
             let trace_probs_ptr = trace_probs.as_mut_ptr();
             pool.compute({
@@ -1447,12 +1473,9 @@ fn forward_attention(
     dbg_out(step, layer, "self_attn.out_proj", unsafe {
         std::slice::from_raw_parts(attn_proj_ptr, n_embd)
     });
-    trace::layer_1d(
-        "attn_proj",
-        layer,
-        step,
-        unsafe { std::slice::from_raw_parts(attn_proj_ptr, n_embd) },
-    );
+    trace::layer_1d("attn_proj", layer, step, unsafe {
+        std::slice::from_raw_parts(attn_proj_ptr, n_embd)
+    });
 }
 
 #[allow(clippy::too_many_arguments)]

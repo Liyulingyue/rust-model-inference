@@ -59,10 +59,11 @@ fn replay(
     n_predict: usize,
     add_bos: bool,
 ) -> (Vec<u32>, Vec<u32>) {
-    let tokenizer = rust_model_inference::core::tokenizer::BPETokenizer::from_gguf_metadata(
-        |key| source.metadata(key).cloned(),
-    )
-    .expect("tokenizer");
+    let tokenizer =
+        rust_model_inference::core::tokenizer::BPETokenizer::from_gguf_metadata(|key| {
+            source.metadata(key).cloned()
+        })
+        .expect("tokenizer");
     let config = Lfm2MoeConfig::from_source(source.as_ref()).expect("config");
     // One thread: the oracle harness pins `n_threads = 1`, and the pool splits
     // reduction order per thread in some kernels.
@@ -182,7 +183,10 @@ fn lfm25_24b_a2b_config_matches_the_pinned_contract() {
         .map(|(layer, _)| layer)
         .collect();
     assert_eq!(attention, vec![2, 6, 10, 14, 18, 22, 26, 30, 34, 38]);
-    assert!(config.n_head_kv_per_layer.iter().all(|kv| *kv == 0 || *kv == 8));
+    assert!(config
+        .n_head_kv_per_layer
+        .iter()
+        .all(|kv| *kv == 0 || *kv == 8));
 }
 
 /// Tokenizer parity, pinned against `llama-eval-callback`'s `prompt_ids` for
@@ -193,10 +197,11 @@ fn lfm25_token_ids_match_the_pinned_oracle() {
         return;
     };
     let source = open_source(&path);
-    let tokenizer = rust_model_inference::core::tokenizer::BPETokenizer::from_gguf_metadata(
-        |key| source.metadata(key).cloned(),
-    )
-    .expect("tokenizer");
+    let tokenizer =
+        rust_model_inference::core::tokenizer::BPETokenizer::from_gguf_metadata(|key| {
+            source.metadata(key).cloned()
+        })
+        .expect("tokenizer");
     assert_eq!(tokenizer.bos_id(), Some(124894));
     assert_eq!(tokenizer.eos_id(), Some(124900));
     // oracle: `llama-eval-callback -p "What is 2+2?"`, add_bos = true.
