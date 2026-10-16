@@ -271,6 +271,17 @@ impl<'model> Qwen3Session<'model> {
         } else if compute_policy == ComputePolicy::Vulkan {
             return Err("Qwen3 Vulkan currently requires F16 KV".into());
         } else {
+            // The resident Vulkan decoder is the only GPU path this model has,
+            // and it needs F16 KV. Under the default F32 the request was simply
+            // dropped, so `--gpu` looked like it ran while every token was
+            // computed on the CPU. Say so instead of failing quietly.
+            if compute_policy != ComputePolicy::Cpu {
+                eprintln!(
+                    "[GPU] Qwen3 resident Vulkan decode requires F16 KV but got \
+                     {kv_format:?}; text generation runs on the CPU. \
+                     Pass --kv-cache f16 to enable the GPU path."
+                );
+            }
             None
         };
         #[cfg(feature = "vulkan")]
