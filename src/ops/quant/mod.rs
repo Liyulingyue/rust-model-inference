@@ -3683,10 +3683,7 @@ mod q8k_padding_tests {
                     lhs.d,
                     rhs.d
                 );
-                assert_eq!(
-                    lhs.qs, rhs.qs,
-                    "case {case} block {index}: qs differ"
-                );
+                assert_eq!(lhs.qs, rhs.qs, "case {case} block {index}: qs differ");
                 assert_eq!(
                     lhs.bsums, rhs.bsums,
                     "case {case} block {index}: bsums differ"
