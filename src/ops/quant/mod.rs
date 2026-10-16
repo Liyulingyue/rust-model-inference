@@ -86,7 +86,7 @@ pub fn quantize_row_q8_k_into(x: &[f32], buf: &mut [BlockQ8K]) {
 }
 
 fn quantize_row_q8_k_scalar(x: &[f32]) -> Vec<BlockQ8K> {
-    let nb = x.len() / QK_K;
+    let nb = x.len().div_ceil(QK_K);
     let mut result = vec![
         BlockQ8K {
             d: 0.0,
@@ -3626,6 +3626,99 @@ mod q8k_padding_tests {
         // `-63.5` in the other direction is where the two disagree, which is
         // why the helper is shared with `quantize_row_q8_k_ggml_into`.
         assert_eq!(buf[0].qs[1], 64);
+    }
+
+    /// The SIMD and scalar Q8_K quantisers encode the same ggml signed
+    /// contract (`iscale = -127 / max_signed`, ties-to-even, `d = 1/iscale`),
+    /// but they are two separate hand-written implementations. They have
+    /// already drifted once: the scalar path used a symmetric
+    /// `amax / 127` + `f32::round` form while the SIMD path was correct,
+    /// so every Q6_K dot on a non-AVX2 build was ~2 ULP off ggml. This test
+    /// is the guard that keeps them from diverging again.
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn avx2_quantizer_matches_scalar_bitwise() {
+        if !crate::ops::has_avx2_fma() {
+            return;
+        }
+        // Deterministic LCG so a failure is reproducible without a dependency.
+        let mut state: u64 = 0x243f_6a88_85a3_08d3;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 40) as f32 / 8_388_608.0 - 1.0
+        };
+
+        for case in 0..64 {
+            let nb = 1 + case;
+            let len = nb * QK_K;
+            let input: Vec<f32> = (0..len).map(|_| next()).collect();
+
+            let mut scalar = vec![
+                BlockQ8K {
+                    d: 0.0,
+                    qs: [0; QK_K],
+                    bsums: [0; 16]
+                };
+                nb
+            ];
+            super::quantize_row_q8_k_scalar_into(&input, &mut scalar);
+
+            let mut simd = vec![
+                BlockQ8K {
+                    d: 0.0,
+                    qs: [0; QK_K],
+                    bsums: [0; 16]
+                };
+                nb
+            ];
+            unsafe { super::quantize_row_q8_k_avx2_into(&input, &mut simd) };
+
+            for (index, (lhs, rhs)) in scalar.iter().zip(simd.iter()).enumerate() {
+                assert_eq!(
+                    lhs.d.to_bits(),
+                    rhs.d.to_bits(),
+                    "case {case} block {index}: d differs (scalar {} vs simd {})",
+                    lhs.d,
+                    rhs.d
+                );
+                assert_eq!(
+                    lhs.qs, rhs.qs,
+                    "case {case} block {index}: qs differ"
+                );
+                assert_eq!(
+                    lhs.bsums, rhs.bsums,
+                    "case {case} block {index}: bsums differ"
+                );
+            }
+        }
+    }
+
+    /// `quantize_row_q8_k` is the public allocating entry point, but it sized
+    /// its buffer with a truncating `len / QK_K` while the writer it delegates
+    /// to needs `len.div_ceil(QK_K)`. Any non-256-multiple length (GLM-4's
+    /// n_ff = 13696 is the canonical case) therefore panicked with "buf too
+    /// small" instead of zero-padding the tail the way `_into` does.
+    #[test]
+    fn allocating_entry_point_handles_partial_tail() {
+        for len in [QK_K - 1, 128, 13_696] {
+            let input: Vec<f32> = (0..len).map(|i| (i as f32 * 0.01).sin()).collect();
+            let blocks = super::quantize_row_q8_k(&input);
+            assert_eq!(
+                blocks.len(),
+                len.div_ceil(QK_K),
+                "len = {len} should produce one block per 256-element group"
+            );
+            let tail = len % QK_K;
+            if tail != 0 {
+                let last = blocks.last().unwrap();
+                assert!(
+                    last.qs[tail..].iter().all(|&q| q == 0),
+                    "len = {len}: the {tail}-wide padded tail must quantize to zero"
+                );
+            }
+        }
     }
 
     /// The buffer-size contract: `buf.len() >= nb` where `nb = len.div_ceil(QK_K)`.
