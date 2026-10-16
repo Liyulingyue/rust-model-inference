@@ -18,6 +18,29 @@ struct LinearState {
     runtime: BatchedLinearRuntime,
 }
 
+/// Smallest number of output elements worth a GPU submission.
+///
+/// Every `BatchedLinearRuntime::matmul_rows` call ends in its own
+/// `submit_and_wait`, and that fence costs ~2.5 ms on the GB10 + driver
+/// combination this project targets. A matmul only wins if it does enough
+/// work to pay that back.
+///
+/// LFM2.5-8B (MoE) is the pathological case: decode runs `rows=1`,
+/// `n_out=1792` expert projections, 24 layers x top-4 experts x 3, so one
+/// token pays 288 fences. Measured on that model, the GPU path took 20.3 s
+/// for a 2-token run against 2.1 s with the GPU matmul disabled -- an ~10x
+/// regression purely from fence latency. Those calls are 1792 output
+/// elements, so they now stay on the CPU pool, while image/diffusion
+/// matmuls (millions of output elements per call) are unaffected.
+///
+/// Override with `RUST_GPU_MIN_OUTPUTS=0` to restore the old behaviour.
+fn min_gpu_matmul_outputs() -> usize {
+    std::env::var("RUST_GPU_MIN_OUTPUTS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(16 * 1024)
+}
+
 pub(crate) fn offload_enabled() -> bool {
     crate::ops::gpu_requested()
         && !crate::ops::scalar_mode()
@@ -66,6 +89,9 @@ impl GpuLinear {
                     .ok()
                     .and_then(|value| value.parse().ok())
                     .unwrap_or(usize::MAX)
+            || rows
+                .checked_mul(n_out)
+                .is_none_or(|outputs| outputs < min_gpu_matmul_outputs())
         {
             return false;
         }
