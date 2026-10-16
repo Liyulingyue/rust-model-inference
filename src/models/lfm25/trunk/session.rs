@@ -38,6 +38,10 @@ pub struct Lfm25Session<'a> {
     pub kv_cache: KvCache,
     pub scratch: ExecutionScratchpad,
     pub pool: Arc<ComputePool>,
+    /// The KV format this session was constructed with. The free-function
+    /// path allocates its own cache, so it has to be told explicitly; it used
+    /// to hard-code `F16` regardless of the caller's request.
+    pub kv_format: KvFormat,
     /// Vocabulary size for the LM head. Captured here so the
     /// free-function path's internal `BPETokenizer` reconstruction
     /// doesn't have to round-trip the GGUF metadata on every call.
@@ -135,6 +139,7 @@ impl<'a> Lfm25Session<'a> {
             },
             source,
             kv_cache,
+            kv_format,
             scratch,
             pool,
             vocab,
@@ -173,7 +178,7 @@ impl<'a> Lfm25Session<'a> {
             self.source,
             prompt_tokens,
             self.pool.n_threads(),
-            KvFormat::F16,
+            self.kv_format,
             self.config.n_ctx,
             batch_size,
         )
