@@ -2297,3 +2297,41 @@ DP4A，得写一个自己的「块缩放 + int32 提升」的 int8 dot kernel，
 结论与 TODO-031 合并看：**GPU dense 路径目前只有 Q8_0 勉强可用（持平 CPU），
 Q4_K 家族完全不能用（慢 17.6 倍）。** 在补出 Q4_K 的向量化 kernel 之前，
 Q4_K 模型应该明确走 CPU，而不是靠一条经验阈值去猜。
+
+### TODO-033: Q4_K split-K GEMV 试过，行度不够；真正的瓶颈是单字节权重访问效率
+
+接着 TODO-032，真的去写了一个 rows==1 的 split-K GEMV（`q4_k_matmul.comp`
+里新增分支：rows==1 时不让 64 个 lane 各领一个输出行，而是让 64 个 lane
+合作同一个输出行，按 32 元素一个 scale/min 小组切 K，最后树形归约）。
+256 元素的 Q4_K block 正好切成 8 个 32 元素组共享一个 scale 和一个 minimum，
+所以 lane 之间不需要交换 scale，每个 lane 内部就能把该组的 dot 算完。
+
+结果：
+
+- **数值**：对真实权重（Qwen3-8B-Q4_K_M 的 blk.0.ffn_gate），
+  GEMV 输出与已提交（对 CPU 位精确）的 batched 路径 **逐字节一致**。
+- **性能**：rows=1 只从 2.33ms 降到 2.11ms（~10%），LFM2.5 MoE 端到端
+  1.1 t/s → 1.2 t/s，**基本没动**。因此这个分支没有保留（回退了）。
+
+**为什么并行度不是瓶颈。** 8B prefill 每次提交 GPU 等 188ms（vs 驱动
+35µs），整趟 forward 对 8GB 权重只跑出 ~1.2 GB/s；而同卡 LM head
+（rows=1、n_out 很大）能到 22 GB/s。差异在于**单次权重字节的访问效率**，
+不是 lane 数：
+
+```
+Q4_K rows=1:  2.06 MB 权重，实测 2.11 ms  →  0.98 GB/s
+理论下限:     若能到 25 GB/s，只需 0.08 ms   →  差 25 倍
+```
+
+根源在 shader 的 `weight_byte()` / `q8()`：一次取一个字节
+（`w.data[index>>2] >> ((index&3)*8)` 再掩码），nibble 再逐个拆
+（`packed & 15` / `packed >> 4`）。加多少 lane 都还是在做字节级提取。
+
+**真正要做的**：把权重读取向量化——用 `uint4`/`int4` 一次搬 16 字节，
+在寄存器里用位运算拆 nibble 和 scale，让一次内存事务服务 16 个元素。
+这是重写 Q4_K 读取路径的量级，和 TODO-032 是同一个大工程，建议合并做。
+在那之前：
+- batched（rows>1）的 Q4_K 已经被 `7747f07` 的 shared-memory staging +
+  scale 提取外提提速 2.3~2.6 倍（位精确）；
+- rows=1 的 Q4_K（MoE decode、单 token）仍然只有 0.98 GB/s，
+  继续走 `7750eeb` 的 CPU 门控。
