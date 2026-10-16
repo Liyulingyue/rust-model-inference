@@ -2260,3 +2260,40 @@ dense 路径强。
   这和 `7750eeb` 里 LFM2.5 MoE 的结论是同一件事的两个入口。
 - **8B-Q8_0 的 GPU 运行峰值 RSS 约 18.7 GB**，超过 15 GiB 预算；
   一次性 CLI 同时持有 mmap 权重和显存副本是原因之一。
+
+### TODO-032: Q4_K/Q5_K/Q6_K 在 GPU 上没有 DP4A kernel，8B Q4_K_M 比 CPU 慢 17.6 倍
+
+接着 TODO-031 往下挖，发现 Q4_K 家族在 dense Vulkan 路径上缺少向量化 kernel，
+这是 Q4_K_M 特别慢的**结构性**原因。
+
+在 `src/vulkan/ops.rs` 的 operator 表里：
+
+- **Q8_0** 有两个 kernel：
+  - `Q8_MATMUL_GROUPED`，其 index 会被 `Q8_MATMUL_GROUPED_DP4A` 顶替
+    （`force_dp4a && context.supports_integer_dot_product()`，约 1423 行）；
+  - 外加 `Q8_MATMUL_TILED_DP4A`（`rows > 1` 时 `record_weight_matmul_rows`
+    自动切到 `record_weight_matmul_tiled_rows`，约 1960 行）。
+  两者都吃设备 int8 dot-product，8B Q8_0 生成能持平 CPU。
+
+- **Q4_K / Q5_K / Q6_K** 只有**一个**标量 kernel（`q4_k_matmul.comp` 等，
+  表项见约 392 行），既没有 dp4a 变体，也没有 tiled 变体。
+  8B Q4_K_M 实测 prefill 0.4 t/s、生成 1.3 t/s，wall 45.8s，
+  同机 CPU 2.6s —— **慢 17.6 倍**，是所有测过的组合里最差的。
+
+`q4_k_matmul.comp` 主循环（每 block）：
+
+```glsl
+int value = int((group & 1u) == 0u ? packed & 15u : packed >> 4u);  // 解 4-bit nibble
+int activation = q8(block * 256u + local);
+partial[(local & 31u) >> 2u] += int(scale(slot, offset, group)) * activation * value;
+```
+
+单块累加值量级 = `scale(≤63) * activation(≤127) * value(≤15)`，
+再在 8 个 lane 上求和，落到 int32。这种**块缩放的 int32 乘加不能直接套
+Q8_0 的 dp4a 路径**（Q8_0 的量化把乘积压在 int8 内）。所以 Q4_K 想吃
+DP4A，得写一个自己的「块缩放 + int32 提升」的 int8 dot kernel，或者
+把激活缩放到能进 int8 的范围 —— 这是一个完整的 shader 项目，不适合随手做。
+
+结论与 TODO-031 合并看：**GPU dense 路径目前只有 Q8_0 勉强可用（持平 CPU），
+Q4_K 家族完全不能用（慢 17.6 倍）。** 在补出 Q4_K 的向量化 kernel 之前，
+Q4_K 模型应该明确走 CPU，而不是靠一条经验阈值去猜。
