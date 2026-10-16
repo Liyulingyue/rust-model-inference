@@ -36,7 +36,22 @@ pub(crate) fn check_eligibility(facts: &EligibilityFacts) -> Result<(), String> 
         return Err("unsupported Vulkan weight format: no weights".into());
     }
     for &format in &facts.weight_formats {
-        GpuWeightFormat::from_ggml_type(format).map_err(|error| error.to_string())?;
+        let gpu = GpuWeightFormat::from_ggml_type(format).map_err(|error| error.to_string())?;
+        // Q4_K/Q5_K/Q6_K only have a single scalar matmul shader: the Q8_0
+        // operator gets a DP4A replacement plus a tiled variant, these do not.
+        // Measured on Qwen3-8B-Q4_K_M, the resident dense path ran 17.6x
+        // slower than the CPU (45.8s vs 2.6s wall, prefill 0.4 vs 13.0 t/s)
+        // because every projection falls to that scalar kernel. Until those
+        // families get a vectorised kernel they must stay on the CPU.
+        if matches!(
+            gpu,
+            GpuWeightFormat::Q4_K | GpuWeightFormat::Q5_K | GpuWeightFormat::Q6_K
+        ) {
+            return Err(format!(
+                "{format:?} weights have no vectorised Vulkan matmul kernel; \
+                 the resident decoder is far slower than the CPU for this model"
+            ));
+        }
     }
     if facts
         .gate_up_formats
