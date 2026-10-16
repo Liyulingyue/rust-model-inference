@@ -39,6 +39,23 @@ pub(crate) fn checkpoint(
     let _ = (name, layer, step, shape, values);
 }
 
+/// True when this checkpoint would actually be written.
+///
+/// Lets a caller skip building a staging buffer that only exists to be dumped —
+/// e.g. the `[n_head, n_cached]` score matrix the attention loop has to gather
+/// across heads before it can be recorded.
+pub(crate) fn trace_enabled(name: &str) -> bool {
+    #[cfg(feature = "parity-trace")]
+    {
+        crate::parity_trace::enabled(name)
+    }
+    #[cfg(not(feature = "parity-trace"))]
+    {
+        let _ = name;
+        false
+    }
+}
+
 /// Emit a per-layer checkpoint whose shape is one-dimensional.
 pub(crate) fn layer_1d(name: &str, layer: usize, step: usize, values: &[f32]) {
     checkpoint(name, Some(layer), step, &[values.len()], values);
@@ -49,7 +66,7 @@ pub(crate) fn global(name: &str, step: usize, values: &[f32]) {
     checkpoint(name, None, step, &[values.len()], values);
 }
 
-/// Emit a per-layer checkpoint with an explicit two-dimensional shape.
+/// Emit the integer top-k expert selection.
 ///
 /// ggml writes projections as `[out_features, n_embd_head]`, so the oracle
 /// records e.g. `q_proj` with shape `[64, 16]` rather than `[1024]`. Keeping
@@ -63,4 +80,19 @@ pub(crate) fn layer_2d(
     values: &[f32],
 ) {
     checkpoint(name, Some(layer), step, &[rows, cols], values);
+}
+
+/// Emit a token-id record.
+///
+/// The oracle writes `prompt_ids` and `generated_ids` under exactly these
+/// names, so recording them from the incremental decode path lets the compare
+/// script check that path against the re-prefill one without re-running the
+/// oracle.
+pub(crate) fn tokens(name: &str, values: &[u32]) {
+    #[cfg(feature = "parity-trace")]
+    {
+        let _ = crate::parity_trace::token_ids(name, values);
+    }
+    #[cfg(not(feature = "parity-trace"))]
+    let _ = (name, values);
 }

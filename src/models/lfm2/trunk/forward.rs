@@ -467,6 +467,13 @@ pub fn run_inference_stream(
         generated_tokens.len(),
         infer_ms
     );
+    // Record the token streams so this incremental path can be compared
+    // against the re-prefill path (and against the oracle, which uses the same
+    // record names). No-op unless the parity-trace feature is on. `all_tokens`
+    // has grown past the prompt by now, so slice back to `n_prompt` to match
+    // the oracle's prompt-only record.
+    trace::tokens("prompt_ids", &all_tokens[..n_prompt]);
+    trace::tokens("generated_ids", &generated_tokens);
     Ok(())
 }
 
@@ -820,6 +827,24 @@ fn forward_attention_chunked(
     // Attention compute (single-token decode path).
     let group_size = n_head / n_head_kv;
     let kq_scale = 1.0f32 / (n_embd_head_k as f32).sqrt();
+    // Staging for the two `[n_head, n_cached]` trace records. Only allocated
+    // when the checkpoint is actually wanted, and each head writes its own
+    // row, so the parallel loop below stays race-free. The Vec is kept alive
+    // here and shared with the closure as a raw pointer, matching how the rest
+    // of this function hands scratch across the thread pool.
+    let n_cached = pos + 1;
+    let mut trace_stage =
+        trace::trace_enabled("attn_scores").then(|| vec![0.0f32; n_head * n_cached]);
+    let mut probs_stage =
+        trace::trace_enabled("attn_probs").then(|| vec![0.0f32; n_head * n_cached]);
+    let trace_stage_ptr = trace_stage
+        .as_mut()
+        .map(|buffer| buffer.as_mut_ptr())
+        .unwrap_or(std::ptr::null_mut());
+    let probs_stage_ptr = probs_stage
+        .as_mut()
+        .map(|buffer| buffer.as_mut_ptr())
+        .unwrap_or(std::ptr::null_mut());
 
     match kv_cache {
         KvCache::F16(_) => {
@@ -895,7 +920,6 @@ fn forward_attention_chunked(
             let v_cache = unsafe {
                 std::slice::from_raw_parts(v_cache_f32_ptr, n_layer * max_ctx * n_embd_gqa)
             };
-            let n_cached = pos + 1;
             let n_padded = (n_cached + 255) / 256 * 256;
             let score_stride = scratch.score_stride;
             let scores_ptr = scratch.scores.as_mut_ptr();
@@ -931,23 +955,27 @@ fn forward_attention_chunked(
                         for v in &mut scores[n_cached..n_padded] {
                             *v = f32::NEG_INFINITY;
                         }
-                        trace::layer_2d(
-                            "attn_scores",
-                            layer,
-                            pos,
-                            n_head,
-                            n_cached,
-                            &scores[..n_cached],
-                        );
+                        // The oracle records one `[n_head, n_cached]` matrix, so
+                        // each head copies into its own disjoint slice of the
+                        // staging buffer. Emitting the per-head slice directly
+                        // would declare `n_head * n_cached` values and hand over
+                        // `n_cached`, which the trace refuses to write (it
+                        // reports the mismatch and drops the record).
+                        if !trace_stage_ptr.is_null() {
+                            let row = h * n_cached;
+                            unsafe {
+                                std::slice::from_raw_parts_mut(trace_stage_ptr.add(row), n_cached)
+                            }
+                            .copy_from_slice(&scores[..n_cached]);
+                        }
                         softmax_inplace(&mut scores[..n_padded]);
-                        trace::layer_2d(
-                            "attn_probs",
-                            layer,
-                            pos,
-                            n_head,
-                            n_cached,
-                            &scores[..n_cached],
-                        );
+                        if !probs_stage_ptr.is_null() {
+                            let row = h * n_cached;
+                            unsafe {
+                                std::slice::from_raw_parts_mut(probs_stage_ptr.add(row), n_cached)
+                            }
+                            .copy_from_slice(&scores[..n_cached]);
+                        }
                         // `values` was hard-coded to `[0.0f32; 512]` historically,
                         // which silently truncated attention once the cache
                         // exceeded 512 tokens. Allocating based on `max_ctx`
@@ -969,6 +997,12 @@ fn forward_attention_chunked(
 
     // Output projection.
     let attn_out = unsafe { std::slice::from_raw_parts(attn_out_ptr, n_embd_q) };
+    if let Some(stage) = trace_stage {
+        trace::layer_2d("attn_scores", layer, pos, n_head, n_cached, &stage);
+    }
+    if let Some(stage) = probs_stage {
+        trace::layer_2d("attn_probs", layer, pos, n_head, n_cached, &stage);
+    }
     trace::layer_2d("attn_values", layer, pos, n_embd_head_v, n_head, attn_out);
     quantize_q8_0_into(
         attn_out,
