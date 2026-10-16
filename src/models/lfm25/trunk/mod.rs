@@ -1,16 +1,14 @@
-//! LFM2.5 transformer trunk
+//! LFM2.5 trunk — aliases onto the `lfm2` trunk.
 //!
-//! Per [`MODEL_ORGANIZATION.md`](../../../../docs/MODEL_ORGANIZATION.md) §2.
-//! LFM2.5 has no `Model` struct (weights and config are passed around
-//! independently), so `trunk/` exposes the config / weights / forward /
-//! session helpers directly.
+//! See [`crate::models::lfm25`] for why these are aliases rather than a second
+//! implementation. Nothing here computes anything; the types and functions are
+//! the `lfm2` ones under their historical `Lfm25*` names, so existing call
+//! sites (JEV single/grouped scorers included) keep working while there is only
+//! ever one forward pass to reason about.
 
-pub mod config;
-pub mod forward;
-pub mod session;
-pub mod weights;
-
-pub use config::Lfm25Config;
-pub use forward::{run_forward_logits_lfm25_with_batch, run_inference};
-pub use session::Lfm25Session;
-pub use weights::{get_f32_tensor, load_layers, Lfm25LayerWeights};
+pub use crate::models::lfm2::trunk::{
+    config::Lfm2Config as Lfm25Config, forward::run_forward_logits_lfm2_with_batch
+        as run_forward_logits_lfm25_with_batch, forward::run_inference as run_inference,
+    session::Lfm2Session as Lfm25Session, weights::get_f32_tensor,
+    weights::load_layers, weights::Lfm2LayerWeights as Lfm25LayerWeights,
+};

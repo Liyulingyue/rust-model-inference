@@ -51,23 +51,22 @@ NEON on aarch64; no AVX-512).
       证据：12 步 9 912 个 checkpoint 全部逐位一致，见
       [`tools/oracle/lfm2moe/README.md`](../../tools/oracle/lfm2moe/README.md)。
       守卫：`tests/lfm2moe_reference.rs`（真实权重 + 逐位 oracle）。
-- [ ] **`lfm2` / `lfm25` 的 trunk 选择靠 `general.basename` 判断——判据不成立** —
-      `src/app/text/generation.rs` 用 `source.metadata("general.basename").contains("2.5")` 决定走哪个 trunk。
-      这是**来源/命名字段**而非架构字段：Liquid 的 QAD 量化管线写它，
+- [x] **`lfm2` / `lfm25` 的 trunk 选择靠 `general.basename` 判断——已删除** —
+      原实现：`src/app/text/generation.rs` 用 `source.metadata("general.basename").contains("2.5")`
+      决定走哪个 trunk。这是**来源/命名字段**而非架构字段：Liquid 的 QAD 量化管线写它，
       llama.cpp 的 `convert_hf_to_gguf.py` 不写。实测 15 个稠密 GGUF：只有 QAD 档带这个 key，
-      其余的 Q4_K_M / Q5_K_M / Q6_K / Q8_0 / F16 / BF16 全部走 lfm2 trunk。
+      其余八个档全部静默走 lfm2 trunk。
       llama.cpp 根本没有这个选择：`llama-arch.cpp` 只定义 `LLM_ARCH_LFM2` 与
       `LLM_ARCH_LFM2MOE`，所有稠密生成都走唯一的 `src/models/lfm2.cpp`，**无 2.5 分支**。
-      **当前不会算错**：`dense_trunks_produce_identical_logits` 实测两个 trunk 在同一 GGUF 上
-      输入同一批 token ids 后 logits 逐位相同（65536 项零差异）。两份 trunk 的
-      `config.rs` 只差一个 struct 名。
-      **但这是碎弱性而非正确性**：同一个模型的计算路径取决于谁做的量化，
-      一旦任何一侧发生漂移就会静默切换数学实现。
-      **建议改法**：删掉 `src/models/lfm25/` 这份重复实现，统一走 `lfm2`（与 llama.cpp 一致）；
-      若因历史原因保留两份，则至少把判据换成真正的架构信号（如 `n_rot`、
-      `block_count`、头数布局），并加测试锁定两个 trunk 的 logits 逐位一致。
-      注意它们的**内置 chat 模板**也不同（CLI 分别打印 `N tokens` 与 `N items`），
-      但只是打印措辞差异，实际 token 数一致。
+      **当时不会算错**：`dense_trunks_produce_identical_logits` 实测两个 trunk 在同一 GGUF 上
+      输入同一批 token ids 后 logits 逐位相同（65536 项零差异），两份 `config.rs`
+      只差一个 struct 名。但这恰好是“第二份 transformer forward 在任何一侧被修改时静默漂移”
+      的典型场景，而路由之间只有一个可选元数据键在撑着。
+      **已修（同一 commit）**：`src/models/lfm25/` 改为 lfm2 trunk 的**别名层**，1.5k 行重复实现删除；
+      `generation.rs` 不再读 `general.basename`。JEV single/grouped 两套 scorer 保持可用（走别名）。
+      已核对两个 `run_inference` 原来都调用 `build_lfm2_chat_prompt_with_thinking`，非 ChatML 的
+      `build_lfm25_chat_prompt_with_thinking`。后者实为**不同**而非重复，且被 `tests/jinja_chat_template_ab.rs`
+      锁定（记录它与 GGUF 自带 Jinja 模板的已知分歧），保留。
 - [x] **把同款 oracle 对齐扩展到 lfm2 / lfm25 稠密档** — ✅ **已完成**（2026-10-16）。
       15 个稠密 LFM2 GGUF 全部与固定 oracle（llama.cpp `749f688`，`-n 24 --temp 0 -c 512`，
       `RMI_SCALAR=1`）的 greedy token ids **逐个一致**：
