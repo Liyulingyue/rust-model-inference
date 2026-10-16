@@ -6899,7 +6899,7 @@ mod tests {
         }
         const ROWS: usize = 3;
         const OUTPUTS: usize = 5;
-        let context = Box::leak(Box::new(VulkanContext::new().unwrap()));
+        let context = Box::leak(Box::new(crate::vulkan::VulkanContext::new().unwrap()));
         check_qwen3_core_contract(context).unwrap();
         for width in [32, 128, 256] {
             let weight: Vec<u8> = (0..width * OUTPUTS)
@@ -6942,6 +6942,48 @@ mod tests {
                     expected.to_bits(),
                     "F16 width={width} at {index}"
                 );
+            }
+        }
+    }
+
+    /// TEMPORARY kernel-development benchmark; not for commit.
+    #[test]
+    #[ignore = "benchmark; requires a Vulkan device"]
+    fn bench_quant_matmul_rows_scaling() {
+        use super::{BatchedLinearRuntime, GpuWeightFormat};
+        let context = Box::leak(Box::new(crate::vulkan::VulkanContext::new().unwrap()));
+        // LFM2.5 expert shape and Qwen3-8B-ish shapes.
+        const N_IN: usize = 2048;
+        const N_OUT: usize = 1792;
+        let n = N_IN * N_OUT;
+        let cases: [(&str, GpuWeightFormat, usize); 2] = [
+            ("Q8_0", GpuWeightFormat::Q8_0, n / 32 * 34),
+            ("Q4_K", GpuWeightFormat::Q4_K, n / 256 * 144),
+        ];
+        println!("{:<6} {:>5} {:>9} {:>12} {:>13} {:>11}",
+                 "fmt", "rows", "weight_MB", "ms/call", "eff_GB/s", "GFLOP/s");
+        for (name, format, bytes) in cases {
+            let weight: Vec<u8> = (0..bytes).map(|i| ((i * 131 + 7) % 251) as u8).collect();
+            for rows in [1usize, 8, 64, 256] {
+                let iters = if rows >= 256 { 20 } else { 200 };
+                let input: Vec<f32> =
+                    (0..rows * N_IN).map(|i| ((i % 29) as f32 - 14.0) * 0.031).collect();
+                let mut out = vec![0f32; rows * N_OUT];
+                let mut rt = BatchedLinearRuntime::new(context, rows, N_IN, N_OUT, 2).unwrap();
+                rt.matmul_rows(&weight, format, &input, rows, N_IN, N_OUT, &mut out)
+                    .unwrap();
+                let t = std::time::Instant::now();
+                for _ in 0..iters {
+                    rt.matmul_rows(&weight, format, &input, rows, N_IN, N_OUT, &mut out)
+                        .unwrap();
+                }
+                let el = t.elapsed().as_secs_f64();
+                let flops = 2.0 * rows as f64 * N_IN as f64 * N_OUT as f64;
+                println!("{:<6} {:>5} {:>9.2} {:>12.4} {:>13.2} {:>11.2}",
+                         name, rows, bytes as f64 / 1e6,
+                         el * 1000.0 / iters as f64,
+                         (bytes * iters) as f64 / el / 1e9,
+                         flops * iters as f64 / el / 1e9);
             }
         }
     }
@@ -8047,7 +8089,7 @@ mod tests {
     #[ignore = "requires a Vulkan device"]
     fn batched_linear_device_owned_buffers_wait_before_cleanup() {
         use super::{Ordering, VulkanContext};
-        let context = Box::leak(Box::new(VulkanContext::new().unwrap()));
+        let context = Box::leak(Box::new(crate::vulkan::VulkanContext::new().unwrap()));
         let mut owner = super::super::qwen3::UploadedBuffers::new(context);
         let buffer = owner.upload(&[1, 2, 3, 4]).unwrap();
         context.mutex.lock().unwrap().uncertain = true;
@@ -8768,7 +8810,7 @@ mod tests {
     #[ignore = "requires a Vulkan device"]
     fn batched_linear_device_mode_change_preserves_cache_and_host_output() {
         use super::*;
-        let context = Box::leak(Box::new(VulkanContext::new().unwrap()));
+        let context = Box::leak(Box::new(crate::vulkan::VulkanContext::new().unwrap()));
         let weight: Vec<u8> = (0..32)
             .flat_map(|_| crate::ops::f32_to_f16(0.25).to_le_bytes())
             .collect();

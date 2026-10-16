@@ -21,9 +21,11 @@ void main() {
     uint row = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 64u + gl_LocalInvocationID.x;
     uint rows = slot == 0u ? pc.rows0 : (slot == 1u ? pc.rows1 : pc.rows2);
     bool valid_row = slot < pc.group_count && row < rows;
-    // Small projections are cache-friendly on UMA; amortize staging barriers
-    // only for genuinely wide activation rows.
-    bool shared_input = pc.n_in >= 4096u;
+    // Stage each block's activations once for the whole workgroup. The previous
+    // gate (`n_in >= 4096`) skipped this for narrower projections, where every
+    // one of the 64 threads then re-read the same 256 activation bytes out of
+    // the arena: measured 0.89 GB/s at rows=1 for this shader.
+    bool shared_input = true;
     precise float sums[8] = float[8](0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
     precise float block_total = 0.0;
     precise float minimum_sums[4] = float[4](0.0, 0.0, 0.0, 0.0);
@@ -41,13 +43,24 @@ void main() {
             precise float q8_scale = uintBitsToFloat(arena.data[pc.scales_word + token_row * pc.scales_stride + block]);
             int partial[8] = int[8](0, 0, 0, 0, 0, 0, 0, 0);
             int minimum_partial[4] = int[4](0, 0, 0, 0);
+            // group = local >> 5, so the eight scales and four minimums are
+            // constant across each run of 32 elements. Decoding them once per
+            // group instead of once per element drops three weight_byte()
+            // extractions (each a shift/mask on a uint) from 256 iterations
+            // per block to 8. Arithmetic order is unchanged.
+            int group_scale[8];
+            int group_minimum[8];
+            for (uint group = 0u; group < 8u; ++group) {
+                group_scale[group] = int(scale(slot, offset, group));
+                group_minimum[group] = int(minimum(slot, offset, group));
+            }
             for (uint local = 0u; local < 256u; ++local) {
                 uint group = local >> 5u;
                 uint packed = weight_byte(slot, offset + 16u + (group >> 1u) * 32u + (local & 31u));
                 int value = int((group & 1u) == 0u ? packed & 15u : packed >> 4u);
                 int activation = shared_input ? input_q8[local] : q8(block * 256u + local);
-                partial[(local & 31u) >> 2u] += int(scale(slot, offset, group)) * activation * value;
-                minimum_partial[group >> 1u] += int(minimum(slot, offset, group)) * activation;
+                partial[(local & 31u) >> 2u] += group_scale[group] * activation * value;
+                minimum_partial[group >> 1u] += group_minimum[group] * activation;
             }
             precise float factor = q8_scale * q4_scale;
             if (pc.input_sum_word == 1u) {
