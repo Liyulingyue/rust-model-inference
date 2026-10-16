@@ -6,6 +6,7 @@ shader_names=(
     q8_matmul
     q8_matmul_dp4a
     q8_matmul_grouped_dp4a
+    q8_matmul_cooperative_dp4a
     quantize_q8_0
     quantize_q8_k
     q8_matmul_grouped
@@ -33,6 +34,7 @@ shader_names=(
     add
     adaln_modulate
     q8_matmul_tiled_dp4a
+    q8_matmul_tiled_dp4a_wide
     f16_matmul_tiled
     attention_scores_tiled
 )
@@ -79,6 +81,7 @@ hash_files() {
     for name in "${shader_names[@]}"; do
         files+=("shaders/glsl/$name.comp" "shaders/bin/$name.spv")
     done
+    files+=(shaders/glsl/*.glsl)
     if command -v sha256sum >/dev/null 2>&1; then
         sha256sum "${files[@]}"
     else

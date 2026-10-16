@@ -934,6 +934,27 @@ fn qwen35_vulkan_dense_chunks_preserve_four_mrope_axes() {
 
 #[cfg(feature = "vulkan")]
 #[test]
+fn qwen35_forced_vulkan_failure_preserves_state_without_cpu_retry() {
+    let _cpu = ComputePool::disable_gpu_matmul_for_scope();
+    let mut session = mixed_fixture_session(8, 5);
+    session.step_with_tokens(&[1], &[[0; 4]]).unwrap();
+    let before = snapshot_qwen35_recurrent_state(&session);
+    session.force_vulkan_policy_for_test();
+    session.fail_gpu_once_for_test("forced Vulkan failure");
+    session.fail_cpu_chunk_after_row_for_test(0);
+    let input = [[1, 2, 3, 4], [5, 6, 7, 8]];
+    let error = session.step_with_tokens(&[2, 3], &input).unwrap_err();
+    assert_eq!(error, "forced Vulkan failure");
+    assert_eq!(snapshot_qwen35_recurrent_state(&session), before);
+    assert!(session
+        .step_with_tokens(&[2, 3], &input)
+        .unwrap_err()
+        .contains("unavailable"));
+    assert_eq!(snapshot_qwen35_recurrent_state(&session), before);
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
 fn qwen35_gpu_and_cpu_chunk_failure_preserves_committed_state_and_both_errors() {
     let _cpu = ComputePool::disable_gpu_matmul_for_scope();
     let mut session = mixed_fixture_session(8, 5);

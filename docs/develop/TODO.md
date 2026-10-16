@@ -2164,3 +2164,136 @@ if info.dims.len() != 2 || info.dims[0] != h as u64 || info.dims[1] < n_tokens a
 
 dims 数量、宽度、以及**行数是否覆盖 `n_tokens`** 三者都查了 —— 这正是
 「不查就会静默越界」的地方。
+
+### TODO-031: Qwen3 resident Vulkan decode 在 GB10 上打不过 CPU，且默认根本不启用
+
+排查「Qwen3 为什么没有 GPU 加速」时挖出三层问题，从表面到根因。
+
+#### 1. 默认配置下 `--gpu` 是静默空操作（已修，a66705f）
+
+Qwen3 唯一的 GPU 路径是常驻 Vulkan 解码器 `Qwen3VulkanSession`
+（`src/vulkan/qwen3.rs`），它**要求 F16 KV**。而 CLI 默认是 F32
+（`src/app/text/runtime.rs:50` 的 `defaults::KV_FORMAT = KvFormat::F32`），
+于是 `src/models/qwen3/trunk/session.rs` 里 `compute_policy.context()` 那段
+直接落到 `None` 分支，**不报错、不提示**，全程 CPU 跑完，日志里还照样打印
+`[GPU] Vulkan device: NVIDIA GB10`。
+
+```rust
+} else if compute_policy == ComputePolicy::Vulkan {
+    return Err("Qwen3 Vulkan currently requires F16 KV".into());
+} else {
+    None          // Auto + F32：请求被静默丢弃
+}
+```
+
+`a66705f` 改成明确提示并给出正确 flag。**在此之前，本文件之前所有关于
+「Qwen3 GPU 加速」的结论都是无效的** —— 那些数字测的是 CPU。
+
+#### 2. 即使显式 `--kv-cache f16`，GPU 也赢不了
+
+在 GB10（NVIDIA GB10，int8 dot product: supported）上实测，
+同一台机器、同一 prompt（220 词）、`--threads 8`、等待 load<3、
+多次重复取中位数：
+
+| 模型 | 大小 | 生成 ratio (GPU/CPU) | 端到端 ratio | wall CPU | wall GPU |
+|---|---|---|---|---|---|
+| Qwen3-0.6B-Q8_0 | 0.6G | 0.46x | 0.34x | 2.8s | 8.7s |
+| Qwen3-0.6B-Q4_K_M | 0.4G | 0.11x | 0.11x | 3.9s | 33.8s |
+| Qwen3-0.6B-BF16 | 1.1G | 0.38x | 0.43x | 5.9s | 15.7s |
+| Qwen3-4B-Q4_K_M | 2.3G | 1.08x | 0.14x | 15.7s | 113.4s |
+| Qwen3-4B-Q8_0 | 4.0G | **1.08x** | 0.56x | 16.8s | 31.2s |
+| Qwen3-8B-Q4_K_M | 4.7G | 0.19x | 0.11x | 35.1s | 398.5s |
+| Qwen3-8B-Q8_0 | 8.1G | **1.02x** | 0.54x | 49.0s | 100.1s |
+| Qwen3-14B-Q4_K_M | 8.4G | 0.97x | 0.56x | 72.7s | 138.0s |
+
+两个独立的结论：
+
+- **生成（steady state）在 4B 以上才勉强追平**，逐次 ratio 紧密聚在 1.0 附近
+  （4B Q8_0: 1.28 / 1.00 / 0.98；8B Q8_0: 1.00 / 1.02 / 0.94），
+  **不是加速，是持平**。
+- **端到端在所有尺寸上都是输的**（0.11x ~ 0.59x）。因为常驻解码器要先
+  付一次性启动成本：~0.4s 的 pipeline JIT + 把整个权重上传进显存。
+
+启动成本拆解（Qwen3-0.6B-Q8_0，`RMI_SETUP_TRACE`）：
+
+```
+Qwen3Ops::new (pipeline/descriptor)  211.0 ms
+权重上传+bind  633.5 MB               169.0 ms
+core_contract 校验                     31.5 ms   ← 已是 OnceLock memoize
+q8_0_activation_contract 校验           6.4 ms   ← 同上
+```
+
+契约校验那两项**已经**是 `OnceLock::get_or_init`，只跑一次，没有优化空间；
+pipeline JIT 和权重上传是一次性 CLI 进程无法摊销的成本。
+
+#### 3. 根因：dense GEMM 在 M 很小时被饿死
+
+用 `RUST_GPU_SUBMIT_TRACE` 测 Qwen3-8B-Q8_0 的 prefill：
+一次 prefill 只产生 ~36 次 submission（**分块是合理的**，不是提交过碎），
+但每次 `wait` 平均 **188 ms**，而驱动调用 `submit` 只有 35 µs。
+即整条链路的开销不在提交，而在 GPU 执行本身。
+
+折算下来整趟 forward 对 8GB 权重只跑到约 **1.2 GB/s 有效带宽**；
+而同一块卡上 LM head 那一类（`rows=1`, `n_out` 很大）能跑到 22 GB/s。
+差别在于 **M（行数）**：prefill M≈60、decode M=1，对 GPU 来说都太小，
+填不满 SMs，既算不出强度也吃不到带宽。
+
+对比同机 CPU：8B prefill 11.3 t/s vs GPU 5.7 t/s —— **CPU 快一倍**。
+这台机器的 CPU（含 AVX2/FMA 路径）在这个工作负载上就是比这条 Vulkan
+dense 路径强。
+
+#### 为什么先不写「按模型大小决定是否上 GPU」的阈值
+
+本来想用上面的表定一个尺寸阈值，但数据不支持：**4B 以上生成只是持平，
+没有出现真正的交叉点**，而且持平的区间里 e2e 依然全输。也就是说
+「小模型不上 GPU」这个结论虽然成立，但真正的问题是
+**常驻 dense 路径本身在这个硬件上就没赢过**，加阈值只能掩盖症状。
+
+要真正修好，得动 dense GEMM kernel 本身（M 小的时候的 tiling / split-K），
+那是重写 shader 的量级，不适合在没有回归基线的情况下顺手做。
+
+#### 附带记录
+
+- **Q4_K_M 在 GPU 上尤其糟**（8B: 0.19x，wall 398s）。
+  `GpuMatmulMode::Dot`（GEMV/split-K 路径）只对 F16/BF16 存在，
+  Q4_K 只能走 `Prepared` -> `Q4_K_MATMUL`，没有 rows=1 专用 kernel。
+  这和 `7750eeb` 里 LFM2.5 MoE 的结论是同一件事的两个入口。
+- **8B-Q8_0 的 GPU 运行峰值 RSS 约 18.7 GB**，超过 15 GiB 预算；
+  一次性 CLI 同时持有 mmap 权重和显存副本是原因之一。
+
+### TODO-032: Q4_K/Q5_K/Q6_K 在 GPU 上没有 DP4A kernel，8B Q4_K_M 比 CPU 慢 17.6 倍
+
+接着 TODO-031 往下挖，发现 Q4_K 家族在 dense Vulkan 路径上缺少向量化 kernel，
+这是 Q4_K_M 特别慢的**结构性**原因。
+
+在 `src/vulkan/ops.rs` 的 operator 表里：
+
+- **Q8_0** 有两个 kernel：
+  - `Q8_MATMUL_GROUPED`，其 index 会被 `Q8_MATMUL_GROUPED_DP4A` 顶替
+    （`force_dp4a && context.supports_integer_dot_product()`，约 1423 行）；
+  - 外加 `Q8_MATMUL_TILED_DP4A`（`rows > 1` 时 `record_weight_matmul_rows`
+    自动切到 `record_weight_matmul_tiled_rows`，约 1960 行）。
+  两者都吃设备 int8 dot-product，8B Q8_0 生成能持平 CPU。
+
+- **Q4_K / Q5_K / Q6_K** 只有**一个**标量 kernel（`q4_k_matmul.comp` 等，
+  表项见约 392 行），既没有 dp4a 变体，也没有 tiled 变体。
+  8B Q4_K_M 实测 prefill 0.4 t/s、生成 1.3 t/s，wall 45.8s，
+  同机 CPU 2.6s —— **慢 17.6 倍**，是所有测过的组合里最差的。
+
+`q4_k_matmul.comp` 主循环（每 block）：
+
+```glsl
+int value = int((group & 1u) == 0u ? packed & 15u : packed >> 4u);  // 解 4-bit nibble
+int activation = q8(block * 256u + local);
+partial[(local & 31u) >> 2u] += int(scale(slot, offset, group)) * activation * value;
+```
+
+单块累加值量级 = `scale(≤63) * activation(≤127) * value(≤15)`，
+再在 8 个 lane 上求和，落到 int32。这种**块缩放的 int32 乘加不能直接套
+Q8_0 的 dp4a 路径**（Q8_0 的量化把乘积压在 int8 内）。所以 Q4_K 想吃
+DP4A，得写一个自己的「块缩放 + int32 提升」的 int8 dot kernel，或者
+把激活缩放到能进 int8 的范围 —— 这是一个完整的 shader 项目，不适合随手做。
+
+结论与 TODO-031 合并看：**GPU dense 路径目前只有 Q8_0 勉强可用（持平 CPU），
+Q4_K 家族完全不能用（慢 17.6 倍）。** 在补出 Q4_K 的向量化 kernel 之前，
+Q4_K 模型应该明确走 CPU，而不是靠一条经验阈值去猜。

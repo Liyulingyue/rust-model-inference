@@ -334,6 +334,19 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
             "--no-thinking" => options.thinking = false,
             "--profile" => options.profile = true,
             "--gpu" => options.gpu = true,
+            "--compute" => {
+                if options.compute.is_some() {
+                    return Err("--compute may be specified only once".into());
+                }
+                options.compute = Some(
+                    match required_string_value(args, &mut i, "--compute")?.as_str() {
+                        "cpu" => crate::compute::ComputePolicy::Cpu,
+                        "auto" => crate::compute::ComputePolicy::Auto,
+                        "vulkan" => crate::compute::ComputePolicy::Vulkan,
+                        _ => return Err("--compute expects cpu, auto or vulkan".into()),
+                    },
+                );
+            }
             "--kv-cache" => {
                 if i + 1 < args.len() {
                     options.kv_format = match args[i + 1].as_str() {
@@ -631,6 +644,9 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
             }
         }
         i += 1;
+    }
+    if options.gpu && options.compute.is_some() {
+        return Err("--gpu and --compute cannot be combined".into());
     }
     Ok(options)
 }
