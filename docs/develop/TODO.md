@@ -207,6 +207,21 @@ NEON on aarch64; no AVX-512).
       **复现**：用只带 `GGML_NATIVE=OFF` 的标志配置构建一份 oracle，与全标量那份对同一模型跑同一 prompt，
       再用 `tools/oracle/lfm2moe/check_scalar.py` 对比两份 manifest。
 
+- [ ] **AVX2 kernel 与 ggml 参考实现不逐位一致（已定位到入口，未定位到具体 kernel）** —
+      测量：15 个稠密 LFM2 GGUF，Rust 不设 `RMI_SCALAR`（走 AVX2）vs 标量 oracle，**12/15 greedy 一致**；
+      `RMI_SCALAR=1` 下是 **15/15**。失配三个的 top-2 间距为 **6.6e-3 ~ 9.6e-3 相对**（比 f32 epsilon 高三四个量级），
+      属真实算术差异而非近平局；其中 `LFM2.5-2.6B-Q4_K_M` **第 0 个生成 token 就分歧**。
+      **入口已确认**：逐层 trace 显示 `LFM2.5-2.6B-Q4_K_M` step 0 下，`RMI_SCALAR=1` 时
+      **396 个 checkpoint 全部零失配**，AVX2 时第一个失配就是 `conv_in_proj`（layer 0，Q4_K × Q8_K 矩阵乘，
+      max|delta| 2.5e-07），之后沿层级放大。`attn_norm` 仍然匹配，说明 RMS norm 未受影响。
+      **性质**：2.5e-07 是求和顺序不同的 ULP 级差异，不是算法不同。
+      **注意**：仓库自带的 `ops::quant::avx2_parity` 单元测试（q4k/q6k AVX2 vs scalar）**全部通过**，
+      但那些只用合成的小 block，覆盖不了真实多行 / 真实权重的累加顺序。
+      **未办**：尚未定位到具体 kernel。下一步是用真实 GGUF 权重构一个
+      针对 `conv_in_proj` 矩阵乘的 scalar/AVX2 对照测试（而不是合成 block），该测试应能直接拍住求和顺序。
+      **影响范围**：当前所有逐位结论都只在标量下成立。真实用户在有 AVX2 的机器上跑的是
+      这条路径，**与 oracle 存在 ULP 级差异**，并会在近平局处翻转为 token 级分歧。
+
 ### JEV 决策评分 follow-ups
 
 `--jev` 已在 `src/app/jev/single.rs::run_jev_decision` 中按 `general.architecture`
