@@ -86,7 +86,7 @@ pub fn quantize_row_q8_k_into(x: &[f32], buf: &mut [BlockQ8K]) {
 }
 
 fn quantize_row_q8_k_scalar(x: &[f32]) -> Vec<BlockQ8K> {
-    let nb = x.len() / QK_K;
+    let nb = x.len().div_ceil(QK_K);
     let mut result = vec![
         BlockQ8K {
             d: 0.0,
@@ -161,19 +161,33 @@ fn quantize_row_q8_k_scalar_into(x: &[f32], buf: &mut [BlockQ8K]) {
         // zero — otherwise the stale values get quantized into `qs` and
         // corrupt the round-trip.
         padded[len..].fill(0.0);
-        // Unsigned scale (d = amax/127). The legacy signed form
-        // (`-127/max_val`) is mathematically equivalent whenever amax is
-        // the true max-|x|, which is what the fold below computes.
-        let amax = padded[..len]
-            .iter()
-            .fold(0.0f32, |acc, &v| acc.max(v.abs()));
-        let block = &mut buf[i];
-        block.d = amax / 127.0;
-        let inv_d = if block.d > 0.0 { 1.0 / block.d } else { 0.0 };
-        for j in 0..QK_K {
-            let q = (padded[j] * inv_d).round();
-            block.qs[j] = q.clamp(-127.0, 127.0) as i8;
+        // ggml's `quantize_row_q8_K_ref` keeps the *signed* element with the
+        // largest magnitude and scales by the negative reciprocal of it, so a
+        // negative-dominant block comes out sign-flipped. A symmetric
+        // `amax / 127` quantizer produces the same magnitudes but the opposite
+        // signs, which shifts every Q6_K dot product.
+        let mut amax = 0.0f32;
+        let mut max = 0.0f32;
+        for &value in &padded[..len] {
+            let ax = value.abs();
+            if ax > amax {
+                amax = ax;
+                max = value;
+            }
         }
+        let block = &mut buf[i];
+        if amax == 0.0 {
+            block.d = 0.0;
+            block.qs = [0; QK_K];
+            block.bsums.fill(0);
+            continue;
+        }
+        let iscale = -127.0f32 / max;
+        for j in 0..QK_K {
+            let v = nearest_int(iscale * padded[j]);
+            block.qs[j] = v.min(127) as i8;
+        }
+        block.d = 1.0f32 / iscale;
         block.bsums.fill(0);
         for j in (0..QK_K).step_by(16) {
             let mut acc = 0i32;
@@ -3509,7 +3523,11 @@ mod q8k_padding_tests {
             for (i, &rt) in round_tripped.iter().enumerate() {
                 let original = input[start + i];
                 let err = (rt - original).abs();
-                let bound = buf[block_idx].d / 2.0 + 1e-6;
+                // ggml's `quantize_row_q8_K_ref` scales by the *signed*
+                // element of largest magnitude, so `d` is negative whenever the
+                // block's extreme value is negative and the quantised codes
+                // flip sign with it. The step size is `|d| / 2`, not `d / 2`.
+                let bound = buf[block_idx].d.abs() / 2.0 + 1e-6;
                 assert!(
                     err <= bound,
                     "block {block_idx} byte {i}: err {err} > bound {bound}"
@@ -3550,6 +3568,153 @@ mod q8k_padding_tests {
                 buf[nb - 1].qs[j],
                 nb - 2
             );
+        }
+    }
+
+    /// The scalar Q8_K quantiser must reproduce ggml's
+    /// `quantize_row_q8_K_ref` byte for byte: the block is scaled by
+    /// `-127 / (signed max|x|)` and the codes are clamped with `min(127, v)` —
+    /// *not* the symmetric `amax / 127` form. A K-quant matmul that disagrees
+    /// here is off by ~2 ULP everywhere, which is what the lfm2moe bit-parity
+    /// harness caught on the Q6_K LM head (see `tools/oracle/lfm2moe/README.md`).
+    #[test]
+    fn scalar_quantizer_matches_the_signed_ggml_contract() {
+        // ggml picks the *signed* element of largest magnitude as `max`, then
+        // `iscale = -127 / max` and `d = 1 / iscale = -max / 127`. So `d`
+        // carries the opposite sign of `max`, and the extreme element itself
+        // always maps to -127 (the clamp is `min(127, v)`, an upper bound only).
+        let mut input = vec![0.0f32; QK_K];
+        input[0] = -3.0;
+        input[1] = 1.0;
+        input[2] = -0.5;
+        let mut buf = vec![
+            BlockQ8K {
+                d: 0.0,
+                qs: [0; QK_K],
+                bsums: [0; 16]
+            };
+            1
+        ];
+        super::quantize_row_q8_k_scalar_into(&input, &mut buf);
+
+        assert!(
+            buf[0].d > 0.0,
+            "max|x| = -3.0 must give d > 0, got {}",
+            buf[0].d
+        );
+        assert_eq!(buf[0].qs[0], -127, "the extreme element maps to -127");
+        assert_eq!(buf[0].qs[1], 42, "+1.0 keeps the max's sign");
+        assert_eq!(buf[0].qs[2], -21, "-0.5 flips sign");
+        // bsums are the per-16 element code sums, same grouping as ggml.
+        let expected: i16 = buf[0].qs[0..16].iter().map(|&q| q as i16).sum();
+        assert_eq!(buf[0].bsums[0], expected);
+
+        // A positive-dominant block flips d the other way.
+        let mut positive = vec![0.0f32; QK_K];
+        positive[0] = 2.0;
+        positive[1] = -1.0;
+        super::quantize_row_q8_k_scalar_into(&positive, &mut buf);
+        assert!(
+            buf[0].d < 0.0,
+            "max|x| = +2.0 must give d < 0, got {}",
+            buf[0].d
+        );
+        assert_eq!(buf[0].qs[0], -127);
+        // iscale = -63.5 and x = -1.0 give exactly -1.0 * -63.5 = 63.5; ggml's
+        // `nearest_int` (the 12582912.0 magic-add trick) rounds halves to even,
+        // so this is 64, not 63. `f32::round` would have given 64 too, but
+        // `-63.5` in the other direction is where the two disagree, which is
+        // why the helper is shared with `quantize_row_q8_k_ggml_into`.
+        assert_eq!(buf[0].qs[1], 64);
+    }
+
+    /// The SIMD and scalar Q8_K quantisers encode the same ggml signed
+    /// contract (`iscale = -127 / max_signed`, ties-to-even, `d = 1/iscale`),
+    /// but they are two separate hand-written implementations. They have
+    /// already drifted once: the scalar path used a symmetric
+    /// `amax / 127` + `f32::round` form while the SIMD path was correct,
+    /// so every Q6_K dot on a non-AVX2 build was ~2 ULP off ggml. This test
+    /// is the guard that keeps them from diverging again.
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn avx2_quantizer_matches_scalar_bitwise() {
+        if !crate::ops::has_avx2_fma() {
+            return;
+        }
+        // Deterministic LCG so a failure is reproducible without a dependency.
+        let mut state: u64 = 0x243f_6a88_85a3_08d3;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 40) as f32 / 8_388_608.0 - 1.0
+        };
+
+        for case in 0..64 {
+            let nb = 1 + case;
+            let len = nb * QK_K;
+            let input: Vec<f32> = (0..len).map(|_| next()).collect();
+
+            let mut scalar = vec![
+                BlockQ8K {
+                    d: 0.0,
+                    qs: [0; QK_K],
+                    bsums: [0; 16]
+                };
+                nb
+            ];
+            super::quantize_row_q8_k_scalar_into(&input, &mut scalar);
+
+            let mut simd = vec![
+                BlockQ8K {
+                    d: 0.0,
+                    qs: [0; QK_K],
+                    bsums: [0; 16]
+                };
+                nb
+            ];
+            unsafe { super::quantize_row_q8_k_avx2_into(&input, &mut simd) };
+
+            for (index, (lhs, rhs)) in scalar.iter().zip(simd.iter()).enumerate() {
+                assert_eq!(
+                    lhs.d.to_bits(),
+                    rhs.d.to_bits(),
+                    "case {case} block {index}: d differs (scalar {} vs simd {})",
+                    lhs.d,
+                    rhs.d
+                );
+                assert_eq!(lhs.qs, rhs.qs, "case {case} block {index}: qs differ");
+                assert_eq!(
+                    lhs.bsums, rhs.bsums,
+                    "case {case} block {index}: bsums differ"
+                );
+            }
+        }
+    }
+
+    /// `quantize_row_q8_k` is the public allocating entry point, but it sized
+    /// its buffer with a truncating `len / QK_K` while the writer it delegates
+    /// to needs `len.div_ceil(QK_K)`. Any non-256-multiple length (GLM-4's
+    /// n_ff = 13696 is the canonical case) therefore panicked with "buf too
+    /// small" instead of zero-padding the tail the way `_into` does.
+    #[test]
+    fn allocating_entry_point_handles_partial_tail() {
+        for len in [QK_K - 1, 128, 13_696] {
+            let input: Vec<f32> = (0..len).map(|i| (i as f32 * 0.01).sin()).collect();
+            let blocks = super::quantize_row_q8_k(&input);
+            assert_eq!(
+                blocks.len(),
+                len.div_ceil(QK_K),
+                "len = {len} should produce one block per 256-element group"
+            );
+            let tail = len % QK_K;
+            if tail != 0 {
+                let last = blocks.last().unwrap();
+                assert!(
+                    last.qs[tail..].iter().all(|&q| q == 0),
+                    "len = {len}: the {tail}-wide padded tail must quantize to zero"
+                );
+            }
         }
     }
 
