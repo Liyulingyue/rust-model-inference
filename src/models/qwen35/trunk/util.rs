@@ -41,7 +41,11 @@ pub(crate) fn l2_norm(x: &mut [f32], eps: f32) {
     for &v in x.iter() {
         sum += f64::from(v * v);
     }
-    let scale = 1.0f32 / (sum as f32).sqrt().max(eps);
+    // The oracle's build_gdn_l2_norm is ggml_scale(ggml_rms_norm(x, eps/n), 1/sqrt(n)),
+    // which reduces to x / sqrt(||x||^2 + eps): eps goes *inside* the square root.
+    // Clamping the denominator from below (max) instead differs whenever the head
+    // vector is near zero, which is exactly where these norms are least stable.
+    let scale = 1.0f32 / ((sum as f32) + eps).sqrt();
     for v in x.iter_mut() {
         *v *= scale;
     }

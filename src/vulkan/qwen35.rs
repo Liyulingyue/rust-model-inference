@@ -630,15 +630,27 @@ impl Qwen35VulkanSession {
 
             let post_norm_buffer = buffers.upload_f32(&layer.attn_post_norm)?;
             let post_attention_norm = ops.bind_buffers(&[post_norm_buffer])?;
-            let gate_up = bind_weight_group(
-                &mut ops,
-                &mut buffers,
-                [
-                    (&layer.ffn_gate, "Qwen3.5 FFN gate"),
-                    (&layer.ffn_up, "Qwen3.5 FFN up"),
-                ],
-            )?;
-            let down = bind_weight(&mut ops, &mut buffers, &layer.ffn_down, "Qwen3.5 FFN down")?;
+            // A qwen35moe layer has no dense FFN; it falls back to the CPU
+            // route for the FFN instead of binding a half-model on the GPU.
+            let (gate_up, down) = match (layer.ffn_gate.as_ref(), layer.ffn_up.as_ref()) {
+                (Some(gate), Some(up)) => (
+                    bind_weight_group(
+                        &mut ops,
+                        &mut buffers,
+                        [(gate, "Qwen3.5 FFN gate"), (up, "Qwen3.5 FFN up")],
+                    )?,
+                    bind_weight(
+                        &mut ops,
+                        &mut buffers,
+                        layer
+                            .ffn_down
+                            .as_ref()
+                            .ok_or("Qwen3.5 FFN down missing with gate/up")?,
+                        "Qwen3.5 FFN down",
+                    )?,
+                ),
+                _ => (None, None),
+            };
             layers.push(LayerBindings {
                 attention_norm,
                 attention,
@@ -1276,11 +1288,15 @@ fn eligibility_facts(model: &Qwen35Model<'_>) -> EligibilityFacts {
         return facts;
     }
     for (layer_index, layer) in model.layers.iter().enumerate() {
-        facts.weight_formats.extend([
-            layer.ffn_gate.ggml_type,
-            layer.ffn_up.ggml_type,
-            layer.ffn_down.ggml_type,
-        ]);
+        for weight in [
+            layer.ffn_gate.as_ref(),
+            layer.ffn_up.as_ref(),
+            layer.ffn_down.as_ref(),
+        ] {
+            if let Some(weight) = weight {
+                facts.weight_formats.push(weight.ggml_type);
+            }
+        }
         if model.config.is_recurrent[layer_index] {
             let weights = [
                 layer.wqkv.as_ref(),

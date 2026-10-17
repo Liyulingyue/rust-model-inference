@@ -12,6 +12,7 @@
 
 pub mod config;
 pub mod forward;
+pub mod moe;
 pub mod positions;
 pub mod scratch;
 pub mod session;

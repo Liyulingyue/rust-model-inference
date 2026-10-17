@@ -288,6 +288,45 @@ LFM2 / LFM2.5 / Spark / Nemotron-H / Hunyuan / LFM2-MoE），每个 scorer 实�
       真实模型上跑通（Paris = 0.9141、pair_1 = A 0.7158）。图像推理路径
       （`--image` + mmproj）确认不受影响（apple.png 描述正确）。
 
+- [x] **MiniCPM-V 4.7 1B（`qwen35` 语言塔）多模态接入** — 已完成，`20c247d`…`1bd1165`。
+      视觉塔逐位对齐：602,112 个 normalized pixel F32 与 pinned oracle
+      `69f201a2` 完全一致；`conv_output_silu` 逐位相同（2158/8192 分量一致，L1 6e-5）；
+      `pos_embed` 约 `1e-6` 相对差异，按 SIMD/FMA 标准接受。切片、CANVAS M-RoPE、
+      tile separator 的 token-free embedding span 已接入；`<image_id>0</image_id>`
+      由 mtmd 层注入。复现命令见 [`tools/oracle/minicpmv/README.md`](../../tools/oracle/minicpmv/README.md)。
+- [x] **MiniCPM-V 4.7 35B-A3B（`qwen35moe`）语言塔** — 已完成，`032ff5c`…`385d6cf`。
+      SSM 全链路对齐：输入 embedding / conv / `q_conv_predelta` / `k_conv_predelta` /
+      `v_conv_predelta` / `beta_sigmoid` / `gate` 全部逐位一致或 ~1e-7；递推本身与
+      oracle 的 chunked WY 输出在**同一输入、同一初始 state**（用 oracle 自带的
+      `state_predelta` 锚定）下相差 avg 0.0063%。多模态端到端可用，`--jinja` 下
+      512×512 出 overview + 2 slices 共 202 个视觉 token。
+      ⚠️ 途中**两次误判**：先是 oracle eval callback 把多 ubatch 写进同一文件（后写覆盖先写），
+      导致「最佳匹配 L1 923 vs 我方相邻 token 间 L1 中位数 956」——结论**不可证伪**；
+      再是把「我方 token *i*」对「oracle row *i*」，而 llama.cpp 的 prefill ubatch
+      首尾各带 3 个 padding row，3-token prompt 的 ubatch 是
+      `[pad,pad,pad,t1,t2,t3,pad,pad,pad]`。据此曾误报「~14% 差异」，`385d6cf` 已撤回。
+      **教训：oracle dump 必须先解决 ubatch 对齐与 padding，否则任何归因都是错的。**
+- [ ] **35B 的 MoE（routed + shared expert）从未做过数值对照** — 这是当前最大的验证缺口。
+      `src/models/qwen35/trunk/moe.rs` 是**逐算子照抄** oracle 的公式
+      （`LLM_FFN_PAR` 是 gate 模式而非残差；`routed = Σ score_e down_e(silu(gate_e·x)·up_e·x)`；
+      `out = routed + sigmoid(gate_inp_shexp·x) · shared`；256 专家 softmax → top-8 → 归一），
+      张量 shape 也对得上，输出质量正确——但这是**构造性论证 + 行为观察**，
+      不是数值验证。早先「路由选中同一批专家（67,140,206）」的观测**不可信**：
+      用了「首个精确匹配」做 token 映射，重复 token 全部塌到同一下标，且发生在搞懂 padding 之前。
+      oracle 侧 `ffn_moe_logits` / `ffn_moe_out` / `ffn_shexp_gated` 都已能 dump；
+      缺的是干净对齐，需给 `tests/minicpmv_reference.rs` 加一个「注入指定 embedding 行」
+      的开关，让 Rust 侧也跑 ubatch 前面那 3 个 padding row。
+- [ ] **35B 视觉塔未与 oracle 做数值对照** — 1B 的 `pos_embed` 逐位比过，35B 完全没有。
+      projector 代码零改动（两个尺寸共用同一 `minicpmv4_7` 实现，仅 `projection_dim`
+      1024 → 2048），但 2048 维输出、`attn_post_norm` 全层 checkpoint 都没验证过。
+- [ ] **canvas 路径缺 `--jinja` 时报错信息误导** —
+      `src/app/text/multimodal.rs` 的 `MINICPMV47_WIRING_MSG`（7 处引用）声称
+      「投影器已实现但接线缺失 / 语言塔只接受一个 `<|image_pad>`」，而实际原因是
+      `jinja.resolve()` 在未启用时返回 `None`。这条文案在排查中把人（和 agent）带偏了两轮。
+      应改成能指明「本 projector 需 `--jinja`」；注意 1B 一直如此，不是新引入的限制。
+- [ ] **`qwen35moe` 的 Vulkan 路径未接** — `src/vulkan/qwen35.rs:17` 仍 gate 在
+      `architecture == "qwen35"`，35B 目前只能走标量/SIMD CPU 路径。
+
 ## Medium Priority
 
 - [ ] **讨论：MemoryArena 与 BlockAllocator 组合**
