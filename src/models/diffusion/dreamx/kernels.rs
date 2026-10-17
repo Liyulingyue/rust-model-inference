@@ -129,6 +129,17 @@ impl<'a> Linear<'a> {
             return Err("Invalid DreamX linear input shape".into());
         }
         let mut output = vec![0.0; checked_len("DreamX linear output", &[rows, self.n_out()])?];
+        #[cfg(feature = "vulkan")]
+        if self.weight.try_vulkan_rows(input, &mut output, rows) {
+            if let Some(bias) = &self.bias {
+                for row in output.chunks_exact_mut(self.n_out()) {
+                    vec_add_into(bias, row);
+                }
+            }
+            return Ok(output);
+        }
+        #[cfg(feature = "vulkan")]
+        let _cpu_scope = ComputePool::disable_gpu_matmul_for_scope();
         if let Some(weight) = self.weight.kernel.bf16_bytes() {
             linear_bf16(
                 pool,
@@ -265,17 +276,18 @@ fn linear_bf16(
 }
 
 pub(crate) fn dot_bf16_f32(weight: &[u8], input: &[f32]) -> f32 {
+    // The parity path must not enter the architecture-specific BF16 kernel.
+    // `has_neon` already observes this flag on current builds, but keep the
+    // check local so this operator stays correct if feature probing changes.
     #[cfg(target_arch = "aarch64")]
-    if crate::ops::has_neon() {
+    if !crate::ops::scalar_mode() && crate::ops::has_neon() {
         return unsafe { dot_bf16_f32_neon(weight, input) };
     }
-    weight
-        .chunks_exact(2)
-        .zip(input)
-        .map(|(bytes, &input)| {
-            crate::ops::bf16_to_f32(u16::from_le_bytes(bytes.try_into().unwrap())) * input
-        })
-        .sum()
+    let mut sum = 0.0f32;
+    for (bytes, &input) in weight.chunks_exact(2).zip(input) {
+        sum += crate::ops::bf16_to_f32(u16::from_le_bytes(bytes.try_into().unwrap())) * input;
+    }
+    sum
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -321,7 +333,19 @@ pub fn rms_norm_rows(
     let mut output = vec![0.0; input.len()];
     for row in 0..rows {
         let range = row * width..(row + 1) * width;
-        rms_norm(&input[range.clone()], weight, &mut output[range], epsilon);
+        if crate::ops::scalar_mode() {
+            let values = &input[range.clone()];
+            let mut sum_sq = 0.0f32;
+            for &value in values {
+                sum_sq += value * value;
+            }
+            let scale = 1.0f32 / (sum_sq / width as f32 + epsilon).sqrt();
+            for index in 0..width {
+                output[range.start + index] = values[index] * scale * weight[index];
+            }
+        } else {
+            rms_norm(&input[range.clone()], weight, &mut output[range], epsilon);
+        }
     }
     Ok(output)
 }
@@ -351,6 +375,25 @@ pub fn layer_norm_rows(
     for row in 0..rows {
         let range = row * width..(row + 1) * width;
         let values = &input[range.clone()];
+        if crate::ops::scalar_mode() {
+            let mut sum = 0.0f32;
+            for &value in values {
+                sum += value;
+            }
+            let mean = sum / width as f32;
+            let mut variance = 0.0f32;
+            for &value in values {
+                let centered = value - mean;
+                variance += centered * centered;
+            }
+            let inverse = 1.0 / (variance / width as f32 + epsilon).sqrt();
+            for index in 0..width {
+                output[range.start + index] =
+                    (values[index] - mean) * inverse * weight.map_or(1.0, |weight| weight[index])
+                        + bias.map_or(0.0, |bias| bias[index]);
+            }
+            continue;
+        }
         let mean = (sum_f32(values) / width as f64) as f32;
         let variance = (sum_sq_centered_f32(values, mean) / width as f64) as f32;
         let inverse = 1.0 / (variance + epsilon).sqrt();
@@ -389,8 +432,25 @@ pub fn group_norm_ncthw(
     for group in 0..groups {
         let start = group * values_per_group;
         let values = &input[start..start + values_per_group];
-        let mean = (sum_f32(values) / values_per_group as f64) as f32;
-        let variance = (sum_sq_centered_f32(values, mean) / values_per_group as f64) as f32;
+        let (mean, variance) = if crate::ops::scalar_mode() {
+            let mut sum = 0.0f32;
+            for &value in values {
+                sum += value;
+            }
+            let mean = sum / values_per_group as f32;
+            let mut variance = 0.0f32;
+            for &value in values {
+                let centered = value - mean;
+                variance += centered * centered;
+            }
+            (mean, variance / values_per_group as f32)
+        } else {
+            let mean = (sum_f32(values) / values_per_group as f64) as f32;
+            (
+                mean,
+                (sum_sq_centered_f32(values, mean) / values_per_group as f64) as f32,
+            )
+        };
         let inverse = 1.0 / (variance + epsilon).sqrt();
         for channel_offset in 0..channels_per_group {
             let channel = group * channels_per_group + channel_offset;
@@ -474,7 +534,33 @@ fn attention_scalar_with_dot(
     spec: AttentionSpec,
     dot: fn(&[f32], &[f32], usize) -> f32,
 ) -> Result<Vec<f32>, String> {
+    attention_scalar_with_bias(query, key, value, None, spec, dot)
+}
+
+fn attention_scalar_with_bias(
+    query: &[f32],
+    key: &[f32],
+    value: &[f32],
+    bias: Option<&[f32]>,
+    spec: AttentionSpec,
+    dot: fn(&[f32], &[f32], usize) -> f32,
+) -> Result<Vec<f32>, String> {
     spec.validate(query, key, value)?;
+    #[cfg(feature = "vulkan")]
+    if bias.is_none() {
+        if let Some(output) = crate::ops::kernel::vulkan::try_attention(query, key, value, spec) {
+            return Ok(output);
+        }
+    }
+    if let Some(bias) = bias {
+        let expected = checked_len(
+            "DreamX attention bias",
+            &[spec.query_heads, spec.query_tokens, spec.key_tokens],
+        )?;
+        if bias.len() != expected {
+            return Err("Invalid DreamX attention bias shape".into());
+        }
+    }
     let mut output = vec![0.0; query.len()];
     let mut scores = vec![f32::NEG_INFINITY; spec.key_tokens];
     let group_size = spec.query_heads / spec.key_value_heads;
@@ -494,6 +580,11 @@ fn attention_scalar_with_dot(
                     &key[key_start..key_start + spec.head_dim],
                     spec.head_dim,
                 ) * spec.scale;
+                let score = score
+                    + bias.map_or(0.0, |bias| {
+                        bias[(query_head * spec.query_tokens + query_token) * spec.key_tokens
+                            + key_token]
+                    });
                 scores[key_token] = score;
                 maximum = maximum.max(score);
             }
@@ -525,7 +616,14 @@ pub fn attention_online(
     value: &[f32],
     spec: AttentionSpec,
 ) -> Result<Vec<f32>, String> {
+    if crate::ops::scalar_mode() {
+        return attention_scalar_f32(query, key, value, spec);
+    }
     spec.validate(query, key, value)?;
+    #[cfg(feature = "vulkan")]
+    if let Some(output) = crate::ops::kernel::vulkan::try_attention(query, key, value, spec) {
+        return Ok(output);
+    }
     let mut output = vec![0.0; query.len()];
     let group_size = spec.query_heads / spec.key_value_heads;
     for query_token in 0..spec.query_tokens {
@@ -571,6 +669,16 @@ pub fn attention_online_with_bias(
     bias: &[f32],
     spec: AttentionSpec,
 ) -> Result<Vec<f32>, String> {
+    if crate::ops::scalar_mode() {
+        return attention_scalar_with_bias(
+            query,
+            key,
+            value,
+            Some(bias),
+            spec,
+            crate::ops::dot_f32_exact,
+        );
+    }
     spec.validate(query, key, value)?;
     if bias.len()
         != checked_len(
@@ -711,8 +819,22 @@ pub fn conv3d_with_options(
     let output_shape = [output_channels, output_depth, output_height, output_width];
     let output_len = checked_len("DreamX Conv3D output", &output_shape)?;
     let mut output = vec![0.0; output_len];
+    #[cfg(feature = "vulkan")]
+    if crate::ops::kernel::vulkan::try_conv3d(
+        input,
+        weight,
+        bias,
+        &mut output,
+        input_shape,
+        weight_shape,
+        output_shape,
+        spec,
+    ) {
+        return Ok((output, output_shape));
+    }
     let output_address = output.as_mut_ptr() as usize;
     let output_channels_per_group = output_channels / spec.groups;
+    let strict = crate::ops::scalar_mode();
     pool.compute(|thread, threads| {
         for output_index in (thread..output_len).step_by(threads) {
             let ow = output_index % output_width;
@@ -722,7 +844,11 @@ pub fn conv3d_with_options(
             let od = rest % output_depth;
             let oc = rest / output_depth;
             let group = oc / output_channels_per_group;
-            let mut sum = bias.map_or(0.0, |bias| bias[oc]);
+            let mut sum = if strict {
+                0.0
+            } else {
+                bias.map_or(0.0, |bias| bias[oc])
+            };
             for local_channel in 0..weight_channels {
                 let input_channel = group * weight_channels + local_channel;
                 for kd in 0..kernel_depth {
@@ -750,7 +876,18 @@ pub fn conv3d_with_options(
                             * kernel_height
                             + kh)
                             * kernel_width;
-                        if spec.dilation[2] == 1 {
+                        if strict {
+                            for kw in 0..kernel_width {
+                                let padded_width = ow * spec.stride[2] + kw * spec.dilation[2];
+                                if padded_width >= spec.padding[2] {
+                                    let input_width = padded_width - spec.padding[2];
+                                    if input_width < width {
+                                        sum += input[input_row + input_width]
+                                            * weight[weight_row + kw];
+                                    }
+                                }
+                            }
+                        } else if spec.dilation[2] == 1 {
                             let base = ow * spec.stride[2];
                             let first = spec.padding[2].saturating_sub(base).min(kernel_width);
                             let last = kernel_width
@@ -777,6 +914,11 @@ pub fn conv3d_with_options(
                             }
                         }
                     }
+                }
+            }
+            if strict {
+                if let Some(bias) = bias {
+                    sum += bias[oc];
                 }
             }
             unsafe { (output_address as *mut f32).add(output_index).write(sum) };
@@ -1184,6 +1326,103 @@ mod tests {
         let expected = attention_scalar(&q, &k, &v, spec).unwrap();
         let actual = attention_online(&q, &k, &v, spec).unwrap();
         assert_close(&actual, &expected, 1e-5);
+    }
+
+    #[test]
+    fn scalar_attention_bias_is_materialized_in_key_order() {
+        if !crate::ops::scalar_mode() {
+            return;
+        }
+        let q = values(2 * 1 * 3);
+        let k = values(3 * 1 * 3);
+        let v = values(3 * 1 * 3);
+        let bias = [0.25, -0.5, 0.75, 0.0, 0.125, -0.25];
+        let spec = AttentionSpec {
+            query_tokens: 2,
+            key_tokens: 3,
+            query_heads: 1,
+            key_value_heads: 1,
+            head_dim: 3,
+            causal: false,
+            scale: 0.5,
+        };
+        fn scalar_dot(a: &[f32], b: &[f32], n: usize) -> f32 {
+            let mut sum = 0.0f32;
+            for index in 0..n {
+                sum += a[index] * b[index];
+            }
+            sum
+        }
+        let actual = attention_online_with_bias(&q, &k, &v, &bias, spec).unwrap();
+        let expected =
+            attention_scalar_with_bias(&q, &k, &v, Some(&bias), spec, scalar_dot).unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn scalar_rms_norm_uses_f32_sum_of_squares() {
+        if !crate::ops::scalar_mode() {
+            return;
+        }
+        let input = [3.0f32, -2.0, 1.5, 0.25];
+        let weight = [1.0f32, 0.5, 2.0, -1.0];
+        let actual = rms_norm_rows(&input, 1, &weight, 1e-6).unwrap();
+        let mut sum = 0.0f32;
+        for value in input {
+            sum += value * value;
+        }
+        let scale = 1.0f32 / (sum / input.len() as f32 + 1e-6).sqrt();
+        let expected: Vec<f32> = input
+            .iter()
+            .zip(weight)
+            .map(|(&value, weight)| value * scale * weight)
+            .collect();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn scalar_conv3d_adds_bias_after_sequential_kernel_sum() {
+        if !crate::ops::scalar_mode() {
+            return;
+        }
+        let input = [1.25f32, -2.0, 3.5];
+        let weight = [0.5f32, 1.25, -0.75];
+        let bias = [0.125f32];
+        let actual = conv3d_with_options(
+            &ComputePool::new(1),
+            &input,
+            [1, 1, 1, 3],
+            &weight,
+            [1, 1, 1, 1, 3],
+            Some(&bias),
+            Conv3dSpec::default(),
+        )
+        .unwrap()
+        .0;
+        let mut expected = 0.0f32;
+        for (&value, coefficient) in input.iter().zip(weight) {
+            expected += value * coefficient;
+        }
+        expected += bias[0];
+        assert_eq!(actual, [expected]);
+    }
+
+    #[test]
+    fn scalar_bf16_dot_rounds_storage_then_accumulates_in_order() {
+        if !crate::ops::scalar_mode() {
+            return;
+        }
+        let input = values(19);
+        let bytes: Vec<u8> = values(19)
+            .iter()
+            .flat_map(|&value| crate::ops::f32_to_bf16(value).to_le_bytes())
+            .collect();
+        let mut expected = 0.0f32;
+        for (index, chunk) in bytes.chunks_exact(2).enumerate() {
+            expected += crate::ops::bf16_to_f32(u16::from_le_bytes(chunk.try_into().unwrap()))
+                * input[index];
+        }
+        assert_eq!(dot_bf16_f32(&bytes, &input), expected);
     }
 
     #[test]
