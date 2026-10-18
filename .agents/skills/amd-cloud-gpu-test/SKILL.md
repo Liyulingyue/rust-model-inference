@@ -443,3 +443,76 @@ scp radeon-cloud:/root/<result-file> ./results/
 - 不要用 `dev`/`main` profile 编（dev = debug，编译慢 5–10×）——一律 `release-fast`，省 80% 时间。
 - 不要在云端留 `~/.cargo` / `models/` 当「持久存储」——Template 重启即清空；`/root/target-amd/` 同会话可复用，跨会话别指望。
 - **不要在没有用户授权的情况下，直接改动用户态文件**（`~/.ssh/config`、`~/.ssh/known_hosts`、`$PROFILE` 等）。Template 重启后看到 stale Port/指纹，**只给用户看命令**，让他们自己跑或明确点头后再动；助手自己 `Set-Content ~/.ssh/config` 或 `ssh-keygen -R` 不算经过同意。
+
+## 跨会话沉淀（Z-Image 11.5 GB / 3 档验证后新增）
+
+Z-Image-Turbo Q8_0 三档（CPU 512 / GPU 512 / GPU 1024）端到端跑通后新增 5 条坑，前面章节都未覆盖。
+
+### 1. cloud 没装 `/usr/bin/time`，`set -e` 脚本秒退
+
+Template 默认不带 `timeutils` 包，`/usr/bin/time -v` 不存在；`set -e` 下脚本立即 exit 0 行——3 档都没跑。
+
+```bash
+# 替代：bash builtin time（无 -v），或直接 date +%s%N 取差
+start_ns=$(date +%s%N); "$BIN" "$@"; end_ns=$(date +%s%N)
+echo "wall=$(( (end_ns - start_ns) / 1000000 ))ms"
+
+# peak RSS 从 /proc/$PID/status 的 VmHWM 读（替代 /usr/bin/time -v 唯一给的那个）
+```
+
+### 2. 大文件 scp / 11 GB 级 tarball
+
+- **`-C` 不要用**：GGUF / 权重里是随机浮点，compression 纯浪费 CPU。本网络实测 ~33 MB/s 上限，**11 GB ≈ 35 min wall**。Opencode shell `timeout` 上限给 2700000 ms（45 min）。
+- **scp 静默半截失败**：第一次传到 5.5 GB 时 SSH wrapper timeout，cloud 残留 5.5 GB 错误文件——下次重传覆盖前**始终 SHA256 校验两端**：
+  ```powershell
+  # local:
+  Get-FileHash <file> -Algorithm SHA256
+  # cloud:
+  ssh radeon-cloud 'sha256sum /root/<file>'
+  ```
+- **不想冒险**：本机 `split -b 2G big.tar chunks/chunk_` 后逐块 scp，cloud `cat chunks/chunk_* | tar -xf -`。
+- **别用 `-r` scp 整目录大文件**——`scp -r` 是多次 stream 拼接，断点续传零支持。
+
+### 3. cgroup `memory.max` ≠ `free -h` 显示的 host RAM
+
+`free -h` 的 `total` 给的是 host 物理 RAM；**容器内实际可用看 `cat /sys/fs/cgroup/memory.max`**。本网络实测：503 GB host → 55 GB cgroup。
+
+- **预算大模型推理前先 cat 一次**——55 GB 对 12B Q8_0 DiT（7 GB）有富裕，但 4 个并发任务 + 1024 latent attention 可能 OOM。
+- `free -h` 的 `available` 列是 cgroup 视图（不是 host 剩余），看起来 444 GB free 实际**根本拿不到**。
+
+```bash
+ssh radeon-cloud 'cat /sys/fs/cgroup/memory.max; free -h | head -2'
+```
+
+### 4. cloud 进程存活判定——`pgrep` 不一定够
+
+Z-Image 实际跑了 5 min，但 `pgrep -f run-zimage` 三次只匹配脚本 PID 没匹配 `rust-model-inference`（cmdline 没 "run-zimage"）。判定 binary 还在不在：
+
+```bash
+# 1. binary 自己的 cmdline + 当前 %CPU/RSS
+ps -o pid,pcpu,rss,etime,cmd -p $(pgrep -f rust-model-inference | head -1)
+# → %CPU=799% RSS=10.9GB 表示真在跑（8 核满载）
+
+# 2. /proc/<pid>/status 看 State
+cat /proc/<PID>/status | head -5   # R=running, S=sleeping on syscall
+
+# 3. top 5 秒实时
+top -bn 2 -d 2 -p <PID> | tail -10
+```
+
+PowerShell 端串行「string not match 'foo'」判定 ssh 输出「process 消失」**不可靠**——直接 `LASTEXITCODE` 或 `pgrep` 返回空数组。
+
+### 5. CPU vs GPU backend 一致性验证（构图守恒）
+
+任何「把 matmul 搬上 Vulkan」类的改动都必须用同 prompt + 同 seed 同时跑 CPU 和 GPU，肉眼对比是端到端 V&V 最便宜一步（不需要 Python 评测脚本）：
+
+```bash
+# 同 prompt / 同 seed / 同 thread 数
+... --threads 8 --seed 42 --out cpu.png
+... --threads 8 --seed 42 --out gpu.png --gpu
+
+# md5 不一定相等（RNG 在 matmul 顺序上的差异会被 diffusion 放大），
+# 但 主体 / 构图 / 配色 应该肉眼一致。Z-Image 在 512² / seed=42 下肉眼一致 ✓
+```
+
+如果 CPU vs GPU 主体错位（主体对了但动作/朝向偏差大），多半是 DiT matmul 顺序在 attention / RoPE / adaln 一处悄悄引入 race。同 seed + 同 thread 数是基本盘。
