@@ -113,40 +113,25 @@ pub fn run_inference(
             jinja,
         )
     } else if arch == "lfm2" {
-        let is_lfm25 = source
-            .metadata("general.basename")
-            .and_then(|v| v.to_string_val())
-            .map(|v| v.contains("2.5"))
-            .unwrap_or(false);
-
-        if is_lfm25 {
-            crate::models::lfm25::run_inference(
-                source.as_ref(),
-                prompt,
-                max_tokens,
-                temperature,
-                n_threads_arg,
-                profile,
-                kv_format,
-                max_context,
-                thinking,
-                jinja,
-            )
-        } else {
-            crate::models::lfm2::run_inference(
-                source.as_ref(),
-                prompt,
-                max_tokens,
-                temperature,
-                n_threads_arg,
-                profile,
-                kv_format,
-                max_context,
-                repetition_penalty,
-                thinking,
-                jinja,
-            )
-        }
+        // LFM2.5 dense shares this path unconditionally. It used to branch on
+        // whether `general.basename` contained "2.5", but that key is written
+        // only by Liquid's QAD quantisation pipeline, so the same checkpoint
+        // took a different code path depending on which quantizer produced the
+        // file. llama.cpp has no equivalent split: every dense generation goes
+        // through one `src/models/lfm2.cpp`. See `crate::models::lfm25`.
+        crate::models::lfm2::run_inference(
+            source.as_ref(),
+            prompt,
+            max_tokens,
+            temperature,
+            n_threads_arg,
+            profile,
+            kv_format,
+            max_context,
+            repetition_penalty,
+            thinking,
+            jinja,
+        )
     } else if arch == "lfm2moe" {
         crate::models::lfm2moe::run_inference_with_batch(
             source.as_ref(),
