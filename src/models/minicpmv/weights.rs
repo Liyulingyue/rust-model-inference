@@ -33,10 +33,26 @@ pub fn decode_param(
             "{name}: expected {n_out}x{n_in} = {expected} elements, got {got}"
         ));
     }
-    decode_matrix(data, info.ggml_type, expected)
+    decode_matrix(data, info.ggml_type, n_in, n_out)
 }
 
-pub fn decode_matrix(data: &[u8], ty: GGMLType, elements: usize) -> Result<Vec<f32>, String> {
+/// Decode a parameter slice into row-major `[n_out][n_in]` f32.
+///
+/// F32 / F16 / BF16 are decoded inline, byte-for-byte as before. Everything
+/// else is delegated to [`crate::ops::quant::dequantize_tensor`] rather than
+/// refused: this used to reject every quantized type, so a Q8_0 / Q4_K / Q6_K
+/// mmproj was unloadable even though the shared decoder covers exactly those
+/// three. The projector's weights stay eagerly materialised as `Vec<f32>`
+/// because its forward is pinned to an oracle trace; the lazy `Weight` /
+/// `QuantizedTensor` path would change that, so only the decode is widened
+/// here.
+pub fn decode_matrix(
+    data: &[u8],
+    ty: GGMLType,
+    n_in: usize,
+    n_out: usize,
+) -> Result<Vec<f32>, String> {
+    let elements = n_in.checked_mul(n_out).ok_or("element count overflow")?;
     match ty {
         GGMLType::F32 => {
             if data.len() != elements * 4 {
@@ -77,9 +93,10 @@ pub fn decode_matrix(data: &[u8], ty: GGMLType, elements: usize) -> Result<Vec<f
                 .map(|c| crate::core::tensor::bf16_to_f32(u16::from_le_bytes([c[0], c[1]])))
                 .collect())
         }
-        other => Err(format!(
-            "unsupported ggml type {other:?} for a projector parameter"
-        )),
+        // Quantized projectors go through the shared whole-tensor decoder.
+        // `n_cols` is `n_in`: the tensor is stored `[n_out][n_in]`.
+        other => crate::ops::quant::dequantize_tensor(data, other, n_in, n_out)
+            .map_err(|e| format!("unsupported ggml type {other:?} for a projector parameter: {e}")),
     }
 }
 
@@ -303,4 +320,77 @@ fn tensor_dims(source: &dyn TensorSource, name: &str) -> Result<Vec<usize>, Stri
         .tensor_info(name)
         .ok_or_else(|| format!("Missing tensor: {name}"))?;
     Ok(info.dims.iter().map(|&v| v as usize).collect())
+}
+
+#[cfg(test)]
+mod decode_matrix_tests {
+    use super::decode_matrix;
+    use crate::core::tensor::GGMLType;
+
+    /// A Q8_0 block is 32 values: an F16 scale then 32 i8.
+    const QK8_0: usize = 32;
+
+    fn q8_0_block(scale: f32, values: &[i8; QK8_0]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(2 + QK8_0);
+        out.extend_from_slice(&crate::ops::float::f32_to_f16(scale).to_le_bytes());
+        out.extend(values.iter().map(|&q| q as u8));
+        out
+    }
+
+    /// The regression: `decode_matrix` used to refuse every quantized type with
+    /// "unsupported ggml type ... for a projector parameter", so a Q8_0 / Q4_K /
+    /// Q6_K mmproj would not load even though `ops::quant::dequantize_tensor`
+    /// covers exactly those three. It now delegates.
+    #[test]
+    fn quantized_projector_parameters_decode() {
+        let mut data = q8_0_block(0.5, &[1; QK8_0]);
+        data.extend(q8_0_block(0.25, &[2; QK8_0]));
+
+        let got = decode_matrix(&data, GGMLType::Q8_0, QK8_0, 2).expect("Q8_0 projector row");
+        assert_eq!(got.len(), 2 * QK8_0, "row-major [n_out][n_in]");
+        for &v in &got[..QK8_0] {
+            assert_eq!(v, 0.5, "row 0 = d * q");
+        }
+        for &v in &got[QK8_0..] {
+            assert_eq!(v, 0.5, "row 1 = 0.25 * 2");
+        }
+    }
+
+    /// The oracle pins the projector in F32, so widening the decode must not
+    /// disturb the three types it already handled.
+    #[test]
+    fn f16_and_f32_projector_parameters_are_unchanged() {
+        let f32_values: Vec<f32> = (0..8).map(|i| i as f32 * 0.5).collect();
+        let mut f32_bytes = Vec::new();
+        for v in &f32_values {
+            f32_bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        assert_eq!(
+            decode_matrix(&f32_bytes, GGMLType::F32, 4, 2).unwrap(),
+            f32_values
+        );
+
+        let mut f16_bytes = Vec::new();
+        for v in &f32_values {
+            f16_bytes.extend_from_slice(&crate::ops::float::f32_to_f16(*v).to_le_bytes());
+        }
+        let decoded = decode_matrix(&f16_bytes, GGMLType::F16, 4, 2).unwrap();
+        for (got, want) in decoded.iter().zip(&f32_values) {
+            assert_eq!(
+                *got,
+                crate::ops::float::f16_to_f32(crate::ops::float::f32_to_f16(*want))
+            );
+        }
+    }
+
+    /// A type the shared decoder does not cover still reports cleanly instead of
+    /// panicking, and the message names the type.
+    #[test]
+    fn unsupported_type_still_errors_with_the_type_named() {
+        let err = decode_matrix(&[0u8; 4], GGMLType::I32, 1, 1).unwrap_err();
+        assert!(
+            err.contains("I32"),
+            "the error must name the offending type, got: {err}"
+        );
+    }
 }

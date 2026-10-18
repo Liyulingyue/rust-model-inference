@@ -129,7 +129,7 @@ pub fn run_qwen3_family_multimodal(
                 (grid.image_width(), grid.image_height())
             }
             crate::app::media::ProjectorFamily::MiniCpmV47 => {
-                return Err(MINICPMV47_WIRING_MSG.to_string());
+                return Err(MINICPMV47_CANVAS_ONLY_MSG.to_string());
             }
         };
         let (mean, std) = match family {
@@ -154,7 +154,7 @@ pub fn run_qwen3_family_multimodal(
                 (encoder.config.image_mean, encoder.config.image_std)
             }
             crate::app::media::ProjectorFamily::MiniCpmV47 => {
-                return Err(MINICPMV47_WIRING_MSG.to_string());
+                return Err(MINICPMV47_CANVAS_ONLY_MSG.to_string());
             }
         };
         let normalized = frames
@@ -246,7 +246,7 @@ pub fn run_qwen3_family_multimodal(
                 }
             }
             crate::app::media::ProjectorFamily::MiniCpmV47 => {
-                return Err(MINICPMV47_WIRING_MSG.to_string());
+                return Err(MINICPMV47_CANVAS_ONLY_MSG.to_string());
             }
         }
     }
@@ -645,15 +645,31 @@ fn crop_box(
 }
 
 /// MiniCPM-V 4.7's projector, config, slicing and per-tile encoder are
-/// implemented in `crate::models::minicpmv`, but the multimodal prompt path
-/// still needs its own token/position assembly: the canvas layout gives every
+/// implemented in `crate::models::minicpmv`, but the canvas layout gives every
 /// tile one M-RoPE slot and the separators after it one slot each, which the
-/// shared anyres builder (`build_qwen35_positions`) cannot express.
-const MINICPMV47_WIRING_MSG: &str = "MiniCPM-V 4.7 (minicpmv4_7): the projector, slicing and canvas \
-positions are implemented, but its tile separators (`</image>`, `<slice>`, `</slice>`, newline) are \
-embeddings with no token id, and the qwen35 tower currently only accepts one <|image_pad|> \
-placeholder per media row. Wiring needs the language tower to consume a token-free embedding span \
-with its own KV positions (llama.cpp's MTMD_POS_TYPE_CANVAS), not an extra placeholder per row.";
+/// shared anyres builder (`build_qwen35_positions`) cannot express. So the
+/// anyres-shaped helpers below cannot serve this family at all; the canvas path
+/// in `run_qwen35_family_multimodal_logits` is the only one that can.
+const MINICPMV47_CANVAS_ONLY_MSG: &str = "MiniCPM-V 4.7 (minicpmv4_7): this anyres helper does \
+not handle it. Its tile separators (`</image>`, `<slice>`, `</slice>`, newline) are embeddings \
+with no token id, and its canvas gives every tile one M-RoPE slot, which build_qwen35_positions \
+cannot express; use the minicpmv4_7 canvas path instead.";
+
+/// The same projector's canvas path, reached with `--jinja` off.
+///
+/// This used to reuse the wording above and claim the wiring was missing. That
+/// gap is closed: the canvas path splices the media span over the single
+/// `<|image_pad|>` that the checkpoint's own `tokenizer.chat_template` emits.
+/// What actually arrives here is that `--jinja` is off, so `jinja.resolve()`
+/// returns `None`, `text_conversation_tokens` has no template to read the marker
+/// from and returns `None`, and the "not wired" story sent two debugging rounds
+/// after a problem that did not exist. 1B has always needed `--jinja`; this is
+/// not a new restriction.
+const MINICPMV47_JINJA_MSG: &str = "MiniCPM-V 4.7 (minicpmv4_7): pass --jinja, or \
+--chat-template-file <path.jinja>. The projector, slicing and canvas positions are implemented and \
+need exactly one <|image_pad|> marker, which only the checkpoint's own tokenizer.chat_template \
+emits; with jinja disabled there is no template to take that marker from, so the prompt cannot \
+be built.";
 pub fn run_qwen3_family_multimodal_logits(
     llm_source: &dyn TensorSource,
     model_source: Arc<dyn TensorSource>,
@@ -747,7 +763,7 @@ pub fn run_qwen3_family_multimodal_logits(
                 (grid.image_width(), grid.image_height())
             }
             crate::app::media::ProjectorFamily::MiniCpmV47 => {
-                return Err(MINICPMV47_WIRING_MSG.to_string());
+                return Err(MINICPMV47_CANVAS_ONLY_MSG.to_string());
             }
         };
         let pairs = frame_pairs(frames.len());
@@ -832,7 +848,7 @@ pub fn run_qwen3_family_multimodal_logits(
                 }
             }
             crate::app::media::ProjectorFamily::MiniCpmV47 => {
-                return Err(MINICPMV47_WIRING_MSG.to_string());
+                return Err(MINICPMV47_CANVAS_ONLY_MSG.to_string());
             }
         }
     }
@@ -1304,7 +1320,8 @@ pub(super) fn run_multimodal_with_video_ref(
     }
     if arch != "qwen35" && arch != "qwen35moe" && arch != "qwen3vl" && arch != "edge0" {
         return Err(format!(
-            "Only qwen35, qwen3vl, and edge0 architectures are supported for multimodal, got: {arch}"
+            "Only qwen35, qwen35moe, qwen3vl, and edge0 architectures are supported \
+             for multimodal, got: {arch}"
         ));
     }
 
@@ -1528,7 +1545,7 @@ pub(super) fn run_multimodal_with_video_ref(
                 None,
                 true,
             )?
-            .ok_or_else(|| MINICPMV47_WIRING_MSG.to_string())?;
+            .ok_or_else(|| MINICPMV47_JINJA_MSG.to_string())?;
             // `mtmd_tokenizer` injects `<image_id>N</image_id>` ahead of every
             // image for this projector (`use_image_id`), before the `<image>`
             // marker. The chat template knows nothing about it, so it has to be

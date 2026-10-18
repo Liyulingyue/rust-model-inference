@@ -319,13 +319,48 @@ LFM2 / LFM2.5 / Spark / Nemotron-H / Hunyuan / LFM2-MoE），每个 scorer 实�
 - [ ] **35B 视觉塔未与 oracle 做数值对照** — 1B 的 `pos_embed` 逐位比过，35B 完全没有。
       projector 代码零改动（两个尺寸共用同一 `minicpmv4_7` 实现，仅 `projection_dim`
       1024 → 2048），但 2048 维输出、`attn_post_norm` 全层 checkpoint 都没验证过。
-- [ ] **canvas 路径缺 `--jinja` 时报错信息误导** —
-      `src/app/text/multimodal.rs` 的 `MINICPMV47_WIRING_MSG`（7 处引用）声称
-      「投影器已实现但接线缺失 / 语言塔只接受一个 `<|image_pad>`」，而实际原因是
-      `jinja.resolve()` 在未启用时返回 `None`。这条文案在排查中把人（和 agent）带偏了两轮。
-      应改成能指明「本 projector 需 `--jinja`」；注意 1B 一直如此，不是新引入的限制。
+- [x] **canvas 路径缺 `--jinja` 时报错信息误导** — 已修。
+      根因确认为 `jinja.resolve()` 在未启用时返回 `None`，`text_conversation_tokens`
+      因此返回 `None`，而旧文案说的是「投影器已实现但接线缺失」——那个缺口早已不存在
+      （canvas 路径就是把 media span 拼到 checkpoint 自己模板产出的那一个
+      `<|image_pad|>` 上）。同一个常量被 6 处以两种语义复用，已拆成两条：
+      `MINICPMV47_CANVAS_ONLY_MSG`（anyres helper 根本处理不了这个家族）与
+      `MINICPMV47_JINJA_MSG`（canvas 路径 + `--jinja` 关闭，指明 `--jinja` /
+      `--chat-template-file`）。1B 一直需要 `--jinja`，不是新引入的限制。
 - [ ] **`qwen35moe` 的 Vulkan 路径未接** — `src/vulkan/qwen35.rs:17` 仍 gate 在
       `architecture == "qwen35"`，35B 目前只能走标量/SIMD CPU 路径。
+
+## 入口面覆盖（2026-10-19 审计）
+
+MiniCPM-V 4.7 的 `qwen35moe`（35B-A3B）此前只在**生成面**注册，多模态对话可用、
+但 JEV 打分全线不通——而它与 `qwen35` 共用同一个 `minicpmv4_7` projector 和同一个
+`Qwen35Model`，只有 arch 字符串不同，属漏改而非有意限制：
+
+| 入口 | `qwen35` | `qwen35moe` |
+| --- | --- | --- |
+| CLI `--image` / HTTP `/v1/chat/completions` | ✅ | ✅ |
+| CLI `--jev --image` | ✅ | ✅（本次补） |
+| HTTP `/v1/jev/image`(`/v1/jev/image_grouped`) | ✅ | ✅（本次补） |
+
+改动点：`src/app/jev/single.rs` 的 `IMAGE_JEV_ARCHES` 与 dispatch、
+`src/app/jev/grouped.rs` 的 `build_jev_token_ids_for_arch` 与 grouped dispatch、
+`src/app/server/api.rs` 的 `run_multimodal_text_only`（`/v1/jev/image` 与
+`image_grouped` 共用这一个闸门，故两侧同时生效）。
+回归测试 `app::jev::single::image_arch_tests`。
+
+顺带修掉两处会把排查带偏的文案：HTTP 侧原写「only supports qwen3/qwen3vl/qwen35」
+却漏了实际支持的 `qwen3vlmoe`；生成侧原写「Only qwen35, qwen3vl, and edge0」
+却漏了条件里本来就有的 `qwen35moe`。
+
+- [x] **量化 mmproj 无法加载** — 已修。`src/models/minicpmv/weights.rs` 的
+      `decode_matrix` 原本只认 F32/F16/BF16，其余一律
+      `unsupported ggml type`，于是 Q8_0 / Q4_K / Q6_K 的 mmproj 直接加载失败，
+      而 `ops::quant::dequantize_tensor` 恰好覆盖这三种。现在委托下去。
+      投影器权重仍是 eager 的 `Vec<f32>`：它的 forward 已 pin 在 oracle trace 上，
+      改成惰性的 `Weight` / `QuantizedTensor` 会动到已验证的数值路径，只放宽解码面。
+      回归测试 `minicpmv::weights::decode_matrix_tests`（含 F32/F16 不变、
+      不支持的类型仍报出类型名）。
+
 
 ## Medium Priority
 

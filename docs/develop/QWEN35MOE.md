@@ -320,3 +320,14 @@ numbers live (see [`tools/oracle/minicpmv/README.md`](../../tools/oracle/minicpm
 * `qwen35moe` is accepted by the multimodal arch allowlist, the chat template
   map, and the MiniCPM-V 4.7 canvas path, so `--mmproj --image` works on the
   35B as well as the 1B.
+* The JEV surfaces accept it too — `src/app/jev/single.rs`
+  (`IMAGE_JEV_ARCHES` + dispatch), `src/app/jev/grouped.rs` (both the
+  `build_jev_token_ids_for_arch` match and the grouped dispatch) and
+  `src/app/server/api.rs` (`run_multimodal_text_only`, which
+  `/v1/jev/image` and `/v1/jev/image_grouped` share). It was registered on the
+  generation path only, so the 35B could chat with an image but not be scored
+  on one; since the MoE tower is a `Qwen35Model` with `moe` set, the existing
+  `qwen35` scorers are reused as-is. See
+  [`TODO.md`](TODO.md#入口面覆盖2026-10-19-审计).
+* Vulkan is still gated to `qwen35` (`src/vulkan/qwen35.rs:17`), so the 35B runs
+  on the scalar/SIMD CPU path only.
