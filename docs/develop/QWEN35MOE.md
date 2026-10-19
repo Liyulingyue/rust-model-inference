@@ -166,9 +166,53 @@ Two gotchas, both learned the hard way:
   unconditionally (not in an `else if (cb_eval == nullptr)` branch) and must
   return `true` so the walk continues.
 
-`RMI_MOE_DUMP` additionally writes the per-token router logits, probabilities,
-routed sum, shared sum and combined output, so the MoE can be bisected against
-the oracle's `ffn_moe_logits-*` / `ffn_moe_out-*` / `ffn_shexp_gated-*`.
+### The MoE was never dumpable on this side either
+
+`RMI_MOE_DUMP` used to write the per-token router logits, probabilities, routed
+sum, shared sum and combined output, so the MoE could in principle be bisected.
+It could not actually be used. The dumper opened six files with
+`OpenOptions::append`, had no layer or token index, no length header and no
+occurrence counter, so with 40 layers times N tokens every record interleaved
+into the same six files and none could be attributed to a `(layer, token)` pair.
+A dump nobody can attribute cannot falsify anything.
+
+That is now gone. `src/models/qwen35/trunk/trace.rs` provides the same keyed
+`(name, layer, step)` checkpoint the LFM2-MoE trunk uses, and `moe.rs` emits ten
+of them -- `ffn_moe_input`, `ffn_moe_logits`, `ffn_moe_probs`, `ffn_moe_topk`,
+`ffn_moe_weights_norm`, `ffn_moe_out`, `ffn_shexp_gate`, `ffn_moe_scale`,
+`ffn_shexp_gated`, `ffn_moe_combined` -- under `RMI_PARITY_TRACE` with the
+`parity-trace` feature. `forward_qwen35moe_token` now takes the layer and step
+indices; before, it had no positional arguments at all.
+
+`ffn_moe_topk` is the checkpoint that can falsify a claim. "The same experts
+were selected" has to mean the same ids in the same order -- not a
+plausible-looking output, and not first-exact-match token mapping.
+
+### What the oracle side still lacks
+
+`tools/oracle/qwen35/qwen35-llama-trace.patch` has **no MoE node in its
+whitelist**: `selected_data` covers `conv_output_raw`, `*_conv_predelta`,
+`state_predelta`, `attn_norm`, `Qcur*`/`Kcur*`, `l_out` and `result_*` only.
+The `ffn_moe_*` dumps reachable in this repo belong to
+`tools/oracle/lfm2moe/` and `tools/oracle/mellum/`, which are different models.
+The same patch also rejects the architecture outright
+(`architecture != "qwen35"` throws), so `qwen35moe` cannot load it at all.
+
+So the MoE gap is larger than "the oracle output is hard to line up": **the
+oracle has never produced those numbers for this architecture.** See
+[`tools/oracle/qwen35/qwen35moe-ffn-dump.patch.README.md`](../../tools/oracle/qwen35/qwen35moe-ffn-dump.patch.README.md)
+for the node list and the alignment rule. That patch is deliberately not
+written yet -- authoring one needs a llama.cpp checkout to apply and build it,
+and an unverifiable diff is the same class of artifact this section is about.
+
+### Alignment is a single token, not a ubatch
+
+llama.cpp pads a multi-token prefill ubatch with three rows at each end, so a
+3-token prompt arrives as `[pad,pad,pad,t1,t2,t3,pad,pad,pad]`. Comparing "our
+token i" against "oracle row i" is a misalignment, which is how this branch once
+reported ~14% that had to be withdrawn. Running **one** token on each side
+removes the padding row entirely and makes `step == 0` the same real token, so
+no injection switch through the forward path is needed.
 
 Prompt processing runs several ubatches, and the eval callback wrote every one
 of them to `<name>.bin` with `trunc`, so each ubatch erased its predecessor and

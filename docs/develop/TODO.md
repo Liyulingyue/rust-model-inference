@@ -313,9 +313,22 @@ LFM2 / LFM2.5 / Spark / Nemotron-H / Hunyuan / LFM2-MoE），每个 scorer 实�
       张量 shape 也对得上，输出质量正确——但这是**构造性论证 + 行为观察**，
       不是数值验证。早先「路由选中同一批专家（67,140,206）」的观测**不可信**：
       用了「首个精确匹配」做 token 映射，重复 token 全部塌到同一下标，且发生在搞懂 padding 之前。
-      oracle 侧 `ffn_moe_logits` / `ffn_moe_out` / `ffn_shexp_gated` 都已能 dump；
-      缺的是干净对齐，需给 `tests/minicpmv_reference.rs` 加一个「注入指定 embedding 行」
-      的开关，让 Rust 侧也跑 ubatch 前面那 3 个 padding row。
+      ⚠️ **本文原先写「oracle 侧 `ffn_moe_logits` / `ffn_moe_out` / `ffn_shexp_gated`
+      都已能 dump」——这是错的**，属于此前乐观记录的残留。qwen35 的 oracle patch
+      （`tools/oracle/qwen35/qwen35-llama-trace.patch`）白名单里**一个 MoE 节点都没有**，
+      并且 `architecture != "qwen35"` 直接 throw，`qwen35moe` 连加载都做不到。
+      那几个 `ffn_moe_*` dump 属于 **lfm2moe / mellum** 的 patch，是别的模型。
+      即「oracle 从未为本架构产出过这些数字」。
+      本轮已补的（2026-10-19）：Rust 侧 `RMI_MOE_DUMP` 的 append 式 dumper
+      （6 个文件、无 layer/step、无长度头，40 层 × N token 全部交错，无法归因）
+      已删除，改为 `src/models/qwen35/trunk/trace.rs` 的 `(name, layer, step)`
+      定点 checkpoint，共 10 个 MoE 节点，`forward_qwen35moe_token` 已补上
+      layer/step 参数。对齐方式定为**两侧各跑单 token**（ubatch padding 只在多 token
+      prefill 出现，单 token 下 `step == 0` 即同一个真 token，无需穿热路径插桩）。
+      **仍缺**：oracle 侧的 MoE dump patch 需要 llama.cpp checkout 才能写并验证 applies，
+      以及 35B Q8_0 权重（约 35 GB）。节点清单与对齐规则见
+      [`tools/oracle/qwen35/qwen35moe-ffn-dump.patch.README.md`](../../tools/oracle/qwen35/qwen35moe-ffn-dump.patch.README.md)。
+      `ffn_moe_topk` 是唯一能证伪「路由一致」的 checkpoint——必须 id 与顺序都对上。
 - [ ] **35B 视觉塔未与 oracle 做数值对照** — 1B 的 `pos_embed` 逐位比过，35B 完全没有。
       projector 代码零改动（两个尺寸共用同一 `minicpmv4_7` 实现，仅 `projection_dim`
       1024 → 2048），但 2048 维输出、`attn_post_norm` 全层 checkpoint 都没验证过。

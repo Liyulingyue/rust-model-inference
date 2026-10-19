@@ -285,32 +285,115 @@ fn qwen35_l2_norm_matches_pinned_llama_cpp_bits() {
         0x3d0243cb, 0x3b3fc530, 0xbc016f46, 0x3bb1d80e, 0xba45c19f, 0xba89fe14, 0x3b26ebc8,
         0xb9d28f76, 0xbbec5142,
     ];
+    // Regenerated 2026-10-19. The previous values were produced by the Rust
+    // implementation as it stood, not by the oracle: they reproduce
+    // `1/sqrt(sum + eps)` on this input 128/128 and ggml's kernel
+    // `1.0f/fmaxf(sqrtf(sum), eps)` 0/128. So the pin asserted agreement with
+    // the code under test.
+    //
+    // What settles it is the measurement, not the algebra: with this formula
+    // layer 1's whole SSM chain (conv_output_raw, q_conv, q_conv_predelta,
+    // k_conv_predelta, state_predelta, final_output) became bit-identical against
+    // a real llama.cpp process on MiniCPM-V 4.7 35B-A3B, where it had differed
+    // by up to 1e-4 and grew to 3e-2 by the last layer. See
+    // tools/oracle/qwen35/qwen35moe-ffn-dump.patch.README.md.
     const EXPECTED_BITS: [u32; 128] = [
-        0x3c05bc7c, 0x3babffb3, 0x3b60900b, 0xbf27d1ea, 0x3d49d682, 0xbc6a000e, 0x3ddfb4ee,
-        0x3d264b72, 0xbe06e996, 0x3e031a11, 0xbdedf062, 0xbb94afeb, 0xbbeb8f71, 0x3c8b4666,
-        0x3cfe7b4d, 0x3c1c6468, 0x3d76ea3d, 0x3a18f039, 0xbd760662, 0x3d8fca17, 0xbe1dce9f,
-        0xbb2d1b31, 0x3d0d4b62, 0x3d588dfc, 0xbb049ce4, 0x3dcb84d1, 0xbabac6f5, 0x3d04fae8,
-        0x399f4a5f, 0x3b0ee936, 0xbd90f390, 0xb9223764, 0xbdd39f2d, 0x3d636168, 0x3b8da54d,
-        0x3b949afd, 0xbd709660, 0xbdbd0fa8, 0xbbcfe975, 0x3d0701a6, 0xbba9244f, 0xbe5756ba,
-        0xba1e01af, 0x3c19cfc9, 0x3dc877bb, 0x3a83f32e, 0xba7a1f13, 0x3d65915e, 0x3b92ba37,
-        0x3cef2529, 0x3de82717, 0x3ae990ea, 0x3a99c310, 0xbdc37d16, 0xba5efcaa, 0x3dbf5aa9,
-        0xbb384a42, 0x3e1519d8, 0x3aeb39f1, 0x398cbc4a, 0x3e172cfc, 0x3d890021, 0xb9a93e5c,
-        0xbab4aa81, 0x3e0da19f, 0xba549441, 0xbd88b31a, 0xbc79215c, 0xbd21ec52, 0x3bc0316f,
-        0x3d75b839, 0xb9767fbf, 0x3ca0c3c6, 0xbe4b1f92, 0xbc6f599e, 0xbd39e32a, 0x3b94be69,
-        0x3e1d6fbe, 0xbb41d910, 0x3aa8b0da, 0xbbc17cb7, 0xbdef04dd, 0xbd63774f, 0x3a2c080e,
-        0x3d896259, 0xbb860fb0, 0xbc8bfd0d, 0xbba16331, 0x3c8321fd, 0x3a02c8fa, 0x3cae879f,
-        0xbc6b65a4, 0xba18a2a1, 0xbde0a0bd, 0x3d451b58, 0x3bed98f4, 0xbd597c0e, 0x3c2237f4,
-        0xbadb7e2e, 0xb9a0753b, 0xbb66dac1, 0xba1b8d3d, 0x3d8e9c09, 0xbd811aeb, 0xbdc20944,
-        0x3e150d81, 0x3dbcc06c, 0xbe1b9dd6, 0x3e30f3b6, 0x3a569007, 0x3d8f61d2, 0xba85b0a7,
-        0xba628b7f, 0xbaa1a47f, 0x3a833394, 0xb6d6c564, 0xbe318a69, 0x3cd39f93, 0x3adfd1e5,
-        0x3def24a9, 0x3c300736, 0xbced9e83, 0x3ca33ebc, 0xbb3585da, 0xbb7d5471, 0x3c193801,
-        0xbac1469e, 0xbcd8eb24,
+        0x3c05bcb8, 0x3bac0000, 0x3b60906f, 0xbf27d235, 0x3d49d6dc, 0xbc6a0077, 0x3ddfb552,
+        0x3d264bbc, 0xbe06e9d2, 0x3e031a4c, 0xbdedf0cd, 0xbb94b02d, 0xbbeb8fdb, 0x3c8b46a4,
+        0x3cfe7bbe, 0x3c1c64ae, 0x3d76eaac, 0x3a18f07d, 0xbd7606d0, 0x3d8fca57, 0xbe1dcee5,
+        0xbb2d1b7f, 0x3d0d4ba1, 0x3d588e5d, 0xbb049d1f, 0x3dcb852c, 0xbabac748, 0x3d04fb24,
+        0x399f4aa6, 0x3b0ee976, 0xbd90f3d1, 0xb92237ac, 0xbdd39f8b, 0x3d6361ce, 0x3b8da58c,
+        0x3b949b3f, 0xbd7096cc, 0xbdbd0ffc, 0xbbcfe9d2, 0x3d0701e2, 0xbba9249b, 0xbe57571a,
+        0xba1e01f6, 0x3c19d00d, 0x3dc87814, 0x3a83f369, 0xba7a1f83, 0x3d6591c5, 0x3b92ba79,
+        0x3cef2594, 0x3de8277f, 0x3ae99153, 0x3a99c355, 0xbdc37d6e, 0xba5efd0e, 0x3dbf5aff,
+        0xbb384a95, 0x3e151a1b, 0x3aeb3a5a, 0x398cbc89, 0x3e172d40, 0x3d89005e, 0xb9a93ea7,
+        0xbab4aad2, 0x3e0da1de, 0xba5494a0, 0xbd88b357, 0xbc7921cb, 0xbd21ec9a, 0x3bc031c5,
+        0x3d75b8a7, 0xb976802e, 0x3ca0c40e, 0xbe4b1fec, 0xbc6f5a09, 0xbd39e37d, 0x3b94beab,
+        0x3e1d7004, 0xbb41d966, 0x3aa8b126, 0xbbc17d0d, 0xbdef0548, 0xbd6377b4, 0x3a2c085b,
+        0x3d896296, 0xbb860fec, 0xbc8bfd4c, 0xbba16379, 0x3c832238, 0x3a02c934, 0x3cae87ed,
+        0xbc6b660e, 0xba18a2e6, 0xbde0a121, 0x3d451bb1, 0x3bed995e, 0xbd597c6f, 0x3c22383d,
+        0xbadb7e90, 0xb9a07583, 0xbb66db29, 0xba1b8d82, 0x3d8e9c48, 0xbd811b24, 0xbdc2099b,
+        0x3e150dc4, 0x3dbcc0c0, 0xbe1b9e1c, 0x3e30f405, 0x3a569067, 0x3d8f6212, 0xba85b0e3,
+        0xba628be5, 0xbaa1a4c7, 0x3a8333cf, 0xb6d6c5c4, 0xbe318ab8, 0x3cd39ff2, 0x3adfd249,
+        0x3def2514, 0x3c300785, 0xbced9eed, 0x3ca33f05, 0xbb35862b, 0xbb7d54e2, 0x3c193845,
+        0xbac146f5, 0xbcd8eb85,
     ];
 
     let mut actual = INPUT_BITS.map(f32::from_bits);
     super::util::l2_norm(&mut actual, 1e-6);
 
     assert_eq!(actual.map(f32::to_bits), EXPECTED_BITS);
+}
+
+#[test]
+fn qwen35_l2_norm_clamps_the_denominator_at_eps() {
+    // The case the pin above cannot reach: when the vector's norm is below eps,
+    // ggml's `1.0f/fmaxf(sqrtf(sum), eps)` returns exactly 1/eps, while
+    // `1/sqrt(sum + eps)` keeps growing. On this input the two scales differ by
+    // ~1000x, so a pin that only exercises well-scaled vectors cannot tell them
+    // apart -- which is how the wrong formula survived in the first place.
+    const N: usize = 128;
+    const EPS: f32 = 1e-6;
+    let tiny = vec![1e-8f32; N];
+
+    let sum: f64 = tiny.iter().map(|&v| f64::from(v * v)).sum();
+    assert!(
+        (sum as f32).sqrt() < EPS,
+        "this input is meant to sit below eps; sqrt(sum) = {:?}",
+        (sum as f32).sqrt()
+    );
+
+    let mut actual = tiny.clone();
+    super::util::l2_norm(&mut actual, EPS);
+
+    // ggml clamps, so every output is the input times exactly 1/eps.
+    for (got, &input) in actual.iter().zip(&tiny) {
+        let expected = input * (1.0f32 / EPS);
+        assert_eq!(
+            got.to_bits(),
+            expected.to_bits(),
+            "denominator was not clamped at eps"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires RMI_QWEN35_MODEL and RMI_QWEN35_PROMPT_TOKENS"]
+fn qwen35moe_single_token_trace() {
+    // Runs exactly one token so the MoE checkpoints can be joined against the
+    // oracle on (name, layer, step=0).
+    //
+    // The tokens come from an env var rather than a prompt string on purpose.
+    // The oracle prints the ids it tokenised and then processes that many
+    // tokens; re-tokenising the same text here could add a BOS or split
+    // differently and quietly compare two different tokens. Handing both sides
+    // the same ids is the only way "one token" means one token on both.
+    let path = std::env::var("RMI_QWEN35_MODEL").expect("RMI_QWEN35_MODEL must be set");
+    let ids = std::env::var("RMI_QWEN35_PROMPT_TOKENS")
+        .expect("RMI_QWEN35_PROMPT_TOKENS must be a comma-separated list");
+    let tokens: Vec<u32> = ids
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(|part| part.parse().expect("token id must be a u32"))
+        .collect();
+    assert!(
+        !tokens.is_empty(),
+        "RMI_QWEN35_PROMPT_TOKENS must name at least one token"
+    );
+
+    let source =
+        crate::open_model_source(std::path::Path::new(&path), crate::ComponentRole::Llm).unwrap();
+    let mut model = Qwen35Model::from_source(source.as_ref()).unwrap();
+    let n_ctx = model.config.n_ctx.min(tokens.len() + 1);
+    let pool = session_pool();
+    let mut session =
+        Qwen35Session::new_with_prefill_batch_size(&mut model, n_ctx, tokens.len(), pool).unwrap();
+    let positions: Vec<[usize; 4]> = (0..tokens.len()).map(|i| [i; 4]).collect();
+    // The trace is emitted from moe.rs during this call; nothing to assert here
+    // beyond it succeeding, because the comparison is done offline by
+    // tools/oracle/qwen35/check_moe.py against the oracle's manifest.
+    session.step_with_tokens(&tokens, &positions).unwrap();
 }
 
 #[test]

@@ -25,13 +25,18 @@
 
 use super::config::Qwen35Moe;
 use super::scratch::Qwen35Scratchpad;
+use super::trace;
 use super::weights::Qwen35MoeWeights;
 use crate::core::thread_pool::ComputePool;
 use crate::ops::activation::silu_inplace;
 use crate::ops::kernel::PreparedRows;
 
 /// Routed + shared expert output for one token, written into `out`.
-#[allow(clippy::too_many_arguments)]
+///
+/// `layer` and `step` key the `RMI_PARITY_TRACE` checkpoints. They are
+/// positional: without them every record lands in the same append-mode files
+/// and none can be attributed, which is how the earlier attempt at MoE parity
+/// ended up unfalsifiable.
 pub(crate) fn forward_qwen35moe_token(
     moe: &Qwen35MoeWeights<'_>,
     cfg: &Qwen35Moe,
@@ -40,6 +45,8 @@ pub(crate) fn forward_qwen35moe_token(
     out: &mut [f32],
     prepared: &mut PreparedRows,
     pool: &ComputePool,
+    layer: usize,
+    step: usize,
 ) -> Result<(), String> {
     let n_embd = input.len();
     let mut logits = vec![0.0f32; moe.n_expert];
@@ -68,11 +75,13 @@ pub(crate) fn forward_qwen35moe_token(
     if logits.iter().any(|v| !v.is_finite()) {
         return Err("qwen35moe router produced non-finite logits".into());
     }
+    trace::layer_1d("ffn_moe_logits", layer, step, &logits);
 
     let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     let exp: Vec<f32> = logits.iter().map(|v| (*v - max).exp()).collect();
     let total = exp.iter().sum::<f32>();
     let probabilities: Vec<f32> = exp.iter().map(|v| v / total).collect();
+    trace::layer_1d("ffn_moe_probs", layer, step, &probabilities);
 
     // Descending by probability, ties by ascending index: ggml_argsort_top_k
     // leaves equal keys in index order.
@@ -83,13 +92,48 @@ pub(crate) fn forward_qwen35moe_token(
             .then_with(|| a.cmp(&b))
     });
     let chosen = &order[..cfg.n_expert_used.min(moe.n_expert)];
-    let chosen_total: f32 = chosen.iter().map(|&i| probabilities[i]).sum();
 
-    // RMI_PARITY: dump the router / routed / shared terms for layer-0 token 0.
-    let dump = std::env::var("RMI_MOE_DUMP").ok();
+    // The routing decision itself, as integers. This is the checkpoint that can
+    // falsify a claim: "the same experts were selected" has to mean the same
+    // ids in the same order, not merely a plausible-looking output.
+    let chosen_ids: Vec<u32> = chosen.iter().map(|&i| i as u32).collect();
+    trace::ids("ffn_moe_topk", layer, step, &chosen_ids);
+
+    // The oracle's weight pipeline is four separate nodes and this code has to
+    // reproduce each one, because `ffn_moe_weights_norm` is unscaled there:
+    //   weights             = probs gathered at the chosen ids
+    //   weights_sum         = row sum of those
+    //   weights_sum_clamped = weights_sum clamped below at 2^-14
+    //   weights_norm        = weights / weights_sum_clamped
+    //   weights_scaled      = weights_norm * expert_weights_scale
+    // Folding the scale into the divide, as this code used to, is algebraically
+    // the same but not bit-identical: (s*p)/sum and (p/sum)*s differ in the
+    // last bits, and that is exactly the magnitude that moves a router argmax.
+    let gathered: Vec<f32> = chosen.iter().map(|&i| probabilities[i]).collect();
+    trace::layer_1d("ffn_moe_weights", layer, step, &gathered);
+
+    let sum: f32 = gathered.iter().sum();
+    trace::layer_1d("ffn_moe_weights_sum", layer, step, &[sum]);
+
+    // `ggml_clamp(ctx0, weights_sum, 6.103515625e-5, INFINITY)` -- 2^-14. Not
+    // cosmetic: without it a token whose chosen weights sum to ~0 divides by
+    // ~0 and the routed output becomes non-finite.
+    const SUM_FLOOR: f32 = 6.103515625e-5;
+    let sum_clamped = sum.max(SUM_FLOOR);
+    trace::layer_1d("ffn_moe_weights_sum_clamped", layer, step, &[sum_clamped]);
+
+    let normed: Vec<f32> = gathered.iter().map(|w| w / sum_clamped).collect();
+    trace::layer_1d("ffn_moe_weights_norm", layer, step, &normed);
+
+    let scaled: Vec<f32> = normed.iter().map(|w| w * weights_scale).collect();
+    trace::layer_1d("ffn_moe_weights_scaled", layer, step, &scaled);
+
+    // Rust-only, no oracle counterpart: the block input both expert paths read.
+    // The compare script reports it as unjoinable rather than failing on it.
+    trace::layer_1d("ffn_moe_input", layer, step, input);
 
     let mut routed = vec![0.0f32; n_embd];
-    for &expert in chosen {
+    for (slot, &expert) in chosen.iter().enumerate() {
         let gate_w = moe.gate(expert);
         let up_w = moe.up(expert);
         let down_w = moe.down(expert);
@@ -120,11 +164,13 @@ pub(crate) fn forward_qwen35moe_token(
             down_w.uses_q8_k(),
         )?;
         prepared.matmul(&down_w, &gate, &mut down, pool)?;
-        let score = weights_scale * probabilities[expert] / chosen_total;
+        let score = scaled[slot];
         for (o, v) in routed.iter_mut().zip(down) {
             *o += score * v;
         }
     }
+    // `ffn_moe_out` is the routed term alone, before the shared expert is added.
+    trace::layer_1d("ffn_moe_out", layer, step, &routed);
 
     // Shared expert. With LLM_FFN_PAR the gate projection reads `input`
     // directly, so this is `silu(gate @ input) * (up @ input)`.
@@ -135,7 +181,12 @@ pub(crate) fn forward_qwen35moe_token(
         moe.gate_shexp.as_ref(),
         moe.down_shexp.as_ref(),
     ) else {
+        // A tower with routed experts but no shared expert. `ffn_moe_out` is
+        // already checkpointed above, so the routed path stays fully observable;
+        // only the shexp checkpoints are unavailable, and saying so in the trace
+        // beats letting them silently go missing.
         out.copy_from_slice(&routed);
+        trace::layer_1d("ffn_shexp_gated", layer, step, &[]);
         return Ok(());
     };
     // The SwiGLU intermediate is `n_ff_shexp`, not the projection's output
@@ -168,41 +219,25 @@ pub(crate) fn forward_qwen35moe_token(
         down_shexp.uses_q8_k(),
     )?;
     prepared.matmul(down_shexp, &gate, &mut shared_acc, pool)?;
+    // `ffn_shexp` is the shared FFN *before* the gate multiplies it.
+    trace::layer_1d("ffn_shexp", layer, step, &shared_acc);
 
+    // The oracle's gate is `build_lora_mm(ffn_gate_inp_shexp, cur)` then a
+    // sigmoid, emitted as two nodes. `sigmoid(x)` here is the algebraically
+    // equal `1/(1+exp(-x))`; keep it as ggml writes it so the bits match.
+    trace::layer_1d("shared_expert_gate", layer, step, &shared_gate);
     let scale = 1.0 / (1.0 + (-shared_gate[0]).exp());
+    trace::layer_1d("shared_expert_gate_sigmoid", layer, step, &[scale]);
+
     // cur = moe_out + ffn_shexp * sigmoid(gate_inp_shexp . cur).
     for (o, shared) in out.iter_mut().zip(&shared_acc) {
         *o += scale * shared;
     }
-    if let Some(dir) = &dump {
-        if cfg.n_expert == 256 && cfg.n_expert_used == 8 {
-            let w = |v: &[f32]| -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() };
-            use std::io::Write as _;
-            let mut open = |name: &str| {
-                std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(format!("{dir}/{name}"))
-            };
-            if let Ok(mut f) = open("input.bin") {
-                let _ = f.write_all(&w(input));
-            }
-            if let Ok(mut f) = open("router.bin") {
-                let _ = f.write_all(&w(&logits));
-            }
-            if let Ok(mut f) = open("routed.bin") {
-                let _ = f.write_all(&w(&routed));
-            }
-            if let Ok(mut f) = open("shared.bin") {
-                let _ = f.write_all(&w(&shared_acc));
-            }
-            if let Ok(mut f) = open("out.bin") {
-                let _ = f.write_all(&w(out));
-            }
-            if let Ok(mut f) = open("scale.bin") {
-                let _ = f.write_all(&w(&[scale]));
-            }
-        }
-    }
+    // The oracle names the gated product `ffn_shexp_gated` and the final sum
+    // `ffn_out`. This code used to dump the *pre*-gate accumulator under the
+    // first name, which would have compared two different tensors.
+    let gated: Vec<f32> = shared_acc.iter().map(|s| scale * s).collect();
+    trace::layer_1d("ffn_shexp_gated", layer, step, &gated);
+    trace::layer_1d("ffn_out", layer, step, out);
     Ok(())
 }

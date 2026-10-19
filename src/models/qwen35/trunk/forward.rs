@@ -211,8 +211,31 @@ impl<'a> super::weights::HybridTrunk<'a> {
         #[cfg(feature = "parity-trace")]
         let first_dense_layer = self.config.is_recurrent.iter().position(|value| !*value);
         #[cfg(feature = "parity-trace")]
-        let trace_layer =
-            |layer: usize| layer == 0 || first_dense_layer == Some(layer) || layer + 1 == n_layer;
+        let trace_layer = {
+            // Extra layers named by RMI_QWEN35_TRACE_LAYERS, on top of the
+            // defaults. Bisecting a divergence needs the layers in between, and
+            // hardcoding one into this predicate would mean editing production
+            // code to look at a different layer each time.
+            //
+            // The defaults are layer 0, the first dense layer and the last. That
+            // set is not enough: the per-layer profile said layer 0 matches and
+            // layer 3 does not, which locates a difference between two layers and
+            // not the layer that caused it.
+            let mut extra: Vec<usize> = Vec::new();
+            if let Ok(spec) = std::env::var("RMI_QWEN35_TRACE_LAYERS") {
+                for part in spec.split(',') {
+                    if let Ok(layer) = part.trim().parse::<usize>() {
+                        extra.push(layer);
+                    }
+                }
+            }
+            move |layer: usize| {
+                extra.contains(&layer)
+                    || layer == 0
+                    || first_dense_layer == Some(layer)
+                    || layer + 1 == n_layer
+            }
+        };
 
         #[cfg(feature = "parity-trace")]
         if edge0 {
@@ -328,6 +351,23 @@ impl<'a> super::weights::HybridTrunk<'a> {
                 );
             }
             #[cfg(feature = "parity-trace")]
+            if trace_layer(il) {
+                // `attn_post_norm` is the FFN's input and therefore the MoE's
+                // direct input -- the node that decides whether a later expert
+                // divergence originated upstream or inside the experts. Only
+                // edge0 was dumping it before, so a qwen35moe layer-3 router
+                // difference could not be traced to its source: layer 0's
+                // `ffn_moe_logits` is bit-exact while layer 3's is not, which
+                // says the split happens between the layers, and without this
+                // there was no checkpoint on either side to say where.
+                parity_trace::report(parity_trace::checkpoint_rows(
+                    &format!("attn_post_norm-{il}"),
+                    Some(il),
+                    &[n_tokens, n_embd],
+                    &scratch.buf[..n_tokens * n_embd],
+                ));
+            }
+            #[cfg(feature = "parity-trace")]
             if edge0 && trace_layer(il) {
                 parity_trace::report(parity_trace::checkpoint_rows(
                     &format!("edge0.moe_input-{il}"),
@@ -359,6 +399,8 @@ impl<'a> super::weights::HybridTrunk<'a> {
                         &mut scratch.buf[offset..offset + n_embd],
                         &mut scratch.prepared,
                         pool,
+                        il,
+                        token,
                     )?;
                 }
             }
@@ -388,8 +430,11 @@ impl<'a> super::weights::HybridTrunk<'a> {
             }
             #[cfg(feature = "parity-trace")]
             {
+                // Named `l_out` to match the oracle (qwen35moe.cpp line 222,
+                // the last cb of the layer). `scratch.x` is the layer output
+                // after the FFN residual, which is exactly that node.
                 parity_trace::report(parity_trace::checkpoint_rows(
-                    &format!("layer_output-{il}"),
+                    &format!("l_out-{il}"),
                     Some(il),
                     &[n_tokens, n_embd],
                     &scratch.x[..n_tokens * n_embd],
@@ -904,6 +949,20 @@ impl<'a> super::weights::HybridTrunk<'a> {
                     scratch.v_buf2[t * value_dim + h * head_v_dim + d] =
                         scratch.qkv_buf[qkv_off + 2 * key_dim + h * head_v_dim + d];
                 }
+            }
+            // Before the q/k L2 norms. The oracle emits `q_conv` here (the
+            // linear's output) and `q_conv_predelta` after the norm, so without
+            // this the two checkpoints cannot say whether a difference came out
+            // of the projection or out of the normalisation -- and those are
+            // very different bugs.
+            #[cfg(feature = "parity-trace")]
+            if trace_layer {
+                parity_trace::report(parity_trace::checkpoint_rows(
+                    &format!("q_conv_prenorm-{il}"),
+                    Some(il),
+                    &[n_tokens, key_dim],
+                    &scratch.q_buf[..n_tokens * key_dim],
+                ));
             }
             for h in 0..num_k_heads {
                 let q = &mut scratch.q_buf[t * key_dim + h * head_k_dim..][..head_k_dim];
