@@ -1,0 +1,14 @@
+# Unified diffs are byte-exact data, not text to be re-wrapped.
+#
+# With core.autocrlf=true (the Windows default, and this repo has it set) and no
+# rule here, git rewrites every context line of a .patch to CRLF on checkout.
+# `git apply` then rejects the hunk as corrupt -- it stops at the first blank
+# context line, whose lone \r matches no tag. Every oracle build script applies
+# its patch with plain `git apply`, so all of them fail on Windows while working
+# fine on Linux.
+#
+# Found via tools/oracle/qwen35/qwen35-llama-trace.patch, which was the first one
+# exercised on this machine; all 17 patches under tools/oracle were affected the
+# same way. `-text` tells git not to touch the file's contents at all in either
+# direction, so the blob and the working copy stay byte-identical.
+*.patch -text
