@@ -1,0 +1,296 @@
+diff --git a/examples/eval-callback/eval-callback.cpp b/examples/eval-callback/eval-callback.cpp
+index 8846f0c..4a62f2a 100644
+--- a/examples/eval-callback/eval-callback.cpp
++++ b/examples/eval-callback/eval-callback.cpp
+@@ -33,10 +33,63 @@ static bool selected_layer(const std::string & name, const char * prefix, int la
+ 
+ static int last_layer = 63;
+ 
++// qwen35moe routed + shared expert nodes. These are the names build_moe_ffn
++// (llama-graph.cpp) and llama_model_qwen35moe::build_layer_ffn actually emit;
++// nothing here is invented. The per-layer suffix is added by cb(), hence
++// selected_layer. ffn_moe_input is deliberately absent: no oracle node carries
++// it, so comparing it would be comparing two different things.
++static bool selected_moe(const std::string & name) {
++    for (int layer : {0, 3, last_layer}) {
++        for (const char * prefix : {
++                "ffn_moe_logits", "ffn_moe_probs", "ffn_moe_topk", "ffn_moe_argsort",
++                "ffn_moe_weights", "ffn_moe_weights_sum",
++                "ffn_moe_weights_sum_clamped", "ffn_moe_weights_norm",
++                "ffn_moe_weights_scaled", "ffn_moe_out", "ffn_out",
++                "ffn_shexp", "ffn_shexp_gated",
++                "shared_expert_gate", "shared_expert_gate_sigmoid"}) {
++            if (selected_layer(name, prefix, layer)) return true;
++        }
++    }
++    // Per-layer boundary, every layer. Three spot checks located the difference
++    // ("layer 0 exact, layer 3 differs") but not where it starts, and this is
++    // the node that says: `attn_post_norm` is the FFN's input, so the first
++    // layer where it disagrees names the first layer that computed something
++    // differently. Without it every hypothesis about the attention or SSM half
++    // is a guess. Cost is 40 x 2048 floats per side, which is nothing.
++    for (const char * prefix : {"attn_post_norm", "l_out"}) {
++        const char * digits = prefix + strlen(prefix);
++        (void) digits;
++        if (starts_with(name, prefix) && name.find('-') != std::string::npos) {
++            const size_t dash = name.rfind('-');
++            const std::string tail = name.substr(dash + 1);
++            if (!tail.empty() && tail.find_first_not_of("0123456789") == std::string::npos) {
++                return true;
++            }
++        }
++    }
++    // SSM internals at layer 1; see the comment where they are written.
++    for (const char * prefix : {"conv_output_raw", "q_conv", "k_conv",
++                                "q_conv_predelta", "k_conv_predelta",
++                                "state_predelta", "final_output"}) {
++        if (selected_layer(name, prefix, 1)) return true;
++    }
++    // Attention internals at layer 3, the first dense layer. Once the L2 norm
++    // matched, layers 0-2 (SSM) came back to ~1e-9 and the first remaining
++    // difference is at layer 3's FFN input -- so the split moved into the
++    // attention path. These are the nodes along it.
++    for (const char * prefix : {"attn_norm", "Qcur_normed", "Kcur_normed",
++                                "Qcur", "Kcur", "attn_gated", "attn_output",
++                                "attn_residual", "attn_post_norm"}) {
++        if (selected_layer(name, prefix, 3)) return true;
++    }
++    return false;
++}
++
+ static bool selected_data(const std::string & name) {
+     if (name == "model.input_embed" || name == "result_norm" || name == "result_output") {
+         return true;
+     }
++    if (selected_moe(name)) return true;
+     for (int layer : {0, 3, last_layer}) {
+         if (selected_layer(name, "l_out", layer)) return true;
+     }
+@@ -206,6 +259,141 @@ public:
+         write_tokens("qwen35.greedy_token_ids", tokens);
+     }
+ 
++    // MoE checkpoints, one step at a time.
++    //
++    // Separate from write() on purpose: write() asserts on the SSM chain
++    // (conv_output_raw-0, state_predelta-0, ...) and throws when a name is
++    // missing, which is the wrong failure for a tower whose interest is the
++    // experts. This only touches names it verified are present.
++    void write_moe(const std::vector<llama_token> & tokens, int n_layer, int step) {
++        write_tokens("qwen35moe.prompt_ids", tokens);
++        for (int layer = 0; layer < n_layer; ++layer) {
++            const std::string suffix = "-" + std::to_string(layer);
++            // Boundary nodes for every layer: this is the per-layer profile.
++            for (const char * name : {"attn_post_norm", "l_out"}) {
++                const std::string full = std::string(name) + suffix;
++                if (!tensors_.count(full)) continue;
++                write_moe_tensor(full, name, layer, step);
++            }
++        }
++        for (int layer : {0, 3, last_layer}) {
++            const std::string suffix = "-" + std::to_string(layer);
++            for (const char * name : {
++                    "ffn_moe_logits", "ffn_moe_probs", "ffn_moe_topk",
++                    "ffn_moe_weights", "ffn_moe_weights_sum",
++                    "ffn_moe_weights_sum_clamped", "ffn_moe_weights_norm",
++                    "ffn_moe_weights_scaled", "ffn_moe_out", "ffn_out",
++                    "ffn_shexp", "ffn_shexp_gated",
++                    "shared_expert_gate", "shared_expert_gate_sigmoid"}) {
++                const std::string full = std::string(name) + suffix;
++                if (!tensors_.count(full)) continue;
++                write_moe_tensor(full, name, layer, step);
++            }
++        }
++    // SSM internals, layer 1 only.
++    //
++    // The per-layer profile says layer 0 is fine (its output differs by 1.9e-9,
++    // the MoE's own accumulation) and layer 1 turns that into 1.3e-5 -- an
++    // amplification of roughly 7000x, which no well-conditioned layer does to
++    // its input. So the difference is inside layer 1's recurrence, and these are
++    // the nodes that place it: the short convolution on the way in, the two
++    // pre-delta convolutions, the state update, and the attention output the
++    // state is read into. Layer 0 is not dumped for these because it is already
++    // known good, and every one of these is large enough that dumping all
++    // forty layers would be wasteful.
++    // `q_conv` and `k_conv` are the linear's output, before the L2 norm that
++    // produces `q_conv_predelta`. Having both says whether a difference came
++    // out of the projection or out of the normalisation.
++    for (const char * name : {"conv_output_raw", "q_conv", "k_conv",
++                              "q_conv_predelta", "k_conv_predelta",
++                              "state_predelta", "final_output"}) {
++        const std::string full = std::string(name) + "-1";
++        if (!tensors_.count(full)) continue;
++        write_moe_tensor(full, name, 1, step);
++    }
++
++    // Attention chain at layer 3, the first dense layer, in graph order.
++    for (const char * name : {"attn_norm", "Qcur", "Kcur", "Qcur_normed", "Kcur_normed",
++                              "attn_gated", "attn_output", "attn_residual",
++                              "attn_post_norm"}) {
++        const std::string full = std::string(name) + "-3";
++        if (!tensors_.count(full)) continue;
++        write_moe_tensor(full, name, 3, step);
++    }
++
++        // The final logits.
++        //
++        // Every per-layer checkpoint answers "do the experts compute the same
++        // thing", which is not the question a user has. The question is whether
++        // the model emits the same token. Two layers out of forty carrying a
++        // 3.6e-4 relative difference say nothing about whether that survives to
++        // the argmax, so the comparison has to end here.
++        for (const char * name : {"result_norm", "result_output"}) {
++            if (!tensors_.count(name)) continue;
++            write_moe_tensor(name, name, -1, step);
++        }
++        (void) n_layer;
++    }
++
++private:
++    // Writes one MoE checkpoint keyed on (name, layer, step).
++    //
++    // I32 is widened to f32 on write. ffn_moe_topk is the oracle's I32 node and
++    // the Rust side emits the same ids as f32, so one binary format on both
++    // sides is what lets them join; expert ids are small and survive the
++    // widening exactly. The alternative -- keeping I32 here -- means the compare
++    // script has to know which names are integer-typed, which is exactly the
++    // kind of assumption that turns into a silent mismatch later.
++    void write_moe_tensor(const std::string & source_name, const std::string & output_name,
++            int layer, int step) {
++        const auto & snapshot = get(source_name);
++        std::vector<float> values;
++        if (snapshot.type == GGML_TYPE_F32) {
++            values = snapshot.f32;
++        } else if (snapshot.type == GGML_TYPE_I32) {
++            values.reserve(snapshot.i32.size());
++            for (int32_t value : snapshot.i32) values.push_back(float(value));
++        } else {
++            throw std::runtime_error("moe checkpoint is neither F32 nor I32: " + source_name);
++        }
++        std::vector<int64_t> shape;
++        for (int64_t i = 0; i < GGML_MAX_DIMS; ++i) {
++            if (snapshot.ne[i] > 1) shape.push_back(snapshot.ne[i]);
++        }
++        // A one-token run makes every scalar checkpoint a 1-element tensor whose
++        // ne is all ones -- ffn_moe_weights_sum, ffn_moe_weights_sum_clamped,
++        // shared_expert_gate, shared_expert_gate_sigmoid. Dropping every
++        // dimension of extent 1 leaves nothing, so fall back to the element
++        // count. Without this the run aborts on the first scalar, after the
++        // vector checkpoints have already been written, which looks like a
++        // silent truncation rather than a failure.
++        if (shape.empty()) shape.push_back(int64_t(values.size()));
++        size_t expected = 1;
++        for (int64_t dimension : shape) expected *= size_t(dimension);
++        if (expected != values.size()) {
++            throw std::runtime_error("moe shape mismatch for " + source_name);
++        }
++        const size_t occurrence = occurrences_[output_name]++;
++        std::string binary_path = path_ + "." + output_name;
++        if (occurrence) binary_path += "." + std::to_string(occurrence);
++        binary_path += ".f32";
++        std::ofstream binary(binary_path, std::ios::binary | std::ios::trunc);
++        for (float value : values) {
++            uint32_t bits;
++            std::memcpy(&bits, &value, sizeof(bits));
++            const char bytes[] = {char(bits), char(bits >> 8), char(bits >> 16), char(bits >> 24)};
++            binary.write(bytes, sizeof(bytes));
++        }
++        if (!binary) throw std::runtime_error("failed to write " + binary_path);
++
++        manifest_ << "{\"name\":\"" << output_name << "\",\"layer\":" << layer
++                  << ",\"step\":" << step << ",\"shape\":[";
++        write_shape(shape);
++        manifest_ << "],\"len\":" << values.size() << ",\"occurrence\":" << occurrence
++                  << ",\"binary_path\":\"" << json_escape(binary_path) << "\"}\n";
++        manifest_.flush();
++    }
++
+ private:
+     const tensor_snapshot & get(const std::string & name) const {
+         const auto found = tensors_.find(name);
+@@ -315,19 +503,59 @@ static llama_token greedy_token(llama_context * ctx, int n_vocab) {
+     return best;
+ }
+ 
++// qwen35moe: one token in, one token out.
++//
++// The refusal on tokens.size() != 1 is the whole point. llama.cpp pads a
++// multi-token prefill ubatch with three rows at each end, so a 3-token prompt
++// reaches the graph as [pad,pad,pad,t1,t2,t3,pad,pad,pad]. Comparing "our token
++// i" against "oracle row i" is then a misalignment, and this branch has already
++// published and retracted a ~14% discrepancy that came from exactly that. With
++// one token there is no padding row and step 0 is the same real token on both
++// sides.
++static bool run_moe(llama_context * ctx, const common_params & params, parity_trace & trace) {
++    const llama_model * model = llama_get_model(ctx);
++    const llama_vocab * vocab = llama_model_get_vocab(model);
++    const bool add_bos = llama_vocab_get_add_bos(vocab);
++    std::vector<llama_token> tokens = common_tokenize(ctx, params.prompt, add_bos, true);
++    if (tokens.size() != 1) {
++        throw std::runtime_error(
++                "qwen35moe oracle needs exactly one token so no ubatch padding can be "
++                "confused with a real token; got " + std::to_string(tokens.size()));
++    }
++    const int n_layer = llama_model_n_layer(model);
++    if (llama_decode(ctx, llama_batch_get_one(tokens.data(), 1))) return false;
++    trace.write_moe(tokens, n_layer, 0);
++    return true;
++}
++
+ static bool run(llama_context * ctx, const common_params & params, parity_trace & trace) {
+     const llama_model * model = llama_get_model(ctx);
+     const llama_vocab * vocab = llama_model_get_vocab(model);
++    const int n_layer = llama_model_n_layer(model);
++    // Set before the qwen35moe dispatch below, not after it. `selected_moe`
++    // selects layers {0, 3, last_layer}, so leaving this at its default of 63
++    // while the model has 40 layers silently drops the last layer from the
++    // dump -- and the last layer is the one carrying the most accumulated
++    // difference. The first run of this reported layers 0 and 3 and nothing
++    // else, which read as "the last layer matched" rather than as "the last
++    // layer was never measured".
++    last_layer = n_layer - 1;
+     char architecture[32];
+-    if (llama_model_meta_val_str(model, "general.architecture", architecture, sizeof(architecture)) < 0 ||
+-            std::string(architecture) != "qwen35") {
+-        throw std::runtime_error("Oracle requires general.architecture=qwen35");
++    if (llama_model_meta_val_str(model, "general.architecture", architecture, sizeof(architecture)) < 0) {
++        throw std::runtime_error("model has no general.architecture");
++    }
++    // qwen35moe is the same hybrid SSM stack plus routed and shared experts.
++    // It gets its own run() because the checkpoint set is the experts, not the
++    // SSM chain, and the alignment rule is stricter.
++    if (std::string(architecture) == "qwen35moe") {
++        return run_moe(ctx, params, trace);
++    }
++    if (std::string(architecture) != "qwen35") {
++        throw std::runtime_error("Oracle requires general.architecture=qwen35 or qwen35moe");
+     }
+-    const int n_layer = llama_model_n_layer(model);
+     if (n_layer < 4 || n_layer % 4 != 0) {
+         throw std::runtime_error("Oracle requires full attention every fourth layer");
+     }
+-    last_layer = n_layer - 1;
+     if (params.n_predict < 1) throw std::runtime_error("Oracle requires -n >= 1");
+ 
+     const bool add_bos = llama_vocab_get_add_bos(vocab);
+@@ -381,7 +609,19 @@ int main(int argc, char ** argv) {
+     auto * ctx = llama_init->context();
+     if (model == nullptr || ctx == nullptr) return 1;
+ 
+-    const bool ok = run(ctx, params, trace);
++    // run() throws on every precondition failure -- wrong architecture, more
++    // than one token, a missing checkpoint, a shape that does not match its
++    // buffer. Left uncaught those become an abort with exit code 0xC0000409 and
++    // no message at all, which reads as a crash in llama.cpp rather than as the
++    // reason it stopped. Print it and exit non-zero instead.
++    bool ok;
++    try {
++        ok = run(ctx, params, trace);
++    } catch (const std::exception & err) {
++        fprintf(stderr, "oracle failed: %s\n", err.what());
++        llama_backend_free();
++        return 1;
++    }
+     if (ok) llama_perf_context_print(ctx);
+     llama_backend_free();
+     return ok ? 0 : 1;
