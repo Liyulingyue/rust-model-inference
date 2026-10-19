@@ -38,6 +38,15 @@ pub struct Lfm2Session<'a> {
     pub kv_cache: KvCache,
     pub scratch: ExecutionScratchpad,
     pub pool: Arc<ComputePool>,
+    /// The KV format this session was constructed with.
+    ///
+    /// `forward_logits_chunked` delegates to the free-function path, which
+    /// allocates its own cache, so it has to be told the format explicitly
+    /// rather than infer it from `kv_cache`. It used to hard-code `F16`
+    /// regardless of what the caller asked for, which silently made a session
+    /// constructed with `KvFormat::F32` compute in F16 — enough to produce
+    /// phantom divergences against an F32 oracle.
+    pub kv_format: KvFormat,
     /// Vocabulary size for the LM head. Captured here so the
     /// free-function path's internal `BPETokenizer` reconstruction
     /// doesn't have to round-trip the GGUF metadata on every call.
@@ -135,6 +144,7 @@ impl<'a> Lfm2Session<'a> {
             },
             source,
             kv_cache,
+            kv_format,
             scratch,
             pool,
             vocab,
@@ -173,7 +183,7 @@ impl<'a> Lfm2Session<'a> {
             self.source,
             prompt_tokens,
             self.pool.n_threads(),
-            KvFormat::F16,
+            self.kv_format,
             self.config.n_ctx,
             batch_size,
         )
