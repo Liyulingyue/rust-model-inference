@@ -32,11 +32,11 @@ def main() -> None:
     parser.add_argument("--frame-trace", type=Path, help="optional focused first-frame Rust trace")
     parser.add_argument("--mel-f32", type=Path, help="time-major normalized Mel input for a focused trace")
     args = parser.parse_args()
-    records = [json.loads(line) for line in args.rust_trace.read_text().splitlines()]
+    records = [json.loads(line) for line in args.rust_trace.read_text(encoding="utf-8").splitlines()]
     if args.frame_trace:
         records = [record for record in records if record["name"] not in
                    ("audio8.norm1", "audio8.layer_output")]
-        records += [json.loads(line) for line in args.frame_trace.read_text().splitlines()]
+        records += [json.loads(line) for line in args.frame_trace.read_text(encoding="utf-8").splitlines()]
     by_name = {record["name"]: record for record in records if record.get("occurrence") == 0}
     if args.mel_f32:
         mel = np.fromfile(args.mel_f32, dtype="<f4").reshape(-1, 128)

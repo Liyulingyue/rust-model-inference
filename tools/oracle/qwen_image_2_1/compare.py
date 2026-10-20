@@ -14,7 +14,7 @@ if not __debug__:
 
 
 def records(path):
-    result = [json.loads(line) for line in Path(path).read_text().splitlines()]
+    result = [json.loads(line) for line in Path(path).read_text(encoding="utf-8").splitlines()]
     assert result, f"empty trace: {path}"
     for row in result:
         assert math.prod(row["shape"]) == row["len"], row["name"]

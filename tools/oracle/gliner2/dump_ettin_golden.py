@@ -132,7 +132,7 @@ def main() -> None:
     # BPE vocabulary.
     state = load_file(str(model_dir / "model.safetensors"))
     rows = state["encoder.embeddings.tok_embeddings.weight"].shape[0]
-    fast = json.loads((model_dir / "tokenizer.json").read_text())
+    fast = json.loads((model_dir / "tokenizer.json").read_text(encoding="utf-8"))
     highest = max(int(entry["id"]) for entry in fast.get("added_tokens", []))
     if rows != highest + 1:
         raise ValueError(

@@ -172,7 +172,7 @@ def write_gguf(hf_dir: Path, out_path: Path) -> None:
     cfg_path = hf_dir / "config.json"
     if not cfg_path.is_file():
         raise FileNotFoundError(f"missing config.json at {cfg_path}")
-    cfg = json.loads(cfg_path.read_text())
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
     text = cfg.get("text_config", {})
     vision = cfg.get("vision_config", {})
     audio = cfg.get("audio_config", {})
@@ -199,11 +199,11 @@ def write_gguf(hf_dir: Path, out_path: Path) -> None:
     tok_cfg_path = hf_dir / "tokenizer_config.json"
     if not tok_cfg_path.is_file():
         raise FileNotFoundError(f"missing tokenizer_config.json at {tok_cfg_path}")
-    tok_cfg = json.loads(tok_cfg_path.read_text())
+    tok_cfg = json.loads(tok_cfg_path.read_text(encoding="utf-8"))
     tok_json_path = hf_dir / "tokenizer.json"
     if not tok_json_path.is_file():
         raise FileNotFoundError(f"missing tokenizer.json at {tok_json_path}")
-    tok_json = json.loads(tok_json_path.read_text())
+    tok_json = json.loads(tok_json_path.read_text(encoding="utf-8"))
     merges = tok_json["model"]["merges"]
 
     st = open_safetensors(hf_dir / "model.safetensors")

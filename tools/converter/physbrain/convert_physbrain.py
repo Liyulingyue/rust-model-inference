@@ -96,7 +96,12 @@ TEXT_ROPE_FREQ_BASE = 5_000_000.0
 TEXT_NORM_EPS = 1e-6
 TEXT_HEAD_DIM = 128  # n_embd / n_head = 2048 / 16
 TEXT_ROPE_SECTIONS = [24, 20, 20, 0]
-TEXT_DIMENSION_COUNT = 64  # rope.dimension_count (HEAD_DIM/2 for Qwen3VL)
+# rope.dimension_count is the number of rotated lanes per head, and for Qwen3-VL
+# it is the *whole* head dim: llama.cpp asserts `n_embd_head == n_rot`
+# (src/models/qwen3vl.cpp) and reads n_rot from this key when it is present.
+# HEAD_DIM/2 would make llama.cpp abort on load, and it would also tell this
+# engine to rotate 64 lanes when the model rotates 128.
+TEXT_DIMENSION_COUNT = 128
 # Vision-side metadata values
 VISION_BLOCK_COUNT = 24
 VISION_EMBEDDING_LENGTH = 1024
@@ -118,7 +123,7 @@ def _read_hf_config(hf_dir: Path) -> dict:
     cfg_path = hf_dir / "config.json"
     if not cfg_path.is_file():
         raise FileNotFoundError(f"missing HF config.json at {cfg_path}")
-    cfg = json.loads(cfg_path.read_text())
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
     text = cfg.get("text_config", {})
     vision = cfg.get("vision_config", {})
     # Pin dimensions from the actual config so any drift is caught early.
@@ -157,11 +162,11 @@ def _read_tokenizer(hf_dir: Path) -> tuple[dict, dict, list[str]]:
     tok_path = hf_dir / "tokenizer.json"
     if not tok_path.is_file():
         raise FileNotFoundError(f"missing tokenizer.json at {tok_path}")
-    tok = json.loads(tok_path.read_text())
+    tok = json.loads(tok_path.read_text(encoding="utf-8"))
     cfg_path = hf_dir / "tokenizer_config.json"
     if not cfg_path.is_file():
         raise FileNotFoundError(f"missing tokenizer_config.json at {cfg_path}")
-    return json.loads(cfg_path.read_text()), tok, tok["model"]["merges"]
+    return json.loads(cfg_path.read_text(encoding="utf-8")), tok, tok["model"]["merges"]
 
 
 def _build_vocab(

@@ -44,9 +44,15 @@ unsafe fn exp_approx_inplace_avx2(values: &mut [f32]) {
 pub(crate) unsafe fn exp_approx_avx2(x: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
     use std::arch::x86_64::*;
 
+    // The exponent below is built by shifting float bits, so it can only
+    // represent 2**n while n stays within the f32 exponent field. Clamping at
+    // 88.376_26 lets n reach -128, and that wrap turns exp(-88.376) into -inf
+    // instead of an underflowed zero -- which made SiLU of any gate above
+    // ~88.4 collapse to zero and silently drop that FFN channel. 88.0 keeps
+    // n at +-127, the largest magnitude still representable.
     let x = _mm256_max_ps(
-        _mm256_min_ps(x, _mm256_set1_ps(88.376_26)),
-        _mm256_set1_ps(-88.376_26),
+        _mm256_min_ps(x, _mm256_set1_ps(88.0)),
+        _mm256_set1_ps(-88.0),
     );
     let magic = _mm256_set1_ps(f32::from_bits(0x4b40_0000));
     let z = _mm256_add_ps(_mm256_mul_ps(x, _mm256_set1_ps(1.442_695_1)), magic);
@@ -140,4 +146,44 @@ pub(crate) unsafe fn exp_approx_neon(
         vmulq_f32(s1, s1),
         vbslq_f32(c, vmulq_f32(vfmaq_f32(s2, s2, j), s1), vfmaq_f32(k, k, j)),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::exp_approx_inplace;
+
+    /// The fast path builds `2**n` by shifting float bits, so the clamp bound
+    /// must keep `n` inside the f32 exponent field. A bound that allowed
+    /// `n == -128` wrapped to `-inf` instead of underflowing to zero, which
+    /// made `silu` of any gate above ~88.4 collapse to zero and silently drop
+    /// that FFN channel.
+    #[test]
+    fn exp_approx_never_wraps_negative() {
+        let inputs: Vec<f32> = (0..512).map(|i| i as f32 * 0.8 - 200.0).collect();
+        let mut values = inputs.clone();
+        exp_approx_inplace(&mut values);
+        for (input, got) in inputs.iter().zip(&values) {
+            assert!(*got >= 0.0, "exp_approx({input}) wrapped to {got}");
+        }
+    }
+
+    /// The exact value that exposed the bug: gate 131.219 in the PhysBrain
+    /// FFN made `exp(-131.219)` wrap to `-inf`. Padded past the vector width so
+    /// the SIMD path runs rather than the scalar tail.
+    #[test]
+    fn exp_approx_underflows_to_zero_at_the_clamp_floor() {
+        let probes = [-88.0f32, -88.376_26, -90.0, -100.0, -131.219];
+        let mut values = vec![0.0f32; 16];
+        for (slot, probe) in values.iter_mut().zip(probes.iter()) {
+            *slot = *probe;
+        }
+        exp_approx_inplace(&mut values);
+        for (input, got) in probes.iter().zip(&values) {
+            assert!(*got >= 0.0, "exp_approx({input}) = {got}");
+            assert!(
+                got.abs() < 1e-30,
+                "exp_approx({input}) should underflow to ~0, got {got}"
+            );
+        }
+    }
 }

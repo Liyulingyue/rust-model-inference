@@ -78,7 +78,7 @@ def _read_hf_config(checkpoint_dir: Path) -> dict:
     cfg_path = checkpoint_dir / "config.json"
     if not cfg_path.is_file():
         raise FileNotFoundError(f"missing HF config.json at {cfg_path}")
-    return json.loads(cfg_path.read_text())
+    return json.loads(cfg_path.read_text(encoding="utf-8"))
 
 
 def _read_hf_score_weight(safetensors_path: Path) -> bytes:

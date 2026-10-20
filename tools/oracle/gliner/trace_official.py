@@ -25,7 +25,7 @@ def main():
     parser.add_argument("--trace", type=Path, required=True)
     parser.add_argument("--scalar", action="store_true")
     arguments = parser.parse_args()
-    request = json.loads(arguments.request.read_text())
+    request = json.loads(arguments.request.read_text(encoding="utf-8"))
     torch.set_num_threads(1)
     torch.set_num_interop_threads(1)
     model = AutoExtractor.from_pretrained(arguments.model, use_flashdeberta=False)

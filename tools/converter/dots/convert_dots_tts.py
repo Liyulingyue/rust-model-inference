@@ -796,12 +796,12 @@ def _export_open_model(
     vocoder: Safetensors,
 ) -> tuple[Path, Path]:
     llm_path, mmproj_path = _output_paths(out_dir, variant, quant)
-    llm_cfg = json.loads((model_dir / "llm_config.json").read_text())
-    cfg = json.loads((model_dir / "config.json").read_text())
-    tok_cfg = json.loads((model_dir / "tokenizer_config.json").read_text())
-    vocab = json.loads((model_dir / "vocab.json").read_text())
-    added = json.loads((model_dir / "added_tokens.json").read_text())
-    merges = (model_dir / "merges.txt").read_text().splitlines()
+    llm_cfg = json.loads((model_dir / "llm_config.json").read_text(encoding="utf-8"))
+    cfg = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
+    tok_cfg = json.loads((model_dir / "tokenizer_config.json").read_text(encoding="utf-8"))
+    vocab = json.loads((model_dir / "vocab.json").read_text(encoding="utf-8"))
+    added = json.loads((model_dir / "added_tokens.json").read_text(encoding="utf-8"))
+    merges = (model_dir / "merges.txt").read_text(encoding="utf-8").splitlines()
     latent_stats = load_latent_stats(model_dir / "latent_stats.pt")
 
     n_layer = llm_cfg["num_hidden_layers"]

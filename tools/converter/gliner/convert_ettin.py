@@ -175,7 +175,7 @@ def read_tokenizer(model_dir: Path) -> dict:
     `added_tokens` and cross-checked against the embedding table's row count
     rather than assumed to be contiguous.
     """
-    raw = (model_dir / "tokenizer.json").read_text()
+    raw = (model_dir / "tokenizer.json").read_text(encoding="utf-8")
     fast = json.loads(raw)
     model = fast.get("model", {})
     if model.get("type") != "BPE":
@@ -223,7 +223,7 @@ def validate_config(config: dict) -> None:
 def convert(model_dir: Path, output: Path) -> None:
     if output.exists():
         raise FileExistsError(output)
-    config = json.loads((model_dir / "config.json").read_text())
+    config = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
     validate_config(config)
 
     tokenizer = read_tokenizer(model_dir)

@@ -13,8 +13,8 @@ Laya_COMMIT = "4066d5d5fbf08b66c6757ddeedbd797bd7655bc0"
 
 
 def compare(oracle, native):
-    left = [json.loads(s) for s in Path(oracle).read_text().splitlines()]
-    right = [json.loads(s) for s in Path(native).read_text().splitlines()]
+    left = [json.loads(s) for s in Path(oracle).read_text(encoding="utf-8").splitlines()]
+    right = [json.loads(s) for s in Path(native).read_text(encoding="utf-8").splitlines()]
     if len(left) != len(right):
         raise AssertionError(f"checkpoint counts differ: {len(left)} != {len(right)}")
     for a, b in zip(left, right):
@@ -64,7 +64,7 @@ def trace(model_dir, source_dir, request_file, output):
     scalar = Scalar(output)
     with torch.inference_mode(), scalar:
         scalar.reset_rope(agent.model.encoder)
-    request = json.loads(request_file.read_text())
+    request = json.loads(request_file.read_text(encoding="utf-8"))
     ids = list(request["questions"])
     for qid in ids:
         agent._check_question(qid, request["questions"][qid])

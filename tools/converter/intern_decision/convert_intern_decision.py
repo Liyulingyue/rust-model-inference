@@ -118,19 +118,19 @@ def _read_hf_config(hf_dir: Path) -> dict:
     cfg_path = hf_dir / "config.json"
     if not cfg_path.is_file():
         raise FileNotFoundError(f"missing HF config.json at {cfg_path}")
-    return json.loads(cfg_path.read_text())
+    return json.loads(cfg_path.read_text(encoding="utf-8"))
 
 
 def _read_tokenizer(hf_dir: Path) -> tuple[dict, dict, list[str]]:
     tok_path = hf_dir / "tokenizer.json"
     if not tok_path.is_file():
         raise FileNotFoundError(f"missing tokenizer.json at {tok_path}")
-    tok = json.loads(tok_path.read_text())
+    tok = json.loads(tok_path.read_text(encoding="utf-8"))
     cfg_path = hf_dir / "tokenizer_config.json"
     if not cfg_path.is_file():
         raise FileNotFoundError(f"missing tokenizer_config.json at {cfg_path}")
     return (
-        json.loads(cfg_path.read_text()),
+        json.loads(cfg_path.read_text(encoding="utf-8")),
         tok,
         tok["model"]["merges"],
     )

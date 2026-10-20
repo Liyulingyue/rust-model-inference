@@ -52,7 +52,7 @@ CASES = [
 
 
 def build_head(model_dir: Path) -> BoundaryHead:
-    config = json.loads((model_dir / "config.json").read_text())
+    config = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
     if config.get("architecture") != "boundary":
         raise ValueError(f"expected architecture='boundary', got {config.get('architecture')!r}")
     settings = BoundaryHeadSettings(**config["boundary_head"])

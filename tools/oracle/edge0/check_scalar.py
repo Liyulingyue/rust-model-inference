@@ -34,7 +34,7 @@ def trace(prefix, name):
 
 
 def check(model_dir, prefix):
-    weight_map = json.loads((model_dir / "model.safetensors.index.json").read_text())["weight_map"]
+    weight_map = json.loads((model_dir / "model.safetensors.index.json").read_text(encoding="utf-8"))["weight_map"]
     headers = {}
 
     def tensor(name, start=0, size=None):
@@ -82,7 +82,7 @@ def check(model_dir, prefix):
         raise ValueError("unexpected first norm contract")
     sum_sq = sum(float(f32(value * value)) for value in embedding_values)
     mean_sq = f32(sum_sq / len(embedding_values))
-    eps = f32(json.loads((model_dir / "config.json").read_text())["text_config"]["rms_norm_eps"])
+    eps = f32(json.loads((model_dir / "config.json").read_text(encoding="utf-8"))["text_config"]["rms_norm_eps"])
     scale = f32(1.0 / f32(math.sqrt(f32(mean_sq + eps))))
     x = tuple(f32(f32(value * scale) * bf16(norm_weight, col))
               for col, value in enumerate(embedding_values))

@@ -9,7 +9,7 @@ import sys
 import numpy as np
 
 def selected_records(path):
-    values=[json.loads(s) for s in Path(path).read_text().splitlines()]
+    values=[json.loads(s) for s in Path(path).read_text(encoding="utf-8").splitlines()]
     if any(v["name"].startswith("mage_flow.text.") for v in values):
         return [v for v in values if v["name"].startswith(("mage_flow.","hidden_sequence."))]
     return values
