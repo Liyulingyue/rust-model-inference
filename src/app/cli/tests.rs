@@ -1044,9 +1044,8 @@ fn gemma4_media_requires_mmproj() {
         "x",
     ]))
     .is_ok());
-    // What IS enforced at validate time: --image under --embedding without
-    // --mmproj, and --video without --mmproj. Those paths have no
-    // standalone variant to disambiguate against.
+    // Self-contained BGE visual models need no projector. Media embeddings
+    // defer that requirement until the dispatcher can inspect the source.
     assert!(validate_cli_options(&parse(&[
         "rmi",
         "--model",
@@ -1055,7 +1054,7 @@ fn gemma4_media_requires_mmproj() {
         "--image",
         "a.png",
     ]))
-    .is_err());
+    .is_ok());
     assert!(validate_cli_options(&parse(&[
         "rmi",
         "--model",

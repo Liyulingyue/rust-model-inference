@@ -555,11 +555,38 @@ fn main() {
         return;
     }
 
+    if options.embedding && rust_model_inference::models::bge_vl::is_visual(source.as_ref()) {
+        if video.is_some() || audio.is_some() {
+            app::run_or_exit(Err("BGE visual embedding accepts an image".into()));
+            return;
+        }
+        let started = std::time::Instant::now();
+        let embedding = rust_model_inference::models::bge_vl::compute_embedding(
+            source.as_ref(),
+            prompt,
+            image,
+            options.threads,
+        )
+        .unwrap_or_else(|error| {
+            eprintln!("Inference error: {error}");
+            std::process::exit(1);
+        });
+        print_embedding(
+            &embedding,
+            options.embedding_output,
+            started.elapsed().as_millis(),
+        );
+        return;
+    }
+
     if options.embedding && (image.is_some() || video.is_some() || audio.is_some()) {
         let started = std::time::Instant::now();
         let embedding = match app::run_omni_embedding(
             source.as_ref(),
-            explicit_mmproj.expect("validated media embedding mmproj"),
+            explicit_mmproj.unwrap_or_else(|| {
+                eprintln!("media embedding requires --mmproj");
+                std::process::exit(1);
+            }),
             image,
             video,
             audio,
@@ -943,7 +970,7 @@ fn main() {
         ));
         return;
     } else if !prompt.is_empty() {
-        if matches!(arch, "qwen35" | "edge0" | "qwen35moe") {
+        if matches!(arch, "qwen35" | "qwen35moe" | "edge0") {
             app::run_or_exit(app::run_multimodal_with_video(
                 Arc::clone(&source),
                 model_path,
@@ -1037,7 +1064,7 @@ fn main() {
         // tokenizer and prompt token ids line up with the rest of the
         // qwen35 family; the qwen35 multimodal stack handles the
         // image-less case (it just skips the vision stage).
-        if matches!(arch, "qwen35" | "edge0" | "qwen35moe") {
+        if matches!(arch, "qwen35" | "qwen35moe" | "edge0") {
             app::run_or_exit(app::run_interactive_qwen35(
                 Arc::clone(&source),
                 model_path,

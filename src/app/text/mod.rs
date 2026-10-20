@@ -64,6 +64,7 @@ mod tests {
                 is_recurrent: Vec::new(),
                 key_length: 2,
                 value_length: 2,
+                moe: None,
             },
             tok_embd,
             output_norm: vec![1.0; 2],

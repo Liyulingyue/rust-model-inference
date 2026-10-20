@@ -447,6 +447,7 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             | "mistral3"
             | "ernie_image"
             | "audiocpp"
+            | "mellum"
     ) {
         return Err(format!("Unsupported architecture: {arch}"));
     }
@@ -621,7 +622,12 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
     let as_usize = |key: String| -> Result<usize, String> {
         usize::try_from(get_u64(&key)?).map_err(|_| format!("{key} does not fit usize"))
     };
-    let n_embd_head = if arch == "qwen35" || arch == "edge0" || arch == "nanbeige" {
+    let n_embd_head = if arch == "qwen35"
+        || arch == "qwen35moe"
+        || arch == "edge0"
+        || arch == "nanbeige"
+        || arch == "mellum"
+    {
         if n_head == 0 {
             return Err(format!(
                 "Invalid {prefix} head shape: embedding_length={n_embd}, head_count={n_head}"
@@ -680,10 +686,17 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             as_usize(format!("{prefix}.attention.head_count_kv"))?
         },
         n_embd_head,
-        // A MoE-only tower publishes the expert width and leaves
-        // `feed_forward_length` unset, since no layer has a dense FFN.
-        n_ff: as_usize(format!("{prefix}.feed_forward_length"))
-            .or_else(|_| as_usize(format!("{prefix}.expert_feed_forward_length")))?,
+        // A MoE tower has no dense FFN, so `feed_forward_length` is absent and
+        // the width lives in `expert_feed_forward_length` instead. Fall back to
+        // that so the shared config struct stays usable for the MoE arch; the
+        // dense path never reads it.
+        n_ff: match as_usize(format!("{prefix}.feed_forward_length")) {
+            Ok(value) => value,
+            Err(error) => match as_usize(format!("{prefix}.expert_feed_forward_length")) {
+                Ok(value) => value,
+                Err(_) => return Err(error),
+            },
+        },
         n_ctx: as_usize(format!("{prefix}.context_length"))?,
         vocab_size: match get_u64(&format!("{prefix}.vocab_size")) {
             Ok(value) => usize::try_from(value)

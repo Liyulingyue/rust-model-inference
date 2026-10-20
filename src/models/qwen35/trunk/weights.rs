@@ -48,11 +48,87 @@ pub struct Qwen35LayerWeights<'a> {
     pub ssm_alpha: Option<Weight<'a>>,
     pub ssm_norm: Option<Vec<f32>>,
     pub ssm_out: Option<Weight<'a>>,
-    /// Dense SwiGLU FFN. Absent on MoE-only towers, where every layer routes
-    /// through experts instead and the weights are unused.
+    /// Dense FFN, absent on `qwen35moe` where `moe` carries the experts.
     pub ffn_gate: Option<Weight<'a>>,
     pub ffn_up: Option<Weight<'a>>,
     pub ffn_down: Option<Weight<'a>>,
+    pub moe: Option<Qwen35MoeWeights<'a>>,
+}
+
+/// MoE weights for `qwen35moe`.
+///
+/// Experts are kept as one borrowed slice per projection rather than 3 *
+/// `n_expert` eager `Weight`s: a 40-layer 256-expert model would otherwise build
+/// 30 720 kernels up front for a path that only ever touches `n_expert_used`
+/// of them per token. Each expert's matrix is a contiguous block inside the 3-D
+/// GGUF tensor, so an expert is a sub-slice at a fixed stride.
+pub struct Qwen35MoeWeights<'a> {
+    /// Router: `[n_expert, n_embd]` (ggml dims `[n_embd, n_expert]`).
+    pub gate_inp: Weight<'a>,
+    pub up_exps: &'a [u8],
+    pub gate_exps: &'a [u8],
+    pub down_exps: &'a [u8],
+    pub ggml_type: GGMLType,
+    pub n_expert: usize,
+    pub n_ff_exp: usize,
+    pub n_embd: usize,
+    /// Bytes per expert for each projection.
+    pub stride_up: usize,
+    pub stride_gate: usize,
+    pub stride_down: usize,
+    /// Shared expert; `None` when the checkpoint has none.
+    pub gate_inp_shexp: Option<Vec<f32>>,
+    pub up_shexp: Option<Weight<'a>>,
+    pub gate_shexp: Option<Weight<'a>>,
+    pub down_shexp: Option<Weight<'a>>,
+}
+
+impl<'a> Qwen35MoeWeights<'a> {
+    /// `[n_ff_exp, n_embd]` for expert `e`, matching ggml's
+    /// `ffn_up_exps` (`[n_embd, n_ff_exp, n_expert]`).
+    pub fn up(&self, e: usize) -> Weight<'a> {
+        self.view(self.up_exps, self.stride_up, e, self.n_embd, self.n_ff_exp)
+    }
+
+    pub fn gate(&self, e: usize) -> Weight<'a> {
+        self.view(
+            self.gate_exps,
+            self.stride_gate,
+            e,
+            self.n_embd,
+            self.n_ff_exp,
+        )
+    }
+
+    /// `[n_embd, n_ff_exp]` for expert `e`, matching ggml's
+    /// `ffn_down_exps` (`[n_ff_exp, n_embd, n_expert]`).
+    pub fn down(&self, e: usize) -> Weight<'a> {
+        self.view(
+            self.down_exps,
+            self.stride_down,
+            e,
+            self.n_ff_exp,
+            self.n_embd,
+        )
+    }
+
+    fn view(
+        &self,
+        data: &'a [u8],
+        stride: usize,
+        e: usize,
+        n_in: usize,
+        n_out: usize,
+    ) -> Weight<'a> {
+        let start = e * stride;
+        let slice = data.get(start..start + stride).unwrap_or(&data[..0]);
+        Weight::from_quantized(QuantizedTensor::from_bytes(
+            slice,
+            self.ggml_type,
+            n_in,
+            n_out,
+        ))
+    }
 }
 
 /// Shared Qwen3.5/Edge0 attention and SSM weights + parsed config.
@@ -145,6 +221,97 @@ pub(crate) fn load_weight<'a, S: TensorSource + ?Sized>(
 
 /// Load an F32-or-F16 norm/bias tensor into an owned `Vec<f32>`. Used for
 /// non-matmul tensors (norms, biases, conv1d, dt.bias, A-log).
+/// Bind one layer's MoE tensors.
+///
+/// Each projection is a 3-D GGUF tensor with the expert axis last, so expert
+/// `e` is a contiguous block at `e * bytes_per_expert`.
+fn load_moe_weights<'a, S: TensorSource + ?Sized>(
+    source: &'a S,
+    layer: usize,
+    moe: super::config::Qwen35Moe,
+    n_embd_cfg: usize,
+) -> Result<Qwen35MoeWeights<'a>, String> {
+    let need = |name: &str| -> Result<&'a [u8], String> {
+        source
+            .tensor_slice(name)
+            .ok_or_else(|| format!("Missing {name}"))
+    };
+    let info = |name: &str| -> Result<&'a crate::core::tensor::TensorInfo, String> {
+        source
+            .tensor_info(name)
+            .ok_or_else(|| format!("Missing {name}"))
+    };
+
+    let up_name = format!("blk.{layer}.ffn_up_exps.weight");
+    let gate_name = format!("blk.{layer}.ffn_gate_exps.weight");
+    let down_name = format!("blk.{layer}.ffn_down_exps.weight");
+
+    let up_info = info(&up_name)?;
+    if up_info.dims.len() != 3 {
+        return Err(format!(
+            "{up_name}: expected [n_embd, n_ff_exp, n_expert], got {:?}",
+            up_info.dims
+        ));
+    }
+    let n_embd = up_info.dims[0] as usize;
+    let n_ff_exp = up_info.dims[1] as usize;
+    let n_expert = up_info.dims[2] as usize;
+    if n_embd != n_embd_cfg || n_ff_exp != moe.n_ff_exp || n_expert != moe.n_expert {
+        return Err(format!(
+            "{up_name}: got [{n_embd}, {n_ff_exp}, {n_expert}], config says \
+             [{n_embd_cfg}, {}, {}]",
+            moe.n_ff_exp, moe.n_expert
+        ));
+    }
+    // ggml stores the expert axis last and contiguous, so a 3-D tensor is
+    // `n_expert` back-to-back copies of one expert's matrix.
+    let stride_up = up_info.ggml_type.nbytes(n_embd * n_ff_exp);
+    let stride_gate = info(&gate_name)?.ggml_type.nbytes(n_embd * n_ff_exp);
+    let stride_down = info(&down_name)?.ggml_type.nbytes(n_ff_exp * n_embd);
+
+    let gate_inp = load_weight(source, &format!("blk.{layer}.ffn_gate_inp.weight"))
+        .ok_or_else(|| format!("Missing blk.{layer}.ffn_gate_inp.weight"))?;
+    if gate_inp.n_in != n_embd || gate_inp.n_out != n_expert {
+        return Err(format!(
+            "blk.{layer}.ffn_gate_inp.weight: got [{}, {}], expected [{n_embd}, {n_expert}]",
+            gate_inp.n_in, gate_inp.n_out
+        ));
+    }
+
+    let has_shexp = moe.n_ff_shexp > 0;
+    let gate_inp_shexp = if has_shexp {
+        load_weight_f32(source, &format!("blk.{layer}.ffn_gate_inp_shexp.weight"))
+            .or_else(|| load_weight_f32(source, &format!("blk.{layer}.ffn_gate_inp_shexp")))
+            .ok_or_else(|| format!("Missing blk.{layer}.ffn_gate_inp_shexp.weight"))?
+    } else {
+        Vec::new()
+    };
+
+    Ok(Qwen35MoeWeights {
+        gate_inp,
+        up_exps: need(&up_name)?,
+        gate_exps: need(&gate_name)?,
+        down_exps: need(&down_name)?,
+        ggml_type: up_info.ggml_type,
+        n_expert,
+        n_ff_exp,
+        n_embd,
+        stride_up,
+        stride_gate,
+        stride_down,
+        gate_inp_shexp: has_shexp.then_some(gate_inp_shexp),
+        up_shexp: has_shexp
+            .then(|| load_weight(source, &format!("blk.{layer}.ffn_up_shexp.weight")))
+            .flatten(),
+        gate_shexp: has_shexp
+            .then(|| load_weight(source, &format!("blk.{layer}.ffn_gate_shexp.weight")))
+            .flatten(),
+        down_shexp: has_shexp
+            .then(|| load_weight(source, &format!("blk.{layer}.ffn_down_shexp.weight")))
+            .flatten(),
+    })
+}
+
 pub(crate) fn load_weight_f32<S: TensorSource + ?Sized>(
     source: &S,
     name: &str,
@@ -204,15 +371,19 @@ impl<'a> HybridTrunk<'a> {
         if arch == Some("edge0") {
             return Err("Edge0 architecture requires Edge0Model::from_source".into());
         }
-        // qwen35moe shares every attention and SSM tensor with qwen35; only the
-        // FFN differs, and OccamyModel supplies the MoE half.
-        if arch != Some("qwen35") && arch != Some("qwen35moe") {
-            return Err(format!(
-                "Qwen35Model requires general.architecture=qwen35, got {arch:?}"
-            ));
-        }
-        let config = Qwen35Config::from_source_for_arch(source, "qwen35moe")?;
-        Self::load_trunk(source, config, true)
+        // `qwen35moe` is the same hybrid attention/SSM stack with a routed +
+        // shared expert FFN, so it shares this trunk; only the FFN differs.
+        let prefix = match arch.as_deref() {
+            Some("qwen35") => "qwen35",
+            Some("qwen35moe") => "qwen35moe",
+            _ => {
+                return Err(format!(
+                    "Qwen35Model requires general.architecture=qwen35 or qwen35moe, got {arch:?}"
+                ));
+            }
+        };
+        let config = Qwen35Config::from_source_for_arch(source, prefix)?;
+        Self::load_trunk(source, config, false)
     }
 
     pub(crate) fn load_trunk(
@@ -355,16 +526,24 @@ impl<'a> HybridTrunk<'a> {
                 }
             }
 
-            let ffn_gate = load_weight(source, &format!("blk.{}.ffn_gate.weight", i));
-            let ffn_up = load_weight(source, &format!("blk.{}.ffn_up.weight", i));
-            let ffn_down = load_weight(source, &format!("blk.{}.ffn_down.weight", i));
-            if ffn_gate.is_none() && ffn_up.is_none() && ffn_down.is_none() {
-                // MoE-only tower; the expert weights live in a separate loader.
-            } else if ffn_gate.is_none() || ffn_up.is_none() || ffn_down.is_none() {
-                return Err(format!(
-                    "blk.{i} has a partial dense FFN; all three of ffn_gate/ffn_up/ffn_down are required"
-                ));
-            }
+            let moe = match config.moe {
+                None => None,
+                Some(moe) => Some(load_moe_weights(source, i, moe, config.n_embd)?),
+            };
+            let dense = |name: &str| -> Result<Option<Weight<'a>>, String> {
+                if config.moe.is_some() {
+                    // qwen35moe carries no dense FFN; the per-expert tensors
+                    // stand in for it. Absent rather than mis-bound, so the
+                    // dispatch cannot silently run a dense block on a MoE model.
+                    return Ok(None);
+                }
+                load_weight(source, name)
+                    .map(Some)
+                    .ok_or_else(|| format!("Missing {name}"))
+            };
+            let ffn_gate = dense(&format!("blk.{i}.ffn_gate.weight"))?;
+            let ffn_up = dense(&format!("blk.{i}.ffn_up.weight"))?;
+            let ffn_down = dense(&format!("blk.{i}.ffn_down.weight"))?;
             layers.push(Qwen35LayerWeights {
                 attn_norm,
                 attn_post_norm,
@@ -386,6 +565,7 @@ impl<'a> HybridTrunk<'a> {
                 ffn_gate,
                 ffn_up,
                 ffn_down,
+                moe,
             });
         }
 

@@ -32,6 +32,10 @@ fn is_qwen35(arch: &str) -> Result<bool, String> {
         // qwen2vl / qwen3vlmoe ride the same Qwen3 ChatML prompt as qwen3;
         // their projector differs, which the runtime's image path handles.
         "qwen3" | "qwen3vl" | "lfm2moe" | "qwen2vl" | "qwen3vlmoe" => Ok(false),
+        // Mellum 2.1 ships ChatML (`<|im_start|>role\n … <|im_end|>\n`) with
+        // the same `# Tools` preamble as Qwen3, so it rides the Qwen3
+        // renderer.
+        "mellum" => Ok(false),
         // Falcon-H1 uses the same ChatML role markers as Qwen (verified
         // against the unsloth GGUF: <|im_start|>user\n...
         // <|im_end|> <|im_start|>assistant\n), so it rides the same

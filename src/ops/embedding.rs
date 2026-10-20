@@ -3,6 +3,7 @@
 use crate::core::tensor::GGMLType;
 
 pub const SUPPORTED_EMBEDDING_TYPES: &[GGMLType] = &[
+    GGMLType::F32,
     GGMLType::F16,
     GGMLType::BF16,
     GGMLType::Q8_0,
@@ -35,6 +36,7 @@ pub fn embedding_lookup(
     out: &mut [f32],
 ) {
     match embd_type {
+        GGMLType::F32 => embedding_lookup_f32(weight, token_id, n_embd, out),
         GGMLType::F16 => embedding_lookup_f16(weight, token_id, n_embd, out),
         GGMLType::Q8_0 => embedding_lookup_q8_0(weight, token_id, n_embd, out),
         GGMLType::Q4_0 => embedding_lookup_q4_0(weight, token_id, n_embd, out),
@@ -48,6 +50,19 @@ pub fn embedding_lookup(
             "unsupported embedding type {embd_type:?}; supported: {:?}",
             SUPPORTED_EMBEDDING_TYPES
         ),
+    }
+}
+
+pub fn embedding_lookup_f32(weight: &[u8], token_id: u32, n_embd: usize, out: &mut [f32]) {
+    let row_start = token_id as usize * n_embd * 4;
+    for (index, value) in out.iter_mut().take(n_embd).enumerate() {
+        let offset = row_start + index * 4;
+        *value = f32::from_le_bytes([
+            weight[offset],
+            weight[offset + 1],
+            weight[offset + 2],
+            weight[offset + 3],
+        ]);
     }
 }
 
@@ -155,5 +170,26 @@ pub fn embedding_lookup_q1_0(weight: &[u8], token_id: u32, n_embd: usize, out: &
             let bit = (bits[byte_idx] >> bit_idx) & 1;
             out[b * BLOCK_ELEMENTS + j] = if bit != 0 { d } else { -d };
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{embedding_lookup, embedding_lookup_f32, is_supported_embedding};
+    use crate::core::tensor::GGMLType;
+
+    #[test]
+    fn f32_embedding_lookup_reads_little_endian_rows() {
+        let weight = [1.0f32, 2.0, 3.0, 4.0]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect::<Vec<_>>();
+        let mut output = [0.0; 2];
+        embedding_lookup_f32(&weight, 1, 2, &mut output);
+        assert_eq!(output, [3.0, 4.0]);
+        output.fill(0.0);
+        embedding_lookup(&weight, 0, 2, GGMLType::F32, &mut output);
+        assert_eq!(output, [1.0, 2.0]);
+        assert!(is_supported_embedding(GGMLType::F32));
     }
 }

@@ -412,3 +412,110 @@ pub(crate) fn encode_qwen3vl_image_dynamic(
         grid_shapes: vec![(grid.grid_h, grid.grid_w)],
     })
 }
+
+/// Splice a whole span of media embeddings over a **single** marker token.
+///
+/// [`inject_vision_embeddings`] requires one `<|image_pad|>` per media row,
+/// which cannot express MiniCPM-V 4.7: its tile separators (`</image>`,
+/// `<slice>`, `</slice>`, newline) are embeddings with no token id, so the
+/// marker count is one short of the row count by design. llama.cpp models the
+/// same shape with `MTMD_POS_TYPE_CANVAS`, where the chunk contributes no
+/// tokens at all and every row takes its own KV slot.
+///
+/// Returns `(embeddings, marker_index)`: `marker_index` is the row in the
+/// returned buffer where the media span starts, so the caller can lay out
+/// positions per row.
+pub fn inject_media_span(
+    llm: &Qwen35Model,
+    tokens: &[i32],
+    marker_token: i32,
+    vis_embd: &[f32],
+    n_rows: usize,
+    proj_dim: usize,
+) -> Result<(Vec<f32>, usize), String> {
+    let n_embd = llm.config.n_embd;
+    if proj_dim != n_embd {
+        return Err(format!(
+            "Media projection dim {proj_dim} does not match model width {n_embd}"
+        ));
+    }
+    let expected = n_rows
+        .checked_mul(proj_dim)
+        .ok_or("Media embedding length overflow")?;
+    if vis_embd.len() != expected {
+        return Err(format!(
+            "Media embedding mismatch: rows={n_rows}, values={}",
+            vis_embd.len()
+        ));
+    }
+    let markers = tokens.iter().filter(|&&t| t == marker_token).count();
+    if markers != 1 {
+        return Err(format!(
+            "Media span needs exactly one marker token, found {markers}"
+        ));
+    }
+    let text_ids: Vec<u32> = tokens
+        .iter()
+        .filter(|&&t| t != marker_token)
+        .map(|&t| u32::try_from(t).map_err(|_| format!("invalid negative token id {t}")))
+        .collect::<Result<Vec<_>, _>>()?;
+    let text = llm.embed_tokens(&text_ids)?;
+
+    let marker_row = tokens
+        .iter()
+        .position(|&t| t == marker_token)
+        .expect("marker count checked above");
+    let total_rows = tokens.len() + n_rows - 1;
+    let mut out = vec![0.0f32; total_rows * n_embd];
+    let mut text_row = 0usize;
+    let mut out_row = 0usize;
+    let mut span_start = 0usize;
+    for (index, &token) in tokens.iter().enumerate() {
+        if index == marker_row {
+            span_start = out_row;
+            out[out_row * n_embd..(out_row + n_rows) * n_embd].copy_from_slice(vis_embd);
+            out_row += n_rows;
+        } else {
+            out[out_row * n_embd..(out_row + 1) * n_embd]
+                .copy_from_slice(&text[text_row * n_embd..(text_row + 1) * n_embd]);
+            text_row += 1;
+            out_row += 1;
+        }
+    }
+    Ok((out, span_start))
+}
+
+/// Positions for a prompt whose image is a token-free span.
+///
+/// Text tokens take the usual sequential positions. The media span is replaced
+/// by [`crate::models::minicpmv::canvas_positions`], whose entries are indexed
+/// per embedding **row**, matching what `inject_media_span` returns.
+///
+/// Returns `(positions, next_text_position)` where `next_text_position` is
+/// where decoding resumes — one past the last position used, so it stays
+/// monotonic even though the canvas reuses `base` for many rows.
+pub fn minicpmv47_prompt_positions(
+    tokens: &[i32],
+    marker_token: i32,
+    span_start: usize,
+    canvas: &[[usize; 4]],
+) -> (Vec<[usize; 4]>, usize) {
+    let mut out = Vec::with_capacity(tokens.len() + canvas.len());
+    let mut next = 0usize;
+    for &token in tokens {
+        if token == marker_token {
+            out.extend_from_slice(canvas);
+        } else {
+            out.push([next, next, next, 0]);
+            next += 1;
+        }
+    }
+    let _ = span_start;
+    // The canvas slots are shared, so resume past the largest one it used.
+    let canvas_max = canvas
+        .iter()
+        .flat_map(|slot| slot.iter().copied())
+        .max()
+        .unwrap_or(next);
+    (out, canvas_max.max(next) + 1)
+}

@@ -1,5 +1,6 @@
 pub mod audio8;
 pub mod bert_family;
+pub mod bge_vl;
 pub mod bitnet;
 pub mod breeze;
 /// Renamed to [`crate::prompt::legacy`].
@@ -12,6 +13,7 @@ pub mod chat_template {
 }
 
 pub mod clm;
+pub mod decoder_embedding;
 pub mod diffusion;
 pub mod dots;
 pub mod edge0;
@@ -31,6 +33,8 @@ pub mod lfm2;
 pub mod lfm25;
 pub mod lfm2moe;
 pub mod llama;
+pub mod mellum;
+pub mod minicpmv;
 pub mod nemotron_h;
 pub mod occamy;
 pub mod phi3;

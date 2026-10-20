@@ -216,8 +216,31 @@ impl<'a> super::weights::HybridTrunk<'a> {
         #[cfg(feature = "parity-trace")]
         let first_dense_layer = self.config.is_recurrent.iter().position(|value| !*value);
         #[cfg(feature = "parity-trace")]
-        let trace_layer =
-            |layer: usize| layer == 0 || first_dense_layer == Some(layer) || layer + 1 == n_layer;
+        let trace_layer = {
+            // Extra layers named by RMI_QWEN35_TRACE_LAYERS, on top of the
+            // defaults. Bisecting a divergence needs the layers in between, and
+            // hardcoding one into this predicate would mean editing production
+            // code to look at a different layer each time.
+            //
+            // The defaults are layer 0, the first dense layer and the last. That
+            // set is not enough: the per-layer profile said layer 0 matches and
+            // layer 3 does not, which locates a difference between two layers and
+            // not the layer that caused it.
+            let mut extra: Vec<usize> = Vec::new();
+            if let Ok(spec) = std::env::var("RMI_QWEN35_TRACE_LAYERS") {
+                for part in spec.split(',') {
+                    if let Ok(layer) = part.trim().parse::<usize>() {
+                        extra.push(layer);
+                    }
+                }
+            }
+            move |layer: usize| {
+                extra.contains(&layer)
+                    || layer == 0
+                    || first_dense_layer == Some(layer)
+                    || layer + 1 == n_layer
+            }
+        };
 
         #[cfg(feature = "parity-trace")]
         if edge0 {
@@ -322,6 +345,19 @@ impl<'a> super::weights::HybridTrunk<'a> {
                     &mut scratch.x[off..off + n_embd],
                 );
             }
+            // The oracle emits `attn_residual` here; the layer loop above was
+            // where the attention path ended for us, so the node that says
+            // whether the out projection or the residual add moved the number
+            // had no counterpart.
+            #[cfg(feature = "parity-trace")]
+            if trace_layer(il) {
+                parity_trace::report(parity_trace::checkpoint_rows(
+                    &format!("attn_residual-{il}"),
+                    Some(il),
+                    &[n_tokens, n_embd],
+                    &scratch.x[..n_tokens * n_embd],
+                ));
+            }
 
             for t in 0..n_tokens {
                 let off = t * n_embd;
@@ -331,6 +367,23 @@ impl<'a> super::weights::HybridTrunk<'a> {
                     &layer.attn_post_norm,
                     eps,
                 );
+            }
+            #[cfg(feature = "parity-trace")]
+            if trace_layer(il) {
+                // `attn_post_norm` is the FFN's input and therefore the MoE's
+                // direct input -- the node that decides whether a later expert
+                // divergence originated upstream or inside the experts. Only
+                // edge0 was dumping it before, so a qwen35moe layer-3 router
+                // difference could not be traced to its source: layer 0's
+                // `ffn_moe_logits` is bit-exact while layer 3's is not, which
+                // says the split happens between the layers, and without this
+                // there was no checkpoint on either side to say where.
+                parity_trace::report(parity_trace::checkpoint_rows(
+                    &format!("attn_post_norm-{il}"),
+                    Some(il),
+                    &[n_tokens, n_embd],
+                    &scratch.buf[..n_tokens * n_embd],
+                ));
             }
             #[cfg(feature = "parity-trace")]
             if edge0 && trace_layer(il) {
@@ -347,9 +400,32 @@ impl<'a> super::weights::HybridTrunk<'a> {
             let buf_len = n_tokens * n_embd;
             let ffn_input = unsafe { std::slice::from_raw_parts(buf_ptr, buf_len) };
             let edge0_input = edge0_moe.map(|_| ffn_input.to_vec());
+            // Occamy layers are served by their own MoE path below, which
+            // writes `buf` itself, so the dense FFN must not run for them.
             let occamy_input = occamy_moe.map(|_| ffn_input.to_vec());
+            // qwen35moe replaces the dense FFN wholesale, so snapshot the input
+            // the same way: `forward_ffn_parallel` returns early without writing
+            // `buf`, and the routed + shared expert output replaces it there.
+            let qwen35moe = layer.moe.as_ref().zip(self.config.moe.as_ref());
+            let qwen35moe_input = qwen35moe.map(|_| ffn_input.to_vec());
             if edge0_moe.is_none() && occamy_moe.is_none() {
                 self.forward_ffn_parallel(layer, ffn_input, n_tokens, scratch, pool, edge0);
+            }
+            if let (Some((moe, cfg)), Some(input)) = (qwen35moe, &qwen35moe_input) {
+                for token in 0..n_tokens {
+                    let offset = token * n_embd;
+                    super::moe::forward_qwen35moe_token(
+                        moe,
+                        cfg,
+                        cfg.weights_scale,
+                        &input[offset..offset + n_embd],
+                        &mut scratch.buf[offset..offset + n_embd],
+                        &mut scratch.prepared,
+                        pool,
+                        il,
+                        token,
+                    )?;
+                }
             }
             if let Some(moe) = edge0_moe.map(|layers| &layers[il]) {
                 let ffn_input = edge0_input.as_ref().unwrap();
@@ -393,8 +469,11 @@ impl<'a> super::weights::HybridTrunk<'a> {
             }
             #[cfg(feature = "parity-trace")]
             {
+                // Named `l_out` to match the oracle (qwen35moe.cpp line 222,
+                // the last cb of the layer). `scratch.x` is the layer output
+                // after the FFN residual, which is exactly that node.
                 parity_trace::report(parity_trace::checkpoint_rows(
-                    &format!("layer_output-{il}"),
+                    &format!("l_out-{il}"),
                     Some(il),
                     &[n_tokens, n_embd],
                     &scratch.x[..n_tokens * n_embd],
@@ -527,6 +606,44 @@ impl<'a> super::weights::HybridTrunk<'a> {
             )
             .expect("validated Qwen3.5 dense projection shape");
         t_qkv += t0.elapsed().as_secs_f64();
+
+        // The gate cannot be read off the oracle's attention path: llama.cpp
+        // takes it as a view of the fused QG projection and then fuses sigmoid
+        // into the following mul, so no scheduled node carries it. Two nodes
+        // that *are* scheduled do, and between them they bracket the gate:
+        //
+        //   Qcur_full     the fused projection, [q(256), gate(256)] per head
+        //   gate_reshaped the gate half alone, after ggml_cont_2d
+        //
+        // q_buf is the counterpart of Qcur_full with the same interleaving.
+        #[cfg(feature = "parity-trace")]
+        if trace_layer {
+            parity_trace::report(parity_trace::checkpoint_rows(
+                &format!("Qcur_full-{il}"),
+                Some(il),
+                &[n_tokens, n_head, n_embd_head * 2],
+                &scratch.q_buf[..n_tokens * q_dim],
+            ));
+            let mut gate_trace: Vec<f32> = Vec::with_capacity(n_tokens * n_head * n_embd_head);
+            for token in 0..n_tokens {
+                for head in 0..n_head {
+                    let offset = token * q_dim + head * n_embd_head * 2 + n_embd_head;
+                    gate_trace.extend_from_slice(&scratch.q_buf[offset..offset + n_embd_head]);
+                }
+            }
+            parity_trace::report(parity_trace::checkpoint_rows(
+                &format!("gate_reshaped-{il}"),
+                Some(il),
+                &[n_tokens, n_head, n_embd_head],
+                &gate_trace,
+            ));
+            parity_trace::report(parity_trace::checkpoint_rows(
+                &format!("Vcur-{il}"),
+                Some(il),
+                &[n_tokens, n_head_kv, n_embd_head],
+                &scratch.v_buf[..n_tokens * v_dim],
+            ));
+        }
 
         for t in 0..n_tokens {
             for h in 0..n_head {
@@ -699,6 +816,19 @@ impl<'a> super::weights::HybridTrunk<'a> {
         }
         t_score += t0.elapsed().as_secs_f64();
 
+        // `attn_pregate` is the attention core's output before the gate. With one
+        // cached token the softmax is [1, 0, 0, ...], so this ought to be
+        // exactly Vcur; the node exists to check that rather than assume it.
+        #[cfg(feature = "parity-trace")]
+        if trace_layer {
+            parity_trace::report(parity_trace::checkpoint_rows(
+                &format!("attn_pregate-{il}"),
+                Some(il),
+                &[n_tokens, n_embd_heads_total],
+                &scratch.attn_out_buf[..n_tokens * n_embd_heads_total],
+            ));
+        }
+
         for t in 0..n_tokens {
             for h in 0..n_head {
                 let gate_off = t * q_dim + h * n_embd_head * 2 + n_embd_head;
@@ -710,6 +840,17 @@ impl<'a> super::weights::HybridTrunk<'a> {
                     attn_out[d] *= gate[d];
                 }
             }
+        }
+        // `attn_gated` is the first node on the attention path that both sides
+        // can observe. It comes after the value reduction and the sigmoid gate.
+        #[cfg(feature = "parity-trace")]
+        if trace_layer {
+            parity_trace::report(parity_trace::checkpoint_rows(
+                &format!("attn_gated-{il}"),
+                Some(il),
+                &[n_tokens, n_embd_heads_total],
+                &scratch.attn_out_buf[..n_tokens * n_embd_heads_total],
+            ));
         }
 
         let mut result = vec![0.0f32; n_tokens * n_embd];
@@ -730,6 +871,15 @@ impl<'a> super::weights::HybridTrunk<'a> {
             .matmul(wo, wo_input, &mut result, pool)
             .expect("validated Qwen3.5 output projection shape");
         t_wo += t0.elapsed().as_secs_f64();
+        #[cfg(feature = "parity-trace")]
+        if trace_layer {
+            parity_trace::report(parity_trace::checkpoint_rows(
+                &format!("attn_output-{il}"),
+                Some(il),
+                &[n_tokens, n_embd],
+                &result,
+            ));
+        }
         if profile {
             eprintln!(
                 "  dense_attn[{}]: qkv={:.3}s score={:.3}s wo={:.3}s",
@@ -821,6 +971,23 @@ impl<'a> super::weights::HybridTrunk<'a> {
                     softplus_f32(a_biased) * ssm_a[v % ssm_a.len()];
             }
         }
+        if std::env::var("RMI_SSM_DUMP").is_ok() && il == 0 {
+            use std::io::Write as _;
+            let nb = n_tokens * num_v_heads;
+            for (nm, buf) in [
+                ("beta_sigmoid", &scratch.beta_buf[..nb]),
+                ("a_softplus", &scratch.alpha_buf[..nb]),
+            ] {
+                let bytes: Vec<u8> = buf.iter().flat_map(|v| v.to_le_bytes()).collect();
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(format!("rust_{nm}.bin"))
+                {
+                    let _ = f.write_all(&bytes);
+                }
+            }
+        }
         #[cfg(feature = "parity-trace")]
         if edge0 && trace_layer {
             parity_trace::report(parity_trace::checkpoint_rows(
@@ -893,6 +1060,20 @@ impl<'a> super::weights::HybridTrunk<'a> {
                         scratch.qkv_buf[qkv_off + 2 * key_dim + h * head_v_dim + d];
                 }
             }
+            // Before the q/k L2 norms. The oracle emits `q_conv` here (the
+            // linear's output) and `q_conv_predelta` after the norm, so without
+            // this the two checkpoints cannot say whether a difference came out
+            // of the projection or out of the normalisation -- and those are
+            // very different bugs.
+            #[cfg(feature = "parity-trace")]
+            if trace_layer {
+                parity_trace::report(parity_trace::checkpoint_rows(
+                    &format!("q_conv_prenorm-{il}"),
+                    Some(il),
+                    &[n_tokens, key_dim],
+                    &scratch.q_buf[..n_tokens * key_dim],
+                ));
+            }
             for h in 0..num_k_heads {
                 let q = &mut scratch.q_buf[t * key_dim + h * head_k_dim..][..head_k_dim];
                 let k = &mut scratch.k_buf2[t * key_dim + h * head_k_dim..][..head_k_dim];
@@ -902,6 +1083,22 @@ impl<'a> super::weights::HybridTrunk<'a> {
                 } else {
                     l2_norm(q, eps);
                     l2_norm(k, eps);
+                }
+            }
+        }
+        if std::env::var("RMI_SSM_DUMP").is_ok() && il == 0 {
+            use std::io::Write as _;
+            for (nm, buf) in [
+                ("q_conv_predelta", &scratch.q_buf[..n_tokens * key_dim]),
+                ("k_conv_predelta", &scratch.k_buf2[..n_tokens * key_dim]),
+            ] {
+                let bytes: Vec<u8> = buf.iter().flat_map(|v| v.to_le_bytes()).collect();
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(format!("rust_{nm}.bin"))
+                {
+                    let _ = f.write_all(&bytes);
                 }
             }
         }
@@ -921,6 +1118,20 @@ impl<'a> super::weights::HybridTrunk<'a> {
             ));
         }
 
+        if std::env::var("RMI_SSM_DUMP").is_ok() && il == 0 {
+            let bytes: Vec<u8> = scratch.qkv_buf[..n_tokens * conv_dim]
+                .iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect();
+            use std::io::Write as _;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("rust_conv_silu.bin")
+            {
+                let _ = f.write_all(&bytes);
+            }
+        }
         let tc = tc0.elapsed().as_secs_f64();
 
         let ts0 = std::time::Instant::now();
@@ -948,11 +1159,7 @@ impl<'a> super::weights::HybridTrunk<'a> {
                 let gate_val = scratch.alpha_buf[t * num_v_heads + v_h];
                 let beta_val = scratch.beta_buf[t * num_v_heads + v_h];
                 let state_off = v_h * head_v_dim * head_v_dim;
-                let k_h = if edge0 {
-                    v_h / (num_v_heads / num_k_heads)
-                } else {
-                    v_h % num_k_heads
-                };
+                let k_h = v_h % num_k_heads;
                 let decay = gate_val.exp();
                 crate::ops::ssm_state_decay(
                     &mut ssm_state[state_off..state_off + head_v_dim * head_v_dim],
@@ -1007,6 +1214,20 @@ impl<'a> super::weights::HybridTrunk<'a> {
             }
         }
 
+        if std::env::var("RMI_SSM_DUMP").is_ok() && il == 0 {
+            let bytes: Vec<u8> = scratch.attn_out_buf[..n_tokens * value_dim]
+                .iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect();
+            use std::io::Write as _;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("rust_ssm_out.bin")
+            {
+                let _ = f.write_all(&bytes);
+            }
+        }
         let tssm = ts0.elapsed().as_secs_f64();
         let tn0 = std::time::Instant::now();
         for t in 0..n_tokens {
@@ -1098,22 +1319,20 @@ impl<'a> super::weights::HybridTrunk<'a> {
         };
         let n_embd = self.config.n_embd;
         let n_ff = self.config.n_ff;
-        let q8k_required = layer.ffn_gate.as_ref().is_some_and(|w| w.uses_q8_k())
-            || layer.ffn_up.as_ref().is_some_and(|w| w.uses_q8_k());
+        // qwen35moe has no dense FFN: the routed + shared experts replace it.
+        let (Some(ffn_gate), Some(ffn_up), Some(ffn_down)) =
+            (&layer.ffn_gate, &layer.ffn_up, &layer.ffn_down)
+        else {
+            return;
+        };
+        let q8k_required = ffn_gate.uses_q8_k() || ffn_up.uses_q8_k();
         assert!(
             !q8k_required || n_embd % crate::ops::quant::QK_K == 0,
             "Qwen3.5 FFN input width {n_embd} must be a multiple of {} for K-quant weights",
             crate::ops::quant::QK_K
         );
 
-        let need_q8 = layer
-            .ffn_gate
-            .as_ref()
-            .is_some_and(|w| w.needs_q8_0_activation())
-            || layer
-                .ffn_up
-                .as_ref()
-                .is_some_and(|w| w.needs_q8_0_activation());
+        let need_q8 = ffn_gate.needs_q8_0_activation() || ffn_up.needs_q8_0_activation();
         scratch
             .prepared
             .prepare(hidden, n_tokens, n_embd, need_q8, q8k_required)
@@ -1149,11 +1368,8 @@ impl<'a> super::weights::HybridTrunk<'a> {
                 down_input,
                 n_tokens,
                 n_ff,
-                layer
-                    .ffn_down
-                    .as_ref()
-                    .is_some_and(|w| w.needs_q8_0_activation()),
-                layer.ffn_down.as_ref().is_some_and(|w| w.uses_q8_k()),
+                ffn_down.needs_q8_0_activation(),
+                ffn_down.uses_q8_k(),
             )
             .expect("validated Qwen3.5 FFN output shape");
         scratch

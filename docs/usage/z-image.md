@@ -41,18 +41,19 @@ Z-Image model requires --text-encoder, --vae, --prompt, and --out
 ### 实测耗时（NVIDIA GB10，20 核，512×512，8 步）
 
 prompt "A red fox sleeping beneath a pine tree"（16 token），seed 42，`--threads 8`，
-`cargo build --release --features vulkan`。2026-10-09，`#165` 之后。
+`cargo build --release --features vulkan`。2026-10-12，FFN 合批 + SiLU 饱和修复 +
+Q/K norm 与交错 RoPE 上设备之后。
 
 同一二进制、只切开关的同会话对照：
 
 | 阶段 | CPU | GPU（`--gpu`） |
 |---|---|---|
-| text_encode | 0.6 s | **0.65–0.74 s**（见下方 gate）|
-| denoise | 563.3 s | **50.3 s** |
-| vae_decode | 10.6 s | **6.0 s** |
-| **总计** | **574.6 s** | **60.1 s** |
+| text_encode | 0.6 s | **0.65–0.84 s**（见下方 gate）|
+| denoise | 563.3 s | **42.0 s** |
+| vae_decode | 10.6 s | **6.1 s** |
+| **总计** | **574.6 s** | **49.0 s** |
 
-denoise 11.2×、端到端 9.6×。默认配置多次运行输出逐字节一致；
+denoise 13.2×、端到端 11.6×。多次运行输出逐字节一致。
 `RUST_GPU_TEXT=1` 输出亦逐字节一致（text gate 只改执行位置不改算术）。
 `RUST_GPU_ATTENTION=0` **不**逐字节一致（PSNR 31.4 dB）——这是该开关本身的语义，
 见下文「GPU 路径从来就不是逐位精确的」。
@@ -71,7 +72,7 @@ denoise 分段（`[gpu-block-profile]`，8 步合计 50.3 s）：
 | ffn: refiner | 2.4 s | 4.8% | GPU（F16 tiled）|
 | &nbsp;&nbsp;其中 host silu | 4.8 s | 9.6% | **host**（w1/w3 之间）|
 | &nbsp;&nbsp;其中 w1 readback | 2.4 s | 4.7% | **host** |
-| rope | 0.9 s | 1.8% | host |
+| &nbsp;&nbsp;其中 rope | 0.9 s | 1.8% | ~~host~~ → **GPU**（已融合进 norm+adaln+qkv）|
 | modulation | 0.02 s | 0.0% | host |
 
 **真正在 host 的是 8.1 s / 50.3 s = 16.1%**，其中 host silu + w1 readback 合计
@@ -307,13 +308,27 @@ cache 布局**——`cache[(layer*token_count + position)]` 两种嵌套共用�
 > `zimage_tiled_matmul_beats_the_one_token_per_weight_kernel`，它轮流读取 8 个
 > 不同权重矩阵以绕开 L2，单矩阵热缓存下会报出 10 万 GOP/s 的假数字。
 
-### 还没搬上 GPU 的
+### 还在 host 上的
 
-attention 仍占单步 23%，在 CPU 上跑。它比 GEMM 难搬：DiT 没有 KV cache——每个
-token 只看自己 block 里的每个 token 一次——而现成的 scores/values operator
-按 decoder 的 `[layer][position][head][dim]` 缓存布局索引，需要给
-`kv_write` 和 `attention_scores` 加源 stride，并且要确认 softmax 归约的轴。
-另外它有和 GEMM 同样的 514 GB K 重读，必须一并做 token 分块才有意义。
+DiT 的整条链现在都在设备上：rms_norm、AdaLN 调制、QKV 投影、Q/K norm、
+交错 RoPE、attention、out proj、FFN 四个投影、SiLU。剩下真正跑在 CPU 的只有：
+
+| 阶段 | 耗时 | 说明 |
+|---|---|---|
+| FFN 的 W2 输出回读 | 1.38 s / 8 步 | 回读后接 norm + 门控残差 |
+| AdaLN modulation | 0.02 s | 每 block 的 scale/shift 向量 |
+| rope | 0.3 ms | 已在设备，只是 profile 槽位仍标 host |
+
+**回读那一项是剩下最大的一块。** W2 的输出要进 `readback_norm_and_residual_rows`
+做 ffn_norm2 和门控残差，两者都作用在 `HIDDEN` 宽的整行上而不是 FFN 宽度，
+所以搬上设备要先确认这条链在 F16 arena 上的舍入契约。
+
+attention 早期确实搬不动——DiT 没有 KV cache（每个 token 只看自己 block 里的每个
+token 一次），而现成的 scores/values operator 按 decoder 的
+`[layer][position][head][dim]` 缓存布局索引。现在通过给 `kv_write` 和
+`attention_scores` 加源 stride、并让整段序列作为单个 block 走 `full_attention`
+（去掉 decoder 依赖的 causal 上限）解决；scores 用的是 tiled kernel，
+带 `QUERY_TILE` 的 query 分块。
 
 > `RUST_GPU_DIAG=1` 会逐步打印 `blocks_on_gpu` 与 `projections`。这个计数器
 > 抓到过一次静默故障：block 0 报错后 `mark_gpu_broken` 把设备锁死，而 block
@@ -373,8 +388,8 @@ GPU 一列的判定依据与已知缺口：
 - **已跑通**：NVIDIA GB10（`--features vulkan` 构建）上 8 步 512×512 端到端出图，
   **70.6 s**（同会话 CPU 574.6 s，8.1×）；`RUST_GPU_DIAG=1` 报 `blocks_on_gpu=34`
   （全部 34 层进入 `run_block_gpu`），每步 170 次 projection。
-- **画质**：同 seed 512×512 8 步，GPU 与 CPU 输出 PSNR **33.34 dB**，
-  mean\|Δ\| 2.81/255。`RUST_GPU_TEXT=1` 的输出与默认配置逐字节一致；
+- **画质**：同 seed 512×512 8 步，GPU 与 CPU 输出 PSNR **32.21 dB**，
+  mean\|Δ\| 3.01/255（Q8_0 倒数对齐 CPU 后；此前 31.61 dB / 3.44）。`RUST_GPU_TEXT=1` 的输出与默认配置逐字节一致；
   `RUST_GPU_ATTENTION=0` 与默认相差 PSNR 31.4 dB（该开关按设计改变浮点路径）。
 - **单测覆盖**：`cargo test --features vulkan --lib` 下 5 个 GPU 正确性测试通过
   （AdaLN 调制、融合 norm+modulate、batched QKV、W2 scale 抵消、attention 分块逐位一致）。
@@ -385,13 +400,82 @@ GPU 一列的判定依据与已知缺口：
 - **已知缺口**：
   - **DiT attention 已在 GPU**（默认 `RUST_GPU_ATTENTION=1`，实测 10.8 s/8 步；
     关掉后 27.0 s）。旧版本文档与 `GPU_PHASE_LABELS` 曾误标为 host，标签已修正。
-  - **RoPE 与 AdaLN modulation 仍在 host**（合计 0.9 s / 50.3 s，可忽略）。
+  - **RoPE 已上设备**：`qk_norm_rope_interleaved.comp` 把 Q/K 的 rms_norm 与
+    交错 RoPE 融进 QKV 的同一个 command buffer，QKV 不再回 host
+    （`rope (host)` 893.8 ms → 0.3 ms，denoise 43.1 → 42.0 s）。
+    **AdaLN modulation 仍在 host**（0.02 s，可忽略）。
   - **FFN 的 w1/w3 激活要经 host silu + 回读**，合计 7.2 s / 50.3 s = 14.3%，
-    是 denoise 剩余最大的一块 host 开销。合批到单 command buffer 的尝试曾输出
-    全 `-inf` 而回退，根因未定位——**修它需要先独立诊断那个 bug**，风险与收益
-    不对等。
-  - **QKV 每 block 重新上传 ~48 MB**（RoPE 在 host，旋转后的行要送回设备）。
-    8 步约 13 GB，被包在 attention 那一档里。若 RoPE 上设备可省，但尚未评估。
+    是 denoise 剩余最大的一块 host 开销。合批到单 command buffer 后这部分
+    **完全消失**（host silu 从 profile 里消失，`ffn: main stack` 25.4 → 16.3 s，
+    denoise 52.7 → 43.4 s，端到端 59.9 → 50.6 s），**但整图会产出 `-inf`**。
+    根因见下方「FFN 合批的 `-inf`：已定位」。
+
+### FFN 合批的 `-inf`：已定位
+
+历史上这个失败被归因为「descriptor set 与 pipeline 布局在跨 dispatch 复用时的
+状态」，并注明「根因未定位」。**那个归因是错的**，2026-10-12 用逐层放开的办法
+定位到了真正的机制。
+
+`FFN_BATCH_MAX=<n>` 让合批只对 `layer < n` 生效，二分结果是：
+
+| 放开层数 | 结果 |
+|---|---|
+| 0（全走原路径）| ✅ 正常出图 |
+| 2 | ✅ layer 0、1 合批，正常 |
+| 4 | ❌ **layer 3 首个产出 `-inf`** |
+
+逐阶段读回（同 seed、256×256、单步）把放大链定位到 **w1 本身**：
+
+| 路径 | layer | w1 输出 amax | w1 非有限 |
+|---|---|---|---|
+| 原路径（逐 dispatch submit）| 2 | 83.8 | 0 |
+| 原路径（逐 dispatch submit）| 3 | **103.2** | **0** |
+| 合批（单 command buffer）| 2 | 767 | 0 |
+| 合批（单 command buffer）| 3 | **6314** | **191 / 2621440** |
+
+**输入完全正常**：合批路径下 layer 3 送进 `x` 的激活 amax 仅 90.6、零非有限值，
+与原路径一致。变的只有执行方式。
+
+所以合批的算术本身没错——`record_ffn` 自己在 rows=3840 的真实形状上逐元素正确
+（`batched_ffn_chain_matches_incremental_submission`，14 745 600 个元素全部有限且与
+逐个提交一致）。
+
+**真正的根因在 `record_silu_mul`，而且与 DiT 完全无关。** 用一个独立自检
+（`silu_ffn_scale_probe`，FFN 真实规模 3840×9728）单独调这个算子即可复现：
+**37 324 800 个激活里 16 009 509 个（43%）非有限**。
+
+`shaders/glsl/silu_mul.comp` 的 `exp_approx` 把 exp 输入 clamp 在 `±88.376`
+（exp 溢出点），但 silu 的补偿算法
+
+```glsl
+res = fma(-den, act, gate);   // 灾难性抵消
+act = fma(res, 1/den, act);   // 需要 1/den 是正规数
+```
+
+要求 `1/denominator` 落在 f32 正规数范围。clamp=88.376 时 `1/den = 4.16e-39`，
+**低于正规数下限 1.18e-38**，落进次正规数区间，修正项产出 NaN。clamp=80 时
+`1/den = 1.8e-35`，是正规数。
+
+为什么只有合批会暴露：原路径的 silu 在 **host 上做**，从不调用这个 GPU 算子。
+合批第一次把它放进 dispatch 链，才碰到这个从未在生产规模验证过的缺陷——原自检
+只覆盖 `N_FF = 96`，真实规模是它的 38.9 万倍。
+
+两个佐证：
+
+- `RUST_GPU_F16_REF=0`（refiner 的 F16 权重不上设备）时合批路径正常——
+  出问题的是 F16 路径，Q8_0 的 main stack 不受影响。
+- 去掉 silu（w1+w3+w2 仍在同一 buffer）即可正常出图；`record_silu_mul` 是唯一的
+  破坏者。
+
+**已修复**：clamp 改 `±80`，并新增生产规模门禁。⚠️ clamp 值不可调回 88.376，
+且 GPU SiLU 自此与 CPU 不再逐位一致（PSNR 33.34 → 31.61 dB）。
+完整风险登记见 [`docs/develop/TODO.md`](../develop/TODO.md) TODO-020。
+
+### 其余已知缺口
+
+  - ~~QKV 每 block 重新上传~~ **已消除**：RoPE 上设备后 QKV 不再往返
+    （原先每 block 下 177 MB + 上 177 MB，实测合计只值约 1.3 s——这台机器上
+    177 MB 的单向传输约 0.4 s，先前「传输值 1.9–3.9 s」的估计偏高）。
   - **Qwen3 文本编码器默认在 CPU 上跑**（临时 gate，见第 1 节环境变量表）。
   - **VAE 只 offload 卷积**：GroupNorm、SiLU、nearest upsample 与 VAE 内 attention
     仍在 CPU。当前 VAE 6.0 s 已优于 CPU 的 10.6 s，故非瓶颈。

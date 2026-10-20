@@ -132,6 +132,9 @@ pub fn run_qwen3_family_multimodal(
                     .map_err(|error| format!("Failed to parse ZDT vision config: {error}"))?;
                 (config.image_size, config.image_size)
             }
+            crate::app::media::ProjectorFamily::MiniCpmV47 => {
+                return Err(MINICPMV47_CANVAS_ONLY_MSG.to_string());
+            }
         };
         let (mean, std) = match family {
             crate::app::media::ProjectorFamily::Qwen3VlMerger => {
@@ -153,6 +156,9 @@ pub fn run_qwen3_family_multimodal(
                 let config = ZdtVisionEncoder::load_config_only(mmproj.as_ref())
                     .map_err(|error| format!("Failed to parse ZDT vision config: {error}"))?;
                 (config.image_mean, config.image_std)
+            }
+            crate::app::media::ProjectorFamily::MiniCpmV47 => {
+                return Err(MINICPMV47_CANVAS_ONLY_MSG.to_string());
             }
         };
         let normalized = frames
@@ -264,6 +270,9 @@ pub fn run_qwen3_family_multimodal(
                     media.extend_from_slice(&projected);
                     media_grid_shapes.push((tokens, 1));
                 }
+            }
+            crate::app::media::ProjectorFamily::MiniCpmV47 => {
+                return Err(MINICPMV47_CANVAS_ONLY_MSG.to_string());
             }
         }
     }
@@ -478,6 +487,215 @@ pub fn run_qwen3_family_multimodal(
 /// true JEV argmax-over-labels scoring on multimodal inputs
 /// without paying the cost of generation + parsing.
 #[allow(clippy::too_many_arguments)]
+/// Encode one image with the `minicpmv4_7` projector.
+///
+/// Resizes the image onto the overview tile, and when the slice instructions
+/// ask for a grid, also onto the refined canvas that the slices are cut from.
+/// Each tile goes through [`crate::models::minicpmv::encode_tile`], and the
+/// separator rows that follow it (`</image>`, `<slice>`, `</slice>`, newline,
+/// per `clip_suffix_rows`) are appended from `v.tok_embd_sep`.
+///
+/// The returned [`VisionGrid`] describes the canvas. `grid_w x grid_h` is the
+/// token grid of the **last** tile — llama.cpp's `canvas_tile_grid` scales every
+/// other tile's grid from it — and `grid_t` carries the slice grid width.
+fn encode_minicpmv47_image(
+    mmproj_source: &dyn TensorSource,
+    image_path: &Path,
+    n_threads_arg: usize,
+) -> Result<(VisionGrid, Vec<f32>, Vec<[usize; 4]>), String> {
+    use crate::models::minicpmv::{
+        append_suffix, encode_tile, get_slice_instructions, suffix_plan, ImageSize,
+        MiniCpmV47Scratch, MiniCpmV47Weights,
+    };
+
+    let started = std::time::Instant::now();
+    let weights = MiniCpmV47Weights::load(mmproj_source)?;
+    let cfg = weights.config.clone();
+    let image = decode_image(image_path)?;
+    let original = ImageSize {
+        width: usize::try_from(image.width()).map_err(|_| "image width does not fit usize")?,
+        height: usize::try_from(image.height()).map_err(|_| "image height does not fit usize")?,
+    };
+    let inst = get_slice_instructions(&cfg, original);
+    let plan = suffix_plan(inst.grid_size.width, inst.grid_size.height);
+    let ps = cfg.patch_size;
+
+    // [overview, slices row-major], each already at its own pixel size.
+    let mut tiles: Vec<(image::DynamicImage, usize, usize)> = Vec::new();
+    tiles.push((
+        resize_to(&image, inst.overview_size.width, inst.overview_size.height)?,
+        inst.overview_size.width,
+        inst.overview_size.height,
+    ));
+    let mut reference_grid = (
+        inst.overview_size.width / ps / cfg.n_merge,
+        inst.overview_size.height / ps / cfg.n_merge,
+    );
+    if inst.has_slices() {
+        let refined = resize_to(&image, inst.refined_size.width, inst.refined_size.height)?;
+        for slice in &inst.slices {
+            tiles.push((
+                crop_box(&refined, slice.x, slice.y, slice.width, slice.height)?,
+                slice.width,
+                slice.height,
+            ));
+        }
+        let last = inst.slices.last().expect("has_slices implies a last slice");
+        reference_grid = (
+            last.width / ps / cfg.n_merge,
+            last.height / ps / cfg.n_merge,
+        );
+    }
+
+    let pool = Arc::new(crate::core::thread_pool::ComputePool::new(
+        n_threads_arg.max(1),
+    ));
+    let mut scratch = MiniCpmV47Scratch::default();
+    let mut projected: Vec<f32> = Vec::new();
+    let mut token_grids: Vec<crate::models::minicpmv::vision::TileGrid> = Vec::new();
+    for (index, ((tile, width, height), suffix)) in tiles.iter().zip(plan.iter()).enumerate() {
+        let (nx, ny) = (width / ps, height / ps);
+        let pixels = crate::app::media::normalize_resized_image(
+            tile,
+            *width,
+            *height,
+            &cfg.image_mean,
+            &cfg.image_std,
+        )?;
+        let mut embd = encode_tile(&weights, &mut scratch, &pool, &pixels, nx, ny)?;
+        append_suffix(&weights, suffix, &mut embd);
+        let expected = cfg.output_tokens(nx, ny, suffix.len());
+        if embd.len() != expected * cfg.n_embd_text {
+            return Err(format!(
+                "tile {index}: encoder produced {} rows, expected {expected}",
+                embd.len() / cfg.n_embd_text
+            ));
+        }
+        projected.extend_from_slice(&embd);
+        // One 2x2 merge at the vit_merger and one in the final projector, so
+        // a side loses a factor of `n_merge` (4) from patch count to tokens.
+        let half = |v: usize| v / 2;
+        let per_side_x = if cfg.n_merge == 2 {
+            half(nx)
+        } else {
+            half(half(nx))
+        };
+        let per_side_y = if cfg.n_merge == 2 {
+            half(ny)
+        } else {
+            half(half(ny))
+        };
+        token_grids.push(crate::models::minicpmv::vision::TileGrid {
+            grid_w: per_side_x.max(1),
+            grid_h: per_side_y.max(1),
+        });
+    }
+    // `pos_0` is the KV slot the `<|image_pad|>` marker will occupy, so the
+    // canvas origin (`base = pos_0 - 1`) lands on the text row before it.
+    let canvas = crate::models::minicpmv::vision::canvas_positions(
+        &token_grids,
+        &plan,
+        inst.grid_size.width,
+        inst.grid_size.height,
+        MARKER_SLOT,
+    )?;
+    if canvas.len() != projected.len() / cfg.n_embd_text {
+        return Err(format!(
+            "canvas positions ({}) do not match the projected rows ({})",
+            canvas.len(),
+            projected.len() / cfg.n_embd_text
+        ));
+    }
+
+    let (grid_w, grid_h) = reference_grid;
+    println!(
+        "MiniCPM-V 4.7 vision: {}x{} -> overview {}x{} + {} slices ({}x{} grid), \
+{} tokens in {:.3}s",
+        original.width,
+        original.height,
+        inst.overview_size.width,
+        inst.overview_size.height,
+        inst.slices.len(),
+        inst.grid_size.width,
+        inst.grid_size.height,
+        projected.len() / cfg.n_embd_text,
+        started.elapsed().as_secs_f64(),
+    );
+    Ok((
+        VisionGrid {
+            grid_t: inst.grid_size.width.max(1),
+            grid_h: grid_h.max(1),
+            grid_w: grid_w.max(1),
+            patch_size: ps,
+            merge_size: cfg.n_merge,
+        },
+        projected,
+        canvas,
+    ))
+}
+
+/// Placeholder KV slot the `<|image_pad|>` marker occupies. The canvas origin
+/// is `pos_0 - 1`, so this is the position of the token right before `<image>`.
+const MARKER_SLOT: usize = 1;
+
+fn resize_to(
+    image: &image::DynamicImage,
+    width: usize,
+    height: usize,
+) -> Result<image::DynamicImage, String> {
+    let w = u32::try_from(width).map_err(|_| "target width does not fit u32")?;
+    let h = u32::try_from(height).map_err(|_| "target height does not fit u32")?;
+    if width == 0 || height == 0 {
+        return Err("target size must be non-zero".into());
+    }
+    if image.width() == w && image.height() == h {
+        return Ok(image.clone());
+    }
+    Ok(image.resize_exact(w, h, image::imageops::FilterType::Triangle))
+}
+
+fn crop_box(
+    image: &image::DynamicImage,
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+) -> Result<image::DynamicImage, String> {
+    let x = u32::try_from(x).map_err(|_| "crop x does not fit u32")?;
+    let y = u32::try_from(y).map_err(|_| "crop y does not fit u32")?;
+    let w = u32::try_from(width).map_err(|_| "crop width does not fit u32")?;
+    let h = u32::try_from(height).map_err(|_| "crop height does not fit u32")?;
+    let rgb = image.to_rgb8();
+    let cropped = image::imageops::crop_imm(&rgb, x, y, w, h).to_image();
+    Ok(image::DynamicImage::ImageRgb8(cropped))
+}
+
+/// MiniCPM-V 4.7's projector, config, slicing and per-tile encoder are
+/// implemented in `crate::models::minicpmv`, but the canvas layout gives every
+/// tile one M-RoPE slot and the separators after it one slot each, which the
+/// shared anyres builder (`build_qwen35_positions`) cannot express. So the
+/// anyres-shaped helpers below cannot serve this family at all; the canvas path
+/// in `run_qwen35_family_multimodal_logits` is the only one that can.
+const MINICPMV47_CANVAS_ONLY_MSG: &str = "MiniCPM-V 4.7 (minicpmv4_7): this anyres helper does \
+not handle it. Its tile separators (`</image>`, `<slice>`, `</slice>`, newline) are embeddings \
+with no token id, and its canvas gives every tile one M-RoPE slot, which build_qwen35_positions \
+cannot express; use the minicpmv4_7 canvas path instead.";
+
+/// The same projector's canvas path, reached with `--jinja` off.
+///
+/// This used to reuse the wording above and claim the wiring was missing. That
+/// gap is closed: the canvas path splices the media span over the single
+/// `<|image_pad|>` that the checkpoint's own `tokenizer.chat_template` emits.
+/// What actually arrives here is that `--jinja` is off, so `jinja.resolve()`
+/// returns `None`, `text_conversation_tokens` has no template to read the marker
+/// from and returns `None`, and the "not wired" story sent two debugging rounds
+/// after a problem that did not exist. 1B has always needed `--jinja`; this is
+/// not a new restriction.
+const MINICPMV47_JINJA_MSG: &str = "MiniCPM-V 4.7 (minicpmv4_7): pass --jinja, or \
+--chat-template-file <path.jinja>. The projector, slicing and canvas positions are implemented and \
+need exactly one <|image_pad|> marker, which only the checkpoint's own tokenizer.chat_template \
+emits; with jinja disabled there is no template to take that marker from, so the prompt cannot \
+be built.";
 pub fn run_qwen3_family_multimodal_logits(
     llm_source: &dyn TensorSource,
     model_source: Arc<dyn TensorSource>,
@@ -570,6 +788,13 @@ pub fn run_qwen3_family_multimodal_logits(
                 let config = ZdtVisionEncoder::load_config_only(mmproj.as_ref())
                     .map_err(|error| format!("Failed to parse ZDT vision config: {error}"))?;
                 (config.image_size, config.image_size)
+            }
+            // Main carries the MiniCPM-V arm on this match rather than on
+            // `norm_stats` below, and that is the only exhaustive placement:
+            // the canvas-only path has to bail out before the fixed-size grid
+            // is used at all, and `norm_stats` is already covered by its `_` arm.
+            crate::app::media::ProjectorFamily::MiniCpmV47 => {
+                return Err(MINICPMV47_CANVAS_ONLY_MSG.to_string());
             }
         };
         let norm_stats = match family {
@@ -681,6 +906,9 @@ pub fn run_qwen3_family_multimodal_logits(
                     media.extend_from_slice(&projected);
                     media_grid_shapes.push((projected.len() / per_token, 1));
                 }
+            }
+            crate::app::media::ProjectorFamily::MiniCpmV47 => {
+                return Err(MINICPMV47_CANVAS_ONLY_MSG.to_string());
             }
         }
     }
@@ -1150,13 +1378,17 @@ pub(super) fn run_multimodal_with_video_ref(
     if arch == "edge0" && (image_path.is_some() || video_path.is_some()) {
         return Err("Edge0-35B preview contains no vision weights; text input only".into());
     }
-    if arch != "qwen35" && arch != "qwen3vl" && arch != "edge0" {
+    if arch != "qwen35" && arch != "qwen35moe" && arch != "qwen3vl" && arch != "edge0" {
         return Err(format!(
-            "Only qwen35, qwen3vl, and edge0 architectures are supported for multimodal, got: {arch}"
+            "Only qwen35, qwen35moe, qwen3vl, and edge0 architectures are supported \
+             for multimodal, got: {arch}"
         ));
     }
 
     let t_img_start = std::time::Instant::now();
+    // MiniCPM-V 4.7 lays its tiles on one 2D canvas, so its M-RoPE positions
+    // come from `canvas_positions` instead of the anyres grid builder.
+    let mut canvas_positions: Option<Vec<[usize; 4]>> = None;
     let (image_grid, vis_embeddings_vec) = if let Some(image_path) = image_path {
         let projector_path = mmproj_path.unwrap_or(model_path);
         println!("Loading mmproj {} ...", projector_path.display());
@@ -1308,6 +1540,11 @@ pub(super) fn run_multimodal_with_video_ref(
                     }),
                     projected,
                 )
+            } else if family == crate::app::media::ProjectorFamily::MiniCpmV47 {
+                let (grid, projected, canvas) =
+                    encode_minicpmv47_image(mmproj_source.as_ref(), image_path, n_threads_arg)?;
+                canvas_positions = Some(canvas);
+                (Some(grid), projected)
             } else {
                 let (grid, projected) =
                     encode_qwen35_image(mmproj_source.as_ref(), image_path, n_threads_arg)?;
@@ -1354,7 +1591,15 @@ pub(super) fn run_multimodal_with_video_ref(
                 .special_token_id("vision_start")
                 .ok_or("Required token missing: <|vision_start|>")?,
         );
-        content_tokens.extend(std::iter::repeat(image_token_id).take(n_vis_tokens));
+        // MiniCPM-V 4.7 emits exactly one `<|image_pad|>` per image (that is
+        // what its own GGUF template does) and then projects N embedding rows
+        // over it; the separator rows in between have no token id. Every other
+        // family keeps one placeholder per projected row.
+        if canvas_positions.is_some() {
+            content_tokens.push(image_token_id);
+        } else {
+            content_tokens.extend(std::iter::repeat(image_token_id).take(n_vis_tokens));
+        }
         content_tokens.push(
             tokenizer
                 .special_token_id("vision_end")
@@ -1369,18 +1614,72 @@ pub(super) fn run_multimodal_with_video_ref(
         },
     ));
 
-    let mut prompt_ids = Vec::new();
-    append_qwen_message_tokens(&mut prompt_ids, &tokenizer, "user", &content_tokens)?;
-    append_qwen_assistant_prefix(&mut prompt_ids, &tokenizer, false)?;
+    // `--jinja` renders the checkpoint's own template. MiniCPM-V 4.7's emits a
+    // single `<|image_pad|>` per image, which is exactly what the canvas path
+    // wants: the media span is spliced over that one marker.
+    let prompt_ids = match (canvas_positions.is_some(), image_token_id) {
+        (true, Some(marker)) => {
+            let special = crate::prompt::jinja::special_token_literals(&tokenizer);
+            let template = jinja.resolve(&|k| llm_source.metadata(k).cloned())?;
+            let media = [crate::prompt::jinja::MediaPart::new("image", 1)];
+            let mut ids = crate::prompt::jinja::media_conversation_tokens(
+                &tokenizer,
+                template.as_ref(),
+                marker,
+                &media,
+                prompt,
+                None,
+                true,
+            )?
+            .ok_or_else(|| MINICPMV47_JINJA_MSG.to_string())?;
+            // `mtmd_tokenizer` injects `<image_id>N</image_id>` ahead of every
+            // image for this projector (`use_image_id`), before the `<image>`
+            // marker. The chat template knows nothing about it, so it has to be
+            // added here.
+            let image_id_tokens = tokenizer.encode(
+                "<image_id>0</image_id>",
+                EncodeOptions {
+                    add_special: false,
+                    parse_special: true,
+                },
+            );
+            if let Some(at) = ids.iter().position(|&id| id == marker) {
+                for (offset, id) in image_id_tokens.iter().enumerate() {
+                    ids.insert(at + offset, *id);
+                }
+            }
+            ids
+        }
+        _ => {
+            let mut ids = Vec::new();
+            append_qwen_message_tokens(&mut ids, &tokenizer, "user", &content_tokens)?;
+            append_qwen_assistant_prefix(&mut ids, &tokenizer, false)?;
+            ids
+        }
+    };
     let image_grids: Vec<crate::models::qwen35::vision::VisionGrid> =
         image_grid.iter().copied().collect();
-    let (prompt_positions, mut next_text_position) =
-        build_qwen35_positions(&prompt_ids, image_token_id, &image_grids)?;
     let prompt_tokens: Vec<i32> = prompt_ids
         .iter()
         .copied()
         .map(|id| i32::try_from(id).map_err(|_| format!("Token ID {id} exceeds i32")))
         .collect::<Result<_, _>>()?;
+    // Canvas layouts own their positions: one per embedding row, with the
+    // marker replaced by the whole media span.
+    let (prompt_positions, mut next_text_position) = match (&canvas_positions, image_token_id) {
+        (Some(canvas), Some(marker)) => {
+            let marker =
+                i32::try_from(marker).map_err(|_| format!("Token ID {marker} exceeds i32"))?;
+            let (positions, next) = crate::app::text::vision::minicpmv47_prompt_positions(
+                &prompt_tokens,
+                marker,
+                0,
+                canvas,
+            );
+            (positions, next)
+        }
+        _ => build_qwen35_positions(&prompt_ids, image_token_id, &image_grids)?,
+    };
 
     let projected_count = if vis_embeddings.is_empty() {
         0
@@ -1391,7 +1690,13 @@ pub(super) fn run_multimodal_with_video_ref(
         }
         vis_embeddings.len() / projection_dim
     };
-    if projected_count != n_vis_tokens || prompt_positions.len() != prompt_tokens.len() {
+    // The canvas path intentionally breaks both invariants: separators add
+    // rows beyond the grid's token count, and the marker is one token that
+    // expands to many embedding rows.
+    let canvas_path = canvas_positions.is_some();
+    if !canvas_path
+        && (projected_count != n_vis_tokens || prompt_positions.len() != prompt_tokens.len())
+    {
         return Err(format!(
             "Vision/position count mismatch: placeholders={n_vis_tokens}, projected={projected_count}, positions={}, tokens={}",
             prompt_positions.len(),
@@ -1413,15 +1718,30 @@ pub(super) fn run_multimodal_with_video_ref(
         prompt_tokens
     );
 
-    let max_seq = (prompt_tokens.len() + max_tokens).min(config.n_ctx);
-    let prompt_embd = inject_vision_embeddings(
-        llm.trunk(),
-        &prompt_tokens,
-        image_token_id,
-        vis_embeddings,
-        n_vis_tokens,
-        config.n_embd,
-    )?;
+    let prompt_embd = match (&canvas_positions, image_token_id) {
+        (Some(_), Some(marker)) => {
+            let marker =
+                i32::try_from(marker).map_err(|_| format!("Token ID {marker} exceeds i32"))?;
+            let rows = vis_embeddings.len() / config.n_embd;
+            let (embeddings, _span) = crate::app::text::vision::inject_media_span(
+                llm.trunk(),
+                &prompt_tokens,
+                marker,
+                vis_embeddings,
+                rows,
+                config.n_embd,
+            )?;
+            embeddings
+        }
+        _ => inject_vision_embeddings(
+            llm.trunk(),
+            &prompt_tokens,
+            image_token_id,
+            vis_embeddings,
+            n_vis_tokens,
+            config.n_embd,
+        )?,
+    };
     #[cfg(feature = "parity-trace")]
     {
         let flat_positions = prompt_positions
@@ -1450,7 +1770,12 @@ pub(super) fn run_multimodal_with_video_ref(
         ));
     }
 
+    let n_embd_row = llm.trunk().config.n_embd;
+    // The canvas path expands one marker token into many embedding rows, so
+    // the session has to be sized by rows, not by tokens.
     let n_prompt = prompt_tokens.len();
+    let prompt_rows = prompt_embd.len() / n_embd_row;
+    let max_seq = (prompt_rows + max_tokens).min(config.n_ctx);
     let mut all_tokens = prompt_tokens.clone();
 
     let n_threads = if n_threads_arg > 0 { n_threads_arg } else { 8 };
@@ -1481,7 +1806,13 @@ pub(super) fn run_multimodal_with_video_ref(
         } else {
             &all_tokens[all_tokens.len() - 1..all_tokens.len() - 1 + 1]
         };
-        let n_tok = tokens.len();
+        // On the canvas path the prompt is longer in embeddings than in tokens
+        // (the separator rows have no id), so prefill by row count.
+        let n_tok = if step == 0 {
+            prompt_embd.len() / n_embd_row
+        } else {
+            tokens.len()
+        };
 
         let decode_embedding;
         let embeddings = if step == 0 {

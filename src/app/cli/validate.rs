@@ -201,18 +201,13 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
         if media_count > 1 {
             return Err("--embedding accepts only one of --image, --video, or --audio".into());
         }
-        if media_count == 1 {
-            if options
-                .mmproj
-                .as_deref()
-                .is_none_or(|path| path.as_os_str().is_empty())
-            {
-                return Err("media embedding requires --mmproj".into());
-            }
-            return Ok(());
-        }
-    }
-    if options.video.is_some() {
+        // A media embedding is fully handled by `main.rs`, which checks
+        // `--mmproj` where it opens the projector and reports the failure
+        // itself. Do not return here: this used to skip every check below,
+        // including the dispatch-mode conflicts, so `--embedding --image
+        // --rerank` got as far as loading a model instead of saying the two
+        // modes conflict.
+    } else if options.video.is_some() {
         if options
             .mmproj
             .as_deref()
@@ -275,7 +270,13 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
         }
         return Ok(());
     }
-    if options.audio.is_none() {
+    // An audio *embedding* is dispatched by `main.rs` and never reaches the ASR
+    // path, so the checks below -- which treat `--audio` as audio generation and
+    // treat `--embedding` as a conflicting mode with it -- do not apply. The old
+    // unconditional `return Ok(())` covered this by also skipping the
+    // dispatch-mode conflicts above; now the embedding block falls through, so
+    // this has to be stated explicitly.
+    if options.audio.is_none() || (options.embedding && media_count == 1) {
         return if options.language.is_some() {
             Err("--language requires --audio".into())
         } else {

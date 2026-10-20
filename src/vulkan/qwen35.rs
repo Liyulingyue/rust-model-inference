@@ -463,8 +463,10 @@ struct LayerBindings {
     attention_norm: OperatorBindings,
     attention: AttentionBindings,
     post_attention_norm: OperatorBindings,
-    // None for MoE-only blocks (Occamy-1.0); the CPU MoE trunk handles
-    // their FFN. The Vulkan layer forward skips FFN when both are None.
+    // Both are None when the layer has no dense FFN: a qwen35moe layer, or an
+    // Occamy-1.0 block, both of which run their experts on the CPU. Recording a
+    // half-built FFN would submit work against buffers nothing writes, and the
+    // Vulkan layer forward skips the FFN when both are None.
     gate_up: Option<WeightBindings<2>>,
     down: Option<OperatorBindings>,
 }
@@ -642,6 +644,10 @@ impl Qwen35VulkanSession {
 
             let post_norm_buffer = buffers.upload_f32(&layer.attn_post_norm)?;
             let post_attention_norm = ops.bind_buffers(&[post_norm_buffer])?;
+            // A layer with no dense FFN -- qwen35moe or an Occamy-1.0 block --
+            // falls back to the CPU route for the FFN instead of binding a
+            // half-model on the GPU. Both helpers take and return `Option`, so
+            // an absent weight yields `None` rather than a missing-tensor error.
             let gate_up = bind_weight_group(
                 &mut ops,
                 &mut buffers,
@@ -1075,10 +1081,11 @@ impl Qwen35VulkanSession {
                 config.n_embd,
                 config.n_embd,
             )?;
-            // MoE-only blocks (Occamy-1.0, all 40 layers are MoE with no
-            // dense FFN) skip this entire Vulkan FFN block; the CPU MoE
-            // trunk handles their FFN. Vulkan still records attention,
-            // norms, and the residual add below, so x is preserved.
+            // The dense FFN only exists on a qwen35 layer. On qwen35moe and on
+            // Occamy-1.0 blocks the experts run on the CPU, so there is nothing
+            // to record and submitting it would read buffers the graph never
+            // wrote. Attention, both norms and both residual adds still record,
+            // so x is preserved either way.
             if let (Some(gate_up), Some(down)) = (bindings.gate_up, bindings.down) {
                 self.record_weight_group(
                     &commands,
@@ -1311,23 +1318,19 @@ fn eligibility_facts(model: &Qwen35Model<'_>) -> EligibilityFacts {
         return facts;
     }
     for (layer_index, layer) in model.layers.iter().enumerate() {
-        facts.weight_formats.extend([
-            layer
-                .ffn_gate
-                .as_ref()
-                .map(|w| w.ggml_type)
-                .unwrap_or_default(),
-            layer
-                .ffn_up
-                .as_ref()
-                .map(|w| w.ggml_type)
-                .unwrap_or_default(),
-            layer
-                .ffn_down
-                .as_ref()
-                .map(|w| w.ggml_type)
-                .unwrap_or_default(),
-        ]);
+        // Only weights that are actually present. Pushing a default for an
+        // absent one would report F32 for a MoE layer that has no dense FFN at
+        // all, and let it through the format eligibility check on a format it
+        // never had.
+        for weight in [
+            layer.ffn_gate.as_ref(),
+            layer.ffn_up.as_ref(),
+            layer.ffn_down.as_ref(),
+        ] {
+            if let Some(weight) = weight {
+                facts.weight_formats.push(weight.ggml_type);
+            }
+        }
         if model.config.is_recurrent[layer_index] {
             let weights = [
                 layer.wqkv.as_ref(),
@@ -1856,6 +1859,9 @@ mod tests {
             is_recurrent: vec![true, false],
             key_length: 4,
             value_length: 4,
+            // A dense qwen35 layer, so the Vulkan FFN bindings are the ones
+            // under test here rather than the qwen35moe CPU fallback.
+            moe: None,
         }
     }
 

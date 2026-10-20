@@ -26,7 +26,9 @@ pub(crate) mod yue2;
 mod zimage_probe;
 #[cfg(feature = "vulkan")]
 #[doc(hidden)]
-pub use ops::{dump_dispatch_trace, run_batched_matmul_check, run_qwen3_operator_check};
+pub use ops::{
+    dump_dispatch_trace, run_batched_matmul_check, run_qwen3_operator_check, silu_ffn_scale_probe,
+};
 
 #[cfg(feature = "vulkan")]
 use ash::vk;
