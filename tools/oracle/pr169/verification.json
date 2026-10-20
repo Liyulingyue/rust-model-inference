@@ -797,5 +797,36 @@
     "vulkan_library_and_cli_compile": "passed",
     "rustfmt": "passed",
     "diff_whitespace": "passed"
+  },
+  "cli_smoke": {
+    "blue_image": {
+      "intern_decision_0_8b": "Blue",
+      "occamy": "blue",
+      "physbrain": "The color of the image is blue.",
+      "zdt": "blue"
+    },
+    "occamy_and_intern_latest_input": {
+      "width": 64,
+      "height": 64,
+      "rgb": [
+        0,
+        0,
+        255
+      ],
+      "png_sha256": "fb59293297bbed4792e45b1e8a353c63f942d86ac3b235a8c5c38b81ab75e09a",
+      "resized_width": 96,
+      "resized_height": 96,
+      "vision_tokens": 9,
+      "prompt": "Reply with one word: what color is this image?",
+      "max_tokens": 8,
+      "temperature": 0
+    },
+    "occamy_llama_cpp_smoke": "blue; same image with image-min-tokens=9 and image-max-tokens=9; generation templates are not asserted identical",
+    "embeddinggemma_modalities": [
+      "text",
+      "image",
+      "audio"
+    ],
+    "embeddinggemma_dimensions": 768
   }
 }

@@ -167,6 +167,22 @@ existing vision RoPE operator; production precompute preserves supplied weights
 instead of silently requantizing them to Q8. Keeping F32 caches increases memory
 use and may affect throughput; no performance improvement is claimed.
 
+## Real CLI smoke
+
+The final Intern/Occamy runs both identify a solid RGB `[0,0,255]` 64x64 PNG as
+`Blue` / `blue`. Each CLI resizes it to 96x96 (nine vision tokens). Use a matching
+PNG with the corresponding text/mmproj paths:
+
+```sh
+target/release-fast/rust-model-inference --model "$RMI_OCCAMY_TEXT" --mmproj "$RMI_OCCAMY_MMPROJ" --image path/to/blue-64.png --prompt 'Reply with one word: what color is this image?' --max-tokens 8 --max-context 256 --threads 8 --temperature 0
+```
+
+The original F16 llama.cpp multimodal CLI also answers `blue` with
+`--image-min-tokens 9 --image-max-tokens 9`. This is a semantic smoke check; its
+generation template is not asserted identical to Rust. PhysBrain and ZDT also
+identify the blue-image fixture correctly. Their numerical acceptance remains the
+separate tokenizer, text-logit and full projection tests above.
+
 ## EmbeddingGemma-2 and regression checks
 
 ```sh
