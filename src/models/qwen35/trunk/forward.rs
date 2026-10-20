@@ -340,6 +340,19 @@ impl<'a> super::weights::HybridTrunk<'a> {
                     &mut scratch.x[off..off + n_embd],
                 );
             }
+            // The oracle emits `attn_residual` here; the layer loop above was
+            // where the attention path ended for us, so the node that says
+            // whether the out projection or the residual add moved the number
+            // had no counterpart.
+            #[cfg(feature = "parity-trace")]
+            if trace_layer(il) {
+                parity_trace::report(parity_trace::checkpoint_rows(
+                    &format!("attn_residual-{il}"),
+                    Some(il),
+                    &[n_tokens, n_embd],
+                    &scratch.x[..n_tokens * n_embd],
+                ));
+            }
 
             for t in 0..n_tokens {
                 let off = t * n_embd;
@@ -568,6 +581,25 @@ impl<'a> super::weights::HybridTrunk<'a> {
             .expect("validated Qwen3.5 dense projection shape");
         t_qkv += t0.elapsed().as_secs_f64();
 
+        // `Vcur` is the one attention input that neither side traced before.
+        // With q, k and both per-head norms bit-exact, a difference at
+        // `attn_gated` could only come from the value path or the gate.
+        //
+        // Note what is deliberately absent: the gate. `cb()` only renames a
+        // tensor, and llama.cpp fuses `sigmoid` into the following `mul`, so
+        // neither the pre-sigmoid gate nor its sigmoid exists as a scheduled
+        // node. There is no oracle node for it to compare against, so naming
+        // it here would only manufacture a node that cannot be checked.
+        #[cfg(feature = "parity-trace")]
+        if trace_layer {
+            parity_trace::report(parity_trace::checkpoint_rows(
+                &format!("Vcur-{il}"),
+                Some(il),
+                &[n_tokens, n_head_kv, n_embd_head],
+                &scratch.v_buf[..n_tokens * v_dim],
+            ));
+        }
+
         for t in 0..n_tokens {
             for h in 0..n_head {
                 let q_off = t * q_dim + h * n_embd_head * 2;
@@ -751,6 +783,17 @@ impl<'a> super::weights::HybridTrunk<'a> {
                 }
             }
         }
+        // `attn_gated` is the first node on the attention path that both sides
+        // can observe. It comes after the value reduction and the sigmoid gate.
+        #[cfg(feature = "parity-trace")]
+        if trace_layer {
+            parity_trace::report(parity_trace::checkpoint_rows(
+                &format!("attn_gated-{il}"),
+                Some(il),
+                &[n_tokens, n_embd_heads_total],
+                &scratch.attn_out_buf[..n_tokens * n_embd_heads_total],
+            ));
+        }
 
         let mut result = vec![0.0f32; n_tokens * n_embd];
         let t0 = std::time::Instant::now();
@@ -770,6 +813,15 @@ impl<'a> super::weights::HybridTrunk<'a> {
             .matmul(wo, wo_input, &mut result, pool)
             .expect("validated Qwen3.5 output projection shape");
         t_wo += t0.elapsed().as_secs_f64();
+        #[cfg(feature = "parity-trace")]
+        if trace_layer {
+            parity_trace::report(parity_trace::checkpoint_rows(
+                &format!("attn_output-{il}"),
+                Some(il),
+                &[n_tokens, n_embd],
+                &result,
+            ));
+        }
         if profile {
             eprintln!(
                 "  dense_attn[{}]: qkv={:.3}s score={:.3}s wo={:.3}s",

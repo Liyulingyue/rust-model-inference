@@ -305,11 +305,94 @@ then the `k (x) d` outer product, then `s^T q / sqrt(S_k)`. The three ops in
 `state[a][b]` mapping to the oracle's `S[b][a]`, `ssm_matvec` and
 `ssm_outer_product_update` agree exactly.
 
-`l2_norm` now matches `build_gdn_l2_norm`, which is
-`ggml_scale(ggml_rms_norm(x, eps/n), 1/sqrt(n))` and reduces to
-`x / sqrt(||x||^2 + eps)`: eps goes **inside** the square root. The previous
-version clamped the denominator from below with `max`, which only differs for
-near-zero head vectors but those are exactly the least stable ones.
+`l2_norm` now matches `ggml_compute_forward_l2_norm_f32`
+(`ggml/src/ggml-cpu/ops.cpp:4333`):
+
+```c
+ggml_float sum = 0.0;
+for (...) sum += (ggml_float)(xi * xi);   // f64 accumulator, f32 products
+const float scale = 1.0f/fmaxf(sqrtf(sum), eps);
+```
+
+Two details matter, and an earlier revision of this file got both wrong:
+
+* **eps floors the denominator, it is not added under the root.** The kernel
+  computes `1 / max(sqrt(sum), eps)`, not `1 / sqrt(sum + eps)`. The Rust side
+  used `1 / sqrt(sum + eps)`; after the change to `1 / (sum as f32).sqrt().max(eps)`
+  layer 1's whole SSM chain is bit-exact.
+* **`sqrtf` narrows the f64 accumulator to f32 before rooting.** The sum
+  accumulates in `ggml_float` (double), but `sqrtf` takes a `float`, so the
+  value is rounded to single precision first. `(sum as f32).sqrt()` reproduces
+  that; `sum.sqrt()` on the f64 would not.
+
+The old pin, `qwen35_l2_norm_matches_pinned_llama_cpp_bits`, did not catch any of
+this: it agreed 128/128 with the old Rust formula and 0/128 with the ggml one,
+because it had been generated from the Rust code it was supposed to check. It is
+regenerated from the kernel above, and
+`qwen35_l2_norm_clamps_the_denominator_at_eps` now pins the floor directly.
+
+With that fixed, every SSM stage at layer 1 is bit-exact end to end
+(`conv_output_raw`, `q_conv`, `q_conv_predelta`, `k_conv_predelta`,
+`state_predelta`, `final_output`), and the per-layer `l_out` drift collapses:
+
+| layer | kind | `l_out` rms |
+|---|---|---|
+| 0 | SSM | 1.90e-09 |
+| 1 | SSM | 2.96e-09 |
+| 2 | SSM | 6.64e-09 |
+| 3 | dense (first, `full_attention_interval = 4`) | 3.86e-05 |
+
+### Layer 3: the remaining split is inside the attention core
+
+Layers 0-2 are GDN/SSM and layers 3, 7, 11, ... are dense attention
+(`full_attention_interval = 4`), so layer 3 is the first layer on the attention
+path. Tracing it end to end on a single token gives:
+
+| node | max abs | rms | state |
+|---|---|---|---|
+| `attn_norm` | 3.8147e-06 | 9.9098e-08 | differs (inherited from layer 2) |
+| `Qcur` | 0 | 0 | **bit-exact** |
+| `Kcur` | 0 | 0 | **bit-exact** |
+| `Vcur` | 0 | 0 | **bit-exact** |
+| `Qcur_normed` | 0 | 0 | **bit-exact** |
+| `Kcur_normed` | 0 | 0 | **bit-exact** |
+| `attn_gated` | 7.2300e-05 | 1.9874e-06 | differs |
+| `attn_output` | 5.0902e-05 | 1.1363e-05 | differs |
+| `attn_residual` | 5.0664e-05 | 1.1363e-05 | differs |
+| `attn_post_norm` | 7.8106e-04 | 1.8525e-04 | differs |
+
+Two hypotheses were checked and eliminated rather than assumed:
+
+* **The score scale.** llama.cpp uses
+  `kq_scale = hparams.f_attention_scale == 0 ? 1/sqrtf(n_embd_head) : hparams.f_attention_scale`
+  while this repo hardcodes `1.0 / (n_embd_head as f32).sqrt()`. Reading the
+  GGUF header shows **`qwen35moe.attention.scale` is absent**, so llama.cpp also
+  takes the `1/sqrtf(n_embd_head)` branch and the two agree. (The hardcoding is
+  still a portability gap relative to the llama convention at
+  `src/models/llama/trunk/forward.rs:1282`, which honours
+  `<arch>.attention.scale`; it is just not this model's bug.)
+* **The value path.** `Vcur` is bit-exact, and with a single token `n_attend`
+  is 1, so the softmax is exactly `[1, 0, 0, ...]` regardless of the score.
+  The padded reduction in this repo (summed over `ceil(n_attend/256)*256`
+  terms) cannot move the result either: adding exact `0.0` to an f64
+  accumulator is exact.
+
+With the value path clean, `attn_gated = Vcur * sigmoid(gate)` forces the
+difference into the gate. The oracle cannot confirm it directly: `cb()` only
+renames a tensor, and ggml fuses `sigmoid` into the following `mul`, so neither
+the raw gate nor its sigmoid survives as a scheduled node. Both were emitted
+and both were absent from the manifest, which is how the fusion was confirmed.
+The gate lives in the other half of the fused QKV projection; `Qcur`, `Kcur`
+and `Vcur` from that same projection are bit-exact, which makes a
+per-column rounding difference unlikely but does not rule it out.
+
+So layer 3 is open, and the next lever is to defeat the `sigmoid`+`mul` fusion
+(or dump the fused QKV projection tensor) rather than to trace more nodes.
+
+Note on shapes: the attention runs with `head_dim = 256`, so `Qcur` and
+`attn_gated` are 4096 wide and `wo` projects 4096 -> 2048. That is not
+`embedding_length / head_count`, and reading it as 128 makes the two sides look
+misaligned when they are not.
 
 ### There is no chunked-vs-sequential gap
 
