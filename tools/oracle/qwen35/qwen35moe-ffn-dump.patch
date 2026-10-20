@@ -1,5 +1,5 @@
 diff --git a/examples/eval-callback/eval-callback.cpp b/examples/eval-callback/eval-callback.cpp
-index 8846f0c..fd3bfcf 100644
+index 8846f0c..0b593d6 100644
 --- a/examples/eval-callback/eval-callback.cpp
 +++ b/examples/eval-callback/eval-callback.cpp
 @@ -33,10 +33,64 @@ static bool selected_layer(const std::string & name, const char * prefix, int la
@@ -51,7 +51,7 @@ index 8846f0c..fd3bfcf 100644
 +    // difference is at layer 3's FFN input -- so the split moved into the
 +    // attention path. These are the nodes along it.
 +    for (const char * prefix : {"attn_norm", "Qcur_full", "gate_reshaped",
-+                                "Qcur_normed", "Kcur_normed",
++                                "Qcur_normed", "Kcur_normed", "attn_pregate",
 +                                "Qcur", "Kcur", "Vcur", "attn_gated",
 +                                "attn_output", "attn_residual", "attn_post_norm"}) {
 +        if (selected_layer(name, prefix, 3)) return true;
@@ -67,7 +67,22 @@ index 8846f0c..fd3bfcf 100644
      for (int layer : {0, 3, last_layer}) {
          if (selected_layer(name, "l_out", layer)) return true;
      }
-@@ -206,6 +260,162 @@ public:
+@@ -55,6 +109,14 @@ static bool selected_data(const std::string & name) {
+ }
+ 
+ static bool selected_tensor(const std::string & name) {
++    // RMI_CB_TRACE=1 prints every name the scheduler asks about. Reading the
++    // graph and reasoning about what ggml should schedule explained nothing:
++    // Qcur_full-3 is a matmul output consumed by two views and is never
++    // mentioned, while Qcur-3 forty lines later is. The only way to tell
++    // whether a name is never offered or offered and rejected is to log it.
++    if (getenv("RMI_CB_TRACE")) {
++        fprintf(stderr, "RMI_ASK %s\n", name.c_str());
++    }
+     return selected_data(name) || starts_with(name, "conv_output_raw-") || starts_with(name, "Qcur-");
+ }
+ 
+@@ -206,6 +268,171 @@ public:
          write_tokens("qwen35.greedy_token_ids", tokens);
      }
  
@@ -125,8 +140,17 @@ index 8846f0c..fd3bfcf 100644
 +    }
 +
 +    // Attention chain at layer 3, the first dense layer, in graph order.
-+    for (const char * name : {"attn_norm", "Qcur", "Kcur", "Vcur", "z",
-+                              "Qcur_normed", "Kcur_normed",
++    //
++    // Qcur_full and gate_reshaped are here because the gate cannot be reached
++    // any other way: llama.cpp takes it as a view of the fused QG projection
++    // and fuses sigmoid into the following mul, so neither the raw gate nor its
++    // sigmoid is a separate result, and the gate can only be reconstructed from
++    // attn_gated and Vcur. Both nodes are captured and offered by the scheduler
++    // (RMI_CB_TRACE=1 confirms it); they were missing because this writer, not
++    // the capture filter, is what enumerates the chain.
++    for (const char * name : {"attn_norm", "Qcur_full", "gate_reshaped",
++                              "Qcur", "Kcur", "Vcur",
++                              "Qcur_normed", "Kcur_normed", "attn_pregate",
 +                              "attn_gated", "attn_output", "attn_residual",
 +                              "attn_post_norm"}) {
 +        const std::string full = std::string(name) + "-3";
@@ -230,14 +254,14 @@ index 8846f0c..fd3bfcf 100644
  private:
      const tensor_snapshot & get(const std::string & name) const {
          const auto found = tensors_.find(name);
-@@ -263,6 +473,20 @@ private:
+@@ -263,6 +490,20 @@ private:
              throw std::runtime_error("shape mismatch for " + output_name + ": expected " +
                      std::to_string(expected) + ", got " + std::to_string(values.size()));
          }
-+        // Same one-record-per-key rule as the MoE writer above.
++        // Same one-record-per-key rule as the MoE writer above. This writer has
++        // no step parameter because a single-token run only ever has step 0.
 +        {
-+            const std::string key = output_name + "/" + std::to_string(layer) +
-+                                    "/" + std::to_string(step);
++            const std::string key = output_name + "/" + std::to_string(layer) + "/0";
 +            const auto previous = written_.find(key);
 +            if (previous != written_.end()) {
 +                if (previous->second != values) {
@@ -251,7 +275,7 @@ index 8846f0c..fd3bfcf 100644
          const size_t occurrence = occurrences_[output_name]++;
          std::string binary_path = path_ + "." + output_name;
          if (occurrence) binary_path += "." + std::to_string(occurrence);
-@@ -298,6 +522,9 @@ private:
+@@ -298,6 +539,9 @@ private:
      std::vector<std::map<std::string, tensor_snapshot>> prompt_rows_;
      std::set<std::string> seen_;
      std::map<std::string, size_t> occurrences_;
@@ -261,7 +285,7 @@ index 8846f0c..fd3bfcf 100644
  };
  
  static bool parity_eval_callback(ggml_tensor * tensor, bool ask, void * user_data) {
-@@ -315,19 +542,59 @@ static llama_token greedy_token(llama_context * ctx, int n_vocab) {
+@@ -315,19 +559,59 @@ static llama_token greedy_token(llama_context * ctx, int n_vocab) {
      return best;
  }
  
@@ -326,7 +350,7 @@ index 8846f0c..fd3bfcf 100644
      if (params.n_predict < 1) throw std::runtime_error("Oracle requires -n >= 1");
  
      const bool add_bos = llama_vocab_get_add_bos(vocab);
-@@ -381,7 +648,19 @@ int main(int argc, char ** argv) {
+@@ -381,7 +665,19 @@ int main(int argc, char ** argv) {
      auto * ctx = llama_init->context();
      if (model == nullptr || ctx == nullptr) return 1;
  

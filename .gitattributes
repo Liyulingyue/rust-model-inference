@@ -11,4 +11,10 @@
 # exercised on this machine; all 17 patches under tools/oracle were affected the
 # same way. `-text` tells git not to touch the file's contents at all in either
 # direction, so the blob and the working copy stay byte-identical.
-*.patch -text
+#
+# `whitespace=-blank-at-eol` is for `git diff --check`, which otherwise reads a
+# patch as prose and reports every context line that wraps an empty source line.
+# Unified diff writes that as a single space, so the warning is a false positive
+# on nine lines of a 900-line file, and silencing it is better than mangling
+# correct diff syntax to satisfy a text linter.
+*.patch -text whitespace=-blank-at-eol

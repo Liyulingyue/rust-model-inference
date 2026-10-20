@@ -386,59 +386,71 @@ The gate lives in the other half of the fused QKV projection; `Qcur`, `Kcur`
 and `Vcur` from that same projection are bit-exact, which makes a
 per-column rounding difference unlikely but does not rule it out.
 
-So layer 3 is open, and the next lever is to defeat the `sigmoid`+`mul` fusion
-(or dump the fused QKV projection tensor) rather than to trace more nodes.
+So layer 3 is where the split sits, and the first two things to try are the
+fused QKV projection and the attention core's own output rather than more nodes
+after the gate.
 
-It is worth being precise about which node is unobtainable and why, because the
-first explanation offered for it was wrong twice. `cb()` does nothing but rename
-a tensor, so a later `cb()` on the same tensor silently replaces the earlier
-name -- an added `cb(gate, "attn_gate_pre", il)` was hiding upstream's
-`gate_reshaped` that way. Removing it changed nothing. What is actually true is
-narrower: **the eval callback does not report nodes inside the dense attention
-between the QG projection and the RoPE.** `attn_norm`, earlier in the same
-layer, is reported; `Qcur`, `Kcur` and `Vcur`, after the RoPE, are reported;
-`Qcur_full` and `gate_reshaped`, between them, never arrive, though their names
-are in the allowlist, their `cb()` calls are upstream llama.cpp's own, the
-strings are in the built binary, and a forced rebuild does not change it.
+#### Where it actually comes from: llama.cpp's KV cache is F16
 
-#### Recovering the gate without a trace node
+`attn_pregate` is the attention core's output before the gate, and at one
+cached token the softmax is exactly `[1, 0, 0, ...]`, so `attn_pregate` must
+equal `Vcur`. Checking that rather than assuming it:
 
-Since the gate cannot be captured, it was recovered numerically instead. At one
-token `n_attend` is 1, so `attn_gated = Vcur * sigmoid(gate)` with no reduction
-left to disagree about, and both sides have `attn_gated` and `Vcur`:
+| comparison | max | rms | bit-exact cells |
+|---|---|---|---|
+| oracle `attn_pregate` vs its `Vcur` | 9.2864e-04 | 9.3395e-05 | 0 / 4096 |
+| **rust** `attn_pregate` vs its `Vcur` | **0** | **0** | **4096 / 4096** |
+| oracle `attn_pregate` vs `f32(f16(Vcur))` | **0** | **0** | **4096 / 4096** |
 
-    gate = logit(attn_gated / Vcur)
+This repo's attention output is `Vcur` exactly, which is the only answer the
+arithmetic allows. llama.cpp's is `f32(f16(Vcur))` to the last bit, because its
+KV cache defaults to half precision (`src/llama-context.cpp:3631-3632`,
+`type_k` and `type_v` both `GGML_TYPE_F16`): the value is rounded once on the
+way into the cache and widened back on the way out.
 
-| comparison | max | rms |
-|---|---|---|
-| Rust reconstructed vs Rust's actual gate | 5.5271e-07 | 4.6078e-08 |
-| Oracle reconstructed vs Rust's actual gate | 6.8706e-04 | 2.1327e-04 |
+That is the whole of the layer-3 difference, and it is not a defect here.
+Everything that depends only on the weights and the residual stream -- the fused
+QG projection `Qcur_full` (8192 values), `gate_reshaped`, `Qcur`, `Kcur`,
+`Vcur`, `Qcur_normed`, `Kcur_normed` -- is bit-exact, and the deviation begins
+the moment the value passes through llama.cpp's F16 cache, then rides the out
+projection into `attn_output` and the residual.
 
-The first row is the reconstruction's own error floor, and it is 1240x smaller
-than the second, so the head/dim mapping is right and **the gate values really
-do differ**. What they differ by is more informative than the fact that they
-differ:
+The relative size matches F16 and nothing else: `|difference|/|Vcur|` is
+1.90e-04, 1.71e-04, 1.80e-04 and 1.66e-04 across four quarters of the
+element-magnitude range -- a pure relative error of about 1.8e-04, against F16's
+2^-11 = 4.88e-04 unit roundoff, and additive in nothing.
 
-| property | value | reading |
-|---|---|---|
-| correlation | 0.999999973 | same values, perturbed |
-| best single scale oracle/rust | 1.000000547 | **not** a scale factor |
-| error spread | 97.9% of cells over 1e-5 | systematic, not a few outliers |
-| per-head mean error | 1.75e-04 to 1.90e-04, all 16 heads | head-independent |
-| error size | ~1955 ULP at the gate rms | far past what accumulation order can do |
+Two things follow. Matching llama.cpp bit-for-bit here means storing the KV
+cache in F16 as well, which is a policy choice rather than a bug fix, and on
+that reading this repo is the more accurate of the two.
 
-Accumulation order over 2048 terms buys roughly `sqrt(N)` ULP and wobbles from
-column to column; this is an order of magnitude past that, uniform, and
-head-symmetric. It is also far too large to be inherited from `attn_norm`,
-whose own difference is 9.9e-8 rms and which would contribute at most ~3e-6
-after the projection.
+#### A wrong turn worth recording
 
-The awkward part is what that implies. The gate is the second half of
-`Qcur_full`, the output of a single `wq` matmul, and its first half is
-**bit-exact** (`Qcur_normed` is a view of `Qcur_full` at offset 0 and matches).
-One matmul, one accumulation order, one input -- and one half is exact while
-the other carries 1955 ULP of uniform noise. Whatever produces it is not a
-rounding difference, so this stays open until the raw projection can be read.
+This one was reached by arithmetic and it was wrong. The gate cannot be observed
+on the attention path -- llama.cpp takes it as a view of the fused QG projection
+and fuses sigmoid into the following mul, so neither the gate nor its sigmoid is
+a separate result. Recovering it as `gate = logit(attn_gated / Vcur)` assumed
+`attn_out == Vcur`, and on the oracle side that assumption is false by exactly
+the F16 round trip above. The reconstruction reported a gate difference of
+2.13e-04 rms, ~1955 ULP, uniform across all 16 heads, and concluded the gate was
+computed differently.
+
+It was not. The gate is bit-exact; the arithmetic was measuring the F16 KV cache
+and blaming the gate. Three explanations were killed before the right one:
+that `cb()` cannot rename a tensor twice (it can, and a later `cb()` does
+silently replace an earlier name -- real, but it only ever hid
+`gate_reshaped`); that the eval callback skips nodes before the RoPE (it does
+not; `RMI_CB_TRACE=1` shows `Qcur_full-3` and `gate_reshaped-3` each offered
+exactly once); and that ggml's sigmoid is an approximation (it is not,
+`op_sigmoid` is `1.f / (1.f + expf(-x))`, the same expression this repo uses).
+
+The real cause was the least exotic one. Capture, selection and writing are
+three separate lists: `Qcur_full`, `gate_reshaped` and `attn_pregate` were
+captured correctly, passed the selection filter, and were then never written,
+because the writer enumerates its own node list and they were not on it. So
+"missing from the manifest" meant nothing until all three were checked, and
+`RMI_CB_TRACE=1` -- which logs what the scheduler actually offers -- settles it
+in one run.
 
 #### The L2 fix did not move the end-to-end numbers
 
@@ -459,12 +471,15 @@ once, after the `l2_norm` fix:
 the disagreement** (`The`, `dog`, `water`) -- and that is exactly the same 3 of
 7 as before the `l2_norm` fix. The fix is a real correctness win at the layer
 level: layers 0-2 are now bit-exact instead of merely close. It changed nothing
-end to end, because the layer-3 gate error is two orders of magnitude larger than
-anything it removed and it has 36 layers left to propagate through.
+end to end, and there is now a measured reason rather than a shrug: every layer
+runs its attention value path through llama.cpp's F16 KV cache, across 40 layers
+and both KV heads, and that alone puts the final logits about 0.2 apart.
 
-Reading the table as "it works" because all seven tokens match would be wrong.
-A margin of 0.035 against a disagreement of 0.124 means the next prompt has a
-good chance of flipping, and this build should not be trusted on token choice.
+So the remaining `margin < disagreement` cases are **not** evidence of a defect
+in this repo. They are the expected cost of keeping the KV cache in F32 while
+the oracle keeps it in F16. Reading the table as "the model is broken here"
+would be wrong, and so would reading it as "it works" because all seven tokens
+match.
 
 Note on shapes: the attention runs with `head_dim = 256`, so `Qcur` and
 `attn_gated` are 4096 wide and `wo` projects 4096 -> 2048. That is not

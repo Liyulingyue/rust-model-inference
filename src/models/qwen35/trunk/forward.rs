@@ -790,6 +790,19 @@ impl<'a> super::weights::HybridTrunk<'a> {
         }
         t_score += t0.elapsed().as_secs_f64();
 
+        // `attn_pregate` is the attention core's output before the gate. With one
+        // cached token the softmax is [1, 0, 0, ...], so this ought to be
+        // exactly Vcur; the node exists to check that rather than assume it.
+        #[cfg(feature = "parity-trace")]
+        if trace_layer {
+            parity_trace::report(parity_trace::checkpoint_rows(
+                &format!("attn_pregate-{il}"),
+                Some(il),
+                &[n_tokens, n_embd_heads_total],
+                &scratch.attn_out_buf[..n_tokens * n_embd_heads_total],
+            ));
+        }
+
         for t in 0..n_tokens {
             for h in 0..n_head {
                 let gate_off = t * q_dim + h * n_embd_head * 2 + n_embd_head;
