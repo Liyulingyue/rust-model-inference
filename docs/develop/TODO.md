@@ -306,7 +306,14 @@ LFM2 / LFM2.5 / Spark / Nemotron-H / Hunyuan / LFM2-MoE），每个 scorer 实�
       首尾各带 3 个 padding row，3-token prompt 的 ubatch 是
       `[pad,pad,pad,t1,t2,t3,pad,pad,pad]`。据此曾误报「~14% 差异」，`385d6cf` 已撤回。
       **教训：oracle dump 必须先解决 ubatch 对齐与 padding，否则任何归因都是错的。**
-- [ ] **35B 的 MoE（routed + shared expert）从未做过数值对照** — 这是当前最大的验证缺口。
+      **2026-10-20 追到底**：修掉 `l2_norm` 把 eps 加在根号内（应为分母下限
+      `1/max(sqrt(sum), eps)`，见 `ggml/src/ggml-cpu/ops.cpp:4333`；且 `sqrtf`
+      会先把 f64 累加器收窄到 f32）后，layer 1 的 `conv_output_raw` / `q_conv` /
+      `q_conv_predelta` / `k_conv_predelta` / `state_predelta` / `final_output`
+      **全链逐位精确**，0-2 层 `l_out` 从 1e-5 降到 1e-9 量级。此前
+      `qwen35_l2_norm_matches_pinned_llama_cpp_bits` 没能拦住，是因为它是从它要
+      检查的 Rust 代码生成的（对旧公式 128/128、对 ggml 公式 0/128），已按 kernel 重生成。
+- [x] **35B 的 MoE（routed + shared expert）数值对照** — 已完成，2026-10-20。
       `src/models/qwen35/trunk/moe.rs` 是**逐算子照抄** oracle 的公式
       （`LLM_FFN_PAR` 是 gate 模式而非残差；`routed = Σ score_e down_e(silu(gate_e·x)·up_e·x)`；
       `out = routed + sigmoid(gate_inp_shexp·x) · shared`；256 专家 softmax → top-8 → 归一），
@@ -319,16 +326,24 @@ LFM2 / LFM2.5 / Spark / Nemotron-H / Hunyuan / LFM2-MoE），每个 scorer 实�
       并且 `architecture != "qwen35"` 直接 throw，`qwen35moe` 连加载都做不到。
       那几个 `ffn_moe_*` dump 属于 **lfm2moe / mellum** 的 patch，是别的模型。
       即「oracle 从未为本架构产出过这些数字」。
-      本轮已补的（2026-10-19）：Rust 侧 `RMI_MOE_DUMP` 的 append 式 dumper
-      （6 个文件、无 layer/step、无长度头，40 层 × N token 全部交错，无法归因）
-      已删除，改为 `src/models/qwen35/trunk/trace.rs` 的 `(name, layer, step)`
-      定点 checkpoint，共 10 个 MoE 节点，`forward_qwen35moe_token` 已补上
-      layer/step 参数。对齐方式定为**两侧各跑单 token**（ubatch padding 只在多 token
-      prefill 出现，单 token 下 `step == 0` 即同一个真 token，无需穿热路径插桩）。
-      **仍缺**：oracle 侧的 MoE dump patch 需要 llama.cpp checkout 才能写并验证 applies，
-      以及 35B Q8_0 权重（约 35 GB）。节点清单与对齐规则见
+      Rust 侧的 `RMI_MOE_DUMP` append 式 dumper（6 个文件、无 layer/step、无长度头，
+      40 层 × N token 全部交错，无法归因）已删除，改为
+      `src/models/qwen35/trunk/trace.rs` 的 `(name, layer, step)` 定点 checkpoint，
+      对齐方式定为**两侧各跑单 token**（ubatch padding 只在多 token prefill 出现，
+      单 token 下 `step == 0` 即同一个真 token，无需穿热路径插桩）。
+      oracle 侧也已补齐：`tools/oracle/qwen35/qwen35moe-ffn-dump.patch` 让
+      `llama-eval-callback` 接受 `qwen35moe`，产出 10 个 MoE 节点 + 逐层边界；
+      `tools/oracle/qwen35/build_qwen35_oracle.sh` 从 tarball 构建并做 blob 校验、
+      关掉全部 x86 ISA 变体以保证标量路径。35B Q8_0 权重已下载并校验
+      （`MiniCPM-V-4_7-35B-A3B-Q8_0.gguf`，36,902,368,928 bytes，
+      SHA256 `8543ee5b0f83152066f2fec58b8d9757d56bb7c4233b4fdd26ae364f0107d16b`）。
+      **结果**：`ffn_moe_topk` 在 layer 0 / 3 / 39 逐位一致（id 与顺序都对上），
+      layer 0 的 `ffn_moe_logits` 与 shared expert 全链亦逐位一致。
+      节点清单与对齐规则见
       [`tools/oracle/qwen35/qwen35moe-ffn-dump.patch.README.md`](../../tools/oracle/qwen35/qwen35moe-ffn-dump.patch.README.md)。
-      `ffn_moe_topk` 是唯一能证伪「路由一致」的 checkpoint——必须 id 与顺序都对上。
+      ⚠️ 教训：capture / selection / writing 是**三份独立名单**。「节点不在 manifest 里」
+      在三份都查过之前什么都不能说明；`RMI_CB_TRACE=1` 会打印调度器实际问到的每个名字，
+      一次运行即可分辨「从未提供」与「提供了但被拒」。
 - [ ] **35B 视觉塔未与 oracle 做数值对照** — 1B 的 `pos_embed` 逐位比过，35B 完全没有。
       projector 代码零改动（两个尺寸共用同一 `minicpmv4_7` 实现，仅 `projection_dim`
       1024 → 2048），但 2048 维输出、`attn_post_norm` 全层 checkpoint 都没验证过。
