@@ -35,12 +35,34 @@ pub fn f16_bits_to_f32(bits: u16) -> f32 {
     }
 }
 
-/// In-place L2 normalization of `x`, matching llama.cpp's `llm_build_l2_norm`.
+/// In-place L2 normalization of `x`, matching ggml's `GGML_OP_L2_NORM`
+/// scalar kernel (`ggml-cpu/ops.cpp`, `ggml_compute_forward_l2_norm_f32`).
+///
+/// That kernel is:
+///
+/// ```text
+/// ggml_float sum = 0.0;                     // ggml_float is `double`
+/// for (...) sum += (ggml_float)(xi * xi);
+/// const float scale = 1.0f/fmaxf(sqrtf(sum), eps);
+/// ```
+///
+/// so `eps` is a floor on the *denominator*, applied outside the square root.
+/// Writing it as `1/sqrt(sum + eps)` is algebraically different and was the
+/// bug: on a head vector whose norm sits near `eps`, one form clamps the
+/// denominator at `eps` and the other does not, and the two disagree on a value
+/// that then feeds the router. Measured on MiniCPM-V 4.7 35B-A3B, layer 1:
+/// the input to this function was bit-exact on both sides and the output
+/// differed by up to 3.6e-6, which then propagated to 4e-3 by the last layer.
+///
+/// The comment that used to sit here claimed eps went inside the square root.
+/// It does not. See `tools/oracle/qwen35/qwen35moe-ffn-dump.patch.README.md`.
 pub(crate) fn l2_norm(x: &mut [f32], eps: f32) {
     let mut sum = 0.0f64;
     for &v in x.iter() {
         sum += f64::from(v * v);
     }
+    // `sqrtf` takes a float, so the double accumulator is narrowed first --
+    // `(sum as f32).sqrt()` -- rather than summed in f32.
     let scale = 1.0f32 / (sum as f32).sqrt().max(eps);
     for v in x.iter_mut() {
         *v *= scale;

@@ -1,4 +1,8 @@
-//! JEV single-mode scorer for qwen35.
+//! JEV single-mode scorer for qwen35 and qwen35moe.
+//!
+//! `qwen35moe` (MiniCPM-V 4.7 35B-A3B) is dispatched here too: it shares the
+//! `minicpmv4_7` projector and loads through the same `Qwen35Model`, so only
+//! the arch string differs.
 
 use super::super::types::JevResult;
 use super::jev_labels;
@@ -9,18 +13,11 @@ use super::verify_label_tokens_single;
 use super::JevScorer;
 use super::PreparedQuestion;
 use crate::app::cli::{resolve_thread_count, KvFormat};
-use crate::app::text::{encode_qwen35_image, inject_vision_embeddings};
 use crate::core::tensor::TensorSource;
-use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
-use crate::format::ggufrs::{open_model_source, ComponentRole};
-use crate::models::qwen35::vision::VisionGrid;
-use crate::models::qwen35::{
-    build_qwen35_positions, run_forward_logits_qwen35_with_batch, Qwen35Model, Qwen35Session,
-};
+use crate::models::qwen35::run_forward_logits_qwen35_with_batch;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
 
 pub(crate) fn run_jev_decision_qwen35(
     source: Arc<dyn TensorSource>,

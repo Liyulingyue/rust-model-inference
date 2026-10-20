@@ -288,6 +288,108 @@ LFM2 / LFM2.5 / Spark / Nemotron-H / Hunyuan / LFM2-MoE），每个 scorer 实�
       真实模型上跑通（Paris = 0.9141、pair_1 = A 0.7158）。图像推理路径
       （`--image` + mmproj）确认不受影响（apple.png 描述正确）。
 
+- [x] **MiniCPM-V 4.7 1B（`qwen35` 语言塔）多模态接入** — 已完成，`20c247d`…`1bd1165`。
+      视觉塔逐位对齐：602,112 个 normalized pixel F32 与 pinned oracle
+      `69f201a2` 完全一致；`conv_output_silu` 逐位相同（2158/8192 分量一致，L1 6e-5）；
+      `pos_embed` 约 `1e-6` 相对差异，按 SIMD/FMA 标准接受。切片、CANVAS M-RoPE、
+      tile separator 的 token-free embedding span 已接入；`<image_id>0</image_id>`
+      由 mtmd 层注入。复现命令见 [`tools/oracle/minicpmv/README.md`](../../tools/oracle/minicpmv/README.md)。
+- [x] **MiniCPM-V 4.7 35B-A3B（`qwen35moe`）语言塔** — 已完成，`032ff5c`…`385d6cf`。
+      SSM 全链路对齐：输入 embedding / conv / `q_conv_predelta` / `k_conv_predelta` /
+      `v_conv_predelta` / `beta_sigmoid` / `gate` 全部逐位一致或 ~1e-7；递推本身与
+      oracle 的 chunked WY 输出在**同一输入、同一初始 state**（用 oracle 自带的
+      `state_predelta` 锚定）下相差 avg 0.0063%。多模态端到端可用，`--jinja` 下
+      512×512 出 overview + 2 slices 共 202 个视觉 token。
+      ⚠️ 途中**两次误判**：先是 oracle eval callback 把多 ubatch 写进同一文件（后写覆盖先写），
+      导致「最佳匹配 L1 923 vs 我方相邻 token 间 L1 中位数 956」——结论**不可证伪**；
+      再是把「我方 token *i*」对「oracle row *i*」，而 llama.cpp 的 prefill ubatch
+      首尾各带 3 个 padding row，3-token prompt 的 ubatch 是
+      `[pad,pad,pad,t1,t2,t3,pad,pad,pad]`。据此曾误报「~14% 差异」，`385d6cf` 已撤回。
+      **教训：oracle dump 必须先解决 ubatch 对齐与 padding，否则任何归因都是错的。**
+      **2026-10-20 追到底**：修掉 `l2_norm` 把 eps 加在根号内（应为分母下限
+      `1/max(sqrt(sum), eps)`，见 `ggml/src/ggml-cpu/ops.cpp:4333`；且 `sqrtf`
+      会先把 f64 累加器收窄到 f32）后，layer 1 的 `conv_output_raw` / `q_conv` /
+      `q_conv_predelta` / `k_conv_predelta` / `state_predelta` / `final_output`
+      **全链逐位精确**，0-2 层 `l_out` 从 1e-5 降到 1e-9 量级。此前
+      `qwen35_l2_norm_matches_pinned_llama_cpp_bits` 没能拦住，是因为它是从它要
+      检查的 Rust 代码生成的（对旧公式 128/128、对 ggml 公式 0/128），已按 kernel 重生成。
+- [x] **35B 的 MoE（routed + shared expert）数值对照** — 已完成，2026-10-20。
+      `src/models/qwen35/trunk/moe.rs` 是**逐算子照抄** oracle 的公式
+      （`LLM_FFN_PAR` 是 gate 模式而非残差；`routed = Σ score_e down_e(silu(gate_e·x)·up_e·x)`；
+      `out = routed + sigmoid(gate_inp_shexp·x) · shared`；256 专家 softmax → top-8 → 归一），
+      张量 shape 也对得上，输出质量正确——但这是**构造性论证 + 行为观察**，
+      不是数值验证。早先「路由选中同一批专家（67,140,206）」的观测**不可信**：
+      用了「首个精确匹配」做 token 映射，重复 token 全部塌到同一下标，且发生在搞懂 padding 之前。
+      ⚠️ **本文原先写「oracle 侧 `ffn_moe_logits` / `ffn_moe_out` / `ffn_shexp_gated`
+      都已能 dump」——这是错的**，属于此前乐观记录的残留。qwen35 的 oracle patch
+      （`tools/oracle/qwen35/qwen35-llama-trace.patch`）白名单里**一个 MoE 节点都没有**，
+      并且 `architecture != "qwen35"` 直接 throw，`qwen35moe` 连加载都做不到。
+      那几个 `ffn_moe_*` dump 属于 **lfm2moe / mellum** 的 patch，是别的模型。
+      即「oracle 从未为本架构产出过这些数字」。
+      Rust 侧的 `RMI_MOE_DUMP` append 式 dumper（6 个文件、无 layer/step、无长度头，
+      40 层 × N token 全部交错，无法归因）已删除，改为
+      `src/models/qwen35/trunk/trace.rs` 的 `(name, layer, step)` 定点 checkpoint，
+      对齐方式定为**两侧各跑单 token**（ubatch padding 只在多 token prefill 出现，
+      单 token 下 `step == 0` 即同一个真 token，无需穿热路径插桩）。
+      oracle 侧也已补齐：`tools/oracle/qwen35/qwen35moe-ffn-dump.patch` 让
+      `llama-eval-callback` 接受 `qwen35moe`，产出 10 个 MoE 节点 + 逐层边界；
+      `tools/oracle/qwen35/build_qwen35_oracle.sh` 从 tarball 构建并做 blob 校验、
+      关掉全部 x86 ISA 变体以保证标量路径。35B Q8_0 权重已下载并校验
+      （`MiniCPM-V-4_7-35B-A3B-Q8_0.gguf`，36,902,368,928 bytes，
+      SHA256 `8543ee5b0f83152066f2fec58b8d9757d56bb7c4233b4fdd26ae364f0107d16b`）。
+      **结果**：`ffn_moe_topk` 在 layer 0 / 3 / 39 逐位一致（id 与顺序都对上），
+      layer 0 的 `ffn_moe_logits` 与 shared expert 全链亦逐位一致。
+      节点清单与对齐规则见
+      [`tools/oracle/qwen35/qwen35moe-ffn-dump.patch.README.md`](../../tools/oracle/qwen35/qwen35moe-ffn-dump.patch.README.md)。
+      ⚠️ 教训：capture / selection / writing 是**三份独立名单**。「节点不在 manifest 里」
+      在三份都查过之前什么都不能说明；`RMI_CB_TRACE=1` 会打印调度器实际问到的每个名字，
+      一次运行即可分辨「从未提供」与「提供了但被拒」。
+- [ ] **35B 视觉塔未与 oracle 做数值对照** — 1B 的 `pos_embed` 逐位比过，35B 完全没有。
+      projector 代码零改动（两个尺寸共用同一 `minicpmv4_7` 实现，仅 `projection_dim`
+      1024 → 2048），但 2048 维输出、`attn_post_norm` 全层 checkpoint 都没验证过。
+- [x] **canvas 路径缺 `--jinja` 时报错信息误导** — 已修。
+      根因确认为 `jinja.resolve()` 在未启用时返回 `None`，`text_conversation_tokens`
+      因此返回 `None`，而旧文案说的是「投影器已实现但接线缺失」——那个缺口早已不存在
+      （canvas 路径就是把 media span 拼到 checkpoint 自己模板产出的那一个
+      `<|image_pad|>` 上）。同一个常量被 6 处以两种语义复用，已拆成两条：
+      `MINICPMV47_CANVAS_ONLY_MSG`（anyres helper 根本处理不了这个家族）与
+      `MINICPMV47_JINJA_MSG`（canvas 路径 + `--jinja` 关闭，指明 `--jinja` /
+      `--chat-template-file`）。1B 一直需要 `--jinja`，不是新引入的限制。
+- [ ] **`qwen35moe` 的 Vulkan 路径未接** — `src/vulkan/qwen35.rs:17` 仍 gate 在
+      `architecture == "qwen35"`，35B 目前只能走标量/SIMD CPU 路径。
+
+## 入口面覆盖（2026-10-19 审计）
+
+MiniCPM-V 4.7 的 `qwen35moe`（35B-A3B）此前只在**生成面**注册，多模态对话可用、
+但 JEV 打分全线不通——而它与 `qwen35` 共用同一个 `minicpmv4_7` projector 和同一个
+`Qwen35Model`，只有 arch 字符串不同，属漏改而非有意限制：
+
+| 入口 | `qwen35` | `qwen35moe` |
+| --- | --- | --- |
+| CLI `--image` / HTTP `/v1/chat/completions` | ✅ | ✅ |
+| CLI `--jev --image` | ✅ | ✅（本次补） |
+| HTTP `/v1/jev/image`(`/v1/jev/image_grouped`) | ✅ | ✅（本次补） |
+
+改动点：`src/app/jev/single.rs` 的 `IMAGE_JEV_ARCHES` 与 dispatch、
+`src/app/jev/grouped.rs` 的 `build_jev_token_ids_for_arch` 与 grouped dispatch、
+`src/app/server/api.rs` 的 `run_multimodal_text_only`（`/v1/jev/image` 与
+`image_grouped` 共用这一个闸门，故两侧同时生效）。
+回归测试 `app::jev::single::image_arch_tests`。
+
+顺带修掉两处会把排查带偏的文案：HTTP 侧原写「only supports qwen3/qwen3vl/qwen35」
+却漏了实际支持的 `qwen3vlmoe`；生成侧原写「Only qwen35, qwen3vl, and edge0」
+却漏了条件里本来就有的 `qwen35moe`。
+
+- [x] **量化 mmproj 无法加载** — 已修。`src/models/minicpmv/weights.rs` 的
+      `decode_matrix` 原本只认 F32/F16/BF16，其余一律
+      `unsupported ggml type`，于是 Q8_0 / Q4_K / Q6_K 的 mmproj 直接加载失败，
+      而 `ops::quant::dequantize_tensor` 恰好覆盖这三种。现在委托下去。
+      投影器权重仍是 eager 的 `Vec<f32>`：它的 forward 已 pin 在 oracle trace 上，
+      改成惰性的 `Weight` / `QuantizedTensor` 会动到已验证的数值路径，只放宽解码面。
+      回归测试 `minicpmv::weights::decode_matrix_tests`（含 F32/F16 不变、
+      不支持的类型仍报出类型名）。
+
+
 ## Medium Priority
 
 - [ ] **讨论：MemoryArena 与 BlockAllocator 组合**

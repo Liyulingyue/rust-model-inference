@@ -259,7 +259,9 @@ fn build_jev_token_ids_for_arch(
             append_qwen_assistant_prefix(&mut token_ids, tokenizer, false)?;
             Ok(token_ids)
         }
-        "qwen35" => {
+        // `qwen35moe` (MiniCPM-V 4.7 35B-A3B) shares this arm: same ChatML
+        // message tokens, same assistant prefix, same `qwen35` grouped scorer.
+        "qwen35" | "qwen35moe" => {
             let mut token_ids = Vec::new();
             append_qwen_message_tokens(
                 &mut token_ids,
@@ -600,7 +602,7 @@ pub fn run_jev_grouped_decision_data(
             false,
             jinja.clone(),
         )?,
-        "qwen35" => qwen35::run_jev_grouped_qwen35(
+        "qwen35" | "qwen35moe" => qwen35::run_jev_grouped_qwen35(
             source.clone(),
             context,
             &prepared,
