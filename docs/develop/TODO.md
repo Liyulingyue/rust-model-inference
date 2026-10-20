@@ -2538,3 +2538,40 @@ abs 2e-3 + rel 2e-3）的结果**按尺寸分裂**：
 
 同时记录：unified 分支的 decoder 路径比 `main` 快 6 倍以上
 （8B Q8_0 generation 5.1 t/s vs 0.8 t/s），这是该分支的目标，回归要盯住这条线。
+
+### TODO-037: `--threads` 等于核数时 CPU 吞吐塌 29 倍
+
+Qwen3-0.6B Q8_0，20 核 GB10，greedy，64 token：
+
+| `--threads` | prefill t/s | generation t/s |
+|---|---|---|
+| 12 | 280–335 | 82.8–88.4 |
+| 16 | 303–347 | 67.5–97.2 |
+| 17 | 281 | 52.2 |
+| 18 | 295 | 69.3 |
+| 19 | 312 | 69.0 |
+| **20** | **46–48** | **2.4** |
+
+悬崖正好落在 `threads == nproc`，可复现 3/3，且不是偶发：20 线程的 prefill 也只有
+1/6。默认线程数是 8，所以平时碰不到，只有显式 `--threads $(nproc)` 才会踩到。
+
+机制（`src/core/thread_pool.rs`）：`ComputePool::new(n)` 起 `n - 1` 个 worker，
+调用线程也参与，总参与者 = n。worker 在空闲时是 `spin_loop()` 忙等（CPU 模式，
+GPU 模式才 yield），而 `compute()` 的收尾是「自旋等 `n_complete == n_threads`」。
+在 20 核机器上再叠一个别的租户进程占着核，参与者一多，barrier 就开始等调度器，
+一个 token 被放大到 0.4 s。
+
+要查/要改的：
+
+1. `compute()` 的等待循环（`thread_pool.rs:224`、`255`、`280`）在参与数接近核数时
+   应该 `yield_now()` 而不是 `spin_loop()`，或者干脆把 worker 数设成
+   `min(requested, nproc - 1)`。
+2. 空闲 worker 的 `spin_loop()` 在有其他进程抢核时是净损失；改成有界自旋后
+   `yield_now()`。
+3. 回归测试：一个「线程数等于核数时不低于核数减一」的基准，写进 `tests/`。
+
+顺带记一条同源结论：**Qwen3 的 GPU 常驻解码在这台机器上全面输给 CPU**
+（0.6B：CPU 67–97 t/s vs GPU 26 t/s；8B：CPU 12.6–13.5 t/s vs GPU 5.1 t/s），
+原因与 TODO-031 一致，只是这次把尺寸补全了。GPU 真正赢的是高算术强度的大矩阵
+（Z-Image DiT 权重 1.3 GB/层、rows 数百），而 decode 是 rows=1 的 GEMV——正是
+`docs/usage/z-image.md` 里点名会误导的那类形状。
