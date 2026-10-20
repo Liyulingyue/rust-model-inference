@@ -463,8 +463,11 @@ struct LayerBindings {
     attention_norm: OperatorBindings,
     attention: AttentionBindings,
     post_attention_norm: OperatorBindings,
-    gate_up: WeightBindings<2>,
-    down: OperatorBindings,
+    // Both are None on a qwen35moe layer: it has no dense FFN, the experts run
+    // on the CPU, and recording a half-built FFN would submit work against
+    // buffers nothing writes.
+    gate_up: Option<WeightBindings<2>>,
+    down: Option<OperatorBindings>,
 }
 
 pub(crate) struct Qwen35GpuChunkResult<'a> {
@@ -633,22 +636,21 @@ impl Qwen35VulkanSession {
             // A qwen35moe layer has no dense FFN; it falls back to the CPU
             // route for the FFN instead of binding a half-model on the GPU.
             let (gate_up, down) = match (layer.ffn_gate.as_ref(), layer.ffn_up.as_ref()) {
-                (Some(gate), Some(up)) => (
-                    bind_weight_group(
+                (Some(gate), Some(up)) => {
+                    let gate_up = bind_weight_group(
                         &mut ops,
                         &mut buffers,
                         [(gate, "Qwen3.5 FFN gate"), (up, "Qwen3.5 FFN up")],
-                    )?,
-                    bind_weight(
-                        &mut ops,
-                        &mut buffers,
-                        layer
-                            .ffn_down
-                            .as_ref()
-                            .ok_or("Qwen3.5 FFN down missing with gate/up")?,
-                        "Qwen3.5 FFN down",
-                    )?,
-                ),
+                    )?;
+                    let down_weight = layer.ffn_down.as_ref().ok_or_else(|| {
+                        VulkanError::UnsupportedShape(format!(
+                            "missing Qwen3.5 layer {layer_index} FFN down while gate/up are present"
+                        ))
+                    })?;
+                    let down =
+                        bind_weight(&mut ops, &mut buffers, down_weight, "Qwen3.5 FFN down")?;
+                    (Some(gate_up), Some(down))
+                }
                 _ => (None, None),
             };
             layers.push(LayerBindings {
@@ -1069,39 +1071,44 @@ impl Qwen35VulkanSession {
                 config.n_embd,
                 config.n_embd,
             )?;
-            self.record_weight_group(
-                &commands,
-                bindings.gate_up,
-                self.layout.normed,
-                [
-                    (self.layout.ffn_gate, config.n_ff),
-                    (self.layout.ffn_up, config.n_ff),
-                ],
-                config.n_embd,
-                rows,
-            )?;
-            self.ops.record_silu_mul_rows(
-                &commands,
-                self.layout.ffn_gate,
-                self.layout.ffn_up,
-                config.n_ff,
-                rows,
-            )?;
-            self.record_weights(
-                &commands,
-                bindings.down,
-                self.layout.ffn_gate,
-                &[(self.layout.down, config.n_embd)],
-                config.n_ff,
-                rows,
-            )?;
-            self.ops.record_add_rows(
-                &commands,
-                self.layout.x,
-                self.layout.down,
-                config.n_embd,
-                rows,
-            )?;
+            // The dense FFN only exists on a qwen35 layer. On qwen35moe the
+            // experts run on the CPU, so there is nothing to record and
+            // submitting it would read buffers the graph never wrote.
+            if let (Some(gate_up), Some(down)) = (bindings.gate_up, bindings.down) {
+                self.record_weight_group(
+                    &commands,
+                    gate_up,
+                    self.layout.normed,
+                    [
+                        (self.layout.ffn_gate, config.n_ff),
+                        (self.layout.ffn_up, config.n_ff),
+                    ],
+                    config.n_embd,
+                    rows,
+                )?;
+                self.ops.record_silu_mul_rows(
+                    &commands,
+                    self.layout.ffn_gate,
+                    self.layout.ffn_up,
+                    config.n_ff,
+                    rows,
+                )?;
+                self.record_weights(
+                    &commands,
+                    down,
+                    self.layout.ffn_gate,
+                    &[(self.layout.down, config.n_embd)],
+                    config.n_ff,
+                    rows,
+                )?;
+                self.ops.record_add_rows(
+                    &commands,
+                    self.layout.x,
+                    self.layout.down,
+                    config.n_embd,
+                    rows,
+                )?;
+            }
         }
 
         let last_offset = (rows - 1) * config.n_embd * 4;
@@ -1825,6 +1832,9 @@ mod tests {
             is_recurrent: vec![true, false],
             key_length: 4,
             value_length: 4,
+            // A dense qwen35 layer, so the Vulkan FFN bindings are the ones
+            // under test here rather than the qwen35moe CPU fallback.
+            moe: None,
         }
     }
 
