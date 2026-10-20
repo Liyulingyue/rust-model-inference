@@ -581,17 +581,36 @@ impl<'a> super::weights::HybridTrunk<'a> {
             .expect("validated Qwen3.5 dense projection shape");
         t_qkv += t0.elapsed().as_secs_f64();
 
-        // `Vcur` is the one attention input that neither side traced before.
-        // With q, k and both per-head norms bit-exact, a difference at
-        // `attn_gated` could only come from the value path or the gate.
+        // The gate cannot be read off the oracle's attention path: llama.cpp
+        // takes it as a view of the fused QG projection and then fuses sigmoid
+        // into the following mul, so no scheduled node carries it. Two nodes
+        // that *are* scheduled do, and between them they bracket the gate:
         //
-        // Note what is deliberately absent: the gate. `cb()` only renames a
-        // tensor, and llama.cpp fuses `sigmoid` into the following `mul`, so
-        // neither the pre-sigmoid gate nor its sigmoid exists as a scheduled
-        // node. There is no oracle node for it to compare against, so naming
-        // it here would only manufacture a node that cannot be checked.
+        //   Qcur_full     the fused projection, [q(256), gate(256)] per head
+        //   gate_reshaped the gate half alone, after ggml_cont_2d
+        //
+        // q_buf is the counterpart of Qcur_full with the same interleaving.
         #[cfg(feature = "parity-trace")]
         if trace_layer {
+            parity_trace::report(parity_trace::checkpoint_rows(
+                &format!("Qcur_full-{il}"),
+                Some(il),
+                &[n_tokens, n_head, n_embd_head * 2],
+                &scratch.q_buf[..n_tokens * q_dim],
+            ));
+            let mut gate_trace: Vec<f32> = Vec::with_capacity(n_tokens * n_head * n_embd_head);
+            for token in 0..n_tokens {
+                for head in 0..n_head {
+                    let offset = token * q_dim + head * n_embd_head * 2 + n_embd_head;
+                    gate_trace.extend_from_slice(&scratch.q_buf[offset..offset + n_embd_head]);
+                }
+            }
+            parity_trace::report(parity_trace::checkpoint_rows(
+                &format!("gate_reshaped-{il}"),
+                Some(il),
+                &[n_tokens, n_head, n_embd_head],
+                &gate_trace,
+            ));
             parity_trace::report(parity_trace::checkpoint_rows(
                 &format!("Vcur-{il}"),
                 Some(il),

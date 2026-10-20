@@ -1,8 +1,8 @@
 diff --git a/examples/eval-callback/eval-callback.cpp b/examples/eval-callback/eval-callback.cpp
-index 8846f0c..602f5f8 100644
+index 8846f0c..fd3bfcf 100644
 --- a/examples/eval-callback/eval-callback.cpp
 +++ b/examples/eval-callback/eval-callback.cpp
-@@ -33,10 +33,63 @@ static bool selected_layer(const std::string & name, const char * prefix, int la
+@@ -33,10 +33,64 @@ static bool selected_layer(const std::string & name, const char * prefix, int la
  
  static int last_layer = 63;
  
@@ -50,7 +50,8 @@ index 8846f0c..602f5f8 100644
 +    // matched, layers 0-2 (SSM) came back to ~1e-9 and the first remaining
 +    // difference is at layer 3's FFN input -- so the split moved into the
 +    // attention path. These are the nodes along it.
-+    for (const char * prefix : {"attn_norm", "Qcur_normed", "Kcur_normed",
++    for (const char * prefix : {"attn_norm", "Qcur_full", "gate_reshaped",
++                                "Qcur_normed", "Kcur_normed",
 +                                "Qcur", "Kcur", "Vcur", "attn_gated",
 +                                "attn_output", "attn_residual", "attn_post_norm"}) {
 +        if (selected_layer(name, prefix, 3)) return true;
@@ -66,7 +67,7 @@ index 8846f0c..602f5f8 100644
      for (int layer : {0, 3, last_layer}) {
          if (selected_layer(name, "l_out", layer)) return true;
      }
-@@ -206,6 +259,142 @@ public:
+@@ -206,6 +260,162 @@ public:
          write_tokens("qwen35.greedy_token_ids", tokens);
      }
  
@@ -185,6 +186,26 @@ index 8846f0c..602f5f8 100644
 +        if (expected != values.size()) {
 +            throw std::runtime_error("moe shape mismatch for " + source_name);
 +        }
++        // One record per (name, layer, step). A node can be reached twice by the
++        // writer -- attn_post_norm-3 is both a per-layer boundary and a step in
++        // the layer-3 attention chain -- and emitting it twice makes the join
++        // ambiguous, which check_moe.py then refuses. A repeat with identical
++        // data is the same tensor written twice and is dropped; a repeat with
++        // different data really is two tensors under one key, and throwing keeps
++        // that visible instead of silently keeping whichever came first.
++        {
++            const std::string key = output_name + "/" + std::to_string(layer) +
++                                    "/" + std::to_string(step);
++            const auto previous = written_.find(key);
++            if (previous != written_.end()) {
++                if (previous->second != values) {
++                    throw std::runtime_error(
++                            "two different tensors share the checkpoint key " + key);
++                }
++                return;
++            }
++            written_.emplace(key, values);
++        }
 +        const size_t occurrence = occurrences_[output_name]++;
 +        std::string binary_path = path_ + "." + output_name;
 +        if (occurrence) binary_path += "." + std::to_string(occurrence);
@@ -209,7 +230,38 @@ index 8846f0c..602f5f8 100644
  private:
      const tensor_snapshot & get(const std::string & name) const {
          const auto found = tensors_.find(name);
-@@ -315,19 +504,59 @@ static llama_token greedy_token(llama_context * ctx, int n_vocab) {
+@@ -263,6 +473,20 @@ private:
+             throw std::runtime_error("shape mismatch for " + output_name + ": expected " +
+                     std::to_string(expected) + ", got " + std::to_string(values.size()));
+         }
++        // Same one-record-per-key rule as the MoE writer above.
++        {
++            const std::string key = output_name + "/" + std::to_string(layer) +
++                                    "/" + std::to_string(step);
++            const auto previous = written_.find(key);
++            if (previous != written_.end()) {
++                if (previous->second != values) {
++                    throw std::runtime_error(
++                            "two different tensors share the checkpoint key " + key);
++                }
++                return;
++            }
++            written_.emplace(key, values);
++        }
+         const size_t occurrence = occurrences_[output_name]++;
+         std::string binary_path = path_ + "." + output_name;
+         if (occurrence) binary_path += "." + std::to_string(occurrence);
+@@ -298,6 +522,9 @@ private:
+     std::vector<std::map<std::string, tensor_snapshot>> prompt_rows_;
+     std::set<std::string> seen_;
+     std::map<std::string, size_t> occurrences_;
++    // Checkpoint keys already emitted, with the values that were written, so a
++    // node the writer reaches twice can be proven to be the same tensor.
++    std::map<std::string, std::vector<float>> written_;
+ };
+ 
+ static bool parity_eval_callback(ggml_tensor * tensor, bool ask, void * user_data) {
+@@ -315,19 +542,59 @@ static llama_token greedy_token(llama_context * ctx, int n_vocab) {
      return best;
  }
  
@@ -274,7 +326,7 @@ index 8846f0c..602f5f8 100644
      if (params.n_predict < 1) throw std::runtime_error("Oracle requires -n >= 1");
  
      const bool add_bos = llama_vocab_get_add_bos(vocab);
-@@ -381,7 +610,19 @@ int main(int argc, char ** argv) {
+@@ -381,7 +648,19 @@ int main(int argc, char ** argv) {
      auto * ctx = llama_init->context();
      if (model == nullptr || ctx == nullptr) return 1;
  

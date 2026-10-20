@@ -389,6 +389,83 @@ per-column rounding difference unlikely but does not rule it out.
 So layer 3 is open, and the next lever is to defeat the `sigmoid`+`mul` fusion
 (or dump the fused QKV projection tensor) rather than to trace more nodes.
 
+It is worth being precise about which node is unobtainable and why, because the
+first explanation offered for it was wrong twice. `cb()` does nothing but rename
+a tensor, so a later `cb()` on the same tensor silently replaces the earlier
+name -- an added `cb(gate, "attn_gate_pre", il)` was hiding upstream's
+`gate_reshaped` that way. Removing it changed nothing. What is actually true is
+narrower: **the eval callback does not report nodes inside the dense attention
+between the QG projection and the RoPE.** `attn_norm`, earlier in the same
+layer, is reported; `Qcur`, `Kcur` and `Vcur`, after the RoPE, are reported;
+`Qcur_full` and `gate_reshaped`, between them, never arrive, though their names
+are in the allowlist, their `cb()` calls are upstream llama.cpp's own, the
+strings are in the built binary, and a forced rebuild does not change it.
+
+#### Recovering the gate without a trace node
+
+Since the gate cannot be captured, it was recovered numerically instead. At one
+token `n_attend` is 1, so `attn_gated = Vcur * sigmoid(gate)` with no reduction
+left to disagree about, and both sides have `attn_gated` and `Vcur`:
+
+    gate = logit(attn_gated / Vcur)
+
+| comparison | max | rms |
+|---|---|---|
+| Rust reconstructed vs Rust's actual gate | 5.5271e-07 | 4.6078e-08 |
+| Oracle reconstructed vs Rust's actual gate | 6.8706e-04 | 2.1327e-04 |
+
+The first row is the reconstruction's own error floor, and it is 1240x smaller
+than the second, so the head/dim mapping is right and **the gate values really
+do differ**. What they differ by is more informative than the fact that they
+differ:
+
+| property | value | reading |
+|---|---|---|
+| correlation | 0.999999973 | same values, perturbed |
+| best single scale oracle/rust | 1.000000547 | **not** a scale factor |
+| error spread | 97.9% of cells over 1e-5 | systematic, not a few outliers |
+| per-head mean error | 1.75e-04 to 1.90e-04, all 16 heads | head-independent |
+| error size | ~1955 ULP at the gate rms | far past what accumulation order can do |
+
+Accumulation order over 2048 terms buys roughly `sqrt(N)` ULP and wobbles from
+column to column; this is an order of magnitude past that, uniform, and
+head-symmetric. It is also far too large to be inherited from `attn_norm`,
+whose own difference is 9.9e-8 rms and which would contribute at most ~3e-6
+after the projection.
+
+The awkward part is what that implies. The gate is the second half of
+`Qcur_full`, the output of a single `wq` matmul, and its first half is
+**bit-exact** (`Qcur_normed` is a view of `Qcur_full` at offset 0 and matches).
+One matmul, one accumulation order, one input -- and one half is exact while
+the other carries 1955 ULP of uniform noise. Whatever produces it is not a
+rounding difference, so this stays open until the raw projection can be read.
+
+#### The L2 fix did not move the end-to-end numbers
+
+Seven single-token prompts, oracle tokenises, Rust replays the same id, compare
+once, after the `l2_norm` fix:
+
+| prompt | ids | top-2 margin | worst logit disagreement | verdict |
+|---|---|---|---|---|
+| `Hello` | 9419 | 1.2156 | 0.1683 | same token |
+| `The` | 760 | 0.0350 | 0.1237 | same token |
+| `dog` | 17907 | 0.3988 | 0.4640 | same token |
+| `cat` | 4466 | 1.3751 | 0.2131 | same token |
+| `run` | 5917 | 0.3308 | 0.1906 | same token |
+| `water` | 12615 | 0.3000 | 0.9868 | same token |
+| `1` | 16 | 1.3271 | 0.1907 | same token |
+
+7/7 agree on the argmax. What matters more is that **3 of 7 have a margin below
+the disagreement** (`The`, `dog`, `water`) -- and that is exactly the same 3 of
+7 as before the `l2_norm` fix. The fix is a real correctness win at the layer
+level: layers 0-2 are now bit-exact instead of merely close. It changed nothing
+end to end, because the layer-3 gate error is two orders of magnitude larger than
+anything it removed and it has 36 layers left to propagate through.
+
+Reading the table as "it works" because all seven tokens match would be wrong.
+A margin of 0.035 against a disagreement of 0.124 means the next prompt has a
+good chance of flipping, and this build should not be trusted on token choice.
+
 Note on shapes: the attention runs with `head_dim = 256`, so `Qcur` and
 `attn_gated` are 4096 wide and `wo` projects 4096 -> 2048. That is not
 `embedding_length / head_count`, and reading it as 128 makes the two sides look
