@@ -66,6 +66,22 @@ impl ZdtVisionConfig {
             .and_then(|v| usize::try_from(v).ok())
             .ok_or("Missing clip metadata: clip.vision.projector.scale_factor")?;
 
+        if [
+            projection_dim,
+            image_size,
+            patch_size,
+            n_embd,
+            n_ff,
+            n_layer,
+            n_head,
+        ]
+        .contains(&0)
+        {
+            return Err("vision dimensions and head count must be positive".into());
+        }
+        if image_size % patch_size != 0 {
+            return Err("vision image_size must be divisible by patch_size".into());
+        }
         if n_embd % n_head != 0 {
             return Err(format!(
                 "vision embedding_length {n_embd} is not divisible by attention.head_count {n_head}"

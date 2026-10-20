@@ -25,7 +25,7 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     model = AutoModel.from_pretrained(model_path, torch_dtype="auto")
     model.eval()
-    inputs = tokenizer(args.input, return_tensors="pt", padding=True, truncation=True, max_length=128)
+    inputs = tokenizer(args.input, return_tensors="pt")
     with torch.no_grad():
         outputs = model(**inputs)
     attention_mask = inputs["attention_mask"]

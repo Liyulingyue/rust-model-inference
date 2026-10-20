@@ -47,13 +47,36 @@ pub fn run_inference(
         BPETokenizer::from_gguf_metadata(|key| source.metadata(key).cloned())
             .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?,
     );
-    let tokens = tokenizer.encode(
-        prompt,
-        EncodeOptions {
-            add_special: true,
-            parse_special: true,
-        },
-    );
+    let tokens = if bench {
+        tokenizer.encode(
+            prompt,
+            EncodeOptions {
+                add_special: true,
+                parse_special: true,
+            },
+        )
+    } else {
+        match crate::prompt::jinja::single_turn_tokens(
+            tokenizer.as_ref(),
+            jinja,
+            &|key| source.metadata(key).cloned(),
+            prompt,
+            false,
+        )? {
+            Some(tokens) => tokens,
+            None => crate::prompt::build_qwen_chat_prompt(
+                tokenizer.as_ref(),
+                &[crate::prompt::QwenMessage {
+                    role: "user",
+                    content: prompt,
+                }],
+                false,
+            )?,
+        }
+    };
+
+    #[cfg(feature = "parity-trace")]
+    crate::parity_trace::report(crate::parity_trace::token_ids("prompt_ids", &tokens));
 
     let mut runtime = build_text_runtime(
         "qwen35moe",
@@ -86,6 +109,5 @@ pub fn run_inference(
     } else {
         println!("\n{:?}", generated.finish);
     }
-    let _ = jinja;
     Ok(())
 }

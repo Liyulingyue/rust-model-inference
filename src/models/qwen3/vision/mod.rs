@@ -3,8 +3,7 @@ pub mod clip_config;
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::ops::{
-    gelu_inplace, rope_mrope_interleaved, softmax_inplace, sum_f32, sum_sq_centered_f32, vec_add,
-    vec_add_into,
+    gelu_inplace, rope_vision, softmax_inplace, sum_f32, sum_sq_centered_f32, vec_add, vec_add_into,
 };
 use clip_config::ClipVisionConfig;
 use std::sync::Arc;
@@ -613,7 +612,8 @@ impl<'a> VisionEncoder<'a> {
     }
 
     pub fn precompute(&mut self) {
-        self.precompute_impl(false, false);
+        // Keep the supplied weights: re-quantizing this tower to Q8 amplifies errors across layers.
+        self.precompute_impl(true, false);
     }
 
     /// Keep widened weights and activations in F32, without Q8 quantization.
@@ -1301,7 +1301,7 @@ impl<'a> VisionEncoder<'a> {
                 let q_base = h * n_tokens * d_head;
                 let k_base = n_head * n_tokens * d_head + h * n_tokens * d_head;
                 for t in 0..n_tokens {
-                    rope_mrope_interleaved(
+                    rope_vision(
                         &mut scratch.attn_buf[q_base + t * d_head..q_base + t * d_head + d_head],
                         mrope_positions[t],
                         mrope_sections,
@@ -1309,7 +1309,7 @@ impl<'a> VisionEncoder<'a> {
                         freq_base,
                         d_head / 2,
                     );
-                    rope_mrope_interleaved(
+                    rope_vision(
                         &mut scratch.attn_buf[k_base + t * d_head..k_base + t * d_head + d_head],
                         mrope_positions[t],
                         mrope_sections,

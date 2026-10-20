@@ -41,15 +41,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+import struct
 import sys
 from pathlib import Path
 
 from tools.converter.utils.gguf import (
+    model_metadata_value,
     GGML_BF16,
     GGML_F32,
+    GGML_F16,
     GGML_Q8_0,
     GgufWriter,
     bf16_bytes_to_q8_0,
+    bf16_to_f16,
     bf16_to_f32,
     gguf_dims,
     open_safetensors,
@@ -65,7 +70,7 @@ VARIANT_TABLE = {
         text_n_head=8,
         text_n_head_kv=2,
         text_n_ff=3584,
-        text_head_dim=256,  # = n_embd / n_head
+        text_head_dim=256,  # Explicit head_dim differs from hidden_size / head_count.
         text_vocab=248_320,
         vision_depth=12,
         vision_embd=768,
@@ -148,9 +153,10 @@ def _build_vocab(
     all_tokens: dict[int, str] = {**vocab, **added}
     tokens = [all_tokens.get(i, f"<|reserved_{i}|>") for i in range(vocab_size)]
     types = [1] * vocab_size
-    for tid in added:
+    for entry in tok_json["added_tokens"]:
+        tid = entry["id"]
         if tid < vocab_size:
-            types[tid] = 3
+            types[tid] = 3 if entry["special"] else 4
     return tokens, types
 
 
@@ -173,6 +179,7 @@ def _require(st_dicts, name: str):
 
 def _emit_f32_or_bf16_to_f32(
     gguf: GgufWriter, name: str, raw: bytes, shape: tuple, src_dtype: str,
+    *, add_one: bool = False, neg_exp: bool = False,
 ) -> None:
     """Coerce either an F32 source (already F32) or a BF16 source (cast to
     F32 with the same width) into a F32 GGUF tensor. The qwen35 trunk
@@ -185,15 +192,23 @@ def _emit_f32_or_bf16_to_f32(
             raise ValueError(
                 f"{name}: shape {shape} ({n}) != f32 payload {len(raw) // 4}"
             )
-        gguf.add_tensor(name, GGML_F32, gguf_dims(shape), raw)
+        payload = raw
     elif src_dtype == "BF16":
         if len(raw) != n * 2:
             raise ValueError(
                 f"{name}: shape {shape} ({n}) != bf16 payload {len(raw) // 2}"
             )
-        gguf.add_tensor(name, GGML_F32, gguf_dims(shape), bf16_to_f32(raw))
+        payload = bf16_to_f32(raw)
     else:
         raise ValueError(f"{name}: unsupported source dtype {src_dtype!r}")
+    if add_one or neg_exp:
+        values = struct.unpack(f"<{n}f", payload)
+        if add_one:
+            values = tuple(value + 1.0 for value in values)
+        if neg_exp:
+            values = tuple(-math.exp(value) for value in values)
+        payload = struct.pack(f"<{n}f", *values)
+    gguf.add_tensor(name, GGML_F32, gguf_dims(shape), payload)
 
 
 def _emit_f32(gguf: GgufWriter, name: str, raw: bytes, shape: tuple) -> None:
@@ -207,7 +222,9 @@ def _emit_f32(gguf: GgufWriter, name: str, raw: bytes, shape: tuple) -> None:
     gguf.add_tensor(name, GGML_F32, gguf_dims(shape), raw)
 
 
-def _emit_bf16_f32(gguf: GgufWriter, name: str, raw: bytes, shape: tuple) -> None:
+def _emit_bf16_f32(
+    gguf: GgufWriter, name: str, raw: bytes, shape: tuple, *, add_one: bool = False,
+) -> None:
     """BF16 -> F32 conversion for BF16 norms / biases the engine reads as F32."""
     n = 1
     for d in shape:
@@ -216,7 +233,9 @@ def _emit_bf16_f32(gguf: GgufWriter, name: str, raw: bytes, shape: tuple) -> Non
         raise ValueError(
             f"{name}: shape {shape} ({n}) != bf16 payload {len(raw) // 2}"
         )
-    gguf.add_tensor(name, GGML_F32, gguf_dims(shape), bf16_to_f32(raw))
+    _emit_f32_or_bf16_to_f32(
+        gguf, name, raw, shape, "BF16", add_one=add_one,
+    )
 
 
 def _emit_bf16_q8_0(gguf: GgufWriter, name: str, raw: bytes, shape: tuple) -> None:
@@ -241,6 +260,16 @@ def _emit_bf16(gguf: GgufWriter, name: str, raw: bytes, shape: tuple) -> None:
             f"{name}: shape {shape} ({n}) != bf16 payload {len(raw) // 2}"
         )
     gguf.add_tensor(name, GGML_BF16, gguf_dims(shape), raw)
+
+
+def _emit_bf16_f16(gguf: GgufWriter, name: str, raw: bytes, shape: tuple) -> None:
+    """Convert BF16 source weights to the F16 storage used by vision linear layers."""
+    n = 1
+    for d in shape:
+        n *= d
+    if len(raw) != n * 2:
+        raise ValueError(f"{name}: shape {shape} ({n}) != bf16 payload {len(raw) // 2}")
+    gguf.add_tensor(name, GGML_F16, gguf_dims(shape), bf16_to_f16(raw))
 
 
 def _is_full_attention(idx: int) -> bool:
@@ -358,10 +387,13 @@ def write_text_gguf(
 
         # Norms → F32 (BF16 source converted to F32).
         ln1 = _require(lang_st, f"{layer}.input_layernorm.weight")
-        _emit_bf16_f32(gguf, f"{blk}.attn_norm.weight", ln1.raw, tuple(ln1.shape))
+        _emit_bf16_f32(
+            gguf, f"{blk}.attn_norm.weight", ln1.raw, tuple(ln1.shape), add_one=True,
+        )
         ln2 = _require(lang_st, f"{layer}.post_attention_layernorm.weight")
         _emit_bf16_f32(
             gguf, f"{blk}.post_attention_norm.weight", ln2.raw, tuple(ln2.shape),
+            add_one=True,
         )
 
         # FFN → Q8_0.
@@ -390,11 +422,11 @@ def write_text_gguf(
                 )
             qn = _require(lang_st, f"{layer}.self_attn.q_norm.weight")
             _emit_bf16_f32(
-                gguf, f"{blk}.attn_q_norm.weight", qn.raw, tuple(qn.shape),
+                gguf, f"{blk}.attn_q_norm.weight", qn.raw, tuple(qn.shape), add_one=True,
             )
             kn = _require(lang_st, f"{layer}.self_attn.k_norm.weight")
             _emit_bf16_f32(
-                gguf, f"{blk}.attn_k_norm.weight", kn.raw, tuple(kn.shape),
+                gguf, f"{blk}.attn_k_norm.weight", kn.raw, tuple(kn.shape), add_one=True,
             )
         else:
             # Linear (Mamba) SSM block: in_proj_qkv / in_proj_z / in_proj_a /
@@ -416,6 +448,8 @@ def write_text_gguf(
                 gguf, f"{blk}.ssm_beta.weight", beta.raw, tuple(beta.shape),
             )
             conv1d = _require(lang_st, f"{layer}.linear_attn.conv1d.weight")
+            if len(conv1d.shape) != 3 or conv1d.shape[1] != 1:
+                raise ValueError(f"unexpected depthwise conv shape: {conv1d.shape}")
             # `ssm_conv1d.weight` is F32 in the engine (matches what
             # Qwen3.5-0.8B / Qwen3.5-2B / Qwen3.5-4B GGUF ships); we cast the
             # BF16 source to F32 with a width-preserving conversion.
@@ -423,7 +457,7 @@ def write_text_gguf(
                 gguf,
                 f"{blk}.ssm_conv1d.weight",
                 conv1d.raw,
-                tuple(conv1d.shape),
+                (conv1d.shape[0], conv1d.shape[2]),
             )
             ssm_norm = _require(lang_st, f"{layer}.linear_attn.norm.weight")
             # `linear_attn.norm.weight` is F32 in HF; some older exports
@@ -441,7 +475,7 @@ def write_text_gguf(
             a_log = _require(lang_st, f"{layer}.linear_attn.A_log")
             _emit_f32_or_bf16_to_f32(
                 gguf, f"{blk}.ssm_a", a_log.raw, tuple(a_log.shape),
-                a_log.dtype,
+                a_log.dtype, neg_exp=True,
             )
             # `dt.bias` is BF16 in HF; cast to F32 (matches Qwen3.5-0.8B
             # GGUF which already emits `blk.{i}.ssm_dt.bias` as F32).
@@ -454,9 +488,10 @@ def write_text_gguf(
     # Final norm.
     out_norm = _require(lang_st, "model.language_model.norm.weight")
     _emit_bf16_f32(
-        gguf, "output_norm.weight", out_norm.raw, tuple(out_norm.shape),
+        gguf, "output_norm.weight", out_norm.raw, tuple(out_norm.shape), add_one=True,
     )
 
+    gguf.metadata = [(key, model_metadata_value(value)) for key, value in gguf.metadata]
     gguf.write()
     print(
         f"[text] wrote {out_path} ({out_path.stat().st_size // 1024 // 1024} MiB)",
@@ -537,7 +572,10 @@ def write_mmproj_gguf(
             ("mlp.linear_fc2.bias", "ffn_down.bias"),
         ]:
             t = _require(lang_st, f"{layer}.{hf_name}")
-            _emit_bf16(gguf, f"{blk}.{gguf_name}", t.raw, tuple(t.shape))
+            if hf_name.endswith(".weight"):
+                _emit_bf16_f16(gguf, f"{blk}.{gguf_name}", t.raw, tuple(t.shape))
+            else:
+                _emit_bf16_f32(gguf, f"{blk}.{gguf_name}", t.raw, tuple(t.shape))
 
     # Patch embed: Conv3D [out, in, kt=2, kH, kW] -> two Conv2D weights + bias.
     patch_w = _require(lang_st, "model.visual.patch_embed.proj.weight")
@@ -553,10 +591,10 @@ def write_mmproj_gguf(
     frame0 = bf16[:, :, 0, :].reshape(out_c, in_c, kH, kW).copy()
     frame1 = bf16[:, :, 1, :].reshape(out_c, in_c, kH, kW).copy()
     torch_shape = (out_c, in_c, kH, kW)
-    _emit_bf16(gguf, "v.patch_embd.weight", frame0.tobytes(), torch_shape)
-    _emit_bf16(gguf, "v.patch_embd.weight.1", frame1.tobytes(), torch_shape)
+    _emit_bf16_f16(gguf, "v.patch_embd.weight", frame0.tobytes(), torch_shape)
+    _emit_bf16_f16(gguf, "v.patch_embd.weight.1", frame1.tobytes(), torch_shape)
     patch_b = _require(lang_st, "model.visual.patch_embed.proj.bias")
-    _emit_bf16(
+    _emit_bf16_f32(
         gguf, "v.patch_embd.bias", patch_b.raw, tuple(patch_b.shape),
     )
     pos = _require(lang_st, "model.visual.pos_embed.weight")
@@ -565,7 +603,7 @@ def write_mmproj_gguf(
             f"pos_embed shape {pos.shape} != "
             f"({p['vision_pos']}, {p['vision_embd']})"
         )
-    _emit_bf16(gguf, "v.position_embd.weight", pos.raw, tuple(pos.shape))
+    _emit_bf16_f32(gguf, "v.position_embd.weight", pos.raw, tuple(pos.shape))
 
     # Merger: norm -> v.post_ln; fc1 -> mm.0; fc2 -> mm.2.
     out_prefix = "model.visual.merger"
@@ -575,15 +613,16 @@ def write_mmproj_gguf(
         _emit_bf16_f32(gguf, "v.post_ln.bias", nb.raw, tuple(nb.shape))
 
     fc1w = _require(proj_st, f"{out_prefix}.linear_fc1.weight")
-    _emit_bf16(gguf, "mm.0.weight", fc1w.raw, tuple(fc1w.shape))
+    _emit_bf16_f16(gguf, "mm.0.weight", fc1w.raw, tuple(fc1w.shape))
     if (fc1b := _require_safe(proj_st, f"{out_prefix}.linear_fc1.bias")) is not None:
         _emit_bf16_f32(gguf, "mm.0.bias", fc1b.raw, tuple(fc1b.shape))
 
     fc2w = _require(proj_st, f"{out_prefix}.linear_fc2.weight")
-    _emit_bf16(gguf, "mm.2.weight", fc2w.raw, tuple(fc2w.shape))
+    _emit_bf16_f16(gguf, "mm.2.weight", fc2w.raw, tuple(fc2w.shape))
     if (fc2b := _require_safe(proj_st, f"{out_prefix}.linear_fc2.bias")) is not None:
         _emit_bf16_f32(gguf, "mm.2.bias", fc2b.raw, tuple(fc2b.shape))
 
+    gguf.metadata = [(key, model_metadata_value(value)) for key, value in gguf.metadata]
     gguf.write()
     print(
         f"[mmproj] wrote {out_path} ({out_path.stat().st_size // 1024 // 1024} MiB)",

@@ -463,10 +463,9 @@ struct LayerBindings {
     attention_norm: OperatorBindings,
     attention: AttentionBindings,
     post_attention_norm: OperatorBindings,
-    // Both are None when the layer has no dense FFN: a qwen35moe layer, or an
-    // Occamy-1.0 block, both of which run their experts on the CPU. Recording a
-    // half-built FFN would submit work against buffers nothing writes, and the
-    // Vulkan layer forward skips the FFN when both are None.
+    // Both are None on a qwen35moe layer: it has no dense FFN, the experts run
+    // on the CPU, and recording a half-built FFN would submit work against
+    // buffers nothing writes.
     gate_up: Option<WeightBindings<2>>,
     down: Option<OperatorBindings>,
 }
@@ -555,17 +554,12 @@ impl Qwen35VulkanSession {
                     &mut ops,
                     &mut buffers,
                     [
-                        (Some(wqkv), "Qwen3.5 recurrent QKV"),
-                        (Some(gate), "Qwen3.5 recurrent gate"),
-                        (Some(beta), "Qwen3.5 recurrent beta"),
+                        (wqkv, "Qwen3.5 recurrent QKV"),
+                        (gate, "Qwen3.5 recurrent gate"),
+                        (beta, "Qwen3.5 recurrent beta"),
                     ],
                 )?;
-                let alpha = bind_weight(
-                    &mut ops,
-                    &mut buffers,
-                    Some(alpha),
-                    "Qwen3.5 recurrent alpha",
-                )?;
+                let alpha = bind_weight(&mut ops, &mut buffers, alpha, "Qwen3.5 recurrent alpha")?;
                 let conv_weight = layer.ssm_conv1d.as_ref().ok_or_else(|| {
                     VulkanError::UnsupportedShape(format!(
                         "missing Qwen3.5 layer {layer_index} convolution weight"
@@ -594,19 +588,14 @@ impl Qwen35VulkanSession {
                     buffers.upload_f32(norm)?,
                 ];
                 let ssm = ops.bind_buffers(&ssm_buffers)?;
-                let output = bind_weight(
-                    &mut ops,
-                    &mut buffers,
-                    Some(output),
-                    "Qwen3.5 recurrent output",
-                )?;
+                let output =
+                    bind_weight(&mut ops, &mut buffers, output, "Qwen3.5 recurrent output")?;
                 AttentionBindings::Recurrent(RecurrentBindings {
-                    qkv_gate_beta: qkv_gate_beta
-                        .expect("recurrent qkv/gate/beta bindings always present"),
-                    alpha: alpha.expect("recurrent alpha bindings always present"),
+                    qkv_gate_beta,
+                    alpha,
                     convolution,
                     ssm,
-                    output: output.expect("recurrent output bindings always present"),
+                    output,
                 })
             } else {
                 let wq = required_weight(layer.wq.as_ref(), layer_index, "attn_q")?;
@@ -617,9 +606,9 @@ impl Qwen35VulkanSession {
                     &mut ops,
                     &mut buffers,
                     [
-                        (Some(wq), "Qwen3.5 dense Q"),
-                        (Some(wk), "Qwen3.5 dense K"),
-                        (Some(wv), "Qwen3.5 dense V"),
+                        (wq, "Qwen3.5 dense Q"),
+                        (wk, "Qwen3.5 dense K"),
+                        (wv, "Qwen3.5 dense V"),
                     ],
                 )?;
                 let q_norm = layer.attn_q_norm.as_ref().ok_or_else(|| {
@@ -634,34 +623,36 @@ impl Qwen35VulkanSession {
                 })?;
                 let prepare_buffers = [buffers.upload_f32(q_norm)?, buffers.upload_f32(k_norm)?];
                 let prepare = ops.bind_buffers(&prepare_buffers)?;
-                let output = bind_weight(&mut ops, &mut buffers, Some(wo), "Qwen3.5 dense output")?;
+                let output = bind_weight(&mut ops, &mut buffers, wo, "Qwen3.5 dense output")?;
                 AttentionBindings::Dense(DenseBindings {
-                    qkv: qkv.expect("dense QKV bindings always present"),
+                    qkv,
                     prepare,
-                    output: output.expect("dense output bindings always present"),
+                    output,
                 })
             };
 
             let post_norm_buffer = buffers.upload_f32(&layer.attn_post_norm)?;
             let post_attention_norm = ops.bind_buffers(&[post_norm_buffer])?;
-            // A layer with no dense FFN -- qwen35moe or an Occamy-1.0 block --
-            // falls back to the CPU route for the FFN instead of binding a
-            // half-model on the GPU. Both helpers take and return `Option`, so
-            // an absent weight yields `None` rather than a missing-tensor error.
-            let gate_up = bind_weight_group(
-                &mut ops,
-                &mut buffers,
-                [
-                    (layer.ffn_gate.as_ref(), "Qwen3.5 FFN gate"),
-                    (layer.ffn_up.as_ref(), "Qwen3.5 FFN up"),
-                ],
-            )?;
-            let down = bind_weight(
-                &mut ops,
-                &mut buffers,
-                layer.ffn_down.as_ref(),
-                "Qwen3.5 FFN down",
-            )?;
+            // A qwen35moe layer has no dense FFN; it falls back to the CPU
+            // route for the FFN instead of binding a half-model on the GPU.
+            let (gate_up, down) = match (layer.ffn_gate.as_ref(), layer.ffn_up.as_ref()) {
+                (Some(gate), Some(up)) => {
+                    let gate_up = bind_weight_group(
+                        &mut ops,
+                        &mut buffers,
+                        [(gate, "Qwen3.5 FFN gate"), (up, "Qwen3.5 FFN up")],
+                    )?;
+                    let down_weight = layer.ffn_down.as_ref().ok_or_else(|| {
+                        VulkanError::UnsupportedShape(format!(
+                            "missing Qwen3.5 layer {layer_index} FFN down while gate/up are present"
+                        ))
+                    })?;
+                    let down =
+                        bind_weight(&mut ops, &mut buffers, down_weight, "Qwen3.5 FFN down")?;
+                    (Some(gate_up), Some(down))
+                }
+                _ => (None, None),
+            };
             layers.push(LayerBindings {
                 attention_norm,
                 attention,
@@ -676,10 +667,9 @@ impl Qwen35VulkanSession {
         let output = bind_weight(
             &mut ops,
             &mut buffers,
-            Some(&model.output_weight),
+            &model.output_weight,
             "Qwen3.5 output",
-        )?
-        .expect("output projection bindings always present");
+        )?;
         let dense_kv = config
             .n_head_kv
             .checked_mul(config.n_embd_head())
@@ -1081,11 +1071,9 @@ impl Qwen35VulkanSession {
                 config.n_embd,
                 config.n_embd,
             )?;
-            // The dense FFN only exists on a qwen35 layer. On qwen35moe and on
-            // Occamy-1.0 blocks the experts run on the CPU, so there is nothing
-            // to record and submitting it would read buffers the graph never
-            // wrote. Attention, both norms and both residual adds still record,
-            // so x is preserved either way.
+            // The dense FFN only exists on a qwen35 layer. On qwen35moe the
+            // experts run on the CPU, so there is nothing to record and
+            // submitting it would read buffers the graph never wrote.
             if let (Some(gate_up), Some(down)) = (bindings.gate_up, bindings.down) {
                 self.record_weight_group(
                     &commands,
@@ -1258,32 +1246,21 @@ fn validated_weight_bytes<'a>(
 fn bind_weight(
     ops: &mut Qwen3Ops<'_>,
     buffers: &mut UploadedBuffers,
-    weight: Option<&Weight<'_>>,
+    weight: &Weight<'_>,
     label: &str,
-) -> Result<Option<OperatorBindings>, VulkanError> {
-    let Some(weight) = weight else {
-        return Ok(None);
-    };
+) -> Result<OperatorBindings, VulkanError> {
     let (buffer, format) = upload_weight(buffers, weight, label)?;
     ops.bind_weight_buffers(std::slice::from_ref(&buffer), std::slice::from_ref(&format))
-        .map(Some)
 }
 
 fn bind_weight_group<const N: usize>(
     ops: &mut Qwen3Ops<'_>,
     buffers: &mut UploadedBuffers,
-    weights: [(Option<&Weight<'_>>, &str); N],
-) -> Result<Option<WeightBindings<N>>, VulkanError> {
-    // MoE-only blocks (Occamy-1.0) have no dense FFN; skip binding entirely.
-    // The CPU trunk handles MoE FFN via the hybrid `expert_*` hook; the
-    // Vulkan layer forward is never invoked for such layers.
-    if weights.iter().all(|(w, _)| w.is_none()) {
-        return Ok(None);
-    }
+    weights: [(&Weight<'_>, &str); N],
+) -> Result<WeightBindings<N>, VulkanError> {
     let mut gpu_buffers = Vec::with_capacity(N);
     let mut formats = Vec::with_capacity(N);
     for (weight, label) in weights {
-        let weight = weight.expect("non-None weight in a partially-populated FFN group");
         let (buffer, format) = upload_weight(buffers, weight, label)?;
         gpu_buffers.push(buffer);
         formats.push(format);
@@ -1291,7 +1268,7 @@ fn bind_weight_group<const N: usize>(
     if formats.iter().all(|format| *format == formats[0]) {
         return ops
             .bind_weight_buffers(&gpu_buffers, &formats)
-            .map(|b| Some(WeightBindings::Grouped(b)));
+            .map(WeightBindings::Grouped);
     }
 
     let split = gpu_buffers
@@ -1303,7 +1280,7 @@ fn bind_weight_group<const N: usize>(
         .collect::<Result<Vec<_>, _>>()?
         .try_into()
         .map_err(|_| VulkanError::OutOfMemory)?;
-    Ok(Some(WeightBindings::Split(split)))
+    Ok(WeightBindings::Split(split))
 }
 
 fn eligibility_facts(model: &Qwen35Model<'_>) -> EligibilityFacts {
@@ -1318,10 +1295,6 @@ fn eligibility_facts(model: &Qwen35Model<'_>) -> EligibilityFacts {
         return facts;
     }
     for (layer_index, layer) in model.layers.iter().enumerate() {
-        // Only weights that are actually present. Pushing a default for an
-        // absent one would report F32 for a MoE layer that has no dense FFN at
-        // all, and let it through the format eligibility check on a format it
-        // never had.
         for weight in [
             layer.ffn_gate.as_ref(),
             layer.ffn_up.as_ref(),

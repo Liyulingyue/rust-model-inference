@@ -1,0 +1,801 @@
+{
+  "validated_on": "2026-10-21",
+  "host": "Apple Silicon macOS, CPU, 8 inference threads",
+  "profile": "release-fast",
+  "oracle": {
+    "repository": "https://github.com/ggml-org/llama.cpp",
+    "commit": "11fe02151f79c41d0d4af7da708755d73b9c0da6",
+    "patch": "llama-trace.patch",
+    "hf_transformers": "5.19.0",
+    "external_acceleration": false,
+    "python_packages": {
+      "transformers": "5.19.0",
+      "torch": "2.9.1",
+      "numpy": "2.5.3"
+    }
+  },
+  "comparison": "Exact tokenizer and lossless layout/payload checks; numerical bounds for quantized/approximate operators. No whole-model bitwise parity claim.",
+  "files": [
+    {
+      "file": "models/Occamy-1.0-GGUF/occamy-1.0-Q8_0.gguf",
+      "bytes": 36903139456,
+      "sha256": "9bd6eceae8434098c8c7ebec33e4ca0d0bd3f004c2bddf37d16cd906448fdbdd",
+      "source": "https://huggingface.co/Accio-Lab/occamy-1.0-GGUF",
+      "converted_locally": false,
+      "tensor_types": [
+        "F32",
+        "Q8_0"
+      ],
+      "tensor_count": 733,
+      "tensor_inventory_sha256": "1faab0254d438cada9c51ad24d3a5ded215da7e22c58b0aba1559ce3ed67bb31",
+      "metadata": {
+        "general.architecture": "qwen35moe",
+        "general.type": "model",
+        "general.name": "Occamy 1.0",
+        "general.version": "1.0",
+        "general.basename": "occamy",
+        "general.size_label": "256x2.6B",
+        "qwen35moe.block_count": 40,
+        "qwen35moe.embedding_length": 2048,
+        "qwen35moe.attention.head_count": 16,
+        "qwen35moe.attention.head_count_kv": 2,
+        "qwen35moe.rope.dimension_sections": [
+          11,
+          11,
+          10,
+          0
+        ],
+        "qwen35moe.expert_count": 256,
+        "qwen35moe.expert_used_count": 8,
+        "general.file_type": 7,
+        "qwen35moe.expert_feed_forward_length": 512,
+        "qwen35moe.expert_shared_feed_forward_length": 512,
+        "qwen35moe.rope.dimension_count": 64,
+        "general.quantization_version": 2
+      }
+    },
+    {
+      "file": "models/Occamy-1.0-GGUF/mmproj-occamy-1.0-F16.gguf",
+      "bytes": 899282944,
+      "sha256": "8f827a1e495f23e987686a7f55c26064270502a5b6ee954a828f1aec0b2fd400",
+      "source": "https://huggingface.co/Accio-Lab/occamy-1.0-GGUF",
+      "converted_locally": false,
+      "tensor_types": [
+        "F16",
+        "F32"
+      ],
+      "tensor_count": 334,
+      "tensor_inventory_sha256": "a9b4b8b011b2a1fa838bd513eeebc37223976c69fb31da4d4a0f964b7fc0c557",
+      "metadata": {
+        "general.architecture": "clip",
+        "general.type": "mmproj",
+        "general.name": "Occamy 1.0",
+        "general.version": "1.0",
+        "general.basename": "occamy",
+        "general.size_label": "447M",
+        "general.file_type": 1,
+        "clip.has_vision_encoder": true,
+        "clip.vision.projection_dim": 2048,
+        "clip.vision.image_size": 768,
+        "clip.vision.patch_size": 16,
+        "clip.vision.embedding_length": 1152,
+        "clip.vision.feed_forward_length": 4304,
+        "clip.vision.block_count": 27,
+        "clip.vision.attention.head_count": 16,
+        "clip.vision.image_mean": [
+          0.5,
+          0.5,
+          0.5
+        ],
+        "clip.vision.image_std": [
+          0.5,
+          0.5,
+          0.5
+        ],
+        "clip.projector_type": "qwen3vl_merger",
+        "clip.use_gelu": true,
+        "clip.vision.spatial_merge_size": 2,
+        "clip.vision.attention.layer_norm_epsilon": 9.999999974752427e-07,
+        "clip.vision.is_deepstack_layers": [
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false
+        ],
+        "general.quantization_version": 2
+      }
+    },
+    {
+      "file": "models/PhysBrain1.5-2B-GGUF/physbrain-1.5-2b-Q8_0.gguf",
+      "bytes": 2194718944,
+      "sha256": "07202f65d7a8514661f5331ed5d8ea78393926b3ec6d9b03730c19de55a6e00c",
+      "source": "https://modelscope.cn/models/DeepCybo/PhysBrain1.5-2B",
+      "converted_locally": true,
+      "tensor_types": [
+        "BF16",
+        "F32",
+        "Q8_0"
+      ],
+      "tensor_count": 310,
+      "tensor_inventory_sha256": "581177ba76006f27a1036836aaf70e22c264f310b447562e15057c5ce67c1eaf",
+      "metadata": {
+        "general.architecture": "qwen3vl",
+        "general.name": "PhysBrain1.5-2B",
+        "general.basename": "PhysBrain1.5-2B",
+        "general.size_label": "2B",
+        "general.file_type": 7,
+        "general.quantization_version": 2,
+        "general.base_model.0.name": "Qwen3-VL-2B-Instruct",
+        "general.base_model.0.organization": "Qwen",
+        "general.base_model.0.repo_url": "https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct",
+        "general.base_model.count": 1,
+        "qwen3vl.embedding_length": 2048,
+        "qwen3vl.block_count": 28,
+        "qwen3vl.attention.head_count": 16,
+        "qwen3vl.attention.head_count_kv": 8,
+        "qwen3vl.rope.dimension_count": 128,
+        "qwen3vl.rope.dimension_sections": [
+          24,
+          20,
+          20,
+          0
+        ]
+      }
+    },
+    {
+      "file": "models/PhysBrain1.5-2B-GGUF/mmproj-physbrain-1.5-2b-F16.gguf",
+      "bytes": 819394528,
+      "sha256": "1a59b05ec70b5369456234e5274dbc11c8303fc1a32c078268f318c3a73e9faf",
+      "source": "https://modelscope.cn/models/DeepCybo/PhysBrain1.5-2B",
+      "converted_locally": true,
+      "tensor_types": [
+        "F16",
+        "F32"
+      ],
+      "tensor_count": 316,
+      "tensor_inventory_sha256": "c2b44e655939908bb62342450254c0be93b9ae745353ded7177419effa4932fb",
+      "metadata": {
+        "general.architecture": "clip",
+        "general.name": "PhysBrain1.5-2B-mmproj",
+        "general.file_type": 1,
+        "clip.has_vision_encoder": true,
+        "clip.projector_type": "qwen3vl_merger",
+        "clip.vision.embedding_length": 1024,
+        "clip.vision.feed_forward_length": 4096,
+        "clip.vision.block_count": 24,
+        "clip.vision.attention.head_count": 16,
+        "clip.vision.image_size": 768,
+        "clip.vision.patch_size": 16,
+        "clip.vision.projection_dim": 2048,
+        "clip.vision.spatial_merge_size": 2,
+        "clip.vision.attention.layer_norm_epsilon": 9.999999974752427e-07,
+        "clip.use_gelu": true,
+        "clip.vision.image_mean": [
+          0.5,
+          0.5,
+          0.5
+        ],
+        "clip.vision.image_std": [
+          0.5,
+          0.5,
+          0.5
+        ],
+        "clip.vision.is_deepstack_layers": [
+          false,
+          false,
+          false,
+          false,
+          false,
+          true,
+          false,
+          false,
+          false,
+          false,
+          false,
+          true,
+          false,
+          false,
+          false,
+          false,
+          false,
+          true,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false
+        ]
+      }
+    },
+    {
+      "file": "models/Intern-Decision-0.8B-GGUF/mmproj-intern-decision-0.8b-F16.gguf",
+      "bytes": 204986464,
+      "sha256": "970d7cdb3301841c2f7da2ce96d4f09d8284da174173a63f22f04bcb3b3e418f",
+      "source": "https://modelscope.cn/models/Shanghai_AI_Laboratory/Intern-Decision-0.8B",
+      "converted_locally": true,
+      "tensor_types": [
+        "F16",
+        "F32"
+      ],
+      "tensor_count": 154,
+      "tensor_inventory_sha256": "452c78b1373a8bf194329ded0163dbdfcd7330ec1f97dc3f8a5c24d4555ef5af",
+      "metadata": {
+        "general.architecture": "clip",
+        "general.name": "Intern-Decision-0.8b-mmproj",
+        "general.file_type": 1,
+        "clip.has_vision_encoder": true,
+        "clip.projector_type": "qwen3vl_merger",
+        "clip.vision.embedding_length": 768,
+        "clip.vision.feed_forward_length": 3072,
+        "clip.vision.block_count": 12,
+        "clip.vision.attention.head_count": 12,
+        "clip.vision.image_size": 768,
+        "clip.vision.patch_size": 16,
+        "clip.vision.projection_dim": 1024,
+        "clip.vision.spatial_merge_size": 2,
+        "clip.vision.attention.layer_norm_epsilon": 9.999999974752427e-07,
+        "clip.use_gelu": true,
+        "clip.vision.image_mean": [
+          0.5,
+          0.5,
+          0.5
+        ],
+        "clip.vision.image_std": [
+          0.5,
+          0.5,
+          0.5
+        ],
+        "clip.vision.is_deepstack_layers": [
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false
+        ]
+      }
+    },
+    {
+      "file": "models/Intern-Decision-0.8B-GGUF/intern-decision-0.8b-Q8_0.gguf",
+      "bytes": 1050224768,
+      "sha256": "0a5d28076ed2485b475047a9848d1838734cb82bc20daddbeba5bd3ef2ade322",
+      "source": "https://modelscope.cn/models/Shanghai_AI_Laboratory/Intern-Decision-0.8B",
+      "converted_locally": true,
+      "tensor_types": [
+        "BF16",
+        "F32",
+        "Q8_0"
+      ],
+      "tensor_count": 320,
+      "tensor_inventory_sha256": "b151b1da7a217806d3c4985027b24ae2a174c8efb1b7eead9805ebe6040194fc",
+      "metadata": {
+        "general.architecture": "qwen35",
+        "general.name": "Intern-Decision-0.8b",
+        "general.basename": "Intern-Decision-0.8b",
+        "general.size_label": "0.8B",
+        "general.file_type": 7,
+        "general.quantization_version": 2,
+        "general.base_model.0.name": "Qwen3.5-0.8B",
+        "general.base_model.0.organization": "Qwen",
+        "general.base_model.0.repo_url": "https://huggingface.co/Qwen/Qwen3.5-0.8B",
+        "general.base_model.count": 1,
+        "qwen35.embedding_length": 1024,
+        "qwen35.block_count": 24,
+        "qwen35.attention.head_count": 8,
+        "qwen35.attention.head_count_kv": 2,
+        "qwen35.rope.dimension_count": 64,
+        "qwen35.rope.dimension_sections": [
+          11,
+          11,
+          10,
+          0
+        ]
+      }
+    },
+    {
+      "file": "models/ZDTaichu5.0-9B-GGUF/ZDTaichu5.0-9B-Q4_K_M.gguf",
+      "bytes": 5629101440,
+      "sha256": "83bda0ff1a752979b99c895bec84f2d6cfff0c3ab4c32bdc2da731774a4ac2f0",
+      "source": "https://huggingface.co/ngquocvinh/ZDTaichu5.0-9B-GGUF",
+      "converted_locally": false,
+      "tensor_types": [
+        "F32",
+        "Q4_K",
+        "Q6_K"
+      ],
+      "tensor_count": 427,
+      "tensor_inventory_sha256": "386131a2532ef651a2876bc37186dfdd8294e921b28ea671b568a4a0c1f7ee66",
+      "metadata": {
+        "general.architecture": "qwen35",
+        "general.type": "model",
+        "general.sampling.top_k": 20,
+        "general.sampling.top_p": 0.949999988079071,
+        "general.sampling.temp": 1.0,
+        "general.sampling.penalty_repeat": 1.0,
+        "general.name": "TaichuAI/ZDTaichu5.0-9B",
+        "general.size_label": "9.0B",
+        "general.tags": [
+          "multimodal",
+          "vision-language-model",
+          "spatial-reasoning",
+          "agent",
+          "video-understanding",
+          "image-text-to-text"
+        ],
+        "general.languages": [
+          "en",
+          "zh"
+        ],
+        "qwen35.block_count": 32,
+        "qwen35.embedding_length": 4096,
+        "qwen35.attention.head_count": 16,
+        "qwen35.attention.head_count_kv": 4,
+        "qwen35.rope.dimension_sections": [
+          11,
+          11,
+          10,
+          0
+        ],
+        "qwen35.rope.dimension_count": 64,
+        "general.quantization_version": 2,
+        "general.file_type": 15
+      }
+    },
+    {
+      "file": "models/ZDTaichu5.0-9B-GGUF/mmproj-ZDTaichu5.0-9B-BF16.gguf",
+      "bytes": 1647178144,
+      "sha256": "96f58047108b8f251b2b244f52e0b44be853f1231dffccc90787c898ee6b9684",
+      "source": "https://huggingface.co/ngquocvinh/ZDTaichu5.0-9B-GGUF",
+      "converted_locally": false,
+      "tensor_types": [
+        "BF16",
+        "F32"
+      ],
+      "tensor_count": 390,
+      "tensor_inventory_sha256": "b9e882054645d6b1c2f5101ea7653e9c5cb724304dfe8a124021e5c43508d2de",
+      "metadata": {
+        "general.architecture": "clip",
+        "general.type": "mmproj",
+        "general.sampling.top_k": 20,
+        "general.sampling.top_p": 0.949999988079071,
+        "general.sampling.temp": 1.0,
+        "general.sampling.penalty_repeat": 1.0,
+        "general.name": "TaichuAI/ZDTaichu5.0-9B",
+        "general.size_label": "821M",
+        "general.tags": [
+          "multimodal",
+          "vision-language-model",
+          "spatial-reasoning",
+          "agent",
+          "video-understanding",
+          "image-text-to-text"
+        ],
+        "general.languages": [
+          "en",
+          "zh"
+        ],
+        "clip.projector_type": "nemotron_v2_vl",
+        "general.file_type": 32,
+        "clip.has_vision_encoder": true,
+        "clip.vision.projection_dim": 4096,
+        "clip.vision.image_size": 512,
+        "clip.vision.patch_size": 16,
+        "clip.vision.embedding_length": 1280,
+        "clip.vision.feed_forward_length": 5120,
+        "clip.vision.block_count": 32,
+        "clip.vision.attention.head_count": 16,
+        "clip.vision.image_mean": [
+          0.48500001430511475,
+          0.4560000002384186,
+          0.4059999883174896
+        ],
+        "clip.vision.image_std": [
+          0.2290000021457672,
+          0.2240000069141388,
+          0.22499999403953552
+        ],
+        "clip.vision.attention.layer_norm_epsilon": 9.999999974752427e-07,
+        "clip.use_gelu": true,
+        "clip.vision.projector.scale_factor": 2,
+        "general.quantization_version": 2
+      }
+    },
+    {
+      "file": "models/embeddinggemma-2-GGUF/embeddinggemma-2-F16.gguf",
+      "bytes": 1381933504,
+      "sha256": "02a3e8d7d28993e54edba085031f331cb4f9e39ebea1a32aa8887c666a03419c",
+      "source": "https://modelscope.cn/models/google/embeddinggemma-2",
+      "converted_locally": true,
+      "tensor_types": [
+        "BF16",
+        "F32",
+        "Q8_0"
+      ],
+      "tensor_count": 1376,
+      "tensor_inventory_sha256": "d46eaa04775a474ddb1767f036f6b8759eb4761286c052ace55959a4693c50fe",
+      "metadata": {
+        "general.architecture": "gemma4-embedding",
+        "general.name": "embeddinggemma-2",
+        "general.basename": "embeddinggemma-2",
+        "general.size_label": "embedding",
+        "general.file_type": 1,
+        "general.quantization_version": 2,
+        "general.base_model.0.name": "EmbeddingGemma 2 (multimodal encoder)",
+        "general.base_model.count": 1,
+        "gemma4-embedding.embedding_length": 512,
+        "gemma4-embedding.block_count": 24,
+        "gemma4-embedding.attention.head_count": 4,
+        "gemma4-embedding.vision.embedding_length": 768,
+        "gemma4-embedding.vision.attention.head_count": 12
+      }
+    }
+  ],
+  "text_prompt": "What is 2+2?",
+  "text": {
+    "intern_decision": {
+      "prompt_tokens": 19,
+      "generated_ids": [
+        17,
+        478,
+        220,
+        17,
+        283,
+        2972,
+        19,
+        332
+      ],
+      "logits": [
+        {
+          "relative_l2": 0.029402767260919328,
+          "max_abs": 0.37053632736206055
+        },
+        {
+          "relative_l2": 0.020375315042046482,
+          "max_abs": 0.2881169319152832
+        },
+        {
+          "relative_l2": 0.014269829529758903,
+          "max_abs": 0.288438081741333
+        },
+        {
+          "relative_l2": 0.029536453278225856,
+          "max_abs": 0.2988283634185791
+        },
+        {
+          "relative_l2": 0.017171113113583002,
+          "max_abs": 0.33101940155029297
+        },
+        {
+          "relative_l2": 0.020788454940072202,
+          "max_abs": 0.2953526973724365
+        },
+        {
+          "relative_l2": 0.02343935963379177,
+          "max_abs": 0.28237080574035645
+        },
+        {
+          "relative_l2": 0.02422033711045959,
+          "max_abs": 0.2979716472327709
+        }
+      ],
+      "relative_l2_bound": 0.03,
+      "comparison": "numerical (quantized/approximate operators)"
+    },
+    "physbrain": {
+      "prompt_tokens": 19,
+      "generated_ids": [
+        17,
+        488,
+        220,
+        17,
+        284,
+        220,
+        19,
+        271
+      ],
+      "logits": [
+        {
+          "relative_l2": 0.040462115698063274,
+          "max_abs": 0.6277709007263184
+        },
+        {
+          "relative_l2": 0.04884795762297285,
+          "max_abs": 0.37379980087280273
+        },
+        {
+          "relative_l2": 0.026452114184951785,
+          "max_abs": 0.22527778148651123
+        },
+        {
+          "relative_l2": 0.030334944439761202,
+          "max_abs": 0.28279638290405273
+        },
+        {
+          "relative_l2": 0.035481081538171665,
+          "max_abs": 0.29614853858947754
+        },
+        {
+          "relative_l2": 0.028730064274614452,
+          "max_abs": 0.2905661463737488
+        },
+        {
+          "relative_l2": 0.017206938706378967,
+          "max_abs": 0.23804962635040283
+        },
+        {
+          "relative_l2": 0.02377295689618877,
+          "max_abs": 0.3357725143432617
+        }
+      ],
+      "relative_l2_bound": 0.05,
+      "comparison": "numerical (quantized/approximate operators)"
+    },
+    "zdt": {
+      "prompt_tokens": 19,
+      "generated_ids": [
+        19,
+        248046
+      ],
+      "rust_argmax_ids": [
+        19,
+        248046
+      ],
+      "teacher_forced": false,
+      "logits": [
+        {
+          "relative_l2": 0.011398142372578838,
+          "max_abs": 0.6972465515136719
+        },
+        {
+          "relative_l2": 0.0010232381895708294,
+          "max_abs": 0.14886856079101562
+        }
+      ],
+      "relative_l2_bound": 0.02,
+      "comparison": "numerical (quantized/approximate operators)"
+    },
+    "occamy_default_teacher_forced": {
+      "prompt_tokens": 19,
+      "generated_ids": [
+        17,
+        478,
+        220,
+        17,
+        283,
+        220,
+        19,
+        248046
+      ],
+      "rust_argmax_ids": [
+        17,
+        478,
+        220,
+        17,
+        16327,
+        220,
+        19,
+        248046
+      ],
+      "teacher_forced": true,
+      "logits": [
+        {
+          "relative_l2": 0.08481081826480966,
+          "max_abs": 1.0430083274841309
+        },
+        {
+          "relative_l2": 0.07745718617194278,
+          "max_abs": 1.1168923377990723
+        },
+        {
+          "relative_l2": 0.03895792493960703,
+          "max_abs": 0.931004524230957
+        },
+        {
+          "relative_l2": 0.042577594422437415,
+          "max_abs": 1.0892515182495117
+        },
+        {
+          "relative_l2": 0.049719242481923616,
+          "max_abs": 0.8216700553894043
+        },
+        {
+          "relative_l2": 0.07071220726990583,
+          "max_abs": 1.0669770240783691
+        },
+        {
+          "relative_l2": 0.06171022693140365,
+          "max_abs": 1.1731815934181213
+        },
+        {
+          "relative_l2": 0.05796181102384276,
+          "max_abs": 0.9382128715515137
+        }
+      ],
+      "relative_l2_bound": 0.1,
+      "comparison": "numerical (quantized/approximate operators)"
+    },
+    "occamy_scalar": {
+      "prompt_tokens": 19,
+      "generated_ids": [
+        17,
+        478,
+        220,
+        17,
+        16327,
+        2972,
+        19,
+        159034
+      ],
+      "rust_argmax_ids": [
+        17,
+        478,
+        220,
+        17,
+        16327,
+        2972,
+        19,
+        159034
+      ],
+      "teacher_forced": false,
+      "logits": [
+        {
+          "relative_l2": 0.06509029508613044,
+          "max_abs": 0.8608551025390625
+        },
+        {
+          "relative_l2": 0.051364631254864415,
+          "max_abs": 0.9588101208209991
+        },
+        {
+          "relative_l2": 0.033007132941340216,
+          "max_abs": 0.716871976852417
+        },
+        {
+          "relative_l2": 0.028072228085525116,
+          "max_abs": 0.7722797393798828
+        },
+        {
+          "relative_l2": 0.042339281793424166,
+          "max_abs": 0.8000900745391846
+        },
+        {
+          "relative_l2": 0.07014966912730798,
+          "max_abs": 1.0212945938110352
+        },
+        {
+          "relative_l2": 0.08385563792423105,
+          "max_abs": 2.1787166595458984
+        },
+        {
+          "relative_l2": 0.030088769214343256,
+          "max_abs": 0.5456695556640625
+        }
+      ],
+      "relative_l2_bound": 0.1,
+      "comparison": "numerical (quantized/approximate operators)"
+    }
+  },
+  "vision": {
+    "input": "512x512 already normalized debug RGB [0,0,1]",
+    "intern_decision": {
+      "relative_l2": 0.00773721,
+      "reference": "identical F16 weights widened exactly to F32; F32 activations; actual qwen35 vision encoder",
+      "bound": 0.01,
+      "original_f16_execution_relative_l2": 0.05106330883085485
+    },
+    "physbrain": {
+      "relative_l2": 0.0046002,
+      "deepstack_outputs": 3,
+      "reference": "identical F16 weights widened exactly to F32; F32 activations",
+      "bound": 0.01
+    },
+    "zdt": {
+      "relative_l2_f32": 0.00035072,
+      "bound_f32": 0.001,
+      "relative_l2_bf16": 0.00493116,
+      "bound_bf16": 0.01
+    },
+    "occamy": {
+      "relative_l2": 0.00336136,
+      "reference": "identical F16 weights widened exactly to F32; F32 activations; actual qwen35 vision encoder",
+      "bound": 0.01,
+      "original_f16_execution_relative_l2": 0.02676313645137835
+    }
+  },
+  "embeddinggemma": {
+    "tower_relative_l2": {
+      "vision": 1.18e-05,
+      "audio": 2.2e-06
+    },
+    "tower_bound": 0.0001,
+    "final_embedding_relative_l2": {
+      "vision": 0.00799082,
+      "audio": 0.0152692
+    },
+    "embedding_bound": 0.02,
+    "dimensions": 768,
+    "fixture_sha256": {
+      "tests/oracle/embeddinggemma2_embed.json": "3b8be1f206b5bdfa73de4ba88a4d47d30464a21cfe09d48c30d43f700f1f0891",
+      "tests/oracle/embeddinggemma2_fox.json": "c11cda052a3baed370f074f8677ebd8b62ed26982eff02ec3db540b4f179f020",
+      "tests/oracle/embeddinggemma2_hello.json": "9c714c928685d3153e17d06b779b6a3a711790323d335fd49c445e33f37465a6",
+      "tests/oracle/embeddinggemma2_long.json": "b04d1100849426a818e2673d5e318a14fbf3a1e298deba932be2b705bf7430e8",
+      "tests/oracle/embeddinggemma2_multimodal.json": "d1b66f1cc8bd3190c261434596438fed71ed9d734d9d17d6f9b87fc8a80f8d16",
+      "tests/oracle/embeddinggemma2_sliding.json": "a87474e7bd7465a982d0b564d1e3da2b1bba2d5bcf5fcfca8f7f108e06e739b3"
+    },
+    "text_case_count": 5,
+    "text_cosine_lower_bound": 0.999,
+    "text_relative_l2_bound": 0.03,
+    "sliding_fixture_tokens": 552,
+    "sliding_cosine": 0.999801,
+    "sliding_relative_l2": 0.020072283512639986
+  },
+  "limitations": [
+    "Occamy default SIMD reference and Rust choose different greedy token at step 4; reference top-two margin 0.0093708. Teacher-forced logits compare identical histories.",
+    "Original F16 execution has vision relative L2 0.05106331 / 0.02676314 / about 0.0442 for Intern / Occamy / PhysBrain; primary vision comparison uses the exact same weight values with F32 activations.",
+    "Qwen3-VL F32 weight caches increase memory and may affect throughput; no performance benchmark.",
+    "PhysBrain CLI requires --kv-cache f16; robot action decoding/execution is outside the generic inference path.",
+    "No Intern-Decision-4B real weights, GPU numerical alignment or full-suite pass claimed."
+  ],
+  "baseline_failures": [
+    "qwen35_config_rejects_invalid_tensor_dimensions"
+  ],
+  "regressions": {
+    "qwen35_neon_layer_norm": {
+      "cause": "Loaded four F32 lanes but advanced by eight, skipping half of each row. The existing grouped-variance check is restored by correcting the stride.",
+      "before_input_relative_l2": 0.00046011892845854163,
+      "before_first_query_relative_l2": 0.468722939491272,
+      "checks": [
+        "layer_norm_stats_include_every_simd_lane_and_tail",
+        "layer_norm_stats_match_ggml_grouped_f32_variance"
+      ]
+    }
+  },
+  "checks": {
+    "contracts": {
+      "embeddinggemma": 16,
+      "intern_decision_0_8b": 10,
+      "physbrain": 12
+    },
+    "exact_tokenizer_models": 4,
+    "actual_cli_vision_oracles": 3,
+    "zdt_projection_oracle": 1,
+    "qwen35_unit_passed": 75,
+    "qwen35_unit_ignored": 5,
+    "qwen35_baseline_excluded": 1,
+    "related_unit_passed": 21,
+    "python_self_checks": 4,
+    "vulkan_library_and_cli_compile": "passed",
+    "rustfmt": "passed",
+    "diff_whitespace": "passed"
+  }
+}

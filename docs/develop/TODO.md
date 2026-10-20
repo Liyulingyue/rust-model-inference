@@ -457,34 +457,10 @@ ggml-org/llama.cpp 的一部分**——它们是 `microsoft/BitNet` 私有 fork 
 - [ ] 更多量化格式支持（Q4_K, Q5_K 等）
 - [ ] 完善 GGUfRS 导出功能
 - [ ] GGUF 导出支持
-- [x] **EmbeddingGemma2 text forward numerical parity**——Oracle test (`tests/embeddinggemma_2_text_oracle.rs`) 对比 HF `transformers` 5.19 参考实现，4 个文本（hello/fox/embed/long）**cosine sim = 0.999972 / 0.999722 / 0.999965 / 0.999943，全部 ≥ 0.99**。关键 bug 链：
-    1. **Q8_0 scale 格式**：ggml 写 fp16、读 fp16（之前误用 bf16 << 16，导致 14 个数量级偏差）
-    2. **Q8_0 块 stride**：GGUF 块按 PyTorch `[n_out, n_in]` 排布，每行 `n_in/32` 个块（之前误用 `n_out/32`）
-    3. **BF16 dequant 不转置**：所有 Linear weight 的 raw bytes 都是 PyTorch `[n_out, n_in]` flat（不需 `[n_in, n_out] → [n_out, n_in]` 转置）
-    4. **RMSNorm per-token**：每次只能 norm 一个 token；`rms_norm_inplace` 用 `min(x.len(), weight.len())`，所以对 `x[n_tokens * n_embd]` 调用时只有前 n_embd 元素被 norm（之前是 bug root cause）
-    5. **`attn_q.forward()` 漏调用**：之前 layer 0 attn_q 全零，修改无依据
-    6. **`EmbeddingGemma2Attention.scaling = 1.0`**：per llama.cpp `gemma4.cpp` `hparams.f_attention_scale = 1.0f`，不需要 `1 / sqrt(head_dim)`
-    7. **`text_embproj.weight` 加载时手写转置到错误形状**：HF nn.Linear(512, 768).weight = `[768, 512]` = `[out, in]`，但代码转置成 `[n_embd, EMBEDDING_DIM] = [512, 768]` 并传给 `Linear{matrix, n_in=512, n_out=768}`，matrix 排列与 Linear.forward 访问模式 `[o * n_in + ...]` 错位。修复：直接当 PyTorch layout 解码，无转置。
-
-- [x] **EmbeddingGemma2 audio forward math sanity**——text/vision/audio 三个 forward 路径都已实现（`src/models/embeddinggemma2/{text,vision,audio}.rs`），契约测试 15/15 通过，e2e smoke（text 14s + vision 10s + audio 77s/run dev 模式）输出形状正确且 **36864/36864 finite**。修复了 5 处 bug：
-    1. **DFT in-place corruption**：原代码 `let mut real = fft_real.clone(); ... real[k] = sum_r; ... sum_r += real[t]` —— 在 `real[k]` 已被覆写后 `t=k` 索引读到的是上一步的输出而非输入，导致 power 谱全 inf。改为独立的 `real_out`/`imag_out` 缓冲。
-    2. **power spectrum 错误**：原 `power[k] = sqrt(real² + imag²)` 应为 `real² + imag²`（能量谱不是幅度谱）。前者把能量值压回 1e-7 量级被 log 压成 -12 之类，后者保留能量让 conformer 输入分布正常。
-    3. **conv_norm 类型错误**：GGUF 中的 `lconv1d.conv_norm.weight` 是 per-channel affine (`y = x * w + b`)，不是 RMSNorm。llama.cpp `references/llama.cpp/tools/mtmd/models/conformer.cpp:180` 明确写 `x = ggml_add(ctx0, ggml_mul(ctx0, x, layer.conv_norm_w), layer.conv_norm_b)`。
-    4. **FFN 激活错误**：原 `silu(x) * x`（swish）应为 `silu(x)`。llama.cpp `references/llama.cpp/src/llama-graph.cpp` 的 `case LLM_FFN_SILU` 在没有 gate 的分支走 `cur = ggml_silu(ctx0, cur)`。GEMMA4 audio conformer 不是 SwiGLU。
-    5. **FFN post_layer_norm 多余**：原代码在 FFN 之后再做 rms_norm，但 llama.cpp 参考实现没有此步。GGUF 中的 `ff{1,2}.post_layer_norm.weight` 实际是其他用途（多半对应 `norm_post_attn` 或 `norm_out`），不当 FFN 输出归一化用。
-    - **剩余 TODO（不影响模型工作，纯精度对齐，可降级处理）**：
-        1. **`audio.rs::log_mel_features` 跟 HF `Gemma4AudioFeatureExtractor` 不完全一致**：
-           - mel_floor：HF=0.001（默认） vs Rust=5.96e-8 — 改一行常量即可
-           - mel filterbank：HF 用 Slaney 三角 bins + Slaney area normalization（`2/(f_hi - f_lo)`），Rust 已经用 Slaney 公式构造 hz_pts，但 hz→bin 量化是 floor + linear interp，跟 librosa 的 fractional assignment 不同
-           - power spectrum 实现：HF 用 slaney librosa 标准 STFT，Rust 用朴素 O(n²) DFT（功能正确但慢且相位可能跟 librosa FFT 不同）
-           - per_bin_mean / per_bin_stddev：HF 在特征提取后做了 (x - mean) / std，Rust 没做
-           触发条件：用户跑 audio embedding Oracle 失败或语义检索 AUC < 阈值时开工
-        2. **`vision.rs::encode` 接受 raw [0, 1] 输入（跟 llama.cpp `clip.cpp::build_inp` 一致），HF `Gemma4ImageProcessor` 走 normalize `(x - 0.5)/0.5`** — 两条路径结果数值不同但跟各自参考实现一致。如果要做 vision HF Oracle，需要先在 Rust 端补 normalize（或 HF 端跳过 normalize）。
-        3. **end-to-end audio/vision Oracle：跟 `transformers` 5.19 的 sentence-transformers 输出逐位对齐**（vs embeddinggemma-1 那条没有跨模型比对就只标 Verified 一样）。
-        4. **Pre-existing failed lib tests 跟本次修改无关**（`gemma4::trunk::softcap_matches_pinned_reciprocal_scale_bits` 等 18 个，1 ULP / pre-existing f32 tanh 等），clippy 12 errors 也是 pre-existing。全部等维护者启动时再统一清理。
-    - **vision / text / audio 都通过 finite + 不同输入产生不同输出验证（38s/run avg），audio 36864/36864 finite**
-    - **text 4 个文本 cos_sim ≥ 0.9997**（vs HF `transformers` 5.19 reference, 8/12/10/~50 token）— 精度已对齐
-    触发条件：用户要 embedding 任务（语义检索 / rerank / 多模态 RAG）且 embeddinggemma-1（纯文本 300M）不够用时开工。
+- [x] **PR #169 五组模型适配与真实权重数值对齐**：EmbeddingGemma-2 补齐文本/图像/音频到 768 维 embedding；Intern-Decision-0.8B、PhysBrain1.5-2B 修正转换精度、token 类型和 RoPE；Occamy 复用既有 qwen35moe；修复实际 Qwen3.5 视觉入口 NEON LayerNorm 漏算半行的问题；ZDT 修复 register 前缀搬移、Q 读取及 FFN 残差归一化。真实 CLI、模型契约、固定 llama.cpp/HF Oracle 的完整输出对照见 [复现记录](../../tools/oracle/pr169/README.md) 和 [哈希/指标](../../tools/oracle/pr169/verification.json)。
+    - 无损载荷/layout/token IDs 使用精确检查；量化、低精度舍入、近似激活使用明确数值误差界限，不再把音频逐位相同作为本次验收要求。
+    - Occamy 标量参考 8 步 greedy 一致；默认近似路径在候选分数接近时有措辞分叉，已用相同 token 历史验证完整 logits 并保留差异。
+    - 未覆盖：Intern-Decision-4B 真实权重、GPU 数值对齐、真实机器人动作执行和性能基准。Qwen3-VL 保留 F32 权重缓存，内存和耗时需另行测量。
 - [ ] **RLCD constrained-decoding 调度器**（harshatheg/Qwen-2.5-1B-RLCD 的 value-token 切片路径）。
       **不做**：权重（复用 `Qwen2.5-1.5B-Instruct-Q4_K_M.gguf`，已 Verified）。
       **不做**：转换器（`tools/converter/rlcd/` 不存在意义——RLCD 没有 LoRA/分类头/微调 checkpoint，

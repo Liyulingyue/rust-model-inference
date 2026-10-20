@@ -16,12 +16,12 @@ use rust_model_inference::TensorInfo;
 
 fn text_loader() -> Option<GGUFLoader> {
     let path = std::env::var_os("RMI_INTERN_DECISION_0_8B_TEXT")?;
-    GGUFLoader::from_file(path).ok()
+    Some(GGUFLoader::from_file(path).expect("load Intern-Decision text GGUF"))
 }
 
 fn mmproj_loader() -> Option<GGUFLoader> {
     let path = std::env::var_os("RMI_INTERN_DECISION_0_8B_MMPROJ")?;
-    GGUFLoader::from_file(path).ok()
+    Some(GGUFLoader::from_file(path).expect("load Intern-Decision mmproj"))
 }
 
 fn pick(loader: &GGUFLoader, key: &str) -> usize {
@@ -106,6 +106,12 @@ fn text_hybrid_layer_dispatch_full_vs_linear() {
     // Linear-attention (SSM) layers must carry ssm_* tensors and lack
     // attn_{q,k,v,output}.
     for i in [0usize, 1, 2, 4, 5, 6] {
+        assert_eq!(
+            shape(&loader, &format!("blk.{i}.ssm_conv1d.weight"))
+                .unwrap()
+                .dims,
+            [4, 6144]
+        );
         for name in [
             "attn_qkv",
             "attn_gate",
@@ -247,16 +253,21 @@ fn mmproj_conv3d_split_and_merger_shape() {
     };
     let w0 = shape(&loader, "v.patch_embd.weight").expect("v.patch_embd.weight");
     let w1 = shape(&loader, "v.patch_embd.weight.1").expect("v.patch_embd.weight.1");
+    assert_eq!(w0.ggml_type, rust_model_inference::GGMLType::F16);
+    assert_eq!(w1.ggml_type, rust_model_inference::GGMLType::F16);
     // Intern-Decision vision out_channels=768 (vs 1024 for PhysBrain).
     assert_eq!(w0.dims, vec![16, 16, 3, 768]);
     assert_eq!(w1.dims, vec![16, 16, 3, 768]);
     let mm0 = shape(&loader, "mm.0.weight").expect("mm.0.weight");
     let mm2 = shape(&loader, "mm.2.weight").expect("mm.2.weight");
+    assert_eq!(mm0.ggml_type, rust_model_inference::GGMLType::F16);
+    assert_eq!(mm2.ggml_type, rust_model_inference::GGMLType::F16);
     // mm.0: [merged_embd, merged_embd] = [n_embd*merge^2, n_embd*merge^2] = [3072, 3072]
     // mm.2: [merged_embd, projection_dim] = [3072, 1024]
     assert_eq!(mm0.dims, vec![3072, 3072]);
     assert_eq!(mm2.dims, vec![3072, 1024]);
     let post_ln = shape(&loader, "v.post_ln.weight").expect("v.post_ln.weight");
+    assert_eq!(post_ln.ggml_type, rust_model_inference::GGMLType::F32);
     // post_ln operates per-token on n_embd=768.
     assert_eq!(post_ln.dims, vec![768]);
 }

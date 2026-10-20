@@ -32,6 +32,10 @@ fn audio_forward_returns_correct_shape_finite_values() {
     let pcm_440: Vec<i16> = (0..sample_count)
         .map(|i| ((i as f32 * 2.0 * std::f32::consts::PI * 440.0 / 16000.0).sin() * 16000.0) as i16)
         .collect();
+    let tower = model
+        .encode_tower(&pcm_440)
+        .expect("audio tower encode 440Hz");
+    assert_eq!(tower.len(), 25 * cfg.projection_dim);
     let tokens = model.encode(&pcm_440).expect("audio encode 440Hz");
     // Different signal — 1000 Hz sine, should produce different embeddings.
     let pcm_1000: Vec<i16> = (0..sample_count)
@@ -50,10 +54,12 @@ fn audio_forward_returns_correct_shape_finite_values() {
         diff > 0.0,
         "two different signals produced identical embeddings (diff={diff})"
     );
-    // Without center padding: n_frames = (16000 - 400) / 160 = 97 hops + offset 0 = 98 frames.
-    // n_hidden = n_frames / 4 = 24 (integer division).
-    let n_frames = 98 / 4;
-    assert_eq!(tokens.len(), n_frames * cfg.projection_dim);
+    // Gemma4 uses 99 mel frames after 160-sample semicausal padding and two
+    // stride-2 convolutions, yielding ceil(ceil(99/2)/2) = 25 frames. The
+    // tower is 1536-wide; the public multimodal projector returns text-width
+    // (512) soft tokens.
+    let n_frames = 25;
+    assert_eq!(tokens.len(), n_frames * 512);
     // Verify all outputs are finite.
     let n_finite = tokens.iter().filter(|x| x.is_finite()).count();
     assert_eq!(n_finite, tokens.len(), "non-finite values in audio output");

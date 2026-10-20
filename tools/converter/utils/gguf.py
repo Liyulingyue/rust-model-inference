@@ -370,6 +370,22 @@ def _gguf_meta_value(value) -> bytes:
     raise TypeError(f"unsupported metadata value: {value!r}")
 
 
+def model_metadata_value(value):
+    """Use llama.cpp's model metadata types, preserving explicitly typed values."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return MetaScalar(_T_UINT32 if value >= 0 else _T_INT32, value)
+    if isinstance(value, float):
+        return MetaScalar(_T_FLOAT32, value)
+    if isinstance(value, list) and value:
+        if all(type(item) is int for item in value):
+            return MetaArray(_T_INT32, tuple(value))
+        if all(type(item) is float for item in value):
+            return MetaArray(_T_FLOAT32, tuple(value))
+    return value
+
+
 def _gguf_array(values: list) -> bytes:
     if all(isinstance(value, str) for value in values):
         payload = b"".join(_gguf_str(value) for value in values)
