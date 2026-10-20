@@ -8999,4 +8999,106 @@ mod tests {
             }
         }
     }
+
+    /// Times the decode-shaped Q8_0 matmul: one token against the weight
+    /// matrices of a Qwen3-8B layer, with the effective streaming bandwidth
+    /// that implies. Decode reads the whole weight set once per token, so
+    /// this is the number that decides whether the Vulkan decoder can beat
+    /// the CPU; the DiT is bandwidth-bound on much larger matrices.
+    #[test]
+    #[ignore = "requires a Vulkan device; timing harness, not a correctness gate"]
+    fn qwen3_decode_gemv_bandwidth() {
+        use super::*;
+        use std::time::Instant;
+        const ROWS: usize = 1;
+        const REPS: usize = 10;
+        const STREAMS: usize = 3;
+        let context = VulkanContext::new().unwrap();
+        for (label, n_in, n_out) in [
+            ("qkv", 4096, 4096 + 1024 + 1024),
+            ("o_proj", 4096, 4096),
+            ("ffn_gate_up", 4096, 2 * 12288),
+            ("ffn_down", 12288, 4096),
+            ("lm_head", 4096, 151936),
+        ] {
+            let mut cursor = 0;
+            let input = f32_region(&mut cursor, ROWS * n_in).unwrap();
+            let q8 = region(&mut cursor, ROWS * n_in).unwrap();
+            let scales = f32_region(&mut cursor, ROWS * n_in / 32).unwrap();
+            let sums = f32_region(&mut cursor, ROWS * n_in / 32).unwrap();
+            let output = f32_region(&mut cursor, ROWS * n_out).unwrap();
+            let mut ops = Qwen3Ops::new_with_size(&context, cursor, STREAMS).unwrap();
+            let mut buffers = Vec::new();
+            for stream in 0..STREAMS {
+                let mut weight = synthetic_weight(GpuWeightFormat::Q8_0, n_in, n_out);
+                for (index, byte) in weight.iter_mut().enumerate() {
+                    if index % 512 == stream % 512 {
+                        *byte = byte.wrapping_add(stream as u8);
+                    }
+                }
+                let upload_start = Instant::now();
+                buffers.push(unsafe { context.upload_static(&weight) }.unwrap());
+                if stream == 0 {
+                    eprintln!(
+                        "[gemv] {:12} upload {:7.2} MB in {:7.2} ms ({:6.2} GB/s host->device)",
+                        label,
+                        weight.len() as f64 / 1e6,
+                        upload_start.elapsed().as_secs_f64() * 1e3,
+                        weight.len() as f64 / upload_start.elapsed().as_secs_f64() / 1e9,
+                    );
+                }
+            }
+            let formats = [GpuWeightFormat::Q8_0; STREAMS];
+            let bindings = ops.bind_weight_buffers(&buffers, &formats).unwrap();
+            ops.write_f32(
+                input,
+                &(0..ROWS * n_in)
+                    .map(|index| ((index * 7 % 251) as f32 - 125.0) / 97.0)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+            let (matmul_push, _) = matmul_rows_push(
+                cursor,
+                &context.limits,
+                bindings,
+                q8,
+                scales,
+                Some(sums),
+                &[(output, n_out, n_out * 4)],
+                n_in,
+                ROWS,
+                n_in,
+            )
+            .unwrap();
+            let dispatch = row_dispatch(n_out.div_ceil(64), 1, &context.limits).unwrap();
+            let bytes = n_in * n_out * 34 / 32;
+            let time = |pipeline: usize| {
+                let mut best = f64::MAX;
+                for _ in 0..3 {
+                    let start = Instant::now();
+                    for _ in 0..REPS {
+                        let commands = TokenCommands::begin(&context).unwrap();
+                        ops.record_linear_dispatch(&commands, pipeline, bindings, &matmul_push, dispatch);
+                        commands.submit_and_wait().unwrap();
+                    }
+                    best = best.min(start.elapsed().as_secs_f64() / REPS as f64);
+                }
+                best
+            };
+            let grouped = time(Q8_MATMUL_GROUPED);
+            let wide = time(Q8_MATMUL_GROUPED_TILED_WIDE);
+            eprintln!(
+                "[gemv] {:12} {:7.2} MB  grouped {:7.2} ms ({:6.1} GB/s)  wide {:7.2} ms ({:6.1} GB/s)",
+                label,
+                bytes as f64 / 1e6,
+                grouped * 1e3,
+                bytes as f64 / grouped / 1e9,
+                wide * 1e3,
+                bytes as f64 / wide / 1e9,
+            );
+            for buffer in buffers {
+                unsafe { context.destroy_completed_buffers(&[buffer]) }.unwrap();
+            }
+        }
+    }
 }
