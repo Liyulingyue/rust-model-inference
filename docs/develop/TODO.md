@@ -2561,14 +2561,31 @@ GPU 模式才 yield），而 `compute()` 的收尾是「自旋等 `n_complete ==
 在 20 核机器上再叠一个别的租户进程占着核，参与者一多，barrier 就开始等调度器，
 一个 token 被放大到 0.4 s。
 
-要查/要改的：
+**已修**（`src/core/thread_pool.rs`）：等待循环与空闲 worker 都不再硬自旋。
 
-1. `compute()` 的等待循环（`thread_pool.rs:224`、`255`、`280`）在参与数接近核数时
-   应该 `yield_now()` 而不是 `spin_loop()`，或者干脆把 worker 数设成
-   `min(requested, nproc - 1)`。
-2. 空闲 worker 的 `spin_loop()` 在有其他进程抢核时是净损失；改成有界自旋后
-   `yield_now()`。
-3. 回归测试：一个「线程数等于核数时不低于核数减一」的基准，写进 `tests/`。
+1. 新增 `wait_while`：先自旋 `WAIT_SPINS` 次（覆盖一次 hand-off 的微秒级窗口），
+   之后改成 `yield_now()`。原来的 `spin_loop()` 无限自旋会让每个参与者一直处于
+   runnable 状态。
+2. 空闲 worker 同样改成「有界自旋 + `yield_now()`」。这条更关键：
+   `compute_with_chunks` 每次调用都新起 `n_threads - 1` 个线程，20 线程时进程里
+   同时有 42 个线程挤在 20 核上，而常驻 worker 的热自旋正好在抢这些线程要用的核。
+3. `cargo test --lib core::thread_pool` 的两个用例覆盖了 Drop 与 chunk 语义
+   （`single_thread_pool_drops_without_spinning`、`chunks_begin_at_zero_and_execute_exactly_once`）。
+
+修完的效果（Qwen3-0.6B Q8_0，`--threads 20`，同会话交替）：
+
+| | generation t/s |
+|---|---|
+| 修复前 | 2.5 / 2.4 / 2.9 |
+| 修复后 | 65.1 / 53.8 / 41.4 |
+
+**20×**。顺带：`--threads 8` 的 CPU 生成从 41–56 t/s 到 83 t/s，
+Z-Image 的 **CPU** 路径 denoise 从 139.7 s 降到 126.4 s（−9.5%），GPU 路径不变
+（block profile 20.0 s vs 19.5 s，输出逐字节相同）。
+
+没做的：把 worker 数夹到 `min(requested, nproc - 1)`。修完等待逻辑后
+`--threads 20` 已经不再塌，这条就没有必要了——但默认线程数仍是 8，
+因为 12–20 线程在 0.6B 上没有稳定收益。
 
 顺带记一条同源结论：**Qwen3 的 GPU 常驻解码在这台机器上全面输给 CPU**
 （0.6B：CPU 67–97 t/s vs GPU 26 t/s；8B：CPU 12.6–13.5 t/s vs GPU 5.1 t/s），
