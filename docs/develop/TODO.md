@@ -2510,3 +2510,31 @@ HOST→COMPUTE barrier 时能否看见写入只取决于速度；旧 kernel 每�
 1e-4 相对）就够了，补偿项可以砍掉一半。
 
 复现数据与完整推导见 `docs/develop/ZIMAGE_OPTIMIZATION.md`。
+
+### TODO-036: Qwen3-4B Q8_0 过不了 model contract，而 0.6B 与 8B 能过
+
+`test-unified3`（unified-compute）上用 `--gpu --kv-cache f16` 跑 Qwen3 的三个
+Q8_0 尺寸，model contract（`src/models/qwen3/trunk/session.rs`，
+abs 2e-3 + rel 2e-3）的结果**按尺寸分裂**：
+
+| 模型 | contract | 实测（Generation t/s，同会话） |
+|---|---|---|
+| Qwen3-0.6B Q8_0 | 通过 | 25.6 / 25.7 / 26.6 |
+| Qwen3-4B Q8_0 | **失败**：`model logit mismatch at 0: gpu=9.235686 cpu=9.315228 rel=0.008538938` | 走 CPU，10.6 / 11.6 t/s |
+| Qwen3-8B Q8_0 | 通过 | 4.7 / 5.0 / 5.1 / 5.3 / 5.5 |
+
+4B 的相对偏差 8.5e-3 是容差的 4.3 倍，于是整条 GPU 路径被拒并回退 CPU。
+**同一个模型家族、同一种量化，只换尺寸就翻脸**，说明这不是「Q8 路径整体不精确」，
+而是某个尺寸触发了特定形状的偏差（4B 的 hidden 2560 / 36 层与 8B 的 4096 / 36 层
+在 n_in 上不整除某些 chunk 边界，是第一个该查的方向）。
+
+补充两点，避免重复劳动：
+
+- 这个失败**与 push constant 特化无关**：修复前后的 contract 数值逐位相同
+  （gpu=9.235686 cpu=9.315228），greedy 输出也逐字相同。
+- `main` 没有这道 contract 门，4B 直接跑 GPU，但只有 1.4 t/s generation，
+  比 CPU 回退的 10.6 t/s 慢 7 倍——**门是合理的**，问题在于 4B 的 GPU 数值
+  偏差太大而不是 GPU 太慢。
+
+同时记录：unified 分支的 decoder 路径比 `main` 快 6 倍以上
+（8B Q8_0 generation 5.1 t/s vs 0.8 t/s），这是该分支的目标，回归要盯住这条线。
