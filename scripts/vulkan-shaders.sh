@@ -26,6 +26,7 @@ shader_names=(
     attention_scores
     softmax
     attention_values
+    attention_values_f32
     qwen35_dense_prepare
     qwen35_attention
     qwen35_recurrent_conv
@@ -35,6 +36,7 @@ shader_names=(
     adaln_modulate
     q8_matmul_tiled_dp4a
     q8_matmul_tiled_dp4a_wide
+    q8_matmul_tiled_dp4a_wide_add
     f16_matmul_tiled
     attention_scores_tiled
 )

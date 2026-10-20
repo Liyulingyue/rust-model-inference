@@ -24,6 +24,12 @@ const Q8_MATMUL_COOPERATIVE_SHADER: &[u8] =
 /// bound prevents some ARM drivers from unrolling the wide-token loop.
 const Q8_MATMUL_GROUPED_TILED_WIDE_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/q8_matmul_tiled_dp4a_wide.spv");
+/// Unfused twin of the wide kernel, for hosts whose CPU reduction does not
+/// contract. Both are the same code with the accumulate folded to a single
+/// operation, because testing `reduction_mode` costs about 40% of the kernel
+/// on GB10 and the mode is known on the host.
+const Q8_MATMUL_GROUPED_TILED_WIDE_ADD_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/q8_matmul_tiled_dp4a_wide_add.spv");
 const F16_MATMUL_TILED_SHADER: &[u8] = include_bytes!("../../shaders/bin/f16_matmul_tiled.spv");
 
 const ATTENTION_SCORES_TILED_SHADER: &[u8] =
@@ -45,6 +51,11 @@ const KV_WRITE_SHADER: &[u8] = include_bytes!("../../shaders/bin/kv_write.spv");
 const ATTENTION_SCORES_SHADER: &[u8] = include_bytes!("../../shaders/bin/attention_scores.spv");
 const SOFTMAX_SHADER: &[u8] = include_bytes!("../../shaders/bin/softmax.spv");
 const ATTENTION_VALUES_SHADER: &[u8] = include_bytes!("../../shaders/bin/attention_values.spv");
+/// Reduction mode 0 only. `attention_values.comp` also serves the decoder
+/// reductions that stream into 8, 16 or 32 accumulators, and mode 0 would pay
+/// for that array on every output element.
+const ATTENTION_VALUES_F32_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/attention_values_f32.spv");
 const SILU_MUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/silu_mul.spv");
 const ADD_SHADER: &[u8] = include_bytes!("../../shaders/bin/add.spv");
 const QWEN35_DENSE_PREPARE_SHADER: &[u8] =
@@ -88,6 +99,8 @@ const ATTENTION_SCORES_TILED: usize = 26;
 const MLX_AFFINE_MATMUL: usize = 27;
 const Q8_MATMUL_COOPERATIVE: usize = 28;
 const Q8_MATMUL_GROUPED_TILED_WIDE: usize = 30;
+const Q8_MATMUL_GROUPED_TILED_WIDE_ADD: usize = 31;
+const ATTENTION_VALUES_F32: usize = 32;
 
 pub(crate) fn tiled_matmul_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -175,6 +188,8 @@ const OPERATOR_SHADER_NAMES: [&str; OPERATOR_SHADERS.len()] = [
     "q8_matmul_cooperative",
     "qk_norm_rope_interleaved",
     "q8_matmul_tiled_dp4a_wide",
+    "q8_matmul_tiled_dp4a_wide_add",
+    "attention_values_f32",
 ];
 
 /// True when the ordered dispatch log is being collected.
@@ -262,7 +277,7 @@ pub fn dump_dispatch_trace() {
     }
 }
 
-const OPERATOR_SHADERS: [&[u8]; 31] = [
+const OPERATOR_SHADERS: [&[u8]; 33] = [
     QUANTIZE_Q8_0_SHADER,
     QUANTIZE_Q8_K_SHADER,
     Q8_MATMUL_GROUPED_SHADER,
@@ -294,6 +309,8 @@ const OPERATOR_SHADERS: [&[u8]; 31] = [
     Q8_MATMUL_COOPERATIVE_SHADER,
     QK_NORM_ROPE_INTERLEAVED_SHADER,
     Q8_MATMUL_GROUPED_TILED_WIDE_SHADER,
+    Q8_MATMUL_GROUPED_TILED_WIDE_ADD_SHADER,
+    ATTENTION_VALUES_F32_SHADER,
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1424,7 +1441,10 @@ impl<'a> Qwen3Ops<'a> {
                     Q8_MATMUL_GROUPED_DP4A_SHADER
                 } else if matches!(
                     index,
-                    Q8_MATMUL_GROUPED_TILED | Q8_MATMUL_COOPERATIVE | Q8_MATMUL_GROUPED_TILED_WIDE
+                    Q8_MATMUL_GROUPED_TILED
+                        | Q8_MATMUL_COOPERATIVE
+                        | Q8_MATMUL_GROUPED_TILED_WIDE
+                        | Q8_MATMUL_GROUPED_TILED_WIDE_ADD
                 ) && !q8_tiled
                 {
                     // The tiled kernel needs `dotPacked4x8EXT`, so on a device
@@ -2218,10 +2238,13 @@ impl<'a> Qwen3Ops<'a> {
         );
         // Keep the 32-token ARM/scalar path statically bounded. AVX2 uses the
         // generic shader because it needs its four-token reduction layout.
-        let tiled_pipeline = if push[14] == 8 {
-            Q8_MATMUL_GROUPED_TILED
-        } else {
-            Q8_MATMUL_GROUPED_TILED_WIDE
+        // The two wide shaders differ only in how the partial dot is
+        // accumulated, and `q8_dot_mode()` already decided that on the host,
+        // so neither one tests `reduction_mode` inside the token loop.
+        let tiled_pipeline = match q8_dot_mode() {
+            8 => Q8_MATMUL_GROUPED_TILED,
+            0 => Q8_MATMUL_GROUPED_TILED_WIDE_ADD,
+            _ => Q8_MATMUL_GROUPED_TILED_WIDE,
         };
         self.record_linear_dispatch(commands, tiled_pipeline, bindings, &push, dispatch);
         Ok(())
@@ -2946,10 +2969,18 @@ impl<'a> Qwen3Ops<'a> {
                 mode.reduction(256)
             },
         ];
+        // Mode 0 is a plain compensated F32 sum. The other modes stream into
+        // 8, 16 or 32 accumulators, and reading that kernel for a mode that
+        // never touches the array costs the DiT about 15% of its attention.
+        let values_pipeline = if push[12] == 0 {
+            ATTENTION_VALUES_F32
+        } else {
+            ATTENTION_VALUES
+        };
         let [x, y, z] = row_dispatch(output_count.div_ceil(64), rows, &self.context.limits)?;
         unsafe {
             commands.bind(
-                self.pipelines[ATTENTION_VALUES],
+                self.pipelines[values_pipeline],
                 self.context.pipeline_layout,
                 &[self.arena_bindings.descriptor_set],
                 bytemuck::cast_slice(&push),
@@ -8865,6 +8896,107 @@ mod tests {
         crate::ops::silu_mul_approx_inplace(&gate, &mut expected);
         for (&gpu, cpu) in ops.read_f32(layout.down, 32).unwrap().iter().zip(expected) {
             assert!((gpu - cpu).abs() < 1e-6);
+        }
+    }
+
+    /// Times the kernels the Z-Image DiT runs per projection, quantize and the
+    /// tiled Q8_0 matmul, at the real 256x256 token count. The weight buffers
+    /// are cycled so one matrix cannot sit in L2 between iterations; three is
+    /// all `bind_weight_buffers` takes, and at these shapes a single matrix is
+    /// already 1.3 GB. Print, do not assert: this is the attribution harness
+    /// for kernel selection changes, and a whole-image A/B cannot resolve a few
+    /// percent against the ~1 s run-to-run spread.
+    #[test]
+    #[ignore = "requires a Vulkan device; timing harness, not a correctness gate"]
+    fn zimage_projection_kernel_costs() {
+        use super::*;
+        use std::time::Instant;
+        const ROWS: usize = 256;
+        const HIDDEN: usize = 3840;
+        const FFN: usize = 9728;
+        const REPS: usize = 20;
+        const STREAMS: usize = 3;
+        let context = VulkanContext::new().unwrap();
+        for (label, n_in, n_out) in [
+            ("qkv", HIDDEN, HIDDEN * 3),
+            ("out_proj", HIDDEN, HIDDEN),
+            ("ffn_w1_w3", HIDDEN, FFN),
+            ("ffn_w2", FFN, HIDDEN),
+        ] {
+            let mut cursor = 0;
+            let input = f32_region(&mut cursor, ROWS * n_in).unwrap();
+            let q8 = region(&mut cursor, ROWS * n_in).unwrap();
+            let scales = f32_region(&mut cursor, ROWS * n_in / 32).unwrap();
+            let sums = f32_region(&mut cursor, ROWS * n_in / 32).unwrap();
+            let output = f32_region(&mut cursor, ROWS * n_out).unwrap();
+            let mut ops = Qwen3Ops::new_with_size(&context, cursor, STREAMS).unwrap();
+            assert!(ops.q8_tiled, "device cannot run the tiled Q8_0 kernels");
+            let mut buffers = Vec::new();
+            for stream in 0..STREAMS {
+                let mut weight = synthetic_weight(GpuWeightFormat::Q8_0, n_in, n_out);
+                // Distinct content per stream so the loads cannot be coalesced
+                // away by the memory system.
+                for (index, byte) in weight.iter_mut().enumerate() {
+                    if index % 512 == stream % 512 {
+                        *byte = byte.wrapping_add(stream as u8);
+                    }
+                }
+                buffers.push(unsafe { context.upload_static(&weight) }.unwrap());
+            }
+            let formats = [GpuWeightFormat::Q8_0; STREAMS];
+            let bindings = ops.bind_weight_buffers(&buffers, &formats).unwrap();
+            ops.write_f32(
+                input,
+                &(0..ROWS * n_in)
+                    .map(|index| ((index * 7 % 251) as f32 - 125.0) / 97.0)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+
+            let quantize_push =
+                quantize_rows_push(cursor, input, q8, scales, Some(sums), n_in, ROWS, n_in, 32)
+                    .unwrap();
+            let quantize_dispatch = row_dispatch(n_in / 32, ROWS, &context.limits).unwrap();
+            let (matmul_push, _) = matmul_rows_push(
+                cursor,
+                &context.limits,
+                bindings,
+                q8,
+                scales,
+                Some(sums),
+                &[(output, n_out, n_out * 4)],
+                n_in,
+                ROWS,
+                n_in,
+            )
+            .unwrap();
+            let tiles = ROWS.div_ceil(32);
+            let matmul_dispatch = row_dispatch(n_out.div_ceil(64), tiles, &context.limits).unwrap();
+
+            let time = |pipeline: usize, push: &[u32], dispatch: [u32; 3]| {
+                let mut best = f64::MAX;
+                for _ in 0..3 {
+                    let start = Instant::now();
+                    for rep in 0..REPS {
+                        let commands = TokenCommands::begin(&context).unwrap();
+                        ops.record_linear_dispatch(&commands, pipeline, bindings, push, dispatch);
+                        commands.submit_and_wait().unwrap();
+                        std::hint::black_box(rep);
+                    }
+                    best = best.min(start.elapsed().as_secs_f64() / REPS as f64 * 1e3);
+                }
+                best
+            };
+            eprintln!(
+                "[kernel-cost] {:10} quantize={:.3}ms generic={:.3}ms wide={:.3}ms",
+                label,
+                time(QUANTIZE, &quantize_push, quantize_dispatch),
+                time(Q8_MATMUL_GROUPED_TILED, &matmul_push, matmul_dispatch),
+                time(Q8_MATMUL_GROUPED_TILED_WIDE, &matmul_push, matmul_dispatch),
+            );
+            for buffer in buffers {
+                unsafe { context.destroy_completed_buffers(&[buffer]) }.unwrap();
+            }
         }
     }
 }

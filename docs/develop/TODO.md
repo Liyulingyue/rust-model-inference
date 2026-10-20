@@ -2470,3 +2470,43 @@ Q4_K rows=1:  2.06 MB 权重，实测 2.11 ms  →  0.98 GB/s
   scale 提取外提提速 2.3~2.6 倍（位精确）；
 - rows=1 的 Q4_K（MoE decode、单 token）仍然只有 0.98 GB/s，
   继续走 `7750eeb` 的 CPU 门控。
+
+### TODO-034: Z-Image GPU 路径罕见地不可复现（同 seed 约 1/20 次输出不同）
+
+在 GB10 上交替跑同 seed 的 Z-Image 256×256 八步，**大约每 20 次有一次输出不同**。
+幅度很小：mean|Δ| 1.2/255、PSNR 41.5 dB（不是坏图，是舍入级差异），
+其余各次逐字节一致。main 与 unified 分支都出现过，unified 修复前后都出现，
+所以**不是本次 push constant 特化引入的**。
+
+`main` 的历史记录里已经有同类现象（`docs/usage/z-image.md`「host 写 → device 读的
+barrier」一节）：arena 是 CPU 直接写、shader 直接读的映射内存，缺失
+HOST→COMPUTE barrier 时能否看见写入只取决于速度；旧 kernel 每次 dispatch 约 700 ms，
+写入总来得及被「看见」，tiled kernel 约 64 ms 就可能错过。该记录同时说 512×512 才会
+复现、256×256 逐位一致——**现在 256 也会出现，说明 tiled 化之后窗口更窄了**。
+
+需要做的事：
+
+1. 在 `VulkanContext::host_write_barrier` 之外，找出**哪一类** host 写入没有对应的
+   barrier。`zimage_projection_kernel_costs`（`src/vulkan/ops.rs`，`#[ignore]`）
+   可以先复现到单 kernel：同一形状连续录制多次，比较读回的激活是否逐字节一致。
+2. 目标是让 256 与 512 都逐字节可复现，再谈「GPU 与 CPU 逐位一致」。
+   在此之前，任何「GPU 输出逐字节一致」的测试结论都要注明运行次数。
+
+### TODO-035: 补偿 exp 的价值只在 decoder 侧，DiT 侧已确认不值得
+
+试过给 `softmax.comp` 加 `exact_exp` push 位、让 Z-Image DiT 走单精度 Horner
+（`exp_cheap`），结论是**回退**：
+
+- 性能几乎没赚：attention 相位只从 17.6 s 到 16.7–17.1 s（512，4 步）。同一个
+  shader 里编进两套实现后，热循环里那个 select 把省下的算术吃掉了。
+- 数值代价可测：DiT GPU 输出与同分支 CPU 参考的 PSNR 从 37.66 dB 降到 31.62 dB
+  （mean|Δ| 1.76 → 2.47，256×256 八步 seed 42）。
+
+所以 DiT 保留补偿版。剩下的开放问题是 decoder 侧：`exp_accurate` 的注释说
+「1 ULP 的 exp 误差可能翻转 F16 概率平局」，而 `attention_values` 在两种模式下都会把
+概率 `round_f16_rte` 之后才累加——补偿把 exp 做到 F32 最后一位，紧接着就被 F16
+舍入吃掉了。要回答的是：**decoder 路径真正需要的是 exp 的精度，还是「舍入到 F16
+之后不再变」这个性质**。如果只需要后者，把 exp 的误差压到远小于 F16 间隔（例如
+1e-4 相对）就够了，补偿项可以砍掉一半。
+
+复现数据与完整推导见 `docs/develop/ZIMAGE_OPTIMIZATION.md`。
