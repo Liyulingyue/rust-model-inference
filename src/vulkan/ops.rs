@@ -6991,14 +6991,17 @@ mod tests {
             ("Q8_0", GpuWeightFormat::Q8_0, n / 32 * 34),
             ("Q4_K", GpuWeightFormat::Q4_K, n / 256 * 144),
         ];
-        println!("{:<6} {:>5} {:>9} {:>12} {:>13} {:>11}",
-                 "fmt", "rows", "weight_MB", "ms/call", "eff_GB/s", "GFLOP/s");
+        println!(
+            "{:<6} {:>5} {:>9} {:>12} {:>13} {:>11}",
+            "fmt", "rows", "weight_MB", "ms/call", "eff_GB/s", "GFLOP/s"
+        );
         for (name, format, bytes) in cases {
             let weight: Vec<u8> = (0..bytes).map(|i| ((i * 131 + 7) % 251) as u8).collect();
             for rows in [1usize, 8, 64, 256] {
                 let iters = if rows >= 256 { 20 } else { 200 };
-                let input: Vec<f32> =
-                    (0..rows * N_IN).map(|i| ((i % 29) as f32 - 14.0) * 0.031).collect();
+                let input: Vec<f32> = (0..rows * N_IN)
+                    .map(|i| ((i % 29) as f32 - 14.0) * 0.031)
+                    .collect();
                 let mut out = vec![0f32; rows * N_OUT];
                 let mut rt = BatchedLinearRuntime::new(context, rows, N_IN, N_OUT, 2).unwrap();
                 rt.matmul_rows(&weight, format, &input, rows, N_IN, N_OUT, &mut out)
@@ -7010,11 +7013,15 @@ mod tests {
                 }
                 let el = t.elapsed().as_secs_f64();
                 let flops = 2.0 * rows as f64 * N_IN as f64 * N_OUT as f64;
-                println!("{:<6} {:>5} {:>9.2} {:>12.4} {:>13.2} {:>11.2}",
-                         name, rows, bytes as f64 / 1e6,
-                         el * 1000.0 / iters as f64,
-                         (bytes * iters) as f64 / el / 1e9,
-                         flops * iters as f64 / el / 1e9);
+                println!(
+                    "{:<6} {:>5} {:>9.2} {:>12.4} {:>13.2} {:>11.2}",
+                    name,
+                    rows,
+                    bytes as f64 / 1e6,
+                    el * 1000.0 / iters as f64,
+                    (bytes * iters) as f64 / el / 1e9,
+                    flops * iters as f64 / el / 1e9
+                );
             }
         }
     }
@@ -9078,7 +9085,13 @@ mod tests {
                     let start = Instant::now();
                     for _ in 0..REPS {
                         let commands = TokenCommands::begin(&context).unwrap();
-                        ops.record_linear_dispatch(&commands, pipeline, bindings, &matmul_push, dispatch);
+                        ops.record_linear_dispatch(
+                            &commands,
+                            pipeline,
+                            bindings,
+                            &matmul_push,
+                            dispatch,
+                        );
                         commands.submit_and_wait().unwrap();
                     }
                     best = best.min(start.elapsed().as_secs_f64() / REPS as f64);
