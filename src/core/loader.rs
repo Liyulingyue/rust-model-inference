@@ -448,6 +448,7 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             | "ernie_image"
             | "audiocpp"
             | "mellum"
+            | "dory"
     ) {
         return Err(format!("Unsupported architecture: {arch}"));
     }
@@ -557,6 +558,40 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             vocab_size,
             rope_freq_base: 0.0,
             norm_eps: 1e-5,
+        });
+    }
+    if arch == "dory" {
+        let n_embd = source
+            .metadata("dory.embedding_length")
+            .and_then(MetaValue::to_u64)
+            .map(|v| v as usize)
+            .unwrap_or(0);
+        let n_layer = source
+            .metadata("dory.block_count")
+            .and_then(MetaValue::to_u64)
+            .map(|v| v as usize)
+            .unwrap_or(0);
+        let vocab_size = source
+            .metadata("tokenizer.ggml.tokens")
+            .and_then(MetaValue::to_arr)
+            .map(Vec::len)
+            .unwrap_or(0);
+        let n_ctx = source
+            .metadata("dory.context_length")
+            .and_then(MetaValue::to_u64)
+            .map(|v| v as usize)
+            .unwrap_or(0);
+        return Ok(ModelConfig {
+            n_embd,
+            n_layer,
+            n_head: 0,
+            n_head_kv: 0,
+            n_embd_head: 0,
+            n_ff: 0,
+            n_ctx,
+            vocab_size,
+            rope_freq_base: 0.0,
+            norm_eps: 1e-6,
         });
     }
     // Falcon-H1 declares key/value lengths (128) that differ from
