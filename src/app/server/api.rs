@@ -2260,7 +2260,10 @@ async fn run_multimodal_text_only(
             prefill_batch_size,
             Some(system_prompt.as_str()),
         ),
-        "qwen35" => {
+        // `qwen35moe` (MiniCPM-V 4.7 35B-A3B) uses the same `minicpmv4_7`
+        // projector and the same `run_qwen35_family_multimodal_logits` helper as
+        // `qwen35`; only the arch string differs.
+        "qwen35" | "qwen35moe" => {
             let max_context = match state_for_max_ctx(&state) {
                 Ok(v) => v,
                 Err(e) => return Err(e),
@@ -2281,7 +2284,8 @@ async fn run_multimodal_text_only(
             )
         }
         other => Err(format!(
-            "/v1/jev/image only supports qwen3/qwen3vl/qwen35 multimodal, got {other:?}"
+            "/v1/jev/image only supports qwen3/qwen3vl/qwen3vlmoe/qwen35/qwen35moe \
+             multimodal, got {other:?}"
         )),
     })
     .await
