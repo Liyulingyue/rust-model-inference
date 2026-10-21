@@ -101,6 +101,7 @@ const Q8_MATMUL_COOPERATIVE: usize = 28;
 const Q8_MATMUL_GROUPED_TILED_WIDE: usize = 30;
 const Q8_MATMUL_GROUPED_TILED_WIDE_ADD: usize = 31;
 const ATTENTION_VALUES_F32: usize = 32;
+const TIMESTRAL: usize = 33;
 
 pub(crate) fn tiled_matmul_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -190,6 +191,7 @@ const OPERATOR_SHADER_NAMES: [&str; OPERATOR_SHADERS.len()] = [
     "q8_matmul_tiled_dp4a_wide",
     "q8_matmul_tiled_dp4a_wide_add",
     "attention_values_f32",
+    "timestral",
 ];
 
 /// True when the ordered dispatch log is being collected.
@@ -277,7 +279,7 @@ pub fn dump_dispatch_trace() {
     }
 }
 
-const OPERATOR_SHADERS: [&[u8]; 33] = [
+const OPERATOR_SHADERS: [&[u8]; 34] = [
     QUANTIZE_Q8_0_SHADER,
     QUANTIZE_Q8_K_SHADER,
     Q8_MATMUL_GROUPED_SHADER,
@@ -311,6 +313,7 @@ const OPERATOR_SHADERS: [&[u8]; 33] = [
     Q8_MATMUL_GROUPED_TILED_WIDE_SHADER,
     Q8_MATMUL_GROUPED_TILED_WIDE_ADD_SHADER,
     ATTENTION_VALUES_F32_SHADER,
+    include_bytes!("../../shaders/bin/timestral.spv"),
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1359,6 +1362,15 @@ impl Drop for Conv2dRuntime {
         }
         unsafe { std::mem::ManuallyDrop::drop(&mut self.ops) };
     }
+}
+
+#[derive(Clone, Copy)]
+#[repr(u32)]
+pub(crate) enum TimestralOp {
+    Qkv,
+    Attention,
+    Gate,
+    SwiGlu,
 }
 
 pub(crate) struct Qwen3Ops<'a> {
@@ -3684,6 +3696,67 @@ impl<'a> Qwen3Ops<'a> {
             commands.dispatch(x, y, 1);
             commands.barrier();
         }
+        Ok(())
+    }
+
+    /// Fixed published Timestral geometry; every arena range is checked before recording.
+    pub(crate) fn record_timestral(
+        &self,
+        commands: &TokenCommands<'_>,
+        op: TimestralOp,
+        regions: [ArenaRegion; 6],
+        geometry: [usize; 6],
+    ) -> Result<(), VulkanError> {
+        let [rows, enc, seq, context, covariates, time] = geometry;
+        if rows == 0
+            || enc == 0
+            || enc >= seq
+            || context == 0
+            || context > enc
+            || covariates > 1
+            || time > 1
+        {
+            return Err(VulkanError::UnsupportedShape(
+                "invalid Timestral GPU geometry".into(),
+            ));
+        }
+        let n = product("Timestral tokens", &[rows, seq])?;
+        let d = product("Timestral hidden", &[n, 768])?;
+        let sizes = match op {
+            TimestralOp::Qkv => [
+                product("QKV", &[d, 3])?,
+                d,
+                d,
+                d,
+                product("RoPE", &[seq, 32])?,
+                0,
+            ],
+            TimestralOp::Attention => [d, d, d, d, product("valid", &[rows, enc])?, rows],
+            TimestralOp::Gate => [d, d, 0, 0, 0, 0],
+            TimestralOp::SwiGlu => [
+                product("FFN", &[n, 4096])?,
+                product("FFN", &[n, 2048])?,
+                0,
+                0,
+                0,
+                0,
+            ],
+        };
+        let mut push = [0u32; 13];
+        push[0] = op as u32;
+        for (i, (region, size)) in regions.into_iter().zip(sizes).enumerate() {
+            push[i + 1] = self.f32_word(region, size, "Timestral arena")?;
+        }
+        for (i, value) in geometry.into_iter().enumerate() {
+            push[i + 7] = as_u32(value, "Timestral geometry")?;
+        }
+        let groups = match op {
+            TimestralOp::Attention => product("attention queries", &[n, 12])?,
+            TimestralOp::SwiGlu => product("FFN dispatch", &[n, 2048])?.div_ceil(64),
+            _ => d.div_ceil(64),
+        };
+        let grid = row_dispatch(groups, 1, &self.context.limits)?;
+        self.record_linear_dispatch(commands, TIMESTRAL, self.arena_bindings, &push, grid);
         Ok(())
     }
 

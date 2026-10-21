@@ -1,19 +1,19 @@
 use super::forecast::{scale_row, Row};
 use super::*;
 
-struct Layout {
-    rows: usize,
-    enc: usize,
-    dec: usize,
-    context: usize,
-    covariates: bool,
-    roles: Vec<u8>,
-    valid: Vec<bool>,
-    first: usize,
+pub(super) struct Layout {
+    pub(super) rows: usize,
+    pub(super) enc: usize,
+    pub(super) dec: usize,
+    pub(super) context: usize,
+    pub(super) covariates: bool,
+    pub(super) roles: Vec<u8>,
+    pub(super) valid: Vec<bool>,
+    pub(super) first: usize,
 }
 
 impl Layout {
-    fn seq(&self) -> usize {
+    pub(super) fn seq(&self) -> usize {
         self.enc + self.dec
     }
     fn time_allowed(&self, row: usize, q: usize, k: usize) -> bool {
@@ -41,7 +41,7 @@ impl Layout {
                 && !(self.roles[q] != 0 && self.roles[k] == 0)
                 && !(self.roles[q] == 2 && self.roles[k] != 2))
     }
-    fn position(&self, slot: usize) -> f32 {
+    pub(super) fn position(&self, slot: usize) -> f32 {
         let p = if self.covariates {
             slot % self.enc
         } else {
@@ -172,39 +172,7 @@ impl TimestralModel<'_> {
             }
         }
         trace("embedding", &[r, s, D], &x)?;
-        for layer in 0..24 {
-            let p = format!("transformer.layers.{layer}");
-            for axis in 0..if layer % 4 == 3 { 2 } else { 1 } {
-                let norm = self.norm(&format!("{p}.attn_norms.{axis}"), &x);
-                trace(
-                    &format!("layer.{layer}.attn.{axis}.norm"),
-                    &[r, s, D],
-                    &norm,
-                )?;
-                let attn = self.attention(
-                    &format!("{p}.attns.{axis}"),
-                    &norm,
-                    &layout,
-                    axis == 0,
-                    layer,
-                    axis,
-                )?;
-                add(&mut x, &attn);
-            }
-            let norm = self.norm(&format!("{p}.mlp_norm"), &x);
-            let fused = self.linear(&format!("{p}.mlp.w12"), &norm, D, 2 * F);
-            let mut hidden = vec![0.; r * s * F];
-            for (out, inp) in hidden.chunks_exact_mut(F).zip(fused.chunks_exact(2 * F)) {
-                for i in 0..F {
-                    out[i] = inp[i] * crate::ops::silu(inp[F + i]);
-                }
-            }
-            let mlp = self.linear(&format!("{p}.mlp.w3"), &hidden, F, D);
-            add(&mut x, &mlp);
-            trace(&format!("layer.{layer}.output"), &[r, s, D], &x)?;
-        }
-        let out = self.norm("transformer.out_norm", &x);
-        trace("out_norm", &[r, s, D], &out)?;
+        let out = self.transform(x, &layout)?;
         let mut decoder = Vec::with_capacity(r * dec * D);
         for row in out.chunks_exact(s * D) {
             decoder.extend_from_slice(&row[enc * D..]);
@@ -232,6 +200,85 @@ impl TimestralModel<'_> {
         }
         trace("block_quantiles", &[r, h * PS, Q], &result.concat())?;
         Ok(result)
+    }
+
+    fn transform(&self, x: Vec<f32>, layout: &Layout) -> Result<Vec<f32>, String> {
+        use crate::compute::UsedBackend;
+        #[cfg(feature = "vulkan")]
+        if let Some(context) = self.compute.context().map_err(|e| e.to_string())? {
+            let mut state = self
+                .gpu
+                .lock()
+                .map_err(|_| "Timestral GPU state poisoned")?;
+            let result = (|| {
+                let count = layout.rows * layout.seq();
+                if state.as_ref().is_none_or(|gpu| gpu.capacity() < count) {
+                    // shortcut: growing the arena reuploads weights; retain uploads if resizing becomes frequent.
+                    *state = None;
+                    *state = Some(super::gpu::Transformer::new(context, &self.weights, count)?);
+                }
+                state.as_ref().unwrap().forward(&x, layout)
+            })();
+            match result {
+                Ok(out) => {
+                    self.compute.trace(
+                        "timestral.transformer",
+                        UsedBackend::Vulkan,
+                        layout.rows * layout.seq(),
+                    );
+                    return Ok(out);
+                }
+                Err(error) if self.compute == crate::compute::ComputePolicy::Auto => {
+                    *state = None;
+                    eprintln!("compute requested=Auto scope=timestral.transformer backend=Cpu reason={error}");
+                }
+                Err(error) => return Err(format!("Timestral Vulkan: {error}")),
+            }
+        }
+        self.compute.trace(
+            "timestral.transformer",
+            UsedBackend::Cpu,
+            layout.rows * layout.seq(),
+        );
+        self.transform_cpu(x, layout)
+    }
+
+    fn transform_cpu(&self, mut x: Vec<f32>, layout: &Layout) -> Result<Vec<f32>, String> {
+        let (r, s) = (layout.rows, layout.seq());
+        for layer in 0..24 {
+            let p = format!("transformer.layers.{layer}");
+            for axis in 0..if layer % 4 == 3 { 2 } else { 1 } {
+                let norm = self.norm(&format!("{p}.attn_norms.{axis}"), &x);
+                trace(
+                    &format!("layer.{layer}.attn.{axis}.norm"),
+                    &[r, s, D],
+                    &norm,
+                )?;
+                let attn = self.attention(
+                    &format!("{p}.attns.{axis}"),
+                    &norm,
+                    layout,
+                    axis == 0,
+                    layer,
+                    axis,
+                )?;
+                add(&mut x, &attn);
+            }
+            let norm = self.norm(&format!("{p}.mlp_norm"), &x);
+            let fused = self.linear(&format!("{p}.mlp.w12"), &norm, D, 2 * F);
+            let mut hidden = vec![0.; r * s * F];
+            for (out, inp) in hidden.chunks_exact_mut(F).zip(fused.chunks_exact(2 * F)) {
+                for i in 0..F {
+                    out[i] = inp[i] * crate::ops::silu(inp[F + i]);
+                }
+            }
+            let mlp = self.linear(&format!("{p}.mlp.w3"), &hidden, F, D);
+            add(&mut x, &mlp);
+            trace(&format!("layer.{layer}.output"), &[r, s, D], &x)?;
+        }
+        let out = self.norm("transformer.out_norm", &x);
+        trace("out_norm", &[r, s, D], &out)?;
+        Ok(out)
     }
 
     fn attention(

@@ -27,6 +27,7 @@ shader_names=(
     softmax
     attention_values
     attention_values_f32
+    timestral
     qwen35_dense_prepare
     qwen35_attention
     qwen35_recurrent_conv

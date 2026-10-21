@@ -5,10 +5,17 @@ import unittest
 
 import numpy as np
 
-from tools.oracle.timestral.parity import compare
+from tools.oracle.timestral.parity import compare, verify_gpu_execution
 
 
 class ComparatorTest(unittest.TestCase):
+    def test_gpu_requires_real_dispatches_and_rejects_fallback(self):
+        good = 'compute scope=timestral.transformer backend=Vulkan\ncompute scope=timestral.transformer gpu_dispatches=252'
+        self.assertEqual(verify_gpu_execution(good)['blocks'], 1)
+        for bad in ['', good.replace('Vulkan', 'Cpu'), good.replace('252', '0'), good+'\ncompute scope=timestral.transformer backend=Cpu']:
+            with self.assertRaises(AssertionError):
+                verify_gpu_execution(bad)
+
     def test_rejects_wrong_layout_bits_numbers_and_missing_checkpoint(self):
         with tempfile.TemporaryDirectory() as directory:
             directory = Path(directory)

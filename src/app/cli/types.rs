@@ -200,7 +200,6 @@ impl CliOptions {
                 || self.planner.is_some()
                 || self.perception.is_some()
                 || self.laya_request.is_some()
-                || self.timestral_request.is_some()
                 || self.longcat_kind.is_some()
                 || self.dump_logits
                 || self.bench

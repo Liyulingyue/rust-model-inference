@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -185,6 +186,15 @@ def compare(records, native_path):
     return metrics
 
 
+def verify_gpu_execution(stderr):
+    backends = re.findall(r'scope=timestral\.transformer backend=(\w+)', stderr)
+    assert backends and all(b == 'Vulkan' for b in backends), 'GPU case fell back or never ran the Transformer'
+    dispatches = [int(v) for v in re.findall(r'gpu_dispatches=(\d+)', stderr)]
+    assert len(dispatches) == len(backends) and all(d >= 252 for d in dispatches), 'missing real GPU dispatch evidence'
+    return dict(blocks=len(backends), dispatches=dispatches,
+                counters=[line for line in stderr.splitlines() if 'counters=device_cumulative' in line])
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--oracle', required=True, type=Path)
@@ -192,6 +202,7 @@ def main():
     parser.add_argument('--gguf', required=True, type=Path)
     parser.add_argument('--binary', required=True, type=Path)
     parser.add_argument('--output-dir', required=True, type=Path)
+    parser.add_argument('--mode', action='append', choices=['scalar', 'simd', 'vulkan', 'auto'])
     parser.add_argument('--case', action='append', choices=list(cases()))
     args = parser.parse_args()
     assert subprocess.check_output(['git', '-C', str(args.oracle), 'rev-parse', 'HEAD'], text=True).strip() == ORACLE
@@ -251,16 +262,19 @@ def main():
         request_path = output_dir/f'{name}.json'
         request_path.write_text(json.dumps(request))
         report['cases'][name] = {}
-        for mode in ('scalar', 'simd'):
+        for mode in args.mode or ('scalar', 'simd'):
             trace_path = output_dir/f'{name}.{mode}.jsonl'
             trace_path.unlink(missing_ok=True)
-            env = dict(os.environ, RMI_PARITY_TRACE=str(trace_path))
+            env = dict(os.environ, RMI_PARITY_TRACE=str(trace_path), RMI_COMPUTE_TRACE='1')
             env.pop('RMI_PARITY_FILTER', None)
             env.pop('RMI_SCALAR', None)
             if mode=='scalar':
                 env['RMI_SCALAR']='1'
-            run = subprocess.run([str(args.binary.resolve()), '--model', str(args.gguf.resolve()),
-                '--timestral-request', str(request_path), '--threads', '1' if mode=='scalar' else '4'],
+            command = [str(args.binary.resolve()), '--model', str(args.gguf.resolve()),
+                '--timestral-request', str(request_path), '--threads', '1' if mode=='scalar' else '4']
+            if mode in ('vulkan', 'auto'):
+                command += ['--compute', mode]
+            run = subprocess.run(command,
                 env=env, text=True, capture_output=True, check=True)
             (output_dir/f'{name}.{mode}.stdout').write_text(run.stdout)
             (output_dir/f'{name}.{mode}.stderr').write_text(run.stderr)
@@ -275,6 +289,8 @@ def main():
             worst = max(metrics, key=lambda m:m['nrmse'])
             result = dict(checkpoints=len(metrics), worst_nrmse=worst,
                 forecast=metrics[-1], max_abs=max(m['max_abs'] for m in metrics))
+            if mode in ('vulkan', 'auto'):
+                result['gpu_execution'] = verify_gpu_execution(run.stderr)
             report['cases'][name][mode]=result
             print(name, mode, json.dumps(result), flush=True)
         (output_dir/'report.json').write_text(json.dumps(report, indent=2)+'\n')

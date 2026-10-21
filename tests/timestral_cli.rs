@@ -24,7 +24,6 @@ fn timestral_request_is_a_forecast_mode() {
         "--jev",
         "--tts",
         "--embedding",
-        "--gpu",
         "--serve",
         "--dreamx",
         "--yue2",
@@ -67,7 +66,7 @@ fn forecast_conflicts_fail_before_other_task_dispatch() {
         .output()
         .unwrap();
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("CPU forecasting"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("forecasting mode"));
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_rust-model-inference"))
         .args([
             "--serve",
@@ -80,4 +79,27 @@ fn forecast_conflicts_fail_before_other_task_dispatch() {
         .unwrap();
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("--serve is unsupported"));
+}
+
+#[test]
+fn forecast_accepts_gpu_and_explicit_compute_policies() {
+    for flags in [
+        vec!["--gpu"],
+        vec!["--compute", "auto"],
+        vec!["--compute", "vulkan"],
+        vec!["--compute", "cpu"],
+    ] {
+        let mut args = vec![
+            "rmi",
+            "--model",
+            "timestral.gguf",
+            "--timestral-request",
+            "series.json",
+        ];
+        args.extend(flags);
+        let options =
+            parse_cli_options(&args.into_iter().map(String::from).collect::<Vec<_>>()).unwrap();
+        validate_cli_options(&options).unwrap();
+        options.validate_compute_mode().unwrap();
+    }
 }

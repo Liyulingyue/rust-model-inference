@@ -1,5 +1,7 @@
 //! Native F32 inference for the published Timestral-209M checkpoint.
 mod forecast;
+#[cfg(feature = "vulkan")]
+mod gpu;
 mod network;
 
 use crate::core::tensor::{GGMLType, MetaValue, TensorSource};
@@ -22,6 +24,9 @@ const LEVELS: [f32; Q] = [
 
 pub struct TimestralModel<'a> {
     weights: HashMap<String, &'a [f32]>,
+    compute: crate::compute::ComputePolicy,
+    #[cfg(feature = "vulkan")]
+    gpu: std::sync::Mutex<Option<gpu::Transformer>>,
 }
 
 fn tensor_contracts() -> Vec<(String, Vec<u64>)> {
@@ -72,6 +77,14 @@ fn tensor_contracts() -> Vec<(String, Vec<u64>)> {
 
 impl<'a> TimestralModel<'a> {
     pub fn from_source(source: &'a dyn TensorSource) -> Result<Self, String> {
+        Self::from_source_with_compute(source, crate::compute::ComputePolicy::legacy())
+    }
+
+    pub fn from_source_with_compute(
+        source: &'a dyn TensorSource,
+        compute: crate::compute::ComputePolicy,
+    ) -> Result<Self, String> {
+        compute.check_build()?;
         let arch = source
             .metadata("general.architecture")
             .and_then(MetaValue::to_string_val);
@@ -106,7 +119,12 @@ impl<'a> TimestralModel<'a> {
             }
             weights.insert(name, values);
         }
-        Ok(Self { weights })
+        Ok(Self {
+            weights,
+            compute,
+            #[cfg(feature = "vulkan")]
+            gpu: std::sync::Mutex::new(None),
+        })
     }
 
     fn linear(&self, prefix: &str, input: &[f32], n_in: usize, n_out: usize) -> Vec<f32> {

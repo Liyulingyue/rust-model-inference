@@ -8,8 +8,7 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
         if options.model.as_os_str().is_empty() {
             return Err("--timestral-request requires --model".into());
         }
-        if options.compute_policy() != crate::compute::ComputePolicy::Cpu
-            || options.jev
+        if options.jev
             || options.rerank
             || options.embedding
             || options.tts
@@ -29,7 +28,7 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
             || options.out.is_some()
             || options.output.is_some()
         {
-            return Err("--timestral-request requires CPU forecasting; generation, media, server and other task modes are unsupported".into());
+            return Err("--timestral-request is a forecasting mode; generation, media, server and other task modes are unsupported".into());
         }
         return Ok(());
     }

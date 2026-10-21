@@ -86,7 +86,7 @@ fn validate_audio_temperature(route: AudioRoute, temperature: Option<f32>) -> Re
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
-        println!("{USAGE}\n\nTimestral-209M: --model <timestral-F32.gguf> --timestral-request <series.json> [--threads N] | time-series forecasting; JSON context and prediction_length in, 21 quantiles out");
+        println!("{USAGE}\n\nTimestral-209M: --model <timestral-F32.gguf> --timestral-request <series.json> [--threads N] [--compute cpu|auto|vulkan] | time-series forecasting; JSON context and prediction_length in, 21 quantiles out");
         return;
     }
     // \n\nGLiNER2 boundary mode: --jev --gliner2-boundary --model <gliner2.5-boundary.gguf> --jev-context <text> --gliner2-schema <json> | span extraction; the schema is {\"entities\":[\"person\",\"location\"],\"entity_descriptions\":{...}} (the dict form {\"entities\":{\"person\":[...]}} is also accepted). Output is (start, end) word spans per field; --jev-output json for machine-readable.\n\nServer mode: --serve delegates to app::server::run_server which has its
@@ -250,7 +250,10 @@ fn main() {
                 .map_err(|e| format!("Timestral request JSON: {e}"))?;
                 let source = open_model_source(&options.model, ComponentRole::Llm)
                     .map_err(|e| e.to_string())?;
-                let model = TimestralModel::from_source(source.as_ref())?;
+                let model = TimestralModel::from_source_with_compute(
+                    source.as_ref(),
+                    options.compute_policy(),
+                )?;
                 let result = model.forecast(&request)?;
                 println!(
                     "{}",
