@@ -198,11 +198,11 @@ fn require_finite(values: &[f32], name: &str) -> Result<(), String> {
         let n_inf = values.iter().filter(|v| v.is_infinite()).count();
         let n_neg = values
             .iter()
-            .filter(|v| v.is_finite() == false && v.is_sign_negative())
+            .filter(|v| v.is_infinite() && v.is_sign_negative())
             .count();
         let n_pos = values
             .iter()
-            .filter(|v| v.is_finite() == false && v.is_sign_positive())
+            .filter(|v| v.is_infinite() && v.is_sign_positive())
             .count();
         let (min, max) = values
             .iter()
@@ -2686,7 +2686,7 @@ fn run_block_gpu(
             rows,
         )?;
         gpu_profile_add(7, t_ffn);
-    } else {
+    } else if gate_on_gpu {
         // w1's output is the silu'd side, so it goes to the `gate` region and
         // the product is formed on the host before w2 sees it.
         session
@@ -2780,6 +2780,7 @@ fn run_block_gpu(
                 )?;
             }
         }
+    } else {
         // No FFN projection is on the GPU: this is `run_block` verbatim.
         for row in 0..rows {
             let input = &attention[row * HIDDEN..(row + 1) * HIDDEN];
@@ -4131,10 +4132,15 @@ mod tests {
     #[test]
     fn dit_boundaries_reject_non_finite_values() {
         assert!(require_finite(&[0.0, -1.0], "context").is_ok());
-        for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        for (value, counts) in [
+            (f32::NAN, "nan=1, inf=0 (+inf=0, -inf=0)"),
+            (f32::from_bits(0xffc0_0000), "nan=1, inf=0 (+inf=0, -inf=0)"),
+            (f32::INFINITY, "nan=0, inf=1 (+inf=1, -inf=0)"),
+            (f32::NEG_INFINITY, "nan=0, inf=1 (+inf=0, -inf=1)"),
+        ] {
             assert_eq!(
                 require_finite(&[0.0, value], "context").unwrap_err(),
-                "Non-finite Z-Image context"
+                format!("Non-finite Z-Image context: len=2, {counts}, finite_range=[0.000,0.000], first_bad_idx=1")
             );
         }
     }
@@ -4187,6 +4193,10 @@ mod tests {
         let mut session =
             crate::models::diffusion::z_image::dit_gpu::DitGpuSession::new(context, rows)
                 .expect("session");
+        if !session.ops().supports_tiled_q8() {
+            eprintln!("skipped: tiled Q8_0 is unavailable on this device or disabled by DP4A=0");
+            return;
+        }
         for layer in 0..LAYERS {
             let (_, weight) = tiled_bench_synthetic(rows + layer, n_in, n_out);
             session

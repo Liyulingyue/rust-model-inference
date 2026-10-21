@@ -19,7 +19,10 @@
 //! numerics.
 use std::collections::HashMap;
 
-use crate::vulkan::ops::{ArenaRegion, GpuWeightFormat, OperatorBindings, Qwen3Ops, TokenCommands};
+use crate::vulkan::ops::{
+    tiled_matmul_enabled, ArenaRegion, GpuMatmulMode, GpuWeightFormat, OperatorBindings, Qwen3Ops,
+    TokenCommands,
+};
 use crate::vulkan::{GpuBuffer, VulkanContext, VulkanError};
 
 use super::dit::{FFN_WIDTH, HEADS, HIDDEN, QKV_WIDTH, QK_RMS_EPSILON, ROPE_HEAD_WIDTH};
@@ -80,24 +83,6 @@ struct BoundWeight {
     /// (the fused Q/K norms). Single-buffer callers leave it `None`.
     extra: Option<GpuBuffer>,
     bindings: OperatorBindings,
-}
-
-/// Whether to use the register-tiled Q8_0 kernel, which measured 11.8x faster
-/// on Z-Image's W2 shape (64.4 ms against 757.6 ms, streaming eight distinct
-/// weight matrices) while agreeing with the old kernel to 9.5e-7 relative, and
-/// which brings a 1-step render from 148 s of denoise to 84 s.
-///
-/// `RUST_GPU_TILED=0` falls back to the one-token-per-weight kernel, which is
-/// the escape hatch for a device without integer dot product and the other half
-/// of the measurement in
-/// `zimage_tiled_matmul_beats_the_one_token_per_weight_kernel`.
-fn tiled_matmul_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("RUST_GPU_TILED")
-            .map(|value| value != "0")
-            .unwrap_or(true)
-    })
 }
 
 /// Which gamma a norm binding holds. Each needs its own descriptor set: the
@@ -368,16 +353,23 @@ impl DitGpuSession {
             return Ok(());
         }
         let buffer = unsafe { self.context.upload_device_static(bytes) }?;
-        let bindings = match self
-            .ops
-            .bind_weight_buffers(std::slice::from_ref(&buffer), &[format])
-        {
-            Ok(bindings) => bindings,
-            Err(error) => {
-                unsafe { self.context.destroy_buffer(&buffer) };
-                return Err(error);
-            }
+        // Refiner projections retain their F16 input rounding and F32 reduction.
+        let mode = if format == GpuWeightFormat::F16 {
+            GpuMatmulMode::RoundedInputF32
+        } else {
+            GpuMatmulMode::Prepared
         };
+        let bindings =
+            match self
+                .ops
+                .bind_weight_buffers_mode(std::slice::from_ref(&buffer), &[format], mode)
+            {
+                Ok(bindings) => bindings,
+                Err(error) => {
+                    unsafe { self.context.destroy_buffer(&buffer) };
+                    return Err(error);
+                }
+            };
         self.weights.insert(
             (layer, projection),
             BoundWeight {
@@ -534,7 +526,7 @@ impl DitGpuSession {
         output_region: ArenaRegion,
         q8: ArenaRegion,
     ) -> Result<(), VulkanError> {
-        self.ops.record_weight_matmul_rows(
+        self.ops.record_weight_matmul_ordinary_rows(
             commands,
             bindings,
             input_region,
@@ -1124,6 +1116,61 @@ impl DitGpuSession {
     }
 }
 
+#[cfg(test)]
+mod f16_contract_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn f16_refiner_projection_keeps_f32_accumulation() {
+        let context = Box::leak(Box::new(VulkanContext::new().unwrap()));
+        let rows = 32;
+        let mut session = DitGpuSession::new(context, rows).unwrap();
+        let weight: Vec<u8> = (0..FFN_WIDTH * HIDDEN)
+            .flat_map(|_| crate::ops::f32_to_f16(1.0).to_le_bytes())
+            .collect();
+        session
+            .bind_weight_as(0, Projection::W2, &weight, GpuWeightFormat::F16)
+            .unwrap();
+        let layout = *session.layout();
+        // Finite F16 operands can overflow a half reduction. The historical
+        // refiner rounds its input to F16 but keeps the accumulation in F32.
+        let input = vec![-256.0625; rows * FFN_WIDTH];
+        session.ops.write_f32(layout.gate, &input).unwrap();
+        let bindings = session.binding_for(0, Projection::W2).unwrap();
+        let mut output = vec![0.0; rows * HIDDEN];
+        for tiled in [false, true] {
+            let mut commands = TokenCommands::begin(context).unwrap();
+            if tiled {
+                session.record_projection_tiled(
+                    &mut commands,
+                    bindings,
+                    Projection::W2,
+                    layout.gate,
+                    layout.out,
+                )
+            } else {
+                session.record_projection_grouped(
+                    &mut commands,
+                    bindings,
+                    Projection::W2,
+                    layout.gate,
+                    layout.out,
+                )
+            }
+            .unwrap();
+            commands.submit_and_wait().unwrap();
+            session.ops.read_f32_into(layout.out, &mut output).unwrap();
+            let expected = -256.0 * FFN_WIDTH as f32;
+            assert!(
+                output.iter().all(|&value| value == expected),
+                "tiled={tiled}, expected={expected}, first={}",
+                output[0],
+            );
+        }
+    }
+}
+
 impl Drop for DitGpuSession {
     fn drop(&mut self) {
         // Every uploaded buffer belongs to this render. On an uncertain fence,
@@ -1222,46 +1269,14 @@ mod tests {
             .collect();
         session.ops().write_f32(layout.x, &input).expect("write x");
 
-        let record_chain = |session: &DitGpuSession, commands: &mut TokenCommands<'_>| {
-            session
-                .record_projection(
-                    commands,
-                    session.binding_for(0, Projection::W1).unwrap(),
-                    Projection::W1,
-                    layout.x,
-                    layout.gate,
-                )
-                .expect("w1");
-            session
-                .record_projection(
-                    commands,
-                    session.binding_for(0, Projection::W3).unwrap(),
-                    Projection::W3,
-                    layout.x,
-                    layout.up,
-                )
-                .expect("w3");
-            session
-                .ops()
-                .record_silu_mul(commands, layout.gate, layout.up, rows * n_out)
-                .expect("silu");
-            session
-                .record_projection(
-                    commands,
-                    session.binding_for(0, Projection::W2).unwrap(),
-                    Projection::W2,
-                    layout.gate,
-                    layout.out,
-                )
-                .expect("w2");
-        };
-
         // Batched: all four dispatched once, submitted once.
         let before = context.submission_count();
         let mut batched = vec![0.0f32; rows * n_in];
         {
-            let mut commands = TokenCommands::begin(context).expect("begin");
-            record_chain(&session, &mut commands);
+            let commands = TokenCommands::begin(context).expect("begin");
+            let commands = session
+                .record_ffn(commands, 0, rows * n_out)
+                .expect("record FFN");
             commands.submit_and_wait().expect("submit");
         }
         session

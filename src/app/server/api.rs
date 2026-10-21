@@ -337,7 +337,7 @@ async fn prompt(state: &AppState, request: &Request) -> Result<PromptResult, (u1
     // every request.
     let compiled_chat_template = text.compiled_chat_template.clone();
     let request = request.clone();
-    tokio::task::spawn_blocking(move || {
+    super::compute_task(state.compute, move || {
         let mut messages = request.messages.clone();
         if let Some(instructions) = &request.instructions {
             messages.insert(
@@ -539,7 +539,7 @@ async fn handle(
     let id = format!("{prefix}{:016x}", rand::random::<u64>());
     if request.stream {
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, axum::Error>>(32);
-        tokio::task::spawn_blocking(move || {
+        super::compute_task(state.compute, move || {
             let _permit = permit;
             let mut encoder = Encoder::new(protocol, id.clone(), state.model_name.clone());
             let mut start = encoder.start(ids.len());
@@ -603,7 +603,7 @@ async fn handle(
     }
     let cancelled = Arc::new(AtomicBool::new(false));
     let mut cancellation_guard = CancellationGuard::new(cancelled.clone());
-    let result = tokio::task::spawn_blocking(move || {
+    let result = super::compute_task(state.compute, move || {
         let _permit = permit;
         let generation = generate(
             &state,
@@ -945,6 +945,7 @@ mod http_tests {
     }
     fn state() -> AppState {
         AppState {
+            compute: crate::compute::ComputePolicy::Cpu,
             model: std::sync::Arc::new(super::super::Backend::Text(super::super::TextBackend {
                 arch: "unimplemented".into(),
                 pool: std::sync::Arc::new(super::super::ComputePool::new(1)),
@@ -1196,6 +1197,7 @@ pub(super) async fn jev_boundary(
     State(state): State<AppState>,
     body: Result<Json<BoundaryRequest>, JsonRejection>,
 ) -> Response {
+    let _compute_scope = state.compute.enter_legacy_scope();
     let Json(req) = match body {
         Ok(j) => j,
         Err(e) => return jev_error(StatusCode::BAD_REQUEST, format!("invalid JSON: {e}")),
@@ -1444,6 +1446,7 @@ pub async fn jev_score(
     State(state): State<AppState>,
     body: Result<Json<JevScoreRequest>, JsonRejection>,
 ) -> Response {
+    let _compute_scope = state.compute.enter_legacy_scope();
     let Json(req) = match body {
         Ok(j) => j,
         Err(e) => return jev_error(StatusCode::BAD_REQUEST, format!("invalid JSON: {e}")),
@@ -1569,6 +1572,7 @@ async fn jev_grouped(
     State(state): State<AppState>,
     body: Result<Json<JevGroupedRequest>, JsonRejection>,
 ) -> Response {
+    let _compute_scope = state.compute.enter_legacy_scope();
     let Json(req) = match body {
         Ok(j) => j,
         Err(e) => return jev_error(StatusCode::BAD_REQUEST, format!("invalid JSON: {e}")),
@@ -2241,7 +2245,7 @@ async fn run_multimodal_text_only(
     let threads = jev_threads(&state);
     let prefill_batch_size = jev_prefill_batch_size(&state);
 
-    tokio::task::spawn_blocking(move || match arch.as_str() {
+    super::compute_task(state.compute, move || match arch.as_str() {
         // Same arch set the CLI `--jev --image` gate accepts; see
         // `crate::app::jev::single::image_supported_arch`.
         "qwen3" | "qwen3vl" | "qwen3vlmoe" => crate::app::run_qwen3_family_multimodal_logits(

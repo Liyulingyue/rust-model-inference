@@ -13,6 +13,15 @@
 //! retain the Q8_0 path.
 
 pub trait Kernel: Send + Sync {
+    /// Prepared BF16 kernels may also round activations before their wide dot.
+    fn rounds_bf16_input(&self) -> bool {
+        false
+    }
+    /// Capability query before a strict group can modify any output.
+    fn supports_f16_strict(&self) -> bool {
+        false
+    }
+
     /// Opt in to synchronous projection offload before entering ComputePool.
     /// A false result requires the caller to recompute the entire output on CPU.
     #[cfg(feature = "vulkan")]

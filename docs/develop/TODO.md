@@ -2401,3 +2401,367 @@ if info.dims.len() != 2 || info.dims[0] != h as u64 || info.dims[1] < n_tokens a
 
 dims 数量、宽度、以及**行数是否覆盖 `n_tokens`** 三者都查了 —— 这正是
 「不查就会静默越界」的地方。
+
+### TODO-031: Qwen3 resident Vulkan decode 在 GB10 上打不过 CPU，且默认根本不启用
+
+排查「Qwen3 为什么没有 GPU 加速」时挖出三层问题，从表面到根因。
+
+#### 1. 默认配置下 `--gpu` 是静默空操作（已修，a66705f）
+
+Qwen3 唯一的 GPU 路径是常驻 Vulkan 解码器 `Qwen3VulkanSession`
+（`src/vulkan/qwen3.rs`），它**要求 F16 KV**。而 CLI 默认是 F32
+（`src/app/text/runtime.rs:50` 的 `defaults::KV_FORMAT = KvFormat::F32`），
+于是 `src/models/qwen3/trunk/session.rs` 里 `compute_policy.context()` 那段
+直接落到 `None` 分支，**不报错、不提示**，全程 CPU 跑完，日志里还照样打印
+`[GPU] Vulkan device: NVIDIA GB10`。
+
+```rust
+} else if compute_policy == ComputePolicy::Vulkan {
+    return Err("Qwen3 Vulkan currently requires F16 KV".into());
+} else {
+    None          // Auto + F32：请求被静默丢弃
+}
+```
+
+`a66705f` 改成明确提示并给出正确 flag。**在此之前，本文件之前所有关于
+「Qwen3 GPU 加速」的结论都是无效的** —— 那些数字测的是 CPU。
+
+#### 2. 即使显式 `--kv-cache f16`，GPU 也赢不了
+
+在 GB10（NVIDIA GB10，int8 dot product: supported）上实测，
+同一台机器、同一 prompt（220 词）、`--threads 8`、等待 load<3、
+多次重复取中位数：
+
+| 模型 | 大小 | 生成 ratio (GPU/CPU) | 端到端 ratio | wall CPU | wall GPU |
+|---|---|---|---|---|---|
+| Qwen3-0.6B-Q8_0 | 0.6G | 0.46x | 0.34x | 2.8s | 8.7s |
+| Qwen3-0.6B-Q4_K_M | 0.4G | 0.11x | 0.11x | 3.9s | 33.8s |
+| Qwen3-0.6B-BF16 | 1.1G | 0.38x | 0.43x | 5.9s | 15.7s |
+| Qwen3-4B-Q4_K_M | 2.3G | 1.08x | 0.14x | 15.7s | 113.4s |
+| Qwen3-4B-Q8_0 | 4.0G | **1.08x** | 0.56x | 16.8s | 31.2s |
+| Qwen3-8B-Q4_K_M | 4.7G | 0.19x | 0.11x | 35.1s | 398.5s |
+| Qwen3-8B-Q8_0 | 8.1G | **1.02x** | 0.54x | 49.0s | 100.1s |
+| Qwen3-14B-Q4_K_M | 8.4G | 0.97x | 0.56x | 72.7s | 138.0s |
+
+两个独立的结论：
+
+- **生成（steady state）在 4B 以上才勉强追平**，逐次 ratio 紧密聚在 1.0 附近
+  （4B Q8_0: 1.28 / 1.00 / 0.98；8B Q8_0: 1.00 / 1.02 / 0.94），
+  **不是加速，是持平**。
+- **端到端在所有尺寸上都是输的**（0.11x ~ 0.59x）。因为常驻解码器要先
+  付一次性启动成本：~0.4s 的 pipeline JIT + 把整个权重上传进显存。
+
+启动成本拆解（Qwen3-0.6B-Q8_0，`RMI_SETUP_TRACE`）：
+
+```
+Qwen3Ops::new (pipeline/descriptor)  211.0 ms
+权重上传+bind  633.5 MB               169.0 ms
+core_contract 校验                     31.5 ms   ← 已是 OnceLock memoize
+q8_0_activation_contract 校验           6.4 ms   ← 同上
+```
+
+契约校验那两项**已经**是 `OnceLock::get_or_init`，只跑一次，没有优化空间；
+pipeline JIT 和权重上传是一次性 CLI 进程无法摊销的成本。
+
+#### 3. 根因：dense GEMM 在 M 很小时被饿死
+
+用 `RUST_GPU_SUBMIT_TRACE` 测 Qwen3-8B-Q8_0 的 prefill：
+一次 prefill 只产生 ~36 次 submission（**分块是合理的**，不是提交过碎），
+但每次 `wait` 平均 **188 ms**，而驱动调用 `submit` 只有 35 µs。
+即整条链路的开销不在提交，而在 GPU 执行本身。
+
+折算下来整趟 forward 对 8GB 权重只跑到约 **1.2 GB/s 有效带宽**；
+而同一块卡上 LM head 那一类（`rows=1`, `n_out` 很大）能跑到 22 GB/s。
+差别在于 **M（行数）**：prefill M≈60、decode M=1，对 GPU 来说都太小，
+填不满 SMs，既算不出强度也吃不到带宽。
+
+对比同机 CPU：8B prefill 11.3 t/s vs GPU 5.7 t/s —— **CPU 快一倍**。
+这台机器的 CPU（含 AVX2/FMA 路径）在这个工作负载上就是比这条 Vulkan
+dense 路径强。
+
+#### 为什么先不写「按模型大小决定是否上 GPU」的阈值
+
+本来想用上面的表定一个尺寸阈值，但数据不支持：**4B 以上生成只是持平，
+没有出现真正的交叉点**，而且持平的区间里 e2e 依然全输。也就是说
+「小模型不上 GPU」这个结论虽然成立，但真正的问题是
+**常驻 dense 路径本身在这个硬件上就没赢过**，加阈值只能掩盖症状。
+
+要真正修好，得动 dense GEMM kernel 本身（M 小的时候的 tiling / split-K），
+那是重写 shader 的量级，不适合在没有回归基线的情况下顺手做。
+
+#### 附带记录
+
+- **Q4_K_M 在 GPU 上尤其糟**（8B: 0.19x，wall 398s）。
+  `GpuMatmulMode::Dot`（GEMV/split-K 路径）只对 F16/BF16 存在，
+  Q4_K 只能走 `Prepared` -> `Q4_K_MATMUL`，没有 rows=1 专用 kernel。
+  这和 `7750eeb` 里 LFM2.5 MoE 的结论是同一件事的两个入口。
+- **8B-Q8_0 的 GPU 运行峰值 RSS 约 18.7 GB**，超过 15 GiB 预算；
+  一次性 CLI 同时持有 mmap 权重和显存副本是原因之一。
+
+### TODO-032: Q4_K/Q5_K/Q6_K 在 GPU 上没有 DP4A kernel，8B Q4_K_M 比 CPU 慢 17.6 倍
+
+接着 TODO-031 往下挖，发现 Q4_K 家族在 dense Vulkan 路径上缺少向量化 kernel，
+这是 Q4_K_M 特别慢的**结构性**原因。
+
+在 `src/vulkan/ops.rs` 的 operator 表里：
+
+- **Q8_0** 有两个 kernel：
+  - `Q8_MATMUL_GROUPED`，其 index 会被 `Q8_MATMUL_GROUPED_DP4A` 顶替
+    （`force_dp4a && context.supports_integer_dot_product()`，约 1423 行）；
+  - 外加 `Q8_MATMUL_TILED_DP4A`（`rows > 1` 时 `record_weight_matmul_rows`
+    自动切到 `record_weight_matmul_tiled_rows`，约 1960 行）。
+  两者都吃设备 int8 dot-product，8B Q8_0 生成能持平 CPU。
+
+- **Q4_K / Q5_K / Q6_K** 只有**一个**标量 kernel（`q4_k_matmul.comp` 等，
+  表项见约 392 行），既没有 dp4a 变体，也没有 tiled 变体。
+  8B Q4_K_M 实测 prefill 0.4 t/s、生成 1.3 t/s，wall 45.8s，
+  同机 CPU 2.6s —— **慢 17.6 倍**，是所有测过的组合里最差的。
+
+`q4_k_matmul.comp` 主循环（每 block）：
+
+```glsl
+int value = int((group & 1u) == 0u ? packed & 15u : packed >> 4u);  // 解 4-bit nibble
+int activation = q8(block * 256u + local);
+partial[(local & 31u) >> 2u] += int(scale(slot, offset, group)) * activation * value;
+```
+
+单块累加值量级 = `scale(≤63) * activation(≤127) * value(≤15)`，
+再在 8 个 lane 上求和，落到 int32。这种**块缩放的 int32 乘加不能直接套
+Q8_0 的 dp4a 路径**（Q8_0 的量化把乘积压在 int8 内）。所以 Q4_K 想吃
+DP4A，得写一个自己的「块缩放 + int32 提升」的 int8 dot kernel，或者
+把激活缩放到能进 int8 的范围 —— 这是一个完整的 shader 项目，不适合随手做。
+
+结论与 TODO-031 合并看：**GPU dense 路径目前只有 Q8_0 勉强可用（持平 CPU），
+Q4_K 家族完全不能用（慢 17.6 倍）。** 在补出 Q4_K 的向量化 kernel 之前，
+Q4_K 模型应该明确走 CPU，而不是靠一条经验阈值去猜。
+
+### TODO-033: Q4_K split-K GEMV 试过，行度不够；真正的瓶颈是单字节权重访问效率
+
+接着 TODO-032，真的去写了一个 rows==1 的 split-K GEMV（`q4_k_matmul.comp`
+里新增分支：rows==1 时不让 64 个 lane 各领一个输出行，而是让 64 个 lane
+合作同一个输出行，按 32 元素一个 scale/min 小组切 K，最后树形归约）。
+256 元素的 Q4_K block 正好切成 8 个 32 元素组共享一个 scale 和一个 minimum，
+所以 lane 之间不需要交换 scale，每个 lane 内部就能把该组的 dot 算完。
+
+结果：
+
+- **数值**：对真实权重（Qwen3-8B-Q4_K_M 的 blk.0.ffn_gate），
+  GEMV 输出与已提交（对 CPU 位精确）的 batched 路径 **逐字节一致**。
+- **性能**：rows=1 只从 2.33ms 降到 2.11ms（~10%），LFM2.5 MoE 端到端
+  1.1 t/s → 1.2 t/s，**基本没动**。因此这个分支没有保留（回退了）。
+
+**为什么并行度不是瓶颈。** 8B prefill 每次提交 GPU 等 188ms（vs 驱动
+35µs），整趟 forward 对 8GB 权重只跑出 ~1.2 GB/s；而同卡 LM head
+（rows=1、n_out 很大）能到 22 GB/s。差异在于**单次权重字节的访问效率**，
+不是 lane 数：
+
+```
+Q4_K rows=1:  2.06 MB 权重，实测 2.11 ms  →  0.98 GB/s
+理论下限:     若能到 25 GB/s，只需 0.08 ms   →  差 25 倍
+```
+
+根源在 shader 的 `weight_byte()` / `q8()`：一次取一个字节
+（`w.data[index>>2] >> ((index&3)*8)` 再掩码），nibble 再逐个拆
+（`packed & 15` / `packed >> 4`）。加多少 lane 都还是在做字节级提取。
+
+**真正要做的**：把权重读取向量化——用 `uint4`/`int4` 一次搬 16 字节，
+在寄存器里用位运算拆 nibble 和 scale，让一次内存事务服务 16 个元素。
+这是重写 Q4_K 读取路径的量级，和 TODO-032 是同一个大工程，建议合并做。
+在那之前：
+- batched（rows>1）的 Q4_K 已经被 `7747f07` 的 shared-memory staging +
+  scale 提取外提提速 2.3~2.6 倍（位精确）；
+- rows=1 的 Q4_K（MoE decode、单 token）仍然只有 0.98 GB/s，
+  继续走 `7750eeb` 的 CPU 门控。
+
+### TODO-034: Z-Image GPU 路径罕见地不可复现（同 seed 约 1/20 次输出不同）
+
+在 GB10 上交替跑同 seed 的 Z-Image 256×256 八步，**大约每 20 次有一次输出不同**。
+幅度很小：mean|Δ| 1.2/255、PSNR 41.5 dB（不是坏图，是舍入级差异），
+其余各次逐字节一致。main 与 unified 分支都出现过，unified 修复前后都出现，
+所以**不是本次 push constant 特化引入的**。
+
+`main` 的历史记录里已经有同类现象（`docs/usage/z-image.md`「host 写 → device 读的
+barrier」一节）：arena 是 CPU 直接写、shader 直接读的映射内存，缺失
+HOST→COMPUTE barrier 时能否看见写入只取决于速度；旧 kernel 每次 dispatch 约 700 ms，
+写入总来得及被「看见」，tiled kernel 约 64 ms 就可能错过。该记录同时说 512×512 才会
+复现、256×256 逐位一致——**现在 256 也会出现，说明 tiled 化之后窗口更窄了**。
+
+需要做的事：
+
+1. 在 `VulkanContext::host_write_barrier` 之外，找出**哪一类** host 写入没有对应的
+   barrier。`zimage_projection_kernel_costs`（`src/vulkan/ops.rs`，`#[ignore]`）
+   可以先复现到单 kernel：同一形状连续录制多次，比较读回的激活是否逐字节一致。
+2. 目标是让 256 与 512 都逐字节可复现，再谈「GPU 与 CPU 逐位一致」。
+   在此之前，任何「GPU 输出逐字节一致」的测试结论都要注明运行次数。
+
+### TODO-035: 补偿 exp 的价值只在 decoder 侧，DiT 侧已确认不值得
+
+试过给 `softmax.comp` 加 `exact_exp` push 位、让 Z-Image DiT 走单精度 Horner
+（`exp_cheap`），结论是**回退**：
+
+- 性能几乎没赚：attention 相位只从 17.6 s 到 16.7–17.1 s（512，4 步）。同一个
+  shader 里编进两套实现后，热循环里那个 select 把省下的算术吃掉了。
+- 数值代价可测：DiT GPU 输出与同分支 CPU 参考的 PSNR 从 37.66 dB 降到 31.62 dB
+  （mean|Δ| 1.76 → 2.47，256×256 八步 seed 42）。
+
+所以 DiT 保留补偿版。剩下的开放问题是 decoder 侧：`exp_accurate` 的注释说
+「1 ULP 的 exp 误差可能翻转 F16 概率平局」，而 `attention_values` 在两种模式下都会把
+概率 `round_f16_rte` 之后才累加——补偿把 exp 做到 F32 最后一位，紧接着就被 F16
+舍入吃掉了。要回答的是：**decoder 路径真正需要的是 exp 的精度，还是「舍入到 F16
+之后不再变」这个性质**。如果只需要后者，把 exp 的误差压到远小于 F16 间隔（例如
+1e-4 相对）就够了，补偿项可以砍掉一半。
+
+复现数据与完整推导见 `docs/develop/ZIMAGE_OPTIMIZATION.md`。
+
+### TODO-036: Qwen3-4B Q8_0 过不了 model contract，而 0.6B 与 8B 能过
+
+`test-unified3`（unified-compute）上用 `--gpu --kv-cache f16` 跑 Qwen3 的三个
+Q8_0 尺寸，model contract（`src/models/qwen3/trunk/session.rs`，
+abs 2e-3 + rel 2e-3）的结果**按尺寸分裂**：
+
+| 模型 | contract | 实测（Generation t/s，同会话） |
+|---|---|---|
+| Qwen3-0.6B Q8_0 | 通过 | 25.6 / 25.7 / 26.6 |
+| Qwen3-4B Q8_0 | **失败**：`model logit mismatch at 0: gpu=9.235686 cpu=9.315228 rel=0.008538938` | 走 CPU，10.6 / 11.6 t/s |
+| Qwen3-8B Q8_0 | 通过 | 4.7 / 5.0 / 5.1 / 5.3 / 5.5 |
+
+4B 的相对偏差 8.5e-3 是容差的 4.3 倍，于是整条 GPU 路径被拒并回退 CPU。
+**同一个模型家族、同一种量化，只换尺寸就翻脸**，说明这不是「Q8 路径整体不精确」，
+而是某个尺寸触发了特定形状的偏差（4B 的 hidden 2560 / 36 层与 8B 的 4096 / 36 层
+在 n_in 上不整除某些 chunk 边界，是第一个该查的方向）。
+
+补充两点，避免重复劳动：
+
+- 这个失败**与 push constant 特化无关**：修复前后的 contract 数值逐位相同
+  （gpu=9.235686 cpu=9.315228），greedy 输出也逐字相同。
+- `main` 没有这道 contract 门，4B 直接跑 GPU，但只有 1.4 t/s generation，
+  比 CPU 回退的 10.6 t/s 慢 7 倍——**门是合理的**，问题在于 4B 的 GPU 数值
+  偏差太大而不是 GPU 太慢。
+
+同时记录：unified 分支的 decoder 路径比 `main` 快 6 倍以上
+（8B Q8_0 generation 5.1 t/s vs 0.8 t/s），这是该分支的目标，回归要盯住这条线。
+
+### TODO-037: `--threads` 等于核数时 CPU 吞吐塌 29 倍
+
+Qwen3-0.6B Q8_0，20 核 GB10，greedy，64 token：
+
+| `--threads` | prefill t/s | generation t/s |
+|---|---|---|
+| 12 | 280–335 | 82.8–88.4 |
+| 16 | 303–347 | 67.5–97.2 |
+| 17 | 281 | 52.2 |
+| 18 | 295 | 69.3 |
+| 19 | 312 | 69.0 |
+| **20** | **46–48** | **2.4** |
+
+悬崖正好落在 `threads == nproc`，可复现 3/3，且不是偶发：20 线程的 prefill 也只有
+1/6。默认线程数是 8，所以平时碰不到，只有显式 `--threads $(nproc)` 才会踩到。
+
+机制（`src/core/thread_pool.rs`）：`ComputePool::new(n)` 起 `n - 1` 个 worker，
+调用线程也参与，总参与者 = n。worker 在空闲时是 `spin_loop()` 忙等（CPU 模式，
+GPU 模式才 yield），而 `compute()` 的收尾是「自旋等 `n_complete == n_threads`」。
+在 20 核机器上再叠一个别的租户进程占着核，参与者一多，barrier 就开始等调度器，
+一个 token 被放大到 0.4 s。
+
+**已修**（`src/core/thread_pool.rs`）：等待循环与空闲 worker 都不再硬自旋。
+
+1. 新增 `wait_while`：先自旋 `WAIT_SPINS` 次（覆盖一次 hand-off 的微秒级窗口），
+   之后改成 `yield_now()`。原来的 `spin_loop()` 无限自旋会让每个参与者一直处于
+   runnable 状态。
+2. 空闲 worker 同样改成「有界自旋 + `yield_now()`」。这条更关键：
+   `compute_with_chunks` 每次调用都新起 `n_threads - 1` 个线程，20 线程时进程里
+   同时有 42 个线程挤在 20 核上，而常驻 worker 的热自旋正好在抢这些线程要用的核。
+3. `cargo test --lib core::thread_pool` 的两个用例覆盖了 Drop 与 chunk 语义
+   （`single_thread_pool_drops_without_spinning`、`chunks_begin_at_zero_and_execute_exactly_once`）。
+
+修完的效果（Qwen3-0.6B Q8_0，`--threads 20`，同会话交替）：
+
+| | generation t/s |
+|---|---|
+| 修复前 | 2.5 / 2.4 / 2.9 |
+| 修复后 | 65.1 / 53.8 / 41.4 |
+
+**20×**。顺带：`--threads 8` 的 CPU 生成从 41–56 t/s 到 83 t/s，
+Z-Image 的 **CPU** 路径 denoise 从 139.7 s 降到 126.4 s（−9.5%），GPU 路径不变
+（block profile 20.0 s vs 19.5 s，输出逐字节相同）。
+
+没做的：把 worker 数夹到 `min(requested, nproc - 1)`。修完等待逻辑后
+`--threads 20` 已经不再塌，这条就没有必要了——但默认线程数仍是 8，
+因为 12–20 线程在 0.6B 上没有稳定收益。
+
+顺带记一条同源结论：**Qwen3 的 GPU 常驻解码在这台机器上全面输给 CPU**
+（0.6B：CPU 67–97 t/s vs GPU 26 t/s；8B：CPU 12.6–13.5 t/s vs GPU 5.1 t/s），
+原因与 TODO-031 一致，只是这次把尺寸补全了。GPU 真正赢的是高算术强度的大矩阵
+（Z-Image DiT 权重 1.3 GB/层、rows 数百），而 decode 是 rows=1 的 GEMV——正是
+`docs/usage/z-image.md` 里点名会误导的那类形状。
+
+### TODO-038: CPU/GPU 自动分发应该按实测选后端，而不是按模型大小
+
+在 GB10 上把 Qwen3 的 Q8_0 从 0.6B 扫到 8B（同 prompt、greedy、16 线程，
+线程池修复后的构建）：
+
+| 模型 | 每 token 权重 | CPU gen t/s | GPU gen t/s | CPU prefill t/s | GPU prefill t/s |
+|---|---|---|---|---|---|
+| 0.6B | 0.54 GB | **121.2** | 52.8 | **346.9** | 25.9 |
+| 4B | 3.74 GB | **23.1** | contract 失败→CPU | 1.3 | — |
+| 8B | 7.57 GB | **11.1** | 9.2 | **14.0** | 4.3 |
+
+**没有出现 GPU 超越的点**，但差距随尺寸收窄：0.6B 差 2.3×，8B 差 1.2×。
+
+把两边换算成有效带宽（每 token 把整个权重集读一遍）：
+
+| 模型 | CPU GB/s | GPU GB/s |
+|---|---|---|
+| 0.6B | 65 | 28 |
+| 8B | 84 | 70 |
+
+于是结论是：**GPU 解码是带宽受限的，而它只跑到 70 GB/s；CPU 在同一台机器上跑到 84 GB/s。**
+`qwen3_decode_gemv_bandwidth`（`src/vulkan/ops.rs`，`#[ignore]`）在真实解码形状上
+量到 lm_head 一次 661 MB 的 GEMV 最快 8.9 ms（74 GB/s），其余形状 10–52 GB/s，
+小矩阵被每次 dispatch 的固定开销吃掉。
+
+**但这个 GPU 数字是带偏的**：测量期间另一个租户占着 85% 的 GPU（root 的 python，
+96 GB 显存），nvidia-smi 采样 79–92%。GPU 这边还没拿到空闲机器，所以
+「GPU 在大模型上能不能反超」在这台机器上无法判定。
+
+因此自动分发的策略应当是**实测驱动**，不是按尺寸猜：
+
+1. **先量设备忙不忙**。本机 GPU 常驻 85% 利用率时，GPU 路径在任何尺寸都不该被选中。
+   可以用首 token 的实测延迟对比 CPU 基线，落后就回退——现在只有「logit 逐位一致」
+   的 contract 门，没有「谁更快」的门。
+2. **把 setup 成本算进去**。host→device 上传实测只有 5–9 GB/s（PCIe 路径在这台
+   统一内存机器上不快），8B 的 7.5 GB 权重上传就要 1 s 起步；一次性的 CLI 短跑
+   永远摊不平，serving 才能。策略需要知道预期 token 数。
+3. **contract 门先修**。4B 现在直接被拒（TODO-036），在数值对齐修好之前，
+   任何尺寸相关的策略表都是空谈。
+
+顺带记一条实测的坑：这台机器上任何「GPU 更快/更慢」的结论都必须附带
+**当次测量的 GPU 利用率**，否则数据没有可比性——TODO-036/037/038 里的数字都受此影响。
+
+### TODO-039: PyTorch 参照证明 GPU 路径不是「实现得不好」，是设备被占着
+
+用原始 safetensors 权重跑 PyTorch（`tools/oracle/qwen3/pytorch_qwen3.py`，
+bf16，greedy，64 token），和本仓库的两条路径同台对照：
+
+| 模型 | PyTorch CUDA bf16 | 我们的 Vulkan GPU (Q8_0) | 我们的 CPU (Q8_0) | PyTorch CPU fp32 |
+|---|---|---|---|---|
+| Qwen3-0.6B | 24.7 t/s | **52.8 t/s** | 121.2 t/s | 2.4 t/s |
+| Qwen3-8B | 4.2 t/s（15.6 GB/token） | **9.2 t/s**（7.6 GB/token） | 11.1 t/s | — |
+
+**我们的 Vulkan 路径比同卡 PyTorch 快 2.1–2.2×**（Q8_0 把每 token 的字节数减半，
+kernel 也够快），所以「GPU 输给 CPU」**不是实现问题**。
+
+真正的原因是带宽比：GPU 有效读取 70 GB/s，CPU 84 GB/s，而 GPU 这 70 GB/s 是在
+**另一个租户占着 85% 设备**的情况下拿到的（nvidia-smi 采样 79–92%）。GB10 的
+DRAM 峰值在 273 GB/s 量级，设备空闲时 GPU 路径在 8B 上应该能到 20 t/s 以上，
+也就是**会赢过 CPU 的 11.1 t/s**。
+
+所以自动分发的正确形状是「按实测选」，而不是「按大小猜」：先量设备占用与首 token
+延迟，落后 CPU 就回退。0.6B 上 GPU 无论如何都输（小模型权重装不进 cache，
+CPU 直接吃 LPDDR），8B 以上在设备空闲时才可能赢——这两个边界都需要在
+**独占设备**上重新测一遍。
+
+顺带把 PyTorch 的输出也记下来：Q8_0 的 greedy 文本与 bf16 参考在十几个 token 后
+就分叉（CPU 路径与 GPU 路径之间也分叉），这是量化 + 非逐位一致的正常表现，
+不是 bug 的证据；要判对错得用同权重的 llama.cpp 参照（TODO-036 的 4B contract
+失败同理）。

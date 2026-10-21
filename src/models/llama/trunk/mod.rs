@@ -19,3 +19,7 @@ pub use forward::{
 };
 pub use session::{LlamaSession, LlamaSessionConfig, LlamaWeights};
 pub use weights::{get_f32_tensor, load_layers, load_layers_static, LlamaLayerWeights};
+
+#[cfg(test)]
+mod compute_tests;
+mod dense;
