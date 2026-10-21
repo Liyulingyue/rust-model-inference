@@ -27,6 +27,7 @@ AuK Base/Flash 的 F16/Q8_0 投影与原生 Qwen 文本入口见 [AuK 实机记�
 
 | 型号 | GGUF architecture | 能力 | 所需组件 | 已验证格式 | 状态 | 证据 / 限制 |
 |---|---|---|---|---|---|---|
+| Timestral-209M | `timestral` | 单/多变量时间序列、数值协变量、21 分位数预测 | 官方 config + F32 safetensors 无损转换；请求 JSON | F32 GGUF | `Verified`（CPU/F32） | 固定官方 `a534bdbd`；全部 203 个权重 payload 精确一致。真实 CLI 的标量/默认 SIMD 路径逐 checkpoint 比较 mask、position、shape 和数值，包括 1025 步分块预测。浮点计算使用明确误差界；无 tokenizer。仅 209M，不支持 categorical target encoding、HTTP、GPU 或量化；[用法、哈希与复现](../../tools/oracle/timestral/README.md)。 |
 | Mage-Flow-Base | `mage_flow` + `mage_vae` + `qwen3vl`/`clip` | 主 CLI CPU 文生图 | DiT + MageVAE + Qwen3-VL 4B text；Edit 另需 vision | DiT/VAE/text BF16，norm/vision F32，F32 KV | `Experimental`（标量计算图已验证） | 真实权重 DiT、VAE、文本/vision 和固定噪声采样按全部 `u32` 位比较；最小 PNG 入口已运行。参考图片到 VL fast processor、默认大图、GPU 与 SIMD/FMA 未对齐。[哈希和验证范围](../../tools/oracle/mage_flow/README.md)。 |
 | Mage-Flow | `mage_flow` + `mage_vae` + `qwen3vl`/`clip` | 主 CLI CPU 文生图 | DiT + MageVAE + Qwen3-VL 4B text；Edit 另需 vision | DiT/VAE/text BF16，norm/vision F32，F32 KV | `Experimental`（标量计算图已验证） | 真实权重 DiT、VAE、文本/vision 和固定噪声采样按全部 `u32` 位比较；最小 PNG 入口已运行。参考图片到 VL fast processor、默认大图、GPU 与 SIMD/FMA 未对齐。[哈希和验证范围](../../tools/oracle/mage_flow/README.md)。 |
 | Mage-Flow-Turbo | `mage_flow` + `mage_vae` + `qwen3vl`/`clip` | 主 CLI CPU 文生图 | DiT + MageVAE + Qwen3-VL 4B text；Edit 另需 vision | DiT/VAE/text BF16，norm/vision F32，F32 KV | `Experimental`（标量计算图已验证） | 真实权重 DiT、VAE、文本/vision 和固定噪声采样按全部 `u32` 位比较；最小 PNG 入口已运行。参考图片到 VL fast processor、默认大图、GPU 与 SIMD/FMA 未对齐。[哈希和验证范围](../../tools/oracle/mage_flow/README.md)。 |
@@ -128,6 +129,8 @@ AuK Base/Flash 的 F16/Q8_0 投影与原生 Qwen 文本入口见 [AuK 实机记�
 | DreamX-Creator GPU、未匹配 GGUF pair | `Unsupported` | DreamX 当前只走原生 CPU；pair ID、组件清单、版本或精度 metadata 不匹配会在加载阶段拒绝。 |
 
 ## 架构注册表
+
+`timestral` 使用独立的 `src/models/timestral/` 配置、张量契约和概率预测图，由主 CLI 的 `--timestral-request` 入口分发，不进入文本模型/Tokenizer 路径。
 
 主模型代码当前认识这些 architecture：`bert`、`qwen2`、`qwen2vl`、`qwen3`、`qwen3vl`、`qwen3vlmoe`、`qwen35`、`edge0`、`qwen3tts`、`llama`、`mistral3`、`gemma2`、`granite`、`hunyuan-dense`、`pig`、`lfm2`、`lfm2moe`、`nanbeige`、`gemma4`、`spark2_5`、`mellum`、`dreamx`、`laya`、`audio8_asr_infinite`、`funasr-sensevoice-encoder`。其中 `bert` 使用 BERT/XLM-R 文本 embedding 路径；`gemma4`、`spark2_5`、`mellum`、`dreamx`、`audio8_asr_infinite` 和 `funasr-sensevoice-encoder` 使用各自的专用配置加载路径；`clip` 和 `funasr-sensevoice-encoder` 是 mmproj 组件架构，不是可独立生成的主模型。`mellum` 有独立的 `src/models/mellum/trunk/`，不复用 qwen3 trunk：它与 qwen3moe 在 tokenizer（`mellum2` vs `qwen2`）、位置编码（仅 7/28 非 SWA 层用 YaRN，SWA 层无缩放）、Attention/KV（21 层滑动窗口 1024）三处不一致，因此不能按“相近模型”路由；MoE 张量命名与 Qwen3 相同但门控后的专家顺序、权重归一和累加顺序按 llama.cpp `build_moe_ffn` 独立实现。`mistral` 与 `mistral3` 均复用 llama trunk：`mistral`（1/2 / 7B 等）走 GGUF 的 `llama` arch，文本模板靠 `general.name` 包含 `mistral`/`ministral`/`shieldstral` 触发 `[INST] … [/INST]`；`mistral3` 走 GGUF 的 `mistral3` arch，文本模板同样靠这三个子串之一触发。`shieldstral` 子串匹配是为 `Mistral-Shieldstral-1.0-3B` / `-22B`（Mistral 的内容审核系列）专门加的——它们的 `general.name` 是 "Shieldstral 1.0 3B" / "Shieldstral 22B"，与 "Mistral" / "Ministral" 只共享后缀字面。
 

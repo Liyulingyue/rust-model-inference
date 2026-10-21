@@ -125,6 +125,7 @@ pub struct CliOptions {
     pub qwen_omni_bf16: Option<PathBuf>,
     pub jev: bool,
     pub laya_request: Option<PathBuf>,
+    pub timestral_request: Option<PathBuf>,
     pub jev_context: Option<String>,
     pub jev_questions: Vec<JevQuestion>,
     pub jev_positive: Option<String>,
@@ -199,6 +200,7 @@ impl CliOptions {
                 || self.planner.is_some()
                 || self.perception.is_some()
                 || self.laya_request.is_some()
+                || self.timestral_request.is_some()
                 || self.longcat_kind.is_some()
                 || self.dump_logits
                 || self.bench

@@ -4,6 +4,35 @@ use super::options::{
 use super::types::{normalize_tts_language, CliOptions};
 
 pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
+    if options.timestral_request.is_some() {
+        if options.model.as_os_str().is_empty() {
+            return Err("--timestral-request requires --model".into());
+        }
+        if options.compute_policy() != crate::compute::ComputePolicy::Cpu
+            || options.jev
+            || options.rerank
+            || options.embedding
+            || options.tts
+            || options.yue2
+            || options.dreamx
+            || options.laya_request.is_some()
+            || options.prompt.is_some()
+            || options.planner.is_some()
+            || options.perception.is_some()
+            || options.longcat_kind.is_some()
+            || options.image.is_some()
+            || options.audio.is_some()
+            || options.video.is_some()
+            || options.mmproj.is_some()
+            || options.vae.is_some()
+            || options.text_encoder.is_some()
+            || options.out.is_some()
+            || options.output.is_some()
+        {
+            return Err("--timestral-request requires CPU forecasting; generation, media, server and other task modes are unsupported".into());
+        }
+        return Ok(());
+    }
     if options.width.is_some()
         || options.height.is_some()
         || options.cfg.is_some()
