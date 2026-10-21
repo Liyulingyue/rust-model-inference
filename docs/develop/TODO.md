@@ -2635,3 +2635,31 @@ Z-Image 的 **CPU** 路径 denoise 从 139.7 s 降到 126.4 s（−9.5%），GPU
 
 顺带记一条实测的坑：这台机器上任何「GPU 更快/更慢」的结论都必须附带
 **当次测量的 GPU 利用率**，否则数据没有可比性——TODO-036/037/038 里的数字都受此影响。
+
+### TODO-039: PyTorch 参照证明 GPU 路径不是「实现得不好」，是设备被占着
+
+用原始 safetensors 权重跑 PyTorch（`tools/oracle/qwen3/pytorch_qwen3.py`，
+bf16，greedy，64 token），和本仓库的两条路径同台对照：
+
+| 模型 | PyTorch CUDA bf16 | 我们的 Vulkan GPU (Q8_0) | 我们的 CPU (Q8_0) | PyTorch CPU fp32 |
+|---|---|---|---|---|
+| Qwen3-0.6B | 24.7 t/s | **52.8 t/s** | 121.2 t/s | 2.4 t/s |
+| Qwen3-8B | 4.2 t/s（15.6 GB/token） | **9.2 t/s**（7.6 GB/token） | 11.1 t/s | — |
+
+**我们的 Vulkan 路径比同卡 PyTorch 快 2.1–2.2×**（Q8_0 把每 token 的字节数减半，
+kernel 也够快），所以「GPU 输给 CPU」**不是实现问题**。
+
+真正的原因是带宽比：GPU 有效读取 70 GB/s，CPU 84 GB/s，而 GPU 这 70 GB/s 是在
+**另一个租户占着 85% 设备**的情况下拿到的（nvidia-smi 采样 79–92%）。GB10 的
+DRAM 峰值在 273 GB/s 量级，设备空闲时 GPU 路径在 8B 上应该能到 20 t/s 以上，
+也就是**会赢过 CPU 的 11.1 t/s**。
+
+所以自动分发的正确形状是「按实测选」，而不是「按大小猜」：先量设备占用与首 token
+延迟，落后 CPU 就回退。0.6B 上 GPU 无论如何都输（小模型权重装不进 cache，
+CPU 直接吃 LPDDR），8B 以上在设备空闲时才可能赢——这两个边界都需要在
+**独占设备**上重新测一遍。
+
+顺带把 PyTorch 的输出也记下来：Q8_0 的 greedy 文本与 bf16 参考在十几个 token 后
+就分叉（CPU 路径与 GPU 路径之间也分叉），这是量化 + 非逐位一致的正常表现，
+不是 bug 的证据；要判对错得用同权重的 llama.cpp 参照（TODO-036 的 4B contract
+失败同理）。
