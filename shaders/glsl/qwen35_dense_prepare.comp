@@ -1,4 +1,7 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+#include "f32_divide.glsl"
+#include "f32_norm.glsl"
 
 layout(local_size_x = 64) in;
 
@@ -54,7 +57,7 @@ void main() {
             sum = next;
         }
         precise float mean_square = (sum + correction) / float(head_dim) + pc.eps;
-        inverse_rms = inversesqrt(mean_square);
+        inverse_rms = inverse_sqrt_f32(mean_square);
     }
     barrier();
 
@@ -64,7 +67,8 @@ void main() {
         float scale = kind == 0u
             ? uintBitsToFloat(q_norm.data[index])
             : uintBitsToFloat(k_norm.data[index]);
-        arena.data[output_base + index] = floatBitsToUint(value * inverse_rms * scale);
+        precise float normalized = value * inverse_rms * scale;
+        arena.data[output_base + index] = floatBitsToUint(normalized);
         if (kind == 0u) {
             arena.data[pc.gate_word + (row * q_heads + head) * head_dim + index] =
                 arena.data[raw_base + head_dim + index];
@@ -78,9 +82,11 @@ void main() {
         float sine = uintBitsToFloat(arena.data[pc.rope_word + row * rope_dim + half_rope + index]);
         float first = uintBitsToFloat(arena.data[output_base + index]);
         float second = uintBitsToFloat(arena.data[output_base + half_rope + index]);
-        arena.data[output_base + index] = floatBitsToUint(fma(first, cosine, -second * sine));
+        precise float second_sine = second * sine;
+        precise float second_cosine = second * cosine;
+        arena.data[output_base + index] = floatBitsToUint(fma(first, cosine, -second_sine));
         arena.data[output_base + half_rope + index] =
-            floatBitsToUint(fma(first, sine, second * cosine));
+            floatBitsToUint(fma(first, sine, second_cosine));
     }
     barrier();
 

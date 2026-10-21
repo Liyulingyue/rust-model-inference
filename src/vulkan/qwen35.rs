@@ -1,6 +1,10 @@
-use super::ops::{ArenaRegion, GpuWeightFormat, OperatorBindings, Qwen3Ops, TokenCommands};
-use super::qwen3::{TokenCommitState, UploadedBuffers};
+use super::ops::{
+    required_activation_contracts, ArenaRegion, GpuMatmulSpec, GpuWeightFormat, OperatorBindings,
+    Qwen3Ops, TokenCommands,
+};
+use super::qwen3::UploadedBuffers;
 use super::{GpuBuffer, VulkanContext, VulkanError};
+use crate::compute::state::TokenCommitState;
 use crate::core::scratchpad::KvCache;
 use crate::core::tensor::GGMLType;
 use crate::models::qwen35::{Qwen35Config, Qwen35Model};
@@ -17,22 +21,11 @@ fn check_eligibility(facts: &EligibilityFacts) -> Result<(), String> {
     if facts.architecture != "qwen35" {
         return Err(format!("unsupported architecture {}", facts.architecture));
     }
-    if facts.weight_formats.is_empty()
-        || facts.weight_formats.iter().any(|&format| {
-            !matches!(
-                format,
-                GGMLType::BF16
-                    | GGMLType::F32
-                    | GGMLType::Q8_0
-                    | GGMLType::Q4_0
-                    | GGMLType::Q4_1
-                    | GGMLType::Q4K
-                    | GGMLType::Q5K
-                    | GGMLType::Q6K
-            )
-        })
-    {
-        return Err("unsupported Qwen3.5 Vulkan weight format".into());
+    if facts.weight_formats.is_empty() {
+        return Err("unsupported Qwen3.5 Vulkan weight format: no weights".into());
+    }
+    for &format in &facts.weight_formats {
+        GpuWeightFormat::from_ggml_type(format).map_err(|error| error.to_string())?;
     }
     if let Some(operation) = facts.unrecorded_operations.first() {
         return Err(format!(
@@ -421,8 +414,9 @@ fn fill_mrope(
                 3
             }
         };
-        coefficients[index] = theta[axis].cos();
-        coefficients[index + half] = theta[axis].sin();
+        let (cosine, sine) = crate::ops::rope_sin_cos(theta[axis]);
+        coefficients[index] = cosine;
+        coefficients[index + half] = sine;
         for value in &mut theta {
             *value *= theta_scale;
         }
@@ -463,8 +457,11 @@ struct LayerBindings {
     attention_norm: OperatorBindings,
     attention: AttentionBindings,
     post_attention_norm: OperatorBindings,
-    gate_up: WeightBindings<2>,
-    down: OperatorBindings,
+    // Both are None on a qwen35moe layer: it has no dense FFN, the experts run
+    // on the CPU, and recording a half-built FFN would submit work against
+    // buffers nothing writes.
+    gate_up: Option<WeightBindings<2>>,
+    down: Option<OperatorBindings>,
 }
 
 pub(crate) struct Qwen35GpuChunkResult<'a> {
@@ -524,6 +521,21 @@ impl Qwen35VulkanSession {
         if let Err(reason) = validate_executor_shape(&model.config, capacity) {
             eprintln!("[GPU] Qwen3.5 Vulkan unavailable: {reason}. Falling back to CPU.");
             return Ok(None);
+        }
+        context
+            .validate_qwen3_core_contract()
+            .map_err(VulkanError::UnsupportedShape)?;
+        let contracts = required_activation_contracts(&facts.weight_formats)
+            .map_err(VulkanError::UnsupportedShape)?;
+        if contracts.q8_0 {
+            context
+                .validate_q8_0_activation_contract()
+                .map_err(VulkanError::UnsupportedShape)?;
+        }
+        if contracts.q8_k {
+            context
+                .validate_q8_k_activation_contract()
+                .map_err(VulkanError::UnsupportedShape)?;
         }
 
         let config = model.config.clone();
@@ -630,15 +642,26 @@ impl Qwen35VulkanSession {
 
             let post_norm_buffer = buffers.upload_f32(&layer.attn_post_norm)?;
             let post_attention_norm = ops.bind_buffers(&[post_norm_buffer])?;
-            let gate_up = bind_weight_group(
-                &mut ops,
-                &mut buffers,
-                [
-                    (&layer.ffn_gate, "Qwen3.5 FFN gate"),
-                    (&layer.ffn_up, "Qwen3.5 FFN up"),
-                ],
-            )?;
-            let down = bind_weight(&mut ops, &mut buffers, &layer.ffn_down, "Qwen3.5 FFN down")?;
+            // A qwen35moe layer has no dense FFN; it falls back to the CPU
+            // route for the FFN instead of binding a half-model on the GPU.
+            let (gate_up, down) = match (layer.ffn_gate.as_ref(), layer.ffn_up.as_ref()) {
+                (Some(gate), Some(up)) => {
+                    let gate_up = bind_weight_group(
+                        &mut ops,
+                        &mut buffers,
+                        [(gate, "Qwen3.5 FFN gate"), (up, "Qwen3.5 FFN up")],
+                    )?;
+                    let down_weight = layer.ffn_down.as_ref().ok_or_else(|| {
+                        VulkanError::UnsupportedShape(format!(
+                            "missing Qwen3.5 layer {layer_index} FFN down while gate/up are present"
+                        ))
+                    })?;
+                    let down =
+                        bind_weight(&mut ops, &mut buffers, down_weight, "Qwen3.5 FFN down")?;
+                    (Some(gate_up), Some(down))
+                }
+                _ => (None, None),
+            };
             layers.push(LayerBindings {
                 attention_norm,
                 attention,
@@ -1057,39 +1080,44 @@ impl Qwen35VulkanSession {
                 config.n_embd,
                 config.n_embd,
             )?;
-            self.record_weight_group(
-                &commands,
-                bindings.gate_up,
-                self.layout.normed,
-                [
-                    (self.layout.ffn_gate, config.n_ff),
-                    (self.layout.ffn_up, config.n_ff),
-                ],
-                config.n_embd,
-                rows,
-            )?;
-            self.ops.record_silu_mul_rows(
-                &commands,
-                self.layout.ffn_gate,
-                self.layout.ffn_up,
-                config.n_ff,
-                rows,
-            )?;
-            self.record_weights(
-                &commands,
-                bindings.down,
-                self.layout.ffn_gate,
-                &[(self.layout.down, config.n_embd)],
-                config.n_ff,
-                rows,
-            )?;
-            self.ops.record_add_rows(
-                &commands,
-                self.layout.x,
-                self.layout.down,
-                config.n_embd,
-                rows,
-            )?;
+            // The dense FFN only exists on a qwen35 layer. On qwen35moe the
+            // experts run on the CPU, so there is nothing to record and
+            // submitting it would read buffers the graph never wrote.
+            if let (Some(gate_up), Some(down)) = (bindings.gate_up, bindings.down) {
+                self.record_weight_group(
+                    &commands,
+                    gate_up,
+                    self.layout.normed,
+                    [
+                        (self.layout.ffn_gate, config.n_ff),
+                        (self.layout.ffn_up, config.n_ff),
+                    ],
+                    config.n_embd,
+                    rows,
+                )?;
+                self.ops.record_silu_mul_rows(
+                    &commands,
+                    self.layout.ffn_gate,
+                    self.layout.ffn_up,
+                    config.n_ff,
+                    rows,
+                )?;
+                self.record_weights(
+                    &commands,
+                    down,
+                    self.layout.ffn_gate,
+                    &[(self.layout.down, config.n_embd)],
+                    config.n_ff,
+                    rows,
+                )?;
+                self.ops.record_add_rows(
+                    &commands,
+                    self.layout.x,
+                    self.layout.down,
+                    config.n_embd,
+                    rows,
+                )?;
+            }
         }
 
         let last_offset = (rows - 1) * config.n_embd * 4;
@@ -1189,8 +1217,8 @@ fn upload_weight(
     buffers: &mut UploadedBuffers,
     weight: &Weight<'_>,
     label: &str,
-) -> Result<(GpuBuffer, GpuWeightFormat), VulkanError> {
-    let format = GpuWeightFormat::from_ggml_type(weight.ggml_type)?;
+) -> Result<(GpuBuffer, GpuMatmulSpec), VulkanError> {
+    let format = GpuMatmulSpec::prepared(weight)?;
     let bytes = validated_weight_bytes(weight, label)?;
     Ok((buffers.upload(bytes)?, format))
 }
@@ -1231,7 +1259,11 @@ fn bind_weight(
     label: &str,
 ) -> Result<OperatorBindings, VulkanError> {
     let (buffer, format) = upload_weight(buffers, weight, label)?;
-    ops.bind_weight_buffers(std::slice::from_ref(&buffer), std::slice::from_ref(&format))
+    ops.bind_weight_buffers_mode(
+        std::slice::from_ref(&buffer),
+        std::slice::from_ref(&format.format),
+        format.mode,
+    )
 }
 
 fn bind_weight_group<const N: usize>(
@@ -1248,7 +1280,11 @@ fn bind_weight_group<const N: usize>(
     }
     if formats.iter().all(|format| *format == formats[0]) {
         return ops
-            .bind_weight_buffers(&gpu_buffers, &formats)
+            .bind_weight_buffers_mode(
+                &gpu_buffers,
+                &formats.iter().map(|spec| spec.format).collect::<Vec<_>>(),
+                formats[0].mode,
+            )
             .map(WeightBindings::Grouped);
     }
 
@@ -1256,7 +1292,11 @@ fn bind_weight_group<const N: usize>(
         .iter()
         .zip(&formats)
         .map(|(buffer, format)| {
-            ops.bind_weight_buffers(std::slice::from_ref(buffer), std::slice::from_ref(format))
+            ops.bind_weight_buffers_mode(
+                std::slice::from_ref(buffer),
+                std::slice::from_ref(&format.format),
+                format.mode,
+            )
         })
         .collect::<Result<Vec<_>, _>>()?
         .try_into()
@@ -1276,11 +1316,15 @@ fn eligibility_facts(model: &Qwen35Model<'_>) -> EligibilityFacts {
         return facts;
     }
     for (layer_index, layer) in model.layers.iter().enumerate() {
-        facts.weight_formats.extend([
-            layer.ffn_gate.ggml_type,
-            layer.ffn_up.ggml_type,
-            layer.ffn_down.ggml_type,
-        ]);
+        for weight in [
+            layer.ffn_gate.as_ref(),
+            layer.ffn_up.as_ref(),
+            layer.ffn_down.as_ref(),
+        ] {
+            if let Some(weight) = weight {
+                facts.weight_formats.push(weight.ggml_type);
+            }
+        }
         if model.config.is_recurrent[layer_index] {
             let weights = [
                 layer.wqkv.as_ref(),
@@ -1472,6 +1516,7 @@ mod tests {
             vec![GGMLType::Q5K],
             vec![GGMLType::Q8_0, GGMLType::Q5K, GGMLType::Q6K],
             vec![GGMLType::F32],
+            vec![GGMLType::F16],
             vec![GGMLType::Q4_0, GGMLType::Q5K, GGMLType::F32],
         ] {
             let facts = EligibilityFacts {
@@ -1604,7 +1649,13 @@ mod tests {
                 super::upload_weight(&mut buffers, weight, label).unwrap()
             })
             .unzip();
-        let bindings = ops.bind_weight_buffers(&gpu_buffers, &formats).unwrap();
+        let bindings = ops
+            .bind_weight_buffers_mode(
+                &gpu_buffers,
+                &formats.iter().map(|spec| spec.format).collect::<Vec<_>>(),
+                formats[0].mode,
+            )
+            .unwrap();
         let outputs: Vec<_> = [layout.projection, layout.gate, layout.up]
             .into_iter()
             .zip(weights)
@@ -1809,6 +1860,9 @@ mod tests {
             is_recurrent: vec![true, false],
             key_length: 4,
             value_length: 4,
+            // A dense qwen35 layer, so the Vulkan FFN bindings are the ones
+            // under test here rather than the qwen35moe CPU fallback.
+            moe: None,
         }
     }
 
@@ -1843,5 +1897,18 @@ mod tests {
             2.0f32.mul_add(coefficients[3], 4.0 * coefficients[1]),
         ];
         assert_eq!(actual.map(f32::to_bits), expected.map(f32::to_bits));
+        for dim in [32, 64, 128] {
+            for positions in [[0; 4], [3; 4], [7, 11, 13, 17]] {
+                let mut coefficients = vec![0.0; dim];
+                fill_mrope(&mut coefficients, positions, [16, 24, 24, 0], 1_000_000.0).unwrap();
+                let mut expected = vec![0.0; dim];
+                expected[..dim / 2].fill(1.0);
+                crate::ops::rope_mrope(&mut expected, positions, [16, 24, 24, 0], dim, 1_000_000.0);
+                assert_eq!(
+                    coefficients.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                    expected.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+                );
+            }
+        }
     }
 }

@@ -12,6 +12,7 @@
 //! when the heap offers it). On UMA iGPUs (Intel Xe) this is zero-copy system
 //! memory; discrete GPUs later want a staging → DEVICE_LOCAL upload path.
 
+pub(crate) mod dense;
 #[cfg(feature = "vulkan")]
 pub(crate) mod matmul_q4k;
 #[cfg(feature = "vulkan")]
@@ -35,7 +36,7 @@ use ash::vk;
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 #[cfg(feature = "vulkan")]
 const SHADER: &[u8] = include_bytes!("../shaders/bin/q8_matmul.spv");
@@ -163,10 +164,17 @@ pub struct VulkanContext {
     /// such devices and the engine stays on the CPU path.
     is_software_icd: bool,
     submission_count: std::sync::atomic::AtomicU64,
+    counters: ComputeCounters,
     /// Completed-matmul generation. Thread 0 bumps it after the fence wait;
     /// other pool threads block on it before touching the matmul output
     /// (their post-matmul work — silu, residual — must see the GPU result).
     completed_gen: std::sync::atomic::AtomicU64,
+    /// Cached Qwen3 operator contracts. The common attention boundary is
+    /// independent of weight storage; activation quantizers are checked only
+    /// when a model actually dispatches through that path.
+    qwen3_core_contract: OnceLock<Result<(), String>>,
+    q8_0_activation_contract: OnceLock<Result<(), String>>,
+    q8_k_activation_contract: OnceLock<Result<(), String>>,
 }
 
 /// Persistent activation staging buffers. Capacities grow to the largest
@@ -220,11 +228,59 @@ impl Default for IoState {
     }
 }
 
+/// Device-wide counters. Host bytes include mapped UMA copies; allocation peaks
+/// count Vulkan buffers, not process RSS or total driver memory.
+#[cfg(feature = "vulkan")]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ComputeStats {
+    pub submissions: u64,
+    pub static_uploads: u64,
+    pub static_upload_bytes: u64,
+    pub host_write_bytes: u64,
+    pub host_read_bytes: u64,
+    pub transfer_submissions: u64,
+    pub live_allocation_bytes: u64,
+    pub peak_allocation_bytes: u64,
+}
+#[cfg(feature = "vulkan")]
+impl ComputeStats {
+    pub fn since(self, before: Self) -> Self {
+        Self {
+            submissions: self.submissions.saturating_sub(before.submissions),
+            static_uploads: self.static_uploads.saturating_sub(before.static_uploads),
+            static_upload_bytes: self
+                .static_upload_bytes
+                .saturating_sub(before.static_upload_bytes),
+            host_write_bytes: self
+                .host_write_bytes
+                .saturating_sub(before.host_write_bytes),
+            host_read_bytes: self.host_read_bytes.saturating_sub(before.host_read_bytes),
+            transfer_submissions: self
+                .transfer_submissions
+                .saturating_sub(before.transfer_submissions),
+            live_allocation_bytes: self.live_allocation_bytes,
+            peak_allocation_bytes: self.peak_allocation_bytes,
+        }
+    }
+}
+#[cfg(feature = "vulkan")]
+#[derive(Default)]
+struct ComputeCounters {
+    static_uploads: AtomicU64,
+    static_upload_bytes: AtomicU64,
+    host_write_bytes: AtomicU64,
+    host_read_bytes: AtomicU64,
+    transfer_submissions: AtomicU64,
+    live_allocation_bytes: AtomicU64,
+    peak_allocation_bytes: AtomicU64,
+}
+
 #[cfg(feature = "vulkan")]
 pub(crate) struct GpuBuffer {
     pub(crate) buffer: vk::Buffer,
     pub(crate) memory: vk::DeviceMemory,
     pub(crate) size: u64,
+    allocation_bytes: u64,
     pub(crate) mapped: *mut u8,
 }
 
@@ -353,7 +409,11 @@ impl VulkanContext {
                             limits: candidate.limits,
                             is_software_icd: candidate.device_type == vk::PhysicalDeviceType::CPU,
                             submission_count: std::sync::atomic::AtomicU64::new(0),
+                            counters: ComputeCounters::default(),
                             completed_gen: std::sync::atomic::AtomicU64::new(0),
+                            qwen3_core_contract: OnceLock::new(),
+                            q8_0_activation_contract: OnceLock::new(),
+                            q8_k_activation_contract: OnceLock::new(),
                         });
                     }
                     Err(error) => failures.push(format!("{}: {error}", candidate.name)),
@@ -386,6 +446,26 @@ impl VulkanContext {
 
     pub(crate) fn supports_shader_float16(&self) -> bool {
         self.shader_float16
+    }
+
+    pub(crate) fn validate_qwen3_core_contract(&self) -> Result<(), String> {
+        self.qwen3_core_contract
+            .get_or_init(|| ops::check_qwen3_core_contract(self))
+            .clone()
+    }
+
+    pub(crate) fn validate_q8_0_activation_contract(&self) -> Result<(), String> {
+        self.q8_0_activation_contract
+            .get_or_init(|| ops::check_q8_0_activation_contract(self))
+            .clone()
+            .map_err(|error| format!("Q8_0 activation path: {error}"))
+    }
+
+    pub(crate) fn validate_q8_k_activation_contract(&self) -> Result<(), String> {
+        self.q8_k_activation_contract
+            .get_or_init(|| ops::check_q8_k_activation_contract(self))
+            .clone()
+            .map_err(|error| format!("Q8_K activation path: {error}"))
     }
 
     /// Human-readable memory heaps for diagnosing allocation performance.
@@ -424,6 +504,38 @@ impl VulkanContext {
 
     pub fn submission_count(&self) -> u64 {
         self.submission_count.load(Ordering::Relaxed)
+    }
+
+    pub fn compute_stats(&self) -> ComputeStats {
+        ComputeStats {
+            submissions: self.submission_count(),
+            static_uploads: self.counters.static_uploads.load(Ordering::Relaxed),
+            static_upload_bytes: self.counters.static_upload_bytes.load(Ordering::Relaxed),
+            host_write_bytes: self.counters.host_write_bytes.load(Ordering::Relaxed),
+            host_read_bytes: self.counters.host_read_bytes.load(Ordering::Relaxed),
+            transfer_submissions: self.counters.transfer_submissions.load(Ordering::Relaxed),
+            live_allocation_bytes: self.counters.live_allocation_bytes.load(Ordering::Relaxed),
+            peak_allocation_bytes: self.counters.peak_allocation_bytes.load(Ordering::Relaxed),
+        }
+    }
+
+    fn submit_transfer_commands(
+        &self,
+        submission: &mut CommandSubmission,
+    ) -> Result<(), VulkanError> {
+        let before = self.submission_count();
+        let result = self.submit_commands(submission);
+        self.counters
+            .transfer_submissions
+            .fetch_add(self.submission_count() - before, Ordering::Relaxed);
+        result
+    }
+
+    fn count_upload(&self, bytes: usize) {
+        self.counters.static_uploads.fetch_add(1, Ordering::Relaxed);
+        self.counters
+            .static_upload_bytes
+            .fetch_add(bytes as u64, Ordering::Relaxed);
     }
 
     fn recover_commands(&self, submission: &mut CommandSubmission) -> Result<(), VulkanError> {
@@ -594,9 +706,7 @@ impl VulkanContext {
             .map_err(|_| VulkanError::InitFailed("Vulkan command mutex poisoned".into()))?;
         let blocks_per_row = n_in / 32;
         if blocks_per_row > 512 {
-            // shader stages the input row in 4096 shared words (16 KiB);
-            // UnsupportedShape lets the caller fall back to CPU for this
-            // matmul while keeping the GPU alive for the rest.
+            // Keep the legacy width contract consistent with the row recorder.
             return Err(VulkanError::UnsupportedShape(format!(
                 "n_in {n_in} exceeds shader shared-memory capacity"
             )));
@@ -621,6 +731,10 @@ impl VulkanContext {
         std::ptr::copy_nonoverlapping(input_q8.as_ptr(), in_map, input_q8.len());
         let scale_map = scale_buffer.mapped as *mut f32;
         std::ptr::copy_nonoverlapping(input_scales.as_ptr(), scale_map, input_scales.len());
+        self.counters.host_write_bytes.fetch_add(
+            (input_q8.len() + input_scales.len() * 4) as u64,
+            Ordering::Relaxed,
+        );
 
         // 4. Bind and dispatch.
         self.update_descriptor_sets(
@@ -644,10 +758,10 @@ impl VulkanContext {
             &[],
         );
 
-        // dims = [n_in, n_out, blocks_per_row, row_stride_bytes]; the shader
+        // dims = [reduction_mode, n_out, blocks_per_row, row_stride_bytes]; the shader
         // addresses `weight` with byte offsets extracted from u32 words.
         let push_constants: [u32; 4] = [
-            n_in as u32,
+            ops::q8_dot_mode(),
             n_out as u32,
             blocks_per_row as u32,
             (blocks_per_row * 34) as u32,
@@ -659,7 +773,7 @@ impl VulkanContext {
             0,
             bytemuck::cast_slice(&push_constants),
         );
-        let (groups_x, groups_y) = dispatch_grid(n_out, &self.limits)?;
+        let (groups_x, groups_y) = dispatch_grid(n_out.div_ceil(64), &self.limits)?;
         self.device
             .cmd_dispatch(self.command_buffer, groups_x, groups_y, 1);
 
@@ -670,6 +784,9 @@ impl VulkanContext {
         // 5. Read results out of the persistently mapped output buffer.
         let out_map = output_buffer.mapped as *const f32;
         std::ptr::copy_nonoverlapping(out_map, output.as_mut_ptr(), n_out);
+        self.counters
+            .host_read_bytes
+            .fetch_add((n_out * 4) as u64, Ordering::Relaxed);
 
         Ok(())
     }
@@ -729,6 +846,7 @@ impl VulkanContext {
         };
         std::ptr::copy_nonoverlapping(weight.as_ptr(), buf.mapped, weight.len());
         std::ptr::write_bytes(buf.mapped.add(weight.len()), 0, size - weight.len());
+        self.count_upload(weight.len());
         self.weight_cache.lock().unwrap().insert(key, buf);
         Ok(*self.weight_cache.lock().unwrap().get(&key).unwrap())
     }
@@ -815,15 +933,27 @@ impl VulkanContext {
             std::ptr::null_mut()
         };
 
+        let live = self
+            .counters
+            .live_allocation_bytes
+            .fetch_add(mem_reqs.size, Ordering::Relaxed)
+            + mem_reqs.size;
+        self.counters
+            .peak_allocation_bytes
+            .fetch_max(live, Ordering::Relaxed);
         Ok(GpuBuffer {
             buffer,
             memory,
             size,
+            allocation_bytes: mem_reqs.size,
             mapped,
         })
     }
 
     pub(crate) unsafe fn destroy_buffer(&self, buf: &GpuBuffer) {
+        self.counters
+            .live_allocation_bytes
+            .fetch_sub(buf.allocation_bytes, Ordering::Relaxed);
         if !buf.mapped.is_null() {
             self.device.unmap_memory(buf.memory);
         }
@@ -857,6 +987,7 @@ impl VulkanContext {
         let buffer = self.alloc_persistently_mapped(size)?;
         std::ptr::copy_nonoverlapping(data.as_ptr(), buffer.mapped, data.len());
         std::ptr::write_bytes(buffer.mapped.add(data.len()), 0, size as usize - data.len());
+        self.count_upload(data.len());
         Ok(buffer)
     }
 
@@ -877,6 +1008,7 @@ impl VulkanContext {
             Ok(buffer) => buffer,
             Err(VulkanError::OutOfMemory) => {
                 // A full VRAM heap must preserve the shared-memory fallback.
+                self.count_upload(data.len());
                 return Ok(staging);
             }
             Err(error) => {
@@ -891,7 +1023,7 @@ impl VulkanContext {
                 .map_err(|_| VulkanError::InitFailed("Vulkan command mutex poisoned".into()))?;
             self.begin_commands(&mut submission)?;
             self.record_buffer_copy(self.command_buffer, staging, buffer, 0, 0, size as u64);
-            self.submit_commands(&mut submission)
+            self.submit_transfer_commands(&mut submission)
         })();
         if let Err(error) = result {
             // A failed fence wait does not prove these buffers are idle.
@@ -899,6 +1031,7 @@ impl VulkanContext {
             return Err(error);
         }
         self.destroy_buffer(&staging);
+        self.count_upload(data.len());
         Ok(buffer)
     }
 
@@ -950,7 +1083,7 @@ impl VulkanContext {
                 .map_err(|_| VulkanError::InitFailed("Vulkan command mutex poisoned".into()))?;
             self.begin_commands(&mut submission)?;
             self.record_buffer_copy(self.command_buffer, host, arena, 0, 0, size as u64);
-            self.submit_commands(&mut submission)
+            self.submit_transfer_commands(&mut submission)
         })();
         if let Err(error) = result {
             let _ = self.destroy_completed_buffers([&host, &arena]);
@@ -1529,6 +1662,9 @@ impl VulkanContext {
         pipeline_layout: vk::PipelineLayout,
         shader: &[u8],
     ) -> Result<vk::Pipeline, VulkanError> {
+        // include_bytes! only guarantees byte alignment; Vulkan requires u32 words.
+        let words = ash::util::read_spv(&mut std::io::Cursor::new(shader))
+            .map_err(|error| VulkanError::ShaderCompileFailed(error.to_string()))?;
         let shader_module = unsafe {
             device
                 .create_shader_module(
@@ -1537,7 +1673,7 @@ impl VulkanContext {
                         p_next: std::ptr::null(),
                         flags: Default::default(),
                         code_size: shader.len(),
-                        p_code: shader.as_ptr() as *const u32,
+                        p_code: words.as_ptr(),
                     },
                     None,
                 )
@@ -1872,6 +2008,61 @@ mod tests {
     };
     use ash::vk;
     use std::sync::atomic::Ordering;
+
+    #[test]
+    fn shader_module_receives_aligned_spirv_words() {
+        unsafe extern "system" fn create_shader_module(
+            _: vk::Device,
+            info: *const vk::ShaderModuleCreateInfo,
+            _: *const vk::AllocationCallbacks,
+            _: *mut vk::ShaderModule,
+        ) -> vk::Result {
+            let info = &*info;
+            if info.p_code.align_offset(std::mem::align_of::<u32>()) != 0 {
+                return vk::Result::ERROR_UNKNOWN;
+            }
+            let bytes = std::slice::from_raw_parts(info.p_code.cast::<u8>(), info.code_size);
+            if bytes != super::SHADER {
+                return vk::Result::ERROR_INVALID_SHADER_NV;
+            }
+            // Stop at the driver boundary after checking alignment and every byte.
+            vk::Result::ERROR_INITIALIZATION_FAILED
+        }
+
+        unsafe extern "system" fn get_device_proc_addr(
+            _: vk::Device,
+            name: *const std::ffi::c_char,
+        ) -> vk::PFN_vkVoidFunction {
+            if std::ffi::CStr::from_ptr(name).to_bytes() == b"vkCreateShaderModule" {
+                Some(std::mem::transmute(
+                    create_shader_module as vk::PFN_vkCreateShaderModule,
+                ))
+            } else {
+                None
+            }
+        }
+
+        let instance_fn = vk::InstanceFnV1_0::load(|name| {
+            if name.to_bytes() == b"vkGetDeviceProcAddr" {
+                get_device_proc_addr as *const () as *const std::ffi::c_void
+            } else {
+                std::ptr::null()
+            }
+        });
+        let device = unsafe { ash::Device::load(&instance_fn, vk::Device::null()) };
+        let mut storage = vec![0u8; super::SHADER.len() + 4];
+        let offset = (5 - (storage.as_ptr() as usize % 4)) % 4;
+        let shader = &mut storage[offset..offset + super::SHADER.len()];
+        shader.copy_from_slice(super::SHADER);
+        assert_eq!(shader.as_ptr() as usize % 4, 1);
+        let error =
+            VulkanContext::create_pipeline_for_device(&device, vk::PipelineLayout::null(), shader)
+                .unwrap_err();
+        assert!(
+            matches!(error, super::VulkanError::ShaderCompileFailed(ref message)
+            if message == &vk::Result::ERROR_INITIALIZATION_FAILED.to_string())
+        );
+    }
 
     #[test]
     #[ignore = "requires a Vulkan device"]

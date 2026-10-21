@@ -46,6 +46,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::config::Lfm2Config;
+use super::trace;
 use super::weights::{get_f32_tensor, load_layers, weight_needs_q8k, Lfm2LayerWeights};
 
 /// One item of the prefill stream: a text token or a precomputed embedding
@@ -466,6 +467,13 @@ pub fn run_inference_stream(
         generated_tokens.len(),
         infer_ms
     );
+    // Record the token streams so this incremental path can be compared
+    // against the re-prefill path (and against the oracle, which uses the same
+    // record names). No-op unless the parity-trace feature is on. `all_tokens`
+    // has grown past the prompt by now, so slice back to `n_prompt` to match
+    // the oracle's prompt-only record.
+    trace::tokens("prompt_ids", &all_tokens[..n_prompt]);
+    trace::tokens("generated_ids", &generated_tokens);
     Ok(())
 }
 
@@ -511,6 +519,7 @@ fn forward_layer(
         let x = std::slice::from_raw_parts_mut(x_ptr, n_embd);
         let normed = std::slice::from_raw_parts_mut(normed_ptr, n_embd);
         rms_norm(x, &lw.attn_norm, normed, eps);
+        trace::layer_1d("attn_norm", layer, pos, normed);
         quantize_q8_0_into(
             normed,
             n_embd,
@@ -546,8 +555,11 @@ fn forward_layer(
             n_layer,
         );
         let attn_proj = unsafe { std::slice::from_raw_parts(attn_proj_ptr, n_embd) };
+        trace::layer_1d("attn_proj", layer, pos, attn_proj);
         let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
         vec_add_into(attn_proj, x);
+        let x = unsafe { std::slice::from_raw_parts(x_ptr, n_embd) };
+        trace::layer_1d("post_attn_residual", layer, pos, x);
     } else {
         let (cur, _bx) = forward_shortconv(
             &pool,
@@ -562,6 +574,8 @@ fn forward_layer(
         );
         let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
         vec_add_into(&cur, x);
+        let x = unsafe { std::slice::from_raw_parts(x_ptr, n_embd) };
+        trace::layer_1d("post_attn_residual", layer, pos, x);
     };
 
     // ---- FFN (always present) ----
@@ -569,6 +583,7 @@ fn forward_layer(
         let x = std::slice::from_raw_parts_mut(x_ptr, n_embd);
         let normed = std::slice::from_raw_parts_mut(normed_ptr, n_embd);
         rms_norm(x, &lw.ffn_norm, normed, eps);
+        trace::layer_1d("ffn_norm", layer, pos, normed);
         quantize_q8_0_into(
             normed,
             n_embd,
@@ -602,7 +617,15 @@ fn forward_layer(
             .matmul_prepared(input, q8, sc, Some(q8k), up_buf, pool);
         lw.w_up
             .matmul_prepared(input, q8, sc, Some(q8k), gate_buf, pool);
+        // ggml names the *weight* projections, so `ffn_gate` is `w_gate`'s
+        // output — which this function parks in `up_buf`, and vice versa.
+        // `silu_mul_inplace(gate, up)` writes `up *= silu(gate)`, i.e. the
+        // product lands in its *second* (mutable) argument, which is `gate_buf`
+        // here.
+        trace::layer_1d("ffn_gate", layer, pos, up_buf);
+        trace::layer_1d("ffn_up", layer, pos, gate_buf);
         silu_mul_inplace(&up_buf[..n_ff], &mut gate_buf[..n_ff]);
+        trace::layer_1d("ffn_swiglu", layer, pos, gate_buf);
     }
 
     let gate_buf = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, n_ff) };
@@ -633,8 +656,11 @@ fn forward_layer(
     }
 
     let down_buf = unsafe { std::slice::from_raw_parts(down_buf_ptr, n_embd) };
+    trace::layer_1d("ffn_down", layer, pos, down_buf);
     let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
     vec_add_into(down_buf, x);
+    let x = unsafe { std::slice::from_raw_parts(x_ptr, n_embd) };
+    trace::layer_1d("l_out", layer, pos, x);
 }
 
 /// Batched LFM2 attention sub-layer for `rows` consecutive tokens
@@ -728,6 +754,9 @@ fn forward_attention_chunked(
             .as_ref()
             .unwrap()
             .matmul_prepared(input, q8, sc, Some(q8k), v_new, pool);
+        trace::layer_2d("q_proj", layer, pos, n_embd_head_k, n_head, q);
+        trace::layer_2d("k_proj", layer, pos, n_embd_head_k, n_head_kv, k_new);
+        trace::layer_2d("v_proj", layer, pos, n_embd_head_k, n_head_kv, v_new);
     }
 
     // Q/K norm + RoPE.
@@ -746,6 +775,8 @@ fn forward_attention_chunked(
                 eps,
             );
         }
+        trace::layer_2d("q_norm", layer, pos, n_embd_head_k, n_head, q);
+        trace::layer_2d("k_norm", layer, pos, n_embd_head_k, n_head_kv, k_new);
         for h in 0..n_head {
             rope_neox_inplace(
                 &mut q[h * n_embd_head_k..(h + 1) * n_embd_head_k],
@@ -762,6 +793,8 @@ fn forward_attention_chunked(
                 freq_base,
             );
         }
+        trace::layer_2d("q_rope", layer, pos, n_embd_head_k, n_head, q);
+        trace::layer_2d("k_rope", layer, pos, n_embd_head_k, n_head_kv, k_new);
     }
 
     // KV cache write.
@@ -794,6 +827,24 @@ fn forward_attention_chunked(
     // Attention compute (single-token decode path).
     let group_size = n_head / n_head_kv;
     let kq_scale = 1.0f32 / (n_embd_head_k as f32).sqrt();
+    // Staging for the two `[n_head, n_cached]` trace records. Only allocated
+    // when the checkpoint is actually wanted, and each head writes its own
+    // row, so the parallel loop below stays race-free. The Vec is kept alive
+    // here and shared with the closure as a raw pointer, matching how the rest
+    // of this function hands scratch across the thread pool.
+    let n_cached = pos + 1;
+    let mut trace_stage =
+        trace::trace_enabled("attn_scores").then(|| vec![0.0f32; n_head * n_cached]);
+    let mut probs_stage =
+        trace::trace_enabled("attn_probs").then(|| vec![0.0f32; n_head * n_cached]);
+    let trace_stage_ptr = trace_stage
+        .as_mut()
+        .map(|buffer| buffer.as_mut_ptr())
+        .unwrap_or(std::ptr::null_mut());
+    let probs_stage_ptr = probs_stage
+        .as_mut()
+        .map(|buffer| buffer.as_mut_ptr())
+        .unwrap_or(std::ptr::null_mut());
 
     match kv_cache {
         KvCache::F16(_) => {
@@ -869,7 +920,6 @@ fn forward_attention_chunked(
             let v_cache = unsafe {
                 std::slice::from_raw_parts(v_cache_f32_ptr, n_layer * max_ctx * n_embd_gqa)
             };
-            let n_cached = pos + 1;
             let n_padded = (n_cached + 255) / 256 * 256;
             let score_stride = scratch.score_stride;
             let scores_ptr = scratch.scores.as_mut_ptr();
@@ -905,7 +955,27 @@ fn forward_attention_chunked(
                         for v in &mut scores[n_cached..n_padded] {
                             *v = f32::NEG_INFINITY;
                         }
+                        // The oracle records one `[n_head, n_cached]` matrix, so
+                        // each head copies into its own disjoint slice of the
+                        // staging buffer. Emitting the per-head slice directly
+                        // would declare `n_head * n_cached` values and hand over
+                        // `n_cached`, which the trace refuses to write (it
+                        // reports the mismatch and drops the record).
+                        if !trace_stage_ptr.is_null() {
+                            let row = h * n_cached;
+                            unsafe {
+                                std::slice::from_raw_parts_mut(trace_stage_ptr.add(row), n_cached)
+                            }
+                            .copy_from_slice(&scores[..n_cached]);
+                        }
                         softmax_inplace(&mut scores[..n_padded]);
+                        if !probs_stage_ptr.is_null() {
+                            let row = h * n_cached;
+                            unsafe {
+                                std::slice::from_raw_parts_mut(probs_stage_ptr.add(row), n_cached)
+                            }
+                            .copy_from_slice(&scores[..n_cached]);
+                        }
                         // `values` was hard-coded to `[0.0f32; 512]` historically,
                         // which silently truncated attention once the cache
                         // exceeded 512 tokens. Allocating based on `max_ctx`
@@ -927,6 +997,13 @@ fn forward_attention_chunked(
 
     // Output projection.
     let attn_out = unsafe { std::slice::from_raw_parts(attn_out_ptr, n_embd_q) };
+    if let Some(stage) = trace_stage {
+        trace::layer_2d("attn_scores", layer, pos, n_head, n_cached, &stage);
+    }
+    if let Some(stage) = probs_stage {
+        trace::layer_2d("attn_probs", layer, pos, n_head, n_cached, &stage);
+    }
+    trace::layer_2d("attn_values", layer, pos, n_embd_head_v, n_head, attn_out);
     quantize_q8_0_into(
         attn_out,
         n_embd_q,
@@ -967,7 +1044,7 @@ fn forward_attention_chunked(
 fn forward_shortconv(
     pool: &Arc<ComputePool>,
     lw: &Lfm2LayerWeights<'_>,
-    _layer_idx: usize,
+    layer: usize,
     cfg: &Lfm2Config,
     scratch: &mut ExecutionScratchpad,
     pos: usize,
@@ -1033,6 +1110,7 @@ fn forward_shortconv(
             .as_ref()
             .unwrap()
             .matmul_prepared(input, q8, sc, q8k_opt, bcx, pool);
+        trace::layer_1d("conv_in_proj", layer, pos, bcx);
     }
 
     // Step 2: bx = b * x (per-channel); conv1d over (state || bx); multiply by c; out_proj.
@@ -1108,6 +1186,7 @@ fn forward_shortconv(
         }
         conv_out[c_idx] = acc;
     }
+    trace::layer_1d("conv_conv", layer, pos, &conv_out);
 
     // y = c * conv_out (per-channel gating, SIMD via vec_mul_inplace).
     vec_mul_inplace(c, conv_out.as_mut_slice());
@@ -1148,8 +1227,8 @@ fn forward_shortconv(
             .unwrap()
             .matmul_prepared(input, q8, sc, q8k_opt, o, pool);
     }
+    trace::layer_1d("conv_out_proj", layer, pos, &out);
 
-    let _ = pos;
     (out, bx)
 }
 
@@ -1318,6 +1397,7 @@ pub fn run_forward_logits_lfm2_with_batch(
         let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
         let normed = unsafe { std::slice::from_raw_parts_mut(normed_ptr, n_embd) };
         rms_norm(x, &output_norm, normed, eps);
+        trace::global("result_norm", pos, normed);
 
         let q8_buf = unsafe {
             std::slice::from_raw_parts_mut(
@@ -1358,6 +1438,10 @@ pub fn run_forward_logits_lfm2_with_batch(
                 Some(q8k)
             };
             output_pw.matmul_prepared(input, q8, sc, q8k_opt, logits, &pool);
+        }
+        {
+            let logits = unsafe { std::slice::from_raw_parts(logits_ptr, vocab) };
+            trace::global("result_output", pos, logits);
         }
 
         prefill_time += eval_started.elapsed();

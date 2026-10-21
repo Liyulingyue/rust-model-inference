@@ -27,6 +27,28 @@ pub struct Qwen35Config {
     pub is_recurrent: Vec<bool>,
     pub key_length: usize,
     pub value_length: usize,
+    /// MoE block, present only for `qwen35moe`.
+    ///
+    /// MiniCPM-V 4.7 35B-A3B pairs 256 routed experts (top-8, softmax gating,
+    /// selected weights re-normalised) with a **shared** expert whose output is
+    /// sigmoid-gated. See `docs/develop/QWEN35MOE.md`.
+    pub moe: Option<Qwen35Moe>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Qwen35Moe {
+    /// `{prefix}.expert_count`.
+    pub n_expert: usize,
+    /// `{prefix}.expert_used_count`.
+    pub n_expert_used: usize,
+    /// `{prefix}.expert_feed_forward_length`.
+    pub n_ff_exp: usize,
+    /// `{prefix}.expert_shared_feed_forward_length`; `0` means the checkpoint
+    /// has no shared expert and `ffn_out` is just the routed output.
+    pub n_ff_shexp: usize,
+    /// `{prefix}.expert_weights_scale` — llama.cpp applies it to the routed
+    /// expert weights; defaults to 1.0.
+    pub weights_scale: f32,
 }
 
 impl Qwen35Config {
@@ -202,6 +224,44 @@ impl Qwen35Config {
         let full_attention_interval = usize::try_from(full_attention_interval_raw.unwrap_or(4))
             .map_err(|_| "qwen35.full_attention_interval does not fit usize")?;
 
+        // Only `qwen35moe` carries the expert keys; a dense qwen35 has none, and
+        // inferring MoE from the presence of `ffn_gate_inp` alone would let a
+        // truncated or mislabelled GGUF half-load.
+        let moe = match source
+            .metadata(&format!("{prefix}.expert_count"))
+            .and_then(|v| v.to_u64())
+        {
+            None => None,
+            Some(n_expert) => {
+                let n_expert = n_expert as usize;
+                let n_expert_used = source
+                    .metadata(&format!("{prefix}.expert_used_count"))
+                    .and_then(|v| v.to_u64())
+                    .unwrap_or(0) as usize;
+                if n_expert == 0 || n_expert_used == 0 || n_expert_used > n_expert {
+                    return Err(format!(
+                        "Invalid {prefix} expert counts: total={n_expert}, used={n_expert_used}"
+                    ));
+                }
+                let n_ff_exp = get_u32("expert_feed_forward_length")? as usize;
+                let n_ff_shexp = source
+                    .metadata(&format!("{prefix}.expert_shared_feed_forward_length"))
+                    .and_then(|v| v.to_u64())
+                    .unwrap_or(0) as usize;
+                let weights_scale = source
+                    .metadata(&format!("{prefix}.expert_weights_scale"))
+                    .and_then(|v| v.to_f64())
+                    .unwrap_or(1.0) as f32;
+                Some(Qwen35Moe {
+                    n_expert,
+                    n_expert_used,
+                    n_ff_exp,
+                    n_ff_shexp,
+                    weights_scale,
+                })
+            }
+        };
+
         Ok(Self {
             n_embd: base.n_embd,
             n_layer: base.n_layer,
@@ -224,6 +284,7 @@ impl Qwen35Config {
             is_recurrent,
             key_length,
             value_length,
+            moe,
         })
     }
 

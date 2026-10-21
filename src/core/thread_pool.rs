@@ -79,6 +79,30 @@ impl Drop for GpuMatmulScope {
 //   Cargo.toml.
 // ============================================================================
 
+/// How many times a waiter spins before it lets the core go.
+///
+/// The spin covers the hand-off inside one `compute()` call, where the
+/// worker's turn is microseconds away. After that the waiter yields, because a
+/// hot spin keeps every participant runnable: a pool with as many
+/// participants as the machine has cores then starves the thread that is
+/// actually doing the work, and on a shared box it starves the other tenants
+/// too. Measured on a 20-core GB10 with `--threads 20`, hot spinning cost
+/// 29x: 2.4 tok/s against 69 tok/s at 19 threads.
+const WAIT_SPINS: usize = 256;
+
+/// Wait while `condition` holds, spinning briefly and then yielding the core.
+fn wait_while(mut condition: impl FnMut() -> bool) {
+    let mut spins = 0;
+    while condition() {
+        if spins < WAIT_SPINS {
+            spins += 1;
+            std::hint::spin_loop();
+        } else {
+            std::thread::yield_now();
+        }
+    }
+}
+
 pub struct ComputePool {
     n_threads: usize,
     inner: Arc<Inner>,
@@ -221,9 +245,7 @@ impl ComputePool {
         let call_fn = call_closure::<F> as *const () as usize;
 
         // Wait for all workers to be idle from previous compute
-        while self.inner.n_complete.load(Ordering::Acquire) < self.n_threads as i32 {
-            std::hint::spin_loop();
-        }
+        wait_while(|| self.inner.n_complete.load(Ordering::Acquire) < self.n_threads as i32);
         std::sync::atomic::fence(Ordering::SeqCst);
 
         // Reset completion counter before publishing new work
@@ -252,9 +274,7 @@ impl ComputePool {
         self.inner.n_complete.fetch_add(1, Ordering::SeqCst);
 
         // Wait for all threads to finish
-        while self.inner.n_complete.load(Ordering::Acquire) < self.n_threads as i32 {
-            std::hint::spin_loop();
-        }
+        wait_while(|| self.inner.n_complete.load(Ordering::Acquire) < self.n_threads as i32);
         std::sync::atomic::fence(Ordering::SeqCst);
 
         unsafe {
@@ -277,9 +297,7 @@ impl ComputePool {
             return;
         }
 
-        while self.inner.n_complete.load(Ordering::Acquire) < self.n_threads as i32 {
-            std::hint::spin_loop();
-        }
+        wait_while(|| self.inner.n_complete.load(Ordering::Acquire) < self.n_threads as i32);
         std::sync::atomic::fence(Ordering::SeqCst);
 
         self.inner.n_complete.store(0, Ordering::Relaxed);
@@ -315,9 +333,7 @@ impl ComputePool {
 
         self.inner.epoch.fetch_add(1, Ordering::SeqCst);
 
-        while self.inner.n_complete.load(Ordering::Acquire) < (self.n_threads - 1) as i32 {
-            std::hint::spin_loop();
-        }
+        wait_while(|| self.inner.n_complete.load(Ordering::Acquire) < (self.n_threads - 1) as i32);
 
         barrier.wait();
 
@@ -332,9 +348,7 @@ impl ComputePool {
 
         self.inner.n_complete.fetch_add(1, Ordering::SeqCst);
 
-        while self.inner.n_complete.load(Ordering::Acquire) < self.n_threads as i32 {
-            std::hint::spin_loop();
-        }
+        wait_while(|| self.inner.n_complete.load(Ordering::Acquire) < self.n_threads as i32);
         std::sync::atomic::fence(Ordering::SeqCst);
 
         self.inner.call_fn.store(0, Ordering::Relaxed);
@@ -354,9 +368,7 @@ impl ComputePool {
 
 impl Drop for ComputePool {
     fn drop(&mut self) {
-        while self.inner.n_complete.load(Ordering::Acquire) < self.n_threads as i32 {
-            std::hint::spin_loop();
-        }
+        wait_while(|| self.inner.n_complete.load(Ordering::Acquire) < self.n_threads as i32);
         self.inner.n_complete.store(0, Ordering::Relaxed);
         self.inner.shutdown.store(true, Ordering::Relaxed);
         std::sync::atomic::fence(Ordering::SeqCst);
@@ -370,17 +382,27 @@ impl Drop for ComputePool {
 fn worker_loop(tid: usize, n_threads: usize, inner: &Inner) {
     let mut my_epoch: u32 = 0;
     loop {
+        // An idle worker must not hold a core. The chunked path spawns
+        // `n_threads - 1` fresh threads per call, so a hot-spinning worker
+        // competes with the very threads the call is waiting for.
+        let mut spins = 0;
         while inner.epoch.load(Ordering::Acquire) == my_epoch {
             if inner.shutdown.load(Ordering::Acquire) {
                 return;
             }
+            if spins < WAIT_SPINS {
+                spins += 1;
+                std::hint::spin_loop();
+                continue;
+            }
+            spins = 0;
             // Yield idle GPU-mode workers so they do not compete with driver threads.
             #[cfg(feature = "vulkan")]
             if crate::ops::gpu_requested() {
                 std::thread::yield_now();
                 continue;
             }
-            std::hint::spin_loop();
+            std::thread::yield_now();
         }
         my_epoch = inner.epoch.load(Ordering::Acquire);
         if inner.shutdown.load(Ordering::Acquire) {

@@ -9,7 +9,12 @@ use std::time::Instant;
 /// Architectures `--jev --image` accepts. The HTTP `/v1/jev/image` endpoints
 /// dispatch on the same set via [`image_supported_arch`], so a model that can be
 /// scored over HTTP can also be scored from the CLI.
-const IMAGE_JEV_ARCHES: [&str; 4] = ["qwen35", "qwen3", "qwen3vl", "qwen3vlmoe"];
+///
+/// `qwen35moe` (MiniCPM-V 4.7 35B-A3B) rides the same `minicpmv4_7` projector
+/// as `qwen35` and its text tower loads through the same `Qwen35Model`, so it
+/// needs no separate scorer. It was missing here while the plain multimodal
+/// gate already accepted it, which left 35B-A3B able to chat but not score.
+const IMAGE_JEV_ARCHES: [&str; 5] = ["qwen35", "qwen35moe", "qwen3", "qwen3vl", "qwen3vlmoe"];
 
 pub fn image_supported_arch(arch: &str) -> bool {
     IMAGE_JEV_ARCHES.contains(&arch)
@@ -86,7 +91,11 @@ fn run_jev_decision_data_with_image(
             image_path,
             jinja.clone(),
         ),
-        "qwen35" => qwen35::run_jev_decision_qwen35(
+        // `qwen35moe` shares `qwen35::run_jev_decision_qwen35`: the MoE tower is
+        // a `Qwen35Model` with `moe` set, so `run_forward_logits_qwen35_with_batch`
+        // and the `minicpmv4_7` projector path are identical. Only the arch
+        // string differs.
+        "qwen35" | "qwen35moe" => qwen35::run_jev_decision_qwen35(
             source.clone(),
             context,
             &prepared,
@@ -725,4 +734,34 @@ pub(crate) fn run_jev_decision_core<S: JevScorer>(
         results.push(result);
     }
     Ok(results)
+}
+
+#[cfg(test)]
+mod image_arch_tests {
+    use super::image_supported_arch;
+
+    /// The regression: `qwen35moe` (MiniCPM-V 4.7 35B-A3B) was missing here while
+    /// the plain multimodal gate already accepted it, so `--jev --image` and
+    /// `/v1/jev/image` refused a model that could chat fine. It rides the same
+    /// `minicpmv4_7` projector and the same `Qwen35Model`, so it needs no
+    /// separate scorer.
+    #[test]
+    fn qwen35moe_is_scoreable_with_an_image() {
+        assert!(
+            image_supported_arch("qwen35moe"),
+            "MiniCPM-V 4.7 35B-A3B must be JEV-scorable"
+        );
+        assert!(image_supported_arch("qwen35"));
+    }
+
+    /// Only the multimodal towers are accepted; a text-only model still errors.
+    #[test]
+    fn non_multimodal_arches_stay_rejected() {
+        for arch in ["llama", "qwen2", "mistral3", "gemma4", ""] {
+            assert!(
+                !image_supported_arch(arch),
+                "{arch:?} has no multimodal tower and must stay rejected"
+            );
+        }
+    }
 }

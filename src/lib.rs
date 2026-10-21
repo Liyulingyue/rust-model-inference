@@ -2,6 +2,7 @@ pub mod app;
 pub use app::open_or_exit;
 pub use app::run_or_exit;
 pub use models::qwen3::{get_f32_tensor, Qwen3LayerWeights};
+pub mod compute;
 pub mod core;
 pub mod format;
 pub mod models;

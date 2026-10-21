@@ -22,29 +22,7 @@ shared float partial_error[64];
 shared float row_max;
 shared float inverse_sum;
 
-float exp_accurate(float x) {
-    precise float z = fma(x, uintBitsToFloat(0x3fb8aa3bu), uintBitsToFloat(0x4b400000u));
-    precise float n = z - uintBitsToFloat(0x4b400000u);
-    precise float reduced = fma(-n, uintBitsToFloat(0x3f317200u), x);
-    reduced = fma(-n, uintBitsToFloat(0x35bfbe8eu), reduced);
-    uint exponent = floatBitsToUint(z) << 23u;
-    precise float scale = uintBitsToFloat(exponent + floatBitsToUint(1.0));
-    precise float polynomial = uintBitsToFloat(0x39500d01u);
-    polynomial = fma(polynomial, reduced, uintBitsToFloat(0x3ab60b61u));
-    polynomial = fma(polynomial, reduced, uintBitsToFloat(0x3c088889u));
-    polynomial = fma(polynomial, reduced, uintBitsToFloat(0x3d2aaaabu));
-    polynomial = fma(polynomial, reduced, uintBitsToFloat(0x3e2aaaabu));
-    polynomial = fma(polynomial, reduced, uintBitsToFloat(0x3f000000u));
-    polynomial = fma(polynomial, reduced, uintBitsToFloat(0x3f800000u));
-    polynomial = fma(polynomial, reduced, uintBitsToFloat(0x3f800000u));
-    if (abs(n) <= 126.0) return scale * polynomial;
-
-    uint adjust = n <= 0.0 ? 0x82000000u : 0u;
-    precise float scale1 = uintBitsToFloat(adjust + 0x7f000000u);
-    precise float scale2 = uintBitsToFloat(exponent - adjust);
-    if (abs(n) > 192.0) return scale1 * scale1;
-    return scale2 * polynomial * scale1;
-}
+#include "exp_accurate.glsl"
 
 void add_pair(
     inout float high,
@@ -85,7 +63,8 @@ void main() {
     float sum = 0.0;
     float sum_error = 0.0;
     for (uint index = lane; index < visible; index += 64u) {
-        float value = exp_accurate(uintBitsToFloat(arena.data[base + index]) - row_max);
+        float score = uintBitsToFloat(arena.data[base + index]);
+        float value = exp_accurate(score - row_max);
         arena.data[base + index] = floatBitsToUint(value);
         add_pair(sum, sum_error, value, 0.0);
     }
@@ -105,8 +84,22 @@ void main() {
     if (lane == 0u) {
         precise float inverse = 1.0 / partial[0];
         precise float residual = fma(-partial[0], inverse, 1.0);
-        residual = fma(-partial_error[0], inverse, residual);
+        // Keep the compensated low term out of FMA: RADV can contract this
+        // sub-ULP product away even under `precise`, which changes F16 ties.
+        precise float inverse_low = -partial_error[0] * inverse;
+        residual = residual + inverse_low;
         inverse_sum = fma(residual, inverse, inverse);
+        // Some drivers contract the tiny compensated term away inside FMA.
+        // Add it explicitly before choosing the nearest F32 reciprocal.
+        precise float current_residual = fma(-partial[0], inverse_sum, 1.0);
+        precise float current_low = -partial_error[0] * inverse_sum;
+        current_residual = current_residual + current_low;
+        uint next_bits = floatBitsToUint(inverse_sum) + 1u;
+        precise float next_inverse = uintBitsToFloat(next_bits);
+        precise float next_residual = fma(-partial[0], next_inverse, 1.0);
+        precise float next_low = -partial_error[0] * next_inverse;
+        next_residual = next_residual + next_low;
+        if (abs(next_residual) < abs(current_residual)) inverse_sum = next_inverse;
     }
     barrier();
     for (uint index = lane; index < visible; index += 64u) {

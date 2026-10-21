@@ -4,7 +4,8 @@ use super::Kernel;
 use crate::core::tensor::GGMLType;
 use crate::ops::quant::BlockQ8K;
 use crate::vulkan::ops::{
-    AttentionRuntime, BatchedLinearRuntime, Conv2dRuntime, Conv3dRuntime, GpuWeightFormat,
+    AttentionRuntime, BatchedLinearRuntime, Conv2dRuntime, Conv3dRuntime, GpuMatmulSpec,
+    GpuWeightFormat,
 };
 use std::sync::Mutex;
 
@@ -15,9 +16,32 @@ pub(crate) struct GpuLinear {
 
 struct LinearState {
     weight: (usize, usize),
-    format: GpuWeightFormat,
+    spec: GpuMatmulSpec,
     shape: (usize, usize, usize),
     runtime: BatchedLinearRuntime,
+}
+
+/// Smallest number of output elements worth a GPU submission.
+///
+/// Every `BatchedLinearRuntime::matmul_rows` call ends in its own
+/// `submit_and_wait`, and that fence costs ~2.5 ms on the GB10 + driver
+/// combination this project targets. A matmul only wins if it does enough
+/// work to pay that back.
+///
+/// LFM2.5-8B (MoE) is the pathological case: decode runs `rows=1`,
+/// `n_out=1792` expert projections, 24 layers x top-4 experts x 3, so one
+/// token pays 288 fences. Measured on that model, the GPU path took 20.3 s
+/// for a 2-token run against 2.1 s with the GPU matmul disabled -- an ~10x
+/// regression purely from fence latency. Those calls are 1792 output
+/// elements, so they now stay on the CPU pool, while image/diffusion
+/// matmuls (millions of output elements per call) are unaffected.
+///
+/// Override with `RUST_GPU_MIN_OUTPUTS=0` to restore the old behaviour.
+fn min_gpu_matmul_outputs() -> usize {
+    std::env::var("RUST_GPU_MIN_OUTPUTS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(16 * 1024)
 }
 
 pub(crate) fn offload_enabled() -> bool {
@@ -30,15 +54,19 @@ pub(crate) fn offload_enabled() -> bool {
 
 impl GpuLinear {
     pub(crate) fn tile_rows(
-        format: GpuWeightFormat,
+        spec: impl Into<GpuMatmulSpec>,
         n_in: usize,
         n_out: usize,
         rows: usize,
     ) -> usize {
-        let limit = if matches!(
-            format,
-            GpuWeightFormat::F16 | GpuWeightFormat::BF16 | GpuWeightFormat::F32
-        ) {
+        let spec = spec.into();
+        // The tiled paths amortize a fence over many rows: F16 in the prepared
+        // mode, and BF16/F32 in the prepared mode through the transposed float
+        // kernel. The dot and rounded modes reduce serially and stay small.
+        let limit = if spec.uses_tiled_f16()
+            || (matches!(spec.format, GpuWeightFormat::BF16 | GpuWeightFormat::F32)
+                && spec.mode == crate::vulkan::ops::GpuMatmulMode::Prepared)
+        {
             // Target 16 MiB of host input/output while amortizing fence waits.
             (4 * 1024 * 1024 / n_in.saturating_add(n_out).max(1)).clamp(1, 4096)
         } else {
@@ -51,13 +79,14 @@ impl GpuLinear {
     pub(crate) fn try_matmul(
         &self,
         weight: &[u8],
-        format: GpuWeightFormat,
+        spec: impl Into<GpuMatmulSpec>,
         input: &[f32],
         output: &mut [f32],
         n_in: usize,
         n_out: usize,
         rows: usize,
     ) -> bool {
+        let spec = spec.into();
         if !offload_enabled()
             || rows == 0
             || n_in == 0
@@ -70,19 +99,22 @@ impl GpuLinear {
                     .ok()
                     .and_then(|value| value.parse().ok())
                     .unwrap_or(usize::MAX)
+            || rows
+                .checked_mul(n_out)
+                .is_none_or(|outputs| outputs < min_gpu_matmul_outputs())
         {
             return false;
         }
         let Some(context) = crate::ops::get_vulkan_context() else {
             return false;
         };
-        let tile_rows = Self::tile_rows(format, n_in, n_out, rows);
+        let tile_rows = Self::tile_rows(spec, n_in, n_out, rows);
         let key = (weight.as_ptr() as usize, weight.len());
         let mut state = self.state.lock().unwrap();
         let result = (|| {
             if state.as_ref().is_none_or(|cached| {
                 cached.weight != key
-                    || cached.format != format
+                    || cached.spec != spec
                     || cached.shape.0 < tile_rows
                     || cached.shape.1 != n_in
                     || cached.shape.2 != n_out
@@ -91,7 +123,7 @@ impl GpuLinear {
                 let runtime = BatchedLinearRuntime::new(context, tile_rows, n_in, n_out, 2)?;
                 *state = Some(LinearState {
                     weight: key,
-                    format,
+                    spec,
                     shape: (tile_rows, n_in, n_out),
                     runtime,
                 });
@@ -103,7 +135,7 @@ impl GpuLinear {
             {
                 runtime.matmul_rows(
                     weight,
-                    format,
+                    spec,
                     input,
                     input.len() / n_in,
                     n_in,
@@ -341,9 +373,9 @@ mod tests {
         let rows = GpuLinear::tile_rows(GpuWeightFormat::F16, 4608, 512, 4096);
         assert!(rows > 64 && rows * (4608 + 512) * 4 <= 16 * 1024 * 1024);
         for format in [
-            GpuWeightFormat::F16Dot,
-            GpuWeightFormat::BF16Dot,
-            GpuWeightFormat::Q8_0,
+            GpuWeightFormat::F16.with_mode(crate::vulkan::ops::GpuMatmulMode::Dot),
+            GpuWeightFormat::BF16.with_mode(crate::vulkan::ops::GpuMatmulMode::Dot),
+            GpuWeightFormat::Q8_0.into(),
         ] {
             assert_eq!(GpuLinear::tile_rows(format, 512, 512, 1089), 64);
         }
@@ -370,6 +402,13 @@ impl<'a> VulkanKernel<'a> {
 }
 
 impl Kernel for VulkanKernel<'_> {
+    fn supports_f16_strict(&self) -> bool {
+        self.inner.supports_f16_strict()
+    }
+    fn rounds_bf16_input(&self) -> bool {
+        self.inner.rounds_bf16_input()
+    }
+
     fn try_forward_vulkan_rows(
         &self,
         input: &[f32],

@@ -1,5 +1,7 @@
 //! Per-request Qwen3 generation state and prompt/decode orchestration.
 
+use crate::compute::ComputePolicy;
+
 use super::forward::{Qwen3GenerateOptions, Qwen3Generation, Qwen3Input};
 use super::prefill::Qwen3PrefillScratch;
 use super::util::{
@@ -13,12 +15,127 @@ use crate::core::scratchpad::{
 #[cfg(feature = "parity-trace")]
 use crate::parity_trace;
 #[cfg(feature = "vulkan")]
-use crate::vulkan::qwen3::{commit_shadow_kv, Qwen3VulkanSession};
+use crate::vulkan::qwen3::Qwen3VulkanSession;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+const MODEL_LOGIT_ABS_TOLERANCE: f32 = 2e-3;
+const MODEL_LOGIT_REL_TOLERANCE: f32 = 2e-3;
+
+pub(super) fn validate_model_logits(gpu: &[f32], cpu: &[f32]) -> Result<(), String> {
+    if gpu.len() != cpu.len() {
+        return Err(format!(
+            "model logit length mismatch: gpu={} cpu={}",
+            gpu.len(),
+            cpu.len()
+        ));
+    }
+    for (index, (&gpu, &cpu)) in gpu.iter().zip(cpu).enumerate() {
+        let absolute = (gpu - cpu).abs();
+        let relative = absolute / cpu.abs().max(f32::MIN_POSITIVE);
+        if !gpu.is_finite()
+            || !cpu.is_finite()
+            || absolute > MODEL_LOGIT_ABS_TOLERANCE + MODEL_LOGIT_REL_TOLERANCE * cpu.abs()
+        {
+            return Err(format!(
+                "model logit mismatch at {index}: gpu={gpu} cpu={cpu} abs={absolute} rel={relative}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn validate_model_kv(gpu: &KvState, cpu: &KvState) -> Result<(), String> {
+    validate_model_kv_range(gpu, cpu, 0, gpu.seq_len)
+}
+
+pub(super) fn validate_model_kv_range(
+    gpu: &KvState,
+    cpu: &KvState,
+    start_position: usize,
+    rows: usize,
+) -> Result<(), String> {
+    if gpu.format != cpu.format
+        || gpu.capacity != cpu.capacity
+        || gpu.seq_len != cpu.seq_len
+        || !gpu.arch.is_compatible_with(&cpu.arch)
+    {
+        return Err(format!(
+            "model KV shape mismatch: gpu={:?}/capacity {}/seq {} cpu={:?}/capacity {}/seq {}",
+            gpu.format, gpu.capacity, gpu.seq_len, cpu.format, cpu.capacity, cpu.seq_len
+        ));
+    }
+    let end_position = start_position
+        .checked_add(rows)
+        .ok_or_else(|| "model KV range overflow".to_string())?;
+    if end_position > gpu.seq_len {
+        return Err(format!(
+            "model KV range {}..{} exceeds sequence length {}",
+            start_position, end_position, gpu.seq_len
+        ));
+    }
+    let stride = gpu.arch.n_head_kv * gpu.arch.n_embd_head_k.max(gpu.arch.n_embd_head_v);
+    for layer in 0..gpu.arch.n_layer {
+        let start = layer * gpu.capacity * stride + start_position * stride;
+        let end = start + rows * stride;
+        match (&gpu.cache, &cpu.cache) {
+            (KvCache::F16(gpu), KvCache::F16(cpu)) => {
+                if let Some(index) = gpu.k[start..end]
+                    .iter()
+                    .zip(&cpu.k[start..end])
+                    .position(|(gpu, cpu)| gpu != cpu)
+                {
+                    return Err(format!(
+                        "model KV mismatch at layer {layer} K index {index}: gpu={} cpu={}",
+                        gpu.k[start + index],
+                        cpu.k[start + index]
+                    ));
+                }
+                if let Some(index) = gpu.v[start..end]
+                    .iter()
+                    .zip(&cpu.v[start..end])
+                    .position(|(gpu, cpu)| gpu != cpu)
+                {
+                    return Err(format!(
+                        "model KV mismatch at layer {layer} V index {index}: gpu={} cpu={}",
+                        gpu.v[start + index],
+                        cpu.v[start + index]
+                    ));
+                }
+            }
+            (KvCache::F32(gpu), KvCache::F32(cpu)) => {
+                if let Some(index) = gpu.k[start..end]
+                    .iter()
+                    .zip(&cpu.k[start..end])
+                    .position(|(gpu, cpu)| gpu.to_bits() != cpu.to_bits())
+                {
+                    return Err(format!(
+                        "model KV mismatch at layer {layer} K index {index}: gpu={} cpu={}",
+                        gpu.k[start + index],
+                        cpu.k[start + index]
+                    ));
+                }
+                if let Some(index) = gpu.v[start..end]
+                    .iter()
+                    .zip(&cpu.v[start..end])
+                    .position(|(gpu, cpu)| gpu.to_bits() != cpu.to_bits())
+                {
+                    return Err(format!(
+                        "model KV mismatch at layer {layer} V index {index}: gpu={} cpu={}",
+                        gpu.v[start + index],
+                        cpu.v[start + index]
+                    ));
+                }
+            }
+            _ => return Err("model KV cache format mismatch".into()),
+        }
+    }
+    Ok(())
+}
+
 pub struct Qwen3Session<'model> {
     pub(crate) model: &'model Qwen3Model,
+    pub(crate) compute_policy: ComputePolicy,
     pub(crate) kv_state: KvState,
     pub(crate) scratch: ExecutionScratchpad,
     pub(super) prefill_scratch: Qwen3PrefillScratch,
@@ -27,6 +144,8 @@ pub struct Qwen3Session<'model> {
     pub(crate) gpu: Option<Qwen3VulkanSession>,
     #[cfg(feature = "vulkan")]
     pub(crate) full_model_gpu_failed: bool,
+    #[cfg(feature = "vulkan")]
+    pub(crate) gpu_contract_validated: bool,
     #[cfg(test)]
     pub(super) fail_cpu_prefill_after_layer: Option<usize>,
 }
@@ -42,6 +161,24 @@ impl<'model> Qwen3Session<'model> {
         kv_format: KvFormat,
         lifecycle: KvLifecycle,
     ) -> Result<Self, String> {
+        Self::new_with_compute(
+            model,
+            capacity,
+            kv_format,
+            lifecycle,
+            ComputePolicy::legacy(),
+        )
+    }
+
+    pub fn new_with_compute(
+        model: &'model Qwen3Model,
+        capacity: usize,
+        kv_format: KvFormat,
+        lifecycle: KvLifecycle,
+        compute_policy: ComputePolicy,
+    ) -> Result<Self, String> {
+        compute_policy.check_build()?;
+        let _scope = compute_policy.cpu_scope();
         if capacity == 0 || capacity > model.config.n_ctx {
             return Err(format!(
                 "Session capacity {capacity} must be within 1..={}",
@@ -127,9 +264,37 @@ impl<'model> Qwen3Session<'model> {
         let _ = kv_bytes;
 
         #[cfg(feature = "vulkan")]
-        let (gpu, full_model_gpu_failed) = match crate::ops::get_vulkan_context() {
+        let context = if kv_format == KvFormat::F16 {
+            compute_policy
+                .context()
+                .map_err(|error| error.to_string())?
+        } else if compute_policy == ComputePolicy::Vulkan {
+            return Err("Qwen3 Vulkan currently requires F16 KV".into());
+        } else {
+            // The resident Vulkan decoder is the only GPU path this model has,
+            // and it needs F16 KV. Under the default F32 the request was simply
+            // dropped, so `--gpu` looked like it ran while every token was
+            // computed on the CPU. Say so instead of failing quietly.
+            if compute_policy != ComputePolicy::Cpu {
+                eprintln!(
+                    "[GPU] Qwen3 resident Vulkan decode requires F16 KV but got \
+                     {kv_format:?}; text generation runs on the CPU. \
+                     Pass --kv-cache f16 to enable the GPU path."
+                );
+            }
+            None
+        };
+        #[cfg(feature = "vulkan")]
+        let (gpu, full_model_gpu_failed) = match context {
             Some(context) => match Qwen3VulkanSession::try_new(model, capacity, context) {
-                Ok(gpu) => (gpu, false),
+                Ok(None) if compute_policy == ComputePolicy::Vulkan => {
+                    return Err("Qwen3 configuration is unsupported for full-model Vulkan".into());
+                }
+                Ok(Some(gpu)) => (Some(gpu), false),
+                Ok(None) => (None, false),
+                Err(error) if compute_policy == ComputePolicy::Vulkan => {
+                    return Err(error.to_string())
+                }
                 Err(error) => {
                     eprintln!(
                         "[GPU] Qwen3 Vulkan session unavailable: {error}. Falling back to CPU."
@@ -142,6 +307,7 @@ impl<'model> Qwen3Session<'model> {
 
         Ok(Self {
             model,
+            compute_policy,
             kv_state,
             scratch: ExecutionScratchpad {
                 x: vec![0.0; config.n_embd],
@@ -176,6 +342,8 @@ impl<'model> Qwen3Session<'model> {
             gpu,
             #[cfg(feature = "vulkan")]
             full_model_gpu_failed,
+            #[cfg(feature = "vulkan")]
+            gpu_contract_validated: false,
             #[cfg(test)]
             fail_cpu_prefill_after_layer: None,
         })
@@ -258,6 +426,14 @@ impl<'model> Qwen3Session<'model> {
         input: Qwen3Input<'_>,
         prefill_batch_size: usize,
     ) -> Result<Vec<f32>, String> {
+        if self.compute_policy == ComputePolicy::Vulkan {
+            return Err("Vulkan does not export hidden rows for this API".into());
+        }
+        #[cfg(feature = "vulkan")]
+        {
+            self.gpu = None;
+            self.full_model_gpu_failed = true;
+        }
         if !self.model.is_rerank() {
             return Err("forward_rerank requires cls.output.weight".into());
         }
@@ -310,6 +486,14 @@ impl<'model> Qwen3Session<'model> {
         input: Qwen3Input<'_>,
         prefill_batch_size: usize,
     ) -> Result<Vec<f32>, String> {
+        if self.compute_policy == ComputePolicy::Vulkan {
+            return Err("Vulkan does not export hidden rows for this API".into());
+        }
+        #[cfg(feature = "vulkan")]
+        {
+            self.gpu = None;
+            self.full_model_gpu_failed = true;
+        }
         if input.token_ids.is_empty() {
             return Err("Qwen3 forward must contain at least one token".into());
         }
@@ -358,6 +542,14 @@ impl<'model> Qwen3Session<'model> {
         input: Qwen3Input<'_>,
         normalize: bool,
     ) -> Result<Vec<f32>, String> {
+        if self.compute_policy == ComputePolicy::Vulkan {
+            return Err("Vulkan does not export hidden rows for this API".into());
+        }
+        #[cfg(feature = "vulkan")]
+        {
+            self.gpu = None;
+            self.full_model_gpu_failed = true;
+        }
         if self.kv_state.seq_len != 0
             || input.token_ids.is_empty()
             || input.token_ids.len() > self.capacity
@@ -553,56 +745,9 @@ impl<'model> Qwen3Session<'model> {
                 deepstack_embeddings: None,
             };
 
-            #[cfg(feature = "vulkan")]
-            let used_vulkan = {
-                model
-                    .token_embedding
-                    .embedding_lookup(token_id, &mut self.scratch.x);
-                let mut disable_reason = None;
-                let gpu_position = self.kv_state.seq_len;
-                let used = match self.gpu.as_mut() {
-                    Some(gpu) => match gpu.forward_token(&self.scratch.x, gpu_position) {
-                        Ok(result) => {
-                            if let Err(error) = commit_shadow_kv(
-                                &mut self.kv_state,
-                                gpu_position,
-                                result.k_delta,
-                                result.v_delta,
-                            ) {
-                                gpu.abort_token();
-                                disable_reason = Some(error);
-                                false
-                            } else {
-                                self.scratch.logits.copy_from_slice(result.logits);
-                                gpu.commit_token();
-                                true
-                            }
-                        }
-                        Err(error) => {
-                            disable_reason = Some(error.to_string());
-                            false
-                        }
-                    },
-                    None => false,
-                };
-                if let Some(reason) = disable_reason {
-                    eprintln!(
-                        "[GPU] Qwen3 Vulkan session disabled after error: {reason}. Falling back to CPU."
-                    );
-                    self.gpu = None;
-                    self.full_model_gpu_failed = true;
-                }
-                used
-            };
-            #[cfg(not(feature = "vulkan"))]
-            let used_vulkan = false;
-
-            if !used_vulkan {
-                let base = self.kv_state.seq_len;
-                self.forward_cpu_chunk(&decode_input, 0..1, true)?;
-                self.kv_state.seq_len = base + 1;
-                self.kv_state.update_access();
-            }
+            self.prefill(&decode_input, 1, true)?;
+            #[cfg(all(feature = "parity-trace", feature = "vulkan"))]
+            let used_vulkan = self.gpu.is_some();
             decode_duration += eval_started.elapsed();
 
             #[cfg(all(feature = "parity-trace", feature = "vulkan"))]
@@ -804,6 +949,47 @@ mod vulkan_tests {
 
     fn run_qwen3_cpu_only(prompt_len: usize) -> (Vec<u32>, (usize, Vec<u32>), Vec<u32>) {
         run_failure_fixture(prompt_len, None)
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn forced_vulkan_failure_keeps_committed_state_without_cpu_retry() {
+        let model = fixture_model();
+        let mut session = Qwen3Session::new_with_compute(
+            &model,
+            9,
+            KvFormat::F16,
+            KvLifecycle::Ephemeral,
+            crate::compute::ComputePolicy::Vulkan,
+        )
+        .unwrap();
+        session
+            .prefill(
+                &Qwen3Input {
+                    token_ids: &[0, 1],
+                    positions: &[[0, 0, 0, 0], [1, 0, 0, 0]],
+                    embeddings: None,
+                    deepstack_embeddings: None,
+                },
+                4,
+                true,
+            )
+            .unwrap();
+        let committed = snapshot(session.kv_state());
+        session.gpu.as_mut().unwrap().fail_after_row = Some(1);
+        session.fail_cpu_prefill_after_layer = Some(0);
+        let input = Qwen3Input {
+            token_ids: &[2, 3],
+            positions: &[[2, 0, 0, 0], [3, 0, 0, 0]],
+            embeddings: None,
+            deepstack_embeddings: None,
+        };
+        let error = session.prefill(&input, 4, true).unwrap_err();
+        assert!(error.contains("GPU failure after row 1"), "{error}");
+        assert_eq!(session.fail_cpu_prefill_after_layer, Some(0));
+        assert_eq!(snapshot(session.kv_state()), committed);
+        assert!(session.prefill(&input, 4, true).is_err());
+        assert_eq!(session.fail_cpu_prefill_after_layer, Some(0));
     }
 
     #[test]
@@ -1065,5 +1251,42 @@ mod cancellation_tests {
             .unwrap();
         assert_eq!(callbacks, 1);
         assert_eq!(generation.token_ids.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod model_contract_tests {
+    use super::{validate_model_kv, validate_model_kv_range, validate_model_logits};
+    use crate::core::scratchpad::{KvArch, KvCache, KvFormat, KvState};
+    use std::sync::Arc;
+
+    #[test]
+    fn model_logit_contract_rejects_reproduced_q8_drift() {
+        let error = validate_model_logits(&[3.1978734], &[3.152948]).unwrap_err();
+        assert!(error.contains("logit mismatch at 0"), "{error}");
+    }
+
+    #[test]
+    fn model_logit_contract_accepts_declared_tolerance() {
+        validate_model_logits(&[3.1535], &[3.152948]).unwrap();
+    }
+
+    #[test]
+    fn model_kv_range_contract_checks_only_new_rows() {
+        let arch = Arc::new(KvArch::new(1, 1, 2, 2, 4));
+        let mut gpu = KvState::new(arch.clone(), KvFormat::F16, 4);
+        let mut cpu = KvState::new(arch, KvFormat::F16, 4);
+        gpu.seq_len = 2;
+        cpu.seq_len = 2;
+        if let (KvCache::F16(gpu), KvCache::F16(cpu)) = (&mut gpu.cache, &mut cpu.cache) {
+            gpu.k[..4].copy_from_slice(&[1, 2, 3, 4]);
+            gpu.v[..4].copy_from_slice(&[5, 6, 7, 8]);
+            cpu.k[..4].copy_from_slice(&[9, 10, 3, 4]);
+            cpu.v[..4].copy_from_slice(&[11, 12, 7, 8]);
+        } else {
+            unreachable!("test states use F16 KV");
+        }
+        validate_model_kv_range(&gpu, &cpu, 1, 1).unwrap();
+        assert!(validate_model_kv(&gpu, &cpu).is_err());
     }
 }

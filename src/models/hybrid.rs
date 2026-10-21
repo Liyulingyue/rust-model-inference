@@ -19,7 +19,7 @@ impl<'a> HybridTextModel<'a> {
             .metadata("general.architecture")
             .and_then(|value| value.to_string_val())
         {
-            Some("qwen35") => Ok(Self::Qwen35(Qwen35Model::from_source(source)?)),
+            Some("qwen35" | "qwen35moe") => Ok(Self::Qwen35(Qwen35Model::from_source(source)?)),
             Some("edge0") => Ok(Self::Edge0(Edge0Model::from_source(source)?)),
             arch => Err(format!("Unsupported hybrid architecture: {arch:?}")),
         }

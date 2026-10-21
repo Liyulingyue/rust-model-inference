@@ -225,6 +225,7 @@ impl<'a> Lfm2MoeSession<'a> {
             embd_type,
             &mut self.scratch.x,
         );
+        super::trace::global("embd", pos, &self.scratch.x);
 
         // Per-layer forward. `is_prefill` must follow the CLI's fused loop
         // (`step < input_tokens.len()`), otherwise decode steps rebuild the
@@ -324,6 +325,10 @@ impl<'a> Lfm2MoeSession<'a> {
         });
 
         self.seq_len += 1;
+        super::trace::global("result_norm", pos, &self.scratch.normed[..n_embd]);
+        super::trace::global("result_output", pos, unsafe {
+            std::slice::from_raw_parts(logits_ptr, vocab)
+        });
         Ok(logits.clone())
     }
 

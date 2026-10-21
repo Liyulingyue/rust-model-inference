@@ -1,0 +1,259 @@
+//! Session-local compute selection; CPU kernels retain their own ISA dispatch.
+
+pub(crate) mod dense;
+pub(crate) mod linear;
+pub(crate) mod state;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ComputePolicy {
+    #[default]
+    Cpu,
+    Auto,
+    Vulkan,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UsedBackend {
+    Cpu,
+    Vulkan,
+}
+
+thread_local! {
+    static LEGACY_POLICY: std::cell::Cell<Option<ComputePolicy>> = const { std::cell::Cell::new(None) };
+}
+
+/// Synchronous compatibility scope for entry points with pre-policy signatures.
+pub struct LegacyComputeScope {
+    previous: Option<ComputePolicy>,
+    _cpu: ComputeScope,
+    _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl Drop for LegacyComputeScope {
+    fn drop(&mut self) {
+        LEGACY_POLICY.with(|policy| policy.set(self.previous));
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ComputeError {
+    InvalidInput(String),
+    Unsupported(String),
+    Device(String),
+    State(String),
+}
+
+impl std::fmt::Display for ComputeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (kind, message) = match self {
+            Self::InvalidInput(s) => ("invalid compute input", s),
+            Self::Unsupported(s) => ("unsupported compute request", s),
+            Self::Device(s) => ("compute device failure", s),
+            Self::State(s) => ("invalid compute state", s),
+        };
+        write!(f, "{kind}: {message}")
+    }
+}
+
+impl std::error::Error for ComputeError {}
+
+#[cfg(feature = "vulkan")]
+impl From<crate::vulkan::VulkanError> for ComputeError {
+    fn from(error: crate::vulkan::VulkanError) -> Self {
+        match error {
+            crate::vulkan::VulkanError::UnsupportedShape(message) => Self::Unsupported(message),
+            other => Self::Device(other.to_string()),
+        }
+    }
+}
+
+impl ComputePolicy {
+    pub(crate) fn trace(self, scope: &str, backend: UsedBackend, rows: usize) {
+        if std::env::var_os("RMI_COMPUTE_TRACE").is_some() {
+            eprintln!("compute requested={self:?} scope={scope} backend={backend:?} rows={rows}");
+            #[cfg(feature = "vulkan")]
+            if backend == UsedBackend::Vulkan {
+                if let Ok(context) = crate::ops::float::shared_vulkan_context() {
+                    eprintln!(
+                        "compute counters=device_cumulative {:?}",
+                        context.compute_stats()
+                    );
+                }
+            }
+        }
+    }
+    pub fn validate_text_arch(self, arch: &str) -> Result<(), String> {
+        if self == Self::Vulkan && !matches!(arch, "llama" | "qwen3" | "qwen35") {
+            return Err(format!("full Vulkan text decoding is not supported for {arch}; local linear offload does not satisfy this request"));
+        }
+        Ok(())
+    }
+
+    pub fn enter_legacy_scope(self) -> LegacyComputeScope {
+        LegacyComputeScope {
+            previous: LEGACY_POLICY.with(|policy| policy.replace(Some(self))),
+            _cpu: self.cpu_scope(),
+            _thread_bound: std::marker::PhantomData,
+        }
+    }
+
+    pub fn configure_cli(self) -> Result<LegacyComputeScope, String> {
+        self.check_build()?;
+        if self == Self::Auto {
+            #[cfg(feature = "vulkan")]
+            crate::ops::enable_gpu();
+            #[cfg(not(feature = "vulkan"))]
+            eprintln!("compute requested=Auto backend=Cpu reason=build_without_vulkan");
+        }
+        Ok(self.enter_legacy_scope())
+    }
+    fn context_with<T>(
+        self,
+        initialize: impl FnOnce() -> Result<T, String>,
+    ) -> Result<Option<T>, ComputeError> {
+        if self == Self::Cpu {
+            return Ok(None);
+        }
+        match initialize() {
+            Ok(context) => Ok(Some(context)),
+            Err(error) if self == Self::Auto => {
+                eprintln!("compute requested=Auto backend=Cpu reason={error}");
+                Ok(None)
+            }
+            Err(error) => Err(ComputeError::Device(error)),
+        }
+    }
+
+    #[cfg(feature = "vulkan")]
+    pub(crate) fn context(
+        self,
+    ) -> Result<Option<&'static crate::vulkan::VulkanContext>, ComputeError> {
+        self.context_with(|| {
+            if crate::core::thread_pool::gpu_matmul_disabled() {
+                return Err("Vulkan is disabled in the current CPU scope".into());
+            }
+            if crate::vulkan::gpu_broken() {
+                return Err("Vulkan device is disabled after a queue failure".into());
+            }
+            let context = crate::ops::float::shared_vulkan_context()?;
+            if context.is_software_icd() {
+                return Err("software Vulkan device is not an accelerator".into());
+            }
+            Ok(context)
+        })
+    }
+
+    pub(crate) fn check_build(self) -> Result<(), String> {
+        if self == Self::Vulkan && !cfg!(feature = "vulkan") {
+            return Err("Vulkan requires a build with --features vulkan".into());
+        }
+        Ok(())
+    }
+
+    /// Compatibility constructors still honor the legacy request, within a CPU scope.
+    pub(crate) fn legacy() -> Self {
+        #[cfg(feature = "vulkan")]
+        if crate::core::thread_pool::gpu_matmul_disabled() {
+            return Self::Cpu;
+        }
+        if let Some(policy) = LEGACY_POLICY.with(|policy| policy.get()) {
+            return policy;
+        }
+        if crate::ops::gpu_requested() {
+            Self::Auto
+        } else {
+            Self::Cpu
+        }
+    }
+
+    pub(crate) fn cpu_scope(self) -> ComputeScope {
+        ComputeScope {
+            #[cfg(feature = "vulkan")]
+            _guard: (self == Self::Cpu)
+                .then(crate::core::thread_pool::ComputePool::disable_gpu_matmul_for_scope),
+        }
+    }
+}
+
+pub(crate) struct ComputeScope {
+    #[cfg(feature = "vulkan")]
+    _guard: Option<crate::core::thread_pool::GpuMatmulScope>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn legacy_policy_scope_restores_and_rejects_partial_model_requests() {
+        let original = ComputePolicy::legacy();
+        {
+            let _cpu = ComputePolicy::Cpu.enter_legacy_scope();
+            assert_eq!(ComputePolicy::legacy(), ComputePolicy::Cpu);
+        }
+        assert_eq!(ComputePolicy::legacy(), original);
+        for arch in ["gemma4", "edge0", "qwen3vl", "auk", "unknown"] {
+            assert!(ComputePolicy::Vulkan.validate_text_arch(arch).is_err());
+            assert!(ComputePolicy::Auto.validate_text_arch(arch).is_ok());
+        }
+        for arch in ["llama", "qwen3", "qwen35"] {
+            assert!(ComputePolicy::Vulkan.validate_text_arch(arch).is_ok());
+        }
+    }
+
+    #[test]
+    fn cpu_policy_never_initializes_vulkan() {
+        let calls = Cell::new(0);
+        let selected = ComputePolicy::Cpu
+            .context_with(|| {
+                calls.set(calls.get() + 1);
+                Ok(7)
+            })
+            .unwrap();
+        assert_eq!(selected, None);
+        assert_eq!(calls.get(), 0);
+    }
+
+    #[test]
+    fn cpu_auto_sessions_do_not_share_policy() {
+        for (policy, expected) in [
+            (ComputePolicy::Auto, Some(7)),
+            (ComputePolicy::Cpu, None),
+            (ComputePolicy::Auto, Some(7)),
+        ] {
+            assert_eq!(policy.context_with(|| Ok(7)).unwrap(), expected);
+        }
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn cpu_scope_restores_nested_main_and_worker_policy() {
+        use crate::core::thread_pool::{gpu_matmul_disabled, ComputePool};
+        let pool = ComputePool::new(3);
+        assert!(!gpu_matmul_disabled());
+        {
+            let _outer = ComputePolicy::Cpu.cpu_scope();
+            {
+                let _inner = ComputePolicy::Cpu.cpu_scope();
+                pool.compute(|_, _| assert!(gpu_matmul_disabled()));
+            }
+            pool.compute(|_, _| assert!(gpu_matmul_disabled()));
+        }
+        pool.compute(|_, _| assert!(!gpu_matmul_disabled()));
+    }
+
+    #[test]
+    fn forced_vulkan_reports_initialization_failure() {
+        assert_eq!(
+            ComputePolicy::Auto
+                .context_with::<()>(|| Err("no device".into()))
+                .unwrap(),
+            None
+        );
+        assert!(matches!(
+            ComputePolicy::Vulkan.context_with::<()>(|| Err("no device".into())),
+            Err(ComputeError::Device(_))
+        ));
+    }
+}

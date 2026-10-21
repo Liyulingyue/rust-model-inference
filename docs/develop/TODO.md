@@ -37,13 +37,59 @@ NEON on aarch64; no AVX-512).
       `{%- if enable_thinking is defined and enable_thinking is false %}`，未定义即不注入空块，
       与 `unwrap_or(true)` 等价。**改动会翻转现有 thinking 模型的 HTTP 默认输出**，需先确认
       是否有依赖当前行为的调用方。
-- [ ] **lfm2moe 残余 1-ULP 贪心翻转** — forward 路径分裂**已修**
-      （`Lfm2MoeSession::prompt_len` + `is_prefill = pos < prompt_len`；原先硬编码 `true`，
-      decode 阶段把整段 b*x 历史塞回短卷积窗口）。修复后两侧首 token 与前 ~30 字符一致，
-      剩余差异为第 ~30 字符处 `says "` vs `says: "` — greedy 下 top-2 logits 极接近时的
-      1-ULP 翻转（同类现象见 `tests/quantized_inference.rs` 的 q4_k/q6_k 预存失败）。
-      精确定位需逐层 logits 对比 llama.cpp oracle（`RUST_LFM2MOE_DEBUG_LOGITS` 已有），
-      属独立任务。守卫：`tests/cli_http_agreement.rs`。
+- [x] **lfm2moe 残余 1-ULP 贪心翻转** — ✅ **已定位根因并修复**（2026-10-15，LFM2.5-24B-A2B 适配期间）
+      **先前的判断是错的**：它不是「greedy 下 top-2 logits 极接近时的 1-ULP 翻转」，而是一个
+      **确定性的 shortconv 状态 bug**。完整 oracle 逐位对齐后，首个分歧 checkpoint 精确落在
+      layer 0 的 `conv_conv`（step 8 = 首个 decode 步），其输入 `conv_in_proj` 逐位一致 ——
+      即卷积**输入**没错，**状态窗口**错了。
+      根因：`forward_shortconv` 只在 `!is_prefill` 时滑动 conv 状态。最后一个 prefill token 之后
+      没有任何调用方重建状态，调用方的重建发生在**每个 prefill token 之前**，所以状态停留在
+      `[bx_{t-2}, bx_{t-1}]`，缺少最后一步的 `bx_t`，第一个 decode 步的窗口整体错位一格。
+      修复：状态滑动**每步都执行**（prefill 期间的滑动会被下一步的重建覆盖，无副作用）。
+      顺带收益：decode 4.7 → **18.0 t/s**（3.8×，此前 decode 一直在用过期的窗口做无用功）。
+      影响面：**所有 lfm2 / lfm2moe / lfm25 家族**的首次生成 token。
+      证据：12 步 9 912 个 checkpoint 全部逐位一致，见
+      [`tools/oracle/lfm2moe/README.md`](../../tools/oracle/lfm2moe/README.md)。
+      守卫：`tests/lfm2moe_reference.rs`（真实权重 + 逐位 oracle）。
+- [x] **`lfm2` / `lfm25` 的 trunk 选择靠 `general.basename` 判断——已删除** —
+      原实现：`src/app/text/generation.rs` 用 `source.metadata("general.basename").contains("2.5")`
+      决定走哪个 trunk。这是**来源/命名字段**而非架构字段：Liquid 的 QAD 量化管线写它，
+      llama.cpp 的 `convert_hf_to_gguf.py` 不写。实测 15 个稠密 GGUF：只有 QAD 档带这个 key，
+      其余八个档全部静默走 lfm2 trunk。
+      llama.cpp 根本没有这个选择：`llama-arch.cpp` 只定义 `LLM_ARCH_LFM2` 与
+      `LLM_ARCH_LFM2MOE`，所有稠密生成都走唯一的 `src/models/lfm2.cpp`，**无 2.5 分支**。
+      **当时不会算错**：`dense_trunks_produce_identical_logits` 实测两个 trunk 在同一 GGUF 上
+      输入同一批 token ids 后 logits 逐位相同（65536 项零差异），两份 `config.rs`
+      只差一个 struct 名。但这恰好是“第二份 transformer forward 在任何一侧被修改时静默漂移”
+      的典型场景，而路由之间只有一个可选元数据键在撑着。
+      **已修（同一 commit）**：`src/models/lfm25/` 改为 lfm2 trunk 的**别名层**，1.5k 行重复实现删除；
+      `generation.rs` 不再读 `general.basename`。JEV single/grouped 两套 scorer 保持可用（走别名）。
+      已核对两个 `run_inference` 原来都调用 `build_lfm2_chat_prompt_with_thinking`，非 ChatML 的
+      `build_lfm25_chat_prompt_with_thinking`。后者实为**不同**而非重复，且被 `tests/jinja_chat_template_ab.rs`
+      锁定（记录它与 GGUF 自带 Jinja 模板的已知分歧），保留。
+- [x] **lfm2moe 8B-A1B 逐位对齐 + shortconv 符号零累加顺序修复** — ✅ 已完成（2026-10-16）。
+      在 24B 之外又验了 `LFM2.5-8B-A1B-Q4_0` 与 `Q4_K_M`，各 **7 840 个 checkpoint 零失配**（
+      Q4_K_M 顶外覆盖了 MoE trunk 的 Q8_K/Q4_K 路径）。
+      此体暴露了一个真实缺陷：`forward_shortconv` 的 `l_cache == 3` 展开分支写成
+      `a0*w0 + a1*w1 + a2*w2`，把第一个乘积并进了初始值；而通用分支与 ggml 都是**从 0.0 开始逐项累加**。
+      两者数值相同，但当三个乘积全为±0.0 时产生 **-0.0 与 +0.0 的符号位差异**
+      （`0.0 + (-0.0) == +0.0`）。
+      触发条件是某通道的 `b*x` 恰好为零，因此 24B 的 9 912 个 checkpoint 一次都没踩到，
+      8B 却在 layer 0 就有 104 / 2048 个通道中中。修复后三个 checkpoint 全部零失配，24B 无回归。
+      说明：需要真实 GGUF 才能触发，纯单元测试没有足够长观测，因此这里只记录现象与修复。
+- [x] **把同款 oracle 对齐扩展到 lfm2 / lfm25 稠密档** — ✅ **已完成**（2026-10-16）。
+      15 个稠密 LFM2 GGUF 全部与固定 oracle（llama.cpp `749f688`，`-n 24 --temp 0 -c 512`，
+      `RMI_SCALAR=1`）的 greedy token ids **逐个一致**：
+      `LFM2.5-230M` 的 QAD-Q4_0 / Q4_K_M / Q5_K_M / Q6_K / Q8_0 / F16 / BF16（7）、
+      `LFM2.5-1.2B-Instruct` 的 QAD-Q4_0 / Q4_K_M / Q6_K / Q8_0（4）、
+      `LFM2.5-2.6B` 的 QAD-Q4_0 / Q4_K_M / Q6_K / Q8_0（4）。
+      另外 `LFM2.5-2.6B-Q4_K_M` 做了逐层逐位对比：35 步、**75 240 个 checkpoint 零失配**，
+      包含每步完整的 128 000 项 `result_output`。
+      稠密 trunk 新增 `src/models/lfm2/trunk/trace.rs`（24 个检查点，命名与 oracle 对齐）。
+      工具链 `tests/lfm2_dense_trunk_agreement.rs`（验证两个 trunk 逐位一致 + greedy 对拍）。
+      遗留：CLI 的增量 decode 路径已由 `tests/lfm2_incremental_decode.rs` 单独覆盖；`lfm2moe` 的 8B-A1B 逐位对齐已完成（Q4_0 与 Q4_K_M 各 7 840 个 checkpoint 零失配）。
+      会课到的三个临时脚本陷阱均已写进 commit message（重新选取二进制、按
+      mtime 选二进制、缺记录当作匹配）。
 - [ ] **HTTP 多模态图片输入（OpenAI 兼容）** — `/v1/chat/completions` 现在**完全不支持图片**：
       `protocol.rs::text_content` 只接受 string / `type:"text"` block，带 `image_url` 的请求实测
       返回 400 `unsupported content block`。CLI 侧 `--mmproj --image` 能力完备（`app/text/
@@ -95,6 +141,95 @@ NEON on aarch64; no AVX-512).
 - [ ] **token 维寄存器分块：消除 per-token 权重重读** — 详见 [TODO-019](#todo-019-token-维寄存器分块消除-per-token-权重重读)。
       文本编码只跑到约 11% 的 NEON 峰值，瓶颈是每个 token 都从 DRAM 重读整个权重矩阵。
       预期 1.5-2× 加速。
+
+- [x] **LFM2.5-24B-A2B 适配 + 标量逐位对齐** — ✅ 已完成 (2026-10-15)。
+      24B 总 / 2B 激活的 MoE，`lfm2moe` 架构：40 层 × 2048 宽 × 32 头（head_dim 64），注意力层
+      `[2,6,…,38]`（每 4 层一个），前 2 层 dense SwiGLU（`feed_forward_length=11776`），其余 38 层
+      MoE（64 选 4，`expert_feed_forward_length=1536`，sigmoid 路由），`l_cache=3` shortconv，
+      `rope.freq_base=1e7`，ctx 131072，词表 128000，Q6_K `token_embd` + Q4_0 其余。
+      **未新增模型代码** —— 现有 `src/models/lfm2moe/` 直接跑通真实权重（QAD-Q4_0，SHA-256
+      `d1c03f73…f8a5`）。对固定 llama.cpp `749f688` 的标量 oracle：12 步（8 prompt + 4 greedy）
+      token IDs 一致、**9 912 / 9 912 个 checkpoint 原始 F32 位完全相同（0 mismatch）**、
+      `generated_ids` 一致。CLI 实测 `"What is 2+2?"` → `"2+2 equals 4."`。
+      ⚠ 未覆盖：Q4_K_M/Q5_K_M/Q6_K/Q8_0/F16/BF16 档；SIMD 路径；批量 prefill；F16 KV；
+      JEV / embedding 入口。
+      [oracle 说明、复现命令与边界](../../tools/oracle/lfm2moe/README.md)。
+- [ ] **oracle 构建脚本有一处静默陷阱，`GGML_NATIVE=OFF` 不等于关掉 SIMD 变体** — 本次对齐初期
+      83% 的 checkpoint 全错，最根本的原因是 **oracle 侧**：`GGML_NATIVE=OFF` 只去掉
+      `-march=native`，这一版 llama.cpp 的 `GGML_AVX2` / `GGML_FMA` / `GGML_F16C` 仍默认 `ON`，
+      于是 `arch/x86/quants.c` 的 `#if defined(__AVX2__)` 分支被编译进去，Q4_0 点积用
+      `_mm256_fmadd_ps` 累加，与参考实现差 ~2 ULP。**逐位对齐必须显式
+      `-DGGML_AVX2=OFF -DGGML_FMA=OFF -DGGML_F16C=OFF -DGGML_CPU_ALL_VARIANTS=OFF`**，
+      否则得到的是一个「看起来能跑」的 SIMD oracle。
+      `tools/oracle/shared/build_llama_oracle.sh`（既有 mellum 等用的那份）**没有**这些开关，
+      只有 `GGML_NATIVE=OFF` —— 已在本次的新脚本 `tools/oracle/lfm2moe/build_lfm2moe_oracle.sh`
+      补齐，**但共享脚本尚未同步**，其中所有 arch 的既有「逐位对齐」结论都应复核一遍是否真的
+      跑在标量路径上。⚠ 优先级取决于复核结果：若 mellum 等当时确实跑在 AVX2 上，它们的
+      0-mismatch 结论就与本次的构造方式不一致。
+- [ ] **标量 Q8_K 激活量化器与 ggml 契约不一致（已修，但调用面比想象的大）** — ✅ 已修（2026-10-15）：
+      `quantize_row_q8_k_scalar_into` 用的是对称 `d = amax/127` + `f32::round()`，
+      而 ggml 的 `quantize_row_q8_K_ref` 是 `iscale = -127/max`（`max` 是**带符号**的最大幅值元素）、
+      `d = 1/iscale`、取整用 `nearest_int()`（12582912.0 技巧，**ties-to-even**），钳位是
+      `min(127, v)`（只有上界）。负值主导的 block 因此符号相反、`d` 反号，Q6_K 的每个点积都差
+      ~2 ULP。仓库里其实**已经**有一份正确实现 `quantize_row_q8_k_ggml_into`（ERNIE 在用），
+      标量路径只是没跟上 —— 说明同一契约存在两份实现且会漂移。
+      **待办：收敛成单一实现**，让 `quantize_row_q8_k_into` 的标量分支直接走 ggml 版本，
+      删掉重复代码；否则下次改动仍可能只改一处。
+      守卫：`ops::quant::q8k_padding_tests::scalar_quantizer_matches_the_signed_ggml_contract`。
+- [ ] **MoE 权重归一化的累加精度** — ✅ 已修（2026-10-15）：归一化用的 sum 必须像
+      `ggml_sum_rows` 一样在 **f64** 中累加，然后转 f32 再做 f32 除法。用 f32 累加会让专家权重
+      差 2 ULP，在近平局处直接换专家。`src/models/lfm2moe/trunk/forward.rs` 已修；
+      **待查** `mellum`、`qwen3vlmoe` 等其它 MoE trunk 是否也用 f32 累加。
+
+- [x] **`tools/oracle/shared/build_llama_oracle.sh` 只有 `GGML_NATIVE=OFF`，并非标量 oracle ——已修，并已实测定量** —
+      `GGML_NATIVE=OFF` 只是不传 `-march=native`，**并不改 ggml 自身的默认值**：该 pin 下
+      `GGML_CPU_ALL_VARIANTS` 仍为 ON（会为每个 kernel 额外编译一份 AVX2 / AVX512 / FMA 副本并运行时分发），
+      `GGML_AVX2` / `GGML_FMA` / `GGML_F16C` / `GGML_AVX512*` 也仍为 ON。
+      **实测定量**（同一 llama.cpp commit、同一模型、同一 prompt，仅差那 10 个 ISA 开关，
+      `LFM2.5-230M-Q4_K_M` 单线程）：
+      - **3 468 个 checkpoint 中 3 445 个逐位不同（99.3%）**；
+      - `result_output` 每步 65 536 个 logits 中 65 535 个不同，max|delta| 0.218（logit 量程 18.79，约 1.2%）；
+      - **token ids 相同**（11 个 prompt + 6 个 greedy 完全一致）。
+      即：**逐位结论失效，token 级结论通常存活**，但会在近平局处翻转。
+      已在共享脚本补齐 `GGML_AVX/AVX2/FMA/F16C/AVX512*/AVX_VNNI/AMX=OFF` 与 `GGML_CPU_ALL_VARIANTS=OFF`。
+      **影响面（需逐一复验）**：
+      - `tests/inference_parity.rs` 的 `q4_0_matches_pinned_scalar_oracle_bit_for_bit` /
+        `q4_k_m_matches_pinned_scalar_oracle_bit_for_bit` 用 `f32::from_bits` 原始位比较，
+        且 `RMI_LLAMA_ORACLE` 指向的二进制若由共享脚本构建，则这两个结论需重跑（两者均 `#[ignore]`，需手动运行）。
+      - MiniCPM5 `dump_tokens_oracle`、Falcon-H1“遵循共享脚本标志”构建。
+      - **不受影响**：`inference_parity.rs` 里的 schema 测试（只校验 record 名/顺序/shape）、
+        LFM2-MoE（自己的构建脚本本就带全部开关）。
+      **同类脚本仍存在 10 个**：`mellum` / `qwen35` / `qwen_drive` / `gemma4`(两个）/ `ernie_image` /
+      `nanbeige` / `longcat` / `jina_bert_v2` / `qwen_image_2_1`。它们同样只有 `GGML_NATIVE=OFF`。
+      未批量修改的原因：部分归档在 **ARM** 上取得结论（那里 `-U__ARM_NEON` 已经在 CMAKE_C_FLAGS 里），
+      x86 的陷阱不适用；而且改脚本会改变已有验证产物的构建条件。
+      应当逐个 arch 确认其结论是否依赖浮点位级一致性，再决定是否重建 oracle。
+      **复现**：用只带 `GGML_NATIVE=OFF` 的标志配置构建一份 oracle，与全标量那份对同一模型跑同一 prompt，
+      再用 `tools/oracle/lfm2moe/check_scalar.py` 对比两份 manifest。
+
+- [ ] **AVX2 kernel 与 ggml 参考实现不逐位一致（已定位到入口，未定位到具体 kernel）** —
+      测量：15 个稠密 LFM2 GGUF，Rust 不设 `RMI_SCALAR`（走 AVX2）vs 标量 oracle，**12/15 greedy 一致**；
+      `RMI_SCALAR=1` 下是 **15/15**。失配三个的 top-2 间距为 **6.6e-3 ~ 9.6e-3 相对**（比 f32 epsilon 高三四个量级），
+      属真实算术差异而非近平局；其中 `LFM2.5-2.6B-Q4_K_M` **第 0 个生成 token 就分歧**。
+      **入口已确认**：逐层 trace 显示 `LFM2.5-2.6B-Q4_K_M` step 0 下，`RMI_SCALAR=1` 时
+      **396 个 checkpoint 全部零失配**，AVX2 时第一个失配就是 `conv_in_proj`（layer 0，Q4_K × Q8_K 矩阵乘，
+      max|delta| 2.5e-07），之后沿层级放大。`attn_norm` 仍然匹配，说明 RMS norm 未受影响。
+      **性质**：2.5e-07 是求和顺序不同的 ULP 级差异，不是算法不同。
+      **注意**：仓库自带的 `ops::quant::avx2_parity` 单元测试（q4k/q6k AVX2 vs scalar）**全部通过**，
+      但那些只用合成的小 block，覆盖不了真实多行 / 真实权重的累加顺序。
+      **未办**：尚未定位到具体 kernel。下一步是用真实 GGUF 权重构一个
+      针对 `conv_in_proj` 矩阵乘的 scalar/AVX2 对照测试（而不是合成 block），该测试应能直接拍住求和顺序。
+      **机制已看懂，但未定位到具体 kernel**：`vec_dot_q4k_q8k_avx2` 每个 block 用
+      `_mm256_fmadd_ps(vd, sumi, acc)` 累加（**FMA，单次舍入**），最后走 `hsum_ps` 树形归约；
+      标量路径是逐 block `sumf += d * sumi`（**两次舍入**）。两者算的是同一个和，
+      但添加顺序不同 —— 与 2.5e-07 的偏差尺度一致。
+      **这是性能与精度的取舍，不是 bug**：`LFM2.5-2.6B-Q4_K_M` 同一 prompt 下
+      AVX2 输出 `"2"`（25.1 t/s）、scalar 输出 `"2."`（2.0 t/s）——两者都合理，
+      但**AVX2 快 12.5 倍**。要让 AVX2 与标量 oracle 逐位一致，就要拉掉 FMA 和树形归约，
+      代价是吞吐掉一个数量级。**不建议改**；应该把「逐位对齐」明确限定在
+      `RMI_SCALAR=1`，并在文档里写清“默认 AVX2 路径不在逐位契约内”。
+      **影响范围**：当前所有逐位结论都只在标量下成立。真实用户在有 AVX2 的机器上跑的是
+      这条路径，**与 oracle 存在 ULP 级差异**，并会在近平局处翻转为 token 级分歧。
 
 ### JEV 决策评分 follow-ups
 
@@ -152,6 +287,108 @@ LFM2 / LFM2.5 / Spark / Nemotron-H / Hunyuan / LFM2-MoE），每个 scorer 实�
       zero-copy 完全保留。JEV 单 + group smoke test 在 Qwen3.5-0.8B Q8_0
       真实模型上跑通（Paris = 0.9141、pair_1 = A 0.7158）。图像推理路径
       （`--image` + mmproj）确认不受影响（apple.png 描述正确）。
+
+- [x] **MiniCPM-V 4.7 1B（`qwen35` 语言塔）多模态接入** — 已完成，`20c247d`…`1bd1165`。
+      视觉塔逐位对齐：602,112 个 normalized pixel F32 与 pinned oracle
+      `69f201a2` 完全一致；`conv_output_silu` 逐位相同（2158/8192 分量一致，L1 6e-5）；
+      `pos_embed` 约 `1e-6` 相对差异，按 SIMD/FMA 标准接受。切片、CANVAS M-RoPE、
+      tile separator 的 token-free embedding span 已接入；`<image_id>0</image_id>`
+      由 mtmd 层注入。复现命令见 [`tools/oracle/minicpmv/README.md`](../../tools/oracle/minicpmv/README.md)。
+- [x] **MiniCPM-V 4.7 35B-A3B（`qwen35moe`）语言塔** — 已完成，`032ff5c`…`385d6cf`。
+      SSM 全链路对齐：输入 embedding / conv / `q_conv_predelta` / `k_conv_predelta` /
+      `v_conv_predelta` / `beta_sigmoid` / `gate` 全部逐位一致或 ~1e-7；递推本身与
+      oracle 的 chunked WY 输出在**同一输入、同一初始 state**（用 oracle 自带的
+      `state_predelta` 锚定）下相差 avg 0.0063%。多模态端到端可用，`--jinja` 下
+      512×512 出 overview + 2 slices 共 202 个视觉 token。
+      ⚠️ 途中**两次误判**：先是 oracle eval callback 把多 ubatch 写进同一文件（后写覆盖先写），
+      导致「最佳匹配 L1 923 vs 我方相邻 token 间 L1 中位数 956」——结论**不可证伪**；
+      再是把「我方 token *i*」对「oracle row *i*」，而 llama.cpp 的 prefill ubatch
+      首尾各带 3 个 padding row，3-token prompt 的 ubatch 是
+      `[pad,pad,pad,t1,t2,t3,pad,pad,pad]`。据此曾误报「~14% 差异」，`385d6cf` 已撤回。
+      **教训：oracle dump 必须先解决 ubatch 对齐与 padding，否则任何归因都是错的。**
+      **2026-10-20 追到底**：修掉 `l2_norm` 把 eps 加在根号内（应为分母下限
+      `1/max(sqrt(sum), eps)`，见 `ggml/src/ggml-cpu/ops.cpp:4333`；且 `sqrtf`
+      会先把 f64 累加器收窄到 f32）后，layer 1 的 `conv_output_raw` / `q_conv` /
+      `q_conv_predelta` / `k_conv_predelta` / `state_predelta` / `final_output`
+      **全链逐位精确**，0-2 层 `l_out` 从 1e-5 降到 1e-9 量级。此前
+      `qwen35_l2_norm_matches_pinned_llama_cpp_bits` 没能拦住，是因为它是从它要
+      检查的 Rust 代码生成的（对旧公式 128/128、对 ggml 公式 0/128），已按 kernel 重生成。
+- [x] **35B 的 MoE（routed + shared expert）数值对照** — 已完成，2026-10-20。
+      `src/models/qwen35/trunk/moe.rs` 是**逐算子照抄** oracle 的公式
+      （`LLM_FFN_PAR` 是 gate 模式而非残差；`routed = Σ score_e down_e(silu(gate_e·x)·up_e·x)`；
+      `out = routed + sigmoid(gate_inp_shexp·x) · shared`；256 专家 softmax → top-8 → 归一），
+      张量 shape 也对得上，输出质量正确——但这是**构造性论证 + 行为观察**，
+      不是数值验证。早先「路由选中同一批专家（67,140,206）」的观测**不可信**：
+      用了「首个精确匹配」做 token 映射，重复 token 全部塌到同一下标，且发生在搞懂 padding 之前。
+      ⚠️ **本文原先写「oracle 侧 `ffn_moe_logits` / `ffn_moe_out` / `ffn_shexp_gated`
+      都已能 dump」——这是错的**，属于此前乐观记录的残留。qwen35 的 oracle patch
+      （`tools/oracle/qwen35/qwen35-llama-trace.patch`）白名单里**一个 MoE 节点都没有**，
+      并且 `architecture != "qwen35"` 直接 throw，`qwen35moe` 连加载都做不到。
+      那几个 `ffn_moe_*` dump 属于 **lfm2moe / mellum** 的 patch，是别的模型。
+      即「oracle 从未为本架构产出过这些数字」。
+      Rust 侧的 `RMI_MOE_DUMP` append 式 dumper（6 个文件、无 layer/step、无长度头，
+      40 层 × N token 全部交错，无法归因）已删除，改为
+      `src/models/qwen35/trunk/trace.rs` 的 `(name, layer, step)` 定点 checkpoint，
+      对齐方式定为**两侧各跑单 token**（ubatch padding 只在多 token prefill 出现，
+      单 token 下 `step == 0` 即同一个真 token，无需穿热路径插桩）。
+      oracle 侧也已补齐：`tools/oracle/qwen35/qwen35moe-ffn-dump.patch` 让
+      `llama-eval-callback` 接受 `qwen35moe`，产出 10 个 MoE 节点 + 逐层边界；
+      `tools/oracle/qwen35/build_qwen35_oracle.sh` 从 tarball 构建并做 blob 校验、
+      关掉全部 x86 ISA 变体以保证标量路径。35B Q8_0 权重已下载并校验
+      （`MiniCPM-V-4_7-35B-A3B-Q8_0.gguf`，36,902,368,928 bytes，
+      SHA256 `8543ee5b0f83152066f2fec58b8d9757d56bb7c4233b4fdd26ae364f0107d16b`）。
+      **结果**：`ffn_moe_topk` 在 layer 0 / 3 / 39 逐位一致（id 与顺序都对上），
+      layer 0 的 `ffn_moe_logits` 与 shared expert 全链亦逐位一致。
+      节点清单与对齐规则见
+      [`tools/oracle/qwen35/qwen35moe-ffn-dump.patch.README.md`](../../tools/oracle/qwen35/qwen35moe-ffn-dump.patch.README.md)。
+      ⚠️ 教训：capture / selection / writing 是**三份独立名单**。「节点不在 manifest 里」
+      在三份都查过之前什么都不能说明；`RMI_CB_TRACE=1` 会打印调度器实际问到的每个名字，
+      一次运行即可分辨「从未提供」与「提供了但被拒」。
+- [ ] **35B 视觉塔未与 oracle 做数值对照** — 1B 的 `pos_embed` 逐位比过，35B 完全没有。
+      projector 代码零改动（两个尺寸共用同一 `minicpmv4_7` 实现，仅 `projection_dim`
+      1024 → 2048），但 2048 维输出、`attn_post_norm` 全层 checkpoint 都没验证过。
+- [x] **canvas 路径缺 `--jinja` 时报错信息误导** — 已修。
+      根因确认为 `jinja.resolve()` 在未启用时返回 `None`，`text_conversation_tokens`
+      因此返回 `None`，而旧文案说的是「投影器已实现但接线缺失」——那个缺口早已不存在
+      （canvas 路径就是把 media span 拼到 checkpoint 自己模板产出的那一个
+      `<|image_pad|>` 上）。同一个常量被 6 处以两种语义复用，已拆成两条：
+      `MINICPMV47_CANVAS_ONLY_MSG`（anyres helper 根本处理不了这个家族）与
+      `MINICPMV47_JINJA_MSG`（canvas 路径 + `--jinja` 关闭，指明 `--jinja` /
+      `--chat-template-file`）。1B 一直需要 `--jinja`，不是新引入的限制。
+- [ ] **`qwen35moe` 的 Vulkan 路径未接** — `src/vulkan/qwen35.rs:17` 仍 gate 在
+      `architecture == "qwen35"`，35B 目前只能走标量/SIMD CPU 路径。
+
+## 入口面覆盖（2026-10-19 审计）
+
+MiniCPM-V 4.7 的 `qwen35moe`（35B-A3B）此前只在**生成面**注册，多模态对话可用、
+但 JEV 打分全线不通——而它与 `qwen35` 共用同一个 `minicpmv4_7` projector 和同一个
+`Qwen35Model`，只有 arch 字符串不同，属漏改而非有意限制：
+
+| 入口 | `qwen35` | `qwen35moe` |
+| --- | --- | --- |
+| CLI `--image` / HTTP `/v1/chat/completions` | ✅ | ✅ |
+| CLI `--jev --image` | ✅ | ✅（本次补） |
+| HTTP `/v1/jev/image`(`/v1/jev/image_grouped`) | ✅ | ✅（本次补） |
+
+改动点：`src/app/jev/single.rs` 的 `IMAGE_JEV_ARCHES` 与 dispatch、
+`src/app/jev/grouped.rs` 的 `build_jev_token_ids_for_arch` 与 grouped dispatch、
+`src/app/server/api.rs` 的 `run_multimodal_text_only`（`/v1/jev/image` 与
+`image_grouped` 共用这一个闸门，故两侧同时生效）。
+回归测试 `app::jev::single::image_arch_tests`。
+
+顺带修掉两处会把排查带偏的文案：HTTP 侧原写「only supports qwen3/qwen3vl/qwen35」
+却漏了实际支持的 `qwen3vlmoe`；生成侧原写「Only qwen35, qwen3vl, and edge0」
+却漏了条件里本来就有的 `qwen35moe`。
+
+- [x] **量化 mmproj 无法加载** — 已修。`src/models/minicpmv/weights.rs` 的
+      `decode_matrix` 原本只认 F32/F16/BF16，其余一律
+      `unsupported ggml type`，于是 Q8_0 / Q4_K / Q6_K 的 mmproj 直接加载失败，
+      而 `ops::quant::dequantize_tensor` 恰好覆盖这三种。现在委托下去。
+      投影器权重仍是 eager 的 `Vec<f32>`：它的 forward 已 pin 在 oracle trace 上，
+      改成惰性的 `Weight` / `QuantizedTensor` 会动到已验证的数值路径，只放宽解码面。
+      回归测试 `minicpmv::weights::decode_matrix_tests`（含 F32/F16 不变、
+      不支持的类型仍报出类型名）。
+
 
 ## Medium Priority
 
@@ -2164,3 +2401,367 @@ if info.dims.len() != 2 || info.dims[0] != h as u64 || info.dims[1] < n_tokens a
 
 dims 数量、宽度、以及**行数是否覆盖 `n_tokens`** 三者都查了 —— 这正是
 「不查就会静默越界」的地方。
+
+### TODO-031: Qwen3 resident Vulkan decode 在 GB10 上打不过 CPU，且默认根本不启用
+
+排查「Qwen3 为什么没有 GPU 加速」时挖出三层问题，从表面到根因。
+
+#### 1. 默认配置下 `--gpu` 是静默空操作（已修，a66705f）
+
+Qwen3 唯一的 GPU 路径是常驻 Vulkan 解码器 `Qwen3VulkanSession`
+（`src/vulkan/qwen3.rs`），它**要求 F16 KV**。而 CLI 默认是 F32
+（`src/app/text/runtime.rs:50` 的 `defaults::KV_FORMAT = KvFormat::F32`），
+于是 `src/models/qwen3/trunk/session.rs` 里 `compute_policy.context()` 那段
+直接落到 `None` 分支，**不报错、不提示**，全程 CPU 跑完，日志里还照样打印
+`[GPU] Vulkan device: NVIDIA GB10`。
+
+```rust
+} else if compute_policy == ComputePolicy::Vulkan {
+    return Err("Qwen3 Vulkan currently requires F16 KV".into());
+} else {
+    None          // Auto + F32：请求被静默丢弃
+}
+```
+
+`a66705f` 改成明确提示并给出正确 flag。**在此之前，本文件之前所有关于
+「Qwen3 GPU 加速」的结论都是无效的** —— 那些数字测的是 CPU。
+
+#### 2. 即使显式 `--kv-cache f16`，GPU 也赢不了
+
+在 GB10（NVIDIA GB10，int8 dot product: supported）上实测，
+同一台机器、同一 prompt（220 词）、`--threads 8`、等待 load<3、
+多次重复取中位数：
+
+| 模型 | 大小 | 生成 ratio (GPU/CPU) | 端到端 ratio | wall CPU | wall GPU |
+|---|---|---|---|---|---|
+| Qwen3-0.6B-Q8_0 | 0.6G | 0.46x | 0.34x | 2.8s | 8.7s |
+| Qwen3-0.6B-Q4_K_M | 0.4G | 0.11x | 0.11x | 3.9s | 33.8s |
+| Qwen3-0.6B-BF16 | 1.1G | 0.38x | 0.43x | 5.9s | 15.7s |
+| Qwen3-4B-Q4_K_M | 2.3G | 1.08x | 0.14x | 15.7s | 113.4s |
+| Qwen3-4B-Q8_0 | 4.0G | **1.08x** | 0.56x | 16.8s | 31.2s |
+| Qwen3-8B-Q4_K_M | 4.7G | 0.19x | 0.11x | 35.1s | 398.5s |
+| Qwen3-8B-Q8_0 | 8.1G | **1.02x** | 0.54x | 49.0s | 100.1s |
+| Qwen3-14B-Q4_K_M | 8.4G | 0.97x | 0.56x | 72.7s | 138.0s |
+
+两个独立的结论：
+
+- **生成（steady state）在 4B 以上才勉强追平**，逐次 ratio 紧密聚在 1.0 附近
+  （4B Q8_0: 1.28 / 1.00 / 0.98；8B Q8_0: 1.00 / 1.02 / 0.94），
+  **不是加速，是持平**。
+- **端到端在所有尺寸上都是输的**（0.11x ~ 0.59x）。因为常驻解码器要先
+  付一次性启动成本：~0.4s 的 pipeline JIT + 把整个权重上传进显存。
+
+启动成本拆解（Qwen3-0.6B-Q8_0，`RMI_SETUP_TRACE`）：
+
+```
+Qwen3Ops::new (pipeline/descriptor)  211.0 ms
+权重上传+bind  633.5 MB               169.0 ms
+core_contract 校验                     31.5 ms   ← 已是 OnceLock memoize
+q8_0_activation_contract 校验           6.4 ms   ← 同上
+```
+
+契约校验那两项**已经**是 `OnceLock::get_or_init`，只跑一次，没有优化空间；
+pipeline JIT 和权重上传是一次性 CLI 进程无法摊销的成本。
+
+#### 3. 根因：dense GEMM 在 M 很小时被饿死
+
+用 `RUST_GPU_SUBMIT_TRACE` 测 Qwen3-8B-Q8_0 的 prefill：
+一次 prefill 只产生 ~36 次 submission（**分块是合理的**，不是提交过碎），
+但每次 `wait` 平均 **188 ms**，而驱动调用 `submit` 只有 35 µs。
+即整条链路的开销不在提交，而在 GPU 执行本身。
+
+折算下来整趟 forward 对 8GB 权重只跑到约 **1.2 GB/s 有效带宽**；
+而同一块卡上 LM head 那一类（`rows=1`, `n_out` 很大）能跑到 22 GB/s。
+差别在于 **M（行数）**：prefill M≈60、decode M=1，对 GPU 来说都太小，
+填不满 SMs，既算不出强度也吃不到带宽。
+
+对比同机 CPU：8B prefill 11.3 t/s vs GPU 5.7 t/s —— **CPU 快一倍**。
+这台机器的 CPU（含 AVX2/FMA 路径）在这个工作负载上就是比这条 Vulkan
+dense 路径强。
+
+#### 为什么先不写「按模型大小决定是否上 GPU」的阈值
+
+本来想用上面的表定一个尺寸阈值，但数据不支持：**4B 以上生成只是持平，
+没有出现真正的交叉点**，而且持平的区间里 e2e 依然全输。也就是说
+「小模型不上 GPU」这个结论虽然成立，但真正的问题是
+**常驻 dense 路径本身在这个硬件上就没赢过**，加阈值只能掩盖症状。
+
+要真正修好，得动 dense GEMM kernel 本身（M 小的时候的 tiling / split-K），
+那是重写 shader 的量级，不适合在没有回归基线的情况下顺手做。
+
+#### 附带记录
+
+- **Q4_K_M 在 GPU 上尤其糟**（8B: 0.19x，wall 398s）。
+  `GpuMatmulMode::Dot`（GEMV/split-K 路径）只对 F16/BF16 存在，
+  Q4_K 只能走 `Prepared` -> `Q4_K_MATMUL`，没有 rows=1 专用 kernel。
+  这和 `7750eeb` 里 LFM2.5 MoE 的结论是同一件事的两个入口。
+- **8B-Q8_0 的 GPU 运行峰值 RSS 约 18.7 GB**，超过 15 GiB 预算；
+  一次性 CLI 同时持有 mmap 权重和显存副本是原因之一。
+
+### TODO-032: Q4_K/Q5_K/Q6_K 在 GPU 上没有 DP4A kernel，8B Q4_K_M 比 CPU 慢 17.6 倍
+
+接着 TODO-031 往下挖，发现 Q4_K 家族在 dense Vulkan 路径上缺少向量化 kernel，
+这是 Q4_K_M 特别慢的**结构性**原因。
+
+在 `src/vulkan/ops.rs` 的 operator 表里：
+
+- **Q8_0** 有两个 kernel：
+  - `Q8_MATMUL_GROUPED`，其 index 会被 `Q8_MATMUL_GROUPED_DP4A` 顶替
+    （`force_dp4a && context.supports_integer_dot_product()`，约 1423 行）；
+  - 外加 `Q8_MATMUL_TILED_DP4A`（`rows > 1` 时 `record_weight_matmul_rows`
+    自动切到 `record_weight_matmul_tiled_rows`，约 1960 行）。
+  两者都吃设备 int8 dot-product，8B Q8_0 生成能持平 CPU。
+
+- **Q4_K / Q5_K / Q6_K** 只有**一个**标量 kernel（`q4_k_matmul.comp` 等，
+  表项见约 392 行），既没有 dp4a 变体，也没有 tiled 变体。
+  8B Q4_K_M 实测 prefill 0.4 t/s、生成 1.3 t/s，wall 45.8s，
+  同机 CPU 2.6s —— **慢 17.6 倍**，是所有测过的组合里最差的。
+
+`q4_k_matmul.comp` 主循环（每 block）：
+
+```glsl
+int value = int((group & 1u) == 0u ? packed & 15u : packed >> 4u);  // 解 4-bit nibble
+int activation = q8(block * 256u + local);
+partial[(local & 31u) >> 2u] += int(scale(slot, offset, group)) * activation * value;
+```
+
+单块累加值量级 = `scale(≤63) * activation(≤127) * value(≤15)`，
+再在 8 个 lane 上求和，落到 int32。这种**块缩放的 int32 乘加不能直接套
+Q8_0 的 dp4a 路径**（Q8_0 的量化把乘积压在 int8 内）。所以 Q4_K 想吃
+DP4A，得写一个自己的「块缩放 + int32 提升」的 int8 dot kernel，或者
+把激活缩放到能进 int8 的范围 —— 这是一个完整的 shader 项目，不适合随手做。
+
+结论与 TODO-031 合并看：**GPU dense 路径目前只有 Q8_0 勉强可用（持平 CPU），
+Q4_K 家族完全不能用（慢 17.6 倍）。** 在补出 Q4_K 的向量化 kernel 之前，
+Q4_K 模型应该明确走 CPU，而不是靠一条经验阈值去猜。
+
+### TODO-033: Q4_K split-K GEMV 试过，行度不够；真正的瓶颈是单字节权重访问效率
+
+接着 TODO-032，真的去写了一个 rows==1 的 split-K GEMV（`q4_k_matmul.comp`
+里新增分支：rows==1 时不让 64 个 lane 各领一个输出行，而是让 64 个 lane
+合作同一个输出行，按 32 元素一个 scale/min 小组切 K，最后树形归约）。
+256 元素的 Q4_K block 正好切成 8 个 32 元素组共享一个 scale 和一个 minimum，
+所以 lane 之间不需要交换 scale，每个 lane 内部就能把该组的 dot 算完。
+
+结果：
+
+- **数值**：对真实权重（Qwen3-8B-Q4_K_M 的 blk.0.ffn_gate），
+  GEMV 输出与已提交（对 CPU 位精确）的 batched 路径 **逐字节一致**。
+- **性能**：rows=1 只从 2.33ms 降到 2.11ms（~10%），LFM2.5 MoE 端到端
+  1.1 t/s → 1.2 t/s，**基本没动**。因此这个分支没有保留（回退了）。
+
+**为什么并行度不是瓶颈。** 8B prefill 每次提交 GPU 等 188ms（vs 驱动
+35µs），整趟 forward 对 8GB 权重只跑出 ~1.2 GB/s；而同卡 LM head
+（rows=1、n_out 很大）能到 22 GB/s。差异在于**单次权重字节的访问效率**，
+不是 lane 数：
+
+```
+Q4_K rows=1:  2.06 MB 权重，实测 2.11 ms  →  0.98 GB/s
+理论下限:     若能到 25 GB/s，只需 0.08 ms   →  差 25 倍
+```
+
+根源在 shader 的 `weight_byte()` / `q8()`：一次取一个字节
+（`w.data[index>>2] >> ((index&3)*8)` 再掩码），nibble 再逐个拆
+（`packed & 15` / `packed >> 4`）。加多少 lane 都还是在做字节级提取。
+
+**真正要做的**：把权重读取向量化——用 `uint4`/`int4` 一次搬 16 字节，
+在寄存器里用位运算拆 nibble 和 scale，让一次内存事务服务 16 个元素。
+这是重写 Q4_K 读取路径的量级，和 TODO-032 是同一个大工程，建议合并做。
+在那之前：
+- batched（rows>1）的 Q4_K 已经被 `7747f07` 的 shared-memory staging +
+  scale 提取外提提速 2.3~2.6 倍（位精确）；
+- rows=1 的 Q4_K（MoE decode、单 token）仍然只有 0.98 GB/s，
+  继续走 `7750eeb` 的 CPU 门控。
+
+### TODO-034: Z-Image GPU 路径罕见地不可复现（同 seed 约 1/20 次输出不同）
+
+在 GB10 上交替跑同 seed 的 Z-Image 256×256 八步，**大约每 20 次有一次输出不同**。
+幅度很小：mean|Δ| 1.2/255、PSNR 41.5 dB（不是坏图，是舍入级差异），
+其余各次逐字节一致。main 与 unified 分支都出现过，unified 修复前后都出现，
+所以**不是本次 push constant 特化引入的**。
+
+`main` 的历史记录里已经有同类现象（`docs/usage/z-image.md`「host 写 → device 读的
+barrier」一节）：arena 是 CPU 直接写、shader 直接读的映射内存，缺失
+HOST→COMPUTE barrier 时能否看见写入只取决于速度；旧 kernel 每次 dispatch 约 700 ms，
+写入总来得及被「看见」，tiled kernel 约 64 ms 就可能错过。该记录同时说 512×512 才会
+复现、256×256 逐位一致——**现在 256 也会出现，说明 tiled 化之后窗口更窄了**。
+
+需要做的事：
+
+1. 在 `VulkanContext::host_write_barrier` 之外，找出**哪一类** host 写入没有对应的
+   barrier。`zimage_projection_kernel_costs`（`src/vulkan/ops.rs`，`#[ignore]`）
+   可以先复现到单 kernel：同一形状连续录制多次，比较读回的激活是否逐字节一致。
+2. 目标是让 256 与 512 都逐字节可复现，再谈「GPU 与 CPU 逐位一致」。
+   在此之前，任何「GPU 输出逐字节一致」的测试结论都要注明运行次数。
+
+### TODO-035: 补偿 exp 的价值只在 decoder 侧，DiT 侧已确认不值得
+
+试过给 `softmax.comp` 加 `exact_exp` push 位、让 Z-Image DiT 走单精度 Horner
+（`exp_cheap`），结论是**回退**：
+
+- 性能几乎没赚：attention 相位只从 17.6 s 到 16.7–17.1 s（512，4 步）。同一个
+  shader 里编进两套实现后，热循环里那个 select 把省下的算术吃掉了。
+- 数值代价可测：DiT GPU 输出与同分支 CPU 参考的 PSNR 从 37.66 dB 降到 31.62 dB
+  （mean|Δ| 1.76 → 2.47，256×256 八步 seed 42）。
+
+所以 DiT 保留补偿版。剩下的开放问题是 decoder 侧：`exp_accurate` 的注释说
+「1 ULP 的 exp 误差可能翻转 F16 概率平局」，而 `attention_values` 在两种模式下都会把
+概率 `round_f16_rte` 之后才累加——补偿把 exp 做到 F32 最后一位，紧接着就被 F16
+舍入吃掉了。要回答的是：**decoder 路径真正需要的是 exp 的精度，还是「舍入到 F16
+之后不再变」这个性质**。如果只需要后者，把 exp 的误差压到远小于 F16 间隔（例如
+1e-4 相对）就够了，补偿项可以砍掉一半。
+
+复现数据与完整推导见 `docs/develop/ZIMAGE_OPTIMIZATION.md`。
+
+### TODO-036: Qwen3-4B Q8_0 过不了 model contract，而 0.6B 与 8B 能过
+
+`test-unified3`（unified-compute）上用 `--gpu --kv-cache f16` 跑 Qwen3 的三个
+Q8_0 尺寸，model contract（`src/models/qwen3/trunk/session.rs`，
+abs 2e-3 + rel 2e-3）的结果**按尺寸分裂**：
+
+| 模型 | contract | 实测（Generation t/s，同会话） |
+|---|---|---|
+| Qwen3-0.6B Q8_0 | 通过 | 25.6 / 25.7 / 26.6 |
+| Qwen3-4B Q8_0 | **失败**：`model logit mismatch at 0: gpu=9.235686 cpu=9.315228 rel=0.008538938` | 走 CPU，10.6 / 11.6 t/s |
+| Qwen3-8B Q8_0 | 通过 | 4.7 / 5.0 / 5.1 / 5.3 / 5.5 |
+
+4B 的相对偏差 8.5e-3 是容差的 4.3 倍，于是整条 GPU 路径被拒并回退 CPU。
+**同一个模型家族、同一种量化，只换尺寸就翻脸**，说明这不是「Q8 路径整体不精确」，
+而是某个尺寸触发了特定形状的偏差（4B 的 hidden 2560 / 36 层与 8B 的 4096 / 36 层
+在 n_in 上不整除某些 chunk 边界，是第一个该查的方向）。
+
+补充两点，避免重复劳动：
+
+- 这个失败**与 push constant 特化无关**：修复前后的 contract 数值逐位相同
+  （gpu=9.235686 cpu=9.315228），greedy 输出也逐字相同。
+- `main` 没有这道 contract 门，4B 直接跑 GPU，但只有 1.4 t/s generation，
+  比 CPU 回退的 10.6 t/s 慢 7 倍——**门是合理的**，问题在于 4B 的 GPU 数值
+  偏差太大而不是 GPU 太慢。
+
+同时记录：unified 分支的 decoder 路径比 `main` 快 6 倍以上
+（8B Q8_0 generation 5.1 t/s vs 0.8 t/s），这是该分支的目标，回归要盯住这条线。
+
+### TODO-037: `--threads` 等于核数时 CPU 吞吐塌 29 倍
+
+Qwen3-0.6B Q8_0，20 核 GB10，greedy，64 token：
+
+| `--threads` | prefill t/s | generation t/s |
+|---|---|---|
+| 12 | 280–335 | 82.8–88.4 |
+| 16 | 303–347 | 67.5–97.2 |
+| 17 | 281 | 52.2 |
+| 18 | 295 | 69.3 |
+| 19 | 312 | 69.0 |
+| **20** | **46–48** | **2.4** |
+
+悬崖正好落在 `threads == nproc`，可复现 3/3，且不是偶发：20 线程的 prefill 也只有
+1/6。默认线程数是 8，所以平时碰不到，只有显式 `--threads $(nproc)` 才会踩到。
+
+机制（`src/core/thread_pool.rs`）：`ComputePool::new(n)` 起 `n - 1` 个 worker，
+调用线程也参与，总参与者 = n。worker 在空闲时是 `spin_loop()` 忙等（CPU 模式，
+GPU 模式才 yield），而 `compute()` 的收尾是「自旋等 `n_complete == n_threads`」。
+在 20 核机器上再叠一个别的租户进程占着核，参与者一多，barrier 就开始等调度器，
+一个 token 被放大到 0.4 s。
+
+**已修**（`src/core/thread_pool.rs`）：等待循环与空闲 worker 都不再硬自旋。
+
+1. 新增 `wait_while`：先自旋 `WAIT_SPINS` 次（覆盖一次 hand-off 的微秒级窗口），
+   之后改成 `yield_now()`。原来的 `spin_loop()` 无限自旋会让每个参与者一直处于
+   runnable 状态。
+2. 空闲 worker 同样改成「有界自旋 + `yield_now()`」。这条更关键：
+   `compute_with_chunks` 每次调用都新起 `n_threads - 1` 个线程，20 线程时进程里
+   同时有 42 个线程挤在 20 核上，而常驻 worker 的热自旋正好在抢这些线程要用的核。
+3. `cargo test --lib core::thread_pool` 的两个用例覆盖了 Drop 与 chunk 语义
+   （`single_thread_pool_drops_without_spinning`、`chunks_begin_at_zero_and_execute_exactly_once`）。
+
+修完的效果（Qwen3-0.6B Q8_0，`--threads 20`，同会话交替）：
+
+| | generation t/s |
+|---|---|
+| 修复前 | 2.5 / 2.4 / 2.9 |
+| 修复后 | 65.1 / 53.8 / 41.4 |
+
+**20×**。顺带：`--threads 8` 的 CPU 生成从 41–56 t/s 到 83 t/s，
+Z-Image 的 **CPU** 路径 denoise 从 139.7 s 降到 126.4 s（−9.5%），GPU 路径不变
+（block profile 20.0 s vs 19.5 s，输出逐字节相同）。
+
+没做的：把 worker 数夹到 `min(requested, nproc - 1)`。修完等待逻辑后
+`--threads 20` 已经不再塌，这条就没有必要了——但默认线程数仍是 8，
+因为 12–20 线程在 0.6B 上没有稳定收益。
+
+顺带记一条同源结论：**Qwen3 的 GPU 常驻解码在这台机器上全面输给 CPU**
+（0.6B：CPU 67–97 t/s vs GPU 26 t/s；8B：CPU 12.6–13.5 t/s vs GPU 5.1 t/s），
+原因与 TODO-031 一致，只是这次把尺寸补全了。GPU 真正赢的是高算术强度的大矩阵
+（Z-Image DiT 权重 1.3 GB/层、rows 数百），而 decode 是 rows=1 的 GEMV——正是
+`docs/usage/z-image.md` 里点名会误导的那类形状。
+
+### TODO-038: CPU/GPU 自动分发应该按实测选后端，而不是按模型大小
+
+在 GB10 上把 Qwen3 的 Q8_0 从 0.6B 扫到 8B（同 prompt、greedy、16 线程，
+线程池修复后的构建）：
+
+| 模型 | 每 token 权重 | CPU gen t/s | GPU gen t/s | CPU prefill t/s | GPU prefill t/s |
+|---|---|---|---|---|---|
+| 0.6B | 0.54 GB | **121.2** | 52.8 | **346.9** | 25.9 |
+| 4B | 3.74 GB | **23.1** | contract 失败→CPU | 1.3 | — |
+| 8B | 7.57 GB | **11.1** | 9.2 | **14.0** | 4.3 |
+
+**没有出现 GPU 超越的点**，但差距随尺寸收窄：0.6B 差 2.3×，8B 差 1.2×。
+
+把两边换算成有效带宽（每 token 把整个权重集读一遍）：
+
+| 模型 | CPU GB/s | GPU GB/s |
+|---|---|---|
+| 0.6B | 65 | 28 |
+| 8B | 84 | 70 |
+
+于是结论是：**GPU 解码是带宽受限的，而它只跑到 70 GB/s；CPU 在同一台机器上跑到 84 GB/s。**
+`qwen3_decode_gemv_bandwidth`（`src/vulkan/ops.rs`，`#[ignore]`）在真实解码形状上
+量到 lm_head 一次 661 MB 的 GEMV 最快 8.9 ms（74 GB/s），其余形状 10–52 GB/s，
+小矩阵被每次 dispatch 的固定开销吃掉。
+
+**但这个 GPU 数字是带偏的**：测量期间另一个租户占着 85% 的 GPU（root 的 python，
+96 GB 显存），nvidia-smi 采样 79–92%。GPU 这边还没拿到空闲机器，所以
+「GPU 在大模型上能不能反超」在这台机器上无法判定。
+
+因此自动分发的策略应当是**实测驱动**，不是按尺寸猜：
+
+1. **先量设备忙不忙**。本机 GPU 常驻 85% 利用率时，GPU 路径在任何尺寸都不该被选中。
+   可以用首 token 的实测延迟对比 CPU 基线，落后就回退——现在只有「logit 逐位一致」
+   的 contract 门，没有「谁更快」的门。
+2. **把 setup 成本算进去**。host→device 上传实测只有 5–9 GB/s（PCIe 路径在这台
+   统一内存机器上不快），8B 的 7.5 GB 权重上传就要 1 s 起步；一次性的 CLI 短跑
+   永远摊不平，serving 才能。策略需要知道预期 token 数。
+3. **contract 门先修**。4B 现在直接被拒（TODO-036），在数值对齐修好之前，
+   任何尺寸相关的策略表都是空谈。
+
+顺带记一条实测的坑：这台机器上任何「GPU 更快/更慢」的结论都必须附带
+**当次测量的 GPU 利用率**，否则数据没有可比性——TODO-036/037/038 里的数字都受此影响。
+
+### TODO-039: PyTorch 参照证明 GPU 路径不是「实现得不好」，是设备被占着
+
+用原始 safetensors 权重跑 PyTorch（`tools/oracle/qwen3/pytorch_qwen3.py`，
+bf16，greedy，64 token），和本仓库的两条路径同台对照：
+
+| 模型 | PyTorch CUDA bf16 | 我们的 Vulkan GPU (Q8_0) | 我们的 CPU (Q8_0) | PyTorch CPU fp32 |
+|---|---|---|---|---|
+| Qwen3-0.6B | 24.7 t/s | **52.8 t/s** | 121.2 t/s | 2.4 t/s |
+| Qwen3-8B | 4.2 t/s（15.6 GB/token） | **9.2 t/s**（7.6 GB/token） | 11.1 t/s | — |
+
+**我们的 Vulkan 路径比同卡 PyTorch 快 2.1–2.2×**（Q8_0 把每 token 的字节数减半，
+kernel 也够快），所以「GPU 输给 CPU」**不是实现问题**。
+
+真正的原因是带宽比：GPU 有效读取 70 GB/s，CPU 84 GB/s，而 GPU 这 70 GB/s 是在
+**另一个租户占着 85% 设备**的情况下拿到的（nvidia-smi 采样 79–92%）。GB10 的
+DRAM 峰值在 273 GB/s 量级，设备空闲时 GPU 路径在 8B 上应该能到 20 t/s 以上，
+也就是**会赢过 CPU 的 11.1 t/s**。
+
+所以自动分发的正确形状是「按实测选」，而不是「按大小猜」：先量设备占用与首 token
+延迟，落后 CPU 就回退。0.6B 上 GPU 无论如何都输（小模型权重装不进 cache，
+CPU 直接吃 LPDDR），8B 以上在设备空闲时才可能赢——这两个边界都需要在
+**独占设备**上重新测一遍。
+
+顺带把 PyTorch 的输出也记下来：Q8_0 的 greedy 文本与 bf16 参考在十几个 token 后
+就分叉（CPU 路径与 GPU 路径之间也分叉），这是量化 + 非逐位一致的正常表现，
+不是 bug 的证据；要判对错得用同权重的 llama.cpp 参照（TODO-036 的 4B contract
+失败同理）。

@@ -108,6 +108,7 @@ fn dense_test_config(n_ctx: usize) -> Qwen35Config {
         is_recurrent: vec![false],
         key_length: 32,
         value_length: 8,
+        moe: None,
     }
 }
 
@@ -134,6 +135,7 @@ fn tiny_dense_model(k_weight: [f32; 4], v_weight: [f32; 4]) -> Qwen35Model<'stat
         is_recurrent: vec![false],
         key_length: 2,
         value_length: 2,
+        moe: None,
     };
     let weight = |data: Vec<f32>, n_rows| {
         let n_in = data.len() / n_rows;
@@ -158,9 +160,10 @@ fn tiny_dense_model(k_weight: [f32; 4], v_weight: [f32; 4]) -> Qwen35Model<'stat
         ssm_alpha: None,
         ssm_norm: None,
         ssm_out: None,
-        ffn_gate: identity(),
-        ffn_up: identity(),
-        ffn_down: identity(),
+        ffn_gate: Some(identity()),
+        ffn_up: Some(identity()),
+        ffn_down: Some(identity()),
+        moe: None,
     };
     Qwen35Model {
         config,
@@ -230,8 +233,8 @@ fn qwen35_non_k_quant_weights_do_not_receive_q8_k_input() {
     layer.wq = Some(reject_q8k_weight(2, 4));
     layer.wk = Some(reject_q8k_weight(2, 2));
     layer.wv = Some(reject_q8k_weight(2, 2));
-    layer.ffn_gate = reject_q8k_weight(2, 2);
-    layer.ffn_up = reject_q8k_weight(2, 2);
+    layer.ffn_gate = Some(reject_q8k_weight(2, 2));
+    layer.ffn_up = Some(reject_q8k_weight(2, 2));
 
     let mut scratch = Qwen35Scratchpad::new(&model.config, 1);
     let mut kv_cache = KvCache::new_f32(1, model.config.n_ctx, 2);
@@ -282,6 +285,18 @@ fn qwen35_l2_norm_matches_pinned_llama_cpp_bits() {
         0x3d0243cb, 0x3b3fc530, 0xbc016f46, 0x3bb1d80e, 0xba45c19f, 0xba89fe14, 0x3b26ebc8,
         0xb9d28f76, 0xbbec5142,
     ];
+    // Regenerated 2026-10-19. The previous values were produced by the Rust
+    // implementation as it stood, not by the oracle: they reproduce
+    // `1/sqrt(sum + eps)` on this input 128/128 and ggml's kernel
+    // `1.0f/fmaxf(sqrtf(sum), eps)` 0/128. So the pin asserted agreement with
+    // the code under test.
+    //
+    // What settles it is the measurement, not the algebra: with this formula
+    // layer 1's whole SSM chain (conv_output_raw, q_conv, q_conv_predelta,
+    // k_conv_predelta, state_predelta, final_output) became bit-identical against
+    // a real llama.cpp process on MiniCPM-V 4.7 35B-A3B, where it had differed
+    // by up to 1e-4 and grew to 3e-2 by the last layer. See
+    // tools/oracle/qwen35/qwen35moe-ffn-dump.patch.README.md.
     const EXPECTED_BITS: [u32; 128] = [
         0x3c05bcb8, 0x3bac0000, 0x3b60906f, 0xbf27d235, 0x3d49d6dc, 0xbc6a0077, 0x3ddfb552,
         0x3d264bbc, 0xbe06e9d2, 0x3e031a4c, 0xbdedf0cd, 0xbb94b02d, 0xbbeb8fdb, 0x3c8b46a4,
@@ -308,6 +323,77 @@ fn qwen35_l2_norm_matches_pinned_llama_cpp_bits() {
     super::util::l2_norm(&mut actual, 1e-6);
 
     assert_eq!(actual.map(f32::to_bits), EXPECTED_BITS);
+}
+
+#[test]
+fn qwen35_l2_norm_clamps_the_denominator_at_eps() {
+    // The case the pin above cannot reach: when the vector's norm is below eps,
+    // ggml's `1.0f/fmaxf(sqrtf(sum), eps)` returns exactly 1/eps, while
+    // `1/sqrt(sum + eps)` keeps growing. On this input the two scales differ by
+    // ~1000x, so a pin that only exercises well-scaled vectors cannot tell them
+    // apart -- which is how the wrong formula survived in the first place.
+    const N: usize = 128;
+    const EPS: f32 = 1e-6;
+    let tiny = vec![1e-8f32; N];
+
+    let sum: f64 = tiny.iter().map(|&v| f64::from(v * v)).sum();
+    assert!(
+        (sum as f32).sqrt() < EPS,
+        "this input is meant to sit below eps; sqrt(sum) = {:?}",
+        (sum as f32).sqrt()
+    );
+
+    let mut actual = tiny.clone();
+    super::util::l2_norm(&mut actual, EPS);
+
+    // ggml clamps, so every output is the input times exactly 1/eps.
+    for (got, &input) in actual.iter().zip(&tiny) {
+        let expected = input * (1.0f32 / EPS);
+        assert_eq!(
+            got.to_bits(),
+            expected.to_bits(),
+            "denominator was not clamped at eps"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires RMI_QWEN35_MODEL and RMI_QWEN35_PROMPT_TOKENS"]
+fn qwen35moe_single_token_trace() {
+    // Runs exactly one token so the MoE checkpoints can be joined against the
+    // oracle on (name, layer, step=0).
+    //
+    // The tokens come from an env var rather than a prompt string on purpose.
+    // The oracle prints the ids it tokenised and then processes that many
+    // tokens; re-tokenising the same text here could add a BOS or split
+    // differently and quietly compare two different tokens. Handing both sides
+    // the same ids is the only way "one token" means one token on both.
+    let path = std::env::var("RMI_QWEN35_MODEL").expect("RMI_QWEN35_MODEL must be set");
+    let ids = std::env::var("RMI_QWEN35_PROMPT_TOKENS")
+        .expect("RMI_QWEN35_PROMPT_TOKENS must be a comma-separated list");
+    let tokens: Vec<u32> = ids
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(|part| part.parse().expect("token id must be a u32"))
+        .collect();
+    assert!(
+        !tokens.is_empty(),
+        "RMI_QWEN35_PROMPT_TOKENS must name at least one token"
+    );
+
+    let source =
+        crate::open_model_source(std::path::Path::new(&path), crate::ComponentRole::Llm).unwrap();
+    let mut model = Qwen35Model::from_source(source.as_ref()).unwrap();
+    let n_ctx = model.config.n_ctx.min(tokens.len() + 1);
+    let pool = session_pool();
+    let mut session =
+        Qwen35Session::new_with_prefill_batch_size(&mut model, n_ctx, tokens.len(), pool).unwrap();
+    let positions: Vec<[usize; 4]> = (0..tokens.len()).map(|i| [i; 4]).collect();
+    // The trace is emitted from moe.rs during this call; nothing to assert here
+    // beyond it succeeding, because the comparison is done offline by
+    // tools/oracle/qwen35/check_moe.py against the oracle's manifest.
+    session.step_with_tokens(&tokens, &positions).unwrap();
 }
 
 #[test]
@@ -495,6 +581,7 @@ fn tiny_dense_session_model_with_embedding(
         is_recurrent: vec![false],
         key_length: n_embd,
         value_length: n_embd,
+        moe: None,
     };
     let mk_weight = |n_out| f32_test_weight(vec![1.0; n_embd * n_out], n_embd, n_out);
     let layer = Qwen35LayerWeights {
@@ -515,9 +602,10 @@ fn tiny_dense_session_model_with_embedding(
         ssm_alpha: None,
         ssm_norm: None,
         ssm_out: None,
-        ffn_gate: mk_weight(n_embd),
-        ffn_up: mk_weight(n_embd),
-        ffn_down: mk_weight(n_embd),
+        ffn_gate: Some(mk_weight(n_embd)),
+        ffn_up: Some(mk_weight(n_embd)),
+        ffn_down: Some(mk_weight(n_embd)),
+        moe: None,
     };
     Qwen35Model {
         config,
@@ -593,6 +681,7 @@ fn tiny_q8_session_model() -> Qwen35Model<'static> {
         is_recurrent: vec![false],
         key_length: 256,
         value_length: 256,
+        moe: None,
     };
     let layer = Qwen35LayerWeights {
         attn_norm: vec![1.0; 256],
@@ -612,9 +701,10 @@ fn tiny_q8_session_model() -> Qwen35Model<'static> {
         ssm_alpha: None,
         ssm_norm: None,
         ssm_out: None,
-        ffn_gate: q8_weight(256),
-        ffn_up: q8_weight(256),
-        ffn_down: q8_weight(256),
+        ffn_gate: Some(q8_weight(256)),
+        ffn_up: Some(q8_weight(256)),
+        ffn_down: Some(q8_weight(256)),
+        moe: None,
     };
     Qwen35Model {
         config,
@@ -930,6 +1020,27 @@ fn qwen35_vulkan_dense_chunks_preserve_four_mrope_axes() {
         changed[1][axis] += 1;
         assert_ne!(run(3, &changed), baseline, "mRoPE axis {axis} was ignored");
     }
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
+fn qwen35_forced_vulkan_failure_preserves_state_without_cpu_retry() {
+    let _cpu = ComputePool::disable_gpu_matmul_for_scope();
+    let mut session = mixed_fixture_session(8, 5);
+    session.step_with_tokens(&[1], &[[0; 4]]).unwrap();
+    let before = snapshot_qwen35_recurrent_state(&session);
+    session.force_vulkan_policy_for_test();
+    session.fail_gpu_once_for_test("forced Vulkan failure");
+    session.fail_cpu_chunk_after_row_for_test(0);
+    let input = [[1, 2, 3, 4], [5, 6, 7, 8]];
+    let error = session.step_with_tokens(&[2, 3], &input).unwrap_err();
+    assert_eq!(error, "forced Vulkan failure");
+    assert_eq!(snapshot_qwen35_recurrent_state(&session), before);
+    assert!(session
+        .step_with_tokens(&[2, 3], &input)
+        .unwrap_err()
+        .contains("unavailable"));
+    assert_eq!(snapshot_qwen35_recurrent_state(&session), before);
 }
 
 #[cfg(feature = "vulkan")]
@@ -1357,7 +1468,7 @@ fn last_hidden_borrows_all_final_norm_rows_from_the_last_step() {
     let mut model = tiny_dense_session_model();
     model.config.norm_eps = 0.0;
     model.layers[0].wo = Some(f32_test_weight(vec![0.0; 16], 4, 4));
-    model.layers[0].ffn_down = f32_test_weight(vec![0.0; 16], 4, 4);
+    model.layers[0].ffn_down = Some(f32_test_weight(vec![0.0; 16], 4, 4));
     let mut session = Qwen35Session::new(&mut model, 2, session_pool()).unwrap();
     session
         .step(
