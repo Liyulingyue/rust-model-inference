@@ -146,6 +146,8 @@ bound; the difference is not resolved by changing a comparison threshold.
 
 A 256x256, default 16-step CLI smoke produces a valid PNG depicting the requested
 red cube, table and shadows. This larger image has no numerical Oracle comparison.
-The complete Linux CLI run is still in progress.
+The complete Linux CLI numerical comparison remains pending: the requested host
+repeatedly times out during weight transfer, including a minimal SSH readiness
+command. The Linux VAE result above does not establish complete pipeline parity.
 No GPU, rectangular image, Base/FP8/NVFP4 or native BF16 activation parity claim
 is made. This is an experimental CPU adapter.

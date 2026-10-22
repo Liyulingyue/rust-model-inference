@@ -192,5 +192,10 @@
       "baseline_commit": "973210b6",
       "failure": "SiLU bitwise assertion differs by 1 ULP"
     }
+  },
+  "linux_full_validation": {
+    "status": "pending",
+    "reason": "Repeated SSH connection/transfer timeouts; readiness command exited 255 before complete weights or full CLI validation were available.",
+    "completed_scope": "Native build, FLUX3 unit tests, shared Qwen regressions and real VAE numerical comparison only."
   }
 }
