@@ -1,0 +1,80 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(std430, binding = 1) readonly buffer Weights { uint data[]; } weights;
+layout(push_constant) uniform PC { uint input_word; uint q8_word; uint scales_word; uint output_word; uint n_in; uint n_out; uint format; } pc;
+uint wb(uint i) { return (weights.data[i >> 2u] >> ((i & 3u) * 8u)) & 255u; }
+int wi8(uint i) { uint v = wb(i); return v >= 128u ? int(v) - 256 : int(v); }
+float wh(uint i) { return unpackHalf2x16(wb(i) | (wb(i+1u) << 8u)).x; }
+int activation(uint i) { uint v = (arena.data[pc.q8_word + (i >> 2u)] >> ((i & 3u) * 8u)) & 255u; return v >= 128u ? int(v)-256 : int(v); }
+uint scale5(uint o, uint i) { return i < 4u ? wb(o+4u+i)&63u : (wb(o+8u+i)&15u) | ((wb(o+i)>>6u)<<4u); }
+uint min5(uint o, uint i) { return i < 4u ? wb(o+8u+i)&63u : (wb(o+8u+i)>>4u) | ((wb(o+4u+i)>>6u)<<4u); }
+int weight_scale(uint offset, uint local) {
+    uint section = local / 128u;
+    uint quarter = (local % 128u) / 32u;
+    return wi8( offset + 192u + section * 8u + (local % 32u) / 16u + quarter * 2u);
+}
+
+int weight_code(uint offset, uint local) {
+    uint section = local / 128u;
+    uint quarter = (local % 128u) / 32u;
+    uint l = local % 32u;
+    uint ql = section * 64u + l + (quarter == 1u || quarter == 3u ? 32u : 0u);
+    uint qh = section * 32u + l;
+    uint low = quarter < 2u ? wb( offset + ql) & 15u : wb( offset + ql) >> 4u;
+    uint high = (wb( offset + 128u + qh) >> (quarter * 2u)) & 3u;
+    return int(low | (high << 4u));
+}
+
+void main() {
+    uint row = gl_GlobalInvocationID.x;
+    if (row >= pc.n_out) return;
+    precise float result = 0.0;
+    if (pc.format == 30u) {
+        precise double sum = 0.0lf;
+        for (uint k = 0u; k < pc.n_in; ++k) {
+            uint bits = arena.data[pc.input_word + k];
+            bits += 0x7fffu + ((bits >> 16u) & 1u);
+            float x = uintBitsToFloat(bits & 0xffff0000u);
+            uint idx = row * pc.n_in + k;
+            float w = uintBitsToFloat((weights.data[idx >> 1u] >> ((idx & 1u) * 16u)) << 16u);
+            precise float product = x * w;
+            sum += double(product);
+        }
+        result = float(sum);
+    } else {
+        uint blocks = pc.n_in / 256u;
+        precise float sums[8] = float[8](0,0,0,0,0,0,0,0);
+        for (uint block = 0u; block < blocks; ++block) {
+            uint o = (row * blocks + block) * (pc.format == 13u ? 176u : 210u);
+            int dot[8] = int[8](0,0,0,0,0,0,0,0);
+            int minimum = 0;
+            for (uint k = 0u; k < 256u; ++k) {
+                int x = activation(block * 256u + k);
+                if (pc.format == 13u) {
+                    uint group = k >> 5u;
+                    uint packed = wb(o+48u+(group>>1u)*32u+(k&31u));
+                    uint low = (group & 1u)==0u ? packed&15u : packed>>4u;
+                    uint high = (wb(o+16u+(k&31u))>>group)&1u;
+                    dot[k%8u] += int(scale5(o,group))*x*int(low|(high<<4u));
+                    minimum += int(min5(o,group))*x;
+                } else {
+                    dot[k%8u] += weight_scale(o,k)*x*(weight_code(o,k)-32);
+                }
+            }
+            float d = uintBitsToFloat(arena.data[pc.scales_word + block]);
+            precise float factor = wh(o+(pc.format == 13u ? 0u : 208u)) * d;
+            for (uint lane=0u; lane<8u; ++lane) {
+                precise float term = factor * float(dot[lane]);
+                sums[lane] += term;
+            }
+            if (pc.format == 13u) {
+                precise float term = (wh(o+2u)*d)*float(minimum);
+                result -= term;
+            }
+        }
+        for (uint lane=0u; lane<8u; ++lane) result += sums[lane];
+    }
+    arena.data[pc.output_word+row] = floatBitsToUint(result);
+}

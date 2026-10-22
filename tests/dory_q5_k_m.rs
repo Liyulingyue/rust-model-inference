@@ -102,7 +102,14 @@ fn dory_q5_reference_trace() {
         model.config.sliding_window = window.parse().unwrap();
         assert!(model.config.sliding_window > 0);
     }
-    let mut session = model.new_session(prompt.len() + count, kv);
+    let policy = if std::env::var("RMI_DORY_COMPUTE").as_deref() == Ok("vulkan") {
+        rust_model_inference::compute::ComputePolicy::Vulkan
+    } else {
+        rust_model_inference::compute::ComputePolicy::Cpu
+    };
+    let mut session = model
+        .new_session_with_compute(prompt.len() + count, kv, policy)
+        .unwrap();
     #[cfg(feature = "parity-trace")]
     rust_model_inference::parity_trace::token_ids("prompt_ids", &prompt).unwrap();
     let mut logits = Vec::new();
@@ -138,6 +145,7 @@ fn dory_q5_reference_trace() {
 #[test]
 #[ignore = "requires the real Q5_K_M GGUF"]
 fn dory_q5_prefill_chunking_and_reset() {
+    rust_model_inference::ops::enable_gpu();
     let model = DoryModel::from_source(source().expect("set RMI_DORY_Q5_MODEL"), 4).unwrap();
     let tokens = [22177, 1897, 1429];
     for kv in [KvFormat::F32, KvFormat::F16] {
@@ -158,4 +166,56 @@ fn dory_q5_prefill_chunking_and_reset() {
         chunked.reset(&model, kv);
         assert_close(&model.prefill(&tokens, &mut chunked).unwrap());
     }
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
+#[ignore = "requires the real Q5_K_M GGUF and a hardware Vulkan device"]
+fn dory_q5_vulkan_executes_and_matches_cpu() {
+    use rust_model_inference::compute::ComputePolicy;
+    assert!(std::env::var_os("RMI_PARITY_TRACE").is_none());
+    assert!(std::env::var_os("RMI_SCALAR").is_none());
+    rust_model_inference::ops::enable_gpu();
+    let model = DoryModel::from_source(source().expect("set RMI_DORY_Q5_MODEL"), 4).unwrap();
+    for kv in [KvFormat::F32, KvFormat::F16] {
+        let mut gpu = model
+            .new_session_with_compute(4, kv, ComputePolicy::Vulkan)
+            .unwrap();
+        let mut cpu = model.new_session(4, kv);
+        let context = rust_model_inference::ops::get_vulkan_context().unwrap();
+        let before = context.compute_stats();
+        for token in [22177, 1897, 1429] {
+            let actual = model.prefill(&[token], &mut gpu).unwrap();
+            let expected = model.prefill(&[token], &mut cpu).unwrap();
+            assert_numerically_aligned(&actual, &expected);
+        }
+        assert!(context.compute_stats().since(before).submissions > 0);
+        assert!(model.prefill(&[u32::MAX], &mut gpu).is_err());
+        gpu.reset(&model, kv);
+        cpu.reset(&model, kv);
+        assert_numerically_aligned(
+            &model.prefill(&[22177, 1897, 1429], &mut gpu).unwrap(),
+            &model.prefill(&[22177, 1897, 1429], &mut cpu).unwrap(),
+        );
+    }
+}
+
+#[cfg(feature = "vulkan")]
+fn assert_numerically_aligned(actual: &[f32], expected: &[f32]) {
+    assert_eq!(actual.len(), expected.len());
+    let (mut diff, mut reference, mut max_abs, mut scale) = (0.0f64, 0.0f64, 0.0f64, 1.0f64);
+    for (&a, &b) in actual.iter().zip(expected) {
+        assert!(a.is_finite() && b.is_finite());
+        let delta = f64::from(a) - f64::from(b);
+        diff += delta * delta;
+        reference += f64::from(b) * f64::from(b);
+        max_abs = max_abs.max(delta.abs());
+        scale = scale.max(f64::from(b).abs());
+    }
+    let l2 = (diff / reference.max(f64::MIN_POSITIVE)).sqrt();
+    eprintln!("GPU relative_l2={l2} scaled_max_abs={}", max_abs / scale);
+    assert!(l2 <= 0.01);
+    assert!(max_abs / scale <= 0.01);
+    let best = |v: &[f32]| (1..v.len()).fold(0, |b, i| if v[i] > v[b] { i } else { b });
+    assert_eq!(best(actual), best(expected));
 }

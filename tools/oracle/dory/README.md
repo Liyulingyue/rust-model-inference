@@ -101,7 +101,7 @@ reproduced independently on main `973210b6de572b8226cd576da7ace17fb22d8ad5`.
 Their names and scope are recorded in the Linux result file. No full-suite
 pass is claimed.
 
-## Remote GPU probe
+## Initial GPU probe (2026-10-22)
 
 On 2026-10-22 the same Linux host exposed `AMD Radeon Graphics (RADV NAVI31)`,
 PCI `1002:744b`, with 51,522,830,336 bytes of VRAM. The Radeon Vulkan ICD
@@ -116,11 +116,12 @@ the CPU logits within the unchanged dual 1% gates (observed errors zero).
 However, after Vulkan warmup both replays performed **zero inference GPU
 submissions and zero weight uploads**, even with `RUST_GPU_MIN_OUTPUTS=0`.
 `--gpu` succeeds through CPU fallback; `--compute vulkan` exits with
-`full Vulkan text decoding is not supported for dory`. Dory therefore remains
-CPU-only. No end-to-end GPU alignment or speedup is claimed. Results and
+`full Vulkan text decoding is not supported for dory`. At that revision Dory remained
+CPU-only. That probe does not establish end-to-end GPU alignment or speedup. Results and
 source hashes: [validation-gpu.json](validation-gpu.json).
 
-Reproduce with the same Q5_K_M artifact and a hardware Vulkan ICD:
+The current probe below enforces resident execution. Use the recorded revision
+to reproduce the historical fallback. It requires the same artifact and a hardware Vulkan ICD:
 
 ```sh
 cargo build --locked --profile release-fast --features vulkan --lib
@@ -135,8 +136,8 @@ env -u RMI_PARITY_TRACE -u RMI_SCALAR RUST_GPU_MIN_OUTPUTS=0 \
 The probe asserts that the ICD is hardware and that the operator checks
 submit GPU work, then reports Dory counters separately after warmup. It
 compares every step's logits and greedy IDs with a CPU-scoped session.
-Neither `RMI_PARITY_TRACE` nor `RMI_SCALAR` is set: both would disable offload
-and invalidate this execution probe. The operator helper retains its own
+The execution probe keeps `RMI_PARITY_TRACE` and `RMI_SCALAR` unset so it
+measures production command recording without intermediate readbacks. The operator helper retains its own
 fixture checks; Dory's reduced-precision acceptance remains the dual 1% gate.
 
 The Z-Image SiLU-scale probe now uses `read_f32_into` to copy device-local
@@ -158,6 +159,84 @@ with `SILU_SCALE_ONLY=1`, which skips the SiLU probe entirely. No numerical
 gate was changed; the full operator suite is still not counted as passing.
 The `readback_fix` section of [validation-gpu.json](validation-gpu.json)
 records these follow-up checks separately from the original execution probe.
+
+## Resident Dory Vulkan execution
+
+Dory now has a dedicated Vulkan session selected by `--compute vulkan` or
+`--gpu` (Auto). Projection weights upload once; normalized loop state, all
+per-loop KV slots, RoPE application, attention, gates, MLP, residuals and output
+scaling execute on the device. Embedding lookup and precise RoPE coefficient
+generation remain on the host. Prefill evaluates tokens sequentially; reset
+reuses uploaded weights and arena allocations.
+
+The initial device contract requires `shaderFloat64`. It covers the tested
+Q5_K_M artifact's Q5_K/Q6_K/BF16 projections with F32 or F16 KV. Unsupported
+formats, insufficient buffer range or missing FP64 reject forced Vulkan;
+Auto may select CPU during initialization. An execution failure invalidates
+the GPU session until reset and never silently switches its KV to CPU.
+Context capacity is also bounded by the device's storage-buffer range.
+As in the CPU session, F16 KV is rounded to half precision but stored in F32
+slots; it currently saves no cache memory.
+
+The GPU follows reference Q5/Q6 accumulation and BF16 input rounding. It uses
+the existing signed Q8_K quantizer, F16 ties-to-even conversion and normalization
+helpers. FP64 accumulators preserve the recurrent reduction order. The FP64
+exponential uses Arm's MIT-licensed `expf` reduction/table/evaluation, matching
+the Linux Oracle's FMA sequence: a one-ULP activation difference otherwise
+crossed quantization boundaries and amplified through the recurrent stack.
+This device arithmetic remains experimental outside the recorded hardware.
+
+Machine-readable graph replays, hardware counters, CLI and scope are in
+[validation-gpu-resident.json](validation-gpu-resident.json). The initial
+CPU-fallback evidence above is retained as history. On the AMD RADV NAVI31
+host, seven GPU/Oracle replays passed with 15,795 checkpoints: Hello and math
+with both KV formats, Unicode with F32 KV, and window-2 eviction with both
+KV formats. Observed relative L2 and scaled absolute errors were zero.
+
+With tracing unset, each nine-position F32/F16 decode performed 486 inference
+GPU submissions, zero static uploads during inference, and zero submissions
+from its explicit CPU comparison. Initialization uploaded 362 buffers
+(2,996,551,680 bytes) per session. The final hardware integration test and
+production CLI `--compute vulkan` F32 / `--gpu` F16 / `--compute cpu` F32
+all passed. The two GPU CLI runs produced the pinned Hello output.
+
+This correctness-first graph is currently slow: the alternating nine-position
+probe took GPU 26.92s / CPU 7.69s for F32 and GPU 26.67s / CPU 7.53s for F16,
+excluding initialization. The host was shared and CLI timing fluctuated;
+these are observations, not an isolated benchmark or a speedup claim. Reduced-precision gates
+remain relative L2 <= 1% and scaled maximum absolute error <= 1%; token IDs,
+checkpoint structure and embedding bytes are exact checks.
+
+To replay the complete graph against the fixed CPU Oracle, use the CPU replay
+commands above with a fresh trace path and replace the Rust command with:
+
+```sh
+RMI_DORY_COMPUTE=vulkan RMI_PARITY_TRACE="$case_dir/vulkan.jsonl" \
+  VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.json \
+  cargo test --profile release-fast --features vulkan,parity-trace \
+  --test dory_q5_k_m dory_q5_reference_trace -- --ignored --exact --nocapture
+.venv/bin/python tools/oracle/dory/check.py \
+  "$case_dir/oracle.jsonl" "$case_dir/vulkan.jsonl" --report "$case_dir/gpu-report.json"
+```
+
+The explicit Vulkan graph continues to submit work while tracing; CPU kernel
+offload switches do not select this graph. Run `gpu_probe.rs` above with tracing
+unset to assert actual inference submissions, one-time static uploads, no
+uploads during decode, CPU isolation and nine per-step logits comparisons.
+It also reports GPU/CPU evaluation time separately, excluding initialization.
+The hardware integration test additionally checks chunked prefill and reset:
+
+```sh
+RMI_DORY_Q5_MODEL="$RMI_DORY_Q5_MODEL" \
+  VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.json \
+  cargo test --profile release-fast --features vulkan --test dory_q5_k_m \
+  dory_q5_vulkan_executes_and_matches_cpu -- --ignored --exact --nocapture
+```
+
+Full 1024-token SWA eviction, the 262144-token context, other GGUF formats,
+other GPU/driver combinations and full-repository tests remain unverified.
+The shared operator suite's unrelated convolution/SiLU one-ULP failure above
+has not been relaxed or counted as passing.
 
 ## Acceptance
 

@@ -21,7 +21,7 @@ use super::weights::{load_layers, load_weight, DoryLayerWeights};
 
 const NORM_EPS: f32 = 1e-6;
 
-fn trace(name: &str, layer: Option<usize>, step: usize, values: &[f32]) {
+pub(crate) fn trace(name: &str, layer: Option<usize>, step: usize, values: &[f32]) {
     #[cfg(feature = "parity-trace")]
     if crate::parity_trace::enabled(name)
         && step
@@ -214,10 +214,38 @@ impl DoryModel {
         DorySession {
             model_capacity: capacity.min(self.config.n_ctx).max(1),
             position: 0,
+            model_source: self._source.clone(),
             caches: cache_slots,
             layer_slots,
             scratch: DoryScratch::new(&self.config),
+            kv_format,
+            policy: crate::compute::ComputePolicy::Cpu,
+            #[cfg(feature = "vulkan")]
+            gpu: None,
         }
+    }
+
+    pub fn new_session_with_compute(
+        &self,
+        capacity: usize,
+        kv_format: KvFormat,
+        policy: crate::compute::ComputePolicy,
+    ) -> Result<DorySession, String> {
+        policy.check_build()?;
+        let mut session = self.new_session(capacity, kv_format);
+        session.policy = policy;
+        #[cfg(feature = "vulkan")]
+        if let Some(context) = policy.context().map_err(|e| e.to_string())? {
+            match crate::vulkan::dory::DoryVulkanSession::new(self, context, session.model_capacity)
+            {
+                Ok(gpu) => session.gpu = Some(gpu),
+                Err(error) if policy == crate::compute::ComputePolicy::Auto => {
+                    eprintln!("Dory Vulkan unavailable: {error}")
+                }
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+        Ok(session)
     }
 
     fn matmul(
@@ -505,6 +533,9 @@ impl DoryModel {
         token_ids: &[u32],
         session: &mut DorySession,
     ) -> Result<Vec<f32>, String> {
+        if !Arc::ptr_eq(&self._source, &session.model_source) {
+            return Err("Dory session belongs to a different model".into());
+        }
         if token_ids.is_empty() {
             return Err("Dory prefill: empty token sequence".into());
         }
@@ -514,6 +545,26 @@ impl DoryModel {
                 session.model_capacity
             ));
         }
+        if token_ids
+            .iter()
+            .any(|&t| t as usize >= self.config.vocab_size)
+        {
+            return Err("Dory token is outside vocabulary".into());
+        }
+        #[cfg(feature = "vulkan")]
+        if let Some(gpu) = &mut session.gpu {
+            let logits = gpu
+                .prefill(self, token_ids, session.position, session.kv_format)
+                .map_err(|e| e.to_string())?;
+            session.position += token_ids.len();
+            session
+                .policy
+                .trace("dory", crate::compute::UsedBackend::Vulkan, token_ids.len());
+            return Ok(logits);
+        }
+        session
+            .policy
+            .trace("dory", crate::compute::UsedBackend::Cpu, token_ids.len());
         for &token in token_ids {
             self.token_embedding
                 .embedding_lookup(token, &mut session.scratch.output);
@@ -602,14 +653,28 @@ impl DoryModel {
 pub struct DorySession {
     model_capacity: usize,
     position: usize,
+    model_source: Arc<dyn TensorSource>,
     caches: Vec<DoryCache>,
     layer_slots: Vec<Option<usize>>,
     scratch: DoryScratch,
+    kv_format: KvFormat,
+    policy: crate::compute::ComputePolicy,
+    #[cfg(feature = "vulkan")]
+    gpu: Option<crate::vulkan::dory::DoryVulkanSession>,
 }
 
 impl DorySession {
     pub fn reset(&mut self, model: &DoryModel, kv_format: KvFormat) {
+        #[cfg(feature = "vulkan")]
+        if let Some(gpu) = &mut self.gpu {
+            gpu.failed = false;
+            self.position = 0;
+            self.kv_format = kv_format;
+            return;
+        }
+        let policy = self.policy;
         *self = model.new_session(self.model_capacity, kv_format);
+        self.policy = policy;
     }
 }
 
@@ -675,7 +740,11 @@ pub fn run_inference(
             .saturating_add(max_tokens)
             .max(prompt_ids.len()),
     );
-    let mut session = model.new_session(capacity, kv_format);
+    let mut session = model.new_session_with_compute(
+        capacity,
+        kv_format,
+        crate::compute::ComputePolicy::legacy(),
+    )?;
     let started = Instant::now();
     let mut logits = model.prefill(&prompt_ids, &mut session)?;
     let prefill = started.elapsed();
@@ -710,7 +779,11 @@ pub fn run_forward_logits_dory(
     n_threads: usize,
 ) -> Result<(Vec<f32>, Duration), String> {
     let model = DoryModel::from_source(source, n_threads)?;
-    let mut session = model.new_session(prompt_tokens.len().max(1), KvFormat::F32);
+    let mut session = model.new_session_with_compute(
+        prompt_tokens.len().max(1),
+        KvFormat::F32,
+        crate::compute::ComputePolicy::legacy(),
+    )?;
     let started = Instant::now();
     let logits = model.prefill(prompt_tokens, &mut session)?;
     Ok((logits, started.elapsed()))

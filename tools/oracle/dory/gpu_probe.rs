@@ -1,4 +1,4 @@
-//! Real-device operator checks and Dory CPU/auto comparison; report submission
+//! Real-device operator checks and resident Dory Vulkan/CPU comparison; report submission
 //! counts separately so CPU fallback cannot be mistaken for GPU validation.
 
 use rust_model_inference::{
@@ -37,7 +37,13 @@ fn main() {
     let model = DoryModel::from_source(source, 4).unwrap();
     for kv in [KvFormat::F32, KvFormat::F16] {
         let before = context.compute_stats();
-        let mut auto = model.new_session(9, kv);
+        let mut gpu = model
+            .new_session_with_compute(9, kv, ComputePolicy::Vulkan)
+            .unwrap();
+        let initialization = context.compute_stats().since(before);
+        assert!(initialization.static_uploads > 0);
+        let before_inference = context.compute_stats();
+        let (mut gpu_time, mut cpu_time) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
         let mut cpu = model.new_session(9, kv);
         let mut token = 22177u32;
         let mut generated = Vec::new();
@@ -45,11 +51,17 @@ fn main() {
         let mut max_scaled = 0.0f64;
         let mut bit_mismatches = 0usize;
         for step in 0..9 {
-            let actual = model.prefill(&[token], &mut auto).unwrap();
+            let started = std::time::Instant::now();
+            let actual = model.prefill(&[token], &mut gpu).unwrap();
+            gpu_time += started.elapsed();
+            let before_cpu = context.compute_stats();
+            let started = std::time::Instant::now();
             let expected = {
                 let _scope = ComputePolicy::Cpu.enter_legacy_scope();
                 model.prefill(&[token], &mut cpu).unwrap()
             };
+            cpu_time += started.elapsed();
+            assert_eq!(context.compute_stats().since(before_cpu).submissions, 0);
             assert_eq!(actual.len(), expected.len());
             let mut diff2 = 0.0f64;
             let mut ref2 = 0.0f64;
@@ -78,6 +90,10 @@ fn main() {
             generated,
             [1897, 1429, 22177, 5325, 1897, 1429, 22177, 5325]
         );
+        let inference = context.compute_stats().since(before_inference);
+        assert!(inference.submissions > 0);
+        assert_eq!(inference.static_uploads, 0);
+        println!("kv={kv:?} initialization={initialization:?} gpu_seconds={} cpu_seconds={} inference={inference:?}", gpu_time.as_secs_f64(), cpu_time.as_secs_f64());
         println!("kv={kv:?} generated={generated:?} max_relative_l2={max_l2} max_scaled_max_abs={max_scaled} bit_mismatches={bit_mismatches} stats={:?}", context.compute_stats().since(before));
     }
 }
