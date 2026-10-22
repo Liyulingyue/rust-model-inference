@@ -26,6 +26,8 @@ cmake -S "$source_dir" -B "$work_dir/build" \
     '-DCMAKE_C_FLAGS=-U__ARM_NEON -U__ARM_NEON__ -ffp-contract=off -fno-builtin-sinf -fno-builtin-cosf' \
     '-DCMAKE_CXX_FLAGS=-U__ARM_NEON -U__ARM_NEON__ -ffp-contract=off -fno-builtin-sinf -fno-builtin-cosf' \
     -DGGML_NATIVE=OFF \
+    -DGGML_SSE42=OFF -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_AVX512=OFF \
+    -DGGML_FMA=OFF -DGGML_F16C=OFF -DGGML_BMI2=OFF \
     -DBUILD_SHARED_LIBS=OFF -DGGML_ACCELERATE=OFF -DGGML_BLAS=OFF \
     -DGGML_METAL=OFF -DGGML_CUDA=OFF -DGGML_VULKAN=OFF -DGGML_OPENMP=OFF \
     -DGGML_LLAMAFILE=OFF -DGGML_CPU_REPACK=OFF -DGGML_CCACHE=OFF \

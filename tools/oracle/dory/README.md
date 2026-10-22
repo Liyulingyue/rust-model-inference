@@ -83,8 +83,9 @@ cases pass the same fixed gates. Machine-readable results: [validation.json](val
 
 ## Acceptance
 
-On the validated macOS ARM64 host, the reference build disables NEON, FMA
-contraction and compiler fusion of `sinf`/`cosf`. The initial canonical Rust
+The reference build disables NEON on ARM and SSE4.2, AVX/AVX2/AVX512, FMA,
+F16C and BMI2 on x86. It also disables FMA contraction and compiler fusion
+of `sinf`/`cosf`. The initial canonical Rust
 replay uses `RMI_SCALAR=1`; rerun the same command with that prefix omitted
 to validate the default path, as in the table above. Separate libm calls matter
 on macOS: fused `sincos` rounding can cross an activation-quantization
