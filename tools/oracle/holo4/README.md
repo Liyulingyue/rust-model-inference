@@ -148,6 +148,77 @@ produces nine image tokens and receives the answer `Red`. These are complete
 decoder CLI smoke tests, alongside the separate encoder comparison above.
 No system packages or global toolchain settings were changed.
 
+### Vulkan verification
+
+The same SHA-verified Q4_K_M decoder was tested on the Linux host's 48 GiB
+gfx1100 GPU, reported as `AMD Radeon Graphics (RADV NAVI31)`. Forced
+`ComputePolicy::Vulkan` errors on backend failure rather than falling back to
+CPU. With prefill batch size **1**, F32 KV, capacity 128 and eight CPU threads,
+the fixed 13-token prompt and three decode inputs perform **528 GPU
+submissions**. All four greedy IDs match both pinned CPU Oracles. Full logits
+(248320 finite F32 values per step) are compared numerically:
+
+| Generated token | Vulkan vs native Oracle relative-L2 |
+| --- | ---: |
+| 109266 | 0.159833005 |
+| 6115 | 0.122238512 |
+| 98691 | 0.084825248 |
+| 95815 | 0.121322781 |
+
+The existing independently measured native/scalar logit spread is
+`0.208963599`, giving the unchanged Holo4 bound `0.313445398`. Thus this
+single-row GPU sample passes the same lossy smoke criterion as the CPU tests;
+it does not establish bitwise parity or general model accuracy. GPU token-major
+parity tracing is unsupported, so this test reads session logits directly.
+It does not compare every GPU intermediate or state/KV word.
+
+After generating the CPU reference traces above, run the ignored GPU checks
+without `RMI_PARITY_TRACE` set. Trace JSON files contain absolute binary paths;
+when moving them between hosts, copy the referenced F32 files and update only
+those paths.
+
+```sh
+export RMI_HOLO4_NATIVE_TRACE="$RMI_HOLO4_ARTIFACTS/llama.jsonl"
+export RMI_HOLO4_SCALAR_TRACE="$RMI_HOLO4_ARTIFACTS/scalar/llama.jsonl"
+export RMI_HOLO4_ARTIFACTS="$PWD/target/holo4/vulkan"
+cargo test --offline --profile release-fast --features vulkan,parity-trace \
+  --test qwen35_reference holo4_vulkan_single_row_matches_precision_bounds \
+  -- --ignored --nocapture --test-threads=1
+# Diagnostic: currently fails on this RADV host during batched prefill.
+cargo test --offline --profile release-fast --features vulkan,parity-trace \
+  --test qwen35_reference holo4_vulkan_batched_matches_precision_bounds \
+  -- --ignored --nocapture --test-threads=1
+```
+
+The first check writes four raw logit arrays and `batch-1/proof.json`, including
+the device, submission count, IDs, errors and bound. The matching real CLI also
+returns `你好！有什么我`:
+
+```sh
+cargo build --offline --profile release-fast --features vulkan \
+  --bin rust-model-inference
+target/release-fast/rust-model-inference --model "$RMI_HOLO4_MODEL" \
+  --jinja --prompt '你好' --temp 0 --threads 8 --compute vulkan \
+  --prefill-batch-size 1 --kv-cache f32 --max-tokens 4
+```
+
+**Known GPU failure:** the default prefill batch size 64 reproducibly reports
+`The logical device has been lost` / RADV hard recovery, in both the clean CLI
+and the session test above. The 13 prompt tokens form one multi-row chunk.
+Temporary layer/stage submission splits did not resolve it. One instrumented
+run failed on the first layer's SiLU submission, but independently replaying
+the captured finite inputs at the same 13×17408 shape passed; the root cause
+remains unresolved. All diagnostic production-code edits were removed and the
+single-row acceptance was rerun with clean sources. This change adds no GPU
+workaround or arithmetic rewrite; use the explicit batch-size-1 command for
+the validated path. Batch 64 is not a passing configuration.
+
+**GPU image limit:** the real CLI rejects forced Vulkan with the F16 mmproj
+and red-image fixture: `--compute vulkan supports plain text decoder generation
+only`. The full Vulkan runtime currently supports text input only. CPU image
+verification above remains applicable; Auto/legacy partial offload, GPU vision,
+other GPU devices, long context and performance are unverified.
+
 The full library run reports 1237 passed, 80 ignored and 22 existing failures.
 Compared with the unchanged baseline (1235 passed / 80 ignored / 23 failed),
 the existing layer-normalization failure is fixed, the lane/tail regression
@@ -155,8 +226,8 @@ test passes, and no new failures are introduced. The remaining failures cover
 Breeze, CLM, Z-Image, FunASR, Gemma4, Qwen3.5 invalid tensor dimensions, argmax,
 softmax and RoPE; they are outside this adaptation.
 
-Validation is scoped to these CPU Q4_K_M/F16 artifacts, the fixed text prompt
-and small image fixture. Other quantizations, GPU/Vulkan, long context, video,
+Validation is scoped to these Q4_K_M/F16 artifacts, the CPU checks, the fixed
+Vulkan batch-size-1 text prompt and small CPU image fixture. Other quantizations, long context, video,
 multi-image server execution and thinking-mode generation are unverified. The repository's Jinja renderer
 does not supply tool definitions; this change does not implement the upstream
 computer-use agent harness or validate task success on computer-use benchmarks.

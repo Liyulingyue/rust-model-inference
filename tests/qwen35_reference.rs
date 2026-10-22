@@ -717,6 +717,135 @@ fn holo4_precision_bound(spread: f64) -> f64 {
     (1.5 * spread).clamp(1e-5, 0.35)
 }
 
+#[cfg(feature = "vulkan")]
+fn check_holo4_vulkan(batch: usize) {
+    use rust_model_inference::compute::ComputePolicy;
+    use rust_model_inference::models::qwen35::Qwen35Session;
+    use rust_model_inference::{ComputePool, GGUFLoader, Qwen35Model};
+    use std::sync::Arc;
+
+    assert!(std::env::var_os("RMI_PARITY_TRACE").is_none());
+    let native = records(&required_path("RMI_HOLO4_NATIVE_TRACE")).unwrap();
+    let scalar = records(&required_path("RMI_HOLO4_SCALAR_TRACE")).unwrap();
+    let outputs = |trace: &[Value]| {
+        trace
+            .iter()
+            .filter(|record| record["name"] == "result_output")
+            .map(|record| {
+                assert_eq!(shape(record).unwrap(), [248320]);
+                f32_words(record).unwrap()
+            })
+            .collect::<Vec<_>>()
+    };
+    let (native_logits, scalar_logits) = (outputs(&native), outputs(&scalar));
+    assert_eq!(native_logits.len(), 16);
+    assert_eq!(scalar_logits.len(), 16);
+    let spread = native_logits
+        .iter()
+        .zip(&scalar_logits)
+        .map(|(native, scalar)| relative_l2(scalar, native))
+        .fold(0.0f64, f64::max);
+    let bound = holo4_precision_bound(spread);
+    let prompt = [
+        248045, 846, 198, 109266, 248046, 198, 248045, 74455, 198, 248068, 271, 248069, 271,
+    ];
+    let expected = [109266u32, 6115, 98691, 95815];
+    for trace in [&native, &scalar] {
+        let ids = trace
+            .iter()
+            .find(|record| record["name"] == "qwen35.prompt_ids")
+            .unwrap();
+        assert_eq!(ids["token_ids"], serde_json::json!(prompt));
+        assert_eq!(
+            trace.last().unwrap()["token_ids"],
+            serde_json::json!(expected)
+        );
+    }
+    let artifacts = std::env::var_os("RMI_HOLO4_ARTIFACTS")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| unique_temp_dir("rmi-holo4-vulkan"))
+        .join(format!("batch-{batch}"));
+    std::fs::create_dir_all(&artifacts).unwrap();
+    let source = GGUFLoader::from_file(required_path("RMI_HOLO4_MODEL")).unwrap();
+    let mut model = Qwen35Model::from_source(&source).unwrap();
+    rust_model_inference::ops::enable_gpu();
+    let context = rust_model_inference::ops::get_vulkan_context().expect("Vulkan required");
+    let mut session = Qwen35Session::new_with_compute(
+        &mut model,
+        128,
+        batch,
+        Arc::new(ComputePool::new(8)),
+        ComputePolicy::Vulkan,
+    )
+    .unwrap();
+    let before = context.submission_count();
+    let mut logits = session
+        .step_with_tokens(
+            &prompt,
+            &rust_model_inference::qwen_text_positions(prompt.len()),
+        )
+        .unwrap();
+    let mut tokens = Vec::new();
+    let mut metrics = Vec::new();
+    for step in 0..expected.len() {
+        let words: Vec<_> = logits.iter().map(|value| value.to_bits()).collect();
+        std::fs::write(
+            artifacts.join(format!("logits-{step}.f32")),
+            bytemuck::cast_slice(&logits),
+        )
+        .unwrap();
+        let error = relative_l2(&words, &native_logits[prompt.len() - 1 + step]);
+        let token = logits
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.total_cmp(b))
+            .unwrap()
+            .0 as u32;
+        tokens.push(token);
+        metrics.push(error);
+        eprintln!("Holo4 Vulkan batch={batch} step={step} token={token} relative-L2={error:.9} bound={bound:.9}");
+        if step + 1 < expected.len() {
+            let position = session.next_position();
+            logits = session
+                .step_with_tokens(&[token], &[[position, position, position, 0]])
+                .unwrap();
+        }
+    }
+    let submissions = context.submission_count() - before;
+    let proof = serde_json::json!({
+        "oracle_pin": LLAMA_PIN, "device": context.device_name(), "batch": batch,
+        "prompt_ids": prompt, "greedy_ids": tokens, "submissions": submissions,
+        "relative_l2": metrics, "oracle_spread": spread, "bound": bound,
+    });
+    std::fs::write(
+        artifacts.join("proof.json"),
+        serde_json::to_vec_pretty(&proof).unwrap(),
+    )
+    .unwrap();
+    eprintln!(
+        "Holo4 Vulkan proof: {}; artifacts {}",
+        proof,
+        artifacts.display()
+    );
+    assert!(submissions > 0, "no GPU submissions");
+    assert_eq!(tokens, expected);
+    assert!(metrics.iter().all(|&error| error <= bound));
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
+#[ignore = "requires Holo4, Vulkan and native/scalar pinned Oracle traces"]
+fn holo4_vulkan_single_row_matches_precision_bounds() {
+    check_holo4_vulkan(1);
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
+#[ignore = "requires Holo4, Vulkan and native/scalar pinned Oracle traces"]
+fn holo4_vulkan_batched_matches_precision_bounds() {
+    check_holo4_vulkan(64);
+}
+
 fn compare_holo4_traces(rust: &Path, native: &Path, scalar: &Path) -> Result<(), String> {
     let (rust, native, scalar) = (records(rust)?, records(native)?, records(scalar)?);
     if rust.len() != native.len() || rust.len() != scalar.len() || rust.is_empty() {
