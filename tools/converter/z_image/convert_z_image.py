@@ -170,7 +170,7 @@ class Checkpoint:
             index_path = directory / "model.safetensors.index.json"
         self.weight_map: dict[str, str] = {}
         if index_path.exists():
-            self.weight_map = json.loads(index_path.read_text()).get("weight_map", {})
+            self.weight_map = json.loads(index_path.read_text(encoding="utf-8")).get("weight_map", {})
 
     def find(self, name: str):
         for shard in self.shards:

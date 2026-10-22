@@ -101,7 +101,7 @@ def main():
 
     # Parse Rust trace: "[step=S il=L label] v1 v2 ..."
     rust = {}
-    with open(trace_path) as f:
+    with open(trace_path, encoding="utf-8", errors="replace") as f:
         for line in f:
             if not line.startswith("[step="):
                 continue

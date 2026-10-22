@@ -107,7 +107,7 @@ def reference_heads(model_dir: Path):
     missing key names the module that wanted it."""
     from safetensors.torch import load_file
 
-    config = __import__("json").loads((model_dir / "config.json").read_text())
+    config = __import__("json").loads((model_dir / "config.json").read_text(encoding="utf-8"))
     settings = BoundaryHeadSettings(**config["boundary_head"])
     state = load_file(str(model_dir / "model.safetensors"))
 

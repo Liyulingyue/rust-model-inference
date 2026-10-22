@@ -1034,20 +1034,18 @@ impl<'a> super::weights::HybridTrunk<'a> {
                         scratch.qkv_buf[qkv_off + 2 * key_dim + h * head_v_dim + d];
                 }
             }
-            // Before the q/k L2 norms. The oracle emits `q_conv` here (the
-            // linear's output) and `q_conv_predelta` after the norm, so without
-            // this the two checkpoints cannot say whether a difference came out
-            // of the projection or out of the normalisation -- and those are
-            // very different bugs.
-            #[cfg(feature = "parity-trace")]
-            if trace_layer {
-                parity_trace::report(parity_trace::checkpoint_rows(
-                    &format!("q_conv_prenorm-{il}"),
-                    Some(il),
-                    &[n_tokens, key_dim],
-                    &scratch.q_buf[..n_tokens * key_dim],
-                ));
-            }
+        }
+        // Emit complete, unnormalized rows once, independent of chunk size.
+        #[cfg(feature = "parity-trace")]
+        if trace_layer {
+            parity_trace::report(parity_trace::checkpoint_rows(
+                &format!("q_conv_prenorm-{il}"),
+                Some(il),
+                &[n_tokens, key_dim],
+                &scratch.q_buf[..n_tokens * key_dim],
+            ));
+        }
+        for t in 0..n_tokens {
             for h in 0..num_k_heads {
                 let q = &mut scratch.q_buf[t * key_dim + h * head_k_dim..][..head_k_dim];
                 let k = &mut scratch.k_buf2[t * key_dim + h * head_k_dim..][..head_k_dim];

@@ -117,7 +117,7 @@ def build_head(dir_: Path | None = None, model: str = DEFAULT_MODEL) -> Boundary
     """
     dir_ = dir_ or model_dir_for(model)
     hidden = model_entry(model)["hidden_size"]
-    config = json.loads((dir_ / "config.json").read_text())
+    config = json.loads((dir_ / "config.json").read_text(encoding="utf-8"))
     if config.get("architecture") != "boundary":
         raise ValueError(
             f"expected architecture='boundary', got {config.get('architecture')!r}"

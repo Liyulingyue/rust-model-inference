@@ -1,0 +1,110 @@
+diff --git a/common/debug.cpp b/common/debug.cpp
+index 102c6924d..870eef487 100644
+--- a/common/debug.cpp
++++ b/common/debug.cpp
+@@ -4,6 +4,8 @@
+ #include "log.h"
+ 
+ #include <cmath>
++#include <cstdio>
++#include <cstdlib>
+ #include <regex>
+ #include <string>
+ #include <vector>
+@@ -181,6 +183,32 @@ bool common_debug_cb_eval(struct ggml_tensor * t, bool ask, void * user_data) {
+         ggml_backend_tensor_get(t, pimpl->data.data(), 0, n_bytes);
+     }
+ 
++    if (const char * dir = std::getenv("RMI_ORACLE_DUMP")) {
++        static unsigned sequence = 0;
++        const char * filter = std::getenv("RMI_ORACLE_FILTER");
++        if (!ggml_is_quantized(t->type) && (!filter || std::regex_search(t->name, std::regex(filter)))) {
++            char path[4096];
++            std::snprintf(path, sizeof(path), "%s/%04u.f32", dir, sequence++);
++            FILE * f = std::fopen(path, "wb");
++            GGML_ASSERT(f);
++            const uint8_t * data = is_host ? (uint8_t *) t->data : pimpl->data.data();
++            for (int64_t i3 = 0; i3 < t->ne[3]; ++i3)
++            for (int64_t i2 = 0; i2 < t->ne[2]; ++i2)
++            for (int64_t i1 = 0; i1 < t->ne[1]; ++i1)
++            for (int64_t i0 = 0; i0 < t->ne[0]; ++i0) {
++                float v = common_ggml_get_float_value(data, t->type, t->nb, i0, i1, i2, i3);
++                GGML_ASSERT(std::fwrite(&v, sizeof(v), 1, f) == 1);
++            }
++            std::fclose(f);
++            std::snprintf(path, sizeof(path), "%s/index.tsv", dir);
++            f = std::fopen(path, "a");
++            GGML_ASSERT(f);
++            std::fprintf(f, "%04u\t%s\t%s\n", sequence - 1, t->name, common_ggml_ne_string(t).c_str());
++            std::fclose(f);
++        }
++        return true;
++    }
++
+     if (!ggml_is_quantized(t->type) && matches_filter) {
+         uint8_t * data = is_host ? (uint8_t *) t->data : pimpl->data.data();
+         common_debug_print_tensor(data, t->type, t->ne, t->nb, 3, pimpl->abort_on_nan);
+diff --git a/examples/eval-callback/eval-callback.cpp b/examples/eval-callback/eval-callback.cpp
+index 703ce130b..0f7da7fcf 100644
+--- a/examples/eval-callback/eval-callback.cpp
++++ b/examples/eval-callback/eval-callback.cpp
+@@ -5,6 +5,7 @@
+ #include "llama.h"
+ 
+ #include <clocale>
++#include <algorithm>
+ #include <string>
+ #include <vector>
+ 
+@@ -22,6 +23,11 @@ static bool run(llama_context * ctx, const common_params & params) {
+     }
+ 
+     LOG_INF("number of input tokens = %zu\n", tokens.size());
++    std::printf("RMI_PROMPT [");
++    for (size_t i = 0; i < tokens.size(); ++i) {
++        std::printf("%s%d", i ? "," : "", tokens[i]);
++    }
++    std::printf("]\n");
+     for (size_t i = 0; i < tokens.size(); ++i) {
+         LOG_INF("  %d\n", tokens[i]);
+     }
+@@ -32,6 +38,16 @@ static bool run(llama_context * ctx, const common_params & params) {
+         return false;
+     }
+ 
++    for (int step = 0; step < params.n_predict; ++step) {
++        const float * logits = llama_get_logits_ith(ctx, -1);
++        const int count = llama_vocab_n_tokens(vocab);
++        llama_token next = std::max_element(logits, logits + count) - logits;
++        std::printf("RMI_GREEDY %d\n", next);
++        if (llama_vocab_is_eog(vocab, next) || step + 1 == params.n_predict) break;
++        std::vector<llama_token> one = {next};
++        auto next_batch = common_batch_get_one(ctx, one);
++        if (llama_process(ctx, LLAMA_PROCESS_TYPE_DECODE, next_batch.get())) return false;
++    }
+     return true;
+ }
+ 
+diff --git a/tools/mtmd/models/nemotron-v2-vl.cpp b/tools/mtmd/models/nemotron-v2-vl.cpp
+index 03094be1b..a0a76f121 100644
+--- a/tools/mtmd/models/nemotron-v2-vl.cpp
++++ b/tools/mtmd/models/nemotron-v2-vl.cpp
+@@ -29,6 +29,7 @@ ggml_cgraph * clip_graph_nemotron_v2_vl::build() {
+         cur = build_ffn(cur, model.mm_1_w, nullptr, nullptr, nullptr, model.mm_3_w, nullptr, FFN_RELU_SQR, -1);
+     }
+ 
++    cb(cur, "zdt.projected", -1);
+     ggml_build_forward_expand(gf, cur);
+ 
+     return gf;
+diff --git a/tools/mtmd/models/qwen3vl.cpp b/tools/mtmd/models/qwen3vl.cpp
+index 48626b221..fbcb5b322 100644
+--- a/tools/mtmd/models/qwen3vl.cpp
++++ b/tools/mtmd/models/qwen3vl.cpp
+@@ -179,5 +179,6 @@ ggml_cgraph * clip_graph_qwen3vl::build() {
+         embeddings = ggml_concat(ctx0, embeddings, deepstack_features, 0);
+     } // concat along the feature dimension
+ 
++    ggml_set_name(embeddings, "rmi.vision.output");
+     // build the graph
+     ggml_build_forward_expand(gf, embeddings);

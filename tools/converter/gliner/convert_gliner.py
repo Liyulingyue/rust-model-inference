@@ -183,9 +183,9 @@ def source_contracts(encoder: dict, vocab_size: int) -> dict[str, str]:
 def convert(model_dir: Path, output: Path) -> None:
     if output.exists():
         raise FileExistsError(output)
-    config = json.loads((model_dir / "config.json").read_text())
+    config = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
     encoder = validate_config(config)
-    tokenizer_config = json.loads((model_dir / "tokenizer_config.json").read_text())
+    tokenizer_config = json.loads((model_dir / "tokenizer_config.json").read_text(encoding="utf-8"))
     # fastino ships both the slow `DebertaV2Tokenizer` (gliner2-large-v1,
     # GLiNER2.5-Decide) and the fast `DebertaV2TokenizerFast` (gliner2-base-v1)
     # for what is the same DeBERTa-v2 SPM vocabulary. The class name is only a
@@ -199,7 +199,7 @@ def convert(model_dir: Path, output: Path) -> None:
         raise ValueError("Expected a case-sensitive SentencePiece tokenizer")
     tokenizer_json_path = model_dir / "tokenizer.json"
     fast_json = (
-        tokenizer_json_path.read_text()
+        tokenizer_json_path.read_text(encoding="utf-8")
         if tokenizer_json_path.exists() and not (model_dir / "spm.model").exists()
         else None
     )

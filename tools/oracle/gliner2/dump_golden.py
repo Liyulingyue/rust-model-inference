@@ -209,12 +209,12 @@ def main():
     # `added_tokens` array in `tokenizer.json` (the guardrail repos, whose
     # `tokenizer_config.json` transformers cannot even load). Either is
     # authoritative; the check is that the embedding table covers the highest id.
-    tokenizer_config = json.loads((model_dir / "tokenizer_config.json").read_text())
+    tokenizer_config = json.loads((model_dir / "tokenizer_config.json").read_text(encoding="utf-8"))
     decoder = tokenizer_config.get("added_tokens_decoder") or {}
     if decoder:
         highest_id = max(int(index) for index in decoder)
     else:
-        fast = json.loads((model_dir / "tokenizer.json").read_text())
+        fast = json.loads((model_dir / "tokenizer.json").read_text(encoding="utf-8"))
         highest_id = max(int(entry["id"]) for entry in fast.get("added_tokens", []))
     if vocab_size != highest_id + 1:
         raise ValueError(

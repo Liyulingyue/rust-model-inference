@@ -174,7 +174,7 @@ def convert_visual(
             "vision_model.embeddings.position_ids",
         },
     )
-    tokenizer = (model_dir / "tokenizer.json").read_text()
+    tokenizer = (model_dir / "tokenizer.json").read_text(encoding="utf-8")
     json.loads(tokenizer)
     processor = _load_json(model_dir, "preprocessor_config.json")
     writer = GgufWriter(output.with_suffix(output.suffix + ".tmp"))

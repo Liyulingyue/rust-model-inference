@@ -55,12 +55,12 @@ def check(mode, rust, oracle, *extra):
 
 
 def named(trace, name, index=0):
-    return Path([json.loads(s)['binary_path'] for s in trace.read_text().splitlines() if json.loads(s)['name']==name][index])
+    return Path([json.loads(s)['binary_path'] for s in trace.read_text(encoding="utf-8").splitlines() if json.loads(s)['name']==name][index])
 
 
 def split_text(trace, root):
     groups, group = [], []
-    for line in trace.read_text().splitlines():
+    for line in trace.read_text(encoding="utf-8").splitlines():
         row = json.loads(line)
         if row['name'] == 'qwen.text.tokens':
             if group: groups.append(group)

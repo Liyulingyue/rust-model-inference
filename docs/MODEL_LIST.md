@@ -1,10 +1,3 @@
-Mage-Flow 已接入主 CLI；下表数值与 PNG 证据来自原适配记录，远端已关机，本次入口迁移的真实权重复验未执行，见 verification.json 的 `cli_integration`。
-
-Z-Image VAE、YuE2、Edge0、LFM2/LFM2.5/LFM2MoE、文本 embedding 与 AuK 已接入实验性 Vulkan 投影路径，
-RADV 实机数值、成品和计时范围见 [2026-10-07 验证记录](develop/VULKAN_RADV_VALIDATION_2026-10-07.md)；
-表中已有验证等级仍指原来的执行范围。
-AuK Base/Flash 记录见 [2026-10-08 验证](develop/VULKAN_AUK_RADV_VALIDATION_2026-10-08.md)；格式与限制见 [Vulkan 文档](develop/VULKAN.md)。
-
 | 模型 | 版本 | 任务类型 | 参考实现 | 原始权重 | 推理权重 | 备注 |
 |---|---|---|---|---|---|---|
 | Mage-Flow-Base | Base | 文生图 | microsoft/Mage @ `76bec2bb` | https://www.modelscope.cn/models/microsoft/Mage-Flow-Base | `tools/converter/mage_flow`（无损 BF16） | 主 CLI `rust-model-inference` CPU 入口；真实 DiT 与共享组件按标量原始 F32 位对齐，PNG 仅最小尺寸验证。[范围与复现](../tools/oracle/mage_flow/README.md)。 |
@@ -87,8 +80,14 @@ AuK Base/Flash 记录见 [2026-10-08 验证](develop/VULKAN_AUK_RADV_VALIDATION_
 | Qwen3-Omni-MoE |  | 多模态 |  | 待补 | 待补 | 待核验。两列权重来源均未定位。 |
 | Qwen3-TTS | 12Hz-1.7B-Base | TTS | llama.cpp @ `201e50c` | https://www.modelscope.cn/models/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice | https://www.modelscope.cn/models/ggml-org/Qwen3-TTS-12Hz-1.7B-Base-GGUF | √ |
 | Qwen3-VL                      | 4B           | 文本、图像        | llama.cpp | -                                                          | https://www.modelscope.cn/models/Qwen/Qwen3-VL-4B-Instruct-GGUF | √ |
+| PhysBrain1.5 | 2B | 文本、图像 | llama.cpp @ `11fe0215` | https://www.modelscope.cn/models/DeepCybo/PhysBrain1.5-2B | `tools/converter/physbrain`（Q8_0 + F16 mmproj） | `qwen3vl`；修正全 head RoPE=128 和 added-token 类型。13 项契约、精确分词、8 步 greedy 一致；logits relative L2 ≤4.885%，视觉含 3 个 DeepStack ≤0.461%（F32 激活参考）。蓝图 CLI 正确输出 blue；需 `--kv-cache f16`，ActionPiece 需下游解码器。[对齐记录](../tools/oracle/pr169/README.md)。 |
+| Intern-Decision | 0.8B / 4B | 文本、图像 | llama.cpp @ `11fe0215` | https://www.modelscope.cn/models/Shanghai_AI_Laboratory/Intern-Decision-0.8B | `tools/converter/intern_decision`（Q8_0 + F16 mmproj） | 0.8B 的 `qwen35` + `qwen3vl_merger` 已验证：10 项契约、精确分词、8 步 greedy 一致；logits relative L2 ≤2.954%，视觉 ≤0.774%（F32 激活参考，实际 Qwen3.5 视觉入口，修复 NEON LayerNorm 漏算），真实文本/图像 CLI 通过。4B 尚无真实权重验证。[对齐记录](../tools/oracle/pr169/README.md)。 |
+| EmbeddingGemma-2 | text + vision + audio | 768 维多模态嵌入 | HF transformers 5.19.0 | https://www.modelscope.cn/models/google/embeddinggemma-2 | `tools/converter/embeddinggemma2`（单 GGUF，实际 Q8_0/BF16/F32） | `gemma4-embedding`；16 项契约，HF 文本/视觉/音频 fixture、完整 768 维输出与真实 CLI 已验证。视觉/音频塔 relative L2 <1e-4，最终媒体 embedding <2%；有损运算按数值误差对齐，不声称逐位相同。[对齐记录及哈希](../tools/oracle/pr169/README.md)。 |
 | LensVLM | 9B | 文本、图像 | llama.cpp @ `b11081`（转换侧） | https://www.modelscope.cn/models/apple/LensVLM-9B | https://www.modelscope.cn/models/bartowski/LensVLM-9B-GGUF | 语言塔 `qwen35` + 视觉塔 `qwen3vl_merger`，两者均复用既有实现，未新增模型代码；真实 GGUF 冒烟通过（文本生成 + 纯色方块判色）。**未做 llama.cpp 逐位对齐**。 |
+| ZDTaichu5.0 | 9B | 文本、图像 | llama.cpp @ `11fe0215` | https://www.modelscope.cn/models/TaichuAI/ZDTaichu5.0-9B | https://huggingface.co/ngquocvinh/ZDTaichu5.0-9B-GGUF | `qwen35` + `nemotron_v2_vl`；修复 Q 读取、register 前缀搬移、FFN 残差归一化。Q4_K_M 文本 + BF16 mmproj 实测；视觉 relative L2=0.0351%（F32 参考）/0.4932%（原始 BF16 参考），蓝图 CLI 输出 blue。[对齐记录](../tools/oracle/pr169/README.md)。 |
 | Qwen3.5 | 0.8B / 2B / 4B | 文本、图像 | llama.cpp @ `b96806d` | https://www.modelscope.cn/models/Qwen/Qwen3.5-4B | https://www.modelscope.cn/models/unsloth/Qwen3.5-4B-GGUF | √ |
+| Occamy-1.0 | 2.6B-A41B（256 experts） | 文本、图像 | llama.cpp @ `11fe0215` | https://www.modelscope.cn/models/Accio-Lab/occamy-1.0 | https://huggingface.co/Accio-Lab/occamy-1.0-GGUF | GGUF arch=`qwen35moe`；复用既有主干和 routed/shared MoE，删除重复实现。官方 Q8_0 + F16 mmproj 文本/图像 CLI 已跑通；实际视觉投影 relative L2=0.3362%（F32 激活参考），修复 NEON LayerNorm 漏算；标量参考 8 步 greedy 一致。默认近似路径在接近并列的候选处有措辞分叉，相同历史 logits relative L2 ≤8.482%，不保证所有 greedy 相同。[对齐记录](../tools/oracle/pr169/README.md)。 |
+| Xing4.0 | 29B-A4B | 文本（稀疏 MoE） | `xing4_0`（对齐提交 `a1d0f6e` / `eb41a27`） | https://www.modelscope.cn/models/XingChen-AGI/Xing4.0-29B-A4B | HF `XingChen-AGI/Xing4.0-29B-A4B-GGUF`（官方自发布，`xing4_0-29b-IQ4_NL.gguf`，约 5.8 GB；ModelScope 官方仅 safetensors） | 语言塔，MLA + mHC 超连接（4 lane）+ 64 experts top-4 稀疏 MoE；`src/models/xing4_0/`。**未逐位对齐，本机当前无 GGUF，未在当前 main 上复核**。 |
 | Qwen3.8 | 27B | 多模态 | llama.cpp @ `b96806d` | 待补 | 待补 | 待核验。两列权重来源均未定位。 |
 | Edge0-35B-A3B-preview | 35B / 3B active | 文本 | Edge0 @ `fb4cd2c` | https://www.modelscope.cn/models/edge0/Edge0-35B-A3B-preview | `tools/converter/edge0`（本仓库产出） | 标量 CPU 四步 greedy 与官方文本一致；固定文本样本的 16 次 forward、全部 40 层及 logits F32 逐位核验；不含视觉权重，未接入 prerouter；[范围与命令](../tools/oracle/edge0/README.md) |
 | Qwen-Drive-1.0 | 4B | 自动驾驶多模态感知 / 规划 | 官方实现 @ `28091c1`；llama.cpp @ `b96806d` | https://www.modelscope.cn/models/Qwen/Qwen-Drive-1.0-4B | `tools/converter/qwen_drive`（本仓库产出） | BF16 VLM、mmproj、SFT/RL planner 与 F32 perception 已导出；Tokenizer、规划 checkpoint 和感知 BF16 算子逐位核验；CUDA 端到端感知尚未核验；[导出、哈希与限制](../tools/oracle/qwen_drive/README.md) |

@@ -273,7 +273,7 @@ class TensorStore:
             return
         index_path = model_dir / "model.safetensors.index.json"
         if index_path.exists():
-            index = json.loads(index_path.read_text())
+            index = json.loads(index_path.read_text(encoding="utf-8"))
             weight_map = index.get("weight_map")
             if not isinstance(weight_map, dict) or not weight_map:
                 raise ValueError(f"{index_path}: missing weight_map")
@@ -436,7 +436,7 @@ def _load_json(model_dir: Path, name: str, *, required: bool = True) -> dict | N
         if required:
             raise FileNotFoundError(path)
         return None
-    value = json.loads(path.read_text())
+    value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
         raise ValueError(f"{path}: expected JSON object")
     return value
@@ -575,7 +575,7 @@ def _read_tokens(model_dir: Path, model_type: str) -> TokenizerSpec:
         vocab = _load_json(model_dir, "vocab.json")
         merges = [
             line
-            for line in (model_dir / "merges.txt").read_text().splitlines()
+            for line in (model_dir / "merges.txt").read_text(encoding="utf-8").splitlines()
             if line and not line.startswith("#")
         ]
         added = [
@@ -734,7 +734,7 @@ def _read_tokens(model_dir: Path, model_type: str) -> TokenizerSpec:
 
     vocab_path = model_dir / "vocab.txt"
     if vocab_path.exists():
-        tokens = [line.rstrip("\n\r") for line in vocab_path.read_text().splitlines()]
+        tokens = [line.rstrip("\n\r") for line in vocab_path.read_text(encoding="utf-8").splitlines()]
         tokens = [
             (
                 token[2:]

@@ -93,25 +93,51 @@ n_ff=9728, head_dim=128, n_ctx=262144, freq_base=5e6, M-RoPE [24,20,20,0]`）。
 
 **Qwen3-VL 其它尺寸 (`-2B` / `-8B` / `-32B` / `-30B-A3B` / `-235B-A22B`) 状态**：
 
-- **`-2B`（`-Instruct` 与 `-Thinking` 两个 GGUF 均下载并尝试过）——本仓库未适配**。
-  在 4 核 + 7.5 GiB RAM 上 2B 端到端不工作：
-  - 文本-only + ChatML: 首 token 预测 `151645`（`<|im_end|>` = EOS），0 输出 token；
-  - 文本-only + `--thinking` flag: 工作（首 token 是普通文本）；
-  - 多模态 + ChatML: 首 token 仍预测 `151645`，立即结束；
-  - 多模态 + 字面文字 chat (`\nuser\n…assistant\n` 各种变体): 不预测 EOS，但陷入退化循环
-    —— 反复输出 `\n\n\n...` / `####...` / `sponsorsponsor...` / `mainmainmain...` 等；
-  - 多模态 + 高温度采样 (temp=2.0 + rep_penalty 1.1): 产出 multilingual 乱码
-    （`abandoningดีๆ imorig eloney craz…`），无可用语义。
-  - 根因疑似：2B-Instruct GGUF 的 `tokenizer.chat_template` 用字面文字 `user\n…\nassistant\n`
-    格式而非 ChatML 的 `<|im_start|>…<|im_end|>` tokens；我们的代码走 ChatML。
-    4B 能容忍两种格式，2B 不能。即便换成字面文字也只是把 "首 token = EOS" 问题替换成
-    "生成退化为重复 token"，vision encoder 输出与 2B 的 LLM 主干也可能有交互问题。
-  - 2B 容量 (2.1B) 对 vision encoder embedding 的容错较差也是候选原因之一。
-  - 暂时不打算修，等用户进一步指令。
+- **`-2B`——2026-10-22 已定位并修复根因；官方 `-Instruct` / `-Thinking` GGUF 本身未复测。**
+  此前记录的症状（文本-only 首 token = EOS、多模态退化为重复 token、高温采样出乱码）
+  与 `qwen3vl` 2B 尺寸无关，也不是 chat template 的问题——真正的根因是
+  `exp_approx_avx2` 的 clamp 越界（见下），它会静默清零 FFN 通道。
+
+  复现与定位走的是同架构的 `PhysBrain1.5-2B`（Qwen3-VL-2B-Instruct 微调，
+  `tools/converter/physbrain`）：用一个 NumPy 参考实现逐层比对 28 层 prefill，
+  504 个 (layer, row) 单元里只有 1 个不符，定位到 layer 2 / row 0 的单个激活
+  ——`gate=131.219`、`up=-151.609`，正确值 `silu(gate)*up = -19893.98`，
+  引擎算出 `0.0`。根因是 `src/ops/math/exp.rs` 里 `exp_approx_avx2` 用
+  位移构造 `2**n`，clamp 上界 `88.376_26` 允许 `n = -128`，指数位溢出后
+  返回 `-inf` 而非下溢的 0；`silu(x) = x/(1+exp(-x))` 于是变成 `-0`，
+  该 FFN 通道被整个丢掉。  改成 clamp `±88.0`（`n = ±127`）后，`PhysBrain1.5-2B` 文本恢复正常。
+
+  > 该 bug 只在 AVX2 路径上；NEON 变体本来就有 `vcagtq_f32(n, 126.0)` 越界保护。
+  > 任何 gate 超过 ~88.4 的模型都会中招，与尺寸无关。
+  > 越界 clamp 从 fast-exp 近似引入的第一版（`998a35c`）就存在，所以它一直是
+  > **潜伏且依赖输入**的：只有当某次前向真的把某个 gate 顶到 88 以上时才发作。
+  > 这正是当年 2B 症状看起来自相矛盾的原因——同一模型换个 prompt 或换张图，
+  > 可能正常、也可能退化。
+
+  **图像路径另有一个独立根因**（PR #179 修掉）：`qwen3vl` 视觉塔此前用
+  `rope_mrope_interleaved`（interleaved 配对）旋转 Q/K，而 llama.cpp 与本仓库
+  早已在用的 `qwen35` 视觉塔都是 split-half（NeoX）配对。配对方式错了以后，
+  图像 embedding 是乱的，但模型照样能吐出一句通顺的描述——**幻觉而非报错**，
+  比崩溃难查得多。
+
+  > 实测证据：用模型官方资产 `case-action-trajectory.png`（2594×1557，缩到
+  > 768×461）喂给修复前的引擎，得到的是
+  > “a dark, possibly forested area, featuring a path or road that leads
+  > through it”；换成 split-half 配对后得到
+  > “a collage of various scenes from a video or a series of frames... a
+  > table, a chair, bottles, a cup, a box, and a toy car”，与图片真实内容
+  > （一串操作轨迹帧）一致。
+
+  官方 `-2B` GGUF 建议在升级后重测；`PhysBrain1.5-2B` 已端到端验证（文本 + 图像）。
 
 - **`-8B` / `-32B` / `-30B-A3B` / `-235B-A22B` 等更大尺寸**：Q4_K_M 量化后 ≥ 5 GB，
   在 4 核 + 7.5 GiB RAM 环境下未做端到端验证。需要更大机器才能跑。
 - 文本-only `-0.6B`（同 `-2B` 等 Instruct 模型）不在 ModelScope 上能找到 GGUF，本仓库未尝试。
+
+> **大图显存注意**：视觉塔对全部 patch 做全注意力，注意力分数缓冲是
+> `n_head * n_tokens^2 * 4B`。`PhysBrain1.5-2B` 的 2594×1557 原图会产生
+> 15876 个 patch，分数缓冲约 16 GB，直接把内存打满。缩到 768×461
+> （384 个 patch，约 9 MB）即可正常跑完。
 
 限制：
 
