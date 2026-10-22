@@ -120,15 +120,17 @@ cargo test --profile release-fast --test timestral_cli
 工程验证：8 个模型单测、2 个 CLI 测试、2 个 Python 检查通过；最新优化 CLI 再验数值协变量及近零裁剪用例。默认全量 `cargo test` 在未修改的 `vk_mem_info` 示例编译失败；排除示例后的库测试为 1224 passed / 23 failed / 79 ignored，全部失败名称保存在验证记录中，未继续宣称其余集成测试通过。失败位于本次未修改的模型/算子路径；不据此声明全库通过。
 
 
-GPU 实测见 [gpu_verification.json](gpu_verification.json)：M3 Max / MoltenVK 1.4.2，最终 glslang 15.1.0 shader；10 个用例在 SIMD / 严格 Vulkan / Auto 下执行 30 次，比较 10,182 个检查点。其中 20 次 GPU 执行、6,788 个检查点全部通过同一误差界，每个 Transformer 块实际记录 252 个投影/Timestral dispatch。GPU 最差最终 NRMSE 为 `5.84e-6`；最大最终绝对误差 `0.0703125` 出现在长 horizon 的大幅值尾部分位数，中间尾部分位数绝对误差可达 `4736`，不能据此声称所有绝对误差都很小。Vulkan 与 Auto 的最终预测逐位一致，但它们与 Oracle 的浮点计算按数值界验收。
+优化前 GPU 实测见 [gpu_verification.json](gpu_verification.json)：M3 Max / MoltenVK 1.4.2，最终 glslang 15.1.0 shader；10 个用例在 SIMD / 严格 Vulkan / Auto 下执行 30 次，比较 10,182 个检查点。其中 20 次 GPU 执行、6,788 个检查点全部通过同一误差界，每个 Transformer 块实际记录 252 个投影/Timestral dispatch。GPU 最差最终 NRMSE 为 `5.84e-6`；最大最终绝对误差 `0.0703125` 出现在长 horizon 的大幅值尾部分位数，中间尾部分位数绝对误差可达 `4736`，不能据此声称所有绝对误差都很小。Vulkan 与 Auto 的最终预测逐位一致，但它们与 Oracle 的浮点计算按数值界验收。
 
 另有 4 次普通 GPU CLI（严格 Vulkan / `--gpu`、关闭 parity trace）与插桩 GPU 的预测精确一致；设备不可用时 CPU/Auto 输出精确一致，严格 Vulkan 返回错误。8 个模型单测、3 个 CLI 测试、3 个 Python 检查、CPU-only 库编译、Vulkan 构建和完整 shader 检查通过。GPU 扩展后未重复全量测试，原有失败见上文记录。
 
 上述 GPU Oracle 检查实测 M3 Max/MoltenVK；后续 NAVI31/RADV 的性能和最终输出验证见 [PERFORMANCE.md](PERFORMANCE.md)，其中 GPU 慢于 CPU。数据集预测指标仍未验证。构建工具和依赖均保留在仓库 .venv / target，模型文件始终从上述 models 目录读取。
 
+最终 F32 分块投影路径另见 [gpu_optimization_verification.json](gpu_optimization_verification.json)：M3 Max 上 10 个用例 × Vulkan/Auto，共 20 次 GPU 执行、6,788 个检查点，沿用原误差界全部通过；最差最终 NRMSE 为 `2.9871e-6`。两次关闭运行时 trace 的普通 CLI 输出与插桩结果精确一致。同机 NAVI31 性能与完整验收边界见下节链接。
+
 ## 性能复现
 
-实测结论、线程扩展、最大上下文和验证边界见 [PERFORMANCE.md](PERFORMANCE.md)，完整采样见 [performance.json](performance.json)。
+最新 GPU 优化与同机 A/B 见 [GPU_OPTIMIZATION.md](GPU_OPTIMIZATION.md)。优化前的线程扩展、最大上下文和验证边界保留在 [PERFORMANCE.md](PERFORMANCE.md)，原始采样见 [performance.json](performance.json)。
 
 ```sh
 cargo build --release --features vulkan --bin rust-model-inference --example timestral_bench

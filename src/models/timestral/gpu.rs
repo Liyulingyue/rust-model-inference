@@ -53,8 +53,18 @@ impl Transformer {
             .collect();
         names.sort();
         for name in names {
-            let buffer = buffers.upload_f32(weights[name])?;
-            let binding = if name.ends_with(".weight") {
+            let matrix = name.ends_with(".weight");
+            let buffer = if matrix {
+                let n_in = if name.ends_with(".mlp.w3.weight") {
+                    F
+                } else {
+                    D
+                };
+                buffers.upload_f32_transposed(weights[name], n_in)?
+            } else {
+                buffers.upload_f32(weights[name])?
+            };
+            let binding = if matrix {
                 ops.bind_weight_buffers(&[buffer], &[GpuWeightFormat::F32])?
             } else {
                 ops.bind_buffers(&[buffer])?
@@ -81,16 +91,10 @@ impl Transformer {
         n_out: usize,
         rows: usize,
     ) -> Result<(), VulkanError> {
-        let unused = ArenaRegion { offset: 0, size: 0 };
-        self.ops.record_weight_matmul_rows(
+        self.ops.record_transposed_float_matmul_rows(
             commands,
             self.bindings[&format!("{name}.weight")],
             input,
-            unused,
-            unused,
-            unused,
-            unused,
-            unused,
             &[(output, n_out, n_out * 4)],
             n_in,
             rows,

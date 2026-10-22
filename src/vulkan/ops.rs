@@ -2683,9 +2683,9 @@ impl<'a> Qwen3Ops<'a> {
         Ok(())
     }
 
-    /// Only BatchedLinearRuntime uploads these weights in [input, output] order.
+    /// Weights must be uploaded in [input, output] order; activations remain F32.
     #[allow(clippy::too_many_arguments)]
-    fn record_transposed_float_matmul_rows(
+    pub(crate) fn record_transposed_float_matmul_rows(
         &self,
         commands: &TokenCommands<'_>,
         bindings: OperatorBindings,

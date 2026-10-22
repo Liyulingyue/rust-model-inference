@@ -1,6 +1,6 @@
-# Timestral-209M F32 性能验证（2026-10-22）
+# Timestral-209M F32 性能验证（2026-10-22，优化前基线）
 
-本次实测应优先使用 CPU。GPU 功能与数值检查通过，但在这台 NAVI31 上，默认行为的常驻预测比四线程 CPU 慢 1.47–5.63 倍；完整 CLI 也更慢。Auto 实际选择 GPU，因此本机性能优先时应显式指定 `--compute cpu`。
+此报告保留 GPU 优化前的基线；最新对比见 [GPU_OPTIMIZATION.md](GPU_OPTIMIZATION.md)。以下原始版本的实测应优先使用 CPU。GPU 功能与数值检查通过，但在这台 NAVI31 上，默认行为的常驻预测比四线程 CPU 慢 1.47–5.63 倍；完整 CLI 也更慢。Auto 实际选择 GPU，因此本机性能优先时应显式指定 `--compute cpu`。
 
 原始采样与验收记录见 [performance.json](performance.json)，复现入口见 [README.md](README.md#性能复现)。推理实现没有因本轮性能验证发生修改，也没有改变精度或关闭默认对称平均。
 
