@@ -724,45 +724,42 @@ impl Gemma4Session<'_> {
     }
 }
 
-#[cfg(feature = "vulkan")]
 #[allow(clippy::too_many_arguments)]
-fn try_vulkan_rows(
-    linear: &mut Gemma4PrefillLinear,
-    model: &Gemma4Model,
-    name: &str,
+fn try_linear_rows(
+    linear: &mut Gemma4PrefillLinear<'_>,
+    _model: &Gemma4Model,
+    _name: &str,
     weight: &Weight<'_>,
     input: &[f32],
     output: &mut [f32],
     rows: usize,
 ) -> bool {
-    use crate::vulkan::ops::GpuWeightFormat;
-    if crate::vulkan::gpu_broken() {
-        linear.runtime = None;
-    }
-    if !linear.active() {
+    #[cfg(feature = "vulkan")]
+    if crate::core::thread_pool::gpu_matmul_disabled() {
         return false;
     }
-    let Ok(format) = GpuWeightFormat::from_ggml_type(weight.ggml_type) else {
-        return false;
-    };
-    #[cfg(test)]
+    #[cfg(all(test, feature = "vulkan"))]
     if let Some(dispatcher) = &linear.dispatcher {
-        let result = dispatcher.lock().unwrap().dispatch(name, rows);
+        let result = dispatcher.lock().unwrap().dispatch(_name, rows);
         return linear.finish_dispatch(result);
     }
-    let Some(bytes) = model._source.tensor_slice(name) else {
+    // Preserve Gemma4's native F32 dot reduction below.
+    if weight.kernel.f32_slice().is_some() {
+        return false;
+    }
+    let Some(executor) = linear.runtime.as_mut() else {
         return false;
     };
-    let result = linear.runtime.as_mut().unwrap().matmul_rows(
-        bytes,
-        format,
-        input,
-        rows,
-        weight.n_in,
-        weight.n_out,
-        output,
-    );
-    linear.finish_dispatch(result)
+    match executor
+        .id_for(weight)
+        .and_then(|id| executor.run(id, input, rows, output))
+    {
+        Ok(_) => true,
+        Err(error) => {
+            log::debug!("Gemma4 linear: {error}");
+            false
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -782,12 +779,9 @@ fn prefill_matmul_rows(
     if input.len() != rows * weight.n_in || output.len() != rows * weight.n_out {
         return Err(format!("Invalid {name} batched matmul lengths"));
     }
-    #[cfg(feature = "vulkan")]
-    if try_vulkan_rows(linear, model, name, weight, input, output, rows) {
+    if try_linear_rows(linear, model, name, weight, input, output, rows) {
         return ensure_finite(name, output);
     }
-    #[cfg(not(feature = "vulkan"))]
-    let _ = (model, linear);
     #[cfg(feature = "vulkan")]
     let _cpu_scope = ComputePool::disable_gpu_matmul_for_scope();
     if weight.ggml_type == GGMLType::F32 {
@@ -836,6 +830,22 @@ fn matmul_group_rows<const N: usize>(
     }
     #[cfg(feature = "vulkan")]
     let _cpu_scope = ComputePool::disable_gpu_matmul_for_scope();
+    if let Some(executor) = linear.runtime.as_mut() {
+        let ids = projections
+            .each_ref()
+            .map(|(_, weight, _)| executor.id_for(weight));
+        if ids.iter().all(Result::is_ok) {
+            return executor
+                .run_group(
+                    ids.map(Result::unwrap),
+                    input,
+                    rows,
+                    projections.map(|(_, _, output)| output),
+                )
+                .map(|_| ())
+                .map_err(|error| error.to_string());
+        }
+    }
     let need_q8 = projections
         .iter()
         .any(|(_, weight, _)| weight.needs_q8_0_activation());

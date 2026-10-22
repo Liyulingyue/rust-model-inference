@@ -1130,10 +1130,7 @@ fn f16_dot_dispatch_matches_platform_reduction_contract() {
         (x, y)
     }
 
-    #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
-    let native_fp16 = std::arch::is_aarch64_feature_detected!("fp16");
-    #[cfg(not(all(target_arch = "aarch64", target_endian = "little")))]
-    let native_fp16 = false;
+    let native_fp16 = crate::ops::f16_uses_neon_accumulators(32);
     #[cfg(target_arch = "x86_64")]
     let avx_f16 = std::arch::is_x86_feature_detected!("avx2")
         && std::arch::is_x86_feature_detected!("fma")

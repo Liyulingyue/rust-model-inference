@@ -104,6 +104,10 @@ fn dequant_q8(input_q8: &[u8], input_scales: &[f32], k: usize) -> f32 {
 }
 
 impl<'a> Kernel for F16Kernel<'a> {
+    fn supports_f16_strict(&self) -> bool {
+        true
+    }
+
     fn weight_bytes(&self) -> Option<&[u8]> {
         Some(self.weight)
     }

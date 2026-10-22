@@ -680,7 +680,7 @@ fn gemma4_vulkan_linear_device_rows_match_and_decode_stays_cpu() {
         let logits = session.forward_rows(&fixture_rows(3)).unwrap();
         assert_eq!(
             context.submission_count() - before,
-            if batch == 1 { 78 } else { 26 }
+            ((26 - 2 * model.config.layers) * if batch == 1 { 3 } else { 1 }) as u64
         );
         let state = snapshot_gemma4_state(&session);
         let before_decode = context.submission_count();

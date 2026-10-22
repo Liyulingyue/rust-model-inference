@@ -24,6 +24,7 @@ use crate::ops::generation_runtime::{
 
 /// `TextRuntime` impl for `arch = "falcon-h1"`.
 pub struct FalconH1TextRuntime {
+    compute: crate::compute::ComputePolicy,
     model: Mutex<FalconH1Model>,
     /// Per-request scratch, behind the same lock as the model: `prefill`
     /// takes `&self` on the model but `&mut scratch`, and they must be
@@ -36,12 +37,16 @@ pub struct FalconH1TextRuntime {
 
 impl FalconH1TextRuntime {
     pub fn new(options: RuntimeOptions) -> Result<Self, String> {
+        options.compute.check_build()?;
+        options.compute.validate_text_arch("falcon-h1")?;
+        let _scope = options.compute.enter_legacy_scope();
         let source = options.source.clone();
         let context_length = options.max_context;
         let model = FalconH1Model::from_source(source, 0)
             .map_err(|error| format!("Failed to load Falcon-H1 model: {error}"))?;
         let context_length = context_length.min(model.config.n_ctx).max(1);
         Ok(Self {
+            compute: options.compute,
             model: Mutex::new(model),
             scratch: Mutex::new(None),
             tokenizer: options.tokenizer,
@@ -65,6 +70,7 @@ impl TextRuntime for FalconH1TextRuntime {
         request: &GenerationRequest,
         sink: &mut dyn TokenSink,
     ) -> Result<GeneratedText, String> {
+        let _scope = self.compute.enter_legacy_scope();
         if request.token_ids.is_empty() {
             return Err("Falcon-H1 generate: empty prompt".into());
         }

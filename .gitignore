@@ -19,3 +19,6 @@ __pycache__/
 .DS_Store
 .hf-venv/
 out/
+
+# Astronex 验证产物（视频、算子 fixture）不入库
+/artifacts/

@@ -225,6 +225,9 @@ pub fn matmul_bf16_vs_f32_range(
 }
 
 impl<'a> Kernel for BF16Kernel<'a> {
+    fn rounds_bf16_input(&self) -> bool {
+        self.bf16_input
+    }
     fn bf16_bytes(&self) -> Option<&[u8]> {
         Some(self.weight)
     }
