@@ -1,8 +1,9 @@
-use crate::app::cli::{LongCatCliOptions, ZImageCliOptions};
+use crate::app::cli::{AstronexCliOptions, LongCatCliOptions, ZImageCliOptions};
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
 use crate::format::ggufrs::{open_model_source, ComponentRole};
+use crate::models::diffusion::astronex_world::AstronexPipeline;
 use crate::models::diffusion::longcat::text::{
     encode_prompt as encode_longcat_prompt, load_tokenizer as load_longcat_tokenizer,
     LongCatTextSource,
@@ -27,6 +28,65 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
+
+pub fn run_astronex_cli(
+    main: Arc<dyn TensorSource>,
+    components: Arc<dyn TensorSource>,
+    options: &AstronexCliOptions,
+    n_threads: usize,
+) -> Result<(), String> {
+    options.options.validate()?;
+    if options.options.mode == crate::models::diffusion::astronex_world::AstronexMode::ImageToVideo
+        && options.image.is_none()
+    {
+        return Err("Astronex image-to-video requires --image".into());
+    }
+    let image = options
+        .image
+        .as_deref()
+        .map(image::open)
+        .transpose()
+        .map_err(|error| format!("Load Astronex reference image: {error}"))?
+        .map(|image| {
+            image::imageops::resize(
+                &image.to_rgb8(),
+                options.options.width as u32,
+                options.options.height as u32,
+                image::imageops::FilterType::Lanczos3,
+            )
+        });
+    let started = Instant::now();
+    let pipeline = AstronexPipeline::load(main, components, n_threads)?;
+    let frames = pipeline.generate(&options.prompt, image.as_ref(), &options.options)?;
+    if frames.len() != options.options.frames {
+        return Err(format!(
+            "Astronex VAE returned {} frames; expected {}",
+            frames.len(),
+            options.options.frames
+        ));
+    }
+    let mut writer = crate::models::diffusion::dreamx::media::FfmpegVideoWriter::create(
+        &options.out,
+        options.options.width as u32,
+        options.options.height as u32,
+        options.options.fps as u32,
+        options.overwrite,
+    )?;
+    for frame in &frames {
+        writer.write_frame(frame)?;
+    }
+    writer.finish()?;
+    println!(
+        "Astronex {} video saved to {} in {}ms",
+        match options.options.mode {
+            crate::models::diffusion::astronex_world::AstronexMode::TextToVideo => "T2V",
+            crate::models::diffusion::astronex_world::AstronexMode::ImageToVideo => "I2V",
+        },
+        options.out.display(),
+        started.elapsed().as_millis()
+    );
+    Ok(())
+}
 
 fn trace_longcat(name: &str, values: &[f32], shape: &[usize]) -> Result<(), String> {
     let Some(dir) = std::env::var_os("RMI_LONGCAT_TRACE_DIR") else {

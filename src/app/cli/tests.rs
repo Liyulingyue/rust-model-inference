@@ -7,6 +7,53 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 
+#[test]
+fn compute_policy_options_are_shared_and_unambiguous() {
+    use crate::compute::ComputePolicy::{Auto, Cpu, Vulkan};
+    for (flags, expected) in [
+        (vec!["rmi"], Cpu),
+        (vec!["rmi", "--gpu"], Auto),
+        (vec!["rmi", "--compute", "cpu"], Cpu),
+        (vec!["rmi", "--compute", "auto"], Auto),
+        (vec!["rmi", "--compute", "vulkan"], Vulkan),
+    ] {
+        assert_eq!(
+            parse_cli_options(&args(&flags)).unwrap().compute_policy(),
+            expected
+        );
+    }
+    for flags in [
+        vec!["rmi", "--compute"],
+        vec!["rmi", "--compute", "bogus"],
+        vec!["rmi", "--compute", "--gpu"],
+        vec!["rmi", "--gpu", "--compute", "cpu"],
+        vec!["rmi", "--compute", "auto", "--gpu"],
+        vec!["rmi", "--compute", "cpu", "--compute", "vulkan"],
+    ] {
+        assert!(parse_cli_options(&args(&flags)).is_err(), "{flags:?}");
+    }
+}
+
+#[test]
+fn compute_vulkan_rejects_unmigrated_modes_before_loading() {
+    for mode in [
+        "--embedding",
+        "--jev",
+        "--tts",
+        "--yue2",
+        "--dreamx",
+        "--dump-logits",
+        "--bench",
+        "--profile",
+    ] {
+        let options = parse_cli_options(&args(&["rmi", "--compute", "vulkan", mode])).unwrap();
+        assert!(options.validate_compute_mode().is_err(), "{mode}");
+    }
+    let options = parse_cli_options(&args(&["rmi", "--compute", "vulkan"])).unwrap();
+    assert!(options.validate_compute_model("gemma4").is_err());
+    assert!(options.validate_compute_model("qwen3").is_ok());
+}
+
 struct TestTensorSource {
     info: TensorInfo,
     bytes: Vec<u8>,
@@ -539,6 +586,114 @@ fn dreamx_cli_rejects_edit_only_options() {
         (vec!["--use-xvector", "auto"], "--use-xvector"),
     ] {
         let mut argv = base.to_vec();
+        argv.extend(extra);
+        let error = validate_cli_options(&parse_cli_options(&args(&argv)).unwrap()).unwrap_err();
+        assert!(error.contains(expected), "{argv:?}: {error}");
+    }
+}
+
+#[test]
+fn astronex_cli_requires_explicit_pair_prompt_and_mp4() {
+    let complete = parse_cli_options(&args(&[
+        "rmi",
+        "--astronex",
+        "--model",
+        "astronex.gguf",
+        "--mmproj",
+        "components.gguf",
+        "--prompt",
+        "a red kite",
+        "--out",
+        "kite.mp4",
+        "--cfg-scale",
+        "4.5",
+    ]))
+    .unwrap();
+    let resolved = astronex_cli_options(&complete).unwrap().unwrap();
+    assert_eq!(resolved.model, PathBuf::from("astronex.gguf"));
+    assert_eq!(resolved.mmproj, PathBuf::from("components.gguf"));
+    assert_eq!(resolved.prompt, "a red kite");
+    assert_eq!(resolved.out, PathBuf::from("kite.mp4"));
+    assert_eq!(resolved.options.frames, 9);
+    assert_eq!(resolved.options.steps, 8);
+    assert_eq!(resolved.options.guidance_scale, 4.5);
+
+    for argv in [
+        vec![
+            "rmi",
+            "--astronex",
+            "--mmproj",
+            "components.gguf",
+            "--prompt",
+            "x",
+            "--out",
+            "x.mp4",
+        ],
+        vec![
+            "rmi",
+            "--astronex",
+            "--model",
+            "m.gguf",
+            "--prompt",
+            "x",
+            "--out",
+            "x.mp4",
+        ],
+        vec![
+            "rmi",
+            "--astronex",
+            "--model",
+            "m.gguf",
+            "--mmproj",
+            "c.gguf",
+            "--out",
+            "x.mp4",
+        ],
+        vec![
+            "rmi",
+            "--astronex",
+            "--model",
+            "m.gguf",
+            "--mmproj",
+            "c.gguf",
+            "--prompt",
+            "x",
+            "--out",
+            "x.png",
+        ],
+    ] {
+        let options = parse_cli_options(&args(&argv)).unwrap();
+        assert!(validate_cli_options(&options).is_err(), "{argv:?}");
+    }
+}
+
+#[test]
+fn astronex_cli_rejects_non_contract_frames_steps_and_routes() {
+    for (extra, expected) in [
+        (vec!["--width", "15"], "multiples of 16"),
+        (vec!["--video-frames", "0"], "frame count"),
+        (vec!["--steps", "4"], "8-step"),
+        (
+            vec!["--video-frames", "9", "--steps", "8", "--dreamx"],
+            "--dreamx",
+        ),
+        (
+            vec!["--video-frames", "9", "--steps", "8", "--frames", "8"],
+            "--frames",
+        ),
+    ] {
+        let mut argv = vec![
+            "rmi",
+            "--astronex",
+            "--model",
+            "m.gguf",
+            "--mmproj",
+            "c.gguf",
+            "--prompt",
+            "x",
+            "--out",
+            "x.mp4",
+        ];
         argv.extend(extra);
         let error = validate_cli_options(&parse_cli_options(&args(&argv)).unwrap()).unwrap_err();
         assert!(error.contains(expected), "{argv:?}: {error}");

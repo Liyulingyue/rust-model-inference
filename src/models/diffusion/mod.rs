@@ -20,6 +20,7 @@
 //! (vision references, DiT-only debug mode). The trait is the default path
 //! for new pipelines.
 
+pub mod astronex_world;
 pub mod auk;
 pub(crate) mod common;
 pub mod dreamx;

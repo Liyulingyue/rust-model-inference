@@ -194,7 +194,7 @@ pub fn dot_f16(a: &[u16], b: &[u16], n: usize) -> f32 {
     #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
     let (mut sum, tail_start) = {
         let prefix = n & !31;
-        if has_neon() && prefix > 0 && std::arch::is_aarch64_feature_detected!("fp16") {
+        if f16_uses_neon_accumulators(n) {
             (
                 f64::from(unsafe { dot_f16_neon(a.as_ptr(), b.as_ptr(), prefix) }),
                 prefix,
@@ -249,6 +249,22 @@ unsafe fn dot_f16_avx2(a: &[u16], b: &[u16], n: usize) -> f32 {
     sum
 }
 
+pub(crate) fn f16_uses_neon_accumulators(n: usize) -> bool {
+    #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+    return n >= 32
+        && has_neon()
+        && if cfg!(feature = "ggml-f16-dot-parity") {
+            std::arch::is_aarch64_feature_detected!("fp16")
+        } else {
+            std::arch::is_aarch64_feature_detected!("fhm")
+        };
+    #[cfg(not(all(target_arch = "aarch64", target_endian = "little")))]
+    {
+        let _ = n;
+        false
+    }
+}
+
 pub fn dot_f16_f16_bytes(a: &[u16], b: &[u8], n: usize) -> f32 {
     debug_assert!(a.len() >= n && b.len() >= n * 2);
     #[cfg(target_arch = "x86_64")]
@@ -260,7 +276,7 @@ pub fn dot_f16_f16_bytes(a: &[u16], b: &[u8], n: usize) -> f32 {
     #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
     let (mut sum, tail_start) = {
         let prefix = n & !31;
-        if has_neon() && prefix > 0 && std::arch::is_aarch64_feature_detected!("fp16") {
+        if f16_uses_neon_accumulators(n) {
             (
                 f64::from(unsafe { dot_f16_neon(a.as_ptr(), b.as_ptr().cast::<u16>(), prefix) }),
                 prefix,
@@ -681,9 +697,7 @@ unsafe fn dot_f16_neon(x: *const u16, y: *const u16, n: usize) -> f32 {
 /// carries. It matches what the x86 path has always done, so the same function
 /// stops meaning two different things per architecture.
 ///
-/// Same FEAT_FP16 requirement as the parity version -- `fmlal` is part of the
-/// same Armv8.2 extension as `fmla` on `.8h`, so the existing runtime detection
-/// in `dot_f16` covers both.
+/// FMLAL requires FEAT_FHM; the shared dispatch checks it before entering here.
 #[cfg(all(
     target_arch = "aarch64",
     target_endian = "little",

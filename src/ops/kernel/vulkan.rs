@@ -3,7 +3,10 @@
 use super::Kernel;
 use crate::core::tensor::GGMLType;
 use crate::ops::quant::BlockQ8K;
-use crate::vulkan::ops::{BatchedLinearRuntime, Conv2dRuntime, GpuWeightFormat};
+use crate::vulkan::ops::{
+    AttentionRuntime, BatchedLinearRuntime, Conv2dRuntime, Conv3dRuntime, GpuMatmulSpec,
+    GpuWeightFormat,
+};
 use std::sync::Mutex;
 
 #[derive(Default)]
@@ -13,9 +16,32 @@ pub(crate) struct GpuLinear {
 
 struct LinearState {
     weight: (usize, usize),
-    format: GpuWeightFormat,
+    spec: GpuMatmulSpec,
     shape: (usize, usize, usize),
     runtime: BatchedLinearRuntime,
+}
+
+/// Smallest number of output elements worth a GPU submission.
+///
+/// Every `BatchedLinearRuntime::matmul_rows` call ends in its own
+/// `submit_and_wait`, and that fence costs ~2.5 ms on the GB10 + driver
+/// combination this project targets. A matmul only wins if it does enough
+/// work to pay that back.
+///
+/// LFM2.5-8B (MoE) is the pathological case: decode runs `rows=1`,
+/// `n_out=1792` expert projections, 24 layers x top-4 experts x 3, so one
+/// token pays 288 fences. Measured on that model, the GPU path took 20.3 s
+/// for a 2-token run against 2.1 s with the GPU matmul disabled -- an ~10x
+/// regression purely from fence latency. Those calls are 1792 output
+/// elements, so they now stay on the CPU pool, while image/diffusion
+/// matmuls (millions of output elements per call) are unaffected.
+///
+/// Override with `RUST_GPU_MIN_OUTPUTS=0` to restore the old behaviour.
+fn min_gpu_matmul_outputs() -> usize {
+    std::env::var("RUST_GPU_MIN_OUTPUTS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(16 * 1024)
 }
 
 pub(crate) fn offload_enabled() -> bool {
@@ -28,12 +54,19 @@ pub(crate) fn offload_enabled() -> bool {
 
 impl GpuLinear {
     pub(crate) fn tile_rows(
-        format: GpuWeightFormat,
+        spec: impl Into<GpuMatmulSpec>,
         n_in: usize,
         n_out: usize,
         rows: usize,
     ) -> usize {
-        let limit = if format == GpuWeightFormat::F16 {
+        let spec = spec.into();
+        // The tiled paths amortize a fence over many rows: F16 in the prepared
+        // mode, and BF16/F32 in the prepared mode through the transposed float
+        // kernel. The dot and rounded modes reduce serially and stay small.
+        let limit = if spec.uses_tiled_f16()
+            || (matches!(spec.format, GpuWeightFormat::BF16 | GpuWeightFormat::F32)
+                && spec.mode == crate::vulkan::ops::GpuMatmulMode::Prepared)
+        {
             // Target 16 MiB of host input/output while amortizing fence waits.
             (4 * 1024 * 1024 / n_in.saturating_add(n_out).max(1)).clamp(1, 4096)
         } else {
@@ -46,13 +79,14 @@ impl GpuLinear {
     pub(crate) fn try_matmul(
         &self,
         weight: &[u8],
-        format: GpuWeightFormat,
+        spec: impl Into<GpuMatmulSpec>,
         input: &[f32],
         output: &mut [f32],
         n_in: usize,
         n_out: usize,
         rows: usize,
     ) -> bool {
+        let spec = spec.into();
         if !offload_enabled()
             || rows == 0
             || n_in == 0
@@ -65,19 +99,22 @@ impl GpuLinear {
                     .ok()
                     .and_then(|value| value.parse().ok())
                     .unwrap_or(usize::MAX)
+            || rows
+                .checked_mul(n_out)
+                .is_none_or(|outputs| outputs < min_gpu_matmul_outputs())
         {
             return false;
         }
         let Some(context) = crate::ops::get_vulkan_context() else {
             return false;
         };
-        let tile_rows = Self::tile_rows(format, n_in, n_out, rows);
+        let tile_rows = Self::tile_rows(spec, n_in, n_out, rows);
         let key = (weight.as_ptr() as usize, weight.len());
         let mut state = self.state.lock().unwrap();
         let result = (|| {
             if state.as_ref().is_none_or(|cached| {
                 cached.weight != key
-                    || cached.format != format
+                    || cached.spec != spec
                     || cached.shape.0 < tile_rows
                     || cached.shape.1 != n_in
                     || cached.shape.2 != n_out
@@ -86,7 +123,7 @@ impl GpuLinear {
                 let runtime = BatchedLinearRuntime::new(context, tile_rows, n_in, n_out, 2)?;
                 *state = Some(LinearState {
                     weight: key,
-                    format,
+                    spec,
                     shape: (tile_rows, n_in, n_out),
                     runtime,
                 });
@@ -98,7 +135,7 @@ impl GpuLinear {
             {
                 runtime.matmul_rows(
                     weight,
-                    format,
+                    spec,
                     input,
                     input.len() / n_in,
                     n_in,
@@ -121,6 +158,111 @@ impl GpuLinear {
                 *state = None;
                 false
             }
+        }
+    }
+}
+
+pub(crate) fn try_attention(
+    query: &[f32],
+    key: &[f32],
+    value: &[f32],
+    spec: crate::models::diffusion::dreamx::kernels::AttentionSpec,
+) -> Option<Vec<f32>> {
+    if !offload_enabled() || spec.head_dim > 1024 {
+        return None;
+    }
+    static RUNTIME: std::sync::OnceLock<Mutex<Option<AttentionRuntime>>> =
+        std::sync::OnceLock::new();
+    let context = crate::ops::get_vulkan_context()?;
+    let mut state = RUNTIME.get_or_init(Mutex::default).lock().unwrap();
+    let mut output = vec![0.0; query.len()];
+    let result = (|| {
+        if state.as_ref().is_none_or(|runtime| {
+            query.len() > runtime.capacity.0 || key.len() > runtime.capacity.1
+        }) {
+            let old = state.as_ref().map_or((0, 0), |runtime| runtime.capacity);
+            *state = None;
+            *state = Some(AttentionRuntime::new(
+                context,
+                (old.0.max(query.len()), old.1.max(key.len())),
+            )?);
+        }
+        state
+            .as_mut()
+            .unwrap()
+            .forward(query, key, value, &mut output, spec)
+    })();
+    match result {
+        Ok(()) if output.iter().all(|v| v.is_finite()) => Some(output),
+        Ok(()) => {
+            crate::vulkan::mark_gpu_broken("non-finite attention output");
+            *state = None;
+            None
+        }
+        Err(crate::vulkan::VulkanError::UnsupportedShape(_)) => None,
+        Err(error) => {
+            crate::vulkan::mark_gpu_broken(&error.to_string());
+            *state = None;
+            None
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn try_conv3d(
+    input: &[f32],
+    weight: &[f32],
+    bias: Option<&[f32]>,
+    output: &mut [f32],
+    input_shape: [usize; 4],
+    weight_shape: [usize; 5],
+    output_shape: [usize; 4],
+    spec: crate::models::diffusion::dreamx::kernels::Conv3dSpec,
+) -> bool {
+    if !offload_enabled() || spec.groups != 1 {
+        return false;
+    }
+    let Some(context) = crate::ops::get_vulkan_context() else {
+        return false;
+    };
+    static RUNTIME: std::sync::OnceLock<Mutex<Option<Conv3dRuntime>>> = std::sync::OnceLock::new();
+    let mut state = RUNTIME.get_or_init(Mutex::default).lock().unwrap();
+    let needed = [input.len(), weight.len(), output.len(), output_shape[0]];
+    let result = (|| {
+        if state
+            .as_ref()
+            .is_none_or(|runtime| needed.iter().zip(runtime.capacity).any(|(&n, c)| n > c))
+        {
+            let old = state.as_ref().map_or([0; 4], |runtime| runtime.capacity);
+            *state = None;
+            *state = Some(Conv3dRuntime::new(
+                context,
+                std::array::from_fn(|i| old[i].max(needed[i])),
+            )?);
+        }
+        state.as_mut().unwrap().forward(
+            input,
+            weight,
+            bias,
+            output,
+            input_shape,
+            weight_shape,
+            output_shape,
+            spec,
+        )
+    })();
+    match result {
+        Ok(()) if output.iter().all(|v| v.is_finite()) => true,
+        Ok(()) => {
+            crate::vulkan::mark_gpu_broken("non-finite Conv3D output");
+            *state = None;
+            false
+        }
+        Err(crate::vulkan::VulkanError::UnsupportedShape(_)) => false,
+        Err(error) => {
+            crate::vulkan::mark_gpu_broken(&error.to_string());
+            *state = None;
+            false
         }
     }
 }
@@ -231,9 +373,9 @@ mod tests {
         let rows = GpuLinear::tile_rows(GpuWeightFormat::F16, 4608, 512, 4096);
         assert!(rows > 64 && rows * (4608 + 512) * 4 <= 16 * 1024 * 1024);
         for format in [
-            GpuWeightFormat::F16Dot,
-            GpuWeightFormat::BF16Dot,
-            GpuWeightFormat::Q8_0,
+            GpuWeightFormat::F16.with_mode(crate::vulkan::ops::GpuMatmulMode::Dot),
+            GpuWeightFormat::BF16.with_mode(crate::vulkan::ops::GpuMatmulMode::Dot),
+            GpuWeightFormat::Q8_0.into(),
         ] {
             assert_eq!(GpuLinear::tile_rows(format, 512, 512, 1089), 64);
         }
@@ -260,6 +402,13 @@ impl<'a> VulkanKernel<'a> {
 }
 
 impl Kernel for VulkanKernel<'_> {
+    fn supports_f16_strict(&self) -> bool {
+        self.inner.supports_f16_strict()
+    }
+    fn rounds_bf16_input(&self) -> bool {
+        self.inner.rounds_bf16_input()
+    }
+
     fn try_forward_vulkan_rows(
         &self,
         input: &[f32],

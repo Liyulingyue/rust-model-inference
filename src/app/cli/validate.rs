@@ -4,6 +4,10 @@ use super::options::{
 use super::types::{normalize_tts_language, CliOptions};
 
 pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
+    if options.astronex || options.astronex_frames.is_some() {
+        crate::app::cli::astronex_cli_options(options)?;
+        return Ok(());
+    }
     if options.width.is_some()
         || options.height.is_some()
         || options.cfg.is_some()

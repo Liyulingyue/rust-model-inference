@@ -13,6 +13,7 @@
 //! Existing call sites that use `Qwen35Model::forward` directly keep working;
 //! `Session::step` is additive.
 
+use crate::compute::ComputePolicy;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
@@ -57,6 +58,7 @@ pub struct HybridSession<'a, 'm, M: HybridTrunkModel<'m>> {
     model: &'a mut M,
     source_lifetime: PhantomData<&'m ()>,
     capacity: usize,
+    compute_policy: ComputePolicy,
     kv_cache: KvCache,
     scratch: Qwen35Scratchpad,
     prefill_batch_size: usize,
@@ -234,6 +236,24 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
         prefill_batch_size: usize,
         pool: Arc<ComputePool>,
     ) -> Result<Self, String> {
+        Self::new_with_compute(
+            model,
+            capacity,
+            prefill_batch_size,
+            pool,
+            ComputePolicy::legacy(),
+        )
+    }
+
+    pub fn new_with_compute(
+        model: &'a mut M,
+        capacity: usize,
+        prefill_batch_size: usize,
+        pool: Arc<ComputePool>,
+        compute_policy: ComputePolicy,
+    ) -> Result<Self, String> {
+        compute_policy.check_build()?;
+        let _scope = compute_policy.cpu_scope();
         let prefill_batch_size = checked_prefill_batch_size(Some(prefill_batch_size))?;
         let cfg = &model.trunk().config;
         if capacity == 0 || capacity > cfg.n_ctx {
@@ -245,18 +265,28 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
         let kv_cache = KvCache::new_f32(cfg.n_layer_impl(), capacity, cfg.n_embd_gqa());
         let scratch = Qwen35Scratchpad::new(cfg, capacity.min(prefill_batch_size));
         #[cfg(feature = "vulkan")]
-        let (gpu, full_model_gpu_failed) = match (model.supports_vulkan()
-            && !crate::core::thread_pool::gpu_matmul_disabled())
-        .then(crate::ops::get_vulkan_context)
-        .flatten()
-        {
+        let (gpu, full_model_gpu_failed) = match if model.supports_vulkan() {
+            compute_policy
+                .context()
+                .map_err(|error| error.to_string())?
+        } else if compute_policy == ComputePolicy::Vulkan {
+            return Err("This hybrid model does not support full-model Vulkan".into());
+        } else {
+            None
+        } {
             Some(context) => match Qwen35VulkanSession::try_new_rows(
                 model.trunk(),
                 capacity,
                 capacity.min(prefill_batch_size),
                 context,
             ) {
+                Ok(None) if compute_policy == ComputePolicy::Vulkan => {
+                    return Err("Qwen3.5 configuration is unsupported for full-model Vulkan".into());
+                }
                 Ok(gpu) => (gpu, false),
+                Err(error) if compute_policy == ComputePolicy::Vulkan => {
+                    return Err(error.to_string())
+                }
                 Err(error) => {
                     eprintln!(
                         "[GPU] Qwen3.5 Vulkan session unavailable: {error}. Falling back to CPU."
@@ -270,6 +300,7 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
             model,
             source_lifetime: PhantomData,
             capacity,
+            compute_policy,
             kv_cache,
             scratch,
             prefill_batch_size,
@@ -286,6 +317,20 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
             #[cfg(test)]
             fail_cpu_chunk_after_row: None,
         })
+    }
+
+    #[cfg(feature = "vulkan")]
+    fn gpu_available(&self) -> bool {
+        #[cfg(test)]
+        if self.gpu_failure_for_test.is_some() {
+            return true;
+        }
+        self.gpu.is_some()
+    }
+
+    #[cfg(all(test, feature = "vulkan"))]
+    pub(crate) fn force_vulkan_policy_for_test(&mut self) {
+        self.compute_policy = ComputePolicy::Vulkan;
     }
 
     pub fn config(&self) -> &Qwen35Config {
@@ -450,6 +495,11 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
         n_tokens: usize,
         positions: &[[usize; 4]],
     ) -> Result<Vec<f32>, String> {
+        let _scope = self.compute_policy.cpu_scope();
+        #[cfg(feature = "vulkan")]
+        if self.compute_policy == ComputePolicy::Vulkan && !self.gpu_available() {
+            return Err("Vulkan session unavailable; create a new session to retry".into());
+        }
         let n_embd = self.model.trunk().config.n_embd;
         #[cfg(feature = "vulkan")]
         let kv_stride =
@@ -487,6 +537,9 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
         let trace_each_token = false;
         #[cfg(feature = "vulkan")]
         if trace_each_token {
+            if self.compute_policy == ComputePolicy::Vulkan {
+                return Err("Vulkan does not support token-major parity tracing".into());
+            }
             self.gpu = None;
         }
         let batch_size = self.prefill_batch_size;
@@ -541,15 +594,23 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
                     Ok(()) => {
                         self.processed_tokens += rows;
                         self.next_position = chunk_positions[rows - 1][0].saturating_add(1);
+                        self.compute_policy.trace(
+                            "resident_hybrid_decoder",
+                            crate::compute::UsedBackend::Vulkan,
+                            rows,
+                        );
                         continue;
                     }
                     Err(error) => {
                         if let Some(gpu) = &mut self.gpu {
                             gpu.abort_token();
                         }
-                        eprintln!("[GPU] Qwen3.5 Vulkan chunk {base}..{} failed: {error}. Recomputing the whole chunk on CPU.", base + rows);
                         self.gpu = None;
                         self.full_model_gpu_failed = true;
+                        if self.compute_policy == ComputePolicy::Vulkan {
+                            return Err(error);
+                        }
+                        eprintln!("[GPU] Qwen3.5 Vulkan chunk {base}..{} failed: {error}. Recomputing the whole chunk on CPU.", base + rows);
                         Some(error)
                     }
                 }
@@ -558,8 +619,7 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
             };
 
             #[cfg(feature = "vulkan")]
-            let _gpu_matmul_scope = (self.full_model_gpu_failed || trace_each_token)
-                .then(ComputePool::disable_gpu_matmul_for_scope);
+            let _gpu_matmul_scope = ComputePool::disable_gpu_matmul_for_scope();
             self.scratch.x[..rows * n_embd].copy_from_slice(chunk_embeddings);
             // Preserve the existing CPU decode path; only a failed GPU chunk needs a retry snapshot.
             let direct_decode = n_tokens == 1;
@@ -629,6 +689,8 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
             };
             self.scratch.conv_states = working_conv;
             self.scratch.ssm_states = working_ssm;
+            self.compute_policy
+                .trace("hybrid_decoder", crate::compute::UsedBackend::Cpu, rows);
             self.processed_tokens += rows;
             self.next_position = chunk_positions[rows - 1][0].saturating_add(1);
             self.last_step_tokens = rows;

@@ -1,5 +1,8 @@
 #version 450
-#extension GL_EXT_integer_dot_product : require
+#extension GL_EXT_spirv_intrinsics : require
+// glslang 15 lacks the GLSL dot extension; emit its signed packed SPIR-V instruction.
+spirv_instruction(extensions = ["SPV_KHR_integer_dot_product"], capabilities = [6018, 6019], id = 4450)
+int dotPacked4x8EXT(int a, int b, spirv_literal uint format);
 // dp4a variant: inner loop uses packed 4x int8 dot products.
 layout(local_size_x = 64) in;
 layout(std430, binding = 0) readonly buffer W  { uint w_data[]; };
@@ -7,8 +10,9 @@ layout(std430, binding = 1) readonly buffer IQ { uint i_data[]; };
 layout(std430, binding = 2) readonly buffer SC { float i_scales[]; };
 layout(std430, binding = 3) writeonly buffer OU { float o_data[]; };
 layout(push_constant) uniform PC { uvec4 dims; };
-shared uint s_input[4096];
-shared float s_red[8];
+const uint CHUNK_BLOCKS = 64u;
+shared uint s_input[CHUNK_BLOCKS * 8u];
+shared float s_scales[CHUNK_BLOCKS];
 
 float f16_decode(uint bits) {
     uint sign = (bits >> 15u) & 1u;
@@ -20,43 +24,48 @@ float f16_decode(uint bits) {
     else { v = (1.0 + float(man) / 1024.0) * exp2(float(expo - 15)); }
     return sign != 0u ? -v : v;
 }
-int i8_of(uint word, uint byte_idx) {
-    uint b = (word >> (byte_idx * 8u)) & 0xFFu;
-    return b >= 128u ? int(b) - 256 : int(b);
-}
 void main() {
     uint bpr = dims.z;
     uint lid = gl_LocalInvocationID.x;
-    uint in_words = bpr * 8u;
-    for (uint w = lid; w < in_words; w += 64u) { s_input[w] = i_data[w]; }
-    barrier();
-    uint row = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint row = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 64u + lid;
+    uint read_row = min(row, dims.y - 1u);
+    uint row_off = read_row * dims.w;
+    precise float acc[8];
+    for (uint group = 0u; group < 8u; group++) acc[group] = 0.0;
+    for (uint chunk = 0u; chunk < bpr; chunk += CHUNK_BLOCKS) {
+        uint blocks = min(CHUNK_BLOCKS, bpr - chunk);
+        for (uint word = lid; word < blocks * 8u; word += 64u) {
+            s_input[word] = i_data[chunk * 8u + word];
+        }
+        if (lid < blocks) s_scales[lid] = i_scales[chunk + lid];
+        barrier();
+        for (uint local_block = 0u; local_block < blocks; local_block++) {
+            uint block = chunk + local_block;
+            uint w_off = row_off + block * 34u;
+            uint s_word = w_data[w_off >> 2u];
+            uint s_bits = ((w_off & 3u) == 0u) ? (s_word & 0xFFFFu) : ((s_word >> 16u) & 0xFFFFu);
+            float w_scale = f16_decode(s_bits);
+            precise float scale = w_scale * s_scales[local_block];
+            uint w_body = w_off + 2u;
+            int block_dot = 0;
+            for (uint group = 0u; group < 8u; group++) {
+                uint g_off = w_body + group * 4u;
+                uint w0 = w_data[g_off >> 2u];
+                uint w1 = w_data[(g_off >> 2u) + 1u];
+                uint sh = (g_off & 3u) * 8u;
+                uint packed = (sh == 0u) ? w0 : ((w0 >> sh) | (w1 << (32u - sh)));
+                uint i_word = s_input[local_block * 8u + group];
+                int dot = dotPacked4x8EXT(int(packed), int(i_word), 0u);
+                if (dims.x == 8u) acc[group] = fma(float(dot), scale, acc[group]);
+                else block_dot += dot;
+            }
+            precise float product = float(block_dot) * scale;
+            if (dims.x != 8u) acc[0] = dims.x == 0u ? acc[0] + product : fma(float(block_dot), scale, acc[0]);
+        }
+        if (chunk + CHUNK_BLOCKS < bpr) barrier();
+    }
     if (row >= dims.y) return;
-    uint row_off = row * dims.w;
-    // Match the CPU's eight independent FMA streams, including their reduction.
-    // ponytail: eight active lanes; preserve this order when tuning occupancy.
-    precise float acc = 0.0;
-    for (uint block = 0u; lid < 8u && block < bpr; block++) {
-        uint w_off = row_off + block * 34u;
-        uint s_word = w_data[w_off >> 2u];
-        uint s_bits = ((w_off & 3u) == 0u) ? (s_word & 0xFFFFu) : ((s_word >> 16u) & 0xFFFFu);
-        float w_scale = f16_decode(s_bits);
-        uint w_body = w_off + 2u;
-        uint g_off = w_body + lid * 4u;
-        uint w0 = w_data[g_off >> 2u];
-        uint w1 = w_data[(g_off >> 2u) + 1u];
-        uint sh = (g_off & 3u) * 8u;
-        uint packed = (sh == 0u) ? w0 : ((w0 >> sh) | (w1 << (32u - sh)));
-        uint i_word = s_input[block * 8u + lid];
-        int dot = dotPacked4x8EXT(int(packed), int(i_word));
-        float scale = w_scale * i_scales[block];
-        acc = fma(float(dot), scale, acc);
-    }
-    if (lid < 8u) s_red[lid] = acc;
-    barrier();
-    if (lid == 0u) {
-        precise float sum01 = (s_red[0] + s_red[4]) + (s_red[1] + s_red[5]);
-        precise float sum23 = (s_red[2] + s_red[6]) + (s_red[3] + s_red[7]);
-        o_data[row] = sum01 + sum23;
-    }
+    precise float sum01 = (acc[0] + acc[4]) + (acc[1] + acc[5]);
+    precise float sum23 = (acc[2] + acc[6]) + (acc[3] + acc[7]);
+    o_data[row] = dims.x == 8u ? sum01 + sum23 : acc[0];
 }
