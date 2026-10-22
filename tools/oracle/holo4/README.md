@@ -217,7 +217,69 @@ the validated path. Batch 64 is not a passing configuration.
 and red-image fixture: `--compute vulkan supports plain text decoder generation
 only`. The full Vulkan runtime currently supports text input only. CPU image
 verification above remains applicable; Auto/legacy partial offload, GPU vision,
-other GPU devices, long context and performance are unverified.
+other GPU devices and long context are unverified.
+
+### Resident performance
+
+Measured on 2026-10-23 (Asia/Shanghai), at source revision `5a041900`, on the
+same dual EPYC 9334 / 48 GiB gfx1100 host. Rust 1.99.1 uses the full `release`
+profile (fat LTO), `--features vulkan`, eight CPU workers, F32 KV and capacity
+128. The fixed 13-token prompt is followed by 32 decode evaluations. Three
+resident sessions are warmed once, then measured in alternating order for five
+rounds. Model loading, Vulkan initialization and weight upload are excluded;
+request-state reset is included in total time. The GPU session constructor
+separately takes 15.790 seconds, including contracts and weight upload.
+
+| Backend | Prefill batch | Prefill tok/s | Decode tok/s | Total seconds, median | Total seconds, min–max |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| CPU | 64 | 4.045 | 3.831 | 11.306 | 10.953–46.997 |
+| CPU | 1 | 1.905 | 2.222 | 20.988 | 18.168–44.233 |
+| Vulkan | 1 | 0.604 | 0.613 | 75.995 | 72.952–78.239 |
+
+Each column is summarized independently. For this workload, the Vulkan/CPU
+default-batch median wall-time ratio is **6.72**: Vulkan is slower. Even the
+slowest CPU sample completes before the fastest GPU sample. This is a shared
+host, with a 16-core container CPU quota and other CPU jobs. CPU throttling
+was observed, and affinity, NUMA placement and frequency were not pinned;
+the large CPU variation is retained above. These are measurements of this
+configuration, not a hardware-wide performance claim or an optimized baseline.
+
+Every GPU sample records 429 prefill and 1056 decode submissions, with zero
+new static uploads; CPU samples record zero GPU submissions. The Vulkan buffer
+allocation peak is 16105264640 bytes. The runtime records 9600768000 host-read
+bytes per sample. This is an API counter, not measured PCIe traffic; no kernel
+profiler was run, so it does not establish the dominant bottleneck.
+
+For comparable workloads, every timed session consumes the same decode-token
+sequence from the CPU warmup. EOS does not stop these fixed-count evaluations.
+All logits are finite and each backend's top-1 sequence is repeatable. CPU
+batch 1 and 64 agree on all 33 predictions. GPU agrees through the normal EOS
+(prediction 9), but prediction 30, after EOS, differs: CPU 96747 / GPU 2064.
+Thus this is a teacher-forced throughput benchmark, not a claim of 32-step
+autoregressive parity. The earlier four-step numerical acceptance remains
+the validated precision scope.
+
+The [raw samples](performance.jsonl) include build hashes, initialization,
+warmups, all 15 measurements, counters and process RSS. RSS covers the whole
+benchmark process with three resident model views, not separate CPU/GPU peaks.
+The [fixed benchmark source](benchmark.rs) uses existing dependencies only.
+Reproduce in a clean checkout with no `RMI_PARITY_TRACE` set:
+
+```sh
+(
+set -e
+test ! -e examples/holo4_perf.rs
+cp tools/oracle/holo4/benchmark.rs examples/holo4_perf.rs
+trap 'rm -f examples/holo4_perf.rs' EXIT
+cargo build --offline --release --features vulkan --example holo4_perf
+RMI_HOLO4_MODEL="$RMI_HOLO4_MODEL" target/release/examples/holo4_perf \
+  > target/holo4-performance.jsonl
+)
+```
+
+The model SHA-256, finite values, four known greedy IDs, backend submission
+counters and same-backend repeatability are checked by the harness. GPU batch
+64 remains a known failure and GPU image performance is not measured.
 
 The full library run reports 1237 passed, 80 ignored and 22 existing failures.
 Compared with the unchanged baseline (1235 passed / 80 ignored / 23 failed),
