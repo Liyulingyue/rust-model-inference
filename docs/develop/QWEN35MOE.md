@@ -305,7 +305,14 @@ then the `k (x) d` outer product, then `s^T q / sqrt(S_k)`. The three ops in
 `state[a][b]` mapping to the oracle's `S[b][a]`, `ssm_matvec` and
 `ssm_outer_product_update` agree exactly.
 
-`l2_norm` now matches `ggml_compute_forward_l2_norm_f32`
+**Current contract (2026-10-22):** llama.cpp `11fe0215` now uses
+`build_gdn_l2_norm`: RMSNorm(eps/n) followed by scale(1/sqrt(n)), equivalent
+to `x / sqrt(sum(x²) + eps)`. The shared Rust helper follows that order and
+has a fresh Holo4 numerical regression. The denominator-clamp results below
+refer to the older Oracle snapshot; those MiniCPM artifacts have not been
+rerun with this update. See [Holo4 validation](../../tools/oracle/holo4/README.md).
+
+The historical `l2_norm` implementation matched `ggml_compute_forward_l2_norm_f32`
 (`ggml/src/ggml-cpu/ops.cpp:4333`):
 
 ```c
@@ -329,7 +336,8 @@ The old pin, `qwen35_l2_norm_matches_pinned_llama_cpp_bits`, did not catch any o
 this: it agreed 128/128 with the old Rust formula and 0/128 with the ggml one,
 because it had been generated from the Rust code it was supposed to check. It is
 regenerated from the kernel above, and
-`qwen35_l2_norm_clamps_the_denominator_at_eps` now pins the floor directly.
+`qwen35_l2_norm_clamps_the_denominator_at_eps` pinned the floor at that time.
+These tests have since been replaced by the current GDN numerical fixtures.
 
 With that fixed, every SSM stage at layer 1 is bit-exact end to end
 (`conv_output_raw`, `q_conv`, `q_conv_predelta`, `k_conv_predelta`,

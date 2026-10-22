@@ -1,0 +1,470 @@
+{
+  "model": "Hcompany/Holo4-35B-A3B-GGUF",
+  "modelscope_revision": "a298a0585d798c32341af11cdcddfb08f87e6744",
+  "date": "2026-10-22",
+  "status": "experimental: runnable; text numerical alignment has unresolved residuals",
+  "local_model_directory": "/Users/gouzi/Documents/git/rust-model-inference/models/Holo4-35B-A3B-GGUF",
+  "artifacts": [
+    {
+      "file": "q4_k_m.gguf",
+      "bytes": 21297870912,
+      "sha256": "4c51212a4b5673d6a4215b9d708cd1730f1b6b4dbb5f75552df18de8341ce669"
+    },
+    {
+      "file": "mmproj.f16.gguf",
+      "bytes": 899282976,
+      "sha256": "e1076d4179a6d82dbc7f129f043ac5cb03e4584ef5c1ed4a0c31eca5d1a187e4"
+    }
+  ],
+  "oracle": {
+    "repository": "https://github.com/ggml-org/llama.cpp",
+    "commit": "11fe02151f79c41d0d4af7da708755d73b9c0da6",
+    "backend": "CPU",
+    "external_acceleration": false,
+    "kv_cache": "f32",
+    "flash_attention": false,
+    "repack": false,
+    "threads": 8,
+    "prefill_batch": 1,
+    "ubatch": 1
+  },
+  "contract": {
+    "architecture": "qwen35moe",
+    "tensors": 733,
+    "tensor_types": {
+      "Q4_K": 370,
+      "F32": 301,
+      "Q6_K": 62
+    },
+    "layers": 40,
+    "hidden": 2048,
+    "vocab": 248320,
+    "recurrent_layers": 30,
+    "experts": 256,
+    "top_k": 8,
+    "expert_width": 512,
+    "shared_width": 512,
+    "expert_projection_types": "up/gate Q4_K; down Q4_K on 20 layers and Q6_K on 20 layers",
+    "rope_sections": [
+      11,
+      11,
+      10,
+      0
+    ],
+    "projector": {
+      "architecture": "clip",
+      "type": "qwen3vl_merger",
+      "layers": 27,
+      "hidden": 1152,
+      "output": 2048,
+      "patch": 16,
+      "merge": 2,
+      "deepstack": false
+    }
+  },
+  "tokenizer": {
+    "comparison": "exact token IDs",
+    "cases": [
+      {
+        "input": "",
+        "ids": []
+      },
+      {
+        "input": "Hello world",
+        "ids": [
+          9419,
+          1814
+        ]
+      },
+      {
+        "input": " 你好，Rust! 👋\n\n",
+        "ids": [
+          220,
+          109266,
+          3709,
+          49,
+          575,
+          0,
+          59720,
+          233,
+          271
+        ]
+      },
+      {
+        "input": "\t a  b\r\n",
+        "ids": [
+          197,
+          264,
+          220,
+          292,
+          317
+        ]
+      },
+      {
+        "input": "<|im_start|>user\nHi<|im_end|>\n",
+        "ids": [
+          248045,
+          846,
+          198,
+          12675,
+          248046,
+          198
+        ]
+      },
+      {
+        "input": "<tool_call>hello</tool_call> <think>想一想</think>",
+        "ids": [
+          248058,
+          14556,
+          248059,
+          220,
+          248068,
+          122096,
+          248069
+        ]
+      },
+      {
+        "input": "<|vision_start|><|image_pad|><|vision_end|>",
+        "ids": [
+          248053,
+          248056,
+          248054
+        ]
+      }
+    ]
+  },
+  "projector_widening": {
+    "tensors": 334,
+    "values": 446571248,
+    "comparison": "raw u32 words after F16 to F32 expansion; includes negative-zero fixture",
+    "bitwise_equal": true
+  },
+  "text": {
+    "acceptance": "English generated logits pass 0.10 relative-L2; selected graph diagnostics and other prompts do not establish full text numerical parity",
+    "english": {
+      "prompt_tokens": 19,
+      "reference_generated_ids": [
+        760,
+        6511,
+        314,
+        9338,
+        369,
+        11751,
+        13,
+        248046
+      ],
+      "rust_argmax_ids": [
+        760,
+        6511,
+        314,
+        9338,
+        369,
+        11751,
+        13,
+        248046
+      ],
+      "teacher_forced": false,
+      "logits": [
+        {
+          "relative_l2": 0.07491810051845116,
+          "max_abs": 1.4255242347717285
+        },
+        {
+          "relative_l2": 0.08629031066344865,
+          "max_abs": 2.0444860458374023
+        },
+        {
+          "relative_l2": 0.08178259734538958,
+          "max_abs": 2.4944067001342773
+        },
+        {
+          "relative_l2": 0.05347962288012407,
+          "max_abs": 1.4972610473632812
+        },
+        {
+          "relative_l2": 0.08678879765543904,
+          "max_abs": 1.8383588790893555
+        },
+        {
+          "relative_l2": 0.0637193879680974,
+          "max_abs": 1.6962566375732422
+        },
+        {
+          "relative_l2": 0.07632846582044142,
+          "max_abs": 1.7023563385009766
+        },
+        {
+          "relative_l2": 0.07315154453403717,
+          "max_abs": 1.6493034362792969
+        }
+      ],
+      "checkpoint_counts": {
+        "model.input_embed": 19,
+        "l_out-0": 26,
+        "l_out-3": 26,
+        "l_out-39": 26,
+        "result_norm": 26
+      },
+      "checkpoint_max_relative_l2": {
+        "model.input_embed": 0,
+        "l_out-0": 1.3076940394850139e-06,
+        "l_out-3": 0.04692921880324271,
+        "l_out-39": 0.18371493036596598,
+        "result_norm": 0.19468831655331206
+      },
+      "input_embedding_bitwise_equal": true,
+      "prefill_logits_max_relative_l2": 0.12894377367390464,
+      "generation_logits_max_relative_l2": 0.08678879765543904
+    },
+    "math_teacher_forced": {
+      "prompt_tokens": 19,
+      "reference_generated_ids": [
+        17,
+        10,
+        17,
+        16327,
+        220,
+        19,
+        13,
+        248046
+      ],
+      "rust_argmax_ids": [
+        17,
+        478,
+        17,
+        16327,
+        220,
+        19,
+        13,
+        248046
+      ],
+      "teacher_forced": true,
+      "logits": [
+        {
+          "relative_l2": 0.09041495280536718,
+          "max_abs": 1.7948360443115234
+        },
+        {
+          "relative_l2": 0.050452155239500016,
+          "max_abs": 1.0855731964111328
+        },
+        {
+          "relative_l2": 0.06270435994434241,
+          "max_abs": 1.8435521125793457
+        },
+        {
+          "relative_l2": 0.06751763959300242,
+          "max_abs": 1.7043170928955078
+        },
+        {
+          "relative_l2": 0.06832548286239207,
+          "max_abs": 1.9231457710266113
+        },
+        {
+          "relative_l2": 0.05722809836612483,
+          "max_abs": 1.7363457679748535
+        },
+        {
+          "relative_l2": 0.10003590689795258,
+          "max_abs": 2.369442939758301
+        },
+        {
+          "relative_l2": 0.05774673845256402,
+          "max_abs": 1.7468385696411133
+        }
+      ],
+      "checkpoint_counts": {
+        "model.input_embed": 19,
+        "l_out-0": 26,
+        "l_out-3": 26,
+        "l_out-39": 26,
+        "result_norm": 26
+      },
+      "checkpoint_max_relative_l2": {
+        "model.input_embed": 0,
+        "l_out-0": 0.0011896446487691822,
+        "l_out-3": 0.06965570567478532,
+        "l_out-39": 0.1769200195532745,
+        "result_norm": 0.18599868762619046
+      },
+      "input_embedding_bitwise_equal": true,
+      "rust_free_generated_ids": [
+        17,
+        478,
+        220,
+        17,
+        16327,
+        220,
+        19,
+        13
+      ],
+      "prefill_logits_max_relative_l2": 0.10986868282852116,
+      "generation_logits_max_relative_l2": 0.10003590689795258
+    },
+    "chinese_teacher_forced": {
+      "prompt_tokens": 17,
+      "reference_generated_ids": [
+        96328,
+        96435,
+        96878,
+        98116,
+        1710,
+        248046
+      ],
+      "rust_argmax_ids": [
+        98116,
+        96435,
+        96878,
+        98116,
+        1710,
+        248046
+      ],
+      "teacher_forced": true,
+      "logits": [
+        {
+          "relative_l2": 0.14567875963799945,
+          "max_abs": 3.4442862272262573
+        },
+        {
+          "relative_l2": 0.05793499343715251,
+          "max_abs": 1.2629356384277344
+        },
+        {
+          "relative_l2": 0.082970017592195,
+          "max_abs": 1.5011201202869415
+        },
+        {
+          "relative_l2": 0.09477767313425103,
+          "max_abs": 1.9200439453125
+        },
+        {
+          "relative_l2": 0.08717171455231806,
+          "max_abs": 2.1240577697753906
+        },
+        {
+          "relative_l2": 0.13240163781090714,
+          "max_abs": 2.6585187911987305
+        }
+      ],
+      "checkpoint_counts": {
+        "model.input_embed": 17,
+        "l_out-0": 22,
+        "l_out-3": 22,
+        "l_out-39": 22,
+        "result_norm": 22
+      },
+      "checkpoint_max_relative_l2": {
+        "model.input_embed": 0,
+        "l_out-0": 0.0009478779165776807,
+        "l_out-3": 0.052260864384350326,
+        "l_out-39": 0.363326881653233,
+        "result_norm": 0.35605546600923565
+      },
+      "input_embedding_bitwise_equal": true,
+      "rust_free_generated_ids": [
+        98116,
+        1710,
+        248046
+      ],
+      "prefill_logits_max_relative_l2": 0.37391150094064274,
+      "generation_logits_max_relative_l2": 0.14567875963799945
+    },
+    "diagnostic": {
+      "first_observed_mismatch": "math prompt token index 6, layer 0 quantized output/FFN path",
+      "gdn_final_output_relative_l2": 5.995763307028467e-08,
+      "router_logits_relative_l2": 7.167683054828822e-05,
+      "routed_experts_equal": 8,
+      "routed_output_relative_l2": 0.0063724747554300245,
+      "layer_output_relative_l2": 0.0011896446487691822,
+      "note": "Subsequent routed expert sets differ. This bounds the earliest observed residual, without proving that every downstream discrepancy is harmless."
+    }
+  },
+  "vision": {
+    "input": "128x128 already-normalized [0,0,1] RGB floats",
+    "output_shape": [
+      16,
+      2048
+    ],
+    "values": 32768,
+    "relative_l2_bound": 0.02,
+    "local_vs_widened_f32": 0.00094837,
+    "local_vs_native_f16": 0.00716528,
+    "remote_x86_vs_widened_f32": 0.0009091,
+    "real_cli": {
+      "image": "128x128 blue PNG",
+      "prompt": "What color is this image? Answer in one word.",
+      "output": "blue",
+      "max_tokens": 8
+    }
+  },
+  "engineering": {
+    "local_platform": "macOS aarch64 CPU",
+    "rust": "1.98.1",
+    "local_qwen35_tests": {
+      "passed": 88,
+      "ignored": 5,
+      "excluded_baseline_failures": [
+        "qwen35_config_rejects_invalid_tensor_dimensions",
+        "qwen35_trace_metadata_is_independent_of_prefill_batch_size"
+      ]
+    },
+    "python_comparator_tests": 2,
+    "remote": {
+      "platform": "Ubuntu 24.04 x86_64 CPU",
+      "workspace": "/workspace/rust-model-inference-holo4",
+      "rust": "1.98.1 (repo-local target/holo4/rust)",
+      "qwen35_tests": {
+        "passed": 82,
+        "ignored": 5,
+        "excluded_same_baseline_failures": true
+      },
+      "vision_projection": "passed, real original F16 mmproj SHA256 verified",
+      "full_llm_generation": "not run: repeated ModelScope connection timeouts and interrupted SSH uploads; incomplete file is named q4_k_m.gguf.incomplete"
+    }
+  },
+  "uncovered": [
+    "full text numerical parity: Chinese generation logits maximum relative L2 0.14567875963799945; all-prefill logits maximum 0.37391150094064274; math and Chinese free-running greedy differ",
+    "other Holo4 model sizes or quantizations",
+    "GPU, video, long context, server/multiturn and computer-control agent harness",
+    "complete repository test suite",
+    "older Qwen3.5/MiniCPM artifacts after updating the shared GDN normalization contract"
+  ],
+  "evidence": [
+    {
+      "path": "target/holo4/contract.log",
+      "sha256": "29f5304c5808009efa6854425df2be3187579388e660e9475c4003fc08a70e65"
+    },
+    {
+      "path": "target/holo4/english-final-rust.jsonl",
+      "sha256": "5566611cc507e90eb5c6f10b482a817f24236aadf8a9e9edfac9b7d88263f87e"
+    },
+    {
+      "path": "target/holo4/english-final-reference/index.tsv",
+      "sha256": "c4185daa7fe6ea2a57f2235121b66baf0d29d67e5716b03ba09fb43feb3c1ee3"
+    },
+    {
+      "path": "target/holo4/math-forced-rust.jsonl",
+      "sha256": "ff6aeda897af5c0b02735f2c4bb1b673897fd93dc2f908eb51abdb97f8c6eb94"
+    },
+    {
+      "path": "target/holo4/math-sequential-reference/index.tsv",
+      "sha256": "c4185daa7fe6ea2a57f2235121b66baf0d29d67e5716b03ba09fb43feb3c1ee3"
+    },
+    {
+      "path": "target/holo4/chinese-forced-rust.jsonl",
+      "sha256": "a8e6962fc09e3e5ad03fcdd6e816a2bba531010c0f62d2921bf9c17ee57ba4ad"
+    },
+    {
+      "path": "target/holo4/chinese-final-reference/index.tsv",
+      "sha256": "7a1e38edb713006660476e435c91f2edbd9b4612f59b73424dc71f56ffee1b29"
+    },
+    {
+      "path": "target/holo4/vision-cli.log",
+      "sha256": "038e7fb463a62f5b703d3cbac6c93b4cb1960e476e941dd5b2e4cf09585e2511"
+    },
+    {
+      "path": "target/holo4/contract-final.log",
+      "sha256": "5b8eec5f4e90cb77367be8b4aaebec4ec3b11e4423b49029299e4a28bfc21e66"
+    }
+  ]
+}
