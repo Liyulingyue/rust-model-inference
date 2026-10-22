@@ -95,14 +95,19 @@ The supported numerical path is **F32 CPU activations/accumulation**, with the
 released BF16 DiT/text weights and F16 VAE convolutions. The primary Oracle
 widens the released weights and runs the pinned official graph in F32.
 
-On macOS arm64, 8 threads, seed 42, 64x64 and two flow-map steps:
+Real CLI comparisons use seed 42, 64x64 and two flow-map steps. macOS arm64 uses
+8 Rust threads; Linux x86_64 uses 16 (EPYC 9334, cgroup limit 55 GiB / 16 CPUs).
+Both platforms are compared with the same pinned F32 CPU Oracle recorded on
+arm64 with 8 threads.
 
-| Case | Canonical checkpoints | Text relative L2 | Maximum velocity relative L2 | RGB relative L2 |
+| Platform / case | Canonical checkpoints | Text relative L2 | Maximum velocity relative L2 | RGB relative L2 |
 | --- | ---: | ---: | ---: | ---: |
-| Text to image | 89 | 0.0000154383 | 0.0000978136 | 0.000585576 |
-| Two prepared reference images | 103 | 0.0000154383 | 0.00105131 | 0.000157232 |
+| arm64 / text to image | 89 | 0.0000154383 | 0.0000978136 | 0.000585576 |
+| arm64 / two prepared references | 103 | 0.0000154383 | 0.00105131 | 0.000157232 |
+| x86_64 / text to image | 89 | 0.0000158357 | 0.000188365 | 0.000858396 |
+| x86_64 / two prepared references | 103 | 0.0000158357 | 0.000797763 | 0.000319389 |
 
-Both cases pass every predeclared F32 bound, produce CLI PNGs, and preserve
+All four cases pass every predeclared F32 bound, produce CLI PNGs, and preserve
 canonical checkpoint order/shape/count. Token IDs and initial noise are exact.
 
 - All source SHA256 hashes match the fixed revision. All **1007** converted
@@ -116,15 +121,18 @@ canonical checkpoint order/shape/count. Token IDs and initial noise are exact.
   16 CPUs), RGB is 0.000476291. Both runs pass all four checkpoints.
 - A clean, isolated build passes all six FLUX3 tests, including the real released
   tokenizer, text encoder and VAE. The separate text-only Oracle comparison
-  passes both checkpoints (text relative L2 0.0000154383).
-- Eleven shared Qwen regression tests pass locally with `parity-trace` (one
+  passes both checkpoints on arm64 (text relative L2 0.0000154383) and x86_64
+  (0.0000158357). All three GGUF files pass full SHA256 checks on Linux, whose
+  changed Rust source files also match the PR source hashes.
+- Eleven shared Qwen regression tests pass on both platforms with `parity-trace` (one
   ignored), including hidden-layer capture and key masking. All eight
   converter/comparator checks and asymmetric F16/BF16 downsampling pass.
   The binary dispatches `flux3` explicitly.
 - Broader arm64 VAE regression: 25 passed, 1 ignored, 1 existing SiLU bitwise
   assertion failed by 1 ULP. The same values/failure reproduce on unmodified
   initial HEAD `973210b6`.
-- The Linux build and three FLUX3 unit tests pass. Its existing Rust 1.94.1
+- The Linux build, three FLUX3 unit tests and released text/VAE tests pass.
+  Its existing Rust 1.94.1
   needs temporary `RUSTC_BOOTSTRAP=1` and
   `RUSTFLAGS='-C target-cpu=native -Zcrate-attr=feature(if_let_guard)'` for
   pre-existing syntax in `src/prompt/jinja_compat.rs`; no source workaround or
@@ -146,8 +154,5 @@ bound; the difference is not resolved by changing a comparison threshold.
 
 A 256x256, default 16-step CLI smoke produces a valid PNG depicting the requested
 red cube, table and shadows. This larger image has no numerical Oracle comparison.
-The complete Linux CLI numerical comparison remains pending: the requested host
-repeatedly times out during weight transfer, including a minimal SSH readiness
-command. The Linux VAE result above does not establish complete pipeline parity.
 No GPU, rectangular image, Base/FP8/NVFP4 or native BF16 activation parity claim
 is made. This is an experimental CPU adapter.

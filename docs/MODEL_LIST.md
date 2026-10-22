@@ -7,7 +7,7 @@ AuK Base/Flash 记录见 [2026-10-08 验证](develop/VULKAN_AUK_RADV_VALIDATION_
 
 | 模型 | 版本 | 任务类型 | 参考实现 | 原始权重 | 推理权重 | 备注 |
 |---|---|---|---|---|---|---|
-| FLUX 3 Image Klein | Distilled BF16 | CPU 文生图、参考图条件 | black-forest-labs/flux-3-image-klein @ `bfc8889a` | https://huggingface.co/black-forest-labs/flux-3-image-klein | `tools/converter/flux3`，`flux3` + `qwen3vl` + `flux3_vae` | CPU F32 链路已通过真实权重 Oracle：64×64 两步文生图与双参考图，权重/Tokenizer 精确检查、浮点数值容差；正方形输入，原生 BF16 激活比较未通过；[精度与复现](../tools/oracle/flux3/README.md)。 |
+| FLUX 3 Image Klein | Distilled BF16 | CPU 文生图、参考图条件 | black-forest-labs/flux-3-image-klein @ `bfc8889a` | https://huggingface.co/black-forest-labs/flux-3-image-klein | `tools/converter/flux3`，`flux3` + `qwen3vl` + `flux3_vae` | CPU F32（arm64/x86_64）链路已通过真实权重 Oracle：64×64 两步文生图与双参考图，权重/Tokenizer 精确检查、浮点数值容差；正方形输入，原生 BF16 激活比较未通过；[精度与复现](../tools/oracle/flux3/README.md)。 |
 | Mage-Flow-Base | Base | 文生图 | microsoft/Mage @ `76bec2bb` | https://www.modelscope.cn/models/microsoft/Mage-Flow-Base | `tools/converter/mage_flow`（无损 BF16） | 主 CLI `rust-model-inference` CPU 入口；真实 DiT 与共享组件按标量原始 F32 位对齐，PNG 仅最小尺寸验证。[范围与复现](../tools/oracle/mage_flow/README.md)。 |
 | Mage-Flow | Flow | 文生图 | microsoft/Mage @ `76bec2bb` | https://www.modelscope.cn/models/microsoft/Mage-Flow | `tools/converter/mage_flow`（无损 BF16） | 主 CLI `rust-model-inference` CPU 入口；真实 DiT 与共享组件按标量原始 F32 位对齐，PNG 仅最小尺寸验证。[范围与复现](../tools/oracle/mage_flow/README.md)。 |
 | Mage-Flow-Turbo | Turbo | 文生图 | microsoft/Mage @ `76bec2bb` | https://www.modelscope.cn/models/microsoft/Mage-Flow-Turbo | `tools/converter/mage_flow`（无损 BF16） | 主 CLI `rust-model-inference` CPU 入口；真实 DiT 与共享组件按标量原始 F32 位对齐，PNG 仅最小尺寸验证。[范围与复现](../tools/oracle/mage_flow/README.md)。 |
