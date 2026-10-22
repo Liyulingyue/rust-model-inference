@@ -456,6 +456,29 @@ fn decode_f32_slice(data: &[u8]) -> Vec<f32> {
     out
 }
 
+/// Borrow a bias tensor's bytes, rejecting storage that is not F32.
+///
+/// Every bias in this tower is decoded four bytes per element by
+/// [`decode_f32_slice`], so a BF16 bias is read at half length and the
+/// bias-add loop then runs past the end of the merged buffer. The other
+/// vision loaders already require F32 here (gemma4, qwen35, lfm2); this
+/// makes the qwen3 loader say so instead of failing later.
+fn f32_bias_slice<'a, S: TensorSource + ?Sized>(
+    source: &'a S,
+    name: &str,
+) -> Result<Option<&'a [u8]>, String> {
+    let Some(info) = source.tensor_info(name) else {
+        return Ok(None);
+    };
+    if info.ggml_type != crate::core::tensor::GGMLType::F32 {
+        return Err(format!(
+            "{name} must be F32, found {:?}: this tower decodes biases four bytes per element",
+            info.ggml_type
+        ));
+    }
+    Ok(source.tensor_slice(name))
+}
+
 fn dequant_q8_0_tensor(data: &[u8], n_cols: usize, n_rows: usize) -> Vec<f32> {
     let blocks_per_row = n_cols / 32;
     let mut out = vec![0.0f32; n_rows * n_cols];
@@ -520,35 +543,35 @@ impl<'a> VisionEncoder<'a> {
         let patch_embd_weight_1 = source.tensor_slice("v.patch_embd.weight.1");
         let position_embd = source.tensor_slice("v.position_embd.weight");
         let post_ln_weight = source.tensor_slice("v.post_ln.weight");
-        let post_ln_bias = source.tensor_slice("v.post_ln.bias");
-        let patch_bias = source.tensor_slice("v.patch_embd.bias");
+        let post_ln_bias = f32_bias_slice(source, "v.post_ln.bias")?;
+        let patch_bias = f32_bias_slice(source, "v.patch_embd.bias")?;
 
         let mut layers = Vec::with_capacity(config.n_layer);
         for i in 0..config.n_layer {
             let ln1_weight = source
                 .tensor_slice(&format!("v.blk.{}.ln1.weight", i))
                 .ok_or_else(|| format!("Missing v.blk.{}.ln1.weight", i))?;
-            let ln1_bias = source.tensor_slice(&format!("v.blk.{}.ln1.bias", i));
+            let ln1_bias = f32_bias_slice(source, &format!("v.blk.{}.ln1.bias", i))?;
             let ln2_weight = source
                 .tensor_slice(&format!("v.blk.{}.ln2.weight", i))
                 .ok_or_else(|| format!("Missing v.blk.{}.ln2.weight", i))?;
-            let ln2_bias = source.tensor_slice(&format!("v.blk.{}.ln2.bias", i));
+            let ln2_bias = f32_bias_slice(source, &format!("v.blk.{}.ln2.bias", i))?;
             let qkv_weight = source
                 .tensor_slice(&format!("v.blk.{}.attn_qkv.weight", i))
                 .ok_or_else(|| format!("Missing v.blk.{}.attn_qkv.weight", i))?;
-            let qkv_bias = source.tensor_slice(&format!("v.blk.{}.attn_qkv.bias", i));
+            let qkv_bias = f32_bias_slice(source, &format!("v.blk.{}.attn_qkv.bias", i))?;
             let out_weight = source
                 .tensor_slice(&format!("v.blk.{}.attn_out.weight", i))
                 .ok_or_else(|| format!("Missing v.blk.{}.attn_out.weight", i))?;
-            let out_bias = source.tensor_slice(&format!("v.blk.{}.attn_out.bias", i));
+            let out_bias = f32_bias_slice(source, &format!("v.blk.{}.attn_out.bias", i))?;
             let ffn_up_weight = source
                 .tensor_slice(&format!("v.blk.{}.ffn_up.weight", i))
                 .ok_or_else(|| format!("Missing v.blk.{}.ffn_up.weight", i))?;
-            let ffn_up_bias = source.tensor_slice(&format!("v.blk.{}.ffn_up.bias", i));
+            let ffn_up_bias = f32_bias_slice(source, &format!("v.blk.{}.ffn_up.bias", i))?;
             let ffn_down_weight = source
                 .tensor_slice(&format!("v.blk.{}.ffn_down.weight", i))
                 .ok_or_else(|| format!("Missing v.blk.{}.ffn_down.weight", i))?;
-            let ffn_down_bias = source.tensor_slice(&format!("v.blk.{}.ffn_down.bias", i));
+            let ffn_down_bias = f32_bias_slice(source, &format!("v.blk.{}.ffn_down.bias", i))?;
             let deepstack = if config.has_deepstack_layers.get(i).copied().unwrap_or(false) {
                 let tensor = |suffix: &str| {
                     let name = format!("v.deepstack.{i}.{suffix}");
@@ -556,13 +579,17 @@ impl<'a> VisionEncoder<'a> {
                         .tensor_slice(&name)
                         .ok_or_else(|| format!("Missing {name}"))
                 };
+                let bias = |suffix: &str| {
+                    let name = format!("v.deepstack.{i}.{suffix}");
+                    f32_bias_slice(source, &name)?.ok_or_else(|| format!("Missing {name}"))
+                };
                 Some(DeepstackWeights {
                     norm_weight: tensor("norm.weight")?,
-                    norm_bias: tensor("norm.bias")?,
+                    norm_bias: bias("norm.bias")?,
                     fc1_weight: tensor("fc1.weight")?,
-                    fc1_bias: tensor("fc1.bias")?,
+                    fc1_bias: bias("fc1.bias")?,
                     fc2_weight: tensor("fc2.weight")?,
-                    fc2_bias: tensor("fc2.bias")?,
+                    fc2_bias: bias("fc2.bias")?,
                 })
             } else {
                 None
@@ -588,11 +615,11 @@ impl<'a> VisionEncoder<'a> {
         let mm_0_weight = source
             .tensor_slice("mm.0.weight")
             .ok_or("Missing mm.0.weight")?;
-        let mm_0_bias = source.tensor_slice("mm.0.bias");
+        let mm_0_bias = f32_bias_slice(source, "mm.0.bias")?;
         let mm_2_weight = source
             .tensor_slice("mm.2.weight")
             .ok_or("Missing mm.2.weight")?;
-        let mm_2_bias = source.tensor_slice("mm.2.bias");
+        let mm_2_bias = f32_bias_slice(source, "mm.2.bias")?;
 
         Ok(Self {
             config,

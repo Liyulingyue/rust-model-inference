@@ -101,6 +101,16 @@ fn text_image_token_ids_match_physbrain_specials() {
 }
 
 #[test]
+fn text_declares_the_deepstack_layer_count() {
+    // The projector injects three deepstack embeddings, so the text tower has
+    // to declare the same count or the multimodal splice is refused with
+    // "Deepstack layer mismatch". llama.cpp writes the same key from
+    // len(deepstack_visual_indexes).
+    let Some(loader) = text_loader() else { return };
+    assert_eq!(pick(&loader, "qwen3vl.n_deepstack_layers"), 3);
+}
+
+#[test]
 fn text_tied_embedding_omits_output_weight() {
     // PhysBrain sets tie_word_embeddings=true in HF config; the engine
     // constructs `output` from `token_embd.weight` (see
@@ -270,6 +280,15 @@ fn mmproj_conv3d_split_into_two_conv2d_weights() {
     assert_eq!(w1.dims, vec![16, 16, 3, 1024]);
     let bias = shape(&loader, "v.patch_embd.bias").expect("v.patch_embd.bias");
     assert_eq!(bias.dims, vec![1024]);
+    // The vision loader decodes biases through `decode_f32_slice`, which
+    // assumes F32. A BF16 bias would be read at half length and the
+    // bias-add loop would run off the end of the merged buffer.
+    assert_eq!(
+        bias.ggml_type,
+        rust_model_inference::core::tensor::GGMLType::F32,
+        "v.patch_embd.bias must be F32, not {:?}",
+        bias.ggml_type
+    );
 }
 
 #[test]

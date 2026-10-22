@@ -309,6 +309,10 @@ def write_text_gguf(hf_dir: Path, out_path: Path) -> None:
     gguf.add_meta("qwen3vl.rope.dimension_count", TEXT_DIMENSION_COUNT)
     gguf.add_meta("qwen3vl.rope.dimension_sections", TEXT_ROPE_SECTIONS)
     gguf.add_meta("qwen3vl.vocab_size", TEXT_VOCAB_SIZE)
+    # The text tower has to know how many deepstack injections the projector
+    # produces, or the multimodal splice disagrees with the mmproj.
+    # llama.cpp writes the same key from len(deepstack_visual_indexes).
+    gguf.add_meta("qwen3vl.n_deepstack_layers", len(DEEPSTACK_VISUAL_INDEXES))
     # Image placeholder ids (engine reads these from metadata).
     gguf.add_meta("qwen3vl.image_token_id", IMAGE_TOKEN_ID)
     gguf.add_meta("qwen3vl.vision_start_token_id", VISION_START_TOKEN_ID)
@@ -446,7 +450,9 @@ def write_mmproj_gguf(hf_dir: Path, out_path: Path) -> None:
     _emit_bf16(gguf, "v.patch_embd.weight", frame0_raw, frame0_shape)
     _emit_bf16(gguf, "v.patch_embd.weight.1", frame1_raw, frame1_shape)
     patch_b = _require(st, "model.visual.patch_embed.proj.bias")
-    _emit_bf16(gguf, "v.patch_embd.bias", patch_b.raw, tuple(patch_b.shape))
+    # Biases stay F32: the vision loader decodes every bias through
+    # `decode_f32_slice`, so a BF16 tensor would be read at half length.
+    _emit_bf16_norm(gguf, "v.patch_embd.bias", patch_b.raw, tuple(patch_b.shape))
 
     pos = _require(st, "model.visual.pos_embed.weight")
     if tuple(pos.shape) != (VISION_NUM_POSITION_EMBEDDINGS, VISION_EMBEDDING_LENGTH):

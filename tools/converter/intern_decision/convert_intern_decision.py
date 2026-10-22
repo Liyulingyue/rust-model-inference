@@ -556,8 +556,10 @@ def write_mmproj_gguf(
     _emit_bf16(gguf, "v.patch_embd.weight", frame0.tobytes(), torch_shape)
     _emit_bf16(gguf, "v.patch_embd.weight.1", frame1.tobytes(), torch_shape)
     patch_b = _require(lang_st, "model.visual.patch_embed.proj.bias")
-    _emit_bf16(
-        gguf, "v.patch_embd.bias", patch_b.raw, tuple(patch_b.shape),
+    # Biases stay F32: the vision loader decodes every bias through
+    # `decode_f32_slice`, so a BF16 tensor would be read at half length.
+    _emit_f32_or_bf16_to_f32(
+        gguf, "v.patch_embd.bias", patch_b.raw, tuple(patch_b.shape), patch_b.dtype,
     )
     pos = _require(lang_st, "model.visual.pos_embed.weight")
     if tuple(pos.shape) != (p["vision_pos"], p["vision_embd"]):
