@@ -113,7 +113,7 @@ cargo test --profile release-fast --test timestral_cli
 .venv/bin/python -m unittest tools.converter.timestral.test_convert_timestral tools.oracle.timestral.test_parity
 ```
 
-CPU 验证使用 ARM64/F32；没有对 32768 点最大上下文做性能或预测精度 benchmark，不据合成数据对齐结果声称达到官方数据集指标。
+上述 CPU Oracle 验证使用 ARM64/F32。后续补测的 32768 点最大上下文性能及 CPU/GPU 最终输出比较见 [PERFORMANCE.md](PERFORMANCE.md)；没有运行官方数据集质量 benchmark，不据合成数据对齐结果声称达到官方数据集指标。
 
 实测摘要见 [verification.json](verification.json)：10 个用例、20 次真实权重 CLI 执行、6,788 个检查点。最终预测最差 NRMSE `7.50e-6`；最大绝对误差 `0.0962` 出现在长 horizon 的大幅值尾部分位数。近零用例的中间 NRMSE 可达 `7.01e-5`，对应绝对偏差仅 `8.1e-8`，满足上述混合误差界。权重和结构检查精确一致。
 
@@ -124,4 +124,32 @@ GPU 实测见 [gpu_verification.json](gpu_verification.json)：M3 Max / MoltenVK
 
 另有 4 次普通 GPU CLI（严格 Vulkan / `--gpu`、关闭 parity trace）与插桩 GPU 的预测精确一致；设备不可用时 CPU/Auto 输出精确一致，严格 Vulkan 返回错误。8 个模型单测、3 个 CLI 测试、3 个 Python 检查、CPU-only 库编译、Vulkan 构建和完整 shader 检查通过。GPU 扩展后未重复全量测试，原有失败见上文记录。
 
-仅实测 M3 Max/MoltenVK；其他 GPU、最大上下文性能和数据集预测指标未验证，不声明加速倍数。构建工具和依赖均保留在仓库 .venv / target，模型文件始终从上述主仓库 models 目录读取。
+上述 GPU Oracle 检查实测 M3 Max/MoltenVK；后续 NAVI31/RADV 的性能和最终输出验证见 [PERFORMANCE.md](PERFORMANCE.md)，其中 GPU 慢于 CPU。数据集预测指标仍未验证。构建工具和依赖均保留在仓库 .venv / target，模型文件始终从上述 models 目录读取。
+
+## 性能复现
+
+实测结论、线程扩展、最大上下文和验证边界见 [PERFORMANCE.md](PERFORMANCE.md)，完整采样见 [performance.json](performance.json)。
+
+```sh
+cargo build --release --features vulkan --bin rust-model-inference --example timestral_bench
+.venv/bin/python -m tools.oracle.timestral.benchmark \
+  --model "$MODEL_DIR/Timestral-209M-F32.gguf" \
+  --output-dir target/timestral-performance --wait-idle
+```
+
+默认比较 CPU/Vulkan、4 个 CPU 线程。每个输入启动独立进程：一次首次预测后，在同一个模型上计时 5 次重复预测；另外运行 3 次完整 CLI，计入进程启动、模型验证、预测、JSON 输出和退出。全部用例串行执行，保留系统文件缓存，不代表清空磁盘缓存后的启动。每次重复预测必须产生完全相同的本后端结果；CLI 必须与相同后端的常驻模型结果一致。CPU/GPU 之间沿用上文的数值误差界。
+
+默认七个用例包含 96/512/4096 点上下文、8 个联合变量、数值协变量、1025 步预测，以及关闭对称平均的对照；其余用例保留官方默认行为。可用 `--case` / `--mode` 选择用例/后端，`--threads` 测线程扩展，`--warm-repeats` / `--cli-repeats` 调整采样数。`--mode auto` 也必须实际使用 GPU，回退不计作 GPU 性能。
+
+32768 点最大上下文耗时较长，单独执行；下面每个后端只采一次常驻重复预测和一次完整 CLI，用于容量与延迟边界检查：
+
+```sh
+.venv/bin/python -m tools.oracle.timestral.benchmark \
+  --model "$MODEL_DIR/Timestral-209M-F32.gguf" \
+  --output-dir target/timestral-max-context --case max_context \
+  --warm-repeats 1 --cli-repeats 1 --timeout 900 --wait-idle
+```
+
+`report.json` 保存每次耗时、模型/二进制哈希、峰值 RSS、实际后端、GPU 累计提交/上传/分配计数及最终输出比较。`warm_median_ms` 是同一个模型的完整预测耗时（含 CPU 前后处理，GPU 完成并读回后才停表）；`first_forecast_ms` 额外包含惰性 GPU 初始化/首次权重上传。模型文件打开和全部 F32 张量的验证另计，JSON 序列化也另计。RSS 是进程峰值，GPU 分配另从设备计数读取。
+
+脚本在 macOS/Linux 通过 `wait4` 读取子进程峰值 RSS，完整 CLI 的计时覆盖子进程生命周期，排除 Python 测量进程的启动。`--wait-idle` 在每次测量前等待连续三秒无 Rust 编译/链接进程，并在测量期间每两秒采样一次；`observed_compilers` 非空的测量需剔除或重测，脚本不会自动重试。检测范围不代表整台主机完全空闲。比较器和后端检查可用 `.venv/bin/python -m unittest tools.oracle.timestral.test_benchmark` 自检。
