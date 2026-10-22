@@ -1,0 +1,147 @@
+{
+  "date": "2026-10-23",
+  "scope": "Sage-A1.5 Q8_0 scalar-reference Vulkan text decoder",
+  "model": {
+    "repository": "InternScience/Sage-A1.5-Q8_0-GGUF",
+    "file": "Sage-A1.5-Q8_0.gguf",
+    "bytes": 37802150112,
+    "sha256": "f7247f6faef3f6c616b953595e1fc7c3fbf257d02d9915af5fdf15e808ea8ee4"
+  },
+  "oracle": {
+    "repository": "ggml-org/llama.cpp",
+    "commit": "b96806d96061049a5b574269b049bf6241d63d46",
+    "backend": "CPU scalar",
+    "weight_repacking": false
+  },
+  "test_host": {
+    "os": "Linux",
+    "isa": "x86_64",
+    "libc": "Ubuntu GLIBC 2.39-0ubuntu8.7",
+    "gpu": "AMD Radeon Graphics (RADV NAVI31)",
+    "gfx": "gfx1100",
+    "vram_gib_approx": 48
+  },
+  "rust_configuration": {
+    "backend": "forced Vulkan",
+    "RMI_SCALAR": "1",
+    "kv": "F32",
+    "main_layers": 40,
+    "mtp_layers_executed": 0,
+    "profile": "release-fast",
+    "features": [
+      "vulkan",
+      "parity-trace"
+    ]
+  },
+  "acceptance": {
+    "exact": [
+      "token IDs",
+      "embedding bytes",
+      "selected expert IDs and order"
+    ],
+    "floating_point": {
+      "max_relative_l2": 0.01,
+      "min_cosine": 0.99995,
+      "max_logit_abs": 0.5
+    },
+    "lossy_checks_are_numerical": true
+  },
+  "text_parity": {
+    "raw": {
+      "checkpoints": 220,
+      "processed_tokens": 4,
+      "greedy": [
+        11,
+        353,
+        1044,
+        4313
+      ],
+      "exact_checkpoints": 16,
+      "max_relative_l2": 0,
+      "min_cosine": 1,
+      "max_abs": 0,
+      "max_logit_abs": 0.0
+    },
+    "chat": {
+      "checkpoints": 880,
+      "processed_tokens": 16,
+      "greedy": [
+        109266,
+        6115,
+        98691,
+        101009
+      ],
+      "exact_checkpoints": 64,
+      "max_relative_l2": 0,
+      "min_cosine": 1,
+      "max_abs": 0,
+      "max_logit_abs": 0.0
+    }
+  },
+  "batched_real_model": {
+    "passed": true,
+    "cpu_prefill_batch": 1,
+    "gpu_prefill_batch": 3,
+    "decode_predictions": 4,
+    "greedy": [
+      109266,
+      6115,
+      98691,
+      101009
+    ],
+    "max_relative_l2": 0,
+    "min_cosine": 1,
+    "max_logit_abs": 0
+  },
+  "device_regressions": {
+    "adapter_passed": 21,
+    "silu_passed": 2,
+    "failed": 0,
+    "ignored": 0,
+    "real_ssm_projection_matrices": 60,
+    "independent_real_moe_blocks": 40,
+    "moe_max_observed_abs_error": 0
+  },
+  "local_checks": {
+    "vulkan_focused": {
+      "passed": 46,
+      "failed": 0,
+      "ignored": 45
+    },
+    "comparator_unit_tests_passed": 4,
+    "rustfmt": "passed",
+    "shader_rebuild_manifest_spirv_validation": "passed",
+    "remote_source_and_shader_sha256_matches": 31
+  },
+  "limits": [
+    "optimized x86 graph alignment",
+    "other GPUs and hosts",
+    "GPU vision and numerical vision parity",
+    "long context",
+    "other expert formats",
+    "MTP",
+    "HTTP",
+    "whole-repository tests",
+    "clean clippy"
+  ],
+  "known_baseline_failures": [
+    "qwen35_config_rejects_invalid_tensor_dimensions",
+    "qwen35_trace_metadata_is_independent_of_prefill_batch_size"
+  ],
+  "cli": {
+    "forced_text": {
+      "passed": true,
+      "policy": "Vulkan",
+      "scalar_dispatch": false,
+      "decoder": "Vulkan"
+    },
+    "auto_red_image": {
+      "passed": true,
+      "policy": "Auto",
+      "scalar_dispatch": true,
+      "decoder": "Vulkan",
+      "projector": "CPU F16",
+      "red_identified": true
+    }
+  }
+}

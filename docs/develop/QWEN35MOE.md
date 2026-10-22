@@ -1,5 +1,10 @@
 # qwen35moe — MiniCPM-V 4.7 35B-A3B language tower
 
+Current Vulkan status: the resident executor now records Q8_0/F32 routed and
+shared experts. Sage-A1.5 hardware results, numerical bounds, reproduction and
+format limits are tracked in [the Sage validation record](../../tools/oracle/sage_a15/README.md).
+The investigation below describes the earlier CPU implementation.
+
 Extracted while adapting [OpenBMB/MiniCPM-V-4.7-35B-A3B-gguf]. Everything here
 is read off the pinned oracle (`69f201a2`, `src/models/qwen35moe.cpp`) and off
 the real GGUF, not guessed.

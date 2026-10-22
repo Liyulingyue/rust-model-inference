@@ -115,6 +115,9 @@ YuE2 的 BF16 舍入阈值和 NAR 累积误差必须单独验收。
 - 标准 Llama session 复用同一 dense recipe 和驻留 runtime；当前只有合成数值/状态验证，Auto 留在 CPU。
 - Qwen3.5 BF16 文本模型使用独立 executor，覆盖 dense attention、recurrent convolution/SSM、
   mRoPE、FFN 和 logits；BF16 matmul 权重与 F32 辅助张量均在 Vulkan 路径执行。
+- `qwen35moe` 复用混合 executor，新增 GPU softmax/top-k、专家 ID 寻址、Q8_0/F32 routed experts、
+  shared expert 与 residual reduction。其他专家格式明确拒绝；Sage-A1.5 的真权重与精度范围见
+  [`sage_a15/README.md`](../../tools/oracle/sage_a15/README.md)。
 - 权重、F32 activation 和 GPU KV cache 常驻设备；共享 Qwen3/Llama dense runtime 每个 chunk 录制一次主计算提交。
   Qwen3.5 保留原有按 dispatch 数分段 flush，规避长 command buffer 的驱动正确性问题，不能承诺每 chunk 只提交一次。
   初始化、扩容及独显 staging 的 transfer 提交单独计数。embedding lookup 和 greedy sampling 仍在 CPU；提交成功后，Qwen3 同步 F16

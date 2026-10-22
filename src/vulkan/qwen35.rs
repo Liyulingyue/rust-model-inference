@@ -1,12 +1,13 @@
 use super::ops::{
-    required_activation_contracts, ArenaRegion, GpuMatmulSpec, GpuWeightFormat, OperatorBindings,
-    Qwen3Ops, TokenCommands,
+    required_activation_contracts, ArenaRegion, ExpertSelection, GpuMatmulSpec, GpuWeightFormat,
+    OperatorBindings, Qwen3Ops, TokenCommands,
 };
 use super::qwen3::UploadedBuffers;
 use super::{GpuBuffer, VulkanContext, VulkanError};
 use crate::compute::state::TokenCommitState;
 use crate::core::scratchpad::KvCache;
 use crate::core::tensor::GGMLType;
+use crate::models::qwen35::trunk::{config::Qwen35Moe, weights::Qwen35MoeWeights};
 use crate::models::qwen35::{Qwen35Config, Qwen35Model};
 use crate::ops::kernel::Weight;
 
@@ -18,7 +19,7 @@ struct EligibilityFacts {
 }
 
 fn check_eligibility(facts: &EligibilityFacts) -> Result<(), String> {
-    if facts.architecture != "qwen35" {
+    if !matches!(facts.architecture.as_str(), "qwen35" | "qwen35moe") {
         return Err(format!("unsupported architecture {}", facts.architecture));
     }
     if facts.weight_formats.is_empty() {
@@ -189,6 +190,15 @@ struct Qwen35ArenaLayout {
     ffn_gate: ArenaRegion,
     ffn_up: ArenaRegion,
     down: ArenaRegion,
+    router_logits: ArenaRegion,
+    router_probs: ArenaRegion,
+    expert_ids: ArenaRegion,
+    expert_weights: ArenaRegion,
+    expert_weights_norm: ArenaRegion,
+    expert_gate: ArenaRegion,
+    expert_up: ArenaRegion,
+    expert_down: ArenaRegion,
+    shared_gate: ArenaRegion,
     logits: ArenaRegion,
     rope: ArenaRegion,
     q8: ArenaRegion,
@@ -220,7 +230,6 @@ impl Qwen35ArenaLayout {
         let value_heads = config.ssm_dt_rank;
         if [
             config.n_embd,
-            config.n_ff,
             config.n_head,
             config.n_head_kv,
             head_dim,
@@ -251,7 +260,18 @@ impl Qwen35ArenaLayout {
         let value_dim = config.value_dim();
         let conv_dim = config.conv_dim();
         let head_v_dim = config.head_v_dim();
-        let quant_len = config.n_embd.max(config.n_ff).max(dense_q).max(value_dim);
+        let (experts, used, expert_ff, shared_ff) = config
+            .moe
+            .as_ref()
+            .map(|m| (m.n_expert, m.n_expert_used, m.n_ff_exp, m.n_ff_shexp))
+            .unwrap_or((1, 1, 1, 0));
+        let ffn_width = config.n_ff.max(shared_ff).max(1);
+        let quant_len = config
+            .n_embd
+            .max(ffn_width)
+            .max(expert_ff)
+            .max(dense_q)
+            .max(value_dim);
         let kv_cache = qwen35_product("KV cache", &[layer_count, capacity, dense_kv])?;
         let kv_delta = qwen35_product("KV delta", &[layer_count, rows, dense_kv])?;
         let conv_state = qwen35_product(
@@ -277,9 +297,18 @@ impl Qwen35ArenaLayout {
         let alpha = row_region(value_heads)?;
         let attn = row_region(dense_q.max(value_dim))?;
         let projection = row_region(config.n_embd)?;
-        let ffn_gate = row_region(config.n_ff)?;
-        let ffn_up = row_region(config.n_ff)?;
+        let ffn_gate = row_region(ffn_width)?;
+        let ffn_up = row_region(ffn_width)?;
         let down = row_region(config.n_embd)?;
+        let router_logits = row_region(experts)?;
+        let router_probs = row_region(experts)?;
+        let expert_ids = row_region(used)?;
+        let expert_weights = row_region(used)?;
+        let expert_weights_norm = row_region(used)?;
+        let expert_gate = row_region(qwen35_product("expert gate", &[used, expert_ff])?)?;
+        let expert_up = row_region(qwen35_product("expert up", &[used, expert_ff])?)?;
+        let expert_down = row_region(qwen35_product("expert down", &[used, config.n_embd])?)?;
+        let shared_gate = row_region(1)?;
         let rope = row_region(config.rope_dimension_count)?;
         let logits = qwen35_f32_region(&mut cursor, config.vocab_size)?;
         let quant_rows = qwen35_product("quantized rows", &[rows, quant_len.div_ceil(4) * 4])?;
@@ -319,6 +348,15 @@ impl Qwen35ArenaLayout {
             ffn_gate,
             ffn_up,
             down,
+            router_logits,
+            router_probs,
+            expert_ids,
+            expert_weights,
+            expert_weights_norm,
+            expert_gate,
+            expert_up,
+            expert_down,
+            shared_gate,
             logits,
             rope,
             q8,
@@ -453,13 +491,35 @@ enum AttentionBindings {
 }
 
 #[derive(Clone, Copy)]
+struct SharedExpertBindings {
+    gate: OperatorBindings,
+    gate_up: WeightBindings<2>,
+    down: OperatorBindings,
+}
+
+#[derive(Clone, Copy)]
+struct MoeBindings {
+    router: OperatorBindings,
+    gate_up: OperatorBindings,
+    down: OperatorBindings,
+    shared: Option<SharedExpertBindings>,
+}
+
+#[derive(Clone, Copy)]
+enum FfnBindings {
+    Dense {
+        gate_up: WeightBindings<2>,
+        down: OperatorBindings,
+    },
+    Moe(MoeBindings),
+}
+
+#[derive(Clone, Copy)]
 struct LayerBindings {
     attention_norm: OperatorBindings,
     attention: AttentionBindings,
     post_attention_norm: OperatorBindings,
-    // Eligibility rejects MoE and incomplete FFNs before binding any weights.
-    gate_up: Option<WeightBindings<2>>,
-    down: Option<OperatorBindings>,
+    ffn: FfnBindings,
 }
 
 pub(crate) struct Qwen35GpuChunkResult<'a> {
@@ -540,7 +600,7 @@ impl Qwen35VulkanSession {
         let layer_count = config.n_layer_impl();
         let layout = Qwen35ArenaLayout::new_rows(&config, capacity, max_rows)?;
         let descriptor_capacity = layer_count
-            .checked_mul(12)
+            .checked_mul(18)
             .and_then(|count| count.checked_add(3))
             .ok_or(VulkanError::OutOfMemory)?;
         let mut ops = Qwen3Ops::new_with_size(context, layout.total_size(), descriptor_capacity)?;
@@ -640,30 +700,89 @@ impl Qwen35VulkanSession {
 
             let post_norm_buffer = buffers.upload_f32(&layer.attn_post_norm)?;
             let post_attention_norm = ops.bind_buffers(&[post_norm_buffer])?;
-            let (gate_up, down) = match (layer.ffn_gate.as_ref(), layer.ffn_up.as_ref()) {
-                (Some(gate), Some(up)) => {
-                    let gate_up = bind_weight_group(
+            let ffn = if let Some(cfg) = &config.moe {
+                let moe = layer
+                    .moe
+                    .as_ref()
+                    .ok_or_else(|| VulkanError::UnsupportedShape("missing MoE weights".into()))?;
+                validate_moe(moe, cfg, config.n_embd).map_err(VulkanError::UnsupportedShape)?;
+                let format = GpuWeightFormat::from_ggml_type(moe.ggml_type)?;
+                let gate_up_buffers =
+                    [buffers.upload(moe.gate_exps)?, buffers.upload(moe.up_exps)?];
+                let gate_up = ops.bind_weight_buffers(&gate_up_buffers, &[format; 2])?;
+                let down_buffer = buffers.upload(moe.down_exps)?;
+                let down = ops.bind_weight_buffers(&[down_buffer], &[format])?;
+                let router = bind_weight(&mut ops, &mut buffers, &moe.gate_inp, "MoE router")?;
+                let shared = if cfg.n_ff_shexp > 0 {
+                    let gate_weight =
+                        Weight::from_quantized(crate::ops::kernel::QuantizedTensor::F32 {
+                            data: moe.gate_inp_shexp.as_ref().unwrap().clone(),
+                            n_in: config.n_embd,
+                            n_out: 1,
+                        });
+                    Some(SharedExpertBindings {
+                        gate: bind_weight(
+                            &mut ops,
+                            &mut buffers,
+                            &gate_weight,
+                            "shared expert gate",
+                        )?,
+                        gate_up: bind_weight_group(
+                            &mut ops,
+                            &mut buffers,
+                            [
+                                (
+                                    moe.gate_shexp.as_ref().unwrap(),
+                                    "shared expert gate projection",
+                                ),
+                                (moe.up_shexp.as_ref().unwrap(), "shared expert up"),
+                            ],
+                        )?,
+                        down: bind_weight(
+                            &mut ops,
+                            &mut buffers,
+                            moe.down_shexp.as_ref().unwrap(),
+                            "shared expert down",
+                        )?,
+                    })
+                } else {
+                    None
+                };
+                FfnBindings::Moe(MoeBindings {
+                    router,
+                    gate_up,
+                    down,
+                    shared,
+                })
+            } else {
+                FfnBindings::Dense {
+                    gate_up: bind_weight_group(
                         &mut ops,
                         &mut buffers,
-                        [(gate, "Qwen3.5 FFN gate"), (up, "Qwen3.5 FFN up")],
-                    )?;
-                    let down_weight = layer.ffn_down.as_ref().ok_or_else(|| {
-                        VulkanError::UnsupportedShape(format!(
-                            "missing Qwen3.5 layer {layer_index} FFN down while gate/up are present"
-                        ))
-                    })?;
-                    let down =
-                        bind_weight(&mut ops, &mut buffers, down_weight, "Qwen3.5 FFN down")?;
-                    (Some(gate_up), Some(down))
+                        [
+                            (
+                                required_weight(layer.ffn_gate.as_ref(), layer_index, "FFN gate")?,
+                                "Qwen3.5 FFN gate",
+                            ),
+                            (
+                                required_weight(layer.ffn_up.as_ref(), layer_index, "FFN up")?,
+                                "Qwen3.5 FFN up",
+                            ),
+                        ],
+                    )?,
+                    down: bind_weight(
+                        &mut ops,
+                        &mut buffers,
+                        required_weight(layer.ffn_down.as_ref(), layer_index, "FFN down")?,
+                        "Qwen3.5 FFN down",
+                    )?,
                 }
-                _ => (None, None),
             };
             layers.push(LayerBindings {
                 attention_norm,
                 attention,
                 post_attention_norm,
-                gate_up,
-                down,
+                ffn,
             });
         }
 
@@ -815,6 +934,181 @@ impl Qwen35VulkanSession {
                 Ok(())
             }
         }
+    }
+
+    fn record_moe(
+        &self,
+        commands: &TokenCommands<'_>,
+        bindings: MoeBindings,
+        rows: usize,
+    ) -> Result<(), VulkanError> {
+        let cfg = self.config.moe.as_ref().expect("validated MoE config");
+        let l = self.layout;
+        let width = self.config.n_embd;
+        self.record_weights(
+            commands,
+            bindings.router,
+            l.normed,
+            &[(l.router_logits, cfg.n_expert)],
+            width,
+            rows,
+        )?;
+        self.ops.record_qwen35_moe_route(
+            commands,
+            l.router_logits,
+            l.router_probs,
+            l.expert_ids,
+            l.expert_weights,
+            l.expert_weights_norm,
+            cfg.n_expert,
+            cfg.n_expert_used,
+            cfg.weights_scale,
+            rows,
+        )?;
+        for slot in 0..cfg.n_expert_used {
+            let outputs = [
+                (
+                    l.expert_gate.shifted(slot * cfg.n_ff_exp * 4),
+                    cfg.n_ff_exp,
+                    cfg.n_expert_used * cfg.n_ff_exp * 4,
+                ),
+                (
+                    l.expert_up.shifted(slot * cfg.n_ff_exp * 4),
+                    cfg.n_ff_exp,
+                    cfg.n_expert_used * cfg.n_ff_exp * 4,
+                ),
+            ];
+            self.ops.record_selected_weight_matmul_rows(
+                commands,
+                bindings.gate_up,
+                l.normed,
+                l.q8,
+                l.q8_scales,
+                l.q4_1_input_sums,
+                l.q8k,
+                l.q8k_scales,
+                &outputs,
+                width,
+                rows,
+                width,
+                Some(ExpertSelection {
+                    ids: l.expert_ids,
+                    count: cfg.n_expert,
+                    used: cfg.n_expert_used,
+                    slot,
+                }),
+            )?;
+        }
+        self.ops.record_silu_mul_rows_into(
+            commands,
+            l.expert_gate,
+            l.expert_up,
+            l.expert_gate,
+            cfg.n_ff_exp,
+            rows * cfg.n_expert_used,
+            false,
+        )?;
+        for slot in 0..cfg.n_expert_used {
+            self.ops.record_selected_weight_matmul_rows(
+                commands,
+                bindings.down,
+                l.expert_gate.shifted(slot * cfg.n_ff_exp * 4),
+                l.q8,
+                l.q8_scales,
+                l.q4_1_input_sums,
+                l.q8k,
+                l.q8k_scales,
+                &[(
+                    l.expert_down.shifted(slot * width * 4),
+                    width,
+                    cfg.n_expert_used * width * 4,
+                )],
+                cfg.n_ff_exp,
+                rows,
+                cfg.n_expert_used * cfg.n_ff_exp,
+                Some(ExpertSelection {
+                    ids: l.expert_ids,
+                    count: cfg.n_expert,
+                    used: cfg.n_expert_used,
+                    slot,
+                }),
+            )?;
+        }
+        if let Some(shared) = bindings.shared {
+            self.record_weights(
+                commands,
+                shared.gate,
+                l.normed,
+                &[(l.shared_gate, 1)],
+                width,
+                rows,
+            )?;
+            self.record_weight_group(
+                commands,
+                shared.gate_up,
+                l.normed,
+                [(l.ffn_gate, cfg.n_ff_shexp), (l.ffn_up, cfg.n_ff_shexp)],
+                width,
+                rows,
+            )?;
+            self.ops.record_silu_mul_rows_into(
+                commands,
+                l.ffn_gate,
+                l.ffn_up,
+                l.ffn_gate,
+                cfg.n_ff_shexp,
+                rows,
+                false,
+            )?;
+            self.record_weights(
+                commands,
+                shared.down,
+                l.ffn_gate,
+                &[(l.down, width)],
+                cfg.n_ff_shexp,
+                rows,
+            )?;
+        }
+        self.ops.record_qwen35_moe_reduce(
+            commands,
+            l.x,
+            l.expert_down,
+            l.expert_weights,
+            l.down,
+            l.shared_gate,
+            width,
+            cfg.n_expert_used,
+            rows,
+            bindings.shared.is_some(),
+        )
+    }
+
+    #[cfg(feature = "parity-trace")]
+    fn trace_region(
+        &self,
+        name: &str,
+        layer: Option<usize>,
+        step: usize,
+        region: ArenaRegion,
+        count: usize,
+        ids: bool,
+    ) -> Result<(), VulkanError> {
+        if crate::parity_trace::enabled(name) {
+            let values = self.ops.read_f32(region, count)?;
+            let widened;
+            let values = if ids {
+                widened = values
+                    .iter()
+                    .map(|v| v.to_bits() as f32)
+                    .collect::<Vec<_>>();
+                &widened
+            } else {
+                values
+            };
+            crate::parity_trace::checkpoint_at(name, layer, Some(step), &[count], values)
+                .map_err(|e| VulkanError::UnsupportedShape(e.to_string()))?;
+        }
+        Ok(())
     }
 
     fn forward_chunk_inner(
@@ -1041,6 +1335,24 @@ impl Qwen35VulkanSession {
                         config.norm_eps,
                         scan_rows,
                     )?;
+                    #[cfg(feature = "parity-trace")]
+                    if rows == 1 && std::env::var_os("RMI_PARITY_TRACE").is_some() {
+                        commands = commands.flush()?;
+                        for (name, region, count) in [
+                            ("q_conv_predelta", self.layout.q, key_dim),
+                            ("k_conv_predelta", self.layout.k, key_dim),
+                            ("final_output", self.layout.attn, value_dim),
+                        ] {
+                            self.trace_region(
+                                &format!("{name}-{layer_index}"),
+                                Some(layer_index),
+                                cache_position,
+                                region,
+                                count,
+                                false,
+                            )?;
+                        }
+                    }
                     #[cfg(test)]
                     if let Some(row) = failure {
                         commands.submit_and_wait()?;
@@ -1076,40 +1388,114 @@ impl Qwen35VulkanSession {
                 config.n_embd,
                 config.n_embd,
             )?;
-            if let (Some(gate_up), Some(down)) = (bindings.gate_up, bindings.down) {
-                self.record_weight_group(
-                    &commands,
-                    gate_up,
-                    self.layout.normed,
-                    [
-                        (self.layout.ffn_gate, config.n_ff),
-                        (self.layout.ffn_up, config.n_ff),
-                    ],
-                    config.n_embd,
-                    rows,
-                )?;
-                self.ops.record_silu_mul_rows(
-                    &commands,
-                    self.layout.ffn_gate,
-                    self.layout.ffn_up,
-                    config.n_ff,
-                    rows,
-                )?;
-                self.record_weights(
-                    &commands,
-                    down,
-                    self.layout.ffn_gate,
-                    &[(self.layout.down, config.n_embd)],
-                    config.n_ff,
-                    rows,
-                )?;
-                self.ops.record_add_rows(
-                    &commands,
+            #[cfg(feature = "parity-trace")]
+            if rows == 1 && std::env::var_os("RMI_PARITY_TRACE").is_some() {
+                commands = commands.flush()?;
+                for (name, region) in [
+                    ("attn_residual", self.layout.x),
+                    ("attn_post_norm", self.layout.normed),
+                ] {
+                    self.trace_region(
+                        &format!("{name}-{layer_index}"),
+                        Some(layer_index),
+                        cache_position,
+                        region,
+                        config.n_embd,
+                        false,
+                    )?;
+                }
+            }
+            match bindings.ffn {
+                FfnBindings::Moe(moe) => self.record_moe(&commands, moe, rows)?,
+                FfnBindings::Dense { gate_up, down } => {
+                    self.record_weight_group(
+                        &commands,
+                        gate_up,
+                        self.layout.normed,
+                        [
+                            (self.layout.ffn_gate, config.n_ff),
+                            (self.layout.ffn_up, config.n_ff),
+                        ],
+                        config.n_embd,
+                        rows,
+                    )?;
+                    self.ops.record_silu_mul_rows(
+                        &commands,
+                        self.layout.ffn_gate,
+                        self.layout.ffn_up,
+                        config.n_ff,
+                        rows,
+                    )?;
+                    self.record_weights(
+                        &commands,
+                        down,
+                        self.layout.ffn_gate,
+                        &[(self.layout.down, config.n_embd)],
+                        config.n_ff,
+                        rows,
+                    )?;
+                    self.ops.record_add_rows(
+                        &commands,
+                        self.layout.x,
+                        self.layout.down,
+                        config.n_embd,
+                        rows,
+                    )?;
+                }
+            }
+            #[cfg(feature = "parity-trace")]
+            if std::env::var_os("RMI_PARITY_TRACE").is_some() {
+                if rows != 1 {
+                    return Err(VulkanError::UnsupportedShape(
+                        "Vulkan parity tracing requires single-token chunks".into(),
+                    ));
+                }
+                commands = commands.flush()?;
+                self.trace_region(
+                    &format!("l_out-{layer_index}"),
+                    Some(layer_index),
+                    cache_position,
                     self.layout.x,
-                    self.layout.down,
                     config.n_embd,
-                    rows,
+                    false,
                 )?;
+                if let Some(moe) = &config.moe {
+                    for (name, region, count, ids) in [
+                        (
+                            "ffn_moe_logits",
+                            self.layout.router_logits,
+                            moe.n_expert,
+                            false,
+                        ),
+                        (
+                            "ffn_moe_probs",
+                            self.layout.router_probs,
+                            moe.n_expert,
+                            false,
+                        ),
+                        (
+                            "ffn_moe_topk",
+                            self.layout.expert_ids,
+                            moe.n_expert_used,
+                            true,
+                        ),
+                        (
+                            "ffn_moe_weights_norm",
+                            self.layout.expert_weights_norm,
+                            moe.n_expert_used,
+                            false,
+                        ),
+                    ] {
+                        self.trace_region(
+                            name,
+                            Some(layer_index),
+                            cache_position,
+                            region,
+                            count,
+                            ids,
+                        )?;
+                    }
+                }
             }
         }
 
@@ -1127,6 +1513,15 @@ impl Qwen35VulkanSession {
             config.norm_eps,
         )?;
         commands.submit_and_wait()?;
+        #[cfg(feature = "parity-trace")]
+        self.trace_region(
+            "result_norm",
+            None,
+            cache_position,
+            self.layout.normed,
+            config.n_embd,
+            false,
+        )?;
         let commands = TokenCommands::begin(self.context)?;
         self.record_weights(
             &commands,
@@ -1138,6 +1533,15 @@ impl Qwen35VulkanSession {
         )?;
         commands.submit_and_wait()?;
 
+        #[cfg(feature = "parity-trace")]
+        self.trace_region(
+            "result_output",
+            None,
+            cache_position,
+            self.layout.logits,
+            config.vocab_size,
+            false,
+        )?;
         self.logits
             .copy_from_slice(self.ops.read_f32(self.layout.logits, config.vocab_size)?);
         let delta_count = qwen35_product("KV delta", &[layer_count, rows, dense_kv])?;
@@ -1297,9 +1701,63 @@ fn bind_weight_group<const N: usize>(
     Ok(WeightBindings::Split(split))
 }
 
+fn validate_moe(moe: &Qwen35MoeWeights<'_>, cfg: &Qwen35Moe, width: usize) -> Result<(), String> {
+    if cfg.n_expert == 0
+        || cfg.n_expert_used == 0
+        || cfg.n_expert_used > cfg.n_expert
+        || cfg.n_ff_exp == 0
+        || !cfg.weights_scale.is_finite()
+        || (moe.n_expert, moe.n_ff_exp, moe.n_embd) != (cfg.n_expert, cfg.n_ff_exp, width)
+        || (moe.gate_inp.n_in, moe.gate_inp.n_out) != (width, cfg.n_expert)
+        || !matches!(moe.ggml_type, GGMLType::Q8_0 | GGMLType::F32)
+    {
+        return Err("invalid or unsupported MoE dimensions/format".into());
+    }
+    let (block, bytes) = if moe.ggml_type == GGMLType::Q8_0 {
+        (32, 34)
+    } else {
+        (1, 4)
+    };
+    for (data, stride, n_in, n_out) in [
+        (moe.gate_exps, moe.stride_gate, width, cfg.n_ff_exp),
+        (moe.up_exps, moe.stride_up, width, cfg.n_ff_exp),
+        (moe.down_exps, moe.stride_down, cfg.n_ff_exp, width),
+    ] {
+        let expected = (n_in / block)
+            .checked_mul(bytes)
+            .and_then(|v| v.checked_mul(n_out));
+        if n_in % block != 0
+            || expected != Some(stride)
+            || stride.checked_mul(cfg.n_expert) != Some(data.len())
+        {
+            return Err("invalid MoE expert payload/stride".into());
+        }
+    }
+    if cfg.n_ff_shexp > 0 {
+        if moe
+            .gate_inp_shexp
+            .as_ref()
+            .is_none_or(|v| v.len() != width || v.iter().any(|x| !x.is_finite()))
+        {
+            return Err("missing or invalid shared expert gate".into());
+        }
+        for (weight, n_in, n_out) in [
+            (moe.gate_shexp.as_ref(), width, cfg.n_ff_shexp),
+            (moe.up_shexp.as_ref(), width, cfg.n_ff_shexp),
+            (moe.down_shexp.as_ref(), cfg.n_ff_shexp, width),
+        ] {
+            if weight.is_none_or(|w| (w.n_in, w.n_out) != (n_in, n_out)) {
+                return Err("missing or invalid shared expert projection".into());
+            }
+        }
+    } else if moe.up_shexp.is_some() || moe.gate_shexp.is_some() || moe.down_shexp.is_some() {
+        return Err("unexpected shared expert projections".into());
+    }
+    Ok(())
+}
+
 fn eligibility_facts(model: &Qwen35Model<'_>) -> EligibilityFacts {
     let mut facts = EligibilityFacts {
-        // shortcut: MoE has no recorder; reject it until routed/shared experts are recorded.
         architecture: if model.config.moe.is_some() {
             "qwen35moe"
         } else {
@@ -1315,20 +1773,43 @@ fn eligibility_facts(model: &Qwen35Model<'_>) -> EligibilityFacts {
         return facts;
     }
     for (layer_index, layer) in model.layers.iter().enumerate() {
-        let ffn_weights = [
-            layer.ffn_gate.as_ref(),
-            layer.ffn_up.as_ref(),
-            layer.ffn_down.as_ref(),
-        ];
-        if ffn_weights.iter().any(|weight| weight.is_none()) {
-            facts.unrecorded_operations.push("dense_ffn");
+        if let Some(cfg) = &model.config.moe {
+            if let Some(moe) = &layer.moe {
+                if validate_moe(moe, cfg, model.config.n_embd).is_err() {
+                    facts.unrecorded_operations.push("moe_weights");
+                }
+                facts
+                    .weight_formats
+                    .extend([moe.ggml_type, moe.gate_inp.ggml_type]);
+                facts.weight_formats.extend(
+                    [
+                        moe.gate_shexp.as_ref(),
+                        moe.up_shexp.as_ref(),
+                        moe.down_shexp.as_ref(),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .map(|w| w.ggml_type),
+                );
+            } else {
+                facts.unrecorded_operations.push("moe_weights");
+            }
+        } else {
+            let ffn_weights = [
+                layer.ffn_gate.as_ref(),
+                layer.ffn_up.as_ref(),
+                layer.ffn_down.as_ref(),
+            ];
+            if ffn_weights.iter().any(|weight| weight.is_none()) || model.config.n_ff == 0 {
+                facts.unrecorded_operations.push("dense_ffn");
+            }
+            facts.weight_formats.extend(
+                ffn_weights
+                    .into_iter()
+                    .flatten()
+                    .map(|weight| weight.ggml_type),
+            );
         }
-        facts.weight_formats.extend(
-            ffn_weights
-                .into_iter()
-                .flatten()
-                .map(|weight| weight.ggml_type),
-        );
         if model.config.is_recurrent[layer_index] {
             let weights = [
                 layer.wqkv.as_ref(),
@@ -1501,7 +1982,7 @@ mod tests {
     }
 
     #[test]
-    fn eligibility_rejects_moe_in_the_shared_trunk() {
+    fn eligibility_rejects_missing_moe_weights() {
         let mut model = crate::models::qwen35::trunk::tests::tiny_dense_session_model();
         assert_eq!(check_eligibility(&super::eligibility_facts(&model)), Ok(()));
         model.config.moe = Some(crate::models::qwen35::trunk::config::Qwen35Moe {
@@ -1517,7 +1998,274 @@ mod tests {
         layer.ffn_down = None;
         assert!(check_eligibility(&super::eligibility_facts(&model))
             .expect_err("MoE must not execute a graph that skips its experts")
-            .contains("qwen35moe"));
+            .contains("moe"));
+    }
+
+    fn tiny_moe_model() -> super::Qwen35Model<'static> {
+        use crate::models::qwen35::trunk::{config::Qwen35Moe, weights::Qwen35MoeWeights};
+        use crate::ops::kernel::QuantizedTensor;
+        let mut model = crate::models::qwen35::trunk::tests::tiny_dense_session_model();
+        let cfg = Qwen35Moe {
+            n_expert: 4,
+            n_expert_used: 2,
+            n_ff_exp: 3,
+            n_ff_shexp: 5,
+            weights_scale: 1.25,
+        };
+        let weight = |n_in, n_out, seed| {
+            Weight::from_quantized(QuantizedTensor::F32 {
+                data: (0..n_in * n_out)
+                    .map(|i| ((i * 7 + seed) % 19) as f32 / 37.0 - 0.2)
+                    .collect(),
+                n_in,
+                n_out,
+            })
+        };
+        let bytes = |seed| -> &'static [u8] {
+            Box::leak(
+                (0..4 * 4 * 3)
+                    .flat_map(|i| (((i * 7 + seed) % 23) as f32 / 31.0 - 0.3).to_le_bytes())
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            )
+        };
+        let layer = &mut model.layers[0];
+        layer.ffn_gate = None;
+        layer.ffn_up = None;
+        layer.ffn_down = None;
+        layer.moe = Some(Qwen35MoeWeights {
+            gate_inp: weight(4, 4, 2),
+            gate_exps: bytes(1),
+            up_exps: bytes(5),
+            down_exps: bytes(11),
+            ggml_type: GGMLType::F32,
+            n_expert: 4,
+            n_ff_exp: 3,
+            n_embd: 4,
+            stride_gate: 48,
+            stride_up: 48,
+            stride_down: 48,
+            gate_inp_shexp: Some(vec![0.3, -0.5, 0.7, -0.9]),
+            gate_shexp: Some(weight(4, 5, 4)),
+            up_shexp: Some(weight(4, 5, 8)),
+            down_shexp: Some(weight(5, 4, 12)),
+        });
+        model.output_weight = weight(4, 8, 3);
+        model.config.moe = Some(cfg);
+        model.config.n_ff = 5;
+        model
+    }
+
+    #[test]
+    fn eligibility_accepts_complete_moe_and_rejects_partial_shared_expert() {
+        let mut model = tiny_moe_model();
+        assert_eq!(check_eligibility(&super::eligibility_facts(&model)), Ok(()));
+        model.layers[0].moe.as_mut().unwrap().down_shexp = None;
+        assert!(check_eligibility(&super::eligibility_facts(&model)).is_err());
+    }
+
+    #[test]
+    fn eligibility_rejects_malformed_experts() {
+        for invalid in 0..5 {
+            let mut model = tiny_moe_model();
+            let cfg = model.config.moe.as_mut().unwrap();
+            let weights = model.layers[0].moe.as_mut().unwrap();
+            match invalid {
+                0 => cfg.n_expert_used = cfg.n_expert + 1,
+                1 => weights.stride_gate -= 1,
+                2 => weights.down_exps = &weights.down_exps[1..],
+                3 => weights.ggml_type = GGMLType::F16,
+                _ => cfg.weights_scale = f32::INFINITY,
+            }
+            assert!(check_eligibility(&super::eligibility_facts(&model)).is_err());
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a physical Vulkan device"]
+    fn moe_router_wide_sum_runs_on_vulkan() {
+        let context = Box::leak(Box::new(super::VulkanContext::new().unwrap()));
+        assert!(!context.is_software_icd());
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tools/oracle/sage_a15/router_fixture.json"
+        ))
+        .unwrap();
+        let values = |name: &str| {
+            fixture[name]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| f32::from_bits(v.as_u64().unwrap() as u32))
+                .collect::<Vec<_>>()
+        };
+        let logits = values("ffn_moe_logits");
+        let region = |slot: usize| super::ArenaRegion {
+            offset: slot * 1024,
+            size: 1024,
+        };
+        let ops = super::Qwen3Ops::new_with_size(context, 5 * 1024, 1).unwrap();
+        ops.write_f32(region(0), &logits).unwrap();
+        let commands = super::TokenCommands::begin(context).unwrap();
+        ops.record_qwen35_moe_route(
+            &commands,
+            region(0),
+            region(1),
+            region(2),
+            region(3),
+            region(4),
+            256,
+            8,
+            1.0,
+            1,
+        )
+        .unwrap();
+        commands.submit_and_wait().unwrap();
+        let expected_ids = values("ffn_moe_topk");
+        let ids = ops.read_f32(region(2), 8).unwrap();
+        assert_eq!(
+            ids.iter().map(|v| v.to_bits() as f32).collect::<Vec<_>>(),
+            expected_ids
+        );
+        for (&actual, expected) in ops
+            .read_f32(region(4), 8)
+            .unwrap()
+            .iter()
+            .zip(values("ffn_moe_weights_norm"))
+        {
+            assert!(
+                (actual - expected).abs() <= 1e-9 + 1e-8 * expected.abs(),
+                "router weight {actual} != {expected}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a physical Vulkan device"]
+    fn moe_routing_and_experts_run_on_vulkan() {
+        let context = Box::leak(Box::new(super::VulkanContext::new().unwrap()));
+        assert!(!context.is_software_icd());
+        let model = tiny_moe_model();
+        let gpu = super::Qwen35VulkanSession::try_new_rows(&model, 8, 3, context)
+            .unwrap()
+            .unwrap();
+        let super::FfnBindings::Moe(bindings) = gpu.layers[0].ffn else {
+            panic!("missing MoE recorder")
+        };
+        let input = [
+            1.0, -2.0, 0.5, 3.0, -1.5, 0.2, 2.1, -0.7, 0.0, 0.0, 0.0, 0.0,
+        ];
+        gpu.ops.write_f32(gpu.layout.normed, &input).unwrap();
+        let commands = super::TokenCommands::begin(context).unwrap();
+        gpu.record_moe(&commands, bindings, 3).unwrap();
+        commands.submit_and_wait().unwrap();
+        let actual = gpu.ops.read_f32(gpu.layout.x, 12).unwrap().to_vec();
+        let moe = model.layers[0].moe.as_ref().unwrap();
+        let cfg = model.config.moe.as_ref().unwrap();
+        for (row, input) in input.chunks_exact(4).enumerate() {
+            let mut expected = [0.0; 4];
+            {
+                let _cpu = crate::compute::ComputePolicy::Cpu.cpu_scope();
+                crate::models::qwen35::trunk::moe::forward_qwen35moe_token(
+                    moe,
+                    cfg,
+                    cfg.weights_scale,
+                    input,
+                    &mut expected,
+                    &mut crate::ops::kernel::PreparedRows::new(1, 5),
+                    &crate::ComputePool::new(1),
+                    0,
+                    row,
+                )
+                .unwrap();
+            }
+            for (&a, b) in actual[row * 4..row * 4 + 4].iter().zip(expected) {
+                assert!(
+                    a.is_finite() && (a - b).abs() <= 1e-5 + b.abs() * 1e-4,
+                    "row={row}: {a} != {b}"
+                );
+            }
+        }
+        let ids = gpu.ops.read_f32(gpu.layout.expert_ids, 6).unwrap();
+        assert_eq!(
+            ids[4].to_bits(),
+            0,
+            "router ties choose ascending expert IDs"
+        );
+        assert_eq!(ids[5].to_bits(), 1);
+        // All-equal logits: normalized weights include the configured scaling.
+        assert!((gpu.ops.read_f32(gpu.layout.expert_weights, 6).unwrap()[4] - 0.625).abs() < 1e-7);
+        // Non-finite routers propagate failure without forming an invalid expert address.
+        gpu.ops
+            .write_f32(gpu.layout.router_logits, &[f32::NAN, 1.0, 2.0, 3.0])
+            .unwrap();
+        let commands = super::TokenCommands::begin(context).unwrap();
+        gpu.ops
+            .record_qwen35_moe_route(
+                &commands,
+                gpu.layout.router_logits,
+                gpu.layout.router_probs,
+                gpu.layout.expert_ids,
+                gpu.layout.expert_weights,
+                gpu.layout.expert_weights_norm,
+                4,
+                2,
+                1.0,
+                1,
+            )
+            .unwrap();
+        commands.submit_and_wait().unwrap();
+        assert!(gpu
+            .ops
+            .read_f32(gpu.layout.expert_weights, 2)
+            .unwrap()
+            .iter()
+            .all(|v| v.is_nan()));
+        println!("physical GPU MoE: 3 rows, tie ordering, scaled weights, routed/shared output, nonfinite router checked");
+    }
+
+    #[test]
+    #[ignore = "requires a physical Vulkan device"]
+    fn moe_full_session_prefill_and_decode_match_cpu() {
+        let context = Box::leak(Box::new(super::VulkanContext::new().unwrap()));
+        assert!(!context.is_software_icd());
+        let mut model = tiny_moe_model();
+        let mut gpu = super::Qwen35VulkanSession::try_new_rows(&model, 8, 3, context)
+            .unwrap()
+            .unwrap();
+        let mut cpu = crate::models::qwen35::Qwen35Session::new_with_compute(
+            &mut model,
+            8,
+            3,
+            std::sync::Arc::new(crate::ComputePool::new(1)),
+            crate::compute::ComputePolicy::Cpu,
+        )
+        .unwrap();
+        let input = [
+            1.0, -2.0, 0.5, 3.0, -1.5, 0.2, 2.1, -0.7, 0.8, -0.1, 0.9, 0.4,
+        ];
+        for (base, rows, data) in [
+            (0, 3, &input[..]),
+            (3, 1, &input[..4]),
+            (4, 1, &input[4..8]),
+        ] {
+            let positions = (base..base + rows).map(|p| [p; 4]).collect::<Vec<_>>();
+            let expected = cpu.step(data, rows, &positions).unwrap();
+            let actual = gpu
+                .forward_chunk(data, base, &positions, rows)
+                .unwrap()
+                .logits
+                .to_vec();
+            gpu.commit_token();
+            for (&a, b) in actual.iter().zip(expected) {
+                assert!(
+                    a.is_finite() && (a - b).abs() <= 1e-4 + b.abs() * 1e-4,
+                    "position={base}: {a} != {b}"
+                );
+            }
+        }
+        println!(
+            "physical GPU MoE: batched prefill + 2 decode steps match independent CPU session"
+        );
     }
 
     #[test]
@@ -1752,6 +2500,14 @@ mod tests {
     #[ignore = "requires a Vulkan device"]
     fn f32_weights_run_on_vulkan() {
         let context = Box::leak(Box::new(super::VulkanContext::new().unwrap()));
+        if crate::ops::scalar_mode() {
+            let weight = Weight::from_quantized(crate::ops::kernel::QuantizedTensor::F32 {
+                data: vec![1e8, 1.0, -1e8],
+                n_in: 3,
+                n_out: 1,
+            });
+            check_gpu_weights(context, &[(&weight, "wide cancellation")], &[1.0; 3]);
+        }
         for n_in in [3, 5120, 17_409] {
             let mut input: Vec<f32> = (0..n_in)
                 .map(|i| ((i * 29 % 251) as f32 - 125.0) / 97.0)
@@ -1816,6 +2572,92 @@ mod tests {
         }
         assert!(checked > 0, "model must have recurrent SSM matrices");
         println!("verified {checked} real SSM matrices");
+    }
+
+    #[test]
+    #[ignore = "requires a physical Vulkan GPU and RMI_QWEN35_MODEL"]
+    fn qwen35_real_moe_weights_run_on_vulkan() {
+        let context = Box::leak(Box::new(super::VulkanContext::new().unwrap()));
+        assert!(!context.is_software_icd());
+        let source = crate::open_model_source(
+            std::path::Path::new(
+                &std::env::var("RMI_QWEN35_MODEL").expect("RMI_QWEN35_MODEL required"),
+            ),
+            crate::ComponentRole::Llm,
+        )
+        .unwrap();
+        let model = super::Qwen35Model::from_source(source.as_ref()).unwrap();
+        let gpu = super::Qwen35VulkanSession::try_new_rows(&model, 4, 1, context)
+            .unwrap()
+            .unwrap();
+        let cfg = model.config.moe.as_ref().unwrap();
+        let width = model.config.n_embd;
+        let input = (0..width)
+            .map(|i| ((i * 29 % 251) as f32 - 125.0) / 97.0)
+            .collect::<Vec<_>>();
+        let pool = crate::ComputePool::new(8);
+        let mut prepared =
+            crate::ops::kernel::PreparedRows::new(1, width.max(cfg.n_ff_exp).max(cfg.n_ff_shexp));
+        let mut worst = 0.0f32;
+        for (layer, bindings) in gpu.layers.iter().enumerate() {
+            let super::FfnBindings::Moe(bindings) = bindings.ffn else {
+                panic!("missing expert recorder")
+            };
+            gpu.ops.write_f32(gpu.layout.normed, &input).unwrap();
+            gpu.ops.zero_region(gpu.layout.x).unwrap();
+            let commands = super::TokenCommands::begin(context).unwrap();
+            gpu.record_moe(&commands, bindings, 1).unwrap();
+            commands.submit_and_wait().unwrap();
+            let actual = gpu.ops.read_f32(gpu.layout.x, width).unwrap();
+            let mut expected = vec![0.0; width];
+            let moe = model.layers[layer].moe.as_ref().unwrap();
+            let _cpu = crate::compute::ComputePolicy::Cpu.cpu_scope();
+            crate::models::qwen35::trunk::moe::forward_qwen35moe_token(
+                moe,
+                cfg,
+                cfg.weights_scale,
+                &input,
+                &mut expected,
+                &mut prepared,
+                &pool,
+                layer,
+                0,
+            )
+            .unwrap();
+            let mut probabilities = moe.gate_inp.matmul(&input);
+            crate::ops::softmax_inplace(&mut probabilities);
+            let mut ids = (0..cfg.n_expert).collect::<Vec<_>>();
+            ids.sort_by(|&a, &b| {
+                probabilities[b]
+                    .total_cmp(&probabilities[a])
+                    .then_with(|| a.cmp(&b))
+            });
+            let actual_ids = gpu
+                .ops
+                .read_f32(gpu.layout.expert_ids, cfg.n_expert_used)
+                .unwrap();
+            assert_eq!(
+                actual_ids
+                    .iter()
+                    .map(|v| v.to_bits() as usize)
+                    .collect::<Vec<_>>(),
+                ids[..cfg.n_expert_used]
+            );
+            let mut max_abs = 0.0f32;
+            for (&a, &b) in actual.iter().zip(&expected) {
+                max_abs = max_abs.max((a - b).abs());
+                assert!(
+                    a.is_finite() && b.is_finite() && (a - b).abs() <= 1e-4 + b.abs() * 1e-4,
+                    "layer {layer}: {a} != {b}"
+                );
+            }
+            worst = worst.max(max_abs);
+            println!("real MoE layer={layer}: exact selected IDs, bounded routed+shared output, max_abs={max_abs:.8e}");
+        }
+        println!(
+            "verified {} real MoE blocks, worst max_abs={worst:.8e}",
+            gpu.layers.len()
+        );
     }
 
     #[test]

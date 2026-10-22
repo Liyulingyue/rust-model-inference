@@ -117,13 +117,21 @@ fn sage_dump_trace() {
         },
     );
     assert!(!ids.is_empty());
-    let mut session = Qwen35Session::new_with_prefill_batch_size(
+    let backend = std::env::var("RMI_SAGE_BACKEND").unwrap_or_else(|_| "cpu".into());
+    let policy = match backend.as_str() {
+        "cpu" => rust_model_inference::compute::ComputePolicy::Cpu,
+        "vulkan" => rust_model_inference::compute::ComputePolicy::Vulkan,
+        _ => panic!("unsupported RMI_SAGE_BACKEND {backend}"),
+    };
+    let mut session = Qwen35Session::new_with_compute(
         &mut model,
         ids.len() + 4,
         1,
         Arc::new(rust_model_inference::ComputePool::new(8)),
+        policy,
     )
     .unwrap();
+    println!("Sage trace backend: {backend}");
     let mut processed = Vec::new();
     let mut generated = Vec::new();
     let mut logits = Vec::new();
@@ -162,4 +170,84 @@ fn sage_dump_trace() {
             .unwrap(),
     )
     .unwrap();
+}
+
+#[cfg(all(feature = "vulkan", feature = "parity-trace"))]
+#[test]
+#[ignore = "requires a physical Vulkan GPU and RMI_SAGE_MODEL; run without RMI_PARITY_TRACE"]
+fn sage_vulkan_batched_prefill_and_decode() {
+    use rust_model_inference::compute::ComputePolicy;
+    assert!(
+        std::env::var_os("RMI_PARITY_TRACE").is_none(),
+        "trace mode forces single-token chunks"
+    );
+    let source = GGUFLoader::from_file(path("RMI_SAGE_MODEL")).unwrap();
+    let mut model = Qwen35Model::from_source(&source).unwrap();
+    let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned()).unwrap();
+    let prompt = "<|im_start|>user\n你好<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
+    let ids = tokenizer.encode(
+        prompt,
+        EncodeOptions {
+            add_special: true,
+            parse_special: true,
+        },
+    );
+    let mut run = |policy, batch| {
+        let mut session = Qwen35Session::new_with_compute(
+            &mut model,
+            ids.len() + 4,
+            batch,
+            Arc::new(rust_model_inference::ComputePool::new(8)),
+            policy,
+        )
+        .unwrap();
+        let positions = (0..ids.len()).map(|p| [p; 4]).collect::<Vec<_>>();
+        let mut logits = session.step_with_tokens(&ids, &positions).unwrap();
+        let mut generated = Vec::new();
+        let mut outputs = Vec::new();
+        for step in 0..4 {
+            let next = (0..logits.len())
+                .max_by(|&a, &b| logits[a].total_cmp(&logits[b]).then_with(|| b.cmp(&a)))
+                .unwrap() as u32;
+            generated.push(next);
+            outputs.push(logits);
+            if step < 3 {
+                logits = session
+                    .step_with_tokens(&[next], &[[ids.len() + step; 4]])
+                    .unwrap();
+            } else {
+                break;
+            }
+        }
+        (generated, outputs)
+    };
+    let (cpu_ids, cpu) = run(ComputePolicy::Cpu, 1);
+    let (gpu_ids, gpu) = run(ComputePolicy::Vulkan, 3);
+    assert_eq!(gpu_ids, cpu_ids);
+    for (step, (cpu, gpu)) in cpu.iter().zip(&gpu).enumerate() {
+        assert_eq!(gpu.len(), cpu.len());
+        assert!(cpu.iter().chain(gpu).all(|v| v.is_finite()));
+        let norm = |v: &[f32]| v.iter().map(|&x| f64::from(x).powi(2)).sum::<f64>();
+        let (a, b) = (norm(cpu), norm(gpu));
+        let delta = cpu
+            .iter()
+            .zip(gpu)
+            .map(|(&x, &y)| (f64::from(x) - f64::from(y)).powi(2))
+            .sum::<f64>();
+        let relative_l2 = (delta / a).sqrt();
+        let cosine = cpu
+            .iter()
+            .zip(gpu)
+            .map(|(&x, &y)| f64::from(x) * f64::from(y))
+            .sum::<f64>()
+            / (a * b).sqrt();
+        let max_abs = cpu
+            .iter()
+            .zip(gpu)
+            .map(|(&x, &y)| (x - y).abs())
+            .fold(0.0f32, f32::max);
+        println!("Sage Vulkan batched step={step}: relative_l2={relative_l2:.8e} cosine={cosine:.10} max_abs={max_abs:.8e}");
+        assert!(relative_l2 <= 0.01 && cosine >= 0.99995 && max_abs <= 0.5);
+    }
+    println!("Sage Vulkan batch=3 vs CPU batch=1, greedy={gpu_ids:?}");
 }

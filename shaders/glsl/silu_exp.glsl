@@ -1,0 +1,48 @@
+float exp_approx(float x) {
+    // SATURATION BOUNDARY -- this value is load-bearing, do not "raise it back
+    // to the exp overflow point" without reading TODO.md (silu saturation).
+    //
+    // Clamp to +/-80, not to the exp overflow point near 88.7. silu divides by
+    // (1 + exp(-x)) and then recovers the residual with `fma(-den, act, gate)`
+    // followed by `fma(residual, 1/den, act)`, so it needs 1/den to stay a
+    // *normal* float. At 88.376 that reciprocal is 4.16e-39, below the normal
+    // floor of 1.18e-38, and the correction degenerates: measured on GB10,
+    // every activation at or below -88 came back NaN from the whole Z-Image
+    // FFN, 16 009 509 of 37 324 800 values non-finite, and the render aborted
+    // with "Non-finite Z-Image predicted flow". At 80 the reciprocal is
+    // 1.8e-35 and the correction stays exact over the range that matters.
+    //
+    // PARITY NOTE: this is a deliberate divergence from the CPU SiLU, which
+    // clamps nowhere and reaches -0 as gate -> -inf. Two regimes, not one:
+    // for |gate| < 80 the two are bit-identical, because nothing here is
+    // clamped and the compensation is exact. Past that the CPU path is *also*
+    // wrong -- 1 + exp(103) overflows f32, so it computes gate/inf and lands
+    // on -0 -- while this saturates at exp(80) and lands near -1.9e-33. The
+    // absolute gap is ~1e-33, which is noise floor in f32 and cannot
+    // contaminate a downstream matmul, but the two do not agree *relatively*
+    // and any test comparing them must use an absolute tolerance there.
+    // On the Z-Image 512x512 render this costs about 1.8 dB of PSNR against
+    // the CPU path (33.34 -> 31.52). See TODO.md before changing either side.
+    x = max(min(x, 80.0), -80.0);
+    precise float z = x * uintBitsToFloat(0x3fb8aa3cu) + uintBitsToFloat(0x4b400000u);
+    precise float n = z - uintBitsToFloat(0x4b400000u);
+    precise float reduced = x - n * uintBitsToFloat(0x3f318000u);
+    reduced = reduced - n * uintBitsToFloat(0xb95e8083u);
+    uint exponent = floatBitsToUint(z) << 23u;
+    precise float scale = uintBitsToFloat(exponent + 0x3f800000u);
+    precise float square = reduced * reduced;
+    precise float low = uintBitsToFloat(0x3efffedbu)
+        + uintBitsToFloat(0x3e2aaf33u) * reduced;
+    precise float high = uintBitsToFloat(0x3d2b9f17u)
+        + uintBitsToFloat(0x3c072010u) * reduced;
+    precise float polynomial = uintBitsToFloat(0x3f7ffff6u) * reduced
+        + (low + high * square) * square;
+    return (1.0 + polynomial) * scale;
+}
+
+#include "exp_approx_neon.glsl"
+#include "host_libm.glsl"
+float silu_exponential(float x, uint mode, uint index, uint count) {
+    return mode == 1u && index < (count / 4u) * 4u ? exp_approx_neon(x)
+        : mode == 0u && index < (count / 8u) * 8u ? exp_approx(x) : exp_reference(x);
+}

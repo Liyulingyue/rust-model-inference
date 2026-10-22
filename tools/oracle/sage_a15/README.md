@@ -57,9 +57,9 @@ python3 tools/oracle/sage_a15/compare.py \
   --out target/sage-parity
 ```
 
-`compare.py` refuses a file with the wrong size or SHA-256. Both implementations
-use CPU, eight threads, F32 KV, sequential single-token prefill and four greedy
-predictions. This avoids comparing padded SSM ubatch rows with real tokens.
+`compare.py` refuses a file with the wrong size or SHA-256. The Oracle uses CPU; Rust uses CPU by default or the forced Vulkan decoder with
+`--backend vulkan`. Both use eight CPU threads, F32 KV, sequential single-token
+prefill and four greedy predictions. This avoids comparing padded SSM ubatch rows with real tokens.
 Oracle weight repacking is disabled to keep the Q8_0 path explicit and avoid a
 second full weight allocation.
 Inputs are raw `Hello` and a Chinese user turn rendered with the GGUF's default
@@ -144,82 +144,104 @@ the GGUF Jinja template, and the F16 projector identifying a solid-red image
 as red. These establish CLI execution only; the x86_64 optimized kernels and
 vision outputs were not compared numerically with the Oracle.
 
-### GPU probe: full-model decoding is unsupported
+### Vulkan MoE decoder
 
-The remote host exposes a physical gfx1100 GPU with approximately 48 GiB VRAM,
-reported by Vulkan as `AMD Radeon Graphics (RADV NAVI31)`. Tests explicitly
-select `/usr/share/vulkan/icd.d/radeon_icd.json` to exclude software ICDs.
+The resident Qwen3.5 executor now also records `qwen35moe`: F32 router,
+softmax/top-k/normalization, Q8_0 or F32 routed expert projections, scalar-reference SiLU,
+shared expert with sigmoid gate, and residual reduction. Expert IDs remain on
+the GPU and index the uploaded contiguous expert tensors; decoding does not
+copy selected weights back through the CPU. Unsupported expert formats and
+incomplete or malformed expert/shared projections are rejected before upload.
+The main decoder still executes 40 layers, excluding the MTP block.
 
-**Sage does not have a complete Vulkan decoder.** The existing executor records
-dense FFNs, but has no routed/shared-expert recorder for `qwen35moe`.
-`--compute vulkan` rejects this architecture. `--gpu` / `--compute auto` must
-fall back to the CPU decoder; successful Auto output is not GPU alignment.
+Recurrent SiLU now follows the existing exact/NEON/AVX2 dispatch, including
+`RMI_SCALAR=1`. F32 matrix products use compensated accumulation in scalar
+Oracle mode, preserving the CPU's wide sum of F32-rounded products without
+requiring GPU float64 support. Recurrent state and attention scalar dots also
+use compensated sums. Other modes retain their existing reduction contracts.
 
-The real-model probe found that the old eligibility builder hard-coded
-`qwen35`, accepting Sage while silently skipping every MoE FFN. Auto emitted
-blank/whitespace answers for the Chinese and red-image cases while reporting
-`resident_hybrid_decoder backend=Vulkan`. The fix derives the architecture
-from the parsed MoE configuration and rejects incomplete dense FFNs before
-weight upload. Two small tests reproduce the old acceptance bug; both failed
-before the fix, then passed. The final Vulkan adapter suite passed all 15
-tests, explicitly including the two device-dependent tests.
+On Linux x86_64 GNU builds, a shader specialization selects the same
+table/polynomial `expf`/`logf` approximations as the host reference. A correctly
+rounded exponential can differ from that libm by half an ULP and cross a later
+Q8 rounding boundary. `host_libm.glsl` evaluates the approximations with two
+F32 components, based on the MIT-licensed ARM optimized routines pinned in its
+header. Other hosts retain the existing exponential path. This calibrates the
+validated host; it does not promise identical libm behavior on other systems.
 
-| Probe | Result |
-| --- | --- |
-| Generated Q8_0 matmul fixtures, five shapes | Passed `vk_check`'s combined absolute/relative bound |
-| Generated F32 projections, 18 individual/grouped cases | Passed; largest observed absolute error `1.144409e-4` |
-| Real Sage SSM alpha/beta projections | All 60 Q8_0 matrices passed; observed maximum absolute error 0 |
-| Forced full-model Vulkan | Rejected `qwen35moe`, exit 1 |
-| Auto Chinese text / red-image CLI | Both match the corresponding CPU answer; trace confirms CPU decoder fallback |
-
-Projection checks compare physical Vulkan dispatches against CPU kernels,
-requiring finite values and `abs(gpu - cpu) <= 1e-4 + 1e-4 * abs(cpu)` for
-floating-point reductions. The old F32 exact-bit assertion is replaced with
-this existing `vk_check` bound. The real-weight test accepts Sage's Q8_0 SSM
-projections as well as F32 projections; its CPU reference prepares quantized
-activations independently. These are operator checks, not a full-model GPU
-comparison with llama.cpp. The CLI output matches establish correct fallback,
-not GPU vision execution or numerical parity.
-
-Build and inspect the selected backend with:
+The test device is physical gfx1100 (`AMD Radeon Graphics (RADV NAVI31)`),
+with approximately 48 GiB VRAM. Select its hardware ICD explicitly:
 
 ```sh
-cargo build --profile release-fast --features vulkan \
-  --bin rust-model-inference --example vk_check
+cargo test --profile release-fast --features vulkan,parity-trace \
+  --test sage_a15 --no-run
+RMI_SCALAR=1 RMI_QWEN35_MODEL="$SAGE_MODEL_DIR/Sage-A1.5-Q8_0.gguf" \
 VK_DRIVER_FILES=/usr/share/vulkan/icd.d/radeon_icd.json \
-  target/release-fast/examples/vk_check
-RMI_COMPUTE_TRACE=1 VK_DRIVER_FILES=/usr/share/vulkan/icd.d/radeon_icd.json \
-  target/release-fast/rust-model-inference \
-  --model "$SAGE_MODEL_DIR/Sage-A1.5-Q8_0.gguf" \
-  --gpu --jinja --no-thinking --prompt '你好' --max-tokens 8 --temp 0 --threads 8
-RMI_QWEN35_MODEL="$SAGE_MODEL_DIR/Sage-A1.5-Q8_0.gguf" \
+  cargo test --profile release-fast --features vulkan,parity-trace \
+  --lib vulkan::qwen35::tests:: -- --include-ignored --nocapture --test-threads=1
+python3 tools/oracle/sage_a15/compare.py \
+  --backend vulkan --model "$SAGE_MODEL_DIR/Sage-A1.5-Q8_0.gguf" \
+  --oracle target/sage-oracle/build/bin/llama-eval-callback \
+  --rust-test target/release-fast/deps/sage_a15-REPLACE_WITH_EXECUTABLE_HASH \
+  --out target/sage-vulkan-parity
+RMI_SCALAR=1 RMI_SAGE_MODEL="$SAGE_MODEL_DIR/Sage-A1.5-Q8_0.gguf" \
 VK_DRIVER_FILES=/usr/share/vulkan/icd.d/radeon_icd.json \
-  cargo test --profile release-fast --features vulkan --lib vulkan::qwen35::tests:: \
-  -- --include-ignored --nocapture --test-threads=1
+  cargo test --profile release-fast --features vulkan,parity-trace \
+  --test sage_a15 sage_vulkan_batched_prefill_and_decode -- --ignored --exact --nocapture
 ```
 
-The trace must report `unsupported architecture qwen35moe. Falling back to CPU`
-and `scope=hybrid_decoder backend=Cpu`. Replacing `--gpu` with
-`--compute vulkan` must exit unsuccessfully with an unsupported-architecture
-error. Neither result establishes GPU model accuracy or performance.
+Forced Vulkan session creation must succeed; the trace helper prints
+`Sage trace backend: vulkan` and cannot silently substitute CPU execution.
+GPU trace mode uses one-token chunks to retain the token-major schema; the
+separate batched test runs without tracing and compares prefill=3 plus four
+greedy steps against CPU prefill=1. Structural checks and numerical thresholds
+are identical to the CPU harness above. The router fixture contains F32 bit
+patterns from layer 0, token 0 of the same pinned scalar Oracle case; it
+reproduces the wide-sum softmax boundary without loading the full model.
+
+The physical adapter suite passed all 21 tests, including synthetic batched
+prefill/decode, F32 cancellation, malformed payload/format guards, the real
+router fixture, 60 real SSM projections and 40 independent real-weight MoE
+blocks. The MoE blocks passed exact selected IDs/order and bounded
+routed+shared outputs against production CPU operators with observed maximum
+absolute error 0. The separate SiLU device regressions include libm boundaries,
+NaN/infinities and input preservation.
+
+With `RMI_SCALAR=1`, forced Vulkan passed all 1,100 selected checkpoints against
+the same-host pinned CPU Oracle: 220 raw / 880 Chinese, with the x86 greedy IDs
+listed above. Maximum observed relative L2, absolute and logit errors were 0;
+minimum cosine was 1. Assertions retain the stated numerical tolerances for
+lossy operations. This is measured agreement on these inputs, not a generic
+bitwise GPU arithmetic guarantee.
+
+The untraced real-model test separately passed CPU prefill=1 versus Vulkan
+prefill=3 and four greedy predictions. Forced Vulkan default-dispatch text and
+Auto + scalar red-image CLI smokes use `resident_hybrid_decoder backend=Vulkan`.
+The image CLI uses the CPU F16 projector. The machine-readable summary is
+[verification.json](verification.json).
+
+Full decoder weights occupy `36,351,807,040` uploaded bytes; tiny trace capacity
+used approximately 36.45 GB of Vulkan allocations. Capacity and prefill size
+increase arena memory. These measurements are not performance benchmarks.
+Vision encoder GPU execution and numerical vision parity are outside this
+validation; image CLI uses the existing CPU projector and Vulkan text decoder.
 
 ### Focused regression checks
 
-The local `--lib models::qwen35::` run reports 74 passed, 1 failed and 4 ignored.
-The failure is the pre-existing `qwen35_config_rejects_invalid_tensor_dimensions`
-error-message assertion (`head lengths` versus `Invalid ...key_length: 0`).
-Excluding that known failure gives 74 passed. The new production-path MoE test
-passes with both default dispatch and `RMI_SCALAR=1`; the old implementation
-fails, and reverting only its softmax independently fails the second fixture.
-The Python comparator has four passing self-tests, including rejection of
-identical NaNs in a supposedly lossless embedding checkpoint.
+The final local `--features vulkan,parity-trace --lib vulkan::` run passed 46
+tests, with 45 device/model/benchmark tests ignored. The physical Sage adapter
+and focused SiLU tests above were run separately with ignored tests enabled.
+Formatting, shader rebuild/manifest/SPIR-V validation and all four Python
+comparator self-tests passed.
 
-On remote Linux x86_64, the final `--features parity-trace --lib models::qwen35::`
-run reports 72 passed, 2 failed and 5 ignored. Both failures were reproduced
-before these changes: the same configuration assertion and
-`qwen35_trace_metadata_is_independent_of_prefill_batch_size` (which also checks
-existing batch-dependent numeric outputs). The new MoE fixtures pass there.
+Earlier broader Qwen3.5 runs still had two baseline failures reproduced before
+these changes: `qwen35_config_rejects_invalid_tensor_dimensions` (error-message
+assertion) and `qwen35_trace_metadata_is_independent_of_prefill_batch_size`
+(existing batch-dependent numeric outputs). No whole-repository or clean
+clippy claim is made. The production CPU MoE regression also passed default
+and scalar dispatch; reverting its earlier softmax/reduction fixes fails it.
 
-The text Oracle harness covers incremental decoding; it does not establish
-batched prefill, long-context, MTP, full-model GPU, HTTP or vision numerical
-parity. Other model revisions and quantization types do not inherit these results.
+The optimized x86 decoder graph, other GPUs/hosts, other expert formats,
+long-context behavior, MTP execution, HTTP and numerical vision alignment are
+not covered. Default ARM NEON limits above still apply; the Vulkan scalar
+results do not broaden the CPU dispatch claim. Other model revisions and
+quantization types need separate validation.

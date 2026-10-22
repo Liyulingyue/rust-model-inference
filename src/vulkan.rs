@@ -1680,6 +1680,16 @@ impl VulkanContext {
                 .map_err(|e| VulkanError::ShaderCompileFailed(e.to_string()))?
         };
 
+        // Keep scalar Qwen math consistent with this host's libm before Q8 rounding.
+        let host_glibc = u32::from(cfg!(all(target_arch = "x86_64", target_env = "gnu")));
+        let entries = [vk::SpecializationMapEntry {
+            constant_id: 0,
+            offset: 0,
+            size: 4,
+        }];
+        let specialization = vk::SpecializationInfo::builder()
+            .map_entries(&entries)
+            .data(bytemuck::bytes_of(&host_glibc));
         let stage = vk::PipelineShaderStageCreateInfo {
             s_type: vk::StructureType::PIPELINE_SHADER_STAGE_CREATE_INFO,
             p_next: std::ptr::null(),
@@ -1687,7 +1697,7 @@ impl VulkanContext {
             stage: vk::ShaderStageFlags::COMPUTE,
             module: shader_module,
             p_name: CStr::from_bytes_with_nul(b"main\0").unwrap().as_ptr(),
-            p_specialization_info: std::ptr::null(),
+            p_specialization_info: &*specialization,
         };
 
         let pipeline = unsafe {

@@ -22,12 +22,13 @@ layout(push_constant) uniform PC {
     float eps;
     uint phase;
     uint rows;
+    uint exp_mode;
 } pc;
 
 shared float inverse_q;
 shared float inverse_k;
 
-#include "exp_approx_neon.glsl"
+#include "silu_exp.glsl"
 #include "f32_divide.glsl"
 #include "f32_norm.glsl"
 
@@ -49,7 +50,7 @@ void main() {
                 precise float term = uintBitsToFloat(conv_weight.data[channel * pc.d_conv + tap]) * input_value;
                 value += term;
             }
-            precise float activated = divide_finite_normal(value, 1.0 + exp_approx_neon(-value));
+            precise float activated = divide_finite_normal(value, 1.0 + silu_exponential(-value, pc.exp_mode, channel, pc.conv_dim));
             uint output_word = channel < pc.key_dim
                 ? pc.q_word + row * pc.key_dim + channel
                 : channel < 2u * pc.key_dim
