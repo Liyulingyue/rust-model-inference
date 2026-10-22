@@ -143,10 +143,58 @@ are not included in this model/schedule adaptation. To reproduce this failure,
 repeat the focused runner with `--cases context --optimized --relative-l2 0.01`
 and the same scalar `--oracle-bin`, using a fresh output directory.
 
+A second comparison used the same pinned Oracle with native CPU kernels
+(`GGML_NATIVE=ON`, `-ffp-contract=off`, external acceleration disabled). It also
+failed the unchanged 1% bounds: first failure `qwen.debug.attn.seg1`, occurrence
+7, max absolute error `0.08275669813156128` (reference peak `7.771087646484375`),
+relative L2 `0.0066251952738719515`. Final latent relative L2 was
+`0.012600705953349844`, max absolute error `0.024372607469558716`; final PNG
+maximum difference was seven levels, above the allowed four. Changing the
+reference build does not establish passing default SIMD parity.
+
+The investigated rounding differences include Q8 activation ties: a real-operator
+probe with scale 1 and inputs `0.5, 1.5, 2.5, -0.5, -1.5, -2.5` produced
+`0, 2, 2, 0, -2, -2` in NEON and `1, 2, 3, -1, -2, -3` in scalar mode.
+The pinned ggml ARM and generic kernels use these respective rules as well.
+The first block's attention input differs by only `2.86102294921875e-6` absolute,
+but quantized projections amplify the difference. This is a diagnostic result,
+not a justification for loosening the end-to-end bound.
+
 The SSH host passed the same 11 focused tests with the final schedule fixture.
-Full remote inference is not claimed: repeated upload attempts stalled/timed out
-before a complete hash-verified DiT/VAE pair reached that host. No external
-acceleration library or global dependency was installed there.
+The actual DiT, text encoder and VAE reached that host and passed full SHA256
+checks. A normal scalar build then completed the real text-to-image CLI with
+`A blue cat. 蓝猫 🐈`, 64×32, seed 42, eight threads and the default eight steps /
+CFG 1 in 51.335 seconds, maximum RSS 8,181,514,240 bytes. This included component
+loading and ran alongside build activity; it is not an isolated benchmark.
+Weights reside under `/root/rmi-qi21-turbo-d289/models`, linked from the test
+checkout to avoid its smaller filesystem. No external acceleration library or
+global dependency was installed there.
+
+The first Linux Oracle build still selected baseline SSE2 SiLU/softmax kernels,
+despite `GGML_SSE42=OFF` and all AVX/FMA options being disabled. It failed the
+text bound at block 35 (relative L2 `0.017662001171485316`). The scalar build
+script now also undefines `__SSE2__`; the pinned reference source and numerical
+bounds are unchanged. A linked 256-value operator probe went from 146 differing
+exponentials / 64 differing SiLU values to zero; its softmax sum error went from
+`-8.8178785517811775e-7` to zero. Against the existing Rust trace, all 39 text
+checkpoints / 5,079,073 F32 values then had zero measured error. The script uses
+standard `grep` for compiler/target detection so it also runs on hosts without
+`rg`.
+
+After all eight Oracle tool/configuration inputs were synchronized and
+SHA256-verified, the complete Linux text case passed 2,854 checkpoints /
+274,274,866 F32 values. Text and sampling measured zero error. VAE maximum
+absolute error was `1.1920928955078125e-7`, maximum relative L2
+`5.9441857491399164e-8`; all 8,192 RGBA8 bytes matched. The completed Rust trace
+was reused after correcting the remote harness copy, while the independent
+Oracle computed its own text conditioning, eight-step sampler and VAE outputs.
+The normal build repeated the same PNG pixels in 69.38 seconds. Both remote
+production PNGs have SHA256
+`195536bb9cf2519fa77fd5fb3495eefb802fe1baafa930f161b87770f645d674`.
+
+Linux versus macOS output pixels differ by up to 18 levels. A successful CLI
+run does not imply cross-platform bitwise identity or passing cross-platform
+numerical parity; comparisons with the same-platform Oracle are separate.
 
 The exact result summary is kept in
 [`turbo_validation.json`](../../tools/oracle/qwen_image_2_1/turbo_validation.json).

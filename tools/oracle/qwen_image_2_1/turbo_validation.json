@@ -119,7 +119,112 @@
   "remote": {
     "cpu": "AMD EPYC 9334",
     "focused_passed": 11,
-    "real_weight_inference": "not completed: upload repeatedly times out"
+    "real_weight_inference": "passed: normal scalar text-to-RGBA CLI, 64x32, 8 steps, CFG1",
+    "production": {
+      "returncode": 0,
+      "wall_seconds": 51.335,
+      "max_rss_bytes": 8181514240,
+      "user_seconds": 287.827314,
+      "system_seconds": 33.219274,
+      "scalar": true,
+      "width": 64,
+      "height": 32,
+      "threads": 8,
+      "seed": 42,
+      "steps": 8,
+      "cfg": 1,
+      "prompt": "A blue cat. \u84dd\u732b \ud83d\udc08",
+      "isolated_benchmark": false,
+      "png_sha256": "195536bb9cf2519fa77fd5fb3495eefb802fe1baafa930f161b87770f645d674"
+    },
+    "model_sha256_verified": [
+      "399d2ddc3636f36456e2f5bfa57187da4e38721bc046430317f42a9eab5b1712",
+      "cb8616bf6ed228982d9e47d7b72b42195342efa26044b0ee1873e61d9e78d3d7",
+      "71879ffd5321e6d10c3c87513e2b474b1252efa7f3dec2969214a9bf06a6dd5c"
+    ],
+    "cross_platform_rgba_max_abs": 18,
+    "cross_platform_note": "Linux versus macOS output pixels; not a same-platform Oracle comparison or a passing cross-platform alignment claim",
+    "source_audit": {
+      "matching_source_files": 503,
+      "source_fingerprint": "5753f04bd065e021eeb04f6f965dfffbd5e5a09e582f28b59aa4dafd34059a62"
+    },
+    "runtime_source_commit": "05e9d487d82569dc3c92d25bc06a09d1c7772127",
+    "scalar_oracle_configuration_correction": {
+      "cause": "baseline __SSE2__ kept vector SiLU/softmax active despite GGML_SSE42=OFF; now disabled for the scalar reference",
+      "initial_first_failed_checkpoint": {
+        "name": "qwen.text.block.35",
+        "max_abs": 17.298095703125,
+        "relative_l2": 0.017662001171485316
+      },
+      "probe_values": 256,
+      "probe_before": {
+        "exp_different_values": 146,
+        "silu_different_values": 64,
+        "softmax_sum_difference": -8.817878551781178e-07
+      },
+      "probe_after": {
+        "exp_different_values": 0,
+        "silu_different_values": 0,
+        "softmax_sum_difference": 0
+      },
+      "corrected_text": {
+        "checkpoints": 39,
+        "f32_values": 5079073,
+        "max_abs": 0.0,
+        "max_relative_l2": 0.0
+      },
+      "build_script_sha256": "93205105f0beb89a0a539233878dea39dffbb11b4ae9a7281d3e7c8bd9324f51"
+    },
+    "oracle_input_audit": {
+      "matching_files": 8,
+      "manifest_sha256": "b0d4469a5454e76130590be580f980a2739e619ebedd0ce54e5656c8438cf8c6",
+      "components_sha256": "f70e62c06654f8fb8fdc95f5f492279f0f9ea3618bc0785c6dfb1ba198594cab"
+    },
+    "parity": {
+      "case": "text",
+      "scalar": true,
+      "width": 64,
+      "height": 32,
+      "steps": 8,
+      "cfg": 1.0,
+      "references": 0,
+      "stages": [
+        {
+          "mode": "text",
+          "checkpoints": 39,
+          "f32_values": 5079073,
+          "relative_l2_limit": 0.01,
+          "max_abs": 0.0,
+          "max_relative_l2": 0.0
+        },
+        {
+          "mode": "sample",
+          "checkpoints": 2730,
+          "f32_values": 259897873,
+          "relative_l2_limit": 0.01,
+          "max_abs": 0.0,
+          "max_relative_l2": 0.0
+        },
+        {
+          "mode": "vae",
+          "checkpoints": 85,
+          "f32_values": 9297920,
+          "relative_l2_limit": 0.01,
+          "max_abs": 1.1920928955078125e-07,
+          "max_relative_l2": 5.9441857491399164e-08,
+          "rgba_max_abs": 0,
+          "rgba_bytes": 8192
+        }
+      ],
+      "production_seconds": 69.38,
+      "rust_trace_reused": true,
+      "rust_trace_note": "Reused the completed Rust run after correcting the remote Oracle harness copy; independent Oracle text, sampler and VAE use their own outputs",
+      "png_sha256": "195536bb9cf2519fa77fd5fb3495eefb802fe1baafa930f161b87770f645d674",
+      "production_png_sha256": "195536bb9cf2519fa77fd5fb3495eefb802fe1baafa930f161b87770f645d674",
+      "status": "passed unchanged 1% numerical bounds and exact structural checks",
+      "total_checkpoints": 2854,
+      "total_f32_values": 274274866
+    }
   },
   "output_sha256": "4754fccfdbac18477434059e3f7b7e2adf190d4752f5eca89f7cb5cb998f8b0e",
   "production_sha256": "4754fccfdbac18477434059e3f7b7e2adf190d4752f5eca89f7cb5cb998f8b0e",
@@ -201,7 +306,23 @@
     },
     "rgba_max_abs": 16,
     "failed_checkpoints": 1918,
-    "total_checkpoints": 2730
+    "total_checkpoints": 2730,
+    "native_oracle_crosscheck": {
+      "status": "failed unchanged 1% numerical bounds",
+      "oracle_build": "GGML_NATIVE=ON, -ffp-contract=off, external acceleration disabled",
+      "first_failure": {
+        "name": "qwen.debug.attn.seg1",
+        "occurrence": 7,
+        "max_abs": 0.08275669813156128,
+        "reference_peak": 7.771087646484375,
+        "relative_l2": 0.0066251952738719515
+      },
+      "final_latent": {
+        "max_abs": 0.024372607469558716,
+        "relative_l2": 0.012600705953349844
+      },
+      "rgba_max_abs": 7
+    }
   },
   "engineering_checks": {
     "local_focused_passed": 11,
@@ -243,6 +364,7 @@
       "ops::argmax::tests::ties_pick_lowest_index",
       "ops::matmul::neon_tests::neon_softmax_matches_ggml_vector_exp_and_f64_sum",
       "ops::rope::tests::rope_neox_inplace_simd_matches_scalar_fallback"
-    ]
+    ],
+    "remote_python_comparator_passed": 6
   }
 }
