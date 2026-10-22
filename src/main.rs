@@ -11,11 +11,12 @@ use rust_model_inference::DreamXConfig;
 use rust_model_inference::MetaValue;
 use rust_model_inference::TensorSource;
 
-const USAGE: &str = "Usage: rust-model-inference --model <path.gguf-or-ggufrs> [--prompt ...] [--threads N] [--compute cpu|auto|vulkan (default cpu); --gpu aliases auto] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--max-context N (default 8192)] [--repetition-penalty α (default 1.0 = disabled)] [--serve [--host 0.0.0.0] [--port 8080]]\n\nChat template: --jinja renders the GGUF's own `tokenizer.chat_template` (a Jinja2 program) with minijinja instead of the built-in per-architecture builder; --chat-template-file <path.jinja> overrides it and implies --jinja. --chat-template <name> still selects a built-in preset (chatml/llama3/gemma/lfm2/glm4/exaone/phi/none). Both are off by default, so token ids are unchanged unless you ask. tests/jinja_chat_template_ab.rs compares the two paths on real GGUFs: Qwen3 is asserted to match token for token, and LFM2.5 records a known divergence where the template is the correct one.\n\nLongCat Image Edit: --kind edit|turbo --model <transformer.gguf> --components <dir> --input <image.png> --instruction TEXT --out edited.png [--side 1024] [--steps N] [--guidance F32] [--seed N]; <dir> holds text_encoder/, vae/ and tokenizer/ safetensors, shared by both kinds; the two kinds use different Flux schedules so the step/guidance defaults differ (Edit 50/4.5, Turbo 8/1.0)\n\nQwen-Image-2.1: --model <qwen-image-2.1-Q8_0.gguf> --text-encoder <Qwen3-VL-8B.gguf> --vae <Qwen-Image-2.1/vae/diffusion_pytorch_model.safetensors> --prompt TEXT --out image.png [--width N --height N --steps N --cfg N --seed N] [--image reference.png --mmproj vision.gguf --reference another.png]\n\nMage-Flow: --model <dit.gguf> --text-encoder <text.gguf> --vae <vae.gguf> --prompt TEXT --out image.png [--resolution N | --width N --height N] [--steps N --cfg N --seed N --noise fixed.f32] [--image reference.png --mmproj vision.gguf --reference another.png]\n\nRerank mode: --rerank --rerank-query <TEXT> [--rerank-doc <TEXT> ...] | [--rerank-documents <FILE>] [--rerank-instruction <TEXT>] [--rerank-max-tokens N] | cross-encoder scoring; backend picked by GGUF arch (jina-bert-v2 + cls.weight/cls.bias → bert forward, qwen3 + cls.output.weight + pooling_type=4 → qwen3 trunk + 2-class head); one sigmoid'd score per document in [0, 1]\n\nJEV mode: --jev --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | single-forward-pass decision scoring over candidate labels A/B/C/…\n\nJEV grouped: --jev --jev-multi [--jev-option <pos> --jev-option <neg> ...] (pairs) or --jev-block <label> --jev-option <a> [--jev-option <b> ...] (blocks)\n\nServer mode: --serve [--host 0.0.0.0] [--port 8080] --model <path> [--mmproj ...] [--tts] [--embedding]\n\nCLM mode: --jev --clm-head <clm-heads.gguf> --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | cosine scoring via CLM projection heads on the chosen encoder (state = context, blank line, question; candidates verbatim\n\nGLiNER2 mode: --jev --gliner2-decide --model <gliner2-decide.gguf> --jev-context <text> [--gliner2-schema <json> | --jev-question <name> --jev-option <a> [--jev-option <b> ...]] | one DeBERTa-v3 pass scores every label of every task; --gliner2-schema takes a classify_text-shaped mapping: {intent: [a, b], aspects: {labels: [x], multi_label: true, cls_threshold: 0.4}}
+const USAGE: &str = "Usage: rust-model-inference --model <path.gguf-or-ggufrs> [--prompt ...] [--threads N] [--compute cpu|auto|vulkan (default cpu); --gpu aliases auto] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--max-context N (default 8192)] [--repetition-penalty α (default 1.0 = disabled)] [--serve [--host 0.0.0.0] [--port 8080]]\n\nChat template: --jinja renders the GGUF's own `tokenizer.chat_template` (a Jinja2 program) with minijinja instead of the built-in per-architecture builder; --chat-template-file <path.jinja> overrides it and implies --jinja. --chat-template <name> still selects a built-in preset (chatml/llama3/gemma/lfm2/glm4/exaone/phi/none). Both are off by default, so token ids are unchanged unless you ask. tests/jinja_chat_template_ab.rs compares the two paths on real GGUFs: Qwen3 is asserted to match token for token, and LFM2.5 records a known divergence where the template is the correct one.\n\nLongCat Image Edit: --kind edit|turbo --model <transformer.gguf> --components <dir> --input <image.png> --instruction TEXT --out edited.png [--side 1024] [--steps N] [--guidance F32] [--seed N]; <dir> holds text_encoder/, vae/ and tokenizer/ safetensors, shared by both kinds; the two kinds use different Flux schedules so the step/guidance defaults differ (Edit 50/4.5, Turbo 8/1.0)\n\nQwen-Image-2.1: --model <qwen-image-2.1-Q8_0.gguf> --text-encoder <Qwen3-VL-8B.gguf> --vae <Qwen-Image-2.1/vae/diffusion_pytorch_model.safetensors> --prompt TEXT --out image.png [--width N --height N --steps N --cfg N --seed N] [--image reference.png --mmproj vision.gguf --reference another.png]\nAstronex-World: --astronex --model <Astronex-World-BF16.gguf> --mmproj <mmproj-Astronex-World.gguf> --prompt TEXT --out video.mp4 [--width N --height N --video-frames N --fps N --steps 8 --cfg-scale N --seed N] [--image first-frame.png] | T2V or first-frame I2V; causal 8-frame blocks, 20-frame KV window, 8-step Flow-UniPC; add --gpu with the Vulkan build\n\nMage-Flow: --model <dit.gguf> --text-encoder <text.gguf> --vae <vae.gguf> --prompt TEXT --out image.png [--resolution N | --width N --height N] [--steps N --cfg N --seed N --noise fixed.f32] [--image reference.png --mmproj vision.gguf --reference another.png]\n\nRerank mode: --rerank --rerank-query <TEXT> [--rerank-doc <TEXT> ...] | [--rerank-documents <FILE>] [--rerank-instruction <TEXT>] [--rerank-max-tokens N] | cross-encoder scoring; backend picked by GGUF arch (jina-bert-v2 + cls.weight/cls.bias → bert forward, qwen3 + cls.output.weight + pooling_type=4 → qwen3 trunk + 2-class head); one sigmoid'd score per document in [0, 1]\n\nJEV mode: --jev --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | single-forward-pass decision scoring over candidate labels A/B/C/…\n\nJEV grouped: --jev --jev-multi [--jev-option <pos> --jev-option <neg> ...] (pairs) or --jev-block <label> --jev-option <a> [--jev-option <b> ...] (blocks)\n\nServer mode: --serve [--host 0.0.0.0] [--port 8080] --model <path> [--mmproj ...] [--tts] [--embedding]\n\nCLM mode: --jev --clm-head <clm-heads.gguf> --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | cosine scoring via CLM projection heads on the chosen encoder (state = context, blank line, question; candidates verbatim\n\nGLiNER2 mode: --jev --gliner2-decide --model <gliner2-decide.gguf> --jev-context <text> [--gliner2-schema <json> | --jev-question <name> --jev-option <a> [--jev-option <b> ...]] | one DeBERTa-v3 pass scores every label of every task; --gliner2-schema takes a classify_text-shaped mapping: {intent: [a, b], aspects: {labels: [x], multi_label: true, cls_threshold: 0.4}}
 
 AuK TTS mode: --model auk-base-f16.gguf --vae auk-vae-f32.gguf [--text-encoder qwen2.5-omni-3b-q8_0.gguf] --prompt \"<TEXT>\" --out speech.wav [--steps N (default 32)] [--resolution SR (default 24000)] [--duration-seconds N (default 1)] [--cfg-scale α (default 2.0)] [--instruction \"<voice/style>\" (instruct TTS)] [--ref-audio ref.wav (CFMEdit reference voice with audio tower)] | 24 kHz mono speech generation";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DispatchMode {
+    Astronex,
     DreamX,
     QwenDrive,
     Yue2,
@@ -25,7 +26,9 @@ enum DispatchMode {
 }
 
 fn dispatch_mode(options: &app::CliOptions) -> DispatchMode {
-    if options.dreamx {
+    if options.astronex {
+        DispatchMode::Astronex
+    } else if options.dreamx {
         DispatchMode::DreamX
     } else if options.planner.is_some() || options.perception.is_some() {
         DispatchMode::QwenDrive
@@ -123,6 +126,27 @@ fn main() {
             return;
         }
         None => {}
+    }
+
+    // Astronex-World owns its Wan denoiser/text/VAE pair and must dispatch
+    // before the generic diffusion validators can classify it as Z-Image.
+    let astronex_options = app::astronex_cli_options(&options).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(2);
+    });
+    if let Some(astronex) = astronex_options {
+        if options.gpu {
+            ops::enable_gpu();
+        }
+        app::init_rayon_global_pool(n_threads);
+        let main: Arc<dyn TensorSource> =
+            Arc::from(app::open_or_exit(&astronex.model, ComponentRole::Llm));
+        let components: Arc<dyn TensorSource> =
+            Arc::from(app::open_or_exit(&astronex.mmproj, ComponentRole::Mmproj));
+        app::run_or_exit(app::run_astronex_cli(
+            main, components, &astronex, n_threads,
+        ));
+        return;
     }
 
     // Select Mage before Z-Image's shared-component validation rejects edit inputs.
@@ -228,6 +252,7 @@ fn main() {
     }
 
     match dispatch_mode(&options) {
+        DispatchMode::Astronex => unreachable!("Astronex is dispatched before shared model setup"),
         DispatchMode::DreamX => {
             let dreamx = dreamx_options.expect("validated DreamX options");
             let main: Arc<dyn TensorSource> =

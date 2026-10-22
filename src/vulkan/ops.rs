@@ -31,6 +31,11 @@ const Q8_MATMUL_GROUPED_TILED_WIDE_SHADER: &[u8] =
 const Q8_MATMUL_GROUPED_TILED_WIDE_ADD_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/q8_matmul_tiled_dp4a_wide_add.spv");
 const F16_MATMUL_TILED_SHADER: &[u8] = include_bytes!("../../shaders/bin/f16_matmul_tiled.spv");
+const FLOAT_MATMUL_TILED_SHADER: &[u8] = include_bytes!("../../shaders/bin/float_matmul_tiled.spv");
+const ATTENTION_ONLINE_SHADER: &[u8] = include_bytes!("../../shaders/bin/attention_online.spv");
+const ATTENTION_ONLINE_WIDE_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/attention_online_wide.spv");
+const CONV3D_TILED_SHADER: &[u8] = include_bytes!("../../shaders/bin/conv3d_tiled.spv");
 
 const ATTENTION_SCORES_TILED_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/attention_scores_tiled.spv");
@@ -101,6 +106,13 @@ const Q8_MATMUL_COOPERATIVE: usize = 28;
 const Q8_MATMUL_GROUPED_TILED_WIDE: usize = 30;
 const Q8_MATMUL_GROUPED_TILED_WIDE_ADD: usize = 31;
 const ATTENTION_VALUES_F32: usize = 32;
+// The operator table is a hard-coded index, so these follow the unified
+// operators instead of reusing 29-32: index 29 is the interleaved QK norm and
+// 30-32 are the wide tiled matmuls and the F32 attention values.
+const FLOAT_MATMUL_TILED: usize = 33;
+const ATTENTION_ONLINE: usize = 34;
+const CONV3D_TILED: usize = 35;
+const ATTENTION_ONLINE_WIDE: usize = 36;
 
 pub(crate) fn tiled_matmul_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -120,6 +132,17 @@ pub(crate) fn require_tiled_attention(context: &VulkanContext) -> Result<(), Vul
     {
         return Err(VulkanError::UnsupportedShape(
             "tiled attention requires 256 workgroup invocations and a 256-wide workgroup".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn require_online_attention(context: &VulkanContext) -> Result<(), VulkanError> {
+    require_tiled_attention(context)?;
+    // Sixteen queries plus 32 staged keys/values and their online softmax state.
+    if context.limits.max_compute_shared_memory_size < 27 * 1024 {
+        return Err(VulkanError::UnsupportedShape(
+            "online attention requires 27 KiB of workgroup memory".into(),
         ));
     }
     Ok(())
@@ -190,6 +213,10 @@ const OPERATOR_SHADER_NAMES: [&str; OPERATOR_SHADERS.len()] = [
     "q8_matmul_tiled_dp4a_wide",
     "q8_matmul_tiled_dp4a_wide_add",
     "attention_values_f32",
+    "float_matmul_tiled",
+    "attention_online",
+    "conv3d_tiled",
+    "attention_online_wide",
 ];
 
 /// True when the ordered dispatch log is being collected.
@@ -277,7 +304,7 @@ pub fn dump_dispatch_trace() {
     }
 }
 
-const OPERATOR_SHADERS: [&[u8]; 33] = [
+const OPERATOR_SHADERS: [&[u8]; 37] = [
     QUANTIZE_Q8_0_SHADER,
     QUANTIZE_Q8_K_SHADER,
     Q8_MATMUL_GROUPED_SHADER,
@@ -311,6 +338,10 @@ const OPERATOR_SHADERS: [&[u8]; 33] = [
     Q8_MATMUL_GROUPED_TILED_WIDE_SHADER,
     Q8_MATMUL_GROUPED_TILED_WIDE_ADD_SHADER,
     ATTENTION_VALUES_F32_SHADER,
+    FLOAT_MATMUL_TILED_SHADER,
+    ATTENTION_ONLINE_SHADER,
+    CONV3D_TILED_SHADER,
+    ATTENTION_ONLINE_WIDE_SHADER,
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1049,7 +1080,7 @@ impl BatchedLinearLayout {
 pub(crate) struct BatchedLinearRuntime {
     ops: std::mem::ManuallyDrop<Qwen3Ops<'static>>,
     layout: BatchedLinearLayout,
-    weights: HashMap<(usize, usize), (GpuBuffer, OperatorBindings)>,
+    weights: HashMap<(usize, usize, usize, usize), (GpuBuffer, OperatorBindings)>,
     weight_capacity: usize,
     #[cfg(test)]
     pub(crate) begin_commands:
@@ -1082,7 +1113,10 @@ impl BatchedLinearRuntime {
             n_out,
             output_len,
         )?;
-        if let Some((_, binding)) = self.weights.get(&(weight.as_ptr() as usize, weight.len())) {
+        if let Some((_, binding)) =
+            self.weights
+                .get(&(weight.as_ptr() as usize, weight.len(), n_in, n_out))
+        {
             if binding.weight_format(1)? != format || binding.weight_mode != spec.mode {
                 return Err(VulkanError::UnsupportedShape(
                     "cached batched linear weight storage or numerical mode changed".into(),
@@ -1142,7 +1176,12 @@ impl BatchedLinearRuntime {
         let commands = (self.begin_commands)(context)?;
         #[cfg(not(test))]
         let commands = TokenCommands::begin(context)?;
-        let key = (weight_bytes.as_ptr() as usize, weight_bytes.len());
+        let key = (
+            weight_bytes.as_ptr() as usize,
+            weight_bytes.len(),
+            n_in,
+            n_out,
+        );
         let bindings = if let Some((_, bindings)) = self.weights.get(&key) {
             if bindings.weight_format(1)? != format || bindings.weight_mode != spec.mode {
                 return Err(VulkanError::UnsupportedShape(
@@ -1156,7 +1195,42 @@ impl BatchedLinearRuntime {
                     "batched linear descriptor capacity exhausted".into(),
                 ));
             }
-            let buffer = unsafe { self.ops.context.upload_static(weight_bytes)? };
+            // BF16 and F32 weights are uploaded transposed so the tiled float
+            // kernel can walk the reduction axis with unit stride. Only the
+            // prepared mode uses that kernel: the dot and rounded modes keep
+            // their own reduction, which the tiled float kernel does not
+            // implement.
+            let transposed = if n_in % 2 == 0
+                && matches!(format, GpuWeightFormat::BF16 | GpuWeightFormat::F32)
+                && spec.mode == GpuMatmulMode::Prepared
+            {
+                let bytes = if format == GpuWeightFormat::BF16 {
+                    2
+                } else {
+                    4
+                };
+                let mut packed = vec![0u8; weight_bytes.len()];
+                for r0 in (0..n_out).step_by(32) {
+                    for k0 in (0..n_in).step_by(128) {
+                        for r in r0..(r0 + 32).min(n_out) {
+                            for k in k0..(k0 + 128).min(n_in) {
+                                let src = (r * n_in + k) * bytes;
+                                let dst = (k * n_out + r) * bytes;
+                                packed[dst..dst + bytes]
+                                    .copy_from_slice(&weight_bytes[src..src + bytes]);
+                            }
+                        }
+                    }
+                }
+                Some(packed)
+            } else {
+                None
+            };
+            let buffer = unsafe {
+                self.ops
+                    .context
+                    .upload_static(transposed.as_deref().unwrap_or(weight_bytes))?
+            };
             let bindings = match self
                 .ops
                 .bind_weight_buffers_mode(&[buffer], &[format], spec.mode)
@@ -1173,26 +1247,42 @@ impl BatchedLinearRuntime {
             bindings
         };
         self.ops.write_f32(self.layout.input, input)?;
-        let recorder = if spec.uses_tiled_f16() && n_in % 2 == 0 && rows >= 32 {
-            Qwen3Ops::record_weight_matmul_tiled_rows
+        let outputs = [(self.layout.output, n_out, f32_bytes(n_out)?)];
+        if n_in % 2 == 0
+            && matches!(format, GpuWeightFormat::BF16 | GpuWeightFormat::F32)
+            && spec.mode == GpuMatmulMode::Prepared
+        {
+            self.ops.record_transposed_float_matmul_rows(
+                &commands,
+                bindings,
+                self.layout.input,
+                &outputs,
+                n_in,
+                rows,
+                n_in,
+            )?;
         } else {
-            Qwen3Ops::record_weight_matmul_rows
-        };
-        recorder(
-            &self.ops,
-            &commands,
-            bindings,
-            self.layout.input,
-            self.layout.q8,
-            self.layout.scales,
-            self.layout.sums,
-            self.layout.q8,
-            self.layout.scales,
-            &[(self.layout.output, n_out, f32_bytes(n_out)?)],
-            n_in,
-            rows,
-            n_in,
-        )?;
+            let recorder = if spec.uses_tiled_f16() && n_in % 2 == 0 && rows >= 32 {
+                Qwen3Ops::record_weight_matmul_tiled_rows
+            } else {
+                Qwen3Ops::record_weight_matmul_rows
+            };
+            recorder(
+                &self.ops,
+                &commands,
+                bindings,
+                self.layout.input,
+                self.layout.q8,
+                self.layout.scales,
+                self.layout.sums,
+                self.layout.q8,
+                self.layout.scales,
+                &outputs,
+                n_in,
+                rows,
+                n_in,
+            )?;
+        }
         commands.submit_and_wait()?;
         output[..count].copy_from_slice(self.ops.read_f32(self.layout.output, count)?);
         Ok(())
@@ -1212,6 +1302,497 @@ impl Drop for BatchedLinearRuntime {
         }
         // Qwen3Ops acquires the same mutex in Drop.
         unsafe { std::mem::ManuallyDrop::drop(&mut self.ops) };
+    }
+}
+
+/// A shared convolution workspace; weights are refreshed on each call so no
+/// source address outlives its mmap. Direct gather avoids host im2col buffers.
+pub(crate) struct Conv3dRuntime {
+    ops: Qwen3Ops<'static>,
+    regions: [ArenaRegion; 4],
+    pub(crate) capacity: [usize; 4],
+}
+
+impl Conv3dRuntime {
+    pub(crate) fn new(
+        context: &'static VulkanContext,
+        capacity: [usize; 4],
+    ) -> Result<Self, VulkanError> {
+        let mut cursor = 0;
+        let regions = [
+            f32_region(&mut cursor, capacity[0])?,
+            f32_region(&mut cursor, capacity[1])?,
+            f32_region(&mut cursor, capacity[2])?,
+            f32_region(&mut cursor, capacity[3])?,
+        ];
+        Ok(Self {
+            ops: Qwen3Ops::new_with_size(context, cursor, 1)?,
+            regions,
+            capacity,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn forward(
+        &mut self,
+        input: &[f32],
+        weight: &[f32],
+        bias: Option<&[f32]>,
+        output: &mut [f32],
+        input_shape: [usize; 4],
+        weight_shape: [usize; 5],
+        output_shape: [usize; 4],
+        spec: crate::models::diffusion::dreamx::kernels::Conv3dSpec,
+    ) -> Result<(), VulkanError> {
+        let [ir, wr, or, br] = self.regions;
+        let mut push = vec![
+            self.ops.f32_word(ir, input.len(), "Conv3D input")?,
+            self.ops.f32_word(wr, weight.len(), "Conv3D weight")?,
+            self.ops.f32_word(br, output_shape[0], "Conv3D bias")?,
+            self.ops.f32_word(or, output.len(), "Conv3D output")?,
+        ];
+        for n in [input_shape[0], output_shape[0]]
+            .into_iter()
+            .chain(input_shape[1..].iter().copied())
+            .chain(output_shape[1..].iter().copied())
+            .chain(weight_shape[2..].iter().copied())
+            .chain(spec.stride)
+            .chain(spec.padding)
+            .chain(spec.dilation)
+        {
+            push.push(as_u32(n, "Conv3D geometry")?);
+        }
+        let spatial = product("Conv3D spatial", &output_shape[1..])?;
+        let dispatch = row_dispatch(
+            output_shape[0].div_ceil(64),
+            spatial.div_ceil(32),
+            &self.ops.context.limits,
+        )?;
+        let commands = TokenCommands::begin(self.ops.context)?;
+        self.ops.write_f32(ir, input)?;
+        self.ops.write_f32(wr, weight)?;
+        if let Some(bias) = bias {
+            self.ops.write_f32(br, bias)?;
+        } else {
+            self.ops.zero_region(br)?;
+        }
+        self.ops.record_linear_dispatch(
+            &commands,
+            CONV3D_TILED,
+            self.ops.arena_bindings,
+            &push,
+            dispatch,
+        );
+        commands.submit_and_wait()?;
+        output.copy_from_slice(self.ops.read_f32(or, output.len())?);
+        Ok(())
+    }
+}
+
+pub(crate) struct AttentionRuntime {
+    ops: Qwen3Ops<'static>,
+    q: ArenaRegion,
+    k: ArenaRegion,
+    v: ArenaRegion,
+    output: ArenaRegion,
+    pub(crate) capacity: (usize, usize),
+}
+
+#[cfg(test)]
+mod video_gpu_tests {
+    use super::*;
+    use crate::models::diffusion::dreamx::kernels::{attention_scalar_f32, AttentionSpec};
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn video_gpu_online_attention_memory_gate_keeps_baseline_operators_available() {
+        let mut context = Box::new(VulkanContext::new().unwrap());
+        context.limits.max_compute_shared_memory_size = 27 * 1024;
+        assert!(require_online_attention(&context).is_ok());
+        context.limits.max_compute_shared_memory_size = 16 * 1024 + 256;
+        let context = Box::leak(context);
+        assert!(matches!(
+            AttentionRuntime::new(context, (128, 128)),
+            Err(VulkanError::UnsupportedShape(_))
+        ));
+        let ops = Qwen3Ops::new_with_size(context, 1024, 1).unwrap();
+        drop(ops);
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn video_gpu_transposed_weight_cache_tracks_geometry_and_rejects_row_major_recorder() {
+        let context = Box::leak(Box::new(VulkanContext::new().unwrap()));
+        let weight = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let bytes = bytemuck::cast_slice(&weight);
+        let mut runtime = BatchedLinearRuntime::new(context, 1, 4, 4, 3).unwrap();
+        let mut first = [0.0; 4];
+        runtime
+            .matmul_rows(bytes, GpuWeightFormat::F32, &[1.0; 2], 1, 2, 4, &mut first)
+            .unwrap();
+        assert_eq!(first, [3.0, 7.0, 11.0, 15.0]);
+        let mut second = [0.0; 2];
+        runtime
+            .matmul_rows(bytes, GpuWeightFormat::F32, &[1.0; 4], 1, 4, 2, &mut second)
+            .unwrap();
+        assert_eq!(second, [10.0, 26.0]);
+        assert_eq!(runtime.weights.len(), 2);
+        let bindings = runtime.weights[&(bytes.as_ptr() as usize, bytes.len(), 2, 4)].1;
+        let commands = TokenCommands::begin(context).unwrap();
+        let layout = &runtime.layout;
+        assert!(runtime
+            .ops
+            .record_weight_matmul_tiled_rows(
+                &commands,
+                bindings,
+                layout.input,
+                layout.q8,
+                layout.scales,
+                layout.sums,
+                layout.q8,
+                layout.scales,
+                &[(layout.output, 4, 16)],
+                2,
+                1,
+                2,
+            )
+            .is_err());
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn video_gpu_conv3d_matches_cpu_padding_stride_and_partial_tiles() {
+        use crate::models::diffusion::dreamx::kernels::{conv3d_with_options, Conv3dSpec};
+        let context = Box::leak(Box::new(VulkanContext::new().unwrap()));
+        let shape = [2, 3, 4, 9];
+        let pool = crate::core::thread_pool::ComputePool::new(2);
+        for kernel in [[1, 1, 1], [3, 3, 3]] {
+            let wshape = [65, 2, kernel[0], kernel[1], kernel[2]];
+            let input: Vec<f32> = (0..shape.iter().product())
+                .map(|i| (i as f32 * 0.17).sin())
+                .collect();
+            let weight: Vec<f32> = (0..wshape.iter().product())
+                .map(|i| (i as f32 * 0.31).cos())
+                .collect();
+            let bias: Vec<f32> = (0..65).map(|i| i as f32 * 0.01).collect();
+            for (stride, dilation) in [([1, 1, 1], [1, 1, 1]), ([1, 2, 1], [1, 1, 2])] {
+                let spec = Conv3dSpec {
+                    stride,
+                    padding: if kernel[0] == 1 { [0; 3] } else { [1, 1, 2] },
+                    dilation,
+                    groups: 1,
+                };
+                let (expected, out_shape) = {
+                    let _scope =
+                        crate::core::thread_pool::ComputePool::disable_gpu_matmul_for_scope();
+                    conv3d_with_options(&pool, &input, shape, &weight, wshape, Some(&bias), spec)
+                        .unwrap()
+                };
+                let mut runtime =
+                    Conv3dRuntime::new(context, [input.len(), weight.len(), expected.len(), 65])
+                        .unwrap();
+                let mut actual = vec![0.0; expected.len()];
+                runtime
+                    .forward(
+                        &input,
+                        &weight,
+                        Some(&bias),
+                        &mut actual,
+                        shape,
+                        wshape,
+                        out_shape,
+                        spec,
+                    )
+                    .unwrap();
+                let error = actual
+                    .iter()
+                    .zip(&expected)
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0f32, f32::max);
+                eprintln!("Conv3D kernel={kernel:?} stride={stride:?} dilation={dilation:?} max_abs={error}");
+                assert!(error < 3e-5);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn video_gpu_float_projection_preserves_range_and_partial_tiles() {
+        let context = Box::leak(Box::new(VulkanContext::new().unwrap()));
+        let (rows, n_in, n_out) = (33, 130, 65);
+        let input: Vec<f32> = (0..rows * n_in)
+            .map(|i| (i as f32 * 0.37).sin() * 100000.0)
+            .collect();
+        let weights: Vec<f32> = (0..n_in * n_out)
+            .map(|i| (i as f32 * 0.17).cos() * 2.0)
+            .collect();
+        for format in [GpuWeightFormat::F32, GpuWeightFormat::BF16] {
+            let bytes: Vec<u8> = if format == GpuWeightFormat::F32 {
+                weights.iter().flat_map(|w| w.to_le_bytes()).collect()
+            } else {
+                weights
+                    .iter()
+                    .flat_map(|&w| crate::ops::f32_to_bf16(w).to_le_bytes())
+                    .collect()
+            };
+            let mut runtime = BatchedLinearRuntime::new(context, rows, n_in, n_out, 2).unwrap();
+            let mut actual = vec![0.0; rows * n_out];
+            runtime
+                .matmul_rows(&bytes, format, &input, rows, n_in, n_out, &mut actual)
+                .unwrap();
+            for row in 0..rows {
+                for c in 0..n_out {
+                    let expected: f64 = (0..n_in)
+                        .map(|i| {
+                            let w = weights[c * n_in + i];
+                            let w = if format == GpuWeightFormat::F32 {
+                                w
+                            } else {
+                                f32::from_bits((crate::ops::f32_to_bf16(w) as u32) << 16)
+                            };
+                            input[row * n_in + i] as f64 * w as f64
+                        })
+                        .sum();
+                    let error = (actual[row * n_out + c] as f64 - expected).abs();
+                    assert!(
+                        error <= 2.0 + expected.abs() * 2e-5,
+                        "{format:?} row {row} column {c}: {error}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn video_gpu_online_attention_matches_cpu_with_masks_and_partial_tiles() {
+        let context = Box::leak(Box::new(VulkanContext::new().unwrap()));
+        for causal in [false, true] {
+            let spec = AttentionSpec {
+                query_tokens: 9,
+                key_tokens: 67,
+                query_heads: 4,
+                key_value_heads: 2,
+                head_dim: 128,
+                causal,
+                scale: 128.0f32.sqrt().recip(),
+            };
+            let q: Vec<f32> = (0..9 * 4 * 128)
+                .map(|i| (i as f32 * 0.17).sin() * 3.0)
+                .collect();
+            let k: Vec<f32> = (0..67 * 2 * 128)
+                .map(|i| (i as f32 * 0.31).cos() * 3.0)
+                .collect();
+            let v: Vec<f32> = (0..k.len()).map(|i| (i as f32 * 0.13).sin()).collect();
+            let mut runtime = AttentionRuntime::new(context, (q.len(), k.len())).unwrap();
+            let mut actual = vec![0.0; q.len()];
+            runtime.forward(&q, &k, &v, &mut actual, spec).unwrap();
+            let _scope = crate::core::thread_pool::ComputePool::disable_gpu_matmul_for_scope();
+            let expected = attention_scalar_f32(&q, &k, &v, spec).unwrap();
+            let error = actual
+                .iter()
+                .zip(&expected)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f32, f32::max);
+            eprintln!("online attention causal={causal} max_abs={error}");
+            assert!(error < 3e-5);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn video_gpu_wide_vae_attention_matches_cpu() {
+        let context = Box::leak(Box::new(VulkanContext::new().unwrap()));
+        let spec = AttentionSpec {
+            query_tokens: 9,
+            key_tokens: 67,
+            query_heads: 1,
+            key_value_heads: 1,
+            head_dim: 1024,
+            causal: false,
+            scale: 1024.0f32.sqrt().recip(),
+        };
+        let q: Vec<f32> = (0..9 * 1024).map(|i| (i as f32 * 0.17).sin()).collect();
+        let k: Vec<f32> = (0..67 * 1024).map(|i| (i as f32 * 0.31).cos()).collect();
+        let v: Vec<f32> = (0..k.len()).map(|i| (i as f32 * 0.13).sin()).collect();
+        let mut runtime = AttentionRuntime::new(context, (q.len(), k.len())).unwrap();
+        let mut actual = vec![0.0; q.len()];
+        runtime.forward(&q, &k, &v, &mut actual, spec).unwrap();
+        let _scope = crate::core::thread_pool::ComputePool::disable_gpu_matmul_for_scope();
+        let expected = attention_scalar_f32(&q, &k, &v, spec).unwrap();
+        let error = actual
+            .iter()
+            .zip(&expected)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        eprintln!("wide attention max_abs={error}");
+        assert!(error < 3e-5);
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device; native 720p window timing"]
+    fn video_gpu_720p_window_probe() {
+        let context = Box::leak(Box::new(VulkanContext::new().unwrap()));
+        let spec = AttentionSpec {
+            query_tokens: 8 * 23 * 40,
+            key_tokens: 20 * 23 * 40,
+            query_heads: 24,
+            key_value_heads: 24,
+            head_dim: 128,
+            causal: false,
+            scale: 128.0f32.sqrt().recip(),
+        };
+        let q = vec![0.1; spec.query_tokens * 3072];
+        let k = vec![0.2; spec.key_tokens * 3072];
+        let v = vec![0.3; k.len()];
+        let mut runtime = AttentionRuntime::new(context, (q.len(), k.len())).unwrap();
+        let mut output = vec![0.0; q.len()];
+        runtime.forward(&q, &k, &v, &mut output, spec).unwrap();
+        let start = std::time::Instant::now();
+        runtime.forward(&q, &k, &v, &mut output, spec).unwrap();
+        eprintln!(
+            "720p window {} queries, {} keys: {:.6}s; bounded GPU workspace={} bytes",
+            spec.query_tokens,
+            spec.key_tokens,
+            start.elapsed().as_secs_f64(),
+            (q.len() + k.len()) * 8
+        );
+        assert!(output.iter().all(|&v| (v - 0.3).abs() < 3e-4));
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device; native 720p projection timing"]
+    fn video_gpu_720p_projection_probe() {
+        crate::ops::enable_gpu();
+        let rows = 8 * 23 * 40;
+        let input = vec![0.125; rows * 3072];
+        for n_out in [3072, 14336] {
+            let weights: Vec<u8> = (0..3072 * n_out)
+                .flat_map(|_| crate::ops::f32_to_bf16(0.03125).to_le_bytes())
+                .collect();
+            let mut output = vec![0.0; rows * n_out];
+            let gpu = crate::ops::kernel::vulkan::GpuLinear::default();
+            assert!(gpu.try_matmul(
+                &weights,
+                GpuWeightFormat::BF16,
+                &input,
+                &mut output,
+                3072,
+                n_out,
+                rows
+            ));
+            let start = std::time::Instant::now();
+            assert!(gpu.try_matmul(
+                &weights,
+                GpuWeightFormat::BF16,
+                &input,
+                &mut output,
+                3072,
+                n_out,
+                rows
+            ));
+            eprintln!(
+                "720p BF16 projection {rows}x3072 -> {n_out}: {:.6}s",
+                start.elapsed().as_secs_f64()
+            );
+            assert!(output.iter().all(|&v| (v - 12.0).abs() < 1e-4));
+        }
+    }
+}
+
+impl AttentionRuntime {
+    pub(crate) fn new(
+        context: &'static VulkanContext,
+        capacity: (usize, usize),
+    ) -> Result<Self, VulkanError> {
+        require_online_attention(context)?;
+        let mut cursor = 0;
+        let q = f32_region(&mut cursor, capacity.0)?;
+        let k = f32_region(&mut cursor, capacity.1)?;
+        let v = f32_region(&mut cursor, capacity.1)?;
+        let output = f32_region(&mut cursor, capacity.0)?;
+        Ok(Self {
+            ops: Qwen3Ops::new_with_size(context, cursor, 1)?,
+            q,
+            k,
+            v,
+            output,
+            capacity,
+        })
+    }
+
+    pub(crate) fn forward(
+        &mut self,
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        output: &mut [f32],
+        spec: crate::models::diffusion::dreamx::kernels::AttentionSpec,
+    ) -> Result<(), VulkanError> {
+        if spec.query_tokens == 0
+            || spec.key_tokens == 0
+            || spec.head_dim == 0
+            || spec.head_dim > 1024
+            || spec.query_heads == 0
+            || spec.key_value_heads == 0
+            || spec.query_heads % spec.key_value_heads != 0
+            || q.len()
+                != product(
+                    "attention Q",
+                    &[spec.query_tokens, spec.query_heads, spec.head_dim],
+                )?
+            || k.len()
+                != product(
+                    "attention K",
+                    &[spec.key_tokens, spec.key_value_heads, spec.head_dim],
+                )?
+            || v.len() != k.len()
+            || output.len() != q.len()
+            || !spec.scale.is_finite()
+            || (spec.causal && spec.query_tokens > spec.key_tokens)
+        {
+            return Err(VulkanError::UnsupportedShape(
+                "invalid online attention geometry".into(),
+            ));
+        }
+        let push = [
+            self.ops.f32_word(self.q, q.len(), "attention Q")?,
+            self.ops.f32_word(self.k, k.len(), "attention K")?,
+            self.ops.f32_word(self.v, v.len(), "attention V")?,
+            self.ops
+                .f32_word(self.output, output.len(), "attention output")?,
+            as_u32(spec.query_tokens, "attention queries")?,
+            as_u32(spec.key_tokens, "attention keys")?,
+            as_u32(spec.query_heads, "attention heads")?,
+            as_u32(spec.key_value_heads, "attention KV heads")?,
+            as_u32(spec.head_dim, "attention dimension")?,
+            spec.scale.to_bits(),
+            u32::from(spec.causal),
+        ];
+        let dispatch = row_dispatch(
+            spec.query_tokens
+                .div_ceil(if spec.head_dim <= 128 { 16 } else { 8 }),
+            spec.query_heads,
+            &self.ops.context.limits,
+        )?;
+        let commands = TokenCommands::begin(self.ops.context)?;
+        self.ops.write_f32(self.q, q)?;
+        self.ops.write_f32(self.k, k)?;
+        self.ops.write_f32(self.v, v)?;
+        self.ops.record_linear_dispatch(
+            &commands,
+            if spec.head_dim <= 128 {
+                ATTENTION_ONLINE
+            } else {
+                ATTENTION_ONLINE_WIDE
+            },
+            self.ops.arena_bindings,
+            &push,
+            dispatch,
+        );
+        commands.submit_and_wait()?;
+        output.copy_from_slice(self.ops.read_f32(self.output, output.len())?);
+        Ok(())
     }
 }
 
@@ -1452,8 +2033,10 @@ impl<'a> Qwen3Ops<'a> {
                     // and the recorder selects ordinary GPU work instead of
                     // dispatching this placeholder with a tiled grid.
                     Q8_MATMUL_GROUPED_SHADER
-                } else if index == ATTENTION_SCORES_TILED
-                    && require_tiled_attention(context).is_err()
+                } else if (index == ATTENTION_SCORES_TILED
+                    && require_tiled_attention(context).is_err())
+                    || (matches!(index, ATTENTION_ONLINE | ATTENTION_ONLINE_WIDE)
+                        && require_online_attention(context).is_err())
                 {
                     // Keep ordinary Qwen operators available on baseline
                     // devices; DiT rejects this slot before recording it.
@@ -2085,6 +2668,47 @@ impl<'a> Qwen3Ops<'a> {
             self.record_linear_dispatch(commands, pipeline, self.arena_bindings, &push, dispatch);
         }
         self.record_linear_dispatch(commands, format.layout().2, bindings, &push, dispatch);
+        Ok(())
+    }
+
+    /// Only BatchedLinearRuntime uploads these weights in [input, output] order.
+    #[allow(clippy::too_many_arguments)]
+    fn record_transposed_float_matmul_rows(
+        &self,
+        commands: &TokenCommands<'_>,
+        bindings: OperatorBindings,
+        activation: ArenaRegion,
+        outputs: &[(ArenaRegion, usize, usize)],
+        n_in: usize,
+        token_rows: usize,
+        input_stride: usize,
+    ) -> Result<(), VulkanError> {
+        let format = bindings.weight_format(outputs.len())?;
+        if n_in % 2 != 0 || !matches!(format, GpuWeightFormat::BF16 | GpuWeightFormat::F32) {
+            return Err(VulkanError::UnsupportedShape(
+                "transposed float matmul requires BF16/F32 and even input dimension".into(),
+            ));
+        }
+        let (mut push, _) = matmul_rows_push(
+            self.arena.size as usize,
+            &self.context.limits,
+            bindings,
+            activation,
+            activation,
+            None,
+            outputs,
+            n_in,
+            token_rows,
+            input_stride,
+        )?;
+        push[16] = if format == GpuWeightFormat::F32 { 4 } else { 2 };
+        let columns = outputs[0].1;
+        let dispatch = row_dispatch(
+            columns.div_ceil(64),
+            token_rows.div_ceil(32) * outputs.len(),
+            &self.context.limits,
+        )?;
+        self.record_linear_dispatch(commands, FLOAT_MATMUL_TILED, bindings, &push, dispatch);
         Ok(())
     }
 
@@ -7842,7 +8466,7 @@ mod tests {
             .is_err());
         assert_eq!(runtime.weights.len(), 1);
         assert_eq!(context.submission_count(), 0);
-        let key = (weight.as_ptr() as usize, weight.len());
+        let key = (weight.as_ptr() as usize, weight.len(), 4, 1);
         let buffer = runtime.weights[&key].0.buffer;
         runtime.ops.arena.size = arena_size;
         runtime
@@ -8189,6 +8813,8 @@ mod tests {
     fn batched_linear_device_rows_match_and_reuse_weights() {
         use super::{BatchedLinearRuntime, GpuWeightFormat::*};
         let context = Box::leak(Box::new(super::VulkanContext::new().unwrap()));
+        // max_rows is 64: the test runs a 64-row batch at the end. The
+        // descriptor pool holds one set per weight format plus the arena.
         let mut runtime = BatchedLinearRuntime::new(context, 64, 513, 65, 10).unwrap();
         // Keep every source allocation alive: the cache keys are stable slices.
         let weights: Vec<_> = [F32, F16, BF16, Q8_0, Q4_0, Q4_1, Q4_K, Q5_K, Q6_K]
@@ -8221,7 +8847,7 @@ mod tests {
             assert_eq!(context.submission_count(), before + 1);
             assert!(batched[195].is_nan());
             assert_eq!(runtime.weights.len(), slot + 1);
-            let key = (weight.as_ptr() as usize, weight.len());
+            let key = (weight.as_ptr() as usize, weight.len(), 512, 65);
             let buffer = runtime.weights[&key].0.buffer;
             let binding = runtime.weights[&key].1.descriptor_set;
             let mut singles = [0.0; 195];
@@ -8316,7 +8942,7 @@ mod tests {
                 &mut [0.0; 195]
             )
             .is_err());
-        assert_eq!(runtime.weights.len(), 9);
+        assert_eq!(runtime.weights.len(), weights.len());
     }
 
     #[test]
@@ -8867,7 +9493,7 @@ mod tests {
             .unwrap();
         assert_eq!(output, [8.0]);
         let before = context.submission_count();
-        let key = (weight.as_ptr() as usize, weight.len());
+        let key = (weight.as_ptr() as usize, weight.len(), 32, 1);
         let buffer = runtime.weights[&key].0.buffer;
         let spec = GpuWeightFormat::F16.with_mode(GpuMatmulMode::RoundedInputF32);
         assert!(runtime.validate(&weight, spec, 32, 1, 32, 1, 1).is_err());
