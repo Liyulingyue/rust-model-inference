@@ -413,7 +413,7 @@ impl<'a> super::weights::HybridTrunk<'a> {
                         &mut scratch.prepared,
                         pool,
                         il,
-                        token,
+                        base_position.unwrap_or(0) + token,
                     )?;
                 }
             }

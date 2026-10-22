@@ -2653,7 +2653,7 @@ unsafe fn ggml_layer_norm_stats_neon(x: &[f32]) -> (f32, f32) {
     let mut sumsq0 = vdupq_n_f64(0.0);
     let mut sumsq1 = vdupq_n_f64(0.0);
     let mut i = 0;
-    while i + 8 <= n {
+    while i + 4 <= n {
         let v = vld1q_f32(x.as_ptr().add(i));
         let lo = vcvt_f64_f32(vget_low_f32(v));
         let hi = vcvt_high_f64_f32(v);
@@ -2663,7 +2663,7 @@ unsafe fn ggml_layer_norm_stats_neon(x: &[f32]) -> (f32, f32) {
         let sq_hi = vmulq_f64(hi, hi);
         sumsq0 = vaddq_f64(sumsq0, sq_lo);
         sumsq1 = vaddq_f64(sumsq1, sq_hi);
-        i += 8;
+        i += 4;
     }
     let mut partial_sum = 0.0f64;
     let mut partial_sumsq = 0.0f64;
@@ -3580,9 +3580,18 @@ mod tests {
             0x4019d4e4,
         ]
         .map(f32::from_bits);
-        let (mean, variance) = ggml_layer_norm_stats(&input);
-        assert_eq!(mean.to_bits(), 0xbf6c5994);
-        assert_eq!(variance.to_bits(), 0x40b68732);
+        for count in [1, 4, 7, 8] {
+            let values = &input[..count];
+            let mean = (values.iter().map(|&v| f64::from(v)).sum::<f64>() / count as f64) as f32;
+            let variance = values
+                .iter()
+                .map(|&v| f64::from((v - mean) * (v - mean)))
+                .sum::<f64>() as f32
+                / count as f32;
+            let (actual_mean, actual_variance) = ggml_layer_norm_stats(values);
+            assert!((actual_mean - mean).abs() <= 1e-6);
+            assert!((actual_variance - variance).abs() <= 1e-6 * variance.max(1.0));
+        }
     }
 
     #[cfg(target_arch = "aarch64")]
