@@ -460,8 +460,11 @@ mod tests {
 
     #[test]
     fn qwen35_config_rejects_invalid_tensor_dimensions() {
+        // key_length = 0 is caught by the shared loader (src/core/loader.rs)
+        // before the qwen35 head-length pair check runs, so it reports the
+        // single dimension it rejected rather than the pair message.
         for (key, value, expected) in [
-            ("qwen35.attention.key_length", 0, "head lengths"),
+            ("qwen35.attention.key_length", 0, "attention.key_length"),
             ("qwen35.attention.value_length", 0, "head lengths"),
             ("qwen35.attention.value_length", 128, "head lengths"),
             ("qwen35.ssm.time_step_rank", 0, "inner/rank"),
