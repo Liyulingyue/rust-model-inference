@@ -7,7 +7,8 @@ Pass **`--qwen-image-turbo`** with the Turbo checkpoint: the GGUF architecture
 (`qwen_image`) and tensor names do not distinguish the base and Turbo weights.
 The flag selects the checkpoint's fixed eight-step schedule and defaults CFG to 1.
 Explicit step counts other than eight are rejected. Ordinary Qwen-Image-2.1
-keeps its existing schedule and defaults. CPU execution only.
+keeps its existing schedule and defaults. CPU execution is the default; optional
+hardware Vulkan projection offload uses `--features vulkan` and `--gpu`.
 
 ```bash
 RMI_SCALAR=1 target/release-fast/rust-model-inference \
@@ -49,8 +50,9 @@ The independent component Oracle is pinned stable-diffusion.cpp
 `2f886889e6e8b78738d6b87f7191f6018557c551` / ggml
 `4bf5f6000653b7881d00963cd6ddb665ccd62a8d`, using the official Turbo schedule
 loaded separately from the JSON fixture. No external acceleration library is
-used. This checks the released GGUF CPU path; it is not a BF16 Diffusers/GPU
-comparison or a GGUF-conversion quality measurement.
+used. The initial results below check the released GGUF CPU path; the Vulkan
+section compares GPU projections with the same CPU Oracle. Neither establishes
+native BF16 Diffusers parity or GGUF-conversion quality.
 
 ```bash
 CARGO_TARGET_DIR=target/qi21-turbo/trace-build \
@@ -82,9 +84,18 @@ See [the runner documentation](../../tools/oracle/qwen_image_2_1/README.md).
 - SSH Linux focused integration tests: 11 passed on AMD EPYC 9334.
 - Python comparator regressions: 6 passed, including rejection of large errors,
   nonfinite values, structural mismatches and invalid tolerances.
-- Full local library suite: 1,236 passed, 23 failed, 80 ignored. The original
+- Full local library suite before the Vulkan follow-up: 1,236 passed, 23 failed,
+  80 ignored. The original
   HEAD (`973210b6de572b8226cd576da7ace17fb22d8ad5`) has 1,235 passed and exactly
   the same 23 failures / 80 ignored; this is not a passing full-suite claim.
+
+The Vulkan follow-up additionally passed 12 focused integration tests with and
+without the feature. Local Qwen3 session and dense-execution regressions passed
+12 tests; the hardware BF16 tiling and raw-hidden/F32-KV projection checks passed
+on both MoltenVK and RADV. The CPU-scope regression passed without initializing
+hardware. The SSH host also passed the 12 integration tests and these three
+projection/policy checks. The full library suite was not repeated for this
+follow-up.
 
 ## Executed real-weight results
 
@@ -211,11 +222,93 @@ and the default SIMD path on AMD EPYC 9334 failed at its first step with
 No PNG was produced. This is a failed large-image SIMD run; the passing remote
 64×32 scalar comparison above does not cover that configuration.
 
-Linux versus macOS output pixels differ by up to 18 levels. A successful CLI
+Linux versus macOS CPU output pixels differ by up to 18 levels. A successful CLI
 run does not imply cross-platform bitwise identity or passing cross-platform
 numerical parity; comparisons with the same-platform Oracle are separate.
 
 The exact result summary is kept in
 [`turbo_validation.json`](../../tools/oracle/qwen_image_2_1/turbo_validation.json).
-Turbo image-editing end-to-end parity, other GGUF quantizations, native Diffusers
-DiT safetensors and GPU execution are outside this validation scope.
+Turbo image-editing end-to-end parity, other GGUF quantizations and native
+Diffusers DiT safetensors are outside this validation scope.
+
+## Vulkan projection offload
+
+Build with `--features vulkan` and pass `--gpu`. The text encoder's Q/K/V,
+output and FFN projections, the DiT's Q8_0/BF16 projections and the VAE's
+F16 convolution matrices use the existing Rust/Vulkan kernels. Attention,
+normalization, RoPE, activations, F32 KV and the small F32 DiT modulation
+projection remain on the host. VAE im2col, input rounding and layout conversion
+also remain on the host. Independent attention query rows run in the existing
+thread pool; each row retains its original dot/softmax reduction order.
+Weights stay cached for the render. An unavailable,
+software or failed Vulkan device returns an error; CPU fallback is not counted
+as GPU success.
+
+Use **`RMI_SCALAR=1 --gpu`** for the numerical path exercised below. The scalar
+flag controls host operations; these explicit Vulkan projections still execute
+on the GPU. It does not establish numerical alignment for default host SIMD.
+No external acceleration library is used.
+
+```bash
+cargo build --profile release-fast --features vulkan --bin rust-model-inference
+RMI_SCALAR=1 target/release-fast/rust-model-inference \
+  --qwen-image-turbo --gpu \
+  --model models/Qwen-Image-2.1-Turbo-GGUF/qwen-image-2.1-turbo-Q8_0.gguf \
+  --text-encoder models/Qwen3-VL-8B-Instruct-GGUF/Qwen3-VL-8B-Instruct-Q8_0.gguf \
+  --vae models/Qwen-Image-2.1-Turbo/vae/diffusion_pytorch_model.safetensors \
+  --prompt 'A blue cat. 蓝猫 🐈' --width 512 --height 512 \
+  --seed 42 --threads 8 --out target/turbo-gpu.png
+```
+
+For component parity, build with `--features vulkan,parity-trace` and append
+`--gpu` to the runner command above. The runner keeps the pinned CPU Oracle
+independent and retains the same 1% checkpoint and four-level RGBA8 bounds.
+`RMI_COMPUTE_TRACE=1 RUST_GPU_DISPATCH_TRACE=1` records real device submissions,
+weight uploads and allocation counters. An explicit CPU compute scope skips
+offload even after an earlier GPU request in the same process.
+
+On Apple M3 Max / MoltenVK, the fixed-context 64×32 case completed all eight
+steps and VAE decoding. All 2,815 checkpoints / 105,386,513 F32 values passed
+the unchanged bounds. Sampling measured zero error; VAE maximum absolute error
+was `0.11763381958007812`, maximum relative L2 `0.0009098223636591213`.
+All 8,192 RGBA8 bytes differed by at most one level. The runtime recorded 1,982
+Vulkan submissions and 246 static uploads, with peak tracked device allocations
+of 8,097,642,016 bytes. A normal build repeated exactly the same GPU PNG pixels
+in 8.363 seconds including loading; the traced CLI took 273.278 seconds.
+These tiny-image timings include host execution and are not a speedup benchmark.
+The parallel host-attention implementation repeated all these comparisons with
+the same errors and pixels. A normal scalar CPU build also reproduced the
+pre-change CPU PNG pixels in 15.974 seconds; that run overlapped GPU/build work.
+
+On the supplied SSH host, AMD Radeon Graphics (RADV NAVI31, 51,522,830,336 bytes
+reported VRAM) passed the complete Q8_0 text-to-image case with the same scalar
+CPU Oracle. All 2,854 checkpoints / 274,274,866 F32 values passed. Text and
+sampling measured zero error; VAE maximum absolute error was
+`0.20376968383789062`, maximum relative L2 `0.0009691028640275452`.
+The 8,192 RGBA8 bytes differed by at most one level. These comparisons reuse
+the already completed independent Linux scalar Oracle outputs for the same
+fixed inputs, including its own text conditioning, eight-step sampler and VAE.
+The GPU CLI was rerun after the VAE Q/K/V capacity correction.
+
+The final parallel-query traced CLI took 390.549 seconds. An ordinary
+Vulkan build repeated the same GPU PNG pixels in 26.7 seconds. It recorded 2,234 Vulkan submissions,
+498 cumulative static uploads (15,459,581,632 bytes), and peak tracked device
+allocations of 8,097,642,016 bytes. Upload bytes are cumulative across components,
+not simultaneous VRAM usage. The final local/remote source audit matched all
+599 runtime/shader/build files. Timings include loading and host operations;
+the final trace and 512×512 visual run overlap, and no controlled CPU/GPU
+speedup measurement is claimed.
+
+The ordinary Vulkan build also completed the actual long-prompt text-to-PNG
+pipeline at 512×512 on RADV: eight steps, CFG 1, seed 42, eight threads and
+`RMI_SCALAR=1 --gpu`. It took 645.291 seconds, with maximum process RSS
+13,963,321,344 bytes (measured for this child process with `wait4`). It recorded
+74,437 hardware submissions, 498 cumulative static uploads (15,459,581,632
+bytes), and peak tracked device allocations of 8,097,642,016 bytes. The latter
+is the runtime's allocation counter, not a measurement of peak physical VRAM.
+The PNG was visually inspected: the orange tabby, wooden windowsill, cup,
+open book and blurred city background are present; steam is not clearly
+visible. PNG SHA256:
+`d41fa3587ab5f55e06ca9c7fb82983d6447eb06521d969ce8568f17ff428ce6e`.
+The run overlapped the final 64×32 parity check, so this is a functional image
+result, not an isolated benchmark. No 512×512 Oracle alignment is claimed.

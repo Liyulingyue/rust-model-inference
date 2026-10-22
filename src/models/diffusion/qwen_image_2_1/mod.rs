@@ -9,6 +9,8 @@
 use crate::core::tensor::{GGMLType, TensorInfo, TensorSource};
 
 pub mod dit;
+#[cfg(feature = "vulkan")]
+mod gpu;
 mod pipeline;
 pub mod text;
 pub mod vae;

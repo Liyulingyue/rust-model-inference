@@ -866,8 +866,8 @@ pub fn run_qwen_image_2_1_cli(
         || options.cfg_scale.is_some()
         || options.negative_prompt.is_some()
         || options.noise.is_some();
-    if options.gpu {
-        return Err("Qwen-Image-2.1 currently supports CPU execution".into());
+    if options.gpu && !cfg!(feature = "vulkan") {
+        return Err("Qwen-Image-2.1 GPU execution requires --features vulkan".into());
     }
     if !image_mode {
         return run_qwen_image_2_1(
@@ -892,7 +892,6 @@ pub fn run_qwen_image_2_1_cli(
         );
     }
     for (present, flag) in [
-        (options.gpu, "--gpu"),
         (
             options.tts || options.jev || options.embedding || options.bench || options.dump_logits,
             "text/audio modes",

@@ -164,6 +164,49 @@ pub(crate) struct DenseCpu<'a, 'w> {
 }
 
 impl DenseCpu<'_, '_> {
+    pub(crate) fn execute_with_linear(
+        &mut self,
+        op: DenseOp,
+        executor: Option<&mut crate::compute::linear::LinearExecutor<'_, '_>>,
+    ) -> Result<(), String> {
+        if let (DenseOp::Linear { input, projections }, Some(executor)) = (op, executor) {
+            return match *projections {
+                [a] => self.linear_with_executor(input, [a], executor),
+                [a, b] => self.linear_with_executor(input, [a, b], executor),
+                [a, b, c] => self.linear_with_executor(input, [a, b, c], executor),
+                _ => Err("dense linear group must contain 1..=3 projections".into()),
+            };
+        }
+        self.execute(op)
+    }
+
+    fn linear_with_executor<const N: usize>(
+        &mut self,
+        input: DenseTensor,
+        projections: [(DenseMatrix, DenseTensor); N],
+        executor: &mut crate::compute::linear::LinearExecutor<'_, '_>,
+    ) -> Result<(), String> {
+        self.with_outputs(
+            input,
+            projections.map(|(_, out)| out),
+            |this, x, outputs| {
+                let mut ids = Vec::with_capacity(N);
+                for (matrix, _) in projections {
+                    ids.push(
+                        executor
+                            .id_for(this.matrices[matrix as usize])
+                            .map_err(|e| e.to_string())?,
+                    );
+                }
+                let ids = std::array::from_fn(|i| ids[i]);
+                executor
+                    .run_group(ids, x, this.rows, outputs)
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            },
+        )
+    }
+
     fn with_outputs<const N: usize>(
         &mut self,
         input: DenseTensor,

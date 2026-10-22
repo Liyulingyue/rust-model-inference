@@ -96,6 +96,7 @@ def main():
     p.add_argument('--turbo-model-index', default=str(REPO/'tests/fixtures/qwen_image_2_1_turbo/model_index.json'))
     p.add_argument('--relative-l2', type=float, help='numerical error bound for reduced-precision computations')
     p.add_argument('--optimized', action='store_true', help='leave Rust optimizations enabled; select the reference build with --oracle-bin')
+    p.add_argument('--gpu', action='store_true', help='offload Rust projections to hardware Vulkan; CPU Oracle stays independent')
     args = p.parse_args()
     model = 'Qwen-Image-2.1-Turbo' if args.turbo else 'Qwen-Image-2.1'
     args.dit = args.dit or os.environ.get('QWEN_IMAGE_2_1_DIT', str(REPO/f'models/{model}-GGUF/{model.lower()}-Q8_0.gguf'))
@@ -129,6 +130,7 @@ def main():
         command = [args.rust_bin,'--model',args.dit,'--vae',args.vae,'--width','64','--height','32','--steps',args.steps,'--cfg',args.cfg,'--seed','42','--threads',args.threads,'--out',dst/'output.png']
         command += ['--qwen-context-file',context] if case == 'context' else ['--text-encoder',args.text,'--prompt',prompt,'--negative-prompt',negative]
         if args.turbo: command.append('--qwen-image-turbo')
+        if args.gpu: command.append('--gpu')
         if nref:
             command += ['--mmproj',args.mmproj,'--image',fixtures[0][0]]
             for image in fixtures[1:nref]: command += ['--reference',image[0]]
@@ -173,7 +175,7 @@ def main():
         decoded = dst/'oracle-decode.jsonl'
         run([args.oracle_bin,'vae',args.vae,named(oracle,'qwen.sample.latent',args.steps-1),4,2,args.threads],decoded,not args.optimized,dst/'oracle-decode.log')
         stages.append(compare_stage('vae',rust,decoded,'--png',dst/'output.png'))
-        result = dict(case=case,scalar=not args.optimized,width=64,height=32,steps=args.steps,cfg=args.cfg,references=nref,rust_seconds=elapsed,stages=stages)
+        result = dict(case=case,scalar=not args.optimized,gpu=args.gpu,width=64,height=32,steps=args.steps,cfg=args.cfg,references=nref,rust_seconds=elapsed,stages=stages)
         if args.production_rust_bin:
             production_command[0] = args.production_rust_bin
             production_png = dst/'production.png'

@@ -9,6 +9,38 @@ use std::collections::HashMap;
 const PREFIX: &str = "model.diffusion_model";
 
 #[test]
+fn gpu_request_requires_vulkan_and_reaches_the_pipeline_when_built() {
+    let args = [
+        "rmi",
+        "--qwen-image-turbo",
+        "--gpu",
+        "--out",
+        "turbo-test.png",
+        "--qwen-context-file",
+        "unused.f32",
+        "--vae",
+        "unused.safetensors",
+    ]
+    .map(String::from)
+    .to_vec();
+    let options = rust_model_inference::app::parse_cli_options(&args).unwrap();
+    let error = rust_model_inference::app::run_qwen_image_2_1_cli(
+        std::sync::Arc::new(TestSource::default()),
+        &options,
+        1,
+    )
+    .unwrap_err();
+    assert!(
+        error.contains(if cfg!(feature = "vulkan") {
+            "Missing tensor: img_in.weight"
+        } else {
+            "requires --features vulkan"
+        }),
+        "{error}"
+    );
+}
+
+#[test]
 fn turbo_rejects_a_non_eight_step_schedule_before_loading_components() {
     let args: Vec<String> = [
         "rmi",

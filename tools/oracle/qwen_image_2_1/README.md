@@ -125,5 +125,13 @@ Omitting `--relative-l2` preserves the original bitwise comparison.
 The validated Turbo path uses `RMI_SCALAR=1`; default SIMD exceeded the
 declared 1% bounds and is not claimed to pass numerical alignment.
 
+For hardware Vulkan projections, build the Rust CLI with
+`--features vulkan,parity-trace` and add `--gpu` to this runner. The flag is
+passed only to Rust; the CPU Oracle remains independent. Without `--optimized`,
+`RMI_SCALAR=1` preserves host arithmetic while explicit Vulkan projections still
+run on the device. The normal-build repeat must also have `--features vulkan`.
+This is projection and VAE convolution offload; attention and other host
+operations remain on CPU. An unavailable hardware device is an error.
+
 See [the Turbo validation report](../../../docs/develop/QWEN_IMAGE_2_1_TURBO.md)
 for executed cases, artifact hashes, results and limitations.

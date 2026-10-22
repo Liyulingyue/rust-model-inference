@@ -90,6 +90,8 @@ pub(crate) struct QwenImage21Dit {
     q8_values: Vec<u8>,
     q8_scales: Vec<f32>,
     thread_pool: rayon::ThreadPool,
+    #[cfg(feature = "vulkan")]
+    gpu: Option<super::gpu::GpuProjections>,
 }
 
 impl QwenImage21Dit {
@@ -105,6 +107,8 @@ impl QwenImage21Dit {
             q8_values: Vec::new(),
             q8_scales: Vec::new(),
             thread_pool,
+            #[cfg(feature = "vulkan")]
+            gpu: super::gpu::GpuProjections::new(12288, 24576, 201)?,
         })
     }
 
@@ -143,6 +147,17 @@ impl QwenImage21Dit {
             .ok_or_else(|| format!("Missing tensor data: {name}"))?;
         if weight.len() != weight_bytes {
             return Err(format!("Invalid {name} weight length"));
+        }
+        #[cfg(feature = "vulkan")]
+        if let Some(gpu) = &mut self.gpu {
+            return gpu.run(
+                weight,
+                crate::vulkan::ops::GpuWeightFormat::Q8_0,
+                input,
+                output,
+                n_in,
+                n_out,
+            );
         }
         let blocks = n_in / 32;
         let q8_len = tokens
@@ -184,13 +199,29 @@ impl QwenImage21Dit {
     /// every output element is a scalar f64-accumulated dot (the aarch64
     /// ggml_vec_dot_bf16 fallback path).
     fn bf16_linear(
-        &self,
+        &mut self,
         name: &str,
         n_in: usize,
         n_out: usize,
         input: &[f32],
         output: &mut [f32],
     ) -> Result<(), String> {
+        #[cfg(feature = "vulkan")]
+        if let Some(gpu) = &mut self.gpu {
+            use crate::vulkan::ops::{GpuMatmulMode, GpuWeightFormat};
+            let weight = self
+                .source
+                .tensor_slice(name)
+                .ok_or_else(|| format!("Missing tensor data: {name}"))?;
+            return gpu.run(
+                weight,
+                GpuWeightFormat::BF16.with_mode(GpuMatmulMode::RoundedBf16),
+                input,
+                output,
+                n_in,
+                n_out,
+            );
+        }
         let weight = self.weight_bytes(name)?;
         let tokens = input.len() / n_in;
         if tokens * n_in != input.len() {
@@ -688,8 +719,6 @@ impl QwenImage21Dit {
             }
         }
         let mut attn_out = vec![0.0f32; hidden * seq];
-        let mut scores = vec![0.0f32; seq];
-        let mut probs = vec![0.0f32; seq];
         #[cfg(feature = "parity-trace")]
         for (name, values) in [("qwen.debug.attn.q", &q), ("qwen.debug.attn.k", &k)] {
             let transposed: Vec<_> = (0..hidden * seq)
@@ -706,6 +735,7 @@ impl QwenImage21Dit {
                 &transposed,
             ));
         }
+        // shortcut: attention stays on CPU until Vulkan meets the Q8 pipeline error bound.
         // Text queries attend causally to the text keys; image queries attend
         // to the whole sequence.
         for (index, segment) in segments.iter().enumerate() {
@@ -716,33 +746,42 @@ impl QwenImage21Dit {
                 segment.end,
                 segment.image.is_none(),
             );
-            for token in query_start..query_end {
-                for head in 0..heads {
-                    let q_base = token * hidden + head * head_dim;
-                    for key in 0..key_end {
-                        let k_base = key * hidden + head * head_dim;
-                        scores[key] =
-                            crate::ops::dot_f32(&q[q_base..], &k[k_base..], head_dim) * scale;
-                    }
-                    if causal {
-                        for (key, score) in scores[..key_end].iter_mut().enumerate() {
-                            if key > token {
-                                *score = f32::NEG_INFINITY;
+            self.thread_pool.install(|| {
+                attn_out[query_start * hidden..query_end * hidden]
+                    .par_chunks_mut(hidden)
+                    .enumerate()
+                    .for_each_init(
+                        || (vec![0.0f32; key_end], vec![0.0f32; key_end]),
+                        |(scores, probs), (row, output)| {
+                            let token = query_start + row;
+                            for head in 0..heads {
+                                let q_base = token * hidden + head * head_dim;
+                                for key in 0..key_end {
+                                    let k_base = key * hidden + head * head_dim;
+                                    scores[key] =
+                                        crate::ops::dot_f32(&q[q_base..], &k[k_base..], head_dim)
+                                            * scale;
+                                }
+                                if causal {
+                                    for (key, score) in scores.iter_mut().enumerate() {
+                                        if key > token {
+                                            *score = f32::NEG_INFINITY;
+                                        }
+                                    }
+                                }
+                                probs.copy_from_slice(scores);
+                                crate::ops::softmax_approx_inplace(probs);
+                                for d in 0..head_dim {
+                                    output[head * head_dim + d] = crate::ops::dot_f32(
+                                        &v_transposed[(head * head_dim + d) * seq..],
+                                        probs,
+                                        key_end,
+                                    );
+                                }
                             }
-                        }
-                    }
-                    probs[..key_end].copy_from_slice(&scores[..key_end]);
-                    crate::ops::softmax_approx_inplace(&mut probs[..key_end]);
-                    let out_base = token * hidden + head * head_dim;
-                    for d in 0..head_dim {
-                        attn_out[out_base + d] = crate::ops::dot_f32(
-                            &v_transposed[(head * head_dim + d) * seq..],
-                            &probs,
-                            key_end,
-                        );
-                    }
-                }
-            }
+                        },
+                    );
+            });
             #[cfg(feature = "parity-trace")]
             crate::parity_trace::report(crate::parity_trace::checkpoint(
                 &format!("qwen.debug.attn.seg{index}"),

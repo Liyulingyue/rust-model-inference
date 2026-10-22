@@ -19,6 +19,10 @@ pub(crate) struct QwenImage21Vae {
     pool: rayon::ThreadPool,
     mean: [f32; 64],
     std: [f32; 64],
+    #[cfg(feature = "vulkan")]
+    gpu: std::cell::RefCell<Option<super::gpu::GpuProjections>>,
+    #[cfg(feature = "vulkan")]
+    gpu_weights: std::cell::RefCell<std::collections::HashMap<String, Vec<u8>>>,
 }
 
 impl QwenImage21Vae {
@@ -64,6 +68,11 @@ impl QwenImage21Vae {
                 .map_err(|e| e.to_string())?,
             mean: stats("latents_mean")?,
             std: stats("latents_std")?,
+            #[cfg(feature = "vulkan")]
+            // The middle attention convolution emits Q, K and V together.
+            gpu: std::cell::RefCell::new(super::gpu::GpuProjections::new(1152 * 9, 1152 * 3, 128)?),
+            #[cfg(feature = "vulkan")]
+            gpu_weights: std::cell::RefCell::default(),
         };
         for (name, dims) in [
             ("post_quant_conv.weight", vec![1, 1, 64, 64]),
@@ -170,6 +179,30 @@ impl QwenImage21Vae {
             h,
             w,
         };
+        #[cfg(feature = "vulkan")]
+        if let Some(gpu) = self.gpu.borrow_mut().as_mut() {
+            use crate::vulkan::ops::{GpuMatmulMode, GpuWeightFormat};
+            // Keep converted storage alive: the upload cache keys immutable weights by address.
+            let mut cache = self.gpu_weights.borrow_mut();
+            let weights = cache.entry(key).or_insert(weights);
+            let input: Vec<f32> = patches.iter().map(|&v| crate::ops::f16_to_f32(v)).collect();
+            let mut rows = vec![0.0; y.data.len()];
+            gpu.run(
+                weights,
+                GpuWeightFormat::F16.with_mode(GpuMatmulMode::RoundedInputF32),
+                &input,
+                &mut rows,
+                patch_len,
+                c,
+            )?;
+            for oc in 0..c {
+                for p in 0..spatial {
+                    y.data[oc * spatial + p] = rows[p * c + oc] * 128.0 + bias[oc];
+                }
+            }
+            self.report(name, &y)?;
+            return Ok(y);
+        }
         self.pool.install(|| {
             y.data
                 .par_chunks_mut(spatial)

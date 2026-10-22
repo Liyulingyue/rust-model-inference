@@ -131,12 +131,18 @@ impl TextConditioner {
             KvFormat::F32,
             KvLifecycle::Ephemeral,
         )?;
-        let hidden = session.forward_hidden_sequence_raw(Qwen3Input {
+        let input = Qwen3Input {
             token_ids: &tokens,
             positions: &positions,
             embeddings: Some(&embeddings),
             deepstack_embeddings: (!references.is_empty()).then_some(deepstack.as_slice()),
-        })?;
+        };
+        let hidden =
+            if crate::compute::ComputePolicy::legacy() != crate::compute::ComputePolicy::Cpu {
+                session.forward_hidden_sequence_raw_with_linear_offload(input)?
+            } else {
+                session.forward_hidden_sequence_raw(input)?
+            };
         let context = hidden[drop * 4096..].to_vec();
         trace("qwen.text.context", &[4096, tokens.len() - drop], &context)?;
         if !references.is_empty() {
