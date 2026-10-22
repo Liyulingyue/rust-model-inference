@@ -2765,3 +2765,75 @@ CPU 直接吃 LPDDR），8B 以上在设备空闲时才可能赢——这两个�
 就分叉（CPU 路径与 GPU 路径之间也分叉），这是量化 + 非逐位一致的正常表现，
 不是 bug 的证据；要判对错得用同权重的 llama.cpp 参照（TODO-036 的 4B contract
 失败同理）。
+
+### TODO-040: Astronex GPU 路径在同 seed 下不可复现（GB10，2026-10-21）
+
+同一个二进制、同一个 prompt、同一个 `--seed 42`，两次 GPU 跑出来的
+256x144 视频逐帧 PSNR 只有 18.4–19.2 dB；把采样后的 latent 导出来
+（`RMI_ASTRONEX_LATENT_OUT`）对比，61,440 个元素里有 61,439 个不同，
+最大绝对差 1.78（latent 本身最大幅值 8.66）。差异在 VAE 之前就出现，
+所以 VAE 和文本编码器都不是源头。
+
+已经排除的：
+
+- online attention kernel 与 BF16 投影 kernel **单独**反复调用都逐位一致
+  （`examples/astronex_gpu_determinism.rs`）；
+- 文本编码器里第一个出现差异的算子**永远是 GPU 投影**：输入哈希相同、
+  权重相同，输出哈希不同（`examples/astronex_text_determinism.rs`）；
+- 关掉 GPU matmul（`RUST_GPU_MIN_OUTPUTS`）或把 `ComputePool` 降到单线程，
+  文本编码器就完全可复现 → CPU 路径和线程池自身的归约都不是源头；
+- 差异是**间歇性**的：有些次编码逐位相同，而且首次出错的算子在几次运行之间会移动。
+
+一个已知但未修的规范问题：`src/vulkan.rs` 的 `host_write_barrier` 是在
+`begin_commands` 里记录的，位置在它本该覆盖的 host 写**之前**（权重上传与
+输入写都在其后）。把屏障挪到 dispatch 之前能降低发生率但不能根除，
+所以 host→device 可见性不是唯一原因。
+
+下一步：在**独占设备**上重测（这台 GB10 有另一个租户占着 65 GB 和 79–92% 利用率），
+确认是驱动/内存压力导致的偶发，还是我们自己的同步缺口。
+
+### TODO-041: Astronex 视频输出依赖系统 `ffmpeg`
+
+`src/models/diffusion/dreamx/media.rs` 直接 spawn `ffmpeg`，没有它
+`--astronex` 跑完采样和 VAE 解码后在写视频时失败（`Start ffmpeg for DreamX
+video: No such file or directory`）。这台机器没有系统 ffmpeg，验证时用的是
+`imageio-ffmpeg` 装进仓库 venv 的静态构建（7.0.2，含 libx264）。
+要么在 USAGE 里写明这个运行期依赖，要么在 `--out` 不支持时给出更早、更明确的报错。
+
+### TODO-042: Astronex 权重契约的 pinned commit 不公开
+
+转换器的形状契约来自 `references/astronex-world-contract`，钉在
+`dec4ec502f7113a1ab07b78ae40a7ac1b88b2eeb`；这个 commit 不在
+`github.com/Astronex-Robotics/Astronex-World` 的任何 ref 里，也不在
+gouzil/rust-model-inference 的远端分支里。本地只能用下载到的 safetensors
+自己生成 header，等于 denoiser/VAE 的形状 pin 变成自证（张量数
+898/242/196、dtype、`model.*` 前缀和 UMT5 的硬编码形状仍然生效）。
+要么把契约 header 随仓库分发，要么让转换器在缺契约时明确报「未钉住」而不是静默通过。
+
+顺带记一条：官方图的 trace 在本机跑到第 1,438 个 checkpoint（整个文本编码器 +
+denoiser 大部分）后停在 `NotImplementedError: Uncovered floating factory:
+linspace.default` —— scalar oracle 的算子白名单没覆盖 `linspace`（solver 的
+timestep 网格），不是权重或图的问题。要跑完整官方图 trace，得先给 oracle 补
+`linspace` 的白名单条目。
+
+### TODO-043: 对拍生成文本必须显式 `--temp 0`（默认是 0.6 采样）
+
+排查 BF16/F32 Prepared 新路径的干扰面时（2026-10-22），前两批实验全部作废，
+原因就是这个：CLI 的默认温度是 **0.6**（`src/app/cli/validate.rs:321`），
+所以不带 `--temp 0` 的「同 seed 两次对比」其实是在比较两次独立采样。
+
+它产生的假象很有说服力：同一二进制、同一 prompt，CPU 连续两次结果不同，
+其中一次把澳大利亚首都答成 Melbourne（错误答案），一次答成 Canberra；
+统计「与 CPU 参考的最长公共前缀」也随之变成噪声。补上 `--temp 0` 之后
+CPU 侧逐位可复现（同 1 和 8 线程都一致），所有差异才变得可解释。
+
+顺带记第二个坑：选测试对象时必须先静态确认它**真的走到被改的代码路径**。
+Qwen3-0.6B-BF16 看起来是最干净的受害者（197 个纯 BF16 二维权重），实际上它
+用 `with_bf16_input` 构造 kernel，mode 落在 `RoundedBf16`，根本不进新分支，
+于是「输出一致」只证明了没变化。`dump_dispatch_log` 只在测试里调用，CLI 读不到，
+只能从 `rounds_bf16_input()` 的来源反推哪些模型会命中。
+
+排查结论：主力文本模型（Qwen3 / Qwen3.5 / Edge0 / ERNIE）全部不命中，
+Z-Image 代码零改动且 3/3 逐位复现基线 md5，含 110 个 F32 二维权重的
+occamy-1.0 在 `--temp 0` 下 GPU 与 CPU 逐位一致。尚未实测的是少数多模态
+projector（ZDTaichu5 mmproj、LongCat）与几个 MoE gate。

@@ -13,6 +13,7 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
         match args[i].as_str() {
             "--yue2" => options.yue2 = true,
             "--dreamx" => options.dreamx = true,
+            "--astronex" => options.astronex = true,
             "--planner" => {
                 options.planner = Some(required_path_value(args, &mut i, "--planner")?);
             }
@@ -125,6 +126,15 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                     value
                         .parse::<usize>()
                         .map_err(|error| format!("Invalid --steps value: {error}"))?,
+                );
+                i += 1;
+            }
+            "--video-frames" => {
+                let value = args.get(i + 1).ok_or("Missing value for --video-frames")?;
+                options.astronex_frames = Some(
+                    value
+                        .parse::<usize>()
+                        .map_err(|error| format!("Invalid --video-frames value: {error}"))?,
                 );
                 i += 1;
             }

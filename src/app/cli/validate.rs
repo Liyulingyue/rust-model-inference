@@ -14,6 +14,8 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
             || options.tts
             || options.yue2
             || options.dreamx
+            || options.astronex
+            || options.astronex_frames.is_some()
             || options.laya_request.is_some()
             || options.prompt.is_some()
             || options.planner.is_some()
@@ -30,6 +32,10 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
         {
             return Err("--timestral-request is a forecasting mode; generation, media, server and other task modes are unsupported".into());
         }
+        return Ok(());
+    }
+    if options.astronex || options.astronex_frames.is_some() {
+        crate::app::cli::astronex_cli_options(options)?;
         return Ok(());
     }
     if options.width.is_some()

@@ -26,6 +26,7 @@ fn timestral_request_is_a_forecast_mode() {
         "--embedding",
         "--serve",
         "--dreamx",
+        "--astronex",
         "--yue2",
     ] {
         let conflicting = args
@@ -54,6 +55,20 @@ fn timestral_request_is_a_forecast_mode() {
 
 #[test]
 fn forecast_conflicts_fail_before_other_task_dispatch() {
+    for flags in [vec!["--astronex"], vec!["--video-frames", "9"]] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_rust-model-inference"))
+            .args([
+                "--model",
+                "missing.gguf",
+                "--timestral-request",
+                "missing.json",
+            ])
+            .args(flags)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("forecasting mode"));
+    }
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_rust-model-inference"))
         .args([
             "--model",

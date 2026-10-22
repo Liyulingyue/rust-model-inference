@@ -17,6 +17,7 @@ pub enum EmbeddingOutput {
 pub struct CliOptions {
     pub yue2: bool,
     pub dreamx: bool,
+    pub astronex: bool,
     pub planner: Option<PathBuf>,
     pub perception: Option<PathBuf>,
     pub scenes: Option<PathBuf>,
@@ -67,6 +68,9 @@ pub struct CliOptions {
     pub prefill_batch_size: Option<usize>,
     pub repetition_penalty: Option<f32>,
     pub steps: Option<usize>,
+    /// Astronex output latent-frame count. `--frames` remains reserved for
+    /// Qwen-Drive's frame manifest, so the video path uses `--video-frames`.
+    pub astronex_frames: Option<usize>,
     pub resolution: Option<usize>,
     pub width: Option<usize>,
     pub height: Option<usize>,
@@ -288,6 +292,17 @@ pub struct DreamXCliOptions {
     pub dry_run: bool,
     pub overwrite: bool,
     pub allow_memory_overcommit: bool,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct AstronexCliOptions {
+    pub model: PathBuf,
+    pub mmproj: PathBuf,
+    pub image: Option<PathBuf>,
+    pub prompt: String,
+    pub out: PathBuf,
+    pub options: crate::models::diffusion::astronex_world::AstronexOptions,
+    pub overwrite: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]

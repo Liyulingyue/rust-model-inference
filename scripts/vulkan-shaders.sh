@@ -40,6 +40,10 @@ shader_names=(
     q8_matmul_tiled_dp4a_wide_add
     f16_matmul_tiled
     attention_scores_tiled
+    float_matmul_tiled
+    attention_online
+    attention_online_wide
+    conv3d_tiled
 )
 manifest="$root_dir/shaders/manifest.sha256"
 
@@ -83,6 +87,7 @@ hash_files() {
     local files=()
     for name in "${shader_names[@]}"; do
         files+=("shaders/glsl/$name.comp" "shaders/bin/$name.spv")
+        if [[ "$name" == "attention_online" ]]; then files+=("shaders/glsl/attention_online.glsl"); fi
     done
     files+=(shaders/glsl/*.glsl)
     if command -v sha256sum >/dev/null 2>&1; then
@@ -105,7 +110,7 @@ check_workgroup_limit() {
     # Optional DiT attention is gated on both device limits in Vulkan ops;
     # keep the baseline shaders within the original 64x1x1 requirement.
     case "${shader##*/}" in
-        attention_scores_tiled.spv) limit=256 ;;
+        attention_scores_tiled.spv|attention_online.spv|attention_online_wide.spv) limit=256 ;;
     esac
     spirv-dis "$shader" -o - | awk -v shader="$shader" -v limit="$limit" '
         $1 == "OpExecutionMode" && $3 == "LocalSize" {

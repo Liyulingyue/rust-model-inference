@@ -3,7 +3,10 @@
 use super::Kernel;
 use crate::core::tensor::GGMLType;
 use crate::ops::quant::BlockQ8K;
-use crate::vulkan::ops::{BatchedLinearRuntime, Conv2dRuntime, GpuMatmulSpec, GpuWeightFormat};
+use crate::vulkan::ops::{
+    AttentionRuntime, BatchedLinearRuntime, Conv2dRuntime, Conv3dRuntime, GpuMatmulSpec,
+    GpuWeightFormat,
+};
 use std::sync::Mutex;
 
 #[derive(Default)]
@@ -56,7 +59,14 @@ impl GpuLinear {
         n_out: usize,
         rows: usize,
     ) -> usize {
-        let limit = if spec.into().uses_tiled_f16() {
+        let spec = spec.into();
+        // The tiled paths amortize a fence over many rows: F16 in the prepared
+        // mode, and BF16/F32 in the prepared mode through the transposed float
+        // kernel. The dot and rounded modes reduce serially and stay small.
+        let limit = if spec.uses_tiled_f16()
+            || (matches!(spec.format, GpuWeightFormat::BF16 | GpuWeightFormat::F32)
+                && spec.mode == crate::vulkan::ops::GpuMatmulMode::Prepared)
+        {
             // Target 16 MiB of host input/output while amortizing fence waits.
             (4 * 1024 * 1024 / n_in.saturating_add(n_out).max(1)).clamp(1, 4096)
         } else {
@@ -148,6 +158,111 @@ impl GpuLinear {
                 *state = None;
                 false
             }
+        }
+    }
+}
+
+pub(crate) fn try_attention(
+    query: &[f32],
+    key: &[f32],
+    value: &[f32],
+    spec: crate::models::diffusion::dreamx::kernels::AttentionSpec,
+) -> Option<Vec<f32>> {
+    if !offload_enabled() || spec.head_dim > 1024 {
+        return None;
+    }
+    static RUNTIME: std::sync::OnceLock<Mutex<Option<AttentionRuntime>>> =
+        std::sync::OnceLock::new();
+    let context = crate::ops::get_vulkan_context()?;
+    let mut state = RUNTIME.get_or_init(Mutex::default).lock().unwrap();
+    let mut output = vec![0.0; query.len()];
+    let result = (|| {
+        if state.as_ref().is_none_or(|runtime| {
+            query.len() > runtime.capacity.0 || key.len() > runtime.capacity.1
+        }) {
+            let old = state.as_ref().map_or((0, 0), |runtime| runtime.capacity);
+            *state = None;
+            *state = Some(AttentionRuntime::new(
+                context,
+                (old.0.max(query.len()), old.1.max(key.len())),
+            )?);
+        }
+        state
+            .as_mut()
+            .unwrap()
+            .forward(query, key, value, &mut output, spec)
+    })();
+    match result {
+        Ok(()) if output.iter().all(|v| v.is_finite()) => Some(output),
+        Ok(()) => {
+            crate::vulkan::mark_gpu_broken("non-finite attention output");
+            *state = None;
+            None
+        }
+        Err(crate::vulkan::VulkanError::UnsupportedShape(_)) => None,
+        Err(error) => {
+            crate::vulkan::mark_gpu_broken(&error.to_string());
+            *state = None;
+            None
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn try_conv3d(
+    input: &[f32],
+    weight: &[f32],
+    bias: Option<&[f32]>,
+    output: &mut [f32],
+    input_shape: [usize; 4],
+    weight_shape: [usize; 5],
+    output_shape: [usize; 4],
+    spec: crate::models::diffusion::dreamx::kernels::Conv3dSpec,
+) -> bool {
+    if !offload_enabled() || spec.groups != 1 {
+        return false;
+    }
+    let Some(context) = crate::ops::get_vulkan_context() else {
+        return false;
+    };
+    static RUNTIME: std::sync::OnceLock<Mutex<Option<Conv3dRuntime>>> = std::sync::OnceLock::new();
+    let mut state = RUNTIME.get_or_init(Mutex::default).lock().unwrap();
+    let needed = [input.len(), weight.len(), output.len(), output_shape[0]];
+    let result = (|| {
+        if state
+            .as_ref()
+            .is_none_or(|runtime| needed.iter().zip(runtime.capacity).any(|(&n, c)| n > c))
+        {
+            let old = state.as_ref().map_or([0; 4], |runtime| runtime.capacity);
+            *state = None;
+            *state = Some(Conv3dRuntime::new(
+                context,
+                std::array::from_fn(|i| old[i].max(needed[i])),
+            )?);
+        }
+        state.as_mut().unwrap().forward(
+            input,
+            weight,
+            bias,
+            output,
+            input_shape,
+            weight_shape,
+            output_shape,
+            spec,
+        )
+    })();
+    match result {
+        Ok(()) if output.iter().all(|v| v.is_finite()) => true,
+        Ok(()) => {
+            crate::vulkan::mark_gpu_broken("non-finite Conv3D output");
+            *state = None;
+            false
+        }
+        Err(crate::vulkan::VulkanError::UnsupportedShape(_)) => false,
+        Err(error) => {
+            crate::vulkan::mark_gpu_broken(&error.to_string());
+            *state = None;
+            false
         }
     }
 }

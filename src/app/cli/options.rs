@@ -1,9 +1,111 @@
 use super::types::{
-    CliOptions, DreamXCliOptions, DreamXOptions, DreamXRefinerOptions, EmbeddingOutput,
-    LongCatCliOptions, PlanningMode, QwenDriveCliOptions, QwenDriveHead, YuE2CliOptions,
-    ZImageCliOptions,
+    AstronexCliOptions, CliOptions, DreamXCliOptions, DreamXOptions, DreamXRefinerOptions,
+    EmbeddingOutput, LongCatCliOptions, PlanningMode, QwenDriveCliOptions, QwenDriveHead,
+    YuE2CliOptions, ZImageCliOptions,
 };
+use crate::models::diffusion::astronex_world::{AstronexMode, AstronexOptions};
 use crate::models::diffusion::longcat::LongCatKind;
+
+/// Parse the explicit Astronex-World video route.  Its components are a
+/// denoiser GGUF plus one `mmproj` GGUF containing UMT5 and the Wan VAE.
+pub fn astronex_cli_options(options: &CliOptions) -> Result<Option<AstronexCliOptions>, String> {
+    let unique = options.astronex_frames.is_some();
+    if !options.astronex {
+        return if unique {
+            Err("--video-frames requires --astronex".into())
+        } else {
+            Ok(None)
+        };
+    }
+    let conflict = if options.dreamx {
+        Some("--dreamx")
+    } else if options.yue2 {
+        Some("--yue2")
+    } else if options.tts {
+        Some("--tts")
+    } else if options.edit {
+        Some("--edit")
+    } else if options.audio.is_some() {
+        Some("--audio")
+    } else if options.video.is_some() {
+        Some("--video")
+    } else if options.embedding {
+        Some("--embedding")
+    } else if options.jev {
+        Some("--jev")
+    } else if options.text_encoder.is_some() {
+        Some("--text-encoder")
+    } else if options.vae.is_some() {
+        Some("--vae")
+    } else if !options.references.is_empty() || options.cfg.is_some() || options.noise.is_some() {
+        Some("Mage-Flow flags")
+    } else if options.resolution.is_some() {
+        Some("--resolution (use --width/--height)")
+    } else {
+        None
+    };
+    if let Some(conflict) = conflict {
+        return Err(format!("--astronex cannot be used with {conflict}"));
+    }
+    let model = options.model.clone();
+    if model.as_os_str().is_empty() {
+        return Err("--astronex requires --model".into());
+    }
+    let mmproj = options
+        .mmproj
+        .clone()
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or("--astronex requires --mmproj")?;
+    let prompt = options
+        .prompt
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or("--astronex requires a non-empty --prompt")?;
+    let out = options
+        .out
+        .clone()
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or("--astronex requires --out")?;
+    if options
+        .image
+        .as_deref()
+        .is_some_and(|path| path.as_os_str().is_empty())
+    {
+        return Err("--astronex --image path must not be empty".into());
+    }
+    if out.extension().and_then(|value| value.to_str()) != Some("mp4") {
+        return Err("--astronex requires an .mp4 --out path".into());
+    }
+    if options.frames.is_some() {
+        return Err("--frames is reserved for Qwen-Drive; use --video-frames for Astronex".into());
+    }
+    let defaults = AstronexOptions::default();
+    let astronex = AstronexOptions {
+        mode: if options.image.is_some() {
+            AstronexMode::ImageToVideo
+        } else {
+            AstronexMode::TextToVideo
+        },
+        width: options.width.unwrap_or(defaults.width),
+        height: options.height.unwrap_or(defaults.height),
+        frames: options.astronex_frames.unwrap_or(defaults.frames),
+        fps: options.fps.unwrap_or(defaults.fps),
+        steps: options.steps.unwrap_or(defaults.steps),
+        guidance_scale: options.cfg_scale.unwrap_or(defaults.guidance_scale),
+        seed: u64::try_from(options.seed.unwrap_or(defaults.seed as i64))
+            .map_err(|_| "--astronex --seed must be non-negative".to_string())?,
+    };
+    astronex.validate()?;
+    Ok(Some(AstronexCliOptions {
+        model,
+        mmproj,
+        image: options.image.clone(),
+        prompt,
+        out,
+        options: astronex,
+        overwrite: options.overwrite,
+    }))
+}
 
 /// Parse the LongCat Image Edit flags, or `None` when the invocation is not
 /// for LongCat. Selected by `--kind` / `--components`, which no other model
