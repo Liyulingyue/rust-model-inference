@@ -591,5 +591,21 @@
     "src/models/diffusion/flux3/dit.rs": "cc134cd3854d837d5f5b9470f9e994fabd1030c1e29d7fb79f918e7e2a3bfba6",
     "src/models/diffusion/flux3/mod.rs": "4155165f6a4bbb42beafa123d6559ce814e7fe7999fa0c3c852ce88680f5894f",
     "src/ops/kernel/vulkan.rs": "ec8f716777ecb2b521311989178f183e1b165fda0b57a043c6e8f8e797e1b91b"
+  },
+  "performance": {
+    "report": "performance.json",
+    "date": "2026-10-23",
+    "paired_resolution": [
+      256,
+      256
+    ],
+    "paired_steps": 2,
+    "repeats_per_backend": 3,
+    "cpu_median_seconds": 274.2608125284314,
+    "gpu_median_seconds": 57.84431742876768,
+    "end_to_end_speedup": 4.741361376874567,
+    "second_denoise_step_speedup": 13.961168408983129,
+    "gpu_16_step_seconds": 154.79569085128605,
+    "shared_host": true
   }
 }

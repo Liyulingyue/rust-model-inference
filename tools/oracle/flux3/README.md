@@ -169,9 +169,10 @@ No threshold was relaxed for GPU execution.
 
 Neither run reports a GPU error or fallback. These are the last DiT executor
 counter snapshots, not whole-process physical VRAM peaks; VAE decoding follows.
-A separate 256x256, default 16-step `--compute auto` CLI run exits successfully
+An earlier release-fast 256x256, default 16-step `--compute auto` CLI run exits successfully
 in 155.29 seconds and produces the requested red cube scene. It has no numerical
-Oracle comparison or comparable CPU timing, so it does not establish speedup.
+Oracle comparison or matching 16-step CPU timing, so it does not establish a
+16-step speedup.
 
 Hardware regressions cover a 257-row BF16 projection (two staging tiles and a
 tail), repeated execution without another static upload, scalar-mode CPU
@@ -197,6 +198,43 @@ a later parallel run also failed the ASR projector test, which passes alone
 and in the final serial run. No root cause is attributed to that instability.
 Shared Qwen trunk regressions pass (28 passed, 1 ignored). The full suite is not
 green; failure names and repeated-run results are recorded in `validation.json`.
+
+### Performance (2026-10-23)
+
+The same `release` binary (`--features vulkan`, without `parity-trace`) is timed
+on the EPYC 9334 host with 16 Rust threads and a 16-core cgroup quota. GPU runs
+select the NAVI31 device at PCI `0000:c3:00.0`, `/dev/dri/renderD134`. All runs use
+the same weights, caption, seed 42, 256x256 output, **two steps**, no references,
+and explicit `--compute cpu` / `--compute auto` policies. Model files are read
+before each timed run; process initialization, model setup and GPU uploads are
+included. Separate 64x64/two-step warmups precede measurement. Rounds alternate
+backend order, with no concurrent CPU/GPU generation from this benchmark.
+
+| Round | CPU total seconds | Hybrid Vulkan total seconds |
+| --- | ---: | ---: |
+| 1 | 315.99 | 54.22 |
+| 2 | 180.66 | 57.84 |
+| 3 | 274.26 | 69.76 |
+| Median | 274.26 | 57.84 |
+
+The ratio of total-time medians is **4.74x**. The second denoise step takes
+106.61s / 7.64s (CPU / GPU medians, **13.96x**); this is the measured second step,
+not an extrapolated 16-step CPU time. VAE medians are 5.02s / 2.64s; process peak
+RSS medians are 15.32 / 15.60 GiB. Selected-device GPU memory sampling records
+about 9.27 GiB of host-backed GTT memory in GPU rounds 2/3; device VRAM and GTT
+are separate counters, and neither is interchangeable with process RSS.
+
+A separate 256x256, **16-step GPU** run produces the red cube image in 154.80s,
+with a 5.99s median across denoise steps 2..16. The three two-step PNGs are
+deterministic within each backend; between CPU/GPU, decoded RGB8 pixels have
+maximum absolute difference 1/255. This is not an official 256x256 Oracle check.
+
+This is a **shared-host observation**, with substantial CPU variation and no
+exclusive CPU/GPU reservation. Device activity also occurs during CPU rounds
+1/3 while those CPU processes have no render node open; no exact cause of the
+timing variation is attributed. No 16-step CPU or larger-resolution benchmark
+is claimed. Commands, binary/source/PNG hashes, all round timings and memory
+sampling scope are recorded in [performance.json](performance.json).
 
 ### Cross-precision diagnostic
 
