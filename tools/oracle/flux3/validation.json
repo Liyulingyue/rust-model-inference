@@ -1,0 +1,196 @@
+{
+  "hf_revision": "337337621b8526e120f2275d250242f4a6bedd75",
+  "sources": {
+    "model.safetensors": {
+      "sha256": "c3e9813cdd049c831c836b2e9db61150e49a93fc1a4c63b256494642fee0bd7c",
+      "bytes": 11097404512
+    },
+    "ae.safetensors": {
+      "sha256": "868fe7b343cc8f3a19dbcfcafbc3d5f888802be3f89bd81b65b3621a066ce8f3",
+      "bytes": 336211292
+    },
+    "text_encoder/model-00001-of-00002.safetensors": {
+      "sha256": "30a01a0556622645a3cce87b655bbbbbc1f170c196099f1b666c93202c3339a9",
+      "bytes": 4967229296
+    },
+    "text_encoder/model-00002-of-00002.safetensors": {
+      "sha256": "046296a2a387efb43b0c997d5833c789604d168834f6e0d3064bf7bb13d002a6",
+      "bytes": 3908490048
+    },
+    "config.json": {
+      "sha256": "c4fc638a9618e8ddc25f013c009be4d2aa9bd631d89dcf45149a377dd472c67d",
+      "bytes": 828
+    },
+    "text_encoder/config.json": {
+      "sha256": "edac7703329133edfc53e46ac0081835144c99d7eebf28b71c732694d435224d",
+      "bytes": 1505
+    },
+    "text_encoder/tokenizer.json": {
+      "sha256": "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7",
+      "bytes": 7032403
+    },
+    "text_encoder/chat_template.json": {
+      "sha256": "6f8a6a55027e3da5160105556cda5dd69f6423f1c32645f6730d32de7773d0c4",
+      "bytes": 5502
+    }
+  },
+  "components": {
+    "dit": {
+      "sha256": "6e5a57d74fed53b8d766797b642f4eef30d15632fbd2a7f453533cfc771a7924",
+      "bytes": 11097390400,
+      "tensors": 359,
+      "lossless_payloads": 359,
+      "f16_payloads": 0,
+      "f16_relative_l2": 0.0,
+      "architecture": "flux3"
+    },
+    "text": {
+      "sha256": "4d7f199d4ae72e5ea61d7ff5f6d13f81459ac19cd320e84c9a1009c1d55ecf8a",
+      "bytes": 8050890496,
+      "tensors": 398,
+      "lossless_payloads": 398,
+      "f16_payloads": 0,
+      "f16_relative_l2": 0.0,
+      "architecture": "qwen3vl"
+    },
+    "vae": {
+      "sha256": "f2ad83f5e02f97a10fd76d77714ca6f0fbfeeaa11837ba7b9cd51cb32ac96b03",
+      "bytes": 168243168,
+      "tensors": 250,
+      "lossless_payloads": 178,
+      "f16_payloads": 72,
+      "f16_relative_l2": 0.000207374475770303,
+      "architecture": "flux3_vae"
+    }
+  },
+  "oracle_commit": "bfc8889a4497f846416f253a3972a1941ac698b9",
+  "supported_precision": "F32 CPU activations/accumulation; BF16 DiT/text weights; F16 VAE convolutions",
+  "cases": {
+    "text_to_image": {
+      "checkpoints": 89,
+      "passed": true,
+      "failed": 0,
+      "metrics": {
+        "flux3.text": {
+          "max_relative_l2": 1.543833870084055e-05,
+          "max_absolute": 0.25
+        },
+        "flux3.velocity": {
+          "max_relative_l2": 9.781360216977687e-05,
+          "max_absolute": 0.00045740604400634766
+        },
+        "z_image.vae.rgb_channels": {
+          "max_relative_l2": 0.0005855760926050863,
+          "max_absolute": 0.0034329742193222046
+        }
+      },
+      "png": {
+        "sha256": "710d050d5da35de5d822abc2f43f9ccd22e398c7cbb3ae6b2ee50b66e242acd2",
+        "width": 64,
+        "height": 64
+      }
+    },
+    "two_references": {
+      "checkpoints": 103,
+      "passed": true,
+      "failed": 0,
+      "metrics": {
+        "flux3.text": {
+          "max_relative_l2": 1.543833870084055e-05,
+          "max_absolute": 0.25
+        },
+        "flux3.reference.0": {
+          "max_relative_l2": 0.0013586002669404146,
+          "max_absolute": 0.015625
+        },
+        "flux3.reference.1": {
+          "max_relative_l2": 0.001310176322402025,
+          "max_absolute": 0.015625
+        },
+        "flux3.velocity": {
+          "max_relative_l2": 0.0010513125935175042,
+          "max_absolute": 0.009675979614257812
+        },
+        "z_image.vae.rgb_channels": {
+          "max_relative_l2": 0.00015723184205106524,
+          "max_absolute": 0.000527799129486084
+        }
+      },
+      "png": {
+        "sha256": "1cacdcdf39e189b5f12ba9989eed762bb5a978a827fb48ccefa4aa0f83897602",
+        "width": 64,
+        "height": 64
+      }
+    },
+    "native_bf16_diagnostic": {
+      "checkpoints": 89,
+      "passed": false,
+      "failed": 14,
+      "metrics": {
+        "flux3.text": {
+          "max_relative_l2": 0.006639730209740318,
+          "max_absolute": 64.0
+        },
+        "flux3.velocity": {
+          "max_relative_l2": 0.09924627249415122,
+          "max_absolute": 0.3608057498931885
+        },
+        "z_image.vae.rgb_channels": {
+          "max_relative_l2": 0.3107452207927836,
+          "max_absolute": 1.1686769127845764
+        }
+      }
+    },
+    "linux_vae": {
+      "checkpoints": 4,
+      "passed": true,
+      "failed": 0,
+      "metrics": {
+        "flux3.reference.0": {
+          "max_relative_l2": 0.001307079115595036,
+          "max_absolute": 0.0078125
+        },
+        "z_image.vae.rgb_channels": {
+          "max_relative_l2": 0.00047629085476915436,
+          "max_absolute": 0.001035153865814209
+        }
+      }
+    },
+    "text_only": {
+      "checkpoints": 2,
+      "passed": true,
+      "failed": 0,
+      "text_relative_l2": 1.543833870084055e-05
+    },
+    "image_smoke_256": {
+      "steps": 16,
+      "seed": 42,
+      "png": {
+        "sha256": "cc58ffc367dafbadb904073bb739ae6f5fcafdf9a06c8182267323ce542cfab9",
+        "width": 256,
+        "height": 256
+      },
+      "numerical_oracle_comparison": false
+    }
+  },
+  "tests": {
+    "macos_flux3_including_real_ignored": {
+      "passed": 6,
+      "ignored": 0
+    },
+    "macos_qwen_trunk_parity_trace": {
+      "passed": 11,
+      "ignored": 1
+    },
+    "python_converter_comparator": {
+      "passed": 8
+    },
+    "macos_vae_regression": {
+      "passed": 25,
+      "ignored": 1,
+      "baseline_failed": 1,
+      "baseline_commit": "973210b6",
+      "failure": "SiLU bitwise assertion differs by 1 ULP"
+    }
+  }
+}

@@ -27,6 +27,7 @@ AuK Base/Flash 的 F16/Q8_0 投影与原生 Qwen 文本入口见 [AuK 实机记�
 
 | 型号 | GGUF architecture | 能力 | 所需组件 | 已验证格式 | 状态 | 证据 / 限制 |
 |---|---|---|---|---|---|---|
+| FLUX 3 Image Klein distilled | `flux3` + `qwen3vl` + `flux3_vae` | CPU 文生图、最多十张参考图 | 专用 DiT、Qwen3-VL-4B text、32-channel VAE | DiT/text BF16，VAE Conv F16 / Norm F32 | `Experimental` | F32 CPU 激活：真实权重文生图/双参考图完整 CLI 与 89/103 个 Oracle 检查点通过，Tokenizer 精确；原生 BF16 激活比较未通过。正方形、16 像素网格；GPU、Base/FP8/NVFP4 拒绝。[范围和复现](../../tools/oracle/flux3/README.md)。 |
 | Mage-Flow-Base | `mage_flow` + `mage_vae` + `qwen3vl`/`clip` | 主 CLI CPU 文生图 | DiT + MageVAE + Qwen3-VL 4B text；Edit 另需 vision | DiT/VAE/text BF16，norm/vision F32，F32 KV | `Experimental`（标量计算图已验证） | 真实权重 DiT、VAE、文本/vision 和固定噪声采样按全部 `u32` 位比较；最小 PNG 入口已运行。参考图片到 VL fast processor、默认大图、GPU 与 SIMD/FMA 未对齐。[哈希和验证范围](../../tools/oracle/mage_flow/README.md)。 |
 | Mage-Flow | `mage_flow` + `mage_vae` + `qwen3vl`/`clip` | 主 CLI CPU 文生图 | DiT + MageVAE + Qwen3-VL 4B text；Edit 另需 vision | DiT/VAE/text BF16，norm/vision F32，F32 KV | `Experimental`（标量计算图已验证） | 真实权重 DiT、VAE、文本/vision 和固定噪声采样按全部 `u32` 位比较；最小 PNG 入口已运行。参考图片到 VL fast processor、默认大图、GPU 与 SIMD/FMA 未对齐。[哈希和验证范围](../../tools/oracle/mage_flow/README.md)。 |
 | Mage-Flow-Turbo | `mage_flow` + `mage_vae` + `qwen3vl`/`clip` | 主 CLI CPU 文生图 | DiT + MageVAE + Qwen3-VL 4B text；Edit 另需 vision | DiT/VAE/text BF16，norm/vision F32，F32 KV | `Experimental`（标量计算图已验证） | 真实权重 DiT、VAE、文本/vision 和固定噪声采样按全部 `u32` 位比较；最小 PNG 入口已运行。参考图片到 VL fast processor、默认大图、GPU 与 SIMD/FMA 未对齐。[哈希和验证范围](../../tools/oracle/mage_flow/README.md)。 |
