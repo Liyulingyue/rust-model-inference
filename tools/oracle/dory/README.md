@@ -101,6 +101,51 @@ reproduced independently on main `973210b6de572b8226cd576da7ace17fb22d8ad5`.
 Their names and scope are recorded in the Linux result file. No full-suite
 pass is claimed.
 
+## Remote GPU probe
+
+On 2026-10-22 the same Linux host exposed `AMD Radeon Graphics (RADV NAVI31)`,
+PCI `1002:744b`, with 51,522,830,336 bytes of VRAM. The Radeon Vulkan ICD
+initialized successfully. The existing `vk_check` passed all five Q8_0
+matrix shapes. Q5_K, Q6_K and BF16 batched operator checks also passed with
+one and three token rows, including grouped projections, padded strides,
+large outputs and long command buffers. These are operator fixtures, not a
+Dory GPU accuracy claim.
+
+The real Dory Hello replay with F32/F16 KV and eight generated tokens matched
+the CPU logits within the unchanged dual 1% gates (observed errors zero).
+However, after Vulkan warmup both replays performed **zero inference GPU
+submissions and zero weight uploads**, even with `RUST_GPU_MIN_OUTPUTS=0`.
+`--gpu` succeeds through CPU fallback; `--compute vulkan` exits with
+`full Vulkan text decoding is not supported for dory`. Dory therefore remains
+CPU-only. No end-to-end GPU alignment or speedup is claimed. Results and
+source hashes: [validation-gpu.json](validation-gpu.json).
+
+Reproduce with the same Q5_K_M artifact and a hardware Vulkan ICD:
+
+```sh
+cargo build --locked --profile release-fast --features vulkan --lib
+rustc --edition=2021 -C opt-level=3 -L dependency=target/release-fast/deps \
+  --extern rust_model_inference=target/release-fast/librust_model_inference.rlib \
+  tools/oracle/dory/gpu_probe.rs -o target/dory-gpu-probe
+env -u RMI_PARITY_TRACE -u RMI_SCALAR RUST_GPU_MIN_OUTPUTS=0 \
+  VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.json \
+  target/dory-gpu-probe "$RMI_DORY_Q5_MODEL"
+```
+
+The probe asserts that the ICD is hardware and that the operator checks
+submit GPU work, then reports Dory counters separately after warmup. It
+compares every step's logits and greedy IDs with a CPU-scoped session.
+Neither `RMI_PARITY_TRACE` nor `RMI_SCALAR` is set: both would disable offload
+and invalidate this execution probe. The operator helper retains its own
+fixture checks; Dory's reduced-precision acceptance remains the dual 1% gate.
+
+The larger `vk_ops_check --formats q5_k,q6_k,bf16 --rows 1` and `--rows 3`
+runs completed those batched matmul fixtures, then failed in the existing
+Z-Image SiLU-scale probe: `device arena requires read_f32_into`. That probe
+creates a device-local arena but calls its borrowed `read_f32` API. This
+shared code is unchanged from main; the full operator suite is not counted
+as passing and was not repaired in this Dory validation change.
+
 ## Acceptance
 
 The reference build disables NEON on ARM and SSE2/SSE4.2, AVX/AVX2/AVX512, FMA,
@@ -134,6 +179,7 @@ Both bounds were fixed before investigating differences. Missing, duplicated,
 empty, non-finite or truncated checkpoints fail. This is numerical acceptance
 of reduced-precision computation, not a claim of end-to-end bitwise equality.
 
-The replay covers this CPU Q5_K_M artifact with `per_loop` KV. GPU execution,
+The replay covers this CPU Q5_K_M artifact with `per_loop` KV. Dory GPU execution
+is unsupported as confirmed by the separate probe above;
 other weight quantizations, `last_loop` KV, the actual 1024-token SWA boundary,
 the full 262144-token context and chat-template generation are outside this validation.
