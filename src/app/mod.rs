@@ -99,6 +99,9 @@ pub fn compute_embedding(
         "gemma-embedding" => {
             crate::models::gemma_embedding::compute_embedding(source, prompt, n_threads_arg)
         }
+        "gemma4-embedding" => {
+            crate::models::embeddinggemma2::compute_embedding(source, prompt, n_threads_arg)
+        }
         // gemma3 arch: BitNet b1.58 270M (file_type=40) hits the
         // detect_is_bitnet gate above; the standard gemma3 270M-it
         // (and future 1B/4B/12B/27B) falls through to the standard
@@ -147,6 +150,13 @@ pub fn run_embedding(
     let arch = arch_of(source);
     match arch.as_str() {
         "gemma-embedding" => crate::models::gemma_embedding::run_embedding(
+            source,
+            prompt,
+            n_threads_arg,
+            kv_format,
+            output,
+        ),
+        "gemma4-embedding" => crate::models::embeddinggemma2::run_embedding(
             source,
             prompt,
             n_threads_arg,

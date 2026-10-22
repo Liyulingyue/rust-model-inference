@@ -7,16 +7,15 @@
 //!   cargo test --profile release-fast --test embeddinggemma_2
 //!
 //! This test pins the converter's metadata contract + tensor inventory.
-//! End-to-end text/forward/multimodal Oracle is out of scope for this
-//! test — the engine does not yet implement the `gemma4-embedding` arch
-//! forward path (see TODO.md `EmbeddingGemma2 forward path`).
+//! Forward and multimodal Oracle coverage is in the neighboring smoke and
+//! Oracle tests; see tools/oracle/pr169/README.md for the real-weight commands.
 
 use rust_model_inference::GGUFLoader;
 use rust_model_inference::TensorInfo;
 
 fn loader() -> Option<GGUFLoader> {
     let path = std::env::var_os("RMI_EMBEDDINGGEMMA_2")?;
-    GGUFLoader::from_file(path).ok()
+    Some(GGUFLoader::from_file(path).expect("load EmbeddingGemma GGUF"))
 }
 
 fn pick(loader: &GGUFLoader, key: &str) -> usize {
@@ -44,6 +43,30 @@ fn arch_is_gemma4_embedding() {
     assert_eq!(
         pick_str(&loader, "general.architecture"),
         Some("gemma4-embedding")
+    );
+}
+
+#[test]
+fn tokenizer_uses_gemma4_bpe_with_bos_and_eos() {
+    let Some(loader) = loader() else { return };
+    assert_eq!(pick_str(&loader, "tokenizer.ggml.model"), Some("gemma4"));
+    assert_eq!(
+        loader
+            .metadata("tokenizer.ggml.add_bos_token")
+            .and_then(|value| match value {
+                rust_model_inference::core::tensor::MetaValue::Bool(value) => Some(*value),
+                _ => None,
+            }),
+        Some(true)
+    );
+    assert_eq!(
+        loader
+            .metadata("tokenizer.ggml.add_eos_token")
+            .and_then(|value| match value {
+                rust_model_inference::core::tensor::MetaValue::Bool(value) => Some(*value),
+                _ => None,
+            }),
+        Some(true)
     );
 }
 

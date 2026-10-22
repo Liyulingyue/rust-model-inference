@@ -279,10 +279,40 @@ fn load_moe_weights<'a, S: TensorSource + ?Sized>(
     }
 
     let has_shexp = moe.n_ff_shexp > 0;
+    let shared_weight = |suffix: &str,
+                         n_in: usize,
+                         n_out: usize|
+     -> Result<Option<Weight<'a>>, String> {
+        if !has_shexp {
+            return Ok(None);
+        }
+        let name = format!("blk.{layer}.ffn_{suffix}_shexp.weight");
+        let tensor = info(&name)?;
+        if tensor.dims != [n_in as u64, n_out as u64]
+            || tensor.checked_nbytes() != Some(need(&name)?.len() as u64)
+        {
+            return Err(format!("Invalid shared expert tensor {name}: expected [{n_in}, {n_out}] with complete payload"));
+        }
+        load_weight(source, &name)
+            .map(Some)
+            .ok_or_else(|| format!("Unsupported shared expert tensor: {name}"))
+    };
     let gate_inp_shexp = if has_shexp {
-        load_weight_f32(source, &format!("blk.{layer}.ffn_gate_inp_shexp.weight"))
-            .or_else(|| load_weight_f32(source, &format!("blk.{layer}.ffn_gate_inp_shexp")))
-            .ok_or_else(|| format!("Missing blk.{layer}.ffn_gate_inp_shexp.weight"))?
+        let name = [
+            format!("blk.{layer}.ffn_gate_inp_shexp.weight"),
+            format!("blk.{layer}.ffn_gate_inp_shexp"),
+        ]
+        .into_iter()
+        .find(|name| source.tensor_info(name).is_some())
+        .ok_or_else(|| format!("Missing blk.{layer}.ffn_gate_inp_shexp.weight"))?;
+        let tensor = info(&name)?;
+        if tensor.dims != [n_embd as u64] && tensor.dims != [n_embd as u64, 1] {
+            return Err(format!(
+                "Invalid shared expert gate {name}: shape {:?}",
+                tensor.dims
+            ));
+        }
+        crate::core::tensor::load_f32_tensor(source, &name, &tensor.dims)?
     } else {
         Vec::new()
     };
@@ -300,15 +330,9 @@ fn load_moe_weights<'a, S: TensorSource + ?Sized>(
         stride_gate,
         stride_down,
         gate_inp_shexp: has_shexp.then_some(gate_inp_shexp),
-        up_shexp: has_shexp
-            .then(|| load_weight(source, &format!("blk.{layer}.ffn_up_shexp.weight")))
-            .flatten(),
-        gate_shexp: has_shexp
-            .then(|| load_weight(source, &format!("blk.{layer}.ffn_gate_shexp.weight")))
-            .flatten(),
-        down_shexp: has_shexp
-            .then(|| load_weight(source, &format!("blk.{layer}.ffn_down_shexp.weight")))
-            .flatten(),
+        up_shexp: shared_weight("up", n_embd, moe.n_ff_shexp)?,
+        gate_shexp: shared_weight("gate", n_embd, moe.n_ff_shexp)?,
+        down_shexp: shared_weight("down", moe.n_ff_shexp, n_embd)?,
     })
 }
 
@@ -654,5 +678,83 @@ impl<'a> HybridTrunk<'a> {
             }
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod moe_contract_tests {
+    use super::*;
+    use crate::core::tensor::{MetaValue, TensorInfo};
+    use std::collections::HashMap;
+    struct Source(HashMap<String, (TensorInfo, Vec<u8>)>);
+    impl TensorSource for Source {
+        fn metadata(&self, _: &str) -> Option<&MetaValue> {
+            None
+        }
+        fn tensor_info(&self, name: &str) -> Option<&TensorInfo> {
+            self.0.get(name).map(|v| &v.0)
+        }
+        fn tensor_slice(&self, name: &str) -> Option<&[u8]> {
+            self.0.get(name).map(|v| v.1.as_slice())
+        }
+    }
+    #[test]
+    fn shared_expert_requires_all_projections_and_valid_payloads() {
+        let mut source = Source(HashMap::new());
+        for (suffix, dims) in [
+            ("up_exps.weight", vec![2, 3, 2]),
+            ("gate_exps.weight", vec![2, 3, 2]),
+            ("down_exps.weight", vec![3, 2, 2]),
+            ("gate_inp.weight", vec![2, 2]),
+            ("gate_inp_shexp.weight", vec![2]),
+            ("up_shexp.weight", vec![2, 3]),
+            ("gate_shexp.weight", vec![2, 3]),
+            ("down_shexp.weight", vec![3, 2]),
+        ] {
+            let name = format!("blk.0.ffn_{suffix}");
+            let len = dims.iter().product::<u64>() as usize * 4;
+            source.0.insert(
+                name.clone(),
+                (
+                    TensorInfo {
+                        name,
+                        dims,
+                        ggml_type: GGMLType::F32,
+                        offset: 0,
+                    },
+                    vec![0; len],
+                ),
+            );
+        }
+        let config = super::super::config::Qwen35Moe {
+            n_expert: 2,
+            n_expert_used: 1,
+            n_ff_exp: 3,
+            n_ff_shexp: 3,
+            weights_scale: 1.0,
+        };
+        assert!(load_moe_weights(&source, 0, config, 2).is_ok());
+        for suffix in ["up", "gate", "down"] {
+            let name = format!("blk.0.ffn_{suffix}_shexp.weight");
+            let saved = source.0.remove(&name).unwrap();
+            assert!(
+                load_moe_weights(&source, 0, config, 2).is_err(),
+                "missing {suffix}"
+            );
+            source.0.insert(name.clone(), saved);
+            source.0.get_mut(&name).unwrap().1.pop();
+            assert!(
+                load_moe_weights(&source, 0, config, 2).is_err(),
+                "truncated {suffix}"
+            );
+            source.0.get_mut(&name).unwrap().1.push(0);
+        }
+        source
+            .0
+            .get_mut("blk.0.ffn_up_shexp.weight")
+            .unwrap()
+            .0
+            .dims = vec![3, 2];
+        assert!(load_moe_weights(&source, 0, config, 2).is_err());
     }
 }

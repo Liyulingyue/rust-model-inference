@@ -11,7 +11,7 @@ Inputs:
     vision_start=151652, vision_end=151653) + vision config (depth=24,
     hidden_size=1024, intermediate=4096, heads=16, patch=16, merge=2,
     num_position_embeddings=2304, deepstack_visual_indexes=[5,11,17]).
-  - `tokenizer.json` — BPE vocab + merges + 16926 added special tokens.
+  - `tokenizer.json` — BPE vocab + merges + 16926 added tokens (16914 special).
   - `tokenizer_config.json` — for BOS/EOS/pad token ids.
   - `model.safetensors` — single 4.3 GiB BF16 shard with:
     * `model.language_model.embed_tokens.weight` [168576, 2048]
@@ -43,13 +43,11 @@ Quantization: text tower `attn_*.weight` + `ffn_{gate,up,down}.weight` →
 `Q8_0`; norms, biases, embeddings, post_ln, position_embd stay `F32` (norms)
 or `BF16` (everything else that doesn't get quantized). Mmproj mirrors the
 existing `Qwen3.5-2B` convention: vision `attn_*`/`mlp_*` weights stay F16
-when not quantized, but we keep things simple and emit BF16 for the full
-mmproj (the engine accepts BF16 for vision tensors; that's what
-Qwen3.5-2B/mmproj-F16 actually emits because the upstream llama.cpp writer
-stores F16 — but our GGUFs end up at F16 dtype with the right shape).
+when not quantized, and emit F16 for vision linear weights while widening
+norms and biases to F32 for the existing vision loader contract.
 
-Token types: every entry of `tokenizer.json`'s `added_tokens` is CONTROL (3);
-all `model.vocab` entries are NORMAL (1). BPE model + qwen2 pre.
+Token types: special added tokens are CONTROL (3), ordinary added tokens are
+USER_DEFINED (4); base `model.vocab` entries are NORMAL (1). BPE + qwen2 pre.
 
 Usage:
     python3 tools/converter/physbrain/convert_physbrain.py \
@@ -70,12 +68,14 @@ from pathlib import Path
 import numpy as np
 
 from tools.converter.utils.gguf import (
+    model_metadata_value,
     GGML_BF16,
     GGML_F32,
     GGML_F16,
     GGML_Q8_0,
     GgufWriter,
     bf16_bytes_to_q8_0,
+    bf16_to_f16,
     bf16_to_f32,
     f16_to_f32,
     gguf_dims,
@@ -96,7 +96,8 @@ TEXT_ROPE_FREQ_BASE = 5_000_000.0
 TEXT_NORM_EPS = 1e-6
 TEXT_HEAD_DIM = 128  # n_embd / n_head = 2048 / 16
 TEXT_ROPE_SECTIONS = [24, 20, 20, 0]
-TEXT_DIMENSION_COUNT = 64  # rope.dimension_count (HEAD_DIM/2 for Qwen3VL)
+TEXT_DIMENSION_COUNT = 128  # Qwen3-VL rotates the full head dimension.
+TEXT_DEEPSTACK_LAYERS = 3
 # Vision-side metadata values
 VISION_BLOCK_COUNT = 24
 VISION_EMBEDDING_LENGTH = 1024
@@ -181,9 +182,10 @@ def _build_vocab(
         all_tokens.get(i, f"<|reserved_{i}|>") for i in range(TEXT_VOCAB_SIZE)
     ]
     types = [1] * TEXT_VOCAB_SIZE
-    for tid in added:
+    for entry in tok_json["added_tokens"]:
+        tid = entry["id"]
         if tid < TEXT_VOCAB_SIZE:
-            types[tid] = 3
+            types[tid] = 3 if entry["special"] else 4
     return tokens, types
 
 
@@ -230,6 +232,16 @@ def _emit_bf16(gguf: GgufWriter, name: str, raw: bytes, shape: tuple) -> None:
             f"{name}: shape {shape} ({n}) != bf16 payload {len(raw) // 2}"
         )
     gguf.add_tensor(name, GGML_BF16, gguf_dims(shape), raw)
+
+
+def _emit_bf16_f16(gguf: GgufWriter, name: str, raw: bytes, shape: tuple) -> None:
+    """Convert BF16 source weights to the F16 storage used by vision linear layers."""
+    n = 1
+    for d in shape:
+        n *= d
+    if len(raw) != n * 2:
+        raise ValueError(f"{name}: shape {shape} ({n}) != bf16 payload {len(raw) // 2}")
+    gguf.add_tensor(name, GGML_F16, gguf_dims(shape), bf16_to_f16(raw))
 
 
 def _split_conv3d(weight_raw: bytes, shape: tuple[int, ...]) -> tuple[bytes, tuple]:
@@ -303,6 +315,7 @@ def write_text_gguf(hf_dir: Path, out_path: Path) -> None:
     gguf.add_meta("qwen3vl.rope.freq_base", TEXT_ROPE_FREQ_BASE)
     gguf.add_meta("qwen3vl.rope.dimension_count", TEXT_DIMENSION_COUNT)
     gguf.add_meta("qwen3vl.rope.dimension_sections", TEXT_ROPE_SECTIONS)
+    gguf.add_meta("qwen3vl.n_deepstack_layers", TEXT_DEEPSTACK_LAYERS)
     gguf.add_meta("qwen3vl.vocab_size", TEXT_VOCAB_SIZE)
     # Image placeholder ids (engine reads these from metadata).
     gguf.add_meta("qwen3vl.image_token_id", IMAGE_TOKEN_ID)
@@ -386,6 +399,7 @@ def write_text_gguf(hf_dir: Path, out_path: Path) -> None:
     out_norm = _require(st, "model.language_model.norm.weight")
     _emit_bf16_norm(gguf, "output_norm.weight", out_norm.raw, tuple(out_norm.shape))
 
+    gguf.metadata = [(key, model_metadata_value(value)) for key, value in gguf.metadata]
     gguf.write()
     print(
         f"[text] wrote {out_path} ({out_path.stat().st_size // 1024 // 1024} MiB)",
@@ -438,10 +452,12 @@ def write_mmproj_gguf(hf_dir: Path, out_path: Path) -> None:
     frame0_raw, frame0_shape, frame1_raw, frame1_shape = _split_conv3d(
         patch_w.raw, tuple(patch_w.shape),
     )
-    _emit_bf16(gguf, "v.patch_embd.weight", frame0_raw, frame0_shape)
-    _emit_bf16(gguf, "v.patch_embd.weight.1", frame1_raw, frame1_shape)
+    _emit_bf16_f16(gguf, "v.patch_embd.weight", frame0_raw, frame0_shape)
+    _emit_bf16_f16(gguf, "v.patch_embd.weight.1", frame1_raw, frame1_shape)
     patch_b = _require(st, "model.visual.patch_embed.proj.bias")
-    _emit_bf16(gguf, "v.patch_embd.bias", patch_b.raw, tuple(patch_b.shape))
+    # The vision loader consumes patch bias as F32, unlike linear weights
+    # which are decoded according to their storage type.
+    _emit_bf16_norm(gguf, "v.patch_embd.bias", patch_b.raw, tuple(patch_b.shape))
 
     pos = _require(st, "model.visual.pos_embed.weight")
     if tuple(pos.shape) != (VISION_NUM_POSITION_EMBEDDINGS, VISION_EMBEDDING_LENGTH):
@@ -449,7 +465,9 @@ def write_mmproj_gguf(hf_dir: Path, out_path: Path) -> None:
             f"pos_embed shape {pos.shape} != "
             f"({VISION_NUM_POSITION_EMBEDDINGS}, {VISION_EMBEDDING_LENGTH})"
         )
-    _emit_bf16(gguf, "v.position_embd.weight", pos.raw, tuple(pos.shape))
+    # Position interpolation also decodes this tensor as F32 in the vision
+    # path, so widen the BF16 source here.
+    _emit_bf16_norm(gguf, "v.position_embd.weight", pos.raw, tuple(pos.shape))
 
     for i in range(VISION_BLOCK_COUNT):
         layer_prefix = f"model.visual.blocks.{i}"
@@ -479,7 +497,7 @@ def write_mmproj_gguf(hf_dir: Path, out_path: Path) -> None:
             ("mlp.linear_fc2", "ffn_down"),
         ]:
             w = _require(st, f"{layer_prefix}.{hf_name}.weight")
-            _emit_bf16(gguf, f"{block_prefix}.{gguf_name}.weight", w.raw, tuple(w.shape))
+            _emit_bf16_f16(gguf, f"{block_prefix}.{gguf_name}.weight", w.raw, tuple(w.shape))
             if (b := st.get(f"{layer_prefix}.{hf_name}.bias")) is not None:
                 _emit_bf16_norm(
                     gguf,
@@ -503,7 +521,7 @@ def write_mmproj_gguf(hf_dir: Path, out_path: Path) -> None:
             if hf_name == "norm":
                 _emit_bf16_norm(gguf, f"{out}.{gguf_name}.weight", w.raw, tuple(w.shape))
             else:
-                _emit_bf16(gguf, f"{out}.{gguf_name}.weight", w.raw, tuple(w.shape))
+                _emit_bf16_f16(gguf, f"{out}.{gguf_name}.weight", w.raw, tuple(w.shape))
             if (b := st.get(f"{prefix}.{hf_name}.bias")) is not None:
                 _emit_bf16_norm(
                     gguf, f"{out}.{gguf_name}.bias", b.raw, tuple(b.shape),
@@ -519,19 +537,20 @@ def write_mmproj_gguf(hf_dir: Path, out_path: Path) -> None:
         )
 
     fc1_w = _require(st, f"{out_prefix}.linear_fc1.weight")
-    _emit_bf16(gguf, "mm.0.weight", fc1_w.raw, tuple(fc1_w.shape))
+    _emit_bf16_f16(gguf, "mm.0.weight", fc1_w.raw, tuple(fc1_w.shape))
     if (fc1_b := st.get(f"{out_prefix}.linear_fc1.bias")) is not None:
         _emit_bf16_norm(
             gguf, "mm.0.bias", fc1_b.raw, tuple(fc1_b.shape),
         )
 
     fc2_w = _require(st, f"{out_prefix}.linear_fc2.weight")
-    _emit_bf16(gguf, "mm.2.weight", fc2_w.raw, tuple(fc2_w.shape))
+    _emit_bf16_f16(gguf, "mm.2.weight", fc2_w.raw, tuple(fc2_w.shape))
     if (fc2_b := st.get(f"{out_prefix}.linear_fc2.bias")) is not None:
         _emit_bf16_norm(
             gguf, "mm.2.bias", fc2_b.raw, tuple(fc2_b.shape),
         )
 
+    gguf.metadata = [(key, model_metadata_value(value)) for key, value in gguf.metadata]
     gguf.write()
     print(
         f"[mmproj] wrote {out_path} ({out_path.stat().st_size // 1024 // 1024} MiB)",

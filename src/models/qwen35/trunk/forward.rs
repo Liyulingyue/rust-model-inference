@@ -46,7 +46,6 @@ impl<'a> super::weights::HybridTrunk<'a> {
         scratch: &mut super::scratch::Qwen35Scratchpad,
         pool: &ComputePool,
         mrope_positions: &[[usize; 4]],
-        occamy_moe: Option<&[crate::models::occamy::weights::OccamyMoeWeights<'_>]>,
     ) -> Result<Vec<f32>, String> {
         self.forward_impl(
             n_tokens,
@@ -56,7 +55,6 @@ impl<'a> super::weights::HybridTrunk<'a> {
             pool,
             mrope_positions,
             None,
-            occamy_moe,
         )
     }
 
@@ -68,7 +66,6 @@ impl<'a> super::weights::HybridTrunk<'a> {
         scratch: &mut super::scratch::Qwen35Scratchpad,
         pool: &ComputePool,
         mrope_positions: &[[usize; 4]],
-        occamy_moe: Option<&[crate::models::occamy::weights::OccamyMoeWeights<'_>]>,
     ) -> Result<Vec<f32>, String> {
         self.forward_impl(
             n_tokens,
@@ -78,7 +75,6 @@ impl<'a> super::weights::HybridTrunk<'a> {
             pool,
             mrope_positions,
             None,
-            occamy_moe,
         )
     }
 
@@ -91,7 +87,6 @@ impl<'a> super::weights::HybridTrunk<'a> {
         pool: &ComputePool,
         mrope_positions: &[[usize; 4]],
         edge0_moe: Option<&[Edge0MoeWeights<'_>]>,
-        occamy_moe: Option<&[crate::models::occamy::weights::OccamyMoeWeights<'_>]>,
     ) -> Result<Vec<f32>, String> {
         let edge0 = edge0_moe.is_some();
         if mrope_positions.len() != n_tokens {
@@ -400,17 +395,12 @@ impl<'a> super::weights::HybridTrunk<'a> {
             let buf_len = n_tokens * n_embd;
             let ffn_input = unsafe { std::slice::from_raw_parts(buf_ptr, buf_len) };
             let edge0_input = edge0_moe.map(|_| ffn_input.to_vec());
-            // Occamy layers are served by their own MoE path below, which
-            // writes `buf` itself, so the dense FFN must not run for them.
-            let occamy_input = occamy_moe.map(|_| ffn_input.to_vec());
             // qwen35moe replaces the dense FFN wholesale, so snapshot the input
             // the same way: `forward_ffn_parallel` returns early without writing
             // `buf`, and the routed + shared expert output replaces it there.
             let qwen35moe = layer.moe.as_ref().zip(self.config.moe.as_ref());
             let qwen35moe_input = qwen35moe.map(|_| ffn_input.to_vec());
-            if edge0_moe.is_none() && occamy_moe.is_none() {
-                self.forward_ffn_parallel(layer, ffn_input, n_tokens, scratch, pool, edge0);
-            }
+            self.forward_ffn_parallel(layer, ffn_input, n_tokens, scratch, pool, edge0);
             if let (Some((moe, cfg)), Some(input)) = (qwen35moe, &qwen35moe_input) {
                 for token in 0..n_tokens {
                     let offset = token * n_embd;
@@ -432,22 +422,6 @@ impl<'a> super::weights::HybridTrunk<'a> {
                 for token in 0..n_tokens {
                     let offset = token * n_embd;
                     forward_edge0_moe_token(
-                        moe,
-                        &ffn_input[offset..offset + n_embd],
-                        &mut scratch.buf[offset..offset + n_embd],
-                        &mut scratch.prepared,
-                        pool,
-                        il,
-                        token,
-                    )?;
-                }
-            } else if let Some(moe) = occamy_moe.map(|layers| &layers[il]) {
-                // Occamy shares the trunk but gates its shared expert through a
-                // sigmoid, so it cannot ride the Edge0 path.
-                let ffn_input = occamy_input.as_ref().unwrap();
-                for token in 0..n_tokens {
-                    let offset = token * n_embd;
-                    crate::models::occamy::forward::forward_occamy_moe_token(
                         moe,
                         &ffn_input[offset..offset + n_embd],
                         &mut scratch.buf[offset..offset + n_embd],
@@ -1060,20 +1034,18 @@ impl<'a> super::weights::HybridTrunk<'a> {
                         scratch.qkv_buf[qkv_off + 2 * key_dim + h * head_v_dim + d];
                 }
             }
-            // Before the q/k L2 norms. The oracle emits `q_conv` here (the
-            // linear's output) and `q_conv_predelta` after the norm, so without
-            // this the two checkpoints cannot say whether a difference came out
-            // of the projection or out of the normalisation -- and those are
-            // very different bugs.
-            #[cfg(feature = "parity-trace")]
-            if trace_layer {
-                parity_trace::report(parity_trace::checkpoint_rows(
-                    &format!("q_conv_prenorm-{il}"),
-                    Some(il),
-                    &[n_tokens, key_dim],
-                    &scratch.q_buf[..n_tokens * key_dim],
-                ));
-            }
+        }
+        // Emit complete, unnormalized rows once, independent of chunk size.
+        #[cfg(feature = "parity-trace")]
+        if trace_layer {
+            parity_trace::report(parity_trace::checkpoint_rows(
+                &format!("q_conv_prenorm-{il}"),
+                Some(il),
+                &[n_tokens, key_dim],
+                &scratch.q_buf[..n_tokens * key_dim],
+            ));
+        }
+        for t in 0..n_tokens {
             for h in 0..num_k_heads {
                 let q = &mut scratch.q_buf[t * key_dim + h * head_k_dim..][..head_k_dim];
                 let k = &mut scratch.k_buf2[t * key_dim + h * head_k_dim..][..head_k_dim];
@@ -1308,15 +1280,6 @@ impl<'a> super::weights::HybridTrunk<'a> {
         pool: &ComputePool,
         edge0: bool,
     ) {
-        // MoE towers carry no dense FFN; the caller routes them to the expert
-        // path instead, so reaching here without weights is a hard error.
-        let (Some(ffn_gate), Some(ffn_up), Some(ffn_down)) = (
-            layer.ffn_gate.as_ref(),
-            layer.ffn_up.as_ref(),
-            layer.ffn_down.as_ref(),
-        ) else {
-            panic!("dense FFN weights missing on a layer that took the dense path");
-        };
         let n_embd = self.config.n_embd;
         let n_ff = self.config.n_ff;
         // qwen35moe has no dense FFN: the routed + shared experts replace it.

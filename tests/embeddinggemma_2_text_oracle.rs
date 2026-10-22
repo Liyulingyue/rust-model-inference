@@ -11,6 +11,8 @@
 
 use std::sync::Arc;
 
+use rust_model_inference::core::tokenizer::{BPETokenizer, EncodeOptions};
+
 fn load_oracle(name: &str) -> (Vec<u32>, Vec<f32>, String) {
     let path = format!("tests/oracle/embeddinggemma2_{name}.json");
     let data =
@@ -39,17 +41,31 @@ fn text_forward_matches_huggingface_oracle() {
     };
     let loader = rust_model_inference::GGUFLoader::from_file(path).expect("load GGUF");
     let source: Arc<dyn rust_model_inference::TensorSource> = Arc::new(loader);
+    let tokenizer = BPETokenizer::from_gguf_metadata(|key| source.metadata(key).cloned())
+        .expect("EmbeddingGemma tokenizer");
 
     let model =
         rust_model_inference::models::embeddinggemma2::EmbeddingGemmaTextModel::from_source(
-            &source,
+            source.as_ref(),
         )
         .expect("EmbeddingGemmaTextModel::from_source");
 
-    let cases = ["hello", "fox", "embed", "long"];
+    let cases = ["hello", "fox", "embed", "long", "sliding"];
+    let mut direct_hello = None;
     for name in &cases {
         let (token_ids, expected, text) = load_oracle(name);
+        let encoded = tokenizer.encode(
+            &text,
+            EncodeOptions {
+                add_special: true,
+                parse_special: true,
+            },
+        );
+        assert_eq!(encoded, token_ids, "{name}: tokenizer mismatch");
         let actual = model.forward(&token_ids).expect("text forward");
+        if *name == "hello" {
+            direct_hello = Some(actual.clone());
+        }
         assert_eq!(
             actual.len(),
             expected.len(),
@@ -81,11 +97,39 @@ fn text_forward_matches_huggingface_oracle() {
         eprintln!("  actual  [:5] = {:?}", &actual[..5]);
         eprintln!("  expected norm = {}", b_norm_sq.sqrt());
         eprintln!("  actual norm   = {}", a_norm_sq.sqrt());
-        // Tolerance: GGUF stores BF16 weights, ~2% per-dim quantization error.
-        // After mean-pool over 8 tokens the error compounds, expect cos_sim > 0.99.
+        // Text matrices are Q8_0; test direction and magnitude against the HF
+        // reference instead of demanding bitwise parity after quantization.
         assert!(
-            cosine_sim > 0.99,
-            "{name}: cosine similarity {cosine_sim:.6} < 0.99 (text=\"{text}\")"
+            cosine_sim > 0.999 && l2 / b_norm_sq.sqrt() < 0.03,
+            "{name}: cosine {cosine_sim:.6}, relative L2 {} (text=\"{text}\")",
+            l2 / b_norm_sq.sqrt()
         );
     }
+
+    let routed = rust_model_inference::app::compute_embedding(
+        source.as_ref(),
+        "Hello world this is a test",
+        4,
+    )
+    .expect("app embedding dispatch");
+    let direct = direct_hello.expect("hello direct result");
+    let dot: f64 = routed
+        .iter()
+        .zip(&direct)
+        .map(|(a, b)| f64::from(*a) * f64::from(*b))
+        .sum();
+    let routed_norm = routed
+        .iter()
+        .map(|value| f64::from(*value).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    let direct_norm = direct
+        .iter()
+        .map(|value| f64::from(*value).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    assert!(
+        dot / (routed_norm * direct_norm) > 0.99999,
+        "app dispatch changed EmbeddingGemma tokenization"
+    );
 }
