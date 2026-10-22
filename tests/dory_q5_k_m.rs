@@ -63,3 +63,99 @@ fn dory_q5_single_token_logits_are_finite() {
     assert_eq!(logits.len(), 131_072);
     assert!(logits.iter().all(|value| value.is_finite()));
 }
+
+fn reference_prompt() -> String {
+    match std::env::var_os("RMI_DORY_PROMPT_FILE") {
+        Some(path) => std::fs::read_to_string(path).expect("read raw prompt"),
+        None => std::env::var("RMI_DORY_PROMPT").unwrap_or_else(|_| "Hello".into()),
+    }
+}
+
+#[test]
+#[ignore = "requires the real Q5_K_M GGUF; see tools/oracle/dory/README.md"]
+fn dory_q5_reference_trace() {
+    let source = source().expect("set RMI_DORY_Q5_MODEL to the real GGUF");
+    let tokenizer = BPETokenizer::from_gguf_metadata(|key| source.metadata(key).cloned()).unwrap();
+    let prompt = tokenizer.encode(
+        &reference_prompt(),
+        EncodeOptions {
+            add_special: true,
+            parse_special: true,
+        },
+    );
+    assert!(!prompt.is_empty());
+    let count: usize = std::env::var("RMI_DORY_N_PREDICT")
+        .unwrap_or_else(|_| "8".into())
+        .parse()
+        .unwrap();
+    let threads = std::env::var("RMI_DORY_THREADS")
+        .unwrap_or_else(|_| "1".into())
+        .parse()
+        .unwrap();
+    let kv = match std::env::var("RMI_DORY_KV").as_deref().unwrap_or("f32") {
+        "f32" => KvFormat::F32,
+        "f16" => KvFormat::F16,
+        other => panic!("unknown KV format {other}"),
+    };
+    let mut model = DoryModel::from_source(source, threads).unwrap();
+    if let Ok(window) = std::env::var("RMI_DORY_TEST_SWA") {
+        model.config.sliding_window = window.parse().unwrap();
+        assert!(model.config.sliding_window > 0);
+    }
+    let mut session = model.new_session(prompt.len() + count, kv);
+    #[cfg(feature = "parity-trace")]
+    rust_model_inference::parity_trace::token_ids("prompt_ids", &prompt).unwrap();
+    let mut logits = Vec::new();
+    let prefix = std::env::var("RMI_DORY_TRACE_FROM")
+        .ok()
+        .map(|v| v.parse::<usize>().unwrap().min(prompt.len()))
+        .unwrap_or(0);
+    for (i, chunk) in prompt[..prefix].chunks(32).enumerate() {
+        logits = model.prefill(chunk, &mut session).unwrap();
+        eprintln!("prefill {}/{}", ((i + 1) * 32).min(prefix), prefix);
+    }
+    for token in &prompt[prefix..] {
+        logits = model.prefill(&[*token], &mut session).unwrap();
+    }
+    let mut generated = Vec::new();
+    for _ in 0..count {
+        assert!(logits.iter().all(|x| x.is_finite()));
+        let mut best = 0;
+        for i in 1..logits.len() {
+            if logits[i] > logits[best] {
+                best = i;
+            }
+        }
+        generated.push(best as u32);
+        logits = model.prefill(&[best as u32], &mut session).unwrap();
+    }
+    #[cfg(feature = "parity-trace")]
+    rust_model_inference::parity_trace::token_ids("generated_ids", &generated).unwrap();
+    println!("prompt_ids={prompt:?}\ngenerated_ids={generated:?}");
+    println!("output={:?}", tokenizer.decode(&generated, true));
+}
+
+#[test]
+#[ignore = "requires the real Q5_K_M GGUF"]
+fn dory_q5_prefill_chunking_and_reset() {
+    let model = DoryModel::from_source(source().expect("set RMI_DORY_Q5_MODEL"), 4).unwrap();
+    let tokens = [22177, 1897, 1429];
+    for kv in [KvFormat::F32, KvFormat::F16] {
+        let mut batched = model.new_session(tokens.len(), kv);
+        let expected = model.prefill(&tokens, &mut batched).unwrap();
+        let mut chunked = model.new_session(tokens.len(), kv);
+        model.prefill(&tokens[..2], &mut chunked).unwrap();
+        let actual = model.prefill(&tokens[2..], &mut chunked).unwrap();
+        let assert_close = |actual: &[f32]| {
+            assert_eq!(expected.len(), actual.len());
+            assert!(expected.iter().zip(actual).all(|(a, b)| a.is_finite()
+                && b.is_finite()
+                && (a - b).abs() <= 1e-6 * a.abs().max(1.0)));
+        };
+        assert_close(&actual);
+        assert!(model.prefill(&[], &mut chunked).is_err());
+        assert!(model.prefill(&[1], &mut chunked).is_err());
+        chunked.reset(&model, kv);
+        assert_close(&model.prefill(&tokens, &mut chunked).unwrap());
+    }
+}

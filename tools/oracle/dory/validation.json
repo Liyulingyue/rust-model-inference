@@ -1,0 +1,234 @@
+{
+  "date": "2026-10-22",
+  "platform": "macOS ARM64, Apple M3 Max",
+  "rust": "1.98.1",
+  "profile": "release-fast",
+  "rust_mode": "default CPU quantized kernels; precise Dory RoPE and F64 attention accumulation",
+  "oracle_commit": "98a74c97ea09ac72f6ceda1559808fc0a2f447ce",
+  "oracle_mode": "scalar CPU; no FMA contraction; separate sinf/cosf; no external acceleration",
+  "artifact": {
+    "file": "NVIDIA-Nemotron-Labs-Dory1.0-4B-Q5_K_M.gguf",
+    "bytes": 3673288864,
+    "sha256": "96080be49ffd67b916018b7bdef8c484762576fb52780e10ab98ac4978a660e0"
+  },
+  "limits": {
+    "relative_l2": 0.01,
+    "scaled_max_abs": 0.01
+  },
+  "exact_checks": [
+    "prompt/generated token IDs",
+    "checkpoint names/order/layers/steps/counts/shapes",
+    "embedding bytes"
+  ],
+  "checked": 15795,
+  "cases": [
+    {
+      "case": "default-hello-f32",
+      "prompt": "Hello",
+      "kv": "f32",
+      "sliding_window": 1024,
+      "threads": 4,
+      "checked": 1755,
+      "prompt_ids": [
+        22177
+      ],
+      "generated_ids": [
+        1897,
+        1429,
+        22177,
+        5325,
+        1897,
+        1429,
+        22177,
+        5325
+      ],
+      "max_relative_l2": 0.001597207183611643,
+      "max_scaled_max_abs": 0.0013874902462190216,
+      "max_hidden_relative_l2": 0.0,
+      "passed": true
+    },
+    {
+      "case": "default-math-f32",
+      "prompt": "What is 2+2?",
+      "kv": "f32",
+      "sliding_window": 1024,
+      "threads": 4,
+      "checked": 2925,
+      "prompt_ids": [
+        7493,
+        1395,
+        1032,
+        1050,
+        1043,
+        1050,
+        1063
+      ],
+      "generated_ids": [
+        1032,
+        1052,
+        1046,
+        5675,
+        1395,
+        1032,
+        1050,
+        1120
+      ],
+      "max_relative_l2": 0.00234749725258185,
+      "max_scaled_max_abs": 0.0018658887399669942,
+      "max_hidden_relative_l2": 0.0,
+      "passed": true
+    },
+    {
+      "case": "default-unicode-f32",
+      "prompt": "你好\n  café\t🙂 <s> [INST]",
+      "kv": "f32",
+      "sliding_window": 1024,
+      "threads": 4,
+      "checked": 2925,
+      "prompt_ids": [
+        124108,
+        1010,
+        1032,
+        35858,
+        1009,
+        1240,
+        1159,
+        1153,
+        1130,
+        1032,
+        1,
+        1032,
+        3
+      ],
+      "generated_ids": [
+        1010,
+        1032
+      ],
+      "max_relative_l2": 0.0034134885431581084,
+      "max_scaled_max_abs": 0.0023906788813222164,
+      "max_hidden_relative_l2": 0.0,
+      "passed": true
+    },
+    {
+      "case": "default-hello-f16",
+      "prompt": "Hello",
+      "kv": "f16",
+      "sliding_window": 1024,
+      "threads": 4,
+      "checked": 1755,
+      "prompt_ids": [
+        22177
+      ],
+      "generated_ids": [
+        1897,
+        1429,
+        22177,
+        5325,
+        1897,
+        1429,
+        22177,
+        5325
+      ],
+      "max_relative_l2": 0.0028933423463644256,
+      "max_scaled_max_abs": 0.002161118688539595,
+      "max_hidden_relative_l2": 0.0,
+      "passed": true
+    },
+    {
+      "case": "default-math-f16",
+      "prompt": "What is 2+2?",
+      "kv": "f16",
+      "sliding_window": 1024,
+      "threads": 4,
+      "checked": 2925,
+      "prompt_ids": [
+        7493,
+        1395,
+        1032,
+        1050,
+        1043,
+        1050,
+        1063
+      ],
+      "generated_ids": [
+        1032,
+        1052,
+        1046,
+        5675,
+        1395,
+        1032,
+        1050,
+        1120
+      ],
+      "max_relative_l2": 0.0029246441558182694,
+      "max_scaled_max_abs": 0.002098620427859646,
+      "max_hidden_relative_l2": 0.0,
+      "passed": true
+    },
+    {
+      "case": "window2-f32",
+      "prompt": "Hello",
+      "kv": "f32",
+      "sliding_window": 2,
+      "threads": 4,
+      "checked": 1755,
+      "prompt_ids": [
+        22177
+      ],
+      "generated_ids": [
+        1897,
+        1429,
+        22177,
+        1897,
+        1429,
+        22177,
+        1897,
+        1429
+      ],
+      "max_relative_l2": 0.003820131291558144,
+      "max_scaled_max_abs": 0.001508608157554896,
+      "max_hidden_relative_l2": 0.0,
+      "passed": true
+    },
+    {
+      "case": "window2-f16",
+      "prompt": "Hello",
+      "kv": "f16",
+      "sliding_window": 2,
+      "threads": 4,
+      "checked": 1755,
+      "prompt_ids": [
+        22177
+      ],
+      "generated_ids": [
+        1897,
+        1429,
+        22177,
+        1897,
+        1429,
+        22177,
+        1897,
+        1429
+      ],
+      "max_relative_l2": 0.0028202188521458606,
+      "max_scaled_max_abs": 0.0019566823415507724,
+      "max_hidden_relative_l2": 0.0,
+      "passed": true
+    }
+  ],
+  "limits_of_evidence": [
+    "Window 2 cases override only test configuration on both sides; the actual 1024-token boundary replay was stopped before completion and is not accepted.",
+    "No GPU, other weight quantizations, last_loop KV, full 262144-token context or chat-template generation validation.",
+    "No full repository test suite or performance benchmark."
+  ],
+  "cli_smoke": {
+    "prompt": "Hello",
+    "kv": "f32",
+    "max_tokens": 8,
+    "temperature": 0,
+    "repetition_penalty": 1.0,
+    "threads": 4,
+    "output": "\", \"Hello World\", \"Hello World",
+    "passed": true
+  }
+}

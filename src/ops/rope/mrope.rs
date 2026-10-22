@@ -24,9 +24,14 @@ unsafe extern "C" {
 #[inline]
 pub(crate) fn sin_cos(value: f32) -> (f32, f32) {
     if crate::ops::scalar_mode() {
-        return (scalar_sin(value), scalar_cos(value));
+        return sin_cos_precise(value);
     }
     value.sin_cos()
+}
+
+#[inline]
+pub(super) fn sin_cos_precise(value: f32) -> (f32, f32) {
+    (scalar_sin(value), scalar_cos(value))
 }
 
 // Separate libm calls: LLVM's sincos fusion changes scalar rounding on macOS.

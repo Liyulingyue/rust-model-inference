@@ -14,12 +14,33 @@ use crate::core::tensor::{load_f32_tensor, BlockQ8K, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 use crate::ops::kernel::Weight;
-use crate::ops::{dot_f32, rope_neox_inplace, sample_llama_cpp, softmax_inplace};
+use crate::ops::{dot_f32_f64_acc, rope_neox_inplace_precise, sample_llama_cpp, softmax_inplace};
 
 use super::config::DoryConfig;
 use super::weights::{load_layers, load_weight, DoryLayerWeights};
 
 const NORM_EPS: f32 = 1e-6;
+
+fn trace(name: &str, layer: Option<usize>, step: usize, values: &[f32]) {
+    #[cfg(feature = "parity-trace")]
+    if crate::parity_trace::enabled(name)
+        && step
+            >= std::env::var("RMI_DORY_TRACE_FROM")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0)
+    {
+        crate::parity_trace::report(crate::parity_trace::checkpoint_at(
+            name,
+            layer,
+            Some(step),
+            &[values.len()],
+            values,
+        ));
+    }
+    #[cfg(not(feature = "parity-trace"))]
+    let _ = (name, layer, step, values);
+}
 
 /// A cache is kept in F32 storage so the session stays simple; `KvFormat::F16`
 /// still applies the requested half precision round-trip at insertion time.
@@ -234,9 +255,11 @@ impl DoryModel {
         }
         let mean = (sum / values.len() as f64) as f32;
         let rms_scale = 1.0f32 / (mean + NORM_EPS / n).sqrt();
-        let scale = rms_scale * (1.0f32 / n.sqrt());
+        let unit_scale = 1.0f32 / n.sqrt();
         for value in values.iter_mut() {
-            *value *= scale;
+            // The Oracle rounds after RMSNorm, before the second scale node.
+            *value *= rms_scale;
+            *value *= unit_scale;
         }
     }
 
@@ -313,8 +336,9 @@ impl DoryModel {
         } else {
             cfg.rope_freq_base
         };
-        rope_neox_inplace(&mut scratch.q, position, cfg.head_dim, theta);
-        rope_neox_inplace(&mut scratch.k, position, cfg.head_dim, theta);
+        // Recurrent Q8 quantization amplifies fused-rotation rounding.
+        rope_neox_inplace_precise(&mut scratch.q, position, cfg.head_dim, theta);
+        rope_neox_inplace_precise(&mut scratch.k, position, cfg.head_dim, theta);
         let q_factor = (cfg.head_dim as f32).sqrt() / cfg.initializer_range;
         for head in 0..cfg.n_head {
             let start = head * cfg.head_dim;
@@ -328,6 +352,12 @@ impl DoryModel {
             let start = head * cfg.head_dim;
             Self::unit_norm(&mut scratch.k[start..start + cfg.head_dim]);
         }
+        if matches!(cache.kv_format, KvFormat::F16) {
+            // GGML's F16 cache matmul also rounds its query input to F16.
+            for value in &mut scratch.q {
+                *value = f16::from_f32(*value).to_f32();
+            }
+        }
         cache.push(&scratch.k, &scratch.v, cache_len);
         let seq = cache.len();
         scratch.attn_out.fill(0.0);
@@ -339,15 +369,26 @@ impl DoryModel {
             let mut scores = vec![0.0; seq];
             for (j, score) in scores.iter_mut().enumerate() {
                 let off = j * cfg.n_head_kv * cfg.head_dim + kv_head * cfg.head_dim;
-                *score = dot_f32(q, &cache.keys[off..off + cfg.head_dim], cfg.head_dim) * scale;
+                *score =
+                    dot_f32_f64_acc(q, &cache.keys[off..off + cfg.head_dim], cfg.head_dim) * scale;
             }
             softmax_inplace(&mut scores);
-            let out = &mut scratch.attn_out[head * cfg.head_dim..(head + 1) * cfg.head_dim];
-            for (j, &score) in scores.iter().enumerate() {
-                let off = j * cfg.n_head_kv * cfg.head_dim + kv_head * cfg.head_dim;
-                for d in 0..cfg.head_dim {
-                    out[d] += score * cache.values[off + d];
+            if matches!(cache.kv_format, KvFormat::F16) {
+                for score in &mut scores {
+                    *score = f16::from_f32(*score).to_f32();
                 }
+            }
+            let out = &mut scratch.attn_out[head * cfg.head_dim..(head + 1) * cfg.head_dim];
+            for (d, value) in out.iter_mut().enumerate() {
+                // GGML's F32 value projection accumulates F32 products in f64.
+                *value = scores
+                    .iter()
+                    .enumerate()
+                    .map(|(j, &score)| {
+                        let off = j * cfg.n_head_kv * cfg.head_dim + kv_head * cfg.head_dim;
+                        f64::from(score * cache.values[off + d])
+                    })
+                    .sum::<f64>() as f32;
             }
         }
         let gate_factor = cfg.gate_init.sqrt() / cfg.initializer_range;
@@ -477,8 +518,10 @@ impl DoryModel {
             self.token_embedding
                 .embedding_lookup(token, &mut session.scratch.output);
             let mut hidden = std::mem::take(&mut session.scratch.output);
+            trace("embd", None, session.position, &hidden);
             for layer in 0..self.config.n_input_layers {
                 self.forward_layer(layer, &mut hidden, session.position, session, 0);
+                trace("l_out", Some(layer), session.position, &hidden);
             }
             let input_h = hidden.clone();
             let mut state = input_h.clone();
@@ -492,19 +535,49 @@ impl DoryModel {
                     ..self.config.n_input_layers + self.config.n_recurrent_layers
                 {
                     self.forward_layer(layer, &mut hidden, session.position, session, loop_idx);
+                    if layer + 1 < self.config.n_input_layers + self.config.n_recurrent_layers {
+                        trace(
+                            "l_out",
+                            Some(layer + loop_idx * self.config.n_recurrent_layers),
+                            session.position,
+                            &hidden,
+                        );
+                    }
                 }
                 state = hidden.clone();
                 Self::unit_norm(&mut state);
+                trace(
+                    "l_out",
+                    Some(
+                        self.config.n_input_layers
+                            + (loop_idx + 1) * self.config.n_recurrent_layers
+                            - 1,
+                    ),
+                    session.position,
+                    &state,
+                );
             }
             hidden.copy_from_slice(&state);
             for layer in
                 self.config.n_input_layers + self.config.n_recurrent_layers..self.config.n_layer
             {
                 self.forward_layer(layer, &mut hidden, session.position, session, 0);
+                trace(
+                    "l_out",
+                    Some(layer + (self.config.n_loops - 1) * self.config.n_recurrent_layers),
+                    session.position,
+                    &hidden,
+                );
             }
             session.scratch.output = hidden;
             session.position += 1;
         }
+        trace(
+            "result_norm",
+            None,
+            session.position - 1,
+            &session.scratch.output,
+        );
         self.matmul(
             &self.output,
             &session.scratch.output,
@@ -514,8 +587,14 @@ impl DoryModel {
             &mut session.scratch.q8k,
         );
         for (logit, scale) in session.scratch.logits.iter_mut().zip(&self.output_scale) {
-            *logit *= *scale / self.config.initializer_range;
+            *logit *= *scale * (1.0 / self.config.initializer_range);
         }
+        trace(
+            "result_output",
+            None,
+            session.position - 1,
+            &session.scratch.logits,
+        );
         Ok(session.scratch.logits.clone())
     }
 }
