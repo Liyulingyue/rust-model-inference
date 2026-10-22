@@ -8,6 +8,54 @@ use std::collections::HashMap;
 
 const PREFIX: &str = "model.diffusion_model";
 
+#[test]
+fn turbo_rejects_a_non_eight_step_schedule_before_loading_components() {
+    let args: Vec<String> = [
+        "rmi",
+        "--qwen-image-turbo",
+        "--steps",
+        "3",
+        "--out",
+        "turbo-test.png",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    let options = rust_model_inference::app::parse_cli_options(&args).unwrap();
+    let error = rust_model_inference::app::run_qwen_image_2_1_cli(
+        std::sync::Arc::new(TestSource::default()),
+        &options,
+        1,
+    )
+    .unwrap_err();
+    assert!(error.contains("exactly 8 steps"), "{error}");
+}
+
+#[test]
+fn turbo_defaults_allow_explicit_conditioning_without_cfg_or_steps() {
+    let args: Vec<String> = [
+        "rmi",
+        "--qwen-image-turbo",
+        "--out",
+        "turbo-test.png",
+        "--qwen-context-file",
+        "unused.f32",
+        "--vae",
+        "unused.safetensors",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    let options = rust_model_inference::app::parse_cli_options(&args).unwrap();
+    let error = rust_model_inference::app::run_qwen_image_2_1_cli(
+        std::sync::Arc::new(TestSource::default()),
+        &options,
+        1,
+    )
+    .unwrap_err();
+    assert!(error.contains("Missing tensor: img_in.weight"), "{error}");
+}
+
 #[derive(Default)]
 struct TestSource {
     tensors: HashMap<String, TensorInfo>,

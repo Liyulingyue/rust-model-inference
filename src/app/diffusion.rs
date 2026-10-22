@@ -841,7 +841,7 @@ pub fn run_qwen_image_2_1_cli(
     n_threads: usize,
 ) -> Result<(), String> {
     use crate::models::diffusion::qwen_image_2_1::{
-        rgba_bytes, sample,
+        rgba_bytes, sample, sampling_sigmas,
         text::{ReferenceFeatures, TextConditioner},
         vae::QwenImage21Vae,
         Condition, ReferenceLatent,
@@ -851,7 +851,8 @@ pub fn run_qwen_image_2_1_cli(
         .as_deref()
         .filter(|p| !p.as_os_str().is_empty())
         .ok_or("Qwen-Image-2.1 requires --out")?;
-    let image_mode = options.text_encoder.is_some()
+    let image_mode = options.qwen_image_turbo
+        || options.text_encoder.is_some()
         || options.vae.is_some()
         || options.prompt.is_some()
         || options.width.is_some()
@@ -931,8 +932,14 @@ pub fn run_qwen_image_2_1_cli(
     {
         return Err("Qwen-Image-2.1 RGBA image dimensions overflow".into());
     }
-    let cfg = options.cfg.or(options.cfg_scale).unwrap_or(6.0);
-    let steps = options.steps.unwrap_or(30);
+    let cfg = options
+        .cfg
+        .or(options.cfg_scale)
+        .unwrap_or(if options.qwen_image_turbo { 1.0 } else { 6.0 });
+    let steps = options
+        .steps
+        .unwrap_or(if options.qwen_image_turbo { 8 } else { 30 });
+    sampling_sigmas(steps, width / 16 * (height / 16), options.qwen_image_turbo)?;
     if !cfg.is_finite() || cfg < 1.0 || steps == 0 || steps > 1000 {
         return Err("Qwen-Image-2.1 requires CFG >= 1 and 1..=1000 steps".into());
     }
@@ -1126,6 +1133,7 @@ pub fn run_qwen_image_2_1_cli(
         &reference_latents,
         steps,
         cfg,
+        options.qwen_image_turbo,
     )?;
     let rgba = vae.decode(&latent, w, h)?;
     let bytes = rgba_bytes(&rgba, width, height)?;

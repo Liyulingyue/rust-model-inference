@@ -51,8 +51,9 @@ To additionally check an ordinary build, compile it into a separate target
 directory and pass `--production-rust-bin /path/to/ordinary/rust-model-inference`;
 the runner repeats each CLI case without tracing and compares every RGBA8 byte
 to the output already checked against the independent Oracle.
-An optimized comparison must use `--optimized` and an independently built
-optimized Oracle; that comparison also rejects every differing bit. The current
+A bitwise optimized comparison uses `--optimized` and an independently built
+optimized Oracle; that comparison also rejects every differing bit. Numerical
+comparisons with `--relative-l2` can retain the scalar Oracle as the reference. The current
 optimized comparison differs at text block 0, so only scalar bitwise parity is
 claimed. See the [validation report](../../../docs/develop/QWEN_IMAGE_2_1.md).
 
@@ -97,3 +98,32 @@ RGBA in `[0,1]`; VAE input is planar RGBA in `[-1,1]`. Image slots hold exact
 integer IDs represented as F32. Text uses F32 KV and the last transformer layer's
 raw hidden state. The sampler calls the pinned implementation's discrete flow
 timestep conversion, Flux schedule, CFG and Euler integrator without prefix caching.
+
+## Qwen-Image-2.1-Turbo
+
+Use the actual Turbo GGUF and add `--turbo --relative-l2 0.01` to the runner.
+It passes `--qwen-image-turbo` to the CLI and defaults to eight steps / CFG 1.
+`--cases context` instead exercises the real DiT, sampler and VAE with a fixed
+two-token F32 context through `--qwen-context-file`; it needs no text encoder
+and makes no tokenizer, text-conditioning or editing claim.
+The independent Oracle reads the checkpoint's eight sigmas from
+`tests/fixtures/qwen_image_2_1_turbo/model_index.json` (official revision
+`4954d69c119759f085aa36bd5e66e27647cdee60`) and appends zero. No resolution shift
+or terminal stretching applies. `sample_turbo` requires the corresponding
+nine-F32 file through `QWEN_IMAGE_2_1_TURBO_SIGMAS`; `sample` remains unchanged.
+
+The numerical mode requires NumPy in the repository's `.venv`. It checks each
+computed checkpoint against **both** relative L2 <= the requested tolerance and
+max absolute error <= `1e-5 + tolerance * max(abs(reference))`, rejecting NaN/Inf.
+Names, order, counts, shapes, token IDs, image slots, sigmas, timesteps and initial
+noise stay exact. Standalone DiT inputs also stay exact; in full sampling, latent
+and conditioning inputs include preceding lossy computations and use the same
+numerical bounds. RGBA8 bytes may differ by at most `ceil(255*tolerance)+1`.
+`summary.json` retains metrics per checkpoint and the maximum for each component.
+Omitting `--relative-l2` preserves the original bitwise comparison.
+
+The validated Turbo path uses `RMI_SCALAR=1`; default SIMD exceeded the
+declared 1% bounds and is not claimed to pass numerical alignment.
+
+See [the Turbo validation report](../../../docs/develop/QWEN_IMAGE_2_1_TURBO.md)
+for executed cases, artifact hashes, results and limitations.

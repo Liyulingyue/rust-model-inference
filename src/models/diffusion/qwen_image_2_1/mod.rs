@@ -14,7 +14,7 @@ pub mod text;
 pub mod vae;
 
 pub(crate) use pipeline::sample;
-pub use pipeline::{flow_sigmas, rgba_bytes};
+pub use pipeline::{flow_sigmas, rgba_bytes, sampling_sigmas};
 
 pub(crate) use dit::QwenImage21Dit;
 
