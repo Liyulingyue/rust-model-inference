@@ -885,19 +885,19 @@ impl<'a> VisionEncoder<'a> {
                             .tensor_slice(&format!("v.blk.{}.attn_q.weight", i))
                             .ok_or_else(|| format!("Missing v.blk.{}.attn_q.weight", i))?,
                     ),
-                    source.tensor_slice(&format!("v.blk.{}.attn_q.bias", i)),
+                    f32_bias_slice(source, &format!("v.blk.{}.attn_q.bias", i))?,
                     Some(
                         source
                             .tensor_slice(&format!("v.blk.{}.attn_k.weight", i))
                             .ok_or_else(|| format!("Missing v.blk.{}.attn_k.weight", i))?,
                     ),
-                    source.tensor_slice(&format!("v.blk.{}.attn_k.bias", i)),
+                    f32_bias_slice(source, &format!("v.blk.{}.attn_k.bias", i))?,
                     Some(
                         source
                             .tensor_slice(&format!("v.blk.{}.attn_v.weight", i))
                             .ok_or_else(|| format!("Missing v.blk.{}.attn_v.weight", i))?,
                     ),
-                    source.tensor_slice(&format!("v.blk.{}.attn_v.bias", i)),
+                    f32_bias_slice(source, &format!("v.blk.{}.attn_v.bias", i))?,
                 )
             } else {
                 (None, None, None, None, None, None)
