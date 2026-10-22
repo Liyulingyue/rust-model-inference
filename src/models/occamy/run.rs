@@ -81,6 +81,10 @@ pub fn run_inference(
     let mut runtime = build_text_runtime(
         "qwen35moe",
         RuntimeOptions {
+            // The qwen35moe tower this entry point drives is CPU-only: it
+            // has no Vulkan executor, and this legacy per-model path carries
+            // no compute policy of its own.
+            compute: crate::compute::ComputePolicy::Cpu,
             threads,
             kv_format,
             max_context,
