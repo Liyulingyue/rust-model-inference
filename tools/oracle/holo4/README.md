@@ -222,6 +222,15 @@ RMI_HOLO4_GPU_REPORT=target/holo4/gpu-logits.json \
 For the fixed-Oracle replay above, add `RMI_HOLO4_COMPUTE=vulkan` and build with
 `vulkan,parity-trace`. Keep prefill batch 1 for token-major checkpoints.
 
+The checked-in GDN SPIR-V is generated with glslang `15.1.0`, matching the
+Ubuntu 24.04 CI package `15.1.0-2~ubuntu0.24.04.2`. macOS glslang `16.6.0`
+produces different constant folding/IDs, so its binary fails the repository's
+byte-for-byte rebuild check. Regenerate with the CI compiler and run
+`bash scripts/vulkan-shaders.sh check`; dependencies can be extracted under
+`target/` without installing system packages. The optimized arithmetic graphs
+compare equal, and the final binary is rerun on both GPUs before reporting
+the numerical results above.
+
 ## CLI and remote checks
 
 The real CLI with the original projector and `--image target/holo4/blue.png

@@ -459,7 +459,66 @@
       "shader SHA256 manifest",
       "spirv-val --target-env vulkan1.1 shaders/bin/qwen35_recurrent_conv.spv"
     ],
-    "review": "second read-only GPU diff review found no remaining actionable issue; not proof of numerical alignment"
+    "review": "second read-only GPU diff review found no remaining actionable issue; not proof of numerical alignment",
+    "shader_reproducibility": {
+      "glslang": "15.1.0",
+      "ubuntu_package": "15.1.0-2~ubuntu0.24.04.2",
+      "spirv_tools_package": "2025.1~rc1-1~ubuntu0.24.04.2",
+      "installation": "Ubuntu packages extracted into target/holo4/shader-tools; no system installation",
+      "shader_sha256": "e03f182ed236ed7e02f07708f69c5660ef44e113a410f437f442e40143baf992",
+      "full_shader_rebuild_check": "passed on remote Ubuntu with the exact CI package versions",
+      "previous_compiler": "macOS glslang 16.6.0 produced different constant folding/IDs; optimized arithmetic graph equal",
+      "final_binary_reruns": {
+        "local": {
+          "mode": "local",
+          "shader_toolchain": "glslang 15.1.0",
+          "cases": {
+            "english": {
+              "checkpoints": 133,
+              "raw_f32_values": 6708224,
+              "all_raw_words_unchanged": true
+            },
+            "math": {
+              "checkpoints": 133,
+              "raw_f32_values": 6708224,
+              "all_raw_words_unchanged": true
+            },
+            "chinese": {
+              "checkpoints": 113,
+              "raw_f32_values": 5678080,
+              "all_raw_words_unchanged": true
+            }
+          },
+          "batched_prefill_continuation_reset_passed": true,
+          "hello_report_unchanged": true,
+          "hello_numerical_bound_still_failed": true
+        },
+        "remote": {
+          "mode": "remote",
+          "shader_toolchain": "glslang 15.1.0",
+          "cases": {
+            "english": {
+              "checkpoints": 29,
+              "raw_f32_values": 6495232,
+              "all_raw_words_unchanged": true
+            },
+            "math": {
+              "checkpoints": 29,
+              "raw_f32_values": 6495232,
+              "all_raw_words_unchanged": true
+            },
+            "chinese": {
+              "checkpoints": 25,
+              "raw_f32_values": 5497856,
+              "all_raw_words_unchanged": true
+            }
+          },
+          "batched_prefill_continuation_reset_passed": true,
+          "hello_report_unchanged": true,
+          "hello_numerical_bound_still_failed": true
+        }
+      }
+    }
   },
   "uncovered": [
     "complete text numerical alignment: CPU, CPU/Vulkan and fixed-Oracle GPU comparisons retain quantified failures above",
@@ -638,6 +697,102 @@
     {
       "path": "target/holo4/remote-results/payload-manifest.json",
       "sha256": "94c5a38492a332f2e999291774cd0029bf2ff7bcec5be739d41064993c0bcb9d"
+    },
+    {
+      "path": "target/holo4/shader-equivalence.json",
+      "sha256": "f08c210decc30f1dc8d23f22664f4b05f84f0461eb3490952ea894b9d18508f5"
+    },
+    {
+      "path": "target/holo4/shader-manifest-ci-final.log",
+      "sha256": "7aeda10d11dcdbc12dd773a25ace9826cc21f24e7860a99824d5c7edc531fe0f"
+    },
+    {
+      "path": "target/holo4/shaders-ci-toolchain-final.log",
+      "sha256": "7aeda10d11dcdbc12dd773a25ace9826cc21f24e7860a99824d5c7edc531fe0f"
+    },
+    {
+      "path": "target/holo4/build-ci-shader-final.log",
+      "sha256": "fad820674357f0ca3334f8724220411c0ec73968527f1f191989303cfb0c0756"
+    },
+    {
+      "path": "target/holo4/ci-shader-local-summary.json",
+      "sha256": "7ae177c35d3a57eeff0622d0bb59842ed4cb1fe5b9c1f9bf1687cb6061016f9f"
+    },
+    {
+      "path": "target/holo4/ci-shader-remote-summary.json",
+      "sha256": "1ab212ab4f38d7333eee5c307424caf8efe0aebac6422985b47b6ac9c45d61bc"
+    },
+    {
+      "path": "target/holo4/ci-shader-local-run.log",
+      "sha256": "7d4e505cb9a4d12fe6d779553c8ce730d0eba3fb63d57334216883aac7bd7b3e"
+    },
+    {
+      "path": "target/holo4/ci-shader-remote-run.log",
+      "sha256": "92e2e81438303cbf5c0018d13e5201ed7a1c438a53a0cc817e0994982fe965de"
+    },
+    {
+      "path": "target/holo4/ci-shader-local-hello.json",
+      "sha256": "b5517f2397ac8e438617e937b3f4388fd8d72ea9f3cfe25d232debfada0623dd"
+    },
+    {
+      "path": "target/holo4/ci-shader-remote-hello.json",
+      "sha256": "334d6eebe7ae28643066d1bd153abfa35d371773c5f67e4d4612784521d13f55"
+    },
+    {
+      "path": "target/holo4/ci-vulkan-failed.log",
+      "sha256": "e3ef2af1b84ae855ebeef211b98a45748a4fbbb5c996c0e6dccaf7e2d15d56af"
+    },
+    {
+      "path": "target/holo4/ci-vulkan-job.log",
+      "sha256": "6ecf07d4e57a763a5015faeada47417fc3c81331ffdb1dee74a82157357206ad"
+    },
+    {
+      "path": "target/holo4/recheck_ci_shader.py",
+      "sha256": "086b659b890e6a8e307ab6369ad7d367dec929a249547c80f83b973d226beb1e"
+    },
+    {
+      "path": "target/holo4/ci-shader-final-payload-manifest.json",
+      "sha256": "9b7e3db41a3ea27563e6f987a0fc482eee823bbcde87c5ec762027e41091a5b3"
+    },
+    {
+      "path": "target/holo4/ci-shader-local-english.log",
+      "sha256": "fcadc895dfeb7a0d95eaf0872ddddee8ff6b019da615b7d8519c6874d5a6ddc2"
+    },
+    {
+      "path": "target/holo4/ci-shader-local-math.log",
+      "sha256": "1d4a49105d589c95da8bc3e853a70df55ca85204d3bd872646243f4cb488378b"
+    },
+    {
+      "path": "target/holo4/ci-shader-local-chinese.log",
+      "sha256": "0213b5cd799c62f08526116ed2d6d9d303ff820a29e329cad7c9cd537cd7c62c"
+    },
+    {
+      "path": "target/holo4/ci-shader-local-batched.log",
+      "sha256": "9e96442008261516510781ae4fee9a3f02487183513f745ef155dd89ffde8a96"
+    },
+    {
+      "path": "target/holo4/ci-shader-local-hello.log",
+      "sha256": "954710f4c6066e757c04b4f742f879d74ba8ed7b088d003767b8329bfb9a8322"
+    },
+    {
+      "path": "target/holo4/ci-shader-remote-english.log",
+      "sha256": "62635a4755e8c650b6666da3119d91a28d6dfa8edc70cf3ae716024f97673c5c"
+    },
+    {
+      "path": "target/holo4/ci-shader-remote-math.log",
+      "sha256": "5e404572e35e0939d6810e7ea77017122cbfbfac25c7ac7b3950462fa1a3e78b"
+    },
+    {
+      "path": "target/holo4/ci-shader-remote-chinese.log",
+      "sha256": "ccdf25f95ef8d08f0183ff1dd329e8b90958f466ab33af8fd5c87d57096a2305"
+    },
+    {
+      "path": "target/holo4/ci-shader-remote-batched.log",
+      "sha256": "e3998e9a7583bfd58c3d6ead465fd04f490995527d8f86ee7a984e0d2bb92c56"
+    },
+    {
+      "path": "target/holo4/ci-shader-remote-hello.log",
+      "sha256": "223ed13a492b6ab888a1d981a6883e0986a292e47cb76afaf5b62936cae4f5f3"
     }
   ],
   "vulkan": {
