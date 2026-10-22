@@ -533,8 +533,10 @@ numbers live (see [`tools/oracle/minicpmv/README.md`](../../tools/oracle/minicpm
 * The oracle's tensor table can build an MTP draft head; this GGUF has no
   `nextn.*` tensors, so that path is dead here but may still need to load
   cleanly if the arch gains it later.
-* Vulkan: `src/vulkan/qwen35.rs` still gates on `architecture == "qwen35"`, so
-  the 35B runs on the scalar/SIMD CPU path only.
+* Vulkan now has shared MoE projection support, with host routing/reduction.
+  Holo4 was exercised on M3 Max / RADV NAVI31, but complete logits alignment
+  remains unresolved and this MiniCPM artifact has not been tested on GPU.
+  See [Holo4 validation](../../tools/oracle/holo4/README.md).
 
 ## What is implemented
 
@@ -556,5 +558,7 @@ numbers live (see [`tools/oracle/minicpmv/README.md`](../../tools/oracle/minicpm
   on one; since the MoE tower is a `Qwen35Model` with `moe` set, the existing
   `qwen35` scorers are reused as-is. See
   [`TODO.md`](TODO.md#入口面覆盖2026-10-19-审计).
-* Vulkan is still gated to `qwen35` (`src/vulkan/qwen35.rs:17`), so the 35B runs
-  on the scalar/SIMD CPU path only.
+* `src/vulkan/qwen35/moe.rs` binds resident expert banks with per-expert
+  descriptor ranges and records routed/shared projections. Softmax/top-k and
+  ordered weighted reduction remain on the host; strict Vulkan supports text,
+  while Auto image mode uses CPU vision encoding followed by Vulkan decoding.

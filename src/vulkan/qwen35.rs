@@ -10,6 +10,9 @@ use crate::core::tensor::GGMLType;
 use crate::models::qwen35::{Qwen35Config, Qwen35Model};
 use crate::ops::kernel::Weight;
 
+mod moe;
+use moe::MoeBindings;
+
 #[derive(Debug, Clone)]
 struct EligibilityFacts {
     architecture: String,
@@ -189,6 +192,8 @@ struct Qwen35ArenaLayout {
     ffn_gate: ArenaRegion,
     ffn_up: ArenaRegion,
     down: ArenaRegion,
+    router: ArenaRegion,
+    shared_gate: ArenaRegion,
     logits: ArenaRegion,
     rope: ArenaRegion,
     q8: ArenaRegion,
@@ -218,9 +223,15 @@ impl Qwen35ArenaLayout {
         let layer_count = config.n_layer_impl();
         let head_dim = config.n_embd_head();
         let value_heads = config.ssm_dt_rank;
+        let ffn_width = config
+            .moe
+            .map_or(config.n_ff, |m| m.n_ff_exp.max(m.n_ff_shexp));
+        let expert_slots = config
+            .moe
+            .map_or(1, |m| m.n_expert_used + usize::from(m.n_ff_shexp > 0));
         if [
             config.n_embd,
-            config.n_ff,
+            ffn_width,
             config.n_head,
             config.n_head_kv,
             head_dim,
@@ -251,7 +262,7 @@ impl Qwen35ArenaLayout {
         let value_dim = config.value_dim();
         let conv_dim = config.conv_dim();
         let head_v_dim = config.head_v_dim();
-        let quant_len = config.n_embd.max(config.n_ff).max(dense_q).max(value_dim);
+        let quant_len = config.n_embd.max(ffn_width).max(dense_q).max(value_dim);
         let kv_cache = qwen35_product("KV cache", &[layer_count, capacity, dense_kv])?;
         let kv_delta = qwen35_product("KV delta", &[layer_count, rows, dense_kv])?;
         let conv_state = qwen35_product(
@@ -277,10 +288,22 @@ impl Qwen35ArenaLayout {
         let alpha = row_region(value_heads)?;
         let attn = row_region(dense_q.max(value_dim))?;
         let projection = row_region(config.n_embd)?;
-        let ffn_gate = row_region(config.n_ff)?;
-        let ffn_up = row_region(config.n_ff)?;
-        let down = row_region(config.n_embd)?;
+        let router = row_region(config.moe.map_or(1, |m| m.n_expert))?;
+        let shared_gate = row_region(1)?;
         let rope = row_region(config.rope_dimension_count)?;
+        let ffn_rows = rows.max(expert_slots);
+        let ffn_gate = qwen35_f32_region(
+            &mut cursor,
+            qwen35_product("FFN slots", &[ffn_rows, ffn_width])?,
+        )?;
+        let ffn_up = qwen35_f32_region(
+            &mut cursor,
+            qwen35_product("FFN slots", &[ffn_rows, ffn_width])?,
+        )?;
+        let down = qwen35_f32_region(
+            &mut cursor,
+            qwen35_product("FFN outputs", &[ffn_rows, config.n_embd])?,
+        )?;
         let logits = qwen35_f32_region(&mut cursor, config.vocab_size)?;
         let quant_rows = qwen35_product("quantized rows", &[rows, quant_len.div_ceil(4) * 4])?;
         let q8 = qwen35_region(&mut cursor, quant_rows)?;
@@ -319,6 +342,8 @@ impl Qwen35ArenaLayout {
             ffn_gate,
             ffn_up,
             down,
+            router,
+            shared_gate,
             logits,
             rope,
             q8,
@@ -452,16 +477,13 @@ enum AttentionBindings {
     Recurrent(RecurrentBindings),
 }
 
-#[derive(Clone, Copy)]
 struct LayerBindings {
     attention_norm: OperatorBindings,
     attention: AttentionBindings,
     post_attention_norm: OperatorBindings,
-    // Both are None on a qwen35moe layer: it has no dense FFN, the experts run
-    // on the CPU, and recording a half-built FFN would submit work against
-    // buffers nothing writes.
     gate_up: Option<WeightBindings<2>>,
     down: Option<OperatorBindings>,
+    moe: Option<MoeBindings>,
 }
 
 pub(crate) struct Qwen35GpuChunkResult<'a> {
@@ -542,7 +564,7 @@ impl Qwen35VulkanSession {
         let layer_count = config.n_layer_impl();
         let layout = Qwen35ArenaLayout::new_rows(&config, capacity, max_rows)?;
         let descriptor_capacity = layer_count
-            .checked_mul(12)
+            .checked_mul(12 + config.moe.map_or(0, |m| m.n_expert * 3 + 4))
             .and_then(|count| count.checked_add(3))
             .ok_or(VulkanError::OutOfMemory)?;
         let mut ops = Qwen3Ops::new_with_size(context, layout.total_size(), descriptor_capacity)?;
@@ -642,8 +664,6 @@ impl Qwen35VulkanSession {
 
             let post_norm_buffer = buffers.upload_f32(&layer.attn_post_norm)?;
             let post_attention_norm = ops.bind_buffers(&[post_norm_buffer])?;
-            // A qwen35moe layer has no dense FFN; it falls back to the CPU
-            // route for the FFN instead of binding a half-model on the GPU.
             let (gate_up, down) = match (layer.ffn_gate.as_ref(), layer.ffn_up.as_ref()) {
                 (Some(gate), Some(up)) => {
                     let gate_up = bind_weight_group(
@@ -662,12 +682,24 @@ impl Qwen35VulkanSession {
                 }
                 _ => (None, None),
             };
+            let moe = match (&layer.moe, config.moe) {
+                (Some(weights), Some(cfg)) => {
+                    Some(MoeBindings::new(&mut ops, &mut buffers, weights, cfg)?)
+                }
+                (None, None) if gate_up.is_some() && down.is_some() => None,
+                _ => {
+                    return Err(VulkanError::UnsupportedShape(format!(
+                        "incomplete Qwen3.5 layer {layer_index} FFN"
+                    )))
+                }
+            };
             layers.push(LayerBindings {
                 attention_norm,
                 attention,
                 post_attention_norm,
                 gate_up,
                 down,
+                moe,
             });
         }
 
@@ -1045,6 +1077,19 @@ impl Qwen35VulkanSession {
                         config.norm_eps,
                         scan_rows,
                     )?;
+                    #[cfg(feature = "parity-trace")]
+                    {
+                        let name = format!("final_output-{layer_index}");
+                        if crate::parity_trace::enabled(&name) {
+                            commands = commands.flush()?;
+                            crate::parity_trace::report(crate::parity_trace::checkpoint_rows(
+                                &name,
+                                Some(layer_index),
+                                &[rows, value_heads, recurrent_head_dim],
+                                self.ops.read_f32(self.layout.attn, rows * value_dim)?,
+                            ));
+                        }
+                    }
                     #[cfg(test)]
                     if let Some(row) = failure {
                         commands.submit_and_wait()?;
@@ -1080,9 +1125,10 @@ impl Qwen35VulkanSession {
                 config.n_embd,
                 config.n_embd,
             )?;
-            // The dense FFN only exists on a qwen35 layer. On qwen35moe the
-            // experts run on the CPU, so there is nothing to record and
-            // submitting it would read buffers the graph never wrote.
+            if let Some(moe) = &bindings.moe {
+                commands = moe.forward(self, commands, rows, layer_index, cache_position)?;
+                chunk_start = self.ops.recorded_dispatch_count();
+            }
             if let (Some(gate_up), Some(down)) = (bindings.gate_up, bindings.down) {
                 self.record_weight_group(
                     &commands,
@@ -1118,6 +1164,19 @@ impl Qwen35VulkanSession {
                     rows,
                 )?;
             }
+            #[cfg(feature = "parity-trace")]
+            {
+                let name = format!("l_out-{layer_index}");
+                if crate::parity_trace::enabled(&name) {
+                    commands = commands.flush()?;
+                    crate::parity_trace::report(crate::parity_trace::checkpoint_rows(
+                        &name,
+                        Some(layer_index),
+                        &[rows, config.n_embd],
+                        self.ops.read_f32(self.layout.x, rows * config.n_embd)?,
+                    ));
+                }
+            }
         }
 
         let last_offset = (rows - 1) * config.n_embd * 4;
@@ -1134,6 +1193,14 @@ impl Qwen35VulkanSession {
             config.norm_eps,
         )?;
         commands.submit_and_wait()?;
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint_row(
+            0,
+            "result_norm",
+            None,
+            &[config.n_embd],
+            self.ops.read_f32(self.layout.normed, config.n_embd)?,
+        ));
         let commands = TokenCommands::begin(self.context)?;
         self.record_weights(
             &commands,
@@ -1147,6 +1214,14 @@ impl Qwen35VulkanSession {
 
         self.logits
             .copy_from_slice(self.ops.read_f32(self.layout.logits, config.vocab_size)?);
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint_row(
+            0,
+            "result_output",
+            None,
+            &[config.vocab_size],
+            &self.logits,
+        ));
         let delta_count = qwen35_product("KV delta", &[layer_count, rows, dense_kv])?;
         self.k_delta[..delta_count]
             .copy_from_slice(self.ops.read_f32(self.layout.kv_delta_k, delta_count)?);
@@ -1316,6 +1391,29 @@ fn eligibility_facts(model: &Qwen35Model<'_>) -> EligibilityFacts {
         return facts;
     }
     for (layer_index, layer) in model.layers.iter().enumerate() {
+        match (&layer.moe, model.config.moe) {
+            (Some(moe), Some(cfg))
+                if moe.n_expert == cfg.n_expert && moe.n_ff_exp == cfg.n_ff_exp =>
+            {
+                facts.weight_formats.extend([
+                    moe.gate_type,
+                    moe.up_type,
+                    moe.down_type,
+                    moe.gate_inp.ggml_type,
+                ]);
+                for weight in [&moe.gate_shexp, &moe.up_shexp, &moe.down_shexp]
+                    .into_iter()
+                    .flatten()
+                {
+                    facts.weight_formats.push(weight.ggml_type);
+                }
+            }
+            (None, None)
+                if layer.ffn_gate.is_some()
+                    && layer.ffn_up.is_some()
+                    && layer.ffn_down.is_some() => {}
+            _ => facts.unrecorded_operations.push("feed_forward_layer"),
+        }
         for weight in [
             layer.ffn_gate.as_ref(),
             layer.ffn_up.as_ref(),
@@ -1860,8 +1958,6 @@ mod tests {
             is_recurrent: vec![true, false],
             key_length: 4,
             value_length: 4,
-            // A dense qwen35 layer, so the Vulkan FFN bindings are the ones
-            // under test here rather than the qwen35moe CPU fallback.
             moe: None,
         }
     }
@@ -1879,6 +1975,25 @@ mod tests {
         assert_eq!(layout.q8.size, config.n_ff);
         assert_eq!(layout.q8k.size, config.n_ff);
         assert!(layout.total_size() >= layout.ssm_state.end());
+
+        let mut config = config;
+        config.moe = Some(crate::models::qwen35::trunk::config::Qwen35Moe {
+            n_expert: 32,
+            n_expert_used: 8,
+            n_ff_exp: 16,
+            n_ff_shexp: 20,
+            weights_scale: 1.0,
+        });
+        for rows in [1, 3, 16] {
+            let layout = Qwen35ArenaLayout::new_rows(&config, 16, rows).unwrap();
+            assert_eq!(layout.router.size, rows * 32 * 4);
+            assert_eq!(layout.shared_gate.size, rows * 4);
+            assert_eq!(layout.ffn_gate.size, rows.max(9) * 20 * 4);
+            assert_eq!(layout.ffn_up.size, layout.ffn_gate.size);
+            assert_eq!(layout.down.size, rows.max(9) * config.n_embd * 4);
+            assert!(layout.ffn_gate.end() <= layout.ffn_up.offset);
+            assert!(layout.ffn_up.end() <= layout.down.offset);
+        }
     }
 
     #[test]

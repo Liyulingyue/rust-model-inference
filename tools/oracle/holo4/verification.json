@@ -1,8 +1,8 @@
 {
   "model": "Hcompany/Holo4-35B-A3B-GGUF",
   "modelscope_revision": "a298a0585d798c32341af11cdcddfb08f87e6744",
-  "date": "2026-10-22",
-  "status": "experimental: runnable; text numerical alignment has unresolved residuals",
+  "date": "2026-10-23",
+  "status": "experimental: CPU and Vulkan runnable; full text numerical alignment remains unresolved",
   "local_model_directory": "/Users/gouzi/Documents/git/rust-model-inference/models/Holo4-35B-A3B-GGUF",
   "artifacts": [
     {
@@ -398,7 +398,7 @@
     }
   },
   "engineering": {
-    "local_platform": "macOS aarch64 CPU",
+    "local_platform": "macOS aarch64 CPU / Apple M3 Max Vulkan (MoltenVK)",
     "rust": "1.98.1",
     "local_qwen35_tests": {
       "passed": 88,
@@ -410,7 +410,7 @@
     },
     "python_comparator_tests": 2,
     "remote": {
-      "platform": "Ubuntu 24.04 x86_64 CPU",
+      "platform": "Ubuntu 24.04 x86_64 EPYC 9334 CPU / AMD RADV NAVI31 Vulkan",
       "workspace": "/workspace/rust-model-inference-holo4",
       "rust": "1.98.1 (repo-local target/holo4/rust)",
       "qwen35_tests": {
@@ -419,13 +419,54 @@
         "excluded_same_baseline_failures": true
       },
       "vision_projection": "passed, real original F16 mmproj SHA256 verified",
-      "full_llm_generation": "not run: repeated ModelScope connection timeouts and interrupted SSH uploads; incomplete file is named q4_k_m.gguf.incomplete"
-    }
+      "full_llm_generation": "CPU text/image and strict Vulkan text / Auto image executed successfully with real original artifacts",
+      "qwen35_vulkan_tests": {
+        "features": [
+          "vulkan",
+          "parity-trace"
+        ],
+        "passed": 98,
+        "ignored": 14,
+        "excluded_same_baseline_failures": true
+      },
+      "model_upload": "complete; entire q4_k_m.gguf SHA256 verified before rename; same canonical model directory as local",
+      "vulkan_operator_checks": {
+        "passed_command": "SILU_SCALE_ONLY=1 VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.json target/release-fast/examples/vk_ops_check --formats q4_k,q6_k --rows 3",
+        "broader_probe_failures": [
+          "large SiLU device-local probe: device arena requires read_f32_into",
+          "generic strict F32 probe: approximately 3.624e-5 error"
+        ],
+        "note": "Focused pass does not imply the full generic tool passed; Holo4 uses host-visible arena and real F32 router/alpha/beta were exercised by full model."
+      }
+    },
+    "local_qwen35_vulkan_tests": {
+      "features": [
+        "vulkan",
+        "parity-trace"
+      ],
+      "passed": 104,
+      "ignored": 14,
+      "excluded_same_baseline_failures": true
+    },
+    "vulkan_boundary_tests": {
+      "expert_descriptor_ranges": 1,
+      "compute_policy_filter": 10,
+      "passed": true
+    },
+    "vulkan_build_checks": [
+      "cargo check --offline --profile release-fast --features vulkan --lib",
+      "cargo fmt --all -- --check",
+      "shader SHA256 manifest",
+      "spirv-val --target-env vulkan1.1 shaders/bin/qwen35_recurrent_conv.spv"
+    ],
+    "review": "second read-only GPU diff review found no remaining actionable issue; not proof of numerical alignment"
   },
   "uncovered": [
-    "full text numerical parity: Chinese generation logits maximum relative L2 0.14567875963799945; all-prefill logits maximum 0.37391150094064274; math and Chinese free-running greedy differ",
+    "complete text numerical alignment: CPU, CPU/Vulkan and fixed-Oracle GPU comparisons retain quantified failures above",
+    "GPU vision encoder (images use CPU vision + Vulkan decoder)",
+    "GPU performance improvement: no controlled benchmark; one remote CLI smoke reported CPU 15.6 vs Vulkan 1.3 generation tokens/s",
     "other Holo4 model sizes or quantizations",
-    "GPU, video, long context, server/multiturn and computer-control agent harness",
+    "video, long context, server/multiturn and computer-control agent harness",
     "complete repository test suite",
     "older Qwen3.5/MiniCPM artifacts after updating the shared GDN normalization contract"
   ],
@@ -465,6 +506,627 @@
     {
       "path": "target/holo4/contract-final.log",
       "sha256": "5b8eec5f4e90cb77367be8b4aaebec4ec3b11e4423b49029299e4a28bfc21e66"
+    },
+    {
+      "path": "target/holo4/gpu-oracle-summary.json",
+      "sha256": "62fb368df7df8ee201667e045724e14ee2d9ed5b4b546befc13822ea10af1c4f"
+    },
+    {
+      "path": "target/holo4/gpu-graph-contract.json",
+      "sha256": "0aaa5394f0ff39b38ddf3e6deecfa0bac07105d8a20a5c57e0c50656523c8433"
+    },
+    {
+      "path": "target/holo4/gpu-oracle-summary-remote.json",
+      "sha256": "3d19466bbea15b5e563a0b01f78146b02ed5e810708cdab30e9cb02e74653e3f"
+    },
+    {
+      "path": "target/holo4/gpu-english-comparator-final.json",
+      "sha256": "108c984516beac4d54e3cac24da2b3561dbab97f618c7246cfe76dceb2b4d8b1"
+    },
+    {
+      "path": "target/holo4/gpu-hello-full.json",
+      "sha256": "b5517f2397ac8e438617e937b3f4388fd8d72ea9f3cfe25d232debfada0623dd"
+    },
+    {
+      "path": "target/holo4/moe-layers-local.log",
+      "sha256": "d256830808a1673eae1c1669232286678566a6a8b65a5ab7252e30ec7c82446a"
+    },
+    {
+      "path": "target/holo4/gpu-batched-local.log",
+      "sha256": "e450e330b557af296be66bfdbd7331f59b8972199094dc816132fd59dadee162"
+    },
+    {
+      "path": "target/holo4/gpu-cli-text.log",
+      "sha256": "1a3f96fee3ffd1ea1be3e174ad744ff1d566f7ff7314da2b08e22d26d628b7ad"
+    },
+    {
+      "path": "target/holo4/gpu-cli-image-auto.log",
+      "sha256": "664a82da1b12d273ac6e9c72b65dd125e70f41ebb15a0670c34485052a61f042"
+    },
+    {
+      "path": "target/holo4/gpu-cli-image.log",
+      "sha256": "73824b26a8fa37bb22783df3fa83e56040054b5d66019f2b05d2e2891322a698"
+    },
+    {
+      "path": "target/holo4/qwen35-gpu-focused-final.log",
+      "sha256": "345ce78ff6eb3c8ca216f2b71301c9dfd57b536b2556e581649af72bf0df6ac4"
+    },
+    {
+      "path": "target/holo4/gpu-boundary-tests.log",
+      "sha256": "5f937071c690ce1e57287d1b049af8efdfb105e41ce6aa13f296cb345faa3eb4"
+    },
+    {
+      "path": "target/holo4/gpu-cargo-check.log",
+      "sha256": "6434663a0d46ef3dd0e5e5cc33ef5dfb66865898322312ab91209eb62e6a999c"
+    },
+    {
+      "path": "target/holo4/shader-manifest-final.log",
+      "sha256": "7aeda10d11dcdbc12dd773a25ace9826cc21f24e7860a99824d5c7edc531fe0f"
+    },
+    {
+      "path": "target/holo4/upload-verified2.log",
+      "sha256": "dbbf5b282837d3d83cf8ce797651705924394fc9b2e21d78ffc306f4484ac379"
+    },
+    {
+      "path": "target/holo4/remote-results.tgz",
+      "sha256": "19126cc22069d3f909401c967bc740ff4fffaaffcb93d813c4521b56c3bf04ad"
+    },
+    {
+      "path": "target/holo4/analyze_remote_results.py",
+      "sha256": "b7347b02b748d441986bd69400acb495fa302f3d8881711849eb220751d66758"
+    },
+    {
+      "path": "target/holo4/remote-analysis.log",
+      "sha256": "c490d0dea193df44cd5c7b27e89e63318a68cd1b25ecba3a768caa4f3350ccee"
+    },
+    {
+      "path": "target/holo4/remote-results/gpu-hello-full.json",
+      "sha256": "334d6eebe7ae28643066d1bd153abfa35d371773c5f67e4d4612784521d13f55"
+    },
+    {
+      "path": "target/holo4/remote-results/moe-layers-final.log",
+      "sha256": "b384d77a6fe39613bc4536d0c7c000fbd8d503abf658fc241977f4554dd333f2"
+    },
+    {
+      "path": "target/holo4/remote-results/gpu-batched-final.log",
+      "sha256": "34386030d6f4e7543fc17bd842c6f20887a06582309ada11e601dd35e86e2795"
+    },
+    {
+      "path": "target/holo4/remote-results/qwen35-gpu-focused-final.log",
+      "sha256": "80387685c208c002635250ed5bf270f8b93a3f51c6647324f8f913627c3e7df3"
+    },
+    {
+      "path": "target/holo4/remote-results/gpu-operators-kquant.log",
+      "sha256": "e0e8bca81e745232d99effb5ee8d5f81d1bcca15321e1028edd45df6c018e20e"
+    },
+    {
+      "path": "target/holo4/remote-results/gpu-operators-final.log",
+      "sha256": "07e321beee47f0cde3c0fd16ca6053858787824735345e2c1229a5173198375c"
+    },
+    {
+      "path": "target/holo4/remote-results/gpu-operators-focused.log",
+      "sha256": "dbcb19172bfe1a85c6e034c3cd841541d5aec1bfa3205213d082d0d2494dba5f"
+    },
+    {
+      "path": "target/holo4/remote-results/cli-text-cpu.log",
+      "sha256": "0f46957f15f1de0cfb78950c3a3110c00a92795ffa95dd806cd8a4e331ca468b"
+    },
+    {
+      "path": "target/holo4/remote-results/cli-text-vulkan.log",
+      "sha256": "2a9607fb73bdecc0d141ca59db871ae588f4818817157305a86de796c31df057"
+    },
+    {
+      "path": "target/holo4/remote-results/cli-image-cpu.log",
+      "sha256": "df84891b0942d2b7b136d5847d2770a6ef32d52eb01377017e34f3a135317ea9"
+    },
+    {
+      "path": "target/holo4/remote-results/cli-image-auto.log",
+      "sha256": "d9e0121dcf6f5af84e61be0779c55f0d650e63c612cc290fc44d678e2fb71a9d"
+    },
+    {
+      "path": "target/holo4/remote-results/gpu-english-forced-remote.jsonl",
+      "sha256": "c36ad2c3b81534a4f10ee6ffbe4bb83e2ed389e630741ff17d0d88eee0c145a0"
+    },
+    {
+      "path": "target/holo4/remote-results/gpu-math-forced-remote.jsonl",
+      "sha256": "05a91fe312d25d07909a7827ca221d22446b1c0c528f8f8db2d8cbf11ee55316"
+    },
+    {
+      "path": "target/holo4/remote-results/gpu-chinese-forced-remote.jsonl",
+      "sha256": "d081e232a19f37456ce56537b9443eb5be2e59f321e33c303e5b15733f4d5f3e"
+    },
+    {
+      "path": "target/holo4/remote-results/payload-manifest.json",
+      "sha256": "94c5a38492a332f2e999291774cd0029bf2ff7bcec5be739d41064993c0bcb9d"
     }
-  ]
+  ],
+  "vulkan": {
+    "implementation": {
+      "gpu_operations": [
+        "router projection",
+        "routed/shared expert gate/up/down projections",
+        "SiLU",
+        "attention/KV",
+        "GDN recurrence"
+      ],
+      "host_operations": [
+        "router softmax/top-k/normalization",
+        "ordered weighted expert sum"
+      ],
+      "weight_uploads": 733,
+      "weight_upload_bytes": 20869705280,
+      "expert_banks": "uploaded once each; validated per-expert descriptor subranges",
+      "driver_submission_limit": "flush after each two routed experts and before shared expert",
+      "image": "Auto uses CPU vision encoder and Vulkan decoder; strict Vulkan image input is rejected",
+      "performance": "not established; host routing/reduction synchronizes every MoE row"
+    },
+    "acceptance": "isolated MoE and batch/reset checks pass on both devices; complete CPU/GPU 0.02 logits bound fails; fixed-Oracle 0.10 generation bound fails selected prompts on both devices",
+    "local": {
+      "device": "Apple M3 Max (MoltenVK)",
+      "moe_same_input": {
+        "layers": 40,
+        "rows": 3,
+        "max_relative_l2": 4.095519109388936e-08,
+        "relative_l2_bound": 0.02,
+        "passed": true
+      },
+      "batch_prefill": {
+        "prompt_tokens": 7,
+        "batch_size": 4,
+        "continuation_tokens": 1,
+        "relative_l2": [
+          0.0,
+          0.0
+        ],
+        "reset_replay_exact": true,
+        "passed": true
+      },
+      "hello_cpu_vs_gpu": {
+        "prompt": "Hello",
+        "prompt_ids": [
+          9419
+        ],
+        "relative_l2": [
+          3.6360064196569787e-07,
+          0.05883709551014592,
+          0.04355460267863052,
+          0.027974417347184304,
+          0.027263109371761365,
+          0.028772253898751314,
+          0.038795642926379104,
+          0.03179248467349763
+        ],
+        "cpu_greedy": [
+          11,
+          271,
+          40,
+          2688,
+          4313,
+          310,
+          1791,
+          264
+        ],
+        "gpu_argmax_on_cpu_history": [
+          11,
+          271,
+          40,
+          2688,
+          4313,
+          310,
+          1791,
+          264
+        ],
+        "max_relative_l2": 0.05883709551014592,
+        "relative_l2_bound": 0.02,
+        "bound_passed": false,
+        "greedy_ids_equal": true
+      },
+      "oracle_teacher_forced": {
+        "english": {
+          "prompt_checkpoints": 19,
+          "generation_relative_l2": [
+            0.08297489706040244,
+            0.09326496049315608,
+            0.06483609444392026,
+            0.05869180035601921,
+            0.07554177045811267,
+            0.0696872440970447,
+            0.07800318326592037,
+            0.04869090187821969
+          ],
+          "prefill_max_relative_l2": 0.14737437733238368,
+          "max_generation_relative_l2": 0.09326496049315608,
+          "oracle_greedy": [
+            760,
+            6511,
+            314,
+            9338,
+            369,
+            11751,
+            13,
+            248046
+          ],
+          "gpu_argmax_on_oracle_history": [
+            760,
+            6511,
+            314,
+            9338,
+            369,
+            11751,
+            13,
+            248046
+          ],
+          "generation_bound": 0.1,
+          "generation_bound_passed": true
+        },
+        "math": {
+          "prompt_checkpoints": 19,
+          "generation_relative_l2": [
+            0.09837576022514599,
+            0.06947379667852088,
+            0.0602805958180698,
+            0.08818601290636606,
+            0.08843076964118357,
+            0.06677548841129671,
+            0.11156020498444137,
+            0.0632138145772752
+          ],
+          "prefill_max_relative_l2": 0.13528245069874253,
+          "max_generation_relative_l2": 0.11156020498444137,
+          "oracle_greedy": [
+            17,
+            10,
+            17,
+            16327,
+            220,
+            19,
+            13,
+            248046
+          ],
+          "gpu_argmax_on_oracle_history": [
+            17,
+            10,
+            17,
+            16327,
+            220,
+            19,
+            13,
+            248046
+          ],
+          "generation_bound": 0.1,
+          "generation_bound_passed": false
+        },
+        "chinese": {
+          "prompt_checkpoints": 17,
+          "generation_relative_l2": [
+            0.1300215925692175,
+            0.09493324553027425,
+            0.11278736493975537,
+            0.08596564555073648,
+            0.08885079102702624,
+            0.0985651814807246
+          ],
+          "prefill_max_relative_l2": 0.3546306908142189,
+          "max_generation_relative_l2": 0.1300215925692175,
+          "oracle_greedy": [
+            96328,
+            96435,
+            96878,
+            98116,
+            1710,
+            248046
+          ],
+          "gpu_argmax_on_oracle_history": [
+            98116,
+            96435,
+            96878,
+            98116,
+            1710,
+            248046
+          ],
+          "generation_bound": 0.1,
+          "generation_bound_passed": false
+        }
+      },
+      "graph_diagnostics": {
+        "english": {
+          "model.input_embed": {
+            "all_raw_words_equal": true,
+            "prompt_values": 38912
+          },
+          "l_out-0": {
+            "maximum_relative_l2": 1.2254414143598885e-06,
+            "checkpoints": 26
+          },
+          "l_out-3": {
+            "maximum_relative_l2": 0.0469292278310716,
+            "checkpoints": 26
+          },
+          "l_out-39": {
+            "maximum_relative_l2": 0.1939898099548656,
+            "checkpoints": 26
+          },
+          "result_norm": {
+            "maximum_relative_l2": 0.2043805741791332,
+            "checkpoints": 26
+          }
+        },
+        "math": {
+          "model.input_embed": {
+            "all_raw_words_equal": true,
+            "prompt_values": 38912
+          },
+          "l_out-0": {
+            "maximum_relative_l2": 0.001189643325778834,
+            "checkpoints": 26
+          },
+          "l_out-3": {
+            "maximum_relative_l2": 0.06904094216029792,
+            "checkpoints": 26
+          },
+          "l_out-39": {
+            "maximum_relative_l2": 0.21184702216213674,
+            "checkpoints": 26
+          },
+          "result_norm": {
+            "maximum_relative_l2": 0.2286758846759339,
+            "checkpoints": 26
+          }
+        },
+        "chinese": {
+          "model.input_embed": {
+            "all_raw_words_equal": true,
+            "prompt_values": 34816
+          },
+          "l_out-0": {
+            "maximum_relative_l2": 0.0009478808291915731,
+            "checkpoints": 22
+          },
+          "l_out-3": {
+            "maximum_relative_l2": 0.05226080023780354,
+            "checkpoints": 22
+          },
+          "l_out-39": {
+            "maximum_relative_l2": 0.3677244377207507,
+            "checkpoints": 22
+          },
+          "result_norm": {
+            "maximum_relative_l2": 0.36286797551812855,
+            "checkpoints": 22
+          }
+        }
+      },
+      "cli": {
+        "strict_vulkan_text_output": "Paris",
+        "auto_image_output": "Blue",
+        "auto_image_decoder": "Vulkan",
+        "strict_vulkan_image_rejected": true
+      }
+    },
+    "remote": {
+      "device": "AMD Radeon Graphics (RADV NAVI31)",
+      "vram_bytes": 51522830336,
+      "icd": "/usr/share/vulkan/icd.d/radeon_icd.json",
+      "moe_same_input": {
+        "layers": 40,
+        "rows": 3,
+        "max_relative_l2": 1.2013590525231618e-06,
+        "relative_l2_bound": 0.02,
+        "passed": true
+      },
+      "batch_prefill": {
+        "prompt_tokens": 7,
+        "batch_size": 4,
+        "continuation_tokens": 1,
+        "relative_l2": [
+          0.0,
+          0.0
+        ],
+        "reset_replay_exact": true,
+        "passed": true
+      },
+      "hello_cpu_vs_gpu": {
+        "prompt": "Hello",
+        "prompt_ids": [
+          9419
+        ],
+        "relative_l2": [
+          0.035773737915837156,
+          0.04931125640742786,
+          0.040384478393702766,
+          0.02909753705563272,
+          0.035952561729963854,
+          0.03379952896235413,
+          0.03842827386768404,
+          0.036586125617832005
+        ],
+        "cpu_greedy": [
+          11,
+          271,
+          40,
+          2688,
+          4313,
+          310,
+          1791,
+          264
+        ],
+        "gpu_argmax_on_cpu_history": [
+          11,
+          271,
+          40,
+          2688,
+          4313,
+          310,
+          1791,
+          264
+        ],
+        "max_relative_l2": 0.04931125640742786,
+        "relative_l2_bound": 0.02,
+        "bound_passed": false,
+        "greedy_ids_equal": true
+      },
+      "oracle_teacher_forced": {
+        "english": {
+          "prompt_ids_exact": true,
+          "teacher_forced_ids_exact": true,
+          "prompt_embedding_raw_words_exact": true,
+          "prompt_embedding_values": 38912,
+          "checkpoint_count": 26,
+          "prefill_max_relative_l2": 0.18998320482820283,
+          "generation_relative_l2": [
+            0.10057801181286502,
+            0.08666986856391089,
+            0.07361297324865368,
+            0.06334821095818596,
+            0.06749202029177515,
+            0.06654956561127819,
+            0.07798958206570161,
+            0.055947367207312
+          ],
+          "max_generation_relative_l2": 0.10057801181286502,
+          "oracle_greedy": [
+            760,
+            6511,
+            314,
+            9338,
+            369,
+            11751,
+            13,
+            248046
+          ],
+          "gpu_argmax_on_oracle_history": [
+            760,
+            6511,
+            314,
+            9338,
+            369,
+            11751,
+            13,
+            248046
+          ],
+          "generation_bound": 0.1,
+          "generation_bound_passed": false,
+          "comparator": {
+            "passed": false,
+            "error": "logits relative L2 0.10057801181286585 > 0.1 at step 0"
+          }
+        },
+        "math": {
+          "prompt_ids_exact": true,
+          "teacher_forced_ids_exact": true,
+          "prompt_embedding_raw_words_exact": true,
+          "prompt_embedding_values": 38912,
+          "checkpoint_count": 26,
+          "prefill_max_relative_l2": 0.11373808445139245,
+          "generation_relative_l2": [
+            0.09040466455473237,
+            0.07081669363900063,
+            0.053738927658486375,
+            0.04850573933710652,
+            0.0833737601854809,
+            0.0712776912560013,
+            0.09449778365777133,
+            0.0609250346463056
+          ],
+          "max_generation_relative_l2": 0.09449778365777133,
+          "oracle_greedy": [
+            17,
+            10,
+            17,
+            16327,
+            220,
+            19,
+            13,
+            248046
+          ],
+          "gpu_argmax_on_oracle_history": [
+            17,
+            10,
+            17,
+            16327,
+            220,
+            19,
+            13,
+            248046
+          ],
+          "generation_bound": 0.1,
+          "generation_bound_passed": true,
+          "comparator": {
+            "passed": true
+          }
+        },
+        "chinese": {
+          "prompt_ids_exact": true,
+          "teacher_forced_ids_exact": true,
+          "prompt_embedding_raw_words_exact": true,
+          "prompt_embedding_values": 34816,
+          "checkpoint_count": 22,
+          "prefill_max_relative_l2": 0.27327579656258755,
+          "generation_relative_l2": [
+            0.14182632080632224,
+            0.07042892067542689,
+            0.08762345107222362,
+            0.08083346455873602,
+            0.0905673318860454,
+            0.14532537686844266
+          ],
+          "max_generation_relative_l2": 0.14532537686844266,
+          "oracle_greedy": [
+            96328,
+            96435,
+            96878,
+            98116,
+            1710,
+            248046
+          ],
+          "gpu_argmax_on_oracle_history": [
+            96328,
+            96435,
+            96878,
+            98116,
+            1710,
+            248046
+          ],
+          "generation_bound": 0.1,
+          "generation_bound_passed": false,
+          "comparator": {
+            "passed": false,
+            "error": "logits relative L2 0.14182632080632357 > 0.1 at step 0"
+          }
+        }
+      },
+      "cli": {
+        "cpu_text_output": "The capital of France is Paris.",
+        "strict_vulkan_text_output": "The capital of France is Paris.",
+        "cpu_image_output": "blue",
+        "auto_image_output": "Blue",
+        "auto_image_decoder": "Vulkan",
+        "exit_codes": {
+          "gpu-english-forced-remote": 0,
+          "gpu-math-forced-remote": 0,
+          "gpu-chinese-forced-remote": 0,
+          "cli-text-cpu": 0,
+          "cli-text-vulkan": 0,
+          "cli-image-cpu": 0,
+          "cli-image-auto": 0
+        }
+      }
+    },
+    "first_inspected_cpu_gpu_difference": {
+      "history": [
+        1,
+        2
+      ],
+      "step_0_layer": 18,
+      "checkpoint": "GDN final_output",
+      "relative_l2": 1.6427862496643216e-08,
+      "max_abs": 5.5879354e-09,
+      "different_values": 77,
+      "total_values": 4096,
+      "preceding_18_layers_moe_input_output_raw_words_equal": true,
+      "step_1_layer": 5,
+      "step_1_gdn_relative_l2": 3.230575326727875e-08,
+      "note": "Subsequent quantized projections amplify differences; this does not prove all downstream residuals harmless."
+    }
+  }
 }

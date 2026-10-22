@@ -18,6 +18,117 @@ fn artifact(name: &str) -> PathBuf {
     PathBuf::from(std::env::var_os(name).unwrap_or_else(|| panic!("{name} is required")))
 }
 
+#[cfg(feature = "vulkan")]
+fn relative_l2(expected: &[f32], actual: &[f32]) -> f64 {
+    assert_eq!(expected.len(), actual.len());
+    assert!(expected.iter().chain(actual).all(|v| v.is_finite()));
+    (expected
+        .iter()
+        .zip(actual)
+        .map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2))
+        .sum::<f64>()
+        / expected.iter().map(|&v| f64::from(v).powi(2)).sum::<f64>())
+    .sqrt()
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
+#[ignore = "requires real Holo4 weights and a Vulkan device"]
+fn holo4_vulkan_batched_prefill_and_reset() {
+    use rust_model_inference::{compute::ComputePolicy, models::qwen35::Qwen35Session};
+    let source = GGUFLoader::from_file(artifact("RMI_HOLO4_MODEL")).unwrap();
+    let mut model = Qwen35Model::from_source(&source).unwrap();
+    let pool = Arc::new(ComputePool::new(8));
+    let mut session =
+        Qwen35Session::new_with_compute(&mut model, 32, 4, pool, ComputePolicy::Vulkan).unwrap();
+    let tokens = [1, 2, 3, 4, 5, 6, 7];
+    let positions: Vec<_> = (0..tokens.len()).map(|p| [p; 4]).collect();
+    let mut sequential = Vec::new();
+    for (&token, &position) in tokens.iter().zip(&positions) {
+        sequential = session.step_with_tokens(&[token], &[position]).unwrap();
+    }
+    let continued = session.step_with_tokens(&[8], &[[7; 4]]).unwrap();
+    session.reset();
+    let batched = session.step_with_tokens(&tokens, &positions).unwrap();
+    let batched_continued = session.step_with_tokens(&[8], &[[7; 4]]).unwrap();
+    let errors = [
+        relative_l2(&sequential, &batched),
+        relative_l2(&continued, &batched_continued),
+    ];
+    session.reset();
+    let repeated = session.step_with_tokens(&tokens, &positions).unwrap();
+    assert_eq!(
+        batched, repeated,
+        "reset must reproduce the same GPU computation"
+    );
+    eprintln!("HOLO4_VULKAN_BATCHED relative_l2={errors:?}");
+    assert!(
+        errors.iter().all(|&e| e < 0.02),
+        "batched/continuation: {errors:?}"
+    );
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
+#[ignore = "requires real Holo4 weights and a Vulkan device"]
+fn holo4_vulkan_text() {
+    use rust_model_inference::{compute::ComputePolicy, models::qwen35::Qwen35Session};
+    let source = GGUFLoader::from_file(artifact("RMI_HOLO4_MODEL")).unwrap();
+    let tokenizer = BPETokenizer::from_gguf_metadata(|key| source.metadata(key).cloned()).unwrap();
+    let prompt = std::env::var("RMI_HOLO4_GPU_PROMPT").unwrap_or_else(|_| "Hello".into());
+    let tokens = tokenizer.encode(
+        &prompt,
+        EncodeOptions {
+            add_special: true,
+            parse_special: true,
+        },
+    );
+    let mut cpu_model = Qwen35Model::from_source(&source).unwrap();
+    let mut gpu_model = Qwen35Model::from_source(&source).unwrap();
+    let pool = Arc::new(ComputePool::new(8));
+    let mut cpu =
+        Qwen35Session::new_with_compute(&mut cpu_model, 512, 1, pool.clone(), ComputePolicy::Cpu)
+            .unwrap();
+    let mut gpu =
+        Qwen35Session::new_with_compute(&mut gpu_model, 512, 1, pool, ComputePolicy::Vulkan)
+            .unwrap();
+    let mut history = tokens.clone();
+    let mut errors = Vec::new();
+    let mut greedy = Vec::new();
+    let mut gpu_greedy = Vec::new();
+    for step in 0..tokens.len() + 7 {
+        let input = if step < tokens.len() {
+            tokens[step]
+        } else {
+            *history.last().unwrap()
+        };
+        let a = cpu.step_with_tokens(&[input], &[[step; 4]]).unwrap();
+        let b = gpu.step_with_tokens(&[input], &[[step; 4]]).unwrap();
+        let error = relative_l2(&a, &b);
+        errors.push(error);
+        if step + 1 >= tokens.len() {
+            let argmax = |values: &[f32]| {
+                values
+                    .iter()
+                    .enumerate()
+                    .max_by(|a, b| a.1.total_cmp(b.1))
+                    .unwrap()
+                    .0 as u32
+            };
+            greedy.push(argmax(&a));
+            gpu_greedy.push(argmax(&b));
+            history.push(argmax(&a));
+        }
+    }
+    let report = serde_json::json!({"prompt": prompt, "prompt_ids": tokens, "relative_l2": errors, "cpu_greedy": greedy, "gpu_argmax_on_cpu_history": gpu_greedy});
+    eprintln!("HOLO4_VULKAN {report}");
+    if let Some(path) = std::env::var_os("RMI_HOLO4_GPU_REPORT") {
+        std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+    }
+    assert!(errors.iter().all(|&e| e < 0.02), "relative_l2={errors:?}");
+    assert_eq!(greedy, gpu_greedy);
+}
+
 #[test]
 #[ignore = "requires the real Holo4 GGUF and pinned llama-tokenize"]
 fn holo4_contract_and_tokenizer() {
@@ -178,7 +289,12 @@ fn holo4_teacher_forced_text() {
         .iter()
         .all(|&id| (id as usize) < model.config.vocab_size));
     let pool = Arc::new(ComputePool::new(8));
-    let mut session = Qwen35Session::new_with_prefill_batch_size(&mut model, 512, 1, pool).unwrap();
+    let policy = match std::env::var("RMI_HOLO4_COMPUTE").as_deref() {
+        Ok("vulkan") => rust_model_inference::compute::ComputePolicy::Vulkan,
+        Ok("cpu") | Err(_) => rust_model_inference::compute::ComputePolicy::Cpu,
+        Ok(value) => panic!("unsupported RMI_HOLO4_COMPUTE {value}"),
+    };
+    let mut session = Qwen35Session::new_with_compute(&mut model, 512, 1, pool, policy).unwrap();
     parity_trace::token_ids("qwen35.prompt_ids", prompt).unwrap();
     parity_trace::token_ids("teacher_forced_ids", &history).unwrap();
     let embeddings = session.embed_tokens(prompt).unwrap();

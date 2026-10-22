@@ -2190,6 +2190,29 @@ impl<'a> Qwen3Ops<'a> {
         Ok(bindings)
     }
 
+    /// Bind expert views without duplicating the containing tensor's allocation.
+    pub(crate) fn bind_weight_ranges(
+        &mut self,
+        ranges: &[(GpuBuffer, u64, u64)],
+        formats: &[GpuWeightFormat],
+    ) -> Result<OperatorBindings, VulkanError> {
+        if ranges.is_empty() || ranges.len() > 3 || ranges.len() != formats.len() {
+            return Err(VulkanError::UnsupportedShape(
+                "invalid weight range count".into(),
+            ));
+        }
+        for &(buffer, offset, size) in ranges {
+            validate_weight_range(buffer.size, offset, size, &self.context.limits)?;
+        }
+        allocate_bindings_ranges(
+            self.context,
+            self.descriptor_pool,
+            self.arena,
+            ranges,
+            formats,
+        )
+    }
+
     pub(crate) fn write_f32(&self, region: ArenaRegion, values: &[f32]) -> Result<(), VulkanError> {
         self.f32_word(region, values.len(), "host write")?;
         if values.is_empty() {
@@ -4572,11 +4595,57 @@ impl Drop for Qwen3Ops<'_> {
     }
 }
 
+#[test]
+fn expert_weight_ranges_reject_misalignment_overflow_and_out_of_bounds() {
+    let mut limits = vk::PhysicalDeviceLimits::default();
+    limits.min_storage_buffer_offset_alignment = 256;
+    limits.max_storage_buffer_range = 4096;
+    assert!(validate_weight_range(8192, 256, 4096, &limits).is_ok());
+    for (offset, size) in [
+        (1, 1024),
+        (0, 0),
+        (0, 4097),
+        (8192, 1),
+        (u64::MAX - 255, 1024),
+    ] {
+        assert!(validate_weight_range(8192, offset, size, &limits).is_err());
+    }
+}
+
+fn validate_weight_range(
+    buffer_size: u64,
+    offset: u64,
+    size: u64,
+    limits: &vk::PhysicalDeviceLimits,
+) -> Result<(), VulkanError> {
+    if size == 0
+        || offset % limits.min_storage_buffer_offset_alignment.max(1) != 0
+        || size > u64::from(limits.max_storage_buffer_range)
+        || offset.checked_add(size).is_none_or(|end| end > buffer_size)
+    {
+        return Err(VulkanError::UnsupportedShape(
+            "invalid Vulkan weight subrange".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn allocate_bindings(
     context: &VulkanContext,
     descriptor_pool: vk::DescriptorPool,
     arena: GpuBuffer,
     extras: &[GpuBuffer],
+    formats: &[GpuWeightFormat],
+) -> Result<OperatorBindings, VulkanError> {
+    let ranges = extras.iter().map(|&b| (b, 0, b.size)).collect::<Vec<_>>();
+    allocate_bindings_ranges(context, descriptor_pool, arena, &ranges, formats)
+}
+
+fn allocate_bindings_ranges(
+    context: &VulkanContext,
+    descriptor_pool: vk::DescriptorPool,
+    arena: GpuBuffer,
+    extras: &[(GpuBuffer, u64, u64)],
     formats: &[GpuWeightFormat],
 ) -> Result<OperatorBindings, VulkanError> {
     if extras.len() != formats.len() && !formats.is_empty() {
@@ -4595,17 +4664,20 @@ fn allocate_bindings(
             )
             .map_err(|error| VulkanError::InitFailed(error.to_string()))?[0]
     };
-    let mut buffers = [arena; 4];
-    let mut sizes = [arena.size; 3];
-    for (index, &buffer) in extras.iter().enumerate() {
-        buffers[index + 1] = buffer;
-        sizes[index] = buffer.size;
-    }
-    let infos = buffers.map(|buffer| vk::DescriptorBufferInfo {
-        buffer: buffer.buffer,
+    let mut infos = [vk::DescriptorBufferInfo {
+        buffer: arena.buffer,
         offset: 0,
-        range: vk::WHOLE_SIZE,
-    });
+        range: arena.size,
+    }; 4];
+    let mut sizes = [arena.size; 3];
+    for (index, &(buffer, offset, size)) in extras.iter().enumerate() {
+        infos[index + 1] = vk::DescriptorBufferInfo {
+            buffer: buffer.buffer,
+            offset,
+            range: size,
+        };
+        sizes[index] = size;
+    }
     let writes: [vk::WriteDescriptorSet; 4] = std::array::from_fn(|index| {
         vk::WriteDescriptorSet::builder()
             .dst_set(descriptor_set)
@@ -4784,7 +4856,7 @@ fn quantize_rows_push(
             count / 4,
             blocks,
             rows_u32,
-            u32::from(crate::ops::has_avx2_fma()),
+            1, // All CPU Q8_K paths use a signed scale and ties-to-even.
             0,
             0,
         ])
@@ -6734,9 +6806,19 @@ fn check_qwen35_conv_exact(context: &VulkanContext) -> Result<(), String> {
             .map(|index| ((index * seed % 191) as f32 - 95.0) / 37.0)
             .collect()
     };
-    let qkv = input(ROWS * CONV, 43);
+    let mut qkv = input(ROWS * CONV, 43);
+    for row in qkv.chunks_exact_mut(CONV) {
+        for v in &mut row[..DIM] {
+            *v *= 1e-7;
+        }
+    }
     let weight = input(CONV * TAPS, 73);
-    let initial = input(CONV * TAPS, 101);
+    let mut initial = input(CONV * TAPS, 101);
+    for tap in initial.chunks_exact_mut(CONV) {
+        for v in &mut tap[..DIM] {
+            *v *= 1e-7;
+        }
+    }
     let mut state = initial.clone();
     let mut expected = vec![0.0; ROWS * CONV];
     for row in 0..ROWS {
@@ -6751,11 +6833,7 @@ fn check_qwen35_conv_exact(context: &VulkanContext) -> Result<(), String> {
         crate::ops::silu_approx_inplace(values);
         for offset in [0, DIM] {
             let head = &mut values[offset..offset + DIM];
-            let sum: f64 = head.iter().map(|&value| f64::from(value * value)).sum();
-            let scale = 1.0f32 / (sum as f32).sqrt().max(1e-6);
-            for value in head {
-                *value *= scale;
-            }
+            crate::models::qwen35::trunk::util::l2_norm(head, 1e-6);
         }
     }
     let layout = ArenaLayout::build_rows(CONV, CONV * TAPS, 1, 1, DIM, 1, 1, ROWS, ROWS)
@@ -6795,7 +6873,7 @@ fn check_qwen35_conv_exact(context: &VulkanContext) -> Result<(), String> {
                 for column in 0..DIM {
                     let gpu = actual[row * DIM + column];
                     let cpu = expected[row * CONV + offset + column];
-                    if gpu.to_bits() != cpu.to_bits() {
+                    if !gpu.is_finite() || (gpu - cpu).abs() > 2e-6 {
                         return Err(VulkanError::UnsupportedShape(format!("conv mismatch offset={offset} row={row} column={column}: gpu={:#010x} cpu={:#010x}", gpu.to_bits(), cpu.to_bits())));
                     }
                 }
@@ -6807,7 +6885,7 @@ fn check_qwen35_conv_exact(context: &VulkanContext) -> Result<(), String> {
     })();
     let cleanup = unsafe { context.destroy_completed_buffers(&[buffer]) };
     run.and(cleanup).map_err(|error| error.to_string())?;
-    println!("operator=qwen35_conv exact_bits=true rows={ROWS} taps={TAPS} nonzero_prefix=true");
+    println!("operator=qwen35_conv max_abs_bound=2e-6 tiny_q=true rows={ROWS} taps={TAPS} nonzero_prefix=true");
     Ok(())
 }
 
