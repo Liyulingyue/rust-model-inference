@@ -224,6 +224,24 @@
       "status": "passed unchanged 1% numerical bounds and exact structural checks",
       "total_checkpoints": 2854,
       "total_f32_values": 274274866
+    },
+    "normal_cli_image_512": {
+      "prompt": "A photorealistic orange tabby cat sitting on a wooden windowsill in warm afternoon sunlight, next to a steaming ceramic cup of tea and an open book. Rain-washed city rooftops outside the window, soft bokeh, detailed fur, cinematic composition.",
+      "scalar": false,
+      "width": 512,
+      "height": 512,
+      "steps": 8,
+      "cfg": 1,
+      "seed": 42,
+      "threads": 8,
+      "binary_sha256": "1ab6d3da5b186126a0b3a1c487b228b70366c93fe99e6478ec3eb28b9f7d3612",
+      "runtime_source_commit": "05e9d487d82569dc3c92d25bc06a09d1c7772127",
+      "cpu": "AMD EPYC 9334",
+      "returncode": 1,
+      "wall_seconds": 294.299,
+      "max_rss_bytes": 7849402368,
+      "error": "Non-finite Qwen-Image-2.1 latent at step 1",
+      "status": "failed; no PNG produced"
     }
   },
   "output_sha256": "4754fccfdbac18477434059e3f7b7e2adf190d4752f5eca89f7cb5cb998f8b0e",
@@ -366,5 +384,39 @@
       "ops::rope::tests::rope_neox_inplace_simd_matches_scalar_fallback"
     ],
     "remote_python_comparator_passed": 6
+  },
+  "normal_cli_image_512": {
+    "prompt": "A photorealistic orange tabby cat sitting on a wooden windowsill in warm afternoon sunlight, next to a steaming ceramic cup of tea and an open book. Rain-washed city rooftops outside the window, soft bokeh, detailed fur, cinematic composition.",
+    "scalar": false,
+    "width": 512,
+    "height": 512,
+    "steps": 8,
+    "cfg": 1,
+    "seed": 42,
+    "threads": 8,
+    "binary_sha256": "b90289927d3c2755ee4af1ffe555a9bb2e2d58c6893485c82f6f19389a480a62",
+    "source_commit": "503e4520eef4e72bd12bd43f98352e5cfb62eef8",
+    "concurrent_scalar_run": true,
+    "returncode": 0,
+    "wall_seconds": 1348.311,
+    "max_rss_bytes": 12928778240,
+    "png_sha256": "d597156d37c8f17d97dd479a927746f14474fb926bcb4ba719651292f6f885fa",
+    "cpu": "Apple M3 Max",
+    "visually_inspected": true,
+    "isolated_benchmark": false,
+    "environment_note": "Concurrent optional scalar run during the initial part; system memory compression/swap activity observed",
+    "status": "passed functional full pipeline; no 512x512 Oracle alignment claim"
+  },
+  "scalar_512_visual_run": {
+    "status": "stopped by agent due to runtime; no PNG produced",
+    "completed_steps": 2,
+    "requested_steps": 8,
+    "wall_seconds": 1016.227,
+    "prompt": "A photorealistic orange tabby cat sitting on a wooden windowsill in warm afternoon sunlight, next to a steaming ceramic cup of tea and an open book. Rain-washed city rooftops outside the window, soft bokeh, detailed fur, cinematic composition.",
+    "width": 512,
+    "height": 512,
+    "seed": 42,
+    "cfg": 1,
+    "threads": 8
   }
 }

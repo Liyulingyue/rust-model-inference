@@ -130,6 +130,19 @@ measurement ran alongside trace validation, so it is not an isolated performance
 benchmark. The PNG was inspected visually. Successful generation does not by
 itself establish the SIMD numerical bound.
 
+A later 512×512 full text-to-PNG run on Apple M3 Max used the long prompt
+recorded in `normal_cli_image_512` in the result JSON: an orange tabby cat on a
+sunlit windowsill, a cup of tea, an open book and city rooftops outside. With the
+default SIMD path, eight threads, eight steps, CFG 1 and seed 42, it completed
+in 1,348.311 seconds with maximum RSS 12,928,778,240 bytes. The cat, cup, book
+and window scene were present on visual inspection; steam was not clearly
+visible. PNG SHA256:
+`d597156d37c8f17d97dd479a927746f14474fb926bcb4ba719651292f6f885fa`.
+The initial part ran alongside an optional scalar comparison, and system
+memory compression/swap activity was observed. This is a functional result,
+not an isolated benchmark or a 512×512 Oracle comparison. The optional scalar
+run was stopped after two steps / 1,016.227 seconds; it produced no PNG.
+
 The default SIMD path was checked separately against the same scalar Oracle and
 **failed** the declared 1% bounds. Its first failure was
 `qwen.debug.attn.seg1`, occurrence 8: max absolute error `0.08545827865600586`
@@ -191,6 +204,12 @@ Oracle computed its own text conditioning, eight-step sampler and VAE outputs.
 The normal build repeated the same PNG pixels in 69.38 seconds. Both remote
 production PNGs have SHA256
 `195536bb9cf2519fa77fd5fb3495eefb802fe1baafa930f161b87770f645d674`.
+
+A later 512×512 visual smoke with the long orange-cat/windowsill/tea/book prompt
+and the default SIMD path on AMD EPYC 9334 failed at its first step with
+`Non-finite Qwen-Image-2.1 latent at step 1` (exit 1 after 294.299 seconds).
+No PNG was produced. This is a failed large-image SIMD run; the passing remote
+64×32 scalar comparison above does not cover that configuration.
 
 Linux versus macOS output pixels differ by up to 18 levels. A successful CLI
 run does not imply cross-platform bitwise identity or passing cross-platform
