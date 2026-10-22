@@ -202,3 +202,45 @@ Narrowing it down:
 `examples/astronex_text_determinism.rs` reproduces the text-encoder case
 without touching the model code. Nothing in this section changes the runtime;
 it is recorded so the next pass can start from a measured baseline.
+
+### Shared-dispatch impact review (2026-10-22)
+
+Bringing Astronex in required one behaviour change to shared code: projections
+with `GpuMatmulMode::Prepared` and BF16 or F32 weights now take a transposed
+float tiled kernel (`FLOAT_MATMUL_TILED`, new in this branch) instead of the
+grouped kernel, and their `tile_rows` limit stops being the fixed 64. That path
+is reachable from existing models, so it was audited before any merge.
+
+Which models reach it depends on the mode, and the mode is decided by
+`rounds_bf16_input()`, not by the file name:
+
+| models | mode | reaches the new path |
+| --- | --- | --- |
+| Qwen3, Qwen3.5, Edge0, ERNIE image | `RoundedBf16` (they build the kernel with `with_bf16_input`) | no |
+| MiniCPM-V vision tower | decodes BF16 to F32 itself, never reaches `GpuLinear` | no |
+| Z-Image (all loadable variants) | F16 / Q8_0 | no, and `src/models/diffusion/z_image/` is byte-identical to main |
+| YuE2 | explicit `GpuMatmulMode::Dot` | no |
+| Astronex-World | `Prepared` | yes, by design |
+| ZDTaichu5.0 mmproj (130 2-D BF16), LongCat Image Edit (6) | `Prepared` via the generic GGUF loader | yes, not yet measured |
+| occamy-Q8_0 (110 2-D F32), LensVLM (72), MiniCPM-V-35B (70), LFM2.5 (40), Mellum (28) | `Prepared` | yes, not yet measured |
+
+Two measurements back the audit. Z-Image at 256x512 pixels reproduces its
+recorded baseline md5 `3ed1d5ff` on this branch, three runs in a row, and
+`git diff 9ddf79f HEAD -- src/models/diffusion/z_image/` is empty. `occamy-1.0`
+with its 110 two-dimensional F32 weights produces byte-identical greedy output
+on the GPU and on the CPU at `--temp 0`, so the transposed kernel reproduces
+the exact F32 result on the shapes it has been measured on. The remaining
+unmeasured rows are all multimodal projectors and MoE gates.
+
+Two measurement mistakes are worth recording, because both produced confident
+wrong answers first:
+
+- The CLI defaults to `temperature = 0.6` (`src/app/cli/validate.rs:321`), so
+  every same-seed comparison that omits `--temp 0` compares two independent
+  samples. Any parity claim on generated text needs `--temp 0`; with it, CPU
+  runs are reproducible at `--threads 1` and above.
+- Qwen3-0.6B-BF16 looked like the ideal victim, but it builds its BF16 kernel
+  with `with_bf16_input`, so it never reaches the new path and its output
+  matching main proves nothing. Checking which mode a model resolves to is the
+  only way to tell whether a comparison exercised the change at all;
+  `dump_dispatch_log` is test-only and does not report from the CLI.
