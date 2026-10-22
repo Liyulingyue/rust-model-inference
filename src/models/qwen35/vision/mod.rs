@@ -2694,7 +2694,7 @@ unsafe fn ggml_layer_norm_stats_neon(x: &[f32]) -> (f32, f32) {
     let mut sumsq0 = vdupq_n_f64(0.0);
     let mut sumsq1 = vdupq_n_f64(0.0);
     let mut i = 0;
-    while i + 8 <= n {
+    while i + 4 <= n {
         let v = vld1q_f32(x.as_ptr().add(i));
         let lo = vcvt_f64_f32(vget_low_f32(v));
         let hi = vcvt_high_f64_f32(v);
@@ -2704,7 +2704,7 @@ unsafe fn ggml_layer_norm_stats_neon(x: &[f32]) -> (f32, f32) {
         let sq_hi = vmulq_f64(hi, hi);
         sumsq0 = vaddq_f64(sumsq0, sq_lo);
         sumsq1 = vaddq_f64(sumsq1, sq_hi);
-        i += 8;
+        i += 4;
     }
     let mut partial_sum = 0.0f64;
     let mut partial_sumsq = 0.0f64;
@@ -3612,6 +3612,24 @@ mod tests {
 
     fn close(a: f32, b: f32) {
         assert!((a - b).abs() <= 1e-4 + 1e-4 * b.abs(), "a={a} b={b}");
+    }
+
+    #[test]
+    fn layer_norm_stats_include_every_simd_lane_and_tail() {
+        for input in [
+            vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+            (0..13).map(|i| i as f32 - 6.0).collect(),
+        ] {
+            let mean = input.iter().map(|&v| f64::from(v)).sum::<f64>() / input.len() as f64;
+            let variance = input
+                .iter()
+                .map(|&v| (f64::from(v) - mean).powi(2))
+                .sum::<f64>()
+                / input.len() as f64;
+            let (actual_mean, actual_variance) = ggml_layer_norm_stats(&input);
+            close(actual_mean, mean as f32);
+            close(actual_variance, variance as f32);
+        }
     }
 
     #[test]

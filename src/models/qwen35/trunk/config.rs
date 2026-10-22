@@ -43,8 +43,8 @@ pub struct Qwen35Moe {
     pub n_expert_used: usize,
     /// `{prefix}.expert_feed_forward_length`.
     pub n_ff_exp: usize,
-    /// `{prefix}.expert_shared_feed_forward_length`; `0` means the checkpoint
-    /// has no shared expert and `ffn_out` is just the routed output.
+    /// `{prefix}.expert_shared_feed_forward_length`, falling back to `n_ff`
+    /// when absent or zero, as in llama.cpp's qwen35moe tensor loader.
     pub n_ff_shexp: usize,
     /// `{prefix}.expert_weights_scale` — llama.cpp applies it to the routed
     /// expert weights; defaults to 1.0.
@@ -247,7 +247,8 @@ impl Qwen35Config {
                 let n_ff_shexp = source
                     .metadata(&format!("{prefix}.expert_shared_feed_forward_length"))
                     .and_then(|v| v.to_u64())
-                    .unwrap_or(0) as usize;
+                    .filter(|&width| width > 0)
+                    .unwrap_or(base.n_ff as u64) as usize;
                 let weights_scale = source
                     .metadata(&format!("{prefix}.expert_weights_scale"))
                     .and_then(|v| v.to_f64())
@@ -433,6 +434,33 @@ mod tests {
             recurrent_layer_mask(8, 0, None, Some(4)).unwrap(),
             vec![true, true, true, false, true, true, true, false],
         );
+    }
+
+    #[test]
+    fn qwen35moe_missing_shared_width_uses_ffn_width() {
+        let mut source = qwen38_config_source();
+        source.metadata = source
+            .metadata
+            .into_iter()
+            .map(|(key, value)| (key.replace("qwen35.", "qwen35moe."), value))
+            .collect();
+        source.metadata.insert(
+            "general.architecture".into(),
+            MetaValue::String("qwen35moe".into()),
+        );
+        source.metadata.remove("qwen35moe.feed_forward_length");
+        for (key, value) in [
+            ("expert_count", 256),
+            ("expert_used_count", 8),
+            ("expert_feed_forward_length", 512),
+        ] {
+            source
+                .metadata
+                .insert(format!("qwen35moe.{key}"), MetaValue::Uint32(value));
+        }
+        let config = Qwen35Config::from_source_for_arch(&source, "qwen35moe").unwrap();
+        assert_eq!(config.n_ff, 512);
+        assert_eq!(config.moe.unwrap().n_ff_shexp, 512);
     }
 
     #[test]

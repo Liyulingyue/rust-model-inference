@@ -141,13 +141,14 @@ impl EmbeddingGemmaTextConfig {
     }
 }
 
-fn decode_f32(data: &[u8], expected: usize) -> Vec<f32> {
+fn decode_f32(data: &[u8], expected: usize) -> Result<Vec<f32>, String> {
     let n = data.len() / 4;
-    assert_eq!(
-        n, expected,
-        "f32 payload length mismatch: {} != {expected}",
-        n
-    );
+    if expected.checked_mul(4) != Some(data.len()) {
+        return Err(format!(
+            "F32 payload length {} != {expected} * 4",
+            data.len()
+        ));
+    }
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
         let bits = u32::from_le_bytes([
@@ -158,7 +159,7 @@ fn decode_f32(data: &[u8], expected: usize) -> Vec<f32> {
         ]);
         out.push(f32::from_bits(bits));
     }
-    out
+    Ok(out)
 }
 
 fn dequant_to_f32(
@@ -167,25 +168,16 @@ fn dequant_to_f32(
     n_in: usize,
     n_out: usize,
 ) -> Result<Vec<f32>, String> {
-    // GGUF stores Linear weights as `[n_in, n_out]` flat row-major.
-    // We dequantize to PyTorch convention `[n_out, n_in]` so the
-    // downstream Linear::forward can iterate `matrix[out * n_in + in]`.
-    let n = n_in * n_out;
+    // GGUF reverses dimension labels, but preserves PyTorch [out, in] bytes.
+    let n = n_in
+        .checked_mul(n_out)
+        .ok_or("Linear dimensions overflow")?;
     match qtype {
-        GGMLType::F32 => {
-            // raw is GGUF order: tensor[k * n_out + j] for k in 0..n_in, j in 0..n_out.
-            // We want out[o * n_in + i] = raw[i * n_out + o].
-            let src = decode_f32(raw, n);
-            let mut out = vec![0.0f32; n];
-            for i in 0..n_in {
-                for o in 0..n_out {
-                    out[o * n_in + i] = src[i * n_out + o];
-                }
-            }
-            Ok(out)
-        }
+        GGMLType::F32 => decode_f32(raw, n),
         GGMLType::BF16 => {
-            // Raw bytes are in PyTorch [n_out, n_in] row-major order (verified).
+            if n.checked_mul(2) != Some(raw.len()) {
+                return Err(format!("BF16 payload length {} != {n} * 2", raw.len()));
+            }
             let mut out = Vec::with_capacity(n);
             for idx in 0..n {
                 let bits = u16::from_le_bytes([raw[idx * 2], raw[idx * 2 + 1]]);
@@ -247,11 +239,7 @@ impl Linear {
         // For each output row i, compute the dot product with input.
         for i in 0..self.n_out {
             let row = &self.matrix[i * self.n_in..(i + 1) * self.n_in];
-            let mut s = 0.0f32;
-            for k in 0..self.n_in {
-                s += row[k] * input[k];
-            }
-            output[i] = s;
+            output[i] = crate::ops::dot_f32(row, input, self.n_in);
         }
     }
 }
@@ -265,6 +253,12 @@ fn linear_from_gguf(
     let info = source
         .tensor_info(name)
         .ok_or_else(|| format!("Missing tensor: {name}"))?;
+    if info.dims != [n_in as u64, n_out as u64] {
+        return Err(format!(
+            "{name}: shape {:?} != [{n_in}, {n_out}]",
+            info.dims
+        ));
+    }
     let raw = source
         .tensor_slice(name)
         .ok_or_else(|| format!("Missing tensor: {name}"))?;
@@ -299,7 +293,6 @@ struct LayerWeights {
 pub struct EmbeddingGemmaTextModel {
     pub config: EmbeddingGemmaTextConfig,
     pub(super) pool: Arc<ComputePool>,
-    pub(super) source: Arc<dyn TensorSource>,
     pub(super) token_embd: Vec<f32>,
     pub(super) text_embproj: Linear,
     pub(super) per_layer_model_proj: Linear,
@@ -309,15 +302,15 @@ pub struct EmbeddingGemmaTextModel {
 }
 
 impl EmbeddingGemmaTextModel {
-    pub fn from_source(source: &Arc<dyn TensorSource>) -> Result<Self, String> {
+    pub fn from_source(source: &dyn TensorSource) -> Result<Self, String> {
         let pool = Arc::new(ComputePool::new(8));
-        let config = EmbeddingGemmaTextConfig::from_metadata(source.as_ref())?;
+        let config = EmbeddingGemmaTextConfig::from_metadata(source)?;
 
         let get_f32 = |name: &str, expected: usize| -> Result<Vec<f32>, String> {
             let raw = source
                 .tensor_slice(name)
                 .ok_or_else(|| format!("Missing tensor: {name}"))?;
-            Ok(decode_f32(raw, expected))
+            decode_f32(raw, expected)
         };
 
         // Token embedding: dequantize token_embd to F32 (vocab × n_embd).
@@ -436,7 +429,7 @@ impl EmbeddingGemmaTextModel {
                 .tensor_slice(&format!("blk.{i}.layer_scalar"))
                 .ok_or_else(|| format!("Missing tensor: blk.{i}.layer_scalar"))?;
             let layer_scalar = if ls_raw.len() == 4 {
-                decode_f32(ls_raw, 1)[0]
+                decode_f32(ls_raw, 1)?[0]
             } else if ls_raw.len() == 2 {
                 let bits = u16::from_le_bytes([ls_raw[0], ls_raw[1]]);
                 f32::from_bits((bits as u32) << 16)
@@ -449,14 +442,14 @@ impl EmbeddingGemmaTextModel {
 
             // ple_input_gate: per-layer, [n_embd, n_embd] → input gate.
             let ple_input_gate = linear_from_gguf(
-                source.as_ref(),
+                source,
                 &format!("blk.{i}.ple_input_gate.weight"),
                 config.n_embd,
                 config.n_embd,
             )?;
             // ple_projection: per-layer, [n_embd, n_embd] → final projection.
             let ple_projection = linear_from_gguf(
-                source.as_ref(),
+                source,
                 &format!("blk.{i}.ple_projection.weight"),
                 config.n_embd,
                 config.n_embd,
@@ -465,25 +458,25 @@ impl EmbeddingGemmaTextModel {
             let ple_post_norm = get_f32(&format!("blk.{i}.ple_post_norm.weight"), config.n_embd)?;
 
             let attn_q = linear_from_gguf(
-                source.as_ref(),
+                source,
                 &format!("blk.{i}.attn_q.weight"),
                 config.n_embd,
                 config.n_head * head_dim,
             )?;
             let attn_k = linear_from_gguf(
-                source.as_ref(),
+                source,
                 &format!("blk.{i}.attn_k.weight"),
                 config.n_embd,
                 kv_heads * head_dim,
             )?;
             let attn_v = linear_from_gguf(
-                source.as_ref(),
+                source,
                 &format!("blk.{i}.attn_v.weight"),
                 config.n_embd,
                 kv_heads * head_dim,
             )?;
             let attn_output = linear_from_gguf(
-                source.as_ref(),
+                source,
                 &format!("blk.{i}.attn_output.weight"),
                 config.n_head * head_dim,
                 config.n_embd,
@@ -492,19 +485,19 @@ impl EmbeddingGemmaTextModel {
             let attn_k_norm = get_f32(&format!("blk.{i}.attn_k_norm.weight"), head_dim)?;
 
             let ffn_gate = linear_from_gguf(
-                source.as_ref(),
+                source,
                 &format!("blk.{i}.ffn_gate.weight"),
                 config.n_embd,
                 config.n_ff,
             )?;
             let ffn_up = linear_from_gguf(
-                source.as_ref(),
+                source,
                 &format!("blk.{i}.ffn_up.weight"),
                 config.n_embd,
                 config.n_ff,
             )?;
             let ffn_down = linear_from_gguf(
-                source.as_ref(),
+                source,
                 &format!("blk.{i}.ffn_down.weight"),
                 config.n_ff,
                 config.n_embd,
@@ -534,7 +527,6 @@ impl EmbeddingGemmaTextModel {
         Ok(Self {
             config,
             pool,
-            source: Arc::clone(source),
             token_embd,
             text_embproj,
             per_layer_model_proj,
@@ -547,6 +539,25 @@ impl EmbeddingGemmaTextModel {
     /// Forward a sequence of token IDs, return the mean-pooled
     /// 768-dim embedding. Bidirectional: no causal mask.
     pub fn forward(&self, token_ids: &[u32]) -> Result<Vec<f32>, String> {
+        self.forward_inputs(token_ids, None)
+    }
+
+    /// Replace media placeholders with the tower's projected soft tokens,
+    /// then return the same 768-dim mean-pooled embedding as text input.
+    pub fn forward_with_soft_tokens(
+        &self,
+        token_ids: &[u32],
+        media_token_id: u32,
+        soft_tokens: &[f32],
+    ) -> Result<Vec<f32>, String> {
+        self.forward_inputs(token_ids, Some((media_token_id, soft_tokens)))
+    }
+
+    fn forward_inputs(
+        &self,
+        token_ids: &[u32],
+        media: Option<(u32, &[f32])>,
+    ) -> Result<Vec<f32>, String> {
         if token_ids.is_empty() {
             return Err("empty input".to_string());
         }
@@ -560,11 +571,28 @@ impl EmbeddingGemmaTextModel {
         }
         let n_embd = cfg.n_embd;
         let per_layer_w = cfg.per_layer_width;
+        if let Some((id, values)) = media {
+            let slots = token_ids.iter().filter(|&&token| token == id).count();
+            if slots == 0 || slots.checked_mul(n_embd) != Some(values.len()) {
+                return Err(
+                    "media soft tokens do not match placeholder count and hidden width".into(),
+                );
+            }
+        }
 
         // Step 1: token lookup → scaled by sqrt(n_embd) (per references/llama.cpp/src/models/gemma4.cpp:165).
         let scale = (n_embd as f32).sqrt();
         let mut x = vec![0.0f32; n_tokens * n_embd];
+        let mut media_offset = 0;
         for (i, &tid) in token_ids.iter().enumerate() {
+            if let Some((id, values)) = media {
+                if tid == id {
+                    x[i * n_embd..(i + 1) * n_embd]
+                        .copy_from_slice(&values[media_offset..media_offset + n_embd]);
+                    media_offset += n_embd;
+                    continue;
+                }
+            }
             if (tid as usize) >= cfg.n_vocab {
                 return Err(format!("token id {tid} out of range"));
             }
@@ -720,9 +748,7 @@ impl EmbeddingGemmaTextModel {
             }
         }
 
-        // Step e: bidirectional attention (no causal mask, no sliding window — both ignored
-        // in HF eager mode for this architecture, see eager_attention_forward in
-        // .venv/lib/python3.12/site-packages/transformers/models/embedding_gemma2/modeling_embedding_gemma2.py).
+        // Step e: bidirectional attention with the layer's sliding window.
         let attn_dim = n_head * head_dim;
         let mut attn_out = vec![0.0f32; n_tokens * attn_dim];
         let gqa_ratio = n_head / n_kv;
@@ -736,6 +762,10 @@ impl EmbeddingGemmaTextModel {
                 // Scores for ALL key positions (bidirectional).
                 let mut scores = vec![0.0f32; n_tokens];
                 for j in 0..n_tokens {
+                    if !full_attn && i.abs_diff(j) > sliding_window {
+                        scores[j] = f32::NEG_INFINITY;
+                        continue;
+                    }
                     let k_off = j * n_kv * head_dim + kv_h * head_dim;
                     let k_vec = &k[k_off..k_off + head_dim];
                     let mut s = 0.0f32;
@@ -760,7 +790,6 @@ impl EmbeddingGemmaTextModel {
                 attn_out[dst_off..dst_off + head_dim].copy_from_slice(&out_vec);
             }
         }
-        let _ = (full_attn, sliding_window); // suppress unused-variable warnings
 
         // Step f: output projection.
         let mut proj_out = vec![0.0f32; n_tokens * n_embd];
@@ -870,5 +899,123 @@ fn apply_rope_neox(x: &mut [f32], head_dim: usize, cos: &[f32], sin: &[f32]) {
         let s = sin[i];
         x[i] = x_first * c - x_second * s;
         x[i + half] = x_second * c + x_first * s;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sliding_attention_keeps_inclusive_boundary_and_masks_distant_token() {
+        let zero = || Linear {
+            matrix: vec![0.0; 4],
+            n_in: 2,
+            n_out: 2,
+        };
+        let identity = || Linear {
+            matrix: vec![1.0, 0.0, 0.0, 1.0],
+            n_in: 2,
+            n_out: 2,
+        };
+        let model = EmbeddingGemmaTextModel {
+            config: EmbeddingGemmaTextConfig {
+                n_embd: 2,
+                n_layer: 1,
+                n_head: 1,
+                head_dims: vec![2],
+                kv_heads: vec![1],
+                rope_freq_base_sliding: 10000.0,
+                rope_freq_base_full: 1000000.0,
+                n_ff: 2,
+                n_vocab: 1,
+                per_layer_width: 2,
+                n_ctx: 1024,
+            },
+            pool: Arc::new(ComputePool::new(1)),
+            token_embd: vec![],
+            text_embproj: zero(),
+            per_layer_model_proj: zero(),
+            per_layer_proj_norm: vec![1.0; 2],
+            output_norm: vec![1.0; 2],
+            layers: vec![LayerWeights {
+                attn_norm: vec![1.0; 2],
+                post_attention_norm: vec![1.0; 2],
+                pre_ffn_norm: vec![1.0; 2],
+                post_ffn_norm: vec![1.0; 2],
+                layer_scalar: 1.0,
+                ple_input_gate: zero(),
+                ple_projection: zero(),
+                ple_post_norm: vec![1.0; 2],
+                attn_q: zero(),
+                attn_k: zero(),
+                attn_v: identity(),
+                attn_output: identity(),
+                attn_q_norm: vec![1.0; 2],
+                attn_k_norm: vec![1.0; 2],
+                ffn_gate: zero(),
+                ffn_up: zero(),
+                ffn_down: zero(),
+            }],
+        };
+        // Uniform QK scores make a distant nonzero value directly observable.
+        let mut hidden = [1.0, 0.0].repeat(514);
+        hidden[1026..].copy_from_slice(&[0.0, 1.0]);
+        model
+            .forward_layer(0, &mut hidden, &vec![0.0; 1028])
+            .unwrap();
+        assert_eq!(hidden[1], 0.0, "position 0 must exclude position 513");
+        assert!(
+            hidden[3] > 0.0,
+            "position 1 must include position 513 at distance 512"
+        );
+    }
+
+    #[test]
+    fn float_weights_preserve_row_order_and_bits() {
+        let bits: [u32; 6] = [
+            0x80000000, 0x7fc12345, 1, 0x3f800000, 0xbf800000, 0x7f800000,
+        ];
+        let raw: Vec<u8> = bits.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let decoded = dequant_to_f32(&raw, GGMLType::F32, 2, 3).unwrap();
+        assert_eq!(
+            decoded.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            bits
+        );
+
+        let bits: [u16; 6] = [0x8000, 0x7fc1, 1, 0x3f80, 0xbf80, 0x7f80];
+        let raw: Vec<u8> = bits.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let decoded = dequant_to_f32(&raw, GGMLType::BF16, 2, 3).unwrap();
+        assert_eq!(
+            decoded.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            bits.map(|v| (v as u32) << 16)
+        );
+    }
+
+    #[test]
+    fn float_weights_reject_incomplete_and_trailing_payloads() {
+        for (qtype, bytes) in [(GGMLType::F32, 24), (GGMLType::BF16, 12)] {
+            for len in [bytes - 1, bytes + 1] {
+                assert!(dequant_to_f32(&vec![0; len], qtype, 2, 3).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn q8_weights_decode_fp16_scale_and_separate_rows() {
+        let mut raw = Vec::new();
+        for scale in [0.5, 2.0] {
+            raw.extend(half::f16::from_f32(scale).to_bits().to_le_bytes());
+            raw.extend((-16i8..16).map(|v| v as u8));
+        }
+        let values = dequant_to_f32(&raw, GGMLType::Q8_0, 32, 2).unwrap();
+        let expected: Vec<_> = [0.5f32, 2.0]
+            .into_iter()
+            .flat_map(|scale| (-16..16).map(move |v| (v as f32 * scale).to_bits()))
+            .collect();
+        assert_eq!(
+            values.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            expected
+        );
     }
 }

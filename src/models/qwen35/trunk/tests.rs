@@ -243,7 +243,7 @@ fn qwen35_non_k_quant_weights_do_not_receive_q8_k_input() {
 
     scratch.x[..2].copy_from_slice(&hidden);
     model
-        .forward(1, &mut kv_cache, &mut scratch, &pool, &[[0; 4]], None)
+        .forward(1, &mut kv_cache, &mut scratch, &pool, &[[0; 4]])
         .unwrap();
 }
 
@@ -259,7 +259,7 @@ fn qwen35_k_quant_weights_reject_non_block_width() {
     let mut kv_cache = KvCache::new_f32(1, model.config.n_ctx, 2);
     let pool = ComputePool::new(1);
     scratch.x[..2].copy_from_slice(&[1.0, 0.0]);
-    let _ = model.forward(1, &mut kv_cache, &mut scratch, &pool, &[[0; 4]], None);
+    let _ = model.forward(1, &mut kv_cache, &mut scratch, &pool, &[[0; 4]]);
 }
 
 #[test]
@@ -1521,7 +1521,7 @@ fn cpu_scope_prevents_model_from_creating_a_second_vulkan_session() {
     scratch.x[..256].copy_from_slice(&model.embed_tokens(&[0]).unwrap());
     let _scope = ComputePool::disable_gpu_matmul_for_scope();
     model
-        .forward(1, &mut cache, &mut scratch, &pool, &[[0; 4]], None)
+        .forward(1, &mut cache, &mut scratch, &pool, &[[0; 4]])
         .unwrap();
     assert!(
         model.gpu.is_none(),

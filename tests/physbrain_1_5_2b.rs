@@ -13,20 +13,20 @@
 //! vocab extension to 168576 tokens (vs 151936 base Qwen3) and the
 //! deepstack visual indexes `[5, 11, 17]` in the mmproj.
 //!
-//! The test pins loader + tokenizer + tensor contract; no end-to-end image
-//! Oracle (the contract surface is enough to detect a bad converter run).
+//! This file pins the loader, tokenizer and tensor contract; production vision
+//! Oracle coverage, including DeepStack, is in pr169_vision_oracle.rs.
 
 use rust_model_inference::GGUFLoader;
 use rust_model_inference::TensorInfo;
 
 fn text_loader() -> Option<GGUFLoader> {
     let path = std::env::var_os("RMI_PHYSBRAIN_1_5_2B_TEXT")?;
-    GGUFLoader::from_file(path).ok()
+    Some(GGUFLoader::from_file(path).expect("load PhysBrain text GGUF"))
 }
 
 fn mmproj_loader() -> Option<GGUFLoader> {
     let path = std::env::var_os("RMI_PHYSBRAIN_1_5_2B_MMPROJ")?;
-    GGUFLoader::from_file(path).ok()
+    Some(GGUFLoader::from_file(path).expect("load PhysBrain mmproj"))
 }
 
 fn pick(loader: &GGUFLoader, key: &str) -> usize {
@@ -63,6 +63,8 @@ fn text_arch_and_dims_match_qwen3vl_2b_whitelist() {
     assert_eq!(pick(&loader, "qwen3vl.feed_forward_length"), 6144);
     assert_eq!(pick(&loader, "qwen3vl.context_length"), 262_144);
     assert_eq!(pick(&loader, "qwen3vl.vocab_size"), 168_576);
+    assert_eq!(pick(&loader, "qwen3vl.n_deepstack_layers"), 3);
+    assert_eq!(pick(&loader, "qwen3vl.rope.dimension_count"), 128);
     let rope_base: f64 = loader
         .metadata("qwen3vl.rope.freq_base")
         .and_then(|v| v.to_f64())
@@ -177,13 +179,11 @@ fn text_tokenizer_vocab_is_extended_to_168576() {
         .collect();
     assert_eq!(type_vec.len(), 168_576);
     let control_count = type_vec.iter().filter(|&&t| t == 3).count();
-    // The HF `added_tokens.json` has 16926 entries (151643-168568), but
-    // any beyond vocab_size are dropped by the engine. 16926 is the
-    // upper bound on CONTROL count.
-    assert!(
-        control_count >= 168_568 - 151_643 + 1,
-        "expected at least 16926 CONTROL tokens, got {control_count}",
-    );
+    assert_eq!(control_count, 16_914);
+    // HF marks tool/FIM/thinking delimiters as ordinary added tokens.
+    for id in 151_657..=151_668 {
+        assert_eq!(type_vec[id], 4, "added token {id} must be USER_DEFINED");
+    }
 }
 
 #[test]
@@ -276,6 +276,8 @@ fn mmproj_conv3d_split_into_two_conv2d_weights() {
     // up here as (16, 16, 3, 1024).
     let w0 = shape(&loader, "v.patch_embd.weight").expect("v.patch_embd.weight");
     let w1 = shape(&loader, "v.patch_embd.weight.1").expect("v.patch_embd.weight.1");
+    assert_eq!(w0.ggml_type, rust_model_inference::GGMLType::F16);
+    assert_eq!(w1.ggml_type, rust_model_inference::GGMLType::F16);
     assert_eq!(w0.dims, vec![16, 16, 3, 1024]);
     assert_eq!(w1.dims, vec![16, 16, 3, 1024]);
     let bias = shape(&loader, "v.patch_embd.bias").expect("v.patch_embd.bias");
@@ -285,7 +287,7 @@ fn mmproj_conv3d_split_into_two_conv2d_weights() {
     // bias-add loop would run off the end of the merged buffer.
     assert_eq!(
         bias.ggml_type,
-        rust_model_inference::core::tensor::GGMLType::F32,
+        rust_model_inference::GGMLType::F32,
         "v.patch_embd.bias must be F32, not {:?}",
         bias.ggml_type
     );
@@ -298,11 +300,14 @@ fn mmproj_merger_tensors_match_qwen3vl_merger_contract() {
     };
     let mm0 = shape(&loader, "mm.0.weight").expect("mm.0.weight");
     let mm2 = shape(&loader, "mm.2.weight").expect("mm.2.weight");
+    assert_eq!(mm0.ggml_type, rust_model_inference::GGMLType::F16);
+    assert_eq!(mm2.ggml_type, rust_model_inference::GGMLType::F16);
     // mm.0: [merged_embd, merged_embd] = [n_embd*merge*merge, n_embd*merge*merge] = [4096, 4096]
     // mm.2: [merged_embd, projection_dim] = [4096, 2048]
     assert_eq!(mm0.dims, vec![4096, 4096]);
     assert_eq!(mm2.dims, vec![4096, 2048]);
     let post_ln = shape(&loader, "v.post_ln.weight").expect("v.post_ln.weight");
+    assert_eq!(post_ln.ggml_type, rust_model_inference::GGMLType::F32);
     // post_ln operates per-token on n_embd=1024; weight must be 1024 long.
     assert_eq!(post_ln.dims, vec![1024]);
 }

@@ -55,6 +55,7 @@ import sys
 from pathlib import Path
 
 from tools.converter.utils.gguf import (
+    model_metadata_value,
     GGML_BF16,
     GGML_F16,
     GGML_F32,
@@ -209,6 +210,7 @@ def write_gguf(hf_dir: Path, out_path: Path) -> None:
     st = open_safetensors(hf_dir / "model.safetensors")
 
     # Build the GGUF.
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     gguf = GgufWriter(out_path)
 
     # ---- general.* ----
@@ -288,17 +290,25 @@ def write_gguf(hf_dir: Path, out_path: Path) -> None:
     for tid in added:
         if tid < TEXT_VOCAB:
             types[tid] = 3
-    gguf.add_meta("tokenizer.ggml.model", "gpt2")
-    gguf.add_meta("tokenizer.ggml.pre", "gpt2")  # Gemma3+ uses gpt2 BPE.
+    # EmbeddingGemma uses Gemma's character-level BPE: spaces become `▁`,
+    # newlines are separate segments, and BOS is always emitted by the
+    # Gemma4 tokenizer path. Keeping the model tag explicit avoids routing it
+    # through the GPT-2 byte-level pretokenizer.
+    gguf.add_meta("tokenizer.ggml.model", "gemma4")
     gguf.add_meta("tokenizer.ggml.tokens", tokens)
     gguf.add_meta("tokenizer.ggml.token_type", types)
     gguf.add_meta("tokenizer.ggml.merges", [" ".join(m) for m in merges])
-    bos_id = tok_cfg.get("bos_token_id", 1)
-    eos_id = tok_cfg.get("eos_token_id", 1)
+    token_ids = {token: token_id for token_id, token in all_tokens.items()}
+    bos_id = tok_cfg.get("bos_token_id")
+    if bos_id is None:
+        bos_id = token_ids.get(tok_cfg.get("bos_token", "<bos>"), 1)
+    eos_id = tok_cfg.get("eos_token_id")
+    if eos_id is None:
+        eos_id = token_ids.get(tok_cfg.get("eos_token", "<eos>"), 1)
     gguf.add_meta("tokenizer.ggml.bos_token_id", int(bos_id))
     gguf.add_meta("tokenizer.ggml.eos_token_id", int(eos_id))
-    gguf.add_meta("tokenizer.ggml.add_bos_token", False)
-    gguf.add_meta("tokenizer.ggml.add_eos_token", False)
+    gguf.add_meta("tokenizer.ggml.add_bos_token", True)
+    gguf.add_meta("tokenizer.ggml.add_eos_token", True)
 
     # ---- tensors ----
     # Token embeddings + embedding projection.
@@ -471,6 +481,7 @@ def write_gguf(hf_dir: Path, out_path: Path) -> None:
             new_name = "audio." + n[len("audio_tower."):]
             _emit_bf16(gguf, new_name, t.raw, tuple(t.shape))
 
+    gguf.metadata = [(key, model_metadata_value(value)) for key, value in gguf.metadata]
     gguf.write()
     print(
         f"[gemma4-embedding] wrote {out_path} "

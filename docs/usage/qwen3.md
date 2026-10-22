@@ -105,8 +105,7 @@ n_ff=9728, head_dim=128, n_ctx=262144, freq_base=5e6, M-RoPE [24,20,20,0]`）。
   引擎算出 `0.0`。根因是 `src/ops/math/exp.rs` 里 `exp_approx_avx2` 用
   位移构造 `2**n`，clamp 上界 `88.376_26` 允许 `n = -128`，指数位溢出后
   返回 `-inf` 而非下溢的 0；`silu(x) = x/(1+exp(-x))` 于是变成 `-0`，
-  该 FFN 通道被整个丢掉。改成 clamp `±88.0`（`n = ±127`）后，
-  `PhysBrain1.5-2B` 文本与图像均正常。
+  该 FFN 通道被整个丢掉。  改成 clamp `±88.0`（`n = ±127`）后，`PhysBrain1.5-2B` 文本恢复正常。
 
   > 该 bug 只在 AVX2 路径上；NEON 变体本来就有 `vcagtq_f32(n, 126.0)` 越界保护。
   > 任何 gate 超过 ~88.4 的模型都会中招，与尺寸无关。
@@ -114,6 +113,20 @@ n_ff=9728, head_dim=128, n_ctx=262144, freq_base=5e6, M-RoPE [24,20,20,0]`）。
   > **潜伏且依赖输入**的：只有当某次前向真的把某个 gate 顶到 88 以上时才发作。
   > 这正是当年 2B 症状看起来自相矛盾的原因——同一模型换个 prompt 或换张图，
   > 可能正常、也可能退化。
+
+  **图像路径另有一个独立根因**（PR #179 修掉）：`qwen3vl` 视觉塔此前用
+  `rope_mrope_interleaved`（interleaved 配对）旋转 Q/K，而 llama.cpp 与本仓库
+  早已在用的 `qwen35` 视觉塔都是 split-half（NeoX）配对。配对方式错了以后，
+  图像 embedding 是乱的，但模型照样能吐出一句通顺的描述——**幻觉而非报错**，
+  比崩溃难查得多。
+
+  > 实测证据：用模型官方资产 `case-action-trajectory.png`（2594×1557，缩到
+  > 768×461）喂给修复前的引擎，得到的是
+  > “a dark, possibly forested area, featuring a path or road that leads
+  > through it”；换成 split-half 配对后得到
+  > “a collage of various scenes from a video or a series of frames... a
+  > table, a chair, bottles, a cup, a box, and a toy car”，与图片真实内容
+  > （一串操作轨迹帧）一致。
 
   官方 `-2B` GGUF 建议在升级后重测；`PhysBrain1.5-2B` 已端到端验证（文本 + 图像）。
 

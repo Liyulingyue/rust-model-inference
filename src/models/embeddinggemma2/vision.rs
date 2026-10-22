@@ -11,7 +11,7 @@
 //!
 //! Forward: image (H, W, 3) → patch_embed → add 2D positional embeddings →
 //! 16 ViT blocks → spatial merge (groups of 3×3 → 1) → 280 soft tokens →
-//! `vision_embed.weight` projection to text space (768).
+//! `vision_embed.weight` projection to the text hidden space (512).
 //!
 //! Image preprocessing:
 //! - resize to image_size × image_size (default 768)
@@ -20,7 +20,7 @@
 //! - patch_pos: rows × cols (each (h, w) gets pos = position_embedding[h, w])
 //! - spatial merge: every (merge × merge) block of patches becomes 1 token
 
-use crate::core::tensor::{GGMLType, MetaValue, TensorSource};
+use crate::core::tensor::TensorSource;
 use std::sync::Arc;
 
 pub const RMS_NORM_EPS: f32 = 1e-6;
@@ -122,14 +122,24 @@ fn dequant_bf16_to_f32(raw: &[u8], n: usize) -> Vec<f32> {
 /// transpose to PyTorch `[n_out, n_in]` for our Linear::forward loop.
 fn dequant_bf16_to_f32_linear(raw: &[u8], n_in: usize, n_out: usize) -> Vec<f32> {
     let n = n_in * n_out;
-    let mut src = dequant_bf16_to_f32(raw, n);
-    let mut out = vec![0.0f32; n];
-    for i in 0..n_in {
-        for o in 0..n_out {
-            out[o * n_in + i] = src[i * n_out + o];
-        }
+    // The converter preserves the source PyTorch [out, in] payload. GGUF
+    // reverses only the dimension metadata, so Linear can consume it directly.
+    dequant_bf16_to_f32(raw, n)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dequant_bf16_to_f32_linear;
+
+    #[test]
+    fn linear_bf16_payload_keeps_pytorch_row_order() {
+        let values = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let raw: Vec<u8> = values
+            .iter()
+            .flat_map(|value| half::bf16::from_f32(*value).to_bits().to_le_bytes())
+            .collect();
+        assert_eq!(dequant_bf16_to_f32_linear(&raw, 3, 2), values);
     }
-    out
 }
 
 /// Linear weight stored as a flat F32 matrix (row-major `[n_out, n_in]`,
@@ -147,11 +157,7 @@ impl Linear {
         assert_eq!(output.len(), self.n_out, "Linear::forward output shape");
         for i in 0..self.n_out {
             let row = &self.matrix[i * self.n_in..(i + 1) * self.n_in];
-            let mut s = 0.0f32;
-            for k in 0..self.n_in {
-                s += row[k] * input[k];
-            }
-            output[i] = s;
+            output[i] = crate::ops::dot_f32(row, input, self.n_in);
         }
     }
 }
@@ -165,7 +171,7 @@ fn linear_from_gguf_bf16(
     let raw = source
         .tensor_slice(name)
         .ok_or_else(|| format!("Missing tensor: {name}"))?;
-    // Stored as `[n_in, n_out]` in GGUF; transpose to `[n_out, n_in]`.
+    // Payload is already `[n_out, n_in]`; GGUF dims are metadata only.
     let matrix = dequant_bf16_to_f32_linear(raw, n_in, n_out);
     Ok(Linear {
         matrix,
@@ -198,6 +204,7 @@ pub struct EmbeddingGemmaVisionModel {
     /// embd)` — separate (h, w) tables. We read it as a flat F32 vector.
     pub(super) position_embedding_table: Vec<f32>,
     pub(super) layers: Vec<VisionLayer>,
+    pub(super) vision_embed: Linear,
 }
 
 impl EmbeddingGemmaVisionModel {
@@ -335,24 +342,36 @@ impl EmbeddingGemmaVisionModel {
             });
         }
 
+        let text_dim = source
+            .metadata("gemma4-embedding.embedding_length")
+            .and_then(|value| value.to_u64())
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or("Missing metadata: gemma4-embedding.embedding_length")?;
+        let vision_embed = linear_from_gguf_bf16(
+            source.as_ref(),
+            "vision_embed.weight",
+            config.embd,
+            text_dim,
+        )?;
+
         Ok(Self {
             config,
             source: Arc::clone(source),
             patch_input_proj,
             position_embedding_table,
             layers,
+            vision_embed,
         })
     }
 
-    /// Encode an image to a sequence of `default_output_length` soft tokens
-    /// projected to `projection_dim` (1536). The caller can then map them
-    /// to the text space via `vision_embed.weight`.
+    /// Encode an image to pooled vision-tower tokens (one 768-dim row per
+    /// `spatial_merge_size` square), before the multimodal text projector.
     ///
     /// `image_pixels` is `(image_h * patch_size, image_w * patch_size, 3)`
     /// in RGB order. For our test path we accept any shape that's a
     /// multiple of `patch_size` and equal in both dims (the default
     /// produces `default_output_length` merged tokens).
-    pub fn encode(
+    pub fn encode_tower(
         &self,
         image_pixels: &[f32],
         image_h: usize,
@@ -383,7 +402,8 @@ impl EmbeddingGemmaVisionModel {
         let merged_x = n_patches_x / merge;
         let n_tokens = merged_y * merged_x;
 
-        // Step 1: patch embed. For each patch, compute
+        // Step 1: patch embed. HF scales RGB values from [0, 1] to [-1, 1]
+        // immediately before the learned patch projection.
         //   embed[p] = patch_input_proj @ pixels[p]  (linear in_features → embd)
         // stored as `[embd, in_features]` so it's a matvec.
         let mut patches = vec![0.0f32; n_patches * embd];
@@ -400,7 +420,7 @@ impl EmbeddingGemmaVisionModel {
                     for c in 0..3 {
                         let idx = (dy * ps + dx) * 3 + c;
                         let img_idx = (img_row * image_w + img_col) * 3 + c;
-                        patch_pixels[idx] = image_pixels[img_idx];
+                        patch_pixels[idx] = 2.0 * (image_pixels[img_idx] - 0.5);
                     }
                 }
             }
@@ -418,13 +438,13 @@ impl EmbeddingGemmaVisionModel {
             if py >= cfg.position_embedding_size || px >= cfg.position_embedding_size {
                 return Err("Image exceeds position embedding table".to_string());
             }
-            // h table: row `py`, col `0..embd` (offset 0).
-            let h_off = py * embd;
-            // w table: row `px`, col `0..embd` (offset position_embedding_size * embd).
-            let w_off = cfg.position_embedding_size * embd + px * embd;
+            // HF uses position ids in (x, y) order, matching the two table
+            // slices in `position_embedding_table`.
+            let x_off = px * embd;
+            let y_off = cfg.position_embedding_size * embd + py * embd;
             for e in 0..embd {
-                patches[p * embd + e] += self.position_embedding_table[h_off + e]
-                    + self.position_embedding_table[w_off + e];
+                patches[p * embd + e] += self.position_embedding_table[x_off + e]
+                    + self.position_embedding_table[y_off + e];
             }
         }
 
@@ -433,27 +453,52 @@ impl EmbeddingGemmaVisionModel {
             self.forward_vision_layer(il, &mut patches, n_patches_x, n_patches_y)?;
         }
 
-        // Step 4: spatial merge — group every (merge × merge) block of
-        // patches into a single token (concat across the 9 patch positions).
-        // No "down_proj" tensor after the last layer (EmbeddingGemma2's
-        // design), so we just concat.
-        let merged_token_len = merge * merge * embd;
-        let mut merged = vec![0.0f32; n_tokens * merged_token_len];
+        // Step 4: spatial pool — HF averages each merge×merge patch block and
+        // scales the resulting tower token by sqrt(hidden_size).
+        if n_patches_y % merge != 0 || n_patches_x % merge != 0 {
+            return Err(format!(
+                "patch grid ({n_patches_y}, {n_patches_x}) is not divisible by merge {merge}"
+            ));
+        }
+        let mut pooled = vec![0.0f32; n_tokens * embd];
         for t in 0..n_tokens {
             let my = t / merged_x;
             let mx = t % merged_x;
-            let mut out_idx = t * merged_token_len;
             for dy in 0..merge {
                 for dx in 0..merge {
                     let p = (my * merge + dy) * n_patches_x + (mx * merge + dx);
-                    merged[out_idx..out_idx + embd]
-                        .copy_from_slice(&patches[p * embd..(p + 1) * embd]);
-                    out_idx += embd;
+                    for e in 0..embd {
+                        pooled[t * embd + e] += patches[p * embd + e];
+                    }
                 }
             }
+            let scale = (embd as f32).sqrt() / (merge * merge) as f32;
+            for e in 0..embd {
+                pooled[t * embd + e] *= scale;
+            }
         }
+        Ok(pooled)
+    }
 
-        Ok(merged)
+    /// Encode an image to the 512-dim language-space soft tokens consumed by
+    /// the EmbeddingGemma multimodal embedder.
+    pub fn encode(
+        &self,
+        image_pixels: &[f32],
+        image_h: usize,
+        image_w: usize,
+    ) -> Result<Vec<f32>, String> {
+        let tower = self.encode_tower(image_pixels, image_h, image_w)?;
+        let mut output = vec![0.0f32; tower.len() / self.config.embd * self.vision_embed.n_out];
+        for (input, out) in tower
+            .chunks_exact(self.config.embd)
+            .zip(output.chunks_exact_mut(self.vision_embed.n_out))
+        {
+            let mut normalized = input.to_vec();
+            crate::ops::norm::rms_unit_inplace(&mut normalized, RMS_NORM_EPS);
+            self.vision_embed.forward(&normalized, out);
+        }
+        Ok(output)
     }
 
     fn forward_vision_layer(
@@ -473,19 +518,15 @@ impl EmbeddingGemmaVisionModel {
 
         // Step a: normed = rms_norm(input_layernorm, x).
         let mut normed = x.to_vec();
-        crate::ops::norm::rms_norm_inplace(
-            &mut normed[..n_patches * embd],
-            &layer.input_layernorm,
-            RMS_NORM_EPS,
-        );
+        for row in normed.chunks_exact_mut(embd) {
+            crate::ops::norm::rms_norm_inplace(row, &layer.input_layernorm, RMS_NORM_EPS);
+        }
 
         // Step b: separate Q, K, V projections.
         let mut q = vec![0.0f32; n_patches * embd];
         let mut k = vec![0.0f32; n_patches * embd];
         let mut v = vec![0.0f32; n_patches * embd];
         let mut tmp_q = vec![0.0f32; embd];
-        let mut tmp_k = vec![0.0f32; embd];
-        let mut tmp_v = vec![0.0f32; embd];
         let mut tmp_k = vec![0.0f32; embd];
         let mut tmp_v = vec![0.0f32; embd];
         for p in 0..n_patches {
@@ -499,11 +540,11 @@ impl EmbeddingGemmaVisionModel {
         }
 
         // Step c: per-head Q/K RMSNorm + axial RoPE.
-        // RoPE dimensions: split head_dim in half (32 each).
-        // First half rotated by (py, px).second_half rotated by (px, py)
-        // per "axial" semantics: pos_h rotates first half, pos_w rotates
-        // second half. (This matches llama.cpp's SigLIP implementation.)
+        // HF computes head_dim/4 frequencies and repeats each axis' frequency
+        // table twice into the [X, X, Y, Y] rotary layout.
         let half = head_dim / 2;
+        let quarter = head_dim / 4;
+        let spatial_dim = head_dim / 2;
         let mut cos_h = vec![0.0f32; n_patches * half];
         let mut sin_h = vec![0.0f32; n_patches * half];
         let mut cos_w = vec![0.0f32; n_patches * half];
@@ -512,9 +553,9 @@ impl EmbeddingGemmaVisionModel {
             let py = p / n_patches_x;
             let px = p % n_patches_x;
             for j in 0..half {
-                let freq = 1.0 / rope_freq.powf(2.0 * j as f32 / head_dim as f32);
-                let angle_h = py as f32 * freq;
-                let angle_w = px as f32 * freq;
+                let freq = 1.0 / rope_freq.powf(2.0 * (j % quarter) as f32 / spatial_dim as f32);
+                let angle_h = px as f32 * freq;
+                let angle_w = py as f32 * freq;
                 cos_h[p * half + j] = angle_h.cos();
                 sin_h[p * half + j] = angle_h.sin();
                 cos_w[p * half + j] = angle_w.cos();
@@ -553,37 +594,32 @@ impl EmbeddingGemmaVisionModel {
                     &cos_w[p * half..(p + 1) * half],
                     &sin_w[p * half..(p + 1) * half],
                 );
+                crate::ops::norm::rms_unit_inplace(&mut v[off..off + head_dim], RMS_NORM_EPS);
             }
         }
 
-        // Step d: full bidirectional attention (no mask).
+        // Step d: full bidirectional attention (no mask). Gemma4 vision uses
+        // a unit attention scale; the head dimension is already normalized by
+        // the trained projections.
         let mut attn_out = vec![0.0f32; n_patches * embd];
-        let scale = 1.0 / (head_dim as f32).sqrt();
+        let mut scores = vec![0.0f32; n_patches];
         for i in 0..n_patches {
-            let q_i = &q[i * embd..(i + 1) * embd];
-            let mut scores = vec![0.0f32; n_patches];
-            for j in 0..n_patches {
-                let k_j = &k[j * embd..(j + 1) * embd];
-                let mut s = 0.0f32;
-                for h in 0..n_head {
-                    let q_off = h * head_dim;
-                    let k_off = h * head_dim;
+            for h in 0..n_head {
+                let head_off = h * head_dim;
+                let q_i = &q[i * embd + head_off..i * embd + head_off + head_dim];
+                for j in 0..n_patches {
+                    let k_j = &k[j * embd + head_off..j * embd + head_off + head_dim];
+                    scores[j] = crate::ops::dot_f32(q_i, k_j, head_dim);
+                }
+                crate::ops::softmax::softmax_inplace(&mut scores);
+                let out_i = &mut attn_out[i * embd + head_off..i * embd + head_off + head_dim];
+                for j in 0..n_patches {
+                    let v_j = &v[j * embd + head_off..j * embd + head_off + head_dim];
                     for d in 0..head_dim {
-                        s += q_i[q_off + d] * k_j[k_off + d];
+                        out_i[d] += scores[j] * v_j[d];
                     }
                 }
-                scores[j] = s * scale;
             }
-            crate::ops::softmax::softmax_inplace(&mut scores);
-            let mut out_i = vec![0.0f32; embd];
-            for j in 0..n_patches {
-                let v_j = &v[j * embd..(j + 1) * embd];
-                let s = scores[j];
-                for e in 0..embd {
-                    out_i[e] += s * v_j[e];
-                }
-            }
-            attn_out[i * embd..(i + 1) * embd].copy_from_slice(&out_i);
         }
 
         // Step e: output projection.
@@ -610,11 +646,9 @@ impl EmbeddingGemmaVisionModel {
 
         // Step g: pre_ffn_norm.
         let mut ff_x = x.to_vec();
-        crate::ops::norm::rms_norm_inplace(
-            &mut ff_x[..n_patches * embd],
-            &layer.pre_ffn_norm,
-            RMS_NORM_EPS,
-        );
+        for row in ff_x.chunks_exact_mut(embd) {
+            crate::ops::norm::rms_norm_inplace(row, &layer.pre_ffn_norm, RMS_NORM_EPS);
+        }
 
         // Step h: SwiGLU FFN.
         let mut gate_buf = vec![0.0f32; n_patches * cfg.intermediate_size];
@@ -628,7 +662,7 @@ impl EmbeddingGemmaVisionModel {
             layer.ffn_gate.forward(src, &mut tmp_g);
             layer.ffn_up.forward(src, &mut tmp_u);
             for j in 0..cfg.intermediate_size {
-                tmp_g[j] = crate::ops::silu(tmp_g[j]) * tmp_u[j];
+                tmp_g[j] = crate::ops::activation::gelu(tmp_g[j]) * tmp_u[j];
             }
             layer.ffn_down.forward(&tmp_g, &mut tmp_d);
             ffn_out[p * embd..(p + 1) * embd].copy_from_slice(&tmp_d);
@@ -642,7 +676,6 @@ impl EmbeddingGemmaVisionModel {
                 x[p * embd + e] += tmp[e];
             }
         }
-
         Ok(())
     }
 }
@@ -658,20 +691,24 @@ fn apply_axial_rope(
     cos_w: &[f32],
     sin_w: &[f32],
 ) {
-    let half = head_dim / 2;
-    debug_assert_eq!(cos_h.len(), half);
-    debug_assert_eq!(sin_h.len(), half);
-    debug_assert_eq!(cos_w.len(), half);
-    debug_assert_eq!(sin_w.len(), half);
-    for i in 0..half {
-        let x_first = x[i];
-        let x_second = x[i + half];
-        let ch = cos_h[i];
-        let sh = sin_h[i];
-        let cw = cos_w[i];
-        let sw = sin_w[i];
-        // First half rotated by (ch, sh); second half by (cw, sw).
-        x[i] = x_first * ch - x_second * sh;
-        x[i + half] = x_second * cw + x_first * sw;
+    let axis_dim = head_dim / 2;
+    let pair_dim = axis_dim / 2;
+    debug_assert_eq!(cos_h.len(), axis_dim);
+    debug_assert_eq!(sin_h.len(), axis_dim);
+    debug_assert_eq!(cos_w.len(), axis_dim);
+    debug_assert_eq!(sin_w.len(), axis_dim);
+    // HF splits each head into two 32-wide axis chunks, then applies the
+    // usual rotate_half within each chunk.  The frequency table is repeated
+    // twice in each chunk ([H,H,W,W]), so pairs are separated by 16 here.
+    for i in 0..pair_dim {
+        let h0 = x[i];
+        let h1 = x[i + pair_dim];
+        x[i] = h0 * cos_h[i] - h1 * sin_h[i];
+        x[i + pair_dim] = h1 * cos_h[i + pair_dim] + h0 * sin_h[i + pair_dim];
+
+        let w0 = x[axis_dim + i];
+        let w1 = x[axis_dim + i + pair_dim];
+        x[axis_dim + i] = w0 * cos_w[i] - w1 * sin_w[i];
+        x[axis_dim + i + pair_dim] = w1 * cos_w[i + pair_dim] + w0 * sin_w[i + pair_dim];
     }
 }

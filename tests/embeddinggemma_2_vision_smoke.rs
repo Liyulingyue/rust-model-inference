@@ -35,11 +35,16 @@ fn vision_forward_returns_correct_shape_finite_values() {
     let pixels: Vec<f32> = (0..image_h * image_w * 3)
         .map(|i| (i as f32 * 0.001).sin() * 0.5 + 0.5)
         .collect();
+    let tower = model
+        .encode_tower(&pixels, image_h, image_w)
+        .expect("vision tower encode");
+    assert_eq!(tower.len(), 768);
     let tokens = model
         .encode(&pixels, image_h, image_w)
         .expect("vision encode");
-    // merge_token_len = merge^2 * embd = 9 * 768 = 6912.
-    assert_eq!(tokens.len(), 9 * 768);
+    // A 3×3 patch block pools to one 768-wide tower row, then projects to
+    // the 512-wide text embedding space.
+    assert_eq!(tokens.len(), 512);
     let n_finite = tokens.iter().filter(|v| v.is_finite()).count();
     assert_eq!(n_finite, tokens.len(), "non-finite values in vision output");
     // Different image: solid red instead of noisy gradient.
