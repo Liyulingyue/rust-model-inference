@@ -139,12 +139,25 @@ Neither `RMI_PARITY_TRACE` nor `RMI_SCALAR` is set: both would disable offload
 and invalidate this execution probe. The operator helper retains its own
 fixture checks; Dory's reduced-precision acceptance remains the dual 1% gate.
 
-The larger `vk_ops_check --formats q5_k,q6_k,bf16 --rows 1` and `--rows 3`
-runs completed those batched matmul fixtures, then failed in the existing
-Z-Image SiLU-scale probe: `device arena requires read_f32_into`. That probe
-creates a device-local arena but calls its borrowed `read_f32` API. This
-shared code is unchanged from main; the full operator suite is not counted
-as passing and was not repaired in this Dory validation change.
+The Z-Image SiLU-scale probe now uses `read_f32_into` to copy device-local
+output into its existing host `gate` vector. Its previous borrowed `read_f32`
+call failed with `device arena requires read_f32_into` on the discrete GPU.
+The same remote check fails before the fix and passes afterward:
+
+```sh
+SILU_ONLY=1 VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.json \
+  cargo run --locked --profile release-fast --features vulkan \
+  --example vk_ops_check -- --formats q5_k,q6_k,bf16 --rows 1
+```
+
+All 39,321,600 SiLU outputs are finite. Fresh full `vk_ops_check` runs with
+`--rows 1` and `--rows 3` pass SiLU, RMSNorm, RoPE, Q5/Q6/BF16 matvec and Q8_K
+quantization, then stop at a separate convolution check: row 0, column 17,
+GPU `0xb788d769` versus CPU `0xb788d768` (1 ULP). The same mismatch occurs
+with `SILU_SCALE_ONLY=1`, which skips the SiLU probe entirely. No numerical
+gate was changed; the full operator suite is still not counted as passing.
+The `readback_fix` section of [validation-gpu.json](validation-gpu.json)
+records these follow-up checks separately from the original execution probe.
 
 ## Acceptance
 

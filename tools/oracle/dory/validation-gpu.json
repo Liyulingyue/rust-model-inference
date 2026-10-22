@@ -217,6 +217,83 @@
     "No end-to-end Dory GPU checkpoint alignment: the real model performs no inference GPU work.",
     "No Dory GPU speedup or performance benchmark.",
     "Only the named Q5_K_M artifact, Hello prompt, F32/F16 KV and eight greedy continuation tokens in this GPU request probe.",
-    "The broader shared operator suite fails; no full-suite pass is claimed."
-  ]
+    "The repaired SiLU probe passes; the broader shared operator suite still stops at an independent convolution 1 ULP mismatch, including with SiLU skipped."
+  ],
+  "readback_fix": {
+    "date": "2026-10-22",
+    "source_base_commit": "64cffadb3129590bd96cbc1d4e533c7fa944e730",
+    "change": "silu_ffn_scale_probe downloads device-local output through read_f32_into into its existing gate vector; no additional buffer or numerical gate change",
+    "source_verification": {
+      "old_manifest_files": 548,
+      "changed_files": [
+        "src/vulkan/ops.rs"
+      ],
+      "new_ops_sha256": "5d0f6d1ddf94727d0ebc31efbdbea32bd22d74b435b439b112f93869196f723c",
+      "binary_sha256": "193bfc3add684b21790783f4a535cfae52346830b732b785e1e8027979f173a4"
+    },
+    "before": {
+      "SILU_ONLY": "1",
+      "rows": 1,
+      "exit_code": 1,
+      "error": "device arena requires read_f32_into"
+    },
+    "cases": [
+      {
+        "case": "silu-only",
+        "command": [
+          "target/release-fast/examples/vk_ops_check",
+          "--formats",
+          "q5_k,q6_k,bf16",
+          "--rows",
+          "1"
+        ],
+        "SILU_ONLY": "1",
+        "exit_code": 0,
+        "elapsed_seconds": 0.515
+      },
+      {
+        "case": "full-rows1",
+        "command": [
+          "target/release-fast/examples/vk_ops_check",
+          "--formats",
+          "q5_k,q6_k,bf16",
+          "--rows",
+          "1"
+        ],
+        "SILU_ONLY": "unset",
+        "exit_code": 1,
+        "elapsed_seconds": 0.565
+      },
+      {
+        "case": "full-rows3",
+        "command": [
+          "target/release-fast/examples/vk_ops_check",
+          "--formats",
+          "q5_k,q6_k,bf16",
+          "--rows",
+          "3"
+        ],
+        "SILU_ONLY": "unset",
+        "exit_code": 1,
+        "elapsed_seconds": 0.615
+      }
+    ],
+    "silu_outputs": 39321600,
+    "silu_nonfinite_outputs": 0,
+    "later_failure": {
+      "error": "conv mismatch offset=0 row=0 column=17: gpu=0xb788d769 cpu=0xb788d768",
+      "ulp_difference": 1,
+      "reproduced_with_silu_skipped": true,
+      "skip_environment": "SILU_SCALE_ONLY=1",
+      "skip_exit_code": 1,
+      "full_suite_passed": false
+    },
+    "evidence_sha256": {
+      "gpu-silu-red.log": "70cfb076cc88f267ea47128aa3205c40e8999f725689ce0f36ad92707a458759",
+      "silu-only.log": "294e2f042e5589db385c5533f256640730556245f8fc2f7182babcbb0542599b",
+      "full-rows1.log": "c7fd592647368c8acc63494bcbdf08353b2303c3340bb51ad29bc6bbaf6546af",
+      "full-rows3.log": "24f20f47af5cba8464c3eae7384ce61acc6a41c1265ac3486ad027e715c45c0b",
+      "without-silu.log": "02a54d44de8df65f473f995c97d4b94c047ab1ce2a7ca07ad30b9421c81c113f"
+    }
+  }
 }

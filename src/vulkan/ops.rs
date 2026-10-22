@@ -5561,10 +5561,9 @@ pub fn silu_ffn_scale_probe(context: &VulkanContext) -> Result<usize, String> {
         .submit_and_wait()
         .map_err(|error| error.to_string())?;
 
-    let after = ops
-        .read_f32(gate_region, count)
+    ops.read_f32_into(gate_region, &mut gate)
         .map_err(|error| error.to_string())?;
-    let nonfinite = after.iter().filter(|value| !value.is_finite()).count();
+    let nonfinite = gate.iter().filter(|value| !value.is_finite()).count();
     Ok(nonfinite)
 }
 
