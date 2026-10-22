@@ -23,8 +23,8 @@ fi
 cp "$script_dir/oracle.cpp" "$source_dir/examples/eval-callback/eval-callback.cpp"
 cmake -S "$source_dir" -B "$work_dir/build" \
     -DCMAKE_BUILD_TYPE=Release \
-    '-DCMAKE_C_FLAGS=-U__ARM_NEON -U__ARM_NEON__ -ffp-contract=off -fno-builtin-sinf -fno-builtin-cosf' \
-    '-DCMAKE_CXX_FLAGS=-U__ARM_NEON -U__ARM_NEON__ -ffp-contract=off -fno-builtin-sinf -fno-builtin-cosf' \
+    '-DCMAKE_C_FLAGS=-U__ARM_NEON -U__ARM_NEON__ -U__SSE2__ -ffp-contract=off -fno-builtin-sinf -fno-builtin-cosf' \
+    '-DCMAKE_CXX_FLAGS=-U__ARM_NEON -U__ARM_NEON__ -U__SSE2__ -ffp-contract=off -fno-builtin-sinf -fno-builtin-cosf' \
     -DGGML_NATIVE=OFF \
     -DGGML_SSE42=OFF -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_AVX512=OFF \
     -DGGML_FMA=OFF -DGGML_F16C=OFF -DGGML_BMI2=OFF \

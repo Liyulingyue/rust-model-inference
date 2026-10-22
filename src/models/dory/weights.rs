@@ -54,12 +54,15 @@ pub fn load_weight<'a>(
     if Some(bytes.len() as u64) != info.checked_nbytes() {
         return Err(format!("Invalid tensor byte length: {name}"));
     }
-    Ok(Weight::from_quantized(QuantizedTensor::from_bytes(
+    let mut weight = Weight::from_quantized(QuantizedTensor::from_bytes(
         bytes,
         info.ggml_type,
         n_in,
         n_out,
-    )))
+    ));
+    // Recurrent activation quantization amplifies SIMD reduction rounding.
+    weight.kernel.use_scalar_reference();
+    Ok(weight)
 }
 
 fn vec(source: &dyn TensorSource, name: &str, len: usize) -> Result<Vec<f32>, String> {

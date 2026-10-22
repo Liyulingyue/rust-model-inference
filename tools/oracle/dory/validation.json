@@ -3,7 +3,7 @@
   "platform": "macOS ARM64, Apple M3 Max",
   "rust": "1.98.1",
   "profile": "release-fast",
-  "rust_mode": "default CPU quantized kernels; precise Dory RoPE and F64 attention accumulation",
+  "rust_mode": "default CPU entry; scalar-reference Q5_K/Q6_K reductions; BF16 input rounding/F64 accumulation; precise Dory RoPE and attention",
   "oracle_commit": "98a74c97ea09ac72f6ceda1559808fc0a2f447ce",
   "oracle_mode": "scalar CPU; no FMA contraction; separate sinf/cosf; no external acceleration",
   "artifact": {
@@ -42,8 +42,8 @@
         22177,
         5325
       ],
-      "max_relative_l2": 0.001597207183611643,
-      "max_scaled_max_abs": 0.0013874902462190216,
+      "max_relative_l2": 0.0,
+      "max_scaled_max_abs": 0.0,
       "max_hidden_relative_l2": 0.0,
       "passed": true
     },
@@ -73,8 +73,8 @@
         1050,
         1120
       ],
-      "max_relative_l2": 0.00234749725258185,
-      "max_scaled_max_abs": 0.0018658887399669942,
+      "max_relative_l2": 0.0,
+      "max_scaled_max_abs": 0.0,
       "max_hidden_relative_l2": 0.0,
       "passed": true
     },
@@ -104,8 +104,8 @@
         1010,
         1032
       ],
-      "max_relative_l2": 0.0034134885431581084,
-      "max_scaled_max_abs": 0.0023906788813222164,
+      "max_relative_l2": 0.0,
+      "max_scaled_max_abs": 0.0,
       "max_hidden_relative_l2": 0.0,
       "passed": true
     },
@@ -129,8 +129,8 @@
         22177,
         5325
       ],
-      "max_relative_l2": 0.0028933423463644256,
-      "max_scaled_max_abs": 0.002161118688539595,
+      "max_relative_l2": 0.0,
+      "max_scaled_max_abs": 0.0,
       "max_hidden_relative_l2": 0.0,
       "passed": true
     },
@@ -160,8 +160,8 @@
         1050,
         1120
       ],
-      "max_relative_l2": 0.0029246441558182694,
-      "max_scaled_max_abs": 0.002098620427859646,
+      "max_relative_l2": 0.0,
+      "max_scaled_max_abs": 0.0,
       "max_hidden_relative_l2": 0.0,
       "passed": true
     },
@@ -185,8 +185,8 @@
         1897,
         1429
       ],
-      "max_relative_l2": 0.003820131291558144,
-      "max_scaled_max_abs": 0.001508608157554896,
+      "max_relative_l2": 0.0,
+      "max_scaled_max_abs": 0.0,
       "max_hidden_relative_l2": 0.0,
       "passed": true
     },
@@ -210,8 +210,8 @@
         1897,
         1429
       ],
-      "max_relative_l2": 0.0028202188521458606,
-      "max_scaled_max_abs": 0.0019566823415507724,
+      "max_relative_l2": 0.0,
+      "max_scaled_max_abs": 0.0,
       "max_hidden_relative_l2": 0.0,
       "passed": true
     }
@@ -230,5 +230,15 @@
     "threads": 4,
     "output": "\", \"Hello World\", \"Hello World",
     "passed": true
+  },
+  "oracle_trace_reuse": "Existing pinned scalar ARM64 Oracle traces; the new SSE2 macro flag does not affect the ARM64 backend.",
+  "source_files_sha256": {
+    "src/models/dory/weights.rs": "3e974398bf75e1c1c41a5a17727443b621d3b62a548f639590cf3ac02f9aeb7c",
+    "src/ops/kernel/trait_.rs": "6381929ff3b9ee9ab5dde67692a16158c8aab6b22da21af84d897350b58ee9e1",
+    "src/ops/kernel/bf16/mod.rs": "faff077cc00d4ef4acee0a07785f148ce5189812436d83c44a2c90ed7e9ae2af",
+    "src/ops/kernel/q5_k.rs": "b335887743ea812cda4f0a8d2edaaaef4a448d31a135b695dcf362dd70515acd",
+    "src/ops/kernel/q6_k.rs": "b117f4c374def89264262f7e80e400f7d2f55cffda41c13318a8758eb5100dd3",
+    "src/ops/kernel/vulkan.rs": "c567d7d8de41be9cbb8d9f13bab41f8d37ac73d53f12f9ec91b0731ea44661e2",
+    "tools/oracle/dory/build_oracle.sh": "f4328c5e395c7bf1f5b8e99d43379f42b0c4091d125cd768480432dbd16f64b0"
   }
 }

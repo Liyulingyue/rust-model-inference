@@ -67,29 +67,59 @@ real weights, but does not establish accuracy at the original 1024-token boundar
 ## Recorded results
 
 Validated on macOS ARM64 / Apple M3 Max, Rust 1.98.1, `release-fast`, four
-threads on both sides. Rust uses its default quantized CPU kernels, with the
-precise attention operations selected by Dory; `RMI_SCALAR` is unset. All seven
+threads on both sides. Dory selects the existing scalar Q5_K/Q6_K reductions,
+BF16 input rounding with F64 accumulation, and precise attention operations
+through the shared kernels; `RMI_SCALAR` is unset. All seven
 cases pass the same fixed gates. Machine-readable results: [validation.json](validation.json).
 
 | Case | KV | Prompt / generated tokens | Checkpoints | Max relative L2 | Max scaled absolute error |
 | --- | --- | --- | --- | --- | --- |
-| default-hello-f32 | f32 | 1 / 8 | 1755 | 0.001597 | 0.001387 |
-| default-math-f32 | f32 | 7 / 8 | 2925 | 0.002347 | 0.001866 |
-| default-unicode-f32 | f32 | 13 / 2 | 2925 | 0.003413 | 0.002391 |
-| default-hello-f16 | f16 | 1 / 8 | 1755 | 0.002893 | 0.002161 |
-| default-math-f16 | f16 | 7 / 8 | 2925 | 0.002925 | 0.002099 |
-| window2-f32 | f32 | 1 / 8 | 1755 | 0.003820 | 0.001509 |
-| window2-f16 | f16 | 1 / 8 | 1755 | 0.002820 | 0.001957 |
+| default-hello-f32 | f32 | 1 / 8 | 1755 | 0 | 0 |
+| default-math-f32 | f32 | 7 / 8 | 2925 | 0 | 0 |
+| default-unicode-f32 | f32 | 13 / 2 | 2925 | 0 | 0 |
+| default-hello-f16 | f16 | 1 / 8 | 1755 | 0 | 0 |
+| default-math-f16 | f16 | 7 / 8 | 2925 | 0 | 0 |
+| window2-f32 | f32 | 1 / 8 | 1755 | 0 | 0 |
+| window2-f16 | f16 | 1 / 8 | 1755 | 0 | 0 |
+
+The ARM64 Rust replays were rerun after the projection fix against the existing
+pinned scalar Oracle traces. Zero is the observed error for these inputs;
+the lossy-path acceptance gates remain unchanged.
+
+Linux x86_64 / AMD EPYC 9334, glibc 2.39, Rust 1.98.1 and `release-fast` also
+pass with four threads on both sides. Fresh Oracle traces cover the same seven
+default-entry cases plus scalar-entry Hello with F32/F16 KV: nine comparisons,
+19,305 checkpoints, and observed maximum relative L2 / scaled absolute error
+of zero. Results and source hashes: [validation-linux.json](validation-linux.json).
+The real contract/finite-logit tests, F32/F16 prefill chunking/reset, five Dory
+unit tests, two reference-arithmetic regressions in both default/scalar modes,
+and the production CLI Hello-eight-token replay pass. The arithmetic tests
+also pass with the Vulkan wrapper compiled on macOS; this is a CPU check.
+
+The expanded Linux RoPE preflight has two existing failures (1 and 4 ULP),
+reproduced independently on main `973210b6de572b8226cd576da7ace17fb22d8ad5`.
+Their names and scope are recorded in the Linux result file. No full-suite
+pass is claimed.
 
 ## Acceptance
 
-The reference build disables NEON on ARM and SSE4.2, AVX/AVX2/AVX512, FMA,
+The reference build disables NEON on ARM and SSE2/SSE4.2, AVX/AVX2/AVX512, FMA,
 F16C and BMI2 on x86. It also disables FMA contraction and compiler fusion
 of `sinf`/`cosf`. The initial canonical Rust
 replay uses `RMI_SCALAR=1`; rerun the same command with that prefix omitted
 to validate the default path, as in the table above. Separate libm calls matter
 on macOS: fused `sincos` rounding can cross an activation-quantization
 boundary and amplify through recurrent layers.
+
+On x86, disabling the CMake SSE4.2 option leaves `__SSE2__` defined and selects
+GGML's vector activation implementation. The build also undefines that macro
+to use the scalar implementation. Dory opts in to reference arithmetic inside
+the weight kernels: tiny differences in SIMD reduction order can change later
+Q8_K activation bins and amplify over the recurrent stack. BF16 projections
+round activations to BF16 before their dot product, as in GGML. Other models
+retain their existing kernel defaults. The Vulkan wrapper preserves this CPU
+contract instead of offloading these projections. This trades x86 SIMD dot
+throughput for stability; performance has not been benchmarked.
 
 The checker requires exact prompt/generated token IDs, checkpoint order,
 virtual layer/step indices, shapes and counts. Every traced token has 195
