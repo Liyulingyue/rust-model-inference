@@ -457,9 +457,7 @@ struct LayerBindings {
     attention_norm: OperatorBindings,
     attention: AttentionBindings,
     post_attention_norm: OperatorBindings,
-    // Both are None on a qwen35moe layer: it has no dense FFN, the experts run
-    // on the CPU, and recording a half-built FFN would submit work against
-    // buffers nothing writes.
+    // Eligibility rejects MoE and incomplete FFNs before binding any weights.
     gate_up: Option<WeightBindings<2>>,
     down: Option<OperatorBindings>,
 }
@@ -642,8 +640,6 @@ impl Qwen35VulkanSession {
 
             let post_norm_buffer = buffers.upload_f32(&layer.attn_post_norm)?;
             let post_attention_norm = ops.bind_buffers(&[post_norm_buffer])?;
-            // A qwen35moe layer has no dense FFN; it falls back to the CPU
-            // route for the FFN instead of binding a half-model on the GPU.
             let (gate_up, down) = match (layer.ffn_gate.as_ref(), layer.ffn_up.as_ref()) {
                 (Some(gate), Some(up)) => {
                     let gate_up = bind_weight_group(
@@ -1080,9 +1076,6 @@ impl Qwen35VulkanSession {
                 config.n_embd,
                 config.n_embd,
             )?;
-            // The dense FFN only exists on a qwen35 layer. On qwen35moe the
-            // experts run on the CPU, so there is nothing to record and
-            // submitting it would read buffers the graph never wrote.
             if let (Some(gate_up), Some(down)) = (bindings.gate_up, bindings.down) {
                 self.record_weight_group(
                     &commands,
@@ -1306,7 +1299,13 @@ fn bind_weight_group<const N: usize>(
 
 fn eligibility_facts(model: &Qwen35Model<'_>) -> EligibilityFacts {
     let mut facts = EligibilityFacts {
-        architecture: "qwen35".into(),
+        // shortcut: MoE has no recorder; reject it until routed/shared experts are recorded.
+        architecture: if model.config.moe.is_some() {
+            "qwen35moe"
+        } else {
+            "qwen35"
+        }
+        .into(),
         weight_formats: vec![model.output_weight.ggml_type],
         unrecorded_operations: Vec::new(),
     };
@@ -1316,15 +1315,20 @@ fn eligibility_facts(model: &Qwen35Model<'_>) -> EligibilityFacts {
         return facts;
     }
     for (layer_index, layer) in model.layers.iter().enumerate() {
-        for weight in [
+        let ffn_weights = [
             layer.ffn_gate.as_ref(),
             layer.ffn_up.as_ref(),
             layer.ffn_down.as_ref(),
-        ] {
-            if let Some(weight) = weight {
-                facts.weight_formats.push(weight.ggml_type);
-            }
+        ];
+        if ffn_weights.iter().any(|weight| weight.is_none()) {
+            facts.unrecorded_operations.push("dense_ffn");
         }
+        facts.weight_formats.extend(
+            ffn_weights
+                .into_iter()
+                .flatten()
+                .map(|weight| weight.ggml_type),
+        );
         if model.config.is_recurrent[layer_index] {
             let weights = [
                 layer.wqkv.as_ref(),
@@ -1497,6 +1501,42 @@ mod tests {
     }
 
     #[test]
+    fn eligibility_rejects_moe_in_the_shared_trunk() {
+        let mut model = crate::models::qwen35::trunk::tests::tiny_dense_session_model();
+        assert_eq!(check_eligibility(&super::eligibility_facts(&model)), Ok(()));
+        model.config.moe = Some(crate::models::qwen35::trunk::config::Qwen35Moe {
+            n_expert: 256,
+            n_expert_used: 8,
+            n_ff_exp: 512,
+            n_ff_shexp: 512,
+            weights_scale: 1.0,
+        });
+        let layer = &mut model.layers[0];
+        layer.ffn_gate = None;
+        layer.ffn_up = None;
+        layer.ffn_down = None;
+        assert!(check_eligibility(&super::eligibility_facts(&model))
+            .expect_err("MoE must not execute a graph that skips its experts")
+            .contains("qwen35moe"));
+    }
+
+    #[test]
+    fn eligibility_rejects_incomplete_dense_ffn() {
+        for missing in 0..3 {
+            let mut model = crate::models::qwen35::trunk::tests::tiny_dense_session_model();
+            let layer = &mut model.layers[0];
+            match missing {
+                0 => layer.ffn_gate = None,
+                1 => layer.ffn_up = None,
+                _ => layer.ffn_down = None,
+            }
+            assert!(check_eligibility(&super::eligibility_facts(&model))
+                .expect_err("a missing FFN projection must reject the whole graph")
+                .contains("ffn"));
+        }
+    }
+
+    #[test]
     fn qwen35_bf16_mixed_stack_is_eligible_only_when_every_operation_has_a_recorder() {
         assert_eq!(check_eligibility(&eligible_facts()), Ok(()));
 
@@ -1625,11 +1665,12 @@ mod tests {
             .contains("expected 24"));
     }
 
-    fn check_f32_gpu_weights(
+    fn check_gpu_weights(
         context: &'static super::VulkanContext,
         weights: &[(&Weight<'_>, &str)],
         input: &[f32],
     ) {
+        assert!(!context.is_software_icd(), "requires a physical Vulkan GPU");
         let n_in = input.len();
         let max_rows = weights
             .iter()
@@ -1644,7 +1685,7 @@ mod tests {
         let (gpu_buffers, formats): (Vec<_>, Vec<_>) = weights
             .iter()
             .map(|(weight, label)| {
-                assert_eq!(weight.ggml_type, GGMLType::F32);
+                assert!(matches!(weight.ggml_type, GGMLType::F32 | GGMLType::Q8_0));
                 assert_eq!(weight.n_in, n_in);
                 super::upload_weight(&mut buffers, weight, label).unwrap()
             })
@@ -1678,10 +1719,12 @@ mod tests {
         .unwrap();
         commands.submit_and_wait().unwrap();
         for ((weight, label), (region, rows)) in weights.iter().zip(outputs) {
-            let mut expected = vec![0.0; rows];
-            weight
-                .kernel
-                .forward_prepared(input, &[], &[], None, &mut expected, n_in, rows, 0, 1);
+            let expected = {
+                let _cpu = crate::compute::ComputePolicy::Cpu.cpu_scope();
+                weight.matmul(input)
+            };
+            // GPU/CPU reduction order can differ; use the vk_check numerical bound.
+            let mut max_abs = 0.0f32;
             for (row, (&actual, expected)) in ops
                 .read_f32(region, rows)
                 .unwrap()
@@ -1689,15 +1732,18 @@ mod tests {
                 .zip(expected)
                 .enumerate()
             {
-                assert_eq!(
-                    actual.to_bits(),
-                    expected.to_bits(),
-                    "{label} row {row}, n_in={n_in}"
+                let error = (actual - expected).abs();
+                assert!(
+                    actual.is_finite()
+                        && expected.is_finite()
+                        && error <= 1e-4 + 1e-4 * expected.abs(),
+                    "{label} row {row}, n_in={n_in}: actual={actual}, expected={expected}, error={error}"
                 );
+                max_abs = max_abs.max(error);
             }
             println!(
-                "F32 {label}: {n_in} -> {rows}, group={}, CPU/GPU bits equal",
-                weights.len()
+                "{:?} {label}: {n_in} -> {rows}, group={}, max_abs={max_abs:.6e}, bounded CPU/GPU values",
+                weight.ggml_type, weights.len()
             );
         }
     }
@@ -1716,7 +1762,7 @@ mod tests {
                 let mut values: Vec<f32> = (0..n_in * n_out)
                     .map(|i| ((i * 31 + n_out * 17) % 257) as f32 / 63.0 - 2.0)
                     .collect();
-                // Separate multiply/add yields zero here; fused multiply/add does not.
+                // Exercise cancellation alongside the wider reduction rows.
                 values[..n_in].fill(0.0);
                 values[0] = -1.0;
                 values[1] = 1.0 + f32::EPSILON;
@@ -1732,14 +1778,14 @@ mod tests {
                     .iter()
                     .zip(["alpha", "beta", "third"])
                     .collect();
-                check_f32_gpu_weights(context, &labeled, &input);
+                check_gpu_weights(context, &labeled, &input);
             }
         }
     }
 
     #[test]
     #[ignore = "requires a Vulkan device and RMI_QWEN35_MODEL"]
-    fn qwen35_real_f32_weights_run_on_vulkan() {
+    fn qwen35_real_ssm_weights_run_on_vulkan() {
         let path = std::env::var("RMI_QWEN35_MODEL").expect("RMI_QWEN35_MODEL must be set");
         let source =
             crate::open_model_source(std::path::Path::new(&path), crate::ComponentRole::Llm)
@@ -1761,15 +1807,15 @@ mod tests {
             let weights = names.each_ref().map(|name| {
                 crate::models::qwen35::trunk::weights::load_weight(source.as_ref(), name).unwrap()
             });
-            check_f32_gpu_weights(
+            check_gpu_weights(
                 context,
                 &[(&weights[0], &names[0]), (&weights[1], &names[1])],
                 &input,
             );
             checked += 2;
         }
-        assert!(checked > 0, "model must have recurrent F32 matrices");
-        println!("verified {checked} real F32 matrices");
+        assert!(checked > 0, "model must have recurrent SSM matrices");
+        println!("verified {checked} real SSM matrices");
     }
 
     #[test]

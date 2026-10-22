@@ -144,6 +144,65 @@ the GGUF Jinja template, and the F16 projector identifying a solid-red image
 as red. These establish CLI execution only; the x86_64 optimized kernels and
 vision outputs were not compared numerically with the Oracle.
 
+### GPU probe: full-model decoding is unsupported
+
+The remote host exposes a physical gfx1100 GPU with approximately 48 GiB VRAM,
+reported by Vulkan as `AMD Radeon Graphics (RADV NAVI31)`. Tests explicitly
+select `/usr/share/vulkan/icd.d/radeon_icd.json` to exclude software ICDs.
+
+**Sage does not have a complete Vulkan decoder.** The existing executor records
+dense FFNs, but has no routed/shared-expert recorder for `qwen35moe`.
+`--compute vulkan` rejects this architecture. `--gpu` / `--compute auto` must
+fall back to the CPU decoder; successful Auto output is not GPU alignment.
+
+The real-model probe found that the old eligibility builder hard-coded
+`qwen35`, accepting Sage while silently skipping every MoE FFN. Auto emitted
+blank/whitespace answers for the Chinese and red-image cases while reporting
+`resident_hybrid_decoder backend=Vulkan`. The fix derives the architecture
+from the parsed MoE configuration and rejects incomplete dense FFNs before
+weight upload. Two small tests reproduce the old acceptance bug; both failed
+before the fix, then passed. The final Vulkan adapter suite passed all 15
+tests, explicitly including the two device-dependent tests.
+
+| Probe | Result |
+| --- | --- |
+| Generated Q8_0 matmul fixtures, five shapes | Passed `vk_check`'s combined absolute/relative bound |
+| Generated F32 projections, 18 individual/grouped cases | Passed; largest observed absolute error `1.144409e-4` |
+| Real Sage SSM alpha/beta projections | All 60 Q8_0 matrices passed; observed maximum absolute error 0 |
+| Forced full-model Vulkan | Rejected `qwen35moe`, exit 1 |
+| Auto Chinese text / red-image CLI | Both match the corresponding CPU answer; trace confirms CPU decoder fallback |
+
+Projection checks compare physical Vulkan dispatches against CPU kernels,
+requiring finite values and `abs(gpu - cpu) <= 1e-4 + 1e-4 * abs(cpu)` for
+floating-point reductions. The old F32 exact-bit assertion is replaced with
+this existing `vk_check` bound. The real-weight test accepts Sage's Q8_0 SSM
+projections as well as F32 projections; its CPU reference prepares quantized
+activations independently. These are operator checks, not a full-model GPU
+comparison with llama.cpp. The CLI output matches establish correct fallback,
+not GPU vision execution or numerical parity.
+
+Build and inspect the selected backend with:
+
+```sh
+cargo build --profile release-fast --features vulkan \
+  --bin rust-model-inference --example vk_check
+VK_DRIVER_FILES=/usr/share/vulkan/icd.d/radeon_icd.json \
+  target/release-fast/examples/vk_check
+RMI_COMPUTE_TRACE=1 VK_DRIVER_FILES=/usr/share/vulkan/icd.d/radeon_icd.json \
+  target/release-fast/rust-model-inference \
+  --model "$SAGE_MODEL_DIR/Sage-A1.5-Q8_0.gguf" \
+  --gpu --jinja --no-thinking --prompt '你好' --max-tokens 8 --temp 0 --threads 8
+RMI_QWEN35_MODEL="$SAGE_MODEL_DIR/Sage-A1.5-Q8_0.gguf" \
+VK_DRIVER_FILES=/usr/share/vulkan/icd.d/radeon_icd.json \
+  cargo test --profile release-fast --features vulkan --lib vulkan::qwen35::tests:: \
+  -- --include-ignored --nocapture --test-threads=1
+```
+
+The trace must report `unsupported architecture qwen35moe. Falling back to CPU`
+and `scope=hybrid_decoder backend=Cpu`. Replacing `--gpu` with
+`--compute vulkan` must exit unsuccessfully with an unsupported-architecture
+error. Neither result establishes GPU model accuracy or performance.
+
 ### Focused regression checks
 
 The local `--lib models::qwen35::` run reports 74 passed, 1 failed and 4 ignored.
@@ -161,6 +220,6 @@ before these changes: the same configuration assertion and
 `qwen35_trace_metadata_is_independent_of_prefill_batch_size` (which also checks
 existing batch-dependent numeric outputs). The new MoE fixtures pass there.
 
-The harness covers incremental text decoding; it does not establish batched
-prefill, long-context, MTP, GPU, HTTP or vision numerical parity. Other model
-revisions and quantization types do not inherit these results.
+The text Oracle harness covers incremental decoding; it does not establish
+batched prefill, long-context, MTP, full-model GPU, HTTP or vision numerical
+parity. Other model revisions and quantization types do not inherit these results.

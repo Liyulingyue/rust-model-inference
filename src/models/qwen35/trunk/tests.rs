@@ -620,7 +620,7 @@ fn tiny_dense_session_model_with_embedding(
     }
 }
 
-fn tiny_dense_session_model() -> Qwen35Model<'static> {
+pub(crate) fn tiny_dense_session_model() -> Qwen35Model<'static> {
     let tok_embd = f32_test_weight((0..32).map(|i| i as f32).collect(), 4, 8);
     tiny_dense_session_model_with_embedding(tok_embd, 4, 8)
 }
