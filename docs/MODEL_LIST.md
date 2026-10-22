@@ -1,10 +1,3 @@
-Mage-Flow 已接入主 CLI；下表数值与 PNG 证据来自原适配记录，远端已关机，本次入口迁移的真实权重复验未执行，见 verification.json 的 `cli_integration`。
-
-Z-Image VAE、YuE2、Edge0、LFM2/LFM2.5/LFM2MoE、文本 embedding 与 AuK 已接入实验性 Vulkan 投影路径，
-RADV 实机数值、成品和计时范围见 [2026-10-07 验证记录](develop/VULKAN_RADV_VALIDATION_2026-10-07.md)；
-表中已有验证等级仍指原来的执行范围。
-AuK Base/Flash 记录见 [2026-10-08 验证](develop/VULKAN_AUK_RADV_VALIDATION_2026-10-08.md)；格式与限制见 [Vulkan 文档](develop/VULKAN.md)。
-
 | 模型 | 版本 | 任务类型 | 参考实现 | 原始权重 | 推理权重 | 备注 |
 |---|---|---|---|---|---|---|
 | Mage-Flow-Base | Base | 文生图 | microsoft/Mage @ `76bec2bb` | https://www.modelscope.cn/models/microsoft/Mage-Flow-Base | `tools/converter/mage_flow`（无损 BF16） | 主 CLI `rust-model-inference` CPU 入口；真实 DiT 与共享组件按标量原始 F32 位对齐，PNG 仅最小尺寸验证。[范围与复现](../tools/oracle/mage_flow/README.md)。 |
