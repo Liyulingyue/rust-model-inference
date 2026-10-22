@@ -43,7 +43,7 @@ impl Transformer {
             };
             size = size.checked_add(bytes).ok_or(VulkanError::OutOfMemory)?;
         }
-        let mut ops = Qwen3Ops::new_with_size(context, size, weights.len() + 1)?;
+        let mut ops = Qwen3Ops::new_device_local_with_size(context, size, weights.len() + 1)?;
         let mut buffers = UploadedBuffers::new(context);
         let mut bindings = HashMap::new();
         // Stable order keeps descriptor/dispatch traces reproducible.
@@ -130,10 +130,11 @@ impl Transformer {
     ) -> Result<TokenCommands<'a>, VulkanError> {
         #[cfg(feature = "parity-trace")]
         if std::env::var_os("RMI_PARITY_TRACE").is_some() {
-            let commands = commands.flush()?;
-            let values = self.ops.read_f32(region, shape.iter().product())?;
-            trace(name, shape, values).map_err(VulkanError::InitFailed)?;
-            return Ok(commands);
+            commands.submit_and_wait()?;
+            let mut values = vec![0.0; shape.iter().product()];
+            self.ops.read_f32_into(region, &mut values)?;
+            trace(name, shape, &values).map_err(VulkanError::InitFailed)?;
+            return TokenCommands::begin(self.context);
         }
         let _ = (name, shape, region);
         Ok(commands)
@@ -151,7 +152,6 @@ impl Transformer {
         let [x, norm, fused, q, k, v, attn, gate, projection, hidden, masks, rope] = self.regions;
         let roles = masks.shifted(count * 4);
         let before = self.ops.recorded_dispatch_count();
-        let mut commands = TokenCommands::begin(self.context)?;
         self.ops.write_f32(x, input)?;
         self.ops.write_f32(
             masks,
@@ -178,6 +178,7 @@ impl Transformer {
             }
         }
         self.ops.write_f32(rope, &coefficients)?;
+        let mut commands = TokenCommands::begin(self.context)?;
         let empty = ArenaRegion { offset: 0, size: 0 };
         for layer in 0..24 {
             let p = format!("transformer.layers.{layer}");
@@ -293,7 +294,8 @@ impl Transformer {
         }
         self.norm(&commands, "transformer.out_norm", count)?;
         commands.submit_and_wait()?;
-        let output = self.ops.read_f32(norm, count * D)?.to_vec();
+        let mut output = vec![0.0; count * D];
+        self.ops.read_f32_into(norm, &mut output)?;
         if output.iter().any(|v| !v.is_finite()) {
             return Err(VulkanError::UnsupportedShape(
                 "non-finite Timestral GPU output".into(),

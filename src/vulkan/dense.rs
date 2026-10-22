@@ -317,7 +317,13 @@ impl UploadedBuffers {
         n_in: usize,
     ) -> Result<GpuBuffer, VulkanError> {
         let packed = transpose_f32_weights(values, n_in)?;
-        self.upload_f32(&packed)
+        // Immutable projections belong in VRAM on discrete GPUs.
+        let buffer = unsafe {
+            self.context
+                .upload_device_static(bytemuck::cast_slice(&packed))?
+        };
+        self.values.push(buffer);
+        Ok(buffer)
     }
 
     pub(crate) fn upload_f32(&mut self, values: &[f32]) -> Result<GpuBuffer, VulkanError> {
@@ -364,7 +370,7 @@ mod transpose_tests {
         let weights: Vec<_> = (0..n_in * n_out).map(|i| (i as f32 * 0.17).cos()).collect();
         let mut buffers = UploadedBuffers::new(context);
         let buffer = buffers.upload_f32_transposed(&weights, n_in).unwrap();
-        for rows in [1, 5, 33] {
+        for rows in [1, 5, 19, 32, 33] {
             let input_stride = n_in + 3;
             let output_stride = n_out + 7;
             let input = ArenaRegion {
@@ -375,7 +381,8 @@ mod transpose_tests {
                 offset: input.size,
                 size: rows * output_stride * 4,
             };
-            let mut ops = Qwen3Ops::new_with_size(context, input.size + output.size, 2).unwrap();
+            let mut ops =
+                Qwen3Ops::new_device_local_with_size(context, input.size + output.size, 2).unwrap();
             let binding = ops
                 .bind_weight_buffers(&[buffer], &[GpuWeightFormat::F32])
                 .unwrap();
@@ -397,7 +404,8 @@ mod transpose_tests {
             )
             .unwrap();
             commands.submit_and_wait().unwrap();
-            let actual = ops.read_f32(output, rows * output_stride).unwrap();
+            let mut actual = vec![0.0; rows * output_stride];
+            ops.read_f32_into(output, &mut actual).unwrap();
             for row in 0..rows {
                 for col in 0..n_out {
                     let expected: f64 = (0..n_in)

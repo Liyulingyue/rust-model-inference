@@ -114,6 +114,7 @@ const ATTENTION_ONLINE: usize = 34;
 const CONV3D_TILED: usize = 35;
 const ATTENTION_ONLINE_WIDE: usize = 36;
 const TIMESTRAL: usize = 37;
+const FLOAT_MATMUL_SMALL: usize = 38;
 
 pub(crate) fn tiled_matmul_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -219,6 +220,7 @@ const OPERATOR_SHADER_NAMES: [&str; OPERATOR_SHADERS.len()] = [
     "conv3d_tiled",
     "attention_online_wide",
     "timestral",
+    "float_matmul_small",
 ];
 
 /// True when the ordered dispatch log is being collected.
@@ -306,7 +308,7 @@ pub fn dump_dispatch_trace() {
     }
 }
 
-const OPERATOR_SHADERS: [&[u8]; 38] = [
+const OPERATOR_SHADERS: [&[u8]; 39] = [
     QUANTIZE_Q8_0_SHADER,
     QUANTIZE_Q8_K_SHADER,
     Q8_MATMUL_GROUPED_SHADER,
@@ -345,6 +347,7 @@ const OPERATOR_SHADERS: [&[u8]; 38] = [
     CONV3D_TILED_SHADER,
     ATTENTION_ONLINE_WIDE_SHADER,
     include_bytes!("../../shaders/bin/timestral.spv"),
+    include_bytes!("../../shaders/bin/float_matmul_small.spv"),
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1522,7 +1525,7 @@ mod video_gpu_tests {
     #[ignore = "requires a Vulkan device"]
     fn video_gpu_float_projection_preserves_range_and_partial_tiles() {
         let context = Box::leak(Box::new(VulkanContext::new().unwrap()));
-        let (rows, n_in, n_out) = (33, 130, 65);
+        let (rows, n_in, n_out) = (19, 130, 65);
         let input: Vec<f32> = (0..rows * n_in)
             .map(|i| (i as f32 * 0.37).sin() * 100000.0)
             .collect();
@@ -2715,12 +2718,22 @@ impl<'a> Qwen3Ops<'a> {
         )?;
         push[16] = if format == GpuWeightFormat::F32 { 4 } else { 2 };
         let columns = outputs[0].1;
+        // Narrow batches need more workgroups and parallel K reduction.
+        let small = format == GpuWeightFormat::F32
+            && token_rows <= 32
+            && columns <= 4096
+            && outputs.len() == 1;
+        let (pipeline, column_tile, token_tile) = if small {
+            (FLOAT_MATMUL_SMALL, 2, 4)
+        } else {
+            (FLOAT_MATMUL_TILED, 64, 32)
+        };
         let dispatch = row_dispatch(
-            columns.div_ceil(64),
-            token_rows.div_ceil(32) * outputs.len(),
+            columns.div_ceil(column_tile),
+            token_rows.div_ceil(token_tile) * outputs.len(),
             &self.context.limits,
         )?;
-        self.record_linear_dispatch(commands, FLOAT_MATMUL_TILED, bindings, &push, dispatch);
+        self.record_linear_dispatch(commands, pipeline, bindings, &push, dispatch);
         Ok(())
     }
 

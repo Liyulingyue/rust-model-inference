@@ -41,6 +41,7 @@ shader_names=(
     f16_matmul_tiled
     attention_scores_tiled
     float_matmul_tiled
+    float_matmul_small
     attention_online
     attention_online_wide
     conv3d_tiled

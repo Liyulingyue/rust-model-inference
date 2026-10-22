@@ -55,7 +55,7 @@ cargo build --profile release-fast --features vulkan --bin rust-model-inference
 
 `--compute vulkan` 要求真实硬件 Vulkan；缺少编译 feature、设备初始化或执行失败时返回错误。`--gpu` / `--compute auto` 优先使用 Vulkan，无法使用时明确记录 CPU 回退；`--compute cpu` 强制 CPU。
 
-24 层 Transformer 的全部 F32 投影、RMSNorm、partial RoPE、时间/变量 attention、sigmoid gate、SwiGLU 和残差在 GPU 执行。复用仓库 Vulkan F32 matmul/RMSNorm/add；Timestral shader 处理 QKV head 布局、双轴 mask 和在线 softmax，不构造平方大小的 attention 分数矩阵。权重按模型缓存；块变大时重建 arena 并重新上传。输入缩放、patch/head 投影、分位数变换和预测反馈仍在 CPU；这是 CPU/GPU 混合预测入口。
+24 层 Transformer 的全部 F32 投影、RMSNorm、partial RoPE、时间/变量 attention、sigmoid gate、SwiGLU 和残差在 GPU 执行。复用仓库 Vulkan F32 matmul/RMSNorm/add；Timestral shader 处理 QKV head 布局、双轴 mask 和在线 softmax，不构造平方大小的 attention 分数矩阵。独显的投影权重和中间激活驻留显存，仅在 Transformer 边界上传输入和读回输出；UMA 沿用映射内存。权重按模型缓存；块变大时重建 arena 并重新上传。输入缩放、patch/head 投影、分位数变换和预测反馈仍在 CPU；这是 CPU/GPU 混合预测入口。
 
 GPU 与同一个官方 CPU/F32 Oracle 比较，沿用下面的误差界，不要求浮点逐位一致。复现时在下节 parity 命令追加 `--mode vulkan`；可同时添加 `--mode simd --mode auto`。GPU 验收还检查每个块实际报告 Vulkan 后端和不少于 252 个投影/Timestral dispatch，CPU 回退不算通过。`RMI_COMPUTE_TRACE=1` 可输出后端、dispatch 和设备累计计数。普通运行不读取中间激活；parity trace 为比较而增加同步和读回。
 
@@ -124,9 +124,11 @@ cargo test --profile release-fast --test timestral_cli
 
 另有 4 次普通 GPU CLI（严格 Vulkan / `--gpu`、关闭 parity trace）与插桩 GPU 的预测精确一致；设备不可用时 CPU/Auto 输出精确一致，严格 Vulkan 返回错误。8 个模型单测、3 个 CLI 测试、3 个 Python 检查、CPU-only 库编译、Vulkan 构建和完整 shader 检查通过。GPU 扩展后未重复全量测试，原有失败见上文记录。
 
-上述 GPU Oracle 检查实测 M3 Max/MoltenVK；后续 NAVI31/RADV 的性能和最终输出验证见 [PERFORMANCE.md](PERFORMANCE.md)，其中 GPU 慢于 CPU。数据集预测指标仍未验证。构建工具和依赖均保留在仓库 .venv / target，模型文件始终从上述 models 目录读取。
+上述 GPU Oracle 检查实测 M3 Max/MoltenVK；优化前 NAVI31/RADV 的性能和最终输出验证见 [PERFORMANCE.md](PERFORMANCE.md)，最新结果见 [GPU_OPTIMIZATION.md](GPU_OPTIMIZATION.md)。数据集预测指标仍未验证。构建工具和依赖均保留在仓库 .venv / target，模型文件始终从上述 models 目录读取。
 
-最终 F32 分块投影路径另见 [gpu_optimization_verification.json](gpu_optimization_verification.json)：M3 Max 上 10 个用例 × Vulkan/Auto，共 20 次 GPU 执行、6,788 个检查点，沿用原误差界全部通过；最差最终 NRMSE 为 `2.9871e-6`。两次关闭运行时 trace 的普通 CLI 输出与插桩结果精确一致。同机 NAVI31 性能与完整验收边界见下节链接。
+上一版 F32 分块投影路径另见 [gpu_optimization_verification.json](gpu_optimization_verification.json)：M3 Max 上 10 个用例 × Vulkan/Auto，共 20 次 GPU 执行、6,788 个检查点，沿用原误差界全部通过；最差最终 NRMSE 为 `2.9871e-6`。两次关闭运行时 trace 的普通 CLI 输出与插桩结果精确一致。
+
+当前显存驻留与小批次 F32 协作归约路径见 [gpu_small_input_verification.json](gpu_small_input_verification.json)：M3 Max 上 10 个用例 × Vulkan/Auto、6,788 个检查点全部通过原有误差界，最差最终 NRMSE 为 `3.1853e-6`。Vulkan/Auto 的预测精确一致；两次关闭运行时 trace 的普通入口也与对应插桩结果一致。权重仍按位模式检查，浮点归约允许上述误差。3 个 GPU/打包检查覆盖部分分块、padding、19/32/33 行边界及大幅值 F32/BF16 投影；8 个未改动的模型单测和 5 个 Python 检查通过。独显的最终预测和性能单独在 NAVI31 上验证。
 
 ## 性能复现
 
