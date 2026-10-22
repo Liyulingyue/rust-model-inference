@@ -92,11 +92,11 @@ CLI examples:
 cargo build --offline --profile release-fast --features parity-trace \
   --bin rust-model-inference
 target/release-fast/rust-model-inference --model "$RMI_HOLO4_MODEL" \
-  --jinja --prompt '你好' --temp 0 --threads 1 --kv-cache f32 --max-tokens 4
+  --jinja --prompt '你好' --temp 0 --threads 1 --compute cpu --kv-cache f32 --max-tokens 4
 target/release-fast/rust-model-inference --model "$RMI_HOLO4_MODEL" \
   --mmproj "$RMI_HOLO4_MMPROJ" --image /absolute/path/to/image.png \
   --jinja --prompt 'Describe this image.' --temp 0 --threads 1 \
-  --kv-cache f32 --max-tokens 4
+  --compute cpu --kv-cache f32 --max-tokens 4
 ```
 
 ## Coverage limits
@@ -139,8 +139,14 @@ toolchain and offline vendored dependencies. Its SHA-verified F16 mmproj produce
 4×5120 finite values for the same normalized-image fixture. Comparing those
 values with the fixed CPU Oracle gives relative-L2 `0.007208926`, maximum
 absolute difference `0.6387634`. These checks exercise the original F16 encoder;
-the remote full-decoder CLI is still pending model transfer. No system packages
-or global toolchain settings were changed.
+the complete Q4_K_M decoder and F16 mmproj also pass SHA-256 verification there.
+The full CPU text CLI, using one thread, F32 KV, `--jinja`, temperature zero
+and four generated tokens, reproduces the same 13 prompt IDs and four greedy
+IDs listed above. The CPU image CLI uses eight threads, F32 KV, temperature
+zero and up to eight generated tokens; the red PNG is resized to 96×96,
+produces nine image tokens and receives the answer `Red`. These are complete
+decoder CLI smoke tests, alongside the separate encoder comparison above.
+No system packages or global toolchain settings were changed.
 
 The full library run reports 1237 passed, 80 ignored and 22 existing failures.
 Compared with the unchanged baseline (1235 passed / 80 ignored / 23 failed),
