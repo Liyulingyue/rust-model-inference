@@ -363,7 +363,6 @@ pub fn run_flux3_cli(
     n_threads: usize,
 ) -> Result<(), String> {
     for (present, flag) in [
-        (options.gpu, "--gpu"),
         (
             options.cfg.is_some()
                 || options.cfg_scale.is_some()
@@ -1575,6 +1574,16 @@ mod tests {
             height: 1,
             bytes: vec![255, 0, 0, 0, 255, 0],
         }
+    }
+
+    #[test]
+    fn flux3_gpu_reaches_component_validation() {
+        let options = crate::app::CliOptions {
+            gpu: true,
+            ..Default::default()
+        };
+        let error = run_flux3_cli(Arc::new(MustNotBeRead), &options, 1).unwrap_err();
+        assert!(error.contains("requires --text-encoder"), "{error}");
     }
 
     #[test]

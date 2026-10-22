@@ -1,5 +1,7 @@
 //! BFL bfc8889: independent image/reference/text blocks followed by joint blocks.
 use super::{trace, HIDDEN, TEXT_WIDTH};
+use crate::compute::linear::{LinearBinding, LinearExecutor, LinearId, LinearMode};
+use crate::compute::ComputePolicy;
 use crate::core::{
     tensor::{GGMLType, TensorSource},
     thread_pool::ComputePool,
@@ -8,13 +10,16 @@ use crate::models::diffusion::common::{require_finite, require_tensor};
 use crate::models::diffusion::dreamx::kernels::{
     attention_scalar, layer_norm_rows, load_float_values, AttentionSpec, Linear,
 };
-use std::sync::Arc;
+use crate::ops::kernel::Weight;
+use std::{cell::RefCell, collections::HashMap, sync::Arc};
 
 const HEADS: usize = 24;
 const HEAD_DIM: usize = 128;
 const FFN: usize = 9216;
 
-pub(crate) fn validate_dit(source: &dyn TensorSource) -> Result<(), String> {
+pub(crate) fn validate_dit(
+    source: &dyn TensorSource,
+) -> Result<Vec<(String, usize, usize)>, String> {
     if source
         .metadata("general.architecture")
         .and_then(|v| v.to_string_val())
@@ -26,8 +31,12 @@ pub(crate) fn validate_dit(source: &dyn TensorSource) -> Result<(), String> {
     {
         return Err("FLUX3 requires an explicitly registered distilled flow-map checkpoint".into());
     }
-    let matrix =
-        |name: &str, input, output| require_tensor(source, name, &[input, output], GGMLType::BF16);
+    let mut matrices = Vec::new();
+    let mut matrix = |name: &str, input, output| {
+        require_tensor(source, name, &[input, output], GGMLType::BF16)?;
+        matrices.push((name.to_owned(), input as usize, output as usize));
+        Ok::<_, String>(())
+    };
     matrix("emb_in.image.weight", 128, 3072)?;
     matrix("emb_in.image_cond.weight", 128, 3072)?;
     matrix("txt_in.weight", 20480, 3072)?;
@@ -64,10 +73,12 @@ pub(crate) fn validate_dit(source: &dyn TensorSource) -> Result<(), String> {
             }
         }
     }
-    Ok(())
+    Ok(matrices)
 }
 
 pub(crate) struct Flux3Dit {
+    // The retained source owns every cached weight slice.
+    matrices: Vec<(String, Weight<'static>)>,
     source: Arc<dyn TensorSource>,
     pool: Arc<ComputePool>,
 }
@@ -77,10 +88,64 @@ impl Flux3Dit {
         source: Arc<dyn TensorSource>,
         pool: Arc<ComputePool>,
     ) -> Result<Self, String> {
-        validate_dit(source.as_ref())?;
-        Ok(Self { source, pool })
+        let matrices = validate_dit(source.as_ref())?
+            .into_iter()
+            .map(|(name, input, output)| {
+                let weight =
+                    crate::core::loader::load_static_weight(source.as_ref(), &name, input, output);
+                (name, weight)
+            })
+            .collect();
+        Ok(Self {
+            matrices,
+            source,
+            pool,
+        })
     }
 
+    pub(crate) fn session(&self) -> Result<Flux3Session<'_>, String> {
+        let mut gpu = None;
+        let mut ids = HashMap::new();
+        let policy = ComputePolicy::legacy();
+        if policy != ComputePolicy::Cpu && !crate::ops::scalar_mode() {
+            let executor = LinearExecutor::new(
+                policy,
+                self.matrices
+                    .iter()
+                    .map(|(_, weight)| LinearBinding {
+                        weight,
+                        mode: LinearMode::Prepared,
+                    })
+                    .collect(),
+                GPU_ROWS,
+                self.pool.clone(),
+            )
+            .map_err(|e| e.to_string())?;
+            if executor.uses_vulkan() {
+                for (i, (name, _)) in self.matrices.iter().enumerate() {
+                    ids.insert(name.as_str(), executor.id(i).map_err(|e| e.to_string())?);
+                }
+                gpu = Some(RefCell::new(executor));
+            }
+        }
+        Ok(Flux3Session {
+            dit: self,
+            gpu,
+            ids,
+        })
+    }
+}
+
+// Bound host staging while retaining uploads across every denoising step.
+const GPU_ROWS: usize = 128;
+
+pub(crate) struct Flux3Session<'a> {
+    dit: &'a Flux3Dit,
+    gpu: Option<RefCell<LinearExecutor<'a, 'static>>>,
+    ids: HashMap<&'a str, LinearId>,
+}
+
+impl Flux3Session<'_> {
     fn linear(
         &self,
         name: &str,
@@ -88,8 +153,24 @@ impl Flux3Dit {
         n_in: usize,
         n_out: usize,
     ) -> Result<Vec<f32>, String> {
-        Linear::from_source(self.source.as_ref(), name, None, n_in, n_out)?.forward(
-            &self.pool,
+        if let Some(gpu) = &self.gpu {
+            let id = *self
+                .ids
+                .get(name)
+                .ok_or_else(|| format!("Unbound FLUX3 projection: {name}"))?;
+            let mut output = vec![0.0; input.len() / n_in * n_out];
+            for (input, output) in input
+                .chunks(GPU_ROWS * n_in)
+                .zip(output.chunks_mut(GPU_ROWS * n_out))
+            {
+                gpu.borrow_mut()
+                    .run(id, input, input.len() / n_in, output)
+                    .map_err(|e| e.to_string())?;
+            }
+            return Ok(output);
+        }
+        Linear::from_source(self.dit.source.as_ref(), name, None, n_in, n_out)?.forward(
+            &self.dit.pool,
             input,
             input.len() / n_in,
         )
@@ -166,7 +247,7 @@ impl Flux3Dit {
         )?;
         for (values, name) in [(&mut q, "query_norm"), (&mut k, "key_norm")] {
             let scale = load_float_values(
-                self.source.as_ref(),
+                self.dit.source.as_ref(),
                 &format!("{prefix}.norm.{name}.scale"),
                 &[128],
             )?;
@@ -413,5 +494,55 @@ mod tests {
         source.first.ggml_type = GGMLType::BF16;
         source.bytes.pop();
         assert!(validate_dit(&source).unwrap_err().contains("byte length"));
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    #[ignore = "requires a hardware Vulkan device; run alone with --test-threads=1"]
+    fn vulkan_projection_tiles_rows_and_reuses_weight_uploads() {
+        let name = "emb_in.image.weight";
+        let source: Arc<dyn TensorSource> = Arc::new(Contract {
+            arch: MetaValue::String("flux3".into()),
+            flow: MetaValue::Bool(true),
+            first: TensorInfo {
+                name: name.into(),
+                dims: vec![4, 2],
+                ggml_type: GGMLType::BF16,
+                offset: 0,
+            },
+            bytes: [1.0, 2.0, 3.0, 4.0, -1.0, 0.0, 1.0, 0.0]
+                .into_iter()
+                .flat_map(|v| crate::ops::f32_to_bf16(v).to_le_bytes())
+                .collect(),
+        });
+        let weight = crate::core::loader::load_static_weight(source.as_ref(), name, 4, 2);
+        let dit = Flux3Dit {
+            matrices: vec![(name.into(), weight)],
+            source,
+            pool: Arc::new(ComputePool::new(1)),
+        };
+        // Two full staging tiles plus a tail; each row has hand-computed outputs.
+        let input: Vec<_> = (0..257).flat_map(|r| [r as f32, 1.0, 2.0, 3.0]).collect();
+        let _scope = ComputePolicy::Vulkan.enter_legacy_scope();
+        let context = ComputePolicy::Vulkan.context().unwrap().unwrap();
+        let session = dit.session().unwrap();
+        if crate::ops::scalar_mode() {
+            assert!(session.gpu.is_none(), "scalar mode must keep DiT on CPU");
+            return;
+        }
+        assert!(session.gpu.is_some());
+        let before = context.compute_stats();
+        let actual = session.linear(name, &input, 4, 2).unwrap();
+        let first = context.compute_stats();
+        for (row, values) in actual.chunks_exact(2).enumerate() {
+            assert!((values[0] - (row as f32 + 20.0)).abs() < 1e-4);
+            assert!((values[1] - (2.0 - row as f32)).abs() < 1e-4);
+        }
+        assert!(first.submissions >= before.submissions + 3);
+        assert!(first.static_uploads > before.static_uploads);
+        assert_eq!(session.linear(name, &input, 4, 2).unwrap(), actual);
+        let second = context.compute_stats();
+        assert!(second.submissions >= first.submissions + 3);
+        assert_eq!(second.static_uploads, first.static_uploads);
     }
 }

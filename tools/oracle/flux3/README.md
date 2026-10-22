@@ -1,13 +1,13 @@
-# FLUX 3 Image Klein CPU adaptation and Oracle
+# FLUX 3 Image Klein adaptation and Oracle
 
 This adapter targets the **distilled BF16** release only. It registers `flux3`
 explicitly, uses the Qwen3-VL-4B hidden layers 4/8/12/16/20/24/28/32, and owns
 its three-stream DiT and flow-map sampler. Base, FP8 and NVFP4 are rejected.
 
-The runtime uses the existing Rust CPU operators with F32 activations and
+The runtime uses existing Rust CPU/Vulkan operators with F32 activations and
 accumulation, BF16 DiT/text weights and F16 VAE convolutions. Text features,
 reference features and initial noise are rounded to BF16. This is a numerical
-CPU implementation; it does not promise the CUDA BF16 activation bits.
+implementation; it does not promise the CUDA BF16 activation bits.
 
 ## Fixed inputs
 
@@ -50,8 +50,23 @@ conditioning (up to ten). Reference pixels are encoded through the deterministic
 32-channel mean, quant_conv, patchify and the checkpoint's BN statistics; they
 are never posterior samples. This initial VAE integration accepts square images
 and references on the 16-pixel grid, 64..4096 pixels. It rejects rectangular
-inputs and `--gpu`. Supply a full scene caption; the separate prompt upsampler
+inputs. Supply a full scene caption; the separate prompt upsampler
 is not part of this adapter.
+
+### Hybrid Vulkan execution
+
+Build with `--features vulkan` (add `parity-trace` for alignment) and add
+`--gpu` or `--compute auto` to the CLI command above. DiT BF16 projections use
+the existing Vulkan linear executor with F32 activations, a bounded 128-row
+staging buffer, and weight uploads retained across sampling steps. Existing
+Vulkan attention and supported F16 VAE convolutions also offload. The text
+encoder, normalization, RoPE, sampler and remaining operations run on CPU.
+`--compute vulkan` still requires a fully GPU-resident model and is rejected
+by the diffusion CLI; use `--compute auto` for this hybrid adapter.
+
+`RMI_PARITY_TRACE` now observes the requested GPU backend instead of disabling
+operator offload. `RMI_SCALAR=1` and explicit CPU scopes retain CPU execution.
+`RMI_COMPUTE_TRACE=1` reports actual backend selection and upload counters.
 
 ## Reproduce alignment
 
@@ -91,8 +106,8 @@ Oracle preserves that exact trace schema.
 
 ## Validation evidence
 
-The supported numerical path is **F32 CPU activations/accumulation**, with the
-released BF16 DiT/text weights and F16 VAE convolutions. The primary Oracle
+The supported numerical path is **F32 activations/accumulation on CPU or hybrid
+Vulkan**, with released BF16 DiT/text weights and F16 VAE convolutions. The primary Oracle
 widens the released weights and runs the pinned official graph in F32.
 
 Real CLI comparisons use seed 42, 64x64 and two flow-map steps. macOS arm64 uses
@@ -106,8 +121,10 @@ arm64 with 8 threads.
 | arm64 / two prepared references | 103 | 0.0000154383 | 0.00105131 | 0.000157232 |
 | x86_64 / text to image | 89 | 0.0000158357 | 0.000188365 | 0.000858396 |
 | x86_64 / two prepared references | 103 | 0.0000158357 | 0.000797763 | 0.000319389 |
+| x86_64 / Vulkan text to image | 89 | 0.0000158357 | 0.000190077 | 0.000869048 |
+| x86_64 / Vulkan two prepared references | 103 | 0.0000158357 | 0.000747608 | 0.000176240 |
 
-All four cases pass every predeclared F32 bound, produce CLI PNGs, and preserve
+All six cases pass every predeclared F32 bound, produce CLI PNGs, and preserve
 canonical checkpoint order/shape/count. Token IDs and initial noise are exact.
 
 - All source SHA256 hashes match the fixed revision. All **1007** converted
@@ -138,6 +155,49 @@ canonical checkpoint order/shape/count. Token IDs and initial noise are exact.
   pre-existing syntax in `src/prompt/jinja_compat.rs`; no source workaround or
   global environment change is required.
 
+### GPU execution evidence and regressions
+
+The Linux Vulkan runs use `AMD Radeon Graphics (RADV NAVI31)`, the Radeon ICD,
+and a device exposing 51,522,830,336 bytes of VRAM. They use the same released
+weights, inputs, pinned F32 Oracle and fixed bounds as the CPU cases above.
+No threshold was relaxed for GPU execution.
+
+| Case | Vulkan DiT linear calls | CPU DiT linear calls | Device submissions at last DiT snapshot | Static upload bytes | Peak allocation counter bytes |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Text to image | 484 | 0 | 561 | 9,756,476,480 | 9,787,544,400 |
+| Two references | 550 | 0 | 695 | 11,165,325,888 | 11,196,783,152 |
+
+Neither run reports a GPU error or fallback. These are the last DiT executor
+counter snapshots, not whole-process physical VRAM peaks; VAE decoding follows.
+A separate 256x256, default 16-step `--compute auto` CLI run exits successfully
+in 155.29 seconds and produces the requested red cube scene. It has no numerical
+Oracle comparison or comparable CPU timing, so it does not establish speedup.
+
+Hardware regressions cover a 257-row BF16 projection (two staging tiles and a
+tail), repeated execution without another static upload, scalar-mode CPU
+selection, and traced GPU attention with a hand-computed result and a real
+submission. Run each in a separate process on a hardware Vulkan device:
+
+```sh
+cargo test --offline --profile release-fast --features vulkan,parity-trace --lib \
+  vulkan_projection_tiles_rows_and_reuses_weight_uploads -- --ignored --test-threads=1
+RMI_SCALAR=1 cargo test --offline --profile release-fast --features vulkan,parity-trace --lib \
+  vulkan_projection_tiles_rows_and_reuses_weight_uploads -- --ignored --test-threads=1
+RMI_PARITY_TRACE=target/flux3-attention-test.jsonl \
+  cargo test --offline --profile release-fast --features vulkan,parity-trace --lib \
+  tracing_preserves_requested_gpu_attention -- --ignored --test-threads=1
+```
+
+The final local arm64 `vulkan,parity-trace --lib -- --test-threads=1` suite
+reports 1339 passed, 34 failed, 163 ignored. A clean isolated build of pre-GPU
+commit `ffb387ae` with the same flags reports 1337 passed, 35 failed, 161 ignored.
+All 34 current failure names occur on that baseline. Whole-suite results vary:
+earlier parallel runs had 31 matching failures on current code and baseline;
+a later parallel run also failed the ASR projector test, which passes alone
+and in the final serial run. No root cause is attributed to that instability.
+Shared Qwen trunk regressions pass (28 passed, 1 ignored). The full suite is not
+green; failure names and repeated-run results are recorded in `validation.json`.
+
 ### Cross-precision diagnostic
 
 The native CPU BF16-activation Oracle is also measured. Against the supported
@@ -154,5 +214,6 @@ bound; the difference is not resolved by changing a comparison threshold.
 
 A 256x256, default 16-step CLI smoke produces a valid PNG depicting the requested
 red cube, table and shadows. This larger image has no numerical Oracle comparison.
-No GPU, rectangular image, Base/FP8/NVFP4 or native BF16 activation parity claim
-is made. This is an experimental CPU adapter.
+No rectangular image, Base/FP8/NVFP4 or native BF16 activation parity claim
+is made. This is an experimental CPU/hybrid Vulkan adapter; larger-image GPU
+numerical alignment and a fully GPU-resident pipeline remain unverified.

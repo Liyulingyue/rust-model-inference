@@ -95,6 +95,8 @@ fn encode_text(
     tokenizer: &BPETokenizer,
     prompt: &str,
 ) -> Result<Vec<f32>, String> {
+    // Hidden-layer capture retains the validated CPU text-encoder contract.
+    let _cpu = crate::compute::ComputePolicy::Cpu.enter_legacy_scope();
     let input = text_input(tokenizer, prompt);
     let raw_ids: Vec<_> = input.ids.iter().map(|&id| id as f32).collect();
     trace("flux3.token_ids", &[input.ids.len()], &raw_ids)?;
@@ -303,8 +305,9 @@ impl Flux3Pipeline {
         bf16_round(&mut latent);
         trace("flux3.noise", &[latent_side * latent_side, 128], &latent)?;
         let ids = image_ids(latent_side, None);
+        let dit = self.dit.session()?;
         for (step, pair) in schedule.windows(2).enumerate() {
-            let velocity = self.dit.predict(
+            let velocity = dit.predict(
                 &latent,
                 &ids,
                 &text,
