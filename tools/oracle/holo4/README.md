@@ -269,6 +269,54 @@ full-device execution, including vision. This is the existing global policy,
 not a Holo4 restriction. GPU vision, other devices and long contexts remain
 unverified.
 
+### Resident performance after the VRAM upload fix
+
+The [new raw samples](performance-vram.jsonl) use the full `release` build,
+8 workers, F32 KV, capacity 128, 13 prompt tokens and 32 fixed-input decode
+evaluations. CPU and Vulkan both use batch 64. Two resident sessions are warmed;
+loading, initialization and weight upload are excluded, and state reset is
+included in total time. Source is `84606a5c` plus the VRAM upload change now in
+`67dc43de`; the raw records pin the actual binary and source SHA-256 values.
+
+| Backend | Prefill tok/s, median | Decode tok/s, median | Total seconds, median | Total seconds, min–max |
+| --- | ---: | ---: | ---: | ---: |
+| CPU batch 64 | 0.731 | 0.665 | 84.193 | 14.564–96.285 |
+| Vulkan batch 64 | 1.494 | 0.567 | 65.502 | 58.881–468.899 |
+
+Each column is summarized independently. The median GPU/CPU wall ratio is
+`0.778`, but the shared host's severe variation prevents a stable speedup
+conclusion. CPU has a 16-core container quota and other concurrent jobs. During
+the last GPU sample, the card was 100% busy with 51.239 GB of its 51.523 GB VRAM
+occupied. This process still reported its 15,670,836 KiB allocation resident in
+VRAM and zero eviction at that snapshot. These are load observations, not a
+kernel-profile attribution of every delay. The 468.899-second sample is retained.
+
+Five paired rounds are included. The first process recorded four complete
+rounds before SSH disconnected and its stdout pipe closed. A detached completion
+process repeats the same warmups and executes only loop `4..5` (round 5), with
+all other benchmark settings unchanged. Both CPU and GPU reproduce all 33 of
+their respective warmup predictions across processes. The raw file retains
+both builds, metadata, warmups, an explicit interruption record and all ten
+measured samples; the completion process exits successfully. To reproduce the
+completion source, change only `for round in 0..5` to `for round in 4..5` and
+metadata `measured_rounds` from 5 to 1. The normal harness below runs all five.
+
+Every measured CPU sample has zero GPU submissions; every Vulkan sample has
+33 prefill and 1056 decode submissions, with zero new static uploads. The
+context's allocation peak is 17,207,762,304 bytes. GPU host-read accounting is
+7,047,100,416 bytes per sample; this is an API counter, not measured PCIe traffic.
+No kernel profiler was run. GPU session initialization takes 12.248 / 34.110
+seconds in the two processes, outside the timed samples. Completion-process
+peak RSS is 16,495,400 KiB for both model views together; the interrupted
+process's peak RSS is unavailable. These are not separate per-backend peaks.
+
+Each backend's complete prediction sequence is repeatable and all logits are
+finite. As in the historical benchmark, CPU/GPU agree through normal EOS
+(prediction 9), with only prediction 30 differing after EOS (CPU 96747 / GPU
+2064). Fixed CPU-derived inputs continue after EOS. This is throughput
+measurement, not 32-step autoregressive parity. Different batch sizes and host
+load prevent attributing a before/after speedup solely to the VRAM change.
+
 ### Resident performance before the VRAM upload fix
 
 Measured on 2026-10-23 (Asia/Shanghai), at source revision `5a041900`, on the
