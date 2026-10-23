@@ -603,7 +603,11 @@ impl Qwen35VulkanSession {
             .checked_mul(18)
             .and_then(|count| count.checked_add(3))
             .ok_or(VulkanError::OutOfMemory)?;
-        let mut ops = Qwen3Ops::new_with_size(context, layout.total_size(), descriptor_capacity)?;
+        let mut ops = Qwen3Ops::new_device_local_with_size(
+            context,
+            layout.total_size(),
+            descriptor_capacity,
+        )?;
         let mut buffers = UploadedBuffers::new(context);
         let mut layers = Vec::with_capacity(layer_count);
 
@@ -1094,18 +1098,14 @@ impl Qwen35VulkanSession {
         ids: bool,
     ) -> Result<(), VulkanError> {
         if crate::parity_trace::enabled(name) {
-            let values = self.ops.read_f32(region, count)?;
-            let widened;
-            let values = if ids {
-                widened = values
-                    .iter()
-                    .map(|v| v.to_bits() as f32)
-                    .collect::<Vec<_>>();
-                &widened
-            } else {
-                values
-            };
-            crate::parity_trace::checkpoint_at(name, layer, Some(step), &[count], values)
+            let mut values = vec![0.0; count];
+            self.ops.read_f32_into(region, &mut values)?;
+            if ids {
+                for value in &mut values {
+                    *value = value.to_bits() as f32;
+                }
+            }
+            crate::parity_trace::checkpoint_at(name, layer, Some(step), &[count], &values)
                 .map_err(|e| VulkanError::UnsupportedShape(e.to_string()))?;
         }
         Ok(())
@@ -1149,10 +1149,7 @@ impl Qwen35VulkanSession {
         let value_heads = config.ssm_dt_rank;
         let recurrent_head_dim = config.head_v_dim();
 
-        // Hold the context submission guard before touching mapped arena bytes
-        // and keep it for the whole recording: `TokenCommands::flush` submits
-        // and re-opens the command buffer without dropping it.
-        let mut commands = TokenCommands::begin(self.context)?;
+        // Staged transfers take the submission guard themselves, before recording.
         self.ops.write_f32(self.layout.x, input)?;
         // Recurrent layers have no dense delta; active rows change its layer stride.
         for region in [self.layout.kv_delta_k, self.layout.kv_delta_v] {
@@ -1184,6 +1181,7 @@ impl Qwen35VulkanSession {
             self.layout.rope,
             &self.rope[..rows * config.rope_dimension_count],
         )?;
+        let mut commands = TokenCommands::begin(self.context)?;
 
         // Flush once a chunk reaches this many dispatches. Recording every layer
         // of a chunk into one command buffer and submitting it as a single unit
@@ -1337,7 +1335,7 @@ impl Qwen35VulkanSession {
                     )?;
                     #[cfg(feature = "parity-trace")]
                     if rows == 1 && std::env::var_os("RMI_PARITY_TRACE").is_some() {
-                        commands = commands.flush()?;
+                        commands.submit_and_wait()?;
                         for (name, region, count) in [
                             ("q_conv_predelta", self.layout.q, key_dim),
                             ("k_conv_predelta", self.layout.k, key_dim),
@@ -1352,6 +1350,7 @@ impl Qwen35VulkanSession {
                                 false,
                             )?;
                         }
+                        commands = TokenCommands::begin(self.context)?;
                     }
                     #[cfg(test)]
                     if let Some(row) = failure {
@@ -1390,7 +1389,7 @@ impl Qwen35VulkanSession {
             )?;
             #[cfg(feature = "parity-trace")]
             if rows == 1 && std::env::var_os("RMI_PARITY_TRACE").is_some() {
-                commands = commands.flush()?;
+                commands.submit_and_wait()?;
                 for (name, region) in [
                     ("attn_residual", self.layout.x),
                     ("attn_post_norm", self.layout.normed),
@@ -1404,6 +1403,7 @@ impl Qwen35VulkanSession {
                         false,
                     )?;
                 }
+                commands = TokenCommands::begin(self.context)?;
             }
             match bindings.ffn {
                 FfnBindings::Moe(moe) => self.record_moe(&commands, moe, rows)?,
@@ -1450,7 +1450,7 @@ impl Qwen35VulkanSession {
                         "Vulkan parity tracing requires single-token chunks".into(),
                     ));
                 }
-                commands = commands.flush()?;
+                commands.submit_and_wait()?;
                 self.trace_region(
                     &format!("l_out-{layer_index}"),
                     Some(layer_index),
@@ -1496,6 +1496,7 @@ impl Qwen35VulkanSession {
                         )?;
                     }
                 }
+                commands = TokenCommands::begin(self.context)?;
             }
         }
 
@@ -1542,19 +1543,19 @@ impl Qwen35VulkanSession {
             config.vocab_size,
             false,
         )?;
-        self.logits
-            .copy_from_slice(self.ops.read_f32(self.layout.logits, config.vocab_size)?);
+        self.ops
+            .read_f32_into(self.layout.logits, &mut self.logits)?;
         let delta_count = qwen35_product("KV delta", &[layer_count, rows, dense_kv])?;
-        self.k_delta[..delta_count]
-            .copy_from_slice(self.ops.read_f32(self.layout.kv_delta_k, delta_count)?);
-        self.v_delta[..delta_count]
-            .copy_from_slice(self.ops.read_f32(self.layout.kv_delta_v, delta_count)?);
-        let conv_count = self.conv_state.len();
-        self.conv_state
-            .copy_from_slice(self.ops.read_f32(self.layout.conv_state, conv_count)?);
-        let ssm_count = self.ssm_state.len();
-        self.ssm_state
-            .copy_from_slice(self.ops.read_f32(self.layout.ssm_state, ssm_count)?);
+        self.ops
+            .read_f32_into(self.layout.kv_delta_k, &mut self.k_delta[..delta_count])?;
+        self.ops
+            .read_f32_into(self.layout.kv_delta_v, &mut self.v_delta[..delta_count])?;
+        self.ops
+            .read_f32_into(self.layout.conv_state, &mut self.conv_state)?;
+        self.ops
+            .read_f32_into(self.layout.ssm_state, &mut self.ssm_state)?;
+        let mut hidden = vec![0.0; input_count];
+        self.ops.read_f32_into(self.layout.x, &mut hidden)?;
         if self
             .logits
             .iter()
@@ -1563,11 +1564,7 @@ impl Qwen35VulkanSession {
             .chain(&self.conv_state)
             .chain(&self.ssm_state)
             .any(|v| !v.is_finite())
-            || self
-                .ops
-                .read_f32(self.layout.x, input_count)?
-                .iter()
-                .any(|v| !v.is_finite())
+            || hidden.iter().any(|v| !v.is_finite())
         {
             return Err(VulkanError::UnsupportedShape(
                 "Qwen3.5 Vulkan chunk produced non-finite output".into(),
@@ -2158,7 +2155,8 @@ mod tests {
         let commands = super::TokenCommands::begin(context).unwrap();
         gpu.record_moe(&commands, bindings, 3).unwrap();
         commands.submit_and_wait().unwrap();
-        let actual = gpu.ops.read_f32(gpu.layout.x, 12).unwrap().to_vec();
+        let mut actual = vec![0.0; 12];
+        gpu.ops.read_f32_into(gpu.layout.x, &mut actual).unwrap();
         let moe = model.layers[0].moe.as_ref().unwrap();
         let cfg = model.config.moe.as_ref().unwrap();
         for (row, input) in input.chunks_exact(4).enumerate() {
@@ -2185,7 +2183,10 @@ mod tests {
                 );
             }
         }
-        let ids = gpu.ops.read_f32(gpu.layout.expert_ids, 6).unwrap();
+        let mut ids = [0.0; 6];
+        gpu.ops
+            .read_f32_into(gpu.layout.expert_ids, &mut ids)
+            .unwrap();
         assert_eq!(
             ids[4].to_bits(),
             0,
@@ -2193,7 +2194,11 @@ mod tests {
         );
         assert_eq!(ids[5].to_bits(), 1);
         // All-equal logits: normalized weights include the configured scaling.
-        assert!((gpu.ops.read_f32(gpu.layout.expert_weights, 6).unwrap()[4] - 0.625).abs() < 1e-7);
+        let mut weights = [0.0; 6];
+        gpu.ops
+            .read_f32_into(gpu.layout.expert_weights, &mut weights)
+            .unwrap();
+        assert!((weights[4] - 0.625).abs() < 1e-7);
         // Non-finite routers propagate failure without forming an invalid expert address.
         gpu.ops
             .write_f32(gpu.layout.router_logits, &[f32::NAN, 1.0, 2.0, 3.0])
@@ -2214,12 +2219,10 @@ mod tests {
             )
             .unwrap();
         commands.submit_and_wait().unwrap();
-        assert!(gpu
-            .ops
-            .read_f32(gpu.layout.expert_weights, 2)
-            .unwrap()
-            .iter()
-            .all(|v| v.is_nan()));
+        gpu.ops
+            .read_f32_into(gpu.layout.expert_weights, &mut weights[..2])
+            .unwrap();
+        assert!(weights[..2].iter().all(|v| v.is_nan()));
         println!("physical GPU MoE: 3 rows, tie ordering, scaled weights, routed/shared output, nonfinite router checked");
     }
 
@@ -2608,7 +2611,8 @@ mod tests {
             let commands = super::TokenCommands::begin(context).unwrap();
             gpu.record_moe(&commands, bindings, 1).unwrap();
             commands.submit_and_wait().unwrap();
-            let actual = gpu.ops.read_f32(gpu.layout.x, width).unwrap();
+            let mut actual = vec![0.0; width];
+            gpu.ops.read_f32_into(gpu.layout.x, &mut actual).unwrap();
             let mut expected = vec![0.0; width];
             let moe = model.layers[layer].moe.as_ref().unwrap();
             let _cpu = crate::compute::ComputePolicy::Cpu.cpu_scope();
@@ -2632,9 +2636,9 @@ mod tests {
                     .total_cmp(&probabilities[a])
                     .then_with(|| a.cmp(&b))
             });
-            let actual_ids = gpu
-                .ops
-                .read_f32(gpu.layout.expert_ids, cfg.n_expert_used)
+            let mut actual_ids = vec![0.0; cfg.n_expert_used];
+            gpu.ops
+                .read_f32_into(gpu.layout.expert_ids, &mut actual_ids)
                 .unwrap();
             assert_eq!(
                 actual_ids
