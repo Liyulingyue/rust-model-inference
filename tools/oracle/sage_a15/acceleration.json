@@ -410,5 +410,388 @@
     "First-pair session initialization is 8.31 seconds slower due to staging; end-to-end time includes this cost.",
     "Existing numerical assertions and scalar Oracle scope retained; optimized graph and vision numerical alignment are not extended.",
     "Other dense/Qwen3 real models, UMA hardware, forced VRAM exhaustion, long context and concurrency were not tested here."
-  ]
+  ],
+  "cpu_comparison": {
+    "date": "2026-10-23",
+    "code_commit": "eed17fba9f237bc2f7c5c43de29c122414450cb8",
+    "binary_sha256": "61906e75b31064e832727b5324114c5305a069eaf876259696dd58dccd186f4a",
+    "profile": "release",
+    "features": [
+      "vulkan"
+    ],
+    "scalar": false,
+    "parity_trace": false,
+    "compute_trace": false,
+    "method": "Alternating CPU then Vulkan, three rounds each, same binary/model/prompt/8 threads; 64 generated tokens capped intentionally, 44 input rows and 63 timed decode evaluations per run. Each run is a new process.",
+    "parameters": {
+      "threads": 8,
+      "prefill_batch_size": 64,
+      "temperature": 0,
+      "max_tokens": 64,
+      "jinja": true,
+      "thinking": false
+    },
+    "command_template": [
+      "/workspace/rmi-sage-a15-f165/target/sage-gpu/acceleration/after",
+      "--model",
+      "/workspace/rmi-sage-a15-f165/models/Sage-A1.5-Q8_0-GGUF/Sage-A1.5-Q8_0.gguf",
+      "--compute",
+      "<cpu|vulkan>",
+      "--jinja",
+      "--no-thinking",
+      "--temp",
+      "0",
+      "--threads",
+      "8",
+      "--prefill-batch-size",
+      "64",
+      "--max-tokens",
+      "64",
+      "--prompt",
+      "请用三句话向初学者解释混合专家（MoE）模型：它如何选择专家、为什么能减少计算，以及一个主要代价。不要列标题。"
+    ],
+    "cpu": "model name\t: AMD EPYC 9334 32-Core Processor",
+    "container_cpu_max": "1600000 100000",
+    "container_cpu_quota_cores": 16,
+    "cpu_affinity_count": 128,
+    "summaries": {
+      "cpu": {
+        "session_init_seconds": {
+          "median": 0.004534,
+          "min": 0.00448,
+          "max": 0.004611
+        },
+        "prefill_seconds": {
+          "median": 2.32624,
+          "min": 2.149355,
+          "max": 2.356097
+        },
+        "decode_evaluations_per_second": {
+          "median": 10.204747734586498,
+          "min": 9.727713576583819,
+          "max": 12.620313656862084
+        },
+        "first_text_seconds": {
+          "median": 2.588151950389147,
+          "min": 2.4208967369049788,
+          "max": 2.6214423775672913
+        },
+        "process_seconds": {
+          "median": 9.962275573983788,
+          "min": 8.330913681536913,
+          "max": 10.295256540179253
+        }
+      },
+      "vulkan": {
+        "session_init_seconds": {
+          "median": 21.210452,
+          "min": 17.931905,
+          "max": 21.871898
+        },
+        "prefill_seconds": {
+          "median": 1.180435,
+          "min": 1.179961,
+          "max": 1.18411
+        },
+        "decode_evaluations_per_second": {
+          "median": 5.02918805036181,
+          "min": 5.024997768661705,
+          "max": 5.084540165082913
+        },
+        "first_text_seconds": {
+          "median": 22.643681310117245,
+          "min": 19.38942740112543,
+          "max": 23.329350367188454
+        },
+        "process_seconds": {
+          "median": 37.10430635884404,
+          "min": 33.5633757263422,
+          "max": 37.993417935445905
+        }
+      }
+    },
+    "ratios": {
+      "cpu_over_vulkan_decode": 2.029104426479409,
+      "vulkan_over_cpu_prefill_throughput": 1.9706633571522363,
+      "vulkan_over_cpu_process_time": 3.7244810267787543
+    },
+    "runs": [
+      {
+        "name": "cpu-64-1",
+        "backend": "cpu",
+        "metrics": {
+          "session_init": 0.004611,
+          "prompt_rows": 44,
+          "generated_tokens": 64,
+          "decode_evals": 63,
+          "prefill": 2.32624,
+          "decode": 6.173597,
+          "generation_total": 8.514397
+        },
+        "first_text_seconds": 2.588151950389147,
+        "process_seconds": 9.962275573983788,
+        "resources": {
+          "gpu_busy_percent_before": [
+            0
+          ],
+          "gpu_vram_before_bytes": 28004352,
+          "loadavg_before": [
+            43.04150390625,
+            42.85205078125,
+            44.2451171875
+          ],
+          "loadavg_after": [
+            43.32373046875,
+            42.92236328125,
+            44.25341796875
+          ],
+          "child_cpu_seconds": 69.638768,
+          "container_throttled_usec_delta": 0
+        },
+        "process_gpu_peaks_KiB": {
+          "drm-resident-gtt": 0,
+          "drm-resident-vram": 0
+        }
+      },
+      {
+        "name": "cpu-64-2",
+        "backend": "cpu",
+        "metrics": {
+          "session_init": 0.00448,
+          "prompt_rows": 44,
+          "generated_tokens": 64,
+          "decode_evals": 63,
+          "prefill": 2.356097,
+          "decode": 6.476342,
+          "generation_total": 8.846913
+        },
+        "first_text_seconds": 2.6214423775672913,
+        "process_seconds": 10.295256540179253,
+        "resources": {
+          "gpu_busy_percent_before": [
+            100
+          ],
+          "gpu_vram_before_bytes": 28004352,
+          "loadavg_before": [
+            45.36669921875,
+            43.470703125,
+            44.3876953125
+          ],
+          "loadavg_after": [
+            45.2783203125,
+            43.51953125,
+            44.39404296875
+          ],
+          "child_cpu_seconds": 72.31047199999996,
+          "container_throttled_usec_delta": 0
+        },
+        "process_gpu_peaks_KiB": {
+          "drm-resident-gtt": 0,
+          "drm-resident-vram": 0
+        }
+      },
+      {
+        "name": "cpu-64-3",
+        "backend": "cpu",
+        "metrics": {
+          "session_init": 0.004534,
+          "prompt_rows": 44,
+          "generated_tokens": 64,
+          "decode_evals": 63,
+          "prefill": 2.149355,
+          "decode": 4.991952,
+          "generation_total": 7.155819
+        },
+        "first_text_seconds": 2.4208967369049788,
+        "process_seconds": 8.330913681536913,
+        "resources": {
+          "gpu_busy_percent_before": [
+            100
+          ],
+          "gpu_vram_before_bytes": 28004352,
+          "loadavg_before": [
+            46.2939453125,
+            43.9951171875,
+            44.5224609375
+          ],
+          "loadavg_after": [
+            46.4150390625,
+            44.09521484375,
+            44.5498046875
+          ],
+          "child_cpu_seconds": 58.50160699999992,
+          "container_throttled_usec_delta": 0
+        },
+        "process_gpu_peaks_KiB": {
+          "drm-resident-gtt": 0,
+          "drm-resident-vram": 0
+        }
+      },
+      {
+        "name": "vulkan-64-1",
+        "backend": "vulkan",
+        "metrics": {
+          "session_init": 17.931905,
+          "prompt_rows": 44,
+          "generated_tokens": 64,
+          "decode_evals": 63,
+          "prefill": 1.180435,
+          "decode": 12.537319,
+          "generation_total": 13.736371
+        },
+        "first_text_seconds": 19.38942740112543,
+        "process_seconds": 33.5633757263422,
+        "resources": {
+          "gpu_busy_percent_before": [
+            0,
+            0,
+            0
+          ],
+          "gpu_vram_before_bytes": 28004352,
+          "loadavg_before": [
+            43.32373046875,
+            42.92236328125,
+            44.25341796875
+          ],
+          "loadavg_after": [
+            45.36669921875,
+            43.470703125,
+            44.3876953125
+          ],
+          "child_cpu_seconds": 242.75875300000004,
+          "container_throttled_usec_delta": 0
+        },
+        "process_gpu_peaks_KiB": {
+          "drm-resident-gtt": 415168,
+          "drm-resident-vram": 35719384
+        }
+      },
+      {
+        "name": "vulkan-64-2",
+        "backend": "vulkan",
+        "metrics": {
+          "session_init": 21.210452,
+          "prompt_rows": 44,
+          "generated_tokens": 64,
+          "decode_evals": 63,
+          "prefill": 1.179961,
+          "decode": 12.390501,
+          "generation_total": 13.586796
+        },
+        "first_text_seconds": 22.643681310117245,
+        "process_seconds": 37.10430635884404,
+        "resources": {
+          "gpu_busy_percent_before": [
+            0,
+            0,
+            0
+          ],
+          "gpu_vram_before_bytes": 28004352,
+          "loadavg_before": [
+            45.2783203125,
+            43.51953125,
+            44.39404296875
+          ],
+          "loadavg_after": [
+            46.2939453125,
+            43.9951171875,
+            44.5224609375
+          ],
+          "child_cpu_seconds": 268.223875,
+          "container_throttled_usec_delta": 0
+        },
+        "process_gpu_peaks_KiB": {
+          "drm-resident-gtt": 664320,
+          "drm-resident-vram": 35719384
+        }
+      },
+      {
+        "name": "vulkan-64-3",
+        "backend": "vulkan",
+        "metrics": {
+          "session_init": 21.871898,
+          "prompt_rows": 44,
+          "generated_tokens": 64,
+          "decode_evals": 63,
+          "prefill": 1.18411,
+          "decode": 12.526873,
+          "generation_total": 13.727018
+        },
+        "first_text_seconds": 23.329350367188454,
+        "process_seconds": 37.993417935445905,
+        "resources": {
+          "gpu_busy_percent_before": [
+            0,
+            0,
+            0
+          ],
+          "gpu_vram_before_bytes": 28004352,
+          "loadavg_before": [
+            46.4150390625,
+            44.09521484375,
+            44.5498046875
+          ],
+          "loadavg_after": [
+            48.16015625,
+            44.8876953125,
+            44.80078125
+          ],
+          "child_cpu_seconds": 274.65522500000003,
+          "container_throttled_usec_delta": 0
+        },
+        "process_gpu_peaks_KiB": {
+          "drm-resident-gtt": 415168,
+          "drm-resident-vram": 35719384
+        }
+      }
+    ],
+    "answers_at_64_token_cap": {
+      "cpu": "混合专家模型像是一个拥有多位专业顾问的团队，每次处理任务时，路由器只会挑选最相关的少数几位专家来共同工作。由于并非所有参数都在每次推理中激活，这种稀疏激活机制大幅降低了实际运行时的计算量。然而，这种架构的主要代价是通信开销显著增加，因为需要",
+      "vulkan": "混合专家模型像是一个拥有多位专业顾问的团队，每次处理任务时，一个轻量级的门控网络会根据输入内容智能地挑选出最相关的少数几位专家来共同工作。\n\n由于每次只需激活总参数中很小的一部分，模型在推理时能大幅节省计算资源，从而实现比同等规模的密集"
+    },
+    "complete_generation_before_fixed_length_test": {
+      "cpu": {
+        "answer": "混合专家模型像是一个拥有多位专业顾问的团队，每次处理任务时，路由器只会挑选最相关的少数几位专家来共同工作。由于并非所有参数都在每次推理中激活，这种稀疏激活机制大幅降低了实际运行时的计算量。然而，这种架构的主要代价是通信开销显著增加，因为需要频繁地在不同专家之间传输数据，这可能会成为性能瓶颈。",
+        "metrics": {
+          "session_init": 0.003586,
+          "prompt_rows": 44,
+          "generated_tokens": 78,
+          "decode_evals": 78,
+          "prefill": 3.064015,
+          "decode": 7.126286,
+          "generation_total": 10.208498
+        },
+        "first_text_seconds": 3.3348852340132,
+        "process_seconds": 11.68335946649313
+      },
+      "vulkan": {
+        "answer": "混合专家模型像是一个拥有多位专业顾问的团队，每次处理任务时，一个轻量级的门控网络会根据输入内容智能地挑选出最相关的少数几位专家来共同工作。\n\n由于每次只需激活总参数中很小的一部分，模型在推理时能大幅节省计算资源，从而实现比同等规模的密集模型更快的速度或更低的能耗。\n\n然而，这种架构的主要代价是训练过程变得更加复杂且难以并行化，因为需要精心设计路由机制来确保不同专家之间的负载均衡和有效协作。",
+        "metrics": {
+          "session_init": 22.365504,
+          "prompt_rows": 44,
+          "generated_tokens": 104,
+          "decode_evals": 104,
+          "prefill": 1.244744,
+          "decode": 20.673229,
+          "generation_total": 21.944796
+        },
+        "first_text_seconds": 23.907611100003123,
+        "process_seconds": 46.73864574916661
+      }
+    },
+    "checks": [
+      "All six processes exited 0 and generated exactly 64 tokens.",
+      "CPU processes opened no DRM device; Vulkan used PCI 0000:c3:00.0 with increasing process engine counters.",
+      "All three Vulkan runs began with 0/0/0 percent sampled GPU busy.",
+      "Container CPU throttled_usec deltas were zero for all six fixed-length runs.",
+      "Each backend produced the same capped answer in all three rounds; CPU and Vulkan answers differ."
+    ],
+    "limits": [
+      "Short input and 8 CPU threads; not full-core CPU performance or long-context/concurrent behavior.",
+      "Shared host with no CPU/GPU reservation; initial idle samples are not an isolation guarantee.",
+      "File and driver caches were not flushed. These are new-process runs, not cold-cache or persistent-session measurements.",
+      "Default optimized CPU/Vulkan answers differ; this speed test does not establish numerical alignment or equal answer quality.",
+      "Full uncapped answers had different lengths (CPU 78, Vulkan 104); fixed-length cases remove that output-count difference from the timing comparison."
+    ]
+  }
 }

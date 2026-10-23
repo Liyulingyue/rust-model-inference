@@ -311,6 +311,42 @@ Other real dense/Qwen3 models, UMA hardware, forced VRAM exhaustion, long
 contexts and concurrency were not tested in this follow-up. This does not
 extend the optimized-graph numerical contract described above.
 
+### CPU versus Vulkan runtime
+
+The weight-placement speedup above compares two Vulkan implementations.
+On the same AMD host, the current optimized **eight-thread CPU decoder is
+faster than Vulkan** for this short-input workload.
+
+Both backends used the same release binary, model, 44-row prompt, temperature
+0, no thinking, Jinja template, eight threads and prefill batch 64. Three
+alternating CPU/Vulkan rounds each capped output at 64 tokens, with 63 timed
+decode evaluations. These capped runs measure speed, not a completed answer.
+Values below are per-metric medians; raw measurements and complete uncapped
+answers are included under `cpu_comparison` in [acceleration.json](acceleration.json).
+
+| Fixed 64-token output | CPU, 8 threads | Vulkan |
+| --- | ---: | ---: |
+| Session init (s) | 0.005 | 21.21 |
+| Prefill, 44 rows (s) | 2.33 | 1.18 |
+| Decode eval/s | 10.20 | 5.03 |
+| Process wall including startup (s) | 9.96 | 37.10 |
+
+CPU decode throughput is 2.03x Vulkan; Vulkan prefill throughput is 1.97x CPU.
+Vulkan process time is 3.72x CPU, including the full weight-upload cost on every
+new process. Decode rates ranged from 9.73–12.62 for CPU and 5.02–5.08 for
+Vulkan. CPU processes opened no DRM device; Vulkan used the same physical PCI
+device and its engine counters increased. All three GPU starts sampled
+0/0/0% busy. The shared container has a 16-CPU quota and 128 allowed logical
+CPUs, but these tests use eight threads; no container throttling was observed.
+
+Uncapped CPU and Vulkan answers had 78 and 104 tokens and different text, so
+the primary comparison uses equal output counts. Each backend's capped answer
+was repeatable across its three rounds. This speed comparison does not extend
+the optimized numerical-alignment contract or establish equal answer quality.
+The host was not reserved, file/driver caches were not flushed, and persistent
+sessions, full-core CPU performance, long contexts and concurrency were not
+measured.
+
 ### Focused regression checks
 
 The final local `--features vulkan,parity-trace --lib vulkan::` run passed 46
