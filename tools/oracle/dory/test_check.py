@@ -65,6 +65,24 @@ class TraceChecks(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "shape"):
             check.compare(oracle, rust)
 
+    def test_batched_structure_requires_each_row_and_only_final_logits(self):
+        paths = []
+        for side in ("oracle", "rust"):
+            path = self.manifest(side)
+            old = list(map(json.loads, path.read_text().splitlines()))
+            records = [dict(name="prompt_ids", token_ids=[1, 2]),
+                       dict(name="generated_ids", token_ids=[]),
+                       dict(name="prefill_batches", token_ids=[2])]
+            for row in old[2:]:
+                for step in ([1] if row["name"].startswith("result_") else [0, 1]):
+                    records.append(dict(row, step=step))
+            path.write_text("\n".join(map(json.dumps, records)))
+            paths.append(path)
+        self.assertTrue(check.compare(*paths)["passed"])
+        rows = paths[1].read_text().splitlines()
+        paths[1].write_text("\n".join(rows[:5] + rows[6:]))
+        self.assertFalse(check.compare(*paths)["passed"])
+
 
 if __name__ == "__main__":
     unittest.main()

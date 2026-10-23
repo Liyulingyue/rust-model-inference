@@ -1,6 +1,6 @@
 //! Resident Dory graph: projections, loop state and KV stay on the device.
 use super::dense::UploadedBuffers;
-use super::ops::{ArenaLayout, ArenaRegion, OperatorBindings, Qwen3Ops, TokenCommands};
+use super::ops::{ArenaRegion, OperatorBindings, Qwen3Ops, TokenCommands};
 use super::{VulkanContext, VulkanError};
 use crate::app::cli::KvFormat;
 use crate::core::tensor::GGMLType;
@@ -20,6 +20,52 @@ struct Matrix {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn half_kv_layout_uses_half_the_cache_bytes() {
+        let mut cfg = DoryConfig {
+            n_embd: 256,
+            n_layer: 6,
+            n_head: 2,
+            n_head_kv: 1,
+            head_dim: 256,
+            n_ff: 512,
+            n_ctx: 4096,
+            vocab_size: 256,
+            rope_freq_base: 10000.0,
+            rope_freq_base_2: 1000.0,
+            sliding_window: 1024,
+            n_input_layers: 2,
+            n_recurrent_layers: 2,
+            n_output_layers: 2,
+            n_loops: 4,
+            recurrent_kv_cache_mode: "per_loop".into(),
+            initializer_range: 0.0177,
+            alpha_init: 0.05,
+            gate_init: 2.0,
+            rope_profile: vec![2, 1, 1, 1, 2, 1],
+            attention_sliding: vec![true, false, true],
+        };
+        let f32 = DoryLayout::new(&cfg, 2048, KvFormat::F32).unwrap();
+        let f16 = DoryLayout::new(&cfg, 2048, KvFormat::F16).unwrap();
+        let bytes = |l: &DoryLayout| {
+            l.caches
+                .iter()
+                .map(|c| c.keys.size + c.values.size)
+                .sum::<usize>()
+        };
+        assert_eq!(bytes(&f32), bytes(&f16) * 2);
+        assert_eq!(f32.bytes - f16.bytes, bytes(&f16));
+        for c in &f16.caches {
+            assert!(c.slots <= 2048);
+        }
+        assert_eq!(f32.caches.len(), 6);
+        cfg.recurrent_kv_cache_mode = "last_loop".into();
+        let last = DoryLayout::new(&cfg, 2048, KvFormat::F16).unwrap();
+        assert_eq!(last.caches.len(), 3);
+        assert!(bytes(&last) < bytes(&f16));
+        assert!(DoryLayout::new(&cfg, usize::MAX, KvFormat::F16).is_err());
+    }
 
     #[test]
     #[ignore = "requires a hardware Vulkan device with shaderFloat64"]
@@ -76,7 +122,7 @@ mod tests {
                 for cooperative in [false, true] {
                     let commands = TokenCommands::begin(context).unwrap();
                     if cooperative {
-                        let mut push = [0; 14];
+                        let mut push = [0; 17];
                         push[..4].copy_from_slice(&[
                             13,
                             0,
@@ -130,21 +176,151 @@ enum Layer {
     },
 }
 
+struct CacheRegion {
+    keys: ArenaRegion,
+    values: ArenaRegion,
+    slots: usize,
+}
+
+struct DoryLayout {
+    x: ArenaRegion,
+    q: ArenaRegion,
+    k: ArenaRegion,
+    v: ArenaRegion,
+    attn: ArenaRegion,
+    projection: ArenaRegion,
+    gate: ArenaRegion,
+    up: ArenaRegion,
+    logits: ArenaRegion,
+    q8k: ArenaRegion,
+    q8k_scales: ArenaRegion,
+    scores: ArenaRegion,
+    rope: ArenaRegion,
+    rope_sliding: ArenaRegion,
+    input_h: ArenaRegion,
+    state: ArenaRegion,
+    caches: Vec<CacheRegion>,
+    slots: Vec<Option<usize>>,
+    bytes: usize,
+    rows: usize,
+}
+
+impl DoryLayout {
+    fn new(cfg: &DoryConfig, capacity: usize, kv: KvFormat) -> Result<Self> {
+        let rows = capacity.min(crate::models::dory::PREFILL_BATCH);
+        let q = cfg
+            .n_head
+            .checked_mul(cfg.head_dim)
+            .ok_or(VulkanError::OutOfMemory)?;
+        let k = cfg
+            .n_head_kv
+            .checked_mul(cfg.head_dim)
+            .ok_or(VulkanError::OutOfMemory)?;
+        if rows == 0 || k % 2 != 0 {
+            return Err(VulkanError::UnsupportedShape(
+                "invalid Dory KV dimensions".into(),
+            ));
+        }
+        let max_in = cfg.n_ff.max(q).max(cfg.n_embd);
+        let mut bytes = 0usize;
+        let mut alloc = |dimensions: &[usize], element_bytes: usize| -> Result<ArenaRegion> {
+            let elements = dimensions
+                .iter()
+                .try_fold(1usize, |n, &d| n.checked_mul(d))
+                .ok_or(VulkanError::OutOfMemory)?;
+            let offset = bytes.checked_add(15).ok_or(VulkanError::OutOfMemory)? & !15;
+            let size = elements
+                .checked_mul(element_bytes)
+                .ok_or(VulkanError::OutOfMemory)?;
+            bytes = offset.checked_add(size).ok_or(VulkanError::OutOfMemory)?;
+            Ok(ArenaRegion { offset, size })
+        };
+        let x = alloc(&[rows, cfg.n_embd], 4)?;
+        let q = alloc(&[rows, q], 4)?;
+        let k_region = alloc(&[rows, k], 4)?;
+        let v = alloc(&[rows, k], 4)?;
+        let attn = alloc(&[rows, cfg.n_head, cfg.head_dim], 4)?;
+        let projection = alloc(&[rows, cfg.n_embd], 4)?;
+        let gate = alloc(&[rows, max_in], 4)?;
+        let up = alloc(&[rows, cfg.n_ff], 4)?;
+        let logits = alloc(&[cfg.vocab_size], 4)?;
+        let q8k = alloc(&[rows, max_in], 1)?;
+        let q8k_scales = alloc(&[rows, max_in.div_ceil(256)], 4)?;
+        let scores = alloc(&[cfg.n_head, capacity], 4)?;
+        let rope = alloc(&[rows, cfg.head_dim], 4)?;
+        let rope_sliding = alloc(&[rows, cfg.head_dim], 4)?;
+        let input_h = alloc(&[rows, cfg.n_embd], 4)?;
+        let state = alloc(&[rows, cfg.n_embd], 4)?;
+        let mut caches = Vec::new();
+        let mut slots = vec![None; cfg.n_layer];
+        let element_bytes = if matches!(kv, KvFormat::F16) { 2 } else { 4 };
+        for (layer, slot) in slots.iter_mut().enumerate() {
+            if !cfg.is_attention(layer) {
+                continue;
+            }
+            *slot = Some(caches.len());
+            let cache_slots = if cfg.attention_is_sliding(layer) {
+                capacity.min(cfg.sliding_window.saturating_add(rows - 1))
+            } else {
+                capacity
+            };
+            let elements = cache_slots.checked_mul(k).ok_or(VulkanError::OutOfMemory)?;
+            for _ in 0..if cfg.separate_loop_cache(layer) {
+                cfg.n_loops
+            } else {
+                1
+            } {
+                caches.push(CacheRegion {
+                    keys: alloc(&[elements], element_bytes)?,
+                    values: alloc(&[elements], element_bytes)?,
+                    slots: cache_slots,
+                });
+            }
+        }
+        Ok(Self {
+            x,
+            q,
+            k: k_region,
+            v,
+            attn,
+            projection,
+            gate,
+            up,
+            logits,
+            q8k,
+            q8k_scales,
+            scores,
+            rope,
+            rope_sliding,
+            input_h,
+            state,
+            caches,
+            slots,
+            bytes,
+            rows,
+        })
+    }
+
+    fn row(region: ArenaRegion, row: usize, width: usize) -> ArenaRegion {
+        ArenaRegion {
+            offset: region.offset + row * width * 4,
+            size: width * 4,
+        }
+    }
+}
+
 pub(crate) struct DoryVulkanSession {
     ops: Qwen3Ops<'static>,
     _buffers: UploadedBuffers,
     context: &'static VulkanContext,
-    layout: ArenaLayout,
-    input_h: ArenaRegion,
-    state: ArenaRegion,
-    rope_sliding: ArenaRegion,
+    layout: DoryLayout,
     layers: Vec<Layer>,
-    slots: Vec<Option<usize>>,
     output: Matrix,
     output_scale: OperatorBindings,
     graph_pipeline: usize,
     matmul_pipeline: usize,
     capacity: usize,
+    kv_format: KvFormat,
     pub(crate) failed: bool,
 }
 
@@ -178,10 +354,18 @@ fn matrix(ops: &mut Qwen3Ops<'_>, buffers: &mut UploadedBuffers, w: &Weight<'_>)
 }
 
 impl DoryVulkanSession {
+    pub(crate) fn kv_cache_bytes(&self) -> usize {
+        self.layout
+            .caches
+            .iter()
+            .map(|c| c.keys.size + c.values.size)
+            .sum()
+    }
     pub(crate) fn new(
         model: &DoryModel,
         context: &'static VulkanContext,
         capacity: usize,
+        kv_format: KvFormat,
     ) -> Result<Self> {
         if !context.shader_float64 {
             return Err(VulkanError::UnsupportedShape(
@@ -190,51 +374,8 @@ impl DoryVulkanSession {
             ));
         }
         let cfg = &model.config;
-        let mut slots = vec![None; cfg.n_layer];
-        let mut count = 0;
-        for (layer, slot) in slots.iter_mut().enumerate() {
-            if cfg.is_attention(layer) {
-                *slot = Some(count);
-                count += if cfg.in_recurrent_block(layer) {
-                    cfg.n_loops
-                } else {
-                    1
-                };
-            }
-        }
-        let layout = ArenaLayout::build_rows(
-            cfg.n_embd,
-            cfg.n_ff,
-            cfg.n_head,
-            cfg.n_head_kv,
-            cfg.head_dim,
-            cfg.vocab_size,
-            count,
-            capacity,
-            1,
-        )?;
-        let input_h = ArenaRegion {
-            offset: layout.total_size(),
-            size: cfg.n_embd * 4,
-        };
-        let state = ArenaRegion {
-            offset: input_h
-                .offset
-                .checked_add(input_h.size)
-                .ok_or(VulkanError::OutOfMemory)?,
-            size: cfg.n_embd * 4,
-        };
-        let rope_sliding = ArenaRegion {
-            offset: state
-                .offset
-                .checked_add(state.size)
-                .ok_or(VulkanError::OutOfMemory)?,
-            size: cfg.head_dim * 4,
-        };
-        let bytes = rope_sliding
-            .offset
-            .checked_add(rope_sliding.size)
-            .ok_or(VulkanError::OutOfMemory)?;
+        let layout = DoryLayout::new(cfg, capacity, kv_format)?;
+        let bytes = layout.bytes;
         if bytes / 4 > u32::MAX as usize
             || bytes as u64 > context.limits.max_storage_buffer_range as u64
         {
@@ -311,16 +452,13 @@ impl DoryVulkanSession {
             _buffers: buffers,
             context,
             layout,
-            input_h,
-            state,
-            rope_sliding,
             layers,
-            slots,
             output,
             output_scale,
             graph_pipeline,
             matmul_pipeline,
             capacity,
+            kv_format,
             failed: false,
         })
     }
@@ -336,12 +474,29 @@ impl DoryVulkanSession {
         push: [u32; 14],
         threads: usize,
     ) -> Result<()> {
+        self.graph_rows(commands, binding, push, threads, 1, [0; 3])
+    }
+
+    fn graph_rows(
+        &self,
+        commands: &TokenCommands<'_>,
+        binding: Option<OperatorBindings>,
+        push: [u32; 14],
+        threads: usize,
+        rows: usize,
+        strides: [usize; 3],
+    ) -> Result<()> {
+        let mut data = [0u32; 17];
+        data[..14].copy_from_slice(&push);
+        for (v, stride) in data[14..].iter_mut().zip(strides) {
+            *v = stride as u32;
+        }
         self.ops.record_custom(
             commands,
             self.graph_pipeline,
             binding,
-            &push,
-            [threads.div_ceil(64) as u32, 1, 1],
+            &data,
+            [threads.div_ceil(64) as u32, rows as u32, 1],
         )
     }
 
@@ -351,8 +506,9 @@ impl DoryVulkanSession {
         region: ArenaRegion,
         heads: usize,
         width: usize,
+        rows: usize,
     ) -> Result<()> {
-        self.graph(
+        self.graph_rows(
             commands,
             None,
             [
@@ -372,6 +528,8 @@ impl DoryVulkanSession {
                 0,
             ],
             heads * 64,
+            rows,
+            [heads * width, 0, 0],
         )
     }
 
@@ -382,8 +540,9 @@ impl DoryVulkanSession {
         b: Option<ArenaRegion>,
         c: ArenaRegion,
         n: usize,
+        rows: usize,
     ) -> Result<()> {
-        self.graph(
+        self.graph_rows(
             commands,
             None,
             [
@@ -403,6 +562,8 @@ impl DoryVulkanSession {
                 0,
             ],
             n,
+            rows,
+            [n, n, n],
         )
     }
 
@@ -411,16 +572,20 @@ impl DoryVulkanSession {
         commands: &TokenCommands<'_>,
         input: ArenaRegion,
         projections: &[(&Matrix, ArenaRegion)],
+        rows: usize,
     ) -> Result<()> {
+        let l = &self.layout;
+        let q8_stride = l.q8k.size / l.rows;
+        let scale_stride = l.q8k_scales.size / l.rows / 4;
         if let Some((w, _)) = projections.iter().find(|(w, _)| w.format != 30) {
-            self.graph(
+            self.graph_rows(
                 commands,
                 None,
                 [
                     13,
                     Self::word(input),
-                    Self::word(self.layout.q8k),
-                    Self::word(self.layout.q8k_scales),
+                    Self::word(l.q8k),
+                    Self::word(l.q8k_scales),
                     0,
                     0,
                     0,
@@ -433,24 +598,34 @@ impl DoryVulkanSession {
                     0,
                 ],
                 w.n_in / 4,
+                rows,
+                [w.n_in, q8_stride / 4, scale_stride],
             )?;
         }
         for &(w, output) in projections {
-            debug_assert_eq!(w.n_in * 4, input.size);
+            let stride = if output.offset == l.gate.offset {
+                l.gate.size / l.rows / 4
+            } else {
+                w.n_out
+            };
             self.ops.record_custom(
                 commands,
                 self.matmul_pipeline,
                 Some(w.binding),
                 &[
                     Self::word(input),
-                    Self::word(self.layout.q8k),
-                    Self::word(self.layout.q8k_scales),
+                    Self::word(l.q8k),
+                    Self::word(l.q8k_scales),
                     Self::word(output),
                     w.n_in as u32,
                     w.n_out as u32,
                     w.format,
+                    w.n_in as u32,
+                    (q8_stride / 4) as u32,
+                    scale_stride as u32,
+                    stride as u32,
                 ],
-                [w.n_out.div_ceil(8) as u32, 1, 1],
+                [w.n_out.div_ceil(8) as u32, rows as u32, 1],
             )?;
         }
         Ok(())
@@ -464,6 +639,7 @@ impl DoryVulkanSession {
         loop_idx: usize,
         position: usize,
         kv: KvFormat,
+        rows: usize,
     ) -> Result<()> {
         let l = &self.layout;
         let vectors = match &self.layers[layer] {
@@ -481,14 +657,15 @@ impl DoryVulkanSession {
                     commands,
                     l.x,
                     &[(q, l.q), (k, l.k), (v, l.v), (gate, l.gate)],
+                    rows,
                 )?;
                 let rope = if cfg.attention_is_sliding(layer) {
-                    self.rope_sliding
+                    l.rope_sliding
                 } else {
                     l.rope
                 };
                 for (r, n, h) in [(l.q, qn, cfg.n_head), (l.k, kn, cfg.n_head_kv)] {
-                    self.graph(
+                    self.graph_rows(
                         commands,
                         None,
                         [
@@ -508,11 +685,13 @@ impl DoryVulkanSession {
                             0,
                         ],
                         n / 2,
+                        rows,
+                        [n, cfg.head_dim, 0],
                     )?;
-                    self.norm(commands, r, h, cfg.head_dim)?;
+                    self.norm(commands, r, h, cfg.head_dim, rows)?;
                 }
                 let half = u32::from(matches!(kv, KvFormat::F16));
-                self.graph(
+                self.graph_rows(
                     commands,
                     Some(*vectors),
                     [
@@ -532,69 +711,73 @@ impl DoryVulkanSession {
                         half,
                     ],
                     qn,
+                    rows,
+                    [qn, 0, 0],
                 )?;
-                let slot = self.slots[layer].unwrap()
-                    + if cfg.in_recurrent_block(layer) {
+                let slot = l.slots[layer].unwrap()
+                    + if cfg.separate_loop_cache(layer) {
                         loop_idx
                     } else {
                         0
                     };
+                let cache = &l.caches[slot];
                 let window = if cfg.attention_is_sliding(layer) {
                     cfg.sliding_window.min(self.capacity)
                 } else {
                     self.capacity
                 };
-                let seq = (position + 1).min(window);
-                let cache = slot * self.capacity * kn;
-                let kb = Self::word(l.kv_k) + cache as u32;
-                let vb = Self::word(l.kv_v) + cache as u32;
-                let offset = ((position % window) * kn) as u32;
-                self.graph(
-                    commands,
-                    None,
-                    [
-                        5,
-                        Self::word(l.k),
-                        Self::word(l.v),
-                        kb + offset,
-                        kn as u32,
+                for row in 0..rows {
+                    let pos = position + row;
+                    let seq = (pos + 1).min(window);
+                    let divisor = if half != 0 { 2 } else { 1 };
+                    let offset = ((pos % cache.slots) * kn / divisor) as u32;
+                    self.graph(
+                        commands,
+                        None,
+                        [
+                            5,
+                            Self::word(l.k) + (row * kn) as u32,
+                            Self::word(l.v) + (row * kn) as u32,
+                            Self::word(cache.keys) + offset,
+                            kn as u32,
+                            0,
+                            Self::word(cache.values) + offset,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            half,
+                        ],
+                        kn / divisor,
+                    )?;
+                    let mut push = [
+                        6,
+                        Self::word(l.q) + (row * qn) as u32,
+                        Self::word(cache.keys),
+                        Self::word(l.scores),
+                        seq as u32,
+                        cfg.head_dim as u32,
+                        cfg.n_head as u32,
+                        cfg.n_head_kv as u32,
                         0,
-                        vb + offset,
+                        cache.slots as u32,
+                        ((pos + 1 - seq) % cache.slots) as u32,
                         0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
+                        (1.0 / (cfg.head_dim as f32).sqrt()).to_bits(),
                         half,
-                    ],
-                    kn,
-                )?;
-                let mut push = [
-                    6,
-                    Self::word(l.q),
-                    kb,
-                    Self::word(l.scores),
-                    seq as u32,
-                    cfg.head_dim as u32,
-                    cfg.n_head as u32,
-                    cfg.n_head_kv as u32,
-                    0,
-                    window as u32,
-                    ((position + 1 - seq) % window) as u32,
-                    0,
-                    (1.0 / (cfg.head_dim as f32).sqrt()).to_bits(),
-                    half,
-                ];
-                self.graph(commands, None, push, seq * cfg.n_head)?;
-                push[0] = 7;
-                push[1] = Self::word(l.scores);
-                self.graph(commands, None, push, cfg.n_head)?;
-                push[0] = 8;
-                push[2] = vb;
-                push[3] = Self::word(l.attn);
-                self.graph(commands, None, push, qn)?;
-                self.graph(
+                    ];
+                    self.graph(commands, None, push, seq * cfg.n_head)?;
+                    push[0] = 7;
+                    push[1] = Self::word(l.scores);
+                    self.graph(commands, None, push, cfg.n_head)?;
+                    push[0] = 8;
+                    push[2] = Self::word(cache.values);
+                    push[3] = Self::word(l.attn) + (row * qn) as u32;
+                    self.graph(commands, None, push, qn)?;
+                }
+                self.graph_rows(
                     commands,
                     Some(*vectors),
                     [
@@ -614,9 +797,11 @@ impl DoryVulkanSession {
                         0,
                     ],
                     qn,
+                    rows,
+                    [qn, l.gate.size / l.rows / 4, 0],
                 )?;
-                self.norm(commands, l.attn, 1, qn)?;
-                self.project(commands, l.attn, &[(out, l.projection)])?;
+                self.norm(commands, l.attn, 1, qn, rows)?;
+                self.project(commands, l.attn, &[(out, l.projection)], rows)?;
                 *vectors
             }
             Layer::Mlp {
@@ -625,8 +810,8 @@ impl DoryVulkanSession {
                 up,
                 down,
             } => {
-                self.project(commands, l.x, &[(gate, l.gate), (up, l.up)])?;
-                self.graph(
+                self.project(commands, l.x, &[(gate, l.gate), (up, l.up)], rows)?;
+                self.graph_rows(
                     commands,
                     Some(*vectors),
                     [
@@ -646,15 +831,17 @@ impl DoryVulkanSession {
                         0,
                     ],
                     cfg.n_ff,
+                    rows,
+                    [l.gate.size / l.rows / 4, cfg.n_ff, 0],
                 )?;
-                self.norm(commands, l.up, 1, cfg.n_ff)?;
-                self.project(commands, l.up, &[(down, l.projection)])?;
+                self.norm(commands, l.up, 1, cfg.n_ff, rows)?;
+                self.project(commands, l.up, &[(down, l.projection)], rows)?;
                 *vectors
             }
         };
-        self.norm(commands, l.x, 1, cfg.n_embd)?;
-        self.norm(commands, l.projection, 1, cfg.n_embd)?;
-        self.graph(
+        self.norm(commands, l.x, 1, cfg.n_embd, rows)?;
+        self.norm(commands, l.projection, 1, cfg.n_embd, rows)?;
+        self.graph_rows(
             commands,
             Some(vectors),
             [
@@ -674,8 +861,10 @@ impl DoryVulkanSession {
                 0,
             ],
             cfg.n_embd,
+            rows,
+            [cfg.n_embd, cfg.n_embd, 0],
         )?;
-        self.norm(commands, l.x, 1, cfg.n_embd)
+        self.norm(commands, l.x, 1, cfg.n_embd, rows)
     }
 
     pub(crate) fn prefill(
@@ -685,6 +874,11 @@ impl DoryVulkanSession {
         position: usize,
         kv: KvFormat,
     ) -> Result<Vec<f32>> {
+        if kv != self.kv_format {
+            return Err(VulkanError::UnsupportedShape(
+                "Dory KV storage format requires reset".into(),
+            ));
+        }
         if self.failed {
             return Err(VulkanError::UnsupportedShape(
                 "Dory GPU session requires reset after a failed submission".into(),
@@ -706,62 +900,78 @@ impl DoryVulkanSession {
     ) -> Result<Vec<f32>> {
         let cfg = &model.config;
         let l = &self.layout;
-        let mut embedding = vec![0.0; cfg.n_embd];
-        for (step, &token) in tokens.iter().enumerate() {
-            let pos = position + step;
-            model
-                .token_embedding
-                .embedding_lookup(token, &mut embedding);
-            self.ops.write_f32(l.x, &embedding)?;
-            crate::models::dory::trace("embd", None, pos, &embedding);
+        for (chunk_idx, chunk) in tokens.chunks(l.rows).enumerate() {
+            let pos = position + chunk_idx * l.rows;
+            let rows = chunk.len();
+            let mut embedding = vec![0.0; rows * cfg.n_embd];
+            for (row, (&token, h)) in chunk
+                .iter()
+                .zip(embedding.chunks_exact_mut(cfg.n_embd))
+                .enumerate()
+            {
+                model.token_embedding.embedding_lookup(token, h);
+                crate::models::dory::trace("embd", None, pos + row, h);
+            }
+            self.ops
+                .write_f32(DoryLayout::row(l.x, 0, rows * cfg.n_embd), &embedding)?;
             for (r, base) in [
                 (l.rope, cfg.rope_freq_base),
-                (self.rope_sliding, cfg.rope_freq_base_2),
+                (l.rope_sliding, cfg.rope_freq_base_2),
             ] {
-                let mut coefficients = vec![0.0; cfg.head_dim];
-                coefficients[..cfg.head_dim / 2].fill(1.0);
-                crate::ops::rope_neox_inplace_precise(&mut coefficients, pos, cfg.head_dim, base);
-                self.ops.write_f32(r, &coefficients)?;
+                let mut coefficients = vec![0.0; rows * cfg.head_dim];
+                for (row, c) in coefficients.chunks_exact_mut(cfg.head_dim).enumerate() {
+                    c[..cfg.head_dim / 2].fill(1.0);
+                    crate::ops::rope_neox_inplace_precise(c, pos + row, cfg.head_dim, base);
+                }
+                self.ops
+                    .write_f32(DoryLayout::row(r, 0, rows * cfg.head_dim), &coefficients)?;
             }
             let mut commands = TokenCommands::begin(self.context)?;
             for layer in 0..cfg.n_input_layers {
-                self.layer(&commands, cfg, layer, 0, pos, kv)?;
-                commands = self.checkpoint(commands, layer, pos)?;
+                self.layer(&commands, cfg, layer, 0, pos, kv, rows)?;
+                commands = self.checkpoint(commands, layer, pos, rows)?;
             }
-            self.copy_add(&commands, l.x, None, self.input_h, cfg.n_embd)?;
-            self.copy_add(&commands, l.x, None, self.state, cfg.n_embd)?;
+            self.copy_add(&commands, l.x, None, l.input_h, cfg.n_embd, rows)?;
+            self.copy_add(&commands, l.x, None, l.state, cfg.n_embd, rows)?;
             for loop_idx in 0..cfg.n_loops {
-                self.copy_add(&commands, self.state, Some(self.input_h), l.x, cfg.n_embd)?;
-                self.norm(&commands, l.x, 1, cfg.n_embd)?;
+                self.copy_add(&commands, l.state, Some(l.input_h), l.x, cfg.n_embd, rows)?;
+                self.norm(&commands, l.x, 1, cfg.n_embd, rows)?;
                 for layer in cfg.n_input_layers..cfg.n_input_layers + cfg.n_recurrent_layers {
-                    self.layer(&commands, cfg, layer, loop_idx, pos, kv)?;
+                    self.layer(&commands, cfg, layer, loop_idx, pos, kv, rows)?;
                     if layer + 1 == cfg.n_input_layers + cfg.n_recurrent_layers {
-                        self.norm(&commands, l.x, 1, cfg.n_embd)?;
+                        self.norm(&commands, l.x, 1, cfg.n_embd, rows)?;
                     }
-                    commands =
-                        self.checkpoint(commands, layer + loop_idx * cfg.n_recurrent_layers, pos)?;
+                    commands = self.checkpoint(
+                        commands,
+                        layer + loop_idx * cfg.n_recurrent_layers,
+                        pos,
+                        rows,
+                    )?;
                 }
-                self.copy_add(&commands, l.x, None, self.state, cfg.n_embd)?;
+                self.copy_add(&commands, l.x, None, l.state, cfg.n_embd, rows)?;
             }
             for layer in cfg.n_input_layers + cfg.n_recurrent_layers..cfg.n_layer {
-                self.layer(&commands, cfg, layer, 0, pos, kv)?;
+                self.layer(&commands, cfg, layer, 0, pos, kv, rows)?;
                 commands = self.checkpoint(
                     commands,
                     layer + (cfg.n_loops - 1) * cfg.n_recurrent_layers,
                     pos,
+                    rows,
                 )?;
             }
             commands.submit_and_wait()?;
         }
+        let final_row = (tokens.len() - 1) % l.rows;
+        let final_hidden = DoryLayout::row(l.x, final_row, cfg.n_embd);
         self.trace_region(
             "result_norm",
             None,
             position + tokens.len() - 1,
-            l.x,
+            final_hidden,
             cfg.n_embd,
         )?;
         let commands = TokenCommands::begin(self.context)?;
-        self.project(&commands, l.x, &[(&self.output, l.logits)])?;
+        self.project(&commands, final_hidden, &[(&self.output, l.logits)], 1)?;
         self.graph(
             &commands,
             Some(self.output_scale),
@@ -800,17 +1010,21 @@ impl DoryVulkanSession {
         commands: TokenCommands<'a>,
         layer: usize,
         position: usize,
+        rows: usize,
     ) -> Result<TokenCommands<'a>> {
         // Bound recordings even without tracing; long command buffers can be truncated by drivers.
-        if Self::tracing("l_out") || layer % 4 == 3 {
+        let trace = Self::tracing_step("l_out", position + rows - 1);
+        if trace || layer % 4 == 3 {
             commands.submit_and_wait()?;
-            self.trace_region(
-                "l_out",
-                Some(layer),
-                position,
-                self.layout.x,
-                self.input_h.size / 4,
-            )?;
+            if trace {
+                let width = self.layout.x.size / self.layout.rows / 4;
+                let mut values = vec![0.0; rows * width];
+                self.ops
+                    .read_f32_into(DoryLayout::row(self.layout.x, 0, values.len()), &mut values)?;
+                for (row, h) in values.chunks_exact(width).enumerate() {
+                    crate::models::dory::trace("l_out", Some(layer), position + row, h);
+                }
+            }
             TokenCommands::begin(self.context)
         } else {
             Ok(commands)
@@ -828,6 +1042,14 @@ impl DoryVulkanSession {
             false
         }
     }
+    fn tracing_step(name: &str, step: usize) -> bool {
+        Self::tracing(name)
+            && step
+                >= std::env::var("RMI_DORY_TRACE_FROM")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0)
+    }
     fn trace_region(
         &self,
         name: &str,
@@ -836,7 +1058,7 @@ impl DoryVulkanSession {
         r: ArenaRegion,
         n: usize,
     ) -> Result<()> {
-        if Self::tracing(name) {
+        if Self::tracing_step(name, position) {
             let mut v = vec![0.0; n];
             self.ops.read_f32_into(r, &mut v)?;
             crate::models::dory::trace(name, layer, position, &v);

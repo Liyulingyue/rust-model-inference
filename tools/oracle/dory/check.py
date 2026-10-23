@@ -47,12 +47,20 @@ def compare(oracle, rust, first_step=0):
         elif expected_tokens[name] != actual_tokens[name]:
             failures.append(f"{name}: oracle={expected_tokens[name]} rust={actual_tokens[name]}")
     steps = len(expected_tokens.get("prompt_ids", [])) + len(expected_tokens.get("generated_ids", []))
-    contract = [
-        (name, layer, step)
-        for step in range(first_step, steps)
-        for name, layer in [("embd", None)] + [("l_out", i) for i in range(192)]
-        + [("result_norm", None), ("result_output", None)]
-    ]
+    batches = expected_tokens.get("prefill_batches", [1] * steps)
+    if actual_tokens.get("prefill_batches", [1] * steps) != batches:
+        failures.append("prefill batch schedule differs")
+    if not batches or any(type(n) is not int or not 1 <= n <= 32 for n in batches) or sum(batches) != steps:
+        failures.append("invalid prefill batch schedule")
+        batches = []
+    contract = []
+    step = 0
+    for size in batches:
+        for name, layer in [("embd", None)] + [("l_out", i) for i in range(192)]:
+            contract.extend((name, layer, s) for s in range(max(first_step, step), step + size))
+        if step + size - 1 >= first_step:
+            contract.extend((name, None, step + size - 1) for name in ("result_norm", "result_output"))
+        step += size
     if not expected or list(expected) != contract or list(actual) != contract:
         failures.append("checkpoint names/layers/steps/order differ or trace is empty")
     for key, row in expected.items():

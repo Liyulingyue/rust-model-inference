@@ -14,7 +14,7 @@ use crate::core::tensor::{load_f32_tensor, BlockQ8K, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 use crate::ops::kernel::Weight;
-use crate::ops::{dot_f32_f64_acc, rope_neox_inplace_precise, sample_llama_cpp, softmax_inplace};
+use crate::ops::{rope_neox_inplace_precise, sample_llama_cpp, softmax_inplace};
 
 use super::config::DoryConfig;
 use super::weights::{load_layers, load_weight, DoryLayerWeights};
@@ -42,54 +42,86 @@ pub(crate) fn trace(name: &str, layer: Option<usize>, step: usize, values: &[f32
     let _ = (name, layer, step, values);
 }
 
-/// A cache is kept in F32 storage so the session stays simple; `KvFormat::F16`
-/// still applies the requested half precision round-trip at insertion time.
-/// The cache is an intentionally non-bitwise path, because the requested
-/// model is quantized and the F16 KV option itself discards mantissa bits.
+enum CacheStorage {
+    F32 { keys: Vec<f32>, values: Vec<f32> },
+    F16 { keys: Vec<f16>, values: Vec<f16> },
+}
+
 struct DoryCache {
-    keys: Vec<f32>,
-    values: Vec<f32>,
+    storage: CacheStorage,
     width: usize,
+    slots: usize,
     kv_format: KvFormat,
 }
 
 impl DoryCache {
     fn new(width: usize, kv_format: KvFormat) -> Self {
+        let storage = match kv_format {
+            KvFormat::F32 => CacheStorage::F32 {
+                keys: Vec::new(),
+                values: Vec::new(),
+            },
+            KvFormat::F16 => CacheStorage::F16 {
+                keys: Vec::new(),
+                values: Vec::new(),
+            },
+        };
         Self {
-            keys: Vec::new(),
-            values: Vec::new(),
+            storage,
             width,
+            slots: 0,
             kv_format,
         }
     }
 
-    fn push(&mut self, key: &[f32], value: &[f32], max_len: usize) {
+    fn write(&mut self, position: usize, key: &[f32], value: &[f32], slots: usize) {
         debug_assert_eq!(key.len(), self.width);
         debug_assert_eq!(value.len(), self.width);
-        match self.kv_format {
-            KvFormat::F32 => {
-                self.keys.extend_from_slice(key);
-                self.values.extend_from_slice(value);
+        self.slots = slots;
+        let offset = (position % slots) * self.width;
+        match &mut self.storage {
+            CacheStorage::F32 { keys, values } => {
+                keys.resize(keys.len().max(offset + self.width), 0.0);
+                values.resize(keys.len(), 0.0);
+                keys[offset..offset + self.width].copy_from_slice(key);
+                values[offset..offset + self.width].copy_from_slice(value);
             }
-            KvFormat::F16 => {
-                self.keys
-                    .extend(key.iter().map(|&v| f16::from_f32(v).to_f32()));
-                self.values
-                    .extend(value.iter().map(|&v| f16::from_f32(v).to_f32()));
+            CacheStorage::F16 { keys, values } => {
+                keys.resize(keys.len().max(offset + self.width), f16::ZERO);
+                values.resize(keys.len(), f16::ZERO);
+                for d in 0..self.width {
+                    keys[offset + d] = f16::from_f32(key[d]);
+                    values[offset + d] = f16::from_f32(value[d]);
+                }
             }
-        }
-        let len = self.keys.len() / self.width;
-        if len > max_len {
-            let drop = (len - max_len) * self.width;
-            self.keys.drain(..drop);
-            self.values.drain(..drop);
         }
     }
 
-    fn len(&self) -> usize {
-        self.keys.len() / self.width
+    fn key(&self, position: usize, d: usize) -> f32 {
+        let offset = (position % self.slots) * self.width + d;
+        match &self.storage {
+            CacheStorage::F32 { keys, .. } => keys[offset],
+            CacheStorage::F16 { keys, .. } => keys[offset].to_f32(),
+        }
+    }
+
+    fn value(&self, position: usize, d: usize) -> f32 {
+        let offset = (position % self.slots) * self.width + d;
+        match &self.storage {
+            CacheStorage::F32 { values, .. } => values[offset],
+            CacheStorage::F16 { values, .. } => values[offset].to_f32(),
+        }
+    }
+
+    fn storage_bytes(&self) -> usize {
+        match &self.storage {
+            CacheStorage::F32 { keys, values } => (keys.capacity() + values.capacity()) * 4,
+            CacheStorage::F16 { keys, values } => (keys.capacity() + values.capacity()) * 2,
+        }
     }
 }
+
+pub(crate) const PREFILL_BATCH: usize = 32;
 
 pub struct DoryScratch {
     pub q: Vec<f32>,
@@ -150,11 +182,6 @@ pub struct DoryModel {
 impl DoryModel {
     pub fn from_source(source: Arc<dyn TensorSource>, n_threads: usize) -> Result<Self, String> {
         let config = DoryConfig::from_source(source.as_ref())?;
-        if config.recurrent_kv_cache_mode != "per_loop" {
-            return Err(
-                "Dory GGUF uses recurrent_kv_cache_mode=last_loop, which is not supported by this session yet".into(),
-            );
-        }
         let layers = load_layers(source.as_ref(), &config)?;
         let token_embedding = load_weight(
             source.as_ref(),
@@ -198,7 +225,7 @@ impl DoryModel {
             if !self.config.is_attention(layer) {
                 continue;
             }
-            let loops = if self.config.in_recurrent_block(layer) {
+            let loops = if self.config.separate_loop_cache(layer) {
                 self.config.n_loops
             } else {
                 1
@@ -215,6 +242,7 @@ impl DoryModel {
             model_capacity: capacity.min(self.config.n_ctx).max(1),
             position: 0,
             model_source: self._source.clone(),
+            model_config: self.config.clone(),
             caches: cache_slots,
             layer_slots,
             scratch: DoryScratch::new(&self.config),
@@ -236,8 +264,12 @@ impl DoryModel {
         session.policy = policy;
         #[cfg(feature = "vulkan")]
         if let Some(context) = policy.context().map_err(|e| e.to_string())? {
-            match crate::vulkan::dory::DoryVulkanSession::new(self, context, session.model_capacity)
-            {
+            match crate::vulkan::dory::DoryVulkanSession::new(
+                self,
+                context,
+                session.model_capacity,
+                kv_format,
+            ) {
                 Ok(gpu) => session.gpu = Some(gpu),
                 Err(error) if policy == crate::compute::ComputePolicy::Auto => {
                     eprintln!("Dory Vulkan unavailable: {error}")
@@ -386,8 +418,11 @@ impl DoryModel {
                 *value = f16::from_f32(*value).to_f32();
             }
         }
-        cache.push(&scratch.k, &scratch.v, cache_len);
-        let seq = cache.len();
+        // Keep the entire chunk's prior history alive until all recurrent rewrites finish.
+        let slots = cache_len.saturating_add(PREFILL_BATCH - 1).min(cfg.n_ctx);
+        cache.write(position, &scratch.k, &scratch.v, slots);
+        let seq = (position + 1).min(cache_len);
+        let first = position + 1 - seq;
         scratch.attn_out.fill(0.0);
         let group = cfg.n_head / cfg.n_head_kv;
         let scale = 1.0 / (cfg.head_dim as f32).sqrt();
@@ -396,9 +431,10 @@ impl DoryModel {
             let q = &scratch.q[head * cfg.head_dim..(head + 1) * cfg.head_dim];
             let mut scores = vec![0.0; seq];
             for (j, score) in scores.iter_mut().enumerate() {
-                let off = j * cfg.n_head_kv * cfg.head_dim + kv_head * cfg.head_dim;
-                *score =
-                    dot_f32_f64_acc(q, &cache.keys[off..off + cfg.head_dim], cfg.head_dim) * scale;
+                *score = (0..cfg.head_dim)
+                    .map(|d| f64::from(q[d] * cache.key(first + j, kv_head * cfg.head_dim + d)))
+                    .sum::<f64>() as f32
+                    * scale;
             }
             softmax_inplace(&mut scores);
             if matches!(cache.kv_format, KvFormat::F16) {
@@ -413,8 +449,7 @@ impl DoryModel {
                     .iter()
                     .enumerate()
                     .map(|(j, &score)| {
-                        let off = j * cfg.n_head_kv * cfg.head_dim + kv_head * cfg.head_dim;
-                        f64::from(score * cache.values[off + d])
+                        f64::from(score * cache.value(first + j, kv_head * cfg.head_dim + d))
                     })
                     .sum::<f64>() as f32;
             }
@@ -502,7 +537,7 @@ impl DoryModel {
         let weights = &self.layers[layer];
         if self.config.is_attention(layer) {
             let base = session.layer_slots[layer].expect("attention cache slot");
-            let slot = if self.config.in_recurrent_block(layer) {
+            let slot = if self.config.separate_loop_cache(layer) {
                 base + loop_idx
             } else {
                 base
@@ -536,6 +571,9 @@ impl DoryModel {
         if !Arc::ptr_eq(&self._source, &session.model_source) {
             return Err("Dory session belongs to a different model".into());
         }
+        if self.config != session.model_config {
+            return Err("Dory model configuration changed; reset the session".into());
+        }
         if token_ids.is_empty() {
             return Err("Dory prefill: empty token sequence".into());
         }
@@ -565,63 +603,8 @@ impl DoryModel {
         session
             .policy
             .trace("dory", crate::compute::UsedBackend::Cpu, token_ids.len());
-        for &token in token_ids {
-            self.token_embedding
-                .embedding_lookup(token, &mut session.scratch.output);
-            let mut hidden = std::mem::take(&mut session.scratch.output);
-            trace("embd", None, session.position, &hidden);
-            for layer in 0..self.config.n_input_layers {
-                self.forward_layer(layer, &mut hidden, session.position, session, 0);
-                trace("l_out", Some(layer), session.position, &hidden);
-            }
-            let input_h = hidden.clone();
-            let mut state = input_h.clone();
-            for loop_idx in 0..self.config.n_loops {
-                hidden.copy_from_slice(&state);
-                for i in 0..self.config.n_embd {
-                    hidden[i] += input_h[i];
-                }
-                Self::unit_norm(&mut hidden);
-                for layer in self.config.n_input_layers
-                    ..self.config.n_input_layers + self.config.n_recurrent_layers
-                {
-                    self.forward_layer(layer, &mut hidden, session.position, session, loop_idx);
-                    if layer + 1 < self.config.n_input_layers + self.config.n_recurrent_layers {
-                        trace(
-                            "l_out",
-                            Some(layer + loop_idx * self.config.n_recurrent_layers),
-                            session.position,
-                            &hidden,
-                        );
-                    }
-                }
-                state = hidden.clone();
-                Self::unit_norm(&mut state);
-                trace(
-                    "l_out",
-                    Some(
-                        self.config.n_input_layers
-                            + (loop_idx + 1) * self.config.n_recurrent_layers
-                            - 1,
-                    ),
-                    session.position,
-                    &state,
-                );
-            }
-            hidden.copy_from_slice(&state);
-            for layer in
-                self.config.n_input_layers + self.config.n_recurrent_layers..self.config.n_layer
-            {
-                self.forward_layer(layer, &mut hidden, session.position, session, 0);
-                trace(
-                    "l_out",
-                    Some(layer + (self.config.n_loops - 1) * self.config.n_recurrent_layers),
-                    session.position,
-                    &hidden,
-                );
-            }
-            session.scratch.output = hidden;
-            session.position += 1;
+        for tokens in token_ids.chunks(PREFILL_BATCH) {
+            self.prefill_chunk(tokens, session);
         }
         trace(
             "result_norm",
@@ -648,12 +631,70 @@ impl DoryModel {
         );
         Ok(session.scratch.logits.clone())
     }
+
+    fn prefill_chunk(&self, tokens: &[u32], session: &mut DorySession) {
+        let cfg = &self.config;
+        let position = session.position;
+        let mut hidden: Vec<Vec<f32>> = tokens
+            .iter()
+            .enumerate()
+            .map(|(row, &token)| {
+                let mut h = vec![0.0; cfg.n_embd];
+                self.token_embedding.embedding_lookup(token, &mut h);
+                trace("embd", None, position + row, &h);
+                h
+            })
+            .collect();
+        for layer in 0..cfg.n_input_layers {
+            for (row, h) in hidden.iter_mut().enumerate() {
+                self.forward_layer(layer, h, position + row, session, 0);
+                trace("l_out", Some(layer), position + row, h);
+            }
+        }
+        let input_h = hidden.clone();
+        for loop_idx in 0..cfg.n_loops {
+            for (h, input) in hidden.iter_mut().zip(&input_h) {
+                for (v, &x) in h.iter_mut().zip(input) {
+                    *v += x;
+                }
+                Self::unit_norm(h);
+            }
+            for layer in cfg.n_input_layers..cfg.n_input_layers + cfg.n_recurrent_layers {
+                for (row, h) in hidden.iter_mut().enumerate() {
+                    self.forward_layer(layer, h, position + row, session, loop_idx);
+                    if layer + 1 == cfg.n_input_layers + cfg.n_recurrent_layers {
+                        Self::unit_norm(h);
+                    }
+                    trace(
+                        "l_out",
+                        Some(layer + loop_idx * cfg.n_recurrent_layers),
+                        position + row,
+                        h,
+                    );
+                }
+            }
+        }
+        for layer in cfg.n_input_layers + cfg.n_recurrent_layers..cfg.n_layer {
+            for (row, h) in hidden.iter_mut().enumerate() {
+                self.forward_layer(layer, h, position + row, session, 0);
+                trace(
+                    "l_out",
+                    Some(layer + (cfg.n_loops - 1) * cfg.n_recurrent_layers),
+                    position + row,
+                    h,
+                );
+            }
+        }
+        session.scratch.output = hidden.pop().unwrap();
+        session.position += tokens.len();
+    }
 }
 
 pub struct DorySession {
     model_capacity: usize,
     position: usize,
     model_source: Arc<dyn TensorSource>,
+    model_config: DoryConfig,
     caches: Vec<DoryCache>,
     layer_slots: Vec<Option<usize>>,
     scratch: DoryScratch,
@@ -664,17 +705,29 @@ pub struct DorySession {
 }
 
 impl DorySession {
-    pub fn reset(&mut self, model: &DoryModel, kv_format: KvFormat) {
+    /// Bytes reserved for K and V, excluding weights and forward scratch.
+    pub fn kv_cache_bytes(&self) -> usize {
         #[cfg(feature = "vulkan")]
-        if let Some(gpu) = &mut self.gpu {
-            gpu.failed = false;
-            self.position = 0;
-            self.kv_format = kv_format;
-            return;
+        if let Some(gpu) = &self.gpu {
+            return gpu.kv_cache_bytes();
         }
-        let policy = self.policy;
-        *self = model.new_session(self.model_capacity, kv_format);
-        self.policy = policy;
+        self.caches.iter().map(DoryCache::storage_bytes).sum()
+    }
+
+    pub fn reset(&mut self, model: &DoryModel, kv_format: KvFormat) -> Result<(), String> {
+        #[cfg(feature = "vulkan")]
+        if self.kv_format == kv_format
+            && self.model_config == model.config
+            && Arc::ptr_eq(&self.model_source, &model._source)
+        {
+            if let Some(gpu) = &mut self.gpu {
+                gpu.failed = false;
+                self.position = 0;
+                return Ok(());
+            }
+        }
+        *self = model.new_session_with_compute(self.model_capacity, kv_format, self.policy)?;
+        Ok(())
     }
 }
 
@@ -791,7 +844,34 @@ pub fn run_forward_logits_dory(
 
 #[cfg(test)]
 mod tests {
-    use super::DoryModel;
+    use super::*;
+
+    #[test]
+    fn half_cache_is_packed_and_rewrites_current_position() {
+        let mut cache = DoryCache::new(4, KvFormat::F16);
+        cache.write(0, &[1.001; 4], &[2.001; 4], 3);
+        cache.write(1, &[3.001; 4], &[4.001; 4], 3);
+        cache.write(1, &[5.001; 4], &[6.001; 4], 3);
+        assert_eq!(cache.storage_bytes(), 2 * 2 * 4 * 2);
+        assert_eq!(cache.key(0, 0), f16::from_f32(1.001).to_f32());
+        assert_eq!(cache.key(1, 0), f16::from_f32(5.001).to_f32());
+        assert_eq!(cache.value(1, 0), f16::from_f32(6.001).to_f32());
+    }
+
+    #[test]
+    fn sliding_cache_preserves_history_while_replaying_a_chunk() {
+        let mut cache = DoryCache::new(1, KvFormat::F32);
+        for p in 0..6 {
+            cache.write(p, &[p as f32], &[p as f32], 6);
+        }
+        for p in 4..6 {
+            cache.write(p, &[100.0 + p as f32], &[100.0 + p as f32], 6);
+            assert_eq!(cache.key(p - 3, 0), (p - 3) as f32);
+        }
+        cache.write(6, &[106.0], &[106.0], 6);
+        assert_eq!(cache.key(6, 0), 106.0);
+        assert_eq!(cache.key(3, 0), 3.0);
+    }
 
     #[test]
     fn unit_norm_is_l2_not_rms() {

@@ -4,7 +4,7 @@ mod config;
 mod forward;
 pub(crate) mod weights;
 #[cfg(feature = "vulkan")]
-pub(crate) use forward::trace;
+pub(crate) use forward::{trace, PREFILL_BATCH};
 
 pub use config::DoryConfig;
 pub use forward::{run_forward_logits_dory, run_inference, DoryModel, DorySession};

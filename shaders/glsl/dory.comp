@@ -8,6 +8,7 @@ layout(push_constant) uniform PC {
     uint op; uint a; uint b; uint c; uint n; uint width;
     uint p0; uint p1; uint p2; uint p3; uint p4; uint p5;
     float factor; uint half_kv;
+    uint stride_a; uint stride_b; uint stride_c;
 } pc;
 #include "exp_f64.glsl"
 #include "f16_rounding.glsl"
@@ -19,18 +20,27 @@ float half_round(float v) { return round_f16_rte(v); }
 uint cache_index(uint j, uint head, uint d) {
     return ((pc.p4 + j) % pc.p3) * pc.p1 * pc.width + head * pc.width + d;
 }
+float cache_get(uint base, uint i) {
+    if (pc.half_kv == 0u) return get(base + i);
+    vec2 pair = unpackHalf2x16(arena.data[base + i / 2u]);
+    return (i & 1u) == 0u ? pair.x : pair.y;
+}
 shared double norm_sums[64];
 shared float norm_scale;
 shared float quant_max[64];
 void main() {
     uint i = gl_GlobalInvocationID.x;
+    uint row = gl_WorkGroupID.y;
+    uint a = pc.a + row * pc.stride_a;
+    uint b = pc.b + row * pc.stride_b;
+    uint c = pc.c + row * pc.stride_c;
     if (pc.op == 13u) {
         uint lane = gl_LocalInvocationID.x;
         uint block = gl_WorkGroupID.x;
         uint base = block * 256u + lane * 4u;
         float maximum = 0.0;
         for (uint j = 0u; j < 4u; ++j) {
-            float v = get(pc.a + base + j);
+            float v = get(a + base + j);
             if (abs(v) > abs(maximum)) maximum = v;
         }
         quant_max[lane] = maximum;
@@ -41,20 +51,20 @@ void main() {
             for (uint j = 0u; j < 64u; ++j)
                 if (abs(quant_max[j]) > abs(maximum)) maximum = quant_max[j];
             norm_scale = maximum == 0.0 ? 0.0 : divide_finite_normal(-127.0, maximum);
-            put(pc.c + block, maximum == 0.0 ? 0.0 : divide_finite_normal(1.0, norm_scale));
+            put(c + block, maximum == 0.0 ? 0.0 : divide_finite_normal(1.0, norm_scale));
         }
         barrier();
         uint packed = 0u;
         for (uint j = 0u; j < 4u; ++j) {
-            precise float scaled = norm_scale * get(pc.a + base + j);
+            precise float scaled = norm_scale * get(a + base + j);
             int q = int((floatBitsToUint(scaled + 12582912.0) & 0x007fffffu) - 0x00400000u);
             packed |= uint(clamp(q, -127, 127) & 255) << (j * 8u);
         }
-        arena.data[pc.b + block * 64u + lane] = packed;
+        arena.data[b + block * 64u + lane] = packed;
     } else if (pc.op == 0u) {
         uint head = gl_WorkGroupID.x, lane = gl_LocalInvocationID.x;
         if (head >= pc.n) return;
-        uint base = pc.a + head * pc.width;
+        uint base = a + head * pc.width;
         precise double sum = 0.0lf;
         for (uint d = lane; d < pc.width; d += 64u) {
             precise float square = get(base + d) * get(base + d);
@@ -76,42 +86,49 @@ void main() {
         }
     } else if (pc.op == 1u || pc.op == 2u) {
         if (i >= pc.n) return;
-        precise float v = get(pc.a + i);
-        if (pc.op == 2u) v += get(pc.b + i);
-        put(pc.c + i, v);
+        precise float v = get(a + i);
+        if (pc.op == 2u) v += get(b + i);
+        put(c + i, v);
     } else if (pc.op == 3u) {
         if (i >= pc.n / 2u) return;
         uint d = i % (pc.width / 2u);
-        uint a = pc.a + (i / (pc.width / 2u)) * pc.width + d;
-        float cs = get(pc.b + d), sn = get(pc.b + pc.width / 2u + d);
-        float x = get(a), y = get(a + pc.width / 2u);
+        uint rotated = a + (i / (pc.width / 2u)) * pc.width + d;
+        float cs = get(b + d), sn = get(b + pc.width / 2u + d);
+        float x = get(rotated), y = get(rotated + pc.width / 2u);
         precise float xr = x * cs - y * sn;
         precise float yr = x * sn + y * cs;
-        put(a, xr); put(a + pc.width / 2u, yr);
+        put(rotated, xr); put(rotated + pc.width / 2u, yr);
     } else if (pc.op == 4u) {
         if (i >= pc.n) return;
         precise float scale = weights.data[pc.p5 + i] * pc.factor;
-        precise float v = get(pc.a + i) * (scale * scale);
-        put(pc.a + i, pc.half_kv != 0u ? half_round(v) : v);
+        precise float v = get(a + i) * (scale * scale);
+        put(a + i, pc.half_kv != 0u ? half_round(v) : v);
     } else if (pc.op == 5u) {
-        if (i >= pc.n) return;
-        float k = get(pc.a + i), v = get(pc.b + i);
-        put(pc.c + i, pc.half_kv != 0u ? half_round(k) : k);
-        put(pc.p0 + i, pc.half_kv != 0u ? half_round(v) : v);
+        if (pc.half_kv != 0u) {
+            if (i >= pc.n / 2u) return;
+            arena.data[c + i] = f32_to_f16_rte(get(a + i * 2u)) |
+                (f32_to_f16_rte(get(a + i * 2u + 1u)) << 16u);
+            arena.data[pc.p0 + i] = f32_to_f16_rte(get(b + i * 2u)) |
+                (f32_to_f16_rte(get(b + i * 2u + 1u)) << 16u);
+        } else {
+            if (i >= pc.n) return;
+            put(c + i, get(a + i));
+            put(pc.p0 + i, get(b + i));
+        }
     } else if (pc.op == 6u) {
         if (i >= pc.n * pc.p0) return;
         uint head = i / pc.n, j = i % pc.n;
         uint kh = head / (pc.p0 / pc.p1);
         precise double sum = 0.0lf;
         for (uint d = 0u; d < pc.width; ++d) {
-            precise float term = get(pc.a + head * pc.width + d) * get(pc.b + cache_index(j, kh, d));
+            precise float term = get(a + head * pc.width + d) * cache_get(b, cache_index(j, kh, d));
             sum += double(term);
         }
         precise float result = float(sum) * pc.factor;
-        put(pc.c + i, result);
+        put(c + i, result);
     } else if (pc.op == 7u) {
         if (i >= pc.p0) return;
-        uint base = pc.a + i * pc.n;
+        uint base = a + i * pc.n;
         float mx = get(base);
         for (uint j = 1u; j < pc.n; ++j) mx = max(mx, get(base + j));
         precise double sum = 0.0lf;
@@ -130,32 +147,32 @@ void main() {
         uint kh = head / (pc.p0 / pc.p1);
         precise double sum = 0.0lf;
         for (uint j = 0u; j < pc.n; ++j) {
-            precise float term = get(pc.a + head * pc.n + j) * get(pc.b + cache_index(j, kh, d));
+            precise float term = get(a + head * pc.n + j) * cache_get(b, cache_index(j, kh, d));
             sum += double(term);
         }
-        put(pc.c + i, float(sum));
+        put(c + i, float(sum));
     } else if (pc.op == 9u) {
         if (i >= pc.n) return;
         precise float scale = weights.data[pc.p5 + i] * pc.factor;
-        precise float exponent = -get(pc.b + i) * (scale * scale);
+        precise float exponent = -get(b + i) * (scale * scale);
         precise float gate = divide_finite_normal(1.0, 1.0 + exp_f64(exponent));
-        precise float v = get(pc.a + i) * gate;
-        put(pc.a + i, v);
+        precise float v = get(a + i) * gate;
+        put(a + i, v);
     } else if (pc.op == 10u) {
         if (i >= pc.n) return;
-        precise float gate = get(pc.a + i) * (weights.data[pc.p5 + i] * pc.factor);
-        precise float up = get(pc.b + i) * (weights.data[pc.p5 + pc.n + i] * pc.factor);
+        precise float gate = get(a + i) * (weights.data[pc.p5 + i] * pc.factor);
+        precise float up = get(b + i) * (weights.data[pc.p5 + pc.n + i] * pc.factor);
         precise float activation = divide_finite_normal(gate, 1.0 + exp_f64(-gate));
         precise float v = activation * up;
-        put(pc.b + i, v);
+        put(b + i, v);
     } else if (pc.op == 11u) {
         if (i >= pc.n) return;
-        precise float a = get(pc.a + i), b = get(pc.b + i);
-        precise float v = a + abs(weights.data[i]) * (b - a);
-        put(pc.a + i, v);
+        precise float x = get(a + i), y = get(b + i);
+        precise float v = x + abs(weights.data[i]) * (y - x);
+        put(a + i, v);
     } else if (pc.op == 12u) {
         if (i >= pc.n) return;
-        precise float v = get(pc.a + i) * weights.data[i];
-        put(pc.a + i, v);
+        precise float v = get(a + i) * weights.data[i];
+        put(a + i, v);
     }
 }

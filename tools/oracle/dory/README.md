@@ -1,4 +1,4 @@
-# Dory Q5_K_M CPU reference replay
+# Dory CPU and Vulkan reference replay
 
 Reference: [NVIDIA Dory llama.cpp fork](https://github.com/brianchmielNV/llama.cpp),
 commit `98a74c97ea09ac72f6ceda1559808fc0a2f447ce`. The build script clones the
@@ -45,17 +45,22 @@ RMI_SCALAR=1 cargo test --profile release-fast --test dory_q5_k_m \
   dory_q5_prefill_chunking_and_reset -- --ignored --exact
 ```
 
+Set `RMI_DORY_BATCH=1..32` and `RMI_DORY_CACHE_MODE=per_loop|last_loop`
+identically for the Oracle and Rust. The defaults are batch 1 and the model
+metadata mode. `last_loop` keeps older tokens from the final loop and replaces
+only the current chunk; its results depend on the chunk schedule. Comparing
+different schedules in that mode is not a valid alignment check.
+
 Use a fresh `case_dir` for every Rust replay: the shared trace writer appends
 records. Set `RMI_DORY_KV=f16` to check half-precision KV. The harness uses raw
 text with `add_special=true`, `parse_special=true`, CPU attention without flash
 attention, and greedy sampling. It evaluates every generated token as well.
 
-For an optional full-size sliding-window replay, write `"hello " * 1025` into the prompt file,
-set `RMI_DORY_N_PREDICT=2`, and set `RMI_DORY_TRACE_FROM=1022` for **both**
-executables. Pass `--first-step 1022` to the checker. The prefix still executes
-in full; Rust prefills it in chunks of 32. Positions 1022–1027 capture both
-sides of the SWA boundary and two continuation tokens. This expensive full-size
-case is not included in the accepted results.
+For a full-size sliding-window replay, write `" a" * 1025` into the prompt
+file, set `RMI_DORY_BATCH=32`, `RMI_DORY_N_PREDICT=2` and
+`RMI_DORY_TRACE_FROM=1022` for both executables. Pass `--first-step 1022` to
+the checker. The entire prefix executes before the recorded boundary and
+continuation. Use `" a" * 4095` and first step 4094 for a 4K replay.
 
 For the short boundary regression, use `Hello`, eight generated tokens, and
 `RMI_DORY_TEST_SWA=2` for both executables, without `RMI_DORY_TRACE_FROM`.
@@ -166,8 +171,9 @@ Dory now has a dedicated Vulkan session selected by `--compute vulkan` or
 `--gpu` (Auto). Projection weights upload once; normalized loop state, all
 per-loop KV slots, RoPE application, attention, gates, MLP, residuals and output
 scaling execute on the device. Embedding lookup and precise RoPE coefficient
-generation remain on the host. Prefill evaluates tokens sequentially; reset
-reuses uploaded weights and arena allocations.
+generation remain on the host. Prefill executes at most 32 rows per chunk in
+layer order, with causal attention for each row. Reset with the same model, configuration
+and KV format reuses uploaded weights and arena allocations.
 
 The initial device contract requires `shaderFloat64`. It covers the tested
 Q5_K_M artifact's Q5_K/Q6_K/BF16 projections with F32 or F16 KV. Unsupported
@@ -175,8 +181,16 @@ formats, insufficient buffer range or missing FP64 reject forced Vulkan;
 Auto may select CPU during initialization. An execution failure invalidates
 the GPU session until reset and never silently switches its KV to CPU.
 Context capacity is also bounded by the device's storage-buffer range.
-As in the CPU session, F16 KV is rounded to half precision but stored in F32
-slots; it currently saves no cache memory.
+CPU F16 caches use `Vec<f16>`; Vulkan packs two half values per 32-bit word.
+K/V regions occupy half the F32 bytes. Scratch and weights retain their
+existing formats, so total device allocation does not halve. SWA rings keep
+up to `window + 31` slots to preserve earlier rows through recurrent rewrites.
+`per_loop` uses separate recurrent slots; `last_loop` shares them.
+`DorySession::kv_cache_bytes()` reports reserved cache bytes, excluding scratch
+and weights. `reset` now returns `Result` so a KV-format change can propagate
+allocation or device errors without replacing the old session on failure.
+Changing model configuration requires reset; it rebuilds the matching cache
+layout instead of reusing a session created for a different KV mode.
 
 The GPU follows reference Q5/Q6 accumulation and BF16 input rounding. It uses
 the existing signed Q8_K quantizer, F16 ties-to-even conversion and normalization
@@ -322,10 +336,8 @@ RMI_DORY_Q5_MODEL="$RMI_DORY_Q5_MODEL" \
   dory_q5_vulkan_executes_and_matches_cpu -- --ignored --exact --nocapture
 ```
 
-Full 1024-token SWA eviction, the 262144-token context, other GGUF formats,
-other GPU/driver combinations and full-repository tests remain unverified.
-The shared operator suite's unrelated convolution/SiLU one-ULP failure above
-has not been relaxed or counted as passing.
+Latest coverage and limits are recorded in the completion validation below.
+Historical operator failures above have not been relaxed or counted as passing.
 
 ## Acceptance
 
@@ -348,8 +360,10 @@ contract instead of offloading these projections. This trades x86 SIMD dot
 throughput for stability; performance has not been benchmarked.
 
 The checker requires exact prompt/generated token IDs, checkpoint order,
-virtual layer/step indices, shapes and counts. Every traced token has 195
-checkpoints: `embd`, 192 `l_out`, `result_norm`, and `result_output`. Lossless
+virtual layer/step indices, shapes and counts. Each row has `embd` and 192
+`l_out` records; only the last row of each prefill call has `result_norm`
+and `result_output`. Batch 1 therefore has 195 checkpoints per token.
+The exact `prefill_batches` record fixes the layer-major trace schedule. Lossless
 embedding decode is compared as raw bytes. Quantized/BF16 projections,
 normalization, RoPE, softmax, gates and F16 KV use numerical gates:
 
@@ -360,7 +374,75 @@ Both bounds were fixed before investigating differences. Missing, duplicated,
 empty, non-finite or truncated checkpoints fail. This is numerical acceptance
 of reduced-precision computation, not a claim of end-to-end bitwise equality.
 
-The CPU and resident Vulkan replays cover this Q5_K_M artifact with `per_loop`
-KV, within the device and arithmetic scope recorded above;
-other weight quantizations, `last_loop` KV, the actual 1024-token SWA boundary,
-the full 262144-token context and chat-template generation are outside this validation.
+The full 262144-token context, chat-template generation and other GPU/driver
+combinations remain outside this validation. The available GPU is RADV NAVI31;
+no additional hardware was available.
+
+## Batched prefill, packed KV and last-loop completion
+
+The completion pass implements at most 32 rows per prefill chunk on CPU and
+Vulkan. Vulkan dispatches projections, quantization, norms, RoPE and residuals
+across rows; causal score/softmax/value operations consume each row in order.
+CPU rows reuse the existing projection kernels in layer order. Calls longer
+than 32 tokens split internally. `last_loop` uses shared recurrent KV and
+retains final-loop history from older chunks, matching the pinned Oracle.
+
+The official NVIDIA GGUF repository at revision
+`0963c8000791e77b2b1b49aa387d92a6da9988d6` lists only Q5_K_M. Additional
+quantization checks use a Q6_K test artifact produced by the pinned
+`llama-quantize --allow-requantize` from that file: 3,270,160,544 bytes,
+SHA-256 `14ecbbda6221dd89e5239ac8c9ff65047c7aa0baf34aaba0442b96307a99617a`,
+with 290 Q6_K and 217 BF16 tensors. This tests the Q6 execution path; it
+does not validate official native Q6 weights or claim improved model quality.
+
+The hardware regression checks both modes and both KV formats, a 35-token
+prompt split 32+3, an internally split call, reset, KV-format switching and
+actual half-size GPU cache regions:
+
+```sh
+env -u RMI_PARITY_TRACE -u RMI_SCALAR \
+  RMI_DORY_Q5_MODEL="$RMI_DORY_Q5_MODEL" \
+  VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.json \
+  cargo test --locked --profile release-fast --features vulkan --test dory_q5_k_m \
+  dory_batched_modes_and_packed_kv -- --ignored --exact --nocapture
+```
+
+`gpu_prefill_bench.rs` compares the same 64 token IDs with batch 1 and 32,
+excluding initialization and one warmup per shape. Six measured calls alternate
+the shapes, assert finite/numerically consistent logits and zero static
+uploads, and record submissions and cache bytes. Use the same manual linking
+command as `gpu_bench.rs` above with this source and its own output binary.
+The input artifact must use `per_loop`, since that mode permits comparisons
+between chunk schedules.
+
+Same-host Linux GPU / strict-Oracle boundary replays use the original
+1024-token window and two generated tokens, with batch 32. The unrecorded
+prefix executes in full before tracing the listed positions:
+
+| KV | Mode | Prompt tokens | First traced position | Checkpoints | Max relative L2 |
+| --- | --- | --- | --- | --- | --- |
+| F32 | per_loop | 1057 | 1016 | 8309 | 0 |
+| F16 | per_loop | 1025 | 1022 | 973 | 0 |
+| F16 | last_loop | 1057 | 1054 | 973 | 0 |
+
+The macOS CPU / macOS strict-Oracle F16 `per_loop` replay also passes
+973 checkpoints at positions 1022 onward. These are numerical results under
+the unchanged gates; token IDs, schedule, graph structure and embeddings use
+the exact checks described above.
+
+At capacity 64 the GPU K/V regions are 50,331,648 bytes for F32 and 25,165,824
+for F16. Batch 32 reduces submissions from 3456 to 108 for this prompt, but
+did not improve wall time in the shared-device measurements: F32 medians
+were 31.904s / 39.385s for batch 1 / 32; F16 was 38.807s / 39.302s. A trial
+that submitted every batched layer was slower and was discarded. This is
+functional batching and a memory saving, with no measured batching speedup.
+
+The completion report keeps native-SIMD and cross-platform diagnostics
+separate from same-platform strict-Oracle acceptance. A 64-token Linux GPU
+replay passes against the Linux strict Oracle with zero observed error, but
+fails against the macOS strict Oracle (maximum relative L2 4.68%). The macOS
+Oracle comparisons at 1025 and 1057 prompt tokens also fail (5.18% and 5.37%).
+A native-SIMD Linux Oracle comparison fails at 8.31%. The fixed scalar build
+and its platform are part of the acceptance contract; cross-platform or
+native-SIMD agreement is not established. None of these failures is counted
+as passing and neither 1% gate has been relaxed.

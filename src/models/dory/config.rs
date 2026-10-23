@@ -2,7 +2,7 @@
 
 use crate::core::tensor::{MetaValue, TensorSource};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DoryConfig {
     pub n_embd: usize,
     pub n_layer: usize,
@@ -214,6 +214,10 @@ impl DoryConfig {
         self.attention_sliding[layer / 2]
     }
 
+    pub(crate) fn separate_loop_cache(&self, layer: usize) -> bool {
+        self.in_recurrent_block(layer) && self.recurrent_kv_cache_mode == "per_loop"
+    }
+
     pub fn in_recurrent_block(&self, layer: usize) -> bool {
         (self.n_input_layers..self.n_input_layers + self.n_recurrent_layers).contains(&layer)
     }
@@ -338,6 +342,21 @@ mod tests {
         assert!(DoryConfig::from_source(&source)
             .unwrap_err()
             .contains("layer_pattern"));
+    }
+
+    #[test]
+    fn last_loop_shares_only_recurrent_cache_slots() {
+        let mut source = source();
+        let per = DoryConfig::from_source(&source).unwrap();
+        assert!(per.separate_loop_cache(2));
+        assert!(!per.separate_loop_cache(0));
+        source.metadata.insert(
+            "dory.recurrent_kv_cache_mode".into(),
+            MetaValue::String("last_loop".into()),
+        );
+        let last = DoryConfig::from_source(&source).unwrap();
+        assert!(!last.separate_loop_cache(2));
+        assert!(!last.separate_loop_cache(0));
     }
 
     #[test]

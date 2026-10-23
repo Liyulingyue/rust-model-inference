@@ -30,7 +30,7 @@ fn main() {
     let tokens = [22177, 1897, 1429, 22177, 5325, 1897, 1429, 22177, 5325];
     let expected = [1897, 1429, 22177, 5325, 1897, 1429, 22177, 5325];
     for round in 0..4 {
-        session.reset(&model, kv);
+        session.reset(&model, kv).unwrap();
         let before = context.compute_stats();
         let mut seconds = Vec::new();
         for (step, &token) in tokens.iter().enumerate() {

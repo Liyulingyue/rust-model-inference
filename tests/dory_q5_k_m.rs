@@ -102,6 +102,15 @@ fn dory_q5_reference_trace() {
         model.config.sliding_window = window.parse().unwrap();
         assert!(model.config.sliding_window > 0);
     }
+    if let Ok(mode) = std::env::var("RMI_DORY_CACHE_MODE") {
+        assert!(mode == "per_loop" || mode == "last_loop");
+        model.config.recurrent_kv_cache_mode = mode;
+    }
+    let batch: usize = std::env::var("RMI_DORY_BATCH")
+        .unwrap_or_else(|_| "1".into())
+        .parse()
+        .unwrap();
+    assert!((1..=32).contains(&batch));
     let policy = if std::env::var("RMI_DORY_COMPUTE").as_deref() == Ok("vulkan") {
         rust_model_inference::compute::ComputePolicy::Vulkan
     } else {
@@ -113,16 +122,21 @@ fn dory_q5_reference_trace() {
     #[cfg(feature = "parity-trace")]
     rust_model_inference::parity_trace::token_ids("prompt_ids", &prompt).unwrap();
     let mut logits = Vec::new();
-    let prefix = std::env::var("RMI_DORY_TRACE_FROM")
-        .ok()
-        .map(|v| v.parse::<usize>().unwrap().min(prompt.len()))
-        .unwrap_or(0);
-    for (i, chunk) in prompt[..prefix].chunks(32).enumerate() {
+    #[cfg(feature = "parity-trace")]
+    let batches: Vec<u32> = prompt
+        .chunks(batch)
+        .map(|c| c.len() as u32)
+        .chain(std::iter::repeat_n(1, count))
+        .collect();
+    #[cfg(feature = "parity-trace")]
+    rust_model_inference::parity_trace::token_ids("prefill_batches", &batches).unwrap();
+    for (i, chunk) in prompt.chunks(batch).enumerate() {
         logits = model.prefill(chunk, &mut session).unwrap();
-        eprintln!("prefill {}/{}", ((i + 1) * 32).min(prefix), prefix);
-    }
-    for token in &prompt[prefix..] {
-        logits = model.prefill(&[*token], &mut session).unwrap();
+        eprintln!(
+            "prefill {}/{}",
+            ((i + 1) * batch).min(prompt.len()),
+            prompt.len()
+        );
     }
     let mut generated = Vec::new();
     for _ in 0..count {
@@ -163,7 +177,7 @@ fn dory_q5_prefill_chunking_and_reset() {
         assert_close(&actual);
         assert!(model.prefill(&[], &mut chunked).is_err());
         assert!(model.prefill(&[1], &mut chunked).is_err());
-        chunked.reset(&model, kv);
+        chunked.reset(&model, kv).unwrap();
         assert_close(&model.prefill(&tokens, &mut chunked).unwrap());
     }
 }
@@ -191,8 +205,8 @@ fn dory_q5_vulkan_executes_and_matches_cpu() {
         }
         assert!(context.compute_stats().since(before).submissions > 0);
         assert!(model.prefill(&[u32::MAX], &mut gpu).is_err());
-        gpu.reset(&model, kv);
-        cpu.reset(&model, kv);
+        gpu.reset(&model, kv).unwrap();
+        cpu.reset(&model, kv).unwrap();
         assert_numerically_aligned(
             &model.prefill(&[22177, 1897, 1429], &mut gpu).unwrap(),
             &model.prefill(&[22177, 1897, 1429], &mut cpu).unwrap(),
@@ -218,4 +232,86 @@ fn assert_numerically_aligned(actual: &[f32], expected: &[f32]) {
     assert!(max_abs / scale <= 0.01);
     let best = |v: &[f32]| (1..v.len()).fold(0, |b, i| if v[i] > v[b] { i } else { b });
     assert_eq!(best(actual), best(expected));
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
+#[ignore = "requires the real GGUF and hardware Vulkan"]
+fn dory_batched_modes_and_packed_kv() {
+    use rust_model_inference::compute::ComputePolicy;
+    rust_model_inference::ops::enable_gpu();
+    let mut model = DoryModel::from_source(source().expect("set RMI_DORY_Q5_MODEL"), 4).unwrap();
+    model.config.sliding_window = 2;
+    let tokens: Vec<u32> = (0..35).map(|i| [22177, 1897, 1429][i % 3]).collect();
+    for mode in ["per_loop", "last_loop"] {
+        model.config.recurrent_kv_cache_mode = mode.into();
+        let mut cache_bytes = Vec::new();
+        for kv in [KvFormat::F32, KvFormat::F16] {
+            let mut gpu = model
+                .new_session_with_compute(tokens.len(), kv, ComputePolicy::Vulkan)
+                .unwrap();
+            let mut cpu = model.new_session(tokens.len(), kv);
+            cache_bytes.push(gpu.kv_cache_bytes());
+            let mut expected_last = Vec::new();
+            for chunk in tokens.chunks(32) {
+                let actual = model.prefill(chunk, &mut gpu).unwrap();
+                let expected = model.prefill(chunk, &mut cpu).unwrap();
+                assert_numerically_aligned(&actual, &expected);
+                expected_last = expected;
+            }
+            gpu.reset(&model, kv).unwrap();
+            assert_numerically_aligned(&model.prefill(&tokens, &mut gpu).unwrap(), &expected_last);
+            gpu.reset(&model, kv).unwrap();
+            cpu.reset(&model, kv).unwrap();
+            assert_numerically_aligned(
+                &model.prefill(&tokens[..3], &mut gpu).unwrap(),
+                &model.prefill(&tokens[..3], &mut cpu).unwrap(),
+            );
+        }
+        assert_eq!(cache_bytes[0], cache_bytes[1] * 2);
+    }
+    let mut gpu = model
+        .new_session_with_compute(2, KvFormat::F32, ComputePolicy::Vulkan)
+        .unwrap();
+    let full_bytes = gpu.kv_cache_bytes();
+    gpu.reset(&model, KvFormat::F16).unwrap();
+    assert_eq!(gpu.kv_cache_bytes() * 2, full_bytes);
+    let mut cpu = model.new_session(2, KvFormat::F16);
+    assert_numerically_aligned(
+        &model.prefill(&tokens[..2], &mut gpu).unwrap(),
+        &model.prefill(&tokens[..2], &mut cpu).unwrap(),
+    );
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
+#[ignore = "requires the real GGUF and hardware Vulkan"]
+fn dory_reset_rebuilds_changed_config() {
+    use rust_model_inference::compute::ComputePolicy;
+    rust_model_inference::ops::enable_gpu();
+    let mut model = DoryModel::from_source(source().expect("set RMI_DORY_Q5_MODEL"), 4).unwrap();
+    model.config.recurrent_kv_cache_mode = "last_loop".into();
+    let mut gpu = model
+        .new_session_with_compute(2, KvFormat::F16, ComputePolicy::Vulkan)
+        .unwrap();
+    let mut cpu = model.new_session(2, KvFormat::F16);
+    let last_bytes = gpu.kv_cache_bytes();
+    for mode in ["per_loop", "last_loop"] {
+        model.config.recurrent_kv_cache_mode = mode.into();
+        gpu.reset(&model, KvFormat::F16).unwrap();
+        if mode == "per_loop" {
+            assert!(gpu.kv_cache_bytes() > last_bytes);
+        } else {
+            assert_eq!(gpu.kv_cache_bytes(), last_bytes);
+        }
+        assert!(model
+            .prefill(&[22177], &mut cpu)
+            .unwrap_err()
+            .contains("configuration changed"));
+        cpu.reset(&model, KvFormat::F16).unwrap();
+        assert_numerically_aligned(
+            &model.prefill(&[22177, 1897], &mut gpu).unwrap(),
+            &model.prefill(&[22177, 1897], &mut cpu).unwrap(),
+        );
+    }
 }
