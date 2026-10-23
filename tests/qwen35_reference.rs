@@ -846,6 +846,130 @@ fn holo4_vulkan_batched_matches_precision_bounds() {
     check_holo4_vulkan(64);
 }
 
+#[cfg(feature = "vulkan")]
+#[test]
+#[ignore = "requires Holo4 decoder/mmproj, Vulkan and native/scalar image references"]
+fn holo4_cpu_vision_vulkan_decoder_matches_precision_bounds() {
+    use rust_model_inference::compute::ComputePolicy;
+    use rust_model_inference::models::qwen35::{build_qwen35_positions, vision::VisionGrid};
+    assert!(std::env::var_os("RMI_PARITY_TRACE").is_none());
+    let source =
+        rust_model_inference::GGUFLoader::from_file(required_path("RMI_HOLO4_MODEL")).unwrap();
+    let mmproj = required_path("RMI_HOLO4_MMPROJ");
+    let reference = required_path("RMI_HOLO4_IMAGE_REFERENCE");
+    let mut references = Vec::new();
+    let mut contracts = Vec::new();
+    for name in ["native", "scalar"] {
+        let contract: Value =
+            serde_json::from_slice(&std::fs::read(reference.join(format!("{name}.json"))).unwrap())
+                .unwrap();
+        assert_eq!(contract["oracle_pin"], LLAMA_PIN);
+        let path = reference.join(format!("{name}.f32"));
+        let words = f32_words(&serde_json::json!({"binary_path":path})).unwrap();
+        assert_eq!(words.len(), 248320);
+        references.push(words);
+        contracts.push(contract);
+    }
+    assert_eq!(contracts[0], contracts[1]);
+    let chunks = contracts[0]["chunks"].as_array().unwrap();
+    assert_eq!(chunks.len(), 3);
+    assert_eq!(chunks[1]["count"], 9);
+    assert_eq!(chunks[1]["n_pos"], 3);
+    let tokenizer =
+        rust_model_inference::BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
+            .unwrap();
+    let prompt = format!("<|im_start|>user\n<|vision_start|>{}<|vision_end|>What color is the image? Answer with one word.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n", "<|image_pad|>".repeat(9));
+    let ids = tokenizer.encode(
+        &prompt,
+        rust_model_inference::EncodeOptions {
+            add_special: false,
+            parse_special: true,
+        },
+    );
+    let mut oracle_ids: Vec<u32> = serde_json::from_value(chunks[0]["text"].clone()).unwrap();
+    oracle_ids.extend(std::iter::repeat(tokenizer.special_token_id("image_pad").unwrap()).take(9));
+    oracle_ids.extend(serde_json::from_value::<Vec<u32>>(chunks[2]["text"].clone()).unwrap());
+    assert_eq!(ids, oracle_ids);
+    let grid = VisionGrid {
+        grid_t: 1,
+        grid_h: 3,
+        grid_w: 3,
+        patch_size: 16,
+        merge_size: 2,
+    };
+    let (positions, end) =
+        build_qwen35_positions(&ids, tokenizer.special_token_id("image_pad"), &[grid]).unwrap();
+    let mut oracle_positions: Vec<[usize; 4]> =
+        serde_json::from_value(chunks[1]["image_positions"].clone()).unwrap();
+    // mtmd exposes x/y; its decoder packs time, row, column.
+    for position in &mut oracle_positions {
+        position.swap(1, 2);
+    }
+    assert_eq!(&positions[4..13], oracle_positions);
+    assert_eq!(serde_json::json!(end), contracts[0]["end_pos"]);
+    let spread = relative_l2(&references[1], &references[0]);
+    let bound = holo4_precision_bound(spread);
+    let artifacts = unique_temp_dir("rmi-holo4-image-gpu");
+    let image = artifacts.join("red.png");
+    image::RgbImage::from_pixel(64, 64, image::Rgb([255, 0, 0]))
+        .save(&image)
+        .unwrap();
+    rust_model_inference::ops::enable_gpu();
+    let context = rust_model_inference::ops::get_vulkan_context().expect("Vulkan required");
+    let mut metrics = Vec::new();
+    for policy in [ComputePolicy::Cpu, ComputePolicy::Vulkan] {
+        let _scope = policy.enter_legacy_scope();
+        let before = context.submission_count();
+        let (logits, _) = rust_model_inference::app::run_qwen35_family_multimodal_logits(
+            &source,
+            &mmproj,
+            Some(&image),
+            None,
+            None,
+            "What color is the image? Answer with one word.",
+            8,
+            64,
+            128,
+            None,
+            None,
+        )
+        .unwrap();
+        let submissions = context.submission_count() - before;
+        assert_eq!(submissions > 0, policy == ComputePolicy::Vulkan);
+        assert_eq!(logits.len(), 248320);
+        assert!(logits.iter().all(|x| x.is_finite()));
+        std::fs::write(
+            artifacts.join(format!("{policy:?}.f32")),
+            bytemuck::cast_slice(&logits),
+        )
+        .unwrap();
+        let words: Vec<_> = logits.iter().map(|x| x.to_bits()).collect();
+        let error = relative_l2(&words, &references[0]);
+        let top1 = logits
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.total_cmp(b))
+            .unwrap()
+            .0;
+        assert_eq!(serde_json::json!(top1), contracts[0]["top1"]);
+        metrics.push(serde_json::json!({"decoder":format!("{policy:?}"), "submissions":submissions,"top1":top1,"relative_l2":error}));
+        eprintln!("Holo4 image decoder={policy:?} submissions={submissions} relative-L2={error:.9} bound={bound:.9}");
+    }
+    let proof = serde_json::json!({"oracle_pin":LLAMA_PIN,"device":context.device_name(),"oracle_spread":spread,"bound":bound,"metrics":metrics});
+    std::fs::write(
+        artifacts.join("proof.json"),
+        serde_json::to_vec_pretty(&proof).unwrap(),
+    )
+    .unwrap();
+    eprintln!(
+        "Holo4 image proof: {proof}; artifacts {}",
+        artifacts.display()
+    );
+    assert!(metrics
+        .iter()
+        .all(|m| m["relative_l2"].as_f64().unwrap() <= bound));
+}
+
 fn compare_holo4_traces(rust: &Path, native: &Path, scalar: &Path) -> Result<(), String> {
     let (rust, native, scalar) = (records(rust)?, records(native)?, records(scalar)?);
     if rust.len() != native.len() || rust.len() != scalar.len() || rust.is_empty() {

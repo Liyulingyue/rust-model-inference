@@ -77,7 +77,7 @@ fn main() {
     );
     let loaded = Instant::now();
     let source = GGUFLoader::from_file(&path).unwrap();
-    let mut models: Vec<_> = (0..3)
+    let mut models: Vec<_> = (0..2)
         .map(|_| Qwen35Model::from_source(&source).unwrap())
         .collect();
     let model_load_ms = loaded.elapsed().as_secs_f64() * 1000.0;
@@ -85,8 +85,7 @@ fn main() {
     let context = rust_model_inference::ops::get_vulkan_context().expect("real Vulkan required");
     let configs = [
         ("cpu_b64", ComputePolicy::Cpu, 64),
-        ("cpu_b1", ComputePolicy::Cpu, 1),
-        ("vulkan_b1", ComputePolicy::Vulkan, 1),
+        ("vulkan_b64", ComputePolicy::Vulkan, 64),
     ];
     let pool = Arc::new(ComputePool::new(8));
     let mut sessions = Vec::new();
@@ -115,7 +114,7 @@ fn main() {
         "{}",
         json!({"kind":"warmup", "backend":configs[0].0,"metrics":warm,"top1_ids":forced})
     );
-    for i in 1..3 {
+    for i in 1..configs.len() {
         let (warm, ids) = measure(&mut sessions[i], context, Some(&forced));
         assert_eq!(ids[..4], EXPECTED);
         expected.push(ids.clone());
@@ -126,13 +125,17 @@ fn main() {
         );
     }
     for round in 0..5 {
-        let order = if round % 2 == 0 { [0, 2, 1] } else { [1, 2, 0] };
+        let order = if round % 2 == 0 { [0, 1] } else { [1, 0] };
         for i in order {
             let (sample, ids) = measure(&mut sessions[i], context, Some(&forced));
             assert_eq!(ids, expected[i], "same-backend greedy drift");
             let submissions = sample["prefill_submissions"].as_u64().unwrap()
                 + sample["decode_submissions"].as_u64().unwrap();
-            assert_eq!(submissions > 0, i == 2, "unexpected compute backend");
+            assert_eq!(
+                submissions > 0,
+                configs[i].1 == ComputePolicy::Vulkan,
+                "unexpected compute backend"
+            );
             println!(
                 "{}",
                 json!({"kind":"sample", "round":round+1, "backend":configs[i].0,"metrics":sample,"top1_matches_cpu":ids==forced})

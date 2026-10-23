@@ -8752,21 +8752,21 @@ mod tests {
     fn batched_linear_device_owned_buffers_wait_before_cleanup() {
         use super::{Ordering, VulkanContext};
         let context = Box::leak(Box::new(crate::vulkan::VulkanContext::new().unwrap()));
+        let initial = context.compute_stats().live_allocation_bytes;
         let mut owner = super::super::qwen3::UploadedBuffers::new(context);
         let buffer = owner.upload(&[1, 2, 3, 4]).unwrap();
+        let allocated = context.compute_stats().live_allocation_bytes;
         context.mutex.lock().unwrap().uncertain = true;
         context.fail_wait_idle.store(true, Ordering::Relaxed);
         drop(owner);
         assert_eq!(context.idle_waits.load(Ordering::Relaxed), 1);
-        assert_eq!(
-            unsafe { std::slice::from_raw_parts(buffer.mapped, 4) },
-            &[1, 2, 3, 4]
-        );
+        assert_eq!(context.compute_stats().live_allocation_bytes, allocated);
         assert!(unsafe { context.destroy_completed_buffers(&[buffer]) }.is_err());
         assert!(context.mutex.lock().unwrap().uncertain);
         context.fail_wait_idle.store(false, Ordering::Relaxed);
         unsafe { context.destroy_completed_buffers(&[buffer]).unwrap() };
         assert!(!context.mutex.lock().unwrap().uncertain);
+        assert_eq!(context.compute_stats().live_allocation_bytes, initial);
     }
 
     #[test]
