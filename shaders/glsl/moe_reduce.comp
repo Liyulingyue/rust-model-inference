@@ -1,0 +1,30 @@
+#version 450
+
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(push_constant) uniform PC {
+    uint values_word;
+    uint scores_word;
+    uint output_word;
+    uint residual_word;
+    uint status_word;
+    uint width;
+    uint experts;
+} pc;
+
+void main() {
+    uint i = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 64u
+        + gl_LocalInvocationID.x;
+    if (i >= pc.width) return;
+    precise float sum = 0.0;
+    for (uint slot = 0u; slot < pc.experts; ++slot) {
+        precise float term = uintBitsToFloat(arena.data[pc.scores_word + slot])
+            * uintBitsToFloat(arena.data[pc.values_word + slot * pc.width + i]);
+        sum += term;
+    }
+    // Keep failures sticky until the chunk is checked, even if a later op masks a NaN.
+    if (isnan(sum) || isinf(sum)) atomicOr(arena.data[pc.status_word], 1u);
+    arena.data[pc.output_word + i] = floatBitsToUint(sum);
+    precise float residual = uintBitsToFloat(arena.data[pc.residual_word + i]) + sum;
+    arena.data[pc.residual_word + i] = floatBitsToUint(residual);
+}

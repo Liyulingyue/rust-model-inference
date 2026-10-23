@@ -1535,5 +1535,444 @@
       "backend": "strict Vulkan",
       "timing_used_for_benchmark": false
     }
+  },
+  "gpu_reduction_and_q4_followup": {
+    "date": "2026-10-23",
+    "baseline_commit": "c9fbceee70cc855ecd85db79115342071df50b22",
+    "status": "Experimental; whole-model CPU/GPU/Oracle alignment remains unresolved",
+    "changes": [
+      "Ordered GPU MoE reduction with fused residual replaces expert-output host readback/reduction; host softmax/top-k and shared gate sigmoid remain.",
+      "Separate per-row scores avoid CPU overwrites while commands are queued; sticky GPU nonfinite status is checked before CPU shadow commit. MoE output tracing retains host reduction, and other vendors retain short submissions.",
+      "Single-row Q4_K projections with at most 1024 output columns use eight lanes per output row; original block-first and lane-first arithmetic orders are preserved."
+    ],
+    "protocol": {
+      "profile": "release",
+      "features": [
+        "vulkan"
+      ],
+      "prompt_tokens": 32,
+      "decode_steps": 64,
+      "threads": 8,
+      "batch": 16,
+      "capacity": 512,
+      "kv": "f32",
+      "warmup_each": 1,
+      "alternating_rounds": 5,
+      "scope": "resident forward; synchronized readback included; load/upload/reset/tokenize/sampling excluded",
+      "teacher_forced": "identical CPU warmup history across versions and backends; snapshots collected separately from timing"
+    },
+    "machines": {
+      "local": {
+        "device": "Apple M3 Max",
+        "before": {
+          "cpu": {
+            "pp_tok_s": 23.263965217464005,
+            "tg_tok_s": 14.124659408004787,
+            "resident_total_seconds": 5.921822667,
+            "submissions": 0,
+            "host_read_bytes": 0,
+            "host_write_bytes": 0,
+            "tg_range": [
+              13.313716634196485,
+              15.626824115058596
+            ]
+          },
+          "vulkan": {
+            "pp_tok_s": 6.115392974435889,
+            "tg_tok_s": 4.041663349729339,
+            "resident_total_seconds": 21.067761792,
+            "submissions": 6612,
+            "host_read_bytes": 6251645952,
+            "host_write_bytes": 32268288,
+            "tg_range": [
+              3.996290089802699,
+              4.0557852880987175
+            ]
+          }
+        },
+        "before_decode_samples": {
+          "cpu": [
+            15.626824115058596,
+            14.124659408004787,
+            14.35786791452177,
+            13.353072117162144,
+            13.313716634196485
+          ],
+          "vulkan": [
+            4.041663349729339,
+            4.0557852880987175,
+            4.042574265773058,
+            3.996290089802699,
+            4.008474614814538
+          ]
+        },
+        "after": {
+          "cpu": {
+            "pp_tok_s": 20.24665861357508,
+            "tg_tok_s": 12.758123373744192,
+            "resident_total_seconds": 6.5969194579999995,
+            "submissions": 0,
+            "host_read_bytes": 0,
+            "host_write_bytes": 0,
+            "tg_range": [
+              10.651817367517761,
+              13.481030427017854
+            ]
+          },
+          "vulkan": {
+            "pp_tok_s": 9.200536182177236,
+            "tg_tok_s": 5.576520047492548,
+            "resident_total_seconds": 14.827001541,
+            "submissions": 3972,
+            "host_read_bytes": 5968530696,
+            "host_write_bytes": 949248,
+            "tg_range": [
+              5.256047732078714,
+              5.639291508051956
+            ]
+          }
+        },
+        "after_decode_samples": {
+          "cpu": [
+            13.481030427017854,
+            11.983522936077742,
+            12.758123373744192,
+            10.651817367517761,
+            13.290471907537563
+          ],
+          "vulkan": [
+            5.639291508051956,
+            5.576520047492548,
+            5.588656804996453,
+            5.573233821792082,
+            5.256047732078714
+          ]
+        },
+        "observed_gpu_decode_ratio": 1.379758669871897,
+        "observed_gpu_prefill_ratio": 1.5044881368438852,
+        "cpu_over_gpu_decode": 2.2878288368174724,
+        "causal_or_exclusive_speedup_claimed": false,
+        "gpu_before_after_logits": {
+          "positions": 65,
+          "vocab": 248320,
+          "float_count": 16140800,
+          "bytes": 64563200,
+          "baseline_sha256": "1f2942c7331f503761e7d70506fe7be54f924ad280a252284a02993ce3c4d59f",
+          "optimized_sha256": "1f2942c7331f503761e7d70506fe7be54f924ad280a252284a02993ce3c4d59f",
+          "exact": true
+        },
+        "last_warmup_cpu_gpu_logit_relative_l2": 0.1800021357882499,
+        "real_moe_same_input_max_relative_l2": 4.095519109388936e-08,
+        "real_moe_relative_l2_bound": 0.02,
+        "batch_continuation_relative_l2": [
+          0.0,
+          0.0
+        ],
+        "reset_repeat_exact": true
+      },
+      "remote": {
+        "device": "AMD Radeon Graphics (RADV NAVI31)",
+        "before": {
+          "cpu": {
+            "pp_tok_s": 24.112986607152923,
+            "tg_tok_s": 19.686741335855757,
+            "resident_total_seconds": 4.567791425,
+            "submissions": 0,
+            "host_read_bytes": 0,
+            "host_write_bytes": 0,
+            "tg_range": [
+              14.390337199042367,
+              20.65428405439588
+            ]
+          },
+          "vulkan": {
+            "pp_tok_s": 3.284375434451986,
+            "tg_tok_s": 2.0839091252935797,
+            "resident_total_seconds": 40.502269261,
+            "submissions": 6612,
+            "host_read_bytes": 6251645952,
+            "host_write_bytes": 32268288,
+            "tg_range": [
+              2.0631012762056335,
+              2.0877049841041306
+            ]
+          }
+        },
+        "before_decode_samples": {
+          "cpu": [
+            20.12604539711304,
+            19.35490675817369,
+            20.65428405439588,
+            19.686741335855757,
+            14.390337199042367
+          ],
+          "vulkan": [
+            2.0877049841041306,
+            2.0631012762056335,
+            2.0842116444768255,
+            2.071304339106796,
+            2.0839091252935797
+          ]
+        },
+        "after": {
+          "cpu": {
+            "pp_tok_s": 21.424653261202206,
+            "tg_tok_s": 18.610509799966014,
+            "resident_total_seconds": 4.8770175469999995,
+            "submissions": 0,
+            "host_read_bytes": 0,
+            "host_write_bytes": 0,
+            "tg_range": [
+              14.768353295023447,
+              19.844611205981877
+            ]
+          },
+          "vulkan": {
+            "pp_tok_s": 8.358188771445489,
+            "tg_tok_s": 3.584389947703644,
+            "resident_total_seconds": 21.683780843,
+            "submissions": 3972,
+            "host_read_bytes": 5968530696,
+            "host_write_bytes": 949248,
+            "tg_range": [
+              3.5185186673123563,
+              3.6222440926679753
+            ]
+          }
+        },
+        "after_decode_samples": {
+          "cpu": [
+            14.768353295023447,
+            15.304879021506455,
+            18.610509799966014,
+            18.91582131178974,
+            19.844611205981877
+          ],
+          "vulkan": [
+            3.584389947703644,
+            3.598020815843796,
+            3.6222440926679753,
+            3.5561525233234934,
+            3.5185186673123563
+          ]
+        },
+        "observed_gpu_decode_ratio": 1.720031792268618,
+        "observed_gpu_prefill_ratio": 2.5448335424053288,
+        "cpu_over_gpu_decode": 5.192099651961396,
+        "causal_or_exclusive_speedup_claimed": false,
+        "gpu_before_after_logits": {
+          "positions": 65,
+          "vocab": 248320,
+          "float_count": 16140800,
+          "bytes": 64563200,
+          "baseline_sha256": "80c202f06dcecd929a5284a54b20255e35aa9bcdb65139a31002c471a8cc287b",
+          "optimized_sha256": "80c202f06dcecd929a5284a54b20255e35aa9bcdb65139a31002c471a8cc287b",
+          "exact": true
+        },
+        "last_warmup_cpu_gpu_logit_relative_l2": 0.23536753385733553,
+        "real_moe_same_input_max_relative_l2": 1.2013590525231618e-06,
+        "real_moe_relative_l2_bound": 0.02,
+        "batch_continuation_relative_l2": [
+          0.0,
+          0.0
+        ],
+        "reset_repeat_exact": true
+      }
+    },
+    "no_thresholds_relaxed": true,
+    "whole_model_alignment_pass_claimed": false,
+    "tests": {
+      "regular_qwen35": {
+        "local_passed": 104,
+        "remote_passed": 98,
+        "ignored_each": 13,
+        "excluded_baseline_failure": "qwen35_config_rejects_invalid_tensor_dimensions (error-message assertion)"
+      },
+      "hardware_passes_each_host": [
+        "q4_k_cooperative_matches_row_kernel_in_both_reductions",
+        "moe_reduce_preserves_slot_order_and_sticky_finite_check",
+        "qwen35_real_moe_layers_run_on_vulkan (all 40 layers, 3 rows, submission assertion)",
+        "holo4_vulkan_batched_prefill_and_reset",
+        "qwen35_vulkan_dense_chunks_preserve_four_mrope_axes"
+      ],
+      "q4_k_comparison": "GPU old/new raw F32 words; modes 0/1; three grouped weights; dimensions (256,1), (512,67), (2048,512), including unequal output widths and tails",
+      "moe_reduce_comparison": "slot order, tail width 67, validation before recording, one submission boundary and sticky NaN/Inf rejection",
+      "shaders": "glslang 15.1.0; manifest and full shader rebuild/SPIR-V check passed on remote",
+      "other_baseline_failures": "See gpu_performance_followup.tests.same_failures_reproduced_at_baseline; these were not counted as passes.",
+      "local_final_checks": {
+        "rustfmt": {
+          "command": [
+            "rtk",
+            "bypass",
+            "cargo",
+            "fmt",
+            "--check"
+          ],
+          "exit_code": 0
+        },
+        "manifest": {
+          "command": [
+            "shasum",
+            "-a",
+            "256",
+            "-c",
+            "shaders/manifest.sha256"
+          ],
+          "exit_code": 0
+        },
+        "moe_reduce_spirv": {
+          "command": [
+            "spirv-val",
+            "--target-env",
+            "vulkan1.1",
+            "shaders/bin/moe_reduce.spv"
+          ],
+          "exit_code": 0
+        },
+        "q4_k_cooperative_spirv": {
+          "command": [
+            "spirv-val",
+            "--target-env",
+            "vulkan1.1",
+            "shaders/bin/q4_k_matmul_cooperative.spv"
+          ],
+          "exit_code": 0
+        },
+        "whitespace": {
+          "command": [
+            "git",
+            "diff",
+            "--check"
+          ],
+          "exit_code": 0
+        },
+        "local_full_shader_rebuild": {
+          "exit_code": 1,
+          "compiler": "Glslang Version: 11:16.6.0\nESSL Version: OpenGL ES GLSL 3.20 glslang Khronos. 16.6.0\nGLSL Version: 4.60 glslang Khronos. 16.6.0\nSPIR-V Version 0x00010600, Revision 1\nGLSL.std.450 Version 100, Revision 1\nKhronos Tool ID 8\nSPIR-V Generator Version 11\nGL_KHR_vulkan_glsl version 100\nARB_GL_gl_spirv version 100\n",
+          "error": "Checked-in softmax.spv differs from local compiler output; authoritative glslang 15.1.0 full rebuild passed on remote. No binaries regenerated locally."
+        }
+      }
+    },
+    "remote_gpu_monitor": {
+      "baseline": {
+        "samples": 57,
+        "interval_seconds": 5,
+        "render_node": "/dev/dri/renderD134",
+        "other_clients_observed": [],
+        "other_engine_increments_observed": []
+      },
+      "optimized": {
+        "samples": 35,
+        "interval_seconds": 5,
+        "render_node": "/dev/dri/renderD134",
+        "other_clients_observed": [],
+        "other_engine_increments_observed": []
+      },
+      "exclusive_benchmark": false,
+      "limitation": "Latest samples found only the benchmark on the selected render node. Shared-host access and sampling do not establish exclusive hardware use; earlier run had active other clients."
+    },
+    "local_environment_limit": "Background load and about 26.8 GiB swap used; neither hardware exclusivity nor power controlled.",
+    "remaining_cost": {
+      "host_routing": true,
+      "host_reduction_only_when_moe_trace_requested": true,
+      "host_read_bytes_per_round": 5968530696,
+      "host_write_bytes_per_round": 949248,
+      "submissions_per_round": 3972,
+      "device_local_mutable_arena": false,
+      "per_kernel_gpu_timing": "not measured"
+    },
+    "release_cli_math": {
+      "local": {
+        "output": "80 * 0.8 - 5 = 59",
+        "last_logits_step": 56,
+        "eos_id": 248046,
+        "exit_code": 0,
+        "backend": "strict Vulkan",
+        "timing_used_for_benchmark": false
+      },
+      "remote": {
+        "output": "80 × 0.8 - 5 = 64 - 5 = 59元",
+        "last_logits_step": 64,
+        "eos_id": 248046,
+        "exit_code": 0,
+        "backend": "strict Vulkan",
+        "timing_used_for_benchmark": false
+      },
+      "remote_exit_evidence": "remote-benchmark.sh set -e completed its final marker and exited 0 after the CLI"
+    },
+    "runtime_source_sha256": {
+      "src/vulkan/ops.rs": "ca7c32bedb838d54c72930aab2b4d3e8b215ea0d1d2a515efc59018dbd90e8c9",
+      "src/vulkan/qwen35.rs": "aef728ea05dc910def57f57e4c53d39639591416e1d0e642011242dfb500d1de",
+      "src/vulkan/qwen35/moe.rs": "aef7e39e784461e7255688f81670898d43686e694ba77a17d0dfb47f9f5ae4b3",
+      "shaders/glsl/moe_reduce.comp": "18d9ad60c91e4adff970c94170c02258829fb9412e983dfcbb0ce0b53f114a0d",
+      "shaders/bin/moe_reduce.spv": "8b61384eedd31598a9218f44b701baf7b266d51c2e840345953bb83fd6675b3b",
+      "shaders/glsl/q4_k_matmul_cooperative.comp": "1fa184393cb2853eb9e73b319510e1ded5efb88af729058fc470160a1ea43578",
+      "shaders/bin/q4_k_matmul_cooperative.spv": "f6b1449245340ac892fef83f636fc7629e33a46f38171d3e647fd04b07753e1e",
+      "shaders/manifest.sha256": "9c0ac77205f5bf7a62cb4963265b47c1d6a28132d0751f2b90816bd655b0becc",
+      "scripts/vulkan-shaders.sh": "bbac59f7ef2679f9abe621e7ad7d24fb025910e10d81211d0e6f2c8c76293dfe",
+      "tools/oracle/holo4/benchmark.rs": "4df2c26b90b2d3d68b95aa7cc083af21baa4e5ecc9be1c104805e66559fea855"
+    },
+    "remote_build_source_formatting": {
+      "file": "src/vulkan/ops.rs",
+      "built_source_sha256": "7a533df778be3acf9c9317a7a9f74775d7f1a6e1d53811b0f42e001409fd880d",
+      "formatted_source_sha256": "ca7c32bedb838d54c72930aab2b4d3e8b215ea0d1d2a515efc59018dbd90e8c9",
+      "rustfmt_output_matches_final_source": true,
+      "diff_only_in_cfg_test_function": true
+    },
+    "unverified": [
+      "full repository suite",
+      "long context",
+      "other GPU vendors",
+      "per-kernel timestamps",
+      "hardware-exclusive and power-controlled speedup"
+    ],
+    "evidence_directory": "target/holo4/gpu-kquant-2026-10-23",
+    "evidence_sha256": {
+      "REPORT.md": "3a7f9e22514d1f4f90350b9678d412b31a8a7b7dea2454a619432f6262bd280d",
+      "local-baseline-bench.jsonl": "32a77bfe9dc76de1e11e0dd2db80d36b0392d5fb8ceb3dea180697613da75e5d",
+      "local-batched.log": "e46bfcfa6035aa26244b5ae71ab293d03d211012e1e7e5a1a1129ddde7eb779e",
+      "local-cooperative.log": "778361bf62bef9297818158b4b6e78ce62137a9b2570ad3c019f5ee013888ef9",
+      "local-dense-four-axis.log": "817436ccec56babf089253b53fec11f9b155ddc816bb357597a66f61dd459cd2",
+      "local-environment.txt": "0e259dea56d2fcf39e2470e9731564b6070a48045cf6d3fd0054145e2a0daed9",
+      "local-final-checks.json": "faa5304452a1183a8b870de8b686d194efc1b38fde7819526460a6546fe6e105",
+      "local-final-manifest.log": "891fe13bb5a1fa27dbeba4d9689c6a1ca42f3275b60bb63e9fc1267296d83d7e",
+      "local-final-moe_reduce_spirv.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "local-final-q4_k_cooperative_spirv.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "local-final-rustfmt.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "local-final-whitespace.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "local-logit-comparison.json": "707bfe1f05c732e01c785b196826bdfaa0bb906488efffd3d3505dc7776be7c0",
+      "local-math.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "local-math.stderr.txt": "14bd4c40975843c19bf9376f75b6c7bd27ea2636bb833507e56b6a8044519606",
+      "local-math.stdout.txt": "0c5ed2ca01c27b1d14eebbf88b16a7b5345779c40be9d23e40a476a65581255f",
+      "local-optimized-bench.jsonl": "2501e7077eb91d8fab58f77cd56dc587841078371624a7c7fc9aca3e3f08493b",
+      "local-qwen35.log": "dbcfb2a29a35067cb35d057d0b9d22ad65d6401590778913df8443b86ab7ba45",
+      "local-real-moe.log": "c08947024f5b986b8a71fd1c60d0056f2af3922485fb1b5228433454cdb48d49",
+      "local-reduce.log": "6ec91b92ad9ff7b160cf6a31658af1327da2067441c1e812c7a86ae542a2fb78",
+      "local-release-build.log": "dd0cdd591422f3cbad15624efd146ecc7505d1a129acc84acfe098054501c4ca",
+      "local-shader-check.log": "fad4309d4b62bb793188aef4c3200901e57d1975fdc080d9f1cee71df5ca290e",
+      "release-cli-summary.json": "3facd8f4a2aef71b0cc465bb5f6d8bbc424e611f94e4db40d569b6034cfdf578",
+      "remote-baseline-bench.jsonl": "c4615844cb4bd55fae5cb8169733aa7456a81d305577f2b6f1f43ee0c693f650",
+      "remote-baseline-gpu-load.jsonl": "986a7f841adf171facb125c311c2d39d0728a7737d897a0feba0a4255baf0fc9",
+      "remote-benchmark.sh": "b5cf5243e330b596ab747e594ee0d9529eaf6acca034f2571ce17a8290a70dbb",
+      "remote-format-normalization.json": "62ac5761b538422c57d4743783af5e1b8850c5690d4c769316314b2b7f2fb346",
+      "remote-logit-comparison.json": "c069b479fa63ccc795224f0d935c391160e427ed053368e9a256f49db85f4179",
+      "remote-optimized-bench.jsonl": "8e0db969c29e090b0d363310d676b85494bfea19031d33270b6b33b93f3daab7",
+      "remote-optimized-gpu-load.jsonl": "a45b4c611d7d7b79ff8fb1069d25586fd5a6f86756f6c90f65bc263b46dae61a",
+      "remote/remote-batched.log": "8afab7c60a818e502edc6c03fce1b12c2de62e39701dca3a5812fd7337c7f981",
+      "remote/remote-cooperative.log": "0f5112c1d5bd2ba46ee76ffbe703f7015387e4cf7a196431ca2b431738ec1ae0",
+      "remote/remote-dense-four-axis.log": "99c0b599385ba2b992957cfac56208e801cc84e0c0976d0a5f1c5a025a46975a",
+      "remote/remote-math.stderr.txt": "cf63256a145c49a4fcbb5a68b96d323e53ea675e1122345121475cd64e8d2a84",
+      "remote/remote-math.stdout.txt": "13284911bcde8e349e80b30ee9e277beb504935502f4c73aac336ee6cc74a672",
+      "remote/remote-qwen35.log": "69f53c976ca9f851154a43cc2cad581a39e0d7239ef192ec13ce16a1dc60f5cb",
+      "remote/remote-real-moe.log": "eb462d1bb83f3d4a9f8525b0c149997bc1270aa5ebf3b9c6ff116a0d1ecb2587",
+      "remote/remote-reduce.log": "6656ae5d44ca822350f0aad4fb99cfc4ba0e232ad79f20f32128f6e96a2072c7",
+      "remote/remote-release-build.log": "ae90c1c26244e552a5d2b66e96c18e714eed7172a4ed0656d34ce3779e7809c2",
+      "remote/remote-release-clean.log": "5bc740fc1573daba1d37de2213e5bbfba68c06149dd570209f776573904d7d2e",
+      "remote/shader-check.log": "891fe13bb5a1fa27dbeba4d9689c6a1ca42f3275b60bb63e9fc1267296d83d7e",
+      "remote_monitor.py": "cc558227c9df45fb48776a498d54b4f0ce779ff740395ee219af50b0c7142dc0",
+      "report.py": "06113b2661a3afe8079d2dfad8efa265c83380bb86d5adace14114978a020c8a",
+      "runtime-source-sha256.json": "6b00f913cf04e9de6c9facfa5e2b4af10fb7887149a6a6d05faaff30713c5e65",
+      "summary.json": "c0c9d2a17f60d0fc72491c82f81c867d2a9c524e8a94d23dfa7c8567d7674f43"
+    }
   }
 }

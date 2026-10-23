@@ -194,6 +194,8 @@ struct Qwen35ArenaLayout {
     down: ArenaRegion,
     router: ArenaRegion,
     shared_gate: ArenaRegion,
+    moe_scores: ArenaRegion,
+    moe_status: ArenaRegion,
     logits: ArenaRegion,
     rope: ArenaRegion,
     q8: ArenaRegion,
@@ -290,7 +292,12 @@ impl Qwen35ArenaLayout {
         let projection = row_region(config.n_embd)?;
         let router = row_region(config.moe.map_or(1, |m| m.n_expert))?;
         let shared_gate = row_region(1)?;
-        let rope = row_region(config.rope_dimension_count)?;
+        let moe_scores = row_region(expert_slots)?;
+        let moe_status = qwen35_f32_region(&mut cursor, 1)?;
+        let rope = qwen35_f32_region(
+            &mut cursor,
+            qwen35_product("rope rows", &[rows, config.rope_dimension_count])?,
+        )?;
         let ffn_rows = rows.max(expert_slots);
         let ffn_gate = qwen35_f32_region(
             &mut cursor,
@@ -344,6 +351,8 @@ impl Qwen35ArenaLayout {
             down,
             router,
             shared_gate,
+            moe_scores,
+            moe_status,
             logits,
             rope,
             q8,
@@ -896,6 +905,7 @@ impl Qwen35VulkanSession {
         // and re-opens the command buffer without dropping it.
         let mut commands = TokenCommands::begin(self.context)?;
         self.ops.write_f32(self.layout.x, input)?;
+        self.ops.zero_region(self.layout.moe_status)?;
         // Recurrent layers have no dense delta; active rows change its layer stride.
         for region in [self.layout.kv_delta_k, self.layout.kv_delta_v] {
             self.ops.zero_region(ArenaRegion {
@@ -1233,14 +1243,15 @@ impl Qwen35VulkanSession {
         let ssm_count = self.ssm_state.len();
         self.ssm_state
             .copy_from_slice(self.ops.read_f32(self.layout.ssm_state, ssm_count)?);
-        if self
-            .logits
-            .iter()
-            .chain(&self.k_delta[..delta_count])
-            .chain(&self.v_delta[..delta_count])
-            .chain(&self.conv_state)
-            .chain(&self.ssm_state)
-            .any(|v| !v.is_finite())
+        if self.ops.read_f32(self.layout.moe_status, 1)?[0].to_bits() != 0
+            || self
+                .logits
+                .iter()
+                .chain(&self.k_delta[..delta_count])
+                .chain(&self.v_delta[..delta_count])
+                .chain(&self.conv_state)
+                .chain(&self.ssm_state)
+                .any(|v| !v.is_finite())
             || self
                 .ops
                 .read_f32(self.layout.x, input_count)?

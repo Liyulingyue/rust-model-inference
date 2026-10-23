@@ -351,3 +351,78 @@ and after this optimization. All 40 same-input MoE checks and batch/continuation
 reset checks retain their previous errors. This regression does not resolve
 the whole-model CPU/GPU/Oracle numerical failures. See `verification.json`'s
 `gpu_performance_followup` for ranges, raw-evidence digests and baseline failures.
+
+## GPU MoE reduction and narrow Q4_K projections
+
+The next optimization keeps expert outputs on the GPU: an ordered weighted
+reduction fuses residual addition, replacing the per-layer expert-output
+readback and CPU reduction. Router softmax/top-k and the shared-gate sigmoid
+retain their host implementation. Scores use separate per-row arena storage;
+a sticky GPU NaN/Inf flag is checked before committing the chunk. CPU shadow
+state, fallback/abort/reset behavior and the shorter submission policy for
+other vendors are preserved. Requests for MoE output traces retain host
+reduction so the existing checkpoints remain available.
+
+Single-row Q4_K projections with at most 1024 output columns use eight lanes
+per output row. A 512-column expert projection therefore dispatches 64 rather
+than eight workgroups per weight group. Both the block-first and lane-first
+reductions preserve the old shader's arithmetic order. Larger or batched
+projections retain the existing kernel.
+
+Focused hardware checks (run on both M3 Max and the requested NAVI31 host):
+
+```sh
+cargo test --locked --profile release-fast --features vulkan --lib \
+  q4_k_cooperative_matches_row_kernel_in_both_reductions -- --ignored --nocapture
+cargo test --locked --profile release-fast --features vulkan --lib \
+  moe_reduce_preserves_slot_order_and_sticky_finite_check -- --ignored --nocapture
+```
+
+The Q4_K check compares both modes, three grouped weights and tail dimensions
+against the old GPU shader by F32 bits. The reducer checks slot order, tails,
+validation before recording, one submission boundary and sticky NaN/Inf
+rejection. All 40 real MoE layers retain max same-input CPU/GPU relative L2
+`4.095519109388936e-8` on M3 and `1.2013590525231618e-6` on NAVI31; the existing
+`0.02` bound is unchanged. Batch/continuation relative L2 remains `[0,0]`, with
+exact reset replay. These checks do not resolve the whole-model alignment
+failures documented above.
+
+Five-round release medians for this optimization, relative to `c9fbceee`
+(same resident-forward protocol above, 2026-10-23):
+
+| Device | CPU decode, new | GPU decode, before | GPU decode, new | GPU prefill, before → new |
+|---|---:|---:|---:|---:|
+| Apple M3 Max | 12.758 | 4.042 | 5.577 | 6.115 → 9.201 |
+| SSH RADV NAVI31 | 18.611 | 2.084 | 3.584 | 3.284 → 8.358 |
+
+All rates are token/s. GPU decode ranges are `3.996–4.056` → `5.256–5.639`
+on M3 and `2.063–2.088` → `3.519–3.622` on NAVI31. The observed median changes
+are +38.0% and +72.0%; hardware exclusivity and power were not controlled, so
+these ratios are not isolated causal speedup claims. M3 had background load
+and about 26.8 GiB swap in use. Unlike the earlier remote run, this run's
+five-second DRM samples found only the benchmark client on the selected
+render node; that does not establish hardware exclusivity. CPU decode is
+still about 2.29× / 5.19× faster on the two hosts.
+
+Submissions per 32+64-token round fall from `6612` to `3972`, host writes from
+`32,268,288` to `949,248` bytes, and host reads from `6,251,645,952` to
+`5,968,530,696` bytes. CPU routing synchronization and approximately 5.56 GiB
+of synchronized state/logit readback remain; per-kernel timestamps were not
+measured, so these counters do not assign every remaining cost to a kernel.
+
+On each GPU, all `16,140,800` raw F32 logits at the last prefill plus 64 decode
+positions remain byte-for-byte equal to `c9fbceee`. This is a regression check
+against the previous GPU implementation; reduced-precision CPU/GPU and Oracle
+paths retain their numerical bounds and existing failures. Both release strict
+Vulkan CLIs finish the discount-price example with `59` yuan and natural EOS
+`248046`. Dense four-axis tests also pass on both devices. Regular Qwen35 tests
+pass `104` on ARM / `98` on x86, each with `13` ignored and the known config
+error-message assertion excluded.
+
+See `verification.json`'s `gpu_reduction_and_q4_followup` for ranges, snapshots,
+source/evidence hashes and the build-source formatting note. Raw logs, snapshots
+and the local report are under `target/holo4/gpu-kquant-2026-10-23/` (not committed).
+The full repository suite, long context and other GPU vendors were not tested.
+The full shader rebuild passes with pinned glslang `15.1.0` on the SSH host.
+Local `16.6.0` fails byte-for-byte rebuild of the existing `softmax.spv`;
+local manifest and the new binaries' SPIR-V validation pass independently.

@@ -167,8 +167,16 @@ impl MoeBindings {
             .ops
             .read_f32(session.layout.shared_gate, rows)?
             .to_vec();
-        let mut output = vec![0.0; rows * width];
         let experts_per_submission = session.context.moe_experts_per_submission();
+        let host_reduce = ["ffn_moe_out", "ffn_out"]
+            .iter()
+            .any(|name| crate::models::qwen35::trunk::trace::trace_enabled(name));
+        let mut output = if host_reduce {
+            vec![0.0; rows * width]
+        } else {
+            Vec::new()
+        };
+        let count = self.config.n_expert_used + usize::from(self.shared.is_some());
         for row in 0..rows {
             let trace = &crate::models::qwen35::trunk::trace::layer_1d;
             if crate::models::qwen35::trunk::trace::trace_enabled("ffn_moe_input") {
@@ -180,7 +188,7 @@ impl MoeBindings {
                     &input[row * width..(row + 1) * width],
                 );
             }
-            let (chosen, scores) = crate::models::qwen35::trunk::moe::route_experts(
+            let (chosen, mut scores) = crate::models::qwen35::trunk::moe::route_experts(
                 &logits[row * self.experts.len()..(row + 1) * self.experts.len()],
                 self.config.n_expert_used,
                 self.config.weights_scale,
@@ -188,6 +196,14 @@ impl MoeBindings {
                 position + row,
             )
             .map_err(VulkanError::UnsupportedShape)?;
+            if !host_reduce {
+                if self.shared.is_some() {
+                    scores.push(1.0 / (1.0 + (-shared_scores[row]).exp()));
+                }
+                session
+                    .ops
+                    .write_f32(row_region(session.layout.moe_scores, row, count)?, &scores)?;
+            }
             let input = row_region(session.layout.normed, row, width)?;
             for (slot, &expert) in chosen.iter().enumerate() {
                 if slot > 0 && slot % experts_per_submission == 0 {
@@ -200,6 +216,23 @@ impl MoeBindings {
                     commands = commands.flush()?;
                 }
                 self.record_expert(session, &commands, shared, input, chosen.len())?;
+            }
+            if !host_reduce {
+                session.ops.record_moe_reduce(
+                    &commands,
+                    session.layout.down,
+                    row_region(session.layout.moe_scores, row, count)?,
+                    row_region(session.layout.projection, row, width)?,
+                    row_region(session.layout.x, row, width)?,
+                    session.layout.moe_status,
+                    width,
+                    count,
+                )?;
+                // Preserve the shorter submissions on drivers outside the validated nine-expert set.
+                if row + 1 < rows || experts_per_submission < count {
+                    commands = commands.flush()?;
+                }
+                continue;
             }
             commands = commands.flush()?;
             let count = chosen.len() + usize::from(self.shared.is_some());
@@ -221,6 +254,9 @@ impl MoeBindings {
                 }
             }
             trace("ffn_out", layer, position + row, target);
+        }
+        if !host_reduce {
+            return Ok(commands);
         }
         if output.iter().any(|v| !v.is_finite()) {
             return Err(VulkanError::UnsupportedShape(
@@ -317,8 +353,9 @@ mod tests {
                 .submit_and_wait()
                 .unwrap();
             let experts = config.n_expert_used + usize::from(config.n_ff_shexp > 0);
+            let budget = context.moe_experts_per_submission();
             let expected_submissions =
-                2 + 3 * experts.div_ceil(context.moe_experts_per_submission());
+                1 + 3 * experts.div_ceil(budget) + usize::from(budget < experts);
             assert_eq!(
                 context.compute_stats().since(before).submissions,
                 expected_submissions as u64,
