@@ -1,0 +1,406 @@
+{
+  "date": "2026-10-23",
+  "timezone": "Asia/Shanghai",
+  "code_commit": "15c7c929971bc421911148ddae732d36a067a82a",
+  "model": {
+    "repository": "black-forest-labs/flux-3-image-klein",
+    "revision": "337337621b8526e120f2275d250242f4a6bedd75",
+    "component_sha256": {
+      "dit": "6e5a57d74fed53b8d766797b642f4eef30d15632fbd2a7f453533cfc771a7924",
+      "text": "4d7f199d4ae72e5ea61d7ff5f6d13f81459ac19cd320e84c9a1009c1d55ecf8a",
+      "vae": "f2ad83f5e02f97a10fd76d77714ca6f0fbfeeaa11837ba7b9cd51cb32ac96b03"
+    }
+  },
+  "environment": {
+    "binary_sha256": "f20f142c144a83e52ea3f3cfdb0290cd23a77c727fa709095b778d8974d78c5b",
+    "source_sha256": {
+      "src/app/diffusion.rs": "c9f983c5fb52ef406680ed5366de3b6f7a466002d5d48f269260179d81ca5126",
+      "src/models/diffusion/flux3/dit.rs": "cc134cd3854d837d5f5b9470f9e994fabd1030c1e29d7fb79f918e7e2a3bfba6",
+      "src/models/diffusion/flux3/mod.rs": "4155165f6a4bbb42beafa123d6559ce814e7fe7999fa0c3c852ce88680f5894f",
+      "src/ops/kernel/vulkan.rs": "ec8f716777ecb2b521311989178f183e1b165fda0b57a043c6e8f8e797e1b91b"
+    },
+    "cpu_max": "1600000 100000",
+    "memory_max": "59055800320",
+    "cpu": "AMD EPYC 9334 32-Core Processor",
+    "kernel": "6.8.0-79-generic",
+    "build_profile": "release; Vulkan enabled; parity-trace disabled",
+    "environment_overrides": {
+      "VK_ICD_FILENAMES": "/usr/share/vulkan/icd.d/radeon_icd.json",
+      "DRI_PRIME": "pci-0000_c3_00_0!",
+      "MESA_SHADER_CACHE_DIR": "/root/flux3-rmi-01a16224/target/flux3-perf-20261023/mesa-cache"
+    },
+    "cache_policy": "Separate CLI processes; pre-read all three model files before every run outside timing; Prior completed 64x64/2-step CPU and GPU warmups on this binary; shared warmed shader cache; GPU initialization/uploads included.",
+    "gpu_memory_scope": "500ms sampling of selected device-wide VRAM, not per-process allocation; shared host, no exclusive reservation."
+  },
+  "hardware": {
+    "cpu": "AMD EPYC 9334 32-Core Processor",
+    "cpu_quota_cores": 16,
+    "rust_threads": 16,
+    "gpu": "AMD Radeon Graphics (RADV NAVI31)",
+    "pci": "0000:c3:00.0",
+    "render_node": "/dev/dri/renderD134",
+    "vram_total_bytes": 51522830336,
+    "shared_host": true
+  },
+  "workload": {
+    "prompt": "A red cube on a white table.",
+    "width": 256,
+    "height": 256,
+    "steps": 2,
+    "seed": 42,
+    "references": 0,
+    "cpu_compute_policy": "cpu",
+    "gpu_compute_policy": "auto",
+    "round_order": [
+      "gpu-1",
+      "cpu-1",
+      "cpu-2",
+      "gpu-2",
+      "gpu-3",
+      "cpu-3"
+    ]
+  },
+  "rounds": [
+    {
+      "round": 1,
+      "cpu": {
+        "elapsed_seconds": 315.9887060597539,
+        "setup_through_first_step_seconds": 179.66847742721438,
+        "vae_decode_seconds": 4.5241999999999996,
+        "max_rss_kib": 16189396,
+        "user_seconds": 2753.568342,
+        "system_seconds": 118.188024,
+        "prewarm_seconds_excluded": 3.8039735443890095,
+        "opened_render_nodes": [],
+        "png_sha256": "9272f37fca1b121c8da2f93bf85032a7467dd0cf19d49d1b76eb9704175315df",
+        "second_denoise_step_seconds": 130.78295496851206,
+        "average_cpu_cores_used": 9.088161415037876
+      },
+      "gpu": {
+        "elapsed_seconds": 54.22202690131962,
+        "setup_through_first_step_seconds": 41.810247238725424,
+        "vae_decode_seconds": 3.265,
+        "max_rss_kib": 16356332,
+        "user_seconds": 665.068903,
+        "system_seconds": 113.95741,
+        "prewarm_seconds_excluded": 3.058757333084941,
+        "opened_render_nodes": [
+          "/dev/dri/renderD134"
+        ],
+        "png_sha256": "6c4e85da180ff42c80b70a8791f571127ef2ba7b9271d9c97d09bfd6dd021bfa",
+        "second_denoise_step_seconds": 7.636427644640207,
+        "average_cpu_cores_used": 14.367340313887095
+      }
+    },
+    {
+      "round": 2,
+      "cpu": {
+        "elapsed_seconds": 180.65669328160584,
+        "setup_through_first_step_seconds": 89.08728856034577,
+        "vae_decode_seconds": 5.0214,
+        "max_rss_kib": 16066484,
+        "user_seconds": 2573.370758,
+        "system_seconds": 92.827805,
+        "prewarm_seconds_excluded": 4.680323293432593,
+        "opened_render_nodes": [],
+        "png_sha256": "9272f37fca1b121c8da2f93bf85032a7467dd0cf19d49d1b76eb9704175315df",
+        "second_denoise_step_seconds": 85.2657178863883,
+        "average_cpu_cores_used": 14.75837133166141
+      },
+      "gpu": {
+        "elapsed_seconds": 57.84431742876768,
+        "setup_through_first_step_seconds": 46.20361037366092,
+        "vae_decode_seconds": 2.6228000000000002,
+        "max_rss_kib": 16344520,
+        "user_seconds": 586.971602,
+        "system_seconds": 100.802763,
+        "prewarm_seconds_excluded": 3.6347322519868612,
+        "opened_render_nodes": [
+          "/dev/dri/renderD134"
+        ],
+        "png_sha256": "6c4e85da180ff42c80b70a8791f571127ef2ba7b9271d9c97d09bfd6dd021bfa",
+        "second_denoise_step_seconds": 7.548038117587566,
+        "average_cpu_cores_used": 11.89009388600633
+      }
+    },
+    {
+      "round": 3,
+      "cpu": {
+        "elapsed_seconds": 274.2608125284314,
+        "setup_through_first_step_seconds": 161.2612110339105,
+        "vae_decode_seconds": 5.3664,
+        "max_rss_kib": 15955248,
+        "user_seconds": 2611.856138,
+        "system_seconds": 97.55839,
+        "prewarm_seconds_excluded": 3.092156335711479,
+        "opened_render_nodes": [],
+        "png_sha256": "9272f37fca1b121c8da2f93bf85032a7467dd0cf19d49d1b76eb9704175315df",
+        "second_denoise_step_seconds": 106.61345238983631,
+        "average_cpu_cores_used": 9.878970688600024
+      },
+      "gpu": {
+        "elapsed_seconds": 69.75883262977004,
+        "setup_through_first_step_seconds": 58.02403183653951,
+        "vae_decode_seconds": 2.637,
+        "max_rss_kib": 16363448,
+        "user_seconds": 584.563553,
+        "system_seconds": 103.653246,
+        "prewarm_seconds_excluded": 3.2305927257984877,
+        "opened_render_nodes": [
+          "/dev/dri/renderD134"
+        ],
+        "png_sha256": "6c4e85da180ff42c80b70a8791f571127ef2ba7b9271d9c97d09bfd6dd021bfa",
+        "second_denoise_step_seconds": 7.690117945894599,
+        "average_cpu_cores_used": 9.86565819775916
+      }
+    }
+  ],
+  "median_summary": {
+    "cpu": {
+      "elapsed_seconds": 274.2608125284314,
+      "steady_step_median_seconds": 106.61345238983631,
+      "vae_decode_seconds": 5.0214,
+      "max_rss_kib": 16066484
+    },
+    "auto": {
+      "elapsed_seconds": 57.84431742876768,
+      "steady_step_median_seconds": 7.636427644640207,
+      "vae_decode_seconds": 2.637,
+      "max_rss_kib": 16356332
+    },
+    "end_to_end_speedup": 4.741361376874567,
+    "steady_denoise_speedup": 13.961168408983129
+  },
+  "summary_metric_scope": "steady_denoise_speedup compares only the second denoise step in each two-step run; no inference of a 16-step CPU time.",
+  "gpu_16_step_image": {
+    "elapsed_seconds": 154.79569085128605,
+    "setup_through_first_step_seconds": 56.445966305211186,
+    "steady_step_median_seconds": 5.986854404211044,
+    "vae_decode_seconds": 2.5413,
+    "max_rss_kib": 16338156,
+    "user_seconds": 1660.238993,
+    "system_seconds": 261.578174,
+    "prewarm_seconds_excluded": 4.210995709523559,
+    "opened_render_nodes": [
+      "/dev/dri/renderD134"
+    ],
+    "png_sha256": "72d9efaca8be68ffdf6f0863da8ea51bd5fd482d1a46583aecaff381fda51035",
+    "steps": 16
+  },
+  "gpu_16_step_scope": "One separately timed GPU run, 256x256, 16 steps, same prompt/seed/binary; steady_step_median_seconds is the median of steps 2..16.",
+  "cpu_gpu_png_comparison": {
+    "scope": "Decoded RGB8 PNG between CPU and GPU at 256x256, two steps; not an official Oracle comparison.",
+    "relative_l2": 0.0003391142288784158,
+    "mean_absolute_8bit": 0.0046539306640625,
+    "max_absolute_8bit": 1.0
+  },
+  "device_memory_samples": {
+    "interval_seconds": 0.5,
+    "scope": "Selected-device-wide VRAM/GTT/busy counters. External sampler started partway through CPU round 1, and does not cover GPU round 1. These are not per-process VRAM peaks; GTT is host-backed GPU memory.",
+    "sampled_maxima": {
+      "cpu-1": {
+        "mem_info_vram_used": 44032000,
+        "mem_info_gtt_used": 3021635584,
+        "gpu_busy_percent": 100
+      },
+      "cpu-2": {
+        "mem_info_vram_used": 28004352,
+        "mem_info_gtt_used": 15962112,
+        "gpu_busy_percent": 0
+      },
+      "cpu-3": {
+        "mem_info_vram_used": 865628160,
+        "mem_info_gtt_used": 36461940736,
+        "gpu_busy_percent": 100
+      },
+      "gpu-2": {
+        "mem_info_vram_used": 38920192,
+        "mem_info_gtt_used": 9952952320,
+        "gpu_busy_percent": 64
+      },
+      "gpu-3": {
+        "mem_info_vram_used": 38928384,
+        "mem_info_gtt_used": 9953550336,
+        "gpu_busy_percent": 63
+      }
+    }
+  },
+  "limitations": [
+    "Shared host without exclusive CPU/GPU isolation; substantial run-to-run CPU variation. Raw per-round times are retained. CPU rounds 1/3 had no render node open, but separate device activity was observed during those runs; no exact performance cause is attributed.",
+    "All model files pre-read before each run outside timing; separate process startup, initialization and GPU uploads remain included. This is a warm-file-cache comparison, not cold-disk startup.",
+    "Only 256x256, two-step paired timings; one GPU-only 16-step image. No 16-step CPU comparison or larger-resolution performance claim.",
+    "Text encoder and remaining unsupported operations stay on CPU. GPU allocations are largely host-visible memory; device GTT usage and process RSS are separate counters and must not be summed as disjoint physical memory.",
+    "PNG agreement is not full numerical Oracle coverage for 256x256.",
+    "512x512 extension is a single pair under severe shared load, with documented device-selection and CPU timing-recovery deviations; do not compare its ratio with the earlier 256x256 median as a scaling claim."
+  ],
+  "raw_archive_sha256": "a9a19b1070716f8d3311dfc89d6a08684e0c0bbc514ef89df5a06e97f68e0b16",
+  "reproduce_cpu_command": [
+    "/root/flux3-rmi-01a16224/target/release/rust-model-inference",
+    "--model",
+    "models/flux3-dit.gguf",
+    "--text-encoder",
+    "models/flux3-text.gguf",
+    "--vae",
+    "models/flux3-vae.gguf",
+    "--prompt",
+    "A red cube on a white table.",
+    "--resolution",
+    "256",
+    "--steps",
+    "2",
+    "--seed",
+    "42",
+    "--threads",
+    "16",
+    "--compute",
+    "cpu",
+    "--out",
+    "target/flux3-perf-two-step-20261023/cpu-1.png"
+  ],
+  "reproduce_gpu_command": [
+    "/root/flux3-rmi-01a16224/target/release/rust-model-inference",
+    "--model",
+    "models/flux3-dit.gguf",
+    "--text-encoder",
+    "models/flux3-text.gguf",
+    "--vae",
+    "models/flux3-vae.gguf",
+    "--prompt",
+    "A red cube on a white table.",
+    "--resolution",
+    "256",
+    "--steps",
+    "2",
+    "--seed",
+    "42",
+    "--threads",
+    "16",
+    "--compute",
+    "auto",
+    "--out",
+    "target/flux3-perf-two-step-20261023/gpu-1.png"
+  ],
+  "extension_512": {
+    "runtime_commit": "9e127972578f5b90b6f097c37291b9bfe7cd106b",
+    "measurement": "One sequential 512x512/two-step pair on the shared host; approximate CPU start recovery. Latency stops at the PNG announcement for both backends. Not a median or isolated benchmark.",
+    "environment": {
+      "binary_sha256": "183468bb56d6f7c577637677a5c4f2f6eb8eda2fcf6f62db8aa8d40d07d1105d",
+      "runtime_source_sha256": {
+        "src/app/diffusion.rs": "c9f983c5fb52ef406680ed5366de3b6f7a466002d5d48f269260179d81ca5126",
+        "src/models/diffusion/flux3/mod.rs": "a909f6c842fbe7032d1dd29ae3682fe444f324b68b88de7c644c97c8d7b0b1b6",
+        "src/models/diffusion/flux3/dit.rs": "cc134cd3854d837d5f5b9470f9e994fabd1030c1e29d7fb79f918e7e2a3bfba6",
+        "src/models/diffusion/z_image/vae.rs": "d0fd8cc3fe5acc084d52edaa0c01c3cb145330494b88e3d4a0a67996c16e87e2",
+        "src/models/qwen3/trunk/forward.rs": "9d86a8be790b432cf6006d159a6b965a061cdb9ebf1389f2d63491a4d4a5be29",
+        "src/ops/kernel/vulkan.rs": "ec8f716777ecb2b521311989178f183e1b165fda0b57a043c6e8f8e797e1b91b"
+      },
+      "profile": "release; vulkan; parity-trace disabled",
+      "cpu_max": "1600000 100000",
+      "memory_max": "59055800320",
+      "device_pci": "0000:c3:00.0",
+      "device": "/sys/class/drm/card7/device",
+      "environment": {
+        "VK_ICD_FILENAMES": "/usr/share/vulkan/icd.d/radeon_icd.json",
+        "DRI_PRIME": "pci-0000_c3_00_0!"
+      },
+      "scope": "One sequential 512x512/two-step pair on a shared host; weights pre-read outside timing; setup/uploads included; no exclusive reservation.",
+      "actual_render_node": "/dev/dri/renderD134",
+      "available_render_nodes": [
+        "/dev/dri/renderD134"
+      ],
+      "qualification": "GPU generation and timing succeeded, but requested alternate-device assertion failed: container exposes/enumerates only c3/renderD134. GPU timing belongs to c3; mistakenly sampled card3 device-memory counters are excluded. CPU comparison is on the same host and exact release binary. Shared-device contention, no exclusive reservation.",
+      "gpu_helper_sha256": "e559fc63a0fac47b63166b05eb61d43efec41daf268dd13a76fb016211e14f9a"
+    },
+    "workload": {
+      "prompt": "A red cube on a white table.",
+      "side": 512,
+      "steps": 2,
+      "seed": 42,
+      "rust_threads": 16,
+      "references": 0,
+      "order": [
+        "gpu",
+        "cpu"
+      ]
+    },
+    "cpu": {
+      "png_announcement_seconds_approximate": 1593.8228520881385,
+      "observed_process_exit_seconds_approximate": 1594.6264021005481,
+      "exit_code": 0,
+      "exit_status_source": "/proc/3733510/stat field 52, observed zombie state Z with matching kernel starttime",
+      "clock_recovery_method": "Approximate original process start recovered from first-step event and log mtime; subsequent events use CLOCK_BOOTTIME. Start checked against /proc starttime within 1 second. Original SSH harness died; exit status recovered from the zombie process stat field 52.",
+      "start_difference_from_kernel_seconds": 0.0071823932230472565,
+      "second_denoise_step_seconds_approximate": 665.4920824281871,
+      "png_sha256": "da23cb4e2fd21c3afba1520fbab4aa0d9c2f643097663d6820c7d7dc06f8a393",
+      "command": [
+        "/root/flux3-rmi-01a16224/target/release/rust-model-inference",
+        "--model",
+        "/root/flux3-rmi-01a16224/models/flux3-dit.gguf",
+        "--text-encoder",
+        "/root/flux3-rmi-01a16224/models/flux3-text.gguf",
+        "--vae",
+        "/root/flux3-rmi-01a16224/models/flux3-vae.gguf",
+        "--prompt",
+        "A red cube on a white table.",
+        "--resolution",
+        "512",
+        "--steps",
+        "2",
+        "--seed",
+        "42",
+        "--threads",
+        "16",
+        "--compute",
+        "cpu",
+        "--out",
+        "/root/flux3-rmi-01a16224/target/flux3-completion-20261023/perf-512-final/cpu-512-2.png"
+      ]
+    },
+    "gpu": {
+      "png_announcement_seconds": 635.0323939993978,
+      "process_elapsed_seconds": 635.3594682943076,
+      "exit_code": 0,
+      "second_denoise_step_seconds": 360.46848100051284,
+      "actual_device_pci": "0000:c3:00.0",
+      "actual_render_nodes": [
+        "/dev/dri/renderD134"
+      ],
+      "png_sha256": "e8759a37512050a2d1f93965c57d2fe917b911db9520681f8d63b871ec64f0a5",
+      "command": [
+        "/root/flux3-rmi-01a16224/target/release/rust-model-inference",
+        "--model",
+        "/root/flux3-rmi-01a16224/models/flux3-dit.gguf",
+        "--text-encoder",
+        "/root/flux3-rmi-01a16224/models/flux3-text.gguf",
+        "--vae",
+        "/root/flux3-rmi-01a16224/models/flux3-vae.gguf",
+        "--prompt",
+        "A red cube on a white table.",
+        "--resolution",
+        "512",
+        "--steps",
+        "2",
+        "--seed",
+        "42",
+        "--threads",
+        "16",
+        "--compute",
+        "auto",
+        "--out",
+        "/root/flux3-rmi-01a16224/target/flux3-completion-20261023/perf-512-card3/gpu-512-2.png"
+      ],
+      "error_or_fallback_lines": []
+    },
+    "png_latency_ratio_approximate": 2.5098292105231566,
+    "decoded_png_comparison": {
+      "rgb8_max_difference": 1,
+      "rgb8_relative_l2": 0.00037503579243816166,
+      "scope": "CPU/GPU PNG consistency only; not an official 512x512 numerical Oracle comparison."
+    },
+    "qualification_deviations": [
+      "First GPU attempt was terminated by us after 1254.58 seconds without a completed denoise step; excluded from ratios.",
+      "Requested alternate card3, but container exposes/enumerates only renderD134/c3. Actual render node was independently verified. The alternate-device harness assertion failed after successful generation. Timing and PNG belong to c3; card3 device-memory samples are excluded.",
+      "SSH disconnected during CPU generation. A detached reader continued the same process, reconstructed its start (7.18 ms from kernel start), and recorded completion. Exit code 0 was recovered from matching zombie process stat field 52. CPU latency is approximate."
+    ],
+    "raw_archive_sha256": "e54fba5ff35e5d853b2775e777db6fd4963a2b117aaa54171992d682f4af8439"
+  }
+}

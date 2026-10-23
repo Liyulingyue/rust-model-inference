@@ -1,0 +1,863 @@
+{
+  "hf_revision": "337337621b8526e120f2275d250242f4a6bedd75",
+  "sources": {
+    "model.safetensors": {
+      "sha256": "c3e9813cdd049c831c836b2e9db61150e49a93fc1a4c63b256494642fee0bd7c",
+      "bytes": 11097404512
+    },
+    "ae.safetensors": {
+      "sha256": "868fe7b343cc8f3a19dbcfcafbc3d5f888802be3f89bd81b65b3621a066ce8f3",
+      "bytes": 336211292
+    },
+    "text_encoder/model-00001-of-00002.safetensors": {
+      "sha256": "30a01a0556622645a3cce87b655bbbbbc1f170c196099f1b666c93202c3339a9",
+      "bytes": 4967229296
+    },
+    "text_encoder/model-00002-of-00002.safetensors": {
+      "sha256": "046296a2a387efb43b0c997d5833c789604d168834f6e0d3064bf7bb13d002a6",
+      "bytes": 3908490048
+    },
+    "config.json": {
+      "sha256": "c4fc638a9618e8ddc25f013c009be4d2aa9bd631d89dcf45149a377dd472c67d",
+      "bytes": 828
+    },
+    "text_encoder/config.json": {
+      "sha256": "edac7703329133edfc53e46ac0081835144c99d7eebf28b71c732694d435224d",
+      "bytes": 1505
+    },
+    "text_encoder/tokenizer.json": {
+      "sha256": "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7",
+      "bytes": 7032403
+    },
+    "text_encoder/chat_template.json": {
+      "sha256": "6f8a6a55027e3da5160105556cda5dd69f6423f1c32645f6730d32de7773d0c4",
+      "bytes": 5502
+    }
+  },
+  "components": {
+    "dit": {
+      "sha256": "6e5a57d74fed53b8d766797b642f4eef30d15632fbd2a7f453533cfc771a7924",
+      "bytes": 11097390400,
+      "tensors": 359,
+      "lossless_payloads": 359,
+      "f16_payloads": 0,
+      "f16_relative_l2": 0.0,
+      "architecture": "flux3"
+    },
+    "text": {
+      "sha256": "4d7f199d4ae72e5ea61d7ff5f6d13f81459ac19cd320e84c9a1009c1d55ecf8a",
+      "bytes": 8050890496,
+      "tensors": 398,
+      "lossless_payloads": 398,
+      "f16_payloads": 0,
+      "f16_relative_l2": 0.0,
+      "architecture": "qwen3vl"
+    },
+    "vae": {
+      "sha256": "f2ad83f5e02f97a10fd76d77714ca6f0fbfeeaa11837ba7b9cd51cb32ac96b03",
+      "bytes": 168243168,
+      "tensors": 250,
+      "lossless_payloads": 178,
+      "f16_payloads": 72,
+      "f16_relative_l2": 0.000207374475770303,
+      "architecture": "flux3_vae"
+    }
+  },
+  "oracle_commit": "bfc8889a4497f846416f253a3972a1941ac698b9",
+  "supported_precision": "F32 CPU or hybrid Vulkan activations/accumulation; BF16 DiT/text weights; F16 VAE convolutions; CPU text encoder",
+  "cases": {
+    "text_to_image": {
+      "checkpoints": 89,
+      "passed": true,
+      "failed": 0,
+      "metrics": {
+        "flux3.text": {
+          "max_relative_l2": 1.543833870084055e-05,
+          "max_absolute": 0.25
+        },
+        "flux3.velocity": {
+          "max_relative_l2": 9.781360216977687e-05,
+          "max_absolute": 0.00045740604400634766
+        },
+        "z_image.vae.rgb_channels": {
+          "max_relative_l2": 0.0005855760926050863,
+          "max_absolute": 0.0034329742193222046
+        }
+      },
+      "png": {
+        "sha256": "710d050d5da35de5d822abc2f43f9ccd22e398c7cbb3ae6b2ee50b66e242acd2",
+        "width": 64,
+        "height": 64
+      }
+    },
+    "two_references": {
+      "checkpoints": 103,
+      "passed": true,
+      "failed": 0,
+      "metrics": {
+        "flux3.text": {
+          "max_relative_l2": 1.543833870084055e-05,
+          "max_absolute": 0.25
+        },
+        "flux3.reference.0": {
+          "max_relative_l2": 0.0013586002669404146,
+          "max_absolute": 0.015625
+        },
+        "flux3.reference.1": {
+          "max_relative_l2": 0.001310176322402025,
+          "max_absolute": 0.015625
+        },
+        "flux3.velocity": {
+          "max_relative_l2": 0.0010513125935175042,
+          "max_absolute": 0.009675979614257812
+        },
+        "z_image.vae.rgb_channels": {
+          "max_relative_l2": 0.00015723184205106524,
+          "max_absolute": 0.000527799129486084
+        }
+      },
+      "png": {
+        "sha256": "1cacdcdf39e189b5f12ba9989eed762bb5a978a827fb48ccefa4aa0f83897602",
+        "width": 64,
+        "height": 64
+      }
+    },
+    "native_bf16_diagnostic": {
+      "checkpoints": 89,
+      "passed": false,
+      "failed": 14,
+      "metrics": {
+        "flux3.text": {
+          "max_relative_l2": 0.006639730209740318,
+          "max_absolute": 64.0
+        },
+        "flux3.velocity": {
+          "max_relative_l2": 0.09924627249415122,
+          "max_absolute": 0.3608057498931885
+        },
+        "z_image.vae.rgb_channels": {
+          "max_relative_l2": 0.3107452207927836,
+          "max_absolute": 1.1686769127845764
+        }
+      }
+    },
+    "linux_vae": {
+      "checkpoints": 4,
+      "passed": true,
+      "failed": 0,
+      "metrics": {
+        "flux3.reference.0": {
+          "max_relative_l2": 0.001307079115595036,
+          "max_absolute": 0.0078125
+        },
+        "z_image.vae.rgb_channels": {
+          "max_relative_l2": 0.00047629085476915436,
+          "max_absolute": 0.001035153865814209
+        }
+      }
+    },
+    "text_only": {
+      "checkpoints": 2,
+      "passed": true,
+      "failed": 0,
+      "text_relative_l2": 1.543833870084055e-05
+    },
+    "image_smoke_256": {
+      "steps": 16,
+      "seed": 42,
+      "png": {
+        "sha256": "cc58ffc367dafbadb904073bb739ae6f5fcafdf9a06c8182267323ce542cfab9",
+        "width": 256,
+        "height": 256
+      },
+      "numerical_oracle_comparison": false
+    },
+    "linux_text": {
+      "checkpoints": 2,
+      "passed": true,
+      "failed": 0,
+      "metrics": {
+        "flux3.text": {
+          "max_relative_l2": 1.5835749253947158e-05,
+          "max_absolute": 0.25
+        }
+      },
+      "raw_bit_inputs_match": [
+        "flux3.token_ids"
+      ]
+    },
+    "linux_text_to_image": {
+      "checkpoints": 89,
+      "passed": true,
+      "failed": 0,
+      "metrics": {
+        "flux3.text": {
+          "max_relative_l2": 1.5835749253947158e-05,
+          "max_absolute": 0.25
+        },
+        "flux3.velocity": {
+          "max_relative_l2": 0.0001883653312021764,
+          "max_absolute": 0.0007414817810058594
+        },
+        "z_image.vae.rgb_channels": {
+          "max_relative_l2": 0.000858396122274647,
+          "max_absolute": 0.005670219659805298
+        }
+      },
+      "raw_bit_inputs_match": [
+        "flux3.token_ids",
+        "flux3.noise"
+      ],
+      "png": {
+        "sha256": "01be3e9e1f8e0dcf15150788526112a51ff4615820e1b0145c008adadeac0aac",
+        "width": 64,
+        "height": 64
+      },
+      "configuration": {
+        "side": 64,
+        "steps": 2,
+        "seed": 42,
+        "rust_threads": 16,
+        "oracle_threads": 8
+      }
+    },
+    "linux_two_references": {
+      "checkpoints": 103,
+      "passed": true,
+      "failed": 0,
+      "metrics": {
+        "flux3.text": {
+          "max_relative_l2": 1.5835749253947158e-05,
+          "max_absolute": 0.25
+        },
+        "flux3.reference.0": {
+          "max_relative_l2": 0.001307079115595036,
+          "max_absolute": 0.0078125
+        },
+        "flux3.reference.1": {
+          "max_relative_l2": 0.0013580421625331773,
+          "max_absolute": 0.015625
+        },
+        "flux3.velocity": {
+          "max_relative_l2": 0.0007977631242085659,
+          "max_absolute": 0.008357256650924683
+        },
+        "z_image.vae.rgb_channels": {
+          "max_relative_l2": 0.00031938910578040993,
+          "max_absolute": 0.0007936358451843262
+        }
+      },
+      "raw_bit_inputs_match": [
+        "flux3.token_ids",
+        "flux3.noise"
+      ],
+      "png": {
+        "sha256": "36f57a167ca0cb79978a0e0596371ff049b3522753fb2036a4498470a565b8c5",
+        "width": 64,
+        "height": 64
+      },
+      "configuration": {
+        "side": 64,
+        "steps": 2,
+        "seed": 42,
+        "rust_threads": 16,
+        "oracle_threads": 8
+      }
+    },
+    "linux_vulkan_text_to_image": {
+      "checkpoints": 89,
+      "passed": true,
+      "failed": 0,
+      "metrics": {
+        "flux3.text": {
+          "max_relative_l2": 1.5835749253947158e-05,
+          "max_absolute": 0.25
+        },
+        "flux3.velocity": {
+          "max_relative_l2": 0.00019007691121011833,
+          "max_absolute": 0.0007513761520385742
+        },
+        "z_image.vae.rgb_channels": {
+          "max_relative_l2": 0.0008690480321018869,
+          "max_absolute": 0.005610913038253784
+        }
+      },
+      "raw_bit_inputs_match": [
+        "flux3.token_ids",
+        "flux3.noise"
+      ],
+      "configuration": {
+        "side": 64,
+        "steps": 2,
+        "seed": 42,
+        "rust_threads": 16,
+        "oracle_threads": 8,
+        "compute": "auto",
+        "parity_trace": true
+      },
+      "png": {
+        "sha256": "f8bba4454978e252df8d32d27d1d25c31b7bea522b6fd64be1145d4259230dba",
+        "width": 64,
+        "height": 64
+      },
+      "execution": {
+        "vulkan_host_linear_calls": 484,
+        "cpu_host_linear_calls": 0,
+        "gpu_errors_or_fallbacks": 0,
+        "last_dit_device_cumulative": {
+          "submissions": 561,
+          "static_uploads": 241,
+          "static_upload_bytes": 9756476480,
+          "host_write_bytes": 870144036,
+          "host_read_bytes": 937148544,
+          "transfer_submissions": 0,
+          "live_allocation_bytes": 9787544400,
+          "peak_allocation_bytes": 9787544400
+        },
+        "counter_scope": "Device cumulative at the last DiT linear call, before final VAE decoding; not whole-process physical VRAM peak."
+      }
+    },
+    "linux_vulkan_two_references": {
+      "checkpoints": 103,
+      "passed": true,
+      "failed": 0,
+      "metrics": {
+        "flux3.text": {
+          "max_relative_l2": 1.5835749253947158e-05,
+          "max_absolute": 0.25
+        },
+        "flux3.reference.0": {
+          "max_relative_l2": 0.001375685729453788,
+          "max_absolute": 0.015625
+        },
+        "flux3.reference.1": {
+          "max_relative_l2": 0.0013785857872475739,
+          "max_absolute": 0.015625
+        },
+        "flux3.velocity": {
+          "max_relative_l2": 0.0007476081573548224,
+          "max_absolute": 0.007358461618423462
+        },
+        "z_image.vae.rgb_channels": {
+          "max_relative_l2": 0.00017623969121033538,
+          "max_absolute": 0.0005147457122802734
+        }
+      },
+      "raw_bit_inputs_match": [
+        "flux3.token_ids",
+        "flux3.noise"
+      ],
+      "configuration": {
+        "side": 64,
+        "steps": 2,
+        "seed": 42,
+        "rust_threads": 16,
+        "oracle_threads": 8,
+        "compute": "auto",
+        "parity_trace": true
+      },
+      "png": {
+        "sha256": "cb3f71ec8829c05862184bdfaf328a38ac39907fcc3c55250bc1b13976989a8b",
+        "width": 64,
+        "height": 64
+      },
+      "execution": {
+        "vulkan_host_linear_calls": 550,
+        "cpu_host_linear_calls": 0,
+        "gpu_errors_or_fallbacks": 0,
+        "last_dit_device_cumulative": {
+          "submissions": 695,
+          "static_uploads": 313,
+          "static_upload_bytes": 11165325888,
+          "host_write_bytes": 1188685860,
+          "host_read_bytes": 1289420928,
+          "transfer_submissions": 0,
+          "live_allocation_bytes": 11196783152,
+          "peak_allocation_bytes": 11196783152
+        },
+        "counter_scope": "Device cumulative at the last DiT linear call, before final VAE decoding; not whole-process physical VRAM peak."
+      }
+    },
+    "linux_vulkan_image_smoke_256": {
+      "exit_code": 0,
+      "elapsed_seconds": 155.291748682037,
+      "max_rss_kib": 16341124,
+      "steps": 16,
+      "seed": 42,
+      "compute": "auto",
+      "png": {
+        "sha256": "72d9efaca8be68ffdf6f0863da8ea51bd5fd482d1a46583aecaff381fda51035",
+        "width": 256,
+        "height": 256
+      },
+      "numerical_oracle_comparison": true,
+      "comparable_cpu_benchmark": false,
+      "comparison_case": "linux_vulkan_text_to_image_256_16 (same PNG SHA256)"
+    },
+    "linux_vulkan_text_to_image_256_16": {
+      "checkpoints": 677,
+      "passed": true,
+      "failed": 0,
+      "configuration": {
+        "side": 256,
+        "steps": 16,
+        "seed": 42,
+        "rust_threads": 16,
+        "oracle_threads": 8,
+        "compute": "auto",
+        "parity_trace": true
+      },
+      "raw_bit_inputs_match": [
+        "flux3.token_ids",
+        "flux3.noise"
+      ],
+      "metrics": {
+        "flux3.text": {
+          "max_relative_l2": 1.5835749253947158e-05,
+          "max_absolute": 0.25
+        },
+        "flux3.velocity": {
+          "max_relative_l2": 6.703784227085734e-05,
+          "max_absolute": 0.0007872581481933594
+        },
+        "z_image.vae.rgb_channels": {
+          "max_relative_l2": 9.507903858321915e-05,
+          "max_absolute": 0.001119077205657959
+        }
+      },
+      "worst_checkpoint": {
+        "name": "single_blocks.26",
+        "occurrence": 14,
+        "relative_l2": 0.0034946553449206846,
+        "max_absolute": 58948.5,
+        "criterion": "relative_l2 <= 0.005",
+        "passed": true
+      },
+      "png": {
+        "sha256": "72d9efaca8be68ffdf6f0863da8ea51bd5fd482d1a46583aecaff381fda51035",
+        "width": 256,
+        "height": 256
+      },
+      "execution": {
+        "vulkan_host_linear_calls": 9760,
+        "cpu_host_linear_calls": 0,
+        "gpu_errors_or_fallbacks": 0
+      },
+      "oracle_provenance": {
+        "arguments": {
+          "model_dir": "/Users/gouzi/Documents/git/rust-model-inference/models/flux-3-image-klein",
+          "output_dir": "target/flux3-completion-20261023/oracle-256-16",
+          "oracle_source": "target/flux3-oracle",
+          "prompt": "A red cube on a white table.",
+          "side": 256,
+          "steps": 16,
+          "seed": 42,
+          "threads": 8,
+          "dtype": "f32",
+          "reference": [],
+          "text_only": false,
+          "vae_only": false
+        },
+        "oracle_commit": "bfc8889a4497f846416f253a3972a1941ac698b9",
+        "torch": "2.9.1",
+        "numpy": "2.5.3",
+        "transformers": "5.19.0"
+      },
+      "rust_provenance": {
+        "command": [
+          "/root/flux3-rmi-01a16224/target/release-fast/rust-model-inference",
+          "--model",
+          "models/flux3-dit.gguf",
+          "--text-encoder",
+          "models/flux3-text.gguf",
+          "--vae",
+          "models/flux3-vae.gguf",
+          "--prompt",
+          "A red cube on a white table.",
+          "--resolution",
+          "256",
+          "--steps",
+          "16",
+          "--seed",
+          "42",
+          "--threads",
+          "16",
+          "--compute",
+          "auto",
+          "--out",
+          "/root/flux3-rmi-01a16224/target/flux3-completion-20261023/gpu-256-16.png"
+        ],
+        "source_sha256": {
+          "src/app/diffusion.rs": "c9f983c5fb52ef406680ed5366de3b6f7a466002d5d48f269260179d81ca5126",
+          "src/models/diffusion/flux3/dit.rs": "cc134cd3854d837d5f5b9470f9e994fabd1030c1e29d7fb79f918e7e2a3bfba6",
+          "src/models/diffusion/flux3/mod.rs": "4155165f6a4bbb42beafa123d6559ce814e7fe7999fa0c3c852ce88680f5894f",
+          "src/ops/kernel/vulkan.rs": "ec8f716777ecb2b521311989178f183e1b165fda0b57a043c6e8f8e797e1b91b"
+        },
+        "binary_sha256": "f4245751ec2a4bd81ae434cf31f1f18bd672380f118466e14a3211a6ad3c602a",
+        "environment": {
+          "VK_ICD_FILENAMES": "/usr/share/vulkan/icd.d/radeon_icd.json",
+          "DRI_PRIME": "pci-0000_c3_00_0!",
+          "RMI_PARITY_TRACE": "/root/flux3-rmi-01a16224/target/flux3-completion-20261023/gpu-256-16.jsonl",
+          "RMI_PARITY_FILTER": "flux3.token_ids,flux3.text,flux3.noise,flux3.image.input,flux3.txt.input,content_mode_blocks.image.0,txt_mode_blocks.0,content_mode_blocks.image.1,txt_mode_blocks.1,content_mode_blocks.image.2,txt_mode_blocks.2,content_mode_blocks.image.3,txt_mode_blocks.3,content_mode_blocks.image.4,txt_mode_blocks.4,single_blocks.0,single_blocks.1,single_blocks.2,single_blocks.3,single_blocks.4,single_blocks.5,single_blocks.6,single_blocks.7,single_blocks.8,single_blocks.9,single_blocks.10,single_blocks.11,single_blocks.12,single_blocks.13,single_blocks.14,single_blocks.15,single_blocks.16,single_blocks.17,single_blocks.18,single_blocks.19,single_blocks.20,single_blocks.21,single_blocks.22,single_blocks.23,single_blocks.24,single_blocks.25,single_blocks.26,single_blocks.27,flux3.velocity,flux3.latent.0,flux3.latent.1,flux3.vae_input,z_image.vae.rgb_channels,flux3.latent.2,flux3.latent.3,flux3.latent.4,flux3.latent.5,flux3.latent.6,flux3.latent.7,flux3.latent.8,flux3.latent.9,flux3.latent.10,flux3.latent.11,flux3.latent.12,flux3.latent.13,flux3.latent.14,flux3.latent.15",
+          "RMI_COMPUTE_TRACE": "1"
+        },
+        "profile": "release-fast; vulkan,parity-trace",
+        "returncode": 0,
+        "seconds": 3080.3067906107754
+      },
+      "evidence_sha256": {
+        "comparison-256-16.json": "8588107eec6d86a59f74ce4a443fa85f2dc17d44b0388aaf70d1025478f50f9b",
+        "oracle-256-16/trace.jsonl": "df0aa9de8932c4ce0fa713b5f1317401ced386685291ede002e02c1d7cc83b25",
+        "oracle-256-16/run.json": "4772adeec4c8dee98253b1e8793c232b9170cee58bb1f599495c9a756139d098",
+        "gpu-trace/gpu-256-16.jsonl": "2c27ad3df8057d0835539d168f386179a3190073c665718f31d371b2cd595400"
+      },
+      "source_scope": "Full GPU trace uses the pre-validator numerical snapshot. Runtime commit 9e127972578f5b90b6f097c37291b9bfe7cd106b only adds text input validation and a negative test; accepted-file numerical operations are unchanged. Final release performance separately exercises the new validator with the released files.",
+      "timing_scope": "Trace duration is excluded from performance conclusions."
+    }
+  },
+  "tests": {
+    "macos_flux3_including_real_ignored": {
+      "passed": 6,
+      "ignored": 0
+    },
+    "macos_qwen_trunk_parity_trace": {
+      "passed": 11,
+      "ignored": 1
+    },
+    "python_converter_comparator": {
+      "passed": 8
+    },
+    "macos_vae_regression": {
+      "passed": 25,
+      "ignored": 1,
+      "baseline_failed": 1,
+      "baseline_commit": "973210b6",
+      "failure": "SiLU bitwise assertion differs by 1 ULP"
+    },
+    "macos_vulkan_parity_trace_lib": {
+      "passed": 1339,
+      "failed": 34,
+      "ignored": 163,
+      "test_threads": 1,
+      "baseline_commit": "ffb387ae5956118e1940bd8b1569f163d01383b7",
+      "baseline": {
+        "passed": 1337,
+        "failed": 35,
+        "ignored": 161,
+        "test_threads": 1
+      },
+      "baseline_failure_names": [
+        "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+        "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+        "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+        "models::clm::tests::matches_reference_golden_vectors",
+        "models::clm::tests::rejects_wrong_embedding_width",
+        "models::diffusion::z_image::dit::tests::attention_matches_the_ggml_neon_softmax_and_value_reduction",
+        "models::diffusion::z_image::dit::tests::silu_mul_inplace_matches_ggml_neon_activation_dit",
+        "models::diffusion::z_image::dit::tests::torch_mt19937_recomputes_the_final_sixteen_values",
+        "models::diffusion::z_image::text::tests::qwen_attention_softmax_matches_the_pinned_ggml_neon_reduction",
+        "models::diffusion::z_image::text::tests::silu_mul_inplace_matches_pinned_ggml_neon_activation",
+        "models::diffusion::z_image::vae::tests::silu_matches_pinned_ggml_neon_vector_path",
+        "models::dots::weights::tests::flattened_q8_convolution_loads_without_dequantizing_and_runs_batched",
+        "models::funasr::encoder::parity_tests::fsmn_rounds_product_before_adding_like_ggml",
+        "models::funasr::encoder::parity_tests::layernorm_accumulates_variance_in_ggml_neon_groups",
+        "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+        "models::gemma4::trunk::tests::gemma4_trace_rows_match_batch_one_raw_bits",
+        "models::gemma4::trunk::tests::per_layer_bf16_projection_matches_pinned_scalar_dot_bits",
+        "models::gemma4::trunk::tests::per_layer_projection_rejects_non_bf16_weight",
+        "models::gemma4::trunk::tests::per_layer_projection_rejects_wrong_bf16_storage_length",
+        "models::qwen35::trunk::config::tests::qwen35_config_rejects_invalid_tensor_dimensions",
+        "models::qwen35::trunk::tests::last_hidden_borrows_all_final_norm_rows_from_the_last_step",
+        "models::qwen35::trunk::tests::qwen35_failed_chunk_keeps_dense_and_recurrent_state",
+        "models::qwen35::trunk::tests::qwen35_trace_metadata_is_independent_of_prefill_batch_size",
+        "models::qwen35::vision::tests::layer_norm_stats_match_ggml_grouped_f32_variance",
+        "ops::argmax::tests::all_negative",
+        "ops::argmax::tests::large_random",
+        "ops::argmax::tests::middle_max",
+        "ops::argmax::tests::tail_handles_non_aligned_lengths",
+        "ops::argmax::tests::ties_pick_lowest_index",
+        "ops::kernel::q8_0::tests::q8_kernel_multi_row",
+        "ops::kernel::q8_0::tests::q8_kernel_thread_partition",
+        "ops::kernel::q8_0::tests::q8_kernel_uniform_weights_sum_to_dot_product",
+        "ops::kernel::qtensor_owned::qtensor_owned_tests::qtensor_owned_kernel_matches_borrowed_kernel_bit_exact",
+        "ops::matmul::neon_tests::neon_softmax_matches_ggml_vector_exp_and_f64_sum",
+        "ops::rope::tests::rope_neox_inplace_simd_matches_scalar_fallback"
+      ],
+      "final_failure_names": [
+        "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+        "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+        "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+        "models::clm::tests::matches_reference_golden_vectors",
+        "models::clm::tests::rejects_wrong_embedding_width",
+        "models::diffusion::z_image::dit::tests::attention_matches_the_ggml_neon_softmax_and_value_reduction",
+        "models::diffusion::z_image::dit::tests::silu_mul_inplace_matches_ggml_neon_activation_dit",
+        "models::diffusion::z_image::dit::tests::torch_mt19937_recomputes_the_final_sixteen_values",
+        "models::diffusion::z_image::text::tests::qwen_attention_softmax_matches_the_pinned_ggml_neon_reduction",
+        "models::diffusion::z_image::text::tests::silu_mul_inplace_matches_pinned_ggml_neon_activation",
+        "models::diffusion::z_image::vae::tests::silu_matches_pinned_ggml_neon_vector_path",
+        "models::dots::weights::tests::flattened_q8_convolution_loads_without_dequantizing_and_runs_batched",
+        "models::funasr::encoder::parity_tests::fsmn_rounds_product_before_adding_like_ggml",
+        "models::funasr::encoder::parity_tests::layernorm_accumulates_variance_in_ggml_neon_groups",
+        "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+        "models::gemma4::trunk::tests::gemma4_trace_rows_match_batch_one_raw_bits",
+        "models::gemma4::trunk::tests::per_layer_bf16_projection_matches_pinned_scalar_dot_bits",
+        "models::gemma4::trunk::tests::per_layer_projection_rejects_non_bf16_weight",
+        "models::gemma4::trunk::tests::per_layer_projection_rejects_wrong_bf16_storage_length",
+        "models::qwen35::trunk::config::tests::qwen35_config_rejects_invalid_tensor_dimensions",
+        "models::qwen35::trunk::tests::last_hidden_borrows_all_final_norm_rows_from_the_last_step",
+        "models::qwen35::trunk::tests::qwen35_failed_chunk_keeps_dense_and_recurrent_state",
+        "models::qwen35::trunk::tests::qwen35_trace_metadata_is_independent_of_prefill_batch_size",
+        "models::qwen35::vision::tests::layer_norm_stats_match_ggml_grouped_f32_variance",
+        "ops::argmax::tests::all_negative",
+        "ops::argmax::tests::large_random",
+        "ops::argmax::tests::middle_max",
+        "ops::argmax::tests::tail_handles_non_aligned_lengths",
+        "ops::argmax::tests::ties_pick_lowest_index",
+        "ops::kernel::q8_0::tests::q8_kernel_thread_partition",
+        "ops::kernel::q8_0::tests::q8_kernel_uniform_weights_sum_to_dot_product",
+        "ops::kernel::qtensor_owned::qtensor_owned_tests::qtensor_owned_kernel_matches_borrowed_kernel_bit_exact",
+        "ops::matmul::neon_tests::neon_softmax_matches_ggml_vector_exp_and_f64_sum",
+        "ops::rope::tests::rope_neox_inplace_simd_matches_scalar_fallback"
+      ],
+      "new_failures": [],
+      "parallel_repeat": {
+        "passed": 1339,
+        "failed": 34,
+        "ignored": 163,
+        "extra_names_not_in_serial_baseline": [
+          "models::qwen3::asr::mel_encoder::tests::projector_is_post_ln_then_linear_gelu_linear"
+        ],
+        "extra_name_isolated_recheck_passed": true
+      },
+      "earlier_parallel_run": {
+        "passed": 1342,
+        "failed": 31,
+        "ignored": 163,
+        "baseline": {
+          "passed": 1341,
+          "failed": 31,
+          "ignored": 161
+        },
+        "new_failures": []
+      },
+      "scope": "Whole-suite results vary. All final single-thread failure names occur on the clean single-thread baseline. One additional parallel ASR failure passes alone; no root cause attributed."
+    },
+    "macos_qwen_trunk_vulkan_parity_trace": {
+      "passed": 28,
+      "ignored": 1
+    },
+    "linux_vulkan_projection_tiles_and_cache": {
+      "passed": 1,
+      "run_ignored_explicitly": true
+    },
+    "linux_vulkan_traced_attention": {
+      "passed": 1,
+      "run_ignored_explicitly": true
+    },
+    "linux_vulkan_scalar_scope": {
+      "passed": 1,
+      "run_ignored_explicitly": true,
+      "red_green_verified": true
+    },
+    "macos_flux3_vulkan_parity_trace": {
+      "passed": 4,
+      "ignored": 4
+    },
+    "merge_main_regression": {
+      "base_commit": "973210b6de572b8226cd576da7ace17fb22d8ad5",
+      "runtime_commit": "9e127972578f5b90b6f097c37291b9bfe7cd106b",
+      "features": "vulkan,parity-trace",
+      "test_threads": 1,
+      "controlled_environment": {
+        "VK_ICD_FILENAMES": "/Users/gouzi/.codex/worktrees/e4f5/rust-model-inference/target/flux3-completion-20261023/unavailable-icd.json",
+        "VK_DRIVER_FILES": "/Users/gouzi/.codex/worktrees/e4f5/rust-model-inference/target/flux3-completion-20261023/unavailable-icd.json"
+      },
+      "scope": "Identical unavailable ICD overrides keep compiled Vulkan support while selecting CPU fallback; hardware Vulkan is validated separately.",
+      "main": {
+        "passed": 1339,
+        "failed": 29,
+        "ignored": 158
+      },
+      "pr": {
+        "passed": 1345,
+        "failed": 29,
+        "ignored": 163
+      },
+      "shared_failure_names": [
+        "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+        "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+        "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+        "models::clm::tests::matches_reference_golden_vectors",
+        "models::clm::tests::rejects_wrong_embedding_width",
+        "models::diffusion::z_image::dit::tests::attention_matches_the_ggml_neon_softmax_and_value_reduction",
+        "models::diffusion::z_image::dit::tests::silu_mul_inplace_matches_ggml_neon_activation_dit",
+        "models::diffusion::z_image::dit::tests::torch_mt19937_recomputes_the_final_sixteen_values",
+        "models::diffusion::z_image::text::tests::qwen_attention_softmax_matches_the_pinned_ggml_neon_reduction",
+        "models::diffusion::z_image::text::tests::silu_mul_inplace_matches_pinned_ggml_neon_activation",
+        "models::diffusion::z_image::vae::tests::silu_matches_pinned_ggml_neon_vector_path",
+        "models::funasr::encoder::parity_tests::fsmn_rounds_product_before_adding_like_ggml",
+        "models::funasr::encoder::parity_tests::layernorm_accumulates_variance_in_ggml_neon_groups",
+        "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+        "models::gemma4::trunk::tests::gemma4_trace_rows_match_batch_one_raw_bits",
+        "models::gemma4::trunk::tests::per_layer_bf16_projection_matches_pinned_scalar_dot_bits",
+        "models::gemma4::trunk::tests::per_layer_projection_rejects_non_bf16_weight",
+        "models::gemma4::trunk::tests::per_layer_projection_rejects_wrong_bf16_storage_length",
+        "models::qwen35::trunk::config::tests::qwen35_config_rejects_invalid_tensor_dimensions",
+        "models::qwen35::trunk::tests::qwen35_trace_metadata_is_independent_of_prefill_batch_size",
+        "models::qwen35::vision::tests::layer_norm_stats_match_ggml_grouped_f32_variance",
+        "ops::argmax::tests::all_negative",
+        "ops::argmax::tests::large_random",
+        "ops::argmax::tests::middle_max",
+        "ops::argmax::tests::tail_handles_non_aligned_lengths",
+        "ops::argmax::tests::ties_pick_lowest_index",
+        "ops::matmul::neon_tests::neon_softmax_matches_ggml_vector_exp_and_f64_sum",
+        "ops::rope::tests::rope_neox_inplace_simd_matches_scalar_fallback",
+        "vulkan::tests::initializes_with_homebrew_moltenvk"
+      ],
+      "new_failures": [],
+      "device_enabled_suite": {
+        "main_initial": {
+          "passed": 1336,
+          "failed": 32,
+          "ignored": 158
+        },
+        "pr_initial": {
+          "passed": 1338,
+          "failed": 35,
+          "ignored": 163
+        },
+        "main_repeat_failure_counts": [
+          33,
+          33,
+          32
+        ],
+        "pr_extra_failure_names": [
+          "models::qwen3::asr::mel_encoder::tests::audio_ffn_is_up_gelu_down_not_gated",
+          "ops::kernel::qtensor_owned::qtensor_owned_tests::qtensor_owned_fused_kernel_dispatches_correctly",
+          "ops::kernel::qtensor_owned::qtensor_owned_tests::qtensor_owned_kernel_matches_borrowed_kernel_bit_exact"
+        ],
+        "isolated_rechecks": "All three additional PR failure names pass in fresh processes on both main and PR. One also fails in repeated main whole-suite runs.",
+        "scope": "The device-enabled whole suite is not green or stable; no whole-suite Vulkan cleanliness claim."
+      }
+    },
+    "text_contract_rejection": {
+      "passed": 1,
+      "negative_cases": 8,
+      "red_green_verified": true,
+      "scope": "Missing/quantized/wrong-shape/truncated embedding; extra output/classifier weights and QKV bias; full 398-tensor validation accepts the released component."
+    },
+    "macos_flux3_vulkan_final": {
+      "passed": 4,
+      "ignored": 4
+    },
+    "macos_real_components_final": {
+      "passed": 3,
+      "ignored": 0
+    },
+    "linux_final_release_512": {
+      "cpu_exit_code": 0,
+      "gpu_exit_code": 0,
+      "png_shape": [
+        512,
+        512,
+        3
+      ],
+      "cpu_gpu_rgb8_max_difference": 1,
+      "source_hashes_match_final_runtime": true,
+      "numerical_oracle_comparison": false,
+      "scope": "Final released text validator accepts official files; both generations complete. CPU clock/exit recovery and GPU device qualification are recorded in performance.json."
+    }
+  },
+  "linux_full_validation": {
+    "status": "passed",
+    "completed_scope": "Native build, three FLUX3 unit tests, shared Qwen regressions, released text/VAE tests, and complete text-to-image/two-reference CLI comparisons.",
+    "oracle_execution": "Pinned F32 CPU Oracle recorded on macOS arm64, with 8 Oracle threads; Linux CLI uses 16 Rust threads."
+  },
+  "linux_environment": {
+    "platform": "Linux-6.8.0-79-generic-x86_64-with-glibc2.39",
+    "machine": "x86_64",
+    "cpu": "AMD EPYC 9334 32-Core Processor",
+    "python": "3.12.3",
+    "torch": "2.9.1+gitff65f5b",
+    "numpy": "2.1.2",
+    "transformers": "4.57.6",
+    "rustc": "rustc 1.94.1 (e408947bf 2026-03-25)",
+    "memory_max_bytes": 59055800320,
+    "cpu_max": "1600000 100000",
+    "cli_threads": 16
+  },
+  "linux_source_rust_sha256": {
+    "src/app/diffusion.rs": "7202c28e3f5843acb4f438385a86708460bcd0cfc41de14cd76bdd6d927c2b8e",
+    "src/app/mod.rs": "8899fccdebd8b14b29948f5f4224e0fe77b5dfe58f23a031ecf7605772f03b24",
+    "src/main.rs": "2213862157fa2c6e395ebebd80e4762f1abf7a16866ffff2a92ed976f5c45f43",
+    "src/models/diffusion/flux3/dit.rs": "1eae967ced74d4fdafe9099ab68d2f07b642cfd7f6c823138c92c9f893bb0203",
+    "src/models/diffusion/flux3/mod.rs": "84f0d56d7df14ee2ff74fa48dfa1afacef7a869ba397325ee51073ca117021a7",
+    "src/models/diffusion/mod.rs": "79d63e99a7bbc0b86c61e93ed455207e96d52eaeb9c84a1560886ec7d1d585c4",
+    "src/models/diffusion/z_image/vae.rs": "d0fd8cc3fe5acc084d52edaa0c01c3cb145330494b88e3d4a0a67996c16e87e2",
+    "src/models/qwen3/trunk/forward.rs": "9d86a8be790b432cf6006d159a6b965a061cdb9ebf1389f2d63491a4d4a5be29",
+    "src/models/qwen3/trunk/tests.rs": "bee1fcfbbd450b3b8a77bf1f938dbe17d363e8391fb59985458ab24a1ba49a53"
+  },
+  "linux_vulkan_environment": {
+    "device": "AMD Radeon Graphics (RADV NAVI31)",
+    "icd": "/usr/share/vulkan/icd.d/radeon_icd.json",
+    "vram_total_bytes": 51522830336,
+    "precision": "BF16 DiT weights, F32 activations; existing Vulkan linear/attention and supported F16 VAE convolution operators",
+    "cpu_operations": [
+      "text encoder",
+      "normalization",
+      "RoPE",
+      "sampler",
+      "remaining unsupported operators"
+    ]
+  },
+  "linux_source_rust_sha256_scope": "CPU validation snapshot before hybrid Vulkan implementation; the GPU source snapshot is recorded separately.",
+  "linux_vulkan_source_rust_sha256": {
+    "src/app/diffusion.rs": "c9f983c5fb52ef406680ed5366de3b6f7a466002d5d48f269260179d81ca5126",
+    "src/models/diffusion/flux3/dit.rs": "cc134cd3854d837d5f5b9470f9e994fabd1030c1e29d7fb79f918e7e2a3bfba6",
+    "src/models/diffusion/flux3/mod.rs": "4155165f6a4bbb42beafa123d6559ce814e7fe7999fa0c3c852ce88680f5894f",
+    "src/ops/kernel/vulkan.rs": "ec8f716777ecb2b521311989178f183e1b165fda0b57a043c6e8f8e797e1b91b"
+  },
+  "performance": {
+    "report": "performance.json",
+    "date": "2026-10-23",
+    "paired_resolution": [
+      256,
+      256
+    ],
+    "paired_steps": 2,
+    "repeats_per_backend": 3,
+    "cpu_median_seconds": 274.2608125284314,
+    "gpu_median_seconds": 57.84431742876768,
+    "end_to_end_speedup": 4.741361376874567,
+    "second_denoise_step_speedup": 13.961168408983129,
+    "gpu_16_step_seconds": 154.79569085128605,
+    "shared_host": true,
+    "extension_512": {
+      "report_key": "performance.json extension_512",
+      "side": 512,
+      "steps": 2,
+      "cpu_png_seconds_approximate": 1593.8228520881385,
+      "gpu_png_seconds": 635.0323939993978,
+      "png_latency_ratio_approximate": 2.5098292105231566,
+      "scope": "One sequential 512x512/two-step pair on the shared host; approximate CPU start recovery. Latency stops at the PNG announcement for both backends. Not a median or isolated benchmark."
+    }
+  },
+  "review": {
+    "kind": "independent agent review; no GitHub approval implied",
+    "base_commit": "973210b6de572b8226cd576da7ace17fb22d8ad5",
+    "reviewed_runtime_commit": "9e127972578f5b90b6f097c37291b9bfe7cd106b",
+    "critical_remaining": 0,
+    "important_remaining": 0,
+    "fixed": "Validate all 398 BF16 text tensors and released Qwen metadata before shared loading; reject optional QKV biases and output/classification heads.",
+    "recommendation": "Ready as Experimental within the documented precision and device scope; the larger 256x256/16-step GPU case passes all 677 canonical Oracle checkpoints.",
+    "larger_image_followup": {
+      "checkpoints": 677,
+      "passed": true,
+      "canonical_manifest_verified": true,
+      "evidence_hashes_verified": 4,
+      "source_snapshot_verified": "trace source matches 9e127972^; final accepted-file numerical operations unchanged",
+      "recommendation": "No new blocker; ready within documented Experimental scope.",
+      "scope": "Independent follow-up verifies saved metrics, canonical manifest and provenance; author reran the full binary comparator."
+    }
+  }
+}

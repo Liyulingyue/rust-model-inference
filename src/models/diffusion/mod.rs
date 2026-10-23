@@ -25,6 +25,7 @@ pub mod auk;
 pub(crate) mod common;
 pub mod dreamx;
 pub mod ernie_image;
+pub mod flux3;
 pub mod longcat;
 pub mod mage_flow;
 pub mod pig;

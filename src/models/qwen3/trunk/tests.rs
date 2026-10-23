@@ -373,6 +373,56 @@ pub(super) fn deterministic_session_model(n_ctx: usize) -> Qwen3Model {
 }
 
 #[test]
+fn hidden_layer_capture_is_token_major_and_respects_padding() {
+    let mut model = deterministic_session_model(16);
+    model
+        .layers
+        .push(deterministic_session_model(16).layers.remove(0));
+    model
+        .layers
+        .push(deterministic_session_model(16).layers.remove(0));
+    model.config.n_layer = 3;
+    let positions = [[0; 4], [1; 4], [1; 4], [3; 4]];
+    let mask = [true, true, false, true];
+    let captured = model
+        .text_encode_hidden_layers(&[0, 1, 2, 3], &positions, &mask, &[1, 2])
+        .unwrap();
+    assert_eq!(captured.len(), 4 * 2 * 32);
+    for (index, depth) in [1, 2].into_iter().enumerate() {
+        model.config.n_layer = depth;
+        let expected = model
+            .text_encode_embeddings(
+                model.embed_tokens(&[0, 1, 2, 3]).unwrap(),
+                &positions,
+                &mask,
+            )
+            .unwrap();
+        for token in 0..4 {
+            let start = (token * 2 + index) * 32;
+            let mut normalized = [0.0; 32];
+            crate::ops::rms_norm(
+                &captured[start..start + 32],
+                &model.output_norm,
+                &mut normalized,
+                model.config.eps,
+            );
+            assert_eq!(&normalized, &expected[token * 32..(token + 1) * 32]);
+        }
+    }
+    model.config.n_layer = 3;
+    let changed = model
+        .text_encode_hidden_layers(&[0, 1, 7, 3], &positions, &mask, &[1, 2])
+        .unwrap();
+    assert_eq!(&captured[3 * 64..], &changed[3 * 64..]);
+    assert_ne!(&captured[2 * 64..3 * 64], &changed[2 * 64..3 * 64]);
+    for layers in [&[][..], &[0], &[2, 1], &[1, 1], &[3]] {
+        assert!(model
+            .text_encode_hidden_layers(&[0, 1, 2, 3], &positions, &mask, layers)
+            .is_err());
+    }
+}
+
+#[test]
 fn text_embeddings_mask_hides_middle_padding_from_later_tokens() {
     let model = deterministic_session_model(16);
     let positions = [[0, 0, 0, 0], [1, 1, 1, 0], [2, 2, 2, 0], [3, 3, 3, 0]];

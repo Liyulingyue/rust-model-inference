@@ -213,7 +213,37 @@ impl Qwen3Model {
             return Err("Invalid Qwen text embeddings or attention mask".into());
         }
         let n_tokens = positions.len();
-        text_encode_forward(self, &embeddings, n_tokens, positions, Some(key_mask))
+        text_encode_forward(self, &embeddings, n_tokens, positions, Some(key_mask), &[])
+    }
+
+    /// Token-major concatenation of selected pre-output-norm hidden layers.
+    /// Layer numbers follow Transformers' `hidden_states` (embedding is zero).
+    pub(crate) fn text_encode_hidden_layers(
+        &self,
+        token_ids: &[u32],
+        positions: &[[usize; 4]],
+        key_mask: &[bool],
+        layers: &[usize],
+    ) -> Result<Vec<f32>, String> {
+        if token_ids.len() != positions.len()
+            || token_ids.len() != key_mask.len()
+            || key_mask.first() != Some(&true)
+            || layers.is_empty()
+            || layers[0] == 0
+            || layers.windows(2).any(|w| w[0] >= w[1])
+            || *layers.last().unwrap() >= self.config.n_layer
+        {
+            return Err("Invalid Qwen hidden-layer extraction request".into());
+        }
+        let embeddings = self.embed_tokens(token_ids)?;
+        text_encode_forward(
+            self,
+            &embeddings,
+            token_ids.len(),
+            positions,
+            Some(key_mask),
+            layers,
+        )
     }
 }
 
@@ -227,7 +257,7 @@ pub fn text_encode(
         return Ok(Vec::new());
     }
     let embeddings = model.embed_tokens(token_ids)?;
-    text_encode_forward(model, &embeddings, n_tokens, positions, None)
+    text_encode_forward(model, &embeddings, n_tokens, positions, None, &[])
 }
 
 /// Qwen2.5-Omni CFMEdit extension: same as [`text_encode`] but with audio
@@ -274,7 +304,7 @@ pub fn text_encode_with_audio(
         let off = *pos * n_embd;
         embeddings[off..off + n_embd].copy_from_slice(audio_embed);
     }
-    text_encode_forward(model, &embeddings, n_tokens, positions, None)
+    text_encode_forward(model, &embeddings, n_tokens, positions, None, &[])
 }
 
 /// One weight applied to every token row: the weight, its output width, the
@@ -364,19 +394,20 @@ impl RowsWrap {
 /// Shared forward path for [`text_encode`] and [`text_encode_with_audio`].
 /// Operates on pre-built per-token embeddings of shape `[n_tokens, n_embd]`.
 ///
-/// `key_mask` masks out padded keys. `None` means full bidirectional
-/// attention over every position.
+/// `key_mask` masks out padded keys; causal attention always hides future keys.
 fn text_encode_forward(
     model: &Qwen3Model,
     embeddings: &[f32],
     n_tokens: usize,
     positions: &[[usize; 4]],
     key_mask: Option<&[bool]>,
+    layers: &[usize],
 ) -> Result<Vec<f32>, String> {
     #[cfg(feature = "vulkan")]
     let mut full_model_gpu_failed = false;
     #[cfg(feature = "vulkan")]
-    if key_mask.is_none()
+    if layers.is_empty()
+        && key_mask.is_none()
         && positions
             .iter()
             .enumerate()
@@ -408,8 +439,13 @@ fn text_encode_forward(
     let kq_scale = 1.0 / (cfg.n_embd_head_k as f32).sqrt();
 
     let mut hidden = embeddings.to_vec();
+    let mut collected = if layers.is_empty() {
+        Vec::new()
+    } else {
+        vec![0.0; checked_product("hidden-layer output", hidden.len(), layers.len())?]
+    };
 
-    for layer_idx in 0..cfg.n_layer {
+    for layer_idx in 0..layers.last().copied().unwrap_or(cfg.n_layer) {
         let layer = &model.layers[layer_idx];
 
         let mut normed = vec![0.0; n_tokens * cfg.n_embd];
@@ -689,8 +725,18 @@ fn text_encode_forward(
                 }
             }
         }
+        if let Ok(index) = layers.binary_search(&(layer_idx + 1)) {
+            for tok in 0..n_tokens {
+                let dst = (tok * layers.len() + index) * cfg.n_embd;
+                collected[dst..dst + cfg.n_embd]
+                    .copy_from_slice(&hidden[tok * cfg.n_embd..(tok + 1) * cfg.n_embd]);
+            }
+        }
     }
 
+    if !layers.is_empty() {
+        return Ok(collected);
+    }
     let mut output = vec![0.0; n_tokens * cfg.n_embd];
     for tok in 0..n_tokens {
         let off = tok * cfg.n_embd;
