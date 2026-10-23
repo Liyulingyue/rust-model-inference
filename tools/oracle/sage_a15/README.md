@@ -38,7 +38,13 @@ the shared builder also accepts a tarball with matching pinned model blobs.
 BLAS, Accelerate, Metal and other external accelerators are disabled. The
 builder also disables SSE4.2/AVX kernels, baseline SSE2/NEON activation and
 reduction branches, and FMA contraction;
-`compare.py` sets Rust's existing `RMI_SCALAR=1` dispatch. The lossy comparisons
+`compare.py` clears `RMI_SCALAR` to exercise default Rust dispatch. The
+`qwen35moe` decoder selects reference arithmetic for each synchronous forward
+and propagates it to its compute workers, restoring the previous thread-local
+setting afterward. Other architectures retain their normal dispatch. This
+prevents small reassociations from crossing Q8 activation boundaries and
+changing later expert selection; it does disable explicit CPU SIMD kernels
+for this architecture. The Vulkan decoder still uses packed integer dots. The lossy comparisons
 below use numerical bounds, including on this reproducible scalar CPU path.
 
 ```sh
@@ -94,14 +100,13 @@ the harness intentionally retains numerical assertions for lossy operations.
 The small non-ignored MoE fixture exercises production routing and fails with
 the previous F32 reductions, without requiring model files.
 
-Default ARM NEON CLI smokes also passed with built-in chat wrapping, the GGUF
-Jinja template, and the F16 projector (a solid-red image was identified as red).
-The two text trace cases generated the same four greedy IDs with default
-dispatch, but **did not pass the scalar numerical/routing contract**: worst
-relative L2 was 0.05289 / 0.11320, minimum cosine 0.99860 / 0.99359, and maximum
-logit absolute error 0.50174 / 1.16432 for raw / Chinese respectively; some
-selected expert IDs/order differed. These are measured limits, not relaxed
-acceptance thresholds. Use `RMI_SCALAR=1` for the validated Oracle contract.
+Default ARM CPU now also passes the same 1,100 selected checkpoints without
+`RMI_SCALAR`: observed relative L2 and absolute error 0, cosine 1, with the
+same exact token/embedding/expert checks. This replaces the earlier default
+NEON result, which exceeded the bounds (relative L2 0.05289 / 0.11320 and
+maximum logit absolute error 0.50174 / 1.16432 for raw / Chinese).
+Vision encoding remains on its existing default dispatch and has CLI smoke
+coverage only, without numerical Oracle comparison.
 
 Example CLI usage (set `SAGE_MODEL_DIR` to the artifact directory):
 
@@ -139,10 +144,11 @@ convolution output; the small discrepancy then entered recurrent state. The
 builder selects the pinned implementation's scalar branches without changing
 model formulas or comparison thresholds.
 
-Default-dispatch CLI smokes passed on this host for built-in chat wrapping,
+Earlier default-dispatch CLI smokes passed on this host for built-in chat wrapping,
 the GGUF Jinja template, and the F16 projector identifying a solid-red image
-as red. These establish CLI execution only; the x86_64 optimized kernels and
-vision outputs were not compared numerically with the Oracle.
+as red. Those smokes establish CLI execution only. The completion validation below
+separately checks default text dispatch; vision outputs still lack numerical
+Oracle comparison.
 
 ### Vulkan MoE decoder
 
@@ -158,7 +164,11 @@ Recurrent SiLU now follows the existing exact/NEON/AVX2 dispatch, including
 `RMI_SCALAR=1`. F32 matrix products use compensated accumulation in scalar
 Oracle mode, preserving the CPU's wide sum of F32-rounded products without
 requiring GPU float64 support. Recurrent state and attention scalar dots also
-use compensated sums. Other modes retain their existing reduction contracts.
+use compensated sums. The shared F32 shader also packs 64 independent reference outputs into each
+workgroup; AVX2 mode packs four outputs and follows its two eight-lane FMA
+streams and horizontal sums. An adversarial cancellation fixture failed on
+the old shader (0 instead of 1) and passes on the physical AMD adapter in
+default and reference modes. Tail widths and grouped outputs are exercised.
 
 On Linux x86_64 GNU builds, a shader specialization selects the same
 table/polynomial `expf`/`logf` approximations as the host reference. A correctly
@@ -174,7 +184,7 @@ with approximately 48 GiB VRAM. Select its hardware ICD explicitly:
 ```sh
 cargo test --profile release-fast --features vulkan,parity-trace \
   --test sage_a15 --no-run
-RMI_SCALAR=1 RMI_QWEN35_MODEL="$SAGE_MODEL_DIR/Sage-A1.5-Q8_0.gguf" \
+RMI_QWEN35_MODEL="$SAGE_MODEL_DIR/Sage-A1.5-Q8_0.gguf" \
 VK_DRIVER_FILES=/usr/share/vulkan/icd.d/radeon_icd.json \
   cargo test --profile release-fast --features vulkan,parity-trace \
   --lib vulkan::qwen35::tests:: -- --include-ignored --nocapture --test-threads=1
@@ -183,7 +193,7 @@ python3 tools/oracle/sage_a15/compare.py \
   --oracle target/sage-oracle/build/bin/llama-eval-callback \
   --rust-test target/release-fast/deps/sage_a15-REPLACE_WITH_EXECUTABLE_HASH \
   --out target/sage-vulkan-parity
-RMI_SCALAR=1 RMI_SAGE_MODEL="$SAGE_MODEL_DIR/Sage-A1.5-Q8_0.gguf" \
+RMI_SAGE_MODEL="$SAGE_MODEL_DIR/Sage-A1.5-Q8_0.gguf" \
 VK_DRIVER_FILES=/usr/share/vulkan/icd.d/radeon_icd.json \
   cargo test --profile release-fast --features vulkan,parity-trace \
   --test sage_a15 sage_vulkan_batched_prefill_and_decode -- --ignored --exact --nocapture
@@ -192,8 +202,10 @@ VK_DRIVER_FILES=/usr/share/vulkan/icd.d/radeon_icd.json \
 Forced Vulkan session creation must succeed; the trace helper prints
 `Sage trace backend: vulkan` and cannot silently substitute CPU execution.
 GPU trace mode uses one-token chunks to retain the token-major schema; the
-separate batched test runs without tracing and compares prefill=3 plus four
-greedy steps against CPU prefill=1. Structural checks and numerical thresholds
+separate batched test runs without tracing and compares 44-token prefill=64
+and 64 teacher-forced predictions against CPU prefill=1 and prefill=64.
+Every full logit vector must satisfy the original numerical bounds, and the
+greedy token IDs must match. Structural checks and numerical thresholds
 are identical to the CPU harness above. The router fixture contains F32 bit
 patterns from layer 0, token 0 of the same pinned scalar Oracle case; it
 reproduces the wide-sum softmax boundary without loading the full model.
@@ -407,23 +419,97 @@ These measurements cover short requests and eight CPU threads, not full-core
 CPU performance, persistent sessions, long contexts or concurrency. Optimized
 CPU/Vulkan graph alignment remains outside the scalar Oracle claim.
 
-### Focused regression checks
+### Completion validation
 
-The final local `--features vulkan,parity-trace --lib vulkan::` run passed 46
-tests, with 45 device/model/benchmark tests ignored. The physical Sage adapter
-and focused SiLU tests above were run separately with ignored tests enabled.
-Formatting, shader rebuild/manifest/SPIR-V validation and all four Python
-comparator self-tests passed.
+Default dispatch passes the original 1,100 selected checkpoints on ARM64 CPU,
+x86_64 CPU and the physical NAVI31 Vulkan decoder, without `RMI_SCALAR`.
+The same-host Oracle and cross-ISA boundary described above still apply.
+The historical performance tables above used different arithmetic and are
+retained as measurements of their respective revisions; the current CPU/GPU
+comparison is recorded in [completion.json](completion.json).
 
-Earlier broader Qwen3.5 runs still had two baseline failures reproduced before
-these changes: `qwen35_config_rejects_invalid_tensor_dimensions` (error-message
-assertion) and `qwen35_trace_metadata_is_independent_of_prefill_batch_size`
-(existing batch-dependent numeric outputs). No whole-repository or clean
-clippy claim is made. The production CPU MoE regression also passed default
-and scalar dispatch; reverting its earlier softmax/reduction fixes fails it.
+A longer 44-token Chinese prompt exposed a Vulkan RoPE defect: rotation still
+used FMA even when the MoE graph selected reference arithmetic. The first
+visible difference was at layer 23, input row 23. Its tiny attention error
+crossed a subsequent Q8 activation boundary (116.500015 versus 116.499992),
+and the final prefill logits exceeded the original relative-L2 limit:
+0.0259996 versus 0.01. The dense-prepare operator now forwards the active
+reference mode and separately rounds the rotation products in that mode;
+normal fused dispatch retains FMA. A small cancellation fixture failed on the
+physical adapter with 2.039535 instead of 0, and passes after the fix.
+Temporary diagnostic flags and batch-trace modifications were removed.
 
-The optimized x86 decoder graph, other GPUs/hosts, other expert formats,
-long-context behavior, MTP execution, HTTP and numerical vision alignment are
-not covered. Default ARM NEON limits above still apply; the Vulkan scalar
-results do not broaden the CPU dispatch claim. Other model revisions and
-quantization types need separate validation.
+The 44-token case now also passes the pinned Oracle on AMD CPU and Vulkan:
+47 processed rows (prompt plus three generated inputs), 2,585 selected
+checkpoints per backend and greedy IDs `[101742, 98138, 103725, 96647]`.
+The observed maximum relative L2 / absolute error is 0 and minimum cosine is 1.
+The separate untraced regression compares CPU batch=1, CPU batch=64 and
+Vulkan batch=64 across 64 complete output-logit vectors and their greedy IDs;
+all pass, with observed floating error 0. The implementation retains the
+original lossy numerical bounds, rather than asserting generic bitwise GPU
+arithmetic. Tokens, embedding values and expert IDs/order remain exact checks.
+
+The physical AMD suite passes 22 adapter tests, two injected rollback tests,
+four-axis mRoPE and the long batched regression. The local Qwen namespace
+passes 80 tests (11 ignored), shader source/binary/manifest validation passes,
+and all four comparator self-tests pass. The numerical-scope regression
+covers nesting, pool and chunk workers, thread isolation, restoration and
+unwind restoration. The config error-message expectation matches the actual
+loader validation; the CPU recurrent trace now emits `q_conv_prenorm` once
+after copying every row and before normalizing any row.
+
+The final release binary uses the same default arithmetic on both backends:
+SHA-256 `7ffd077ce3d334eeb1b7bf37b38c60405d30184c4858c6c2e12f3117a04cde5c`.
+Three alternating CPU/GPU rounds used eight threads, batch 64, the same
+44-token prompt and 64 output tokens (63 timed decode evaluations). All six
+answers match. Every case starts a new process; caches are not flushed.
+
+| Final release, median of three | CPU, 8 threads | NAVI31 Vulkan |
+| --- | ---: | ---: |
+| Session init (s) | 0.0047 | 21.72 |
+| Prefill, 44 rows (s) | 4.82 | 0.96 |
+| Decode eval/s | 9.92 | 5.51 |
+| First text including startup (s) | 5.10 | 22.99 |
+| Process wall (s) | 12.55 | 36.85 |
+
+Vulkan prefill is 5.03x faster in this sample, but CPU decode is 1.80x faster
+and the standalone CPU process finishes 2.94x faster. Vulkan decode ranges
+from 5.21 to 5.70 eval/s; CPU ranges from 7.90 to 10.10. Weight upload/session
+setup remains substantial. These are shared-host observations, not dedicated
+hardware or persistent-session benchmarks, and do not imply full-core CPU
+performance. The earlier SIMD/default CPU tables are revision-specific.
+
+The complete GPU text run reaches EOS with 80 output tokens and matches the
+complete CPU answer. The companion-image run also reaches EOS (15 tokens),
+returning `图中从左到右依次是红色圆形、蓝色正方形和绿色三角形。`
+for the synthetic image above. Process DRM engine counters verify GPU activity;
+the image projector remains on CPU. All eight final runs began after three
+idle samples, but the shared host was not reserved. Complete answers, commands,
+per-run timing and resource snapshots remain in `completion.json`.
+
+Full-library testing is not green. The comparison against `e3c49e3d` is retained
+in the completion evidence: CPU failures decreased from 24 to 22, while the
+serial Vulkan run changed from 32 to 31. One VibeVoice failure appeared only
+in the current full Vulkan run but passes in isolation on both revisions;
+it is not classified as a proven baseline failure. Other failures reproduced
+on the baseline. The final RoPE change was verified with the focused and
+physical suites above, rather than rerunning unrelated full-library failures.
+No whole-repository or clean-clippy claim is made.
+
+For the validated standalone GPU text path, build the release CLI and use:
+
+```sh
+cargo build --release --features vulkan --bin rust-model-inference
+VK_DRIVER_FILES=/usr/share/vulkan/icd.d/radeon_icd.json \
+DRI_PRIME='pci-0000_c3_00_0!' \
+  target/release/rust-model-inference \
+  --model "$SAGE_MODEL_DIR/Sage-A1.5-Q8_0.gguf" --compute vulkan \
+  --jinja --no-thinking --temp 0 --threads 8 --prefill-batch-size 64 \
+  --max-tokens 192 --prompt '请用三句话向初学者解释混合专家（MoE）模型。'
+```
+
+Other GPUs/libm implementations, other expert formats, persistent-session
+performance, long contexts, HTTP, MTP execution and numerical vision alignment
+remain outside this validation. The CPU vision encoder/projector is not a GPU
+implementation. Other model revisions and quantization types need separate
+validation.

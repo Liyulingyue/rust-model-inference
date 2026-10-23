@@ -3,6 +3,11 @@
 Current Vulkan status: the resident executor now records Q8_0/F32 routed and
 shared experts. Sage-A1.5 hardware results, numerical bounds, reproduction and
 format limits are tracked in [the Sage validation record](../../tools/oracle/sage_a15/README.md).
+Default `qwen35moe` forwards select reference arithmetic within the graph and
+its compute workers, then restore the previous dispatch. This disables explicit
+CPU SIMD branches for this architecture; Vulkan retains packed integer dots.
+The Sage record validates this policy. MiniCPM-V's tower has not been rerun in
+this follow-up, so its earlier measurements below remain revision-specific.
 The investigation below describes the earlier CPU implementation.
 
 Extracted while adapting [OpenBMB/MiniCPM-V-4.7-35B-A3B-gguf]. Everything here
