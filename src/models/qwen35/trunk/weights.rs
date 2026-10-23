@@ -371,18 +371,7 @@ impl<'a> HybridTrunk<'a> {
         if arch == Some("edge0") {
             return Err("Edge0 architecture requires Edge0Model::from_source".into());
         }
-        // `qwen35moe` is the same hybrid attention/SSM stack with a routed +
-        // shared expert FFN, so it shares this trunk; only the FFN differs.
-        let prefix = match arch.as_deref() {
-            Some("qwen35") => "qwen35",
-            Some("qwen35moe") => "qwen35moe",
-            _ => {
-                return Err(format!(
-                    "Qwen35Model requires general.architecture=qwen35 or qwen35moe, got {arch:?}"
-                ));
-            }
-        };
-        let config = Qwen35Config::from_source_for_arch(source, prefix)?;
+        let config = Qwen35Config::from_source(source)?;
         Self::load_trunk(source, config, false)
     }
 

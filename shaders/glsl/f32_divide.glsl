@@ -48,3 +48,19 @@ float divide_finite_normal(float numerator, float denominator) {
         sign | (uint(result_exponent) << 23u) | (quotient & 0x007fffffu)
     );
 }
+
+// Positive compensated sums: retain the reciprocal residual even when a driver splits GLSL fma.
+float reciprocal_positive_sum(float high, float low) {
+    precise float sum = high + low;
+    precise float tail = (high - sum) + low;
+    precise float inverse = divide_finite_normal(1.0, sum);
+    float a = uintBitsToFloat(floatBitsToUint(sum) & 0xfffff000u);
+    float b = uintBitsToFloat(floatBitsToUint(inverse) & 0xfffff000u);
+    precise float a_low = sum - a;
+    precise float b_low = inverse - b;
+    precise float product = sum * inverse;
+    precise float error = ((a * b - product) + a * b_low + a_low * b) + a_low * b_low;
+    precise float residual = ((1.0 - product) - error) - tail * inverse;
+    precise float correction = residual * inverse;
+    return inverse + correction;
+}

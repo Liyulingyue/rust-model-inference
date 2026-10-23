@@ -77,10 +77,8 @@ pub(crate) fn forward_qwen35moe_token(
     }
     trace::layer_1d("ffn_moe_logits", layer, step, &logits);
 
-    let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    let exp: Vec<f32> = logits.iter().map(|v| (*v - max).exp()).collect();
-    let total = exp.iter().sum::<f32>();
-    let probabilities: Vec<f32> = exp.iter().map(|v| v / total).collect();
+    let mut probabilities = logits.clone();
+    crate::ops::softmax_inplace(&mut probabilities);
     trace::layer_1d("ffn_moe_probs", layer, step, &probabilities);
 
     // Descending by probability, ties by ascending index: ggml_argsort_top_k
@@ -112,7 +110,8 @@ pub(crate) fn forward_qwen35moe_token(
     let gathered: Vec<f32> = chosen.iter().map(|&i| probabilities[i]).collect();
     trace::layer_1d("ffn_moe_weights", layer, step, &gathered);
 
-    let sum: f32 = gathered.iter().sum();
+    // ggml_sum_rows accumulates in F64 before rounding its F32 result.
+    let sum = gathered.iter().map(|&v| f64::from(v)).sum::<f64>() as f32;
     trace::layer_1d("ffn_moe_weights_sum", layer, step, &[sum]);
 
     // `ggml_clamp(ctx0, weights_sum, 6.103515625e-5, INFINITY)` -- 2^-14. Not
@@ -240,4 +239,118 @@ pub(crate) fn forward_qwen35moe_token(
     trace::layer_1d("ffn_shexp_gated", layer, step, &gated);
     trace::layer_1d("ffn_out", layer, step, out);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::tensor::GGMLType;
+    use crate::ops::kernel::{QuantizedTensor, Weight};
+
+    #[test]
+    fn routed_output_preserves_small_router_weights() {
+        const WIDTH: usize = 8;
+        // Pinned b96806d scalar softmax -> top-8 -> sum_rows -> div fixtures.
+        // The two cases independently detect F32 selected sums and old softmax.
+        for (numerators, selected, expected) in [
+            (
+                [
+                    -5, 48, 98, -99, 3, -39, -71, 42, -46, -37, 34, -8, -86, -32, -84, -30,
+                ],
+                [2, 1, 7, 10, 4, 0, 11, 15],
+                [
+                    0.89154077,
+                    0.04707655,
+                    0.033076853,
+                    0.020660954,
+                    0.0033358126,
+                    0.0020836643,
+                    0.0017465759,
+                    0.00047880583,
+                ],
+            ),
+            (
+                [
+                    -55, -49, 88, 40, 14, -65, -80, -62, -21, -14, -4, -83, -85, 40, 40, 76,
+                ],
+                [2, 15, 3, 13, 14, 4, 10, 9],
+                [
+                    0.59113115,
+                    0.29182532,
+                    0.035110787,
+                    0.035110787,
+                    0.035110787,
+                    0.0076072095,
+                    0.002638664,
+                    0.0014652677,
+                ],
+            ),
+        ] {
+            let logits = numerators.map(|x| x as f32 / 17.0);
+            let mut router = vec![0.0; logits.len() * WIDTH];
+            let mut up = vec![0.0f32; router.len()];
+            let mut gate = up.clone();
+            let mut down = up.clone();
+            for (expert, logit) in logits.into_iter().enumerate() {
+                router[expert * WIDTH] = logit;
+                up[expert * WIDTH] = 1.0 / 64.0;
+                gate[expert * WIDTH] = 64.0;
+            }
+            // Each selected expert writes its routing weight to a separate output.
+            for (slot, expert) in selected.into_iter().enumerate() {
+                down[expert * WIDTH + slot] = 1.0;
+            }
+            let bytes = |values: Vec<f32>| {
+                values
+                    .into_iter()
+                    .flat_map(f32::to_le_bytes)
+                    .collect::<Vec<_>>()
+            };
+            let (up, gate, down) = (bytes(up), bytes(gate), bytes(down));
+            let moe = Qwen35MoeWeights {
+                gate_inp: Weight::from_quantized(QuantizedTensor::F32 {
+                    data: router,
+                    n_in: WIDTH,
+                    n_out: logits.len(),
+                }),
+                up_exps: &up,
+                gate_exps: &gate,
+                down_exps: &down,
+                ggml_type: GGMLType::F32,
+                n_expert: logits.len(),
+                n_ff_exp: 1,
+                n_embd: WIDTH,
+                stride_up: WIDTH * 4,
+                stride_gate: WIDTH * 4,
+                stride_down: WIDTH * 4,
+                gate_inp_shexp: Some(vec![0.0; WIDTH]),
+                up_shexp: None,
+                gate_shexp: None,
+                down_shexp: None,
+            };
+            let config = Qwen35Moe {
+                n_expert: logits.len(),
+                n_expert_used: WIDTH,
+                n_ff_exp: 1,
+                n_ff_shexp: 0,
+                weights_scale: 1.0,
+            };
+            let mut output = [0.0; WIDTH];
+            forward_qwen35moe_token(
+                &moe,
+                &config,
+                1.0,
+                &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                &mut output,
+                &mut PreparedRows::new(1, WIDTH),
+                &ComputePool::new(1),
+                0,
+                0,
+            )
+            .unwrap();
+            for (actual, expected) in output.into_iter().zip(expected) {
+                assert!((actual - expected).abs() <= 2e-8, "{actual} != {expected}");
+            }
+        }
+    }
 }

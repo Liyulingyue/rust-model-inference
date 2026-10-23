@@ -223,6 +223,14 @@ impl ComputePool {
     /// `docs/develop/PARALLEL_MATMUL_SAFETY.md` §1 for the audited
     /// pattern.
     pub fn compute<F: Fn(usize, usize)>(&self, f: F) {
+        let scalar = crate::ops::scalar_mode();
+        self.compute_dispatch(|ith, nth| {
+            let _numerics = crate::ops::ScalarDispatchScope::new(scalar);
+            f(ith, nth);
+        });
+    }
+
+    fn compute_dispatch<F: Fn(usize, usize)>(&self, f: F) {
         if self.n_threads <= 1 {
             #[cfg(all(test, feature = "vulkan"))]
             if gpu_matmul_disabled() {
@@ -287,7 +295,11 @@ impl ComputePool {
         n_chunks: i32,
         f: F,
     ) {
-        let f = Arc::new(f);
+        let scalar = crate::ops::scalar_mode();
+        let f = Arc::new(move |ith, chunk| {
+            let _numerics = crate::ops::ScalarDispatchScope::new(scalar);
+            f(ith, chunk);
+        });
         if self.n_threads <= 1 {
             let mut chunk_id = 0;
             while chunk_id < n_chunks {

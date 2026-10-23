@@ -125,7 +125,15 @@ fn recurrent_layer_mask(
 impl Qwen35Config {
     /// Build a `Qwen35Config` from a GGUF tensor source.
     pub fn from_source<S: TensorSource + ?Sized>(source: &S) -> Result<Self, String> {
-        Self::from_source_for_arch(source, "qwen35")
+        let arch = source
+            .metadata("general.architecture")
+            .and_then(MetaValue::to_string_val);
+        match arch {
+            Some(prefix @ ("qwen35" | "qwen35moe")) => Self::from_source_for_arch(source, prefix),
+            _ => Err(format!(
+                "Qwen35Config requires general.architecture=qwen35 or qwen35moe, got {arch:?}"
+            )),
+        }
     }
 
     pub(crate) fn from_source_for_arch<S: TensorSource + ?Sized>(
@@ -458,10 +466,71 @@ mod tests {
         assert_eq!(config.rope_dimension_sections, [11, 11, 10, 0]);
     }
 
+    fn sage_config_source() -> ConfigSource {
+        let mut source = qwen38_config_source();
+        source.metadata = source
+            .metadata
+            .into_iter()
+            .map(|(key, value)| (key.replace("qwen35.", "qwen35moe."), value))
+            .collect();
+        source.metadata.insert(
+            "general.architecture".into(),
+            MetaValue::String("qwen35moe".into()),
+        );
+        for (key, value) in [
+            ("embedding_length", 2048),
+            ("block_count", 41),
+            ("attention.head_count", 16),
+            ("attention.head_count_kv", 2),
+            ("ssm.time_step_rank", 32),
+            ("ssm.inner_size", 4096),
+            ("expert_count", 256),
+            ("expert_used_count", 8),
+            ("expert_feed_forward_length", 512),
+            ("expert_shared_feed_forward_length", 512),
+        ] {
+            source
+                .metadata
+                .insert(format!("qwen35moe.{key}"), MetaValue::Uint32(value));
+        }
+        source.metadata.remove("qwen35moe.feed_forward_length");
+        source
+    }
+
+    #[test]
+    fn sage_moe_config_excludes_the_mtp_block() {
+        let config = Qwen35Config::from_source(&sage_config_source()).unwrap();
+        assert_eq!(
+            (config.n_layer, config.n_layer_impl(), config.n_nextn),
+            (41, 40, 1)
+        );
+        assert_eq!((config.n_embd, config.vocab_size), (2048, 248320));
+        assert_eq!((config.n_embd_head(), config.n_embd_gqa()), (256, 512));
+        assert_eq!((config.key_dim(), config.value_dim()), (2048, 4096));
+        assert_eq!(config.is_recurrent.len(), 40);
+        for (layer, &recurrent) in config.is_recurrent.iter().enumerate() {
+            assert_eq!(recurrent, (layer + 1) % 4 != 0);
+        }
+        let moe = config.moe.unwrap();
+        assert_eq!((moe.n_expert, moe.n_expert_used), (256, 8));
+        assert_eq!((moe.n_ff_exp, moe.n_ff_shexp), (512, 512));
+    }
+
+    #[test]
+    fn sage_moe_config_rejects_invalid_experts_and_mtp_split() {
+        for (key, value) in [("expert_used_count", 257), ("nextn_predict_layers", 41)] {
+            let mut source = sage_config_source();
+            source
+                .metadata
+                .insert(format!("qwen35moe.{key}"), MetaValue::Uint32(value));
+            assert!(Qwen35Config::from_source(&source).is_err(), "{key}");
+        }
+    }
+
     #[test]
     fn qwen35_config_rejects_invalid_tensor_dimensions() {
         for (key, value, expected) in [
-            ("qwen35.attention.key_length", 0, "head lengths"),
+            ("qwen35.attention.key_length", 0, "attention.key_length"),
             ("qwen35.attention.value_length", 0, "head lengths"),
             ("qwen35.attention.value_length", 128, "head lengths"),
             ("qwen35.ssm.time_step_rank", 0, "inner/rank"),

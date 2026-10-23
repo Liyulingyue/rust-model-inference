@@ -1,3 +1,11 @@
+vec2 add_f32_wide(vec2 sum, float value) {
+    precise float high = sum.x + value;
+    precise float error = abs(sum.x) >= abs(value)
+        ? (sum.x - high) + value : (value - high) + sum.x;
+    precise float low = sum.y + error;
+    return vec2(high, low);
+}
+
 float reduce_f32_dot(float values[16], uint lanes) {
     if (lanes == 16u) {
         precise float a = (values[0] + values[8]) + (values[4] + values[12]);

@@ -15,6 +15,7 @@ layout(push_constant) uniform PC {
     uint output1_word; uint rows1; uint output1_stride;
     uint output2_word; uint rows2; uint output2_stride;
     uint group_count; uint reduction_mode; uint input_stride; uint q8_stride; uint scales_stride; uint input_sum_stride; uint q8k_stride; uint q8k_scales_stride; uint token_rows;
+    uint expert_count; uint expert_ids_word; uint expert_used; uint expert_slot;
 } pc;
 
 const uint CHUNK_BLOCKS = 64u;
@@ -59,6 +60,10 @@ void main() {
     // Each lane owns an output, preserving the CPU reduction inside that lane.
     uint blocks_per_row = pc.blocks_per_row;
     uint row_offset = read_row * blocks_per_row * 34u;
+    if (pc.expert_count != 0u) {
+        uint expert = arena.data[pc.expert_ids_word + token_row * pc.expert_used + pc.expert_slot];
+        row_offset += min(expert, pc.expert_count - 1u) * rows * blocks_per_row * 34u;
+    }
 
     precise float acc[8];
     for (uint group = 0u; group < 8u; group++) acc[group] = 0.0;
