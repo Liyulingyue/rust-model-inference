@@ -296,8 +296,8 @@ Vulkan build repeated the same GPU PNG pixels in 26.7 seconds. It recorded 2,234
 allocations of 8,097,642,016 bytes. Upload bytes are cumulative across components,
 not simultaneous VRAM usage. The final local/remote source audit matched all
 599 runtime/shader/build files. Timings include loading and host operations;
-the final trace and 512×512 visual run overlap, and no controlled CPU/GPU
-speedup measurement is claimed.
+the final trace and 512×512 visual run overlap. These earlier timings do not
+form a controlled CPU/GPU comparison.
 
 The ordinary Vulkan build also completed the actual long-prompt text-to-PNG
 pipeline at 512×512 on RADV: eight steps, CFG 1, seed 42, eight threads and
@@ -312,3 +312,43 @@ visible. PNG SHA256:
 `d41fa3587ab5f55e06ca9c7fb82983d6447eb06521d969ce8568f17ff428ce6e`.
 The run overlapped the final 64×32 parity check, so this is a functional image
 result, not an isolated benchmark. No 512×512 Oracle alignment is claimed.
+
+## CPU and Vulkan CLI timing
+
+On 2026-10-23, both paths used the same `release` binary with the `vulkan`
+feature on the supplied EPYC 9334 / RADV NAVI31 host. Both used
+`RMI_SCALAR=1`, eight threads pinned to physical CPUs 39, 44, 46, 51–53, 59
+and 61 on NUMA node 1, the long orange-cat prompt, seed 42, eight steps and
+CFG 1. Each image started a fresh CLI process; the wall clock includes model
+loading, device uploads, text conditioning, sampling, VAE decoding and PNG
+saving. OS file caches and shader disk caches were warmed with the 64×32 case
+first; those warmup PNGs matched the previously validated build exactly.
+
+| Output | CPU seconds | Vulkan seconds | CPU/GPU mean ratio |
+| --- | ---: | ---: | ---: |
+| 256×256, two runs each | 544.149, 553.001 (mean 548.575) | 135.916, 135.399 (mean 135.658) | 4.044× |
+
+The 256×256 sequence was CPU, Vulkan, Vulkan, CPU. Before each render the
+runner waited for known compilation/inference jobs and the selected GPU to
+be idle, then sampled processes and device state every five seconds. No known
+competing workload was observed during these four accepted samples. The host
+is shared, so this is not a claim of physical machine isolation. An earlier
+attempt that overlapped a Sage benchmark was stopped and excluded.
+
+A subsequent 512×512 CPU attempt overlapped sustained compilation and
+inference work. It was manually terminated before PNG output and excluded;
+the corresponding same-release GPU measurement was not started. No comparable
+512×512 speed ratio is available. The earlier functional GPU timing used a
+different build and concurrency conditions.
+
+Both CPU repeats produced identical PNGs, as did both Vulkan repeats. The
+CPU/Vulkan RGBA8 maximum difference was one level (mean absolute difference
+0.003414154052734375). This is a final-image CPU/Vulkan check, rather than a
+new per-checkpoint Oracle comparison. The default host SIMD path is outside
+this comparison because it has not passed the declared numerical bound.
+
+The exact commands, affinity, binary/source hashes, per-run timings, process
+RSS and concurrency flags are in `cpu_gpu_cli_benchmark` in the result JSON.
+To reproduce, build with `cargo build --release --features vulkan --bin
+rust-model-inference`, use the recorded arguments and affinity, and toggle
+only `--gpu` between CPU and Vulkan runs (with separate PNG output paths).

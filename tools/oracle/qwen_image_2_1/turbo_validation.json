@@ -719,5 +719,186 @@
       }
     },
     "parallel_host_queries": "Independent query rows use the existing rayon thread pool; dot/softmax reduction order within each row is unchanged"
+  },
+  "cpu_gpu_cli_benchmark": {
+    "profile": "release",
+    "features": [
+      "vulkan"
+    ],
+    "binary_sha256": "281f4cd2e63c4b784d1f0b4838ffa934a35de44514fc610258cca1bf2fc1ee75",
+    "source_manifest_sha256": "6efa341baa32aae550dd210ff8b15ab34415123f9ce316c1dafbb42421dc24f0",
+    "source_commit": "cde71f3a4b9b26734bd891e4cba973625d13b350",
+    "cpu": "AMD EPYC 9334",
+    "device": "AMD Radeon Graphics (RADV NAVI31)",
+    "gpu_pci": "0000:c3:00.0",
+    "gpu_vram_bytes": 51522830336,
+    "scalar_host": true,
+    "threads": 8,
+    "cpu_affinity": [
+      39,
+      44,
+      46,
+      51,
+      52,
+      53,
+      59,
+      61
+    ],
+    "cpu_quota": "1600000 100000",
+    "environment": {
+      "RMI_SCALAR": "1",
+      "RAYON_NUM_THREADS": "8",
+      "VK_ICD_FILENAMES": "/usr/share/vulkan/icd.d/radeon_icd.json"
+    },
+    "steps": 8,
+    "cfg": 1,
+    "seed": 42,
+    "shared_host": true,
+    "monitor_interval_seconds": 5,
+    "measurement": "Fresh CLI process per image; warm OS file/shader caches; includes loading, uploads, text, eight sampling steps, VAE and PNG",
+    "accepted_sample_order": [
+      "cpu-256-1",
+      "gpu-256-1",
+      "gpu-256-2",
+      "cpu-256-2"
+    ],
+    "cases": [
+      {
+        "width": 256,
+        "height": 256,
+        "cpu": {
+          "repeats": 2,
+          "mean_seconds": 548.5751219419762,
+          "median_seconds": 548.5751219419762,
+          "min_seconds": 544.1491000652313,
+          "max_seconds": 553.0011438187212,
+          "records": [
+            {
+              "label": "cpu-256-1",
+              "wall_seconds": 544.1491000652313,
+              "max_rss_bytes": 8838602752,
+              "user_seconds": 4032.780439,
+              "system_seconds": 23.700778,
+              "png_sha256": "f9a7875fd6811b30c846c838c1a2b456e88e475488c5efabe90877520c2f435e",
+              "no_known_competing_jobs": true,
+              "observed_competing_processes": [],
+              "cgroup_throttled_seconds_delta": 0.0,
+              "telemetry_samples": 103
+            },
+            {
+              "label": "cpu-256-2",
+              "wall_seconds": 553.0011438187212,
+              "max_rss_bytes": 8839598080,
+              "user_seconds": 4054.745135,
+              "system_seconds": 22.342813,
+              "png_sha256": "f9a7875fd6811b30c846c838c1a2b456e88e475488c5efabe90877520c2f435e",
+              "no_known_competing_jobs": true,
+              "observed_competing_processes": [],
+              "cgroup_throttled_seconds_delta": 0.0,
+              "telemetry_samples": 105
+            }
+          ]
+        },
+        "gpu": {
+          "repeats": 2,
+          "mean_seconds": 135.65780762117356,
+          "median_seconds": 135.65780762117356,
+          "min_seconds": 135.39919798262417,
+          "max_seconds": 135.91641725972295,
+          "records": [
+            {
+              "label": "gpu-256-1",
+              "wall_seconds": 135.91641725972295,
+              "max_rss_bytes": 10114785280,
+              "user_seconds": 192.908955,
+              "system_seconds": 27.950252,
+              "png_sha256": "f9001034e11d156ce9bd4c78aeaa14973eefa4e8350b0962a9c2915c6a6c3493",
+              "no_known_competing_jobs": true,
+              "observed_competing_processes": [],
+              "cgroup_throttled_seconds_delta": 0.0,
+              "telemetry_samples": 26
+            },
+            {
+              "label": "gpu-256-2",
+              "wall_seconds": 135.39919798262417,
+              "max_rss_bytes": 10116313088,
+              "user_seconds": 195.136328,
+              "system_seconds": 27.69937,
+              "png_sha256": "f9001034e11d156ce9bd4c78aeaa14973eefa4e8350b0962a9c2915c6a6c3493",
+              "no_known_competing_jobs": true,
+              "observed_competing_processes": [],
+              "cgroup_throttled_seconds_delta": 0.0,
+              "telemetry_samples": 26
+            }
+          ]
+        },
+        "cpu_cli_command_without_output": [
+          "/root/rmi-qi21-turbo-d289/bin/rust-model-inference-benchmark-release",
+          "--qwen-image-turbo",
+          "--model",
+          "/root/rmi-qi21-turbo-d289/models/Qwen-Image-2.1-Turbo-GGUF/qwen-image-2.1-turbo-Q8_0.gguf",
+          "--text-encoder",
+          "/root/rmi-qi21-turbo-d289/models/Qwen3-VL-8B-Instruct-GGUF/Qwen3-VL-8B-Instruct-Q8_0.gguf",
+          "--vae",
+          "/root/rmi-qi21-turbo-d289/models/Qwen-Image-2.1-Turbo/vae/diffusion_pytorch_model.safetensors",
+          "--prompt",
+          "A photorealistic orange tabby cat sitting on a wooden windowsill in warm afternoon sunlight, next to a steaming ceramic cup of tea and an open book. Rain-washed city rooftops outside the window, soft bokeh, detailed fur, cinematic composition.",
+          "--negative-prompt",
+          "low quality",
+          "--width",
+          "256",
+          "--height",
+          "256",
+          "--steps",
+          "8",
+          "--cfg",
+          "1",
+          "--seed",
+          "42",
+          "--threads",
+          "8"
+        ],
+        "cpu_over_gpu_ratio": 4.043815328888997,
+        "wall_time_reduction_fraction": 0.7527087864631195,
+        "rgba_max_abs": 1,
+        "rgba_mean_abs": 0.003414154052734375,
+        "no_known_workload_overlap": true,
+        "timing_scope": "shared-host comparison with no known competing workloads observed"
+      }
+    ],
+    "release_warmup_pngs_match_prior_validated_build": true,
+    "rejected_attempts": [
+      {
+        "label": "rejected-cpu-256-1",
+        "returncode": -15,
+        "wall_seconds": 325.10671491734684,
+        "reason": "Overlapped foreign Sage benchmark process named after and target/sage-gpu/device-arena/benchmark.py; stop own contaminated attempt only",
+        "excluded": true
+      },
+      {
+        "label": "cpu-512-1",
+        "returncode": -15,
+        "wall_seconds": 3259.2067556288093,
+        "excluded": true,
+        "termination": "Manually sent SIGTERM to end a contaminated benchmark; not an inference failure",
+        "reason": "Concurrent foreign compilation and inference; eight pinned workers obtained about 2.3 CPU core equivalents in a two-second diagnostic sample; no valid 512 comparison"
+      }
+    ],
+    "status": "finished_with_partial_resolution_coverage",
+    "completed_resolutions": [
+      {
+        "width": 256,
+        "height": 256
+      }
+    ],
+    "unavailable_resolutions": [
+      {
+        "width": 512,
+        "height": 512,
+        "status": "CPU attempt interrupted due to shared load; matching GPU run not started",
+        "speed_ratio": null,
+        "reason": "Concurrent foreign compilation and inference; eight pinned workers obtained about 2.3 CPU core equivalents in a two-second diagnostic sample; no valid 512 comparison"
+      }
+    ]
   }
 }
