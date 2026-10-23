@@ -732,6 +732,263 @@ mod tests {
         }
     }
 
+    /// Every projection shape a denoiser block actually uses, each one driven
+    /// with its own real weight. The narrow output projection and the wide
+    /// feed-forward ones are the shapes that a single shape check misses.
+    #[test]
+    #[ignore = "requires a Vulkan device and the real Mage-Flow GGUFs"]
+    fn bf16_prepared_every_block_shape_is_reproducible() {
+        use crate::vulkan::ops::{GpuMatmulMode, GpuMatmulSpec, GpuWeightFormat};
+        crate::ops::float::enable_gpu();
+        if crate::ops::get_vulkan_context().is_none() {
+            eprintln!("no vulkan context; skip");
+            return;
+        }
+        let Ok(loader) =
+            crate::GGUFLoader::from_file("models/mage-flow/mage-flow-base-dit-BF16.gguf")
+        else {
+            eprintln!("no real weights; skip");
+            return;
+        };
+        // (tensor, rows) exactly as the denoiser calls them.
+        let cases: [(&str, usize); 10] = [
+            ("proj_out.weight", 1024),
+            ("img_in.weight", 1024),
+            ("transformer_blocks.0.attn.to_q.weight", 1024),
+            ("transformer_blocks.0.attn.to_out.0.weight", 1024),
+            ("transformer_blocks.0.img_mlp.net.0.proj.weight", 1024),
+            ("transformer_blocks.0.img_mlp.net.2.weight", 1024),
+            ("transformer_blocks.8.txt_mlp.net.0.proj.weight", 20),
+            ("transformer_blocks.8.txt_mlp.net.2.weight", 20),
+            ("transformer_blocks.8.attn.add_q_proj.weight", 20),
+            ("norm_out.linear.weight", 1),
+        ];
+        let mut state: u64 = 0x9E3779B97F4A7C15;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 40) as f32 / 1024.0 - 8.0
+        };
+        let spec = GpuMatmulSpec {
+            format: GpuWeightFormat::BF16,
+            mode: GpuMatmulMode::Prepared,
+        };
+        for (name, rows) in cases {
+            let (Some(bytes), Some(info)) = (loader.tensor_slice(name), loader.tensor_info(name))
+            else {
+                eprintln!("PROBE {name}: 权重缺失，跳过");
+                continue;
+            };
+            let n_in = info.dims[0] as usize;
+            let n_out = info.dims[1] as usize;
+            let input: Vec<f32> = (0..rows * n_in).map(|_| next()).collect();
+            let mut first: Option<Vec<f32>> = None;
+            let mut differing = 0usize;
+            let mut max_abs = 0.0f64;
+            let mut fallback = false;
+            for round in 0..8 {
+                let mut out = vec![0.0f32; rows * n_out];
+                let ok = GpuLinear::default()
+                    .try_matmul(bytes, spec, &input, &mut out, n_in, n_out, rows);
+                if !ok {
+                    fallback = true;
+                    break;
+                }
+                match &first {
+                    None => first = Some(out),
+                    Some(reference) => {
+                        let d = reference
+                            .iter()
+                            .zip(out.iter())
+                            .filter(|(x, y)| x.to_bits() != y.to_bits())
+                            .count();
+                        let m = reference
+                            .iter()
+                            .zip(out.iter())
+                            .map(|(x, y)| (x - y).abs() as f64)
+                            .fold(0.0f64, f64::max);
+                        differing += d;
+                        max_abs = max_abs.max(m);
+                    }
+                }
+            }
+            eprintln!(
+                "PROBE {name:44} n_in={n_in:6} n_out={n_out:6} rows={rows:5}{} 不同元素累计={differing} 最大绝对差={max_abs:.6e}",
+                if fallback { " [回退 CPU]" } else { "" }
+            );
+        }
+    }
+
+    /// Sweep the three dimensions of a projection against the CPU kernel with
+    /// weights that are small enough to add up exactly, so any difference is a
+    /// wrong answer and not a rounding difference.
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn bf16_prepared_dimension_sweep_matches_cpu() {
+        use crate::vulkan::ops::{GpuMatmulMode, GpuMatmulSpec, GpuWeightFormat};
+        crate::ops::float::enable_gpu();
+        if crate::ops::get_vulkan_context().is_none() {
+            eprintln!("no vulkan context; skip");
+            return;
+        }
+        let spec = GpuMatmulSpec {
+            format: GpuWeightFormat::BF16,
+            mode: GpuMatmulMode::Prepared,
+        };
+        let cases: [(usize, usize, usize); 8] = [
+            (128, 3072, 64),
+            (128, 3072, 1024),
+            (3072, 3072, 64),
+            (3072, 128, 64),
+            (128, 128, 64),
+            (128, 3072, 32),
+            (128, 3072, 33),
+            (64, 3072, 64),
+        ];
+        for (n_in, n_out, rows) in cases {
+            // Position dependent weights, so a wrong index cannot hide behind
+            // a constant. The input is one, so the exact product is the sum of
+            // the row, accumulated in f64.
+            let mut weight = Vec::with_capacity(n_in * n_out * 2);
+            let mut sums = vec![0.0f64; n_out];
+            // Re-encode every weight as bf16 so the host and the device see the
+            // same number, then accumulate the reference in f64.
+            weight.clear();
+            let mut exact = vec![0.0f64; n_in * n_out];
+            for index in 0..n_in * n_out {
+                let mixed = ((index as u64).wrapping_mul(0x9E3779B97F4A7C15) >> 40) as u32;
+                let value = ((mixed % 65) as f32 - 32.0) / 64.0;
+                let bf16 = crate::ops::f32_to_bf16(value);
+                weight.extend_from_slice(&bf16.to_le_bytes());
+                exact[index] = f64::from(crate::ops::bf16_to_f32(bf16));
+            }
+            // Row major [n_out][n_in], the layout the CPU kernel reads.
+            for column in 0..n_out {
+                for k in 0..n_in {
+                    sums[column] += exact[column * n_in + k];
+                }
+            }
+            let input = vec![1.0f32; rows * n_in];
+            let mut gpu = vec![0.0f32; rows * n_out];
+            let ok =
+                GpuLinear::default().try_matmul(&weight, spec, &input, &mut gpu, n_in, n_out, rows);
+            if !ok {
+                eprintln!("PROBE n_in={n_in} n_out={n_out} rows={rows}: 回退 CPU");
+                continue;
+            }
+            let mut wrong = 0usize;
+            let mut worst = 0.0f64;
+            let mut first_bad = None;
+            for index in 0..rows * n_out {
+                let column = index % n_out;
+                let expected = sums[column];
+                let got = f64::from(gpu[index]);
+                let error = (got - expected).abs();
+                let tolerance = expected.abs().max(1.0) * 1.0e-3;
+                if error > tolerance {
+                    wrong += 1;
+                    if first_bad.is_none() {
+                        first_bad = Some((index, got, expected));
+                    }
+                }
+                worst = worst.max(error);
+            }
+            eprintln!(
+                "PROBE n_in={n_in:5} n_out={n_out:5} rows={rows:5}: 错误元素={wrong}/{} 最大绝对误差={worst:.6e} 首个错误={first_bad:?}",
+                gpu.len()
+            );
+        }
+    }
+
+    /// Three way arbitration for the narrow projection the denoiser starts
+    /// with: the GPU kernel, the CPU kernel and an f64 reference all see the
+    /// same weight and the same input, so the majority that is off shows up.
+    #[test]
+    #[ignore = "requires a Vulkan device and the real Mage-Flow GGUFs"]
+    fn bf16_prepared_narrow_projection_three_way_arbitration() {
+        use crate::vulkan::ops::{GpuMatmulMode, GpuMatmulSpec, GpuWeightFormat};
+        crate::ops::float::enable_gpu();
+        if crate::ops::get_vulkan_context().is_none() {
+            eprintln!("no vulkan context; skip");
+            return;
+        }
+        let Ok(loader) =
+            crate::GGUFLoader::from_file("models/mage-flow/mage-flow-base-dit-BF16.gguf")
+        else {
+            eprintln!("no real weights; skip");
+            return;
+        };
+        let (Some(bytes), Some(info)) = (
+            loader.tensor_slice("img_in.weight"),
+            loader.tensor_info("img_in.weight"),
+        ) else {
+            eprintln!("no img_in.weight; skip");
+            return;
+        };
+        let n_in = info.dims[0] as usize;
+        let n_out = info.dims[1] as usize;
+        let rows = 64usize;
+        let mut state: u64 = 0x243F6A8885A308D3;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 40) as f32 / 1024.0 - 8.0
+        };
+        let input: Vec<f32> = (0..rows * n_in).map(|_| next()).collect();
+        let spec = GpuMatmulSpec {
+            format: GpuWeightFormat::BF16,
+            mode: GpuMatmulMode::Prepared,
+        };
+        let mut gpu = vec![0.0f32; rows * n_out];
+        if !GpuLinear::default().try_matmul(bytes, spec, &input, &mut gpu, n_in, n_out, rows) {
+            eprintln!("回退 CPU");
+            return;
+        }
+        let mut cpu = vec![0.0f32; rows * n_out];
+        for index in 0..rows * n_out {
+            let row = index / n_out;
+            let column = index % n_out;
+            cpu[index] = crate::models::diffusion::dreamx::kernels::dot_bf16_f32(
+                &bytes[column * n_in * 2..(column + 1) * n_in * 2],
+                &input[row * n_in..(row + 1) * n_in],
+            );
+        }
+        // f64 reference over the same bytes.
+        let mut reference = vec![0.0f64; rows * n_out];
+        for index in 0..rows * n_out {
+            let row = index / n_out;
+            let column = index % n_out;
+            let mut sum = 0.0f64;
+            for k in 0..n_in {
+                let bits = u16::from_le_bytes(
+                    bytes[column * n_in * 2 + k * 2..column * n_in * 2 + k * 2 + 2]
+                        .try_into()
+                        .unwrap(),
+                );
+                sum += f64::from(crate::ops::bf16_to_f32(bits)) * f64::from(input[row * n_in + k]);
+            }
+            reference[index] = sum;
+        }
+        let mut gpu_worst = 0.0f64;
+        let mut cpu_worst = 0.0f64;
+        let mut gpu_scale = 0.0f64;
+        let mut cpu_scale = 0.0f64;
+        for index in 0..rows * n_out {
+            let want = reference[index];
+            gpu_worst = gpu_worst.max((f64::from(gpu[index]) - want).abs());
+            cpu_worst = cpu_worst.max((f64::from(cpu[index]) - want).abs());
+            gpu_scale = gpu_scale.max(want.abs());
+            cpu_scale = cpu_scale.max(want.abs());
+        }
+        eprintln!(
+            "PROBE img_in n_in={n_in} n_out={n_out}: GPU 最大误差={gpu_worst:.6e} (相对 {:.3e})  CPU 最大误差={cpu_worst:.6e} (相对 {:.3e})",
+            gpu_worst / gpu_scale,
+            cpu_worst / cpu_scale
+        );
+    }
+
     /// The transposed BF16/F32 kernel that #174 added has to stay within a
     /// float rounding of the CPU path, including when one call is split into
     /// several dispatches.

@@ -1172,10 +1172,6 @@ impl BatchedLinearRuntime {
             output.len(),
         )?;
         let context = self.ops.context;
-        #[cfg(test)]
-        let commands = (self.begin_commands)(context)?;
-        #[cfg(not(test))]
-        let commands = TokenCommands::begin(context)?;
         let key = (
             weight_bytes.as_ptr() as usize,
             weight_bytes.len(),
@@ -1246,7 +1242,22 @@ impl BatchedLinearRuntime {
             self.weights.insert(key, (buffer, bindings));
             bindings
         };
-        self.ops.write_f32(self.layout.input, input)?;
+        // The activation copy has to land before the command buffer starts
+        // recording. The barrier that begin_commands places is the one that
+        // orders host writes against the dispatches that read them, and a
+        // write that lands after it is only ordered by luck: the tiled
+        // kernel reads the activation region within microseconds of the copy.
+        let host_writes_early = self.ops.staging.is_none();
+        if host_writes_early {
+            self.ops.write_f32(self.layout.input, input)?;
+        }
+        #[cfg(test)]
+        let commands = (self.begin_commands)(context)?;
+        #[cfg(not(test))]
+        let commands = TokenCommands::begin(context)?;
+        if !host_writes_early {
+            self.ops.write_f32(self.layout.input, input)?;
+        }
         let outputs = [(self.layout.output, n_out, f32_bytes(n_out)?)];
         if n_in % 2 == 0
             && matches!(format, GpuWeightFormat::BF16 | GpuWeightFormat::F32)
@@ -1948,9 +1959,86 @@ pub(crate) struct Qwen3Ops<'a> {
     staging: Option<GpuBuffer>,
     descriptor_pool: vk::DescriptorPool,
     arena_bindings: OperatorBindings,
-    pipelines: [vk::Pipeline; OPERATOR_SHADERS.len()],
+    pipelines: Vec<vk::Pipeline>,
     q8_tiled: bool,
     recorded_dispatches: std::sync::atomic::AtomicUsize,
+}
+
+/// Compile the operator pipelines for this device.
+///
+/// The set belongs to the device: every arena that records dispatches
+/// borrows it instead of building its own, so a shader is compiled once and
+/// the first dispatch always runs a pipeline the driver has executed before.
+pub(crate) fn build_operator_pipelines(
+    context: &VulkanContext,
+) -> Result<Vec<vk::Pipeline>, VulkanError> {
+    // The dot-product variant is a drop-in for the scalar Q8_0 grouped
+    // matmul, so it takes over that pipeline index. `RUST_GPU_DP4A=0`
+    // forces the scalar variant for A/B measurement.
+    let force_dp4a = std::env::var("RUST_GPU_DP4A")
+        .map(|value| value != "0")
+        .unwrap_or(context.supports_integer_dot_product());
+    let q8_tiled = force_dp4a
+        && context.supports_integer_dot_product()
+        && context.limits.max_compute_shared_memory_size >= 18_432;
+    let operators: Vec<&[u8]> = OPERATOR_SHADERS
+        .iter()
+        .enumerate()
+        .map(|(index, shader)| {
+            if index == Q8_MATMUL_GROUPED && force_dp4a {
+                Q8_MATMUL_GROUPED_DP4A_SHADER
+            } else if matches!(
+                index,
+                Q8_MATMUL_GROUPED_TILED
+                    | Q8_MATMUL_COOPERATIVE
+                    | Q8_MATMUL_GROUPED_TILED_WIDE
+                    | Q8_MATMUL_GROUPED_TILED_WIDE_ADD
+            ) && !q8_tiled
+            {
+                // The tiled kernel needs `dotPacked4x8EXT`, so on a device
+                // without it the slot falls back to the plain grouped shader
+                // and the recorder selects ordinary GPU work instead of
+                // dispatching this placeholder with a tiled grid.
+                Q8_MATMUL_GROUPED_SHADER
+            } else if (index == ATTENTION_SCORES_TILED && require_tiled_attention(context).is_err())
+                || (matches!(index, ATTENTION_ONLINE | ATTENTION_ONLINE_WIDE)
+                    && require_online_attention(context).is_err())
+            {
+                // Keep ordinary Qwen operators available on baseline
+                // devices; DiT rejects this slot before recording it.
+                ATTENTION_SCORES_SHADER
+            } else {
+                *shader
+            }
+        })
+        .collect();
+    let mut pipelines = Vec::with_capacity(OPERATOR_SHADERS.len());
+    for (index, shader) in operators.into_iter().enumerate() {
+        match context.create_pipeline(context.pipeline_layout, shader) {
+            Ok(pipeline) => {
+                if index == Q8_MATMUL_GROUPED {
+                    eprintln!(
+                        "[GPU] Q8_0 matmul: {}",
+                        if force_dp4a {
+                            "packed int8 dot product"
+                        } else {
+                            "scalar int8 multiply"
+                        },
+                    );
+                }
+                pipelines.push(pipeline);
+            }
+            Err(error) => {
+                unsafe {
+                    for pipeline in pipelines {
+                        context.device.destroy_pipeline(pipeline, None);
+                    }
+                }
+                return Err(error);
+            }
+        }
+    }
+    Ok(pipelines)
 }
 
 impl<'a> Qwen3Ops<'a> {
@@ -2005,74 +2093,15 @@ impl<'a> Qwen3Ops<'a> {
             .and_then(|count| u32::try_from(count).ok())
             .ok_or(VulkanError::OutOfMemory)?;
         let max_sets = u32::try_from(descriptor_capacity).map_err(|_| VulkanError::OutOfMemory)?;
-        // The dot-product variant is a drop-in for the scalar Q8_0 grouped
-        // matmul, so it takes over that pipeline index. `RUST_GPU_DP4A=0`
-        // forces the scalar variant for A/B measurement.
-        let force_dp4a = std::env::var("RUST_GPU_DP4A")
-            .map(|value| value != "0")
-            .unwrap_or(context.supports_integer_dot_product());
-        let q8_tiled = force_dp4a
-            && context.supports_integer_dot_product()
-            && context.limits.max_compute_shared_memory_size >= 18_432;
-        let operators: Vec<&[u8]> = OPERATOR_SHADERS
-            .iter()
-            .enumerate()
-            .map(|(index, shader)| {
-                if index == Q8_MATMUL_GROUPED && force_dp4a {
-                    Q8_MATMUL_GROUPED_DP4A_SHADER
-                } else if matches!(
-                    index,
-                    Q8_MATMUL_GROUPED_TILED
-                        | Q8_MATMUL_COOPERATIVE
-                        | Q8_MATMUL_GROUPED_TILED_WIDE
-                        | Q8_MATMUL_GROUPED_TILED_WIDE_ADD
-                ) && !q8_tiled
-                {
-                    // The tiled kernel needs `dotPacked4x8EXT`, so on a device
-                    // without it the slot falls back to the plain grouped shader
-                    // and the recorder selects ordinary GPU work instead of
-                    // dispatching this placeholder with a tiled grid.
-                    Q8_MATMUL_GROUPED_SHADER
-                } else if (index == ATTENTION_SCORES_TILED
-                    && require_tiled_attention(context).is_err())
-                    || (matches!(index, ATTENTION_ONLINE | ATTENTION_ONLINE_WIDE)
-                        && require_online_attention(context).is_err())
-                {
-                    // Keep ordinary Qwen operators available on baseline
-                    // devices; DiT rejects this slot before recording it.
-                    ATTENTION_SCORES_SHADER
-                } else {
-                    *shader
-                }
-            })
-            .collect();
-        let mut pipelines = Vec::with_capacity(OPERATOR_SHADERS.len());
-        for (index, shader) in operators.into_iter().enumerate() {
-            match context.create_pipeline(context.pipeline_layout, shader) {
-                Ok(pipeline) => {
-                    if index == Q8_MATMUL_GROUPED {
-                        eprintln!(
-                            "[GPU] Q8_0 matmul: {}",
-                            if force_dp4a {
-                                "packed int8 dot product"
-                            } else {
-                                "scalar int8 multiply"
-                            },
-                        );
-                    }
-                    pipelines.push(pipeline);
-                }
-                Err(error) => {
-                    unsafe {
-                        for pipeline in pipelines {
-                            context.device.destroy_pipeline(pipeline, None);
-                        }
-                    }
-                    return Err(error);
-                }
-            }
-        }
-        let pipelines: [vk::Pipeline; OPERATOR_SHADERS.len()] = pipelines.try_into().unwrap();
+        // The operator pipelines belong to the device, not to one arena, and
+        // every projection used to build a fresh set. That put a freshly
+        // compiled pipeline in front of the very first dispatch, and a
+        // driver may drop that dispatch while the shader is still being
+        // prepared: the output region then keeps its zeroed contents and the
+        // projection silently returns nothing. Sharing one set per device
+        // compiles each shader once and lets the first dispatch use a
+        // pipeline the driver has already run.
+        let pipelines = context.operator_pipelines()?;
 
         let (arena, staging) =
             match unsafe { context.allocate_operator_arena(arena_size, device_local) } {
@@ -2139,7 +2168,11 @@ impl<'a> Qwen3Ops<'a> {
             descriptor_pool,
             arena_bindings,
             pipelines,
-            q8_tiled,
+            q8_tiled: std::env::var("RUST_GPU_DP4A")
+                .map(|value| value != "0")
+                .unwrap_or(context.supports_integer_dot_product())
+                && context.supports_integer_dot_product()
+                && context.limits.max_compute_shared_memory_size >= 18_432,
             recorded_dispatches: std::sync::atomic::AtomicUsize::new(0),
         })
     }
@@ -2228,6 +2261,12 @@ impl<'a> Qwen3Ops<'a> {
                 self.arena.mapped.add(region.offset).cast::<f32>(),
                 values.len(),
             );
+            // The shader reads the activation region microseconds later.
+            self.context.flush_mapped(
+                self.arena,
+                region.offset as u64,
+                f32_bytes(values.len())? as u64,
+            )?;
         }
         self.context
             .counters
@@ -2246,6 +2285,16 @@ impl<'a> Qwen3Ops<'a> {
             return Err(VulkanError::UnsupportedShape(
                 "device arena requires read_f32_into".into(),
             ));
+        }
+        // The dispatch that produced these values may have finished only
+        // microseconds ago, so make the device writes visible to the host
+        // before reading them out of the mapping.
+        unsafe {
+            self.context.invalidate_mapped(
+                self.arena,
+                region.offset as u64,
+                f32_bytes(count)? as u64,
+            )?;
         }
         self.context
             .counters
@@ -4561,9 +4610,8 @@ impl Drop for Qwen3Ops<'_> {
             self.context
                 .device
                 .destroy_descriptor_pool(self.descriptor_pool, None);
-            for pipeline in self.pipelines {
-                self.context.device.destroy_pipeline(pipeline, None);
-            }
+            // The operator pipelines belong to the device and outlive this
+            // arena, so they are not destroyed here.
             self.context.destroy_buffer(&self.arena);
             if let Some(staging) = &self.staging {
                 self.context.destroy_buffer(staging);
@@ -7543,6 +7591,26 @@ fn silu_probe_uses_the_production_ffn_width() {
 
 #[cfg(test)]
 mod tests {
+    /// The operator pipelines are compiled once per device. A denoiser step
+    /// records hundreds of dispatches, and building a fresh set for each of
+    /// them compiled every shader again.
+    #[test]
+    fn operator_pipelines_are_shared() {
+        crate::ops::float::enable_gpu();
+        let Some(context) = crate::ops::get_vulkan_context() else {
+            eprintln!("no vulkan context; skip");
+            return;
+        };
+        let first = context.operator_pipelines().expect("pipelines");
+        let second = context.operator_pipelines().expect("pipelines");
+        assert_eq!(first.len(), second.len());
+        assert_eq!(
+            first.iter().collect::<Vec<_>>(),
+            second.iter().collect::<Vec<_>>(),
+            "the second call must hand out the same pipelines"
+        );
+    }
+
     #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
     #[test]
     #[ignore = "requires a Vulkan device and NEON half operands"]

@@ -138,6 +138,10 @@ pub struct VulkanContext {
     /// Weights keyed by (data_ptr, byte_len); mmap slices are stable, so the
     /// first matmul over a tensor uploads it and every later call is a hit.
     weight_cache: Mutex<HashMap<(usize, usize), GpuBuffer>>,
+    /// Operator pipelines, compiled once per device and shared by every
+    /// arena. Building a fresh set per arena compiled every shader again for
+    /// each projection, which cost far more than the dispatch itself.
+    operator_pipelines: Mutex<Option<Vec<vk::Pipeline>>>,
     /// Persistent I/O buffers, grown on demand.
     io_state: Mutex<IoState>,
     mutex: Mutex<CommandSubmission>,
@@ -393,6 +397,7 @@ impl VulkanContext {
                             command_buffer: resources.command_buffer,
                             fence: resources.fence,
                             weight_cache: Mutex::new(HashMap::new()),
+                            operator_pipelines: Mutex::new(None),
                             io_state: Mutex::new(IoState::default()),
                             mutex: Mutex::new(CommandSubmission::default()),
                             #[cfg(test)]
@@ -978,6 +983,75 @@ impl VulkanContext {
         Ok(())
     }
 
+    /// The operator pipelines, compiled once for this device.
+    ///
+    /// Sharing them removes the per-arena cost of compiling every shader
+    /// again, which the denoiser paid for each of its hundred odd
+    /// projections per step.
+    pub(crate) fn operator_pipelines(&self) -> Result<Vec<vk::Pipeline>, VulkanError> {
+        let mut cached = self
+            .operator_pipelines
+            .lock()
+            .map_err(|_| VulkanError::InitFailed("Vulkan pipeline cache poisoned".into()))?;
+        if let Some(pipelines) = cached.as_ref() {
+            return Ok(pipelines.clone());
+        }
+        let pipelines = crate::vulkan::ops::build_operator_pipelines(self)?;
+        *cached = Some(pipelines.clone());
+        Ok(pipelines)
+    }
+
+    /// Force the host side cache of a mapped range out to the device.
+    ///
+    /// The arena and the weight uploads are plain copies into mapped memory.
+    /// The memory is host coherent, so a barrier alone is supposed to order
+    /// them, and the barrier in begin_commands does. A tiled kernel reads
+    /// those regions within microseconds of the copy though, so the copy is
+    /// flushed as well rather than relying on that barrier alone.
+    pub(crate) unsafe fn flush_mapped(
+        &self,
+        buffer: GpuBuffer,
+        offset: u64,
+        size: u64,
+    ) -> Result<(), VulkanError> {
+        if size == 0 {
+            return Ok(());
+        }
+        let range = vk::MappedMemoryRange::builder()
+            .memory(buffer.memory)
+            .offset(offset)
+            .size(size)
+            .build();
+        self.device
+            .flush_mapped_memory_ranges(&[range])
+            .map_err(|error| VulkanError::InitFailed(error.to_string()))
+    }
+
+    /// Drop the host side cache of a mapped range so the device writes it
+    /// holds become visible to the host.
+    ///
+    /// The result region is read straight out of the mapping. The memory is
+    /// host coherent, so the fence wait is supposed to be enough, but the
+    /// range is invalidated as well so the read does not depend on that.
+    pub(crate) unsafe fn invalidate_mapped(
+        &self,
+        buffer: GpuBuffer,
+        offset: u64,
+        size: u64,
+    ) -> Result<(), VulkanError> {
+        if size == 0 {
+            return Ok(());
+        }
+        let range = vk::MappedMemoryRange::builder()
+            .memory(buffer.memory)
+            .offset(offset)
+            .size(size)
+            .build();
+        self.device
+            .invalidate_mapped_memory_ranges(&[range])
+            .map_err(|error| VulkanError::InitFailed(error.to_string()))
+    }
+
     pub(crate) unsafe fn upload_static(&self, data: &[u8]) -> Result<GpuBuffer, VulkanError> {
         let size = data
             .len()
@@ -987,6 +1061,7 @@ impl VulkanContext {
         let buffer = self.alloc_persistently_mapped(size)?;
         std::ptr::copy_nonoverlapping(data.as_ptr(), buffer.mapped, data.len());
         std::ptr::write_bytes(buffer.mapped.add(data.len()), 0, size as usize - data.len());
+        self.flush_mapped(buffer, 0, data.len() as u64)?;
         self.count_upload(data.len());
         Ok(buffer)
     }

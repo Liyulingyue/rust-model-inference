@@ -131,6 +131,49 @@ impl<'a> Linear<'a> {
         let mut output = vec![0.0; checked_len("DreamX linear output", &[rows, self.n_out()])?];
         #[cfg(feature = "vulkan")]
         if self.weight.try_vulkan_rows(input, &mut output, rows) {
+            // `RMI_GPU_CPU_CHECK=1` compares every GPU projection with the CPU
+            // kernel on the same weight and input. The two summation orders
+            // differ, so a healthy projection shows a relative difference
+            // around 1e-6; a device that returned the previous contents of the
+            // arena shows 1.0, and one that ran only part of the dispatch
+            // shows up between the two.
+            #[cfg(feature = "vulkan")]
+            if std::env::var_os("RMI_GPU_CPU_CHECK").is_some() {
+                use std::sync::atomic::{AtomicUsize, Ordering};
+                static COUNTER: AtomicUsize = AtomicUsize::new(0);
+                let index = COUNTER.fetch_add(1, Ordering::Relaxed);
+                if let Some(weight) = self.weight.kernel.bf16_bytes() {
+                    let mut cpu = vec![0.0f32; output.len()];
+                    linear_bf16(
+                        pool,
+                        weight,
+                        input,
+                        rows,
+                        self.n_in(),
+                        self.n_out(),
+                        None,
+                        &mut cpu,
+                    );
+                    let mut max_abs = 0.0f32;
+                    let mut scale = 0.0f32;
+                    for (gpu, cpu) in output.iter().zip(cpu.iter()) {
+                        max_abs = max_abs.max((gpu - cpu).abs());
+                        scale = scale.max(cpu.abs());
+                    }
+                    let relative = if scale > 0.0 {
+                        max_abs / scale
+                    } else {
+                        max_abs
+                    };
+                    if relative > 1.0e-2 {
+                        eprintln!(
+                            "[GPU-CHECK] projection #{index} rows={rows} n_in={} n_out={} relative={relative:.3e}",
+                            self.n_in(),
+                            self.n_out(),
+                        );
+                    }
+                }
+            }
             if let Some(bias) = &self.bias {
                 for row in output.chunks_exact_mut(self.n_out()) {
                     vec_add_into(bias, row);

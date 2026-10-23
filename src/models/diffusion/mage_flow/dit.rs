@@ -16,6 +16,11 @@ const EPS: f32 = 1e-6;
 pub struct MageFlowDit<'a> {
     source: &'a dyn TensorSource,
     pool: Arc<ComputePool>,
+    /// Projections are built once and reused. Every call used to build a new
+    /// projection, and with it a new GPU runtime, a new arena and a fresh set
+    /// of operator pipelines, so each of the hundred odd projections per step
+    /// paid for a full setup and the driver saw a pipeline it had never run.
+    projections: std::cell::RefCell<std::collections::HashMap<String, Linear<'a>>>,
 }
 
 impl<'a> MageFlowDit<'a> {
@@ -36,6 +41,7 @@ impl<'a> MageFlowDit<'a> {
         ) {
             return Err("Missing or unsupported mage_flow.variant".into());
         }
+        let projections = std::cell::RefCell::new(std::collections::HashMap::new());
         let tensor = |name: &str, dims: &[u64]| -> Result<(), String> {
             let info = source
                 .tensor_info(name)
@@ -178,7 +184,11 @@ impl<'a> MageFlowDit<'a> {
                 tensor(&format!("{p}.{name}"), &[HEAD_DIM as u64])?;
             }
         }
-        Ok(Self { source, pool })
+        Ok(Self {
+            source,
+            pool,
+            projections: projections,
+        })
     }
 
     fn linear(
@@ -189,14 +199,23 @@ impl<'a> MageFlowDit<'a> {
         width: usize,
         out: usize,
     ) -> Result<Vec<f32>, String> {
-        let layer = Linear::from_source(
-            self.source,
-            &format!("{name}.weight"),
-            Some(&format!("{name}.bias")),
-            width,
-            out,
-        )?;
+        let mut projections = self.projections.borrow_mut();
+        let layer = match projections.get(name) {
+            Some(layer) => layer,
+            None => {
+                let layer = Linear::from_source(
+                    self.source,
+                    &format!("{name}.weight"),
+                    Some(&format!("{name}.bias")),
+                    width,
+                    out,
+                )?;
+                projections.insert(name.to_string(), layer);
+                projections.get(name).expect("projection was just inserted")
+            }
+        };
         let values = layer.forward(&self.pool, input, rows)?;
+        drop(projections);
         trace(name, rows, out, &values)?;
         Ok(values)
     }
@@ -535,6 +554,47 @@ mod tests {
             trace("disabled", 1, 1, &[1.0]).unwrap();
         }
     }
+    /// The denoiser reuses its projections now, so one runtime and one arena
+    /// serve every step. Two steps of the same input have to come out
+    /// identical, and a step that runs after another one has to match a step
+    /// that runs on its own.
+    #[test]
+    #[ignore = "requires a Vulkan device and the real Mage-Flow GGUFs"]
+    fn reused_projections_give_the_same_step() {
+        let Ok(loader) =
+            crate::GGUFLoader::from_file("models/mage-flow/mage-flow-base-dit-BF16.gguf")
+        else {
+            eprintln!("no real weights; skip");
+            return;
+        };
+        crate::ops::float::enable_gpu();
+        if crate::ops::get_vulkan_context().is_none() {
+            eprintln!("no vulkan context; skip");
+            return;
+        }
+        let pool = std::sync::Arc::new(ComputePool::new(4));
+        let Ok(dit) = MageFlowDit::load(&loader, pool) else {
+            eprintln!("no denoiser; skip");
+            return;
+        };
+        let shapes = [[4usize, 4usize]];
+        let image = vec![0.25f32; 4 * 4 * IN_CHANNELS];
+        let context = vec![0.5f32; 2 * CONTEXT_DIM];
+        let first = dit.forward(&image, &shapes, &context, 0.5).unwrap();
+        let second = dit.forward(&image, &shapes, &context, 0.5).unwrap();
+        assert_eq!(
+            first.len(),
+            second.len(),
+            "the two steps must have the same shape"
+        );
+        let differing = first
+            .iter()
+            .zip(second.iter())
+            .filter(|(a, b)| a.to_bits() != b.to_bits())
+            .count();
+        assert_eq!(differing, 0, "the same step must give the same result");
+    }
+
     #[test]
     fn reference_rope_uses_its_own_frame_and_centered_grid() {
         assert_eq!(
