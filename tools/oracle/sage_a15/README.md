@@ -225,6 +225,44 @@ increase arena memory. These measurements are not performance benchmarks.
 Vision encoder GPU execution and numerical vision parity are outside this
 validation; image CLI uses the existing CPU projector and Vulkan text decoder.
 
+### End-to-end generation and runtime measurement
+
+The 2026-10-23 run used a full `--release --features vulkan` CLI, without
+`parity-trace` or compute tracing: temperature 0, eight CPU threads, prefill
+batch 64, the GGUF Jinja template, no thinking, and an output limit of 192.
+All three cases completed before that limit. Full answers, commands, binary
+SHA-256 and precise timing fields are in [performance.json](performance.json).
+
+| Case | Input rows | Output tokens | Session init (s) | Prefill (s) | First text including startup (s) | Decode eval/s | Process wall (s) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Scalar Vulkan text | 44 | 88 | 58.47 | 17.07 | 75.95 | 0.87 | 179.07 |
+| Default Vulkan text | 44 | 104 | 24.61 | 19.44 | 44.33 | 0.40 | 308.92 |
+| Default CPU vision + Vulkan decoder | 104 | 15 | 21.85 | 53.97 | 80.99 | 0.75 | 103.39 |
+
+Decode timing counts single-token model evaluations, including the stopping
+EOS evaluation. Startup includes model/session preparation and, for the image
+case, image processing. File and driver caches were not flushed. The image
+used 72 vision tokens; CPU vision encoding took 4.649 seconds. Given
+[this synthetic input](performance-shapes.png), the complete actual response
+was `图中从左到右依次是红色圆形、蓝色正方形和绿色三角形。`
+
+These are **shared-environment observations**, not a stable hardware benchmark
+or a scalar/default speed comparison. The host has eight adapters, but this
+container exposes only `card7/renderD134` (PCI `0000:c3:00.0`); its GPU was
+98–100% busy before our measured default runs. Each configuration ran once.
+The process held about 34 GiB in host-visible GTT buffers and only 211 MiB in
+VRAM: this executor's existing `UploadedBuffers::upload` uses `upload_static`,
+not the separate `upload_device_static` VRAM path. GPU execution therefore does
+not imply that these weights reside in VRAM. No weight-placement optimization
+or attribution of all performance costs is claimed here.
+
+Both text cases requested forced Vulkan. The image CLI uses `--gpu` (Auto),
+since forced Vulkan CLI mode admits plain text only; there was no logged CPU
+decoder fallback. Process DRM engine counters increased during image decoding
+on the same physical adapter. The image encoder/projector remains on CPU.
+This run does not extend the earlier numerical parity coverage or establish
+long-context/concurrent performance.
+
 ### Focused regression checks
 
 The final local `--features vulkan,parity-trace --lib vulkan::` run passed 46
