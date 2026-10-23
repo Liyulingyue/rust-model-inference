@@ -17,6 +17,102 @@ struct Matrix {
     format: u32,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires a hardware Vulkan device with shaderFloat64"]
+    fn cooperative_quantization_matches_signed_q8k() {
+        crate::ops::enable_gpu();
+        let context = crate::ops::get_vulkan_context().expect("Vulkan context");
+        assert!(!context.is_software_icd() && context.shader_float64);
+        for width in [256, 512, 2560, 7168] {
+            let input = ArenaRegion {
+                offset: 0,
+                size: width * 4,
+            };
+            let q8 = ArenaRegion {
+                offset: input.size,
+                size: width,
+            };
+            let scales = ArenaRegion {
+                offset: q8.offset + q8.size,
+                size: width / 256 * 4,
+            };
+            let mut ops =
+                Qwen3Ops::new_device_local_with_size(context, scales.offset + scales.size, 1)
+                    .unwrap();
+            let pipeline = ops
+                .add_shader(include_bytes!("../../shaders/bin/dory.spv"))
+                .unwrap();
+            for pattern in 0..4 {
+                let mut values: Vec<f32> = (0..width)
+                    .map(|i| {
+                        if pattern == 0 {
+                            0.0
+                        } else {
+                            ((i * 73 % 251) as f32 - 125.0) * 0.137
+                        }
+                    })
+                    .collect();
+                if pattern == 1 || pattern == 2 {
+                    for block in values.chunks_exact_mut(256) {
+                        let maximum = if pattern == 1 { 127.0 } else { -127.0 };
+                        block[3] = maximum;
+                        block[252] = -maximum;
+                        block[8..14].copy_from_slice(&[
+                            0.5,
+                            -0.5,
+                            1.5,
+                            -1.5,
+                            f32::from_bits(0x3effffff),
+                            -0.0,
+                        ]);
+                    }
+                }
+                ops.write_f32(input, &values).unwrap();
+                let mut expected = Vec::new();
+                for cooperative in [false, true] {
+                    let commands = TokenCommands::begin(context).unwrap();
+                    if cooperative {
+                        let mut push = [0; 14];
+                        push[..4].copy_from_slice(&[
+                            13,
+                            0,
+                            (q8.offset / 4) as u32,
+                            (scales.offset / 4) as u32,
+                        ]);
+                        ops.record_custom(
+                            &commands,
+                            pipeline,
+                            None,
+                            &push,
+                            [(width / 256) as u32, 1, 1],
+                        )
+                        .unwrap();
+                    } else {
+                        ops.record_quantize_q8_k_ggml(&commands, input, q8, scales, width)
+                            .unwrap();
+                    }
+                    commands.submit_and_wait().unwrap();
+                    let mut actual = Vec::new();
+                    for region in [q8, scales] {
+                        let mut data = vec![0.0; region.size / 4];
+                        ops.read_f32_into(region, &mut data).unwrap();
+                        actual.extend(data.into_iter().map(f32::to_bits));
+                    }
+                    if cooperative {
+                        assert_eq!(actual, expected, "width={width} pattern={pattern}");
+                    } else {
+                        expected = actual;
+                    }
+                }
+            }
+        }
+    }
+}
+
 enum Layer {
     Attention {
         vectors: OperatorBindings,
@@ -313,34 +409,51 @@ impl DoryVulkanSession {
     fn project(
         &self,
         commands: &TokenCommands<'_>,
-        w: &Matrix,
         input: ArenaRegion,
-        output: ArenaRegion,
+        projections: &[(&Matrix, ArenaRegion)],
     ) -> Result<()> {
-        if w.format != 30 {
-            self.ops.record_quantize_q8_k_ggml(
+        if let Some((w, _)) = projections.iter().find(|(w, _)| w.format != 30) {
+            self.graph(
                 commands,
-                input,
-                self.layout.q8k,
-                self.layout.q8k_scales,
-                w.n_in,
+                None,
+                [
+                    13,
+                    Self::word(input),
+                    Self::word(self.layout.q8k),
+                    Self::word(self.layout.q8k_scales),
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                ],
+                w.n_in / 4,
             )?;
         }
-        self.ops.record_custom(
-            commands,
-            self.matmul_pipeline,
-            Some(w.binding),
-            &[
-                Self::word(input),
-                Self::word(self.layout.q8k),
-                Self::word(self.layout.q8k_scales),
-                Self::word(output),
-                w.n_in as u32,
-                w.n_out as u32,
-                w.format,
-            ],
-            [w.n_out.div_ceil(8) as u32, 1, 1],
-        )
+        for &(w, output) in projections {
+            debug_assert_eq!(w.n_in * 4, input.size);
+            self.ops.record_custom(
+                commands,
+                self.matmul_pipeline,
+                Some(w.binding),
+                &[
+                    Self::word(input),
+                    Self::word(self.layout.q8k),
+                    Self::word(self.layout.q8k_scales),
+                    Self::word(output),
+                    w.n_in as u32,
+                    w.n_out as u32,
+                    w.format,
+                ],
+                [w.n_out.div_ceil(8) as u32, 1, 1],
+            )?;
+        }
+        Ok(())
     }
 
     fn layer(
@@ -364,10 +477,11 @@ impl DoryVulkanSession {
             } => {
                 let qn = cfg.n_head * cfg.head_dim;
                 let kn = cfg.n_head_kv * cfg.head_dim;
-                self.project(commands, q, l.x, l.q)?;
-                self.project(commands, k, l.x, l.k)?;
-                self.project(commands, v, l.x, l.v)?;
-                self.project(commands, gate, l.x, l.gate)?;
+                self.project(
+                    commands,
+                    l.x,
+                    &[(q, l.q), (k, l.k), (v, l.v), (gate, l.gate)],
+                )?;
                 let rope = if cfg.attention_is_sliding(layer) {
                     self.rope_sliding
                 } else {
@@ -502,7 +616,7 @@ impl DoryVulkanSession {
                     qn,
                 )?;
                 self.norm(commands, l.attn, 1, qn)?;
-                self.project(commands, out, l.attn, l.projection)?;
+                self.project(commands, l.attn, &[(out, l.projection)])?;
                 *vectors
             }
             Layer::Mlp {
@@ -511,8 +625,7 @@ impl DoryVulkanSession {
                 up,
                 down,
             } => {
-                self.project(commands, gate, l.x, l.gate)?;
-                self.project(commands, up, l.x, l.up)?;
+                self.project(commands, l.x, &[(gate, l.gate), (up, l.up)])?;
                 self.graph(
                     commands,
                     Some(*vectors),
@@ -535,7 +648,7 @@ impl DoryVulkanSession {
                     cfg.n_ff,
                 )?;
                 self.norm(commands, l.up, 1, cfg.n_ff)?;
-                self.project(commands, down, l.up, l.projection)?;
+                self.project(commands, l.up, &[(down, l.projection)])?;
                 *vectors
             }
         };
@@ -648,7 +761,7 @@ impl DoryVulkanSession {
             cfg.n_embd,
         )?;
         let commands = TokenCommands::begin(self.context)?;
-        self.project(&commands, &self.output, l.x, l.logits)?;
+        self.project(&commands, l.x, &[(&self.output, l.logits)])?;
         self.graph(
             &commands,
             Some(self.output_scale),

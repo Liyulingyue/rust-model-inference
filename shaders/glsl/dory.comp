@@ -21,9 +21,37 @@ uint cache_index(uint j, uint head, uint d) {
 }
 shared double norm_sums[64];
 shared float norm_scale;
+shared float quant_max[64];
 void main() {
     uint i = gl_GlobalInvocationID.x;
-    if (pc.op == 0u) {
+    if (pc.op == 13u) {
+        uint lane = gl_LocalInvocationID.x;
+        uint block = gl_WorkGroupID.x;
+        uint base = block * 256u + lane * 4u;
+        float maximum = 0.0;
+        for (uint j = 0u; j < 4u; ++j) {
+            float v = get(pc.a + base + j);
+            if (abs(v) > abs(maximum)) maximum = v;
+        }
+        quant_max[lane] = maximum;
+        barrier();
+        if (lane == 0u) {
+            maximum = 0.0;
+            // Consecutive four-value lanes retain the first signed maximum on ties.
+            for (uint j = 0u; j < 64u; ++j)
+                if (abs(quant_max[j]) > abs(maximum)) maximum = quant_max[j];
+            norm_scale = maximum == 0.0 ? 0.0 : divide_finite_normal(-127.0, maximum);
+            put(pc.c + block, maximum == 0.0 ? 0.0 : divide_finite_normal(1.0, norm_scale));
+        }
+        barrier();
+        uint packed = 0u;
+        for (uint j = 0u; j < 4u; ++j) {
+            precise float scaled = norm_scale * get(pc.a + base + j);
+            int q = int((floatBitsToUint(scaled + 12582912.0) & 0x007fffffu) - 0x00400000u);
+            packed |= uint(clamp(q, -127, 127) & 255) << (j * 8u);
+        }
+        arena.data[pc.b + block * 64u + lane] = packed;
+    } else if (pc.op == 0u) {
         uint head = gl_WorkGroupID.x, lane = gl_LocalInvocationID.x;
         if (head >= pc.n) return;
         uint base = pc.a + head * pc.width;

@@ -253,6 +253,49 @@ env -u RMI_PARITY_TRACE -u RMI_SCALAR \
 # Repeat with f16. Preserve binaries and hashes before switching revisions.
 ```
 
+### Shared and cooperative activation quantization
+
+Q/K/V/gate projections now reuse one Q8_K preparation of their unchanged input;
+MLP gate/up projections do the same. BF16 consumers still read the original
+F32 input. Dory's private quantizer distributes each 256-value block over 64
+invocations, with four consecutive values per lane. It retains the first
+signed maximum on ties and the existing ties-to-even integer conversion.
+The shared quantizer used by other models is unchanged.
+
+[validation-gpu-quantization.json](validation-gpu-quantization.json) compares
+this change with commit `eb01be8e`, using fresh ABBA runs on the same shared
+EPYC 9334 / RADV NAVI31 host. Each build/KV has 54 measured calls, excluding
+initialization and each run's nine warmup calls:
+
+| KV | Before | After | Observed latency reduction |
+| --- | --- | --- | --- |
+| F32 | 0.4285s | 0.4109s | 4.1% |
+| F16 | 0.4113s | 0.3861s | 6.1% |
+
+All samples are retained; these shared-device observations are not an isolated
+throughput guarantee and must not be compared with older absolute timings.
+A second ABBA comparison isolates the cooperative kernel from input sharing.
+The report also records a discarded Q5 reduction experiment that had no speed
+benefit. Use the same `gpu_bench.rs` commands above against the two frozen
+builds, running before/after/after/before for each KV format.
+
+The hardware quantizer regression compares packed bytes and scale bits with
+the original signed Q8_K kernel for 16 fixtures: four widths, all-zero inputs,
+positive/negative maximum ties, rounding boundaries and varied values:
+
+```sh
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.json \
+  cargo test --locked --profile release-fast --features vulkan --lib \
+  vulkan::dory::tests::cooperative_quantization_matches_signed_q8k \
+  -- --ignored --exact --nocapture
+```
+
+Seven fresh full-model Oracle replays pass all 15,795 checkpoints with zero
+observed error and unchanged reduced-precision gates. The untraced CPU/GPU
+comparison, hardware prefill/reset test and forced-Vulkan F32 / Auto F16 CLI
+also pass. Inference still performs 486 GPU submissions per nine positions
+and zero static weight uploads.
+
 To replay the complete graph against the fixed CPU Oracle, use the CPU replay
 commands above with a fresh trace path and replace the Rust command with:
 
@@ -317,7 +360,7 @@ Both bounds were fixed before investigating differences. Missing, duplicated,
 empty, non-finite or truncated checkpoints fail. This is numerical acceptance
 of reduced-precision computation, not a claim of end-to-end bitwise equality.
 
-The replay covers this CPU Q5_K_M artifact with `per_loop` KV. Dory GPU execution
-is unsupported as confirmed by the separate probe above;
+The CPU and resident Vulkan replays cover this Q5_K_M artifact with `per_loop`
+KV, within the device and arithmetic scope recorded above;
 other weight quantizations, `last_loop` KV, the actual 1024-token SWA boundary,
 the full 262144-token context and chat-template generation are outside this validation.
