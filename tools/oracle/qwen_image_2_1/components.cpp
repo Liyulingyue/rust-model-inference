@@ -101,7 +101,7 @@ int main(int argc, char** argv) {
             if (argc > 5) { std::vector<float> slots; for(auto v:condition.c_token_types.values()) slots.push_back(v); qwen_image_2_1_trace_f32("qwen.text.image_slots",slots,{static_cast<int64_t>(slots.size())}); }
             conditioner.runner_end();
             ggml_backend_buffer_free(buffer);
-        } else if (mode == "sample") {
+        } else if (mode == "sample" || mode == "sample_turbo") {
             if (argc != 11 && (argc < 16 || (argc-13)%3)) throw std::runtime_error("sample DIT NOISE POSITIVE NEGATIVE W H STEPS CFG THREADS [POS_SLOTS NEG_SLOTS REF W H ...]");
             if (!loader.init_from_file(argv[2])) throw std::runtime_error("DiT load failed");
             Qwen::QwenImage21Runner runner(backend, loader.get_tensor_storage_map(), "model.diffusion_model", nullptr, "qwen_image_2_1_prefix_cache=false");
@@ -122,6 +122,15 @@ int main(int argc, char** argv) {
             }
             FluxScheduler scheduler(w*h,VERSION_QWEN_IMAGE_2_1);
             auto sigmas=scheduler.get_sigmas(steps,0,0,nullptr);
+            if (mode == "sample_turbo") {
+                const char* path = std::getenv("QWEN_IMAGE_2_1_TURBO_SIGMAS");
+                if (!path) throw std::runtime_error("sample_turbo requires independent QWEN_IMAGE_2_1_TURBO_SIGMAS");
+                sigmas = read_floats(path);
+                if (steps != 8 || sigmas.size() != 9 || sigmas.front() != 1.f || sigmas.back() != 0.f)
+                    throw std::runtime_error("invalid Turbo checkpoint schedule");
+                for (size_t i=1;i<sigmas.size();++i)
+                    if (!std::isfinite(sigmas[i]) || sigmas[i-1]<=sigmas[i]) throw std::runtime_error("invalid Turbo sigmas");
+            }
             qwen_image_2_1_trace_f32("qwen.sample.sigmas",sigmas,{steps+1});
             qwen_image_2_1_trace_f32("qwen.sample.noise",x.values(),{w,h,64});
             DiscreteFlowDenoiser denoiser;

@@ -4,6 +4,9 @@ use super::options::{
 use super::types::{normalize_tts_language, CliOptions};
 
 pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
+    if options.qwen_image_turbo {
+        return Err("--qwen-image-turbo requires a Qwen-Image-2.1 DiT GGUF".into());
+    }
     if options.astronex || options.astronex_frames.is_some() {
         crate::app::cli::astronex_cli_options(options)?;
         return Ok(());
