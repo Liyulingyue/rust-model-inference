@@ -18,6 +18,8 @@ layout(push_constant) uniform PC {
     uint expert_count; uint expert_ids_word; uint expert_used; uint expert_slot;
 } pc;
 
+shared float partial[64];
+
 uint weight_word(uint slot, uint index) {
     if (slot == 0u) return w0.data[index];
     if (slot == 1u) return w1.data[index];
@@ -26,19 +28,55 @@ uint weight_word(uint slot, uint index) {
 
 void main() {
     uint token_row = gl_WorkGroupID.z / pc.group_count; uint slot = gl_WorkGroupID.z % pc.group_count;
-    uint row = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint group = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint invocation = gl_LocalInvocationID.x;
     uint rows = slot == 0u ? pc.rows0 : (slot == 1u ? pc.rows1 : pc.rows2);
-    if (slot >= pc.group_count || row >= rows || gl_LocalInvocationID.x != 0u) return;
+    if (slot >= pc.group_count) return;
 
-    // ponytail: one lane per row preserves F32Kernel's scalar reduction;
-    // parallelize rows further if profiling shows this path is a bottleneck.
-    precise float sum = 0.0;
-    precise float correction = 0.0;
+    // AVX2 uses two independent eight-lane FMA streams, then two horizontal sums.
+    uint lanes = pc.wide_sum == 16u ? 16u : 1u;
+    uint row = group * (64u / lanes) + invocation / lanes;
+    uint lane = invocation % lanes;
     uint row_base = row * pc.elements_per_row;
     if (pc.expert_count != 0u) {
         uint expert = arena.data[pc.expert_ids_word + token_row * pc.expert_used + pc.expert_slot];
         row_base += min(expert, pc.expert_count - 1u) * rows * pc.elements_per_row;
     }
+    uint output_word = slot == 0u
+        ? pc.output0_word
+        : (slot == 1u ? pc.output1_word : pc.output2_word);
+    uint output_stride = slot == 0u ? pc.output0_stride : (slot == 1u ? pc.output1_stride : pc.output2_stride);
+    if (lanes == 16u) {
+        precise float acc = 0.0;
+        if (row < rows) {
+            for (uint index = lane; index < pc.n_in / 16u * 16u; index += 16u) {
+                float x = uintBitsToFloat(arena.data[pc.input_word + token_row * pc.input_stride + index]);
+                acc = fma(uintBitsToFloat(weight_word(slot, row_base + index)), x, acc);
+            }
+            if (pc.n_in % 16u != 0u && lane < 8u) {
+                uint index = pc.n_in / 16u * 16u + lane;
+                float x = uintBitsToFloat(arena.data[pc.input_word + token_row * pc.input_stride + index]);
+                acc = fma(uintBitsToFloat(weight_word(slot, row_base + index)), x, acc);
+            }
+        }
+        partial[invocation] = acc;
+        barrier();
+        if (lane != 0u || row >= rows) return;
+        precise float low = ((partial[invocation] + partial[invocation + 4u])
+            + (partial[invocation + 1u] + partial[invocation + 5u]))
+            + ((partial[invocation + 2u] + partial[invocation + 6u])
+            + (partial[invocation + 3u] + partial[invocation + 7u]));
+        precise float high = ((partial[invocation + 8u] + partial[invocation + 12u])
+            + (partial[invocation + 9u] + partial[invocation + 13u]))
+            + ((partial[invocation + 10u] + partial[invocation + 14u])
+            + (partial[invocation + 11u] + partial[invocation + 15u]));
+        arena.data[output_word + token_row * output_stride + row] = floatBitsToUint(low + high);
+        return;
+    }
+    if (row >= rows) return;
+
+    precise float sum = 0.0;
+    precise float correction = 0.0;
     for (uint index = 0u; index < pc.n_in; index++) {
         float input_value = uintBitsToFloat(arena.data[pc.input_word + token_row * pc.input_stride + index]);
         float weight_value = uintBitsToFloat(weight_word(slot, row_base + index));
@@ -51,8 +89,5 @@ void main() {
         sum = next;
     }
 
-    uint output_word = slot == 0u
-        ? pc.output0_word
-        : (slot == 1u ? pc.output1_word : pc.output2_word);
-    arena.data[output_word + token_row * (slot == 0u ? pc.output0_stride : (slot == 1u ? pc.output1_stride : pc.output2_stride)) + row] = floatBitsToUint(sum + correction);
+    arena.data[output_word + token_row * output_stride + row] = floatBitsToUint(sum + correction);
 }

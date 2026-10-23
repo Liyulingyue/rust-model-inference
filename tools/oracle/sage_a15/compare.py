@@ -107,7 +107,8 @@ def main():
         oracle_trace, rust_trace = directory / "oracle.jsonl", directory / "rust.jsonl"
         env = dict(os.environ, RMI_PARITY_TRACE=str(oracle_trace), RMI_PARITY_FILTER=",".join(["model.input_embed", "result_norm", "result_output", *sorted(ROUTER_NAMES), *[f"l_out-{layer}" for layer in range(40)]]))
         run([args.oracle, "-m", args.model, "--no-repack", "-p", prompt, "--no-escape", "-n", "4", "-c", "128", "-b", "1", "-ub", "1", "-t", "8", "-tb", "8", "-ngl", "0", "-ctk", "f32", "-ctv", "f32", "-fa", "off", "--temp", "0", "--repeat-penalty", "1"], directory / "oracle.log", env)
-        env.update(RMI_SCALAR="1", RMI_SAGE_BACKEND=args.backend, RMI_PARITY_TRACE=str(rust_trace), RMI_SAGE_MODEL=str(args.model), RMI_SAGE_PROMPT=prompt, RMI_SAGE_TOKENS=str(directory / "tokens.json"))
+        env.pop("RMI_SCALAR", None)
+        env.update(RMI_SAGE_BACKEND=args.backend, RMI_PARITY_TRACE=str(rust_trace), RMI_SAGE_MODEL=str(args.model), RMI_SAGE_PROMPT=prompt, RMI_SAGE_TOKENS=str(directory / "tokens.json"))
         run([args.rust_test, "--ignored", "--exact", "sage_dump_trace", "--nocapture"], directory / "rust.log", env)
         assert f"Sage trace backend: {args.backend}" in (directory / "rust.log").read_text()
         records, oracle = load(oracle_trace)

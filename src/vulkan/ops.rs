@@ -5029,7 +5029,11 @@ fn matmul_rows_push(
     let mut push = [0; 26];
     if format == GpuWeightFormat::F32 {
         // F32 has no activation scales; scalar Oracle mode sums rounded products widely.
-        push[1] = u32::from(crate::ops::scalar_mode());
+        push[1] = if n_in.is_multiple_of(8) && crate::ops::has_avx2_fma() {
+            16
+        } else {
+            u32::from(crate::ops::scalar_mode())
+        };
     }
     if format == GpuWeightFormat::F16
         && bindings.weight_mode == GpuMatmulMode::Prepared
@@ -5176,7 +5180,9 @@ fn matmul_rows_push(
         max_output_rows = max_output_rows.max(n_out);
     }
     // BF16 dot streams occupy 4/8 lanes; use the rest for independent outputs.
-    let output_groups = if format == GpuWeightFormat::BF16 && push[1] != 0 {
+    let output_groups = if format == GpuWeightFormat::F32 {
+        max_output_rows.div_ceil(if push[1] == 16 { 4 } else { 64 })
+    } else if format == GpuWeightFormat::BF16 && push[1] != 0 {
         max_output_rows.div_ceil(64 / push[1] as usize)
     } else if format == GpuWeightFormat::Q6_K {
         max_output_rows.div_ceil(8)
@@ -9381,7 +9387,7 @@ mod tests {
                     )
                 };
                 let output_groups = match format {
-                    Q8_0 | Q4_0 | Q4_1 | Q4_K | Q5_K | Q6_K => 1,
+                    F32 | Q8_0 | Q4_0 | Q4_1 | Q4_K | Q5_K | Q6_K => 1,
                     BF16 if crate::ops::has_neon() || crate::ops::has_avx2_fma() => 1,
                     _ => 3,
                 };

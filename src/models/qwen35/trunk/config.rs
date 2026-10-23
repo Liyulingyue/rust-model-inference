@@ -530,7 +530,7 @@ mod tests {
     #[test]
     fn qwen35_config_rejects_invalid_tensor_dimensions() {
         for (key, value, expected) in [
-            ("qwen35.attention.key_length", 0, "head lengths"),
+            ("qwen35.attention.key_length", 0, "attention.key_length"),
             ("qwen35.attention.value_length", 0, "head lengths"),
             ("qwen35.attention.value_length", 128, "head lengths"),
             ("qwen35.ssm.time_step_rank", 0, "inner/rank"),

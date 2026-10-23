@@ -1119,6 +1119,7 @@ impl Qwen35VulkanSession {
         rows: usize,
     ) -> Result<(), VulkanError> {
         let config = &self.config;
+        let _numerics = crate::ops::ScalarDispatchScope::new(config.moe.is_some());
         let input_count = qwen35_product("input rows", &[rows, config.n_embd])?;
         if rows > self.max_rows
             || positions.len() != rows
@@ -2503,6 +2504,18 @@ mod tests {
     #[ignore = "requires a Vulkan device"]
     fn f32_weights_run_on_vulkan() {
         let context = Box::leak(Box::new(super::VulkanContext::new().unwrap()));
+        let mut cancellation = vec![0.0; 32 * 65];
+        for row in cancellation.chunks_mut(32) {
+            row[0] = 1e8;
+            row[1] = 1.0;
+            row[16] = -1e8;
+        }
+        let weight = Weight::from_quantized(crate::ops::kernel::QuantizedTensor::F32 {
+            data: cancellation,
+            n_in: 32,
+            n_out: 65,
+        });
+        check_gpu_weights(context, &[(&weight, "SIMD cancellation")], &[1.0; 32]);
         if crate::ops::scalar_mode() {
             let weight = Weight::from_quantized(crate::ops::kernel::QuantizedTensor::F32 {
                 data: vec![1e8, 1.0, -1e8],
@@ -2511,7 +2524,7 @@ mod tests {
             });
             check_gpu_weights(context, &[(&weight, "wide cancellation")], &[1.0; 3]);
         }
-        for n_in in [3, 5120, 17_409] {
+        for n_in in [3, 8, 16, 24, 5120, 17_409] {
             let mut input: Vec<f32> = (0..n_in)
                 .map(|i| ((i * 29 % 251) as f32 - 125.0) / 97.0)
                 .collect();
