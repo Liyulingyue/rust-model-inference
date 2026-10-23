@@ -1,0 +1,2740 @@
+{
+  "date": "2026-10-23",
+  "baseline_commit": "b9dd5dfd311c7011e89ba8f6e8476dc606962e58",
+  "implementation_commit": "7c64a57c14e3c0d700db81643629c18a7794fa13",
+  "platform": "Linux x86_64 AMD EPYC 9334, glibc 2.39, Rust 1.98.1, release-fast, vulkan,parity-trace",
+  "gpu": {
+    "device": "AMD Radeon Graphics (RADV NAVI31)",
+    "hardware_icd": true,
+    "mesa_vulkan_drivers": "25.2.8-0ubuntu0.24.04.1",
+    "exclusive_access": false,
+    "required_feature": "shaderFloat64"
+  },
+  "artifact": {
+    "bytes": 3673288864,
+    "sha256": "96080be49ffd67b916018b7bdef8c484762576fb52780e10ab98ac4978a660e0"
+  },
+  "additional_artifact": {
+    "path": "models/dory-q6k-derived.gguf",
+    "bytes": 3270160544,
+    "sha256": "14ecbbda6221dd89e5239ac8c9ff65047c7aa0baf34aaba0442b96307a99617a",
+    "source_sha256": "96080be49ffd67b916018b7bdef8c484762576fb52780e10ab98ac4978a660e0",
+    "command": "target/dory-oracle-strict/build/bin/llama-quantize --allow-requantize models/model-upload.gguf models/dory-q6k-derived.gguf Q6_K 4",
+    "warning": "Requantized test artifact from Q5_K_M; not official native Q6_K and not a quality improvement claim"
+  },
+  "additional_tensor_counts": {
+    "q6_K": 290,
+    "bf16": 217
+  },
+  "model_after_sha256": {
+    "models/model-upload.gguf": "96080be49ffd67b916018b7bdef8c484762576fb52780e10ab98ac4978a660e0",
+    "models/dory-q6k-derived.gguf": "14ecbbda6221dd89e5239ac8c9ff65047c7aa0baf34aaba0442b96307a99617a"
+  },
+  "quantizer_binary_sha256": "fbab89412a0215677ea046e82c0c6986162e6fc6baa5a2e3e7be42a600596520",
+  "upstream_gguf_repository": {
+    "revision": "0963c8000791e77b2b1b49aa387d92a6da9988d6",
+    "gguf_files": [
+      "NVIDIA-Nemotron-Labs-Dory1.0-4B-Q5_K_M.gguf"
+    ]
+  },
+  "oracle": {
+    "commit": "98a74c97ea09ac72f6ceda1559808fc0a2f447ce",
+    "mode": "Pinned strict scalar CPU, same platform as replay",
+    "graph_or_backend_modifications": "",
+    "build_options": {
+      "CMAKE_BUILD_TYPE": "Release",
+      "CMAKE_CXX_FLAGS": "-U__ARM_NEON -U__ARM_NEON__ -U__SSE2__ -ffp-contract=off -fno-builtin-sinf -fno-builtin-cosf",
+      "CMAKE_C_FLAGS": "-U__ARM_NEON -U__ARM_NEON__ -U__SSE2__ -ffp-contract=off -fno-builtin-sinf -fno-builtin-cosf",
+      "GGML_ACCELERATE": "OFF",
+      "GGML_AVX": "OFF",
+      "GGML_AVX2": "OFF",
+      "GGML_AVX512": "OFF",
+      "GGML_BLAS": "OFF",
+      "GGML_FMA": "OFF",
+      "GGML_NATIVE": "OFF",
+      "GGML_VULKAN": "OFF"
+    },
+    "long_running_config": [
+      {
+        "pid": 3733561,
+        "command": "/workspace/rmi-dory-7ad180bc/target/dory-oracle-strict/build/bin/llama-eval-callback /workspace/rmi-dory-7ad180bc/models/model-upload.gguf /workspace/rmi-dory-7ad180bc/target/dory-completion/long4096-linux-per_loop-f16/prompt.txt 2 ",
+        "settings": {
+          "RMI_DORY_THREADS": "8",
+          "RMI_DORY_KV": "f16",
+          "RMI_DORY_CACHE_MODE": "per_loop",
+          "RMI_DORY_BATCH": "32",
+          "RMI_DORY_TRACE_FROM": "4094"
+        }
+      },
+      {
+        "pid": 3791142,
+        "command": "/workspace/rmi-dory-7ad180bc/target/dory-completion/integration-reset-final dory_q5_reference_trace --ignored --exact --nocapture ",
+        "settings": {
+          "RMI_DORY_Q5_MODEL": "/workspace/rmi-dory-7ad180bc/models/model-upload.gguf",
+          "RMI_DORY_THREADS": "4",
+          "RMI_DORY_KV": "f16",
+          "RMI_DORY_CACHE_MODE": "per_loop",
+          "RMI_DORY_BATCH": "32",
+          "RMI_DORY_TRACE_FROM": "4094",
+          "RMI_DORY_PROMPT_FILE": "/workspace/rmi-dory-7ad180bc/target/dory-completion/long4096-linux-per_loop-f16/prompt.txt",
+          "RMI_DORY_N_PREDICT": "2",
+          "RMI_DORY_COMPUTE": "vulkan"
+        }
+      }
+    ],
+    "binary_sha256": "32a1f190597ea3b7c4d9c66b07d4ccf6898366bfab6d641b2d085adb7002e8aa",
+    "harness_sha256": "696596f26a167757709c2701ac14c39b902e9c095accb039da87098f4adb4de2"
+  },
+  "gates": {
+    "relative_l2": 0.01,
+    "scaled_max_abs": 0.01,
+    "exact": [
+      "token IDs",
+      "prefill schedule",
+      "checkpoint order/layers/steps/shapes/count",
+      "embedding bytes"
+    ],
+    "bitwise_gate_on_lossy_values": false
+  },
+  "accepted_replays": {
+    "diag64-linux-per_loop-f16/gpu": {
+      "passed": true,
+      "checked": 585,
+      "first_step": 63,
+      "failures": [],
+      "limits": {
+        "relative_l2": 0.01,
+        "scaled_max_abs": 0.01
+      },
+      "worst_relative_l2": {
+        "name": "embd",
+        "layer": null,
+        "step": 63,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "worst_max_abs": {
+        "name": "embd",
+        "layer": null,
+        "step": 63,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "generated_ids": [
+        4249,
+        1045
+      ],
+      "prefill_batches": [
+        32,
+        32,
+        1,
+        1
+      ],
+      "report_sha256": "16b9b39ce469cea7e5f949b13722b817e005a2c761b721badcc7c7c9033f65c9",
+      "report": "target/dory-completion/diag64-linux-per_loop-f16/gpu-report.json",
+      "failure_count": 0,
+      "prompt_tokens": 64,
+      "prompt_ids_repeated": {
+        "token": 1261,
+        "count": 64
+      }
+    },
+    "last_loop-f16-b1/cpu": {
+      "passed": true,
+      "checked": 975,
+      "first_step": 0,
+      "failures": [],
+      "limits": {
+        "relative_l2": 0.01,
+        "scaled_max_abs": 0.01
+      },
+      "worst_relative_l2": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "worst_max_abs": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "generated_ids": [
+        2409,
+        1395
+      ],
+      "prefill_batches": [
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "report_sha256": "56c8281767ba3a60839de6f19c7817dc3ad1998a590336e223fd49731d535d9e",
+      "report": "target/dory-completion/last_loop-f16-b1/cpu-report.json",
+      "failure_count": 0,
+      "prompt_tokens": 3,
+      "prompt_ids": [
+        22177,
+        4304,
+        1033
+      ]
+    },
+    "last_loop-f16-b1/gpu": {
+      "passed": true,
+      "checked": 975,
+      "first_step": 0,
+      "failures": [],
+      "limits": {
+        "relative_l2": 0.01,
+        "scaled_max_abs": 0.01
+      },
+      "worst_relative_l2": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "worst_max_abs": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "generated_ids": [
+        2409,
+        1395
+      ],
+      "prefill_batches": [
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "report_sha256": "56c8281767ba3a60839de6f19c7817dc3ad1998a590336e223fd49731d535d9e",
+      "report": "target/dory-completion/last_loop-f16-b1/gpu-report.json",
+      "failure_count": 0,
+      "prompt_tokens": 3,
+      "prompt_ids": [
+        22177,
+        4304,
+        1033
+      ]
+    },
+    "last_loop-f16-b3/cpu": {
+      "passed": true,
+      "checked": 971,
+      "first_step": 0,
+      "failures": [],
+      "limits": {
+        "relative_l2": 0.01,
+        "scaled_max_abs": 0.01
+      },
+      "worst_relative_l2": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "worst_max_abs": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "generated_ids": [
+        2409,
+        1395
+      ],
+      "prefill_batches": [
+        3,
+        1,
+        1
+      ],
+      "report_sha256": "65f4b638f5df47f7029f54f17c6f46b7c86e993c59bc3f5be6615408b8e4da37",
+      "report": "target/dory-completion/last_loop-f16-b3/cpu-report.json",
+      "failure_count": 0,
+      "prompt_tokens": 3,
+      "prompt_ids": [
+        22177,
+        4304,
+        1033
+      ]
+    },
+    "last_loop-f16-b3/gpu": {
+      "passed": true,
+      "checked": 971,
+      "first_step": 0,
+      "failures": [],
+      "limits": {
+        "relative_l2": 0.01,
+        "scaled_max_abs": 0.01
+      },
+      "worst_relative_l2": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "worst_max_abs": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "generated_ids": [
+        2409,
+        1395
+      ],
+      "prefill_batches": [
+        3,
+        1,
+        1
+      ],
+      "report_sha256": "65f4b638f5df47f7029f54f17c6f46b7c86e993c59bc3f5be6615408b8e4da37",
+      "report": "target/dory-completion/last_loop-f16-b3/gpu-report.json",
+      "failure_count": 0,
+      "prompt_tokens": 3,
+      "prompt_ids": [
+        22177,
+        4304,
+        1033
+      ]
+    },
+    "last_loop-f16-window2-b32/cpu": {
+      "passed": true,
+      "checked": 7535,
+      "first_step": 0,
+      "failures": [],
+      "limits": {
+        "relative_l2": 0.01,
+        "scaled_max_abs": 0.01
+      },
+      "worst_relative_l2": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "worst_max_abs": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "generated_ids": [
+        45383,
+        4304
+      ],
+      "prefill_batches": [
+        32,
+        5,
+        1,
+        1
+      ],
+      "report_sha256": "e8cfe926fa71c1154e4134085825a14c65ea70f61af19442e36c717e6b6ba8fd",
+      "report": "target/dory-completion/last_loop-f16-window2-b32/cpu-report.json",
+      "failure_count": 0,
+      "prompt_tokens": 37,
+      "prompt_ids": [
+        22177,
+        4304,
+        1033,
+        45383,
+        4304,
+        1033,
+        45383,
+        4304,
+        1033,
+        45383,
+        4304,
+        1033,
+        45383,
+        4304,
+        1033,
+        45383,
+        4304,
+        1033,
+        45383,
+        4304,
+        1033,
+        45383,
+        4304,
+        1033,
+        45383,
+        4304,
+        1033,
+        45383,
+        4304,
+        1033,
+        45383,
+        4304,
+        1033,
+        45383,
+        4304,
+        1033,
+        1032
+      ]
+    },
+    "last_loop-f16-window2-b32/gpu": {
+      "passed": true,
+      "checked": 7535,
+      "first_step": 0,
+      "failures": [],
+      "limits": {
+        "relative_l2": 0.01,
+        "scaled_max_abs": 0.01
+      },
+      "worst_relative_l2": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "worst_max_abs": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "generated_ids": [
+        45383,
+        4304
+      ],
+      "prefill_batches": [
+        32,
+        5,
+        1,
+        1
+      ],
+      "report_sha256": "e8cfe926fa71c1154e4134085825a14c65ea70f61af19442e36c717e6b6ba8fd",
+      "report": "target/dory-completion/last_loop-f16-window2-b32/gpu-report.json",
+      "failure_count": 0,
+      "prompt_tokens": 37,
+      "prompt_ids": [
+        22177,
+        4304,
+        1033,
+        45383,
+        4304,
+        1033,
+        45383,
+        4304,
+        1033,
+        45383,
+        4304,
+        1033,
+        45383,
+        4304,
+        1033,
+        45383,
+        4304,
+        1033,
+        45383,
+        4304,
+        1033,
+        45383,
+        4304,
+        1033,
+        45383,
+        4304,
+        1033,
+        45383,
+        4304,
+        1033,
+        45383,
+        4304,
+        1033,
+        45383,
+        4304,
+        1033,
+        1032
+      ]
+    },
+    "last_loop-f32-b1/cpu": {
+      "passed": true,
+      "checked": 975,
+      "first_step": 0,
+      "failures": [],
+      "limits": {
+        "relative_l2": 0.01,
+        "scaled_max_abs": 0.01
+      },
+      "worst_relative_l2": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "worst_max_abs": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "generated_ids": [
+        2409,
+        1395
+      ],
+      "prefill_batches": [
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "report_sha256": "56c8281767ba3a60839de6f19c7817dc3ad1998a590336e223fd49731d535d9e",
+      "report": "target/dory-completion/last_loop-f32-b1/cpu-report.json",
+      "failure_count": 0,
+      "prompt_tokens": 3,
+      "prompt_ids": [
+        22177,
+        4304,
+        1033
+      ]
+    },
+    "last_loop-f32-b1/gpu": {
+      "passed": true,
+      "checked": 975,
+      "first_step": 0,
+      "failures": [],
+      "limits": {
+        "relative_l2": 0.01,
+        "scaled_max_abs": 0.01
+      },
+      "worst_relative_l2": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "worst_max_abs": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "generated_ids": [
+        2409,
+        1395
+      ],
+      "prefill_batches": [
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "report_sha256": "56c8281767ba3a60839de6f19c7817dc3ad1998a590336e223fd49731d535d9e",
+      "report": "target/dory-completion/last_loop-f32-b1/gpu-report.json",
+      "failure_count": 0,
+      "prompt_tokens": 3,
+      "prompt_ids": [
+        22177,
+        4304,
+        1033
+      ]
+    },
+    "last_loop-f32-b3/cpu": {
+      "passed": true,
+      "checked": 971,
+      "first_step": 0,
+      "failures": [],
+      "limits": {
+        "relative_l2": 0.01,
+        "scaled_max_abs": 0.01
+      },
+      "worst_relative_l2": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "worst_max_abs": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "generated_ids": [
+        2409,
+        1395
+      ],
+      "prefill_batches": [
+        3,
+        1,
+        1
+      ],
+      "report_sha256": "65f4b638f5df47f7029f54f17c6f46b7c86e993c59bc3f5be6615408b8e4da37",
+      "report": "target/dory-completion/last_loop-f32-b3/cpu-report.json",
+      "failure_count": 0,
+      "prompt_tokens": 3,
+      "prompt_ids": [
+        22177,
+        4304,
+        1033
+      ]
+    },
+    "last_loop-f32-b3/gpu": {
+      "passed": true,
+      "checked": 971,
+      "first_step": 0,
+      "failures": [],
+      "limits": {
+        "relative_l2": 0.01,
+        "scaled_max_abs": 0.01
+      },
+      "worst_relative_l2": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "worst_max_abs": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "generated_ids": [
+        2409,
+        1395
+      ],
+      "prefill_batches": [
+        3,
+        1,
+        1
+      ],
+      "report_sha256": "65f4b638f5df47f7029f54f17c6f46b7c86e993c59bc3f5be6615408b8e4da37",
+      "report": "target/dory-completion/last_loop-f32-b3/gpu-report.json",
+      "failure_count": 0,
+      "prompt_tokens": 3,
+      "prompt_ids": [
+        22177,
+        4304,
+        1033
+      ]
+    },
+    "long4096-linux-per_loop-f16/gpu": {
+      "passed": true,
+      "checked": 585,
+      "first_step": 4094,
+      "failures": [],
+      "limits": {
+        "relative_l2": 0.01,
+        "scaled_max_abs": 0.01
+      },
+      "worst_relative_l2": {
+        "name": "embd",
+        "layer": null,
+        "step": 4094,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "worst_max_abs": {
+        "name": "embd",
+        "layer": null,
+        "step": 4094,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "gpu_execution": {
+        "exit": 0,
+        "seconds": 3172.362314807251,
+        "binary_sha256": "6e83c1b1247577c829f0cf19bd56a22cfeb1ca0d73bd5ccdcaa9285cf0213559"
+      },
+      "oracle_execution": {
+        "exit": 0,
+        "seconds": 5117.832873720676,
+        "platform": "Linux x86_64 AMD EPYC 9334 glibc 2.39",
+        "kv": "f16",
+        "mode": "per_loop",
+        "batch": 32,
+        "first_step": 4094
+      },
+      "generated_ids": [
+        4249,
+        1045
+      ],
+      "prefill_batches": [
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        31,
+        1,
+        1
+      ],
+      "report_sha256": "ae7bb2c279badb1f6cc43c05d482386a1ca3e18f63ba474ed2d6d34cc28b968f",
+      "report": "target/dory-completion/long4096-linux-per_loop-f16/gpu-report.json",
+      "failure_count": 0,
+      "prompt_tokens": 4095,
+      "prompt_ids_repeated": {
+        "token": 1261,
+        "count": 4095
+      }
+    },
+    "per_loop-f16-b1/cpu": {
+      "passed": true,
+      "checked": 975,
+      "first_step": 0,
+      "failures": [],
+      "limits": {
+        "relative_l2": 0.01,
+        "scaled_max_abs": 0.01
+      },
+      "worst_relative_l2": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "worst_max_abs": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "generated_ids": [
+        2409,
+        1395
+      ],
+      "prefill_batches": [
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "report_sha256": "56c8281767ba3a60839de6f19c7817dc3ad1998a590336e223fd49731d535d9e",
+      "report": "target/dory-completion/per_loop-f16-b1/cpu-report.json",
+      "failure_count": 0,
+      "prompt_tokens": 3,
+      "prompt_ids": [
+        22177,
+        4304,
+        1033
+      ]
+    },
+    "per_loop-f16-b1/gpu": {
+      "passed": true,
+      "checked": 975,
+      "first_step": 0,
+      "failures": [],
+      "limits": {
+        "relative_l2": 0.01,
+        "scaled_max_abs": 0.01
+      },
+      "worst_relative_l2": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "worst_max_abs": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "generated_ids": [
+        2409,
+        1395
+      ],
+      "prefill_batches": [
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "report_sha256": "56c8281767ba3a60839de6f19c7817dc3ad1998a590336e223fd49731d535d9e",
+      "report": "target/dory-completion/per_loop-f16-b1/gpu-report.json",
+      "failure_count": 0,
+      "prompt_tokens": 3,
+      "prompt_ids": [
+        22177,
+        4304,
+        1033
+      ]
+    },
+    "per_loop-f16-b3/cpu": {
+      "passed": true,
+      "checked": 971,
+      "first_step": 0,
+      "failures": [],
+      "limits": {
+        "relative_l2": 0.01,
+        "scaled_max_abs": 0.01
+      },
+      "worst_relative_l2": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "worst_max_abs": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "generated_ids": [
+        2409,
+        1395
+      ],
+      "prefill_batches": [
+        3,
+        1,
+        1
+      ],
+      "report_sha256": "65f4b638f5df47f7029f54f17c6f46b7c86e993c59bc3f5be6615408b8e4da37",
+      "report": "target/dory-completion/per_loop-f16-b3/cpu-report.json",
+      "failure_count": 0,
+      "prompt_tokens": 3,
+      "prompt_ids": [
+        22177,
+        4304,
+        1033
+      ]
+    },
+    "per_loop-f16-b3/gpu": {
+      "passed": true,
+      "checked": 971,
+      "first_step": 0,
+      "failures": [],
+      "limits": {
+        "relative_l2": 0.01,
+        "scaled_max_abs": 0.01
+      },
+      "worst_relative_l2": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "worst_max_abs": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "generated_ids": [
+        2409,
+        1395
+      ],
+      "prefill_batches": [
+        3,
+        1,
+        1
+      ],
+      "report_sha256": "65f4b638f5df47f7029f54f17c6f46b7c86e993c59bc3f5be6615408b8e4da37",
+      "report": "target/dory-completion/per_loop-f16-b3/gpu-report.json",
+      "failure_count": 0,
+      "prompt_tokens": 3,
+      "prompt_ids": [
+        22177,
+        4304,
+        1033
+      ]
+    },
+    "per_loop-f16-window2-b32/cpu": {
+      "passed": true,
+      "checked": 7535,
+      "first_step": 0,
+      "failures": [],
+      "limits": {
+        "relative_l2": 0.01,
+        "scaled_max_abs": 0.01
+      },
+      "worst_relative_l2": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "worst_max_abs": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "generated_ids": [
+        45383,
+        4304
+      ],
+      "prefill_batches": [
+        32,
+        5,
+        1,
+        1
+      ],
+      "report_sha256": "e8cfe926fa71c1154e4134085825a14c65ea70f61af19442e36c717e6b6ba8fd",
+      "report": "target/dory-completion/per_loop-f16-window2-b32/cpu-report.json",
+      "failure_count": 0,
+      "prompt_tokens": 37,
+      "prompt_ids": [
+        22177,
+        4304,
+        1033,
+        45383,
+        4304,
+        1033,
+        45383,
+        4304,
+        1033,
+        45383,
+        4304,
+        1033,
+        45383,
+        4304,
+        1033,
+        45383,
+        4304,
+        1033,
+        45383,
+        4304,
+        1033,
+        45383,
+        4304,
+        1033,
+        45383,
+        4304,
+        1033,
+        45383,
+        4304,
+        1033,
+        45383,
+        4304,
+        1033,
+        45383,
+        4304,
+        1033,
+        1032
+      ]
+    },
+    "per_loop-f16-window2-b32/gpu": {
+      "passed": true,
+      "checked": 7535,
+      "first_step": 0,
+      "failures": [],
+      "limits": {
+        "relative_l2": 0.01,
+        "scaled_max_abs": 0.01
+      },
+      "worst_relative_l2": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "worst_max_abs": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "generated_ids": [
+        45383,
+        4304
+      ],
+      "prefill_batches": [
+        32,
+        5,
+        1,
+        1
+      ],
+      "report_sha256": "e8cfe926fa71c1154e4134085825a14c65ea70f61af19442e36c717e6b6ba8fd",
+      "report": "target/dory-completion/per_loop-f16-window2-b32/gpu-report.json",
+      "failure_count": 0,
+      "prompt_tokens": 37,
+      "prompt_ids": [
+        22177,
+        4304,
+        1033,
+        45383,
+        4304,
+        1033,
+        45383,
+        4304,
+        1033,
+        45383,
+        4304,
+        1033,
+        45383,
+        4304,
+        1033,
+        45383,
+        4304,
+        1033,
+        45383,
+        4304,
+        1033,
+        45383,
+        4304,
+        1033,
+        45383,
+        4304,
+        1033,
+        45383,
+        4304,
+        1033,
+        45383,
+        4304,
+        1033,
+        45383,
+        4304,
+        1033,
+        1032
+      ]
+    },
+    "per_loop-f32-b1/cpu": {
+      "passed": true,
+      "checked": 975,
+      "first_step": 0,
+      "failures": [],
+      "limits": {
+        "relative_l2": 0.01,
+        "scaled_max_abs": 0.01
+      },
+      "worst_relative_l2": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "worst_max_abs": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "generated_ids": [
+        2409,
+        1395
+      ],
+      "prefill_batches": [
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "report_sha256": "56c8281767ba3a60839de6f19c7817dc3ad1998a590336e223fd49731d535d9e",
+      "report": "target/dory-completion/per_loop-f32-b1/cpu-report.json",
+      "failure_count": 0,
+      "prompt_tokens": 3,
+      "prompt_ids": [
+        22177,
+        4304,
+        1033
+      ]
+    },
+    "per_loop-f32-b1/gpu": {
+      "passed": true,
+      "checked": 975,
+      "first_step": 0,
+      "failures": [],
+      "limits": {
+        "relative_l2": 0.01,
+        "scaled_max_abs": 0.01
+      },
+      "worst_relative_l2": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "worst_max_abs": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "generated_ids": [
+        2409,
+        1395
+      ],
+      "prefill_batches": [
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "report_sha256": "56c8281767ba3a60839de6f19c7817dc3ad1998a590336e223fd49731d535d9e",
+      "report": "target/dory-completion/per_loop-f32-b1/gpu-report.json",
+      "failure_count": 0,
+      "prompt_tokens": 3,
+      "prompt_ids": [
+        22177,
+        4304,
+        1033
+      ]
+    },
+    "per_loop-f32-b3/cpu": {
+      "passed": true,
+      "checked": 971,
+      "first_step": 0,
+      "failures": [],
+      "limits": {
+        "relative_l2": 0.01,
+        "scaled_max_abs": 0.01
+      },
+      "worst_relative_l2": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "worst_max_abs": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "generated_ids": [
+        2409,
+        1395
+      ],
+      "prefill_batches": [
+        3,
+        1,
+        1
+      ],
+      "report_sha256": "65f4b638f5df47f7029f54f17c6f46b7c86e993c59bc3f5be6615408b8e4da37",
+      "report": "target/dory-completion/per_loop-f32-b3/cpu-report.json",
+      "failure_count": 0,
+      "prompt_tokens": 3,
+      "prompt_ids": [
+        22177,
+        4304,
+        1033
+      ]
+    },
+    "per_loop-f32-b3/gpu": {
+      "passed": true,
+      "checked": 971,
+      "first_step": 0,
+      "failures": [],
+      "limits": {
+        "relative_l2": 0.01,
+        "scaled_max_abs": 0.01
+      },
+      "worst_relative_l2": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "worst_max_abs": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "generated_ids": [
+        2409,
+        1395
+      ],
+      "prefill_batches": [
+        3,
+        1,
+        1
+      ],
+      "report_sha256": "65f4b638f5df47f7029f54f17c6f46b7c86e993c59bc3f5be6615408b8e4da37",
+      "report": "target/dory-completion/per_loop-f32-b3/gpu-report.json",
+      "failure_count": 0,
+      "prompt_tokens": 3,
+      "prompt_ids": [
+        22177,
+        4304,
+        1033
+      ]
+    },
+    "q6k-last_loop-f16-b3/cpu": {
+      "passed": true,
+      "checked": 971,
+      "first_step": 0,
+      "failures": [],
+      "limits": {
+        "relative_l2": 0.01,
+        "scaled_max_abs": 0.01
+      },
+      "worst_relative_l2": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "worst_max_abs": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "generated_ids": [
+        1032,
+        1049
+      ],
+      "prefill_batches": [
+        3,
+        1,
+        1
+      ],
+      "report_sha256": "d5bd28c5e70365e74677881224ad0b28a2fe914a9baa14877bd775d4aa5f3bd3",
+      "report": "target/dory-completion/q6k-last_loop-f16-b3/cpu-report.json",
+      "failure_count": 0,
+      "prompt_tokens": 3,
+      "prompt_ids": [
+        22177,
+        4304,
+        1033
+      ]
+    },
+    "q6k-last_loop-f16-b3/gpu": {
+      "passed": true,
+      "checked": 971,
+      "first_step": 0,
+      "failures": [],
+      "limits": {
+        "relative_l2": 0.01,
+        "scaled_max_abs": 0.01
+      },
+      "worst_relative_l2": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "worst_max_abs": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "generated_ids": [
+        1032,
+        1049
+      ],
+      "prefill_batches": [
+        3,
+        1,
+        1
+      ],
+      "report_sha256": "d5bd28c5e70365e74677881224ad0b28a2fe914a9baa14877bd775d4aa5f3bd3",
+      "report": "target/dory-completion/q6k-last_loop-f16-b3/gpu-report.json",
+      "failure_count": 0,
+      "prompt_tokens": 3,
+      "prompt_ids": [
+        22177,
+        4304,
+        1033
+      ]
+    },
+    "q6k-per_loop-f32-b3/cpu": {
+      "passed": true,
+      "checked": 971,
+      "first_step": 0,
+      "failures": [],
+      "limits": {
+        "relative_l2": 0.01,
+        "scaled_max_abs": 0.01
+      },
+      "worst_relative_l2": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "worst_max_abs": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "generated_ids": [
+        3075,
+        1584
+      ],
+      "prefill_batches": [
+        3,
+        1,
+        1
+      ],
+      "report_sha256": "173f4c3d53949146280e913e094b3d093613b39cdda6231d0f2c8ae9d7467406",
+      "report": "target/dory-completion/q6k-per_loop-f32-b3/cpu-report.json",
+      "failure_count": 0,
+      "prompt_tokens": 3,
+      "prompt_ids": [
+        22177,
+        4304,
+        1033
+      ]
+    },
+    "q6k-per_loop-f32-b3/gpu": {
+      "passed": true,
+      "checked": 971,
+      "first_step": 0,
+      "failures": [],
+      "limits": {
+        "relative_l2": 0.01,
+        "scaled_max_abs": 0.01
+      },
+      "worst_relative_l2": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "worst_max_abs": {
+        "name": "embd",
+        "layer": null,
+        "step": 0,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "generated_ids": [
+        3075,
+        1584
+      ],
+      "prefill_batches": [
+        3,
+        1,
+        1
+      ],
+      "report_sha256": "173f4c3d53949146280e913e094b3d093613b39cdda6231d0f2c8ae9d7467406",
+      "report": "target/dory-completion/q6k-per_loop-f32-b3/gpu-report.json",
+      "failure_count": 0,
+      "prompt_tokens": 3,
+      "prompt_ids": [
+        22177,
+        4304,
+        1033
+      ]
+    },
+    "window1024-linux-last_loop-f16/gpu": {
+      "passed": true,
+      "checked": 973,
+      "first_step": 1054,
+      "failures": [],
+      "limits": {
+        "relative_l2": 0.01,
+        "scaled_max_abs": 0.01
+      },
+      "worst_relative_l2": {
+        "name": "embd",
+        "layer": null,
+        "step": 1054,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "worst_max_abs": {
+        "name": "embd",
+        "layer": null,
+        "step": 1054,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "reused_gpu_trace": "target/dory-completion/window1024-macos-last_loop-f16/gpu.jsonl",
+      "oracle_execution": {
+        "exit": 0,
+        "seconds": 1352.4524178355932,
+        "platform": "Linux x86_64 AMD EPYC 9334 glibc 2.39",
+        "kv": "f16",
+        "mode": "last_loop",
+        "batch": 32,
+        "first_step": 1054
+      },
+      "generated_ids": [
+        4249,
+        1045
+      ],
+      "prefill_batches": [
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        1,
+        1,
+        1
+      ],
+      "report_sha256": "be0881f04a943a669f764d63a0ee056d3c2b39a218c2a3377edd3b236b344a5e",
+      "report": "target/dory-completion/window1024-linux-last_loop-f16/gpu-report.json",
+      "failure_count": 0,
+      "prompt_tokens": 1057,
+      "prompt_ids_repeated": {
+        "token": 1261,
+        "count": 1057
+      }
+    },
+    "window1024-linux-per_loop-f16/gpu": {
+      "passed": true,
+      "checked": 973,
+      "first_step": 1022,
+      "failures": [],
+      "limits": {
+        "relative_l2": 0.01,
+        "scaled_max_abs": 0.01
+      },
+      "worst_relative_l2": {
+        "name": "embd",
+        "layer": null,
+        "step": 1022,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "worst_max_abs": {
+        "name": "embd",
+        "layer": null,
+        "step": 1022,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "reused_gpu_trace": "target/dory-completion/window1024-macos-per_loop-f16/gpu.jsonl",
+      "oracle_execution": {
+        "exit": 0,
+        "seconds": 1638.431000592187,
+        "platform": "Linux x86_64 AMD EPYC 9334 glibc 2.39",
+        "kv": "f16",
+        "mode": "per_loop",
+        "batch": 32,
+        "first_step": 1022
+      },
+      "generated_ids": [
+        3039,
+        1317
+      ],
+      "prefill_batches": [
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        1,
+        1,
+        1
+      ],
+      "report_sha256": "437fc4475166b9a4017c63d4b26725d35b952787f79400fc5919b0668f29c416",
+      "report": "target/dory-completion/window1024-linux-per_loop-f16/gpu-report.json",
+      "failure_count": 0,
+      "prompt_tokens": 1025,
+      "prompt_ids_repeated": {
+        "token": 1261,
+        "count": 1025
+      }
+    },
+    "window1024-per_loop-f32/gpu": {
+      "passed": true,
+      "checked": 8309,
+      "first_step": 1016,
+      "failures": [],
+      "limits": {
+        "relative_l2": 0.01,
+        "scaled_max_abs": 0.01
+      },
+      "worst_relative_l2": {
+        "name": "embd",
+        "layer": null,
+        "step": 1016,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "worst_max_abs": {
+        "name": "embd",
+        "layer": null,
+        "step": 1016,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "generated_ids": [
+        4249,
+        1045
+      ],
+      "prefill_batches": [
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        1,
+        1,
+        1
+      ],
+      "report_sha256": "6c81cc405d450f9475d505cfbb966a7bae71dd96679b111340f17641be705700",
+      "report": "target/dory-completion/window1024-per_loop-f32/gpu-report.json",
+      "failure_count": 0,
+      "prompt_tokens": 1057,
+      "prompt_ids_repeated": {
+        "token": 1261,
+        "count": 1057
+      }
+    },
+    "window1024-macos-per_loop-f16/cpu": {
+      "passed": true,
+      "checked": 973,
+      "first_step": 1022,
+      "failures": [],
+      "limits": {
+        "relative_l2": 0.01,
+        "scaled_max_abs": 0.01
+      },
+      "worst_relative_l2": {
+        "name": "embd",
+        "layer": null,
+        "step": 1022,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "worst_max_abs": {
+        "name": "embd",
+        "layer": null,
+        "step": 1022,
+        "relative_l2": 0.0,
+        "max_abs": 0.0,
+        "scaled_max_abs": 0.0,
+        "exact": true,
+        "passed": true
+      },
+      "prefill_batches": [
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        1,
+        1,
+        1
+      ],
+      "generated_ids": [
+        3039,
+        1317
+      ],
+      "report": "target/dory-completion/window1024-macos-per_loop-f16/cpu-report.json",
+      "report_sha256": "4983ce28855a4c9bb2bb2876e84bf3ebe11ea50922659086bd223e9d12370d91",
+      "failure_count": 0,
+      "prompt_tokens": 1025,
+      "prompt_ids_repeated": {
+        "token": 1261,
+        "count": 1025
+      }
+    }
+  },
+  "accepted_summary": {
+    "comparisons": 30,
+    "checkpoints": 61990,
+    "max_relative_l2": 0.0
+  },
+  "exploratory_failures": {
+    "diag64-macos-per_loop-f16/gpu": {
+      "passed": false,
+      "checked": 585,
+      "first_step": 63,
+      "failures": [
+        "{'name': 'l_out', 'layer': 11, 'step': 63, 'relative_l2': 0.010505271852195191, 'max_abs': 0.0013938844203948975, 'scaled_max_abs': 0.0013938844203948975, 'exact': False, 'passed': False}",
+        "{'name': 'l_out', 'layer': 14, 'step': 63, 'relative_l2': 0.010103301277127531, 'max_abs': 0.0009317947551608086, 'scaled_max_abs': 0.0009317947551608086, 'exact': False, 'passed': False}",
+        "{'name': 'l_out', 'layer': 15, 'step': 63, 'relative_l2': 0.01484250490999158, 'max_abs': 0.010091036558151245, 'scaled_max_abs': 0.010091036558151245, 'exact': False, 'passed': False}",
+        "{'name': 'l_out', 'layer': 16, 'step': 63, 'relative_l2': 0.011015774027137768, 'max_abs': 0.0014532841742038727, 'scaled_max_abs': 0.0014532841742038727, 'exact': False, 'passed': False}",
+        "{'name': 'l_out', 'layer': 27, 'step': 63, 'relative_l2': 0.01026699184449536, 'max_abs': 0.0017855167388916016, 'scaled_max_abs': 0.0017855167388916016, 'exact': False, 'passed': False}"
+      ],
+      "limits": {
+        "relative_l2": 0.01,
+        "scaled_max_abs": 0.01
+      },
+      "worst_relative_l2": {
+        "name": "l_out",
+        "layer": 191,
+        "step": 65,
+        "relative_l2": 0.04684783728086275,
+        "max_abs": 0.005979821085929871,
+        "scaled_max_abs": 0.005979821085929871,
+        "exact": false,
+        "passed": false
+      },
+      "worst_max_abs": {
+        "name": "result_output",
+        "layer": null,
+        "step": 65,
+        "relative_l2": 0.02626469281787723,
+        "max_abs": 0.5202441215515137,
+        "scaled_max_abs": 0.03665804146387159,
+        "exact": false,
+        "passed": false
+      },
+      "generated_ids": [
+        4249,
+        1045
+      ],
+      "prefill_batches": [
+        32,
+        32,
+        1,
+        1
+      ],
+      "report_sha256": "e1575c3a8a97dbaf51d2a88ad2cde70b5c11e3028fdb2b20d9f524b07de794de",
+      "report": "target/dory-completion/diag64-macos-per_loop-f16/gpu-report.json",
+      "failure_count": 476,
+      "prompt_tokens": 64,
+      "prompt_ids_repeated": {
+        "token": 1261,
+        "count": 64
+      }
+    },
+    "native-check-per_loop-f32/gpu": {
+      "passed": false,
+      "checked": 971,
+      "first_step": 0,
+      "failures": [
+        "{'name': 'l_out', 'layer': 7, 'step': 1, 'relative_l2': 0.010450027434070149, 'max_abs': 0.0013836445286870003, 'scaled_max_abs': 0.0013836445286870003, 'exact': False, 'passed': False}",
+        "{'name': 'l_out', 'layer': 7, 'step': 2, 'relative_l2': 0.01244042281040267, 'max_abs': 0.0014550238847732544, 'scaled_max_abs': 0.0014550238847732544, 'exact': False, 'passed': False}",
+        "{'name': 'l_out', 'layer': 8, 'step': 1, 'relative_l2': 0.012079572570776517, 'max_abs': 0.0010492298752069473, 'scaled_max_abs': 0.0010492298752069473, 'exact': False, 'passed': False}",
+        "{'name': 'l_out', 'layer': 8, 'step': 2, 'relative_l2': 0.014791979422763486, 'max_abs': 0.001451516116503626, 'scaled_max_abs': 0.001451516116503626, 'exact': False, 'passed': False}",
+        "{'name': 'l_out', 'layer': 9, 'step': 1, 'relative_l2': 0.014349213989619369, 'max_abs': 0.0037376880645751953, 'scaled_max_abs': 0.0037376880645751953, 'exact': False, 'passed': False}"
+      ],
+      "limits": {
+        "relative_l2": 0.01,
+        "scaled_max_abs": 0.01
+      },
+      "worst_relative_l2": {
+        "name": "l_out",
+        "layer": 184,
+        "step": 3,
+        "relative_l2": 0.08313075491329891,
+        "max_abs": 0.007025241851806641,
+        "scaled_max_abs": 0.007025241851806641,
+        "exact": false,
+        "passed": false
+      },
+      "worst_max_abs": {
+        "name": "result_output",
+        "layer": null,
+        "step": 3,
+        "relative_l2": 0.05244974376330626,
+        "max_abs": 0.9734697341918945,
+        "scaled_max_abs": 0.05663742828610519,
+        "exact": false,
+        "passed": false
+      },
+      "generated_ids": [
+        2409,
+        1395
+      ],
+      "prefill_batches": [
+        3,
+        1,
+        1
+      ],
+      "report_sha256": "0cead387e3e3e79bd24f02cec388865c83b2913534b3ecb51b97eb7f7ad32bc5",
+      "report": "target/dory-completion/native-check-per_loop-f32/gpu-report.json",
+      "failure_count": 870,
+      "prompt_tokens": 3,
+      "prompt_ids": [
+        22177,
+        4304,
+        1033
+      ]
+    },
+    "window1024-macos-last_loop-f16/gpu": {
+      "passed": false,
+      "checked": 973,
+      "first_step": 1054,
+      "failures": [
+        "{'name': 'l_out', 'layer': 8, 'step': 1054, 'relative_l2': 0.011520103340969062, 'max_abs': 0.0009814444929361343, 'scaled_max_abs': 0.0009814444929361343, 'exact': False, 'passed': False}",
+        "{'name': 'l_out', 'layer': 9, 'step': 1054, 'relative_l2': 0.012012155347497113, 'max_abs': 0.0025895237922668457, 'scaled_max_abs': 0.0025895237922668457, 'exact': False, 'passed': False}",
+        "{'name': 'l_out', 'layer': 9, 'step': 1055, 'relative_l2': 0.010822229191208569, 'max_abs': 0.001171603798866272, 'scaled_max_abs': 0.001171603798866272, 'exact': False, 'passed': False}",
+        "{'name': 'l_out', 'layer': 10, 'step': 1054, 'relative_l2': 0.014591978716067145, 'max_abs': 0.0015010656788945198, 'scaled_max_abs': 0.0015010656788945198, 'exact': False, 'passed': False}",
+        "{'name': 'l_out', 'layer': 10, 'step': 1055, 'relative_l2': 0.012479966804967529, 'max_abs': 0.001060563139617443, 'scaled_max_abs': 0.001060563139617443, 'exact': False, 'passed': False}"
+      ],
+      "limits": {
+        "relative_l2": 0.01,
+        "scaled_max_abs": 0.01
+      },
+      "worst_relative_l2": {
+        "name": "result_output",
+        "layer": null,
+        "step": 1055,
+        "relative_l2": 0.053680939891108226,
+        "max_abs": 0.6563069820404053,
+        "scaled_max_abs": 0.06610130411684367,
+        "exact": false,
+        "passed": false
+      },
+      "worst_max_abs": {
+        "name": "result_output",
+        "layer": null,
+        "step": 1055,
+        "relative_l2": 0.053680939891108226,
+        "max_abs": 0.6563069820404053,
+        "scaled_max_abs": 0.06610130411684367,
+        "exact": false,
+        "passed": false
+      },
+      "gpu_seconds": 1715.743370577693,
+      "oracle_execution": {
+        "exit": 0,
+        "seconds": 474.8557036250131,
+        "platform": "macOS ARM64 Apple M3 Max",
+        "kv": "f16",
+        "mode": "last_loop",
+        "batch": 32,
+        "first_step": 1054
+      },
+      "original_manifest_sha256": "e0989838ceb39a1ce728e2c1cdddba27d0976f874fb8573933b436e56cd98350",
+      "generated_ids": [
+        4249,
+        1045
+      ],
+      "prefill_batches": [
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        1,
+        1,
+        1
+      ],
+      "report_sha256": "6763c3ec58a7daa0b033f080f12f24c8dcc64ba69816d2fd71da9bbe4e34500c",
+      "report": "target/dory-completion/window1024-macos-last_loop-f16/gpu-report.json",
+      "failure_count": 750,
+      "prompt_tokens": 1057,
+      "prompt_ids_repeated": {
+        "token": 1261,
+        "count": 1057
+      }
+    },
+    "window1024-macos-per_loop-f16/gpu": {
+      "passed": false,
+      "checked": 973,
+      "first_step": 1022,
+      "failures": [
+        "{'name': 'l_out', 'layer': 8, 'step': 1022, 'relative_l2': 0.011358757955357145, 'max_abs': 0.0008338158950209618, 'scaled_max_abs': 0.0008338158950209618, 'exact': False, 'passed': False}",
+        "{'name': 'l_out', 'layer': 8, 'step': 1023, 'relative_l2': 0.012584458033287511, 'max_abs': 0.0011289846152067184, 'scaled_max_abs': 0.0011289846152067184, 'exact': False, 'passed': False}",
+        "{'name': 'l_out', 'layer': 9, 'step': 1022, 'relative_l2': 0.011815384596574934, 'max_abs': 0.0011139102280139923, 'scaled_max_abs': 0.0011139102280139923, 'exact': False, 'passed': False}",
+        "{'name': 'l_out', 'layer': 9, 'step': 1023, 'relative_l2': 0.012078878656745371, 'max_abs': 0.0011930232867598534, 'scaled_max_abs': 0.0011930232867598534, 'exact': False, 'passed': False}",
+        "{'name': 'l_out', 'layer': 10, 'step': 1022, 'relative_l2': 0.01521427163054849, 'max_abs': 0.0015585314249619842, 'scaled_max_abs': 0.0015585314249619842, 'exact': False, 'passed': False}"
+      ],
+      "limits": {
+        "relative_l2": 0.01,
+        "scaled_max_abs": 0.01
+      },
+      "worst_relative_l2": {
+        "name": "l_out",
+        "layer": 191,
+        "step": 1023,
+        "relative_l2": 0.05180665213306759,
+        "max_abs": 0.013796262443065643,
+        "scaled_max_abs": 0.013796262443065643,
+        "exact": false,
+        "passed": false
+      },
+      "worst_max_abs": {
+        "name": "result_output",
+        "layer": null,
+        "step": 1025,
+        "relative_l2": 0.02754433623994651,
+        "max_abs": 0.6054151058197021,
+        "scaled_max_abs": 0.03810807509195,
+        "exact": false,
+        "passed": false
+      },
+      "gpu_seconds": 1518.0775083582848,
+      "oracle_execution": {
+        "exit": 0,
+        "seconds": 554.8195162500488,
+        "platform": "macOS ARM64 Apple M3 Max",
+        "kv": "f16",
+        "mode": "per_loop",
+        "batch": 32,
+        "first_step": 1022
+      },
+      "original_manifest_sha256": "53f43d4ce57f9c0e71991d9cd4a7b67db4bddfcc2b6c2545bb1b9ed18e96d218",
+      "generated_ids": [
+        3039,
+        1317
+      ],
+      "prefill_batches": [
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        32,
+        1,
+        1,
+        1
+      ],
+      "report_sha256": "4eeb44c0f65026d6cae79898baed2db95f7113770f507cc65311430db0639da7",
+      "report": "target/dory-completion/window1024-macos-per_loop-f16/gpu-report.json",
+      "failure_count": 744,
+      "prompt_tokens": 1025,
+      "prompt_ids_repeated": {
+        "token": 1261,
+        "count": 1025
+      }
+    }
+  },
+  "diagnostic_scope": "Native SIMD Oracle and cross-platform macOS Oracle vs Linux GPU fail the unchanged gates; these are not passing comparisons. Same-host strict Oracle is the accepted contract.",
+  "benchmarks": {
+    "prefill-bench.log": {
+      "samples": [
+        {
+          "kv": "F32",
+          "round": 0,
+          "warmup": true,
+          "batch": 1,
+          "seconds": 32.083665387,
+          "submissions": 3456,
+          "static_uploads": 0
+        },
+        {
+          "kv": "F32",
+          "round": 1,
+          "warmup": true,
+          "batch": 32,
+          "seconds": 38.845261408,
+          "submissions": 108,
+          "static_uploads": 0
+        },
+        {
+          "kv": "F32",
+          "round": 2,
+          "warmup": false,
+          "batch": 1,
+          "seconds": 31.904129885,
+          "submissions": 3456,
+          "static_uploads": 0
+        },
+        {
+          "kv": "F32",
+          "round": 3,
+          "warmup": false,
+          "batch": 32,
+          "seconds": 39.384971057,
+          "submissions": 108,
+          "static_uploads": 0
+        },
+        {
+          "kv": "F32",
+          "round": 4,
+          "warmup": false,
+          "batch": 32,
+          "seconds": 39.200233463000004,
+          "submissions": 108,
+          "static_uploads": 0
+        },
+        {
+          "kv": "F32",
+          "round": 5,
+          "warmup": false,
+          "batch": 1,
+          "seconds": 31.89875866,
+          "submissions": 3456,
+          "static_uploads": 0
+        },
+        {
+          "kv": "F32",
+          "round": 6,
+          "warmup": false,
+          "batch": 1,
+          "seconds": 33.973219798,
+          "submissions": 3456,
+          "static_uploads": 0
+        },
+        {
+          "kv": "F32",
+          "round": 7,
+          "warmup": false,
+          "batch": 32,
+          "seconds": 39.516149464,
+          "submissions": 108,
+          "static_uploads": 0
+        },
+        {
+          "kv": "F16",
+          "round": 0,
+          "warmup": true,
+          "batch": 1,
+          "seconds": 46.295607568,
+          "submissions": 3456,
+          "static_uploads": 0
+        },
+        {
+          "kv": "F16",
+          "round": 1,
+          "warmup": true,
+          "batch": 32,
+          "seconds": 42.943129753,
+          "submissions": 108,
+          "static_uploads": 0
+        },
+        {
+          "kv": "F16",
+          "round": 2,
+          "warmup": false,
+          "batch": 1,
+          "seconds": 46.655933973,
+          "submissions": 3456,
+          "static_uploads": 0
+        },
+        {
+          "kv": "F16",
+          "round": 3,
+          "warmup": false,
+          "batch": 32,
+          "seconds": 41.973546738,
+          "submissions": 108,
+          "static_uploads": 0
+        },
+        {
+          "kv": "F16",
+          "round": 4,
+          "warmup": false,
+          "batch": 32,
+          "seconds": 39.302134097,
+          "submissions": 108,
+          "static_uploads": 0
+        },
+        {
+          "kv": "F16",
+          "round": 5,
+          "warmup": false,
+          "batch": 1,
+          "seconds": 32.658469795,
+          "submissions": 3456,
+          "static_uploads": 0
+        },
+        {
+          "kv": "F16",
+          "round": 6,
+          "warmup": false,
+          "batch": 1,
+          "seconds": 38.80742507,
+          "submissions": 3456,
+          "static_uploads": 0
+        },
+        {
+          "kv": "F16",
+          "round": 7,
+          "warmup": false,
+          "batch": 32,
+          "seconds": 38.731601008,
+          "submissions": 108,
+          "static_uploads": 0
+        }
+      ],
+      "log_sha256": "301095e965252c381237dd226af755b5538da7526dbcbd07a67d741b9d52663c",
+      "medians": {
+        "F32-batch1": 31.904129885,
+        "F16-batch1": 38.80742507,
+        "F32-batch32": 39.384971057,
+        "F16-batch32": 39.302134097
+      }
+    },
+    "prefill-bench-flush.log": {
+      "samples": [
+        {
+          "kv": "F32",
+          "round": 0,
+          "warmup": true,
+          "batch": 1,
+          "seconds": 34.523950387,
+          "submissions": 3456,
+          "static_uploads": 0
+        },
+        {
+          "kv": "F32",
+          "round": 1,
+          "warmup": true,
+          "batch": 32,
+          "seconds": 40.872977884,
+          "submissions": 396,
+          "static_uploads": 0
+        },
+        {
+          "kv": "F32",
+          "round": 2,
+          "warmup": false,
+          "batch": 1,
+          "seconds": 35.980698233,
+          "submissions": 3456,
+          "static_uploads": 0
+        },
+        {
+          "kv": "F32",
+          "round": 3,
+          "warmup": false,
+          "batch": 32,
+          "seconds": 42.210907646,
+          "submissions": 396,
+          "static_uploads": 0
+        },
+        {
+          "kv": "F32",
+          "round": 4,
+          "warmup": false,
+          "batch": 32,
+          "seconds": 42.566810942000004,
+          "submissions": 396,
+          "static_uploads": 0
+        },
+        {
+          "kv": "F32",
+          "round": 5,
+          "warmup": false,
+          "batch": 1,
+          "seconds": 39.759235812,
+          "submissions": 3456,
+          "static_uploads": 0
+        },
+        {
+          "kv": "F32",
+          "round": 6,
+          "warmup": false,
+          "batch": 1,
+          "seconds": 36.528070207,
+          "submissions": 3456,
+          "static_uploads": 0
+        },
+        {
+          "kv": "F32",
+          "round": 7,
+          "warmup": false,
+          "batch": 32,
+          "seconds": 42.603515682,
+          "submissions": 396,
+          "static_uploads": 0
+        },
+        {
+          "kv": "F16",
+          "round": 0,
+          "warmup": true,
+          "batch": 1,
+          "seconds": 37.864405456,
+          "submissions": 3456,
+          "static_uploads": 0
+        },
+        {
+          "kv": "F16",
+          "round": 1,
+          "warmup": true,
+          "batch": 32,
+          "seconds": 51.569481249,
+          "submissions": 396,
+          "static_uploads": 0
+        },
+        {
+          "kv": "F16",
+          "round": 2,
+          "warmup": false,
+          "batch": 1,
+          "seconds": 34.264202415,
+          "submissions": 3456,
+          "static_uploads": 0
+        },
+        {
+          "kv": "F16",
+          "round": 3,
+          "warmup": false,
+          "batch": 32,
+          "seconds": 50.291200785,
+          "submissions": 396,
+          "static_uploads": 0
+        },
+        {
+          "kv": "F16",
+          "round": 4,
+          "warmup": false,
+          "batch": 32,
+          "seconds": 47.543211123,
+          "submissions": 396,
+          "static_uploads": 0
+        },
+        {
+          "kv": "F16",
+          "round": 5,
+          "warmup": false,
+          "batch": 1,
+          "seconds": 37.699713288,
+          "submissions": 3456,
+          "static_uploads": 0
+        },
+        {
+          "kv": "F16",
+          "round": 6,
+          "warmup": false,
+          "batch": 1,
+          "seconds": 50.099307694,
+          "submissions": 3456,
+          "static_uploads": 0
+        },
+        {
+          "kv": "F16",
+          "round": 7,
+          "warmup": false,
+          "batch": 32,
+          "seconds": 44.484713246,
+          "submissions": 396,
+          "static_uploads": 0
+        }
+      ],
+      "log_sha256": "8e9b515d7eb4aa281419a25bfc252debfa56df3fa869b90c219216bcdab15282",
+      "medians": {
+        "F32-batch1": 36.528070207,
+        "F16-batch1": 37.699713288,
+        "F32-batch32": 42.566810942000004,
+        "F16-batch32": 47.543211123
+      }
+    }
+  },
+  "benchmark_scope": "Shared host/GPU, initialization and warmup excluded; functional batching reduces submissions but has no measured wall-time speedup.",
+  "kv_cache_bytes_at_capacity_64": {
+    "f32": 50331648,
+    "f16": 25165824,
+    "excludes": [
+      "weights",
+      "scratch",
+      "arena alignment"
+    ]
+  },
+  "hardware_regressions": {
+    "batched_modes_exit": "0",
+    "covers": [
+      "both cache modes and KV types",
+      "35 tokens split 32+3",
+      "internal splitting",
+      "reset",
+      "KV format switching",
+      "configuration switching",
+      "half-size cache regions"
+    ]
+  },
+  "cli": [
+    {
+      "name": "cli-vulkan-f32",
+      "exit": 0,
+      "seconds": 95.02581782452762,
+      "expected_output": " This is",
+      "passed": true
+    },
+    {
+      "name": "cli-auto-f16",
+      "exit": 0,
+      "seconds": 108.27554388716817,
+      "expected_output": " This is",
+      "passed": true
+    }
+  ],
+  "full_lib": {
+    "baseline_commit": "b9dd5dfd311c7011e89ba8f6e8476dc606962e58",
+    "baseline_result": "test result: FAILED. 1243 passed; 22 failed; 80 ignored; 0 measured; 0 filtered out; finished in 28.51s",
+    "current_result": "test result: FAILED. 1245 passed; 22 failed; 80 ignored; 0 measured; 0 filtered out; finished in 24.17s",
+    "same_failures": [
+      "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+      "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+      "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+      "models::clm::tests::matches_reference_golden_vectors",
+      "models::clm::tests::rejects_wrong_embedding_width",
+      "models::diffusion::z_image::text::tests::qwen_attention_softmax_matches_the_pinned_ggml_neon_reduction",
+      "models::diffusion::z_image::text::tests::silu_mul_inplace_matches_pinned_ggml_neon_activation",
+      "models::diffusion::z_image::vae::tests::silu_matches_pinned_ggml_neon_vector_path",
+      "models::funasr::encoder::parity_tests::fsmn_rounds_product_before_adding_like_ggml",
+      "models::funasr::encoder::parity_tests::layernorm_accumulates_variance_in_ggml_neon_groups",
+      "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+      "models::gemma4::trunk::tests::per_layer_bf16_projection_matches_pinned_scalar_dot_bits",
+      "models::gemma4::trunk::tests::per_layer_projection_rejects_non_bf16_weight",
+      "models::gemma4::trunk::tests::per_layer_projection_rejects_wrong_bf16_storage_length",
+      "models::qwen35::trunk::config::tests::qwen35_config_rejects_invalid_tensor_dimensions",
+      "models::qwen35::vision::tests::layer_norm_stats_match_ggml_grouped_f32_variance",
+      "ops::argmax::tests::all_negative",
+      "ops::argmax::tests::large_random",
+      "ops::argmax::tests::middle_max",
+      "ops::argmax::tests::tail_handles_non_aligned_lengths",
+      "ops::argmax::tests::ties_pick_lowest_index",
+      "ops::matmul::neon_tests::neon_softmax_matches_ggml_vector_exp_and_f64_sum"
+    ],
+    "final_result": "test result: FAILED. 1246 passed; 22 failed; 80 ignored; 0 measured; 0 filtered out; finished in 18.34s",
+    "final_new_failures": []
+  },
+  "focused_checks": {
+    "dory_unit_tests": 8,
+    "checker_tests": 5,
+    "gpu_cache_layout_tests": 1,
+    "vulkan_lib_bins_examples_check": true,
+    "rustfmt": true,
+    "shader_manifest_validation_and_rebuild": true
+  },
+  "source_sha256": {
+    "src/models/dory/config.rs": "5d01a60cdd283146f57a78514005db9418225ae3b346b245d69a9ae8eb4a9454",
+    "src/models/dory/forward.rs": "3a440e4662c4cb0e44e91921b827a63e7c308dfce7b8fd4c5c4797f4738fabac",
+    "src/models/dory/mod.rs": "5150025b113419d3843caafc426e688be8ed6fd7e9bae629f674823f79f8b37c",
+    "src/vulkan/dory.rs": "d0f82ffc436d720ce86605cce572260935a8021c8ffa63bbf43306437f7ffc64",
+    "shaders/glsl/dory.comp": "598a9b5f005d9e172777fbc9c3bd568c556bfe2623028e9b81a37eb49b686b9e",
+    "shaders/glsl/dory_matmul.comp": "14be71eeaf56900cbc691ff52dde2e1d5029214fd8bad9ad4949ed0206a4d904",
+    "shaders/bin/dory.spv": "f434a901f1641fe7f1f5f912a629a9d2cb7faf10362c62301da5eaec6db80338",
+    "shaders/bin/dory_matmul.spv": "92feb96a04dab718c696c3745382029fe6cc0879fc4b52a7e1982b6c9f2706d8",
+    "shaders/manifest.sha256": "e883555a24719f79520a230b64dace552422074dd28c99e5c9b918a7dce2ddc4",
+    "tests/dory_q5_k_m.rs": "0e2c9f35f9eec3de24f740f7c77b53e5c36a395ce5446923707259384970d037",
+    "tools/oracle/dory/check.py": "609e31f44d2ff0dfaa6a9c882b7d6888a7ff25bd8a6cecc578e5afa4894c620f",
+    "tools/oracle/dory/oracle.cpp": "696596f26a167757709c2701ac14c39b902e9c095accb039da87098f4adb4de2",
+    "tools/oracle/dory/test_check.py": "4171bf814aa968468d17a2450373eeb079fcbacab31f5904a3d104b340ed894f",
+    "tools/oracle/dory/gpu_prefill_bench.rs": "35fb9ad3b1ef131c1bcdc7f7b3d03e2bd71ba6d546cb1a3473c59677ac306fdc"
+  },
+  "binary_sha256": {
+    "integration-final": "b2d85b295371d8d0ea58a924c8a9a5b7b0ded0ab92209b472c76f3a1822723e6",
+    "integration-reset-final": "6e83c1b1247577c829f0cf19bd56a22cfeb1ca0d73bd5ccdcaa9285cf0213559",
+    "prefill-bench": "41b6f690c44d4795a4060f19fb29c4b0a1f23cf8654cd403f3b12c222af6bd7f",
+    "prefill-bench-flush": "7e649629f3b0bbf404df478b4f0c684b4944482c910a12f4f0e30d68c5d904ae"
+  },
+  "log_sha256": {
+    "shaders-final.log": "36f39a43cde1d58a49088503bd56476a565cc6eb43a3b5bcf7089789ca6526fa",
+    "final-gpu-build.log": "eecaefff9b040f5f3df8af5569f9c8ca2730bd22ad030786be1161d7ab3504b9",
+    "batched-modes-gpu.log": "8ad914a44ef875ee85a21518a23759942c5a365b9478eadf15db2967d9c128bc",
+    "smoke-gpu.log": "87ff8d23f267be58443394523132c709989f568a8d1b71b8ac3b9b0ebb36c941",
+    "cli-vulkan-f32.log": "708c7c6cdbf501c90dcd2c287fa3b6b961ae36f49eadefaabee0fddd383f6fec",
+    "cli-auto-f16.log": "615868442fa633487e6a9999bd4814a495c9f64f304402ed1c4f762ce81735d3",
+    "short-run.log": "7ae3a139c07e3d1ee6545cd075b6f70c4555d19fd16ecb29f52e739cc4551662",
+    "long-strict-run.log": "c4ed741aa3ed74e7cb381e1f20da8d60683208a22eb4f1549b942bc90be0e73e",
+    "q6k-run.log": "5c1af29c638c0ff82d0642d9611a75e23401efd6294d8a57e92c4df086c63349",
+    "quantize-q6k.log": "c028c0b5dd50cf6c5d955390b69d43d6b8a1527cfd754406b1390d36eecae745",
+    "reset-green.log": "e2512eb95c239759260fbf52899aa09d35de07d320f5e620ee883ccbf430e58f",
+    "reset-build.log": "cf5603a57e6f8a5cb324495177e88aac3291283b9b8341e605381bf65955eae0",
+    "linux-gpu4096-run.log": "e8704b800af2d1fb36d3c2da0c637eb9ae0b2296049d7d98665f45291b594947",
+    "reuse-linux.log": "352a1c20d2875ffa50154e59af2c235b9a725f7e398961726c69affa3ff2fe03"
+  },
+  "binary_scope": {
+    "initial_integration": "Short, Q6_K and 1024-token replays precede the configuration-change reset guard; forward arithmetic and shaders are unchanged by that guard.",
+    "final_integration": "4K replay and configuration-switching hardware regression use integration-reset-final; source hashes describe the final verified working tree."
+  },
+  "local_log_sha256": {
+    "verified-build.log": "47de66d0b3b077fff9f676fa98151a18d0e17482f2b43aefeaba52e021aeeb62",
+    "verified-dory-unit.log": "ec56f17859f085c33febd3836b6f451d6c5c40dc12473abbf4a8cae60278eda0",
+    "full-lib-reset-final.log": "7a2cb4019549e4c0c4192460a9b7b2efcee730a8181dcc30d527671081213c23",
+    "baseline-lib.log": "701a949dd743f4a1a087f284364d9813da854c84096ad5af8c6edd0e9743ff6e",
+    "layout-final.log": "8a1f0c62b9ea984f3fe9ddca070f0366885736746e8d257af8995e1256cc4661"
+  },
+  "limitations": [
+    "No full 262144-token replay; GPU capacity also depends on storage-buffer range",
+    "No additional GPU or driver available",
+    "Q6_K is a requantized test artifact, not official native Q6_K quality validation",
+    "Q4_K/Q8_0 and other projection formats are not covered by the resident Vulkan graph",
+    "last_loop requires identical chunk schedules for reference comparisons",
+    "No cross-platform or native SIMD Oracle agreement claim",
+    "Chat template generation not revalidated",
+    "Existing full-library and shared-operator failures remain"
+  ]
+}

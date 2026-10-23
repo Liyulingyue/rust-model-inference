@@ -395,6 +395,20 @@ SHA-256 `14ecbbda6221dd89e5239ac8c9ff65047c7aa0baf34aaba0442b96307a99617a`,
 with 290 Q6_K and 217 BF16 tensors. This tests the Q6 execution path; it
 does not validate official native Q6 weights or claim improved model quality.
 
+To reproduce that file using the strict build's existing CMake flags:
+
+```sh
+cmake -S target/dory-oracle-strict/source -B target/dory-oracle-strict/build \
+  -DLLAMA_BUILD_TOOLS=ON
+cmake --build target/dory-oracle-strict/build --target llama-quantize --parallel 4
+target/dory-oracle-strict/build/bin/llama-quantize --allow-requantize \
+  "$RMI_DORY_Q5_MODEL" models/dory-q6k-derived.gguf Q6_K 4
+```
+
+Repeat the reference replay above with that artifact, batch 3, and the
+`per_loop`/F32 and `last_loop`/F16 combinations. Keep the same cache mode,
+KV format and batch schedule on both sides.
+
 The hardware regression checks both modes and both KV formats, a 35-token
 prompt split 32+3, an internally split call, reset, KV-format switching and
 actual half-size GPU cache regions:
@@ -415,7 +429,7 @@ command as `gpu_bench.rs` above with this source and its own output binary.
 The input artifact must use `per_loop`, since that mode permits comparisons
 between chunk schedules.
 
-Same-host Linux GPU / strict-Oracle boundary replays use the original
+Same-host Linux GPU / strict-Oracle boundary and long-context replays use the original
 1024-token window and two generated tokens, with batch 32. The unrecorded
 prefix executes in full before tracing the listed positions:
 
@@ -424,11 +438,29 @@ prefix executes in full before tracing the listed positions:
 | F32 | per_loop | 1057 | 1016 | 8309 | 0 |
 | F16 | per_loop | 1025 | 1022 | 973 | 0 |
 | F16 | last_loop | 1057 | 1054 | 973 | 0 |
+| F16 | per_loop | 4095 | 4094 | 585 | 0 |
 
 The macOS CPU / macOS strict-Oracle F16 `per_loop` replay also passes
 973 checkpoints at positions 1022 onward. These are numerical results under
 the unchanged gates; token IDs, schedule, graph structure and embeddings use
 the exact checks described above.
+
+[validation-completion.json](validation-completion.json) records 30 accepted
+CPU/GPU comparisons and 61,990 checkpoints, including short batch/mode/KV
+coverage, the Q6_K artifact, the 64-token platform diagnostic, real window
+eviction and the 4K replay. The accepted comparisons have zero observed
+relative L2 and scaled absolute errors. The four failed exploratory comparisons
+are retained separately. The 4K Oracle uses eight CPU threads; its GPU session
+uses four host threads. The report also records source/binary/log/model hashes,
+strict build flags, actual cache sizes, CLI results and raw benchmark samples.
+
+The full CPU library suite has the same 22 failing tests as baseline
+`b9dd5dfd`: 1243 passed before and 1246 after, with 80 ignored in both runs.
+There are no new failures, and no full-suite pass is claimed. Eight focused
+Dory unit tests, five trace-checker tests, the cache-layout test, Vulkan
+library/binaries/examples compilation, rustfmt, shader validation/rebuild and
+the hardware regressions pass. A configuration-switching regression also
+checks that reset rebuilds the per-loop/last-loop allocation.
 
 At capacity 64 the GPU K/V regions are 50,331,648 bytes for F32 and 25,165,824
 for F16. Batch 32 reduces submissions from 3456 to 108 for this prompt, but
