@@ -275,7 +275,7 @@ impl DoryVulkanSession {
                 (1.0 / (width as f32).sqrt()).to_bits(),
                 0,
             ],
-            heads,
+            heads * 64,
         )
     }
 
@@ -339,7 +339,7 @@ impl DoryVulkanSession {
                 w.n_out as u32,
                 w.format,
             ],
-            [w.n_out.div_ceil(64) as u32, 1, 1],
+            [w.n_out.div_ceil(8) as u32, 1, 1],
         )
     }
 

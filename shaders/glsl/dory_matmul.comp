@@ -27,13 +27,19 @@ int weight_code(uint offset, uint local) {
     return int(low | (high << 4u));
 }
 
+shared float partial_sums[64];
+shared double bf16_sums[64];
+shared int minima[64];
+
 void main() {
-    uint row = gl_GlobalInvocationID.x;
-    if (row >= pc.n_out) return;
+    uint invocation = gl_LocalInvocationID.x;
+    uint lane = invocation % 8u;
+    uint row = gl_WorkGroupID.x * 8u + invocation / 8u;
+    bool valid_row = row < pc.n_out;
     precise float result = 0.0;
     if (pc.format == 30u) {
         precise double sum = 0.0lf;
-        for (uint k = 0u; k < pc.n_in; ++k) {
+        for (uint k = lane; valid_row && k < pc.n_in; k += 8u) {
             uint bits = arena.data[pc.input_word + k];
             bits += 0x7fffu + ((bits >> 16u) & 1u);
             float x = uintBitsToFloat(bits & 0xffff0000u);
@@ -42,39 +48,55 @@ void main() {
             precise float product = x * w;
             sum += double(product);
         }
+        bf16_sums[invocation] = sum;
+        barrier();
+        if (lane != 0u || !valid_row) return;
+        sum = 0.0lf;
+        for (uint i = 0u; i < 8u; ++i) sum += bf16_sums[invocation + i];
         result = float(sum);
     } else {
         uint blocks = pc.n_in / 256u;
-        precise float sums[8] = float[8](0,0,0,0,0,0,0,0);
+        precise float sum = 0.0;
         for (uint block = 0u; block < blocks; ++block) {
             uint o = (row * blocks + block) * (pc.format == 13u ? 176u : 210u);
-            int dot[8] = int[8](0,0,0,0,0,0,0,0);
+            int dot = 0;
             int minimum = 0;
-            for (uint k = 0u; k < 256u; ++k) {
+            for (uint k = lane; valid_row && k < 256u; k += 8u) {
                 int x = activation(block * 256u + k);
                 if (pc.format == 13u) {
                     uint group = k >> 5u;
                     uint packed = wb(o+48u+(group>>1u)*32u+(k&31u));
                     uint low = (group & 1u)==0u ? packed&15u : packed>>4u;
                     uint high = (wb(o+16u+(k&31u))>>group)&1u;
-                    dot[k%8u] += int(scale5(o,group))*x*int(low|(high<<4u));
+                    dot += int(scale5(o,group))*x*int(low|(high<<4u));
                     minimum += int(min5(o,group))*x;
                 } else {
-                    dot[k%8u] += weight_scale(o,k)*x*(weight_code(o,k)-32);
+                    dot += weight_scale(o,k)*x*(weight_code(o,k)-32);
                 }
             }
             float d = uintBitsToFloat(arena.data[pc.scales_word + block]);
-            precise float factor = wh(o+(pc.format == 13u ? 0u : 208u)) * d;
-            for (uint lane=0u; lane<8u; ++lane) {
-                precise float term = factor * float(dot[lane]);
-                sums[lane] += term;
+            if (valid_row) {
+                precise float factor = wh(o+(pc.format == 13u ? 0u : 208u)) * d;
+                precise float term = factor * float(dot);
+                sum += term;
             }
             if (pc.format == 13u) {
-                precise float term = (wh(o+2u)*d)*float(minimum);
-                result -= term;
+                // Reduce the integer correction before scaling, preserving the reference order.
+                minima[invocation] = minimum;
+                barrier();
+                if (lane == 0u && valid_row) {
+                    minimum = 0;
+                    for (uint i = 0u; i < 8u; ++i) minimum += minima[invocation + i];
+                    precise float term = (wh(o+2u)*d)*float(minimum);
+                    result -= term;
+                }
+                barrier();
             }
         }
-        for (uint lane=0u; lane<8u; ++lane) result += sums[lane];
+        partial_sums[invocation] = sum;
+        barrier();
+        if (lane != 0u || !valid_row) return;
+        for (uint i=0u; i<8u; ++i) result += partial_sums[invocation + i];
     }
     arena.data[pc.output_word+row] = floatBitsToUint(result);
 }

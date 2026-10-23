@@ -19,20 +19,30 @@ float half_round(float v) { return round_f16_rte(v); }
 uint cache_index(uint j, uint head, uint d) {
     return ((pc.p4 + j) % pc.p3) * pc.p1 * pc.width + head * pc.width + d;
 }
+shared double norm_sums[64];
+shared float norm_scale;
 void main() {
     uint i = gl_GlobalInvocationID.x;
     if (pc.op == 0u) {
-        if (i >= pc.n) return;
-        uint base = pc.a + i * pc.width;
+        uint head = gl_WorkGroupID.x, lane = gl_LocalInvocationID.x;
+        if (head >= pc.n) return;
+        uint base = pc.a + head * pc.width;
         precise double sum = 0.0lf;
-        for (uint d = 0u; d < pc.width; ++d) {
+        for (uint d = lane; d < pc.width; d += 64u) {
             precise float square = get(base + d) * get(base + d);
             sum += double(square);
         }
-        precise float mean = float(sum / double(pc.width));
-        precise float scale = inverse_sqrt_f32(mean + divide_finite_normal(1e-6, float(pc.width)));
-        for (uint d = 0u; d < pc.width; ++d) {
-            precise float v = get(base + d) * scale;
+        norm_sums[lane] = sum;
+        barrier();
+        if (lane == 0u) {
+            sum = 0.0lf;
+            for (uint j = 0u; j < 64u; ++j) sum += norm_sums[j];
+            precise float mean = float(sum / double(pc.width));
+            norm_scale = inverse_sqrt_f32(mean + divide_finite_normal(1e-6, float(pc.width)));
+        }
+        barrier();
+        for (uint d = lane; d < pc.width; d += 64u) {
+            precise float v = get(base + d) * norm_scale;
             v *= pc.factor;
             put(base + d, v);
         }

@@ -180,7 +180,8 @@ slots; it currently saves no cache memory.
 
 The GPU follows reference Q5/Q6 accumulation and BF16 input rounding. It uses
 the existing signed Q8_K quantizer, F16 ties-to-even conversion and normalization
-helpers. FP64 accumulators preserve the recurrent reduction order. The FP64
+helpers. Q5/Q6 keep their per-lane and per-block reduction order; BF16 and
+normalization use cooperative FP64 reductions. The FP64
 exponential uses Arm's MIT-licensed `expf` reduction/table/evaluation, matching
 the Linux Oracle's FMA sequence: a one-ULP activation difference otherwise
 crossed quantization boundaries and amplified through the recurrent stack.
@@ -200,12 +201,57 @@ from its explicit CPU comparison. Initialization uploaded 362 buffers
 production CLI `--compute vulkan` F32 / `--gpu` F16 / `--compute cpu` F32
 all passed. The two GPU CLI runs produced the pinned Hello output.
 
-This correctness-first graph is currently slow: the alternating nine-position
+Before the cooperative-kernel optimization, the alternating nine-position
 probe took GPU 26.92s / CPU 7.69s for F32 and GPU 26.67s / CPU 7.53s for F16,
 excluding initialization. The host was shared and CLI timing fluctuated;
 these are observations, not an isolated benchmark or a speedup claim. Reduced-precision gates
 remain relative L2 <= 1% and scaled maximum absolute error <= 1%; token IDs,
 checkpoint structure and embedding bytes are exact checks.
+
+The optimized graph assigns eight invocations to each projection row and a
+64-invocation workgroup to each normalization vector. Q5's integer minimum
+correction is reduced before scaling, so its floating-point block/lane order
+is unchanged. BF16 keeps activation rounding and FP64 accumulation; the
+normalization reduction also retains FP64, the same epsilon and scale steps.
+Tail projection rows participate in barriers without reading weights or
+writing outputs. No external acceleration library or new device feature is
+required.
+
+Fresh timings and Oracle replays for these kernels are recorded separately in
+[validation-gpu-performance.json](validation-gpu-performance.json); the earlier
+resident-execution report remains a record of the initial implementation.
+On the same EPYC 9334 / RADV NAVI31 device, the per-call medians were:
+
+| KV | Original | Optimized | Observed ratio |
+| --- | --- | --- | --- |
+| F32 | 3.764s | 0.581s | 6.47x |
+| F16 | 4.016s | 0.504s | 7.97x |
+
+Each median uses 27 post-warmup calls. The host/GPU were shared with independent
+tasks; an original-build call stalled for 19.68s, and load changed during the
+optimized F32 run. All samples are retained, so these observations do not
+establish an isolated throughput guarantee. The final seven Oracle replays
+passed all 15,795 checkpoints with zero observed numerical error. The untraced
+CPU comparison, hardware integration and forced-Vulkan F32 / Auto F16 CLI also
+passed without relaxing either 1% gate.
+
+`gpu_bench.rs` measures nine single-token forwards after an excluded warmup
+round, then records three rounds with the same session capacity, input IDs and
+KV format. Initialization is excluded. Each round checks finite logits, the
+eight pinned greedy IDs, actual GPU submissions and zero static uploads.
+Link the same source against each revision's library, save each binary before
+building the other revision, and alternate their runs on the same device:
+
+```sh
+cargo build --locked --profile release-fast --features vulkan,parity-trace --lib
+rustc --edition=2021 -C opt-level=3 -L dependency=target/release-fast/deps \
+  --extern rust_model_inference=target/release-fast/librust_model_inference.rlib \
+  tools/oracle/dory/gpu_bench.rs -o target/dory-gpu-bench
+env -u RMI_PARITY_TRACE -u RMI_SCALAR \
+  VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.json \
+  target/dory-gpu-bench "$RMI_DORY_Q5_MODEL" f32
+# Repeat with f16. Preserve binaries and hashes before switching revisions.
+```
 
 To replay the complete graph against the fixed CPU Oracle, use the CPU replay
 commands above with a fresh trace path and replace the Rust command with:
