@@ -1,0 +1,414 @@
+{
+  "date": "2026-10-23",
+  "source_commit": "eed17fba9f237bc2f7c5c43de29c122414450cb8",
+  "baseline_source_commit": "2ddecab25ce55f60836eb6f468679fccc92eafd3",
+  "model": {
+    "repository": "InternScience/Sage-A1.5-Q8_0-GGUF",
+    "file": "Sage-A1.5-Q8_0.gguf",
+    "bytes": 37802150112,
+    "sha256": "f7247f6faef3f6c616b953595e1fc7c3fbf257d02d9915af5fdf15e808ea8ee4"
+  },
+  "hardware": {
+    "cpu": "AMD EPYC 9334 32-Core Processor",
+    "gpu": "AMD Radeon Graphics (RADV NAVI31)",
+    "gfx": "gfx1100",
+    "pci": "0000:c3:00.0",
+    "vram_total_bytes": 51522830336,
+    "exposed_device": "card7/renderD134"
+  },
+  "build": {
+    "profile": "release",
+    "features": [
+      "vulkan"
+    ],
+    "parity_trace": false,
+    "compute_trace": false,
+    "binary_sha256": {
+      "before": "578f2e8ac1db1e8b114e4ed0ac4832ca02904f00c2d347f79f4a8c98d44822c8",
+      "after": "61906e75b31064e832727b5324114c5305a069eaf876259696dd58dccd186f4a"
+    },
+    "source_sha256": {
+      "src/vulkan/dense.rs": "237d3877b8dcd37d98e5b60c4beb9acf4b69ef2c69c9ac6339db80e46f6bb063",
+      "src/vulkan/ops.rs": "bbf67335e27d74f9d643ffd81837714f8530a62731f24ad26b2d6ec7e647aa3f"
+    }
+  },
+  "parameters": {
+    "temperature": 0,
+    "threads": 8,
+    "prefill_batch_size": 64,
+    "max_tokens": 192,
+    "jinja": true,
+    "thinking": false,
+    "scalar": false
+  },
+  "change": "Shared dense/Qwen3/Qwen3.5 immutable decoder uploads use existing upload_device_static. Discrete GPUs stage to DEVICE_LOCAL; UMA and allocation-OOM retain the existing mapped-memory fallback. Arithmetic and quantization are unchanged.",
+  "first_pair": {
+    "kind": "One complete before/after pair; both started with idle GPU samples. No exclusive allocation or sustained isolation guarantee.",
+    "gpu_busy_percent_before": {
+      "before": [
+        0
+      ],
+      "after": [
+        0,
+        0,
+        0
+      ]
+    },
+    "answers_identical": true,
+    "before": {
+      "name": "before-text-1",
+      "returncode": 0,
+      "scalar": false,
+      "image": false,
+      "command": [
+        "/workspace/rmi-sage-a15-f165/target/sage-gpu/acceleration/before",
+        "--model",
+        "/workspace/rmi-sage-a15-f165/models/Sage-A1.5-Q8_0-GGUF/Sage-A1.5-Q8_0.gguf",
+        "--compute",
+        "vulkan",
+        "--jinja",
+        "--no-thinking",
+        "--temp",
+        "0",
+        "--threads",
+        "8",
+        "--prefill-batch-size",
+        "64",
+        "--max-tokens",
+        "192",
+        "--prompt",
+        "请用三句话向初学者解释混合专家（MoE）模型：它如何选择专家、为什么能减少计算，以及一个主要代价。不要列标题。"
+      ],
+      "answer": "混合专家模型像是一个拥有多位专业顾问的团队，每次处理任务时，一个轻量级的门控网络会根据输入内容智能地挑选出最相关的少数几位专家来共同工作。\n\n由于每次只需激活总参数中很小的一部分，模型在推理时能大幅节省计算资源，从而实现比同等规模的密集模型更快的速度或更低的能耗。\n\n然而，这种架构的主要代价是训练过程变得更加复杂且难以并行化，因为需要精心设计路由机制来确保不同专家之间的负载均衡和有效协作。",
+      "ready_seconds": 30.355227442458272,
+      "first_text_seconds": 47.419062877073884,
+      "ttft_after_ready_seconds": 17.063835434615612,
+      "generation_end_seconds": 147.91842715069652,
+      "process_seconds": 150.08935207128525,
+      "metrics": {
+        "session_init": 30.045446,
+        "prompt_rows": 44,
+        "generated_tokens": 104,
+        "decode_evals": 104,
+        "prefill": 17.062759,
+        "decode": 100.471947,
+        "generation_total": 117.563363
+      },
+      "prefill_rows_per_second": 2.578715435176691,
+      "decode_evaluations_per_second": 1.0351148067231144,
+      "process_resource_peaks_KiB": {
+        "drm-resident-gtt": 35659812,
+        "drm-resident-vram": 215952
+      }
+    },
+    "after": {
+      "name": "after-text-1",
+      "returncode": 0,
+      "scalar": false,
+      "image": false,
+      "command": [
+        "/workspace/rmi-sage-a15-f165/target/sage-gpu/acceleration/after",
+        "--model",
+        "/workspace/rmi-sage-a15-f165/models/Sage-A1.5-Q8_0-GGUF/Sage-A1.5-Q8_0.gguf",
+        "--compute",
+        "vulkan",
+        "--jinja",
+        "--no-thinking",
+        "--temp",
+        "0",
+        "--threads",
+        "8",
+        "--prefill-batch-size",
+        "64",
+        "--max-tokens",
+        "192",
+        "--prompt",
+        "请用三句话向初学者解释混合专家（MoE）模型：它如何选择专家、为什么能减少计算，以及一个主要代价。不要列标题。"
+      ],
+      "answer": "混合专家模型像是一个拥有多位专业顾问的团队，每次处理任务时，一个轻量级的门控网络会根据输入内容智能地挑选出最相关的少数几位专家来共同工作。\n\n由于每次只需激活总参数中很小的一部分，模型在推理时能大幅节省计算资源，从而实现比同等规模的密集模型更快的速度或更低的能耗。\n\n然而，这种架构的主要代价是训练过程变得更加复杂且难以并行化，因为需要精心设计路由机制来确保不同专家之间的负载均衡和有效协作。",
+      "ready_seconds": 38.74771629087627,
+      "first_text_seconds": 39.979927856475115,
+      "ttft_after_ready_seconds": 1.2322115655988455,
+      "generation_end_seconds": 59.67870422266424,
+      "process_seconds": 61.25055364146829,
+      "metrics": {
+        "session_init": 38.353803,
+        "prompt_rows": 44,
+        "generated_tokens": 104,
+        "decode_evals": 104,
+        "prefill": 1.231267,
+        "decode": 19.673927,
+        "generation_total": 20.931198
+      },
+      "prefill_rows_per_second": 35.73554720462743,
+      "decode_evaluations_per_second": 5.286184095325758,
+      "process_resource_peaks_KiB": {
+        "drm-resident-gtt": 684800,
+        "drm-resident-vram": 35719384
+      }
+    },
+    "decode_speedup": 5.106857771709737,
+    "prefill_speedup": 13.857887038310944,
+    "process_speedup": 2.4504162517425914,
+    "process_time_reduction_percent": 59.19060693101186,
+    "session_init_increase_seconds": 8.308357
+  },
+  "shared_load_followup": {
+    "excluded_from_speedup": true,
+    "before": {
+      "name": "before-text-2",
+      "returncode": 0,
+      "scalar": false,
+      "image": false,
+      "command": [
+        "/workspace/rmi-sage-a15-f165/target/sage-gpu/acceleration/before",
+        "--model",
+        "/workspace/rmi-sage-a15-f165/models/Sage-A1.5-Q8_0-GGUF/Sage-A1.5-Q8_0.gguf",
+        "--compute",
+        "vulkan",
+        "--jinja",
+        "--no-thinking",
+        "--temp",
+        "0",
+        "--threads",
+        "8",
+        "--prefill-batch-size",
+        "64",
+        "--max-tokens",
+        "192",
+        "--prompt",
+        "请用三句话向初学者解释混合专家（MoE）模型：它如何选择专家、为什么能减少计算，以及一个主要代价。不要列标题。"
+      ],
+      "answer": "混合专家模型像是一个拥有多位专业顾问的团队，每次处理任务时，一个轻量级的门控网络会根据输入内容智能地挑选出最相关的少数几位专家来共同工作。\n\n由于每次只需激活总参数中很小的一部分，模型在推理时能大幅节省计算资源，从而实现比同等规模的密集模型更快的速度或更低的能耗。\n\n然而，这种架构的主要代价是训练过程变得更加复杂且难以并行化，因为需要精心设计路由机制来确保不同专家之间的负载均衡和有效协作。",
+      "ready_seconds": 17.893247339874506,
+      "first_text_seconds": 35.000107591971755,
+      "ttft_after_ready_seconds": 17.10686025209725,
+      "generation_end_seconds": 152.25943670235574,
+      "process_seconds": 154.06300739385188,
+      "metrics": {
+        "session_init": 17.502781,
+        "prompt_rows": 44,
+        "generated_tokens": 104,
+        "decode_evals": 104,
+        "prefill": 17.105639,
+        "decode": 117.230617,
+        "generation_total": 134.365269
+      },
+      "prefill_rows_per_second": 2.572251174013435,
+      "decode_evaluations_per_second": 0.8871402596132374,
+      "process_resource_peaks_KiB": {
+        "drm-resident-gtt": 35659812,
+        "drm-resident-vram": 215952
+      }
+    },
+    "after": {
+      "name": "after-text-2",
+      "returncode": 0,
+      "scalar": false,
+      "image": false,
+      "command": [
+        "/workspace/rmi-sage-a15-f165/target/sage-gpu/acceleration/after",
+        "--model",
+        "/workspace/rmi-sage-a15-f165/models/Sage-A1.5-Q8_0-GGUF/Sage-A1.5-Q8_0.gguf",
+        "--compute",
+        "vulkan",
+        "--jinja",
+        "--no-thinking",
+        "--temp",
+        "0",
+        "--threads",
+        "8",
+        "--prefill-batch-size",
+        "64",
+        "--max-tokens",
+        "192",
+        "--prompt",
+        "请用三句话向初学者解释混合专家（MoE）模型：它如何选择专家、为什么能减少计算，以及一个主要代价。不要列标题。"
+      ],
+      "answer": "混合专家模型像是一个拥有多位专业顾问的团队，每次处理任务时，一个轻量级的门控网络会根据输入内容智能地挑选出最相关的少数几位专家来共同工作。\n\n由于每次只需激活总参数中很小的一部分，模型在推理时能大幅节省计算资源，从而实现比同等规模的密集模型更快的速度或更低的能耗。\n\n然而，这种架构的主要代价是训练过程变得更加复杂且难以并行化，因为需要精心设计路由机制来确保不同专家之间的负载均衡和有效协作。",
+      "ready_seconds": 21.660233229398727,
+      "first_text_seconds": 26.32807696610689,
+      "ttft_after_ready_seconds": 4.667843736708164,
+      "generation_end_seconds": 139.35089163854718,
+      "process_seconds": 140.92176023311913,
+      "metrics": {
+        "session_init": 21.368183,
+        "prompt_rows": 44,
+        "generated_tokens": 104,
+        "decode_evals": 104,
+        "prefill": 4.660827,
+        "decode": 112.993269,
+        "generation_total": 117.69074
+      },
+      "prefill_rows_per_second": 9.440384721423902,
+      "decode_evaluations_per_second": 0.9204088077140241,
+      "process_resource_peaks_KiB": {
+        "drm-resident-gtt": 6325032,
+        "drm-resident-vram": 29551852
+      }
+    },
+    "idle_samples": {
+      "before-text-2": [
+        {
+          "gpu_busy_percent": 11,
+          "mem_info_vram_used": 48242688,
+          "mem_info_gtt_used": 212008960
+        },
+        {
+          "gpu_busy_percent": 19,
+          "mem_info_vram_used": 623968256,
+          "mem_info_gtt_used": 349241344
+        },
+        {
+          "gpu_busy_percent": 3,
+          "mem_info_vram_used": 925970432,
+          "mem_info_gtt_used": 418447360
+        }
+      ],
+      "after-text-2": [
+        {
+          "gpu_busy_percent": 100,
+          "mem_info_vram_used": 21124972544,
+          "mem_info_gtt_used": 198242304
+        },
+        {
+          "gpu_busy_percent": 99,
+          "mem_info_vram_used": 21124972544,
+          "mem_info_gtt_used": 198242304
+        },
+        {
+          "gpu_busy_percent": 93,
+          "mem_info_vram_used": 21124972544,
+          "mem_info_gtt_used": 198242304
+        }
+      ],
+      "before-text-3": [
+        {
+          "gpu_busy_percent": 100,
+          "mem_info_vram_used": 21336662016,
+          "mem_info_gtt_used": 198242304
+        },
+        {
+          "gpu_busy_percent": 90,
+          "mem_info_vram_used": 21124972544,
+          "mem_info_gtt_used": 198242304
+        },
+        {
+          "gpu_busy_percent": 90,
+          "mem_info_vram_used": 21124972544,
+          "mem_info_gtt_used": 198242304
+        }
+      ]
+    },
+    "reason": "Another model benchmark held about 20 GiB VRAM on the same GPU. After-text-2 began at 100/99/93 percent GPU busy. Repeats stopped; incomplete before-text-3 excluded. No median or repeated stable speedup claim."
+  },
+  "image_functional_check": {
+    "before_start_gpu": {
+      "gpu_busy_percent": 7,
+      "mem_info_vram_used": 9106014208,
+      "mem_info_gtt_used": 282886144
+    },
+    "result": {
+      "name": "after-image-1",
+      "returncode": 0,
+      "scalar": false,
+      "image": true,
+      "command": [
+        "/workspace/rmi-sage-a15-f165/target/sage-gpu/acceleration/after",
+        "--model",
+        "/workspace/rmi-sage-a15-f165/models/Sage-A1.5-Q8_0-GGUF/Sage-A1.5-Q8_0.gguf",
+        "--gpu",
+        "--jinja",
+        "--no-thinking",
+        "--temp",
+        "0",
+        "--threads",
+        "8",
+        "--prefill-batch-size",
+        "64",
+        "--max-tokens",
+        "192",
+        "--prompt",
+        "按从左到右的顺序，描述图中三个图形的颜色和形状，用一句话回答。",
+        "--mmproj",
+        "/workspace/rmi-sage-a15-f165/models/Sage-A1.5-Q8_0-GGUF/Sage-A1.5-mmproj.gguf",
+        "--image",
+        "/workspace/rmi-sage-a15-f165/target/sage-gpu/acceleration/shapes.png"
+      ],
+      "answer": "图中从左到右依次是红色圆形、蓝色正方形和绿色三角形。",
+      "ready_seconds": 31.184368895366788,
+      "first_text_seconds": 44.08512224256992,
+      "ttft_after_ready_seconds": 12.900753347203135,
+      "generation_end_seconds": 59.76419737562537,
+      "process_seconds": 61.33726189285517,
+      "metrics": {
+        "image_total": 4.488,
+        "preprocess": 0.001,
+        "vision_encode": 4.412,
+        "session_init": 26.257097,
+        "prompt_rows": 104,
+        "generated_tokens": 15,
+        "decode_evals": 15,
+        "prefill": 12.900556,
+        "decode": 15.674313,
+        "generation_total": 28.580115
+      },
+      "prefill_rows_per_second": 8.061668039734101,
+      "decode_evaluations_per_second": 0.9569797413130643,
+      "process_resource_peaks_KiB": {
+        "drm-resident-gtt": 6347904,
+        "drm-resident-vram": 29538584
+      }
+    },
+    "scope": "CPU vision/projector plus Vulkan decoder, correct colors/shapes/order. Shared load; no image acceleration comparison or numerical vision parity claim."
+  },
+  "verification": {
+    "oracle_commit": "b96806d96061049a5b574269b049bf6241d63d46",
+    "scalar": true,
+    "text_parity": {
+      "raw": {
+        "checkpoints": 220,
+        "exact_checkpoints": 16,
+        "max_relative_l2": 0.0,
+        "max_abs": 0.0,
+        "min_cosine": 1.0
+      },
+      "chat": {
+        "checkpoints": 880,
+        "exact_checkpoints": 64,
+        "max_relative_l2": 0.0,
+        "max_abs": 0.0,
+        "min_cosine": 1.0
+      }
+    },
+    "lossy_bounds": {
+      "max_relative_l2": 0.01,
+      "min_cosine": 0.99995,
+      "max_logit_abs": 0.5
+    },
+    "exact_checks": [
+      "token IDs",
+      "embedding bytes",
+      "selected expert IDs/order"
+    ],
+    "batched_real_model": "CPU prefill=1 versus forced Vulkan prefill=3 plus four decode predictions passed",
+    "physical_gpu_tests_passed": {
+      "upload_bytes_padding_device_placement": 1,
+      "qwen35": 21,
+      "qwen3": 7
+    },
+    "local_vulkan": {
+      "passed": 46,
+      "ignored": 45
+    },
+    "rustfmt": "passed",
+    "diff_check": "passed"
+  },
+  "limits": [
+    "File/driver caches were not flushed; all measurements use new processes.",
+    "Shared host, one complete pair beginning with idle GPU samples; no dedicated-card repeated benchmark or median.",
+    "First-pair session initialization is 8.31 seconds slower due to staging; end-to-end time includes this cost.",
+    "Existing numerical assertions and scalar Oracle scope retained; optimized graph and vision numerical alignment are not extended.",
+    "Other dense/Qwen3 real models, UMA hardware, forced VRAM exhaustion, long context and concurrency were not tested here."
+  ]
+}

@@ -250,11 +250,10 @@ These are **shared-environment observations**, not a stable hardware benchmark
 or a scalar/default speed comparison. The host has eight adapters, but this
 container exposes only `card7/renderD134` (PCI `0000:c3:00.0`); its GPU was
 98–100% busy before our measured default runs. Each configuration ran once.
-The process held about 34 GiB in host-visible GTT buffers and only 211 MiB in
-VRAM: this executor's existing `UploadedBuffers::upload` uses `upload_static`,
-not the separate `upload_device_static` VRAM path. GPU execution therefore does
-not imply that these weights reside in VRAM. No weight-placement optimization
-or attribution of all performance costs is claimed here.
+At that revision, the process held about 34 GiB in host-visible GTT buffers and
+only 211 MiB in VRAM: `UploadedBuffers::upload` used `upload_static`, rather
+than the separate `upload_device_static` VRAM path. These historical timings
+precede the weight-placement optimization measured below.
 
 Both text cases requested forced Vulkan. The image CLI uses `--gpu` (Auto),
 since forced Vulkan CLI mode admits plain text only; there was no logged CPU
@@ -262,6 +261,55 @@ decoder fallback. Process DRM engine counters increased during image decoding
 on the same physical adapter. The image encoder/projector remains on CPU.
 This run does not extend the earlier numerical parity coverage or establish
 long-context/concurrent performance.
+
+### Discrete GPU weight placement
+
+The shared dense/Qwen3/Qwen3.5 immutable decoder uploader now calls the existing
+`upload_device_static`: discrete GPUs stage weights into `DEVICE_LOCAL` memory,
+while UMA and device-allocation OOM retain its existing mapped-memory fallback.
+No arithmetic, quantization or precision settings change. The device upload
+regression now also exercises this decoder entry, checking bytes, zero padding
+and unmapped device storage on a discrete GPU.
+
+The same physical AMD adapter ran the saved baseline and a new full release CLI
+with identical parameters and the same complete 104-token answer. The first
+pair began with 0% GPU-busy samples; the host was not reserved. Exact commands,
+binary/source hashes, answers and metrics are in [acceleration.json](acceleration.json).
+
+| First complete pair | Before | After |
+| --- | ---: | ---: |
+| Session init (s) | 30.05 | 38.35 |
+| Prefill, 44 rows (s) | 17.06 | 1.23 |
+| Decode eval/s | 1.04 | 5.29 |
+| First text including startup (s) | 47.42 | 39.98 |
+| Process wall (s) | 150.09 | 61.25 |
+| Process peak GTT (GiB) | 34.01 | 0.65 |
+| Process peak VRAM (GiB) | 0.21 | 34.06 |
+
+This pair shows 5.11x decode throughput, 13.86x prefill throughput and 2.45x
+end-to-end speed (59.2% less process time), including the **8.31-second increase
+in session initialization**. The new peak GTT includes temporary upload
+staging. File and driver caches were not flushed; each case uses a new process.
+
+Another model benchmark then occupied about 20 GiB VRAM on this same adapter.
+The second new run began at 100/99/93% GPU busy and measured only 0.92 decode
+eval/s. Both second-run answers still matched the first pair. These follow-up
+results are retained as shared-load observations and excluded from the speedup.
+Further repeats stopped; an incomplete third baseline is excluded. There is
+**no dedicated-card repeated benchmark or median speedup claim**.
+
+After this change, the physical upload check, all 21 Qwen3.5 adapter checks,
+seven Qwen3 checks, real CPU prefill=1 versus Vulkan prefill=3 plus four decode
+predictions, and all 1,100 scalar Oracle checkpoints passed again. Observed
+maximum relative L2 and absolute errors remain 0, minimum cosine 1; exact
+token/embedding/expert checks and the existing lossy bounds are unchanged.
+The full default-dispatch synthetic-image CLI also returned the correct colors,
+shapes and order. Its timings were under shared load and do not establish an
+image speedup or numerical vision parity.
+
+Other real dense/Qwen3 models, UMA hardware, forced VRAM exhaustion, long
+contexts and concurrency were not tested in this follow-up. This does not
+extend the optimized-graph numerical contract described above.
 
 ### Focused regression checks
 
