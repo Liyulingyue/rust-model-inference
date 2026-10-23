@@ -4040,6 +4040,7 @@ impl<'a> Qwen3Ops<'a> {
             pack_u16_pair(q_heads, kv_heads, "Qwen3.5 dense heads")?,
             pack_u16_pair(head_dim, rope_dim, "Qwen3.5 dense dimensions")?,
             eps.to_bits(),
+            u32::from(crate::ops::scalar_mode()),
         ];
         let group_count = q_heads.max(kv_heads);
         if group_count > self.context.limits.max_compute_work_group_count[0] as usize

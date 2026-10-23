@@ -173,6 +173,33 @@ fn sage_dump_trace() {
 }
 
 #[cfg(all(feature = "vulkan", feature = "parity-trace"))]
+fn assert_sage_logits(label: &str, step: usize, cpu: &[f32], gpu: &[f32]) {
+    assert_eq!(gpu.len(), cpu.len());
+    assert!(cpu.iter().chain(gpu).all(|v| v.is_finite()));
+    let norm = |v: &[f32]| v.iter().map(|&x| f64::from(x).powi(2)).sum::<f64>();
+    let (a, b) = (norm(cpu), norm(gpu));
+    let delta = cpu
+        .iter()
+        .zip(gpu)
+        .map(|(&x, &y)| (f64::from(x) - f64::from(y)).powi(2))
+        .sum::<f64>();
+    let relative_l2 = (delta / a).sqrt();
+    let cosine = cpu
+        .iter()
+        .zip(gpu)
+        .map(|(&x, &y)| f64::from(x) * f64::from(y))
+        .sum::<f64>()
+        / (a * b).sqrt();
+    let max_abs = cpu
+        .iter()
+        .zip(gpu)
+        .map(|(&x, &y)| (x - y).abs())
+        .fold(0.0f32, f32::max);
+    println!("Sage {label} step={step}: relative_l2={relative_l2:.8e} cosine={cosine:.10} max_abs={max_abs:.8e}");
+    assert!(relative_l2 <= 0.01 && cosine >= 0.99995 && max_abs <= 0.5);
+}
+
+#[cfg(all(feature = "vulkan", feature = "parity-trace"))]
 #[test]
 #[ignore = "requires a physical Vulkan GPU and RMI_SAGE_MODEL; run without RMI_PARITY_TRACE"]
 fn sage_vulkan_batched_prefill_and_decode() {
@@ -184,7 +211,7 @@ fn sage_vulkan_batched_prefill_and_decode() {
     let source = GGUFLoader::from_file(path("RMI_SAGE_MODEL")).unwrap();
     let mut model = Qwen35Model::from_source(&source).unwrap();
     let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned()).unwrap();
-    let prompt = "<|im_start|>user\n你好<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
+    let prompt = "<|im_start|>user\n请用三句话向初学者解释混合专家（MoE）模型：它如何选择专家、为什么能减少计算，以及一个主要代价。不要列标题。<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
     let ids = tokenizer.encode(
         prompt,
         EncodeOptions {
@@ -192,10 +219,10 @@ fn sage_vulkan_batched_prefill_and_decode() {
             parse_special: true,
         },
     );
-    let mut run = |policy, batch| {
+    let mut run = |policy, batch, reference: Option<&[u32]>, expected: Option<&[Vec<f32>]>| {
         let mut session = Qwen35Session::new_with_compute(
             &mut model,
-            ids.len() + 4,
+            ids.len() + 64,
             batch,
             Arc::new(rust_model_inference::ComputePool::new(8)),
             policy,
@@ -205,15 +232,26 @@ fn sage_vulkan_batched_prefill_and_decode() {
         let mut logits = session.step_with_tokens(&ids, &positions).unwrap();
         let mut generated = Vec::new();
         let mut outputs = Vec::new();
-        for step in 0..4 {
+        for step in 0..64 {
+            if let Some(expected) = expected {
+                assert_sage_logits(
+                    &format!("{policy:?}/batch={batch}"),
+                    step,
+                    &expected[step],
+                    &logits,
+                );
+            }
             let next = (0..logits.len())
                 .max_by(|&a, &b| logits[a].total_cmp(&logits[b]).then_with(|| b.cmp(&a)))
                 .unwrap() as u32;
             generated.push(next);
             outputs.push(logits);
-            if step < 3 {
+            if step < 63 {
                 logits = session
-                    .step_with_tokens(&[next], &[[ids.len() + step; 4]])
+                    .step_with_tokens(
+                        &[reference.map_or(next, |ids| ids[step])],
+                        &[[ids.len() + step; 4]],
+                    )
                     .unwrap();
             } else {
                 break;
@@ -221,33 +259,12 @@ fn sage_vulkan_batched_prefill_and_decode() {
         }
         (generated, outputs)
     };
-    let (cpu_ids, cpu) = run(ComputePolicy::Cpu, 1);
-    let (gpu_ids, gpu) = run(ComputePolicy::Vulkan, 3);
+    let (cpu_ids, cpu) = run(ComputePolicy::Cpu, 1, None, None);
+    let (batched_ids, batched) = run(ComputePolicy::Cpu, 64, Some(&cpu_ids), Some(&cpu));
+    assert_eq!(batched_ids, cpu_ids);
+    assert_eq!(batched, cpu);
+    let (gpu_ids, gpu) = run(ComputePolicy::Vulkan, 64, Some(&cpu_ids), Some(&cpu));
+    println!("CPU greedy={cpu_ids:?}; GPU teacher-forced greedy={gpu_ids:?}");
     assert_eq!(gpu_ids, cpu_ids);
-    for (step, (cpu, gpu)) in cpu.iter().zip(&gpu).enumerate() {
-        assert_eq!(gpu.len(), cpu.len());
-        assert!(cpu.iter().chain(gpu).all(|v| v.is_finite()));
-        let norm = |v: &[f32]| v.iter().map(|&x| f64::from(x).powi(2)).sum::<f64>();
-        let (a, b) = (norm(cpu), norm(gpu));
-        let delta = cpu
-            .iter()
-            .zip(gpu)
-            .map(|(&x, &y)| (f64::from(x) - f64::from(y)).powi(2))
-            .sum::<f64>();
-        let relative_l2 = (delta / a).sqrt();
-        let cosine = cpu
-            .iter()
-            .zip(gpu)
-            .map(|(&x, &y)| f64::from(x) * f64::from(y))
-            .sum::<f64>()
-            / (a * b).sqrt();
-        let max_abs = cpu
-            .iter()
-            .zip(gpu)
-            .map(|(&x, &y)| (x - y).abs())
-            .fold(0.0f32, f32::max);
-        println!("Sage Vulkan batched step={step}: relative_l2={relative_l2:.8e} cosine={cosine:.10} max_abs={max_abs:.8e}");
-        assert!(relative_l2 <= 0.01 && cosine >= 0.99995 && max_abs <= 0.5);
-    }
-    println!("Sage Vulkan batch=3 vs CPU batch=1, greedy={gpu_ids:?}");
+    println!("Sage Vulkan/CPU batch=64 vs CPU batch=1, 64 decode logits checked");
 }

@@ -1980,6 +1980,71 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a physical Vulkan GPU"]
+    fn dense_rope_respects_reference_arithmetic() {
+        let context = Box::leak(Box::new(super::VulkanContext::new().unwrap()));
+        assert!(!context.is_software_icd());
+        let mut model = crate::models::qwen35::trunk::tests::tiny_dense_session_model();
+        model.layers[0].attn_q_norm = Some(vec![100_000_008.0, 1.0, 100_000_000.0, 1.0]);
+        let gpu = super::Qwen35VulkanSession::try_new(&model, 1, context)
+            .unwrap()
+            .unwrap();
+        let super::AttentionBindings::Dense(dense) = gpu.layers[0].attention else {
+            panic!("dense fixture");
+        };
+        let l = gpu.layout;
+        gpu.ops.write_f32(l.raw_qkv, &[1.0; 8]).unwrap();
+        gpu.ops.write_f32(l.raw_k, &[1.0; 4]).unwrap();
+        gpu.ops.write_f32(l.v, &[1.0; 4]).unwrap();
+        let cosine = f32::from_bits(1.0f32.to_bits() - 1);
+        gpu.ops.write_f32(l.rope, &[cosine, 1.0, 1.0, 0.0]).unwrap();
+        for reference in [false, true] {
+            let _scope = crate::ops::ScalarDispatchScope::new(reference);
+            let commands = super::TokenCommands::begin(context).unwrap();
+            gpu.ops
+                .record_qwen35_dense_prepare(
+                    &commands,
+                    dense.prepare,
+                    l.raw_qkv,
+                    l.raw_k,
+                    l.v,
+                    l.q,
+                    l.z,
+                    l.kv_k,
+                    l.kv_v,
+                    l.kv_delta_k,
+                    l.kv_delta_v,
+                    l.rope,
+                    0,
+                    1,
+                    0,
+                    1,
+                    1,
+                    1,
+                    4,
+                    4,
+                    0.0,
+                    1,
+                )
+                .unwrap();
+            commands.submit_and_wait().unwrap();
+            // Cancellation makes fused vs separately rounded rotation observable.
+            let expected = if crate::ops::scalar_mode() {
+                0.0
+            } else {
+                100_000_008.0f32.mul_add(cosine, -100_000_000.0)
+            };
+            let mut output = [0.0; 4];
+            gpu.ops.read_f32_into(l.q, &mut output).unwrap();
+            let actual = output[0];
+            assert!(
+                (actual - expected).abs() <= 1e-6,
+                "reference={reference} actual={actual} expected={expected}"
+            );
+        }
+    }
+
+    #[test]
     fn eligibility_rejects_missing_moe_weights() {
         let mut model = crate::models::qwen35::trunk::tests::tiny_dense_session_model();
         assert_eq!(check_eligibility(&super::eligibility_facts(&model)), Ok(()));
