@@ -1695,12 +1695,17 @@ pub(super) fn run_multimodal_with_video_ref(
     let n_threads = if n_threads_arg > 0 { n_threads_arg } else { 8 };
     let pool = std::sync::Arc::new(ComputePool::new(n_threads));
     eprintln!("compute pool: {} threads", pool.n_threads());
+    let session_start = std::time::Instant::now();
     let mut session = HybridSession::new_with_prefill_batch_size(
         &mut llm,
         max_seq,
         prefill_batch_size,
         std::sync::Arc::clone(&pool),
     )?;
+    eprintln!(
+        "[pipeline-timing] session_init={:.6}s",
+        session_start.elapsed().as_secs_f64()
+    );
 
     let mut generated = String::new();
     #[cfg(feature = "parity-trace")]
@@ -1710,7 +1715,6 @@ pub(super) fn run_multimodal_with_video_ref(
     let t_gen_start = std::time::Instant::now();
     let mut t_prompt = 0.0;
     let mut t_decode = 0.0;
-    let mut prefill_evals = 0usize;
     let mut decode_evals = 0usize;
 
     for step in 0..max_tokens {
@@ -1772,7 +1776,6 @@ pub(super) fn run_multimodal_with_video_ref(
         let t_step = t0.elapsed().as_secs_f64();
         if step == 0 {
             t_prompt += t_step;
-            prefill_evals += 1;
         } else {
             t_decode += t_step;
             decode_evals += 1;
@@ -1829,7 +1832,8 @@ pub(super) fn run_multimodal_with_video_ref(
         std::io::Write::flush(&mut std::io::stdout()).ok();
     }
 
-    let gen_ms = t_gen_start.elapsed().as_millis();
+    let generation_time = t_gen_start.elapsed();
+    let gen_ms = generation_time.as_millis();
     let n_gen = all_tokens.len() - n_prompt;
     let tok_s = if gen_ms > 0 {
         n_gen as f64 / gen_ms as f64 * 1000.0
@@ -1850,8 +1854,12 @@ pub(super) fn run_multimodal_with_video_ref(
         crate::vulkan::dump_dispatch_trace();
     }
     eprintln!(
+        "[pipeline-timing] prompt_rows={prompt_rows} generated_tokens={n_gen} decode_evals={decode_evals} prefill={t_prompt:.6}s decode={t_decode:.6}s generation_total={:.6}s",
+        generation_time.as_secs_f64()
+    );
+    eprintln!(
         "Prompt: {:.1} t/s | Generation: {:.1} t/s | end-to-end: {:.1} tok/s",
-        per_second(prefill_evals, t_prompt),
+        per_second(prompt_rows, t_prompt),
         per_second(decode_evals, t_decode),
         tok_s
     );
