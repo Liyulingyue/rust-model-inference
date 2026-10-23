@@ -111,6 +111,78 @@ fn encode_text(
     Ok(text)
 }
 
+fn validate_text(source: &dyn TensorSource) -> Result<(), String> {
+    use crate::core::tensor::GGMLType;
+    use crate::models::diffusion::common::require_tensor;
+    use crate::models::qwen3::{Qwen3Config, Qwen3Rope};
+
+    for name in ["output.weight", "cls.output.weight"] {
+        if source.tensor_info(name).is_some() {
+            return Err(format!("Unexpected FLUX3 text tensor: {name}"));
+        }
+    }
+    for layer in 0..36 {
+        for projection in ["q", "k", "v"] {
+            let name = format!("blk.{layer}.attn_{projection}.bias");
+            if source.tensor_info(&name).is_some() {
+                return Err(format!("Unexpected FLUX3 text tensor: {name}"));
+            }
+        }
+    }
+    require_tensor(source, "token_embd.weight", &[2560, 151936], GGMLType::BF16)?;
+    require_tensor(source, "output_norm.weight", &[2560], GGMLType::BF16)?;
+    for layer in 0..36 {
+        for (suffix, dims) in [
+            ("attn_norm", vec![2560]),
+            ("ffn_norm", vec![2560]),
+            ("attn_q_norm", vec![128]),
+            ("attn_k_norm", vec![128]),
+            ("attn_q", vec![2560, 4096]),
+            ("attn_k", vec![2560, 1024]),
+            ("attn_v", vec![2560, 1024]),
+            ("attn_output", vec![4096, 2560]),
+            ("ffn_gate", vec![2560, 9728]),
+            ("ffn_up", vec![2560, 9728]),
+            ("ffn_down", vec![9728, 2560]),
+        ] {
+            require_tensor(
+                source,
+                &format!("blk.{layer}.{suffix}.weight"),
+                &dims,
+                GGMLType::BF16,
+            )?;
+        }
+    }
+    let cfg = Qwen3Config::from_source(source)?;
+    if cfg.architecture != "qwen3vl"
+        || cfg.n_embd != 2560
+        || cfg.n_layer != 36
+        || cfg.n_head != 32
+        || cfg.n_head_kv != 8
+        || cfg.n_embd_head_k != 128
+        || cfg.n_embd_head_v != 128
+        || cfg.n_ff != 9728
+        || cfg.vocab != 151936
+        || cfg.n_ctx != 262144
+        || cfg.eps != 1e-6
+        || cfg.freq_base != 5000000.0
+        || !cfg.has_qk_norm
+        || cfg.has_qkv_bias
+        || cfg.n_deepstack_layers != 0
+        || cfg.moe.is_some()
+        || cfg.rope
+            != (Qwen3Rope::Interleaved {
+                sections: [24, 20, 20, 0],
+                n_dims: 128,
+            })
+    {
+        return Err(
+            "FLUX3 requires the released Qwen3-VL-4B text configuration and tied embedding".into(),
+        );
+    }
+    Ok(())
+}
+
 fn validate_vae(source: &dyn TensorSource) -> Result<(), String> {
     use crate::core::tensor::GGMLType;
     use crate::models::diffusion::common::require_tensor;
@@ -216,6 +288,7 @@ impl Flux3Pipeline {
         {
             return Err("FLUX3 requires its Qwen3-VL-4B text encoder and FLUX3 VAE".into());
         }
+        validate_text(text.as_ref())?;
         dit::validate_dit(dit.as_ref())?;
         validate_vae(vae.as_ref())?;
         let pool = Arc::new(ComputePool::new(threads));
@@ -232,17 +305,6 @@ impl Flux3Pipeline {
             }
         }
         let text = Qwen3Model::from_source(text, tokenizer.clone(), pool.clone())?;
-        let cfg = text.config();
-        if cfg.n_embd != 2560
-            || cfg.n_layer != 36
-            || cfg.n_head != 32
-            || cfg.n_head_kv != 8
-            || cfg.n_embd_head_k != 128
-            || cfg.n_ff != 9728
-            || cfg.freq_base != 5000000.0
-        {
-            return Err("FLUX3 requires the released Qwen3-VL-4B text dimensions".into());
-        }
         let mean = load_float_values(vae.as_ref(), "bn.running_mean", &[128])?;
         let variance = load_float_values(vae.as_ref(), "bn.running_var", &[128])?;
         crate::models::diffusion::common::require_finite(&mean, "FLUX3 VAE mean")?;
@@ -385,6 +447,70 @@ fn trace(_name: &str, _shape: &[usize], _values: &[f32]) -> Result<(), String> {
 mod tests {
     use super::*;
     #[test]
+    fn text_contract_rejects_missing_quantized_misshaped_and_truncated_embeddings() {
+        use crate::core::tensor::{GGMLType, MetaValue, TensorInfo};
+        struct TextSource(Option<TensorInfo>);
+        impl TensorSource for TextSource {
+            fn metadata(&self, _: &str) -> Option<&MetaValue> {
+                None
+            }
+            fn tensor_info(&self, name: &str) -> Option<&TensorInfo> {
+                self.0.as_ref().filter(|info| info.name == name)
+            }
+            fn tensor_slice(&self, _: &str) -> Option<&[u8]> {
+                Some(&[])
+            }
+        }
+        let embedding = TensorInfo {
+            name: "token_embd.weight".into(),
+            dims: vec![2560, 151936],
+            ggml_type: GGMLType::BF16,
+            offset: 0,
+        };
+        for (info, message) in [
+            (None, "Missing tensor"),
+            (
+                Some(TensorInfo {
+                    ggml_type: GGMLType::Q8_0,
+                    ..embedding.clone()
+                }),
+                "type",
+            ),
+            (
+                Some(TensorInfo {
+                    dims: vec![2560, 1],
+                    ..embedding.clone()
+                }),
+                "dimensions",
+            ),
+            (Some(embedding), "byte length"),
+        ] {
+            let error = validate_text(&TextSource(info)).unwrap_err();
+            assert!(
+                error.contains("token_embd.weight") && error.contains(message),
+                "{error}"
+            );
+        }
+        for name in [
+            "output.weight",
+            "cls.output.weight",
+            "blk.0.attn_q.bias",
+            "blk.35.attn_v.bias",
+        ] {
+            let source = TextSource(Some(TensorInfo {
+                name: name.into(),
+                dims: vec![1],
+                ggml_type: GGMLType::BF16,
+                offset: 0,
+            }));
+            let error = validate_text(&source).unwrap_err();
+            assert!(
+                error.contains("Unexpected") && error.contains(name),
+                "{error}"
+            );
+        }
+    }
+    #[test]
     fn official_flow_map_schedule_and_reference_positions() {
         assert_eq!(schedule(2).unwrap(), vec![1.0, 16.0 / 17.0, 0.0]);
         assert!(schedule(0).is_err());
@@ -456,6 +582,7 @@ mod tests {
         );
         let tokenizer =
             Arc::new(BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned()).unwrap());
+        validate_text(source.as_ref()).unwrap();
         let model =
             Qwen3Model::from_source(source, tokenizer.clone(), Arc::new(ComputePool::new(8)))
                 .unwrap();
