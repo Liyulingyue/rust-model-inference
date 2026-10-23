@@ -2408,7 +2408,7 @@ impl<'a> Qwen3Ops<'a> {
     ) {
         if pipeline == Q4_K_MATMUL && push.len() == 22 && push[21] == 1 {
             let columns = push[5].max(push[8]).max(push[11]) as usize;
-            if columns <= 1024 {
+            if columns <= 4096 {
                 if let Ok(grid) = matmul_dispatch(
                     columns.div_ceil(8),
                     1,
@@ -9641,7 +9641,16 @@ mod tests {
     fn q4_k_cooperative_matches_row_kernel_in_both_reductions() {
         use super::*;
         let context = VulkanContext::new().unwrap();
-        for (n_in, n_out) in [(256, 1), (512, 67), (2048, 512)] {
+        for (n_in, n_out) in [
+            (256, 1),
+            (512, 67),
+            (2048, 512),
+            (512, 2048),
+            (4096, 2048),
+            (2048, 4096),
+            (4096, 4096),
+            (12288, 4096),
+        ] {
             let mut cursor = 0;
             let input = f32_region(&mut cursor, n_in).unwrap();
             let q8 = region(&mut cursor, n_in).unwrap();

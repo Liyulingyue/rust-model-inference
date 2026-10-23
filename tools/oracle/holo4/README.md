@@ -352,7 +352,7 @@ reset checks retain their previous errors. This regression does not resolve
 the whole-model CPU/GPU/Oracle numerical failures. See `verification.json`'s
 `gpu_performance_followup` for ranges, raw-evidence digests and baseline failures.
 
-## GPU MoE reduction and narrow Q4_K projections
+## GPU MoE reduction and initial narrow Q4_K projections
 
 The next optimization keeps expert outputs on the GPU: an ordered weighted
 reduction fuses residual addition, replacing the per-layer expert-output
@@ -363,11 +363,12 @@ state, fallback/abort/reset behavior and the shorter submission policy for
 other vendors are preserved. Requests for MoE output traces retain host
 reduction so the existing checkpoints remain available.
 
-Single-row Q4_K projections with at most 1024 output columns use eight lanes
-per output row. A 512-column expert projection therefore dispatches 64 rather
-than eight workgroups per weight group. Both the block-first and lane-first
-reductions preserve the old shader's arithmetic order. Larger or batched
-projections retain the existing kernel.
+The initial optimization (`3f13f226`) uses eight lanes for single-row Q4_K
+projections with at most 1024 output columns. The follow-up below extends this
+to 4096. A 512-column expert projection therefore dispatches 64 rather than
+eight workgroups per weight group. Both the block-first and lane-first
+reductions preserve the old shader's arithmetic order. At that baseline, larger
+or batched projections retain the existing kernel.
 
 Focused hardware checks (run on both M3 Max and the requested NAVI31 host):
 
@@ -426,3 +427,63 @@ The full repository suite, long context and other GPU vendors were not tested.
 The full shader rebuild passes with pinned glslang `15.1.0` on the SSH host.
 Local `16.6.0` fails byte-for-byte rebuild of the existing `softmax.spv`;
 local manifest and the new binaries' SPIR-V validation pass independently.
+
+## Wider single-row Q4_K projections
+
+The follow-up to `3f13f226` extends the existing cooperative-kernel selection
+from 1024 to 4096 output columns, including more recurrent and dense projections.
+The only production change is that dispatch limit in `src/vulkan/ops.rs`;
+GLSL/SPIR-V, reduction order, batched projections and wider heads are unchanged.
+The same hardware test now also covers `(n_in,n_out)` pairs `(512,2048)`,
+`(4096,2048)`, `(2048,4096)`, `(4096,4096)` and `(12288,4096)`, with both
+reduction orders, three grouped weights and unequal output widths/tails.
+
+Temporary release-fast wall-clock instrumentation over 64 decode steps found
+that the layer loop and its waits dominated the measured host stages: median
+158.31 ms on M3 and 226.02 ms on NAVI31, versus 9.26/7.20 ms for the head stage.
+Queued GPU work can cross these stage boundaries; these are not per-kernel GPU
+timestamps. The instrumentation was removed before final tests and release
+builds. CPU shadow state, finite scans, commit validation and fallback were
+preserved. An isolated synthetic operator experiment with 30 repeats measured
+old/new elapsed-time ratios of 1.218–1.845 on M3 and 1.188–2.376 on NAVI31 for
+the added output widths. Those ratios do not establish whole-model speedup.
+
+Five-round release medians for the wider-kernel follow-up (same resident-forward protocol, baseline `3f13f226`):
+
+| Device | CPU decode, before → new | GPU decode, before → new | GPU prefill, before → new |
+|---|---:|---:|---:|
+| Apple M3 Max | 11.180 → 10.215 | 5.344 → 5.706 | 8.139 → 5.384 |
+| SSH RADV NAVI31 | 16.465 → 20.946 | 3.629 → 4.975 | 8.409 → 10.391 |
+
+All rates are token/s. GPU decode ranges are `5.306–5.430` → `4.420–6.103`
+on M3 and `3.616–3.695` → `4.876–5.050` on NAVI31. Observed decode median
+changes are +6.8% / +37.1%, while local prefill regressed. CPU controls also
+changed, from 11.180 to 10.215 / 16.465 to 20.946 token/s. Local one-minute
+load average rose from 23.16 to 114.86 and swap from about 20.09 to 22.71 GiB.
+No stable local performance gain is established. Neither host was exclusive
+or power-controlled, and these ratios do not isolate the effect of the code.
+Remote five-second samples found only the benchmark on the selected render
+node; this does not prove exclusivity. CPU remains about 1.79× / 4.21× faster
+than GPU for decode in this run.
+
+Each measured GPU round still has `3972` submissions, `5,968,530,696` host-read
+bytes and `949,248` host-write bytes. Those counters are identical across all
+ten GPU samples; this change only selects a different existing kernel.
+
+On each GPU, all `16,140,800` F32 logits at the 65 measured positions remain
+byte-for-byte equal to the previous GPU implementation. The 40-layer
+same-input MoE errors remain `4.095519109388936e-8` / `1.2013590525231618e-6`
+(unchanged bound `0.02`); batch/continuation errors remain `[0,0]`, reset replay
+is exact, and regular Qwen35 tests pass 104 / 98 with 13 ignored and the same
+baseline config assertion excluded. Both release strict-Vulkan CLIs complete
+the discount-price question with `59` yuan, EOS `248046` and exit code 0.
+This optimization does not resolve the existing whole-model CPU/GPU/Oracle
+alignment failures; benchmark warmup CPU/GPU relative L2 remains
+`0.18000214` / `0.23536753`.
+
+See `verification.json`'s `gpu_wider_q4_followup` for raw ranges, snapshots,
+source/evidence hashes and the profiling limits. Raw logs and the report are
+under `target/holo4/gpu-shadow-2026-10-23/` (not committed). No shader sources
+or binaries changed in this follow-up; the manifest was checked, and a full
+shader rebuild was not repeated. The full repository suite, long context,
+other GPU vendors and per-kernel GPU timestamps remain untested.
