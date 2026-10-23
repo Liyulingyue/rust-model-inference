@@ -311,11 +311,11 @@ Other real dense/Qwen3 models, UMA hardware, forced VRAM exhaustion, long
 contexts and concurrency were not tested in this follow-up. This does not
 extend the optimized-graph numerical contract described above.
 
-### CPU versus Vulkan runtime
+### CPU versus Vulkan with device-local weights, before the arena change
 
 The weight-placement speedup above compares two Vulkan implementations.
-On the same AMD host, the current optimized **eight-thread CPU decoder is
-faster than Vulkan** for this short-input workload.
+At the weight-upload revision `eed17fba`, the optimized **eight-thread CPU
+decoder was faster than Vulkan** for this short-input workload.
 
 Both backends used the same release binary, model, 44-row prompt, temperature
 0, no thinking, Jinja template, eight threads and prefill batch 64. Three
@@ -346,6 +346,66 @@ the optimized numerical-alignment contract or establish equal answer quality.
 The host was not reserved, file/driver caches were not flushed, and persistent
 sessions, full-core CPU performance, long contexts and concurrency were not
 measured.
+
+### Device-local activation and recurrent arena
+
+Qwen3.5 now reuses the existing device-local operator arena for activations,
+KV and recurrent state on discrete GPUs. Inputs transfer before command
+recording; results and parity traces use owned staging copies, releasing the
+submission guard before trace downloads. CPU shadow synchronization and all
+finite checks remain. Shaders, arithmetic, expert dispatches and recording
+chunk limits are unchanged. The allocator retains mapped memory on UMA or
+allocation OOM; those fallback configurations were not exercised here.
+
+The specified AMD host ran three rounds each of the saved weight-only Vulkan
+binary, the new release Vulkan binary, and the new release eight-thread CPU
+backend. GPU order reversed in round two. The prompt, 44 input rows, 64-token
+output cap, 63 timed decode evaluations, eight threads, batch 64, Jinja,
+no-thinking and temperature 0 were identical. Each case started a new process
+after three consecutive idle samples. No parity or compute tracing was enabled.
+Full commands, hashes, per-run data, ranges and complete answers are in
+[device_arena.json](device_arena.json).
+
+| Per-metric median | Old Vulkan | New Vulkan | CPU, 8 threads |
+| --- | ---: | ---: | ---: |
+| Session init (s) | 20.39 | 21.10 | 0.005 |
+| Prefill, 44 rows (s) | 1.21 | 1.16 | 2.63 |
+| Decode eval/s | 4.98 | 5.68 | 12.16 |
+| Process wall including startup (s) | 36.52 | 35.77 | 8.92 |
+
+Decode throughput increased by 14.0% in this sample. New Vulkan ranged from
+5.30 to 5.68 eval/s versus 4.92 to 4.99 before. The process-wall median changed
+by only 2.1%; initialization remained substantial and ranged from 19.42 to
+38.73 seconds in the new runs, so this is not an initialization-speedup claim.
+Session init includes weight upload and pipeline/buffer setup, not just copy
+time. The CPU decoder remains 2.14x faster than the new Vulkan decoder here.
+
+Decode-time process-resident VRAM increased from 34.06 to 34.19 GiB, consistent
+with moving the arena into device memory. Resident GTT remained about 0.13 GiB
+because the staging arena is retained for input transfers and CPU state mirrors.
+All six fixed-length GPU answers were identical. A complete 104-token GPU
+answer also matched the previous GPU answer; the 15-token image answer correctly
+identified the red circle, blue square and green triangle in order. Image
+encoding/projection still executes on CPU; no image speedup or numerical vision
+alignment claim is made.
+
+After the change, all 21 physical adapter tests, two injected GPU rollback
+tests, four-axis mRoPE, real batched prefill/four-step decode, and all 1,100
+selected scalar Oracle checkpoints passed again. Observed relative L2 and
+maximum absolute error were 0, and minimum cosine was 1; exact structural
+checks and existing lossy bounds are unchanged. The local Vulkan namespace
+passed 46 tests with 45 ignored. The broader local Qwen3.5 trunk run had 43
+passed, nine ignored, and the existing CPU-only
+`qwen35_trace_metadata_is_independent_of_prefill_batch_size` failure, also
+reproduced with the earlier cached test binary.
+
+The host was shared and caches were not flushed. The third old-GPU case had
+a 3.06-second increase in the container-wide CPU throttling counter; all other
+cases were at most 8.7 ms. This shared counter cannot be attributed solely to
+the inference process. Idle starts do not guarantee isolation throughout a run.
+These measurements cover short requests and eight CPU threads, not full-core
+CPU performance, persistent sessions, long contexts or concurrency. Optimized
+CPU/Vulkan graph alignment remains outside the scalar Oracle claim.
 
 ### Focused regression checks
 
