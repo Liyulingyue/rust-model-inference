@@ -324,9 +324,10 @@ loading, device uploads, text conditioning, sampling, VAE decoding and PNG
 saving. OS file caches and shader disk caches were warmed with the 64×32 case
 first; those warmup PNGs matched the previously validated build exactly.
 
-| Output | CPU seconds | Vulkan seconds | CPU/GPU mean ratio |
+| Output | CPU seconds | Vulkan seconds | CPU/GPU ratio |
 | --- | ---: | ---: | ---: |
 | 256×256, two runs each | 544.149, 553.001 (mean 548.575) | 135.916, 135.399 (mean 135.658) | 4.044× |
+| 512×512, one run each | 2133.794 | 622.621 | 3.427× |
 
 The 256×256 sequence was CPU, Vulkan, Vulkan, CPU. Before each render the
 runner waited for known compilation/inference jobs and the selected GPU to
@@ -335,17 +336,26 @@ competing workload was observed during these four accepted samples. The host
 is shared, so this is not a claim of physical machine isolation. An earlier
 attempt that overlapped a Sage benchmark was stopped and excluded.
 
-A subsequent 512×512 CPU attempt overlapped sustained compilation and
-inference work. It was manually terminated before PNG output and excluded;
-the corresponding same-release GPU measurement was not started. No comparable
-512×512 speed ratio is available. The earlier functional GPU timing used a
-different build and concurrency conditions.
+The 512×512 pair ran CPU then Vulkan, requiring 60 seconds without known
+competing work before each render. During both accepted renders, five-second
+monitoring observed no known competing workload, and the cgroup CPU throttling
+counter did not increase. The GPU took 70.821% less wall time. These are single
+samples on a shared host; run-to-run variation at this size was not measured.
+Caches were not cleared or rewarmed after waiting, and file-cache residency
+was not measured. The earlier long shared-load CPU attempt and three further
+overlapping retry attempts were stopped and excluded. The earlier functional
+GPU timing used a different build and concurrency conditions and is not used
+in this ratio.
 
-Both CPU repeats produced identical PNGs, as did both Vulkan repeats. The
-CPU/Vulkan RGBA8 maximum difference was one level (mean absolute difference
-0.003414154052734375). This is a final-image CPU/Vulkan check, rather than a
-new per-checkpoint Oracle comparison. The default host SIMD path is outside
-this comparison because it has not passed the declared numerical bound.
+At 256×256, both CPU repeats produced identical PNGs, as did both Vulkan
+repeats. The CPU/Vulkan RGBA8 maximum difference was one level (mean absolute
+difference 0.003414154052734375). At 512×512 it was also one level (mean
+absolute difference 0.002681732177734375); the GPU PNG SHA256 matched the
+earlier 512×512 functional render. These are final-image CPU/Vulkan checks,
+rather than new per-checkpoint Oracle comparisons. The default host SIMD path
+is outside this comparison because it has not passed the declared numerical
+bound. After the measurements, the binary SHA256 and all 599 runtime, shader
+and build files still matched the recorded source audit.
 
 The exact commands, affinity, binary/source hashes, per-run timings, process
 RSS and concurrency flags are in `cpu_gpu_cli_benchmark` in the result JSON.

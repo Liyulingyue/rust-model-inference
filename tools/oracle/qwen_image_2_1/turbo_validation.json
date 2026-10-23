@@ -755,12 +755,14 @@
     "seed": 42,
     "shared_host": true,
     "monitor_interval_seconds": 5,
-    "measurement": "Fresh CLI process per image; warm OS file/shader caches; includes loading, uploads, text, eight sampling steps, VAE and PNG",
+    "measurement": "Fresh CLI process per image; OS file/shader caches not cleared; includes loading, uploads, text, eight sampling steps, VAE and PNG",
     "accepted_sample_order": [
       "cpu-256-1",
       "gpu-256-1",
       "gpu-256-2",
-      "cpu-256-2"
+      "cpu-256-2",
+      "cpu-512-retry-5",
+      "gpu-512-retry-1"
     ],
     "cases": [
       {
@@ -864,6 +866,86 @@
         "rgba_mean_abs": 0.003414154052734375,
         "no_known_workload_overlap": true,
         "timing_scope": "shared-host comparison with no known competing workloads observed"
+      },
+      {
+        "width": 512,
+        "height": 512,
+        "required_quiet_window_seconds": 60,
+        "cache_preparation": "No cache flush or additional warmup after waiting; file-cache residency not measured",
+        "cpu": {
+          "repeats": 1,
+          "mean_seconds": 2133.793806867674,
+          "median_seconds": 2133.793806867674,
+          "min_seconds": 2133.793806867674,
+          "max_seconds": 2133.793806867674,
+          "records": [
+            {
+              "label": "cpu-512-retry-5",
+              "wall_seconds": 2133.793806867674,
+              "max_rss_bytes": 10645299200,
+              "user_seconds": 16043.36766,
+              "system_seconds": 95.429064,
+              "png_sha256": "1119582eba3deff91c9e2aeac0a689e65c4ef724d55a485d09be8ba7b9c0326b",
+              "no_known_competing_jobs": true,
+              "observed_competing_processes": [],
+              "cgroup_throttled_seconds_delta": 0.0,
+              "telemetry_samples": 403
+            }
+          ]
+        },
+        "gpu": {
+          "repeats": 1,
+          "mean_seconds": 622.6208407897502,
+          "median_seconds": 622.6208407897502,
+          "min_seconds": 622.6208407897502,
+          "max_seconds": 622.6208407897502,
+          "records": [
+            {
+              "label": "gpu-512-retry-1",
+              "wall_seconds": 622.6208407897502,
+              "max_rss_bytes": 14023180288,
+              "user_seconds": 2007.309376,
+              "system_seconds": 77.743961,
+              "png_sha256": "d41fa3587ab5f55e06ca9c7fb82983d6447eb06521d969ce8568f17ff428ce6e",
+              "no_known_competing_jobs": true,
+              "observed_competing_processes": [],
+              "cgroup_throttled_seconds_delta": 0.0,
+              "telemetry_samples": 119
+            }
+          ]
+        },
+        "cpu_cli_command_without_output": [
+          "/root/rmi-qi21-turbo-d289/bin/rust-model-inference-benchmark-release",
+          "--qwen-image-turbo",
+          "--model",
+          "/root/rmi-qi21-turbo-d289/models/Qwen-Image-2.1-Turbo-GGUF/qwen-image-2.1-turbo-Q8_0.gguf",
+          "--text-encoder",
+          "/root/rmi-qi21-turbo-d289/models/Qwen3-VL-8B-Instruct-GGUF/Qwen3-VL-8B-Instruct-Q8_0.gguf",
+          "--vae",
+          "/root/rmi-qi21-turbo-d289/models/Qwen-Image-2.1-Turbo/vae/diffusion_pytorch_model.safetensors",
+          "--prompt",
+          "A photorealistic orange tabby cat sitting on a wooden windowsill in warm afternoon sunlight, next to a steaming ceramic cup of tea and an open book. Rain-washed city rooftops outside the window, soft bokeh, detailed fur, cinematic composition.",
+          "--negative-prompt",
+          "low quality",
+          "--width",
+          "512",
+          "--height",
+          "512",
+          "--steps",
+          "8",
+          "--cfg",
+          "1",
+          "--seed",
+          "42",
+          "--threads",
+          "8"
+        ],
+        "cpu_over_gpu_ratio": 3.4271159381062613,
+        "wall_time_reduction_fraction": 0.7082094629828675,
+        "rgba_max_abs": 1,
+        "rgba_mean_abs": 0.002681732177734375,
+        "no_known_workload_overlap": true,
+        "timing_scope": "shared-host comparison with no known competing workloads observed"
       }
     ],
     "release_warmup_pngs_match_prior_validated_build": true,
@@ -882,23 +964,43 @@
         "excluded": true,
         "termination": "Manually sent SIGTERM to end a contaminated benchmark; not an inference failure",
         "reason": "Concurrent foreign compilation and inference; eight pinned workers obtained about 2.3 CPU core equivalents in a two-second diagnostic sample; no valid 512 comparison"
+      },
+      {
+        "label": "cpu-512-retry-2",
+        "accepted": false,
+        "wall_seconds": 16.61809583939612,
+        "returncode": -15,
+        "excluded": true,
+        "reason": "Known competing compilation or inference observed during render"
+      },
+      {
+        "label": "cpu-512-retry-3",
+        "accepted": false,
+        "wall_seconds": 123.38037119619548,
+        "returncode": -15,
+        "excluded": true,
+        "reason": "Known competing compilation or inference observed during render"
+      },
+      {
+        "label": "cpu-512-retry-4",
+        "accepted": false,
+        "wall_seconds": 10.863942176103592,
+        "returncode": -15,
+        "excluded": true,
+        "reason": "Known competing compilation or inference observed during render"
       }
     ],
-    "status": "finished_with_partial_resolution_coverage",
+    "status": "finished",
     "completed_resolutions": [
       {
         "width": 256,
         "height": 256
-      }
-    ],
-    "unavailable_resolutions": [
+      },
       {
         "width": 512,
-        "height": 512,
-        "status": "CPU attempt interrupted due to shared load; matching GPU run not started",
-        "speed_ratio": null,
-        "reason": "Concurrent foreign compilation and inference; eight pinned workers obtained about 2.3 CPU core equivalents in a two-second diagnostic sample; no valid 512 comparison"
+        "height": 512
       }
-    ]
+    ],
+    "unavailable_resolutions": []
   }
 }
