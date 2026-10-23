@@ -1283,5 +1283,257 @@
       "step_1_gdn_relative_l2": 3.230575326727875e-08,
       "note": "Subsequent quantized projections amplify differences; this does not prove all downstream residuals harmless."
     }
+  },
+  "gpu_performance_followup": {
+    "date": "2026-10-23",
+    "baseline_commit": "418f83baf60dd809932206797c69ed0a88263e73",
+    "status": "Experimental; whole-model alignment remains unresolved",
+    "changes": [
+      "Reuse device-local immutable uploads on discrete GPUs, preserving UMA and OOM fallback.",
+      "Batch up to nine MoE experts on AMD/Apple; other vendors retain two. Host routing, ordered reduction, finite checks and state shadow remain."
+    ],
+    "protocol": {
+      "profile": "release",
+      "features": [
+        "vulkan"
+      ],
+      "prompt_tokens": 32,
+      "decode_steps": 64,
+      "threads": 8,
+      "batch": 16,
+      "capacity": 512,
+      "kv": "f32",
+      "warmup_each": 1,
+      "alternating_rounds": 5,
+      "scope": "resident forward; synchronized readback included; load/upload/reset/tokenize/sampling excluded",
+      "teacher_forced": "same CPU warmup history before and after"
+    },
+    "machines": {
+      "local": {
+        "device": "Apple M3 Max",
+        "before": {
+          "cpu": {
+            "pp_tok_s": 24.834448328922957,
+            "tg_tok_s": 15.858340253442224,
+            "resident_total_seconds": 5.341973625,
+            "first_token_seconds": 1.28853275,
+            "submissions": 0,
+            "host_read_bytes": 0,
+            "static_upload_bytes": 0,
+            "tg_range": [
+              15.789054774358835,
+              15.95928719207278
+            ]
+          },
+          "vulkan": {
+            "pp_tok_s": 4.982090196113082,
+            "tg_tok_s": 3.5456550444458603,
+            "resident_total_seconds": 24.493297208999998,
+            "first_token_seconds": 6.423006959,
+            "submissions": 21972,
+            "host_read_bytes": 6251645952,
+            "static_upload_bytes": 0,
+            "tg_range": [
+              3.5343258175825794,
+              3.5463324234275695
+            ]
+          }
+        },
+        "after": {
+          "cpu": {
+            "pp_tok_s": 22.80412461936166,
+            "tg_tok_s": 14.433982512492248,
+            "resident_total_seconds": 5.7762928339999995,
+            "first_token_seconds": 1.403254917,
+            "submissions": 0,
+            "host_read_bytes": 0,
+            "static_upload_bytes": 0,
+            "tg_range": [
+              12.846410870873749,
+              14.916293372965386
+            ]
+          },
+          "vulkan": {
+            "pp_tok_s": 6.116567975160645,
+            "tg_tok_s": 4.0683546081901785,
+            "resident_total_seconds": 20.913995583000002,
+            "first_token_seconds": 5.231692042,
+            "submissions": 6612,
+            "host_read_bytes": 6251645952,
+            "static_upload_bytes": 0,
+            "tg_range": [
+              4.0438139236935395,
+              4.085374300956151
+            ]
+          }
+        },
+        "last_warmup_cpu_gpu_logit_relative_l2": 0.1800021357882499,
+        "gpu_before_after_logits": {
+          "positions": 65,
+          "vocab": 248320,
+          "float_count": 16140800,
+          "bytes": 64563200,
+          "baseline_sha256": "1f2942c7331f503761e7d70506fe7be54f924ad280a252284a02993ce3c4d59f",
+          "optimized_sha256": "1f2942c7331f503761e7d70506fe7be54f924ad280a252284a02993ce3c4d59f",
+          "exact": true
+        },
+        "real_moe_same_input_max_relative_l2": 4.095519109388936e-08,
+        "batch_continuation_relative_l2": [
+          0.0,
+          0.0
+        ],
+        "reset_repeat_exact": true
+      },
+      "remote": {
+        "device": "AMD Radeon Graphics (RADV NAVI31)",
+        "before": {
+          "cpu": {
+            "pp_tok_s": 24.51573469765399,
+            "tg_tok_s": 19.264185031996366,
+            "resident_total_seconds": 4.6275113789999995,
+            "first_token_seconds": 1.3052841530000001,
+            "submissions": 0,
+            "host_read_bytes": 0,
+            "static_upload_bytes": 0,
+            "tg_range": [
+              12.767200461954815,
+              21.23995688260875
+            ]
+          },
+          "vulkan": {
+            "pp_tok_s": 1.1331001977835107,
+            "tg_tok_s": 0.6467180357778736,
+            "resident_total_seconds": 144.734563171,
+            "first_token_seconds": 28.241103534,
+            "submissions": 21972,
+            "host_read_bytes": 6251645952,
+            "static_upload_bytes": 0,
+            "tg_range": [
+              0.16398384943824162,
+              0.7263966336569209
+            ]
+          }
+        },
+        "after": {
+          "cpu": {
+            "pp_tok_s": 16.739172672082002,
+            "tg_tok_s": 14.715277567384119,
+            "resident_total_seconds": 6.260904881,
+            "first_token_seconds": 1.911683488,
+            "submissions": 0,
+            "host_read_bytes": 0,
+            "static_upload_bytes": 0,
+            "tg_range": [
+              13.88217441432097,
+              14.932995017869173
+            ]
+          },
+          "vulkan": {
+            "pp_tok_s": 2.6593253709430282,
+            "tg_tok_s": 1.9302344149871669,
+            "resident_total_seconds": 45.189721639,
+            "first_token_seconds": 12.033127029,
+            "submissions": 6612,
+            "host_read_bytes": 6251645952,
+            "static_upload_bytes": 0,
+            "tg_range": [
+              0.695724916119811,
+              2.072312916926875
+            ]
+          }
+        },
+        "last_warmup_cpu_gpu_logit_relative_l2": 0.23536753385733553,
+        "gpu_before_after_logits": {
+          "positions": 65,
+          "vocab": 248320,
+          "float_count": 16140800,
+          "bytes": 64563200,
+          "baseline_sha256": "80c202f06dcecd929a5284a54b20255e35aa9bcdb65139a31002c471a8cc287b",
+          "optimized_sha256": "80c202f06dcecd929a5284a54b20255e35aa9bcdb65139a31002c471a8cc287b",
+          "exact": true
+        },
+        "real_moe_same_input_max_relative_l2": 1.2013590525231618e-06,
+        "batch_continuation_relative_l2": [
+          0.0,
+          0.0
+        ],
+        "reset_repeat_exact": true
+      }
+    },
+    "remote_gpu_monitor": {
+      "monitor_samples": 101,
+      "other_clients": [
+        "after",
+        "before",
+        "rust_model_infe",
+        "sage_a15-649300"
+      ],
+      "max_vram_placement": {
+        "vram_kib": 20602508,
+        "gtt_kib": 180056
+      },
+      "exclusive_benchmark": false,
+      "causal_speedup_claimed": false
+    },
+    "local_environment_limit": "Background load and 21.05 GiB swap used; not an exclusive or power-controlled benchmark.",
+    "remaining_cost": {
+      "host_read_bytes_per_round": 6251645952,
+      "host_routing_and_reduction": true,
+      "device_local_mutable_arena": false,
+      "per_kernel_gpu_timing": "not measured"
+    },
+    "tests": {
+      "regular_qwen35": {
+        "local_passed": 104,
+        "remote_passed": 98,
+        "ignored_each": 13,
+        "baseline_config_error_message_failure": true
+      },
+      "hardware_passes": [
+        "staged_static_upload_preserves_bytes_and_zeroes_padding",
+        "qwen35_real_moe_layers_run_on_vulkan (40 layers, rows=3, submission assertion)",
+        "qwen35_vulkan_dense_chunks_preserve_four_mrope_axes",
+        "holo4_vulkan_batched_prefill_and_reset"
+      ],
+      "same_failures_reproduced_at_baseline": [
+        "qwen35_config_rejects_invalid_tensor_dimensions",
+        "qwen35_vulkan_chunks_match_token_bits_and_submission_count (numerics match; stale submission count 12 vs 6)",
+        "qwen35_real_f32_weights_run_on_vulkan (qwen35-only metadata reader does not accept qwen35moe)",
+        "f32_weights_run_on_vulkan on AMD (generic strict F32 check, 29 ULP at n_in=5120); passes on Apple"
+      ],
+      "no_thresholds_relaxed": true,
+      "full_repository_suite": "not run"
+    },
+    "runtime_source_sha256": {
+      "src/vulkan.rs": "34ea3a3a18624b7ba559814de12204930900a3678f75cfd2688cc59387539dc8",
+      "src/vulkan/dense.rs": "237d3877b8dcd37d98e5b60c4beb9acf4b69ef2c69c9ac6339db80e46f6bb063",
+      "src/vulkan/qwen35/moe.rs": "c9241b6725af4a16721cd44638049cb7e440199be37413cfbef5784f95193f8d",
+      "tools/oracle/holo4/benchmark.rs": "4df2c26b90b2d3d68b95aa7cc083af21baa4e5ecc9be1c104805e66559fea855"
+    },
+    "evidence_directory": "target/holo4/gpu-speed-2026-10-23",
+    "evidence_sha256": {
+      "local-bench.jsonl": "dde21f4ab0018227ae3c2f3564071807ccdcfacd978d6927c6793d16005da29e",
+      "remote-bench.jsonl": "0eb4007ebd59bb0f98387cb70d2d23aa57f727d3cfefea41978adf1abcf72a53",
+      "local-logit-comparison.json": "aa1f41146142825129c7fcc94ecfa039efa52c433c795277d29a0cc83d91cedc",
+      "remote-logit-comparison.json": "6eae5ea4dd6bb99760fff3af841bc416f8bfdc4e5206a2f63a149a670d222096",
+      "remote-gpu-load.jsonl": "c33fc083062b6fe0f685a9ea92738649a3c92d075a6969a5f925d85b6943f853",
+      "local-final-focused.log": "c0136a9fec12eace339930a08f6b7044e103a955c5b1cd06872a13e64f1d54fe",
+      "local-batch-reset.log": "d1e2c3c52f5a8d145551ea4cfa55c22846a3b1c0d16ef46a0773c952d00fe807",
+      "local-qwen35_real_moe_layers_run_on_vulkan.log": "64a76370d23c3d55c4d8b3987c56b3d7bb35c933d26a54bbfc08b42881a72cb0",
+      "remote/remote-qwen35_real_moe_layers_run_on_vulkan.log": "3c5f047d8fc86a55d4db5c2787850a125de558e1af12dc792c3c2e6458059258",
+      "remote/remote-batch-reset.log": "3fe01ff8b77c460b2bd585e8e730bb2b11970fe64fc8212aaf06b82b41b6c17e",
+      "paired_bench.rs": "bc73656ce9daba7209be7d03bc4fcc433524a0d8ffc7599376d87780a4551307"
+    },
+    "release_cli_math": {
+      "local": "80 * 0.8 - 5 = 59",
+      "remote": "80 × 0.8 - 5 = 64 - 5 = 59元",
+      "eos_id": 248046,
+      "exit_codes": [
+        0,
+        0
+      ],
+      "backend": "strict Vulkan",
+      "timing_used_for_benchmark": false
+    }
   }
 }

@@ -175,10 +175,13 @@ python3 -m unittest tools.oracle.holo4.test_compare
 ## Vulkan decoder
 
 The decoder now uploads each complete expert bank once and binds per-expert
-ranges. Router, routed/shared expert projections, SiLU, attention and GDN state
+ranges. Immutable buffers prefer device-local VRAM on discrete GPUs, with
+staging and the existing out-of-memory host fallback; UMA keeps mapped memory.
+Router, routed/shared expert projections, SiLU, attention and GDN state
 updates run on Vulkan. Softmax/top-k routing and the ordered weighted expert sum
 run on the host. This is a hybrid execution path, with host synchronization per
-MoE row; no performance improvement is claimed. Strict `--compute vulkan`
+MoE row. AMD/Apple batch up to nine experts per submission; other vendors retain
+two-expert batches for the Intel short-submission workaround. Strict `--compute vulkan`
 supports text. For images, `--compute auto` uses the CPU vision encoder followed
 by Vulkan text decoding; strict Vulkan image mode is still rejected.
 
@@ -299,8 +302,52 @@ the model. Neither generic failure was hidden or counted as a passing check.
 
 Host routing/reduction introduces synchronization. One remote CLI smoke run
 reported 1.3 generation tokens/s on Vulkan versus 15.6 on CPU; this is not a
-controlled benchmark, and GPU performance improvement is not established.
+controlled benchmark; the resident-forward follow-up below records the optimized path.
 Video, long context, server/multiturn, the computer-control harness, other
 quantizations, the full repository suite and older shared-GDN artifacts remain
 unverified. The local evidence paths and SHA256 digests are in `verification.json`;
 large traces and weights are not committed.
+
+## Resident-forward performance reproduction
+
+Build the standalone harness against the release library (no external acceleration
+libraries). It uses 32 prompt tokens, 64 teacher-forced decode steps, eight CPU
+threads, F32 KV, batch 16 and capacity 512. CPU and strict Vulkan each warm up once;
+five alternating rounds exclude load, upload, reset, tokenization and sampling,
+and include synchronized logits/state readback. It asserts no uploads during
+measurement, the selected backend, finite logits and exact repeated GPU/CPU runs.
+
+```sh
+cargo build --locked --release --features vulkan --lib
+rustc --edition=2021 tools/oracle/holo4/benchmark.rs \
+  --extern rust_model_inference=target/release/librust_model_inference.rlib \
+  --extern serde_json="$(find target/release/deps -name 'libserde_json-*.rlib' -print -quit)" \
+  -L dependency=target/release/deps -C opt-level=3 -C lto=fat \
+  -C codegen-units=1 -C panic=abort -o target/holo4/benchmark
+target/holo4/benchmark "$RMI_HOLO4_MODEL" > target/holo4/benchmark.jsonl
+```
+
+For before/after numerical regression, build the same harness against each
+version's release library, then run `RMI_SPEED_ROUNDS=0` with a different
+`RMI_SPEED_SNAPSHOT=target/holo4/before.f32` / `after.f32` path. Compare the raw
+F32 words at the last prefill position and every decode step. This compares the
+two GPU implementations on identical CPU-generated history; it does not certify
+CPU/GPU or Oracle alignment. Snapshot collection is excluded from performance
+runs. The existing whole-model numerical failures above remain unresolved.
+
+On 2026-10-23, five-round median decode throughput on M3 Max changed from
+3.546 to 4.068 token/s (+14.7%); the new CPU median was 14.434 token/s. GPU
+prefill changed from 4.982 to 6.117 token/s. The SSH NAVI31 host recorded
+0.647 to 1.930 GPU decode token/s, versus 14.715 CPU token/s, but different
+concurrent GPU clients prevent attributing this ratio to the change. The local
+host also had background load and substantial swap use; neither is an exclusive
+or power-controlled benchmark. GPU remains slower than CPU on these runs.
+
+Submissions per 32+64-token round dropped from 21,972 to 6,612; synchronized host
+readback remains 5.822 GiB. Remote DRM fdinfo shows this process's VRAM changing
+from about 0.21 to 19.65 GiB, and GTT from 19.61 to 0.17 GiB. On each device,
+all 16,140,800 F32 logits at the 65 measured positions compare exactly before
+and after this optimization. All 40 same-input MoE checks and batch/continuation/
+reset checks retain their previous errors. This regression does not resolve
+the whole-model CPU/GPU/Oracle numerical failures. See `verification.json`'s
+`gpu_performance_followup` for ranges, raw-evidence digests and baseline failures.

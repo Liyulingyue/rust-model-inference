@@ -168,6 +168,7 @@ impl MoeBindings {
             .read_f32(session.layout.shared_gate, rows)?
             .to_vec();
         let mut output = vec![0.0; rows * width];
+        let experts_per_submission = session.context.moe_experts_per_submission();
         for row in 0..rows {
             let trace = &crate::models::qwen35::trunk::trace::layer_1d;
             if crate::models::qwen35::trunk::trace::trace_enabled("ffn_moe_input") {
@@ -189,14 +190,15 @@ impl MoeBindings {
             .map_err(VulkanError::UnsupportedShape)?;
             let input = row_region(session.layout.normed, row, width)?;
             for (slot, &expert) in chosen.iter().enumerate() {
-                // Keep the decoder's short-submission workaround inside the MoE loop too.
-                if slot > 0 && slot % 2 == 0 {
+                if slot > 0 && slot % experts_per_submission == 0 {
                     commands = commands.flush()?;
                 }
                 self.record_expert(session, &commands, &self.experts[expert], input, slot)?;
             }
             if let Some((_, shared)) = &self.shared {
-                commands = commands.flush()?;
+                if !chosen.is_empty() && chosen.len() % experts_per_submission == 0 {
+                    commands = commands.flush()?;
+                }
                 self.record_expert(session, &commands, shared, input, chosen.len())?;
             }
             commands = commands.flush()?;
@@ -299,6 +301,7 @@ mod tests {
                 .ops
                 .write_f32(session.layout.normed, &input)
                 .unwrap();
+            let before = context.compute_stats();
             session.layers[layer]
                 .moe
                 .as_ref()
@@ -313,6 +316,14 @@ mod tests {
                 .unwrap()
                 .submit_and_wait()
                 .unwrap();
+            let experts = config.n_expert_used + usize::from(config.n_ff_shexp > 0);
+            let expected_submissions =
+                2 + 3 * experts.div_ceil(context.moe_experts_per_submission());
+            assert_eq!(
+                context.compute_stats().since(before).submissions,
+                expected_submissions as u64,
+                "router + expert batches + residual, layer={layer}"
+            );
             let actual = session.ops.read_f32(session.layout.x, input.len()).unwrap();
             assert!(actual.iter().all(|v| v.is_finite()));
             let error = (expected
