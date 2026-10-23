@@ -364,6 +364,374 @@ mod tests {
     use super::*;
 
     #[test]
+    /// Mage-Flow drives dozens of projections with different shapes in a row,
+    /// each with its own runtime and weight upload. Interleave them the way
+    /// the model does and check that every projection still reproduces itself.
+    #[test]
+    #[ignore = "requires a Vulkan device and the real Mage-Flow GGUFs"]
+    fn bf16_prepared_many_shapes_interleaved_is_stable() {
+        use crate::vulkan::ops::{GpuMatmulSpec, GpuWeightFormat};
+        crate::ops::float::enable_gpu();
+        if crate::ops::get_vulkan_context().is_none() {
+            eprintln!("no vulkan context; skip");
+            return;
+        }
+        let Ok(loader) =
+            crate::GGUFLoader::from_file("models/mage-flow/mage-flow-base-dit-BF16.gguf")
+        else {
+            eprintln!("no real weights; skip");
+            return;
+        };
+        let names = [
+            "transformer_blocks.0.attn.add_q_proj.weight",
+            "transformer_blocks.0.attn.add_k_proj.weight",
+            "transformer_blocks.0.attn.add_v_proj.weight",
+            "transformer_blocks.0.attn.to_add_out.weight",
+            "transformer_blocks.0.mlp.fc1.weight",
+            "transformer_blocks.0.mlp.fc2.weight",
+        ];
+        let mut state: u64 = 0x9E3779B97F4A7C15;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 40) as f32 / 1024.0 - 8.0
+        };
+        let rows = 1024usize;
+        let mut inputs: Vec<Vec<f32>> = Vec::new();
+        let mut weights: Vec<&[u8]> = Vec::new();
+        let mut shapes: Vec<(usize, usize)> = Vec::new();
+        for name in names {
+            let Some(bytes) = loader.tensor_slice(name) else {
+                continue;
+            };
+            let Some(info) = loader.tensor_info(name) else {
+                continue;
+            };
+            let n_in = info.dims[1] as usize;
+            let n_out = info.dims[0] as usize;
+            weights.push(bytes);
+            shapes.push((n_in, n_out));
+            inputs.push((0..rows * n_in).map(|_| next() / 8.0).collect());
+        }
+        if weights.is_empty() {
+            eprintln!("no real projections; skip");
+            return;
+        }
+        let run = |round: usize| -> Vec<Vec<f32>> {
+            let mut out = Vec::new();
+            for (index, bytes) in weights.iter().enumerate() {
+                let (n_in, n_out) = shapes[index];
+                let spec = GpuMatmulSpec {
+                    format: GpuWeightFormat::BF16,
+                    mode: crate::vulkan::ops::GpuMatmulMode::Prepared,
+                };
+                let linear = GpuLinear::default();
+                let mut gpu = vec![0.0f32; rows * n_out];
+                let ok =
+                    linear.try_matmul(bytes, spec, &inputs[index], &mut gpu, n_in, n_out, rows);
+                if !ok {
+                    eprintln!("PROBE round {round} projection {index}: 退回 CPU");
+                    break;
+                }
+                out.push(gpu);
+            }
+            out
+        };
+        let first = run(0);
+        for round in 1..8 {
+            let again = run(round);
+            let mut bad = 0usize;
+            for (index, (a, b)) in first.iter().zip(again.iter()).enumerate() {
+                let differing = a
+                    .iter()
+                    .zip(b.iter())
+                    .filter(|(x, y)| x.to_bits() != y.to_bits())
+                    .count();
+                if differing > 0 {
+                    eprintln!(
+                        "PROBE round {round} projection {index}: {differing}/{} 个元素不同",
+                        a.len()
+                    );
+                    bad += 1;
+                }
+            }
+            if bad == 0 {
+                eprintln!("PROBE round {round}: 全部投影逐位一致");
+            }
+        }
+    }
+
+    /// Mage-Flow feeds the denoiser a [1024, 128] latent patch grid into a
+    /// [128, 3072] projection. That shape is nothing like the wide one the
+    /// other checks use, and the first GPU run of a model is the one that has
+    /// to land on the reference image, so repeat it and compare.
+    #[test]
+    #[ignore = "requires a Vulkan device and the real Mage-Flow GGUFs"]
+    fn bf16_prepared_mageflow_projection_is_reproducible() {
+        use crate::vulkan::ops::{GpuMatmulMode, GpuMatmulSpec, GpuWeightFormat};
+        crate::ops::float::enable_gpu();
+        if crate::ops::get_vulkan_context().is_none() {
+            eprintln!("no vulkan context; skip");
+            return;
+        }
+        let Ok(loader) =
+            crate::GGUFLoader::from_file("models/mage-flow/mage-flow-base-dit-BF16.gguf")
+        else {
+            eprintln!("no real weights; skip");
+            return;
+        };
+        let Some(bytes) = loader.tensor_slice("img_in.weight") else {
+            eprintln!("no img_in.weight; skip");
+            return;
+        };
+        let Some(info) = loader.tensor_info("img_in.weight") else {
+            eprintln!("no img_in info; skip");
+            return;
+        };
+        let n_in = info.dims[0] as usize;
+        let n_out = info.dims[1] as usize;
+        let rows = 1024usize;
+        eprintln!("PROBE img_in: n_in={n_in} n_out={n_out} rows={rows}");
+        let mut state: u64 = 0xB5026F5AA96619E9;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 40) as f32 / 1024.0 - 8.0
+        };
+        let input: Vec<f32> = (0..rows * n_in).map(|_| next()).collect();
+        let spec = GpuMatmulSpec {
+            format: GpuWeightFormat::BF16,
+            mode: GpuMatmulMode::Prepared,
+        };
+        let mut first = vec![0.0f32; rows * n_out];
+        let mut worst = 0.0f64;
+        let rounds: usize = std::env::var("PROBE_ROUNDS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(8);
+        for round in 0..rounds {
+            let mut out = vec![0.0f32; rows * n_out];
+            // Mage-Flow rebuilds the projection for every call, so each round
+            // gets a fresh runtime and a freshly JIT-compiled pipeline.
+            let linear = GpuLinear::default();
+            let ok = linear.try_matmul(bytes, spec, &input, &mut out, n_in, n_out, rows);
+            if !ok {
+                eprintln!("PROBE round {round}: 退回 CPU");
+                return;
+            }
+            if round == 0 {
+                first = out;
+                continue;
+            }
+            let differing = first
+                .iter()
+                .zip(out.iter())
+                .filter(|(x, y)| x.to_bits() != y.to_bits())
+                .count();
+            let max_abs = first
+                .iter()
+                .zip(out.iter())
+                .map(|(x, y)| (x - y).abs() as f64)
+                .fold(0.0f64, f64::max);
+            worst = worst.max(max_abs);
+            if differing > 0 || round < 3 || round % 100 == 0 {
+                eprintln!(
+                    "PROBE round {round}: 与第 0 轮不同元素={differing}/{} 最大绝对差={max_abs:.6e}",
+                    first.len()
+                );
+            }
+        }
+        eprintln!("PROBE img_in {rounds} 轮最大绝对差={worst:.6e}");
+    }
+
+    /// A denoiser step is not a single projection: the blocks in between run
+    /// attention on the same device, and the projection that follows has to
+    /// give the same answer no matter what those blocks did before it.
+    #[test]
+    #[ignore = "requires a Vulkan device and the real Mage-Flow GGUFs"]
+    fn bf16_prepared_after_attention_is_reproducible() {
+        use crate::models::diffusion::dreamx::kernels::AttentionSpec;
+        use crate::vulkan::ops::{GpuMatmulMode, GpuMatmulSpec, GpuWeightFormat};
+        crate::ops::float::enable_gpu();
+        if crate::ops::get_vulkan_context().is_none() {
+            eprintln!("no vulkan context; skip");
+            return;
+        }
+        let Ok(loader) =
+            crate::GGUFLoader::from_file("models/mage-flow/mage-flow-base-dit-BF16.gguf")
+        else {
+            eprintln!("no real weights; skip");
+            return;
+        };
+        let Some(bytes) = loader.tensor_slice("img_in.weight") else {
+            eprintln!("no img_in.weight; skip");
+            return;
+        };
+        let Some(info) = loader.tensor_info("img_in.weight") else {
+            eprintln!("no img_in info; skip");
+            return;
+        };
+        let n_in = info.dims[0] as usize;
+        let n_out = info.dims[1] as usize;
+        let rows = 1024usize;
+        let mut state: u64 = 0x2545F4914F6CDD1D;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 40) as f32 / 1024.0 - 8.0
+        };
+        let input: Vec<f32> = (0..rows * n_in).map(|_| next()).collect();
+        // The denoiser attention shape: 1024 tokens, 24 heads, 128 dims.
+        let tokens = 1024usize;
+        let heads = 24usize;
+        let dim = 128usize;
+        let q: Vec<f32> = (0..tokens * heads * dim).map(|_| next() / 8.0).collect();
+        let k: Vec<f32> = (0..tokens * heads * dim).map(|_| next() / 8.0).collect();
+        let v: Vec<f32> = (0..tokens * heads * dim).map(|_| next() / 8.0).collect();
+        let spec_attn = AttentionSpec {
+            query_tokens: tokens,
+            key_tokens: tokens,
+            query_heads: heads,
+            key_value_heads: heads,
+            head_dim: dim,
+            causal: false,
+            scale: 1.0 / (dim as f32).sqrt(),
+        };
+        let spec = GpuMatmulSpec {
+            format: GpuWeightFormat::BF16,
+            mode: GpuMatmulMode::Prepared,
+        };
+        let mut first = vec![0.0f32; rows * n_out];
+        for round in 0..8 {
+            let attn = crate::ops::kernel::vulkan::try_attention(&q, &k, &v, spec_attn);
+            if attn.is_none() {
+                eprintln!("PROBE round {round}: attention 走 CPU");
+                return;
+            }
+            let mut out = vec![0.0f32; rows * n_out];
+            let ok =
+                GpuLinear::default().try_matmul(bytes, spec, &input, &mut out, n_in, n_out, rows);
+            if !ok {
+                eprintln!("PROBE round {round}: 投影退回 CPU");
+                return;
+            }
+            if round == 0 {
+                first = out;
+                continue;
+            }
+            let differing = first
+                .iter()
+                .zip(out.iter())
+                .filter(|(x, y)| x.to_bits() != y.to_bits())
+                .count();
+            let max_abs = first
+                .iter()
+                .zip(out.iter())
+                .map(|(x, y)| (x - y).abs() as f64)
+                .fold(0.0f64, f64::max);
+            eprintln!(
+                "PROBE round {round}: 投影不同元素={differing}/{} 最大绝对差={max_abs:.6e}",
+                first.len()
+            );
+        }
+        eprintln!("PROBE attention 之后的投影 8 轮全部比较完毕");
+    }
+
+    /// A transformer block is an attention followed by a projection over the
+    /// attention result. Either half on its own is reproducible, so the pair
+    /// is the smallest unit that can show the two disagreeing.
+    #[test]
+    #[ignore = "requires a Vulkan device and the real Mage-Flow GGUFs"]
+    fn bf16_prepared_after_attention_projection_is_reproducible() {
+        use crate::models::diffusion::dreamx::kernels::AttentionSpec;
+        use crate::vulkan::ops::{GpuMatmulMode, GpuMatmulSpec, GpuWeightFormat};
+        crate::ops::float::enable_gpu();
+        if crate::ops::get_vulkan_context().is_none() {
+            eprintln!("no vulkan context; skip");
+            return;
+        }
+        let Ok(loader) =
+            crate::GGUFLoader::from_file("models/mage-flow/mage-flow-base-dit-BF16.gguf")
+        else {
+            eprintln!("no real weights; skip");
+            return;
+        };
+        let mut state: u64 = 0x14057B7EF767814F;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 40) as f32 / 1024.0 - 8.0
+        };
+        let tokens = 1024usize;
+        let heads = 24usize;
+        let dim = 128usize;
+        let q: Vec<f32> = (0..tokens * heads * dim).map(|_| next() / 8.0).collect();
+        let k: Vec<f32> = (0..tokens * heads * dim).map(|_| next() / 8.0).collect();
+        let v: Vec<f32> = (0..tokens * heads * dim).map(|_| next() / 8.0).collect();
+        let spec_attn = AttentionSpec {
+            query_tokens: tokens,
+            key_tokens: tokens,
+            query_heads: heads,
+            key_value_heads: heads,
+            head_dim: dim,
+            causal: false,
+            scale: 1.0 / (dim as f32).sqrt(),
+        };
+        let (Some(bytes), Some(info)) = (
+            loader.tensor_slice("transformer_blocks.0.attn.to_add_out.weight"),
+            loader.tensor_info("transformer_blocks.0.attn.to_add_out.weight"),
+        ) else {
+            eprintln!("no attn output projection; skip");
+            return;
+        };
+        let n_in = info.dims[0] as usize;
+        let n_out = info.dims[1] as usize;
+        eprintln!("PROBE attn 投影: n_in={n_in} n_out={n_out}");
+        let spec = GpuMatmulSpec {
+            format: GpuWeightFormat::BF16,
+            mode: GpuMatmulMode::Prepared,
+        };
+        let mut first: Option<Vec<f32>> = None;
+        for round in 0..8 {
+            let Some(context) = crate::ops::kernel::vulkan::try_attention(&q, &k, &v, spec_attn)
+            else {
+                eprintln!("PROBE round {round}: attention 走 CPU");
+                return;
+            };
+            let rows = tokens;
+            let mut out = vec![0.0f32; rows * n_out];
+            let ok =
+                GpuLinear::default().try_matmul(bytes, spec, &context, &mut out, n_in, n_out, rows);
+            if !ok {
+                eprintln!("PROBE round {round}: 投影退回 CPU");
+                return;
+            }
+            match &first {
+                None => first = Some(out),
+                Some(reference) => {
+                    let differing = reference
+                        .iter()
+                        .zip(out.iter())
+                        .filter(|(x, y)| x.to_bits() != y.to_bits())
+                        .count();
+                    let max_abs = reference
+                        .iter()
+                        .zip(out.iter())
+                        .map(|(x, y)| (x - y).abs() as f64)
+                        .fold(0.0f64, f64::max);
+                    eprintln!(
+                        "PROBE round {round}: attention+投影 不同元素={differing}/{} 最大绝对差={max_abs:.6e}",
+                        reference.len()
+                    );
+                }
+            }
+        }
+    }
+
     /// The transposed BF16/F32 kernel that #174 added has to stay within a
     /// float rounding of the CPU path, including when one call is split into
     /// several dispatches.

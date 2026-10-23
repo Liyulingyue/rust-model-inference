@@ -2837,3 +2837,56 @@ Qwen3-0.6B-BF16 看起来是最干净的受害者（197 个纯 BF16 二维权重
 Z-Image 代码零改动且 3/3 逐位复现基线 md5，含 110 个 F32 二维权重的
 occamy-1.0 在 `--temp 0` 下 GPU 与 CPU 逐位一致。尚未实测的是少数多模态
 projector（ZDTaichu5 mmproj、LongCat）与几个 MoE gate。
+
+### TODO-044: Mage-Flow 的 GPU 路径 run-to-run 不确定，分叉在 DiT 的 transformer block 内部
+
+排查 BF16/F32 Prepared 新路径（TODO-043）时顺带发现的独立问题，2026-10-23。
+
+**现象**：同一二进制、同一 seed、同一 prompt，Mage-Flow 512×512 在 GPU 上连续跑
+的结果互相不同，与 CPU 参考的 PSNR 在 13.3 / 16.1 / 18.6 / 29.5 dB 之间跳，
+最差的一次只剩 11 种颜色。CPU 侧完全可复现：两次 CPU 跑的输出 md5 相同
+（`out/mage_flow_base_512_s8.png` 与 `out/mage_cpu_512.png` 同为
+`84d6e5169559f272fc48e42dc77753b5`），NEON 与标量 F64 累加之间也有 82 dB。
+256×256 的两次 GPU 跑 PSNR 12.26 dB、corr -0.34，等于两张不同的图。
+
+**边界**：用 parity-trace 逐点比对（`RMI_PARITY_TRACE=<文件路径>`，
+注意是文件路径而不是目录；过滤名要写全 `mage_flow.xxx`），两次 GPU 跑的
+时间线是：
+
+- `time_proj` / `txt_norm`（CPU 侧）15 次全部逐位相同 → 调度器、时间嵌入、
+  文本条件都确定；
+- DiT 的第一个投影 `img_in` 的**输入**（初始 latent patch）第 0、1 次相同
+  （步 1 的正、负两个 batch），第 2 次起不同 —— 那是步 1 的结果已经分叉之后
+  的下游传播；
+- DiT 的第一个投影 `img_in` 的**输出**第 0、1 次相同；
+- DiT 的最终输出 `proj_out` 第 0 次就不同。
+
+所以分叉发生在**一次 denoiser step 内部的 transformer block**，而不是第一个
+投影、也不是调度器。
+
+**已排除的假设**（每条都有可复现的测试，见 `src/ops/kernel/vulkan.rs`）：
+
+- 三个新 shader 单独调用都正确且可复现：`float_matmul_tiled` 用真实
+  Mage-Flow BF16 权重 400 轮逐位相同；`attention_online` 在 Mage-Flow 的
+  24 heads × 128 dims 形状上误差为 0；`conv3d_tiled` 与标量 CPU 相对差
+  3e-7 且三次运行逐位相同；
+- 真实形状（`img_in` 是 [1024, 128] → [1024, 3072]，不是 3072×3072）、
+  每次新建 runtime 与 pipeline、多形状交替、attention + 投影的组合，
+  全部逐位相同；
+- 命令提交是全局串行的（`TokenCommands` 持 `context.mutex`），
+  `submit_commands` 真的 `wait_for_fences`，`upload_static` 写的是
+  `HOST_COHERENT` 内存，`begin_commands` 还会插 `host_write_barrier`；
+- F64 仲裁显示真实权重下 GPU 的求和顺序比 CPU 更接近真值
+  （7.79e-5 vs 1.18e-4），所以 GPU 与 CPU 之间那 1e-3 的固定差异
+  **不是**错误，只是累加顺序不同（CPU 是 vec4 累加器 + `vaddvq` 横向求和，
+  GPU 是单标量串行累加），被 8 步扩散放大到约 29.5 dB。
+
+**结论**：GPU 路径自身不可复现，这是比「新 kernel 算错」严重得多的问题，
+和 Astronex 的 TODO-040 应当合并追查。Mage-Flow 的 `--gpu` 门禁保持不变
+（`src/app/diffusion.rs`），在查清之前不要放开。
+
+**下一步**：需要在真实 block 序列里逐算子比对。注意 DiT 走 `ComputePool`
+之外的 `Linear::forward` → `try_vulkan_rows` → `GpuLinear::try_matmul`
+（mode 固定为 `Prepared`），所以 block 里的 GPU 算子只有 matmul 和
+attention 两种，两者单独都稳定，但按真实顺序串起来不稳定 —— 复现时必须
+复刻完整序列，单独测任一算子都会得到「稳定」的假结论。
