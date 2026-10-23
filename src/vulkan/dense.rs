@@ -306,7 +306,7 @@ impl UploadedBuffers {
     }
 
     pub(crate) fn upload(&mut self, bytes: &[u8]) -> Result<GpuBuffer, VulkanError> {
-        let buffer = unsafe { self.context.upload_static(bytes)? };
+        let buffer = unsafe { self.context.upload_device_static(bytes)? };
         self.values.push(buffer);
         Ok(buffer)
     }

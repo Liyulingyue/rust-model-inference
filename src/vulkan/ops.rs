@@ -8427,18 +8427,22 @@ mod tests {
     #[ignore = "requires a Vulkan device"]
     fn staged_static_upload_preserves_bytes_and_zeroes_padding() {
         use super::{ArenaRegion, Qwen3Ops, TokenCommands, VulkanContext};
-        let context = VulkanContext::new().unwrap();
-        let ops = Qwen3Ops::new_device_local_with_size(&context, 256, 1).unwrap();
+        let context = Box::leak(Box::new(VulkanContext::new().unwrap()));
+        let ops = Qwen3Ops::new_device_local_with_size(context, 256, 1).unwrap();
+        let mut decoder_weights = crate::vulkan::dense::UploadedBuffers::new(context);
         let bytes: Vec<u8> = (0..67).collect();
-        for device_local in [false, true] {
+        for source in 0..3 {
             let weight = unsafe {
-                if device_local {
-                    context.upload_device_static(&bytes)
-                } else {
-                    context.upload_static(&bytes)
+                match source {
+                    0 => context.upload_static(&bytes),
+                    1 => context.upload_device_static(&bytes),
+                    _ => decoder_weights.upload(&bytes),
                 }
             }
             .unwrap();
+            if source == 2 && context.is_discrete() {
+                assert!(weight.mapped.is_null(), "decoder weights must use VRAM");
+            }
             let commands = TokenCommands::begin(&context).unwrap();
             unsafe {
                 context.record_buffer_copy(commands.command, weight, ops.arena, 0, 0, weight.size)
@@ -8456,7 +8460,9 @@ mod tests {
             let actual: &[u8] = bytemuck::cast_slice(&output);
             assert_eq!(&actual[..bytes.len()], bytes);
             assert!(actual[bytes.len()..].iter().all(|&byte| byte == 0));
-            unsafe { context.destroy_completed_buffers([&weight]) }.unwrap();
+            if source != 2 {
+                unsafe { context.destroy_completed_buffers([&weight]) }.unwrap();
+            }
         }
     }
 
