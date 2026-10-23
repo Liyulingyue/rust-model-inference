@@ -106,6 +106,13 @@ Oracle preserves that exact trace schema.
 
 ## Validation evidence
 
+The runtime checks all 398 text tensors for the released BF16 dtype, shape and
+byte length before entering the shared Qwen loader. It also validates the
+released Qwen configuration and rejects additional QKV biases and output or
+classification heads. Missing or differently quantized components return an
+error before model construction. The rejection tests were verified red/green,
+and the released tokenizer, text encoder and VAE all pass after the fix.
+
 The supported numerical path is **F32 activations/accumulation on CPU or hybrid
 Vulkan**, with released BF16 DiT/text weights and F16 VAE convolutions. The primary Oracle
 widens the released weights and runs the pinned official graph in F32.
@@ -136,8 +143,9 @@ canonical checkpoint order/shape/count. Token IDs and initial noise are exact.
 - Separate real VAE encode/decode: reference features relative L2 0.00135860,
   RGB 0.000483546 on arm64. On Linux x86_64 (EPYC 9334, container limit 55 GiB,
   16 CPUs), RGB is 0.000476291. Both runs pass all four checkpoints.
-- A clean, isolated build passes all six FLUX3 tests, including the real released
-  tokenizer, text encoder and VAE. The separate text-only Oracle comparison
+- The final Vulkan/trace build passes four regular FLUX3 tests (four ignored).
+  Explicit real released tokenizer, text encoder and VAE tests pass separately
+  (three passed, none ignored). The separate text-only Oracle comparison
   passes both checkpoints on arm64 (text relative L2 0.0000154383) and x86_64
   (0.0000158357). All three GGUF files pass full SHA256 checks on Linux, whose
   changed Rust source files also match the PR source hashes.
@@ -170,9 +178,21 @@ No threshold was relaxed for GPU execution.
 Neither run reports a GPU error or fallback. These are the last DiT executor
 counter snapshots, not whole-process physical VRAM peaks; VAE decoding follows.
 An earlier release-fast 256x256, default 16-step `--compute auto` CLI run exits successfully
-in 155.29 seconds and produces the requested red cube scene. It has no numerical
-Oracle comparison or matching 16-step CPU timing, so it does not establish a
-16-step speedup.
+in 155.29 seconds and produces the requested red cube scene. A later full trace
+of this workload passes **677/677 canonical Oracle checkpoints** and produces
+the same PNG SHA256. Token IDs and noise match raw bits. Maximum velocity
+relative L2 is **0.0000670378**, final RGB **0.0000950790**, and the worst
+intermediate checkpoint is `single_blocks.26`, occurrence 14, at **0.00349466**
+against the unchanged 0.005 bound. The trace records 9,760 Vulkan linear calls,
+zero CPU linear fallback and no GPU errors.
+
+Reproduce this larger case with `--side 256 --steps 16` on the Oracle and
+`--resolution 256 --steps 16 --compute auto` on the Vulkan CLI. Compare every
+step with the same comparator. The trace was started before the final
+text-input validation fix; its numerical operations are unchanged for the
+accepted official component. Source/binary hashes and Oracle provenance are
+recorded per case in `validation.json`; final release performance runs exercise
+the updated validator. Trace duration is excluded from performance data.
 
 Hardware regressions cover a 257-row BF16 projection (two staging tiles and a
 tail), repeated execution without another static upload, scalar-mode CPU
@@ -189,15 +209,22 @@ RMI_PARITY_TRACE=target/flux3-attention-test.jsonl \
   tracing_preserves_requested_gpu_attention -- --ignored --test-threads=1
 ```
 
-The final local arm64 `vulkan,parity-trace --lib -- --test-threads=1` suite
-reports 1339 passed, 34 failed, 163 ignored. A clean isolated build of pre-GPU
-commit `ffb387ae` with the same flags reports 1337 passed, 35 failed, 161 ignored.
-All 34 current failure names occur on that baseline. Whole-suite results vary:
-earlier parallel runs had 31 matching failures on current code and baseline;
-a later parallel run also failed the ASR projector test, which passes alone
-and in the final serial run. No root cause is attributed to that instability.
-Shared Qwen trunk regressions pass (28 passed, 1 ignored). The full suite is not
-green; failure names and repeated-run results are recorded in `validation.json`.
+The final whole-PR regression compares against actual `main` commit `973210b6`,
+not the intermediate CPU adapter. With identical unavailable ICD overrides
+(`VK_ICD_FILENAMES` and `VK_DRIVER_FILES`) and compiled `vulkan,parity-trace`
+features, single-thread library tests report **1339 passed / 29 failed / 158
+ignored on main**, and **1345 passed / the same 29 failed / 163 ignored on the
+PR**. This controlled CPU-fallback comparison has no new failures; real-device
+Vulkan checks remain separate.
+
+With the local device enabled, main initially reports 32 failures and the PR
+35; three main repeats report 33/33/32. The three extra PR failure names all
+pass individually on both revisions, and one also fails in repeated main
+whole-suite runs. Thus the device-enabled full suite remains unstable, and is
+not presented as green. Independent review found and closed the text-component
+input-contract gap; it found no remaining critical or important code issues.
+Shared Qwen trunk regressions pass (28 passed, 1 ignored). Earlier baseline
+comparisons and failure names remain recorded in `validation.json`.
 
 ### Performance (2026-10-23)
 
@@ -227,12 +254,30 @@ are separate counters, and neither is interchangeable with process RSS.
 A separate 256x256, **16-step GPU** run produces the red cube image in 154.80s,
 with a 5.99s median across denoise steps 2..16. The three two-step PNGs are
 deterministic within each backend; between CPU/GPU, decoded RGB8 pixels have
-maximum absolute difference 1/255. This is not an official 256x256 Oracle check.
+maximum absolute difference 1/255. These two-step PNG checks are separate from
+the 16-step official comparison above.
+
+The final runtime also completes a **512x512/two-step single pair**. Latency
+through the PNG announcement is **approximately 1593.82s CPU / 635.03s GPU**
+(about **2.51x**), with the same final release binary, weights, caption, seed
+and 16 threads. Both generations exit with code 0; decoded RGB8 pixels differ
+by at most 1/255. This is PNG consistency, not an official 512x512 Oracle check.
+
+This extension has explicit measurement deviations. The container exposes only
+`renderD134` at `0000:c3:00.0`; attempting to select an idle host card did not
+change the actual render node. That selection assertion failed after successful
+generation, and mistakenly sampled card3 memory counters are excluded. An
+earlier contended GPU attempt was deliberately terminated and excluded. SSH
+disconnected during CPU generation; a detached reader preserved the same run,
+recovered its start within 7.18ms of the kernel starttime, and recorded the PNG.
+Exit code 0 was recovered from the matching zombie process stat. CPU timing is
+therefore approximate. Raw evidence, source/binary hashes and these boundaries
+are recorded under `extension_512` in `performance.json`.
 
 This is a **shared-host observation**, with substantial CPU variation and no
 exclusive CPU/GPU reservation. Device activity also occurs during CPU rounds
 1/3 while those CPU processes have no render node open; no exact cause of the
-timing variation is attributed. No 16-step CPU or larger-resolution benchmark
+timing variation is attributed. No 16-step CPU or isolated hardware benchmark
 is claimed. Commands, binary/source/PNG hashes, all round timings and memory
 sampling scope are recorded in [performance.json](performance.json).
 
@@ -250,8 +295,7 @@ intermediate rounding and BF16 text encoder. Controlled runs with rounded
 timestep inputs alone and with widened text features still exceed the BF16
 bound; the difference is not resolved by changing a comparison threshold.
 
-A 256x256, default 16-step CLI smoke produces a valid PNG depicting the requested
-red cube, table and shadows. This larger image has no numerical Oracle comparison.
 No rectangular image, Base/FP8/NVFP4 or native BF16 activation parity claim
-is made. This is an experimental CPU/hybrid Vulkan adapter; larger-image GPU
-numerical alignment and a fully GPU-resident pipeline remain unverified.
+is made. This is an experimental CPU/hybrid Vulkan adapter; numerical Oracle
+coverage reaches 256x256/16 steps. A fully GPU-resident pipeline remains
+unsupported.

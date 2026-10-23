@@ -230,7 +230,8 @@
     "All model files pre-read before each run outside timing; separate process startup, initialization and GPU uploads remain included. This is a warm-file-cache comparison, not cold-disk startup.",
     "Only 256x256, two-step paired timings; one GPU-only 16-step image. No 16-step CPU comparison or larger-resolution performance claim.",
     "Text encoder and remaining unsupported operations stay on CPU. GPU allocations are largely host-visible memory; device GTT usage and process RSS are separate counters and must not be summed as disjoint physical memory.",
-    "PNG agreement is not full numerical Oracle coverage for 256x256."
+    "PNG agreement is not full numerical Oracle coverage for 256x256.",
+    "512x512 extension is a single pair under severe shared load, with documented device-selection and CPU timing-recovery deviations; do not compare its ratio with the earlier 256x256 median as a scaling claim."
   ],
   "raw_archive_sha256": "a9a19b1070716f8d3311dfc89d6a08684e0c0bbc514ef89df5a06e97f68e0b16",
   "reproduce_cpu_command": [
@@ -278,5 +279,128 @@
     "auto",
     "--out",
     "target/flux3-perf-two-step-20261023/gpu-1.png"
-  ]
+  ],
+  "extension_512": {
+    "runtime_commit": "9e127972578f5b90b6f097c37291b9bfe7cd106b",
+    "measurement": "One sequential 512x512/two-step pair on the shared host; approximate CPU start recovery. Latency stops at the PNG announcement for both backends. Not a median or isolated benchmark.",
+    "environment": {
+      "binary_sha256": "183468bb56d6f7c577637677a5c4f2f6eb8eda2fcf6f62db8aa8d40d07d1105d",
+      "runtime_source_sha256": {
+        "src/app/diffusion.rs": "c9f983c5fb52ef406680ed5366de3b6f7a466002d5d48f269260179d81ca5126",
+        "src/models/diffusion/flux3/mod.rs": "a909f6c842fbe7032d1dd29ae3682fe444f324b68b88de7c644c97c8d7b0b1b6",
+        "src/models/diffusion/flux3/dit.rs": "cc134cd3854d837d5f5b9470f9e994fabd1030c1e29d7fb79f918e7e2a3bfba6",
+        "src/models/diffusion/z_image/vae.rs": "d0fd8cc3fe5acc084d52edaa0c01c3cb145330494b88e3d4a0a67996c16e87e2",
+        "src/models/qwen3/trunk/forward.rs": "9d86a8be790b432cf6006d159a6b965a061cdb9ebf1389f2d63491a4d4a5be29",
+        "src/ops/kernel/vulkan.rs": "ec8f716777ecb2b521311989178f183e1b165fda0b57a043c6e8f8e797e1b91b"
+      },
+      "profile": "release; vulkan; parity-trace disabled",
+      "cpu_max": "1600000 100000",
+      "memory_max": "59055800320",
+      "device_pci": "0000:c3:00.0",
+      "device": "/sys/class/drm/card7/device",
+      "environment": {
+        "VK_ICD_FILENAMES": "/usr/share/vulkan/icd.d/radeon_icd.json",
+        "DRI_PRIME": "pci-0000_c3_00_0!"
+      },
+      "scope": "One sequential 512x512/two-step pair on a shared host; weights pre-read outside timing; setup/uploads included; no exclusive reservation.",
+      "actual_render_node": "/dev/dri/renderD134",
+      "available_render_nodes": [
+        "/dev/dri/renderD134"
+      ],
+      "qualification": "GPU generation and timing succeeded, but requested alternate-device assertion failed: container exposes/enumerates only c3/renderD134. GPU timing belongs to c3; mistakenly sampled card3 device-memory counters are excluded. CPU comparison is on the same host and exact release binary. Shared-device contention, no exclusive reservation.",
+      "gpu_helper_sha256": "e559fc63a0fac47b63166b05eb61d43efec41daf268dd13a76fb016211e14f9a"
+    },
+    "workload": {
+      "prompt": "A red cube on a white table.",
+      "side": 512,
+      "steps": 2,
+      "seed": 42,
+      "rust_threads": 16,
+      "references": 0,
+      "order": [
+        "gpu",
+        "cpu"
+      ]
+    },
+    "cpu": {
+      "png_announcement_seconds_approximate": 1593.8228520881385,
+      "observed_process_exit_seconds_approximate": 1594.6264021005481,
+      "exit_code": 0,
+      "exit_status_source": "/proc/3733510/stat field 52, observed zombie state Z with matching kernel starttime",
+      "clock_recovery_method": "Approximate original process start recovered from first-step event and log mtime; subsequent events use CLOCK_BOOTTIME. Start checked against /proc starttime within 1 second. Original SSH harness died; exit status recovered from the zombie process stat field 52.",
+      "start_difference_from_kernel_seconds": 0.0071823932230472565,
+      "second_denoise_step_seconds_approximate": 665.4920824281871,
+      "png_sha256": "da23cb4e2fd21c3afba1520fbab4aa0d9c2f643097663d6820c7d7dc06f8a393",
+      "command": [
+        "/root/flux3-rmi-01a16224/target/release/rust-model-inference",
+        "--model",
+        "/root/flux3-rmi-01a16224/models/flux3-dit.gguf",
+        "--text-encoder",
+        "/root/flux3-rmi-01a16224/models/flux3-text.gguf",
+        "--vae",
+        "/root/flux3-rmi-01a16224/models/flux3-vae.gguf",
+        "--prompt",
+        "A red cube on a white table.",
+        "--resolution",
+        "512",
+        "--steps",
+        "2",
+        "--seed",
+        "42",
+        "--threads",
+        "16",
+        "--compute",
+        "cpu",
+        "--out",
+        "/root/flux3-rmi-01a16224/target/flux3-completion-20261023/perf-512-final/cpu-512-2.png"
+      ]
+    },
+    "gpu": {
+      "png_announcement_seconds": 635.0323939993978,
+      "process_elapsed_seconds": 635.3594682943076,
+      "exit_code": 0,
+      "second_denoise_step_seconds": 360.46848100051284,
+      "actual_device_pci": "0000:c3:00.0",
+      "actual_render_nodes": [
+        "/dev/dri/renderD134"
+      ],
+      "png_sha256": "e8759a37512050a2d1f93965c57d2fe917b911db9520681f8d63b871ec64f0a5",
+      "command": [
+        "/root/flux3-rmi-01a16224/target/release/rust-model-inference",
+        "--model",
+        "/root/flux3-rmi-01a16224/models/flux3-dit.gguf",
+        "--text-encoder",
+        "/root/flux3-rmi-01a16224/models/flux3-text.gguf",
+        "--vae",
+        "/root/flux3-rmi-01a16224/models/flux3-vae.gguf",
+        "--prompt",
+        "A red cube on a white table.",
+        "--resolution",
+        "512",
+        "--steps",
+        "2",
+        "--seed",
+        "42",
+        "--threads",
+        "16",
+        "--compute",
+        "auto",
+        "--out",
+        "/root/flux3-rmi-01a16224/target/flux3-completion-20261023/perf-512-card3/gpu-512-2.png"
+      ],
+      "error_or_fallback_lines": []
+    },
+    "png_latency_ratio_approximate": 2.5098292105231566,
+    "decoded_png_comparison": {
+      "rgb8_max_difference": 1,
+      "rgb8_relative_l2": 0.00037503579243816166,
+      "scope": "CPU/GPU PNG consistency only; not an official 512x512 numerical Oracle comparison."
+    },
+    "qualification_deviations": [
+      "First GPU attempt was terminated by us after 1254.58 seconds without a completed denoise step; excluded from ratios.",
+      "Requested alternate card3, but container exposes/enumerates only renderD134/c3. Actual render node was independently verified. The alternate-device harness assertion failed after successful generation. Timing and PNG belong to c3; card3 device-memory samples are excluded.",
+      "SSH disconnected during CPU generation. A detached reader continued the same process, reconstructed its start (7.18 ms from kernel start), and recorded completion. Exit code 0 was recovered from matching zombie process stat field 52. CPU latency is approximate."
+    ],
+    "raw_archive_sha256": "e54fba5ff35e5d853b2775e777db6fd4963a2b117aaa54171992d682f4af8439"
+  }
 }
