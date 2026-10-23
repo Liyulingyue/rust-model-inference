@@ -13,6 +13,7 @@ shader_names=(
     q4_0_matmul
     q4_1_matmul
     q4_k_matmul
+    q4_k_matmul_cooperative
     q5_k_matmul
     q6_k_matmul
     f16_matmul
@@ -33,6 +34,7 @@ shader_names=(
     qwen35_recurrent_ssm
     silu_mul
     add
+    moe_reduce
     adaln_modulate
     q8_matmul_tiled_dp4a
     q8_matmul_tiled_dp4a_wide

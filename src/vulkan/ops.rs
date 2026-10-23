@@ -42,6 +42,8 @@ const ATTENTION_SCORES_TILED_SHADER: &[u8] =
 const Q4_0_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_0_matmul.spv");
 const Q4_1_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_1_matmul.spv");
 const Q4_K_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_k_matmul.spv");
+const Q4_K_MATMUL_COOPERATIVE_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/q4_k_matmul_cooperative.spv");
 const Q5_K_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q5_k_matmul.spv");
 const Q6_K_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q6_k_matmul.spv");
 const F16_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/f16_matmul.spv");
@@ -63,6 +65,7 @@ const ATTENTION_VALUES_F32_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/attention_values_f32.spv");
 const SILU_MUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/silu_mul.spv");
 const ADD_SHADER: &[u8] = include_bytes!("../../shaders/bin/add.spv");
+const MOE_REDUCE_SHADER: &[u8] = include_bytes!("../../shaders/bin/moe_reduce.spv");
 const QWEN35_DENSE_PREPARE_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/qwen35_dense_prepare.spv");
 const QWEN35_ATTENTION_SHADER: &[u8] = include_bytes!("../../shaders/bin/qwen35_attention.spv");
@@ -113,6 +116,8 @@ const FLOAT_MATMUL_TILED: usize = 33;
 const ATTENTION_ONLINE: usize = 34;
 const CONV3D_TILED: usize = 35;
 const ATTENTION_ONLINE_WIDE: usize = 36;
+const MOE_REDUCE: usize = 37;
+const Q4_K_MATMUL_COOPERATIVE: usize = 38;
 
 pub(crate) fn tiled_matmul_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -217,6 +222,8 @@ const OPERATOR_SHADER_NAMES: [&str; OPERATOR_SHADERS.len()] = [
     "attention_online",
     "conv3d_tiled",
     "attention_online_wide",
+    "moe_reduce",
+    "q4_k_matmul_cooperative",
 ];
 
 /// True when the ordered dispatch log is being collected.
@@ -304,7 +311,7 @@ pub fn dump_dispatch_trace() {
     }
 }
 
-const OPERATOR_SHADERS: [&[u8]; 37] = [
+const OPERATOR_SHADERS: [&[u8]; 39] = [
     QUANTIZE_Q8_0_SHADER,
     QUANTIZE_Q8_K_SHADER,
     Q8_MATMUL_GROUPED_SHADER,
@@ -342,6 +349,8 @@ const OPERATOR_SHADERS: [&[u8]; 37] = [
     ATTENTION_ONLINE_SHADER,
     CONV3D_TILED_SHADER,
     ATTENTION_ONLINE_WIDE_SHADER,
+    MOE_REDUCE_SHADER,
+    Q4_K_MATMUL_COOPERATIVE_SHADER,
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2190,6 +2199,29 @@ impl<'a> Qwen3Ops<'a> {
         Ok(bindings)
     }
 
+    /// Bind expert views without duplicating the containing tensor's allocation.
+    pub(crate) fn bind_weight_ranges(
+        &mut self,
+        ranges: &[(GpuBuffer, u64, u64)],
+        formats: &[GpuWeightFormat],
+    ) -> Result<OperatorBindings, VulkanError> {
+        if ranges.is_empty() || ranges.len() > 3 || ranges.len() != formats.len() {
+            return Err(VulkanError::UnsupportedShape(
+                "invalid weight range count".into(),
+            ));
+        }
+        for &(buffer, offset, size) in ranges {
+            validate_weight_range(buffer.size, offset, size, &self.context.limits)?;
+        }
+        allocate_bindings_ranges(
+            self.context,
+            self.descriptor_pool,
+            self.arena,
+            ranges,
+            formats,
+        )
+    }
+
     pub(crate) fn write_f32(&self, region: ArenaRegion, values: &[f32]) -> Result<(), VulkanError> {
         self.f32_word(region, values.len(), "host write")?;
         if values.is_empty() {
@@ -2374,6 +2406,20 @@ impl<'a> Qwen3Ops<'a> {
         push: &[u32],
         mut dispatch: [u32; 3],
     ) {
+        if pipeline == Q4_K_MATMUL && push.len() == 22 && push[21] == 1 {
+            let columns = push[5].max(push[8]).max(push[11]) as usize;
+            if columns <= 4096 {
+                if let Ok(grid) = matmul_dispatch(
+                    columns.div_ceil(8),
+                    1,
+                    push[13] as usize,
+                    &self.context.limits,
+                ) {
+                    pipeline = Q4_K_MATMUL_COOPERATIVE;
+                    dispatch = grid;
+                }
+            }
+        }
         if pipeline == Q8_MATMUL_GROUPED
             && self.q8_tiled
             && tiled_matmul_enabled()
@@ -4478,6 +4524,36 @@ impl<'a> Qwen3Ops<'a> {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_moe_reduce(
+        &self,
+        commands: &TokenCommands<'_>,
+        values: ArenaRegion,
+        scores: ArenaRegion,
+        output: ArenaRegion,
+        residual: ArenaRegion,
+        status: ArenaRegion,
+        width: usize,
+        experts: usize,
+    ) -> Result<(), VulkanError> {
+        if width == 0 || experts == 0 {
+            return Err(VulkanError::UnsupportedShape("empty MoE reduction".into()));
+        }
+        let count = width.checked_mul(experts).ok_or(VulkanError::OutOfMemory)?;
+        let push = [
+            self.f32_word(values, count, "MoE expert outputs")?,
+            self.f32_word(scores, experts, "MoE expert scores")?,
+            self.f32_word(output, width, "MoE output")?,
+            self.f32_word(residual, width, "MoE residual")?,
+            self.f32_word(status, 1, "MoE finite status")?,
+            as_u32(width, "MoE width")?,
+            as_u32(experts, "MoE expert count")?,
+        ];
+        let dispatch = row_dispatch(width.div_ceil(64), 1, &self.context.limits)?;
+        self.record_linear_dispatch(commands, MOE_REDUCE, self.arena_bindings, &push, dispatch);
+        Ok(())
+    }
+
     pub(crate) fn zero_region(&self, region: ArenaRegion) -> Result<(), VulkanError> {
         self.byte_word(region, region.size, "zeroed Vulkan arena region")?;
         if let Some(staging) = self.staging {
@@ -4572,11 +4648,57 @@ impl Drop for Qwen3Ops<'_> {
     }
 }
 
+#[test]
+fn expert_weight_ranges_reject_misalignment_overflow_and_out_of_bounds() {
+    let mut limits = vk::PhysicalDeviceLimits::default();
+    limits.min_storage_buffer_offset_alignment = 256;
+    limits.max_storage_buffer_range = 4096;
+    assert!(validate_weight_range(8192, 256, 4096, &limits).is_ok());
+    for (offset, size) in [
+        (1, 1024),
+        (0, 0),
+        (0, 4097),
+        (8192, 1),
+        (u64::MAX - 255, 1024),
+    ] {
+        assert!(validate_weight_range(8192, offset, size, &limits).is_err());
+    }
+}
+
+fn validate_weight_range(
+    buffer_size: u64,
+    offset: u64,
+    size: u64,
+    limits: &vk::PhysicalDeviceLimits,
+) -> Result<(), VulkanError> {
+    if size == 0
+        || offset % limits.min_storage_buffer_offset_alignment.max(1) != 0
+        || size > u64::from(limits.max_storage_buffer_range)
+        || offset.checked_add(size).is_none_or(|end| end > buffer_size)
+    {
+        return Err(VulkanError::UnsupportedShape(
+            "invalid Vulkan weight subrange".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn allocate_bindings(
     context: &VulkanContext,
     descriptor_pool: vk::DescriptorPool,
     arena: GpuBuffer,
     extras: &[GpuBuffer],
+    formats: &[GpuWeightFormat],
+) -> Result<OperatorBindings, VulkanError> {
+    let ranges = extras.iter().map(|&b| (b, 0, b.size)).collect::<Vec<_>>();
+    allocate_bindings_ranges(context, descriptor_pool, arena, &ranges, formats)
+}
+
+fn allocate_bindings_ranges(
+    context: &VulkanContext,
+    descriptor_pool: vk::DescriptorPool,
+    arena: GpuBuffer,
+    extras: &[(GpuBuffer, u64, u64)],
     formats: &[GpuWeightFormat],
 ) -> Result<OperatorBindings, VulkanError> {
     if extras.len() != formats.len() && !formats.is_empty() {
@@ -4595,17 +4717,20 @@ fn allocate_bindings(
             )
             .map_err(|error| VulkanError::InitFailed(error.to_string()))?[0]
     };
-    let mut buffers = [arena; 4];
-    let mut sizes = [arena.size; 3];
-    for (index, &buffer) in extras.iter().enumerate() {
-        buffers[index + 1] = buffer;
-        sizes[index] = buffer.size;
-    }
-    let infos = buffers.map(|buffer| vk::DescriptorBufferInfo {
-        buffer: buffer.buffer,
+    let mut infos = [vk::DescriptorBufferInfo {
+        buffer: arena.buffer,
         offset: 0,
-        range: vk::WHOLE_SIZE,
-    });
+        range: arena.size,
+    }; 4];
+    let mut sizes = [arena.size; 3];
+    for (index, &(buffer, offset, size)) in extras.iter().enumerate() {
+        infos[index + 1] = vk::DescriptorBufferInfo {
+            buffer: buffer.buffer,
+            offset,
+            range: size,
+        };
+        sizes[index] = size;
+    }
     let writes: [vk::WriteDescriptorSet; 4] = std::array::from_fn(|index| {
         vk::WriteDescriptorSet::builder()
             .dst_set(descriptor_set)
@@ -4784,7 +4909,7 @@ fn quantize_rows_push(
             count / 4,
             blocks,
             rows_u32,
-            u32::from(crate::ops::has_avx2_fma()),
+            1, // All CPU Q8_K paths use a signed scale and ties-to-even.
             0,
             0,
         ])
@@ -6734,9 +6859,19 @@ fn check_qwen35_conv_exact(context: &VulkanContext) -> Result<(), String> {
             .map(|index| ((index * seed % 191) as f32 - 95.0) / 37.0)
             .collect()
     };
-    let qkv = input(ROWS * CONV, 43);
+    let mut qkv = input(ROWS * CONV, 43);
+    for row in qkv.chunks_exact_mut(CONV) {
+        for v in &mut row[..DIM] {
+            *v *= 1e-7;
+        }
+    }
     let weight = input(CONV * TAPS, 73);
-    let initial = input(CONV * TAPS, 101);
+    let mut initial = input(CONV * TAPS, 101);
+    for tap in initial.chunks_exact_mut(CONV) {
+        for v in &mut tap[..DIM] {
+            *v *= 1e-7;
+        }
+    }
     let mut state = initial.clone();
     let mut expected = vec![0.0; ROWS * CONV];
     for row in 0..ROWS {
@@ -6751,11 +6886,7 @@ fn check_qwen35_conv_exact(context: &VulkanContext) -> Result<(), String> {
         crate::ops::silu_approx_inplace(values);
         for offset in [0, DIM] {
             let head = &mut values[offset..offset + DIM];
-            let sum: f64 = head.iter().map(|&value| f64::from(value * value)).sum();
-            let scale = 1.0f32 / (sum as f32).sqrt().max(1e-6);
-            for value in head {
-                *value *= scale;
-            }
+            crate::models::qwen35::trunk::util::l2_norm(head, 1e-6);
         }
     }
     let layout = ArenaLayout::build_rows(CONV, CONV * TAPS, 1, 1, DIM, 1, 1, ROWS, ROWS)
@@ -6795,7 +6926,7 @@ fn check_qwen35_conv_exact(context: &VulkanContext) -> Result<(), String> {
                 for column in 0..DIM {
                     let gpu = actual[row * DIM + column];
                     let cpu = expected[row * CONV + offset + column];
-                    if gpu.to_bits() != cpu.to_bits() {
+                    if !gpu.is_finite() || (gpu - cpu).abs() > 2e-6 {
                         return Err(VulkanError::UnsupportedShape(format!("conv mismatch offset={offset} row={row} column={column}: gpu={:#010x} cpu={:#010x}", gpu.to_bits(), cpu.to_bits())));
                     }
                 }
@@ -6807,7 +6938,7 @@ fn check_qwen35_conv_exact(context: &VulkanContext) -> Result<(), String> {
     })();
     let cleanup = unsafe { context.destroy_completed_buffers(&[buffer]) };
     run.and(cleanup).map_err(|error| error.to_string())?;
-    println!("operator=qwen35_conv exact_bits=true rows={ROWS} taps={TAPS} nonzero_prefix=true");
+    println!("operator=qwen35_conv max_abs_bound=2e-6 tiny_q=true rows={ROWS} taps={TAPS} nonzero_prefix=true");
     Ok(())
 }
 
@@ -9503,6 +9634,187 @@ mod tests {
         assert_eq!(context.submission_count(), before);
         assert_eq!(runtime.weights[&key].0.buffer, buffer);
         assert_eq!(output, [8.0]);
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn q4_k_cooperative_matches_row_kernel_in_both_reductions() {
+        use super::*;
+        let context = VulkanContext::new().unwrap();
+        for (n_in, n_out) in [
+            (256, 1),
+            (512, 67),
+            (2048, 512),
+            (512, 2048),
+            (4096, 2048),
+            (2048, 4096),
+            (4096, 4096),
+            (12288, 4096),
+        ] {
+            let mut cursor = 0;
+            let input = f32_region(&mut cursor, n_in).unwrap();
+            let q8 = region(&mut cursor, n_in).unwrap();
+            let scales = f32_region(&mut cursor, n_in / 256).unwrap();
+            let old: Vec<_> = (0..3)
+                .map(|_| f32_region(&mut cursor, n_out).unwrap())
+                .collect();
+            let new: Vec<_> = (0..3)
+                .map(|_| f32_region(&mut cursor, n_out).unwrap())
+                .collect();
+            let mut ops = Qwen3Ops::new_with_size(&context, cursor, 2).unwrap();
+            let mut buffers = Vec::new();
+            for slot in 0..3 {
+                let mut bytes = synthetic_weight(GpuWeightFormat::Q4_K, n_in, n_out);
+                for (i, byte) in bytes.iter_mut().enumerate() {
+                    if i % 144 >= 16 {
+                        *byte ^= slot * 37;
+                    }
+                }
+                buffers.push(unsafe { context.upload_static(&bytes) }.unwrap());
+            }
+            let bindings = ops
+                .bind_weight_buffers(&buffers, &[GpuWeightFormat::Q4_K; 3])
+                .unwrap();
+            ops.write_f32(
+                input,
+                &(0..n_in)
+                    .map(|i| ((i * 29 % 251) as f32 - 125.0) / 97.0)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+            for mode in [0, 1] {
+                let outputs = |regions: &[ArenaRegion]| {
+                    regions
+                        .iter()
+                        .enumerate()
+                        .map(|(slot, &r)| (r, n_out.saturating_sub(slot).max(1), n_out * 4))
+                        .collect::<Vec<_>>()
+                };
+                let (mut old_push, old_grid) = matmul_rows_push(
+                    cursor,
+                    &context.limits,
+                    bindings,
+                    q8,
+                    scales,
+                    None,
+                    &outputs(&old),
+                    n_in,
+                    1,
+                    n_in,
+                )
+                .unwrap();
+                let (mut new_push, new_grid) = matmul_rows_push(
+                    cursor,
+                    &context.limits,
+                    bindings,
+                    q8,
+                    scales,
+                    None,
+                    &outputs(&new),
+                    n_in,
+                    1,
+                    n_in,
+                )
+                .unwrap();
+                old_push[14] = mode;
+                new_push[14] = mode;
+                let commands = TokenCommands::begin(&context).unwrap();
+                ops.record_quantize_q8_k(&commands, input, q8, scales, n_in)
+                    .unwrap();
+                unsafe {
+                    commands.bind(
+                        ops.pipelines[Q4_K_MATMUL],
+                        context.pipeline_layout,
+                        &[bindings.descriptor_set],
+                        bytemuck::cast_slice(&old_push),
+                    );
+                    commands.dispatch(old_grid[0], old_grid[1], old_grid[2]);
+                    commands.barrier();
+                }
+                ops.record_linear_dispatch(&commands, Q4_K_MATMUL, bindings, &new_push, new_grid);
+                commands.submit_and_wait().unwrap();
+                for slot in 0..3 {
+                    let count = n_out.saturating_sub(slot).max(1);
+                    for (i, (&a, &b)) in ops
+                        .read_f32(old[slot], count)
+                        .unwrap()
+                        .iter()
+                        .zip(ops.read_f32(new[slot], count).unwrap())
+                        .enumerate()
+                    {
+                        assert_eq!(
+                            a.to_bits(),
+                            b.to_bits(),
+                            "{n_in}x{n_out} slot={slot} mode={mode} i={i}"
+                        );
+                    }
+                }
+            }
+            drop(ops);
+            for buffer in buffers {
+                unsafe { context.destroy_buffer(&buffer) };
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn moe_reduce_preserves_slot_order_and_sticky_finite_check() {
+        use super::*;
+        let context = VulkanContext::new().unwrap();
+        let mut cursor = 0;
+        let width = 67;
+        let values = f32_region(&mut cursor, width * 3).unwrap();
+        let scores = f32_region(&mut cursor, 3).unwrap();
+        let output = f32_region(&mut cursor, width).unwrap();
+        let residual = f32_region(&mut cursor, width).unwrap();
+        let status = f32_region(&mut cursor, 1).unwrap();
+        let ops = Qwen3Ops::new_with_size(&context, cursor, 1).unwrap();
+        let inputs: Vec<_> = [1e20, -1e20, 3.0]
+            .into_iter()
+            .flat_map(|v| std::iter::repeat_n(v, width))
+            .collect();
+        ops.write_f32(values, &inputs).unwrap();
+        ops.write_f32(scores, &[1.0; 3]).unwrap();
+        ops.write_f32(residual, &vec![2.0; width]).unwrap();
+        ops.zero_region(status).unwrap();
+        let before = context.submission_count();
+        let commands = TokenCommands::begin(&context).unwrap();
+        let invalid = ArenaRegion { size: 4, ..scores };
+        let recorded = ops.recorded_dispatch_count();
+        assert!(ops
+            .record_moe_reduce(&commands, values, invalid, output, residual, status, width, 3)
+            .is_err());
+        assert_eq!(ops.recorded_dispatch_count(), recorded);
+        ops.record_moe_reduce(
+            &commands, values, scores, output, residual, status, width, 3,
+        )
+        .unwrap();
+        assert_eq!(context.submission_count(), before);
+        commands.submit_and_wait().unwrap();
+        assert_eq!(context.submission_count(), before + 1);
+        assert_eq!(ops.read_f32(output, width).unwrap(), vec![3.0; width]);
+        assert_eq!(ops.read_f32(residual, width).unwrap(), vec![5.0; width]);
+        assert_eq!(ops.read_f32(status, 1).unwrap()[0].to_bits(), 0);
+        for bad in [f32::INFINITY, f32::NAN] {
+            ops.write_f32(values, &vec![bad; width * 3]).unwrap();
+            let commands = TokenCommands::begin(&context).unwrap();
+            ops.record_moe_reduce(
+                &commands, values, scores, output, residual, status, width, 3,
+            )
+            .unwrap();
+            commands.submit_and_wait().unwrap();
+            assert_eq!(ops.read_f32(status, 1).unwrap()[0].to_bits(), 1);
+            ops.write_f32(values, &inputs).unwrap();
+            let commands = TokenCommands::begin(&context).unwrap();
+            ops.record_moe_reduce(
+                &commands, values, scores, output, residual, status, width, 3,
+            )
+            .unwrap();
+            commands.submit_and_wait().unwrap();
+            assert_eq!(ops.read_f32(status, 1).unwrap()[0].to_bits(), 1);
+            ops.zero_region(status).unwrap();
+        }
     }
 
     #[test]

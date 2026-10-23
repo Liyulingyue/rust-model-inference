@@ -355,8 +355,10 @@ LFM2 / LFM2.5 / Spark / Nemotron-H / Hunyuan / LFM2-MoE），每个 scorer 实�
       `MINICPMV47_CANVAS_ONLY_MSG`（anyres helper 根本处理不了这个家族）与
       `MINICPMV47_JINJA_MSG`（canvas 路径 + `--jinja` 关闭，指明 `--jinja` /
       `--chat-template-file`）。1B 一直需要 `--jinja`，不是新引入的限制。
-- [ ] **`qwen35moe` 的 Vulkan 路径未接** — `src/vulkan/qwen35.rs:17` 仍 gate 在
-      `architecture == "qwen35"`，35B 目前只能走标量/SIMD CPU 路径。
+- [ ] **`qwen35moe` 的 Vulkan 整模数值验收未完成** — 共享路径已接入 GPU expert 投影与
+      host 路由/归约。Holo4 在 M3 Max / RADV NAVI31 的 MoE 分层和 batch/reset 检查通过，
+      整模 logits 的 0.02 CPU/GPU 门槛仍失败；此 MiniCPM 权重尚未验证 GPU。
+      见 [Holo4 验证](../../tools/oracle/holo4/README.md)。
 
 ## 入口面覆盖（2026-10-19 审计）
 
