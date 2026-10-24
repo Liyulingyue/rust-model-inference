@@ -393,10 +393,12 @@ pub fn run_mage_flow_cli(
             options.top_k.is_some() || options.top_p.is_some(),
             "--top-k/--top-p",
         ),
-        (
-            options.edit,
-            "--edit (use an edit variant and --image/--reference)",
-        ),
+        // The edit variants are released and the reference image path works,
+        // so the gate on --edit is lifted.
+        // (
+        //     options.edit,
+        //     "--edit (use an edit variant and --image/--reference)",
+        // ),
         (options.cfg_scale.is_some(), "--cfg-scale (use --cfg)"),
         (options.gpu, "--gpu"),
         (options.overwrite, "--overwrite"),
