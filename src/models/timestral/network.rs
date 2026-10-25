@@ -164,7 +164,7 @@ impl TimestralModel<'_> {
             trace("positions", &[r, s], &pos)?;
         }
         let embed = self.residual_block("representation.patch_proj", &patch_inputs, 2 * PS, D);
-        let query = self.weights["representation.forecast_query"];
+        let query = self.weight("representation.forecast_query");
         let mut x = Vec::with_capacity(r * s * D);
         for row in embed.chunks_exact(enc * D) {
             x.extend_from_slice(row);
@@ -218,7 +218,8 @@ impl TimestralModel<'_> {
                     *state = None;
                     *state = Some(crate::vulkan::timestral::Transformer::new(
                         context,
-                        &self.weights,
+                        &self.matrices,
+                        &self.vectors,
                         count,
                     )?);
                 }

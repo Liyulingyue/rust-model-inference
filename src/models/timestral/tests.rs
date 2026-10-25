@@ -55,14 +55,14 @@ fn rejects_architecture_config_and_wrong_shape_with_same_element_count() {
     assert!(TimestralModel::from_source(&s)
         .err()
         .unwrap()
-        .contains("shape/type"));
+        .contains("shape"));
 }
 #[test]
 fn contract_has_exact_parameter_count() {
     assert_eq!(
         tensor_contracts()
             .iter()
-            .map(|(_, s)| s.iter().product::<u64>())
+            .map(|(_, contract)| contract.elements())
             .sum::<u64>(),
         209312256
     );

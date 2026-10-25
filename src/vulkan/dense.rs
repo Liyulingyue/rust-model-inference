@@ -329,6 +329,48 @@ impl UploadedBuffers {
     pub(crate) fn upload_f32(&mut self, values: &[f32]) -> Result<GpuBuffer, VulkanError> {
         self.upload(bytemuck::cast_slice(values))
     }
+
+    /// Upload a half-precision matrix in the transposed layout the device
+    /// kernel reads.
+    ///
+    /// The reorder moves the two-byte values without decoding them, so no
+    /// bit of the stored weight changes.
+    pub(crate) fn upload_half_transposed(
+        &mut self,
+        bytes: &[u8],
+        n_in: usize,
+    ) -> Result<GpuBuffer, VulkanError> {
+        let packed = transpose_half_bytes(bytes, n_in)?;
+        let buffer = unsafe { self.context.upload_device_static(&packed)? };
+        self.values.push(buffer);
+        Ok(buffer)
+    }
+}
+
+/// Reorder a half-precision matrix from `[n_out, n_in]` to `[n_in, n_out]`.
+///
+/// The values are moved as raw bytes: a half-precision weight keeps every
+/// bit of the stored number.
+fn transpose_half_bytes(bytes: &[u8], n_in: usize) -> Result<Vec<u8>, VulkanError> {
+    if n_in == 0 || bytes.is_empty() || bytes.len() % (2 * n_in) != 0 {
+        return Err(VulkanError::UnsupportedShape(
+            "invalid half-precision matrix shape".into(),
+        ));
+    }
+    let n_out = bytes.len() / (2 * n_in);
+    let mut packed = vec![0u8; bytes.len()];
+    use rayon::prelude::*;
+    packed
+        .par_chunks_mut(2 * n_out)
+        .enumerate()
+        .for_each(|(k, destination)| {
+            for r in 0..n_out {
+                let source = (r * n_in + k) * 2;
+                let target = r * 2;
+                destination[target..target + 2].copy_from_slice(&bytes[source..source + 2]);
+            }
+        });
+    Ok(packed)
 }
 
 // Reorder storage only: preserve every F32 bit, including signed zero.

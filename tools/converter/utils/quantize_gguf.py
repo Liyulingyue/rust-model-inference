@@ -133,11 +133,17 @@ def quantize_gguf(
     if temporary.exists():
         raise FileExistsError(temporary)
     writer = GgufWriter(temporary)
+    wrote_file_type = False
     for key, value in metadata.items():
         if key == "general.file_type":
             writer.add_meta(key, target_format)
+            wrote_file_type = True
         else:
             writer.add_meta(key, value)
+    if not wrote_file_type:
+        # The format is what a reader needs to pick the right tolerance, so
+        # it is recorded whether or not the source carried it.
+        writer.add_meta("general.file_type", target_format)
     quantised = 0
     kept_f32 = 0
     for index, (name, value) in enumerate(sorted(tensors.items())):

@@ -15,7 +15,10 @@ pub(crate) struct Transformer {
     ops: Qwen3Ops<'static>,
     _buffers: UploadedBuffers,
     bindings: HashMap<String, OperatorBindings>,
-    regions: [ArenaRegion; 12],
+    /// The weight format of every matrix, so the recorder can pick the
+    /// matching device kernel.
+    formats: HashMap<String, GpuWeightFormat>,
+    regions: [ArenaRegion; 15],
     capacity: usize,
     context: &'static VulkanContext,
 }
@@ -27,15 +30,18 @@ impl Transformer {
 
     pub(crate) fn new(
         context: &'static VulkanContext,
-        weights: &HashMap<String, &[f32]>,
+        matrices: &HashMap<String, crate::models::timestral::Matrix<'_>>,
+        vectors: &HashMap<String, Vec<f32>>,
         capacity: usize,
     ) -> Result<Self, VulkanError> {
         let mut size = 0usize;
-        let mut regions = [ArenaRegion { offset: 0, size: 0 }; 12];
-        // x, norm, fused, q, k, v, attention, gate, projection, hidden, valid/roles, rope.
-        for (region, width) in regions
-            .iter_mut()
-            .zip([D, D, 2 * F, D, D, D, D, D, D, F, 2, 32])
+        let mut regions = [ArenaRegion { offset: 0, size: 0 }; 15];
+        // x, norm, fused, q, k, v, attention, gate, projection, hidden,
+        // valid/roles, rope, q8 activation, q8 scales, q4_1 input sums.
+        for (region, width) in
+            regions
+                .iter_mut()
+                .zip([D, D, 2 * F, D, D, D, D, D, D, F, 2, 32, 0, 0, 0])
         {
             let bytes = capacity
                 .checked_mul(width)
@@ -47,38 +53,127 @@ impl Transformer {
             };
             size = size.checked_add(bytes).ok_or(VulkanError::OutOfMemory)?;
         }
-        let mut ops = Qwen3Ops::new_device_local_with_size(context, size, weights.len() + 1)?;
-        let mut buffers = UploadedBuffers::new(context);
-        let mut bindings = HashMap::new();
+        // A quantized weight reads a Q8_0 activation, so the arena carries
+        // one byte and one scale per value. The widest projection is the
+        // `mlp.w3` matrix.
+        let q8_bytes = capacity.checked_mul(F).ok_or(VulkanError::OutOfMemory)?;
+        regions[12] = ArenaRegion {
+            offset: size,
+            size: q8_bytes,
+        };
+        size = size.checked_add(q8_bytes).ok_or(VulkanError::OutOfMemory)?;
+        let q8_scale_bytes = capacity
+            .checked_mul(F / 32)
+            .and_then(|n| n.checked_mul(4))
+            .ok_or(VulkanError::OutOfMemory)?;
+        regions[13] = ArenaRegion {
+            offset: size,
+            size: q8_scale_bytes,
+        };
+        size = size
+            .checked_add(q8_scale_bytes)
+            .ok_or(VulkanError::OutOfMemory)?;
+        // The Q8_0 quantizer also writes the per-block input sums.
+        let q4_1_sum_bytes = capacity
+            .checked_mul(F / 32)
+            .and_then(|n| n.checked_mul(4))
+            .ok_or(VulkanError::OutOfMemory)?;
+        regions[14] = ArenaRegion {
+            offset: size,
+            size: q4_1_sum_bytes,
+        };
+        size = size
+            .checked_add(q4_1_sum_bytes)
+            .ok_or(VulkanError::OutOfMemory)?;
         // Stable order keeps descriptor/dispatch traces reproducible.
-        let mut names: Vec<_> = weights
+        let mut names: Vec<_> = matrices
             .keys()
             .filter(|n| n.starts_with("transformer."))
             .collect();
         names.sort();
-        for name in names {
-            let matrix = name.ends_with(".weight");
-            let buffer = if matrix {
-                let n_in = if name.ends_with(".mlp.w3.weight") {
-                    F
-                } else {
-                    D
-                };
-                buffers.upload_f32_transposed(weights[name], n_in)?
+        let mut vector_names: Vec<_> = vectors
+            .keys()
+            .filter(|n| n.starts_with("transformer."))
+            .collect();
+        vector_names.sort();
+        // Every upload takes one descriptor set out of the pool.
+        let mut ops = Qwen3Ops::new_device_local_with_size(
+            context,
+            size,
+            names.len() + vector_names.len() + 2,
+        )?;
+        let mut buffers = UploadedBuffers::new(context);
+        let mut bindings = HashMap::new();
+        let mut formats = HashMap::new();
+        for name in &names {
+            let weight = &matrices[*name];
+            let n_in = if name.ends_with(".mlp.w3.weight") {
+                F
             } else {
-                buffers.upload_f32(weights[name])?
+                D
             };
-            let binding = if matrix {
-                ops.bind_weight_buffers(&[buffer], &[GpuWeightFormat::F32])?
-            } else {
-                ops.bind_buffers(&[buffer])?
+            let format = GpuWeightFormat::from_ggml_type(weight.ggml_type()).map_err(|_| {
+                VulkanError::UnsupportedShape(format!(
+                    "Timestral GPU path does not support {:?} weights",
+                    weight.ggml_type()
+                ))
+            })?;
+            // The K-quant formats only have a scalar device kernel, which
+            // measured far slower than the CPU path on a resident model.
+            // Refusing them lets the auto policy fall back to the CPU.
+            if matches!(
+                format,
+                GpuWeightFormat::Q4_K | GpuWeightFormat::Q5_K | GpuWeightFormat::Q6_K
+            ) {
+                return Err(VulkanError::UnsupportedShape(format!(
+                    "Timestral GPU path has no vectorised {:?} matmul kernel",
+                    weight.ggml_type()
+                )));
+            }
+            if matches!(format, GpuWeightFormat::F16) {
+                return Err(VulkanError::UnsupportedShape(
+                    "Timestral GPU path has no F16 matmul kernel".into(),
+                ));
+            }
+            // A quantized tensor keeps its block layout, so it is uploaded
+            // as it is stored. The float tensors are transposed because the
+            // device kernel reads them column-major.
+            let buffer = match weight.f32_slice() {
+                Some(rows) => buffers.upload_f32_transposed(rows, n_in)?,
+                None if format == GpuWeightFormat::BF16 => {
+                    let bytes =
+                        weight
+                            .weight_bytes()
+                            .ok_or(VulkanError::UnsupportedShape(format!(
+                                "Timestral GPU path cannot upload {name}"
+                            )))?;
+                    buffers.upload_half_transposed(bytes, n_in)?
+                }
+                None => {
+                    let bytes =
+                        weight
+                            .weight_bytes()
+                            .ok_or(VulkanError::UnsupportedShape(format!(
+                                "Timestral GPU path cannot upload {name}"
+                            )))?;
+                    buffers.upload(bytes)?
+                }
             };
-            bindings.insert(name.clone(), binding);
+            let binding = ops.bind_weight_buffers(&[buffer], &[format])?;
+            bindings.insert((*name).clone(), binding);
+            formats.insert((*name).clone(), format);
+        }
+        // The norms travel with the weights: they are read by the same
+        // dispatch that consumes the projection they scale.
+        for name in &vector_names {
+            let buffer = buffers.upload_f32(&vectors[name.as_str()])?;
+            bindings.insert((*name).clone(), ops.bind_buffers(&[buffer])?);
         }
         Ok(Self {
             ops,
             _buffers: buffers,
             bindings,
+            formats,
             regions,
             capacity,
             context,
@@ -95,10 +190,34 @@ impl Transformer {
         n_out: usize,
         rows: usize,
     ) -> Result<(), VulkanError> {
-        self.ops.record_transposed_float_matmul_rows(
+        let format = self.formats[name];
+        if matches!(
+            format,
+            GpuWeightFormat::F32 | GpuWeightFormat::BF16 | GpuWeightFormat::F16
+        ) {
+            return self.ops.record_transposed_float_matmul_rows(
+                commands,
+                self.bindings[name],
+                input,
+                &[(output, n_out, n_out * 4)],
+                n_in,
+                rows,
+                n_in,
+            );
+        }
+        // A quantized weight keeps its block layout, so the device kernel
+        // reads the weight as it is stored and quantizes the activation
+        // itself.
+        let empty = ArenaRegion { offset: 0, size: 0 };
+        self.ops.record_weight_matmul_rows(
             commands,
             self.bindings[name],
             input,
+            self.regions[12],
+            self.regions[13],
+            self.regions[14],
+            empty,
+            empty,
             &[(output, n_out, n_out * 4)],
             n_in,
             rows,
