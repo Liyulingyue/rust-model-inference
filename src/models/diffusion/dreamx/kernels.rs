@@ -165,13 +165,15 @@ impl<'a> Linear<'a> {
                     } else {
                         max_abs
                     };
-                    if relative > 1.0e-2 {
-                        eprintln!(
-                            "[GPU-CHECK] projection #{index} rows={rows} n_in={} n_out={} relative={relative:.3e}",
-                            self.n_in(),
-                            self.n_out(),
-                        );
-                    }
+                    // The relative difference is always reported: a healthy
+                    // projection sits around 1e-6 because the two summation
+                    // orders differ, and the first projection whose number
+                    // moves between two runs is where the drift starts.
+                    eprintln!(
+                        "[GPU-CHECK] {index} {rows} {} {} {relative:.12e}",
+                        self.n_in(),
+                        self.n_out(),
+                    );
                 }
             }
             if let Some(bias) = &self.bias {

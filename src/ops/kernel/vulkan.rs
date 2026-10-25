@@ -989,6 +989,159 @@ mod tests {
         );
     }
 
+    /// The narrow projection that the denoiser uses for its text stream.
+    ///
+    /// It is the shape that fails once in a few thousand calls in the real
+    /// model, so this drives it thousands of times and watches the result
+    /// against the CPU kernel.
+    #[test]
+    #[ignore = "requires a Vulkan device and the real Mage-Flow GGUFs"]
+    fn bf16_prepared_narrow_projection_survives_many_rounds() {
+        use crate::vulkan::ops::{GpuMatmulMode, GpuMatmulSpec, GpuWeightFormat};
+        crate::ops::float::enable_gpu();
+        if crate::ops::get_vulkan_context().is_none() {
+            eprintln!("no vulkan context; skip");
+            return;
+        }
+        let Ok(loader) =
+            crate::GGUFLoader::from_file("models/mage-flow/mage-flow-base-dit-BF16.gguf")
+        else {
+            eprintln!("no real weights; skip");
+            return;
+        };
+        let (Some(bytes), Some(info)) = (
+            loader.tensor_slice("transformer_blocks.8.attn.to_k.weight"),
+            loader.tensor_info("transformer_blocks.8.attn.to_k.weight"),
+        ) else {
+            eprintln!("no weight; skip");
+            return;
+        };
+        let n_in = info.dims[0] as usize;
+        let n_out = info.dims[1] as usize;
+        // The text stream uses twenty rows, the image stream hundreds. The
+        // failure only shows up on the narrow one, so both are worth running.
+        let rows: usize = std::env::var("PROBE_ROWS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(20);
+        let rounds: usize = std::env::var("PROBE_ROUNDS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(4000);
+        let mut state: u64 = 0x8E1D4C7B93A2F506;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 40) as f32 / 1024.0 - 8.0
+        };
+        let input: Vec<f32> = (0..rows * n_in).map(|_| next()).collect();
+        // The CPU reference, computed once.
+        let mut reference = vec![0.0f32; rows * n_out];
+        for index in 0..rows * n_out {
+            let row = index / n_out;
+            let column = index % n_out;
+            reference[index] = crate::models::diffusion::dreamx::kernels::dot_bf16_f32(
+                &bytes[column * n_in * 2..(column + 1) * n_in * 2],
+                &input[row * n_in..(row + 1) * n_in],
+            );
+        }
+        let scale = reference
+            .iter()
+            .fold(0.0f32, |peak, value| peak.max(value.abs()))
+            .max(1.0);
+        let spec = GpuMatmulSpec {
+            format: GpuWeightFormat::BF16,
+            mode: GpuMatmulMode::Prepared,
+        };
+        let mut failures = 0usize;
+        // PROBE_REUSE=1 keeps one runtime for every round, the way the
+        // denoiser reuses a projection; the default builds a new one each
+        // round, the way a caller that rebuilds the projection would.
+        let reuse = std::env::var("PROBE_REUSE").is_ok();
+        let mut linear = GpuLinear::default();
+        for round in 0..rounds {
+            let mut out = vec![0.0f32; rows * n_out];
+            let ok = linear.try_matmul(bytes, spec, &input, &mut out, n_in, n_out, rows);
+            if !ok {
+                eprintln!("PROBE round {round}: 回退 CPU");
+                return;
+            }
+            let max_abs = out
+                .iter()
+                .zip(reference.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f32, f32::max);
+            let relative = max_abs / scale;
+            if relative > 1.0e-2 {
+                failures += 1;
+                let nonzero = out.iter().filter(|value| **value != 0.0).count();
+                // Which rows are wrong, and are the wrong values zero, stale or
+                // something else? A tail of unwritten rows points at the
+                // driver dropping the end of a dispatch.
+                let mut wrong_rows: Vec<usize> = Vec::new();
+                let mut all_zero_rows: Vec<usize> = Vec::new();
+                let mut stale_rows: Vec<usize> = Vec::new();
+                for row in 0..rows {
+                    let start = row * n_out;
+                    let slice = &out[start..start + n_out];
+                    let reference_slice = &reference[start..start + n_out];
+                    if slice.iter().zip(reference_slice).all(|(a, b)| a == b) {
+                        continue;
+                    }
+                    wrong_rows.push(row);
+                    if slice.iter().all(|value| *value == 0.0) {
+                        all_zero_rows.push(row);
+                    } else if slice
+                        .iter()
+                        .zip(reference_slice)
+                        .all(|(a, b)| a.abs() < 1.0e-3 && b.abs() > 1.0e-3)
+                    {
+                        stale_rows.push(row);
+                    }
+                }
+                // Which part of the reduction went wrong? Compare the broken
+                // values against references that only use the first or the
+                // second half of the input.
+                let half = n_in / 2;
+                let mut first_half = vec![0.0f32; rows * n_out];
+                let mut second_half = vec![0.0f32; rows * n_out];
+                for index in 0..rows * n_out {
+                    let row = index / n_out;
+                    let column = index % n_out;
+                    let weight = &bytes[column * n_in * 2..(column + 1) * n_in * 2];
+                    let input = &input[row * n_in..(row + 1) * n_in];
+                    first_half[index] = crate::models::diffusion::dreamx::kernels::dot_bf16_f32(
+                        &weight[..half * 2],
+                        &input[..half],
+                    );
+                    second_half[index] = crate::models::diffusion::dreamx::kernels::dot_bf16_f32(
+                        &weight[half * 2..],
+                        &input[half..],
+                    );
+                }
+                let mut matches_first = 0usize;
+                let mut matches_second = 0usize;
+                let mut matches_neither = 0usize;
+                for index in 0..rows * n_out {
+                    if out[index] == first_half[index] {
+                        matches_first += 1;
+                    } else if out[index] == second_half[index] {
+                        matches_second += 1;
+                    } else {
+                        matches_neither += 1;
+                    }
+                }
+                eprintln!(
+                    "PROBE round {round}: 相对差={relative:.4e} 错行={:?} 全零行={:?} | 错值等于前一半={matches_first} 后一半={matches_second} 都不是={matches_neither}",
+                    wrong_rows,
+                    all_zero_rows,
+                );
+            }
+        }
+        eprintln!("PROBE {rounds} 轮中失败 {failures} 次");
+    }
+
     /// The transposed BF16/F32 kernel that #174 added has to stay within a
     /// float rounding of the CPU path, including when one call is split into
     /// several dispatches.
