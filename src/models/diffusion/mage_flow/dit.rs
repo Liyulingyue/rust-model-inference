@@ -261,6 +261,13 @@ impl<'a> MageFlowDit<'a> {
                 *x += dt * v;
             }
             trace("sample.latent", 1, target, &image[..target])?;
+            // A projection that the device got wrong leaves the latent with
+            // values that no longer match its own scale, and the diffusion
+            // carries that into the picture. Refuse the result instead of
+            // writing out a flat image, so the caller can fall back.
+            if !latent_is_usable(&image[..target]) {
+                return Err(format!("Mage-Flow step {step} produced an unusable latent"));
+            }
         }
         Ok(image[..target].to_vec())
     }
@@ -442,6 +449,17 @@ impl<'a> MageFlowDit<'a> {
     }
 }
 
+/// Whether a latent can still be used.
+///
+/// A projection that the device got wrong leaves values that are not finite
+/// or that collapsed to zero, and the diffusion turns either into a flat
+/// picture, so the sampler refuses such a step.
+pub(crate) fn latent_is_usable(values: &[f32]) -> bool {
+    !values.is_empty()
+        && values.iter().all(|value| value.is_finite())
+        && values.iter().any(|value| *value != 0.0)
+}
+
 pub(crate) fn trace(name: &str, rows: usize, width: usize, values: &[f32]) -> Result<(), String> {
     #[cfg(feature = "parity-trace")]
     {
@@ -559,6 +577,7 @@ mod tests {
     /// identical, and a step that runs after another one has to match a step
     /// that runs on its own.
     #[test]
+    #[cfg(feature = "vulkan")]
     #[ignore = "requires a Vulkan device and the real Mage-Flow GGUFs"]
     fn reused_projections_give_the_same_step() {
         let Ok(loader) =
@@ -596,6 +615,15 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn a_broken_latent_is_refused() {
+        assert!(latent_is_usable(&[0.5, -0.25]));
+        assert!(!latent_is_usable(&[]));
+        assert!(!latent_is_usable(&[0.0, 0.0]));
+        assert!(!latent_is_usable(&[f32::NAN, 1.0]));
+        assert!(!latent_is_usable(&[f32::INFINITY, 1.0]));
+    }
+
     fn reference_rope_uses_its_own_frame_and_centered_grid() {
         assert_eq!(
             image_positions(&[[1, 2], [3, 1]]).unwrap(),

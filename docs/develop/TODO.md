@@ -2916,6 +2916,15 @@ pipeline JIT（共享 pipeline 后仍然复现）。
 - **kernel 逻辑与投影复用**：f64 参照下 GPU 精确，复用投影把真实流程的异常率从
   18/2700 降到 1/2749。
 
+**这一轮的处置**：GPU 路径改成两级。
+
+- 默认仍然拒绝 `--gpu`，错误消息直接说明原因与开关名；
+- `RMI_GPU_UNSAFE=1` 放行 GPU，速度约为 CPU 的两倍（256×256 约 1.5 分钟对 2 分
+  53 秒），代价是结果不保证可复现；
+- 采样器每步检查 latent 是否还可用（非有限或整体塌成零就拒绝），被拒绝时
+  自动用 CPU 重采样（`ComputePool::disable_gpu_matmul_for_scope`），因此最严重的
+  坏窗口会变成「慢但正确」而不是一张平涂图。CPU 路径逐位不变。
+
 **下一步**：
 
 - 用 `examples/mage_conditioning_probe.rs` 可以把两半分开验：Qwen3-VL 的 prefill

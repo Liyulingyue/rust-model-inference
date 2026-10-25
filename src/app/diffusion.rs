@@ -400,7 +400,13 @@ pub fn run_mage_flow_cli(
         //     "--edit (use an edit variant and --image/--reference)",
         // ),
         (options.cfg_scale.is_some(), "--cfg-scale (use --cfg)"),
-        (options.gpu, "--gpu"),
+        // The GPU path of this model is not reproducible (TODO-044), so it
+        // stays off by default. RMI_GPU_UNSAFE=1 turns it on for callers that
+        // want the speed and accept that two runs can differ.
+        (
+            options.gpu && std::env::var_os("RMI_GPU_UNSAFE").is_none(),
+            "--gpu (set RMI_GPU_UNSAFE=1 to allow it; the result is not reproducible)",
+        ),
         (options.overwrite, "--overwrite"),
         (
             options.ref_audio.is_some() || options.ref_text.is_some(),
@@ -587,7 +593,19 @@ pub fn run_mage_flow_cli(
         packed.extend((0..n * 128).map(|i| latent[(i % 128) * n + i / 128]));
         shapes.push([lh, lw]);
     }
-    let latent = dit.sample(&packed, &shapes, &context, negative.as_deref(), steps, cfg)?;
+    let latent = match dit.sample(&packed, &shapes, &context, negative.as_deref(), steps, cfg) {
+        Ok(latent) => latent,
+        Err(error) => {
+            // The GPU path of this model is not reproducible: a projection now
+            // and then returns a wrong result (TODO-044). A broken latent is
+            // refused by the sampler, so redo the sampling on the CPU, which
+            // is slower but reproducible, rather than write out a flat image.
+            eprintln!("[Mage-Flow] {error}; sampling again on the CPU");
+            #[cfg(feature = "vulkan")]
+            let _cpu = ComputePool::disable_gpu_matmul_for_scope();
+            dit.sample(&packed, &shapes, &context, negative.as_deref(), steps, cfg)?
+        }
+    };
     let chw: Vec<_> = (0..n * 128)
         .map(|i| latent[(i % n) * 128 + i / n])
         .collect();
