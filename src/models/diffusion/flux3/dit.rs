@@ -8,7 +8,7 @@ use crate::core::{
 };
 use crate::models::diffusion::common::{require_finite, require_tensor};
 use crate::models::diffusion::dreamx::kernels::{
-    attention_scalar, layer_norm_rows, load_float_values, AttentionSpec, Linear,
+    attention_scalar, layer_norm_rows, load_float_values, AttentionSpec,
 };
 use crate::ops::kernel::Weight;
 use std::{cell::RefCell, collections::HashMap, sync::Arc};
@@ -104,44 +104,37 @@ impl Flux3Dit {
     }
 
     pub(crate) fn session(&self) -> Result<Flux3Session<'_>, String> {
-        let mut gpu = None;
+        let executor = LinearExecutor::new(
+            ComputePolicy::legacy(),
+            self.matrices
+                .iter()
+                .map(|(_, weight)| LinearBinding {
+                    weight,
+                    mode: LinearMode::Prepared,
+                })
+                .collect(),
+            LINEAR_ROWS,
+            self.pool.clone(),
+        )
+        .map_err(|e| e.to_string())?;
         let mut ids = HashMap::new();
-        let policy = ComputePolicy::legacy();
-        if policy != ComputePolicy::Cpu && !crate::ops::scalar_mode() {
-            let executor = LinearExecutor::new(
-                policy,
-                self.matrices
-                    .iter()
-                    .map(|(_, weight)| LinearBinding {
-                        weight,
-                        mode: LinearMode::Prepared,
-                    })
-                    .collect(),
-                GPU_ROWS,
-                self.pool.clone(),
-            )
-            .map_err(|e| e.to_string())?;
-            if executor.uses_vulkan() {
-                for (i, (name, _)) in self.matrices.iter().enumerate() {
-                    ids.insert(name.as_str(), executor.id(i).map_err(|e| e.to_string())?);
-                }
-                gpu = Some(RefCell::new(executor));
-            }
+        for (i, (name, _)) in self.matrices.iter().enumerate() {
+            ids.insert(name.as_str(), executor.id(i).map_err(|e| e.to_string())?);
         }
         Ok(Flux3Session {
             dit: self,
-            gpu,
+            executor: RefCell::new(executor),
             ids,
         })
     }
 }
 
 // Bound host staging while retaining uploads across every denoising step.
-const GPU_ROWS: usize = 128;
+const LINEAR_ROWS: usize = 128;
 
 pub(crate) struct Flux3Session<'a> {
     dit: &'a Flux3Dit,
-    gpu: Option<RefCell<LinearExecutor<'a, 'static>>>,
+    executor: RefCell<LinearExecutor<'a, 'static>>,
     ids: HashMap<&'a str, LinearId>,
 }
 
@@ -153,27 +146,21 @@ impl Flux3Session<'_> {
         n_in: usize,
         n_out: usize,
     ) -> Result<Vec<f32>, String> {
-        if let Some(gpu) = &self.gpu {
-            let id = *self
-                .ids
-                .get(name)
-                .ok_or_else(|| format!("Unbound FLUX3 projection: {name}"))?;
-            let mut output = vec![0.0; input.len() / n_in * n_out];
-            for (input, output) in input
-                .chunks(GPU_ROWS * n_in)
-                .zip(output.chunks_mut(GPU_ROWS * n_out))
-            {
-                gpu.borrow_mut()
-                    .run(id, input, input.len() / n_in, output)
-                    .map_err(|e| e.to_string())?;
-            }
-            return Ok(output);
+        let id = *self
+            .ids
+            .get(name)
+            .ok_or_else(|| format!("Unbound FLUX3 projection: {name}"))?;
+        let mut output = vec![0.0; input.len() / n_in * n_out];
+        for (input, output) in input
+            .chunks(LINEAR_ROWS * n_in)
+            .zip(output.chunks_mut(LINEAR_ROWS * n_out))
+        {
+            self.executor
+                .borrow_mut()
+                .run(id, input, input.len() / n_in, output)
+                .map_err(|e| e.to_string())?;
         }
-        Linear::from_source(self.dit.source.as_ref(), name, None, n_in, n_out)?.forward(
-            &self.dit.pool,
-            input,
-            input.len() / n_in,
-        )
+        Ok(output)
     }
 
     fn time(&self, prefix: &str, timestep: f32) -> Result<Vec<f32>, String> {
@@ -496,10 +483,7 @@ mod tests {
         assert!(validate_dit(&source).unwrap_err().contains("byte length"));
     }
 
-    #[cfg(feature = "vulkan")]
-    #[test]
-    #[ignore = "requires a hardware Vulkan device; run alone with --test-threads=1"]
-    fn vulkan_projection_tiles_rows_and_reuses_weight_uploads() {
+    fn projection_model() -> Flux3Dit {
         let name = "emb_in.image.weight";
         let source: Arc<dyn TensorSource> = Arc::new(Contract {
             arch: MetaValue::String("flux3".into()),
@@ -516,21 +500,46 @@ mod tests {
                 .collect(),
         });
         let weight = crate::core::loader::load_static_weight(source.as_ref(), name, 4, 2);
-        let dit = Flux3Dit {
+        Flux3Dit {
             matrices: vec![(name.into(), weight)],
             source,
             pool: Arc::new(ComputePool::new(1)),
-        };
+        }
+    }
+
+    #[test]
+    fn cpu_projection_uses_shared_executor_across_tiles() {
+        let dit = projection_model();
+        let _scope = ComputePolicy::Cpu.enter_legacy_scope();
+        let session = dit.session().unwrap();
+        assert!(!session.executor.borrow().uses_vulkan());
+        let input: Vec<_> = (0..257).flat_map(|r| [r as f32, 1.0, 2.0, 3.0]).collect();
+        let actual = session.linear("emb_in.image.weight", &input, 4, 2).unwrap();
+        for (row, values) in actual.chunks_exact(2).enumerate() {
+            assert_eq!(values, [row as f32 + 20.0, 2.0 - row as f32]);
+        }
+        assert!(session.linear("unbound.weight", &input, 4, 2).is_err());
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    #[ignore = "requires a hardware Vulkan device; run alone with --test-threads=1"]
+    fn vulkan_projection_tiles_rows_and_reuses_weight_uploads() {
+        let name = "emb_in.image.weight";
+        let dit = projection_model();
         // Two full staging tiles plus a tail; each row has hand-computed outputs.
         let input: Vec<_> = (0..257).flat_map(|r| [r as f32, 1.0, 2.0, 3.0]).collect();
         let _scope = ComputePolicy::Vulkan.enter_legacy_scope();
         let context = ComputePolicy::Vulkan.context().unwrap().unwrap();
         let session = dit.session().unwrap();
         if crate::ops::scalar_mode() {
-            assert!(session.gpu.is_none(), "scalar mode must keep DiT on CPU");
+            assert!(
+                !session.executor.borrow().uses_vulkan(),
+                "scalar mode must keep DiT on CPU"
+            );
             return;
         }
-        assert!(session.gpu.is_some());
+        assert!(session.executor.borrow().uses_vulkan());
         let before = context.compute_stats();
         let actual = session.linear(name, &input, 4, 2).unwrap();
         let first = context.compute_stats();

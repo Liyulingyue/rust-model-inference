@@ -859,5 +859,393 @@
       "recommendation": "No new blocker; ready within documented Experimental scope.",
       "scope": "Independent follow-up verifies saved metrics, canonical manifest and provenance; author reran the full binary comparator."
     }
+  },
+  "shared_dispatch_correction": {
+    "date": "2026-10-25",
+    "base_commit": "aab6b743e6599a9013135a2fa74acfe3b32d6b9a",
+    "changes": [
+      "Remove the FLUX3 CLI Rayon global-pool initialization; all new-path CPU projection work uses ComputePool.",
+      "Route both DiT and Qwen text projections through the existing LinearExecutor, including automatic CPU fallback.",
+      "Remove the forced CPU text scope; shared executor enforces scalar selection before device initialization."
+    ],
+    "platform": "macOS arm64 / Apple M3 Max / MoltenVK 1.4.2",
+    "precision": "F32 activations/accumulation; unchanged BF16 DiT/text and F16 VAE weights",
+    "source_sha256": {
+      "src/main.rs": "3ce7ab22854a7c9be8431d9cdb11cc1d56b5db80aa832477639ec0cb1afd885c",
+      "src/compute/linear.rs": "99155092091520b4c46c170221b93302b639cf298a17a38f56f5cf1a8b63e2c4",
+      "src/models/diffusion/flux3/dit.rs": "cbe1863fec6645ab04a62d1b244fc4285ceacc99de21822441e388d658d25204",
+      "src/models/diffusion/flux3/mod.rs": "e233ce7ab1d709693a8e2b3243572d3108afd36e7b0da287d0ac57359d4c8d31",
+      "src/models/qwen3/trunk/forward.rs": "416135eb34cce548242c36221383673bb352baf6a78484719c8c028a4488321d"
+    },
+    "binary_sha256": "39cf6b4822fdb5b47e385d5e772484312c3dc7134196b3c240cbd690b9dbc31c",
+    "oracle_commit": "bfc8889a4497f846416f253a3972a1941ac698b9",
+    "cases": {
+      "cpu": {
+        "command": [
+          "/Users/gouzi/.codex/worktrees/e4f5/rust-model-inference/target/release-fast/rust-model-inference",
+          "--model",
+          "/Users/gouzi/Documents/git/rust-model-inference/models/flux-3-image-klein/gguf/flux3-dit.gguf",
+          "--text-encoder",
+          "/Users/gouzi/Documents/git/rust-model-inference/models/flux-3-image-klein/gguf/flux3-text.gguf",
+          "--vae",
+          "/Users/gouzi/Documents/git/rust-model-inference/models/flux-3-image-klein/gguf/flux3-vae.gguf",
+          "--prompt",
+          "A red cube on a white table.",
+          "--resolution",
+          "64",
+          "--steps",
+          "2",
+          "--seed",
+          "42",
+          "--threads",
+          "8",
+          "--compute",
+          "cpu",
+          "--out",
+          "/Users/gouzi/.codex/worktrees/e4f5/rust-model-inference/target/flux3-dispatch-20261025/cpu.png"
+        ],
+        "environment": {
+          "VK_ICD_FILENAMES": "/Users/gouzi/.codex/worktrees/e4f5/rust-model-inference/target/flux3-dispatch-20261025/unavailable.json",
+          "VK_DRIVER_FILES": "/Users/gouzi/.codex/worktrees/e4f5/rust-model-inference/target/flux3-dispatch-20261025/unavailable.json",
+          "RMI_PARITY_TRACE": "/Users/gouzi/.codex/worktrees/e4f5/rust-model-inference/target/flux3-dispatch-20261025/cpu.jsonl",
+          "RMI_PARITY_FILTER": "flux3.token_ids,flux3.text,flux3.noise,flux3.image.input,flux3.txt.input,content_mode_blocks.image.0,txt_mode_blocks.0,content_mode_blocks.image.1,txt_mode_blocks.1,content_mode_blocks.image.2,txt_mode_blocks.2,content_mode_blocks.image.3,txt_mode_blocks.3,content_mode_blocks.image.4,txt_mode_blocks.4,single_blocks.0,single_blocks.1,single_blocks.2,single_blocks.3,single_blocks.4,single_blocks.5,single_blocks.6,single_blocks.7,single_blocks.8,single_blocks.9,single_blocks.10,single_blocks.11,single_blocks.12,single_blocks.13,single_blocks.14,single_blocks.15,single_blocks.16,single_blocks.17,single_blocks.18,single_blocks.19,single_blocks.20,single_blocks.21,single_blocks.22,single_blocks.23,single_blocks.24,single_blocks.25,single_blocks.26,single_blocks.27,flux3.velocity,flux3.latent.0,flux3.latent.1,flux3.vae_input,z_image.vae.rgb_channels",
+          "RMI_COMPUTE_TRACE": "1"
+        },
+        "exit_code": 0,
+        "comparison_exit": 0,
+        "passed": 89,
+        "checkpoints": 89,
+        "max_relative_l2": 0.0005855760926050863,
+        "text_relative_l2": 1.543833870084055e-05,
+        "rgb_relative_l2": 0.0005855760926050863,
+        "png_sha256": "710d050d5da35de5d822abc2f43f9ccd22e398c7cbb3ae6b2ee50b66e242acd2",
+        "linear_dispatch_groups": {
+          "text": {
+            "Cpu": 128,
+            "Vulkan": 0
+          },
+          "dit": {
+            "Cpu": 484,
+            "Vulkan": 0
+          }
+        },
+        "maximum_velocity_relative_l2": 9.781360216977687e-05,
+        "comparison_sha256": "ed62d9bdcc85afa6acbf017fa01e5f7dc3da98ee68e0b6c1e1b36fc3b4beb276",
+        "trace_manifest_sha256": "ed4ba64cebdd7f36c33b38450651cbd907f790cc7abd89064762d2f725f551d8",
+        "raw_bits_passed": true,
+        "timing_scope": "Correctness trace only; not benchmarked."
+      },
+      "auto-unavailable": {
+        "command": [
+          "/Users/gouzi/.codex/worktrees/e4f5/rust-model-inference/target/release-fast/rust-model-inference",
+          "--model",
+          "/Users/gouzi/Documents/git/rust-model-inference/models/flux-3-image-klein/gguf/flux3-dit.gguf",
+          "--text-encoder",
+          "/Users/gouzi/Documents/git/rust-model-inference/models/flux-3-image-klein/gguf/flux3-text.gguf",
+          "--vae",
+          "/Users/gouzi/Documents/git/rust-model-inference/models/flux-3-image-klein/gguf/flux3-vae.gguf",
+          "--prompt",
+          "A red cube on a white table.",
+          "--resolution",
+          "64",
+          "--steps",
+          "2",
+          "--seed",
+          "42",
+          "--threads",
+          "8",
+          "--compute",
+          "auto",
+          "--out",
+          "/Users/gouzi/.codex/worktrees/e4f5/rust-model-inference/target/flux3-dispatch-20261025/auto-unavailable.png"
+        ],
+        "environment": {
+          "VK_ICD_FILENAMES": "/Users/gouzi/.codex/worktrees/e4f5/rust-model-inference/target/flux3-dispatch-20261025/unavailable.json",
+          "VK_DRIVER_FILES": "/Users/gouzi/.codex/worktrees/e4f5/rust-model-inference/target/flux3-dispatch-20261025/unavailable.json",
+          "RMI_PARITY_TRACE": "/Users/gouzi/.codex/worktrees/e4f5/rust-model-inference/target/flux3-dispatch-20261025/auto-unavailable.jsonl",
+          "RMI_PARITY_FILTER": "flux3.token_ids,flux3.text,flux3.noise,flux3.image.input,flux3.txt.input,content_mode_blocks.image.0,txt_mode_blocks.0,content_mode_blocks.image.1,txt_mode_blocks.1,content_mode_blocks.image.2,txt_mode_blocks.2,content_mode_blocks.image.3,txt_mode_blocks.3,content_mode_blocks.image.4,txt_mode_blocks.4,single_blocks.0,single_blocks.1,single_blocks.2,single_blocks.3,single_blocks.4,single_blocks.5,single_blocks.6,single_blocks.7,single_blocks.8,single_blocks.9,single_blocks.10,single_blocks.11,single_blocks.12,single_blocks.13,single_blocks.14,single_blocks.15,single_blocks.16,single_blocks.17,single_blocks.18,single_blocks.19,single_blocks.20,single_blocks.21,single_blocks.22,single_blocks.23,single_blocks.24,single_blocks.25,single_blocks.26,single_blocks.27,flux3.velocity,flux3.latent.0,flux3.latent.1,flux3.vae_input,z_image.vae.rgb_channels",
+          "RMI_COMPUTE_TRACE": "1"
+        },
+        "exit_code": 0,
+        "comparison_exit": 0,
+        "passed": 89,
+        "checkpoints": 89,
+        "max_relative_l2": 0.0005855760926050863,
+        "text_relative_l2": 1.543833870084055e-05,
+        "rgb_relative_l2": 0.0005855760926050863,
+        "png_sha256": "710d050d5da35de5d822abc2f43f9ccd22e398c7cbb3ae6b2ee50b66e242acd2",
+        "linear_dispatch_groups": {
+          "text": {
+            "Cpu": 128,
+            "Vulkan": 0
+          },
+          "dit": {
+            "Cpu": 484,
+            "Vulkan": 0
+          }
+        },
+        "maximum_velocity_relative_l2": 9.781360216977687e-05,
+        "comparison_sha256": "ed62d9bdcc85afa6acbf017fa01e5f7dc3da98ee68e0b6c1e1b36fc3b4beb276",
+        "trace_manifest_sha256": "78bd9d0ab127e9397f39633795ba336b73c303ae04e2800411a25486bde0099b",
+        "raw_bits_passed": true,
+        "timing_scope": "Correctness trace only; not benchmarked."
+      },
+      "auto-moltenvk": {
+        "command": [
+          "/Users/gouzi/.codex/worktrees/e4f5/rust-model-inference/target/release-fast/rust-model-inference",
+          "--model",
+          "/Users/gouzi/Documents/git/rust-model-inference/models/flux-3-image-klein/gguf/flux3-dit.gguf",
+          "--text-encoder",
+          "/Users/gouzi/Documents/git/rust-model-inference/models/flux-3-image-klein/gguf/flux3-text.gguf",
+          "--vae",
+          "/Users/gouzi/Documents/git/rust-model-inference/models/flux-3-image-klein/gguf/flux3-vae.gguf",
+          "--prompt",
+          "A red cube on a white table.",
+          "--resolution",
+          "64",
+          "--steps",
+          "2",
+          "--seed",
+          "42",
+          "--threads",
+          "8",
+          "--compute",
+          "auto",
+          "--out",
+          "/Users/gouzi/.codex/worktrees/e4f5/rust-model-inference/target/flux3-dispatch-20261025/auto-moltenvk.png"
+        ],
+        "environment": {
+          "VK_ICD_FILENAMES": "/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json",
+          "VK_DRIVER_FILES": "/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json",
+          "RMI_PARITY_TRACE": "/Users/gouzi/.codex/worktrees/e4f5/rust-model-inference/target/flux3-dispatch-20261025/auto-moltenvk.jsonl",
+          "RMI_PARITY_FILTER": "flux3.token_ids,flux3.text,flux3.noise,flux3.image.input,flux3.txt.input,content_mode_blocks.image.0,txt_mode_blocks.0,content_mode_blocks.image.1,txt_mode_blocks.1,content_mode_blocks.image.2,txt_mode_blocks.2,content_mode_blocks.image.3,txt_mode_blocks.3,content_mode_blocks.image.4,txt_mode_blocks.4,single_blocks.0,single_blocks.1,single_blocks.2,single_blocks.3,single_blocks.4,single_blocks.5,single_blocks.6,single_blocks.7,single_blocks.8,single_blocks.9,single_blocks.10,single_blocks.11,single_blocks.12,single_blocks.13,single_blocks.14,single_blocks.15,single_blocks.16,single_blocks.17,single_blocks.18,single_blocks.19,single_blocks.20,single_blocks.21,single_blocks.22,single_blocks.23,single_blocks.24,single_blocks.25,single_blocks.26,single_blocks.27,flux3.velocity,flux3.latent.0,flux3.latent.1,flux3.vae_input,z_image.vae.rgb_channels",
+          "RMI_COMPUTE_TRACE": "1"
+        },
+        "exit_code": 0,
+        "comparison_exit": 0,
+        "passed": 89,
+        "checkpoints": 89,
+        "max_relative_l2": 0.0005895364751341128,
+        "text_relative_l2": 1.256642044297466e-05,
+        "rgb_relative_l2": 0.0005895364751341128,
+        "png_sha256": "bf35b5d7a32938122b00f91f29d0204e842ffa209182de92a6646b5a32f8c4f9",
+        "linear_dispatch_groups": {
+          "text": {
+            "Cpu": 0,
+            "Vulkan": 128
+          },
+          "dit": {
+            "Cpu": 0,
+            "Vulkan": 484
+          }
+        },
+        "maximum_velocity_relative_l2": 7.271079217468109e-05,
+        "comparison_sha256": "a34c8399bf5d997cdb0bb8a6fc585e9c24e2cd5ad3ddb4167541709d8ba80b08",
+        "trace_manifest_sha256": "b30f4d3886cccf4af19c1f37f6325b8f48a5df08efc6e49f605d405a1d2ada65",
+        "raw_bits_passed": true,
+        "timing_scope": "Correctness trace only; not benchmarked."
+      },
+      "auto-moltenvk-256-16": {
+        "command": [
+          "/Users/gouzi/.codex/worktrees/e4f5/rust-model-inference/target/release-fast/rust-model-inference",
+          "--model",
+          "/Users/gouzi/Documents/git/rust-model-inference/models/flux-3-image-klein/gguf/flux3-dit.gguf",
+          "--text-encoder",
+          "/Users/gouzi/Documents/git/rust-model-inference/models/flux-3-image-klein/gguf/flux3-text.gguf",
+          "--vae",
+          "/Users/gouzi/Documents/git/rust-model-inference/models/flux-3-image-klein/gguf/flux3-vae.gguf",
+          "--prompt",
+          "A red cube on a white table.",
+          "--resolution",
+          "256",
+          "--steps",
+          "16",
+          "--seed",
+          "42",
+          "--threads",
+          "8",
+          "--compute",
+          "auto",
+          "--out",
+          "/Users/gouzi/.codex/worktrees/e4f5/rust-model-inference/target/flux3-dispatch-20261025/auto-256-16.png"
+        ],
+        "environment": {
+          "VK_ICD_FILENAMES": "/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json",
+          "VK_DRIVER_FILES": "/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json",
+          "RMI_PARITY_TRACE": "/Users/gouzi/.codex/worktrees/e4f5/rust-model-inference/target/flux3-dispatch-20261025/auto-256-16.jsonl",
+          "RMI_PARITY_FILTER": "flux3.token_ids,flux3.text,flux3.noise,flux3.image.input,flux3.txt.input,content_mode_blocks.image.0,txt_mode_blocks.0,content_mode_blocks.image.1,txt_mode_blocks.1,content_mode_blocks.image.2,txt_mode_blocks.2,content_mode_blocks.image.3,txt_mode_blocks.3,content_mode_blocks.image.4,txt_mode_blocks.4,single_blocks.0,single_blocks.1,single_blocks.2,single_blocks.3,single_blocks.4,single_blocks.5,single_blocks.6,single_blocks.7,single_blocks.8,single_blocks.9,single_blocks.10,single_blocks.11,single_blocks.12,single_blocks.13,single_blocks.14,single_blocks.15,single_blocks.16,single_blocks.17,single_blocks.18,single_blocks.19,single_blocks.20,single_blocks.21,single_blocks.22,single_blocks.23,single_blocks.24,single_blocks.25,single_blocks.26,single_blocks.27,flux3.velocity,flux3.latent.0,flux3.latent.1,flux3.vae_input,z_image.vae.rgb_channels",
+          "RMI_COMPUTE_TRACE": "1"
+        },
+        "exit_code": 0,
+        "comparison_exit": 0,
+        "passed": 677,
+        "checkpoints": 677,
+        "max_relative_l2": 0.001195376750931726,
+        "text_relative_l2": 1.256642044297466e-05,
+        "rgb_relative_l2": 9.785197528460855e-05,
+        "linear_dispatch_groups": {
+          "text": {
+            "Cpu": 0,
+            "Vulkan": 128
+          },
+          "dit": {
+            "Cpu": 0,
+            "Vulkan": 9760
+          }
+        },
+        "vulkan_host_linear_calls": 9888,
+        "cpu_host_linear_calls": 0,
+        "gpu_errors_or_fallbacks": 0,
+        "device_cumulative": {
+          "submissions": 10593,
+          "static_uploads": 465,
+          "static_upload_bytes": 16215704640,
+          "host_write_bytes": 24411422756,
+          "host_read_bytes": 26546536576,
+          "transfer_submissions": 0,
+          "live_allocation_bytes": 9799340880,
+          "peak_allocation_bytes": 9799340880
+        },
+        "png_sha256": "874ee833d1a9fb0317a3c6129ed7da44bad60a0f5f55e63e71c933e18c686491",
+        "maximum_velocity_relative_l2": 2.7892121356437005e-05,
+        "comparison_sha256": "0504665141fb59611d3ccaadd3f1c1c0d1d6ec4f6a26a974410b843926d10291",
+        "trace_manifest_sha256": "9794635e662c92f1b9624a3eca1e9cd79f2e97a45488f6fab0b72be88f836e64",
+        "raw_bits_passed": true,
+        "timing_scope": "Correctness trace only; not benchmarked."
+      },
+      "auto-references": {
+        "command": [
+          "/Users/gouzi/.codex/worktrees/e4f5/rust-model-inference/target/release-fast/rust-model-inference",
+          "--model",
+          "/Users/gouzi/Documents/git/rust-model-inference/models/flux-3-image-klein/gguf/flux3-dit.gguf",
+          "--text-encoder",
+          "/Users/gouzi/Documents/git/rust-model-inference/models/flux-3-image-klein/gguf/flux3-text.gguf",
+          "--vae",
+          "/Users/gouzi/Documents/git/rust-model-inference/models/flux-3-image-klein/gguf/flux3-vae.gguf",
+          "--prompt",
+          "A red cube on a white table.",
+          "--resolution",
+          "64",
+          "--steps",
+          "2",
+          "--seed",
+          "42",
+          "--threads",
+          "8",
+          "--reference",
+          "/Users/gouzi/.codex/worktrees/e4f5/rust-model-inference/target/flux3-reference-0.png",
+          "--reference",
+          "/Users/gouzi/.codex/worktrees/e4f5/rust-model-inference/target/flux3-reference-1.png",
+          "--compute",
+          "auto",
+          "--out",
+          "/Users/gouzi/.codex/worktrees/e4f5/rust-model-inference/target/flux3-dispatch-20261025/auto-references.png"
+        ],
+        "exit_code": 0,
+        "comparison_exit": 0,
+        "passed": 103,
+        "checkpoints": 103,
+        "max_relative_l2": 0.0016937607569088228,
+        "text_relative_l2": 1.256642044297466e-05,
+        "rgb_relative_l2": 0.000275344927256648,
+        "vulkan_linear_dispatch_groups": 678,
+        "cpu_linear_dispatch_groups": 0,
+        "png_sha256": "bca353ce6c2f0b8b5673ee9fa4a9f18342b4dae745c43be038ecce14c7524ce9",
+        "maximum_velocity_relative_l2": 0.0008332908502660837,
+        "comparison_sha256": "d792e04ce205fd43ecefea7b7142c00caf5f3b27b68bad583efaffc494bc7b99",
+        "trace_manifest_sha256": "fe1765ffbdda413ba8723a80109b9b6b74abd8189b0c9d01f4f6e42a5c206cdb",
+        "raw_bits_passed": true,
+        "timing_scope": "Correctness trace only; not benchmarked."
+      }
+    },
+    "tests": {
+      "cpu_qwen_trunk": {
+        "passed": 28,
+        "failed": 0
+      },
+      "cpu_shared_linear": {
+        "passed": 4,
+        "failed": 0,
+        "ignored": 1
+      },
+      "cpu_flux3": {
+        "passed": 6,
+        "failed": 0,
+        "ignored": 3
+      },
+      "scalar_no_device": {
+        "passed": 1,
+        "builds": [
+          "CPU-only",
+          "vulkan,parity-trace"
+        ],
+        "environment": "RMI_SCALAR=1",
+        "red_green_verified": true
+      },
+      "hidden_capture_policy_without_vulkan": {
+        "passed": 1,
+        "scalar_override_passed": true,
+        "red_green_verified": true
+      },
+      "hardware_hidden_capture": {
+        "passed": 1,
+        "tokens": 257,
+        "padding": true,
+        "tiling": true,
+        "cpu_scope_prevents_submissions": true
+      },
+      "hardware_dit_upload_reuse": {
+        "passed": 1
+      },
+      "hardware_injected_device_failure": {
+        "passed": 1,
+        "scope": "Auto falls back, forced Vulkan returns error without output writes"
+      },
+      "whole_lib_cpu_fallback": {
+        "result": [
+          "test result: FAILED. 1346 passed; 29 failed; 165 ignored; 0 measured; 0 filtered out; finished in 38.10s"
+        ],
+        "failed_names": [
+          "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+          "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+          "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+          "models::clm::tests::matches_reference_golden_vectors",
+          "models::clm::tests::rejects_wrong_embedding_width",
+          "models::diffusion::z_image::dit::tests::attention_matches_the_ggml_neon_softmax_and_value_reduction",
+          "models::diffusion::z_image::dit::tests::silu_mul_inplace_matches_ggml_neon_activation_dit",
+          "models::diffusion::z_image::dit::tests::torch_mt19937_recomputes_the_final_sixteen_values",
+          "models::diffusion::z_image::text::tests::qwen_attention_softmax_matches_the_pinned_ggml_neon_reduction",
+          "models::diffusion::z_image::text::tests::silu_mul_inplace_matches_pinned_ggml_neon_activation",
+          "models::diffusion::z_image::vae::tests::silu_matches_pinned_ggml_neon_vector_path",
+          "models::funasr::encoder::parity_tests::fsmn_rounds_product_before_adding_like_ggml",
+          "models::funasr::encoder::parity_tests::layernorm_accumulates_variance_in_ggml_neon_groups",
+          "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+          "models::gemma4::trunk::tests::gemma4_trace_rows_match_batch_one_raw_bits",
+          "models::gemma4::trunk::tests::per_layer_bf16_projection_matches_pinned_scalar_dot_bits",
+          "models::gemma4::trunk::tests::per_layer_projection_rejects_non_bf16_weight",
+          "models::gemma4::trunk::tests::per_layer_projection_rejects_wrong_bf16_storage_length",
+          "models::qwen35::trunk::config::tests::qwen35_config_rejects_invalid_tensor_dimensions",
+          "models::qwen35::trunk::tests::qwen35_trace_metadata_is_independent_of_prefill_batch_size",
+          "models::qwen35::vision::tests::layer_norm_stats_match_ggml_grouped_f32_variance",
+          "ops::argmax::tests::all_negative",
+          "ops::argmax::tests::large_random",
+          "ops::argmax::tests::middle_max",
+          "ops::argmax::tests::tail_handles_non_aligned_lengths",
+          "ops::argmax::tests::ties_pick_lowest_index",
+          "ops::matmul::neon_tests::neon_softmax_matches_ggml_vector_exp_and_f64_sum",
+          "ops::rope::tests::rope_neox_inplace_simd_matches_scalar_fallback",
+          "vulkan::tests::initializes_with_homebrew_moltenvk"
+        ],
+        "new_failures": [],
+        "baseline_failures_now_pass": []
+      }
+    },
+    "limitations": [
+      "Earlier Linux GPU host refused SSH connections twice; corrected-path Linux hardware validation/performance not rerun.",
+      "Previous 256/512 Linux benchmark results remain historical and do not measure this correction.",
+      "The device-enabled whole library suite is not claimed green; focused hardware checks are separate.",
+      "Full GPU residency and native BF16 activation parity remain unsupported."
+    ],
+    "local_evidence_directory": "/Users/gouzi/.codex/worktrees/e4f5/rust-model-inference/target/flux3-dispatch-20261025"
   }
 }

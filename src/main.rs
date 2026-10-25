@@ -171,7 +171,6 @@ fn main() {
             .and_then(MetaValue::to_string_val)
             == Some("flux3")
     }) {
-        app::init_rayon_global_pool(n_threads);
         app::run_or_exit(app::run_flux3_cli(source.clone(), &options, n_threads));
         return;
     }

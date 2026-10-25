@@ -58,9 +58,16 @@ is not part of this adapter.
 Build with `--features vulkan` (add `parity-trace` for alignment) and add
 `--gpu` or `--compute auto` to the CLI command above. DiT BF16 projections use
 the existing Vulkan linear executor with F32 activations, a bounded 128-row
-staging buffer, and weight uploads retained across sampling steps. Existing
-Vulkan attention and supported F16 VAE convolutions also offload. The text
-encoder, normalization, RoPE, sampler and remaining operations run on CPU.
+staging buffer, and weight uploads retained across sampling steps. DiT and
+Qwen text projections
+share `LinearExecutor` for CPU, Vulkan and automatic CPU fallback; the model
+does not select a separate CPU matmul implementation. QKV and FFN gate/up
+projections share activation preparation. The FLUX3 entry point uses only
+`ComputePool` and does not initialize Rayon.
+
+Existing Vulkan attention and supported F16 VAE convolutions also offload.
+Normalization, RoPE, masked text attention, the sampler and remaining operations
+run on CPU. Scalar selection is enforced inside the shared linear executor.
 `--compute vulkan` still requires a fully GPU-resident model and is rejected
 by the diffusion CLI; use `--compute auto` for this hybrid adapter.
 
@@ -105,6 +112,58 @@ shared VAE RGB trace has a legacy H,W,C shape label with planar payload; the
 Oracle preserves that exact trace schema.
 
 ## Validation evidence
+
+### Shared-dispatch correction (2026-10-25)
+
+The FLUX3 entry point no longer initializes Rayon. Both CPU and GPU DiT
+projections use the shared linear executor; Qwen hidden-layer extraction also
+uses that executor without forcing a CPU scope. CPU workers use `ComputePool`.
+The executor selects CPU before device probing in scalar mode, preserves CPU
+scopes, and handles Auto fallback without changing model code.
+
+The same corrected `release-fast` binary (`vulkan,parity-trace`) uses the real
+released GGUFs and pinned F32 Oracle on Apple M3 Max / MoltenVK 1.4.2, with
+8 CPU threads. The original bounds, canonical manifests and raw-bit ID/noise
+checks are unchanged.
+
+| Case | Passed checkpoints | Text relative L2 | RGB relative L2 |
+| --- | ---: | ---: | ---: |
+| CPU / 64x64, two steps | 89/89 | 0.0000154383 | 0.000585576 |
+| Auto, unavailable device / same input | 89/89 | 0.0000154383 | 0.000585576 |
+| Auto, MoltenVK / same input | 89/89 | 0.0000125664 | 0.000589536 |
+| Auto, MoltenVK / two references | 103/103 | 0.0000125664 | 0.000275345 |
+
+The GPU text-to-image run records 128 text and 484 DiT host-linear dispatch
+groups on Vulkan, with zero CPU projection fallback. CPU and unavailable-device
+Auto instead record those same groups on CPU, with no Vulkan linear execution.
+A group may contain QKV or gate/up projections; these counts are not individual
+matrix multiplications or whole-process device submission counts.
+
+CPU checks pass: 28 Qwen trunk tests, four shared-linear tests and six FLUX3
+tests. The no-device scalar and hidden-capture policy regressions were verified
+red/green. Hardware checks pass for 257-token masked/tiled hidden capture, a
+CPU scope that prevents submissions, DiT staging/upload reuse, and injected
+device failure (Auto fallback versus forced-Vulkan error).
+
+The whole-library run with unavailable ICD overrides reports 1346 passed,
+29 failed and 165 ignored. Its failure-name set matches the saved actual-main
+baseline exactly; the suite is not green. Full names and all corrected-runtime
+commands, metrics, source/binary/trace hashes are recorded under
+`shared_dispatch_correction` in `validation.json`.
+
+Reproduce hardware hidden capture separately from other device tests:
+
+```sh
+cargo test --offline --profile release-fast --features vulkan,parity-trace --lib \
+  hidden_layer_capture_auto_dispatches_with_padding_and_tiles -- --ignored --test-threads=1
+RMI_SCALAR=1 cargo test --offline --profile release-fast --features vulkan,parity-trace --lib \
+  scalar_linear_selection_does_not_initialize_a_device -- --ignored --test-threads=1
+```
+
+### Earlier runtime validation (2026-10-23)
+
+The following Linux/arm64 snapshots predate the shared-dispatch correction;
+use their recorded source hashes when reproducing their exact values.
 
 The runtime checks all 398 text tensors for the released BF16 dtype, shape and
 byte length before entering the shared Qwen loader. It also validates the
@@ -163,7 +222,7 @@ canonical checkpoint order/shape/count. Token IDs and initial noise are exact.
   pre-existing syntax in `src/prompt/jinja_compat.rs`; no source workaround or
   global environment change is required.
 
-### GPU execution evidence and regressions
+### Earlier GPU execution evidence and regressions
 
 The Linux Vulkan runs use `AMD Radeon Graphics (RADV NAVI31)`, the Radeon ICD,
 and a device exposing 51,522,830,336 bytes of VRAM. They use the same released
@@ -193,6 +252,19 @@ text-input validation fix; its numerical operations are unchanged for the
 accepted official component. Source/binary hashes and Oracle provenance are
 recorded per case in `validation.json`; final release performance runs exercise
 the updated validator. Trace duration is excluded from performance data.
+
+The 2026-10-25 shared-dispatch correction was rerun on the Apple M3 Max with
+MoltenVK using the updated binary and the same 256x256/16-step workload. It
+passes **677/677 canonical checkpoints**, with text relative L2
+**0.0000125664**, worst intermediate relative L2 **0.00119538**
+(`single_blocks.25`, occurrence 3), maximum velocity relative L2
+**0.0000278921**, and final RGB relative L2 **0.0000978520**. All 128 text
+projection groups and 9,760 DiT groups used Vulkan; CPU linear fallback was
+zero. The run had 10,593 device submissions and no GPU errors or fallback.
+This is correctness evidence only; its trace duration is not a performance
+benchmark. The exact command, filter, hashes and counters are in the
+`shared_dispatch_correction.cases.auto-moltenvk-256-16` entry in
+`validation.json`.
 
 Hardware regressions cover a 257-row BF16 projection (two staging tiles and a
 tail), repeated execution without another static upload, scalar-mode CPU
@@ -226,7 +298,13 @@ input-contract gap; it found no remaining critical or important code issues.
 Shared Qwen trunk regressions pass (28 passed, 1 ignored). Earlier baseline
 comparisons and failure names remain recorded in `validation.json`.
 
-### Performance (2026-10-23)
+### Performance (2026-10-23, before the shared-dispatch correction)
+
+These measurements describe the earlier runtime with CPU-only text encoding
+and a separate DiT CPU projection path. They remain historical evidence for
+that binary; they are not benchmarks of the corrected shared-dispatch path.
+The Linux host was inaccessible on 2026-10-25, so its 256/512 timings have not
+been rerun for the correction. Traced correctness runs are not performance data.
 
 The same `release` binary (`--features vulkan`, without `parity-trace`) is timed
 on the EPYC 9334 host with 16 Rust threads and a 16-core cgroup quota. GPU runs
@@ -257,7 +335,7 @@ deterministic within each backend; between CPU/GPU, decoded RGB8 pixels have
 maximum absolute difference 1/255. These two-step PNG checks are separate from
 the 16-step official comparison above.
 
-The final runtime also completes a **512x512/two-step single pair**. Latency
+That runtime also completes a **512x512/two-step single pair**. Latency
 through the PNG announcement is **approximately 1593.82s CPU / 635.03s GPU**
 (about **2.51x**), with the same final release binary, weights, caption, seed
 and 16 threads. Both generations exit with code 0; decoded RGB8 pixels differ
@@ -297,5 +375,5 @@ bound; the difference is not resolved by changing a comparison threshold.
 
 No rectangular image, Base/FP8/NVFP4 or native BF16 activation parity claim
 is made. This is an experimental CPU/hybrid Vulkan adapter; numerical Oracle
-coverage reaches 256x256/16 steps. A fully GPU-resident pipeline remains
+coverage for the earlier runtime reaches 256x256/16 steps. A fully GPU-resident pipeline remains
 unsupported.

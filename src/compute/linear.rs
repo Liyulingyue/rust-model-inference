@@ -57,6 +57,11 @@ impl<'model, 'weights> LinearExecutor<'model, 'weights> {
         max_rows: usize,
         pool: Arc<ComputePool>,
     ) -> Result<Self, ComputeError> {
+        let policy = if crate::ops::scalar_mode() {
+            ComputePolicy::Cpu
+        } else {
+            policy
+        };
         if max_rows == 0 || bindings.is_empty() {
             return Err(invalid("linear requires bindings and nonzero rows"));
         }
@@ -426,6 +431,38 @@ mod tests {
 
     fn pool() -> Arc<ComputePool> {
         Arc::new(ComputePool::new(2))
+    }
+
+    #[test]
+    #[ignore = "run in a fresh process with RMI_SCALAR=1"]
+    fn scalar_linear_selection_does_not_initialize_a_device() {
+        assert!(crate::ops::scalar_mode());
+        let weight = Weight::from_quantized(QuantizedTensor::F32 {
+            data: vec![2.0, 3.0],
+            n_in: 2,
+            n_out: 1,
+        });
+        for policy in [ComputePolicy::Auto, ComputePolicy::Vulkan] {
+            let mut executor = LinearExecutor::new(
+                policy,
+                vec![LinearBinding {
+                    weight: &weight,
+                    mode: LinearMode::Prepared,
+                }],
+                1,
+                pool(),
+            )
+            .unwrap();
+            assert!(!executor.uses_vulkan());
+            let mut output = [f32::NAN];
+            assert_eq!(
+                executor
+                    .run(executor.id(0).unwrap(), &[4.0, 5.0], 1, &mut output)
+                    .unwrap(),
+                UsedBackend::Cpu
+            );
+            assert_eq!(output, [23.0]);
+        }
     }
 
     #[cfg(feature = "vulkan")]

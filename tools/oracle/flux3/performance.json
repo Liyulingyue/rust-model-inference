@@ -402,5 +402,6 @@
       "SSH disconnected during CPU generation. A detached reader continued the same process, reconstructed its start (7.18 ms from kernel start), and recorded completion. Exit code 0 was recovered from matching zombie process stat field 52. CPU latency is approximate."
     ],
     "raw_archive_sha256": "e54fba5ff35e5d853b2775e777db6fd4963a2b117aaa54171992d682f4af8439"
-  }
+  },
+  "revision_scope": "Historical measurements before the 2026-10-25 shared-dispatch correction. They measure CPU-only text encoding and the previous DiT CPU path, not the corrected shared CPU/Vulkan executor. The earlier Linux GPU host refused SSH connections on 2026-10-25; corrected-path Linux performance has not been remeasured. See validation.json shared_dispatch_correction for correctness evidence; trace durations are not benchmarks."
 }
