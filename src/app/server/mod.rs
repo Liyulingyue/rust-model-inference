@@ -1132,6 +1132,24 @@ fn build_timestral(options: &CliOptions) -> Result<TimestralBackend, String> {
     let source: &'static Arc<dyn TensorSource> = Box::leak(Box::new(source));
     let model: TimestralModel<'static> =
         TimestralModel::from_source_with_compute(source.as_ref(), options.compute_policy())?;
+    // The device path refuses the formats it has no kernel for. A server
+    // that would fail every request is worse than one that refuses to
+    // start, so the check happens here.
+    #[cfg(feature = "vulkan")]
+    if options.compute_policy() == crate::compute::ComputePolicy::Vulkan {
+        let refused: Vec<String> = model
+            .matrix_types()
+            .iter()
+            .filter(|format| !crate::vulkan::timestral::gpu_supports(**format))
+            .map(|format| format!("{format:?}"))
+            .collect();
+        if !refused.is_empty() {
+            return Err(format!(
+                "the Timestral device path has no kernel for {refused:?}; \
+                 use --compute cpu or --compute auto"
+            ));
+        }
+    }
     let model: &'static TimestralModel<'static> = Box::leak(Box::new(model));
     Ok(TimestralBackend {
         model: Arc::new(model),

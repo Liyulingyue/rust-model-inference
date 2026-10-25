@@ -400,6 +400,18 @@ impl<'a> TimestralModel<'a> {
             .unwrap_or_else(|| panic!("missing Timestral tensor {name}"))
     }
 
+    /// The weight formats the checkpoint holds.
+    ///
+    /// The device path reads this before it starts, so a checkpoint it
+    /// cannot run is reported at load time instead of on the first
+    /// request.
+    pub(crate) fn matrix_types(&self) -> Vec<GGMLType> {
+        let mut types: Vec<GGMLType> = self.matrices.values().map(Matrix::ggml_type).collect();
+        types.sort_by_key(|value| format!("{value:?}"));
+        types.dedup();
+        types
+    }
+
     /// Look up a matmul weight.
     pub(crate) fn matrix(&self, name: &str) -> &Matrix<'a> {
         self.matrices

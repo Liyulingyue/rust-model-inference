@@ -23,6 +23,21 @@ pub(crate) struct Transformer {
     context: &'static VulkanContext,
 }
 
+/// Whether the device path can run a weight format.
+///
+/// The K-quant formats have no vectorised kernel, and F16 has no
+/// device kernel at all, so a checkpoint that mixes them in cannot run
+/// on the device.
+pub(crate) fn gpu_supports(format: crate::core::tensor::GGMLType) -> bool {
+    !matches!(
+        format,
+        crate::core::tensor::GGMLType::Q4K
+            | crate::core::tensor::GGMLType::Q5K
+            | crate::core::tensor::GGMLType::Q6K
+            | crate::core::tensor::GGMLType::F16
+    )
+}
+
 impl Transformer {
     pub(crate) fn capacity(&self) -> usize {
         self.capacity
