@@ -1,6 +1,6 @@
-# Timestral-209M CPU / Vulkan F32
+# Timestral-209M CPU / Vulkan
 
-原生 Rust 预测，不依赖 Python 推理或外部加速库。显式 `general.architecture=timestral`，仅接受本目录对应的官方 209M 配置和 F32 权重；其他尺寸/量化格式会被拒绝。
+原生 Rust 预测，不依赖 Python 推理或外部加速库。显式 `general.architecture=timestral`，仅接受本目录对应的官方 209M 配置；其他尺寸会被拒绝。权重可以是 F32，也可以是 block 量化的（Q8_0 / Q4_0 / Q4_1 / Q4_K / Q5_K / Q6_K）或半精度的（F16 / BF16），逐张量读取 `general.file_type` 决定分派。
 
 固定输入：
 
@@ -33,6 +33,27 @@ cargo build --profile release-fast --bin rust-model-inference
 
 `null` 表示缺失值。`context` 支持 `[time]` 或 `[variate][time]`；二维输入表示同一个序列的多变量联合预测。输出 JSON 为 `quantile_levels`（21 个分位点）和 `quantiles[variate][horizon][quantile]`，中位数在索引 10。
 
+### 量化权重
+
+F32 权重可以再量化成更小的 GGUF。逐张量决定：行宽（`dims[0]`，即 `n_in`）不是块大小整数倍的保持 F32，1-D 张量（norm、bias）也保持 F32。
+
+```sh
+.venv/bin/python -m tools.converter.utils.quantize_gguf \
+  "$MODEL_DIR/Timestral-209M-F32.gguf" \
+  "$MODEL_DIR/Timestral-209M-q8_0.gguf" --format q8_0
+```
+
+| 格式 | 块 | 大小 | 设备路径 | forecast p95 中位相对误差 |
+|---|---|---|---|---|
+| F32 | — | 837 MB | 有（转置浮点 matmul） | — |
+| Q8_0 | 32 | 223 MB | 有（Q8_0 激活 + 权重 matmul） | 0.6% |
+| Q6_K | 256 | 173 MB | 无（无向量化设备 kernel） | 1.4% |
+| Q4_K | 256 | 119 MB | 无 | 3.5% |
+
+`representation.patch_proj` 的两个矩阵行宽只有 64，因此保持 F32（Q8_0 之外的格式都需要 256 对齐）。K-quant 没有向量化设备 kernel，设备路径会明确拒绝，`--compute auto` 回退 CPU。
+
+量化检查点的容差按 `general.file_type` 分档，`tools/oracle/timestral/parity.py` 自动读取。
+
 可选字段：
 
 - `observation_mask`：`[target variate][context time]` 布尔矩阵。
@@ -42,7 +63,9 @@ cargo build --profile release-fast --bin rust-model-inference
 - `max_context`：默认 32768，范围 1..32768，只保留最近的历史并向左补齐 patch；非负裁剪的资格仍基于完整输入历史。
 - `per_shot_horizon_patches`：默认 32，范围 1..32。超过一个 block 时使用中位数反馈，已知未来协变量使用真实值，past-only 协变量使用缺失值。每个 block 都应用 advancing refine frame。
 
-不接受未知 JSON 字段。暂不提供 categorical target encoding、批次 API 或 HTTP；categorical 协变量不会被静默当作数值协变量处理。其他 Timestral 尺寸和量化格式未经验证。
+不接受未知 JSON 字段。暂不提供 categorical target encoding 或批次 API；categorical 协变量不会被静默当作数值协变量处理。其他 Timestral 尺寸未经验证。
+
+HTTP：`rust-model-server --model <Timestral GGUF>` 会按 `general.architecture` 探测到 timestral 后端，只挂 `POST /v1/forecast`，请求体与 `--timestral-request` 文件相同，响应为 `{"quantile_levels": [...], "quantiles": [[target][horizon][quantile]]}`。该后端不挂 `/v1/chat/completions` 等其它路由。
 
 ## GPU 运行
 
