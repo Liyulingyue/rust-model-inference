@@ -1,22 +1,23 @@
 use super::forecast::{scale_row, Row};
+use super::ops::{self, Slot, TimestralOp, TimestralOpKind};
 use super::*;
 
-pub(super) struct Layout {
-    pub(super) rows: usize,
-    pub(super) enc: usize,
-    pub(super) dec: usize,
-    pub(super) context: usize,
-    pub(super) covariates: bool,
-    pub(super) roles: Vec<u8>,
-    pub(super) valid: Vec<bool>,
-    pub(super) first: usize,
+pub(crate) struct Layout {
+    pub(crate) rows: usize,
+    pub(crate) enc: usize,
+    pub(crate) dec: usize,
+    pub(crate) context: usize,
+    pub(crate) covariates: bool,
+    pub(crate) roles: Vec<u8>,
+    pub(crate) valid: Vec<bool>,
+    pub(crate) first: usize,
 }
 
 impl Layout {
-    pub(super) fn seq(&self) -> usize {
+    pub(crate) fn seq(&self) -> usize {
         self.enc + self.dec
     }
-    fn time_allowed(&self, row: usize, q: usize, k: usize) -> bool {
+    pub(crate) fn time_allowed(&self, row: usize, q: usize, k: usize) -> bool {
         let valid = k < self.enc && self.valid[row * self.enc + k];
         if q < self.enc {
             return k < self.enc && ((valid && (self.roles[row] == 2 || k <= q)) || k == q);
@@ -35,13 +36,13 @@ impl Layout {
         let kp = k - self.enc;
         kp == p || (p >= self.context && kp >= self.context && kp <= p)
     }
-    fn variate_allowed(&self, slot: usize, q: usize, k: usize) -> bool {
+    pub(crate) fn variate_allowed(&self, slot: usize, q: usize, k: usize) -> bool {
         q == k
             || ((slot >= self.enc || self.valid[k * self.enc + slot])
                 && !(self.roles[q] != 0 && self.roles[k] == 0)
                 && !(self.roles[q] == 2 && self.roles[k] != 2))
     }
-    pub(super) fn position(&self, slot: usize) -> f32 {
+    pub(crate) fn position(&self, slot: usize) -> f32 {
         let p = if self.covariates {
             slot % self.enc
         } else {
@@ -215,7 +216,11 @@ impl TimestralModel<'_> {
                 if state.as_ref().is_none_or(|gpu| gpu.capacity() < count) {
                     // shortcut: growing the arena reuploads weights; retain uploads if resizing becomes frequent.
                     *state = None;
-                    *state = Some(super::gpu::Transformer::new(context, &self.weights, count)?);
+                    *state = Some(crate::vulkan::timestral::Transformer::new(
+                        context,
+                        &self.weights,
+                        count,
+                    )?);
                 }
                 state.as_ref().unwrap().forward(&x, layout)
             })();
@@ -243,140 +248,244 @@ impl TimestralModel<'_> {
         self.transform_cpu(x, layout)
     }
 
-    fn transform_cpu(&self, mut x: Vec<f32>, layout: &Layout) -> Result<Vec<f32>, String> {
-        let (r, s) = (layout.rows, layout.seq());
-        for layer in 0..24 {
-            let p = format!("transformer.layers.{layer}");
-            for axis in 0..if layer % 4 == 3 { 2 } else { 1 } {
-                let norm = self.norm(&format!("{p}.attn_norms.{axis}"), &x);
-                trace(
-                    &format!("layer.{layer}.attn.{axis}.norm"),
-                    &[r, s, D],
-                    &norm,
-                )?;
-                let attn = self.attention(
-                    &format!("{p}.attns.{axis}"),
-                    &norm,
-                    layout,
-                    axis == 0,
-                    layer,
-                    axis,
-                )?;
-                add(&mut x, &attn);
-            }
-            let norm = self.norm(&format!("{p}.mlp_norm"), &x);
-            let fused = self.linear(&format!("{p}.mlp.w12"), &norm, D, 2 * F);
-            let mut hidden = vec![0.; r * s * F];
-            for (out, inp) in hidden.chunks_exact_mut(F).zip(fused.chunks_exact(2 * F)) {
-                for i in 0..F {
-                    out[i] = inp[i] * crate::ops::silu(inp[F + i]);
-                }
-            }
-            let mlp = self.linear(&format!("{p}.mlp.w3"), &hidden, F, D);
-            add(&mut x, &mlp);
-            trace(&format!("layer.{layer}.output"), &[r, s, D], &x)?;
+    /// Execute the shared op list on the CPU.
+    ///
+    /// This is the CPU twin of `crate::vulkan::timestral::Transformer`: both
+    /// consume `ops::transformer_ops()`, so the layer order, the weight
+    /// names and the tensor layout are defined exactly once.
+    fn transform_cpu(&self, x: Vec<f32>, layout: &Layout) -> Result<Vec<f32>, String> {
+        let mut executor = CpuExecutor::new(self, layout, x)?;
+        for op in ops::transformer_ops() {
+            executor.execute(op)?;
         }
-        let out = self.norm("transformer.out_norm", &x);
-        trace("out_norm", &[r, s, D], &out)?;
-        Ok(out)
+        Ok(executor.take(Slot::Norm))
+    }
+}
+
+/// CPU executor for the shared Timestral op list.
+///
+/// Slots hold owned `Vec<f32>` buffers; the residual stream lives in
+/// `Slot::X` for the whole run, every other slot is scratch.
+struct CpuExecutor<'a, 'w> {
+    model: &'a TimestralModel<'w>,
+    layout: &'a Layout,
+    slots: Vec<Vec<f32>>,
+    count: usize,
+    seq: usize,
+    rows: usize,
+}
+
+impl<'a, 'w> CpuExecutor<'a, 'w> {
+    fn new(
+        model: &'a TimestralModel<'w>,
+        layout: &'a Layout,
+        input: Vec<f32>,
+    ) -> Result<Self, String> {
+        let count = layout.rows * layout.seq();
+        let mut slots = vec![Vec::new(); Slot::COUNT];
+        slots[Slot::X.index()] = input;
+        Ok(Self {
+            model,
+            layout,
+            slots,
+            count,
+            seq: layout.seq(),
+            rows: layout.rows,
+        })
     }
 
-    fn attention(
-        &self,
-        prefix: &str,
-        x: &[f32],
-        layout: &Layout,
-        time: bool,
-        layer: usize,
-        axis: usize,
-    ) -> Result<Vec<f32>, String> {
-        let s = layout.seq();
-        let count = layout.rows * s;
-        let fused = self.linear(&format!("{prefix}.wQKV"), x, D, 3 * D);
-        let mut q = vec![0.; count * D];
-        let mut k = q.clone();
-        let mut v = q.clone();
-        for token in 0..count {
-            for head in 0..HEADS {
-                for dim in 0..HD {
-                    let dst = token * D + head * HD + dim;
-                    let src = token * 3 * D + dim * HEADS + head;
-                    q[dst] = fused[src];
-                    k[dst] = fused[src + D];
-                    v[dst] = fused[src + 2 * D];
-                }
+    fn take(&mut self, slot: Slot) -> Vec<f32> {
+        std::mem::take(&mut self.slots[slot.index()])
+    }
+
+    fn put(&mut self, slot: Slot, values: Vec<f32>) {
+        self.slots[slot.index()] = values;
+    }
+
+    fn borrow(&self, slot: Slot) -> &[f32] {
+        &self.slots[slot.index()]
+    }
+
+    fn execute(&mut self, op: TimestralOp) -> Result<(), String> {
+        let checkpoints = op.trace.clone();
+        match op.kind {
+            TimestralOpKind::RmsNorm {
+                input,
+                weight,
+                output,
+            } => {
+                let dst = {
+                    let src = &self.slots[input.index()];
+                    let scale = self.model.weight(&weight);
+                    // `rms_norm` only touches `min(input.len(), weight.len())`
+                    // elements, so each row has to be normalized on its own.
+                    let mut dst = vec![0.; src.len()];
+                    for (out, inp) in dst.chunks_exact_mut(D).zip(src.chunks_exact(D)) {
+                        crate::ops::rms_norm(inp, scale, out, 1e-6);
+                    }
+                    dst
+                };
+                self.put(output, dst);
             }
-            if time {
-                rotate(
-                    &mut q[token * D..(token + 1) * D],
-                    layout.position(token % s),
-                );
-                rotate(
-                    &mut k[token * D..(token + 1) * D],
-                    layout.position(token % s),
-                );
+            TimestralOpKind::Linear {
+                input,
+                weight,
+                output,
+                n_in,
+                n_out,
+            } => {
+                let dst = {
+                    let src = &self.slots[input.index()];
+                    self.model.linear_named(&weight, src, n_in, n_out)
+                };
+                self.put(output, dst);
             }
-        }
-        trace(
-            &format!("layer.{layer}.attn.{axis}.q"),
-            &[layout.rows, s, HEADS, HD],
-            &q,
-        )?;
-        trace(
-            &format!("layer.{layer}.attn.{axis}.k"),
-            &[layout.rows, s, HEADS, HD],
-            &k,
-        )?;
-        trace(
-            &format!("layer.{layer}.attn.{axis}.v"),
-            &[layout.rows, s, HEADS, HD],
-            &v,
-        )?;
-        let mut out = vec![0.; count * D];
-        out.par_chunks_mut(D).enumerate().for_each(|(token, out)| {
-            let row = token / s;
-            let slot = token % s;
-            let keys = if time { s } else { layout.rows };
-            let mut scores = vec![0.; keys];
-            for head in 0..HEADS {
-                let query = &q[token * D + head * HD..token * D + (head + 1) * HD];
-                for (j, score) in scores.iter_mut().enumerate() {
-                    let allowed = if time {
-                        layout.time_allowed(row, slot, j)
-                    } else {
-                        layout.variate_allowed(slot, row, j)
-                    };
-                    let key = if time { row * s + j } else { j * s + slot };
-                    *score = if allowed {
-                        crate::ops::dot_f32(
-                            query,
-                            &k[key * D + head * HD..key * D + (head + 1) * HD],
-                            HD,
-                        ) / 8.
-                    } else {
-                        f32::NEG_INFINITY
-                    };
-                }
-                crate::ops::softmax_inplace(&mut scores);
-                for (j, score) in scores.iter().enumerate() {
-                    let key = if time { row * s + j } else { j * s + slot };
-                    for dim in 0..HD {
-                        out[head * HD + dim] += score * v[key * D + head * HD + dim];
+            TimestralOpKind::Qkv {
+                fused,
+                q,
+                k,
+                v,
+                rope: _,
+                time,
+            } => {
+                let fused = self.take(fused);
+                let (mut qv, mut kv, mut vv) = (
+                    vec![0.; self.count * D],
+                    vec![0.; self.count * D],
+                    vec![0.; self.count * D],
+                );
+                for token in 0..self.count {
+                    for head in 0..HEADS {
+                        for dim in 0..HD {
+                            let dst = token * D + head * HD + dim;
+                            let src = token * 3 * D + dim * HEADS + head;
+                            qv[dst] = fused[src];
+                            kv[dst] = fused[src + D];
+                            vv[dst] = fused[src + 2 * D];
+                        }
+                    }
+                    if time {
+                        rotate(
+                            &mut qv[token * D..(token + 1) * D],
+                            self.layout.position(token % self.seq),
+                        );
+                        rotate(
+                            &mut kv[token * D..(token + 1) * D],
+                            self.layout.position(token % self.seq),
+                        );
                     }
                 }
+                self.put(q, qv);
+                self.put(k, kv);
+                self.put(v, vv);
             }
-        });
-        let gate = self.linear(&format!("{prefix}._gate"), x, D, D);
-        for (o, g) in out.iter_mut().zip(gate) {
-            *o *= 1. / (1. + (-g).exp());
+            TimestralOpKind::Attention {
+                q,
+                k,
+                v,
+                out,
+                masks: _,
+                roles: _,
+                time,
+            } => {
+                let values = {
+                    let q = &self.slots[q.index()];
+                    let k = &self.slots[k.index()];
+                    let v = &self.slots[v.index()];
+                    self.attention(q, k, v, time)
+                };
+                self.put(out, values);
+            }
+            TimestralOpKind::Gate { attn, gate, .. } => {
+                let mut values = self.take(attn);
+                let gate = self.take(gate);
+                for (o, g) in values.iter_mut().zip(gate) {
+                    *o *= 1. / (1. + (-g).exp());
+                }
+                self.put(attn, values);
+            }
+            TimestralOpKind::SwiGlu { fused, hidden } => {
+                let fused = self.take(fused);
+                let mut hidden_values = vec![0.; self.count * F];
+                for (out, inp) in hidden_values
+                    .chunks_exact_mut(F)
+                    .zip(fused.chunks_exact(2 * F))
+                {
+                    for i in 0..F {
+                        out[i] = inp[i] * crate::ops::silu(inp[F + i]);
+                    }
+                }
+                self.put(hidden, hidden_values);
+            }
+            TimestralOpKind::Add { input, output } => {
+                let addition = self.take(input);
+                let mut acc = self.take(output);
+                for (a, b) in acc.iter_mut().zip(addition) {
+                    *a += b;
+                }
+                self.put(output, acc);
+            }
         }
-        let out = self.linear(&format!("{prefix}.wO"), &out, D, D);
-        trace(
-            &format!("layer.{layer}.attn.{axis}.output"),
-            &[layout.rows, s, D],
-            &out,
-        )?;
-        Ok(out)
+        // Record the parity checkpoints this op produced.
+        for (name, slot) in checkpoints {
+            let values = self.borrow(slot);
+            let shape: Vec<usize> = match slot {
+                Slot::Q | Slot::K | Slot::V => vec![self.rows, self.seq, HEADS, HD],
+                _ => vec![self.rows, self.seq, D],
+            };
+            super::trace(&name, &shape, values)?;
+        }
+        Ok(())
+    }
+
+    /// Dual-axis masked attention.
+    ///
+    /// The time axis attends over the sequence, the variate axis over the
+    /// target rows; `Layout` owns both masks.
+    fn attention(&self, q: &[f32], k: &[f32], v: &[f32], time: bool) -> Vec<f32> {
+        let layout = self.layout;
+        let s = self.seq;
+        let rows = self.rows;
+        let count = self.count;
+        let mut out_values = vec![0.; count * D];
+        // Tokens are independent, so the rayon pool splits them.
+        out_values
+            .par_chunks_mut(D)
+            .enumerate()
+            .for_each(|(token, token_out)| {
+                let row = token / s;
+                let slot = token % s;
+                let keys = if time { s } else { rows };
+                let mut scores = vec![0.; keys];
+                for head in 0..HEADS {
+                    let query = &q[token * D + head * HD..token * D + (head + 1) * HD];
+                    for (j, score) in scores.iter_mut().enumerate() {
+                        let allowed = if time {
+                            layout.time_allowed(row, slot, j)
+                        } else {
+                            layout.variate_allowed(slot, row, j)
+                        };
+                        let key = if time { row * s + j } else { j * s + slot };
+                        *score = if allowed {
+                            crate::ops::dot_f32(
+                                query,
+                                &k[key * D + head * HD..key * D + (head + 1) * HD],
+                                HD,
+                            ) / 8.
+                        } else {
+                            f32::NEG_INFINITY
+                        };
+                    }
+                    crate::ops::softmax_inplace(&mut scores);
+                    for (j, score) in scores.iter().enumerate() {
+                        let key = if time { row * s + j } else { j * s + slot };
+                        for dim in 0..HD {
+                            token_out[head * HD + dim] += score * v[key * D + head * HD + dim];
+                        }
+                    }
+                }
+            });
+        out_values
     }
 }
 

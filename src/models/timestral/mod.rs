@@ -1,8 +1,7 @@
 //! Native F32 inference for the published Timestral-209M checkpoint.
 mod forecast;
-#[cfg(feature = "vulkan")]
-mod gpu;
-mod network;
+pub(crate) mod network;
+pub(crate) mod ops;
 
 use crate::core::tensor::{GGMLType, MetaValue, TensorSource};
 pub use forecast::{Forecast, ForecastRequest, Series};
@@ -10,14 +9,14 @@ use rayon::prelude::*;
 use std::collections::HashMap;
 
 const CONFIG_JSON: &str = include_str!("config.json");
-const D: usize = 768;
-const HEADS: usize = 12;
-const HD: usize = D / HEADS;
-const F: usize = 2048;
-const PS: usize = 32;
-const Q: usize = 21;
-const MEDIAN: usize = 10;
-const LEVELS: [f32; Q] = [
+pub(crate) const D: usize = 768;
+pub(crate) const HEADS: usize = 12;
+pub(crate) const HD: usize = D / HEADS;
+pub(crate) const F: usize = 2048;
+pub(crate) const PS: usize = 32;
+pub(crate) const Q: usize = 21;
+pub(crate) const MEDIAN: usize = 10;
+pub(crate) const LEVELS: [f32; Q] = [
     0.01, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8,
     0.85, 0.9, 0.95, 0.99,
 ];
@@ -26,7 +25,7 @@ pub struct TimestralModel<'a> {
     weights: HashMap<String, &'a [f32]>,
     compute: crate::compute::ComputePolicy,
     #[cfg(feature = "vulkan")]
-    gpu: std::sync::Mutex<Option<gpu::Transformer>>,
+    gpu: std::sync::Mutex<Option<crate::vulkan::timestral::Transformer>>,
 }
 
 fn tensor_contracts() -> Vec<(String, Vec<u64>)> {
@@ -127,17 +126,54 @@ impl<'a> TimestralModel<'a> {
         })
     }
 
-    fn linear(&self, prefix: &str, input: &[f32], n_in: usize, n_out: usize) -> Vec<f32> {
-        let w = self.weights[&format!("{prefix}.weight")];
-        let bias = self.weights.get(&format!("{prefix}.bias"));
-        let mut output = vec![0.; input.len() / n_in * n_out];
+    /// Look up a fully qualified tensor name.
+    pub(crate) fn weight(&self, name: &str) -> &'a [f32] {
+        self.weights
+            .get(name)
+            .copied()
+            .unwrap_or_else(|| panic!("missing Timestral tensor {name}"))
+    }
+
+    /// `weight @ input` for a fully qualified weight name.
+    pub(crate) fn linear_named(
+        &self,
+        name: &str,
+        input: &[f32],
+        n_in: usize,
+        n_out: usize,
+    ) -> Vec<f32> {
+        let w = self.weight(name);
+        let bias = self.weights.get(&format!("{name}.bias")).copied();
+        let n_rows = input.len() / n_in;
+        let mut output = vec![0.; n_rows * n_out];
+        // Rows are independent, so the rayon pool splits them; every worker
+        // keeps the whole weight matrix hot.
         output
             .par_chunks_mut(n_out)
             .zip(input.par_chunks(n_in))
             .for_each(|(out, inp)| {
                 crate::ops::kernel::f32::forward_f32_rows_dispatch(w, inp, out, n_in, n_out, 0, 1);
                 if let Some(b) = bias {
-                    for (v, b) in out.iter_mut().zip(*b) {
+                    for (v, b) in out.iter_mut().zip(b.iter().copied()) {
+                        *v += b;
+                    }
+                }
+            });
+        output
+    }
+
+    fn linear(&self, prefix: &str, input: &[f32], n_in: usize, n_out: usize) -> Vec<f32> {
+        let w = self.weights[&format!("{prefix}.weight")];
+        let bias = self.weights.get(&format!("{prefix}.bias"));
+        let n_rows = input.len() / n_in;
+        let mut output = vec![0.; n_rows * n_out];
+        output
+            .par_chunks_mut(n_out)
+            .zip(input.par_chunks(n_in))
+            .for_each(|(out, inp)| {
+                crate::ops::kernel::f32::forward_f32_rows_dispatch(w, inp, out, n_in, n_out, 0, 1);
+                if let Some(b) = bias {
+                    for (v, b) in out.iter_mut().zip(b.iter().copied()) {
                         *v += b;
                     }
                 }
@@ -172,7 +208,7 @@ fn add(out: &mut [f32], rhs: &[f32]) {
     }
 }
 
-fn trace(name: &str, shape: &[usize], values: &[f32]) -> Result<(), String> {
+pub(crate) fn trace(name: &str, shape: &[usize], values: &[f32]) -> Result<(), String> {
     #[cfg(feature = "parity-trace")]
     if std::env::var_os("RMI_PARITY_TRACE").is_some() {
         crate::parity_trace::checkpoint(&format!("timestral.{name}"), None, shape, values)
