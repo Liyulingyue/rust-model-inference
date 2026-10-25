@@ -1,4 +1,4 @@
-//! Backend-neutral Timestral transformer description.
+//! Backend-neutral Timestral transformer graph.
 //!
 //! The 24-layer Timestral transformer is written **once**, here, as an
 //! ordered list of [`TimestralOp`] values. Two executors consume that same
@@ -11,11 +11,14 @@
 //!
 //! Keeping a single op list is what makes `--compute cpu|vulkan|auto` a
 //! backend switch instead of two independent implementations that can drift.
-//! The op set is intentionally Timestral-specific: partial RoPE, the
-//! time/variate dual attention axes, the sigmoid attention gate and the
-//! absence of a KV cache all differ from the standard decoder layer that
-//! `crate::compute::dense` describes, so a Timestral-local vocabulary is
-//! kept rather than widening the shared one.
+//!
+//! This is the same shape as `crate::compute::dense` (an op vocabulary plus
+//! a slot vocabulary, executed by a CPU and a Vulkan executor), but the
+//! vocabulary is Timestral-local: partial RoPE, the time/variate dual
+//! attention axes, the sigmoid attention gate and the absence of a KV cache
+//! all differ from the standard decoder layer `compute::dense` describes, so
+//! widening that shared vocabulary would distort it. The numeric kernels
+//! themselves are not defined here; they stay in `crate::ops`.
 
 use super::{D, F};
 

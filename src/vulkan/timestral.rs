@@ -1,6 +1,6 @@
 //! Resident F32 Transformer; scaling, patch/head projections and forecast folding stay on CPU.
+use crate::models::timestral::graph::Slot;
 use crate::models::timestral::network::Layout;
-use crate::models::timestral::ops::Slot;
 #[cfg(feature = "parity-trace")]
 use crate::models::timestral::{trace, HD, HEADS};
 use crate::models::timestral::{D, F};
@@ -202,7 +202,7 @@ impl Transformer {
         // The op list is shared with the CPU backend; only the execution
         // differs. The command buffer is flushed at layer boundaries to
         // bound its length on drivers that truncate long recordings.
-        for layer in crate::models::timestral::ops::transformer_layer_ops() {
+        for layer in crate::models::timestral::graph::transformer_layer_ops() {
             for op in layer {
                 let geometry = [
                     r,
@@ -237,7 +237,7 @@ impl Transformer {
             usize::from(layout.covariates),
             0,
         ];
-        let final_norm = crate::models::timestral::ops::final_norm_op();
+        let final_norm = crate::models::timestral::graph::final_norm_op();
         self.execute(&commands, &final_norm, geometry, count)?;
         #[cfg(feature = "parity-trace")]
         if std::env::var_os("RMI_PARITY_TRACE").is_some() {
@@ -269,11 +269,11 @@ impl Transformer {
     fn execute(
         &self,
         commands: &TokenCommands<'_>,
-        op: &crate::models::timestral::ops::TimestralOp,
+        op: &crate::models::timestral::graph::TimestralOp,
         geometry: [usize; 6],
         count: usize,
     ) -> Result<(), VulkanError> {
-        use crate::models::timestral::ops::TimestralOpKind;
+        use crate::models::timestral::graph::TimestralOpKind;
         let empty = ArenaRegion { offset: 0, size: 0 };
         match &op.kind {
             TimestralOpKind::RmsNorm {

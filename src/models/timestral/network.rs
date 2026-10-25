@@ -1,5 +1,5 @@
 use super::forecast::{scale_row, Row};
-use super::ops::{self, Slot, TimestralOp, TimestralOpKind};
+use super::graph::{self, Slot, TimestralOp, TimestralOpKind};
 use super::*;
 
 pub(crate) struct Layout {
@@ -251,11 +251,11 @@ impl TimestralModel<'_> {
     /// Execute the shared op list on the CPU.
     ///
     /// This is the CPU twin of `crate::vulkan::timestral::Transformer`: both
-    /// consume `ops::transformer_ops()`, so the layer order, the weight
+    /// consume `graph::transformer_ops()`, so the layer order, the weight
     /// names and the tensor layout are defined exactly once.
     fn transform_cpu(&self, x: Vec<f32>, layout: &Layout) -> Result<Vec<f32>, String> {
         let mut executor = CpuExecutor::new(self, layout, x)?;
-        for op in ops::transformer_ops() {
+        for op in graph::transformer_ops() {
             executor.execute(op)?;
         }
         Ok(executor.take(Slot::Norm))

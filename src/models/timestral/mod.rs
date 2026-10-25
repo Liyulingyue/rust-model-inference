@@ -1,7 +1,7 @@
 //! Native F32 inference for the published Timestral-209M checkpoint.
 mod forecast;
+pub(crate) mod graph;
 pub(crate) mod network;
-pub(crate) mod ops;
 
 use crate::core::tensor::{GGMLType, MetaValue, TensorSource};
 pub use forecast::{Forecast, ForecastRequest, Series};
