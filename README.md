@@ -439,6 +439,11 @@ cargo run --release --bin rust-model-server -- \
   --model models/Qwen3-TTS/Qwen3-TTS-12Hz-1.7B-Base-Q8_0.gguf \
   --mmproj models/Qwen3-TTS/mmproj-Qwen3-TTS-12Hz-1.7B-Base-Q8_0.gguf \
   --tts --language cn
+
+# 时间序列预测（Timestral-209M，按 GGUF 的 architecture 探测）
+cargo run --release --bin rust-model-server -- \
+  --model models/Timestral-209M/Timestral-209M-F32.gguf --host 0.0.0.0 --port 8080
+# -> POST /v1/forecast，请求体与 --timestral-request 文件相同
 ```
 
 ### 端点
