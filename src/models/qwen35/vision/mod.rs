@@ -3603,6 +3603,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn layer_norm_stats_include_every_lane_and_tail() {
+        for length in [4, 7, 8, 9, 13, 16, 1152] {
+            let input: Vec<f32> = (0..length).map(|i| (i * 17 % 31) as f32 - 15.0).collect();
+            let expected_mean = input.iter().map(|&x| f64::from(x)).sum::<f64>() / length as f64;
+            let expected_variance = input
+                .iter()
+                .map(|&x| (f64::from(x) - expected_mean).powi(2))
+                .sum::<f64>()
+                / length as f64;
+            let (mean, variance) = ggml_layer_norm_stats(&input);
+            close(mean, expected_mean as f32);
+            close(variance, expected_variance as f32);
+        }
+    }
+
     #[cfg(target_arch = "aarch64")]
     #[test]
     fn neon_layer_norm_helpers_match_scalar() {

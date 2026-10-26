@@ -1,5 +1,8 @@
 # Holo4-35B-A3B GGUF CPU / Vulkan validation
 
+For the dense Holo4-27B (`qwen35`) artifacts and validation, see
+[the separate 27B guide](27b/README.md). Both sizes share the decoder/vision kernels.
+
 Model: [Hcompany/Holo4-35B-A3B-GGUF](https://modelscope.cn/models/Hcompany/Holo4-35B-A3B-GGUF),
 ModelScope revision `a298a0585d798c32341af11cdcddfb08f87e6744`.
 The model card calls this Qwen3.6 MoE; the actual GGUF architecture is
