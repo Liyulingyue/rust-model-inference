@@ -114,6 +114,13 @@ pub(crate) fn shared_vulkan_context() -> Result<&'static VulkanContext, String> 
     result.as_ref().map_err(Clone::clone)
 }
 
+#[cfg(feature = "vulkan")]
+pub(crate) fn release_vulkan_weight(weight: &[u8]) {
+    if let Some(Ok(context)) = VULKAN_CONTEXT.get() {
+        context.release_cached_weight(weight);
+    }
+}
+
 #[cfg(feature = "wgpu")]
 static WGPU_CONTEXT: OnceLock<Result<WgpuContext, String>> = OnceLock::new();
 

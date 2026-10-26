@@ -42,7 +42,7 @@ fn is_qwen35(arch: &str) -> Result<bool, String> {
         // renderer; it has no tool grammar and no vision path, so
         // build_prompt rejects tools/images before we get here.
         "falcon-h1" => Ok(false),
-        "qwen35" => Ok(true),
+        "qwen35" | "qwen35moe" => Ok(true),
         // Llama-family archs go through the CLI prompt builder
         // (`llama::trunk::build_prompt_tokens`) and don't support tool
         // prompting. They are accepted here so `build_prompt` returns Ok
@@ -940,6 +940,20 @@ mod tests {
                 "split={split}"
             );
             assert_eq!(parser.text(), "prefix");
+        }
+    }
+
+    #[test]
+    fn qwen35_moe_uses_dense_chat_and_tool_grammar() {
+        assert!(is_qwen35("qwen35moe").unwrap());
+        let raw =
+            "<tool_call><function=lookup><parameter=city>杭州</parameter></function></tool_call>";
+        for split in raw.char_indices().map(|(i, _)| i).chain([raw.len()]) {
+            let (text, calls) = replay("qwen35moe", raw, split);
+            assert!(text.is_empty());
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].name, "lookup");
+            assert_eq!(calls[0].arguments, json!({"city": "杭州"}));
         }
     }
 

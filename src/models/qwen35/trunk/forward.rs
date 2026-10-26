@@ -90,7 +90,7 @@ impl<'a> super::weights::HybridTrunk<'a> {
     ) -> Result<Vec<f32>, String> {
         let edge0 = edge0_moe.is_some();
         // Quantization boundaries amplify small reassociations into different experts.
-        let _numerics = crate::ops::ScalarDispatchScope::new(self.config.moe.is_some());
+        let _numerics = crate::ops::ScalarDispatchScope::new(self.config.reference_arithmetic());
         if mrope_positions.len() != n_tokens {
             return Err(format!(
                 "Qwen3.5 position count mismatch: tokens={n_tokens}, positions={}",

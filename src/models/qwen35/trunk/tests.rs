@@ -1106,13 +1106,27 @@ fn recurrent_fixture_session(
     batch_size: usize,
 ) -> Qwen35Session<'static, 'static> {
     let model = Box::leak(Box::new(tiny_recurrent_session_model()));
-    Qwen35Session::new_with_prefill_batch_size(model, capacity, batch_size, session_pool()).unwrap()
+    Qwen35Session::new_with_compute(
+        model,
+        capacity,
+        batch_size,
+        session_pool(),
+        crate::compute::ComputePolicy::Cpu,
+    )
+    .unwrap()
 }
 
 fn mixed_fixture_session(capacity: usize, batch_size: usize) -> Qwen35Session<'static, 'static> {
     let model = Box::leak(Box::new(tiny_mixed_session_model()));
     model.config.n_ctx = capacity;
-    Qwen35Session::new_with_prefill_batch_size(model, capacity, batch_size, session_pool()).unwrap()
+    Qwen35Session::new_with_compute(
+        model,
+        capacity,
+        batch_size,
+        session_pool(),
+        crate::compute::ComputePolicy::Cpu,
+    )
+    .unwrap()
 }
 
 #[test]
@@ -1469,7 +1483,14 @@ fn last_hidden_borrows_all_final_norm_rows_from_the_last_step() {
     model.config.norm_eps = 0.0;
     model.layers[0].wo = Some(f32_test_weight(vec![0.0; 16], 4, 4));
     model.layers[0].ffn_down = Some(f32_test_weight(vec![0.0; 16], 4, 4));
-    let mut session = Qwen35Session::new(&mut model, 2, session_pool()).unwrap();
+    let mut session = Qwen35Session::new_with_compute(
+        &mut model,
+        2,
+        2,
+        session_pool(),
+        crate::compute::ComputePolicy::Cpu,
+    )
+    .unwrap();
     session
         .step(
             &[3.0, 4.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0],

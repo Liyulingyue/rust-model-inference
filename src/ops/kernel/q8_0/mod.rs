@@ -16,7 +16,7 @@ pub mod scalar;
 ///
 /// `weight` is laid out as Q8_0 blocks: `[2-byte F16 scale][32 bytes data]`,
 /// row-major `[n_out rows × n_in cols]` (n_in must be a multiple of 32).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Q8Kernel<'a> {
     pub weight: &'a [u8],
 }
@@ -24,6 +24,13 @@ pub struct Q8Kernel<'a> {
 impl<'a> Q8Kernel<'a> {
     pub fn new(weight: &'a [u8]) -> Self {
         Self { weight }
+    }
+}
+
+impl Drop for Q8Kernel<'_> {
+    fn drop(&mut self) {
+        #[cfg(feature = "vulkan")]
+        crate::ops::float::release_vulkan_weight(self.weight);
     }
 }
 

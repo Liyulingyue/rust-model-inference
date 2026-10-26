@@ -191,6 +191,7 @@ struct IoState {
 #[derive(Default)]
 struct CommandSubmission {
     uncertain: bool,
+    retired_weights: Vec<GpuBuffer>,
 }
 
 #[cfg(feature = "vulkan")]
@@ -549,7 +550,11 @@ impl VulkanContext {
             }
             unsafe { self.device.device_wait_idle() }
                 .map_err(|error| VulkanError::InitFailed(error.to_string()))
-        })
+        })?;
+        for buffer in submission.retired_weights.drain(..) {
+            unsafe { self.destroy_buffer(&buffer) };
+        }
+        Ok(())
     }
 
     /// Caller holds mutex, from recovery through submission.
@@ -658,11 +663,13 @@ impl VulkanContext {
     pub fn warmup(&self) -> Result<(), VulkanError> {
         let n_in = 32usize;
         let n_out = 32usize;
-        let mut weight = vec![0u8; n_out * (n_in / 32) * 34];
+        let weight = vec![0u8; n_out * (n_in / 32) * 34];
         let input = vec![0u8; n_in];
         let scales = vec![0.0f32; n_in / 32];
         let mut out = vec![0.0f32; n_out];
-        unsafe { self.matmul_q8_0(&weight, &input, &scales, &mut out, n_in, n_out) }
+        let result = unsafe { self.matmul_q8_0(&weight, &input, &scales, &mut out, n_in, n_out) };
+        self.release_cached_weight(&weight);
+        result
     }
 
     /// Snapshot of the completed-matmul generation; pair with [`Self::wait_for_gen`].
@@ -811,6 +818,19 @@ impl VulkanContext {
         let buf = self.alloc_persistently_mapped(new_size)?;
         *slot = Some(buf);
         Ok(*slot.as_ref().unwrap())
+    }
+
+    pub(crate) fn release_cached_weight(&self, weight: &[u8]) {
+        // A later model may reuse this address for different weights.
+        if let Ok(mut submission) = self.mutex.lock() {
+            if let Ok(mut cache) = self.weight_cache.lock() {
+                if let Some(buffer) = cache.remove(&(weight.as_ptr() as usize, weight.len())) {
+                    submission.retired_weights.push(buffer);
+                }
+            }
+            // Evict the expired host key even if GPU completion cannot be confirmed.
+            let _ = self.recover_commands(&mut submission);
+        }
     }
 
     unsafe fn weight_for(&self, weight: &[u8]) -> Result<GpuBuffer, VulkanError> {
@@ -2018,6 +2038,51 @@ mod tests {
     };
     use ash::vk;
     use std::sync::atomic::Ordering;
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn legacy_cached_weight_cleanup_waits_for_idle_and_invalidates_host_key() {
+        let context = VulkanContext::new().unwrap();
+        let mut weight = vec![1u8; 34];
+        weight[..2].copy_from_slice(&crate::ops::f32_to_f16(1.0).to_le_bytes());
+        let key = (weight.as_ptr() as usize, weight.len());
+        context.fail_fence_wait.store(true, Ordering::Relaxed);
+        assert!(
+            unsafe { context.matmul_q8_0(&weight, &[1; 32], &[1.0], &mut [0.0], 32, 1) }.is_err()
+        );
+        let live = context.compute_stats().live_allocation_bytes;
+        context.fail_wait_idle.store(true, Ordering::Relaxed);
+        context.release_cached_weight(&weight);
+        assert_eq!(context.compute_stats().live_allocation_bytes, live);
+        assert!(!context.weight_cache.lock().unwrap().contains_key(&key));
+        assert!(context.mutex.lock().unwrap().uncertain);
+
+        context.fail_wait_idle.store(false, Ordering::Relaxed);
+        weight[2..].fill(2);
+        let mut output = [0.0];
+        unsafe {
+            context
+                .matmul_q8_0(&weight, &[1; 32], &[1.0], &mut output, 32, 1)
+                .unwrap();
+        }
+        assert_eq!(output, [64.0]);
+        assert!(!context.mutex.lock().unwrap().uncertain);
+        assert_eq!(context.compute_stats().live_allocation_bytes, live);
+        context.release_cached_weight(&weight);
+        assert!(context.compute_stats().live_allocation_bytes < live);
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn warmup_releases_temporary_cached_weights() {
+        let context = VulkanContext::new().unwrap();
+        context.warmup().unwrap();
+        assert!(context.weight_cache.lock().unwrap().is_empty());
+        let live = context.compute_stats().live_allocation_bytes;
+        context.warmup().unwrap();
+        assert!(context.weight_cache.lock().unwrap().is_empty());
+        assert_eq!(context.compute_stats().live_allocation_bytes, live);
+    }
 
     #[test]
     fn shader_module_receives_aligned_spirv_words() {

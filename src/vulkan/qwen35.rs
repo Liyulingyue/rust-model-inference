@@ -1119,7 +1119,7 @@ impl Qwen35VulkanSession {
         rows: usize,
     ) -> Result<(), VulkanError> {
         let config = &self.config;
-        let _numerics = crate::ops::ScalarDispatchScope::new(config.moe.is_some());
+        let _numerics = crate::ops::ScalarDispatchScope::new(config.reference_arithmetic());
         let input_count = qwen35_product("input rows", &[rows, config.n_embd])?;
         if rows > self.max_rows
             || positions.len() != rows

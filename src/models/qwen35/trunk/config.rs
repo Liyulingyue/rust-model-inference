@@ -52,6 +52,12 @@ pub struct Qwen35Moe {
 }
 
 impl Qwen35Config {
+    pub(crate) fn reference_arithmetic(&self) -> bool {
+        static REFERENCE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        self.moe.is_some()
+            && *REFERENCE.get_or_init(|| std::env::var("RMI_QWEN35_MOE_SIMD").as_deref() != Ok("1"))
+    }
+
     /// Layers actually executed by the trunk: the main stack without the
     /// appended MTP (nextn) predict blocks.
     pub fn n_layer_impl(&self) -> usize {
@@ -514,6 +520,48 @@ mod tests {
         let moe = config.moe.unwrap();
         assert_eq!((moe.n_expert, moe.n_expert_used), (256, 8));
         assert_eq!((moe.n_ff_exp, moe.n_ff_shexp), (512, 512));
+    }
+
+    #[test]
+    fn moe_simd_opt_in_preserves_reference_default_and_scalar_override() {
+        const CHILD: &str = "RMI_QWEN35_NUMERICS_TEST_CHILD";
+        if let Ok(expected) = std::env::var(CHILD) {
+            let config = Qwen35Config::from_source(&sage_config_source()).unwrap();
+            let _scope = crate::ops::ScalarDispatchScope::new(config.reference_arithmetic());
+            assert_eq!(crate::ops::scalar_mode(), expected == "reference");
+            return;
+        }
+        for (simd, scalar, expected) in [
+            (None, false, "reference"),
+            (Some("0"), false, "reference"),
+            (Some("1"), false, "simd"),
+            (Some("1"), true, "reference"),
+        ] {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child.args([
+                "--exact",
+                "models::qwen35::trunk::config::tests::moe_simd_opt_in_preserves_reference_default_and_scalar_override",
+                "--nocapture",
+            ]);
+            child
+                .env(CHILD, expected)
+                .env_remove("RMI_SCALAR")
+                .env_remove("RMI_QWEN35_MOE_SIMD");
+            if let Some(value) = simd {
+                child.env("RMI_QWEN35_MOE_SIMD", value);
+            }
+            if scalar {
+                child.env("RMI_SCALAR", "1");
+            }
+            let output = child.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
+        let dense = Qwen35Config::from_source(&qwen38_config_source()).unwrap();
+        assert!(!dense.reference_arithmetic());
     }
 
     #[test]

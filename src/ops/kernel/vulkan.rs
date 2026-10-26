@@ -364,6 +364,54 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn dropping_q8_kernel_releases_legacy_cached_weights() {
+        let context = crate::ops::float::shared_vulkan_context().unwrap();
+        let mut weight = vec![1u8; 34];
+        weight[..2].copy_from_slice(&crate::ops::f32_to_f16(1.0).to_le_bytes());
+        for value in [1u8, 2] {
+            weight[2..].fill(value);
+            let kernel = super::super::q8_0::Q8Kernel::new(&weight);
+            let mut output = [0.0];
+            unsafe {
+                context
+                    .matmul_q8_0(
+                        kernel.weight_bytes().unwrap(),
+                        &[1; 32],
+                        &[1.0],
+                        &mut output,
+                        32,
+                        1,
+                    )
+                    .unwrap();
+            }
+            assert_eq!(output, [32.0 * value as f32]);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn dropping_owned_q8_kernel_releases_legacy_cached_weights() {
+        let context = crate::ops::float::shared_vulkan_context().unwrap();
+        let mut weight = vec![1u8; 34];
+        weight[..2].copy_from_slice(&crate::ops::f32_to_f16(1.0).to_le_bytes());
+        let kernel = super::super::QTensorOwned::from_bytes_owned(&weight, GGMLType::Q8_0, 32, 1);
+        let super::super::QTensorOwned::Q8_0 { data, .. } = &kernel else {
+            unreachable!()
+        };
+        let mut output = [0.0];
+        unsafe {
+            context
+                .matmul_q8_0(data, &[1; 32], &[1.0], &mut output, 32, 1)
+                .unwrap();
+        }
+        assert_eq!(output, [32.0]);
+        let live = context.compute_stats().live_allocation_bytes;
+        drop(kernel);
+        assert!(context.compute_stats().live_allocation_bytes < live);
+    }
+
+    #[test]
     fn f16_batches_bound_memory_and_preserve_dot_contracts() {
         assert_eq!(
             GpuLinear::tile_rows(GpuWeightFormat::F16, 512, 512, 4225),
