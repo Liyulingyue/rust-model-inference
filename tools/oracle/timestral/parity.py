@@ -42,8 +42,11 @@ TOLERANCES = {
 }
 
 
-#: Formats the device path refuses because it has no vectorised kernel.
-K_QUANT_FORMATS = {'q4_k', 'q5_k', 'q6_k'}
+#: Formats the device path refuses because it has no device kernel.
+#:
+#: The K-quant formats only have a scalar kernel, and F16 has none, so
+#: the device path refuses them and the run falls back to the CPU.
+NO_DEVICE_KERNEL = {'q4_k', 'q5_k', 'q6_k', 'f16'}
 
 
 def tolerance_for(file_type):
@@ -321,7 +324,7 @@ def main():
         request_path.write_text(json.dumps(request))
         report['cases'][name] = {}
         for mode in args.mode or ('scalar', 'simd'):
-            if mode == 'vulkan' and file_type in K_QUANT_FORMATS:
+            if mode == 'vulkan' and file_type in NO_DEVICE_KERNEL:
                 # The K-quant formats have no vectorised device kernel, so
                 # the GPU path refuses them and the run falls back to the
                 # CPU. The CPU modes already cover the format.
@@ -356,7 +359,7 @@ def main():
             worst = max(metrics, key=lambda m:m['nrmse'])
             result = dict(checkpoints=len(metrics), worst_nrmse=worst,
                 forecast=metrics[-1], max_abs=max(m['max_abs'] for m in metrics))
-            if mode in ('vulkan', 'auto') and file_type not in K_QUANT_FORMATS:
+            if mode in ('vulkan', 'auto') and file_type not in NO_DEVICE_KERNEL:
                 result['gpu_execution'] = verify_gpu_execution(run.stderr)
             elif mode in ('vulkan', 'auto'):
                 # The device path refuses this format, so the run falls

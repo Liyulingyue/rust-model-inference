@@ -45,8 +45,8 @@ from pathlib import Path
 import numpy as np
 
 from tools.converter.utils.gguf import (
-    GGML_F32, GGML_Q4K, GGML_Q6K, GGML_Q8_0, _read_gguf, GgufWriter, gguf_dims,
-    quantize_q8_0,
+    GGML_BF16, GGML_F16, GGML_F32, GGML_Q4K, GGML_Q6K, GGML_Q8_0, _read_gguf,
+    GgufWriter, f32_to_bf16, f32_to_f16, gguf_dims, quantize_q8_0,
 )
 from tools.converter.utils.kquants import quantize_k
 
@@ -55,6 +55,8 @@ BLOCK_FORMATS = {
     "q8_0": (32, GGML_Q8_0),
     "q4_k": (256, GGML_Q4K),
     "q6_k": (256, GGML_Q6K),
+    "f16": (1, GGML_F16),
+    "bf16": (1, GGML_BF16),
 }
 #: Nothing is excluded by name. The alignment rule below is checked against
 #: the row width, not the vocabulary: GGUF stores a `[n_out, n_in]` linear as
@@ -105,6 +107,10 @@ def _quantize_one(
         # Per-block `f16 scale / int8 payload` over the F32 dynamic range,
         # which is what `quantize_row_q8_0_ref` in `ggml-quants.c` does.
         return target, quantize_q8_0(values)
+    if target == GGML_F16:
+        return target, f32_to_f16(raw)
+    if target == GGML_BF16:
+        return target, f32_to_bf16(raw)
     if target in (GGML_Q4K, GGML_Q6K):
         # The k-quant search compares weighted squared errors, so its float
         # accumulation order is load-bearing: `kquants.py` is a line-by-line
