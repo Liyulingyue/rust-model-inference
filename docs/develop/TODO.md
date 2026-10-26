@@ -403,6 +403,30 @@ MiniCPM-V 4.7 的 `qwen35moe`（35B-A3B）此前只在**生成面**注册，多�
       F-2 `entity_attributes`（两套机制、零 ground truth）、
       F-3 长文本 `*_long` chunk+merge、F-4 relation 4 阶段 dedup。
 - [ ] **讨论：两套线程调度统一** — ComputePool vs rayon。暂不统一（LLM 热路径不应轻易改动）
+- [ ] **ComputePool 的空闲 worker 在 GPU 模式下空转，抢占驱动线程** —
+      `src/core/thread_pool.rs` 的 `worker_loop` 空闲分支是「自旋 `WAIT_SPINS` 次 →
+      `yield_now()`」。`yield_now()` 只让出调度，线程仍是 runnable，会被立刻重新调度，
+      所以持有 ComputePool 的模型在 GPU 模式下会持续烧掉 N-1 个核。
+      2026-10-25 在 Timestral 上量化过：Vulkan 跑 4096-token 长上下文，
+      `--threads 4` 时 driver 侧 `wait_for_fences` 每次提交要 18.5 ms，
+      同一份 GPU 命令流（dispatch 序列、push constants、descriptor 绑定逐条比对全同）
+      在不持有 ComputePool 时只要 14.5 ms（快 30%）；`--threads 1` 时两者完全一致
+      （14.73 vs 14.78 ms），说明差异与并发线程数成正比而非 GPU 工作量。
+      CPU 侧同步观察到 `user` 时间 0.63 s → 5.24 s、占用率 64% → 353%。
+      修法有两个方向：(a) GPU 活跃时让 idle worker 真正 park（`Condvar` 或
+      `park_timeout`）而不是 yield —— 但这会改变 LLM 热路径的唤醒延迟，
+      需要按模型分别评估；(b) 不在 GPU 场景持有 ComputePool。
+      Timestral 目前走 (b)：CPU 投影与 attention 继续用 rayon global pool
+      （`app::init_rayon_global_pool` 已按 `--threads N` 对齐，语义等价），
+      transformer 图本身则由 `src/models/timestral/ops.rs` 的 op 列表统一描述，
+      CPU / Vulkan 两个执行器消费同一份列表。
+- [ ] **`src/models/diffusion/auk/mod.rs` 的单测泄漏 `RMI_PARITY_TRACE=1`** —
+      该测试 `set_var("RMI_PARITY_TRACE", "1")` 后没有 `remove_var`，同一测试进程里
+      后续任何会打 trace 的用例都会把 `<name>.f32` 写到**当前工作目录**，
+      仓库根目录因此被塞进几百个 `1.timestral.*.f32` 之类的垃圾文件
+      （`parity_trace::full_f32` 用 `format!("{trace}.{name}.f32")`，
+      trace 路径是 "1" 时就落在 cwd）。修法：测试结束时恢复原值，
+      或改用 `TempDir` 下的绝对路径。
 - [ ] **`kquants.py` 的 Q6_K 批大小估算偏低** — `--format q6_k` 量化 783 MB 的
       `gliner2.5-base-v1` 跑 15 分钟未完成（Q4_K 同输入 4.5 分钟）。`_Q6K_BYTES_PER_BLOCK`
       记的是 `16 × 19 × 8 × 3`（每个 256 元素 super-block 的 19-candidate scale 搜索），

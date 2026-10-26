@@ -45,11 +45,11 @@ fn min_gpu_matmul_outputs() -> usize {
 }
 
 pub(crate) fn offload_enabled() -> bool {
+    // Tracing observes the requested backend; CPU/scalar scopes select exact CPU paths.
     crate::ops::gpu_requested()
         && !crate::ops::scalar_mode()
         && !crate::core::thread_pool::gpu_matmul_disabled()
         && !crate::vulkan::gpu_broken()
-        && std::env::var_os("RMI_PARITY_TRACE").is_none()
 }
 
 impl GpuLinear {
@@ -409,6 +409,40 @@ mod tests {
         let live = context.compute_stats().live_allocation_bytes;
         drop(kernel);
         assert!(context.compute_stats().live_allocation_bytes < live);
+    }
+
+    #[test]
+    #[ignore = "requires hardware Vulkan and RMI_PARITY_TRACE; run alone"]
+    fn tracing_preserves_requested_gpu_attention() {
+        assert!(std::env::var_os("RMI_PARITY_TRACE").is_some());
+        crate::ops::enable_gpu();
+        let _scope = crate::compute::ComputePolicy::Auto.enter_legacy_scope();
+        let context = crate::compute::ComputePolicy::Vulkan
+            .context()
+            .unwrap()
+            .unwrap();
+        let before = context.submission_count();
+        let result = try_attention(
+            &[0.0; 8],
+            &[0.0; 8],
+            &[1.0, 2.0, 3.0, 4.0, 3.0, 4.0, 5.0, 6.0],
+            crate::models::diffusion::dreamx::kernels::AttentionSpec {
+                query_tokens: 2,
+                key_tokens: 2,
+                query_heads: 1,
+                key_value_heads: 1,
+                head_dim: 4,
+                causal: false,
+                scale: 0.5,
+            },
+        )
+        .expect("tracing must not force requested GPU attention onto CPU");
+        for (value, expected) in result.iter().zip([2.0, 3.0, 4.0, 5.0].repeat(2)) {
+            assert!((value - expected).abs() < 1e-5);
+        }
+        assert!(context.submission_count() > before);
+        let _cpu = crate::core::thread_pool::ComputePool::disable_gpu_matmul_for_scope();
+        assert!(!offload_enabled());
     }
 
     #[test]

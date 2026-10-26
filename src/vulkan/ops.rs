@@ -115,8 +115,11 @@ const FLOAT_MATMUL_TILED: usize = 33;
 const ATTENTION_ONLINE: usize = 34;
 const CONV3D_TILED: usize = 35;
 const ATTENTION_ONLINE_WIDE: usize = 36;
-const QWEN35_MOE_ROUTE: usize = 37;
-const QWEN35_MOE_REDUCE: usize = 38;
+const TIMESTRAL: usize = 37;
+const FLOAT_MATMUL_SMALL: usize = 38;
+
+const QWEN35_MOE_ROUTE: usize = 39;
+const QWEN35_MOE_REDUCE: usize = 40;
 
 fn silu_exp_mode(approximate: bool) -> u32 {
     if !approximate {
@@ -233,6 +236,8 @@ const OPERATOR_SHADER_NAMES: [&str; OPERATOR_SHADERS.len()] = [
     "attention_online",
     "conv3d_tiled",
     "attention_online_wide",
+    "timestral",
+    "float_matmul_small",
     "qwen35_moe_route",
     "qwen35_moe_reduce",
 ];
@@ -322,7 +327,7 @@ pub fn dump_dispatch_trace() {
     }
 }
 
-const OPERATOR_SHADERS: [&[u8]; 39] = [
+const OPERATOR_SHADERS: [&[u8]; 41] = [
     QUANTIZE_Q8_0_SHADER,
     QUANTIZE_Q8_K_SHADER,
     Q8_MATMUL_GROUPED_SHADER,
@@ -360,6 +365,8 @@ const OPERATOR_SHADERS: [&[u8]; 39] = [
     ATTENTION_ONLINE_SHADER,
     CONV3D_TILED_SHADER,
     ATTENTION_ONLINE_WIDE_SHADER,
+    include_bytes!("../../shaders/bin/timestral.spv"),
+    include_bytes!("../../shaders/bin/float_matmul_small.spv"),
     QWEN35_MOE_ROUTE_SHADER,
     QWEN35_MOE_REDUCE_SHADER,
 ];
@@ -1548,7 +1555,7 @@ mod video_gpu_tests {
     #[ignore = "requires a Vulkan device"]
     fn video_gpu_float_projection_preserves_range_and_partial_tiles() {
         let context = Box::leak(Box::new(VulkanContext::new().unwrap()));
-        let (rows, n_in, n_out) = (33, 130, 65);
+        let (rows, n_in, n_out) = (19, 130, 65);
         let input: Vec<f32> = (0..rows * n_in)
             .map(|i| (i as f32 * 0.37).sin() * 100000.0)
             .collect();
@@ -1969,6 +1976,15 @@ impl Drop for Conv2dRuntime {
         }
         unsafe { std::mem::ManuallyDrop::drop(&mut self.ops) };
     }
+}
+
+#[derive(Clone, Copy)]
+#[repr(u32)]
+pub(crate) enum TimestralOp {
+    Qkv,
+    Attention,
+    Gate,
+    SwiGlu,
 }
 
 pub(crate) struct Qwen3Ops<'a> {
@@ -2767,9 +2783,9 @@ impl<'a> Qwen3Ops<'a> {
         Ok(())
     }
 
-    /// Only BatchedLinearRuntime uploads these weights in [input, output] order.
+    /// Weights must be uploaded in [input, output] order; activations remain F32.
     #[allow(clippy::too_many_arguments)]
-    fn record_transposed_float_matmul_rows(
+    pub(crate) fn record_transposed_float_matmul_rows(
         &self,
         commands: &TokenCommands<'_>,
         bindings: OperatorBindings,
@@ -2799,12 +2815,22 @@ impl<'a> Qwen3Ops<'a> {
         )?;
         push[16] = if format == GpuWeightFormat::F32 { 4 } else { 2 };
         let columns = outputs[0].1;
+        // Narrow batches need more workgroups and parallel K reduction.
+        let small = format == GpuWeightFormat::F32
+            && token_rows <= 32
+            && columns <= 4096
+            && outputs.len() == 1;
+        let (pipeline, column_tile, token_tile) = if small {
+            (FLOAT_MATMUL_SMALL, 2, 4)
+        } else {
+            (FLOAT_MATMUL_TILED, 64, 32)
+        };
         let dispatch = row_dispatch(
-            columns.div_ceil(64),
-            token_rows.div_ceil(32) * outputs.len(),
+            columns.div_ceil(column_tile),
+            token_rows.div_ceil(token_tile) * outputs.len(),
             &self.context.limits,
         )?;
-        self.record_linear_dispatch(commands, FLOAT_MATMUL_TILED, bindings, &push, dispatch);
+        self.record_linear_dispatch(commands, pipeline, bindings, &push, dispatch);
         Ok(())
     }
 
@@ -4477,6 +4503,67 @@ impl<'a> Qwen3Ops<'a> {
             &push,
             grid,
         );
+        Ok(())
+    }
+
+    /// Fixed published Timestral geometry; every arena range is checked before recording.
+    pub(crate) fn record_timestral(
+        &self,
+        commands: &TokenCommands<'_>,
+        op: TimestralOp,
+        regions: [ArenaRegion; 6],
+        geometry: [usize; 6],
+    ) -> Result<(), VulkanError> {
+        let [rows, enc, seq, context, covariates, time] = geometry;
+        if rows == 0
+            || enc == 0
+            || enc >= seq
+            || context == 0
+            || context > enc
+            || covariates > 1
+            || time > 1
+        {
+            return Err(VulkanError::UnsupportedShape(
+                "invalid Timestral GPU geometry".into(),
+            ));
+        }
+        let n = product("Timestral tokens", &[rows, seq])?;
+        let d = product("Timestral hidden", &[n, 768])?;
+        let sizes = match op {
+            TimestralOp::Qkv => [
+                product("QKV", &[d, 3])?,
+                d,
+                d,
+                d,
+                product("RoPE", &[seq, 32])?,
+                0,
+            ],
+            TimestralOp::Attention => [d, d, d, d, product("valid", &[rows, enc])?, rows],
+            TimestralOp::Gate => [d, d, 0, 0, 0, 0],
+            TimestralOp::SwiGlu => [
+                product("FFN", &[n, 4096])?,
+                product("FFN", &[n, 2048])?,
+                0,
+                0,
+                0,
+                0,
+            ],
+        };
+        let mut push = [0u32; 13];
+        push[0] = op as u32;
+        for (i, (region, size)) in regions.into_iter().zip(sizes).enumerate() {
+            push[i + 1] = self.f32_word(region, size, "Timestral arena")?;
+        }
+        for (i, value) in geometry.into_iter().enumerate() {
+            push[i + 7] = as_u32(value, "Timestral geometry")?;
+        }
+        let groups = match op {
+            TimestralOp::Attention => product("attention queries", &[n, 12])?,
+            TimestralOp::SwiGlu => product("FFN dispatch", &[n, 2048])?.div_ceil(64),
+            _ => d.div_ceil(64),
+        };
+        let grid = row_dispatch(groups, 1, &self.context.limits)?;
+        self.record_linear_dispatch(commands, TIMESTRAL, self.arena_bindings, &push, grid);
         Ok(())
     }
 
@@ -7714,6 +7801,37 @@ fn silu_probe_uses_the_production_ffn_width() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn appended_operator_indices_match_shader_modules() {
+        use super::*;
+        let operators: [(usize, &str, &[u8]); 4] = [
+            (
+                TIMESTRAL,
+                "timestral",
+                include_bytes!("../../shaders/bin/timestral.spv"),
+            ),
+            (
+                FLOAT_MATMUL_SMALL,
+                "float_matmul_small",
+                include_bytes!("../../shaders/bin/float_matmul_small.spv"),
+            ),
+            (
+                QWEN35_MOE_ROUTE,
+                "qwen35_moe_route",
+                QWEN35_MOE_ROUTE_SHADER,
+            ),
+            (
+                QWEN35_MOE_REDUCE,
+                "qwen35_moe_reduce",
+                QWEN35_MOE_REDUCE_SHADER,
+            ),
+        ];
+        for (index, name, shader) in operators {
+            assert_eq!(OPERATOR_SHADER_NAMES[index], name);
+            assert_eq!(OPERATOR_SHADERS[index], shader);
+        }
+    }
+
     #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
     #[test]
     #[ignore = "requires a Vulkan device and NEON half operands"]
