@@ -735,7 +735,7 @@ fn raw_hidden_sequence_preserves_normalization_and_compute_policy() {
     assert_eq!(normalized_session.kv_state().seq_len, tokens.len());
     let mut cpu_only = session();
     assert!(cpu_only
-        .forward_hidden_sequence_raw_with_linear_offload(input())
+        .forward_hidden_sequence_raw_with_linear_offload(input(), ComputePolicy::Auto)
         .is_err());
     assert_eq!(cpu_only.kv_state().seq_len, 0);
     assert!(raw
@@ -805,7 +805,7 @@ fn raw_hidden_projection_offload_preserves_f32_kv_and_all_rows() {
     let context = ComputePolicy::Vulkan.context().unwrap().unwrap();
     let before = context.submission_count();
     let actual = gpu
-        .forward_hidden_sequence_raw_with_linear_offload(input())
+        .forward_hidden_sequence_raw_with_linear_offload(input(), ComputePolicy::Vulkan)
         .unwrap();
     assert!(context.submission_count() > before);
     assert_eq!(actual.len(), tokens.len() * model.config.n_embd);
@@ -816,6 +816,45 @@ fn raw_hidden_projection_offload_preserves_f32_kv_and_all_rows() {
     assert_eq!(gpu.kv_state().seq_len, tokens.len());
     assert!(matches!(gpu.kv_state().cache, KvCache::F32(_)));
     assert!(gpu.hidden_linear.is_none());
+}
+
+#[test]
+fn raw_hidden_projection_offload_auto_falls_back_without_vulkan() {
+    use crate::{
+        compute::ComputePolicy,
+        core::scratchpad::{KvFormat, KvLifecycle},
+    };
+    // Disable device use without depending on the machine's installed Vulkan driver.
+    let _cpu_scope = ComputePolicy::Cpu.enter_legacy_scope();
+    let model = deterministic_session_model(8);
+    let tokens = [1, 2, 1];
+    let positions = super::positions::qwen_text_positions(tokens.len());
+    let input = || Qwen3Input {
+        token_ids: &tokens,
+        positions: &positions,
+        embeddings: None,
+        deepstack_embeddings: None,
+    };
+    let session = |policy| {
+        Qwen3Session::new_with_compute(&model, 8, KvFormat::F32, KvLifecycle::Ephemeral, policy)
+            .unwrap()
+    };
+    let mut cpu = session(ComputePolicy::Cpu);
+    let expected = cpu.forward_hidden_sequence_raw(input()).unwrap();
+    let mut auto = session(ComputePolicy::Auto);
+    let actual = auto
+        .forward_hidden_sequence_raw_with_linear_offload(input(), ComputePolicy::Auto)
+        .unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(auto.kv_state().seq_len, tokens.len());
+    assert!(matches!(auto.kv_state().cache, KvCache::F32(_)));
+    assert!(auto.hidden_linear.is_none());
+    let mut forced = session(ComputePolicy::Auto);
+    assert!(forced
+        .forward_hidden_sequence_raw_with_linear_offload(input(), ComputePolicy::Vulkan)
+        .is_err());
+    assert_eq!(forced.kv_state().seq_len, 0);
+    assert!(forced.hidden_linear.is_none());
 }
 
 #[test]

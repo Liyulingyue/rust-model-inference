@@ -97,6 +97,34 @@ hardware. The SSH host also passed the 12 integration tests and these three
 projection/policy checks. The full library suite was not repeated for this
 follow-up.
 
+### 2026-10-26 dispatch corrections
+
+The AVX2 approximate softmax now includes all eight lanes when finding the
+maximum. Regression inputs place two large, distinct logits in every lane,
+including across vector blocks and the scalar tail. Q8_0 dispatch now requires
+AVX2, FMA **and F16C** before entering its annotated kernel; hosts without F16C
+use scalar execution. The shared `hsum_ps` reduction is unchanged: the report's
+claim that it drops two lanes used an incorrect `_mm_movehl_ps` interpretation.
+
+Qwen text and DiT projection initialization now honor Auto rather than promoting
+it to a forced Vulkan request. Auto can use CPU when a hardware device or the
+projection runtime cannot initialize. An explicit Vulkan projection request
+still reports failure, and CPU scopes still prevent GPU use. F32 KV stays on
+the host independently of the projection policy. Once a DiT GPU runtime has
+started, its dispatch failures still propagate; this change does not add
+mid-render recovery.
+
+CI now runs native x86 AVX2 softmax/Q8_0 regressions, a QEMU AVX2/FMA test with
+F16C disabled, CPU/Auto policy tests, and the focused image integration tests
+with and without Vulkan. Locally, each build passed the 12 integration tests;
+Auto/no-device and CPU/strict-policy regressions passed, as did both hardware
+projection checks on M3 Max / MoltenVK. The full CPU library suite changed from
+1,236 to 1,238 passed, with the exact same 23 failure names and 80 ignored tests.
+These are targeted fixes, not a passing full-library suite claim.
+All real-weight precision and timing records below retain their
+original source revisions. Default-SIMD real-weight parity and the failed
+512×512 SIMD render have not been rerun after these corrections.
+
 ## Executed real-weight results
 
 All four local components were downloaded from ModelScope and SHA256-verified.
@@ -162,8 +190,8 @@ peak-relative criterion failed here; the final latent also exceeded the L2
 criterion (`0.012188912160074497`, max absolute error `0.023451805114746094`).
 The final PNG differed by up to 16 RGBA8 levels. The bound was not loosened.
 Use **`RMI_SCALAR=1`** for the validated numerical path; successful default SIMD
-image generation is a separate functional result. Generic SIMD kernel changes
-are not included in this model/schedule adaptation. To reproduce this failure,
+image generation is a separate functional result. These measurements predate
+the dispatch corrections above. To reproduce the historical failure,
 repeat the focused runner with `--cases context --optimized --relative-l2 0.01`
 and the same scalar `--oracle-bin`, using a fresh output directory.
 
@@ -240,9 +268,11 @@ normalization, RoPE, activations, F32 KV and the small F32 DiT modulation
 projection remain on the host. VAE im2col, input rounding and layout conversion
 also remain on the host. Independent attention query rows run in the existing
 thread pool; each row retains its original dot/softmax reduction order.
-Weights stay cached for the render. An unavailable,
-software or failed Vulkan device returns an error; CPU fallback is not counted
-as GPU success.
+Weights stay cached for the render. Auto (`--gpu` or `--compute auto`) falls
+back to CPU if hardware or projection initialization is unavailable; explicit
+Vulkan projections remain strict. DiT dispatch failures after initialization
+still return an error. The historical GPU results below required observed
+hardware submissions; CPU fallback is not counted as GPU success.
 
 Use **`RMI_SCALAR=1 --gpu`** for the numerical path exercised below. The scalar
 flag controls host operations; these explicit Vulkan projections still execute

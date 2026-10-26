@@ -11,17 +11,24 @@ impl GpuProjections {
         max_n_out: usize,
         weights: usize,
     ) -> Result<Option<Self>, String> {
-        if crate::compute::ComputePolicy::legacy() == crate::compute::ComputePolicy::Cpu {
-            return Ok(None);
-        }
-        let context = crate::compute::ComputePolicy::Vulkan
-            .context()
-            .map_err(|e| e.to_string())?
-            .ok_or("Qwen-Image-2.1 requires a hardware Vulkan device")?;
-        Ok(Some(Self {
-            runtime: BatchedLinearRuntime::new(context, 64, max_n_in, max_n_out, weights + 1)
-                .map_err(|e| e.to_string())?,
-        }))
+        crate::compute::ComputePolicy::legacy()
+            .context_with(|| {
+                let context = crate::compute::ComputePolicy::Vulkan
+                    .context()
+                    .map_err(|e| e.to_string())?
+                    .ok_or("Qwen-Image-2.1 requires a hardware Vulkan device")?;
+                Ok(Self {
+                    runtime: BatchedLinearRuntime::new(
+                        context,
+                        64,
+                        max_n_in,
+                        max_n_out,
+                        weights + 1,
+                    )
+                    .map_err(|e| e.to_string())?,
+                })
+            })
+            .map_err(|e| e.to_string())
     }
 
     pub(super) fn run(
@@ -86,6 +93,40 @@ mod tests {
         crate::ops::enable_gpu();
         let _cpu = crate::compute::ComputePolicy::Cpu.enter_legacy_scope();
         assert!(GpuProjections::new(64, 32, 2).unwrap().is_none());
+    }
+
+    #[test]
+    fn auto_falls_back_without_a_hardware_vulkan_device() {
+        // A child process isolates both loader configuration and cached Vulkan state.
+        if std::env::var_os("RMI_QI21_NO_DEVICE_TEST").is_none() {
+            let missing = std::env::temp_dir()
+                .join(format!("rmi-qi21-missing-icd-{}.json", std::process::id()));
+            assert!(!missing.exists());
+            assert!(std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    concat!(
+                        module_path!(),
+                        "::auto_falls_back_without_a_hardware_vulkan_device"
+                    )
+                    .split_once("::")
+                    .unwrap()
+                    .1,
+                ])
+                .env("RMI_QI21_NO_DEVICE_TEST", "1")
+                .env("VK_DRIVER_FILES", &missing)
+                .env("VK_ICD_FILENAMES", &missing)
+                .status()
+                .unwrap()
+                .success());
+            return;
+        }
+        {
+            let _auto = crate::compute::ComputePolicy::Auto.enter_legacy_scope();
+            assert!(GpuProjections::new(64, 32, 2).unwrap().is_none());
+        }
+        let _forced = crate::compute::ComputePolicy::Vulkan.enter_legacy_scope();
+        assert!(GpuProjections::new(64, 32, 2).is_err());
     }
 
     #[test]

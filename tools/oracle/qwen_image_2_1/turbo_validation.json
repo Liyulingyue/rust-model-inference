@@ -718,7 +718,8 @@
         "status": "passed functional full pipeline; no 512x512 Oracle alignment claim"
       }
     },
-    "parallel_host_queries": "Independent query rows use the existing rayon thread pool; dot/softmax reduction order within each row is unchanged"
+    "parallel_host_queries": "Independent query rows use the existing rayon thread pool; dot/softmax reduction order within each row is unchanged",
+    "policy_note": "Historical hardware validation policy; current Auto initialization behavior is recorded in dispatch_corrections_20261026. Original precision/timing records and source revisions are unchanged."
   },
   "cpu_gpu_cli_benchmark": {
     "profile": "release",
@@ -1002,5 +1003,52 @@
       }
     ],
     "unavailable_resolutions": []
+  },
+  "dispatch_corrections_20261026": {
+    "based_on_commit": "0938f48f60e8d2e912ea07d136ed72c47bc579c7",
+    "changes": [
+      "AVX2 approximate softmax maximum includes every lane",
+      "Q8_0 AVX2 kernel and dispatch require AVX2, FMA and F16C",
+      "Qwen text and DiT projection initialization honor Auto CPU fallback; explicit Vulkan projections remain strict"
+    ],
+    "shared_hsum_ps_changed": false,
+    "local_host": "Apple M3 Max / MoltenVK",
+    "regression_evidence": {
+      "auto_without_vulkan_build": "Failed before the correction; passes after",
+      "auto_with_disabled_vulkan": "Failed before the correction; passes after",
+      "dit_auto_without_driver": "Isolated child with missing ICD failed before the correction; passes after; forced Vulkan still errors",
+      "softmax_sse_reduction_probe": "Rosetta SSE3 instruction probe failed before and passed after; not a full AVX2 execution",
+      "hardware_projection_checks": "Text raw hidden rows/F32 KV and DiT BF16 tiling passed on MoltenVK"
+    },
+    "ci_coverage": {
+      "native_x86": "AVX2/FMA/F16C required; softmax large distinct logits in all lanes, Q8_0 kernels and row offsets/tails",
+      "missing_f16c": "QEMU Haswell with F16C disabled; assert AVX2/FMA present and run Q8_0 scalar fallback",
+      "policy_and_integration": "CPU/Auto/forced Vulkan policy checks and image integration tests, with and without Vulkan",
+      "full_library_suite_in_ci": false
+    },
+    "real_weight_parity_rerun": false,
+    "cli_benchmarks_rerun": false,
+    "remaining_limits": [
+      "Default host SIMD precision and the historical failed 512x512 SIMD render have not been revalidated",
+      "DiT dispatch failures after GPU runtime initialization still propagate; no mid-render recovery was added"
+    ],
+    "local_checks": {
+      "image_integration_without_vulkan_passed": 12,
+      "image_integration_with_vulkan_passed": 12,
+      "hardware_projection_tests_passed": 2,
+      "full_cpu_library_suite_before": {
+        "passed": 1236,
+        "failed": 23,
+        "ignored": 80
+      },
+      "full_cpu_library_suite_after": {
+        "passed": 1238,
+        "failed": 23,
+        "ignored": 80
+      },
+      "failure_names_unchanged": true,
+      "new_failure_names": [],
+      "logs": "target/qi21-turbo/fixes-20261026"
+    }
   }
 }

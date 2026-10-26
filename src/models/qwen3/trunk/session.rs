@@ -543,10 +543,14 @@ impl<'model> Qwen3Session<'model> {
     pub(crate) fn forward_hidden_sequence_raw_with_linear_offload(
         &mut self,
         input: Qwen3Input<'_>,
+        projection_policy: ComputePolicy,
     ) -> Result<Vec<f32>, String> {
         use crate::compute::linear::{LinearBinding, LinearExecutor, LinearMode};
-        if self.compute_policy != ComputePolicy::Auto || self.model.config.moe.is_some() {
-            return Err("Hidden-row projection offload requires an Auto dense session".into());
+        if self.compute_policy != ComputePolicy::Auto
+            || projection_policy == ComputePolicy::Cpu
+            || self.model.config.moe.is_some()
+        {
+            return Err("Hidden-row projection offload requires an Auto dense host session and Auto or Vulkan projections".into());
         }
         let bindings = self
             .model
@@ -570,7 +574,7 @@ impl<'model> Qwen3Session<'model> {
             .collect();
         self.hidden_linear = Some(
             LinearExecutor::new(
-                ComputePolicy::Vulkan,
+                projection_policy,
                 bindings,
                 input.token_ids.len(),
                 self.model.pool.clone(),

@@ -11,8 +11,12 @@ use crate::ops::hsum_ps;
 ///
 /// Tiles rows in groups of 4 for ILP; trailing rows handled by a single-row
 /// fallback. Selected by `dispatch::matmul_q8_0_quantized_range` on
-/// x86_64 hosts with AVX2.
+/// x86_64 hosts with AVX2, FMA and F16C.
+///
+/// # Safety
+/// The caller must verify AVX2, FMA and F16C support.
 #[inline(never)]
+#[target_feature(enable = "avx2,fma,f16c")]
 pub unsafe fn matmul_q8_0_vs_q8_0_avx2(
     weight: &[u8],
     input_q8: &[u8],
@@ -211,7 +215,7 @@ mod tests {
 
     #[test]
     fn q8_0_avx2_matches_scalar_uniform() {
-        if !crate::ops::has_avx2_fma() {
+        if !crate::ops::has_avx2_fma() || !crate::ops::has_f16c() {
             return;
         }
         // 8 rows × 16 blocks/row = 8 rows × 512 input = 4096 weights / 4096 in
@@ -234,7 +238,7 @@ mod tests {
 
     #[test]
     fn q8_0_avx2_matches_scalar_real_model() {
-        if !crate::ops::has_avx2_fma() {
+        if !crate::ops::has_avx2_fma() || !crate::ops::has_f16c() {
             return;
         }
         let loader = match crate::core::loader::GGUFLoader::from_file(
