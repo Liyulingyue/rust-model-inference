@@ -72,6 +72,9 @@ from tools.converter.utils.gguf import (
     GGML_BF16,
     GGML_F32,
     GGML_F16,
+    GGML_Q4_0,
+    GGML_Q4K,
+    GGML_Q6K,
     GGML_Q8_0,
     GgufWriter,
     bf16_bytes_to_q8_0,
@@ -80,7 +83,9 @@ from tools.converter.utils.gguf import (
     f16_to_f32,
     gguf_dims,
     open_safetensors,
+    quantize_q4_0,
 )
+from tools.converter.utils.kquants import quantize_q4_k, quantize_q6_k
 
 
 # Text-side metadata values pinned by the engine whitelist
@@ -122,6 +127,52 @@ TEXT_VOCAB_SIZE = 168_576
 IMAGE_TOKEN_ID = 151_655
 VISION_START_TOKEN_ID = 151_652
 VISION_END_TOKEN_ID = 151_653
+
+# ---------------------------------------------------------------------------
+# Quantization policy for the text tower.
+#
+# The vision tower is *not* a quantization target: the mmproj loader decodes
+# its linear weights from F16 and its norms and biases from F32, so the mmproj
+# GGUF is emitted the same way in every mode. Only the text tower's learned
+# 2-D projections move.
+# ---------------------------------------------------------------------------
+
+#: Selectable weight formats for the text tower.
+QUANT_MODES = ("bf16", "q8_0", "q4_0", "q4_k_m", "q6_k")
+
+#: `general.file_type` per mode, matching llama.cpp's `llama_ftype` values so
+#: other tools read the same label we do.
+QUANT_FILE_TYPE = {
+    "bf16": 32,   # LLAMA_FTYPE_MOSTLY_BF16
+    "q8_0": 7,    # LLAMA_FTYPE_MOSTLY_Q8_0
+    "q4_0": 2,    # LLAMA_FTYPE_MOSTLY_Q4_0
+    "q4_k_m": 15, # LLAMA_FTYPE_MOSTLY_Q4_K_M
+    "q6_k": 18,   # LLAMA_FTYPE_MOSTLY_Q6_K
+}
+
+#: Filename suffix per mode.
+QUANT_SUFFIX = {
+    "bf16": "BF16",
+    "q8_0": "Q8_0",
+    "q4_0": "Q4_0",
+    "q4_k_m": "Q4_K_M",
+    "q6_k": "Q6_K",
+}
+
+#: Element count per quantization block, for the alignment guard.
+QUANT_BLOCK = {
+    "bf16": 1,
+    "q8_0": 32,
+    "q4_0": 32,
+    "q4_k_m": 256,
+    "q6_k": 256,
+}
+
+#: Tensors that keep their own type under `q4_k_m`. llama.cpp promotes the
+#: attention value projection and the FFN down projection to 6-bit because
+#: their error lands in the residual stream that every later layer reads; see
+#: `references/llama.cpp/src/llama-quant.cpp` (`use_more_bits`).
+Q4_K_M_PROMOTED = ("attn_v.weight", "ffn_down.weight")
 
 
 def _read_hf_config(hf_dir: Path) -> dict:
@@ -231,6 +282,74 @@ def _emit_bf16_q8_0(gguf: GgufWriter, name: str, raw: bytes, shape: tuple) -> No
     gguf.add_tensor(name, GGML_Q8_0, gguf_dims(shape), bf16_bytes_to_q8_0(raw))
 
 
+def _quant_target(name: str, mode: str) -> int:
+    """GGML type for one text-tower weight under `mode`.
+
+    `q4_k_m` is a mixed recipe, not a single type: the attention value
+    projection and the FFN down projection take 6-bit blocks, everything else
+    4-bit. That mirrors llama.cpp's `LLAMA_FTYPE_MOSTLY_Q4_K_M`, whose
+    `use_more_bits` promotes the same two tensors.
+    """
+    if mode == "bf16":
+        return GGML_BF16
+    if mode == "q8_0":
+        return GGML_Q8_0
+    if mode == "q4_0":
+        return GGML_Q4_0
+    if mode == "q6_k":
+        return GGML_Q6K
+    if mode == "q4_k_m":
+        if name.endswith(Q4_K_M_PROMOTED):
+            return GGML_Q6K
+        return GGML_Q4K
+    raise ValueError(f"unknown quantization mode {mode!r}")
+
+
+def _emit_bf16_quantized(
+    gguf: GgufWriter, name: str, raw: bytes, shape: tuple, mode: str,
+) -> None:
+    """Emit one BF16-sourced text-tower weight in `mode`.
+
+    The GGUF byte order is row-major over the torch shape, so a torch
+    `(n_out, n_in)` matrix is contiguous in `n_in` — the same order the
+    existing Q8_0 path relies on. The block quantizers therefore need
+    `n_in % block == 0`.
+    """
+    n = 1
+    for d in shape:
+        n *= d
+    if len(raw) != n * 2:
+        raise ValueError(
+            f"{name}: shape {shape} ({n}) != bf16 payload {len(raw) // 2}"
+        )
+    target = _quant_target(name, mode)
+    if target == GGML_BF16:
+        gguf.add_tensor(name, GGML_BF16, gguf_dims(shape), raw)
+        return
+    if target == GGML_Q8_0:
+        gguf.add_tensor(name, GGML_Q8_0, gguf_dims(shape), bf16_bytes_to_q8_0(raw))
+        return
+    if len(shape) != 2:
+        raise ValueError(f"{name}: only 2-D tensors can be quantized, got {shape}")
+    n_in = shape[1]
+    block = QUANT_BLOCK[mode]
+    if n_in % block:
+        raise ValueError(
+            f"{name}: n_in={n_in} is not a multiple of the {mode} block size "
+            f"{block}; refusing to quantize"
+        )
+    values = np.frombuffer(bf16_to_f32(raw), dtype="<f4")
+    if target == GGML_Q4_0:
+        payload = quantize_q4_0(values)
+    elif target == GGML_Q4K:
+        payload = quantize_q4_k(values)
+    elif target == GGML_Q6K:
+        payload = quantize_q6_k(values)
+    else:  # pragma: no cover - _quant_target only returns the types above
+        raise ValueError(f"{name}: unsupported quant target {target}")
+    gguf.add_tensor(name, target, gguf_dims(shape), payload)
+
+
 def _emit_bf16(gguf: GgufWriter, name: str, raw: bytes, shape: tuple) -> None:
     """BF16 kept as-is (token embeddings + mmproj-side weights)."""
     n = 1
@@ -286,7 +405,9 @@ def _split_conv3d(weight_raw: bytes, shape: tuple[int, ...]) -> tuple[bytes, tup
     )
 
 
-def write_text_gguf(hf_dir: Path, out_path: Path) -> None:
+def write_text_gguf(hf_dir: Path, out_path: Path, *, quant: str = "q8_0") -> None:
+    if quant not in QUANT_MODES:
+        raise ValueError(f"unknown quantization mode {quant!r}")
     cfg = _read_hf_config(hf_dir)
     tok_cfg, tok_json, merges = _read_tokenizer(hf_dir)
     tokens, types = _build_vocab(tok_cfg, tok_json)
@@ -299,7 +420,7 @@ def write_text_gguf(hf_dir: Path, out_path: Path) -> None:
     gguf.add_meta("general.name", "PhysBrain1.5-2B")
     gguf.add_meta("general.basename", "PhysBrain1.5-2B")
     gguf.add_meta("general.size_label", "2B")
-    gguf.add_meta("general.file_type", 7)  # mostly Q8_0
+    gguf.add_meta("general.file_type", QUANT_FILE_TYPE[quant])
     gguf.add_meta("general.quantization_version", 2)
     gguf.add_meta(
         "general.base_model.0.name", "Qwen3-VL-2B-Instruct",
@@ -348,15 +469,25 @@ def write_text_gguf(hf_dir: Path, out_path: Path) -> None:
     gguf.add_meta("tokenizer.ggml.add_eos_token", False)
 
     # ---- tensors ----
-    # Embedding is BF16 because the engine token_embd lookup expects it; the
-    # qwen3 trunk accepts BF16 here.
+    # The embedding is tied to the output projection, so its format decides
+    # both the token lookup and the logits. `bf16` and `q8_0` keep it BF16:
+    # that is the shape the engine's qwen3 trunk was verified against, and it
+    # is what the reference GGUF ships. The narrower modes quantize it too —
+    # it is the single largest tensor in the model — which the engine supports
+    # because the tied path goes through the same generic quantized-weight
+    # loader as every other projection.
     embed = _require(st, "model.language_model.embed_tokens.weight")
     if tuple(embed.shape) != (TEXT_VOCAB_SIZE, TEXT_EMBEDDING_LENGTH):
         raise ValueError(
             f"embed_tokens shape {embed.shape} != "
             f"({TEXT_VOCAB_SIZE}, {TEXT_EMBEDDING_LENGTH})"
         )
-    _emit_bf16(gguf, "token_embd.weight", embed.raw, tuple(embed.shape))
+    if quant in ("bf16", "q8_0"):
+        _emit_bf16(gguf, "token_embd.weight", embed.raw, tuple(embed.shape))
+    else:
+        _emit_bf16_quantized(
+            gguf, "token_embd.weight", embed.raw, tuple(embed.shape), quant,
+        )
     # No `output.weight` — `tie_word_embeddings=true`. Engine constructs
     # output from `token_embd.weight` (see `src/models/qwen3/trunk/weights.rs`).
 
@@ -385,7 +516,7 @@ def write_text_gguf(hf_dir: Path, out_path: Path) -> None:
         k_norm = _require(st, f"{layer_prefix}.self_attn.k_norm.weight")
         _emit_bf16_norm(gguf, f"{block_prefix}.attn_k_norm.weight", k_norm.raw, tuple(k_norm.shape))
 
-        # Attention projections → Q8_0.
+        # Attention projections → the mode's weight format.
         for hf_name, gguf_name in [
             ("self_attn.q_proj", "attn_q"),
             ("self_attn.k_proj", "attn_k"),
@@ -393,16 +524,22 @@ def write_text_gguf(hf_dir: Path, out_path: Path) -> None:
             ("self_attn.o_proj", "attn_output"),
         ]:
             t = _require(st, f"{layer_prefix}.{hf_name}.weight")
-            _emit_bf16_q8_0(gguf, f"{block_prefix}.{gguf_name}.weight", t.raw, tuple(t.shape))
+            _emit_bf16_quantized(
+                gguf, f"{block_prefix}.{gguf_name}.weight", t.raw, tuple(t.shape),
+                quant,
+            )
 
-        # FFN projections → Q8_0.
+        # FFN projections → the mode's weight format.
         for hf_name, gguf_name in [
             ("mlp.gate_proj", "ffn_gate"),
             ("mlp.up_proj", "ffn_up"),
             ("mlp.down_proj", "ffn_down"),
         ]:
             t = _require(st, f"{layer_prefix}.{hf_name}.weight")
-            _emit_bf16_q8_0(gguf, f"{block_prefix}.{gguf_name}.weight", t.raw, tuple(t.shape))
+            _emit_bf16_quantized(
+                gguf, f"{block_prefix}.{gguf_name}.weight", t.raw, tuple(t.shape),
+                quant,
+            )
 
     # Final norm.
     out_norm = _require(st, "model.language_model.norm.weight")
@@ -569,12 +706,21 @@ def write_mmproj_gguf(hf_dir: Path, out_path: Path) -> None:
     )
 
 
-def convert(hf_dir: Path, out_dir: Path) -> None:
+def convert(hf_dir: Path, out_dir: Path, *, quant: str = "q8_0") -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
-    text_path = out_dir / "physbrain-1.5-2b-Q8_0.gguf"
-    mmproj_path = out_dir / "mmproj-physbrain-1.5-2b-F16.gguf"
-    write_text_gguf(hf_dir, text_path)
-    write_mmproj_gguf(hf_dir, mmproj_path)
+    write_text_gguf(hf_dir, text_gguf_path(out_dir, quant), quant=quant)
+    write_mmproj_gguf(hf_dir, mmproj_gguf_path(out_dir))
+
+
+def text_gguf_path(out_dir: Path, quant: str) -> Path:
+    """Text-tower GGUF path for `quant`."""
+    return out_dir / f"physbrain-1.5-2b-{QUANT_SUFFIX[quant]}.gguf"
+
+
+def mmproj_gguf_path(out_dir: Path) -> Path:
+    """mmproj GGUF path. The vision tower is not quantized, so this name does
+    not carry a format suffix."""
+    return out_dir / "mmproj-physbrain-1.5-2b-F16.gguf"
 
 
 def main() -> int:
@@ -593,14 +739,23 @@ def main() -> int:
         "--only", choices=["text", "mmproj"], default=None,
         help="Emit only one of the two outputs (debug aid).",
     )
+    ap.add_argument(
+        "--quant", choices=QUANT_MODES, default="q8_0",
+        help=(
+            "Weight format for the text tower. The mmproj is F16 in every "
+            "mode because the vision loader requires it. q4_k_m is a mixed "
+            "Q4_K/Q6_K recipe like llama.cpp's: the attention value and FFN "
+            "down projections keep 6 bits, everything else takes 4."
+        ),
+    )
     args = ap.parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
     if args.only in (None, "text"):
-        write_text_gguf(args.hf_dir, args.out_dir / "physbrain-1.5-2b-Q8_0.gguf")
-    if args.only in (None, "mmproj"):
-        write_mmproj_gguf(
-            args.hf_dir, args.out_dir / "mmproj-physbrain-1.5-2b-F16.gguf",
+        write_text_gguf(
+            args.hf_dir, text_gguf_path(args.out_dir, args.quant), quant=args.quant,
         )
+    if args.only in (None, "mmproj"):
+        write_mmproj_gguf(args.hf_dir, mmproj_gguf_path(args.out_dir))
     return 0
 
 
