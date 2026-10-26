@@ -1,6 +1,8 @@
 # Sage-A1.5 Q8_0
 
 [ModelScope artifact](https://modelscope.cn/models/InternScience/Sage-A1.5-Q8_0-GGUF/files).
+Latest review follow-up: [functional acceptance and current test boundaries](#review-fixes-and-functional-acceptance),
+with machine-readable evidence in [review-fixes.json](review-fixes.json).
 The GGUF declares `qwen35moe`; it reuses the existing hybrid decoder, not a new
 architecture inferred from the model name. The public `Qwen35Config::from_source`
 now selects the matching metadata prefix, as the model loader already did.
@@ -46,6 +48,14 @@ prevents small reassociations from crossing Q8 activation boundaries and
 changing later expert selection; it does disable explicit CPU SIMD kernels
 for this architecture. The Vulkan decoder still uses packed integer dots. The lossy comparisons
 below use numerical bounds, including on this reproducible scalar CPU path.
+
+Set `RMI_QWEN35_MOE_SIMD=1` before starting a process to opt this architecture
+back into native SIMD/FMA dispatch on CPU and native arithmetic on Vulkan.
+The default remains reference arithmetic; `RMI_SCALAR` still forces scalar
+dispatch even with the opt-in. The setting is read once per process and is
+shared by CPU and Vulkan forwards. Native arithmetic can cross Q8 activation
+boundaries, change expert selection and generated tokens, and exceed the
+reference-mode error bounds. The opt-in is not an aligned performance claim.
 
 ```sh
 sh tools/oracle/sage_a15/build_oracle.sh /path/to/pinned/llama.cpp target/sage-oracle
@@ -419,7 +429,9 @@ These measurements cover short requests and eight CPU threads, not full-core
 CPU performance, persistent sessions, long contexts or concurrency. Optimized
 CPU/Vulkan graph alignment remains outside the scalar Oracle claim.
 
-### Completion validation
+### Completion validation (2026-10-23 snapshot)
+
+These results predate the review follow-up below.
 
 Default dispatch passes the original 1,100 selected checkpoints on ARM64 CPU,
 x86_64 CPU and the physical NAVI31 Vulkan decoder, without `RMI_SCALAR`.
@@ -509,7 +521,117 @@ DRI_PRIME='pci-0000_c3_00_0!' \
 ```
 
 Other GPUs/libm implementations, other expert formats, persistent-session
-performance, long contexts, HTTP, MTP execution and numerical vision alignment
-remain outside this validation. The CPU vision encoder/projector is not a GPU
+performance, long contexts, MTP execution and numerical vision alignment
+remain outside this validation. HTTP functional checks added after review are
+recorded below. The CPU vision encoder/projector is not a GPU
 implementation. Other model revisions and quantization types need separate
 validation.
+
+
+### Review fixes and functional acceptance
+
+[review-fixes.json](review-fixes.json) records the follow-up to PR #187's review,
+including the exact commands, real-model responses, red/green regressions and
+current test failures. `verification.json` is an explicitly historical snapshot;
+`completion.json` retains the previous AMD validation and measurements.
+
+The HTTP chat/tool classifier now accepts `qwen35moe` with the existing Qwen3.5
+grammar. Before this fix, a real Sage chat request returned HTTP 500 with
+`Tool/chat template is unsupported for architecture qwen35moe`. Text and SSE
+chat requests now return the same answer, `你好！有什么可以帮助你的吗？`, and SSE
+terminates with `[DONE]`. The parser regression exercises every UTF-8 split of
+a Qwen3.5 tool call. Actual tool execution remains outside the real-model smoke.
+
+CPU CLI and HTTP JEV single-choice and grouped block-choice requests run with
+the published model. For context `The sky is blue.` and question
+`What color is the sky?`, options `blue` / `green`, both interfaces choose A and
+return identical probability values: single A=0.9934966564178467,
+B=0.0065033454447984695; grouped A=0.9999839067459106,
+B=0.000016103205780382268. These are functional consistency checks, not
+numerical Oracle validation of every JEV mode. An HTTP data-URI image request
+also describes the red circle, blue square and green triangle in order; its
+48-token budget ends with `finish_reason=length`. Vision remains on CPU.
+
+The legacy Q8 Vulkan cache is keyed by host address and length. A deterministic
+real-device regression reuses one host allocation across two kernel lifetimes;
+before eviction it returned 32 instead of 64 on the second calculation.
+Dropping a borrowed or owned Q8 kernel now evicts that weight, and warmup evicts
+its own temporary weights. Cleanup retires an expired host key immediately, but releases
+the GPU allocation only after commands are confirmed idle. Failed recovery
+retains the allocation until a later successful recovery or context teardown.
+An injected fence/idle failure verifies this boundary and subsequent address
+reuse on the physical Apple M3 Max Vulkan device. This regression demonstrates
+a cache defect; it does not prove the cause of the previously reported
+intermittent VibeVoice full-suite failure. Direct legacy raw-slice callers still
+need to manage the backing allocation lifetime. `Q8Kernel` retains `Clone` but
+can no longer be `Copy` because it now performs cleanup. Temporary kernels
+created by `QuantizedTensor` bridge calls evict on each drop; long-lived
+`Weight` kernels retain reuse across forwards.
+
+CPU recurrent-state and `last_hidden` fixtures now explicitly request CPU, so
+unrelated tests that globally enable GPU cannot switch those fixtures to a
+different backend. The SIMD opt-in and scalar override are checked in isolated
+subprocesses. The default CPU path was rechecked against the pinned Oracle:
+all 1,100 selected checkpoints pass the original exact/numerical contracts.
+The opt-in CPU CLI smoke also generates `你好！有什么可以帮助你的吗？`; this does
+not establish opt-in numerical parity or a performance gain.
+
+To reproduce the functional checks, build both entry points and start a CPU
+server with the existing artifacts:
+
+```sh
+cargo build --profile release-fast --features vulkan,parity-trace \
+  --bin rust-model-inference --bin rust-model-server
+
+target/release-fast/rust-model-inference \
+  --model "$SAGE_MODEL_DIR/Sage-A1.5-Q8_0.gguf" --compute cpu --threads 8 \
+  --prefill-batch-size 64 --jev --jev-output json \
+  --jev-context 'The sky is blue.' --jev-question 'What color is the sky?' \
+  --jev-option blue --jev-option green
+# Add --jev-block color before the options for the grouped request.
+
+target/release-fast/rust-model-server \
+  --model "$SAGE_MODEL_DIR/Sage-A1.5-Q8_0.gguf" \
+  --mmproj "$SAGE_MODEL_DIR/Sage-A1.5-mmproj.gguf" \
+  --compute cpu --threads 8 --prefill-batch-size 64 \
+  --host 127.0.0.1 --port 8080 --max-context 512 --jinja --no-thinking
+
+curl --fail-with-body http://127.0.0.1:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"messages":[{"role":"user","content":"你好"}],"temperature":0,"max_tokens":8}'
+# Add "stream":true to the body for the SSE request.
+curl --fail-with-body http://127.0.0.1:8080/v1/jev/score \
+  -H 'Content-Type: application/json' \
+  -d '{"context":"The sky is blue.","questions":[{"text":"What color is the sky?","options":["blue","green"]}]}'
+curl --fail-with-body http://127.0.0.1:8080/v1/jev/grouped \
+  -H 'Content-Type: application/json' \
+  -d '{"context":"The sky is blue.","mode":"block_choice","questions":[{"text":"What color is the sky?","groups":[{"label":"color","options":["blue","green"]}]}]}'
+
+cargo test --profile release-fast --features vulkan,parity-trace \
+  --lib cached_weight -- --ignored --nocapture --test-threads=1
+```
+
+The original AMD endpoint closes SSH during the handshake in this follow-up;
+no new AMD result or SIMD speedup is claimed. Whole-suite and clippy results,
+including baseline comparisons and unresolved failures, are listed by name in
+`review-fixes.json`; neither is claimed green.
+
+
+| Follow-up test scope | Passed | Failed | Ignored |
+| --- | ---: | ---: | ---: |
+| Final default library (serial) | 1243 | 21 | 80 |
+| Final Vulkan library (serial) | 1352 | 26 | 168 |
+| Default library + integration targets (151 targets) | 1739 | 40 | 146 |
+| Explicit physical-device cache regressions | 4 | 0 | 0 |
+
+The final Vulkan failure names are a subset of the same-host `e3c49e3d`
+baseline's 31 failures; this comparison has no current-only failure.
+Clippy still exits 101 at the same 20 primary error locations as that baseline.
+The unrestricted default `cargo test --no-fail-fast` also encounters an
+unchanged example without a `main`; library and integration targets were run
+separately. The integration run preceded the final cache-owner destructor
+changes; final library runs and Vulkan clippy's test compilation cover those
+changes. The 40 integration/library failures are not all classified as baseline
+failures. These counts exclude ignored real-model/device tests unless explicitly
+run above. Full failure names, commands, logs and their hashes are retained in
+`review-fixes.json`.

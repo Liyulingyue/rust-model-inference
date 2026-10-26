@@ -1,4 +1,10 @@
 {
+  "record_type": "historical_validation_snapshot",
+  "superseded_by": [
+    "completion.json",
+    "review-fixes.json"
+  ],
+  "scope_note": "This early snapshot is retained for reproducibility. Current acceptance, fixed test status and remaining limits are recorded in the superseding files.",
   "date": "2026-10-23",
   "scope": "Sage-A1.5 Q8_0 scalar-reference Vulkan text decoder",
   "model": {
@@ -124,10 +130,6 @@
     "whole-repository tests",
     "clean clippy"
   ],
-  "known_baseline_failures": [
-    "qwen35_config_rejects_invalid_tensor_dimensions",
-    "qwen35_trace_metadata_is_independent_of_prefill_batch_size"
-  ],
   "cli": {
     "forced_text": {
       "passed": true,
@@ -143,5 +145,10 @@
       "projector": "CPU F16",
       "red_identified": true
     }
-  }
+  },
+  "historical_test_failures": [
+    "qwen35_config_rejects_invalid_tensor_dimensions",
+    "qwen35_trace_metadata_is_independent_of_prefill_batch_size"
+  ],
+  "historical_test_failure_note": "Both Qwen35 tests were fixed before completion.json. Their presence in this old snapshot is not a current failure or a claim that every full-suite failure is pre-existing."
 }
