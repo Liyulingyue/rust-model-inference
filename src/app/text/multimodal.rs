@@ -935,6 +935,7 @@ pub fn run_qwen3_family_multimodal_logits(
         .special_token_id(end_name)
         .ok_or_else(|| format!("Required token missing: {end_name}"))?;
     let rows = media.len() / width;
+    let media_deepstack = media_deepstack_layers.concat();
     let mut content = vec![start];
     content.extend(std::iter::repeat_n(pad, rows));
     content.push(end);
@@ -946,9 +947,14 @@ pub fn run_qwen3_family_multimodal_logits(
         },
     ));
     let mut token_ids = Vec::new();
-    if let Some(system_text) =
-        system_prompt.filter(|_| family == crate::app::media::ProjectorFamily::Qwen25Omni)
-    {
+    // Prepend for every projector family, not just Qwen2.5-Omni: the only
+    // caller that passes `Some` is the JEV scorer, whose system prompt is
+    // what tells the model to reply with a letter label. Gating it on the
+    // family silently dropped that instruction for qwen3vl, so `--jev
+    // --image` and `/v1/jev/image` compared the logits of "A" and "B"
+    // without ever being asked for one, and returned a near-constant
+    // answer for every image.
+    if let Some(system_text) = system_prompt {
         append_qwen_message_tokens(
             &mut token_ids,
             &tokenizer,
@@ -965,8 +971,19 @@ pub fn run_qwen3_family_multimodal_logits(
     append_qwen_message_tokens(&mut token_ids, &tokenizer, "user", &content)?;
     append_qwen_assistant_prefix(&mut token_ids, &tokenizer, false)?;
     let mut embeddings = model.embed_tokens(&token_ids)?;
-    // qwen3vl deepstack embeddings currently unused here — vision
-    // embeddings flow through `model.embed_tokens` + `inject_qwen_media_embeddings`.
+    // The vision tower above only supplies *rows*: without this splice the
+    // placeholder tokens keep their text embeddings and the image never
+    // reaches the logits. `run_qwen3_family_multimodal` and the server
+    // runtime already inject here; this logits-only path did not, so JEV
+    // scored the question from text alone and scored every image the same.
+    let deepstack_embeddings = inject_qwen_media_embeddings(
+        &token_ids,
+        pad,
+        &mut embeddings,
+        &media,
+        &media_deepstack,
+        width,
+    )?;
     let positions = build_qwen3_media_positions(&token_ids, pad, &media_grid_shapes)?;
     let capacity = token_ids.len() + 1;
     let mut session = Qwen3Session::new_with_kv_state(
@@ -980,7 +997,8 @@ pub fn run_qwen3_family_multimodal_logits(
         token_ids: &token_ids,
         positions: &positions,
         embeddings: Some(&embeddings),
-        deepstack_embeddings: None,
+        deepstack_embeddings: (!deepstack_embeddings.is_empty())
+            .then_some(deepstack_embeddings.as_slice()),
     };
     let (logits, _dur) = session.forward_logits(input, prefill_batch_size)?;
     Ok((logits, t0.elapsed()))
