@@ -2876,9 +2876,63 @@ pipeline JIT（共享 pipeline 后仍然复现）。
 - **`flush_mapped` / `invalidate_mapped`**（`src/vulkan.rs`）：映射内存的写与读
   各自显式刷新/失效，不再只依赖 coherent 语义。
 
-**剩余**：端到端仍不可复现（256×256 连续六次六个 md5），因为扩散会放大任何
-微小差异。GPU 路径因此保持关闭（Mage-Flow 的 `--gpu` 门禁在
-`src/app/diffusion.rs`），在彻底查清之前不要放开。
+### 第二轮排查（2026-10-26）
+
+**校验层**：机器上有 Khronos 校验层
+（`/usr/share/vulkan/explicit_layer.d/VkLayer_khronos_validation.json`）。在
+`src/vulkan.rs` 里加了 `RMI_VULKAN_VALIDATION=1`（启用层 + `VK_EXT_debug_utils`
+messenger + `VK_EXT_validation_features` 打开同步校验）后：
+
+- 校验层能加载、能报消息（证明 messenger 与特性都生效）；
+- 我们的 Vulkan 用法**没有报任何违规**；
+- 但层开启后 NVIDIA 驱动在 `vkCreateComputePipelines` 里崩了：SIGTRAP 落在
+  `libnvidia-gpucomp.so` 的着色器编译器里（GPU-AV 关掉也一样崩）。这是驱动侧的
+  编译器缺陷，不是我们的用法问题，所以这条路查不下去。
+
+**窄投影探针的假阳性**：`bf16_prepared_activation_round_is_visible` 一度报
+4000 轮里失败 16 次。查下来是**探针自己的归一化 bug**——它用第 0 轮的量级当分母，
+而输入每轮都在变大（`base + round * step`），于是健康的 1e-6 被放大成 1e-2。
+改成每轮按当轮量级归一、并用精确参考代替外推参考后，**4000 轮 0 失败**
+（rows=20 与 rows=256 各测）。结论：单投影的窄路径其实是健康的，之前那批
+"失败" 全是探针假阳性。
+
+**真正的漏网之鱼**：分歧不在 DiT，也不在单个投影，而在**VAE 解码器**。
+逐阶段校验和（`RMI_MAGE_VAE_CHECKSUM=1`）显示 DiT 的投影与注意力逐位相同，
+第一个分歧出现在 `pipeline.dec_net.res_blocks.*.mlp.0` 与
+`pipeline.y_embedder_x`——这些是 **VAE 里没走校验的算子**（VAE 的 `linear` 用的是
+`forward` 而不是 `forward_verified`，VAE 的卷积完全没有校验）。
+
+**损坏形态**（`RMI_GPU_VERIFY_TRACE=1` 打出的形态表）：
+
+| 形状 | 不同的元素 | 受影响的行 | 最差行的错列数 |
+|---|---|---|---|
+| rows=6, n_out=3072 | 18432/18432 (100%) | 6/6 | 3072 |
+| rows=256, n_out=8192 | 1866527/2097152 (89%) | 256/256 | 7478/8192 |
+| rows=65536, n_out=32 | 1635183/2097152 (78%) | 65536/65536 | 32/32 |
+
+即：损坏是**整片**的（一个 dispatch 的结果整体不对），不是零星几个元素。
+
+**已实施的修复**（把 16 次相同结果从 3/10 提到 19/20、14/14、10/10）：
+
+- **VAE 的 `linear` 改走 `forward_verified`**（`src/models/diffusion/mage_flow/vae.rs`）。
+- **卷积也做校验**（`src/models/diffusion/dreamx/kernels.rs`）：新增
+  `conv3d_matches_cpu`，抽样 512 个输出元素与 CPU 卷积对拍；不对就重跑
+  （`GPU_RETRY_LIMIT = 3` 次），仍旧不对就整块交给 CPU 卷积。同时把 CPU 卷积
+  主体抽成 `conv3d_cpu` 供两条路径共用。
+- **注意力校验加密**：每个 token 的每个 head 查 8 个元素（原来只查 1 个），
+  设备只坏掉 head 的一部分时原来会漏。
+- **投影校验加密**：每行查 32 个散布列 + 16 个连续列（原来 8 + 0），
+  连续块用来抓"一整段连续列错"而散布列用来抓零星错列。
+- **两级门禁保持不变**：默认 `--gpu` 仍然拒绝，`RMI_GPU_UNSAFE=1` 放行。
+
+**剩余**：仍有约 1/16 的运行与其它运行不同（约 6%）。损坏是整片的，所以理论上
+"整片损坏"一定能被抽样抓到；抓不到的那次估计坏在了**没被任何检查覆盖的算子**上，
+或者坏在了抽样没覆盖到的少数元素上。要彻底关掉这个口子，只能把校验从抽样换成
+全量（代价是 CPU 参考要算满整个输出），或者干脆把 Mage-Flow 的 GPU 路径按当前
+状态定级为"实验性"。
+
+**当前状态**：GPU 路径默认关闭；`RMI_GPU_UNSAFE=1` 下 256×256 连续跑大部分
+逐位相同，但**不保证**，所以门禁文案仍然写着"not reproducible"。
 
 #### 第二次排查（2026-10-24）：投影偶发出错已经能复现
 

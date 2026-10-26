@@ -540,6 +540,10 @@ pub fn run_mage_flow_cli(
         }
     }
     let context = encode_prompt(&text, prompt, &features)?;
+    if std::env::var_os("RMI_MAGE_STEP_CHECKSUM").is_some() {
+        let sum: f64 = context.iter().map(|value| *value as f64).sum();
+        eprintln!("[Mage-CHECK] context sum={sum:.12e} len={}", context.len());
+    }
     let negative = if cfg > 1.0 {
         Some(encode_prompt(
             &text,

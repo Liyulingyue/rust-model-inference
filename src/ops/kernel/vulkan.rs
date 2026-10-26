@@ -193,13 +193,60 @@ pub(crate) fn try_attention(
             .forward(query, key, value, &mut output, spec)
     })();
     match result {
-        Ok(()) if output.iter().all(|v| v.is_finite()) => Some(output),
+        Ok(()) if output.iter().all(|v| v.is_finite()) => {
+            // The device has been seen to return the numbers of an earlier
+            // call (TODO-044), so the result is checked against the CPU
+            // kernel before it is used. A retry of the same call usually
+            // returns the right numbers, and a retry keeps the bits of a
+            // healthy run.
+            if crate::models::diffusion::dreamx::kernels::attention_matches_cpu(
+                query, key, value, &output, spec,
+            ) {
+                return Some(output);
+            }
+            let mut attempts = 0;
+            while attempts < 3 {
+                attempts += 1;
+                let mut retry = vec![0.0; query.len()];
+                let outcome = state
+                    .as_mut()
+                    .unwrap()
+                    .forward(query, key, value, &mut retry, spec);
+                if outcome.is_err() {
+                    break;
+                }
+                if !retry.iter().all(|v| v.is_finite()) {
+                    break;
+                }
+                if crate::models::diffusion::dreamx::kernels::attention_matches_cpu(
+                    query, key, value, &retry, spec,
+                ) {
+                    return Some(retry);
+                }
+            }
+            // The device keeps returning numbers the CPU kernel does not
+            // agree with, so the attention is computed on the CPU.
+            let _cpu_scope = crate::core::thread_pool::ComputePool::disable_gpu_matmul_for_scope();
+            let mut cpu = vec![0.0; query.len()];
+            if crate::models::diffusion::dreamx::kernels::attention_on_cpu(query, key, value, spec)
+                .map(|values| cpu.copy_from_slice(&values))
+                .is_err()
+            {
+                return None;
+            }
+            Some(cpu)
+        }
         Ok(()) => {
             crate::vulkan::mark_gpu_broken("non-finite attention output");
             *state = None;
             None
         }
-        Err(crate::vulkan::VulkanError::UnsupportedShape(_)) => None,
+        Err(crate::vulkan::VulkanError::UnsupportedShape(error)) => {
+            if std::env::var_os("RMI_GPU_VERIFY_TRACE").is_some() {
+                eprintln!("[GPU-VERIFY] attention unsupported: {error}");
+            }
+            None
+        }
         Err(error) => {
             crate::vulkan::mark_gpu_broken(&error.to_string());
             *state = None;
@@ -1138,6 +1185,192 @@ mod tests {
                     all_zero_rows,
                 );
             }
+        }
+        eprintln!("PROBE {rounds} 轮中失败 {failures} 次");
+    }
+
+    /// The device has been seen to return a projection that is wrong in
+    /// whole rows (TODO-044). This probe changes the activation from round
+    /// to round, so a result that belongs to an earlier round stands out.
+    ///
+    /// The activation is `base + round * step`, and the projection is
+    /// linear, so the reference of every round follows from two CPU
+    /// projections. A result that matches an earlier round's reference is a
+    /// stale activation, and a result that matches none is a wrong one.
+    #[test]
+    #[ignore = "requires a Vulkan device and the real Mage-Flow GGUFs"]
+    fn bf16_prepared_activation_round_is_visible() {
+        use crate::vulkan::ops::{GpuMatmulMode, GpuMatmulSpec, GpuWeightFormat};
+        crate::ops::float::enable_gpu();
+        if crate::ops::get_vulkan_context().is_none() {
+            eprintln!("no vulkan context; skip");
+            return;
+        }
+        let Ok(loader) =
+            crate::GGUFLoader::from_file("models/mage-flow/mage-flow-base-dit-BF16.gguf")
+        else {
+            eprintln!("no real weights; skip");
+            return;
+        };
+        let (Some(bytes), Some(info)) = (
+            loader.tensor_slice("transformer_blocks.8.attn.to_k.weight"),
+            loader.tensor_info("transformer_blocks.8.attn.to_k.weight"),
+        ) else {
+            eprintln!("no weight; skip");
+            return;
+        };
+        let n_in = info.dims[0] as usize;
+        let n_out = info.dims[1] as usize;
+        let rows: usize = std::env::var("PROBE_ROWS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(20);
+        let rounds: usize = std::env::var("PROBE_ROUNDS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(4000);
+        let mut state: u64 = 0x8E1D4C7B93A2F506;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 40) as f32 / 1024.0 - 8.0
+        };
+        let base: Vec<f32> = (0..rows * n_in).map(|_| next()).collect();
+        let step: Vec<f32> = (0..rows * n_in).map(|_| next()).collect();
+        // The projection is linear, so the reference of every round follows
+        // from the references of the base and of the step.
+        let project = |input: &[f32]| -> Vec<f32> {
+            let mut reference = vec![0.0f32; rows * n_out];
+            for index in 0..rows * n_out {
+                let row = index / n_out;
+                let column = index % n_out;
+                reference[index] = crate::models::diffusion::dreamx::kernels::dot_bf16_f32(
+                    &bytes[column * n_in * 2..(column + 1) * n_in * 2],
+                    &input[row * n_in..(row + 1) * n_in],
+                );
+            }
+            reference
+        };
+        let base_reference = project(&base);
+        let step_reference = project(&step);
+        let scale = base_reference
+            .iter()
+            .fold(0.0f32, |peak, value| peak.max(value.abs()))
+            .max(1.0);
+        let spec = GpuMatmulSpec {
+            format: GpuWeightFormat::BF16,
+            mode: GpuMatmulMode::Prepared,
+        };
+        let mut failures = 0usize;
+        let mut linear = GpuLinear::default();
+        for round in 0..rounds {
+            let input: Vec<f32> = base
+                .iter()
+                .zip(step.iter())
+                .map(|(base, step)| base + round as f32 * step)
+                .collect();
+            let mut out = vec![0.0f32; rows * n_out];
+            if !linear.try_matmul(bytes, spec, &input, &mut out, n_in, n_out, rows) {
+                eprintln!("PROBE round {round}: fell back to the CPU");
+                return;
+            }
+            // How far is the result from the reference of this round, and how
+            // far is it from the reference of the rounds around it?
+            let distance = |candidate: &[f32]| -> f32 {
+                out.iter()
+                    .zip(candidate.iter())
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0f32, f32::max)
+                    / scale
+            };
+            let own_reference: Vec<f32> = base_reference
+                .iter()
+                .zip(step_reference.iter())
+                .map(|(base, step)| base + round as f32 * step)
+                .collect();
+            // The scale must follow the round: the reference grows with the
+            // input, so a scale fixed at round 0 would turn a healthy 1e-6
+            // into a 1e-2 at round 3000.
+            let round_scale = own_reference
+                .iter()
+                .fold(0.0f32, |peak, value| peak.max(value.abs()))
+                .max(1.0);
+            let own = distance(&own_reference) * scale / round_scale;
+            // The extrapolated reference drifts over thousands of rounds, so
+            // the exact reference decides whether this is a failure. Its
+            // scale follows the round too, because the reference grows with
+            // the input.
+            let exact = project(&input);
+            let exact_scale = exact
+                .iter()
+                .fold(0.0f32, |peak, value| peak.max(value.abs()))
+                .max(1.0);
+            let exact_distance = out
+                .iter()
+                .zip(exact.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f32, f32::max)
+                / exact_scale;
+            if exact_distance <= 1.0e-4 {
+                continue;
+            }
+            failures += 1;
+            // Which earlier round does the result look like, if any?
+            let mut closest: Option<(usize, f32)> = None;
+            for earlier in 0..=round {
+                let candidate: Vec<f32> = base_reference
+                    .iter()
+                    .zip(step_reference.iter())
+                    .map(|(base, step)| base + earlier as f32 * step)
+                    .collect();
+                let distance = distance(&candidate);
+                if closest.is_none_or(|(_, best)| distance < best) {
+                    closest = Some((earlier, distance));
+                }
+            }
+            // How much of each row is wrong, and where in the row?
+            let mut wrong_per_row: Vec<(usize, usize, usize)> = Vec::new();
+            for row in 0..rows {
+                let mut wrong = 0usize;
+                let mut first = usize::MAX;
+                let mut last = 0usize;
+                for column in 0..n_out {
+                    if out[row * n_out + column] != own_reference[row * n_out + column] {
+                        wrong += 1;
+                        first = first.min(column);
+                        last = last.max(column);
+                    }
+                }
+                if wrong > 0 {
+                    wrong_per_row.push((
+                        row,
+                        wrong,
+                        if first == usize::MAX { 0 } else { last - first },
+                    ));
+                }
+            }
+            let caught = crate::models::diffusion::dreamx::kernels::projection_matches_cpu(
+                bytes, &input, &out, rows, n_in, n_out,
+            );
+            // How localized is the damage? Count the rows that carry any wrong
+            // value and, for those rows, how much of the row is wrong.
+            let mut affected_rows = 0usize;
+            let mut worst_row_fraction = 0.0f32;
+            for row in 0..rows {
+                let wrong = (0..n_out)
+                    .filter(|column| {
+                        out[row * n_out + column] != own_reference[row * n_out + column]
+                    })
+                    .count();
+                if wrong > 0 {
+                    affected_rows += 1;
+                    worst_row_fraction = worst_row_fraction.max(wrong as f32 / n_out as f32);
+                }
+            }
+            eprintln!(
+                "PROBE round {round}: 外推相对差={own:.4e} 精确相对差={exact_distance:.4e} 检查抓到={caught} 受影响的行={affected_rows}/{rows} 最差行错列比例={worst_row_fraction:.3} 历史轮次={closest:?}"
+            );
         }
         eprintln!("PROBE {rounds} 轮中失败 {failures} 次");
     }

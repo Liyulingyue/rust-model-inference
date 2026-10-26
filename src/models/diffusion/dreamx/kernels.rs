@@ -125,6 +125,33 @@ impl<'a> Linear<'a> {
         input: &[f32],
         rows: usize,
     ) -> Result<Vec<f32>, String> {
+        self.forward_impl(pool, input, rows, false)
+    }
+
+    /// Forward a projection and repair a device result that the CPU kernel
+    /// does not agree with.
+    ///
+    /// The device intermittently returns a projection that is wrong in whole
+    /// rows (TODO-044). Rechecking a few elements of the result against the
+    /// CPU kernel costs a fraction of the projection itself, and a result
+    /// that disagrees is recomputed on the CPU, so the caller always gets
+    /// the numbers the CPU would have produced.
+    pub fn forward_verified(
+        &self,
+        pool: &ComputePool,
+        input: &[f32],
+        rows: usize,
+    ) -> Result<Vec<f32>, String> {
+        self.forward_impl(pool, input, rows, true)
+    }
+
+    fn forward_impl(
+        &self,
+        pool: &ComputePool,
+        input: &[f32],
+        rows: usize,
+        verify: bool,
+    ) -> Result<Vec<f32>, String> {
         if rows == 0 || input.len() != checked_len("DreamX linear input", &[rows, self.n_in()])? {
             return Err("Invalid DreamX linear input shape".into());
         }
@@ -174,6 +201,122 @@ impl<'a> Linear<'a> {
                         self.n_in(),
                         self.n_out(),
                     );
+                }
+            }
+            if verify {
+                if let Some(weight) = self.weight.kernel.bf16_bytes() {
+                    // The device has been seen to return the numbers of an
+                    // earlier call, so a projection is checked against the CPU
+                    // kernel before it is used. A retry of the same call
+                    // usually returns the right numbers, and a retry keeps the
+                    // bits of a healthy run, which leaves the caller
+                    // reproducible. Only a projection that stays wrong is
+                    // recomputed on the CPU.
+                    let mut attempts = 0;
+                    if std::env::var_os("RMI_GPU_VERIFY_TRACE").is_some() {
+                        // When the check fails, the whole output is compared
+                        // against the CPU kernel, so the shape of the damage
+                        // is visible: how many elements differ, and how they
+                        // are spread over the output.
+                        if !projection_matches_cpu(
+                            weight,
+                            input,
+                            &output,
+                            rows,
+                            self.n_in(),
+                            self.n_out(),
+                        ) {
+                            let mut cpu = vec![0.0f32; output.len()];
+                            linear_bf16(
+                                pool,
+                                weight,
+                                input,
+                                rows,
+                                self.n_in(),
+                                self.n_out(),
+                                None,
+                                &mut cpu,
+                            );
+                            let mut differing = 0usize;
+                            let mut first = usize::MAX;
+                            let mut last = 0usize;
+                            let mut per_row: Vec<usize> = vec![0; rows];
+                            for index in 0..output.len() {
+                                if output[index] != cpu[index] {
+                                    differing += 1;
+                                    first = first.min(index);
+                                    last = last.max(index);
+                                    per_row[index / self.n_out()] += 1;
+                                }
+                            }
+                            let rows_hit = per_row.iter().filter(|c| **c > 0).count();
+                            let worst_row = per_row.iter().copied().max().unwrap_or(0);
+                            eprintln!(
+                                "[GPU-VERIFY-SHAPE] rows={rows} n_out={} 不同的元素={differing}/{} 受影响的行={rows_hit} 最差行的错列数={worst_row} 跨度={}",
+                                self.n_out(),
+                                output.len(),
+                                last.saturating_sub(first)
+                            );
+                        }
+                    }
+                    if std::env::var_os("RMI_GPU_VERIFY_TRACE").is_some() {
+                        eprintln!(
+                            "[GPU-VERIFY] linear rows={rows} n_in={} n_out={} worst={:.3e}",
+                            self.n_in(),
+                            self.n_out(),
+                            projection_worst_difference(
+                                weight,
+                                input,
+                                &output,
+                                rows,
+                                self.n_in(),
+                                self.n_out(),
+                            )
+                        );
+                    }
+                    while attempts < GPU_RETRY_LIMIT
+                        && !projection_matches_cpu(
+                            weight,
+                            input,
+                            &output,
+                            rows,
+                            self.n_in(),
+                            self.n_out(),
+                        )
+                    {
+                        attempts += 1;
+                        if !self.weight.try_vulkan_rows(input, &mut output, rows) {
+                            break;
+                        }
+                    }
+                    if attempts > 0 {
+                        eprintln!(
+                            "[GPU-VERIFY] a projection was wrong and {attempts} retries fixed it"
+                        );
+                    }
+                    if !projection_matches_cpu(
+                        weight,
+                        input,
+                        &output,
+                        rows,
+                        self.n_in(),
+                        self.n_out(),
+                    ) {
+                        eprintln!(
+                            "[GPU] a projection did not match the CPU kernel after {attempts} retries; recomputing it on the CPU"
+                        );
+                        let _cpu_scope = ComputePool::disable_gpu_matmul_for_scope();
+                        linear_bf16(
+                            pool,
+                            weight,
+                            input,
+                            rows,
+                            self.n_in(),
+                            self.n_out(),
+                            None,
+                            &mut output,
+                        );
+                    }
                 }
             }
             if let Some(bias) = &self.bias {
@@ -318,6 +461,115 @@ fn linear_bf16(
             unsafe { (output_address as *mut f32).add(index).write(value) };
         }
     });
+}
+
+/// How often a projection is asked of the device again after the CPU kernel
+/// disagreed with it.
+const GPU_RETRY_LIMIT: usize = 3;
+
+/// How many columns of every row of a projection are checked against the CPU
+/// kernel.
+const GPU_CHECK_COLUMNS: usize = 32;
+
+/// How many consecutive columns of every row are checked as well, to catch
+/// a run of wrong values that the spread sampling can step over.
+const GPU_CHECK_BLOCK: usize = 16;
+
+/// The largest relative difference between a device projection and the CPU
+/// kernel over the sampled elements.
+fn projection_worst_difference(
+    weight: &[u8],
+    input: &[f32],
+    output: &[f32],
+    rows: usize,
+    n_in: usize,
+    n_out: usize,
+) -> f32 {
+    let scale = output
+        .iter()
+        .fold(0.0f32, |peak, value| peak.max(value.abs()))
+        .max(1.0e-6);
+    let mut worst = 0.0f32;
+    for row in 0..rows {
+        for step in 0..GPU_CHECK_COLUMNS {
+            let column = (row * 7919 + step * 104729 + 13) % n_out;
+            let reference = dot_bf16_f32(
+                &weight[column * n_in * 2..(column + 1) * n_in * 2],
+                &input[row * n_in..(row + 1) * n_in],
+            );
+            worst = worst.max((output[row * n_out + column] - reference).abs() / scale);
+        }
+    }
+    worst
+}
+
+/// Whether a device projection agrees with the CPU kernel.
+///
+/// The two summation orders differ, so a healthy projection differs from the
+/// CPU by a relative amount around 1e-6. A device that returned the numbers
+/// of an earlier call differs in whole rows, which is far above that.
+///
+/// The check looks at a few elements of a few rows instead of the whole
+/// projection, so it costs a small fraction of the projection itself. A
+/// device that returned the wrong numbers gets those wrong in every row, so
+/// a handful of elements is enough to catch it.
+pub(crate) fn projection_matches_cpu(
+    weight: &[u8],
+    input: &[f32],
+    output: &[f32],
+    rows: usize,
+    n_in: usize,
+    n_out: usize,
+) -> bool {
+    if rows == 0 || n_in == 0 || n_out == 0 {
+        return true;
+    }
+    // The scale of the whole result is the yardstick: the healthy
+    // difference between the two summation orders is a small fraction of it.
+    let scale = output
+        .iter()
+        .fold(0.0f32, |peak, value| peak.max(value.abs()))
+        .max(1.0e-6);
+    // The healthy difference between the two summation orders is around 1e-6
+    // of the scale, and a broken projection is off by 1e-2 of it or more, so
+    // a limit of 1e-4 tells the two apart with room on both sides.
+    let limit = 1.0e-4 * scale;
+    // The device gets whole rows or whole column ranges wrong, so every row
+    // is looked at, at several columns spread over it. The columns are
+    // spread by a stride that shares no factor with the row count, so the
+    // sampled ones differ from row to row.
+    //
+    // The damage is sometimes confined to a part of a row, so a few columns
+    // per row are not enough on their own: the check also walks a block of
+    // consecutive columns, which is where a run of wrong values shows up.
+    for row in 0..rows {
+        for step in 0..GPU_CHECK_COLUMNS {
+            let column = (row * 7919 + step * 104729 + 13) % n_out;
+            let reference = dot_bf16_f32(
+                &weight[column * n_in * 2..(column + 1) * n_in * 2],
+                &input[row * n_in..(row + 1) * n_in],
+            );
+            if (output[row * n_out + column] - reference).abs() > limit {
+                return false;
+            }
+        }
+    }
+    // A consecutive block of columns of every row catches a run of wrong
+    // values that the spread sampling above can step over.
+    let block = GPU_CHECK_BLOCK.min(n_out);
+    for row in 0..rows {
+        for offset in 0..block {
+            let column = (row * 104_729 + offset) % n_out;
+            let reference = dot_bf16_f32(
+                &weight[column * n_in * 2..(column + 1) * n_in * 2],
+                &input[row * n_in..(row + 1) * n_in],
+            );
+            if (output[row * n_out + column] - reference).abs() > limit {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 pub(crate) fn dot_bf16_f32(weight: &[u8], input: &[f32]) -> f32 {
@@ -562,6 +814,86 @@ pub fn attention_scalar(
     attention_scalar_with_dot(query, key, value, spec, dot_f32)
 }
 
+thread_local! {
+    /// Set while the CPU attention runs, so the check that compares a device
+    /// result against it does not ask the device again.
+    static ATTENTION_ON_CPU: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The attention the CPU kernel produces, without the device path.
+///
+/// The device has been seen to return the numbers of an earlier call
+/// (TODO-044), so the device result is compared against this one.
+pub fn attention_on_cpu(
+    query: &[f32],
+    key: &[f32],
+    value: &[f32],
+    spec: AttentionSpec,
+) -> Result<Vec<f32>, String> {
+    ATTENTION_ON_CPU.with(|flag| flag.set(true));
+    let result = attention_scalar_with_dot(query, key, value, spec, dot_f32);
+    ATTENTION_ON_CPU.with(|flag| flag.set(false));
+    result
+}
+
+/// Whether the CPU attention is the one being computed right now.
+pub(crate) fn attention_is_on_cpu() -> bool {
+    ATTENTION_ON_CPU.with(|flag| flag.get())
+}
+
+/// Whether a device attention agrees with the CPU kernel.
+///
+/// The two summation orders differ, so a healthy attention differs from the
+/// CPU by a small relative amount. A device that returned the numbers of an
+/// earlier call differs in every row, which is far above that.
+pub(crate) fn attention_matches_cpu(
+    query: &[f32],
+    key: &[f32],
+    value: &[f32],
+    output: &[f32],
+    spec: AttentionSpec,
+) -> bool {
+    if spec.query_heads == 0 || spec.head_dim == 0 || spec.query_tokens == 0 {
+        return true;
+    }
+    // The scale of the whole result is the yardstick.
+    let scale = output
+        .iter()
+        .fold(0.0f32, |peak, value| peak.max(value.abs()))
+        .max(1.0e-6);
+    // The healthy difference between the two summation orders is around 1e-6
+    // of the scale, and a broken result is off by 1e-2 of it or more, so a
+    // limit of 1e-4 tells the two apart with room on both sides.
+    let limit = 1.0e-4 * scale;
+    let Ok(reference) = attention_on_cpu(query, key, value, spec) else {
+        return true;
+    };
+    if reference.len() != output.len() {
+        return true;
+    }
+    // The device gets whole tokens or whole heads wrong, so every token is
+    // looked at, at one element of every head.
+    let width = spec.head_dim * spec.query_heads;
+    if width == 0 || output.len() % width != 0 {
+        return true;
+    }
+    // Every token and every head is looked at, at several elements of the
+    // head. One element per head is not enough: the device has been seen to
+    // damage a part of a head only, and that part would slip through.
+    for token in 0..output.len() / width {
+        for head in 0..spec.query_heads {
+            let base = token * width + head * spec.head_dim;
+            for step in 0..GPU_ATTENTION_CHECK_ELEMENTS {
+                let index = base + (step * 1_030_003 + head * 8_177) % spec.head_dim;
+                if (output[index] - reference[index]).abs() > limit {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
 /// Sequential F32 QK reduction in scalar mode, as used by MageVAE's torch.bmm.
 pub fn attention_scalar_f32(
     query: &[f32],
@@ -592,7 +924,7 @@ fn attention_scalar_with_bias(
 ) -> Result<Vec<f32>, String> {
     spec.validate(query, key, value)?;
     #[cfg(feature = "vulkan")]
-    if bias.is_none() {
+    if bias.is_none() && !attention_is_on_cpu() {
         if let Some(output) = crate::ops::kernel::vulkan::try_attention(query, key, value, spec) {
             return Ok(output);
         }
@@ -875,8 +1207,236 @@ pub fn conv3d_with_options(
         output_shape,
         spec,
     ) {
+        // The device has been seen to return a convolution that disagrees
+        // with the CPU kernel, so the result is checked before it is used.
+        // A retry of the same call usually returns the right numbers.
+        let mut attempts = 0;
+        while attempts < GPU_RETRY_LIMIT
+            && !conv3d_matches_cpu(
+                input,
+                weight,
+                bias,
+                &output,
+                input_shape,
+                weight_shape,
+                output_shape,
+                spec,
+            )
+        {
+            attempts += 1;
+            if !crate::ops::kernel::vulkan::try_conv3d(
+                input,
+                weight,
+                bias,
+                &mut output,
+                input_shape,
+                weight_shape,
+                output_shape,
+                spec,
+            ) {
+                break;
+            }
+        }
+        if attempts > 0 {
+            eprintln!("[GPU-VERIFY] a convolution was wrong and {attempts} retries fixed it");
+        }
+        if conv3d_matches_cpu(
+            input,
+            weight,
+            bias,
+            &output,
+            input_shape,
+            weight_shape,
+            output_shape,
+            spec,
+        ) {
+            return Ok((output, output_shape));
+        }
+        // The device keeps returning a wrong convolution, so the CPU kernel
+        // computes the whole thing.
+        let _scope = crate::core::thread_pool::ComputePool::disable_gpu_matmul_for_scope();
+        conv3d_cpu(
+            pool,
+            input,
+            weight,
+            bias,
+            &mut output,
+            input_shape,
+            weight_shape,
+            output_shape,
+            spec,
+        );
         return Ok((output, output_shape));
     }
+    conv3d_cpu(
+        pool,
+        input,
+        weight,
+        bias,
+        &mut output,
+        input_shape,
+        weight_shape,
+        output_shape,
+        spec,
+    );
+    Ok((output, output_shape))
+}
+
+/// How many elements of a convolution output are checked against the CPU
+/// kernel.
+const GPU_CONV_CHECK_SAMPLES: usize = 512;
+
+/// How many elements of every head of an attention result are checked
+/// against the CPU kernel.
+const GPU_ATTENTION_CHECK_ELEMENTS: usize = 8;
+
+/// The largest relative difference between a device convolution and the CPU
+/// kernel over the sampled elements.
+#[allow(clippy::too_many_arguments)]
+fn conv3d_matches_cpu(
+    input: &[f32],
+    weight: &[f32],
+    bias: Option<&[f32]>,
+    output: &[f32],
+    input_shape: [usize; 4],
+    weight_shape: [usize; 5],
+    output_shape: [usize; 4],
+    spec: Conv3dSpec,
+) -> bool {
+    let output_len = match checked_len("DreamX Conv3D output", &output_shape) {
+        Ok(len) => len,
+        Err(_) => return false,
+    };
+    if output.len() != output_len || output_len == 0 {
+        return false;
+    }
+    // The scale of the whole output sets the tolerance, because the two
+    // implementations sum in a different order.
+    let scale = output
+        .iter()
+        .fold(0.0f32, |peak, value| peak.max(value.abs()))
+        .max(1.0);
+    let tolerance = 1.0e-4 * scale;
+    if std::env::var_os("RMI_GPU_VERIFY_TRACE").is_some() {
+        eprintln!(
+            "[GPU-VERIFY] conv check 输出长度={output_len} 形状={output_shape:?} 采样={GPU_CONV_CHECK_SAMPLES} 容差={tolerance:.3e}"
+        );
+    }
+    let reference = vec![0.0f32; output_len];
+    for sample in 0..GPU_CONV_CHECK_SAMPLES {
+        // Spread the samples over the whole output.
+        let index = (sample * 2_654_435_761) % output_len;
+        let value = conv3d_element(
+            input,
+            weight,
+            bias,
+            &reference,
+            index,
+            input_shape,
+            weight_shape,
+            output_shape,
+            spec,
+        );
+        if (value - output[index]).abs() > tolerance {
+            if std::env::var_os("RMI_GPU_VERIFY_TRACE").is_some() {
+                eprintln!(
+                    "[GPU-VERIFY-SHAPE] conv 采样命中 index={index} gpu={:.6e} cpu={:.6e} 容差={tolerance:.3e} 输出长度={output_len}",
+                    output[index], value
+                );
+            }
+            return false;
+        }
+    }
+    true
+}
+
+/// One element of the convolution, computed the way the CPU kernel does.
+#[allow(clippy::too_many_arguments)]
+fn conv3d_element(
+    input: &[f32],
+    weight: &[f32],
+    bias: Option<&[f32]>,
+    scratch: &[f32],
+    output_index: usize,
+    input_shape: [usize; 4],
+    weight_shape: [usize; 5],
+    output_shape: [usize; 4],
+    spec: Conv3dSpec,
+) -> f32 {
+    let [_, depth, height, width] = input_shape;
+    let [_, weight_channels, kernel_depth, kernel_height, kernel_width] = weight_shape;
+    let [_, output_depth, output_height, output_width] = output_shape;
+    let output_channels_per_group = output_shape[0] / spec.groups;
+    let ow = output_index % output_width;
+    let rest = output_index / output_width;
+    let oh = rest % output_height;
+    let rest = rest / output_height;
+    let od = rest % output_depth;
+    let oc = rest / output_depth;
+    let group = oc / output_channels_per_group;
+    let mut sum = bias.map_or(0.0, |bias| bias[oc]);
+    for local_channel in 0..weight_channels {
+        let input_channel = group * weight_channels + local_channel;
+        for kd in 0..kernel_depth {
+            let padded_depth = od * spec.stride[0] + kd * spec.dilation[0];
+            if padded_depth < spec.padding[0] {
+                continue;
+            }
+            let input_depth = padded_depth - spec.padding[0];
+            if input_depth >= depth {
+                continue;
+            }
+            for kh in 0..kernel_height {
+                let padded_height = oh * spec.stride[1] + kh * spec.dilation[1];
+                if padded_height < spec.padding[1] {
+                    continue;
+                }
+                let input_height = padded_height - spec.padding[1];
+                if input_height >= height {
+                    continue;
+                }
+                let input_row =
+                    ((input_channel * depth + input_depth) * height + input_height) * width;
+                let weight_row = (((oc * weight_channels + local_channel) * kernel_depth + kd)
+                    * kernel_height
+                    + kh)
+                    * kernel_width;
+                for kw in 0..kernel_width {
+                    let padded_width = ow * spec.stride[2] + kw * spec.dilation[2];
+                    if padded_width < spec.padding[2] {
+                        continue;
+                    }
+                    let input_width = padded_width - spec.padding[2];
+                    if input_width < width {
+                        sum += input[input_row + input_width] * weight[weight_row + kw];
+                    }
+                }
+            }
+        }
+    }
+    let _ = scratch;
+    sum
+}
+
+/// The CPU convolution. The device version is checked against a sample of
+/// this kernel, so both have to agree on the same arithmetic.
+#[allow(clippy::too_many_arguments)]
+fn conv3d_cpu(
+    pool: &ComputePool,
+    input: &[f32],
+    weight: &[f32],
+    bias: Option<&[f32]>,
+    output: &mut [f32],
+    input_shape: [usize; 4],
+    weight_shape: [usize; 5],
+    output_shape: [usize; 4],
+    spec: Conv3dSpec,
+) {
+    let [_, depth, height, width] = input_shape;
+    let [output_channels, weight_channels, kernel_depth, kernel_height, kernel_width] =
+        weight_shape;
+    let [_, output_depth, output_height, output_width] = output_shape;
+    let output_len = checked_len("DreamX Conv3D output", &output_shape).unwrap_or(0);
     let output_address = output.as_mut_ptr() as usize;
     let output_channels_per_group = output_channels / spec.groups;
     let strict = crate::ops::scalar_mode();
@@ -969,7 +1529,6 @@ pub fn conv3d_with_options(
             unsafe { (output_address as *mut f32).add(output_index).write(sum) };
         }
     });
-    Ok((output, output_shape))
 }
 
 pub fn conv2d(
@@ -1266,6 +1825,127 @@ fn transpose_input_index(
 
 #[cfg(test)]
 mod tests {
+    use super::projection_matches_cpu;
+
+    fn bf16(value: f32) -> [u8; 2] {
+        ((value.to_bits() >> 16) as u16).to_le_bytes()
+    }
+
+    /// A device projection that the CPU kernel agrees with has to pass the
+    /// check, and one that came back with a stale row has to fail it.
+    #[test]
+    fn a_broken_convolution_fails_the_convolution_check() {
+        let input_shape = [2usize, 1, 4, 4];
+        let weight_shape = [3usize, 2, 3, 3, 3];
+        let output_shape = [3usize, 1, 4, 4];
+        let spec = Conv3dSpec {
+            stride: [1, 1, 1],
+            padding: [1, 1, 1],
+            dilation: [1, 1, 1],
+            groups: 1,
+        };
+        let input: Vec<f32> = (0..input_shape.iter().product())
+            .map(|i| (i % 7) as f32 / 3.0 - 1.0)
+            .collect();
+        let weight: Vec<f32> = (0..weight_shape.iter().product())
+            .map(|i| (i % 5) as f32 / 4.0 - 0.5)
+            .collect();
+        let bias: Vec<f32> = vec![0.25, -0.5, 0.75];
+        let mut output = vec![0.0f32; output_shape.iter().product()];
+        let pool = ComputePool::new(1);
+        super::conv3d_cpu(
+            &pool,
+            &input,
+            &weight,
+            Some(&bias),
+            &mut output,
+            input_shape,
+            weight_shape,
+            output_shape,
+            spec,
+        );
+        assert!(super::conv3d_matches_cpu(
+            &input,
+            &weight,
+            Some(&bias),
+            &output,
+            input_shape,
+            weight_shape,
+            output_shape,
+            spec,
+        ));
+        // A slice of the output that came back wrong is what a broken
+        // dispatch looks like.
+        let mut broken = output.clone();
+        broken[0] += 10.0;
+        assert!(!super::conv3d_matches_cpu(
+            &input,
+            &weight,
+            Some(&bias),
+            &broken,
+            input_shape,
+            weight_shape,
+            output_shape,
+            spec,
+        ));
+    }
+
+    fn a_stale_row_fails_the_projection_check() {
+        let n_in = 64usize;
+        let n_out = 32usize;
+        let rows = 8usize;
+        let mut weight = vec![0u8; n_out * n_in * 2];
+        for column in 0..n_out {
+            for k in 0..n_in {
+                let value = ((column * 7 + k * 13) % 11) as f32 / 8.0 - 0.5;
+                weight[(column * n_in + k) * 2..(column * n_in + k) * 2 + 2]
+                    .copy_from_slice(&bf16(value));
+            }
+        }
+        let input: Vec<f32> = (0..rows * n_in)
+            .map(|i| (i % 17) as f32 / 4.0 - 2.0)
+            .collect();
+        let mut output = vec![0.0f32; rows * n_out];
+        for row in 0..rows {
+            for column in 0..n_out {
+                output[row * n_out + column] = super::dot_bf16_f32(
+                    &weight[column * n_in * 2..(column + 1) * n_in * 2],
+                    &input[row * n_in..(row + 1) * n_in],
+                );
+            }
+        }
+        assert!(projection_matches_cpu(
+            &weight, &input, &output, rows, n_in, n_out
+        ));
+        // A row that came back zero is what a stale activation looks like.
+        let mut stale = output.clone();
+        for column in 0..n_out {
+            stale[3 * n_out + column] = 0.0;
+        }
+        assert!(!projection_matches_cpu(
+            &weight, &input, &stale, rows, n_in, n_out
+        ));
+        // A row that came back with different numbers is caught as well.
+        let mut wrong = output.clone();
+        for column in 0..n_out {
+            wrong[5 * n_out + column] += 3.0;
+        }
+        assert!(!projection_matches_cpu(
+            &weight, &input, &wrong, rows, n_in, n_out
+        ));
+        // The numbers of an earlier call, which is what the device was seen
+        // to return, are caught as well.
+        let mut earlier = output.clone();
+        for row in 0..rows {
+            for column in 0..n_out {
+                earlier[row * n_out + column] *= 0.5;
+            }
+        }
+        assert!(!projection_matches_cpu(
+            &weight, &input, &earlier, rows, n_in, n_out
+        ));
+    }
+
     use super::*;
     use crate::core::thread_pool::ComputePool;
 

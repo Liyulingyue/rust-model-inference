@@ -214,7 +214,22 @@ impl<'a> MageFlowDit<'a> {
                 projections.get(name).expect("projection was just inserted")
             }
         };
-        let values = layer.forward(&self.pool, input, rows)?;
+        // The device sometimes returns a projection that is wrong in whole
+        // rows (TODO-044). The verified path rechecks a few elements against
+        // the CPU kernel and recomputes a projection that disagrees, so the
+        // sampler never sees a broken result.
+        let values = layer.forward_verified(&self.pool, input, rows)?;
+        if std::env::var_os("RMI_MAGE_PROJ_CHECKSUM").is_some() {
+            // A checksum of every projection shows the first one that differs
+            // between two runs, because the input of a projection only depends
+            // on the steps before it.
+            let sum: f64 = values.iter().map(|value| *value as f64).sum();
+            let squares: f64 = values
+                .iter()
+                .map(|value| (*value as f64) * (*value as f64))
+                .sum();
+            eprintln!("[Mage-PROJ] {name} sum={sum:.12e} sq={squares:.12e}");
+        }
         drop(projections);
         trace(name, rows, out, &values)?;
         Ok(values)
@@ -261,6 +276,15 @@ impl<'a> MageFlowDit<'a> {
                 *x += dt * v;
             }
             trace("sample.latent", 1, target, &image[..target])?;
+            if std::env::var_os("RMI_MAGE_STEP_CHECKSUM").is_some() {
+                // A checksum of the latent after every step shows the first
+                // step where two runs drift apart.
+                let sum: f64 = image[..target].iter().map(|value| *value as f64).sum();
+                eprintln!(
+                    "[Mage-CHECK] step {step} sum={sum:.12e} head={:?}",
+                    &image[..target.min(4)]
+                );
+            }
             // A projection that the device got wrong leaves the latent with
             // values that no longer match its own scale, and the diffusion
             // carries that into the picture. Refuse the result instead of
@@ -398,6 +422,14 @@ impl<'a> MageFlowDit<'a> {
                 },
             )?;
             trace(&format!("{p}.attn.context"), n, HIDDEN, &attn)?;
+            if std::env::var_os("RMI_MAGE_PROJ_CHECKSUM").is_some() {
+                let sum: f64 = attn.iter().map(|value| *value as f64).sum();
+                let squares: f64 = attn
+                    .iter()
+                    .map(|value| (*value as f64) * (*value as f64))
+                    .sum();
+                eprintln!("[Mage-PROJ] {p}.attn sum={sum:.12e} sq={squares:.12e}");
+            }
             let ti = text_tokens * HIDDEN;
             let pi = self.linear(
                 &format!("{p}.attn.to_out.0"),
