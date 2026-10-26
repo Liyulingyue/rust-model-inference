@@ -152,7 +152,10 @@ mod tests {
     #[test]
     #[ignore = "requires AVX2/FMA with F16C disabled; run under QEMU in CI"]
     fn avx2_without_f16c_uses_scalar() {
-        assert!(!cfg!(target_feature = "f16c"), "build with target-cpu=x86-64");
+        assert!(
+            !cfg!(target_feature = "f16c"),
+            "build with target-cpu=x86-64"
+        );
         assert!(crate::ops::has_avx2_fma());
         assert!(!crate::ops::has_f16c());
         quantized_range_handles_row_offset_and_tail();
