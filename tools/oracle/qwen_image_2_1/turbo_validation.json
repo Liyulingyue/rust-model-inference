@@ -1009,7 +1009,8 @@
     "changes": [
       "AVX2 approximate softmax maximum includes every lane",
       "Q8_0 AVX2 kernel and dispatch require AVX2, FMA and F16C",
-      "Qwen text and DiT projection initialization honor Auto CPU fallback; explicit Vulkan projections remain strict"
+      "Qwen text and DiT projection initialization honor Auto CPU fallback; explicit Vulkan projections remain strict",
+      "AVX2 exponential underflow masks scales below the normal range to zero instead of wrapping to negative infinity"
     ],
     "shared_hsum_ps_changed": false,
     "local_host": "Apple M3 Max / MoltenVK",
@@ -1018,10 +1019,11 @@
       "auto_with_disabled_vulkan": "Failed before the correction; passes after",
       "dit_auto_without_driver": "Isolated child with missing ICD failed before the correction; passes after; forced Vulkan still errors",
       "softmax_sse_reduction_probe": "Rosetta SSE3 instruction probe failed before and passed after; not a full AVX2 execution",
-      "hardware_projection_checks": "Text raw hidden rows/F32 KV and DiT BF16 tiling passed on MoltenVK"
+      "hardware_projection_checks": "Text raw hidden rows/F32 KV and DiT BF16 tiling passed on MoltenVK",
+      "native_x86_underflow": "The initial native x86 softmax regression failed even with an even-lane maximum; exponent n=-128 wrapped to negative infinity. The underflow tail is now masked to zero."
     },
     "ci_coverage": {
-      "native_x86": "AVX2/FMA/F16C required; softmax large distinct logits in all lanes, Q8_0 kernels and row offsets/tails",
+      "native_x86": "AVX2/FMA/F16C required; softmax large distinct logits in all lanes, Q8_0 kernels and row offsets/tails; exponential underflow and masked values remain finite and nonnegative",
       "missing_f16c": "QEMU Haswell with F16C disabled; assert AVX2/FMA present and run Q8_0 scalar fallback",
       "policy_and_integration": "CPU/Auto/forced Vulkan policy checks and image integration tests, with and without Vulkan",
       "full_library_suite_in_ci": false

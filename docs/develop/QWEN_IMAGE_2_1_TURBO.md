@@ -103,8 +103,12 @@ The AVX2 approximate softmax now includes all eight lanes when finding the
 maximum. Regression inputs place two large, distinct logits in every lane,
 including across vector blocks and the scalar tail. Q8_0 dispatch now requires
 AVX2, FMA **and F16C** before entering its annotated kernel; hosts without F16C
-use scalar execution. The shared `hsum_ps` reduction is unchanged: the report's
-claim that it drops two lanes used an incorrect `_mm_movehl_ps` interpretation.
+use scalar execution. The native x86 regression also exposed an independent
+exponential underflow: the exponent-bit shortcut wrapped to negative infinity
+for `n = -128`. The underflow tail now returns zero, preserving finite,
+nonnegative softmax probabilities. The shared `hsum_ps` reduction is unchanged:
+the report's claim that it drops two lanes used an incorrect `_mm_movehl_ps`
+interpretation.
 
 Qwen text and DiT projection initialization now honor Auto rather than promoting
 it to a forced Vulkan request. Auto can use CPU when a hardware device or the

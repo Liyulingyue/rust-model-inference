@@ -73,7 +73,38 @@ pub(crate) unsafe fn exp_approx_avx2(x: std::arch::x86_64::__m256) -> std::arch:
         _mm256_set1_epi32(0x3f80_0000),
     );
     let scale = _mm256_castsi256_ps(exponent);
-    _mm256_mul_ps(_mm256_add_ps(_mm256_set1_ps(1.0), j), scale)
+    // shortcut: flush subnormal scales (n=-128 wraps); use split scaling for subnormal accuracy.
+    _mm256_andnot_ps(
+        _mm256_cmp_ps::<_CMP_LT_OQ>(n, _mm256_set1_ps(-126.0)),
+        _mm256_mul_ps(_mm256_add_ps(_mm256_set1_ps(1.0), j), scale),
+    )
+}
+
+#[cfg(all(test, target_arch = "x86_64"))]
+mod tests {
+    #[test]
+    fn avx2_underflow_remains_nonnegative_and_finite() {
+        if !crate::ops::has_avx2_fma() {
+            return;
+        }
+        let input = [
+            f32::NEG_INFINITY,
+            -1000.0,
+            -100.0,
+            -89.0,
+            -88.0,
+            -87.0,
+            -1.0,
+            0.0,
+        ];
+        let mut actual = input;
+        super::exp_approx_inplace(&mut actual);
+        for (x, actual) in input.into_iter().zip(actual) {
+            let expected = x.exp();
+            assert!(actual.is_finite() && actual >= 0.0, "exp({x}) = {actual}");
+            assert!((actual - expected).abs() <= (expected * 1e-6).max(f32::MIN_POSITIVE));
+        }
+    }
 }
 
 #[cfg(target_arch = "aarch64")]
