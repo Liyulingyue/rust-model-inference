@@ -18,6 +18,9 @@ jobs:
   x86:
     name: x86 dispatch regressions
     runs-on: ubuntu-latest
+    env:
+      # Keep feature detection dynamic when QEMU removes an ISA feature.
+      RUSTFLAGS: -C target-cpu=x86-64
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

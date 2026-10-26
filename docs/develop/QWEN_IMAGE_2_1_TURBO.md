@@ -119,7 +119,8 @@ started, its dispatch failures still propagate; this change does not add
 mid-render recovery.
 
 CI now runs native x86 AVX2 softmax/Q8_0 regressions, a QEMU AVX2/FMA test with
-F16C disabled, CPU/Auto policy tests, and the focused image integration tests
+F16C disabled (built with `target-cpu=x86-64` to keep detection dynamic),
+CPU/Auto policy tests, and the focused image integration tests
 with and without Vulkan. Locally, each build passed the 12 integration tests;
 Auto/no-device and CPU/strict-policy regressions passed, as did both hardware
 projection checks on M3 Max / MoltenVK. The full CPU library suite changed from

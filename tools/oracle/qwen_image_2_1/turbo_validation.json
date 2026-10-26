@@ -1024,7 +1024,7 @@
     },
     "ci_coverage": {
       "native_x86": "AVX2/FMA/F16C required; softmax large distinct logits in all lanes, Q8_0 kernels and row offsets/tails; exponential underflow and masked values remain finite and nonnegative",
-      "missing_f16c": "QEMU Haswell with F16C disabled; assert AVX2/FMA present and run Q8_0 scalar fallback",
+      "missing_f16c": "Portable target-cpu=x86-64 build under QEMU Haswell with F16C disabled; assert F16C is not a compile-time feature, AVX2/FMA are detected and F16C is absent, then run Q8_0 scalar fallback",
       "policy_and_integration": "CPU/Auto/forced Vulkan policy checks and image integration tests, with and without Vulkan",
       "full_library_suite_in_ci": false
     },
