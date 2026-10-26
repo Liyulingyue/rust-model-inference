@@ -50,6 +50,10 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
             "--laya-request" => {
                 options.laya_request = Some(required_path_value(args, &mut i, "--laya-request")?);
             }
+            "--timestral-request" => {
+                options.timestral_request =
+                    Some(required_path_value(args, &mut i, "--timestral-request")?);
+            }
             "--prompt" => {
                 if i + 1 < args.len() {
                     options.prompt = Some(args[i + 1].clone());
@@ -658,6 +662,9 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
     }
     if options.gpu && options.compute.is_some() {
         return Err("--gpu and --compute cannot be combined".into());
+    }
+    if options.timestral_request.is_some() && args.iter().any(|arg| arg == "--serve") {
+        return Err("--timestral-request is a CLI forecast mode; --serve is unsupported".into());
     }
     Ok(options)
 }

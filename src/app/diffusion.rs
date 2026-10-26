@@ -357,6 +357,91 @@ pub fn run_pig_image(
     Ok(())
 }
 
+pub fn run_flux3_cli(
+    source: Arc<dyn TensorSource>,
+    options: &crate::app::CliOptions,
+    n_threads: usize,
+) -> Result<(), String> {
+    for (present, flag) in [
+        (
+            options.cfg.is_some()
+                || options.cfg_scale.is_some()
+                || options.negative_prompt.is_some(),
+            "--cfg/--cfg-scale/--negative-prompt",
+        ),
+        (options.noise.is_some(), "--noise"),
+        (
+            options.embedding
+                || options.rerank
+                || options.jev
+                || options.tts
+                || options.yue2
+                || options.dreamx,
+            "non-image task modes",
+        ),
+        (
+            options.audio.is_some() || options.video.is_some(),
+            "--audio/--video",
+        ),
+        (
+            options.max_tokens.is_some()
+                || options.temperature.is_some()
+                || options.top_k.is_some()
+                || options.top_p.is_some(),
+            "text generation options",
+        ),
+    ] {
+        if present {
+            return Err(format!("FLUX3 cannot be used with {flag}"));
+        }
+    }
+    let text = options
+        .text_encoder
+        .as_deref()
+        .ok_or("FLUX3 requires --text-encoder")?;
+    let vae = options.vae.as_deref().ok_or("FLUX3 requires --vae")?;
+    let out = options.out.as_deref().ok_or("FLUX3 requires --out")?;
+    if out.exists() && !options.overwrite {
+        return Err(format!("Output already exists: {}", out.display()));
+    }
+    let prompt = options
+        .prompt
+        .as_deref()
+        .ok_or("FLUX3 requires --prompt (a full scene caption)")?;
+    let side = options.resolution.unwrap_or(1024);
+    let width = options.width.unwrap_or(side);
+    let height = options.height.unwrap_or(side);
+    if width != height {
+        return Err("FLUX3 currently requires square output".into());
+    }
+    let references = options
+        .image
+        .iter()
+        .chain(&options.references)
+        .map(|p| crate::app::media::decode_image(p).map(|image| image.to_rgb8()))
+        .collect::<Result<Vec<_>, _>>()?;
+    if options.edit && references.is_empty() {
+        return Err("FLUX3 --edit requires --image or --reference".into());
+    }
+    if references.len() > 10 {
+        return Err("FLUX3 supports at most 10 references".into());
+    }
+    let text = Arc::from(open_model_source(text, ComponentRole::Llm).map_err(|e| e.to_string())?);
+    let vae = Arc::from(open_model_source(vae, ComponentRole::Mmproj).map_err(|e| e.to_string())?);
+    let pipeline =
+        crate::models::diffusion::flux3::Flux3Pipeline::load(source, text, vae, n_threads)?;
+    let rgb = pipeline.generate(
+        prompt,
+        width,
+        options.steps.unwrap_or(16),
+        options.seed.unwrap_or(42) as u64,
+        &references,
+    )?;
+    write_png_atomically(out, &rgb, options.overwrite)?;
+    println!("FLUX3 image saved to {}", out.display());
+    Ok(())
+}
+
 pub fn run_mage_flow_cli(
     source: Arc<dyn TensorSource>,
     options: &crate::app::CliOptions,
@@ -1496,6 +1581,16 @@ mod tests {
             height: 1,
             bytes: vec![255, 0, 0, 0, 255, 0],
         }
+    }
+
+    #[test]
+    fn flux3_gpu_reaches_component_validation() {
+        let options = crate::app::CliOptions {
+            gpu: true,
+            ..Default::default()
+        };
+        let error = run_flux3_cli(Arc::new(MustNotBeRead), &options, 1).unwrap_err();
+        assert!(error.contains("requires --text-encoder"), "{error}");
     }
 
     #[test]

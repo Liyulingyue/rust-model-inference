@@ -373,6 +373,127 @@ pub(super) fn deterministic_session_model(n_ctx: usize) -> Qwen3Model {
 }
 
 #[test]
+#[cfg(not(feature = "vulkan"))]
+fn hidden_layer_capture_honors_policy_without_vulkan() {
+    let mut model = deterministic_session_model(16);
+    model
+        .layers
+        .push(deterministic_session_model(16).layers.remove(0));
+    model.config.n_layer = 2;
+    let _scope = crate::compute::ComputePolicy::Vulkan.enter_legacy_scope();
+    let result = model.text_encode_hidden_layers(&[0, 1], &[[0; 4], [1; 4]], &[true, false], &[1]);
+    if crate::ops::scalar_mode() {
+        assert!(result.is_ok());
+    } else {
+        let error = result.unwrap_err();
+        assert!(error.contains("vulkan"), "{error}");
+    }
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
+#[ignore = "requires a hardware Vulkan device; run alone with --test-threads=1"]
+fn hidden_layer_capture_auto_dispatches_with_padding_and_tiles() {
+    use crate::compute::ComputePolicy;
+    let mut model = deterministic_session_model(260);
+    model
+        .layers
+        .push(deterministic_session_model(260).layers.remove(0));
+    model.config.n_layer = 2;
+    let ids: Vec<_> = (0..257).map(|i| i % 8).collect();
+    let mut mask = vec![true; ids.len()];
+    mask[2] = false;
+    let positions: Vec<_> = (0..ids.len())
+        .map(|i| [if mask[i] { i } else { 1 }; 4])
+        .collect();
+    let expected = {
+        let _scope = ComputePolicy::Cpu.enter_legacy_scope();
+        model
+            .text_encode_hidden_layers(&ids, &positions, &mask, &[1])
+            .unwrap()
+    };
+    let context = ComputePolicy::Vulkan.context().unwrap().unwrap();
+    let before = context.compute_stats();
+    let actual = {
+        let _scope = ComputePolicy::Auto.enter_legacy_scope();
+        model
+            .text_encode_hidden_layers(&ids, &positions, &mask, &[1])
+            .unwrap()
+    };
+    assert!(
+        context.compute_stats().submissions > before.submissions,
+        "hidden-layer extraction must reach GPU projections"
+    );
+    let l2 = actual
+        .iter()
+        .zip(&expected)
+        .map(|(a, b)| (*a as f64 - *b as f64).powi(2))
+        .sum::<f64>()
+        / expected.iter().map(|v| (*v as f64).powi(2)).sum::<f64>();
+    assert!(l2.sqrt() < 0.005, "relative L2 {}", l2.sqrt());
+    let before_cpu = context.compute_stats();
+    let cpu = {
+        let _cpu = ComputePolicy::Cpu.enter_legacy_scope();
+        let _auto = ComputePolicy::Auto.enter_legacy_scope();
+        model
+            .text_encode_hidden_layers(&ids, &positions, &mask, &[1])
+            .unwrap()
+    };
+    assert_eq!(cpu, expected);
+    assert_eq!(context.compute_stats().submissions, before_cpu.submissions);
+}
+
+#[test]
+fn hidden_layer_capture_is_token_major_and_respects_padding() {
+    let mut model = deterministic_session_model(16);
+    model
+        .layers
+        .push(deterministic_session_model(16).layers.remove(0));
+    model
+        .layers
+        .push(deterministic_session_model(16).layers.remove(0));
+    model.config.n_layer = 3;
+    let positions = [[0; 4], [1; 4], [1; 4], [3; 4]];
+    let mask = [true, true, false, true];
+    let captured = model
+        .text_encode_hidden_layers(&[0, 1, 2, 3], &positions, &mask, &[1, 2])
+        .unwrap();
+    assert_eq!(captured.len(), 4 * 2 * 32);
+    for (index, depth) in [1, 2].into_iter().enumerate() {
+        model.config.n_layer = depth;
+        let expected = model
+            .text_encode_embeddings(
+                model.embed_tokens(&[0, 1, 2, 3]).unwrap(),
+                &positions,
+                &mask,
+            )
+            .unwrap();
+        for token in 0..4 {
+            let start = (token * 2 + index) * 32;
+            let mut normalized = [0.0; 32];
+            crate::ops::rms_norm(
+                &captured[start..start + 32],
+                &model.output_norm,
+                &mut normalized,
+                model.config.eps,
+            );
+            assert_eq!(&normalized, &expected[token * 32..(token + 1) * 32]);
+        }
+    }
+    model.config.n_layer = 3;
+    let changed = model
+        .text_encode_hidden_layers(&[0, 1, 7, 3], &positions, &mask, &[1, 2])
+        .unwrap();
+    assert_eq!(&captured[3 * 64..], &changed[3 * 64..]);
+    assert_ne!(&captured[2 * 64..3 * 64], &changed[2 * 64..3 * 64]);
+    for layers in [&[][..], &[0], &[2, 1], &[1, 1], &[3]] {
+        assert!(model
+            .text_encode_hidden_layers(&[0, 1, 2, 3], &positions, &mask, layers)
+            .is_err());
+    }
+}
+
+#[test]
 fn text_embeddings_mask_hides_middle_padding_from_later_tokens() {
     let model = deterministic_session_model(16);
     let positions = [[0, 0, 0, 0], [1, 1, 1, 0], [2, 2, 2, 0], [3, 3, 3, 0]];

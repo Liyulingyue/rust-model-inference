@@ -129,6 +129,7 @@ pub struct CliOptions {
     pub qwen_omni_bf16: Option<PathBuf>,
     pub jev: bool,
     pub laya_request: Option<PathBuf>,
+    pub timestral_request: Option<PathBuf>,
     pub jev_context: Option<String>,
     pub jev_questions: Vec<JevQuestion>,
     pub jev_positive: Option<String>,
