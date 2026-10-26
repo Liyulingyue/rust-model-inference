@@ -6,6 +6,21 @@ Both GGUF files are official prebuilt artifacts downloaded without local convers
 It does not declare a new GGUF architecture. Use `--jinja` to render its embedded
 Hcompany chat template. Weights are published under CC-BY-NC-4.0.
 
+## Integrated branch status (2026-10-26)
+
+The shared decoder on `codex/holo4-35b-a3b` uses the newer GDN RMSNorm/scale
+normalization from the [35B reference](../README.md). The fixed 27B Oracle below
+uses the earlier `ggml_l2_norm` denominator-floor operation. The integrated
+CPU text rerun fails `state_predelta-0`: maximum relative-L2 `1.186765e-5`
+exceeds the unchanged `1e-5` bound. Keep the older Oracle and its bound intact;
+the passing text results below describe the original #185 implementation and
+do not establish alignment of this integrated decoder. Contract/tokenizer and
+vision checks pass on Apple M3 Max. Vulkan batch-1/64 also passes all four
+greedy IDs and final-logit bounds (maximum relative-L2 `0.16732743`, unchanged
+bound `0.31344540`), as does CPU vision with Vulkan decoding. These checks do
+not cover the failing CPU intermediate checkpoint. The combined branch remains
+experimental.
+
 ## Fixed artifacts
 
 ModelScope revision: `f9ab82b4f7484f3ffb156f649cdf8b1b35abb1ac`.
