@@ -208,12 +208,21 @@ fn run_jev_decision_data_with_image(
             false,
             jinja.clone(),
         ),
+        "dory" => dory::run_jev_decision_dory(
+            source.clone(),
+            context,
+            &prepared,
+            n_threads_arg,
+            prefill_batch_size,
+            false,
+            jinja.clone(),
+        ),
         other => Err(format!(
             "--jev is not yet supported for architecture {:?}; \
              currently supported: qwen3 / qwen3vl / qwen35 / \
              llama / k2-horizon / granite / nanbeige / qwen2_2 / glm4 / \
              gemma4 / lfm2 / lfm25 / mellum / spark2_5 / hunyuan-dense / \
-             nemotron_h / exaone / mistral3 / falcon-h1",
+             nemotron_h / exaone / mistral3 / falcon-h1 / dory",
             other
         )),
     }
@@ -405,6 +414,7 @@ pub fn prepare_jev_questions(
     Ok(per_question)
 }
 
+pub(crate) mod dory;
 pub(crate) mod falcon_h1;
 pub(crate) mod gemma4;
 pub(crate) mod hunyuan;

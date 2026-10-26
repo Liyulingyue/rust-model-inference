@@ -478,3 +478,55 @@ A native-SIMD Linux Oracle comparison fails at 8.31%. The fixed scalar build
 and its platform are part of the acceptance contract; cross-platform or
 native-SIMD agreement is not established. None of these failures is counted
 as passing and neither 1% gate has been relaxed.
+
+## Server and JEV surfaces
+
+Dory is reachable through the same entry points as the other text models.
+
+`src/models/dory/runtime.rs` implements the `TextRuntime` trait that the HTTP
+server holds behind its mutex. Dory's forward API is stateless per call
+(`DoryModel::prefill` takes the token ids plus a session), so the adapter
+allocates a fresh `DorySession` per request, prefills the whole prompt in one
+call and then walks the decode one token at a time. The session is sized to
+`prompt + max_new_tokens` rather than to the model's 262144-token context: the
+Vulkan path pre-allocates the KV region for the whole capacity, and the CPU
+path grows its cache per token.
+
+```sh
+target/release-fast/rust-model-server \
+    --model models/NVIDIA-Nemotron-Labs-Dory1.0-4B-GGUF/NVIDIA-Nemotron-Labs-Dory1.0-4B-Q5_K_M.gguf \
+    --port 8080 --threads 4
+
+curl -s http://127.0.0.1:8080/v1/chat/completions \
+    -H 'Content-Type: application/json' \
+    -d '{"model":"NVIDIA-Nemotron-Labs-Dory1.0-4B-Q5_K_M",
+         "messages":[{"role":"user","content":"Hello"}],
+         "max_tokens":8,"temperature":0}'
+```
+
+`/v1/responses`, `/v1/messages`, `/v1/messages/count_tokens` and the SSE
+streaming variant all work through the same runtime.
+
+`src/app/jev/single/dory.rs` scores a candidate label set with a single
+forward pass, reading the label logits off the last prompt position:
+
+```sh
+target/release-fast/rust-model-inference \
+    --model models/NVIDIA-Nemotron-Labs-Dory1.0-4B-GGUF/NVIDIA-Nemotron-Labs-Dory1.0-4B-Q5_K_M.gguf \
+    --jev --jev-context "The sky is blue and the grass is green." \
+    --jev-question "What color is the sky?" \
+    --jev-option "Blue" --jev-option "Green" --jev-option "Red" --threads 4
+```
+
+The same scorer backs `POST /v1/jev/score`. Both report the identical
+distribution (Blue 0.9157, Green 0.0644, Red 0.0199).
+
+`src/app/jev/grouped/dory.rs` adds the grouped variant, so `--jev --jev-multi`
+and `POST /v1/jev/grouped` work too.
+
+Dory ships a ChatML `tokenizer.chat_template`, so the CLI renders the prompt
+with ChatML by default and `--jinja` renders the checkpoint's own template
+(including its `<think>` block). Feeding the raw prompt to this chat model
+produced incoherent text; the ChatML default fixed it. The parity replay is
+unaffected because it feeds explicit token ids from a prompt file rather than
+going through the chat template.
