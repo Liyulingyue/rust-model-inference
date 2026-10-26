@@ -160,7 +160,7 @@ struct FluxVaeEncoder {
 }
 
 impl FluxVaeEncoder {
-    fn load(source: &dyn TensorSource) -> Result<Self, String> {
+    fn load(source: &dyn TensorSource, channels: usize) -> Result<Self, String> {
         let mut stages = Vec::with_capacity(4);
         for (stage, input, output) in [(0, 128, 128), (1, 128, 256), (2, 256, 512), (3, 512, 512)] {
             let mut blocks = Vec::with_capacity(2);
@@ -195,7 +195,7 @@ impl FluxVaeEncoder {
             mid_attention: VaeAttention::load(source, "encoder.mid.attn_1", 512)?,
             mid_block_2: VaeResidualBlock::load(source, "encoder.mid.block_2", 512, 512)?,
             norm_out: VaeNorm::load(source, "encoder.norm_out", 512)?,
-            conv_out: VaeConv::load(source, "encoder.conv_out", 512, 32, 3)?,
+            conv_out: VaeConv::load(source, "encoder.conv_out", 512, 2 * channels, 3)?,
         })
     }
 }
@@ -263,7 +263,7 @@ impl FluxVae {
         source: Arc<dyn TensorSource>,
         pool: Arc<ComputePool>,
     ) -> Result<Self, String> {
-        let encoder = FluxVaeEncoder::load(source.as_ref())?;
+        let encoder = FluxVaeEncoder::load(source.as_ref(), 16)?;
         let mut vae = Self::load_decoder(source, pool, 16, None)?;
         vae.encoder = Some(encoder);
         Ok(vae)
@@ -276,6 +276,35 @@ impl FluxVae {
         super::validate_flux2_vae(source.as_ref())?;
         let post_quant_conv = VaeConv::load(source.as_ref(), "post_quant_conv", 32, 32, 1)?;
         Self::load_decoder(source, pool, 32, Some(post_quant_conv))
+    }
+
+    pub(crate) fn load_flux3(
+        source: Arc<dyn TensorSource>,
+        pool: Arc<ComputePool>,
+    ) -> Result<Self, String> {
+        let encoder = FluxVaeEncoder::load(source.as_ref(), 32)?;
+        let post = VaeConv::load(source.as_ref(), "post_quant_conv", 32, 32, 1)?;
+        let mut vae = Self::load_decoder(source, pool, 32, Some(post))?;
+        vae.encoder = Some(encoder);
+        Ok(vae)
+    }
+
+    pub(crate) fn encode_flux3_mean(&self, rgb: &[u8], side: usize) -> Result<Vec<f32>, String> {
+        let moments = self.encode_moments(rgb, side)?;
+        let conv = VaeConv::load(self.source.as_ref(), "encoder.quant_conv", 64, 64, 1)?;
+        let mut projected = vec![0.0; moments.len()];
+        run_conv(
+            self.source.as_ref(),
+            &self.pool,
+            &conv,
+            &moments,
+            side / 8,
+            &mut projected,
+            #[cfg(feature = "vulkan")]
+            Some(&self.gpu_conv),
+        )?;
+        projected.truncate(projected.len() / 2);
+        Ok(projected)
     }
 
     fn load_decoder(
@@ -347,6 +376,22 @@ impl FluxVae {
         side: usize,
         seed: u64,
     ) -> Result<Vec<f32>, String> {
+        let moments = self.encode_moments(rgb, side)?;
+        let latent_spatial = checked_spatial(side / 8, "LongCat VAE latent")?;
+        let mut noise = vec![0.0; 16 * latent_spatial];
+        TorchMt19937::new(seed).fill_normal(&mut noise);
+        let latent = (0..noise.len())
+            .map(|index| {
+                let mean = moments[index];
+                let logvar = moments[index + noise.len()].clamp(-30.0, 20.0);
+                let sampled = mean + (0.5 * logvar).exp() * noise[index];
+                (sampled - 0.1159) * 0.3611
+            })
+            .collect();
+        Ok(latent)
+    }
+
+    fn encode_moments(&self, rgb: &[u8], side: usize) -> Result<Vec<f32>, String> {
         let encoder = self
             .encoder
             .as_ref()
@@ -438,7 +483,10 @@ impl FluxVae {
         )?;
         silu_inplace_checked(&mut scratch.first)?;
         let latent_spatial = checked_spatial(feature_side, "LongCat VAE latent")?;
-        let mut moments = reserve_f32("LongCat VAE moments", 32 * latent_spatial)?;
+        let mut moments = reserve_f32(
+            "VAE moments",
+            encoder.conv_out.output_channels * latent_spatial,
+        )?;
         run_conv(
             self.source.as_ref(),
             &self.pool,
@@ -449,17 +497,7 @@ impl FluxVae {
             #[cfg(feature = "vulkan")]
             Some(&self.gpu_conv),
         )?;
-        let mut noise = vec![0.0; 16 * latent_spatial];
-        TorchMt19937::new(seed).fill_normal(&mut noise);
-        let latent = (0..noise.len())
-            .map(|index| {
-                let mean = moments[index];
-                let logvar = moments[index + noise.len()].clamp(-30.0, 20.0);
-                let sampled = mean + (0.5 * logvar).exp() * noise[index];
-                (sampled - 0.1159) * 0.3611
-            })
-            .collect();
-        Ok(latent)
+        Ok(moments)
     }
 
     pub(crate) fn decode_rgb(
@@ -1123,13 +1161,17 @@ fn run_bf16_downsample(
     let weights = source
         .tensor_slice(&conv.weight)
         .ok_or_else(|| format!("Missing tensor data: {}", conv.weight))?;
-    if info.ggml_type != GGMLType::BF16
+    if !matches!(info.ggml_type, GGMLType::BF16 | GGMLType::F16)
         || weights.len() != weight_len
         || input.len() != input_len
         || output.len() != output_len
         || input.iter().any(|value| !value.is_finite())
     {
         return Err("Invalid BF16 VAE downsample buffer".into());
+    }
+    let is_f16 = info.ggml_type == GGMLType::F16;
+    if is_f16 && weights.as_ptr().align_offset(std::mem::align_of::<u16>()) != 0 {
+        return Err("Unaligned F16 VAE downsample weights".into());
     }
     let input_ptr = input.as_ptr() as usize;
     let weights_ptr = weights.as_ptr() as usize;
@@ -1158,7 +1200,7 @@ fn run_bf16_downsample(
                     }
                 }
             }
-            if crate::ops::scalar_mode() {
+            if !is_f16 && crate::ops::scalar_mode() {
                 // The Oracle loads BF16 VAE weights as F16 and builds F16 im2col patches.
                 for value in &mut patch {
                     *value = crate::ops::f16_to_f32(crate::ops::f32_to_f16(*value));
@@ -1169,7 +1211,11 @@ fn run_bf16_downsample(
                 // Workers own disjoint pixels, including across channels.
                 unsafe {
                     let weight = &weights[start..start + patch_len * 2];
-                    let value = if crate::ops::scalar_mode() {
+                    let value = if is_f16 {
+                        let halves =
+                            std::slice::from_raw_parts(weight.as_ptr().cast::<u16>(), patch_len);
+                        crate::ops::dot_f16_f32(&patch, halves, patch_len)
+                    } else if crate::ops::scalar_mode() {
                         dot_vae_f16_scalar(&patch, weight)
                     } else {
                         crate::ops::dot_bf16_f32(&patch, weight, patch_len)
@@ -2138,6 +2184,26 @@ mod tests {
         let mut output = [0.0; 4];
         run_bf16_downsample(
             &source,
+            &Arc::new(ComputePool::new(1)),
+            &conv,
+            &[1.0; 16],
+            4,
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(output, [9.0, 6.0, 6.0, 4.0]);
+        let f16_source = OneConv {
+            info: TensorInfo {
+                ggml_type: GGMLType::F16,
+                ..source.info.clone()
+            },
+            weights: [1.0f32; 9]
+                .into_iter()
+                .flat_map(|v| crate::ops::f32_to_f16(v).to_le_bytes())
+                .collect(),
+        };
+        run_bf16_downsample(
+            &f16_source,
             &Arc::new(ComputePool::new(1)),
             &conv,
             &[1.0; 16],

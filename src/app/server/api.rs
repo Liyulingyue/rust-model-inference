@@ -1665,6 +1665,7 @@ fn backend_label(b: &Backend) -> &'static str {
         Backend::Clm(_) => "clm",
         Backend::Gliner2(_) => "gliner2",
         Backend::Gliner2Boundary(_) => "gliner2-boundary",
+        Backend::Timestral(_) => "timestral",
     }
 }
 
