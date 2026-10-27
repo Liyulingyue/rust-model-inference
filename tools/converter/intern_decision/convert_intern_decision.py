@@ -72,6 +72,19 @@ VARIANT_TABLE = {
         text_n_ff=3584,
         text_head_dim=256,  # Explicit head_dim differs from hidden_size / head_count.
         text_vocab=248_320,
+        # Linear-attention (Mamba SSM) shape. The value dim is
+        # `linear_num_value_heads * linear_value_head_dim`; the key dim is
+        # `linear_num_key_heads * linear_key_head_dim`; the state size is
+        # `linear_key_head_dim`; the group / dt rank is the number of value
+        # heads. Every one of these is checked against the checkpoint's
+        # tensor shapes before anything is written.
+        ssm_conv_kernel=4,
+        ssm_key_dim=2048,
+        ssm_inner_size=2048,
+        ssm_state_size=128,
+        ssm_time_step_rank=16,
+        ssm_group_count=16,
+        full_attention_interval=4,
         vision_depth=12,
         vision_embd=768,
         vision_ff=3072,
@@ -84,16 +97,25 @@ VARIANT_TABLE = {
     ),
     "4b": dict(
         text_n_embd=2560,
-        text_n_layer=36,
+        text_n_layer=32,
         text_n_head=16,
-        text_n_head_kv=2,
-        text_n_ff=9728,
-        text_head_dim=160,  # = 2560 / 16
+        text_n_head_kv=4,
+        text_n_ff=9216,
+        text_head_dim=256,
         text_vocab=248_320,
-        vision_depth=12,
-        vision_embd=768,
-        vision_ff=3072,
-        vision_head=12,
+        ssm_conv_kernel=4,
+        ssm_key_dim=2048,
+        ssm_inner_size=4096,  # 32 value heads x 128, not the 0.8B's 16 x 128.
+        ssm_state_size=128,
+        ssm_time_step_rank=32,
+        ssm_group_count=32,
+        full_attention_interval=4,
+        # The 4B vision tower is a different size than the 0.8B's: 24 blocks
+        # at width 1024, not 12 at width 768.
+        vision_depth=24,
+        vision_embd=1024,
+        vision_ff=4096,
+        vision_head=16,
         vision_patch=16,
         vision_image=768,
         vision_merge=2,
@@ -108,12 +130,6 @@ TEXT_NORM_EPS = 1e-6
 TEXT_ROPE_FREQ_BASE = 10_000_000.0
 TEXT_DIMENSION_COUNT = 64
 TEXT_ROPE_SECTIONS = [11, 11, 10, 0]
-SSM_CONV_KERNEL = 4
-SSM_INNER_SIZE = 2048
-SSM_STATE_SIZE = 128
-SSM_TIME_STEP_RANK = 16
-SSM_GROUP_COUNT = 16
-FULL_ATTENTION_INTERVAL = 4
 IMAGE_TOKEN_ID = 248056
 VISION_START_TOKEN_ID = 248053
 VISION_END_TOKEN_ID = 248054
@@ -272,10 +288,10 @@ def _emit_bf16_f16(gguf: GgufWriter, name: str, raw: bytes, shape: tuple) -> Non
     gguf.add_tensor(name, GGML_F16, gguf_dims(shape), bf16_to_f16(raw))
 
 
-def _is_full_attention(idx: int) -> bool:
-    """Qwen3.5 layer-type pattern: layers [3, 7, 11, ...] (every 4th) are full
+def _is_full_attention(idx: int, interval: int) -> bool:
+    """Qwen3.5 layer-type pattern: every `interval`-th layer is full
     attention; everything else is linear (Mamba SSM)."""
-    return (idx + 1) % FULL_ATTENTION_INTERVAL == 0
+    return (idx + 1) % interval == 0
 
 
 def write_text_gguf(
@@ -296,12 +312,56 @@ def write_text_gguf(
         or text["num_key_value_heads"] != p["text_n_head_kv"]
         or text["intermediate_size"] != p["text_n_ff"]
         or text["vocab_size"] != p["text_vocab"]
+        or text["head_dim"] != p["text_head_dim"]
     ):
         raise ValueError(
             f"text_config dims mismatch with variant {variant!r}: "
             f"hidden={text['hidden_size']}, layers={text['num_hidden_layers']}, "
             f"heads={text['num_attention_heads']}/{text['num_key_value_heads']}, "
-            f"ff={text['intermediate_size']}, vocab={text['vocab_size']}"
+            f"ff={text['intermediate_size']}, vocab={text['vocab_size']}, "
+            f"head_dim={text.get('head_dim')}"
+        )
+    # The linear-attention (Mamba SSM) block has its own shape, and the
+    # 0.8B and 4B differ in it. Derive it from the config instead of
+    # trusting the pinned table alone.
+    linear_value_dim = text["linear_num_value_heads"] * text["linear_value_head_dim"]
+    linear_key_dim = text["linear_num_key_heads"] * text["linear_key_head_dim"]
+    if (
+        linear_value_dim != p["ssm_inner_size"]
+        or linear_key_dim != p["ssm_key_dim"]
+        or text["linear_key_head_dim"] != p["ssm_state_size"]
+        or text["linear_num_value_heads"] != p["ssm_time_step_rank"]
+        or text["linear_num_value_heads"] != p["ssm_group_count"]
+        or text["linear_conv_kernel_dim"] != p["ssm_conv_kernel"]
+        or text["full_attention_interval"] != p["full_attention_interval"]
+    ):
+        raise ValueError(
+            f"linear-attention dims mismatch with variant {variant!r}: "
+            f"value_dim={linear_value_dim}, key_dim={linear_key_dim}, "
+            f"state={text['linear_key_head_dim']}, "
+            f"groups={text['linear_num_value_heads']}, "
+            f"conv_kernel={text['linear_conv_kernel_dim']}, "
+            f"full_attention_interval={text['full_attention_interval']}"
+        )
+
+    vision = cfg.get("vision_config", {})
+    if vision and (
+        vision.get("depth") != p["vision_depth"]
+        or vision.get("hidden_size") != p["vision_embd"]
+        or vision.get("intermediate_size") != p["vision_ff"]
+        or vision.get("num_heads") != p["vision_head"]
+        or vision.get("patch_size") != p["vision_patch"]
+        or vision.get("spatial_merge_size") != p["vision_merge"]
+        or vision.get("num_position_embeddings") != p["vision_pos"]
+        or vision.get("out_hidden_size") != p["vision_proj"]
+    ):
+        raise ValueError(
+            f"vision_config dims mismatch with variant {variant!r}: "
+            f"depth={vision.get('depth')}, hidden={vision.get('hidden_size')}, "
+            f"ff={vision.get('intermediate_size')}, heads={vision.get('num_heads')}, "
+            f"patch={vision.get('patch_size')}, merge={vision.get('spatial_merge_size')}, "
+            f"pos={vision.get('num_position_embeddings')}, "
+            f"proj={vision.get('out_hidden_size')}"
         )
 
     tokens, types = _build_vocab(tok_cfg, tok_json, p["text_vocab"])
@@ -345,12 +405,12 @@ def write_text_gguf(
     gguf.add_meta("qwen35.rope.dimension_sections", TEXT_ROPE_SECTIONS)
     gguf.add_meta("qwen35.vocab_size", p["text_vocab"])
     # SSM (Mamba) constants.
-    gguf.add_meta("qwen35.ssm.conv_kernel", SSM_CONV_KERNEL)
-    gguf.add_meta("qwen35.ssm.inner_size", SSM_INNER_SIZE)
-    gguf.add_meta("qwen35.ssm.state_size", SSM_STATE_SIZE)
-    gguf.add_meta("qwen35.ssm.time_step_rank", SSM_TIME_STEP_RANK)
-    gguf.add_meta("qwen35.ssm.group_count", SSM_GROUP_COUNT)
-    gguf.add_meta("qwen35.full_attention_interval", FULL_ATTENTION_INTERVAL)
+    gguf.add_meta("qwen35.ssm.conv_kernel", p["ssm_conv_kernel"])
+    gguf.add_meta("qwen35.ssm.inner_size", p["ssm_inner_size"])
+    gguf.add_meta("qwen35.ssm.state_size", p["ssm_state_size"])
+    gguf.add_meta("qwen35.ssm.time_step_rank", p["ssm_time_step_rank"])
+    gguf.add_meta("qwen35.ssm.group_count", p["ssm_group_count"])
+    gguf.add_meta("qwen35.full_attention_interval", p["full_attention_interval"])
     # Image placeholder ids (engine reads these from metadata).
     gguf.add_meta("qwen35.image_token_id", IMAGE_TOKEN_ID)
     gguf.add_meta("qwen35.vision_start_token_id", VISION_START_TOKEN_ID)
@@ -383,7 +443,7 @@ def write_text_gguf(
     for i in range(p["text_n_layer"]):
         layer = f"model.language_model.layers.{i}"
         blk = f"blk.{i}"
-        full_attn = _is_full_attention(i)
+        full_attn = _is_full_attention(i, p["full_attention_interval"])
 
         # Norms → F32 (BF16 source converted to F32).
         ln1 = _require(lang_st, f"{layer}.input_layernorm.weight")
@@ -450,6 +510,14 @@ def write_text_gguf(
             conv1d = _require(lang_st, f"{layer}.linear_attn.conv1d.weight")
             if len(conv1d.shape) != 3 or conv1d.shape[1] != 1:
                 raise ValueError(f"unexpected depthwise conv shape: {conv1d.shape}")
+            # The conv sees [key_dim, key_dim, value_dim] concatenated.
+            expected_conv = 2 * p["ssm_key_dim"] + p["ssm_inner_size"]
+            if conv1d.shape[0] != expected_conv:
+                raise ValueError(
+                    f"{layer}.linear_attn.conv1d.weight has {conv1d.shape[0]} channels, "
+                    f"expected {expected_conv} for variant {variant!r} "
+                    f"(2 * key_dim {p['ssm_key_dim']} + value dim {p['ssm_inner_size']})"
+                )
             # `ssm_conv1d.weight` is F32 in the engine (matches what
             # Qwen3.5-0.8B / Qwen3.5-2B / Qwen3.5-4B GGUF ships); we cast the
             # BF16 source to F32 with a width-preserving conversion.
@@ -460,6 +528,11 @@ def write_text_gguf(
                 (conv1d.shape[0], conv1d.shape[2]),
             )
             ssm_norm = _require(lang_st, f"{layer}.linear_attn.norm.weight")
+            if ssm_norm.shape[0] != p["ssm_state_size"]:
+                raise ValueError(
+                    f"{layer}.linear_attn.norm.weight has {ssm_norm.shape[0]} entries, "
+                    f"expected the state size {p['ssm_state_size']} for variant {variant!r}"
+                )
             # `linear_attn.norm.weight` is F32 in HF; some older exports
             # carry BF16 (engine reads it as F32 either way).
             _emit_f32_or_bf16_to_f32(
@@ -467,12 +540,26 @@ def write_text_gguf(
                 ssm_norm.dtype,
             )
             out_proj = _require(lang_st, f"{layer}.linear_attn.out_proj.weight")
+            # `out_proj` is [hidden_size, value_dim], so the value dim is its
+            # second axis; `in_proj_z` is [value_dim, hidden_size], so the same
+            # dim is its first axis. Both must agree with the metadata.
+            if out_proj.shape[1] != p["ssm_inner_size"] or z.shape[0] != p["ssm_inner_size"]:
+                raise ValueError(
+                    f"{layer}.linear_attn value dim mismatch: out_proj {tuple(out_proj.shape)} "
+                    f"and in_proj_z {tuple(z.shape)} against the expected value dim "
+                    f"{p['ssm_inner_size']} for variant {variant!r}"
+                )
             _emit_bf16_q8_0(
                 gguf, f"{blk}.ssm_out.weight", out_proj.raw, tuple(out_proj.shape),
             )
             # `linear_attn.A_log` is F32 in HF (`dtype: 'F32'` per the shard
             # dump) and is small (16 values). Cast BF16 to F32 for safety.
             a_log = _require(lang_st, f"{layer}.linear_attn.A_log")
+            if a_log.shape[0] != p["ssm_group_count"]:
+                raise ValueError(
+                    f"{layer}.linear_attn.A_log has {a_log.shape[0]} entries, "
+                    f"expected the group count {p['ssm_group_count']} for variant {variant!r}"
+                )
             _emit_f32_or_bf16_to_f32(
                 gguf, f"{blk}.ssm_a", a_log.raw, tuple(a_log.shape),
                 a_log.dtype, neg_exp=True,
@@ -480,6 +567,12 @@ def write_text_gguf(
             # `dt.bias` is BF16 in HF; cast to F32 (matches Qwen3.5-0.8B
             # GGUF which already emits `blk.{i}.ssm_dt.bias` as F32).
             dt_bias = _require(lang_st, f"{layer}.linear_attn.dt_bias")
+            if dt_bias.shape[0] != p["ssm_time_step_rank"]:
+                raise ValueError(
+                    f"{layer}.linear_attn.dt_bias has {dt_bias.shape[0]} entries, "
+                    f"expected the time step rank {p['ssm_time_step_rank']} "
+                    f"for variant {variant!r}"
+                )
             _emit_f32_or_bf16_to_f32(
                 gguf, f"{blk}.ssm_dt.bias", dt_bias.raw, tuple(dt_bias.shape),
                 dt_bias.dtype,
