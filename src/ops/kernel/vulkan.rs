@@ -1690,6 +1690,7 @@ pub(super) struct VulkanKernel<'a> {
     inner: Box<dyn Kernel + 'a>,
     format: GpuWeightFormat,
     gpu: GpuLinear,
+    scalar_reference: bool,
 }
 
 impl<'a> VulkanKernel<'a> {
@@ -1699,6 +1700,7 @@ impl<'a> VulkanKernel<'a> {
                 inner,
                 format,
                 gpu: GpuLinear::default(),
+                scalar_reference: false,
             }),
             Err(_) => inner,
         }
@@ -1706,6 +1708,11 @@ impl<'a> VulkanKernel<'a> {
 }
 
 impl Kernel for VulkanKernel<'_> {
+    fn use_scalar_reference(&mut self) {
+        self.inner.use_scalar_reference();
+        self.scalar_reference = true;
+    }
+
     fn supports_f16_strict(&self) -> bool {
         self.inner.supports_f16_strict()
     }
@@ -1721,6 +1728,9 @@ impl Kernel for VulkanKernel<'_> {
         n_out: usize,
         rows: usize,
     ) -> bool {
+        if self.scalar_reference {
+            return false;
+        }
         self.inner.weight_bytes().is_some_and(|bytes| {
             self.gpu
                 .try_matmul(bytes, self.format, input, output, n_in, n_out, rows)

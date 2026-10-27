@@ -3,6 +3,8 @@ set -euo pipefail
 
 root_dir=$(cd "$(dirname "$0")/.." && pwd)
 shader_names=(
+    dory
+    dory_matmul
     q8_matmul
     q8_matmul_dp4a
     q8_matmul_grouped_dp4a

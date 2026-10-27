@@ -48,7 +48,12 @@ pub fn rope_sin_cos(theta: f32) -> (f32, f32) {
 /// one fmul per call; the rotation loop is the same).
 pub fn rope_neox_inplace(x: &mut [f32], pos: usize, head_dim: usize, freq_base: f32) {
     // `theta_0 = pos as f32` — no factor multiply.
-    build_cos_sin_table_and_apply(x, pos as f32, head_dim, freq_base);
+    build_cos_sin_table_and_apply(x, pos as f32, head_dim, freq_base, false);
+}
+
+/// Separate libm calls and F32 rotation products for quantization-sensitive loops.
+pub fn rope_neox_inplace_precise(x: &mut [f32], pos: usize, head_dim: usize, freq_base: f32) {
+    build_cos_sin_table_and_apply(x, pos as f32, head_dim, freq_base, true);
 }
 
 /// RoPE-Neox with linear position scaling.
@@ -70,7 +75,7 @@ pub fn rope_neox_inplace_with_factor(
 ) {
     // `theta_0 = pos as f32 * factor` — this is the only place
     // the public entry points diverge.
-    build_cos_sin_table_and_apply(x, pos as f32 * factor, head_dim, freq_base);
+    build_cos_sin_table_and_apply(x, pos as f32 * factor, head_dim, freq_base, false);
 }
 
 /// Build the cos/sin table once per token and dispatch to the
@@ -82,7 +87,13 @@ pub fn rope_neox_inplace_with_factor(
 /// and broadcast). Apply cost: `O(x.len())` f32 muls + adds
 /// under the per-arch kernel below.
 #[inline]
-fn build_cos_sin_table_and_apply(x: &mut [f32], theta_0: f32, head_dim: usize, freq_base: f32) {
+fn build_cos_sin_table_and_apply(
+    x: &mut [f32],
+    theta_0: f32,
+    head_dim: usize,
+    freq_base: f32,
+    precise: bool,
+) {
     let half = head_dim / 2;
     let n_heads = x.len() / head_dim;
     if half == 0 || n_heads == 0 {
@@ -93,10 +104,19 @@ fn build_cos_sin_table_and_apply(x: &mut [f32], theta_0: f32, head_dim: usize, f
     let theta_scale = freq_base.powf(-2.0 / head_dim as f32);
     let mut theta = theta_0;
     for i in 0..half {
-        let (c, s) = rope_sin_cos(theta);
+        let (c, s) = if precise {
+            let (sin, cos) = super::mrope::sin_cos_precise(theta);
+            (cos, sin)
+        } else {
+            rope_sin_cos(theta)
+        };
         cos_table[i] = c;
         sin_table[i] = s;
         theta *= theta_scale;
+    }
+    if precise {
+        rope_neox_inplace_scalar(x, n_heads, head_dim, &cos_table, &sin_table);
+        return;
     }
     #[cfg(target_arch = "x86_64")]
     {

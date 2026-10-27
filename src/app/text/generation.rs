@@ -230,6 +230,19 @@ pub fn run_inference(
             thinking,
             jinja,
         )
+    } else if arch == "dory" {
+        crate::models::dory::run_inference(
+            source.clone(),
+            prompt,
+            max_tokens,
+            temperature,
+            n_threads_arg,
+            kv_format,
+            repetition_penalty,
+            chat_template,
+            thinking,
+            jinja,
+        )
     } else {
         crate::app::text::run_qwen3_inference(
             source.clone(),

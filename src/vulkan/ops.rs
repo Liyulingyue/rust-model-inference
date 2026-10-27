@@ -2045,6 +2045,8 @@ pub(crate) fn build_operator_pipelines(
             }
             Err(error) => {
                 unsafe {
+                    // These pipelines were built here and are not in the
+                    // device cache yet, so this failure has to release them.
                     for pipeline in pipelines {
                         context.device.destroy_pipeline(pipeline, None);
                     }
@@ -2122,11 +2124,8 @@ impl<'a> Qwen3Ops<'a> {
             match unsafe { context.allocate_operator_arena(arena_size, device_local) } {
                 Ok(buffers) => buffers,
                 Err(error) => {
-                    unsafe {
-                        for pipeline in pipelines {
-                            context.device.destroy_pipeline(pipeline, None);
-                        }
-                    }
+                    // The operator pipelines belong to the device and are
+                    // shared by every arena, so they survive this failure.
                     return Err(error);
                 }
             };
@@ -2150,9 +2149,8 @@ impl<'a> Qwen3Ops<'a> {
                     if let Some(staging) = &staging {
                         context.destroy_buffer(staging);
                     }
-                    for pipeline in pipelines {
-                        context.device.destroy_pipeline(pipeline, None);
-                    }
+                    // The operator pipelines belong to the device and are
+                    // shared by every arena, so they survive this failure.
                 }
                 return Err(VulkanError::InitFailed(error.to_string()));
             }
@@ -2168,9 +2166,8 @@ impl<'a> Qwen3Ops<'a> {
                     if let Some(staging) = &staging {
                         context.destroy_buffer(staging);
                     }
-                    for pipeline in pipelines {
-                        context.device.destroy_pipeline(pipeline, None);
-                    }
+                    // The operator pipelines belong to the device and are
+                    // shared by every arena, so they survive this failure.
                 }
                 return Err(error);
             }
@@ -2190,6 +2187,51 @@ impl<'a> Qwen3Ops<'a> {
                 && context.limits.max_compute_shared_memory_size >= 18_432,
             recorded_dispatches: std::sync::atomic::AtomicUsize::new(0),
         })
+    }
+
+    // Model-specific pipelines are optional, so their device features need not
+    // be required by the baseline operator set.
+    pub(crate) fn add_shader(&mut self, shader: &[u8]) -> Result<usize, VulkanError> {
+        let pipeline = self
+            .context
+            .create_pipeline(self.context.pipeline_layout, shader)?;
+        self.pipelines.push(pipeline);
+        Ok(self.pipelines.len() - 1)
+    }
+
+    pub(crate) fn record_custom(
+        &self,
+        commands: &TokenCommands<'_>,
+        pipeline: usize,
+        bindings: Option<OperatorBindings>,
+        push: &[u32],
+        dispatch: [u32; 3],
+    ) -> Result<(), VulkanError> {
+        if pipeline < OPERATOR_SHADERS.len()
+            || pipeline >= self.pipelines.len()
+            || push.len() > 32
+            || dispatch
+                .iter()
+                .enumerate()
+                .any(|(i, &n)| n == 0 || n > self.context.limits.max_compute_work_group_count[i])
+        {
+            return Err(VulkanError::UnsupportedShape(
+                "invalid custom operator dispatch".into(),
+            ));
+        }
+        self.recorded_dispatches
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        unsafe {
+            commands.bind(
+                self.pipelines[pipeline],
+                self.context.pipeline_layout,
+                &[bindings.unwrap_or(self.arena_bindings).descriptor_set],
+                std::slice::from_raw_parts(push.as_ptr().cast(), push.len() * 4),
+            );
+            commands.dispatch(dispatch[0], dispatch[1], dispatch[2]);
+            commands.barrier();
+        }
+        Ok(())
     }
 
     pub(crate) fn bind_buffers(
@@ -2425,6 +2467,32 @@ impl<'a> Qwen3Ops<'a> {
             count,
             256,
         )?;
+        let dispatch = row_dispatch(count / 256, 1, &self.context.limits)?;
+        self.record_linear_dispatch(commands, QUANTIZE_K, self.arena_bindings, &push, dispatch);
+        Ok(())
+    }
+
+    pub(crate) fn record_quantize_q8_k_ggml(
+        &self,
+        commands: &TokenCommands<'_>,
+        input: ArenaRegion,
+        q8: ArenaRegion,
+        scales: ArenaRegion,
+        count: usize,
+    ) -> Result<(), VulkanError> {
+        let mut push = quantize_rows_push(
+            self.arena.size as usize,
+            input,
+            q8,
+            scales,
+            None,
+            count,
+            1,
+            count,
+            256,
+        )?;
+        // Dory's contract is signed GGML Q8_K on every host ISA.
+        push[8] = 1;
         let dispatch = row_dispatch(count / 256, 1, &self.context.limits)?;
         self.record_linear_dispatch(commands, QUANTIZE_K, self.arena_bindings, &push, dispatch);
         Ok(())
@@ -4697,7 +4765,12 @@ impl Drop for Qwen3Ops<'_> {
                 .device
                 .destroy_descriptor_pool(self.descriptor_pool, None);
             // The operator pipelines belong to the device and outlive this
-            // arena, so they are not destroyed here.
+            // arena, so the baseline set is not destroyed here. The shaders
+            // `add_shader` appended for this model are arena-owned, and
+            // those are.
+            for &pipeline in &self.pipelines[OPERATOR_SHADERS.len()..] {
+                self.context.device.destroy_pipeline(pipeline, None);
+            }
             self.context.destroy_buffer(&self.arena);
             if let Some(staging) = &self.staging {
                 self.context.destroy_buffer(staging);
@@ -5695,10 +5768,9 @@ pub fn silu_ffn_scale_probe(context: &VulkanContext) -> Result<usize, String> {
         .submit_and_wait()
         .map_err(|error| error.to_string())?;
 
-    let after = ops
-        .read_f32(gate_region, count)
+    ops.read_f32_into(gate_region, &mut gate)
         .map_err(|error| error.to_string())?;
-    let nonfinite = after.iter().filter(|value| !value.is_finite()).count();
+    let nonfinite = gate.iter().filter(|value| !value.is_finite()).count();
     Ok(nonfinite)
 }
 

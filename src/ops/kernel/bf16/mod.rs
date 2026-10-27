@@ -225,6 +225,10 @@ pub fn matmul_bf16_vs_f32_range(
 }
 
 impl<'a> Kernel for BF16Kernel<'a> {
+    fn use_scalar_reference(&mut self) {
+        self.bf16_input = true;
+    }
+
     fn rounds_bf16_input(&self) -> bool {
         self.bf16_input
     }
