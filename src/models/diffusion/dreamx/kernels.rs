@@ -475,6 +475,11 @@ const GPU_CHECK_COLUMNS: usize = 32;
 /// a run of wrong values that the spread sampling can step over.
 const GPU_CHECK_BLOCK: usize = 16;
 
+/// How many rows of a projection are checked in full. The damage is
+/// sometimes a few scattered values of a row, which a column sample steps
+/// over.
+const GPU_CHECK_ROWS: usize = 4;
+
 /// The largest relative difference between a device projection and the CPU
 /// kernel over the sampled elements.
 fn projection_worst_difference(
@@ -560,6 +565,22 @@ pub(crate) fn projection_matches_cpu(
     for row in 0..rows {
         for offset in 0..block {
             let column = (row * 104_729 + offset) % n_out;
+            let reference = dot_bf16_f32(
+                &weight[column * n_in * 2..(column + 1) * n_in * 2],
+                &input[row * n_in..(row + 1) * n_in],
+            );
+            if (output[row * n_out + column] - reference).abs() > limit {
+                return false;
+            }
+        }
+    }
+    // The device has also been seen to damage a few scattered values of a
+    // few rows, which the column sampling above steps over: a few wrong
+    // values in a row of eight thousand are easy to miss. Every column of a
+    // few rows is looked at instead, so scattered damage cannot hide.
+    for sample in 0..GPU_CHECK_ROWS {
+        let row = (sample * 2_654_435_761) % rows;
+        for column in 0..n_out {
             let reference = dot_bf16_f32(
                 &weight[column * n_in * 2..(column + 1) * n_in * 2],
                 &input[row * n_in..(row + 1) * n_in],
@@ -885,6 +906,14 @@ pub(crate) fn attention_matches_cpu(
             let base = token * width + head * spec.head_dim;
             for step in 0..GPU_ATTENTION_CHECK_ELEMENTS {
                 let index = base + (step * 1_030_003 + head * 8_177) % spec.head_dim;
+                if (output[index] - reference[index]).abs() > limit {
+                    return false;
+                }
+            }
+            // A run of wrong dimensions is missed by the spread sampling
+            // above, so a consecutive block is looked at as well.
+            for step in 0..GPU_ATTENTION_CHECK_BLOCK {
+                let index = base + (step + head * 31) % spec.head_dim;
                 if (output[index] - reference[index]).abs() > limit {
                     return false;
                 }
@@ -1284,11 +1313,14 @@ pub fn conv3d_with_options(
 
 /// How many elements of a convolution output are checked against the CPU
 /// kernel.
-const GPU_CONV_CHECK_SAMPLES: usize = 512;
+const GPU_CONV_CHECK_SAMPLES: usize = 4096;
 
 /// How many elements of every head of an attention result are checked
 /// against the CPU kernel.
 const GPU_ATTENTION_CHECK_ELEMENTS: usize = 8;
+
+/// How many consecutive dimensions of every head are checked as well.
+const GPU_ATTENTION_CHECK_BLOCK: usize = 16;
 
 /// The largest relative difference between a device convolution and the CPU
 /// kernel over the sampled elements.
