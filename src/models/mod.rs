@@ -15,6 +15,7 @@ pub mod chat_template {
 pub mod clm;
 pub mod decoder_embedding;
 pub mod diffusion;
+pub mod dory;
 pub mod dots;
 pub mod edge0;
 pub mod falcon_h1;

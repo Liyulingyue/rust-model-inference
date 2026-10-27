@@ -65,6 +65,7 @@ fn run_jev_grouped_core<S: JevGroupedScorer>(
     Ok(results)
 }
 
+pub(crate) mod dory;
 pub(crate) mod gemma4;
 pub(crate) mod hunyuan;
 pub(crate) mod lfm2;
@@ -471,11 +472,28 @@ fn build_jev_token_ids_for_arch(
                 },
             ))
         }
+        // Dory 1.0 ships a ChatML template (`<|im_start|>role\n …
+        // <|im_end|>\n` plus an `<|im_start|>assistant\n` generation
+        // prompt), the same shape the single-mode scorer renders.
+        "dory" => {
+            let prompt = format!(
+                "<|im_start|>system\n{system}<|im_end|>\n\
+                 <|im_start|>user\n{payload}<|im_end|>\n\
+                 <|im_start|>assistant\n"
+            );
+            Ok(tokenizer.encode(
+                &prompt,
+                EncodeOptions {
+                    add_special: true,
+                    parse_special: true,
+                },
+            ))
+        }
         other => Err(format!(
             "--jev grouped is not yet supported for architecture {:?}; \
              currently supported: qwen3 / qwen3vl / qwen35 / llama / k2-horizon / \
              granite / nanbeige / qwen2_2 / gemma4 / lfm2 / lfm25 / spark2_5 / \
-             mistral3 / hunyuan-dense / nemotron_h",
+             mistral3 / hunyuan-dense / nemotron_h / dory",
             other
         )),
     }
@@ -676,6 +694,15 @@ pub fn run_jev_grouped_decision_data(
             jinja.clone(),
         )?,
         "mellum" => mellum::run_jev_grouped_mellum(
+            source.clone(),
+            context,
+            &prepared,
+            n_threads_arg,
+            prefill_batch_size,
+            false,
+            jinja.clone(),
+        )?,
+        "dory" => dory::run_jev_grouped_dory(
             source.clone(),
             context,
             &prepared,

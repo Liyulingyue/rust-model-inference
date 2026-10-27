@@ -1,0 +1,299 @@
+{
+  "date": "2026-10-22",
+  "tested_runtime_commit": "41cba0dda9ae1cab6f5f552b7c1f042051fc7b25",
+  "platform": "Linux x86_64, AMD EPYC 9334, Rust 1.98.1, release-fast, features=vulkan (without parity-trace)",
+  "gpu": {
+    "device": "AMD Radeon Graphics (RADV NAVI31)",
+    "pci_id": "1002:744b",
+    "hardware_icd": true,
+    "vram_bytes": 51522830336,
+    "mesa_vulkan_drivers": "25.2.8-0ubuntu0.24.04.1",
+    "vulkan_loader": "1.3.275.0-1build1",
+    "icd": {
+      "ICD": {
+        "api_version": "1.4.318",
+        "library_path": "libvulkan_radeon.so"
+      },
+      "file_format_version": "1.0.1"
+    }
+  },
+  "artifact": {
+    "file": "NVIDIA-Nemotron-Labs-Dory1.0-4B-Q5_K_M.gguf",
+    "bytes": 3673288864,
+    "sha256": "96080be49ffd67b916018b7bdef8c484762576fb52780e10ab98ac4978a660e0"
+  },
+  "gates": {
+    "relative_l2": 0.01,
+    "scaled_max_abs": 0.01,
+    "greedy_token_ids": "exact"
+  },
+  "execution_probe": {
+    "RMI_PARITY_TRACE": "unset",
+    "RMI_SCALAR": "unset",
+    "RUST_GPU_MIN_OUTPUTS": "0",
+    "VK_ICD_FILENAMES": "/usr/share/vulkan/icd.d/radeon_icd.json",
+    "warmup_excluded_from_deltas": true,
+    "comparison": "GPU-requested Dory versus ComputePolicy::Cpu session, every logits vector; generated IDs additionally match the existing pinned Oracle Hello result",
+    "oracle_commit": "98a74c97ea09ac72f6ceda1559808fc0a2f447ce"
+  },
+  "operator_checks": {
+    "vk_check_q8_0": {
+      "passed": true,
+      "shapes": [
+        [
+          1024,
+          1024
+        ],
+        [
+          1024,
+          3072
+        ],
+        [
+          3072,
+          1024
+        ],
+        [
+          1024,
+          151936
+        ],
+        [
+          16384,
+          32
+        ]
+      ]
+    },
+    "batched_matmul": [
+      {
+        "rows": 1,
+        "formats": [
+          "Q5_K",
+          "Q6_K",
+          "BF16"
+        ],
+        "passed": true,
+        "stats": {
+          "submissions": 25,
+          "static_uploads": 37,
+          "static_upload_bytes": 2306756,
+          "host_write_bytes": 111020,
+          "host_read_bytes": 11296,
+          "transfer_submissions": 0,
+          "live_allocation_bytes": 3146832,
+          "peak_allocation_bytes": 3994160
+        }
+      },
+      {
+        "rows": 3,
+        "formats": [
+          "Q5_K",
+          "Q6_K",
+          "BF16"
+        ],
+        "passed": true,
+        "stats": {
+          "submissions": 25,
+          "static_uploads": 37,
+          "static_upload_bytes": 2306756,
+          "host_write_bytes": 272012,
+          "host_read_bytes": 36832,
+          "transfer_submissions": 0,
+          "live_allocation_bytes": 3146832,
+          "peak_allocation_bytes": 4040160
+        }
+      }
+    ],
+    "scope": "Existing synthetic operator fixtures and their own checks; not full-model GPU alignment"
+  },
+  "dory_cases": [
+    {
+      "kv": "f32",
+      "prompt_ids": [
+        22177
+      ],
+      "generated_ids": [
+        1897,
+        1429,
+        22177,
+        5325,
+        1897,
+        1429,
+        22177,
+        5325
+      ],
+      "evaluated_positions": 9,
+      "compared_logits": 1179648,
+      "max_relative_l2": 0.0,
+      "max_scaled_max_abs": 0.0,
+      "execution": "CPU fallback",
+      "stats": {
+        "submissions": 0,
+        "static_uploads": 0,
+        "static_upload_bytes": 0,
+        "host_write_bytes": 0,
+        "host_read_bytes": 0,
+        "transfer_submissions": 0,
+        "live_allocation_bytes": 3146832,
+        "peak_allocation_bytes": 4040160
+      }
+    },
+    {
+      "kv": "f16",
+      "prompt_ids": [
+        22177
+      ],
+      "generated_ids": [
+        1897,
+        1429,
+        22177,
+        5325,
+        1897,
+        1429,
+        22177,
+        5325
+      ],
+      "evaluated_positions": 9,
+      "compared_logits": 1179648,
+      "max_relative_l2": 0.0,
+      "max_scaled_max_abs": 0.0,
+      "execution": "CPU fallback",
+      "stats": {
+        "submissions": 0,
+        "static_uploads": 0,
+        "static_upload_bytes": 0,
+        "host_write_bytes": 0,
+        "host_read_bytes": 0,
+        "transfer_submissions": 0,
+        "live_allocation_bytes": 3146832,
+        "peak_allocation_bytes": 4040160
+      }
+    }
+  ],
+  "production_cli": {
+    "gpu_f32_exit": 0,
+    "gpu_f16_exit": 0,
+    "output": ", \"Hello World\", \"Hello World",
+    "compute_vulkan_exit": 1,
+    "compute_vulkan_error": "full Vulkan text decoding is not supported for dory; local linear offload does not satisfy this request"
+  },
+  "dory_gpu_inference_validated": false,
+  "dory_gpu_status": "unsupported: scalar-reference projections stay on CPU; --gpu succeeds via CPU fallback and --compute vulkan rejects dory",
+  "broader_operator_suite": {
+    "passed": false,
+    "rows": [
+      1,
+      3
+    ],
+    "exit_code": 1,
+    "error": "silu_mul FFN-scale check: Unsupported shape: device arena requires read_f32_into",
+    "cause": "Existing silu_ffn_scale_probe creates a device-local arena then calls borrowed read_f32 instead of read_f32_into. src/vulkan/ops.rs is unchanged from main 973210b6de572b8226cd576da7ace17fb22d8ad5.",
+    "scope": "The batched checks complete before this failure; later suite checks are not claimed as passing."
+  },
+  "source_verification": {
+    "runtime_and_shader_files_checked": 548,
+    "mismatches": [],
+    "source_manifest_sha256": "11d1ffda41e8a9cb937f1bb76818b3932be8cda2bb404470a668f4ddc70dd80e",
+    "sha256": {
+      "Cargo.toml": "6b28dde46c91265efb3f40bbabc63033c9e6bafb80ae08e6f6ca80d0f2e8082d",
+      "Cargo.lock": "f2b0f641b14db89da6aa1585e0ba86ec4437362a4a9d80fbad2994a21585a2c6",
+      "src/models/dory/forward.rs": "6f0045da4b59627be0577eb2cc4a298b9f201da062a532db8fc077dbecab5ee3",
+      "src/models/dory/weights.rs": "3e974398bf75e1c1c41a5a17727443b621d3b62a548f639590cf3ac02f9aeb7c",
+      "src/ops/kernel/vulkan.rs": "c567d7d8de41be9cbb8d9f13bab41f8d37ac73d53f12f9ec91b0731ea44661e2",
+      "src/ops/float.rs": "6b23f6b45e39821bcdfada9f115e8ae9482ae010d711c72b48511643461c1d31",
+      "src/vulkan.rs": "7ae2147c5e7665d87580aba566980429351698e8fa949d35659b5636fd8e6051",
+      "src/vulkan/ops.rs": "e285d7b58222b1b9ad7f7a55a435b8574aa59d1fd3651253d61e045ecfca03b7",
+      "src/compute/mod.rs": "8c2870dd70fefd3de34adcf06693b9674164afb38da8be2c7d9c7981a946e263"
+    }
+  },
+  "evidence_sha256": {
+    "gpu-dory-probe-v2.log": "0484f4d6fff2c6e06828ac2582ff111810433cf0862eda8a1766ebcc4a1ebf89",
+    "gpu-vk-check.log": "b75249fc01a38b2ebf11c8b8325773adce4352f4e375a9807f6df260b7823425",
+    "gpu-ops-rows1.log": "adb9e0f329bdede5f1bb7127737a4a24bbb3a4797655b91cd6ef1d78ff1baecd",
+    "gpu-ops-rows3.log": "ff93fae08cb1c39cce88d2b2df70a1d765ba370e23155f81e1a983625d4bd61f",
+    "gpu-cli-auto-f32.log": "c0a7b09c880ae95886c6ecb25dd0a4130eb4ab748ad404a8ac5c6d0b8316b9ea",
+    "gpu-cli-auto-f16.log": "2328a5685b9ceaff046d9aa2c2908bc08b4ab24621f144477772a161d5272eb9",
+    "gpu-cli-vulkan.log": "07ed7a9f3d07b71cec3759e265b194467da978617143dd2623292cbe86dfad7d"
+  },
+  "limits": [
+    "No end-to-end Dory GPU checkpoint alignment: the real model performs no inference GPU work.",
+    "No Dory GPU speedup or performance benchmark.",
+    "Only the named Q5_K_M artifact, Hello prompt, F32/F16 KV and eight greedy continuation tokens in this GPU request probe.",
+    "The repaired SiLU probe passes; the broader shared operator suite still stops at an independent convolution 1 ULP mismatch, including with SiLU skipped."
+  ],
+  "readback_fix": {
+    "date": "2026-10-22",
+    "source_base_commit": "64cffadb3129590bd96cbc1d4e533c7fa944e730",
+    "change": "silu_ffn_scale_probe downloads device-local output through read_f32_into into its existing gate vector; no additional buffer or numerical gate change",
+    "source_verification": {
+      "old_manifest_files": 548,
+      "changed_files": [
+        "src/vulkan/ops.rs"
+      ],
+      "new_ops_sha256": "5d0f6d1ddf94727d0ebc31efbdbea32bd22d74b435b439b112f93869196f723c",
+      "binary_sha256": "193bfc3add684b21790783f4a535cfae52346830b732b785e1e8027979f173a4"
+    },
+    "before": {
+      "SILU_ONLY": "1",
+      "rows": 1,
+      "exit_code": 1,
+      "error": "device arena requires read_f32_into"
+    },
+    "cases": [
+      {
+        "case": "silu-only",
+        "command": [
+          "target/release-fast/examples/vk_ops_check",
+          "--formats",
+          "q5_k,q6_k,bf16",
+          "--rows",
+          "1"
+        ],
+        "SILU_ONLY": "1",
+        "exit_code": 0,
+        "elapsed_seconds": 0.515
+      },
+      {
+        "case": "full-rows1",
+        "command": [
+          "target/release-fast/examples/vk_ops_check",
+          "--formats",
+          "q5_k,q6_k,bf16",
+          "--rows",
+          "1"
+        ],
+        "SILU_ONLY": "unset",
+        "exit_code": 1,
+        "elapsed_seconds": 0.565
+      },
+      {
+        "case": "full-rows3",
+        "command": [
+          "target/release-fast/examples/vk_ops_check",
+          "--formats",
+          "q5_k,q6_k,bf16",
+          "--rows",
+          "3"
+        ],
+        "SILU_ONLY": "unset",
+        "exit_code": 1,
+        "elapsed_seconds": 0.615
+      }
+    ],
+    "silu_outputs": 39321600,
+    "silu_nonfinite_outputs": 0,
+    "later_failure": {
+      "error": "conv mismatch offset=0 row=0 column=17: gpu=0xb788d769 cpu=0xb788d768",
+      "ulp_difference": 1,
+      "reproduced_with_silu_skipped": true,
+      "skip_environment": "SILU_SCALE_ONLY=1",
+      "skip_exit_code": 1,
+      "full_suite_passed": false
+    },
+    "evidence_sha256": {
+      "gpu-silu-red.log": "70cfb076cc88f267ea47128aa3205c40e8999f725689ce0f36ad92707a458759",
+      "silu-only.log": "294e2f042e5589db385c5533f256640730556245f8fc2f7182babcbb0542599b",
+      "full-rows1.log": "c7fd592647368c8acc63494bcbdf08353b2303c3340bb51ad29bc6bbaf6546af",
+      "full-rows3.log": "24f20f47af5cba8464c3eae7384ce61acc6a41c1265ac3486ad027e715c45c0b",
+      "without-silu.log": "02a54d44de8df65f473f995c97d4b94c047ab1ce2a7ca07ad30b9421c81c113f"
+    }
+  }
+}
