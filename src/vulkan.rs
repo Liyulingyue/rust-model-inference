@@ -1160,6 +1160,18 @@ impl VulkanContext {
             == vk::PhysicalDeviceType::DISCRETE_GPU
     }
 
+    pub(crate) fn moe_experts_per_submission(&self) -> usize {
+        let properties = unsafe {
+            self.instance
+                .get_physical_device_properties(self._physical_device)
+        };
+        // shortcut: nine-expert batches are validated on M3 Max/RADV NAVI31; keep other vendors at two until tested.
+        match properties.vendor_id {
+            0x1002 | 0x106b => 9,
+            _ => 2,
+        }
+    }
+
     unsafe fn alloc_device_buffer(&self, size: usize) -> Result<GpuBuffer, VulkanError> {
         self.alloc_buffer(
             u64::try_from(size).map_err(|_| VulkanError::OutOfMemory)?,

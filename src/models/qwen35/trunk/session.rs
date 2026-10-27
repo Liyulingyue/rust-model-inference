@@ -536,7 +536,7 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
         #[cfg(not(feature = "parity-trace"))]
         let trace_each_token = false;
         #[cfg(feature = "vulkan")]
-        if trace_each_token {
+        if trace_each_token && self.prefill_batch_size != 1 {
             if self.compute_policy == ComputePolicy::Vulkan {
                 return Err("Vulkan does not support token-major parity tracing".into());
             }
