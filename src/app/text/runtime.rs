@@ -442,11 +442,6 @@ impl TextRuntime for Qwen3TextRuntime {
         sink: &mut dyn TokenSink,
     ) -> Result<GeneratedText, String> {
         let _scope = self.options.compute.enter_legacy_scope();
-        if self.options.compute == crate::compute::ComputePolicy::Vulkan
-            && !request.images.is_empty()
-        {
-            return Err("full Vulkan runtime supports text input only".into());
-        }
         let capacity = self.options.capacity_for(self.model.config().n_ctx);
         let mut session = crate::models::qwen3::Qwen3Session::new_with_compute(
             &self.model,
