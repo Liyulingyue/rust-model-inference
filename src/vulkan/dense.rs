@@ -362,8 +362,184 @@ impl UploadedBuffers {
         Ok(buffer)
     }
 
+    pub(crate) fn upload_f32_transposed(
+        &mut self,
+        values: &[f32],
+        n_in: usize,
+    ) -> Result<GpuBuffer, VulkanError> {
+        let packed = transpose_f32_weights(values, n_in)?;
+        // Immutable projections belong in VRAM on discrete GPUs.
+        let buffer = unsafe {
+            self.context
+                .upload_device_static(bytemuck::cast_slice(&packed))?
+        };
+        self.values.push(buffer);
+        Ok(buffer)
+    }
+
     pub(crate) fn upload_f32(&mut self, values: &[f32]) -> Result<GpuBuffer, VulkanError> {
         self.upload(bytemuck::cast_slice(values))
+    }
+
+    /// Upload a half-precision matrix in the transposed layout the device
+    /// kernel reads.
+    ///
+    /// The reorder moves the two-byte values without decoding them, so no
+    /// bit of the stored weight changes.
+    pub(crate) fn upload_half_transposed(
+        &mut self,
+        bytes: &[u8],
+        n_in: usize,
+    ) -> Result<GpuBuffer, VulkanError> {
+        let packed = transpose_half_bytes(bytes, n_in)?;
+        let buffer = unsafe { self.context.upload_device_static(&packed)? };
+        self.values.push(buffer);
+        Ok(buffer)
+    }
+}
+
+/// Reorder a half-precision matrix from `[n_out, n_in]` to `[n_in, n_out]`.
+///
+/// The values are moved as raw bytes: a half-precision weight keeps every
+/// bit of the stored number.
+fn transpose_half_bytes(bytes: &[u8], n_in: usize) -> Result<Vec<u8>, VulkanError> {
+    if n_in == 0 || bytes.is_empty() || bytes.len() % (2 * n_in) != 0 {
+        return Err(VulkanError::UnsupportedShape(
+            "invalid half-precision matrix shape".into(),
+        ));
+    }
+    let n_out = bytes.len() / (2 * n_in);
+    let mut packed = vec![0u8; bytes.len()];
+    use rayon::prelude::*;
+    packed
+        .par_chunks_mut(2 * n_out)
+        .enumerate()
+        .for_each(|(k, destination)| {
+            for r in 0..n_out {
+                let source = (r * n_in + k) * 2;
+                let target = r * 2;
+                destination[target..target + 2].copy_from_slice(&bytes[source..source + 2]);
+            }
+        });
+    Ok(packed)
+}
+
+// Reorder storage only: preserve every F32 bit, including signed zero.
+fn transpose_f32_weights(values: &[f32], n_in: usize) -> Result<Vec<f32>, VulkanError> {
+    if n_in == 0 || values.is_empty() || values.len() % n_in != 0 {
+        return Err(VulkanError::UnsupportedShape(
+            "invalid F32 matrix shape".into(),
+        ));
+    }
+    let n_out = values.len() / n_in;
+    let mut packed = vec![0.0; values.len()];
+    use rayon::prelude::*;
+    let tile = n_in.min(32);
+    packed
+        .par_chunks_mut(tile * n_out)
+        .enumerate()
+        .for_each(|(block, destination)| {
+            for r0 in (0..n_out).step_by(128) {
+                for k in 0..destination.len() / n_out {
+                    for r in r0..(r0 + 128).min(n_out) {
+                        destination[k * n_out + r] = values[r * n_in + block * tile + k];
+                    }
+                }
+            }
+        });
+    Ok(packed)
+}
+
+#[cfg(test)]
+mod transpose_tests {
+    use super::transpose_f32_weights;
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn f32_transposed_recording_preserves_strides_and_partial_tiles() {
+        use super::*;
+        let context = Box::leak(Box::new(VulkanContext::new().unwrap()));
+        let (n_in, n_out) = (130, 65);
+        let weights: Vec<_> = (0..n_in * n_out).map(|i| (i as f32 * 0.17).cos()).collect();
+        let mut buffers = UploadedBuffers::new(context);
+        let buffer = buffers.upload_f32_transposed(&weights, n_in).unwrap();
+        for rows in [1, 5, 19, 32, 33] {
+            let input_stride = n_in + 3;
+            let output_stride = n_out + 7;
+            let input = ArenaRegion {
+                offset: 0,
+                size: rows * input_stride * 4,
+            };
+            let output = ArenaRegion {
+                offset: input.size,
+                size: rows * output_stride * 4,
+            };
+            let mut ops =
+                Qwen3Ops::new_device_local_with_size(context, input.size + output.size, 2).unwrap();
+            let binding = ops
+                .bind_weight_buffers(&[buffer], &[GpuWeightFormat::F32])
+                .unwrap();
+            let values: Vec<_> = (0..rows * input_stride)
+                .map(|i| (i as f32 * 0.37).sin())
+                .collect();
+            ops.write_f32(input, &values).unwrap();
+            ops.write_f32(output, &vec![123456.0; rows * output_stride])
+                .unwrap();
+            let commands = TokenCommands::begin(context).unwrap();
+            ops.record_transposed_float_matmul_rows(
+                &commands,
+                binding,
+                input,
+                &[(output, n_out, output_stride * 4)],
+                n_in,
+                rows,
+                input_stride,
+            )
+            .unwrap();
+            commands.submit_and_wait().unwrap();
+            let mut actual = vec![0.0; rows * output_stride];
+            ops.read_f32_into(output, &mut actual).unwrap();
+            for row in 0..rows {
+                for col in 0..n_out {
+                    let expected: f64 = (0..n_in)
+                        .map(|k| {
+                            f64::from(weights[col * n_in + k])
+                                * f64::from(values[row * input_stride + k])
+                        })
+                        .sum();
+                    let got = f64::from(actual[row * output_stride + col]);
+                    assert!(
+                        (got - expected).abs() <= 3e-5 + 5e-5 * expected.abs(),
+                        "row={row} col={col} got={got} expected={expected}"
+                    );
+                }
+                assert!(
+                    actual[row * output_stride + n_out..(row + 1) * output_stride]
+                        .iter()
+                        .all(|&v| v == 123456.0)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn f32_packing_preserves_bits_and_partial_tiles() {
+        let (n_in, n_out) = (130, 65);
+        let values: Vec<_> = (0..n_in * n_out)
+            .map(|i| f32::from_bits((i as u32).wrapping_mul(2654435761)))
+            .collect();
+        let packed = transpose_f32_weights(&values, n_in).unwrap();
+        for r in 0..n_out {
+            for k in 0..n_in {
+                assert_eq!(
+                    packed[k * n_out + r].to_bits(),
+                    values[r * n_in + k].to_bits()
+                );
+            }
+        }
+        assert!(transpose_f32_weights(&values, 0).is_err());
+        assert!(transpose_f32_weights(&values, 129).is_err());
+        assert!(transpose_f32_weights(&[], n_in).is_err());
     }
 }
 

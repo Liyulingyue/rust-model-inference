@@ -112,7 +112,7 @@ impl ComputePolicy {
         }
         Ok(self.enter_legacy_scope())
     }
-    fn context_with<T>(
+    pub(crate) fn context_with<T>(
         self,
         initialize: impl FnOnce() -> Result<T, String>,
     ) -> Result<Option<T>, ComputeError> {

@@ -27,7 +27,7 @@ pub use cli::{
 };
 pub use diffusion::{
     read_f32_file, run_astronex_cli, run_auk_cli, run_dreamx_cli, run_ernie_image_cli,
-    run_longcat_image_edit, run_mage_flow_cli, run_pig_image, run_qwen_image_2_1,
+    run_flux3_cli, run_longcat_image_edit, run_mage_flow_cli, run_pig_image, run_qwen_image_2_1,
     run_qwen_image_2_1_cli, run_z_image_cli, write_output_atomically, write_png_atomically,
     QwenImage21Request,
 };

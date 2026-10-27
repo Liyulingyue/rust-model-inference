@@ -22,11 +22,14 @@ enum DispatchMode {
     Yue2,
     Tts,
     Laya,
+    Timestral,
     Model,
 }
 
 fn dispatch_mode(options: &app::CliOptions) -> DispatchMode {
-    if options.astronex {
+    if options.timestral_request.is_some() {
+        DispatchMode::Timestral
+    } else if options.astronex {
         DispatchMode::Astronex
     } else if options.dreamx {
         DispatchMode::DreamX
@@ -86,12 +89,14 @@ fn validate_audio_temperature(route: AudioRoute, temperature: Option<f32>) -> Re
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
-        println!("{USAGE}");
+        println!("{USAGE}\n\nTimestral-209M: --model <timestral-F32.gguf> --timestral-request <series.json> [--threads N] [--compute cpu|auto|vulkan] | time-series forecasting; JSON context and prediction_length in, 21 quantiles out");
         return;
     }
     // \n\nGLiNER2 boundary mode: --jev --gliner2-boundary --model <gliner2.5-boundary.gguf> --jev-context <text> --gliner2-schema <json> | span extraction; the schema is {\"entities\":[\"person\",\"location\"],\"entity_descriptions\":{...}} (the dict form {\"entities\":{\"person\":[...]}} is also accepted). Output is (start, end) word spans per field; --jev-output json for machine-readable.\n\nServer mode: --serve delegates to app::server::run_server which has its
     // own --host/--port pre-parser and reuses the shared CLI parser for the rest.
-    if args.iter().any(|arg| arg == "--serve") {
+    if args.iter().any(|arg| arg == "--serve")
+        && !args.iter().any(|arg| arg == "--timestral-request")
+    {
         app::server::run_server();
         return;
     }
@@ -99,6 +104,10 @@ fn main() {
         eprintln!("{error}");
         std::process::exit(2);
     });
+    // Reject mixed forecast/task modes before any early media route can run.
+    if options.timestral_request.is_some() {
+        app::run_or_exit(app::validate_cli_options(&options));
+    }
     app::run_or_exit(options.validate_compute_mode());
     let _compute_scope = options
         .compute_policy()
@@ -166,6 +175,14 @@ fn main() {
     } else {
         None
     };
+    if let Some(source) = early_source.as_ref().filter(|s| {
+        s.metadata("general.architecture")
+            .and_then(MetaValue::to_string_val)
+            == Some("flux3")
+    }) {
+        app::run_or_exit(app::run_flux3_cli(source.clone(), &options, n_threads));
+        return;
+    }
     if let Some(source) = early_source.as_ref().filter(|s| {
         s.metadata("general.architecture")
             .and_then(MetaValue::to_string_val)
@@ -252,6 +269,33 @@ fn main() {
     }
 
     match dispatch_mode(&options) {
+        DispatchMode::Timestral => {
+            let run = || -> Result<(), String> {
+                use rust_model_inference::models::timestral::{ForecastRequest, TimestralModel};
+                let path = options
+                    .timestral_request
+                    .as_ref()
+                    .expect("validated Timestral request");
+                let request: ForecastRequest = serde_json::from_slice(
+                    &std::fs::read(path).map_err(|e| format!("Timestral request: {e}"))?,
+                )
+                .map_err(|e| format!("Timestral request JSON: {e}"))?;
+                let source = open_model_source(&options.model, ComponentRole::Llm)
+                    .map_err(|e| e.to_string())?;
+                let model = TimestralModel::from_source_with_compute(
+                    source.as_ref(),
+                    options.compute_policy(),
+                )?;
+                let result = model.forecast(&request)?;
+                println!(
+                    "{}",
+                    serde_json::to_string(&result).map_err(|e| e.to_string())?
+                );
+                Ok(())
+            };
+            app::run_or_exit(run());
+            return;
+        }
         DispatchMode::Astronex => unreachable!("Astronex is dispatched before shared model setup"),
         DispatchMode::DreamX => {
             let dreamx = dreamx_options.expect("validated DreamX options");
@@ -1156,6 +1200,20 @@ mod tests {
 
     #[test]
     fn dedicated_pipelines_dispatch_before_main_model_open() {
+        assert_eq!(
+            dispatch_mode(&app::CliOptions {
+                timestral_request: Some("series.json".into()),
+                ..app::CliOptions::default()
+            }),
+            DispatchMode::Timestral
+        );
+        assert_eq!(
+            dispatch_mode(&app::CliOptions {
+                astronex: true,
+                ..app::CliOptions::default()
+            }),
+            DispatchMode::Astronex
+        );
         assert_eq!(
             dispatch_mode(&app::CliOptions {
                 dreamx: true,

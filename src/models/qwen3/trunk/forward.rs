@@ -20,10 +20,13 @@ use super::util::{
 };
 use super::weights::{Qwen3LayerWeights, Qwen3Model};
 use crate::app::cli::resolve_thread_count;
+use crate::compute::{
+    linear::{LinearBinding, LinearExecutor, LinearMode},
+    ComputePolicy,
+};
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
-use crate::ops::kernel::f32::scalar::row_range;
 use crate::ops::rope::rope_neox_inplace;
 use crate::ops::*;
 use crate::prompt::{build_qwen_chat_prompt, QwenMessage};
@@ -213,7 +216,37 @@ impl Qwen3Model {
             return Err("Invalid Qwen text embeddings or attention mask".into());
         }
         let n_tokens = positions.len();
-        text_encode_forward(self, &embeddings, n_tokens, positions, Some(key_mask))
+        text_encode_forward(self, &embeddings, n_tokens, positions, Some(key_mask), &[])
+    }
+
+    /// Token-major concatenation of selected pre-output-norm hidden layers.
+    /// Layer numbers follow Transformers' `hidden_states` (embedding is zero).
+    pub(crate) fn text_encode_hidden_layers(
+        &self,
+        token_ids: &[u32],
+        positions: &[[usize; 4]],
+        key_mask: &[bool],
+        layers: &[usize],
+    ) -> Result<Vec<f32>, String> {
+        if token_ids.len() != positions.len()
+            || token_ids.len() != key_mask.len()
+            || key_mask.first() != Some(&true)
+            || layers.is_empty()
+            || layers[0] == 0
+            || layers.windows(2).any(|w| w[0] >= w[1])
+            || *layers.last().unwrap() >= self.config.n_layer
+        {
+            return Err("Invalid Qwen hidden-layer extraction request".into());
+        }
+        let embeddings = self.embed_tokens(token_ids)?;
+        text_encode_forward(
+            self,
+            &embeddings,
+            token_ids.len(),
+            positions,
+            Some(key_mask),
+            layers,
+        )
     }
 }
 
@@ -227,7 +260,7 @@ pub fn text_encode(
         return Ok(Vec::new());
     }
     let embeddings = model.embed_tokens(token_ids)?;
-    text_encode_forward(model, &embeddings, n_tokens, positions, None)
+    text_encode_forward(model, &embeddings, n_tokens, positions, None, &[])
 }
 
 /// Qwen2.5-Omni CFMEdit extension: same as [`text_encode`] but with audio
@@ -274,109 +307,67 @@ pub fn text_encode_with_audio(
         let off = *pos * n_embd;
         embeddings[off..off + n_embd].copy_from_slice(audio_embed);
     }
-    text_encode_forward(model, &embeddings, n_tokens, positions, None)
+    text_encode_forward(model, &embeddings, n_tokens, positions, None, &[])
 }
 
-/// One weight applied to every token row: the weight, its output width, the
-/// token-major destination, and an optional bias added afterwards.
-struct TokenProjection<'w> {
-    weight: &'w crate::ops::kernel::Weight<'w>,
-    n_out: usize,
-    out: RowsWrap,
-    bias: Option<&'w [f32]>,
-}
+const PROJECTION_ROWS: usize = 128;
 
-/// Quantize each token row once, then apply every projection to it.
-///
-/// Tokens are the unit of work because each token reads the whole weight
-/// matrix, so splitting by token is what lets the pool overlap the weight
-/// streaming. All projections share a single dispatch and reuse one
-/// activation quantization, matching the previous fused loop.
-fn project_tokens(
-    pool: &Arc<ComputePool>,
-    n_tokens: usize,
+/// Keep weight uploads across layers and let the shared executor select the backend.
+fn project_tokens<const N: usize>(
+    executor: &mut LinearExecutor<'_, '_>,
     input: &[f32],
-    n_in: usize,
-    projections: Vec<TokenProjection<'_>>,
-) {
-    debug_assert_eq!(input.len(), n_tokens * n_in);
-    if n_tokens == 0 {
-        return;
+    mut projections: [(&crate::ops::kernel::Weight<'_>, &mut [f32], Option<&[f32]>); N],
+) -> Result<(), String> {
+    let n_in = projections[0].0.n_in;
+    let rows = input.len() / n_in;
+    let mut ids = [executor
+        .id_for(projections[0].0)
+        .map_err(|e| e.to_string())?; N];
+    for (id, (weight, _, _)) in ids.iter_mut().zip(&projections) {
+        *id = executor.id_for(weight).map_err(|e| e.to_string())?;
     }
-    let input_ptr = input.as_ptr() as usize;
-    pool.compute(move |ith, nth| {
-        let (start, end) = row_range(n_tokens, ith, nth);
-        if start >= end {
-            return;
-        }
-        // SAFETY: `input` outlives the dispatch and every worker reads a
-        // disjoint token range.
-        let input = unsafe { std::slice::from_raw_parts(input_ptr as *const f32, n_tokens * n_in) };
-        for tok in start..end {
-            let row = &input[tok * n_in..(tok + 1) * n_in];
-            let blocks = (n_in + 31) / 32;
-            let mut q8 = vec![0u8; n_in];
-            let mut scales = vec![0.0f32; blocks];
-            quantize_q8_0_into(row, n_in, &mut q8, &mut scales);
-            for projection in &projections {
-                // SAFETY: each worker owns tokens [start, end) and `RowsWrap`
-                // hands out only the row for the token being processed.
-                let out = unsafe { projection.out.rows(tok, tok + 1) };
-                projection.weight.kernel.forward_prepared(
-                    row,
-                    &q8,
-                    &scales,
-                    None,
-                    out,
-                    n_in,
-                    projection.n_out,
-                    0,
-                    1,
-                );
-                if let Some(bias) = projection.bias {
-                    for (value, bias) in out.iter_mut().zip(bias) {
-                        *value += *bias;
-                    }
+    for start in (0..rows).step_by(PROJECTION_ROWS) {
+        let end = (start + PROJECTION_ROWS).min(rows);
+        executor
+            .run_group(
+                ids,
+                &input[start * n_in..end * n_in],
+                end - start,
+                projections.each_mut().map(|(weight, output, _)| {
+                    &mut output[start * weight.n_out..end * weight.n_out]
+                }),
+            )
+            .map_err(|e| e.to_string())?;
+    }
+    for (weight, output, bias) in projections {
+        if let Some(bias) = bias {
+            for row in output.chunks_exact_mut(weight.n_out) {
+                for (value, bias) in row.iter_mut().zip(bias) {
+                    *value += *bias;
                 }
             }
         }
-    });
-}
-
-/// Row-partitioned view over a token-major output buffer.
-///
-/// [`ComputePool::compute`] takes an `Fn` closure, so a `&mut [f32]` cannot be
-/// moved into it; workers borrow a disjoint token range out of the raw pointer
-/// instead. Same shape as `PtrWrap` in the in-tree ViT attention path and
-/// `OutputWrap` in `qwen35::vision`.
-struct RowsWrap(*mut f32, usize);
-unsafe impl Sync for RowsWrap {}
-unsafe impl Send for RowsWrap {}
-impl RowsWrap {
-    /// # Safety
-    /// The caller must guarantee the buffer holds at least `end * stride`
-    /// elements and that no other view of the same rows is live.
-    unsafe fn rows(&self, start: usize, end: usize) -> &mut [f32] {
-        std::slice::from_raw_parts_mut(self.0.add(start * self.1), (end - start) * self.1)
     }
+    Ok(())
 }
 
 /// Shared forward path for [`text_encode`] and [`text_encode_with_audio`].
 /// Operates on pre-built per-token embeddings of shape `[n_tokens, n_embd]`.
 ///
-/// `key_mask` masks out padded keys. `None` means full bidirectional
-/// attention over every position.
+/// `key_mask` masks out padded keys; causal attention always hides future keys.
 fn text_encode_forward(
     model: &Qwen3Model,
     embeddings: &[f32],
     n_tokens: usize,
     positions: &[[usize; 4]],
     key_mask: Option<&[bool]>,
+    layers: &[usize],
 ) -> Result<Vec<f32>, String> {
     #[cfg(feature = "vulkan")]
     let mut full_model_gpu_failed = false;
     #[cfg(feature = "vulkan")]
-    if key_mask.is_none()
+    if layers.is_empty()
+        && key_mask.is_none()
         && positions
             .iter()
             .enumerate()
@@ -408,8 +399,35 @@ fn text_encode_forward(
     let kq_scale = 1.0 / (cfg.n_embd_head_k as f32).sqrt();
 
     let mut hidden = embeddings.to_vec();
+    let mut collected = if layers.is_empty() {
+        Vec::new()
+    } else {
+        vec![0.0; checked_product("hidden-layer output", hidden.len(), layers.len())?]
+    };
 
-    for layer_idx in 0..cfg.n_layer {
+    let depth = layers.last().copied().unwrap_or(cfg.n_layer);
+    let bindings = model.layers[..depth]
+        .iter()
+        .flat_map(|layer| {
+            let mut weights = vec![&layer.wq, &layer.wk, &layer.wv, &layer.wo];
+            if layer.moe_router.is_none() {
+                weights.extend([&layer.w_gate, &layer.w_up, &layer.w_down]);
+            }
+            weights.into_iter().map(|weight| LinearBinding {
+                weight,
+                mode: LinearMode::Prepared,
+            })
+        })
+        .collect();
+    let mut executor = LinearExecutor::new(
+        ComputePolicy::legacy(),
+        bindings,
+        PROJECTION_ROWS,
+        model.pool(),
+    )
+    .map_err(|e| e.to_string())?;
+
+    for layer_idx in 0..depth {
         let layer = &model.layers[layer_idx];
 
         let mut normed = vec![0.0; n_tokens * cfg.n_embd];
@@ -427,31 +445,14 @@ fn text_encode_forward(
         let mut k_all = vec![0.0; n_tokens * n_embd_k];
         let mut v_all = vec![0.0; n_tokens * n_embd_v];
         project_tokens(
-            &model.pool(),
-            n_tokens,
+            &mut executor,
             &normed,
-            cfg.n_embd,
-            vec![
-                TokenProjection {
-                    weight: &layer.wq,
-                    n_out: n_embd_q,
-                    out: RowsWrap(q_all.as_mut_ptr(), n_embd_q),
-                    bias: layer.q_bias.as_deref(),
-                },
-                TokenProjection {
-                    weight: &layer.wk,
-                    n_out: n_embd_k,
-                    out: RowsWrap(k_all.as_mut_ptr(), n_embd_k),
-                    bias: layer.k_bias.as_deref(),
-                },
-                TokenProjection {
-                    weight: &layer.wv,
-                    n_out: n_embd_v,
-                    out: RowsWrap(v_all.as_mut_ptr(), n_embd_v),
-                    bias: layer.v_bias.as_deref(),
-                },
+            [
+                (&layer.wq, &mut q_all, layer.q_bias.as_deref()),
+                (&layer.wk, &mut k_all, layer.k_bias.as_deref()),
+                (&layer.wv, &mut v_all, layer.v_bias.as_deref()),
             ],
-        );
+        )?;
 
         if let (Some(q_norm), Some(k_norm)) = (layer.q_norm.as_deref(), layer.k_norm.as_deref()) {
             apply_qk_norms(
@@ -595,17 +596,10 @@ fn text_encode_forward(
 
         let mut attn_proj_out = vec![0.0; n_tokens * cfg.n_embd];
         project_tokens(
-            &model.pool(),
-            n_tokens,
+            &mut executor,
             &attn_out,
-            n_attn,
-            vec![TokenProjection {
-                weight: &layer.wo,
-                n_out: cfg.n_embd,
-                out: RowsWrap(attn_proj_out.as_mut_ptr(), cfg.n_embd),
-                bias: None,
-            }],
-        );
+            [(&layer.wo, &mut attn_proj_out, None)],
+        )?;
 
         for tok in 0..n_tokens {
             let off = tok * cfg.n_embd;
@@ -639,25 +633,13 @@ fn text_encode_forward(
             let mut gate_buf = vec![0.0; n_tokens * cfg.n_ff];
             let mut up_buf = vec![0.0; n_tokens * cfg.n_ff];
             project_tokens(
-                &model.pool(),
-                n_tokens,
+                &mut executor,
                 &ffn_normed,
-                cfg.n_embd,
-                vec![
-                    TokenProjection {
-                        weight: &layer.w_gate,
-                        n_out: cfg.n_ff,
-                        out: RowsWrap(gate_buf.as_mut_ptr(), cfg.n_ff),
-                        bias: None,
-                    },
-                    TokenProjection {
-                        weight: &layer.w_up,
-                        n_out: cfg.n_ff,
-                        out: RowsWrap(up_buf.as_mut_ptr(), cfg.n_ff),
-                        bias: None,
-                    },
+                [
+                    (&layer.w_gate, &mut gate_buf, None),
+                    (&layer.w_up, &mut up_buf, None),
                 ],
-            );
+            )?;
 
             for tok in 0..n_tokens {
                 let off = tok * cfg.n_ff;
@@ -670,17 +652,10 @@ fn text_encode_forward(
             // `gate_buf`, so that buffer is the down projection's input.
             let mut down_buf = vec![0.0; n_tokens * cfg.n_embd];
             project_tokens(
-                &model.pool(),
-                n_tokens,
+                &mut executor,
                 &gate_buf,
-                cfg.n_ff,
-                vec![TokenProjection {
-                    weight: &layer.w_down,
-                    n_out: cfg.n_embd,
-                    out: RowsWrap(down_buf.as_mut_ptr(), cfg.n_embd),
-                    bias: None,
-                }],
-            );
+                [(&layer.w_down, &mut down_buf, None)],
+            )?;
 
             for tok in 0..n_tokens {
                 let off = tok * cfg.n_embd;
@@ -689,8 +664,18 @@ fn text_encode_forward(
                 }
             }
         }
+        if let Ok(index) = layers.binary_search(&(layer_idx + 1)) {
+            for tok in 0..n_tokens {
+                let dst = (tok * layers.len() + index) * cfg.n_embd;
+                collected[dst..dst + cfg.n_embd]
+                    .copy_from_slice(&hidden[tok * cfg.n_embd..(tok + 1) * cfg.n_embd]);
+            }
+        }
     }
 
+    if !layers.is_empty() {
+        return Ok(collected);
+    }
     let mut output = vec![0.0; n_tokens * cfg.n_embd];
     for tok in 0..n_tokens {
         let off = tok * cfg.n_embd;
