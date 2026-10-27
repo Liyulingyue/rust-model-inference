@@ -455,6 +455,7 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                 i += 1;
             }
             "--srt" => options.srt = true,
+            "--qwen-image-turbo" => options.qwen_image_turbo = true,
             "--qwen-context-file" => {
                 options.qwen_context_file =
                     Some(required_path_value(args, &mut i, "--qwen-context-file")?);

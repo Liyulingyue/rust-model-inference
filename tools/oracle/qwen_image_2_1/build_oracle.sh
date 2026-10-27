@@ -44,7 +44,7 @@ if [[ ! -d "$work" ]]; then
 fi
 
 cp "$script_dir/components.cpp" "$work/examples/qwen_image_2_1_trace/components.cpp"
-if ! rg -q 'qwen-image-2-1-components' "$work/examples/qwen_image_2_1_trace/CMakeLists.txt"; then
+if ! grep -q 'qwen-image-2-1-components' "$work/examples/qwen_image_2_1_trace/CMakeLists.txt"; then
     cat >> "$work/examples/qwen_image_2_1_trace/CMakeLists.txt" <<'CMAKE'
 add_executable(qwen-image-2-1-components components.cpp)
 target_include_directories(qwen-image-2-1-components PRIVATE "${PROJECT_SOURCE_DIR}/src")
@@ -57,9 +57,10 @@ CMAKE
 fi
 
 # Disable vector reductions, architecture kernels, contraction, and fused trig
-# together. RMI_SCALAR=1 uses the same scalar arithmetic contract.
-flags='-ffp-contract=off -fno-builtin-sinf -fno-builtin-cosf -U__ARM_NEON -U__ARM_FEATURE_FP16_VECTOR_ARITHMETIC -U__ARM_FEATURE_SVE -U__ARM_FEATURE_FMA'
-if "${CXX:-c++}" --version | rg -qi clang; then
+# together. Baseline SSE2 otherwise keeps vector exp active on x86-64 even with
+# GGML_SSE42=OFF. RMI_SCALAR=1 uses the same scalar arithmetic contract.
+flags='-ffp-contract=off -fno-builtin-sinf -fno-builtin-cosf -U__SSE2__ -U__ARM_NEON -U__ARM_FEATURE_FP16_VECTOR_ARITHMETIC -U__ARM_FEATURE_SVE -U__ARM_FEATURE_FMA'
+if "${CXX:-c++}" --version | grep -qi clang; then
     flags+=' -fno-vectorize -fno-slp-vectorize'
 else
     flags+=' -fno-tree-vectorize'

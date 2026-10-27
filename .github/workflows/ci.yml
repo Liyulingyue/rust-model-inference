@@ -15,6 +15,33 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo fmt --check
 
+  x86:
+    name: x86 dispatch regressions
+    runs-on: ubuntu-latest
+    env:
+      # Keep feature detection dynamic when QEMU removes an ISA feature.
+      RUSTFLAGS: -C target-cpu=x86-64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Require native SIMD coverage
+        run: |
+          test "$(uname -m)" = x86_64
+          for feature in avx2 fma f16c; do
+            grep -qw "$feature" /proc/cpuinfo
+          done
+      - run: cargo test --locked --lib ops::softmax::tests::softmax_approx_avx2_
+      - run: 'cargo test --locked --lib ops::math::exp::tests::'
+      - run: 'cargo test --locked --lib ops::kernel::q8_0::'
+      - run: cargo test --locked --lib raw_hidden_
+      - run: cargo test --locked --test qwen_image_2_1_unit --test qwen_image_2_1_pipeline
+      - name: Q8 dispatch without F16C
+        run: |
+          sudo apt-get update && sudo apt-get install -y qemu-user
+          cargo test --locked --lib --no-run --message-format=json > target/x86-test-build.jsonl
+          test_bin=$(python3 -c 'import json; print(next(r["executable"] for line in open("target/x86-test-build.jsonl") if (r := json.loads(line)).get("executable") and r["target"]["kind"] == ["lib"]))')
+          qemu-x86_64 -cpu Haswell,-f16c "$test_bin" --exact ops::kernel::q8_0::dispatch::tests::avx2_without_f16c_uses_scalar --ignored
+
   vulkan:
     name: Vulkan compile and shaders
     runs-on: ubuntu-latest
@@ -27,3 +54,7 @@ jobs:
       - run: cargo check --locked --features vulkan --bin rust-model-inference
       - run: cargo check --locked --features vulkan --bin rust-model-server
       - run: cargo check --locked --features vulkan --examples
+      - run: 'cargo test --locked --features vulkan --lib compute::tests::'
+      - run: cargo test --locked --features vulkan --lib raw_hidden_
+      - run: 'cargo test --locked --features vulkan --lib qwen_image_2_1::gpu::tests::'
+      - run: cargo test --locked --features vulkan --test qwen_image_2_1_unit --test qwen_image_2_1_pipeline

@@ -28,6 +28,7 @@ fn timestral_request_is_a_forecast_mode() {
         "--dreamx",
         "--astronex",
         "--yue2",
+        "--qwen-image-turbo",
     ] {
         let conflicting = args
             .iter()
