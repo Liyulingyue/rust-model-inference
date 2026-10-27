@@ -39,6 +39,14 @@ pub(super) struct Qwen3PrefillScratch {
 /// shortcut: 16 decode steps, request-scoped validation is needed for longer guarantees.
 const MODEL_CONTRACT_DECODE_STEPS: usize = 16;
 
+/// The Vulkan arena is sized for the prefill chunk's row count and is
+/// mirrored by a staging buffer of the same size, so a bigger batch means a
+/// bigger device allocation on top of the uploaded weights. On a shared
+/// memory budget that is enough to lose the device, so the GPU path keeps
+/// the default 64-row chunks no matter how large the batch is.
+#[cfg(feature = "vulkan")]
+const VULKAN_MAX_PREFILL_ROWS: usize = 64;
+
 impl Qwen3PrefillScratch {
     pub(super) fn new(max_rows: usize, model: &Qwen3Model) -> Self {
         let config = &model.config;
@@ -189,6 +197,12 @@ impl Qwen3Session<'_> {
         #[cfg(not(feature = "parity-trace"))]
         let trace_each_token = false;
         let chunk_size = batch_size;
+        #[cfg(feature = "vulkan")]
+        let chunk_size = if self.gpu.is_some() {
+            chunk_size.min(VULKAN_MAX_PREFILL_ROWS)
+        } else {
+            chunk_size
+        };
         let max_rows = chunk_size.min(self.capacity);
         self.prefill_scratch.reset_for(max_rows, self.model);
         #[cfg(feature = "vulkan")]

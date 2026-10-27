@@ -152,7 +152,12 @@ pub fn build_text_runtime(
     let policy = options.compute;
     policy.check_build()?;
     policy.validate_text_arch(arch)?;
-    if policy == crate::compute::ComputePolicy::Vulkan && options.mmproj.is_some() {
+    // Qwen3-VL's vision tower has no Vulkan path: it runs on the CPU and
+    // feeds the GPU decoder its projected embeddings and DeepStack planes.
+    // That split is verified against the CPU, so an mmproj is fine there.
+    let qwen3_vision = matches!(arch, "qwen3vl" | "qwen3vlmoe" | "qwen2vl");
+    if policy == crate::compute::ComputePolicy::Vulkan && options.mmproj.is_some() && !qwen3_vision
+    {
         return Err("full Vulkan runtime supports text input only".into());
     }
     let _scope = policy.enter_legacy_scope();
@@ -195,7 +200,13 @@ impl TextRuntime for ComputeTextRuntime {
         request: &GenerationRequest,
         sink: &mut dyn TokenSink,
     ) -> Result<GeneratedText, String> {
-        if self.policy == crate::compute::ComputePolicy::Vulkan && !request.images.is_empty() {
+        // Qwen3-VL's image path runs on the Vulkan decoder: the vision tower
+        // stays on the CPU and hands the GPU its projected embeddings and
+        // DeepStack planes. Every other arch keeps the text-only rule.
+        if self.policy == crate::compute::ComputePolicy::Vulkan
+            && !request.images.is_empty()
+            && !matches!(self.inner.arch(), "qwen3vl" | "qwen3vlmoe" | "qwen2vl")
+        {
             return Err("full Vulkan runtime supports text input only".into());
         }
         let _scope = self.policy.enter_legacy_scope();

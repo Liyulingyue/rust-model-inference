@@ -365,6 +365,17 @@ cargo run --release --bin server -- \
 | Qwen3-VL 不匹配的维度（除 1024-dim 与 2048-dim 两组白名单外） | 配置阶段拒绝 |
 | GPU 后端（`--features vulkan`） | 可跑，但当前不提供 GPU 位级 Oracle 保证 |
 
+### 9.1 Vulkan（GPU）后端的适用范围
+
+`--compute vulkan` 目前覆盖 Qwen3 家族的**文本**解码，以及 Qwen3-VL 的**图像**路径：
+
+- **文本塔**：整段 resident decoder 走 GPU。启动时会做一次 GPU↔CPU 契约校验（logits + KV cache + 16 步 greedy 必须逐位一致），不通过就回落到 CPU。
+- **图像路径**：视觉塔仍在 CPU 上跑，投影出的 embedding 与 DeepStack 平面交给 GPU 解码器。Qwen3-VL 的 M-RoPE 用 4D 位置（图像 token 共享 T、H/W 递增），GPU 侧按调用方给的逐行位置旋转，不按 cache slot 猜。
+- **DeepStack**：只在**带 DeepStack 平面**的分块里注入（prefill 有、decode 没有）。若 decode 步也注入，arena 里上一分块残留的平面会被加到生成 token 的残差流上，结果与 CPU 不一致。
+- **分块上限**：GPU 路径固定按 64 行分块。arena 按分块行数分配并有一份等大的 staging 缓冲，再叠加已上传的权重；更大的 `--prefill-batch-size` 会让共享显存的设备直接丢设备（device lost）。
+- **只有 qwen3vl / qwen3vlmoe / qwen2vl 放行图像**，其余 arch 仍是"仅文本"。
+- 2B 级别模型上 GPU 未必更快（28 层 dispatch 开销摊不开），大模型才划算。
+
 ## 10. 相关源码索引
 
 - `src/models/qwen3/` — 文本 / Embedding / VL / ASR / TTS trunk

@@ -95,6 +95,7 @@ pub(crate) fn record_dense_layer(
     capacity: usize,
     base_position: usize,
     rows: usize,
+    deepstack_enabled: bool,
 ) -> Result<(), VulkanError> {
     let q_count = config
         .n_head
@@ -272,9 +273,15 @@ pub(crate) fn record_dense_layer(
                     // of the first `n_deepstack_layers` layers, added into the
                     // residual stream after the FFN residual. The CPU path
                     // does the same in `prefill.rs::add_deepstack_embedding`.
+                    //
+                    // Only chunks that actually carry planes may add them: a
+                    // decode step has no DeepStack input, and the arena
+                    // still holds the previous chunk's planes. Adding those
+                    // would corrupt the generated token's residual stream.
                     if input == DenseTensor::Down
                         && output == DenseTensor::X
                         && layer_index < config.n_deepstack_layers
+                        && deepstack_enabled
                     {
                         // The arena holds the chunk's planes laid out
                         // `[layer][arena_row][n_embd]`, so a layer's plane
@@ -745,6 +752,7 @@ impl DenseVulkanSession {
                 self.capacity,
                 base_position,
                 rows,
+                extras.deepstack.is_some(),
             )?;
             #[cfg(test)]
             if let Some(row) = failure {
