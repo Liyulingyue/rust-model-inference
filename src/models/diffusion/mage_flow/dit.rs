@@ -16,6 +16,11 @@ const EPS: f32 = 1e-6;
 pub struct MageFlowDit<'a> {
     source: &'a dyn TensorSource,
     pool: Arc<ComputePool>,
+    /// Projections are built once and reused. Every call used to build a new
+    /// projection, and with it a new GPU runtime, a new arena and a fresh set
+    /// of operator pipelines, so each of the hundred odd projections per step
+    /// paid for a full setup and the driver saw a pipeline it had never run.
+    projections: std::cell::RefCell<std::collections::HashMap<String, Linear<'a>>>,
 }
 
 impl<'a> MageFlowDit<'a> {
@@ -36,6 +41,7 @@ impl<'a> MageFlowDit<'a> {
         ) {
             return Err("Missing or unsupported mage_flow.variant".into());
         }
+        let projections = std::cell::RefCell::new(std::collections::HashMap::new());
         let tensor = |name: &str, dims: &[u64]| -> Result<(), String> {
             let info = source
                 .tensor_info(name)
@@ -178,7 +184,11 @@ impl<'a> MageFlowDit<'a> {
                 tensor(&format!("{p}.{name}"), &[HEAD_DIM as u64])?;
             }
         }
-        Ok(Self { source, pool })
+        Ok(Self {
+            source,
+            pool,
+            projections: projections,
+        })
     }
 
     fn linear(
@@ -189,14 +199,38 @@ impl<'a> MageFlowDit<'a> {
         width: usize,
         out: usize,
     ) -> Result<Vec<f32>, String> {
-        let layer = Linear::from_source(
-            self.source,
-            &format!("{name}.weight"),
-            Some(&format!("{name}.bias")),
-            width,
-            out,
-        )?;
-        let values = layer.forward(&self.pool, input, rows)?;
+        let mut projections = self.projections.borrow_mut();
+        let layer = match projections.get(name) {
+            Some(layer) => layer,
+            None => {
+                let layer = Linear::from_source(
+                    self.source,
+                    &format!("{name}.weight"),
+                    Some(&format!("{name}.bias")),
+                    width,
+                    out,
+                )?;
+                projections.insert(name.to_string(), layer);
+                projections.get(name).expect("projection was just inserted")
+            }
+        };
+        // The device sometimes returns a projection that is wrong in whole
+        // rows (TODO-044). The verified path rechecks a few elements against
+        // the CPU kernel and recomputes a projection that disagrees, so the
+        // sampler never sees a broken result.
+        let values = layer.forward_verified(&self.pool, input, rows)?;
+        if std::env::var_os("RMI_MAGE_PROJ_CHECKSUM").is_some() {
+            // A checksum of every projection shows the first one that differs
+            // between two runs, because the input of a projection only depends
+            // on the steps before it.
+            let sum: f64 = values.iter().map(|value| *value as f64).sum();
+            let squares: f64 = values
+                .iter()
+                .map(|value| (*value as f64) * (*value as f64))
+                .sum();
+            eprintln!("[Mage-PROJ] {name} sum={sum:.12e} sq={squares:.12e}");
+        }
+        drop(projections);
         trace(name, rows, out, &values)?;
         Ok(values)
     }
@@ -242,6 +276,22 @@ impl<'a> MageFlowDit<'a> {
                 *x += dt * v;
             }
             trace("sample.latent", 1, target, &image[..target])?;
+            if std::env::var_os("RMI_MAGE_STEP_CHECKSUM").is_some() {
+                // A checksum of the latent after every step shows the first
+                // step where two runs drift apart.
+                let sum: f64 = image[..target].iter().map(|value| *value as f64).sum();
+                eprintln!(
+                    "[Mage-CHECK] step {step} sum={sum:.12e} head={:?}",
+                    &image[..target.min(4)]
+                );
+            }
+            // A projection that the device got wrong leaves the latent with
+            // values that no longer match its own scale, and the diffusion
+            // carries that into the picture. Refuse the result instead of
+            // writing out a flat image, so the caller can fall back.
+            if !latent_is_usable(&image[..target]) {
+                return Err(format!("Mage-Flow step {step} produced an unusable latent"));
+            }
         }
         Ok(image[..target].to_vec())
     }
@@ -372,6 +422,14 @@ impl<'a> MageFlowDit<'a> {
                 },
             )?;
             trace(&format!("{p}.attn.context"), n, HIDDEN, &attn)?;
+            if std::env::var_os("RMI_MAGE_PROJ_CHECKSUM").is_some() {
+                let sum: f64 = attn.iter().map(|value| *value as f64).sum();
+                let squares: f64 = attn
+                    .iter()
+                    .map(|value| (*value as f64) * (*value as f64))
+                    .sum();
+                eprintln!("[Mage-PROJ] {p}.attn sum={sum:.12e} sq={squares:.12e}");
+            }
             let ti = text_tokens * HIDDEN;
             let pi = self.linear(
                 &format!("{p}.attn.to_out.0"),
@@ -421,6 +479,17 @@ impl<'a> MageFlowDit<'a> {
         trace("norm_out", image_tokens, HIDDEN, &img)?;
         self.linear("proj_out", &img, image_tokens, HIDDEN, IN_CHANNELS)
     }
+}
+
+/// Whether a latent can still be used.
+///
+/// A projection that the device got wrong leaves values that are not finite
+/// or that collapsed to zero, and the diffusion turns either into a flat
+/// picture, so the sampler refuses such a step.
+pub(crate) fn latent_is_usable(values: &[f32]) -> bool {
+    !values.is_empty()
+        && values.iter().all(|value| value.is_finite())
+        && values.iter().any(|value| *value != 0.0)
 }
 
 pub(crate) fn trace(name: &str, rows: usize, width: usize, values: &[f32]) -> Result<(), String> {
@@ -535,7 +604,58 @@ mod tests {
             trace("disabled", 1, 1, &[1.0]).unwrap();
         }
     }
+    /// The denoiser reuses its projections now, so one runtime and one arena
+    /// serve every step. Two steps of the same input have to come out
+    /// identical, and a step that runs after another one has to match a step
+    /// that runs on its own.
     #[test]
+    #[cfg(feature = "vulkan")]
+    #[ignore = "requires a Vulkan device and the real Mage-Flow GGUFs"]
+    fn reused_projections_give_the_same_step() {
+        let Ok(loader) =
+            crate::GGUFLoader::from_file("models/mage-flow/mage-flow-base-dit-BF16.gguf")
+        else {
+            eprintln!("no real weights; skip");
+            return;
+        };
+        crate::ops::float::enable_gpu();
+        if crate::ops::get_vulkan_context().is_none() {
+            eprintln!("no vulkan context; skip");
+            return;
+        }
+        let pool = std::sync::Arc::new(ComputePool::new(4));
+        let Ok(dit) = MageFlowDit::load(&loader, pool) else {
+            eprintln!("no denoiser; skip");
+            return;
+        };
+        let shapes = [[4usize, 4usize]];
+        let image = vec![0.25f32; 4 * 4 * IN_CHANNELS];
+        let context = vec![0.5f32; 2 * CONTEXT_DIM];
+        let first = dit.forward(&image, &shapes, &context, 0.5).unwrap();
+        let second = dit.forward(&image, &shapes, &context, 0.5).unwrap();
+        assert_eq!(
+            first.len(),
+            second.len(),
+            "the two steps must have the same shape"
+        );
+        let differing = first
+            .iter()
+            .zip(second.iter())
+            .filter(|(a, b)| a.to_bits() != b.to_bits())
+            .count();
+        assert_eq!(differing, 0, "the same step must give the same result");
+    }
+
+    #[test]
+    #[test]
+    fn a_broken_latent_is_refused() {
+        assert!(latent_is_usable(&[0.5, -0.25]));
+        assert!(!latent_is_usable(&[]));
+        assert!(!latent_is_usable(&[0.0, 0.0]));
+        assert!(!latent_is_usable(&[f32::NAN, 1.0]));
+        assert!(!latent_is_usable(&[f32::INFINITY, 1.0]));
+    }
+
     fn reference_rope_uses_its_own_frame_and_centered_grid() {
         assert_eq!(
             image_positions(&[[1, 2], [3, 1]]).unwrap(),

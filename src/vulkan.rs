@@ -123,6 +123,37 @@ pub fn mark_gpu_broken(reason: &str) {
     }
 }
 
+/// The validation layer reports through this callback; without it the layer
+/// keeps quiet and the hazards we are hunting stay invisible.
+#[cfg(feature = "vulkan")]
+unsafe extern "system" fn validation_log(
+    severity: vk::DebugUtilsMessageSeverityFlagsEXT,
+    types: vk::DebugUtilsMessageTypeFlagsEXT,
+    data: *const vk::DebugUtilsMessengerCallbackDataEXT,
+    _user_data: *mut std::ffi::c_void,
+) -> vk::Bool32 {
+    if data.is_null() {
+        return vk::FALSE;
+    }
+    let callback = &*data;
+    let message = if callback.p_message.is_null() {
+        String::new()
+    } else {
+        std::ffi::CStr::from_ptr(callback.p_message)
+            .to_string_lossy()
+            .into_owned()
+    };
+    let id = if callback.p_message_id_name.is_null() {
+        String::new()
+    } else {
+        std::ffi::CStr::from_ptr(callback.p_message_id_name)
+            .to_string_lossy()
+            .into_owned()
+    };
+    eprintln!("[GPU-VALIDATION] severity={severity:?} type={types:?} id={id}: {message}");
+    vk::FALSE
+}
+
 #[cfg(feature = "vulkan")]
 pub struct VulkanContext {
     entry: std::mem::ManuallyDrop<ash::Entry>,
@@ -142,6 +173,10 @@ pub struct VulkanContext {
     /// Weights keyed by (data_ptr, byte_len); mmap slices are stable, so the
     /// first matmul over a tensor uploads it and every later call is a hit.
     weight_cache: Mutex<HashMap<(usize, usize), GpuBuffer>>,
+    /// Operator pipelines, compiled once per device and shared by every
+    /// arena. Building a fresh set per arena compiled every shader again for
+    /// each projection, which cost far more than the dispatch itself.
+    operator_pipelines: Mutex<Option<Vec<vk::Pipeline>>>,
     /// Persistent I/O buffers, grown on demand.
     io_state: Mutex<IoState>,
     mutex: Mutex<CommandSubmission>,
@@ -180,6 +215,8 @@ pub struct VulkanContext {
     qwen3_core_contract: OnceLock<Result<(), String>>,
     q8_0_activation_contract: OnceLock<Result<(), String>>,
     q8_k_activation_contract: OnceLock<Result<(), String>>,
+    /// The validation messenger, alive as long as the instance is.
+    debug_messenger: Option<(ash::extensions::ext::DebugUtils, vk::DebugUtilsMessengerEXT)>,
 }
 
 /// Persistent activation staging buffers. Capacities grow to the largest
@@ -344,7 +381,7 @@ impl VulkanContext {
         );
         unsafe {
             let entry = load_entry()?;
-            let (instance, instance_api_version, properties2_extension) =
+            let (instance, instance_api_version, properties2_extension, debug_messenger) =
                 Self::create_instance(&entry)?;
             let candidates = match Self::device_candidates(
                 &entry,
@@ -399,6 +436,7 @@ impl VulkanContext {
                             command_buffer: resources.command_buffer,
                             fence: resources.fence,
                             weight_cache: Mutex::new(HashMap::new()),
+                            operator_pipelines: Mutex::new(None),
                             io_state: Mutex::new(IoState::default()),
                             mutex: Mutex::new(CommandSubmission::default()),
                             #[cfg(test)]
@@ -421,6 +459,7 @@ impl VulkanContext {
                             qwen3_core_contract: OnceLock::new(),
                             q8_0_activation_contract: OnceLock::new(),
                             q8_k_activation_contract: OnceLock::new(),
+                            debug_messenger,
                         });
                     }
                     Err(error) => failures.push(format!("{}: {error}", candidate.name)),
@@ -985,6 +1024,75 @@ impl VulkanContext {
         Ok(())
     }
 
+    /// The operator pipelines, compiled once for this device.
+    ///
+    /// Sharing them removes the per-arena cost of compiling every shader
+    /// again, which the denoiser paid for each of its hundred odd
+    /// projections per step.
+    pub(crate) fn operator_pipelines(&self) -> Result<Vec<vk::Pipeline>, VulkanError> {
+        let mut cached = self
+            .operator_pipelines
+            .lock()
+            .map_err(|_| VulkanError::InitFailed("Vulkan pipeline cache poisoned".into()))?;
+        if let Some(pipelines) = cached.as_ref() {
+            return Ok(pipelines.clone());
+        }
+        let pipelines = crate::vulkan::ops::build_operator_pipelines(self)?;
+        *cached = Some(pipelines.clone());
+        Ok(pipelines)
+    }
+
+    /// Force the host side cache of a mapped range out to the device.
+    ///
+    /// The arena and the weight uploads are plain copies into mapped memory.
+    /// The memory is host coherent, so a barrier alone is supposed to order
+    /// them, and the barrier in begin_commands does. A tiled kernel reads
+    /// those regions within microseconds of the copy though, so the copy is
+    /// flushed as well rather than relying on that barrier alone.
+    pub(crate) unsafe fn flush_mapped(
+        &self,
+        buffer: GpuBuffer,
+        offset: u64,
+        size: u64,
+    ) -> Result<(), VulkanError> {
+        if size == 0 {
+            return Ok(());
+        }
+        let range = vk::MappedMemoryRange::builder()
+            .memory(buffer.memory)
+            .offset(offset)
+            .size(size)
+            .build();
+        self.device
+            .flush_mapped_memory_ranges(&[range])
+            .map_err(|error| VulkanError::InitFailed(error.to_string()))
+    }
+
+    /// Drop the host side cache of a mapped range so the device writes it
+    /// holds become visible to the host.
+    ///
+    /// The result region is read straight out of the mapping. The memory is
+    /// host coherent, so the fence wait is supposed to be enough, but the
+    /// range is invalidated as well so the read does not depend on that.
+    pub(crate) unsafe fn invalidate_mapped(
+        &self,
+        buffer: GpuBuffer,
+        offset: u64,
+        size: u64,
+    ) -> Result<(), VulkanError> {
+        if size == 0 {
+            return Ok(());
+        }
+        let range = vk::MappedMemoryRange::builder()
+            .memory(buffer.memory)
+            .offset(offset)
+            .size(size)
+            .build();
+        self.device
+            .invalidate_mapped_memory_ranges(&[range])
+            .map_err(|error| VulkanError::InitFailed(error.to_string()))
+    }
+
     pub(crate) unsafe fn upload_static(&self, data: &[u8]) -> Result<GpuBuffer, VulkanError> {
         let size = data
             .len()
@@ -994,6 +1102,7 @@ impl VulkanContext {
         let buffer = self.alloc_persistently_mapped(size)?;
         std::ptr::copy_nonoverlapping(data.as_ptr(), buffer.mapped, data.len());
         std::ptr::write_bytes(buffer.mapped.add(data.len()), 0, size as usize - data.len());
+        self.flush_mapped(buffer, 0, data.len() as u64)?;
         self.count_upload(data.len());
         Ok(buffer)
     }
@@ -1213,7 +1322,17 @@ impl VulkanContext {
         );
     }
 
-    fn create_instance(entry: &ash::Entry) -> Result<(ash::Instance, u32, bool), VulkanError> {
+    fn create_instance(
+        entry: &ash::Entry,
+    ) -> Result<
+        (
+            ash::Instance,
+            u32,
+            bool,
+            Option<(ash::extensions::ext::DebugUtils, vk::DebugUtilsMessengerEXT)>,
+        ),
+        VulkanError,
+    > {
         let loader_version = entry
             .try_enumerate_instance_version()
             .map_err(|error| VulkanError::InitFailed(error.to_string()))?
@@ -1245,7 +1364,46 @@ impl VulkanContext {
         if properties2_extension {
             extension_names.push(properties2_name.as_ptr());
         }
-        let create_info = vk::InstanceCreateInfo {
+        // The validation layer reports the exact hazard when a submission
+        // reads memory a host write has not reached yet, so it is worth
+        // turning on while looking for one.
+        let validation_layer = CStr::from_bytes_with_nul(b"VK_LAYER_KHRONOS_validation\0").unwrap();
+        let validation_requested = std::env::var_os("RMI_VULKAN_VALIDATION").is_some();
+        let layer_names: Vec<*const i8> = if validation_requested {
+            vec![validation_layer.as_ptr()]
+        } else {
+            Vec::new()
+        };
+        // Without a messenger the layer stays quiet, and synchronization
+        // validation (the check that actually catches a read-before-write
+        // hazard) is off by default, so ask for both.
+        let debug_utils_name = vk::ExtDebugUtilsFn::name();
+        let debug_utils_available =
+            extension_available(&available_extensions, debug_utils_name) && validation_requested;
+        if debug_utils_available {
+            extension_names.push(debug_utils_name.as_ptr());
+        }
+        let validation_features = if debug_utils_available {
+            // GPU-assisted validation crashes this driver, so keep it off
+            // and let the CPU-side checks do the work.
+            let features = [
+                vk::ValidationFeatureEnableEXT::SYNCHRONIZATION_VALIDATION,
+                vk::ValidationFeatureEnableEXT::BEST_PRACTICES,
+            ];
+            // ash 0.37 does not name this one, but the spec gives it the value 8.
+            let disabled = [vk::ValidationFeatureDisableEXT::from_raw(8)];
+            Some(vk::ValidationFeaturesEXT {
+                s_type: vk::StructureType::VALIDATION_FEATURES_EXT,
+                p_next: std::ptr::null(),
+                enabled_validation_feature_count: features.len() as u32,
+                p_enabled_validation_features: features.as_ptr(),
+                disabled_validation_feature_count: disabled.len() as u32,
+                p_disabled_validation_features: disabled.as_ptr(),
+            })
+        } else {
+            None
+        };
+        let mut create_info = vk::InstanceCreateInfo {
             s_type: vk::StructureType::INSTANCE_CREATE_INFO,
             p_next: std::ptr::null(),
             p_application_info: &app_info,
@@ -1254,18 +1412,49 @@ impl VulkanContext {
             } else {
                 vk::InstanceCreateFlags::empty()
             },
-            enabled_layer_count: 0,
-            pp_enabled_layer_names: std::ptr::null(),
+            enabled_layer_count: layer_names.len() as u32,
+            pp_enabled_layer_names: layer_names.as_ptr(),
             enabled_extension_count: extension_names.len() as u32,
             pp_enabled_extension_names: extension_names.as_ptr(),
         };
+        if let Some(features) = validation_features.as_ref() {
+            create_info.p_next = features as *const _ as *const std::ffi::c_void;
+        }
 
-        unsafe {
+        let instance = unsafe {
             entry
                 .create_instance(&create_info, None)
-                .map(|instance| (instance, api_version, properties2_extension))
-                .map_err(|error| VulkanError::InitFailed(error.to_string()))
+                .map_err(|error| VulkanError::InitFailed(error.to_string()))?
+        };
+        let mut debug_messenger = None;
+        if debug_utils_available {
+            let debug_utils = ash::extensions::ext::DebugUtils::new(&entry, &instance);
+            let messenger_info = vk::DebugUtilsMessengerCreateInfoEXT {
+                s_type: vk::StructureType::DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+                p_next: std::ptr::null(),
+                flags: vk::DebugUtilsMessengerCreateFlagsEXT::empty(),
+                message_severity: vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
+                    | vk::DebugUtilsMessageSeverityFlagsEXT::ERROR,
+                message_type: vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
+                    | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
+                    | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
+                pfn_user_callback: Some(validation_log),
+                p_user_data: std::ptr::null_mut(),
+            };
+            let messenger =
+                unsafe { debug_utils.create_debug_utils_messenger(&messenger_info, None) };
+            if let Ok(handle) = messenger {
+                // The messenger has to outlive the instance, so it is owned by
+                // the context and dropped with it.
+                debug_messenger = Some((debug_utils, handle));
+            }
         }
+        Ok((
+            instance,
+            api_version,
+            properties2_extension,
+            debug_messenger,
+        ))
     }
 
     fn device_candidates(
@@ -1891,6 +2080,9 @@ impl Drop for VulkanContext {
             self.device
                 .destroy_descriptor_pool(self.descriptor_pool, None);
             self.device.destroy_device(None);
+            if let Some((debug_utils, messenger)) = self.debug_messenger.take() {
+                debug_utils.destroy_debug_utils_messenger(messenger, None);
+            }
             self.instance.destroy_instance(None);
             std::mem::ManuallyDrop::drop(&mut self.entry);
         }
