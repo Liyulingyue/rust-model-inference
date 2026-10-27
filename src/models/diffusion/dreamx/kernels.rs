@@ -212,6 +212,19 @@ impl<'a> Linear<'a> {
                     // bits of a healthy run, which leaves the caller
                     // reproducible. Only a projection that stays wrong is
                     // recomputed on the CPU.
+                    // How far a healthy projection sits from the CPU kernel.
+                    // The check has to sit above this and below the damage.
+                    if std::env::var_os("RMI_GPU_VERIFY_TRACE").is_some() {
+                        let worst = projection_worst_difference(
+                            weight,
+                            input,
+                            &output,
+                            rows,
+                            self.n_in(),
+                            self.n_out(),
+                        );
+                        HEALTHY_WORST.fetch_max(worst.to_bits(), Ordering::Relaxed);
+                    }
                     let mut attempts = 0;
                     if std::env::var_os("RMI_GPU_VERIFY_TRACE").is_some() {
                         // When the check fails, the whole output is compared
@@ -219,6 +232,7 @@ impl<'a> Linear<'a> {
                         // is visible: how many elements differ, and how they
                         // are spread over the output.
                         if !projection_matches_cpu(
+                            pool,
                             weight,
                             input,
                             &output,
@@ -276,6 +290,7 @@ impl<'a> Linear<'a> {
                     }
                     while attempts < GPU_RETRY_LIMIT
                         && !projection_matches_cpu(
+                            pool,
                             weight,
                             input,
                             &output,
@@ -295,6 +310,7 @@ impl<'a> Linear<'a> {
                         );
                     }
                     if !projection_matches_cpu(
+                        pool,
                         weight,
                         input,
                         &output,
@@ -465,20 +481,31 @@ fn linear_bf16(
 
 /// How often a projection is asked of the device again after the CPU kernel
 /// disagreed with it.
+use std::sync::atomic::Ordering;
+
 const GPU_RETRY_LIMIT: usize = 3;
 
-/// How many columns of every row of a projection are checked against the CPU
-/// kernel.
-const GPU_CHECK_COLUMNS: usize = 32;
+/// The largest relative difference a healthy projection showed against the
+/// CPU kernel.
+static HEALTHY_WORST: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
-/// How many consecutive columns of every row are checked as well, to catch
-/// a run of wrong values that the spread sampling can step over.
-const GPU_CHECK_BLOCK: usize = 16;
+/// The largest relative difference a healthy projection showed.
+pub fn healthy_worst_difference() -> f32 {
+    f32::from_bits(HEALTHY_WORST.load(Ordering::Relaxed))
+}
+
+/// How many elements of a projection are checked against the CPU kernel.
+const GPU_CHECK_SAMPLES: usize = 65_536;
+
+/// How many consecutive columns of a projection are checked at once. The
+/// weight of a projection is read in order this way, and a small block
+/// covers more of the output with the same number of samples.
+const GPU_CHECK_BLOCK: usize = 8;
 
 /// How many rows of a projection are checked in full. The damage is
-/// sometimes a few scattered values of a row, which a column sample steps
-/// over.
-const GPU_CHECK_ROWS: usize = 4;
+/// sometimes a run of wrong columns, which a sample of single elements
+/// steps over.
+const GPU_CHECK_ROWS: usize = 8;
 
 /// The largest relative difference between a device projection and the CPU
 /// kernel over the sampled elements.
@@ -495,15 +522,17 @@ fn projection_worst_difference(
         .fold(0.0f32, |peak, value| peak.max(value.abs()))
         .max(1.0e-6);
     let mut worst = 0.0f32;
-    for row in 0..rows {
-        for step in 0..GPU_CHECK_COLUMNS {
-            let column = (row * 7919 + step * 104729 + 13) % n_out;
-            let reference = dot_bf16_f32(
-                &weight[column * n_in * 2..(column + 1) * n_in * 2],
-                &input[row * n_in..(row + 1) * n_in],
-            );
-            worst = worst.max((output[row * n_out + column] - reference).abs() / scale);
-        }
+    let cells = rows * n_out;
+    let samples = GPU_CHECK_SAMPLES.min(cells);
+    for sample in 0..samples {
+        let cell = (sample as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) % cells as u64;
+        let row = (cell as usize) / n_out;
+        let column = (cell as usize) % n_out;
+        let reference = dot_bf16_f32(
+            &weight[column * n_in * 2..(column + 1) * n_in * 2],
+            &input[row * n_in..(row + 1) * n_in],
+        );
+        worst = worst.max((output[cell as usize] - reference).abs() / scale);
     }
     worst
 }
@@ -519,6 +548,7 @@ fn projection_worst_difference(
 /// device that returned the wrong numbers gets those wrong in every row, so
 /// a handful of elements is enough to catch it.
 pub(crate) fn projection_matches_cpu(
+    pool: &ComputePool,
     weight: &[u8],
     input: &[f32],
     output: &[f32],
@@ -539,58 +569,75 @@ pub(crate) fn projection_matches_cpu(
     // of the scale, and a broken projection is off by 1e-2 of it or more, so
     // a limit of 1e-4 tells the two apart with room on both sides.
     let limit = 1.0e-4 * scale;
-    // The device gets whole rows or whole column ranges wrong, so every row
-    // is looked at, at several columns spread over it. The columns are
-    // spread by a stride that shares no factor with the row count, so the
-    // sampled ones differ from row to row.
+    // The device damages the output in three ways: a whole row, a run of
+    // consecutive columns, and a few scattered values. The check therefore
+    // looks at
     //
-    // The damage is sometimes confined to a part of a row, so a few columns
-    // per row are not enough on their own: the check also walks a block of
-    // consecutive columns, which is where a run of wrong values shows up.
-    for row in 0..rows {
-        for step in 0..GPU_CHECK_COLUMNS {
-            let column = (row * 7919 + step * 104729 + 13) % n_out;
-            let reference = dot_bf16_f32(
-                &weight[column * n_in * 2..(column + 1) * n_in * 2],
-                &input[row * n_in..(row + 1) * n_in],
-            );
-            if (output[row * n_out + column] - reference).abs() > limit {
-                return false;
-            }
-        }
-    }
-    // A consecutive block of columns of every row catches a run of wrong
-    // values that the spread sampling above can step over.
+    // - a spread of single elements over the whole output, which is what
+    //   scattered damage needs;
+    // - a few rows in full, which is what a run of columns needs.
+    //
+    // The spread is over the output and not over the columns of every row:
+    // a projection of the decoder has sixty-five thousand rows of thirty-two
+    // columns, and a sample of every row would spend all its time on the
+    // same thirty-two columns.
+    // The samples come in blocks of consecutive columns, so the weight is
+    // read in order instead of one six kilobyte row at a time.
     let block = GPU_CHECK_BLOCK.min(n_out);
-    for row in 0..rows {
-        for offset in 0..block {
-            let column = (row * 104_729 + offset) % n_out;
-            let reference = dot_bf16_f32(
-                &weight[column * n_in * 2..(column + 1) * n_in * 2],
-                &input[row * n_in..(row + 1) * n_in],
-            );
-            if (output[row * n_out + column] - reference).abs() > limit {
-                return false;
+    let blocks_per_row = n_out.div_ceil(block);
+    let total_blocks = rows * blocks_per_row;
+    let blocks = (GPU_CHECK_SAMPLES / block).clamp(1, total_blocks);
+    // The check is the same work for every block, so the pool runs it.
+    let mismatch = std::sync::atomic::AtomicBool::new(false);
+    pool.compute(|thread, threads| {
+        for sample in (thread..blocks).step_by(threads) {
+            if mismatch.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
+            // The golden ratio spreads the blocks over the output whatever
+            // its size is, and keeps them apart for a power of two.
+            let index = (sample as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) % total_blocks as u64;
+            let row = (index as usize) / blocks_per_row;
+            let first = (index as usize) % blocks_per_row * block;
+            for offset in 0..block {
+                let column = first + offset;
+                if column >= n_out {
+                    break;
+                }
+                let reference = dot_bf16_f32(
+                    &weight[column * n_in * 2..(column + 1) * n_in * 2],
+                    &input[row * n_in..(row + 1) * n_in],
+                );
+                if (output[row * n_out + column] - reference).abs() > limit {
+                    mismatch.store(true, std::sync::atomic::Ordering::Relaxed);
+                    return;
+                }
             }
         }
+    });
+    if mismatch.load(std::sync::atomic::Ordering::Relaxed) {
+        return false;
     }
-    // The device has also been seen to damage a few scattered values of a
-    // few rows, which the column sampling above steps over: a few wrong
-    // values in a row of eight thousand are easy to miss. Every column of a
-    // few rows is looked at instead, so scattered damage cannot hide.
-    for sample in 0..GPU_CHECK_ROWS {
-        let row = (sample * 2_654_435_761) % rows;
-        for column in 0..n_out {
-            let reference = dot_bf16_f32(
-                &weight[column * n_in * 2..(column + 1) * n_in * 2],
-                &input[row * n_in..(row + 1) * n_in],
-            );
-            if (output[row * n_out + column] - reference).abs() > limit {
-                return false;
+    // Every column of a few rows, so a run of wrong columns cannot hide.
+    pool.compute(|thread, threads| {
+        for sample in (thread..GPU_CHECK_ROWS).step_by(threads) {
+            if mismatch.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
+            let row = (sample as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) % rows as u64;
+            for column in 0..n_out {
+                let reference = dot_bf16_f32(
+                    &weight[column * n_in * 2..(column + 1) * n_in * 2],
+                    &input[row as usize * n_in..(row as usize + 1) * n_in],
+                );
+                if (output[row as usize * n_out + column] - reference).abs() > limit {
+                    mismatch.store(true, std::sync::atomic::Ordering::Relaxed);
+                    return;
+                }
             }
         }
-    }
-    true
+    });
+    !mismatch.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 pub(crate) fn dot_bf16_f32(weight: &[u8], input: &[f32]) -> f32 {
@@ -1313,7 +1360,7 @@ pub fn conv3d_with_options(
 
 /// How many elements of a convolution output are checked against the CPU
 /// kernel.
-const GPU_CONV_CHECK_SAMPLES: usize = 4096;
+const GPU_CONV_CHECK_SAMPLES: usize = 65_536;
 
 /// How many elements of every head of an attention result are checked
 /// against the CPU kernel.
@@ -1356,8 +1403,10 @@ fn conv3d_matches_cpu(
     }
     let reference = vec![0.0f32; output_len];
     for sample in 0..GPU_CONV_CHECK_SAMPLES {
-        // Spread the samples over the whole output.
-        let index = (sample * 2_654_435_761) % output_len;
+        // The golden ratio spreads the samples over the whole output
+        // whatever its size is.
+        let index =
+            ((sample as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) % output_len as u64) as usize;
         let value = conv3d_element(
             input,
             weight,
@@ -1938,6 +1987,7 @@ mod tests {
             .map(|i| (i % 17) as f32 / 4.0 - 2.0)
             .collect();
         let mut output = vec![0.0f32; rows * n_out];
+        let pool = ComputePool::new(4);
         for row in 0..rows {
             for column in 0..n_out {
                 output[row * n_out + column] = super::dot_bf16_f32(
@@ -1947,7 +1997,7 @@ mod tests {
             }
         }
         assert!(projection_matches_cpu(
-            &weight, &input, &output, rows, n_in, n_out
+            &pool, &weight, &input, &output, rows, n_in, n_out
         ));
         // A row that came back zero is what a stale activation looks like.
         let mut stale = output.clone();
@@ -1955,7 +2005,7 @@ mod tests {
             stale[3 * n_out + column] = 0.0;
         }
         assert!(!projection_matches_cpu(
-            &weight, &input, &stale, rows, n_in, n_out
+            &pool, &weight, &input, &stale, rows, n_in, n_out
         ));
         // A row that came back with different numbers is caught as well.
         let mut wrong = output.clone();
@@ -1963,7 +2013,7 @@ mod tests {
             wrong[5 * n_out + column] += 3.0;
         }
         assert!(!projection_matches_cpu(
-            &weight, &input, &wrong, rows, n_in, n_out
+            &pool, &weight, &input, &wrong, rows, n_in, n_out
         ));
         // The numbers of an earlier call, which is what the device was seen
         // to return, are caught as well.
@@ -1974,7 +2024,7 @@ mod tests {
             }
         }
         assert!(!projection_matches_cpu(
-            &weight, &input, &earlier, rows, n_in, n_out
+            &pool, &weight, &input, &earlier, rows, n_in, n_out
         ));
     }
 

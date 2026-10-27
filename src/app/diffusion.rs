@@ -634,6 +634,12 @@ pub fn run_mage_flow_cli(
         "Mage-Flow {variant}: saved {w}x{h} image to {}",
         out.display()
     );
+    if std::env::var_os("RMI_GPU_VERIFY_TRACE").is_some() {
+        eprintln!(
+            "[GPU-VERIFY] 健康投影与 CPU 内核的最大相对差 = {:.3e}",
+            crate::models::diffusion::dreamx::kernels::healthy_worst_difference()
+        );
+    }
     Ok(())
 }
 

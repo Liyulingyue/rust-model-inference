@@ -1351,7 +1351,13 @@ mod tests {
                 }
             }
             let caught = crate::models::diffusion::dreamx::kernels::projection_matches_cpu(
-                bytes, &input, &out, rows, n_in, n_out,
+                &crate::core::thread_pool::ComputePool::new(1),
+                bytes,
+                &input,
+                &out,
+                rows,
+                n_in,
+                n_out,
             );
             // How localized is the damage? Count the rows that carry any wrong
             // value and, for those rows, how much of the row is wrong.
