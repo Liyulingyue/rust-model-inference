@@ -11,6 +11,16 @@ load width; previously it skipped half of every eight values.
 MoE routing now uses the existing precise softmax and F64 accumulation for
 the selected-probability sum, matching the pinned Oracle's reduction contract.
 
+## Main synchronization (2026-10-27)
+
+The shared GDN normalization now follows upstream's llama.cpp `11fe0215`
+RMSNorm(eps/n)-then-scale graph, on both CPU and Vulkan. The full-model Sage
+Oracle and performance records below predate this change and remain historical
+evidence against `b96806d`; they do not establish alignment of the merged graph.
+The merge checks cover synthetic CPU/Vulkan prefill and decode for device-routed
+and mixed-format host-routed MoE. Full Sage Oracle replay and AMD performance
+have not been rerun for this synchronization.
+
 ## Artifact contract
 
 | Artifact | Bytes | SHA-256 |

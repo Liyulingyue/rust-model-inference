@@ -42,6 +42,10 @@ fn is_qwen35(arch: &str) -> Result<bool, String> {
         // renderer; it has no tool grammar and no vision path, so
         // build_prompt rejects tools/images before we get here.
         "falcon-h1" => Ok(false),
+        // Dory 1.0 ships the same ChatML role markers (`<|im_start|>role\n …
+        // <|im_end|>\n`) as the Qwen family, so it rides the same renderer.
+        // It has no tool-call grammar and no vision path.
+        "dory" => Ok(false),
         "qwen35" | "qwen35moe" => Ok(true),
         // Llama-family archs go through the CLI prompt builder
         // (`llama::trunk::build_prompt_tokens`) and don't support tool
@@ -201,6 +205,16 @@ pub fn build_prompt(
         }
         if messages.iter().any(|m| !m.images.is_empty()) {
             return Err("Image input is unsupported for Falcon-H1 text generation".into());
+        }
+    }
+    // Dory speaks the same ChatML dialect as Falcon-H1 and has neither a
+    // tool-call grammar nor a vision path.
+    if arch == "dory" {
+        if !tools.is_empty() {
+            return Err("Function tools are unsupported for Dory text generation".into());
+        }
+        if messages.iter().any(|m| !m.images.is_empty()) {
+            return Err("Image input is unsupported for Dory text generation".into());
         }
     }
     let llama_family = matches!(

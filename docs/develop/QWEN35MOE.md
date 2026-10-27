@@ -315,7 +315,14 @@ then the `k (x) d` outer product, then `s^T q / sqrt(S_k)`. The three ops in
 `state[a][b]` mapping to the oracle's `S[b][a]`, `ssm_matvec` and
 `ssm_outer_product_update` agree exactly.
 
-`l2_norm` now matches `ggml_compute_forward_l2_norm_f32`
+**Current contract (2026-10-22):** llama.cpp `11fe0215` now uses
+`build_gdn_l2_norm`: RMSNorm(eps/n) followed by scale(1/sqrt(n)), equivalent
+to `x / sqrt(sum(x²) + eps)`. The shared Rust helper follows that order and
+has a fresh Holo4 numerical regression. The denominator-clamp results below
+refer to the older Oracle snapshot; those MiniCPM artifacts have not been
+rerun with this update. See [Holo4 validation](../../tools/oracle/holo4/README.md).
+
+The historical `l2_norm` implementation matched `ggml_compute_forward_l2_norm_f32`
 (`ggml/src/ggml-cpu/ops.cpp:4333`):
 
 ```c
@@ -339,7 +346,8 @@ The old pin, `qwen35_l2_norm_matches_pinned_llama_cpp_bits`, did not catch any o
 this: it agreed 128/128 with the old Rust formula and 0/128 with the ggml one,
 because it had been generated from the Rust code it was supposed to check. It is
 regenerated from the kernel above, and
-`qwen35_l2_norm_clamps_the_denominator_at_eps` now pins the floor directly.
+`qwen35_l2_norm_clamps_the_denominator_at_eps` pinned the floor at that time.
+These tests have since been replaced by the current GDN numerical fixtures.
 
 With that fixed, every SSM stage at layer 1 is bit-exact end to end
 (`conv_output_raw`, `q_conv`, `q_conv_predelta`, `k_conv_predelta`,
@@ -535,8 +543,10 @@ numbers live (see [`tools/oracle/minicpmv/README.md`](../../tools/oracle/minicpm
 * The oracle's tensor table can build an MTP draft head; this GGUF has no
   `nextn.*` tensors, so that path is dead here but may still need to load
   cleanly if the arch gains it later.
-* Vulkan: `src/vulkan/qwen35.rs` still gates on `architecture == "qwen35"`, so
-  the 35B runs on the scalar/SIMD CPU path only.
+* Vulkan now has shared MoE projection support, with host routing/reduction.
+  Holo4 was exercised on M3 Max / RADV NAVI31, but complete logits alignment
+  remains unresolved and this MiniCPM artifact has not been tested on GPU.
+  See [Holo4 validation](../../tools/oracle/holo4/README.md).
 
 ## What is implemented
 
@@ -558,5 +568,7 @@ numbers live (see [`tools/oracle/minicpmv/README.md`](../../tools/oracle/minicpm
   on one; since the MoE tower is a `Qwen35Model` with `moe` set, the existing
   `qwen35` scorers are reused as-is. See
   [`TODO.md`](TODO.md#入口面覆盖2026-10-19-审计).
-* Vulkan is still gated to `qwen35` (`src/vulkan/qwen35.rs:17`), so the 35B runs
-  on the scalar/SIMD CPU path only.
+* `src/vulkan/qwen35/moe.rs` binds resident expert banks with per-expert
+  descriptor ranges and records routed/shared projections. Softmax/top-k and
+  ordered weighted reduction remain on the host; strict Vulkan supports text,
+  while Auto image mode uses CPU vision encoding followed by Vulkan decoding.

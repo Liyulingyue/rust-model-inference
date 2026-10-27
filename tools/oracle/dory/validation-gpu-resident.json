@@ -1,0 +1,713 @@
+{
+  "date": "2026-10-23",
+  "base_commit": "ebdb0d78fbcaf313520cfafe1c6354e3a981d792",
+  "platform": "Linux x86_64, AMD EPYC 9334, glibc 2.39, Rust 1.98.1, release-fast, features=vulkan,parity-trace",
+  "gpu": {
+    "device": "AMD Radeon Graphics (RADV NAVI31)",
+    "hardware_icd": true,
+    "required_feature": "shaderFloat64",
+    "icd": "/usr/share/vulkan/icd.d/radeon_icd.json",
+    "mesa_vulkan_drivers": "25.2.8-0ubuntu0.24.04.1",
+    "vulkan_loader": "1.3.275.0-1build1"
+  },
+  "artifact": {
+    "file": "NVIDIA-Nemotron-Labs-Dory1.0-4B-Q5_K_M.gguf",
+    "bytes": 3673288864,
+    "sha256": "96080be49ffd67b916018b7bdef8c484762576fb52780e10ab98ac4978a660e0",
+    "hash_rechecked_after_final_execution": true
+  },
+  "oracle": {
+    "commit": "98a74c97ea09ac72f6ceda1559808fc0a2f447ce",
+    "mode": "Pinned scalar CPU Oracle; same existing Linux traces used for CPU validation",
+    "oracle_binary_sha256": "abeb7c7d8d27b952f91338f6492c10678c52ff07327d86ad87788637862b80da",
+    "oracle_trace_sha256": {
+      "math-f16": "9483ed44e0c1c96c4519f8e96f112191d60417b11897d7c54610bf36d7f254d3",
+      "hello-f32": "1bf9a681bcc624c18efb5e1ca367a6f4ba0c37ea481c8294057a52d6b7813a46",
+      "window2-f16": "d7ced1be35d95ae59436a9e1b9396184c32b306eacf1b0c5851c80ca3aacfb87",
+      "window2-f32": "f8e2d38c405ad7094617a63d7f4aced6a95621f4337d82e3773762a2458a608c",
+      "hello-f16": "3f1f8730268b5979457c46f271d2280c21378a5b41bd64e1704b08fe241a16c6",
+      "unicode-f32": "4f9441e9c46ede9ff328aaa8593637ad0ff699b99c635e35ed77021efcf59032",
+      "math-f32": "d56fb859a896aeabf7bad3bd7f48708340f451c068c2a5ac84b752e541ce30c4"
+    }
+  },
+  "gates": {
+    "relative_l2": 0.01,
+    "scaled_max_abs": 0.01,
+    "exact_checks": [
+      "prompt/generated IDs",
+      "checkpoint names/order/layers/steps/count/shapes",
+      "embedding bytes"
+    ],
+    "bitwise_gate_on_lossy_values": false
+  },
+  "resident_scope": [
+    "Q5_K/Q6_K/BF16 projections",
+    "precise RoPE application",
+    "unit normalization",
+    "nGPT residual and loop reinjection",
+    "per-loop full/sliding attention and KV",
+    "gating/SiLU/MLP",
+    "output scaling"
+  ],
+  "host_scope": [
+    "embedding lookup",
+    "precise RoPE coefficient generation",
+    "token orchestration and final logits readback"
+  ],
+  "graph_replays": {
+    "passed": true,
+    "checked": 15795,
+    "cases": [
+      {
+        "passed": true,
+        "checked": 1755,
+        "first_step": 0,
+        "tokens": {
+          "prompt_ids": [
+            22177
+          ],
+          "generated_ids": [
+            1897,
+            1429,
+            22177,
+            5325,
+            1897,
+            1429,
+            22177,
+            5325
+          ]
+        },
+        "limits": {
+          "relative_l2": 0.01,
+          "scaled_max_abs": 0.01
+        },
+        "worst_relative_l2": {
+          "name": "embd",
+          "layer": null,
+          "step": 0,
+          "relative_l2": 0.0,
+          "max_abs": 0.0,
+          "scaled_max_abs": 0.0,
+          "exact": true,
+          "passed": true
+        },
+        "worst_max_abs": {
+          "name": "embd",
+          "layer": null,
+          "step": 0,
+          "relative_l2": 0.0,
+          "max_abs": 0.0,
+          "scaled_max_abs": 0.0,
+          "exact": true,
+          "passed": true
+        },
+        "case": "default-hello-f32",
+        "kv": "f32",
+        "sliding_window": 1024,
+        "seconds": 52.15120519697666,
+        "failures": []
+      },
+      {
+        "passed": true,
+        "checked": 1755,
+        "first_step": 0,
+        "tokens": {
+          "prompt_ids": [
+            22177
+          ],
+          "generated_ids": [
+            1897,
+            1429,
+            22177,
+            5325,
+            1897,
+            1429,
+            22177,
+            5325
+          ]
+        },
+        "limits": {
+          "relative_l2": 0.01,
+          "scaled_max_abs": 0.01
+        },
+        "worst_relative_l2": {
+          "name": "embd",
+          "layer": null,
+          "step": 0,
+          "relative_l2": 0.0,
+          "max_abs": 0.0,
+          "scaled_max_abs": 0.0,
+          "exact": true,
+          "passed": true
+        },
+        "worst_max_abs": {
+          "name": "embd",
+          "layer": null,
+          "step": 0,
+          "relative_l2": 0.0,
+          "max_abs": 0.0,
+          "scaled_max_abs": 0.0,
+          "exact": true,
+          "passed": true
+        },
+        "case": "default-hello-f16",
+        "kv": "f16",
+        "sliding_window": 1024,
+        "seconds": 40.692675579339266,
+        "failures": []
+      },
+      {
+        "passed": true,
+        "checked": 2925,
+        "first_step": 0,
+        "tokens": {
+          "prompt_ids": [
+            7493,
+            1395,
+            1032,
+            1050,
+            1043,
+            1050,
+            1063
+          ],
+          "generated_ids": [
+            1032,
+            1052,
+            1046,
+            5675,
+            1395,
+            1032,
+            1050,
+            1120
+          ]
+        },
+        "limits": {
+          "relative_l2": 0.01,
+          "scaled_max_abs": 0.01
+        },
+        "worst_relative_l2": {
+          "name": "embd",
+          "layer": null,
+          "step": 0,
+          "relative_l2": 0.0,
+          "max_abs": 0.0,
+          "scaled_max_abs": 0.0,
+          "exact": true,
+          "passed": true
+        },
+        "worst_max_abs": {
+          "name": "embd",
+          "layer": null,
+          "step": 0,
+          "relative_l2": 0.0,
+          "max_abs": 0.0,
+          "scaled_max_abs": 0.0,
+          "exact": true,
+          "passed": true
+        },
+        "case": "default-math-f32",
+        "kv": "f32",
+        "sliding_window": 1024,
+        "seconds": 62.538780914619565,
+        "failures": []
+      },
+      {
+        "passed": true,
+        "checked": 2925,
+        "first_step": 0,
+        "tokens": {
+          "prompt_ids": [
+            124108,
+            1010,
+            1032,
+            35858,
+            1009,
+            1240,
+            1159,
+            1153,
+            1130,
+            1032,
+            1,
+            1032,
+            3
+          ],
+          "generated_ids": [
+            1010,
+            1032
+          ]
+        },
+        "limits": {
+          "relative_l2": 0.01,
+          "scaled_max_abs": 0.01
+        },
+        "worst_relative_l2": {
+          "name": "embd",
+          "layer": null,
+          "step": 0,
+          "relative_l2": 0.0,
+          "max_abs": 0.0,
+          "scaled_max_abs": 0.0,
+          "exact": true,
+          "passed": true
+        },
+        "worst_max_abs": {
+          "name": "embd",
+          "layer": null,
+          "step": 0,
+          "relative_l2": 0.0,
+          "max_abs": 0.0,
+          "scaled_max_abs": 0.0,
+          "exact": true,
+          "passed": true
+        },
+        "case": "default-unicode-f32",
+        "kv": "f32",
+        "sliding_window": 1024,
+        "seconds": 59.36724149249494,
+        "failures": []
+      },
+      {
+        "passed": true,
+        "checked": 2925,
+        "first_step": 0,
+        "tokens": {
+          "prompt_ids": [
+            7493,
+            1395,
+            1032,
+            1050,
+            1043,
+            1050,
+            1063
+          ],
+          "generated_ids": [
+            1032,
+            1052,
+            1046,
+            5675,
+            1395,
+            1032,
+            1050,
+            1120
+          ]
+        },
+        "limits": {
+          "relative_l2": 0.01,
+          "scaled_max_abs": 0.01
+        },
+        "worst_relative_l2": {
+          "name": "embd",
+          "layer": null,
+          "step": 0,
+          "relative_l2": 0.0,
+          "max_abs": 0.0,
+          "scaled_max_abs": 0.0,
+          "exact": true,
+          "passed": true
+        },
+        "worst_max_abs": {
+          "name": "embd",
+          "layer": null,
+          "step": 0,
+          "relative_l2": 0.0,
+          "max_abs": 0.0,
+          "scaled_max_abs": 0.0,
+          "exact": true,
+          "passed": true
+        },
+        "case": "default-math-f16",
+        "kv": "f16",
+        "sliding_window": 1024,
+        "seconds": 60.23704165406525,
+        "failures": []
+      },
+      {
+        "passed": true,
+        "checked": 1755,
+        "first_step": 0,
+        "tokens": {
+          "prompt_ids": [
+            22177
+          ],
+          "generated_ids": [
+            1897,
+            1429,
+            22177,
+            1897,
+            1429,
+            22177,
+            1897,
+            1429
+          ]
+        },
+        "limits": {
+          "relative_l2": 0.01,
+          "scaled_max_abs": 0.01
+        },
+        "worst_relative_l2": {
+          "name": "embd",
+          "layer": null,
+          "step": 0,
+          "relative_l2": 0.0,
+          "max_abs": 0.0,
+          "scaled_max_abs": 0.0,
+          "exact": true,
+          "passed": true
+        },
+        "worst_max_abs": {
+          "name": "embd",
+          "layer": null,
+          "step": 0,
+          "relative_l2": 0.0,
+          "max_abs": 0.0,
+          "scaled_max_abs": 0.0,
+          "exact": true,
+          "passed": true
+        },
+        "case": "default-window2-f32",
+        "kv": "f32",
+        "sliding_window": 2,
+        "seconds": 38.52559242211282,
+        "failures": []
+      },
+      {
+        "passed": true,
+        "checked": 1755,
+        "first_step": 0,
+        "tokens": {
+          "prompt_ids": [
+            22177
+          ],
+          "generated_ids": [
+            1897,
+            1429,
+            22177,
+            1897,
+            1429,
+            22177,
+            1897,
+            1429
+          ]
+        },
+        "limits": {
+          "relative_l2": 0.01,
+          "scaled_max_abs": 0.01
+        },
+        "worst_relative_l2": {
+          "name": "embd",
+          "layer": null,
+          "step": 0,
+          "relative_l2": 0.0,
+          "max_abs": 0.0,
+          "scaled_max_abs": 0.0,
+          "exact": true,
+          "passed": true
+        },
+        "worst_max_abs": {
+          "name": "embd",
+          "layer": null,
+          "step": 0,
+          "relative_l2": 0.0,
+          "max_abs": 0.0,
+          "scaled_max_abs": 0.0,
+          "exact": true,
+          "passed": true
+        },
+        "case": "default-window2-f16",
+        "kv": "f16",
+        "sliding_window": 2,
+        "seconds": 42.83807399496436,
+        "failures": []
+      }
+    ]
+  },
+  "execution_probe": {
+    "tracing_and_scalar_env": "unset",
+    "warmup_excluded": true,
+    "forced_compute": "Vulkan",
+    "no_cpu_fallback": true,
+    "static_weight_uploads_once_per_session": true,
+    "cpu_isolation_asserted": true,
+    "cases": [
+      {
+        "kv": "f32",
+        "evaluated_positions": 9,
+        "generated_ids": [
+          1897,
+          1429,
+          22177,
+          5325,
+          1897,
+          1429,
+          22177,
+          5325
+        ],
+        "max_relative_l2": 0.0,
+        "max_scaled_max_abs": 0.0,
+        "observed_bit_mismatches": 0,
+        "initialization": {
+          "submissions": 1,
+          "static_uploads": 362,
+          "static_upload_bytes": 2996551680,
+          "host_write_bytes": 0,
+          "host_read_bytes": 0,
+          "transfer_submissions": 1,
+          "live_allocation_bytes": 3016838736,
+          "peak_allocation_bytes": 3016838736
+        },
+        "inference": {
+          "submissions": 486,
+          "static_uploads": 0,
+          "static_upload_bytes": 0,
+          "host_write_bytes": 110592,
+          "host_read_bytes": 4718592,
+          "transfer_submissions": 36,
+          "live_allocation_bytes": 3016838736,
+          "peak_allocation_bytes": 3016838736
+        },
+        "gpu_evaluation_seconds": 26.920754053,
+        "cpu_evaluation_seconds": 7.685787021,
+        "cpu_submissions": 0
+      },
+      {
+        "kv": "f16",
+        "evaluated_positions": 9,
+        "generated_ids": [
+          1897,
+          1429,
+          22177,
+          5325,
+          1897,
+          1429,
+          22177,
+          5325
+        ],
+        "max_relative_l2": 0.0,
+        "max_scaled_max_abs": 0.0,
+        "observed_bit_mismatches": 0,
+        "initialization": {
+          "submissions": 1,
+          "static_uploads": 362,
+          "static_upload_bytes": 2996551680,
+          "host_write_bytes": 0,
+          "host_read_bytes": 0,
+          "transfer_submissions": 1,
+          "live_allocation_bytes": 3016838736,
+          "peak_allocation_bytes": 3016838736
+        },
+        "inference": {
+          "submissions": 486,
+          "static_uploads": 0,
+          "static_upload_bytes": 0,
+          "host_write_bytes": 110592,
+          "host_read_bytes": 4718592,
+          "transfer_submissions": 36,
+          "live_allocation_bytes": 3016838736,
+          "peak_allocation_bytes": 3016838736
+        },
+        "gpu_evaluation_seconds": 26.672785921,
+        "cpu_evaluation_seconds": 7.532212464,
+        "cpu_submissions": 0
+      }
+    ]
+  },
+  "integration_test": {
+    "name": "dory_q5_vulkan_executes_and_matches_cpu",
+    "passed": true,
+    "scope": [
+      "F32/F16 KV",
+      "three single-token forwards",
+      "three-token prefill",
+      "reset",
+      "invalid token rejection",
+      "actual GPU submissions"
+    ]
+  },
+  "final_commands": [
+    {
+      "case": "final-build",
+      "command": [
+        "target/rust/bin/cargo",
+        "--config",
+        "target/offline-cargo.toml",
+        "test",
+        "--offline",
+        "--locked",
+        "--profile",
+        "release-fast",
+        "--features",
+        "vulkan,parity-trace",
+        "--test",
+        "dory_q5_k_m",
+        "--no-run"
+      ],
+      "exit_code": 0,
+      "seconds": 112.92369118519127
+    },
+    {
+      "case": "probe-build",
+      "command": [
+        "target/rust/bin/rustc",
+        "--edition=2021",
+        "-C",
+        "opt-level=3",
+        "-L",
+        "dependency=target/release-fast/deps",
+        "--extern",
+        "rust_model_inference=target/release-fast/deps/librust_model_inference-681f5d64ed049e18.rlib",
+        "tools/oracle/dory/gpu_probe.rs",
+        "-o",
+        "/workspace/rmi-dory-7ad180bc/target/dory-gpu-resident/probe-final"
+      ],
+      "exit_code": 0,
+      "seconds": 4.725695675238967
+    },
+    {
+      "case": "integration",
+      "command": [
+        "target/release-fast/deps/dory_q5_k_m-7b5700b3bceec5ba",
+        "dory_q5_vulkan_executes_and_matches_cpu",
+        "--ignored",
+        "--exact",
+        "--nocapture"
+      ],
+      "exit_code": 0,
+      "seconds": 54.723073057830334
+    },
+    {
+      "case": "probe",
+      "command": [
+        "/workspace/rmi-dory-7ad180bc/target/dory-gpu-resident/probe-final",
+        "models/model-upload.gguf"
+      ],
+      "exit_code": 0,
+      "seconds": 71.77538407966495
+    },
+    {
+      "case": "cli-vulkan-f32",
+      "command": [
+        "target/release-fast/rust-model-inference",
+        "--model",
+        "models/model-upload.gguf",
+        "--prompt",
+        "Hello",
+        "--max-tokens",
+        "8",
+        "--temperature",
+        "0",
+        "--repetition-penalty",
+        "1.0",
+        "--threads",
+        "4",
+        "--max-context",
+        "64",
+        "--compute",
+        "vulkan",
+        "--kv-cache",
+        "f32"
+      ],
+      "exit_code": 0,
+      "seconds": 24.841725843027234
+    },
+    {
+      "case": "cli-auto-f16",
+      "command": [
+        "target/release-fast/rust-model-inference",
+        "--model",
+        "models/model-upload.gguf",
+        "--prompt",
+        "Hello",
+        "--max-tokens",
+        "8",
+        "--temperature",
+        "0",
+        "--repetition-penalty",
+        "1.0",
+        "--threads",
+        "4",
+        "--max-context",
+        "64",
+        "--gpu",
+        "--kv-cache",
+        "f16"
+      ],
+      "exit_code": 0,
+      "seconds": 25.536758145317435
+    },
+    {
+      "case": "cli-cpu-f32",
+      "command": [
+        "target/release-fast/rust-model-inference",
+        "--model",
+        "models/model-upload.gguf",
+        "--prompt",
+        "Hello",
+        "--max-tokens",
+        "8",
+        "--temperature",
+        "0",
+        "--repetition-penalty",
+        "1.0",
+        "--threads",
+        "4",
+        "--max-context",
+        "64",
+        "--compute",
+        "cpu",
+        "--kv-cache",
+        "f32"
+      ],
+      "exit_code": 0,
+      "seconds": 30.68092187307775
+    }
+  ],
+  "checks": {
+    "local_dory_unit_tests": "5 passed",
+    "local_compute_policy_tests": "5 passed",
+    "trace_checker_tests": "4 passed",
+    "cargo_fmt": "passed",
+    "cargo_check_vulkan_parity_tests": "passed",
+    "cargo_check_without_default_features": "passed",
+    "shader_check": "Full script passed on Linux using CI glslang 15.1.0 and SPIRV Tools 2025.1; both new SPIR-V binaries also byte-identical under local glslang 16.6.0"
+  },
+  "source_sha256": {
+    "src/vulkan.rs": "8e6e626ce558cf87d08e3101ebb07cad59053563381b9ab6d1c9a156cf7c590b",
+    "src/vulkan/dory.rs": "60e5ec9c5bec32390b560471c350ce0e9c0732336854c7d8b91a0e09a0823d79",
+    "src/vulkan/ops.rs": "e69fb4c1bfd629eabb1f013072a64d0d1a2043701691dd73f0dc83ff3b37acff",
+    "src/models/dory/forward.rs": "788b57359517763e7c5f38512ee338c3e6d8a01a855cebc5c609a579bdb62c96",
+    "src/models/dory/mod.rs": "4a2c80efaf393a153a7ff0079d93d228ad9245caf17781c617e478ce89a9181e",
+    "src/compute/mod.rs": "79689346f0c5da6b788b243c997e891c2b8c45c4ca1e83f0f2cd0c37f5c9288e",
+    "tests/dory_q5_k_m.rs": "76ee4d581083eff2728c7f953e437a36c6743baf4eff8d2b9d1c42548abc3b61",
+    "shaders/bin/dory.spv": "ca5327fadb06198f5fae6a018e0cd29ab912a91cee54bcaa154434f0670b01b4",
+    "shaders/bin/dory_matmul.spv": "689fa0bcfbfd6e058ebda572957df68763bdd1e5c2eb4e06ca0df4272deb7b9f",
+    "shaders/glsl/dory.comp": "4100f15a8b9b28a79c34a4829c817be99a704569e9a604b36c62f03ae1f2c3a5",
+    "shaders/glsl/dory_matmul.comp": "0b8bab16fb4c376c0981daf9255edebb991add7892e47f742330bceadd005971",
+    "shaders/glsl/exp_f64.glsl": "79989baed57a474088dec49553b9b07bb02cbecb5093dbc9c27e449aa0478d5a",
+    "tools/oracle/dory/gpu_probe.rs": "324a287a9da2313cf39e2d2f0fd3206cac33d6418ca510ee1ea60ca2fd7caa15"
+  },
+  "alignment_source_sha256": {
+    "src/vulkan.rs": "8e6e626ce558cf87d08e3101ebb07cad59053563381b9ab6d1c9a156cf7c590b",
+    "src/vulkan/dory.rs": "60e5ec9c5bec32390b560471c350ce0e9c0732336854c7d8b91a0e09a0823d79",
+    "src/vulkan/ops.rs": "b642041e8ac3d30d3fc450d732a2ac5e1b798377e4974e888f34818d0263f568",
+    "src/models/dory/forward.rs": "788b57359517763e7c5f38512ee338c3e6d8a01a855cebc5c609a579bdb62c96",
+    "src/models/dory/mod.rs": "4a2c80efaf393a153a7ff0079d93d228ad9245caf17781c617e478ce89a9181e",
+    "src/compute/mod.rs": "79689346f0c5da6b788b243c997e891c2b8c45c4ca1e83f0f2cd0c37f5c9288e",
+    "tests/dory_q5_k_m.rs": "76ee4d581083eff2728c7f953e437a36c6743baf4eff8d2b9d1c42548abc3b61",
+    "shaders/bin/dory.spv": "ca5327fadb06198f5fae6a018e0cd29ab912a91cee54bcaa154434f0670b01b4",
+    "shaders/bin/dory_matmul.spv": "689fa0bcfbfd6e058ebda572957df68763bdd1e5c2eb4e06ca0df4272deb7b9f",
+    "shaders/glsl/dory.comp": "4100f15a8b9b28a79c34a4829c817be99a704569e9a604b36c62f03ae1f2c3a5",
+    "shaders/glsl/dory_matmul.comp": "0b8bab16fb4c376c0981daf9255edebb991add7892e47f742330bceadd005971",
+    "shaders/glsl/exp_f64.glsl": "79989baed57a474088dec49553b9b07bb02cbecb5093dbc9c27e449aa0478d5a"
+  },
+  "source_boundary": "The only source difference after full graph replay is removal of a duplicate shared dispatch-counter increment in src/vulkan/ops.rs. Dory chunks by layer number; shader bytes and numerical recording are unchanged. Final integration/probe/CLI were rebuilt and run after cleanup.",
+  "performance_scope": "Alternating GPU/CPU nine-position forward probe excludes initialization; shared host, not an isolated benchmark. GPU was slower than CPU in this probe. CLI timing fluctuated; no speedup claim.",
+  "limitations": [
+    "GPU arithmetic qualified only on this AMD RADV device/driver and Q5_K_M artifact",
+    "Full 1024-token SWA eviction and 262144-token context not tested; capacity additionally bounded by storage-buffer range",
+    "F16 KV uses rounded F32 storage and saves no cache memory",
+    "Prefill is sequential; performance not optimized",
+    "Other quantizations, GPU/drivers and last_loop KV unverified; last_loop rejected",
+    "Full repository/shared operator suites not rerun; prior shared convolution/SiLU 1 ULP failure remains unresolved"
+  ],
+  "kernel": "6.8.0-79-generic"
+}

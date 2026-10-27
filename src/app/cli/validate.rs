@@ -4,6 +4,9 @@ use super::options::{
 use super::types::{normalize_tts_language, CliOptions};
 
 pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
+    if options.qwen_image_turbo {
+        return Err("--qwen-image-turbo requires a Qwen-Image-2.1 DiT GGUF".into());
+    }
     if options.timestral_request.is_some() {
         if options.model.as_os_str().is_empty() {
             return Err("--timestral-request requires --model".into());

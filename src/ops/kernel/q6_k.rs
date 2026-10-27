@@ -7,6 +7,7 @@ use super::Kernel;
 #[derive(Debug, Clone, Copy)]
 pub struct Q6_KKernel<'a> {
     pub weight: &'a [u8],
+    scalar_reference: bool,
 }
 
 impl<'a> Q6_KKernel<'a> {
@@ -14,11 +15,18 @@ impl<'a> Q6_KKernel<'a> {
     pub const BLOCK_BYTES: usize = 210;
 
     pub fn new(data: &'a [u8], _n_in: usize, _n_out: usize) -> Self {
-        Self { weight: data }
+        Self {
+            weight: data,
+            scalar_reference: false,
+        }
     }
 }
 
 impl<'a> Kernel for Q6_KKernel<'a> {
+    fn use_scalar_reference(&mut self) {
+        self.scalar_reference = true;
+    }
+
     fn weight_bytes(&self) -> Option<&[u8]> {
         Some(self.weight)
     }
@@ -75,10 +83,12 @@ impl<'a> Kernel for Q6_KKernel<'a> {
         let row_bytes = n_in / crate::ops::quant::QK_K * crate::ops::quant::BLOCK_Q6K_SIZE;
         for out_idx in start..end {
             let offset = out_idx * row_bytes;
-            output[out_idx] = crate::ops::quant::vec_dot_q6k_q8k(
-                &self.weight[offset..offset + row_bytes],
-                input_q8_k,
-            );
+            let dot = if self.scalar_reference {
+                crate::ops::quant::vec_dot_q6k_q8k_scalar
+            } else {
+                crate::ops::quant::vec_dot_q6k_q8k
+            };
+            output[out_idx] = dot(&self.weight[offset..offset + row_bytes], input_q8_k);
         }
     }
 

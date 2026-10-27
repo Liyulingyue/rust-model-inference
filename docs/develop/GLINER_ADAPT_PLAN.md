@@ -164,7 +164,7 @@ GeLU GLU + RoPE，两者只共享 RoPE。`src/ops/norm.rs` 的 `rms_norm` 和
 **ByteLevel BPE 是一等实现**，不是薄封装。`src/core/tokenizer/` 里现有的三套
 （`SPMTokenizer` linked-list trie、`UgmTokenizer` `NaiveTrie`）都是 SentencePiece /
 Unigram，没有 ByteLevel 的 byte→unicode 映射与 GPT-2 预分词。对齐 `tokenizers`
-需要四处规则，详见 `docs/GLINER_FAMILY.md`。
+需要四处规则，详见 `develop/GLINER_FAMILY.md`。
 
 **已知限制**：`nfc()` 目前是恒等实现（std 没有 Unicode 归一化）。12 个 fixture case
 都不含 combining mark，所以尚未暴露。`is_nfc_safe()` 提供前置检测，PR 里已写明。
@@ -642,7 +642,7 @@ structures/records（`[C]`）；外加 abstention（`null_projection`）与 coun
 | ✅ C | `gliner2-base-v1` + multi-v1 | span pre-2.5 | 中 | **高** | ✅ `9f71c78` / `8215fd8` |
 | D | boundary 家族另三个变体（multi-v1 / multi-Decide / small-v1） | boundary | 小（尺寸表） | 中 | ✅ `b6bba85` |
 | E | 三个 guardrail（Guardrails-PII / privacy-filter / gliguard） | span pre-2.5 | **≈0**（tokenizer 声明风格） | 中 | ✅ `499e7ec` |
-| F | 架构融合评估（11 个变体实现后） | 全部 | 文档 | — | ✅ `ca40928` → `docs/GLINER_FAMILY.md` |
+| F | 架构融合评估（11 个变体实现后） | 全部 | 文档 | — | ✅ `ca40928` → `develop/GLINER_FAMILY.md` |
 | G | `GLiNER2.5-Decide-1B`（Ettin + ByteLevel BPE） | span 1B | 大（~2000 行） | 中 | ✅ `ac27379` / `4e58bfd` |
 
 每条开工前必须先 `modelscope download --model <repo> config.json tokenizer_config.json`（按 model-download skill），读 config 填本文件对应 TODO 的"flag 决策 / 路由 / 架构位置"三栏，再写代码。**不再做"看着像就动手"的盲改**。

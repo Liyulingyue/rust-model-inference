@@ -145,6 +145,8 @@ pub struct CliOptions {
     pub qwen_latent_width: Option<usize>,
     pub qwen_latent_height: Option<usize>,
     pub qwen_timestep: Option<f32>,
+    /// Select the checkpoint's fixed eight-step schedule; GGUF has no variant tag.
+    pub qwen_image_turbo: bool,
     /// Cross-encoder rerank: rank a query against a list of documents.
     /// Backend chosen by the loaded GGUF's architecture
     /// (`jina-bert-v2` + `cls.weight`/`cls.bias` → bert_family forward,

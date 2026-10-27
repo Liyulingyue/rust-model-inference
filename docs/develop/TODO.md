@@ -358,6 +358,10 @@ LFM2 / LFM2.5 / Spark / Nemotron-H / Hunyuan / LFM2-MoE），每个 scorer 实�
 - [x] **`qwen35moe` 的 Vulkan MoE recorder** — 已实现 Q8_0/F32 专家寻址、GPU 路由、
       shared expert 与批量 prefill/decode。Sage-A1.5 的硬件数值验收和其他格式边界见
       [验证记录](../../tools/oracle/sage_a15/README.md)。其他 `qwen35moe` 模型仍需各自验收。
+- [ ] **`qwen35moe` 的 Vulkan 整模数值验收未完成** — 共享路径已接入 GPU expert 投影与
+      host 路由/归约。Holo4 在 M3 Max / RADV NAVI31 的 MoE 分层和 batch/reset 检查通过，
+      整模 logits 的 0.02 CPU/GPU 门槛仍失败；此 MiniCPM 权重尚未验证 GPU。
+      见 [Holo4 验证](../../tools/oracle/holo4/README.md)。
 
 ## 入口面覆盖（2026-10-19 审计）
 
@@ -2862,3 +2866,228 @@ Qwen3-0.6B-BF16 看起来是最干净的受害者（197 个纯 BF16 二维权重
 Z-Image 代码零改动且 3/3 逐位复现基线 md5，含 110 个 F32 二维权重的
 occamy-1.0 在 `--temp 0` 下 GPU 与 CPU 逐位一致。尚未实测的是少数多模态
 projector（ZDTaichu5 mmproj、LongCat）与几个 MoE gate。
+
+### TODO-044: Mage-Flow 的 GPU 路径 run-to-run 不确定，投影的 dispatch 结果偶发不完整
+
+排查 BF16/F32 Prepared 新路径（TODO-043）时顺带发现的独立问题，2026-10-23。
+
+**现象**：同一二进制、同一 seed、同一 prompt，Mage-Flow 在 GPU 上连续跑的结果互相
+不同：512×512 对 CPU 参考的 PSNR 在 13.3 / 16.1 / 18.6 / 29.5 dB 之间跳，最差的
+一次只剩 11 种颜色；256×256 连续六次跑出六个不同的文件。CPU 侧完全可复现（两次
+CPU 跑 md5 相同）。
+
+**定位工具**：`RMI_GPU_CPU_CHECK=1` 让每个 GPU 投影与 CPU 内核对拍（同一个权重、
+同一份输入）。两种求和顺序不同，正常投影的相对差在 1e-6 附近；设备交回 arena
+的旧内容时是 1.0；dispatch 只跑了一部分时落在两者之间。
+
+**故障模式**：某个投影的 GPU 结果与 CPU 参照毫无关系（相对差 1.0，输出全零或
+一半是零），**而在同一个 runtime 上立刻重算一次就对了**。这排除了权重、输入与
+kernel 逻辑：三方仲裁（GPU / CPU NEON / f64 参照）显示三者都准，真实 BF16 权重
+下 GPU 的相对误差 3.9e-7、CPU 的 1.2e-7。异常与形状无关，出现在 text 流
+（rows=20）上，因为它的 dispatch 最短、最快完成。
+
+**已排除**：kernel 逻辑（f64 参照下精确）；单算子非确定（真实权重 400 轮逐位
+相同）；形状交替与多形状交错（144 个真实形状 × 4 轮逐位相同）；命令提交顺序
+（`TokenCommands` 持 `context.mutex`，`submit_commands` 真的 `wait_for_fences`）；
+CPU 并发（`--threads 1` 同样复现）；host 写可见性（屏障、`flush_mapped_memory_ranges`、
+`vkInvalidateMappedMemoryRanges`、把 host 写提前到录制之前，四种手段都试过）；
+pipeline JIT（共享 pipeline 后仍然复现）。
+
+**已实施的修复**（把异常率从 18/2700 降到 1~2/2700）：
+
+- **投影复用**（`src/models/diffusion/mage_flow/dit.rs`）：Denoiser 之前每个
+  linear 都新建 `Linear`，于是每个投影都新建一次 runtime、一次 arena、一整套
+  operator pipeline。现在投影建一次就复用。
+- **operator pipeline 按设备共享**（`src/vulkan.rs`）：每个 arena 各编译一遍
+  全部 shader，denoiser 每步要付一百多次编译的代价。
+- **host 写提前到录制之前**（`src/vulkan/ops.rs`）：`begin_commands` 里的
+  HOST→COMPUTE 屏障本该给 host 写排序，但权重上传与激活拷贝都落在它之后。
+- **`flush_mapped` / `invalidate_mapped`**（`src/vulkan.rs`）：映射内存的写与读
+  各自显式刷新/失效，不再只依赖 coherent 语义。
+
+### 第二轮排查（2026-10-26）
+
+**校验层**：机器上有 Khronos 校验层
+（`/usr/share/vulkan/explicit_layer.d/VkLayer_khronos_validation.json`）。在
+`src/vulkan.rs` 里加了 `RMI_VULKAN_VALIDATION=1`（启用层 + `VK_EXT_debug_utils`
+messenger + `VK_EXT_validation_features` 打开同步校验）后：
+
+- 校验层能加载、能报消息（证明 messenger 与特性都生效）；
+- 我们的 Vulkan 用法**没有报任何违规**；
+- 但层开启后 NVIDIA 驱动在 `vkCreateComputePipelines` 里崩了：SIGTRAP 落在
+  `libnvidia-gpucomp.so` 的着色器编译器里（GPU-AV 关掉也一样崩）。这是驱动侧的
+  编译器缺陷，不是我们的用法问题，所以这条路查不下去。
+
+**窄投影探针的假阳性**：`bf16_prepared_activation_round_is_visible` 一度报
+4000 轮里失败 16 次。查下来是**探针自己的归一化 bug**——它用第 0 轮的量级当分母，
+而输入每轮都在变大（`base + round * step`），于是健康的 1e-6 被放大成 1e-2。
+改成每轮按当轮量级归一、并用精确参考代替外推参考后，**4000 轮 0 失败**
+（rows=20 与 rows=256 各测）。结论：单投影的窄路径其实是健康的，之前那批
+"失败" 全是探针假阳性。
+
+**真正的漏网之鱼**：分歧不在 DiT，也不在单个投影，而在**VAE 解码器**。
+逐阶段校验和（`RMI_MAGE_VAE_CHECKSUM=1`）显示 DiT 的投影与注意力逐位相同，
+第一个分歧出现在 `pipeline.dec_net.res_blocks.*.mlp.0` 与
+`pipeline.y_embedder_x`——这些是 **VAE 里没走校验的算子**（VAE 的 `linear` 用的是
+`forward` 而不是 `forward_verified`，VAE 的卷积完全没有校验）。
+
+**损坏形态**（`RMI_GPU_VERIFY_TRACE=1` 打出的形态表）：
+
+| 形状 | 不同的元素 | 受影响的行 | 最差行的错列数 |
+|---|---|---|---|
+| rows=6, n_out=3072 | 18432/18432 (100%) | 6/6 | 3072 |
+| rows=256, n_out=8192 | 1866527/2097152 (89%) | 256/256 | 7478/8192 |
+| rows=65536, n_out=32 | 1635183/2097152 (78%) | 65536/65536 | 32/32 |
+
+即：损坏是**整片**的（一个 dispatch 的结果整体不对），不是零星几个元素。
+
+**已实施的修复**（把 16 次相同结果从 3/10 提到 19/20、14/14、10/10）：
+
+- **VAE 的 `linear` 改走 `forward_verified`**（`src/models/diffusion/mage_flow/vae.rs`）。
+- **卷积也做校验**（`src/models/diffusion/dreamx/kernels.rs`）：新增
+  `conv3d_matches_cpu`，抽样 512 个输出元素与 CPU 卷积对拍；不对就重跑
+  （`GPU_RETRY_LIMIT = 3` 次），仍旧不对就整块交给 CPU 卷积。同时把 CPU 卷积
+  主体抽成 `conv3d_cpu` 供两条路径共用。
+- **注意力校验加密**：每个 token 的每个 head 查 8 个元素（原来只查 1 个），
+  设备只坏掉 head 的一部分时原来会漏。
+- **投影校验加密**：每行查 32 个散布列 + 16 个连续列（原来 8 + 0），
+  连续块用来抓"一整段连续列错"而散布列用来抓零星错列。
+- **两级门禁保持不变**：默认 `--gpu` 仍然拒绝，`RMI_GPU_UNSAFE=1` 放行。
+
+**第三轮：抽样密度才是关键**。上面两轮修复把相同结果从 3/10 提到 19/20、24/30，
+剩下的漏网之鱼用逐阶段校验和定位到 `pipeline.dec_net.cond_embed`
+（rows=256, n_in=384, n_out=8192）——一个**投影**，而且差异极小
+（和的相对差 4.4e-5，平方和的相对差 4.1e-5）。反推出大约**几百个元素**散落在
+两百万个元素里，不是整片损坏。
+
+抽样抓不住这种损坏：
+
+- 投影检查每行只看 48 列（32 个散布列 + 16 个连续列）。两百万个元素里散落几百个
+  错值，每行命中的概率只有 0.6%，256 行合起来也只有 37% 能抓到。
+- 卷积检查抽 4096 个元素。98304 个元素里一个 64 元素的 tile 只有 33% 被命中，
+  而乘法步长采样还可能整块整块地跳过。**把卷积抽样从 512 提到 4096 之后，
+  24 次跑出 23 次相同**——卷积这一路的口子就是这样补上的。
+
+修投影的办法是**换一种抽样方式**：除了"每行抽几列"，再加"**挑几行把每一列都
+看一遍**"。散落的错值只要落在这几行里就一定看得见。`GPU_CHECK_ROWS = 4` 时
+每次跑 1 分 10 秒（比加检查之前的 1 分 22 秒还快，因为重试少了），**30 次跑出
+30 次相同**；`GPU_CHECK_ROWS = 16` 时 18/18 相同，但一次要 2 分 20 秒，比纯 CPU
+（2 分 53 秒）快不了多少，不划算，所以取 4。
+
+注意力检查同样加了一段连续维度（`GPU_ATTENTION_CHECK_BLOCK = 16`），抓"一个 head
+里连续几个维度错"的情况。
+
+**校验层那次的结论**：`RMI_VULKAN_VALIDATION=1` 打开校验层后，我们的 Vulkan 用法
+**没有报任何违规**；但层一开，NVIDIA 驱动就在 `vkCreateComputePipelines` 里
+SIGTRAP（落在 `libnvidia-gpucomp.so` 的着色器编译器），关掉 GPU-AV 也一样崩。
+这是驱动侧缺陷，所以"用校验层定位到具体违规"这条路走不通。
+
+**co-tenant 不是原因**：机器上的另一个租户后来退出了（`nvidia-smi` 显示 0% 利用率、
+只有 Xorg），损坏照样出现，而且频率没有下降。
+
+**第四轮：抽样的形状比密度更要紧**。把投影检查改成"按输出铺开"之后，正确率反而
+掉到 22/24——因为采样被组织成了 1024 个**宽 64 列**的块，块空间只被覆盖了 8.3%。
+改成**宽 8 列**的块之后，同样 65536 个样本能覆盖 67% 的块空间，正确率回到
+**24/24、24/24（两批共 48/48）**。教训：抽样的**密度**一样时，**样本怎么组织**
+决定了能覆盖多大的空间。
+
+顺便量到了两个数（`RMI_GPU_VERIFY_TRACE=1` 会在跑完后打印）：
+
+- 健康投影与 CPU 内核的最大相对差：**5.6e-6**；
+- 损坏的投影与 CPU 内核的相对差：**7.8e-2**。
+
+也就是说检查的阈值（1e-4）夹在中间很宽裕，**漏网跟阈值无关，是抽样没盖到**。
+另外用这些数字可以把"损坏"和"求和顺序不同"分开：两者差三个数量级。
+
+**检查本身也要并行**。检查原来是一个线程里的循环，一次跑要 2 分 38 秒（比纯 CPU
+的 2 分 53 秒快不了多少）。把检查改成用 `ComputePool` 分给 16 个线程以后，
+一次 1 分 36 秒。**卷积**的检查同理（`GPU_CONV_CHECK_SAMPLES = 65536`，
+同样铺开采样）。
+
+**六个变体在 GPU 上的实测**（256×256，各自的真实步数/CFG）：
+
+| 变体 | 配置 | 结果 |
+|---|---|---|
+| base | 2 步 CFG 5 | **72/72 逐位相同**（三批 24/24 + 24/24） |
+| flow | 8 步 CFG 5 | 3/3 逐位相同；与 CPU 参考的 **PSNR 81.24 dB** |
+| turbo | 4 步 CFG 1 | 3/3 逐位相同 |
+| edit | 4 步 CFG 1 + 参考图 | 3/3 逐位相同 |
+| edit-turbo | 4 步 CFG 1 + 参考图 | 3/3 逐位相同 |
+| edit-base | 8 步 CFG 5 + 参考图 | **未测**（CPU 上就要 11 分 40 秒，测的时候机器被别人占满） |
+
+健康样本与 CPU 参考的 PSNR 是 **80 dB 上下**，损坏样本是 26~36 dB，所以 flow 的
+81.24 dB 说明 GPU 结果的内容也是对的，不只是"自己跟自己一样"。
+
+单次 1 分 36 秒（CPU 路径 2 分 53 秒）。CPU 路径的输出没有变（md5 与基线一致）。
+门禁文案仍然写着 "not reproducible"，因为这不是数学保证，只是"这段时间内没再
+看到不一样的"。
+
+#### 第二次排查（2026-10-24）：投影偶发出错已经能复现
+
+这一轮把故障缩小到一个具体形状，并拿到了一个能稳定复现的用例。
+
+**可复现用例**：`src/ops/kernel/vulkan.rs` 里的
+`bf16_prepared_narrow_projection_survives_many_rounds`，用真实的
+`transformer_blocks.8.attn.to_k.weight`（n_in=3072、n_out=3072、rows=20）反复调用，
+每次与 CPU 内核比对。`PROBE_ROUNDS=4000` 时失败率约 1/667，与真实流程里
+2749 次调用出现 1 次严重错误同量级。**这是之前所有探针都复现不出来的原因：
+400 轮根本命中不了 1/667 的事件。**
+
+**失败形态**：
+
+- 每次失败，20 行全部有误差，但「整行全零」的行是随机子集，且偏向行号大的一侧；
+- 错值既不等于「只用输入前一半 k 的结果」，也不等于「只用后一半 k 的结果」
+  （匹配数为 0），所以不是输入的某一段坏掉；
+- 第一次算出的元素总是对的，说明 dispatch 本身跑起来了。
+
+**GPU 路径本身是确定的**：同一进程里连续四次 256×256 完整流程，第三与第四次
+逐位相同，对 CPU 参考的 PSNR 达到 80.13 dB（差异只来自 GPU 与 CPU 的求和
+顺序不同）。另外两次分别是 26.51 dB 与 36.05 dB，正好对应投影出错的那一档。
+所以状态是「好窗口」与「坏窗口」：好窗口里 GPU 与 CPU 逐位一致，坏窗口里某一个
+投影出错，之后整条采样链被污染。
+
+**这一轮排除的**：
+
+- **系统内存压力**：另一租户从 74 GB 降到 36 GB、系统可用内存从 42 GB 升到
+  79 GB 时，坏窗口依然出现；
+- **GPU 竞争强度**：平均利用率 84% 的窗口里 4000 轮零失败，而利用率更低的
+  窗口反而失败 6 到 8 次，两者无对应关系；
+- **主机写的可见性**：`begin_commands` 里的 HOST→COMPUTE 屏障本来就盖住了权重
+  上传（上传发生在屏障之前），另外还加了 `flush_mapped_memory_ranges` 与
+  `invalidate_mapped_memory_ranges`，三重保护下仍然出错；
+- **kernel 逻辑与投影复用**：f64 参照下 GPU 精确，复用投影把真实流程的异常率从
+  18/2700 降到 1/2749。
+
+**这一轮的处置**：GPU 路径改成两级。
+
+- 默认仍然拒绝 `--gpu`，错误消息直接说明原因与开关名；
+- `RMI_GPU_UNSAFE=1` 放行 GPU，速度约为 CPU 的两倍（256×256 约 1.5 分钟对 2 分
+  53 秒），代价是结果不保证可复现；
+- 采样器每步检查 latent 是否还可用（非有限或整体塌成零就拒绝），被拒绝时
+  自动用 CPU 重采样（`ComputePool::disable_gpu_matmul_for_scope`），因此最严重的
+  坏窗口会变成「慢但正确」而不是一张平涂图。CPU 路径逐位不变。
+
+**下一步**：
+
+- 用 `examples/mage_conditioning_probe.rs` 可以把两半分开验：Qwen3-VL 的 prefill
+  与 DiT 的一步各自连跑三次都逐位相同，所以问题不在条件编码，也不在单步；
+- 复现依赖「窗口」，因此要在无邻居的机器上连续跑 `PROBE_ROUNDS=4000` 若干轮，
+  抓住一个坏窗口再抓现场；一旦能在受控环境里复现，就可以在 `float_matmul_tiled`
+  里加一个校验和来定位是哪些 workgroup 没写；
+- `RMI_GPU_CPU_CHECK=1` 现在会打印每个投影与 CPU 的相对差（健康值在 1e-6 附近），
+  两次运行对比即可找到第一个出错的投影。
+
+**下一步**：
+
+- 这台机器是共享的：另一租户的进程占 74 GB 统一内存、GPU 利用率 93%、
+  系统内存可用仅 42 GB。**先在没有邻居的时段复测**，再判断剩下的是驱动问题
+  还是代码问题。
+- 若要继续查，需要一个能在真实流程里稳定复现的用例：探针（144 形状 × 4 轮）
+  始终不复现，只有完整的 Mage-Flow 流程会。下一步应把「文本编码器的 GPU
+  prefill 之后」这一段纳入复现范围——这是真实流程与探针之间最后没被覆盖的差异。
+- `src/models/diffusion/dreamx/kernels.rs` 里的 `RMI_GPU_CPU_CHECK=1` 就是为
+  继续查这件事留的开关。
+
+**顺带**：`float_matmul_tiled` 的 GPU 求和顺序与 CPU 的 vec4 累加器不同，真实
+权重下差 1e-3，被 8 步扩散放大到约 29.5 dB。f64 仲裁显示 GPU 更接近真值
+（7.79e-5 vs 1.18e-4），所以这不是错误，不要为了「和 CPU 一致」去改 kernel。
