@@ -14,14 +14,38 @@
 use rust_model_inference::GGUFLoader;
 use rust_model_inference::TensorInfo;
 
+/// Load a GGUF named by an environment variable.
+///
+/// The variable is optional: without it the contract test cannot run, and it
+/// says so out loud instead of passing silently. A variable that points at a
+/// missing file is a mistake -- a typo or a stale path -- so it fails loudly
+/// rather than skipping.
+fn loader_from_env(var: &str, label: &str) -> Option<GGUFLoader> {
+    use std::sync::Once;
+    static NOTIFIED: Once = Once::new();
+    let Some(path) = std::env::var_os(var) else {
+        NOTIFIED.call_once(|| {
+            eprintln!(
+                "[contract-test] SKIPPED: {var} is not set, so the {label} contract tests did not run"
+            );
+        });
+        return None;
+    };
+    let path = std::path::PathBuf::from(path);
+    assert!(
+        path.exists(),
+        "{var} points at {} which does not exist",
+        path.display()
+    );
+    Some(GGUFLoader::from_file(path).expect("load GGUF"))
+}
+
 fn text_loader() -> Option<GGUFLoader> {
-    let path = std::env::var_os("RMI_INTERN_DECISION_0_8B_TEXT")?;
-    Some(GGUFLoader::from_file(path).expect("load Intern-Decision text GGUF"))
+    loader_from_env("RMI_INTERN_DECISION_0_8B_TEXT", "Intern-Decision-0.8B")
 }
 
 fn mmproj_loader() -> Option<GGUFLoader> {
-    let path = std::env::var_os("RMI_INTERN_DECISION_0_8B_MMPROJ")?;
-    Some(GGUFLoader::from_file(path).expect("load Intern-Decision mmproj"))
+    loader_from_env("RMI_INTERN_DECISION_0_8B_MMPROJ", "Intern-Decision-0.8B")
 }
 
 fn pick(loader: &GGUFLoader, key: &str) -> usize {
