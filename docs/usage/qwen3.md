@@ -374,7 +374,9 @@ cargo run --release --bin server -- \
 - **DeepStack**：只在**带 DeepStack 平面**的分块里注入（prefill 有、decode 没有）。若 decode 步也注入，arena 里上一分块残留的平面会被加到生成 token 的残差流上，结果与 CPU 不一致。
 - **分块上限**：GPU 路径固定按 64 行分块。arena 按分块行数分配并有一份等大的 staging 缓冲，再叠加已上传的权重；更大的 `--prefill-batch-size` 会让共享显存的设备直接丢设备（device lost）。
 - **只有 qwen3vl / qwen3vlmoe / qwen2vl 放行图像**，其余 arch 仍是"仅文本"。
+- CLI 与 HTTP 都可用：CLI 图像路径走 `run_qwen3_family_multimodal`（直接驱动 session），HTTP 走 `Qwen3TextRuntime::generate`（经过 runtime 包装）。两边的 Vulkan 门禁是**分开**的，改一处不会自动改另一处 —— 服务端另有一道 gate 挡在 runtime 里。
 - 2B 级别模型上 GPU 未必更快（28 层 dispatch 开销摊不开），大模型才划算。
+- 服务端起 Vulkan 后端必须带 `--kv-cache f16`（Qwen3 的 Vulkan 路径只接受 F16 KV）。
 
 ## 10. 相关源码索引
 
