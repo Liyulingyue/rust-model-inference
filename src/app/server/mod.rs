@@ -1,4 +1,5 @@
 pub mod api;
+mod forecast;
 mod rerank;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -67,6 +68,18 @@ enum Backend {
     Clm(ClmBackend),
     Gliner2(Gliner2Backend),
     Gliner2Boundary(Gliner2BoundaryBackend),
+    Timestral(TimestralBackend),
+}
+
+/// Timestral backend: the 209M time-series forecaster in one GGUF, named
+/// by `--model`.
+///
+/// The model borrows the mapped file, and the device arena it keeps is
+/// worth holding on to: rebuilding it per request would re-upload every
+/// weight to the GPU. So the source and the model are both leaked once
+/// and stay resident, the way the rerank and CLM backends do.
+struct TimestralBackend {
+    model: Arc<&'static crate::models::timestral::TimestralModel<'static>>,
 }
 
 /// GLiNER2.5-Decide backend: a DeBERTa-v3 encoder with the classifier head in
@@ -971,6 +984,9 @@ fn build_backend(options: &CliOptions) -> Result<Arc<Backend>, String> {
     // CLM is opted into rather than detected: the encoder is an ordinary
     // Qwen3 GGUF, and it is `--clm-head` saying "score with these heads"
     // that makes it a CLM backend.
+    if is_timestral_gguf(&options.model) {
+        return Ok(Arc::new(Backend::Timestral(build_timestral(options)?)));
+    }
     if options.clm_head.is_some() {
         return Ok(Arc::new(Backend::Clm(build_clm(options)?)));
     }
@@ -1089,6 +1105,55 @@ fn is_audio8_gguf(path: &std::path::Path) -> bool {
         .metadata("general.architecture")
         .and_then(MetaValue::to_string_val)
         .is_some_and(|arch| arch == "audio8_asr_infinite")
+}
+
+/// True when the file holds a Timestral checkpoint.
+fn is_timestral_gguf(path: &std::path::Path) -> bool {
+    use crate::MetaValue;
+    let loader = match crate::GGUFLoader::from_file(path) {
+        Ok(l) => l,
+        Err(_) => return false,
+    };
+    loader
+        .metadata("general.architecture")
+        .and_then(MetaValue::to_string_val)
+        .map(|arch| arch == "timestral")
+        .unwrap_or(false)
+}
+
+/// Build the forecaster and keep it resident.
+///
+/// The model borrows the mapped weights, so the source is leaked to get a
+/// `'static` borrow. The same leak holds the model, which keeps the
+/// device arena alive instead of re-uploading the weights per request.
+fn build_timestral(options: &CliOptions) -> Result<TimestralBackend, String> {
+    use crate::models::timestral::TimestralModel;
+    let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+    let source: &'static Arc<dyn TensorSource> = Box::leak(Box::new(source));
+    let model: TimestralModel<'static> =
+        TimestralModel::from_source_with_compute(source.as_ref(), options.compute_policy())?;
+    // The device path refuses the formats it has no kernel for. A server
+    // that would fail every request is worse than one that refuses to
+    // start, so the check happens here.
+    #[cfg(feature = "vulkan")]
+    if options.compute_policy() == crate::compute::ComputePolicy::Vulkan {
+        let refused: Vec<String> = model
+            .matrix_types()
+            .iter()
+            .filter(|format| !crate::vulkan::timestral::gpu_supports(**format))
+            .map(|format| format!("{format:?}"))
+            .collect();
+        if !refused.is_empty() {
+            return Err(format!(
+                "the Timestral device path has no kernel for {refused:?}; \
+                 use --compute cpu or --compute auto"
+            ));
+        }
+    }
+    let model: &'static TimestralModel<'static> = Box::leak(Box::new(model));
+    Ok(TimestralBackend {
+        model: Arc::new(model),
+    })
 }
 
 fn build_rerank(options: &CliOptions) -> Result<RerankBackend, String> {
@@ -1595,6 +1660,15 @@ pub fn run_server() {
         eprintln!("{error}");
         std::process::exit(2);
     });
+    // The forecaster's CPU projections run on the rayon global pool, so
+    // the requested thread count has to reach it.
+    let available = std::thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(1);
+    crate::app::cli::init_rayon_global_pool(crate::app::resolve_thread_count(
+        options.threads,
+        available,
+    ));
     let backend = match build_backend(&options) {
         Ok(value) => value,
         Err(error) => {
@@ -1619,6 +1693,7 @@ pub fn run_server() {
         Backend::Clm(_) => "clm",
         Backend::Gliner2(_) => "gliner2",
         Backend::Gliner2Boundary(_) => "gliner2-boundary",
+        Backend::Timestral(_) => "timestral",
     };
     eprintln!(
         "Model '{}' loaded (mode={}, host={}, port={})",
@@ -1666,6 +1741,7 @@ pub fn run_server() {
         // `schema` field, which reads as a malformed request rather than as
         // "this server does not do that".
         Backend::Gliner2Boundary(_) => router.route("/v1/jev/boundary", post(api::jev_boundary)),
+        Backend::Timestral(_) => router.route("/v1/forecast", post(forecast::forecast)),
     };
     if options.compute_policy() == crate::compute::ComputePolicy::Vulkan {
         router = router.layer(axum::middleware::from_fn(

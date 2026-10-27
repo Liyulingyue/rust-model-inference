@@ -29,6 +29,7 @@ shader_names=(
     softmax
     attention_values
     attention_values_f32
+    timestral
     qwen35_dense_prepare
     qwen35_attention
     qwen35_recurrent_conv
@@ -42,6 +43,7 @@ shader_names=(
     f16_matmul_tiled
     attention_scores_tiled
     float_matmul_tiled
+    float_matmul_small
     attention_online
     attention_online_wide
     conv3d_tiled
