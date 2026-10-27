@@ -14,6 +14,8 @@
 
 pub(crate) mod dense;
 #[cfg(feature = "vulkan")]
+pub(crate) mod dory;
+#[cfg(feature = "vulkan")]
 pub(crate) mod matmul_q4k;
 #[cfg(feature = "vulkan")]
 pub(crate) mod ops;
@@ -153,6 +155,7 @@ pub struct VulkanContext {
     idle_waits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     device_name: String,
     shader_float16: bool,
+    shader_float64: bool,
     /// Device reports `VK_KHR_shader_integer_dot_product`, so the packed 4x int8
     /// matmul variant can use `dotPacked4x8EXT` instead of four scalar multiplies.
     integer_dot_product: bool,
@@ -297,6 +300,7 @@ struct DeviceCandidate {
     portability_subset: bool,
     integer_dot_product: bool,
     shader_float16: bool,
+    shader_float64: bool,
 }
 
 #[cfg(feature = "vulkan")]
@@ -407,6 +411,7 @@ impl VulkanContext {
                             idle_waits: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                             device_name: candidate.name,
                             shader_float16: candidate.shader_float16,
+                            shader_float64: candidate.shader_float64,
                             integer_dot_product: candidate.integer_dot_product,
                             limits: candidate.limits,
                             is_software_icd: candidate.device_type == vk::PhysicalDeviceType::CPU,
@@ -1335,6 +1340,8 @@ impl VulkanContext {
                     portability_subset,
                     integer_dot_product,
                     shader_float16,
+                    shader_float64: instance.get_physical_device_features(device).shader_float64
+                        != 0,
                 });
             }
             Ok(candidates)
@@ -1480,7 +1487,10 @@ impl VulkanContext {
             p_queue_priorities: queue_priorities.as_ptr(),
         };
 
-        let features = vk::PhysicalDeviceFeatures::default();
+        let features = vk::PhysicalDeviceFeatures {
+            shader_float64: candidate.shader_float64.into(),
+            ..Default::default()
+        };
         let mut integer_dot = vk::PhysicalDeviceShaderIntegerDotProductFeatures {
             shader_integer_dot_product: candidate.integer_dot_product.into(),
             ..Default::default()
@@ -2130,6 +2140,7 @@ mod tests {
             portability_subset: false,
             integer_dot_product,
             shader_float16: false,
+            shader_float64: false,
         }
     }
 
