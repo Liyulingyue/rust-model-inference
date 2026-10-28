@@ -1401,7 +1401,9 @@ impl VulkanContext {
         // turning on while looking for one.
         let validation_layer = CStr::from_bytes_with_nul(b"VK_LAYER_KHRONOS_validation\0").unwrap();
         let validation_requested = std::env::var_os("RMI_VULKAN_VALIDATION").is_some();
-        let layer_names: Vec<*const i8> = if validation_requested {
+        // `c_char` is `i8` on x86_64 but `u8` on aarch64, so spell it out
+        // instead of hardcoding `i8` or this fails to build on ARM.
+        let layer_names: Vec<*const std::ffi::c_char> = if validation_requested {
             vec![validation_layer.as_ptr()]
         } else {
             Vec::new()
