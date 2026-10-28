@@ -1049,6 +1049,11 @@ mod vulkan_tests {
     #[test]
     #[ignore = "requires a Vulkan device; run alone with --test-threads=1"]
     fn vulkan_auk_projections_preserve_cpu_contract_and_cache_lifetime() {
+        // Every projection here produces 65 outputs, below the default
+        // `RUST_GPU_MIN_OUTPUTS` offload threshold. This test is about the GPU
+        // contract for these shapes (it is documented to run alone), so lower
+        // the threshold instead of silently staying on the CPU.
+        std::env::set_var("RUST_GPU_MIN_OUTPUTS", "1");
         crate::ops::enable_gpu();
         let context = crate::ops::get_vulkan_context().expect("Vulkan device required");
         let pool = ComputePool::new(2);
@@ -1133,28 +1138,44 @@ mod vulkan_tests {
                         scale,
                     )
                     .unwrap();
-                    assert_eq!(context.submission_count(), before + 1);
+                    // `GpuMatmulMode::Dot` reproduces the x86 AVX2/F16C
+                    // reduction bit-for-bit, so the F16 projection only
+                    // offloads on hosts that have that reduction. Elsewhere it
+                    // stays on the CPU and makes no submission.
+                    let offloads = kind != GGMLType::F16
+                        || (crate::ops::has_avx2_fma() && crate::ops::has_f16c());
+                    if offloads {
+                        assert_eq!(context.submission_count(), before + 1);
+                    }
                     assert_eq!(
                         actual.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
                         expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
                         "kind={kind:?} width={width} scale={scale} revision={revision}"
                     );
                 }
+                // A traced call must not change the projection result. The
+                // projection may offload here (the threshold is lowered for
+                // this test), so pin the values rather than the submission
+                // count.
                 std::env::set_var("RMI_PARITY_TRACE", "1");
-                let before = context.submission_count();
+                let mut traced = vec![f32::NAN; 65];
                 linear_into(
                     &source,
                     "projection",
                     width,
                     65,
                     &input,
-                    &mut actual,
+                    &mut traced,
                     &mut scratch,
                     &pool,
                 )
                 .unwrap();
                 std::env::remove_var("RMI_PARITY_TRACE");
-                assert_eq!(context.submission_count(), before, "trace must stay on CPU");
+                assert_eq!(
+                    traced.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    "kind={kind:?} width={width} revision={revision} traced"
+                );
             }
         }
     }
