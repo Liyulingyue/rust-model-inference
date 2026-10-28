@@ -1,0 +1,2088 @@
+{
+  "implementation_commit": "ef3e481170ab96a90e92e34acf590e1ff181a1af",
+  "model": {
+    "source": "https://modelscope.cn/models/InternScience/Sage-A1.5-Q8_0-GGUF/files",
+    "origin": "Publisher GGUF; not converted by this project",
+    "language": {
+      "bytes": 37802150112,
+      "sha256": "f7247f6faef3f6c616b953595e1fc7c3fbf257d02d9915af5fdf15e808ea8ee4"
+    },
+    "mmproj": {
+      "bytes": 899282880,
+      "sha256": "51cd4410057e8dc4152ca771a726fbfb34856f047e7049018c757d42ddd481f2"
+    }
+  },
+  "oracle": {
+    "commit": "b96806d96061049a5b574269b049bf6241d63d46",
+    "mode": "same-host scalar CPU, no external BLAS, no weight repacking"
+  },
+  "numerical_contract": {
+    "exact": [
+      "token IDs",
+      "embedding bits",
+      "selected expert IDs and order",
+      "checkpoint coverage and logical shapes"
+    ],
+    "lossy": {
+      "relative_l2_max": 0.01,
+      "cosine_min": 0.99995,
+      "logit_max_abs": 0.5
+    },
+    "note": "Observed zero error is sample evidence, not a generic bitwise GPU arithmetic claim."
+  },
+  "hardware": {
+    "cpu": "AMD EPYC 9334",
+    "gpu": "physical gfx1100 / RADV NAVI31, approximately 48 GiB VRAM",
+    "cpu_quota": "16 cores",
+    "threads": 8,
+    "shared": true
+  },
+  "source_verification": {
+    "implementation_commit": "ef3e481170ab96a90e92e34acf590e1ff181a1af",
+    "verified_files": 604,
+    "manifest_sha256": "f6b34f6aafcf0fd160db3d174e6df75b0516876dcf210a3629b90af6b71f19d9",
+    "matched": true
+  },
+  "amd_default_short_oracle": {
+    "cpu-raw": {
+      "seconds": 2.9057107716798782,
+      "tokens": {
+        "processed": [
+          9419,
+          11,
+          353,
+          1044
+        ],
+        "generated": [
+          11,
+          353,
+          1044,
+          4313
+        ]
+      },
+      "passed": true,
+      "checkpoints": 220,
+      "max_relative_l2": 0,
+      "min_cosine": 1,
+      "max_abs": 0
+    },
+    "cpu-chat": {
+      "seconds": 8.673556108027697,
+      "tokens": {
+        "processed": [
+          248045,
+          846,
+          198,
+          109266,
+          248046,
+          198,
+          248045,
+          74455,
+          198,
+          248068,
+          271,
+          248069,
+          271,
+          109266,
+          6115,
+          98691
+        ],
+        "generated": [
+          109266,
+          6115,
+          98691,
+          101009
+        ]
+      },
+      "passed": true,
+      "checkpoints": 880,
+      "max_relative_l2": 0,
+      "min_cosine": 1,
+      "max_abs": 0
+    },
+    "vulkan-raw": {
+      "seconds": 26.734765408560634,
+      "tokens": {
+        "processed": [
+          9419,
+          11,
+          353,
+          1044
+        ],
+        "generated": [
+          11,
+          353,
+          1044,
+          4313
+        ]
+      },
+      "passed": true,
+      "checkpoints": 220,
+      "max_relative_l2": 0,
+      "min_cosine": 1,
+      "max_abs": 0
+    },
+    "vulkan-chat": {
+      "seconds": 35.90576269477606,
+      "tokens": {
+        "processed": [
+          248045,
+          846,
+          198,
+          109266,
+          248046,
+          198,
+          248045,
+          74455,
+          198,
+          248068,
+          271,
+          248069,
+          271,
+          109266,
+          6115,
+          98691
+        ],
+        "generated": [
+          109266,
+          6115,
+          98691,
+          101009
+        ]
+      },
+      "passed": true,
+      "checkpoints": 880,
+      "max_relative_l2": 0,
+      "min_cosine": 1,
+      "max_abs": 0
+    }
+  },
+  "amd_default_long_oracle": {
+    "cpu": {
+      "seconds": 23.0666909776628,
+      "tokens": {
+        "processed": [
+          248045,
+          846,
+          198,
+          139054,
+          95986,
+          98933,
+          96127,
+          123759,
+          98682,
+          101742,
+          98138,
+          9616,
+          24797,
+          36,
+          7313,
+          103725,
+          4960,
+          96540,
+          121178,
+          98138,
+          5205,
+          98832,
+          95847,
+          98837,
+          97792,
+          3709,
+          98404,
+          96125,
+          96709,
+          111125,
+          1710,
+          97124,
+          96609,
+          103934,
+          1710,
+          248046,
+          198,
+          248045,
+          74455,
+          198,
+          248068,
+          271,
+          248069,
+          271,
+          101742,
+          98138,
+          103725
+        ],
+        "generated": [
+          101742,
+          98138,
+          103725,
+          96647
+        ]
+      },
+      "checkpoints": 2585,
+      "max_relative_l2": 0,
+      "min_cosine": 1,
+      "max_abs": 0
+    },
+    "vulkan": {
+      "seconds": 50.629996579140425,
+      "tokens": {
+        "processed": [
+          248045,
+          846,
+          198,
+          139054,
+          95986,
+          98933,
+          96127,
+          123759,
+          98682,
+          101742,
+          98138,
+          9616,
+          24797,
+          36,
+          7313,
+          103725,
+          4960,
+          96540,
+          121178,
+          98138,
+          5205,
+          98832,
+          95847,
+          98837,
+          97792,
+          3709,
+          98404,
+          96125,
+          96709,
+          111125,
+          1710,
+          97124,
+          96609,
+          103934,
+          1710,
+          248046,
+          198,
+          248045,
+          74455,
+          198,
+          248068,
+          271,
+          248069,
+          271,
+          101742,
+          98138,
+          103725
+        ],
+        "generated": [
+          101742,
+          98138,
+          103725,
+          96647
+        ]
+      },
+      "checkpoints": 2585,
+      "max_relative_l2": 0,
+      "min_cosine": 1,
+      "max_abs": 0
+    }
+  },
+  "physical_regressions": {
+    "rope": {
+      "exit_code": 0,
+      "seconds": 0.1334254089742899,
+      "result": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1511 filtered out; finished in 0.07s"
+    },
+    "long-batched": {
+      "exit_code": 0,
+      "seconds": 59.29288223013282,
+      "result": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 59.25s"
+    },
+    "adapter": {
+      "exit_code": 0,
+      "seconds": 21.12060085684061,
+      "result": "test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 1490 filtered out; finished in 21.10s"
+    },
+    "rollback": {
+      "exit_code": 0,
+      "seconds": 0.1075499877333641,
+      "result": "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1510 filtered out; finished in 0.05s"
+    },
+    "mrope": {
+      "exit_code": 0,
+      "seconds": 0.09565945900976658,
+      "result": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1511 filtered out; finished in 0.06s"
+    }
+  },
+  "test_binaries": {
+    "sage_a15": {
+      "path": "/workspace/rmi-sage-a15-f165/target/release-fast/deps/sage_a15-64930082a64fa0bd",
+      "sha256": "3e10d1513b6b023d48e68cf6219d2f42dabd1a3447f5b7ad544d9a41300ca0f9"
+    },
+    "rust_model_inference": {
+      "path": "/workspace/rmi-sage-a15-f165/target/release-fast/deps/rust_model_inference-9746d925f19735ce",
+      "sha256": "192947f24e65658dee25b960f74cd9704d32df0322e03a01638f9b422a8effd3"
+    }
+  },
+  "benchmark": {
+    "metadata": {
+      "binary_sha256": "7ffd077ce3d334eeb1b7bf37b38c60405d30184c4858c6c2e12f3117a04cde5c",
+      "parameters": {
+        "threads": 8,
+        "batch": 64,
+        "temperature": 0,
+        "max_tokens": 64,
+        "jinja": true,
+        "thinking": false
+      },
+      "cpu_max": "1600000 100000",
+      "cases": {
+        "vulkan-64-1": {
+          "before": {
+            "utc": "2026-10-23T11:54:06Z",
+            "gpu": {
+              "gpu_busy_percent": 0,
+              "mem_info_vram_used": 28004352,
+              "mem_info_gtt_used": 15962112
+            },
+            "loadavg": [
+              39.51953125,
+              41.39794921875,
+              43.70703125
+            ],
+            "cpu_stat": {
+              "usage_usec": 373211326585,
+              "user_usec": 330131227142,
+              "system_usec": 43080099443,
+              "core_sched.force_idle_usec": 0,
+              "nr_periods": 588504,
+              "nr_throttled": 141181,
+              "throttled_usec": 203190659330,
+              "nr_bursts": 0,
+              "burst_usec": 0
+            }
+          },
+          "idle_samples": [
+            {
+              "utc": "2026-10-23T11:54:05Z",
+              "gpu": {
+                "gpu_busy_percent": 0,
+                "mem_info_vram_used": 28004352,
+                "mem_info_gtt_used": 15962112
+              },
+              "loadavg": [
+                39.51953125,
+                41.39794921875,
+                43.70703125
+              ],
+              "cpu_stat": {
+                "usage_usec": 373211305763,
+                "user_usec": 330131212300,
+                "system_usec": 43080093462,
+                "core_sched.force_idle_usec": 0,
+                "nr_periods": 588497,
+                "nr_throttled": 141181,
+                "throttled_usec": 203190659330,
+                "nr_bursts": 0,
+                "burst_usec": 0
+              }
+            },
+            {
+              "utc": "2026-10-23T11:54:05Z",
+              "gpu": {
+                "gpu_busy_percent": 0,
+                "mem_info_vram_used": 28004352,
+                "mem_info_gtt_used": 15962112
+              },
+              "loadavg": [
+                39.51953125,
+                41.39794921875,
+                43.70703125
+              ],
+              "cpu_stat": {
+                "usage_usec": 373211306726,
+                "user_usec": 330131212300,
+                "system_usec": 43080094425,
+                "core_sched.force_idle_usec": 0,
+                "nr_periods": 588499,
+                "nr_throttled": 141181,
+                "throttled_usec": 203190659330,
+                "nr_bursts": 0,
+                "burst_usec": 0
+              }
+            },
+            {
+              "utc": "2026-10-23T11:54:06Z",
+              "gpu": {
+                "gpu_busy_percent": 0,
+                "mem_info_vram_used": 28004352,
+                "mem_info_gtt_used": 15962112
+              },
+              "loadavg": [
+                39.51953125,
+                41.39794921875,
+                43.70703125
+              ],
+              "cpu_stat": {
+                "usage_usec": 373211326585,
+                "user_usec": 330131227142,
+                "system_usec": 43080099443,
+                "core_sched.force_idle_usec": 0,
+                "nr_periods": 588504,
+                "nr_throttled": 141181,
+                "throttled_usec": 203190659330,
+                "nr_bursts": 0,
+                "burst_usec": 0
+              }
+            }
+          ],
+          "idle_start": true,
+          "after": {
+            "utc": "2026-10-23T11:54:40Z",
+            "gpu": {
+              "gpu_busy_percent": 100,
+              "mem_info_vram_used": 239693824,
+              "mem_info_gtt_used": 15962112
+            },
+            "loadavg": [
+              41.94775390625,
+              41.81005859375,
+              43.76025390625
+            ],
+            "cpu_stat": {
+              "usage_usec": 373456595129,
+              "user_usec": 330332309907,
+              "system_usec": 43124285222,
+              "core_sched.force_idle_usec": 0,
+              "nr_periods": 588842,
+              "nr_throttled": 141181,
+              "throttled_usec": 203190659330,
+              "nr_bursts": 0,
+              "burst_usec": 0
+            }
+          },
+          "child_cpu_seconds": 243.541622
+        },
+        "cpu-64-1": {
+          "before": {
+            "utc": "2026-10-23T11:54:41Z",
+            "gpu": {
+              "gpu_busy_percent": 0,
+              "mem_info_vram_used": 28004352,
+              "mem_info_gtt_used": 15962112
+            },
+            "loadavg": [
+              41.94775390625,
+              41.81005859375,
+              43.76025390625
+            ],
+            "cpu_stat": {
+              "usage_usec": 373456600442,
+              "user_usec": 330332312067,
+              "system_usec": 43124288374,
+              "core_sched.force_idle_usec": 0,
+              "nr_periods": 588848,
+              "nr_throttled": 141181,
+              "throttled_usec": 203190659330,
+              "nr_bursts": 0,
+              "burst_usec": 0
+            }
+          },
+          "idle_samples": [
+            {
+              "utc": "2026-10-23T11:54:40Z",
+              "gpu": {
+                "gpu_busy_percent": 0,
+                "mem_info_vram_used": 28004352,
+                "mem_info_gtt_used": 15962112
+              },
+              "loadavg": [
+                41.94775390625,
+                41.81005859375,
+                43.76025390625
+              ],
+              "cpu_stat": {
+                "usage_usec": 373456597078,
+                "user_usec": 330332310905,
+                "system_usec": 43124286172,
+                "core_sched.force_idle_usec": 0,
+                "nr_periods": 588844,
+                "nr_throttled": 141181,
+                "throttled_usec": 203190659330,
+                "nr_bursts": 0,
+                "burst_usec": 0
+              }
+            },
+            {
+              "utc": "2026-10-23T11:54:41Z",
+              "gpu": {
+                "gpu_busy_percent": 0,
+                "mem_info_vram_used": 28004352,
+                "mem_info_gtt_used": 15962112
+              },
+              "loadavg": [
+                41.94775390625,
+                41.81005859375,
+                43.76025390625
+              ],
+              "cpu_stat": {
+                "usage_usec": 373456599027,
+                "user_usec": 330332311700,
+                "system_usec": 43124287326,
+                "core_sched.force_idle_usec": 0,
+                "nr_periods": 588846,
+                "nr_throttled": 141181,
+                "throttled_usec": 203190659330,
+                "nr_bursts": 0,
+                "burst_usec": 0
+              }
+            },
+            {
+              "utc": "2026-10-23T11:54:41Z",
+              "gpu": {
+                "gpu_busy_percent": 0,
+                "mem_info_vram_used": 28004352,
+                "mem_info_gtt_used": 15962112
+              },
+              "loadavg": [
+                41.94775390625,
+                41.81005859375,
+                43.76025390625
+              ],
+              "cpu_stat": {
+                "usage_usec": 373456600442,
+                "user_usec": 330332312067,
+                "system_usec": 43124288374,
+                "core_sched.force_idle_usec": 0,
+                "nr_periods": 588848,
+                "nr_throttled": 141181,
+                "throttled_usec": 203190659330,
+                "nr_bursts": 0,
+                "burst_usec": 0
+              }
+            }
+          ],
+          "idle_start": true,
+          "after": {
+            "utc": "2026-10-23T11:54:54Z",
+            "gpu": {
+              "gpu_busy_percent": 0,
+              "mem_info_vram_used": 28004352,
+              "mem_info_gtt_used": 15962112
+            },
+            "loadavg": [
+              43.96533203125,
+              42.26171875,
+              43.876953125
+            ],
+            "cpu_stat": {
+              "usage_usec": 373547425690,
+              "user_usec": 330409741490,
+              "system_usec": 43137684200,
+              "core_sched.force_idle_usec": 0,
+              "nr_periods": 588973,
+              "nr_throttled": 141181,
+              "throttled_usec": 203190659330,
+              "nr_bursts": 0,
+              "burst_usec": 0
+            }
+          },
+          "child_cpu_seconds": 90.18716299999997
+        },
+        "cpu-64-2": {
+          "before": {
+            "utc": "2026-10-23T11:54:55Z",
+            "gpu": {
+              "gpu_busy_percent": 0,
+              "mem_info_vram_used": 28004352,
+              "mem_info_gtt_used": 15962112
+            },
+            "loadavg": [
+              43.96533203125,
+              42.26171875,
+              43.876953125
+            ],
+            "cpu_stat": {
+              "usage_usec": 373547573226,
+              "user_usec": 330409760967,
+              "system_usec": 43137812259,
+              "core_sched.force_idle_usec": 0,
+              "nr_periods": 588976,
+              "nr_throttled": 141181,
+              "throttled_usec": 203190659330,
+              "nr_bursts": 0,
+              "burst_usec": 0
+            }
+          },
+          "idle_samples": [
+            {
+              "utc": "2026-10-23T11:54:54Z",
+              "gpu": {
+                "gpu_busy_percent": 0,
+                "mem_info_vram_used": 28004352,
+                "mem_info_gtt_used": 15962112
+              },
+              "loadavg": [
+                43.96533203125,
+                42.26171875,
+                43.876953125
+              ],
+              "cpu_stat": {
+                "usage_usec": 373547429666,
+                "user_usec": 330409742467,
+                "system_usec": 43137687198,
+                "core_sched.force_idle_usec": 0,
+                "nr_periods": 588973,
+                "nr_throttled": 141181,
+                "throttled_usec": 203190659330,
+                "nr_bursts": 0,
+                "burst_usec": 0
+              }
+            },
+            {
+              "utc": "2026-10-23T11:54:54Z",
+              "gpu": {
+                "gpu_busy_percent": 0,
+                "mem_info_vram_used": 28004352,
+                "mem_info_gtt_used": 15962112
+              },
+              "loadavg": [
+                43.96533203125,
+                42.26171875,
+                43.876953125
+              ],
+              "cpu_stat": {
+                "usage_usec": 373547572276,
+                "user_usec": 330409760967,
+                "system_usec": 43137811308,
+                "core_sched.force_idle_usec": 0,
+                "nr_periods": 588976,
+                "nr_throttled": 141181,
+                "throttled_usec": 203190659330,
+                "nr_bursts": 0,
+                "burst_usec": 0
+              }
+            },
+            {
+              "utc": "2026-10-23T11:54:55Z",
+              "gpu": {
+                "gpu_busy_percent": 0,
+                "mem_info_vram_used": 28004352,
+                "mem_info_gtt_used": 15962112
+              },
+              "loadavg": [
+                43.96533203125,
+                42.26171875,
+                43.876953125
+              ],
+              "cpu_stat": {
+                "usage_usec": 373547573226,
+                "user_usec": 330409760967,
+                "system_usec": 43137812259,
+                "core_sched.force_idle_usec": 0,
+                "nr_periods": 588976,
+                "nr_throttled": 141181,
+                "throttled_usec": 203190659330,
+                "nr_bursts": 0,
+                "burst_usec": 0
+              }
+            }
+          ],
+          "idle_start": true,
+          "after": {
+            "utc": "2026-10-23T11:55:07Z",
+            "gpu": {
+              "gpu_busy_percent": 0,
+              "mem_info_vram_used": 28004352,
+              "mem_info_gtt_used": 15962112
+            },
+            "loadavg": [
+              44.4453125,
+              42.4189453125,
+              43.9111328125
+            ],
+            "cpu_stat": {
+              "usage_usec": 373637053324,
+              "user_usec": 330487204269,
+              "system_usec": 43149849055,
+              "core_sched.force_idle_usec": 0,
+              "nr_periods": 589099,
+              "nr_throttled": 141181,
+              "throttled_usec": 203190659330,
+              "nr_bursts": 0,
+              "burst_usec": 0
+            }
+          },
+          "child_cpu_seconds": 88.92887
+        },
+        "vulkan-64-2": {
+          "before": {
+            "utc": "2026-10-23T11:55:08Z",
+            "gpu": {
+              "gpu_busy_percent": 0,
+              "mem_info_vram_used": 28004352,
+              "mem_info_gtt_used": 15962112
+            },
+            "loadavg": [
+              43.9287109375,
+              42.34521484375,
+              43.87890625
+            ],
+            "cpu_stat": {
+              "usage_usec": 373637057241,
+              "user_usec": 330487205107,
+              "system_usec": 43149852133,
+              "core_sched.force_idle_usec": 0,
+              "nr_periods": 589103,
+              "nr_throttled": 141181,
+              "throttled_usec": 203190659330,
+              "nr_bursts": 0,
+              "burst_usec": 0
+            }
+          },
+          "idle_samples": [
+            {
+              "utc": "2026-10-23T11:55:07Z",
+              "gpu": {
+                "gpu_busy_percent": 0,
+                "mem_info_vram_used": 28004352,
+                "mem_info_gtt_used": 15962112
+              },
+              "loadavg": [
+                44.4453125,
+                42.4189453125,
+                43.9111328125
+              ],
+              "cpu_stat": {
+                "usage_usec": 373637054322,
+                "user_usec": 330487204269,
+                "system_usec": 43149850053,
+                "core_sched.force_idle_usec": 0,
+                "nr_periods": 589099,
+                "nr_throttled": 141181,
+                "throttled_usec": 203190659330,
+                "nr_bursts": 0,
+                "burst_usec": 0
+              }
+            },
+            {
+              "utc": "2026-10-23T11:55:08Z",
+              "gpu": {
+                "gpu_busy_percent": 0,
+                "mem_info_vram_used": 28004352,
+                "mem_info_gtt_used": 15962112
+              },
+              "loadavg": [
+                43.9287109375,
+                42.34521484375,
+                43.87890625
+              ],
+              "cpu_stat": {
+                "usage_usec": 373637056273,
+                "user_usec": 330487205107,
+                "system_usec": 43149851165,
+                "core_sched.force_idle_usec": 0,
+                "nr_periods": 589101,
+                "nr_throttled": 141181,
+                "throttled_usec": 203190659330,
+                "nr_bursts": 0,
+                "burst_usec": 0
+              }
+            },
+            {
+              "utc": "2026-10-23T11:55:08Z",
+              "gpu": {
+                "gpu_busy_percent": 0,
+                "mem_info_vram_used": 28004352,
+                "mem_info_gtt_used": 15962112
+              },
+              "loadavg": [
+                43.9287109375,
+                42.34521484375,
+                43.87890625
+              ],
+              "cpu_stat": {
+                "usage_usec": 373637057241,
+                "user_usec": 330487205107,
+                "system_usec": 43149852133,
+                "core_sched.force_idle_usec": 0,
+                "nr_periods": 589103,
+                "nr_throttled": 141181,
+                "throttled_usec": 203190659330,
+                "nr_bursts": 0,
+                "burst_usec": 0
+              }
+            }
+          ],
+          "idle_start": true,
+          "after": {
+            "utc": "2026-10-23T11:55:45Z",
+            "gpu": {
+              "gpu_busy_percent": 100,
+              "mem_info_vram_used": 28004352,
+              "mem_info_gtt_used": 15962112
+            },
+            "loadavg": [
+              40.63330078125,
+              41.69287109375,
+              43.60302734375
+            ],
+            "cpu_stat": {
+              "usage_usec": 373904764882,
+              "user_usec": 330705636789,
+              "system_usec": 43199128092,
+              "core_sched.force_idle_usec": 0,
+              "nr_periods": 589471,
+              "nr_throttled": 141181,
+              "throttled_usec": 203190659330,
+              "nr_bursts": 0,
+              "burst_usec": 0
+            }
+          },
+          "child_cpu_seconds": 265.973883
+        },
+        "vulkan-64-3": {
+          "before": {
+            "utc": "2026-10-23T11:55:47Z",
+            "gpu": {
+              "gpu_busy_percent": 0,
+              "mem_info_vram_used": 28004352,
+              "mem_info_gtt_used": 15962112
+            },
+            "loadavg": [
+              40.63330078125,
+              41.69287109375,
+              43.60302734375
+            ],
+            "cpu_stat": {
+              "usage_usec": 373904990675,
+              "user_usec": 330705666544,
+              "system_usec": 43199324131,
+              "core_sched.force_idle_usec": 0,
+              "nr_periods": 589479,
+              "nr_throttled": 141181,
+              "throttled_usec": 203190659330,
+              "nr_bursts": 0,
+              "burst_usec": 0
+            }
+          },
+          "idle_samples": [
+            {
+              "utc": "2026-10-23T11:55:46Z",
+              "gpu": {
+                "gpu_busy_percent": 0,
+                "mem_info_vram_used": 28004352,
+                "mem_info_gtt_used": 15962112
+              },
+              "loadavg": [
+                40.63330078125,
+                41.69287109375,
+                43.60302734375
+              ],
+              "cpu_stat": {
+                "usage_usec": 373904767839,
+                "user_usec": 330705638789,
+                "system_usec": 43199129050,
+                "core_sched.force_idle_usec": 0,
+                "nr_periods": 589473,
+                "nr_throttled": 141181,
+                "throttled_usec": 203190659330,
+                "nr_bursts": 0,
+                "burst_usec": 0
+              }
+            },
+            {
+              "utc": "2026-10-23T11:55:46Z",
+              "gpu": {
+                "gpu_busy_percent": 0,
+                "mem_info_vram_used": 28004352,
+                "mem_info_gtt_used": 15962112
+              },
+              "loadavg": [
+                40.63330078125,
+                41.69287109375,
+                43.60302734375
+              ],
+              "cpu_stat": {
+                "usage_usec": 373904769313,
+                "user_usec": 330705639285,
+                "system_usec": 43199130027,
+                "core_sched.force_idle_usec": 0,
+                "nr_periods": 589475,
+                "nr_throttled": 141181,
+                "throttled_usec": 203190659330,
+                "nr_bursts": 0,
+                "burst_usec": 0
+              }
+            },
+            {
+              "utc": "2026-10-23T11:55:47Z",
+              "gpu": {
+                "gpu_busy_percent": 0,
+                "mem_info_vram_used": 28004352,
+                "mem_info_gtt_used": 15962112
+              },
+              "loadavg": [
+                40.63330078125,
+                41.69287109375,
+                43.60302734375
+              ],
+              "cpu_stat": {
+                "usage_usec": 373904990675,
+                "user_usec": 330705666544,
+                "system_usec": 43199324131,
+                "core_sched.force_idle_usec": 0,
+                "nr_periods": 589479,
+                "nr_throttled": 141181,
+                "throttled_usec": 203190659330,
+                "nr_bursts": 0,
+                "burst_usec": 0
+              }
+            }
+          ],
+          "idle_start": true,
+          "after": {
+            "utc": "2026-10-23T11:56:24Z",
+            "gpu": {
+              "gpu_busy_percent": 1,
+              "mem_info_vram_used": 37560320,
+              "mem_info_gtt_used": 15962112
+            },
+            "loadavg": [
+              41.59814453125,
+              41.79833984375,
+              43.556640625
+            ],
+            "cpu_stat": {
+              "usage_usec": 374175747517,
+              "user_usec": 330926574939,
+              "system_usec": 43249172578,
+              "core_sched.force_idle_usec": 0,
+              "nr_periods": 589852,
+              "nr_throttled": 141181,
+              "throttled_usec": 203190659330,
+              "nr_bursts": 0,
+              "burst_usec": 0
+            }
+          },
+          "child_cpu_seconds": 269.003423
+        },
+        "cpu-64-3": {
+          "before": {
+            "utc": "2026-10-23T11:56:25Z",
+            "gpu": {
+              "gpu_busy_percent": 0,
+              "mem_info_vram_used": 28004352,
+              "mem_info_gtt_used": 15962112
+            },
+            "loadavg": [
+              41.59814453125,
+              41.79833984375,
+              43.556640625
+            ],
+            "cpu_stat": {
+              "usage_usec": 374175752375,
+              "user_usec": 330926576812,
+              "system_usec": 43249175562,
+              "core_sched.force_idle_usec": 0,
+              "nr_periods": 589858,
+              "nr_throttled": 141181,
+              "throttled_usec": 203190659330,
+              "nr_bursts": 0,
+              "burst_usec": 0
+            }
+          },
+          "idle_samples": [
+            {
+              "utc": "2026-10-23T11:56:24Z",
+              "gpu": {
+                "gpu_busy_percent": 0,
+                "mem_info_vram_used": 28004352,
+                "mem_info_gtt_used": 15962112
+              },
+              "loadavg": [
+                41.59814453125,
+                41.79833984375,
+                43.556640625
+              ],
+              "cpu_stat": {
+                "usage_usec": 374175750469,
+                "user_usec": 330926575939,
+                "system_usec": 43249174530,
+                "core_sched.force_idle_usec": 0,
+                "nr_periods": 589854,
+                "nr_throttled": 141181,
+                "throttled_usec": 203190659330,
+                "nr_bursts": 0,
+                "burst_usec": 0
+              }
+            },
+            {
+              "utc": "2026-10-23T11:56:25Z",
+              "gpu": {
+                "gpu_busy_percent": 0,
+                "mem_info_vram_used": 28004352,
+                "mem_info_gtt_used": 15962112
+              },
+              "loadavg": [
+                41.59814453125,
+                41.79833984375,
+                43.556640625
+              ],
+              "cpu_stat": {
+                "usage_usec": 374175751422,
+                "user_usec": 330926575939,
+                "system_usec": 43249175483,
+                "core_sched.force_idle_usec": 0,
+                "nr_periods": 589856,
+                "nr_throttled": 141181,
+                "throttled_usec": 203190659330,
+                "nr_bursts": 0,
+                "burst_usec": 0
+              }
+            },
+            {
+              "utc": "2026-10-23T11:56:25Z",
+              "gpu": {
+                "gpu_busy_percent": 0,
+                "mem_info_vram_used": 28004352,
+                "mem_info_gtt_used": 15962112
+              },
+              "loadavg": [
+                41.59814453125,
+                41.79833984375,
+                43.556640625
+              ],
+              "cpu_stat": {
+                "usage_usec": 374175752375,
+                "user_usec": 330926576812,
+                "system_usec": 43249175562,
+                "core_sched.force_idle_usec": 0,
+                "nr_periods": 589858,
+                "nr_throttled": 141181,
+                "throttled_usec": 203190659330,
+                "nr_bursts": 0,
+                "burst_usec": 0
+              }
+            }
+          ],
+          "idle_start": true,
+          "after": {
+            "utc": "2026-10-23T11:56:40Z",
+            "gpu": {
+              "gpu_busy_percent": 0,
+              "mem_info_vram_used": 28004352,
+              "mem_info_gtt_used": 15962112
+            },
+            "loadavg": [
+              42.4873046875,
+              41.98779296875,
+              43.5908203125
+            ],
+            "cpu_stat": {
+              "usage_usec": 374282766768,
+              "user_usec": 331018618437,
+              "system_usec": 43264148331,
+              "core_sched.force_idle_usec": 0,
+              "nr_periods": 590005,
+              "nr_throttled": 141181,
+              "throttled_usec": 203190659330,
+              "nr_bursts": 0,
+              "burst_usec": 0
+            }
+          },
+          "child_cpu_seconds": 106.23282300000008
+        },
+        "full-text": {
+          "before": {
+            "utc": "2026-10-23T11:56:41Z",
+            "gpu": {
+              "gpu_busy_percent": 0,
+              "mem_info_vram_used": 28004352,
+              "mem_info_gtt_used": 15962112
+            },
+            "loadavg": [
+              42.4873046875,
+              41.98779296875,
+              43.5908203125
+            ],
+            "cpu_stat": {
+              "usage_usec": 374282772006,
+              "user_usec": 331018620531,
+              "system_usec": 43264151475,
+              "core_sched.force_idle_usec": 0,
+              "nr_periods": 590009,
+              "nr_throttled": 141181,
+              "throttled_usec": 203190659330,
+              "nr_bursts": 0,
+              "burst_usec": 0
+            }
+          },
+          "idle_samples": [
+            {
+              "utc": "2026-10-23T11:56:40Z",
+              "gpu": {
+                "gpu_busy_percent": 0,
+                "mem_info_vram_used": 28004352,
+                "mem_info_gtt_used": 15962112
+              },
+              "loadavg": [
+                42.4873046875,
+                41.98779296875,
+                43.5908203125
+              ],
+              "cpu_stat": {
+                "usage_usec": 374282768662,
+                "user_usec": 331018619342,
+                "system_usec": 43264149319,
+                "core_sched.force_idle_usec": 0,
+                "nr_periods": 590005,
+                "nr_throttled": 141181,
+                "throttled_usec": 203190659330,
+                "nr_bursts": 0,
+                "burst_usec": 0
+              }
+            },
+            {
+              "utc": "2026-10-23T11:56:41Z",
+              "gpu": {
+                "gpu_busy_percent": 0,
+                "mem_info_vram_used": 28004352,
+                "mem_info_gtt_used": 15962112
+              },
+              "loadavg": [
+                42.4873046875,
+                41.98779296875,
+                43.5908203125
+              ],
+              "cpu_stat": {
+                "usage_usec": 374282770613,
+                "user_usec": 331018620183,
+                "system_usec": 43264150429,
+                "core_sched.force_idle_usec": 0,
+                "nr_periods": 590007,
+                "nr_throttled": 141181,
+                "throttled_usec": 203190659330,
+                "nr_bursts": 0,
+                "burst_usec": 0
+              }
+            },
+            {
+              "utc": "2026-10-23T11:56:41Z",
+              "gpu": {
+                "gpu_busy_percent": 0,
+                "mem_info_vram_used": 28004352,
+                "mem_info_gtt_used": 15962112
+              },
+              "loadavg": [
+                42.4873046875,
+                41.98779296875,
+                43.5908203125
+              ],
+              "cpu_stat": {
+                "usage_usec": 374282772006,
+                "user_usec": 331018620531,
+                "system_usec": 43264151475,
+                "core_sched.force_idle_usec": 0,
+                "nr_periods": 590009,
+                "nr_throttled": 141181,
+                "throttled_usec": 203190659330,
+                "nr_bursts": 0,
+                "burst_usec": 0
+              }
+            }
+          ],
+          "idle_start": true,
+          "after": {
+            "utc": "2026-10-23T11:57:20Z",
+            "gpu": {
+              "gpu_busy_percent": 100,
+              "mem_info_vram_used": 239693824,
+              "mem_info_gtt_used": 15962112
+            },
+            "loadavg": [
+              42.5185546875,
+              42.10400390625,
+              43.56591796875
+            ],
+            "cpu_stat": {
+              "usage_usec": 374568466815,
+              "user_usec": 331251704119,
+              "system_usec": 43316762695,
+              "core_sched.force_idle_usec": 0,
+              "nr_periods": 590402,
+              "nr_throttled": 141181,
+              "throttled_usec": 203190659330,
+              "nr_bursts": 0,
+              "burst_usec": 0
+            }
+          },
+          "child_cpu_seconds": 283.7533569999999
+        },
+        "full-image": {
+          "before": {
+            "utc": "2026-10-23T11:57:22Z",
+            "gpu": {
+              "gpu_busy_percent": 0,
+              "mem_info_vram_used": 28004352,
+              "mem_info_gtt_used": 15962112
+            },
+            "loadavg": [
+              42.5185546875,
+              42.10400390625,
+              43.56591796875
+            ],
+            "cpu_stat": {
+              "usage_usec": 374568472037,
+              "user_usec": 331251706468,
+              "system_usec": 43316765568,
+              "core_sched.force_idle_usec": 0,
+              "nr_periods": 590408,
+              "nr_throttled": 141181,
+              "throttled_usec": 203190659330,
+              "nr_bursts": 0,
+              "burst_usec": 0
+            }
+          },
+          "idle_samples": [
+            {
+              "utc": "2026-10-23T11:57:21Z",
+              "gpu": {
+                "gpu_busy_percent": 0,
+                "mem_info_vram_used": 28004352,
+                "mem_info_gtt_used": 15962112
+              },
+              "loadavg": [
+                42.5185546875,
+                42.10400390625,
+                43.56591796875
+              ],
+              "cpu_stat": {
+                "usage_usec": 374568468671,
+                "user_usec": 331251705918,
+                "system_usec": 43316762752,
+                "core_sched.force_idle_usec": 0,
+                "nr_periods": 590404,
+                "nr_throttled": 141181,
+                "throttled_usec": 203190659330,
+                "nr_bursts": 0,
+                "burst_usec": 0
+              }
+            },
+            {
+              "utc": "2026-10-23T11:57:21Z",
+              "gpu": {
+                "gpu_busy_percent": 0,
+                "mem_info_vram_used": 28004352,
+                "mem_info_gtt_used": 15962112
+              },
+              "loadavg": [
+                42.5185546875,
+                42.10400390625,
+                43.56591796875
+              ],
+              "cpu_stat": {
+                "usage_usec": 374568471080,
+                "user_usec": 331251706468,
+                "system_usec": 43316764611,
+                "core_sched.force_idle_usec": 0,
+                "nr_periods": 590406,
+                "nr_throttled": 141181,
+                "throttled_usec": 203190659330,
+                "nr_bursts": 0,
+                "burst_usec": 0
+              }
+            },
+            {
+              "utc": "2026-10-23T11:57:22Z",
+              "gpu": {
+                "gpu_busy_percent": 0,
+                "mem_info_vram_used": 28004352,
+                "mem_info_gtt_used": 15962112
+              },
+              "loadavg": [
+                42.5185546875,
+                42.10400390625,
+                43.56591796875
+              ],
+              "cpu_stat": {
+                "usage_usec": 374568472037,
+                "user_usec": 331251706468,
+                "system_usec": 43316765568,
+                "core_sched.force_idle_usec": 0,
+                "nr_periods": 590408,
+                "nr_throttled": 141181,
+                "throttled_usec": 203190659330,
+                "nr_bursts": 0,
+                "burst_usec": 0
+              }
+            }
+          ],
+          "idle_start": true,
+          "after": {
+            "utc": "2026-10-23T11:57:50Z",
+            "gpu": {
+              "gpu_busy_percent": 4,
+              "mem_info_vram_used": 239693824,
+              "mem_info_gtt_used": 15962112
+            },
+            "loadavg": [
+              43.8623046875,
+              42.48828125,
+              43.64990234375
+            ],
+            "cpu_stat": {
+              "usage_usec": 374791786694,
+              "user_usec": 331432313769,
+              "system_usec": 43359472924,
+              "core_sched.force_idle_usec": 0,
+              "nr_periods": 590694,
+              "nr_throttled": 141181,
+              "throttled_usec": 203190659330,
+              "nr_bursts": 0,
+              "burst_usec": 0
+            }
+          },
+          "child_cpu_seconds": 222.09164900000016
+        }
+      },
+      "limits": [
+        "Shared host, no reservation and no file or driver cache flush. GPU observations and per-process engine counters are retained.",
+        "New processes; same release binary and default reference arithmetic on both backends.",
+        "Previous GPU binary is excluded: it fails the long numerical regression."
+      ]
+    },
+    "summary": {
+      "vulkan": {
+        "init_seconds": {
+          "median": 21.718056,
+          "min": 19.679815,
+          "max": 21.953595
+        },
+        "prefill_seconds": {
+          "median": 0.959891,
+          "min": 0.94677,
+          "max": 0.968161
+        },
+        "decode_eval_per_second": {
+          "median": 5.512224319881202,
+          "min": 5.212700521418987,
+          "max": 5.70229924851842
+        },
+        "process_seconds": {
+          "median": 36.84933237172663,
+          "min": 33.87047277018428,
+          "max": 37.3391655087471
+        },
+        "first_text_seconds": {
+          "median": 22.987905217334628,
+          "min": 20.8922422491014,
+          "max": 23.19129822589457
+        }
+      },
+      "cpu": {
+        "init_seconds": {
+          "median": 0.0047,
+          "min": 0.004643,
+          "max": 0.004822
+        },
+        "prefill_seconds": {
+          "median": 4.824242,
+          "min": 4.570314,
+          "max": 5.066338
+        },
+        "decode_eval_per_second": {
+          "median": 9.91819535444324,
+          "min": 7.902542335675412,
+          "max": 10.102471128580724
+        },
+        "process_seconds": {
+          "median": 12.54944314993918,
+          "min": 12.284211607649922,
+          "max": 14.655483737587929
+        },
+        "first_text_seconds": {
+          "median": 5.104636261239648,
+          "min": 4.844310512766242,
+          "max": 5.358232110738754
+        }
+      }
+    },
+    "runs": [
+      {
+        "name": "vulkan-64-1",
+        "returncode": 0,
+        "scalar": false,
+        "image": false,
+        "command": [
+          "/workspace/rmi-sage-a15-f165/target/sage-gpu/completion/final",
+          "--model",
+          "/workspace/rmi-sage-a15-f165/models/Sage-A1.5-Q8_0-GGUF/Sage-A1.5-Q8_0.gguf",
+          "--compute",
+          "vulkan",
+          "--jinja",
+          "--no-thinking",
+          "--temp",
+          "0",
+          "--threads",
+          "8",
+          "--prefill-batch-size",
+          "64",
+          "--max-tokens",
+          "64",
+          "--prompt",
+          "请用三句话向初学者解释混合专家（MoE）模型：它如何选择专家、为什么能减少计算，以及一个主要代价。不要列标题。"
+        ],
+        "answer": "混合专家模型像是一个拥有多位专业顾问的团队，每次处理任务时，路由器只会挑选最相关的少数几位专家来共同工作。由于大部分专家在每次推理中处于闲置状态，模型只需激活少量参数，从而大幅降低了计算量和能耗。然而，这种机制的主要代价是路由过程引入了额外的通信",
+        "ready_seconds": 19.945905851200223,
+        "first_text_seconds": 20.8922422491014,
+        "ttft_after_ready_seconds": 0.9463363979011774,
+        "generation_end_seconds": 31.956129886209965,
+        "process_seconds": 33.87047277018428,
+        "metrics": {
+          "session_init": 19.679815,
+          "prompt_rows": 44,
+          "generated_tokens": 64,
+          "decode_evals": 63,
+          "prefill": 0.94677,
+          "decode": 11.048175,
+          "generation_total": 12.010941
+        },
+        "peak_process_resident_bytes": {
+          "drm-resident-vram": 36711313408,
+          "drm-resident-gtt": 425132032
+        }
+      },
+      {
+        "name": "cpu-64-1",
+        "returncode": 0,
+        "scalar": false,
+        "image": false,
+        "command": [
+          "/workspace/rmi-sage-a15-f165/target/sage-gpu/completion/final",
+          "--model",
+          "/workspace/rmi-sage-a15-f165/models/Sage-A1.5-Q8_0-GGUF/Sage-A1.5-Q8_0.gguf",
+          "--compute",
+          "cpu",
+          "--jinja",
+          "--no-thinking",
+          "--temp",
+          "0",
+          "--threads",
+          "8",
+          "--prefill-batch-size",
+          "64",
+          "--max-tokens",
+          "64",
+          "--prompt",
+          "请用三句话向初学者解释混合专家（MoE）模型：它如何选择专家、为什么能减少计算，以及一个主要代价。不要列标题。"
+        ],
+        "answer": "混合专家模型像是一个拥有多位专业顾问的团队，每次处理任务时，路由器只会挑选最相关的少数几位专家来共同工作。由于大部分专家在每次推理中处于闲置状态，模型只需激活少量参数，从而大幅降低了计算量和能耗。然而，这种机制的主要代价是路由过程引入了额外的通信",
+        "ready_seconds": 0.2807067632675171,
+        "first_text_seconds": 5.104636261239648,
+        "ttft_after_ready_seconds": 4.823929497972131,
+        "generation_end_seconds": 11.356172822415829,
+        "process_seconds": 12.54944314993918,
+        "metrics": {
+          "session_init": 0.004822,
+          "prompt_rows": 44,
+          "generated_tokens": 64,
+          "decode_evals": 63,
+          "prefill": 4.824242,
+          "decode": 6.236098,
+          "generation_total": 11.076103
+        },
+        "peak_process_resident_bytes": {
+          "drm-resident-vram": 0,
+          "drm-resident-gtt": 0
+        }
+      },
+      {
+        "name": "cpu-64-2",
+        "returncode": 0,
+        "scalar": false,
+        "image": false,
+        "command": [
+          "/workspace/rmi-sage-a15-f165/target/sage-gpu/completion/final",
+          "--model",
+          "/workspace/rmi-sage-a15-f165/models/Sage-A1.5-Q8_0-GGUF/Sage-A1.5-Q8_0.gguf",
+          "--compute",
+          "cpu",
+          "--jinja",
+          "--no-thinking",
+          "--temp",
+          "0",
+          "--threads",
+          "8",
+          "--prefill-batch-size",
+          "64",
+          "--max-tokens",
+          "64",
+          "--prompt",
+          "请用三句话向初学者解释混合专家（MoE）模型：它如何选择专家、为什么能减少计算，以及一个主要代价。不要列标题。"
+        ],
+        "answer": "混合专家模型像是一个拥有多位专业顾问的团队，每次处理任务时，路由器只会挑选最相关的少数几位专家来共同工作。由于大部分专家在每次推理中处于闲置状态，模型只需激活少量参数，从而大幅降低了计算量和能耗。然而，这种机制的主要代价是路由过程引入了额外的通信",
+        "ready_seconds": 0.2737141605466604,
+        "first_text_seconds": 4.844310512766242,
+        "ttft_after_ready_seconds": 4.570596352219582,
+        "generation_end_seconds": 11.210676776245236,
+        "process_seconds": 12.284211607649922,
+        "metrics": {
+          "session_init": 0.0047,
+          "prompt_rows": 44,
+          "generated_tokens": 64,
+          "decode_evals": 63,
+          "prefill": 4.570314,
+          "decode": 6.351962,
+          "generation_total": 10.936927
+        },
+        "peak_process_resident_bytes": {
+          "drm-resident-vram": 0,
+          "drm-resident-gtt": 0
+        }
+      },
+      {
+        "name": "vulkan-64-2",
+        "returncode": 0,
+        "scalar": false,
+        "image": false,
+        "command": [
+          "/workspace/rmi-sage-a15-f165/target/sage-gpu/completion/final",
+          "--model",
+          "/workspace/rmi-sage-a15-f165/models/Sage-A1.5-Q8_0-GGUF/Sage-A1.5-Q8_0.gguf",
+          "--compute",
+          "vulkan",
+          "--jinja",
+          "--no-thinking",
+          "--temp",
+          "0",
+          "--threads",
+          "8",
+          "--prefill-batch-size",
+          "64",
+          "--max-tokens",
+          "64",
+          "--prompt",
+          "请用三句话向初学者解释混合专家（MoE）模型：它如何选择专家、为什么能减少计算，以及一个主要代价。不要列标题。"
+        ],
+        "answer": "混合专家模型像是一个拥有多位专业顾问的团队，每次处理任务时，路由器只会挑选最相关的少数几位专家来共同工作。由于大部分专家在每次推理中处于闲置状态，模型只需激活少量参数，从而大幅降低了计算量和能耗。然而，这种机制的主要代价是路由过程引入了额外的通信",
+        "ready_seconds": 22.223554568365216,
+        "first_text_seconds": 23.19129822589457,
+        "ttft_after_ready_seconds": 0.9677436575293541,
+        "generation_end_seconds": 34.63663203641772,
+        "process_seconds": 36.84933237172663,
+        "metrics": {
+          "session_init": 21.953595,
+          "prompt_rows": 44,
+          "generated_tokens": 64,
+          "decode_evals": 63,
+          "prefill": 0.968161,
+          "decode": 11.429143,
+          "generation_total": 12.413795
+        },
+        "peak_process_resident_bytes": {
+          "drm-resident-vram": 36711313408,
+          "drm-resident-gtt": 425132032
+        }
+      },
+      {
+        "name": "vulkan-64-3",
+        "returncode": 0,
+        "scalar": false,
+        "image": false,
+        "command": [
+          "/workspace/rmi-sage-a15-f165/target/sage-gpu/completion/final",
+          "--model",
+          "/workspace/rmi-sage-a15-f165/models/Sage-A1.5-Q8_0-GGUF/Sage-A1.5-Q8_0.gguf",
+          "--compute",
+          "vulkan",
+          "--jinja",
+          "--no-thinking",
+          "--temp",
+          "0",
+          "--threads",
+          "8",
+          "--prefill-batch-size",
+          "64",
+          "--max-tokens",
+          "64",
+          "--prompt",
+          "请用三句话向初学者解释混合专家（MoE）模型：它如何选择专家、为什么能减少计算，以及一个主要代价。不要列标题。"
+        ],
+        "answer": "混合专家模型像是一个拥有多位专业顾问的团队，每次处理任务时，路由器只会挑选最相关的少数几位专家来共同工作。由于大部分专家在每次推理中处于闲置状态，模型只需激活少量参数，从而大幅降低了计算量和能耗。然而，这种机制的主要代价是路由过程引入了额外的通信",
+        "ready_seconds": 22.028392426669598,
+        "first_text_seconds": 22.987905217334628,
+        "ttft_after_ready_seconds": 0.9595127906650305,
+        "generation_end_seconds": 35.09429971314967,
+        "process_seconds": 37.3391655087471,
+        "metrics": {
+          "session_init": 21.718056,
+          "prompt_rows": 44,
+          "generated_tokens": 64,
+          "decode_evals": 63,
+          "prefill": 0.959891,
+          "decode": 12.085866,
+          "generation_total": 13.066595
+        },
+        "peak_process_resident_bytes": {
+          "drm-resident-vram": 36711313408,
+          "drm-resident-gtt": 425132032
+        }
+      },
+      {
+        "name": "cpu-64-3",
+        "returncode": 0,
+        "scalar": false,
+        "image": false,
+        "command": [
+          "/workspace/rmi-sage-a15-f165/target/sage-gpu/completion/final",
+          "--model",
+          "/workspace/rmi-sage-a15-f165/models/Sage-A1.5-Q8_0-GGUF/Sage-A1.5-Q8_0.gguf",
+          "--compute",
+          "cpu",
+          "--jinja",
+          "--no-thinking",
+          "--temp",
+          "0",
+          "--threads",
+          "8",
+          "--prefill-batch-size",
+          "64",
+          "--max-tokens",
+          "64",
+          "--prompt",
+          "请用三句话向初学者解释混合专家（MoE）模型：它如何选择专家、为什么能减少计算，以及一个主要代价。不要列标题。"
+        ],
+        "answer": "混合专家模型像是一个拥有多位专业顾问的团队，每次处理任务时，路由器只会挑选最相关的少数几位专家来共同工作。由于大部分专家在每次推理中处于闲置状态，模型只需激活少量参数，从而大幅降低了计算量和能耗。然而，这种机制的主要代价是路由过程引入了额外的通信",
+        "ready_seconds": 0.29142320342361927,
+        "first_text_seconds": 5.358232110738754,
+        "ttft_after_ready_seconds": 5.066808907315135,
+        "generation_end_seconds": 13.355679767206311,
+        "process_seconds": 14.655483737587929,
+        "metrics": {
+          "session_init": 0.004643,
+          "prompt_rows": 44,
+          "generated_tokens": 64,
+          "decode_evals": 63,
+          "prefill": 5.066338,
+          "decode": 7.972118,
+          "generation_total": 13.064271
+        },
+        "peak_process_resident_bytes": {
+          "drm-resident-vram": 0,
+          "drm-resident-gtt": 0
+        }
+      }
+    ],
+    "full_generation": [
+      {
+        "name": "full-text",
+        "returncode": 0,
+        "scalar": false,
+        "image": false,
+        "command": [
+          "/workspace/rmi-sage-a15-f165/target/sage-gpu/completion/final",
+          "--model",
+          "/workspace/rmi-sage-a15-f165/models/Sage-A1.5-Q8_0-GGUF/Sage-A1.5-Q8_0.gguf",
+          "--compute",
+          "vulkan",
+          "--jinja",
+          "--no-thinking",
+          "--temp",
+          "0",
+          "--threads",
+          "8",
+          "--prefill-batch-size",
+          "64",
+          "--max-tokens",
+          "192",
+          "--prompt",
+          "请用三句话向初学者解释混合专家（MoE）模型：它如何选择专家、为什么能减少计算，以及一个主要代价。不要列标题。"
+        ],
+        "answer": "混合专家模型像是一个拥有多位专业顾问的团队，每次处理任务时，路由器只会挑选最相关的少数几位专家来共同工作。由于大部分专家在每次推理中处于闲置状态，模型只需激活少量参数，从而大幅降低了计算量和能耗。然而，这种机制的主要代价是路由过程引入了额外的通信开销，且不同专家间的协同可能使模型训练和调试变得更加复杂。",
+        "ready_seconds": 21.219203140586615,
+        "first_text_seconds": 22.178016426041722,
+        "ttft_after_ready_seconds": 0.9588132854551077,
+        "generation_end_seconds": 37.21774873137474,
+        "process_seconds": 39.32474500872195,
+        "metrics": {
+          "session_init": 20.946466,
+          "prompt_rows": 44,
+          "generated_tokens": 80,
+          "decode_evals": 80,
+          "prefill": 0.959191,
+          "decode": 15.018176,
+          "generation_total": 15.99917
+        },
+        "peak_process_resident_bytes": {
+          "drm-resident-vram": 36732284928,
+          "drm-resident-gtt": 446103552
+        }
+      },
+      {
+        "name": "full-image",
+        "returncode": 0,
+        "scalar": false,
+        "image": true,
+        "command": [
+          "/workspace/rmi-sage-a15-f165/target/sage-gpu/completion/final",
+          "--model",
+          "/workspace/rmi-sage-a15-f165/models/Sage-A1.5-Q8_0-GGUF/Sage-A1.5-Q8_0.gguf",
+          "--gpu",
+          "--jinja",
+          "--no-thinking",
+          "--temp",
+          "0",
+          "--threads",
+          "8",
+          "--prefill-batch-size",
+          "64",
+          "--max-tokens",
+          "192",
+          "--prompt",
+          "按从左到右的顺序，描述图中三个图形的颜色和形状，用一句话回答。",
+          "--mmproj",
+          "/workspace/rmi-sage-a15-f165/models/Sage-A1.5-Q8_0-GGUF/Sage-A1.5-mmproj.gguf",
+          "--image",
+          "/workspace/rmi-sage-a15-f165/target/sage-gpu/completion/benchmark-complete/shapes.png"
+        ],
+        "answer": "图中从左到右依次是红色圆形、蓝色正方形和绿色三角形。",
+        "ready_seconds": 21.880647586658597,
+        "first_text_seconds": 23.952443102374673,
+        "ttft_after_ready_seconds": 2.071795515716076,
+        "generation_end_seconds": 26.662125514820218,
+        "process_seconds": 28.56540265865624,
+        "metrics": {
+          "image_total": 2.852,
+          "preprocess": 0.002,
+          "vision_encode": 2.787,
+          "session_init": 18.667013,
+          "prompt_rows": 104,
+          "generated_tokens": 15,
+          "decode_evals": 15,
+          "prefill": 2.071671,
+          "decode": 2.70527,
+          "generation_total": 4.781581
+        },
+        "peak_process_resident_bytes": {
+          "drm-resident-vram": 36742127616,
+          "drm-resident-gtt": 455933952
+        }
+      }
+    ]
+  },
+  "release_build": {
+    "command": "cargo build --release --features vulkan --bin rust-model-inference --offline --locked",
+    "profile": "release",
+    "features": [
+      "vulkan"
+    ],
+    "duration_seconds": 427,
+    "binary_sha256": "7ffd077ce3d334eeb1b7bf37b38c60405d30184c4858c6c2e12f3117a04cde5c"
+  },
+  "long_untraced_regression": {
+    "prompt_tokens": 44,
+    "prediction_steps": 64,
+    "cpu_batch_sizes": [
+      1,
+      64
+    ],
+    "vulkan_batch_size": 64,
+    "teacher_forcing": "CPU reference tokens",
+    "exact_greedy_ids": true,
+    "observed_max_relative_l2": 0.0,
+    "observed_min_cosine": 1.0,
+    "observed_max_abs": 0.0,
+    "profile": "release-fast, vulkan+parity-trace feature enabled, RMI_PARITY_TRACE unset"
+  },
+  "defect_regression": {
+    "before_logit_relative_l2": 0.0259996111,
+    "threshold": 0.01,
+    "first_divergence": "layer23, prompt row23, dense RoPE used FMA in reference mode",
+    "q8_scaled_value_cpu": 116.50001525878906,
+    "q8_scaled_value_gpu": 116.49999237060547,
+    "small_fixture_old_actual": 2.039535,
+    "small_fixture_expected": 0,
+    "small_fixture_fixed": "pass on physical AMD adapter",
+    "temporary_debug_flags_removed": true
+  },
+  "limits": [
+    "Per-host scalar Oracle; raw greedy outputs differ across ARM64 and x86_64.",
+    "Reference arithmetic disables explicit CPU SIMD for qwen35moe; other MoE model performance not measured.",
+    "Shared host, no dedicated-card or persistent-session throughput claim.",
+    "Vision runs on CPU and has functional image coverage, not numerical Oracle alignment.",
+    "Other GPU/libm combinations, expert formats, MTP, HTTP, concurrency and long contexts were not verified.",
+    "Full library is not green; baseline comparison and one unclassified full-suite-only VibeVoice failure are recorded separately."
+  ],
+  "arm_default_short_oracle": {
+    "source_revision": "28079dd1ef262eaa696dae4c7334c6de73ae96b7",
+    "note": "Final ef3e481 changes GPU RoPE and regression tests; the validated CPU graph is unchanged.",
+    "cases": {
+      "raw": {
+        "checkpoints": 220,
+        "generated": [
+          11,
+          271,
+          40,
+          1044
+        ],
+        "max_relative_l2": 0,
+        "min_cosine": 1,
+        "max_abs": 0
+      },
+      "chat": {
+        "checkpoints": 880,
+        "generated": [
+          109266,
+          6115,
+          98691,
+          101009
+        ],
+        "max_relative_l2": 0,
+        "min_cosine": 1,
+        "max_abs": 0
+      }
+    }
+  },
+  "arm_long_prefill_batch_regression": {
+    "backend": "ARM CPU",
+    "prompt_tokens": 44,
+    "batch_sizes": [
+      1,
+      64
+    ],
+    "checkpoints": 1804,
+    "stages": [
+      "all 40 layer outputs",
+      "all prompt-row output logits"
+    ],
+    "worst": {
+      "relative_l2": 0.0,
+      "max_abs": 0.0,
+      "cosine": 1.0
+    },
+    "binary_sha256": "cfbbd93a98767a17dd9fa55b87679e45d80298ef09e9b22f18d67e7237fe6868",
+    "bounds": {
+      "relative_l2": 0.01,
+      "cosine": 0.99995,
+      "max_logit_abs": 0.5
+    },
+    "scope": "prefill only, floating values are numerically bounded, not asserted bitwise"
+  },
+  "full_library_comparison": {
+    "baseline_revision": "e3c49e3d",
+    "compared_revision": "28079dd1",
+    "final_rope_patch": "Focused/local and physical suites rerun, unrelated failing full-library tests not rerun.",
+    "results": {
+      "cpu": {
+        "base": {
+          "summary": "test result: FAILED. 1248 passed; 24 failed; 83 ignored; 0 measured; 0 filtered out; finished in 29.28s",
+          "failures": [
+            "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+            "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+            "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+            "models::clm::tests::matches_reference_golden_vectors",
+            "models::clm::tests::rejects_wrong_embedding_width",
+            "models::diffusion::z_image::text::tests::qwen_attention_softmax_matches_the_pinned_ggml_neon_reduction",
+            "models::diffusion::z_image::text::tests::silu_mul_inplace_matches_pinned_ggml_neon_activation",
+            "models::diffusion::z_image::vae::tests::silu_matches_pinned_ggml_neon_vector_path",
+            "models::funasr::encoder::parity_tests::fsmn_rounds_product_before_adding_like_ggml",
+            "models::funasr::encoder::parity_tests::layernorm_accumulates_variance_in_ggml_neon_groups",
+            "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+            "models::gemma4::trunk::tests::gemma4_trace_rows_match_batch_one_raw_bits",
+            "models::gemma4::trunk::tests::per_layer_bf16_projection_matches_pinned_scalar_dot_bits",
+            "models::gemma4::trunk::tests::per_layer_projection_rejects_non_bf16_weight",
+            "models::gemma4::trunk::tests::per_layer_projection_rejects_wrong_bf16_storage_length",
+            "models::qwen35::trunk::config::tests::qwen35_config_rejects_invalid_tensor_dimensions",
+            "models::qwen35::trunk::tests::qwen35_trace_metadata_is_independent_of_prefill_batch_size",
+            "ops::argmax::tests::all_negative",
+            "ops::argmax::tests::large_random",
+            "ops::argmax::tests::middle_max",
+            "ops::argmax::tests::tail_handles_non_aligned_lengths",
+            "ops::argmax::tests::ties_pick_lowest_index",
+            "ops::matmul::neon_tests::neon_softmax_matches_ggml_vector_exp_and_f64_sum",
+            "ops::rope::tests::rope_neox_inplace_simd_matches_scalar_fallback"
+          ]
+        },
+        "current": {
+          "summary": "test result: FAILED. 1251 passed; 22 failed; 83 ignored; 0 measured; 0 filtered out; finished in 31.26s",
+          "failures": [
+            "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+            "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+            "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+            "models::clm::tests::matches_reference_golden_vectors",
+            "models::clm::tests::rejects_wrong_embedding_width",
+            "models::diffusion::z_image::text::tests::qwen_attention_softmax_matches_the_pinned_ggml_neon_reduction",
+            "models::diffusion::z_image::text::tests::silu_mul_inplace_matches_pinned_ggml_neon_activation",
+            "models::diffusion::z_image::vae::tests::silu_matches_pinned_ggml_neon_vector_path",
+            "models::funasr::encoder::parity_tests::fsmn_rounds_product_before_adding_like_ggml",
+            "models::funasr::encoder::parity_tests::layernorm_accumulates_variance_in_ggml_neon_groups",
+            "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+            "models::gemma4::trunk::tests::gemma4_trace_rows_match_batch_one_raw_bits",
+            "models::gemma4::trunk::tests::per_layer_bf16_projection_matches_pinned_scalar_dot_bits",
+            "models::gemma4::trunk::tests::per_layer_projection_rejects_non_bf16_weight",
+            "models::gemma4::trunk::tests::per_layer_projection_rejects_wrong_bf16_storage_length",
+            "ops::argmax::tests::all_negative",
+            "ops::argmax::tests::large_random",
+            "ops::argmax::tests::middle_max",
+            "ops::argmax::tests::tail_handles_non_aligned_lengths",
+            "ops::argmax::tests::ties_pick_lowest_index",
+            "ops::matmul::neon_tests::neon_softmax_matches_ggml_vector_exp_and_f64_sum",
+            "ops::rope::tests::rope_neox_inplace_simd_matches_scalar_fallback"
+          ]
+        },
+        "current_only": [],
+        "fixed": [
+          "models::qwen35::trunk::config::tests::qwen35_config_rejects_invalid_tensor_dimensions",
+          "models::qwen35::trunk::tests::qwen35_trace_metadata_is_independent_of_prefill_batch_size"
+        ]
+      },
+      "vulkan": {
+        "base": {
+          "summary": "test result: FAILED. 1343 passed; 32 failed; 163 ignored; 0 measured; 0 filtered out; finished in 48.56s",
+          "failures": [
+            "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+            "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+            "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+            "models::clm::tests::matches_reference_golden_vectors",
+            "models::clm::tests::rejects_wrong_embedding_width",
+            "models::diffusion::z_image::dit::tests::attention_matches_the_ggml_neon_softmax_and_value_reduction",
+            "models::diffusion::z_image::dit::tests::silu_mul_inplace_matches_ggml_neon_activation_dit",
+            "models::diffusion::z_image::dit::tests::torch_mt19937_recomputes_the_final_sixteen_values",
+            "models::diffusion::z_image::text::tests::qwen_attention_softmax_matches_the_pinned_ggml_neon_reduction",
+            "models::diffusion::z_image::text::tests::silu_mul_inplace_matches_pinned_ggml_neon_activation",
+            "models::diffusion::z_image::vae::tests::silu_matches_pinned_ggml_neon_vector_path",
+            "models::dots::weights::tests::flattened_q8_convolution_loads_without_dequantizing_and_runs_batched",
+            "models::funasr::encoder::parity_tests::fsmn_rounds_product_before_adding_like_ggml",
+            "models::funasr::encoder::parity_tests::layernorm_accumulates_variance_in_ggml_neon_groups",
+            "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+            "models::gemma4::trunk::tests::gemma4_trace_rows_match_batch_one_raw_bits",
+            "models::gemma4::trunk::tests::per_layer_bf16_projection_matches_pinned_scalar_dot_bits",
+            "models::gemma4::trunk::tests::per_layer_projection_rejects_non_bf16_weight",
+            "models::gemma4::trunk::tests::per_layer_projection_rejects_wrong_bf16_storage_length",
+            "models::qwen35::trunk::config::tests::qwen35_config_rejects_invalid_tensor_dimensions",
+            "models::qwen35::trunk::tests::last_hidden_borrows_all_final_norm_rows_from_the_last_step",
+            "models::qwen35::trunk::tests::qwen35_failed_chunk_keeps_dense_and_recurrent_state",
+            "models::qwen35::trunk::tests::qwen35_trace_metadata_is_independent_of_prefill_batch_size",
+            "ops::argmax::tests::all_negative",
+            "ops::argmax::tests::large_random",
+            "ops::argmax::tests::middle_max",
+            "ops::argmax::tests::tail_handles_non_aligned_lengths",
+            "ops::argmax::tests::ties_pick_lowest_index",
+            "ops::kernel::q8_0::tests::q8_kernel_thread_partition",
+            "ops::kernel::qtensor_owned::qtensor_owned_tests::qtensor_owned_kernel_matches_borrowed_kernel_bit_exact",
+            "ops::matmul::neon_tests::neon_softmax_matches_ggml_vector_exp_and_f64_sum",
+            "ops::rope::tests::rope_neox_inplace_simd_matches_scalar_fallback"
+          ]
+        },
+        "current": {
+          "summary": "test result: FAILED. 1345 passed; 31 failed; 163 ignored; 0 measured; 0 filtered out; finished in 43.93s",
+          "failures": [
+            "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+            "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+            "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+            "models::clm::tests::matches_reference_golden_vectors",
+            "models::clm::tests::rejects_wrong_embedding_width",
+            "models::diffusion::z_image::dit::tests::attention_matches_the_ggml_neon_softmax_and_value_reduction",
+            "models::diffusion::z_image::dit::tests::silu_mul_inplace_matches_ggml_neon_activation_dit",
+            "models::diffusion::z_image::dit::tests::torch_mt19937_recomputes_the_final_sixteen_values",
+            "models::diffusion::z_image::text::tests::qwen_attention_softmax_matches_the_pinned_ggml_neon_reduction",
+            "models::diffusion::z_image::text::tests::silu_mul_inplace_matches_pinned_ggml_neon_activation",
+            "models::diffusion::z_image::vae::tests::silu_matches_pinned_ggml_neon_vector_path",
+            "models::dots::weights::tests::flattened_q8_convolution_loads_without_dequantizing_and_runs_batched",
+            "models::funasr::encoder::parity_tests::fsmn_rounds_product_before_adding_like_ggml",
+            "models::funasr::encoder::parity_tests::layernorm_accumulates_variance_in_ggml_neon_groups",
+            "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+            "models::gemma4::trunk::tests::gemma4_trace_rows_match_batch_one_raw_bits",
+            "models::gemma4::trunk::tests::per_layer_bf16_projection_matches_pinned_scalar_dot_bits",
+            "models::gemma4::trunk::tests::per_layer_projection_rejects_non_bf16_weight",
+            "models::gemma4::trunk::tests::per_layer_projection_rejects_wrong_bf16_storage_length",
+            "models::qwen35::trunk::tests::last_hidden_borrows_all_final_norm_rows_from_the_last_step",
+            "models::qwen35::trunk::tests::qwen35_failed_chunk_keeps_dense_and_recurrent_state",
+            "models::vibevoice_asr::llm::tests::qkv_bias_is_independent_of_thread_count",
+            "ops::argmax::tests::all_negative",
+            "ops::argmax::tests::large_random",
+            "ops::argmax::tests::middle_max",
+            "ops::argmax::tests::tail_handles_non_aligned_lengths",
+            "ops::argmax::tests::ties_pick_lowest_index",
+            "ops::kernel::q8_0::tests::q8_kernel_thread_partition",
+            "ops::kernel::qtensor_owned::qtensor_owned_tests::qtensor_owned_kernel_matches_borrowed_kernel_bit_exact",
+            "ops::matmul::neon_tests::neon_softmax_matches_ggml_vector_exp_and_f64_sum",
+            "ops::rope::tests::rope_neox_inplace_simd_matches_scalar_fallback"
+          ]
+        },
+        "current_only": [
+          "models::vibevoice_asr::llm::tests::qkv_bias_is_independent_of_thread_count"
+        ],
+        "fixed": [
+          "models::qwen35::trunk::config::tests::qwen35_config_rejects_invalid_tensor_dimensions",
+          "models::qwen35::trunk::tests::qwen35_trace_metadata_is_independent_of_prefill_batch_size"
+        ],
+        "scope": "The full Vulkan run has one current-only VibeVoice failure; its focused test passes on both revisions. The cause remains unproven; it is not classified as a proven baseline failure."
+      },
+      "focused": {
+        "qwen35": {
+          "passed": 53,
+          "failed": 0,
+          "ignored": 10
+        },
+        "vulkan": {
+          "passed": 46,
+          "failed": 0,
+          "ignored": 45
+        },
+        "comparator": {
+          "passed": 4,
+          "failed": 0
+        },
+        "numerical_scope": {
+          "passed": 1,
+          "covers": [
+            "nested scope",
+            "pool workers",
+            "chunk workers",
+            "thread isolation",
+            "restoration",
+            "unwind restoration"
+          ]
+        }
+      }
+    }
+  },
+  "local_final_verification": {
+    "qwen": {
+      "passed": 80,
+      "failed": 0,
+      "ignored": 11,
+      "profile": "release-fast, vulkan+parity-trace"
+    },
+    "vulkan": {
+      "passed": 46,
+      "failed": 0,
+      "ignored": 46,
+      "profile": "release-fast, vulkan+parity-trace"
+    },
+    "comparator_self_tests": 4,
+    "shader_source_binary_manifest_check": true,
+    "format_and_diff_check": true
+  },
+  "independent_code_review": {
+    "range": "e3c49e3d..ef3e4811",
+    "actionable_findings": 0,
+    "scope": [
+      "reference scope and worker propagation",
+      "F32 shader reductions",
+      "RoPE push-constant ABI and arithmetic branch",
+      "long numerical regression"
+    ],
+    "hardware_tests_independently_repeated": false
+  },
+  "oracle_checkpoints": {
+    "arm_short": 1100,
+    "amd_cpu_short": 1100,
+    "amd_vulkan_short": 1100,
+    "amd_cpu_long": 2585,
+    "amd_vulkan_long": 2585,
+    "total": 8470
+  }
+}

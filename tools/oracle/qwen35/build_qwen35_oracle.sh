@@ -80,6 +80,10 @@ else
     cp -R "$source_dir" "$clone_dir"
 fi
 
+# A tarball nested inside a checkout must not resolve the parent's .git and
+# silently skip every patch outside that repository-relative path.
+GIT_CEILING_DIRECTORIES=$(CDPATH= cd -- "$(dirname -- "$clone_dir")" && pwd)
+export GIT_CEILING_DIRECTORIES
 git -C "$clone_dir" apply "$script_dir/qwen35-llama-trace.patch"
 # Match Rust's precise softmax without changing the production implementation.
 git -C "$clone_dir" apply "$script_dir/qwen35-scalar-softmax.patch"
@@ -99,6 +103,7 @@ cmake -S "$clone_dir" -B "$build_dir" \
     -DGGML_METAL=OFF \
     -DGGML_NATIVE=OFF \
     -DGGML_OPENMP=OFF \
+    -DGGML_SSE42=OFF \
     -DGGML_AVX=OFF \
     -DGGML_AVX2=OFF \
     -DGGML_FMA=OFF \
@@ -120,5 +125,6 @@ cmake -S "$clone_dir" -B "$build_dir" \
 # dot product, which is enough to move a router argmax -- the thing this oracle
 # exists to settle. See tools/oracle/shared/build_llama_oracle.sh for the same
 # flags and the longer argument.
+# SSE4.2 also defines __SSE3__, enabling GGML_SIMD float reductions without AVX.
 cmake --build "$build_dir" --target llama-eval-callback --parallel "${RMI_BUILD_JOBS:-4}"
 printf '%s\n' "$build_dir/bin/llama-eval-callback"

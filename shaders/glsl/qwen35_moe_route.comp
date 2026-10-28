@@ -1,0 +1,66 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "host_libm.glsl"
+#include "f32_divide.glsl"
+
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(push_constant) uniform PC {
+    uint logits; uint probs; uint ids; uint weights;
+    uint experts; uint used; float scale; uint normalized;
+} pc;
+
+void main() {
+    if (gl_LocalInvocationID.x != 0u) return;
+    uint token = gl_WorkGroupID.z;
+    uint logits = pc.logits + token * pc.experts;
+    uint probs = pc.probs + token * pc.experts;
+    uint ids = pc.ids + token * pc.used;
+    uint weights = pc.weights + token * pc.used;
+    float maximum = -1.0 / 0.0;
+    bool valid = true;
+    for (uint e = 0u; e < pc.experts; e++) {
+        float value = uintBitsToFloat(arena.data[logits + e]);
+        valid = valid && !isnan(value) && !isinf(value);
+        maximum = max(maximum, value);
+    }
+    precise float total = 0.0;
+    precise float correction = 0.0;
+    for (uint e = 0u; e < pc.experts; e++) {
+        float value = exp_reference(uintBitsToFloat(arena.data[logits + e]) - maximum);
+        arena.data[probs + e] = floatBitsToUint(value);
+        precise float next = total + value;
+        correction += total >= value ? (total - next) + value : (value - next) + total;
+        total = next;
+    }
+    precise float inverse = reciprocal_positive_sum(total, correction);
+    for (uint e = 0u; e < pc.experts; e++) {
+        arena.data[probs + e] = floatBitsToUint(uintBitsToFloat(arena.data[probs + e]) * inverse);
+    }
+    precise float selected_sum = 0.0;
+    precise float selected_correction = 0.0;
+    for (uint slot = 0u; slot < pc.used; slot++) {
+        float best = -1.0;
+        uint chosen = 0u;
+        for (uint e = 0u; e < pc.experts; e++) {
+            bool selected = false;
+            for (uint previous = 0u; previous < slot; previous++) {
+                selected = selected || arena.data[ids + previous] == e;
+            }
+            float probability = uintBitsToFloat(arena.data[probs + e]);
+            // Strict comparison preserves ascending IDs for equal probabilities.
+            if (!selected && probability > best) { best = probability; chosen = e; }
+        }
+        arena.data[ids + slot] = chosen;
+        arena.data[weights + slot] = floatBitsToUint(best);
+        precise float next = selected_sum + best;
+        selected_correction += selected_sum >= best ? (selected_sum - next) + best : (best - next) + selected_sum;
+        selected_sum = next;
+    }
+    selected_sum = max(selected_sum + selected_correction, 6.103515625e-5);
+    for (uint slot = 0u; slot < pc.used; slot++) {
+        precise float normalized = divide_finite_normal(uintBitsToFloat(arena.data[weights + slot]), selected_sum);
+        arena.data[pc.normalized + token * pc.used + slot] = valid ? floatBitsToUint(normalized) : 0x7fc00000u;
+        arena.data[weights + slot] = valid ? floatBitsToUint(normalized * pc.scale) : 0x7fc00000u;
+    }
+}

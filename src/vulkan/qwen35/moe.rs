@@ -144,7 +144,7 @@ impl MoeBindings {
             &commands,
             self.router,
             session.layout.normed,
-            &[(session.layout.router, self.experts.len())],
+            &[(session.layout.router_logits, self.experts.len())],
             width,
             rows,
         )?;
@@ -161,7 +161,7 @@ impl MoeBindings {
         commands = commands.flush()?;
         let logits = session
             .ops
-            .read_f32(session.layout.router, rows * self.experts.len())?
+            .read_f32(session.layout.router_logits, rows * self.experts.len())?
             .to_vec();
         let shared_scores = session
             .ops
@@ -338,10 +338,10 @@ mod tests {
                 .write_f32(session.layout.normed, &input)
                 .unwrap();
             let before = context.compute_stats();
-            session.layers[layer]
-                .moe
-                .as_ref()
-                .unwrap()
+            let FfnBindings::MoeHostRouted(bindings) = &session.layers[layer].ffn else {
+                panic!("requires host-routed MoE expert formats");
+            };
+            bindings
                 .forward(
                     &session,
                     TokenCommands::begin(context).unwrap(),

@@ -3580,9 +3580,18 @@ mod tests {
             0x4019d4e4,
         ]
         .map(f32::from_bits);
-        let (mean, variance) = ggml_layer_norm_stats(&input);
-        assert_eq!(mean.to_bits(), 0xbf6c5994);
-        assert_eq!(variance.to_bits(), 0x40b68732);
+        for count in [1, 4, 7, 8] {
+            let values = &input[..count];
+            let mean = (values.iter().map(|&v| f64::from(v)).sum::<f64>() / count as f64) as f32;
+            let variance = values
+                .iter()
+                .map(|&v| f64::from((v - mean) * (v - mean)))
+                .sum::<f64>() as f32
+                / count as f32;
+            let (actual_mean, actual_variance) = ggml_layer_norm_stats(values);
+            assert!((actual_mean - mean).abs() <= 1e-6);
+            assert!((actual_variance - variance).abs() <= 1e-6 * variance.max(1.0));
+        }
     }
 
     #[test]

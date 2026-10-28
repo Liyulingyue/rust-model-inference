@@ -35,6 +35,8 @@ shader_names=(
     qwen35_attention
     qwen35_recurrent_conv
     qwen35_recurrent_ssm
+    qwen35_moe_route
+    qwen35_moe_reduce
     silu_mul
     add
     moe_reduce

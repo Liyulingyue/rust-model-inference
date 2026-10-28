@@ -9,6 +9,8 @@
 //! - dense-attention softmax + padded value reduction
 //! - `Qwen35Session` state management + embed-lookup helpers
 
+use crate::compute::ComputePolicy;
+
 use super::session::required_token_count;
 use super::session::Qwen35Session;
 use super::*;
@@ -590,7 +592,7 @@ fn tiny_dense_session_model_with_embedding(
     }
 }
 
-fn tiny_dense_session_model() -> Qwen35Model<'static> {
+pub(crate) fn tiny_dense_session_model() -> Qwen35Model<'static> {
     let tok_embd = f32_test_weight((0..32).map(|i| i as f32).collect(), 4, 8);
     tiny_dense_session_model_with_embedding(tok_embd, 4, 8)
 }
@@ -828,7 +830,7 @@ fn tiny_mixed_session_model() -> Qwen35Model<'static> {
 #[cfg(all(test, feature = "vulkan"))]
 fn run_qwen35_cpu_fixture(prompt_len: usize, batch_size: usize) -> Vec<u32> {
     let _cpu = ComputePool::disable_gpu_matmul_for_scope();
-    run_qwen35_chunk_fixture(prompt_len, batch_size, None)
+    run_qwen35_chunk_fixture(prompt_len, batch_size, None, ComputePolicy::Cpu)
 }
 
 #[cfg(all(test, feature = "vulkan"))]
@@ -839,7 +841,12 @@ fn run_qwen35_gpu_failure_fixture(
 ) -> Vec<u32> {
     crate::ops::enable_gpu();
     assert!(crate::ops::get_vulkan_context().is_some());
-    run_qwen35_chunk_fixture(prompt_len, batch_size, Some(fail_after_row))
+    run_qwen35_chunk_fixture(
+        prompt_len,
+        batch_size,
+        Some(fail_after_row),
+        ComputePolicy::Auto,
+    )
 }
 
 #[cfg(test)]
@@ -847,8 +854,9 @@ fn run_qwen35_chunk_fixture(
     prompt_len: usize,
     batch_size: usize,
     fail_after_row: Option<usize>,
+    policy: ComputePolicy,
 ) -> Vec<u32> {
-    let mut session = mixed_fixture_session(prompt_len + 3, batch_size);
+    let mut session = mixed_fixture_session(prompt_len + 3, batch_size, policy);
     #[cfg(feature = "vulkan")]
     if let Some(row) = fail_after_row {
         assert!(session.gpu_enabled_for_test());
@@ -895,7 +903,7 @@ fn qwen35_cpu_scope_skips_full_session_gpu() {
     crate::ops::enable_gpu();
     assert!(crate::ops::get_vulkan_context().is_some());
     let _cpu = ComputePool::disable_gpu_matmul_for_scope();
-    let session = mixed_fixture_session(8, 5);
+    let session = mixed_fixture_session(8, 5, ComputePolicy::Auto);
     assert!(
         !session.gpu_enabled_for_test(),
         "CPU scope must exclude the full Vulkan executor too"
@@ -909,8 +917,8 @@ fn qwen35_gpu_chunk_failure_preserves_a_committed_gpu_prefix() {
     crate::ops::enable_gpu();
     let tokens = [0, 1, 2, 3, 4, 5, 6, 7];
     let positions = (0..8).map(|i| [i, i + 1, i + 2, i + 3]).collect::<Vec<_>>();
-    let mut actual = mixed_fixture_session(11, 3);
-    let mut expected = mixed_fixture_session(11, 3);
+    let mut actual = mixed_fixture_session(11, 3, ComputePolicy::Auto);
+    let mut expected = mixed_fixture_session(11, 3, ComputePolicy::Auto);
     for session in [&mut actual, &mut expected] {
         session
             .step_with_tokens(&tokens[..3], &positions[..3])
@@ -946,14 +954,14 @@ fn qwen35_gpu_chunk_failure_preserves_a_committed_gpu_prefix() {
 fn qwen35_vulkan_chunks_match_token_bits_and_submission_count() {
     crate::ops::enable_gpu();
     let context = crate::ops::get_vulkan_context().unwrap();
-    let baseline = run_qwen35_chunk_fixture(5, 1, None);
+    let baseline = run_qwen35_chunk_fixture(5, 1, None, ComputePolicy::Auto);
     for batch in [2, 3, 5] {
         let before = context.submission_count();
-        let actual = run_qwen35_chunk_fixture(5, batch, None);
+        let actual = run_qwen35_chunk_fixture(5, batch, None, ComputePolicy::Auto);
         assert_eq!(actual, baseline, "batch={batch}");
         assert_eq!(
             context.submission_count() - before,
-            5usize.div_ceil(batch) as u64 + 3
+            2 * (5usize.div_ceil(batch) as u64 + 3)
         );
     }
 }
@@ -996,7 +1004,7 @@ fn qwen35_vulkan_dense_chunks_preserve_four_mrope_axes() {
 #[test]
 fn qwen35_forced_vulkan_failure_preserves_state_without_cpu_retry() {
     let _cpu = ComputePool::disable_gpu_matmul_for_scope();
-    let mut session = mixed_fixture_session(8, 5);
+    let mut session = mixed_fixture_session(8, 5, ComputePolicy::Cpu);
     session.step_with_tokens(&[1], &[[0; 4]]).unwrap();
     let before = snapshot_qwen35_recurrent_state(&session);
     session.force_vulkan_policy_for_test();
@@ -1017,7 +1025,7 @@ fn qwen35_forced_vulkan_failure_preserves_state_without_cpu_retry() {
 #[test]
 fn qwen35_gpu_and_cpu_chunk_failure_preserves_committed_state_and_both_errors() {
     let _cpu = ComputePool::disable_gpu_matmul_for_scope();
-    let mut session = mixed_fixture_session(8, 5);
+    let mut session = mixed_fixture_session(8, 5, ComputePolicy::Cpu);
     session.step_with_tokens(&[1], &[[0; 4]]).unwrap();
     let before = snapshot_qwen35_recurrent_state(&session);
     session.fail_gpu_once_for_test("Vulkan chunk error");
@@ -1076,21 +1084,32 @@ fn recurrent_fixture_session(
     batch_size: usize,
 ) -> Qwen35Session<'static, 'static> {
     let model = Box::leak(Box::new(tiny_recurrent_session_model()));
-    Qwen35Session::new_with_prefill_batch_size(model, capacity, batch_size, session_pool()).unwrap()
+    Qwen35Session::new_with_compute(
+        model,
+        capacity,
+        batch_size,
+        session_pool(),
+        crate::compute::ComputePolicy::Cpu,
+    )
+    .unwrap()
 }
 
-fn mixed_fixture_session(capacity: usize, batch_size: usize) -> Qwen35Session<'static, 'static> {
+fn mixed_fixture_session(
+    capacity: usize,
+    batch_size: usize,
+    policy: ComputePolicy,
+) -> Qwen35Session<'static, 'static> {
     let model = Box::leak(Box::new(tiny_mixed_session_model()));
     model.config.n_ctx = capacity;
-    Qwen35Session::new_with_prefill_batch_size(model, capacity, batch_size, session_pool()).unwrap()
+    Qwen35Session::new_with_compute(model, capacity, batch_size, session_pool(), policy).unwrap()
 }
 
 #[test]
 fn qwen35_mixed_boundaries_preserve_prompt_and_decode_state() {
     for len in [1, 2, 3, 63, 64, 65, 127, 128] {
-        let baseline = run_qwen35_chunk_fixture(len, 1, None);
+        let baseline = run_qwen35_chunk_fixture(len, 1, None, ComputePolicy::Cpu);
         assert_eq!(
-            run_qwen35_chunk_fixture(len, 64, None),
+            run_qwen35_chunk_fixture(len, 64, None, ComputePolicy::Cpu),
             baseline,
             "len={len}"
         );
@@ -1172,7 +1191,7 @@ fn qwen35_recurrent_prefill_and_state_match_batch_one_bits() {
 
 #[test]
 fn qwen35_failed_chunk_keeps_dense_and_recurrent_state() {
-    let mut session = mixed_fixture_session(8, 4);
+    let mut session = mixed_fixture_session(8, 4, ComputePolicy::Cpu);
     session.step_with_tokens(&[1], &[[0; 4]]).unwrap();
     let before = snapshot_qwen35_recurrent_state(&session);
     session.fail_cpu_chunk_after_row_for_test(1);
@@ -1183,7 +1202,7 @@ fn qwen35_failed_chunk_keeps_dense_and_recurrent_state() {
 
     let actual = session.step_with_tokens(&[2], &[[1; 4]]).unwrap();
     let actual_state = snapshot_qwen35_recurrent_state(&session);
-    let mut baseline = mixed_fixture_session(8, 4);
+    let mut baseline = mixed_fixture_session(8, 4, ComputePolicy::Cpu);
     baseline.step_with_tokens(&[1], &[[0; 4]]).unwrap();
     let expected = baseline.step_with_tokens(&[2], &[[1; 4]]).unwrap();
     assert_eq!(
@@ -1201,7 +1220,7 @@ fn qwen35_failed_chunk_keeps_dense_and_recurrent_state() {
 
 #[test]
 fn qwen35_nonfinite_input_commits_no_state() {
-    let mut session = mixed_fixture_session(4, 2);
+    let mut session = mixed_fixture_session(4, 2, ComputePolicy::Cpu);
     let before = snapshot_qwen35_recurrent_state(&session);
     assert!(session.step(&[f32::NAN; 4], 1, &[[0; 4]]).is_err());
     assert_eq!(snapshot_qwen35_recurrent_state(&session), before);
@@ -1256,7 +1275,7 @@ fn qwen35_trace_two_tokens_child() {
         .unwrap()
         .parse::<usize>()
         .unwrap();
-    let mut session = mixed_fixture_session(2, batch_size);
+    let mut session = mixed_fixture_session(2, batch_size, ComputePolicy::Cpu);
     if std::env::var_os("RMI_TEST_TRACE_FAIL_ROW").is_some() {
         session.fail_cpu_chunk_after_row_for_test(1);
         assert!(
@@ -1439,7 +1458,14 @@ fn last_hidden_borrows_all_final_norm_rows_from_the_last_step() {
     model.config.norm_eps = 0.0;
     model.layers[0].wo = Some(f32_test_weight(vec![0.0; 16], 4, 4));
     model.layers[0].ffn_down = Some(f32_test_weight(vec![0.0; 16], 4, 4));
-    let mut session = Qwen35Session::new(&mut model, 2, session_pool()).unwrap();
+    let mut session = Qwen35Session::new_with_compute(
+        &mut model,
+        2,
+        2,
+        session_pool(),
+        crate::compute::ComputePolicy::Cpu,
+    )
+    .unwrap();
     session
         .step(
             &[3.0, 4.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0],

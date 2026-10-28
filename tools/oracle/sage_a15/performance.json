@@ -1,0 +1,196 @@
+{
+  "source_commit": "2ddecab25ce55f60836eb6f468679fccc92eafd3",
+  "metadata": {
+    "profile": "release",
+    "features": [
+      "vulkan"
+    ],
+    "parity_trace": false,
+    "binary_sha256": "578f2e8ac1db1e8b114e4ed0ac4832ca02904f00c2d347f79f4a8c98d44822c8",
+    "multimodal_source_sha256": "337601f04f58ce59a40ab69243f2b03ee5bdbb519a775d0c6611926a9dde0f8b",
+    "cpu": "model name\t: AMD EPYC 9334 32-Core Processor",
+    "gpu_vram_total_bytes": 51522830336,
+    "DRI_PRIME": "pci-0000_c3_00_0!",
+    "environment_note": "Shared GPU; container exposes only card7/renderD134. Weights use host-visible GTT memory.",
+    "utc": "2026-10-23T00:35:33Z"
+  },
+  "parameters": {
+    "temperature": 0,
+    "threads": 8,
+    "prefill_batch_size": 64,
+    "max_tokens": 192,
+    "jinja": true,
+    "thinking": false
+  },
+  "limits": [
+    "One complete run per configuration; no controlled repeated benchmark.",
+    "Shared physical GPU was 98-100 percent busy before these runs; container exposes only card7/renderD134.",
+    "Weights are host-visible GTT buffers; measured process peaks are about 34 GiB GTT and 211 MiB VRAM.",
+    "File/driver caches were not flushed; these are not cold-cache timings or hardware peak performance.",
+    "Scalar and default dispatch produce different complete answers; no speedup or long-graph numerical-parity claim.",
+    "Image encoder/projector runs on CPU; text decoder uses Vulkan."
+  ],
+  "gpu_busy_percent_before_run": [
+    100,
+    99,
+    98,
+    100
+  ],
+  "synthetic_image": {
+    "path": "performance-shapes.png",
+    "width": 384,
+    "height": 192,
+    "sha256": "32108739a717b7eea9a544c65f45923ba540dae158d176040b0fb33e7d9be724",
+    "description": "White background; left red circle, middle blue square, right green triangle."
+  },
+  "cases": [
+    {
+      "name": "scalar-text",
+      "returncode": 0,
+      "scalar": true,
+      "image": false,
+      "command": [
+        "/workspace/rmi-sage-a15-f165/target/release/rust-model-inference",
+        "--model",
+        "/workspace/rmi-sage-a15-f165/models/Sage-A1.5-Q8_0-GGUF/Sage-A1.5-Q8_0.gguf",
+        "--compute",
+        "vulkan",
+        "--jinja",
+        "--no-thinking",
+        "--temp",
+        "0",
+        "--threads",
+        "8",
+        "--prefill-batch-size",
+        "64",
+        "--max-tokens",
+        "192",
+        "--prompt",
+        "请用三句话向初学者解释混合专家（MoE）模型：它如何选择专家、为什么能减少计算，以及一个主要代价。不要列标题。"
+      ],
+      "answer": "混合专家模型像是一个拥有多位专业顾问的团队，每次处理任务时，路由器会根据输入内容智能挑选出最相关的少数几位专家进行协作。\n\n由于每次只需激活总参数中极小的一部分，模型在推理时能大幅节省计算资源，从而实现更快的响应速度。\n\n然而，这种机制的主要代价是路由过程本身引入了额外的开销，且不同专家之间的知识隔离可能导致模型难以进行全局性的知识整合。",
+      "ready_seconds": 58.87871501222253,
+      "first_text_seconds": 75.94599257223308,
+      "ttft_after_ready_seconds": 17.067277560010552,
+      "generation_end_seconds": 177.23433407209814,
+      "process_seconds": 179.07207021862268,
+      "metrics": {
+        "session_init": 58.46641,
+        "prompt_rows": 44,
+        "generated_tokens": 88,
+        "decode_evals": 88,
+        "prefill": 17.06752,
+        "decode": 101.261628,
+        "generation_total": 118.355528
+      },
+      "prefill_rows_per_second": 2.5779961001949907,
+      "decode_evaluations_per_second": 0.8690359985126844,
+      "resource_note": "The original sampler observed card1, so those samples are omitted. Separately observed /proc PID 2444470 fdinfo: drm-pdev 0000:c3:00.0, drm-resident-gtt 35659812 KiB, drm-resident-vram 215952 KiB; target card7 remained busy after stopping the process."
+    },
+    {
+      "name": "default-text-1",
+      "returncode": 0,
+      "scalar": false,
+      "image": false,
+      "command": [
+        "/workspace/rmi-sage-a15-f165/target/release/rust-model-inference",
+        "--model",
+        "/workspace/rmi-sage-a15-f165/models/Sage-A1.5-Q8_0-GGUF/Sage-A1.5-Q8_0.gguf",
+        "--compute",
+        "vulkan",
+        "--jinja",
+        "--no-thinking",
+        "--temp",
+        "0",
+        "--threads",
+        "8",
+        "--prefill-batch-size",
+        "64",
+        "--max-tokens",
+        "192",
+        "--prompt",
+        "请用三句话向初学者解释混合专家（MoE）模型：它如何选择专家、为什么能减少计算，以及一个主要代价。不要列标题。"
+      ],
+      "answer": "混合专家模型像是一个拥有多位专业顾问的团队，每次处理任务时，一个轻量级的门控网络会根据输入内容智能地挑选出最相关的少数几位专家来共同工作。\n\n由于每次只需激活总参数中很小的一部分，模型在推理时能大幅节省计算资源，从而实现比同等规模的密集模型更快的速度或更低的能耗。\n\n然而，这种架构的主要代价是训练过程变得更加复杂且难以并行化，因为需要精心设计路由机制来确保不同专家之间的负载均衡和有效协作。",
+      "ready_seconds": 24.884936649352312,
+      "first_text_seconds": 44.32605503499508,
+      "ttft_after_ready_seconds": 19.441118385642767,
+      "generation_end_seconds": 306.4899870995432,
+      "process_seconds": 308.91826810874045,
+      "metrics": {
+        "session_init": 24.609613,
+        "prompt_rows": 44,
+        "generated_tokens": 104,
+        "decode_evals": 104,
+        "prefill": 19.440916,
+        "decode": 262.130724,
+        "generation_total": 281.605085
+      },
+      "prefill_rows_per_second": 2.2632678419062144,
+      "decode_evaluations_per_second": 0.396748608530147,
+      "process_resource_peaks": {
+        "drm-resident-gtt": 35659812,
+        "drm-resident-vram": 215952,
+        "drm-engine-gfx": 112031721095
+      }
+    },
+    {
+      "name": "default-image-1",
+      "returncode": 0,
+      "scalar": false,
+      "image": true,
+      "command": [
+        "/workspace/rmi-sage-a15-f165/target/release/rust-model-inference",
+        "--model",
+        "/workspace/rmi-sage-a15-f165/models/Sage-A1.5-Q8_0-GGUF/Sage-A1.5-Q8_0.gguf",
+        "--gpu",
+        "--jinja",
+        "--no-thinking",
+        "--temp",
+        "0",
+        "--threads",
+        "8",
+        "--prefill-batch-size",
+        "64",
+        "--max-tokens",
+        "192",
+        "--prompt",
+        "按从左到右的顺序，描述图中三个图形的颜色和形状，用一句话回答。",
+        "--mmproj",
+        "/workspace/rmi-sage-a15-f165/models/Sage-A1.5-Q8_0-GGUF/Sage-A1.5-mmproj.gguf",
+        "--image",
+        "/workspace/rmi-sage-a15-f165/target/sage-gpu/performance-measured/shapes.png"
+      ],
+      "answer": "图中从左到右依次是红色圆形、蓝色正方形和绿色三角形。",
+      "ready_seconds": 27.016145622357726,
+      "first_text_seconds": 80.99082455039024,
+      "ttft_after_ready_seconds": 53.97467892803252,
+      "generation_end_seconds": 100.92576692439616,
+      "process_seconds": 103.38546881265938,
+      "metrics": {
+        "image_total": 4.706,
+        "preprocess": 0.001,
+        "vision_encode": 4.649,
+        "session_init": 21.853159,
+        "prompt_rows": 104,
+        "generated_tokens": 15,
+        "decode_evals": 15,
+        "prefill": 53.974994,
+        "decode": 19.930492,
+        "generation_total": 73.910212
+      },
+      "prefill_rows_per_second": 1.9268181854730728,
+      "decode_evaluations_per_second": 0.7526156403966344,
+      "process_resource_peaks": {
+        "drm-resident-gtt": 35669412,
+        "drm-resident-vram": 215952,
+        "drm-engine-gfx": 66996086931
+      }
+    }
+  ],
+  "resource_peak_units": {
+    "drm-resident-gtt": "KiB",
+    "drm-resident-vram": "KiB",
+    "drm-engine-gfx": "nanoseconds"
+  }
+}
