@@ -15,6 +15,7 @@ converter/
 ├── edge0/        ← Edge0-35B MLX-affine 转换器、反量化与测试
 ├── gliner/       ← GLiNER 转换器和测试
 ├── neohorse/     ← NeoHorse 转换器和测试
+├── ovisocr3/     ← OvisOCR3 Qwen3.5 主模型/mmproj 转换器和测试
 ├── qwen_drive/   ← Qwen-Drive 转换器、测试和 source-tensors.json
 ├── vibevoice/    ← 原版与扩展精度转换器
 ├── yue2/         ← YuE2 主模型与 decoder-only VAE 转换器
@@ -35,10 +36,40 @@ converter/
 | `edge0/convert_edge0.py` | Edge0-35B MLX-affine；支持 `--quant lossless/f32/f16/q8_0/q4_0` |
 | `edge0/mlx_affine.py` | MLX-affine 反量化（与 `MlxAffineKernel::decode_row` 对齐） |
 | `neohorse/convert_neohorse.py` | 使用固定 llama.cpp 版本导出 |
+| `ovisocr3/convert_ovisocr3.py` | 校验 ModelScope OvisOCR3 的 473 个 BF16 张量，并用固定 llama.cpp `b96806d96061049a5b574269b049bf6241d63d46` 导出 `qwen35` 主模型和 `qwen3vl` mmproj |
 | `qwen_drive/convert_qwen_drive.py` | `inspect`、`export`、`verify` |
 | `vibevoice/convert_vibevoice_asr_original.py` | 原版导出 |
 | `vibevoice/convert_vibevoice_asr.py` | 扩展精度导出 |
 | `yue2/convert_yue2.py` | 导出 `yue2` 主模型和 `yue2_vae` F32 decoder；`--quant bf16/f32/q8_0/q4_0/q4_k_m/q6_k`（默认 `bf16` 零拷贝）；固定协议/tokenizer metadata，原子写入并读回校验 |
+
+## OvisOCR3
+
+先按文件下载 ModelScope `ATH-MaaS/OvisOCR3`，并准备固定的 llama.cpp
+`b96806d96061049a5b574269b049bf6241d63d46` checkout：
+
+```bash
+models/.venv/bin/python -m tools.converter.ovisocr3.convert_ovisocr3 \
+  models/OvisOCR3 \
+  --llama-cpp /path/to/llama.cpp \
+  --outfile models/OvisOCR3-BF16.gguf \
+  --mmproj-outfile models/mmproj-OvisOCR3-BF16.gguf
+```
+
+The adapter rejects a near-match architecture, missing/extra tensors, wrong
+shapes or dtypes, and tokenizer/image preprocessing drift before invoking the
+Oracle converter. The 473 source tensors are BF16; tokenizer IDs and
+their BF16 representation are preserved, while tokenizer and metadata
+contracts are checked losslessly. Softmax, exponential,
+image resize, and quantization paths are validated by behavior or error bounds
+only because their floating-point operation order can lose bitwise identity.
+
+The validated ModelScope source has `model.safetensors` SHA-256
+`aa2311c6b22b07cf3afe9aac6e8bcb02a2b19dd8671b2a91d0b144071577e600` and is
+1,706,030,528 bytes. Against the pinned Oracle, a `你好` / four-token greedy
+run matched all 325 trace records' order, shapes, prompt IDs, and generated
+IDs. Embeddings and layer selection were bitwise equal; recurrent/attention
+state, nonlinear, resize, and quantization paths were compared with numerical
+error bounds rather than a bitwise claim.
 
 ## BGE 转换与推理
 
