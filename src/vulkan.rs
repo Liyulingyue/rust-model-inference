@@ -1939,7 +1939,11 @@ impl VulkanContext {
             let create_info = vk::ComputePipelineCreateInfo {
                 s_type: vk::StructureType::COMPUTE_PIPELINE_CREATE_INFO,
                 p_next: std::ptr::null(),
-                flags: Default::default(),
+                flags: if std::env::var_os("RMI_VK_NO_OPT").is_some() {
+                    vk::PipelineCreateFlags::DISABLE_OPTIMIZATION
+                } else {
+                    vk::PipelineCreateFlags::empty()
+                },
                 stage,
                 layout: pipeline_layout,
                 base_pipeline_handle: vk::Pipeline::null(),

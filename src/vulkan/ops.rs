@@ -2068,6 +2068,11 @@ pub(crate) fn build_operator_pipelines(
         .collect();
     let mut pipelines = Vec::with_capacity(OPERATOR_SHADERS.len());
     for (index, shader) in operators.into_iter().enumerate() {
+        // Diagnostic: a driver whose SPIR-V compiler traps takes the whole
+        // process down inside `create_pipeline`, so name the shader first.
+        if std::env::var_os("RMI_VK_TRACE_COMPILE").is_some() {
+            eprintln!("[compile] #{index} {}", OPERATOR_SHADER_NAMES[index]);
+        }
         match context.create_pipeline(context.pipeline_layout, shader) {
             Ok(pipeline) => {
                 if index == Q8_MATMUL_GROUPED {
