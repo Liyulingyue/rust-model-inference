@@ -5,6 +5,7 @@ pub mod protocol;
 mod stop;
 mod think;
 pub mod tools;
+mod unlimited_ocr;
 
 use protocol::{Message, Request};
 use serde_json::{json, Value};
@@ -314,6 +315,9 @@ struct PromptResult {
 }
 
 async fn prompt(state: &AppState, request: &Request) -> Result<PromptResult, (u16, String)> {
+    if let Backend::UnlimitedOcr(native) = state.model.as_ref() {
+        return unlimited_ocr::prepare(&native.model, request).map_err(|e| (400, e));
+    }
     let Backend::Text(text) = state.model.as_ref() else {
         return Err((400, "Server is not running a text model".into()));
     };
@@ -513,6 +517,11 @@ async fn handle(
         Ok(r) => r,
         Err(e) => return error(protocol, 400, e),
     };
+    if matches!(state.model.as_ref(), Backend::UnlimitedOcr(_)) {
+        if let Err(e) = unlimited_ocr::options(&body, &mut request) {
+            return error(protocol, 400, e);
+        }
+    }
     if let Err((status, message)) = resolve(&state, protocol, &mut request) {
         return error(protocol, status, message);
     }
@@ -641,6 +650,11 @@ async fn count_tokens(
         Ok(r) => r,
         Err(e) => return error(Protocol::Anthropic, 400, e),
     };
+    if matches!(state.model.as_ref(), Backend::UnlimitedOcr(_)) {
+        if let Err(e) = unlimited_ocr::options(&body, &mut request) {
+            return error(Protocol::Anthropic, 400, e);
+        }
+    }
     if let Err((status, e)) = resolve(&state, Protocol::Anthropic, &mut request) {
         return error(Protocol::Anthropic, status, e);
     }
@@ -690,13 +704,18 @@ fn generate(
     mut emit: impl FnMut(Delta) -> bool,
     cancelled: impl Fn() -> bool,
 ) -> Result<Generation, String> {
-    let Backend::Text(text) = state.model.as_ref() else {
-        return Err("Server is not running a text model".into());
+    let (arch, handle) = match state.model.as_ref() {
+        Backend::Text(text) => (text.arch.as_str(), text.runtime.as_ref()),
+        Backend::UnlimitedOcr(native) => (
+            crate::models::unlimited_ocr::MODEL_TYPE,
+            Some(&native.runtime),
+        ),
+        _ => return Err("Server is not running a text model".into()),
     };
     if cancelled() {
         return Err("Client disconnected".into());
     }
-    let mut parser = tools::OutputParser::new(&text.arch, &request.tools, &request.choice);
+    let mut parser = tools::OutputParser::new(arch, &request.tools, &request.choice);
     let mut stop = stop::StopFilter::new(request.stop.clone());
     // Strip a leading reasoning block first: a stop sequence inside the block
     // must not cut generation short, and the parser should never see it.
@@ -708,7 +727,12 @@ fn generate(
             stopped = true;
             return false;
         }
-        let output = stop.push(&think.push(chunk));
+        let text = if arch == crate::models::unlimited_ocr::MODEL_TYPE {
+            chunk.to_owned()
+        } else {
+            think.push(chunk)
+        };
+        let output = stop.push(&text);
         match parser.push(&output) {
             Ok(deltas) => {
                 for delta in deltas {
@@ -728,8 +752,8 @@ fn generate(
         stopped = stop.hit.is_some();
         !stopped
     };
-    let Some(handle) = &text.runtime else {
-        return Err(format!("Architecture {:?} is unsupported", text.arch));
+    let Some(handle) = handle else {
+        return Err(format!("Architecture {:?} is unsupported", arch));
     };
     let mut runtime = handle.lock().map_err(|e| e.to_string())?;
     // Bridge the runtime's `TokenSink` to the existing `on_token` closure so
@@ -1446,7 +1470,6 @@ pub async fn jev_score(
     State(state): State<AppState>,
     body: Result<Json<JevScoreRequest>, JsonRejection>,
 ) -> Response {
-    let _compute_scope = state.compute.enter_legacy_scope();
     let Json(req) = match body {
         Ok(j) => j,
         Err(e) => return jev_error(StatusCode::BAD_REQUEST, format!("invalid JSON: {e}")),
@@ -1457,6 +1480,10 @@ pub async fn jev_score(
             "questions must contain at least one item".to_string(),
         );
     }
+    if matches!(state.model.as_ref(), Backend::UnlimitedOcr(_)) {
+        return unlimited_ocr::single(state, req.context, req.questions, req.positive, None).await;
+    }
+    let _compute_scope = state.compute.enter_legacy_scope();
     if let Backend::Gliner2(gliner2) = state.model.as_ref() {
         // The label set is caller-supplied, exactly like the other JEV modes,
         // so the request shape does not change.  Each question is one task:
@@ -1572,7 +1599,6 @@ async fn jev_grouped(
     State(state): State<AppState>,
     body: Result<Json<JevGroupedRequest>, JsonRejection>,
 ) -> Response {
-    let _compute_scope = state.compute.enter_legacy_scope();
     let Json(req) = match body {
         Ok(j) => j,
         Err(e) => return jev_error(StatusCode::BAD_REQUEST, format!("invalid JSON: {e}")),
@@ -1593,6 +1619,10 @@ async fn jev_grouped(
             );
         }
     };
+    if matches!(state.model.as_ref(), Backend::UnlimitedOcr(_)) {
+        return unlimited_ocr::grouped(state, req.context, req.questions, mode, None).await;
+    }
+    let _compute_scope = state.compute.enter_legacy_scope();
     let source = match text_source(&state) {
         Ok(s) => s,
         Err(e) => return jev_error(StatusCode::INTERNAL_SERVER_ERROR, e),
@@ -1657,6 +1687,7 @@ fn text_source(state: &AppState) -> Result<Arc<dyn crate::core::tensor::TensorSo
 fn backend_label(b: &Backend) -> &'static str {
     match b {
         Backend::Text(_) => "text",
+        Backend::UnlimitedOcr(_) => "unlimited-ocr",
         Backend::Embedding(_) => "embedding",
         Backend::Asr(_) => "asr",
         Backend::Audio8(_) => "audio8",
@@ -1756,6 +1787,16 @@ async fn jev_image_score(
         );
     }
 
+    if matches!(state.model.as_ref(), Backend::UnlimitedOcr(_)) {
+        return unlimited_ocr::single(
+            state,
+            req.context,
+            req.questions,
+            req.positive,
+            Some(req.image_url),
+        )
+        .await;
+    }
     let image_path = match decode_image_to_tempfile(&req.image_url) {
         Ok(p) => p,
         Err(e) => return jev_error(StatusCode::BAD_REQUEST, e),
@@ -1836,6 +1877,21 @@ async fn jev_image_grouped(
         }
     };
 
+    if matches!(state.model.as_ref(), Backend::UnlimitedOcr(_)) {
+        let mode = if req.mode == "multi_select" {
+            crate::app::JevMode::MultiSelect
+        } else {
+            crate::app::JevMode::BlockChoice
+        };
+        return unlimited_ocr::grouped(
+            state,
+            req.context,
+            req.questions,
+            mode,
+            Some(req.image_url),
+        )
+        .await;
+    }
     let image_path = match decode_image_to_tempfile(&req.image_url) {
         Ok(p) => p,
         Err(e) => return jev_error(StatusCode::BAD_REQUEST, e),

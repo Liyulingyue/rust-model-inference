@@ -109,7 +109,7 @@ class Trace:
         print(name, layer, values.shape, flush=True)
 
 
-def run(mod, root, output, images, max_tokens, threads):
+def run(mod, root, output, images, max_tokens, threads, instruction="Multi page parsing.", prefill_only=False):
     import torch
     from PIL import Image
     from safetensors.torch import load_file
@@ -136,8 +136,12 @@ def run(mod, root, output, images, max_tokens, threads):
     model = model.float()
     tokenizer = AutoTokenizer.from_pretrained(root, local_files_only=True)
     pil = [Image.open(path).convert("RGB") for path in images]
-    prompt = "<PAGE><image>" * len(pil) + "Multi page parsing."
-    ids, imgs, mask, spatial = mod._uocr_build_inputs(tokenizer, prompt, pil, crop_mode=False)
+    prompt = "<PAGE><image>" * len(pil) + instruction
+    if pil:
+        ids, imgs, mask, spatial = mod._uocr_build_inputs(tokenizer, prompt, pil, crop_mode=False)
+    else:
+        ids = torch.tensor([0] + tokenizer.encode(instruction, add_special_tokens=False))
+        imgs = ([], [])
     trace = Trace(output)
     trace.add("uocr.token_ids", None, ids)
     sam, clip = model.model.sam_model, model.model.vision_model
@@ -178,6 +182,8 @@ def run(mod, root, output, images, max_tokens, threads):
             cache = out.past_key_values
             logits = model.lm_head(out.last_hidden_state[:, -1:]).float()[0, -1]
             trace.add("uocr.logits", None, logits)
+            if prefill_only:
+                break
             mod._uocr_page_count_guard(logits, gen, len(pil), 128827, 1, 20000, guard)
             next_id = int(logits.argmax())
             if next_id == 1:
@@ -190,6 +196,7 @@ def run(mod, root, output, images, max_tokens, threads):
     result = dict(revision=REVISION, dtype="F32 compute from original BF16 storage", threads=threads,
                   platform=platform.platform(), torch_version=torch.__version__, transformers_version=transformers.__version__,
                   image_sha256={str(path): digest(path) for path in images}, max_tokens=max_tokens,
+                  instruction=instruction, prefill_only=prefill_only,
                   prompt_ids=ids.tolist(), generated_ids=gen, text=tokenizer.decode(gen, skip_special_tokens=False),
                   source_sha256=SOURCE_SHA256, weight_sha256=WEIGHT_SHA256)
     (output / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
@@ -283,12 +290,14 @@ def main():
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--primitives", action="store_true")
     p.add_argument("--images", type=Path, nargs="+")
+    p.add_argument("--instruction", type=Path, help="UTF-8 instruction file; page markers are automatic")
+    p.add_argument("--prefill-only", action="store_true", help="record final logits without sampling (JEV alignment)")
     p.add_argument("--max-tokens", type=int, default=8)
     p.add_argument("--threads", type=int, default=8)
     p.add_argument("--compare", type=Path, nargs=2, metavar=("ORACLE_TRACE", "RUST_TRACE"))
     p.add_argument("--scope", choices=["all", "vision", "decoder"], default="all", help="comparison scope; bounds are identical for each scope")
     args = p.parse_args()
-    if not args.compare and (args.model_root is None or (not args.primitives and not args.images)):
+    if not args.compare and (args.model_root is None or (not args.primitives and not args.images and not (args.prefill_only and args.instruction))):
         p.error("--model-root and --images are required for real inference")
     if args.max_tokens <= 0 or args.threads <= 0:
         p.error("--max-tokens and --threads must be positive")
@@ -299,7 +308,8 @@ def main():
         if args.primitives:
             primitives(mod, args.model_root, args.output)
         else:
-            run(mod, args.model_root, args.output, args.images, args.max_tokens, args.threads)
+            run(mod, args.model_root, args.output, args.images or [], args.max_tokens, args.threads,
+                args.instruction.read_text() if args.instruction else "Multi page parsing.", args.prefill_only)
 
 
 if __name__ == "__main__":

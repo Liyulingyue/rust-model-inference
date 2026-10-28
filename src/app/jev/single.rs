@@ -596,6 +596,16 @@ pub(crate) fn compute_jev_result(
                 .unwrap_or(0)
         })
         .collect();
+    compute_jev_result_with_ids(q, labels, &label_ids, logits, prefill_ms)
+}
+
+pub(crate) fn compute_jev_result_with_ids(
+    q: &PreparedQuestion,
+    labels: &[char],
+    label_ids: &[u32],
+    logits: &[f32],
+    prefill_ms: u128,
+) -> JevResult {
     let max_logit = label_ids
         .iter()
         .map(|&id| logits[id as usize])

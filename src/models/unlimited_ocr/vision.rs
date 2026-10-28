@@ -7,6 +7,15 @@ use std::path::Path;
 
 pub(super) fn preprocess(path: &Path) -> Result<Vec<f32>, String> {
     let image = image::open(path).map_err(|e| format!("Read OCR page {}: {e}", path.display()))?;
+    preprocess_image(image)
+}
+
+pub(super) fn preprocess_bytes(bytes: &[u8]) -> Result<Vec<f32>, String> {
+    let image = image::load_from_memory(bytes).map_err(|e| format!("Read OCR page: {e}"))?;
+    preprocess_image(image)
+}
+
+fn preprocess_image(image: image::DynamicImage) -> Result<Vec<f32>, String> {
     if !matches!(
         image.color(),
         image::ColorType::L8
@@ -158,7 +167,10 @@ impl<'a> Conv<'a> {
                     }
                 }
             });
-        Ok((self.linear.forward(pool, &patches, out * out)?, out))
+        Ok((
+            self.linear.forward_verified(pool, &patches, out * out)?,
+            out,
+        ))
     }
 }
 struct Block<'a> {
@@ -304,9 +316,9 @@ impl<'a> Vision<'a> {
                             }
                         }
                     }
-                    let qkv = b.qkv.forward(pool, &window, w * w)?;
+                    let qkv = b.qkv.forward_verified(pool, &window, w * w)?;
                     let attn = attention(&qkv, w * w, 12, Some((&b.rel_h, &b.rel_w, w)));
-                    let values = b.proj.forward(pool, &attn, w * w)?;
+                    let values = b.proj.forward_verified(pool, &attn, w * w)?;
                     for y in 0..w {
                         for xx in 0..w {
                             let gy = wy * w + y;
@@ -325,9 +337,9 @@ impl<'a> Vision<'a> {
                 *v += a;
             }
             let norm = b.n2.forward(&x)?;
-            let mut up = b.up.forward(pool, &norm, 4096)?;
+            let mut up = b.up.forward_verified(pool, &norm, 4096)?;
             crate::ops::gelu_erf_inplace(&mut up);
-            let down = b.down.forward(pool, &up, 4096)?;
+            let down = b.down.forward_verified(pool, &up, 4096)?;
             for (v, d) in x.iter_mut().zip(down) {
                 *v += d;
             }
@@ -350,18 +362,18 @@ impl<'a> Vision<'a> {
         trace("uocr.clip_embed", None, &[257, 1024], &x);
         for (i, b) in self.clip.iter().enumerate() {
             let norm = b.n1.forward(&x)?;
-            let qkv = b.qkv.forward(pool, &norm, 257)?;
+            let qkv = b.qkv.forward_verified(pool, &norm, 257)?;
             let attn = attention(&qkv, 257, 16, None);
-            let projected = b.proj.forward(pool, &attn, 257)?;
+            let projected = b.proj.forward_verified(pool, &attn, 257)?;
             for (v, a) in x.iter_mut().zip(projected) {
                 *v += a;
             }
             let norm = b.n2.forward(&x)?;
-            let mut up = b.up.forward(pool, &norm, 257)?;
+            let mut up = b.up.forward_verified(pool, &norm, 257)?;
             for v in &mut up {
                 *v *= 1.0 / (1.0 + (-1.702 * *v).exp());
             }
-            let down = b.down.forward(pool, &up, 257)?;
+            let down = b.down.forward_verified(pool, &up, 257)?;
             for (v, a) in x.iter_mut().zip(down) {
                 *v += a;
             }
@@ -372,7 +384,7 @@ impl<'a> Vision<'a> {
             combined.extend_from_slice(clip);
             combined.extend_from_slice(sam);
         }
-        let projected = self.projector.forward(pool, &combined, 256)?;
+        let projected = self.projector.forward_verified(pool, &combined, 256)?;
         let mut result = Vec::with_capacity(273 * HIDDEN);
         for row in projected.chunks_exact(16 * HIDDEN) {
             result.extend_from_slice(row);

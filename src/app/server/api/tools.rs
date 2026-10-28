@@ -485,6 +485,7 @@ pub fn build_prompt(
 }
 
 pub struct OutputParser {
+    plain_text: bool,
     qwen35: bool,
     tools: HashMap<String, Value>,
     choice: ToolChoice,
@@ -502,13 +503,24 @@ pub struct OutputParser {
 
 impl OutputParser {
     pub fn new(arch: &str, tools: &[Tool], choice: &ToolChoice) -> Self {
-        let arch = is_qwen35(arch);
+        let plain_text = arch == crate::models::unlimited_ocr::MODEL_TYPE;
+        let arch = if plain_text {
+            Ok(false)
+        } else {
+            is_qwen35(arch)
+        };
         let error = arch
             .as_ref()
             .err()
             .cloned()
             .or_else(|| validate_tools(tools, choice).err());
+        let error = error.or_else(|| {
+            (plain_text
+                && (!tools.is_empty() || !matches!(choice, ToolChoice::Auto | ToolChoice::None)))
+            .then(|| "Unlimited-OCR does not support tools".into())
+        });
         Self {
+            plain_text,
             qwen35: arch.unwrap_or(false),
             tools: tools
                 .iter()
@@ -534,6 +546,11 @@ impl OutputParser {
         }
         if self.finished {
             return Err("Output parser already finished".into());
+        }
+        if self.plain_text {
+            let mut deltas = Vec::new();
+            self.emit_text(text.to_owned(), &mut deltas)?;
+            return Ok(deltas);
         }
         self.pending.push_str(text);
         let result = self.drain();

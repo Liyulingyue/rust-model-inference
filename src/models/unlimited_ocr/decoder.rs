@@ -22,10 +22,10 @@ impl<'a> Mlp<'a> {
     }
     fn forward(&self, pool: &ComputePool, x: &[f32]) -> Result<Vec<f32>, String> {
         let rows = x.len() / HIDDEN;
-        let gate = self.gate.forward(pool, x, rows)?;
-        let mut up = self.up.forward(pool, x, rows)?;
+        let gate = self.gate.forward_verified(pool, x, rows)?;
+        let mut up = self.up.forward_verified(pool, x, rows)?;
         crate::ops::silu_mul_inplace(&gate, &mut up);
-        self.down.forward(pool, &up, rows)
+        self.down.forward_verified(pool, &up, rows)
     }
 }
 struct Layer<'a> {
@@ -122,16 +122,16 @@ impl<'a> Decoder<'a> {
         trace("uocr.embeddings", None, &[rows, HIDDEN], &x);
         for (i, (layer, cache)) in self.layers.iter().zip(caches).enumerate() {
             let norm = rms_norm_rows(&x, rows, &layer.norm, 1e-6)?;
-            let mut q = layer.q.forward(pool, &norm, rows)?;
-            let mut k = layer.k.forward(pool, &norm, rows)?;
-            let v = layer.v.forward(pool, &norm, rows)?;
-            let mut rq = router_norm(layer.rq.forward(pool, &norm, rows)?, &layer.rqn)?;
-            let mut rk = router_norm(layer.rk.forward(pool, &norm, rows)?, &layer.rkn)?;
+            let mut q = layer.q.forward_verified(pool, &norm, rows)?;
+            let mut k = layer.k.forward_verified(pool, &norm, rows)?;
+            let v = layer.v.forward_verified(pool, &norm, rows)?;
+            let mut rq = router_norm(layer.rq.forward_verified(pool, &norm, rows)?, &layer.rqn)?;
+            let mut rk = router_norm(layer.rk.forward_verified(pool, &norm, rows)?, &layer.rkn)?;
             let coords = &pages.coords[start..start + rows];
-            sparse::rope(&mut q, coords, 10);
-            sparse::rope(&mut k, coords, 10);
-            sparse::rope(&mut rq, coords, 1);
-            sparse::rope(&mut rk, coords, 1);
+            sparse::rope(&mut q, coords, 10, pages.page_rope);
+            sparse::rope(&mut k, coords, 10, pages.page_rope);
+            sparse::rope(&mut rq, coords, 1, pages.page_rope);
+            sparse::rope(&mut rk, coords, 1, pages.page_rope);
             cache.k.extend(k);
             cache.v.extend(v);
             cache.index.extend(rk);
@@ -206,7 +206,7 @@ impl<'a> Decoder<'a> {
                     }
                 });
             trace("uocr.attention", Some(i), &[rows, HIDDEN], &attended);
-            let projected = layer.o.forward(pool, &attended, rows)?;
+            let projected = layer.o.forward_verified(pool, &attended, rows)?;
             for (dst, value) in x.iter_mut().zip(projected) {
                 *dst += value;
             }
@@ -226,13 +226,32 @@ impl<'a> Decoder<'a> {
         }
         let output = rms_norm_rows(&x, rows, &self.norm, 1e-6)?;
         trace("uocr.norm", None, &[rows, HIDDEN], &output);
-        let logits = self.head.forward(pool, &output[(rows - 1) * HIDDEN..], 1)?;
+        let logits = self
+            .head
+            .forward_verified(pool, &output[(rows - 1) * HIDDEN..], 1)?;
         if logits.iter().any(|v| !v.is_finite()) {
             return Err("Non-finite Unlimited-OCR logits".into());
         }
         trace("uocr.logits", None, &[VOCAB], &logits);
         Ok(logits)
     }
+    pub fn prefill(
+        &self,
+        pool: &ComputePool,
+        ids: &[u32],
+        hidden: Vec<f32>,
+    ) -> Result<Vec<f32>, String> {
+        let pages = Pages::new(ids)?;
+        self.forward(
+            pool,
+            hidden,
+            &pages,
+            0,
+            &mut (0..12).map(|_| Cache::default()).collect::<Vec<_>>(),
+        )
+    }
+
+    #[cfg(test)]
     pub fn generate(
         &self,
         pool: &ComputePool,
@@ -242,10 +261,33 @@ impl<'a> Decoder<'a> {
         expected_pages: usize,
         dump_logits: bool,
     ) -> Result<Vec<u32>, String> {
+        self.generate_stream(
+            pool,
+            ids,
+            hidden,
+            max_tokens,
+            expected_pages,
+            dump_logits,
+            &mut |_| Ok(crate::ops::generation_runtime::Flow::Continue),
+        )
+        .map(|r| r.0)
+    }
+
+    pub fn generate_stream(
+        &self,
+        pool: &ComputePool,
+        ids: &[u32],
+        hidden: Vec<f32>,
+        max_tokens: usize,
+        expected_pages: usize,
+        dump_logits: bool,
+        on_token: &mut dyn FnMut(u32) -> Result<crate::ops::generation_runtime::Flow, String>,
+    ) -> Result<(Vec<u32>, crate::ops::generation_runtime::Finish), String> {
         let mut pages = Pages::new(ids)?;
         let mut caches: Vec<_> = (0..12).map(|_| Cache::default()).collect();
         let mut logits = self.forward(pool, hidden, &pages, 0, &mut caches)?;
         let mut generated = Vec::new();
+        let mut finish = crate::ops::generation_runtime::Finish::Limit;
         for step in 0..max_tokens {
             if dump_logits {
                 println!("{}", serde_json::json!({"step":step,"logits":logits}));
@@ -258,9 +300,14 @@ impl<'a> Decoder<'a> {
                 .unwrap()
                 .0 as u32;
             if next == 1 {
+                finish = crate::ops::generation_runtime::Finish::Eos;
                 break;
             }
             generated.push(next);
+            if on_token(next)? == crate::ops::generation_runtime::Flow::Stop {
+                finish = crate::ops::generation_runtime::Finish::Cancelled;
+                break;
+            }
             if step + 1 == max_tokens {
                 break;
             }
@@ -275,7 +322,7 @@ impl<'a> Decoder<'a> {
             &[generated.len()],
             &generated.iter().map(|x| *x as f32).collect::<Vec<_>>(),
         );
-        Ok(generated)
+        Ok((generated, finish))
     }
 }
 fn router_norm(input: Vec<f32>, weight: &[f32]) -> Result<Vec<f32>, String> {
@@ -310,7 +357,11 @@ fn moe(
     layer_index: usize,
 ) -> Result<Vec<f32>, String> {
     let rows = x.len() / HIDDEN;
-    let scores = layer.gate.as_ref().unwrap().forward(pool, x, rows)?;
+    let scores = layer
+        .gate
+        .as_ref()
+        .unwrap()
+        .forward_verified(pool, x, rows)?;
     trace("uocr.moe_gate", Some(layer_index), &[rows, 64], &scores);
     let mut assignments: Vec<Vec<(usize, f32)>> = (0..64).map(|_| Vec::new()).collect();
     for (row, logits) in scores.chunks_exact(64).enumerate() {

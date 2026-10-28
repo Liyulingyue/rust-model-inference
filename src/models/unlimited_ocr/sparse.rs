@@ -1,6 +1,7 @@
 use super::{IMAGE, PAGE};
 
 pub(super) struct Pages {
+    pub page_rope: bool,
     pub coords: Vec<(usize, usize)>,
     pub image_pages: Vec<Option<usize>>,
     pub query_pages: Vec<Option<usize>>,
@@ -11,15 +12,26 @@ pub(super) struct Pages {
 
 impl Pages {
     pub fn new(ids: &[u32]) -> Result<Self, String> {
-        let last = ids
-            .iter()
-            .rposition(|&id| id == IMAGE)
-            .ok_or("Unlimited-OCR prompt has no image tokens")?;
+        if ids.is_empty() {
+            return Err("Unlimited-OCR prompt is empty".into());
+        }
+        let Some(last) = ids.iter().rposition(|&id| id == IMAGE) else {
+            return Ok(Self {
+                page_rope: false,
+                coords: (0..ids.len()).map(|i| (i, 0)).collect(),
+                image_pages: vec![None; ids.len()],
+                query_pages: vec![None; ids.len()],
+                counts: vec![ids.len()],
+                markers: 0,
+                prompt_pages: 0,
+            });
+        };
         let prompt_pages = ids[..=last].iter().filter(|&&id| id == PAGE).count();
         if prompt_pages == 0 {
             return Err("Unlimited-OCR requires page markers before image runs".into());
         }
         let mut result = Self {
+            page_rope: true,
             coords: Vec::new(),
             image_pages: Vec::new(),
             query_pages: Vec::new(),
@@ -84,14 +96,19 @@ impl Pages {
 }
 
 /// Neox layout, 63 resampled token frequency pairs and one alternating page pair.
-pub(super) fn rope(x: &mut [f32], coords: &[(usize, usize)], heads: usize) {
+pub(super) fn rope(x: &mut [f32], coords: &[(usize, usize)], heads: usize, page_rope: bool) {
     for (row, &(tok, page)) in x.chunks_exact_mut(heads * 128).zip(coords) {
         for head in row.chunks_exact_mut(128) {
             for i in 0..64 {
-                let angle = if i == 63 {
+                let angle = if page_rope && i == 63 {
                     (page % 2) as f32
                 } else {
-                    tok as f32 * (1.0 / 10000_f32.powf(i as f32 / 63.0))
+                    tok as f32
+                        * if page_rope {
+                            1.0 / 10000_f32.powf(i as f32 / 63.0)
+                        } else {
+                            text_rope_frequencies()[i]
+                        }
                 };
                 let (sin, cos) = angle.sin_cos();
                 let a = head[i];
@@ -101,6 +118,25 @@ pub(super) fn rope(x: &mut [f32], coords: &[(usize, usize)], heads: usize) {
             }
         }
     }
+}
+
+// The official no-image fallback uses YaRN (theta 500000, factor 4), with unit magnitude.
+fn text_rope_frequencies() -> &'static [f32] {
+    static FREQUENCIES: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
+    FREQUENCIES.get_or_init(|| {
+        let yarn = crate::models::mellum::trunk::YarnRope {
+            n_dims: 128,
+            n_ctx_orig: 32768.0,
+            freq_base: 500000.0,
+            freq_scale: 0.25,
+            ext_factor: 1.0,
+            mscale: 1.0,
+            corr_dims: [24.0, 42.0],
+        };
+        (0..64)
+            .map(|i| yarn.theta_from_extrap(1.0 / 500000_f32.powf(i as f32 / 64.0), i))
+            .collect()
+    })
 }
 
 pub(super) fn entmax15(scores: &[f32]) -> Vec<f32> {
@@ -167,6 +203,24 @@ pub(super) fn route(scores: &[f32], allowed: &[bool]) -> Vec<(usize, f32)> {
 mod tests {
     use super::*;
     #[test]
+    fn text_prefill_uses_official_one_dimensional_rope_fallback() {
+        let pages = Pages::new(&[0, 42, 43]).unwrap();
+        assert_eq!(pages.coords, [(0, 0), (1, 0), (2, 0)]);
+        assert!(!pages.page_rope);
+        assert_eq!(pages.candidate_blocks(2, 2), [true, true]);
+        let mut values = vec![1.0; 3 * 128];
+        rope(&mut values, &pages.coords, 1, pages.page_rope);
+        let fixture: Vec<f32> = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/unlimited_ocr_text_rope.json"
+        ))
+        .unwrap();
+        for (actual, expected) in text_rope_frequencies().iter().zip(&fixture) {
+            assert!((actual - expected).abs() <= 1e-6 * expected.abs());
+        }
+        let angle = 2.0 * fixture[63];
+        assert!((values[256 + 63] - (angle.cos() - angle.sin())).abs() < 1e-6);
+    }
+    #[test]
     fn page_coordinates_rope_and_routes_match_pinned_official_fixture() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../tests/fixtures/unlimited_ocr_oracle.json"
@@ -199,7 +253,7 @@ mod tests {
             })
             .collect();
         let mut rotated = vec![1.0; coords.len() * 128];
-        rope(&mut rotated, &coords, 1);
+        rope(&mut rotated, &coords, 1, true);
         for (actual, expected) in rotated
             .iter()
             .zip(fixture["rope"]["ones_rotated"].as_array().unwrap())

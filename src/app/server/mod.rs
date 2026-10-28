@@ -60,6 +60,7 @@ fn compute_task<T: Send + 'static>(
 
 enum Backend {
     Text(TextBackend),
+    UnlimitedOcr(UnlimitedOcrBackend),
     Embedding(EmbeddingBackend),
     Asr(AsrBackend),
     Audio8(Audio8Backend),
@@ -69,6 +70,11 @@ enum Backend {
     Gliner2(Gliner2Backend),
     Gliner2Boundary(Gliner2BoundaryBackend),
     Timestral(TimestralBackend),
+}
+
+struct UnlimitedOcrBackend {
+    model: Arc<crate::models::unlimited_ocr::Model>,
+    runtime: crate::ops::TextRuntimeHandle,
 }
 
 /// Timestral backend: the 209M time-series forecaster in one GGUF, named
@@ -938,6 +944,21 @@ fn build_backend(options: &CliOptions) -> Result<Arc<Backend>, String> {
     options.validate_compute_mode()?;
     options.compute_policy().check_build()?;
     let _scope = options.compute_policy().enter_legacy_scope();
+    if crate::models::unlimited_ocr::matches_model(&options.model) {
+        crate::models::unlimited_ocr::validate_options(options)?;
+        let model = Arc::new(crate::models::unlimited_ocr::Model::load(
+            &options.model,
+            options.threads,
+            options.effective_max_context(),
+        )?);
+        let runtime = Mutex::new(
+            Box::new(model.clone()) as Box<dyn crate::ops::generation_runtime::TextRuntime>
+        );
+        return Ok(Arc::new(Backend::UnlimitedOcr(UnlimitedOcrBackend {
+            model,
+            runtime,
+        })));
+    }
     if options.tts {
         return Ok(Arc::new(Backend::Tts(build_tts(options)?)));
     }
@@ -1685,6 +1706,7 @@ pub fn run_server() {
 
     let mode_label = match backend.as_ref() {
         Backend::Text(_) => "text",
+        Backend::UnlimitedOcr(_) => "unlimited-ocr",
         Backend::Embedding(_) => "embedding",
         Backend::Asr(_) => "asr",
         Backend::Audio8(_) => "audio8",
@@ -1712,7 +1734,7 @@ pub fn run_server() {
         .route("/health", get(health))
         .route("/v1/models", get(list_models));
     router = match state.model.as_ref() {
-        Backend::Text(_) => router.merge(api::routes()),
+        Backend::Text(_) | Backend::UnlimitedOcr(_) => router.merge(api::routes()),
         Backend::Embedding(_) => router.route(
             "/v1/embeddings",
             post(embeddings).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
