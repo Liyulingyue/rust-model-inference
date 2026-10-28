@@ -3654,7 +3654,7 @@ mod tests {
     }
 
     #[test]
-    fn layer_norm_stats_include_every_simd_lane_and_tail() {
+    fn layer_norm_stats_cover_every_length() {
         for len in [4, 8, 12, 13, 16, 1152] {
             let input: Vec<f32> = (0..len)
                 .map(|i| if i % 8 >= 4 { 1.0 } else { 0.0 })

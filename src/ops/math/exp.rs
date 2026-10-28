@@ -180,7 +180,7 @@ pub(crate) unsafe fn exp_approx_neon(
 }
 
 #[cfg(test)]
-mod tests {
+mod clamp_tests {
     use super::exp_approx_inplace;
 
     /// The fast path builds `2**n` by shifting float bits, so the clamp bound
