@@ -226,6 +226,15 @@ impl<'a> Linear<'a> {
                         HEALTHY_WORST.fetch_max(worst.to_bits(), Ordering::Relaxed);
                     }
                     let mut attempts = 0;
+                    let mut matches = projection_matches_cpu(
+                        pool,
+                        weight,
+                        input,
+                        &output,
+                        rows,
+                        self.n_in(),
+                        self.n_out(),
+                    );
                     if std::env::var_os("RMI_GPU_VERIFY_TRACE").is_some() {
                         // When the check fails, the whole output is compared
                         // against the CPU kernel, so the shape of the damage
@@ -288,8 +297,12 @@ impl<'a> Linear<'a> {
                             )
                         );
                     }
-                    while attempts < GPU_RETRY_LIMIT
-                        && !projection_matches_cpu(
+                    while attempts < GPU_RETRY_LIMIT && !matches {
+                        attempts += 1;
+                        if !self.weight.try_vulkan_rows(input, &mut output, rows) {
+                            break;
+                        }
+                        matches = projection_matches_cpu(
                             pool,
                             weight,
                             input,
@@ -297,27 +310,14 @@ impl<'a> Linear<'a> {
                             rows,
                             self.n_in(),
                             self.n_out(),
-                        )
-                    {
-                        attempts += 1;
-                        if !self.weight.try_vulkan_rows(input, &mut output, rows) {
-                            break;
-                        }
+                        );
                     }
                     if attempts > 0 {
                         eprintln!(
                             "[GPU-VERIFY] a projection was wrong and {attempts} retries fixed it"
                         );
                     }
-                    if !projection_matches_cpu(
-                        pool,
-                        weight,
-                        input,
-                        &output,
-                        rows,
-                        self.n_in(),
-                        self.n_out(),
-                    ) {
+                    if !matches {
                         eprintln!(
                             "[GPU] a projection did not match the CPU kernel after {attempts} retries; recomputing it on the CPU"
                         );
