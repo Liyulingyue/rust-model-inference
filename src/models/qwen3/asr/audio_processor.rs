@@ -439,7 +439,30 @@ fn fft_real(
     }
 }
 
+pub(crate) fn compute_whisper_log_mel(samples: &[f32]) -> Result<LogMel, AsrAudioError> {
+    compute_log_mel_impl(samples, 1e-10, true)
+}
+
+#[cfg(test)]
+mod hy_simulmt_tests {
+    #[test]
+    fn whisper_mel_drops_the_trailing_frame_and_uses_1e_minus_10_floor() {
+        let mel = super::compute_whisper_log_mel(&vec![0.0; 16_000]).unwrap();
+        assert_eq!(mel.frames, 100);
+        assert_eq!(mel.raw, vec![-10.0; 128 * 100]);
+        assert_eq!(mel.normalized, vec![-1.5; 128 * 100]);
+    }
+}
+
 pub(crate) fn compute_log_mel(samples: &[f32]) -> Result<LogMel, AsrAudioError> {
+    compute_log_mel_impl(samples, 5.960464477539063e-8, false)
+}
+
+fn compute_log_mel_impl(
+    samples: &[f32],
+    floor: f64,
+    drop_last: bool,
+) -> Result<LogMel, AsrAudioError> {
     if samples.is_empty() || samples.iter().any(|sample| !sample.is_finite()) {
         return Err(AsrAudioError::Invalid(
             "audio samples must be non-empty and finite".into(),
@@ -457,7 +480,9 @@ pub(crate) fn compute_log_mel(samples: &[f32]) -> Result<LogMel, AsrAudioError> 
         .checked_div(HOP)
         .and_then(|frames| frames.checked_add(1))
         .ok_or_else(|| AsrAudioError::Invalid("effective frame count overflow".into()))?;
-    let frames = stft_frames.min(sample_frames);
+    let frames = stft_frames
+        .min(sample_frames)
+        .saturating_sub(usize::from(drop_last));
     let raw_len = MEL_BINS
         .checked_mul(frames)
         .ok_or_else(|| AsrAudioError::Invalid("log-Mel size overflow".into()))?;
@@ -502,7 +527,7 @@ pub(crate) fn compute_log_mel(samples: &[f32]) -> Result<LogMel, AsrAudioError> 
                 power_sum += f64::from(power[bin] * filter[bin]);
                 bin += 1;
             }
-            let value = unsafe { log10(power_sum.max(f64::from(5.960464477539063e-8f32))) } as f32;
+            let value = unsafe { log10(power_sum.max(floor)) } as f32;
             if !value.is_finite() {
                 return Err(AsrAudioError::Invalid("non-finite log-Mel value".into()));
             }

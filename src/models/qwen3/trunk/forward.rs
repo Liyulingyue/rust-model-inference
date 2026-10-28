@@ -42,7 +42,11 @@ pub(super) fn forward_moe_token(
     layer: &Qwen3LayerWeights<'_>,
     config: &Qwen3Config,
     output: &mut [f32],
+    pool: &ComputePool,
 ) -> Result<(), String> {
+    if layer.hy_shared.is_some() {
+        return crate::models::hy_simulmt::moe::forward(input, layer, config, pool, output);
+    }
     let router = layer.moe_router.as_deref().ok_or("missing MoE router")?;
     let gate = layer
         .moe_gate
@@ -623,7 +627,13 @@ fn text_encode_forward(
             let mut moe_out = vec![0.0; cfg.n_embd];
             for tok in 0..n_tokens {
                 let off = tok * cfg.n_embd;
-                forward_moe_token(&ffn_normed[off..off + cfg.n_embd], layer, cfg, &mut moe_out)?;
+                forward_moe_token(
+                    &ffn_normed[off..off + cfg.n_embd],
+                    layer,
+                    cfg,
+                    &mut moe_out,
+                    &model.pool,
+                )?;
                 hidden[off..off + cfg.n_embd]
                     .iter_mut()
                     .zip(&moe_out)

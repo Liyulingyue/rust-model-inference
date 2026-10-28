@@ -65,7 +65,7 @@ pub(crate) struct AudioEmbeddings {
     pub dim: usize,
 }
 
-pub(in crate::models::qwen3) struct LayerNormWeights {
+pub(crate) struct LayerNormWeights {
     pub weight: Vec<f32>,
     pub bias: Vec<f32>,
 }
@@ -549,7 +549,7 @@ impl Qwen3AudioModel {
 }
 
 impl LayerNormWeights {
-    pub(in crate::models::qwen3) fn load(
+    pub(crate) fn load(
         source: &dyn TensorSource,
         prefix: &str,
         dims: &[u64],
@@ -1140,7 +1140,7 @@ fn layer_norm(
 /// precision (f64) variant. See git history for a prior f64
 /// implementation that was removed without an oracle test verifying
 /// it was necessary.
-pub(in crate::models::qwen3) fn layer_norm_rows(
+pub(crate) fn layer_norm_rows(
     input: &[f32],
     rows: usize,
     weights: &LayerNormWeights,
@@ -1168,7 +1168,7 @@ pub(in crate::models::qwen3) fn layer_norm_rows(
     Ok(())
 }
 
-pub(in crate::models::qwen3) fn apply_gelu_erf(values: &mut [f32]) -> Result<(), String> {
+pub(crate) fn apply_gelu_erf(values: &mut [f32]) -> Result<(), String> {
     if values.is_empty() || values.iter().any(|value| !value.is_finite()) {
         return Err("Invalid audio GELU input".into());
     }
@@ -1233,7 +1233,7 @@ fn full_attention(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(in crate::models::qwen3) fn full_attention_into(
+pub(crate) fn full_attention_into(
     query: &[f32],
     key: &[f32],
     value: &[f32],

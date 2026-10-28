@@ -63,7 +63,8 @@ fn dispatch_audio_arch(arch: &str) -> Result<AudioRoute, String> {
         | "qwen2"
         | "sensevoice-small"
         | "paraformer"
-        | "audio8_asr_infinite" => Ok(AudioRoute::Asr),
+        | "audio8_asr_infinite"
+        | "hy_v3" => Ok(AudioRoute::Asr),
         "qwen2vl" | "qwen3vlmoe" => Ok(AudioRoute::Multimodal),
         "gemma4" => Ok(AudioRoute::Gemma4),
         _ => Err(format!(
@@ -74,14 +75,14 @@ fn dispatch_audio_arch(arch: &str) -> Result<AudioRoute, String> {
 
 fn validate_audio_route(route: AudioRoute, has_image: bool) -> Result<(), String> {
     if route == AudioRoute::Asr && has_image {
-        return Err("Qwen3-ASR --audio cannot be used with --image".into());
+        return Err("ASR --audio cannot be used with --image".into());
     }
     Ok(())
 }
 
 fn validate_audio_temperature(route: AudioRoute, temperature: Option<f32>) -> Result<(), String> {
     if route == AudioRoute::Asr && temperature.is_some_and(|value| value != 0.0) {
-        return Err("Qwen3-ASR requires greedy decoding; --temp must be 0".into());
+        return Err("ASR requires greedy decoding; --temp must be 0".into());
     }
     Ok(())
 }
@@ -1242,6 +1243,7 @@ mod tests {
     #[test]
     fn architecture_aware_audio_dispatch_preserves_asr() {
         assert_eq!(dispatch_audio_arch("qwen3vl").unwrap(), AudioRoute::Asr);
+        assert_eq!(dispatch_audio_arch("hy_v3").unwrap(), AudioRoute::Asr);
         assert_eq!(
             dispatch_audio_arch("audio8_asr_infinite").unwrap(),
             AudioRoute::Asr
@@ -1251,14 +1253,14 @@ mod tests {
     }
 
     #[test]
-    fn qwen_asr_audio_route_rejects_images() {
+    fn asr_audio_route_rejects_images() {
         assert!(validate_audio_route(AudioRoute::Asr, true).is_err());
         assert!(validate_audio_route(AudioRoute::Asr, false).is_ok());
         assert!(validate_audio_route(AudioRoute::Gemma4, true).is_ok());
     }
 
     #[test]
-    fn only_qwen_asr_keeps_greedy_audio_validation() {
+    fn only_asr_routes_keep_greedy_audio_validation() {
         assert!(validate_audio_temperature(AudioRoute::Asr, Some(0.1)).is_err());
         assert!(validate_audio_temperature(AudioRoute::Multimodal, Some(0.1)).is_ok());
     }

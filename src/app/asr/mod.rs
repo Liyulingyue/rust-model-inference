@@ -8,6 +8,7 @@
 
 mod audio8;
 mod funasr;
+mod hy_simulmt;
 mod vibevoice;
 
 use crate::app::cli::{resolve_thread_count, transcription_options};
@@ -37,7 +38,14 @@ pub fn run_asr_cli(
             .metadata("general.architecture")
             .and_then(|value| value.to_string_val())
             == Some("audio8_asr_infinite");
+        let is_hy = probe
+            .metadata("general.architecture")
+            .and_then(|v| v.to_string_val())
+            == Some("hy_v3");
         drop(probe);
+        if is_hy {
+            return hy_simulmt::run(options, prefill_batch_size);
+        }
         if is_audio8 {
             return audio8::run_audio8_cli(options);
         }

@@ -1,0 +1,292 @@
+{
+  "recorded_on": "2026-10-28",
+  "reference": {
+    "repository": "https://github.com/lihy715/llama.cpp.Hyv3Speech",
+    "revision": "e41ca4212f786815faa37606ee2e6fcf8611f9e4",
+    "branch": "hyv3-speech",
+    "cpu_repack": false,
+    "independent_lossy_baseline_cpu_repack": true,
+    "external_acceleration": false
+  },
+  "runtime": {
+    "cpu": "Intel Xeon Gold 6138",
+    "architecture": "x86_64",
+    "threads": 4,
+    "rustc": "1.98.1",
+    "profile": "release-fast",
+    "simd": "default",
+    "kv": "f32",
+    "flash_attention": false
+  },
+  "weights": [
+    {
+      "file": "Hy-SimulMT-30B-A3B-Q4_K_M.gguf",
+      "bytes": 19746809728,
+      "sha256": "350344d24911ab93fdaee8f9b78e6c06041bff942dc7bc578d8c78d185e4f281"
+    },
+    {
+      "file": "Hy-SimulMT-30B-A3B-Interleave-Q4_K_M.gguf",
+      "bytes": 19746809728,
+      "sha256": "26c87f0a5f6409f3a57f8c4d2a49d58ad0f5c0753141643789e73564339cedbc"
+    }
+  ],
+  "fixture": {
+    "source": "https://raw.githubusercontent.com/ggml-org/whisper.cpp/master/samples/jfk.wav",
+    "wav_sha256": "59dfb9a4acb36fe2a2affc14bacbee2920ff435cb13cc314a08c13f66ba7860e",
+    "samples": 51200,
+    "rate": 16000,
+    "turn_samples": [
+      25600,
+      12800,
+      12800
+    ],
+    "audio_tokens": [
+      11,
+      5,
+      5
+    ],
+    "f32_sha256": "123878986c2d87a1fb18991a4caa14ebf9ad6fa175157a8d2caf57dbe7397b56"
+  },
+  "tokenizer": {
+    "tokens.json": {
+      "exact": true,
+      "cases": 60
+    }
+  },
+  "projections": {
+    "checkpoints": 21,
+    "max_abs": 1.6689300537109375e-06,
+    "max_relative_rms": 2.398840790166703e-07,
+    "min_cosine": 0.9999999999999712
+  },
+  "cases": {
+    "translation_only": {
+      "generated_ids_exact": true,
+      "turns": [
+        [
+          1632,
+          270,
+          120008
+        ],
+        [
+          5557,
+          3903,
+          50829,
+          612,
+          270,
+          120008
+        ],
+        [
+          120008
+        ]
+      ],
+      "logits": {
+        "checkpoints": 10,
+        "max_abs": 1.1552982330322266,
+        "max_relative_rms": 0.08022047492941009,
+        "min_cosine": 0.9967921584117524
+      },
+      "oracle_repack_vs_standard": {
+        "checkpoints": 10,
+        "max_abs": 1.197700023651123,
+        "max_relative_rms": 0.0740470154892129,
+        "min_cosine": 0.9976172544888082
+      },
+      "logit_bounds": {
+        "max_abs": 2.395400047302246,
+        "relative_rms": 0.1480940309784258,
+        "cosine": 0.9952345089776164
+      },
+      "audio": {
+        "checkpoints": 12,
+        "max_abs": 0.054962158203125,
+        "max_relative_rms": 0.0005794820244486951,
+        "min_cosine": 0.9999998322405469
+      }
+    },
+    "interleave": {
+      "generated_ids_exact": true,
+      "turns": [
+        [
+          120008
+        ],
+        [
+          5057,
+          950,
+          11,
+          1685,
+          18495,
+          10334,
+          11,
+          120809,
+          1632,
+          270,
+          5557,
+          3903,
+          50829,
+          612,
+          270,
+          120008
+        ],
+        [
+          120008
+        ]
+      ],
+      "logits": {
+        "checkpoints": 18,
+        "max_abs": 2.3908016085624695,
+        "max_relative_rms": 0.14301146391410327,
+        "min_cosine": 0.9905996599039485
+      },
+      "oracle_repack_vs_standard": {
+        "checkpoints": 18,
+        "max_abs": 2.1156761050224304,
+        "max_relative_rms": 0.15716029004013132,
+        "min_cosine": 0.9875791192255385
+      },
+      "logit_bounds": {
+        "max_abs": 4.231352210044861,
+        "relative_rms": 0.2,
+        "cosine": 0.98
+      },
+      "audio": {
+        "checkpoints": 12,
+        "max_abs": 0.05977630615234375,
+        "max_relative_rms": 0.0008808763579732197,
+        "min_cosine": 0.9999996147443864
+      }
+    }
+  },
+  "audio_only": {
+    "audio-metrics": {
+      "checkpoints": 12,
+      "max_abs": 0.054962158203125,
+      "max_relative_rms": 0.0005794820244486951,
+      "min_cosine": 0.9999998322405469
+    },
+    "tail-metrics": {
+      "checkpoints": 4,
+      "max_abs": 0.022247314453125,
+      "max_relative_rms": 0.00047724781311036705,
+      "min_cosine": 0.9999998861359235
+    },
+    "silence-metrics": {
+      "checkpoints": 4,
+      "max_abs": 0.002777099609375,
+      "max_relative_rms": 0.0001997401163523118,
+      "min_cosine": 0.999999980188147
+    }
+  },
+  "main_cli": {
+    "translation_only": {
+      "turns": 3,
+      "audio_tokens": 21,
+      "output_tokens": 10,
+      "seconds": 37.496
+    },
+    "interleave": {
+      "turns": 3,
+      "audio_tokens": 21,
+      "output_tokens": 18,
+      "seconds": 56.882
+    },
+    "translation_only_full_jfk": {
+      "samples": 176000,
+      "seconds_of_audio": 11,
+      "turns": 13,
+      "audio_tokens": 70,
+      "prompt_tokens": 193,
+      "output_tokens": 35,
+      "seconds": 154.196,
+      "oracle_compared": false,
+      "output_without_newlines": "因此，我的美国同胞们，不要问你的国家能为你做什么，问问你能为你的国家做什么。"
+    }
+  },
+  "not_validated": [
+    "GPU",
+    "TTS",
+    "HTTP ASR",
+    "microphone input",
+    "resampling/non-PCM16 WAV",
+    "FP8/other quantizations",
+    "long recordings",
+    "whole-repository test suite",
+    "whole-model F32 equivalence",
+    "F16 KV numerical parity"
+  ],
+  "global_token_limit": {
+    "max_tokens": 4,
+    "turns": [
+      [
+        1632,
+        270,
+        120008
+      ],
+      [
+        5557
+      ]
+    ],
+    "passed": true
+  },
+  "regression_tests": {
+    "hy_unit": {
+      "passed": 8,
+      "failed": 0
+    },
+    "hy_contract": {
+      "passed": 2,
+      "failed": 0
+    },
+    "qwen3": {
+      "passed": 115,
+      "failed": 0,
+      "ignored": 4
+    },
+    "tokenizer": {
+      "passed": 31,
+      "failed": 0,
+      "ignored": 2
+    },
+    "audio_cli_dispatch": {
+      "passed": 3,
+      "failed": 0
+    },
+    "comparison_checker": {
+      "passed": 3,
+      "failed": 0
+    }
+  },
+  "builds": {
+    "local": {
+      "architecture": "arm64",
+      "profile": "release",
+      "features": [
+        "parity-trace"
+      ],
+      "binary": "rust-model-inference"
+    },
+    "real_weight_host": {
+      "architecture": "x86_64",
+      "profile": "release-fast",
+      "features": [
+        "parity-trace"
+      ],
+      "targets": [
+        "rust-model-inference",
+        "hy_simulmt_parity"
+      ]
+    }
+  },
+  "tokenizer_interleave": {
+    "tokens.json": {
+      "exact": true,
+      "cases": 60
+    }
+  },
+  "projections_interleave": {
+    "checkpoints": 21,
+    "max_abs": 1.5497207641601562e-06,
+    "max_relative_rms": 2.4069789635884177e-07,
+    "min_cosine": 0.9999999999999711
+  }
+}

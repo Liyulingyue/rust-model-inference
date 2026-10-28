@@ -353,6 +353,7 @@ pub(super) fn deterministic_session_model(n_ctx: usize) -> Qwen3Model {
             q_bias: None,
             k_bias: None,
             v_bias: None,
+            hy_shared: None,
             moe_router: None,
             moe_gate: None,
             moe_up: None,

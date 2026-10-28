@@ -98,6 +98,9 @@ pub fn run_inference(
         source
     };
 
+    if arch == "hy_v3" {
+        return Err("Hy-SimulMT requires --audio with a mono 16 kHz PCM16 WAV; use --language for the target language".into());
+    }
     if arch == "hunyuan-dense" {
         crate::app::text::run_hunyuan_inference(
             source.clone(),
