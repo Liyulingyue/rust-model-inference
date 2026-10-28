@@ -652,18 +652,32 @@ fn main() {
 
     if options.embedding && (image.is_some() || video.is_some() || audio.is_some()) {
         let started = std::time::Instant::now();
-        let embedding = match app::run_omni_embedding(
-            source.as_ref(),
-            explicit_mmproj.unwrap_or_else(|| {
-                eprintln!("media embedding requires --mmproj");
-                std::process::exit(1);
-            }),
-            image,
-            video,
-            audio,
-            prompt,
-            options.threads,
-        ) {
+        let result = if app::arch_of(source.as_ref()) == "gemma4-embedding" {
+            if video.is_some() {
+                Err("EmbeddingGemma video embedding is not implemented".into())
+            } else {
+                rust_model_inference::models::embeddinggemma2::compute_media_embedding(
+                    source.clone(),
+                    image,
+                    audio,
+                    prompt,
+                )
+            }
+        } else {
+            app::run_omni_embedding(
+                source.as_ref(),
+                explicit_mmproj.unwrap_or_else(|| {
+                    eprintln!("media embedding requires --mmproj");
+                    std::process::exit(1);
+                }),
+                image,
+                video,
+                audio,
+                prompt,
+                options.threads,
+            )
+        };
+        let embedding = match result {
             Ok(value) => value,
             Err(error) => {
                 eprintln!("Inference error: {error}");

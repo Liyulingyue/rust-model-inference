@@ -77,7 +77,7 @@ def verify(checkpoint: Path, heads: Path, encoder: Path, rust: Path, llama: Path
                 "--jev-context", state, "--jev-question", "", "--jev-option", action,
                 "--jev-option", state, "--threads", "1",
             ], env)
-            tokens = [record["token_ids"] for record in map(json.loads, trace.read_text().splitlines())
+            tokens = [record["token_ids"] for record in map(json.loads, trace.read_text(encoding="utf-8").splitlines())
                       if record["name"] == "clm.tokens"]
             if tokens != [references[state][2], references[action][2], references[state][2]]:
                 raise AssertionError(f"case {index}: token IDs {tokens} differ from llama.cpp")

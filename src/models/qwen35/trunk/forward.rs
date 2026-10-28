@@ -1037,6 +1037,7 @@ impl<'a> super::weights::HybridTrunk<'a> {
                 }
             }
         }
+        // Emit complete, unnormalized rows once, independent of chunk size.
         // Before the q/k L2 norms. The oracle emits `q_conv` here (the
         // linear's output) and `q_conv_predelta` after the norm, so without
         // this the two checkpoints cannot say whether a difference came out

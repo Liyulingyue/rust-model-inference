@@ -80,7 +80,7 @@ class ShardedSafetensors:
         index_path = model_dir / "model.safetensors.index.json"
         if not index_path.is_file():
             raise FileNotFoundError(f"missing required input path: {index_path}")
-        index = json.loads(index_path.read_text())
+        index = json.loads(index_path.read_text(encoding="utf-8"))
         self.weight_map: dict[str, str] = index["weight_map"]
         self.model_dir = model_dir
         self._open_shard: str | None = None
@@ -182,10 +182,10 @@ def emit_f32(gguf: GgufWriter, name: str, tensor: Tensor) -> None:
 
 
 def add_tokenizer_metadata(gguf: GgufWriter, model_dir: Path, llm_cfg: dict) -> None:
-    vocab = json.loads((model_dir / "vocab.json").read_text())
-    added = json.loads((model_dir / "added_tokens.json").read_text())
-    tok_cfg = json.loads((model_dir / "tokenizer_config.json").read_text())
-    merges = (model_dir / "merges.txt").read_text().splitlines()
+    vocab = json.loads((model_dir / "vocab.json").read_text(encoding="utf-8"))
+    added = json.loads((model_dir / "added_tokens.json").read_text(encoding="utf-8"))
+    tok_cfg = json.loads((model_dir / "tokenizer_config.json").read_text(encoding="utf-8"))
+    merges = (model_dir / "merges.txt").read_text(encoding="utf-8").splitlines()
 
     all_tokens: dict[int, str] = {int(tid): token for token, tid in vocab.items()}
     added_entries = [{"id": int(tid), "content": token} for token, tid in added.items()]
@@ -261,7 +261,7 @@ def export_llm(
 ) -> None:
     if quant not in _LLM_QUANTS:
         raise ValueError(f"unsupported --quant {quant!r}; choices: {sorted(_LLM_QUANTS)}")
-    cfg = json.loads((model_dir / "config.json").read_text())
+    cfg = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
     llm_cfg = cfg["decoder_config"]
     n_layer = llm_cfg["num_hidden_layers"]
     n_embd = llm_cfg["hidden_size"]
@@ -405,8 +405,8 @@ def encoder_tensor_shapes(cfg_side: dict, vae_dim: int) -> dict[str, tuple[int, 
 
 
 def export_mmproj(model_dir: Path, out_path: Path, shards: ShardedSafetensors, overwrite: bool) -> None:
-    cfg = json.loads((model_dir / "config.json").read_text())
-    preproc = json.loads((model_dir / "preprocessor_config.json").read_text())
+    cfg = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
+    preproc = json.loads((model_dir / "preprocessor_config.json").read_text(encoding="utf-8"))
     acoustic = cfg["acoustic_tokenizer_config"]
     semantic = cfg["semantic_tokenizer_config"]
     decoder_cfg = cfg["decoder_config"]
@@ -520,7 +520,7 @@ def export_model(
             "lm_head.weight",
             "model.language_model.norm.weight",
         }
-        n_layer = json.loads((model_dir / "config.json").read_text())["decoder_config"]["num_hidden_layers"]
+        n_layer = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))["decoder_config"]["num_hidden_layers"]
         layer_sources = (
             "input_layernorm.weight", "post_attention_layernorm.weight",
             "self_attn.q_proj.weight", "self_attn.k_proj.weight", "self_attn.v_proj.weight",

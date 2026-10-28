@@ -121,7 +121,7 @@ CASES = [
 
 
 def settings() -> BoundaryHeadSettings:
-    config = json.loads((model_dir() / "config.json").read_text())
+    config = json.loads((model_dir() / "config.json").read_text(encoding="utf-8"))
     return BoundaryHeadSettings(**config["boundary_head"])
 
 

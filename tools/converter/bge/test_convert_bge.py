@@ -469,7 +469,7 @@ class BgeConverterTest(unittest.TestCase):
             model = Path(directory) / "model"
             _bert_files(model)
             path = model / "tokenizer_config.json"
-            config = json.loads(path.read_text())
+            config = json.loads(path.read_text(encoding="utf-8"))
             for lowercase, strip_accents in (
                 (False, None),
                 (True, None),

@@ -20,6 +20,13 @@ pub(crate) struct DenseShape {
     pub vocab: usize,
     pub freq_base: f32,
     pub rope_layout: RopeLayout,
+    /// Qwen3-VL's M-RoPE section sizes. `Some` means the per-row rope table
+    /// is built with the 4D axis rule instead of the plain NeoX one; the
+    /// rotation itself stays split-half, so the shader mode is unchanged.
+    pub rope_mrope_sections: Option<[i32; 4]>,
+    /// How many DeepStack planes are injected at the end of the first
+    /// layers. Zero for every architecture without DeepStack.
+    pub n_deepstack_layers: usize,
     pub approximate_silu_multiline: bool,
     pub attention_mode: super::ops::AttentionMode,
 }
@@ -88,6 +95,7 @@ pub(crate) fn record_dense_layer(
     capacity: usize,
     base_position: usize,
     rows: usize,
+    deepstack_enabled: bool,
 ) -> Result<(), VulkanError> {
     let q_count = config
         .n_head
@@ -261,6 +269,33 @@ pub(crate) fn record_dense_layer(
                         width(output),
                         rows,
                     )?;
+                    // Qwen3-VL injects one DeepStack plane at the end of each
+                    // of the first `n_deepstack_layers` layers, added into the
+                    // residual stream after the FFN residual. The CPU path
+                    // does the same in `prefill.rs::add_deepstack_embedding`.
+                    //
+                    // Only chunks that actually carry planes may add them: a
+                    // decode step has no DeepStack input, and the arena
+                    // still holds the previous chunk's planes. Adding those
+                    // would corrupt the generated token's residual stream.
+                    if input == DenseTensor::Down
+                        && output == DenseTensor::X
+                        && layer_index < config.n_deepstack_layers
+                        && deepstack_enabled
+                    {
+                        // The arena holds the chunk's planes laid out
+                        // `[layer][arena_row][n_embd]`, so a layer's plane
+                        // starts one *arena* row block further on, not one
+                        // chunk row block.
+                        let arena_rows = layout.deepstack.size
+                            / (config.n_deepstack_layers
+                                * config.n_embd
+                                * std::mem::size_of::<f32>());
+                        let plane = layout.deepstack.shifted(
+                            layer_index * arena_rows * config.n_embd * std::mem::size_of::<f32>(),
+                        );
+                        ops.record_add_rows(commands, region(output), plane, width(output), rows)?;
+                    }
                 }
                 DenseOp::SiluMul { gate, up } => {
                     ops.record_silu_mul_rows_into(
@@ -284,6 +319,22 @@ pub(crate) fn record_dense_layer(
         layer_index,
         false,
     )
+}
+
+/// Per-row inputs the GPU needs beyond the cache slot.
+///
+/// The cache slot is always `base + row`, but Qwen3-VL's RoPE position is a
+/// 4D M-RoPE position that is *not* the slot: every image token of one frame
+/// shares the same T value while H and W advance, and the text tokens around
+/// them carry their own convention. The caller forwards the very positions
+/// the CPU path uses, so the two agree by construction.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ChunkExtras<'a> {
+    /// One M-RoPE position per row. `None` means plain NeoX at
+    /// `base + row`, which is what every non-multimodal model wants.
+    pub positions: Option<&'a [[usize; 4]]>,
+    /// The chunk's DeepStack planes, laid out `[layer][row][n_embd]`.
+    pub deepstack: Option<&'a [f32]>,
 }
 
 pub(crate) struct GpuChunkResult<'a> {
@@ -542,6 +593,7 @@ impl DenseVulkanSession {
             config.n_layer,
             capacity,
             max_rows,
+            config.n_deepstack_layers,
         )?;
         let descriptor_capacity = config
             .n_layer
@@ -706,13 +758,14 @@ impl DenseVulkanSession {
         input: &[f32],
         position: usize,
     ) -> Result<GpuChunkResult<'a>, VulkanError> {
-        self.forward_chunk(input, position, 1, true)
+        self.forward_chunk(input, position, ChunkExtras::default(), 1, true)
     }
 
     pub(crate) fn forward_chunk<'a>(
         &'a mut self,
         input: &[f32],
         base_position: usize,
+        extras: ChunkExtras<'_>,
         rows: usize,
         project_logits: bool,
     ) -> Result<GpuChunkResult<'a>, VulkanError> {
@@ -720,7 +773,9 @@ impl DenseVulkanSession {
             self.commit_state.abort();
             return Err(VulkanError::UnsupportedShape(error));
         }
-        if let Err(error) = self.forward_chunk_inner(input, base_position, rows, project_logits) {
+        if let Err(error) =
+            self.forward_chunk_inner(input, base_position, extras, rows, project_logits)
+        {
             self.commit_state.abort();
             return Err(error);
         }
@@ -737,7 +792,7 @@ impl DenseVulkanSession {
         input: &[f32],
         position: usize,
     ) -> Result<&'a [f32], VulkanError> {
-        self.forward_chunk(input, position, 1, false)?;
+        self.forward_chunk(input, position, ChunkExtras::default(), 1, false)?;
         match self.ops.read_f32(self.layout.normed, self.config.n_embd) {
             Ok(hidden) => Ok(hidden),
             Err(error) => {
@@ -772,6 +827,7 @@ impl DenseVulkanSession {
         &mut self,
         input: &[f32],
         base_position: usize,
+        extras: ChunkExtras<'_>,
         rows: usize,
         project_logits: bool,
     ) -> Result<(), VulkanError> {
@@ -808,15 +864,59 @@ impl DenseVulkanSession {
         #[cfg(test)]
         let rows = failure.map_or(rows, |row| row + 1);
         for row in 0..rows {
-            fill_rope_coefficients(
-                &mut self.rope[row * config.n_embd_head_k..(row + 1) * config.n_embd_head_k],
-                base_position + row,
-                config.freq_base,
-                config.rope_layout,
-            );
+            let slot = base_position + row;
+            let coefficients =
+                &mut self.rope[row * config.n_embd_head_k..(row + 1) * config.n_embd_head_k];
+            match (config.rope_mrope_sections, extras.positions) {
+                (Some(sections), Some(positions)) => {
+                    // Qwen3-VL's M-RoPE: the rotation pairs are split-half, so
+                    // the shader mode stays NeoX and only the angles differ.
+                    let position = positions.get(row).copied().unwrap_or([slot, slot, slot, 0]);
+                    super::ops::fill_rope_mrope_interleaved(
+                        coefficients,
+                        position,
+                        sections,
+                        config.freq_base,
+                        config.n_embd_head_k,
+                    );
+                }
+                _ => {
+                    fill_rope_coefficients(coefficients, slot, config.freq_base, config.rope_layout)
+                }
+            }
         }
         self.ops
             .write_f32(self.layout.rope, &self.rope[..rows * config.n_embd_head_k])?;
+        // The DeepStack planes for this chunk, laid out `[layer][row][n_embd]`
+        // so one layer's plane is the contiguous block the layer loop adds.
+        if let Some(deepstack) = extras.deepstack {
+            let layers = config.n_deepstack_layers;
+            let expected = layers
+                .checked_mul(rows)
+                .and_then(|count| count.checked_mul(config.n_embd))
+                .ok_or(VulkanError::OutOfMemory)?;
+            if deepstack.len() != expected {
+                return Err(VulkanError::UnsupportedShape(format!(
+                    "deepstack chunk has {} values, expected {expected}",
+                    deepstack.len()
+                )));
+            }
+            // The arena holds the planes as `[layer][arena_row][n_embd]`, so
+            // layer 1's plane starts one *arena* row block further on, not
+            // one chunk row block. Writing the chunk contiguously would put
+            // layer 1's rows where the arena still expects layer 0.
+            let arena_rows =
+                self.layout.deepstack.size / (layers * config.n_embd * std::mem::size_of::<f32>());
+            for layer in 0..layers {
+                let src =
+                    &deepstack[layer * rows * config.n_embd..(layer + 1) * rows * config.n_embd];
+                let dst = self
+                    .layout
+                    .deepstack
+                    .shifted(layer * arena_rows * config.n_embd * std::mem::size_of::<f32>());
+                self.ops.write_f32(dst, src)?;
+            }
+        }
         for (layer_index, bindings) in self.layers.iter().enumerate() {
             record_dense_layer(
                 &self.ops,
@@ -828,6 +928,7 @@ impl DenseVulkanSession {
                 self.capacity,
                 base_position,
                 rows,
+                extras.deepstack.is_some(),
             )?;
             #[cfg(test)]
             if let Some(row) = failure {

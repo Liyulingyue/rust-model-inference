@@ -39,6 +39,14 @@ pub(super) struct Qwen3PrefillScratch {
 /// shortcut: 16 decode steps, request-scoped validation is needed for longer guarantees.
 const MODEL_CONTRACT_DECODE_STEPS: usize = 16;
 
+/// The Vulkan arena is sized for the prefill chunk's row count and is
+/// mirrored by a staging buffer of the same size, so a bigger batch means a
+/// bigger device allocation on top of the uploaded weights. On a shared
+/// memory budget that is enough to lose the device, so the GPU path keeps
+/// the default 64-row chunks no matter how large the batch is.
+#[cfg(feature = "vulkan")]
+const VULKAN_MAX_PREFILL_ROWS: usize = 64;
+
 impl Qwen3PrefillScratch {
     pub(super) fn new(max_rows: usize, model: &Qwen3Model) -> Self {
         let config = &model.config;
@@ -189,6 +197,12 @@ impl Qwen3Session<'_> {
         #[cfg(not(feature = "parity-trace"))]
         let trace_each_token = false;
         let chunk_size = batch_size;
+        #[cfg(feature = "vulkan")]
+        let chunk_size = if self.gpu.is_some() {
+            chunk_size.min(VULKAN_MAX_PREFILL_ROWS)
+        } else {
+            chunk_size
+        };
         let max_rows = chunk_size.min(self.capacity);
         self.prefill_scratch.reset_for(max_rows, self.model);
         #[cfg(feature = "vulkan")]
@@ -217,20 +231,38 @@ impl Qwen3Session<'_> {
                     }
                 }
                 let result = (|| -> Result<(), String> {
-                    if trace_each_token
-                        || range
-                            .clone()
-                            .enumerate()
-                            .any(|(row, token)| input.positions[token][0] != base + row)
-                    {
-                        return Err("Qwen3 Vulkan prefill requires sequential positions and no active parity trace".into());
+                    if trace_each_token {
+                        return Err("Qwen3 Vulkan prefill requires no active parity trace".into());
                     }
                     gpu.reserve_rows(self.model, max_rows)
                         .map_err(|error| error.to_string())?;
+                    // The cache slot is always `base + row`, but the RoPE
+                    // position is not: Qwen3-VL's M-RoPE gives every image
+                    // token of a frame the same T value while H and W
+                    // advance. Forward the caller's positions verbatim so
+                    // the GPU rotates exactly what the CPU rotates.
+                    let positions: Vec<[usize; 4]> = input.positions[range.clone()].to_vec();
+                    // The DeepStack planes for this chunk, laid out
+                    // `[layer][row][n_embd]`.
+                    let deepstack = input.deepstack_embeddings.map(|planes| {
+                        let layers = self.model.config.n_deepstack_layers;
+                        let width = self.model.config.n_embd;
+                        let mut chunk = Vec::with_capacity(layers * rows * width);
+                        for layer in 0..layers {
+                            let start = (layer * input.token_ids.len() + range.start) * width;
+                            let end = start + rows * width;
+                            chunk.extend_from_slice(&planes[start..end]);
+                        }
+                        chunk
+                    });
                     let result = gpu
                         .forward_chunk(
                             &self.prefill_scratch.x[..rows * width],
                             base,
+                            crate::vulkan::dense::ChunkExtras {
+                                positions: Some(&positions),
+                                deepstack: deepstack.as_deref(),
+                            },
                             rows,
                             project_logits,
                         )

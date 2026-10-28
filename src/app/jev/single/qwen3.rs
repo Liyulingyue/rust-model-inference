@@ -72,7 +72,14 @@ fn run_jev_decision_qwen3_visual(
     use super::run_jev_decision_core;
     use super::JevScorer;
 
+    // `compute_jev_result` encodes the A/B/C label chars through this
+    // tokenizer to find their logits, so the visual scorer needs one even
+    // though it never tokenizes the prompt itself. The labels live in the
+    // text GGUF, which is the same source the multimodal helper loads.
+    let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
+        .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
     let mut scorer = Qwen3VisualJevScorer {
+        tokenizer,
         source,
         pending: None,
         mmproj_path: mmproj_path.to_path_buf(),
@@ -95,6 +102,8 @@ struct Qwen3VisualJevScorer {
     pending: Option<(String, String)>,
     mmproj_path: PathBuf,
     image_path: PathBuf,
+    /// Only used to encode the candidate label chars for logit lookup.
+    tokenizer: BPETokenizer,
     source: Arc<dyn TensorSource>,
     n_threads: usize,
     prefill_batch_size: usize,
@@ -142,7 +151,7 @@ impl JevScorer for Qwen3VisualJevScorer {
     }
 
     fn tokenizer(&self) -> &BPETokenizer {
-        unreachable!("the visual scorer never tokenizes the prompt itself")
+        &self.tokenizer
     }
 }
 
@@ -215,7 +224,13 @@ impl JevScorer for Qwen3JevScorer {
     ) -> Result<(Vec<f32>, std::time::Duration), String> {
         let mut session = crate::models::qwen3::Qwen3Session::new_with_kv_state(
             &self.model,
-            self.max_ctx,
+            // Size the KV cache to this prompt, not to the model's whole
+            // context. `new_with_compute` preallocates
+            // `n_layer * capacity * kv_stride` bytes up front, so a model
+            // advertising a 262144-token context asked for a 15 GB
+            // allocation to score one short prompt and the HTTP server died
+            // with "memory allocation of 15032385536 bytes failed".
+            self.max_ctx.min(token_ids.len() + 1),
             KvFormat::F16,
             crate::core::scratchpad::KvLifecycle::Ephemeral,
         )?;

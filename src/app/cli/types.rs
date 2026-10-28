@@ -198,9 +198,7 @@ impl CliOptions {
                 || self.yue2
                 || self.dreamx
                 || self.audio.is_some()
-                || self.image.is_some()
                 || self.video.is_some()
-                || self.mmproj.is_some()
                 || self.vae.is_some()
                 || self.text_encoder.is_some()
                 || self.planner.is_some()

@@ -26,7 +26,7 @@ def bf16(data, index):
 class Source:
     def __init__(self, root, library):
         self.root = root
-        self.weight_map = json.loads((root / "model.safetensors.index.json").read_text())["weight_map"]
+        self.weight_map = json.loads((root / "model.safetensors.index.json").read_text(encoding="utf-8"))["weight_map"]
         self.headers = {}
         self.library = ct.CDLL(str(library.resolve()))
         self.affine_fn = self.library.edge0_affine
@@ -131,7 +131,7 @@ class Scalar:
     def __init__(self, source, trace_prefix):
         self.source = source
         self.trace_prefix = trace_prefix
-        self.eps = f32(json.loads((source.root / "config.json").read_text())["text_config"]["rms_norm_eps"])
+        self.eps = f32(json.loads((source.root / "config.json").read_text(encoding="utf-8"))["text_config"]["rms_norm_eps"])
         self.expf = ct.CDLL(None).expf
         self.expf.argtypes = [ct.c_float]
         self.expf.restype = ct.c_float

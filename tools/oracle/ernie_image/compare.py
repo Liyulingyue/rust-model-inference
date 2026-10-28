@@ -13,10 +13,10 @@ def compare(trace: Path, oracle: Path) -> None:
     names = set()
     dit_layers, text_layers = {}, {}
     token_occurrence = 0
-    reference_rows = list(map(json.loads, (oracle / "checkpoints.jsonl").read_text().splitlines()))
+    reference_rows = list(map(json.loads, (oracle / "checkpoints.jsonl").read_text(encoding="utf-8").splitlines()))
     reference = {(r["name"], r["occurrence"]): r for r in reference_rows}
     dit_order, text_order = [], []
-    for row in map(json.loads, trace.read_text().splitlines()):
+    for row in map(json.loads, trace.read_text(encoding="utf-8").splitlines()):
         name = row["name"]
         occurrence = row.get("occurrence", 0)
         transpose = False

@@ -254,7 +254,7 @@ def output_name(architecture: str, source_name: str) -> str:
 
 def _read_config(path: Path) -> dict:
     try:
-        value = json.loads(path.read_text())
+        value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise ValueError(f"cannot read Qwen-Drive config {path}: {error}") from error
     if not isinstance(value, dict):
@@ -357,7 +357,7 @@ def _validate_llama_cpp(llama_cpp: Path) -> None:
 
 
 def _prepare_vlm_view(model_dir: Path, view: Path) -> None:
-    config = json.loads((model_dir / "config.json").read_text())
+    config = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
     vlm_config = config.get("vlm_config")
     if not isinstance(vlm_config, dict):
         raise ValueError("config.json has no vlm_config")
@@ -647,7 +647,7 @@ def _write_json_atomic(path: Path, value: object) -> None:
 
 
 def _load_manifest(path: Path) -> dict:
-    return json.loads(path.read_text())
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _parser() -> argparse.ArgumentParser:
