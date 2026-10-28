@@ -1,5 +1,6 @@
 use rust_model_inference::core::loader::{model_config_from_source, qwen3_arch_knobs};
 use rust_model_inference::core::tensor::{MetaValue, TensorInfo, TensorSource};
+use rust_model_inference::models::hy_simulmt::HyConfig;
 use std::collections::HashMap;
 
 struct Source(HashMap<String, MetaValue>);
@@ -65,13 +66,19 @@ fn hy_v3_has_explicit_dispatch_and_128_wide_heads() {
         (config.n_embd, config.n_head, config.n_embd_head),
         (2048, 32, 128)
     );
-    let knobs = qwen3_arch_knobs(&source).unwrap();
-    assert_eq!(knobs.arch, "hy_v3");
-    assert!(knobs.has_qk_norm);
-    assert!(!knobs.has_qkv_bias);
-    let moe = knobs.moe.unwrap();
-    assert_eq!((moe.expert_count, moe.expert_used_count), (128, 8));
-    assert_eq!((moe.expert_ffn, moe.shared_expert_ffn), (768, 768));
+    assert!(
+        qwen3_arch_knobs(&source).is_err(),
+        "Hy-SimulMT must have its own decoder instead of entering the Qwen3 trunk"
+    );
+    let config = HyConfig::from_source(&source).unwrap();
+    assert_eq!(
+        (config.moe.expert_count, config.moe.expert_used_count),
+        (128, 8)
+    );
+    assert_eq!(
+        (config.moe.expert_ffn, config.moe.shared_expert_ffn),
+        (768, 768)
+    );
 }
 
 #[test]
@@ -85,6 +92,30 @@ fn hy_v3_rejects_other_router_contracts() {
     ] {
         let mut source = source();
         source.0.insert(format!("hy_v3.{key}"), value);
-        assert!(qwen3_arch_knobs(&source).is_err(), "accepted {key}");
+        assert!(HyConfig::from_source(&source).is_err(), "accepted {key}");
+    }
+}
+
+#[test]
+fn hy_v3_rejects_non_integer_negative_and_empty_dimensions() {
+    for key in [
+        "block_count",
+        "embedding_length",
+        "attention.key_length",
+        "expert_count",
+        "vocab_size",
+    ] {
+        for value in [
+            MetaValue::Int32(-1),
+            MetaValue::Uint32(0),
+            MetaValue::Float32(3.5),
+        ] {
+            let mut source = source();
+            source.0.insert(format!("hy_v3.{key}"), value);
+            assert!(
+                HyConfig::from_source(&source).is_err(),
+                "accepted invalid {key}"
+            );
+        }
     }
 }

@@ -1,13 +1,18 @@
 //! Tencent Hy-SimulMT's bundled speech encoder and mixed dense/MoE decoder.
 mod audio;
+mod config;
+mod decoder;
 pub mod moe;
 mod runtime;
+mod weights;
 
 pub use audio::HyAudioEncoder;
+pub use config::{HyConfig, HyMoeConfig};
+pub use decoder::HySession;
 pub use runtime::{HySimulMt, Translation};
+pub use weights::HyDecoder;
 
 use crate::core::tensor::{GGMLType, TensorSource};
-use crate::models::qwen3::Qwen3Config;
 
 pub(crate) fn check_tensor(
     source: &dyn TensorSource,
@@ -47,7 +52,7 @@ pub(crate) fn check_tensor(
     Ok(())
 }
 
-pub(crate) fn validate_decoder(s: &dyn TensorSource, c: &Qwen3Config) -> Result<(), String> {
+pub(crate) fn validate_decoder(s: &dyn TensorSource, c: &HyConfig) -> Result<(), String> {
     if c.n_layer < 2
         || c.n_head == 0
         || c.n_head_kv == 0
@@ -57,7 +62,7 @@ pub(crate) fn validate_decoder(s: &dyn TensorSource, c: &Qwen3Config) -> Result<
     {
         return Err("Invalid Hy-SimulMT decoder dimensions".into());
     }
-    let m = c.moe.ok_or("missing Hy-SimulMT MoE config")?;
+    let m = &c.moe;
     let h = c.n_embd as u64;
     let q = c
         .n_head

@@ -1,11 +1,13 @@
 use super::{check_tensor, trace};
+use crate::compute::linear::LinearExecutor;
+use crate::compute::ComputePolicy;
 use crate::core::tensor::{load_f32_tensor, TensorSource};
 use crate::core::thread_pool::ComputePool;
-use crate::models::diffusion::dreamx::kernels::{conv2d, Linear};
-use crate::models::qwen3::asr::audio_processor::{compute_whisper_log_mel, HOP};
-use crate::models::qwen3::asr::mel_encoder::{
+use crate::ops::audio::frontend::{compute_whisper_log_mel, HOP};
+use crate::ops::audio::transformer::{
     apply_gelu_erf, full_attention_into, layer_norm_rows, LayerNormWeights,
 };
+use crate::ops::nn::{conv2d, Linear};
 use std::sync::Arc;
 
 struct Conv {
@@ -25,8 +27,8 @@ struct Block {
 }
 
 pub struct HyAudioEncoder {
-    _source: Arc<dyn TensorSource>,
     pool: Arc<ComputePool>,
+    compute: ComputePolicy,
     conv: Vec<Conv>,
     conv_out: Linear<'static>,
     positions: Vec<f32>,
@@ -38,6 +40,7 @@ pub struct HyAudioEncoder {
     mlp3: Linear<'static>,
     output_norm: LayerNormWeights,
     eps: f32,
+    _source: Arc<dyn TensorSource>,
 }
 
 impl HyAudioEncoder {
@@ -45,6 +48,15 @@ impl HyAudioEncoder {
         source: Arc<dyn TensorSource>,
         pool: Arc<ComputePool>,
     ) -> Result<Self, String> {
+        Self::from_source_with_compute(source, pool, ComputePolicy::Cpu)
+    }
+
+    pub fn from_source_with_compute(
+        source: Arc<dyn TensorSource>,
+        pool: Arc<ComputePool>,
+        compute: ComputePolicy,
+    ) -> Result<Self, String> {
+        compute.check_build()?;
         let s = source.as_ref();
         if s.metadata("clip.projector_type")
             .and_then(|v| v.to_string_val())
@@ -118,6 +130,7 @@ impl HyAudioEncoder {
             conv,
             blocks,
             pool,
+            compute,
             conv_out: linear("a.conv_out", 7680, 1024, false)?,
             positions: load_f32_tensor(s, "a.sinusoid_pos_embd", &[1024, 1500])?,
             post_ln: norm("a.post_ln", 1024)?,
@@ -133,7 +146,7 @@ impl HyAudioEncoder {
 
     /// One protocol turn: at most 1.6 seconds, mono PCM at 16 kHz.
     pub fn encode(&self, samples: &[f32]) -> Result<Vec<f32>, String> {
-        let _cpu = crate::compute::ComputePolicy::Cpu.cpu_scope();
+        let _scope = self.compute.enter_legacy_scope();
         if samples.is_empty() || samples.len() > 25_600 || samples.iter().any(|v| !v.is_finite()) {
             return Err("Hy-SimulMT audio turn must contain 1..=25600 finite samples".into());
         }
@@ -191,11 +204,20 @@ impl HyAudioEncoder {
         let mut normed = Vec::new();
         let mut scores = Vec::new();
         let mut attention = Vec::new();
+        let mut linear = LinearExecutor::new(
+            self.compute,
+            self.blocks
+                .iter()
+                .flat_map(|block| [block.q.binding(), block.k.binding(), block.v.binding()])
+                .collect(),
+            rows,
+            self.pool.clone(),
+        )
+        .map_err(|e| e.to_string())?;
         for block in &self.blocks {
             layer_norm_rows(&hidden, rows, &block.ln1, self.eps, &mut normed)?;
-            let q = block.q.forward(&self.pool, &normed, rows)?;
-            let k = block.k.forward(&self.pool, &normed, rows)?;
-            let v = block.v.forward(&self.pool, &normed, rows)?;
+            let [q, k, v] =
+                Linear::forward_group([&block.q, &block.k, &block.v], &mut linear, &normed, rows)?;
             full_attention_into(&q, &k, &v, rows, 16, 64, &mut scores, &mut attention)?;
             let a = block.out.forward(&self.pool, &attention, rows)?;
             for (x, a) in hidden.iter_mut().zip(a) {
@@ -248,6 +270,74 @@ fn flatten_conv(x: &[f32], [channels, mel, frames]: [usize; 3]) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hy_grouped_qkv_preserves_rows_bias_and_projection_order() {
+        use crate::compute::linear::LinearExecutor;
+        use crate::compute::ComputePolicy;
+        use crate::core::tensor::GGMLType;
+        use crate::ops::kernel::{QuantizedTensor, Weight};
+
+        let raw: Vec<u8> = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect();
+        let linear = |bias| {
+            Linear::from_weight(
+                Weight::from_quantized(QuantizedTensor::from_bytes(&raw, GGMLType::F32, 3, 2)),
+                bias,
+            )
+            .unwrap()
+        };
+        let qkv = [
+            linear(Some(vec![0.5, -0.5])),
+            linear(None),
+            linear(Some(vec![-1.0, 2.0])),
+        ];
+        let mut executor = LinearExecutor::new(
+            ComputePolicy::Cpu,
+            qkv.iter().map(Linear::binding).collect(),
+            2,
+            Arc::new(ComputePool::new(2)),
+        )
+        .unwrap();
+        let input = [1.0, 0.0, -1.0, 2.0, 1.0, 0.0];
+        let actual = Linear::forward_group(qkv.each_ref(), &mut executor, &input, 2).unwrap();
+        assert_eq!(actual[0], [-1.5, -2.5, 4.5, 12.5]);
+        assert_eq!(actual[1], [-2.0, -2.0, 4.0, 13.0]);
+        assert_eq!(actual[2], [-3.0, 0.0, 3.0, 15.0]);
+        assert!(Linear::forward_group(qkv.each_ref(), &mut executor, &[f32::NAN; 6], 2).is_err());
+        assert!(Linear::forward_group(qkv.each_ref(), &mut executor, &input, 1).is_err());
+    }
+
+    #[cfg(not(feature = "vulkan"))]
+    #[test]
+    fn hy_audio_explicit_vulkan_rejects_a_cpu_only_build() {
+        use crate::compute::ComputePolicy;
+        use crate::core::tensor::{MetaValue, TensorInfo};
+
+        struct EmptySource;
+        impl TensorSource for EmptySource {
+            fn metadata(&self, _: &str) -> Option<&MetaValue> {
+                None
+            }
+            fn tensor_info(&self, _: &str) -> Option<&TensorInfo> {
+                None
+            }
+            fn tensor_slice(&self, _: &str) -> Option<&[u8]> {
+                None
+            }
+        }
+        let error = HyAudioEncoder::from_source_with_compute(
+            Arc::new(EmptySource),
+            Arc::new(ComputePool::new(1)),
+            ComputePolicy::Vulkan,
+        )
+        .err()
+        .unwrap();
+        assert!(error.contains("--features vulkan"), "{error}");
+    }
+
     #[test]
     fn hy_chunk_grid_and_feature_layout() {
         assert_eq!(

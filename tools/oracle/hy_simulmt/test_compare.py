@@ -16,6 +16,14 @@ def trace(root, values, name="hy.logits"):
 
 
 class ComparisonTests(unittest.TestCase):
+    def test_empty_reference_is_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            ref, got = Path(d) / "ref", Path(d) / "got"
+            ref.mkdir()
+            got.mkdir()
+            with self.assertRaisesRegex(AssertionError, "no comparison artifacts"):
+                compare(ref, got)
+
     def test_lossy_budget_requires_an_independent_reference_and_equal_context(self):
         with tempfile.TemporaryDirectory() as d:
             ref, got, baseline = [Path(d) / p for p in ("ref", "got", "baseline")]

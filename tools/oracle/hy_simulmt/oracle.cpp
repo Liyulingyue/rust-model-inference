@@ -76,7 +76,7 @@ int main(int argc,char ** argv) try {
     std::string mode=argv[1],out=argv[4]; int threads=std::stoi(argv[5]),limit=std::stoi(argv[6]); bool interleave=std::stoi(argv[7]);
     std::filesystem::create_directories(out); Trace trace{out,{}};
     if(mode=="projections") { projections(argv[2],argv[3],trace,threads); return 0; }
-    llama_backend_init(); auto mp=llama_model_default_params(); mp.n_gpu_layers=0; mp.vocab_only=mode!="translate";
+    llama_backend_init(); auto mp=llama_model_default_params(); mp.n_gpu_layers=0; mp.vocab_only=mode!="translate" && mode!="text";
     mp.use_extra_bufts=std::getenv("HY_ORACLE_REPACK")!=nullptr;
     auto * model=llama_model_load_from_file(argv[2],mp); if(!model) throw std::runtime_error("model load failed");
     auto * vocab=llama_model_get_vocab(model);
@@ -84,6 +84,25 @@ int main(int argc,char ** argv) try {
         std::ifstream f(argv[3]); json corpus; f>>corpus;
         for(auto & c:corpus) c["ids"]=tokenize(vocab,c["text"],c["add_special"],c["parse_special"]);
         std::ofstream(out+"/tokens.json")<<corpus.dump(2)<<'\n'; llama_model_free(model); return 0;
+    }
+    if(mode=="text") {
+        std::ifstream input(argv[3]); std::string text((std::istreambuf_iterator<char>(input)),{});
+        auto ids=tokenize(vocab,text,false,true);
+        if(ids.empty() || ids.size()>1024) throw std::runtime_error("invalid text prompt size");
+        std::ofstream(out+"/tokens.json")<<json::array({json{{"text",text},{"add_special",false},{"parse_special",true},{"ids",ids}}}).dump(2)<<'\n';
+        auto cp=llama_context_default_params(); cp.n_ctx=1024; cp.n_batch=cp.n_ubatch=256;
+        cp.n_threads=cp.n_threads_batch=threads; cp.type_k=cp.type_v=std::getenv("HY_KV") && std::string(std::getenv("HY_KV"))=="f16" ? GGML_TYPE_F16 : GGML_TYPE_F32;
+        cp.flash_attn_type=LLAMA_FLASH_ATTN_TYPE_DISABLED; cp.offload_kqv=false;
+        auto * ctx=llama_init_from_model(model,cp); if(!ctx) throw std::runtime_error("text context init failed");
+        for(size_t start=0;start<ids.size();start+=256) {
+            int n=std::min<size_t>(256,ids.size()-start); auto batch=llama_batch_init(n,0,1); batch.n_tokens=n;
+            for(int i=0;i<n;i++) { batch.token[i]=ids[start+i]; batch.pos[i]=start+i; batch.n_seq_id[i]=1; batch.seq_id[i][0]=0; batch.logits[i]=start+i+1==ids.size(); }
+            int err=llama_decode(ctx,batch); llama_batch_free(batch); if(err) throw std::runtime_error("text decode failed");
+        }
+        auto * logits=llama_get_logits_ith(ctx,-1); int nv=llama_vocab_n_tokens(vocab);
+        trace.dump("hy.logits",logits,nv,json::array({nv}));
+        std::ofstream(out+"/turns.json")<<json::array({json::array({std::max_element(logits,logits+nv)-logits})}).dump(2)<<'\n';
+        llama_free(ctx); llama_model_free(model); llama_backend_free(); return 0;
     }
     std::ifstream pcm(argv[3],std::ios::binary|std::ios::ate); auto bytes=pcm.tellg();
     if(bytes<=0 || bytes%4) throw std::runtime_error("invalid f32 PCM");
@@ -112,7 +131,7 @@ int main(int argc,char ** argv) try {
     std::string suffix="<｜hy_Assistant｜><think></think>"; if(interleave) suffix+="<｜hy_place▁holder▁no▁790｜>";
     decode(tokenize(vocab,prefix));
     json turns=json::array(); int generated=0; bool done=false;
-    for(size_t offset=0;offset<samples.size() && !done && generated<limit;) {
+    for(size_t offset=0;offset<samples.size() && !done && (!ctx || generated<limit);) {
         size_t n=std::min<size_t>(offset?12800:25600,samples.size()-offset);
         auto * bitmap=mtmd_bitmap_init_from_audio(n,samples.data()+offset);
         mtmd_input_part part{nullptr,bitmap}; const mtmd_input_part * pp=&part;

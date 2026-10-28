@@ -3,7 +3,7 @@ use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::format::ggufrs::ComponentRole;
 use crate::models::hy_simulmt::HySimulMt;
-use crate::models::qwen3::asr::audio_processor::decode_pcm16_wav;
+use crate::ops::audio::frontend::decode_pcm16_wav;
 use std::sync::Arc;
 
 pub(super) fn run(options: &CliOptions, batch: usize) -> Result<(), String> {
@@ -13,7 +13,8 @@ pub(super) fn run(options: &CliOptions, batch: usize) -> Result<(), String> {
     if options.temperature.is_some_and(|t| t != 0.0) {
         return Err("Hy-SimulMT requires greedy decoding (--temp 0)".into());
     }
-    let _cpu = crate::compute::ComputePolicy::Cpu.cpu_scope();
+    let compute = options.compute_policy();
+    let _scope = compute.enter_legacy_scope();
     let source: Arc<dyn TensorSource> =
         Arc::from(crate::app::open_or_exit(&options.model, ComponentRole::Llm));
     let available = std::thread::available_parallelism()
@@ -23,7 +24,7 @@ pub(super) fn run(options: &CliOptions, batch: usize) -> Result<(), String> {
         options.threads,
         available,
     )));
-    let model = HySimulMt::from_source(source, pool)?;
+    let model = HySimulMt::from_source_with_compute(source, pool, compute)?;
     let path = options
         .audio
         .as_ref()
@@ -42,7 +43,7 @@ pub(super) fn run(options: &CliOptions, batch: usize) -> Result<(), String> {
     )?;
     println!("{}", result.text);
     eprintln!(
-        "Hy-SimulMT CPU: {} turns, {} audio tokens, {} prompt tokens, {} output tokens, {:.3}s",
+        "Hy-SimulMT {compute:?}: {} turns, {} audio tokens, {} prompt tokens, {} output tokens, {:.3}s",
         result.turns.len(),
         result.audio_tokens,
         result.prompt_tokens,

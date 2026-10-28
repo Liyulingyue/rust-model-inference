@@ -90,6 +90,7 @@ def compare(reference, actual, lossy_baseline=None):
             assert m["cosine"] >= limits[2], f"{key}: cosine={m['cosine']}"
             checked.append(dict(name=key[0], occurrence=key[1], shape=ref["shape"], **m))
         result["checkpoints"] = checked
+    assert result, "reference has no comparison artifacts"
     return result
 
 

@@ -922,7 +922,6 @@ pub fn qwen3_arch_knobs<S: TensorSource + ?Sized>(source: &S) -> Result<Qwen3Arc
             | "qwen3tts"
             | "llama"
             | "hunyuan-dense"
-            | "hy_v3"
             | "lfm2"
     ) {
         return Err(format!("Unsupported Qwen3-family architecture: {arch}"));
@@ -930,7 +929,7 @@ pub fn qwen3_arch_knobs<S: TensorSource + ?Sized>(source: &S) -> Result<Qwen3Arc
 
     let has_qk_norm = matches!(
         arch.as_str(),
-        "qwen3" | "qwen3vl" | "qwen3vlmoe" | "hunyuan-dense" | "hy_v3" | "lfm2"
+        "qwen3" | "qwen3vl" | "qwen3vlmoe" | "hunyuan-dense" | "lfm2"
     );
     let has_qkv_bias = arch == "qwen2vl";
 
@@ -956,7 +955,7 @@ pub fn qwen3_arch_knobs<S: TensorSource + ?Sized>(source: &S) -> Result<Qwen3Arc
         None
     };
 
-    let moe = if matches!(arch.as_str(), "qwen3vlmoe" | "hy_v3") {
+    let moe = if arch == "qwen3vlmoe" {
         let get = |name: &str| -> Result<usize, String> {
             let key = format!("{arch}.{name}");
             source
@@ -979,30 +978,6 @@ pub fn qwen3_arch_knobs<S: TensorSource + ?Sized>(source: &S) -> Result<Qwen3Arc
     } else {
         None
     };
-
-    if arch == "hy_v3" {
-        let moe = moe.as_ref().unwrap();
-        let scale = source
-            .metadata("hy_v3.expert_weights_scale")
-            .and_then(MetaValue::to_f64)
-            .unwrap_or(f64::NAN);
-        if source
-            .metadata("hy_v3.expert_gating_func")
-            .and_then(MetaValue::to_u64)
-            != Some(2)
-            || !matches!(
-                source.metadata("hy_v3.expert_weights_norm"),
-                Some(MetaValue::Bool(true))
-            )
-            || !scale.is_finite()
-            || scale <= 0.0
-            || scale > f32::MAX as f64
-            || moe.expert_used_count > moe.expert_count
-            || moe.shared_expert_ffn == 0
-        {
-            return Err("Unsupported hy_v3 sigmoid/shared-expert routing metadata".into());
-        }
-    }
 
     Ok(Qwen3ArchKnobs {
         arch,

@@ -919,6 +919,55 @@ fn f16_dot_scalar_tail_covers_gemma4_audio_patch_length() {
     assert_eq!(dot_f16(&a, &b, 9).to_bits(), expected.to_bits());
 }
 
+#[test]
+fn f32_ggml_dot_retains_cancellation_and_handles_attention_tails() {
+    let mut cancellation = [0.0; 32];
+    for (index, value) in [(0, 1e8), (8, 1.0), (16, -1e8), (24, 1.0)] {
+        cancellation[index] = value;
+    }
+    assert!((crate::ops::dot::dot_f32_ggml(&cancellation, &[1.0; 32], 32) - 2.0).abs() < 1e-6);
+    for n in [0, 9, 31, 32, 128, 259] {
+        let a: Vec<_> = (0..n)
+            .map(|i| ((i * 17 % 31) as f32 - 15.0) / 16.0)
+            .collect();
+        let b: Vec<_> = (0..n)
+            .map(|i| ((i * 13 % 23) as f32 - 11.0) / 8.0)
+            .collect();
+        let expected: f64 = a
+            .iter()
+            .zip(&b)
+            .map(|(&a, &b)| f64::from(a) * f64::from(b))
+            .sum();
+        let actual = f64::from(crate::ops::dot::dot_f32_ggml(&a, &b, n));
+        assert!(
+            (actual - expected).abs() < 1e-5,
+            "n={n}: {actual} vs {expected}"
+        );
+    }
+}
+
+#[test]
+fn f16_ggml_typed_dot_handles_attention_widths_and_tails() {
+    for n in [0, 9, 31, 32, 128, 259] {
+        let a: Vec<_> = (0..n)
+            .map(|i| f32_to_f16(((i * 17 % 31) as f32 - 15.0) / 16.0))
+            .collect();
+        let b: Vec<_> = (0..n)
+            .map(|i| f32_to_f16(((i * 13 % 23) as f32 - 11.0) / 8.0))
+            .collect();
+        let expected: f64 = a
+            .iter()
+            .zip(&b)
+            .map(|(&a, &b)| f64::from(f16_to_f32(a)) * f64::from(f16_to_f32(b)))
+            .sum();
+        let actual = f64::from(crate::ops::dot::dot_f16_ggml(&a, &b, n));
+        assert!(
+            (actual - expected).abs() < 1e-5,
+            "n={n}: {actual} vs {expected}"
+        );
+    }
+}
+
 #[cfg(target_arch = "aarch64")]
 #[test]
 fn neon_q8_matmul_matches_repacked_fused_block_accumulation() {

@@ -1,4 +1,5 @@
 //! Oracle companion; see tools/oracle/hy_simulmt/README.md.
+use rust_model_inference::compute::ComputePolicy;
 use rust_model_inference::core::{
     loader::GGUFLoader,
     scratchpad::KvFormat,
@@ -6,7 +7,7 @@ use rust_model_inference::core::{
     thread_pool::ComputePool,
     tokenizer::{BPETokenizer, EncodeOptions},
 };
-use rust_model_inference::models::hy_simulmt::{HyAudioEncoder, HySimulMt};
+use rust_model_inference::models::hy_simulmt::{HyAudioEncoder, HyDecoder, HySession, HySimulMt};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -107,10 +108,60 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         #[cfg(not(feature = "parity-trace"))]
         return Err("projections requires --features parity-trace".into());
     }
-    let samples = pcm(Path::new(&a[3]))?;
+    let compute = match std::env::var("HY_COMPUTE").as_deref().unwrap_or("cpu") {
+        "cpu" => ComputePolicy::Cpu,
+        "auto" => ComputePolicy::Auto,
+        _ => return Err("HY_COMPUTE must be cpu or auto".into()),
+    };
+    let kv = match std::env::var("HY_KV").as_deref().unwrap_or("f32") {
+        "f32" => KvFormat::F32,
+        "f16" => KvFormat::F16,
+        _ => return Err("HY_KV must be f32 or f16".into()),
+    };
     let pool = Arc::new(ComputePool::new(a[5].parse()?));
+    if a[1] == "text" {
+        let tokenizer = Arc::new(BPETokenizer::from_gguf_metadata(|k| {
+            s.metadata(k).cloned()
+        })?);
+        let text = std::fs::read_to_string(&a[3])?;
+        let ids = tokenizer.encode(
+            &text,
+            EncodeOptions {
+                add_special: false,
+                parse_special: true,
+            },
+        );
+        std::fs::write(
+            format!("{}/tokens.json", a[4]),
+            serde_json::to_vec_pretty(
+                &serde_json::json!([{ "text": text, "add_special": false, "parse_special": true, "ids": ids }]),
+            )?,
+        )?;
+        let model = HyDecoder::from_source(s, tokenizer, pool)?;
+        let mut session = HySession::new(&model, 1024, kv, compute)?;
+        let logits = session.forward(&ids, None, 256)?;
+        #[cfg(feature = "parity-trace")]
+        rust_model_inference::parity_trace::report(rust_model_inference::parity_trace::checkpoint(
+            "hy.logits",
+            None,
+            &[logits.len()],
+            &logits,
+        ));
+        let next = logits
+            .iter()
+            .enumerate()
+            .max_by(|(a, x), (b, y)| x.total_cmp(y).then_with(|| b.cmp(a)))
+            .ok_or("empty logits")?
+            .0;
+        std::fs::write(
+            format!("{}/turns.json", a[4]),
+            serde_json::to_vec_pretty(&vec![vec![next]])?,
+        )?;
+        return Ok(());
+    }
+    let samples = pcm(Path::new(&a[3]))?;
     if a[1] == "audio" {
-        let enc = HyAudioEncoder::from_source(s, pool)?;
+        let enc = HyAudioEncoder::from_source_with_compute(s, pool, compute)?;
         let mut offset = 0;
         while offset < samples.len() {
             let n = (if offset == 0 { 25600 } else { 12800 }).min(samples.len() - offset);
@@ -118,16 +169,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             offset += n;
         }
     } else if a[1] == "translate" {
-        let model = HySimulMt::from_source(s, pool)?;
-        let result = model.translate(
-            &samples,
-            "zh",
-            None,
-            a[6].parse()?,
-            1024,
-            256,
-            KvFormat::F32,
-        )?;
+        let model = HySimulMt::from_source_with_compute(s, pool, compute)?;
+        let result = model.translate(&samples, "zh", None, a[6].parse()?, 1024, 256, kv)?;
         std::fs::write(
             format!("{}/turns.json", a[4]),
             serde_json::to_vec_pretty(&result.turns)?,

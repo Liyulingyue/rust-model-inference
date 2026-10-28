@@ -75,7 +75,7 @@ use std::sync::Mutex;
 
 #[cfg(feature = "vulkan")]
 pub fn get_vulkan_context() -> Option<&'static VulkanContext> {
-    if !GPU_ENABLED.load(Ordering::Relaxed) || crate::core::thread_pool::gpu_matmul_disabled() {
+    if crate::compute::ComputePolicy::legacy() == crate::compute::ComputePolicy::Cpu {
         return None;
     }
     shared_vulkan_context()

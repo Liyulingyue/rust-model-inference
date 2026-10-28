@@ -906,7 +906,6 @@ impl Qwen3Session<'_> {
                                     config,
                                     &mut self.prefill_scratch.down
                                         [row * config.n_embd..(row + 1) * config.n_embd],
-                                    &self.model.pool,
                                 )?;
                             }
                         }

@@ -52,7 +52,6 @@ pub struct Qwen3LayerWeights<'a> {
     pub q_bias: Option<Vec<f32>>,
     pub k_bias: Option<Vec<f32>>,
     pub v_bias: Option<Vec<f32>>,
-    pub hy_shared: Option<crate::models::hy_simulmt::moe::SharedExpert<'a>>,
     pub moe_router: Option<Vec<f32>>,
     pub moe_gate: Option<Vec<Weight<'a>>>,
     pub moe_up: Option<Vec<Weight<'a>>>,
@@ -136,7 +135,6 @@ pub fn load_layers<'a>(
             q_bias: None,
             k_bias: None,
             v_bias: None,
-            hy_shared: None,
             moe_router: None,
             moe_gate: None,
             moe_up: None,
@@ -238,13 +236,8 @@ pub fn load_layers_static(
     moe: Option<crate::core::loader::Qwen3MoeConfig>,
 ) -> Result<Vec<Qwen3LayerWeights<'static>>, String> {
     let source = source.as_ref();
-    let hy = source
-        .metadata("general.architecture")
-        .and_then(|v| v.to_string_val())
-        == Some("hy_v3");
     let mut layers = Vec::with_capacity(n_layer);
     for l in 0..n_layer {
-        let moe = moe.filter(|_| !hy || l > 0);
         let q_bias = load_optional_bias(
             source,
             &format!("blk.{l}.attn_q.bias"),
@@ -265,7 +258,7 @@ pub fn load_layers_static(
         )?;
         let (w_gate, w_up, w_down, moe_router, moe_gate, moe_up, moe_down) = if let Some(moe) = moe
         {
-            if !hy && moe.shared_expert_ffn != 0 {
+            if moe.shared_expert_ffn != 0 {
                 return Err("Qwen3VL-MoE shared experts are not supported".into());
             }
             let gate_slices = expert_slices(
@@ -431,43 +424,6 @@ pub fn load_layers_static(
             w_gate,
             w_up,
             w_down,
-            hy_shared: if hy && l > 0 {
-                let shared_ffn = moe
-                    .ok_or("missing Hy-SimulMT MoE config")?
-                    .shared_expert_ffn;
-                Some(crate::models::hy_simulmt::moe::SharedExpert {
-                    bias: crate::core::tensor::load_f32_tensor(
-                        source,
-                        &format!("blk.{l}.exp_probs_b"),
-                        &[moe.unwrap().expert_count as u64],
-                    )?,
-                    scale: source
-                        .metadata("hy_v3.expert_weights_scale")
-                        .and_then(|v| v.to_f64())
-                        .ok_or("missing Hy-SimulMT expert scale")?
-                        as f32,
-                    gate: static_weight(
-                        source,
-                        &format!("blk.{l}.ffn_gate_shexp.weight"),
-                        n_embd,
-                        shared_ffn,
-                    ),
-                    up: static_weight(
-                        source,
-                        &format!("blk.{l}.ffn_up_shexp.weight"),
-                        n_embd,
-                        shared_ffn,
-                    ),
-                    down: static_weight(
-                        source,
-                        &format!("blk.{l}.ffn_down_shexp.weight"),
-                        shared_ffn,
-                        n_embd,
-                    ),
-                })
-            } else {
-                None
-            },
             moe_router,
             moe_gate,
             moe_up,
@@ -553,9 +509,6 @@ impl Qwen3Model {
         use super::util::{checked_product, load_f32_tensor, usize_to_u64};
 
         let config = Qwen3Config::from_source(source.as_ref())?;
-        if config.architecture == "hy_v3" {
-            crate::models::hy_simulmt::validate_decoder(source.as_ref(), &config)?;
-        }
         if config.vocab != tokenizer.vocab_size() {
             return Err(format!(
                 "{} vocabulary size {} does not match tokenizer vocab {}",

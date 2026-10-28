@@ -1,0 +1,1 @@
+<｜hy_begin▁of▁sentence｜><｜reasoning_mode｜>reasoning_effort:no_think<｜hy_User｜>Choose exactly one letter. Context: Paris is the capital of France. Question: Is Paris in France? A: yes. B: no.<｜hy_Assistant｜><think></think>
