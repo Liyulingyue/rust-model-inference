@@ -22,12 +22,13 @@ layout(push_constant) uniform PC {
     float eps;
     uint phase;
     uint rows;
+    uint exp_mode;
 } pc;
 
 shared float inverse_q;
 shared float inverse_k;
 
-#include "exp_approx_neon.glsl"
+#include "silu_exp.glsl"
 #include "f32_divide.glsl"
 #include "f32_norm.glsl"
 
@@ -49,7 +50,7 @@ void main() {
                 precise float term = uintBitsToFloat(conv_weight.data[channel * pc.d_conv + tap]) * input_value;
                 value += term;
             }
-            precise float activated = divide_finite_normal(value, 1.0 + exp_approx_neon(-value));
+            precise float activated = divide_finite_normal(value, 1.0 + silu_exponential(-value, pc.exp_mode, channel, pc.conv_dim));
             uint output_word = channel < pc.key_dim
                 ? pc.q_word + row * pc.key_dim + channel
                 : channel < 2u * pc.key_dim
@@ -92,8 +93,8 @@ void main() {
                     : (k_square - k_next) + k_sum;
                 k_sum = k_next;
             }
-            inverse_q = divide_finite_normal(1.0, max(sqrt_f32(q_sum + q_correction), pc.eps));
-            inverse_k = divide_finite_normal(1.0, max(sqrt_f32(k_sum + k_correction), pc.eps));
+            inverse_q = inverse_sqrt_f32((q_sum + q_correction) / float(pc.head_dim) + pc.eps / float(pc.head_dim));
+            inverse_k = inverse_sqrt_f32((k_sum + k_correction) / float(pc.head_dim) + pc.eps / float(pc.head_dim));
         }
         barrier();
 
@@ -102,10 +103,10 @@ void main() {
                 uint source_q = pc.q_word + row * pc.key_dim + head * pc.head_dim + index;
                 uint source_k = pc.k_word + row * pc.key_dim + head * pc.head_dim + index;
                 arena.data[pc.q_word + row * pc.key_dim + head * pc.head_dim + index] = floatBitsToUint(
-                    uintBitsToFloat(arena.data[source_q]) * inverse_q
+                    (uintBitsToFloat(arena.data[source_q]) * inverse_q) * inverse_sqrt_f32(float(pc.head_dim))
                 );
                 arena.data[pc.k_word + row * pc.key_dim + head * pc.head_dim + index] = floatBitsToUint(
-                    uintBitsToFloat(arena.data[source_k]) * inverse_k
+                    (uintBitsToFloat(arena.data[source_k]) * inverse_k) * inverse_sqrt_f32(float(pc.head_dim))
                 );
             }
         }

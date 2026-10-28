@@ -535,14 +535,14 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
         let trace_each_token = std::env::var_os("RMI_PARITY_TRACE").is_some();
         #[cfg(not(feature = "parity-trace"))]
         let trace_each_token = false;
-        #[cfg(feature = "vulkan")]
-        if trace_each_token {
-            if self.compute_policy == ComputePolicy::Vulkan {
-                return Err("Vulkan does not support token-major parity tracing".into());
-            }
-            self.gpu = None;
-        }
+        // GPU tracing flushes each layer and records the same token-major schema.
         let batch_size = self.prefill_batch_size;
+        #[cfg(feature = "vulkan")]
+        let batch_size = if trace_each_token && self.gpu_available() {
+            1
+        } else {
+            batch_size
+        };
         let mut logits = Vec::new();
         for range in prefill_chunks(n_tokens, batch_size) {
             let rows = range.len();

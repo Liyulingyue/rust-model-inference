@@ -30,7 +30,7 @@ shared float lane_max[64];
 shared float lane_sum[64];
 
 #include "f32_dot.glsl"
-#include "exp_accurate.glsl"
+#include "host_libm.glsl"
 #include "f32_divide.glsl"
 
 void main() {
@@ -67,11 +67,14 @@ void main() {
             }
             precise float total = pc.reduction_lanes == 0u ? 0.0
                 : reduce_f32_dot(dot, pc.reduction_lanes);
+            vec2 wide_total = vec2(0.0);
             for (uint index = vector_end; index < pc.head_dim; index++) {
                 precise float term = uintBitsToFloat(arena.data[q_base + index])
                     * uintBitsToFloat(arena.data[k_base + index]);
-                total += term;
+                if (pc.reduction_lanes == 0u) wide_total = add_f32_wide(wide_total, term);
+                else total += term;
             }
+            if (pc.reduction_lanes == 0u) total = wide_total.x + wide_total.y;
             scores[token] = total * scale;
         } else {
             // Match the CPU trunk's `f32::NEG_INFINITY` tail: it keeps the
@@ -97,7 +100,7 @@ void main() {
     barrier();
 
     for (uint token = lane; token < padded; token += 64u) {
-        scores[token] = token < sequence_length ? exp_accurate(scores[token] - maximum) : 0.0;
+        scores[token] = token < sequence_length ? exp_reference(scores[token] - maximum) : 0.0;
     }
     barrier();
     if (lane == 0u) {
@@ -109,10 +112,7 @@ void main() {
                 : (scores[token] - next) + sum;
             sum = next;
         }
-        precise float inverse = divide_finite_normal(1.0, sum);
-        precise float residual = fma(-sum, inverse, 1.0);
-        residual = fma(-correction, inverse, residual);
-        lane_sum[0] = fma(residual, inverse, inverse);
+        lane_sum[0] = reciprocal_positive_sum(sum, correction);
     }
     barrier();
     float inverse_sum = lane_sum[0];
@@ -129,6 +129,7 @@ void main() {
         for (uint l = 0u; l < 16u; l++) acc[l] = 0.0;
         uint width = max(pc.reduction_lanes, 1u);
         precise float value = 0.0;
+        vec2 wide_value = vec2(0.0);
         for (uint token = 0u; token < sequence_length; token++) {
             uint v_index = pc.cache_v_word + (pc.layer * pc.capacity + token) * kv_count
                 + kv_head * pc.head_dim + index;
@@ -138,14 +139,15 @@ void main() {
                 acc[stream] = fma(scores[token], v, acc[stream]);
             } else {
                 precise float term = scores[token] * v;
-                value += term;
+                wide_value = add_f32_wide(wide_value, term);
             }
         }
         if (pc.reduction_lanes != 0u) value = reduce_f32_dot(acc, pc.reduction_lanes);
+        else value = wide_value.x + wide_value.y;
         float gate = uintBitsToFloat(
             arena.data[pc.gate_word + (row * pc.q_heads + head) * pc.head_dim + index]
         );
-        value *= divide_finite_normal(1.0, 1.0 + exp_accurate(-gate));
+        value *= divide_finite_normal(1.0, 1.0 + exp_reference(-gate));
         arena.data[pc.output_word + (row * pc.q_heads + head) * pc.head_dim + index] = floatBitsToUint(value);
     }
 }

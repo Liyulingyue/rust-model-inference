@@ -178,6 +178,8 @@ pub fn build_text_runtime(
         )?)
     } else if arch == "mellum" {
         Box::new(crate::models::mellum::trunk::runtime::MellumTextRuntime::new(options)?)
+    } else if arch == "dory" {
+        Box::new(crate::models::dory::DoryTextRuntime::new(options)?)
     } else {
         return Err(format!("No TextRuntime adapter for architecture {arch}"));
     };

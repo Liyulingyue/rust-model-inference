@@ -25,6 +25,7 @@ layout(push_constant) uniform PC {
     uint packed_heads;
     uint packed_dims;
     float eps;
+    uint reference_mode;
 } pc;
 
 shared float inverse_rms;
@@ -84,9 +85,15 @@ void main() {
         float second = uintBitsToFloat(arena.data[output_base + half_rope + index]);
         precise float second_sine = second * sine;
         precise float second_cosine = second * cosine;
-        arena.data[output_base + index] = floatBitsToUint(fma(first, cosine, -second_sine));
-        arena.data[output_base + half_rope + index] =
-            floatBitsToUint(fma(first, sine, second_cosine));
+        // Reference RoPE rounds the products before adding; FMA can cross a later Q8 boundary.
+        precise float first_cosine = first * cosine;
+        precise float first_sine = first * sine;
+        precise float rotated_first = pc.reference_mode != 0u
+            ? first_cosine - second_sine : fma(first, cosine, -second_sine);
+        precise float rotated_second = pc.reference_mode != 0u
+            ? first_sine + second_cosine : fma(first, sine, second_cosine);
+        arena.data[output_base + index] = floatBitsToUint(rotated_first);
+        arena.data[output_base + half_rope + index] = floatBitsToUint(rotated_second);
     }
     barrier();
 

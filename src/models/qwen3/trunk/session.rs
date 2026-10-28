@@ -139,6 +139,7 @@ pub struct Qwen3Session<'model> {
     pub(crate) kv_state: KvState,
     pub(crate) scratch: ExecutionScratchpad,
     pub(super) prefill_scratch: Qwen3PrefillScratch,
+    pub(super) hidden_linear: Option<crate::compute::linear::LinearExecutor<'model, 'static>>,
     pub(crate) capacity: usize,
     #[cfg(feature = "vulkan")]
     pub(crate) gpu: Option<Qwen3VulkanSession>,
@@ -337,6 +338,7 @@ impl<'model> Qwen3Session<'model> {
                 max_rows: 1,
             },
             prefill_scratch: Qwen3PrefillScratch::new(1, model),
+            hidden_linear: None,
             capacity,
             #[cfg(feature = "vulkan")]
             gpu,
@@ -535,6 +537,53 @@ impl<'model> Qwen3Session<'model> {
         input: Qwen3Input<'_>,
     ) -> Result<Vec<f32>, String> {
         self.hidden_sequence(input, false)
+    }
+
+    /// Offload dense projections while retaining F32 KV and every raw hidden row.
+    pub(crate) fn forward_hidden_sequence_raw_with_linear_offload(
+        &mut self,
+        input: Qwen3Input<'_>,
+        projection_policy: ComputePolicy,
+    ) -> Result<Vec<f32>, String> {
+        use crate::compute::linear::{LinearBinding, LinearExecutor, LinearMode};
+        if self.compute_policy != ComputePolicy::Auto
+            || projection_policy == ComputePolicy::Cpu
+            || self.model.config.moe.is_some()
+        {
+            return Err("Hidden-row projection offload requires an Auto dense host session and Auto or Vulkan projections".into());
+        }
+        let bindings = self
+            .model
+            .layers
+            .iter()
+            .flat_map(|layer| {
+                [
+                    &layer.wq,
+                    &layer.wk,
+                    &layer.wv,
+                    &layer.wo,
+                    &layer.w_gate,
+                    &layer.w_up,
+                    &layer.w_down,
+                ]
+                .map(|weight| LinearBinding {
+                    weight,
+                    mode: LinearMode::Prepared,
+                })
+            })
+            .collect();
+        self.hidden_linear = Some(
+            LinearExecutor::new(
+                projection_policy,
+                bindings,
+                input.token_ids.len(),
+                self.model.pool.clone(),
+            )
+            .map_err(|e| e.to_string())?,
+        );
+        let result = self.hidden_sequence(input, false);
+        self.hidden_linear = None;
+        result
     }
 
     fn hidden_sequence(

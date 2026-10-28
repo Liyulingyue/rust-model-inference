@@ -89,6 +89,8 @@ impl<'a> super::weights::HybridTrunk<'a> {
         edge0_moe: Option<&[Edge0MoeWeights<'_>]>,
     ) -> Result<Vec<f32>, String> {
         let edge0 = edge0_moe.is_some();
+        // Quantization boundaries amplify small reassociations into different experts.
+        let _numerics = crate::ops::ScalarDispatchScope::new(self.config.reference_arithmetic());
         if mrope_positions.len() != n_tokens {
             return Err(format!(
                 "Qwen3.5 position count mismatch: tokens={n_tokens}, positions={}",
@@ -413,7 +415,7 @@ impl<'a> super::weights::HybridTrunk<'a> {
                         &mut scratch.prepared,
                         pool,
                         il,
-                        token,
+                        base_position.unwrap_or(0) + token,
                     )?;
                 }
             }
@@ -1036,6 +1038,11 @@ impl<'a> super::weights::HybridTrunk<'a> {
             }
         }
         // Emit complete, unnormalized rows once, independent of chunk size.
+        // Before the q/k L2 norms. The oracle emits `q_conv` here (the
+        // linear's output) and `q_conv_predelta` after the norm, so without
+        // this the two checkpoints cannot say whether a difference came out
+        // of the projection or out of the normalisation -- and those are
+        // very different bugs.
         #[cfg(feature = "parity-trace")]
         if trace_layer {
             parity_trace::report(parity_trace::checkpoint_rows(

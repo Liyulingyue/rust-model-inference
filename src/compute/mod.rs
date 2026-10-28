@@ -86,7 +86,7 @@ impl ComputePolicy {
         if self == Self::Vulkan
             && !matches!(
                 arch,
-                "llama" | "qwen3" | "qwen3vl" | "qwen3vlmoe" | "qwen35"
+                "llama" | "qwen3" | "qwen3vl" | "qwen3vlmoe" | "qwen35" | "qwen35moe" | "dory"
             )
         {
             return Err(format!("full Vulkan text decoding is not supported for {arch}; local linear offload does not satisfy this request"));
@@ -202,7 +202,15 @@ mod tests {
             assert!(ComputePolicy::Vulkan.validate_text_arch(arch).is_err());
             assert!(ComputePolicy::Auto.validate_text_arch(arch).is_ok());
         }
-        for arch in ["llama", "qwen3", "qwen3vl", "qwen3vlmoe", "qwen35"] {
+        for arch in [
+            "llama",
+            "qwen3",
+            "qwen3vl",
+            "qwen3vlmoe",
+            "qwen35",
+            "qwen35moe",
+            "dory",
+        ] {
             assert!(ComputePolicy::Vulkan.validate_text_arch(arch).is_ok());
         }
     }

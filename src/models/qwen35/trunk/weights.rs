@@ -68,7 +68,9 @@ pub struct Qwen35MoeWeights<'a> {
     pub up_exps: &'a [u8],
     pub gate_exps: &'a [u8],
     pub down_exps: &'a [u8],
-    pub ggml_type: GGMLType,
+    pub up_type: GGMLType,
+    pub gate_type: GGMLType,
+    pub down_type: GGMLType,
     pub n_expert: usize,
     pub n_ff_exp: usize,
     pub n_embd: usize,
@@ -87,12 +89,20 @@ impl<'a> Qwen35MoeWeights<'a> {
     /// `[n_ff_exp, n_embd]` for expert `e`, matching ggml's
     /// `ffn_up_exps` (`[n_embd, n_ff_exp, n_expert]`).
     pub fn up(&self, e: usize) -> Weight<'a> {
-        self.view(self.up_exps, self.stride_up, e, self.n_embd, self.n_ff_exp)
+        self.view(
+            self.up_exps,
+            self.up_type,
+            self.stride_up,
+            e,
+            self.n_embd,
+            self.n_ff_exp,
+        )
     }
 
     pub fn gate(&self, e: usize) -> Weight<'a> {
         self.view(
             self.gate_exps,
+            self.gate_type,
             self.stride_gate,
             e,
             self.n_embd,
@@ -105,6 +115,7 @@ impl<'a> Qwen35MoeWeights<'a> {
     pub fn down(&self, e: usize) -> Weight<'a> {
         self.view(
             self.down_exps,
+            self.down_type,
             self.stride_down,
             e,
             self.n_ff_exp,
@@ -115,6 +126,7 @@ impl<'a> Qwen35MoeWeights<'a> {
     fn view(
         &self,
         data: &'a [u8],
+        ggml_type: GGMLType,
         stride: usize,
         e: usize,
         n_in: usize,
@@ -122,12 +134,7 @@ impl<'a> Qwen35MoeWeights<'a> {
     ) -> Weight<'a> {
         let start = e * stride;
         let slice = data.get(start..start + stride).unwrap_or(&data[..0]);
-        Weight::from_quantized(QuantizedTensor::from_bytes(
-            slice,
-            self.ggml_type,
-            n_in,
-            n_out,
-        ))
+        Weight::from_quantized(QuantizedTensor::from_bytes(slice, ggml_type, n_in, n_out))
     }
 }
 
@@ -265,9 +272,34 @@ fn load_moe_weights<'a, S: TensorSource + ?Sized>(
     }
     // ggml stores the expert axis last and contiguous, so a 3-D tensor is
     // `n_expert` back-to-back copies of one expert's matrix.
+    let gate_info = info(&gate_name)?;
+    let down_info = info(&down_name)?;
+    for (name, tensor, dims) in [
+        (
+            &up_name,
+            up_info,
+            [n_embd as u64, n_ff_exp as u64, n_expert as u64],
+        ),
+        (
+            &gate_name,
+            gate_info,
+            [n_embd as u64, n_ff_exp as u64, n_expert as u64],
+        ),
+        (
+            &down_name,
+            down_info,
+            [n_ff_exp as u64, n_embd as u64, n_expert as u64],
+        ),
+    ] {
+        if tensor.dims != dims || tensor.checked_nbytes() != Some(need(name)?.len() as u64) {
+            return Err(format!(
+                "{name}: invalid expert shape or payload; expected {dims:?}"
+            ));
+        }
+    }
     let stride_up = up_info.ggml_type.nbytes(n_embd * n_ff_exp);
-    let stride_gate = info(&gate_name)?.ggml_type.nbytes(n_embd * n_ff_exp);
-    let stride_down = info(&down_name)?.ggml_type.nbytes(n_ff_exp * n_embd);
+    let stride_gate = gate_info.ggml_type.nbytes(n_embd * n_ff_exp);
+    let stride_down = down_info.ggml_type.nbytes(n_ff_exp * n_embd);
 
     let gate_inp = load_weight(source, &format!("blk.{layer}.ffn_gate_inp.weight"))
         .ok_or_else(|| format!("Missing blk.{layer}.ffn_gate_inp.weight"))?;
@@ -322,7 +354,9 @@ fn load_moe_weights<'a, S: TensorSource + ?Sized>(
         up_exps: need(&up_name)?,
         gate_exps: need(&gate_name)?,
         down_exps: need(&down_name)?,
-        ggml_type: up_info.ggml_type,
+        up_type: up_info.ggml_type,
+        gate_type: gate_info.ggml_type,
+        down_type: down_info.ggml_type,
         n_expert,
         n_ff_exp,
         n_embd,
@@ -395,18 +429,7 @@ impl<'a> HybridTrunk<'a> {
         if arch == Some("edge0") {
             return Err("Edge0 architecture requires Edge0Model::from_source".into());
         }
-        // `qwen35moe` is the same hybrid attention/SSM stack with a routed +
-        // shared expert FFN, so it shares this trunk; only the FFN differs.
-        let prefix = match arch.as_deref() {
-            Some("qwen35") => "qwen35",
-            Some("qwen35moe") => "qwen35moe",
-            _ => {
-                return Err(format!(
-                    "Qwen35Model requires general.architecture=qwen35 or qwen35moe, got {arch:?}"
-                ));
-            }
-        };
-        let config = Qwen35Config::from_source_for_arch(source, prefix)?;
+        let config = Qwen35Config::from_source(source)?;
         Self::load_trunk(source, config, false)
     }
 
@@ -682,10 +705,11 @@ impl<'a> HybridTrunk<'a> {
 }
 
 #[cfg(test)]
-mod moe_contract_tests {
+mod moe_tests {
     use super::*;
     use crate::core::tensor::{MetaValue, TensorInfo};
     use std::collections::HashMap;
+
     struct Source(HashMap<String, (TensorInfo, Vec<u8>)>);
     impl TensorSource for Source {
         fn metadata(&self, _: &str) -> Option<&MetaValue> {
@@ -698,53 +722,166 @@ mod moe_contract_tests {
             self.0.get(name).map(|v| v.1.as_slice())
         }
     }
-    #[test]
-    fn shared_expert_requires_all_projections_and_valid_payloads() {
-        let mut source = Source(HashMap::new());
-        for (suffix, dims) in [
-            ("up_exps.weight", vec![2, 3, 2]),
-            ("gate_exps.weight", vec![2, 3, 2]),
-            ("down_exps.weight", vec![3, 2, 2]),
-            ("gate_inp.weight", vec![2, 2]),
-            ("gate_inp_shexp.weight", vec![2]),
-            ("up_shexp.weight", vec![2, 3]),
-            ("gate_shexp.weight", vec![2, 3]),
-            ("down_shexp.weight", vec![3, 2]),
+
+    fn source() -> (Source, super::super::config::Qwen35Moe) {
+        let mut tensors = HashMap::new();
+        for (name, dims, ggml_type) in [
+            ("ffn_up_exps.weight", vec![512, 256, 2], GGMLType::Q4K),
+            ("ffn_gate_exps.weight", vec![512, 256, 2], GGMLType::Q5K),
+            ("ffn_down_exps.weight", vec![256, 512, 2], GGMLType::Q6K),
+            ("ffn_gate_inp.weight", vec![512, 2], GGMLType::F32),
         ] {
-            let name = format!("blk.0.ffn_{suffix}");
-            let len = dims.iter().product::<u64>() as usize * 4;
-            source.0.insert(
+            let name = format!("blk.0.{name}");
+            let bytes = vec![0; ggml_type.nbytes(dims.iter().product::<u64>() as usize)];
+            tensors.insert(
                 name.clone(),
                 (
                     TensorInfo {
                         name,
                         dims,
-                        ggml_type: GGMLType::F32,
+                        ggml_type,
                         offset: 0,
                     },
-                    vec![0; len],
+                    bytes,
                 ),
             );
         }
-        let config = super::super::config::Qwen35Moe {
-            n_expert: 2,
+        (
+            Source(tensors),
+            super::super::config::Qwen35Moe {
+                n_expert: 2,
+                n_expert_used: 1,
+                n_ff_exp: 256,
+                n_ff_shexp: 0,
+                weights_scale: 1.0,
+            },
+        )
+    }
+
+    #[test]
+    fn qwen35moe_preserves_each_expert_projection_type() {
+        let (source, config) = source();
+        let weights = load_moe_weights(&source, 0, config, 512).unwrap();
+        for expert in 0..2 {
+            assert_eq!(weights.up(expert).ggml_type, GGMLType::Q4K);
+            assert_eq!(weights.gate(expert).ggml_type, GGMLType::Q5K);
+            assert_eq!(weights.down(expert).ggml_type, GGMLType::Q6K);
+        }
+    }
+
+    #[test]
+    fn qwen35moe_rejects_invalid_expert_shapes_and_payloads() {
+        for name in [
+            "ffn_up_exps.weight",
+            "ffn_gate_exps.weight",
+            "ffn_down_exps.weight",
+        ] {
+            for bad_shape in [true, false] {
+                let (mut source, config) = source();
+                let tensor = source.0.get_mut(&format!("blk.0.{name}")).unwrap();
+                if bad_shape {
+                    tensor.0.dims[2] = 1;
+                } else {
+                    tensor.1.pop();
+                }
+                assert!(
+                    load_moe_weights(&source, 0, config, 512).is_err(),
+                    "{name}, bad_shape={bad_shape}"
+                );
+            }
+        }
+    }
+}
+
+/// The shared expert is a separate path from the routed experts: it has
+/// three projections of its own, and the loader must reject a missing,
+/// truncated or misshaped one. The routed-expert tests live in `moe_tests`;
+/// this one covers the shared branch.
+#[cfg(test)]
+mod moe_shared_expert_tests {
+    use super::*;
+    use crate::core::tensor::{MetaValue, TensorInfo};
+    use std::collections::HashMap;
+
+    const N_EMBD: usize = 3;
+    const N_FF_EXP: usize = 2;
+    const N_EXPERT: usize = 2;
+    const N_FF_SHEXP: usize = 2;
+
+    struct Source(HashMap<String, (TensorInfo, Vec<u8>)>);
+    impl TensorSource for Source {
+        fn metadata(&self, _: &str) -> Option<&MetaValue> {
+            None
+        }
+        fn tensor_info(&self, name: &str) -> Option<&TensorInfo> {
+            self.0.get(name).map(|v| &v.0)
+        }
+        fn tensor_slice(&self, name: &str) -> Option<&[u8]> {
+            self.0.get(name).map(|v| v.1.as_slice())
+        }
+    }
+
+    fn insert(source: &mut Source, name: &str, dims: Vec<u64>) {
+        let len = dims.iter().product::<u64>() as usize * 4;
+        source.0.insert(
+            name.to_string(),
+            (
+                TensorInfo {
+                    name: name.to_string(),
+                    dims,
+                    ggml_type: GGMLType::F32,
+                    offset: 0,
+                },
+                vec![0; len],
+            ),
+        );
+    }
+
+    fn source() -> Source {
+        let mut source = Source(HashMap::new());
+        for (suffix, dims) in [
+            ("up_exps.weight", vec![N_EMBD, N_FF_EXP, N_EXPERT]),
+            ("gate_exps.weight", vec![N_EMBD, N_FF_EXP, N_EXPERT]),
+            ("down_exps.weight", vec![N_FF_EXP, N_EMBD, N_EXPERT]),
+            ("gate_inp.weight", vec![N_EMBD, N_EXPERT]),
+        ] {
+            insert(&mut source, &format!("blk.0.ffn_{suffix}"), dims);
+        }
+        for (suffix, dims) in [
+            ("up_shexp.weight", vec![N_EMBD, N_FF_SHEXP]),
+            ("gate_shexp.weight", vec![N_EMBD, N_FF_SHEXP]),
+            ("down_shexp.weight", vec![N_FF_SHEXP, N_EMBD]),
+        ] {
+            insert(&mut source, &format!("blk.0.ffn_{suffix}"), dims);
+        }
+        source
+    }
+
+    fn config() -> super::super::config::Qwen35Moe {
+        super::super::config::Qwen35Moe {
+            n_expert: N_EXPERT,
             n_expert_used: 1,
-            n_ff_exp: 3,
-            n_ff_shexp: 3,
+            n_ff_exp: N_FF_EXP,
+            n_ff_shexp: N_FF_SHEXP,
             weights_scale: 1.0,
-        };
-        assert!(load_moe_weights(&source, 0, config, 2).is_ok());
+        }
+    }
+
+    #[test]
+    fn shared_expert_requires_all_projections_and_valid_payloads() {
+        let mut source = source();
+        assert!(load_moe_weights(&source, 0, config(), N_EMBD).is_ok());
         for suffix in ["up", "gate", "down"] {
             let name = format!("blk.0.ffn_{suffix}_shexp.weight");
             let saved = source.0.remove(&name).unwrap();
             assert!(
-                load_moe_weights(&source, 0, config, 2).is_err(),
+                load_moe_weights(&source, 0, config(), N_EMBD).is_err(),
                 "missing {suffix}"
             );
             source.0.insert(name.clone(), saved);
             source.0.get_mut(&name).unwrap().1.pop();
             assert!(
-                load_moe_weights(&source, 0, config, 2).is_err(),
+                load_moe_weights(&source, 0, config(), N_EMBD).is_err(),
                 "truncated {suffix}"
             );
             source.0.get_mut(&name).unwrap().1.push(0);
@@ -754,7 +891,7 @@ mod moe_contract_tests {
             .get_mut("blk.0.ffn_up_shexp.weight")
             .unwrap()
             .0
-            .dims = vec![3, 2];
-        assert!(load_moe_weights(&source, 0, config, 2).is_err());
+            .dims = vec![N_FF_SHEXP, N_EMBD];
+        assert!(load_moe_weights(&source, 0, config(), N_EMBD).is_err());
     }
 }

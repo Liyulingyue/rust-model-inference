@@ -1,4 +1,33 @@
-use rust_model_inference::models::diffusion::qwen_image_2_1::{flow_sigmas, rgba_bytes};
+use rust_model_inference::models::diffusion::qwen_image_2_1::{
+    flow_sigmas, rgba_bytes, sampling_sigmas,
+};
+
+#[test]
+fn turbo_uses_checkpoint_sigmas_without_resolution_shift_or_terminal_stretch() {
+    let index: serde_json::Value = serde_json::from_str(include_str!(
+        "fixtures/qwen_image_2_1_turbo/model_index.json"
+    ))
+    .unwrap();
+    let mut expected: Vec<f32> = serde_json::from_value(index["sample_sigmas"].clone()).unwrap();
+    expected.push(0.0);
+    let scheduler: serde_json::Value = serde_json::from_str(include_str!(
+        "fixtures/qwen_image_2_1_turbo/scheduler_config.json"
+    ))
+    .unwrap();
+    assert_eq!(scheduler["shift"], 1.0);
+    assert_eq!(scheduler["use_dynamic_shifting"], false);
+    assert!(scheduler["shift_terminal"].is_null());
+    for tokens in [8, 256, 8192, 16384] {
+        assert_eq!(sampling_sigmas(8, tokens, true).unwrap(), expected);
+    }
+    assert_eq!(expected.len(), 9);
+    assert!(expected.windows(2).all(|pair| pair[0] > pair[1]));
+    for steps in [0, 1, 7, 9, 30] {
+        assert!(sampling_sigmas(steps, 256, true).is_err());
+    }
+    assert!(sampling_sigmas(8, 0, true).is_err());
+    assert_ne!(sampling_sigmas(8, 256, false).unwrap(), expected);
+}
 
 #[test]
 fn flow_schedule_keeps_the_last_evaluation_and_final_zero_distinct() {

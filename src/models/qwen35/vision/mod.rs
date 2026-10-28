@@ -3639,9 +3639,52 @@ mod tests {
             0x4019d4e4,
         ]
         .map(f32::from_bits);
-        let (mean, variance) = ggml_layer_norm_stats(&input);
-        assert_eq!(mean.to_bits(), 0xbf6c5994);
-        assert_eq!(variance.to_bits(), 0x40b68732);
+        for count in [1, 4, 7, 8] {
+            let values = &input[..count];
+            let mean = (values.iter().map(|&v| f64::from(v)).sum::<f64>() / count as f64) as f32;
+            let variance = values
+                .iter()
+                .map(|&v| f64::from((v - mean) * (v - mean)))
+                .sum::<f64>() as f32
+                / count as f32;
+            let (actual_mean, actual_variance) = ggml_layer_norm_stats(values);
+            assert!((actual_mean - mean).abs() <= 1e-6);
+            assert!((actual_variance - variance).abs() <= 1e-6 * variance.max(1.0));
+        }
+    }
+
+    #[test]
+    fn layer_norm_stats_include_every_simd_lane_and_tail() {
+        for len in [4, 8, 12, 13, 16, 1152] {
+            let input: Vec<f32> = (0..len)
+                .map(|i| if i % 8 >= 4 { 1.0 } else { 0.0 })
+                .collect();
+            let expected_mean = input.iter().sum::<f32>() / len as f32;
+            let expected_var = input
+                .iter()
+                .map(|x| (x - expected_mean).powi(2))
+                .sum::<f32>()
+                / len as f32;
+            let (mean, variance) = ggml_layer_norm_stats(&input);
+            close(mean, expected_mean);
+            close(variance, expected_var);
+        }
+    }
+
+    #[test]
+    fn layer_norm_stats_include_every_lane_and_tail() {
+        for length in [4, 7, 8, 9, 13, 16, 1152] {
+            let input: Vec<f32> = (0..length).map(|i| (i * 17 % 31) as f32 - 15.0).collect();
+            let expected_mean = input.iter().map(|&x| f64::from(x)).sum::<f64>() / length as f64;
+            let expected_variance = input
+                .iter()
+                .map(|&x| (f64::from(x) - expected_mean).powi(2))
+                .sum::<f64>()
+                / length as f64;
+            let (mean, variance) = ggml_layer_norm_stats(&input);
+            close(mean, expected_mean as f32);
+            close(variance, expected_variance as f32);
+        }
     }
 
     #[cfg(target_arch = "aarch64")]

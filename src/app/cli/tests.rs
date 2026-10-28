@@ -135,6 +135,16 @@ fn mage_arguments_preserve_reference_order_and_require_values() {
 }
 
 #[test]
+fn qwen_image_turbo_flag_is_accepted() {
+    assert!(
+        parse_cli_options(&args(&["rmi", "--qwen-image-turbo"]))
+            .unwrap()
+            .qwen_image_turbo
+    );
+    assert!(!CliOptions::default().qwen_image_turbo);
+}
+
+#[test]
 fn qwen_image_cli_parses_latent_shape_and_rejects_nonfinite_timestep() {
     let options = parse_cli_options(&args(&[
         "rmi",

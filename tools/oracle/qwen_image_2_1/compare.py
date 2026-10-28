@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare complete component checkpoints as little-endian F32 bits. No tolerance."""
+"""Compare component structure exactly; optional bounded F32 numerical comparison."""
 import argparse
 from collections import Counter
 import json
@@ -34,20 +34,44 @@ def shape(row):
     return [n for n in row["shape"] if n != 1] or [1]
 
 
-def compare(rust, oracle):
+def compare(rust, oracle, relative_l2=None, exact_inputs=False):
     assert [r["name"] for r in rust] == [r["name"] for r in oracle], "checkpoint names/order/count"
+    if relative_l2 is not None:
+        assert math.isfinite(relative_l2) and relative_l2 > 0, 'positive finite numerical tolerance'
+        import numpy as np
+    metrics = []
     count = 0
     for r, o in zip(rust, oracle):
         assert shape(r) == shape(o), f"{r['name']} shape: {r['shape']} != {o['shape']}"
         a, b = data(r), data(o)
         assert len(a) == len(b), r["name"]
-        if a != b:
+        exact = relative_l2 is None or r['name'] in {
+            'qwen.text.tokens', 'qwen.text.image_slots', 'qwen.sample.sigmas',
+            'qwen.sample.noise', 'qwen.input.timesteps',
+        } or (exact_inputs and r['name'] in {'qwen.input.x', 'qwen.input.context'})
+        if not exact:
+            x, y = (np.frombuffer(v, dtype='<f4').astype(np.float64) for v in (a, b))
+            assert np.isfinite(x).all() and np.isfinite(y).all(), r['name']
+            delta = x-y
+            maximum = float(np.max(np.abs(delta), initial=0))
+            norm = float(np.sum(y*y))
+            error = float(np.sum(delta*delta))
+            relative = math.sqrt(error/norm) if norm else (0.0 if not error else math.inf)
+            limit = 1e-5 + relative_l2 * float(np.max(np.abs(y), initial=0))
+            metric = dict(name=r['name'], occurrence=r.get('occurrence', 0), max_abs=maximum, relative_l2=relative)
+            assert relative <= relative_l2 and maximum <= limit, metric
+            metrics.append(metric)
+        elif a != b:
             index = next(i for i in range(len(a)//4) if a[4*i:4*i+4] != b[4*i:4*i+4])
             bits = [struct.unpack_from('<I', x, 4*index)[0] for x in (a, b)]
             raise AssertionError(f"{r['name']} occurrence {r.get('occurrence', 0)}, first u32[{index}]: {bits[0]:08x} != {bits[1]:08x}")
         assert all(math.isfinite(v[0]) for v in struct.iter_unpack('<f', a)), r["name"]
         count += len(a)//4
-    return {"checkpoints": len(rust), "f32_bits": count}
+    if relative_l2 is None:
+        return {"checkpoints": len(rust), "f32_bits": count}
+    return {"checkpoints": len(rust), "f32_values": count, "relative_l2_limit": relative_l2,
+            "max_abs": max((m['max_abs'] for m in metrics), default=0),
+            "max_relative_l2": max((m['relative_l2'] for m in metrics), default=0), "metrics": metrics}
 
 
 def text_rows(rows, rust, references):
@@ -149,6 +173,7 @@ def main():
     p.add_argument('--references', type=int, default=0)
     p.add_argument('--reference', type=int, default=0)
     p.add_argument('--png')
+    p.add_argument('--relative-l2', type=float, help='bound relative L2 and peak-normalized absolute error; structural inputs stay exact')
     args = p.parse_args()
     rust, oracle = records(args.rust_trace), records(args.oracle_trace)
     if args.mode == 'text':
@@ -174,14 +199,19 @@ def main():
             steps = next(r['len']-1 for r in rust if r['name'] == 'qwen.sample.sigmas')
             assert counts['qwen.sample.noise'] == counts['qwen.sample.sigmas'] == 1
             assert counts['qwen.sample.velocity'] == counts['qwen.sample.latent'] == steps
-    result = compare(rust, oracle)
+    # In a sampler, x/context include earlier lossy computations from each side.
+    result = compare(rust, oracle, args.relative_l2, exact_inputs=args.mode == 'dit')
     if args.png:
         w, h, pixels = png_rgba(args.png)
         values = [v[0] for v in struct.iter_unpack('<f', data(next(r for r in oracle if r['name'] == 'qwen.vae.output')))]
         # Reproduce each F32 rounding before sd.cpp's truncating byte conversion.
         f32 = lambda v: struct.unpack('<f', struct.pack('<f', v))[0]
         expected = bytes(int(max(0,min(255,f32(f32(f32(values[c*w*h+i]+1)*0.5)*255)))) for i in range(w*h) for c in range(4))
-        assert pixels == expected, 'final RGBA PNG pixels (including alpha)'
+        if args.relative_l2 is None:
+            assert pixels == expected, 'final RGBA PNG pixels (including alpha)'
+        else:
+            result['rgba_max_abs'] = max(abs(a-b) for a,b in zip(pixels,expected))
+            assert result['rgba_max_abs'] <= math.ceil(255*args.relative_l2)+1, 'RGBA8 numerical error'
         result['rgba_bytes'] = len(pixels)
     print(json.dumps(dict(mode=args.mode, **result)))
 

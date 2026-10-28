@@ -874,15 +874,27 @@ unsafe fn vec_mad_f16_f32_avx2(y: &mut [f32], x_f16: &[u16], v: f32) {
     }
 }
 
+/// F32 products accumulated in F64, matching the GGML scalar attention contract.
+#[inline(always)]
+pub fn dot_f32_f64_acc(a: &[f32], b: &[f32], n: usize) -> f32 {
+    a[..n]
+        .iter()
+        .zip(&b[..n])
+        .map(|(&x, &y)| f64::from(x * y))
+        .sum::<f64>() as f32
+}
+
+#[test]
+fn f64_accumulation_retains_cancellation_residual() {
+    assert_eq!(dot_f32_f64_acc(&[1e8, 1.0, -1e8], &[1.0; 3], 3), 1.0);
+    assert_eq!(dot_f32_f64_acc(&[], &[], 0), 0.0);
+}
+
 #[inline(always)]
 pub fn dot_f32(a: &[f32], b: &[f32], n: usize) -> f32 {
     if crate::ops::scalar_mode() {
         // ggml's scalar F32 dot rounds products to F32 and accumulates in F64.
-        return a[..n]
-            .iter()
-            .zip(&b[..n])
-            .map(|(&x, &y)| f64::from(x * y))
-            .sum::<f64>() as f32;
+        return dot_f32_f64_acc(a, b, n);
     }
     #[cfg(target_arch = "x86_64")]
     {

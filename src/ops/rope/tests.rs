@@ -8,6 +8,19 @@ use super::{
 use crate::ops::rope::rope_neox_inplace;
 
 #[test]
+fn precise_rope_preserves_unfused_rotation_across_heads() {
+    let mut values = [3.0f32, 4.0, -2.0, 1.0, 3.0, 4.0, -2.0, 1.0];
+    super::rope_neox_inplace_precise(&mut values, 1, 4, 10_000.0);
+    let expected = [3.3038489, 3.9898002, 1.4438083, 1.0399493];
+    for head in values.chunks_exact(4) {
+        for (actual, expected) in head.iter().zip(expected) {
+            assert!((actual - expected).abs() < 5e-7);
+        }
+    }
+    super::rope_neox_inplace_precise(&mut [], 1, 4, 10_000.0);
+}
+
+#[test]
 fn sleef_rope_sin_cos_matches_torch_arm_bits() {
     let expected = [
         (1.0f32, 0x3f0a5141u32, 0x3f576aa4u32),
@@ -115,7 +128,7 @@ fn mrope_matches_ggml_sincos_bits() {
     assert_eq!(head[35].to_bits(), 0xbe8e_2239);
 }
 
-/// SIMD path must produce the same result as the scalar fallback.
+/// SIMD and scalar rotations must agree within F32 rounding error.
 /// Compares public `rope_neox_inplace` against the explicit scalar helper used
 /// when SIMD is unavailable. Catches tail-handling, cache wiring, and
 /// instruction-order bugs across the three paths.
@@ -143,8 +156,8 @@ fn rope_neox_inplace_simd_matches_scalar_fallback() {
 
         // Scalar reference uses the same recurrence as the public function's
         // table build, then a plain scalar per-head rotation — the same
-        // shape as the AVX2/NEON tail loop, so SIMD-vs-scalar diffs are
-        // caught bit-for-bit.
+        // shape as the AVX2/NEON tail loop. Fused SIMD products can round
+        // differently from separate scalar products.
         let half = head_dim / 2;
         let pos_f = pos as f32;
         let mut cos_table = vec![0.0f32; half];
@@ -160,10 +173,10 @@ fn rope_neox_inplace_simd_matches_scalar_fallback() {
         rope_neox_inplace_scalar(&mut b, n_heads, head_dim, &cos_table, &sin_table);
 
         for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
-            assert_eq!(
-                x.to_bits(),
-                y.to_bits(),
-                "head_dim={head_dim} n_heads={n_heads} idx={i}"
+            let tolerance = 4.0 * f32::EPSILON * x.abs().max(y.abs()).max(1.0);
+            assert!(
+                (x - y).abs() <= tolerance,
+                "head_dim={head_dim} n_heads={n_heads} idx={i}: {x} vs {y}"
             );
         }
     }

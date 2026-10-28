@@ -14,6 +14,8 @@
 
 pub(crate) mod dense;
 #[cfg(feature = "vulkan")]
+pub(crate) mod dory;
+#[cfg(feature = "vulkan")]
 pub(crate) mod matmul_q4k;
 #[cfg(feature = "vulkan")]
 pub(crate) mod ops;
@@ -121,6 +123,37 @@ pub fn mark_gpu_broken(reason: &str) {
     }
 }
 
+/// The validation layer reports through this callback; without it the layer
+/// keeps quiet and the hazards we are hunting stay invisible.
+#[cfg(feature = "vulkan")]
+unsafe extern "system" fn validation_log(
+    severity: vk::DebugUtilsMessageSeverityFlagsEXT,
+    types: vk::DebugUtilsMessageTypeFlagsEXT,
+    data: *const vk::DebugUtilsMessengerCallbackDataEXT,
+    _user_data: *mut std::ffi::c_void,
+) -> vk::Bool32 {
+    if data.is_null() {
+        return vk::FALSE;
+    }
+    let callback = &*data;
+    let message = if callback.p_message.is_null() {
+        String::new()
+    } else {
+        std::ffi::CStr::from_ptr(callback.p_message)
+            .to_string_lossy()
+            .into_owned()
+    };
+    let id = if callback.p_message_id_name.is_null() {
+        String::new()
+    } else {
+        std::ffi::CStr::from_ptr(callback.p_message_id_name)
+            .to_string_lossy()
+            .into_owned()
+    };
+    eprintln!("[GPU-VALIDATION] severity={severity:?} type={types:?} id={id}: {message}");
+    vk::FALSE
+}
+
 #[cfg(feature = "vulkan")]
 pub struct VulkanContext {
     entry: std::mem::ManuallyDrop<ash::Entry>,
@@ -140,6 +173,10 @@ pub struct VulkanContext {
     /// Weights keyed by (data_ptr, byte_len); mmap slices are stable, so the
     /// first matmul over a tensor uploads it and every later call is a hit.
     weight_cache: Mutex<HashMap<(usize, usize), GpuBuffer>>,
+    /// Operator pipelines, compiled once per device and shared by every
+    /// arena. Building a fresh set per arena compiled every shader again for
+    /// each projection, which cost far more than the dispatch itself.
+    operator_pipelines: Mutex<Option<Vec<vk::Pipeline>>>,
     /// Persistent I/O buffers, grown on demand.
     io_state: Mutex<IoState>,
     mutex: Mutex<CommandSubmission>,
@@ -153,6 +190,7 @@ pub struct VulkanContext {
     idle_waits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     device_name: String,
     shader_float16: bool,
+    shader_float64: bool,
     /// Device reports `VK_KHR_shader_integer_dot_product`, so the packed 4x int8
     /// matmul variant can use `dotPacked4x8EXT` instead of four scalar multiplies.
     integer_dot_product: bool,
@@ -177,6 +215,8 @@ pub struct VulkanContext {
     qwen3_core_contract: OnceLock<Result<(), String>>,
     q8_0_activation_contract: OnceLock<Result<(), String>>,
     q8_k_activation_contract: OnceLock<Result<(), String>>,
+    /// The validation messenger, alive as long as the instance is.
+    debug_messenger: Option<(ash::extensions::ext::DebugUtils, vk::DebugUtilsMessengerEXT)>,
 }
 
 /// Persistent activation staging buffers. Capacities grow to the largest
@@ -193,6 +233,7 @@ struct IoState {
 #[derive(Default)]
 struct CommandSubmission {
     uncertain: bool,
+    retired_weights: Vec<GpuBuffer>,
 }
 
 #[cfg(feature = "vulkan")]
@@ -297,6 +338,7 @@ struct DeviceCandidate {
     portability_subset: bool,
     integer_dot_product: bool,
     shader_float16: bool,
+    shader_float64: bool,
 }
 
 #[cfg(feature = "vulkan")]
@@ -340,7 +382,7 @@ impl VulkanContext {
         );
         unsafe {
             let entry = load_entry()?;
-            let (instance, instance_api_version, properties2_extension) =
+            let (instance, instance_api_version, properties2_extension, debug_messenger) =
                 Self::create_instance(&entry)?;
             let candidates = match Self::device_candidates(
                 &entry,
@@ -395,6 +437,7 @@ impl VulkanContext {
                             command_buffer: resources.command_buffer,
                             fence: resources.fence,
                             weight_cache: Mutex::new(HashMap::new()),
+                            operator_pipelines: Mutex::new(None),
                             io_state: Mutex::new(IoState::default()),
                             mutex: Mutex::new(CommandSubmission::default()),
                             #[cfg(test)]
@@ -407,6 +450,7 @@ impl VulkanContext {
                             idle_waits: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                             device_name: candidate.name,
                             shader_float16: candidate.shader_float16,
+                            shader_float64: candidate.shader_float64,
                             integer_dot_product: candidate.integer_dot_product,
                             limits: candidate.limits,
                             is_software_icd: candidate.device_type == vk::PhysicalDeviceType::CPU,
@@ -416,6 +460,7 @@ impl VulkanContext {
                             qwen3_core_contract: OnceLock::new(),
                             q8_0_activation_contract: OnceLock::new(),
                             q8_k_activation_contract: OnceLock::new(),
+                            debug_messenger,
                         });
                     }
                     Err(error) => failures.push(format!("{}: {error}", candidate.name)),
@@ -551,7 +596,11 @@ impl VulkanContext {
             }
             unsafe { self.device.device_wait_idle() }
                 .map_err(|error| VulkanError::InitFailed(error.to_string()))
-        })
+        })?;
+        for buffer in submission.retired_weights.drain(..) {
+            unsafe { self.destroy_buffer(&buffer) };
+        }
+        Ok(())
     }
 
     /// Caller holds mutex, from recovery through submission.
@@ -660,11 +709,13 @@ impl VulkanContext {
     pub fn warmup(&self) -> Result<(), VulkanError> {
         let n_in = 32usize;
         let n_out = 32usize;
-        let mut weight = vec![0u8; n_out * (n_in / 32) * 34];
+        let weight = vec![0u8; n_out * (n_in / 32) * 34];
         let input = vec![0u8; n_in];
         let scales = vec![0.0f32; n_in / 32];
         let mut out = vec![0.0f32; n_out];
-        unsafe { self.matmul_q8_0(&weight, &input, &scales, &mut out, n_in, n_out) }
+        let result = unsafe { self.matmul_q8_0(&weight, &input, &scales, &mut out, n_in, n_out) };
+        self.release_cached_weight(&weight);
+        result
     }
 
     /// Snapshot of the completed-matmul generation; pair with [`Self::wait_for_gen`].
@@ -813,6 +864,19 @@ impl VulkanContext {
         let buf = self.alloc_persistently_mapped(new_size)?;
         *slot = Some(buf);
         Ok(*slot.as_ref().unwrap())
+    }
+
+    pub(crate) fn release_cached_weight(&self, weight: &[u8]) {
+        // A later model may reuse this address for different weights.
+        if let Ok(mut submission) = self.mutex.lock() {
+            if let Ok(mut cache) = self.weight_cache.lock() {
+                if let Some(buffer) = cache.remove(&(weight.as_ptr() as usize, weight.len())) {
+                    submission.retired_weights.push(buffer);
+                }
+            }
+            // Evict the expired host key even if GPU completion cannot be confirmed.
+            let _ = self.recover_commands(&mut submission);
+        }
     }
 
     unsafe fn weight_for(&self, weight: &[u8]) -> Result<GpuBuffer, VulkanError> {
@@ -980,6 +1044,75 @@ impl VulkanContext {
         Ok(())
     }
 
+    /// The operator pipelines, compiled once for this device.
+    ///
+    /// Sharing them removes the per-arena cost of compiling every shader
+    /// again, which the denoiser paid for each of its hundred odd
+    /// projections per step.
+    pub(crate) fn operator_pipelines(&self) -> Result<Vec<vk::Pipeline>, VulkanError> {
+        let mut cached = self
+            .operator_pipelines
+            .lock()
+            .map_err(|_| VulkanError::InitFailed("Vulkan pipeline cache poisoned".into()))?;
+        if let Some(pipelines) = cached.as_ref() {
+            return Ok(pipelines.clone());
+        }
+        let pipelines = crate::vulkan::ops::build_operator_pipelines(self)?;
+        *cached = Some(pipelines.clone());
+        Ok(pipelines)
+    }
+
+    /// Force the host side cache of a mapped range out to the device.
+    ///
+    /// The arena and the weight uploads are plain copies into mapped memory.
+    /// The memory is host coherent, so a barrier alone is supposed to order
+    /// them, and the barrier in begin_commands does. A tiled kernel reads
+    /// those regions within microseconds of the copy though, so the copy is
+    /// flushed as well rather than relying on that barrier alone.
+    pub(crate) unsafe fn flush_mapped(
+        &self,
+        buffer: GpuBuffer,
+        offset: u64,
+        size: u64,
+    ) -> Result<(), VulkanError> {
+        if size == 0 {
+            return Ok(());
+        }
+        let range = vk::MappedMemoryRange::builder()
+            .memory(buffer.memory)
+            .offset(offset)
+            .size(size)
+            .build();
+        self.device
+            .flush_mapped_memory_ranges(&[range])
+            .map_err(|error| VulkanError::InitFailed(error.to_string()))
+    }
+
+    /// Drop the host side cache of a mapped range so the device writes it
+    /// holds become visible to the host.
+    ///
+    /// The result region is read straight out of the mapping. The memory is
+    /// host coherent, so the fence wait is supposed to be enough, but the
+    /// range is invalidated as well so the read does not depend on that.
+    pub(crate) unsafe fn invalidate_mapped(
+        &self,
+        buffer: GpuBuffer,
+        offset: u64,
+        size: u64,
+    ) -> Result<(), VulkanError> {
+        if size == 0 {
+            return Ok(());
+        }
+        let range = vk::MappedMemoryRange::builder()
+            .memory(buffer.memory)
+            .offset(offset)
+            .size(size)
+            .build();
+        self.device
+            .invalidate_mapped_memory_ranges(&[range])
+            .map_err(|error| VulkanError::InitFailed(error.to_string()))
+    }
+
     pub(crate) unsafe fn upload_static(&self, data: &[u8]) -> Result<GpuBuffer, VulkanError> {
         let size = data
             .len()
@@ -989,6 +1122,7 @@ impl VulkanContext {
         let buffer = self.alloc_persistently_mapped(size)?;
         std::ptr::copy_nonoverlapping(data.as_ptr(), buffer.mapped, data.len());
         std::ptr::write_bytes(buffer.mapped.add(data.len()), 0, size as usize - data.len());
+        self.flush_mapped(buffer, 0, data.len() as u64)?;
         self.count_upload(data.len());
         Ok(buffer)
     }
@@ -1044,6 +1178,18 @@ impl VulkanContext {
         }
         .device_type
             == vk::PhysicalDeviceType::DISCRETE_GPU
+    }
+
+    pub(crate) fn moe_experts_per_submission(&self) -> usize {
+        let properties = unsafe {
+            self.instance
+                .get_physical_device_properties(self._physical_device)
+        };
+        // shortcut: nine-expert batches are validated on M3 Max/RADV NAVI31; keep other vendors at two until tested.
+        match properties.vendor_id {
+            0x1002 | 0x106b => 9,
+            _ => 2,
+        }
     }
 
     unsafe fn alloc_device_buffer(&self, size: usize) -> Result<GpuBuffer, VulkanError> {
@@ -1208,7 +1354,17 @@ impl VulkanContext {
         );
     }
 
-    fn create_instance(entry: &ash::Entry) -> Result<(ash::Instance, u32, bool), VulkanError> {
+    fn create_instance(
+        entry: &ash::Entry,
+    ) -> Result<
+        (
+            ash::Instance,
+            u32,
+            bool,
+            Option<(ash::extensions::ext::DebugUtils, vk::DebugUtilsMessengerEXT)>,
+        ),
+        VulkanError,
+    > {
         let loader_version = entry
             .try_enumerate_instance_version()
             .map_err(|error| VulkanError::InitFailed(error.to_string()))?
@@ -1240,7 +1396,46 @@ impl VulkanContext {
         if properties2_extension {
             extension_names.push(properties2_name.as_ptr());
         }
-        let create_info = vk::InstanceCreateInfo {
+        // The validation layer reports the exact hazard when a submission
+        // reads memory a host write has not reached yet, so it is worth
+        // turning on while looking for one.
+        let validation_layer = CStr::from_bytes_with_nul(b"VK_LAYER_KHRONOS_validation\0").unwrap();
+        let validation_requested = std::env::var_os("RMI_VULKAN_VALIDATION").is_some();
+        let layer_names: Vec<*const i8> = if validation_requested {
+            vec![validation_layer.as_ptr()]
+        } else {
+            Vec::new()
+        };
+        // Without a messenger the layer stays quiet, and synchronization
+        // validation (the check that actually catches a read-before-write
+        // hazard) is off by default, so ask for both.
+        let debug_utils_name = vk::ExtDebugUtilsFn::name();
+        let debug_utils_available =
+            extension_available(&available_extensions, debug_utils_name) && validation_requested;
+        if debug_utils_available {
+            extension_names.push(debug_utils_name.as_ptr());
+        }
+        let validation_features = if debug_utils_available {
+            // GPU-assisted validation crashes this driver, so keep it off
+            // and let the CPU-side checks do the work.
+            let features = [
+                vk::ValidationFeatureEnableEXT::SYNCHRONIZATION_VALIDATION,
+                vk::ValidationFeatureEnableEXT::BEST_PRACTICES,
+            ];
+            // ash 0.37 does not name this one, but the spec gives it the value 8.
+            let disabled = [vk::ValidationFeatureDisableEXT::from_raw(8)];
+            Some(vk::ValidationFeaturesEXT {
+                s_type: vk::StructureType::VALIDATION_FEATURES_EXT,
+                p_next: std::ptr::null(),
+                enabled_validation_feature_count: features.len() as u32,
+                p_enabled_validation_features: features.as_ptr(),
+                disabled_validation_feature_count: disabled.len() as u32,
+                p_disabled_validation_features: disabled.as_ptr(),
+            })
+        } else {
+            None
+        };
+        let mut create_info = vk::InstanceCreateInfo {
             s_type: vk::StructureType::INSTANCE_CREATE_INFO,
             p_next: std::ptr::null(),
             p_application_info: &app_info,
@@ -1249,18 +1444,49 @@ impl VulkanContext {
             } else {
                 vk::InstanceCreateFlags::empty()
             },
-            enabled_layer_count: 0,
-            pp_enabled_layer_names: std::ptr::null(),
+            enabled_layer_count: layer_names.len() as u32,
+            pp_enabled_layer_names: layer_names.as_ptr(),
             enabled_extension_count: extension_names.len() as u32,
             pp_enabled_extension_names: extension_names.as_ptr(),
         };
+        if let Some(features) = validation_features.as_ref() {
+            create_info.p_next = features as *const _ as *const std::ffi::c_void;
+        }
 
-        unsafe {
+        let instance = unsafe {
             entry
                 .create_instance(&create_info, None)
-                .map(|instance| (instance, api_version, properties2_extension))
-                .map_err(|error| VulkanError::InitFailed(error.to_string()))
+                .map_err(|error| VulkanError::InitFailed(error.to_string()))?
+        };
+        let mut debug_messenger = None;
+        if debug_utils_available {
+            let debug_utils = ash::extensions::ext::DebugUtils::new(&entry, &instance);
+            let messenger_info = vk::DebugUtilsMessengerCreateInfoEXT {
+                s_type: vk::StructureType::DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+                p_next: std::ptr::null(),
+                flags: vk::DebugUtilsMessengerCreateFlagsEXT::empty(),
+                message_severity: vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
+                    | vk::DebugUtilsMessageSeverityFlagsEXT::ERROR,
+                message_type: vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
+                    | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
+                    | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
+                pfn_user_callback: Some(validation_log),
+                p_user_data: std::ptr::null_mut(),
+            };
+            let messenger =
+                unsafe { debug_utils.create_debug_utils_messenger(&messenger_info, None) };
+            if let Ok(handle) = messenger {
+                // The messenger has to outlive the instance, so it is owned by
+                // the context and dropped with it.
+                debug_messenger = Some((debug_utils, handle));
+            }
         }
+        Ok((
+            instance,
+            api_version,
+            properties2_extension,
+            debug_messenger,
+        ))
     }
 
     fn device_candidates(
@@ -1335,6 +1561,8 @@ impl VulkanContext {
                     portability_subset,
                     integer_dot_product,
                     shader_float16,
+                    shader_float64: instance.get_physical_device_features(device).shader_float64
+                        != 0,
                 });
             }
             Ok(candidates)
@@ -1480,7 +1708,10 @@ impl VulkanContext {
             p_queue_priorities: queue_priorities.as_ptr(),
         };
 
-        let features = vk::PhysicalDeviceFeatures::default();
+        let features = vk::PhysicalDeviceFeatures {
+            shader_float64: candidate.shader_float64.into(),
+            ..Default::default()
+        };
         let mut integer_dot = vk::PhysicalDeviceShaderIntegerDotProductFeatures {
             shader_integer_dot_product: candidate.integer_dot_product.into(),
             ..Default::default()
@@ -1682,6 +1913,16 @@ impl VulkanContext {
                 .map_err(|e| VulkanError::ShaderCompileFailed(e.to_string()))?
         };
 
+        // Keep scalar Qwen math consistent with this host's libm before Q8 rounding.
+        let host_glibc = u32::from(cfg!(all(target_arch = "x86_64", target_env = "gnu")));
+        let entries = [vk::SpecializationMapEntry {
+            constant_id: 0,
+            offset: 0,
+            size: 4,
+        }];
+        let specialization = vk::SpecializationInfo::builder()
+            .map_entries(&entries)
+            .data(bytemuck::bytes_of(&host_glibc));
         let stage = vk::PipelineShaderStageCreateInfo {
             s_type: vk::StructureType::PIPELINE_SHADER_STAGE_CREATE_INFO,
             p_next: std::ptr::null(),
@@ -1689,7 +1930,7 @@ impl VulkanContext {
             stage: vk::ShaderStageFlags::COMPUTE,
             module: shader_module,
             p_name: CStr::from_bytes_with_nul(b"main\0").unwrap().as_ptr(),
-            p_specialization_info: std::ptr::null(),
+            p_specialization_info: &*specialization,
         };
 
         let pipeline = unsafe {
@@ -1881,6 +2122,9 @@ impl Drop for VulkanContext {
             self.device
                 .destroy_descriptor_pool(self.descriptor_pool, None);
             self.device.destroy_device(None);
+            if let Some((debug_utils, messenger)) = self.debug_messenger.take() {
+                debug_utils.destroy_debug_utils_messenger(messenger, None);
+            }
             self.instance.destroy_instance(None);
             std::mem::ManuallyDrop::drop(&mut self.entry);
         }
@@ -2012,6 +2256,51 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn legacy_cached_weight_cleanup_waits_for_idle_and_invalidates_host_key() {
+        let context = VulkanContext::new().unwrap();
+        let mut weight = vec![1u8; 34];
+        weight[..2].copy_from_slice(&crate::ops::f32_to_f16(1.0).to_le_bytes());
+        let key = (weight.as_ptr() as usize, weight.len());
+        context.fail_fence_wait.store(true, Ordering::Relaxed);
+        assert!(
+            unsafe { context.matmul_q8_0(&weight, &[1; 32], &[1.0], &mut [0.0], 32, 1) }.is_err()
+        );
+        let live = context.compute_stats().live_allocation_bytes;
+        context.fail_wait_idle.store(true, Ordering::Relaxed);
+        context.release_cached_weight(&weight);
+        assert_eq!(context.compute_stats().live_allocation_bytes, live);
+        assert!(!context.weight_cache.lock().unwrap().contains_key(&key));
+        assert!(context.mutex.lock().unwrap().uncertain);
+
+        context.fail_wait_idle.store(false, Ordering::Relaxed);
+        weight[2..].fill(2);
+        let mut output = [0.0];
+        unsafe {
+            context
+                .matmul_q8_0(&weight, &[1; 32], &[1.0], &mut output, 32, 1)
+                .unwrap();
+        }
+        assert_eq!(output, [64.0]);
+        assert!(!context.mutex.lock().unwrap().uncertain);
+        assert_eq!(context.compute_stats().live_allocation_bytes, live);
+        context.release_cached_weight(&weight);
+        assert!(context.compute_stats().live_allocation_bytes < live);
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn warmup_releases_temporary_cached_weights() {
+        let context = VulkanContext::new().unwrap();
+        context.warmup().unwrap();
+        assert!(context.weight_cache.lock().unwrap().is_empty());
+        let live = context.compute_stats().live_allocation_bytes;
+        context.warmup().unwrap();
+        assert!(context.weight_cache.lock().unwrap().is_empty());
+        assert_eq!(context.compute_stats().live_allocation_bytes, live);
+    }
+
+    #[test]
     fn shader_module_receives_aligned_spirv_words() {
         unsafe extern "system" fn create_shader_module(
             _: vk::Device,
@@ -2130,6 +2419,7 @@ mod tests {
             portability_subset: false,
             integer_dot_product,
             shader_float16: false,
+            shader_float64: false,
         }
     }
 

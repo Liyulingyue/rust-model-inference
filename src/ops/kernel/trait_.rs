@@ -13,6 +13,10 @@
 //! retain the Q8_0 path.
 
 pub trait Kernel: Send + Sync {
+    /// Opt in to the scalar reference's activation rounding and reduction order.
+    /// Kernels without a separate reference contract retain their normal path.
+    fn use_scalar_reference(&mut self) {}
+
     /// Prepared BF16 kernels may also round activations before their wide dot.
     fn rounds_bf16_input(&self) -> bool {
         false

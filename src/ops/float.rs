@@ -114,6 +114,13 @@ pub(crate) fn shared_vulkan_context() -> Result<&'static VulkanContext, String> 
     result.as_ref().map_err(Clone::clone)
 }
 
+#[cfg(feature = "vulkan")]
+pub(crate) fn release_vulkan_weight(weight: &[u8]) {
+    if let Some(Ok(context)) = VULKAN_CONTEXT.get() {
+        context.release_cached_weight(weight);
+    }
+}
+
 #[cfg(feature = "wgpu")]
 static WGPU_CONTEXT: OnceLock<Result<WgpuContext, String>> = OnceLock::new();
 
@@ -247,7 +254,84 @@ pub fn has_neon() -> bool {
 #[inline]
 pub fn scalar_mode() -> bool {
     static SCALAR: OnceLock<bool> = OnceLock::new();
-    *SCALAR.get_or_init(|| std::env::var_os("RMI_SCALAR").is_some())
+    SCALAR_DISPATCH.get() || *SCALAR.get_or_init(|| std::env::var_os("RMI_SCALAR").is_some())
+}
+
+thread_local! {
+    static SCALAR_DISPATCH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Reference arithmetic for one synchronous graph, without changing other sessions.
+pub(crate) struct ScalarDispatchScope {
+    previous: bool,
+    _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl ScalarDispatchScope {
+    pub(crate) fn new(enabled: bool) -> Self {
+        Self {
+            previous: SCALAR_DISPATCH.replace(SCALAR_DISPATCH.get() || enabled),
+            _thread_bound: std::marker::PhantomData,
+        }
+    }
+}
+
+impl Drop for ScalarDispatchScope {
+    fn drop(&mut self) {
+        SCALAR_DISPATCH.set(self.previous);
+    }
+}
+
+#[cfg(test)]
+mod scoped_dispatch_tests {
+    use super::{scalar_mode, ScalarDispatchScope};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn reference_dispatch_restores_nested_scopes_and_pool_workers() {
+        let before = scalar_mode();
+        let pool = crate::ComputePool::new(3);
+        let visited = AtomicUsize::new(0);
+        {
+            let _outer = ScalarDispatchScope::new(true);
+            {
+                let _inner = ScalarDispatchScope::new(false);
+                assert!(scalar_mode());
+            }
+            pool.compute(|_, _| {
+                if scalar_mode() {
+                    visited.fetch_add(1, Ordering::Relaxed);
+                }
+            });
+            assert_eq!(visited.load(Ordering::Relaxed), 3);
+            let chunks = std::sync::Arc::new(AtomicUsize::new(0));
+            let seen = chunks.clone();
+            pool.compute_with_chunks(17, move |_, _| {
+                assert!(scalar_mode());
+                seen.fetch_add(1, Ordering::Relaxed);
+            });
+            assert_eq!(chunks.load(Ordering::Relaxed), 17);
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| assert_eq!(scalar_mode(), before))
+                    .join()
+                    .unwrap();
+            });
+        }
+        assert_eq!(scalar_mode(), before);
+        visited.store(0, Ordering::Relaxed);
+        pool.compute(|_, _| {
+            if scalar_mode() == before {
+                visited.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+        assert_eq!(visited.load(Ordering::Relaxed), 3);
+        let _ = std::panic::catch_unwind(|| {
+            let _scope = ScalarDispatchScope::new(true);
+            panic!("unwind the numerical scope");
+        });
+        assert_eq!(scalar_mode(), before);
+    }
 }
 
 #[cfg(not(target_arch = "aarch64"))]
