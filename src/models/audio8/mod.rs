@@ -64,33 +64,56 @@ pub(crate) fn audio_dot(left: &[f32], right: &[f32]) -> f32 {
     sum
 }
 
-fn check_tensor(source: &dyn TensorSource, name: &str, shape: &[u64]) -> Result<(), String> {
+/// Weight formats the runtime can execute for an Audio8 projection.
+///
+/// The converter emits BF16, and `tools/converter/utils/quantize_gguf.py`
+/// derives the quantized variants from that file. The kernels behind these
+/// types decode a block row the way llama.cpp does, so a quantized file
+/// runs on the same code path as the BF16 one, only with block rounding.
+const SUPPORTED_WEIGHT_TYPES: &[GGMLType] = &[
+    GGMLType::F32,
+    GGMLType::F16,
+    GGMLType::BF16,
+    GGMLType::Q8_0,
+    GGMLType::Q4K,
+    GGMLType::Q5K,
+    GGMLType::Q6K,
+];
+
+fn check_tensor(source: &dyn TensorSource, name: &str, shape: &[u64]) -> Result<GGMLType, String> {
     let info = source
         .tensor_info(name)
         .ok_or_else(|| format!("missing Audio8 tensor {name}"))?;
-    if info.ggml_type != GGMLType::BF16 || info.dims != shape {
+    if info.dims != shape {
         return Err(format!(
-            "invalid Audio8 tensor {name}: {:?} {:?}; expected BF16 {shape:?}",
+            "invalid Audio8 tensor {name}: {:?} {:?}; expected {shape:?}",
             info.ggml_type, info.dims
         ));
     }
-    let expected = shape
-        .iter()
-        .try_fold(2usize, |total, &dim| {
-            total.checked_mul(usize::try_from(dim).ok()?)
-        })
-        .ok_or_else(|| format!("Audio8 tensor shape overflow: {name}"))?;
+    if !SUPPORTED_WEIGHT_TYPES.contains(&info.ggml_type) {
+        return Err(format!(
+            "unsupported Audio8 tensor type {name}: {:?}; expected one of {SUPPORTED_WEIGHT_TYPES:?}",
+            info.ggml_type
+        ));
+    }
+    let expected = usize::try_from(
+        info.checked_nbytes()
+            .ok_or_else(|| format!("invalid Audio8 tensor shape: {name}"))?,
+    )
+    .map_err(|_| format!("Audio8 tensor byte size does not fit usize: {name}"))?;
     if source
         .tensor_slice(name)
         .is_none_or(|bytes| bytes.len() != expected)
     {
         return Err(format!("invalid Audio8 tensor bytes: {name}"));
     }
-    Ok(())
+    Ok(info.ggml_type)
 }
 
 fn vector(source: &dyn TensorSource, name: &str, len: usize) -> Result<Vec<f32>, String> {
-    check_tensor(source, name, &[len as u64])?;
+    // Norms and biases are read as float vectors; the runtime decodes F32,
+    // F16 and BF16 into them, and the converter leaves every 1-D tensor in
+    // its source type.
     load_f32_tensor(source, name, &[len as u64])
 }
 
@@ -100,15 +123,12 @@ fn matrix(
     input: usize,
     output: usize,
 ) -> Result<Weight<'static>, String> {
-    check_tensor(source, name, &[input as u64, output as u64])?;
+    let ggml_type = check_tensor(source, name, &[input as u64, output as u64])?;
     let bytes = source.tensor_slice(name).unwrap();
     // SAFETY: Audio8 owners retain the source Arc for the lifetime of every weight.
     let bytes: &'static [u8] = unsafe { std::mem::transmute(bytes) };
     Ok(Weight::from_quantized(QuantizedTensor::from_bytes(
-        bytes,
-        GGMLType::BF16,
-        input,
-        output,
+        bytes, ggml_type, input, output,
     )))
 }
 
@@ -143,7 +163,16 @@ impl Conv {
         stride: usize,
     ) -> Result<Self, String> {
         let name = format!("{prefix}.weight");
-        check_tensor(source, &name, &[3, input as u64, output as u64])?;
+        // The convolution decoder reads the weight as raw BF16 pairs, so this
+        // tensor stays BF16 even in a quantized file. It is a rounding kernel
+        // over 128 mel bins, not a projection: the converter keeps it and
+        // every other tensor whose row width is not block-aligned.
+        let ggml_type = check_tensor(source, &name, &[3, input as u64, output as u64])?;
+        if ggml_type != GGMLType::BF16 {
+            return Err(format!(
+                "unsupported Audio8 convolution type {name}: {ggml_type:?}; expected BF16"
+            ));
+        }
         let weight: &'static [u8] =
             unsafe { std::mem::transmute(source.tensor_slice(&name).unwrap()) };
         Ok(Self {
@@ -255,6 +284,155 @@ mod tests {
         state.position = 1496;
         assert!(state.check_frames(4).is_ok());
         assert!(state.check_frames(8).is_err());
+    }
+
+    /// A projection must load from every weight format the converter can
+    /// emit and must compute the same product the float weights do, up to
+    /// the block rounding the format introduces.
+    #[test]
+    fn quantized_projections_load_and_match_the_float_weights() {
+        use crate::core::tensor::{GGMLType, MetaValue, TensorInfo, TensorSource};
+
+        const N_IN: usize = 256;
+        const N_OUT: usize = 64;
+
+        struct Source {
+            info: TensorInfo,
+            bytes: Vec<u8>,
+        }
+        impl TensorSource for Source {
+            fn metadata(&self, _key: &str) -> Option<&MetaValue> {
+                None
+            }
+            fn tensor_info(&self, _name: &str) -> Option<&TensorInfo> {
+                Some(&self.info)
+            }
+            fn tensor_slice(&self, _name: &str) -> Option<&[u8]> {
+                Some(&self.bytes)
+            }
+        }
+
+        // One float row per output, `value = (row + column) / 8`.
+        let weights: Vec<f32> = (0..N_OUT)
+            .flat_map(|row| (0..N_IN).map(move |column| (row + column) as f32 / 8.0))
+            .collect();
+        let input: Vec<f32> = (0..N_IN).map(|index| (index % 7) as f32 / 4.0).collect();
+        let expected: Vec<f32> = (0..N_OUT)
+            .map(|row| {
+                weights[row * N_IN..(row + 1) * N_IN]
+                    .iter()
+                    .zip(&input)
+                    .map(|(weight, value)| weight * value)
+                    .sum()
+            })
+            .collect();
+
+        for (ggml_type, payload, tolerance) in [
+            (GGMLType::BF16, encode::bf16(&weights), 1e-3),
+            (GGMLType::F32, encode::f32(&weights), 1e-3),
+            (GGMLType::Q8_0, encode::q8_0(&weights), 1e-2),
+        ] {
+            let source = Source {
+                info: TensorInfo {
+                    name: "projection".into(),
+                    dims: vec![N_IN as u64, N_OUT as u64],
+                    ggml_type,
+                    offset: 0,
+                },
+                bytes: payload,
+            };
+            let weight = super::matrix(&source, "projection", N_IN, N_OUT).unwrap();
+            let output = super::linear(&weight, &input, None);
+            for (index, (got, want)) in output.iter().zip(&expected).enumerate() {
+                let error = (got - want).abs();
+                assert!(
+                    error <= tolerance * want.abs().max(1.0),
+                    "{ggml_type:?} row {index}: {got} vs {want} (error {error})"
+                );
+            }
+        }
+    }
+
+    /// The k-quant formats are encoded by the converter, not by the runtime,
+    /// so the runtime side only has to accept the payload and decode it.
+    /// An all-zero super-block is a valid one: it dequantizes to zeros.
+    #[test]
+    fn k_quant_projections_load_and_decode() {
+        use crate::core::tensor::{GGMLType, MetaValue, TensorInfo, TensorSource};
+
+        const N_IN: usize = 256;
+        const N_OUT: usize = 8;
+
+        struct Source {
+            info: TensorInfo,
+            bytes: Vec<u8>,
+        }
+        impl TensorSource for Source {
+            fn metadata(&self, _key: &str) -> Option<&MetaValue> {
+                None
+            }
+            fn tensor_info(&self, _name: &str) -> Option<&TensorInfo> {
+                Some(&self.info)
+            }
+            fn tensor_slice(&self, _name: &str) -> Option<&[u8]> {
+                Some(&self.bytes)
+            }
+        }
+
+        for (ggml_type, block_bytes) in [
+            (GGMLType::Q4K, crate::ops::quant::BLOCK_Q4K_SIZE),
+            (GGMLType::Q5K, crate::ops::quant::BLOCK_Q5K_SIZE),
+            (GGMLType::Q6K, crate::ops::quant::BLOCK_Q6K_SIZE),
+        ] {
+            let source = Source {
+                info: TensorInfo {
+                    name: "projection".into(),
+                    dims: vec![N_IN as u64, N_OUT as u64],
+                    ggml_type,
+                    offset: 0,
+                },
+                bytes: vec![0; block_bytes * N_OUT],
+            };
+            let weight = super::matrix(&source, "projection", N_IN, N_OUT).unwrap();
+            let output = super::linear(&weight, &vec![1.0; N_IN], None);
+            assert_eq!(output.len(), N_OUT);
+            assert!(output.iter().all(|value| value.is_finite()));
+        }
+    }
+
+    /// Minimal encoders for the test above. They follow the same layouts
+    /// the converter writes, so the loader sees a real payload.
+    mod encode {
+        pub fn f32(values: &[f32]) -> Vec<u8> {
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect()
+        }
+
+        pub fn bf16(values: &[f32]) -> Vec<u8> {
+            values
+                .iter()
+                .flat_map(|value| ((value.to_bits() >> 16) as u16).to_le_bytes())
+                .collect()
+        }
+
+        /// GGML Q8_0: per 32-element block, an f16 scale and 32 int8
+        /// values.
+        pub fn q8_0(values: &[f32]) -> Vec<u8> {
+            let mut out = Vec::new();
+            for block in values.chunks(32) {
+                let amax = block.iter().fold(0.0f32, |max, value| max.max(value.abs()));
+                let scale = crate::ops::f32_to_f16(amax / 127.0);
+                out.extend_from_slice(&scale.to_le_bytes());
+                let scale = half::f16::from_bits(scale).to_f32();
+                for value in block {
+                    let quantized = (value / scale).round().clamp(-128.0, 127.0) as i8;
+                    out.push(quantized as u8);
+                }
+            }
+            out
+        }
     }
 
     #[cfg(feature = "parity-trace")]

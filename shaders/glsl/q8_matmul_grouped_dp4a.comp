@@ -59,10 +59,17 @@ void main() {
     // Each lane owns an output, preserving the CPU reduction inside that lane.
     uint blocks_per_row = pc.blocks_per_row;
     uint row_offset = read_row * blocks_per_row * 34u;
+    // The expert index is folded into a temporary and added unconditionally.
+    // Adding a constant inside the branch makes driver 580.173.02 on GB10
+    // trap inside libnvidia-gpucomp while compiling this shader (SIGTRAP in
+    // vkCreateComputePipelines); the temporary form compiles and the value is
+    // identical, because a non-MoE stack keeps expert_count at zero.
+    uint expert_index = 0u;
     if (pc.expert_count != 0u) {
         uint expert = arena.data[pc.expert_ids_word + token_row * pc.expert_used + pc.expert_slot];
-        row_offset += min(expert, pc.expert_count - 1u) * rows * blocks_per_row * 34u;
+        expert_index = min(expert, pc.expert_count - 1u);
     }
+    row_offset += expert_index * (rows * blocks_per_row * 34u);
 
     precise float acc[8];
     for (uint group = 0u; group < 8u; group++) acc[group] = 0.0;

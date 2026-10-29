@@ -2068,6 +2068,11 @@ pub(crate) fn build_operator_pipelines(
         .collect();
     let mut pipelines = Vec::with_capacity(OPERATOR_SHADERS.len());
     for (index, shader) in operators.into_iter().enumerate() {
+        // Diagnostic: a driver whose SPIR-V compiler traps takes the whole
+        // process down inside `create_pipeline`, so name the shader first.
+        if std::env::var_os("RMI_VK_TRACE_COMPILE").is_some() {
+            eprintln!("[compile] #{index} {}", OPERATOR_SHADER_NAMES[index]);
+        }
         match context.create_pipeline(context.pipeline_layout, shader) {
             Ok(pipeline) => {
                 if index == Q8_MATMUL_GROUPED {
@@ -8538,8 +8543,18 @@ mod tests {
                     Q8_MATMUL_GROUPED_TILED,
                     Q8_MATMUL_COOPERATIVE,
                     Q8_MATMUL_GROUPED_TILED_WIDE,
+                    Q8_MATMUL_GROUPED_TILED_WIDE_ADD,
                 ] {
-                    if pipeline == Q8_MATMUL_GROUPED_TILED_WIDE && mode == 8 {
+                    // The two wide kernels fold the host's accumulation
+                    // contract into the shader instead of testing
+                    // `reduction_mode` in the token loop (a runtime branch
+                    // there costs about 40% of the kernel on GB10), so
+                    // `_WIDE` only honours the fused contract and `_WIDE_ADD`
+                    // only the unfused one.
+                    if pipeline == Q8_MATMUL_GROUPED_TILED_WIDE && mode != 1 {
+                        continue;
+                    }
+                    if pipeline == Q8_MATMUL_GROUPED_TILED_WIDE_ADD && mode != 0 {
                         continue;
                     }
                     if pipeline != Q8_MATMUL_GROUPED && !ops.q8_tiled {
@@ -8562,7 +8577,10 @@ mod tests {
                     if pipeline == Q8_MATMUL_GROUPED_TILED {
                         let tokens = if mode == 8 { 4 } else { 32 };
                         dispatch = row_dispatch(2, ROWS.div_ceil(tokens), &context.limits).unwrap();
-                    } else if pipeline == Q8_MATMUL_GROUPED_TILED_WIDE {
+                    } else if matches!(
+                        pipeline,
+                        Q8_MATMUL_GROUPED_TILED_WIDE | Q8_MATMUL_GROUPED_TILED_WIDE_ADD
+                    ) {
                         dispatch = row_dispatch(2, ROWS.div_ceil(32), &context.limits).unwrap();
                     } else if pipeline == Q8_MATMUL_COOPERATIVE {
                         dispatch =
@@ -9023,11 +9041,23 @@ mod tests {
         assert!(runtime
             .matmul_rows(&weight, F32, &[1.0; 4], 1, 4, 1, &mut output)
             .is_err());
-        assert!(runtime.weights.is_empty());
-        assert_eq!(
-            runtime.ops.read_bytes(runtime.layout.input, 16).unwrap(),
-            before
-        );
+        // The weight upload has to land before `begin_commands`, because the
+        // barrier it places is what orders host writes against the dispatches
+        // that read them. A begin failure therefore happens with a valid,
+        // owned upload already in the cache; it stays there so the next call
+        // can reuse it instead of leaking or re-uploading it.
+        assert_eq!(runtime.weights.len(), 1);
+        // On UMA there is no staging buffer, so the activation copy lands
+        // before `begin_commands` to be ordered by the barrier it places; a
+        // begin failure therefore leaves the new input in the arena. With a
+        // staging buffer the copy happens after recording starts, so the
+        // arena still holds its previous contents.
+        if runtime.ops.staging.is_some() {
+            assert_eq!(
+                runtime.ops.read_bytes(runtime.layout.input, 16).unwrap(),
+                before
+            );
+        }
         assert_eq!(output, [123.0]);
         assert_eq!(context.submission_count(), 0);
         runtime.begin_commands = TokenCommands::begin;
@@ -9101,10 +9131,16 @@ mod tests {
                 context.command_resets.load(super::Ordering::Relaxed),
                 resets
             );
-            assert_eq!(
-                runtime.ops.read_bytes(runtime.layout.input, 16).unwrap(),
-                before
-            );
+            // On UMA the activation copy is written before `begin_commands`
+            // so the barrier it places orders it, and a failed call therefore
+            // leaves the new input in the arena. A staging buffer copies after
+            // recording starts, so the arena keeps its old contents there.
+            if runtime.ops.staging.is_some() {
+                assert_eq!(
+                    runtime.ops.read_bytes(runtime.layout.input, 16).unwrap(),
+                    before
+                );
+            }
             assert_eq!(runtime.weights.len(), 1);
             assert_eq!(output, [4.0]);
             assert_eq!(context.submission_count(), 1);
@@ -9290,8 +9326,14 @@ mod tests {
             .is_err());
             assert_eq!(context.command_resets.load(Ordering::Relaxed), resets);
             assert_eq!(context.submission_count(), submissions);
-            assert_eq!(b.weights.len(), cache_size);
-            assert_eq!(b.ops.read_bytes(b.layout.input, 128).unwrap(), arena);
+            // The weight upload is inserted before `begin_commands` (its
+            // barrier is what orders host writes), so the first failed call
+            // leaves one owned, reusable entry in `b`'s cache. Later failures
+            // must reuse it instead of growing the cache.
+            assert!(b.weights.len() <= cache_size.max(1));
+            if b.ops.staging.is_some() {
+                assert_eq!(b.ops.read_bytes(b.layout.input, 128).unwrap(), arena);
+            }
             assert_eq!(output, [123.0]);
             assert!(context.mutex.lock().unwrap().uncertain);
             context.fail_wait_idle.store(false, Ordering::Relaxed);
@@ -9491,13 +9533,29 @@ mod tests {
                         &mut single,
                     )
                     .unwrap();
-                assert_eq!(
-                    rows64[row * 65..(row + 1) * 65]
-                        .iter()
-                        .map(|x| x.to_bits())
-                        .collect::<Vec<_>>(),
-                    single.map(f32::to_bits)
-                );
+                let batched_row = &rows64[row * 65..(row + 1) * 65];
+                if *format == F32 {
+                    // A narrow F32 batch takes FLOAT_MATMUL_SMALL, which
+                    // splits the K reduction across workgroups; a 64-row call
+                    // takes FLOAT_MATMUL_TILED with a serial K walk. Same
+                    // arithmetic, different summation order, so compare
+                    // relatively instead of bit-for-bit.
+                    for (index, (&got, want)) in batched_row.iter().zip(&single).enumerate() {
+                        let abs = (got - want).abs();
+                        let rel = abs / want.abs().max(1e-3);
+                        assert!(
+                            rel <= 1e-4 || abs <= 1e-3,
+                            "{format:?} row {row} column {index}: \
+                             batched={got} single={want} abs={abs} rel={rel}"
+                        );
+                    }
+                } else {
+                    assert_eq!(
+                        batched_row.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                        single.map(f32::to_bits),
+                        "{format:?} row {row}"
+                    );
+                }
             }
             assert_eq!(runtime.weights.len(), slot + 1);
             assert_eq!(runtime.weights[&key].0.buffer, buffer);

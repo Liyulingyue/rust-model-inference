@@ -955,7 +955,9 @@ mod vulkan_tests {
             gpu.fail_after_row = Some(row);
             session.gpu = Some(gpu);
             session.full_model_gpu_failed = false;
-            failure_context = Some(context);
+            // The operator contracts that `try_new` validates submit on their
+            // own, so remember where the counters stood before the failure.
+            failure_context = Some((context, context.submission_count()));
         }
         let token_ids: Vec<_> = (0..prompt_len).map(|row| (row % 7) as u32).collect();
         let positions: Vec<_> = (0..prompt_len).map(|row| [row, 0, 0, 0]).collect();
@@ -975,10 +977,9 @@ mod vulkan_tests {
             )
             .unwrap();
         assert!(session.gpu.is_none());
-        if let Some(context) = failure_context {
-            assert_eq!(
-                context.submission_count(),
-                1,
+        if let Some((context, before)) = failure_context {
+            assert!(
+                context.submission_count() > before,
                 "failure must occur after GPU row work"
             );
         }
@@ -1054,6 +1055,13 @@ mod vulkan_tests {
         let context = Box::leak(Box::new(VulkanContext::new().unwrap()));
         let mut actual = Qwen3Session::new(&model, 9).unwrap();
         actual.gpu = Qwen3VulkanSession::try_new(&model, 9, context).unwrap();
+        // These assertions count one queue submission per prefill chunk. Two
+        // one-time probes submit on their own: the operator contracts that
+        // `try_new` validates and the model contract that the first prefill
+        // replays through `validate_gpu_prefill`. Neither is what this test is
+        // about, so skip the model probe and measure deltas from a baseline.
+        actual.gpu_contract_validated = true;
+        let before = context.submission_count();
         let prefix = Qwen3Input {
             token_ids: &[0, 1],
             positions: &[[0, 0, 0, 0], [1, 0, 0, 0]],
@@ -1061,7 +1069,7 @@ mod vulkan_tests {
             deepstack_embeddings: None,
         };
         actual.prefill(&prefix, 4, true).unwrap();
-        assert_eq!(context.submission_count(), 1);
+        assert_eq!(context.submission_count() - before, 1);
         let committed = snapshot(actual.kv_state());
         let mut expected = Qwen3Session::new(&model, 9).unwrap();
         expected.gpu = None;
@@ -1082,6 +1090,7 @@ mod vulkan_tests {
             embeddings: None,
             deepstack_embeddings: None,
         };
+        let before = context.submission_count();
         let error = actual.prefill(&input, 4, true).unwrap_err();
         assert!(
             error.contains("CPU prefill failure after layer 0"),
@@ -1089,7 +1098,7 @@ mod vulkan_tests {
         );
         assert!(error.contains("GPU failure after row 1"), "{error}");
         assert_eq!(snapshot(actual.kv_state()), committed);
-        assert_eq!(context.submission_count(), 2);
+        assert_eq!(context.submission_count() - before, 1);
         assert!(actual.gpu.is_none());
         let options = Qwen3GenerateOptions {
             max_new_tokens: 3,
@@ -1138,6 +1147,10 @@ mod vulkan_tests {
         let positions: Vec<_> = (0..8).map(|row| [row, 0, 0, 0]).collect();
         let mut expected = Qwen3Session::new(&model, 11).unwrap();
         expected.gpu = Qwen3VulkanSession::try_new(&model, 11, context).unwrap();
+        // Skip the one-time model contract replay so the submission count is
+        // the steady-state cost of one prefill chunk.
+        expected.gpu_contract_validated = true;
+        let before = context.submission_count();
         expected
             .prefill(
                 &Qwen3Input {
@@ -1150,7 +1163,7 @@ mod vulkan_tests {
                 true,
             )
             .unwrap();
-        assert_eq!(context.submission_count(), 1);
+        assert_eq!(context.submission_count() - before, 1);
         expected.gpu = None;
         expected.full_model_gpu_failed = true;
         let options = Qwen3GenerateOptions {
@@ -1172,7 +1185,9 @@ mod vulkan_tests {
             .token_ids;
         let mut actual = Qwen3Session::new(&model, 11).unwrap();
         actual.gpu = Qwen3VulkanSession::try_new(&model, 11, context).unwrap();
+        actual.gpu_contract_validated = true;
         actual.gpu.as_mut().unwrap().fail_after_row = Some(5);
+        let before = context.submission_count();
         let actual_tokens = actual
             .generate(
                 Qwen3Input {
@@ -1189,7 +1204,9 @@ mod vulkan_tests {
             actual.gpu.is_none(),
             "failure must target row one of the second chunk"
         );
-        assert_eq!(context.submission_count(), 3);
+        // One submission for the first chunk and one for the chunk that fails
+        // after its row work was recorded.
+        assert_eq!(context.submission_count() - before, 2);
         assert_eq!(actual_tokens, expected_tokens);
         assert_eq!(snapshot(actual.kv_state()), snapshot(expected.kv_state()));
         assert_eq!(
@@ -1217,6 +1234,11 @@ mod vulkan_tests {
         for batch in [1, 4, 64, 128] {
             let mut session = Qwen3Session::new(&model, 68).unwrap();
             session.gpu = Qwen3VulkanSession::try_new(&model, 68, context).unwrap();
+            // The first prefill also replays the chunk through
+            // `validate_gpu_prefill`, which submits once per replay chunk and
+            // once per decode probe. This test counts the steady-state cost of
+            // the requested batching, so skip that one-time probe.
+            session.gpu_contract_validated = true;
             let before = context.submission_count();
             let input = Qwen3Input {
                 token_ids: &tokens,

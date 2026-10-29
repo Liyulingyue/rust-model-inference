@@ -40,6 +40,25 @@ converter/
 | `vibevoice/convert_vibevoice_asr.py` | 扩展精度导出 |
 | `yue2/convert_yue2.py` | 导出 `yue2` 主模型和 `yue2_vae` F32 decoder；`--quant bf16/f32/q8_0/q4_0/q4_k_m/q6_k`（默认 `bf16` 零拷贝）；固定协议/tokenizer metadata，原子写入并读回校验 |
 
+## 共享量化工具
+
+`utils/quantize_gguf.py` 把任意 GGUF 转成更小的格式，读取 F32 或 BF16 源，
+`--format` 支持 `q8_0` / `q4_k` / `q5_k` / `q6_k` / `f16` / `bf16`，
+`--keep NAME` 让指定张量留在源类型（运行时按浮点向量读取的张量需要它）。
+
+K-quant 的编码器在 `utils/kquants.py`：`q4_k` / `q6_k` 是 ggml 参考实现的
+向量化移植，`q5_k` 是新增的，同样按 `quantize_row_q5_K_ref` 的结构实现
+（16 个候选 scale、`get_scale_min_k4` 的 12 字节子 scale/min 表、
+第五位单独存 32 字节）。布局与运行时自己的解码器一致，可以用
+`cargo run --example kquant_roundtrip -- <fmt> <values.f32> <payload.bin>`
+交叉验证：把 Python 编码的 payload 交给 Rust 解码器，看还原误差。
+
+| 格式 | 每 256 值字节数 | 相对 RMS 误差（高斯样本） |
+|---|---|---|
+| `q4_k` | 144 | 7.2 % |
+| `q5_k` | 176 | 3.6 % |
+| `q6_k` | 210 | 1.8 % |
+
 ## BGE 转换与推理
 
 先从 ModelScope 下载某个 `BAAI/bge-*` 原始仓库到 `models/`，再在仓库根目录运行：
@@ -180,6 +199,12 @@ Q6_K 量化已改为 NumPy 分块向量化：保留 19 个候选及原有 F64 �
 7.886 s 降到 0.129 s（约 61 倍）；同一完整 2048×6144 矩阵单次对照从
 108.516 s 降到 1.504 s（约 72 倍），两组输出均逐字节一致。这是 Q6_K 编码耗时，
 **不是完整模型导出的提速倍数**；Q4_K 搜索及 NAR 的量化限制不变。
+
+批大小现在由 `K_SEARCH_MAX_BLOCKS = 256` 显式封顶，而不是从字节预算推出来：
+Q4_K 每个 super-block 的瞬时 F64 中间量约 40 KiB，5 GiB 预算会要 32k 块，
+中间量全部冲出缓存，峰值 RSS 达 5.5 GiB。单线程 NumPy、8.4M 值实测，Q4_K
+从 2.22 M values/s、5.5 GiB 变为 3.35 M values/s、150 MiB；搜索按
+super-block 独立，各批大小输出逐字节一致，定值摘要不变。
 
 回归检查：
 
