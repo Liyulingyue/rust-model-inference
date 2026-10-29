@@ -24,7 +24,7 @@ fn source() -> Arc<dyn TensorSource> {
 }
 
 #[test]
-fn hy_text_jev_reaches_its_decoder_without_audio() {
+fn hy_text_jev_is_rejected() {
     let error = run_jev_decision_data(
         source(),
         "The sky is blue.",
@@ -38,12 +38,11 @@ fn hy_text_jev_reaches_its_decoder_without_audio() {
         Default::default(),
     )
     .unwrap_err();
-    assert!(error.contains("tokenizer"), "wrong Hy dispatch: {error}");
-    assert!(!error.contains("not yet supported"), "{error}");
+    assert!(error.contains("--jev is not yet supported"), "{error}");
 }
 
 #[test]
-fn hy_grouped_jev_reaches_its_decoder_without_audio() {
+fn hy_grouped_jev_is_rejected() {
     let error = run_jev_grouped_decision_data(
         source(),
         "The sky is blue.",
@@ -60,8 +59,10 @@ fn hy_grouped_jev_reaches_its_decoder_without_audio() {
         Default::default(),
     )
     .unwrap_err();
-    assert!(error.contains("tokenizer"), "wrong Hy dispatch: {error}");
-    assert!(!error.contains("not yet supported"), "{error}");
+    assert!(
+        error.contains("--jev grouped is not yet supported"),
+        "{error}"
+    );
 }
 
 #[cfg(test)]
@@ -106,20 +107,9 @@ mod real_weights {
         (status, value)
     }
 
-    fn assert_distribution(value: &serde_json::Value) {
-        let probabilities = value["probabilities"].as_object().unwrap();
-        assert_eq!(probabilities.len(), 2, "{value}");
-        let sum: f64 = probabilities.values().map(|p| p.as_f64().unwrap()).sum();
-        assert!((sum - 1.0).abs() < 1e-5, "{value}");
-        assert!(probabilities.values().all(|p| {
-            let p = p.as_f64().unwrap();
-            p.is_finite() && (0.0..=1.0).contains(&p)
-        }));
-    }
-
     #[test]
     #[ignore = "requires RMI_HY_SIMULMT_MODEL and RMI_HY_SIMULMT_WAV"]
-    fn hy_http_serves_both_uploads_and_text_jev() {
+    fn hy_http_serves_audio_uploads() {
         let _guard = MODEL_RUN.lock().unwrap_or_else(|error| error.into_inner());
         let wav_path = std::env::var_os("RMI_HY_SIMULMT_WAV")
             .map(PathBuf::from)
@@ -261,59 +251,6 @@ mod real_weights {
                 invalid,
             );
             assert_eq!(status, 400, "{error}");
-        }
-
-        let (status, single) = post(
-            &client,
-            &format!("{base}/v1/jev/score"),
-            serde_json::json!({"context":"The sky is blue.","questions":[{"text":"Is that true?","options":["yes","no"]}]}),
-        );
-        assert_eq!(status, 200, "{single}");
-        assert_distribution(&single["results"][0]);
-        let (status, grouped) = post(
-            &client,
-            &format!("{base}/v1/jev/grouped"),
-            serde_json::json!({"context":"The sky is blue.","mode":"block_choice","questions":[{"text":"Classify.","groups":[{"label":"truth","options":["yes","no"]}]}]}),
-        );
-        assert_eq!(status, 200, "{grouped}");
-        assert_distribution(&grouped["results"][0]["groups"][0]);
-    }
-
-    #[test]
-    #[ignore = "requires RMI_HY_SIMULMT_MODEL"]
-    fn hy_cli_jev_uses_no_audio_and_normalizes_single_and_grouped_labels() {
-        let _guard = MODEL_RUN.lock().unwrap_or_else(|error| error.into_inner());
-        for grouped in [false, true] {
-            let mut command = Command::new(env!("CARGO_BIN_EXE_rust-model-inference"));
-            command
-                .arg("--model")
-                .arg(model())
-                .args(["--compute", "cpu", "--threads", "4", "--jev"])
-                .args([
-                    "--jev-context",
-                    "The sky is blue.",
-                    "--jev-question",
-                    "Is that true?",
-                ])
-                .args(["--jev-output", "json"]);
-            if grouped {
-                command.args(["--jev-block", "truth"]);
-            }
-            let output = command
-                .args(["--jev-option", "yes", "--jev-option", "no"])
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-            if grouped {
-                assert_distribution(&result["groups"][0]);
-            } else {
-                assert_distribution(&result);
-            }
         }
     }
 

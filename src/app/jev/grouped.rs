@@ -68,7 +68,6 @@ fn run_jev_grouped_core<S: JevGroupedScorer>(
 pub(crate) mod dory;
 pub(crate) mod gemma4;
 pub(crate) mod hunyuan;
-pub(crate) mod hy_simulmt;
 pub(crate) mod lfm2;
 pub(crate) mod lfm25;
 pub(crate) mod llama;
@@ -612,15 +611,6 @@ pub fn run_jev_grouped_decision_data(
     eprintln!("JEV grouped: arch = {:?}, mode = {:?}", arch, mode);
 
     let results = match &*arch {
-        "hy_v3" => hy_simulmt::run_jev_grouped_hy_simulmt(
-            source.clone(),
-            context,
-            &prepared,
-            n_threads_arg,
-            prefill_batch_size,
-            false,
-            jinja.clone(),
-        )?,
         "qwen3" | "qwen3vl" => qwen3::run_jev_grouped_qwen3(
             source.clone(),
             context,
@@ -726,7 +716,7 @@ pub fn run_jev_grouped_decision_data(
                 "--jev grouped is not yet supported for architecture {:?}; \
                  currently supported: qwen3 / qwen3vl / qwen35 / llama / k2-horizon / \
                  granite / nanbeige / qwen2_2 / gemma4 / lfm2 / lfm25 / mellum / \
-                 spark2_5 / mistral3 / hunyuan-dense / nemotron_h / hy_v3",
+                 spark2_5 / mistral3 / hunyuan-dense / nemotron_h",
                 other
             ));
         }

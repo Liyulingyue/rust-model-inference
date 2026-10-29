@@ -1652,7 +1652,6 @@ fn text_source(state: &AppState) -> Result<Arc<dyn crate::core::tensor::TensorSo
         Backend::Text(text) => Ok(Arc::clone(&text.source)),
         // CLM owns an encoder too; it just scores differently.
         Backend::Clm(clm) => Ok(Arc::clone(&clm.source)),
-        Backend::HySimulMt(hy) => Ok(Arc::clone(&hy.source)),
         other => Err(format!(
             "/v1/jev/* requires a text backend (got {})",
             backend_label(other)
@@ -1681,7 +1680,6 @@ fn jev_threads(state: &AppState) -> usize {
         Backend::Text(text) => text.pool.n_threads(),
         Backend::Clm(clm) => clm.model.pool().n_threads(),
         Backend::Gliner2(gliner2) => gliner2.n_threads,
-        Backend::HySimulMt(hy) => hy.n_threads,
         _ => 1,
     }
 }
@@ -1690,7 +1688,6 @@ fn jev_prefill_batch_size(state: &AppState) -> usize {
     match state.model.as_ref() {
         Backend::Text(text) => text.prefill_batch_size,
         Backend::Clm(clm) => clm.prefill_batch_size,
-        Backend::HySimulMt(hy) => hy.prefill_batch_size,
         _ => 64,
     }
 }

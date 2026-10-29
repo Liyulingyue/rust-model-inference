@@ -219,14 +219,12 @@ struct AsrBackend {
 
 struct HySimulMtBackend {
     runtime: Arc<crate::models::hy_simulmt::HySimulMt>,
-    source: Arc<dyn TensorSource>,
     language: String,
     prompt: Option<String>,
     max_tokens: usize,
     max_context: usize,
     prefill_batch_size: usize,
     kv_format: KvFormat,
-    n_threads: usize,
 }
 
 /// Audio8 ASR backend: a single-model Voxtral-Realtime GGUF that bundles the
@@ -1650,14 +1648,12 @@ fn build_hy_simulmt(options: &CliOptions) -> Result<HySimulMtBackend, String> {
     )?;
     Ok(HySimulMtBackend {
         runtime: Arc::new(runtime),
-        source,
         language: options.language.clone().unwrap_or_else(|| "zh".into()),
         prompt: options.prompt.clone(),
         max_tokens: options.max_tokens.unwrap_or(512),
         max_context: options.effective_max_context(),
         prefill_batch_size: options.effective_prefill_batch_size()?,
         kv_format: options.kv_format,
-        n_threads,
     })
 }
 
@@ -1923,9 +1919,6 @@ pub fn run_server() {
         Backend::Gliner2Boundary(_) => router.route("/v1/jev/boundary", post(api::jev_boundary)),
         Backend::Timestral(_) => router.route("/v1/forecast", post(forecast::forecast)),
     };
-    if matches!(state.model.as_ref(), Backend::HySimulMt(_)) {
-        router = router.merge(api::jev_routes());
-    }
     if options.compute_policy() == crate::compute::ComputePolicy::Vulkan {
         router = router.layer(axum::middleware::from_fn(
             |request: axum::extract::Request, next: axum::middleware::Next| async move {

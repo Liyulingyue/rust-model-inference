@@ -73,28 +73,6 @@ Both routes return `{"text":"..."}`. The request language is the target language
 omitting it uses the server's default. Only omitted/`json` response formats and
 greedy temperature `0` are supported. Empty target languages are rejected.
 
-## Text JEV
-
-Hy's decoder supports the existing single and grouped JEV interfaces without an
-audio input. The default prompt uses the native Hy no-think protocol. User
-content is encoded as ordinary text, independently of protocol tokens.
-
-JEV is experimental. Standard's native F16 text Oracle check passes.
-Interleave's F16 text logits have 22.96% relative RMS error against the pinned
-Oracle, above the unchanged 20% cap (F32: 28.69%); its text-score numerical
-parity remains open.
-
-```sh
-target/release/rust-model-inference --model "$model" --compute cpu --threads 4 \
-  --jev --jev-context 'The sky is blue.' --jev-question 'Is that true?' \
-  --jev-option yes --jev-option no --jev-output json
-```
-
-Add `--jev-block truth` before the options for grouped JEV. The audio HTTP server
-also exposes `POST /v1/jev/score` and `POST /v1/jev/grouped`, using their existing
-request and probability-result schemas. JEV uses F16 KV and the same native Hy
-decoder; audio translation accepts either `--kv-format f32` or `f16`.
-
 Numerical evidence and reproducible checks for both Q4_K_M variants are recorded
 in [the Oracle guide](../../tools/oracle/hy_simulmt/README.md). TTS, microphone
 input, resampling and FP8/other quantizations remain outside this integration.

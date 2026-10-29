@@ -74,15 +74,6 @@ fn run_jev_decision_data_with_image(
     }
 
     match &*arch {
-        "hy_v3" => hy_simulmt::run_jev_decision_hy_simulmt(
-            source,
-            context,
-            &prepared,
-            n_threads_arg,
-            prefill_batch_size,
-            false,
-            jinja,
-        ),
         // `qwen2` covers both Qwen2 (base, ChatML-style since Qwen2.5) and
         // Qwen2.5-Instruct — both surface `<|im_start|>`/`<|im_end|>` markers
         // in the tokenizer, so the Qwen3 ChatML scorer handles them. Qwen1 /
@@ -231,7 +222,7 @@ fn run_jev_decision_data_with_image(
              currently supported: qwen3 / qwen3vl / qwen35 / \
              llama / k2-horizon / granite / nanbeige / qwen2_2 / glm4 / \
              gemma4 / lfm2 / lfm25 / mellum / spark2_5 / hunyuan-dense / \
-             nemotron_h / exaone / mistral3 / falcon-h1 / dory / hy_v3",
+             nemotron_h / exaone / mistral3 / falcon-h1 / dory",
             other
         )),
     }
@@ -427,7 +418,6 @@ pub(crate) mod dory;
 pub(crate) mod falcon_h1;
 pub(crate) mod gemma4;
 pub(crate) mod hunyuan;
-pub(crate) mod hy_simulmt;
 pub(crate) mod lfm2;
 pub(crate) mod lfm25;
 pub(crate) mod lfm2moe;
