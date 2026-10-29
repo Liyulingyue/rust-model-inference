@@ -81,33 +81,9 @@ const SUPPORTED_WEIGHT_TYPES: &[GGMLType] = &[
 ];
 
 fn check_tensor(source: &dyn TensorSource, name: &str, shape: &[u64]) -> Result<GGMLType, String> {
-    let info = source
-        .tensor_info(name)
-        .ok_or_else(|| format!("missing Audio8 tensor {name}"))?;
-    if info.dims != shape {
-        return Err(format!(
-            "invalid Audio8 tensor {name}: {:?} {:?}; expected {shape:?}",
-            info.ggml_type, info.dims
-        ));
-    }
-    if !SUPPORTED_WEIGHT_TYPES.contains(&info.ggml_type) {
-        return Err(format!(
-            "unsupported Audio8 tensor type {name}: {:?}; expected one of {SUPPORTED_WEIGHT_TYPES:?}",
-            info.ggml_type
-        ));
-    }
-    let expected = usize::try_from(
-        info.checked_nbytes()
-            .ok_or_else(|| format!("invalid Audio8 tensor shape: {name}"))?,
-    )
-    .map_err(|_| format!("Audio8 tensor byte size does not fit usize: {name}"))?;
-    if source
-        .tensor_slice(name)
-        .is_none_or(|bytes| bytes.len() != expected)
-    {
-        return Err(format!("invalid Audio8 tensor bytes: {name}"));
-    }
-    Ok(info.ggml_type)
+    // The type list is Audio8's own: which formats the runtime can execute is
+    // a property of the model. The check itself lives in `core::tensor`.
+    crate::core::tensor::require_tensor_type(source, name, shape, SUPPORTED_WEIGHT_TYPES)
 }
 
 fn vector(source: &dyn TensorSource, name: &str, len: usize) -> Result<Vec<f32>, String> {
