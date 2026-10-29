@@ -1,10 +1,12 @@
 //! Dedicated Audio8 conditional Qwen2 decoder; no Qwen3 model state is shared.
 
-use super::{audio8_rope, audio_dot, audio_rms_norm, linear, matrix, vector};
+use super::{audio8_rope, audio_dot, audio_rms_norm, matrix, vector, Linear};
 use crate::core::tensor::{MetaValue, TensorSource};
+use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::Weight;
 use crate::ops::silu;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 const WIDTH: usize = 2048;
 const HEAD_WIDTH: usize = 128;
@@ -14,18 +16,20 @@ const FFN_WIDTH: usize = 11008;
 const LAYERS: usize = 36;
 const VOCAB: usize = 151936;
 
+/// Projections are held behind `&'static` so the executor, which is built
+/// after the layers, can borrow them for the model's lifetime.
 struct TextLayer {
     attn_norm: Vec<f32>,
     ffn_norm: Vec<f32>,
-    q: Weight<'static>,
-    k: Weight<'static>,
-    v: Weight<'static>,
-    o: Weight<'static>,
-    gate: Weight<'static>,
-    up: Weight<'static>,
-    down: Weight<'static>,
-    ada1: Weight<'static>,
-    ada2: Weight<'static>,
+    q: &'static Weight<'static>,
+    k: &'static Weight<'static>,
+    v: &'static Weight<'static>,
+    o: &'static Weight<'static>,
+    gate: &'static Weight<'static>,
+    up: &'static Weight<'static>,
+    down: &'static Weight<'static>,
+    ada1: &'static Weight<'static>,
+    ada2: &'static Weight<'static>,
     q_bias: Vec<f32>,
     k_bias: Vec<f32>,
     v_bias: Vec<f32>,
@@ -33,10 +37,13 @@ struct TextLayer {
 
 pub struct Audio8TextDecoder {
     _source: Arc<dyn TensorSource>,
-    embedding: Weight<'static>,
+    embedding: &'static Weight<'static>,
     norm: Vec<f32>,
     layers: Vec<TextLayer>,
     context: usize,
+    /// Every projection above, bound to the CPU/GPU executor. The LM head is
+    /// the tied embedding, so it is bound as well.
+    linear: Mutex<Linear>,
 }
 
 pub struct Audio8TextSession<'a> {
@@ -49,7 +56,18 @@ pub struct Audio8TextSession<'a> {
 }
 
 impl Audio8TextDecoder {
-    pub fn from_source(source: Arc<dyn TensorSource>) -> Result<Self, String> {
+    /// Borrow the executor. A poisoned lock only means an earlier projection
+    /// panicked, so the model is unusable either way.
+    fn linear(&self) -> Result<std::sync::MutexGuard<'_, Linear>, String> {
+        self.linear
+            .lock()
+            .map_err(|_| "Audio8 linear executor poisoned".to_string())
+    }
+
+    pub fn from_source(
+        source: Arc<dyn TensorSource>,
+        pool: Arc<ComputePool>,
+    ) -> Result<Self, String> {
         if source
             .metadata("general.architecture")
             .and_then(MetaValue::to_string_val)
@@ -88,7 +106,7 @@ impl Audio8TextDecoder {
             .and_then(|value| usize::try_from(value).ok())
             .filter(|&value| value > 0)
             .ok_or("invalid Audio8 text context")?;
-        let embedding = matrix(source.as_ref(), "token_embd.weight", WIDTH, VOCAB)?;
+        let embedding = super::leak(matrix(source.as_ref(), "token_embd.weight", WIDTH, VOCAB)?);
         let norm = vector(source.as_ref(), "output_norm.weight", WIDTH)?;
         let mut layers = Vec::with_capacity(LAYERS);
         for index in 0..LAYERS {
@@ -96,36 +114,89 @@ impl Audio8TextDecoder {
             layers.push(TextLayer {
                 attn_norm: vector(source.as_ref(), &name("attn_norm.weight"), WIDTH)?,
                 ffn_norm: vector(source.as_ref(), &name("ffn_norm.weight"), WIDTH)?,
-                q: matrix(source.as_ref(), &name("attn_q.weight"), WIDTH, WIDTH)?,
-                k: matrix(
+                q: super::leak(matrix(
+                    source.as_ref(),
+                    &name("attn_q.weight"),
+                    WIDTH,
+                    WIDTH,
+                )?),
+                k: super::leak(matrix(
                     source.as_ref(),
                     &name("attn_k.weight"),
                     WIDTH,
                     KV_HEADS * HEAD_WIDTH,
-                )?,
-                v: matrix(
+                )?),
+                v: super::leak(matrix(
                     source.as_ref(),
                     &name("attn_v.weight"),
                     WIDTH,
                     KV_HEADS * HEAD_WIDTH,
-                )?,
-                o: matrix(source.as_ref(), &name("attn_output.weight"), WIDTH, WIDTH)?,
-                gate: matrix(source.as_ref(), &name("ffn_gate.weight"), WIDTH, FFN_WIDTH)?,
-                up: matrix(source.as_ref(), &name("ffn_up.weight"), WIDTH, FFN_WIDTH)?,
-                down: matrix(source.as_ref(), &name("ffn_down.weight"), FFN_WIDTH, WIDTH)?,
-                ada1: matrix(source.as_ref(), &name("ada_linear1.weight"), WIDTH, 32)?,
-                ada2: matrix(source.as_ref(), &name("ada_linear2.weight"), 32, WIDTH)?,
+                )?),
+                o: super::leak(matrix(
+                    source.as_ref(),
+                    &name("attn_output.weight"),
+                    WIDTH,
+                    WIDTH,
+                )?),
+                gate: super::leak(matrix(
+                    source.as_ref(),
+                    &name("ffn_gate.weight"),
+                    WIDTH,
+                    FFN_WIDTH,
+                )?),
+                up: super::leak(matrix(
+                    source.as_ref(),
+                    &name("ffn_up.weight"),
+                    WIDTH,
+                    FFN_WIDTH,
+                )?),
+                down: super::leak(matrix(
+                    source.as_ref(),
+                    &name("ffn_down.weight"),
+                    FFN_WIDTH,
+                    WIDTH,
+                )?),
+                ada1: super::leak(matrix(
+                    source.as_ref(),
+                    &name("ada_linear1.weight"),
+                    WIDTH,
+                    32,
+                )?),
+                ada2: super::leak(matrix(
+                    source.as_ref(),
+                    &name("ada_linear2.weight"),
+                    32,
+                    WIDTH,
+                )?),
                 q_bias: vector(source.as_ref(), &name("attn_q.bias"), WIDTH)?,
                 k_bias: vector(source.as_ref(), &name("attn_k.bias"), KV_HEADS * HEAD_WIDTH)?,
                 v_bias: vector(source.as_ref(), &name("attn_v.bias"), KV_HEADS * HEAD_WIDTH)?,
             });
         }
+        let mut bindings: Vec<(&'static str, &'static Weight<'static>)> =
+            Vec::with_capacity(1 + LAYERS * 9);
+        bindings.push(("token_embd.weight", embedding));
+        for (index, layer) in layers.iter().enumerate() {
+            let names: &'static [&'static str] = Box::leak(Box::new(
+                ["q", "k", "v", "o", "gate", "up", "down", "ada1", "ada2"].map(|suffix| {
+                    Box::leak(format!("blk.{index}.{suffix}").into_boxed_str()) as &'static str
+                }),
+            ));
+            for (name, weight) in names.iter().zip([
+                layer.q, layer.k, layer.v, layer.o, layer.gate, layer.up, layer.down, layer.ada1,
+                layer.ada2,
+            ]) {
+                bindings.push((name, weight));
+            }
+        }
+        let linear = Linear::new(&bindings, pool)?;
         Ok(Self {
             _source: source,
             embedding,
             norm,
             layers,
             context,
+            linear: Mutex::new(linear),
         })
     }
 
@@ -164,21 +235,22 @@ impl<'a> Audio8TextSession<'a> {
         if capacity == 0 || capacity > model.context || condition.len() != WIDTH {
             return Err("invalid Audio8 text session capacity or condition".into());
         }
-        let scales = model
-            .layers
-            .iter()
-            .map(|layer| {
-                let mut hidden = linear(&layer.ada1, condition, None);
-                for value in &mut hidden {
-                    *value = crate::ops::gelu_erf(*value);
-                }
-                let mut scale = linear(&layer.ada2, &hidden, None);
-                for value in &mut scale {
-                    *value += 1.0;
-                }
-                scale
-            })
-            .collect();
+        let mut scales = Vec::with_capacity(model.layers.len());
+        for index in 0..model.layers.len() {
+            let mut hidden = model
+                .linear()?
+                .run(&format!("blk.{index}.ada1"), condition, 32)?;
+            for value in &mut hidden {
+                *value = crate::ops::gelu_erf(*value);
+            }
+            let mut scale = model
+                .linear()?
+                .run(&format!("blk.{index}.ada2"), &hidden, WIDTH)?;
+            for value in &mut scale {
+                *value += 1.0;
+            }
+            scales.push(scale);
+        }
         Ok(Self {
             model,
             scales,
@@ -216,9 +288,21 @@ impl<'a> Audio8TextSession<'a> {
                 if index == 0 {
                     trace("attn_norm-0", Some(0), &[1, WIDTH], &normed);
                 }
-                let mut q = linear(&layer.q, &normed, Some(&layer.q_bias));
-                let mut k = linear(&layer.k, &normed, Some(&layer.k_bias));
-                let v = linear(&layer.v, &normed, Some(&layer.v_bias));
+                let mut linear = self.model.linear()?;
+                let mut q = linear.run(&format!("blk.{index}.q"), &normed, WIDTH)?;
+                for (value, bias) in q.iter_mut().zip(&layer.q_bias) {
+                    *value += *bias;
+                }
+                let mut k =
+                    linear.run(&format!("blk.{index}.k"), &normed, KV_HEADS * HEAD_WIDTH)?;
+                for (value, bias) in k.iter_mut().zip(&layer.k_bias) {
+                    *value += *bias;
+                }
+                let mut v =
+                    linear.run(&format!("blk.{index}.v"), &normed, KV_HEADS * HEAD_WIDTH)?;
+                for (value, bias) in v.iter_mut().zip(&layer.v_bias) {
+                    *value += *bias;
+                }
                 audio8_rope(&mut q, HEAD_WIDTH, position);
                 audio8_rope(&mut k, HEAD_WIDTH, position);
                 if index == 0 {
@@ -259,7 +343,7 @@ impl<'a> Audio8TextSession<'a> {
                 if index == 0 {
                     trace("kqv_out-0", Some(0), &[QUERY_HEADS, HEAD_WIDTH], &attention);
                 }
-                let update = linear(&layer.o, &attention, None);
+                let update = linear.run(&format!("blk.{index}.o"), &attention, WIDTH)?;
                 for (value, update) in hidden.iter_mut().zip(update) {
                     *value += update;
                 }
@@ -267,12 +351,12 @@ impl<'a> Audio8TextSession<'a> {
                 for (value, scale) in normed.iter_mut().zip(&self.scales[index]) {
                     *value *= *scale;
                 }
-                let mut gate = linear(&layer.gate, &normed, None);
-                let up = linear(&layer.up, &normed, None);
+                let mut gate = linear.run(&format!("blk.{index}.gate"), &normed, FFN_WIDTH)?;
+                let up = linear.run(&format!("blk.{index}.up"), &normed, FFN_WIDTH)?;
                 for (gate, up) in gate.iter_mut().zip(up) {
                     *gate = silu(*gate) * up;
                 }
-                let down = linear(&layer.down, &gate, None);
+                let down = linear.run(&format!("blk.{index}.down"), &gate, WIDTH)?;
                 if index == 0 {
                     trace("ffn_out-0", Some(0), &[1, WIDTH], &down);
                 }
@@ -290,7 +374,10 @@ impl<'a> Audio8TextSession<'a> {
                 let mut normed = vec![0.0; WIDTH];
                 audio_rms_norm(&hidden, &self.model.norm, &mut normed, 1e-6);
                 trace("result_norm", None, &[1, WIDTH], &normed);
-                logits = linear(&self.model.embedding, &normed, None);
+                logits = self
+                    .model
+                    .linear()?
+                    .run("token_embd.weight", &normed, VOCAB)?;
                 trace("result_output", None, &[VOCAB], &logits);
             }
             self.position += 1;

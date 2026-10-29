@@ -1487,12 +1487,15 @@ fn build_audio8(options: &CliOptions) -> Result<Audio8Backend, String> {
         return Err("Audio8 carries its audio tower in --model; omit --mmproj".into());
     }
     let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
-    let encoder = crate::models::audio8::Audio8Encoder::from_source(Arc::clone(&source))?;
+    let pool = Arc::new(ComputePool::new(options.threads));
+    let encoder =
+        crate::models::audio8::Audio8Encoder::from_source(Arc::clone(&source), Arc::clone(&pool))?;
     let decoder_source = Arc::clone(&source);
     let tokenizer = Arc::new(BPETokenizer::from_gguf_metadata(|key| {
         source.metadata(key).cloned()
     })?);
-    let decoder = crate::models::audio8::text::Audio8TextDecoder::from_source(decoder_source)?;
+    let decoder =
+        crate::models::audio8::text::Audio8TextDecoder::from_source(decoder_source, pool)?;
     // Validate the whole contract once at startup rather than per request.
     let specials = audio8_streaming::SpecialTokens::lookup(&tokenizer)?;
     let language = options.language.as_deref().unwrap_or("zh");

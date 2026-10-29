@@ -4,9 +4,13 @@ pub mod mel;
 pub mod streaming;
 pub mod text;
 
+use crate::compute::linear::{LinearBinding, LinearExecutor, LinearId, LinearMode};
+use crate::compute::ComputePolicy;
 use crate::core::tensor::{load_f32_tensor, GGMLType, MetaValue, TensorSource};
+use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::{QuantizedTensor, Weight};
 use crate::ops::{gelu_erf, silu};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 unsafe extern "C" {
@@ -108,16 +112,85 @@ fn matrix(
     )))
 }
 
-fn linear(weight: &Weight<'_>, input: &[f32], bias: Option<&[f32]>) -> Vec<f32> {
+/// The projections of one Audio8 component, bound to the shared compute
+/// executor.
+///
+/// Audio8 used to call `Weight::kernel.forward` directly, which is the CPU
+/// path: `VulkanKernel::forward` delegates to its inner kernel, so a
+/// `--gpu` build silently ran on the CPU. Going through `LinearExecutor`
+/// is what makes the CPU/GPU choice and the per-format kernels a property of
+/// the executor instead of of every call site.
+///
+/// `rows` is 1 for every Audio8 projection today: the tower and the decoder
+/// both walk one frame/token at a time. The executor is still the right
+/// layer, because it owns the upload, the fallback and the format dispatch.
+pub(crate) struct Linear {
+    executor: LinearExecutor<'static, 'static>,
+    ids: HashMap<&'static str, LinearId>,
+}
+
+impl Linear {
+    pub(crate) fn new(
+        weights: &[(&'static str, &'static Weight<'static>)],
+        pool: Arc<ComputePool>,
+    ) -> Result<Self, String> {
+        let executor = LinearExecutor::new(
+            ComputePolicy::legacy(),
+            weights
+                .iter()
+                .map(|(_, weight)| LinearBinding {
+                    weight,
+                    mode: LinearMode::Prepared,
+                })
+                .collect(),
+            1,
+            pool,
+        )
+        .map_err(|error| error.to_string())?;
+        let mut ids = HashMap::with_capacity(weights.len());
+        for (index, (name, _)) in weights.iter().enumerate() {
+            ids.insert(
+                *name,
+                executor.id(index).map_err(|error| error.to_string())?,
+            );
+        }
+        Ok(Self { executor, ids })
+    }
+
+    pub(crate) fn run(
+        &mut self,
+        name: &str,
+        input: &[f32],
+        n_out: usize,
+    ) -> Result<Vec<f32>, String> {
+        let id = *self
+            .ids
+            .get(name)
+            .ok_or_else(|| format!("Unbound Audio8 projection: {name}"))?;
+        let mut output = vec![0.0; n_out];
+        self.executor
+            .run(id, input, 1, &mut output)
+            .map_err(|error| error.to_string())?;
+        Ok(output)
+    }
+}
+
+/// Pin a loaded projection so the executor can borrow it for the model's
+/// lifetime. The weight is allocated once per model, and the model itself
+/// lives for the process (CLI) or the server, so this is not a leak that
+/// grows with requests.
+fn leak(weight: Weight<'static>) -> &'static Weight<'static> {
+    Box::leak(Box::new(weight))
+}
+
+/// The plain CPU product, used by the format tests below to check that a
+/// payload decodes to the same values the float weights produce.
+#[cfg(test)]
+fn project(weight: &Weight<'_>, input: &[f32]) -> Vec<f32> {
     let mut output = vec![0.0; weight.n_out];
     weight
         .kernel
         .forward(input, &mut output, weight.n_in, weight.n_out);
-    if let Some(bias) = bias {
-        for (value, bias) in output.iter_mut().zip(bias) {
-            *value += *bias;
-        }
-    }
     output
 }
 
@@ -192,16 +265,18 @@ impl Conv {
     }
 }
 
+/// Projections are held behind `&'static` so the executor, which is built
+/// after the layers, can borrow them for the model's lifetime.
 struct AudioLayer {
     norm1: Vec<f32>,
     norm2: Vec<f32>,
-    q: Weight<'static>,
-    k: Weight<'static>,
-    v: Weight<'static>,
-    o: Weight<'static>,
-    gate: Weight<'static>,
-    up: Weight<'static>,
-    down: Weight<'static>,
+    q: &'static Weight<'static>,
+    k: &'static Weight<'static>,
+    v: &'static Weight<'static>,
+    o: &'static Weight<'static>,
+    gate: &'static Weight<'static>,
+    up: &'static Weight<'static>,
+    down: &'static Weight<'static>,
     q_bias: Vec<f32>,
     v_bias: Vec<f32>,
     o_bias: Vec<f32>,
@@ -214,9 +289,11 @@ pub struct Audio8Encoder {
     conv2: Conv,
     layers: Vec<AudioLayer>,
     norm: Vec<f32>,
-    project1: Weight<'static>,
-    project2: Weight<'static>,
     pub frame_embedding: Vec<f32>,
+    /// Every projection above, bound to the CPU/GPU executor. A `Mutex`
+    /// because `encode_frame` takes `&self` while the executor owns the
+    /// upload state, and the server runs the transcriber on a worker thread.
+    linear: std::sync::Mutex<Linear>,
 }
 
 pub struct Audio8State {
@@ -318,7 +395,7 @@ mod tests {
                 bytes: payload,
             };
             let weight = super::matrix(&source, "projection", N_IN, N_OUT).unwrap();
-            let output = super::linear(&weight, &input, None);
+            let output = super::project(&weight, &input);
             for (index, (got, want)) in output.iter().zip(&expected).enumerate() {
                 let error = (got - want).abs();
                 assert!(
@@ -370,7 +447,7 @@ mod tests {
                 bytes: vec![0; block_bytes * N_OUT],
             };
             let weight = super::matrix(&source, "projection", N_IN, N_OUT).unwrap();
-            let output = super::linear(&weight, &vec![1.0; N_IN], None);
+            let output = super::project(&weight, &vec![1.0; N_IN]);
             assert_eq!(output.len(), N_OUT);
             assert!(output.iter().all(|value| value.is_finite()));
         }
@@ -435,7 +512,9 @@ mod tests {
             .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
             .collect();
         let source: Arc<dyn TensorSource> = Arc::new(GGUFLoader::from_file(gguf).unwrap());
-        let encoder = super::Audio8Encoder::from_source(Arc::clone(&source)).unwrap();
+        let pool = Arc::new(crate::core::thread_pool::ComputePool::new(4));
+        let encoder =
+            super::Audio8Encoder::from_source(Arc::clone(&source), Arc::clone(&pool)).unwrap();
         let result = encoder
             .encode_window(&input, frames, groups * 4, &mut Audio8State::new())
             .unwrap();
@@ -448,7 +527,7 @@ mod tests {
             tokenizer.token_id("[LANGUAGE_ZH]").unwrap(),
         ];
         token_ids.resize(groups, tokenizer.token_id("[STREAMING_PAD]").unwrap());
-        let decoder = Audio8TextDecoder::from_source(source).unwrap();
+        let decoder = Audio8TextDecoder::from_source(source, pool).unwrap();
         let condition = super::time_condition(6, &encoder.frame_embedding).unwrap();
         crate::parity_trace::report(crate::parity_trace::checkpoint(
             "audio8.time_condition",
@@ -464,7 +543,18 @@ mod tests {
 }
 
 impl Audio8Encoder {
-    pub fn from_source(source: Arc<dyn TensorSource>) -> Result<Self, String> {
+    /// Borrow the executor. A poisoned lock only means an earlier projection
+    /// panicked, so the model is unusable either way.
+    fn linear(&self) -> Result<std::sync::MutexGuard<'_, Linear>, String> {
+        self.linear
+            .lock()
+            .map_err(|_| "Audio8 linear executor poisoned".to_string())
+    }
+
+    pub fn from_source(
+        source: Arc<dyn TensorSource>,
+        pool: Arc<ComputePool>,
+    ) -> Result<Self, String> {
         let arch = source
             .metadata("general.architecture")
             .and_then(MetaValue::to_string_val);
@@ -529,48 +619,48 @@ impl Audio8Encoder {
                     &format!("{prefix}.final_layer_norm.weight"),
                     AUDIO_WIDTH,
                 )?,
-                q: matrix(
+                q: leak(matrix(
                     source.as_ref(),
                     &format!("{attn}.q_proj.weight"),
                     AUDIO_WIDTH,
                     AUDIO_Q_WIDTH,
-                )?,
-                k: matrix(
+                )?),
+                k: leak(matrix(
                     source.as_ref(),
                     &format!("{attn}.k_proj.weight"),
                     AUDIO_WIDTH,
                     AUDIO_Q_WIDTH,
-                )?,
-                v: matrix(
+                )?),
+                v: leak(matrix(
                     source.as_ref(),
                     &format!("{attn}.v_proj.weight"),
                     AUDIO_WIDTH,
                     AUDIO_Q_WIDTH,
-                )?,
-                o: matrix(
+                )?),
+                o: leak(matrix(
                     source.as_ref(),
                     &format!("{attn}.o_proj.weight"),
                     AUDIO_Q_WIDTH,
                     AUDIO_WIDTH,
-                )?,
-                gate: matrix(
+                )?),
+                gate: leak(matrix(
                     source.as_ref(),
                     &format!("{mlp}.gate_proj.weight"),
                     AUDIO_WIDTH,
                     AUDIO_FFN,
-                )?,
-                up: matrix(
+                )?),
+                up: leak(matrix(
                     source.as_ref(),
                     &format!("{mlp}.up_proj.weight"),
                     AUDIO_WIDTH,
                     AUDIO_FFN,
-                )?,
-                down: matrix(
+                )?),
+                down: leak(matrix(
                     source.as_ref(),
                     &format!("{mlp}.down_proj.weight"),
                     AUDIO_FFN,
                     AUDIO_WIDTH,
-                )?,
+                )?),
                 q_bias: vector(
                     source.as_ref(),
                     &format!("{attn}.q_proj.bias"),
@@ -589,29 +679,53 @@ impl Audio8Encoder {
                 )?,
             });
         }
+        let norm = vector(source.as_ref(), "audio_tower.norm.weight", AUDIO_WIDTH)?;
+        let project1 = leak(matrix(
+            source.as_ref(),
+            "multi_modal_projector.linear_1.weight",
+            8 * AUDIO_WIDTH,
+            TEXT_WIDTH,
+        )?);
+        let project2 = leak(matrix(
+            source.as_ref(),
+            "multi_modal_projector.linear_2.weight",
+            TEXT_WIDTH,
+            TEXT_WIDTH,
+        )?);
+        let frame_embedding = load_f32_tensor(
+            source.as_ref(),
+            "frame_len_embedding.weight",
+            &[TEXT_WIDTH as u64, 3],
+        )?;
+        // The executor borrows the weights, so it is built from the finished
+        // fields rather than from the loader's temporaries.
+        let mut bindings: Vec<(&'static str, &'static Weight<'static>)> =
+            Vec::with_capacity(2 + AUDIO_LAYERS * 7);
+        for (index, layer) in layers.iter().enumerate() {
+            // The names are the GGUF tensor names, leaked once per model.
+            let names: &'static [&'static str] = Box::leak(Box::new(
+                ["q", "k", "v", "o", "gate", "up", "down"].map(|suffix| {
+                    Box::leak(format!("audio_tower.layers.{index}.{suffix}").into_boxed_str())
+                        as &'static str
+                }),
+            ));
+            for (name, weight) in names.iter().zip([
+                layer.q, layer.k, layer.v, layer.o, layer.gate, layer.up, layer.down,
+            ]) {
+                bindings.push((name, weight));
+            }
+        }
+        bindings.push(("multi_modal_projector.linear_1.weight", project1));
+        bindings.push(("multi_modal_projector.linear_2.weight", project2));
+        let linear = Linear::new(&bindings, pool)?;
         Ok(Self {
-            norm: vector(source.as_ref(), "audio_tower.norm.weight", AUDIO_WIDTH)?,
-            project1: matrix(
-                source.as_ref(),
-                "multi_modal_projector.linear_1.weight",
-                8 * AUDIO_WIDTH,
-                TEXT_WIDTH,
-            )?,
-            project2: matrix(
-                source.as_ref(),
-                "multi_modal_projector.linear_2.weight",
-                TEXT_WIDTH,
-                TEXT_WIDTH,
-            )?,
-            frame_embedding: load_f32_tensor(
-                source.as_ref(),
-                "frame_len_embedding.weight",
-                &[TEXT_WIDTH as u64, 3],
-            )?,
+            norm,
+            frame_embedding,
             _source: source,
             conv1,
             conv2,
             layers,
+            linear: std::sync::Mutex::new(linear),
         })
     }
 
@@ -661,7 +775,9 @@ impl Audio8Encoder {
         for group in hidden.chunks_exact(4 * AUDIO_WIDTH) {
             let mut padded = vec![0.0; 8 * AUDIO_WIDTH];
             padded[..group.len()].copy_from_slice(group);
-            let mut value = linear(&self.project1, &padded, None);
+            let mut value =
+                self.linear()?
+                    .run("multi_modal_projector.linear_1.weight", &padded, TEXT_WIDTH)?;
             for item in &mut value {
                 *item = gelu_erf(*item);
             }
@@ -672,7 +788,9 @@ impl Audio8Encoder {
                 &[TEXT_WIDTH],
                 &value,
             ));
-            let output = linear(&self.project2, &value, None);
+            let output =
+                self.linear()?
+                    .run("multi_modal_projector.linear_2.weight", &value, TEXT_WIDTH)?;
             #[cfg(feature = "parity-trace")]
             crate::parity_trace::report(crate::parity_trace::checkpoint(
                 "audio8.project2",
@@ -701,9 +819,28 @@ impl Audio8Encoder {
                     &normed,
                 ));
             }
-            let mut q = linear(&layer.q, &normed, Some(&layer.q_bias));
-            let mut k = linear(&layer.k, &normed, None);
-            let v = linear(&layer.v, &normed, Some(&layer.v_bias));
+            let mut linear = self.linear()?;
+            let mut q = linear.run(
+                &format!("audio_tower.layers.{index}.q"),
+                &normed,
+                AUDIO_Q_WIDTH,
+            )?;
+            for (value, bias) in q.iter_mut().zip(&layer.q_bias) {
+                *value += *bias;
+            }
+            let mut k = linear.run(
+                &format!("audio_tower.layers.{index}.k"),
+                &normed,
+                AUDIO_Q_WIDTH,
+            )?;
+            let mut v = linear.run(
+                &format!("audio_tower.layers.{index}.v"),
+                &normed,
+                AUDIO_Q_WIDTH,
+            )?;
+            for (value, bias) in v.iter_mut().zip(&layer.v_bias) {
+                *value += *bias;
+            }
             audio8_rope(&mut q, HEAD_WIDTH, position);
             audio8_rope(&mut k, HEAD_WIDTH, position);
             #[cfg(feature = "parity-trace")]
@@ -764,17 +901,39 @@ impl Audio8Encoder {
                     &attention,
                 ));
             }
-            let projected = linear(&layer.o, &attention, Some(&layer.o_bias));
+            let mut projected = linear.run(
+                &format!("audio_tower.layers.{index}.o"),
+                &attention,
+                AUDIO_WIDTH,
+            )?;
+            for (value, bias) in projected.iter_mut().zip(&layer.o_bias) {
+                *value += *bias;
+            }
             for (item, update) in hidden.iter_mut().zip(projected) {
                 *item += update;
             }
             audio_rms_norm(&hidden, &layer.norm2, &mut normed, 1e-5);
-            let mut gate = linear(&layer.gate, &normed, None);
-            let up = linear(&layer.up, &normed, None);
+            let mut gate = linear.run(
+                &format!("audio_tower.layers.{index}.gate"),
+                &normed,
+                AUDIO_FFN,
+            )?;
+            let up = linear.run(
+                &format!("audio_tower.layers.{index}.up"),
+                &normed,
+                AUDIO_FFN,
+            )?;
             for (gate, up) in gate.iter_mut().zip(up) {
                 *gate = silu(*gate) * up;
             }
-            let down = linear(&layer.down, &gate, Some(&layer.down_bias));
+            let mut down = linear.run(
+                &format!("audio_tower.layers.{index}.down"),
+                &gate,
+                AUDIO_WIDTH,
+            )?;
+            for (value, bias) in down.iter_mut().zip(&layer.down_bias) {
+                *value += *bias;
+            }
             for (item, update) in hidden.iter_mut().zip(down) {
                 *item += update;
             }

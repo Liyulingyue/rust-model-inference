@@ -7,6 +7,7 @@
 use crate::app::cli::CliOptions;
 use crate::app::open_or_exit;
 use crate::core::tensor::TensorSource;
+use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
 use crate::format::ggufrs::ComponentRole;
 use crate::models::audio8::streaming::{
@@ -21,12 +22,13 @@ pub fn run_audio8_cli(options: &CliOptions) -> Result<(), String> {
         return Err("Audio8 carries its audio tower in --model; omit --mmproj".into());
     }
     let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
-    let encoder = Audio8Encoder::from_source(Arc::clone(&source))?;
+    let pool = Arc::new(ComputePool::new(options.threads));
+    let encoder = Audio8Encoder::from_source(Arc::clone(&source), Arc::clone(&pool))?;
     let decoder_source = Arc::clone(&source);
     let tokenizer = Arc::new(BPETokenizer::from_gguf_metadata(|key| {
         source.metadata(key).cloned()
     })?);
-    let decoder = Audio8TextDecoder::from_source(decoder_source)?;
+    let decoder = Audio8TextDecoder::from_source(decoder_source, pool)?;
     let tokens = SpecialTokens::lookup(&tokenizer)?;
     let language = options.language.as_deref().unwrap_or("zh");
     let language_token = tokens.language(language)?;
@@ -47,5 +49,7 @@ pub fn run_audio8_cli(options: &CliOptions) -> Result<(), String> {
     while transcriber.next_chunk()?.is_some() {}
     let visible = transcriber.finish();
     println!("{}", tokenizer.decode(&visible, false));
+    #[cfg(feature = "vulkan")]
+    crate::vulkan::dump_submit_trace();
     Ok(())
 }
