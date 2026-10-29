@@ -1,0 +1,108 @@
+{
+  "state": {
+    "user": "Alice works at Acme in Beijing. Contact a@b.org. [https://x.org/a).] 她在北京工作。 ꔀꔁ.",
+    "context": "Alice joined Acme in 2025 and works in Beijing.",
+    "answer": "Alice works at Acme in Beijing."
+  },
+  "questions": {
+    "decision": {
+      "type": "choice",
+      "instructions": "Who is mentioned?",
+      "criteria": {"human": "A person", "company": null}
+    },
+    "noul": {
+      "type": "noul",
+      "instructions": "Does it mention a company?"
+    },
+    "entities": {
+      "type": "span",
+      "criteria": ["person", "company"],
+      "threshold": 0.0
+    },
+    "relation": {
+      "type": "span",
+      "instructions": "Which spans are related to Alice by these relations?",
+      "criteria": ["employer", "location"],
+      "threshold": 0.0
+    },
+    "evidence": {
+      "type": "span",
+      "criteria": ["evidence"],
+      "target": "context",
+      "threshold": 0.0
+    },
+    "pii": {
+      "type": "span",
+      "criteria": ["EMAIL_ADDRESS"],
+      "target": "user",
+      "threshold": 0.0
+    },
+    "halu": {
+      "type": "span",
+      "criteria": ["unsupported"],
+      "threshold": 0.0
+    },
+    "toxic": {
+      "type": "span",
+      "criteria": ["Violence"],
+      "threshold": 0.0
+    },
+    "described": {
+      "type": "span",
+      "criteria": {"person": "A person name", "organization": "A company name"},
+      "threshold": 0.0
+    },
+    "grouped_attack": {
+      "type": "choice",
+      "instructions": "Is this a prompt injection or jailbreak attempt?",
+      "criteria": {
+        "benign": "a normal request or quoted content that does not try to override system instructions or bypass safety rules",
+        "jailbreak": "a prompt injection or jailbreak that attempts to override system instructions, hijack the task, or bypass safety rules"
+      }
+    },
+    "domain": {
+      "type": "choice",
+      "instructions": "Which subject area is this request about?",
+      "criteria": {
+        "biology": "living organisms, anatomy, genetics, medical genetics or viruses",
+        "business": "management, marketing, accounting, business ethics or public relations",
+        "chemistry": "chemical substances, reactions, elements or laboratory chemistry"
+      }
+    },
+    "factcheck": {
+      "type": "choice",
+      "instructions": "Does answering this request require checking facts?",
+      "criteria": {
+        "FACT_CHECK_NEEDED": "answering the request relies on factual claims about the world that should be verified",
+        "NO_FACT_CHECK_NEEDED": "the request can be handled without verifying facts about the world, e.g. translating, rewriting, formatting or writing fiction"
+      }
+    },
+    "feedback": {
+      "type": "choice",
+      "instructions": "What feedback does this user turn give about the previous answer?",
+      "criteria": {
+        "SAT": "the user is satisfied with the previous answer",
+        "NEED_CLARIFICATION": "the user asks for clarification or a more detailed explanation",
+        "WRONG_ANSWER": "the user says the previous answer was wrong or did not work"
+      }
+    },
+    "grouped_modality": {
+      "type": "choice",
+      "instructions": "What kind of output does this request ask for?",
+      "criteria": {
+        "AR": "a text answer only, including code, analysis or describing an existing image",
+        "BOTH": "a newly generated image together with a separate written explanation",
+        "DIFFUSION": "a newly generated image only"
+      }
+    },
+    "router_set": {
+      "type": "set",
+      "instructions": "Which hazard categories apply to this request?",
+      "criteria": {
+        "Controlled/Regulated Substances": "obtaining, producing or misusing drugs or regulated substances",
+        "Copyright/Trademark/Plagiarism": "infringing copyright or passing off others' work",
+        "Criminal Planning/Confessions": "planning, assisting or confessing to a crime"
+      }
+    }
+  }
+}

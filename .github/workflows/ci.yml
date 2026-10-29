@@ -34,6 +34,8 @@ jobs:
       - run: 'cargo test --locked --lib ops::math::exp::tests::'
       - run: 'cargo test --locked --lib ops::kernel::q8_0::'
       - run: cargo test --locked --lib raw_hidden_
+      - run: 'cargo test --locked --lib models::vela3::'
+      - run: 'cargo test --locked --lib format::safetensors::tests::'
       - run: cargo test --locked --test qwen_image_2_1_unit --test qwen_image_2_1_pipeline
       - name: Q8 dispatch without F16C
         run: |

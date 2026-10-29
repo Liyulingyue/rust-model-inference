@@ -1,0 +1,28 @@
+{
+  "state": {
+    "user": "Alice works at Acme."
+  },
+  "questions": {
+    "choice": {
+      "type": "choice",
+      "instructions": "Who is named?",
+      "criteria": {
+        "person": "a human",
+        "company": null
+      }
+    },
+    "noul": {
+      "type": "noul",
+      "instructions": "Is a company mentioned?"
+    },
+    "entities": {
+      "type": "span",
+      "criteria": [
+        "PERSON",
+        "ORGANIZATION"
+      ],
+      "definitions": null,
+      "threshold": 0.0
+    }
+  }
+}

@@ -1,0 +1,678 @@
+{
+  "verified_at_utc": "2026-10-29T17:54:28.023338+00:00",
+  "environment": {
+    "platform": "macOS arm64",
+    "rust": "1.98.1",
+    "python": "3.12.13",
+    "torch": "2.9.1",
+    "transformers": "5.19.0",
+    "torchvision": "0.24.1",
+    "numpy": "2.5.3",
+    "pillow": "13.0.0",
+    "cpu_threads": 4
+  },
+  "scope": "Native Rust CPU safetensors System One; no Python or external acceleration library in runtime",
+  "reference_manifest": {
+    "path": "tools/oracle/vela3/snapshots.json",
+    "sha256": "ec77136b7282a8330e402a0ba4055158028c53455fd5f3bdd1145b3e61b28a80"
+  },
+  "comparison_policy": {
+    "exact": [
+      "token IDs",
+      "checkpoint order and shapes",
+      "greedy token IDs",
+      "question routing",
+      "choice strings",
+      "span offsets",
+      "box coordinates",
+      "usage"
+    ],
+    "floating": "Pointwise or recorded BF16/scaled error gates; no bitwise claim for SIMD reductions, BF16, activation approximations, softmax or probabilities."
+  },
+  "system_one": {
+    "lite": {
+      "passed": true,
+      "atol": 0.01,
+      "rtol": 0.01,
+      "floats_compared": 33,
+      "max_absolute_error": 0.004633518871616504,
+      "largest_errors": [
+        {
+          "path": "response.answers.score.probabilities.1",
+          "absolute_error": 0.004633518871616504
+        },
+        {
+          "path": "response.answers.evidence.spans[0].score",
+          "absolute_error": 0.004345033380886987
+        },
+        {
+          "path": "response.answers.default_evidence.spans[0].score",
+          "absolute_error": 0.004345033380886987
+        },
+        {
+          "path": "response.answers.score.confidence",
+          "absolute_error": 0.0036418920186244153
+        },
+        {
+          "path": "response.answers.score.probabilities.0",
+          "absolute_error": 0.003213210783729492
+        },
+        {
+          "path": "response.answers.open.spans[0].score",
+          "absolute_error": 0.00269521432858999
+        },
+        {
+          "path": "response.answers.default_open.spans[0].score",
+          "absolute_error": 0.00269521432858999
+        },
+        {
+          "path": "response.answers.default_relation.spans[0].score",
+          "absolute_error": 0.002571223119759991
+        },
+        {
+          "path": "response.answers.score.score",
+          "absolute_error": 0.0017929026958424243
+        },
+        {
+          "path": "response.answers.score.probabilities.2",
+          "absolute_error": 0.0014203080878870122
+        }
+      ],
+      "errors": [],
+      "questions": 14,
+      "usage": {
+        "input_tokens": 524,
+        "output_tokens": 0
+      },
+      "input": "tools/oracle/vela3/requests/lite.json"
+    },
+    "unicode": {
+      "passed": true,
+      "atol": 0.01,
+      "rtol": 0.01,
+      "floats_compared": 6,
+      "max_absolute_error": 0.004669372669223293,
+      "largest_errors": [
+        {
+          "path": "response.answers.kind.confidence",
+          "absolute_error": 0.004669372669223293
+        },
+        {
+          "path": "response.answers.entities.spans[0].score",
+          "absolute_error": 0.0023248202416792374
+        },
+        {
+          "path": "response.answers.kind.probabilities.人物",
+          "absolute_error": 0.0014321398614393077
+        },
+        {
+          "path": "response.answers.kind.probabilities.公司",
+          "absolute_error": 0.001432139861439266
+        },
+        {
+          "path": "response.answers.entities.spans[1].score",
+          "absolute_error": 0.0003024237461261847
+        },
+        {
+          "path": "response.answers.entities.threshold",
+          "absolute_error": 0.0
+        }
+      ],
+      "errors": [],
+      "questions": 2,
+      "usage": {
+        "input_tokens": 121,
+        "output_tokens": 0
+      },
+      "input": "tools/oracle/vela3/requests/unicode.json"
+    },
+    "fast_vision_cli": {
+      "passed": true,
+      "atol": 0.0005,
+      "rtol": 0.0005,
+      "floats_compared": 2,
+      "max_absolute_error": 2.384185791015625e-07,
+      "largest_errors": [
+        {
+          "path": "response.answers.q.probabilities.receipt",
+          "absolute_error": 2.384185791015625e-07
+        },
+        {
+          "path": "response.answers.q.probabilities.landscape",
+          "absolute_error": 1.601874828338623e-07
+        }
+      ],
+      "errors": []
+    }
+  },
+  "real_span_heads": {
+    "passed": true,
+    "packages": 4,
+    "heads": 15,
+    "max_absolute_error": 6.67572e-06,
+    "atol": 3e-05,
+    "rtol": 2e-05
+  },
+  "d3": {
+    "tiny_causal_four_steps": [
+      {
+        "adapter": null,
+        "passed": true,
+        "max_abs": 4.76837158203125e-07,
+        "max_rmse": 2.1713468356665544e-07,
+        "min_cosine": 0.9999998807907104,
+        "logits": {
+          "name": "vela3.d3.generation_logits",
+          "layer": null,
+          "count": 8,
+          "passed": true,
+          "max_abs": 5.960464477539063e-08,
+          "rmse": 3.7990655954445174e-08,
+          "cosine": 1.0,
+          "oracle_argmax": 0,
+          "native_argmax": 0
+        },
+        "generated_token_ids": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    ],
+    "real_lite_f32": {
+      "passed": true,
+      "profile": "pointwise",
+      "atol": 0.0005,
+      "rtol": 0.0001,
+      "envelope": null,
+      "checkpoints": 75,
+      "max_absolute_error": 0.00010395050048828125,
+      "max_rmse": 8.916556907934137e-06,
+      "first_failed": null,
+      "logits": [
+        {
+          "name": "vela3.d3.logits",
+          "layer": null,
+          "count": 3,
+          "passed": true,
+          "max_abs": 1.1920928955078125e-05,
+          "rmse": 8.916556907934137e-06,
+          "cosine": 0.9999998807907104,
+          "oracle_argmax": 0,
+          "native_argmax": 0
+        }
+      ]
+    },
+    "real_lite_bf16_causal_four_steps": {
+      "passed": true,
+      "profile": "bf16",
+      "atol": 0.1,
+      "rtol": 0.02,
+      "envelope": {
+        "max_abs": 0.75,
+        "max_rmse": 0.06,
+        "min_cosine": 0.9995
+      },
+      "checkpoints": 300,
+      "max_absolute_error": 0.25,
+      "max_rmse": 0.025672798976302147,
+      "first_failed": null,
+      "logits": [
+        {
+          "name": "vela3.d3.generation_logits",
+          "layer": null,
+          "count": 248320,
+          "passed": true,
+          "max_abs": 0.0703125,
+          "rmse": 0.01336448173969984,
+          "cosine": 0.9999594688415527,
+          "oracle_argmax": 2838,
+          "native_argmax": 2838
+        },
+        {
+          "name": "vela3.d3.generation_logits",
+          "layer": null,
+          "count": 248320,
+          "passed": true,
+          "max_abs": 0.0625,
+          "rmse": 0.011432548053562641,
+          "cosine": 0.9999711513519287,
+          "oracle_argmax": 682,
+          "native_argmax": 682
+        },
+        {
+          "name": "vela3.d3.generation_logits",
+          "layer": null,
+          "count": 248320,
+          "passed": true,
+          "max_abs": 0.0625,
+          "rmse": 0.01211400143802166,
+          "cosine": 0.999977707862854,
+          "oracle_argmax": 264,
+          "native_argmax": 264
+        },
+        {
+          "name": "vela3.d3.generation_logits",
+          "layer": null,
+          "count": 248320,
+          "passed": true,
+          "max_abs": 0.0625,
+          "rmse": 0.01319020614027977,
+          "cosine": 0.9999815225601196,
+          "oracle_argmax": 220,
+          "native_argmax": 220
+        }
+      ]
+    },
+    "real_lite_image_bf16": {
+      "passed": false,
+      "profile": "bf16",
+      "atol": 0.1,
+      "rtol": 0.02,
+      "envelope": {
+        "max_abs": 0.75,
+        "max_rmse": 0.06,
+        "min_cosine": 0.9995
+      },
+      "checkpoints": 77,
+      "max_absolute_error": 2.625,
+      "max_rmse": 0.10997476428747177,
+      "first_failed": {
+        "name": "vela3.d3.vision.projected",
+        "layer": null,
+        "count": 71680,
+        "passed": false,
+        "max_abs": 0.24221444129943848,
+        "rmse": 0.005797247402369976,
+        "cosine": 0.9994217753410339
+      },
+      "logits": [
+        {
+          "name": "vela3.d3.logits",
+          "layer": null,
+          "count": 3,
+          "passed": true,
+          "max_abs": 0.0846102237701416,
+          "rmse": 0.05362324416637421,
+          "cosine": 0.9999609589576721,
+          "oracle_argmax": 0,
+          "native_argmax": 0
+        }
+      ]
+    },
+    "real_lite_image_f32": {
+      "passed": false,
+      "profile": "pointwise",
+      "atol": 0.0005,
+      "rtol": 0.0001,
+      "envelope": null,
+      "checkpoints": 77,
+      "max_absolute_error": 0.11217689514160156,
+      "max_rmse": 0.005110466852784157,
+      "first_failed": {
+        "name": "vela3.d3.vision.projected",
+        "layer": null,
+        "count": 71680,
+        "passed": false,
+        "max_abs": 0.005106449127197266,
+        "rmse": 0.00020364268857520074,
+        "cosine": 0.9999994039535522
+      },
+      "logits": [
+        {
+          "name": "vela3.d3.logits",
+          "layer": null,
+          "count": 3,
+          "passed": true,
+          "max_abs": 0.0005855560302734375,
+          "rmse": 0.0004785736673511565,
+          "cosine": 1.0000001192092896,
+          "oracle_argmax": 0,
+          "native_argmax": 0
+        }
+      ]
+    }
+  },
+  "fast": {
+    "real_base_hidden_max_absolute_error": 4.577636719e-05,
+    "real_base_logits_max_absolute_error": 4.827976227e-06,
+    "real_task_coverage": [
+      "choice",
+      "noul",
+      "span",
+      "evidence",
+      "span_set"
+    ],
+    "synthetic_task_coverage": "All nine adapters, 15 questions and long-window aggregation",
+    "real_all_adapters": "pending"
+  },
+  "fast_vision": {
+    "ocr": {
+      "passed": true,
+      "checkpoints": 86,
+      "tokens": 360,
+      "frames": [
+        0,
+        0
+      ],
+      "expected": {
+        "model": "vllm-sr/vela3-fast-vision",
+        "answers": {
+          "q": {
+            "type": "span",
+            "target": "ocr",
+            "spans": [
+              {
+                "start": 0,
+                "end": 25,
+                "label": "ocr_error",
+                "text": "The receipt totals 42.00.",
+                "score": 0.004522145260125399
+              }
+            ],
+            "head": "ocr_check",
+            "threshold": 0.0
+          }
+        },
+        "usage": {
+          "input_tokens": 360,
+          "output_tokens": 0
+        }
+      },
+      "task_metrics": [
+        {
+          "name": "text_hidden",
+          "count": 276480,
+          "max_abs": 0.003373146,
+          "rmse": 0.00011774,
+          "normalized_rmse": 2.3563e-05
+        },
+        {
+          "name": "selected_hidden",
+          "count": 5376,
+          "max_abs": 6.485e-05,
+          "rmse": 1.1354e-05,
+          "normalized_rmse": 2.223e-06
+        },
+        {
+          "name": "logits",
+          "count": 7,
+          "max_abs": 7.629e-06,
+          "rmse": 4.545e-06,
+          "normalized_rmse": 7.37e-07
+        }
+      ],
+      "weights": {
+        "backbone": {
+          "bytes": 1016406336,
+          "sha256": "9387cfd5bc53082b6ff634453c6b0cb3123a67e4c197209e308ecfaf7a578900"
+        },
+        "adapter": {
+          "bytes": 37801156,
+          "sha256": "882f2d71d6aee9d90f75b68d35c6eb74388fa96c1013d959b0ab18fe8b0f9719"
+        }
+      }
+    },
+    "span": {
+      "passed": true,
+      "checkpoints": 86,
+      "tokens": 355,
+      "frames": [
+        0,
+        0
+      ],
+      "expected": {
+        "model": "vllm-sr/vela3-fast-vision",
+        "answers": {
+          "q": {
+            "type": "span",
+            "target": "answer",
+            "spans": [
+              {
+                "start": 0,
+                "end": 25,
+                "label": "unsupported",
+                "text": "The receipt totals 42.00.",
+                "score": 0.9997364282608032
+              }
+            ],
+            "head": "image_halu",
+            "threshold": 0.05
+          }
+        },
+        "usage": {
+          "input_tokens": 355,
+          "output_tokens": 0
+        }
+      },
+      "task_metrics": [
+        {
+          "name": "text_hidden",
+          "count": 272640,
+          "max_abs": 0.005722333,
+          "rmse": 6.1394e-05,
+          "normalized_rmse": 1.6489e-05
+        },
+        {
+          "name": "selected_hidden",
+          "count": 5376,
+          "max_abs": 4.2439e-05,
+          "rmse": 8.839e-06,
+          "normalized_rmse": 2.249e-06
+        },
+        {
+          "name": "logits",
+          "count": 7,
+          "max_abs": 5.722e-06,
+          "rmse": 3.568e-06,
+          "normalized_rmse": 4.33e-07
+        }
+      ],
+      "weights": {
+        "backbone": {
+          "bytes": 1016406336,
+          "sha256": "9387cfd5bc53082b6ff634453c6b0cb3123a67e4c197209e308ecfaf7a578900"
+        },
+        "adapter": {
+          "bytes": 94444476,
+          "sha256": "9cbfd04d5960818001c1b6ff7a3f02a5595dd73f3c5d32a256fbe1855f4055bd"
+        }
+      }
+    },
+    "decision": {
+      "passed": true,
+      "checkpoints": 86,
+      "tokens": 351,
+      "frames": [
+        0,
+        0
+      ],
+      "expected": {
+        "model": "vllm-sr/vela3-fast-vision",
+        "answers": {
+          "q": {
+            "type": "choice",
+            "choice": "receipt",
+            "probabilities": {
+              "receipt": 0.939448356628418,
+              "landscape": 0.06055157259106636
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 351,
+          "output_tokens": 0
+        }
+      },
+      "task_metrics": [
+        {
+          "name": "text_hidden",
+          "count": 269568,
+          "max_abs": 0.003417969,
+          "rmse": 1.9881e-05,
+          "normalized_rmse": 6.404e-06
+        },
+        {
+          "name": "selected_hidden",
+          "count": 1536,
+          "max_abs": 4.8637e-05,
+          "rmse": 1.0512e-05,
+          "normalized_rmse": 2.722e-06
+        },
+        {
+          "name": "logits",
+          "count": 2,
+          "max_abs": 6.437e-06,
+          "rmse": 5.197e-06,
+          "normalized_rmse": 2.388e-06
+        }
+      ],
+      "weights": {
+        "backbone": {
+          "bytes": 1016406336,
+          "sha256": "65e0c0284eb8c6e494c058d1988ad1b3d2eab60c368bb3d704e09174d1220bd5"
+        },
+        "adapter": {
+          "bytes": 2372084,
+          "sha256": "8a8ddc13ccc09ebe41f4200b8685a72a7c19d4567c7c1a85f600b25dad53ae55"
+        }
+      }
+    },
+    "box": {
+      "passed": true,
+      "checkpoints": 86,
+      "tokens": 340,
+      "frames": [
+        2,
+        2
+      ],
+      "expected": {
+        "model": "vllm-sr/vela3-fast-vision",
+        "answers": {
+          "q": {
+            "type": "box",
+            "box": {
+              "top": 0.125,
+              "bottom": 1.0,
+              "left": 0.5625,
+              "right": 1.0
+            },
+            "point": {
+              "y": 0.65625,
+              "x": 0.90625
+            },
+            "confidence": 0.3745133876800537
+          }
+        },
+        "usage": {
+          "input_tokens": 340,
+          "output_tokens": 0
+        }
+      },
+      "task_metrics": [
+        {
+          "name": "text_hidden",
+          "count": 261120,
+          "max_abs": 9.0599e-05,
+          "rmse": 5.555e-06,
+          "normalized_rmse": 2.093e-06
+        },
+        {
+          "name": "selected_hidden",
+          "count": 245760,
+          "max_abs": 9.0599e-05,
+          "rmse": 5.677e-06,
+          "normalized_rmse": 2.143e-06
+        },
+        {
+          "name": "logits",
+          "count": 320,
+          "max_abs": 8.345e-06,
+          "rmse": 3.062e-06,
+          "normalized_rmse": 1.941e-06
+        }
+      ],
+      "weights": {
+        "backbone": {
+          "bytes": 1016406336,
+          "sha256": "46e65f6e6b906a64e4ad57e2e76957522bd01e2eeb5d8467078b895410d1e0aa"
+        },
+        "adapter": {
+          "bytes": 94444476,
+          "sha256": "62d05d58ddbb7f9248dff4e84dc4864c09c78a56e19088cae112ccbd9035fb6b"
+        }
+      }
+    }
+  },
+  "limits": [
+    "mini/turbo fixed-revision bases differ from current ModelScope mirrors; full real-base alignment not executed pending source confirmation",
+    "flash full-base alignment pending weight download",
+    "d3 image BF16 checkpoint gate FAILED; image path experimental",
+    "fast-vision real checks use shipped Python text implementation with config-only compatibility shim",
+    "No GPU/GGUF/server/video integration, long-context benchmark or cross-device validation"
+  ],
+  "engineering_checks": {
+    "vela3": {
+      "result": "ok",
+      "passed": 37,
+      "failed": 0,
+      "ignored": 5
+    },
+    "full_library": {
+      "result": "FAILED",
+      "passed": 1318,
+      "failed": 20,
+      "ignored": 89
+    },
+    "baseline": {
+      "commit": "92d2eca0aad9161694be49a67a4b3057f7514547",
+      "result": "FAILED",
+      "passed": 1280,
+      "failed": 20,
+      "ignored": 84
+    },
+    "same_failures_as_baseline": [
+      "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+      "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+      "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+      "models::clm::tests::matches_reference_golden_vectors",
+      "models::clm::tests::rejects_wrong_embedding_width",
+      "models::diffusion::z_image::text::tests::qwen_attention_softmax_matches_the_pinned_ggml_neon_reduction",
+      "models::diffusion::z_image::text::tests::silu_mul_inplace_matches_pinned_ggml_neon_activation",
+      "models::diffusion::z_image::vae::tests::silu_matches_pinned_ggml_neon_vector_path",
+      "models::funasr::encoder::parity_tests::fsmn_rounds_product_before_adding_like_ggml",
+      "models::funasr::encoder::parity_tests::layernorm_accumulates_variance_in_ggml_neon_groups",
+      "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+      "models::gemma4::trunk::tests::per_layer_bf16_projection_matches_pinned_scalar_dot_bits",
+      "models::gemma4::trunk::tests::per_layer_projection_rejects_non_bf16_weight",
+      "models::gemma4::trunk::tests::per_layer_projection_rejects_wrong_bf16_storage_length",
+      "ops::argmax::tests::all_negative",
+      "ops::argmax::tests::large_random",
+      "ops::argmax::tests::middle_max",
+      "ops::argmax::tests::tail_handles_non_aligned_lengths",
+      "ops::argmax::tests::ties_pick_lowest_index",
+      "ops::matmul::neon_tests::neon_softmax_matches_ggml_vector_exp_and_f64_sum"
+    ],
+    "new_full_library_failures": [],
+    "python_comparator_tests": 3,
+    "rustfmt": "passed: cargo +1.98.1 fmt --all -- --check",
+    "cli_build": "passed: cargo +1.98.1 build --profile release-fast --bin vela3",
+    "clippy": {
+      "passed": false,
+      "errors": 10,
+      "new_module_errors": 0,
+      "new_module_style_warnings": 21,
+      "error_files": [
+        "src/models/diffusion/ernie_image/dit.rs",
+        "src/models/diffusion/pig.rs",
+        "src/models/funasr/encoder.rs",
+        "src/models/funasr/vad.rs",
+        "src/models/qwen3/vision/mod.rs",
+        "src/models/qwen35/vision/mod.rs",
+        "src/models/yue2/nar.rs",
+        "src/ops/math/torch28.rs"
+      ]
+    }
+  }
+}
