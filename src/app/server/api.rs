@@ -1481,7 +1481,10 @@ pub async fn jev_score(
         );
     }
     if matches!(state.model.as_ref(), Backend::UnlimitedOcr(_)) {
-        return unlimited_ocr::single(state, req.context, req.questions, req.positive, None).await;
+        return jev_error(
+            StatusCode::BAD_REQUEST,
+            "Unlimited-OCR is an OCR backend and does not support JEV".into(),
+        );
     }
     let _compute_scope = state.compute.enter_legacy_scope();
     if let Backend::Gliner2(gliner2) = state.model.as_ref() {
@@ -1620,7 +1623,10 @@ async fn jev_grouped(
         }
     };
     if matches!(state.model.as_ref(), Backend::UnlimitedOcr(_)) {
-        return unlimited_ocr::grouped(state, req.context, req.questions, mode, None).await;
+        return jev_error(
+            StatusCode::BAD_REQUEST,
+            "Unlimited-OCR is an OCR backend and does not support JEV".into(),
+        );
     }
     let _compute_scope = state.compute.enter_legacy_scope();
     let source = match text_source(&state) {
@@ -1788,14 +1794,10 @@ async fn jev_image_score(
     }
 
     if matches!(state.model.as_ref(), Backend::UnlimitedOcr(_)) {
-        return unlimited_ocr::single(
-            state,
-            req.context,
-            req.questions,
-            req.positive,
-            Some(req.image_url),
-        )
-        .await;
+        return jev_error(
+            StatusCode::BAD_REQUEST,
+            "Unlimited-OCR is an OCR backend and does not support JEV".into(),
+        );
     }
     let image_path = match decode_image_to_tempfile(&req.image_url) {
         Ok(p) => p,
@@ -1866,31 +1868,21 @@ async fn jev_image_grouped(
             "questions must contain at least one item".to_string(),
         );
     }
-    let mode_label = match req.mode.as_str() {
-        "multi_select" => "multi_select",
-        "block_choice" => "block_choice",
+    match req.mode.as_str() {
+        "multi_select" | "block_choice" => {}
         other => {
             return jev_error(
                 StatusCode::BAD_REQUEST,
                 format!("mode must be 'multi_select' or 'block_choice', got {other:?}"),
             );
         }
-    };
+    }
 
     if matches!(state.model.as_ref(), Backend::UnlimitedOcr(_)) {
-        let mode = if req.mode == "multi_select" {
-            crate::app::JevMode::MultiSelect
-        } else {
-            crate::app::JevMode::BlockChoice
-        };
-        return unlimited_ocr::grouped(
-            state,
-            req.context,
-            req.questions,
-            mode,
-            Some(req.image_url),
-        )
-        .await;
+        return jev_error(
+            StatusCode::BAD_REQUEST,
+            "Unlimited-OCR is an OCR backend and does not support JEV".into(),
+        );
     }
     let image_path = match decode_image_to_tempfile(&req.image_url) {
         Ok(p) => p,

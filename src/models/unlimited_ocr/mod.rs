@@ -9,7 +9,7 @@ use crate::core::thread_pool::ComputePool;
 use crate::format::safetensors::SafetensorSource;
 use crate::models::diffusion::dreamx::kernels::{load_float_values, Linear};
 use serde_json::{json, Value};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub const MODEL_TYPE: &str = "unlimited-ocr";
 const HIDDEN: usize = 1280;
@@ -450,11 +450,9 @@ pub fn validate_options(options: &CliOptions) -> Result<(), String> {
         || options.thinking
         || options.bench
         || options.profile
-        || (options.jev && options.dump_logits)
+        || options.jev
     {
-        return Err(
-            "Unlimited-OCR supports OCR and JEV modes only, using its original prompt".into(),
-        );
+        return Err("Unlimited-OCR supports OCR mode only; --jev is unsupported".into());
     }
     if options.temperature.is_some_and(|x| x != 0.0)
         || options.repetition_penalty.is_some_and(|x| x != 1.0)
@@ -468,7 +466,7 @@ pub fn validate_options(options: &CliOptions) -> Result<(), String> {
 
 pub fn run_cli(options: &CliOptions, threads: usize) -> Result<(), String> {
     validate_options(options)?;
-    if !options.jev && options.image.is_none() {
+    if options.image.is_none() {
         return Err(
             "Unlimited-OCR requires --image <first-page> [--reference <next-page> ...]".into(),
         );
@@ -483,9 +481,6 @@ pub fn run_cli(options: &CliOptions, threads: usize) -> Result<(), String> {
         .chain(&options.references)
         .map(|p| std::fs::read(p).map_err(|e| format!("Read OCR page {}: {e}", p.display())))
         .collect::<Result<Vec<_>, _>>()?;
-    if options.jev {
-        return crate::app::jev::unlimited_ocr::run_cli(&model, options, &images);
-    }
     let ids = model.tokens(images.len(), options.prompt.as_deref().unwrap_or(""))?;
     let result = model.generate(
         &ids,
@@ -505,6 +500,7 @@ pub fn run_cli(options: &CliOptions, threads: usize) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     #[test]
     fn checkpoint_contract_rejects_nearby_architectures_and_changed_math() {
         let cfg: Value = serde_json::from_str(include_str!(

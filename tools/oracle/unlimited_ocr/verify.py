@@ -291,7 +291,7 @@ def main():
     p.add_argument("--primitives", action="store_true")
     p.add_argument("--images", type=Path, nargs="+")
     p.add_argument("--instruction", type=Path, help="UTF-8 instruction file; page markers are automatic")
-    p.add_argument("--prefill-only", action="store_true", help="record final logits without sampling (JEV alignment)")
+    p.add_argument("--prefill-only", action="store_true", help="record final logits without sampling")
     p.add_argument("--max-tokens", type=int, default=8)
     p.add_argument("--threads", type=int, default=8)
     p.add_argument("--compare", type=Path, nargs=2, metavar=("ORACLE_TRACE", "RUST_TRACE"))

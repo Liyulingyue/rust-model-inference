@@ -1,5 +1,5 @@
 use super::*;
-use crate::{app::jev, models::unlimited_ocr::Model};
+use crate::models::unlimited_ocr::Model;
 
 pub(super) fn options(body: &Value, request: &mut Request) -> Result<(), String> {
     if body.get("temperature").is_none_or(Value::is_null) {
@@ -70,116 +70,6 @@ pub(super) fn prepare(model: &Model, request: &Request) -> Result<PromptResult, 
     let ids = model.tokens(images.len(), &instruction)?;
     model.check_context(&ids, request.max_tokens)?;
     Ok(PromptResult { ids, images })
-}
-
-fn images(source: Option<String>) -> Result<Vec<Vec<u8>>, String> {
-    source
-        .map(|s| {
-            image_input::decode_image_source(&s, image_input::allow_remote()).map(|i| vec![i.bytes])
-        })
-        .unwrap_or_else(|| Ok(vec![]))
-}
-
-pub(super) async fn single(
-    state: AppState,
-    context: String,
-    questions: Vec<JevOptionInput>,
-    positive: Option<String>,
-    image: Option<String>,
-) -> Response {
-    let Backend::UnlimitedOcr(native) = state.model.as_ref() else {
-        unreachable!()
-    };
-    let model = native.model.clone();
-    let questions: Vec<_> = questions
-        .into_iter()
-        .map(|q| crate::app::JevQuestionInput {
-            text: q.text,
-            options: q.options,
-        })
-        .collect();
-    if let Err(e) = crate::app::prepare_jev_questions(&questions, positive.as_deref()) {
-        return jev_error(StatusCode::BAD_REQUEST, e);
-    }
-    let permit = match state.generation_slot.clone().try_acquire_owned() {
-        Ok(p) => p,
-        Err(_) => {
-            return jev_error(
-                StatusCode::TOO_MANY_REQUESTS,
-                "Another generation is running".into(),
-            )
-        }
-    };
-    let result = super::super::compute_task(state.compute, move || {
-        let _permit = permit;
-        let images = images(image)?;
-        let results =
-            jev::unlimited_ocr::score(&model, &context, &questions, positive.as_deref(), &images)?;
-        Ok::<_, String>(json!({"mode":"single", "context":context, "results":results}))
-    })
-    .await;
-    response(result)
-}
-
-pub(super) async fn grouped(
-    state: AppState,
-    context: String,
-    questions: Vec<JevGroupedOptionInput>,
-    mode: crate::app::JevMode,
-    image: Option<String>,
-) -> Response {
-    let Backend::UnlimitedOcr(native) = state.model.as_ref() else {
-        unreachable!()
-    };
-    let model = native.model.clone();
-    let questions: Vec<_> = questions
-        .into_iter()
-        .map(|q| crate::app::JevGroupedQuestionInput {
-            text: q.text,
-            groups: q
-                .groups
-                .into_iter()
-                .map(|g| crate::app::JevGroupInput {
-                    label: g.label,
-                    options: g.options,
-                })
-                .collect(),
-        })
-        .collect();
-    if let Err(e) = crate::app::prepare_jev_grouped_questions(&questions, mode) {
-        return jev_error(StatusCode::BAD_REQUEST, e);
-    }
-    let permit = match state.generation_slot.clone().try_acquire_owned() {
-        Ok(p) => p,
-        Err(_) => {
-            return jev_error(
-                StatusCode::TOO_MANY_REQUESTS,
-                "Another generation is running".into(),
-            )
-        }
-    };
-    let result = super::super::compute_task(state.compute, move || {
-        let _permit = permit;
-        let images = images(image)?;
-        let results =
-            jev::unlimited_ocr::score_grouped(&model, &context, &questions, mode, &images)?;
-        let mode = if mode == crate::app::JevMode::MultiSelect {
-            "multi_select"
-        } else {
-            "block_choice"
-        };
-        Ok::<_, String>(json!({"mode":mode, "context":context, "results":results}))
-    })
-    .await;
-    response(result)
-}
-
-fn response(result: Result<Result<Value, String>, tokio::task::JoinError>) -> Response {
-    match result {
-        Ok(Ok(value)) => Json(value).into_response(),
-        Ok(Err(e)) => jev_error(StatusCode::BAD_REQUEST, e),
-        Err(e) => jev_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-    }
 }
 
 #[cfg(test)]

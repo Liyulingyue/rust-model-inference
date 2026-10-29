@@ -41,41 +41,25 @@ The converter accepts `bf16`, `f16`, `f32`, `q8_0`, `q4_k` and `q6_k`. It embeds
 
 BF16 matrices use the shared AVX2/FMA, NEON or scalar dot dispatcher. Quantized projections use the existing weight kernels and prepare activations internally. `RMI_SCALAR=1` selects CPU scalar reference arithmetic. BF16 Auto projections use the existing CPU verification/retry path; small projections and unsupported device operations fall back to CPU. `RMI_COMPUTE_TRACE=1` prints actual device submissions/uploads for projection offload. This is hybrid execution, and no speedup is claimed from concurrent correctness probes.
 
-## JEV and HTTP
+## HTTP
 
-The model includes a causal language decoder, so it supports text-only and image-conditioned JEV. Scoring reads A..Z token logits from one prefill per question, using the shared single/grouped question preparation and probability calculation. It does not generate an answer to estimate probabilities. Labels must encode as exactly one token. The original checkpoint has no chat template: the instruction is `system + "\n" + payload + "\nAnswer:"`, after any page prefix. Text-only prefill uses the official no-image YaRN fallback (theta 500000, factor 4); image requests retain Page2D RoPE. Numerical alignment does not establish classifier accuracy.
+The server uses the common Chat, Anthropic Messages, Responses, SSE, stop-sequence and cancellation infrastructure. OCR accepts one user turn containing ordered page images and optional instruction text/system instructions; conversation history, tools, thinking, JEV and sampling options are rejected. Temperature defaults to zero for this backend. Scanned special/tool/thinking markers are preserved as text. JEV endpoints remain reserved for language-model backends and return an unsupported-backend error for Unlimited-OCR.
 
 ```sh
-target/release-fast/rust-model-inference --model models/Unlimited-OCR-2 \
-  --jev --jev-context 'Paris is the capital of France.' \
-  --jev-question 'Capital of France?' --jev-option Paris --jev-option Berlin --jev-output json
-# Add --image first.png [--reference next.png] for image-conditioned scoring.
-# --jev-multi and --jev-block use the shared grouped CLI input format.
 target/release-fast/rust-model-inference --serve --model models/Unlimited-OCR-2 \
   --host 127.0.0.1 --port 8080 --threads 8 --compute auto
 curl http://127.0.0.1:8080/v1/chat/completions -H 'Content-Type: application/json' \
   -d '{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"first.png"}}]}],"max_tokens":128}'
 ```
 
-The server uses the common Chat, Anthropic Messages, Responses, SSE, stop-sequence and cancellation infrastructure. OCR accepts one user turn containing ordered page images and optional instruction text/system instructions; conversation history, tools, thinking and sampling options are rejected. Temperature defaults to zero for this backend. Scanned special/tool/thinking markers are preserved as text. HTTP JEV routes are `/v1/jev/score`, `/v1/jev/grouped`, `/v1/jev/image` and `/v1/jev/image_grouped`; the native backend returns the shared CLI JEV result schema for all four. Requests share the generation semaphore and run scoring on blocking workers.
-
-Probe a running server with the pinned page fixture, including Anthropic token counting, Chat/SSE, Messages, Responses, all four JEV routes, validation and concurrent-request rejection:
+Probe a running server with the pinned page fixture, including Anthropic token counting, Chat/SSE, Messages, Responses, validation and concurrent-request rejection:
 
 ```sh
 .venv/bin/python tools/oracle/unlimited_ocr/check_http.py \
   --url http://127.0.0.1:8080 --output artifacts/unlimited_ocr/http-probes.json
 ```
 
-The optional `--cli-text` / `--cli-image` arguments compare HTTP probabilities exactly with saved CLI JSON for the `Capital of France?` example above. The script uses `max_tokens=1` for OCR transport checks; complete generated documents are covered by the separate oracle runs.
-
-For a JEV reference, save the exact UTF-8 instruction above to a file, then run the pinned original model without sampling:
-
-```sh
-.venv/bin/python tools/oracle/unlimited_ocr/verify.py \
-  --model-root models/Unlimited-OCR-2 --instruction jev-instruction.txt --prefill-only \
-  --max-tokens 1 --output artifacts/unlimited_ocr/jev-oracle
-# Add --images page.png for image-conditioned prefill. For text-only comparisons use --scope decoder.
-```
+The checker uses `max_tokens=1` for OCR transport checks; complete generated documents are covered by the separate oracle runs.
 
 
 ## Pinned inputs and oracle
@@ -158,10 +142,10 @@ The **whole graph does not pass every pointwise peak bound**. Each case has five
 
 The first divergence comes from a discrete MoE top-6 cutoff. At decoder layer 1, image row 173, the official sixth/seventh expert scores (58/48) differ by only 0.00000149. Feeding the Rust visual embeddings to the unmodified official decoder reverses those two experts, reproducing the route change. With identical official embeddings, the Rust decoder passes all checkpoints above. This isolates upstream floating point rounding crossing a routing boundary; exact greedy output on these fixtures does not guarantee the same route or output on every document.
 
-The integration checks also cover pure-text JEV against the official no-image YaRN path: all 29 checkpoints pass on CPU (peak-relative 0.00000704) and Auto Vulkan (0.00000760). Auto on Apple M3 Max records 201 device submissions and 956007488 static-upload bytes; hiding the Vulkan driver produces exactly the CPU probabilities. Image-conditioned JEV passes all 43 vision checkpoints and all 29 decoder checkpoints when given the official embeddings. Its end-to-end trace retains the same five MoE attention exceptions; the final logit checkpoint passes (peak-relative 0.00003078). CLI and HTTP probabilities match exactly for both text and image JEV, including grouped scoring.
+The integration checks cover OCR through Chat, Anthropic Messages, Responses and SSE, including token counting, option validation and concurrent-request rejection. Auto on Apple M3 Max uses the shared Vulkan projection path and falls back to CPU when the driver is unavailable. The checker uses a one-token OCR budget; it is a transport smoke test rather than a throughput benchmark.
 
-The real BF16 GGUF export reproduces all 69 first-prefill checkpoints bit-for-bit against the original safetensors trace. Real Q8_0 runs produce the first OCR token `<PAGE>` and valid JEV probabilities. In the text example, A changes from 0.52118593 (BF16) to 0.54795533 (Q8_0), a 2.68 percentage-point quantization drift. This is a smoke check and a drift measurement; a full quantized-weight graph oracle has not been run.
+The real BF16 GGUF export reproduces all 69 first-prefill checkpoints bit-for-bit against the original safetensors trace. Real Q8_0 runs produce the first OCR token `<PAGE>`. This is a smoke check; a full quantized-weight graph oracle has not been run.
 
-After the integration fixes, 17 model/JEV/HTTP-focused units, 71 common API tests and 3 CLI regressions pass, along with the converter (3), oracle self-checks (3), HTTP checker self-checks (3), shared JEV (9), shared kernels (10) and scalar BF16 (3). The HTTP checker rejects SSE errors even after expected text has arrived and requires a terminal length finish. The original full library run had 1292 passes, 86 ignored and the same 20 failures reproduced on the base commit (1280 passes, 84 ignored). That full-library result predates these integration fixes; the full suite has not been rerun. Recorded runtimes include concurrent validation jobs and are not clean performance benchmarks.
+After the integration fixes, the focused OCR model units, common API tests and CLI regressions pass, along with the converter, oracle self-checks, HTTP checker self-checks, shared kernels and scalar BF16 checks. The original full library run had 1292 passes, 86 ignored and the same 20 failures reproduced on the base commit (1280 passes, 84 ignored). That full-library result predates these integration fixes; the full suite has not been rerun. Recorded runtimes include concurrent validation jobs and are not clean performance benchmarks.
 
 The committed primitive fixture covers Unicode/whitespace/special-token IDs, page coordinates, resampled Page2D RoPE, entmax route indices/biases and the full normalized pixel hash, including Pillow's ties-to-even pad placement.

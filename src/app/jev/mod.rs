@@ -26,7 +26,6 @@ pub(crate) mod clm;
 pub(crate) mod grouped;
 pub(crate) mod single;
 pub(crate) mod types;
-pub(crate) mod unlimited_ocr;
 
 pub use adapters::gliner2::{
     gliner2_schema, load_gliner2_source, parse_schema, run_gliner2_decision, run_gliner2_scoring,

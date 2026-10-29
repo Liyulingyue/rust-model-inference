@@ -29,8 +29,6 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", default="http://127.0.0.1:8080")
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--cli-text", type=Path)
-    parser.add_argument("--cli-image", type=Path)
     args = parser.parse_args()
     records = []
 
@@ -59,15 +57,6 @@ def main():
     anthropic = {"messages": [{"role": "user", "content": [
         {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": png}}
     ]}], "max_tokens": 1}
-    single = {"context": "Paris is the capital of France.", "questions": [
-        {"text": "Capital of France?", "options": ["Paris", "Berlin"]}
-    ]}
-    grouped = {"context": single["context"], "mode": "block_choice", "questions": [
-        {"text": "Choose", "groups": [
-            {"label": "city", "options": ["Paris", "Berlin"]},
-            {"label": "country", "options": ["France", "Germany"]},
-        ]}
-    ]}
     try:
         for key, value in [("temperature", 0.5), ("top_p", 0.9),
                            ("enable_thinking", True), ("max_tokens", 131072)]:
@@ -77,7 +66,7 @@ def main():
         with concurrent.futures.ThreadPoolExecutor() as pool:
             running = pool.submit(request, "chat", "/v1/chat/completions", chat)
             time.sleep(2)
-            request("concurrent", "/v1/jev/score", single, 429)
+            request("concurrent", "/v1/chat/completions", chat, 429)
             result = json.loads(running.result())
         assert result["choices"][0]["message"]["content"] == "<PAGE>", result
         assert result["usage"]["completion_tokens"] == 1
@@ -92,20 +81,6 @@ def main():
             "max_output_tokens": 1, "store": False,
         }))
         assert result["output"][0]["content"][0]["text"] == "<PAGE>", result
-        for image in [False, True]:
-            suffix = "image" if image else "score"
-            result = json.loads(request(suffix, "/v1/jev/" + suffix,
-                                        single | ({"image_url": uri} if image else {})))
-            cli = args.cli_image if image else args.cli_text
-            if cli:
-                assert result["results"][0]["probabilities"] == json.loads(cli.read_text())["probabilities"]
-            suffix = "image_grouped" if image else "grouped"
-            result = json.loads(request(suffix, "/v1/jev/" + suffix,
-                                        grouped | ({"image_url": uri} if image else {})))
-            groups = result["results"][0]["groups"]
-            assert len(groups) == 2, result
-            for group in groups:
-                assert abs(sum(group["probabilities"].values()) - 1.0) < 1e-6, group
         print(f"PASS: {len(records)} real HTTP requests")
     finally:
         args.output.parent.mkdir(parents=True, exist_ok=True)

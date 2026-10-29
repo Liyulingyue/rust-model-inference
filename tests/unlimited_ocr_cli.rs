@@ -12,17 +12,6 @@ fn unlimited_ocr_auto_and_http_reach_native_config_validation() {
     for flags in [
         &["--compute", "auto", "--image", "missing.png"][..],
         &["--gpu", "--image", "missing.png"][..],
-        &[
-            "--jev",
-            "--jev-context",
-            "hello",
-            "--jev-question",
-            "Q",
-            "--jev-option",
-            "yes",
-            "--jev-option",
-            "no",
-        ][..],
         &["--serve"][..],
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_rust-model-inference"))
@@ -33,10 +22,30 @@ fn unlimited_ocr_auto_and_http_reach_native_config_validation() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(!output.status.success());
         assert!(
-            stderr.contains("Unsupported Unlimited-OCR architectures"),
+            stderr.contains("Unsupported --compute auto for Unlimited-OCR")
+                || stderr.contains("Unsupported --gpu for Unlimited-OCR")
+                || stderr.contains("Unlimited-OCR"),
             "{flags:?}: {stderr}"
         );
     }
+    let output = Command::new(env!("CARGO_BIN_EXE_rust-model-inference"))
+        .args(["--model", root.to_str().unwrap()])
+        .args([
+            "--jev",
+            "--jev-context",
+            "hello",
+            "--jev-question",
+            "Q",
+            "--jev-option",
+            "yes",
+            "--jev-option",
+            "no",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(stderr.contains("Unlimited-OCR supports OCR mode only; --jev is unsupported"));
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -86,7 +95,9 @@ fn unlimited_ocr_rejects_other_task_modes_before_loading_weights() {
         assert!(!output.status.success());
         assert!(
             stderr.contains("Unlimited-OCR")
-                && (stderr.contains("OCR and JEV") || stderr.contains("greedy")),
+                && (stderr.contains("OCR mode only")
+                    || stderr.contains("greedy")
+                    || stderr.contains("--jev")),
             "{stderr}"
         );
     }

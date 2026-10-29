@@ -3,7 +3,7 @@
   "base_commit": "92d2eca0aad9161694be49a67a4b3057f7514547",
   "model": "PaddlePaddle/Unlimited-OCR-2",
   "revision": "7eadb7cd7afe660602040524eab37c8a9b91fe53",
-  "status": "Experimental: base OCR, native/GGUF, CLI/HTTP/JEV, SIMD and Auto hybrid; component numeric alignment, whole-graph MoE peak-bound exceptions retained",
+  "status": "Experimental: base OCR, native/GGUF, CLI/HTTP, SIMD and Auto hybrid; component numeric alignment, whole-graph MoE peak-bound exceptions retained",
   "precision": "BF16 source weights widened losslessly; F32 compute/KV; BF16-rounded processor pixels",
   "platform": "macOS-27.0.1-arm64-arm-64bit",
   "threads": 8,
@@ -736,124 +736,19 @@
           "path": "models/Unlimited-OCR-2-Q8_0.gguf",
           "bytes": 3574328256,
           "sha256": "38b4debb4c3cbe68fe9f28a880a856d79f1f42e339768fd0b332ee1698d4d0f2",
-          "first_ocr_token": "<PAGE>",
-          "text_jev_A_probability": 0.547955334186554
+          "first_ocr_token": "<PAGE>"
         }
       ],
       "q8_probability_absolute_drift": 0.026769399642944336,
-      "q8_evidence_scope": "real OCR/JEV smoke plus converter/shared quantization kernel fixtures; no full quantized-weight graph oracle",
+      "q8_evidence_scope": "real OCR smoke plus converter/shared quantization kernel fixtures; no full quantized-weight graph oracle",
       "other_whole_model_formats_validated": false,
       "f32_limit": "request views currently copy F32 projection weights"
-    },
-    "jev": {
-      "label_scoring": "one real prefill, exact single-token A..Z IDs, shared single/grouped probability calculation",
-      "text_rope": "official no-image YaRN theta500000 factor4; fixed 64 inverse frequencies fixture",
-      "cpu_text": {
-        "checkpoints": 29,
-        "passed": true,
-        "max_peak_relative": 7.036257836632166e-06,
-        "min_cosine": 0.9999999999964969,
-        "artifact": "artifacts/unlimited_ocr/jev-text-comparison.json"
-      },
-      "auto_text": {
-        "checkpoints": 29,
-        "passed": true,
-        "max_peak_relative": 7.599158463562739e-06,
-        "min_cosine": 0.9999999999982762,
-        "artifact": "artifacts/unlimited_ocr/jev-auto-comparison.json"
-      },
-      "image_vision": {
-        "checkpoints": 43,
-        "passed": true,
-        "max_peak_relative": 2.549611989120587e-05,
-        "min_cosine": 0.999999999935093,
-        "artifact": "artifacts/unlimited_ocr/jev-image-vision-comparison.json"
-      },
-      "image_decoder_official_embeddings": {
-        "checkpoints": 29,
-        "passed": true,
-        "max_peak_relative": 4.574963567668174e-06,
-        "min_cosine": 0.9999999999981705,
-        "artifact": "artifacts/unlimited_ocr/jev-image-decoder-comparison.json"
-      },
-      "image_end_to_end": {
-        "checkpoints": 70,
-        "passed": false,
-        "peak_bound_exceptions": [
-          {
-            "name": "uocr.attention",
-            "layer": 2,
-            "occurrence": 2,
-            "peak_relative": 0.0033762486333782623,
-            "cosine": 0.9999998827405627,
-            "exact": false,
-            "passed": false
-          },
-          {
-            "name": "uocr.attention",
-            "layer": 3,
-            "occurrence": 3,
-            "peak_relative": 0.0036090119840000586,
-            "cosine": 0.9999998495949265,
-            "exact": false,
-            "passed": false
-          },
-          {
-            "name": "uocr.attention",
-            "layer": 5,
-            "occurrence": 5,
-            "peak_relative": 0.00633292498099355,
-            "cosine": 0.9999996802601918,
-            "exact": false,
-            "passed": false
-          },
-          {
-            "name": "uocr.attention",
-            "layer": 7,
-            "occurrence": 7,
-            "peak_relative": 0.010542010439843692,
-            "cosine": 0.9999994965255069,
-            "exact": false,
-            "passed": false
-          },
-          {
-            "name": "uocr.attention",
-            "layer": 8,
-            "occurrence": 8,
-            "peak_relative": 0.0122678408274719,
-            "cosine": 0.999999690582838,
-            "exact": false,
-            "passed": false
-          }
-        ],
-        "logits": {
-          "name": "uocr.logits",
-          "layer": null,
-          "occurrence": 0,
-          "peak_relative": 3.077544501135258e-05,
-          "cosine": 0.9999999993538455,
-          "exact": false,
-          "passed": true
-        }
-      },
-      "cpu_text_A_probability": 0.5211859345436096,
-      "auto_text_A_probability": 0.5211830735206604,
-      "image_A_probability": 0.41941872239112854,
-      "classifier_accuracy_evaluated": false
     },
     "compute": {
       "cpu_bf16": "shared AVX2/FMA, NEON, scalar dispatcher",
       "scalar_reference_env": "RMI_SCALAR=1",
       "auto_backend": "hybrid Vulkan projection offload with CPU validation/retry and CPU fallback",
       "device": "Apple M3 Max / MoltenVK",
-      "auto_text_jev": {
-        "submissions": 201,
-        "static_uploads": 201,
-        "static_upload_bytes": 956007488,
-        "host_write_bytes": 38297124,
-        "host_read_bytes": 42723456,
-        "peak_allocation_bytes": 1052143584
-      },
       "trace_env": "RMI_COMPUTE_TRACE=1",
       "unavailable_driver_test": {
         "env": "VK_ICD_FILENAMES=artifacts/unlimited_ocr/missing-icd.json",
@@ -875,7 +770,6 @@
       "native_real_tests_ignored_by_default": 2,
       "server_api_passed": 71,
       "cli_passed": 3,
-      "shared_jev_passed": 9,
       "shared_kernels_passed": 10,
       "scalar_bf16_passed": 3,
       "oracle_self_checks_passed": 3,
@@ -902,13 +796,9 @@
         "--url",
         "http://127.0.0.1:18088",
         "--output",
-        "artifacts/unlimited_ocr/http-reviewed-probes.json",
-        "--cli-text",
-        "artifacts/unlimited_ocr/jev-text-cli-v2.json",
-        "--cli-image",
-        "artifacts/unlimited_ocr/jev-image-cli.json"
+        "artifacts/unlimited_ocr/http-reviewed-probes.json"
       ],
-      "requests_passed": 15,
+      "requests_passed": 11,
       "probes": [
         {
           "name": "temperature",
@@ -937,7 +827,7 @@
         },
         {
           "name": "concurrent",
-          "path": "/v1/jev/score",
+          "path": "/v1/chat/completions",
           "status": 429
         },
         {
@@ -964,33 +854,8 @@
           "name": "responses",
           "path": "/v1/responses",
           "status": 200
-        },
-        {
-          "name": "score",
-          "path": "/v1/jev/score",
-          "status": 200
-        },
-        {
-          "name": "grouped",
-          "path": "/v1/jev/grouped",
-          "status": 200
-        },
-        {
-          "name": "image",
-          "path": "/v1/jev/image",
-          "status": 200
-        },
-        {
-          "name": "image_grouped",
-          "path": "/v1/jev/image_grouped",
-          "status": 200
         }
       ],
-      "cli_http_text_probabilities_exact": true,
-      "cli_http_image_probabilities_exact": true,
-      "cli_http_block_choice_groups_exact": true,
-      "additional_multi_select_request_passed": true,
-      "cli_http_multi_select_groups_exact": true,
       "token_count": {
         "input_tokens": 279
       },
