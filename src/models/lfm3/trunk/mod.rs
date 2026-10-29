@@ -8,4 +8,4 @@ pub mod weights;
 
 pub use config::Lfm3Config;
 pub use forward::{run_forward_logits_lfm3_with_batch, run_inference};
-pub use session::Lfm3Session;
+pub use session::{Lfm3Model, Lfm3Session};

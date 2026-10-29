@@ -1,5 +1,8 @@
 # LFM3-1.7B 分支审阅报告
 
+> §1–9 保留原始 `0d6cc2a0` 审阅结论。后续修复及真实权重复验见 §10；其中的
+> “未做 HTTP/JEV/自动分发”和旧误差数值不再代表当前实现。
+
 审阅对象:`gouzil/codex/lfm3-1-7b`
 分支 tip:`0d6cc2a0`("Support LFM3-1.7B GGUF with CPU alignment")
 基线:`origin/main` = `92d2eca0`(`[codex] Support Sage-A1.5 Q8_0 with aligned Vulkan MoE decoding (#187)`)
@@ -394,3 +397,36 @@ LFM3 是语言类模型,JEV 天然适用,却未实现;HTTP server 也无适配�
 | 数值判据 | `tests/lfm3_reference.rs::lfm3_oracle_alignment` |
 | Oracle | `tools/oracle/lfm3/{README.md,oracle.cpp,checkpoints.patch,compare_checkpoints.py}` |
 | 声明状态 | `docs/develop/SUPPORTED_MODELS.md` |
+
+## 10. 修复与复验（2026-10-29）
+
+已拉取并合入上游 main `8d18565b`；保留 §5 的 RoPE 改进。
+
+| 原审阅项 | 当前结果 |
+| --- | --- |
+| 多 weight 分发 | 所有投影复用 `LinearExecutor`；Q/K/V/head gate、FFN gate/up 使用 `run_group`，共享激活准备 |
+| CPU 多精度 | F32/F16/BF16/Q8_0/Q4_0/Q4_1/Q4_K/Q5_K/Q6_K 及混合投影的合成会话测试通过，检查有限值、非零输出、分块/续写/reset 一致性；Q4_1 embedding 仍明确拒绝 |
+| GPU/CPU 自动分发 | CLI、HTTP、JEV 共用 ComputePolicy；Auto 在 M3 Max 上实际执行 Vulkan 投影，缺驱动时显式回退 CPU；全图 Vulkan 明确拒绝 |
+| HTTP | 新增 LFM3 TextRuntime、默认 GGUF Jinja 和输出解析器注册；真实 chat/thinking/SSE 请求通过，超上下文返回 400 |
+| JEV | CLI 与 HTTP 单项/分组入口接通；真实权重下选出红色选项，CPU/Auto 概率一致 |
+| 数值 | 独立 sin/cos 后聊天 max abs/RMSE 为 `1.007810/0.154821`；四组 CPU prompt 各 8 步 greedy 仍与固定 Oracle 一致；聊天 Auto 同样通过有损路径检查 |
+| 误差归因 | 原 fused、precise、precise+scalar 的对照，以及同一 Oracle Q8 量化器处理双方 norm 输入的探针，见下方记录 |
+
+真实聊天检查点仍为 5,176 个，24 次 embedding 原始位一致；当前首个位差在位置 1、
+layer 2 的 Q RoPE（`4.7683716e-7`）。位置 4、layer 0 的短卷积还存在
+`3.7252903e-9` 的累加差异。后续位置 4、layer 13 的 operator norm 输入差
+`0.00017584115` 已让同一 Oracle Q8 量化器产生 10 个不同字节，证实了重新量化放大。
+这是首个被探针捕获的 **norm 输入**量化差异，不是全图首次量化分叉。
+
+§6 的 softmax 推测需修正：固定 Oracle 在 NEON 下使用向量 exp 近似和四路 F32
+归约，再累加进 `ggml_float`；Rust 为精确 exp 与逐值 F64 累加。两侧原生 NEON
+Q8_0 都采用 ties-to-even。scalar 控制会同时改变多个算子，不能作为 dot 单项归因。
+RoPE/scalar 对照不是可相加的误差分解，也未得到通用全图误差上界。
+
+因此保留 `1.25/0.20` 作为固定模型/样例的经验报警线，并将清单状态细分为 CPU/Q8_0
+运行已验证、Vulkan 投影实验性支持；`Verified` 按清单定义表示真实运行，不代表浮点
+逐位一致。没有为了对齐而替换共享算子或关闭默认 SIMD。
+
+复现命令和机器可读证据见 [README](../../tools/oracle/lfm3/README.md) 与
+[review-fixes.json](../../tools/oracle/lfm3/review-fixes.json)。未运行全仓测试，其他真实
+权重量化档、其他硬件、全图 GPU、多模态和工具调用不在本次验证范围内。

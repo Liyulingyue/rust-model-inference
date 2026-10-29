@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Join the pinned Oracle's F32 checkpoints to one RMI parity-trace manifest."""
 import json
+import ctypes
 import math
 from pathlib import Path
 import struct
@@ -33,8 +34,16 @@ def shape(dims):
     return dims
 
 
-def compare(directory):
+def compare(directory, quantizer_library=None):
     directory = Path(directory)
+    quantize = None
+    if quantizer_library:
+        # This is the pinned Oracle's CPU quantizer, never a model backend.
+        library = ctypes.CDLL(str(quantizer_library))
+        quantize = library.quantize_row_q8_0
+        quantize.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_void_p, ctypes.c_int64]
+        quantize.restype = None
+    first_norm_q8_change = None
     oracle = {}
     for line in (directory / "checkpoints.tsv").read_text().splitlines():
         step, name, *dims = line.split("\t")
@@ -70,6 +79,18 @@ def compare(directory):
         b = struct.unpack(f"<{len(expected)//4}f", expected)
         assert all(math.isfinite(v) for v in (*a, *b)), key
         error = max(abs(x-y) for x, y in zip(a, b))
+        if quantize and first_norm_q8_change is None and row["name"] in ("attn_norm", "ffn_norm"):
+            n = len(a)
+            assert n % 32 == 0, "Q8_0 input must be block aligned"
+            qa = ctypes.create_string_buffer(n // 32 * 34)
+            qb = ctypes.create_string_buffer(n // 32 * 34)
+            quantize((ctypes.c_float * n).from_buffer_copy(actual), qa, n)
+            quantize((ctypes.c_float * n).from_buffer_copy(expected), qb, n)
+            if qa.raw != qb.raw:
+                first_norm_q8_change = dict(
+                    checkpoint=key, input_max_abs=error,
+                    quantized_bytes_differ=sum(x != y for x, y in zip(qa.raw, qb.raw)),
+                )
         if first is None:
             first = (key, error)
         if error > worst[0]:
@@ -81,9 +102,11 @@ def compare(directory):
     assert seen == expected, f"checkpoint coverage differs: missing={expected-seen}, extra={seen-expected}"
     assert embedding_count > 0 and len(seen) > 200, "incomplete checkpoint coverage"
     result = dict(compared=len(seen), exact_embeddings=embedding_count, first_bit_difference=first, worst_abs=worst)
+    if quantize:
+        result["first_norm_q8_change"] = first_norm_q8_change
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return result
 
 
 if __name__ == "__main__":
-    compare(sys.argv[1])
+    compare(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else None)

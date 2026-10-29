@@ -3,7 +3,7 @@ use rust_model_inference::core::scratchpad::KvFormat;
 use rust_model_inference::core::tensor::{
     GGMLType, MetaValue, MetaValueType, TensorInfo, TensorSource,
 };
-use rust_model_inference::models::lfm3::{Lfm3Config, Lfm3Session};
+use rust_model_inference::models::lfm3::{Lfm3Config, Lfm3Model, Lfm3Session};
 use std::collections::HashMap;
 
 #[derive(Default)]
@@ -150,7 +150,8 @@ fn incremental_prefill_chunks_and_reset_agree_for_both_kv_formats() {
     let source = source();
     let tokens: Vec<u32> = (0..18).map(|i| (i % 16) as u32).collect();
     for format in [KvFormat::F32, KvFormat::F16] {
-        let mut session = Lfm3Session::from_source(&source, 1, format, 19).unwrap();
+        let model = Lfm3Model::from_source(&source, 1).unwrap();
+        let mut session = Lfm3Session::new(&model, format, 19).unwrap();
         let whole = session.forward_logits_chunked(&tokens, 7).unwrap();
         assert!(whole.iter().all(|v| v.is_finite()));
         session.reset();
@@ -224,9 +225,131 @@ fn rejects_missing_mis_shaped_and_truncated_weights() {
                     .copy_from_slice(&0f32.to_le_bytes());
             }
         }
-        assert!(
-            Lfm3Session::from_source(&source, 1, KvFormat::F32, 19).is_err(),
-            "case {case}"
-        );
+        assert!(Lfm3Model::from_source(&source, 1).is_err(), "case {case}");
     }
+}
+
+#[test]
+fn cpu_dispatch_covers_float_quantized_and_mixed_weights() {
+    use rust_model_inference::compute::ComputePolicy;
+    let formats = [
+        GGMLType::F32,
+        GGMLType::F16,
+        GGMLType::BF16,
+        GGMLType::Q8_0,
+        GGMLType::Q4_0,
+        GGMLType::Q4_1,
+        GGMLType::Q4K,
+        GGMLType::Q5K,
+        GGMLType::Q6K,
+    ];
+    for choice in 0..=formats.len() {
+        let mut source = source();
+        source.tensor("output.weight", &[32, 16], false);
+        for (key, value) in [
+            ("embedding_length", 256),
+            ("attention.head_count", 16),
+            ("feed_forward_length", 512),
+        ] {
+            source
+                .meta
+                .insert(format!("lfm3.{key}"), MetaValue::Uint32(value));
+        }
+        let mut matrices = 0;
+        let mut names: Vec<_> = source.tensors.keys().cloned().collect();
+        names.sort();
+        for name in names {
+            let (info, bytes) = source.tensors.get_mut(&name).unwrap();
+            for dim in &mut info.dims {
+                *dim = match *dim {
+                    32 => 256,
+                    64 => 512,
+                    96 => 768,
+                    value => value,
+                };
+            }
+            if name.ends_with("attn_gate.weight") {
+                info.dims[1] = 16;
+            }
+            let count = info.dims.iter().product::<u64>() as usize;
+            let matrix = info.dims.len() == 2 && !name.ends_with("shortconv.conv.weight");
+            let mut format = if matrix {
+                let format = formats[if choice == formats.len() {
+                    matrices % formats.len()
+                } else {
+                    choice
+                }];
+                matrices += 1;
+                format
+            } else {
+                GGMLType::F32
+            };
+            // Q4_1 projections are supported; embedding uses the shared lookup formats.
+            if name == "token_embd.weight"
+                && !rust_model_inference::ops::embedding::is_supported_embedding(format)
+            {
+                format = GGMLType::F32;
+            }
+            info.ggml_type = format;
+            let (block, size) = format.type_traits();
+            *bytes = if matches!(format, GGMLType::F32 | GGMLType::F16 | GGMLType::BF16) {
+                (0..count)
+                    .flat_map(|i| {
+                        let value = if !matrix {
+                            1.0
+                        } else {
+                            (i as f32 * 0.17).sin() * 0.01
+                        };
+                        match format {
+                            GGMLType::F32 => value.to_le_bytes().to_vec(),
+                            GGMLType::F16 => half::f16::from_f32(value).to_le_bytes().to_vec(),
+                            _ => half::bf16::from_f32(value).to_le_bytes().to_vec(),
+                        }
+                    })
+                    .collect()
+            } else {
+                let mut bytes = vec![1; count / block * size];
+                for packed in bytes.chunks_exact_mut(size) {
+                    let scale = half::f16::from_f32(1.0 / 256.0).to_le_bytes();
+                    let offset = if format == GGMLType::Q6K { 208 } else { 0 };
+                    packed[offset..offset + 2].copy_from_slice(&scale);
+                    if matches!(format, GGMLType::Q4_1 | GGMLType::Q4K | GGMLType::Q5K) {
+                        packed[2..4].fill(0);
+                    }
+                }
+                bytes
+            };
+        }
+        let model = Lfm3Model::from_source(&source, 2).unwrap();
+        let mut session =
+            Lfm3Session::new_with_compute(&model, KvFormat::F32, 19, ComputePolicy::Cpu).unwrap();
+        let whole = session.forward_logits_chunked(&[1, 2, 3, 4, 5], 3).unwrap();
+        assert!(whole.iter().all(|v| v.is_finite()), "format {choice}");
+        assert!(whole.iter().any(|v| *v != 0.0), "format {choice}");
+        session.reset();
+        session.forward_logits_chunked(&[1, 2, 3], 1).unwrap();
+        let incremental = session.forward_logits_chunked(&[4, 5], 1).unwrap();
+        assert_eq!(whole, incremental, "format {choice}");
+    }
+}
+
+#[test]
+fn auto_can_fall_back_to_cpu_and_full_vulkan_is_explicit() {
+    use rust_model_inference::compute::ComputePolicy;
+    let source = source();
+    let model = Lfm3Model::from_source(&source, 1).unwrap();
+    let _cpu_scope = ComputePolicy::Cpu.enter_legacy_scope();
+    let mut cpu =
+        Lfm3Session::new_with_compute(&model, KvFormat::F32, 19, ComputePolicy::Cpu).unwrap();
+    let expected = cpu.forward_logits_chunked(&[1, 2, 3], 1).unwrap();
+    let mut auto =
+        Lfm3Session::new_with_compute(&model, KvFormat::F32, 19, ComputePolicy::Auto).unwrap();
+    assert_eq!(
+        expected,
+        auto.forward_logits_chunked(&[1, 2, 3], 3).unwrap()
+    );
+    assert!(ComputePolicy::Vulkan.validate_text_arch("lfm3").is_err());
+    assert!(
+        Lfm3Session::new_with_compute(&model, KvFormat::F32, 19, ComputePolicy::Vulkan).is_err()
+    );
 }

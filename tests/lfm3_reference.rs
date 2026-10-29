@@ -5,10 +5,11 @@
 
 use std::path::PathBuf;
 
+use rust_model_inference::compute::ComputePolicy;
 use rust_model_inference::core::loader::{model_config_from_source, GGUFLoader};
 use rust_model_inference::core::scratchpad::KvFormat;
 use rust_model_inference::core::tokenizer::{BPETokenizer, EncodeOptions};
-use rust_model_inference::models::lfm3::{Lfm3Config, Lfm3Session};
+use rust_model_inference::models::lfm3::{Lfm3Config, Lfm3Model, Lfm3Session};
 use rust_model_inference::prompt::jinja::{self, Options};
 
 const DEFAULT_MODEL: &str = concat!(
@@ -153,8 +154,8 @@ fn lfm3_forward_smoke() {
         ],
         "LFM3 GGUF Jinja prompt must match the llama.cpp oracle",
     );
-    let mut session =
-        Lfm3Session::from_source(&source, 1, KvFormat::F32, 512).expect("load LFM3 session");
+    let model = Lfm3Model::from_source(&source, 1).unwrap();
+    let mut session = Lfm3Session::new(&model, KvFormat::F32, 512).expect("load LFM3 session");
     let logits = session
         .forward_logits_chunked(&ids, 1)
         .expect("run LFM3 forward");
@@ -251,8 +252,18 @@ fn lfm3_oracle_alignment() {
             }
             std::env::set_var("RMI_PARITY_TRACE", trace);
         }
+        let model = Lfm3Model::from_source(&source, 1).unwrap();
+        let policy = if std::env::var_os("RMI_LFM3_GPU").is_some() {
+            assert!(
+                cfg!(feature = "vulkan"),
+                "GPU checks require --features vulkan"
+            );
+            ComputePolicy::Auto
+        } else {
+            ComputePolicy::Cpu
+        };
         let mut session =
-            Lfm3Session::from_source(&source, 1, KvFormat::F32, ids.len() + 8).unwrap();
+            Lfm3Session::new_with_compute(&model, KvFormat::F32, ids.len() + 8, policy).unwrap();
         let mut logits = session.forward_logits_chunked(&ids, 7).unwrap();
         let mut max_error = 0.0f32;
         let mut max_rmse = 0.0f64;

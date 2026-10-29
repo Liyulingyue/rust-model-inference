@@ -44,8 +44,9 @@ fn is_qwen35(arch: &str) -> Result<bool, String> {
         "falcon-h1" => Ok(false),
         // Dory 1.0 ships the same ChatML role markers (`<|im_start|>role\n …
         // <|im_end|>\n`) as the Qwen family, so it rides the same renderer.
-        // It has no tool-call grammar and no vision path.
-        "dory" => Ok(false),
+        // LFM3 has its own Jinja input template and the same plain-text
+        // output parser. Neither architecture has a tool-call or vision path.
+        "dory" | "lfm3" => Ok(false),
         "qwen35" | "qwen35moe" => Ok(true),
         // Llama-family archs go through the CLI prompt builder
         // (`llama::trunk::build_prompt_tokens`) and don't support tool
@@ -108,6 +109,23 @@ pub fn build_prompt(
     // re-resolving keeps a server request from recompiling the template.
     compiled_jinja: Option<&crate::prompt::jinja::JinjaChatTemplate>,
 ) -> Result<(Vec<u32>, Vec<Vec<u8>>), String> {
+    let lfm3_jinja;
+    let jinja = if arch == "lfm3" {
+        if !tools.is_empty()
+            || messages
+                .iter()
+                .any(|m| !m.images.is_empty() || !m.calls.is_empty())
+        {
+            return Err("LFM3 supports plain text conversations only".into());
+        }
+        lfm3_jinja = crate::prompt::jinja::Options {
+            jinja: true,
+            file: jinja.file.clone(),
+        };
+        &lfm3_jinja
+    } else {
+        jinja
+    };
     // `--jinja` renders the model's own chat template for a multi-turn
     // conversation. Deliberately gated to plain text turns with no tools:
     //
@@ -155,6 +173,9 @@ pub fn build_prompt(
         }
     }
 
+    if arch == "lfm3" {
+        return Err("LFM3 requires its GGUF chat template or --chat-template-file".into());
+    }
     let qwen35 = is_qwen35(arch)?;
     // LFM2 / LFM2.5 have their own `role\n{content}\n` template. Rendering
     // them with qwen ChatML happens to work (the model copes) but diverges
@@ -881,6 +902,16 @@ mod tests {
             description: Some("Find a city".into()),
             parameters: json!({"type":"object","properties":{"city":{"type":"string"},"count":{"type":"integer"},"ratio":{"type":"number"},"ok":{"type":"boolean"},"filter":{"type":"object"},"items":{"type":"array"},"empty":{"type":"null"}},"required":["city"]}),
         }]
+    }
+
+    #[test]
+    fn lfm3_plain_text_stream_is_accepted() {
+        let mut parser = OutputParser::new("lfm3", &[], &ToolChoice::Auto);
+        parser.push("Hello ").unwrap();
+        parser.push("世界!").unwrap();
+        parser.finish().unwrap();
+        assert_eq!(parser.text(), "Hello 世界!");
+        assert!(parser.calls().is_empty());
     }
 
     fn replay(arch: &str, raw: &str, split: usize) -> (String, Vec<ToolCall>) {

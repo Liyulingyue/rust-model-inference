@@ -1,44 +1,53 @@
-//! Stateful CPU prefill and decode for one LFM3 sequence.
+//! Shared model weights and stateful prefill/decode for one LFM3 sequence.
 
 use super::config::Lfm3Config;
 use super::forward::forward_layer;
 use super::trace;
 use super::weights::{load_layers, quant_weight, Lfm3LayerWeights};
 use crate::app::cli::resolve_thread_count;
+use crate::compute::linear::{LinearBinding, LinearExecutor, LinearMode};
+use crate::compute::ComputePolicy;
 use crate::core::prefill::checked_prefill_batch_size;
 use crate::core::scratchpad::{ExecutionScratchpad, KvCache, KvFormat};
 use crate::core::tensor::{load_f32_tensor, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::Weight;
 use crate::ops::rms_norm;
+use std::sync::Arc;
 
-pub struct Lfm3Session<'a> {
+pub struct Lfm3Model<'a> {
     pub config: Lfm3Config,
-    pub vocab: usize,
-    pub seq_len: usize,
-    pub(crate) max_context: usize,
     layers: Vec<Lfm3LayerWeights<'a>>,
     embedding: Weight<'a>,
     output: Weight<'a>,
     output_norm: Vec<f32>,
+    pool: Arc<ComputePool>,
+}
+
+pub struct Lfm3Session<'model, 'weights> {
+    pub config: &'model Lfm3Config,
+    pub vocab: usize,
+    pub seq_len: usize,
+    pub(crate) max_context: usize,
+    model: &'model Lfm3Model<'weights>,
     kv: Vec<KvCache>,
     conv: Vec<Vec<f32>>,
     scratch: ExecutionScratchpad,
-    pool: ComputePool,
+    linear: LinearExecutor<'model, 'weights>,
 }
 
-impl<'a> Lfm3Session<'a> {
-    pub fn from_source(
+impl<'a> Lfm3Model<'a> {
+    pub fn from_source(source: &'a dyn TensorSource, n_threads: usize) -> Result<Self, String> {
+        let available = std::thread::available_parallelism().map_or(1, usize::from);
+        let n_threads = resolve_thread_count(n_threads, available);
+        Self::from_source_with_pool(source, Arc::new(ComputePool::new(n_threads)))
+    }
+
+    pub(crate) fn from_source_with_pool(
         source: &'a dyn TensorSource,
-        n_threads: usize,
-        kv_format: KvFormat,
-        max_context: usize,
+        pool: Arc<ComputePool>,
     ) -> Result<Self, String> {
         let config = Lfm3Config::from_source(source)?;
-        let max_context = config.n_ctx.min(max_context);
-        if max_context == 0 {
-            return Err("LFM3 max context must be positive".into());
-        }
         let vocab = config.vocab_size;
         let embedding = quant_weight(source, "token_embd.weight", config.n_embd, vocab)?;
         if !crate::ops::embedding::is_supported_embedding(embedding.ggml_type) {
@@ -55,6 +64,79 @@ impl<'a> Lfm3Session<'a> {
         let output = quant_weight(source, output_name, config.n_embd, vocab)?;
         let output_norm = load_f32_tensor(source, "output_norm.weight", &[config.n_embd as u64])?;
         let layers = load_layers(source, &config)?;
+        Ok(Self {
+            config,
+            layers,
+            embedding,
+            output,
+            output_norm,
+            pool,
+        })
+    }
+}
+
+impl<'model, 'weights> Lfm3Session<'model, 'weights> {
+    pub fn new(
+        model: &'model Lfm3Model<'weights>,
+        kv_format: KvFormat,
+        max_context: usize,
+    ) -> Result<Self, String> {
+        Self::new_with_compute(model, kv_format, max_context, ComputePolicy::legacy())
+    }
+
+    pub fn new_with_compute(
+        model: &'model Lfm3Model<'weights>,
+        kv_format: KvFormat,
+        max_context: usize,
+        policy: ComputePolicy,
+    ) -> Result<Self, String> {
+        policy.check_build()?;
+        policy.validate_text_arch("lfm3")?;
+        let config = &model.config;
+        let max_context = config.n_ctx.min(max_context);
+        if max_context == 0 {
+            return Err("LFM3 max context must be positive".into());
+        }
+        let vocab = config.vocab_size;
+        let mut bindings = Vec::new();
+        for layer in &model.layers {
+            bindings.extend(
+                [
+                    Some(&layer.w_gate),
+                    Some(&layer.w_up),
+                    Some(&layer.w_down),
+                    layer.wq.as_ref(),
+                    layer.wk.as_ref(),
+                    layer.wv.as_ref(),
+                    layer.wo.as_ref(),
+                    layer.attn_gate.as_ref(),
+                    layer.shortconv_in.as_ref(),
+                    layer.shortconv_out.as_ref(),
+                ]
+                .into_iter()
+                .flatten()
+                .map(|weight| LinearBinding {
+                    weight,
+                    mode: LinearMode::Prepared,
+                }),
+            );
+        }
+        bindings.push(LinearBinding {
+            weight: &model.output,
+            mode: LinearMode::Prepared,
+        });
+        let linear = LinearExecutor::new(policy, bindings, 1, model.pool.clone())
+            .map_err(|e| e.to_string())?;
+        if policy != ComputePolicy::Cpu {
+            eprintln!(
+                "LFM3 projections: requested={policy:?} backend={}; attention/shortconv/KV=Cpu",
+                if linear.uses_vulkan() {
+                    "Vulkan"
+                } else {
+                    "Cpu"
+                }
+            );
+        }
         let mut kv = Vec::with_capacity(config.n_layer);
         let mut conv = Vec::with_capacity(config.n_layer);
         for &heads in &config.n_head_kv_per_layer {
@@ -72,8 +154,7 @@ impl<'a> Lfm3Session<'a> {
                 }
             ]);
         }
-        let available = std::thread::available_parallelism().map_or(1, usize::from);
-        let n_threads = resolve_thread_count(n_threads, available);
+        let n_threads = model.pool.n_threads();
         let q_width = config.n_head * config.n_embd_head_k;
         let scratch = ExecutionScratchpad::new(
             config.n_embd,
@@ -89,14 +170,11 @@ impl<'a> Lfm3Session<'a> {
             vocab,
             seq_len: 0,
             max_context,
-            layers,
-            embedding,
-            output,
-            output_norm,
+            model,
             kv,
             conv,
             scratch,
-            pool: ComputePool::new(n_threads),
+            linear,
         })
     }
 
@@ -123,7 +201,10 @@ impl<'a> Lfm3Session<'a> {
         // shortcut: chunks step per token; batch projections when optimizing prefill throughput.
         for chunk in input.chunks(batch_size) {
             for &token in chunk {
-                self.forward_token(token, self.seq_len + 1 == end);
+                if let Err(error) = self.forward_token(token, self.seq_len + 1 == end) {
+                    self.reset();
+                    return Err(error);
+                }
             }
         }
         Ok(self.scratch.logits.clone())
@@ -139,13 +220,15 @@ impl<'a> Lfm3Session<'a> {
         }
     }
 
-    fn forward_token(&mut self, token: u32, project_logits: bool) {
+    fn forward_token(&mut self, token: u32, project_logits: bool) -> Result<(), String> {
         let pos = self.seq_len;
-        self.embedding.embedding_lookup(token, &mut self.scratch.x);
+        self.model
+            .embedding
+            .embedding_lookup(token, &mut self.scratch.x);
         trace::global("embedding", pos, &self.scratch.x);
-        for (layer, weights) in self.layers.iter().enumerate() {
+        for (layer, weights) in self.model.layers.iter().enumerate() {
             forward_layer(
-                &self.pool,
+                &mut self.linear,
                 weights,
                 layer,
                 &self.config,
@@ -153,22 +236,31 @@ impl<'a> Lfm3Session<'a> {
                 &mut self.kv[layer],
                 pos,
                 &mut self.conv[layer],
-            );
+            )
+            .map_err(|e| e.to_string())?;
         }
         if project_logits {
             let s = &mut self.scratch;
-            rms_norm(&s.x, &self.output_norm, &mut s.normed, self.config.norm_eps);
-            trace::global("result_norm", pos, &s.normed);
-            self.output.quantize_and_matmul_with_scratch(
-                &s.normed,
-                &mut s.q8k_buf,
-                &mut s.q8_buf,
-                &mut s.scale_buf,
-                &mut s.logits,
-                &self.pool,
+            rms_norm(
+                &s.x,
+                &self.model.output_norm,
+                &mut s.normed,
+                self.config.norm_eps,
             );
+            trace::global("result_norm", pos, &s.normed);
+            self.linear
+                .run(
+                    self.linear
+                        .id_for(&self.model.output)
+                        .map_err(|e| e.to_string())?,
+                    &s.normed,
+                    1,
+                    &mut s.logits,
+                )
+                .map_err(|e| e.to_string())?;
             trace::global("result_output", pos, &s.logits);
         }
         self.seq_len += 1;
+        Ok(())
     }
 }

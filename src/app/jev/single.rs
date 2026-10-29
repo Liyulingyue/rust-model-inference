@@ -154,6 +154,15 @@ fn run_jev_decision_data_with_image(
             false,
             jinja.clone(),
         ),
+        "lfm3" => lfm3::run_jev_decision_lfm3(
+            source.clone(),
+            context,
+            &prepared,
+            n_threads_arg,
+            prefill_batch_size,
+            false,
+            jinja.clone(),
+        ),
         "lfm2moe" => lfm2moe::run_jev_decision_lfm2moe(
             source.clone(),
             context,
@@ -421,6 +430,7 @@ pub(crate) mod hunyuan;
 pub(crate) mod lfm2;
 pub(crate) mod lfm25;
 pub(crate) mod lfm2moe;
+pub(crate) mod lfm3;
 pub(crate) mod llama;
 pub(crate) mod mellum;
 pub(crate) mod nemotron_h;

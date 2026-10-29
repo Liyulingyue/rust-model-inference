@@ -1,0 +1,311 @@
+{
+  "date": "2026-10-29",
+  "upstream_main": "8d18565b05c76897e46752aca98e83f29e24b452",
+  "model": {
+    "path": "models/LFM3-1.7B-GGUF/LFM3-1.7B-Q8_0.gguf",
+    "size_bytes": 1846238336,
+    "sha256": "4dc04caea646076de9502b41b6c6db52203945374246d928d91e70ef5ec8fdcb",
+    "verified_with": "shasum -a 256"
+  },
+  "oracle": {
+    "repository": "https://github.com/ggml-org/llama.cpp",
+    "commit": "19cce6919992fdffd92e0ac152caaf1e2b8f254e",
+    "threads": 1,
+    "kv": "F32",
+    "accelerate_blas_metal_llamafile_openmp": false,
+    "native_cpu": true
+  },
+  "environment": {
+    "cpu_gpu": "Apple M3 Max",
+    "os": "macOS ARM64",
+    "vulkan": "MoltenVK 1.4.2",
+    "rust": "1.98.1",
+    "cargo_profile": "release-fast"
+  },
+  "cpu_precision_synthetic": {
+    "formats": [
+      "F32",
+      "F16",
+      "BF16",
+      "Q8_0",
+      "Q4_0",
+      "Q4_1",
+      "Q4_K",
+      "Q5_K",
+      "Q6_K"
+    ],
+    "mixed": true,
+    "checks": [
+      "finite and nonzero logits",
+      "chunked vs incremental equality after reset",
+      "F16 and F32 KV state",
+      "metadata and tensor storage rejection",
+      "Auto fallback",
+      "full Vulkan rejection"
+    ],
+    "q4_1_embedding": "rejected; uses F32 embedding for Q4_1 projection fixture"
+  },
+  "numerical_cpu": [
+    {
+      "case": "hello",
+      "prompt_tokens": 1,
+      "generated_ids": [
+        4992,
+        1400,
+        2242,
+        310,
+        622,
+        22,
+        358,
+        5716
+      ],
+      "max_abs": 0.24388278,
+      "max_step_rmse": 0.04846488
+    },
+    {
+      "case": "chat",
+      "prompt_tokens": 17,
+      "generated_ids": [
+        597,
+        4695,
+        20589,
+        34,
+        496,
+        57922,
+        415,
+        8043
+      ],
+      "max_abs": 1.00781012,
+      "max_step_rmse": 0.1548206
+    },
+    {
+      "case": "unicode",
+      "prompt_tokens": 13,
+      "generated_ids": [
+        229,
+        23304,
+        108,
+        231,
+        229,
+        23304,
+        108,
+        231
+      ],
+      "max_abs": 0.52032518,
+      "max_step_rmse": 0.14491654
+    },
+    {
+      "case": "window",
+      "prompt_tokens": 265,
+      "generated_ids": [
+        440,
+        5140,
+        3324,
+        383,
+        278,
+        1922,
+        22,
+        229
+      ],
+      "max_abs": 0.39831293,
+      "max_step_rmse": 0.06731333
+    }
+  ],
+  "controls": {
+    "baseline": {
+      "case": "chat",
+      "prompt_tokens": 17,
+      "generated_ids": [
+        597,
+        4695,
+        20589,
+        34,
+        496,
+        57922,
+        415,
+        8043
+      ],
+      "max_abs": 1.11565971,
+      "max_step_rmse": 0.17123345
+    },
+    "precise": {
+      "case": "chat",
+      "prompt_tokens": 17,
+      "generated_ids": [
+        597,
+        4695,
+        20589,
+        34,
+        496,
+        57922,
+        415,
+        8043
+      ],
+      "max_abs": 1.00781012,
+      "max_step_rmse": 0.1548206
+    },
+    "scalar": {
+      "case": "chat",
+      "prompt_tokens": 17,
+      "generated_ids": [
+        597,
+        4695,
+        20589,
+        34,
+        496,
+        57922,
+        415,
+        8043
+      ],
+      "max_abs": 0.73017508,
+      "max_step_rmse": 0.14161186
+    }
+  },
+  "control_scope": "scalar changes SIMD reductions and activation quantization together; controls are not an additive decomposition",
+  "checkpoints": {
+    "common": 5176,
+    "exact_embeddings": 24,
+    "first_bit_difference": {
+      "step": 1,
+      "layer": 2,
+      "op": "q_rope",
+      "max_abs": 4.76837158203125e-07
+    },
+    "shortconv_difference": {
+      "step": 4,
+      "layer": 0,
+      "max_abs": 3.725290298461914e-09
+    },
+    "first_norm_q8_change": {
+      "step": 4,
+      "layer": 13,
+      "op": "operator_norm",
+      "input_max_abs": 0.00017584115266799927,
+      "different_bytes": 10,
+      "method": "same pinned Oracle quantizer applied to both norm checkpoint inputs; does not cover every projection input"
+    }
+  },
+  "acceptance": {
+    "max_abs": 1.25,
+    "max_step_rmse": 0.2,
+    "scope": "empirical regression alarms for these Q8_0 fixtures; not a proven graph-wide bound",
+    "exact": [
+      "prompt IDs",
+      "embedding payload",
+      "checkpoint structure",
+      "8 greedy IDs per case"
+    ],
+    "numerical": [
+      "quantization",
+      "floating point and SIMD",
+      "RoPE",
+      "exp and softmax",
+      "GPU projections"
+    ]
+  },
+  "gpu": {
+    "policy": "Auto",
+    "scope": "linear projections; attention/shortconv/KV on CPU",
+    "numerical_chat": {
+      "case": "chat",
+      "prompt_tokens": 17,
+      "generated_ids": [
+        597,
+        4695,
+        20589,
+        34,
+        496,
+        57922,
+        415,
+        8043
+      ],
+      "max_abs": 1.00781012,
+      "max_step_rmse": 0.1548206
+    },
+    "vulkan_projection_dispatches": 2312,
+    "device_stats": {
+      "submissions": 3681,
+      "static_uploads": 155,
+      "static_upload_bytes": 1836440640,
+      "host_write_bytes": 43122724,
+      "host_read_bytes": 59851392,
+      "transfer_submissions": 0,
+      "live_allocation_bytes": 1840140064,
+      "peak_allocation_bytes": 1840140064
+    },
+    "cpu_projection_fallback": false,
+    "missing_driver_fallback": "passed with VK_DRIVER_FILES=/nonexistent/lfm3-test-icd.json; CPU reason printed"
+  },
+  "http_cpu": {
+    "chat_thinking_on_off": true,
+    "chat_sse_events": 11,
+    "context_limit_http_status": 400,
+    "jev_single_choice": "A",
+    "jev_single_probabilities": {
+      "A": 0.9869149327278137,
+      "B": 0.01308507565408945
+    },
+    "jev_grouped_choices": [
+      "A",
+      "D"
+    ],
+    "jev_grouped_probabilities": [
+      {
+        "A": 0.9497930407524109,
+        "B": 0.05020697042346001
+      },
+      {
+        "C": 0.3156532347202301,
+        "D": 0.6843467354774475
+      }
+    ],
+    "cli_jev": true
+  },
+  "http_auto": {
+    "chat_thinking_on_off": true,
+    "chat_sse_events": 11,
+    "context_limit_http_status": 400,
+    "jev_single_choice": "A",
+    "jev_single_probabilities": {
+      "A": 0.9869149327278137,
+      "B": 0.01308507565408945
+    },
+    "jev_grouped_choices": [
+      "A",
+      "D"
+    ],
+    "jev_grouped_probabilities": [
+      {
+        "A": 0.9497930407524109,
+        "B": 0.05020697042346001
+      },
+      {
+        "C": 0.3156532347202301,
+        "D": 0.6843467354774475
+      }
+    ],
+    "cli_jev": true
+  },
+  "cpu_auto_agreement": [
+    "chat text",
+    "prompt and completion token counts",
+    "JEV single/grouped probabilities"
+  ],
+  "checks": {
+    "vulkan_all_targets": "cargo +1.98.1 check --features vulkan --all-targets: passed",
+    "api_tools_unit": "14 passed",
+    "cli_http_agreement": "real text case passed, thinking false/true; image case skipped",
+    "synthetic": "5 passed",
+    "real_reference": "3 passed, Oracle enabled",
+    "long_swa": "265-token prompt and 8 greedy IDs passed",
+    "fmt": "cargo +1.98.1 fmt --check: passed"
+  },
+  "not_checked": [
+    "full repository test suite",
+    "other real GGUF precisions",
+    "other hardware",
+    "full Vulkan model graph",
+    "multimodal and tool calling",
+    "end-to-end acceleration benchmark"
+  ]
+}

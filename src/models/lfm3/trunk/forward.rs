@@ -1,32 +1,34 @@
 //! LFM3's gated attention / short convolution and sandwich-normalized dense FFN.
 
 use super::config::Lfm3Config;
-use super::session::Lfm3Session;
+use super::session::{Lfm3Model, Lfm3Session};
 use super::trace;
 use super::weights::Lfm3LayerWeights;
+use crate::compute::linear::LinearExecutor;
+use crate::compute::ComputeError;
 use crate::core::scratchpad::{ExecutionScratchpad, KvCache, KvFormat};
 use crate::core::tensor::TensorSource;
-use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
 use crate::ops::kernel::Weight;
 use crate::ops::{
-    dot_f32, rms_norm, rms_norm_inplace, rope_neox_inplace, rope_neox_inplace_with_freqs,
-    sigmoid_inplace, silu_mul_inplace, softmax_inplace, vec_add_into, vec_mul_inplace,
+    dot_f32, rms_norm, rms_norm_inplace, rope_neox_inplace_precise,
+    rope_neox_inplace_with_freqs_precise, sigmoid_inplace, silu_mul_inplace, softmax_inplace,
+    vec_add_into, vec_mul_inplace,
 };
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn forward_layer(
-    pool: &ComputePool,
-    lw: &Lfm3LayerWeights<'_>,
+pub(crate) fn forward_layer<'model, 'weights>(
+    linear: &mut LinearExecutor<'model, 'weights>,
+    lw: &'model Lfm3LayerWeights<'weights>,
     layer: usize,
     cfg: &Lfm3Config,
     scratch: &mut ExecutionScratchpad,
     kv: &mut KvCache,
     pos: usize,
     conv_state: &mut [f32],
-) {
+) -> Result<(), ComputeError> {
     let ExecutionScratchpad {
         x,
         normed,
@@ -38,15 +40,9 @@ pub(crate) fn forward_layer(
         gate_buf,
         up_buf,
         down_buf,
-        q8k_buf,
-        q8_buf,
-        scale_buf,
         scores,
         ..
     } = scratch;
-    let mut project = |w: &Weight<'_>, input: &[f32], output: &mut [f32]| {
-        w.quantize_and_matmul_with_scratch(input, q8k_buf, q8_buf, scale_buf, output, pool);
-    };
     let width = cfg.n_embd;
     let eps = cfg.norm_eps;
     rms_norm(x, &lw.attn_norm, normed, eps);
@@ -58,9 +54,18 @@ pub(crate) fn forward_layer(
         let q = &mut q[..q_width];
         let k = &mut k_new[..kv_width];
         let v = &mut v_new[..kv_width];
-        project(lw.wq.as_ref().unwrap(), normed, q);
-        project(lw.wk.as_ref().unwrap(), normed, k);
-        project(lw.wv.as_ref().unwrap(), normed, v);
+        let gate = &mut gate_buf[..cfg.n_head];
+        linear.run_group(
+            [
+                linear.id_for(lw.wq.as_ref().unwrap())?,
+                linear.id_for(lw.wk.as_ref().unwrap())?,
+                linear.id_for(lw.wv.as_ref().unwrap())?,
+                linear.id_for(lw.attn_gate.as_ref().unwrap())?,
+            ],
+            normed,
+            1,
+            [q, k, v, gate],
+        )?;
         trace::layer_2d("q_proj", layer, pos, dim, cfg.n_head, q);
         trace::layer_2d("k_proj", layer, pos, dim, cfg.n_head_kv_per_layer[layer], k);
         trace::layer_2d("v_proj", layer, pos, dim, cfg.n_head_kv_per_layer[layer], v);
@@ -74,9 +79,9 @@ pub(crate) fn forward_layer(
         trace::layer_2d("k_norm", layer, pos, dim, cfg.n_head_kv_per_layer[layer], k);
         for values in [&mut *q, &mut *k] {
             if cfg.sliding_window_pattern[layer] {
-                rope_neox_inplace(values, pos, dim, cfg.rope_freq_base_swa);
+                rope_neox_inplace_precise(values, pos, dim, cfg.rope_freq_base_swa);
             } else {
-                rope_neox_inplace_with_freqs(
+                rope_neox_inplace_with_freqs_precise(
                     values,
                     pos,
                     dim,
@@ -137,16 +142,20 @@ pub(crate) fn forward_layer(
         }
         trace::layer_1d("attn_values", layer, pos, &attn_out[..q_width]);
         let gate = &mut gate_buf[..cfg.n_head];
-        project(lw.attn_gate.as_ref().unwrap(), normed, gate);
         sigmoid_inplace(gate);
         trace::layer_1d("attn_gate", layer, pos, gate);
         for (head, &gate) in attn_out[..q_width].chunks_exact_mut(dim).zip(gate.iter()) {
             crate::ops::vec_scale_f32(head, gate);
         }
-        project(lw.wo.as_ref().unwrap(), &attn_out[..q_width], attn_proj);
+        project(
+            linear,
+            lw.wo.as_ref().unwrap(),
+            &attn_out[..q_width],
+            attn_proj,
+        )?;
     } else {
         let bcx = &mut gate_buf[..3 * width];
-        project(lw.shortconv_in.as_ref().unwrap(), normed, bcx);
+        project(linear, lw.shortconv_in.as_ref().unwrap(), normed, bcx)?;
         trace::layer_1d("conv_in_proj", layer, pos, bcx);
         let (b, cx) = bcx.split_at(width);
         let (c, input) = cx.split_at(width);
@@ -160,7 +169,7 @@ pub(crate) fn forward_layer(
         );
         trace::layer_1d("conv_conv", layer, pos, &conv);
         vec_mul_inplace(c, &mut conv);
-        project(lw.shortconv_out.as_ref().unwrap(), &conv, attn_proj);
+        project(linear, lw.shortconv_out.as_ref().unwrap(), &conv, attn_proj)?;
         trace::layer_1d("conv_out_proj", layer, pos, attn_proj);
     }
     trace::layer_1d("attn_proj", layer, pos, attn_proj);
@@ -173,13 +182,17 @@ pub(crate) fn forward_layer(
     trace::layer_1d("ffn_norm", layer, pos, normed);
     let gate = &mut gate_buf[..cfg.n_ff];
     let up = &mut up_buf[..cfg.n_ff];
-    project(&lw.w_gate, normed, gate);
-    project(&lw.w_up, normed, up);
+    linear.run_group(
+        [linear.id_for(&lw.w_gate)?, linear.id_for(&lw.w_up)?],
+        normed,
+        1,
+        [gate, up],
+    )?;
     trace::layer_1d("ffn_gate", layer, pos, gate);
     trace::layer_1d("ffn_up", layer, pos, up);
     silu_mul_inplace(gate, up);
     trace::layer_1d("ffn_swiglu", layer, pos, up);
-    project(&lw.w_down, up, down_buf);
+    project(linear, &lw.w_down, up, down_buf)?;
     trace::layer_1d("ffn_down", layer, pos, down_buf);
     if let Some(norm) = &lw.post_ffw_norm {
         rms_norm_inplace(down_buf, norm, eps);
@@ -187,6 +200,18 @@ pub(crate) fn forward_layer(
     trace::layer_1d("post_ffn_norm", layer, pos, down_buf);
     vec_add_into(down_buf, x);
     trace::layer_1d("l_out", layer, pos, x);
+    Ok(())
+}
+
+fn project(
+    linear: &mut LinearExecutor<'_, '_>,
+    weight: &Weight<'_>,
+    input: &[f32],
+    output: &mut [f32],
+) -> Result<(), ComputeError> {
+    linear
+        .run(linear.id_for(weight)?, input, 1, output)
+        .map(|_| ())
 }
 
 fn attention_start(pos: usize, window: Option<usize>) -> usize {
@@ -217,7 +242,8 @@ pub fn run_forward_logits_lfm3_with_batch(
     max_context: usize,
     batch_size: usize,
 ) -> Result<(Vec<f32>, Duration), String> {
-    let mut session = Lfm3Session::from_source(source, n_threads, kv_format, max_context)?;
+    let model = Lfm3Model::from_source(source, n_threads)?;
+    let mut session = Lfm3Session::new(&model, kv_format, max_context)?;
     let start = Instant::now();
     let logits = session.forward_logits_chunked(input, batch_size)?;
     Ok((logits, start.elapsed()))
@@ -250,7 +276,8 @@ pub fn run_inference(
         thinking,
     )?
     .ok_or("LFM3 requires its GGUF chat template or --chat-template-file")?;
-    let mut session = Lfm3Session::from_source(source, n_threads, kv_format, max_context)?;
+    let model = Lfm3Model::from_source(source, n_threads)?;
+    let mut session = Lfm3Session::new(&model, kv_format, max_context)?;
     if input.len().saturating_add(max_tokens.saturating_sub(1)) > session.max_context {
         return Err(format!(
             "LFM3 prompt and generation exceed context capacity {}",

@@ -1,4 +1,4 @@
-# LFM3-1.7B CPU 对齐
+# LFM3-1.7B 适配与验证
 
 适配 [atomic.chat/LFM3-1.7B-GGUF](https://modelscope.cn/models/atomic.chat/LFM3-1.7B-GGUF/files)
 的 `LFM3-1.7B-Q8_0.gguf`。验证环境为 macOS ARM64，单线程 CPU、F32 KV、greedy。
@@ -18,8 +18,13 @@
 - GPT2 BPE、`tokenizer.ggml.pre=lfm2`；BOS `124894`、EOS `124900`，
   `add_bos_token=false` / `add_eos_token=false`。
 
-CLI 为 `lfm3` 默认渲染 GGUF 自带 Jinja 模板，支持 `--thinking` 和
-`--chat-template-file`；CPU model API 的 session 保留卷积历史及 KV，支持续写与 reset。
+CLI 和 HTTP 为 `lfm3` 默认渲染 GGUF 自带 Jinja 模板，支持 thinking 和模板覆盖；
+JEV 单项/分组打分使用同一模板并关闭 thinking。model API 的 session 保留卷积历史及 KV，
+支持续写与 reset。共享 `LinearExecutor` 负责所有投影，Q/K/V/head gate 和 FFN gate/up
+成组执行并复用激活量化；CPU 精度与 SIMD 分发留在共享算子内部。
+
+`--compute cpu` 固定 CPU；`--gpu` / `--compute auto` 尝试 Vulkan 投影并允许 CPU 回退。
+attention、短卷积和 KV 仍在 CPU，`--compute vulkan` 的全图要求明确拒绝。
 
 ## 参考实现与复现
 
@@ -75,9 +80,9 @@ Rust 仅在 prefill 最后一步和每次 decode 投影输出头，所以检查�
 | 输入 | Prompt token 数 | Greedy 对齐 | 8 步中最大 logits abs error | 最大逐步 RMSE |
 | --- | ---: | --- | ---: | ---: |
 | `Hello` | 1 | 8/8 | 0.243883 | 0.048465 |
-| Jinja thinking chat | 17 | 8/8 | 1.115660 | 0.171233 |
-| `你好，LFM3!\n\t café  🦀` | 13 | 8/8 | 0.533533 | 0.095196 |
-| 混合英文重复文本，跨过 SWA 窗口 | 265 | 8/8 | 0.452057 | 0.068492 |
+| Jinja thinking chat | 17 | 8/8 | 1.007810 | 0.154821 |
+| `你好，LFM3!\n\t café  🦀` | 13 | 8/8 | 0.520325 | 0.144917 |
+| 混合英文重复文本，跨过 SWA 窗口 | 265 | 8/8 | 0.398313 | 0.067313 |
 
 四组 prompt IDs 全部完全一致。另有空文本、标点、空白、Unicode、BOS/EOS/control
 静态 tokenizer fixtures，期望值由固定 Oracle 得到。
@@ -99,8 +104,9 @@ cargo +1.98.1 run --profile release-fast --bin rust-model-inference -- \
 ```
 
 聊天过程覆盖 24 个输入位置、5,176 个共同检查点，名称、shape、次数符合预期；
-24 次 embedding 逐位一致。第一个浮点位差异位于位置 4、layer 0 的 shortconv
-累加，最大 `3.7252903e-9`。这种浮点累加差异会在后续 Q8_0 激活重新量化时放大。
+24 次 embedding 逐位一致。当前第一个浮点位差异位于位置 1、layer 2 的 Q RoPE，
+最大 `4.7683716e-7`；位置 4、layer 0 的 shortconv 仍有 `3.7252903e-9` 的累加差异。
+这些局部舍入差异会在后续 Q8_0 激活重新量化时放大，见下面的归因探针。
 短卷积使用 FMA；SWA/full RoPE、gate、sandwich norm 和状态写回均按参考图实现。
 
 按用户要求，有损的量化、浮点累加、softmax/exp、RoPE 和 SIMD 路径使用数值及
@@ -113,6 +119,83 @@ cargo +1.98.1 run --profile release-fast --bin rust-model-inference -- \
 
 ## 范围
 
-已验证 CPU CLI/model API 和真实 Q8_0、F32 KV；F16 KV 仅有合成状态回归。
-HTTP TextRuntime、多模态、其他权重量化档及 GPU 未纳入支持范围。
-分块 prefill 仍按 token 因果执行，未做矩阵批处理优化；未运行全仓测试套件。
+已验证真实 Q8_0/F32 KV 的 CPU CLI、HTTP、JEV 单项/分组和 model API，
+以及 M3 Max/MoltenVK 的 Auto 投影。F16 KV 仅有合成状态回归。
+CPU 合成测试覆盖 F32/F16/BF16/Q8_0/Q4_0/Q4_1/Q4_K/Q5_K/Q6_K 投影及混合权重；
+Q4_1 embedding 不在共享 lookup 支持表中，加载时拒绝，测试使用合法的 F32 embedding。
+其他真实权重量化档、其他 GPU、全图 Vulkan、多模态和工具调用未验证或不支持。
+分块 prefill 仍按 token 因果执行，未做矩阵批处理优化；未运行全仓测试套件，
+不声称 Auto 投影带来端到端加速。
+
+## Review 修复与误差归因
+
+已合入上游 main `8d18565b05c76897e46752aca98e83f29e24b452`。
+入口、状态、数值和设备证据汇总在 [review-fixes.json](review-fixes.json)。
+
+同一聊天样例、固定原生 CPU Oracle、每次只改变 Rust 侧路径：
+
+| Rust 路径 | max abs | 最大逐步 RMSE |
+| --- | ---: | ---: |
+| 原 fused sin/cos | 1.115660 | 0.171233 |
+| 独立 sin/cos（当前路径） | 1.007810 | 0.154821 |
+| 独立 sin/cos + `RMI_SCALAR=1` | 0.730175 | 0.141612 |
+
+第一项实验只改变 RoPE，证实它会影响最终误差，但不是唯一来源。scalar 控制同时改变
+SIMD 归约和激活量化的舍入，不能把结果单独归于 attention dot。未为了逐位一致而
+禁用默认 SIMD 或替换共享算子。
+
+审阅对 softmax 的判断需要修正：固定 Oracle 的 `ggml_vec_soft_max_f32` 在 NEON 上使用
+向量 exp 近似、四路 F32 横向求和，再累加到 `ggml_float`；Rust 使用 libm exp 和逐值
+F64 求和。不是简单的“Oracle 全程 F32 求和”。两侧原生 NEON Q8_0 激活量化都使用
+ties-to-even，不能把原生路径的差异直接解释成 tie 规则错误。
+
+比较器可让固定 Oracle 的同一个 Q8_0 量化函数分别处理双方的 norm 检查点，隔离
+“输入变化”与“量化实现变化”：
+
+```bash
+python3 tools/oracle/lfm3/compare_checkpoints.py /tmp/lfm3-trace/chat \
+  /tmp/llama-cpp-lfm3/build-lfm3-cpu/bin/libggml-cpu.dylib
+```
+
+实测首个发生 Q8 字节变化的 **norm 输入**在位置 4、layer 13 的 operator norm：
+输入最大差 `0.00017584115`，量化后 10 个字节不同。此探针覆盖 norm 后投影输入，
+不覆盖短卷积和 attention 输出投影前的所有中间输入，不能把它称为全图首次量化分叉。
+它证实了重新量化的非连续放大；各算子的最终贡献不能按上表简单相加。
+
+`1.25 / 0.20` 保留为固定模型/样例的经验回归报警线，并非推导出的全图误差上界或
+“精确对齐”证明。真实运行状态与数值精确性分别描述；有损路径继续检查有限值、完整
+logits 误差和多步 greedy，Tokenizer/embedding/检查点结构保留精确检查。
+
+## CLI / HTTP / JEV / Auto 复现
+
+```bash
+cargo +1.98.1 build --profile release-fast --features 'vulkan parity-trace'
+RMI_COMPUTE_TRACE=1 target/release-fast/rust-model-inference \
+  --model models/LFM3-1.7B-GGUF/LFM3-1.7B-Q8_0.gguf \
+  --prompt 'Reply with exactly one short sentence.' --thinking \
+  --max-tokens 8 --temperature 0 --threads 1 --max-context 512 --kv-cache f32 --gpu
+
+RMI_LFM3_GPU=1 RMI_COMPUTE_TRACE=1 RMI_LFM3_CASE=chat \
+  RMI_LFM3_ORACLE=/tmp/lfm3-oracle \
+  cargo +1.98.1 test --profile release-fast --features 'vulkan parity-trace' \
+  --test lfm3_reference lfm3_oracle_alignment -- --nocapture
+
+target/release-fast/rust-model-inference \
+  --model models/LFM3-1.7B-GGUF/LFM3-1.7B-Q8_0.gguf \
+  --jev --jev-context 'An apple is red.' --jev-question 'What color is the apple?' \
+  --jev-option red --jev-option blue --compute auto --threads 1
+
+RMI_COMPUTE_TRACE=1 target/release-fast/rust-model-inference \
+  --model models/LFM3-1.7B-GGUF/LFM3-1.7B-Q8_0.gguf \
+  --serve --host 127.0.0.1 --port 8080 --compute auto --kv-cache f32 --threads 1
+```
+
+真实 HTTP 验证包括 `/v1/chat/completions`（thinking 开/关、SSE）、`/v1/jev/score`、
+`/v1/jev/grouped` 和超限请求 400；CPU/Auto 的文本、token usage 和 JEV 概率一致。
+CLI/HTTP runtime 对照覆盖 thinking 开/关；另修复了只有完整 HTTP 链路才能发现的
+LFM3 输出解析器未注册导致的 500。
+
+聊天 Auto Oracle 检查得到同样的 8 步 greedy 和上表当前 CPU 误差；实测 2,312 次
+Vulkan 投影分发、3,681 次设备提交、155 次静态上传（1,836,440,640 bytes）。这些计数
+证明投影确实上 GPU，不表示 attention/短卷积也在设备端。设置无效 `VK_DRIVER_FILES`
+还验证了同一二进制 Auto 回退 CPU 后正常生成，并打印失败原因。
