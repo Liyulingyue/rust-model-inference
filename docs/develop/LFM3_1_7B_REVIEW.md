@@ -591,3 +591,9 @@ Q8_0 量化字节几乎整排改写（6,678 字节不同）；`attn_gated` 与 `
 **对 §11.4 的修正**:§11.4 说"误差预算撤销、探针覆盖已做"。复验之后要补一句:
 探针不但覆盖了全部六个投影输入，而且**实测表明放大点是普遍现象而非个案** ——
 所以它作为回归监控项的价值比原先估计的高，而"误差预算"依然不必要。
+
+**权重契约的修正**：作者 pin 的 `atomic.chat` 权重已不可下载，而 README、
+`docs/MODEL_LIST.md`、`docs/develop/SUPPORTED_MODELS.md` 与 `review-fixes.json`
+全都指向它 —— 复现链是断的。已把可获得的官方 `LiquidAI/LFM3-1.7B-GGUF` 写进这四处
+（连带下载命令与 SHA-256），并在 `review-fixes.json` 里注明旧数字不可复现、
+可复现的那一份在 `probe-linux.json`。

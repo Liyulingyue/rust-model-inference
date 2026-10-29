@@ -1,12 +1,29 @@
 # LFM3-1.7B 适配与验证
 
-适配 [atomic.chat/LFM3-1.7B-GGUF](https://modelscope.cn/models/atomic.chat/LFM3-1.7B-GGUF/files)
-的 `LFM3-1.7B-Q8_0.gguf`。验证环境为 macOS ARM64，单线程 CPU、F32 KV、greedy。
+适配 [LiquidAI/LFM3-1.7B-GGUF](https://modelscope.cn/models/LiquidAI/LFM3-1.7B-GGUF/files)
+的 `LFM3-1.7B-Q8_0.gguf`。验证环境为 macOS ARM64（首轮）与 Linux x86_64（复验），
+单线程 CPU、F32 KV、greedy。
+
+## 取权重
+
+```bash
+cd models
+./.venv/bin/modelscope download --model LiquidAI/LFM3-1.7B-GGUF \
+  LFM3-1.7B-Q8_0.gguf --local_dir ./LFM3-1.7B-GGUF
+```
+
+下载后用上面的 SHA-256 核对；`.venv` 不存在时先 `python3 -m venv models/.venv &&
+models/.venv/bin/pip install modelscope`。
 
 ## 固定契约
 
-- 文件大小：`1,846,238,336` bytes；SHA-256：
-  `4dc04caea646076de9502b41b6c6db52203945374246d928d91e70ef5ec8fdcb`。
+- 文件大小：`1,846,238,496` bytes；SHA-256：
+  `8f6b24182258205e9e01e21f1f24a1f208c1e8115578825d202ce39976af20b6`
+  （ModelScope 官方 `LiquidAI/LFM3-1.7B-GGUF`，2026-10-29 下载校验）。
+- 本节以下记录的首轮证据来自 `atomic.chat/LFM3-1.7B-GGUF` 的同名文件
+  （`1,846,238,336` bytes，SHA-256 `4dc04cae…`）。**该 repo 已不可公开下载**，
+  所以那组数字无法再复现；可用官方权重做的一次全新自洽复验见文末的「Linux 复验」
+  与 [probe-linux.json](probe-linux.json)。
 - `general.architecture=lfm3`；24 层、2048 hidden、16 query heads、128 head dim、7680 FFN。
 - KV heads：`[0,0,4,0,4,0,4,0,4,0,4,0,4,0,4,0,4,0,4,0,4,0,4,0]`。
   零表示 shortconv，kernel 长度 7、历史长度 6；注意力层使用 sigmoid head gate。

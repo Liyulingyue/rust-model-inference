@@ -5,7 +5,12 @@
     "path": "models/LFM3-1.7B-GGUF/LFM3-1.7B-Q8_0.gguf",
     "size_bytes": 1846238336,
     "sha256": "4dc04caea646076de9502b41b6c6db52203945374246d928d91e70ef5ec8fdcb",
-    "verified_with": "shasum -a 256"
+    "verified_with": "shasum -a 256",
+    "downloadable": false,
+    "note": "This evidence was measured on the atomic.chat copy (sha256 4dc04cae...), whose repo is no longer publicly downloadable, so these numbers cannot be reproduced as recorded. probe-linux.json holds a fresh self-consistent run on the official ModelScope weights (LiquidAI/LFM3-1.7B-GGUF, sha256 8f6b2418...).",
+    "official_repo": "LiquidAI/LFM3-1.7B-GGUF",
+    "official_sha256": "8f6b24182258205e9e01e21f1f24a1f208c1e8115578825d202ce39976af20b6",
+    "official_size_bytes": 1846238496
   },
   "oracle": {
     "repository": "https://github.com/ggml-org/llama.cpp",
