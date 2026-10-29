@@ -147,6 +147,10 @@ pub(crate) fn forward_layer<'model, 'weights>(
         for (head, &gate) in attn_out[..q_width].chunks_exact_mut(dim).zip(gate.iter()) {
             crate::ops::vec_scale_f32(head, gate);
         }
+        // The gated output is what the output projection quantizes, so it is
+        // the checkpoint that says whether the head gate leaves a thin
+        // numerical margin. The Oracle exposes it as `lfm3_attn_gated`.
+        trace::layer_1d("attn_gated", layer, pos, &attn_out[..q_width]);
         project(
             linear,
             lw.wo.as_ref().unwrap(),

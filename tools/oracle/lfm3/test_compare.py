@@ -67,13 +67,13 @@ class CompareCheckpointTests(unittest.TestCase):
                 rows.append(dict(name=rust_name, layer=None, step=step,
                                  shape=[32], binary_path=str(path)))
             if gated:
-                oracle_name = OPTIONAL_NAMES['attn_values'] + '-0'
+                oracle_name = OPTIONAL_NAMES['attn_gated'] + '-0'
                 payload = root / f'{step}-{oracle_name}.f32'
                 payload.write_bytes(struct.pack('<32f', *([0.25] * 32)))
                 oracle_lines.append(f'{step}\t{oracle_name}\t32')
-                path = root / f'rust-{step}-attn_values-0.f32'
+                path = root / f'rust-{step}-attn_gated-0.f32'
                 path.write_bytes(struct.pack('<32f', *([0.25] * 32)))
-                rows.append(dict(name='attn_values', layer=0, step=step,
+                rows.append(dict(name='attn_gated', layer=0, step=step,
                                  shape=[32], binary_path=str(path)))
         for rust_name, layer, step in drift:
             path = root / f'rust-{step}-{rust_name}-{layer}.f32'
@@ -97,7 +97,7 @@ class CompareCheckpointTests(unittest.TestCase):
                              ['attn_norm', 'conv_conv', 'ffn_norm', 'result_norm'])
             self.assertEqual(
                 result['projection_inputs_without_oracle_checkpoint'],
-                ['attn_values', 'ffn_swiglu'],
+                ['attn_gated', 'ffn_swiglu'],
             )
 
     def test_a_drifted_projection_input_is_reported_as_amplified(self):
@@ -115,20 +115,20 @@ class CompareCheckpointTests(unittest.TestCase):
     def test_the_gated_output_is_probed_once_the_oracle_exposes_it(self):
         with tempfile.TemporaryDirectory() as directory:
             root = self.build(Path(directory), gated=True,
-                              drift=[('attn_values', 0, 0)])
+                              drift=[('attn_gated', 0, 0)])
             result = compare(root, quantize=fake_quantize)
-            self.assertIn('attn_values', result['projection_inputs_available'])
+            self.assertIn('attn_gated', result['projection_inputs_available'])
             points = [item for item in result['q8_amplification_points']
-                      if item['checkpoint'] == 'attn_values']
+                      if item['checkpoint'] == 'attn_gated']
             self.assertEqual(len(points), 1)
-            self.assertNotIn('attn_values',
+            self.assertNotIn('attn_gated',
                              result['projection_inputs_without_oracle_checkpoint'])
 
     def test_the_gated_output_is_skipped_when_the_oracle_lacks_it(self):
         with tempfile.TemporaryDirectory() as directory:
             root = self.build(Path(directory))
             result = compare(root, quantize=fake_quantize)
-            self.assertIn('attn_values',
+            self.assertIn('attn_gated',
                           result['projection_inputs_without_oracle_checkpoint'])
 
 

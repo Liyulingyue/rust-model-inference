@@ -178,6 +178,59 @@ python3 tools/oracle/lfm3/compare_checkpoints.py /tmp/lfm3-trace/chat \
 这个探针量的是**数值裕度**，不是比特对齐：它回答“哪里的输入差异容易被量化放大”，
 而不是“哪里还没对齐”。残差本身是量化固有的损失，不是待修的缺陷。
 
+### Linux 复验（2026-10-29，官方权重）
+
+作者 pin 的 `atomic.chat` 权重已不可公开下载，所以下面是用 **ModelScope 官方
+`LiquidAI/LFM3-1.7B-GGUF` 的 `LFM3-1.7B-Q8_0.gguf`**（sha256 `8f6b2418...`，与作者 pin
+的 `4dc04cae...` 不同）做的一次全新自洽验证，不是对旧数字的复现。
+
+```bash
+git -C target/llama-cpp-lfm3 checkout 19cce6919992fdffd92e0ac152caaf1e2b8f254e
+git -C target/llama-cpp-lfm3 apply tools/oracle/lfm3/checkpoints.patch
+cmake -S target/llama-cpp-lfm3 -B target/llama-cpp-lfm3/build-lfm3-cpu \
+  -DCMAKE_BUILD_TYPE=Release -DGGML_ACCELERATE=OFF -DGGML_BLAS=OFF \
+  -DGGML_METAL=OFF -DGGML_LLAMAFILE=OFF -DGGML_OPENMP=OFF \
+  -DLLAMA_CURL=OFF -DLLAMA_BUILD_TESTS=OFF
+cmake --build target/llama-cpp-lfm3/build-lfm3-cpu --target llama -j 8
+c++ -std=c++17 -O2 tools/oracle/lfm3/oracle.cpp \
+  -I target/llama-cpp-lfm3/include -I target/llama-cpp-lfm3/ggml/include \
+  -L target/llama-cpp-lfm3/build-lfm3-cpu/bin \
+  -Wl,-rpath,$PWD/target/llama-cpp-lfm3/build-lfm3-cpu/bin \
+  -lllama -lggml -lggml-base -o target/lfm3-oracle/oracle
+RMI_LFM3_ORACLE=$PWD/target/lfm3-oracle/oracle RMI_LFM3_CASE=chat \
+  RMI_LFM3_CHECKPOINTS=1 RMI_LFM3_ALIGN_DIR=$PWD/target/lfm3-trace \
+  cargo test --profile release-fast --features parity-trace \
+  --test lfm3_reference lfm3_oracle_alignment -- --nocapture
+python3 tools/oracle/lfm3/compare_checkpoints.py target/lfm3-trace/chat \
+  target/llama-cpp-lfm3/build-lfm3-cpu/bin/libggml-cpu.so
+```
+
+结果：17 个 prompt token ID 精确一致，8 步 greedy 与 Oracle 一致
+（`[597,4695,20589,34,496,57922,415,8043]`），最大 logits abs error `0.79560184`、
+RMSE `0.15557143`，在 `1.25 / 0.20` 的报警线内；6,280 个检查点、24 次 embedding 逐位一致。
+首个浮点位差在位置 0、layer 0 的短卷积输入投影（`1.1920928955078125e-07`）。
+
+探针的放大点分布（2,288 个）：
+
+| 投影输入 | 出现 | 最大 Q8 字节差异 | 该处 input_max_abs |
+| --- | ---: | ---: | ---: |
+| `ffn_swiglu`（down 投影输入） | 576 | **6,678** | `1.654e-02` |
+| `result_norm`（输出头输入） | 8 | 1,907 | `6.002e-01` |
+| `attn_norm`（q/k/v/head-gate 输入） | 552 | 1,876 | `4.567e-02` |
+| `ffn_norm`（gate/up 输入） | 576 | 1,868 | `1.388e-01` |
+| `attn_gated`（输出投影输入） | 264 | 1,667 | `1.950e-03` |
+| `conv_conv`（短卷积输出投影输入） | 312 | 1,610 | `2.384e-03` |
+
+六个投影输入全部可探测，`projection_inputs_without_oracle_checkpoint` 为空。
+
+读法：`ffn_swiglu` 一处 `1.65e-02` 的输入差就让 2,048 维张量的 Q8_0 量化字节几乎
+整排改写（6,678 字节不同）；`attn_gated` 与 `conv_conv` 的输入差只有 `2e-03` 量级，
+却同样造成 1,600 余字节变化 —— 说明这两个位置的 Q8_0 量化步长与两侧的舍入差异同量级。
+**这是量化把微小差异放大的机制，不是哪一侧算错了**；它也解释了为什么最终 logits
+能差到 `0.8`，而两边的 greedy 序列始终一致。
+
+机器可读记录：[probe-linux.json](probe-linux.json)。
+
 `1.25 / 0.20` 保留为固定模型/样例的经验回归报警线，并非推导出的全图误差上界或
 “精确对齐”证明。真实运行状态与数值精确性分别描述；有损路径继续检查有限值、完整
 logits 误差和多步 greedy，Tokenizer/embedding/检查点结构保留精确检查。

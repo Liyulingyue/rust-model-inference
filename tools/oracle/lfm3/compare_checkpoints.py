@@ -19,6 +19,10 @@ NAMES = {
     "q_rope": "lfm3_q_rope",
     "k_rope": "lfm3_k_rope",
     "attn_gate": "model.layers.{}.self_attn.gate",
+    # The Oracle names the attention output before the head gate multiplies
+    # it in, and so does the Rust trace.
+    "attn_values": "attn_out",
+    "ffn_swiglu": "ffn_swiglu",
     "ffn_norm": "model.layers.{}.ffn_norm",
     "post_ffn_norm": "model.layers.{}.post_ffn_norm",
     "l_out": "l_out",
@@ -31,7 +35,7 @@ NAMES = {
 # output lives inside the shared build_ffn(), so exposing it would touch
 # every model's graph and it stays unprobed.
 OPTIONAL_NAMES = {
-    "attn_values": "lfm3_attn_gated",
+    "attn_gated": "lfm3_attn_gated",
 }
 
 # Every Rust checkpoint that feeds a quantized projection. Re-quantizing
@@ -41,7 +45,7 @@ OPTIONAL_NAMES = {
 # is the lossy part of quantisation itself, not a defect to chase.
 PROJECTION_INPUTS = {
     "attn_norm",    # operator_norm -> q/k/v/head-gate projections
-    "attn_values",  # gated attention output -> output projection
+    "attn_gated",   # gated attention output -> output projection
     "conv_conv",    # shortconv output -> shortconv output projection
     "ffn_norm",     # ffn_norm -> gate/up projections
     "ffn_swiglu",   # SwiGLU output -> down projection
@@ -66,7 +70,8 @@ def load_quantizer(library_path):
     def quantize(values):
         count = len(values)
         out = ctypes.create_string_buffer(count // 32 * 34)
-        entry((ctypes.c_float * count).from_buffer_copy(values), out, count)
+        raw = struct.pack(f"<{count}f", *values)
+        entry((ctypes.c_float * count).from_buffer_copy(raw), out, count)
         return out.raw
 
     return quantize

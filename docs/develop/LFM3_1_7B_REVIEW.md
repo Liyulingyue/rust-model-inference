@@ -532,3 +532,62 @@ llama.cpp oracle,所以本轮改动**未经真实权重复验**;补丁与探针�
 | 未复验 | 本轮探针改动没在真实 trace 上跑过;`q8_amplification_points` 的实际内容未知 |
 | 补丁未在真 oracle 上编译 | `checkpoints.patch` 的新 hunk 只验证了 `git apply`,没有编译 llama.cpp |
 | 全库测试未跑 | 只跑了 `cargo check --all-targets`(0 error)、`cargo fmt --check`、定向测试组 |
+
+### 11.7 本机复验（2026-10-29）
+
+本机补齐了条件并做了一次完整复验。
+
+**权重的来源变化**:作者 pin 的 `atomic.chat/LFM3-1.7B-GGUF` 已不可公开下载（ModelScope
+API 返回 404）。改用官方 `LiquidAI/LFM3-1.7B-GGUF` 的 `LFM3-1.7B-Q8_0.gguf`
+（1,846,238,496 B，SHA-256 `8f6b24182258205e9e01e21f1f24a1f208c1e8115578825d202ce39976af20b6`），
+与作者 pin 的 `4dc04cae…` **不同**。因此下面是一次**全新自洽的验证**，不是对
+`review-fixes.json` 的复现 —— 数值不可直接比较，但机制可以。
+
+**Oracle**:按 `tools/oracle/lfm3/README.md` 的流程构建了 pinned
+`19cce6919992fdffd92e0ac152caaf1e2b8f254e`（CPU only，禁 Accelerate/BLAS/Metal/
+llamafile/OpenMP），打上 `checkpoints.patch`。
+
+**对齐结果**:
+
+| 项 | 结果 |
+| --- | --- |
+| prompt token IDs | 17/17 精确一致 |
+| 8 步 greedy IDs | `[597,4695,20589,34,496,57922,415,8043]`，与 Oracle 一致，**与作者记录的那一组完全相同** |
+| 最大 logits abs error | `0.79560184`（报警线 1.25） |
+| 最大逐步 RMSE | `0.15557143`（报警线 0.20） |
+| 检查点 | 6,280 个比较，24 次 embedding 逐位一致 |
+| 首个浮点位差 | 位置 0、layer 0 的**短卷积输入投影**，`1.1920928955078125e-07` |
+
+**探针的实际结果**（2,288 个放大点，六个投影输入全部可探测）:
+
+| 投影输入 | 出现 | 最大 Q8 字节差异 | 该处 input_max_abs |
+| --- | ---: | ---: | ---: |
+| `ffn_swiglu`（down 投影输入） | 576 | **6,678** | `1.654e-02` |
+| `result_norm`（输出头输入） | 8 | 1,907 | `6.002e-01` |
+| `attn_norm`（q/k/v/head-gate 输入） | 552 | 1,876 | `4.567e-02` |
+| `ffn_norm`（gate/up 输入） | 576 | 1,868 | `1.388e-01` |
+| `attn_gated`（输出投影输入） | 264 | 1,667 | `1.950e-03` |
+| `conv_conv`（短卷积输出投影输入） | 312 | 1,610 | `2.384e-03` |
+
+这是本次复验最有价值的一条结论：**放大机制存在于每一个量化投影的输入上**，而不是
+作者此前记录的那一处。`ffn_swiglu` 一处 `1.65e-02` 的输入差就让 2,048 维张量的
+Q8_0 量化字节几乎整排改写（6,678 字节不同）；`attn_gated` 与 `conv_conv` 的输入差
+只有 `2e-03` 量级，却同样造成 1,600 余字节变化 —— 说明这两个位置的 Q8_0 量化步长
+与两侧的舍入差异同量级。**这正是 §11.1 所说的"量化本身就是比特损失"**：
+最终 logits 能差到 0.8，而两边的 greedy 序列始终一致。
+
+机器可读记录：[`tools/oracle/lfm3/probe-linux.json`](../../tools/oracle/lfm3/probe-linux.json)。
+
+**本轮为支持这次复验而做的改动**:
+
+| 文件 | 改动 |
+| --- | --- |
+| `src/models/lfm3/trunk/forward.rs` | 在 head gate 缩放之后增加 `attn_gated` 检查点 —— 它才是输出投影真正量化的输入（此前的 `attn_values` 是 gate **之前**的） |
+| `tools/oracle/lfm3/checkpoints.patch` | 增加 `cb(attn_out, "lfm3_attn_gated", il)`，让 Oracle 暴露同一个张量 |
+| `tools/oracle/lfm3/oracle.cpp` | capture 过滤器增加 `attn_out` 与 `ffn_swiglu` —— llama.cpp 的 `build_ffn()` **本来就有** `cb(cur, "ffn_swiglu", il)`，但过滤器把无前缀的名字挡掉了 |
+| `tools/oracle/lfm3/compare_checkpoints.py` | 映射修正：`attn_values` → `attn_out`、`ffn_swiglu` → `ffn_swiglu`、`attn_gated` → `lfm3_attn_gated`；量化器改用 `struct.pack` 传入（`ctypes.from_buffer_copy` 不接受 list） |
+| `tools/oracle/lfm3/probe-linux.json` | 新增，本机复验的机器可读证据 |
+
+**对 §11.4 的修正**:§11.4 说"误差预算撤销、探针覆盖已做"。复验之后要补一句:
+探针不但覆盖了全部六个投影输入，而且**实测表明放大点是普遍现象而非个案** ——
+所以它作为回归监控项的价值比原先估计的高，而"误差预算"依然不必要。

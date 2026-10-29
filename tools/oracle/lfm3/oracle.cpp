@@ -15,7 +15,12 @@ static bool capture(ggml_tensor * t, bool ask, void * data) {
     auto & s = *static_cast<trace_state *>(data);
     std::string name(t->name);
     bool selected = name.find("model.") == 0 || name.find("l_out-") == 0 ||
-                    name.find("lfm3_") == 0 || name == "result_norm" || name == "result_output";
+                    name.find("lfm3_") == 0 || name == "result_norm" || name == "result_output" ||
+                    // The attention output before the head gate and the SwiGLU
+                    // output are the inputs two quantized projections take.
+                    // Their callbacks name them, but the filter above would
+                    // otherwise drop them.
+                    name.find("attn_out") == 0 || name.find("ffn_swiglu") == 0;
     selected = selected && name.find(" (") == std::string::npos;
     if (ask) return selected;
     if (!selected || s.dir.empty() || t->type != GGML_TYPE_F32) return true;
