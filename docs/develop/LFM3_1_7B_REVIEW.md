@@ -612,3 +612,33 @@ attention/shortconv/KV=Cpu`，`Q8_0 matmul: packed int8 dot product`），输出
 这是集显的必然结果：设备内存就是系统内存，1.85 GB 权重"放进显存"后每次投影都要过
 内存总线，比 CPU 直接读 RAM 更慢。它印证了 §11.4 里"Auto 投影实验性支持"的定位 ——
 在集显上它既不是加速路径，也不能默认开启。
+
+### 11.8 全量 lib 单元测试（含既有失败的归因）
+
+`cargo test --locked --lib`（本分支 HEAD `d41389fe`）：
+
+```
+test result: FAILED. 1273 passed; 17 failed; 84 ignored; 0 measured; 0 filtered out
+```
+
+17 个失败**全部在基线 `fa10afc8`（本分支我的 5 个 commit 之前）上原样复现**——用
+`git worktree` 单独检出基线、逐个 `--exact` 重跑逐一比对，失败集合完全一致。因此
+**这 17 个是既有失败，与本轮改动无关**，本轮引入 0 个回归。
+
+失败集中在四类，都不是 LFM3：
+
+| 类别 | 用例 | 性质 |
+| --- | --- | --- |
+| NEON 逐位对齐 | `ops::matmul::neon_tests::rope_neox_inplace_matches_pinned_ggml_recurrence_and_fused_rotation`、`ops::dot::tests::dot_bf16_f32_is_bitwise_stable_against_ascending_reference` | 累加顺序导致 1 ULP 漂移（`...776` vs `...777`） |
+| libm 三角函数逐位 | `ops::rope::tests::vision_rope_matches_ggml_libc_trig_bits` | Rust `sinf`/`cosf` 与 glibc 差 4 ULP |
+| BF16 投影 / softcap | `models::gemma4::trunk::tests::*`（4 个） | pinned 标量 dot 与 FMA 累加顺序不同 |
+| 其它模型与格式 | `models::breeze`（4）、`models::clm`（2）、`models::dots::vocoder`、`models::qwen_drive`、`models::yue2`、`ops::argmax::tests::large_random`、`format::ggufrs` | 与本轮无关 |
+
+其中前两类恰好是**"不必追求完全比特对齐"**原则的正面例证：llama.cpp 用 libm 的
+`sinf`/`cosf`，Rust 用自己的实现，差 4 ULP；BF16 投影因为累加顺序不同差 1 ULP。
+这类差异**无法在不逐位复制 glibc 的情况下消除**，而逐位复制 glibc 并不带来实际价值
+（§11.7 已证明 logits 差到 0.8 而 greedy 序列始终一致）。真正值得修的是"数值上
+明显错"的问题，不是"差 1 ULP"的问题。
+
+**仍未验证**：全量集成测试（`tests/` 下 ~170 个目标）需要本机没有的权重，未跑；
+gouzil 侧同样未跑。
