@@ -111,23 +111,27 @@ impl<'model, 'weights> LinearExecutor<'model, 'weights> {
             && bindings.iter().any(|b| gpu_compatible(*b).is_ok())
         {
             match policy.context()? {
-                Some(context) => match crate::vulkan::ops::BatchedLinearRuntime::new(
-                    context,
-                    max_rows,
-                    max_n_in,
-                    max_n_out,
-                    bindings
-                        .len()
-                        .checked_add(1)
-                        .ok_or_else(|| invalid("binding count overflow"))?,
-                ) {
-                    Ok(runtime) => Some(runtime),
-                    Err(error) if policy == ComputePolicy::Auto => {
-                        log::info!("compute linear: CPU fallback: {error}");
-                        None
+                Some(context) => {
+                    match crate::vulkan::ops::BatchedLinearRuntime::new_with_output_slots(
+                        context,
+                        max_rows,
+                        max_n_in,
+                        max_n_out,
+                        bindings
+                            .len()
+                            .checked_add(bindings.len().div_ceil(2))
+                            .and_then(|n| n.checked_add(1))
+                            .ok_or_else(|| invalid("binding count overflow"))?,
+                        bindings.len().min(3),
+                    ) {
+                        Ok(runtime) => Some(runtime),
+                        Err(error) if policy == ComputePolicy::Auto => {
+                            log::info!("compute linear: CPU fallback: {error}");
+                            None
+                        }
+                        Err(error) => return Err(error.into()),
                     }
-                    Err(error) => return Err(error.into()),
-                },
+                }
                 None => None,
             }
         } else {
@@ -347,6 +351,31 @@ impl<'model, 'weights> LinearExecutor<'model, 'weights> {
             total = total
                 .checked_add(output.len())
                 .ok_or_else(|| invalid("group output size overflow"))?;
+        }
+        if N > 1 {
+            let specs: Vec<_> = bindings
+                .iter()
+                .map(|binding| {
+                    Ok((
+                        binding.weight.kernel.weight_bytes().ok_or_else(|| {
+                            ComputeError::Unsupported("kernel has no immutable storage view".into())
+                        })?,
+                        GpuMatmulSpec::prepared(binding.weight)?,
+                        binding.weight.n_in,
+                        binding.weight.n_out,
+                    ))
+                })
+                .collect::<Result<_, ComputeError>>()?;
+            runtime.matmul_rows_group(&specs, input, rows, &mut outputs[..])?;
+            if outputs
+                .iter()
+                .any(|output| output.iter().any(|v| !v.is_finite()))
+            {
+                return Err(ComputeError::Device(
+                    "linear produced non-finite output".into(),
+                ));
+            }
+            return Ok(());
         }
         self.staging.resize(total, 0.0);
         let mut offset = 0;

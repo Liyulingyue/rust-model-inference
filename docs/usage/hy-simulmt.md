@@ -47,8 +47,11 @@ normalization, routing and KV remain on the host. Auto falls back to CPU when
 the device or a kernel is unavailable. `--compute vulkan` requests a complete
 Vulkan decoder and is rejected for this hybrid model. Set `RMI_COMPUTE_TRACE=1`
 to inspect actual backend choices and cumulative device counters.
-Auto is experimental and can be slower than CPU on this model; the measured
-functional coverage does not establish a GPU speedup.
+Auto is experimental. On an Apple M3 Max with the Q4_K_M checkpoint, four
+threads, and `jfk-3.2s.wav`, a one-token run took 10.36 s in Auto versus
+48.74 s on CPU (end-to-end, including model setup); output was identical
+(`And`). This is a host-specific measurement, not a throughput guarantee for
+other Vulkan drivers.
 Interleave's three-turn Auto logits exceed the numerical error cap. Isolated
 Vulkan operator processes also encountered exit-time SIGSEGV with NVIDIA
 570.153.02; exit stability remains unresolved.
