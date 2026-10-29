@@ -430,3 +430,105 @@ RoPE/scalar 对照不是可相加的误差分解，也未得到通用全图误�
 复现命令和机器可读证据见 [README](../../tools/oracle/lfm3/README.md) 与
 [review-fixes.json](../../tools/oracle/lfm3/review-fixes.json)。未运行全仓测试，其他真实
 权重量化档、其他硬件、全图 GPU、多模态和工具调用不在本次验证范围内。
+
+---
+
+## 11. 对齐原则与二轮审阅（2026-10-29）
+
+### 11.1 仓库的对齐原则
+
+审阅过程中确立了一条应当适用于**所有**模型适配的原则,先记在这里,因为它
+改变了本报告 §6 与 §8 的建议优先级:
+
+> **近似会带来精度损失,并不意味着 llama.cpp 的近似是最好的。我们永远对齐架构、
+> 对齐计算逻辑,但没必要吹毛求疵追求完全比特对齐 —— 因为量化本身就是比特损失的事。**
+
+这条原则的含义:
+
+| 该做 | 不该做 |
+| --- | --- |
+| 对齐架构:层数、注意力形态、归一化位置、门控语义、RoPE 的角度公式 | 对齐近似的实现细节:ggml 的 NEON 向量 exp 近似、四路 F32 横向求和 |
+| 对齐计算逻辑:算子的数学定义、累加顺序、量化发生在哪一步 | 为了位级一致而关闭默认 SIMD、替换共享算子或加特例分支 |
+| 记录残差落在哪个量级、是否可接受 | 把残差拆成逐算子的误差预算并追求归零 |
+
+**按这条原则,§6 的候选 3(在 Rust 侧复刻 Oracle 风格的 softmax)不应该做。**
+Rust 的精确 exp 不劣于 ggml 的向量近似,把它换成近似只会降低精度、换不来一致性。
+§6 候选 1(精确 sin/cos)已经落地,因为它不是"模仿近似",而是**去掉了一个与
+参考无关的舍入差异源**;候选 5(短卷积累加顺序)同理,那是计算逻辑而不是近似选择。
+
+### 11.2 二轮审阅结论
+
+`fa10afc8`("Complete LFM3 entry points and shared compute dispatch")回应了
+§3 的四项缺口。逐条核对实现:
+
+| 原审阅项 | 实现 | 核对 |
+| --- | --- | --- |
+| 多 weight 分发 | 全部投影走 `LinearExecutor`;**Q/K/V/head gate(4 个)与 FFN gate/up(2 个)走 `run_group`**,共享 `PreparedRows` 激活量化 | `forward.rs` 的 `run_group` 两处 ✓ |
+| GPU/CPU 自动分发 | CLI/HTTP/JEV 共用 `ComputePolicy`;Auto 在 M3 Max 上真跑 Vulkan 投影(2,312 次 dispatch);缺驱动回退实测过(`VK_DRIVER_FILES=/nonexistent/...`);`--compute vulkan` 全图拒绝 | `session.rs` 的 `new_with_compute` ✓ |
+| HTTP | `Lfm3TextRuntime` 注册进 `build_text_runtime`;强制 GGUF Jinja;拒图片/工具调用;超上下文 400 | `src/models/lfm3/runtime.rs` ✓ |
+| JEV | CLI + HTTP 单项/分组,用共享 `JevScorer` trait 与 `run_jev_decision_core` | `src/app/jev/{single,grouped}/lfm3.rs` ✓ |
+
+另外两处值得记:
+
+- **Auto 时打印 backend 诊断**(`LFM3 projections: requested=… backend=…; attention/shortconv/KV=Cpu`)
+  —— 正面回应了 §8 R2 的"`--gpu` 静默 no-op"
+- **清单状态细分**为 `Verified`(CPU/Q8_0 运行)+ `Experimental`(Vulkan 投影)
+  —— 回应了 §8 R5 的"状态与证据强度不匹配"
+
+### 11.3 对 §6 误差归因的修正
+
+`fa10afc8` 修正了本报告 §6 的两处推测,方向都是本报告写得太乐观:
+
+1. **softmax**:固定 Oracle 的 `ggml_vec_soft_max_f32` 在 NEON 上使用**向量 exp
+   近似**与**四路 F32 横向求和**,再累加进 `ggml_float`;Rust 是精确 exp 与逐值
+   F64 求和。差异在 **Oracle 一侧**,不是 Rust 一侧。§6 原先把 softmax 列为
+   "已排除",结论对、理由错。
+2. **Q8_0 tie 规则**:两侧原生 NEON Q8_0 激活量化**都**用 ties-to-even,不能把
+   原生路径的差异解释成 tie 规则错误。§6 候选 4 的机理成立,但归因方向错了。
+
+同时接受了本报告的两条方法论意见,并写进了机器可读证据:
+
+- `control_scope`:`scalar changes SIMD reductions and activation quantization
+  together; controls are not an additive decomposition` —— §6 候选 2 的实验设计
+  有缺陷,scalar 控制不能当 dot 单项归因
+- `acceptance.scope`:`empirical regression alarms for these Q8_0 fixtures; not a
+  proven graph-wide bound` —— §6 提醒的"阈值是拟合出来的"已被如实标注
+
+### 11.4 按原则重新分级:还剩什么
+
+模型**工作正常**:四组 prompt 的 token ID 精确一致、各 8 步 greedy 与固定 Oracle
+一致、24 次 embedding 逐位一致、5,176 个检查点的名称/shape/次数核对通过、
+Tokenizer 与嵌入精确检查、有损路径检查有限值与完整 logits 误差。按 11.1 的原则,
+这已经是可接受的状态,`1.25/0.20` 作为**回归报警线**(防止数值变差)而非
+"精确对齐"证明。
+
+于是本报告 §6 剩余建议的优先级变了:
+
+| 原建议 | 重新分级 | 理由 |
+| --- | --- | --- |
+| 误差预算(把 ~1.0 分解到各算子) | ❌ **撤销** | 归零不是目标;11.1 明确不追比特对齐。记录量级与"是否可接受"已足够 |
+| 在 Rust 侧复刻 Oracle 风格 softmax 做 A/B | ❌ **撤销** | 那是把精确换成近似,方向相反 |
+| 探针覆盖 sigmoid head gate 路径 | ✅ **保留并已做** | 量的不是对齐,是**数值裕度**:哪里的输入差异容易被量化放大。这是鲁棒性信息,不是对齐债 |
+| 阈值余量(1.0078/1.25 = 81%) | ⚠️ **降级为记录项** | 作为回归报警线够用;换权重/换平台仍可能越界,故保留在证据里而不是继续收紧 |
+
+### 11.5 本轮随审阅完成的改动
+
+| 文件 | 改动 |
+| --- | --- |
+| `tools/oracle/lfm3/checkpoints.patch` | 增加 `cb(attn_out, "lfm3_attn_gated", il)`,让 **sigmoid head gate 缩放后**的输出(输出投影的输入)能被探针覆盖。已对 pinned `19cce691` 的 `src/models/lfm3.cpp` 实测 `git apply` 通过 |
+| `tools/oracle/lfm3/compare_checkpoints.py` | 探针从只查两个 norm 扩展到**每一个量化投影的输入**;报告 `q8_amplification_points` 全量清单、`projection_inputs_available` / `projection_inputs_without_oracle_checkpoint`;`first_norm_q8_change` 保留以兼容既有证据;量化器改为可注入(`quantize=`),便于测试 |
+| `tools/oracle/lfm3/test_compare.py` | 新增:合成 fixture + 假 Q8_0 量化器,覆盖"全部投影输入可探测""漂移后被报告为放大""Oracle 暴露 gated 输出后即可探测""Oracle 缺失时跳过而非误判"四条路径 |
+| `tools/oracle/lfm3/README.md` | 记录新的探针覆盖面、字段含义,以及"探针量的是数值裕度而非比特对齐" |
+
+**本机条件限制**:LFM3-1.7B 的 Q8_0 权重(1.85 GB)不在本机,也没有构建好的 pinned
+llama.cpp oracle,所以本轮改动**未经真实权重复验**;补丁与探针的行为分别用
+`git apply`(对真实 `lfm3.cpp`)与合成 fixture 验证。真实复验命令见
+`tools/oracle/lfm3/README.md`。
+
+### 11.6 二轮审阅的风险
+
+| 项 | 说明 |
+| --- | --- |
+| 未复验 | 本轮探针改动没在真实 trace 上跑过;`q8_amplification_points` 的实际内容未知 |
+| 补丁未在真 oracle 上编译 | `checkpoints.patch` 的新 hunk 只验证了 `git apply`,没有编译 llama.cpp |
+| 全库测试未跑 | 只跑了 `cargo check --all-targets`(0 error)、`cargo fmt --check`、定向测试组 |
