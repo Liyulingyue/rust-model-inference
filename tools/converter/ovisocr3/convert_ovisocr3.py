@@ -49,6 +49,35 @@ sys.argv = [
 convert_hf_to_gguf.main()
 '''
 
+# The pinned mmproj exporter omits the source processor's pixel budget.
+_VISION_CONVERTER = r'''
+import json
+import sys
+from pathlib import Path
+
+llama_cpp, model, outfile = map(Path, sys.argv[1:])
+sys.path.insert(0, str(llama_cpp))
+sys.path.insert(0, str(llama_cpp / "gguf-py"))
+from conversion.qwen3vl import Qwen3VLVisionModel
+
+size = json.loads((model / "preprocessor_config.json").read_text())["size"]
+original_set_parameters = Qwen3VLVisionModel.set_gguf_parameters
+
+def set_parameters(self):
+    original_set_parameters(self)
+    self.gguf_writer.add_vision_min_pixels(size["shortest_edge"])
+    self.gguf_writer.add_vision_max_pixels(size["longest_edge"])
+
+Qwen3VLVisionModel.set_gguf_parameters = set_parameters
+
+import convert_hf_to_gguf
+sys.argv = [
+    "convert_hf_to_gguf.py", str(model), "--outfile", str(outfile),
+    "--outtype", "bf16", "--mmproj",
+]
+convert_hf_to_gguf.main()
+'''
+
 
 def _shape(config: dict, name: str) -> tuple[int, ...]:
     text = config["text_config"]
@@ -381,8 +410,18 @@ def validate_source(model: Path) -> dict:
         if special_tokens.get(str(token_id), {}).get("content") != token:
             raise ValueError(f"tokenizer special token {token_id} is not {token!r}")
     processor = json.loads((model / "preprocessor_config.json").read_text())
-    if processor.get("image_mean") != [0.5, 0.5, 0.5] or processor.get("image_std") != [0.5, 0.5, 0.5]:
-        raise ValueError("unsupported OvisOCR3 image normalization")
+    for key, expected in {
+        "size": {"shortest_edge": 65536, "longest_edge": 16777216},
+        "patch_size": 16,
+        "temporal_patch_size": 2,
+        "merge_size": 2,
+        "image_mean": [0.5, 0.5, 0.5],
+        "image_std": [0.5, 0.5, 0.5],
+        "processor_class": "Qwen3VLProcessor",
+        "image_processor_type": "Qwen2VLImageProcessorFast",
+    }.items():
+        if processor.get(key) != expected:
+            raise ValueError(f"preprocessor.{key}: expected {expected!r}, got {processor.get(key)!r}")
     weights = model / "model.safetensors"
     if not weights.is_file():
         raise FileNotFoundError(weights)
@@ -398,11 +437,9 @@ def build_commands(
     *,
     python: str = sys.executable,
 ) -> list[list[str]]:
-    converter = llama_cpp / "convert_hf_to_gguf.py"
-    base = [python, str(converter), str(model), "--outtype", "bf16"]
     return [
         [python, "-c", _TEXT_CONVERTER, str(llama_cpp), str(model), str(outfile)],
-        base + ["--outfile", str(mmproj_outfile), "--mmproj"],
+        [python, "-c", _VISION_CONVERTER, str(llama_cpp), str(model), str(mmproj_outfile)],
     ]
 
 

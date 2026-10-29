@@ -48,28 +48,31 @@ converter/
 `b96806d96061049a5b574269b049bf6241d63d46` checkout：
 
 ```bash
-models/.venv/bin/python -m tools.converter.ovisocr3.convert_ovisocr3 \
+.venv/bin/python -m tools.converter.ovisocr3.convert_ovisocr3 \
   models/OvisOCR3 \
   --llama-cpp /path/to/llama.cpp \
   --outfile models/OvisOCR3-BF16.gguf \
   --mmproj-outfile models/mmproj-OvisOCR3-BF16.gguf
 ```
 
-The adapter rejects a near-match architecture, missing/extra tensors, wrong
-shapes or dtypes, and tokenizer/image preprocessing drift before invoking the
-Oracle converter. The 473 source tensors are BF16; tokenizer IDs and
-their BF16 representation are preserved, while tokenizer and metadata
-contracts are checked losslessly. Softmax, exponential,
-image resize, and quantization paths are validated by behavior or error bounds
-only because their floating-point operation order can lose bitwise identity.
+The adapter validates the architecture, all 473 BF16 source tensors,
+tokenizer and image processor before conversion. It also exports the source
+pixel budget (`65536` to `16777216`) into the mmproj metadata. Without these
+keys, the runtime falls back to another model's defaults: a 32x32 input yields
+9 image tokens instead of the source configuration's 64 tokens at 256x256.
+The official README's `448²` to `2880²` values are explicit vLLM overrides,
+not the checkpoint's saved defaults; this exporter preserves the saved values.
 
 The validated ModelScope source has `model.safetensors` SHA-256
 `aa2311c6b22b07cf3afe9aac6e8bcb02a2b19dd8671b2a91d0b144071577e600` and is
-1,706,030,528 bytes. Against the pinned Oracle, a `你好` / four-token greedy
-run matched all 325 trace records' order, shapes, prompt IDs, and generated
-IDs. Embeddings and layer selection were bitwise equal; recurrent/attention
-state, nonlinear, resize, and quantization paths were compared with numerical
-error bounds rather than a bitwise claim.
+1,706,030,528 bytes. Runtime validation uses a separate fixed llama.cpp
+`11fe0215` reference, whose GDN epsilon formula matches the existing runtime.
+The older converter pin uses a different normalization formula, so its failing
+strict recurrent comparison is not a rounding-only difference or a passing
+alignment result. Exact checks cover tokenizer/structure/embedding/initial
+zero state; accumulated arithmetic uses independently calibrated numerical
+bounds. See [the validation report](../oracle/ovisocr3/README.md) for pins,
+hashes, commands, results and coverage limits.
 
 ## BGE 转换与推理
 

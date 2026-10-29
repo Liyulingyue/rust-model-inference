@@ -1,4 +1,7 @@
 import copy
+import json
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -7,8 +10,22 @@ from tools.converter.ovisocr3.convert_ovisocr3 import (
     build_commands,
     expected_tensor_shapes,
     validate_config,
+    validate_source,
     validate_tensor_inventory,
 )
+
+
+def processor_config() -> dict:
+    return {
+        "size": {"shortest_edge": 65536, "longest_edge": 16777216},
+        "patch_size": 16,
+        "temporal_patch_size": 2,
+        "merge_size": 2,
+        "image_mean": [0.5, 0.5, 0.5],
+        "image_std": [0.5, 0.5, 0.5],
+        "processor_class": "Qwen3VLProcessor",
+        "image_processor_type": "Qwen2VLImageProcessorFast",
+    }
 
 
 def model_config() -> dict:
@@ -75,6 +92,79 @@ def model_config() -> dict:
 
 
 class OvisOCR3ContractTest(unittest.TestCase):
+    def test_mmproj_preserves_source_pixel_budget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "preprocessor_config.json").write_text(json.dumps(processor_config()))
+            (root / "conversion").mkdir()
+            (root / "conversion/__init__.py").touch()
+            (root / "conversion/qwen3vl.py").write_text('''
+class Writer:
+    def __init__(self):
+        self.values = {}
+    def add_vision_min_pixels(self, value):
+        self.values["clip.vision.image_min_pixels"] = value
+    def add_vision_max_pixels(self, value):
+        self.values["clip.vision.image_max_pixels"] = value
+class Qwen3VLVisionModel:
+    def __init__(self):
+        self.gguf_writer = Writer()
+    def set_gguf_parameters(self):
+        self.gguf_writer.values["base"] = True
+''')
+            (root / "convert_hf_to_gguf.py").write_text('''
+import json, sys
+from pathlib import Path
+from conversion.qwen3vl import Qwen3VLVisionModel
+def main():
+    model = Qwen3VLVisionModel()
+    model.set_gguf_parameters()
+    Path(sys.argv[sys.argv.index("--outfile") + 1]).write_text(json.dumps(model.gguf_writer.values))
+if __name__ == "__main__":
+    main()
+''')
+            output = root / "mmproj.gguf"
+            command = build_commands(root, root, root / "text.gguf", output)[1]
+            subprocess.run(command, check=True)
+            self.assertEqual(json.loads(output.read_text()), {
+                "base": True,
+                "clip.vision.image_min_pixels": 65536,
+                "clip.vision.image_max_pixels": 16777216,
+            })
+
+    def test_rejects_image_processor_drift(self):
+        config = model_config()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "config.json").write_text(json.dumps(config))
+            (root / "tokenizer.json").write_text(json.dumps({
+                "model": {"type": "BPE"}, "normalizer": {"type": "NFC"},
+            }))
+            (root / "tokenizer_config.json").write_text(json.dumps({
+                "add_bos_token": False, "tokenizer_class": "Qwen2Tokenizer",
+                "bos_token": None, "eos_token": "<|im_end|>", "pad_token": "<|endoftext|>",
+                "added_tokens_decoder": {str(i): {"content": token} for i, token in enumerate([
+                    "<|vision_start|>", "<|vision_end|>", "<|vision_pad|>", "<|image_pad|>", "<|video_pad|>",
+                ], 248053)},
+            }))
+            header = json.dumps({name: {"dtype": "BF16", "shape": shape}
+                                 for name, shape in expected_tensor_shapes(config).items()}).encode()
+            (root / "model.safetensors").write_bytes(len(header).to_bytes(8, "little") + header)
+            processor_path = root / "preprocessor_config.json"
+            processor_path.write_text(json.dumps(processor_config()))
+            validate_source(root)
+            for key, value in {
+                "size": {"shortest_edge": 8192, "longest_edge": 4194304},
+                "patch_size": 14, "temporal_patch_size": 1, "merge_size": 1,
+                "image_processor_type": "CLIPImageProcessor",
+            }.items():
+                with self.subTest(key=key):
+                    invalid = processor_config()
+                    invalid[key] = value
+                    processor_path.write_text(json.dumps(invalid))
+                    with self.assertRaisesRegex(ValueError, "preprocessor"):
+                        validate_source(root)
+
     def test_accepts_ovis_qwen35_contract_and_catalogues_all_tensors(self):
         validate_config(model_config())
         shapes = expected_tensor_shapes(model_config())
@@ -111,7 +201,7 @@ class OvisOCR3ContractTest(unittest.TestCase):
         self.assertIn("tokenizer.ggml.normalizer.nfc", commands[0][2])
         self.assertIn("--no-nextn", commands[0][2])
         self.assertEqual(commands[0][-3:], ["/opt/llama.cpp", "/models/ovis", "/out/ovis.gguf"])
-        self.assertIn("--mmproj", commands[1])
+        self.assertIn("--mmproj", commands[1][2])
         self.assertEqual(LLAMA_CPP_COMMIT, "b96806d96061049a5b574269b049bf6241d63d46")
 
 
