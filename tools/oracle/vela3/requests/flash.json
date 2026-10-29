@@ -18,8 +18,8 @@
     "entities": {
       "type": "span",
       "criteria": [
-        "PERSON",
-        "ORGANIZATION"
+        "person",
+        "company"
       ],
       "definitions": null,
       "threshold": 0.0

@@ -1,5 +1,5 @@
 {
-  "verified_at_utc": "2026-10-29T17:54:28.023338+00:00",
+  "verified_at_utc": "2026-10-29T18:46:17.111858+00:00",
   "environment": {
     "platform": "macOS arm64",
     "rust": "1.98.1",
@@ -143,6 +143,264 @@
         }
       ],
       "errors": []
+    },
+    "fast_threshold_regression": {
+      "passed": true,
+      "atol": 0.0005,
+      "rtol": 0.0005,
+      "floats_compared": 9,
+      "max_absolute_error": 5.960464477539063e-08,
+      "largest_errors": [
+        {
+          "path": "response.answers.threshold_string.spans[0].probability",
+          "absolute_error": 5.960464477539063e-08
+        },
+        {
+          "path": "response.answers.threshold_negative.spans[0].probability",
+          "absolute_error": 5.960464477539063e-08
+        },
+        {
+          "path": "response.answers.threshold_string.spans[0].score",
+          "absolute_error": 4.099297201687335e-08
+        },
+        {
+          "path": "response.answers.threshold_negative.spans[0].score",
+          "absolute_error": 1.3815339094946921e-08
+        },
+        {
+          "path": "response.answers.threshold_string.spans[1].score",
+          "absolute_error": 5.423431925777322e-09
+        },
+        {
+          "path": "response.answers.threshold_string.spans[1].probability",
+          "absolute_error": 0.0
+        },
+        {
+          "path": "response.answers.threshold_string.threshold",
+          "absolute_error": 0.0
+        },
+        {
+          "path": "response.answers.threshold_negative.threshold",
+          "absolute_error": 0.0
+        },
+        {
+          "path": "response.answers.threshold_above_one.threshold",
+          "absolute_error": 0.0
+        }
+      ],
+      "errors": []
+    },
+    "fast_cli": {
+      "passed": true,
+      "atol": 0.0005,
+      "rtol": 0.0005,
+      "floats_compared": 52,
+      "max_absolute_error": 1.0851917867649163e-06,
+      "largest_errors": [
+        {
+          "path": "response.answers.noul.noul",
+          "absolute_error": 1.0851917867649163e-06
+        },
+        {
+          "path": "response.answers.decision.probabilities.human",
+          "absolute_error": 6.820031950294236e-07
+        },
+        {
+          "path": "response.answers.decision.probabilities.company",
+          "absolute_error": 6.820031949739125e-07
+        },
+        {
+          "path": "response.answers.feedback.probabilities.SAT",
+          "absolute_error": 4.784328839213536e-07
+        },
+        {
+          "path": "response.answers.feedback.probabilities.WRONG_ANSWER",
+          "absolute_error": 4.28031035282217e-07
+        },
+        {
+          "path": "response.answers.halu.spans[0].probability",
+          "absolute_error": 3.948807716369629e-07
+        },
+        {
+          "path": "response.answers.halu.spans[0].score",
+          "absolute_error": 3.888573311891519e-07
+        },
+        {
+          "path": "response.answers.entities.spans[0].score",
+          "absolute_error": 2.652745071385354e-07
+        },
+        {
+          "path": "response.answers.grouped_attack.probabilities.jailbreak",
+          "absolute_error": 2.4996127503951193e-07
+        },
+        {
+          "path": "response.answers.grouped_attack.probabilities.benign",
+          "absolute_error": 2.4996127501175636e-07
+        }
+      ],
+      "errors": [],
+      "questions": 18,
+      "usage": {
+        "input_tokens": 1651,
+        "output_tokens": 0
+      },
+      "wall_seconds_approx": 217.3
+    },
+    "fast_criteria_regression": {
+      "passed": true,
+      "atol": 0.0005,
+      "rtol": 0.0005,
+      "floats_compared": 10,
+      "max_absolute_error": 4.7618807730298585e-07,
+      "largest_errors": [
+        {
+          "path": "response.answers.ordinary_object.probabilities.human",
+          "absolute_error": 4.7618807730298585e-07
+        },
+        {
+          "path": "response.answers.ordinary_object.probabilities.company",
+          "absolute_error": 4.7618807730298585e-07
+        },
+        {
+          "path": "response.answers.router_duplicate.probabilities.benign",
+          "absolute_error": 1.1920621706407175e-07
+        },
+        {
+          "path": "response.answers.router_duplicate.probabilities.jailbreak",
+          "absolute_error": 1.192062170085606e-07
+        },
+        {
+          "path": "response.answers.router_unique.probabilities.benign",
+          "absolute_error": 4.470232328745993e-08
+        },
+        {
+          "path": "response.answers.router_unique.probabilities.jailbreak",
+          "absolute_error": 4.470232328745993e-08
+        },
+        {
+          "path": "response.answers.ordinary_array.probabilities.human",
+          "absolute_error": 0.0
+        },
+        {
+          "path": "response.answers.ordinary_array.probabilities.company",
+          "absolute_error": 0.0
+        },
+        {
+          "path": "response.answers.ordinary_duplicate.probabilities.human",
+          "absolute_error": 0.0
+        },
+        {
+          "path": "response.answers.ordinary_duplicate.probabilities.company",
+          "absolute_error": 0.0
+        }
+      ],
+      "errors": [],
+      "questions": 6,
+      "usage": {
+        "input_tokens": 192,
+        "output_tokens": 0
+      },
+      "red_green": true
+    },
+    "flash_cli": {
+      "passed": true,
+      "atol": 0.01,
+      "rtol": 0.01,
+      "floats_compared": 7,
+      "max_absolute_error": 0.0034346127500579637,
+      "largest_errors": [
+        {
+          "path": "response.answers.choice.confidence",
+          "absolute_error": 0.0034346127500579637
+        },
+        {
+          "path": "response.answers.choice.probabilities.person",
+          "absolute_error": 0.000821892786816325
+        },
+        {
+          "path": "response.answers.choice.probabilities.company",
+          "absolute_error": 0.0008218927868162904
+        },
+        {
+          "path": "response.answers.noul.noul",
+          "absolute_error": 0.00014691582246573187
+        },
+        {
+          "path": "response.answers.entities.spans[1].score",
+          "absolute_error": 0.00012663512385241438
+        },
+        {
+          "path": "response.answers.entities.spans[0].score",
+          "absolute_error": 0.00012215192127773555
+        },
+        {
+          "path": "response.answers.entities.threshold",
+          "absolute_error": 0.0
+        }
+      ],
+      "errors": [],
+      "questions": 3,
+      "usage": {
+        "input_tokens": 198,
+        "output_tokens": 0
+      }
+    },
+    "fast_unicode_threshold_regression": {
+      "passed": true,
+      "atol": 0.0005,
+      "rtol": 0.0005,
+      "floats_compared": 28,
+      "max_absolute_error": 5.960464477539063e-08,
+      "largest_errors": [
+        {
+          "path": "response.answers.fullwidth.spans[1].probability",
+          "absolute_error": 5.960464477539063e-08
+        },
+        {
+          "path": "response.answers.arabic.spans[1].probability",
+          "absolute_error": 5.960464477539063e-08
+        },
+        {
+          "path": "response.answers.mathematical.spans[1].probability",
+          "absolute_error": 5.960464477539063e-08
+        },
+        {
+          "path": "response.answers.underscores.spans[1].probability",
+          "absolute_error": 5.960464477539063e-08
+        },
+        {
+          "path": "response.answers.fullwidth.spans[1].score",
+          "absolute_error": 4.7822231730165754e-08
+        },
+        {
+          "path": "response.answers.arabic.spans[1].score",
+          "absolute_error": 4.7822231730165754e-08
+        },
+        {
+          "path": "response.answers.mathematical.spans[1].score",
+          "absolute_error": 4.7822231730165754e-08
+        },
+        {
+          "path": "response.answers.underscores.spans[1].score",
+          "absolute_error": 4.7822231730165754e-08
+        },
+        {
+          "path": "response.answers.exponent.spans[0].score",
+          "absolute_error": 1.8728593897954227e-08
+        },
+        {
+          "path": "response.answers.false.spans[0].score",
+          "absolute_error": 1.8728593897954227e-08
+        }
+      ],
+      "errors": [],
+      "questions": 9,
+      "usage": {
+        "input_tokens": 128,
+        "output_tokens": 0
+      },
+      "red_green": true,
+      "fixture": "tools/oracle/vela3/requests/fast-thresholds.json"
     }
   },
   "real_span_heads": {
@@ -332,6 +590,455 @@
           "native_argmax": 0
         }
       ]
+    },
+    "turbo_prefix_synthetic": {
+      "reference_base_revision": "da17b5d0c860f7e5be6e2afebe67228b4bd24d0c",
+      "runtime": "models/d3-turbo/pinned/d3_runtime.py",
+      "runtime_sha256": "ce79977d22c2307f00c03b4c214a21b9fee0dc9ab566ac04adc76524f8380380",
+      "primary_runtime_matches_pinned": true,
+      "fp32": [
+        {
+          "adapter": null,
+          "passed": true,
+          "max_abs": 4.76837158203125e-07,
+          "max_rmse": 2.059381500885138e-07,
+          "min_cosine": 0.9999998807907104,
+          "logits": {
+            "name": "vela3.d3.logits",
+            "layer": null,
+            "count": 3,
+            "passed": true,
+            "max_abs": 2.9802322387695312e-08,
+            "rmse": 2.517443853378154e-08,
+            "cosine": 0.9999999403953552,
+            "oracle_argmax": 2,
+            "native_argmax": 2
+          }
+        }
+      ],
+      "bf16": [
+        {
+          "adapter": null,
+          "passed": true,
+          "max_abs": 0.0,
+          "max_rmse": 0.0,
+          "min_cosine": 1.0,
+          "logits": {
+            "name": "vela3.d3.logits",
+            "layer": null,
+            "count": 3,
+            "passed": true,
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "cosine": 1.0,
+            "oracle_argmax": 2,
+            "native_argmax": 2
+          }
+        }
+      ],
+      "ordinary_gated_graph": {
+        "comparison": ".codex/vela3/d3-tiny-lora-comparison.json",
+        "max_abs": 3.5762786865234375e-07,
+        "reused_existing_evidence": true
+      },
+      "real_turbo_weight_parity": false
+    },
+    "real_flash_bf16": {
+      "passed": false,
+      "routes": {
+        "base": {
+          "passed": false,
+          "numeric_checkpoints": 99,
+          "passed_checkpoints": 88,
+          "profile": "bf16",
+          "atol": 0.1,
+          "rtol": 0.02,
+          "envelope": {
+            "max_abs": 0.75,
+            "max_rmse": 0.06,
+            "min_cosine": 0.9995
+          },
+          "max_abs": 1.5,
+          "max_activation_rmse": 0.047365956008434296,
+          "min_activation_cosine": 0.9999290108680725,
+          "first_failed_checkpoint": {
+            "name": "vela3.d3.layer",
+            "layer": 26,
+            "count": 24576,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.021890515461564064,
+            "cosine": 0.9999719858169556
+          },
+          "logits": [
+            {
+              "name": "vela3.d3.logits",
+              "layer": null,
+              "count": 3,
+              "passed": true,
+              "max_abs": 0.012209653854370117,
+              "rmse": 0.008420641534030437,
+              "cosine": 0.9999985694885254,
+              "oracle_argmax": 0,
+              "native_argmax": 0
+            }
+          ]
+        },
+        "span": {
+          "passed": false,
+          "numeric_checkpoints": 99,
+          "passed_checkpoints": 82,
+          "profile": "bf16",
+          "atol": 0.1,
+          "rtol": 0.02,
+          "envelope": {
+            "max_abs": 0.75,
+            "max_rmse": 0.06,
+            "min_cosine": 0.9995
+          },
+          "max_abs": 2.5,
+          "max_activation_rmse": 0.04526107758283615,
+          "min_activation_cosine": 0.9999183416366577,
+          "first_failed_checkpoint": {
+            "name": "vela3.d3.layer",
+            "layer": 23,
+            "count": 24576,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.02163992077112198,
+            "cosine": 0.9999710917472839
+          },
+          "logits": [
+            {
+              "name": "vela3.d3.logits",
+              "layer": null,
+              "count": 3,
+              "passed": true,
+              "max_abs": 0.012505412101745605,
+              "rmse": 0.007666591554880142,
+              "cosine": 0.9999926686286926,
+              "oracle_argmax": 0,
+              "native_argmax": 0
+            }
+          ]
+        },
+        "decision": {
+          "passed": false,
+          "numeric_checkpoints": 99,
+          "passed_checkpoints": 87,
+          "profile": "bf16",
+          "atol": 0.1,
+          "rtol": 0.02,
+          "envelope": {
+            "max_abs": 0.75,
+            "max_rmse": 0.06,
+            "min_cosine": 0.9995
+          },
+          "max_abs": 4.0,
+          "max_activation_rmse": 0.04554152116179466,
+          "min_activation_cosine": 0.9998872876167297,
+          "first_failed_checkpoint": {
+            "name": "vela3.d3.layer",
+            "layer": 26,
+            "count": 24576,
+            "passed": false,
+            "max_abs": 2.0,
+            "rmse": 0.02355007454752922,
+            "cosine": 0.9999719262123108
+          },
+          "logits": [
+            {
+              "name": "vela3.d3.logits",
+              "layer": null,
+              "count": 3,
+              "passed": true,
+              "max_abs": 0.07795143127441406,
+              "rmse": 0.07445602864027023,
+              "cosine": 0.9999451041221619,
+              "oracle_argmax": 0,
+              "native_argmax": 0
+            }
+          ]
+        }
+      },
+      "note": "Fixed BF16 activation max-absolute gate fails; short-trace logits and argmax pass. Full three-question public System One comparison passes. FP32 diagnostics pass all 297 numeric checkpoints; the responsible BF16 operator has not been isolated."
+    },
+    "real_flash_bf16_grafted_four_steps": {
+      "passed": false,
+      "numeric_checkpoints": 396,
+      "passed_checkpoints": 344,
+      "profile": "bf16",
+      "atol": 0.1,
+      "rtol": 0.02,
+      "envelope": {
+        "max_abs": 0.75,
+        "max_rmse": 0.06,
+        "min_cosine": 0.9995
+      },
+      "max_abs": 2.0,
+      "max_activation_rmse": 0.041997507214546204,
+      "min_activation_cosine": 0.9999337196350098,
+      "first_failed_checkpoint": {
+        "name": "vela3.d3.layer",
+        "layer": 25,
+        "count": 24576,
+        "passed": false,
+        "max_abs": 1.0,
+        "rmse": 0.01922256499528885,
+        "cosine": 0.9999490976333618
+      },
+      "logits": [
+        {
+          "name": "vela3.d3.generation_logits",
+          "layer": null,
+          "count": 248320,
+          "passed": true,
+          "max_abs": 0.09375,
+          "rmse": 0.018923241645097733,
+          "cosine": 0.9999823570251465,
+          "oracle_argmax": 2838,
+          "native_argmax": 2838
+        },
+        {
+          "name": "vela3.d3.generation_logits",
+          "layer": null,
+          "count": 248320,
+          "passed": true,
+          "max_abs": 0.09375,
+          "rmse": 0.01626369170844555,
+          "cosine": 0.9999803304672241,
+          "oracle_argmax": 369,
+          "native_argmax": 369
+        },
+        {
+          "name": "vela3.d3.generation_logits",
+          "layer": null,
+          "count": 248320,
+          "passed": true,
+          "max_abs": 0.09375,
+          "rmse": 0.01934054121375084,
+          "cosine": 0.9999747276306152,
+          "oracle_argmax": 264,
+          "native_argmax": 264
+        },
+        {
+          "name": "vela3.d3.generation_logits",
+          "layer": null,
+          "count": 248320,
+          "passed": true,
+          "max_abs": 0.15625,
+          "rmse": 0.03153984993696213,
+          "cosine": 0.9999749064445496,
+          "oracle_argmax": 4314,
+          "native_argmax": 4314
+        }
+      ],
+      "oracle_generated_token_ids": [
+        2838,
+        369,
+        264,
+        4314
+      ],
+      "native_generated_token_ids": [
+        2838,
+        369,
+        264,
+        4314
+      ],
+      "generated_tokens_exact": true,
+      "lm_head_sha256": "3d43ed7f6b0af94195d6ea687a59141384a4fba5a3756016aade8c9c0c208662",
+      "note": "Greedy token IDs and all four full-vocabulary logits pass. Overall passed=false because internal BF16 activations fail the unchanged envelope."
+    },
+    "real_flash_reference": {
+      "base": {
+        "repo_id": "vllm-sr/d3-flash",
+        "revision": "8b35c853b90e777595ec36bacae820fe08ea077a",
+        "runtime_note": "verified on this base revision's own runtime (d3 v3.1 *.py) with vela3_span.text_states / image_states (span passes through rt.encoder, noncausal as in training; FINISH_C.md 'Runtime v3.1 span fix')"
+      },
+      "upstream_base": {
+        "repo_id": "Qwen/Qwen3.5-9B",
+        "revision": "c202236235762e1c871ad0ccb60c8ee5ba337b9a"
+      },
+      "base_runtime_sha256": "adf7f7aa085674b5682e492d8b2e3cc4f11c67b0d153515c742e907e9b550917",
+      "pinned_runtime_sha256": "adf7f7aa085674b5682e492d8b2e3cc4f11c67b0d153515c742e907e9b550917",
+      "manifest_sha256": "abdafb9f4a3e39595a54b7ca977e6bd7a3279c57745231319e3a171a43976e65",
+      "pinned_manifest_sha256": "abdafb9f4a3e39595a54b7ca977e6bd7a3279c57745231319e3a171a43976e65",
+      "verified_weight_files": [
+        {
+          "file": "model-00001-of-00004.safetensors",
+          "bytes": 4911663824,
+          "sha256": "2c322016b91b1232c0d7628560164560d06d477a3edc3362714635f0e2f5949c"
+        },
+        {
+          "file": "model-00002-of-00004.safetensors",
+          "bytes": 4987839568,
+          "sha256": "f769650fb747d85132fb321335af7c71fcf3ba95fd1b1e806447e891cb4b0546"
+        },
+        {
+          "file": "model-00003-of-00004.safetensors",
+          "bytes": 4954726768,
+          "sha256": "c85a0f2f8df221b7864c74e778d802dc22fe1237fe2fa6ea8b81d7b612800a33"
+        },
+        {
+          "file": "model-00004-of-00004.safetensors",
+          "bytes": 1931248816,
+          "sha256": "d686ef3f6cdeeaad5eedde9d516c29ed1c90a1a322dd002765732869c11fa269"
+        },
+        {
+          "file": "readout.safetensors",
+          "bytes": 4178000,
+          "sha256": "8bbc9a9df4e1b7df85a80a1091977092b938d8d2d2869dfaeb8fd36063cf322f"
+        },
+        {
+          "file": "tokenizer.json",
+          "bytes": 12807982,
+          "sha256": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42"
+        },
+        {
+          "file": "tokenizer_config.json",
+          "bytes": 16710,
+          "sha256": "316230d6a809701f4db5ea8f8fc862bc3a6f3229c937c174e674ff3ca0a64ac8"
+        }
+      ],
+      "adapter_metadata": {
+        "vela_config_sha256": "9c14b2d82a95f33eb2c094f301a2f33450205b67e5cdd3cf6082e1fd827847ae",
+        "adapters": [
+          {
+            "name": "span",
+            "r": 48,
+            "alpha": 48,
+            "modules": 100,
+            "complete_pairs": true
+          },
+          {
+            "name": "decision",
+            "r": 24,
+            "alpha": 24,
+            "modules": 200,
+            "complete_pairs": true
+          },
+          {
+            "name": "ner",
+            "r": 96,
+            "alpha": 96,
+            "modules": 150,
+            "complete_pairs": true
+          },
+          {
+            "name": "relation",
+            "r": 48,
+            "alpha": 48,
+            "modules": 100,
+            "complete_pairs": true
+          },
+          {
+            "name": "image_halu",
+            "r": 48,
+            "alpha": 48,
+            "modules": 100,
+            "complete_pairs": true
+          },
+          {
+            "name": "decision_df",
+            "r": 24,
+            "alpha": 24,
+            "modules": 200,
+            "complete_pairs": true
+          }
+        ],
+        "generation_head": {
+          "shape": [
+            248320,
+            4096
+          ],
+          "dtype": "BF16"
+        }
+      }
+    },
+    "real_flash_f32": {
+      "passed": true,
+      "numeric_checkpoints": 297,
+      "routes": {
+        "base": {
+          "passed": true,
+          "numeric_checkpoints": 99,
+          "passed_checkpoints": 99,
+          "profile": "pointwise",
+          "atol": 0.0005,
+          "rtol": 0.0001,
+          "envelope": null,
+          "max_abs": 0.00048828125,
+          "max_activation_rmse": 1.0566215678409208e-05,
+          "min_activation_cosine": 0.9999998211860657,
+          "first_failed_checkpoint": null,
+          "logits": [
+            {
+              "name": "vela3.d3.logits",
+              "layer": null,
+              "count": 3,
+              "passed": true,
+              "max_abs": 1.1920928955078125e-06,
+              "rmse": 8.920806635615008e-07,
+              "cosine": 1.0,
+              "oracle_argmax": 0,
+              "native_argmax": 0
+            }
+          ]
+        },
+        "span": {
+          "passed": true,
+          "numeric_checkpoints": 99,
+          "passed_checkpoints": 99,
+          "profile": "pointwise",
+          "atol": 0.0005,
+          "rtol": 0.0001,
+          "envelope": null,
+          "max_abs": 0.0008544921875,
+          "max_activation_rmse": 1.174589942820603e-05,
+          "min_activation_cosine": 0.9999998211860657,
+          "first_failed_checkpoint": null,
+          "logits": [
+            {
+              "name": "vela3.d3.logits",
+              "layer": null,
+              "count": 3,
+              "passed": true,
+              "max_abs": 3.0994415283203125e-06,
+              "rmse": 2.2953593088459456e-06,
+              "cosine": 0.9999998807907104,
+              "oracle_argmax": 0,
+              "native_argmax": 0
+            }
+          ]
+        },
+        "decision": {
+          "passed": true,
+          "numeric_checkpoints": 99,
+          "passed_checkpoints": 99,
+          "profile": "pointwise",
+          "atol": 0.0005,
+          "rtol": 0.0001,
+          "envelope": null,
+          "max_abs": 0.0009765625,
+          "max_activation_rmse": 1.113495909521589e-05,
+          "min_activation_cosine": 0.9999997615814209,
+          "first_failed_checkpoint": null,
+          "logits": [
+            {
+              "name": "vela3.d3.logits",
+              "layer": null,
+              "count": 3,
+              "passed": true,
+              "max_abs": 1.895427703857422e-05,
+              "rmse": 1.345340751868207e-05,
+              "cosine": 1.0,
+              "oracle_argmax": 0,
+              "native_argmax": 0
+            }
+          ]
+        }
+      },
+      "note": "Actual fixed BF16 weight values cast in memory; no alternative checkpoint or tolerance change."
     }
   },
   "fast": {
@@ -345,12 +1052,36 @@
       "span_set"
     ],
     "synthetic_task_coverage": "All nine adapters, 15 questions and long-window aggregation",
-    "real_all_adapters": "pending"
+    "real_all_adapters": {
+      "passed": true,
+      "adapters": [
+        "domain",
+        "evidence",
+        "factcheck",
+        "feedback_df",
+        "ner",
+        "relation",
+        "router",
+        "span",
+        "span_sets"
+      ],
+      "questions": 18,
+      "usage": {
+        "input_tokens": 1651,
+        "output_tokens": 0
+      },
+      "decision_hidden_records": 7,
+      "hidden_max_absolute_error": 0.0008773803711,
+      "logits_max_absolute_error": 3.397464752e-06,
+      "test_wall_seconds": 312.6,
+      "response_atol": 0.0005,
+      "response_rtol": 0.0005,
+      "note": "Final public CLI rerun includes threshold and duplicate-choice fixes; exact response fields pass."
+    }
   },
   "fast_vision": {
     "ocr": {
       "passed": true,
-      "checkpoints": 86,
       "tokens": 360,
       "frames": [
         0,
@@ -412,11 +1143,13 @@
           "bytes": 37801156,
           "sha256": "882f2d71d6aee9d90f75b68d35c6eb74388fa96c1013d959b0ab18fe8b0f9719"
         }
-      }
+      },
+      "numeric_comparisons": 86,
+      "model_checkpoints": 84,
+      "preprocessing_comparisons": 2
     },
     "span": {
       "passed": true,
-      "checkpoints": 86,
       "tokens": 355,
       "frames": [
         0,
@@ -478,11 +1211,13 @@
           "bytes": 94444476,
           "sha256": "9cbfd04d5960818001c1b6ff7a3f02a5595dd73f3c5d32a256fbe1855f4055bd"
         }
-      }
+      },
+      "numeric_comparisons": 86,
+      "model_checkpoints": 84,
+      "preprocessing_comparisons": 2
     },
     "decision": {
       "passed": true,
-      "checkpoints": 86,
       "tokens": 351,
       "frames": [
         0,
@@ -537,11 +1272,13 @@
           "bytes": 2372084,
           "sha256": "8a8ddc13ccc09ebe41f4200b8685a72a7c19d4567c7c1a85f600b25dad53ae55"
         }
-      }
+      },
+      "numeric_comparisons": 86,
+      "model_checkpoints": 84,
+      "preprocessing_comparisons": 2
     },
     "box": {
       "passed": true,
-      "checkpoints": 86,
       "tokens": 340,
       "frames": [
         2,
@@ -602,12 +1339,15 @@
           "bytes": 94444476,
           "sha256": "62d05d58ddbb7f9248dff4e84dc4864c09c78a56e19088cae112ccbd9035fb6b"
         }
-      }
+      },
+      "numeric_comparisons": 86,
+      "model_checkpoints": 84,
+      "preprocessing_comparisons": 2
     }
   },
   "limits": [
     "mini/turbo fixed-revision bases differ from current ModelScope mirrors; full real-base alignment not executed pending source confirmation",
-    "flash full-base alignment pending weight download",
+    "flash real-base BF16 internal checkpoint gate FAILED; F32 graph, tested System One response and four greedy token IDs pass",
     "d3 image BF16 checkpoint gate FAILED; image path experimental",
     "fast-vision real checks use shipped Python text implementation with config-only compatibility shim",
     "No GPU/GGUF/server/video integration, long-context benchmark or cross-device validation"
@@ -615,13 +1355,13 @@
   "engineering_checks": {
     "vela3": {
       "result": "ok",
-      "passed": 37,
+      "passed": 38,
       "failed": 0,
       "ignored": 5
     },
     "full_library": {
       "result": "FAILED",
-      "passed": 1318,
+      "passed": 1319,
       "failed": 20,
       "ignored": 89
     },
@@ -673,6 +1413,11 @@
         "src/models/yue2/nar.rs",
         "src/ops/math/torch28.rs"
       ]
+    },
+    "safetensors": {
+      "passed": 2,
+      "failed": 0,
+      "ignored": 1
     }
   }
 }

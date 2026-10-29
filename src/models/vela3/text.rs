@@ -6,6 +6,44 @@ const CJK: &str = "⺀-⿿　-〿぀-ヿ㄀-ㇿ㐀-䶿一-鿿ꀀ-꓏가-힯豈-�
 const FAST_CJK: &str = "⺀-⿿　-〿぀-ヿ㄀-ㇿ㐀-䶿一-鿿ꀀ-꓏가-힯豈-﫿︰-﹏＀-￯";
 const EDGE: &str = "[](){}<>「」『』【】《》〈〉\"'“”‘’«»‹›";
 
+pub(crate) fn threshold_value(value: &Value) -> Result<f64, String> {
+    match value {
+        Value::String(s) => s.trim().parse::<f64>().ok().or_else(|| {
+            static DECIMAL: OnceLock<Regex> = OnceLock::new();
+            let decimal = DECIMAL.get_or_init(|| Regex::new(r"^\p{Nd}$").unwrap());
+            let is_digit = |c: char| decimal.is_match(c.encode_utf8(&mut [0; 4]));
+            let mut chars = s.trim().chars().peekable();
+            let mut normalized = String::new();
+            let mut previous_digit = false;
+            while let Some(c) = chars.next() {
+                if c == '_' {
+                    if !previous_digit || !chars.peek().is_some_and(|&c| is_digit(c)) {
+                        return None;
+                    }
+                    continue;
+                }
+                previous_digit = is_digit(c);
+                let c = if previous_digit {
+                    let mut start = c as u32;
+                    while char::from_u32(start - 1).is_some_and(is_digit) {
+                        start -= 1;
+                    }
+                    // Unicode decimal runs contain one or more consecutive sets of ten digits.
+                    char::from(b'0' + ((c as u32 - start) % 10) as u8)
+                } else {
+                    c
+                };
+                normalized.push(c);
+            }
+            normalized.parse::<f64>().ok()
+        }),
+        Value::Bool(b) => Some(if *b { 1. } else { 0. }),
+        _ => value.as_f64(),
+    }
+    .filter(|v| v.is_finite())
+    .ok_or_else(|| "span threshold must be a finite number".into())
+}
+
 pub(crate) fn split_words(text: &str) -> Vec<(usize, usize)> {
     static WORD: OnceLock<Regex> = OnceLock::new();
     let re = WORD.get_or_init(|| Regex::new(&format!(
@@ -322,6 +360,49 @@ mod tests {
         assert!(decode_spans("é", &[(1, 2)], &[0.9], &["x".into()], 0.5).is_err());
         assert!(decode_spans("x", &[(0, 1)], &[], &["x".into()], 0.5).is_err());
         assert!(decode_spans("x", &[(0, 1)], &[f32::NAN], &["x".into()], 0.5).is_err());
+    }
+
+    #[test]
+    fn span_thresholds_accept_finite_python_numeric_values() {
+        for (value, expected) in [
+            (json!(" 0.5 "), 0.5),
+            (json!("０.５"), 0.5),
+            (json!("٠.٥"), 0.5),
+            (json!("0_0.5"), 0.5),
+            (json!("1_0e-2"), 0.1),
+            (json!(true), 1.),
+            (json!(false), 0.),
+            (json!(-1), -1.),
+            (json!(2), 2.),
+            (json!("1e300"), 1e300),
+            (json!(-1e300), -1e300),
+        ] {
+            let threshold = threshold_value(&value).unwrap();
+            assert_eq!(threshold, expected);
+            let spans = decode_spans(
+                "word",
+                &[(0, 4)],
+                &[0.5],
+                &["label".into()],
+                threshold.clamp(-1., 2.) as f32,
+            )
+            .unwrap();
+            assert_eq!(spans.as_array().unwrap().is_empty(), expected >= 0.5);
+        }
+        for value in [
+            json!(null),
+            json!([]),
+            json!({}),
+            json!("NaN"),
+            json!("inf"),
+            json!("0__5"),
+            json!("_0.5"),
+            json!("0_.5"),
+            json!("0._5"),
+            json!("1e_2"),
+        ] {
+            assert!(threshold_value(&value).is_err());
+        }
     }
 }
 

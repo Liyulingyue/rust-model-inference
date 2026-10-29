@@ -384,6 +384,9 @@ impl<'a> FastModel<'a> {
         let mut positions = Vec::new();
         let mut names = Vec::new();
         for (n, d) in options {
+            if names.contains(&n) {
+                continue;
+            }
             positions.push(ids.len());
             names.push(n.clone());
             ids.push(self.marker("[O]")?);
@@ -480,6 +483,9 @@ impl<'a> FastModel<'a> {
             let mut positions = Vec::new();
             let mut names = Vec::new();
             for (n, d) in options {
+                if names.contains(&n) {
+                    continue;
+                }
                 positions.push(1 + schema.len());
                 names.push(n.clone());
                 schema.push(self.marker("[O]")?);
@@ -788,14 +794,10 @@ impl<'a> FastModel<'a> {
             why = "open labels".into();
         }
         let threshold = match q.get("threshold") {
-            Some(v) => v.as_f64().ok_or("span threshold must be numeric")?,
+            Some(v) => text::threshold_value(v)?,
             None => threshold,
         };
-        if !temperature.is_finite()
-            || temperature <= 0.
-            || !threshold.is_finite()
-            || !(0. ..=1.).contains(&threshold)
-        {
+        if !temperature.is_finite() || temperature <= 0. || !threshold.is_finite() {
             return Err("invalid span threshold or temperature".into());
         }
         let probabilities = raw
@@ -808,7 +810,7 @@ impl<'a> FastModel<'a> {
             &raw.offsets,
             &probabilities,
             &names,
-            threshold as f32,
+            threshold.clamp(-1., 2.) as f32,
         )?;
         if let Some(spans) = spans.as_array_mut() {
             for span in spans {

@@ -529,13 +529,7 @@ fn prepare(
             context = format!("User request: {user}");
         }
         let threshold = question.get("threshold").unwrap_or(&cfg["threshold"]);
-        e.threshold = match threshold {
-            Value::String(s) => s.trim().parse::<f64>().ok(),
-            Value::Bool(b) => Some(if *b { 1. } else { 0. }),
-            _ => threshold.as_f64(),
-        }
-        .filter(|v| v.is_finite())
-        .ok_or("span threshold must be a finite number")?;
+        e.threshold = super::text::threshold_value(threshold)?;
         e.ids
             .extend(vocab.ids(&format!("{}\nAnswer:", context.trim()))?);
         let encoded = vocab.raw(&e.text, false)?;

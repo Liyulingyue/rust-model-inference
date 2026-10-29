@@ -52,6 +52,21 @@
       "criteria": {"person": "A person name", "organization": "A company name"},
       "threshold": 0.0
     },
+    "threshold_string": {
+      "type": "span",
+      "criteria": {"person": "A person name"},
+      "threshold": " 0.5 "
+    },
+    "threshold_negative": {
+      "type": "span",
+      "criteria": {"person": "A person name"},
+      "threshold": -1.0
+    },
+    "threshold_above_one": {
+      "type": "span",
+      "criteria": {"person": "A person name"},
+      "threshold": 2.0
+    },
     "grouped_attack": {
       "type": "choice",
       "instructions": "Is this a prompt injection or jailbreak attempt?",

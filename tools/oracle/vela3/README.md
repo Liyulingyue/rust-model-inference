@@ -17,6 +17,8 @@ cargo +1.98.1 test --profile release-fast --lib format::safetensors::tests::
 cargo +1.98.1 build --profile release-fast --bin vela3
 ```
 
+38 个 Vela3 测试通过、5 个需要本地权重的检查被忽略；比较器的 3 个检查通过。完整库命令 `cargo +1.98.1 test --profile release-fast --lib` 为 1319 通过、20 失败、89 忽略；未修改的 `92d2eca0` 为 1280 通过、相同的 20 失败、84 忽略，失败名称保存在验证 JSON。Clippy 的 10 个错误均在本次未修改的模块，不能声称全仓检查通过。
+
 ## Fast 全路由
 
 小型官方计算图包含九种适配器、15 个问题，以及独立的长窗口聚合检查。
@@ -45,9 +47,19 @@ RMI_VELA3_FAST_ROOT=models/vela3-fast \
 RMI_VELA3_FAST_FIXTURE=models/vela3-fast-oracle.json \
   cargo +1.98.1 test --profile release-fast --lib native_fast_matches_official \
   -- --ignored --nocapture
+.venv/bin/python -c 'import json; print(json.dumps(json.load(open("models/vela3-fast-oracle.json"))["system_one"]))' \
+  > models/vela3-fast-response.json
+cargo +1.98.1 run --profile release-fast --bin vela3 -- \
+  --model models/vela3-fast --request tools/oracle/vela3/requests/fast.json --threads 4 \
+  > models/vela3-fast-native.json
+.venv/bin/python tools/oracle/vela3/compare_requests.py \
+  models/vela3-fast-response.json models/vela3-fast-native.json \
+  --atol 5e-4 --rtol 5e-4 --out models/vela3-fast-comparison.json
 ```
 
 `--require-all-adapters` 拒绝缺失的可选适配器，避免把官方回退到共享底座误记成任务适配器已验证。
+
+`requests/fast.json` 的真实权重检查包含全部九适配器和 18 个问题。`requests/fast-criteria.json` 单独覆盖普通 choice/router 的数组、重复选项，以及重复 span 标签报错；`requests/fast-thresholds.json` 覆盖 Unicode 数字、下划线、布尔值、巨大阈值和无效字符串。将上面 Oracle 和 CLI 的 `--request` 参数一并替换即可复现；两组边界请求已在确定性小型官方图上通过。
 
 ## Fast-vision 四种真实任务
 
@@ -103,6 +115,11 @@ vela3_test_bin=$(.venv/bin/python -c 'import json; print(next(r["executable"] fo
   --atol 2e-6 --rtol 1e-6 --out models/vela3-d3-tiny-causal
 
 .venv/bin/python tools/oracle/vela3/d3_oracle.py suite \
+  --native "$vela3_test_bin" --base models/d3-tiny-prefix --vela models/vela3-turbo \
+  --synthetic --dtype float32 --state-tokens 2 --adapters \
+  --atol 2e-6 --rtol 1e-6 --out models/vela3-d3-tiny-prefix
+
+.venv/bin/python tools/oracle/vela3/d3_oracle.py suite \
   --native "$vela3_test_bin" --base models/d3-lite --vela models/vela3-lite \
   --dtype bfloat16 --causal --generation-steps 4 \
   --out models/vela3-d3-lite-causal
@@ -111,17 +128,27 @@ vela3_test_bin=$(.venv/bin/python -c 'import json; print(next(r["executable"] fo
   --native "$vela3_test_bin" --base models/d3-lite --vela models/vela3-lite \
   --dtype float32 --adapters span decision \
   --out models/vela3-d3-lite-f32
+
+.venv/bin/python tools/oracle/vela3/d3_oracle.py suite \
+  --native "$vela3_test_bin" --base models/d3-flash --vela models/vela3-flash \
+  --text 'Alice works at Acme.' --dtype float32 --out models/vela3-d3-flash-f32
+.venv/bin/python tools/oracle/vela3/d3_oracle.py suite \
+  --native "$vela3_test_bin" --base models/d3-flash --vela models/vela3-flash \
+  --text 'Alice works at Acme.' --dtype bfloat16 --causal --generation-steps 4 \
+  --out models/vela3-d3-flash-causal
 ```
 
-Checkpoint Oracle 检查名称、顺序、shape、次数、Token IDs、mRoPE 和全部数值，并报告第一个不满足门槛的位置。`float32` 诊断保持真实 BF16 权重值、只关闭激活舍入；不另存一份整模 F32 权重。BF16 文本使用保存于报告中的逐层误差包络，logits 另外要求相同 argmax。`suite --images image.png --vision-detail` 可重现图像路径差异，该检查目前失败。
+Checkpoint Oracle 检查名称、顺序、shape、次数、Token IDs、mRoPE 和全部数值，并报告第一个不满足门槛的位置。`float32` 诊断保持真实 BF16 权重值、只关闭激活舍入；不另存一份整模 F32 权重。BF16 文本使用保存于报告中的逐层误差包络，logits 另外要求相同 argmax。flash 的 causal 命令会因内部 BF16 门槛失败而非零退出，报告仍会记录四步 logits 和精确 token IDs。`suite --images image.png --vision-detail` 可重现图像路径差异，该检查目前失败。flash 公开请求使用上面的 lite 请求命令，将两个模型目录和请求分别改为 `models/vela3-flash`、`models/d3-flash`、`requests/flash.json`，Oracle 与 CLI 均使用 `--threads 1`。
 
 ## 实际验证范围
 
 - lite：14 个英文问题和 2 个中文问题的选项、非空 span 边界、usage 精确一致，浮点最大绝对误差分别为 `0.004634` / `0.004669`。四步 greedy IDs 与官方均为 `[2838, 682, 264, 220]`。
 - d3 小型完整图：F32 最大误差 `4.77e-7`，BF16 最大误差 `0.00390625`；四个 d3 包共 15 个真实 span/NER/relation/image-halu 任务头最大误差 `6.68e-6`。
+- turbo prefix-bidir 小图：固定 runtime 源码 SHA 与镜像一致，F32 最大误差 `4.77e-7`，BF16 样本逐项误差为零；真实 27B 权重仍未验证。
 - lite 真实短序列 F32 激活诊断：所有 checkpoint 满足 `atol=5e-4, rtol=1e-4`。BF16 四步 logits 最大误差 `0.0703125`，各步 argmax 精确一致。
-- fast：真实 380M 决策 hidden 最大误差 `4.58e-5`、logits `4.83e-6`，并已覆盖真实 ordinary span/evidence/span-set；全九适配器检查状态以验证 JSON 为准。
-- fast-vision：四条真实任务各 84 个 checkpoint 和完整响应通过，task logits 最大误差 `8.35e-6`。Box/point 坐标精确一致，confidence 差约 `5.96e-7`。OCR 使用零阈值确保比较非空 span。真实 raw 底座完整 hidden max `0.247871`、NRMSE `0.001068`，采用明确的缩放门槛；小图仍使用严格容差。
+- fast：真实九适配器、18 问完整响应及公开 CLI 均通过，usage 精确为 `1651/0`。七组决策 hidden 最大误差 `8.77e-4`、logits `3.40e-6`；CLI 的 52 个浮点值最大误差 `1.09e-6`，选项、span、路由、usage 精确一致。额外六问输入边界回归已验证 RED→GREEN。
+- fast-vision：四条真实任务各 84 个模型 checkpoint、2 项预处理比较和完整响应通过，task logits 最大误差 `8.35e-6`。Box/point 坐标精确一致，confidence 差约 `5.96e-7`。OCR 使用零阈值确保比较非空 span。真实 raw 底座完整 hidden max `0.247871`、NRMSE `0.001068`，采用明确的缩放门槛；小图仍使用严格容差。
+- flash：真实三问公开请求的 choice、noul、两个非空 NER span 和 usage 一致，浮点最大误差 `0.003435`；grafted head 的四步 greedy IDs 均为 `[2838, 369, 264, 4314]`。base/span/decision 的 F32 激活诊断共 297 个 checkpoint 均通过 `atol=5e-4, rtol=1e-4`，最大绝对误差分别 `0.000488/0.000854/0.000977`。BF16 短 trace 三条路由的 logits 满足既定容差且 argmax 一致，但内部 activation 最大误差 `1.5/2.5/4.0` 超过固定门槛，仍记为失败；差异集中在稀疏的大幅值 channel，尚未隔离具体算子。
 - d3 图像：75 个展开 tokens 和三轴位置精确一致。F32 视觉塔相对官方 F32 投影 max `0.005106`、RMSE `0.000204`；对官方默认 BF16 塔则扩大为最终 hidden max `2.03125`、RMSE `0.10997`、logits max `0.08461`。样本 argmax 一致，但 **BF16 逐层门槛未通过**，未放宽门槛将其记为通过。
 
-mini/turbo 的当前 ModelScope 底座与 Vela 固定版本不一致；完整固定版本验证需要相应文件，不能用当前镜像冒充固定 checkpoint。flash 整模状态以验证 JSON 为准。GPU、GGUF、HTTP server、视频、长上下文性能、跨平台与完整公开基准均未执行。
+mini/turbo 的当前 ModelScope 底座与 Vela 固定版本不一致；完整固定版本验证需要相应文件，不能用当前镜像冒充固定 checkpoint。flash BF16 全部内部激活对齐仍未通过。GPU、GGUF、HTTP server、视频、长上下文性能、跨平台与完整公开基准均未执行。

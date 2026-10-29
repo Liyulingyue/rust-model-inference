@@ -763,10 +763,7 @@ impl<'a> Model<'a> {
             }
         }
         if let Some(v) = q.get("threshold") {
-            threshold = v
-                .as_f64()
-                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
-                .ok_or("threshold must be a number")?;
+            threshold = text::threshold_value(v)?;
         }
         if !threshold.is_finite() {
             return Err("threshold must be finite".into());
@@ -777,11 +774,17 @@ impl<'a> Model<'a> {
                 &offsets,
                 &probs,
                 &names,
-                threshold as f32,
+                threshold.clamp(-1., 2.) as f32,
                 &sp["evidence"]["decode"],
             )?
         } else {
-            text::decode_spans(target_text, &offsets, &probs, &names, threshold as f32)?
+            text::decode_spans(
+                target_text,
+                &offsets,
+                &probs,
+                &names,
+                threshold.clamp(-1., 2.) as f32,
+            )?
         };
         let mut out = json!({"type":"span","target":target,"spans":spans,"head":route,"head_reason":format!("{why_route}; {why}"),"threshold":threshold});
         if !used.is_empty() {

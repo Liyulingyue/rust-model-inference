@@ -15,6 +15,8 @@ activation checkpoint; logits use atol=0.1, rtol=0.02 and require the same argma
 always match exactly. Every threshold can be overridden explicitly and is saved with the report.
 For a small four-step causal greedy check, use `suite --synthetic --causal --generation-steps 4`
 with a scratch --base directory, --vela models/vela3-lite, --dtype float32 and --atol 2e-6 --rtol 1e-6.
+For the turbo prefix mask, use `suite --synthetic --state-tokens 2 --adapters` with the same small
+FP32 fixture. Synthetic traces use the saved pinned runtime when available and record its actual SHA.
 
 The reused image tower has FP32 activations and F16-lookup GELU. It is an approximate path: a real
 lite image trace does not meet the BF16 text envelope. `--images FILE --vision-detail` records the
@@ -73,7 +75,7 @@ class Trace:
                          finite=bool(np.isfinite(values).all()), binary_path=str(binary)))
 
 
-def synthetic(root, dtype):
+def synthetic(root, dtype, prefix=False):
     """A small full-graph fixture using the official transformers model classes."""
     import torch
     from safetensors.torch import save_file
@@ -105,7 +107,8 @@ def synthetic(root, dtype):
     (root / 'config.json').write_text(json.dumps(dict(model_type='qwen3_5',
         text_config=config.to_dict(), tie_word_embeddings=True)))
     (root / 'decision_config.json').write_text(json.dumps(dict(format_version=1, pooling='last',
-        readout_dtype='float32', attention_mode='noncausal_full_attention', temperature=1.)))
+        readout_dtype='float32', attention_mode='prefix_bidir' if prefix else 'noncausal_full_attention',
+        temperature=1.)))
     save_file({'weight': weight('weight', [255, 4])}, root / 'readout.safetensors')
     lora = {}
     for module, output in [('layers.0.linear_attn.in_proj_qkv', 8),
@@ -133,10 +136,14 @@ def run_trace(args):
     if args.generation_steps is not None and (not args.causal or not 1 <= args.generation_steps <= 40):
         raise ValueError('generation_steps requires --causal and 1..40 greedy steps')
     if args.synthetic:
-        model = synthetic(base, dtype)
+        model = synthetic(base, dtype, prefix=args.state_tokens is not None)
         vela = base
         runtime_name = 'd3-turbo' if args.state_tokens is not None else 'd3-lite'
-        runtime = load_module(Path(f'models/{runtime_name}/d3_runtime.py').absolute())
+        runtime_root = Path('models') / runtime_name
+        runtime_path = runtime_root / 'pinned' / 'd3_runtime.py'
+        if not runtime_path.is_file():
+            runtime_path = runtime_root / 'd3_runtime.py'
+        runtime = load_module(runtime_path.absolute())
         ids = torch.tensor([[1, 2, 3]], dtype=torch.long)
         input_text = None
     else:
@@ -166,9 +173,12 @@ def run_trace(args):
     trace = Trace(args.out)
     source_paths = [base / 'config.json', base / 'decision_config.json', base / 'd3_runtime.py',
                     base / 'preprocessor_config.json', base / 'MODEL_MANIFEST.json',
-                    base / 'readout.safetensors', vela / 'vela3_adapters.py', vela / 'vela3_config.json']
+                    base / 'readout.safetensors', vela / 'vela3_adapters.py', vela / 'vela3_config.json',
+                    Path(runtime.__file__)]
     if args.adapter:
         source_paths.append(vela / vela_config['adapters'][args.adapter]['file'])
+    if args.causal and vela_config.get('definitions', {}).get('writer') == 'grafted_head':
+        source_paths.append(vela / vela_config['definitions']['lm_head_file'])
     trace.record(dict(kind='oracle', torch=torch.__version__, transformers=transformers.__version__,
         dtype=str(dtype), adapter=args.adapter, text=input_text, unexpanded_token_ids=unexpanded_ids,
         images=[str(p.absolute()) for p in args.images], state_tokens=args.state_tokens,
