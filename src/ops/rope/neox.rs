@@ -57,15 +57,65 @@ pub fn rope_neox_inplace_precise(x: &mut [f32], pos: usize, head_dim: usize, fre
 }
 
 /// GGUF per-pair frequency divisors, as consumed by ggml_rope_ext.
+///
+/// The GGUF `rope_freqs.weight` tensor holds one **divisor** per head-dim
+/// pair, and ggml applies them as multipliers on the angle:
+///
+/// ```text
+/// angle_i = pos * freq_base^(-2i/d) / divisors[i]
+/// ```
+///
+/// llama.cpp stores the tensor's values as divisors and converts them to
+/// multipliers (`1.0f / freq`) when it builds the graph, so dividing here is
+/// the same quantity. The same formula appears in
+/// `src/models/gemma4/trunk/forward.rs::apply_rope_ggml`, which is where the
+/// GGUF convention was first pinned in this repository.
+///
+/// A divisor of `1.0` leaves the pair on the ordinary RoPE angle. A very
+/// large divisor (`1e30` in LFM3-1.7B's `rope_freqs.weight`) drives the
+/// angle to zero, which freezes the pair: `cos(0) = 1` and `sin(0) = 0` leave
+/// the two channels untouched. That is how LFM3 gives half of its head
+/// dimensions no rotary component at all.
+///
+/// `divisors` must cover every pair, so its length is `head_dim / 2`; the
+/// model layer checks that when it loads the tensor. A shorter slice is a
+/// caller bug: the debug build reports it, and a release build treats the
+/// missing pairs as unscaled instead of panicking.
 pub fn rope_neox_inplace_with_freqs(
     x: &mut [f32],
     pos: usize,
     head_dim: usize,
     freq_base: f32,
-    freqs: &[f32],
+    divisors: &[f32],
 ) {
-    assert_eq!(freqs.len(), head_dim / 2);
-    build_cos_sin_table_and_apply(x, pos as f32, head_dim, freq_base, false, Some(freqs));
+    debug_assert_eq!(
+        divisors.len(),
+        head_dim / 2,
+        "rope frequency divisors must cover every head-dim pair"
+    );
+    build_cos_sin_table_and_apply(x, pos as f32, head_dim, freq_base, false, Some(divisors));
+}
+
+/// [`rope_neox_inplace_with_freqs`] with separate libm calls for the
+/// sine and cosine.
+///
+/// The fused `sin_cos` the default path uses rounds differently from two
+/// independent libm calls, and llama.cpp's reference takes the second form.
+/// Use this variant when the rotation has to line up with that reference
+/// bit for bit; the plain variant is the cheaper default.
+pub fn rope_neox_inplace_with_freqs_precise(
+    x: &mut [f32],
+    pos: usize,
+    head_dim: usize,
+    freq_base: f32,
+    divisors: &[f32],
+) {
+    debug_assert_eq!(
+        divisors.len(),
+        head_dim / 2,
+        "rope frequency divisors must cover every head-dim pair"
+    );
+    build_cos_sin_table_and_apply(x, pos as f32, head_dim, freq_base, true, Some(divisors));
 }
 
 /// RoPE-Neox with linear position scaling.
@@ -105,7 +155,7 @@ fn build_cos_sin_table_and_apply(
     head_dim: usize,
     freq_base: f32,
     precise: bool,
-    freqs: Option<&[f32]>,
+    divisors: Option<&[f32]>,
 ) {
     let half = head_dim / 2;
     let n_heads = x.len() / head_dim;
@@ -117,7 +167,13 @@ fn build_cos_sin_table_and_apply(
     let theta_scale = freq_base.powf(-2.0 / head_dim as f32);
     let mut theta = theta_0;
     for i in 0..half {
-        let angle = freqs.map_or(theta, |freqs| theta / freqs[i]);
+        // A short divisor list is a caller bug that the debug build reports;
+        // a release build treats the missing pairs as unscaled rather than
+        // panicking inside the loop.
+        let angle = match divisors {
+            Some(divisors) => theta / divisors.get(i).copied().unwrap_or(1.0),
+            None => theta,
+        };
         let (c, s) = if precise {
             let (sin, cos) = super::mrope::sin_cos_precise(angle);
             (cos, sin)
