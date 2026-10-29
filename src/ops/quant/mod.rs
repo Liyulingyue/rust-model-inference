@@ -2456,6 +2456,10 @@ pub fn vec_dot_q6k_q8k(q6k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
     if crate::ops::has_avx2_fma() {
         return unsafe { vec_dot_q6k_q8k_avx2(q6k_data, q8k) };
     }
+    #[cfg(target_arch = "aarch64")]
+    if crate::ops::has_neon() && std::arch::is_aarch64_feature_detected!("dotprod") {
+        return unsafe { neon_k::vec_dot_q6k_q8k_neon(q6k_data, q8k) };
+    }
     vec_dot_q6k_q8k_scalar(q6k_data, q8k)
 }
 

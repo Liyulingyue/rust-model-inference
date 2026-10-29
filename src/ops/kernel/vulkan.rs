@@ -37,7 +37,7 @@ struct LinearState {
 /// matmuls (millions of output elements per call) are unaffected.
 ///
 /// Override with `RUST_GPU_MIN_OUTPUTS=0` to restore the old behaviour.
-fn min_gpu_matmul_outputs() -> usize {
+pub(crate) fn min_gpu_matmul_outputs() -> usize {
     std::env::var("RUST_GPU_MIN_OUTPUTS")
         .ok()
         .and_then(|value| value.parse().ok())
@@ -46,7 +46,7 @@ fn min_gpu_matmul_outputs() -> usize {
 
 pub(crate) fn offload_enabled() -> bool {
     // Tracing observes the requested backend; CPU/scalar scopes select exact CPU paths.
-    crate::ops::gpu_requested()
+    crate::compute::ComputePolicy::legacy() != crate::compute::ComputePolicy::Cpu
         && !crate::ops::scalar_mode()
         && !crate::core::thread_pool::gpu_matmul_disabled()
         && !crate::vulkan::gpu_broken()
@@ -409,6 +409,25 @@ impl GpuConv {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn offload_enabled_tracks_explicit_policy_scopes() {
+        use crate::compute::ComputePolicy;
+        let original = ComputePolicy::legacy();
+        {
+            let _auto = ComputePolicy::Auto.enter_legacy_scope();
+            let available = !crate::ops::scalar_mode() && !crate::vulkan::gpu_broken();
+            assert_eq!(offload_enabled(), available);
+            {
+                let _cpu = ComputePolicy::Cpu.enter_legacy_scope();
+                assert!(!offload_enabled());
+            }
+            assert_eq!(offload_enabled(), available);
+            let _scalar = crate::ops::float::ScalarDispatchScope::new(true);
+            assert!(!offload_enabled());
+        }
+        assert_eq!(ComputePolicy::legacy(), original);
+    }
 
     #[test]
     #[ignore = "requires a Vulkan device"]

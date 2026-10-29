@@ -994,6 +994,8 @@ struct BatchedLinearLayout {
     max_rows: usize,
     max_n_in: usize,
     max_n_out: usize,
+    output_slots: usize,
+    output_stride: usize,
     input: ArenaRegion,
     q8: ArenaRegion,
     scales: ArenaRegion,
@@ -1004,7 +1006,16 @@ struct BatchedLinearLayout {
 
 impl BatchedLinearLayout {
     fn new(max_rows: usize, max_n_in: usize, max_n_out: usize) -> Result<Self, VulkanError> {
-        if max_rows == 0 || max_n_in == 0 || max_n_out == 0 {
+        Self::new_with_output_slots(max_rows, max_n_in, max_n_out, 1)
+    }
+
+    fn new_with_output_slots(
+        max_rows: usize,
+        max_n_in: usize,
+        max_n_out: usize,
+        output_slots: usize,
+    ) -> Result<Self, VulkanError> {
+        if max_rows == 0 || max_n_in == 0 || max_n_out == 0 || output_slots == 0 {
             return Err(VulkanError::UnsupportedShape(
                 "batched linear maxima must be nonzero".into(),
             ));
@@ -1015,6 +1026,10 @@ impl BatchedLinearLayout {
         let outputs = max_rows
             .checked_mul(max_n_out)
             .ok_or(VulkanError::OutOfMemory)?;
+        let output_stride = f32_bytes(outputs)?;
+        let output_storage = output_stride
+            .checked_mul(output_slots)
+            .ok_or(VulkanError::OutOfMemory)?;
         let blocks = max_rows
             .checked_mul(max_n_in.div_ceil(32))
             .ok_or(VulkanError::OutOfMemory)?;
@@ -1024,18 +1039,40 @@ impl BatchedLinearLayout {
         let q8 = region(&mut size, inputs)?;
         let scales = f32_region(&mut size, blocks)?;
         let sums = f32_region(&mut size, blocks)?;
-        let output = f32_region(&mut size, outputs)?;
+        let output = region(&mut size, output_storage)?;
         as_u32((size - 1) / 4, "batched linear arena word span")?;
         Ok(Self {
             max_rows,
             max_n_in,
             max_n_out,
+            output_slots,
+            output_stride,
             input,
             q8,
             scales,
             sums,
             output,
             size,
+        })
+    }
+
+    fn output_slot(&self, slot: usize) -> Result<ArenaRegion, VulkanError> {
+        if slot >= self.output_slots {
+            return Err(VulkanError::UnsupportedShape(
+                "batched linear output slot exceeds capacity".into(),
+            ));
+        }
+        let offset = self
+            .output
+            .offset
+            .checked_add(
+                slot.checked_mul(self.output_stride)
+                    .ok_or(VulkanError::OutOfMemory)?,
+            )
+            .ok_or(VulkanError::OutOfMemory)?;
+        Ok(ArenaRegion {
+            offset,
+            size: self.output_stride,
         })
     }
 
@@ -1110,7 +1147,7 @@ impl BatchedLinearLayout {
             },
             self.scales,
             Some(self.sums),
-            &[(self.output, n_out, f32_bytes(n_out)?)],
+            &[(self.output_slot(0)?, n_out, f32_bytes(n_out)?)],
             n_in,
             rows,
             n_in,
@@ -1126,6 +1163,7 @@ pub(crate) struct BatchedLinearRuntime {
     ops: std::mem::ManuallyDrop<Qwen3Ops<'static>>,
     layout: BatchedLinearLayout,
     weights: HashMap<(usize, usize, usize, usize), (GpuBuffer, OperatorBindings)>,
+    grouped_weights: HashMap<Vec<(usize, usize, usize, usize)>, OperatorBindings>,
     weight_capacity: usize,
     #[cfg(test)]
     pub(crate) begin_commands:
@@ -1178,17 +1216,118 @@ impl BatchedLinearRuntime {
         max_n_out: usize,
         descriptor_capacity: usize,
     ) -> Result<Self, VulkanError> {
-        let layout = BatchedLinearLayout::new(max_rows, max_n_in, max_n_out)?;
+        Self::new_with_output_slots(
+            context,
+            max_rows,
+            max_n_in,
+            max_n_out,
+            descriptor_capacity,
+            1,
+        )
+    }
+
+    pub(crate) fn new_with_output_slots(
+        context: &'static VulkanContext,
+        max_rows: usize,
+        max_n_in: usize,
+        max_n_out: usize,
+        descriptor_capacity: usize,
+        output_slots: usize,
+    ) -> Result<Self, VulkanError> {
+        let layout = BatchedLinearLayout::new_with_output_slots(
+            max_rows,
+            max_n_in,
+            max_n_out,
+            output_slots,
+        )?;
         matmul_dispatch(max_n_out, max_rows, 1, &context.limits)?;
         let ops = Qwen3Ops::new_with_size(context, layout.size, descriptor_capacity)?;
         Ok(Self {
             ops: std::mem::ManuallyDrop::new(ops),
             layout,
             weights: HashMap::new(),
+            grouped_weights: HashMap::new(),
             weight_capacity: descriptor_capacity.saturating_sub(1),
             #[cfg(test)]
             begin_commands: TokenCommands::begin,
         })
+    }
+
+    fn ensure_weight(
+        &mut self,
+        weight_bytes: &[u8],
+        spec: GpuMatmulSpec,
+        n_in: usize,
+        n_out: usize,
+    ) -> Result<((usize, usize, usize, usize), GpuBuffer), VulkanError> {
+        let format = spec.format;
+        let key = (
+            weight_bytes.as_ptr() as usize,
+            weight_bytes.len(),
+            n_in,
+            n_out,
+        );
+        if let Some((buffer, bindings)) = self.weights.get(&key) {
+            if bindings.weight_format(1)? != format || bindings.weight_mode != spec.mode {
+                return Err(VulkanError::UnsupportedShape(
+                    "cached batched linear weight storage or numerical mode changed".into(),
+                ));
+            }
+            return Ok((key, *buffer));
+        }
+        if self.weights.len() + self.grouped_weights.len() >= self.weight_capacity {
+            return Err(VulkanError::UnsupportedShape(
+                "batched linear descriptor capacity exhausted".into(),
+            ));
+        }
+        // BF16 and F32 weights are uploaded transposed so the tiled float
+        // kernel can walk the reduction axis with unit stride. Only the
+        // prepared mode uses that kernel: the dot and rounded modes keep
+        // their own reduction, which the tiled float kernel does not
+        // implement.
+        let transposed = if n_in % 2 == 0
+            && matches!(format, GpuWeightFormat::BF16 | GpuWeightFormat::F32)
+            && spec.mode == GpuMatmulMode::Prepared
+        {
+            let bytes = if format == GpuWeightFormat::BF16 {
+                2
+            } else {
+                4
+            };
+            let mut packed = vec![0u8; weight_bytes.len()];
+            for r0 in (0..n_out).step_by(32) {
+                for k0 in (0..n_in).step_by(128) {
+                    for r in r0..(r0 + 32).min(n_out) {
+                        for k in k0..(k0 + 128).min(n_in) {
+                            let src = (r * n_in + k) * bytes;
+                            let dst = (k * n_out + r) * bytes;
+                            packed[dst..dst + bytes]
+                                .copy_from_slice(&weight_bytes[src..src + bytes]);
+                        }
+                    }
+                }
+            }
+            Some(packed)
+        } else {
+            None
+        };
+        let buffer = unsafe {
+            self.ops
+                .context
+                .upload_static(transposed.as_deref().unwrap_or(weight_bytes))?
+        };
+        let bindings = match self
+            .ops
+            .bind_weight_buffers_mode(&[buffer], &[format], spec.mode)
+        {
+            Ok(bindings) => bindings,
+            Err(error) => {
+                unsafe { self.ops.context.destroy_buffer(&buffer) };
+                return Err(error);
+            }
+        };
+        self.weights.insert(key, (buffer, bindings));
+        Ok((key, buffer))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1217,76 +1356,8 @@ impl BatchedLinearRuntime {
             output.len(),
         )?;
         let context = self.ops.context;
-        let key = (
-            weight_bytes.as_ptr() as usize,
-            weight_bytes.len(),
-            n_in,
-            n_out,
-        );
-        let bindings = if let Some((_, bindings)) = self.weights.get(&key) {
-            if bindings.weight_format(1)? != format || bindings.weight_mode != spec.mode {
-                return Err(VulkanError::UnsupportedShape(
-                    "cached batched linear weight storage or numerical mode changed".into(),
-                ));
-            }
-            *bindings
-        } else {
-            if self.weights.len() >= self.weight_capacity {
-                return Err(VulkanError::UnsupportedShape(
-                    "batched linear descriptor capacity exhausted".into(),
-                ));
-            }
-            // BF16 and F32 weights are uploaded transposed so the tiled float
-            // kernel can walk the reduction axis with unit stride. Only the
-            // prepared mode uses that kernel: the dot and rounded modes keep
-            // their own reduction, which the tiled float kernel does not
-            // implement.
-            let transposed = if n_in % 2 == 0
-                && matches!(format, GpuWeightFormat::BF16 | GpuWeightFormat::F32)
-                && spec.mode == GpuMatmulMode::Prepared
-            {
-                let bytes = if format == GpuWeightFormat::BF16 {
-                    2
-                } else {
-                    4
-                };
-                let mut packed = vec![0u8; weight_bytes.len()];
-                for r0 in (0..n_out).step_by(32) {
-                    for k0 in (0..n_in).step_by(128) {
-                        for r in r0..(r0 + 32).min(n_out) {
-                            for k in k0..(k0 + 128).min(n_in) {
-                                let src = (r * n_in + k) * bytes;
-                                let dst = (k * n_out + r) * bytes;
-                                packed[dst..dst + bytes]
-                                    .copy_from_slice(&weight_bytes[src..src + bytes]);
-                            }
-                        }
-                    }
-                }
-                Some(packed)
-            } else {
-                None
-            };
-            let buffer = unsafe {
-                self.ops
-                    .context
-                    .upload_static(transposed.as_deref().unwrap_or(weight_bytes))?
-            };
-            let bindings = match self
-                .ops
-                .bind_weight_buffers_mode(&[buffer], &[format], spec.mode)
-            {
-                Ok(bindings) => bindings,
-                Err(error) => {
-                    unsafe { self.ops.context.destroy_buffer(&buffer) };
-                    return Err(error);
-                }
-            };
-            // Initialization succeeded. Retain this valid upload on later errors
-            // so every GPU allocation stays owned and can be reused or dropped.
-            self.weights.insert(key, (buffer, bindings));
-            bindings
-        };
+        let (key, _) = self.ensure_weight(weight_bytes, spec, n_in, n_out)?;
+        let bindings = self.weights.get(&key).unwrap().1;
         // The activation copy has to land before the command buffer starts
         // recording. The barrier that begin_commands places is the one that
         // orders host writes against the dispatches that read them, and a
@@ -1341,6 +1412,146 @@ impl BatchedLinearRuntime {
         }
         commands.submit_and_wait()?;
         output[..count].copy_from_slice(self.ops.read_f32(self.layout.output, count)?);
+        Ok(())
+    }
+
+    /// Record a projection group in one command buffer and wait only once.
+    ///
+    /// The old scalar entry point submitted and fenced every QKV or gate/up
+    /// projection separately. Keeping the activation and all outputs in the
+    /// arena lets the grouped shader do the same work with one host/device
+    /// round trip.
+    pub(crate) fn matmul_rows_group(
+        &mut self,
+        weights: &[(&[u8], GpuMatmulSpec, usize, usize)],
+        input: &[f32],
+        rows: usize,
+        outputs: &mut [&mut [f32]],
+    ) -> Result<(), VulkanError> {
+        if weights.is_empty()
+            || weights.len() > self.layout.output_slots
+            || weights.len() != outputs.len()
+        {
+            return Err(VulkanError::UnsupportedShape(
+                "invalid batched linear group size".into(),
+            ));
+        }
+        let first_spec = weights[0].1;
+        let first_n_in = weights[0].2;
+        if weights.iter().any(|(_, spec, n_in, _)| {
+            *n_in != first_n_in || spec.format != first_spec.format || spec.mode != first_spec.mode
+        }) {
+            return Err(VulkanError::UnsupportedShape(
+                "heterogeneous grouped Vulkan linear projections".into(),
+            ));
+        }
+        let mut keys = Vec::with_capacity(weights.len());
+        let mut buffers = Vec::with_capacity(weights.len());
+        let mut formats = Vec::with_capacity(weights.len());
+        let mut output_regions = Vec::with_capacity(weights.len());
+        for (slot, ((weight, spec, n_in, n_out), output)) in
+            weights.iter().zip(outputs.iter()).enumerate()
+        {
+            if *n_in != first_n_in
+                || output.len() != rows.checked_mul(*n_out).ok_or(VulkanError::OutOfMemory)?
+            {
+                return Err(VulkanError::UnsupportedShape(
+                    "grouped Vulkan linear shape mismatch".into(),
+                ));
+            }
+            self.layout.validate(
+                &self.ops.context.limits,
+                weight.len(),
+                *spec,
+                input.len(),
+                rows,
+                *n_in,
+                *n_out,
+                output.len(),
+            )?;
+            let (key, buffer) = self.ensure_weight(weight, *spec, *n_in, *n_out)?;
+            keys.push(key);
+            buffers.push(buffer);
+            formats.push(spec.format);
+            output_regions.push((self.layout.output_slot(slot)?, *n_out, f32_bytes(*n_out)?));
+        }
+        let bindings = if let Some(bindings) = self.grouped_weights.get(&keys) {
+            if bindings.weight_format(weights.len())? != first_spec.format
+                || bindings.weight_mode != first_spec.mode
+            {
+                return Err(VulkanError::UnsupportedShape(
+                    "cached grouped Vulkan weight storage or numerical mode changed".into(),
+                ));
+            }
+            *bindings
+        } else {
+            if self.weights.len() + self.grouped_weights.len() >= self.weight_capacity {
+                return Err(VulkanError::UnsupportedShape(
+                    "batched linear descriptor capacity exhausted".into(),
+                ));
+            }
+            let bindings =
+                self.ops
+                    .bind_weight_buffers_mode(&buffers, &formats, first_spec.mode)?;
+            self.grouped_weights.insert(keys.clone(), bindings);
+            bindings
+        };
+
+        let host_writes_early = self.ops.staging.is_none();
+        if host_writes_early {
+            self.ops.write_f32(self.layout.input, input)?;
+        }
+        let context = self.ops.context;
+        #[cfg(test)]
+        let commands = (self.begin_commands)(context)?;
+        #[cfg(not(test))]
+        let commands = TokenCommands::begin(context)?;
+        if !host_writes_early {
+            self.ops.write_f32(self.layout.input, input)?;
+        }
+        if first_n_in % 2 == 0
+            && matches!(
+                first_spec.format,
+                GpuWeightFormat::BF16 | GpuWeightFormat::F32
+            )
+            && first_spec.mode == GpuMatmulMode::Prepared
+        {
+            self.ops.record_transposed_float_matmul_rows(
+                &commands,
+                bindings,
+                self.layout.input,
+                &output_regions,
+                first_n_in,
+                rows,
+                first_n_in,
+            )?;
+        } else {
+            let recorder = if first_spec.uses_tiled_f16() && first_n_in % 2 == 0 && rows >= 32 {
+                Qwen3Ops::record_weight_matmul_tiled_rows
+            } else {
+                Qwen3Ops::record_weight_matmul_rows
+            };
+            recorder(
+                &self.ops,
+                &commands,
+                bindings,
+                self.layout.input,
+                self.layout.q8,
+                self.layout.scales,
+                self.layout.sums,
+                self.layout.q8,
+                self.layout.scales,
+                &output_regions,
+                first_n_in,
+                rows,
+                first_n_in,
+            )?;
+        }
+        commands.submit_and_wait()?;
+        for (slot, output) in outputs.iter_mut().enumerate() {
+            let count = output.len();
+            output.copy_from_slice(self.ops.read_f32(self.layout.output_slot(slot)?, count)?);
+        }
         Ok(())
     }
 }

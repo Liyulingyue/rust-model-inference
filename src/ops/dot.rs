@@ -34,6 +34,52 @@ fn dot_f32_scalar(a: &[f32], b: &[f32], n: usize) -> f32 {
     s
 }
 
+/// F32 dot with ggml's four-accumulator AVX reduction order.
+pub(crate) fn dot_f32_ggml(a: &[f32], b: &[f32], n: usize) -> f32 {
+    let (a, b) = (&a[..n], &b[..n]);
+    #[cfg(target_arch = "x86_64")]
+    if has_avx2_fma() {
+        // SAFETY: the slices cover n elements and both CPU features were checked.
+        return unsafe { dot_f32_ggml_avx2(a, b, n) };
+    }
+    #[cfg(target_arch = "aarch64")]
+    if has_neon() {
+        return unsafe { dot_f32_neon(a, b, n) };
+    }
+    dot_f32_f64_acc(a, b, n)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn dot_f32_ggml_avx2(a: &[f32], b: &[f32], n: usize) -> f32 {
+    use std::arch::x86_64::*;
+    let mut accumulators = [_mm256_setzero_ps(); 4];
+    let mut i = 0;
+    while i + 32 <= n {
+        for (j, accumulator) in accumulators.iter_mut().enumerate() {
+            let x = _mm256_loadu_ps(a.as_ptr().add(i + j * 8));
+            let y = _mm256_loadu_ps(b.as_ptr().add(i + j * 8));
+            *accumulator = _mm256_fmadd_ps(x, y, *accumulator);
+        }
+        i += 32;
+    }
+    let lanes = _mm256_add_ps(
+        _mm256_add_ps(accumulators[0], accumulators[2]),
+        _mm256_add_ps(accumulators[1], accumulators[3]),
+    );
+    let halves = _mm_add_ps(
+        _mm256_castps256_ps128(lanes),
+        _mm256_extractf128_ps(lanes, 1),
+    );
+    let pairs = _mm_hadd_ps(halves, halves);
+    let mut sum = _mm_cvtss_f32(_mm_hadd_ps(pairs, pairs));
+    while i < n {
+        sum += a[i] * b[i];
+        i += 1;
+    }
+    sum
+}
+
 /// Same throughput as `dot_f32_avx2` but with **separate `mul` + `add`** instead of
 /// FMA. Useful where the caller needs numerical behavior closer to the scalar
 /// `sum += a[i] * b[i]` (e.g. vision encoders whose accumulated output feeds a
@@ -292,6 +338,15 @@ pub fn dot_f16_f16_bytes(a: &[u16], b: &[u8], n: usize) -> f32 {
         sum += f64::from(f16_to_f32(a[index]) * f16_to_f32(weight));
     }
     sum as f32
+}
+
+/// F16 dot product matching ggml's four-accumulator AVX reduction order.
+pub(crate) fn dot_f16_ggml(a: &[u16], b: &[u16], n: usize) -> f32 {
+    let (a, b) = (&a[..n], &b[..n]);
+    #[cfg(target_endian = "little")]
+    return dot_f16_f16_bytes_ggml(a, bytemuck::cast_slice(b), n);
+    #[cfg(not(target_endian = "little"))]
+    dot_f16(a, b, n)
 }
 
 /// F16 dot product matching ggml's four-accumulator AVX reduction order.

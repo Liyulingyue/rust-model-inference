@@ -143,3 +143,15 @@ tokenizer 的做法一致，因此不需要 `'static` 泄漏。
 未列出的路由由 axum 直接 404。**这是模型能力边界，不是接口缺功能**——例如
 `/v1/jev/grouped` 对 Clm/Gliner2 返回 404，因为 per-group softmax 在 cosine 打分
 和"每头独立归一化"里没有对应物。
+
+## Hy-SimulMT bundled speech backend
+
+`--serve --audio sample.wav --model Hy-SimulMT-*.gguf` 先探测
+`general.architecture=hy_v3`，进入独立 `HySimulMt` 后端；未命中才继续
+Audio8/Qwen ASR 的既有选择。内置音频塔，因此拒绝额外 `--mmproj`。
+
+它挂载 `/v1/audio/transcriptions` 和 `/v1/audio/transcriptions_json`，
+不提供聊天、JEV 或 TTS 路由。
+转写请求复用一个模型线程池，因此整个推理持有同一个 generation permit；
+并发转写返回 429，客户端取消也会等 blocking worker 结束才释放许可。
+用法和精度范围见 [Hy-SimulMT](../usage/hy-simulmt.md)。

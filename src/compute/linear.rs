@@ -107,27 +107,31 @@ impl<'model, 'weights> LinearExecutor<'model, 'weights> {
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
             .map_err(|_| ComputeError::State("linear executor identity exhausted".into()))?;
         #[cfg(feature = "vulkan")]
-        let runtime = if policy != ComputePolicy::Cpu
+        let runtime = if use_vulkan_for_outputs(policy, max_rows * max_n_out)
             && bindings.iter().any(|b| gpu_compatible(*b).is_ok())
         {
             match policy.context()? {
-                Some(context) => match crate::vulkan::ops::BatchedLinearRuntime::new(
-                    context,
-                    max_rows,
-                    max_n_in,
-                    max_n_out,
-                    bindings
-                        .len()
-                        .checked_add(1)
-                        .ok_or_else(|| invalid("binding count overflow"))?,
-                ) {
-                    Ok(runtime) => Some(runtime),
-                    Err(error) if policy == ComputePolicy::Auto => {
-                        log::info!("compute linear: CPU fallback: {error}");
-                        None
+                Some(context) => {
+                    match crate::vulkan::ops::BatchedLinearRuntime::new_with_output_slots(
+                        context,
+                        max_rows,
+                        max_n_in,
+                        max_n_out,
+                        bindings
+                            .len()
+                            .checked_add(bindings.len().div_ceil(2))
+                            .and_then(|n| n.checked_add(1))
+                            .ok_or_else(|| invalid("binding count overflow"))?,
+                        bindings.len().min(3),
+                    ) {
+                        Ok(runtime) => Some(runtime),
+                        Err(error) if policy == ComputePolicy::Auto => {
+                            log::info!("compute linear: CPU fallback: {error}");
+                            None
+                        }
+                        Err(error) => return Err(error.into()),
                     }
-                    Err(error) => return Err(error.into()),
-                },
+                }
                 None => None,
             }
         } else {
@@ -220,7 +224,13 @@ impl<'model, 'weights> LinearExecutor<'model, 'weights> {
             }
         }
         #[cfg(feature = "vulkan")]
-        if self.runtime.is_some() && !crate::core::thread_pool::gpu_matmul_disabled() {
+        if self.runtime.is_some()
+            && !crate::core::thread_pool::gpu_matmul_disabled()
+            && use_vulkan_for_outputs(
+                self.policy,
+                outputs.iter().map(|output| output.len()).max().unwrap_or(0),
+            )
+        {
             let attempt = self.run_gpu(&bindings, input, rows, &mut outputs);
             match attempt {
                 Ok(()) => {
@@ -342,6 +352,31 @@ impl<'model, 'weights> LinearExecutor<'model, 'weights> {
                 .checked_add(output.len())
                 .ok_or_else(|| invalid("group output size overflow"))?;
         }
+        if N > 1 {
+            let specs: Vec<_> = bindings
+                .iter()
+                .map(|binding| {
+                    Ok((
+                        binding.weight.kernel.weight_bytes().ok_or_else(|| {
+                            ComputeError::Unsupported("kernel has no immutable storage view".into())
+                        })?,
+                        GpuMatmulSpec::prepared(binding.weight)?,
+                        binding.weight.n_in,
+                        binding.weight.n_out,
+                    ))
+                })
+                .collect::<Result<_, ComputeError>>()?;
+            runtime.matmul_rows_group(&specs, input, rows, &mut outputs[..])?;
+            if outputs
+                .iter()
+                .any(|output| output.iter().any(|v| !v.is_finite()))
+            {
+                return Err(ComputeError::Device(
+                    "linear produced non-finite output".into(),
+                ));
+            }
+            return Ok(());
+        }
         self.staging.resize(total, 0.0);
         let mut offset = 0;
         for (binding, output) in bindings.iter().zip(outputs.iter()) {
@@ -368,6 +403,15 @@ impl<'model, 'weights> LinearExecutor<'model, 'weights> {
             offset += output.len();
         }
         Ok(())
+    }
+}
+
+#[cfg(feature = "vulkan")]
+fn use_vulkan_for_outputs(policy: ComputePolicy, outputs: usize) -> bool {
+    match policy {
+        ComputePolicy::Cpu => false,
+        ComputePolicy::Auto => outputs >= crate::ops::kernel::vulkan::min_gpu_matmul_outputs(),
+        ComputePolicy::Vulkan => true,
     }
 }
 
@@ -431,6 +475,138 @@ mod tests {
 
     fn pool() -> Arc<ComputePool> {
         Arc::new(ComputePool::new(2))
+    }
+
+    #[test]
+    fn tiny_auto_executor_stays_cpu_across_row_sizes() {
+        #[cfg(feature = "vulkan")]
+        if crate::ops::kernel::vulkan::min_gpu_matmul_outputs() <= 6 {
+            return;
+        }
+        let a = Weight::from_quantized(QuantizedTensor::F32 {
+            data: vec![2.0, 3.0],
+            n_in: 2,
+            n_out: 1,
+        });
+        let b = Weight::from_quantized(QuantizedTensor::F32 {
+            data: vec![1.0, -1.0, 4.0, 0.5],
+            n_in: 2,
+            n_out: 2,
+        });
+        let mut executor = LinearExecutor::new(
+            ComputePolicy::Auto,
+            [&a, &b]
+                .map(|weight| LinearBinding {
+                    weight,
+                    mode: LinearMode::Prepared,
+                })
+                .to_vec(),
+            3,
+            pool(),
+        )
+        .unwrap();
+        assert!(!executor.uses_vulkan());
+        let ids = [executor.id(0).unwrap(), executor.id(1).unwrap()];
+        let input = [4.0, 5.0, 1.0, 2.0, -2.0, 1.0];
+        for rows in [1, 3, 2, 1] {
+            let mut out_a = vec![f32::NAN; rows];
+            let mut out_b = vec![f32::NAN; rows * 2];
+            assert_eq!(
+                executor
+                    .run_group(ids, &input[..rows * 2], rows, [&mut out_a, &mut out_b])
+                    .unwrap(),
+                [UsedBackend::Cpu; 2],
+            );
+            assert_eq!(out_a, [23.0, 8.0, -1.0][..rows]);
+            assert_eq!(out_b, [-1.0, 18.5, -1.0, 5.0, -3.0, -7.5][..rows * 2]);
+        }
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn auto_gpu_threshold_preserves_forced_vulkan_and_configured_boundary() {
+        let minimum = crate::ops::kernel::vulkan::min_gpu_matmul_outputs();
+        assert!(!use_vulkan_for_outputs(ComputePolicy::Cpu, usize::MAX));
+        assert!(use_vulkan_for_outputs(ComputePolicy::Vulkan, 1));
+        assert!(use_vulkan_for_outputs(ComputePolicy::Auto, minimum));
+        if minimum > 0 {
+            assert!(!use_vulkan_for_outputs(ComputePolicy::Auto, minimum - 1));
+        }
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn auto_gpu_threshold_interleaves_rows_and_mixed_group_sizes() {
+        let minimum = crate::ops::kernel::vulkan::min_gpu_matmul_outputs();
+        if minimum <= 128 || crate::ops::scalar_mode() {
+            return;
+        }
+        let rows = minimum.div_ceil(128);
+        let big = Weight::from_quantized(QuantizedTensor::F32 {
+            data: [1.0, 2.0, 3.0, 4.0].repeat(128),
+            n_in: 4,
+            n_out: 128,
+        });
+        let small = Weight::from_quantized(QuantizedTensor::F32 {
+            data: vec![1.0, 0.0, 0.0, 1.0],
+            n_in: 4,
+            n_out: 1,
+        });
+        let mut executor = LinearExecutor::new(
+            ComputePolicy::Auto,
+            [&big, &small]
+                .map(|weight| LinearBinding {
+                    weight,
+                    mode: LinearMode::Prepared,
+                })
+                .to_vec(),
+            rows,
+            pool(),
+        )
+        .unwrap();
+        assert!(executor.uses_vulkan());
+        let context = crate::ops::float::shared_vulkan_context().unwrap();
+        let ids = [executor.id(0).unwrap(), executor.id(1).unwrap()];
+        for actual_rows in [1, rows, 1, rows] {
+            let before = context.submission_count();
+            let mut out_big = vec![f32::NAN; actual_rows * 128];
+            let mut out_small = vec![f32::NAN; actual_rows];
+            let expected = if actual_rows == rows {
+                UsedBackend::Vulkan
+            } else {
+                UsedBackend::Cpu
+            };
+            assert_eq!(
+                executor
+                    .run_group(
+                        ids,
+                        &vec![1.0; actual_rows * 4],
+                        actual_rows,
+                        [&mut out_big, &mut out_small],
+                    )
+                    .unwrap(),
+                [expected; 2]
+            );
+            assert_eq!(out_big, vec![10.0; actual_rows * 128]);
+            assert_eq!(out_small, vec![2.0; actual_rows]);
+            if expected == UsedBackend::Cpu {
+                assert_eq!(context.submission_count(), before);
+            } else {
+                assert!(context.submission_count() > before);
+            }
+            assert!(executor.uses_vulkan());
+        }
+        let before = context.submission_count();
+        let mut output = vec![f32::NAN; rows];
+        assert_eq!(
+            executor
+                .run(ids[1], &vec![1.0; rows * 4], rows, &mut output)
+                .unwrap(),
+            UsedBackend::Cpu
+        );
+        assert_eq!(output, vec![2.0; rows]);
+        assert_eq!(context.submission_count(), before);
     }
 
     #[test]
@@ -755,10 +931,11 @@ mod tests {
     #[test]
     #[ignore = "requires a Vulkan device"]
     fn linear_device_failure_falls_back_only_for_auto() {
+        let n_out = crate::ops::kernel::vulkan::min_gpu_matmul_outputs().max(1);
         let weight = Weight::from_quantized(QuantizedTensor::F32 {
-            data: vec![2.0, 3.0],
+            data: [2.0, 3.0].repeat(n_out),
             n_in: 2,
-            n_out: 1,
+            n_out,
         });
         let context = Box::leak(Box::new(crate::vulkan::VulkanContext::new().unwrap()));
         for policy in [ComputePolicy::Auto, ComputePolicy::Vulkan] {
@@ -774,18 +951,19 @@ mod tests {
             .unwrap();
             executor.policy = policy;
             let mut runtime =
-                crate::vulkan::ops::BatchedLinearRuntime::new(context, 1, 2, 1, 2).unwrap();
+                crate::vulkan::ops::BatchedLinearRuntime::new(context, 1, 2, n_out, 2).unwrap();
             runtime.begin_commands = |_| Err(crate::vulkan::VulkanError::Timeout);
             executor.runtime = Some(runtime);
-            let mut out = [123.0];
+            let mut out = vec![123.0; n_out];
             let before = context.submission_count();
             let result = executor.run(executor.id(0).unwrap(), &[4.0, 5.0], 1, &mut out);
             if policy == ComputePolicy::Auto {
                 assert_eq!(result.unwrap(), UsedBackend::Cpu);
-                assert_eq!(out, [23.0]);
+                assert_eq!(out, vec![23.0; n_out]);
+                assert!(executor.runtime.is_none());
             } else {
                 assert!(matches!(result, Err(ComputeError::Device(_))));
-                assert_eq!(out, [123.0]);
+                assert_eq!(out, vec![123.0; n_out]);
             }
             assert_eq!(context.submission_count(), before);
         }

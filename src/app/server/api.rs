@@ -161,8 +161,7 @@ pub fn routes() -> Router<AppState> {
             "/v1/responses/{id}",
             get(get_response).delete(delete_response),
         )
-        .route("/v1/jev/score", post(jev_score))
-        .route("/v1/jev/grouped", post(jev_grouped))
+        .merge(jev_routes())
         .route("/v1/jev/image", post(jev_image_score))
         .route("/v1/jev/image_grouped", post(jev_image_grouped))
         // 32 MB, not 4 MB: an image-bearing request carries base64, which
@@ -171,6 +170,12 @@ pub fn routes() -> Router<AppState> {
         // audio transcription route already uses (64 MB) within the same
         // order of magnitude.
         .layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024))
+}
+
+pub(super) fn jev_routes() -> Router<AppState> {
+    Router::new()
+        .route("/v1/jev/score", post(jev_score))
+        .route("/v1/jev/grouped", post(jev_grouped))
 }
 
 async fn chat(State(state): State<AppState>, body: Result<Json<Value>, JsonRejection>) -> Response {
@@ -1659,6 +1664,7 @@ fn backend_label(b: &Backend) -> &'static str {
         Backend::Text(_) => "text",
         Backend::Embedding(_) => "embedding",
         Backend::Asr(_) => "asr",
+        Backend::HySimulMt(_) => "hy-simulmt",
         Backend::Audio8(_) => "audio8",
         Backend::Tts(_) => "tts",
         Backend::Rerank(_) => "rerank",

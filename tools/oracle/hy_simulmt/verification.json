@@ -1,0 +1,861 @@
+{
+  "schema_version": 2,
+  "recorded_on": "2026-10-28",
+  "status": "Experimental / Draft",
+  "source": {
+    "base_main_revision": "92d2eca0aad9161694be49a67a4b3057f7514547",
+    "rust_src_tree": "7995d2c2c9a5bf1fd061f814427d2bfc9b9a3b96",
+    "source_manifest_sha256": "56b7298697309df38506eae0c84c6d3dbab4df1a91bb3e936464443a14a3c19e",
+    "source_files": 546,
+    "qwen3_trunk_diff_from_main": false
+  },
+  "reference": {
+    "repository": "https://github.com/lihy715/llama.cpp.Hyv3Speech",
+    "revision": "e41ca4212f786815faa37606ee2e6fcf8611f9e4",
+    "branch": "hyv3-speech",
+    "isa": "AVX2 / FMA / F16C, GGML_NATIVE=OFF; AVX512/VNNI disabled",
+    "independent_lossy_baseline": "same pinned Oracle, CPU weight repacking enabled",
+    "external_acceleration": false,
+    "companion_note": "Audio-only loop guard was repaired after decoder reference runs; numerical kernels and nonzero-limit translation/text paths are unchanged. Both measured executable hashes are recorded."
+  },
+  "runtime": {
+    "cpu": "Intel Xeon Gold 6138",
+    "architecture": "x86_64",
+    "threads": 4,
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "profile": "release-fast",
+    "features": [
+      "parity-trace",
+      "vulkan"
+    ],
+    "simd": "runtime AVX2/FMA/F16C; local ARM64 NEON/DotProd regression tests",
+    "gpu_inventory": [
+      "NVIDIA GeForce RTX 5090, 570.153.02",
+      "NVIDIA GeForce RTX 5090, 570.153.02",
+      "NVIDIA GeForce RTX 5090, 570.153.02",
+      "NVIDIA GeForce RTX 5090, 570.153.02"
+    ],
+    "flash_attention": false,
+    "timing_note": "Functional wall times on a shared host; not a controlled benchmark."
+  },
+  "weights": [
+    {
+      "file": "Hy-SimulMT-30B-A3B-Q4_K_M.gguf",
+      "bytes": 19746809728,
+      "sha256": "350344d24911ab93fdaee8f9b78e6c06041bff942dc7bc578d8c78d185e4f281"
+    },
+    {
+      "file": "Hy-SimulMT-30B-A3B-Interleave-Q4_K_M.gguf",
+      "bytes": 19746809728,
+      "sha256": "26c87f0a5f6409f3a57f8c4d2a49d58ad0f5c0753141643789e73564339cedbc"
+    }
+  ],
+  "fixture": {
+    "source": "https://raw.githubusercontent.com/ggml-org/whisper.cpp/master/samples/jfk.wav",
+    "wav_sha256": "59dfb9a4acb36fe2a2affc14bacbee2920ff435cb13cc314a08c13f66ba7860e",
+    "samples": 51200,
+    "rate": 16000,
+    "turn_samples": [
+      25600,
+      12800,
+      12800
+    ],
+    "audio_tokens": [
+      11,
+      5,
+      5
+    ],
+    "f32_sha256": "123878986c2d87a1fb18991a4caa14ebf9ad6fa175157a8d2caf57dbe7397b56"
+  },
+  "tolerances": {
+    "discrete": "Exact IDs, protocol, checkpoint names/order/counts/shapes; all values finite.",
+    "projections": {
+      "max_abs": 2e-05,
+      "relative_rms": 2e-06,
+      "cosine": 0.99999999998
+    },
+    "audio": {
+      "max_abs": "0.002 + 0.001 * max(abs(reference))",
+      "relative_rms": 0.003,
+      "cosine": 0.99999
+    },
+    "logits_without_baseline": {
+      "max_abs": 0.15,
+      "relative_rms": 0.005,
+      "cosine": 0.99998
+    },
+    "logits_with_baseline": "Twice independent Oracle-path error; relative RMS hard cap 0.20, cosine floor 0.98. Limits were not widened.",
+    "empty_reference": "Rejected; audio boundary checks assert exactly four checkpoints."
+  },
+  "current": {
+    "cpu": {
+      "standard-translate-f32": {
+        "checker_exit": 0,
+        "process_exit": 0,
+        "generated_tokens": 10,
+        "groups": {
+          "logits": {
+            "checkpoints": 10,
+            "max_abs": 1.2512797117233276,
+            "max_relative_rms": 0.07293087604114223,
+            "min_cosine": 0.9974558236629387
+          },
+          "audio": {
+            "checkpoints": 12,
+            "max_abs": 0.0550994873046875,
+            "max_relative_rms": 0.0005794915501452186,
+            "min_cosine": 0.9999998322347387
+          }
+        },
+        "oracle_path_variation": {
+          "checkpoints": 10,
+          "max_abs": 1.3330318927764893,
+          "max_relative_rms": 0.06633272159023641,
+          "min_cosine": 0.9981301359012572
+        },
+        "logit_bounds": {
+          "max_abs": 2.6660637855529785,
+          "relative_rms": 0.13266544318047283,
+          "cosine": 0.9962602718025144
+        },
+        "failures": [],
+        "generated_ids_exact": true,
+        "turns": [
+          [
+            1632,
+            270,
+            120008
+          ],
+          [
+            5557,
+            3903,
+            50829,
+            612,
+            270,
+            120008
+          ],
+          [
+            120008
+          ]
+        ]
+      },
+      "standard-text-f32": {
+        "checker_exit": 0,
+        "process_exit": 0,
+        "generated_tokens": 1,
+        "groups": {
+          "logits": {
+            "checkpoints": 1,
+            "max_abs": 1.3899500370025635,
+            "max_relative_rms": 0.08264123310561843,
+            "min_cosine": 0.9966678637237952
+          }
+        },
+        "oracle_path_variation": {
+          "checkpoints": 1,
+          "max_abs": 1.2369022369384766,
+          "max_relative_rms": 0.08746602609381651,
+          "min_cosine": 0.9970368774014942
+        },
+        "logit_bounds": {
+          "max_abs": 2.473804473876953,
+          "relative_rms": 0.17493205218763302,
+          "cosine": 0.9940737548029883
+        },
+        "failures": [],
+        "generated_ids_exact": true,
+        "turns": [
+          [
+            32
+          ]
+        ],
+        "input_ids_exact": true
+      },
+      "standard-text-f16": {
+        "checker_exit": 0,
+        "process_exit": 0,
+        "generated_tokens": 1,
+        "groups": {
+          "logits": {
+            "checkpoints": 1,
+            "max_abs": 1.2601518630981445,
+            "max_relative_rms": 0.08097859554646376,
+            "min_cosine": 0.9969160883612198
+          }
+        },
+        "oracle_path_variation": {
+          "checkpoints": 1,
+          "max_abs": 1.9260063171386719,
+          "max_relative_rms": 0.09490565850823798,
+          "min_cosine": 0.9954863692083211
+        },
+        "logit_bounds": {
+          "max_abs": 3.8520126342773438,
+          "relative_rms": 0.18981131701647597,
+          "cosine": 0.9909727384166422
+        },
+        "failures": [],
+        "generated_ids_exact": true,
+        "turns": [
+          [
+            32
+          ]
+        ],
+        "input_ids_exact": true
+      },
+      "interleave-translate-f32": {
+        "checker_exit": 0,
+        "process_exit": 0,
+        "generated_tokens": 18,
+        "groups": {
+          "logits": {
+            "checkpoints": 18,
+            "max_abs": 2.1249436736106873,
+            "max_relative_rms": 0.15401138916161136,
+            "min_cosine": 0.9892843621359493
+          },
+          "audio": {
+            "checkpoints": 12,
+            "max_abs": 0.0597991943359375,
+            "max_relative_rms": 0.0008818199930367588,
+            "min_cosine": 0.9999996138948588
+          }
+        },
+        "oracle_path_variation": {
+          "checkpoints": 18,
+          "max_abs": 2.2396905422210693,
+          "max_relative_rms": 0.22637406730962287,
+          "min_cosine": 0.9808801883097992
+        },
+        "logit_bounds": {
+          "max_abs": 4.479381084442139,
+          "relative_rms": 0.2,
+          "cosine": 0.98
+        },
+        "failures": [],
+        "generated_ids_exact": true,
+        "turns": [
+          [
+            120008
+          ],
+          [
+            5057,
+            950,
+            11,
+            1685,
+            18495,
+            10334,
+            11,
+            120809,
+            1632,
+            270,
+            5557,
+            3903,
+            50829,
+            612,
+            270,
+            120008
+          ],
+          [
+            120008
+          ]
+        ]
+      },
+      "interleave-text-f32": {
+        "checker_exit": 1,
+        "process_exit": 0,
+        "generated_tokens": 1,
+        "groups": {
+          "logits": {
+            "checkpoints": 1,
+            "max_abs": 3.0889618396759033,
+            "max_relative_rms": 0.2868802718654061,
+            "min_cosine": 0.9641183501584513
+          }
+        },
+        "oracle_path_variation": {
+          "checkpoints": 1,
+          "max_abs": 5.8242833614349365,
+          "max_relative_rms": 0.3956152247116955,
+          "min_cosine": 0.9381553104976071
+        },
+        "logit_bounds": {
+          "max_abs": 11.648566722869873,
+          "relative_rms": 0.2,
+          "cosine": 0.98
+        },
+        "failures": [
+          {
+            "checkpoint": [
+              "hy.logits",
+              0
+            ],
+            "metric": "relative_rms",
+            "value": 0.2868802718654061,
+            "limit": 0.2
+          },
+          {
+            "checkpoint": [
+              "hy.logits",
+              0
+            ],
+            "metric": "cosine",
+            "value": 0.9641183501584513,
+            "limit": 0.98
+          }
+        ],
+        "generated_ids_exact": true,
+        "turns": [
+          [
+            31168
+          ]
+        ],
+        "input_ids_exact": true
+      },
+      "interleave-text-f16": {
+        "checker_exit": 1,
+        "process_exit": 0,
+        "generated_tokens": 1,
+        "groups": {
+          "logits": {
+            "checkpoints": 1,
+            "max_abs": 1.6766388416290283,
+            "max_relative_rms": 0.22957120620559926,
+            "min_cosine": 0.9746626901341492
+          }
+        },
+        "oracle_path_variation": {
+          "checkpoints": 1,
+          "max_abs": 2.1872754096984863,
+          "max_relative_rms": 0.2514719245362196,
+          "min_cosine": 0.968946026150297
+        },
+        "logit_bounds": {
+          "max_abs": 4.374550819396973,
+          "relative_rms": 0.2,
+          "cosine": 0.98
+        },
+        "failures": [
+          {
+            "checkpoint": [
+              "hy.logits",
+              0
+            ],
+            "metric": "relative_rms",
+            "value": 0.22957120620559926,
+            "limit": 0.2
+          },
+          {
+            "checkpoint": [
+              "hy.logits",
+              0
+            ],
+            "metric": "cosine",
+            "value": 0.9746626901341492,
+            "limit": 0.98
+          }
+        ],
+        "generated_ids_exact": true,
+        "turns": [
+          [
+            31168
+          ]
+        ],
+        "input_ids_exact": true
+      }
+    },
+    "auto": {
+      "standard-translate-f32": {
+        "checker_exit": 0,
+        "process_exit": 0,
+        "generated_tokens": 10,
+        "groups": {
+          "logits": {
+            "checkpoints": 10,
+            "max_abs": 1.5464855432510376,
+            "max_relative_rms": 0.06636667065077244,
+            "min_cosine": 0.9979351325616931
+          },
+          "audio": {
+            "checkpoints": 12,
+            "max_abs": 0.055145263671875,
+            "max_relative_rms": 0.0005794828979416122,
+            "min_cosine": 0.9999998322392353
+          }
+        },
+        "oracle_path_variation": {
+          "checkpoints": 10,
+          "max_abs": 1.3330318927764893,
+          "max_relative_rms": 0.06633272159023641,
+          "min_cosine": 0.9981301359012572
+        },
+        "logit_bounds": {
+          "max_abs": 2.6660637855529785,
+          "relative_rms": 0.13266544318047283,
+          "cosine": 0.9962602718025144
+        },
+        "failures": [],
+        "generated_ids_exact": true,
+        "turns": [
+          [
+            1632,
+            270,
+            120008
+          ],
+          [
+            5557,
+            3903,
+            50829,
+            612,
+            270,
+            120008
+          ],
+          [
+            120008
+          ]
+        ]
+      },
+      "interleave-translate-f32": {
+        "checker_exit": 1,
+        "process_exit": 0,
+        "generated_tokens": 18,
+        "groups": {
+          "logits": {
+            "checkpoints": 18,
+            "max_abs": 2.5752105712890625,
+            "max_relative_rms": 0.25841511467301875,
+            "min_cosine": 0.9750506905443544
+          },
+          "audio": {
+            "checkpoints": 12,
+            "max_abs": 0.05980682373046875,
+            "max_relative_rms": 0.0008821123544389531,
+            "min_cosine": 0.9999996136430215
+          }
+        },
+        "oracle_path_variation": {
+          "checkpoints": 18,
+          "max_abs": 2.2396905422210693,
+          "max_relative_rms": 0.22637406730962287,
+          "min_cosine": 0.9808801883097992
+        },
+        "logit_bounds": {
+          "max_abs": 4.479381084442139,
+          "relative_rms": 0.2,
+          "cosine": 0.98
+        },
+        "failures": [
+          {
+            "checkpoint": [
+              "hy.logits",
+              6
+            ],
+            "metric": "relative_rms",
+            "value": 0.25841511467301875,
+            "limit": 0.2
+          },
+          {
+            "checkpoint": [
+              "hy.logits",
+              6
+            ],
+            "metric": "cosine",
+            "value": 0.9750506905443544,
+            "limit": 0.98
+          }
+        ],
+        "generated_ids_exact": true,
+        "turns": [
+          [
+            120008
+          ],
+          [
+            5057,
+            950,
+            11,
+            1685,
+            18495,
+            10334,
+            11,
+            120809,
+            1632,
+            270,
+            5557,
+            3903,
+            50829,
+            612,
+            270,
+            120008
+          ],
+          [
+            120008
+          ]
+        ]
+      }
+    },
+    "components": {
+      "standard": {
+        "tokenizer": {
+          "exact": true,
+          "cases": 60
+        },
+        "projections": {
+          "checkpoints": 21,
+          "max_abs": 1.430511474609375e-06,
+          "max_relative_rms": 2.398840790166703e-07,
+          "min_cosine": 0.9999999999999712
+        },
+        "non_hop_tail": {
+          "checkpoints": 4,
+          "max_abs": 0.0222625732421875,
+          "max_relative_rms": 0.0004772914492263863,
+          "min_cosine": 0.9999998861148246
+        },
+        "silence": {
+          "checkpoints": 4,
+          "max_abs": 0.0028858184814453125,
+          "max_relative_rms": 0.00019981761916826516,
+          "min_cosine": 0.9999999801743866
+        }
+      },
+      "interleave": {
+        "tokenizer": {
+          "exact": true,
+          "cases": 60
+        },
+        "projections": {
+          "checkpoints": 21,
+          "max_abs": 1.9073486328125e-06,
+          "max_relative_rms": 2.3569040343213693e-07,
+          "min_cosine": 0.9999999999999726
+        },
+        "non_hop_tail": {
+          "checkpoints": 4,
+          "max_abs": 0.0127410888671875,
+          "max_relative_rms": 0.0004910722190421718,
+          "min_cosine": 0.9999998794409427
+        },
+        "silence": {
+          "checkpoints": 4,
+          "max_abs": 0.0027618408203125,
+          "max_relative_rms": 0.00020766510712248915,
+          "min_cosine": 0.9999999792495637
+        }
+      }
+    },
+    "real_entry_tests": {
+      "standard": {
+        "tests_exit": 0,
+        "tests_seconds": 191.867851074785,
+        "cli_seconds": 41.39853683486581,
+        "tests_passed": 3,
+        "tests_failed": 0,
+        "cli_exit": 0,
+        "cli_text_matches_library": true
+      },
+      "interleave": {
+        "tests_exit": 0,
+        "tests_seconds": 196.61732137110084,
+        "cli_seconds": 42.35186384152621,
+        "tests_passed": 3,
+        "tests_failed": 0,
+        "cli_exit": 0,
+        "cli_text_matches_library": true
+      }
+    },
+    "cli_auto": {
+      "standard": {
+        "exit": 0,
+        "seconds": 173.9971411684528
+      },
+      "interleave": {
+        "exit": 0,
+        "seconds": 183.40620618965477
+      }
+    },
+    "regressions": {
+      "hy_arm64_default": {
+        "passed": 23,
+        "failed": 0,
+        "ignored": 0
+      },
+      "hy_arm64_scalar": {
+        "passed": 23,
+        "failed": 0,
+        "ignored": 0
+      },
+      "f32_dot_default": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "f32_dot_scalar": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "f16_typed_dot_default": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "f16_typed_dot_scalar": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "q6k_neon_dotprod": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "q6k_scalar": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "qwen3": {
+        "passed": 111,
+        "failed": 0,
+        "ignored": 4
+      },
+      "tokenizer": {
+        "passed": 31,
+        "failed": 0,
+        "ignored": 2
+      },
+      "audio_frontend": {
+        "passed": 4,
+        "failed": 0,
+        "ignored": 0
+      },
+      "shared_nn": {
+        "passed": 10,
+        "failed": 0,
+        "ignored": 0
+      },
+      "jev": {
+        "passed": 10,
+        "failed": 0,
+        "ignored": 0
+      },
+      "server_mode": {
+        "passed": 10,
+        "failed": 0,
+        "ignored": 0
+      },
+      "hy_contract_and_normal_entries": [
+        {
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "passed": 2,
+          "failed": 0,
+          "ignored": 3
+        }
+      ],
+      "linear_default": {
+        "passed": 5,
+        "failed": 0,
+        "ignored": 1
+      },
+      "linear_vulkan_feature": {
+        "passed": 6,
+        "failed": 0,
+        "ignored": 5
+      },
+      "explicit_policy": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "explicit_policy_scalar": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "threshold_zero": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "threshold_custom": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "scalar_device_selection": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "comparison_checker": {
+        "passed": 4,
+        "failed": 0
+      }
+    },
+    "vulkan_device_counters": {
+      "standard-translate-f32-auto-valuedot": {
+        "backend_events": {
+          "Vulkan": 429,
+          "Cpu": 79608
+        },
+        "counter_samples": 429,
+        "final_counters": {
+          "submissions": 1004,
+          "static_uploads": 345,
+          "static_upload_bytes": 2077439040,
+          "host_write_bytes": 287397924,
+          "host_read_bytes": 186585216,
+          "transfer_submissions": 0,
+          "live_allocation_bytes": 1895355520,
+          "peak_allocation_bytes": 2197545472
+        }
+      },
+      "standard-cli-auto-1token": {
+        "backend_events": {
+          "Vulkan": 222,
+          "Cpu": 52452
+        },
+        "counter_samples": 222,
+        "final_counters": {
+          "submissions": 547,
+          "static_uploads": 345,
+          "static_upload_bytes": 2077439040,
+          "host_write_bytes": 192351268,
+          "host_read_bytes": 125407360,
+          "transfer_submissions": 0,
+          "live_allocation_bytes": 1895355520,
+          "peak_allocation_bytes": 2197545472
+        }
+      },
+      "interleave-translate-f32-auto-valuedot": {
+        "backend_events": {
+          "Vulkan": 437,
+          "Cpu": 89698
+        },
+        "counter_samples": 437,
+        "final_counters": {
+          "submissions": 1012,
+          "static_uploads": 345,
+          "static_upload_bytes": 2077439040,
+          "host_write_bytes": 293493796,
+          "host_read_bytes": 194771072,
+          "transfer_submissions": 0,
+          "live_allocation_bytes": 1895355520,
+          "peak_allocation_bytes": 2197545472
+        }
+      },
+      "interleave-cli-auto-1token": {
+        "backend_events": {
+          "Vulkan": 222,
+          "Cpu": 53298
+        },
+        "counter_samples": 222,
+        "final_counters": {
+          "submissions": 547,
+          "static_uploads": 345,
+          "static_upload_bytes": 2077439040,
+          "host_write_bytes": 194361380,
+          "host_read_bytes": 126847104,
+          "transfer_submissions": 0,
+          "live_allocation_bytes": 1895355520,
+          "peak_allocation_bytes": 2197545472
+        }
+      }
+    },
+    "binary_sha256": {
+      "rust-model-inference": "506b2c8270905d9a16bf5448841ae14ccfdab5bf53250aad9f0efcbe8f28f59b",
+      "hy_simulmt_parity": "7ee083b2f9729e5031b866e04a4806e541d419f22f05ac6dafc43259a5dd0173",
+      "hy-oracle-avx2": "fb811def7a47ef7bae0e7db66e9c2c1f9c4f2981dde7c300245009429f702079",
+      "hy-oracle-avx2-audio": "74e9ceeab1d1c2041968378fd253d1aa9fe34323c88efeef3c82174c89ab791c",
+      "hy_simulmt_entries-8f825c163e0d4627": "89e17960ab932ab83974055017a63313d41486ed69414624db8968d9ad25c883"
+    }
+  },
+  "known_limitations": {
+    "failed_numerical_cases": [
+      "interleave-text-f32/cpu",
+      "interleave-text-f16/cpu",
+      "interleave-translate-f32/auto"
+    ],
+    "vulkan_process_exit": {
+      "test": "auto_gpu_threshold_interleaves_rows_and_mixed_group_sizes",
+      "assertions_passed": true,
+      "isolated_process_exit_codes": [
+        -11,
+        -11,
+        -11
+      ],
+      "tested_rust_src_tree": "8017a69161e985a3b2c15f2de84fef653d72f403",
+      "source_note": "Before the final one-line CPU router correction; Vulkan and dispatch code are unchanged.",
+      "gdb": "SIGSEGV in [vkps] Update; main thread in libnvidia-glcore.so.570.153.02 during exit().",
+      "root_cause_confirmed": false,
+      "resolved": false
+    },
+    "gpu_performance": "No speedup established; measured Auto runs are slower than CPU."
+  },
+  "historical": {
+    "source_revision": "a2db408bd6436063ff5ef902aabe9e8a72a19010",
+    "note": "Before the standalone Hy decoder; not current parity evidence.",
+    "full_jfk_cli": {
+      "samples": 176000,
+      "seconds_of_audio": 11,
+      "turns": 13,
+      "audio_tokens": 70,
+      "prompt_tokens": 193,
+      "output_tokens": 35,
+      "seconds": 154.196,
+      "oracle_compared": false,
+      "output_without_newlines": "因此，我的美国同胞们，不要问你的国家能为你做什么，问问你能为你的国家做什么。"
+    },
+    "global_token_limit": {
+      "max_tokens": 4,
+      "turns": [
+        [
+          1632,
+          270,
+          120008
+        ],
+        [
+          5557
+        ]
+      ],
+      "passed": true
+    },
+    "prior_native_isa_failures": [
+      {
+        "reference_isa": "native AVX512",
+        "stage": "Before the current F32 reductions/router",
+        "case": "standard-speech-f32",
+        "cosine": 0.9945174786,
+        "required_cosine": 0.9952345089776164
+      },
+      {
+        "reference_isa": "native AVX512",
+        "stage": "Initial independent decoder, sequential FMA values",
+        "case": "interleave-speech-f32",
+        "max_abs": 5.22658,
+        "required_max_abs": 4.231352210044861
+      }
+    ]
+  },
+  "not_validated": [
+    "whole-repository test suite",
+    "final decoder against an AVX512 Oracle",
+    "whole-model F32 equivalence",
+    "other quantizations",
+    "long recordings",
+    "microphone input",
+    "TTS",
+    "resampling/non-PCM16 WAV",
+    "other GPU models/drivers"
+  ],
+  "text_fixture": {
+    "path": "tools/oracle/hy_simulmt/text.txt",
+    "sha256": "e38866440e7adbc66ca06d4b17f6a299c5dfb8d45734ed643d81fb8b4536fe4c",
+    "prompt": "native no_think A/B text prompt",
+    "generated_tokens": 1
+  }
+}
