@@ -59,8 +59,8 @@ from pathlib import Path
 import numpy as np
 
 from tools.converter.utils.gguf import (
-    GGML_BF16, GGML_F16, GGML_F32, GGML_Q4K, GGML_Q6K, GGML_Q8_0, _read_gguf,
-    GgufWriter, f32_to_bf16, gguf_dims, quantize_q8_0,
+    GGML_BF16, GGML_F16, GGML_F32, GGML_Q4K, GGML_Q5K, GGML_Q6K, GGML_Q8_0,
+    _read_gguf, GgufWriter, f32_to_bf16, gguf_dims, quantize_q8_0,
 )
 from tools.converter.utils.kquants import quantize_k
 
@@ -68,6 +68,7 @@ from tools.converter.utils.kquants import quantize_k
 BLOCK_FORMATS = {
     "q8_0": (32, GGML_Q8_0),
     "q4_k": (256, GGML_Q4K),
+    "q5_k": (256, GGML_Q5K),
     "q6_k": (256, GGML_Q6K),
     "f16": (1, GGML_F16),
     "bf16": (1, GGML_BF16),
@@ -140,11 +141,12 @@ def _quantize_one(
         return target, values.astype("<f2").tobytes()
     if target == GGML_BF16:
         return target, f32_to_bf16(values.tobytes())
-    if target in (GGML_Q4K, GGML_Q6K):
+    if target in (GGML_Q4K, GGML_Q5K, GGML_Q6K):
         # The k-quant search compares weighted squared errors, so its float
         # accumulation order is load-bearing: `kquants.py` is a line-by-line
-        # port of `quantize_row_q4_K_ref` / `quantize_row_q6_K_ref` for that
-        # reason, and reordering it here would change which scale wins.
+        # port of `quantize_row_q4_K_ref` / `quantize_row_q5_K_ref` /
+        # `quantize_row_q6_K_ref` for that reason, and reordering it here
+        # would change which scale wins.
         return target, quantize_k(target_format, values)
     raise AssertionError(f"unreachable target {target}")
 

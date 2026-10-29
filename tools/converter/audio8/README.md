@@ -24,6 +24,36 @@ For the WAV above, extract seconds 10–14 of the supplied demo video as mono,
 (`c8ba8eea829be0339e8d7757f8ca52dac06e1e32`) both returned
 `一个两个半年，`. This is a transcription smoke check, not bit parity.
 
+Without a system `ffmpeg`, PyAV bundles the same decoders and resampler:
+
+```bash
+./.venv/bin/python -m pip install av
+./.venv/bin/python - <<'PY'
+import wave
+import av
+
+container = av.open("models/Audio8-ASR-Infinite/Audio8-Asr-Infinite-Demo.mp4")
+stream = next(s for s in container.streams if s.type == "audio")
+resampler = av.audio.resampler.AudioResampler(format="s16", layout="mono", rate=16000)
+frames = []
+for frame in container.decode(stream):
+    if float(frame.pts * stream.time_base) + frame.samples / frame.sample_rate < 10:
+        continue
+    if float(frame.pts * stream.time_base) >= 14:
+        break
+    frames.extend(resampled.to_ndarray().tobytes() for resampled in resampler.resample(frame))
+with wave.open("/tmp/audio8-demo-10-14s.wav", "wb") as out:
+    out.setnchannels(1)
+    out.setsampwidth(2)
+    out.setframerate(16000)
+    out.writeframes(b"".join(frames))
+PY
+```
+
+The cut this produces is not the sample-for-sample twin of the `ffmpeg` one —
+the resampler starts at a different point — so the transcript differs in
+wording from the official run's without either side being wrong.
+
 ## Quantized variants
 
 The BF16 file is the lossless reference. The shared quantizer reads it and
@@ -31,7 +61,7 @@ writes the smaller formats; the runtime loads all of them through the same
 `Weight::from_quantized` path, so no separate loader is involved.
 
 ```bash
-for fmt in q8_0 q6_k q4_k; do
+for fmt in q8_0 q5_k q6_k q4_k; do
   ./.venv/bin/python -m tools.converter.utils.quantize_gguf \
     "$MODEL/Audio8-ASR-Infinite-BF16.gguf" \
     "$MODEL/Audio8-ASR-Infinite-$(echo "$fmt" | tr a-z A-Z).gguf" \
@@ -46,31 +76,56 @@ handled by the rules in `tools/converter/utils/quantize_gguf.py` — 1-D tensors
 by hand, so they stay BF16) and any tensor whose contiguous row width is not
 block-aligned keep their source type.
 
+`examples/kquant_roundtrip.rs` checks a payload against its source with the
+runtime's own decoder, so a layout mistake shows up as a huge error instead
+of a subtly wrong model:
+
+```bash
+./.venv/bin/python -c "
+import numpy as np
+from tools.converter.utils.kquants import quantize_q5_k
+values = np.random.default_rng(7).standard_normal(4096).astype(np.float32) * 0.05
+values.tofile('/tmp/values.f32')
+open('/tmp/payload.bin','wb').write(quantize_q5_k(values))
+"
+cargo run --profile release-fast --example kquant_roundtrip -- \
+  q5_k /tmp/values.f32 /tmp/payload.bin
+```
+
 Measured on this repository's runtime, 4 s of the demo clip, GB10 / aarch64,
 `--threads 4`, machine otherwise idle:
 
 | Format | Size | Peak RSS | Export | Wall clock | Transcript |
 |---|---|---|---|---|---|
-| BF16 | 8.18 GB | 8.2 GB | 14 s | 50 s | `就是两个半月，` |
-| F16 | 8.18 GB | 8.2 GB | 2.5 min | 44 s | `就是两个半月，` |
-| Q8_0 | 4.35 GB | 4.5 GB | 25 s | 20 s | `For two and a half years` |
-| Q6_K | 3.37 GB | 3.5 GB | 6 min | 64 s | `For two and a half years` |
-| Q4_K | 2.32 GB | 2.5 GB | 15 min | 11 s | `就是一个二十二年` |
+| BF16 | 7.62 GB | 8.2 GB | 14 s | 51 s | `就是两个半月，` |
+| F16 | 7.62 GB | 8.2 GB | 2.5 min | 44 s | `就是两个半月，` |
+| Q8_0 | 4.05 GB | 4.5 GB | 25 s | 19 s | `For two and a half years` |
+| Q5_K | 2.63 GB | 3.0 GB | 20 min | 79 s | `For two and a half years` |
+| Q6_K | 3.14 GB | 3.5 GB | 6 min | 64 s | `For two and a half years` |
+| Q4_K | 2.16 GB | 2.5 GB | 11 min | 10 s | `就是一个二十二年` |
+
+The Q4_K export is the slow one: the encoder is a NumPy port of ggml's
+reference scale search, and the search is per super-block. Capping the
+search batch at 256 super-blocks (`K_SEARCH_MAX_BLOCKS`) took the export
+of this model from 23.5 min to 11 min and the peak RSS from 5.5 GiB to
+150 MiB, with a byte-identical file. Q5_K's search walks sixteen candidate
+scales against Q4_K's twenty, and it took 20 min.
 
 F16 keeps the transcript bit-for-bit equivalent to BF16 (the audio embeddings
-agree to 1.3e-6 relative RMS, against 7e-2 for Q8_0) and is 15 % faster,
+agree to 1.3e-6 relative RMS, against 7e-2 for Q8_0) and is about 14 % faster,
 because the BF16 kernel has no NEON path on this host while F16 does. F16 is
 the same size as BF16, so it is a speed knob, not a memory knob.
 
 The block formats change the transcript, and they change it in different ways:
-Q8_0 and Q6_K answer in English, Q4_K answers in Chinese with the wrong
-content. The reason is the runtime's Q8_0 kernel path: it quantizes the
-*activations* to Q8_0 and accumulates in int32, the llama.cpp convention. The
-Audio8 activations are heavy-tailed, so that rounding is a few percent per
+Q8_0, Q5_K and Q6_K answer in English, Q4_K answers in Chinese with the
+wrong content. The reason is the runtime's block kernel path: it quantizes
+the *activations* to Q8_0 and accumulates in int32, the llama.cpp convention.
+The Audio8 activations are heavy-tailed, so that rounding is a few percent per
 projection, the 32 audio layers compound it, and the greedy decode flips the
 first token. The weight rounding alone is not the cause — the Q8_0 weights
 dequantize to 0.5 % relative RMS of the BF16 ones, and F16 (which keeps F32
-activations) reproduces the BF16 transcript exactly.
+activations) reproduces the BF16 transcript exactly. Q4_K is the fastest
+because it moves the least data, and the least accurate for the same reason.
 
 The transcripts above are for the WAV this repository's own extraction
 produced; the README's reference clip came out of `ffmpeg`, and the two cuts

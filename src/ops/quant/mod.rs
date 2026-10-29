@@ -3222,6 +3222,86 @@ mod avx2_kq_parity {
 }
 
 #[cfg(test)]
+mod k_quant_layout_tests {
+    use super::*;
+
+    /// Build a Q5_K super-block whose codes are known, so the decoder's
+    /// layout is pinned: a 2-byte F16 scale, a 2-byte F16 minimum, twelve
+    /// bytes of six-bit sub-scales and sub-minimums, thirty-two bytes of
+    /// fifth bits and 128 bytes of four-bit codes.
+    fn q5_k_block(scale: f32, minimum: f32, codes: &[u8; 256]) -> Vec<u8> {
+        let mut block = vec![0u8; BLOCK_Q5K_SIZE];
+        block[0..2].copy_from_slice(&crate::ops::f32_to_f16(scale).to_le_bytes());
+        block[2..4].copy_from_slice(&crate::ops::f32_to_f16(minimum).to_le_bytes());
+        // Sub-scales 0..7 are one and the sub-minimums are zero. The
+        // `get_scale_min_k4` layout puts scales 0..3 in the low six bits of
+        // bytes 0..3 of the twelve-byte table, minimums 0..3 in bytes 4..7,
+        // and scales 4..7 in the low nibble of bytes 8..11. The table itself
+        // starts at byte 4 of the block, after the two F16 header fields.
+        block[4..8].copy_from_slice(&[1, 1, 1, 1]);
+        block[12..16].copy_from_slice(&[1, 1, 1, 1]);
+        let mut qh = [0u8; 32];
+        let mut qs = [0u8; 128];
+        for group in 0..4 {
+            let m1 = 1u8 << (2 * group);
+            let m2 = 1u8 << (2 * group + 1);
+            for j in 0..32 {
+                let mut low = codes[group * 64 + j];
+                let mut high = codes[group * 64 + j + 32];
+                if low > 15 {
+                    low -= 16;
+                    qh[j] |= m1;
+                }
+                if high > 15 {
+                    high -= 16;
+                    qh[j] |= m2;
+                }
+                qs[group * 32 + j] = low | (high << 4);
+            }
+        }
+        block[16..48].copy_from_slice(&qh);
+        block[48..176].copy_from_slice(&qs);
+        block
+    }
+
+    #[test]
+    fn q5_k_decodes_the_fifth_bit_and_the_sub_scale() {
+        // Every code is 17, so the fifth bit is set everywhere and the
+        // reconstruction is scale * 17.
+        let codes = [17u8; 256];
+        let block = q5_k_block(0.5, 1.0, &codes);
+        let mut output = vec![0.0f32; 256];
+        dequantize_row_q5_k(&block, &mut output);
+        for (index, value) in output.iter().enumerate() {
+            assert!((value - 0.5 * 17.0).abs() < 1e-3, "value {index} = {value}");
+        }
+    }
+
+    #[test]
+    fn q5_k_decodes_the_low_and_high_nibbles_in_order() {
+        // The first 32 codes are 3, the next 32 are 5, and the rest are 0.
+        let mut codes = [0u8; 256];
+        for code in codes.iter_mut().take(32) {
+            *code = 3;
+        }
+        for code in codes.iter_mut().skip(32).take(32) {
+            *code = 5;
+        }
+        let block = q5_k_block(1.0, 0.0, &codes);
+        let mut output = vec![0.0f32; 256];
+        dequantize_row_q5_k(&block, &mut output);
+        for (index, value) in output.iter().enumerate() {
+            let want = match index {
+                0..32 => 3.0,
+                32..64 => 5.0,
+                _ => 0.0,
+            };
+            assert!((value - want).abs() < 1e-3, "value {index} = {value}");
+        }
+    }
+}
+
+#[cfg(test)]
 mod i_quant_tests {
     use super::*;
     use crate::ops::quant::iq_tables::{
