@@ -8,7 +8,6 @@
 
 mod audio8;
 mod funasr;
-mod hy_simulmt;
 mod vibevoice;
 
 use crate::app::cli::{resolve_thread_count, transcription_options};
@@ -17,8 +16,10 @@ use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
 use crate::format::ggufrs::ComponentRole;
+use crate::models::hy_simulmt::HySimulMt;
 use crate::models::qwen3::asr::model::{open_bundled_audio_source, AsrRuntime};
 use crate::models::qwen3::Qwen3Model;
+use crate::ops::audio::frontend::decode_pcm16_wav;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -44,7 +45,7 @@ pub fn run_asr_cli(
             == Some("hy_v3");
         drop(probe);
         if is_hy {
-            return hy_simulmt::run(options, prefill_batch_size);
+            return run_hy_simulmt_cli(options, prefill_batch_size);
         }
         if is_audio8 {
             return audio8::run_audio8_cli(options);
@@ -75,6 +76,53 @@ pub fn run_asr_cli(
         }
     }
     run_qwen3_asr_cli(options, prefill_batch_size, started)
+}
+
+fn run_hy_simulmt_cli(options: &crate::app::cli::CliOptions, batch: usize) -> Result<(), String> {
+    if options.mmproj.is_some() {
+        return Err("Hy-SimulMT GGUF already contains the audio encoder; omit --mmproj".into());
+    }
+    if options.temperature.is_some_and(|t| t != 0.0) {
+        return Err("Hy-SimulMT requires greedy decoding (--temp 0)".into());
+    }
+    let compute = options.compute_policy();
+    let _scope = compute.enter_legacy_scope();
+    let source: Arc<dyn TensorSource> =
+        Arc::from(crate::app::open_or_exit(&options.model, ComponentRole::Llm));
+    let available = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1);
+    let pool = Arc::new(ComputePool::new(resolve_thread_count(
+        options.threads,
+        available,
+    )));
+    let model = HySimulMt::from_source_with_compute(source, pool, compute)?;
+    let path = options
+        .audio
+        .as_ref()
+        .ok_or("Hy-SimulMT requires --audio")?;
+    let wav = std::fs::read(path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+    let samples = decode_pcm16_wav(&wav).map_err(|e| format!("Hy-SimulMT WAV: {e:?}"))?;
+    let started = Instant::now();
+    let result = model.translate(
+        &samples,
+        options.language.as_deref().unwrap_or("zh"),
+        options.prompt.as_deref(),
+        options.max_tokens.unwrap_or(512),
+        options.effective_max_context(),
+        batch,
+        options.kv_format,
+    )?;
+    println!("{}", result.text);
+    eprintln!(
+        "Hy-SimulMT {compute:?}: {} turns, {} audio tokens, {} prompt tokens, {} output tokens, {:.3}s",
+        result.turns.len(),
+        result.audio_tokens,
+        result.prompt_tokens,
+        result.token_ids.len(),
+        started.elapsed().as_secs_f64()
+    );
+    Ok(())
 }
 
 /// Qwen3-VL ASR pipeline (default when no VibeVoice/FunASR mmproj detected).
