@@ -4,7 +4,7 @@
 //! decode) live in [`crate::models::audio8::streaming`]; this module only
 //! parses CLI options and drives the transcriber.
 
-use crate::app::cli::CliOptions;
+use crate::app::cli::{resolve_thread_count, CliOptions};
 use crate::app::open_or_exit;
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
@@ -22,7 +22,15 @@ pub fn run_audio8_cli(options: &CliOptions) -> Result<(), String> {
         return Err("Audio8 carries its audio tower in --model; omit --mmproj".into());
     }
     let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
-    let pool = Arc::new(ComputePool::new(options.threads));
+    // `options.threads` is the raw request: 0 means "pick a default". A pool
+    // built from 0 would be single-threaded, which is what the whole audio
+    // tower runs on.
+    let pool = Arc::new(ComputePool::new(resolve_thread_count(
+        options.threads,
+        std::thread::available_parallelism()
+            .map(|value| value.get())
+            .unwrap_or(1),
+    )));
     let encoder = Audio8Encoder::from_source(Arc::clone(&source), Arc::clone(&pool))?;
     let decoder_source = Arc::clone(&source);
     let tokenizer = Arc::new(BPETokenizer::from_gguf_metadata(|key| {

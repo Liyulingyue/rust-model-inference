@@ -16,7 +16,8 @@ use serde::{Deserialize, Serialize};
 use tower_http::cors::CorsLayer;
 
 use crate::app::cli::{
-    normalize_tts_language, parse_cli_options, validate_cli_options, CliOptions, KvFormat,
+    normalize_tts_language, parse_cli_options, resolve_thread_count, validate_cli_options,
+    CliOptions, KvFormat,
 };
 use crate::app::{compute_embedding, open_or_exit};
 use crate::core::tensor::{MetaValue, TensorSource};
@@ -1487,7 +1488,14 @@ fn build_audio8(options: &CliOptions) -> Result<Audio8Backend, String> {
         return Err("Audio8 carries its audio tower in --model; omit --mmproj".into());
     }
     let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
-    let pool = Arc::new(ComputePool::new(options.threads));
+    // `options.threads` is the raw request: 0 means "pick a default", and a
+    // pool built from 0 would be single-threaded.
+    let pool = Arc::new(ComputePool::new(resolve_thread_count(
+        options.threads,
+        std::thread::available_parallelism()
+            .map(|value| value.get())
+            .unwrap_or(1),
+    )));
     let encoder =
         crate::models::audio8::Audio8Encoder::from_source(Arc::clone(&source), Arc::clone(&pool))?;
     let decoder_source = Arc::clone(&source);
