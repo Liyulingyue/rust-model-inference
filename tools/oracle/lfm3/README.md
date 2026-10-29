@@ -158,9 +158,25 @@ python3 tools/oracle/lfm3/compare_checkpoints.py /tmp/lfm3-trace/chat \
 ```
 
 实测首个发生 Q8 字节变化的 **norm 输入**在位置 4、layer 13 的 operator norm：
-输入最大差 `0.00017584115`，量化后 10 个字节不同。此探针覆盖 norm 后投影输入，
-不覆盖短卷积和 attention 输出投影前的所有中间输入，不能把它称为全图首次量化分叉。
-它证实了重新量化的非连续放大；各算子的最终贡献不能按上表简单相加。
+输入最大差 `0.00017584115`，量化后 10 个字节不同。它证实了重新量化的非连续放大；
+各算子的最终贡献不能按上表简单相加。
+
+探针现在覆盖**每一个量化投影的输入**，而不只是两个 norm：`attn_norm`（q/k/v/head-gate
+投影的输入）、`ffn_norm`（gate/up 的输入）、`conv_conv`（短卷积输出投影的输入）、
+`result_norm`（输出头的输入），以及 `attn_values`（**sigmoid head gate 缩放后**、
+输出投影的输入）。`attn_values` 需要 Oracle 侧多一个检查点，
+`tools/oracle/lfm3/checkpoints.patch` 已在 `src/models/lfm3.cpp` 里加上
+`cb(attn_out, "lfm3_attn_gated", il)`；不打这个补丁时该输入被跳过而不是误判。
+`ffn_swiglu`（down 投影的输入）在共享的 `build_ffn()` 内部，暴露它要改所有模型的图，
+因此保持未探测。
+
+报告字段：`q8_amplification_points` 列出全部发生 Q8 字节变化的投影输入
+（含 `input_max_abs` 与 `quantized_bytes_differ`），
+`projection_inputs_available` / `projection_inputs_without_oracle_checkpoint`
+说明哪些输入可测、哪些缺 Oracle 检查点，`first_norm_q8_change` 保留首个以兼容旧记录。
+
+这个探针量的是**数值裕度**，不是比特对齐：它回答“哪里的输入差异容易被量化放大”，
+而不是“哪里还没对齐”。残差本身是量化固有的损失，不是待修的缺陷。
 
 `1.25 / 0.20` 保留为固定模型/样例的经验回归报警线，并非推导出的全图误差上界或
 “精确对齐”证明。真实运行状态与数值精确性分别描述；有损路径继续检查有限值、完整

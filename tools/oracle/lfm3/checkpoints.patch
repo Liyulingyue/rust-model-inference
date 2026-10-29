@@ -5,10 +5,24 @@ index 77eabc467..0325b505a 100644
 @@ -115,6 +115,9 @@ llama_model_lfm3::graph::graph(const llama_model & model, const llm_graph_params
          k = ggml_rope_ext(ctx0, k, inp_pos, rope_factors, n_rot_l, rope_type, n_ctx_orig,
                            freq_base_l, freq_scale_l, ext_factor, attn_factor, beta_fast, beta_slow);
- 
+
 +        cb(q, "lfm3_q_rope", il);
 +        cb(k, "lfm3_k_rope", il);
 +
          ggml_tensor * attn_out = build_attn(inp_attn,
                  NULL, NULL, NULL,
                  q, k, v, nullptr, nullptr, nullptr, 1.0f / sqrtf(float(n_embd_head)), il);
+@@ -127,7 +130,13 @@ llama_model_lfm3::graph::graph(const llama_model & model, const llm_graph_params
+         ggml_tensor * attn_3d = ggml_reshape_3d(ctx0, attn_out, n_embd_head, n_head_il, n_tokens);
+         ggml_tensor * gate_3d = ggml_reshape_3d(ctx0, gate,     1,           n_head_il, n_tokens);
+         attn_3d = ggml_mul(ctx0, attn_3d, gate_3d);
+         attn_out = ggml_reshape_2d(ctx0, attn_3d, n_embd_head * n_head_il, n_tokens);
+
++        // The gated attention output is the tensor the output projection
++        // quantizes. The Rust trace records it as `attn_values`, so without
++        // this checkpoint the probe cannot tell whether the sigmoid head
++        // gate leaves a thin numerical margin.
++        cb(attn_out, "lfm3_attn_gated", il);
++
+         ggml_tensor * out = build_lora_mm(model.layers[il].wo, attn_out, model.layers[il].wo_s);
+         cb(out, "model.layers.{}.self_attn.out_proj", il);
