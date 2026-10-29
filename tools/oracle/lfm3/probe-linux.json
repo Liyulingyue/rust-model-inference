@@ -101,10 +101,29 @@
     "projection_inputs_without_oracle_checkpoint": []
   },
   "not_checked": [
+    "a discrete GPU: this run used an integrated GPU",
     "the atomic.chat weights the earlier evidence used",
     "other GGUF precisions",
-    "a Vulkan device: this run is CPU only",
     "the full repository test suite",
     "multimodal and tool calling"
-  ]
+  ],
+  "device_path": {
+    "policy": "Auto",
+    "device": "Intel(R) Graphics (MTL)",
+    "int8_dot_product": "supported",
+    "shader_f16": "supported",
+    "q8_0_matmul": "packed int8 dot product",
+    "scope": "linear projections on Vulkan; attention/shortconv/KV on the host",
+    "greedy_agreement": {
+      "32_tokens": "byte-identical to the CPU run",
+      "216_token_prompt_8_decode": "byte-identical to the CPU run"
+    },
+    "wall_seconds": {
+      "cpu_32_tokens": 2.65,
+      "auto_32_tokens": 22.34,
+      "cpu_216_token_prompt_8_decode": 13.8,
+      "auto_216_token_prompt_8_decode": 127.63
+    },
+    "note": "The Auto path agrees with the CPU path token for token but is far slower here: 8.4x on a 32-token decode and 9.25x on a 216-token prefill. This is an integrated GPU whose device memory is system memory, so offloading 1.85 GB of weights makes every projection read them across the memory bus instead of the CPU reading them from RAM. It matches the earlier caution that the projection offload is not claimed to accelerate the model end to end; this run puts a number on it for one device class."
+  }
 }

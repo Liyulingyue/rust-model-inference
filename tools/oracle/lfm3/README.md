@@ -248,6 +248,25 @@ RMSE `0.15557143`，在 `1.25 / 0.20` 的报警线内；6,280 个检查点、24 
 
 机器可读记录：[probe-linux.json](probe-linux.json)。
 
+### 同一台机器上的 Auto/Vulkan 投影路径
+
+`--gpu` 在本机的 Intel 集显（`Intel(R) Graphics (MTL)`，int8 dot product 与 shader f16
+均支持）上确实把投影放到了 Vulkan：诊断打印
+`LFM3 projections: requested=Auto backend=Vulkan; attention/shortconv/KV=Cpu`，
+`Q8_0 matmul: packed int8 dot product`。
+
+输出与 CPU 路径**逐字节相同**（32 步 greedy、216 token prompt + 8 步 decode 两种
+输入）。但**明显更慢**：
+
+| 输入 | CPU | Auto | 比值 |
+| --- | ---: | ---: | ---: |
+| 32 步 greedy | 2.65 s | 22.34 s | 慢 8.4× |
+| 216 token prompt + 8 步 decode | 13.80 s | 127.63 s | 慢 9.25× |
+
+这是集显：设备内存就是系统内存，把 1.85 GB 权重"放进显存"后每次投影都要过内存
+总线，比 CPU 直接读 RAM 更慢。这与「不声称投影 offload 带来端到端加速」的记录一致，
+本节给其中一个设备类别补上了数字。**在集显上不应把 Auto 当作加速路径。**
+
 `1.25 / 0.20` 保留为固定模型/样例的经验回归报警线，并非推导出的全图误差上界或
 “精确对齐”证明。真实运行状态与数值精确性分别描述；有损路径继续检查有限值、完整
 logits 误差和多步 greedy，Tokenizer/embedding/检查点结构保留精确检查。

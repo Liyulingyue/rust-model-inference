@@ -597,3 +597,18 @@ Q8_0 量化字节几乎整排改写（6,678 字节不同）；`attn_gated` 与 `
 全都指向它 —— 复现链是断的。已把可获得的官方 `LiquidAI/LFM3-1.7B-GGUF` 写进这四处
 （连带下载命令与 SHA-256），并在 `review-fixes.json` 里注明旧数字不可复现、
 可复现的那一份在 `probe-linux.json`。
+
+**Auto/Vulkan 投影路径的实测**（本机 Intel 集显）:
+
+`--gpu` 确实把投影放到了 Vulkan（诊断打印 `requested=Auto backend=Vulkan;
+attention/shortconv/KV=Cpu`，`Q8_0 matmul: packed int8 dot product`），输出与 CPU 路径
+**逐字节相同**（32 步 greedy 与 216 token prompt + 8 步 decode 两种输入）。但更慢：
+
+| 输入 | CPU | Auto | 比值 |
+| --- | ---: | ---: | ---: |
+| 32 步 greedy | 2.65 s | 22.34 s | 慢 8.4× |
+| 216 token prompt + 8 步 decode | 13.80 s | 127.63 s | 慢 9.25× |
+
+这是集显的必然结果：设备内存就是系统内存，1.85 GB 权重"放进显存"后每次投影都要过
+内存总线，比 CPU 直接读 RAM 更慢。它印证了 §11.4 里"Auto 投影实验性支持"的定位 ——
+在集显上它既不是加速路径，也不能默认开启。
