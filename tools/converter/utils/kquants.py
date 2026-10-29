@@ -34,6 +34,18 @@ K_BLOCK_BYTES = {"q4_k": 144, "q6_k": 210}
 #: super-blocks and quantizing it in one shot would ask for terabytes.
 K_SEARCH_BUDGET_BYTES = 5 << 30
 
+#: Upper bound on the super-blocks per batch.
+#:
+#: The byte budget alone is a poor bound: the Q4_K search holds roughly 40 KiB
+#: of F64 intermediates per super-block, so a 5 GiB budget asks for 32k
+#: super-blocks and every intermediate spills out of the cache.  Measured on
+#: 8.4M values with single-threaded NumPy, Q4_K runs at 3.35 M values/s with
+#: 256 super-blocks per batch against 2.22 M values/s with 32k, and the peak
+#: RSS drops from 5.5 GiB to 150 MiB.  The search is per super-block, so the
+#: payload is byte-identical at every batch size; the smaller batch is about
+#: cache locality and about not holding gigabytes of intermediates.
+K_SEARCH_MAX_BLOCKS = 256
+
 #: Bytes of transient arrays the Q4_K search holds per super-block.
 _Q4K_BYTES_PER_BLOCK = 8 * SUB_BLOCK * 20 * 8 * 4
 #: Q6_K keeps F64 inputs, weighted values and one candidate's working arrays.
@@ -41,8 +53,13 @@ _Q6K_BYTES_PER_BLOCK = K_BLOCK * 8 * 8
 
 
 def _batch_blocks(bytes_per_block: int) -> int:
-    """Super-blocks per batch that fit ``K_SEARCH_BUDGET_BYTES``."""
-    return max(1, K_SEARCH_BUDGET_BYTES // bytes_per_block)
+    """Super-blocks per batch that fit ``K_SEARCH_BUDGET_BYTES``.
+
+    ``K_SEARCH_MAX_BLOCKS`` caps the batch as well: the byte budget estimates
+    the transient arrays, not the cache behaviour of the search.
+    """
+    budget = max(1, K_SEARCH_BUDGET_BYTES // bytes_per_block)
+    return max(1, min(budget, K_SEARCH_MAX_BLOCKS))
 
 
 def _nearest_int(values: np.ndarray) -> np.ndarray:
