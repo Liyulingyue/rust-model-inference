@@ -48,12 +48,24 @@ pub fn rope_sin_cos(theta: f32) -> (f32, f32) {
 /// one fmul per call; the rotation loop is the same).
 pub fn rope_neox_inplace(x: &mut [f32], pos: usize, head_dim: usize, freq_base: f32) {
     // `theta_0 = pos as f32` — no factor multiply.
-    build_cos_sin_table_and_apply(x, pos as f32, head_dim, freq_base, false);
+    build_cos_sin_table_and_apply(x, pos as f32, head_dim, freq_base, false, None);
 }
 
 /// Separate libm calls and F32 rotation products for quantization-sensitive loops.
 pub fn rope_neox_inplace_precise(x: &mut [f32], pos: usize, head_dim: usize, freq_base: f32) {
-    build_cos_sin_table_and_apply(x, pos as f32, head_dim, freq_base, true);
+    build_cos_sin_table_and_apply(x, pos as f32, head_dim, freq_base, true, None);
+}
+
+/// GGUF per-pair frequency divisors, as consumed by ggml_rope_ext.
+pub fn rope_neox_inplace_with_freqs(
+    x: &mut [f32],
+    pos: usize,
+    head_dim: usize,
+    freq_base: f32,
+    freqs: &[f32],
+) {
+    assert_eq!(freqs.len(), head_dim / 2);
+    build_cos_sin_table_and_apply(x, pos as f32, head_dim, freq_base, false, Some(freqs));
 }
 
 /// RoPE-Neox with linear position scaling.
@@ -75,7 +87,7 @@ pub fn rope_neox_inplace_with_factor(
 ) {
     // `theta_0 = pos as f32 * factor` — this is the only place
     // the public entry points diverge.
-    build_cos_sin_table_and_apply(x, pos as f32 * factor, head_dim, freq_base, false);
+    build_cos_sin_table_and_apply(x, pos as f32 * factor, head_dim, freq_base, false, None);
 }
 
 /// Build the cos/sin table once per token and dispatch to the
@@ -93,6 +105,7 @@ fn build_cos_sin_table_and_apply(
     head_dim: usize,
     freq_base: f32,
     precise: bool,
+    freqs: Option<&[f32]>,
 ) {
     let half = head_dim / 2;
     let n_heads = x.len() / head_dim;
@@ -104,11 +117,12 @@ fn build_cos_sin_table_and_apply(
     let theta_scale = freq_base.powf(-2.0 / head_dim as f32);
     let mut theta = theta_0;
     for i in 0..half {
+        let angle = freqs.map_or(theta, |freqs| theta / freqs[i]);
         let (c, s) = if precise {
-            let (sin, cos) = super::mrope::sin_cos_precise(theta);
+            let (sin, cos) = super::mrope::sin_cos_precise(angle);
             (cos, sin)
         } else {
-            rope_sin_cos(theta)
+            rope_sin_cos(angle)
         };
         cos_table[i] = c;
         sin_table[i] = s;

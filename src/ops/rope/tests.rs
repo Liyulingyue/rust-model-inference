@@ -425,3 +425,23 @@ fn rope_norm_nrot_rejects_out_of_range_n_rot_by_falling_back() {
         }
     }
 }
+
+#[test]
+fn neox_frequency_divisors_preserve_unscaled_and_frozen_pairs() {
+    let input: Vec<f32> = (0..16).map(|i| i as f32 * 0.1).collect();
+    let mut plain = input.clone();
+    let mut unit = input.clone();
+    rope_neox_inplace(&mut plain, 9, 8, 10_000.0);
+    super::rope_neox_inplace_with_freqs(&mut unit, 9, 8, 10_000.0, &[1.0; 4]);
+    assert_eq!(plain, unit);
+    let mut scaled = input.clone();
+    super::rope_neox_inplace_with_freqs(&mut scaled, 9, 8, 10_000.0, &[1.0, 1.0, 1e30, 1e30]);
+    for head in 0..2 {
+        for d in [0, 1, 4, 5] {
+            assert_eq!(scaled[head * 8 + d], plain[head * 8 + d]);
+        }
+        for d in [2, 3, 6, 7] {
+            assert_eq!(scaled[head * 8 + d], input[head * 8 + d]);
+        }
+    }
+}
