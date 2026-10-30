@@ -40,9 +40,11 @@ void main() {
     uint row = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 8u + invocation / 8u;
     uint rows = slot == 0u ? pc.rows0 : (slot == 1u ? pc.rows1 : pc.rows2);
     bool valid_row = slot < pc.group_count && row < rows;
-    // Small projections are cache-friendly on UMA; amortize staging barriers
-    // only for genuinely wide activation rows.
-    bool shared_input = pc.n_in >= 4096u;
+    // Stage each block's activations once for the whole workgroup. The
+    // previous gate (`n_in >= 4096`) skipped this for narrower projections,
+    // where every one of the 64 threads then re-read the same 256 activation
+    // bytes out of the arena: measured 0.89 GB/s at rows=1 for this shader.
+    bool shared_input = true;
     precise float sum = 0.0;
     for (uint block = 0u; block < pc.blocks_per_row; ++block) {
         if (shared_input) {

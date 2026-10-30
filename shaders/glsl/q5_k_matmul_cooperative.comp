@@ -1,0 +1,118 @@
+#version 450
+
+// Q5_K x Q8_K matvec with the block's 256 elements split across eight lanes.
+//
+// The row kernel gives one thread a whole output row: it walks the block's
+// 256 elements serially, so a 2048-wide projection starts 32 workgroups and
+// every SM runs two warps. Measured 1.6 GB/s of weight traffic on GB10
+// against 242 GB/s of memory bandwidth.
+//
+// Here eight lanes share one output row and split the block's elements by
+// position: lane `L` owns the four positions `4L..4L+3` of every 32-element
+// group. That is exactly the row kernel's own accumulator split
+// (`partial[(local & 31) >> 2]`), so the eight lanes reproduce the row
+// kernel's eight accumulators and the two kernels agree bit for bit -- the
+// batched path has to match the row-at-a-time path exactly.
+//
+// The lane-to-position mapping also keeps the weight reads contiguous: the
+// packed nibbles of groups 2c and 2c+1 live in the same 32 bytes, and the
+// high bits are one shared 32-byte read.
+
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(std430, binding = 1) readonly buffer W0 { uint data[]; } w0;
+layout(std430, binding = 2) readonly buffer W1 { uint data[]; } w1;
+layout(std430, binding = 3) readonly buffer W2 { uint data[]; } w2;
+layout(push_constant) uniform PC { uint q8_word; uint scales_word; uint n_in; uint blocks_per_row; uint output0_word; uint rows0; uint output0_stride; uint output1_word; uint rows1; uint output1_stride; uint output2_word; uint rows2; uint output2_stride; uint group_count; uint input_sum_word; uint input_stride; uint q8_stride; uint scales_stride; uint input_sum_stride; uint q8k_stride; uint q8k_scales_stride; uint token_rows; } pc;
+
+float f16_decode(uint bits) { uint sign = (bits >> 15u) & 1u; int exponent = int((bits >> 10u) & 0x1fu); uint mantissa = bits & 0x3ffu; float value = exponent == 0 ? float(mantissa) * exp2(-24.0) : (exponent == 31 ? 0.0 : (1.0 + float(mantissa) / 1024.0) * exp2(float(exponent - 15))); return sign == 0u ? value : -value; }
+uint weight_word(uint slot, uint index) { return slot == 0u ? w0.data[index] : (slot == 1u ? w1.data[index] : w2.data[index]); }
+uint weight_byte(uint slot, uint index) { return (weight_word(slot, index >> 2u) >> ((index & 3u) * 8u)) & 0xffu; }
+int q8(uint index) { uint value = (arena.data[pc.q8_word + (gl_WorkGroupID.z / pc.group_count) * pc.q8_stride + (index >> 2u)] >> ((index & 3u) * 8u)) & 0xffu; return value >= 128u ? int(value) - 256 : int(value); }
+uint scale(uint slot, uint offset, uint index) { return index < 4u ? weight_byte(slot, offset + 4u + index) & 63u : (weight_byte(slot, offset + 4u + index + 4u) & 15u) | ((weight_byte(slot, offset + 4u + index - 4u) >> 6u) << 4u); }
+uint minimum(uint slot, uint offset, uint index) { return index < 4u ? weight_byte(slot, offset + 4u + index + 4u) & 63u : (weight_byte(slot, offset + 4u + index + 4u) >> 4u) | ((weight_byte(slot, offset + 4u + index) >> 6u) << 4u); }
+
+shared int input_q8[256];
+shared int group_sums[8];
+shared float main_sums[64];
+shared float minimum_sums[64];
+
+void main() {
+    uint token_row = gl_WorkGroupID.z / pc.group_count;
+    uint slot = gl_WorkGroupID.z % pc.group_count;
+    uint invocation = gl_LocalInvocationID.x;
+    uint lane = invocation & 7u;
+    uint row_base = invocation & ~7u;
+    uint row = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 8u + invocation / 8u;
+    uint rows = slot == 0u ? pc.rows0 : (slot == 1u ? pc.rows1 : pc.rows2);
+    bool valid_row = row < rows;
+    precise float main_sum = 0.0;
+    precise float minimum_sum = 0.0;
+    for (uint block = 0u; block < pc.blocks_per_row; ++block) {
+        for (uint local = invocation; local < 256u; local += 64u) {
+            input_q8[local] = q8(block * 256u + local);
+        }
+        // The minimum correction needs the activation sum of each 32-element
+        // group. One lane per group keeps the work uniform across the
+        // workgroup. The sums come from the arena rather than the staged
+        // copy: the staging has no barrier before this point.
+        if (invocation < 8u) {
+            int group_sum = 0;
+            for (uint i = 0u; i < 32u; ++i) {
+                group_sum += q8(block * 256u + invocation * 32u + i);
+            }
+            group_sums[invocation] = group_sum;
+        }
+        barrier();
+        if (valid_row) {
+            uint offset = (row * pc.blocks_per_row + block) * 176u;
+            precise float q5_scale = f16_decode(weight_byte(slot, offset) | (weight_byte(slot, offset + 1u) << 8u));
+            precise float q5_min = f16_decode(weight_byte(slot, offset + 2u) | (weight_byte(slot, offset + 3u) << 8u));
+            precise float q8_scale = uintBitsToFloat(arena.data[pc.scales_word + token_row * pc.scales_stride + block]);
+            // This lane owns the four positions `lane * 4 .. lane * 4 + 3` of
+            // every group, which is the row kernel's accumulator `lane`.
+            int partial = 0;
+            for (uint group = 0u; group < 8u; ++group) {
+                int group_scale = int(scale(slot, offset, group));
+                int group_value = 0;
+                for (uint i = 0u; i < 4u; ++i) {
+                    uint local = group * 32u + lane * 4u + i;
+                    uint packed = weight_byte(slot, offset + 48u + (group >> 1u) * 32u + (local & 31u));
+                    uint low = (group & 1u) == 0u ? packed & 15u : packed >> 4u;
+                    uint high = (weight_byte(slot, offset + 16u + (local & 31u)) >> group) & 1u;
+                    group_value += int(low | (high << 4u)) * input_q8[local];
+                }
+                partial += group_scale * group_value;
+            }
+            precise float factor = q8_scale * q5_scale;
+            main_sum = fma(factor, float(partial), main_sum);
+            // The row kernel keeps four minimum accumulators, each covering
+            // two groups; lanes 0..3 own them here.
+            if (lane < 4u) {
+                int minimum_partial = 0;
+                for (uint group = lane * 2u; group < lane * 2u + 2u; ++group) {
+                    minimum_partial += int(minimum(slot, offset, group)) * group_sums[group];
+                }
+                precise float minimum_factor = -q5_min * q8_scale;
+                minimum_sum = fma(minimum_factor, float(minimum_partial), minimum_sum);
+            }
+        }
+        barrier();
+    }
+    main_sums[invocation] = main_sum;
+    minimum_sums[invocation] = minimum_sum;
+    barrier();
+    if (lane != 0u || !valid_row) return;
+    precise float main01 = (main_sums[row_base] + main_sums[row_base + 4u])
+        + (main_sums[row_base + 1u] + main_sums[row_base + 5u]);
+    precise float main23 = (main_sums[row_base + 2u] + main_sums[row_base + 6u])
+        + (main_sums[row_base + 3u] + main_sums[row_base + 7u]);
+    precise float main_total = main01 + main23;
+    precise float minimum02 = minimum_sums[row_base] + minimum_sums[row_base + 2u];
+    precise float minimum13 = minimum_sums[row_base + 1u] + minimum_sums[row_base + 3u];
+    precise float minimum_total = minimum02 + minimum13;
+    precise float sum = main_total + minimum_total;
+    uint output_word = slot == 0u ? pc.output0_word : (slot == 1u ? pc.output1_word : pc.output2_word);
+    uint output_stride = slot == 0u ? pc.output0_stride : (slot == 1u ? pc.output1_stride : pc.output2_stride);
+    arena.data[output_word + token_row * output_stride + row] = floatBitsToUint(sum);
+}

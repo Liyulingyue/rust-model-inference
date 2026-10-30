@@ -45,6 +45,8 @@ const Q4_K_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_k_matmul.
 const Q4_K_MATMUL_COOPERATIVE_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/q4_k_matmul_cooperative.spv");
 const Q5_K_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q5_k_matmul.spv");
+const Q5_K_MATMUL_COOPERATIVE_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/q5_k_matmul_cooperative.spv");
 const Q6_K_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q6_k_matmul.spv");
 const F16_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/f16_matmul.spv");
 const BF16_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/bf16_matmul.spv");
@@ -125,6 +127,7 @@ const Q4_K_MATMUL_COOPERATIVE: usize = 40;
 
 const QWEN35_MOE_ROUTE: usize = 41;
 const QWEN35_MOE_REDUCE: usize = 42;
+const Q5_K_MATMUL_COOPERATIVE: usize = 43;
 
 fn silu_exp_mode(approximate: bool) -> u32 {
     if !approximate {
@@ -247,6 +250,7 @@ const OPERATOR_SHADER_NAMES: [&str; OPERATOR_SHADERS.len()] = [
     "q4_k_matmul_cooperative",
     "qwen35_moe_route",
     "qwen35_moe_reduce",
+    "q5_k_matmul_cooperative",
 ];
 
 /// True when the ordered dispatch log is being collected.
@@ -334,7 +338,7 @@ pub fn dump_dispatch_trace() {
     }
 }
 
-const OPERATOR_SHADERS: [&[u8]; 43] = [
+const OPERATOR_SHADERS: [&[u8]; 44] = [
     QUANTIZE_Q8_0_SHADER,
     QUANTIZE_Q8_K_SHADER,
     Q8_MATMUL_GROUPED_SHADER,
@@ -378,6 +382,7 @@ const OPERATOR_SHADERS: [&[u8]; 43] = [
     Q4_K_MATMUL_COOPERATIVE_SHADER,
     QWEN35_MOE_ROUTE_SHADER,
     QWEN35_MOE_REDUCE_SHADER,
+    Q5_K_MATMUL_COOPERATIVE_SHADER,
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2573,7 +2578,12 @@ impl<'a> Qwen3Ops<'a> {
         push: &[u32],
         mut dispatch: [u32; 3],
     ) {
-        if pipeline == Q4_K_MATMUL && push.len() == 22 && push[21] == 1 {
+        // The k-quant cooperative kernels split the block's reduction across
+        // eight lanes, so a narrow projection stops running one warp per SM.
+        // `push[21]` is the token-row count: the split only pays off for a
+        // single row, where the row kernel would give one lane the whole
+        // output column.
+        if matches!(pipeline, Q4_K_MATMUL | Q5_K_MATMUL) && push.len() == 26 && push[21] == 1 {
             let columns = push[5].max(push[8]).max(push[11]) as usize;
             if columns <= 4096 {
                 if let Ok(grid) = matmul_dispatch(
@@ -2582,7 +2592,11 @@ impl<'a> Qwen3Ops<'a> {
                     push[13] as usize,
                     &self.context.limits,
                 ) {
-                    pipeline = Q4_K_MATMUL_COOPERATIVE;
+                    pipeline = if pipeline == Q4_K_MATMUL {
+                        Q4_K_MATMUL_COOPERATIVE
+                    } else {
+                        Q5_K_MATMUL_COOPERATIVE
+                    };
                     dispatch = grid;
                 }
             }
@@ -8061,7 +8075,7 @@ mod tests {
     #[test]
     fn appended_operator_indices_match_shader_modules() {
         use super::*;
-        let operators: [(usize, &str, &[u8]); 6] = [
+        let operators: [(usize, &str, &[u8]); 7] = [
             (
                 TIMESTRAL,
                 "timestral",
@@ -8087,6 +8101,11 @@ mod tests {
                 QWEN35_MOE_REDUCE,
                 "qwen35_moe_reduce",
                 QWEN35_MOE_REDUCE_SHADER,
+            ),
+            (
+                Q5_K_MATMUL_COOPERATIVE,
+                "q5_k_matmul_cooperative",
+                Q5_K_MATMUL_COOPERATIVE_SHADER,
             ),
         ];
         for (index, name, shader) in operators {
