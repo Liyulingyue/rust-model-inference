@@ -42,7 +42,9 @@ cargo run --profile release-fast --bin vela3 -- \
 }
 ```
 
-fast/fast-vision 省略 `--base-model`。图像通过顶层 `images` 数组传本地文件、HTTP(S) URL 或 base64 image data URL；fast-vision 最多一张图。Span 的 start/end 是 Unicode 字符偏移，遵循对应官方解码器的 URL、CJK、阈值和边界规则。d3 的 span pass 不计入官方 `usage.input_tokens`，这里保留该口径。
+fast/fast-vision 省略 `--base-model`。图像通过顶层 `images` 数组传本地文件、HTTP(S) URL 或 base64 image data URL；fast-vision 最多一张图。Span 的 start/end 是 Unicode 字符偏移，遵循对应官方解码器的 URL、CJK、阈值和边界规则。d3 的 span pass 不计入官方 `usage.input_tokens`，这里保留该口径。turbo 的 usage 按官方入口合并共享 state，并计入路由适配器的额外 pass；当前实现仍按问题重算 state，未验证长文本性能。
+
+非空 `videos`、`assets` 和启用的 `long_context` 会在加载权重前明确报错；当前入口不支持这些模式。
 
 ```rust
 let response = rust_model_inference::models::vela3::system_one(

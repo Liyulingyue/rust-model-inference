@@ -85,9 +85,10 @@ def synthetic(root, dtype, prefix=False):
     from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
     from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5TextModel
     root.mkdir(parents=True, exist_ok=True)
+    # Preserve turbo's 6:1 GQA and 3:1 delta-head groups in the prefix fixture.
     config = Qwen3_5TextConfig(hidden_size=4, intermediate_size=8, num_hidden_layers=2,
-        num_attention_heads=2, num_key_value_heads=1, head_dim=2, vocab_size=8,
-        linear_num_key_heads=1, linear_num_value_heads=2, linear_key_head_dim=2,
+        num_attention_heads=6 if prefix else 2, num_key_value_heads=1, head_dim=2, vocab_size=8,
+        linear_num_key_heads=1, linear_num_value_heads=3 if prefix else 2, linear_key_head_dim=2,
         linear_value_head_dim=2, linear_conv_kernel_dim=4, rms_norm_eps=1e-6,
         max_position_embeddings=32, layer_types=['linear_attention', 'full_attention'],
         rope_parameters={'rope_type': 'default', 'rope_theta': 10000.,
@@ -114,11 +115,11 @@ def synthetic(root, dtype, prefix=False):
         temperature=1.)))
     save_file({'weight': weight('weight', [255, 4])}, root / 'readout.safetensors')
     lora = {}
-    for module, output in [('layers.0.linear_attn.in_proj_qkv', 8),
-                           ('layers.1.self_attn.q_proj', 8), ('layers.1.mlp.down_proj', 4)]:
-        n_in = 8 if module.endswith('down_proj') else 4
-        lora[module + '.A'] = weight(module + '.A', [2, n_in])
-        lora[module + '.B'] = weight(module + '.B', [output, 2])
+    for module in ['layers.0.linear_attn.in_proj_qkv',
+                   'layers.1.self_attn.q_proj', 'layers.1.mlp.down_proj']:
+        projection = model.get_submodule(module)
+        lora[module + '.A'] = weight(module + '.A', [2, projection.in_features])
+        lora[module + '.B'] = weight(module + '.B', [projection.out_features, 2])
     save_file(lora, root / 'span_lora.safetensors', metadata={'r': '2', 'alpha': '3'})
     (root / 'vela3_config.json').write_text(json.dumps(dict(adapters={'span': {
         'file': 'span_lora.safetensors', 'r': 2, 'alpha': 3, 'modules': 3}})))
@@ -126,6 +127,14 @@ def synthetic(root, dtype, prefix=False):
 
 
 def run_trace(args):
+    if args.causal and not args.synthetic:
+        config = json.loads((args.base / 'config.json').read_text())
+        vela = json.loads((args.vela / 'vela3_config.json').read_text())
+        tied = config.get('text_config', {}).get('tie_word_embeddings')
+        if not isinstance(tied, bool):
+            tied = config.get('tie_word_embeddings')
+        if tied is not True and vela.get('definitions', {}).get('writer') != 'grafted_head':
+            raise ValueError('causal tracing requires tied embeddings or the configured grafted LM head')
     with contextlib.ExitStack() as scope:
         return _run_trace(args, scope)
 

@@ -47,6 +47,16 @@ pub fn system_one(
             return Err("images must be an array".into());
         }
     }
+    for field in ["videos", "assets", "long_context"] {
+        if request.get(field).is_some_and(|value| match value {
+            Value::Null | Value::Bool(false) => false,
+            Value::Array(items) => !items.is_empty(),
+            Value::Object(items) => !items.is_empty(),
+            _ => true,
+        }) {
+            return Err(format!("unsupported Vela3 request field: {field}"));
+        }
+    }
     if threads == 0 {
         return Err("threads must be positive".into());
     }
@@ -123,5 +133,27 @@ mod tests {
                 .unwrap_err()
                 .contains("threads")
         );
+    }
+
+    #[test]
+    fn unsupported_video_assets_and_long_context_fail_before_loading() {
+        for (field, value) in [
+            ("videos", json!(["clip.mp4"])),
+            ("assets", json!({"clip": "clip.mp4"})),
+            ("long_context", json!(true)),
+        ] {
+            let mut request = json!({"questions": {}});
+            request[field] = value;
+            assert!(
+                system_one(Path::new("/missing"), None, &request, 1)
+                    .unwrap_err()
+                    .contains("unsupported"),
+                "{field} was ignored"
+            );
+        }
+        let empty = json!({"questions":{},"videos":[],"assets":{},"long_context":false});
+        assert!(!system_one(Path::new("/missing"), None, &empty, 1)
+            .unwrap_err()
+            .contains("unsupported"));
     }
 }

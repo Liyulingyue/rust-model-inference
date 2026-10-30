@@ -53,6 +53,13 @@
         "person"
       ],
       "threshold": 0.0
+    },
+    "ner_defined": {
+      "type": "span",
+      "criteria": {
+        "person": "a human individual"
+      },
+      "threshold": 0.0
     }
   }
 }

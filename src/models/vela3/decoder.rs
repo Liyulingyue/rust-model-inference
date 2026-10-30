@@ -183,12 +183,37 @@ fn user_prompt(state: &Value, q: &Value, codes: &[String]) -> Result<String, Str
     Ok(format!("State:\n{state}\n\nQuestion:\n{instructions}\n\nOptions:\n{lines}\n\nReply with only the code of the best option."))
 }
 
+#[derive(Default)]
+struct DecisionUsage {
+    input: usize,
+    shared: HashSet<Option<String>>,
+}
+
+impl DecisionUsage {
+    fn add(&mut self, length: usize, state: Option<usize>, adapter: Option<(&str, bool)>) {
+        self.input += length;
+        if let Some(state) = state {
+            // Turbo reports the shared base state once, plus each gated adapter's extra pass.
+            if !self.shared.insert(None) {
+                self.input -= state;
+            }
+            if let Some((name, noncausal)) = adapter {
+                self.input += length;
+                if !noncausal && !self.shared.insert(Some(name.to_owned())) {
+                    self.input -= state;
+                }
+            }
+        }
+    }
+}
+
 struct Model<'a> {
     root: &'a Path,
     config: Value,
     routers: Value,
     defs: Value,
     codes: Vec<String>,
+    prefix_bidir: bool,
     tok: Tokenizer,
     chat: JinjaChatTemplate,
     special: SpecialTokens,
@@ -279,6 +304,7 @@ impl<'a> Model<'a> {
             routers,
             defs,
             codes,
+            prefix_bidir: decision["attention_mode"] == "prefix_bidir",
             tok,
             chat,
             special,
@@ -373,7 +399,8 @@ impl<'a> Model<'a> {
         id: &str,
         q: &Value,
         images: Option<&D3Images>,
-    ) -> Result<(Value, usize), String> {
+        usage: &mut DecisionUsage,
+    ) -> Result<Value, String> {
         let (keys, _) = options(q)?;
         let user = user_prompt(state, q, &self.codes)?;
         let rendered = self.render_media(&user, images.map(|i| i.grids.len()).unwrap_or(0))?;
@@ -394,13 +421,15 @@ impl<'a> Model<'a> {
             .take_while(|&&(_, stop)| stop <= end)
             .count();
         let adapter = Self::decision_adapter(&self.config, &self.routers, id, q);
-        let (logits, n) = if let Some(images) = images {
+        // shortcut: prefix state is recomputed per question; cache it before optimizing long requests.
+        let (logits, n, state) = if let Some(images) = images {
             let input = self.encoder.image_input(encoded.get_ids(), images)?;
             let state = input.original_to_expanded[n_state];
             (
                 self.encoder
                     .decide_image_logits(&input, keys.len(), Some(state))?,
                 input.ids.len(),
+                state,
             )
         } else {
             (
@@ -411,9 +440,19 @@ impl<'a> Model<'a> {
                     Some(n_state),
                 )?,
                 encoded.len(),
+                n_state,
             )
         };
-        Ok((decision_answer(q, &keys, &logits)?, n))
+        let answer = decision_answer(q, &keys, &logits)?;
+        usage.add(
+            n,
+            self.prefix_bidir.then_some(state),
+            adapter
+                .as_deref()
+                .filter(|_| images.is_none())
+                .map(|name| (name, self.config["decisions"]["attention"] == "noncausal")),
+        );
+        Ok(answer)
     }
 
     fn definitions(
@@ -1327,7 +1366,7 @@ pub(crate) fn predict(
         .ok_or("questions must be an object")?;
     let model = Model::load(root, base, pool)?;
     let mut answers = Map::new();
-    let mut input = 0;
+    let mut usage = DecisionUsage::default();
     let images = match request["images"].as_array().filter(|a| !a.is_empty()) {
         Some(a) => model.encoder.prepare_images(a).map(Some),
         None => Ok(None),
@@ -1337,19 +1376,14 @@ pub(crate) fn predict(
             Err(e) => Err(e.clone()),
             Ok(images) => {
                 if q["type"] == "span" {
-                    model
-                        .span(&request["state"], q, images.as_ref())
-                        .map(|v| (v, 0))
+                    model.span(&request["state"], q, images.as_ref())
                 } else {
-                    model.decide(&request["state"], id, q, images.as_ref())
+                    model.decide(&request["state"], id, q, images.as_ref(), &mut usage)
                 }
             }
         };
         let answer = match result {
-            Ok((value, n)) => {
-                input += n;
-                value
-            }
+            Ok(value) => value,
             Err(message) => {
                 json!({"type":q.get("type").cloned().unwrap_or(Value::Null),"error":"invalid_question","message":message})
             }
@@ -1357,7 +1391,7 @@ pub(crate) fn predict(
         answers.insert(id.clone(), answer);
     }
     Ok(
-        json!({"model":format!("vllm-sr/{}",model.config["size"]["name"].as_str().unwrap_or("Vela-3.0-4B")),"answers":answers,"usage":{"input_tokens":input,"output_tokens":0}}),
+        json!({"model":format!("vllm-sr/{}",model.config["size"]["name"].as_str().unwrap_or("Vela-3.0-4B")),"answers":answers,"usage":{"input_tokens":usage.input,"output_tokens":0}}),
     )
 }
 
@@ -1365,6 +1399,32 @@ pub(crate) fn predict(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn turbo_usage_counts_shared_state_and_extra_adapter_passes() {
+        let mut usage = DecisionUsage::default();
+        for (length, adapter) in [
+            (108, None),
+            (110, None),
+            (132, Some(("decision", true))),
+            (113, Some(("decision_df", true))),
+        ] {
+            usage.add(length, Some(66), adapter);
+        }
+        // Pinned official turbo request, including both extra noncausal router passes.
+        assert_eq!(usage.input, 510);
+
+        let mut prefix = DecisionUsage::default();
+        let mut plain = DecisionUsage::default();
+        for length in [108, 110] {
+            prefix.add(length, Some(66), Some(("decision", false)));
+            plain.add(length, None, Some(("decision", true)));
+        }
+        assert_eq!(prefix.input, 304);
+        assert_eq!(plain.input, 218);
+        assert_eq!(DecisionUsage::default().input, 0);
+    }
+
     #[test]
     fn d3_prompt_preserves_python_json_spacing_and_option_order() {
         let state = json!({"文字":[1,true],"other":null});
