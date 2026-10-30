@@ -118,9 +118,9 @@ transcription, `--threads 8` (the default cap) for the CPU rows:
 
 | Format | CPU | GPU | GPU kernel |
 |---|---|---|---|
-| F16 | 18.8 s | 36.9 s | 4-row/workgroup + 4× K prefetch |
-| Q5_K | 11.0 s | 31.2 s | cooperative split-K |
-| Q6_K | 18.0 s | 50.1 s | 8-lane split-K (dotprod) |
+| F16 | 21.0 s | 37.1 s | 4-row/workgroup + 4× K prefetch |
+| Q5_K | 13.5 s | 31.1 s | cooperative split-K |
+| Q6_K | 17.1 s | 36.4 s | 8-lane split-K (dotprod) |
 | Q4_K | 10.2 s | 48.0 s | cooperative split-K |
 | Q8_0 | 21.0 s | 32.0 s | cooperative 32-lane dp4a |
 
@@ -129,8 +129,22 @@ for every format: Audio8 walks one frame and one token at a time, so the
 GPU never gets a batch to amortize its dispatch over, and a k-quant shader
 also has to unpack five or six bits per weight on top of the multiply.
 
-Comparing against PyTorch has to hold the weight format fixed, and the
-same projection sequence on the GPU comes out like this:
+Comparing against PyTorch (fp16, same GB10 GPU, forward pass only —
+PyTorch's `generate` needs more KV-cache memory than the GB10's unified
+RAM allows):
+
+| Implementation | Wall clock | vs Rust GPU F16 |
+|---|---|---|
+| PyTorch fp16 forward | 7.6 s | — |
+| Rust GPU F16 | 37.1 s | 4.9× slower |
+| Rust CPU F16 | 21.0 s | 2.8× slower |
+
+The gap comes from dispatch overhead. Audio8 walks one frame and one token
+at a time, so the runtime issues ~98 000 independent Vulkan dispatches per
+transcription; each costs a fixed ~0.05 ms in command-buffer recording and
+queue submission, which sums to ~5 s of floor regardless of kernel speed.
+PyTorch launches a single CUDA graph for the whole forward. The matmul-only
+comparison isolates the kernel cost:
 
 | Weights | Unpacking | Bytes moved per weight | Wall clock |
 |---|---|---|---|
@@ -139,15 +153,10 @@ same projection sequence on the GPU comes out like this:
 | Q5_K | per call | 0.69 read + 2 write + 2 read | 35.4 s |
 | Q5_K | fused into the matmul kernel | 0.69 | 18.3 s |
 
-The last two rows are the ones that compare. Torch has no packed five-bit
-GEMM, so its Q5_K path unpacks to fp16 outside the matmul and moves about
-seven times the bytes; the fused kernel here is still faster, because
-reading a byte and splitting it is cheaper than writing and re-reading a
-half-precision copy. Neither row can reach the 3.2 s of the first one: a
-streaming ASR reads the same weights once per frame and has to unpack them
-again every time. That row is the ceiling, and it says the remaining GPU
-cost is the unpacking arithmetic rather than the multiply -- the matmul
-alone would take 3.2 s.
+Neither row can reach the 3.2 s of the first one: a streaming ASR reads the
+same weights once per frame and has to unpack them again every time. That
+row is the ceiling, and it says the remaining GPU cost is the unpacking
+arithmetic rather than the multiply -- the matmul alone would take 3.2 s.
 
 Reaching the GPU at all took fixing the k-quant shaders. `q5_k_matmul.comp`
 decoded the scale and the minimum inside its 256-element loop, staged the
