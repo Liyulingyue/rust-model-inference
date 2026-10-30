@@ -1004,11 +1004,26 @@ struct BatchedLinearLayout {
     scales: ArenaRegion,
     sums: ArenaRegion,
     output: ArenaRegion,
+    /// Additional output slots for batched multi-binding recording.
+    /// Slot 0 is `output`; slots 1..output_slots are extra.
+    output_slots: Vec<ArenaRegion>,
     size: usize,
 }
 
 impl BatchedLinearLayout {
     fn new(max_rows: usize, max_n_in: usize, max_n_out: usize) -> Result<Self, VulkanError> {
+        Self::with_output_slots(max_rows, max_n_in, max_n_out, 1)
+    }
+
+    /// Create a layout with `output_slots` independent output regions so that
+    /// `run_group_gpu` can record several matmuls into one command buffer
+    /// without their outputs colliding.
+    fn with_output_slots(
+        max_rows: usize,
+        max_n_in: usize,
+        max_n_out: usize,
+        output_slots: usize,
+    ) -> Result<Self, VulkanError> {
         if max_rows == 0 || max_n_in == 0 || max_n_out == 0 {
             return Err(VulkanError::UnsupportedShape(
                 "batched linear maxima must be nonzero".into(),
@@ -1030,6 +1045,10 @@ impl BatchedLinearLayout {
         let scales = f32_region(&mut size, blocks)?;
         let sums = f32_region(&mut size, blocks)?;
         let output = f32_region(&mut size, outputs)?;
+        let mut extra_slots = Vec::with_capacity(output_slots.saturating_sub(1));
+        for _ in 1..output_slots {
+            extra_slots.push(f32_region(&mut size, outputs)?);
+        }
         as_u32((size - 1) / 4, "batched linear arena word span")?;
         Ok(Self {
             max_rows,
@@ -1040,8 +1059,18 @@ impl BatchedLinearLayout {
             scales,
             sums,
             output,
+            output_slots: extra_slots,
             size,
         })
+    }
+
+    /// Return the output region for slot `index` (0-based).
+    fn output_slot(&self, index: usize) -> Option<ArenaRegion> {
+        if index == 0 {
+            Some(self.output)
+        } else {
+            self.output_slots.get(index - 1).copied()
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1183,7 +1212,21 @@ impl BatchedLinearRuntime {
         max_n_out: usize,
         descriptor_capacity: usize,
     ) -> Result<Self, VulkanError> {
-        let layout = BatchedLinearLayout::new(max_rows, max_n_in, max_n_out)?;
+        Self::with_output_slots(context, max_rows, max_n_in, max_n_out, descriptor_capacity, 1)
+    }
+
+    /// Create a runtime with `output_slots` independent output regions so
+    /// `run_group_gpu` can record several matmuls into one command buffer.
+    pub(crate) fn with_output_slots(
+        context: &'static VulkanContext,
+        max_rows: usize,
+        max_n_in: usize,
+        max_n_out: usize,
+        descriptor_capacity: usize,
+        output_slots: usize,
+    ) -> Result<Self, VulkanError> {
+        let layout =
+            BatchedLinearLayout::with_output_slots(max_rows, max_n_in, max_n_out, output_slots)?;
         matmul_dispatch(max_n_out, max_rows, 1, &context.limits)?;
         let ops = Qwen3Ops::new_with_size(context, layout.size, descriptor_capacity)?;
         Ok(Self {
@@ -1347,6 +1390,170 @@ impl BatchedLinearRuntime {
         commands.submit_and_wait()?;
         output[..count].copy_from_slice(self.ops.read_f32(self.layout.output, count)?);
         Ok(())
+    }
+
+    /// Record N matmuls into a single command buffer and submit once.
+    ///
+    /// Each binding writes to its own output slot so outputs don't collide.
+    /// All matmuls share the same input activation region (the caller must
+    /// ensure they all read the same input data). Returns the per-slot output
+    /// regions for readback.
+    pub(crate) fn record_group_matmul(
+        &mut self,
+        group: &[(&[u8], GpuMatmulSpec, usize, usize)], // (weight_bytes, spec, rows, n_out)
+        n_in: usize,
+    ) -> Result<Vec<ArenaRegion>, VulkanError> {
+        let count = group.len();
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        if count > self.layout.output_slots.len() + 1 {
+            return Err(VulkanError::UnsupportedShape(
+                "record_group_matmul: more bindings than output slots".into(),
+            ));
+        }
+        let context = self.ops.context;
+
+        // Look up / upload all weight bindings first (no GPU submit).
+        // Follow the same cache-lookup pattern as matmul_rows.
+        let mut cached_bindings = Vec::with_capacity(count);
+        for (weight_bytes, spec, rows, n_out) in group.iter().copied() {
+            let spec = spec;
+            let format = spec.format;
+            let key = (weight_bytes.as_ptr() as usize, weight_bytes.len(), n_in, n_out);
+            let bindings = if let Some((_, bindings)) = self.weights.get(&key) {
+                if bindings.weight_format(1)? != format || bindings.weight_mode != spec.mode {
+                    return Err(VulkanError::UnsupportedShape(
+                        "cached batched linear weight storage or numerical mode changed".into(),
+                    ));
+                }
+                *bindings
+            } else {
+                if self.weights.len() >= self.weight_capacity {
+                    return Err(VulkanError::UnsupportedShape(
+                        "batched linear descriptor capacity exhausted".into(),
+                    ));
+                }
+                let transposed = if n_in % 2 == 0
+                    && matches!(format, GpuWeightFormat::BF16 | GpuWeightFormat::F32)
+                    && spec.mode == GpuMatmulMode::Prepared
+                {
+                    let bytes = if format == GpuWeightFormat::BF16 {
+                        2
+                    } else {
+                        4
+                    };
+                    let mut packed = vec![0u8; weight_bytes.len()];
+                    for r0 in (0..n_out).step_by(32) {
+                        for k0 in (0..n_in).step_by(128) {
+                            for r in r0..(r0 + 32).min(n_out) {
+                                for k in k0..(k0 + 128).min(n_in) {
+                                    let src = (r * n_in + k) * bytes;
+                                    let dst = (k * n_out + r) * bytes;
+                                    packed[dst..dst + bytes]
+                                        .copy_from_slice(&weight_bytes[src..src + bytes]);
+                                }
+                            }
+                        }
+                    }
+                    Some(packed)
+                } else {
+                    None
+                };
+                let buffer = unsafe {
+                    self.ops
+                        .context
+                        .upload_static(transposed.as_deref().unwrap_or(weight_bytes))?
+                };
+                let bindings = match self
+                    .ops
+                    .bind_weight_buffers_mode(&[buffer], &[format], spec.mode)
+                {
+                    Ok(bindings) => bindings,
+                    Err(error) => {
+                        unsafe { self.ops.context.destroy_buffer(&buffer) };
+                        return Err(error);
+                    }
+                };
+                self.weights.insert(key, (buffer, bindings));
+                bindings
+            };
+            // Validate shapes.
+            self.layout.validate(
+                &self.ops.context.limits,
+                weight_bytes.len(),
+                spec,
+                rows * n_in,
+                rows,
+                n_in,
+                n_out,
+                rows * n_out,
+            )?;
+            cached_bindings.push(bindings);
+        }
+
+        // Write input activation once before recording (UMA: flush_mapped, no submit).
+        let host_writes_early = self.ops.staging.is_none();
+        if host_writes_early {
+            // Input is written by the caller before this method; we just need
+            // to ensure it's visible. The caller must have written to
+            // self.layout.input via write_f32 before calling record_group_matmul.
+        }
+
+        // Begin command buffer once, record all dispatches.
+        let commands = TokenCommands::begin(context)?;
+        let mut output_regions = Vec::with_capacity(count);
+        for (slot, (bindings, (_weight_bytes, spec, rows, n_out))) in
+            cached_bindings.iter().zip(group.iter()).enumerate()
+        {
+            let output_region = self.layout.output_slot(slot).ok_or_else(|| {
+                VulkanError::UnsupportedShape("output slot unavailable".into())
+            })?;
+            let outputs = [(output_region, *n_out, f32_bytes(*n_out)?)];
+            let recorder = if spec.uses_tiled_f16() && n_in % 2 == 0 && *rows >= 32 {
+                Qwen3Ops::record_weight_matmul_tiled_rows
+            } else {
+                Qwen3Ops::record_weight_matmul_rows
+            };
+            recorder(
+                &self.ops,
+                &commands,
+                *bindings,
+                self.layout.input,
+                self.layout.q8,
+                self.layout.scales,
+                self.layout.sums,
+                self.layout.q8,
+                self.layout.scales,
+                &outputs,
+                n_in,
+                *rows,
+                n_in,
+            )?;
+            output_regions.push(output_region);
+        }
+        commands.submit_and_wait()?;
+        Ok(output_regions)
+    }
+
+    /// Write the input activation to the shared input region. Must be called
+    /// before `record_group_matmul` when the group shares one input.
+    pub(crate) fn write_input(&self, input: &[f32]) -> Result<(), VulkanError> {
+        self.ops.write_f32(self.layout.input, input)
+    }
+
+    /// Read back `count` f32 values from an output region after submit.
+    pub(crate) fn read_output(
+        &self,
+        region: ArenaRegion,
+        count: usize,
+    ) -> Result<&[f32], VulkanError> {
+        self.ops.read_f32(region, count)
+    }
+
+    /// Access the Vulkan context.
+    pub(crate) fn ops_context(&self) -> Option<&'static VulkanContext> {
+        Some(self.ops.context)
     }
 }
 

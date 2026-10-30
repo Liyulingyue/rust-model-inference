@@ -173,6 +173,57 @@ impl Linear {
             .map_err(|error| error.to_string())?;
         Ok(output)
     }
+
+    fn id(&self, name: &str) -> Result<LinearId, String> {
+        self.ids
+            .get(name)
+            .copied()
+            .ok_or_else(|| format!("Unbound Audio8 projection: {name}"))
+    }
+
+    /// Run Q/K/V projections as a group (same input, 3 outputs).
+    /// Batched into one GPU submit instead of three.
+    pub(crate) fn run_qkv(
+        &mut self,
+        prefix: &str,
+        input: &[f32],
+        n_q: usize,
+        n_kv: usize,
+    ) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), String> {
+        let q_id = self.id(&format!("{prefix}.q"))?;
+        let k_id = self.id(&format!("{prefix}.k"))?;
+        let v_id = self.id(&format!("{prefix}.v"))?;
+        let mut q_out = vec![0.0; n_q];
+        let mut k_out = vec![0.0; n_kv];
+        let mut v_out = vec![0.0; n_kv];
+        self.executor
+            .run_group(
+                [q_id, k_id, v_id],
+                input,
+                1,
+                [&mut q_out, &mut k_out, &mut v_out],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok((q_out, k_out, v_out))
+    }
+
+    /// Run gate/up projections as a group (same input, 2 outputs).
+    /// Batched into one GPU submit instead of two.
+    pub(crate) fn run_gate_up(
+        &mut self,
+        prefix: &str,
+        input: &[f32],
+        n_out: usize,
+    ) -> Result<(Vec<f32>, Vec<f32>), String> {
+        let gate_id = self.id(&format!("{prefix}.gate"))?;
+        let up_id = self.id(&format!("{prefix}.up"))?;
+        let mut gate_out = vec![0.0; n_out];
+        let mut up_out = vec![0.0; n_out];
+        self.executor
+            .run_group([gate_id, up_id], input, 1, [&mut gate_out, &mut up_out])
+            .map_err(|error| error.to_string())?;
+        Ok((gate_out, up_out))
+    }
 }
 
 /// Pin a loaded projection so the executor can borrow it for the model's
@@ -820,24 +871,16 @@ impl Audio8Encoder {
                 ));
             }
             let mut linear = self.linear()?;
-            let mut q = linear.run(
-                &format!("audio_tower.layers.{index}.q"),
+            // Batch Q/K/V into one GPU submit (3 matmuls, same input).
+            let (mut q, mut k, mut v) = linear.run_qkv(
+                &format!("audio_tower.layers.{index}"),
                 &normed,
+                AUDIO_Q_WIDTH,
                 AUDIO_Q_WIDTH,
             )?;
             for (value, bias) in q.iter_mut().zip(&layer.q_bias) {
                 *value += *bias;
             }
-            let mut k = linear.run(
-                &format!("audio_tower.layers.{index}.k"),
-                &normed,
-                AUDIO_Q_WIDTH,
-            )?;
-            let mut v = linear.run(
-                &format!("audio_tower.layers.{index}.v"),
-                &normed,
-                AUDIO_Q_WIDTH,
-            )?;
             for (value, bias) in v.iter_mut().zip(&layer.v_bias) {
                 *value += *bias;
             }
@@ -913,13 +956,9 @@ impl Audio8Encoder {
                 *item += update;
             }
             audio_rms_norm(&hidden, &layer.norm2, &mut normed, 1e-5);
-            let mut gate = linear.run(
-                &format!("audio_tower.layers.{index}.gate"),
-                &normed,
-                AUDIO_FFN,
-            )?;
-            let up = linear.run(
-                &format!("audio_tower.layers.{index}.up"),
+            // Batch gate/up into one GPU submit (2 matmuls, same input).
+            let (mut gate, up) = linear.run_gate_up(
+                &format!("audio_tower.layers.{index}"),
                 &normed,
                 AUDIO_FFN,
             )?;

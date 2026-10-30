@@ -289,17 +289,15 @@ impl<'a> Audio8TextSession<'a> {
                     trace("attn_norm-0", Some(0), &[1, WIDTH], &normed);
                 }
                 let mut linear = self.model.linear()?;
-                let mut q = linear.run(&format!("blk.{index}.q"), &normed, WIDTH)?;
+                // Batch Q/K/V into one GPU submit (3 matmuls, same input).
+                let (mut q, mut k, mut v) =
+                    linear.run_qkv(&format!("blk.{index}"), &normed, WIDTH, KV_HEADS * HEAD_WIDTH)?;
                 for (value, bias) in q.iter_mut().zip(&layer.q_bias) {
                     *value += *bias;
                 }
-                let mut k =
-                    linear.run(&format!("blk.{index}.k"), &normed, KV_HEADS * HEAD_WIDTH)?;
                 for (value, bias) in k.iter_mut().zip(&layer.k_bias) {
                     *value += *bias;
                 }
-                let mut v =
-                    linear.run(&format!("blk.{index}.v"), &normed, KV_HEADS * HEAD_WIDTH)?;
                 for (value, bias) in v.iter_mut().zip(&layer.v_bias) {
                     *value += *bias;
                 }
@@ -351,8 +349,9 @@ impl<'a> Audio8TextSession<'a> {
                 for (value, scale) in normed.iter_mut().zip(&self.scales[index]) {
                     *value *= *scale;
                 }
-                let mut gate = linear.run(&format!("blk.{index}.gate"), &normed, FFN_WIDTH)?;
-                let up = linear.run(&format!("blk.{index}.up"), &normed, FFN_WIDTH)?;
+                // Batch gate/up into one GPU submit (2 matmuls, same input).
+                let (mut gate, up) =
+                    linear.run_gate_up(&format!("blk.{index}"), &normed, FFN_WIDTH)?;
                 for (gate, up) in gate.iter_mut().zip(up) {
                     *gate = silu(*gate) * up;
                 }
