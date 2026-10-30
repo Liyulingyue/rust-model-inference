@@ -421,27 +421,28 @@ impl<'a> Model<'a> {
             .take_while(|&&(_, stop)| stop <= end)
             .count();
         let adapter = Self::decision_adapter(&self.config, &self.routers, id, q);
+        let input = images
+            .map(|images| self.encoder.image_input(encoded.get_ids(), images))
+            .transpose()?;
+        let (n, state) = input.as_ref().map_or((encoded.len(), n_state), |input| {
+            (input.ids.len(), input.original_to_expanded[n_state])
+        });
+        if let Err(message) = self.encoder.validate_decision_length(n) {
+            return Ok(
+                json!({"type":q["type"],"error":"max_length_exceeded","reason":"question_tokens","message":message}),
+            );
+        }
         // shortcut: prefix state is recomputed per question; cache it before optimizing long requests.
-        let (logits, n, state) = if let Some(images) = images {
-            let input = self.encoder.image_input(encoded.get_ids(), images)?;
-            let state = input.original_to_expanded[n_state];
-            (
-                self.encoder
-                    .decide_image_logits(&input, keys.len(), Some(state))?,
-                input.ids.len(),
-                state,
-            )
+        let logits = if let Some(input) = &input {
+            self.encoder
+                .decide_image_logits(input, keys.len(), Some(state))?
         } else {
-            (
-                self.encoder.decide_logits_with_state(
-                    encoded.get_ids(),
-                    adapter.as_deref(),
-                    keys.len(),
-                    Some(n_state),
-                )?,
-                encoded.len(),
-                n_state,
-            )
+            self.encoder.decide_logits_with_state(
+                encoded.get_ids(),
+                adapter.as_deref(),
+                keys.len(),
+                Some(state),
+            )?
         };
         let answer = decision_answer(q, &keys, &logits)?;
         usage.add(

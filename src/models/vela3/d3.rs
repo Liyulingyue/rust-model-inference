@@ -234,6 +234,7 @@ pub(crate) struct D3Encoder {
     gated_noncausal: bool,
     temperature: f32,
     max_length: usize,
+    decision_max_length: usize,
     generation_head: Option<SafetensorSource>,
     vision_config: Value,
     image_token: Option<u32>,
@@ -379,6 +380,16 @@ impl D3Encoder {
             .filter(|&n| n > 0)
             .unwrap_or(config.context)
             .min(config.context);
+        let decision_max_length = if decision["validated_length"].is_null() {
+            max_length
+        } else {
+            decision["validated_length"]
+                .as_u64()
+                .and_then(|n| usize::try_from(n).ok())
+                .filter(|&n| n > 0)
+                .ok_or("invalid d3 validated_length")?
+                .min(max_length)
+        };
         let source = tensor::open_weights(base_root)?;
         require_shape(
             &source,
@@ -566,6 +577,7 @@ impl D3Encoder {
             gated_noncausal,
             temperature,
             max_length,
+            decision_max_length,
             generation_head,
             vision_config: model_config["vision_config"].clone(),
             image_token: model_config["image_token_id"]
@@ -625,6 +637,7 @@ impl D3Encoder {
         option_count: usize,
         state_tokens: Option<usize>,
     ) -> Result<Vec<f32>, String> {
+        self.validate_decision_length(input.ids.len())?;
         #[cfg(feature = "parity-trace")]
         crate::parity_trace::report(crate::parity_trace::token_ids(
             "vela3.d3.tokens",
@@ -733,6 +746,16 @@ impl D3Encoder {
             length
                 .checked_mul(width)
                 .ok_or("d3 activation size overflow")?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_decision_length(&self, length: usize) -> Result<(), String> {
+        if length > self.decision_max_length {
+            return Err(format!(
+                "the question prompt has {length} tokens, over the maximum context length of {} tokens; nothing was truncated",
+                self.decision_max_length
+            ));
         }
         Ok(())
     }
@@ -1008,6 +1031,7 @@ impl D3Encoder {
         option_count: usize,
         state_tokens: Option<usize>,
     ) -> Result<Vec<f32>, String> {
+        self.validate_decision_length(ids.len())?;
         if !(1..=255).contains(&option_count) {
             return Err("d3 decision requires 1..=255 options".into());
         }
@@ -1430,6 +1454,37 @@ mod tests {
         }
         std::fs::write(&path, valid.to_string()).unwrap();
         assert!(D3Encoder::load(&fixture.0, &fixture.0, Arc::new(ComputePool::new(1))).is_ok());
+    }
+
+    #[test]
+    fn validated_length_caps_decisions_without_shortening_span_or_generation() {
+        let fixture = tiny_fixture();
+        let path = fixture.0.join("decision_config.json");
+        let mut config = json_file(&path).unwrap();
+        config["validated_length"] = json!(8);
+        std::fs::write(&path, config.to_string()).unwrap();
+        let model = D3Encoder::load(&fixture.0, &fixture.0, Arc::new(ComputePool::new(1))).unwrap();
+        assert!(model.decide_logits(&[1; 8], None, 3).is_ok());
+        assert!(model.decide_logits(&[1; 9], None, 3).is_err());
+        let image = D3ImageInput {
+            ids: vec![1; 9],
+            positions: vec![[0; 3]; 9],
+            original_to_expanded: (0..=9).collect(),
+            embeddings: vec![0.; 9 * 4],
+        };
+        assert!(model.decide_image_logits(&image, 3, None).is_err());
+        assert!(model.hidden(&[1; 9], None).is_ok());
+        assert!(model.generation_logits(&[1; 9]).is_ok());
+        for invalid in [json!(0), json!(-1), json!("8"), json!(false)] {
+            config["validated_length"] = invalid;
+            std::fs::write(&path, config.to_string()).unwrap();
+            assert!(
+                D3Encoder::load(&fixture.0, &fixture.0, Arc::new(ComputePool::new(1)))
+                    .err()
+                    .unwrap()
+                    .contains("validated_length")
+            );
+        }
     }
 
     #[test]
