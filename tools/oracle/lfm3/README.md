@@ -304,3 +304,72 @@ LFM3 输出解析器未注册导致的 500。
 Vulkan 投影分发、3,681 次设备提交、155 次静态上传（1,836,440,640 bytes）。这些计数
 证明投影确实上 GPU，不表示 attention/短卷积也在设备端。设置无效 `VK_DRIVER_FILES`
 还验证了同一二进制 Auto 回退 CPU 后正常生成，并打印失败原因。
+
+### Linux 上的 CLI / HTTP / JEV 入口复验（2026-10-30）
+
+上面那节是 M3 Max 上的记录。这一节是在 Linux x86_64（Intel 集显）上重跑入口，
+用官方 `LiquidAI/LFM3-1.7B-GGUF` 的 `LFM3-1.7B-Q8_0.gguf`。
+
+CLI 的三种 JEV 模式：
+
+```bash
+M=models/LFM3-1.7B-GGUF/LFM3-1.7B-Q8_0.gguf
+# 单项
+target/release-fast/rust-model-inference --model $M --threads 8 --max-context 1024 \
+  --jev --jev-context 'The quick brown fox jumps over the lazy dog.' \
+  --jev-question 'Is this text well-written?' --jev-option yes --jev-option no
+# 分组：multi_select（选项按两两成对切分）
+target/release-fast/rust-model-inference --model $M --threads 8 --max-context 1024 \
+  --jev --jev-multi --jev-context 'An apple on a wooden table.' \
+  --jev-question 'Which way should the camera move?' \
+  --jev-option yes --jev-option no --jev-option yes --jev-option no
+# 分组：block_choice（--jev-block 给标签，--jev-option 填该 block 的选项）
+target/release-fast/rust-model-inference --model $M --threads 8 --max-context 1024 \
+  --jev --jev-context 'An apple on a wooden table.' \
+  --jev-question 'Which way should the camera move?' \
+  --jev-block left --jev-option yes --jev-option no \
+  --jev-block right --jev-option yes --jev-option no
+```
+
+`--jev-multi` 必须与 `--jev` 同时给：只给 `--jev-multi` 时 `src/app/jev/mod.rs` 的
+`if !options.jev { return Ok(None) }` 会直接返回，于是既不报错也不跑 JEV，而是掉进
+交互模式。这是所有架构共有的 CLI 行为，不是 LFM3 特有。
+
+HTTP 三条路由：
+
+```bash
+target/release-fast/rust-model-server --model $M --host 127.0.0.1 --port 18080 \
+  --threads 8 --compute cpu --kv-cache f32 &
+curl -s http://127.0.0.1:18080/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model":"LFM3-1.7B-Q8_0","messages":[{"role":"user","content":"Reply with exactly one short sentence."}],"max_tokens":24,"temperature":0}'
+curl -s http://127.0.0.1:18080/v1/jev/score -H 'Content-Type: application/json' \
+  -d '{"context":"The quick brown fox jumps over the lazy dog.","questions":[{"text":"Is this text well-written?","options":["yes","no"]}]}'
+curl -s http://127.0.0.1:18080/v1/jev/grouped -H 'Content-Type: application/json' \
+  -d '{"context":"An apple on a wooden table.","questions":[{"text":"Which way should the camera move?","groups":[{"label":"left","options":["yes","no"]},{"label":"right","options":["yes","no"]}]}],"mode":"block_choice"}'
+```
+
+结果：
+
+| 检查 | 结果 |
+| --- | --- |
+| CLI `--jev` | `A: 0.9737` / `B: 0.0263` |
+| CLI `--jev --jev-multi` | `[pair_1] A: 0.9401`、`[pair_2] D: 0.7004` |
+| CLI `--jev --jev-block` | `[left] A: 0.9401`、`[right] D: 0.7004` |
+| HTTP `/v1/jev/score` | `A: 0.9736617207527161`、`B: 0.026338277384638786` |
+| HTTP `/v1/jev/grouped` | `left A: 0.9400972127914429`、`right D: 0.7003887891769409` |
+| CLI 与 HTTP 的 JEV 概率 | 一致（CLI 打印 4 位小数，HTTP 给全精度） |
+| CLI 与 HTTP 的文本输出 | 一致（`Sure, here's one: I can help with a wide range of questions and tasks.`） |
+
+CLI 的 `--thinking` 会换 chat template，所以带 `--thinking` 的 CLI 输出与 HTTP 不同；
+不带该开关时两者逐字相同。
+
+仓库自带的 CLI/HTTP 一致性测试本来就覆盖 `lfm3`（`tests/cli_http_agreement.rs` 的
+arch 列表里有 `| "lfm3"`），用它跑一遍：
+
+```bash
+RMI_AGREEMENT_MODEL=models/LFM3-1.7B-GGUF/LFM3-1.7B-Q8_0.gguf \
+  cargo test --locked --test cli_http_agreement
+# cli_and_http_agree_on_greedy_and_temperature ... ok（131.77 s）
+```
+
+这条测试覆盖 greedy 与 temperature>0 两种情形。
