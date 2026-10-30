@@ -118,8 +118,9 @@ transcription, `--threads 8` (the default cap) for the CPU rows:
 
 | Format | CPU | GPU | GPU kernel |
 |---|---|---|---|
-| Q5_K | 11.0 s | 42.6 s | cooperative split-K |
-| Q6_K | 11.9 s | 50.1 s | 8-lane split-K |
+| F16 | 18.8 s | 36.9 s | 4-row/workgroup + 4× K prefetch |
+| Q5_K | 11.0 s | 31.2 s | cooperative split-K |
+| Q6_K | 17.1 s | 50.1 s | 8-lane split-K |
 | Q4_K | 10.2 s | 48.0 s | cooperative split-K |
 | Q8_0 | 21.0 s | 32.0 s | cooperative 32-lane dp4a |
 
@@ -159,6 +160,15 @@ F16 keeps the transcript bit-for-bit equivalent to BF16 (the audio embeddings
 agree to 1.3e-6 relative RMS, against 7e-2 for Q8_0) and is about 14 % faster,
 because the BF16 kernel has no NEON path on this host while F16 does. F16 is
 the same size as BF16, so it is a speed knob, not a memory knob.
+
+The F16 GPU kernel used to run one output row per workgroup, which left three
+quarters of the threads idle and measured ~35 GB/s against the 242 GB/s DRAM
+bandwidth. Grouping four rows per workgroup (two when the parity reduction
+needs 32 lanes) and prefetching four K iterations raised the large-projection
+peak to ~72 GB/s and cut the end-to-end transcription from 51 s to 37 s. The
+arithmetic is unchanged: each row still walks the same index classes in the
+same order and reduces through the same tree, so the bit-for-bit contract
+with the CPU reduction holds.
 
 The block formats change the transcript, and they change it in different ways:
 Q8_0, Q5_K and Q6_K answer in English, Q4_K answers in Chinese with the

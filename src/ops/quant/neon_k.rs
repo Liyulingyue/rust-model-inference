@@ -331,24 +331,20 @@ pub(crate) unsafe fn vec_dot_q5k_q8k_neon(q5k_data: &[u8], q8k: &[BlockQ8K]) -> 
     correction + vaddvq_f32(sums)
 }
 
-/// The weights of one 32-element Q6_K group.
+/// The weights of one 32-element Q6_K group, as two signed byte vectors.
 ///
 /// Group `G` takes the low or the high nibble of one 64-byte `ql` chunk and
 /// two bits of the 32-byte `qh` chunk. The two bits are the field at bit
 /// `2 * G` of every `qh` byte, and the value is the six-bit code minus 32.
 #[inline]
-#[target_feature(enable = "neon,dotprod")]
-unsafe fn q6_group_dot<const G: usize>(
+#[target_feature(enable = "neon")]
+unsafe fn q6_group_weights<const G: usize>(
     ql: *const u8,
     qh: *const u8,
-    act: *const i8,
     nibble_mask: std::arch::aarch64::uint8x16_t,
     high_mask: std::arch::aarch64::uint8x16_t,
     shift: std::arch::aarch64::uint8x16_t,
-    scale_lo: i32,
-    scale_hi: i32,
-    zero32: std::arch::aarch64::int32x4_t,
-) -> std::arch::aarch64::int32x4_t {
+) -> (std::arch::aarch64::int8x16_t, std::arch::aarch64::int8x16_t) {
     use std::arch::aarch64::*;
 
     let ql_offset = if G == 1 || G == 3 { 32 } else { 0 };
@@ -368,28 +364,56 @@ unsafe fn q6_group_dot<const G: usize>(
     let high0 = vshlq_n_u8(vandq_u8(vshlq_u8(qh0, back), high_mask), 4);
     let high1 = vshlq_n_u8(vandq_u8(vshlq_u8(qh1, back), high_mask), 4);
     // The unsigned subtraction wraps into the signed six-bit range.
-    let weight0 = vreinterpretq_s8_u8(vsubq_u8(vorrq_u8(nib0, high0), vdupq_n_u8(32)));
-    let weight1 = vreinterpretq_s8_u8(vsubq_u8(vorrq_u8(nib1, high1), vdupq_n_u8(32)));
-    let dot0 = vdotq_s32(zero32, weight0, vld1q_s8(act));
-    let dot1 = vdotq_s32(zero32, weight1, vld1q_s8(act.add(16)));
-    vaddq_s32(vmulq_n_s32(dot0, scale_lo), vmulq_n_s32(dot1, scale_hi))
+    (
+        vreinterpretq_s8_u8(vsubq_u8(vorrq_u8(nib0, high0), vdupq_n_u8(32))),
+        vreinterpretq_s8_u8(vsubq_u8(vorrq_u8(nib1, high1), vdupq_n_u8(32))),
+    )
 }
 
-/// ARM NEON dot-product kernel for Q6_K × Q8_K.
+/// Adds one scaled 16-element half-group into the eight integer lanes.
 ///
-/// Q6_K carries a two-bit high part and one signed scale per 16 elements,
-/// so the scale changes inside a 32-element group; the two halves of the
-/// group are scaled separately.
-#[target_feature(enable = "neon,dotprod")]
+/// Lane `l` takes the products of elements `l` and `l + 8`. That is the
+/// pairing the scalar reference uses, and Q6_K is compared bit for bit, so
+/// the integer grouping has to match even though any regrouping would give
+/// the same real sum.
+#[inline]
+#[target_feature(enable = "neon")]
+unsafe fn q6_half_group(
+    weight: std::arch::aarch64::int8x16_t,
+    act: std::arch::aarch64::int8x16_t,
+    scale: i32,
+    acc_lo: std::arch::aarch64::int32x4_t,
+    acc_hi: std::arch::aarch64::int32x4_t,
+) -> (std::arch::aarch64::int32x4_t, std::arch::aarch64::int32x4_t) {
+    use std::arch::aarch64::*;
+
+    let mut prod = vmlal_s8(vdupq_n_s16(0), vget_low_s8(weight), vget_low_s8(act));
+    prod = vmlal_high_s8(prod, weight, act);
+    (
+        vmlal_n_s16(acc_lo, vget_low_s16(prod), scale as i16),
+        vmlal_high_n_s16(acc_hi, prod, scale as i16),
+    )
+}
+
+/// ARM NEON kernel for Q6_K × Q8_K.
+///
+/// Bit-for-bit identical to [`vec_dot_q6k_q8k_scalar`]: Q6_K is the one format
+/// whose GPU kernel reproduces the scalar reduction order, and the Vulkan
+/// self-check compares the two with zero tolerance. That pins the integer
+/// lane grouping (`l` with `l + 8`), the per-block `d * aux` rounding and the
+/// sequential eight-lane final sum.
+#[target_feature(enable = "neon")]
 pub(crate) unsafe fn vec_dot_q6k_q8k_neon(q6k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
     use std::arch::aarch64::*;
 
     let nb = q8k.len();
     let nibble_mask = vdupq_n_u8(0x0F);
     let high_mask = vdupq_n_u8(0x03);
-    let zero32 = vdupq_n_s32(0);
 
-    let mut sums = vdupq_n_f32(0.0);
+    // Eight integer lanes split across two vectors; the last four live in
+    // `sums_hi` so the final sum can be walked in lane order.
+    let mut sums_lo = vdupq_n_f32(0.0);
+    let mut sums_hi = vdupq_n_f32(0.0);
 
     for i in 0..nb {
         let boff = i * BLOCK_Q6K_SIZE;
@@ -406,74 +430,66 @@ pub(crate) unsafe fn vec_dot_q6k_q8k_neon(q6k_data: &[u8], q8k: &[BlockQ8K]) -> 
         let qh = q6k_data.as_ptr().add(boff + 128);
         let act = q8k[i].qs.as_ptr();
 
-        let mut acc_even = zero32;
-        let mut acc_odd = zero32;
+        let mut acc_lo = vdupq_n_s32(0);
+        let mut acc_hi = vdupq_n_s32(0);
         for chunk in 0..2usize {
             let ql_chunk = ql.add(chunk * 64);
             let qh_chunk = qh.add(chunk * 32);
             let act_chunk = act.add(chunk * 128);
             let base = chunk * 8;
-            acc_even = vaddq_s32(
-                acc_even,
-                q6_group_dot::<0>(
-                    ql_chunk,
-                    qh_chunk,
-                    act_chunk,
-                    nibble_mask,
-                    high_mask,
-                    vdupq_n_u8(0),
-                    i32::from(scales[base] as i8),
-                    i32::from(scales[base + 1] as i8),
-                    zero32,
-                ),
-            );
-            acc_odd = vaddq_s32(
-                acc_odd,
-                q6_group_dot::<1>(
-                    ql_chunk,
-                    qh_chunk,
-                    act_chunk.add(32),
-                    nibble_mask,
-                    high_mask,
-                    vdupq_n_u8(2),
-                    i32::from(scales[base + 2] as i8),
-                    i32::from(scales[base + 3] as i8),
-                    zero32,
-                ),
-            );
-            acc_even = vaddq_s32(
-                acc_even,
-                q6_group_dot::<2>(
-                    ql_chunk,
-                    qh_chunk,
-                    act_chunk.add(64),
-                    nibble_mask,
-                    high_mask,
-                    vdupq_n_u8(4),
-                    i32::from(scales[base + 4] as i8),
-                    i32::from(scales[base + 5] as i8),
-                    zero32,
-                ),
-            );
-            acc_odd = vaddq_s32(
-                acc_odd,
-                q6_group_dot::<3>(
-                    ql_chunk,
-                    qh_chunk,
-                    act_chunk.add(96),
-                    nibble_mask,
-                    high_mask,
-                    vdupq_n_u8(6),
-                    i32::from(scales[base + 6] as i8),
-                    i32::from(scales[base + 7] as i8),
-                    zero32,
-                ),
-            );
+            macro_rules! group {
+                ($g:literal, $shift:literal) => {{
+                    let (low, high) = q6_group_weights::<$g>(
+                        ql_chunk,
+                        qh_chunk,
+                        nibble_mask,
+                        high_mask,
+                        vdupq_n_u8($shift),
+                    );
+                    let group_act = act_chunk.add($g * 32);
+                    (acc_lo, acc_hi) = q6_half_group(
+                        low,
+                        vld1q_s8(group_act),
+                        i32::from(scales[base + $g * 2] as i8),
+                        acc_lo,
+                        acc_hi,
+                    );
+                    (acc_lo, acc_hi) = q6_half_group(
+                        high,
+                        vld1q_s8(group_act.add(16)),
+                        i32::from(scales[base + $g * 2 + 1] as i8),
+                        acc_lo,
+                        acc_hi,
+                    );
+                }};
+            }
+            group!(0, 0);
+            group!(1, 2);
+            group!(2, 4);
+            group!(3, 6);
         }
-        sums = vfmaq_n_f32(sums, vcvtq_f32_s32(vaddq_s32(acc_even, acc_odd)), d);
+        // The scalar reference multiplies by `d` and adds per lane; keep the
+        // two roundings separate instead of fusing them into an FMA.
+        sums_lo = vaddq_f32(sums_lo, vmulq_n_f32(vcvtq_f32_s32(acc_lo), d));
+        sums_hi = vaddq_f32(sums_hi, vmulq_n_f32(vcvtq_f32_s32(acc_hi), d));
     }
 
-    vaddvq_f32(sums)
+    // Sequential, lane 0 through lane 7, like `for l in 0..8 { sumf += sums[l] }`.
+    let lanes = [
+        vgetq_lane_f32::<0>(sums_lo),
+        vgetq_lane_f32::<1>(sums_lo),
+        vgetq_lane_f32::<2>(sums_lo),
+        vgetq_lane_f32::<3>(sums_lo),
+        vgetq_lane_f32::<0>(sums_hi),
+        vgetq_lane_f32::<1>(sums_hi),
+        vgetq_lane_f32::<2>(sums_hi),
+        vgetq_lane_f32::<3>(sums_hi),
+    ];
+    let mut sumf = 0.0f32;
+    for lane in lanes {
+        sumf += lane;
+    }
+    sumf
 }
 
 #[cfg(test)]
@@ -706,6 +722,31 @@ mod tests {
         assert!(
             rel < 1e-3,
             "multi-block: neon={neon} scalar={scalar} rel={rel}"
+        );
+    }
+
+    /// Q6_K is the format whose Vulkan kernel reproduces the scalar
+    /// reduction, and the Vulkan self-check compares GPU against this kernel
+    /// with zero tolerance. So the NEON kernel has to be bit-identical, not
+    /// merely close.
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn q6k_neon_matches_scalar_bits() {
+        if !std::arch::is_aarch64_feature_detected!("dotprod") {
+            return;
+        }
+        let mut block = Vec::new();
+        let mut q8k = Vec::new();
+        for seed in 0..8u8 {
+            block.extend(make_q6k_block(seed));
+            q8k.push(make_q8k(seed));
+        }
+        let neon = unsafe { vec_dot_q6k_q8k_neon(&block, &q8k) };
+        let scalar = vec_dot_q6k_q8k_scalar(&block, &q8k);
+        assert_eq!(
+            neon.to_bits(),
+            scalar.to_bits(),
+            "neon={neon} scalar={scalar}"
         );
     }
 }

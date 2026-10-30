@@ -5556,6 +5556,17 @@ fn matmul_rows_push(
     ) {
         // Each lane owns an output row, preserving its serial reduction.
         max_output_rows.div_ceil(64)
+    } else if format == GpuWeightFormat::F16 {
+        // f16_matmul packs output rows into one workgroup so that all 64
+        // threads work. Each row uses as many lanes as its CPU reduction:
+        // 32 for the parity tree, 16 for NEON, 8 for AVX2/F16C, 1 for scalar.
+        let rows_per_group = match push[1] {
+            1 => 2,
+            2 => 4,
+            8 => 8,
+            _ => 64,
+        };
+        max_output_rows.div_ceil(rows_per_group)
     } else {
         max_output_rows
     };
@@ -9869,6 +9880,19 @@ mod tests {
                 let output_groups = match format {
                     F32 | Q8_0 | Q4_0 | Q4_1 | Q4_K | Q5_K | Q6_K => 1,
                     BF16 if crate::ops::has_neon() || crate::ops::has_avx2_fma() => 1,
+                    // f16_matmul packs 64/lanes_per_row rows into a workgroup,
+                    // and the lane count follows the CPU reduction for width 256.
+                    F16 => {
+                        // The three output groups hold 3, 2 and 1 rows, so the
+                        // workgroup count follows the widest one (3).
+                        let rows_per_group = match super::attention_dot_mode(256) {
+                            1 => 2,
+                            2 => 4,
+                            8 => 8,
+                            _ => 64,
+                        };
+                        (3usize.div_ceil(rows_per_group)) as u32
+                    }
                     _ => 3,
                 };
                 assert_eq!(
