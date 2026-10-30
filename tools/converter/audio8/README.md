@@ -126,10 +126,17 @@ transcription, `--threads 8` (the default cap) for the CPU rows:
 The CPU rows use `--cpu` and the GPU rows `--gpu`. On this host the CPU wins
 for every format: Audio8 walks one frame and one token at a time, so the
 GPU never gets a batch to amortize its dispatch over, and a k-quant shader
-also has to unpack five or six bits per weight on top of the multiply. The
-machine's ceiling is far above both columns -- PyTorch replays the same
-projection sequence in fp16 in 3.2 s -- so the gap is in the kernels, not
-in the hardware.
+also has to unpack five or six bits per weight on top of the multiply.
+
+The machine's ceiling is far above both columns. PyTorch replays the same
+projection sequence on the GPU in **3.2 s** -- but that is the matmuls
+alone, with fp16 weights, so it is not comparable to a whole transcription:
+the tower and the decoder also spend about 6 s on the mel filter, the
+convolutions, the attention, the norms and the RoPE, none of which the
+replay touches. Counting only the matmuls, the same Q5_K work takes 7.3 s
+on the CPU and 18.3 s on the GPU, so the k-quant shaders are the gap: fp16
+needs no unpacking at all, and the k-quant ones read the weight a byte at a
+time.
 
 Reaching the GPU at all took fixing the k-quant shaders. `q5_k_matmul.comp`
 decoded the scale and the minimum inside its 256-element loop, staged the
