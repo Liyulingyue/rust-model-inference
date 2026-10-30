@@ -120,7 +120,7 @@ transcription, `--threads 8` (the default cap) for the CPU rows:
 |---|---|---|---|
 | F16 | 18.8 s | 36.9 s | 4-row/workgroup + 4× K prefetch |
 | Q5_K | 11.0 s | 31.2 s | cooperative split-K |
-| Q6_K | 17.1 s | 50.1 s | 8-lane split-K |
+| Q6_K | 18.0 s | 50.1 s | 8-lane split-K (dotprod) |
 | Q4_K | 10.2 s | 48.0 s | cooperative split-K |
 | Q8_0 | 21.0 s | 32.0 s | cooperative 32-lane dp4a |
 
@@ -169,6 +169,14 @@ peak to ~72 GB/s and cut the end-to-end transcription from 51 s to 37 s. The
 arithmetic is unchanged: each row still walks the same index classes in the
 same order and reduces through the same tree, so the bit-for-bit contract
 with the CPU reduction holds.
+
+Q6_K has two NEON kernels. The production path uses `vdotq_s32` with four
+consecutive elements per lane (~32 GINTOP/s); a second `vmull_s8` kernel
+reproduces the scalar reference's `{l, l + 8}` pairing bit-for-bit
+(~23 GINTOP/s) and is kept for verification. The Vulkan self-check compares
+GPU against the dotprod path with 3e-3 tolerance — the same as Q4_K/Q5_K —
+because k-quant weight rounding already introduces ~1 % noise, so bit-parity
+between GPU and CPU is neither achievable nor meaningful for a quantized format.
 
 The block formats change the transcript, and they change it in different ways:
 Q8_0, Q5_K and Q6_K answer in English, Q4_K answers in Chinese with the

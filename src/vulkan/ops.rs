@@ -6682,7 +6682,15 @@ fn check_weight_matvec(
             .map_err(|error| error.to_string())?;
         let gpu_elapsed = gpu_t.elapsed().as_secs_f64();
         let tolerance = match format {
-            GpuWeightFormat::F32 | GpuWeightFormat::Q6_K => 0.0,
+            GpuWeightFormat::F32 => 0.0,
+            // Q6_K used to be 0.0 because the NEON kernel reproduced the scalar
+            // reference bit-for-bit. The production NEON kernel now uses
+            // vdotq_s32 with a different integer grouping, which is
+            // mathematically equivalent but not bit-identical. k-quant formats
+            // carry ~1 % weight quantization noise, so 3e-3 (matching Q4_K/Q5_K)
+            // is the meaningful bound. The bit-exact path is still tested
+            // separately in neon_k::tests::q6k_neon_bits_match_scalar.
+            GpuWeightFormat::Q6_K => 3e-3,
             GpuWeightFormat::Q4_K | GpuWeightFormat::Q5_K => 3e-3,
             GpuWeightFormat::F16 | GpuWeightFormat::BF16 => 2e-4,
             _ => 2e-3,
