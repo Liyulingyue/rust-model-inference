@@ -16,7 +16,8 @@ use serde::{Deserialize, Serialize};
 use tower_http::cors::CorsLayer;
 
 use crate::app::cli::{
-    normalize_tts_language, parse_cli_options, validate_cli_options, CliOptions, KvFormat,
+    normalize_tts_language, parse_cli_options, resolve_thread_count, validate_cli_options,
+    CliOptions, KvFormat,
 };
 use crate::app::{compute_embedding, open_or_exit};
 use crate::core::tensor::{MetaValue, TensorSource};
@@ -214,6 +215,12 @@ struct Audio8Backend {
     specials: crate::models::audio8::streaming::SpecialTokens,
     language: &'static str,
     max_tokens: usize,
+    /// The tower and the decoder share one compute pool, and
+    /// `ComputePool::compute` publishes its closure through shared atomics,
+    /// so two concurrent transcriptions would overwrite each other's work.
+    /// The lock serializes them, which is what lets the pool have more than
+    /// one thread.
+    compute_lock: Arc<std::sync::Mutex<()>>,
 }
 
 struct TtsBackend {
@@ -730,10 +737,14 @@ async fn do_transcribe(
             let decoder = backend.decoder.clone();
             let specials = backend.specials.clone();
             let tokenizer = backend.tokenizer.clone();
+            let compute_lock = backend.compute_lock.clone();
             let max_tokens = backend.max_tokens;
             let default_language = backend.language.to_string();
             let language = language.unwrap_or(default_language);
             let result = compute_task(state.compute, move || {
+                let _guard = compute_lock
+                    .lock()
+                    .map_err(|_| "Audio8 compute lock poisoned".to_string())?;
                 let samples = audio8_streaming::decode_samples(&wav)?;
                 let stream = audio8_streaming::Schedule::new().padded_stream(&samples);
                 let language_token = specials.language(&language)?;
@@ -1487,13 +1498,16 @@ fn build_audio8(options: &CliOptions) -> Result<Audio8Backend, String> {
         return Err("Audio8 carries its audio tower in --model; omit --mmproj".into());
     }
     let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
-    // The server shares one pool across requests, and `ComputePool::compute`
-    // publishes its closure through shared atomics, so a pool with more than
-    // one thread would let two concurrent requests overwrite each other's
-    // work. The other backends keep the same single-threaded pool for the
-    // same reason; the CLI resolves the thread count because it runs one
-    // request at a time.
-    let pool = Arc::new(ComputePool::new(options.threads));
+    // The pool can have more than one thread because the transcriptions take
+    // `compute_lock`, which serializes them: `ComputePool::compute` publishes
+    // its closure through shared atomics, so two concurrent requests would
+    // otherwise overwrite each other's work.
+    let pool = Arc::new(ComputePool::new(resolve_thread_count(
+        options.threads,
+        std::thread::available_parallelism()
+            .map(|value| value.get())
+            .unwrap_or(1),
+    )));
     let encoder =
         crate::models::audio8::Audio8Encoder::from_source(Arc::clone(&source), Arc::clone(&pool))?;
     let decoder_source = Arc::clone(&source);
@@ -1522,6 +1536,7 @@ fn build_audio8(options: &CliOptions) -> Result<Audio8Backend, String> {
         specials,
         language,
         max_tokens,
+        compute_lock: Arc::new(std::sync::Mutex::new(())),
     })
 }
 
