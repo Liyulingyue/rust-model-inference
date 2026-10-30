@@ -272,16 +272,16 @@ impl<'model> Qwen3Session<'model> {
         } else if compute_policy == ComputePolicy::Vulkan {
             return Err("Qwen3 Vulkan currently requires F16 KV".into());
         } else {
-            // The resident Vulkan decoder is the only GPU path this model has,
-            // and it needs F16 KV. Under the default F32 the request was simply
-            // dropped, so `--gpu` looked like it ran while every token was
-            // computed on the CPU. Say so instead of failing quietly.
             if compute_policy != ComputePolicy::Cpu {
-                eprintln!(
-                    "[GPU] Qwen3 resident Vulkan decode requires F16 KV but got \
-                     {kv_format:?}; text generation runs on the CPU. \
-                     Pass --kv-cache f16 to enable the GPU path."
-                );
+                if model
+                    .source
+                    .metadata("wevisone_vl.source_revision")
+                    .is_some()
+                {
+                    eprintln!("[GPU] WeVisOne retains F32 KV/attention on CPU; dense projections use Auto offload.");
+                } else {
+                    eprintln!("[GPU] Qwen3 resident Vulkan decode requires F16 KV but got {kv_format:?}; text generation runs on the CPU. Pass --kv-cache f16 to enable the GPU path.");
+                }
             }
             None
         };
@@ -545,13 +545,24 @@ impl<'model> Qwen3Session<'model> {
         input: Qwen3Input<'_>,
         projection_policy: ComputePolicy,
     ) -> Result<Vec<f32>, String> {
-        use crate::compute::linear::{LinearBinding, LinearExecutor, LinearMode};
         if self.compute_policy != ComputePolicy::Auto
             || projection_policy == ComputePolicy::Cpu
             || self.model.config.moe.is_some()
         {
             return Err("Hidden-row projection offload requires an Auto dense host session and Auto or Vulkan projections".into());
         }
+        self.enable_projection_offload(projection_policy, input.token_ids.len())?;
+        let result = self.hidden_sequence(input, false);
+        self.hidden_linear = None;
+        result
+    }
+
+    pub(super) fn enable_projection_offload(
+        &mut self,
+        projection_policy: ComputePolicy,
+        max_rows: usize,
+    ) -> Result<(), String> {
+        use crate::compute::linear::{LinearBinding, LinearExecutor, LinearMode};
         let bindings = self
             .model
             .layers
@@ -576,14 +587,12 @@ impl<'model> Qwen3Session<'model> {
             LinearExecutor::new(
                 projection_policy,
                 bindings,
-                input.token_ids.len(),
+                max_rows,
                 self.model.pool.clone(),
             )
             .map_err(|e| e.to_string())?,
         );
-        let result = self.hidden_sequence(input, false);
-        self.hidden_linear = None;
-        result
+        Ok(())
     }
 
     fn hidden_sequence(

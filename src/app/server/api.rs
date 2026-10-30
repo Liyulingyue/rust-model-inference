@@ -960,6 +960,8 @@ mod http_tests {
                 model_path: None,
                 mmproj: None,
                 mmproj_path: None,
+                wevisone_decoder: None,
+                wevisone_options: None,
                 runtime: None,
             })),
             model_name: "local".into(),
@@ -2346,35 +2348,22 @@ fn decode_image_to_tempfile(image_url: &str) -> Result<std::path::PathBuf, Strin
 }
 
 fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
-    // Minimal RFC4648 base64 decoder (whitespace-tolerant, no padding
-    // required). Avoids pulling in a base64 crate.
-    const TABLE: &[u8; 128] = &{
-        let mut t = [255u8; 128];
-        let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut i = 0;
-        while i < alphabet.len() {
-            t[alphabet[i] as usize] = i as u8;
-            i += 1;
-        }
-        t
-    };
+    use base64::Engine as _;
     let cleaned: Vec<u8> = s.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
-    let mut out = Vec::with_capacity(cleaned.len() * 3 / 4);
-    let mut buf = 0u32;
-    let mut bits = 0u32;
-    for &c in &cleaned {
-        let v = if c < 128 { TABLE[c as usize] } else { 255 };
-        if v == 255 {
-            return Err(format!("invalid base64 char: {c:?}"));
-        }
-        buf = (buf << 6) | (v as u32);
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push(((buf >> bits) & 0xff) as u8);
-        }
+    base64::engine::general_purpose::STANDARD
+        .decode(&cleaned)
+        .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(&cleaned))
+        .map_err(|e| format!("invalid base64 image: {e}"))
+}
+
+#[test]
+fn jev_base64_accepts_padding_and_rejects_truncated_bytes() {
+    for input in ["TQ==", "TQ", " TQ==\n"] {
+        assert_eq!(base64_decode(input).unwrap(), b"M");
     }
-    Ok(out)
+    for input in ["T", "TQ=garbage", "@@@"] {
+        assert!(base64_decode(input).is_err());
+    }
 }
 
 fn detect_image_suffix(bytes: &[u8]) -> &'static str {

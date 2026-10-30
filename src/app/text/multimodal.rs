@@ -422,7 +422,11 @@ pub fn run_qwen3_family_multimodal(
         )?;
     }
     append_qwen_message_tokens(&mut token_ids, &tokenizer, "user", &content)?;
-    append_qwen_assistant_prefix(&mut token_ids, &tokenizer, false)?;
+    append_qwen_assistant_prefix(
+        &mut token_ids,
+        &tokenizer,
+        matches!(arch, "qwen3vl" | "qwen3vlmoe"),
+    )?;
     let mut embeddings = model.embed_tokens(&token_ids)?;
     let deepstack_embeddings = inject_qwen_media_embeddings(
         &token_ids,
@@ -798,10 +802,16 @@ pub fn run_qwen3_family_multimodal_logits(
                         &mut scratch,
                     )?;
                     media.extend_from_slice(&scratch.projected);
-                    let deepstack_layers = scratch.deepstack.len()
-                        / (scratch.projected.len() / encoder.config.n_embd)
-                            .max(1)
-                            .max(1);
+                    let deepstack_layers = encoder
+                        .config
+                        .has_deepstack_layers
+                        .iter()
+                        .filter(|&&enabled| enabled)
+                        .count();
+                    if deepstack_layers == 0 {
+                        media_grid_shapes.push((grid.grid_h, grid.grid_w));
+                        continue;
+                    }
                     if scratch.deepstack.len() % deepstack_layers != 0 {
                         return Err("Vision deepstack output is not layer aligned".into());
                     }
@@ -886,9 +896,7 @@ pub fn run_qwen3_family_multimodal_logits(
         },
     ));
     let mut token_ids = Vec::new();
-    if let Some(system_text) =
-        system_prompt.filter(|_| family == crate::app::media::ProjectorFamily::Qwen25Omni)
-    {
+    if let Some(system_text) = system_prompt {
         append_qwen_message_tokens(
             &mut token_ids,
             &tokenizer,
@@ -903,10 +911,24 @@ pub fn run_qwen3_family_multimodal_logits(
         )?;
     }
     append_qwen_message_tokens(&mut token_ids, &tokenizer, "user", &content)?;
-    append_qwen_assistant_prefix(&mut token_ids, &tokenizer, false)?;
+    append_qwen_assistant_prefix(
+        &mut token_ids,
+        &tokenizer,
+        matches!(arch, "qwen3vl" | "qwen3vlmoe"),
+    )?;
     let mut embeddings = model.embed_tokens(&token_ids)?;
-    // qwen3vl deepstack embeddings currently unused here — vision
-    // embeddings flow through `model.embed_tokens` + `inject_qwen_media_embeddings`.
+    let media_deepstack = media_deepstack_layers
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let deepstack = inject_qwen_media_embeddings(
+        &token_ids,
+        pad,
+        &mut embeddings,
+        &media,
+        &media_deepstack,
+        width,
+    )?;
     let positions = build_qwen3_media_positions(&token_ids, pad, &media_grid_shapes)?;
     let capacity = token_ids.len() + 1;
     let mut session = Qwen3Session::new_with_kv_state(
@@ -920,7 +942,7 @@ pub fn run_qwen3_family_multimodal_logits(
         token_ids: &token_ids,
         positions: &positions,
         embeddings: Some(&embeddings),
-        deepstack_embeddings: None,
+        deepstack_embeddings: (!deepstack.is_empty()).then_some(deepstack.as_slice()),
     };
     let (logits, _dur) = session.forward_logits(input, prefill_batch_size)?;
     Ok((logits, t0.elapsed()))

@@ -40,6 +40,10 @@ pub(crate) struct LinearExecutor<'model, 'weights> {
 }
 
 impl<'model, 'weights> LinearExecutor<'model, 'weights> {
+    pub(crate) fn max_rows(&self) -> usize {
+        self.max_rows
+    }
+
     pub(crate) fn uses_vulkan(&self) -> bool {
         #[cfg(feature = "vulkan")]
         {

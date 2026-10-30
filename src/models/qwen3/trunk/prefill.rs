@@ -190,6 +190,19 @@ impl Qwen3Session<'_> {
         let trace_each_token = false;
         let chunk_size = batch_size;
         let max_rows = chunk_size.min(self.capacity);
+        if self.compute_policy == crate::compute::ComputePolicy::Auto
+            && self
+                .model
+                .source
+                .metadata("wevisone_vl.source_revision")
+                .is_some()
+            && self
+                .hidden_linear
+                .as_ref()
+                .is_none_or(|linear| linear.max_rows() < max_rows)
+        {
+            self.enable_projection_offload(self.compute_policy, max_rows)?;
+        }
         self.prefill_scratch.reset_for(max_rows, self.model);
         #[cfg(feature = "vulkan")]
         let validate_gpu_contract = self.gpu.is_some()

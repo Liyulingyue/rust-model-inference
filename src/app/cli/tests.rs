@@ -1560,3 +1560,45 @@ fn legacy_cli_parser_and_dispatch_semantics_are_preserved() {
         assert!(validate_cli_options(&options).is_ok());
     }
 }
+
+#[test]
+fn wevisone_cli_validates_mode_and_preserves_generation_options() {
+    let base = [
+        "rmi",
+        "--model",
+        "text.gguf",
+        "--mmproj",
+        "vision.gguf",
+        "--wevisone-request",
+        "request.json",
+    ];
+    let mut values = base.to_vec();
+    values.extend([
+        "--max-tokens",
+        "1",
+        "--temp",
+        "0.7",
+        "--repetition-penalty",
+        "1.2",
+        "--prefill-batch-size",
+        "1",
+        "--max-context",
+        "256",
+        "--kv-cache",
+        "f16",
+    ]);
+    let options = parse_cli_options(&args(&values)).unwrap();
+    validate_cli_options(&options).unwrap();
+    let prediction = crate::app::wevisone_vl::PredictionOptions::from_cli(&options).unwrap();
+    assert_eq!(prediction.max_new_tokens, 1);
+    assert_eq!(prediction.temperature, 0.7);
+    assert_eq!(prediction.repetition_penalty, 1.2);
+    assert_eq!(prediction.prefill_batch_size, 1);
+    assert_eq!(prediction.max_context, 256);
+    assert_eq!(prediction.kv_format, KvFormat::F16);
+    for extra in ["--dry-run", "--qwen-image-turbo", "--jev", "--dump-logits"] {
+        let mut values = base.to_vec();
+        values.push(extra);
+        assert!(validate_cli_options(&parse_cli_options(&args(&values)).unwrap()).is_err());
+    }
+}

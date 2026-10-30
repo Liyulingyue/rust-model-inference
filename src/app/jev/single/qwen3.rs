@@ -72,7 +72,10 @@ fn run_jev_decision_qwen3_visual(
     use super::run_jev_decision_core;
     use super::JevScorer;
 
+    let tokenizer = BPETokenizer::from_gguf_metadata(|key| source.metadata(key).cloned())?;
+    verify_label_tokens_single(&tokenizer)?;
     let mut scorer = Qwen3VisualJevScorer {
+        tokenizer,
         source,
         pending: None,
         mmproj_path: mmproj_path.to_path_buf(),
@@ -89,6 +92,7 @@ fn run_jev_decision_qwen3_visual(
 /// JEV scorer backed by the shared qwen3 multimodal logits helper, so the two
 /// projector families and their deepstack wiring stay in one place.
 struct Qwen3VisualJevScorer {
+    tokenizer: BPETokenizer,
     /// Rendered `(system, payload)` for the question being scored. `build_prompt`
     /// fills it and `forward_logits` consumes it; `run_jev_decision_core` calls
     /// the two back to back, so a single slot is enough.
@@ -142,7 +146,7 @@ impl JevScorer for Qwen3VisualJevScorer {
     }
 
     fn tokenizer(&self) -> &BPETokenizer {
-        unreachable!("the visual scorer never tokenizes the prompt itself")
+        &self.tokenizer
     }
 }
 
@@ -151,7 +155,6 @@ impl JevScorer for Qwen3VisualJevScorer {
 /// fresh `Qwen3Session` so the KV cache stays ephemeral.
 pub(crate) struct Qwen3JevScorer {
     pub(crate) model: crate::models::qwen3::Qwen3Model,
-    pub(crate) max_ctx: usize,
     pub(crate) prefill_batch_size: usize,
     /// `--jinja` template, resolved once in `new()`.
     pub(crate) jinja: Option<crate::prompt::jinja::JinjaChatTemplate>,
@@ -164,6 +167,8 @@ impl Qwen3JevScorer {
         prefill_batch_size: usize,
         jinja: &crate::prompt::jinja::Options,
     ) -> Result<Self, String> {
+        let mut jinja = jinja.clone();
+        jinja.jinja |= source.metadata("wevisone_vl.source_revision").is_some();
         let jinja = jinja.resolve(&|k| source.metadata(k).cloned())?;
         let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
             .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
@@ -174,10 +179,8 @@ impl Qwen3JevScorer {
             Arc::new(tokenizer),
             pool,
         )?;
-        let max_ctx = model.config().n_ctx;
         Ok(Self {
             model,
-            max_ctx,
             prefill_batch_size,
             jinja,
         })
@@ -215,11 +218,11 @@ impl JevScorer for Qwen3JevScorer {
     ) -> Result<(Vec<f32>, std::time::Duration), String> {
         let mut session = crate::models::qwen3::Qwen3Session::new_with_kv_state(
             &self.model,
-            self.max_ctx,
+            token_ids.len(),
             KvFormat::F16,
             crate::core::scratchpad::KvLifecycle::Ephemeral,
         )?;
-        let positions: Vec<[usize; 4]> = (0..token_ids.len()).map(|i| [i, 0, 0, 0]).collect();
+        let positions = crate::models::qwen3::qwen_text_positions(token_ids.len());
         let input = crate::models::qwen3::Qwen3Input {
             token_ids: &token_ids,
             positions: &positions,
