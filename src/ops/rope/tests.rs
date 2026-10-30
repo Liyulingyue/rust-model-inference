@@ -512,3 +512,29 @@ fn neox_frequency_divisors_without_a_per_pair_list_match_the_plain_path() {
     super::rope_neox_inplace_with_freqs(&mut none, 9, 8, 10_000.0, &[1.0; 4]);
     assert_eq!(plain, none);
 }
+
+#[test]
+fn interleaved_mrope_remainder_uses_temporal_axis() {
+    let mut actual = vec![1.0; 128];
+    super::rope_mrope_interleaved(
+        &mut actual,
+        [7, 11, 13, 0],
+        [24, 20, 20, 0],
+        128,
+        5_000_000.0,
+        128,
+    );
+    for pair in 0..64 {
+        let position = if pair % 3 == 1 && pair < 60 {
+            11.0
+        } else if pair % 3 == 2 && pair < 60 {
+            13.0
+        } else {
+            7.0
+        };
+        let angle = position * 5_000_000.0f32.powf(-2.0 * pair as f32 / 128.0);
+        let (s, c) = angle.sin_cos();
+        assert!((actual[pair] - (c - s)).abs() < 2e-6, "pair {pair}");
+        assert!((actual[pair + 64] - (s + c)).abs() < 2e-6, "pair {pair}");
+    }
+}

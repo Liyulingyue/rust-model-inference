@@ -50,6 +50,14 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
             "--laya-request" => {
                 options.laya_request = Some(required_path_value(args, &mut i, "--laya-request")?);
             }
+            "--wevisone-request" => {
+                options.wevisone_request =
+                    Some(required_path_value(args, &mut i, "--wevisone-request")?);
+            }
+            "--wevisone-decoder" => {
+                options.wevisone_decoder =
+                    Some(required_path_value(args, &mut i, "--wevisone-decoder")?);
+            }
             "--timestral-request" => {
                 options.timestral_request =
                     Some(required_path_value(args, &mut i, "--timestral-request")?);

@@ -1,6 +1,7 @@
 pub mod api;
 mod forecast;
 mod rerank;
+mod wevisone;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -189,6 +190,8 @@ struct TextBackend {
     /// source because the existing multimodal CLI helper expects
     /// `&Path` for both the model and the vision encoder).
     pub(crate) mmproj_path: Option<std::path::PathBuf>,
+    wevisone_decoder: Option<Arc<dyn TensorSource>>,
+    wevisone_options: Option<crate::app::wevisone_vl::PredictionOptions>,
 }
 
 unsafe impl Send for TextBackend {}
@@ -1437,6 +1440,32 @@ fn build_text(options: &CliOptions) -> Result<TextBackend, String> {
     });
     let compiled_chat_template =
         std::sync::Arc::new(chat_template.resolve(&|k| source.metadata(k).cloned())?);
+    let wevisone_options = if source.metadata("wevisone_vl.source_revision").is_some() {
+        Some(crate::app::wevisone_vl::PredictionOptions::from_cli(
+            options,
+        )?)
+    } else {
+        None
+    };
+    let wevisone_decoder: Option<Arc<dyn TensorSource>> = options
+        .wevisone_decoder
+        .as_ref()
+        .map(|path| {
+            crate::format::ggufrs::open_model_source(path, ComponentRole::Llm).map(Arc::from)
+        })
+        .transpose()
+        .map_err(|e| e.to_string())?;
+    if let Some(decoder) = &wevisone_decoder {
+        crate::app::wevisone_vl::validate_components(
+            source.as_ref(),
+            mmproj
+                .as_ref()
+                .ok_or("--wevisone-decoder requires --mmproj")?
+                .as_ref(),
+            Some(decoder.as_ref()),
+        )?;
+        crate::models::wevisone_vl::Decoder::new(decoder.as_ref(), &pool)?;
+    }
     Ok(TextBackend {
         arch: arch.to_string(),
         pool,
@@ -1450,6 +1479,8 @@ fn build_text(options: &CliOptions) -> Result<TextBackend, String> {
         model_path: Some(model_path),
         mmproj,
         mmproj_path: options.mmproj.clone().filter(|p| !p.as_os_str().is_empty()),
+        wevisone_options,
+        wevisone_decoder,
     })
 }
 
@@ -1712,7 +1743,10 @@ pub fn run_server() {
         .route("/health", get(health))
         .route("/v1/models", get(list_models));
     router = match state.model.as_ref() {
-        Backend::Text(_) => router.merge(api::routes()),
+        Backend::Text(_) => router.merge(api::routes()).route(
+            "/v1/wevisone/predict",
+            post(wevisone::prediction).layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
+        ),
         Backend::Embedding(_) => router.route(
             "/v1/embeddings",
             post(embeddings).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),

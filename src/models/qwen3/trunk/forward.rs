@@ -755,6 +755,7 @@ pub fn run_shared_inference(
         n_threads_arg,
         available_threads,
     )));
+    let thinking = thinking || source.metadata("wevisone_vl.source_revision").is_some();
     let model = Qwen3Model::from_source(source, Arc::clone(&tokenizer), pool)?;
     let input_tokens = build_qwen_chat_prompt(
         &tokenizer,

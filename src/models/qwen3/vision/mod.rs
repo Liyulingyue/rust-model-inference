@@ -369,6 +369,7 @@ pub struct VisionEncoder<'a> {
     pub mm_2_weight: &'a [u8],
     pub mm_2_bias: Option<&'a [u8]>,
     pub precomputed: Option<VisionPrecomputed>,
+    preserve_f32: bool,
 }
 
 pub struct VisionPrecomputed {
@@ -608,12 +609,13 @@ impl<'a> VisionEncoder<'a> {
             mm_2_weight,
             mm_2_bias,
             precomputed: None,
+            preserve_f32: source.metadata("wevisone_vl.source_revision").is_some(),
             pool,
         })
     }
 
     pub fn precompute(&mut self) {
-        self.precompute_impl(false, false);
+        self.precompute_impl(self.preserve_f32, false);
     }
 
     /// Keep widened weights and activations in F32, without Q8 quantization.
@@ -765,6 +767,26 @@ impl<'a> VisionEncoder<'a> {
         img_h: usize,
         scratch: &mut VisionScratchpad,
     ) -> Result<VisionGrid, String> {
+        self.encode_pair_capture(
+            frame_a_pixels,
+            frame_b_pixels,
+            img_w,
+            img_h,
+            scratch,
+            &mut |_, _| {},
+        )
+    }
+
+    /// Capture raw ViT rows before the DeepStack and final spatial mergers.
+    pub fn encode_pair_capture(
+        &self,
+        frame_a_pixels: &[f32],
+        frame_b_pixels: &[f32],
+        img_w: usize,
+        img_h: usize,
+        scratch: &mut VisionScratchpad,
+        capture: &mut dyn FnMut(usize, &[f32]),
+    ) -> Result<VisionGrid, String> {
         let cfg = &self.config;
         let n_embd = cfg.n_embd;
         let merge = cfg.spatial_merge_size;
@@ -867,6 +889,7 @@ impl<'a> VisionEncoder<'a> {
         let mut deepstack_index = 0;
         for layer in 0..cfg.n_layer {
             self.forward_vit_layer(layer, scratch, n_tokens, &mrope_positions);
+            capture(layer, &scratch.merged[..n_tokens * n_embd]);
             vision_checkpoint(
                 self,
                 &format!("blocks.{layer}"),

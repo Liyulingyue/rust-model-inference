@@ -168,15 +168,7 @@ pub(crate) fn build_qwen3_media_positions(
     let mut grid_index = 0usize;
     while token < token_ids.len() {
         if token_ids[token] != placeholder_id {
-            // text token — upstream llama.cpp routes text chunks through
-            // the legacy 1D path (compat layer only sets `pos[0]`), so
-            // the H/W/E axes stay at 0 (identity under M-RoPE). Match
-            // that here: applying spurious H/W rotations by `next`
-            // (= base + max(grid_h, grid_w)) accumulates with image
-            // size and destabilises the LLM's last-position logits, so
-            // greedy argmax starts picking `<|im_end|>` at >= 256x256
-            // images. See docs/usage/qwen3.md §3 for the slice history.
-            positions.push([next, 0, 0, 0]);
+            positions.push([next, next, next, 0]);
             next = next.checked_add(1).ok_or("Qwen media position overflow")?;
             token += 1;
             continue;
@@ -232,7 +224,7 @@ pub(crate) fn build_qwen3_media_positions(
     Ok(positions)
 }
 
-pub(super) fn inject_qwen_media_embeddings(
+pub(crate) fn inject_qwen_media_embeddings(
     token_ids: &[u32],
     pad: u32,
     embeddings: &mut [f32],

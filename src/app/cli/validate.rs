@@ -4,6 +4,48 @@ use super::options::{
 use super::types::{normalize_tts_language, CliOptions};
 
 pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
+    if options.wevisone_request.is_some() {
+        if options.model.as_os_str().is_empty() || options.mmproj.is_none() {
+            return Err("--wevisone-request requires --model and --mmproj".into());
+        }
+        if options.jev
+            || options.rerank
+            || options.embedding
+            || options.tts
+            || options.yue2
+            || options.dreamx
+            || options.astronex
+            || options.timestral_request.is_some()
+            || options.laya_request.is_some()
+            || options.prompt.is_some()
+            || options.image.is_some()
+            || options.video.is_some()
+            || options.audio.is_some()
+            || options.vae.is_some()
+            || options.text_encoder.is_some()
+            || options.out.is_some()
+            || options.qwen_image_turbo
+            || options.dry_run
+            || options.planner.is_some()
+            || options.perception.is_some()
+            || options.longcat_kind.is_some()
+            || options.noise.is_some()
+            || options.width.is_some()
+            || options.height.is_some()
+            || options.cfg.is_some()
+            || options.top_k.is_some()
+            || options.top_p.is_some()
+            || options.bench
+            || options.dump_logits
+            || options.thinking
+            || options.jinja
+            || options.chat_template.is_some()
+            || options.chat_template_file.is_some()
+        {
+            return Err("--wevisone-request cannot be combined with other task modes".into());
+        }
+        return Ok(());
+    }
     if options.qwen_image_turbo {
         return Err("--qwen-image-turbo requires a Qwen-Image-2.1 DiT GGUF".into());
     }

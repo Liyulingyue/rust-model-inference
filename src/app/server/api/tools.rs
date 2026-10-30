@@ -500,7 +500,9 @@ pub fn build_prompt(
         .iter()
         .map(|(role, content)| QwenMessage { role, content })
         .collect();
-    let thinking = enable_thinking.unwrap_or(false);
+    // WeVisOne has think tokens, but its trained assistant prefix contains none.
+    let thinking = enable_thinking.unwrap_or(false)
+        || source.metadata("wevisone_vl.source_revision").is_some();
     let ids = build_qwen_chat_prompt(tokenizer, &messages, thinking)?;
     Ok((ids, attached_images))
 }
@@ -1164,10 +1166,12 @@ mod tests {
         BPETokenizer::from_gguf_metadata(|k| metadata.get(k).cloned()).unwrap()
     }
 
-    struct TestSource;
+    struct TestSource(Option<MetaValue>);
     impl crate::core::tensor::TensorSource for TestSource {
-        fn metadata(&self, _key: &str) -> Option<&crate::core::tensor::MetaValue> {
-            None
+        fn metadata(&self, key: &str) -> Option<&crate::core::tensor::MetaValue> {
+            (key == "wevisone_vl.source_revision")
+                .then_some(self.0.as_ref())
+                .flatten()
         }
         fn tensor_info(&self, _name: &str) -> Option<&crate::core::tensor::TensorInfo> {
             None
@@ -1177,7 +1181,7 @@ mod tests {
         }
     }
     fn source() -> std::sync::Arc<dyn crate::core::tensor::TensorSource> {
-        std::sync::Arc::new(TestSource)
+        std::sync::Arc::new(TestSource(None))
     }
 
     fn user_message() -> Vec<Message> {
@@ -1188,6 +1192,31 @@ mod tests {
             call_id: None,
             images: vec![],
         }]
+    }
+
+    #[test]
+    fn wevisone_assistant_prefix_has_no_thinking_markers() {
+        let tokenizer = tokenizer();
+        for marked in [false, true] {
+            let source = TestSource(marked.then(|| MetaValue::String("released".into())));
+            let (ids, _) = build_prompt(
+                &source,
+                &tokenizer,
+                "qwen3vl",
+                &user_message(),
+                &[],
+                &ToolChoice::Auto,
+                None,
+                &crate::prompt::jinja::Options::default(),
+                None,
+            )
+            .unwrap();
+            let text = tokenizer.decode(&ids, true);
+            assert_eq!(text.contains("<think>"), !marked, "{text}");
+            if marked {
+                assert!(text.ends_with("<|im_start|>assistant\n"), "{text}");
+            }
+        }
     }
 
     /// The compiled template has to be what renders, not a fresh resolve.

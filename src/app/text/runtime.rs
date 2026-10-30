@@ -453,7 +453,7 @@ impl TextRuntime for Qwen3TextRuntime {
         // embeddings AND the per-layer deepstack features. Mirrors
         // `app::text::multimodal::run_qwen3_family_multimodal`.
         let (token_ids, embeddings, deepstack, positions) = if request.images.is_empty() {
-            let positions: Vec<_> = (0..request.token_ids.len()).map(|i| [i, 0, 0, 0]).collect();
+            let positions: Vec<_> = (0..request.token_ids.len()).map(|i| [i, i, i, 0]).collect();
             (request.token_ids.clone(), None, None, positions)
         } else {
             self.prepare_qwen3vl_image_prefill(&request.token_ids, &request.images)?
@@ -628,21 +628,13 @@ impl Qwen3TextRuntime {
 
         // Splice `[vision_start][image_pad x rows][vision_end]` right after the
         // user turn's role tokens.
-        let role_len = self
-            .tokenizer
-            .encode(
-                "user\n",
-                crate::core::tokenizer::EncodeOptions {
-                    add_special: false,
-                    parse_special: false,
-                },
-            )
-            .len();
+        let mut user_prefix = vec![im_start];
+        user_prefix.extend(self.tokenizer.encode("user\n", Default::default()));
         let insert_at = prompt_ids
-            .iter()
-            .position(|&id| id == im_start)
-            .map(|first| first + 1 + role_len)
-            .unwrap_or(prompt_ids.len());
+            .windows(user_prefix.len())
+            .rposition(|window| window == user_prefix)
+            .map(|start| start + user_prefix.len())
+            .ok_or("Image prompt requires a user turn")?;
         let mut token_ids = Vec::with_capacity(prompt_ids.len() + rows_total + 2);
         token_ids.extend_from_slice(&prompt_ids[..insert_at]);
         token_ids.push(vision_start);
