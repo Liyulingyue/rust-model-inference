@@ -128,15 +128,25 @@ for every format: Audio8 walks one frame and one token at a time, so the
 GPU never gets a batch to amortize its dispatch over, and a k-quant shader
 also has to unpack five or six bits per weight on top of the multiply.
 
-The machine's ceiling is far above both columns. PyTorch replays the same
-projection sequence on the GPU in **3.2 s** -- but that is the matmuls
-alone, with fp16 weights, so it is not comparable to a whole transcription:
-the tower and the decoder also spend about 6 s on the mel filter, the
-convolutions, the attention, the norms and the RoPE, none of which the
-replay touches. Counting only the matmuls, the same Q5_K work takes 7.3 s
-on the CPU and 18.3 s on the GPU, so the k-quant shaders are the gap: fp16
-needs no unpacking at all, and the k-quant ones read the weight a byte at a
-time.
+Comparing against PyTorch has to hold the weight format fixed, and the
+same projection sequence on the GPU comes out like this:
+
+| Weights | Unpacking | Bytes moved per weight | Wall clock |
+|---|---|---|---|
+| fp16 | none | 2 | 3.29 s |
+| Q5_K | amortized over the whole run | 0.69 read + 2 write + 2 read | 3.20 s |
+| Q5_K | per call | 0.69 read + 2 write + 2 read | 35.4 s |
+| Q5_K | fused into the matmul kernel | 0.69 | 18.3 s |
+
+The last two rows are the ones that compare. Torch has no packed five-bit
+GEMM, so its Q5_K path unpacks to fp16 outside the matmul and moves about
+seven times the bytes; the fused kernel here is still faster, because
+reading a byte and splitting it is cheaper than writing and re-reading a
+half-precision copy. Neither row can reach the 3.2 s of the first one: a
+streaming ASR reads the same weights once per frame and has to unpack them
+again every time. That row is the ceiling, and it says the remaining GPU
+cost is the unpacking arithmetic rather than the multiply -- the matmul
+alone would take 3.2 s.
 
 Reaching the GPU at all took fixing the k-quant shaders. `q5_k_matmul.comp`
 decoded the scale and the minimum inside its 256-element loop, staged the
