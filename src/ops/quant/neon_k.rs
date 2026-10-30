@@ -1,9 +1,10 @@
-//! ARM NEON dot-product kernel for IQ4_NL × Q8_K and Q4_K × Q8_K.
+//! ARM NEON dot-product kernels for IQ4_NL × Q8_K, Q4_K × Q8_K and
+//! Q5_K × Q8_K.
 
 #![cfg(target_arch = "aarch64")]
 
 use crate::ops::f16_to_f32;
-use crate::ops::quant::{BlockQ8K, BLOCK_Q4K_SIZE, KVALUES_IQ4NL};
+use crate::ops::quant::{BlockQ8K, BLOCK_Q4K_SIZE, BLOCK_Q5K_SIZE, BLOCK_Q6K_SIZE, KVALUES_IQ4NL};
 
 #[target_feature(enable = "neon,dotprod")]
 pub(crate) unsafe fn vec_dot_iq4_nl_q8k_neon(iq4nl_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
@@ -177,10 +178,311 @@ pub(crate) unsafe fn vec_dot_q4k_q8k_neon(q4k_data: &[u8], q8k: &[BlockQ8K]) -> 
     total
 }
 
+/// The dot product of one 32-element Q5_K group.
+///
+/// The group index is a const generic so the high-bit extraction compiles to
+/// an immediate shift, and so the even/odd nibble choice folds away.
+#[inline]
+#[target_feature(enable = "neon,dotprod")]
+unsafe fn q5_group_dot<const G: i32>(
+    qh: *const u8,
+    chunk: *const u8,
+    act: *const i8,
+    nibble_mask: std::arch::aarch64::uint8x16_t,
+    zero32: std::arch::aarch64::int32x4_t,
+) -> std::arch::aarch64::int32x4_t {
+    use std::arch::aarch64::*;
+
+    let nib0 = vld1q_u8(chunk);
+    let nib1 = vld1q_u8(chunk.add(16));
+    let (nib0, nib1) = if G & 1 == 0 {
+        (vandq_u8(nib0, nibble_mask), vandq_u8(nib1, nibble_mask))
+    } else {
+        (vshrq_n_u8::<4>(nib0), vshrq_n_u8::<4>(nib1))
+    };
+    // The high bit of the group lives in bit `G` of qh. Comparing against a
+    // broadcast mask keeps the extraction to a constant number of
+    // instructions: the immediate-shift form cannot express a shift of zero.
+    let bit = vdupq_n_u8(1u8 << G);
+    let high0 = vceqq_u8(vandq_u8(vld1q_u8(qh), bit), bit);
+    let high1 = vceqq_u8(vandq_u8(vld1q_u8(qh.add(16)), bit), bit);
+    let weight0 = vorrq_u8(nib0, vandq_u8(high0, vdupq_n_u8(0x10)));
+    let weight1 = vorrq_u8(nib1, vandq_u8(high1, vdupq_n_u8(0x10)));
+    let act0 = vld1q_s8(act.add(G as usize * 32));
+    let act1 = vld1q_s8(act.add(G as usize * 32 + 16));
+    let dot0 = vdotq_s32(zero32, vreinterpretq_s8_u8(weight0), act0);
+    let dot1 = vdotq_s32(zero32, vreinterpretq_s8_u8(weight1), act1);
+    vaddq_s32(dot0, dot1)
+}
+
+/// ARM NEON dot-product kernel for Q5_K × Q8_K.
+///
+/// The scalar reference expands a block into 256 bytes and then walks them
+/// one at a time, so every element costs a branch, a nibble split and a
+/// multiply. This kernel keeps the block packed and dequantizes one
+/// 32-element group at a time: the packed nibbles of groups 2c and 2c+1
+/// share one 32-byte chunk, and the high bits are one 32-byte read.
+#[target_feature(enable = "neon,dotprod")]
+pub(crate) unsafe fn vec_dot_q5k_q8k_neon(q5k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
+    use std::arch::aarch64::*;
+
+    let nb = q8k.len();
+    let nibble_mask = vdupq_n_u8(0x0F);
+    let zero32 = vdupq_n_s32(0);
+
+    // Four accumulators, one per position class inside a 32-element group.
+    // Two integer accumulators keep the eight groups off one dependency
+    // chain.
+    let mut sums = vdupq_n_f32(0.0);
+    let mut correction = 0.0f32;
+
+    for i in 0..nb {
+        let boff = i * BLOCK_Q5K_SIZE;
+        if boff + BLOCK_Q5K_SIZE > q5k_data.len() {
+            break;
+        }
+        let d = f16_to_f32(u16::from_le_bytes([q5k_data[boff], q5k_data[boff + 1]])) * q8k[i].d;
+        let dmin =
+            -f16_to_f32(u16::from_le_bytes([q5k_data[boff + 2], q5k_data[boff + 3]])) * q8k[i].d;
+
+        // Eight scales and eight minimums, six bits each, packed in 12 bytes.
+        // Each minimum covers the 32 activations of its group.
+        let packed = &q5k_data[boff + 4..boff + 16];
+        let mut scales = [0i32; 8];
+        let mut mins = [0u8; 8];
+        for j in 0..8 {
+            if j < 4 {
+                scales[j] = i32::from(packed[j] & 63);
+                mins[j] = packed[j + 4] & 63;
+            } else {
+                scales[j] = i32::from((packed[j + 4] & 0x0F) | ((packed[j - 4] >> 6) << 4));
+                mins[j] = (packed[j + 4] >> 4) | ((packed[j] >> 6) << 4);
+            }
+        }
+
+        let qh = q5k_data.as_ptr().add(boff + 16);
+        let qs = q5k_data.as_ptr().add(boff + 48);
+        let act = q8k[i].qs.as_ptr();
+        let mut acc_even = zero32;
+        let mut acc_odd = zero32;
+        // Group `g` reads the packed nibbles of chunk `g / 2`, the low nibble
+        // when `g` is even, and the high bit of qh at bit `g`.
+        let chunk0 = qs;
+        let chunk1 = qs.add(32);
+        let chunk2 = qs.add(64);
+        let chunk3 = qs.add(96);
+        acc_even = vmlaq_n_s32(
+            acc_even,
+            q5_group_dot::<0>(qh, chunk0, act, nibble_mask, zero32),
+            scales[0],
+        );
+        acc_odd = vmlaq_n_s32(
+            acc_odd,
+            q5_group_dot::<1>(qh, chunk0, act, nibble_mask, zero32),
+            scales[1],
+        );
+        acc_even = vmlaq_n_s32(
+            acc_even,
+            q5_group_dot::<2>(qh, chunk1, act, nibble_mask, zero32),
+            scales[2],
+        );
+        acc_odd = vmlaq_n_s32(
+            acc_odd,
+            q5_group_dot::<3>(qh, chunk1, act, nibble_mask, zero32),
+            scales[3],
+        );
+        acc_even = vmlaq_n_s32(
+            acc_even,
+            q5_group_dot::<4>(qh, chunk2, act, nibble_mask, zero32),
+            scales[4],
+        );
+        acc_odd = vmlaq_n_s32(
+            acc_odd,
+            q5_group_dot::<5>(qh, chunk2, act, nibble_mask, zero32),
+            scales[5],
+        );
+        acc_even = vmlaq_n_s32(
+            acc_even,
+            q5_group_dot::<6>(qh, chunk3, act, nibble_mask, zero32),
+            scales[6],
+        );
+        acc_odd = vmlaq_n_s32(
+            acc_odd,
+            q5_group_dot::<7>(qh, chunk3, act, nibble_mask, zero32),
+            scales[7],
+        );
+        sums = vfmaq_n_f32(sums, vcvtq_f32_s32(vaddq_s32(acc_even, acc_odd)), d);
+
+        // The minimum correction: the Q8_K block carries the activation sums
+        // of its 16 half-groups, and each minimum covers two of them.
+        let mins_wide = vmovl_u8(vld1_u8(mins.as_ptr()));
+        let mins_lo = vreinterpretq_s16_u16(vzip1q_u16(mins_wide, mins_wide));
+        let mins_hi = vreinterpretq_s16_u16(vzip2q_u16(mins_wide, mins_wide));
+        let bsums_lo = vld1q_s16(q8k[i].bsums.as_ptr());
+        let bsums_hi = vld1q_s16(q8k[i].bsums.as_ptr().add(8));
+        let prod0 = vmlal_s16(zero32, vget_low_s16(mins_lo), vget_low_s16(bsums_lo));
+        let prod1 = vmlal_s16(zero32, vget_high_s16(mins_lo), vget_high_s16(bsums_lo));
+        let prod2 = vmlal_s16(zero32, vget_low_s16(mins_hi), vget_low_s16(bsums_hi));
+        let prod3 = vmlal_s16(zero32, vget_high_s16(mins_hi), vget_high_s16(bsums_hi));
+        let sumi = vaddvq_s32(vaddq_s32(prod0, prod1)) + vaddvq_s32(vaddq_s32(prod2, prod3));
+        correction += dmin * sumi as f32;
+    }
+
+    correction + vaddvq_f32(sums)
+}
+
+/// The weights of one 32-element Q6_K group.
+///
+/// Group `G` takes the low or the high nibble of one 64-byte `ql` chunk and
+/// two bits of the 32-byte `qh` chunk. The two bits are the field at bit
+/// `2 * G` of every `qh` byte, and the value is the six-bit code minus 32.
+#[inline]
+#[target_feature(enable = "neon,dotprod")]
+unsafe fn q6_group_dot<const G: usize>(
+    ql: *const u8,
+    qh: *const u8,
+    act: *const i8,
+    nibble_mask: std::arch::aarch64::uint8x16_t,
+    high_mask: std::arch::aarch64::uint8x16_t,
+    shift: std::arch::aarch64::uint8x16_t,
+    scale_lo: i32,
+    scale_hi: i32,
+    zero32: std::arch::aarch64::int32x4_t,
+) -> std::arch::aarch64::int32x4_t {
+    use std::arch::aarch64::*;
+
+    let ql_offset = if G == 1 || G == 3 { 32 } else { 0 };
+    let high_nibble = G == 2 || G == 3;
+    let ql0 = vld1q_u8(ql.add(ql_offset));
+    let ql1 = vld1q_u8(ql.add(ql_offset + 16));
+    let qh0 = vld1q_u8(qh);
+    let qh1 = vld1q_u8(qh.add(16));
+    let (nib0, nib1) = if high_nibble {
+        (vshrq_n_u8::<4>(ql0), vshrq_n_u8::<4>(ql1))
+    } else {
+        (vandq_u8(ql0, nibble_mask), vandq_u8(ql1, nibble_mask))
+    };
+    // A negative shift amount turns the variable left shift into a right
+    // shift, and the immediate-shift form cannot express a shift of zero.
+    let back = vnegq_s8(vreinterpretq_s8_u8(shift));
+    let high0 = vshlq_n_u8(vandq_u8(vshlq_u8(qh0, back), high_mask), 4);
+    let high1 = vshlq_n_u8(vandq_u8(vshlq_u8(qh1, back), high_mask), 4);
+    // The unsigned subtraction wraps into the signed six-bit range.
+    let weight0 = vreinterpretq_s8_u8(vsubq_u8(vorrq_u8(nib0, high0), vdupq_n_u8(32)));
+    let weight1 = vreinterpretq_s8_u8(vsubq_u8(vorrq_u8(nib1, high1), vdupq_n_u8(32)));
+    let dot0 = vdotq_s32(zero32, weight0, vld1q_s8(act));
+    let dot1 = vdotq_s32(zero32, weight1, vld1q_s8(act.add(16)));
+    vaddq_s32(vmulq_n_s32(dot0, scale_lo), vmulq_n_s32(dot1, scale_hi))
+}
+
+/// ARM NEON dot-product kernel for Q6_K × Q8_K.
+///
+/// Q6_K carries a two-bit high part and one signed scale per 16 elements,
+/// so the scale changes inside a 32-element group; the two halves of the
+/// group are scaled separately.
+#[target_feature(enable = "neon,dotprod")]
+pub(crate) unsafe fn vec_dot_q6k_q8k_neon(q6k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
+    use std::arch::aarch64::*;
+
+    let nb = q8k.len();
+    let nibble_mask = vdupq_n_u8(0x0F);
+    let high_mask = vdupq_n_u8(0x03);
+    let zero32 = vdupq_n_s32(0);
+
+    let mut sums = vdupq_n_f32(0.0);
+
+    for i in 0..nb {
+        let boff = i * BLOCK_Q6K_SIZE;
+        if boff + BLOCK_Q6K_SIZE > q6k_data.len() {
+            break;
+        }
+        let d = f16_to_f32(u16::from_le_bytes([
+            q6k_data[boff + 208],
+            q6k_data[boff + 209],
+        ])) * q8k[i].d;
+        // One signed scale per 16 elements.
+        let scales = &q6k_data[boff + 192..boff + 208];
+        let ql = q6k_data.as_ptr().add(boff);
+        let qh = q6k_data.as_ptr().add(boff + 128);
+        let act = q8k[i].qs.as_ptr();
+
+        let mut acc_even = zero32;
+        let mut acc_odd = zero32;
+        for chunk in 0..2usize {
+            let ql_chunk = ql.add(chunk * 64);
+            let qh_chunk = qh.add(chunk * 32);
+            let act_chunk = act.add(chunk * 128);
+            let base = chunk * 8;
+            acc_even = vaddq_s32(
+                acc_even,
+                q6_group_dot::<0>(
+                    ql_chunk,
+                    qh_chunk,
+                    act_chunk,
+                    nibble_mask,
+                    high_mask,
+                    vdupq_n_u8(0),
+                    i32::from(scales[base] as i8),
+                    i32::from(scales[base + 1] as i8),
+                    zero32,
+                ),
+            );
+            acc_odd = vaddq_s32(
+                acc_odd,
+                q6_group_dot::<1>(
+                    ql_chunk,
+                    qh_chunk,
+                    act_chunk.add(32),
+                    nibble_mask,
+                    high_mask,
+                    vdupq_n_u8(2),
+                    i32::from(scales[base + 2] as i8),
+                    i32::from(scales[base + 3] as i8),
+                    zero32,
+                ),
+            );
+            acc_even = vaddq_s32(
+                acc_even,
+                q6_group_dot::<2>(
+                    ql_chunk,
+                    qh_chunk,
+                    act_chunk.add(64),
+                    nibble_mask,
+                    high_mask,
+                    vdupq_n_u8(4),
+                    i32::from(scales[base + 4] as i8),
+                    i32::from(scales[base + 5] as i8),
+                    zero32,
+                ),
+            );
+            acc_odd = vaddq_s32(
+                acc_odd,
+                q6_group_dot::<3>(
+                    ql_chunk,
+                    qh_chunk,
+                    act_chunk.add(96),
+                    nibble_mask,
+                    high_mask,
+                    vdupq_n_u8(6),
+                    i32::from(scales[base + 6] as i8),
+                    i32::from(scales[base + 7] as i8),
+                    zero32,
+                ),
+            );
+        }
+        sums = vfmaq_n_f32(sums, vcvtq_f32_s32(vaddq_s32(acc_even, acc_odd)), d);
+    }
+
+    vaddvq_f32(sums)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ops::quant::{vec_dot_q4k_q8k_scalar, BlockQ8K, BLOCK_Q4K_SIZE};
+    use crate::ops::quant::{
+        vec_dot_q4k_q8k_scalar, vec_dot_q5k_q8k_scalar, vec_dot_q6k_q8k_scalar, BlockQ8K,
+        BLOCK_Q4K_SIZE, BLOCK_Q5K_SIZE, BLOCK_Q6K_SIZE,
+    };
 
     /// Deterministic Q4_K block fixture: random-ish but reproducible
     /// weights with known scales/mins, so a NEON vs scalar mismatch
@@ -255,6 +557,146 @@ mod tests {
         }
         let neon = unsafe { vec_dot_q4k_q8k_neon(&block, &q8k) };
         let scalar = vec_dot_q4k_q8k_scalar(&block, &q8k);
+        let diff = (neon - scalar).abs();
+        let rel = if scalar.abs() > 1e-3 {
+            diff / scalar.abs()
+        } else {
+            diff
+        };
+        assert!(
+            rel < 1e-3,
+            "multi-block: neon={neon} scalar={scalar} rel={rel}"
+        );
+    }
+
+    /// Deterministic Q5_K block fixture. The packed nibbles, the high bits
+    /// and the six-bit scales and minimums all have to be exercised, so the
+    /// fixture uses a pattern that puts a different bit in every group.
+    fn make_q5k_block(seed: u8) -> Vec<u8> {
+        let mut v = vec![0u8; BLOCK_Q5K_SIZE];
+        v[0..2].copy_from_slice(&crate::ops::f32_to_f16(0.7).to_le_bytes());
+        v[2..4].copy_from_slice(&crate::ops::f32_to_f16(0.05).to_le_bytes());
+        // 12 bytes packed scales/mins: the six-bit unpacking has to be
+        // exercised on both the low and the high halves.
+        for i in 0..12 {
+            v[4 + i] = (seed.wrapping_mul(7).wrapping_add(i as u8 * 3)) & 0xff;
+        }
+        // 32 bytes of high bits: one bit per group.
+        for i in 0..32 {
+            v[16 + i] = (seed.wrapping_mul(11).wrapping_add(i as u8 * 5)) & 0xff;
+        }
+        // 128 bytes of packed nibbles.
+        for i in 0..128 {
+            v[48 + i] = (seed.wrapping_mul(13).wrapping_add(i as u8 * 7)) & 0xff;
+        }
+        v
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn q5k_neon_matches_scalar_single_block() {
+        if !std::arch::is_aarch64_feature_detected!("dotprod") {
+            return;
+        }
+        for seed in 0..8u8 {
+            let block = make_q5k_block(seed);
+            let q8k = [make_q8k(seed)];
+            let neon = unsafe { vec_dot_q5k_q8k_neon(&block, &q8k) };
+            let scalar = vec_dot_q5k_q8k_scalar(&block, &q8k);
+            let diff = (neon - scalar).abs();
+            let rel = if scalar.abs() > 1e-3 {
+                diff / scalar.abs()
+            } else {
+                diff
+            };
+            assert!(
+                rel < 1e-3,
+                "seed={seed}: neon={neon} scalar={scalar} rel={rel}"
+            );
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn q5k_neon_matches_scalar_multi_block() {
+        if !std::arch::is_aarch64_feature_detected!("dotprod") {
+            return;
+        }
+        let mut block = Vec::new();
+        let mut q8k = Vec::new();
+        for seed in 0..4u8 {
+            block.extend(make_q5k_block(seed));
+            q8k.push(make_q8k(seed));
+        }
+        let neon = unsafe { vec_dot_q5k_q8k_neon(&block, &q8k) };
+        let scalar = vec_dot_q5k_q8k_scalar(&block, &q8k);
+        let diff = (neon - scalar).abs();
+        let rel = if scalar.abs() > 1e-3 {
+            diff / scalar.abs()
+        } else {
+            diff
+        };
+        assert!(
+            rel < 1e-3,
+            "multi-block: neon={neon} scalar={scalar} rel={rel}"
+        );
+    }
+
+    /// Deterministic Q6_K block fixture: 128 bytes of packed nibbles, 64
+    /// bytes of two-bit high parts, 16 signed scales and the f16 delta.
+    fn make_q6k_block(seed: u8) -> Vec<u8> {
+        let mut v = vec![0u8; BLOCK_Q6K_SIZE];
+        for i in 0..128 {
+            v[i] = (seed.wrapping_mul(7).wrapping_add(i as u8 * 3)) & 0xff;
+        }
+        for i in 0..64 {
+            v[128 + i] = (seed.wrapping_mul(11).wrapping_add(i as u8 * 5)) & 0xff;
+        }
+        for i in 0..16 {
+            v[192 + i] = (seed.wrapping_mul(13).wrapping_add(i as u8 * 7)) as i8 as u8;
+        }
+        v[208..210].copy_from_slice(&crate::ops::f32_to_f16(0.9).to_le_bytes());
+        v
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn q6k_neon_matches_scalar_single_block() {
+        if !std::arch::is_aarch64_feature_detected!("dotprod") {
+            return;
+        }
+        for seed in 0..8u8 {
+            let block = make_q6k_block(seed);
+            let q8k = [make_q8k(seed)];
+            let neon = unsafe { vec_dot_q6k_q8k_neon(&block, &q8k) };
+            let scalar = vec_dot_q6k_q8k_scalar(&block, &q8k);
+            let diff = (neon - scalar).abs();
+            let rel = if scalar.abs() > 1e-3 {
+                diff / scalar.abs()
+            } else {
+                diff
+            };
+            assert!(
+                rel < 1e-3,
+                "seed={seed}: neon={neon} scalar={scalar} rel={rel}"
+            );
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn q6k_neon_matches_scalar_multi_block() {
+        if !std::arch::is_aarch64_feature_detected!("dotprod") {
+            return;
+        }
+        let mut block = Vec::new();
+        let mut q8k = Vec::new();
+        for seed in 0..4u8 {
+            block.extend(make_q6k_block(seed));
+            q8k.push(make_q8k(seed));
+        }
+        let neon = unsafe { vec_dot_q6k_q8k_neon(&block, &q8k) };
+        let scalar = vec_dot_q6k_q8k_scalar(&block, &q8k);
         let diff = (neon - scalar).abs();
         let rel = if scalar.abs() > 1e-3 {
             diff / scalar.abs()

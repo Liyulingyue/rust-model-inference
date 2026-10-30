@@ -111,6 +111,33 @@ of this model from 23.5 min to 11 min and the peak RSS from 5.5 GiB to
 150 MiB, with a byte-identical file. Q5_K's search walks sixteen candidate
 scales against Q4_K's twenty, and it took 20 min.
 
+### CPU and GPU wall clock
+
+The same 4 s of the demo clip on the GB10 (48 SMs, 20 aarch64 cores), one
+transcription, `--threads 8` (the default cap) for the CPU rows:
+
+| Format | CPU | GPU | GPU kernel |
+|---|---|---|---|
+| Q5_K | 11.0 s | 42.6 s | cooperative split-K |
+| Q6_K | 11.9 s | 50.1 s | 8-lane split-K |
+| Q4_K | 10.2 s | 48.0 s | cooperative split-K |
+| Q8_0 | 21.0 s | 32.0 s | cooperative 32-lane dp4a |
+
+The CPU rows use `--cpu` and the GPU rows `--gpu`. On this host the CPU wins
+for every format: Audio8 walks one frame and one token at a time, so the
+GPU never gets a batch to amortize its dispatch over, and a k-quant shader
+also has to unpack five or six bits per weight on top of the multiply. The
+machine's ceiling is far above both columns -- PyTorch replays the same
+projection sequence in fp16 in 3.2 s -- so the gap is in the kernels, not
+in the hardware.
+
+Reaching the GPU at all took fixing the k-quant shaders. `q5_k_matmul.comp`
+decoded the scale and the minimum inside its 256-element loop, staged the
+activation in shared memory only for wide projections, and was the only
+k-quant format without a split-K kernel. Together with the matching NEON
+kernels on the CPU side, that put Q5_K from 258 s to 43 s on the GPU and
+from 40 s to 11 s on the CPU.
+
 F16 keeps the transcript bit-for-bit equivalent to BF16 (the audio embeddings
 agree to 1.3e-6 relative RMS, against 7e-2 for Q8_0) and is about 14 % faster,
 because the BF16 kernel has no NEON path on this host while F16 does. F16 is

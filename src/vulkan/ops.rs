@@ -2583,9 +2583,15 @@ impl<'a> Qwen3Ops<'a> {
         // `push[21]` is the token-row count: the split only pays off for a
         // single row, where the row kernel would give one lane the whole
         // output column.
+        //
+        // The Q5_K split has no column limit. A wide projection does not
+        // need more parallelism -- it has plenty of rows -- but it reads the
+        // same bytes per byte, so it pays the same latency for the same
+        // traffic.
         if matches!(pipeline, Q4_K_MATMUL | Q5_K_MATMUL) && push.len() == 26 && push[21] == 1 {
             let columns = push[5].max(push[8]).max(push[11]) as usize;
-            if columns <= 4096 {
+            let wide_is_fine = pipeline == Q5_K_MATMUL;
+            if columns <= 4096 || wide_is_fine {
                 if let Ok(grid) = matmul_dispatch(
                     columns.div_ceil(8),
                     1,
