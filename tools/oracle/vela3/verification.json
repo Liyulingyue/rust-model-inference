@@ -1,0 +1,4647 @@
+{
+  "verified_at_utc": "2026-10-30T08:38:23.540182+00:00",
+  "environment": {
+    "platform": "macOS arm64",
+    "rust": "1.98.1",
+    "python": "3.12.13",
+    "torch": "2.9.1",
+    "transformers": "5.19.0",
+    "torchvision": "0.24.1",
+    "numpy": "2.5.3",
+    "pillow": "13.0.0",
+    "cpu_threads": 4
+  },
+  "scope": "Native Rust CPU safetensors System One; no Python or external acceleration library in runtime",
+  "reference_manifest": {
+    "path": "tools/oracle/vela3/snapshots.json",
+    "sha256": "253b4f1d221d1551ef5fa1a0f39e8ee1d85e86783c7cf32d0d120d72f3707d47"
+  },
+  "comparison_policy": {
+    "exact": [
+      "token IDs",
+      "checkpoint order and shapes",
+      "greedy token IDs",
+      "question routing",
+      "choice strings",
+      "span offsets",
+      "box coordinates",
+      "usage"
+    ],
+    "floating": "Pointwise or recorded BF16/scaled error gates; no bitwise claim for SIMD reductions, BF16, activation approximations, softmax or probabilities."
+  },
+  "system_one": {
+    "lite": {
+      "passed": true,
+      "atol": 0.01,
+      "rtol": 0.01,
+      "floats_compared": 33,
+      "max_absolute_error": 0.004633518871616504,
+      "largest_errors": [
+        {
+          "path": "response.answers.score.probabilities.1",
+          "absolute_error": 0.004633518871616504
+        },
+        {
+          "path": "response.answers.evidence.spans[0].score",
+          "absolute_error": 0.004345033380886987
+        },
+        {
+          "path": "response.answers.default_evidence.spans[0].score",
+          "absolute_error": 0.004345033380886987
+        },
+        {
+          "path": "response.answers.score.confidence",
+          "absolute_error": 0.0036418920186244153
+        },
+        {
+          "path": "response.answers.score.probabilities.0",
+          "absolute_error": 0.003213210783729492
+        },
+        {
+          "path": "response.answers.open.spans[0].score",
+          "absolute_error": 0.00269521432858999
+        },
+        {
+          "path": "response.answers.default_open.spans[0].score",
+          "absolute_error": 0.00269521432858999
+        },
+        {
+          "path": "response.answers.default_relation.spans[0].score",
+          "absolute_error": 0.002571223119759991
+        },
+        {
+          "path": "response.answers.score.score",
+          "absolute_error": 0.0017929026958424243
+        },
+        {
+          "path": "response.answers.score.probabilities.2",
+          "absolute_error": 0.0014203080878870122
+        }
+      ],
+      "errors": [],
+      "questions": 14,
+      "usage": {
+        "input_tokens": 524,
+        "output_tokens": 0
+      },
+      "input": "tools/oracle/vela3/requests/lite.json"
+    },
+    "unicode": {
+      "passed": true,
+      "atol": 0.01,
+      "rtol": 0.01,
+      "floats_compared": 6,
+      "max_absolute_error": 0.004669372669223293,
+      "largest_errors": [
+        {
+          "path": "response.answers.kind.confidence",
+          "absolute_error": 0.004669372669223293
+        },
+        {
+          "path": "response.answers.entities.spans[0].score",
+          "absolute_error": 0.0023248202416792374
+        },
+        {
+          "path": "response.answers.kind.probabilities.人物",
+          "absolute_error": 0.0014321398614393077
+        },
+        {
+          "path": "response.answers.kind.probabilities.公司",
+          "absolute_error": 0.001432139861439266
+        },
+        {
+          "path": "response.answers.entities.spans[1].score",
+          "absolute_error": 0.0003024237461261847
+        },
+        {
+          "path": "response.answers.entities.threshold",
+          "absolute_error": 0.0
+        }
+      ],
+      "errors": [],
+      "questions": 2,
+      "usage": {
+        "input_tokens": 121,
+        "output_tokens": 0
+      },
+      "input": "tools/oracle/vela3/requests/unicode.json"
+    },
+    "fast_vision_cli": {
+      "passed": true,
+      "atol": 0.0005,
+      "rtol": 0.0005,
+      "floats_compared": 2,
+      "max_absolute_error": 2.384185791015625e-07,
+      "largest_errors": [
+        {
+          "path": "response.answers.q.probabilities.receipt",
+          "absolute_error": 2.384185791015625e-07
+        },
+        {
+          "path": "response.answers.q.probabilities.landscape",
+          "absolute_error": 1.601874828338623e-07
+        }
+      ],
+      "errors": []
+    },
+    "fast_threshold_regression": {
+      "passed": true,
+      "atol": 0.0005,
+      "rtol": 0.0005,
+      "floats_compared": 9,
+      "max_absolute_error": 5.960464477539063e-08,
+      "largest_errors": [
+        {
+          "path": "response.answers.threshold_string.spans[0].probability",
+          "absolute_error": 5.960464477539063e-08
+        },
+        {
+          "path": "response.answers.threshold_negative.spans[0].probability",
+          "absolute_error": 5.960464477539063e-08
+        },
+        {
+          "path": "response.answers.threshold_string.spans[0].score",
+          "absolute_error": 4.099297201687335e-08
+        },
+        {
+          "path": "response.answers.threshold_negative.spans[0].score",
+          "absolute_error": 1.3815339094946921e-08
+        },
+        {
+          "path": "response.answers.threshold_string.spans[1].score",
+          "absolute_error": 5.423431925777322e-09
+        },
+        {
+          "path": "response.answers.threshold_string.spans[1].probability",
+          "absolute_error": 0.0
+        },
+        {
+          "path": "response.answers.threshold_string.threshold",
+          "absolute_error": 0.0
+        },
+        {
+          "path": "response.answers.threshold_negative.threshold",
+          "absolute_error": 0.0
+        },
+        {
+          "path": "response.answers.threshold_above_one.threshold",
+          "absolute_error": 0.0
+        }
+      ],
+      "errors": []
+    },
+    "fast_cli": {
+      "passed": true,
+      "atol": 0.0005,
+      "rtol": 0.0005,
+      "floats_compared": 52,
+      "max_absolute_error": 1.0851917867649163e-06,
+      "largest_errors": [
+        {
+          "path": "response.answers.noul.noul",
+          "absolute_error": 1.0851917867649163e-06
+        },
+        {
+          "path": "response.answers.decision.probabilities.human",
+          "absolute_error": 6.820031950294236e-07
+        },
+        {
+          "path": "response.answers.decision.probabilities.company",
+          "absolute_error": 6.820031949739125e-07
+        },
+        {
+          "path": "response.answers.feedback.probabilities.SAT",
+          "absolute_error": 4.784328839213536e-07
+        },
+        {
+          "path": "response.answers.feedback.probabilities.WRONG_ANSWER",
+          "absolute_error": 4.28031035282217e-07
+        },
+        {
+          "path": "response.answers.halu.spans[0].probability",
+          "absolute_error": 3.948807716369629e-07
+        },
+        {
+          "path": "response.answers.halu.spans[0].score",
+          "absolute_error": 3.888573311891519e-07
+        },
+        {
+          "path": "response.answers.entities.spans[0].score",
+          "absolute_error": 2.652745071385354e-07
+        },
+        {
+          "path": "response.answers.grouped_attack.probabilities.jailbreak",
+          "absolute_error": 2.4996127503951193e-07
+        },
+        {
+          "path": "response.answers.grouped_attack.probabilities.benign",
+          "absolute_error": 2.4996127501175636e-07
+        }
+      ],
+      "errors": [],
+      "questions": 18,
+      "usage": {
+        "input_tokens": 1651,
+        "output_tokens": 0
+      },
+      "wall_seconds_approx": 217.3
+    },
+    "fast_criteria_regression": {
+      "passed": true,
+      "atol": 0.0005,
+      "rtol": 0.0005,
+      "floats_compared": 10,
+      "max_absolute_error": 4.7618807730298585e-07,
+      "largest_errors": [
+        {
+          "path": "response.answers.ordinary_object.probabilities.human",
+          "absolute_error": 4.7618807730298585e-07
+        },
+        {
+          "path": "response.answers.ordinary_object.probabilities.company",
+          "absolute_error": 4.7618807730298585e-07
+        },
+        {
+          "path": "response.answers.router_duplicate.probabilities.benign",
+          "absolute_error": 1.1920621706407175e-07
+        },
+        {
+          "path": "response.answers.router_duplicate.probabilities.jailbreak",
+          "absolute_error": 1.192062170085606e-07
+        },
+        {
+          "path": "response.answers.router_unique.probabilities.benign",
+          "absolute_error": 4.470232328745993e-08
+        },
+        {
+          "path": "response.answers.router_unique.probabilities.jailbreak",
+          "absolute_error": 4.470232328745993e-08
+        },
+        {
+          "path": "response.answers.ordinary_array.probabilities.human",
+          "absolute_error": 0.0
+        },
+        {
+          "path": "response.answers.ordinary_array.probabilities.company",
+          "absolute_error": 0.0
+        },
+        {
+          "path": "response.answers.ordinary_duplicate.probabilities.human",
+          "absolute_error": 0.0
+        },
+        {
+          "path": "response.answers.ordinary_duplicate.probabilities.company",
+          "absolute_error": 0.0
+        }
+      ],
+      "errors": [],
+      "questions": 6,
+      "usage": {
+        "input_tokens": 192,
+        "output_tokens": 0
+      },
+      "red_green": true
+    },
+    "flash_cli": {
+      "passed": true,
+      "atol": 0.01,
+      "rtol": 0.01,
+      "floats_compared": 7,
+      "max_absolute_error": 0.0034346127500579637,
+      "largest_errors": [
+        {
+          "path": "response.answers.choice.confidence",
+          "absolute_error": 0.0034346127500579637
+        },
+        {
+          "path": "response.answers.choice.probabilities.person",
+          "absolute_error": 0.000821892786816325
+        },
+        {
+          "path": "response.answers.choice.probabilities.company",
+          "absolute_error": 0.0008218927868162904
+        },
+        {
+          "path": "response.answers.noul.noul",
+          "absolute_error": 0.00014691582246573187
+        },
+        {
+          "path": "response.answers.entities.spans[1].score",
+          "absolute_error": 0.00012663512385241438
+        },
+        {
+          "path": "response.answers.entities.spans[0].score",
+          "absolute_error": 0.00012215192127773555
+        },
+        {
+          "path": "response.answers.entities.threshold",
+          "absolute_error": 0.0
+        }
+      ],
+      "errors": [],
+      "questions": 3,
+      "usage": {
+        "input_tokens": 198,
+        "output_tokens": 0
+      }
+    },
+    "fast_unicode_threshold_regression": {
+      "passed": true,
+      "atol": 0.0005,
+      "rtol": 0.0005,
+      "floats_compared": 28,
+      "max_absolute_error": 5.960464477539063e-08,
+      "largest_errors": [
+        {
+          "path": "response.answers.fullwidth.spans[1].probability",
+          "absolute_error": 5.960464477539063e-08
+        },
+        {
+          "path": "response.answers.arabic.spans[1].probability",
+          "absolute_error": 5.960464477539063e-08
+        },
+        {
+          "path": "response.answers.mathematical.spans[1].probability",
+          "absolute_error": 5.960464477539063e-08
+        },
+        {
+          "path": "response.answers.underscores.spans[1].probability",
+          "absolute_error": 5.960464477539063e-08
+        },
+        {
+          "path": "response.answers.fullwidth.spans[1].score",
+          "absolute_error": 4.7822231730165754e-08
+        },
+        {
+          "path": "response.answers.arabic.spans[1].score",
+          "absolute_error": 4.7822231730165754e-08
+        },
+        {
+          "path": "response.answers.mathematical.spans[1].score",
+          "absolute_error": 4.7822231730165754e-08
+        },
+        {
+          "path": "response.answers.underscores.spans[1].score",
+          "absolute_error": 4.7822231730165754e-08
+        },
+        {
+          "path": "response.answers.exponent.spans[0].score",
+          "absolute_error": 1.8728593897954227e-08
+        },
+        {
+          "path": "response.answers.false.spans[0].score",
+          "absolute_error": 1.8728593897954227e-08
+        }
+      ],
+      "errors": [],
+      "questions": 9,
+      "usage": {
+        "input_tokens": 128,
+        "output_tokens": 0
+      },
+      "red_green": true,
+      "fixture": "tools/oracle/vela3/requests/fast-thresholds.json"
+    },
+    "mini_cli": {
+      "fixture": "tools/oracle/vela3/requests/mini.json",
+      "oracle": ".codex/vela3/mini-request-oracle.json",
+      "native": ".codex/vela3/mini-request-native.json",
+      "comparison": {
+        "passed": true,
+        "atol": 0.01,
+        "rtol": 0.01,
+        "floats_compared": 19,
+        "max_absolute_error": 0.007681775732036322,
+        "largest_errors": [
+          {
+            "path": "response.answers.intent.confidence",
+            "absolute_error": 0.007681775732036322
+          },
+          {
+            "path": "response.answers.choice.confidence",
+            "absolute_error": 0.003826841582221907
+          },
+          {
+            "path": "response.answers.intent.probabilities.general_quirky",
+            "absolute_error": 0.0034840581857933373
+          },
+          {
+            "path": "response.answers.intent.probabilities.qa_factoid",
+            "absolute_error": 0.0034840581857933095
+          },
+          {
+            "path": "response.answers.opt_in.confidence",
+            "absolute_error": 0.0017391116898010095
+          },
+          {
+            "path": "response.answers.pii.spans[0].score",
+            "absolute_error": 0.0008221101369422779
+          },
+          {
+            "path": "response.answers.choice.probabilities.person",
+            "absolute_error": 0.0006642773113498812
+          },
+          {
+            "path": "response.answers.choice.probabilities.company",
+            "absolute_error": 0.0006642773113498257
+          },
+          {
+            "path": "response.answers.domain.probabilities.business",
+            "absolute_error": 0.0005358457565307617
+          },
+          {
+            "path": "response.answers.domain.probabilities.other",
+            "absolute_error": 0.0005358457565307617
+          }
+        ],
+        "errors": []
+      },
+      "contract": {
+        "passed": true,
+        "errors": [],
+        "unicode_codepoints": 36,
+        "unicode_utf8_bytes": 53,
+        "span_counts": {
+          "oracle": {
+            "ner_auto": 1,
+            "relation": 1,
+            "pii": 1
+          },
+          "native": {
+            "ner_auto": 1,
+            "relation": 1,
+            "pii": 1
+          }
+        },
+        "observed_adapters": [
+          "decision",
+          "decision_df",
+          "decision_optin",
+          "ner",
+          "relation",
+          "span"
+        ],
+        "definition_generations": [
+          {
+            "writer": "base",
+            "prompts": [
+              "You are writing annotation guidelines for named entity recognition.\nThe full label set is: person.\nDefine the entity type \"person\" in one short sentence: what kind of text span it covers. Reply with the definition only."
+            ],
+            "definitions": [
+              "The label \"person\" covers text spans that refer to human individuals."
+            ]
+          }
+        ],
+        "threshold_zero_fixture": true,
+        "limitations": "Threshold zero exercises nonempty span decoding and Unicode offsets; it does not measure extraction quality."
+      },
+      "decision_token_lengths": {
+        "choice": 108,
+        "noul": 110,
+        "intent": 132,
+        "domain": 113,
+        "opt_in": 108
+      },
+      "span_token_lengths": [
+        116,
+        102,
+        104
+      ],
+      "usage": {
+        "input_tokens": 571,
+        "output_tokens": 0
+      },
+      "native_usage": {
+        "input_tokens": 571,
+        "output_tokens": 0
+      }
+    },
+    "turbo_cli": {
+      "fixture": "tools/oracle/vela3/requests/turbo.json",
+      "fixture_sha256": "0af84e2256a242af298952d61cfc3e93d10f85fc12178383bd940be3d13d5446",
+      "oracle": ".codex/vela3/turbo-request-oracle.json",
+      "native": ".codex/vela3/turbo-request-native-fixed.json",
+      "comparison": {
+        "passed": true,
+        "atol": 0.01,
+        "rtol": 0.01,
+        "floats_compared": 18,
+        "max_absolute_error": 0.005646099766972057,
+        "largest_errors": [
+          {
+            "path": "response.answers.choice.confidence",
+            "absolute_error": 0.005646099766972057
+          },
+          {
+            "path": "response.answers.domain.probabilities.business",
+            "absolute_error": 0.003058771779568814
+          },
+          {
+            "path": "response.answers.domain.probabilities.other",
+            "absolute_error": 0.003058771779568814
+          },
+          {
+            "path": "response.answers.domain.confidence",
+            "absolute_error": 0.0027676491023139738
+          },
+          {
+            "path": "response.answers.intent.confidence",
+            "absolute_error": 0.0018551101962624994
+          },
+          {
+            "path": "response.answers.ner_names.spans[0].score",
+            "absolute_error": 0.0012800850801012315
+          },
+          {
+            "path": "response.answers.choice.probabilities.person",
+            "absolute_error": 0.0011861755432507337
+          },
+          {
+            "path": "response.answers.choice.probabilities.company",
+            "absolute_error": 0.0011861755432507337
+          },
+          {
+            "path": "response.answers.relation.spans[0].score",
+            "absolute_error": 0.00035006957726085863
+          },
+          {
+            "path": "response.answers.intent.probabilities.qa_factoid",
+            "absolute_error": 0.00029078641880611426
+          }
+        ],
+        "errors": []
+      },
+      "usage_regression": {
+        "before": {
+          "passed": false,
+          "atol": 0.01,
+          "rtol": 0.01,
+          "floats_compared": 18,
+          "max_absolute_error": 0.005646099766972057,
+          "largest_errors": [
+            {
+              "path": "response.answers.choice.confidence",
+              "absolute_error": 0.005646099766972057
+            },
+            {
+              "path": "response.answers.domain.probabilities.business",
+              "absolute_error": 0.003058771779568814
+            },
+            {
+              "path": "response.answers.domain.probabilities.other",
+              "absolute_error": 0.003058771779568814
+            },
+            {
+              "path": "response.answers.domain.confidence",
+              "absolute_error": 0.0027676491023139738
+            },
+            {
+              "path": "response.answers.intent.confidence",
+              "absolute_error": 0.0018551101962624994
+            },
+            {
+              "path": "response.answers.ner_names.spans[0].score",
+              "absolute_error": 0.0012800850801012315
+            },
+            {
+              "path": "response.answers.choice.probabilities.person",
+              "absolute_error": 0.0011861755432507337
+            },
+            {
+              "path": "response.answers.choice.probabilities.company",
+              "absolute_error": 0.0011861755432507337
+            },
+            {
+              "path": "response.answers.relation.spans[0].score",
+              "absolute_error": 0.00035006957726085863
+            },
+            {
+              "path": "response.answers.intent.probabilities.qa_factoid",
+              "absolute_error": 0.00029078641880611426
+            }
+          ],
+          "errors": [
+            {
+              "path": "response.usage.input_tokens",
+              "reason": "exact value differs",
+              "oracle": 510,
+              "native": 463
+            }
+          ]
+        },
+        "after_full_cli_run": {
+          "command": [
+            "target/release-fast/vela3",
+            "--model",
+            "models/vela3-turbo",
+            "--base-model",
+            "models/d3-turbo/pinned",
+            "--request",
+            "tools/oracle/vela3/requests/turbo.json",
+            "--threads",
+            "8"
+          ],
+          "binary_sha256": "3cfb00765ac56d5d4e784cc6ca46de0b78d59fb51e295d1bc65c180115aadf05",
+          "request_sha256": "0af84e2256a242af298952d61cfc3e93d10f85fc12178383bd940be3d13d5446",
+          "native_exit_code": 0,
+          "wall_seconds": 1064.9117390000029,
+          "comparison_command": [
+            "/Users/gouzi/.codex/worktrees/a06a/rust-model-inference/.venv/bin/python",
+            "tools/oracle/vela3/compare_requests.py",
+            ".codex/vela3/turbo-request-oracle.json",
+            ".codex/vela3/turbo-request-native-fixed.json",
+            "--atol",
+            "0.01",
+            "--rtol",
+            "0.01",
+            "--out",
+            ".codex/vela3/turbo-request-comparison-fixed.json"
+          ],
+          "comparison_exit_code": 0
+        },
+        "portable_test": "models::vela3::decoder::tests::turbo_usage_counts_shared_state_and_extra_adapter_passes"
+      },
+      "contract": {
+        "passed": true,
+        "questions": 8,
+        "observed_adapters": [
+          "decision",
+          "decision_df",
+          "ner",
+          "relation",
+          "span"
+        ],
+        "span_counts": {
+          "oracle": {
+            "relation": 1,
+            "pii": 1,
+            "ner_names": 1,
+            "ner_defined": 1
+          },
+          "native": {
+            "relation": 1,
+            "pii": 1,
+            "ner_names": 1,
+            "ner_defined": 1
+          }
+        },
+        "unicode_codepoints": 36,
+        "unicode_utf8_bytes": 53,
+        "definition_generations": [
+          {
+            "writer": "names",
+            "prompts": [
+              "You are writing annotation guidelines for named entity recognition.\nThe full label set is: person.\nDefine the entity type \"person\" in one short sentence: what kind of text span it covers. Reply with the definition only."
+            ],
+            "definitions": [
+              null
+            ]
+          }
+        ],
+        "threshold_zero_fixture": true,
+        "limitations": "Zero thresholds verify decoding and Unicode offsets, not extraction quality."
+      },
+      "decision_token_lengths": {
+        "choice": 108,
+        "noul": 110,
+        "intent": 132,
+        "domain": 113
+      },
+      "official_state_counts": {
+        "official_format": "d3-format pinned da17b5d0",
+        "decision_rows": {
+          "choice": {
+            "prompt_tokens": 108,
+            "state_tokens": 66
+          },
+          "noul": {
+            "prompt_tokens": 110,
+            "state_tokens": 66
+          },
+          "intent": {
+            "prompt_tokens": 132,
+            "state_tokens": 66
+          },
+          "domain": {
+            "prompt_tokens": 113,
+            "state_tokens": 66
+          }
+        },
+        "exact_expected_usage": 510
+      },
+      "span_token_lengths": [
+        102,
+        104,
+        101,
+        105
+      ],
+      "usage": {
+        "input_tokens": 510,
+        "output_tokens": 0
+      },
+      "native_usage": {
+        "input_tokens": 510,
+        "output_tokens": 0
+      },
+      "token_ids_and_word_label_positions_exact": true
+    }
+  },
+  "real_span_heads": {
+    "passed": true,
+    "packages": 4,
+    "heads": 15,
+    "max_absolute_error": 6.67572e-06,
+    "atol": 3e-05,
+    "rtol": 2e-05
+  },
+  "d3": {
+    "tiny_causal_four_steps": [
+      {
+        "adapter": null,
+        "passed": true,
+        "max_abs": 4.76837158203125e-07,
+        "max_rmse": 2.1713468356665544e-07,
+        "min_cosine": 0.9999998807907104,
+        "logits": {
+          "name": "vela3.d3.generation_logits",
+          "layer": null,
+          "count": 8,
+          "passed": true,
+          "max_abs": 5.960464477539063e-08,
+          "rmse": 3.7990655954445174e-08,
+          "cosine": 1.0,
+          "oracle_argmax": 0,
+          "native_argmax": 0
+        },
+        "generated_token_ids": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    ],
+    "real_lite_f32": {
+      "passed": true,
+      "profile": "pointwise",
+      "atol": 0.0005,
+      "rtol": 0.0001,
+      "envelope": null,
+      "checkpoints": 75,
+      "max_absolute_error": 0.00010395050048828125,
+      "max_rmse": 8.916556907934137e-06,
+      "first_failed": null,
+      "logits": [
+        {
+          "name": "vela3.d3.logits",
+          "layer": null,
+          "count": 3,
+          "passed": true,
+          "max_abs": 1.1920928955078125e-05,
+          "rmse": 8.916556907934137e-06,
+          "cosine": 0.9999998807907104,
+          "oracle_argmax": 0,
+          "native_argmax": 0
+        }
+      ]
+    },
+    "real_lite_bf16_causal_four_steps": {
+      "passed": true,
+      "profile": "bf16",
+      "atol": 0.1,
+      "rtol": 0.02,
+      "envelope": {
+        "max_abs": 0.75,
+        "max_rmse": 0.06,
+        "min_cosine": 0.9995
+      },
+      "checkpoints": 300,
+      "max_absolute_error": 0.25,
+      "max_rmse": 0.025672798976302147,
+      "first_failed": null,
+      "logits": [
+        {
+          "name": "vela3.d3.generation_logits",
+          "layer": null,
+          "count": 248320,
+          "passed": true,
+          "max_abs": 0.0703125,
+          "rmse": 0.01336448173969984,
+          "cosine": 0.9999594688415527,
+          "oracle_argmax": 2838,
+          "native_argmax": 2838
+        },
+        {
+          "name": "vela3.d3.generation_logits",
+          "layer": null,
+          "count": 248320,
+          "passed": true,
+          "max_abs": 0.0625,
+          "rmse": 0.011432548053562641,
+          "cosine": 0.9999711513519287,
+          "oracle_argmax": 682,
+          "native_argmax": 682
+        },
+        {
+          "name": "vela3.d3.generation_logits",
+          "layer": null,
+          "count": 248320,
+          "passed": true,
+          "max_abs": 0.0625,
+          "rmse": 0.01211400143802166,
+          "cosine": 0.999977707862854,
+          "oracle_argmax": 264,
+          "native_argmax": 264
+        },
+        {
+          "name": "vela3.d3.generation_logits",
+          "layer": null,
+          "count": 248320,
+          "passed": true,
+          "max_abs": 0.0625,
+          "rmse": 0.01319020614027977,
+          "cosine": 0.9999815225601196,
+          "oracle_argmax": 220,
+          "native_argmax": 220
+        }
+      ]
+    },
+    "real_lite_image_bf16": {
+      "passed": false,
+      "profile": "bf16",
+      "atol": 0.1,
+      "rtol": 0.02,
+      "envelope": {
+        "max_abs": 0.75,
+        "max_rmse": 0.06,
+        "min_cosine": 0.9995
+      },
+      "checkpoints": 77,
+      "max_absolute_error": 2.625,
+      "max_rmse": 0.10997476428747177,
+      "first_failed": {
+        "name": "vela3.d3.vision.projected",
+        "layer": null,
+        "count": 71680,
+        "passed": false,
+        "max_abs": 0.24221444129943848,
+        "rmse": 0.005797247402369976,
+        "cosine": 0.9994217753410339
+      },
+      "logits": [
+        {
+          "name": "vela3.d3.logits",
+          "layer": null,
+          "count": 3,
+          "passed": true,
+          "max_abs": 0.0846102237701416,
+          "rmse": 0.05362324416637421,
+          "cosine": 0.9999609589576721,
+          "oracle_argmax": 0,
+          "native_argmax": 0
+        }
+      ]
+    },
+    "real_lite_image_f32": {
+      "passed": false,
+      "profile": "pointwise",
+      "atol": 0.0005,
+      "rtol": 0.0001,
+      "envelope": null,
+      "checkpoints": 77,
+      "max_absolute_error": 0.11217689514160156,
+      "max_rmse": 0.005110466852784157,
+      "first_failed": {
+        "name": "vela3.d3.vision.projected",
+        "layer": null,
+        "count": 71680,
+        "passed": false,
+        "max_abs": 0.005106449127197266,
+        "rmse": 0.00020364268857520074,
+        "cosine": 0.9999994039535522
+      },
+      "logits": [
+        {
+          "name": "vela3.d3.logits",
+          "layer": null,
+          "count": 3,
+          "passed": true,
+          "max_abs": 0.0005855560302734375,
+          "rmse": 0.0004785736673511565,
+          "cosine": 1.0000001192092896,
+          "oracle_argmax": 0,
+          "native_argmax": 0
+        }
+      ]
+    },
+    "turbo_prefix_synthetic": {
+      "scope": "synthetic prefix graph; actual turbo 6:1 GQA and 3:1 delta-head grouping; base and span LoRA",
+      "gqa_ratio": 6,
+      "delta_value_to_key_head_ratio": 3,
+      "f32": [
+        {
+          "adapter": null,
+          "passed": true,
+          "max_abs": 2.384185791015625e-07,
+          "max_rmse": 1.0215721601980476e-07,
+          "min_cosine": 0.9999998807907104,
+          "logits": {
+            "name": "vela3.d3.logits",
+            "layer": null,
+            "count": 3,
+            "passed": true,
+            "max_abs": 2.9802322387695312e-08,
+            "rmse": 1.9237315740383565e-08,
+            "cosine": 1.0,
+            "oracle_argmax": 2,
+            "native_argmax": 2
+          }
+        },
+        {
+          "adapter": "span",
+          "passed": true,
+          "max_abs": 3.5762786865234375e-07,
+          "max_rmse": 1.3548316246669856e-07,
+          "min_cosine": 0.9999998807907104,
+          "logits": {
+            "name": "vela3.d3.logits",
+            "layer": null,
+            "count": 3,
+            "passed": true,
+            "max_abs": 2.9802322387695312e-08,
+            "rmse": 2.5809567816281742e-08,
+            "cosine": 1.0000001192092896,
+            "oracle_argmax": 2,
+            "native_argmax": 2
+          }
+        }
+      ],
+      "bf16": [
+        {
+          "adapter": null,
+          "passed": true,
+          "max_abs": 0.0,
+          "max_rmse": 0.0,
+          "min_cosine": 0.9999998807907104,
+          "logits": {
+            "name": "vela3.d3.logits",
+            "layer": null,
+            "count": 3,
+            "passed": true,
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "cosine": 1.0,
+            "oracle_argmax": 2,
+            "native_argmax": 2
+          }
+        },
+        {
+          "adapter": "span",
+          "passed": true,
+          "max_abs": 0.00390625,
+          "max_rmse": 0.0011276372242718935,
+          "min_cosine": 0.9999974370002747,
+          "logits": {
+            "name": "vela3.d3.logits",
+            "layer": null,
+            "count": 3,
+            "passed": true,
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "cosine": 1.0,
+            "oracle_argmax": 2,
+            "native_argmax": 2
+          }
+        }
+      ],
+      "harness_sha256": "fa390b5e67743fb2e4684ced588e0b606716e24d6ce7bf8663cf17ffb4fd7b66",
+      "comparison_policy": {
+        "float32": {
+          "profile": "pointwise",
+          "atol": 2e-06,
+          "rtol": 1e-06
+        },
+        "bfloat16": {
+          "profile": "pointwise",
+          "atol": 0.01,
+          "rtol": 0.01
+        }
+      },
+      "reproducing_commands": [
+        ".venv/bin/python tools/oracle/vela3/d3_oracle.py suite --native .codex/vela3/bin/vela3-parity --base .codex/vela3/tiny-turbo-groups-f32 --vela models/vela3-turbo --synthetic --dtype float32 --state-tokens 2 --adapters span --atol 2e-6 --rtol 1e-6 --out .codex/vela3/tiny-turbo-groups-f32-suite",
+        ".venv/bin/python tools/oracle/vela3/d3_oracle.py suite --native .codex/vela3/bin/vela3-parity --base .codex/vela3/tiny-turbo-groups-bf16 --vela models/vela3-turbo --synthetic --dtype bfloat16 --state-tokens 2 --adapters span --profile pointwise --atol 0.01 --rtol 0.01 --out .codex/vela3/tiny-turbo-groups-bf16-suite"
+      ]
+    },
+    "real_flash_bf16": {
+      "passed": false,
+      "routes": {
+        "base": {
+          "passed": false,
+          "numeric_checkpoints": 99,
+          "passed_checkpoints": 88,
+          "profile": "bf16",
+          "atol": 0.1,
+          "rtol": 0.02,
+          "envelope": {
+            "max_abs": 0.75,
+            "max_rmse": 0.06,
+            "min_cosine": 0.9995
+          },
+          "max_abs": 1.5,
+          "max_activation_rmse": 0.047365956008434296,
+          "min_activation_cosine": 0.9999290108680725,
+          "first_failed_checkpoint": {
+            "name": "vela3.d3.layer",
+            "layer": 26,
+            "count": 24576,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.021890515461564064,
+            "cosine": 0.9999719858169556
+          },
+          "logits": [
+            {
+              "name": "vela3.d3.logits",
+              "layer": null,
+              "count": 3,
+              "passed": true,
+              "max_abs": 0.012209653854370117,
+              "rmse": 0.008420641534030437,
+              "cosine": 0.9999985694885254,
+              "oracle_argmax": 0,
+              "native_argmax": 0
+            }
+          ]
+        },
+        "span": {
+          "passed": false,
+          "numeric_checkpoints": 99,
+          "passed_checkpoints": 82,
+          "profile": "bf16",
+          "atol": 0.1,
+          "rtol": 0.02,
+          "envelope": {
+            "max_abs": 0.75,
+            "max_rmse": 0.06,
+            "min_cosine": 0.9995
+          },
+          "max_abs": 2.5,
+          "max_activation_rmse": 0.04526107758283615,
+          "min_activation_cosine": 0.9999183416366577,
+          "first_failed_checkpoint": {
+            "name": "vela3.d3.layer",
+            "layer": 23,
+            "count": 24576,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.02163992077112198,
+            "cosine": 0.9999710917472839
+          },
+          "logits": [
+            {
+              "name": "vela3.d3.logits",
+              "layer": null,
+              "count": 3,
+              "passed": true,
+              "max_abs": 0.012505412101745605,
+              "rmse": 0.007666591554880142,
+              "cosine": 0.9999926686286926,
+              "oracle_argmax": 0,
+              "native_argmax": 0
+            }
+          ]
+        },
+        "decision": {
+          "passed": false,
+          "numeric_checkpoints": 99,
+          "passed_checkpoints": 87,
+          "profile": "bf16",
+          "atol": 0.1,
+          "rtol": 0.02,
+          "envelope": {
+            "max_abs": 0.75,
+            "max_rmse": 0.06,
+            "min_cosine": 0.9995
+          },
+          "max_abs": 4.0,
+          "max_activation_rmse": 0.04554152116179466,
+          "min_activation_cosine": 0.9998872876167297,
+          "first_failed_checkpoint": {
+            "name": "vela3.d3.layer",
+            "layer": 26,
+            "count": 24576,
+            "passed": false,
+            "max_abs": 2.0,
+            "rmse": 0.02355007454752922,
+            "cosine": 0.9999719262123108
+          },
+          "logits": [
+            {
+              "name": "vela3.d3.logits",
+              "layer": null,
+              "count": 3,
+              "passed": true,
+              "max_abs": 0.07795143127441406,
+              "rmse": 0.07445602864027023,
+              "cosine": 0.9999451041221619,
+              "oracle_argmax": 0,
+              "native_argmax": 0
+            }
+          ]
+        }
+      },
+      "note": "Fixed BF16 activation max-absolute gate fails; short-trace logits and argmax pass. Full three-question public System One comparison passes. FP32 diagnostics pass all 297 numeric checkpoints; the responsible BF16 operator has not been isolated."
+    },
+    "real_flash_bf16_grafted_four_steps": {
+      "passed": false,
+      "numeric_checkpoints": 396,
+      "passed_checkpoints": 344,
+      "profile": "bf16",
+      "atol": 0.1,
+      "rtol": 0.02,
+      "envelope": {
+        "max_abs": 0.75,
+        "max_rmse": 0.06,
+        "min_cosine": 0.9995
+      },
+      "max_abs": 2.0,
+      "max_activation_rmse": 0.041997507214546204,
+      "min_activation_cosine": 0.9999337196350098,
+      "first_failed_checkpoint": {
+        "name": "vela3.d3.layer",
+        "layer": 25,
+        "count": 24576,
+        "passed": false,
+        "max_abs": 1.0,
+        "rmse": 0.01922256499528885,
+        "cosine": 0.9999490976333618
+      },
+      "logits": [
+        {
+          "name": "vela3.d3.generation_logits",
+          "layer": null,
+          "count": 248320,
+          "passed": true,
+          "max_abs": 0.09375,
+          "rmse": 0.018923241645097733,
+          "cosine": 0.9999823570251465,
+          "oracle_argmax": 2838,
+          "native_argmax": 2838
+        },
+        {
+          "name": "vela3.d3.generation_logits",
+          "layer": null,
+          "count": 248320,
+          "passed": true,
+          "max_abs": 0.09375,
+          "rmse": 0.01626369170844555,
+          "cosine": 0.9999803304672241,
+          "oracle_argmax": 369,
+          "native_argmax": 369
+        },
+        {
+          "name": "vela3.d3.generation_logits",
+          "layer": null,
+          "count": 248320,
+          "passed": true,
+          "max_abs": 0.09375,
+          "rmse": 0.01934054121375084,
+          "cosine": 0.9999747276306152,
+          "oracle_argmax": 264,
+          "native_argmax": 264
+        },
+        {
+          "name": "vela3.d3.generation_logits",
+          "layer": null,
+          "count": 248320,
+          "passed": true,
+          "max_abs": 0.15625,
+          "rmse": 0.03153984993696213,
+          "cosine": 0.9999749064445496,
+          "oracle_argmax": 4314,
+          "native_argmax": 4314
+        }
+      ],
+      "oracle_generated_token_ids": [
+        2838,
+        369,
+        264,
+        4314
+      ],
+      "native_generated_token_ids": [
+        2838,
+        369,
+        264,
+        4314
+      ],
+      "generated_tokens_exact": true,
+      "lm_head_sha256": "3d43ed7f6b0af94195d6ea687a59141384a4fba5a3756016aade8c9c0c208662",
+      "note": "Greedy token IDs and all four full-vocabulary logits pass. Overall passed=false because internal BF16 activations fail the unchanged envelope."
+    },
+    "real_flash_reference": {
+      "base": {
+        "repo_id": "vllm-sr/d3-flash",
+        "revision": "8b35c853b90e777595ec36bacae820fe08ea077a",
+        "runtime_note": "verified on this base revision's own runtime (d3 v3.1 *.py) with vela3_span.text_states / image_states (span passes through rt.encoder, noncausal as in training; FINISH_C.md 'Runtime v3.1 span fix')"
+      },
+      "upstream_base": {
+        "repo_id": "Qwen/Qwen3.5-9B",
+        "revision": "c202236235762e1c871ad0ccb60c8ee5ba337b9a"
+      },
+      "base_runtime_sha256": "adf7f7aa085674b5682e492d8b2e3cc4f11c67b0d153515c742e907e9b550917",
+      "pinned_runtime_sha256": "adf7f7aa085674b5682e492d8b2e3cc4f11c67b0d153515c742e907e9b550917",
+      "manifest_sha256": "abdafb9f4a3e39595a54b7ca977e6bd7a3279c57745231319e3a171a43976e65",
+      "pinned_manifest_sha256": "abdafb9f4a3e39595a54b7ca977e6bd7a3279c57745231319e3a171a43976e65",
+      "verified_weight_files": [
+        {
+          "file": "model-00001-of-00004.safetensors",
+          "bytes": 4911663824,
+          "sha256": "2c322016b91b1232c0d7628560164560d06d477a3edc3362714635f0e2f5949c"
+        },
+        {
+          "file": "model-00002-of-00004.safetensors",
+          "bytes": 4987839568,
+          "sha256": "f769650fb747d85132fb321335af7c71fcf3ba95fd1b1e806447e891cb4b0546"
+        },
+        {
+          "file": "model-00003-of-00004.safetensors",
+          "bytes": 4954726768,
+          "sha256": "c85a0f2f8df221b7864c74e778d802dc22fe1237fe2fa6ea8b81d7b612800a33"
+        },
+        {
+          "file": "model-00004-of-00004.safetensors",
+          "bytes": 1931248816,
+          "sha256": "d686ef3f6cdeeaad5eedde9d516c29ed1c90a1a322dd002765732869c11fa269"
+        },
+        {
+          "file": "readout.safetensors",
+          "bytes": 4178000,
+          "sha256": "8bbc9a9df4e1b7df85a80a1091977092b938d8d2d2869dfaeb8fd36063cf322f"
+        },
+        {
+          "file": "tokenizer.json",
+          "bytes": 12807982,
+          "sha256": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42"
+        },
+        {
+          "file": "tokenizer_config.json",
+          "bytes": 16710,
+          "sha256": "316230d6a809701f4db5ea8f8fc862bc3a6f3229c937c174e674ff3ca0a64ac8"
+        }
+      ],
+      "adapter_metadata": {
+        "vela_config_sha256": "9c14b2d82a95f33eb2c094f301a2f33450205b67e5cdd3cf6082e1fd827847ae",
+        "adapters": [
+          {
+            "name": "span",
+            "r": 48,
+            "alpha": 48,
+            "modules": 100,
+            "complete_pairs": true
+          },
+          {
+            "name": "decision",
+            "r": 24,
+            "alpha": 24,
+            "modules": 200,
+            "complete_pairs": true
+          },
+          {
+            "name": "ner",
+            "r": 96,
+            "alpha": 96,
+            "modules": 150,
+            "complete_pairs": true
+          },
+          {
+            "name": "relation",
+            "r": 48,
+            "alpha": 48,
+            "modules": 100,
+            "complete_pairs": true
+          },
+          {
+            "name": "image_halu",
+            "r": 48,
+            "alpha": 48,
+            "modules": 100,
+            "complete_pairs": true
+          },
+          {
+            "name": "decision_df",
+            "r": 24,
+            "alpha": 24,
+            "modules": 200,
+            "complete_pairs": true
+          }
+        ],
+        "generation_head": {
+          "shape": [
+            248320,
+            4096
+          ],
+          "dtype": "BF16"
+        }
+      }
+    },
+    "real_flash_f32": {
+      "passed": true,
+      "numeric_checkpoints": 297,
+      "routes": {
+        "base": {
+          "passed": true,
+          "numeric_checkpoints": 99,
+          "passed_checkpoints": 99,
+          "profile": "pointwise",
+          "atol": 0.0005,
+          "rtol": 0.0001,
+          "envelope": null,
+          "max_abs": 0.00048828125,
+          "max_activation_rmse": 1.0566215678409208e-05,
+          "min_activation_cosine": 0.9999998211860657,
+          "first_failed_checkpoint": null,
+          "logits": [
+            {
+              "name": "vela3.d3.logits",
+              "layer": null,
+              "count": 3,
+              "passed": true,
+              "max_abs": 1.1920928955078125e-06,
+              "rmse": 8.920806635615008e-07,
+              "cosine": 1.0,
+              "oracle_argmax": 0,
+              "native_argmax": 0
+            }
+          ]
+        },
+        "span": {
+          "passed": true,
+          "numeric_checkpoints": 99,
+          "passed_checkpoints": 99,
+          "profile": "pointwise",
+          "atol": 0.0005,
+          "rtol": 0.0001,
+          "envelope": null,
+          "max_abs": 0.0008544921875,
+          "max_activation_rmse": 1.174589942820603e-05,
+          "min_activation_cosine": 0.9999998211860657,
+          "first_failed_checkpoint": null,
+          "logits": [
+            {
+              "name": "vela3.d3.logits",
+              "layer": null,
+              "count": 3,
+              "passed": true,
+              "max_abs": 3.0994415283203125e-06,
+              "rmse": 2.2953593088459456e-06,
+              "cosine": 0.9999998807907104,
+              "oracle_argmax": 0,
+              "native_argmax": 0
+            }
+          ]
+        },
+        "decision": {
+          "passed": true,
+          "numeric_checkpoints": 99,
+          "passed_checkpoints": 99,
+          "profile": "pointwise",
+          "atol": 0.0005,
+          "rtol": 0.0001,
+          "envelope": null,
+          "max_abs": 0.0009765625,
+          "max_activation_rmse": 1.113495909521589e-05,
+          "min_activation_cosine": 0.9999997615814209,
+          "first_failed_checkpoint": null,
+          "logits": [
+            {
+              "name": "vela3.d3.logits",
+              "layer": null,
+              "count": 3,
+              "passed": true,
+              "max_abs": 1.895427703857422e-05,
+              "rmse": 1.345340751868207e-05,
+              "cosine": 1.0,
+              "oracle_argmax": 0,
+              "native_argmax": 0
+            }
+          ]
+        }
+      },
+      "note": "Actual fixed BF16 weight values cast in memory; no alternative checkpoint or tolerance change."
+    },
+    "stream_f32_oracle": {
+      "purpose": "F32 text diagnostic with BF16 weight storage and one temporary F32 decoder layer; no vision or cache",
+      "source_precision_guard": "Every source safetensors tensor must be BF16; mixed F32/FP16 sources rejected before model loading",
+      "self_test": {
+        "passed": true,
+        "torch": "2.9.1",
+        "transformers": "5.19.0",
+        "cases": [
+          {
+            "mode": "noncausal",
+            "adapter": null,
+            "exact": true
+          },
+          {
+            "mode": "noncausal",
+            "adapter": "test",
+            "exact": true
+          },
+          {
+            "mode": "prefix",
+            "adapter": null,
+            "exact": true
+          },
+          {
+            "mode": "prefix",
+            "adapter": "test",
+            "exact": true
+          },
+          {
+            "mode": "causal",
+            "adapter": null,
+            "exact": true
+          },
+          {
+            "mode": "causal",
+            "adapter": "test",
+            "exact": true
+          }
+        ],
+        "exact_checkpoints": 48,
+        "max_absolute_error": 0.0,
+        "original_tensor_references_and_order": true,
+        "exception_cleanup": true,
+        "partial_conversion_cleanup": true,
+        "source_precision_guard": true,
+        "reentry_after_exception": true,
+        "model_dtype": "torch.bfloat16",
+        "maximum_temporary_f32_parameter_bytes": 9648,
+        "scope": "text; no cache; no vision computation"
+      },
+      "real_lite_equivalence": {
+        "passed": true,
+        "numeric_checkpoints": 75,
+        "float32_bits_exact": true,
+        "checked_bf16_source_tensors": 473,
+        "full_f32": ".codex/vela3/d3-lite-f32-suite/base-oracle.jsonl",
+        "streamed_f32": ".codex/vela3/stream-f32-lite-guard-suite/base-oracle.jsonl",
+        "stream_f32_sha256": "920bb33023a7e303c042f23cb22eaa8b5631d99d29468f96a92d822fdf542820"
+      },
+      "self_test_command": ".venv/bin/python tools/oracle/vela3/stream_f32.py --self-test",
+      "sources_sha256": {
+        "tools/oracle/vela3/stream_f32.py": "920bb33023a7e303c042f23cb22eaa8b5631d99d29468f96a92d822fdf542820",
+        "tools/oracle/vela3/d3_oracle.py": "98cf19f36ea05948e34674ee85639acb9df2841de85e947aa0cc91aa88f27abb"
+      }
+    },
+    "real_mini_reference": {
+      "base": {
+        "repo_id": "vllm-sr/d3-mini",
+        "revision": "566da0ea398e27184472add700499245ed09af35",
+        "runtime_note": "d3-mini@566da0ea, the base every 4B adapter was trained on (d3-mini main has different weights and readout); vela3_span.text_states takes the hooked-backbone path on this runtime, bitwise as v2"
+      },
+      "upstream_base": {
+        "repo_id": "Qwen/Qwen3.5-4B",
+        "revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a"
+      },
+      "manifest_sha256": "be76fa2250e0d7a656d63c70b82b38ec8b05042ebe2f6da705cec2118ea9be40",
+      "verified_weight_files": [
+        {
+          "file": "model-00001-of-00002.safetensors",
+          "bytes": 4973332144,
+          "sha256": "6ae27b54cff0902df2a36aabf2a48dffc0dfd7120b07e699037c6f64d4318c5e",
+          "metadata_locator": "hf-mirror.com",
+          "repo_commit": "566da0ea398e27184472add700499245ed09af35",
+          "download_host": "cas-bridge.xethub.hf.co",
+          "reused_verified": true
+        },
+        {
+          "file": "model-00002-of-00002.safetensors",
+          "bytes": 4105283936,
+          "sha256": "4d4bf448680aa1d26fe9cc88d9ca770588c53ee79d649177f8c04daf86570a48",
+          "metadata_locator": "hf-mirror.com",
+          "repo_commit": "566da0ea398e27184472add700499245ed09af35",
+          "download_host": "cas-bridge.xethub.hf.co"
+        },
+        {
+          "file": "readout.safetensors",
+          "bytes": 2611280,
+          "sha256": "b7742b1e67545cf209bff60287ee50b9ad24f71e8cae25be62f6dac45ab97fd0",
+          "metadata_locator": "hf-mirror.com",
+          "repo_commit": "566da0ea398e27184472add700499245ed09af35",
+          "download_host": "cas-bridge.xethub.hf.co",
+          "reused_verified": true
+        }
+      ],
+      "download_report": "models/d3-mini/pinned/official-verified-downloads.json",
+      "fixed_small_files": [
+        {
+          "file": "config.json",
+          "bytes": 3090,
+          "sha256": "8f5f404a71ecc53c4ff26fc42cb4c778ffacfb4c9623f5e2d51245166d6b5057",
+          "git_blob": "ca8495ef6bb09775fc4a9c5ee615d930edc9fd65",
+          "pinned_match": true
+        },
+        {
+          "file": "decision_config.json",
+          "bytes": 5502,
+          "sha256": "588bc0ac7644479b9adde0498d80b6fb7c576388992564ac67599c05d29add07",
+          "git_blob": "c3d9b6b56a91ccf48bf3178b7479f0cf4accb5d2",
+          "pinned_match": true
+        },
+        {
+          "file": "d3_format.py",
+          "bytes": 4881,
+          "sha256": "187a0f359f6f89a844e723377769556f78133b118851e702e4b0fe5123ccb0f1",
+          "git_blob": "7dc14adf7151afa9d323e501fd16799d2311119f",
+          "pinned_match": true
+        },
+        {
+          "file": "d3_runtime.py",
+          "bytes": 49276,
+          "sha256": "b61dad185148422a6ec4cb4543110fc2e3336f50468e91406c83a6666dbe64c6",
+          "git_blob": "0f2f43b61879f8dd63b216d1876abd81f1db5d55",
+          "pinned_match": true
+        },
+        {
+          "file": "modeling_d3.py",
+          "bytes": 10969,
+          "sha256": "9a718530f18d33d706a44d79be463ff43963fa3a9f808ce934a6489fd09042aa",
+          "git_blob": "4de3d8377fa1be054be3411573c4a85f8e4d54e6",
+          "pinned_match": true
+        },
+        {
+          "file": "model.safetensors.index.json",
+          "bytes": 61898,
+          "sha256": "613cc71f6441a964b0a87470536f8fb0c639bdd86b0362027c1c2b1a6e0a4a8c",
+          "git_blob": "0fc6be63f9c11cfca35658bb2c43bd37773c91f8",
+          "pinned_match": true
+        },
+        {
+          "file": "preprocessor_config.json",
+          "bytes": 390,
+          "sha256": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516",
+          "git_blob": "2ea84a437d448ff71b08df68fdd949d5cc4ebb64",
+          "pinned_match": true
+        },
+        {
+          "file": "tokenizer.json",
+          "bytes": 12807982,
+          "sha256": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+          "git_blob": "3db80ca5ce55ecec79ba2de55e6bce256d32bc78",
+          "pinned_match": true
+        },
+        {
+          "file": "tokenizer_config.json",
+          "bytes": 16710,
+          "sha256": "316230d6a809701f4db5ea8f8fc862bc3a6f3229c937c174e674ff3ca0a64ac8",
+          "git_blob": "eda48d3e75a8e59a8479ee4ec8b37f76e711d9c1",
+          "pinned_match": true
+        },
+        {
+          "file": "chat_template.jinja",
+          "bytes": 7756,
+          "sha256": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
+          "git_blob": "a585dec894e63da457d9440ec6aa7caa16d20860",
+          "pinned_match": true
+        }
+      ],
+      "actual_executed_source_checks": [
+        {
+          "sha256": "c5d504897f24fbdaa831af0a797f1527314359454533c1cd3dc07bb1f98838c1",
+          "modules": [
+            "vela_request_642c52db75b4"
+          ],
+          "pinned_d3_match": null,
+          "file": "modeling_vela3.py"
+        },
+        {
+          "sha256": "9a718530f18d33d706a44d79be463ff43963fa3a9f808ce934a6489fd09042aa",
+          "modules": [
+            "transformers_modules.d3_hyphen_mini.75e1a66a48bf74cb.modeling_d3"
+          ],
+          "pinned_d3_match": true,
+          "file": "modeling_d3.py"
+        },
+        {
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "modules": [
+            "transformers_modules.d3_hyphen_mini"
+          ],
+          "pinned_d3_match": null,
+          "file": "__init__.py"
+        },
+        {
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "modules": [
+            "transformers_modules.d3_hyphen_mini.75e1a66a48bf74cb"
+          ],
+          "pinned_d3_match": null,
+          "file": "__init__.py"
+        },
+        {
+          "sha256": "b61dad185148422a6ec4cb4543110fc2e3336f50468e91406c83a6666dbe64c6",
+          "modules": [
+            "transformers_modules.d3_hyphen_mini.75e1a66a48bf74cb.d3_runtime"
+          ],
+          "pinned_d3_match": true,
+          "file": "d3_runtime.py"
+        },
+        {
+          "sha256": "187a0f359f6f89a844e723377769556f78133b118851e702e4b0fe5123ccb0f1",
+          "modules": [
+            "transformers_modules.d3_hyphen_mini.75e1a66a48bf74cb.d3_format"
+          ],
+          "pinned_d3_match": true,
+          "file": "d3_format.py"
+        },
+        {
+          "sha256": "187a0f359f6f89a844e723377769556f78133b118851e702e4b0fe5123ccb0f1",
+          "modules": [
+            "vela3_d3_format"
+          ],
+          "pinned_d3_match": true,
+          "file": "d3_format.py"
+        },
+        {
+          "sha256": "2e88d7af591e3097a735ecbbb17fa6433aaa5b803e4b810cab6231e62ce3a2ee",
+          "modules": [
+            "vela3_adapters"
+          ],
+          "pinned_d3_match": null,
+          "file": "vela3_adapters.py"
+        },
+        {
+          "sha256": "97d2448765a7ee5411dff44c601c3a073fdad9a9921f9818bac4135916081c20",
+          "modules": [
+            "vela3_span"
+          ],
+          "pinned_d3_match": null,
+          "file": "vela3_span.py"
+        },
+        {
+          "sha256": "b7fcefdd1a0b3e8ac22ac12338c72e76925688a989b5af6c70a104fa70122a39",
+          "modules": [
+            "vela3_labeldef"
+          ],
+          "pinned_d3_match": null,
+          "file": "vela3_labeldef.py"
+        },
+        {
+          "sha256": "d2c5f2f446cf12d2f8a24dbf634452477088523b0973e1e07df244c851421efb",
+          "modules": [
+            "vela3_span_decode"
+          ],
+          "pinned_d3_match": null,
+          "file": "span_decode_v2.py"
+        }
+      ],
+      "unused_source_note": "d3_engine.py, d3_server.py and pipeline_d3.py differ from the pinned manifest; d3_fast.py and d3_kernels.py are extra. None executed. Actual cached modeling_d3.py/d3_runtime.py/d3_format.py SHA values match the pinned manifest. All executed Vela source SHA values match the recorded Vela snapshot.",
+      "cache_note": "The full-request source audit used the existing Transformers module cache; actual paths and SHA are recorded. Later trace suites used repo-local .codex/vela3/hf-modules. request_oracle now defaults future module caches to its output directory.",
+      "vela_verified_snapshot_files": [
+        {
+          "file": "config.json",
+          "bytes": 2943,
+          "sha256": "1859126a9061dd4f8eae29a79d8ebeb7a5b9ac7eb1cf7ca91422a433ee7547e6",
+          "modelscope_revision": "0f56a2f6c714c8af2c0fb8156da4dfc6ed9fcfef"
+        },
+        {
+          "file": "decision_df_lora.safetensors",
+          "bytes": 121937440,
+          "sha256": "2455f8bd69170bde42b8fdc3511281829642c70df148e41755561a8cd0badbb4",
+          "modelscope_revision": "0f56a2f6c714c8af2c0fb8156da4dfc6ed9fcfef"
+        },
+        {
+          "file": "decision_lora.safetensors",
+          "bytes": 121937304,
+          "sha256": "ebdd12efa205265ae756f3c3aeec13c8f98cb00b89fb348c3c66607f81bbaa7a",
+          "modelscope_revision": "5c62df3f1ba0a5de24b99c0bfae2fc948c767271"
+        },
+        {
+          "file": "decision_optin_lora.safetensors",
+          "bytes": 121937416,
+          "sha256": "52992183539cf7ae5fbd6ce453615eef069fc76bd38c5b1f24d420c3e75132b0",
+          "modelscope_revision": "5c62df3f1ba0a5de24b99c0bfae2fc948c767271"
+        },
+        {
+          "file": "image_halu_head.safetensors",
+          "bytes": 11195524,
+          "sha256": "097a731801ee306709d72184d9e27ff0d13cb3e47533bf58be38786e7529a1a5",
+          "modelscope_revision": "5c62df3f1ba0a5de24b99c0bfae2fc948c767271"
+        },
+        {
+          "file": "image_halu_lora.safetensors",
+          "bytes": 121917432,
+          "sha256": "20f0a98f5714c4ede7ea86e312ddbaa463a64d56c43d90561ec35f29b178d747",
+          "modelscope_revision": "2935f94e92d6e18285737acb2a23c9ce9b6a809b"
+        },
+        {
+          "file": "ner_head.safetensors",
+          "bytes": 11195612,
+          "sha256": "03dff7640e6fec1ad8ce8cd4af14e2a4e849615d7c296e931e80520a98cb4a39",
+          "modelscope_revision": "808b0ab2d05dbe31e4ef1678a07b9af4830d8922"
+        },
+        {
+          "file": "ner_lora.safetensors",
+          "bytes": 365721808,
+          "sha256": "815a221cba6799ab104ac5725be73e9e8a6589354f0d6082b53ebd61a6dfe3fd",
+          "modelscope_revision": "808b0ab2d05dbe31e4ef1678a07b9af4830d8922"
+        },
+        {
+          "file": "relation_head.safetensors",
+          "bytes": 11195452,
+          "sha256": "ae3d69387d4853cd0eb7dc80f84282946ee25f5b8eaa23e10af8ed9a2d5a4a1e",
+          "modelscope_revision": "808b0ab2d05dbe31e4ef1678a07b9af4830d8922"
+        },
+        {
+          "file": "relation_lora.safetensors",
+          "bytes": 121917360,
+          "sha256": "45ca3ef715bbb4f35c5576915702004c9aad303251c24c6468eeb96ac65bce18",
+          "modelscope_revision": "d18d99ea71f7ae529001525ad5af2282d75a3835"
+        },
+        {
+          "file": "span_head.safetensors",
+          "bytes": 11195452,
+          "sha256": "a06c85629cbe94c888bd9203cccafbaf1ede11f1864f9da4fc1ed4233c037d63",
+          "modelscope_revision": "386825f1ea030c782d48e1ba6080284089c031bf"
+        },
+        {
+          "file": "span_lora.safetensors",
+          "bytes": 121917440,
+          "sha256": "2ff18ab7c99a4a3c59bba4941e23c179d859690d62579de529828a07183746a7",
+          "modelscope_revision": "386825f1ea030c782d48e1ba6080284089c031bf"
+        },
+        {
+          "file": "vela3_config.json",
+          "bytes": 12798,
+          "sha256": "7488b44a2eb22013b332335d71f7cf6d2091a543c2b4c9c13be11fa5750baa15",
+          "modelscope_revision": "79a31f39f9471878147c2e0eb2ab8b69c85f0774"
+        }
+      ],
+      "adapter_metadata": {
+        "base": {
+          "repo_id": "vllm-sr/d3-mini",
+          "revision": "566da0ea398e27184472add700499245ed09af35",
+          "runtime_note": "d3-mini@566da0ea, the base every 4B adapter was trained on (d3-mini main has different weights and readout); vela3_span.text_states takes the hooked-backbone path on this runtime, bitwise as v2"
+        },
+        "adapters": [
+          {
+            "name": "span",
+            "r": 32,
+            "alpha": 32,
+            "modules": 100,
+            "complete_pairs": true
+          },
+          {
+            "name": "decision",
+            "r": 16,
+            "alpha": 16,
+            "modules": 200,
+            "complete_pairs": true
+          },
+          {
+            "name": "ner",
+            "r": 64,
+            "alpha": 64,
+            "modules": 150,
+            "complete_pairs": true
+          },
+          {
+            "name": "image_halu",
+            "r": 32,
+            "alpha": 32,
+            "modules": 100,
+            "complete_pairs": true
+          },
+          {
+            "name": "relation",
+            "r": 32,
+            "alpha": 32,
+            "modules": 100,
+            "complete_pairs": true
+          },
+          {
+            "name": "decision_optin",
+            "r": 16,
+            "alpha": 16,
+            "modules": 200,
+            "complete_pairs": true
+          },
+          {
+            "name": "decision_df",
+            "r": 16,
+            "alpha": 16,
+            "modules": 200,
+            "complete_pairs": true
+          }
+        ],
+        "writer": "base"
+      }
+    },
+    "real_mini_bf16": {
+      "base": {
+        "comparison": ".codex/vela3/mini-bf16-suite/base-comparison.json",
+        "passed": false,
+        "numeric_checkpoints": 99,
+        "passed_checkpoints": 98,
+        "profile": "bf16",
+        "atol": 0.1,
+        "rtol": 0.02,
+        "envelope": {
+          "max_abs": 0.75,
+          "max_rmse": 0.06,
+          "min_cosine": 0.9995
+        },
+        "max_abs": 0.8125,
+        "max_activation_abs": 0.8125,
+        "max_activation_rmse": 0.024701116606593132,
+        "min_activation_cosine": 0.9999184012413025,
+        "first_failed_checkpoint": {
+          "name": "vela3.d3.input_norm",
+          "layer": 30,
+          "count": 15360,
+          "passed": false,
+          "max_abs": 0.8125,
+          "rmse": 0.01566898636519909,
+          "cosine": 0.9999184012413025
+        },
+        "failed_checkpoints": [
+          {
+            "name": "vela3.d3.input_norm",
+            "layer": 30,
+            "count": 15360,
+            "passed": false,
+            "max_abs": 0.8125,
+            "rmse": 0.01566898636519909,
+            "cosine": 0.9999184012413025
+          }
+        ],
+        "logits": [
+          {
+            "name": "vela3.d3.logits",
+            "layer": null,
+            "count": 3,
+            "passed": true,
+            "max_abs": 0.019920527935028076,
+            "rmse": 0.012269404716789722,
+            "cosine": 0.999911904335022,
+            "oracle_argmax": 0,
+            "native_argmax": 0
+          }
+        ]
+      },
+      "span": {
+        "comparison": ".codex/vela3/mini-bf16-suite/span-comparison.json",
+        "passed": false,
+        "numeric_checkpoints": 99,
+        "passed_checkpoints": 98,
+        "profile": "bf16",
+        "atol": 0.1,
+        "rtol": 0.02,
+        "envelope": {
+          "max_abs": 0.75,
+          "max_rmse": 0.06,
+          "min_cosine": 0.9995
+        },
+        "max_abs": 1.0,
+        "max_activation_abs": 1.0,
+        "max_activation_rmse": 0.020346680656075478,
+        "min_activation_cosine": 0.9998756647109985,
+        "first_failed_checkpoint": {
+          "name": "vela3.d3.layer",
+          "layer": 31,
+          "count": 15360,
+          "passed": false,
+          "max_abs": 1.0,
+          "rmse": 0.019992927089333534,
+          "cosine": 0.9999836087226868
+        },
+        "failed_checkpoints": [
+          {
+            "name": "vela3.d3.layer",
+            "layer": 31,
+            "count": 15360,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.019992927089333534,
+            "cosine": 0.9999836087226868
+          }
+        ],
+        "logits": [
+          {
+            "name": "vela3.d3.logits",
+            "layer": null,
+            "count": 3,
+            "passed": true,
+            "max_abs": 0.02299964427947998,
+            "rmse": 0.013715114444494247,
+            "cosine": 0.9999668598175049,
+            "oracle_argmax": 0,
+            "native_argmax": 0
+          }
+        ]
+      },
+      "decision": {
+        "comparison": ".codex/vela3/mini-bf16-suite/decision-comparison.json",
+        "passed": false,
+        "numeric_checkpoints": 99,
+        "passed_checkpoints": 90,
+        "profile": "bf16",
+        "atol": 0.1,
+        "rtol": 0.02,
+        "envelope": {
+          "max_abs": 0.75,
+          "max_rmse": 0.06,
+          "min_cosine": 0.9995
+        },
+        "max_abs": 1.0625,
+        "max_activation_abs": 1.0625,
+        "max_activation_rmse": 0.026409095153212547,
+        "min_activation_cosine": 0.9999014735221863,
+        "first_failed_checkpoint": {
+          "name": "vela3.d3.input_norm",
+          "layer": 28,
+          "count": 15360,
+          "passed": false,
+          "max_abs": 1.0,
+          "rmse": 0.018088916316628456,
+          "cosine": 0.9999014735221863
+        },
+        "failed_checkpoints": [
+          {
+            "name": "vela3.d3.input_norm",
+            "layer": 28,
+            "count": 15360,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.018088916316628456,
+            "cosine": 0.9999014735221863
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 28,
+            "count": 15360,
+            "passed": false,
+            "max_abs": 0.8125,
+            "rmse": 0.011385641992092133,
+            "cosine": 0.9999096393585205
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 28,
+            "count": 15360,
+            "passed": false,
+            "max_abs": 0.8125,
+            "rmse": 0.011649902909994125,
+            "cosine": 0.9999139904975891
+          },
+          {
+            "name": "vela3.d3.input_norm",
+            "layer": 29,
+            "count": 15360,
+            "passed": false,
+            "max_abs": 0.9375,
+            "rmse": 0.01631125435233116,
+            "cosine": 0.9999074339866638
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 29,
+            "count": 15360,
+            "passed": false,
+            "max_abs": 0.8125,
+            "rmse": 0.011859619989991188,
+            "cosine": 0.9999174475669861
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 29,
+            "count": 15360,
+            "passed": false,
+            "max_abs": 0.8125,
+            "rmse": 0.01241553295403719,
+            "cosine": 0.9999175667762756
+          },
+          {
+            "name": "vela3.d3.input_norm",
+            "layer": 30,
+            "count": 15360,
+            "passed": false,
+            "max_abs": 1.0625,
+            "rmse": 0.016930624842643738,
+            "cosine": 0.9999052286148071
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 30,
+            "count": 15360,
+            "passed": false,
+            "max_abs": 0.875,
+            "rmse": 0.013178212568163872,
+            "cosine": 0.9999216198921204
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 31,
+            "count": 15360,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.019863728433847427,
+            "cosine": 0.9999599456787109
+          }
+        ],
+        "logits": [
+          {
+            "name": "vela3.d3.logits",
+            "layer": null,
+            "count": 3,
+            "passed": true,
+            "max_abs": 0.0663047730922699,
+            "rmse": 0.05067305266857147,
+            "cosine": 0.9974503517150879,
+            "oracle_argmax": 0,
+            "native_argmax": 0
+          }
+        ]
+      }
+    },
+    "real_mini_f32": {
+      "base": {
+        "comparison": ".codex/vela3/mini-f32-suite/base-comparison.json",
+        "passed": true,
+        "numeric_checkpoints": 99,
+        "passed_checkpoints": 99,
+        "profile": "pointwise",
+        "atol": 0.0005,
+        "rtol": 0.0001,
+        "envelope": null,
+        "max_abs": 0.00026702880859375,
+        "max_activation_abs": 0.00026702880859375,
+        "max_activation_rmse": 7.4425161074032076e-06,
+        "min_activation_cosine": 0.9999998807907104,
+        "first_failed_checkpoint": null,
+        "failed_checkpoints": [],
+        "logits": [
+          {
+            "name": "vela3.d3.logits",
+            "layer": null,
+            "count": 3,
+            "passed": true,
+            "max_abs": 1.2040138244628906e-05,
+            "rmse": 7.14545512892073e-06,
+            "cosine": 1.0000001192092896,
+            "oracle_argmax": 0,
+            "native_argmax": 0
+          }
+        ]
+      },
+      "span": {
+        "comparison": ".codex/vela3/mini-f32-suite/span-comparison.json",
+        "passed": true,
+        "numeric_checkpoints": 99,
+        "passed_checkpoints": 99,
+        "profile": "pointwise",
+        "atol": 0.0005,
+        "rtol": 0.0001,
+        "envelope": null,
+        "max_abs": 0.000274658203125,
+        "max_activation_abs": 0.000274658203125,
+        "max_activation_rmse": 5.416364729171619e-06,
+        "min_activation_cosine": 0.9999998807907104,
+        "first_failed_checkpoint": null,
+        "failed_checkpoints": [],
+        "logits": [
+          {
+            "name": "vela3.d3.logits",
+            "layer": null,
+            "count": 3,
+            "passed": true,
+            "max_abs": 1.3828277587890625e-05,
+            "rmse": 1.1932248526136391e-05,
+            "cosine": 1.0,
+            "oracle_argmax": 0,
+            "native_argmax": 0
+          }
+        ]
+      },
+      "decision": {
+        "comparison": ".codex/vela3/mini-f32-suite/decision-comparison.json",
+        "passed": true,
+        "numeric_checkpoints": 99,
+        "passed_checkpoints": 99,
+        "profile": "pointwise",
+        "atol": 0.0005,
+        "rtol": 0.0001,
+        "envelope": null,
+        "max_abs": 0.000286102294921875,
+        "max_activation_abs": 0.000286102294921875,
+        "max_activation_rmse": 7.872291462263092e-06,
+        "min_activation_cosine": 0.9999998807907104,
+        "first_failed_checkpoint": null,
+        "failed_checkpoints": [],
+        "logits": [
+          {
+            "name": "vela3.d3.logits",
+            "layer": null,
+            "count": 3,
+            "passed": true,
+            "max_abs": 2.0265579223632812e-05,
+            "rmse": 1.6960742868832313e-05,
+            "cosine": 0.9999999403953552,
+            "oracle_argmax": 0,
+            "native_argmax": 0
+          }
+        ]
+      }
+    },
+    "real_mini_bf16_causal_four_steps": {
+      "comparison": ".codex/vela3/mini-causal-four-suite/base-comparison.json",
+      "passed": true,
+      "numeric_checkpoints": 396,
+      "passed_checkpoints": 396,
+      "profile": "bf16",
+      "atol": 0.1,
+      "rtol": 0.02,
+      "envelope": {
+        "max_abs": 0.75,
+        "max_rmse": 0.06,
+        "min_cosine": 0.9995
+      },
+      "max_abs": 0.75,
+      "max_activation_abs": 0.75,
+      "max_activation_rmse": 0.024677811190485954,
+      "min_activation_cosine": 0.9999237656593323,
+      "first_failed_checkpoint": null,
+      "failed_checkpoints": [],
+      "logits": [
+        {
+          "name": "vela3.d3.generation_logits",
+          "layer": null,
+          "count": 248320,
+          "passed": true,
+          "max_abs": 0.07421875,
+          "rmse": 0.01294645294547081,
+          "cosine": 0.9999620914459229,
+          "oracle_argmax": 2838,
+          "native_argmax": 2838
+        },
+        {
+          "name": "vela3.d3.generation_logits",
+          "layer": null,
+          "count": 248320,
+          "passed": true,
+          "max_abs": 0.125,
+          "rmse": 0.020998183637857437,
+          "cosine": 0.9999492764472961,
+          "oracle_argmax": 369,
+          "native_argmax": 369
+        },
+        {
+          "name": "vela3.d3.generation_logits",
+          "layer": null,
+          "count": 248320,
+          "passed": true,
+          "max_abs": 0.0703125,
+          "rmse": 0.014643464237451553,
+          "cosine": 0.9999734163284302,
+          "oracle_argmax": 264,
+          "native_argmax": 264
+        },
+        {
+          "name": "vela3.d3.generation_logits",
+          "layer": null,
+          "count": 248320,
+          "passed": true,
+          "max_abs": 0.109375,
+          "rmse": 0.01797856204211712,
+          "cosine": 0.9999861717224121,
+          "oracle_argmax": 220,
+          "native_argmax": 220
+        }
+      ],
+      "oracle_generated_token_ids": [
+        2838,
+        369,
+        264,
+        220
+      ],
+      "native_generated_token_ids": [
+        2838,
+        369,
+        264,
+        220
+      ],
+      "generated_tokens_exact": true
+    },
+    "mini_interpretation": "All 297 FP32 short numeric checkpoints pass at the original pointwise tolerance. All final BF16 short readouts pass with matching argmax, but 11 of 297 short numeric checkpoints fail only the activation max-absolute-error envelope; full BF16 activation parity remains failed. Accumulated BF16 rounding is consistent with these observations, but the responsible operator was not isolated. The four-step causal graph passes all 396 numeric checkpoints and exact generated tokens. Full SystemOne output passes the tested fixture, including actual automatic base-writer generation and six text adapter routes. Threshold-zero spans validate decoding/Unicode offsets rather than extraction quality. No mini image input or image_halu inference was tested.",
+    "mini_reproducing_commands": [
+      ".venv/bin/python tools/oracle/vela3/request_oracle.py --model models/vela3-mini --base models/d3-mini --request tools/oracle/vela3/requests/mini.json --out .codex/vela3/mini-request-oracle.json --threads 4",
+      ".codex/vela3/bin/vela3 --model models/vela3-mini --base-model models/d3-mini --request tools/oracle/vela3/requests/mini.json --threads 4 > .codex/vela3/mini-request-native.json",
+      ".venv/bin/python tools/oracle/vela3/compare_requests.py .codex/vela3/mini-request-oracle.json .codex/vela3/mini-request-native.json --out .codex/vela3/mini-request-comparison.json",
+      "HF_MODULES_CACHE=/Users/gouzi/.codex/worktrees/a06a/rust-model-inference/.codex/vela3/hf-modules .venv/bin/python tools/oracle/vela3/d3_oracle.py suite --base models/d3-mini --vela models/vela3-mini --text 'Alice works at Acme.' --native /Users/gouzi/.codex/worktrees/a06a/rust-model-inference/.codex/vela3/bin/vela3-parity --dtype bfloat16 --out .codex/vela3/mini-bf16-suite",
+      "HF_MODULES_CACHE=/Users/gouzi/.codex/worktrees/a06a/rust-model-inference/.codex/vela3/hf-modules .venv/bin/python tools/oracle/vela3/d3_oracle.py suite --base models/d3-mini --vela models/vela3-mini --text 'Alice works at Acme.' --native /Users/gouzi/.codex/worktrees/a06a/rust-model-inference/.codex/vela3/bin/vela3-parity --dtype float32 --out .codex/vela3/mini-f32-suite",
+      "HF_MODULES_CACHE=/Users/gouzi/.codex/worktrees/a06a/rust-model-inference/.codex/vela3/hf-modules .venv/bin/python tools/oracle/vela3/d3_oracle.py suite --base models/d3-mini --vela models/vela3-mini --text 'Alice works at Acme.' --native /Users/gouzi/.codex/worktrees/a06a/rust-model-inference/.codex/vela3/bin/vela3-parity --dtype bfloat16 --causal --generation-steps 4 --out .codex/vela3/mini-causal-four-suite"
+    ],
+    "turbo_causal_contract": {
+      "supported": false,
+      "base_tie_word_embeddings": false,
+      "lm_head_tensors": 0,
+      "definition_writer": "names",
+      "oracle_preflight_rejection_verified": true,
+      "oracle_log": ".codex/vela3/turbo-no-lm-head-oracle.log",
+      "note": "The real turbo package has no generation head. Causal greedy comparison is inapplicable; input embeddings must not be substituted as an output head."
+    },
+    "real_turbo_reference": {
+      "base": {
+        "repo_id": "vllm-sr/d3-turbo",
+        "revision": "da17b5d0c860f7e5be6e2afebe67228b4bd24d0c",
+        "snapshot": "vllm-sr/d3-turbo v1.0 (da17b5d0; the 7478169a pin of the build is not on the Hub, its 50 files are identical to da17b5d0)",
+        "runtime_note": "d3-turbo's own runtime (prefix_bidir, state-once); span passes through rt.encoder without state blocks (single-block noncausal mask, as the span adapters were trained)"
+      },
+      "manifest_sha256": "9d9b4cade18319d5f25b2c8dc43d39879febc021d583da734136bf8e7e2d2706",
+      "verified_weight_files": [
+        {
+          "file": "model-00001-of-00011.safetensors",
+          "bytes": 4997471976,
+          "sha256": "50d08de1271115a154d1eb8e25e4f6e5c84093e4db5c132aa9efb6707f0cf4fd",
+          "revision": "da17b5d0c860f7e5be6e2afebe67228b4bd24d0c",
+          "reused_verified": true
+        },
+        {
+          "file": "model-00002-of-00011.safetensors",
+          "bytes": 4965144568,
+          "sha256": "5314359d38d9066b9262566b3e10ec30a38a4a76cf61d2b42d04f20d9cc57306",
+          "revision": "da17b5d0c860f7e5be6e2afebe67228b4bd24d0c",
+          "reused_verified": true
+        },
+        {
+          "file": "model-00003-of-00011.safetensors",
+          "bytes": 4933789248,
+          "sha256": "abb167d404e6fe80a97ab849e490fec5abd9c0f0aa0a289fa5d6c0f986f9e62c",
+          "revision": "da17b5d0c860f7e5be6e2afebe67228b4bd24d0c",
+          "reused_verified": true
+        },
+        {
+          "file": "model-00004-of-00011.safetensors",
+          "bytes": 4965227496,
+          "sha256": "cb9e7c53dc4289b7ba5bf7d68367f73935c3e78c9ff136890c220f028cd0c6cb",
+          "revision": "da17b5d0c860f7e5be6e2afebe67228b4bd24d0c",
+          "reused_verified": true
+        },
+        {
+          "file": "model-00005-of-00011.safetensors",
+          "bytes": 4974750552,
+          "sha256": "6038ad25b903a12a42e83a53516d68f4260edefb4eae3e59c25fde58f0b2e8b5",
+          "revision": "da17b5d0c860f7e5be6e2afebe67228b4bd24d0c",
+          "reused_verified": true
+        },
+        {
+          "file": "model-00006-of-00011.safetensors",
+          "bytes": 4924266240,
+          "sha256": "128736a8f42b6be77a5ca7bdd93d03615b2f0cfe1630ac5811350a21f6b6bb00",
+          "revision": "da17b5d0c860f7e5be6e2afebe67228b4bd24d0c",
+          "reused_verified": true
+        },
+        {
+          "file": "model-00007-of-00011.safetensors",
+          "bytes": 4974750560,
+          "sha256": "e4297619b5d0b2e990483b4d2bc83b9613acd278b022f48f979505c10e07a9b8",
+          "revision": "da17b5d0c860f7e5be6e2afebe67228b4bd24d0c",
+          "reused_verified": true
+        },
+        {
+          "file": "model-00008-of-00011.safetensors",
+          "bytes": 4902229944,
+          "sha256": "9e4182f5bc970d7aebe61af91fc5b87744f591901081618f0d7f34d262c66e3f",
+          "revision": "da17b5d0c860f7e5be6e2afebe67228b4bd24d0c",
+          "reused_verified": true
+        },
+        {
+          "file": "model-00009-of-00011.safetensors",
+          "bytes": 4996786840,
+          "sha256": "1ce2365cfe1640e0f97ca7bdf2c6fb0b0b317b1b76c6accb55b0dc8bfa47a92b",
+          "revision": "da17b5d0c860f7e5be6e2afebe67228b4bd24d0c",
+          "reused_verified": true
+        },
+        {
+          "file": "model-00010-of-00011.safetensors",
+          "bytes": 4902229960,
+          "sha256": "9ef4d6fe8a80e38337cd02dd9dfec9a90f4582607fb575cbef66f182a5049418",
+          "revision": "da17b5d0c860f7e5be6e2afebe67228b4bd24d0c",
+          "metadata_locator": "huggingface.co",
+          "download_host": "us.aws.cdn.hf.co"
+        },
+        {
+          "file": "model-00011-of-00011.safetensors",
+          "bytes": 2634155256,
+          "sha256": "13ec4fcdc1b06e5727f4aa52c5b4aafa55a71f31f8341bc2e9c02195fd98250d",
+          "revision": "da17b5d0c860f7e5be6e2afebe67228b4bd24d0c",
+          "reused_verified": true
+        },
+        {
+          "file": "readout.safetensors",
+          "bytes": 5222480,
+          "sha256": "55bf284d294821ce5206b04b76c3a59b5e178423aba605679d1218bc726ef2d4",
+          "revision": "da17b5d0c860f7e5be6e2afebe67228b4bd24d0c",
+          "reused_verified": true
+        }
+      ],
+      "download_source": "official Hugging Face CDN; resumed with direct huggingface.co metadata after mirror redirects",
+      "fixed_small_files": [
+        {
+          "file": "chat_template.jinja",
+          "bytes": 8952,
+          "sha256": "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041",
+          "pinned_match": true
+        },
+        {
+          "file": "config.json",
+          "bytes": 3949,
+          "sha256": "f57f7323226d242b0a960b15118ee8e73c87c28ba3556ec7e3dc59578293a523",
+          "pinned_match": true
+        },
+        {
+          "file": "d3_compose.py",
+          "bytes": 14007,
+          "sha256": "d0bab5e6f400a198d39f4adae3b83a5ef06b64485f968aeca15d65be777be39e",
+          "pinned_match": true
+        },
+        {
+          "file": "d3_engine.py",
+          "bytes": 4413,
+          "sha256": "086238942762df45047a32cd9a8e2bedd9b63167eb40be260c776de567979f53",
+          "pinned_match": true
+        },
+        {
+          "file": "d3_fast.py",
+          "bytes": 22331,
+          "sha256": "68a1fb9a2c3bde9ac2763bf504decae592ca12722698fbde1b39a31262955535",
+          "pinned_match": true
+        },
+        {
+          "file": "d3_format.py",
+          "bytes": 9120,
+          "sha256": "5bfc10d47481f7ce18a0ce47a9588fa3d484b5ec1d9b1e762fe6b800d335c693",
+          "pinned_match": true
+        },
+        {
+          "file": "d3_kernels.py",
+          "bytes": 16129,
+          "sha256": "8f7534ca1e1846ebf7c4c73058002f3be4dbf0d5d426f0815150ae0cbe7677bd",
+          "pinned_match": true
+        },
+        {
+          "file": "d3_runtime.py",
+          "bytes": 154257,
+          "sha256": "ce79977d22c2307f00c03b4c214a21b9fee0dc9ab566ac04adc76524f8380380",
+          "pinned_match": true
+        },
+        {
+          "file": "decision_config.json",
+          "bytes": 7930,
+          "sha256": "041c3bc8b6d5bfa440e5554ad59d99eb573bfd320ab167c102507a3066961441",
+          "pinned_match": true
+        },
+        {
+          "file": "merges.txt",
+          "bytes": 3353259,
+          "sha256": "a9d356d7bdf1ef4949e3e748e95b8e10ad9d4e2e838eddc38a0a7b6b94d1db8d",
+          "pinned_match": true
+        },
+        {
+          "file": "model.safetensors.index.json",
+          "bytes": 103954,
+          "sha256": "dc39d771cb240f775399e1845b11d081d8e007f14eecae3b780bc6272b128a46",
+          "pinned_match": true
+        },
+        {
+          "file": "modeling_d3.py",
+          "bytes": 12538,
+          "sha256": "d77b58c6c7834b7a6312560f88a2303ffe240fa4a4e515676cf90f3eb4b7b9a1",
+          "pinned_match": true
+        },
+        {
+          "file": "preprocessor_config.json",
+          "bytes": 390,
+          "sha256": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516",
+          "pinned_match": true
+        },
+        {
+          "file": "tokenizer.json",
+          "bytes": 12809320,
+          "sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+          "pinned_match": true
+        },
+        {
+          "file": "tokenizer_config.json",
+          "bytes": 17928,
+          "sha256": "b11349aafa7cdc6a320767cf7ceb29ed82f7eda5d65e8e0819e76f0ce947bf27",
+          "pinned_match": true
+        },
+        {
+          "file": "vocab.json",
+          "bytes": 6722759,
+          "sha256": "ce99b4cb2983d118806ce0a8b777a35b093e2000a503ebde25853284c9dfa003",
+          "pinned_match": true
+        }
+      ],
+      "actual_executed_source_checks": [
+        {
+          "path": "/Users/gouzi/.codex/worktrees/a06a/rust-model-inference/models/vela3-turbo/modeling_vela3.py",
+          "sha256": "adb08afc8e6e33fd407aed9d74a534f54bdd2d535e29bbccefefdeeb3e9e140a",
+          "modules": [
+            "vela_request_35c7833f186a"
+          ],
+          "pinned_match": true
+        },
+        {
+          "path": "/Users/gouzi/.codex/worktrees/a06a/rust-model-inference/.codex/vela3/hf-modules/transformers_modules/pinned/ff4e0af3c49dd7ea/modeling_d3.py",
+          "sha256": "d77b58c6c7834b7a6312560f88a2303ffe240fa4a4e515676cf90f3eb4b7b9a1",
+          "modules": [
+            "transformers_modules.pinned.ff4e0af3c49dd7ea.modeling_d3"
+          ],
+          "pinned_match": true
+        },
+        {
+          "path": "/Users/gouzi/.codex/worktrees/a06a/rust-model-inference/.codex/vela3/hf-modules/transformers_modules/pinned/__init__.py",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "modules": [
+            "transformers_modules.pinned"
+          ],
+          "pinned_match": false
+        },
+        {
+          "path": "/Users/gouzi/.codex/worktrees/a06a/rust-model-inference/.codex/vela3/hf-modules/transformers_modules/pinned/ff4e0af3c49dd7ea/__init__.py",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "modules": [
+            "transformers_modules.pinned.ff4e0af3c49dd7ea"
+          ],
+          "pinned_match": false
+        },
+        {
+          "path": "/Users/gouzi/.codex/worktrees/a06a/rust-model-inference/.codex/vela3/hf-modules/transformers_modules/pinned/ff4e0af3c49dd7ea/d3_runtime.py",
+          "sha256": "ce79977d22c2307f00c03b4c214a21b9fee0dc9ab566ac04adc76524f8380380",
+          "modules": [
+            "transformers_modules.pinned.ff4e0af3c49dd7ea.d3_runtime"
+          ],
+          "pinned_match": true
+        },
+        {
+          "path": "/Users/gouzi/.codex/worktrees/a06a/rust-model-inference/.codex/vela3/hf-modules/transformers_modules/pinned/ff4e0af3c49dd7ea/d3_format.py",
+          "sha256": "5bfc10d47481f7ce18a0ce47a9588fa3d484b5ec1d9b1e762fe6b800d335c693",
+          "modules": [
+            "transformers_modules.pinned.ff4e0af3c49dd7ea.d3_format"
+          ],
+          "pinned_match": true
+        },
+        {
+          "path": "/Users/gouzi/.codex/worktrees/a06a/rust-model-inference/models/d3-turbo/pinned/d3_fast.py",
+          "sha256": "68a1fb9a2c3bde9ac2763bf504decae592ca12722698fbde1b39a31262955535",
+          "modules": [
+            "d3_fast"
+          ],
+          "pinned_match": true
+        },
+        {
+          "path": "/Users/gouzi/.codex/worktrees/a06a/rust-model-inference/models/d3-turbo/pinned/d3_format.py",
+          "sha256": "5bfc10d47481f7ce18a0ce47a9588fa3d484b5ec1d9b1e762fe6b800d335c693",
+          "modules": [
+            "vela3_d3_format"
+          ],
+          "pinned_match": true
+        },
+        {
+          "path": "/Users/gouzi/.codex/worktrees/a06a/rust-model-inference/models/vela3-turbo/vela3_adapters.py",
+          "sha256": "2e88d7af591e3097a735ecbbb17fa6433aaa5b803e4b810cab6231e62ce3a2ee",
+          "modules": [
+            "vela3_adapters"
+          ],
+          "pinned_match": true
+        },
+        {
+          "path": "/Users/gouzi/.codex/worktrees/a06a/rust-model-inference/models/vela3-turbo/vela3_span.py",
+          "sha256": "97d2448765a7ee5411dff44c601c3a073fdad9a9921f9818bac4135916081c20",
+          "modules": [
+            "vela3_span"
+          ],
+          "pinned_match": true
+        },
+        {
+          "path": "/Users/gouzi/.codex/worktrees/a06a/rust-model-inference/models/vela3-turbo/vela3_labeldef.py",
+          "sha256": "b7fcefdd1a0b3e8ac22ac12338c72e76925688a989b5af6c70a104fa70122a39",
+          "modules": [
+            "vela3_labeldef"
+          ],
+          "pinned_match": true
+        },
+        {
+          "path": "/Users/gouzi/.codex/worktrees/a06a/rust-model-inference/models/vela3-turbo/span_decode_v2.py",
+          "sha256": "d2c5f2f446cf12d2f8a24dbf634452477088523b0973e1e07df244c851421efb",
+          "modules": [
+            "vela3_span_decode"
+          ],
+          "pinned_match": true
+        }
+      ],
+      "vela_verified_snapshot_files": [
+        {
+          "Path": "decision_df_lora.safetensors",
+          "Size": 870400216,
+          "Sha256": "05b8d0cf65b4292a9c2764b8316d53a66f813b8f6742b78d1f75c7c3aa36167e",
+          "Revision": "d9d1f57173b2607e56fe7ba3171d313476f8edca"
+        },
+        {
+          "Path": "decision_lora.safetensors",
+          "Size": 870400176,
+          "Sha256": "f6ceb0a0e0ea66d95db7d32ebd0a01631f2596870ebeb52d83300e2f2fef68b6",
+          "Revision": "86a0c602a396be671d6881ad7c317303b6c7e85c"
+        },
+        {
+          "Path": "ner_head.safetensors",
+          "Size": 22387932,
+          "Sha256": "8bc4c9848358782594e5f508bec047c1e49b9049429d13137672d68e1be6d87a",
+          "Revision": "657c7c2ee8bbaae6cdfc9859f7fda100c84ed752"
+        },
+        {
+          "Path": "ner_lora.safetensors",
+          "Size": 2611017504,
+          "Sha256": "fd9d297b4cc07fb35e45636a3e926137f2e1d7b464abdb48ba088a50d3d6f65a",
+          "Revision": "e560ae797101cc14138fd3865eadde9d3522a12a"
+        },
+        {
+          "Path": "relation_head.safetensors",
+          "Size": 22387932,
+          "Sha256": "b3ec955d3a2144eb5b2359dc7ed3a3f53373ae7eb55cfcad974d81d8c6b02531",
+          "Revision": "e560ae797101cc14138fd3865eadde9d3522a12a"
+        },
+        {
+          "Path": "relation_lora.safetensors",
+          "Size": 870359456,
+          "Sha256": "c61459f28b85f6c5c4fa25fcb850b501400312cefb4e0bba1125ab7c5635a64d",
+          "Revision": "423c93309e6dd617a9bad080ae8c4741eb0e5637"
+        },
+        {
+          "Path": "span_head.safetensors",
+          "Size": 22387892,
+          "Sha256": "5b450a2b20d077f385b7c06042ff06c86797f05692f8b84755032920349f4dd1",
+          "Revision": "deda793b9d48378ebd099f0fac95f3729a3a924a"
+        },
+        {
+          "Path": "span_lora.safetensors",
+          "Size": 870359416,
+          "Sha256": "94a02a79c37c1a7d53d3e9771b31515c94af19011e2a75c1c51ea37196b26383",
+          "Revision": "41364b59f38a468f33564ccf30714aa357b4bd2a"
+        }
+      ],
+      "source_dtypes": {
+        "all_model_tensors_bf16": true,
+        "model_tensors_checked": 1183,
+        "source": "models/d3-turbo/pinned",
+        "streaming_f32_rounds_no_source_weights": true
+      }
+    },
+    "real_turbo_bf16": {
+      "base": {
+        "comparison": ".codex/vela3/turbo-bf16-suite/base-comparison.json",
+        "passed": false,
+        "numeric_checkpoints": 195,
+        "passed_checkpoints": 138,
+        "profile": "bf16",
+        "atol": 0.1,
+        "rtol": 0.02,
+        "envelope": {
+          "max_abs": 0.75,
+          "max_rmse": 0.06,
+          "min_cosine": 0.9995
+        },
+        "max_abs": 4.0,
+        "max_activation_abs": 4.0,
+        "max_activation_rmse": 0.08177904784679413,
+        "min_activation_cosine": 0.9999147057533264,
+        "first_failed_checkpoint": {
+          "name": "vela3.d3.attention_residual",
+          "layer": 27,
+          "count": 30720,
+          "passed": false,
+          "max_abs": 1.0,
+          "rmse": 0.012494306080043316,
+          "cosine": 0.9999735951423645
+        },
+        "failed_checkpoints": [
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 27,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.012494306080043316,
+            "cosine": 0.9999735951423645
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 27,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.012372592464089394,
+            "cosine": 0.9999738931655884
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 28,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.012031671591103077,
+            "cosine": 0.9999747276306152
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 28,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.01205199770629406,
+            "cosine": 0.9999746084213257
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 29,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.011919110082089901,
+            "cosine": 0.9999758005142212
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 29,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.011828585527837276,
+            "cosine": 0.9999762177467346
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 30,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.011922015808522701,
+            "cosine": 0.9999762177467346
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 30,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.011850847862660885,
+            "cosine": 0.9999766945838928
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 31,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.012029781006276608,
+            "cosine": 0.9999759793281555
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 31,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.012322581373155117,
+            "cosine": 0.9999744296073914
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 32,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.012369070202112198,
+            "cosine": 0.999973714351654
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 32,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.012686258181929588,
+            "cosine": 0.9999716281890869
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 33,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.01220187358558178,
+            "cosine": 0.9999738335609436
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 33,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.012100307270884514,
+            "cosine": 0.9999743103981018
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 34,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.012416912242770195,
+            "cosine": 0.9999727606773376
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 34,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.012777246534824371,
+            "cosine": 0.999972939491272
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 35,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.012989002279937267,
+            "cosine": 0.9999716281890869
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 35,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.013016310520470142,
+            "cosine": 0.9999708533287048
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 41,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.014257414266467094,
+            "cosine": 0.9999679327011108
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 41,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.014319510199129581,
+            "cosine": 0.9999679923057556
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 42,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.014730405993759632,
+            "cosine": 0.9999668598175049
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 42,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.01480097882449627,
+            "cosine": 0.9999670386314392
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 43,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.015437641181051731,
+            "cosine": 0.9999646544456482
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 43,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.01548087690025568,
+            "cosine": 0.9999638199806213
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 44,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.015807075425982475,
+            "cosine": 0.9999627470970154
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 44,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.015803230926394463,
+            "cosine": 0.9999621510505676
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 45,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.01597588136792183,
+            "cosine": 0.9999620318412781
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 45,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.01695047877728939,
+            "cosine": 0.9999573826789856
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 46,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.01719357818365097,
+            "cosine": 0.9999549388885498
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 46,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.016634412109851837,
+            "cosine": 0.9999582767486572
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 47,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.017059648409485817,
+            "cosine": 0.9999566674232483
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 47,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.017392702400684357,
+            "cosine": 0.9999516606330872
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 48,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.017392292618751526,
+            "cosine": 0.9999467730522156
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 48,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.017409276217222214,
+            "cosine": 0.9999464154243469
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 49,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.01750529557466507,
+            "cosine": 0.9999460577964783
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 49,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.017982497811317444,
+            "cosine": 0.9999448657035828
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 50,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.01848617196083069,
+            "cosine": 0.9999435544013977
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 50,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.01897931843996048,
+            "cosine": 0.999954104423523
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 54,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 2.0,
+            "rmse": 0.031571466475725174,
+            "cosine": 0.9999532103538513
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 55,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 2.0,
+            "rmse": 0.032983213663101196,
+            "cosine": 0.9999356269836426
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 55,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 2.5,
+            "rmse": 0.03574948012828827,
+            "cosine": 0.9999256730079651
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 56,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 2.0,
+            "rmse": 0.035382095724344254,
+            "cosine": 0.9999302625656128
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 56,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 2.0,
+            "rmse": 0.03735356405377388,
+            "cosine": 0.9999276995658875
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 57,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 2.0,
+            "rmse": 0.038188040256500244,
+            "cosine": 0.9999317526817322
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 57,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 2.0,
+            "rmse": 0.03995411470532417,
+            "cosine": 0.9999303817749023
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 58,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 2.0,
+            "rmse": 0.04120928421616554,
+            "cosine": 0.9999367594718933
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 58,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 4.0,
+            "rmse": 0.04778227210044861,
+            "cosine": 0.9999646544456482
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 59,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 4.0,
+            "rmse": 0.048857640475034714,
+            "cosine": 0.9999411106109619
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 59,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 4.0,
+            "rmse": 0.05081568658351898,
+            "cosine": 0.9999147653579712
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 60,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 3.0,
+            "rmse": 0.04936607927083969,
+            "cosine": 0.9999240040779114
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 60,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 3.0,
+            "rmse": 0.05209844559431076,
+            "cosine": 0.9999244213104248
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 61,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 2.0,
+            "rmse": 0.051701631397008896,
+            "cosine": 0.9999282956123352
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 61,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 2.0,
+            "rmse": 0.055189717561006546,
+            "cosine": 0.9999250173568726
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 62,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 2.0,
+            "rmse": 0.05663755536079407,
+            "cosine": 0.9999299049377441
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 62,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 2.0,
+            "rmse": 0.061600212007761,
+            "cosine": 0.9999315142631531
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 63,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 2.0,
+            "rmse": 0.0636766254901886,
+            "cosine": 0.9999356269836426
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 63,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 4.0,
+            "rmse": 0.08177904784679413,
+            "cosine": 0.9999517202377319
+          }
+        ],
+        "logits": [
+          {
+            "name": "vela3.d3.logits",
+            "layer": null,
+            "count": 3,
+            "passed": true,
+            "max_abs": 0.0802774429321289,
+            "rmse": 0.07501845061779022,
+            "cosine": 0.9999727606773376,
+            "oracle_argmax": 1,
+            "native_argmax": 1
+          }
+        ]
+      },
+      "span": {
+        "comparison": ".codex/vela3/turbo-bf16-suite/span-comparison.json",
+        "passed": false,
+        "numeric_checkpoints": 195,
+        "passed_checkpoints": 165,
+        "profile": "bf16",
+        "atol": 0.1,
+        "rtol": 0.02,
+        "envelope": {
+          "max_abs": 0.75,
+          "max_rmse": 0.06,
+          "min_cosine": 0.9995
+        },
+        "max_abs": 16.0,
+        "max_activation_abs": 16.0,
+        "max_activation_rmse": 0.16268514096736908,
+        "min_activation_cosine": 0.9998798370361328,
+        "first_failed_checkpoint": {
+          "name": "vela3.d3.layer",
+          "layer": 38,
+          "count": 30720,
+          "passed": false,
+          "max_abs": 1.0,
+          "rmse": 0.01408705860376358,
+          "cosine": 0.9999687671661377
+        },
+        "failed_checkpoints": [
+          {
+            "name": "vela3.d3.layer",
+            "layer": 38,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.01408705860376358,
+            "cosine": 0.9999687671661377
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 40,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.014521376229822636,
+            "cosine": 0.99996417760849
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 48,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.020182039588689804,
+            "cosine": 0.9999250769615173
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 49,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.021848903968930244,
+            "cosine": 0.999913215637207
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 49,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.023046867921948433,
+            "cosine": 0.9999076724052429
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 50,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.25,
+            "rmse": 0.02405724488198757,
+            "cosine": 0.999900758266449
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 50,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.25,
+            "rmse": 0.02563454955816269,
+            "cosine": 0.9999123215675354
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 51,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.027122171595692635,
+            "cosine": 0.9998864531517029
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 51,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.027684183791279793,
+            "cosine": 0.9998912811279297
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 52,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.028197206556797028,
+            "cosine": 0.999890148639679
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 54,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 2.0,
+            "rmse": 0.03760432079434395,
+            "cosine": 0.999918520450592
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 55,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.03757710009813309,
+            "cosine": 0.999901533126831
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 55,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.03958474472165108,
+            "cosine": 0.9998985528945923
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 56,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.04061776027083397,
+            "cosine": 0.9999023079872131
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 56,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.5,
+            "rmse": 0.042684104293584824,
+            "cosine": 0.9998980164527893
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 57,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.04274823144078255,
+            "cosine": 0.9999102354049683
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 57,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.044714074581861496,
+            "cosine": 0.999907374382019
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 58,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.044985610991716385,
+            "cosine": 0.9999160766601562
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 58,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 8.0,
+            "rmse": 0.06642141938209534,
+            "cosine": 0.9999229907989502
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 59,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 8.0,
+            "rmse": 0.06719718128442764,
+            "cosine": 0.9998798370361328
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 59,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 5.0,
+            "rmse": 0.05789557099342346,
+            "cosine": 0.9998909831047058
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 60,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 2.0,
+            "rmse": 0.05220605432987213,
+            "cosine": 0.9999200105667114
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 60,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 2.0,
+            "rmse": 0.05521795526146889,
+            "cosine": 0.9999204277992249
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 61,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 2.0,
+            "rmse": 0.05604188144207001,
+            "cosine": 0.9999212622642517
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 61,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 2.0,
+            "rmse": 0.058917198330163956,
+            "cosine": 0.9999191761016846
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 62,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 2.0,
+            "rmse": 0.05965619906783104,
+            "cosine": 0.9999285936355591
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 62,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 2.0,
+            "rmse": 0.06317984312772751,
+            "cosine": 0.9999330639839172
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 63,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 2.0,
+            "rmse": 0.0659177228808403,
+            "cosine": 0.9999518990516663
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 63,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 16.0,
+            "rmse": 0.16268514096736908,
+            "cosine": 0.9999914169311523
+          },
+          {
+            "name": "vela3.d3.logits",
+            "layer": null,
+            "count": 3,
+            "passed": false,
+            "max_abs": 0.03054225444793701,
+            "rmse": 0.026950957253575325,
+            "cosine": 0.9999655485153198,
+            "oracle_argmax": 0,
+            "native_argmax": 1
+          }
+        ],
+        "logits": [
+          {
+            "name": "vela3.d3.logits",
+            "layer": null,
+            "count": 3,
+            "passed": false,
+            "max_abs": 0.03054225444793701,
+            "rmse": 0.026950957253575325,
+            "cosine": 0.9999655485153198,
+            "oracle_argmax": 0,
+            "native_argmax": 1
+          }
+        ]
+      },
+      "decision": {
+        "comparison": ".codex/vela3/turbo-bf16-suite/decision-comparison.json",
+        "passed": false,
+        "numeric_checkpoints": 195,
+        "passed_checkpoints": 137,
+        "profile": "bf16",
+        "atol": 0.1,
+        "rtol": 0.02,
+        "envelope": {
+          "max_abs": 0.75,
+          "max_rmse": 0.06,
+          "min_cosine": 0.9995
+        },
+        "max_abs": 4.0,
+        "max_activation_abs": 4.0,
+        "max_activation_rmse": 0.07968667894601822,
+        "min_activation_cosine": 0.9999218583106995,
+        "first_failed_checkpoint": {
+          "name": "vela3.d3.attention_residual",
+          "layer": 23,
+          "count": 30720,
+          "passed": false,
+          "max_abs": 1.0,
+          "rmse": 0.011584104970097542,
+          "cosine": 0.9999740123748779
+        },
+        "failed_checkpoints": [
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 23,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.011584104970097542,
+            "cosine": 0.9999740123748779
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 23,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.25,
+            "rmse": 0.012504076585173607,
+            "cosine": 0.9999693036079407
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 24,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.25,
+            "rmse": 0.013073720969259739,
+            "cosine": 0.9999662637710571
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 24,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.012992272153496742,
+            "cosine": 0.9999672770500183
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 25,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.012570790015161037,
+            "cosine": 0.9999725222587585
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 25,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.01260427851229906,
+            "cosine": 0.9999731779098511
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 26,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.012787033803761005,
+            "cosine": 0.9999722838401794
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 26,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.012990651652216911,
+            "cosine": 0.9999729990959167
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 27,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.013287391513586044,
+            "cosine": 0.9999709129333496
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 27,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.013171875849366188,
+            "cosine": 0.9999710917472839
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 28,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.013280102983117104,
+            "cosine": 0.9999696612358093
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 28,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.013334494084119797,
+            "cosine": 0.9999692440032959
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 29,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.01353958435356617,
+            "cosine": 0.9999687075614929
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 29,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.01354143489152193,
+            "cosine": 0.9999690055847168
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 30,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.013421855866909027,
+            "cosine": 0.9999699592590332
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 30,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.01349736750125885,
+            "cosine": 0.9999707937240601
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 31,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.013676038011908531,
+            "cosine": 0.9999694228172302
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 31,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.013605141080915928,
+            "cosine": 0.9999691247940063
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 32,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.013701511546969414,
+            "cosine": 0.9999679327011108
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 32,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.01393624022603035,
+            "cosine": 0.9999663829803467
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 33,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.013983044773340225,
+            "cosine": 0.9999661445617676
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 33,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.013952746987342834,
+            "cosine": 0.9999663829803467
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 38,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.015924392268061638,
+            "cosine": 0.9999611973762512
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 39,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.01625986211001873,
+            "cosine": 0.9999582767486572
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 39,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.01607688143849373,
+            "cosine": 0.9999580979347229
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 40,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.016211675480008125,
+            "cosine": 0.9999560117721558
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 41,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.016391688957810402,
+            "cosine": 0.9999561905860901
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 41,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.016453182324767113,
+            "cosine": 0.9999563694000244
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 42,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.016329562291502953,
+            "cosine": 0.9999583959579468
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 42,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.01643974892795086,
+            "cosine": 0.9999585747718811
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 43,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.01677660271525383,
+            "cosine": 0.9999570846557617
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 43,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.016746606677770615,
+            "cosine": 0.9999565482139587
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 44,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.017224177718162537,
+            "cosine": 0.9999536871910095
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 44,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.01722663827240467,
+            "cosine": 0.9999539852142334
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 45,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.017434578388929367,
+            "cosine": 0.9999533295631409
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 45,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.01744069531559944,
+            "cosine": 0.9999536871910095
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 46,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.017665231600403786,
+            "cosine": 0.9999518990516663
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 46,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.01772075705230236,
+            "cosine": 0.9999526143074036
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 47,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.018206927925348282,
+            "cosine": 0.9999513626098633
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 47,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.017810385674238205,
+            "cosine": 0.999950647354126
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 48,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.01812734641134739,
+            "cosine": 0.9999452233314514
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 54,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 2.0,
+            "rmse": 0.0307918693870306,
+            "cosine": 0.999951958656311
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 55,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 2.0,
+            "rmse": 0.031468912959098816,
+            "cosine": 0.9999386072158813
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 55,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.03140693157911301,
+            "cosine": 0.9999412894248962
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 57,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.03473684564232826,
+            "cosine": 0.9999434351921082
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 57,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.03642619401216507,
+            "cosine": 0.9999417066574097
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 58,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.03762250021100044,
+            "cosine": 0.9999451637268066
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 58,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.039191968739032745,
+            "cosine": 0.999970018863678
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 59,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.04086880758404732,
+            "cosine": 0.9999523758888245
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 59,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 3.0,
+            "rmse": 0.0465884804725647,
+            "cosine": 0.9999279975891113
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 60,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 2.0,
+            "rmse": 0.04540949687361717,
+            "cosine": 0.9999361038208008
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 60,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 2.0,
+            "rmse": 0.04898500442504883,
+            "cosine": 0.9999334216117859
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 61,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 2.0,
+            "rmse": 0.05063202604651451,
+            "cosine": 0.999932050704956
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 61,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 3.0,
+            "rmse": 0.05517539754509926,
+            "cosine": 0.9999262094497681
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 62,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 2.0,
+            "rmse": 0.05597212538123131,
+            "cosine": 0.9999322891235352
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 62,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 2.0,
+            "rmse": 0.0610387958586216,
+            "cosine": 0.9999330043792725
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 63,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 2.0,
+            "rmse": 0.06416347622871399,
+            "cosine": 0.999936044216156
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 63,
+            "count": 30720,
+            "passed": false,
+            "max_abs": 4.0,
+            "rmse": 0.07968667894601822,
+            "cosine": 0.9999563694000244
+          }
+        ],
+        "logits": [
+          {
+            "name": "vela3.d3.logits",
+            "layer": null,
+            "count": 3,
+            "passed": true,
+            "max_abs": 0.026460766792297363,
+            "rmse": 0.019380709156394005,
+            "cosine": 0.9999873638153076,
+            "oracle_argmax": 1,
+            "native_argmax": 1
+          }
+        ]
+      }
+    },
+    "real_turbo_f32": {
+      "base": {
+        "comparison": ".codex/vela3/turbo-f32-suite/base-comparison.json",
+        "passed": true,
+        "numeric_checkpoints": 195,
+        "passed_checkpoints": 195,
+        "profile": "pointwise",
+        "atol": 0.0005,
+        "rtol": 0.0001,
+        "envelope": null,
+        "max_abs": 0.000732421875,
+        "max_activation_abs": 0.000732421875,
+        "max_activation_rmse": 2.3146831154008396e-05,
+        "min_activation_cosine": 0.9999997615814209,
+        "first_failed_checkpoint": null,
+        "failed_checkpoints": [],
+        "logits": [
+          {
+            "name": "vela3.d3.logits",
+            "layer": null,
+            "count": 3,
+            "passed": true,
+            "max_abs": 1.9073486328125e-06,
+            "rmse": 1.4889235444570659e-06,
+            "cosine": 0.9999999403953552,
+            "oracle_argmax": 1,
+            "native_argmax": 1
+          }
+        ]
+      },
+      "span": {
+        "comparison": ".codex/vela3/turbo-f32-suite/span-comparison.json",
+        "passed": true,
+        "numeric_checkpoints": 195,
+        "passed_checkpoints": 195,
+        "profile": "pointwise",
+        "atol": 0.0005,
+        "rtol": 0.0001,
+        "envelope": null,
+        "max_abs": 0.0126953125,
+        "max_activation_abs": 0.0126953125,
+        "max_activation_rmse": 8.681214967509732e-05,
+        "min_activation_cosine": 0.9999998211860657,
+        "first_failed_checkpoint": null,
+        "failed_checkpoints": [],
+        "logits": [
+          {
+            "name": "vela3.d3.logits",
+            "layer": null,
+            "count": 3,
+            "passed": true,
+            "max_abs": 9.179115295410156e-06,
+            "rmse": 6.1227638070704415e-06,
+            "cosine": 1.0,
+            "oracle_argmax": 1,
+            "native_argmax": 1
+          }
+        ]
+      },
+      "decision": {
+        "comparison": ".codex/vela3/turbo-f32-suite/decision-comparison.json",
+        "passed": true,
+        "numeric_checkpoints": 195,
+        "passed_checkpoints": 195,
+        "profile": "pointwise",
+        "atol": 0.0005,
+        "rtol": 0.0001,
+        "envelope": null,
+        "max_abs": 0.0018463134765625,
+        "max_activation_abs": 0.0018463134765625,
+        "max_activation_rmse": 2.2586700652027503e-05,
+        "min_activation_cosine": 0.9999997615814209,
+        "first_failed_checkpoint": null,
+        "failed_checkpoints": [],
+        "logits": [
+          {
+            "name": "vela3.d3.logits",
+            "layer": null,
+            "count": 3,
+            "passed": true,
+            "max_abs": 1.0967254638671875e-05,
+            "rmse": 8.073734534264077e-06,
+            "cosine": 1.0000001192092896,
+            "oracle_argmax": 1,
+            "native_argmax": 1
+          }
+        ]
+      }
+    },
+    "turbo_reproducing_commands": [
+      "/Users/gouzi/.codex/worktrees/a06a/rust-model-inference/.venv/bin/python tools/oracle/vela3/request_oracle.py --model models/vela3-turbo --base models/d3-turbo/pinned --request tools/oracle/vela3/requests/turbo.json --threads 8 --out .codex/vela3/turbo-request-oracle.json",
+      ".codex/vela3/bin/vela3-parity models::vela3::decoder::tests::official_request_token_ids_and_word_label_positions_are_exact --ignored --exact --nocapture",
+      ".codex/vela3/bin/vela3 --model models/vela3-turbo --base-model models/d3-turbo/pinned --request tools/oracle/vela3/requests/turbo.json --threads 8",
+      "/Users/gouzi/.codex/worktrees/a06a/rust-model-inference/.venv/bin/python tools/oracle/vela3/compare_requests.py .codex/vela3/turbo-request-oracle.json .codex/vela3/turbo-request-native.json --atol 0.01 --rtol 0.01 --out .codex/vela3/turbo-request-comparison.json",
+      "/Users/gouzi/.codex/worktrees/a06a/rust-model-inference/.venv/bin/python tools/oracle/vela3/d3_oracle.py suite --native .codex/vela3/bin/vela3-parity --base models/d3-turbo/pinned --vela models/vela3-turbo --text 'Alice works at Acme.' --state-tokens 2 --adapters span decision --dtype bfloat16 --out .codex/vela3/turbo-bf16-suite",
+      "/Users/gouzi/.codex/worktrees/a06a/rust-model-inference/.venv/bin/python tools/oracle/vela3/d3_oracle.py suite --native .codex/vela3/bin/vela3-parity --base models/d3-turbo/pinned --vela models/vela3-turbo --text 'Alice works at Acme.' --state-tokens 2 --adapters span decision --dtype float32 --stream-f32-weights --out .codex/vela3/turbo-f32-suite",
+      "target/release-fast/vela3 --model models/vela3-turbo --base-model models/d3-turbo/pinned --request tools/oracle/vela3/requests/turbo.json --threads 8",
+      "/Users/gouzi/.codex/worktrees/a06a/rust-model-inference/.venv/bin/python tools/oracle/vela3/compare_requests.py .codex/vela3/turbo-request-oracle.json .codex/vela3/turbo-request-native-fixed.json --atol 0.01 --rtol 0.01 --out .codex/vela3/turbo-request-comparison-fixed.json"
+    ]
+  },
+  "fast": {
+    "real_base_hidden_max_absolute_error": 4.577636719e-05,
+    "real_base_logits_max_absolute_error": 4.827976227e-06,
+    "real_task_coverage": [
+      "choice",
+      "noul",
+      "span",
+      "evidence",
+      "span_set"
+    ],
+    "synthetic_task_coverage": "All nine adapters, 15 questions and long-window aggregation",
+    "real_all_adapters": {
+      "passed": true,
+      "adapters": [
+        "domain",
+        "evidence",
+        "factcheck",
+        "feedback_df",
+        "ner",
+        "relation",
+        "router",
+        "span",
+        "span_sets"
+      ],
+      "questions": 18,
+      "usage": {
+        "input_tokens": 1651,
+        "output_tokens": 0
+      },
+      "decision_hidden_records": 7,
+      "hidden_max_absolute_error": 0.0008773803711,
+      "logits_max_absolute_error": 3.397464752e-06,
+      "test_wall_seconds": 312.6,
+      "response_atol": 0.0005,
+      "response_rtol": 0.0005,
+      "note": "Final public CLI rerun includes threshold and duplicate-choice fixes; exact response fields pass."
+    }
+  },
+  "fast_vision": {
+    "ocr": {
+      "passed": true,
+      "tokens": 360,
+      "frames": [
+        0,
+        0
+      ],
+      "expected": {
+        "model": "vllm-sr/vela3-fast-vision",
+        "answers": {
+          "q": {
+            "type": "span",
+            "target": "ocr",
+            "spans": [
+              {
+                "start": 0,
+                "end": 25,
+                "label": "ocr_error",
+                "text": "The receipt totals 42.00.",
+                "score": 0.004522145260125399
+              }
+            ],
+            "head": "ocr_check",
+            "threshold": 0.0
+          }
+        },
+        "usage": {
+          "input_tokens": 360,
+          "output_tokens": 0
+        }
+      },
+      "task_metrics": [
+        {
+          "name": "text_hidden",
+          "count": 276480,
+          "max_abs": 0.003373146,
+          "rmse": 0.00011774,
+          "normalized_rmse": 2.3563e-05
+        },
+        {
+          "name": "selected_hidden",
+          "count": 5376,
+          "max_abs": 6.485e-05,
+          "rmse": 1.1354e-05,
+          "normalized_rmse": 2.223e-06
+        },
+        {
+          "name": "logits",
+          "count": 7,
+          "max_abs": 7.629e-06,
+          "rmse": 4.545e-06,
+          "normalized_rmse": 7.37e-07
+        }
+      ],
+      "weights": {
+        "backbone": {
+          "bytes": 1016406336,
+          "sha256": "9387cfd5bc53082b6ff634453c6b0cb3123a67e4c197209e308ecfaf7a578900"
+        },
+        "adapter": {
+          "bytes": 37801156,
+          "sha256": "882f2d71d6aee9d90f75b68d35c6eb74388fa96c1013d959b0ab18fe8b0f9719"
+        }
+      },
+      "numeric_comparisons": 86,
+      "model_checkpoints": 84,
+      "preprocessing_comparisons": 2
+    },
+    "span": {
+      "passed": true,
+      "tokens": 355,
+      "frames": [
+        0,
+        0
+      ],
+      "expected": {
+        "model": "vllm-sr/vela3-fast-vision",
+        "answers": {
+          "q": {
+            "type": "span",
+            "target": "answer",
+            "spans": [
+              {
+                "start": 0,
+                "end": 25,
+                "label": "unsupported",
+                "text": "The receipt totals 42.00.",
+                "score": 0.9997364282608032
+              }
+            ],
+            "head": "image_halu",
+            "threshold": 0.05
+          }
+        },
+        "usage": {
+          "input_tokens": 355,
+          "output_tokens": 0
+        }
+      },
+      "task_metrics": [
+        {
+          "name": "text_hidden",
+          "count": 272640,
+          "max_abs": 0.005722333,
+          "rmse": 6.1394e-05,
+          "normalized_rmse": 1.6489e-05
+        },
+        {
+          "name": "selected_hidden",
+          "count": 5376,
+          "max_abs": 4.2439e-05,
+          "rmse": 8.839e-06,
+          "normalized_rmse": 2.249e-06
+        },
+        {
+          "name": "logits",
+          "count": 7,
+          "max_abs": 5.722e-06,
+          "rmse": 3.568e-06,
+          "normalized_rmse": 4.33e-07
+        }
+      ],
+      "weights": {
+        "backbone": {
+          "bytes": 1016406336,
+          "sha256": "9387cfd5bc53082b6ff634453c6b0cb3123a67e4c197209e308ecfaf7a578900"
+        },
+        "adapter": {
+          "bytes": 94444476,
+          "sha256": "9cbfd04d5960818001c1b6ff7a3f02a5595dd73f3c5d32a256fbe1855f4055bd"
+        }
+      },
+      "numeric_comparisons": 86,
+      "model_checkpoints": 84,
+      "preprocessing_comparisons": 2
+    },
+    "decision": {
+      "passed": true,
+      "tokens": 351,
+      "frames": [
+        0,
+        0
+      ],
+      "expected": {
+        "model": "vllm-sr/vela3-fast-vision",
+        "answers": {
+          "q": {
+            "type": "choice",
+            "choice": "receipt",
+            "probabilities": {
+              "receipt": 0.939448356628418,
+              "landscape": 0.06055157259106636
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 351,
+          "output_tokens": 0
+        }
+      },
+      "task_metrics": [
+        {
+          "name": "text_hidden",
+          "count": 269568,
+          "max_abs": 0.003417969,
+          "rmse": 1.9881e-05,
+          "normalized_rmse": 6.404e-06
+        },
+        {
+          "name": "selected_hidden",
+          "count": 1536,
+          "max_abs": 4.8637e-05,
+          "rmse": 1.0512e-05,
+          "normalized_rmse": 2.722e-06
+        },
+        {
+          "name": "logits",
+          "count": 2,
+          "max_abs": 6.437e-06,
+          "rmse": 5.197e-06,
+          "normalized_rmse": 2.388e-06
+        }
+      ],
+      "weights": {
+        "backbone": {
+          "bytes": 1016406336,
+          "sha256": "65e0c0284eb8c6e494c058d1988ad1b3d2eab60c368bb3d704e09174d1220bd5"
+        },
+        "adapter": {
+          "bytes": 2372084,
+          "sha256": "8a8ddc13ccc09ebe41f4200b8685a72a7c19d4567c7c1a85f600b25dad53ae55"
+        }
+      },
+      "numeric_comparisons": 86,
+      "model_checkpoints": 84,
+      "preprocessing_comparisons": 2
+    },
+    "box": {
+      "passed": true,
+      "tokens": 340,
+      "frames": [
+        2,
+        2
+      ],
+      "expected": {
+        "model": "vllm-sr/vela3-fast-vision",
+        "answers": {
+          "q": {
+            "type": "box",
+            "box": {
+              "top": 0.125,
+              "bottom": 1.0,
+              "left": 0.5625,
+              "right": 1.0
+            },
+            "point": {
+              "y": 0.65625,
+              "x": 0.90625
+            },
+            "confidence": 0.3745133876800537
+          }
+        },
+        "usage": {
+          "input_tokens": 340,
+          "output_tokens": 0
+        }
+      },
+      "task_metrics": [
+        {
+          "name": "text_hidden",
+          "count": 261120,
+          "max_abs": 9.0599e-05,
+          "rmse": 5.555e-06,
+          "normalized_rmse": 2.093e-06
+        },
+        {
+          "name": "selected_hidden",
+          "count": 245760,
+          "max_abs": 9.0599e-05,
+          "rmse": 5.677e-06,
+          "normalized_rmse": 2.143e-06
+        },
+        {
+          "name": "logits",
+          "count": 320,
+          "max_abs": 8.345e-06,
+          "rmse": 3.062e-06,
+          "normalized_rmse": 1.941e-06
+        }
+      ],
+      "weights": {
+        "backbone": {
+          "bytes": 1016406336,
+          "sha256": "46e65f6e6b906a64e4ad57e2e76957522bd01e2eeb5d8467078b895410d1e0aa"
+        },
+        "adapter": {
+          "bytes": 94444476,
+          "sha256": "62d05d58ddbb7f9248dff4e84dc4864c09c78a56e19088cae112ccbd9035fb6b"
+        }
+      },
+      "numeric_comparisons": 86,
+      "model_checkpoints": 84,
+      "preprocessing_comparisons": 2
+    }
+  },
+  "limits": [
+    "turbo real-base BF16 internal checkpoint gate FAILED; see per-route reports without relaxed thresholds",
+    "mini real-base noncausal BF16 internal checkpoint gate FAILED (11/297); F32 graph, full tested System One response and four-step causal graph pass",
+    "flash real-base BF16 internal checkpoint gate FAILED; F32 graph, tested System One response and four greedy token IDs pass",
+    "d3 image BF16 checkpoint gate FAILED; image path experimental",
+    "fast-vision real checks use shipped Python text implementation with config-only compatibility shim",
+    "No GPU/GGUF/server/video integration, long-context benchmark or cross-device validation"
+  ],
+  "engineering_checks": {
+    "vela3": {
+      "result": "ok",
+      "passed": 41,
+      "failed": 0,
+      "ignored": 5
+    },
+    "full_library": {
+      "result": "FAILED",
+      "passed": 1322,
+      "failed": 20,
+      "ignored": 89
+    },
+    "baseline": {
+      "commit": "92d2eca0aad9161694be49a67a4b3057f7514547",
+      "result": "FAILED",
+      "passed": 1280,
+      "failed": 20,
+      "ignored": 84
+    },
+    "same_failures_as_baseline": [
+      "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+      "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+      "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+      "models::clm::tests::matches_reference_golden_vectors",
+      "models::clm::tests::rejects_wrong_embedding_width",
+      "models::diffusion::z_image::text::tests::qwen_attention_softmax_matches_the_pinned_ggml_neon_reduction",
+      "models::diffusion::z_image::text::tests::silu_mul_inplace_matches_pinned_ggml_neon_activation",
+      "models::diffusion::z_image::vae::tests::silu_matches_pinned_ggml_neon_vector_path",
+      "models::funasr::encoder::parity_tests::fsmn_rounds_product_before_adding_like_ggml",
+      "models::funasr::encoder::parity_tests::layernorm_accumulates_variance_in_ggml_neon_groups",
+      "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+      "models::gemma4::trunk::tests::per_layer_bf16_projection_matches_pinned_scalar_dot_bits",
+      "models::gemma4::trunk::tests::per_layer_projection_rejects_non_bf16_weight",
+      "models::gemma4::trunk::tests::per_layer_projection_rejects_wrong_bf16_storage_length",
+      "ops::argmax::tests::all_negative",
+      "ops::argmax::tests::large_random",
+      "ops::argmax::tests::middle_max",
+      "ops::argmax::tests::tail_handles_non_aligned_lengths",
+      "ops::argmax::tests::ties_pick_lowest_index",
+      "ops::matmul::neon_tests::neon_softmax_matches_ggml_vector_exp_and_f64_sum"
+    ],
+    "new_full_library_failures": [],
+    "python_comparator_tests": 3,
+    "rustfmt": "passed: cargo +1.98.1 fmt --all -- --check",
+    "cli_build": "passed: cargo +1.98.1 build --profile release-fast --bin vela3",
+    "clippy": {
+      "passed": false,
+      "errors": 10,
+      "new_module_errors": 0,
+      "new_module_style_warnings": 21,
+      "error_files": [
+        "src/models/diffusion/ernie_image/dit.rs",
+        "src/models/diffusion/pig.rs",
+        "src/models/funasr/encoder.rs",
+        "src/models/funasr/vad.rs",
+        "src/models/qwen3/vision/mod.rs",
+        "src/models/qwen35/vision/mod.rs",
+        "src/models/yue2/nar.rs",
+        "src/ops/math/torch28.rs"
+      ],
+      "command": "cargo +1.98.1 clippy --profile release-fast --lib --message-format=json"
+    },
+    "safetensors": {
+      "passed": 2,
+      "failed": 0,
+      "ignored": 1
+    },
+    "portable_binary_recheck": {
+      "commit": "40bb2d8110e2fe659ed849db555dea1166f54958",
+      "command": ".codex/vela3/bin/vela3-parity models::vela3::",
+      "passed": 38,
+      "failed": 0,
+      "ignored": 5,
+      "provenance": {
+        "source_commit": "40bb2d8110e2fe659ed849db555dea1166f54958",
+        "binaries": [
+          {
+            "file": ".codex/vela3/bin/vela3-parity",
+            "bytes": 37002320,
+            "sha256": "d6a45974198739811a9a6eb4df69e03132a7d3add46f1a3586b0175b5d79ff3c"
+          },
+          {
+            "file": ".codex/vela3/bin/vela3",
+            "bytes": 13727040,
+            "sha256": "858dbfe768d89cbb09403fbc7923e8431882a3b4d8b171c3844fc273dc88a4bc"
+          }
+        ]
+      }
+    },
+    "python_oracle_contract_tests": {
+      "passed": true,
+      "tests": 3,
+      "command": ".venv/bin/python -m unittest discover -s tools/oracle/vela3 -p test_d3_oracle.py",
+      "scope": "Reject real causal traces before model load when the checkpoint has neither tied embeddings nor a configured grafted LM head; preserve valid mini/flash and synthetic paths."
+    },
+    "python_tests": {
+      "passed": true,
+      "tests": 6,
+      "command": ".venv/bin/python -m unittest discover -s tools/oracle/vela3 -p 'test_*.py'"
+    },
+    "runtime_source_check": {
+      "trace_binary_source": "40bb2d8110e2fe659ed849db555dea1166f54958",
+      "request_cli_sha256": "3cfb00765ac56d5d4e784cc6ca46de0b78d59fb51e295d1bc65c180115aadf05",
+      "native_usage_fix_revision": "d02113e1954b54466dc88e8ca639bb48c80fca00",
+      "scope": "The full valid turbo request used the recorded d02113e CLI. Later changes only add a per-decision validated-length cap and its error response; numerical kernels, masks, IDs, state and usage arguments remain unchanged. The latest rebuilt CLI also matches the official over-cap response. Trace source remains 40bb2d81.",
+      "numerical_kernels_unchanged": true,
+      "latest_cli_sha256": "9beeb18cae72840dbf2447ef052ac9d300d1c71a366778ba9a03d83fb3a5bd38"
+    },
+    "unsupported_cli_modes": {
+      "passed": true,
+      "checks": [
+        {
+          "field": "videos",
+          "exit_code": 1,
+          "stderr": "vela3: unsupported Vela3 request field: videos"
+        },
+        {
+          "field": "assets",
+          "exit_code": 1,
+          "stderr": "vela3: unsupported Vela3 request field: assets"
+        },
+        {
+          "field": "long_context",
+          "exit_code": 1,
+          "stderr": "vela3: unsupported Vela3 request field: long_context"
+        }
+      ],
+      "scope": "Actual CLI rejects video, assets and enabled long_context before loading weights; empty/disabled fields remain accepted."
+    },
+    "turbo_default_length_cap": {
+      "passed": true,
+      "default_decision_cap": 32768,
+      "prompt_tokens": 33082,
+      "official_response": {
+        "model": "vllm-sr/Vela-3.0-27B",
+        "answers": {
+          "too_long": {
+            "type": "choice",
+            "error": "max_length_exceeded",
+            "message": "the question prompt has 33082 tokens, over the maximum context length of 32768 tokens; nothing was truncated",
+            "reason": "question_tokens"
+          }
+        },
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0
+        }
+      },
+      "native_response": {
+        "model": "vllm-sr/Vela-3.0-27B",
+        "answers": {
+          "too_long": {
+            "type": "choice",
+            "error": "max_length_exceeded",
+            "reason": "question_tokens",
+            "message": "the question prompt has 33082 tokens, over the maximum context length of 32768 tokens; nothing was truncated"
+          }
+        },
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0
+        }
+      },
+      "comparison": {
+        "passed": true,
+        "atol": 0.0,
+        "rtol": 0.0,
+        "floats_compared": 0,
+        "max_absolute_error": 0,
+        "largest_errors": [],
+        "errors": []
+      },
+      "portable_test": "models::vela3::d3::tests::validated_length_caps_decisions_without_shortening_span_or_generation",
+      "fixture_sha256": "3b6c1a3f8aa2fc8fd388dae58bac6f5c7695005e5c9ee66eeaed8a016efc4ebe",
+      "fixture": {
+        "state": "\"x \" repeated 33000 times",
+        "questions": {
+          "too_long": {
+            "type": "choice",
+            "instructions": "Choose.",
+            "criteria": {
+              "x": null,
+              "y": null
+            }
+          }
+        }
+      },
+      "scope": "8-token decision accepted, 9 rejected at an 8-token validated cap for text/image decisions; span/generation retain their context. Invalid validated-length metadata is rejected. A real fixed turbo 33082-token request matches the official response exactly without forward."
+    },
+    "independent_review": {
+      "passed": true,
+      "resolved": "Default turbo validated_length was missing; fixed for decisions only with exact max_length_exceeded/question_tokens error and zero usage.",
+      "remaining_new_findings": 0,
+      "scope": "Read-only review of final request routing, usage, length cap, scalar safetensors validation, Oracle causal rejection and connected callers; disclosed numerical limitations remain."
+    }
+  }
+}

@@ -66,11 +66,15 @@ impl SafetensorSource {
                     .get("shape")
                     .and_then(Value::as_array)
                     .ok_or_else(|| format!("Missing {name} shape"))?;
-                let dims: Vec<u64> = shape
+                let mut dims: Vec<u64> = shape
                     .iter()
                     .rev()
                     .map(|v| v.as_u64().ok_or_else(|| format!("Invalid {name} shape")))
                     .collect::<Result<_, _>>()?;
+                // TensorInfo uses one-element vectors for scalar readouts.
+                if dims.is_empty() {
+                    dims.push(1);
+                }
                 let offsets = tensor
                     .get("data_offsets")
                     .and_then(Value::as_array)
@@ -146,6 +150,25 @@ impl TensorSource for SafetensorSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scalar_readout_is_one_element_and_keeps_range_validation() {
+        let path = std::env::temp_dir().join(format!("rmi-scalar-{}", std::process::id()));
+        let header = br#"{"log_tau":{"dtype":"F32","shape":[],"data_offsets":[0,4]}}"#;
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(header);
+        bytes.extend_from_slice(&1.25f32.to_le_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+        let source = SafetensorSource::open(&[&path]).unwrap();
+        assert_eq!(source.tensor_info("log_tau").unwrap().dims, [1]);
+        assert_eq!(
+            source.tensor_slice("log_tau").unwrap(),
+            &1.25f32.to_le_bytes()
+        );
+        std::fs::write(&path, &bytes[..bytes.len() - 1]).unwrap();
+        assert!(SafetensorSource::open(&[&path]).is_err());
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn reads_tensor_and_rejects_bad_range() {

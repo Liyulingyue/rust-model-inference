@@ -4,6 +4,8 @@ Mage-Flow 已接入主 CLI；下表数值与 PNG 证据来自原适配记录，�
 
 > 更新于 2026-10-08。以主 CLI `rust-model-inference` 为准。
 
+2026-10-30：Vela3 六个包使用独立 `vela3` CLI / Rust API 与原生 safetensors，见 [使用说明](../usage/vela3.md)；下表这几项的格式不属于 GGUF。
+
 相同的 `general.architecture` 只表示会进入同一条代码路径，不代表任意同架构 GGUF 都已确认可用。未在“具体型号”表中出现的模型，应先按 `Supported` 或 `Experimental` 看待，不能默认视为 `Verified`。
 
 2026-10-08：Z-Image VAE、YuE2、Edge0、LFM2/LFM2.5/LFM2MoE、文本 embedding 与 AuK 的
@@ -27,6 +29,12 @@ AuK Base/Flash 的 F16/Q8_0 投影与原生 Qwen 文本入口见 [AuK 实机记�
 
 | 型号 | GGUF architecture | 能力 | 所需组件 | 已验证格式 | 状态 | 证据 / 限制 |
 |---|---|---|---|---|---|---|
+| Vela3-lite | safetensors `qwen3_5` + `vela3/3` | choice / noul / score / span；图像 | 固定 d3-lite 底座、readout、LoRA 与 heads | 官方 BF16 底座 / F32 heads | `Supported`；图像 `Experimental` | 真实文本请求与官方选择、span 边界、usage 一致；有损概率容差，15 个真实 span heads 全量对照。图像与官方默认 BF16 塔有精度差异。[Oracle](../../tools/oracle/vela3/README.md)。 |
+| Vela3-mini | safetensors `qwen3_5` + `vela3/3` | choice / noul / score / span；图像 | 固定 d3-mini@566da0ea、task/opt-in LoRA 与 heads | 官方固定 BF16 底座 / F32 heads | `Experimental` | 固定 HF 底座的八问公开请求、自动定义、Unicode span、297 个 F32 checkpoint 和四步 greedy 通过；非因果 BF16 内部激活有 11 项超限，门槛未放宽。[范围](../../tools/oracle/vela3/README.md)。 |
+| Vela3-flash | safetensors `qwen3_5` + `vela3/3` | choice / noul / score / span；图像 | 固定 d3-flash、LoRA、heads、定义 lm_head | 官方 BF16 底座 / F32 heads | `Experimental` | 真实三问 choice/noul/非空 NER 请求在概率容差内通过，四步 grafted-head greedy IDs 精确一致；内部 BF16 activation 门槛未通过，未放宽门槛。[验证记录](../../tools/oracle/vela3/README.md)。 |
+| Vela3-turbo | safetensors `qwen3_5` + `vela3/3` | prefix-bidir 决策 / router / span；图像 | 固定 d3-turbo@da17b5d0c、LoRA 与 heads | 官方固定 BF16 底座 / F32 heads | `Experimental` | 固定 HF 27B 底座的八问公开请求、五种文本 LoRA、Unicode span、usage `510/0` 和 585 个 F32 checkpoint 通过；BF16 短图仍有 145 项超限，门槛未放宽。无 LM head，不执行真实 causal greedy 检查。[范围](../../tools/oracle/vela3/README.md)。 |
+| Vela3-fast | safetensors `ultrabert` | choice / noul / span / trained router set | 主模型、对应任务 adapters | 官方 380M F32/BF16 张量 | `Supported`（CPU） | 真实九种 adapter、18 问和公开 CLI 对照通过，usage 精确一致；七组 hidden/logits、小型官方图和长窗口聚合对照。[Oracle](../../tools/oracle/vela3/README.md)。 |
+| Vela3-fast-vision | safetensors `ultravbert` | 图像 choice / noul / span / OCR / box | raw/h2/v2 三底座、四个 task adapters | 官方目录、F32 参考图 | `Experimental`（CPU） | SigLIP + connector + UltraBERT + task heads；各尺寸及真实图像数值边界见 [Oracle](../../tools/oracle/vela3/README.md)。 |
 | FLUX 3 Image Klein distilled | `flux3` + `qwen3vl` + `flux3_vae` | CPU / 混合 Vulkan 文生图、最多十张参考图 | 专用 DiT、Qwen3-VL-4B text、32-channel VAE | DiT/text BF16，F32 激活，VAE Conv F16 / Norm F32 | `Experimental` | CPU（arm64/x86_64）和真实 Vulkan：文生图/双参考图完整 CLI 与 89/103 个 Oracle 检查点通过，Tokenizer 精确。GPU 用 `--gpu` / `--compute auto`，DiT/文本投影统一自动分发，CPU 使用 ComputePool；此前版本的 256×256/16 步 GPU 通过 677 个 Oracle 检查点，端到端中位数加速 4.74 倍；自动分发修正后的覆盖见复现记录。原生 BF16 激活比较未通过。正方形、16 像素网格；Base/FP8/NVFP4 拒绝。[范围和复现](../../tools/oracle/flux3/README.md)。 |
 | Timestral-209M | `timestral` | 单/多变量时间序列、数值协变量、21 分位数预测 | 官方 config + F32 safetensors 无损转换；请求 JSON | F32 GGUF；Q8_0 / Q4_0 / Q4_1 / Q4_K / Q5_K / Q6_K / F16 / BF16 | `Verified`（CPU/F32、Vulkan F32 Transformer、CPU 量化、HTTP `/v1/forecast`） | 固定官方 `a534bdbd`；全部 203 个权重 payload 精确一致。真实 CLI 的标量/默认 SIMD、Vulkan/Auto 路径逐 checkpoint 比较 mask、position、shape 和数值，包括 1025 步分块预测。浮点计算使用明确误差界；无 tokenizer。仅 209M，不支持 categorical target encoding 或批次 API；量化 checkpoint 的容差按 `general.file_type` 分档（Q8_0 的 forecast p95 中位相对误差 0.6%），K-quant 无设备 kernel、`--compute auto` 回退 CPU；HTTP 端点与 CLI 逐位一致。Q8_0 把常驻内存从 827 MB 降到 227 MB、CPU 提速约 2.2 倍；BF16/F16 精度更高（forecast p95 相对误差 0.2%/0.1%）但内存减半，BF16 有设备路径、F16 没有。GPU 实测 M3 Max/MoltenVK，输入处理和 patch/head 投影仍在 CPU，未验证其他设备及性能；[用法、哈希与复现](../../tools/oracle/timestral/README.md)。 |
 | Mage-Flow-Base | `mage_flow` + `mage_vae` + `qwen3vl`/`clip` | 主 CLI CPU 文生图 | DiT + MageVAE + Qwen3-VL 4B text；Edit 另需 vision | DiT/VAE/text BF16，norm/vision F32，F32 KV | `Experimental`（标量计算图已验证） | 真实权重 DiT、VAE、文本/vision 和固定噪声采样按全部 `u32` 位比较；最小 PNG 入口已运行。参考图片到 VL fast processor、默认大图、GPU 与 SIMD/FMA 未对齐。[哈希和验证范围](../../tools/oracle/mage_flow/README.md)。 |
