@@ -1,5 +1,5 @@
 {
-  "verified_at_utc": "2026-10-29T18:46:17.111858+00:00",
+  "verified_at_utc": "2026-10-30T01:34:10.656956+00:00",
   "environment": {
     "platform": "macOS arm64",
     "rust": "1.98.1",
@@ -401,6 +401,120 @@
       },
       "red_green": true,
       "fixture": "tools/oracle/vela3/requests/fast-thresholds.json"
+    },
+    "mini_cli": {
+      "fixture": "tools/oracle/vela3/requests/mini.json",
+      "oracle": ".codex/vela3/mini-request-oracle.json",
+      "native": ".codex/vela3/mini-request-native.json",
+      "comparison": {
+        "passed": true,
+        "atol": 0.01,
+        "rtol": 0.01,
+        "floats_compared": 19,
+        "max_absolute_error": 0.007681775732036322,
+        "largest_errors": [
+          {
+            "path": "response.answers.intent.confidence",
+            "absolute_error": 0.007681775732036322
+          },
+          {
+            "path": "response.answers.choice.confidence",
+            "absolute_error": 0.003826841582221907
+          },
+          {
+            "path": "response.answers.intent.probabilities.general_quirky",
+            "absolute_error": 0.0034840581857933373
+          },
+          {
+            "path": "response.answers.intent.probabilities.qa_factoid",
+            "absolute_error": 0.0034840581857933095
+          },
+          {
+            "path": "response.answers.opt_in.confidence",
+            "absolute_error": 0.0017391116898010095
+          },
+          {
+            "path": "response.answers.pii.spans[0].score",
+            "absolute_error": 0.0008221101369422779
+          },
+          {
+            "path": "response.answers.choice.probabilities.person",
+            "absolute_error": 0.0006642773113498812
+          },
+          {
+            "path": "response.answers.choice.probabilities.company",
+            "absolute_error": 0.0006642773113498257
+          },
+          {
+            "path": "response.answers.domain.probabilities.business",
+            "absolute_error": 0.0005358457565307617
+          },
+          {
+            "path": "response.answers.domain.probabilities.other",
+            "absolute_error": 0.0005358457565307617
+          }
+        ],
+        "errors": []
+      },
+      "contract": {
+        "passed": true,
+        "errors": [],
+        "unicode_codepoints": 36,
+        "unicode_utf8_bytes": 53,
+        "span_counts": {
+          "oracle": {
+            "ner_auto": 1,
+            "relation": 1,
+            "pii": 1
+          },
+          "native": {
+            "ner_auto": 1,
+            "relation": 1,
+            "pii": 1
+          }
+        },
+        "observed_adapters": [
+          "decision",
+          "decision_df",
+          "decision_optin",
+          "ner",
+          "relation",
+          "span"
+        ],
+        "definition_generations": [
+          {
+            "writer": "base",
+            "prompts": [
+              "You are writing annotation guidelines for named entity recognition.\nThe full label set is: person.\nDefine the entity type \"person\" in one short sentence: what kind of text span it covers. Reply with the definition only."
+            ],
+            "definitions": [
+              "The label \"person\" covers text spans that refer to human individuals."
+            ]
+          }
+        ],
+        "threshold_zero_fixture": true,
+        "limitations": "Threshold zero exercises nonempty span decoding and Unicode offsets; it does not measure extraction quality."
+      },
+      "decision_token_lengths": {
+        "choice": 108,
+        "noul": 110,
+        "intent": 132,
+        "domain": 113,
+        "opt_in": 108
+      },
+      "span_token_lengths": [
+        116,
+        102,
+        104
+      ],
+      "usage": {
+        "input_tokens": 571,
+        "output_tokens": 0
+      },
+      "native_usage": {
+        "input_tokens": 571,
+        "output_tokens": 0
+      }
     }
   },
   "real_span_heads": {
@@ -1039,7 +1153,820 @@
         }
       },
       "note": "Actual fixed BF16 weight values cast in memory; no alternative checkpoint or tolerance change."
-    }
+    },
+    "stream_f32_oracle": {
+      "purpose": "F32 text diagnostic with BF16 weight storage and one temporary F32 decoder layer; no vision or cache",
+      "source_precision_guard": "Every source safetensors tensor must be BF16; mixed F32/FP16 sources rejected before model loading",
+      "self_test": {
+        "passed": true,
+        "torch": "2.9.1",
+        "transformers": "5.19.0",
+        "cases": [
+          {
+            "mode": "noncausal",
+            "adapter": null,
+            "exact": true
+          },
+          {
+            "mode": "noncausal",
+            "adapter": "test",
+            "exact": true
+          },
+          {
+            "mode": "prefix",
+            "adapter": null,
+            "exact": true
+          },
+          {
+            "mode": "prefix",
+            "adapter": "test",
+            "exact": true
+          },
+          {
+            "mode": "causal",
+            "adapter": null,
+            "exact": true
+          },
+          {
+            "mode": "causal",
+            "adapter": "test",
+            "exact": true
+          }
+        ],
+        "exact_checkpoints": 48,
+        "max_absolute_error": 0.0,
+        "original_tensor_references_and_order": true,
+        "exception_cleanup": true,
+        "partial_conversion_cleanup": true,
+        "source_precision_guard": true,
+        "reentry_after_exception": true,
+        "model_dtype": "torch.bfloat16",
+        "maximum_temporary_f32_parameter_bytes": 9648,
+        "scope": "text; no cache; no vision computation"
+      },
+      "real_lite_equivalence": {
+        "passed": true,
+        "numeric_checkpoints": 75,
+        "float32_bits_exact": true,
+        "checked_bf16_source_tensors": 473,
+        "full_f32": ".codex/vela3/d3-lite-f32-suite/base-oracle.jsonl",
+        "streamed_f32": ".codex/vela3/stream-f32-lite-guard-suite/base-oracle.jsonl",
+        "stream_f32_sha256": "920bb33023a7e303c042f23cb22eaa8b5631d99d29468f96a92d822fdf542820"
+      },
+      "self_test_command": ".venv/bin/python tools/oracle/vela3/stream_f32.py --self-test",
+      "sources_sha256": {
+        "tools/oracle/vela3/stream_f32.py": "920bb33023a7e303c042f23cb22eaa8b5631d99d29468f96a92d822fdf542820",
+        "tools/oracle/vela3/d3_oracle.py": "98cf19f36ea05948e34674ee85639acb9df2841de85e947aa0cc91aa88f27abb"
+      }
+    },
+    "real_mini_reference": {
+      "base": {
+        "repo_id": "vllm-sr/d3-mini",
+        "revision": "566da0ea398e27184472add700499245ed09af35",
+        "runtime_note": "d3-mini@566da0ea, the base every 4B adapter was trained on (d3-mini main has different weights and readout); vela3_span.text_states takes the hooked-backbone path on this runtime, bitwise as v2"
+      },
+      "upstream_base": {
+        "repo_id": "Qwen/Qwen3.5-4B",
+        "revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a"
+      },
+      "manifest_sha256": "be76fa2250e0d7a656d63c70b82b38ec8b05042ebe2f6da705cec2118ea9be40",
+      "verified_weight_files": [
+        {
+          "file": "model-00001-of-00002.safetensors",
+          "bytes": 4973332144,
+          "sha256": "6ae27b54cff0902df2a36aabf2a48dffc0dfd7120b07e699037c6f64d4318c5e",
+          "metadata_locator": "hf-mirror.com",
+          "repo_commit": "566da0ea398e27184472add700499245ed09af35",
+          "download_host": "cas-bridge.xethub.hf.co",
+          "reused_verified": true
+        },
+        {
+          "file": "model-00002-of-00002.safetensors",
+          "bytes": 4105283936,
+          "sha256": "4d4bf448680aa1d26fe9cc88d9ca770588c53ee79d649177f8c04daf86570a48",
+          "metadata_locator": "hf-mirror.com",
+          "repo_commit": "566da0ea398e27184472add700499245ed09af35",
+          "download_host": "cas-bridge.xethub.hf.co"
+        },
+        {
+          "file": "readout.safetensors",
+          "bytes": 2611280,
+          "sha256": "b7742b1e67545cf209bff60287ee50b9ad24f71e8cae25be62f6dac45ab97fd0",
+          "metadata_locator": "hf-mirror.com",
+          "repo_commit": "566da0ea398e27184472add700499245ed09af35",
+          "download_host": "cas-bridge.xethub.hf.co",
+          "reused_verified": true
+        }
+      ],
+      "download_report": "models/d3-mini/pinned/official-verified-downloads.json",
+      "fixed_small_files": [
+        {
+          "file": "config.json",
+          "bytes": 3090,
+          "sha256": "8f5f404a71ecc53c4ff26fc42cb4c778ffacfb4c9623f5e2d51245166d6b5057",
+          "git_blob": "ca8495ef6bb09775fc4a9c5ee615d930edc9fd65",
+          "pinned_match": true
+        },
+        {
+          "file": "decision_config.json",
+          "bytes": 5502,
+          "sha256": "588bc0ac7644479b9adde0498d80b6fb7c576388992564ac67599c05d29add07",
+          "git_blob": "c3d9b6b56a91ccf48bf3178b7479f0cf4accb5d2",
+          "pinned_match": true
+        },
+        {
+          "file": "d3_format.py",
+          "bytes": 4881,
+          "sha256": "187a0f359f6f89a844e723377769556f78133b118851e702e4b0fe5123ccb0f1",
+          "git_blob": "7dc14adf7151afa9d323e501fd16799d2311119f",
+          "pinned_match": true
+        },
+        {
+          "file": "d3_runtime.py",
+          "bytes": 49276,
+          "sha256": "b61dad185148422a6ec4cb4543110fc2e3336f50468e91406c83a6666dbe64c6",
+          "git_blob": "0f2f43b61879f8dd63b216d1876abd81f1db5d55",
+          "pinned_match": true
+        },
+        {
+          "file": "modeling_d3.py",
+          "bytes": 10969,
+          "sha256": "9a718530f18d33d706a44d79be463ff43963fa3a9f808ce934a6489fd09042aa",
+          "git_blob": "4de3d8377fa1be054be3411573c4a85f8e4d54e6",
+          "pinned_match": true
+        },
+        {
+          "file": "model.safetensors.index.json",
+          "bytes": 61898,
+          "sha256": "613cc71f6441a964b0a87470536f8fb0c639bdd86b0362027c1c2b1a6e0a4a8c",
+          "git_blob": "0fc6be63f9c11cfca35658bb2c43bd37773c91f8",
+          "pinned_match": true
+        },
+        {
+          "file": "preprocessor_config.json",
+          "bytes": 390,
+          "sha256": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516",
+          "git_blob": "2ea84a437d448ff71b08df68fdd949d5cc4ebb64",
+          "pinned_match": true
+        },
+        {
+          "file": "tokenizer.json",
+          "bytes": 12807982,
+          "sha256": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+          "git_blob": "3db80ca5ce55ecec79ba2de55e6bce256d32bc78",
+          "pinned_match": true
+        },
+        {
+          "file": "tokenizer_config.json",
+          "bytes": 16710,
+          "sha256": "316230d6a809701f4db5ea8f8fc862bc3a6f3229c937c174e674ff3ca0a64ac8",
+          "git_blob": "eda48d3e75a8e59a8479ee4ec8b37f76e711d9c1",
+          "pinned_match": true
+        },
+        {
+          "file": "chat_template.jinja",
+          "bytes": 7756,
+          "sha256": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
+          "git_blob": "a585dec894e63da457d9440ec6aa7caa16d20860",
+          "pinned_match": true
+        }
+      ],
+      "actual_executed_source_checks": [
+        {
+          "sha256": "c5d504897f24fbdaa831af0a797f1527314359454533c1cd3dc07bb1f98838c1",
+          "modules": [
+            "vela_request_642c52db75b4"
+          ],
+          "pinned_d3_match": null,
+          "file": "modeling_vela3.py"
+        },
+        {
+          "sha256": "9a718530f18d33d706a44d79be463ff43963fa3a9f808ce934a6489fd09042aa",
+          "modules": [
+            "transformers_modules.d3_hyphen_mini.75e1a66a48bf74cb.modeling_d3"
+          ],
+          "pinned_d3_match": true,
+          "file": "modeling_d3.py"
+        },
+        {
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "modules": [
+            "transformers_modules.d3_hyphen_mini"
+          ],
+          "pinned_d3_match": null,
+          "file": "__init__.py"
+        },
+        {
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "modules": [
+            "transformers_modules.d3_hyphen_mini.75e1a66a48bf74cb"
+          ],
+          "pinned_d3_match": null,
+          "file": "__init__.py"
+        },
+        {
+          "sha256": "b61dad185148422a6ec4cb4543110fc2e3336f50468e91406c83a6666dbe64c6",
+          "modules": [
+            "transformers_modules.d3_hyphen_mini.75e1a66a48bf74cb.d3_runtime"
+          ],
+          "pinned_d3_match": true,
+          "file": "d3_runtime.py"
+        },
+        {
+          "sha256": "187a0f359f6f89a844e723377769556f78133b118851e702e4b0fe5123ccb0f1",
+          "modules": [
+            "transformers_modules.d3_hyphen_mini.75e1a66a48bf74cb.d3_format"
+          ],
+          "pinned_d3_match": true,
+          "file": "d3_format.py"
+        },
+        {
+          "sha256": "187a0f359f6f89a844e723377769556f78133b118851e702e4b0fe5123ccb0f1",
+          "modules": [
+            "vela3_d3_format"
+          ],
+          "pinned_d3_match": true,
+          "file": "d3_format.py"
+        },
+        {
+          "sha256": "2e88d7af591e3097a735ecbbb17fa6433aaa5b803e4b810cab6231e62ce3a2ee",
+          "modules": [
+            "vela3_adapters"
+          ],
+          "pinned_d3_match": null,
+          "file": "vela3_adapters.py"
+        },
+        {
+          "sha256": "97d2448765a7ee5411dff44c601c3a073fdad9a9921f9818bac4135916081c20",
+          "modules": [
+            "vela3_span"
+          ],
+          "pinned_d3_match": null,
+          "file": "vela3_span.py"
+        },
+        {
+          "sha256": "b7fcefdd1a0b3e8ac22ac12338c72e76925688a989b5af6c70a104fa70122a39",
+          "modules": [
+            "vela3_labeldef"
+          ],
+          "pinned_d3_match": null,
+          "file": "vela3_labeldef.py"
+        },
+        {
+          "sha256": "d2c5f2f446cf12d2f8a24dbf634452477088523b0973e1e07df244c851421efb",
+          "modules": [
+            "vela3_span_decode"
+          ],
+          "pinned_d3_match": null,
+          "file": "span_decode_v2.py"
+        }
+      ],
+      "unused_source_note": "d3_engine.py, d3_server.py and pipeline_d3.py differ from the pinned manifest; d3_fast.py and d3_kernels.py are extra. None executed. Actual cached modeling_d3.py/d3_runtime.py/d3_format.py SHA values match the pinned manifest. All executed Vela source SHA values match the recorded Vela snapshot.",
+      "cache_note": "The full-request source audit used the existing Transformers module cache; actual paths and SHA are recorded. Later trace suites used repo-local .codex/vela3/hf-modules. request_oracle now defaults future module caches to its output directory.",
+      "vela_verified_snapshot_files": [
+        {
+          "file": "config.json",
+          "bytes": 2943,
+          "sha256": "1859126a9061dd4f8eae29a79d8ebeb7a5b9ac7eb1cf7ca91422a433ee7547e6",
+          "modelscope_revision": "0f56a2f6c714c8af2c0fb8156da4dfc6ed9fcfef"
+        },
+        {
+          "file": "decision_df_lora.safetensors",
+          "bytes": 121937440,
+          "sha256": "2455f8bd69170bde42b8fdc3511281829642c70df148e41755561a8cd0badbb4",
+          "modelscope_revision": "0f56a2f6c714c8af2c0fb8156da4dfc6ed9fcfef"
+        },
+        {
+          "file": "decision_lora.safetensors",
+          "bytes": 121937304,
+          "sha256": "ebdd12efa205265ae756f3c3aeec13c8f98cb00b89fb348c3c66607f81bbaa7a",
+          "modelscope_revision": "5c62df3f1ba0a5de24b99c0bfae2fc948c767271"
+        },
+        {
+          "file": "decision_optin_lora.safetensors",
+          "bytes": 121937416,
+          "sha256": "52992183539cf7ae5fbd6ce453615eef069fc76bd38c5b1f24d420c3e75132b0",
+          "modelscope_revision": "5c62df3f1ba0a5de24b99c0bfae2fc948c767271"
+        },
+        {
+          "file": "image_halu_head.safetensors",
+          "bytes": 11195524,
+          "sha256": "097a731801ee306709d72184d9e27ff0d13cb3e47533bf58be38786e7529a1a5",
+          "modelscope_revision": "5c62df3f1ba0a5de24b99c0bfae2fc948c767271"
+        },
+        {
+          "file": "image_halu_lora.safetensors",
+          "bytes": 121917432,
+          "sha256": "20f0a98f5714c4ede7ea86e312ddbaa463a64d56c43d90561ec35f29b178d747",
+          "modelscope_revision": "2935f94e92d6e18285737acb2a23c9ce9b6a809b"
+        },
+        {
+          "file": "ner_head.safetensors",
+          "bytes": 11195612,
+          "sha256": "03dff7640e6fec1ad8ce8cd4af14e2a4e849615d7c296e931e80520a98cb4a39",
+          "modelscope_revision": "808b0ab2d05dbe31e4ef1678a07b9af4830d8922"
+        },
+        {
+          "file": "ner_lora.safetensors",
+          "bytes": 365721808,
+          "sha256": "815a221cba6799ab104ac5725be73e9e8a6589354f0d6082b53ebd61a6dfe3fd",
+          "modelscope_revision": "808b0ab2d05dbe31e4ef1678a07b9af4830d8922"
+        },
+        {
+          "file": "relation_head.safetensors",
+          "bytes": 11195452,
+          "sha256": "ae3d69387d4853cd0eb7dc80f84282946ee25f5b8eaa23e10af8ed9a2d5a4a1e",
+          "modelscope_revision": "808b0ab2d05dbe31e4ef1678a07b9af4830d8922"
+        },
+        {
+          "file": "relation_lora.safetensors",
+          "bytes": 121917360,
+          "sha256": "45ca3ef715bbb4f35c5576915702004c9aad303251c24c6468eeb96ac65bce18",
+          "modelscope_revision": "d18d99ea71f7ae529001525ad5af2282d75a3835"
+        },
+        {
+          "file": "span_head.safetensors",
+          "bytes": 11195452,
+          "sha256": "a06c85629cbe94c888bd9203cccafbaf1ede11f1864f9da4fc1ed4233c037d63",
+          "modelscope_revision": "386825f1ea030c782d48e1ba6080284089c031bf"
+        },
+        {
+          "file": "span_lora.safetensors",
+          "bytes": 121917440,
+          "sha256": "2ff18ab7c99a4a3c59bba4941e23c179d859690d62579de529828a07183746a7",
+          "modelscope_revision": "386825f1ea030c782d48e1ba6080284089c031bf"
+        },
+        {
+          "file": "vela3_config.json",
+          "bytes": 12798,
+          "sha256": "7488b44a2eb22013b332335d71f7cf6d2091a543c2b4c9c13be11fa5750baa15",
+          "modelscope_revision": "79a31f39f9471878147c2e0eb2ab8b69c85f0774"
+        }
+      ],
+      "adapter_metadata": {
+        "base": {
+          "repo_id": "vllm-sr/d3-mini",
+          "revision": "566da0ea398e27184472add700499245ed09af35",
+          "runtime_note": "d3-mini@566da0ea, the base every 4B adapter was trained on (d3-mini main has different weights and readout); vela3_span.text_states takes the hooked-backbone path on this runtime, bitwise as v2"
+        },
+        "adapters": [
+          {
+            "name": "span",
+            "r": 32,
+            "alpha": 32,
+            "modules": 100,
+            "complete_pairs": true
+          },
+          {
+            "name": "decision",
+            "r": 16,
+            "alpha": 16,
+            "modules": 200,
+            "complete_pairs": true
+          },
+          {
+            "name": "ner",
+            "r": 64,
+            "alpha": 64,
+            "modules": 150,
+            "complete_pairs": true
+          },
+          {
+            "name": "image_halu",
+            "r": 32,
+            "alpha": 32,
+            "modules": 100,
+            "complete_pairs": true
+          },
+          {
+            "name": "relation",
+            "r": 32,
+            "alpha": 32,
+            "modules": 100,
+            "complete_pairs": true
+          },
+          {
+            "name": "decision_optin",
+            "r": 16,
+            "alpha": 16,
+            "modules": 200,
+            "complete_pairs": true
+          },
+          {
+            "name": "decision_df",
+            "r": 16,
+            "alpha": 16,
+            "modules": 200,
+            "complete_pairs": true
+          }
+        ],
+        "writer": "base"
+      }
+    },
+    "real_mini_bf16": {
+      "base": {
+        "comparison": ".codex/vela3/mini-bf16-suite/base-comparison.json",
+        "passed": false,
+        "numeric_checkpoints": 99,
+        "passed_checkpoints": 98,
+        "profile": "bf16",
+        "atol": 0.1,
+        "rtol": 0.02,
+        "envelope": {
+          "max_abs": 0.75,
+          "max_rmse": 0.06,
+          "min_cosine": 0.9995
+        },
+        "max_abs": 0.8125,
+        "max_activation_abs": 0.8125,
+        "max_activation_rmse": 0.024701116606593132,
+        "min_activation_cosine": 0.9999184012413025,
+        "first_failed_checkpoint": {
+          "name": "vela3.d3.input_norm",
+          "layer": 30,
+          "count": 15360,
+          "passed": false,
+          "max_abs": 0.8125,
+          "rmse": 0.01566898636519909,
+          "cosine": 0.9999184012413025
+        },
+        "failed_checkpoints": [
+          {
+            "name": "vela3.d3.input_norm",
+            "layer": 30,
+            "count": 15360,
+            "passed": false,
+            "max_abs": 0.8125,
+            "rmse": 0.01566898636519909,
+            "cosine": 0.9999184012413025
+          }
+        ],
+        "logits": [
+          {
+            "name": "vela3.d3.logits",
+            "layer": null,
+            "count": 3,
+            "passed": true,
+            "max_abs": 0.019920527935028076,
+            "rmse": 0.012269404716789722,
+            "cosine": 0.999911904335022,
+            "oracle_argmax": 0,
+            "native_argmax": 0
+          }
+        ]
+      },
+      "span": {
+        "comparison": ".codex/vela3/mini-bf16-suite/span-comparison.json",
+        "passed": false,
+        "numeric_checkpoints": 99,
+        "passed_checkpoints": 98,
+        "profile": "bf16",
+        "atol": 0.1,
+        "rtol": 0.02,
+        "envelope": {
+          "max_abs": 0.75,
+          "max_rmse": 0.06,
+          "min_cosine": 0.9995
+        },
+        "max_abs": 1.0,
+        "max_activation_abs": 1.0,
+        "max_activation_rmse": 0.020346680656075478,
+        "min_activation_cosine": 0.9998756647109985,
+        "first_failed_checkpoint": {
+          "name": "vela3.d3.layer",
+          "layer": 31,
+          "count": 15360,
+          "passed": false,
+          "max_abs": 1.0,
+          "rmse": 0.019992927089333534,
+          "cosine": 0.9999836087226868
+        },
+        "failed_checkpoints": [
+          {
+            "name": "vela3.d3.layer",
+            "layer": 31,
+            "count": 15360,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.019992927089333534,
+            "cosine": 0.9999836087226868
+          }
+        ],
+        "logits": [
+          {
+            "name": "vela3.d3.logits",
+            "layer": null,
+            "count": 3,
+            "passed": true,
+            "max_abs": 0.02299964427947998,
+            "rmse": 0.013715114444494247,
+            "cosine": 0.9999668598175049,
+            "oracle_argmax": 0,
+            "native_argmax": 0
+          }
+        ]
+      },
+      "decision": {
+        "comparison": ".codex/vela3/mini-bf16-suite/decision-comparison.json",
+        "passed": false,
+        "numeric_checkpoints": 99,
+        "passed_checkpoints": 90,
+        "profile": "bf16",
+        "atol": 0.1,
+        "rtol": 0.02,
+        "envelope": {
+          "max_abs": 0.75,
+          "max_rmse": 0.06,
+          "min_cosine": 0.9995
+        },
+        "max_abs": 1.0625,
+        "max_activation_abs": 1.0625,
+        "max_activation_rmse": 0.026409095153212547,
+        "min_activation_cosine": 0.9999014735221863,
+        "first_failed_checkpoint": {
+          "name": "vela3.d3.input_norm",
+          "layer": 28,
+          "count": 15360,
+          "passed": false,
+          "max_abs": 1.0,
+          "rmse": 0.018088916316628456,
+          "cosine": 0.9999014735221863
+        },
+        "failed_checkpoints": [
+          {
+            "name": "vela3.d3.input_norm",
+            "layer": 28,
+            "count": 15360,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.018088916316628456,
+            "cosine": 0.9999014735221863
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 28,
+            "count": 15360,
+            "passed": false,
+            "max_abs": 0.8125,
+            "rmse": 0.011385641992092133,
+            "cosine": 0.9999096393585205
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 28,
+            "count": 15360,
+            "passed": false,
+            "max_abs": 0.8125,
+            "rmse": 0.011649902909994125,
+            "cosine": 0.9999139904975891
+          },
+          {
+            "name": "vela3.d3.input_norm",
+            "layer": 29,
+            "count": 15360,
+            "passed": false,
+            "max_abs": 0.9375,
+            "rmse": 0.01631125435233116,
+            "cosine": 0.9999074339866638
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 29,
+            "count": 15360,
+            "passed": false,
+            "max_abs": 0.8125,
+            "rmse": 0.011859619989991188,
+            "cosine": 0.9999174475669861
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 29,
+            "count": 15360,
+            "passed": false,
+            "max_abs": 0.8125,
+            "rmse": 0.01241553295403719,
+            "cosine": 0.9999175667762756
+          },
+          {
+            "name": "vela3.d3.input_norm",
+            "layer": 30,
+            "count": 15360,
+            "passed": false,
+            "max_abs": 1.0625,
+            "rmse": 0.016930624842643738,
+            "cosine": 0.9999052286148071
+          },
+          {
+            "name": "vela3.d3.attention_residual",
+            "layer": 30,
+            "count": 15360,
+            "passed": false,
+            "max_abs": 0.875,
+            "rmse": 0.013178212568163872,
+            "cosine": 0.9999216198921204
+          },
+          {
+            "name": "vela3.d3.layer",
+            "layer": 31,
+            "count": 15360,
+            "passed": false,
+            "max_abs": 1.0,
+            "rmse": 0.019863728433847427,
+            "cosine": 0.9999599456787109
+          }
+        ],
+        "logits": [
+          {
+            "name": "vela3.d3.logits",
+            "layer": null,
+            "count": 3,
+            "passed": true,
+            "max_abs": 0.0663047730922699,
+            "rmse": 0.05067305266857147,
+            "cosine": 0.9974503517150879,
+            "oracle_argmax": 0,
+            "native_argmax": 0
+          }
+        ]
+      }
+    },
+    "real_mini_f32": {
+      "base": {
+        "comparison": ".codex/vela3/mini-f32-suite/base-comparison.json",
+        "passed": true,
+        "numeric_checkpoints": 99,
+        "passed_checkpoints": 99,
+        "profile": "pointwise",
+        "atol": 0.0005,
+        "rtol": 0.0001,
+        "envelope": null,
+        "max_abs": 0.00026702880859375,
+        "max_activation_abs": 0.00026702880859375,
+        "max_activation_rmse": 7.4425161074032076e-06,
+        "min_activation_cosine": 0.9999998807907104,
+        "first_failed_checkpoint": null,
+        "failed_checkpoints": [],
+        "logits": [
+          {
+            "name": "vela3.d3.logits",
+            "layer": null,
+            "count": 3,
+            "passed": true,
+            "max_abs": 1.2040138244628906e-05,
+            "rmse": 7.14545512892073e-06,
+            "cosine": 1.0000001192092896,
+            "oracle_argmax": 0,
+            "native_argmax": 0
+          }
+        ]
+      },
+      "span": {
+        "comparison": ".codex/vela3/mini-f32-suite/span-comparison.json",
+        "passed": true,
+        "numeric_checkpoints": 99,
+        "passed_checkpoints": 99,
+        "profile": "pointwise",
+        "atol": 0.0005,
+        "rtol": 0.0001,
+        "envelope": null,
+        "max_abs": 0.000274658203125,
+        "max_activation_abs": 0.000274658203125,
+        "max_activation_rmse": 5.416364729171619e-06,
+        "min_activation_cosine": 0.9999998807907104,
+        "first_failed_checkpoint": null,
+        "failed_checkpoints": [],
+        "logits": [
+          {
+            "name": "vela3.d3.logits",
+            "layer": null,
+            "count": 3,
+            "passed": true,
+            "max_abs": 1.3828277587890625e-05,
+            "rmse": 1.1932248526136391e-05,
+            "cosine": 1.0,
+            "oracle_argmax": 0,
+            "native_argmax": 0
+          }
+        ]
+      },
+      "decision": {
+        "comparison": ".codex/vela3/mini-f32-suite/decision-comparison.json",
+        "passed": true,
+        "numeric_checkpoints": 99,
+        "passed_checkpoints": 99,
+        "profile": "pointwise",
+        "atol": 0.0005,
+        "rtol": 0.0001,
+        "envelope": null,
+        "max_abs": 0.000286102294921875,
+        "max_activation_abs": 0.000286102294921875,
+        "max_activation_rmse": 7.872291462263092e-06,
+        "min_activation_cosine": 0.9999998807907104,
+        "first_failed_checkpoint": null,
+        "failed_checkpoints": [],
+        "logits": [
+          {
+            "name": "vela3.d3.logits",
+            "layer": null,
+            "count": 3,
+            "passed": true,
+            "max_abs": 2.0265579223632812e-05,
+            "rmse": 1.6960742868832313e-05,
+            "cosine": 0.9999999403953552,
+            "oracle_argmax": 0,
+            "native_argmax": 0
+          }
+        ]
+      }
+    },
+    "real_mini_bf16_causal_four_steps": {
+      "comparison": ".codex/vela3/mini-causal-four-suite/base-comparison.json",
+      "passed": true,
+      "numeric_checkpoints": 396,
+      "passed_checkpoints": 396,
+      "profile": "bf16",
+      "atol": 0.1,
+      "rtol": 0.02,
+      "envelope": {
+        "max_abs": 0.75,
+        "max_rmse": 0.06,
+        "min_cosine": 0.9995
+      },
+      "max_abs": 0.75,
+      "max_activation_abs": 0.75,
+      "max_activation_rmse": 0.024677811190485954,
+      "min_activation_cosine": 0.9999237656593323,
+      "first_failed_checkpoint": null,
+      "failed_checkpoints": [],
+      "logits": [
+        {
+          "name": "vela3.d3.generation_logits",
+          "layer": null,
+          "count": 248320,
+          "passed": true,
+          "max_abs": 0.07421875,
+          "rmse": 0.01294645294547081,
+          "cosine": 0.9999620914459229,
+          "oracle_argmax": 2838,
+          "native_argmax": 2838
+        },
+        {
+          "name": "vela3.d3.generation_logits",
+          "layer": null,
+          "count": 248320,
+          "passed": true,
+          "max_abs": 0.125,
+          "rmse": 0.020998183637857437,
+          "cosine": 0.9999492764472961,
+          "oracle_argmax": 369,
+          "native_argmax": 369
+        },
+        {
+          "name": "vela3.d3.generation_logits",
+          "layer": null,
+          "count": 248320,
+          "passed": true,
+          "max_abs": 0.0703125,
+          "rmse": 0.014643464237451553,
+          "cosine": 0.9999734163284302,
+          "oracle_argmax": 264,
+          "native_argmax": 264
+        },
+        {
+          "name": "vela3.d3.generation_logits",
+          "layer": null,
+          "count": 248320,
+          "passed": true,
+          "max_abs": 0.109375,
+          "rmse": 0.01797856204211712,
+          "cosine": 0.9999861717224121,
+          "oracle_argmax": 220,
+          "native_argmax": 220
+        }
+      ],
+      "oracle_generated_token_ids": [
+        2838,
+        369,
+        264,
+        220
+      ],
+      "native_generated_token_ids": [
+        2838,
+        369,
+        264,
+        220
+      ],
+      "generated_tokens_exact": true
+    },
+    "mini_interpretation": "All 297 FP32 short numeric checkpoints pass at the original pointwise tolerance. All final BF16 short readouts pass with matching argmax, but 11 of 297 short numeric checkpoints fail only the activation max-absolute-error envelope; full BF16 activation parity remains failed. Accumulated BF16 rounding is consistent with these observations, but the responsible operator was not isolated. The four-step causal graph passes all 396 numeric checkpoints and exact generated tokens. Full SystemOne output passes the tested fixture, including actual automatic base-writer generation and six text adapter routes. Threshold-zero spans validate decoding/Unicode offsets rather than extraction quality. No mini image input or image_halu inference was tested.",
+    "mini_reproducing_commands": [
+      ".venv/bin/python tools/oracle/vela3/request_oracle.py --model models/vela3-mini --base models/d3-mini --request tools/oracle/vela3/requests/mini.json --out .codex/vela3/mini-request-oracle.json --threads 4",
+      ".codex/vela3/bin/vela3 --model models/vela3-mini --base-model models/d3-mini --request tools/oracle/vela3/requests/mini.json --threads 4 > .codex/vela3/mini-request-native.json",
+      ".venv/bin/python tools/oracle/vela3/compare_requests.py .codex/vela3/mini-request-oracle.json .codex/vela3/mini-request-native.json --out .codex/vela3/mini-request-comparison.json",
+      "HF_MODULES_CACHE=/Users/gouzi/.codex/worktrees/a06a/rust-model-inference/.codex/vela3/hf-modules .venv/bin/python tools/oracle/vela3/d3_oracle.py suite --base models/d3-mini --vela models/vela3-mini --text 'Alice works at Acme.' --native /Users/gouzi/.codex/worktrees/a06a/rust-model-inference/.codex/vela3/bin/vela3-parity --dtype bfloat16 --out .codex/vela3/mini-bf16-suite",
+      "HF_MODULES_CACHE=/Users/gouzi/.codex/worktrees/a06a/rust-model-inference/.codex/vela3/hf-modules .venv/bin/python tools/oracle/vela3/d3_oracle.py suite --base models/d3-mini --vela models/vela3-mini --text 'Alice works at Acme.' --native /Users/gouzi/.codex/worktrees/a06a/rust-model-inference/.codex/vela3/bin/vela3-parity --dtype float32 --out .codex/vela3/mini-f32-suite",
+      "HF_MODULES_CACHE=/Users/gouzi/.codex/worktrees/a06a/rust-model-inference/.codex/vela3/hf-modules .venv/bin/python tools/oracle/vela3/d3_oracle.py suite --base models/d3-mini --vela models/vela3-mini --text 'Alice works at Acme.' --native /Users/gouzi/.codex/worktrees/a06a/rust-model-inference/.codex/vela3/bin/vela3-parity --dtype bfloat16 --causal --generation-steps 4 --out .codex/vela3/mini-causal-four-suite"
+    ]
   },
   "fast": {
     "real_base_hidden_max_absolute_error": 4.577636719e-05,
@@ -1346,7 +2273,8 @@
     }
   },
   "limits": [
-    "mini/turbo fixed-revision bases differ from current ModelScope mirrors; full real-base alignment not executed pending source confirmation",
+    "turbo fixed-revision base differs from current ModelScope mirror; authorized official CDN download in progress, full real-base alignment not yet executed",
+    "mini real-base noncausal BF16 internal checkpoint gate FAILED (11/297); F32 graph, full tested System One response and four-step causal graph pass",
     "flash real-base BF16 internal checkpoint gate FAILED; F32 graph, tested System One response and four greedy token IDs pass",
     "d3 image BF16 checkpoint gate FAILED; image path experimental",
     "fast-vision real checks use shipped Python text implementation with config-only compatibility shim",
@@ -1418,6 +2346,28 @@
       "passed": 2,
       "failed": 0,
       "ignored": 1
+    },
+    "portable_binary_recheck": {
+      "commit": "40bb2d8110e2fe659ed849db555dea1166f54958",
+      "command": ".codex/vela3/bin/vela3-parity models::vela3::",
+      "passed": 38,
+      "failed": 0,
+      "ignored": 5,
+      "provenance": {
+        "source_commit": "40bb2d8110e2fe659ed849db555dea1166f54958",
+        "binaries": [
+          {
+            "file": ".codex/vela3/bin/vela3-parity",
+            "bytes": 37002320,
+            "sha256": "d6a45974198739811a9a6eb4df69e03132a7d3add46f1a3586b0175b5d79ff3c"
+          },
+          {
+            "file": ".codex/vela3/bin/vela3",
+            "bytes": 13727040,
+            "sha256": "858dbfe768d89cbb09403fbc7923e8431882a3b4d8b171c3844fc273dc88a4bc"
+          }
+        ]
+      }
     }
   }
 }

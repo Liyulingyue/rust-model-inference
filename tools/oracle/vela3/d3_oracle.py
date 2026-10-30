@@ -17,6 +17,8 @@ For a small four-step causal greedy check, use `suite --synthetic --causal --gen
 with a scratch --base directory, --vela models/vela3-lite, --dtype float32 and --atol 2e-6 --rtol 1e-6.
 For the turbo prefix mask, use `suite --synthetic --state-tokens 2 --adapters` with the same small
 FP32 fixture. Synthetic traces use the saved pinned runtime when available and record its actual SHA.
+For a real 27B text checkpoint, add `--dtype float32 --stream-f32-weights` to keep stored weights
+BF16 and temporarily cast one decoder layer at a time; compute and comparison remain F32.
 
 The reused image tower has FP32 activations and F16-lookup GELU. It is an approximate path: a real
 lite image trace does not meet the BF16 text envelope. `--images FILE --vision-detail` records the
@@ -26,6 +28,7 @@ a looser default. `vision-fixture` reproduces the independent tiny Transformers 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import importlib.util
 import json
@@ -123,6 +126,11 @@ def synthetic(root, dtype, prefix=False):
 
 
 def run_trace(args):
+    with contextlib.ExitStack() as scope:
+        return _run_trace(args, scope)
+
+
+def _run_trace(args, scope):
     import torch
     import transformers
     from safetensors.torch import load_file
@@ -131,6 +139,13 @@ def run_trace(args):
     os.environ['D3_FAST'] = '0'
     base, vela = args.base.absolute(), args.vela.absolute()
     dtype = torch.float32 if args.dtype == 'float32' else torch.bfloat16
+    if args.stream_f32_weights and (args.dtype != 'float32' or args.synthetic or args.images):
+        raise ValueError('stream-f32-weights requires a real float32 text trace')
+    storage_dtype = torch.bfloat16 if args.stream_f32_weights else dtype
+    checked_bf16_tensors = None
+    if args.stream_f32_weights:
+        from stream_f32 import require_bf16_checkpoint
+        checked_bf16_tensors = require_bf16_checkpoint(base)
     if args.images and (args.synthetic or args.causal):
         raise ValueError('image tracing requires a local checkpoint and a noncausal prompt pass')
     if args.generation_steps is not None and (not args.causal or not 1 <= args.generation_steps <= 40):
@@ -159,7 +174,7 @@ def run_trace(args):
             ids = torch.tensor([values], dtype=torch.long)
         else:
             ids = tokenizer(args.text, add_special_tokens=False, return_tensors='pt')['input_ids']
-        backbone = Qwen3_5Model.from_pretrained(base, dtype=dtype, attn_implementation='sdpa',
+        backbone = Qwen3_5Model.from_pretrained(base, dtype=storage_dtype, attn_implementation='sdpa',
                                               local_files_only=True).eval()
         model = backbone.language_model
     unexpanded_ids = ids[0].tolist()
@@ -170,17 +185,24 @@ def run_trace(args):
         info = adapters.attach(model, args.adapter, vela / spec['file'])
         if any(info[field] != spec[field] for field in ['r', 'alpha', 'modules']):
             raise ValueError(f'adapter {args.adapter} does not match vela3_config.json: {info}')
+    if args.stream_f32_weights:
+        from stream_f32 import stream_f32
+        scope.enter_context(stream_f32(model))
     trace = Trace(args.out)
     source_paths = [base / 'config.json', base / 'decision_config.json', base / 'd3_runtime.py',
                     base / 'preprocessor_config.json', base / 'MODEL_MANIFEST.json',
                     base / 'readout.safetensors', vela / 'vela3_adapters.py', vela / 'vela3_config.json',
                     Path(runtime.__file__)]
+    if args.stream_f32_weights:
+        source_paths.append(Path(__file__).with_name('stream_f32.py'))
     if args.adapter:
         source_paths.append(vela / vela_config['adapters'][args.adapter]['file'])
     if args.causal and vela_config.get('definitions', {}).get('writer') == 'grafted_head':
         source_paths.append(vela / vela_config['definitions']['lm_head_file'])
     trace.record(dict(kind='oracle', torch=torch.__version__, transformers=transformers.__version__,
-        dtype=str(dtype), adapter=args.adapter, text=input_text, unexpanded_token_ids=unexpanded_ids,
+        dtype=str(dtype), storage_dtype=str(storage_dtype), stream_f32_weights=args.stream_f32_weights,
+        checked_bf16_source_tensors=checked_bf16_tensors,
+        adapter=args.adapter, text=input_text, unexpanded_token_ids=unexpanded_ids,
         images=[str(p.absolute()) for p in args.images], state_tokens=args.state_tokens,
         causal=args.causal, generation_steps=args.generation_steps,
         sources={str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in source_paths if p.is_file()}))
@@ -262,7 +284,8 @@ def run_trace(args):
                 hidden = model(input_ids=ids, attention_mask=mask, use_cache=False).last_hidden_state
         trace.emit('vela3.d3.hidden', hidden)
         if args.causal:
-            logits = torch.nn.functional.linear(hidden[:, -1], head).float()
+            logits = torch.nn.functional.linear(
+                hidden[:, -1], head.float() if args.stream_f32_weights else head).float()
             trace.emit('vela3.d3.generation_logits', logits)
         else:
             logits = (hidden[:, -1].float() @ head.T)[0, :args.options] / temperature
@@ -364,6 +387,8 @@ def suite(args):
             command += ['--generation-steps', str(args.generation_steps)]
         if args.synthetic:
             command += ['--synthetic']
+        if args.stream_f32_weights:
+            command += ['--stream-f32-weights']
         for image in args.images:
             command += ['--images', str(image)]
         with (args.out / f'{name}-oracle.log').open('w') as log:
@@ -475,6 +500,8 @@ def main():
     trace.add_argument('--threads', type=int, default=1)
     trace.add_argument('--dtype', choices=['float32', 'bfloat16'], default='bfloat16')
     trace.add_argument('--synthetic', action='store_true')
+    trace.add_argument('--stream-f32-weights', action='store_true',
+                       help='load BF16 weights and temporarily cast one layer for F32 text diagnostics')
     trace.add_argument('--out', type=Path, required=True)
     trace.set_defaults(run=run_trace)
     cmp = commands.add_parser('compare')
@@ -493,6 +520,8 @@ def main():
     batch.add_argument('--causal', action='store_true')
     batch.add_argument('--generation-steps', type=int)
     batch.add_argument('--synthetic', action='store_true')
+    batch.add_argument('--stream-f32-weights', action='store_true',
+                       help='load BF16 weights and temporarily cast one layer for F32 text diagnostics')
     batch.add_argument('--dtype', choices=['float32', 'bfloat16'], default='bfloat16')
     batch.add_argument('--adapters', nargs='*', default=['span', 'decision'])
     batch.add_argument('--out', type=Path, required=True)

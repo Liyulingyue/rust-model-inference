@@ -57,4 +57,4 @@ let response = rust_model_inference::models::vela3::system_one(
 
 Token IDs、提示词、任务路由、窗口与输出偏移做精确检查；SIMD 归约、BF16 舍入、softmax、GELU 等浮点路径使用记录的误差门槛。默认不承诺逐位一致。[Oracle 命令与验证记录](../../tools/oracle/vela3/README.md) 区分真实整模、小型官方计算图和独立任务头。
 
-这次接入为 CPU safetensors 路径，未接入 GGUF、主生成 CLI、HTTP server 或 GPU。flash 的真实公开请求和四步 greedy IDs 通过对照，但内部 BF16 activation 门槛未通过，仍为实验性。d3 图像复用 F32 视觉编码器，和官方默认 BF16 塔有可测差异，也属于实验性；长上下文性能、完整任务基准及所有尺寸的整模数值覆盖仍应按验证记录判断。
+这次接入为 CPU safetensors 路径，未接入 GGUF、主生成 CLI、HTTP server 或 GPU。mini/flash 的真实公开请求和四步 greedy IDs 通过对照，但非因果内部 BF16 activation 门槛未通过，仍为实验性。d3 图像复用 F32 视觉编码器，和官方默认 BF16 塔有可测差异，也属于实验性；长上下文性能、完整任务基准及所有尺寸的整模数值覆盖仍应按验证记录判断。
