@@ -1,11 +1,11 @@
 #[cfg(test)]
 mod fixtures;
 pub mod image_input;
+mod ocr;
 pub mod protocol;
 mod stop;
 mod think;
 pub mod tools;
-mod unlimited_ocr;
 
 use protocol::{Message, Request};
 use serde_json::{json, Value};
@@ -316,7 +316,7 @@ struct PromptResult {
 
 async fn prompt(state: &AppState, request: &Request) -> Result<PromptResult, (u16, String)> {
     if let Backend::UnlimitedOcr(native) = state.model.as_ref() {
-        return unlimited_ocr::prepare(&native.model, request).map_err(|e| (400, e));
+        return ocr::prepare(&native.model, request).map_err(|e| (400, e));
     }
     let Backend::Text(text) = state.model.as_ref() else {
         return Err((400, "Server is not running a text model".into()));
@@ -518,7 +518,7 @@ async fn handle(
         Err(e) => return error(protocol, 400, e),
     };
     if matches!(state.model.as_ref(), Backend::UnlimitedOcr(_)) {
-        if let Err(e) = unlimited_ocr::options(&body, &mut request) {
+        if let Err(e) = ocr::options(&body, &mut request) {
             return error(protocol, 400, e);
         }
     }
@@ -651,7 +651,7 @@ async fn count_tokens(
         Err(e) => return error(Protocol::Anthropic, 400, e),
     };
     if matches!(state.model.as_ref(), Backend::UnlimitedOcr(_)) {
-        if let Err(e) = unlimited_ocr::options(&body, &mut request) {
+        if let Err(e) = ocr::options(&body, &mut request) {
             return error(Protocol::Anthropic, 400, e);
         }
     }

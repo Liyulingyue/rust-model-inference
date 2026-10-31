@@ -1,3 +1,13 @@
+//! Request handling for the OCR surface.
+//!
+//! An OCR request differs from a text request in three ways. It carries
+//! ordered page images instead of a text prompt, it is greedy only, and
+//! it accepts neither sampling options nor tools nor thinking. All the
+//! pages and the instruction text go to the model as one request.
+//!
+//! The model behind this surface is Unlimited-OCR-2; see
+//! [`crate::models::unlimited_ocr`].
+
 use super::*;
 use crate::models::unlimited_ocr::Model;
 
