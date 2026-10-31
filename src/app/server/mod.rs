@@ -1765,19 +1765,23 @@ pub fn run_server() {
         Backend::Gliner2Boundary(_) => router.route("/v1/jev/boundary", post(api::jev_boundary)),
         Backend::Timestral(_) => router.route("/v1/forecast", post(forecast::forecast)),
     };
-    if options.compute_policy() == crate::compute::ComputePolicy::Vulkan {
-        router = router.layer(axum::middleware::from_fn(
-            |request: axum::extract::Request, next: axum::middleware::Next| async move {
-                if request.uri().path().starts_with("/v1/jev/") {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        "JEV has no complete Vulkan execution path",
-                    )
-                        .into_response();
-                }
-                next.run(request).await
-            },
-        ));
+    if options.compute_policy() == crate::compute::ComputePolicy::Vulkan
+        && matches!(
+            state.model.as_ref(),
+            Backend::Text(_) | Backend::Clm(_) | Backend::Gliner2(_)
+        )
+    {
+        // The JEV routes score with the same text forward pass, so they
+        // take the same device path as the chat routes: the projections
+        // move to the device, the rest stays on the host. The model's own
+        // contract gate decides whether its numbers still agree with the
+        // CPU, so there is nothing to refuse here -- but the caller asked
+        // for a device and gets a partial one, so say so once.
+        eprintln!(
+            "compute requested=Vulkan backend=partial mode=jev \
+             note=no complete device path for this mode; only the \
+             offloadable parts run on the device"
+        );
     }
     let app = router.layer(CorsLayer::permissive()).with_state(state);
 

@@ -127,7 +127,10 @@
   "cli": {
     "out_refuses_existing": true,
     "multi_page_reference": true,
-    "compute_vulkan_rejected": "--compute vulkan supports plain text decoder generation only; this mode has no complete Vulkan execution path",
+    "compute_vulkan": "accepted; the run names the partial device path and the output is byte-identical to the CPU run",
+    "compute_vulkan_device_rows": 2442,
+    "compute_vulkan_submissions": 2533,
+    "compute_vulkan_without_a_device": "hard failure, exit 2: --compute vulkan requires a usable Vulkan device",
     "single_page_output": "matches the recorded text and the recorded bounding boxes",
     "multi_page_output": "matches the recorded text and the recorded bounding boxes"
   },

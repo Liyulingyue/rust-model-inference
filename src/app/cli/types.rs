@@ -190,30 +190,75 @@ impl CliOptions {
         if self.gpu && self.compute.is_some() {
             return Err("--gpu and --compute cannot be combined".into());
         }
-        if self.compute_policy() == ComputePolicy::Vulkan
-            && (self.embedding
-                || self.jev
-                || self.rerank
-                || self.tts
-                || self.yue2
-                || self.dreamx
-                || self.audio.is_some()
-                || self.image.is_some()
-                || self.video.is_some()
-                || self.mmproj.is_some()
-                || self.vae.is_some()
-                || self.text_encoder.is_some()
-                || self.planner.is_some()
-                || self.perception.is_some()
-                || self.laya_request.is_some()
-                || self.longcat_kind.is_some()
-                || self.dump_logits
-                || self.bench
-                || self.profile)
-        {
-            return Err("--compute vulkan supports plain text decoder generation only; this mode has no complete Vulkan execution path".into());
+        if self.compute_policy() == ComputePolicy::Vulkan {
+            if let Some(mode) = self.vulkan_partial_mode() {
+                // One line per request: the mode is checked at more than
+                // one layer, and the caller would otherwise see the same
+                // line twice.
+                static WARNED: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
+                if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    eprintln!(
+                        "compute requested=Vulkan backend=partial mode={mode} \
+                         note=no complete device path for this mode; only the \
+                         offloadable parts run on the device"
+                    );
+                }
+            }
         }
         Ok(())
+    }
+
+    /// The mode whose device path is partial, if the request names one.
+    ///
+    /// `--compute vulkan` asks for a real device. A mode that cannot put
+    /// its whole graph there still runs, and the caller is told which
+    /// mode it asked for. `--bench`, `--profile` and `--dump-logits` are
+    /// not modes: they decorate the text path, which reports its own
+    /// device path. The OCR family is left out as well, because its
+    /// loader reports the path it took.
+    pub(super) fn vulkan_partial_mode(&self) -> Option<&'static str> {
+        if self.embedding {
+            Some("embedding")
+        } else if self.jev {
+            Some("jev")
+        } else if self.rerank {
+            Some("rerank")
+        } else if self.tts {
+            Some("tts")
+        } else if self.yue2 {
+            Some("yue2")
+        } else if self.dreamx {
+            Some("dreamx")
+        } else if self.audio.is_some() {
+            Some("audio")
+        } else if self.video.is_some() {
+            Some("video")
+        } else if self.mmproj.is_some() {
+            Some("mmproj")
+        } else if self.vae.is_some() {
+            Some("vae")
+        } else if self.text_encoder.is_some() {
+            Some("text-encoder")
+        } else if self.planner.is_some() {
+            Some("planner")
+        } else if self.perception.is_some() {
+            Some("perception")
+        } else if self.laya_request.is_some() {
+            Some("laya")
+        } else if self.longcat_kind.is_some() {
+            Some("longcat")
+        } else if self.image.is_some() && !self.is_ocr_model() {
+            Some("image")
+        } else {
+            None
+        }
+    }
+
+    /// Whether the model is one of the OCR family, whose loader reports
+    /// its own device path.
+    fn is_ocr_model(&self) -> bool {
+        crate::models::unlimited_ocr::matches_model(&self.model)
     }
 
     pub fn validate_compute_model(&self, arch: &str) -> Result<(), String> {

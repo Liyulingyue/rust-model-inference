@@ -24,7 +24,7 @@ Use `--reference` repeatedly for subsequent pages. `--prompt` is instruction tex
 
 This entry uses the official **base** mode (`crop_mode=False`): every page has one 1024×1024 letterboxed global view. SAM ViT-B feeds CLIP-L, then a linear projector; the decoder has 12 layers, 64 experts/top-6, shared experts, Page2D RoPE and inference DASH routing (head-CLS summaries, top-16 entmax prior/top-12 remote blocks plus an exact 128-token local window). It supports greedy generation, default page-count guard and a 20,000-token per-page guard. Floating point reductions/activations are verified numerically, without a bitwise requirement.
 
-Limits: 1–128 eight-bit page images, bounded F32 KV, context at most 131072 tokens (8192 by default). Dynamic tiles/gundam, PDF rasterization, sampling and constant-memory unlimited streaming are not implemented. `--compute auto` / `--gpu` uses shared Vulkan projection offload with CPU fallback; `--compute vulkan` is rejected because attention, routing and other operations still run on CPU. Large page sets and long contexts have not been benchmarked; memory grows with the retained context. A token budget can truncate a page before EOS.
+Limits: 1–128 eight-bit page images, bounded F32 KV, context at most 131072 tokens (8192 by default). Dynamic tiles/gundam, PDF rasterization, sampling and constant-memory unlimited streaming are not implemented. `--compute auto` / `--gpu` uses shared Vulkan projection offload with CPU fallback; `--compute vulkan` runs the same projection offload and requires a usable device (it fails rather than falling back), but attention, routing and other operations still run on CPU; the run prints a line naming the partial device path. Large page sets and long contexts have not been benchmarked; memory grows with the retained context. A token budget can truncate a page before EOS.
 
 ## Weight formats and compute
 
@@ -32,7 +32,8 @@ Limits: 1–128 eight-bit page images, bounded F32 KV, context at most 131072 to
 .venv/bin/python -m tools.converter.unlimited_ocr.convert \
   models/Unlimited-OCR-2 models/Unlimited-OCR-2-Q8_0.gguf --type q8_0
 cargo build --profile release-fast --features vulkan
-# --compute cpu works in both builds; Auto falls back when Vulkan is unavailable.
+# --compute cpu works in both builds; Auto falls back when Vulkan is unavailable,
+# while --compute vulkan requires a usable device and fails without one.
 target/release-fast/rust-model-inference --model models/Unlimited-OCR-2-Q8_0.gguf \
   --image first.png --compute auto --max-tokens 128
 ```

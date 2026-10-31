@@ -35,22 +35,25 @@ fn compute_policy_options_are_shared_and_unambiguous() {
 }
 
 #[test]
-fn compute_vulkan_rejects_unmigrated_modes_before_loading() {
-    for mode in [
-        "--embedding",
-        "--jev",
-        "--tts",
-        "--yue2",
-        "--dreamx",
-        "--dump-logits",
-        "--bench",
-        "--profile",
-    ] {
+fn compute_vulkan_reports_modes_without_a_complete_device_path() {
+    for mode in ["--embedding", "--jev", "--tts", "--yue2", "--dreamx"] {
         let options = parse_cli_options(&args(&["rmi", "--compute", "vulkan", mode])).unwrap();
-        assert!(options.validate_compute_mode().is_err(), "{mode}");
+        // The mode no longer blocks the request: `--compute vulkan` asks
+        // for a device, and the mode is reported instead.
+        assert!(options.validate_compute_mode().is_ok(), "{mode}");
+        assert!(options.vulkan_partial_mode().is_some(), "{mode}");
+    }
+    // `--bench`, `--profile` and `--dump-logits` decorate the text path
+    // instead of picking a forward path of their own.
+    for mode in ["--bench", "--profile", "--dump-logits"] {
+        let options = parse_cli_options(&args(&["rmi", "--compute", "vulkan", mode])).unwrap();
+        assert!(options.validate_compute_mode().is_ok(), "{mode}");
+        assert!(options.vulkan_partial_mode().is_none(), "{mode}");
     }
     let options = parse_cli_options(&args(&["rmi", "--compute", "vulkan"])).unwrap();
-    assert!(options.validate_compute_model("gemma4").is_err());
+    assert!(options.validate_compute_mode().is_ok());
+    assert!(options.vulkan_partial_mode().is_none());
+    assert!(options.validate_compute_model("gemma4").is_ok());
     assert!(options.validate_compute_model("qwen3").is_ok());
 }
 

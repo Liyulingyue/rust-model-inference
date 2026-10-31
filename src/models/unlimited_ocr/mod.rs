@@ -416,12 +416,28 @@ impl crate::ops::generation_runtime::TextRuntime for std::sync::Arc<Model> {
     }
 }
 
-pub fn validate_options(options: &CliOptions) -> Result<(), String> {
-    if options.compute_policy() == crate::compute::ComputePolicy::Vulkan {
-        return Err(
-            "Unlimited-OCR supports --compute auto hybrid offload; no complete Vulkan graph".into(),
-        );
+/// Report where the projections run, so a caller who asked for the
+/// device is not left guessing. The attention, the routing and the short
+/// convolution stay on the host either way.
+fn report_device_path(policy: crate::compute::ComputePolicy) {
+    if policy == crate::compute::ComputePolicy::Cpu {
+        return;
     }
+    #[cfg(feature = "vulkan")]
+    let backend = match policy.context() {
+        Ok(Some(_)) => "Vulkan",
+        _ => "Cpu",
+    };
+    #[cfg(not(feature = "vulkan"))]
+    let backend = "Cpu";
+    eprintln!(
+        "Unlimited-OCR projections: requested={policy:?} backend={backend}; \
+         attention/routing/shortconv=Cpu"
+    );
+}
+
+pub fn validate_options(options: &CliOptions) -> Result<(), String> {
+    report_device_path(options.compute_policy());
     if options.embedding
         || options.tts
         || options.audio.is_some()

@@ -77,7 +77,7 @@ through CLI; the other four whole-model formats have not been validated」——
 |---|---|
 | `--out` 拒绝已存在的目标 | ✓ `Publish output to …: File exists (os error 17)`，加 `--overwrite` 才写 |
 | 多页 `--reference` | ✓ 第二页输出 `<PAGE><BLOCK>title<LEVEL2>…<FORK>PAGE TWO` |
-| `--compute vulkan` | ✓ 明确拒绝：`--compute vulkan supports plain text decoder generation only; this mode has no complete Vulkan execution path` |
+| `--compute vulkan` | ✓ 原本被拒（`--compute vulkan supports plain text decoder generation only…`），**本轮放开**：现在真跑设备，输出与 CPU 逐字节相同（见 §7.5） |
 | 页数上限 | 1..=128 |
 | 每页 token 上限 | 20000，超出时强制结束该页 |
 | 单页 128 token 输出 | 与作者记录的 110 个 token ID **逐字节相同**（含全部页面坐标） |
@@ -176,6 +176,89 @@ Auto 跑有 2517 次提交；把门槛降到 0（`RUST_GPU_MIN_OUTPUTS=0`）后�
 **Auto 慢 2.03 倍。** 两个原因叠加：集显的设备内存就是系统内存（与 LFM3 同样的
 问题）；以及每个设备投影的 CPU 抽样核对开销。**在集显上不应把 Auto 当作加速路径。**
 
+### 7.5 `--compute vulkan`：去掉白名单，改成 warning
+
+作者在 OCR 上留了两道拒绝：
+
+1. `src/app/cli/types.rs` 的模式白名单 —— 含 `self.image.is_some()`，而 OCR 必带
+   `--image`（页面图），所以 OCR 必然被挡；
+2. `src/models/unlimited_ocr/mod.rs` 里手写的一条
+   `Unlimited-OCR supports --compute auto hybrid offload; no complete Vulkan graph`。
+
+再加上 `src/compute/mod.rs` 的 arch 白名单（`llama|qwen3|qwen35|qwen35moe|dory`），
+OCR 有三道门。**但白名单挡不住真正的漏洞**：`Configure_cli()` 里**只有 Auto 会
+`ops::enable_gpu()`**，而共享线性离 CPU 的 `offload_enabled()` 要求 `gpu_requested()`
+—— 也就是说**就算把白名单全放开，`--compute vulkan` 也会静默跑成纯 CPU**
+（实测 `backend=Vulkan` 行数为 0）。请求被拒反而比请求被静默降级更诚实。
+
+**已改**（本轮）：
+
+| 位置 | 改法 |
+|---|---|
+| `src/compute/mod.rs` | 拆出 `has_complete_device_path(arch)`；`validate_text_arch` 改成**只警告一次**（进程级 `AtomicBool`）；`configure_cli()` 对 Vulkan 也 `enable_gpu()`，并强制设备可用 |
+| `src/app/cli/types.rs` | 模式白名单改成**警告**（每次请求只打一行）；`--gpu` + `--compute` 互斥仍是硬错误 |
+| `src/models/unlimited_ocr/mod.rs` | 删掉那条手写拒绝；补一行设备路径诊断 |
+| `src/app/server/mod.rs` | 删掉 `/v1/jev/*` 在 Vulkan 下的 blanket 400，改成启动警告（见 §7.6） |
+
+警告长这样：
+
+```
+compute requested=Vulkan backend=partial mode=image note=no complete device path for this mode; only the offloadable parts run on the device
+Unlimited-OCR projections: requested=Vulkan backend=Vulkan; attention/routing/shortconv=Cpu
+```
+
+第二行是给 OCR 补的**模型级诊断**，格式照抄 LFM3 的 `LFM3 projections: …`
+（§7.1 提过 OCR 缺这一行）。第一行是 CLI 层的通用警告。
+
+**严格性没有丢**：设备不可用时 `--compute vulkan` 硬失败，不静默降级：
+
+```
+$ VK_ICD_FILENAMES=/nonexistent.json … --compute vulkan
+--compute vulkan requires a usable Vulkan device: compute device failure: Vulkan init failed: Unable to find a Vulkan driver
+# exit=2
+```
+
+`--compute auto` 在同样环境下仍然回退 CPU（既有行为）。
+
+**实测（Intel 集显，BF16 导出）**：
+
+| 用例 | 结果 |
+|---|---|
+| OCR CLI `--compute vulkan`（单页，32 token） | **2442 次设备提交、2533 submissions、0 条 CPU 回退**；输出与 `--compute cpu` **逐字节相同** |
+| OCR server `--compute vulkan` | 起得来；`check_http.py` **11 项全 PASS** |
+| OCR CLI `--compute vulkan` 与 `--compute cpu` 的输出 | **逐字节相同** |
+
+### 7.6 服务器里还有一道同类拦截：`/v1/jev/*`
+
+`src/app/server/mod.rs` 里有一段 axum 中间件：policy 是 Vulkan 时，`/v1/jev/*` 一律
+回 400 `JEV has no complete Vulkan execution path`。这是同一类白名单，**但实测它是
+过度拦截**：
+
+| 用例 | 结果 |
+|---|---|
+| llama-1B JEV，CPU vs Vulkan | **逐位相同**（`A=0.8926224708557129`、`B=0.10737749934196472`、entropy `0.34099701046943665`、margin `0.7852449417114258`） |
+| HTTP `/v1/jev/score`（llama，Vulkan） | **200**（改动前是 400） |
+
+**已改**：删掉那段中间件，改成启动时打一行警告
+（`compute requested=Vulkan backend=partial mode=jev …`）。**正确性交给模型自己的
+契约门禁** —— 它比中间件更准：
+
+- `qwen3` + Vulkan 的 JEV → 门禁在 token 0 就拦下
+  （`model logit mismatch at 0: gpu=5.6980243 cpu=3.4995377 abs=2.1984866`）→ **500**，
+  而不是悄悄给出一个错的分数。
+- OCR 后端 + Vulkan 的 JEV → **400 `/v1/jev/* requires a text backend (got unlimited-ocr)`**
+  —— 理由是「这个后端不是文本后端」，而不是「Vulkan 没有完整路径」。
+
+### 7.7 顺带查出来的既有问题（不是本轮引入的）
+
+`qwen3` 在 arch 白名单里，`--compute vulkan` 本来就能跑，但它的 CPU 与 Vulkan 输出
+**差一个 token**（CPU 多一个 emoji `😊`），用 `--prompt hello` 这种单 token prompt 时
+差异更大。**stash 回改动前的 HEAD 重编译重跑，输出完全相同** —— 是既有的数值偏离，
+记在 TODO-046。仓库里其实已经记过一次同类现象：`docs/develop/UNIFIED_COMPUTE_VALIDATION.md`
+写的远程 AMD 上 `qwen3` **模型准入门禁在 token 0 就失败**
+（GPU `4.476106` vs CPU `4.4538846`，abs `0.022221565`，门槛 `2e-3`）→ `--compute vulkan`
+exit 1。**本机（Intel 集显）过得了 token 0 的门禁，却在后面对齐时翻了一个 token。**
+
 ---
 
 ## 8. Oracle 对拍结果（本机）
@@ -208,7 +291,8 @@ layer 2/3/5/7/8），量级也相近（作者 0.012268，本机 0.010240）。�
 | `10e5944d` | 删掉已移除的 OCR JEV 集成留下的脚手架（两个 `_with_ids` 变体、`allocate_group_labels` 的可见性放宽）；`src/app/jev/` 现在与 main 零差异 |
 | `6cd5c6d5` | `src/app/server/api/unlimited_ocr.rs` → `ocr.rs`（api/ 按能力命名，不按模型） |
 | `5bfcec7c` | JEV 请求打非文本后端返回 400 而不是 500；删掉 4 段复制粘贴的 OCR 专用拒绝块 |
-| （本轮） | 页面 fixture 改成合成脚本，PNG 不入库；`check_http.py` 自动生成；六种格式实测；本机验证记录 |
+| `dca8bf06` | 页面 fixture 改成合成脚本，PNG 不入库；`check_http.py` 自动生成 |
+| （本轮） | `--compute vulkan` 去掉白名单改成 warning；Vulkan 也 `enable_gpu()` 并强制设备可用；OCR 补设备路径诊断；六种格式实测；本机验证记录 |
 
 ### 9.1 JEV 状态码：一个既存的 500
 
