@@ -1069,6 +1069,31 @@ mod http_tests {
         assert!(flag.load(std::sync::atomic::Ordering::Relaxed));
     }
     #[tokio::test]
+    async fn jev_on_a_non_text_backend_is_a_client_error() {
+        let mut state = state();
+        state.model = std::sync::Arc::new(super::super::Backend::Embedding(
+            super::super::EmbeddingBackend {
+                source: std::sync::Arc::new(UnimplementedSource),
+                mmproj_path: None,
+            },
+        ));
+        let body: JevScoreRequest = serde_json::from_value(json!({
+            "context": "x",
+            "questions": [{"text": "q", "options": ["a", "b"]}]
+        }))
+        .unwrap();
+        let response = jev_score(State(state.clone()), Ok(Json(body))).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body: JevImageScoreRequest = serde_json::from_value(json!({
+            "context": "x",
+            "image_url": "data:image/png;base64,iVBORw0KGgo=",
+            "questions": [{"text": "q", "options": ["a", "b"]}]
+        }))
+        .unwrap();
+        let response = jev_image_score(State(state), Ok(Json(body))).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    #[tokio::test]
     async fn invalid_json_and_missing_model_have_protocol_error_bodies() {
         let req = axum::http::Request::builder()
             .header("content-type", "application/json")
@@ -1480,12 +1505,6 @@ pub async fn jev_score(
             "questions must contain at least one item".to_string(),
         );
     }
-    if matches!(state.model.as_ref(), Backend::UnlimitedOcr(_)) {
-        return jev_error(
-            StatusCode::BAD_REQUEST,
-            "Unlimited-OCR is an OCR backend and does not support JEV".into(),
-        );
-    }
     let _compute_scope = state.compute.enter_legacy_scope();
     if let Backend::Gliner2(gliner2) = state.model.as_ref() {
         // The label set is caller-supplied, exactly like the other JEV modes,
@@ -1537,7 +1556,9 @@ pub async fn jev_score(
 
     let source = match text_source(&state) {
         Ok(s) => s,
-        Err(e) => return jev_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+        // A JEV request against a server that is not running a text model
+        // is a client error, not a fault.
+        Err(e) => return jev_error(StatusCode::BAD_REQUEST, e),
     };
 
     let questions: Vec<crate::app::JevQuestionInput> = req
@@ -1622,16 +1643,12 @@ async fn jev_grouped(
             );
         }
     };
-    if matches!(state.model.as_ref(), Backend::UnlimitedOcr(_)) {
-        return jev_error(
-            StatusCode::BAD_REQUEST,
-            "Unlimited-OCR is an OCR backend and does not support JEV".into(),
-        );
-    }
     let _compute_scope = state.compute.enter_legacy_scope();
     let source = match text_source(&state) {
         Ok(s) => s,
-        Err(e) => return jev_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+        // A JEV request against a server that is not running a text model
+        // is a client error, not a fault.
+        Err(e) => return jev_error(StatusCode::BAD_REQUEST, e),
     };
 
     let questions: Vec<crate::app::JevGroupedQuestionInput> = req
@@ -1793,10 +1810,16 @@ async fn jev_image_score(
         );
     }
 
-    if matches!(state.model.as_ref(), Backend::UnlimitedOcr(_)) {
+    // The image modes need the text backend's tokenizer. Asking a server
+    // that runs something else is a client error, not a fault, so say so
+    // before the image is decoded.
+    if text_tokenizer(&state).is_none() {
         return jev_error(
             StatusCode::BAD_REQUEST,
-            "Unlimited-OCR is an OCR backend and does not support JEV".into(),
+            format!(
+                "/v1/jev/image requires a text backend (got {})",
+                backend_label(state.model.as_ref())
+            ),
         );
     }
     let image_path = match decode_image_to_tempfile(&req.image_url) {
@@ -1878,10 +1901,16 @@ async fn jev_image_grouped(
         }
     }
 
-    if matches!(state.model.as_ref(), Backend::UnlimitedOcr(_)) {
+    // The image modes need the text backend's tokenizer. Asking a server
+    // that runs something else is a client error, not a fault, so say so
+    // before the image is decoded.
+    if text_tokenizer(&state).is_none() {
         return jev_error(
             StatusCode::BAD_REQUEST,
-            "Unlimited-OCR is an OCR backend and does not support JEV".into(),
+            format!(
+                "/v1/jev/image requires a text backend (got {})",
+                backend_label(state.model.as_ref())
+            ),
         );
     }
     let image_path = match decode_image_to_tempfile(&req.image_url) {
