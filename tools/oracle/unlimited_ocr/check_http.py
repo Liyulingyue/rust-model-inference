@@ -5,9 +5,28 @@ import base64
 import concurrent.futures
 import json
 from pathlib import Path
+import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def page_png() -> Path:
+    """The page fixture, rendered on first use.
+
+    The pages are generated rather than committed, so render them when
+    they are missing instead of failing with a missing-file error.
+    """
+    page = FIXTURES / "page-1.png"
+    if not page.exists():
+        subprocess.run(
+            [sys.executable, str(Path(__file__).parent / "make_pages.py")],
+            check=True,
+        )
+    return page
 
 
 def check_chat_stream(output):
@@ -49,7 +68,7 @@ def main():
         assert status == expected, (name, status, output)
         return output
 
-    png = base64.b64encode((Path(__file__).parent / "fixtures/page-1.png").read_bytes()).decode()
+    png = base64.b64encode(page_png().read_bytes()).decode()
     uri = "data:image/png;base64," + png
     chat = {"messages": [{"role": "user", "content": [
         {"type": "image_url", "image_url": {"url": uri}}

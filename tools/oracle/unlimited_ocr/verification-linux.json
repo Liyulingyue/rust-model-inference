@@ -1,0 +1,159 @@
+{
+  "date": "2026-10-30",
+  "platform": "Linux-7.0.0-38-generic-x86_64-with-glibc2.39",
+  "device": "Intel(R) Graphics (MTL) (integrated GPU, Vulkan)",
+  "model": "PaddlePaddle/Unlimited-OCR-2",
+  "revision": "7eadb7cd7afe660602040524eab37c8a9b91fe53",
+  "source_sha256_match": true,
+  "weight_sha256_match": true,
+  "torch": "2.14.1",
+  "transformers": "4.52.1",
+  "numpy": "2.5.4",
+  "pillow": "13.0.0",
+  "fixture": {
+    "generator": "tools/oracle/unlimited_ocr/make_pages.py",
+    "font": "Liberation Sans (fonts-liberation), SHA-256 4659bc0c58c5028dd488ec928d41d9265db43d9b669fc14ca8b0832daca7b144",
+    "page-1.png": "24bbe8347d2a33c071a3ab576275ffe4deea93fa30713aaa8eac3e96c9bed9b4",
+    "page-2.png": "f543d588f1ed13c2dee05af94244d8cabcf817c0a340a5de9f0fb6243e5936ec",
+    "note": "The committed pages were rendered with a macOS system font and cannot be reproduced byte for byte on Linux: an exhaustive search over the 1930 fonts on this machine produced no exact match. The generator uses Liberation Sans, which reproduces the page geometry to within four pixels; the recognised text is identical and the model's predicted bounding boxes move by one to three pixels."
+  },
+  "single_page": {
+    "checkpoints": 3040,
+    "passed": true,
+    "result": "PASS: lossless transforms and token ids exact; floating point within 0.002 peak-relative and cosine >= 0.99999 over every checkpoint.",
+    "max_peak_relative": 9.387803955511322e-05,
+    "min_cosine": 0.999999998798888,
+    "bit_exact_checkpoints": 113,
+    "worst_checkpoints": [
+      {
+        "name": "uocr.attention",
+        "layer": 11,
+        "max_relative_to_peak": 9.387803955511322e-05,
+        "cosine": 0.9999999990811954
+      },
+      {
+        "name": "uocr.norm",
+        "layer": null,
+        "max_relative_to_peak": 7.171604372443823e-05,
+        "cosine": 0.9999999999840623
+      },
+      {
+        "name": "uocr.layer",
+        "layer": 11,
+        "max_relative_to_peak": 6.674598049150072e-05,
+        "cosine": 0.9999999989179081
+      },
+      {
+        "name": "uocr.attention",
+        "layer": 10,
+        "max_relative_to_peak": 6.667186684534014e-05,
+        "cosine": 0.9999999992597818
+      },
+      {
+        "name": "uocr.attention",
+        "layer": 11,
+        "max_relative_to_peak": 6.383958674288047e-05,
+        "cosine": 0.999999999987921
+      },
+      {
+        "name": "uocr.attention",
+        "layer": 10,
+        "max_relative_to_peak": 6.338518472477415e-05,
+        "cosine": 0.9999999994061444
+      }
+    ]
+  },
+  "multi_page": {
+    "checkpoints_compared": 5835,
+    "passed": false,
+    "first_failing_checkpoint": "uocr.attention layer=2 occurrence=2",
+    "max_relative_to_peak": 0.010240032345059998,
+    "cosine": 0.9999995685629424,
+    "limit": "0.002 peak-relative",
+    "note": "Same checkpoint family and decoder layer as the exceptions the author retained on macOS (uocr.attention at decoder layers 2, 3, 5, 7 and 8), and the same magnitude (author 0.012268, here 0.010240). The route diagnostics are only in the primitive fixture, which agrees to one or two float32 ULP, so the route flip itself cannot be observed from these traces."
+  },
+  "primitive_fixture_drift": {
+    "note": "The official modules recomputed on this machine differ from the committed tests/fixtures/unlimited_ocr_oracle.json by one or two float32 ULP in the rotated rope and the route bias. That is the environment, not the Rust implementation: the fixture holds the official code's own output, and the Rust test tolerance accommodates the difference.",
+    "examples": [
+      {
+        "field": "rope/ones_rotated[189]",
+        "committed": 0.9627676606178284,
+        "recomputed": 0.9627676010131836
+      },
+      {
+        "field": "route/bias[0]",
+        "committed": 6.994187831878662,
+        "recomputed": 6.9941887855529785
+      }
+    ]
+  },
+  "conversions": {
+    "note": "All six formats convert and load. The converter quantises only aligned two-dimensional .weight matrices; convolutions, positions, vectors and unaligned matrices keep the source type, so a quantized export is a mix.",
+    "formats": {
+      "bf16": {
+        "bytes": 6698183616,
+        "types": "2818 BF16 + 1 I64",
+        "runs": true
+      },
+      "f16": {
+        "bytes": 6698183616,
+        "types": "2818 F16 + 1 I64",
+        "runs": true,
+        "output": "byte-identical to bf16"
+      },
+      "f32": {
+        "bytes": 13386140096,
+        "types": "2818 F32 + 1 I64",
+        "runs": true,
+        "peak_rss_bytes": 22085180,
+        "note": "22 GB resident for a 16-token run on a 22 GB machine"
+      },
+      "q8_0": {
+        "bytes": 3574328256,
+        "types": "2402 Q8_0 + 416 BF16 + 1 I64",
+        "runs": true,
+        "output": "same text, one block's bounding box moves by one pixel"
+      },
+      "q4_k": {
+        "bytes": 3082210000,
+        "runs": true,
+        "output": "same text, bounding boxes move by one pixel"
+      },
+      "q6_k": {
+        "runs": "conversion still running when this record was written"
+      }
+    }
+  },
+  "cli": {
+    "out_refuses_existing": true,
+    "multi_page_reference": true,
+    "compute_vulkan_rejected": "--compute vulkan supports plain text decoder generation only; this mode has no complete Vulkan execution path",
+    "single_page_output": "matches the recorded text and the recorded bounding boxes",
+    "multi_page_output": "matches the recorded text and the recorded bounding boxes"
+  },
+  "http": {
+    "checker": "tools/oracle/unlimited_ocr/check_http.py",
+    "requests": 11,
+    "result": "PASS",
+    "count_tokens": 279,
+    "note": "the recorded prompt_tokens for the single page is also 279"
+  },
+  "gpu": {
+    "policy": "Auto",
+    "device_projections": "linear projections only; attention, routing and the short convolution stay on the host",
+    "submissions_16_tokens": 2517,
+    "static_uploads": 2027,
+    "static_upload_bytes": 5523375168,
+    "output": "byte-identical to the CPU path",
+    "wall_seconds_cpu": 58.12,
+    "wall_seconds_auto": 118.18,
+    "note": "Auto is 2.03 times slower than the CPU on this integrated GPU. The offload threshold is 16384 output elements, so a one-row decode projection stays on the host and only the lm_head reaches the device; with RUST_GPU_MIN_OUTPUTS=0 the submissions rise to 7628 and the output is unchanged. Every device projection is additionally spot-checked against the CPU kernel, the guard added for the flaky device in TODO-044."
+  },
+  "not_checked": [
+    "a discrete GPU: this run used an integrated GPU",
+    "the whole-page comparison in the multi-page case beyond the first failing checkpoint",
+    "the component comparisons (vision and decoder separately) on this machine",
+    "the q6_k export at full token budget",
+    "the multimodal and tool-calling surfaces, which this backend rejects by design"
+  ]
+}

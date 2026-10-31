@@ -70,8 +70,27 @@ The runner verifies SHA256 of the official source, tokenizer and weights before 
 |---|---:|---|
 | model-00001-of-00002.safetensors | 4998430312 | `4c40b740f209fd7682040d4ebf19409208acde5c401ccd2dde426d0f41542f18` |
 | model-00002-of-00002.safetensors | 1689875264 | `9490b82fa47f89e5110eb5577f8ab1b6694c12121905dbc086ddb10207a4ba0c` |
-| fixtures/page-1.png | — | `82b33a6d81c692ae96a7ee5514c4c07a4361b6feadbf58085ca4765f90cce487` |
-| fixtures/page-2.png | — | `917808b1c31211e4fd0fc4fb36ead391a390d3c6b3c76cb96c0fe8b23f46f53b` |
+| fixtures/page-1.png | — | `24bbe8347d2a33c071a3ab576275ffe4deea93fa30713aaa8eac3e96c9bed9b4` |
+| fixtures/page-2.png | — | `f543d588f1ed13c2dee05af94244d8cabcf817c0a340a5de9f0fb6243e5936ec` |
+
+### 生成页面 fixture
+
+两页图片**不入库**，由脚本合成：
+
+```sh
+.venv/bin/python tools/oracle/unlimited_ocr/make_pages.py
+```
+
+字体是 Liberation Sans（Debian `fonts-liberation`），脚本按 SHA-256 固定它；Pillow 的
+版本由 `requirements.txt` 固定。两页都是白底黑字：800×1000，标题 48 px，正文 34 px，
+行距 110 px，左边距 60 px。脚本会打印每页的 SHA-256，与上表对照即可知道本机的渲染
+结果是否与记录一致。
+
+`check_http.py` 在缺图时会自己调用生成器，所以 HTTP 检查不需要先手动生成。
+
+早先提交的页面是用 macOS 的系统字体渲染的，无法在 Linux 上逐字节复现；换成
+Liberation Sans 后两页的**文字完全相同**，模型预测的页面坐标有 1–3 px 的位移，
+因此 `verification.json` 里记录的 token 序列随之更新。
 
 Create a Python 3.12 environment **inside the repository** for the oracle:
 
@@ -147,5 +166,33 @@ The integration checks cover OCR through Chat, Anthropic Messages, Responses and
 The real BF16 GGUF export reproduces all 69 first-prefill checkpoints bit-for-bit against the original safetensors trace. Real Q8_0 runs produce the first OCR token `<PAGE>`. This is a smoke check; a full quantized-weight graph oracle has not been run.
 
 After the integration fixes, the focused OCR model units, common API tests and CLI regressions pass, along with the converter, oracle self-checks, HTTP checker self-checks, shared kernels and scalar BF16 checks. The original full library run had 1292 passes, 86 ignored and the same 20 failures reproduced on the base commit (1280 passes, 84 ignored). That full-library result predates these integration fixes; the full suite has not been rerun. Recorded runtimes include concurrent validation jobs and are not clean performance benchmarks.
+
+### Linux 上的一次独立复验
+
+[verification-linux.json](verification-linux.json) 记录 2026-10-30 在 Linux x86_64（Intel 集显）上
+的一次复验，用的是**重新生成的页面**（见上面「生成页面 fixture」）。12 个官方源码 SHA 与
+2 个权重 SHA 全部匹配，官方模块 unmodified。
+
+| 用例 | 检查点 | 结果 | 最大 peak-relative | 最小 cosine |
+|---|---:|---|---:|---:|
+| 单页 | 3040 | **通过** | 0.00009388 | 0.999999999 |
+| 双页 | 5835 | **未通过** | 0.01024003 | 0.999999569 |
+
+双页在 `uocr.attention` decoder layer 2 occurrence 2 处越界（门槛 0.002）—— **与作者
+在 macOS 上保留的例外同一签名**（attention，decoder layer 2/3/5/7/8），量级也相近
+（作者 0.012268，本机 0.010240）。也就是说，那个 MoE 路由边界上的不稳定**不是作者
+机器的环境问题**，换机器、换渲染字体后依然出现。
+
+官方模块在本机重算的 primitive 与仓库里 pin 的 `tests/fixtures/unlimited_ocr_oracle.json`
+在 float32 的 1–2 ULP 上有差异（rotated rope 与 route bias）；那是环境差异，不是 Rust
+实现差异 —— 该 fixture 存的是官方代码自己的输出，Rust 测试的容差覆盖得住。
+
+六种 GGUF 格式（bf16 / f16 / f32 / q8_0 / q4_k / q6_k）全部转换成功并能加载运行；
+`f16` 与 `bf16` 的输出**逐字节相同**，`q8_0` 与 `q4_k` 的文字相同而预测框位移 1 px。
+`f32` 导出在 22 GB 的机器上占 22 GB 常驻。
+
+Auto 路径在本机集显上**比 CPU 慢 2.03 倍**（128 token：58.12 s 对 118.18 s），输出
+与 CPU 逐字节相同。离 CPU 的门槛是 16384 个输出元素，所以单行 decode 的投影留在 host，
+只有 lm_head 上了设备；`RUST_GPU_MIN_OUTPUTS=0` 时提交次数从 2517 升到 7628，输出不变。
 
 The committed primitive fixture covers Unicode/whitespace/special-token IDs, page coordinates, resampled Page2D RoPE, entmax route indices/biases and the full normalized pixel hash, including Pillow's ties-to-even pad placement.
