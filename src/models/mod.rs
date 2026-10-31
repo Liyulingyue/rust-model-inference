@@ -32,6 +32,7 @@ pub mod laya;
 pub mod lfm2;
 pub mod lfm25;
 pub mod lfm2moe;
+pub mod lfm3;
 pub mod llama;
 pub mod mellum;
 pub mod minicpmv;

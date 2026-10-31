@@ -407,6 +407,13 @@ MiniCPM-V 4.7 的 `qwen35moe`（35B-A3B）此前只在**生成面**注册，多�
       F-2 `entity_attributes`（两套机制、零 ground truth）、
       F-3 长文本 `*_long` chunk+merge、F-4 relation 4 阶段 dedup。
 - [ ] **讨论：两套线程调度统一** — ComputePool vs rayon。暂不统一（LLM 热路径不应轻易改动）
+- [ ] **LFM3 的 GPU 路径只搬了 matmul，剩余算子占 CPU 解码时间 18%** — 详见
+      [TODO-045](#todo-045-lfm3-的-gpu-路径只搬了-matmul剩余算子占-cpu-时间-18集显上-auto-比-cpu-慢-84925)。
+      现状：GPU 只做线性投影，attention / shortconv / KV 留在 host。测算表明投影占 CPU
+      解码约 82%，其余算子合计仅 18%，所以**在集显上继续搬算子没有收益**（实测 Auto
+      输出与 CPU 逐字节相同，却慢 8.4–9.25×，瓶颈是权重过内存总线）。真要做应在独显上
+      做，优先滑窗 attention、q/k norm+RoPE 合并、RMSNorm 融合、sigmoid head gate，
+      shortconv 最后。
 - [ ] **ComputePool 的空闲 worker 在 GPU 模式下空转，抢占驱动线程** —
       `src/core/thread_pool.rs` 的 `worker_loop` 空闲分支是「自旋 `WAIT_SPINS` 次 →
       `yield_now()`」。`yield_now()` 只让出调度，线程仍是 runnable，会被立刻重新调度，
@@ -3091,3 +3098,70 @@ SIGTRAP（落在 `libnvidia-gpucomp.so` 的着色器编译器），关掉 GPU-AV
 **顺带**：`float_matmul_tiled` 的 GPU 求和顺序与 CPU 的 vec4 累加器不同，真实
 权重下差 1e-3，被 8 步扩散放大到约 29.5 dB。f64 仲裁显示 GPU 更接近真值
 （7.79e-5 vs 1.18e-4），所以这不是错误，不要为了「和 CPU 一致」去改 kernel。
+
+### TODO-045: LFM3 的 GPU 路径只搬了 matmul；剩余算子占 CPU 时间 18%，集显上 Auto 比 CPU 慢 8.4–9.25×
+
+**现状**：`src/models/lfm3/trunk/session.rs:102-127` 把每层的 `w_gate/w_up/w_down`、
+`wq/wk/wv/wo/attn_gate`（attention 层）或 `shortconv_in/shortconv_out`（shortconv 层）
+加上最后的 `model.output` 注册成 `LinearBinding`，这就是 GPU 上的全部负载。诊断行
+`LFM3 projections: requested=Auto backend=Vulkan; attention/shortconv/KV=Cpu` 描述得准确：
+**GPU 只做线性投影，attention / shortconv / KV cache 全在 host。**
+
+仍在 CPU 上的算子与仓库现成 shader 的对应关系：
+
+| 算子 | 次数 | 仓库里有没有现成 shader |
+| --- | --- | --- |
+| RMSNorm（attn/q/k/ffn/post_*/out_norm） | ~5/层 | ✅ `shaders/glsl/rms_norm.comp` |
+| q_norm+k_norm+RoPE（双 freq_base 1e6 / 1e4） | 1/层 | ✅ `shaders/glsl/qk_norm_rope.comp`（freq_base 走系数缓冲，`fill_rope_neox` 已有） |
+| SwiGLU（silu*up） | 1/层 | ✅ `shaders/glsl/silu_mul.comp` |
+| 残差加 | 2/层 | ✅ `shaders/glsl/add.comp` |
+| softmax | 1/层 | ✅ `shaders/glsl/softmax.comp` |
+| KV 写入 + F32/F16 转换 | 1/层 | ✅ `shaders/glsl/kv_write.comp` |
+| attention（full + **SWA**） | 1/层 | ⚠️ 有 `attention_online/scores/values`，但**整个 `shaders/glsl/` 里没有任何支持滑窗的 shader**；LFM3 有 5 个 SWA 层（layer 4/8/12/16/20） |
+| head gate（sigmoid） | 1/层 | ❌ **没有 sigmoid shader**；`silu_mul.comp` 有 `exp_mode` 字段可改 |
+| shortconv（`l_cache=7` + b/c 三路门控） | 1/层 | ❌ LFM3 特有结构；`qwen35_recurrent_conv.comp` 的布局不同 |
+
+**但"算子没上 GPU"不是主要矛盾。** LFM3 每 token 的投影工作量与本机实测：
+
+- 配置：24 层，d=2048，16 head × 128，n_ff=7680，vocab=128000，11 个 attention 层 +
+  13 个 shortconv 层，5 个 SWA 层，`lfm3.attention.head_count_kv` 为 0 的层即 shortconv 层。
+- 每 token 投影 **1.728 G MAC = 3.46 GFLOP**（含 lm_head 2048×128000）。
+- 本机 Q8_0 GEMM 实测 **80 GFLOPS**（`target/release-fast/micro-bench`，AVX2/FMA）→
+  投影理论 **43.2 ms/token**。
+- 实测 CPU 解码 **52.6 ms/token**（`--profile`：947.02 ms / 18 token）。
+
+→ **投影占 CPU 解码约 82%，其余所有算子加起来约 18%。**
+
+**影响**：
+
+1. **在这类集成显卡上继续往上搬算子收益有限**。本机（Intel Meteor Lake 集显）
+   实测 Auto 路径输出与 CPU 路径逐字节相同，但比 CPU **慢 8.4×**（32 步 greedy：
+   2.65 s 对 22.34 s）、**慢 9.25×**（216 token prompt + 8 步 decode：13.80 s 对
+   127.63 s）。原因是集显的设备内存就是系统内存，1.85 GB 权重"放进显存"后每次投影
+   都要过内存总线，比 CPU 直接读 RAM 更慢。把剩下 18% 的算子搬上 GPU，还要付 GPU
+   往返开销，净亏。
+2. **在独显上结论相反**：投影一旦真的快起来，host 端那 18% 会立刻变成主要瓶颈，
+   那时搬 attention / norm / RoPE 才有意义。
+3. **`--gpu` 与 `--compute auto` 都不提示"这次比 CPU 慢"**。用户看到的是"GPU 好慢"，
+   而不是"这个后端在这个设备上不划算"。这与 TODO-038 的结论同源：自动分发应当
+   **按实测选后端**（首 token 实测延迟对比 CPU 基线，落后就回退），而不是按模型
+   大小或"用户要求了 GPU"。
+
+**下一步（建议顺序，仅当有独显可测时）**：
+
+1. **滑窗 attention** —— 给 `attention_online.comp` 加 window 参数。影响 5/11 个
+   attention 层，且 SWA 层是最吃 attention 的；这是唯一一处"必须新写"的 attention 逻辑。
+2. **q/k norm + RoPE 合并** —— `qk_norm_rope.comp` 现成，push constant 已有
+   `q_heads/k_heads/head_dim/norm_flags/eps`，只需喂两组 freq_base 的系数缓冲
+   （`fill_rope_coefficients` / `fill_rope_neox` 已在 `src/vulkan/ops.rs`）。
+3. **RMSNorm 融合进投影后处理** —— 照抄 `silu_mul.comp` 的 `exp_mode` 模式。
+4. **head gate 的 sigmoid** —— 每层只有 16 个标量，最便宜，放哪儿都行。
+5. **shortconv** —— 13 层 × 6144 × 7 tap，FLOPs 最小但结构最 bespoke，最后做。
+
+**尚未验证**：以上任何一项都没有实机数据；本机只有集显，而集显上 GPU 路径本就不该
+作为加速路径。需要一台有独立显存的机器重测，否则做了也证明不了收益。
+
+**关联**：[TODO-038](#todo-038-cpugpu-自动分发应该按实测选后端而不是按模型大小)、
+`docs/develop/SUPPORTED_MODELS.md` 的 LFM3 行（状态 `Verified`（CPU/Q8_0 运行）；
+`Experimental`（Vulkan 投影））、`tools/oracle/lfm3/README.md` 的
+「同一台机器上的 Auto/Vulkan 投影路径」一节。

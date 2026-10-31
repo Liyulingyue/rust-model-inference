@@ -425,3 +425,90 @@ fn rope_norm_nrot_rejects_out_of_range_n_rot_by_falling_back() {
         }
     }
 }
+
+#[test]
+fn neox_frequency_divisors_preserve_unscaled_and_frozen_pairs() {
+    let input: Vec<f32> = (0..16).map(|i| i as f32 * 0.1).collect();
+    let mut plain = input.clone();
+    let mut unit = input.clone();
+    rope_neox_inplace(&mut plain, 9, 8, 10_000.0);
+    super::rope_neox_inplace_with_freqs(&mut unit, 9, 8, 10_000.0, &[1.0; 4]);
+    assert_eq!(plain, unit);
+    let mut scaled = input.clone();
+    super::rope_neox_inplace_with_freqs(&mut scaled, 9, 8, 10_000.0, &[1.0, 1.0, 1e30, 1e30]);
+    for head in 0..2 {
+        for d in [0, 1, 4, 5] {
+            assert_eq!(scaled[head * 8 + d], plain[head * 8 + d]);
+        }
+        for d in [2, 3, 6, 7] {
+            assert_eq!(scaled[head * 8 + d], input[head * 8 + d]);
+        }
+    }
+}
+
+#[test]
+fn neox_frequency_divisors_scale_each_pair_independently() {
+    // A divisor of `d` moves the pair's angle to `theta / d`, so the pair
+    // rotated at position `p * d` with that divisor lands on the angle the
+    // plain path uses at position `p`. This pins the per-pair behaviour
+    // instead of only the unscaled and frozen endpoints.
+    let input: Vec<f32> = (0..8).map(|i| i as f32 * 0.25 - 0.5).collect();
+    let mut plain = input.clone();
+    let mut scaled = input.clone();
+    rope_neox_inplace(&mut plain, 2, 8, 10_000.0);
+    super::rope_neox_inplace_with_freqs(&mut scaled, 4, 8, 10_000.0, &[2.0; 4]);
+    for (a, b) in plain.iter().zip(&scaled) {
+        assert!((a - b).abs() < 1e-6, "{a} != {b}");
+    }
+}
+
+#[test]
+fn neox_frequency_divisors_precise_agrees_with_the_fused_variant() {
+    // The precise path takes two separate libm calls where the default
+    // path takes the fused one, so the two differ in the last bit but must
+    // describe the same rotation.
+    let input: Vec<f32> = (0..16).map(|i| i as f32 * 0.1 - 0.7).collect();
+    let divisors = [1.0, 0.5, 2.0, 4.0];
+    let mut fused = input.clone();
+    let mut precise = input.clone();
+    super::rope_neox_inplace_with_freqs(&mut fused, 9, 8, 10_000.0, &divisors);
+    super::rope_neox_inplace_with_freqs_precise(&mut precise, 9, 8, 10_000.0, &divisors);
+    for (a, b) in fused.iter().zip(&precise) {
+        assert!((a - b).abs() < 1e-6, "{a} != {b}");
+    }
+    // The precise path has to freeze a pair like the default one. The
+    // divisor is finite, so the angle is near zero rather than zero and the
+    // rotation leaves a ~1e-33 residue instead of nothing at all; that
+    // residue only shows up on a channel whose value is exactly zero.
+    let mut frozen = input.clone();
+    super::rope_neox_inplace_with_freqs_precise(
+        &mut frozen,
+        9,
+        8,
+        10_000.0,
+        &[1.0, 1.0, 1e30, 1e30],
+    );
+    for head in 0..2 {
+        for d in [2, 3, 6, 7] {
+            let index = head * 8 + d;
+            assert!(
+                (frozen[index] - input[index]).abs() < 1e-30,
+                "{index}: {} != {}",
+                frozen[index],
+                input[index]
+            );
+        }
+    }
+}
+
+#[test]
+fn neox_frequency_divisors_without_a_per_pair_list_match_the_plain_path() {
+    // The `None` path is what every other architecture uses, so it has to
+    // stay bit-identical to the plain rotation.
+    let input: Vec<f32> = (0..16).map(|i| i as f32 * 0.1).collect();
+    let mut plain = input.clone();
+    let mut none = input.clone();
+    rope_neox_inplace(&mut plain, 9, 8, 10_000.0);
+    super::rope_neox_inplace_with_freqs(&mut none, 9, 8, 10_000.0, &[1.0; 4]);
+    assert_eq!(plain, none);
+}

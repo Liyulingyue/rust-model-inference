@@ -432,6 +432,7 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             | "pig"
             | "lfm2"
             | "lfm2moe"
+            | "lfm3"
             | "xing4_0"
             | "nanbeige"
             | "nemotron_h"
@@ -692,6 +693,20 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             // ModelConfig defaults. The model trunks read their own
             // head_count_kv array for per-layer dispatch.
             8
+        } else if arch == "lfm3" {
+            // LFM3 stores a per-layer array; use the first attention entry
+            // for the generic config while the LFM3 trunk keeps the full
+            // array for recurrent/attention dispatch.
+            source
+                .metadata("lfm3.attention.head_count_kv")
+                .and_then(MetaValue::to_arr)
+                .and_then(|values| {
+                    values
+                        .iter()
+                        .filter_map(MetaValue::to_u64)
+                        .find(|&value| value > 0)
+                })
+                .unwrap_or(0) as usize
         } else if arch == "granite" {
             // Granite stores head_count_kv as a per-layer array (all values
             // are identical for the dense variant). Read the first entry.
