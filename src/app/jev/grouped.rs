@@ -184,7 +184,7 @@ pub fn build_grouped_payload(context: &str, q: &PreparedGroupedQuestion) -> Resu
     Ok(payload)
 }
 
-pub(crate) fn allocate_group_labels(q: &PreparedGroupedQuestion) -> Vec<Vec<char>> {
+fn allocate_group_labels(q: &PreparedGroupedQuestion) -> Vec<Vec<char>> {
     let mut all = Vec::with_capacity(q.groups.len());
     let mut next = b'A';
     for group in &q.groups {
@@ -507,41 +507,26 @@ fn compute_grouped_jev_result(
     logits: &[f32],
     prefill_ms: u128,
 ) -> JevGroupedResult {
-    let label_ids: Vec<Vec<u32>> = group_labels
-        .iter()
-        .map(|labels| {
-            labels
-                .iter()
-                .map(|c| {
-                    tokenizer
-                        .encode(
-                            &c.to_string(),
-                            EncodeOptions {
-                                add_special: false,
-                                parse_special: false,
-                            },
-                        )
-                        .into_iter()
-                        .next()
-                        .unwrap_or(0)
-                })
-                .collect()
-        })
-        .collect();
-    compute_grouped_jev_result_with_ids(q, group_labels, &label_ids, logits, prefill_ms)
-}
-
-pub(crate) fn compute_grouped_jev_result_with_ids(
-    q: &PreparedGroupedQuestion,
-    group_labels: &[Vec<char>],
-    label_ids: &[Vec<u32>],
-    logits: &[f32],
-    prefill_ms: u128,
-) -> JevGroupedResult {
     let mut groups = Vec::with_capacity(q.groups.len());
     for (gi, group) in q.groups.iter().enumerate() {
         let labels = &group_labels[gi];
-        let label_ids = &label_ids[gi];
+        let label_ids: Vec<u32> = labels
+            .iter()
+            .map(|c| {
+                let s = c.to_string();
+                tokenizer
+                    .encode(
+                        &s,
+                        EncodeOptions {
+                            add_special: false,
+                            parse_special: false,
+                        },
+                    )
+                    .into_iter()
+                    .next()
+                    .unwrap_or(0)
+            })
+            .collect();
         let group_logits: Vec<f32> = label_ids.iter().map(|&id| logits[id as usize]).collect();
         let max_logit = group_logits
             .iter()
