@@ -111,6 +111,8 @@ let mut project = |w: &Weight<'_>, input: &[f32], output: &mut [f32]| {
 
 **② `--compute vulkan` 会干净地失败,这是对的。** `ComputePolicy::validate_text_arch`(`src/compute/mod.rs`)的白名单是 `llama | qwen3 | qwen35 | qwen35moe | dory`,不含 `lfm3`,所以会返回 "full Vulkan text decoding is not supported for lfm3"。与 holo4/turbo 分支给 `qwen35moe`/`dory` 放开白名单的做法不同 —— LFM3 没有放开,这是合理的(没有 Vulkan 实现)。
 
+> **后续变更（`codex/unlimited-ocr-2` 分支）**：白名单不再是拒绝，而是**只警告一次**（`compute requested=Vulkan backend=partial arch=lfm3 …`）。LFM3 在这台机器上确实有一条 Vulkan 投影路径（本机 Auto 实测 2,312 次 dispatch、输出与 CPU 逐字节相同），所以「整图拒绝」本来就是误伤 —— 拒绝的理由与 LFM3 的实际能力不符。
+
 对比 holo4 的做法:`src/models/qwen35/trunk/session.rs:268-298` 有一条完整的降级链(Auto 试 Vulkan → 失败打印 "Falling back to CPU" → 降级;Vulkan 强制 → 报错)。LFM3 缺的就是这一层。
 
 ### 3.3 JEV —— ❌ 未做
@@ -464,7 +466,7 @@ Rust 的精确 exp 不劣于 ggml 的向量近似,把它换成近似只会降低
 | 原审阅项 | 实现 | 核对 |
 | --- | --- | --- |
 | 多 weight 分发 | 全部投影走 `LinearExecutor`;**Q/K/V/head gate(4 个)与 FFN gate/up(2 个)走 `run_group`**,共享 `PreparedRows` 激活量化 | `forward.rs` 的 `run_group` 两处 ✓ |
-| GPU/CPU 自动分发 | CLI/HTTP/JEV 共用 `ComputePolicy`;Auto 在 M3 Max 上真跑 Vulkan 投影(2,312 次 dispatch);缺驱动回退实测过(`VK_DRIVER_FILES=/nonexistent/...`);`--compute vulkan` 全图拒绝 | `session.rs` 的 `new_with_compute` ✓ |
+| GPU/CPU 自动分发 | CLI/HTTP/JEV 共用 `ComputePolicy`;Auto 在 M3 Max 上真跑 Vulkan 投影(2,312 次 dispatch);缺驱动回退实测过(`VK_DRIVER_FILES=/nonexistent/...`);`--compute vulkan` 要求设备可用(缺设备硬失败),白名单只警告 | `session.rs` 的 `new_with_compute` ✓ |
 | HTTP | `Lfm3TextRuntime` 注册进 `build_text_runtime`;强制 GGUF Jinja;拒图片/工具调用;超上下文 400 | `src/models/lfm3/runtime.rs` ✓ |
 | JEV | CLI + HTTP 单项/分组,用共享 `JevScorer` trait 与 `run_jev_decision_core` | `src/app/jev/{single,grouped}/lfm3.rs` ✓ |
 
