@@ -151,7 +151,12 @@ impl GpuLinear {
             Ok(())
         })();
         match result {
-            Ok(()) => true,
+            Ok(()) => {
+                if std::env::var_os("RMI_COMPUTE_TRACE").is_some() {
+                    eprintln!("compute scope=linear backend=Vulkan rows={rows} counters=device_cumulative {:?}", context.compute_stats());
+                }
+                true
+            }
             Err(crate::vulkan::VulkanError::UnsupportedShape(_)) => false,
             Err(error) => {
                 crate::vulkan::mark_gpu_broken(&error.to_string());

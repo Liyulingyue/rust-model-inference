@@ -226,6 +226,15 @@ impl<'a> Linear<'a> {
                         HEALTHY_WORST.fetch_max(worst.to_bits(), Ordering::Relaxed);
                     }
                     let mut attempts = 0;
+                    let mut matches = projection_matches_cpu(
+                        pool,
+                        weight,
+                        input,
+                        &output,
+                        rows,
+                        self.n_in(),
+                        self.n_out(),
+                    );
                     if std::env::var_os("RMI_GPU_VERIFY_TRACE").is_some() {
                         // When the check fails, the whole output is compared
                         // against the CPU kernel, so the shape of the damage
@@ -288,8 +297,12 @@ impl<'a> Linear<'a> {
                             )
                         );
                     }
-                    while attempts < GPU_RETRY_LIMIT
-                        && !projection_matches_cpu(
+                    while attempts < GPU_RETRY_LIMIT && !matches {
+                        attempts += 1;
+                        if !self.weight.try_vulkan_rows(input, &mut output, rows) {
+                            break;
+                        }
+                        matches = projection_matches_cpu(
                             pool,
                             weight,
                             input,
@@ -297,27 +310,14 @@ impl<'a> Linear<'a> {
                             rows,
                             self.n_in(),
                             self.n_out(),
-                        )
-                    {
-                        attempts += 1;
-                        if !self.weight.try_vulkan_rows(input, &mut output, rows) {
-                            break;
-                        }
+                        );
                     }
                     if attempts > 0 {
                         eprintln!(
                             "[GPU-VERIFY] a projection was wrong and {attempts} retries fixed it"
                         );
                     }
-                    if !projection_matches_cpu(
-                        pool,
-                        weight,
-                        input,
-                        &output,
-                        rows,
-                        self.n_in(),
-                        self.n_out(),
-                    ) {
+                    if !matches {
                         eprintln!(
                             "[GPU] a projection did not match the CPU kernel after {attempts} retries; recomputing it on the CPU"
                         );
@@ -641,43 +641,7 @@ pub(crate) fn projection_matches_cpu(
 }
 
 pub(crate) fn dot_bf16_f32(weight: &[u8], input: &[f32]) -> f32 {
-    // The parity path must not enter the architecture-specific BF16 kernel.
-    // `has_neon` already observes this flag on current builds, but keep the
-    // check local so this operator stays correct if feature probing changes.
-    #[cfg(target_arch = "aarch64")]
-    if !crate::ops::scalar_mode() && crate::ops::has_neon() {
-        return unsafe { dot_bf16_f32_neon(weight, input) };
-    }
-    let mut sum = 0.0f32;
-    for (bytes, &input) in weight.chunks_exact(2).zip(input) {
-        sum += crate::ops::bf16_to_f32(u16::from_le_bytes(bytes.try_into().unwrap())) * input;
-    }
-    sum
-}
-
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon")]
-unsafe fn dot_bf16_f32_neon(weight: &[u8], input: &[f32]) -> f32 {
-    use std::arch::aarch64::*;
-
-    let mut accumulator = vdupq_n_f32(0.0);
-    let mut index = 0;
-    while index + 4 <= input.len() {
-        let packed = vld1_u16(weight.as_ptr().add(index * 2).cast());
-        let bits = vshlq_n_u32(vmovl_u16(packed), 16);
-        let values = vreinterpretq_f32_u32(bits);
-        accumulator = vfmaq_f32(accumulator, values, vld1q_f32(input.as_ptr().add(index)));
-        index += 4;
-    }
-    let mut sum = vaddvq_f32(accumulator);
-    while index < input.len() {
-        let offset = index * 2;
-        let value =
-            crate::ops::bf16_to_f32(u16::from_le_bytes([weight[offset], weight[offset + 1]]));
-        sum += value * input[index];
-        index += 1;
-    }
-    sum
+    crate::ops::dot_bf16_f32(input, weight, input.len())
 }
 
 pub fn rms_norm_rows(
@@ -2249,9 +2213,8 @@ mod tests {
         assert_close(&output, &[-1.5, -2.5, 4.5, 12.5], 1e-6);
     }
 
-    #[cfg(target_arch = "aarch64")]
     #[test]
-    fn bf16_dot_neon_matches_scalar_values() {
+    fn bf16_dot_dispatch_matches_scalar_values() {
         let input = values(19);
         let weight = values(19);
         let bytes: Vec<u8> = weight
@@ -2263,7 +2226,7 @@ mod tests {
             .map(|bytes| crate::ops::bf16_to_f32(u16::from_le_bytes(bytes.try_into().unwrap())))
             .collect();
         let expected = rounded.iter().zip(&input).map(|(a, b)| a * b).sum::<f32>();
-        let actual = unsafe { dot_bf16_f32_neon(&bytes, &input) };
+        let actual = dot_bf16_f32(&bytes, &input);
         assert!((actual - expected).abs() < 1e-5, "{actual} != {expected}");
     }
 

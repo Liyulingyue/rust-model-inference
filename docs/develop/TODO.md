@@ -3165,3 +3165,68 @@ SIGTRAP（落在 `libnvidia-gpucomp.so` 的着色器编译器），关掉 GPU-AV
 `docs/develop/SUPPORTED_MODELS.md` 的 LFM3 行（状态 `Verified`（CPU/Q8_0 运行）；
 `Experimental`（Vulkan 投影））、`tools/oracle/lfm3/README.md` 的
 「同一台机器上的 Auto/Vulkan 投影路径」一节。
+
+---
+
+### TODO-046: qwen3 的 CPU 与 Vulkan 输出差一个 token（arch 白名单里的模型也不对齐）
+
+**现状**：`qwen3` 在 `ComputePolicy::has_complete_device_path()` 的 arch 白名单里
+（`llama|qwen3|qwen35|qwen35moe|dory`），所以 `--compute vulkan` 一直放行，走的是
+`Qwen3VulkanSession` 那条「整个解码驻留设备」的路径。
+
+但同一条 prompt 下，**CPU 与 Vulkan 的 greedy 输出不一致**。本机（Qwen3-0.6B-Q8_0，
+Intel 集显，`--kv-cache f16`）：
+
+| 路径 | 输出 |
+| --- | --- |
+| CPU | `Hello! How can I assist you today? 😊`（11 token） |
+| Vulkan | `Hello! How can I assist you today?`（9 token） |
+
+差的是末尾那个 emoji token —— **典型的数值边界翻转**：两条路径的 logits 排序在
+某一个 token 上几乎持平，谁赢取决于累加顺序与舍入。
+
+**这不是「去掉白名单」那次改动引入的**：把改动 stash 掉、退回改动前的 HEAD 重编译，
+同样的命令输出**完全相同**（同样少一个 emoji）。而且在 `--prompt hello` 这种单
+token prompt 下差异更大（CPU 出英文、Vulkan 出韩文），说明**偏离不止在最后一步**。
+
+**仓库里其实已经记过一次同样的事**：`docs/develop/UNIFIED_COMPUTE_VALIDATION.md`
+写的是远程 AMD RADV NAVI31 上 `Qwen3-0.6B-Q8_0.gguf` 的**模型准入门禁在 token 0
+就失败**（GPU `4.476106`、CPU `4.4538846`、abs `0.022221565`，门槛
+`MODEL_LOGIT_ABS_TOLERANCE = 2e-3`）→ `--compute vulkan` 以此 exit 1。
+**本机（Intel 集显）过得了 token 0 的门禁，却在后面对齐时翻了一个 token** ——
+同一类数值偏离，两台机器上表现不同。
+
+**JEV 也踩到同一件事**：qwen3 的 JEV 在 Vulkan 下被模型自己的契约门禁拦下
+（`model logit mismatch at 0: gpu=5.6980243 cpu=3.4995377 abs=2.1984866`）→ HTTP 500；
+而 llama-1B 的 JEV 在 Vulkan 下与 CPU **逐位相同**。**同一个 Vulkan 策略下，两个
+白名单里的 arch 一个能过门禁、一个过不了** —— 又一次说明白名单不是能力证明。
+
+**一个可能相关的实现细节**：`src/models/qwen3/trunk/prefill.rs:195` 的
+`validate_gpu_contract` 要求 `need_logits` 为真，而常规 prompt prefill
+（`need_logits = false`）**不会**跑那个 16 步 decode 契约探针
+（`MODEL_CONTRACT_DECODE_STEPS = 16`）。所以**真实生成路径上的 token 偏离没有被
+任何门禁看着**。这条线索没验证，只是探针的触发条件摆在那里。
+
+**为什么值得单列一条**：
+
+1. **白名单的含义被高估了。** `has_complete_device_path()` 现在只用来决定「要不要
+   打印警告」，但名字读起来像「这些架构的设备路径是对的」。实际上 `qwen3` 的设备
+   路径与 CPU 不对齐 —— 白名单里至少有一个成员不满足它字面上的意思。
+2. **LFM3 与 OCR 的同项对比是干净的**（Auto/Vulkan 与 CPU 逐字节相同），所以这不是
+   「设备算错了」，而是 **qwen3 这条驻留式 Vulkan 解码路径自己的累加顺序**与 CPU
+   kernel 不同。
+
+**待查**：
+
+1. `src/models/qwen3/trunk/session.rs` 的 `Qwen3VulkanSession` 与 CPU kernel 在
+   **RMSNorm / softmax / silu** 上的归约顺序是否一致（设备端若用并行归约，累加顺序
+   就和 CPU 的顺序归约不同）。
+2. 差异是**只在边界处翻转**，还是会在长输出里放大？本机只看了 24 token 的短输出。
+3. `src/models/llama/trunk/session.rs` 有同构的 `dense Vulkan currently requires F16 KV`
+   守卫，llama 也在白名单里 —— **llama 是否也有同样的 token 差异**，本轮没测
+   （没有在本机跑 llama 的 CPU/Vulkan 对比）。
+
+**关联**：[TODO-038](#todo-038-cpugpu-自动分发应该按实测选后端而不是按模型大小)、
+[TODO-045](#todo-045-lfm3-的-gpu-路径只搬了-matmul剩余算子占-cpu-时间-18集显上-auto-比-cpu-慢-84925)、
+`docs/develop/UNIFIED_COMPUTE_VALIDATION.md`（远程 AMD 上 qwen3 token 0 门禁失败）、
+`docs/develop/UNLIMITED_OCR_2_REVIEW.md` §7.5。

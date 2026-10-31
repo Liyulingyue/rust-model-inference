@@ -1,0 +1,879 @@
+{
+  "date": "2026-10-28",
+  "base_commit": "92d2eca0aad9161694be49a67a4b3057f7514547",
+  "model": "PaddlePaddle/Unlimited-OCR-2",
+  "revision": "7eadb7cd7afe660602040524eab37c8a9b91fe53",
+  "status": "Experimental: base OCR, native/GGUF, CLI/HTTP, SIMD and Auto hybrid; component numeric alignment, whole-graph MoE peak-bound exceptions retained",
+  "precision": "BF16 source weights widened losslessly; F32 compute/KV; BF16-rounded processor pixels",
+  "platform": "macOS-27.0.1-arm64-arm-64bit",
+  "threads": 8,
+  "torch": "2.14.1",
+  "transformers": "4.52.1",
+  "tensor_count": 2819,
+  "dtype_counts": {
+    "BF16": 2818,
+    "I64": 1
+  },
+  "source_sha256": {
+    "config.json": "607d130a70d5af5a35329aa237acd68651f45504c62cc7ced981066f4e781126",
+    "_sparse_base_impl.py": "86da9c5638704bb9338575040568a97b3e10820bbeb426f51c07e866f3423ccd",
+    "modeling_unlimitedocr.py": "f6df813cef23cc28b1daca40fd8cb20740d05a238e7b9dfa2334531fdcf39f1f",
+    "modeling_deepseekv2.py": "24a15dfd47578ab24a7a4d4e977dc5d7a23dfef0a2a4c4bf73fcf3e2ce7acaf2",
+    "deepencoder.py": "419b63388c1645b9b72c716070cdca36cd0be6047049424dc75941d3a00aaf1f",
+    "dash_attention.py": "960b460acd816df8e561e73dccd5683acb95445eddc723c4f0d6ed1f462b2f77",
+    "tokenizer.json": "c55c165e32c5a67830362a53e1f548c8930dcc8469efa30ff3252a982799c589",
+    "configuration_deepseek_v2.py": "b8470dd616ba8745fce6e27b093aef73a098863cc891b2477dcf9326a36000f7",
+    "packing_patch.py": "e60d842c210c9f1d6cd2ae328cf9127a75f7941a0cea2a8e9abc14662f770c6c",
+    "conversation.py": "ec7b6ce89bcda643de1f43269ffa66a7b2e65dc3ed30e427958f776546b4ba03",
+    "tokenizer_config.json": "ceba7d221f265cca4c98b5e0a1d48c10107270b7b29c12396610d6d0fd64b126",
+    "special_tokens_map.json": "9e89493d7938e7710c524dbaff613c3648f0a018262417af78505128004e5cb4"
+  },
+  "weight_sha256": {
+    "model-00001-of-00002.safetensors": "4c40b740f209fd7682040d4ebf19409208acde5c401ccd2dde426d0f41542f18",
+    "model-00002-of-00002.safetensors": "9490b82fa47f89e5110eb5577f8ab1b6694c12121905dbc086ddb10207a4ba0c"
+  },
+  "acceptance": {
+    "exact": [
+      "token_ids",
+      "normalized_pixels",
+      "generated_ids"
+    ],
+    "floating_components": {
+      "max_absolute_error_divided_by_oracle_peak": 0.002,
+      "minimum_cosine": 0.99999
+    },
+    "bounds_loosened": false
+  },
+  "component_comparisons": {
+    "single_vision": {
+      "checkpoints": 43,
+      "passed": true,
+      "maximum_peak_relative": 2.549611989120587e-05,
+      "minimum_cosine": 0.999999999935093
+    },
+    "single_decoder": {
+      "checkpoints": 2999,
+      "passed": true,
+      "maximum_peak_relative": 3.710712538661376e-05,
+      "minimum_cosine": 0.9999999999185283
+    },
+    "multi_vision": {
+      "checkpoints": 84,
+      "passed": true,
+      "maximum_peak_relative": 2.683875585504202e-05,
+      "minimum_cosine": 0.9999999997973615
+    },
+    "multi_decoder": {
+      "checkpoints": 5753,
+      "passed": true,
+      "maximum_peak_relative": 4.0225734550036806e-05,
+      "minimum_cosine": 0.9999999998721841
+    }
+  },
+  "cases": {
+    "single": {
+      "images": {
+        "tools/oracle/unlimited_ocr/fixtures/page-1.png": "82b33a6d81c692ae96a7ee5514c4c07a4361b6feadbf58085ca4765f90cce487"
+      },
+      "prompt_tokens": 279,
+      "max_tokens": 128,
+      "generated_tokens": 110,
+      "generated_token_ids": [
+        128827,
+        128828,
+        10212,
+        30,
+        114086,
+        19,
+        86594,
+        4610,
+        14,
+        223,
+        5929,
+        14,
+        223,
+        28667,
+        14,
+        223,
+        9309,
+        63,
+        128829,
+        6901,
+        118307,
+        46480,
+        126041,
+        54414,
+        201,
+        128828,
+        2067,
+        61,
+        5863,
+        14,
+        223,
+        5151,
+        14,
+        223,
+        21810,
+        14,
+        223,
+        11342,
+        63,
+        128829,
+        92234,
+        223,
+        939,
+        24,
+        15,
+        5769,
+        26,
+        201,
+        128828,
+        2067,
+        61,
+        5863,
+        14,
+        223,
+        4314,
+        14,
+        223,
+        20544,
+        14,
+        223,
+        16275,
+        63,
+        128829,
+        7519,
+        28,
+        22109,
+        58408,
+        201,
+        128828,
+        2067,
+        61,
+        5863,
+        14,
+        223,
+        17726,
+        14,
+        223,
+        18460,
+        14,
+        223,
+        12747,
+        63,
+        128829,
+        59028,
+        28,
+        223,
+        21,
+        201,
+        128828,
+        2067,
+        61,
+        5863,
+        14,
+        223,
+        19758,
+        14,
+        223,
+        15613,
+        14,
+        223,
+        26307,
+        63,
+        128829,
+        9538,
+        28,
+        223,
+        3180,
+        16,
+        1328,
+        22191
+      ],
+      "text": "<PAGE><BLOCK>title<LEVEL1>[72, 81, 723, 132]<FORK>UNLIMITED OCR TEST\n<BLOCK>text[71, 190, 428, 230]<FORK>Invoice 2026-1028\n<BLOCK>text[71, 300, 406, 340]<FORK>Item: Native Rust\n<BLOCK>text[71, 410, 284, 450]<FORK>Quantity: 3\n<BLOCK>text[71, 519, 404, 559]<FORK>Total: 42.50 USD",
+      "exact_tokens_pixels_and_generation": true,
+      "all_logit_checkpoints_within_bounds": true,
+      "logit_checkpoints": 111,
+      "max_logit_peak_relative": 0.00013436808226043994,
+      "min_logit_cosine": 0.9999999756727381,
+      "end_to_end_checkpoints": 3040,
+      "end_to_end_all_peak_bounds_passed": false,
+      "peak_bound_exceptions": [
+        {
+          "name": "uocr.attention",
+          "layer": 2,
+          "occurrence": 2,
+          "max_abs": 0.0030039753764867783,
+          "max_relative_to_peak": 0.0037758039542657197,
+          "relative_l2": 0.0005652843574150863,
+          "cosine": 0.999999840232455
+        },
+        {
+          "name": "uocr.attention",
+          "layer": 3,
+          "occurrence": 3,
+          "max_abs": 0.006471186876296997,
+          "max_relative_to_peak": 0.005041287400164228,
+          "relative_l2": 0.0006649458655949266,
+          "cosine": 0.9999997789234696
+        },
+        {
+          "name": "uocr.attention",
+          "layer": 5,
+          "occurrence": 5,
+          "max_abs": 0.009799018502235413,
+          "max_relative_to_peak": 0.00633292498099355,
+          "relative_l2": 0.0009135167469296703,
+          "cosine": 0.9999995828468892
+        },
+        {
+          "name": "uocr.attention",
+          "layer": 7,
+          "occurrence": 7,
+          "max_abs": 0.028155922889709473,
+          "max_relative_to_peak": 0.010542010439843692,
+          "relative_l2": 0.0011390290638269432,
+          "cosine": 0.9999993517569612
+        },
+        {
+          "name": "uocr.attention",
+          "layer": 8,
+          "occurrence": 8,
+          "max_abs": 0.01833529770374298,
+          "max_relative_to_peak": 0.0122678408274719,
+          "relative_l2": 0.0008614437000629303,
+          "cosine": 0.9999996296617595
+        }
+      ],
+      "maximum_relative_l2_all_checkpoints": 0.0011390290638269432,
+      "minimum_cosine_all_checkpoints": 0.9999993517569612,
+      "rust_cli_run": {
+        "command": [
+          "artifacts/unlimited_ocr/rust-model-inference",
+          "--model",
+          "models/Unlimited-OCR-2",
+          "--image",
+          "tools/oracle/unlimited_ocr/fixtures/page-1.png",
+          "--threads",
+          "8",
+          "--max-tokens",
+          "128",
+          "--out",
+          "artifacts/unlimited_ocr/single.txt"
+        ],
+        "seconds": 217.7578530421015,
+        "exit_code": 0
+      }
+    },
+    "multi": {
+      "images": {
+        "tools/oracle/unlimited_ocr/fixtures/page-1.png": "82b33a6d81c692ae96a7ee5514c4c07a4361b6feadbf58085ca4765f90cce487",
+        "tools/oracle/unlimited_ocr/fixtures/page-2.png": "917808b1c31211e4fd0fc4fb36ead391a390d3c6b3c76cb96c0fe8b23f46f53b"
+      },
+      "prompt_tokens": 553,
+      "max_tokens": 256,
+      "generated_tokens": 212,
+      "generated_token_ids": [
+        128827,
+        128828,
+        10212,
+        30,
+        114086,
+        19,
+        86594,
+        4610,
+        14,
+        223,
+        5929,
+        14,
+        223,
+        28667,
+        14,
+        223,
+        9309,
+        63,
+        128829,
+        6901,
+        118307,
+        46480,
+        126041,
+        54414,
+        201,
+        128828,
+        2067,
+        61,
+        5863,
+        14,
+        223,
+        5151,
+        14,
+        223,
+        21810,
+        14,
+        223,
+        11342,
+        63,
+        128829,
+        92234,
+        223,
+        939,
+        24,
+        15,
+        5769,
+        26,
+        201,
+        128828,
+        2067,
+        61,
+        5863,
+        14,
+        223,
+        4314,
+        14,
+        223,
+        20544,
+        14,
+        223,
+        16275,
+        63,
+        128829,
+        7519,
+        28,
+        22109,
+        58408,
+        201,
+        128828,
+        2067,
+        61,
+        5863,
+        14,
+        223,
+        20731,
+        14,
+        223,
+        17872,
+        14,
+        223,
+        12747,
+        63,
+        128829,
+        59028,
+        28,
+        223,
+        21,
+        201,
+        128828,
+        2067,
+        61,
+        5863,
+        14,
+        223,
+        19758,
+        14,
+        223,
+        15613,
+        14,
+        223,
+        27277,
+        63,
+        128829,
+        9538,
+        28,
+        223,
+        3180,
+        16,
+        1328,
+        22191,
+        201,
+        128827,
+        128828,
+        10212,
+        30,
+        114086,
+        20,
+        86594,
+        4610,
+        14,
+        223,
+        6078,
+        14,
+        223,
+        23427,
+        14,
+        223,
+        9049,
+        63,
+        128829,
+        50,
+        16412,
+        74381,
+        201,
+        128828,
+        2067,
+        61,
+        2122,
+        14,
+        223,
+        5151,
+        14,
+        223,
+        21170,
+        14,
+        223,
+        14082,
+        63,
+        128829,
+        55428,
+        595,
+        25324,
+        201,
+        128828,
+        2067,
+        61,
+        2122,
+        14,
+        223,
+        17685,
+        14,
+        223,
+        21237,
+        14,
+        223,
+        13506,
+        63,
+        128829,
+        14073,
+        28,
+        223,
+        31602,
+        21767,
+        27,
+        201,
+        128828,
+        2067,
+        61,
+        2122,
+        14,
+        223,
+        20731,
+        14,
+        223,
+        22309,
+        14,
+        223,
+        23036,
+        63,
+        128829,
+        12329,
+        28,
+        10156,
+        201,
+        128828,
+        2067,
+        61,
+        2122,
+        14,
+        223,
+        23911,
+        14,
+        223,
+        17391,
+        14,
+        223,
+        26160,
+        63,
+        128829,
+        17093,
+        440,
+        16
+      ],
+      "text": "<PAGE><BLOCK>title<LEVEL1>[72, 81, 723, 132]<FORK>UNLIMITED OCR TEST\n<BLOCK>text[71, 190, 428, 230]<FORK>Invoice 2026-1028\n<BLOCK>text[71, 300, 406, 340]<FORK>Item: Native Rust\n<BLOCK>text[71, 411, 283, 450]<FORK>Quantity: 3\n<BLOCK>text[71, 519, 404, 558]<FORK>Total: 42.50 USD\n<PAGE><BLOCK>title<LEVEL2>[72, 82, 398, 131]<FORK>PAGE TWO\n<BLOCK>text[70, 190, 470, 231]<FORK>Numerical alignment\n<BLOCK>text[70, 299, 374, 339]<FORK>Order: 8675309\n<BLOCK>text[70, 411, 417, 451]<FORK>Status: completed\n<BLOCK>text[70, 521, 288, 561]<FORK>Thank you.",
+      "exact_tokens_pixels_and_generation": true,
+      "all_logit_checkpoints_within_bounds": true,
+      "logit_checkpoints": 213,
+      "max_logit_peak_relative": 0.00012957988454286693,
+      "min_logit_cosine": 0.9999999853730026,
+      "end_to_end_checkpoints": 5835,
+      "end_to_end_all_peak_bounds_passed": false,
+      "peak_bound_exceptions": [
+        {
+          "name": "uocr.attention",
+          "layer": 2,
+          "occurrence": 2,
+          "max_abs": 0.0030039753764867783,
+          "max_relative_to_peak": 0.0034333102360696354,
+          "relative_l2": 0.0003870659105929366,
+          "cosine": 0.9999999250899825
+        },
+        {
+          "name": "uocr.attention",
+          "layer": 3,
+          "occurrence": 3,
+          "max_abs": 0.006471186876296997,
+          "max_relative_to_peak": 0.004383555814212833,
+          "relative_l2": 0.00048242336576661014,
+          "cosine": 0.9999998836341888
+        },
+        {
+          "name": "uocr.attention",
+          "layer": 5,
+          "occurrence": 5,
+          "max_abs": 0.009799018502235413,
+          "max_relative_to_peak": 0.00633292498099355,
+          "relative_l2": 0.0006422931769190633,
+          "cosine": 0.9999997937441086
+        },
+        {
+          "name": "uocr.attention",
+          "layer": 7,
+          "occurrence": 7,
+          "max_abs": 0.028155922889709473,
+          "max_relative_to_peak": 0.009142806842358669,
+          "relative_l2": 0.0008124854934085622,
+          "cosine": 0.9999996700127168
+        },
+        {
+          "name": "uocr.attention",
+          "layer": 8,
+          "occurrence": 8,
+          "max_abs": 0.01833529770374298,
+          "max_relative_to_peak": 0.0122678408274719,
+          "relative_l2": 0.0006355403827705814,
+          "cosine": 0.9999997985086869
+        }
+      ],
+      "maximum_relative_l2_all_checkpoints": 0.0009895893196920245,
+      "minimum_cosine_all_checkpoints": 0.999999545732188,
+      "rust_cli_run": {
+        "command": [
+          "artifacts/unlimited_ocr/rust-model-inference-final",
+          "--model",
+          "models/Unlimited-OCR-2",
+          "--image",
+          "tools/oracle/unlimited_ocr/fixtures/page-1.png",
+          "--reference",
+          "tools/oracle/unlimited_ocr/fixtures/page-2.png",
+          "--threads",
+          "8",
+          "--max-tokens",
+          "256",
+          "--out",
+          "artifacts/unlimited_ocr/multi.txt"
+        ],
+        "seconds": 464.6174247500021,
+        "exit_code": 0
+      }
+    }
+  },
+  "diagnosis": {
+    "first_end_to_end_exception": "single/prefill attention layer 2, image row 173",
+    "official_layer1_experts_6_and_7": [
+      58,
+      48
+    ],
+    "official_scores": [
+      0.72718745470047,
+      0.7271859645843506
+    ],
+    "official_score_gap": 1.4901161193847656e-06,
+    "official_decoder_given_rust_visual_embeddings_experts_6_and_7": [
+      48,
+      58
+    ],
+    "official_decoder_given_rust_visual_embeddings_scores": [
+      0.7271896600723267,
+      0.7271881103515625
+    ],
+    "conclusion": "Small upstream vision rounding crosses the discrete MoE top-6 cutoff. Feeding either visual input to the unmodified official decoder reproduces the corresponding route. Identical official embeddings make the Rust decoder pass the unchanged component bounds. Whole-graph pointwise bounds are still reported as failing, not waived."
+  },
+  "engineering": {
+    "focused": [
+      {
+        "name": "unit",
+        "command": [
+          "cargo",
+          "test",
+          "--profile",
+          "release-fast",
+          "--features",
+          "parity-trace",
+          "--lib",
+          "unlimited_ocr"
+        ],
+        "seconds": 54.27754133299459,
+        "exit_code": 0
+      },
+      {
+        "name": "safetensors",
+        "command": [
+          "cargo",
+          "test",
+          "--profile",
+          "release-fast",
+          "--features",
+          "parity-trace",
+          "--lib",
+          "format::safetensors::tests"
+        ],
+        "seconds": 0.18651425000280142,
+        "exit_code": 0
+      },
+      {
+        "name": "cli",
+        "command": [
+          "cargo",
+          "test",
+          "--profile",
+          "release-fast",
+          "--features",
+          "parity-trace",
+          "--test",
+          "unlimited_ocr_cli"
+        ],
+        "seconds": 78.01588770898525,
+        "exit_code": 0
+      }
+    ],
+    "new_model_unit": {
+      "passed": 11,
+      "failed": 0,
+      "ignored": 2
+    },
+    "safetensors_unit": {
+      "passed": 2,
+      "failed": 0,
+      "ignored": 1
+    },
+    "cli": {
+      "passed": 2,
+      "failed": 0
+    },
+    "oracle_self_checks": {
+      "passed": 3,
+      "failed": 0
+    },
+    "real_tokenizer": {
+      "passed": 1,
+      "failed": 0
+    },
+    "real_decoder_fixture_tests": {
+      "passed": 2,
+      "failed": 0
+    },
+    "format_check": "passed for all changed Rust files",
+    "git_diff_check": "passed",
+    "default_lib_baseline": {
+      "passed": 1280,
+      "failed": 20,
+      "ignored": 84
+    },
+    "default_lib_after": {
+      "passed": 1292,
+      "failed": 20,
+      "ignored": 86
+    },
+    "introduced_default_lib_failures": [],
+    "preexisting_default_lib_failures": [
+      "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+      "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+      "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+      "models::clm::tests::matches_reference_golden_vectors",
+      "models::clm::tests::rejects_wrong_embedding_width",
+      "models::diffusion::z_image::text::tests::qwen_attention_softmax_matches_the_pinned_ggml_neon_reduction",
+      "models::diffusion::z_image::text::tests::silu_mul_inplace_matches_pinned_ggml_neon_activation",
+      "models::diffusion::z_image::vae::tests::silu_matches_pinned_ggml_neon_vector_path",
+      "models::funasr::encoder::parity_tests::fsmn_rounds_product_before_adding_like_ggml",
+      "models::funasr::encoder::parity_tests::layernorm_accumulates_variance_in_ggml_neon_groups",
+      "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+      "models::gemma4::trunk::tests::per_layer_bf16_projection_matches_pinned_scalar_dot_bits",
+      "models::gemma4::trunk::tests::per_layer_projection_rejects_non_bf16_weight",
+      "models::gemma4::trunk::tests::per_layer_projection_rejects_wrong_bf16_storage_length",
+      "ops::argmax::tests::all_negative",
+      "ops::argmax::tests::large_random",
+      "ops::argmax::tests::middle_max",
+      "ops::argmax::tests::tail_handles_non_aligned_lengths",
+      "ops::argmax::tests::ties_pick_lowest_index",
+      "ops::matmul::neon_tests::neon_softmax_matches_ggml_vector_exp_and_f64_sum"
+    ],
+    "extra_parity_trace_baseline_failure": "models::gemma4::trunk::tests::gemma4_trace_rows_match_batch_one_raw_bits; reproduced on clean archived base commit"
+  },
+  "not_implemented_or_validated": [
+    "dynamic tiles/gundam",
+    "PDF rasterization",
+    "full Vulkan graph",
+    "native BF16 activation parity",
+    "constant-memory unlimited streaming",
+    "large-page/long-context benchmarks",
+    "other real-weight platforms",
+    "whole-model F16/F32/Q4_K/Q6_K and full quantized-weight graph oracle",
+    "fresh full-repository suite after integration fixes; earlier baseline results remain historical"
+  ],
+  "integration_fixes": {
+    "date": "2026-10-28",
+    "base_commit": "92d2eca0aad9161694be49a67a4b3057f7514547",
+    "runtime": "shared original-tokenizer Model and TextRuntime; F32 compute/KV; borrowed decoder/vision views per request",
+    "formats": {
+      "converter_types": [
+        "BF16",
+        "F16",
+        "F32",
+        "Q8_0",
+        "Q4_K",
+        "Q6_K"
+      ],
+      "selection": "quantize aligned 2-D projection/embedding weights; preserve source type for positions, convs, vectors and unaligned matrices; preserve I64 buffers",
+      "converter_tests": 3,
+      "real_exports": [
+        {
+          "path": "models/Unlimited-OCR-2-BF16.gguf",
+          "bytes": 6698183616,
+          "sha256": "8dee41d46fc0f143a41b7a5328f7a25c22b20aada509d3207d9f7ae38f32cad5",
+          "first_prefill_checkpoints": 69,
+          "bit_exact_to_original": true,
+          "first_ocr_token": "<PAGE>"
+        },
+        {
+          "path": "models/Unlimited-OCR-2-Q8_0.gguf",
+          "bytes": 3574328256,
+          "sha256": "38b4debb4c3cbe68fe9f28a880a856d79f1f42e339768fd0b332ee1698d4d0f2",
+          "first_ocr_token": "<PAGE>"
+        }
+      ],
+      "q8_probability_absolute_drift": 0.026769399642944336,
+      "q8_evidence_scope": "real OCR smoke plus converter/shared quantization kernel fixtures; no full quantized-weight graph oracle",
+      "other_whole_model_formats_validated": false,
+      "f32_limit": "request views currently copy F32 projection weights"
+    },
+    "compute": {
+      "cpu_bf16": "shared AVX2/FMA, NEON, scalar dispatcher",
+      "scalar_reference_env": "RMI_SCALAR=1",
+      "auto_backend": "hybrid Vulkan projection offload with CPU validation/retry and CPU fallback",
+      "device": "Apple M3 Max / MoltenVK",
+      "trace_env": "RMI_COMPUTE_TRACE=1",
+      "unavailable_driver_test": {
+        "env": "VK_ICD_FILENAMES=artifacts/unlimited_ocr/missing-icd.json",
+        "requested": "--gpu",
+        "exit_code": 0,
+        "probabilities_exact_to_cpu": true
+      },
+      "auto_image_ocr": {
+        "exit_code": 0,
+        "max_tokens": 1,
+        "text": "<PAGE>",
+        "artifact": "artifacts/unlimited_ocr/auto-image-ocr.txt"
+      },
+      "full_vulkan_graph": false,
+      "speedup_benchmarked": false
+    },
+    "checks": {
+      "native_units_passed": 17,
+      "native_real_tests_ignored_by_default": 2,
+      "server_api_passed": 71,
+      "cli_passed": 3,
+      "shared_kernels_passed": 10,
+      "scalar_bf16_passed": 3,
+      "oracle_self_checks_passed": 3,
+      "real_image_decoder_prefill_passed": 1,
+      "fresh_whole_branch_review": "no remaining actionable findings; fixed Anthropic count_tokens default and real endpoint probe passed",
+      "whole_repo_suite_rerun": false,
+      "cli_features": [
+        "default (no Vulkan)",
+        "parity-trace,vulkan"
+      ],
+      "format_check": "cargo fmt --all -- --check passed",
+      "diff_check": "git diff --check passed",
+      "x86_regressions_added_to_ci": [
+        "unlimited_ocr",
+        "models::diffusion::dreamx::kernels::tests::",
+        "unlimited_ocr_cli"
+      ],
+      "http_checker_self_checks_passed": 3
+    },
+    "http": {
+      "command": [
+        ".venv/bin/python",
+        "tools/oracle/unlimited_ocr/check_http.py",
+        "--url",
+        "http://127.0.0.1:18088",
+        "--output",
+        "artifacts/unlimited_ocr/http-reviewed-probes.json"
+      ],
+      "requests_passed": 11,
+      "probes": [
+        {
+          "name": "temperature",
+          "path": "/v1/chat/completions",
+          "status": 400
+        },
+        {
+          "name": "top_p",
+          "path": "/v1/chat/completions",
+          "status": 400
+        },
+        {
+          "name": "enable_thinking",
+          "path": "/v1/chat/completions",
+          "status": 400
+        },
+        {
+          "name": "max_tokens",
+          "path": "/v1/chat/completions",
+          "status": 400
+        },
+        {
+          "name": "no_image",
+          "path": "/v1/chat/completions",
+          "status": 400
+        },
+        {
+          "name": "concurrent",
+          "path": "/v1/chat/completions",
+          "status": 429
+        },
+        {
+          "name": "chat",
+          "path": "/v1/chat/completions",
+          "status": 200
+        },
+        {
+          "name": "count_tokens",
+          "path": "/v1/messages/count_tokens",
+          "status": 200
+        },
+        {
+          "name": "anthropic",
+          "path": "/v1/messages",
+          "status": 200
+        },
+        {
+          "name": "chat_sse",
+          "path": "/v1/chat/completions",
+          "status": 200
+        },
+        {
+          "name": "responses",
+          "path": "/v1/responses",
+          "status": 200
+        }
+      ],
+      "token_count": {
+        "input_tokens": 279
+      },
+      "ocr_transport_token_budget": 1,
+      "artifact": "artifacts/unlimited_ocr/http-reviewed-probes.json",
+      "context_probe_recheck": {
+        "status": 400,
+        "max_tokens": 131072,
+        "body": {
+          "error": {
+            "message": "Unlimited-OCR prompt + max tokens must fit --max-context (maximum 131072)",
+            "type": "invalid_request_error",
+            "param": null,
+            "code": null
+          }
+        }
+      },
+      "recorded_sse_passes_error_and_finish_reason_validation": true
+    }
+  }
+}

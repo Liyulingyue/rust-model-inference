@@ -82,11 +82,28 @@ impl ComputePolicy {
             }
         }
     }
+    /// The architectures whose whole decode runs on the device.
+    ///
+    /// The others still run under `--compute vulkan`: the flag asks for a
+    /// real device, and a model offloads what it can. This list is where
+    /// the caller learns that only part of the graph qualifies.
+    pub fn has_complete_device_path(arch: &str) -> bool {
+        matches!(arch, "llama" | "qwen3" | "qwen35" | "qwen35moe" | "dory")
+    }
+
     pub fn validate_text_arch(self, arch: &str) -> Result<(), String> {
-        if self == Self::Vulkan
-            && !matches!(arch, "llama" | "qwen3" | "qwen35" | "qwen35moe" | "dory")
-        {
-            return Err(format!("full Vulkan text decoding is not supported for {arch}; local linear offload does not satisfy this request"));
+        if self == Self::Vulkan && !Self::has_complete_device_path(arch) {
+            // One line per process: the arch is checked at more than one
+            // layer, and the model would otherwise repeat itself.
+            static WARNED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                eprintln!(
+                    "compute requested=Vulkan backend=partial arch={arch} \
+                     note=no complete device path for this architecture; only the \
+                     offloadable parts run on the device"
+                );
+            }
         }
         Ok(())
     }
@@ -106,6 +123,19 @@ impl ComputePolicy {
             crate::ops::enable_gpu();
             #[cfg(not(feature = "vulkan"))]
             eprintln!("compute requested=Auto backend=Cpu reason=build_without_vulkan");
+        } else if self == Self::Vulkan {
+            // The strict policy asks for a real device, so make sure one
+            // is there before the model runs. The shared projection
+            // offload falls back to the host whenever the device is
+            // missing, so without this the request would look honoured
+            // while the run stayed on the CPU.
+            #[cfg(feature = "vulkan")]
+            {
+                crate::ops::enable_gpu();
+                self.context().map(|_| ()).map_err(|error| {
+                    format!("--compute vulkan requires a usable Vulkan device: {error}")
+                })?;
+            }
         }
         Ok(self.enter_legacy_scope())
     }
@@ -196,11 +226,16 @@ mod tests {
         }
         assert_eq!(ComputePolicy::legacy(), original);
         for arch in ["gemma4", "edge0", "qwen3vl", "auk", "unknown"] {
-            assert!(ComputePolicy::Vulkan.validate_text_arch(arch).is_err());
+            // `--compute vulkan` asks for a real device, not for a
+            // particular device path, so an architecture without a
+            // complete one is allowed and reported instead.
+            assert!(ComputePolicy::Vulkan.validate_text_arch(arch).is_ok());
             assert!(ComputePolicy::Auto.validate_text_arch(arch).is_ok());
+            assert!(!ComputePolicy::has_complete_device_path(arch));
         }
         for arch in ["llama", "qwen3", "qwen35", "qwen35moe", "dory"] {
             assert!(ComputePolicy::Vulkan.validate_text_arch(arch).is_ok());
+            assert!(ComputePolicy::has_complete_device_path(arch));
         }
     }
 

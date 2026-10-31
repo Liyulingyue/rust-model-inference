@@ -43,6 +43,7 @@ pub mod qwen35;
 pub mod qwen_drive;
 pub mod spark;
 pub mod timestral;
+pub mod unlimited_ocr;
 pub mod vibevoice_asr;
 pub mod xing4_0;
 pub mod yue2;
