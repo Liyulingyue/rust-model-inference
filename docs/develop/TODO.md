@@ -3272,3 +3272,47 @@ forward.rs / qwen3.rs / jev 三处各写一遍。将来加 WeVisOne 变体（或
 `unwrap_or(false)` 这个默认值本身，那条讲的是 WeVisOne 的强制覆盖。
 
 **关联**：`tools/oracle/wevisone_vl/README.md`、`tools/oracle/wevisone_vl/validation.md`。
+
+### TODO-048: `--mmproj` + 纯文本仍会把 qwen2vl / qwen3vlmoe 送进 hybrid 分支报错
+
+**现状**：`src/main.rs` 的多模态分支条件原本是「有没有 `--mmproj`」，而 qwen3vl 的
+多模态路径**要求同时有 image/video/audio**。只有 `--mmproj`、没有媒体的请求因此
+掉进通用分支里的 `HybridTextModel::from_source`，而它只认
+`qwen35 | qwen35moe | edge0` → 报
+`Failed to parse hybrid text model: Unsupported hybrid architecture: Some("qwen3vl")`。
+
+WeVisOne 适配这条分支时已把 **`qwen3vl`** 修好：条件改成
+
+```rust
+image.is_some() || video.is_some() || audio.is_some()
+    || (explicit_mmproj.is_some() && arch != "qwen3vl")
+```
+
+无媒体时 qwen3vl 走文本路（`run_shared_inference` / `run_qwen3_inference`），
+实测 Qwen3-VL-4B-Instruct 纯文本从报错变成正常生成。
+
+**还没修的**：`qwen2vl` 与 `qwen3vlmoe` 同样带 `--mmproj` + 纯文本时，仍会掉进
+hybrid 分支报同一个错。**这是改动前的既有行为，不是回归**，但与已修好的 qwen3vl
+不一致。
+
+**为什么不顺手放开**：把条件扩成
+`!matches!(arch.as_str(), "qwen2vl" | "qwen3vl" | "qwen3vlmoe")` 需要先确认这两个
+arch 的**文本路**真的可用：
+
+- `qwen2vl` 走 qwen3 trunk（`Qwen3Config::from_source` 支持该 arch，rope 走
+  `Qwen3Rope::Mrope` 分支），理论可行，**未实测**；
+- `qwen3vlmoe` 是 MoE（`config.moe`），`run_qwen3_inference` 是否正确处理共享专家
+  **未实测**。
+
+在没有这两个 arch 的权重时放开，会把「明确的报错」变成「静默走错路」——后者更难
+排查。
+
+**待办**：
+
+1. 找一个 `qwen2vl` GGUF（+ mmproj），跑 `--mmproj` + 纯文本，确认文本路可用后再
+   把 `qwen2vl` 加进豁免名单；
+2. 同样验证 `qwen3vlmoe` 的 MoE 文本路；
+3. 两者的媒体路（`--image` / `--video` / `--audio`）保持不变，不在豁免范围内。
+
+**关联**：WeVisOne 适配分支（`codex/wevisone-vl-4b`）的 `src/main.rs` 改动与
+`docs/usage/qwen3.md` §3 的 M-RoPE 记录。
