@@ -81,9 +81,13 @@ for alpha masks.
   host attention/KV, DeepStack and raw OBJ states. Unsupported/unavailable GPU
   operations fall back to existing CPU kernels. Trace with
   `RMI_COMPUTE_TRACE=1`; a CPU host trace is not a full-GPU execution claim.
-- `--compute vulkan` is explicitly rejected: the resident Qwen3-VL decoder
-  does not implement the complete DeepStack/raw-hidden contract. Auto is the
-  supported mixed CPU/GPU policy.
+- `--compute vulkan` is not rejected at validation time: `validate_text_arch`
+  only prints one warning per process because `qwen3vl` has no complete
+  device path. The run then stops on the runtime capability gate
+  (`Qwen3 Vulkan currently requires F16 KV`, and with `--kv-cache f16`
+  `Qwen3 configuration is unsupported for full-model Vulkan`), because the
+  resident Qwen3-VL decoder does not implement the complete DeepStack/raw-hidden
+  contract. Auto is the supported mixed CPU/GPU policy.
 - Pixel-decoder tensors/computation remain F32, including when text is quantized.
   Vision is preserved in F32 instead of the older implicit Q8 precompute.
 - Prediction is single-image, at most 4096 generated tokens, 64 masks, and
