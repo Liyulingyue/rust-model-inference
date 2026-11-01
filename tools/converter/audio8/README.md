@@ -118,7 +118,7 @@ transcription, `--threads 8` (the default cap) for the CPU rows:
 
 | Format | CPU | GPU | GPU kernel |
 |---|---|---|---|
-| F16 | 10.5 s | 10.5 s | 4-row/workgroup + 4× K prefetch + batching + GPU attn/norm/silu |
+| F16 | 10.5 s | 13.5 s | 4-row/workgroup + 4× K prefetch + batching + GPU attn/norm/silu |
 | Q5_K | 13.5 s | 8.0 s | u32 word decode + batching + GPU attn/norm/silu |
 | Q6_K | 17.1 s | 8.4 s | u32 word decode + batching + GPU attn/norm/silu |
 | Q4_K | 10.2 s | 48.0 s | cooperative split-K |
@@ -127,22 +127,26 @@ transcription, `--threads 8` (the default cap) for the CPU rows:
 The CPU rows use `--cpu` and the GPU rows `--gpu`. The GPU wins for the
 k-quant formats: moving attention, RMS norm, and SiLU to the GPU eliminated
 the per-step CPU attention bottleneck (~260 ms/step → <5 ms/step) and the
-u32 word-level shader decode reduced weight unpacking overhead.
+u32 word-level shader decode reduced weight unpacking overhead. For F16 the
+CPU path is faster because the GPU's per-submit overhead (~0.25 ms × ~32K
+submissions) dominates the actual compute.
 
 Comparing against PyTorch (fp16, same GB10 GPU, forward pass only —
 PyTorch's `generate` needs more KV-cache memory than the GB10's unified
 RAM allows):
 
-| Implementation | Wall clock | vs Rust GPU F16 |
+| Implementation | Wall clock | vs Rust CPU F16 |
 |---|---|---|
 | PyTorch fp16 forward | 7.6 s | — |
-| Rust GPU F16 | 10.5 s | 1.4× slower |
 | Rust CPU F16 | 10.5 s | 1.4× slower |
+| Rust GPU F16 | 13.5 s | 1.8× slower |
 
-The gap is now within 40% of PyTorch. The remaining difference comes from
-dispatch overhead: Audio8 walks one frame and one token at a time, so the
-runtime issues ~56 000 Vulkan dispatches per transcription (batched from
-~98 000); each costs a fixed ~0.39 ms. PyTorch launches a single CUDA graph.
+The gap comes from dispatch overhead: Audio8 walks one frame and one token
+at a time, so the GPU runtime issues ~32 000 Vulkan submissions per
+transcription; each costs a fixed ~0.25 ms (queue_submit + wait_for_fences).
+PyTorch launches a single CUDA graph. Fusing multiple ops per layer into one
+command buffer (shared arena) would close this gap but requires
+cross-arena data-flow refactoring.
 The matmul-only comparison isolates the kernel cost:
 
 | Weights | Unpacking | Bytes moved per weight | Wall clock |
