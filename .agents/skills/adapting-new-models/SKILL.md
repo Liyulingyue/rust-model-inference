@@ -15,6 +15,12 @@ description: Use when 用户要求在 rust-model-inference 中新增或扩展 GG
 - 不得把未知架构默认路由到相近模型。只有 Tokenizer、张量契约、位置编码、归一化、Attention/KV、FFN/MoE 和输出变换均一致时才能复用实现，并且仍需显式注册新架构。
 - 将用户指定的 llama.cpp 或官方实现视为只读 Oracle。需要插桩时，在临时副本中固定 commit 后修改，不污染用户的参考仓库。
 - 以实际提供的 GGUF、mmproj 和组件为范围边界；没有多模态组件就不扩展多模态支持。
+- **入口层按能力抽象，不按模型名堆文件。** 模型级 CLI 编排层放在 `src/app/<model>.rs`
+  是允许的（`MODEL_ORGANIZATION.md` §9 P-4 的迁移目标就是 `src/app/gemma4.rs`），
+  但它成立的前提是「这个入口形态只服务一个模型」。当第二个同形态的模型接入、
+  你正要复制上一份同名文件时，就把入口抽成通用的一份，模型差异下沉到
+  `src/models/<model>/`；入口层最终只做编排，不含模型分支。
+  判定与检查项见 `reviewing-model-changes` skill 的「命名红线」。
 
 ## 工作流
 
