@@ -4,6 +4,9 @@ pub mod mel;
 pub mod streaming;
 pub mod text;
 
+#[cfg(feature = "vulkan")]
+pub mod gpu;
+
 use crate::compute::linear::{LinearBinding, LinearExecutor, LinearId, LinearMode};
 use crate::compute::ComputePolicy;
 use crate::core::tensor::{load_f32_tensor, GGMLType, MetaValue, TensorSource};

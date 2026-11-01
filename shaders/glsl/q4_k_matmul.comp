@@ -9,10 +9,14 @@ layout(push_constant) uniform PC { uint q8_word; uint scales_word; uint n_in; ui
 
 float f16_decode(uint bits) { uint sign = (bits >> 15u) & 1u; int exponent = int((bits >> 10u) & 0x1fu); uint mantissa = bits & 0x3ffu; float value = exponent == 0 ? float(mantissa) * exp2(-24.0) : (exponent == 31 ? 0.0 : (1.0 + float(mantissa) / 1024.0) * exp2(float(exponent - 15))); return sign == 0u ? value : -value; }
 uint weight_word(uint slot, uint index) { return slot == 0u ? w0.data[index] : (slot == 1u ? w1.data[index] : w2.data[index]); }
-uint weight_byte(uint slot, uint index) { return (weight_word(slot, index >> 2u) >> ((index & 3u) * 8u)) & 0xffu; }
 int q8(uint index) { uint value = (arena.data[pc.q8_word + (gl_WorkGroupID.z / pc.group_count) * pc.q8_stride + (index >> 2u)] >> ((index & 3u) * 8u)) & 0xffu; return value >= 128u ? int(value) - 256 : int(value); }
-uint scale(uint slot, uint offset, uint index) { return index < 4u ? weight_byte(slot, offset + 4u + index) & 63u : (weight_byte(slot, offset + 4u + index + 4u) & 15u) | ((weight_byte(slot, offset + 4u + index - 4u) >> 6u) << 4u); }
-uint minimum(uint slot, uint offset, uint index) { return index < 4u ? weight_byte(slot, offset + 4u + index + 4u) & 63u : (weight_byte(slot, offset + 4u + index + 4u) >> 4u) | ((weight_byte(slot, offset + 4u + index) >> 6u) << 4u); }
+
+// Q4_K: u32 word-level access for the packed 4-bit weight region.
+// The packed weights start at byte 16 of each block. Each pair of groups
+// (groups 0+1, 2+3, 4+5, 6+7) shares 32 bytes = 8 u32 words.
+// Each byte holds two 4-bit values: even group → low nibble, odd group → high nibble.
+// We load one u32 word (4 bytes = 8 nibbles) at a time and extract the
+// relevant nibble for this group.
 
 shared int input_q8[256];
 
@@ -21,10 +25,6 @@ void main() {
     uint row = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 64u + gl_LocalInvocationID.x;
     uint rows = slot == 0u ? pc.rows0 : (slot == 1u ? pc.rows1 : pc.rows2);
     bool valid_row = slot < pc.group_count && row < rows;
-    // Stage each block's activations once for the whole workgroup. The previous
-    // gate (`n_in >= 4096`) skipped this for narrower projections, where every
-    // one of the 64 threads then re-read the same 256 activation bytes out of
-    // the arena: measured 0.89 GB/s at rows=1 for this shader.
     bool shared_input = true;
     precise float sums[8] = float[8](0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
     precise float block_total = 0.0;
@@ -38,29 +38,69 @@ void main() {
         }
         if (valid_row) {
             uint offset = row * pc.blocks_per_row * 144u + block * 144u;
-            precise float q4_scale = f16_decode(weight_byte(slot, offset) | (weight_byte(slot, offset + 1u) << 8u));
-            precise float q4_min = f16_decode(weight_byte(slot, offset + 2u) | (weight_byte(slot, offset + 3u) << 8u));
+            // Read the 16-byte header (words 0-3) once.
+            uint h0 = weight_word(slot, offset);
+            uint h1 = weight_word(slot, offset + 1u);
+            uint h2 = weight_word(slot, offset + 2u);
+            uint h3 = weight_word(slot, offset + 3u);
+            precise float q4_scale = f16_decode(h0 & 0xffffu);
+            precise float q4_min = f16_decode(h0 >> 16u);
+            // Extract bytes from the pre-loaded header words.
+            // scale[0..3] = byte[4..7] & 63, scale[4..7] = byte[12..15] & 15 | (byte[4..7] >> 6) << 4
+            // minimum[0..3] = byte[8..11] & 63, minimum[4..7] = byte[12..15] >> 4 | (byte[8..11] >> 6) << 4
+            uint b4 = h1 & 0xffu; uint b5 = (h1 >> 8u) & 0xffu;
+            uint b6 = (h1 >> 16u) & 0xffu; uint b7 = (h1 >> 24u) & 0xffu;
+            uint b8 = h2 & 0xffu; uint b9 = (h2 >> 8u) & 0xffu;
+            uint b10 = (h2 >> 16u) & 0xffu; uint b11 = (h2 >> 24u) & 0xffu;
+            uint b12 = h3 & 0xffu; uint b13 = (h3 >> 8u) & 0xffu;
+            uint b14 = (h3 >> 16u) & 0xffu; uint b15 = (h3 >> 24u) & 0xffu;
+            int group_scale[8];
+            int group_minimum[8];
+            group_scale[0] = int(b4 & 63u); group_scale[1] = int(b5 & 63u);
+            group_scale[2] = int(b6 & 63u); group_scale[3] = int(b7 & 63u);
+            group_scale[4] = int((b12 & 15u) | ((b4 >> 6u) << 4u));
+            group_scale[5] = int((b13 & 15u) | ((b5 >> 6u) << 4u));
+            group_scale[6] = int((b14 & 15u) | ((b6 >> 6u) << 4u));
+            group_scale[7] = int((b15 & 15u) | ((b7 >> 6u) << 4u));
+            group_minimum[0] = int(b8 & 63u); group_minimum[1] = int(b9 & 63u);
+            group_minimum[2] = int(b10 & 63u); group_minimum[3] = int(b11 & 63u);
+            group_minimum[4] = int((b12 >> 4u) | ((b8 >> 6u) << 4u));
+            group_minimum[5] = int((b13 >> 4u) | ((b9 >> 6u) << 4u));
+            group_minimum[6] = int((b14 >> 4u) | ((b10 >> 6u) << 4u));
+            group_minimum[7] = int((b15 >> 4u) | ((b11 >> 6u) << 4u));
             precise float q8_scale = uintBitsToFloat(arena.data[pc.scales_word + token_row * pc.scales_stride + block]);
             int partial[8] = int[8](0, 0, 0, 0, 0, 0, 0, 0);
             int minimum_partial[4] = int[4](0, 0, 0, 0);
-            // group = local >> 5, so the eight scales and four minimums are
-            // constant across each run of 32 elements. Decoding them once per
-            // group instead of once per element drops three weight_byte()
-            // extractions (each a shift/mask on a uint) from 256 iterations
-            // per block to 8. Arithmetic order is unchanged.
-            int group_scale[8];
-            int group_minimum[8];
+            // Packed 4-bit weights: 256 nibbles = 128 bytes starting at offset+16.
+            // Each pair of groups shares 32 bytes (8 u32 words).
+            // For each group, we walk its 32 bytes. Even groups take low nibble
+            // of each byte; odd groups take high nibble.
+            // Instead of weight_byte() per element (which re-reads u32 each time),
+            // we load u32 words and extract 4 bytes (8 nibbles) from each.
             for (uint group = 0u; group < 8u; ++group) {
-                group_scale[group] = int(scale(slot, offset, group));
-                group_minimum[group] = int(minimum(slot, offset, group));
-            }
-            for (uint local = 0u; local < 256u; ++local) {
-                uint group = local >> 5u;
-                uint packed = weight_byte(slot, offset + 16u + (group >> 1u) * 32u + (local & 31u));
-                int value = int((group & 1u) == 0u ? packed & 15u : packed >> 4u);
-                int activation = shared_input ? input_q8[local] : q8(block * 256u + local);
-                partial[(local & 31u) >> 2u] += group_scale[group] * activation * value;
-                minimum_partial[group >> 1u] += group_minimum[group] * activation;
+                uint pair = group >> 1u;
+                uint nibble_shift = (group & 1u) * 4u;
+                uint base_word = offset + 4u + pair * 8u; // word offset for this pair
+                uint gs = group_scale[group];
+                uint gm = group_minimum[group];
+                for (uint w = 0u; w < 8u; ++w) {
+                    uint word = weight_word(slot, base_word + w);
+                    uint byte0 = word & 0xffu;
+                    uint byte1 = (word >> 8u) & 0xffu;
+                    uint byte2 = (word >> 16u) & 0xffu;
+                    uint byte3 = (word >> 24u) & 0xffu;
+                    uint local_base = group * 32u + w * 4u;
+                    // Unroll the 4 bytes in this word
+                    uint bytes[4];
+                    bytes[0] = byte0; bytes[1] = byte1; bytes[2] = byte2; bytes[3] = byte3;
+                    for (uint b = 0u; b < 4u; ++b) {
+                        uint local = local_base + b;
+                        int value = int((bytes[b] >> nibble_shift) & 0xfu);
+                        int activation = shared_input ? input_q8[local] : q8(block * 256u + local);
+                        partial[(local & 31u) >> 2u] += int(gs) * activation * value;
+                        minimum_partial[group >> 1u] += int(gm) * activation;
+                    }
+                }
             }
             precise float factor = q8_scale * q4_scale;
             if (pc.input_sum_word == 1u) {

@@ -9,10 +9,17 @@ layout(push_constant) uniform PC { uint q8_word; uint scales_word; uint n_in; ui
 
 float f16_decode(uint bits) { uint sign = (bits >> 15u) & 1u; int exponent = int((bits >> 10u) & 0x1fu); uint mantissa = bits & 0x3ffu; float value = exponent == 0 ? float(mantissa) * exp2(-24.0) : (exponent == 31 ? 0.0 : (1.0 + float(mantissa) / 1024.0) * exp2(float(exponent - 15))); return sign == 0u ? value : -value; }
 uint weight_word(uint slot, uint index) { return slot == 0u ? w0.data[index] : (slot == 1u ? w1.data[index] : w2.data[index]); }
-uint weight_byte(uint slot, uint index) { return (weight_word(slot, index >> 2u) >> ((index & 3u) * 8u)) & 0xffu; }
 int q8(uint index) { uint value = (arena.data[pc.q8_word + (gl_WorkGroupID.z / pc.group_count) * pc.q8_stride + (index >> 2u)] >> ((index & 3u) * 8u)) & 0xffu; return value >= 128u ? int(value) - 256 : int(value); }
-uint scale(uint slot, uint offset, uint index) { return index < 4u ? weight_byte(slot, offset + 4u + index) & 63u : (weight_byte(slot, offset + 4u + index + 4u) & 15u) | ((weight_byte(slot, offset + 4u + index - 4u) >> 6u) << 4u); }
-uint minimum(uint slot, uint offset, uint index) { return index < 4u ? weight_byte(slot, offset + 4u + index + 4u) & 63u : (weight_byte(slot, offset + 4u + index + 4u) >> 4u) | ((weight_byte(slot, offset + 4u + index) >> 6u) << 4u); }
+
+// Q5_K block layout (176 bytes = 44 u32 words):
+//   [0..1]:   q5_scale (f16)
+//   [2..3]:   q5_min (f16)
+//   [4..15]:  12 bytes of scales/minimums (same interleaving as Q4_K)
+//   [16..47]: 32 bytes of high bits (1 bit per value, 256 bits total)
+//              byte[16 + (local & 31)] >> group gives the high bit for group
+//   [48..175]: 128 bytes of low nibbles (4 bits per value)
+//              offset + 48 + (group >> 1) * 32 + (local & 31)
+//              even group → low nibble, odd group → high nibble
 
 shared int input_q8[256];
 
@@ -21,10 +28,6 @@ void main() {
     uint row = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 64u + gl_LocalInvocationID.x;
     uint rows = slot == 0u ? pc.rows0 : (slot == 1u ? pc.rows1 : pc.rows2);
     bool valid_row = slot < pc.group_count && row < rows;
-    // Stage each block's activations once for the whole workgroup. The
-    // previous gate (`n_in >= 4096`) skipped this for narrower projections,
-    // where every one of the 64 threads then re-read the same 256 activation
-    // bytes out of the arena: measured 0.89 GB/s at rows=1 for this shader.
     bool shared_input = true;
     precise float sums[8] = float[8](0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
     precise float minimum_sums[4] = float[4](0.0, 0.0, 0.0, 0.0);
@@ -37,31 +40,65 @@ void main() {
         }
         if (valid_row) {
             uint offset = row * pc.blocks_per_row * 176u + block * 176u;
-            precise float q5_scale = f16_decode(weight_byte(slot, offset) | (weight_byte(slot, offset + 1u) << 8u));
-            precise float q5_min = f16_decode(weight_byte(slot, offset + 2u) | (weight_byte(slot, offset + 3u) << 8u));
+            // Read header words 0-3 (bytes 0-15).
+            uint h0 = weight_word(slot, offset);
+            uint h1 = weight_word(slot, offset + 1u);
+            uint h2 = weight_word(slot, offset + 2u);
+            uint h3 = weight_word(slot, offset + 3u);
+            precise float q5_scale = f16_decode(h0 & 0xffffu);
+            precise float q5_min = f16_decode(h0 >> 16u);
+            // Extract scale/minimum bytes from pre-loaded words.
+            uint b4 = h1 & 0xffu; uint b5 = (h1 >> 8u) & 0xffu;
+            uint b6 = (h1 >> 16u) & 0xffu; uint b7 = (h1 >> 24u) & 0xffu;
+            uint b8 = h2 & 0xffu; uint b9 = (h2 >> 8u) & 0xffu;
+            uint b10 = (h2 >> 16u) & 0xffu; uint b11 = (h2 >> 24u) & 0xffu;
+            uint b12 = h3 & 0xffu; uint b13 = (h3 >> 8u) & 0xffu;
+            uint b14 = (h3 >> 16u) & 0xffu; uint b15 = (h3 >> 24u) & 0xffu;
+            int group_scale[8];
+            int group_minimum[8];
+            group_scale[0] = int(b4 & 63u); group_scale[1] = int(b5 & 63u);
+            group_scale[2] = int(b6 & 63u); group_scale[3] = int(b7 & 63u);
+            group_scale[4] = int((b12 & 15u) | ((b4 >> 6u) << 4u));
+            group_scale[5] = int((b13 & 15u) | ((b5 >> 6u) << 4u));
+            group_scale[6] = int((b14 & 15u) | ((b6 >> 6u) << 4u));
+            group_scale[7] = int((b15 & 15u) | ((b7 >> 6u) << 4u));
+            group_minimum[0] = int(b8 & 63u); group_minimum[1] = int(b9 & 63u);
+            group_minimum[2] = int(b10 & 63u); group_minimum[3] = int(b11 & 63u);
+            group_minimum[4] = int((b12 >> 4u) | ((b8 >> 6u) << 4u));
+            group_minimum[5] = int((b13 >> 4u) | ((b9 >> 6u) << 4u));
+            group_minimum[6] = int((b14 >> 4u) | ((b10 >> 6u) << 4u));
+            group_minimum[7] = int((b15 >> 4u) | ((b11 >> 6u) << 4u));
             precise float q8_scale = uintBitsToFloat(arena.data[pc.scales_word + token_row * pc.scales_stride + block]);
             int partial[8] = int[8](0, 0, 0, 0, 0, 0, 0, 0);
             int minimum_partial[4] = int[4](0, 0, 0, 0);
-            // group = local >> 5, so the eight scales and eight minimums are
-            // constant across each run of 32 elements. Decoding them once per
-            // group instead of once per element drops four weight_byte()
-            // extractions (each a shift/mask on a uint) from 256 iterations
-            // per block to 8. Arithmetic order is unchanged.
-            int group_scale[8];
-            int group_minimum[8];
+            // Q5_K inner loop, restructured for u32 word access.
+            // The high-bit region (offset+16..offset+47) is 32 bytes = 8 u32 words.
+            // Each byte at position (16 + j) contains 8 high bits, one per group.
+            // We load each u32 word once and extract all 4 bytes.
+            // The low-nibble region (offset+48..offset+175) is 128 bytes = 32 u32 words.
+            // Each pair of groups shares 32 bytes = 8 u32 words.
             for (uint group = 0u; group < 8u; ++group) {
-                group_scale[group] = int(scale(slot, offset, group));
-                group_minimum[group] = int(minimum(slot, offset, group));
-            }
-            for (uint local = 0u; local < 256u; ++local) {
-                uint group = local >> 5u;
-                uint packed = weight_byte(slot, offset + 48u + (group >> 1u) * 32u + (local & 31u));
-                uint low = (group & 1u) == 0u ? packed & 15u : packed >> 4u;
-                uint high = (weight_byte(slot, offset + 16u + (local & 31u)) >> group) & 1u;
-                int value = int(low | (high << 4u));
-                int activation = shared_input ? input_q8[local] : q8(block * 256u + local);
-                partial[(local & 31u) >> 2u] += group_scale[group] * activation * value;
-                minimum_partial[group >> 1u] += group_minimum[group] * activation;
+                uint gs = group_scale[group];
+                uint gm = group_minimum[group];
+                uint pair = group >> 1u;
+                uint nibble_shift = (group & 1u) * 4u;
+                uint lo_word_base = offset + 12u + pair * 8u; // word offset for low nibbles
+                for (uint j = 0u; j < 32u; ++j) {
+                    uint local = group * 32u + j;
+                    // High bit: byte at offset+16+j, bit at position `group`
+                    uint hi_word_idx = offset + 4u + (j >> 2u);
+                    uint hi_word = weight_word(slot, hi_word_idx);
+                    uint hi_byte = (hi_word >> ((j & 3u) * 8u)) & 0xffu;
+                    uint high = (hi_byte >> group) & 1u;
+                    // Low nibble: byte at offset+48+pair*32+j
+                    uint lo_word = weight_word(slot, lo_word_base + (j >> 2u));
+                    uint lo_byte = (lo_word >> ((j & 3u) * 8u)) & 0xffu;
+                    uint low = (lo_byte >> nibble_shift) & 15u;
+                    int value = int(low | (high << 4u));
+                    int activation = shared_input ? input_q8[local] : q8(block * 256u + local);
+                    partial[(local & 31u) >> 2u] += int(gs) * activation * value;
+                    minimum_partial[group >> 1u] += int(gm) * activation;
+                }
             }
             precise float factor = q8_scale * q5_scale;
             for (uint lane = 0u; lane < 8u; ++lane) {
