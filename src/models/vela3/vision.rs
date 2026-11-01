@@ -292,7 +292,7 @@ fn truthy(v: &Value) -> bool {
 fn as_text(v: &Value) -> String {
     v.as_str()
         .map(str::to_owned)
-        .unwrap_or_else(|| v.to_string())
+        .unwrap_or_else(|| super::text::python_json(v, true, false))
 }
 
 fn py_string(v: &Value) -> String {
@@ -971,7 +971,85 @@ fn answer(e: &Example, logits: &[f32], task_config: &Value) -> Result<Value, Str
 }
 
 pub(crate) fn predict(root: &Path, request: &Value, pool: &ComputePool) -> Result<Value, String> {
-    predict_traced(root, request, pool, None)
+    let questions = request["questions"]
+        .as_object()
+        .ok_or("questions must be an object")?;
+    let has_images = match request.get("images") {
+        None | Some(Value::Null) => false,
+        Some(Value::Array(images)) => !images.is_empty(),
+        _ => return Err("images must be an array".into()),
+    };
+    let text_root = root.join("text");
+    let routers = if has_images {
+        Map::new()
+    } else {
+        super::fast::router_questions(&text_root)?
+    };
+    let (mut vision_questions, mut text_questions) = (Map::new(), Map::new());
+    for (key, question) in questions {
+        let group = if uses_vision(question, has_images, &routers) {
+            &mut vision_questions
+        } else {
+            &mut text_questions
+        };
+        group.insert(key.clone(), question.clone());
+    }
+    let mut answers = Map::new();
+    let mut tokens = 0u64;
+    for (vision, questions) in [(true, vision_questions), (false, text_questions)] {
+        if questions.is_empty() {
+            continue;
+        }
+        let mut subrequest = json!({"state":request["state"],"questions":questions});
+        let response = if vision {
+            subrequest["images"] = request["images"].clone();
+            predict_traced(root, &subrequest, pool, None)?
+        } else {
+            super::fast::predict(&text_root, &subrequest, pool)?
+        };
+        tokens += response["usage"]["input_tokens"]
+            .as_u64()
+            .ok_or("invalid Vela3 input token count")?;
+        answers.extend(
+            response["answers"]
+                .as_object()
+                .ok_or("invalid Vela3 answers")?
+                .clone(),
+        );
+    }
+    let ordered: Map<_, _> = questions
+        .keys()
+        .map(|key| (key.clone(), answers.remove(key).unwrap()))
+        .collect();
+    let config = read_json(&root.join("vela3v_config.json"))?;
+    Ok(
+        json!({"model":format!("vllm-sr/{}",config["name"].as_str().unwrap_or("vela3-fast-vision")),
+        "answers":ordered,"usage":{"input_tokens":tokens,"output_tokens":0}}),
+    )
+}
+
+fn uses_vision(question: &Value, has_images: bool, routers: &Map<String, Value>) -> bool {
+    let typ = question["type"].as_str();
+    if !has_images {
+        return match typ {
+            Some("choice") => !super::fast::is_router(routers, question),
+            Some("noul" | "box") => true,
+            _ => false,
+        };
+    }
+    match typ {
+        Some("choice" | "noul" | "box") => true,
+        Some("span") => {
+            let names = question
+                .get("criteria")
+                .filter(|v| truthy(v))
+                .or_else(|| question.get("labels").filter(|v| truthy(v)))
+                .map(criteria_names)
+                .unwrap_or_else(|| vec!["unsupported".into()]);
+            question["task"] == "ocr_check" || names == ["unsupported"] || names == ["ocr_error"]
+        }
+        _ => false,
+    }
 }
 
 fn predict_traced(
@@ -1168,6 +1246,44 @@ fn region(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn public_package_routes_text_adapters_and_vision_decisions() {
+        let routers = json!({"Is this harmful?":{"type":"choice"}})
+            .as_object()
+            .unwrap()
+            .clone();
+        let router = json!({"type":"choice","instructions":" Is  this harmful? "});
+        assert!(!uses_vision(&router, false, &routers));
+        assert!(uses_vision(&router, true, &routers));
+        assert!(uses_vision(
+            &json!({"type":"noul","instructions":"Is this harmful?"}),
+            false,
+            &routers
+        ));
+        assert!(uses_vision(
+            &json!({"type":"choice","instructions":"Choose a subject"}),
+            false,
+            &routers
+        ));
+        for images in [false, true] {
+            assert!(!uses_vision(&json!({"type":"set"}), images, &routers));
+            assert!(!uses_vision(
+                &json!({"type":"span","criteria":["person","company"]}),
+                images,
+                &routers
+            ));
+            assert!(uses_vision(&json!({"type":"box"}), images, &routers));
+        }
+        for question in [
+            json!({"type":"span"}),
+            json!({"type":"span","criteria":{"unsupported":null}}),
+            json!({"type":"span","labels":["ocr_error"]}),
+            json!({"type":"span","task":"ocr_check"}),
+        ] {
+            assert!(!uses_vision(&question, false, &routers));
+            assert!(uses_vision(&question, true, &routers));
+        }
+    }
 
     fn vocab() -> Vocab {
         let tokenizer=tokenizers::Tokenizer::from_bytes(br#"{"version":"1.0","truncation":null,"padding":null,"added_tokens":[],"normalizer":null,"pre_tokenizer":{"type":"Whitespace"},"post_processor":null,"decoder":null,"model":{"type":"WordLevel","vocab":{"[UNK]":0,"?":1,"<|sep|>":2,"<image>":3},"unk_token":"[UNK]"}}"#).unwrap();
@@ -1387,13 +1503,14 @@ mod tests {
                 let a = actual
                     .as_object()
                     .unwrap_or_else(|| panic!("{path}: expected object"));
-                assert_eq!(
-                    a.keys().collect::<Vec<_>>(),
-                    e.keys().collect::<Vec<_>>(),
-                    "{path} keys"
-                );
+                assert_eq!(a.len(), e.len(), "{path} keys");
                 for (key, value) in e {
-                    compare_output(&format!("{path}.{key}"), &a[key], value);
+                    compare_output(
+                        &format!("{path}.{key}"),
+                        a.get(key)
+                            .unwrap_or_else(|| panic!("{path}: missing {key}")),
+                        value,
+                    );
                 }
             }
             Value::Array(e) => {
@@ -1417,6 +1534,33 @@ mod tests {
             }
             _ => assert_eq!(actual, expected, "{path}"),
         }
+    }
+
+    #[test]
+    #[ignore = "requires RMI_VELA3_PUBLIC_FIXTURE from vision_request_oracle.py"]
+    fn public_system_one_matches_official_wrapper() {
+        let fixture = std::path::PathBuf::from(std::env::var("RMI_VELA3_PUBLIC_FIXTURE").unwrap());
+        let metadata = read_json(&fixture.with_extension("metadata.json")).unwrap();
+        let actual = crate::models::vela3::system_one(
+            Path::new(metadata["source_root"].as_str().unwrap()),
+            None,
+            &metadata["request"],
+            2,
+        )
+        .unwrap();
+        assert_eq!(
+            actual["answers"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect::<Vec<_>>(),
+            metadata["request"]["questions"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect::<Vec<_>>()
+        );
+        compare_output("public System One", &actual, &read_json(&fixture).unwrap());
     }
 
     #[test]

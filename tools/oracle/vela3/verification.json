@@ -14,7 +14,7 @@
   "scope": "Native Rust CPU safetensors System One; no Python or external acceleration library in runtime",
   "reference_manifest": {
     "path": "tools/oracle/vela3/snapshots.json",
-    "sha256": "253b4f1d221d1551ef5fa1a0f39e8ee1d85e86783c7cf32d0d120d72f3707d47"
+    "sha256": "630393a780ae9886997e5065c33e37a2ca388591df6aba7d3b7069516bf1ace3"
   },
   "comparison_policy": {
     "exact": [
@@ -4643,5 +4643,425 @@
       "remaining_new_findings": 0,
       "scope": "Read-only review of final request routing, usage, length cap, scalar safetensors validation, Oracle causal rejection and connected callers; disclosed numerical limitations remain."
     }
+  },
+  "review_fixes_2026_11_01": {
+    "verified_at_utc": "2026-11-01T13:32:58.566802+00:00",
+    "environment": {
+      "platform": "macOS-27.0.1-arm64-arm-64bit",
+      "rust": "1.98.1",
+      "cpu_threads": [
+        1,
+        2,
+        4
+      ],
+      "oracle_dtype": "float32"
+    },
+    "fixes": [
+      "Use the public fast-vision wrapper contract: text routers/spans use text/ weights; ordinary no-image decisions use the vision decision backbone; mixed image/text questions retain their official routes.",
+      "Reuse d3 Python JSON serialization for fast state/instructions/descriptions and JSON router state, including exponent zero-padding; vision JSON text rendering shares this helper."
+    ],
+    "reference_manifest_sha256": "630393a780ae9886997e5065c33e37a2ca388591df6aba7d3b7069516bf1ace3",
+    "implementation_sha256": {
+      "src/models/vela3/decoder.rs": "3c846b2873ddbae5f8cb246f289b67fccb28d08c1948d9c2cade2e67fda53ebb",
+      "src/models/vela3/fast.rs": "38e77c83169567ae05e626e773e970abb15303fc9a49b1b7a434f77b5188ffc6",
+      "src/models/vela3/text.rs": "9d414829fc602e2801838b6c811ca8df8a34810349f2080b09a3cac752f2d53b",
+      "src/models/vela3/vision.rs": "04b72f5d67e5f19678528d56d74c81eabe2170f9ac1fb6472028a0d9e1d9c712"
+    },
+    "text_component_identity": {
+      "source": "ModelScope fixed per-file revisions in snapshots.json",
+      "files_verified": 11,
+      "safetensors_verified": 6,
+      "checks": [
+        "size",
+        "SHA256"
+      ],
+      "source_py_files_pinned": 5
+    },
+    "cli": {
+      "fast-floats-1": {
+        "passed": true,
+        "atol": 0.0005,
+        "rtol": 0.0005,
+        "floats_compared": 6,
+        "max_absolute_error": 1.7412329679777905e-06,
+        "largest_errors": [
+          {
+            "path": "response.answers.router.probabilities.jailbreak",
+            "absolute_error": 1.7412329679777905e-06
+          },
+          {
+            "path": "response.answers.router.probabilities.benign",
+            "absolute_error": 1.7412329679222793e-06
+          },
+          {
+            "path": "response.answers.json_instructions.probabilities.high",
+            "absolute_error": 5.280609480795562e-07
+          },
+          {
+            "path": "response.answers.json_instructions.probabilities.low",
+            "absolute_error": 5.280609479685339e-07
+          },
+          {
+            "path": "response.answers.state.probabilities.high",
+            "absolute_error": 4.4255388784164573e-07
+          },
+          {
+            "path": "response.answers.state.probabilities.low",
+            "absolute_error": 4.42553887758379e-07
+          }
+        ],
+        "errors": [],
+        "threads": 1,
+        "input_tokens": 180
+      },
+      "vision-text-1": {
+        "passed": true,
+        "atol": 0.0005,
+        "rtol": 0.0005,
+        "floats_compared": 56,
+        "max_absolute_error": 9.5367431640625e-07,
+        "largest_errors": [
+          {
+            "path": "response.answers.noul.noul",
+            "absolute_error": 9.5367431640625e-07
+          },
+          {
+            "path": "response.answers.decision.probabilities.person",
+            "absolute_error": 5.364418029785156e-07
+          },
+          {
+            "path": "response.answers.decision.probabilities.company",
+            "absolute_error": 5.364418029785156e-07
+          },
+          {
+            "path": "response.answers.halu.spans[0].score",
+            "absolute_error": 3.1707499437150233e-07
+          },
+          {
+            "path": "response.answers.halu.spans[0].probability",
+            "absolute_error": 2.980232238769531e-07
+          },
+          {
+            "path": "response.answers.entities.spans[1].probability",
+            "absolute_error": 2.086162567138672e-07
+          },
+          {
+            "path": "response.answers.described.spans[1].probability",
+            "absolute_error": 2.086162567138672e-07
+          },
+          {
+            "path": "response.answers.described.spans[1].score",
+            "absolute_error": 2.009971617478179e-07
+          },
+          {
+            "path": "response.answers.entities.spans[1].score",
+            "absolute_error": 2.008463139135941e-07
+          },
+          {
+            "path": "response.answers.evidence.spans[0].score",
+            "absolute_error": 1.5392021429638802e-07
+          }
+        ],
+        "errors": [],
+        "threads": 1,
+        "input_tokens": 1062
+      },
+      "fast-floats-4": {
+        "passed": true,
+        "atol": 0.0005,
+        "rtol": 0.0005,
+        "floats_compared": 6,
+        "max_absolute_error": 1.7412329679777905e-06,
+        "largest_errors": [
+          {
+            "path": "response.answers.router.probabilities.jailbreak",
+            "absolute_error": 1.7412329679777905e-06
+          },
+          {
+            "path": "response.answers.router.probabilities.benign",
+            "absolute_error": 1.7412329679222793e-06
+          },
+          {
+            "path": "response.answers.json_instructions.probabilities.high",
+            "absolute_error": 5.280609480795562e-07
+          },
+          {
+            "path": "response.answers.json_instructions.probabilities.low",
+            "absolute_error": 5.280609479685339e-07
+          },
+          {
+            "path": "response.answers.state.probabilities.high",
+            "absolute_error": 4.4255388784164573e-07
+          },
+          {
+            "path": "response.answers.state.probabilities.low",
+            "absolute_error": 4.42553887758379e-07
+          }
+        ],
+        "errors": [],
+        "threads": 4,
+        "input_tokens": 180
+      },
+      "vision-text-4": {
+        "passed": true,
+        "atol": 0.0005,
+        "rtol": 0.0005,
+        "floats_compared": 56,
+        "max_absolute_error": 9.5367431640625e-07,
+        "largest_errors": [
+          {
+            "path": "response.answers.noul.noul",
+            "absolute_error": 9.5367431640625e-07
+          },
+          {
+            "path": "response.answers.decision.probabilities.person",
+            "absolute_error": 5.364418029785156e-07
+          },
+          {
+            "path": "response.answers.decision.probabilities.company",
+            "absolute_error": 5.364418029785156e-07
+          },
+          {
+            "path": "response.answers.halu.spans[0].score",
+            "absolute_error": 3.1707499437150233e-07
+          },
+          {
+            "path": "response.answers.halu.spans[0].probability",
+            "absolute_error": 2.980232238769531e-07
+          },
+          {
+            "path": "response.answers.entities.spans[1].probability",
+            "absolute_error": 2.086162567138672e-07
+          },
+          {
+            "path": "response.answers.described.spans[1].probability",
+            "absolute_error": 2.086162567138672e-07
+          },
+          {
+            "path": "response.answers.described.spans[1].score",
+            "absolute_error": 2.009971617478179e-07
+          },
+          {
+            "path": "response.answers.entities.spans[1].score",
+            "absolute_error": 2.008463139135941e-07
+          },
+          {
+            "path": "response.answers.evidence.spans[0].score",
+            "absolute_error": 1.5392021429638802e-07
+          }
+        ],
+        "errors": [],
+        "threads": 4,
+        "input_tokens": 1062
+      },
+      "fast-original": {
+        "passed": true,
+        "atol": 0.0005,
+        "rtol": 0.0005,
+        "floats_compared": 52,
+        "max_absolute_error": 1.0851917867649163e-06,
+        "largest_errors": [
+          {
+            "path": "response.answers.noul.noul",
+            "absolute_error": 1.0851917867649163e-06
+          },
+          {
+            "path": "response.answers.decision.probabilities.human",
+            "absolute_error": 6.820031950294236e-07
+          },
+          {
+            "path": "response.answers.decision.probabilities.company",
+            "absolute_error": 6.820031949739125e-07
+          },
+          {
+            "path": "response.answers.feedback.probabilities.SAT",
+            "absolute_error": 4.784328839213536e-07
+          },
+          {
+            "path": "response.answers.feedback.probabilities.WRONG_ANSWER",
+            "absolute_error": 4.28031035282217e-07
+          },
+          {
+            "path": "response.answers.halu.spans[0].probability",
+            "absolute_error": 3.948807716369629e-07
+          },
+          {
+            "path": "response.answers.halu.spans[0].score",
+            "absolute_error": 3.888573311891519e-07
+          },
+          {
+            "path": "response.answers.entities.spans[0].score",
+            "absolute_error": 2.652745071385354e-07
+          },
+          {
+            "path": "response.answers.grouped_attack.probabilities.jailbreak",
+            "absolute_error": 2.4996127503951193e-07
+          },
+          {
+            "path": "response.answers.grouped_attack.probabilities.benign",
+            "absolute_error": 2.4996127501175636e-07
+          }
+        ],
+        "errors": [],
+        "threads": 4,
+        "input_tokens": 1651
+      },
+      "vision-decision-original": {
+        "passed": true,
+        "atol": 0.0005,
+        "rtol": 0.0005,
+        "floats_compared": 2,
+        "max_absolute_error": 2.384185791015625e-07,
+        "largest_errors": [
+          {
+            "path": "response.answers.q.probabilities.receipt",
+            "absolute_error": 2.384185791015625e-07
+          },
+          {
+            "path": "response.answers.q.probabilities.landscape",
+            "absolute_error": 1.601874828338623e-07
+          }
+        ],
+        "errors": [],
+        "threads": 4,
+        "input_tokens": 351
+      }
+    },
+    "public_mixed_cli": {
+      "passed": true,
+      "atol": 0.0005,
+      "rtol": 0.0005,
+      "floats_compared": 40,
+      "max_absolute_error": 5.960464477539062e-07,
+      "largest_errors": [
+        {
+          "path": "response.answers.box.confidence",
+          "absolute_error": 5.960464477539062e-07
+        },
+        {
+          "path": "response.answers.decision.probabilities.person",
+          "absolute_error": 2.980232238769531e-07
+        },
+        {
+          "path": "response.answers.decision.probabilities.company",
+          "absolute_error": 2.1606683731079102e-07
+        },
+        {
+          "path": "response.answers.entities.spans[1].probability",
+          "absolute_error": 2.086162567138672e-07
+        },
+        {
+          "path": "response.answers.described.spans[1].probability",
+          "absolute_error": 2.086162567138672e-07
+        },
+        {
+          "path": "response.answers.described.spans[1].score",
+          "absolute_error": 2.009971617478179e-07
+        },
+        {
+          "path": "response.answers.entities.spans[1].score",
+          "absolute_error": 2.008463139135941e-07
+        },
+        {
+          "path": "response.answers.router.probabilities.benign",
+          "absolute_error": 1.7881393432617188e-07
+        },
+        {
+          "path": "response.answers.router.probabilities.jailbreak",
+          "absolute_error": 1.7881393432617188e-07
+        },
+        {
+          "path": "response.answers.evidence.spans[0].score",
+          "absolute_error": 1.5392021429638802e-07
+        }
+      ],
+      "errors": [],
+      "questions": 9,
+      "threads": 4,
+      "input_tokens": 2240
+    },
+    "public_text_rust_api": {
+      "passed": true,
+      "questions": 12,
+      "threads": 2,
+      "atol": 0.0005,
+      "rtol": 0.0005,
+      "question_order_exact": true
+    },
+    "fast_float_hidden_logits": {
+      "passed": true,
+      "threads": 2,
+      "records": 3,
+      "hidden_max_abs": 0.0004272460938,
+      "logits_max_abs": 2.62260437e-06,
+      "hidden_atol": 0.001,
+      "logits_atol": 0.0005,
+      "logits_rtol": 0.0005
+    },
+    "coverage": {
+      "entries": "Independent vela3 CLI and models::vela3::system_one; HTTP and text/image JEV not implemented.",
+      "cpu_simd": "Existing SIMD operators unchanged; exact JSON/routing/offset/usage checks and bounded F32 comparisons on CPU 1/2/4 threads.",
+      "components": "Own fast-vision text backbone and router/span/NER/domain/feedback adapters, fixed hashes and explicit ultrabert format gate; no substitution with ordinary fast weights.",
+      "compute_policy": "CPU only; Auto/Vulkan paths not implemented.",
+      "shared_impact": "Python JSON helper moved unchanged from d3 to text; d3 contract unit tests pass. No shared loader, kernel, Cargo dependency or non-Vela runtime change in this fix."
+    },
+    "full_library": {
+      "command": "cargo +1.98.1 test --locked --profile release-fast --lib",
+      "before": {
+        "commit": "78e2eab308e3298f9a380554cfe68fa15a7f48ed",
+        "passed": 1358,
+        "failed": 20,
+        "ignored": 93
+      },
+      "after": {
+        "passed": 1360,
+        "failed": 20,
+        "ignored": 94
+      },
+      "failure_names_identical": true,
+      "failure_names": [
+        "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+        "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+        "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+        "models::clm::tests::matches_reference_golden_vectors",
+        "models::clm::tests::rejects_wrong_embedding_width",
+        "models::diffusion::z_image::text::tests::qwen_attention_softmax_matches_the_pinned_ggml_neon_reduction",
+        "models::diffusion::z_image::text::tests::silu_mul_inplace_matches_pinned_ggml_neon_activation",
+        "models::diffusion::z_image::vae::tests::silu_matches_pinned_ggml_neon_vector_path",
+        "models::funasr::encoder::parity_tests::fsmn_rounds_product_before_adding_like_ggml",
+        "models::funasr::encoder::parity_tests::layernorm_accumulates_variance_in_ggml_neon_groups",
+        "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+        "models::gemma4::trunk::tests::per_layer_bf16_projection_matches_pinned_scalar_dot_bits",
+        "models::gemma4::trunk::tests::per_layer_projection_rejects_non_bf16_weight",
+        "models::gemma4::trunk::tests::per_layer_projection_rejects_wrong_bf16_storage_length",
+        "ops::argmax::tests::all_negative",
+        "ops::argmax::tests::large_random",
+        "ops::argmax::tests::middle_max",
+        "ops::argmax::tests::tail_handles_non_aligned_lengths",
+        "ops::argmax::tests::ties_pick_lowest_index",
+        "ops::matmul::neon_tests::neon_softmax_matches_ggml_vector_exp_and_f64_sum"
+      ],
+      "new_failures": [],
+      "resolved_failures": [],
+      "vela_portable": {
+        "passed": 43,
+        "failed": 0,
+        "ignored": 6
+      }
+    },
+    "other_checks": {
+      "python_oracle_tests": {
+        "passed": 6,
+        "failed": 0
+      },
+      "rustfmt": true,
+      "diff_check": true
+    },
+    "limits": [
+      "Previous mini/flash/turbo/d3-image BF16 experimental limits remain; those real-weight suites were not rerun for this patch.",
+      "Public mixed CLI includes all four image task types; the separate 84-checkpoint per-task vision suites were not rerun.",
+      "Zero-threshold spans verify decoding/nonempty Unicode boundaries, not extraction quality; no new quality or performance benchmark.",
+      "Full library retains the same 20 inherited failures; no claim of full repository success."
+    ]
   }
 }

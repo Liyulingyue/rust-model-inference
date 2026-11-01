@@ -582,6 +582,72 @@
         "Revision": "f228c125f4110f85c475a0cef8c553879ef681a1"
       },
       {
+        "Path": "text/config.json",
+        "Size": 2402,
+        "Sha256": "a78bd20bbea354825e46e1b97f05ccdceeb5455267914ff9666af00fd31d34ab",
+        "Revision": "f228c125f4110f85c475a0cef8c553879ef681a1"
+      },
+      {
+        "Path": "text/domain_df_adapter.safetensors",
+        "Size": 379989432,
+        "Sha256": "5b81662a7428cb84de0d66a848d5ea681e1ec68ff6f2bcf314819c43ffeb89ea",
+        "Revision": "f228c125f4110f85c475a0cef8c553879ef681a1"
+      },
+      {
+        "Path": "text/feedback_df_adapter.safetensors",
+        "Size": 379989432,
+        "Sha256": "10511c8bb0075e3450102f2fd017d8c3585cb99dcabafaccc9f7d4bdd0f4dcc9",
+        "Revision": "e1156708681b45b345234447a9c8e11d848a583e"
+      },
+      {
+        "Path": "text/model.safetensors",
+        "Size": 611280128,
+        "Sha256": "7d724d2d51ed8106393319886911935e8ee5a8ed8d219dc113c18357e02a4ac4",
+        "Revision": "e1156708681b45b345234447a9c8e11d848a583e"
+      },
+      {
+        "Path": "text/ner_adapter.safetensors",
+        "Size": 376817544,
+        "Sha256": "7d9d72f93d69be1a0a513f7fade2290a655c6c4fcc11e9f0a9bccdc453998518",
+        "Revision": "e1156708681b45b345234447a9c8e11d848a583e"
+      },
+      {
+        "Path": "text/router_adapter.safetensors",
+        "Size": 381564700,
+        "Sha256": "184c2a90c688d11930a06a90a3be178ef86619f4a92e345b487264741603b0ab",
+        "Revision": "3ebf75a385678a0b61b30e86703e756e353fb78e"
+      },
+      {
+        "Path": "text/router_questions.json",
+        "Size": 21612,
+        "Sha256": "f7bf64a8c5265a843372147aef70a8babaa584ea9b9e2e7751fa1138d656b10f",
+        "Revision": "3ebf75a385678a0b61b30e86703e756e353fb78e"
+      },
+      {
+        "Path": "text/span_adapter.safetensors",
+        "Size": 306038328,
+        "Sha256": "fb6b0bd8864ba804e69bfcbef599a3f587f7b33fdaf1e73f1cb17a937387c4a1",
+        "Revision": "3ebf75a385678a0b61b30e86703e756e353fb78e"
+      },
+      {
+        "Path": "text/tokenizer.json",
+        "Size": 3523470,
+        "Sha256": "38734bb17ef19f84c67b5eb5692bea19801ffd02cb5c5ffc11429e76b0242e08",
+        "Revision": "3ebf75a385678a0b61b30e86703e756e353fb78e"
+      },
+      {
+        "Path": "text/tokenizer_config.json",
+        "Size": 765,
+        "Sha256": "3a612a73deb56eb875a917534a2436ee1934e0c6b9458e28b326cb3bfb4661a9",
+        "Revision": "3ebf75a385678a0b61b30e86703e756e353fb78e"
+      },
+      {
+        "Path": "text/vela3_config.json",
+        "Size": 11465,
+        "Sha256": "82f33acc0a09960f1e770f353dca0c2aab9517f3f4c49e84f49ea74f234f1147",
+        "Revision": "186946fef178dbbeafc6632294574b197f23e52a"
+      },
+      {
         "Path": "tokenizer.json",
         "Size": 3531040,
         "Sha256": "bda9af747539d9444eca3fc9df922811ae318d93ced0b83ecf2001c77a925e8a",
@@ -611,7 +677,12 @@
       "vela3_encoder.py": "60b6254a6e186b12afc312913971700faf46c26d6abd56079198a73b00843533",
       "span_decode_v2.py": "d2c5f2f446cf12d2f8a24dbf634452477088523b0973e1e07df244c851421efb",
       "configuration_ultravbert.py": "97b79ba8cf3d1e96b829441fa06fcc56ed83d3c0d43a89b04661c463cf9bf1cf",
-      "vela3_server.py": "fe2b36535341d700d4df6e761baa959ea933627a4ca1883cc7336217e9142f36"
+      "vela3_server.py": "fe2b36535341d700d4df6e761baa959ea933627a4ca1883cc7336217e9142f36",
+      "text/configuration_ultrabert.py": "823d10bda19f5164da4f79f8f9c01e5ebd7a75569abce78c0a26b7674fc78cd9",
+      "text/modeling_ultrabert.py": "6d86b56fbcc634dd2f7e2aa29047062289def1ba7e602b991be1af888dc82072",
+      "text/ub_d3_common.py": "ae36592c0fe964af9bba46b55a6eccff484efeb15c8c2fe209149fe285f971a3",
+      "text/vela3_encoder_text.py": "ba7fd94f35393383fecce9d3d1ad873957fc71da4d5f824a25b5591ab5c72834",
+      "text/vela3_schema.py": "b3a9c20ca9873be3c7a22f2431b1972176905ac5754a8f68615b7309163e0a77"
     },
     "contract_file_sha256": "f8d159468b49ee268c29d29c99ec488226ef7524fd967caa34d8d71f333f71f2",
     "contract": {

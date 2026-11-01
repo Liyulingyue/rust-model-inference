@@ -61,6 +61,8 @@ cargo +1.98.1 run --profile release-fast --bin vela3 -- \
 
 `requests/fast.json` 的真实权重检查包含全部九适配器和 18 个问题。`requests/fast-criteria.json` 单独覆盖普通 choice/router 的数组、重复选项，以及重复 span 标签报错；`requests/fast-thresholds.json` 覆盖 Unicode 数字、下划线、布尔值、巨大阈值和无效字符串。将上面 Oracle 和 CLI 的 `--request` 参数一并替换即可复现；两组边界请求已在确定性小型官方图上通过。
 
+`requests/fast-floats.json` 覆盖科学计数法 state、JSON instructions/description 和 router JSON state。此前 fast 使用 serde 的指数格式，`1e-7` 与 Python 的 `1e-07` 会改变 token IDs 和概率；现复用 d3 的 Python JSON 渲染。用此请求替换上述 `--request` 即可运行同一完整检查，不能将提示词差异计入浮点算子容差。
+
 ## Fast-vision 四种真实任务
 
 每条任务自动生成同一张确定性测试图，逐层记录五个图像切片、SigLIP、pixel shuffle、connector、UltraBERT、选取 hidden、任务 logits，并比较完整公开 System One JSON。
@@ -77,6 +79,34 @@ done
 ```
 
 省略 `--task` 可生成小型官方图；`--raw` 使用真实 raw 底座与确定性合成任务头。两者不能当成四个真实任务适配器的替代证据。
+
+## Fast-vision 公开包装器与文本任务
+
+此前四任务检查使用 `vela3v_encoder.py`，只能证明视觉子接口，不能证明 `vela3_encoder.py` 的完整公开包装器。公开包装器无图时把训练过的 router choice/set 和 span 分到包内 `text/`，普通 choice/noul 仍用视觉 decision；有图时，其他标签集的 span 和 set 仍走文本。原实现缺少此分流，现使用各自的独立权重并复用 fast 文本计算。
+
+先按 snapshots.json 下载六个 `text/*.safetensors` 及其配置/tokenizer/源码。以下 Oracle 校验固定源码和文本文件哈希，保持公开包装器、文本 runtime 和模型计算不变，复用上述 Transformers 配置兼容层。第二条命令的图像来自上面的真实 decision fixture。
+
+```bash
+.venv/bin/python tools/oracle/vela3/vision_request_oracle.py \
+  --root models/vela3-fast-vision --request tools/oracle/vela3/requests/fast-vision-text.json \
+  --out models/vela3-vision-public-text.json
+.venv/bin/python tools/oracle/vela3/vision_request_oracle.py \
+  --root models/vela3-fast-vision --request tools/oracle/vela3/requests/fast-vision-mixed.json \
+  --image models/vela3-vision-decision/image.png --out models/vela3-vision-public-mixed.json
+for variant in text mixed; do
+  RMI_VELA3_PUBLIC_FIXTURE="models/vela3-vision-public-$variant.json" \
+    cargo +1.98.1 test --locked --profile release-fast --lib \
+    models::vela3::vision::tests::public_system_one_matches_official_wrapper -- --exact --ignored
+  target/release-fast/vela3 --model models/vela3-fast-vision \
+    --request "models/vela3-vision-public-$variant.request.json" --threads 4 \
+    > "models/vela3-vision-public-$variant.native.json"
+  .venv/bin/python tools/oracle/vela3/compare_requests.py \
+    "models/vela3-vision-public-$variant.json" "models/vela3-vision-public-$variant.native.json" \
+    --atol 5e-4 --rtol 5e-4 --out "models/vela3-vision-public-$variant.comparison.json"
+done
+```
+
+12 问无图请求覆盖普通 decision/noul、共享 router、set、domain/feedback、NER、描述标签、evidence、halu、PII 和缺图 box；9 问混合请求覆盖有图 router choice 走视觉网络、set/开放标签走文本，以及图像 halu/OCR/box。零阈值 span 用于验证非空输出和 Unicode 边界，不代表抽取质量。2026-11-01 的实测与回归补记在 verification.json 的 `review_fixes_2026_11_01`，不替换下方历史测量。
 
 ## d3 请求、任务头和完整计算图
 

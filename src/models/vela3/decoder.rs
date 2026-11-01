@@ -1,7 +1,8 @@
 //! d3 request rendering, task gates and Vela word/label readouts.
 use super::{
     d3::{D3Encoder, D3Images},
-    tensor, text,
+    tensor,
+    text::{self, python_json},
 };
 use crate::core::thread_pool::ComputePool;
 use crate::format::safetensors::SafetensorSource;
@@ -30,55 +31,6 @@ fn truth(value: &Value) -> bool {
         Value::String(v) => !v.is_empty(),
         Value::Array(v) => !v.is_empty(),
         Value::Object(v) => !v.is_empty(),
-    }
-}
-
-// d3 uses Python's default separators; compact JSON changes the prompt tokens.
-fn python_json(value: &Value, compact: bool, sorted: bool) -> String {
-    let comma = if compact { "," } else { ", " };
-    let colon = if compact { ":" } else { ": " };
-    match value {
-        Value::Array(v) => format!(
-            "[{}]",
-            v.iter()
-                .map(|v| python_json(v, compact, sorted))
-                .collect::<Vec<_>>()
-                .join(comma)
-        ),
-        Value::Object(v) => {
-            let mut items: Vec<_> = v.iter().collect();
-            if sorted {
-                items.sort_by_key(|(k, _)| *k);
-            }
-            format!(
-                "{{{}}}",
-                items
-                    .into_iter()
-                    .map(|(k, v)| format!(
-                        "{}{colon}{}",
-                        serde_json::to_string(k).unwrap(),
-                        python_json(v, compact, sorted)
-                    ))
-                    .collect::<Vec<_>>()
-                    .join(comma)
-            )
-        }
-        Value::Number(n) if n.is_f64() => {
-            let x = n.as_f64().unwrap();
-            if x != 0.0 && (x.abs() < 1e-4 || x.abs() >= 1e16) {
-                let s = format!("{x:e}");
-                let (mantissa, exponent) = s.split_once('e').unwrap();
-                let exponent: i32 = exponent.parse().unwrap();
-                format!(
-                    "{mantissa}e{}{exponent:02}",
-                    if exponent < 0 { "-" } else { "+" },
-                    exponent = exponent.abs()
-                )
-            } else {
-                n.to_string()
-            }
-        }
-        _ => value.to_string(),
     }
 }
 

@@ -6,6 +6,55 @@ const CJK: &str = "⺀-⿿　-〿぀-ヿ㄀-ㇿ㐀-䶿一-鿿ꀀ-꓏가-힯豈-�
 const FAST_CJK: &str = "⺀-⿿　-〿぀-ヿ㄀-ㇿ㐀-䶿一-鿿ꀀ-꓏가-힯豈-﫿︰-﹏＀-￯";
 const EDGE: &str = "[](){}<>「」『』【】《》〈〉\"'“”‘’«»‹›";
 
+// Python's separators and exponent spelling are part of the trained prompt contract.
+pub(super) fn python_json(value: &Value, compact: bool, sorted: bool) -> String {
+    let comma = if compact { "," } else { ", " };
+    let colon = if compact { ":" } else { ": " };
+    match value {
+        Value::Array(v) => format!(
+            "[{}]",
+            v.iter()
+                .map(|v| python_json(v, compact, sorted))
+                .collect::<Vec<_>>()
+                .join(comma)
+        ),
+        Value::Object(v) => {
+            let mut items: Vec<_> = v.iter().collect();
+            if sorted {
+                items.sort_by_key(|(k, _)| *k);
+            }
+            format!(
+                "{{{}}}",
+                items
+                    .into_iter()
+                    .map(|(k, v)| format!(
+                        "{}{colon}{}",
+                        serde_json::to_string(k).unwrap(),
+                        python_json(v, compact, sorted)
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(comma)
+            )
+        }
+        Value::Number(n) if n.is_f64() => {
+            let x = n.as_f64().unwrap();
+            if x != 0.0 && (x.abs() < 1e-4 || x.abs() >= 1e16) {
+                let s = format!("{x:e}");
+                let (mantissa, exponent) = s.split_once('e').unwrap();
+                let exponent: i32 = exponent.parse().unwrap();
+                format!(
+                    "{mantissa}e{}{exponent:02}",
+                    if exponent < 0 { "-" } else { "+" },
+                    exponent = exponent.abs()
+                )
+            } else {
+                n.to_string()
+            }
+        }
+        _ => value.to_string(),
+    }
+}
+
 pub(crate) fn threshold_value(value: &Value) -> Result<f64, String> {
     match value {
         Value::String(s) => s.trim().parse::<f64>().ok().or_else(|| {

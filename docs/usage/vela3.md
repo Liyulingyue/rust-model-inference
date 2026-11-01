@@ -9,7 +9,7 @@
 | `vllm-sr/vela3-flash` | 同上 | 同上 |
 | `vllm-sr/vela3-turbo` | 同上 | 同上；普通决策 prefix-bidir，路由决策按配置使用 noncausal |
 | `vllm-sr/vela3-fast` | `vela3-encoder/1` / `ultrabert` | choice、noul、span、训练过的 router choice/set |
-| `vllm-sr/vela3-fast-vision` | `vela3v-encoder/1` / `ultravbert` | 图像 choice/noul、幻觉 span、OCR 检查、box |
+| `vllm-sr/vela3-fast-vision` | `vela3v-encoder/1` / `ultravbert` | 图像 choice/noul、幻觉 span、OCR、box；文本 router choice/set、span、NER、evidence |
 
 ## 权重目录
 
@@ -20,6 +20,8 @@ d3 四个变体还需要其 `vela3_config.json` 固定的独立底座，包含�
 Vela 的全部配置适配器在 d3 加载时校验。flash 的默认自动标签定义还使用 `labeldef_lm_head.safetensors`；缺失时按官方策略对未缓存标签使用名字。mini 使用 tied embedding 写定义，lite/turbo 默认使用名字；也可以在问题中给 `definitions` 对象或 `null`。不自动下载可选的外部 definition writer。
 
 fast-vision 的三个底座分别为 `model.safetensors`、`backbone_h2.safetensors`、`backbone_v2.safetensors`，不能相互替代；还需对应的 span、decision、box、OCR 适配器。
+
+fast-vision 的文本任务使用包内 `text/` 的独立配置、tokenizer、`model.safetensors` 及 span/router/NER/domain/feedback 适配器，不能用普通 fast 的权重替代。无图时，训练过的 router choice/set 与 span 使用文本适配器，普通 choice/noul 仍使用视觉侧的 decision 网络。有图时，choice/noul、box、图像幻觉 span 和 OCR 使用视觉任务；其他 span 标签集和 set 仍走文本侧。
 
 ## 运行
 
@@ -42,7 +44,7 @@ cargo run --profile release-fast --bin vela3 -- \
 }
 ```
 
-fast/fast-vision 省略 `--base-model`。图像通过顶层 `images` 数组传本地文件、HTTP(S) URL 或 base64 image data URL；fast-vision 最多一张图。Span 的 start/end 是 Unicode 字符偏移，遵循对应官方解码器的 URL、CJK、阈值和边界规则。d3 的 span pass 不计入官方 `usage.input_tokens`，这里保留该口径。turbo 的 usage 按官方入口合并共享 state，并计入路由适配器的额外 pass；当前实现仍按问题重算 state，未验证长文本性能。
+fast/fast-vision 省略 `--base-model`。图像通过顶层 `images` 数组传本地文件、HTTP(S) URL 或 base64 image data URL；fast-vision 的 choice/noul 最多三张，图像 span/OCR/box 按官方实现使用第一张。Span 的 start/end 是 Unicode 字符偏移，遵循对应官方解码器的 URL、CJK、阈值和边界规则。d3 的 span pass 不计入官方 `usage.input_tokens`，这里保留该口径。turbo 的 usage 按官方入口合并共享 state，并计入路由适配器的额外 pass；当前实现仍按问题重算 state，未验证长文本性能。
 
 turbo 的普通决策按官方 `validated_length` 限制为 32768 tokens，超限问题返回 `max_length_exceeded` / `question_tokens`，不截断输入。非空 `videos`、`assets` 和启用的 `long_context` 会在加载权重前明确报错；当前入口不支持这些模式。
 

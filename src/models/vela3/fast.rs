@@ -59,10 +59,22 @@ fn render(value: &Value) -> String {
     value
         .as_str()
         .map(str::to_owned)
-        .unwrap_or_else(|| value.to_string())
+        .unwrap_or_else(|| text::python_json(value, true, false))
 }
 fn norm(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+pub(super) fn router_questions(root: &Path) -> Result<Map<String, Value>, String> {
+    Ok(read_json(&root.join("router_questions.json"))?["questions"]
+        .as_object()
+        .ok_or("missing router questions")?
+        .iter()
+        .map(|(k, v)| (norm(k), v.clone()))
+        .collect())
+}
+pub(super) fn is_router(routers: &Map<String, Value>, question: &Value) -> bool {
+    matches!(question["type"].as_str(), Some("choice" | "set"))
+        && routers.contains_key(&norm(question["instructions"].as_str().unwrap_or("")))
 }
 fn described(name: &str, description: &str) -> String {
     if description.is_empty() {
@@ -116,7 +128,7 @@ fn parts(state: &Value, strict: bool) -> Result<Vec<(String, String)>, String> {
                 .into(),
         )
     } else {
-        Ok(vec![("user".into(), state.to_string())])
+        Ok(vec![("user".into(), render(state))])
     }
 }
 fn error(typ: &Value, kind: &str, message: impl AsRef<str>) -> Value {
@@ -144,11 +156,7 @@ pub(crate) fn predict(root: &Path, request: &Value, pool: &ComputePool) -> Resul
         let typ = q.get("type").unwrap_or(&Value::Null);
         match typ.as_str() {
             Some("span") => spans.push((key, q)),
-            Some(t @ ("choice" | "set"))
-                if model
-                    .routers
-                    .contains_key(&norm(q["instructions"].as_str().unwrap_or(""))) =>
-            {
+            Some(t @ ("choice" | "set")) if is_router(&model.routers, q) => {
                 let schema = &model.routers[&norm(q["instructions"].as_str().unwrap_or(""))];
                 if schema["type"] != t {
                     answers.insert(
@@ -284,12 +292,10 @@ impl<'a> FastModel<'a> {
     fn load(root: &'a Path) -> Result<Self, String> {
         let config = read_json(&root.join("config.json"))?;
         let runtime = read_json(&root.join("vela3_config.json"))?;
-        let routers = read_json(&root.join("router_questions.json"))?["questions"]
-            .as_object()
-            .ok_or("missing router questions")?
-            .iter()
-            .map(|(k, v)| (norm(k), v.clone()))
-            .collect();
+        if config["model_type"] != "ultrabert" || runtime["format"] != "vela3-encoder/1" {
+            return Err("Vela3 text adapters require vela3-encoder/1 / ultrabert".into());
+        }
+        let routers = router_questions(root)?;
         let mut tokenizer = read_json(&root.join("tokenizer.json"))?;
         if let Some(added) = tokenizer["added_tokens"].as_array_mut() {
             added.retain(|t| {
@@ -1355,6 +1361,20 @@ fn window_ranges(n: usize, length: usize, overlap: usize) -> Vec<(usize, usize)>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn json_state_and_descriptions_keep_python_exponents() {
+        let state = json!({"price":1e-7,"upper":1e20,"note":"中文"});
+        let expected = r#"{"price":1e-07,"upper":1e+20,"note":"中文"}"#;
+        assert_eq!(render(&state), expected);
+        assert_eq!(
+            parts(&state, false).unwrap(),
+            [("user".into(), expected.into())]
+        );
+        assert_eq!(
+            string_options(&json!({"value":state})).unwrap(),
+            [("value".into(), expected.into())]
+        );
+    }
     #[test]
     fn assembly_shrinks_unprotected_context_before_windowing_target() {
         let segments = vec![
