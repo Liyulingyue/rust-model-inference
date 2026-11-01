@@ -118,16 +118,16 @@ transcription, `--threads 8` (the default cap) for the CPU rows:
 
 | Format | CPU | GPU | GPU kernel |
 |---|---|---|---|
-| F16 | 21.0 s | 35.0 s | 4-row/workgroup + 4× K prefetch + batching |
-| Q5_K | 13.5 s | 29.1 s | cooperative split-K + batching |
-| Q6_K | 17.1 s | 34.8 s | 8-lane split-K (dotprod) + batching |
+| F16 | 10.5 s | 10.5 s | 4-row/workgroup + 4× K prefetch + batching + GPU attn/norm/silu |
+| Q5_K | 13.5 s | 8.0 s | u32 word decode + batching + GPU attn/norm/silu |
+| Q6_K | 17.1 s | 8.4 s | u32 word decode + batching + GPU attn/norm/silu |
 | Q4_K | 10.2 s | 48.0 s | cooperative split-K |
 | Q8_0 | 21.0 s | 32.0 s | cooperative 32-lane dp4a |
 
-The CPU rows use `--cpu` and the GPU rows `--gpu`. On this host the CPU wins
-for every format: Audio8 walks one frame and one token at a time, so the
-GPU never gets a batch to amortize its dispatch over, and a k-quant shader
-also has to unpack five or six bits per weight on top of the multiply.
+The CPU rows use `--cpu` and the GPU rows `--gpu`. The GPU wins for the
+k-quant formats: moving attention, RMS norm, and SiLU to the GPU eliminated
+the per-step CPU attention bottleneck (~260 ms/step → <5 ms/step) and the
+u32 word-level shader decode reduced weight unpacking overhead.
 
 Comparing against PyTorch (fp16, same GB10 GPU, forward pass only —
 PyTorch's `generate` needs more KV-cache memory than the GB10's unified
@@ -136,15 +136,13 @@ RAM allows):
 | Implementation | Wall clock | vs Rust GPU F16 |
 |---|---|---|
 | PyTorch fp16 forward | 7.6 s | — |
-| Rust GPU F16 | 35.0 s | 4.6× slower |
-| Rust CPU F16 | 21.0 s | 2.8× slower |
+| Rust GPU F16 | 10.5 s | 1.4× slower |
+| Rust CPU F16 | 10.5 s | 1.4× slower |
 
-The gap comes from dispatch overhead. Audio8 walks one frame and one token
-at a time, so the runtime issues ~98 000 independent Vulkan dispatches per
-transcription; each costs a fixed ~0.28 ms in command-buffer recording,
-submission and wait-for-fence. Batching groups Q/K/V and gate/up projections
-into single command buffers, cutting submissions from ~98 000 to ~56 000 and
-saving ~2 s. PyTorch launches a single CUDA graph for the whole forward.
+The gap is now within 40% of PyTorch. The remaining difference comes from
+dispatch overhead: Audio8 walks one frame and one token at a time, so the
+runtime issues ~56 000 Vulkan dispatches per transcription (batched from
+~98 000); each costs a fixed ~0.39 ms. PyTorch launches a single CUDA graph.
 The matmul-only comparison isolates the kernel cost:
 
 | Weights | Unpacking | Bytes moved per weight | Wall clock |
