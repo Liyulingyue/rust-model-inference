@@ -371,10 +371,11 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
             }
             "--kv-cache" => {
                 if i + 1 < args.len() {
-                    options.kv_format = match args[i + 1].as_str() {
-                        "f32" => KvFormat::F32,
+                    options.kv_format = match args[i + 1].get(0..) {
+                        Some("f32") => KvFormat::F32,
                         _ => KvFormat::F16,
                     };
+                    options.kv_format_explicit = true;
                     i += 1;
                 }
             }

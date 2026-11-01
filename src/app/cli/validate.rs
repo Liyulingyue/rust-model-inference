@@ -46,6 +46,13 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
         }
         return Ok(());
     }
+    if options.wevisone_decoder.is_some() {
+        // The pixel decoder only exists for the WeVisOne prediction
+        // route. Without --wevisone-request it would be silently
+        // ignored and the run would fail later with an unrelated
+        // message from whichever text path was selected.
+        return Err("--wevisone-decoder requires --wevisone-request".into());
+    }
     if options.qwen_image_turbo {
         return Err("--qwen-image-turbo requires a Qwen-Image-2.1 DiT GGUF".into());
     }

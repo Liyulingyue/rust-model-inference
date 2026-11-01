@@ -1605,3 +1605,33 @@ fn wevisone_cli_validates_mode_and_preserves_generation_options() {
         assert!(validate_cli_options(&parse_cli_options(&args(&values)).unwrap()).is_err());
     }
 }
+
+#[test]
+fn wevisone_decoder_requires_a_wevisone_request() {
+    let mut values = vec![
+        "rmi",
+        "--model",
+        "text.gguf",
+        "--mmproj",
+        "vision.gguf",
+        "--wevisone-decoder",
+        "decoder.gguf",
+    ];
+    let options = parse_cli_options(&args(&values)).unwrap();
+    let error = validate_cli_options(&options).unwrap_err();
+    assert!(error.contains("--wevisone-decoder requires --wevisone-request"));
+    values.push("--wevisone-request");
+    values.push("request.json");
+    let options = parse_cli_options(&args(&values)).unwrap();
+    assert!(validate_cli_options(&options).is_ok());
+}
+
+#[test]
+fn kv_cache_is_only_rejected_when_the_user_asked_for_it() {
+    let mut options = CliOptions::default();
+    assert!(!options.kv_format_explicit);
+    assert_eq!(options.kv_format, KvFormat::F32);
+    let options = parse_cli_options(&args(&["rmi", "--kv-cache", "f32"])).unwrap();
+    assert!(options.kv_format_explicit);
+    assert_eq!(options.kv_format, KvFormat::F32);
+}

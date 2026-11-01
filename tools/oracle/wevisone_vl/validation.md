@@ -158,6 +158,36 @@ positions `[next,0,0,0]`) still truncates the 256x256 answer to 400 bytes.
 slot, and `build_qwen3_media_positions` matches HF `get_rope_index`, whose
 `current_pos` advances by `max(grid_h, grid_w)//merge` after an image.
 
+### CLI dispatch fixes found while re-validating
+
+Two CLI defects surfaced on the same host and are fixed on this branch:
+
+- `--wevisone-decoder` without `--wevisone-request` was silently ignored
+  and the run died later with an unrelated error. It now fails with
+  `--wevisone-decoder requires --wevisone-request`.
+- A bare `--mmproj` with a text-only prompt captured the multimodal branch,
+  which requires media; the request then fell through to the hybrid trunk
+  and failed with `Failed to parse hybrid text model: Unsupported hybrid
+  architecture: Some("qwen3vl")`. Qwen3-VL now takes the text path when no
+  image/video/audio is given. The Qwen3-VL text path always runs with F16
+  KV, so the `--kv-cache f32` guard now only fires when the user asked for
+  F32 explicitly; before, it also rejected the CLI default and blocked
+  plain-text Qwen3-VL entirely.
+
+Re-verified after the fix: Qwen3-VL-4B-Instruct text with and without
+`--mmproj` generates text instead of erroring, WeVisOne text with
+`--mmproj` answers `OK`, the Qwen3-VL image path still describes the
+256x256 fixture, and the WeVisOne segmentation run reproduces the
+pre-fix token IDs and alpha PNG byte for byte.
+
+Note on plain-text Qwen3-VL: the greedy answer is not stable across runs
+(same arguments produced "I'm sorry, but I can't", "Wait, I need to reply
+with exactly" and an empty answer). The shared Qwen3-VL text path always
+uses F16 KV, so `--kv-cache` does not cause it; multi-threaded float
+reductions move the first-token logits, and `docs/usage/qwen3.md` §3
+already records the near-tie between `<|im_end|>` and real text as the
+cause. This is pre-existing and unrelated to the changes above.
+
 ## Coverage limits
 
 Only the stated deterministic image and decoder fixtures were compared;

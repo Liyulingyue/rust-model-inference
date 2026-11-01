@@ -827,7 +827,12 @@ fn main() {
             &jinja_options,
         ));
     } else if !options.jev
-        && (explicit_mmproj.is_some() || image.is_some() || video.is_some() || audio.is_some())
+        && (image.is_some() || video.is_some() || audio.is_some()
+            // A bare --mmproj carries no vision tower to run: the Qwen3-VL
+            // multimodal path requires media, and without media this branch
+            // falls through to the hybrid trunk, which does not know
+            // qwen3vl. Route those models to the text path instead.
+            || (explicit_mmproj.is_some() && arch != "qwen3vl"))
     {
         // Omni → TTS post-processor pipeline: when both the multimodal
         // media path AND a TTS model + mmproj are present, route the
@@ -1090,7 +1095,13 @@ fn main() {
                 options.dump_logits,
                 options.bench,
                 options.profile,
-                options.kv_format,
+                // The shared Qwen3-VL text path always runs with F16 KV, so
+                // an F32 request only conflicts when the user asked for it.
+                if options.kv_format_explicit {
+                    options.kv_format
+                } else {
+                    app::KvFormat::F16
+                },
                 false,
             ));
             app::run_or_exit(app::run_shared_inference(
