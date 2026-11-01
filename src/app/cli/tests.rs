@@ -1627,6 +1627,25 @@ fn wevisone_decoder_requires_a_wevisone_request() {
 }
 
 #[test]
+fn wevisone_decoder_is_allowed_in_server_mode() {
+    // The server owns /v1/wevisone/predict and takes the decoder from
+    // --wevisone-decoder without a request file.
+    let options = parse_cli_options(&args(&[
+        "rmi",
+        "--serve",
+        "--model",
+        "text.gguf",
+        "--mmproj",
+        "vision.gguf",
+        "--wevisone-decoder",
+        "decoder.gguf",
+    ]))
+    .unwrap();
+    assert!(options.serve);
+    assert!(validate_cli_options(&options).is_ok());
+}
+
+#[test]
 fn kv_cache_is_only_rejected_when_the_user_asked_for_it() {
     let mut options = CliOptions::default();
     assert!(!options.kv_format_explicit);

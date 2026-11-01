@@ -1,3 +1,35 @@
+//! `/v1/wevisone/predict` HTTP endpoint for WeVisOne-VL-4B.
+//!
+//! Request schema (the same one the `--wevisone-request` file takes):
+//! ```json
+//! {
+//!   "image": "image.png",           // local path, data URL or http URL
+//!   "task": "segmentation",         // detection, referring, point, count_box,
+//!                                   // count_point, segmentation, matting, ocr,
+//!                                   // ocr_grounding, visual_prompt, freeform
+//!   "query": "the red rectangle",   // task-specific text
+//!   "max_new_tokens": 32
+//! }
+//! ```
+//! `visual_prompt` takes `reference_boxes` as pixel-space xyxy arrays and
+//! ignores `query`; the other tasks reject `reference_boxes`.
+//!
+//! Response:
+//! ```json
+//! {
+//!   "response": "<ref>the red rectangle</ref><box>...</box>",
+//!   "token_ids": [152670, 1782],
+//!   "boxes": [[0.258, 0.17, 0.773, 0.799]],
+//!   "alpha_png": ["data:image/png;base64,..."],
+//!   "width": 128,
+//!   "height": 128
+//! }
+//! ```
+//! `boxes` holds the normalized `<OBJ>` boxes and `alpha_png` one grayscale
+//! PNG data URI per box. Both stay empty unless the response contains
+//! `<OBJ>`, which needs the `--wevisone-decoder` component. The route is
+//! only mounted for the WeVisOne text release.
+
 use super::{compute_task, AppState, Backend};
 use crate::app::wevisone_vl::{predict, PredictRequest};
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
@@ -51,9 +83,16 @@ pub(super) async fn prediction(
     let decoder = backend.wevisone_decoder.clone();
     let pool = backend.pool.clone();
     let tokenizer = backend.tokenizer.clone();
-    let permit = match state.generation_slot.clone().acquire_owned().await {
-        Ok(p) => p,
-        Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    // One active generation protects shared GPU/model state and bounds
+    // server memory, exactly like the chat and JEV routes.
+    let permit = match state.generation_slot.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            return error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "Another generation is running; retry after it completes".into(),
+            )
+        }
     };
     match compute_task(state.compute, move || {
         let _permit = permit;

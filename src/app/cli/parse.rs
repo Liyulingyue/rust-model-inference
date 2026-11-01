@@ -675,6 +675,7 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
     if options.timestral_request.is_some() && args.iter().any(|arg| arg == "--serve") {
         return Err("--timestral-request is a CLI forecast mode; --serve is unsupported".into());
     }
+    options.serve = args.iter().any(|arg| arg == "--serve");
     Ok(options)
 }
 

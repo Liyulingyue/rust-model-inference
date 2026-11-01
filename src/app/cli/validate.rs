@@ -46,11 +46,13 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
         }
         return Ok(());
     }
-    if options.wevisone_decoder.is_some() {
+    if options.wevisone_decoder.is_some() && !options.serve {
         // The pixel decoder only exists for the WeVisOne prediction
         // route. Without --wevisone-request it would be silently
         // ignored and the run would fail later with an unrelated
-        // message from whichever text path was selected.
+        // message from whichever text path was selected. The server
+        // owns the same route and supplies the decoder there, so it
+        // validates the components against the loaded model instead.
         return Err("--wevisone-decoder requires --wevisone-request".into());
     }
     if options.qwen_image_turbo {

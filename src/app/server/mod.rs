@@ -1765,10 +1765,25 @@ pub fn run_server() {
         .route("/health", get(health))
         .route("/v1/models", get(list_models));
     router = match state.model.as_ref() {
-        Backend::Text(_) => router.merge(api::routes()).route(
-            "/v1/wevisone/predict",
-            post(wevisone::prediction).layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
-        ),
+        Backend::Text(text) => {
+            let router = router.merge(api::routes());
+            // The prediction endpoint belongs to the WeVisOne text
+            // release only. Every other text model must not advertise
+            // it: the handler would reject the request anyway, but a
+            // mounted route reads as "this server can do that".
+            if text
+                .source
+                .metadata("wevisone_vl.source_revision")
+                .is_some()
+            {
+                router.route(
+                    "/v1/wevisone/predict",
+                    post(wevisone::prediction).layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
+                )
+            } else {
+                router
+            }
+        }
         Backend::UnlimitedOcr(_) => router.merge(api::routes()),
         Backend::Embedding(_) => router.route(
             "/v1/embeddings",

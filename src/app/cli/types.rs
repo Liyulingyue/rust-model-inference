@@ -119,6 +119,10 @@ pub struct CliOptions {
     /// asked for it. Without this flag the guard would also reject the
     /// default and block plain-text Qwen3-VL entirely.
     pub kv_format_explicit: bool,
+    /// True when `--serve` was passed. The server owns the WeVisOne
+    /// prediction route, so it accepts `--wevisone-decoder` without a
+    /// `--wevisone-request` file.
+    pub serve: bool,
     pub gpu: bool,
     pub compute: Option<crate::compute::ComputePolicy>,
     pub tts: bool,
