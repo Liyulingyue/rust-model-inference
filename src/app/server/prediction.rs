@@ -37,7 +37,7 @@
 //! only mounted for a model that speaks this contract.
 
 use super::{compute_task, AppState, Backend};
-use crate::app::wevisone_vl::{predict, PredictRequest};
+use crate::models::wevisone_vl::{predict, PredictRequest};
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 
 pub(super) async fn prediction(

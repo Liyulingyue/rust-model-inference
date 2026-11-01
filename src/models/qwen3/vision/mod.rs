@@ -1,4 +1,5 @@
 pub mod clip_config;
+pub mod media;
 
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;

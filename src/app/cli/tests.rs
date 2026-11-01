@@ -1592,7 +1592,7 @@ fn wevisone_cli_validates_mode_and_preserves_generation_options() {
     ]);
     let options = parse_cli_options(&args(&values)).unwrap();
     validate_cli_options(&options).unwrap();
-    let prediction = crate::app::wevisone_vl::PredictionOptions::from_cli(&options).unwrap();
+    let prediction = crate::models::wevisone_vl::PredictionOptions::from_cli(&options).unwrap();
     assert_eq!(prediction.max_new_tokens, 1);
     assert_eq!(prediction.temperature, 0.7);
     assert_eq!(prediction.repetition_penalty, 1.2);

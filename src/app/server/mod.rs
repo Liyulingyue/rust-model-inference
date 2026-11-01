@@ -97,7 +97,7 @@ struct WeVisOneBackend {
     /// The pixel decoder behind `--wevisone-decoder`, for alpha masks.
     decoder: Option<Arc<dyn TensorSource>>,
     /// Generation options for the prediction route.
-    options: crate::app::wevisone_vl::PredictionOptions,
+    options: crate::models::wevisone_vl::PredictionOptions,
 }
 
 struct UnlimitedOcrBackend {
@@ -1495,7 +1495,7 @@ fn build_text(options: &CliOptions) -> Result<(TextBackend, Option<WeVisOneExtra
     let compiled_chat_template =
         std::sync::Arc::new(chat_template.resolve(&|k| source.metadata(k).cloned())?);
     let wevisone_options = if source.metadata("wevisone_vl.source_revision").is_some() {
-        Some(crate::app::wevisone_vl::PredictionOptions::from_cli(
+        Some(crate::models::wevisone_vl::PredictionOptions::from_cli(
             options,
         )?)
     } else {
@@ -1510,7 +1510,7 @@ fn build_text(options: &CliOptions) -> Result<(TextBackend, Option<WeVisOneExtra
         .transpose()
         .map_err(|e| e.to_string())?;
     if let Some(decoder) = &wevisone_decoder {
-        crate::app::wevisone_vl::validate_components(
+        crate::models::wevisone_vl::validate_components(
             source.as_ref(),
             mmproj
                 .as_ref()
@@ -1544,7 +1544,7 @@ fn build_text(options: &CliOptions) -> Result<(TextBackend, Option<WeVisOneExtra
 /// The WeVisOne-specific components a text backend carries on top of
 /// the generic one.
 struct WeVisOneExtra {
-    options: crate::app::wevisone_vl::PredictionOptions,
+    options: crate::models::wevisone_vl::PredictionOptions,
     decoder: Option<Arc<dyn TensorSource>>,
 }
 
