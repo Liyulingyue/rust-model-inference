@@ -3230,3 +3230,45 @@ token prompt 下差异更大（CPU 出英文、Vulkan 出韩文），说明**偏
 [TODO-045](#todo-045-lfm3-的-gpu-路径只搬了-matmul剩余算子占-cpu-时间-18集显上-auto-比-cpu-慢-84925)、
 `docs/develop/UNIFIED_COMPUTE_VALIDATION.md`（远程 AMD 上 qwen3 token 0 门禁失败）、
 `docs/develop/UNLIMITED_OCR_2_REVIEW.md` §7.5。
+
+### TODO-047: WeVisOne 的「是否本模型」判定散在 6 处，且 `enable_thinking` 被静默覆盖
+
+**现状**：WeVisOne-VL-4B 的适配在 6 个位置各自判断「这是不是 WeVisOne」，写法完全一样：
+
+```rust
+source.metadata("wevisone_vl.source_revision").is_some()
+```
+
+| 位置 | 用途 |
+| --- | --- |
+| `src/app/server/api/tools.rs:505` | 强制 thinking（HTTP prompt 构造） |
+| `src/app/text/qwen3.rs:65` | 强制 thinking（CLI 文本路径） |
+| `src/models/qwen3/trunk/forward.rs:758` | 强制 thinking（generate 路径） |
+| `src/app/jev/single/qwen3.rs:171` | 强制 jinja 渲染 |
+| `src/app/server/mod.rs:1464` | 决定是否构造 `wevisone_options` |
+| `src/models/qwen3/vision/mod.rs:612` | 视觉预计算保留 F32 |
+
+**强制 thinking 这件事本身是对的**：WeVisOne 自带的 `chat_template.jinja` 里**完全没有
+thinking 机制**（没有 `enable_thinking` 变量、没有 `<think>` 标记，助手轮就是字面
+`assistant\n`），官方实现走 `AutoProcessor.apply_chat_template`，所以官方 prompt
+永远不含空 think 块。不强制的话 HTTP/CLI 都会插入 `<think>\n\n`，prompt 与官方不一致。
+
+**问题一（判定重复）**：同一判定散 6 处，已经吃过一次亏——thinking 阈值在
+forward.rs / qwen3.rs / jev 三处各写一遍。将来加 WeVisOne 变体（或改名 revision
+标记）时漏改一处就是静默的行为分叉。**修复方向**：抽一个
+`qwen3::is_wevisone(source) -> bool`（或把它做成 `Qwen3Config` 的一个字段），
+6 处收敛到 1 处，并补一条单测锁住「哪些路径必须按 WeVisOne 处理」。
+
+**问题二（对外可见的静默覆盖）**：`src/app/server/api/protocol.rs:52-58` 的
+`enable_thinking` 是**客户端字段**（顶层 `"enable_thinking": false` 或嵌套
+`chat_template_kwargs`）。`tools.rs:505` 的
+`enable_thinking.unwrap_or(false) || is_wevisone` 会把客户端**显式传的 false 也
+覆盖成 true**。功能上无害（WeVisOne 本来就不 think，客户端拿到的仍是「无思考」
+输出），但 API 语义上是「显式请求被静默忽略」。
+**修复方向**：要么在强制时打一条 warning，要么在 `protocol.rs` 的字段注释里写明
+「WeVisOne 忽略该开关，模型没有 think 模式」。后者零风险，前者更友好。
+注意本条与已有的
+[enable_thinking 默认值条目](#high-priority) 是**不同**的问题：那条讲的是
+`unwrap_or(false)` 这个默认值本身，那条讲的是 WeVisOne 的强制覆盖。
+
+**关联**：`tools/oracle/wevisone_vl/README.md`、`tools/oracle/wevisone_vl/validation.md`。
