@@ -3230,3 +3230,89 @@ token prompt 下差异更大（CPU 出英文、Vulkan 出韩文），说明**偏
 [TODO-045](#todo-045-lfm3-的-gpu-路径只搬了-matmul剩余算子占-cpu-时间-18集显上-auto-比-cpu-慢-84925)、
 `docs/develop/UNIFIED_COMPUTE_VALIDATION.md`（远程 AMD 上 qwen3 token 0 门禁失败）、
 `docs/develop/UNLIMITED_OCR_2_REVIEW.md` §7.5。
+
+### TODO-047: WeVisOne 的「是否本模型」判定散在 6 处，且 `enable_thinking` 被静默覆盖
+
+**现状**：WeVisOne-VL-4B 的适配在 6 个位置各自判断「这是不是 WeVisOne」，写法完全一样：
+
+```rust
+source.metadata("wevisone_vl.source_revision").is_some()
+```
+
+| 位置 | 用途 |
+| --- | --- |
+| `src/app/server/api/tools.rs:505` | 强制 thinking（HTTP prompt 构造） |
+| `src/app/text/qwen3.rs:65` | 强制 thinking（CLI 文本路径） |
+| `src/models/qwen3/trunk/forward.rs:758` | 强制 thinking（generate 路径） |
+| `src/app/jev/single/qwen3.rs:171` | 强制 jinja 渲染 |
+| `src/app/server/mod.rs:1464` | 决定是否构造 `wevisone_options` |
+| `src/models/qwen3/vision/mod.rs:612` | 视觉预计算保留 F32 |
+
+**强制 thinking 这件事本身是对的**：WeVisOne 自带的 `chat_template.jinja` 里**完全没有
+thinking 机制**（没有 `enable_thinking` 变量、没有 `<think>` 标记，助手轮就是字面
+`assistant\n`），官方实现走 `AutoProcessor.apply_chat_template`，所以官方 prompt
+永远不含空 think 块。不强制的话 HTTP/CLI 都会插入 `<think>\n\n`，prompt 与官方不一致。
+
+**问题一（判定重复）**：同一判定散 6 处，已经吃过一次亏——thinking 阈值在
+forward.rs / qwen3.rs / jev 三处各写一遍。将来加 WeVisOne 变体（或改名 revision
+标记）时漏改一处就是静默的行为分叉。**修复方向**：抽一个
+`qwen3::is_wevisone(source) -> bool`（或把它做成 `Qwen3Config` 的一个字段），
+6 处收敛到 1 处，并补一条单测锁住「哪些路径必须按 WeVisOne 处理」。
+
+**问题二（对外可见的静默覆盖）**：`src/app/server/api/protocol.rs:52-58` 的
+`enable_thinking` 是**客户端字段**（顶层 `"enable_thinking": false` 或嵌套
+`chat_template_kwargs`）。`tools.rs:505` 的
+`enable_thinking.unwrap_or(false) || is_wevisone` 会把客户端**显式传的 false 也
+覆盖成 true**。功能上无害（WeVisOne 本来就不 think，客户端拿到的仍是「无思考」
+输出），但 API 语义上是「显式请求被静默忽略」。
+**修复方向**：要么在强制时打一条 warning，要么在 `protocol.rs` 的字段注释里写明
+「WeVisOne 忽略该开关，模型没有 think 模式」。后者零风险，前者更友好。
+注意本条与已有的
+[enable_thinking 默认值条目](#high-priority) 是**不同**的问题：那条讲的是
+`unwrap_or(false)` 这个默认值本身，那条讲的是 WeVisOne 的强制覆盖。
+
+**关联**：`tools/oracle/wevisone_vl/README.md`、`tools/oracle/wevisone_vl/validation.md`。
+
+### TODO-048: `--mmproj` + 纯文本仍会把 qwen2vl / qwen3vlmoe 送进 hybrid 分支报错
+
+**现状**：`src/main.rs` 的多模态分支条件原本是「有没有 `--mmproj`」，而 qwen3vl 的
+多模态路径**要求同时有 image/video/audio**。只有 `--mmproj`、没有媒体的请求因此
+掉进通用分支里的 `HybridTextModel::from_source`，而它只认
+`qwen35 | qwen35moe | edge0` → 报
+`Failed to parse hybrid text model: Unsupported hybrid architecture: Some("qwen3vl")`。
+
+WeVisOne 适配这条分支时已把 **`qwen3vl`** 修好：条件改成
+
+```rust
+image.is_some() || video.is_some() || audio.is_some()
+    || (explicit_mmproj.is_some() && arch != "qwen3vl")
+```
+
+无媒体时 qwen3vl 走文本路（`run_shared_inference` / `run_qwen3_inference`），
+实测 Qwen3-VL-4B-Instruct 纯文本从报错变成正常生成。
+
+**还没修的**：`qwen2vl` 与 `qwen3vlmoe` 同样带 `--mmproj` + 纯文本时，仍会掉进
+hybrid 分支报同一个错。**这是改动前的既有行为，不是回归**，但与已修好的 qwen3vl
+不一致。
+
+**为什么不顺手放开**：把条件扩成
+`!matches!(arch.as_str(), "qwen2vl" | "qwen3vl" | "qwen3vlmoe")` 需要先确认这两个
+arch 的**文本路**真的可用：
+
+- `qwen2vl` 走 qwen3 trunk（`Qwen3Config::from_source` 支持该 arch，rope 走
+  `Qwen3Rope::Mrope` 分支），理论可行，**未实测**；
+- `qwen3vlmoe` 是 MoE（`config.moe`），`run_qwen3_inference` 是否正确处理共享专家
+  **未实测**。
+
+在没有这两个 arch 的权重时放开，会把「明确的报错」变成「静默走错路」——后者更难
+排查。
+
+**待办**：
+
+1. 找一个 `qwen2vl` GGUF（+ mmproj），跑 `--mmproj` + 纯文本，确认文本路可用后再
+   把 `qwen2vl` 加进豁免名单；
+2. 同样验证 `qwen3vlmoe` 的 MoE 文本路；
+3. 两者的媒体路（`--image` / `--video` / `--audio`）保持不变，不在豁免范围内。
+
+**关联**：WeVisOne 适配分支（`codex/wevisone-vl-4b`）的 `src/main.rs` 改动与
+`docs/usage/qwen3.md` §3 的 M-RoPE 记录。

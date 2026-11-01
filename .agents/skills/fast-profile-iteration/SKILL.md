@@ -5,6 +5,11 @@ description: Use when 在 rust-model-inference 中需要快速验证改动（编
 
 # Fast profile for iteration
 
+> **本 skill 是被引用项。** 它只回答「怎么编译/跑测试最快」，不描述任何任务流程。
+> 工作流类 skill（`adapting-new-models`、`reviewing-model-changes`）在需要编译、
+> 跑单测时**引用**它，不要在各自的 skill 里重复写编译命令——否则同一套命令会在
+> 多个文件里各写一份，改 profile 时漏改一处。
+
 ## 核心原则
 
 仓库自定义了一个 `release-fast` Cargo profile，编译耗时约为默认 `release` 的 1/5~1/8（典型改动 ~30s vs ~5min），同时保留 LTO + 优化等级，足以运行单元测试和绝大多数验证。**默认使用 `--profile release-fast`**；只在用户明确要求发布产物或运行长时 benchmark 时切到 `release`。
@@ -20,7 +25,9 @@ description: Use when 在 rust-model-inference 中需要快速验证改动（编
 | 看 clippy 警告 | `cargo clippy --profile release-fast --lib -- -D warnings`（按需） |
 | 跑集成测试 | `cargo test --profile release-fast --test <test_name>` |
 
-`release-fast` 的 baseline：786~789 passed / 14 failed / 60 ignored。**14 failed 是预存失败**（parity oracle 未跑、第三方依赖回归），不是本次回归。
+`release-fast` 的 baseline：**1302 passed / 17 failed / 88 ignored**（2026-11-01，Linux/x86 实测）。**17 failed 是预存失败**（parity oracle 未跑、第三方依赖回归、Breeze / CLM / DOTS / Gemma4 / Qwen-Drive / YUE2 / argmax / dot BF16 / NEON RoPE / vision RoPE / GGUF sparse segment），不是本次回归。
+
+> 数字会随模型适配漂移。**每次改动前先跑一遍拿到当次基线，报告时逐条对比失败名单，不要只对比总数**——新增一个失败和少一个失败在总数上可能互相抵消。
 
 ## 什么时候**不**用 fast
 
@@ -30,8 +37,8 @@ description: Use when 在 rust-model-inference 中需要快速验证改动（编
 
 ## 已知约束
 
-- 编译 warning 数量很大（~400）几乎全部是历史遗留 `unused variable` / `dead_code`，与本次改动无关。**不要把 warning 当 error**（`-D warnings` 会刷屏）。
-- 编译时会有几个 `vk_*` example crate 因为缺 `main` 报 hard error（line 54/102/144）。这是 pre-existing 仓库状态，**不是本次改动的回归**——忽略它们，看 lib 的 build success 即可。
+- 编译 warning 数量很大（lib 约 300 条，bin 2 条）几乎全部是历史遗留 `unused variable` / `dead_code` / `unused import`，与本次改动无关。**不要把 warning 当 error**（`-D warnings` 会刷屏）。
+- 编译 examples 时会有几个 example crate 因为缺 `main` 报 hard error：`astronex_gpu_determinism`、`astronex_text_determinism`、`check_norm`、`lookup_tokens`、`mage_vae_conv_probe`、`vk_mem_info`（`vk_*` 里只有 `vk_mem_info` 缺 main，`vk_bench` / `vk_check` / `vk_ops_check` 正常）。这是 pre-existing 仓库状态，**不是本次改动的回归**——忽略它们，看 lib 的 build success 即可。
 - 缓存命中：重复编译 + 短改动通常 ~5s；冷启动或大改动 ~30~60s。
 - 编译命令若在 bash 工具里 timeout，检查是否忘记加 `--profile release-fast` 走了默认 dev profile。
 

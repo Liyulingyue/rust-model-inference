@@ -167,10 +167,8 @@ pub fn rope_mrope_interleaved(
                 1
             } else if sector % 3 == 2 && sector < 3 * sections[2] as usize {
                 2
-            } else if sector % 3 == 0 && sector < 3 * sections[0] as usize {
-                0
             } else {
-                3
+                0
             };
             let (sin, cos) = sin_cos(theta[axis]);
             let x0 = head[pair];

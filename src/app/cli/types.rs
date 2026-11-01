@@ -113,6 +113,16 @@ pub struct CliOptions {
     pub bench: bool,
     pub profile: bool,
     pub kv_format: KvFormat,
+    /// True when `--kv-cache` was passed on the command line. The
+    /// `KvFormat` default is F32, but the Qwen3-VL text path always runs
+    /// with F16 KV, so an F32 request is only a conflict when the user
+    /// asked for it. Without this flag the guard would also reject the
+    /// default and block plain-text Qwen3-VL entirely.
+    pub kv_format_explicit: bool,
+    /// True when `--serve` was passed. The server owns the WeVisOne
+    /// prediction route, so it accepts `--wevisone-decoder` without a
+    /// `--wevisone-request` file.
+    pub serve: bool,
     pub gpu: bool,
     pub compute: Option<crate::compute::ComputePolicy>,
     pub tts: bool,
@@ -129,6 +139,8 @@ pub struct CliOptions {
     pub qwen_omni_bf16: Option<PathBuf>,
     pub jev: bool,
     pub laya_request: Option<PathBuf>,
+    pub wevisone_request: Option<PathBuf>,
+    pub wevisone_decoder: Option<PathBuf>,
     pub timestral_request: Option<PathBuf>,
     pub jev_context: Option<String>,
     pub jev_questions: Vec<JevQuestion>,

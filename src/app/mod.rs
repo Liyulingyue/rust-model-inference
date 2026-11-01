@@ -9,6 +9,7 @@ pub(crate) mod selftest;
 pub mod server;
 pub mod text;
 pub(crate) mod tts;
+pub mod wevisone_vl;
 pub(crate) mod yue2;
 
 pub use crate::models::qwen3::embedding::{

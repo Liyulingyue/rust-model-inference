@@ -318,7 +318,7 @@ async fn prompt(state: &AppState, request: &Request) -> Result<PromptResult, (u1
     if let Backend::UnlimitedOcr(native) = state.model.as_ref() {
         return ocr::prepare(&native.model, request).map_err(|e| (400, e));
     }
-    let Backend::Text(text) = state.model.as_ref() else {
+    let Some(text) = state.model.text_backend() else {
         return Err((400, "Server is not running a text model".into()));
     };
     if text.runtime.is_none() {
@@ -706,6 +706,10 @@ fn generate(
 ) -> Result<Generation, String> {
     let (arch, handle) = match state.model.as_ref() {
         Backend::Text(text) => (text.arch.as_str(), text.runtime.as_ref()),
+        Backend::WeVisOne(wevisone) => (
+            wevisone.text.arch.as_str(),
+            wevisone.text.runtime.as_ref(),
+        ),
         Backend::UnlimitedOcr(native) => (
             crate::models::unlimited_ocr::MODEL_TYPE,
             Some(&native.runtime),
@@ -1698,6 +1702,7 @@ async fn jev_grouped(
 fn text_source(state: &AppState) -> Result<Arc<dyn crate::core::tensor::TensorSource>, String> {
     match state.model.as_ref() {
         Backend::Text(text) => Ok(Arc::clone(&text.source)),
+        Backend::WeVisOne(wevisone) => Ok(Arc::clone(&wevisone.text.source)),
         // CLM owns an encoder too; it just scores differently.
         Backend::Clm(clm) => Ok(Arc::clone(&clm.source)),
         other => Err(format!(
@@ -1709,7 +1714,7 @@ fn text_source(state: &AppState) -> Result<Arc<dyn crate::core::tensor::TensorSo
 
 fn backend_label(b: &Backend) -> &'static str {
     match b {
-        Backend::Text(_) => "text",
+        Backend::Text(_) | Backend::WeVisOne(_) => "text",
         Backend::UnlimitedOcr(_) => "unlimited-ocr",
         Backend::Embedding(_) => "embedding",
         Backend::Asr(_) => "asr",
@@ -1726,6 +1731,7 @@ fn backend_label(b: &Backend) -> &'static str {
 fn jev_threads(state: &AppState) -> usize {
     match state.model.as_ref() {
         Backend::Text(text) => text.pool.n_threads(),
+        Backend::WeVisOne(wevisone) => wevisone.text.pool.n_threads(),
         Backend::Clm(clm) => clm.model.pool().n_threads(),
         Backend::Gliner2(gliner2) => gliner2.n_threads,
         _ => 1,
@@ -1735,6 +1741,7 @@ fn jev_threads(state: &AppState) -> usize {
 fn jev_prefill_batch_size(state: &AppState) -> usize {
     match state.model.as_ref() {
         Backend::Text(text) => text.prefill_batch_size,
+        Backend::WeVisOne(wevisone) => wevisone.text.prefill_batch_size,
         Backend::Clm(clm) => clm.prefill_batch_size,
         _ => 64,
     }
@@ -2265,7 +2272,7 @@ async fn run_image_grouped_jev_blocking(
 /// can encode "A"/"B"/... label strings into token ids for JEV
 /// argmax scoring.
 fn text_tokenizer(state: &AppState) -> Option<Arc<BPETokenizer>> {
-    if let Backend::Text(text) = state.model.as_ref() {
+    if let Some(text) = state.model.text_backend() {
         Some(Arc::clone(&text.tokenizer))
     } else {
         None
@@ -2303,6 +2310,7 @@ async fn run_multimodal_text_only(
     // Multimodal logits-only forward — dispatch by arch.
     let arch = match state.model.as_ref() {
         Backend::Text(text) => text.arch.clone(),
+        Backend::WeVisOne(wevisone) => wevisone.text.arch.clone(),
         other => {
             return Err(format!(
                 "/v1/jev/image requires a text backend (got {})",
@@ -2312,14 +2320,17 @@ async fn run_multimodal_text_only(
     };
     let source = match state.model.as_ref() {
         Backend::Text(text) => Arc::clone(&text.source),
+        Backend::WeVisOne(wevisone) => Arc::clone(&wevisone.text.source),
         _ => unreachable!(),
     };
     let mmproj_path = match state.model.as_ref() {
-        Backend::Text(text) => text.mmproj_path.clone().ok_or_else(|| {
-            "/v1/jev/image requires the server to be started with --mmproj".to_string()
-        })?,
-        _ => unreachable!(),
-    };
+        Backend::Text(text) => text.mmproj_path.clone(),
+        Backend::WeVisOne(wevisone) => wevisone.text.mmproj_path.clone(),
+        _ => None,
+    }
+    .ok_or_else(|| {
+        "/v1/jev/image requires the server to be started with --mmproj".to_string()
+    })?;
     let threads = jev_threads(&state);
     let prefill_batch_size = jev_prefill_batch_size(&state);
 
@@ -2372,7 +2383,7 @@ async fn run_multimodal_text_only(
 }
 
 fn state_for_max_ctx(state: &AppState) -> Result<usize, String> {
-    if let Backend::Text(text) = state.model.as_ref() {
+    if let Some(text) = state.model.text_backend() {
         Ok(text.context_length)
     } else {
         Err("max-context unavailable for non-text backend".to_string())
@@ -2423,35 +2434,22 @@ fn decode_image_to_tempfile(image_url: &str) -> Result<std::path::PathBuf, Strin
 }
 
 fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
-    // Minimal RFC4648 base64 decoder (whitespace-tolerant, no padding
-    // required). Avoids pulling in a base64 crate.
-    const TABLE: &[u8; 128] = &{
-        let mut t = [255u8; 128];
-        let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut i = 0;
-        while i < alphabet.len() {
-            t[alphabet[i] as usize] = i as u8;
-            i += 1;
-        }
-        t
-    };
+    use base64::Engine as _;
     let cleaned: Vec<u8> = s.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
-    let mut out = Vec::with_capacity(cleaned.len() * 3 / 4);
-    let mut buf = 0u32;
-    let mut bits = 0u32;
-    for &c in &cleaned {
-        let v = if c < 128 { TABLE[c as usize] } else { 255 };
-        if v == 255 {
-            return Err(format!("invalid base64 char: {c:?}"));
-        }
-        buf = (buf << 6) | (v as u32);
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push(((buf >> bits) & 0xff) as u8);
-        }
+    base64::engine::general_purpose::STANDARD
+        .decode(&cleaned)
+        .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(&cleaned))
+        .map_err(|e| format!("invalid base64 image: {e}"))
+}
+
+#[test]
+fn jev_base64_accepts_padding_and_rejects_truncated_bytes() {
+    for input in ["TQ==", "TQ", " TQ==\n"] {
+        assert_eq!(base64_decode(input).unwrap(), b"M");
     }
-    Ok(out)
+    for input in ["T", "TQ=garbage", "@@@"] {
+        assert!(base64_decode(input).is_err());
+    }
 }
 
 fn detect_image_suffix(bytes: &[u8]) -> &'static str {

@@ -1563,3 +1563,94 @@ fn legacy_cli_parser_and_dispatch_semantics_are_preserved() {
         assert!(validate_cli_options(&options).is_ok());
     }
 }
+
+#[test]
+fn wevisone_cli_validates_mode_and_preserves_generation_options() {
+    let base = [
+        "rmi",
+        "--model",
+        "text.gguf",
+        "--mmproj",
+        "vision.gguf",
+        "--wevisone-request",
+        "request.json",
+    ];
+    let mut values = base.to_vec();
+    values.extend([
+        "--max-tokens",
+        "1",
+        "--temp",
+        "0.7",
+        "--repetition-penalty",
+        "1.2",
+        "--prefill-batch-size",
+        "1",
+        "--max-context",
+        "256",
+        "--kv-cache",
+        "f16",
+    ]);
+    let options = parse_cli_options(&args(&values)).unwrap();
+    validate_cli_options(&options).unwrap();
+    let prediction = crate::models::wevisone_vl::PredictionOptions::from_cli(&options).unwrap();
+    assert_eq!(prediction.max_new_tokens, 1);
+    assert_eq!(prediction.temperature, 0.7);
+    assert_eq!(prediction.repetition_penalty, 1.2);
+    assert_eq!(prediction.prefill_batch_size, 1);
+    assert_eq!(prediction.max_context, 256);
+    assert_eq!(prediction.kv_format, KvFormat::F16);
+    for extra in ["--dry-run", "--qwen-image-turbo", "--jev", "--dump-logits"] {
+        let mut values = base.to_vec();
+        values.push(extra);
+        assert!(validate_cli_options(&parse_cli_options(&args(&values)).unwrap()).is_err());
+    }
+}
+
+#[test]
+fn wevisone_decoder_requires_a_wevisone_request() {
+    let mut values = vec![
+        "rmi",
+        "--model",
+        "text.gguf",
+        "--mmproj",
+        "vision.gguf",
+        "--wevisone-decoder",
+        "decoder.gguf",
+    ];
+    let options = parse_cli_options(&args(&values)).unwrap();
+    let error = validate_cli_options(&options).unwrap_err();
+    assert!(error.contains("--wevisone-decoder requires --wevisone-request"));
+    values.push("--wevisone-request");
+    values.push("request.json");
+    let options = parse_cli_options(&args(&values)).unwrap();
+    assert!(validate_cli_options(&options).is_ok());
+}
+
+#[test]
+fn wevisone_decoder_is_allowed_in_server_mode() {
+    // The server owns /v1/prediction and takes the decoder from
+    // --wevisone-decoder without a request file.
+    let options = parse_cli_options(&args(&[
+        "rmi",
+        "--serve",
+        "--model",
+        "text.gguf",
+        "--mmproj",
+        "vision.gguf",
+        "--wevisone-decoder",
+        "decoder.gguf",
+    ]))
+    .unwrap();
+    assert!(options.serve);
+    assert!(validate_cli_options(&options).is_ok());
+}
+
+#[test]
+fn kv_cache_is_only_rejected_when_the_user_asked_for_it() {
+    let mut options = CliOptions::default();
+    assert!(!options.kv_format_explicit);
+    assert_eq!(options.kv_format, KvFormat::F32);
+    let options = parse_cli_options(&args(&["rmi", "--kv-cache", "f32"])).unwrap();
+    assert!(options.kv_format_explicit);
+    assert_eq!(options.kv_format, KvFormat::F32);
+}
