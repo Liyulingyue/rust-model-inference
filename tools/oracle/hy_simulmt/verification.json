@@ -2,6 +2,7 @@
   "schema_version": 2,
   "recorded_on": "2026-10-28",
   "status": "Experimental / Draft",
+  "record_scope": "Historical measurements before fdb0f239 removed Hy JEV. The current section names the implementation measured on recorded_on, not the latest branch. JEV is unsupported; see validation.md for the merge review.",
   "source": {
     "base_main_revision": "92d2eca0aad9161694be49a67a4b3057f7514547",
     "rust_src_tree": "7995d2c2c9a5bf1fd061f814427d2bfc9b9a3b96",

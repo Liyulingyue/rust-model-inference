@@ -70,6 +70,7 @@ pub(crate) mod gemma4;
 pub(crate) mod hunyuan;
 pub(crate) mod lfm2;
 pub(crate) mod lfm25;
+pub(crate) mod lfm3;
 pub(crate) mod llama;
 pub(crate) mod mellum;
 pub(crate) mod nemotron_h;
@@ -649,6 +650,15 @@ pub fn run_jev_grouped_decision_data(
             jinja.clone(),
         )?,
         "lfm2" => lfm2::run_jev_grouped_lfm2(
+            source.clone(),
+            context,
+            &prepared,
+            n_threads_arg,
+            prefill_batch_size,
+            false,
+            jinja.clone(),
+        )?,
+        "lfm3" => lfm3::run_jev_grouped_lfm3(
             source.clone(),
             context,
             &prepared,

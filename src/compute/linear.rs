@@ -40,6 +40,10 @@ pub(crate) struct LinearExecutor<'model, 'weights> {
 }
 
 impl<'model, 'weights> LinearExecutor<'model, 'weights> {
+    pub(crate) fn max_rows(&self) -> usize {
+        self.max_rows
+    }
+
     pub(crate) fn uses_vulkan(&self) -> bool {
         #[cfg(feature = "vulkan")]
         {
@@ -352,7 +356,8 @@ impl<'model, 'weights> LinearExecutor<'model, 'weights> {
                 .checked_add(output.len())
                 .ok_or_else(|| invalid("group output size overflow"))?;
         }
-        if N > 1 {
+        // The grouped shader accepts at most three weights with one numerical contract.
+        if (2..=3).contains(&N) {
             let specs: Vec<_> = bindings
                 .iter()
                 .map(|binding| {
@@ -366,16 +371,18 @@ impl<'model, 'weights> LinearExecutor<'model, 'weights> {
                     ))
                 })
                 .collect::<Result<_, ComputeError>>()?;
-            runtime.matmul_rows_group(&specs, input, rows, &mut outputs[..])?;
-            if outputs
-                .iter()
-                .any(|output| output.iter().any(|v| !v.is_finite()))
-            {
-                return Err(ComputeError::Device(
-                    "linear produced non-finite output".into(),
-                ));
+            if specs.iter().all(|(_, spec, _, _)| *spec == specs[0].1) {
+                runtime.matmul_rows_group(&specs, input, rows, &mut outputs[..])?;
+                if outputs
+                    .iter()
+                    .any(|output| output.iter().any(|v| !v.is_finite()))
+                {
+                    return Err(ComputeError::Device(
+                        "linear produced non-finite output".into(),
+                    ));
+                }
+                return Ok(());
             }
-            return Ok(());
         }
         self.staging.resize(total, 0.0);
         let mut offset = 0;
@@ -607,6 +614,147 @@ mod tests {
         );
         assert_eq!(output, vec![2.0; rows]);
         assert_eq!(context.submission_count(), before);
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn linear_gpu_group_preserves_mixed_formats_and_four_projections() {
+        let a = Weight::from_quantized(QuantizedTensor::F32 {
+            data: vec![1.0; 4 * 128],
+            n_in: 4,
+            n_out: 128,
+        });
+        let bytes = crate::ops::f32_to_bf16(2.0).to_le_bytes().repeat(4 * 128);
+        let b = Weight::from_quantized(QuantizedTensor::from_bytes(
+            &bytes,
+            crate::GGMLType::BF16,
+            4,
+            128,
+        ));
+        let rows = crate::ops::kernel::vulkan::min_gpu_matmul_outputs()
+            .div_ceil(128)
+            .max(1);
+        for policy in [ComputePolicy::Auto, ComputePolicy::Vulkan] {
+            let mut executor = LinearExecutor::new(
+                policy,
+                [&a, &b]
+                    .map(|weight| LinearBinding {
+                        weight,
+                        mode: LinearMode::Prepared,
+                    })
+                    .to_vec(),
+                rows,
+                pool(),
+            )
+            .unwrap();
+            let ids = [executor.id(0).unwrap(), executor.id(1).unwrap()];
+            let input = vec![1.0; rows * 4];
+            let mut outputs: [Vec<f32>; 4] = std::array::from_fn(|_| vec![f32::NAN; rows * 128]);
+            let backends = executor
+                .run_group(
+                    [ids[0], ids[1], ids[0], ids[1]],
+                    &input,
+                    rows,
+                    outputs.each_mut().map(|output| output.as_mut_slice()),
+                )
+                .unwrap();
+            assert_eq!(backends, [UsedBackend::Vulkan; 4]);
+            for (output, expected) in outputs.iter().zip([4.0, 8.0, 4.0, 8.0]) {
+                assert!(output.iter().all(|&v| (v - expected).abs() < 1e-5));
+            }
+            let [out_a, out_b, _, _] = outputs.each_mut();
+            assert_eq!(
+                executor
+                    .run_group(
+                        ids,
+                        &input,
+                        rows,
+                        [out_a.as_mut_slice(), out_b.as_mut_slice()],
+                    )
+                    .unwrap(),
+                [UsedBackend::Vulkan; 2]
+            );
+        }
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn linear_gpu_group_computes_outputs_wider_than_the_first_projection() {
+        let widths = [1, 65, 129];
+        let rows = crate::ops::kernel::vulkan::min_gpu_matmul_outputs()
+            .div_ceil(129)
+            .max(1);
+        for format in [
+            crate::GGMLType::F32,
+            crate::GGMLType::BF16,
+            crate::GGMLType::F16,
+        ] {
+            let storage: Vec<Vec<u8>> = widths
+                .iter()
+                .map(|&width| match format {
+                    crate::GGMLType::F32 => 1.0f32.to_le_bytes().repeat(4 * width),
+                    crate::GGMLType::BF16 => {
+                        crate::ops::f32_to_bf16(1.0).to_le_bytes().repeat(4 * width)
+                    }
+                    crate::GGMLType::F16 => {
+                        crate::ops::f32_to_f16(1.0).to_le_bytes().repeat(4 * width)
+                    }
+                    _ => unreachable!(),
+                })
+                .collect();
+            let weights: Vec<_> = storage
+                .iter()
+                .zip(widths)
+                .map(|(bytes, width)| {
+                    Weight::from_quantized(QuantizedTensor::from_bytes(bytes, format, 4, width))
+                })
+                .collect();
+            for policy in [ComputePolicy::Auto, ComputePolicy::Vulkan] {
+                let mut executor = LinearExecutor::new(
+                    policy,
+                    weights
+                        .iter()
+                        .map(|weight| LinearBinding {
+                            weight,
+                            mode: LinearMode::Prepared,
+                        })
+                        .collect(),
+                    rows,
+                    pool(),
+                )
+                .unwrap();
+                let ids = std::array::from_fn(|i| executor.id(i).unwrap());
+                for count in [rows, 1, rows] {
+                    let mut outputs = widths.map(|width| vec![f32::NAN; count * width]);
+                    let expected = if use_vulkan_for_outputs(policy, count * 129) {
+                        UsedBackend::Vulkan
+                    } else {
+                        UsedBackend::Cpu
+                    };
+                    assert_eq!(
+                        executor
+                            .run_group(
+                                ids,
+                                &vec![1.0; count * 4],
+                                count,
+                                outputs.each_mut().map(|output| output.as_mut_slice()),
+                            )
+                            .unwrap(),
+                        [expected; 3]
+                    );
+                    for (width, output) in widths.iter().zip(&outputs) {
+                        for (index, &value) in output.iter().enumerate() {
+                            assert!(
+                                (value - 4.0).abs() < 1e-5,
+                                "{format:?} {policy:?} rows={count} width={width} index={index}: {value}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

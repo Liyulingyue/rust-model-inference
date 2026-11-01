@@ -15,6 +15,7 @@ converter/
 ├── edge0/        ← Edge0-35B MLX-affine 转换器、反量化与测试
 ├── gliner/       ← GLiNER 转换器和测试
 ├── neohorse/     ← NeoHorse 转换器和测试
+├── ovisocr3/     ← OvisOCR3 Qwen3.5 主模型/mmproj 转换器和测试
 ├── qwen_drive/   ← Qwen-Drive 转换器、测试和 source-tensors.json
 ├── vibevoice/    ← 原版与扩展精度转换器
 ├── yue2/         ← YuE2 主模型与 decoder-only VAE 转换器
@@ -35,10 +36,43 @@ converter/
 | `edge0/convert_edge0.py` | Edge0-35B MLX-affine；支持 `--quant lossless/f32/f16/q8_0/q4_0` |
 | `edge0/mlx_affine.py` | MLX-affine 反量化（与 `MlxAffineKernel::decode_row` 对齐） |
 | `neohorse/convert_neohorse.py` | 使用固定 llama.cpp 版本导出 |
+| `ovisocr3/convert_ovisocr3.py` | 校验 ModelScope OvisOCR3 的 473 个 BF16 张量，并用固定 llama.cpp `b96806d96061049a5b574269b049bf6241d63d46` 导出 `qwen35` 主模型和 `qwen3vl` mmproj |
 | `qwen_drive/convert_qwen_drive.py` | `inspect`、`export`、`verify` |
 | `vibevoice/convert_vibevoice_asr_original.py` | 原版导出 |
 | `vibevoice/convert_vibevoice_asr.py` | 扩展精度导出 |
 | `yue2/convert_yue2.py` | 导出 `yue2` 主模型和 `yue2_vae` F32 decoder；`--quant bf16/f32/q8_0/q4_0/q4_k_m/q6_k`（默认 `bf16` 零拷贝）；固定协议/tokenizer metadata，原子写入并读回校验 |
+
+## OvisOCR3
+
+先按文件下载 ModelScope `ATH-MaaS/OvisOCR3`，并准备固定的 llama.cpp
+`b96806d96061049a5b574269b049bf6241d63d46` checkout：
+
+```bash
+.venv/bin/python -m tools.converter.ovisocr3.convert_ovisocr3 \
+  models/OvisOCR3 \
+  --llama-cpp /path/to/llama.cpp \
+  --outfile models/OvisOCR3-BF16.gguf \
+  --mmproj-outfile models/mmproj-OvisOCR3-BF16.gguf
+```
+
+The adapter validates the architecture, all 473 BF16 source tensors,
+tokenizer and image processor before conversion. It also exports the source
+pixel budget (`65536` to `16777216`) into the mmproj metadata. Without these
+keys, the runtime falls back to another model's defaults: a 32x32 input yields
+9 image tokens instead of the source configuration's 64 tokens at 256x256.
+The official README's `448²` to `2880²` values are explicit vLLM overrides,
+not the checkpoint's saved defaults; this exporter preserves the saved values.
+
+The validated ModelScope source has `model.safetensors` SHA-256
+`aa2311c6b22b07cf3afe9aac6e8bcb02a2b19dd8671b2a91d0b144071577e600` and is
+1,706,030,528 bytes. Runtime validation uses a separate fixed llama.cpp
+`11fe0215` reference, whose GDN epsilon formula matches the existing runtime.
+The older converter pin uses a different normalization formula, so its failing
+strict recurrent comparison is not a rounding-only difference or a passing
+alignment result. Exact checks cover tokenizer/structure/embedding/initial
+zero state; accumulated arithmetic uses independently calibrated numerical
+bounds. See [the validation report](../oracle/ovisocr3/README.md) for pins,
+hashes, commands, results and coverage limits.
 
 ## BGE 转换与推理
 

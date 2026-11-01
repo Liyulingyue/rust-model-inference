@@ -1212,6 +1212,17 @@ fn apply_rope(
 }
 
 /// Gemma 4 RoPE matching ggml's `ggml_rope_cache_init` and fused rotation.
+///
+/// The per-pair factor formula here — `angle_i = theta_i / factors[i]` with
+/// `theta_i = pos * freq_base^(-2i/d)` — is the GGUF `rope_freqs.weight`
+/// convention, and it now also lives in
+/// `src/ops/rope/neox.rs::rope_neox_inplace_with_freqs`.
+///
+/// This copy stays because its rotation uses `mul_add` (an explicit FMA),
+/// while the shared helper's scalar and SIMD paths deliberately avoid FMA so
+/// they match the pinned ggml reference bit for bit. Switching one for the
+/// other changes the last bit of every rotated channel, so the two cannot be
+/// merged without re-running Gemma 4's raw-bit parity evidence.
 fn apply_rope_ggml(
     values: &mut [f32],
     position: usize,

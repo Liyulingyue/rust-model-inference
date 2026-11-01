@@ -3188,7 +3188,7 @@ impl<'a> Qwen3Ops<'a> {
             input_stride,
         )?;
         push[16] = if format == GpuWeightFormat::F32 { 4 } else { 2 };
-        let columns = outputs[0].1;
+        let columns = outputs.iter().map(|(_, n_out, _)| *n_out).max().unwrap();
         // Narrow batches need more workgroups and parallel K reduction.
         let small = format == GpuWeightFormat::F32
             && token_rows <= 32
@@ -3274,7 +3274,7 @@ impl<'a> Qwen3Ops<'a> {
                 token_rows,
                 input_stride,
             )?;
-            let columns = outputs.first().map(|(_, n_out, _)| *n_out).ok_or(
+            let columns = outputs.iter().map(|(_, n_out, _)| *n_out).max().ok_or(
                 VulkanError::UnsupportedShape("tiled matmul has no output".into()),
             )?;
             const FLOAT_TOKENS: usize = 32;

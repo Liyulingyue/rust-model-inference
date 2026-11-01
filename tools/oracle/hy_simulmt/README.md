@@ -146,13 +146,16 @@ raw-bit equality.
 
 ## Measured validation
 
-The [machine-readable record](verification.json) separates the independent Hy
-decoder measurements from historical runs. Current real-weight checks use the
+The [2026-11-01 merge review](validation.md) records fresh entry, dispatch and
+regression checks separately from the older numerical measurements below.
+
+The [machine-readable record](verification.json) records the independent Hy
+decoder measurements below from before the JEV removal in `fdb0f239`. These checks used the
 Xeon Gold 6138, four threads, Rust 1.98.1, default SIMD and the pinned AVX2
 reference. Speech translation uses F32 KV; the text companion tests both cache
 formats. Results cover the two complete Q4_K_M files and these short fixtures.
 
-| Current CPU check | Result |
+| Recorded check (before `fdb0f239`) | Result |
 |---|---|
 | Tokenizer | 60/60 exact cases for each variant, including protocol literals, parse-special flags, multilingual text and digit/combining-mark boundaries. |
 | Identical-input projections | 21/21 per variant pass; maximum absolute error 1.91e-6, relative RMS 2.40e-7. |
@@ -163,12 +166,12 @@ formats. Results cover the two complete Q4_K_M files and these short fixtures.
 | Standard native text, F32 / F16 KV | Greedy ID 32 matches; relative RMS 8.26% / 8.10%. Both pass the bounded check. |
 | Interleave native text, F32 / F16 KV | Greedy ID 31168 matches; **fails** the 20% / 0.98 hard bounds: relative RMS 28.69% / 22.96%, cosine 0.96412 / 0.97466. |
 | Standard / Interleave Auto, three turns | All 10 / 18 generated IDs match. Standard passes (6.64% relative RMS); Interleave **fails** (25.84% relative RMS, cosine 0.97505). Both processes exit normally. |
-| CLI / HTTP / JEV | Three real-weight entry tests per variant pass, covering both upload formats, concurrency admission, single/grouped JEV and the final-EOT context boundary. Main CPU CLI text equals the library output: 41.4 s / 42.4 s for three turns. |
+| Historical CLI / HTTP / JEV | Three real-weight entry tests per variant passed, covering both upload formats, concurrency admission, the former single/grouped JEV paths and the final-EOT context boundary. Main CPU CLI text equaled the library output: 41.4 s / 42.4 s for three turns. JEV was subsequently removed; these measurements do not establish current entry support. |
 
 Interleave's independent Oracle paths differ by 39.56% / 25.15% relative RMS on
 that text fixture. The hard caps remain unchanged, so this does not establish
-text-score numerical parity. Interleave JEV remains experimental despite working
-CLI/HTTP request handling. No whole-model F32 equivalence is claimed.
+text-score numerical parity. Native text mode is an internal decoder diagnostic;
+Hy JEV is unsupported. No whole-model F32 equivalence is claimed.
 
 Auto uses real Vulkan submissions and CPU kernels: 1004 / 1012 submissions for
 the two three-turn runs, with peak allocations of 2,197,545,472 bytes. Both
@@ -186,8 +189,8 @@ recorded separately in `verification.json`.
 
 ## Scope
 
-Speech-to-text translation via the library, main CLI and HTTP, plus text-only
-single/grouped JEV. The first turn is 1.6 s and later turns are 0.8 s; each turn
+Speech-to-text translation via the library, main CLI and HTTP. Single/grouped
+JEV is unsupported. The first turn is 1.6 s and later turns are 0.8 s; each turn
 is encoded separately and EOT is retained in the decoder KV when another audio
 turn follows. The final EOT needs no unused KV slot. The output-token limit is global across the file.
 Interleave emits source and translation, separated by the reserved target marker.
@@ -214,10 +217,11 @@ RMI_HY_SIMULMT_MODEL="$model" RMI_HY_SIMULMT_WAV=artifacts/jfk-3.2s.wav \
   cargo test --profile release-fast --test hy_simulmt_entries -- --ignored --test-threads=1
 ```
 
-The ignored tests use the real binary: CLI single/grouped JEV without `--audio`;
-HTTP multipart/JSON uploads with a target language; concurrent audio admission;
-HTTP single/grouped JEV; invalid request options; and a final EOT that fits an
-exactly-sized context. Run complete models sequentially on a shared host.
+The ignored tests cover the real HTTP binary's multipart/JSON uploads with a
+target language, concurrent audio admission and invalid request options, plus
+the library's final EOT in an exactly-sized context. The non-ignored entry tests
+assert that single/grouped JEV is rejected. Run complete models sequentially on
+a shared host. Main CLI audio smoke checks must be run separately.
 
 The companions also accept `text` mode with `text.txt` as a native no-think
 prompt. It records tokenizer IDs, final logits and the greedy token without
