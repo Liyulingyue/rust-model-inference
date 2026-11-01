@@ -1,5 +1,6 @@
 pub mod api;
 mod forecast;
+mod prediction;
 mod rerank;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -60,6 +61,11 @@ fn compute_task<T: Send + 'static>(
 
 enum Backend {
     Text(TextBackend),
+    /// A WeVisOne text model: a Qwen3-VL release with a coordinate
+    /// vocabulary and a separate pixel decoder. It serves the ordinary
+    /// text routes and adds the image prediction route.
+    WeVisOne(WeVisOneBackend),
+    UnlimitedOcr(UnlimitedOcrBackend),
     Embedding(EmbeddingBackend),
     Asr(AsrBackend),
     Audio8(Audio8Backend),
@@ -69,6 +75,34 @@ enum Backend {
     Gliner2(Gliner2Backend),
     Gliner2Boundary(Gliner2BoundaryBackend),
     Timestral(TimestralBackend),
+}
+
+impl Backend {
+    /// The generic text payload, for the routes every text-capable
+    /// backend serves (chat, completions, responses, JEV).
+    fn text_backend(&self) -> Option<&TextBackend> {
+        match self {
+            Backend::Text(text) => Some(text),
+            Backend::WeVisOne(wevisone) => Some(&wevisone.text),
+            _ => None,
+        }
+    }
+}
+
+/// WeVisOne backend: the generic text backend plus the components the
+/// image prediction route needs.
+struct WeVisOneBackend {
+    /// Chat, completions and JEV use the generic text backend.
+    text: TextBackend,
+    /// The pixel decoder behind `--wevisone-decoder`, for alpha masks.
+    decoder: Option<Arc<dyn TensorSource>>,
+    /// Generation options for the prediction route.
+    options: crate::models::wevisone_vl::PredictionOptions,
+}
+
+struct UnlimitedOcrBackend {
+    model: Arc<crate::models::unlimited_ocr::Model>,
+    runtime: crate::ops::TextRuntimeHandle,
 }
 
 /// Timestral backend: the 209M time-series forecaster in one GGUF, named
@@ -938,6 +972,21 @@ fn build_backend(options: &CliOptions) -> Result<Arc<Backend>, String> {
     options.validate_compute_mode()?;
     options.compute_policy().check_build()?;
     let _scope = options.compute_policy().enter_legacy_scope();
+    if crate::models::unlimited_ocr::matches_model(&options.model) {
+        crate::models::unlimited_ocr::validate_options(options)?;
+        let model = Arc::new(crate::models::unlimited_ocr::Model::load(
+            &options.model,
+            options.threads,
+            options.effective_max_context(),
+        )?);
+        let runtime = Mutex::new(
+            Box::new(model.clone()) as Box<dyn crate::ops::generation_runtime::TextRuntime>
+        );
+        return Ok(Arc::new(Backend::UnlimitedOcr(UnlimitedOcrBackend {
+            model,
+            runtime,
+        })));
+    }
     if options.tts {
         return Ok(Arc::new(Backend::Tts(build_tts(options)?)));
     }
@@ -998,7 +1047,15 @@ fn build_backend(options: &CliOptions) -> Result<Arc<Backend>, String> {
             options,
         )?)));
     }
-    Ok(Arc::new(Backend::Text(build_text(options)?)))
+    let (text, wevisone) = build_text(options)?;
+    Ok(Arc::new(match wevisone {
+        Some(extra) => Backend::WeVisOne(WeVisOneBackend {
+            text,
+            decoder: extra.decoder,
+            options: extra.options,
+        }),
+        None => Backend::Text(text),
+    }))
 }
 
 /// Returns `true` if the GGUF at `path` looks like a Qwen3 rerank
@@ -1316,7 +1373,7 @@ fn build_gliner2_boundary(options: &CliOptions) -> Result<Gliner2BoundaryBackend
     })
 }
 
-fn build_text(options: &CliOptions) -> Result<TextBackend, String> {
+fn build_text(options: &CliOptions) -> Result<(TextBackend, Option<WeVisOneExtra>), String> {
     let prefill_batch_size = options.effective_prefill_batch_size()?;
     let raw_source: Arc<dyn TensorSource> =
         Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
@@ -1437,7 +1494,33 @@ fn build_text(options: &CliOptions) -> Result<TextBackend, String> {
     });
     let compiled_chat_template =
         std::sync::Arc::new(chat_template.resolve(&|k| source.metadata(k).cloned())?);
-    Ok(TextBackend {
+    let wevisone_options = if source.metadata("wevisone_vl.source_revision").is_some() {
+        Some(crate::models::wevisone_vl::PredictionOptions::from_cli(
+            options,
+        )?)
+    } else {
+        None
+    };
+    let wevisone_decoder: Option<Arc<dyn TensorSource>> = options
+        .wevisone_decoder
+        .as_ref()
+        .map(|path| {
+            crate::format::ggufrs::open_model_source(path, ComponentRole::Llm).map(Arc::from)
+        })
+        .transpose()
+        .map_err(|e| e.to_string())?;
+    if let Some(decoder) = &wevisone_decoder {
+        crate::models::wevisone_vl::validate_components(
+            source.as_ref(),
+            mmproj
+                .as_ref()
+                .ok_or("--wevisone-decoder requires --mmproj")?
+                .as_ref(),
+            Some(decoder.as_ref()),
+        )?;
+        crate::models::wevisone_vl::Decoder::new(decoder.as_ref(), &pool)?;
+    }
+    let text = TextBackend {
         arch: arch.to_string(),
         pool,
         tokenizer,
@@ -1450,7 +1533,19 @@ fn build_text(options: &CliOptions) -> Result<TextBackend, String> {
         model_path: Some(model_path),
         mmproj,
         mmproj_path: options.mmproj.clone().filter(|p| !p.as_os_str().is_empty()),
-    })
+    };
+    let wevisone = wevisone_options.map(|options| WeVisOneExtra {
+        options,
+        decoder: wevisone_decoder,
+    });
+    Ok((text, wevisone))
+}
+
+/// The WeVisOne-specific components a text backend carries on top of
+/// the generic one.
+struct WeVisOneExtra {
+    options: crate::models::wevisone_vl::PredictionOptions,
+    decoder: Option<Arc<dyn TensorSource>>,
 }
 
 fn build_asr(options: &CliOptions) -> Result<AsrBackend, String> {
@@ -1684,7 +1779,8 @@ pub fn run_server() {
         .to_string();
 
     let mode_label = match backend.as_ref() {
-        Backend::Text(_) => "text",
+        Backend::Text(_) | Backend::WeVisOne(_) => "text",
+        Backend::UnlimitedOcr(_) => "unlimited-ocr",
         Backend::Embedding(_) => "embedding",
         Backend::Asr(_) => "asr",
         Backend::Audio8(_) => "audio8",
@@ -1713,6 +1809,11 @@ pub fn run_server() {
         .route("/v1/models", get(list_models));
     router = match state.model.as_ref() {
         Backend::Text(_) => router.merge(api::routes()),
+        Backend::WeVisOne(_) => router.merge(api::routes()).route(
+            "/v1/prediction",
+            post(prediction::prediction).layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
+        ),
+        Backend::UnlimitedOcr(_) => router.merge(api::routes()),
         Backend::Embedding(_) => router.route(
             "/v1/embeddings",
             post(embeddings).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
@@ -1743,19 +1844,23 @@ pub fn run_server() {
         Backend::Gliner2Boundary(_) => router.route("/v1/jev/boundary", post(api::jev_boundary)),
         Backend::Timestral(_) => router.route("/v1/forecast", post(forecast::forecast)),
     };
-    if options.compute_policy() == crate::compute::ComputePolicy::Vulkan {
-        router = router.layer(axum::middleware::from_fn(
-            |request: axum::extract::Request, next: axum::middleware::Next| async move {
-                if request.uri().path().starts_with("/v1/jev/") {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        "JEV has no complete Vulkan execution path",
-                    )
-                        .into_response();
-                }
-                next.run(request).await
-            },
-        ));
+    if options.compute_policy() == crate::compute::ComputePolicy::Vulkan
+        && matches!(
+            state.model.as_ref(),
+            Backend::Text(_) | Backend::WeVisOne(_) | Backend::Clm(_) | Backend::Gliner2(_)
+        )
+    {
+        // The JEV routes score with the same text forward pass, so they
+        // take the same device path as the chat routes: the projections
+        // move to the device, the rest stays on the host. The model's own
+        // contract gate decides whether its numbers still agree with the
+        // CPU, so there is nothing to refuse here -- but the caller asked
+        // for a device and gets a partial one, so say so once.
+        eprintln!(
+            "compute requested=Vulkan backend=partial mode=jev \
+             note=no complete device path for this mode; only the \
+             offloadable parts run on the device"
+        );
     }
     let app = router.layer(CorsLayer::permissive()).with_state(state);
 

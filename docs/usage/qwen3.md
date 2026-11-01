@@ -75,17 +75,25 @@ n_ff=9728, head_dim=128, n_ctx=262144, freq_base=5e6, M-RoPE [24,20,20,0]`）。
 - 4 核 CPU + 7.5 GiB RAM 下端到端跑通：128/256/384/512/1024 PNG
   都能产出准确的图像描述（"This image is a simple, abstract
   composition of two overlapping circular shapes..."）。
-- **修复**：multimodal 流中 text token 的 M-RoPE 位置从
-  `[next, next, next, 0]` 改成 `[next, 0, 0, 0]` —— 即只把 T 轴当作
-  真正的 1D 位置，H/W/E 轴保持 0 (M-RoPE identity)。
-  改前 256×256 起 LLM 在最后位置预测 `<|im_end|>` 文本为空；改后 ≥256 image
-  文本生成正常。
-- 根因：upstream llama.cpp (`tools/mtmd/mtmd-helper-common.h` 的
-  `set_position_normal`) 走的是 1D legacy path，compat layer 只填
-  `token.pos[0]`，H/W/E 留 0；而我们的 `build_qwen3_media_positions`
-  原本把所有 4 个轴都填 `next`，H/W 多出来的 rotation 会在大 image grid
-  (`next = base + max(grid_h, grid_w) ≥ 12` 时) 累积，导致 LLM 在
-  最后位置 logits 偏向 `<|im_end|>` / ``。
+- **修复（2026-11-01 复核并更正）**：根因不是 text token 的位置向量，而是
+  M-RoPE 的**轴分配**。HF 的 Qwen3-VL 用 interleaved 轴分配
+  (`apply_interleaved_mrope`：频率槽 `i` 的归属规则是
+  `i%3==1 && i<3*sections[1]` → H 轴、`i%3==2 && i<3*sections[2]` → W 轴、
+  其余 → T 轴)；本仓库的 `rope_mrope_interleaved` 曾把最后 3 个槽
+  (`i=61,62,63`) 落到 E 轴（位置恒为 0），而这几个正是最高频的槽位，
+  位置偏差随 `next = base + max(grid_h, grid_w)` 增大而放大，
+  于是 ≥256×256 时 LLM 在最后位置的 logits 偏向控制 token、可见文本为空。
+  现在 `rope_mrope_interleaved` 的轴分配与 HF 逐槽一致，text token 的
+  位置也恢复为 HF `get_rope_index` 的 `[next, next, next, 0]`
+  （HF 在图后按 `max(grid_h, grid_w)//merge` 推进 `current_pos`，
+  与本仓库 `build_qwen3_media_positions` 的 `next` 推进方式一致）。
+- 复核方式（2026-11-01，Linux/x86，Qwen3-VL-4B-Instruct Q4_K_M +
+  F16 mmproj，浅青蓝底两个交叠黄圆）：修正后 128/256/512 的描述都连贯
+  完整；对照旧实现（槽 61–63 落 E 轴 + text 位置 `[next,0,0,0]`）在
+  256×256 仍然输出退化（可见文本被截断，只剩 400 字节）。
+  结论：把 text 位置改成 `[next,0,0,0]` 只是掩盖症状，并没有修掉
+  ≥256×256 退化；text 位置应当跟随 HF 的 `[next,next,next,0]`。
+  详见 `tools/oracle/wevisone_vl/validation.md`。
 - **小遗留**：greedy decode 首 token 偶尔会是 ``（被 streaming decoder
   静默跳过），实际可见输出从第二个 token 开始。若用 sampling (temp=0.7)
   这个偏置不明显，输出正常。

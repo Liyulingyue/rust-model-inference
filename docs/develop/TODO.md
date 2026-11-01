@@ -407,6 +407,13 @@ MiniCPM-V 4.7 的 `qwen35moe`（35B-A3B）此前只在**生成面**注册，多�
       F-2 `entity_attributes`（两套机制、零 ground truth）、
       F-3 长文本 `*_long` chunk+merge、F-4 relation 4 阶段 dedup。
 - [ ] **讨论：两套线程调度统一** — ComputePool vs rayon。暂不统一（LLM 热路径不应轻易改动）
+- [ ] **LFM3 的 GPU 路径只搬了 matmul，剩余算子占 CPU 解码时间 18%** — 详见
+      [TODO-045](#todo-045-lfm3-的-gpu-路径只搬了-matmul剩余算子占-cpu-时间-18集显上-auto-比-cpu-慢-84925)。
+      现状：GPU 只做线性投影，attention / shortconv / KV 留在 host。测算表明投影占 CPU
+      解码约 82%，其余算子合计仅 18%，所以**在集显上继续搬算子没有收益**（实测 Auto
+      输出与 CPU 逐字节相同，却慢 8.4–9.25×，瓶颈是权重过内存总线）。真要做应在独显上
+      做，优先滑窗 attention、q/k norm+RoPE 合并、RMSNorm 融合、sigmoid head gate，
+      shortconv 最后。
 - [ ] **ComputePool 的空闲 worker 在 GPU 模式下空转，抢占驱动线程** —
       `src/core/thread_pool.rs` 的 `worker_loop` 空闲分支是「自旋 `WAIT_SPINS` 次 →
       `yield_now()`」。`yield_now()` 只让出调度，线程仍是 runnable，会被立刻重新调度，
@@ -3091,3 +3098,221 @@ SIGTRAP（落在 `libnvidia-gpucomp.so` 的着色器编译器），关掉 GPU-AV
 **顺带**：`float_matmul_tiled` 的 GPU 求和顺序与 CPU 的 vec4 累加器不同，真实
 权重下差 1e-3，被 8 步扩散放大到约 29.5 dB。f64 仲裁显示 GPU 更接近真值
 （7.79e-5 vs 1.18e-4），所以这不是错误，不要为了「和 CPU 一致」去改 kernel。
+
+### TODO-045: LFM3 的 GPU 路径只搬了 matmul；剩余算子占 CPU 时间 18%，集显上 Auto 比 CPU 慢 8.4–9.25×
+
+**现状**：`src/models/lfm3/trunk/session.rs:102-127` 把每层的 `w_gate/w_up/w_down`、
+`wq/wk/wv/wo/attn_gate`（attention 层）或 `shortconv_in/shortconv_out`（shortconv 层）
+加上最后的 `model.output` 注册成 `LinearBinding`，这就是 GPU 上的全部负载。诊断行
+`LFM3 projections: requested=Auto backend=Vulkan; attention/shortconv/KV=Cpu` 描述得准确：
+**GPU 只做线性投影，attention / shortconv / KV cache 全在 host。**
+
+仍在 CPU 上的算子与仓库现成 shader 的对应关系：
+
+| 算子 | 次数 | 仓库里有没有现成 shader |
+| --- | --- | --- |
+| RMSNorm（attn/q/k/ffn/post_*/out_norm） | ~5/层 | ✅ `shaders/glsl/rms_norm.comp` |
+| q_norm+k_norm+RoPE（双 freq_base 1e6 / 1e4） | 1/层 | ✅ `shaders/glsl/qk_norm_rope.comp`（freq_base 走系数缓冲，`fill_rope_neox` 已有） |
+| SwiGLU（silu*up） | 1/层 | ✅ `shaders/glsl/silu_mul.comp` |
+| 残差加 | 2/层 | ✅ `shaders/glsl/add.comp` |
+| softmax | 1/层 | ✅ `shaders/glsl/softmax.comp` |
+| KV 写入 + F32/F16 转换 | 1/层 | ✅ `shaders/glsl/kv_write.comp` |
+| attention（full + **SWA**） | 1/层 | ⚠️ 有 `attention_online/scores/values`，但**整个 `shaders/glsl/` 里没有任何支持滑窗的 shader**；LFM3 有 5 个 SWA 层（layer 4/8/12/16/20） |
+| head gate（sigmoid） | 1/层 | ❌ **没有 sigmoid shader**；`silu_mul.comp` 有 `exp_mode` 字段可改 |
+| shortconv（`l_cache=7` + b/c 三路门控） | 1/层 | ❌ LFM3 特有结构；`qwen35_recurrent_conv.comp` 的布局不同 |
+
+**但"算子没上 GPU"不是主要矛盾。** LFM3 每 token 的投影工作量与本机实测：
+
+- 配置：24 层，d=2048，16 head × 128，n_ff=7680，vocab=128000，11 个 attention 层 +
+  13 个 shortconv 层，5 个 SWA 层，`lfm3.attention.head_count_kv` 为 0 的层即 shortconv 层。
+- 每 token 投影 **1.728 G MAC = 3.46 GFLOP**（含 lm_head 2048×128000）。
+- 本机 Q8_0 GEMM 实测 **80 GFLOPS**（`target/release-fast/micro-bench`，AVX2/FMA）→
+  投影理论 **43.2 ms/token**。
+- 实测 CPU 解码 **52.6 ms/token**（`--profile`：947.02 ms / 18 token）。
+
+→ **投影占 CPU 解码约 82%，其余所有算子加起来约 18%。**
+
+**影响**：
+
+1. **在这类集成显卡上继续往上搬算子收益有限**。本机（Intel Meteor Lake 集显）
+   实测 Auto 路径输出与 CPU 路径逐字节相同，但比 CPU **慢 8.4×**（32 步 greedy：
+   2.65 s 对 22.34 s）、**慢 9.25×**（216 token prompt + 8 步 decode：13.80 s 对
+   127.63 s）。原因是集显的设备内存就是系统内存，1.85 GB 权重"放进显存"后每次投影
+   都要过内存总线，比 CPU 直接读 RAM 更慢。把剩下 18% 的算子搬上 GPU，还要付 GPU
+   往返开销，净亏。
+2. **在独显上结论相反**：投影一旦真的快起来，host 端那 18% 会立刻变成主要瓶颈，
+   那时搬 attention / norm / RoPE 才有意义。
+3. **`--gpu` 与 `--compute auto` 都不提示"这次比 CPU 慢"**。用户看到的是"GPU 好慢"，
+   而不是"这个后端在这个设备上不划算"。这与 TODO-038 的结论同源：自动分发应当
+   **按实测选后端**（首 token 实测延迟对比 CPU 基线，落后就回退），而不是按模型
+   大小或"用户要求了 GPU"。
+
+**下一步（建议顺序，仅当有独显可测时）**：
+
+1. **滑窗 attention** —— 给 `attention_online.comp` 加 window 参数。影响 5/11 个
+   attention 层，且 SWA 层是最吃 attention 的；这是唯一一处"必须新写"的 attention 逻辑。
+2. **q/k norm + RoPE 合并** —— `qk_norm_rope.comp` 现成，push constant 已有
+   `q_heads/k_heads/head_dim/norm_flags/eps`，只需喂两组 freq_base 的系数缓冲
+   （`fill_rope_coefficients` / `fill_rope_neox` 已在 `src/vulkan/ops.rs`）。
+3. **RMSNorm 融合进投影后处理** —— 照抄 `silu_mul.comp` 的 `exp_mode` 模式。
+4. **head gate 的 sigmoid** —— 每层只有 16 个标量，最便宜，放哪儿都行。
+5. **shortconv** —— 13 层 × 6144 × 7 tap，FLOPs 最小但结构最 bespoke，最后做。
+
+**尚未验证**：以上任何一项都没有实机数据；本机只有集显，而集显上 GPU 路径本就不该
+作为加速路径。需要一台有独立显存的机器重测，否则做了也证明不了收益。
+
+**关联**：[TODO-038](#todo-038-cpugpu-自动分发应该按实测选后端而不是按模型大小)、
+`docs/develop/SUPPORTED_MODELS.md` 的 LFM3 行（状态 `Verified`（CPU/Q8_0 运行）；
+`Experimental`（Vulkan 投影））、`tools/oracle/lfm3/README.md` 的
+「同一台机器上的 Auto/Vulkan 投影路径」一节。
+
+---
+
+### TODO-046: qwen3 的 CPU 与 Vulkan 输出差一个 token（arch 白名单里的模型也不对齐）
+
+**现状**：`qwen3` 在 `ComputePolicy::has_complete_device_path()` 的 arch 白名单里
+（`llama|qwen3|qwen35|qwen35moe|dory`），所以 `--compute vulkan` 一直放行，走的是
+`Qwen3VulkanSession` 那条「整个解码驻留设备」的路径。
+
+但同一条 prompt 下，**CPU 与 Vulkan 的 greedy 输出不一致**。本机（Qwen3-0.6B-Q8_0，
+Intel 集显，`--kv-cache f16`）：
+
+| 路径 | 输出 |
+| --- | --- |
+| CPU | `Hello! How can I assist you today? 😊`（11 token） |
+| Vulkan | `Hello! How can I assist you today?`（9 token） |
+
+差的是末尾那个 emoji token —— **典型的数值边界翻转**：两条路径的 logits 排序在
+某一个 token 上几乎持平，谁赢取决于累加顺序与舍入。
+
+**这不是「去掉白名单」那次改动引入的**：把改动 stash 掉、退回改动前的 HEAD 重编译，
+同样的命令输出**完全相同**（同样少一个 emoji）。而且在 `--prompt hello` 这种单
+token prompt 下差异更大（CPU 出英文、Vulkan 出韩文），说明**偏离不止在最后一步**。
+
+**仓库里其实已经记过一次同样的事**：`docs/develop/UNIFIED_COMPUTE_VALIDATION.md`
+写的是远程 AMD RADV NAVI31 上 `Qwen3-0.6B-Q8_0.gguf` 的**模型准入门禁在 token 0
+就失败**（GPU `4.476106`、CPU `4.4538846`、abs `0.022221565`，门槛
+`MODEL_LOGIT_ABS_TOLERANCE = 2e-3`）→ `--compute vulkan` 以此 exit 1。
+**本机（Intel 集显）过得了 token 0 的门禁，却在后面对齐时翻了一个 token** ——
+同一类数值偏离，两台机器上表现不同。
+
+**JEV 也踩到同一件事**：qwen3 的 JEV 在 Vulkan 下被模型自己的契约门禁拦下
+（`model logit mismatch at 0: gpu=5.6980243 cpu=3.4995377 abs=2.1984866`）→ HTTP 500；
+而 llama-1B 的 JEV 在 Vulkan 下与 CPU **逐位相同**。**同一个 Vulkan 策略下，两个
+白名单里的 arch 一个能过门禁、一个过不了** —— 又一次说明白名单不是能力证明。
+
+**一个可能相关的实现细节**：`src/models/qwen3/trunk/prefill.rs:195` 的
+`validate_gpu_contract` 要求 `need_logits` 为真，而常规 prompt prefill
+（`need_logits = false`）**不会**跑那个 16 步 decode 契约探针
+（`MODEL_CONTRACT_DECODE_STEPS = 16`）。所以**真实生成路径上的 token 偏离没有被
+任何门禁看着**。这条线索没验证，只是探针的触发条件摆在那里。
+
+**为什么值得单列一条**：
+
+1. **白名单的含义被高估了。** `has_complete_device_path()` 现在只用来决定「要不要
+   打印警告」，但名字读起来像「这些架构的设备路径是对的」。实际上 `qwen3` 的设备
+   路径与 CPU 不对齐 —— 白名单里至少有一个成员不满足它字面上的意思。
+2. **LFM3 与 OCR 的同项对比是干净的**（Auto/Vulkan 与 CPU 逐字节相同），所以这不是
+   「设备算错了」，而是 **qwen3 这条驻留式 Vulkan 解码路径自己的累加顺序**与 CPU
+   kernel 不同。
+
+**待查**：
+
+1. `src/models/qwen3/trunk/session.rs` 的 `Qwen3VulkanSession` 与 CPU kernel 在
+   **RMSNorm / softmax / silu** 上的归约顺序是否一致（设备端若用并行归约，累加顺序
+   就和 CPU 的顺序归约不同）。
+2. 差异是**只在边界处翻转**，还是会在长输出里放大？本机只看了 24 token 的短输出。
+3. `src/models/llama/trunk/session.rs` 有同构的 `dense Vulkan currently requires F16 KV`
+   守卫，llama 也在白名单里 —— **llama 是否也有同样的 token 差异**，本轮没测
+   （没有在本机跑 llama 的 CPU/Vulkan 对比）。
+
+**关联**：[TODO-038](#todo-038-cpugpu-自动分发应该按实测选后端而不是按模型大小)、
+[TODO-045](#todo-045-lfm3-的-gpu-路径只搬了-matmul剩余算子占-cpu-时间-18集显上-auto-比-cpu-慢-84925)、
+`docs/develop/UNIFIED_COMPUTE_VALIDATION.md`（远程 AMD 上 qwen3 token 0 门禁失败）、
+`docs/develop/UNLIMITED_OCR_2_REVIEW.md` §7.5。
+
+### TODO-047: WeVisOne 的「是否本模型」判定散在 6 处，且 `enable_thinking` 被静默覆盖
+
+**现状**：WeVisOne-VL-4B 的适配在 6 个位置各自判断「这是不是 WeVisOne」，写法完全一样：
+
+```rust
+source.metadata("wevisone_vl.source_revision").is_some()
+```
+
+| 位置 | 用途 |
+| --- | --- |
+| `src/app/server/api/tools.rs:505` | 强制 thinking（HTTP prompt 构造） |
+| `src/app/text/qwen3.rs:65` | 强制 thinking（CLI 文本路径） |
+| `src/models/qwen3/trunk/forward.rs:758` | 强制 thinking（generate 路径） |
+| `src/app/jev/single/qwen3.rs:171` | 强制 jinja 渲染 |
+| `src/app/server/mod.rs:1464` | 决定是否构造 `wevisone_options` |
+| `src/models/qwen3/vision/mod.rs:612` | 视觉预计算保留 F32 |
+
+**强制 thinking 这件事本身是对的**：WeVisOne 自带的 `chat_template.jinja` 里**完全没有
+thinking 机制**（没有 `enable_thinking` 变量、没有 `<think>` 标记，助手轮就是字面
+`assistant\n`），官方实现走 `AutoProcessor.apply_chat_template`，所以官方 prompt
+永远不含空 think 块。不强制的话 HTTP/CLI 都会插入 `<think>\n\n`，prompt 与官方不一致。
+
+**问题一（判定重复）**：同一判定散 6 处，已经吃过一次亏——thinking 阈值在
+forward.rs / qwen3.rs / jev 三处各写一遍。将来加 WeVisOne 变体（或改名 revision
+标记）时漏改一处就是静默的行为分叉。**修复方向**：抽一个
+`qwen3::is_wevisone(source) -> bool`（或把它做成 `Qwen3Config` 的一个字段），
+6 处收敛到 1 处，并补一条单测锁住「哪些路径必须按 WeVisOne 处理」。
+
+**问题二（对外可见的静默覆盖）**：`src/app/server/api/protocol.rs:52-58` 的
+`enable_thinking` 是**客户端字段**（顶层 `"enable_thinking": false` 或嵌套
+`chat_template_kwargs`）。`tools.rs:505` 的
+`enable_thinking.unwrap_or(false) || is_wevisone` 会把客户端**显式传的 false 也
+覆盖成 true**。功能上无害（WeVisOne 本来就不 think，客户端拿到的仍是「无思考」
+输出），但 API 语义上是「显式请求被静默忽略」。
+**修复方向**：要么在强制时打一条 warning，要么在 `protocol.rs` 的字段注释里写明
+「WeVisOne 忽略该开关，模型没有 think 模式」。后者零风险，前者更友好。
+注意本条与已有的
+[enable_thinking 默认值条目](#high-priority) 是**不同**的问题：那条讲的是
+`unwrap_or(false)` 这个默认值本身，那条讲的是 WeVisOne 的强制覆盖。
+
+**关联**：`tools/oracle/wevisone_vl/README.md`、`tools/oracle/wevisone_vl/validation.md`。
+
+### TODO-048: `--mmproj` + 纯文本仍会把 qwen2vl / qwen3vlmoe 送进 hybrid 分支报错
+
+**现状**：`src/main.rs` 的多模态分支条件原本是「有没有 `--mmproj`」，而 qwen3vl 的
+多模态路径**要求同时有 image/video/audio**。只有 `--mmproj`、没有媒体的请求因此
+掉进通用分支里的 `HybridTextModel::from_source`，而它只认
+`qwen35 | qwen35moe | edge0` → 报
+`Failed to parse hybrid text model: Unsupported hybrid architecture: Some("qwen3vl")`。
+
+WeVisOne 适配这条分支时已把 **`qwen3vl`** 修好：条件改成
+
+```rust
+image.is_some() || video.is_some() || audio.is_some()
+    || (explicit_mmproj.is_some() && arch != "qwen3vl")
+```
+
+无媒体时 qwen3vl 走文本路（`run_shared_inference` / `run_qwen3_inference`），
+实测 Qwen3-VL-4B-Instruct 纯文本从报错变成正常生成。
+
+**还没修的**：`qwen2vl` 与 `qwen3vlmoe` 同样带 `--mmproj` + 纯文本时，仍会掉进
+hybrid 分支报同一个错。**这是改动前的既有行为，不是回归**，但与已修好的 qwen3vl
+不一致。
+
+**为什么不顺手放开**：把条件扩成
+`!matches!(arch.as_str(), "qwen2vl" | "qwen3vl" | "qwen3vlmoe")` 需要先确认这两个
+arch 的**文本路**真的可用：
+
+- `qwen2vl` 走 qwen3 trunk（`Qwen3Config::from_source` 支持该 arch，rope 走
+  `Qwen3Rope::Mrope` 分支），理论可行，**未实测**；
+- `qwen3vlmoe` 是 MoE（`config.moe`），`run_qwen3_inference` 是否正确处理共享专家
+  **未实测**。
+
+在没有这两个 arch 的权重时放开，会把「明确的报错」变成「静默走错路」——后者更难
+排查。
+
+**待办**：
+
+1. 找一个 `qwen2vl` GGUF（+ mmproj），跑 `--mmproj` + 纯文本，确认文本路可用后再
+   把 `qwen2vl` 加进豁免名单；
+2. 同样验证 `qwen3vlmoe` 的 MoE 文本路；
+3. 两者的媒体路（`--image` / `--video` / `--audio`）保持不变，不在豁免范围内。
+
+**关联**：WeVisOne 适配分支（`codex/wevisone-vl-4b`）的 `src/main.rs` 改动与
+`docs/usage/qwen3.md` §3 的 M-RoPE 记录。

@@ -132,6 +132,20 @@ pub fn run_inference(
             thinking,
             jinja,
         )
+    } else if arch == "lfm3" {
+        crate::models::lfm3::run_inference(
+            source.as_ref(),
+            prompt,
+            max_tokens,
+            temperature,
+            n_threads_arg,
+            profile,
+            kv_format,
+            max_context,
+            repetition_penalty,
+            thinking,
+            jinja,
+        )
     } else if arch == "lfm2moe" {
         crate::models::lfm2moe::run_inference_with_batch(
             source.as_ref(),

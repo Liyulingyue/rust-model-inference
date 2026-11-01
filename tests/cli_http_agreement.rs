@@ -124,6 +124,7 @@ fn cli_text(
     let stdout = String::from_utf8_lossy(&output.stdout);
     let start = stdout.find("Output: ")? + "Output: ".len();
     let rest = &stdout[start..];
+    let rest = rest.strip_suffix('\n').unwrap_or(rest);
     let end = rest.find("\n[").unwrap_or(rest.len());
     Some(rest[..end].to_string())
 }
@@ -224,7 +225,15 @@ fn cli_and_http_agree_on_greedy_and_temperature() {
     // covered; other archs are gated on their own models elsewhere.
     let covered = matches!(
         arch.as_str(),
-        "llama" | "nanbeige" | "exaone" | "k2-horizon" | "granite" | "lfm2moe" | "qwen3" | "qwen35"
+        "llama"
+            | "nanbeige"
+            | "exaone"
+            | "k2-horizon"
+            | "granite"
+            | "lfm2moe"
+            | "lfm3"
+            | "qwen3"
+            | "qwen35"
     );
     if !covered {
         eprintln!("skipping: arch {arch} is not in the agreement matrix yet");
@@ -246,8 +255,7 @@ fn cli_and_http_agree_on_greedy_and_temperature() {
     for thinking in [false, true] {
         for temperature in [0.0f32] {
             let Some(cli) = cli_text(&path, MAX_TOKENS, temperature, thinking) else {
-                eprintln!("skipping thinking={thinking} temperature={temperature}: CLI run failed");
-                continue;
+                panic!("CLI failed: arch={arch} thinking={thinking} temperature={temperature}");
             };
             let http = http_text(loader, temperature, &[], PROMPT, Some(thinking));
             if cli != http {
