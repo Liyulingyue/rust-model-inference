@@ -6,7 +6,6 @@
 //! separate pixel decoder, so the task list and the `<OBJ>`/alpha-mask
 //! contract below are that model's shape rather than a generic one.
 //!
-//!
 //! Request schema (the same one the `--wevisone-request` file takes):
 //! ```json
 //! {
@@ -35,7 +34,7 @@
 //! `boxes` holds the normalized `<OBJ>` boxes and `alpha_png` one grayscale
 //! PNG data URI per box. Both stay empty unless the response contains
 //! `<OBJ>`, which needs the `--wevisone-decoder` component. The route is
-//! only mounted for the WeVisOne text release.
+//! only mounted for a model that speaks this contract.
 
 use super::{compute_task, AppState, Backend};
 use crate::app::wevisone_vl::{predict, PredictRequest};
@@ -52,18 +51,14 @@ pub(super) async fn prediction(
     if let Err(e) = request.validate() {
         return error(StatusCode::BAD_REQUEST, e);
     }
-    let Backend::Text(backend) = state.model.as_ref() else {
+    let Backend::WeVisOne(backend) = state.model.as_ref() else {
         return error(
             StatusCode::BAD_REQUEST,
             "WeVisOne text backend required".into(),
         );
     };
-    if backend
-        .source
-        .metadata("wevisone_vl.source_revision")
-        .is_none()
-        || backend.mmproj.is_none()
-    {
+    let text = &backend.text;
+    if text.source.metadata("wevisone_vl.source_revision").is_none() || text.mmproj.is_none() {
         return error(
             StatusCode::BAD_REQUEST,
             "WeVisOne text and vision components required".into(),
@@ -72,24 +67,19 @@ pub(super) async fn prediction(
     if matches!(
         request.task.trim().to_lowercase().as_str(),
         "segmentation" | "matting"
-    ) && backend.wevisone_decoder.is_none()
+    ) && backend.decoder.is_none()
     {
         return error(
             StatusCode::BAD_REQUEST,
             "server requires --wevisone-decoder for alpha masks".into(),
         );
     }
-    let Some(options) = backend.wevisone_options else {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "WeVisOne configuration required".into(),
-        );
-    };
-    let source = backend.source.clone();
-    let vision = backend.mmproj.clone().unwrap();
-    let decoder = backend.wevisone_decoder.clone();
-    let pool = backend.pool.clone();
-    let tokenizer = backend.tokenizer.clone();
+    let options = backend.options;
+    let source = text.source.clone();
+    let vision = text.mmproj.clone().unwrap();
+    let decoder = backend.decoder.clone();
+    let pool = text.pool.clone();
+    let tokenizer = text.tokenizer.clone();
     // One active generation protects shared GPU/model state and bounds
     // server memory, exactly like the chat and JEV routes.
     let permit = match state.generation_slot.clone().try_acquire_owned() {

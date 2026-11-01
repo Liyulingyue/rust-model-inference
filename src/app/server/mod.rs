@@ -61,6 +61,10 @@ fn compute_task<T: Send + 'static>(
 
 enum Backend {
     Text(TextBackend),
+    /// A WeVisOne text model: a Qwen3-VL release with a coordinate
+    /// vocabulary and a separate pixel decoder. It serves the ordinary
+    /// text routes and adds the image prediction route.
+    WeVisOne(WeVisOneBackend),
     UnlimitedOcr(UnlimitedOcrBackend),
     Embedding(EmbeddingBackend),
     Asr(AsrBackend),
@@ -71,6 +75,29 @@ enum Backend {
     Gliner2(Gliner2Backend),
     Gliner2Boundary(Gliner2BoundaryBackend),
     Timestral(TimestralBackend),
+}
+
+impl Backend {
+    /// The generic text payload, for the routes every text-capable
+    /// backend serves (chat, completions, responses, JEV).
+    fn text_backend(&self) -> Option<&TextBackend> {
+        match self {
+            Backend::Text(text) => Some(text),
+            Backend::WeVisOne(wevisone) => Some(&wevisone.text),
+            _ => None,
+        }
+    }
+}
+
+/// WeVisOne backend: the generic text backend plus the components the
+/// image prediction route needs.
+struct WeVisOneBackend {
+    /// Chat, completions and JEV use the generic text backend.
+    text: TextBackend,
+    /// The pixel decoder behind `--wevisone-decoder`, for alpha masks.
+    decoder: Option<Arc<dyn TensorSource>>,
+    /// Generation options for the prediction route.
+    options: crate::app::wevisone_vl::PredictionOptions,
 }
 
 struct UnlimitedOcrBackend {
@@ -196,8 +223,6 @@ struct TextBackend {
     /// source because the existing multimodal CLI helper expects
     /// `&Path` for both the model and the vision encoder).
     pub(crate) mmproj_path: Option<std::path::PathBuf>,
-    wevisone_decoder: Option<Arc<dyn TensorSource>>,
-    wevisone_options: Option<crate::app::wevisone_vl::PredictionOptions>,
 }
 
 unsafe impl Send for TextBackend {}
@@ -1022,7 +1047,15 @@ fn build_backend(options: &CliOptions) -> Result<Arc<Backend>, String> {
             options,
         )?)));
     }
-    Ok(Arc::new(Backend::Text(build_text(options)?)))
+    let (text, wevisone) = build_text(options)?;
+    Ok(Arc::new(match wevisone {
+        Some(extra) => Backend::WeVisOne(WeVisOneBackend {
+            text,
+            decoder: extra.decoder,
+            options: extra.options,
+        }),
+        None => Backend::Text(text),
+    }))
 }
 
 /// Returns `true` if the GGUF at `path` looks like a Qwen3 rerank
@@ -1340,7 +1373,7 @@ fn build_gliner2_boundary(options: &CliOptions) -> Result<Gliner2BoundaryBackend
     })
 }
 
-fn build_text(options: &CliOptions) -> Result<TextBackend, String> {
+fn build_text(options: &CliOptions) -> Result<(TextBackend, Option<WeVisOneExtra>), String> {
     let prefill_batch_size = options.effective_prefill_batch_size()?;
     let raw_source: Arc<dyn TensorSource> =
         Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
@@ -1487,7 +1520,7 @@ fn build_text(options: &CliOptions) -> Result<TextBackend, String> {
         )?;
         crate::models::wevisone_vl::Decoder::new(decoder.as_ref(), &pool)?;
     }
-    Ok(TextBackend {
+    let text = TextBackend {
         arch: arch.to_string(),
         pool,
         tokenizer,
@@ -1500,9 +1533,19 @@ fn build_text(options: &CliOptions) -> Result<TextBackend, String> {
         model_path: Some(model_path),
         mmproj,
         mmproj_path: options.mmproj.clone().filter(|p| !p.as_os_str().is_empty()),
-        wevisone_options,
-        wevisone_decoder,
-    })
+    };
+    let wevisone = wevisone_options.map(|options| WeVisOneExtra {
+        options,
+        decoder: wevisone_decoder,
+    });
+    Ok((text, wevisone))
+}
+
+/// The WeVisOne-specific components a text backend carries on top of
+/// the generic one.
+struct WeVisOneExtra {
+    options: crate::app::wevisone_vl::PredictionOptions,
+    decoder: Option<Arc<dyn TensorSource>>,
 }
 
 fn build_asr(options: &CliOptions) -> Result<AsrBackend, String> {
@@ -1736,7 +1779,7 @@ pub fn run_server() {
         .to_string();
 
     let mode_label = match backend.as_ref() {
-        Backend::Text(_) => "text",
+        Backend::Text(_) | Backend::WeVisOne(_) => "text",
         Backend::UnlimitedOcr(_) => "unlimited-ocr",
         Backend::Embedding(_) => "embedding",
         Backend::Asr(_) => "asr",
@@ -1765,25 +1808,11 @@ pub fn run_server() {
         .route("/health", get(health))
         .route("/v1/models", get(list_models));
     router = match state.model.as_ref() {
-        Backend::Text(text) => {
-            let router = router.merge(api::routes());
-            // The prediction endpoint belongs to the WeVisOne text
-            // release only. Every other text model must not advertise
-            // it: the handler would reject the request anyway, but a
-            // mounted route reads as "this server can do that".
-            if text
-                .source
-                .metadata("wevisone_vl.source_revision")
-                .is_some()
-            {
-                router.route(
-                    "/v1/prediction",
-                    post(prediction::prediction).layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
-                )
-            } else {
-                router
-            }
-        }
+        Backend::Text(_) => router.merge(api::routes()),
+        Backend::WeVisOne(_) => router.merge(api::routes()).route(
+            "/v1/prediction",
+            post(prediction::prediction).layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
+        ),
         Backend::UnlimitedOcr(_) => router.merge(api::routes()),
         Backend::Embedding(_) => router.route(
             "/v1/embeddings",
@@ -1818,7 +1847,7 @@ pub fn run_server() {
     if options.compute_policy() == crate::compute::ComputePolicy::Vulkan
         && matches!(
             state.model.as_ref(),
-            Backend::Text(_) | Backend::Clm(_) | Backend::Gliner2(_)
+            Backend::Text(_) | Backend::WeVisOne(_) | Backend::Clm(_) | Backend::Gliner2(_)
         )
     {
         // The JEV routes score with the same text forward pass, so they
