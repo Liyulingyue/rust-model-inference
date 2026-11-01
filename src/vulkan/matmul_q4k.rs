@@ -38,6 +38,15 @@ use super::{VulkanContext, VulkanError};
 /// shape maxima cannot accommodate a later call.
 static Q4_K_RUNTIME: OnceLock<Mutex<Option<Q4KRuntime>>> = OnceLock::new();
 
+pub(crate) fn release_shared_runtime() -> Result<(), VulkanError> {
+    if let Some(slot) = Q4_K_RUNTIME.get() {
+        slot.lock()
+            .map_err(|_| VulkanError::InitFailed("Q4_K runtime mutex poisoned".into()))?
+            .take();
+    }
+    Ok(())
+}
+
 struct Q4KRuntime {
     runtime: BatchedLinearRuntime,
     max_rows: usize,
