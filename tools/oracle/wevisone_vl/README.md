@@ -66,7 +66,7 @@ components produce an error. There is no batch prediction API.
 
 Start the same command with `--serve --host 127.0.0.1 --port 8080` instead of
 `--wevisone-request`/`--output`. POST the same JSON to
-`/v1/wevisone/predict`. HTTP accepts image data URIs/local paths; remote URLs
+`/v1/prediction`. HTTP accepts image data URIs/local paths; remote URLs
 require the existing `--allow-remote-images` option. Ordinary
 `/v1/chat/completions`, text/image JEV and CLI `--jev --image` use the existing
 Qwen3-VL routes. Chat returns markup; use the dedicated prediction endpoint

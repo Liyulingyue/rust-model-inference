@@ -1,7 +1,7 @@
 pub mod api;
 mod forecast;
 mod rerank;
-mod wevisone;
+mod prediction;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -1777,8 +1777,8 @@ pub fn run_server() {
                 .is_some()
             {
                 router.route(
-                    "/v1/wevisone/predict",
-                    post(wevisone::prediction).layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
+                    "/v1/prediction",
+                    post(prediction::prediction).layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
                 )
             } else {
                 router

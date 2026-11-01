@@ -1,4 +1,11 @@
-//! `/v1/wevisone/predict` HTTP endpoint for WeVisOne-VL-4B.
+//! `/v1/prediction` HTTP endpoint for image prediction with structured output.
+//!
+//! The endpoint answers a task over one image and returns the model's text
+//! together with the structured geometry it produced. The model behind it is
+//! WeVisOne-VL-4B, a Qwen3-VL release with a coordinate vocabulary and a
+//! separate pixel decoder, so the task list and the `<OBJ>`/alpha-mask
+//! contract below are that model's shape rather than a generic one.
+//!
 //!
 //! Request schema (the same one the `--wevisone-request` file takes):
 //! ```json

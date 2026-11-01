@@ -58,7 +58,7 @@ and RMSE gates. F16 rounds activations at its existing kernel boundaries.
 ## Real entry points and dispatch
 
 - Dedicated CLI Auto returned one normalized box and a 128×128 grayscale alpha PNG.
-- HTTP `/v1/wevisone/predict`: 200 and the same response as CLI; oversized
+- HTTP `/v1/prediction`: 200 and the same response as CLI; oversized
   context and an invalid task each returned 400.
 - Final CLI run with a 69-token context (57 prompt + 12 generated tokens)
   completed mask replay and matched the earlier prediction, including PNG.
@@ -127,7 +127,7 @@ Device and route coverage on the same host:
 - `--compute auto` (Vulkan build) matched the CPU Q8_0 run exactly: same
   greedy IDs, same box and a byte-identical alpha PNG, in 3m15s with 3582
   device submissions (`scope=linear backend=Vulkan`).
-- HTTP `/v1/wevisone/predict` returned 200 with the same response, IDs and
+- HTTP `/v1/prediction` returned 200 with the same response, IDs and
   a byte-identical alpha PNG; an invalid task returned 400.
 - CLI and HTTP image JEV agreed on the answer: red rectangle -> yes
   (0.9969 CLI, 0.9987 HTTP), white -> no (0.0063 CLI, 0.0072 HTTP).
