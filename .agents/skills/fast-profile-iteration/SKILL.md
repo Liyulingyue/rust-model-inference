@@ -5,6 +5,11 @@ description: Use when 在 rust-model-inference 中需要快速验证改动（编
 
 # Fast profile for iteration
 
+> **本 skill 是被引用项。** 它只回答「怎么编译/跑测试最快」，不描述任何任务流程。
+> 工作流类 skill（`adapting-new-models`、`reviewing-model-changes`）在需要编译、
+> 跑单测时**引用**它，不要在各自的 skill 里重复写编译命令——否则同一套命令会在
+> 多个文件里各写一份，改 profile 时漏改一处。
+
 ## 核心原则
 
 仓库自定义了一个 `release-fast` Cargo profile，编译耗时约为默认 `release` 的 1/5~1/8（典型改动 ~30s vs ~5min），同时保留 LTO + 优化等级，足以运行单元测试和绝大多数验证。**默认使用 `--profile release-fast`**；只在用户明确要求发布产物或运行长时 benchmark 时切到 `release`。
