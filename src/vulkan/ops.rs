@@ -1537,7 +1537,7 @@ impl BatchedLinearRuntime {
     }
 
     /// Write the input activation to the shared input region. Must be called
-    /// before `record_group_matmul` when the group shares one input.
+    /// before `record_group_matmul`.
     pub(crate) fn write_input(&self, input: &[f32]) -> Result<(), VulkanError> {
         self.ops.write_f32(self.layout.input, input)
     }
@@ -1555,6 +1555,7 @@ impl BatchedLinearRuntime {
     pub(crate) fn ops_context(&self) -> Option<&'static VulkanContext> {
         Some(self.ops.context)
     }
+
 }
 
 impl Drop for BatchedLinearRuntime {
@@ -2004,18 +2005,9 @@ impl AttentionRuntime {
             || spec.query_heads == 0
             || spec.key_value_heads == 0
             || spec.query_heads % spec.key_value_heads != 0
-            || q.len()
-                != product(
-                    "attention Q",
-                    &[spec.query_tokens, spec.query_heads, spec.head_dim],
-                )?
-            || k.len()
-                != product(
-                    "attention K",
-                    &[spec.key_tokens, spec.key_value_heads, spec.head_dim],
-                )?
+            || q.len() != product("attention Q", &[spec.query_tokens, spec.query_heads, spec.head_dim])?
+            || k.len() != product("attention K", &[spec.key_tokens, spec.key_value_heads, spec.head_dim])?
             || v.len() != k.len()
-            || output.len() != q.len()
             || !spec.scale.is_finite()
             || (spec.causal && spec.query_tokens > spec.key_tokens)
         {
@@ -2027,8 +2019,7 @@ impl AttentionRuntime {
             self.ops.f32_word(self.q, q.len(), "attention Q")?,
             self.ops.f32_word(self.k, k.len(), "attention K")?,
             self.ops.f32_word(self.v, v.len(), "attention V")?,
-            self.ops
-                .f32_word(self.output, output.len(), "attention output")?,
+            self.ops.f32_word(self.output, q.len(), "attention output")?,
             as_u32(spec.query_tokens, "attention queries")?,
             as_u32(spec.key_tokens, "attention keys")?,
             as_u32(spec.query_heads, "attention heads")?,
@@ -2038,8 +2029,7 @@ impl AttentionRuntime {
             u32::from(spec.causal),
         ];
         let dispatch = row_dispatch(
-            spec.query_tokens
-                .div_ceil(if spec.head_dim <= 128 { 16 } else { 8 }),
+            spec.query_tokens.div_ceil(if spec.head_dim <= 128 { 16 } else { 8 }),
             spec.query_heads,
             &self.ops.context.limits,
         )?;
@@ -2049,11 +2039,7 @@ impl AttentionRuntime {
         self.ops.write_f32(self.v, v)?;
         self.ops.record_linear_dispatch(
             &commands,
-            if spec.head_dim <= 128 {
-                ATTENTION_ONLINE
-            } else {
-                ATTENTION_ONLINE_WIDE
-            },
+            if spec.head_dim <= 128 { ATTENTION_ONLINE } else { ATTENTION_ONLINE_WIDE },
             self.ops.arena_bindings,
             &push,
             dispatch,
@@ -2062,6 +2048,7 @@ impl AttentionRuntime {
         output.copy_from_slice(self.ops.read_f32(self.output, output.len())?);
         Ok(())
     }
+
 }
 
 /// One shared CHW arena for a VAE; immutable weights retain stable source addresses.
@@ -2315,6 +2302,11 @@ pub(crate) fn build_operator_pipelines(
 }
 
 impl<'a> Qwen3Ops<'a> {
+    /// Access the Vulkan context.
+    pub(crate) fn context(&self) -> &'a VulkanContext {
+        self.context
+    }
+
     pub(crate) fn new(
         context: &'a VulkanContext,
         layout: ArenaLayout,
@@ -2405,8 +2397,6 @@ impl<'a> Qwen3Ops<'a> {
                     if let Some(staging) = &staging {
                         context.destroy_buffer(staging);
                     }
-                    // The operator pipelines belong to the device and are
-                    // shared by every arena, so they survive this failure.
                 }
                 return Err(VulkanError::InitFailed(error.to_string()));
             }
