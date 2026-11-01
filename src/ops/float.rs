@@ -71,6 +71,11 @@ static INIT_DONE: AtomicBool = AtomicBool::new(false);
 static VULKAN_CONTEXT: OnceLock<Result<VulkanContext, String>> = OnceLock::new();
 
 #[cfg(feature = "vulkan")]
+pub(crate) fn is_shared_vulkan_context(context: &VulkanContext) -> bool {
+    matches!(VULKAN_CONTEXT.get(), Some(Ok(shared)) if std::ptr::eq(shared, context))
+}
+
+#[cfg(feature = "vulkan")]
 static VULKAN_SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 
 #[cfg(feature = "vulkan")]
