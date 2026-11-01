@@ -2,7 +2,7 @@
   "schema_version": 2,
   "recorded_on": "2026-10-28",
   "status": "Experimental / Draft",
-  "record_scope": "Historical measurements before fdb0f239 removed Hy JEV. The current section names the implementation measured on recorded_on, not the latest branch. JEV is unsupported; see validation.md for the merge review.",
+  "record_scope": "Historical measurements before fdb0f239 removed Hy JEV. The current section names the implementation measured on recorded_on, not the latest branch. JEV is unsupported; see validation.md for the merge review. local_followup_2026_11_01 records subsequent M3 Max validation and supersedes its explicitly named boundaries.",
   "source": {
     "base_main_revision": "92d2eca0aad9161694be49a67a4b3057f7514547",
     "rust_src_tree": "7995d2c2c9a5bf1fd061f814427d2bfc9b9a3b96",
@@ -858,5 +858,392 @@
     "sha256": "e38866440e7adbc66ca06d4b17f6a299c5dfb8d45734ed643d81fb8b4536fe4c",
     "prompt": "native no_think A/B text prompt",
     "generated_tokens": 1
+  },
+  "local_followup_2026_11_01": {
+    "source_base_revision": "c4e7f8b5ecdeda9e2346ab1b61c5b29ac7b943c7",
+    "host": "Apple M3 Max / MoltenVK 1.4.2",
+    "threads": 4,
+    "kv_format": "F32",
+    "oracle_revision": "e41ca4212f786815faa37606ee2e6fcf8611f9e4",
+    "oracle_isa": "native NEON; Accelerate, BLAS, Metal and Vulkan OFF",
+    "vulkan_cleanup": {
+      "pre_fix_exit_audit": "SIGABRT after successful computation; global allocations remained live",
+      "post_fix_exit_audit_children": 3,
+      "post_fix_child_exit_codes": [
+        0,
+        0,
+        0
+      ],
+      "focused_device_tests_passed": 9,
+      "nvidia_570_153_02_retested": false,
+      "original_nvidia_crash_cause_confirmed": false,
+      "khronos_validation_layer": "not installed; initialization with RMI_VULKAN_VALIDATION=1 fails with missing-layer error",
+      "cleanup_commits": [
+        "85cba7d4a",
+        "fd25da1f8"
+      ],
+      "private_context_cache": {
+        "pre_fix_retained_bytes": 7952,
+        "post_fix_retained_bytes": 0,
+        "local_exit_sigsegv_cause_confirmed": true,
+        "cause": "global Q4K runtime outlived a private VulkanContext",
+        "fix": "only singleton contexts enter the global cache; private contexts use call-scoped runtime"
+      },
+      "full_suite_repeats_after_private_context_fix": [
+        {
+          "run": 1,
+          "process_exit": 101,
+          "new_failed_names": [],
+          "removed_failed_names": [],
+          "result": [
+            "test result: FAILED. 1445 passed; 24 failed; 201 ignored; 0 measured; 0 filtered out; finished in 17.21s"
+          ]
+        },
+        {
+          "run": 2,
+          "process_exit": 101,
+          "new_failed_names": [],
+          "removed_failed_names": [],
+          "result": [
+            "test result: FAILED. 1445 passed; 24 failed; 201 ignored; 0 measured; 0 filtered out; finished in 16.92s"
+          ]
+        }
+      ]
+    },
+    "regressions": {
+      "default": {
+        "passed": 1341,
+        "failed": 20,
+        "ignored": 88,
+        "process_exit": 101,
+        "new_failed_names": [],
+        "removed_failed_names": []
+      },
+      "vulkan": {
+        "passed": 1446,
+        "failed": 24,
+        "ignored": 201,
+        "process_exit": 101,
+        "new_failed_names": [],
+        "removed_failed_names": []
+      },
+      "focused_entry_tests_passed": 5,
+      "standard_real_weight_entry_tests_passed": 3,
+      "scalar_hy_tests_passed": 19,
+      "scalar_hy_features": [
+        "parity-trace",
+        "vulkan"
+      ],
+      "normal_hy_tests_passed": 19,
+      "oracle_checker_unit_tests_passed": 4,
+      "interleave_real_weight_entry_tests_passed": 3
+    },
+    "unverified": [
+      "NVIDIA 570.153.02 exit crash",
+      "Khronos validation-layer execution",
+      "other complete quantizations",
+      "long recordings",
+      "GPU speedup",
+      "other models complete real-weight parity"
+    ],
+    "cleanup_only_standard_translation": [
+      {
+        "name": "standard-cpu-final",
+        "tokens": 10,
+        "max_logit_relative_rms": 0.07656117458149744,
+        "min_logit_cosine": 0.9974236137711607,
+        "max_audio_relative_rms": 0.0007531249542767161,
+        "unchanged_from": "standard-cpu-before",
+        "all_checkpoint_bytes_equal": true
+      },
+      {
+        "name": "standard-auto-final-1",
+        "tokens": 10,
+        "max_logit_relative_rms": 0.07803815322421313,
+        "min_logit_cosine": 0.9977130786448526,
+        "max_audio_relative_rms": 0.0007528923760595431,
+        "unchanged_from": "standard-auto-before",
+        "all_checkpoint_bytes_equal": true
+      },
+      {
+        "name": "standard-auto-final-2",
+        "tokens": 10,
+        "max_logit_relative_rms": 0.07803815322421313,
+        "min_logit_cosine": 0.9977130786448526,
+        "max_audio_relative_rms": 0.0007528923760595431,
+        "unchanged_from": "standard-auto-final-1",
+        "all_checkpoint_bytes_equal": true
+      }
+    ],
+    "cleanup_only_standard_cli_http": [
+      {
+        "run": "cli-auto",
+        "exit_code": 0,
+        "seconds": 19.3828884169925,
+        "text": "因此，\n我的美国同胞们，",
+        "matches_library": true,
+        "vulkan_dispatch_reports": 555,
+        "last_counters": "ComputeStats { submissions: 760, static_uploads: 345, static_upload_bytes: 2077439040, host_write_bytes: 249550884, host_read_bytes: 186585216, transfer_submissions: 0, live_allocation_bytes: 2019087488, peak_allocation_bytes: 2321449472 }"
+      },
+      {
+        "run": "http-auto",
+        "seconds": 18.800655333005125,
+        "result": {
+          "text": "因此，\n我的美国同胞们，\n"
+        },
+        "matches_library": true,
+        "jev_status": {
+          "/v1/jev/score": 404,
+          "/v1/jev/grouped": 404,
+          "/v1/jev/image": 404
+        },
+        "vulkan_dispatch_reports": 555,
+        "last_counters": "ComputeStats { submissions: 760, static_uploads: 345, static_upload_bytes: 2077439040, host_write_bytes: 249550884, host_read_bytes: 186585216, transfer_submissions: 0, live_allocation_bytes: 2019087488, peak_allocation_bytes: 2321449472 }"
+      }
+    ],
+    "standard_translation": [
+      {
+        "name": "standard-swiglu-cpu",
+        "process_exit": 0,
+        "checker_exit": 0,
+        "tokens": 10,
+        "generated_ids_exact": true,
+        "max_logit_relative_rms": 0.08004300607562806,
+        "min_logit_cosine": 0.9973591463594381,
+        "max_audio_relative_rms": 0.0007531249542767161
+      },
+      {
+        "name": "standard-swiglu-auto-1",
+        "process_exit": 0,
+        "checker_exit": 0,
+        "tokens": 10,
+        "generated_ids_exact": true,
+        "max_logit_relative_rms": 0.07922778941851139,
+        "min_logit_cosine": 0.9972538654019886,
+        "max_audio_relative_rms": 0.0007528923760595431
+      },
+      {
+        "name": "standard-swiglu-auto-2",
+        "process_exit": 0,
+        "checker_exit": 0,
+        "tokens": 10,
+        "generated_ids_exact": true,
+        "max_logit_relative_rms": 0.07922778941851139,
+        "min_logit_cosine": 0.9972538654019886,
+        "max_audio_relative_rms": 0.0007528923760595431
+      }
+    ],
+    "interleave_translation": [
+      {
+        "name": "interleave-final-cpu",
+        "process_exit": 0,
+        "checker_exit": 0,
+        "tokens": 18,
+        "generated_ids_exact": true,
+        "max_logit_relative_rms": 0.14313646641681918,
+        "min_logit_cosine": 0.9899402847860282,
+        "max_audio_relative_rms": 0.0009083888645683927
+      },
+      {
+        "name": "interleave-final-auto-2",
+        "process_exit": 0,
+        "checker_exit": 0,
+        "tokens": 18,
+        "generated_ids_exact": true,
+        "max_logit_relative_rms": 0.13612389167652533,
+        "min_logit_cosine": 0.9924661012109035,
+        "max_audio_relative_rms": 0.0009086410189362891
+      },
+      {
+        "name": "interleave-final-scalar",
+        "process_exit": 0,
+        "checker_exit": 0,
+        "tokens": 18,
+        "generated_ids_exact": true,
+        "max_logit_relative_rms": 0.18662407960575012,
+        "min_logit_cosine": 0.986624340642775,
+        "max_audio_relative_rms": 0.0009081925215337311
+      }
+    ],
+    "interleave_auto_first_run": {
+      "name": "interleave-encoder-auto",
+      "checker_exit": 0,
+      "process_exit": 0,
+      "tokens": 18,
+      "generated_ids_exact": true,
+      "max_logit_relative_rms": 0.13612389167652533,
+      "min_logit_cosine": 0.9924661012109035,
+      "max_audio_relative_rms": 0.0009086410189362891
+    },
+    "interleave_logit_bounds": {
+      "max_abs": 4.955624580383301,
+      "relative_rms": 0.2,
+      "cosine": 0.9852752324815912
+    },
+    "interleave_pre_fix_failures": [
+      {
+        "name": "interleave-cpu-before",
+        "checker_exit": 1,
+        "tokens": 18,
+        "generated_ids_exact": true,
+        "max_logit_relative_rms": 0.1940436383922047,
+        "min_logit_cosine": 0.9838043729824469,
+        "max_audio_relative_rms": 0.0009083888645683927,
+        "max_logit_abs": 2.388488531112671
+      },
+      {
+        "name": "interleave-auto-before",
+        "checker_exit": 1,
+        "tokens": 18,
+        "generated_ids_exact": true,
+        "max_logit_relative_rms": 0.2012441130507573,
+        "min_logit_cosine": 0.9833128351182151,
+        "max_audio_relative_rms": 0.0009086410189362891,
+        "max_logit_abs": 2.5831098556518555
+      }
+    ],
+    "interleave_unguarded_auto_after_swiglu": {
+      "checker_exit": 1,
+      "process_exit": 0,
+      "generated_ids_exact": true,
+      "max_logit_abs": 2.1402106285095215,
+      "max_logit_relative_rms": 0.19780332495484199,
+      "min_logit_cosine": 0.9829592761073523,
+      "failure": "hy.logits occurrence 6 below unchanged calibrated cosine floor; GPU decoder gated to CPU"
+    },
+    "numerical_correction": {
+      "scope": "Hy MoE only; shared SiLU/SwiGLU operators unchanged",
+      "change": "Use existing SIMD silu_mul_approx_inplace, matching the pinned Oracle SwiGLU path and Hy dense FFN",
+      "fixture_absolute_tolerance": 1e-07,
+      "calibration_or_caps_changed": false,
+      "auto_policy": {
+        "standard": "hybrid Vulkan projections/convolutions and CPU attention/KV",
+        "interleave": "GPU audio encoder and CPU decoder; explicit startup reason"
+      },
+      "gpu_decoder_arithmetic_fixed": false
+    },
+    "interleave_download": {
+      "path": "models/Hy-SimulMT-30B-A3B-Interleave-GGUF/Hy-SimulMT-30B-A3B-Interleave-Q4_K_M.gguf",
+      "bytes": 19746809728,
+      "sha256": "26c87f0a5f6409f3a57f8c4d2a49d58ad0f5c0753141643789e73564339cedbc",
+      "completion_source": "approved official Hugging Face mirror",
+      "repository_revision": "2aae4719eb91c1e6990c9386f70b2610f106b97e",
+      "full_sha256_verified": true
+    },
+    "cli_http": [
+      {
+        "variant": "standard",
+        "entry": "cli-auto",
+        "exit_code": 0,
+        "text": "因此，\n我的美国同胞们，",
+        "matches_library": true,
+        "vulkan_dispatch_reports": 555,
+        "last_counters": [
+          "ComputeStats { submissions: 760, static_uploads: 345, static_upload_bytes: 2077439040, host_write_bytes: 249550884, host_read_bytes: 186585216, transfer_submissions: 0, live_allocation_bytes: 2019087488, peak_allocation_bytes: 2321449472 }"
+        ],
+        "decoder_fallback_reported": false
+      },
+      {
+        "variant": "standard",
+        "entry": "http-json-auto",
+        "status": 200,
+        "result": {
+          "text": "因此，\n我的美国同胞们，\n"
+        },
+        "matches_library": true
+      },
+      {
+        "variant": "standard",
+        "entry": "http-multipart-auto",
+        "status": 200,
+        "result": {
+          "text": "因此，\n我的美国同胞们，\n"
+        },
+        "matches_library": true,
+        "jev_status": {
+          "/v1/jev/score": 404,
+          "/v1/jev/grouped": 404,
+          "/v1/jev/image": 404
+        },
+        "vulkan_dispatch_reports": 1110,
+        "last_counters": [
+          "ComputeStats { submissions: 1519, static_uploads: 613, static_upload_bytes: 3185992768, host_write_bytes: 499101732, host_read_bytes: 373170304, transfer_submissions: 0, live_allocation_bytes: 2019087488, peak_allocation_bytes: 2321449472 }"
+        ],
+        "decoder_fallback_reported": false
+      },
+      {
+        "variant": "interleave",
+        "entry": "cli-auto",
+        "exit_code": 0,
+        "text": "And so, my fellow Americans,<｜hy_place▁holder▁no▁791｜>因此，我的美国同胞们，",
+        "matches_library": true,
+        "vulkan_dispatch_reports": 150,
+        "last_counters": [
+          "ComputeStats { submissions: 163, static_uploads: 149, static_upload_bytes: 1270875200, host_write_bytes: 114313252, host_read_bytes: 59363456, transfer_submissions: 0, live_allocation_bytes: 1022277696, peak_allocation_bytes: 1324639680 }"
+        ],
+        "decoder_fallback_reported": true
+      },
+      {
+        "variant": "interleave",
+        "entry": "http-json-auto",
+        "status": 200,
+        "result": {
+          "text": "And so, my fellow Americans,<｜hy_place▁holder▁no▁791｜>因此，我的美国同胞们，\n"
+        },
+        "matches_library": true
+      },
+      {
+        "variant": "interleave",
+        "entry": "http-multipart-auto",
+        "status": 200,
+        "result": {
+          "text": "And so, my fellow Americans,<｜hy_place▁holder▁no▁791｜>因此，我的美国同胞们，\n"
+        },
+        "matches_library": true,
+        "jev_status": {
+          "/v1/jev/score": 404,
+          "/v1/jev/grouped": 404,
+          "/v1/jev/image": 404
+        },
+        "vulkan_dispatch_reports": 300,
+        "last_counters": [
+          "ComputeStats { submissions: 325, static_uploads: 221, static_upload_bytes: 1572865088, host_write_bytes: 228626468, host_read_bytes: 118726784, transfer_submissions: 0, live_allocation_bytes: 1022277696, peak_allocation_bytes: 1324639680 }"
+        ],
+        "decoder_fallback_reported": true
+      }
+    ],
+    "numerical_source_sha256": {
+      "src/models/hy_simulmt/moe.rs": "498ec675eed8e1d6fa7cbc61a37a26c57092be18743f02c815c258a17de1e693",
+      "src/models/hy_simulmt/runtime.rs": "91913b5442e8def56c99ffa963d65ff0ae2fa019b0b7bace7d6d4434e1008365",
+      "src/models/hy_simulmt/decoder.rs": "677ad80b6aba3d504c0d671f279747147e86aaafa222cbc3a9363d66580f9513",
+      "tools/oracle/hy_simulmt/compare.py": "3a0cd18eab1051c31123a2b587e0b6ba0a403ea0b620161f2166a8d4745d3d9f"
+    },
+    "binary_sha256": {
+      "target/rmi/release-fast/rust-model-inference": "45d2960a9c073afebdcc83c2df66254639f1ccf79ca91e47940afa631c8de9e8",
+      "target/rmi/release-fast/rust-model-server": "3f2dd1e4dd8045dd534423a33f699c5b68d38755047a238a2a45bd9fdcc212a2",
+      "target/rmi/release-fast/examples/hy_simulmt_parity": "bb88f93230272856864a13ecfc4e5cd47c94f0d0c2c467aac8d5621c0dffefcb",
+      "target/hy-fix-review/hy-oracle-m3": "bcaf1ed750b76e7703d5a66775e4b58c44fc8725d7685cb5c147c3e901c7c1b2"
+    },
+    "real_weight_entry_tests": [
+      {
+        "variant": "standard",
+        "exit_code": 0,
+        "result": [
+          "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 61.39s"
+        ]
+      },
+      {
+        "variant": "interleave",
+        "exit_code": 0,
+        "result": [
+          "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 60.01s"
+        ]
+      }
+    ],
+    "standard_logit_bounds": {
+      "max_abs": 2.977287173271179,
+      "relative_rms": 0.15149625684956985,
+      "cosine": 0.9942768631809429
+    }
   }
 }

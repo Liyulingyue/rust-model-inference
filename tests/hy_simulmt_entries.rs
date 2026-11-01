@@ -81,6 +81,55 @@ mod real_weights {
             .expect("set RMI_HY_SIMULMT_MODEL to a Hy-SimulMT GGUF")
     }
 
+    #[cfg(feature = "vulkan")]
+    #[test]
+    #[ignore = "requires Hy GGUF, JFK 3.2s WAV and a Vulkan device"]
+    fn hy_auto_offloads_and_matches_cpu() {
+        use rust_model_inference::compute::ComputePolicy;
+        use rust_model_inference::core::scratchpad::KvFormat;
+        use rust_model_inference::format::ggufrs::{open_model_source, ComponentRole};
+        use rust_model_inference::models::hy_simulmt::HySimulMt;
+        use rust_model_inference::ops::audio::frontend::decode_pcm16_wav;
+        use rust_model_inference::ComputePool;
+
+        let _guard = MODEL_RUN.lock().unwrap_or_else(|error| error.into_inner());
+        let source: Arc<dyn super::TensorSource> =
+            Arc::from(open_model_source(&model(), ComponentRole::Llm).unwrap());
+        let wav =
+            std::fs::read(std::env::var_os("RMI_HY_SIMULMT_WAV").expect("set RMI_HY_SIMULMT_WAV"))
+                .unwrap();
+        let mut samples = decode_pcm16_wav(&wav).unwrap();
+        samples.truncate(51_200);
+        assert_eq!(samples.len(), 51_200);
+        let _scope = ComputePolicy::Auto.configure_cli().unwrap();
+        let context = rust_model_inference::ops::get_vulkan_context().expect("Vulkan device");
+        let before = context.submission_count();
+        let reference = HySimulMt::from_source_with_compute(
+            source.clone(),
+            Arc::new(ComputePool::new(4)),
+            ComputePolicy::Cpu,
+        )
+        .unwrap()
+        .translate(&samples, "zh", None, 64, 1024, 256, KvFormat::F32)
+        .unwrap();
+        assert_eq!(context.submission_count(), before, "CPU must stay on host");
+        let runtime = HySimulMt::from_source_with_compute(
+            source,
+            Arc::new(ComputePool::new(4)),
+            ComputePolicy::Auto,
+        )
+        .unwrap();
+        let result = runtime
+            .translate(&samples, "zh", None, 64, 1024, 256, KvFormat::F32)
+            .unwrap();
+        assert!(
+            context.submission_count() > before,
+            "Auto must use the device for eligible Hy projections"
+        );
+        assert_eq!(result.turns, reference.turns);
+        assert_eq!(result.text, reference.text);
+    }
+
     struct Server(Child);
 
     impl Drop for Server {

@@ -74,14 +74,11 @@ impl HyMoe {
             executor
                 .run_group(ids, input, 1, [&mut gate, &mut up])
                 .map_err(|e| e.to_string())?;
-            crate::ops::activation::silu_inplace(&mut gate);
-            for (g, u) in gate.iter_mut().zip(up) {
-                *g *= u;
-            }
+            crate::ops::silu_mul_approx_inplace(&gate, &mut up);
             let mut value = vec![0.0; output.len()];
             let id = executor.id_for(&expert.down).map_err(|e| e.to_string())?;
             executor
-                .run(id, &gate, 1, &mut value)
+                .run(id, &up, 1, &mut value)
                 .map_err(|e| e.to_string())?;
             for (out, v) in output.iter_mut().zip(value) {
                 *out += probability * v;
@@ -162,6 +159,64 @@ mod tests {
         assert!((out[0] - (5.652 * sigmoid + shared)).abs() < 2e-6);
         assert!((out[1] - (8.478 * sigmoid - shared)).abs() < 2e-6);
     }
+
+    #[test]
+    fn hy_moe_swiglu_matches_pinned_ggml_fixture() {
+        let diagonal = |values: [f32; 4]| {
+            let mut data = vec![0.0; 16];
+            for (i, value) in values.into_iter().enumerate() {
+                data[i * 4 + i] = value;
+            }
+            Weight::from_quantized(QuantizedTensor::F32 {
+                data,
+                n_in: 4,
+                n_out: 4,
+            })
+        };
+        let moe = HyMoe {
+            router: vec![0.0; 4],
+            bias: vec![0.0],
+            experts: vec![Expert {
+                gate: diagonal(
+                    [0xbf46_e0d2, 0xbf47_ebea, 0xbeee_8b6b, 0xbe1b_692b].map(f32::from_bits),
+                ),
+                up: diagonal(
+                    [0xbdbd_ab3d, 0xbdf0_16eb, 0x3e08_064c, 0xbf87_c095].map(f32::from_bits),
+                ),
+                down: diagonal([1.0; 4]),
+            }],
+            shared: Expert {
+                gate: diagonal([0.0; 4]),
+                up: diagonal([0.0; 4]),
+                down: diagonal([0.0; 4]),
+            },
+        };
+        let cfg = HyMoeConfig {
+            expert_count: 1,
+            expert_used_count: 1,
+            expert_ffn: 4,
+            shared_expert_ffn: 4,
+            scale: 1.0,
+        };
+        let mut executor = LinearExecutor::new(
+            ComputePolicy::Cpu,
+            moe.bindings(),
+            1,
+            Arc::new(ComputePool::new(1)),
+        )
+        .unwrap();
+        let mut out = [0.0; 4];
+        moe.forward(&[1.0; 4], &cfg, &mut executor, &mut out)
+            .unwrap();
+        let expected = [0x3cb9_a7c4, 0x3ceb_9536, 0xbcc3_7dcb, 0x3d98_56f8].map(f32::from_bits);
+        for (got, expected) in out.into_iter().zip(expected) {
+            assert!(
+                (got - expected).abs() < 1e-7,
+                "got={got}, expected={expected}"
+            );
+        }
+    }
+
     #[test]
     fn hy_router_rejects_invalid_dimensions_and_nonfinite_values() {
         for (logits, bias, used, scale) in [

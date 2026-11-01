@@ -122,3 +122,112 @@ The older measurements remain dated historical records; JEV claims were correcte
   x86 tiled F16 execution, fresh whole-model logits and other models' full
   weight matrices were not revalidated. Fresh smoke wall times include setup
   and concurrent builds, so they are not a performance comparison.
+
+## Local follow-up — 2026-11-01
+
+The following results supersede the corresponding merge-review boundaries above.
+They use the same M3 Max / MoltenVK host, four threads, F32 KV, complete Q4_K_M
+weights, and the pinned Oracle at `e41ca421`. The local Oracle uses native NEON
+with Accelerate, BLAS, Metal and Vulkan disabled. Each comparison retains the
+independent Oracle weight-repacking calibration and the original numerical caps.
+
+### Shared Vulkan lifetime
+
+Rust's static `OnceLock` did not run the shared context's destructor. A new
+isolated-process regression registers an audit before Vulkan initialization:
+before the fix, its computation passed but the audit aborted because device
+allocations remained live. This reproduces missing cleanup locally; it does
+**not** establish the cause of the historical NVIDIA SIGSEGV.
+
+The shared context now registers process cleanup after warmup. Cleanup releases
+the global attention, convolution and Q4_K runtimes before the context, waits
+for device idle, and destroys cached pipelines before destroying the device.
+The loader stays loaded for the driver's own finalizers. Context shutdown is
+idempotent, rejects later command submissions, and retains resources if idle
+completion cannot be established. Validation-feature arrays now outlive
+`vkCreateInstance`; constructor errors also release the debug messenger.
+
+Cleanup also exposed a dangling context in the pre-existing Q4_K cache: it
+extended any borrowed context to a static lifetime, including a private stack
+context used by the smoke test. A local macOS crash report traced the exit
+SIGSEGV to that cache's buffer teardown. Only the singleton now uses the global
+cache; private contexts get a call-scoped runtime. The smoke test fails before
+the fix with 7,952 bytes retained and passes afterward with no retained bytes.
+Two complete Vulkan suite processes then finish with ordinary test-failure
+exit 101, rather than SIGSEGV, and identical baseline failure names.
+
+All nine focused device regressions pass, including the new three-child exit
+audit, explicit double-shutdown rejection, uncertain-resource retention and the
+existing group/format/threshold/fallback cases. Run the exit checks with:
+
+```sh
+cargo test --locked --profile release-fast --features vulkan --lib \
+  ops::float::tests::shared_vulkan_context_cleans_up_before_driver_exit \
+  -- --exact --ignored --nocapture
+cargo test --locked --profile release-fast --features vulkan --lib \
+  vulkan::tests::vulkan_shutdown_drains_device_and_rejects_later_submissions \
+  -- --exact --ignored --nocapture
+```
+
+### Standard numerical and entry checks
+
+| Configuration | Generated IDs | Maximum logits relative RMS | Minimum logits cosine |
+| --- | --- | --- | --- |
+| CPU | All 10 match | 8.0043% | 0.997359 |
+| Auto, two separate processes | All 10 match on both runs | 7.9228% | 0.997254 |
+
+All 12 audio checkpoints also pass (maximum relative RMS 0.07532%). Before the
+subsequent MoE correction below, the lifetime-only change preserved every CPU
+and Auto checkpoint payload byte-for-byte against its respective pre-cleanup
+run. Those separate measurements remain in `verification.json`; the table
+above records the final MoE implementation using numerical tolerances.
+
+The main Auto CLI and both HTTP upload formats produce the same complete
+three-turn Chinese text as the library. The CLI records 760 device submissions,
+555 Vulkan projection reports and 2,321,449,472 peak allocation bytes. The HTTP
+JEV endpoints still return 404. The real CPU multipart/JSON/concurrency/error
+regression and the F16 final-EOT context-boundary regression both pass.
+
+### Interleave numerical correction and device gate
+
+The complete Interleave GGUF was completed from the approved official HF mirror
+at revision `2aae4719eb91c1e6990c9386f70b2610f106b97e` and its full SHA256 was
+verified as `26c87f0a5f6409f3a57f8c4d2a49d58ad0f5c0753141643789e73564339cedbc`.
+The pinned Oracle and independent repacked run set the unchanged logit bounds:
+max absolute error 4.955625, relative RMS 0.20 and cosine 0.9852752325.
+
+Fresh pre-fix CPU logits failed that cosine floor (0.983804), and unguarded
+Auto failed relative RMS (20.1244%). Hy MoE used exact per-lane SiLU while the
+pinned Oracle uses vector SwiGLU. It now uses the same existing SIMD SwiGLU
+entry as Hy's dense FFN. A four-lane Oracle fixture uses an absolute tolerance
+of `1e-7`; whole-model approximate math is not required to match bitwise.
+
+The unguarded GPU decoder still fails the calibrated cosine floor after that
+correction (0.982959). Interleave Auto therefore uses a CPU decoder and retains
+GPU audio encoding, with an explicit startup reason. Standard's hybrid Auto
+policy is unchanged. Both retain SIMD, grouped weights and normal device-failure
+fallback; full Vulkan decoding and JEV remain unsupported.
+
+| Final configuration | Generated IDs | Maximum logits relative RMS | Minimum logits cosine |
+| --- | --- | --- | --- |
+| Interleave CPU, two separate processes | All 18 match | 14.3136% | 0.989940 |
+| Interleave Auto, two separate processes | All 18 match | 13.6124% | 0.992466 |
+| Interleave scalar CPU | All 18 match | 18.6624% | 0.986624 |
+
+All 12 Interleave audio checkpoints pass (maximum relative RMS 0.09087%). Auto
+records 163 submissions and 150 Vulkan dispatch reports for audio, with peak
+device allocation 1,324,639,680 bytes. The real-weight Auto regression compares
+CPU and Auto using each actual variant, without a metadata override. The main
+CLI and both HTTP upload formats are also checked against library output.
+
+The final full default suite has 1341 passed / 20 failed / 88 ignored; Vulkan
+has 1446 passed / 24 failed / 201 ignored. Both failed-name sets exactly match
+the corresponding merge baseline, with no added or removed failures. The
+Vulkan process exits normally with 101 for those known assertions. The extra
+passing test is the MoE fixture. Detailed local logs and numerical artifacts
+are in `target/hy-fix-review/`.
+
+NVIDIA 570.153.02 was not retested, at the user's request to validate locally.
+The Khronos validation layer is absent on this host; a validation-enabled
+initialization reports that missing layer, so validation-layer coverage is not
+claimed. No GPU speedup or long-recording coverage is established.

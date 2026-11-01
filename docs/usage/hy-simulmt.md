@@ -40,21 +40,25 @@ NEON/DotProd dispatch with a scalar fallback. QKV and gate/up projections use
 multi-weight groups and share activation preparation within each group.
 ARM Q6_K weights also have a runtime-gated NEON DotProd path.
 
-Build with `--features vulkan` and select `--compute auto` to offload supported
-linear groups, audio projections and convolutions to the accelerator. Linear
+For Standard, build with `--features vulkan` and select `--compute auto` to offload
+supported linear groups, audio projections and convolutions to the accelerator. Linear
 groups below the shared output-size threshold stay on CPU. Attention,
 normalization, routing and KV remain on the host. Auto falls back to CPU when
 the device or a kernel is unavailable. `--compute vulkan` requests a complete
 Vulkan decoder and is rejected for this hybrid model. Set `RMI_COMPUTE_TRACE=1`
 to inspect actual backend choices and cumulative device counters.
-Auto is experimental. On an Apple M3 Max with the Q4_K_M checkpoint, four
-threads, and `jfk-3.2s.wav`, a one-token run took 10.36 s in Auto versus
-48.74 s on CPU (end-to-end, including model setup); output was identical
-(`And`). This is a host-specific measurement, not a throughput guarantee for
-other Vulkan drivers.
-Interleave's three-turn Auto logits exceed the numerical error cap. Isolated
-Vulkan operator processes also encountered exit-time SIGSEGV with NVIDIA
-570.153.02; exit stability remains unresolved.
+
+Interleave Auto keeps the speech encoder's GPU offload and uses CPU for the
+decoder, reporting the numerical-validation reason at startup. Its GPU decoder
+logits still exceed the unchanged calibrated cosine bound. The CPU decoder
+retains SIMD and multi-weight grouping. JEV is unsupported for both variants.
+
+Auto is experimental. Earlier one-token M3 Max smoke measurements were 10.36 s
+Auto / 48.74 s CPU, including setup; these are not controlled throughput results.
+The local follow-up verifies complete three-turn outputs and actual device
+submissions, without establishing a GPU speedup. Shared Vulkan exit cleanup and
+validation-feature lifetimes have been repaired and tested on M3 Max. The
+historical NVIDIA 570.153.02 exit-time SIGSEGV has not been retested.
 
 ## HTTP
 

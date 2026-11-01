@@ -73,6 +73,12 @@ impl HySimulMt {
             .unwrap_or("")
             .to_ascii_lowercase()
             .contains("interleave");
+        if interleave && compute == ComputePolicy::Auto {
+            eprintln!(
+                "compute requested=Auto scope=hy_decoder backend=Cpu \
+                 reason=hy_simulmt_interleave_gpu_logits_exceed_validated_bounds"
+            );
+        }
         let encoder =
             HyAudioEncoder::from_source_with_compute(source.clone(), pool.clone(), compute)?;
         let decoder = HyDecoder::from_source(source, tokenizer, pool)?;
@@ -123,7 +129,12 @@ impl HySimulMt {
             &self.decoder,
             max_context.min(self.decoder.config().n_ctx),
             kv_format,
-            self.compute,
+            // shortcut: Interleave decoder stays on CPU until GPU logits pass the Oracle bounds.
+            if self.interleave && self.compute == ComputePolicy::Auto {
+                ComputePolicy::Cpu
+            } else {
+                self.compute
+            },
         )?;
         let mut result = Translation {
             text: String::new(),

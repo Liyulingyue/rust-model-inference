@@ -8,11 +8,14 @@ The read-only Oracle is
 [lihy715/llama.cpp.Hyv3Speech](https://github.com/lihy715/llama.cpp.Hyv3Speech)
 at **e41ca4212f786815faa37606ee2e6fcf8611f9e4** (`hyv3-speech`).
 `oracle.cpp` uses its public APIs, without editing the reference implementation.
-The CPU comparisons use four threads, AVX2/FMA/F16C, no flash attention, greedy decoding,
+The historical CPU comparisons use four threads and AVX2/FMA/F16C; the local
+follow-up uses native M3 Max NEON. Both use no flash attention, greedy decoding,
 and the same prompt, KV format and per-turn audio schedule. Hy owns its decoder and KV
 session; it shares operators with other models through `ops`, without entering
-the Qwen3 trunk. Additional Auto runs use Vulkan for eligible linear groups and
-convolutions while attention/KV stay on the CPU.
+the Qwen3 trunk. Standard Auto uses Vulkan for eligible linear groups and
+convolutions while attention/KV stay on the CPU. Interleave Auto keeps audio
+offload but resolves its decoder to CPU because its GPU logits still exceed
+the calibrated cosine bound.
 
 Tokenizer IDs, special-token behavior, checkpoint names/order/shapes/counts and
 generated token IDs are checked exactly. Floating point comparisons use numerical
@@ -69,6 +72,13 @@ c++ -std=c++17 -O2 tools/oracle/hy_simulmt/oracle.cpp \
   -L "$a" -Wl,-rpath,"$a" -lmtmd -lllama -lggml -lggml-base -lggml-cpu -o target/hy-oracle
 cargo build --profile release-fast --features parity-trace --example hy_simulmt_parity
 ```
+
+For the M3 Max follow-up, the same pinned Oracle is built with `GGML_NATIVE=ON`
+and native NEON rather than the x86 ISA options above. Keep Accelerate, BLAS,
+Metal, Vulkan, CUDA and OpenMP disabled. Build `mtmd`, then link the same
+`oracle.cpp` companion against that build's libraries. Do not compare an
+AVX2 calibration run with a native NEON reference run: the independent
+weight-repacking calibration must use the same Oracle build as its reference.
 
 The speech fixture is the first 51,200 samples (3.2 s) of
 [whisper.cpp's public JFK sample](https://raw.githubusercontent.com/ggml-org/whisper.cpp/master/samples/jfk.wav).
@@ -146,8 +156,9 @@ raw-bit equality.
 
 ## Measured validation
 
-The [2026-11-01 merge review](validation.md) records fresh entry, dispatch and
-regression checks separately from the older numerical measurements below.
+The [2026-11-01 merge review and local follow-up](validation.md) record fresh
+entry, dispatch, whole-model numerical and process-cleanup checks separately
+from the older numerical measurements below.
 
 The [machine-readable record](verification.json) records the independent Hy
 decoder measurements below from before the JEV removal in `fdb0f239`. These checks used the
@@ -173,14 +184,20 @@ that text fixture. The hard caps remain unchanged, so this does not establish
 text-score numerical parity. Native text mode is an internal decoder diagnostic;
 Hy JEV is unsupported. No whole-model F32 equivalence is claimed.
 
-Auto uses real Vulkan submissions and CPU kernels: 1004 / 1012 submissions for
+The historical Auto runs used real Vulkan submissions and CPU kernels: 1004 / 1012 submissions for
 the two three-turn runs, with peak allocations of 2,197,545,472 bytes. Both
 one-token main CLI Auto checks exit normally. Its measured functional runs
 are slower than CPU; they establish no GPU speedup. A focused Vulkan operator
 regression finished its assertions and then exited with SIGSEGV on three
 isolated reruns using NVIDIA 570.153.02. GDB caught a Vulkan background thread
 while the main thread was in NVIDIA's process-exit callback. The root cause and
-a fix are unconfirmed. Auto's exit stability remains an open limitation.
+a fix were unconfirmed at that time. The local follow-up fixes missing shared
+resource cleanup and validation-feature pointer lifetimes, and passes repeated
+M3 Max child-process exit checks. It does not establish the cause or resolution
+of the NVIDIA crash. The local follow-up also corrects Hy MoE's SiLU path;
+Interleave Auto uses the CPU decoder with GPU audio encoding. Fresh complete
+weight comparisons pass, while the unguarded GPU decoder's calibrated cosine
+failure remains recorded in `verification.json`.
 
 The original 11-second JFK CLI run belongs to revision `a2db408b`, before the
 independent decoder. It is retained as historical evidence, not a current
@@ -194,8 +211,10 @@ JEV is unsupported. The first turn is 1.6 s and later turns are 0.8 s; each turn
 is encoded separately and EOT is retained in the decoder KV when another audio
 turn follows. The final EOT needs no unused KV slot. The output-token limit is global across the file.
 Interleave emits source and translation, separated by the reserved target marker.
-Auto uses the shared CPU/GPU operator policy, including the existing minimum
-output-size threshold for linear groups; attention/KV remain on CPU. Forced full
+Standard Auto uses the shared CPU/GPU operator policy, including the existing
+minimum output-size threshold for linear groups; attention/KV remain on CPU.
+Interleave Auto keeps audio offload and uses the CPU decoder, with an explicit
+startup reason, until GPU decoder logits pass the unchanged Oracle bounds. Forced full
 Vulkan decoding is rejected. Microphone capture, TTS, FP8/other quantizations and
 long recordings need their own integration or validation.
 
@@ -217,7 +236,19 @@ RMI_HY_SIMULMT_MODEL="$model" RMI_HY_SIMULMT_WAV=artifacts/jfk-3.2s.wav \
   cargo test --profile release-fast --test hy_simulmt_entries -- --ignored --test-threads=1
 ```
 
-The ignored tests cover the real HTTP binary's multipart/JSON uploads with a
+Run the real-weight Auto regression separately for each complete Hy GGUF.
+It compares all three turns with CPU and requires actual GPU submissions.
+For Interleave those submissions come from audio encoding. Oracle comparisons
+above independently check logits and audio checkpoints:
+
+```sh
+RMI_HY_SIMULMT_MODEL="$model" RMI_HY_SIMULMT_WAV=artifacts/jfk-3.2s.wav \
+  cargo test --locked --profile release-fast --features vulkan --test hy_simulmt_entries \
+  real_weights::hy_auto_offloads_and_matches_cpu -- --exact --ignored
+```
+
+The ignored tests cover real CPU/Auto outputs and GPU submissions,
+the real HTTP binary's multipart/JSON uploads with a
 target language, concurrent audio admission and invalid request options, plus
 the library's final EOT in an exactly-sized context. The non-ignored entry tests
 assert that single/grouped JEV is rejected. Run complete models sequentially on
