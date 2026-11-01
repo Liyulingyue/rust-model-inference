@@ -184,6 +184,12 @@ impl Linear {
             .ok_or_else(|| format!("Unbound Audio8 projection: {name}"))
     }
 
+    /// Access the Vulkan context, if running on GPU.
+    #[cfg(feature = "vulkan")]
+    pub(crate) fn vulkan_context(&self) -> Option<&'static crate::vulkan::VulkanContext> {
+        self.executor.vulkan_context()
+    }
+
     /// Run Q/K/V projections as a group (same input, 3 outputs).
     /// Batched into one GPU submit instead of three.
     pub(crate) fn run_qkv(

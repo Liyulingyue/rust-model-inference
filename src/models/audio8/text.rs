@@ -44,6 +44,9 @@ pub struct Audio8TextDecoder {
     /// Every projection above, bound to the CPU/GPU executor. The LM head is
     /// the tied embedding, so it is bound as well.
     linear: Mutex<Linear>,
+    /// GPU compute for non-matmul ops (attention, RMS norm, SiLU).
+    #[cfg(feature = "vulkan")]
+    gpu: std::sync::Mutex<Option<super::gpu::Audio8GpuCompute>>,
 }
 
 pub struct Audio8TextSession<'a> {
@@ -190,6 +193,12 @@ impl Audio8TextDecoder {
             }
         }
         let linear = Linear::new(&bindings, pool)?;
+        #[cfg(feature = "vulkan")]
+        let gpu = if let Some(context) = linear.vulkan_context() {
+            super::gpu::Audio8GpuCompute::new(context).ok()
+        } else {
+            None
+        };
         Ok(Self {
             _source: source,
             embedding,
@@ -197,6 +206,8 @@ impl Audio8TextDecoder {
             layers,
             context,
             linear: Mutex::new(linear),
+            #[cfg(feature = "vulkan")]
+            gpu: std::sync::Mutex::new(gpu),
         })
     }
 
@@ -282,8 +293,21 @@ impl<'a> Audio8TextSession<'a> {
             let position = self.position;
             let mut hidden = embedding.to_vec();
             trace("model.input_embed", None, &[1, WIDTH], &hidden);
+            #[cfg(feature = "vulkan")]
+            let mut gpu_guard = self.model.gpu.lock().map_err(|_| "Audio8 GPU compute poisoned".to_string())?;
             for (index, layer) in self.model.layers.iter().enumerate() {
                 let mut normed = vec![0.0; WIDTH];
+                // RMS norm: use GPU if available, else CPU fallback.
+                #[cfg(feature = "vulkan")]
+                {
+                    if let Some(gpu) = gpu_guard.as_mut() {
+                        gpu.rms_norm(&hidden, &layer.attn_norm, &mut normed, 1e-6)
+                            .map_err(|e| format!("Audio8 GPU RMS norm failed: {e}"))?;
+                    } else {
+                        audio_rms_norm(&hidden, &layer.attn_norm, &mut normed, 1e-6);
+                    }
+                }
+                #[cfg(not(feature = "vulkan"))]
                 audio_rms_norm(&hidden, &layer.attn_norm, &mut normed, 1e-6);
                 if index == 0 {
                     trace("attn_norm-0", Some(0), &[1, WIDTH], &normed);
@@ -309,42 +333,42 @@ impl<'a> Audio8TextSession<'a> {
                 }
                 self.keys[index].extend_from_slice(&k);
                 self.values[index].extend_from_slice(&v);
-                let mut attention = vec![0.0f32; WIDTH];
-                let scale = 1.0 / (HEAD_WIDTH as f32).sqrt();
-                for head in 0..QUERY_HEADS {
-                    let kv_head = head / (QUERY_HEADS / KV_HEADS);
-                    let head_start = head * HEAD_WIDTH;
-                    let query = &q[head_start..head_start + HEAD_WIDTH];
-                    let mut scores = Vec::with_capacity(position + 1);
-                    let mut maximum = f32::NEG_INFINITY;
-                    for past in 0..=position {
-                        let offset = past * KV_HEADS * HEAD_WIDTH + kv_head * HEAD_WIDTH;
-                        let score =
-                            audio_dot(query, &self.keys[index][offset..offset + HEAD_WIDTH])
-                                * scale;
-                        maximum = maximum.max(score);
-                        scores.push(score);
-                    }
-                    let mut sum = 0.0f32;
-                    for score in &mut scores {
-                        *score = (*score - maximum).exp();
-                        sum += *score;
-                    }
-                    for (past, score) in scores.iter().enumerate() {
-                        let offset = past * KV_HEADS * HEAD_WIDTH + kv_head * HEAD_WIDTH;
-                        for dimension in 0..HEAD_WIDTH {
-                            attention[head_start + dimension] +=
-                                (*score / sum) * self.values[index][offset + dimension];
-                        }
-                    }
+                let mut attention_out = vec![0.0f32; WIDTH];
+                #[cfg(feature = "vulkan")]
+                if let Some(gpu) = gpu_guard.as_mut() {
+                    // GPU attention: upload Q + full KV cache, run, read back.
+                    gpu.attention(
+                        &q,
+                        &self.keys[index],
+                        &self.values[index],
+                        position,
+                        &mut attention_out,
+                    )
+                    .map_err(|e| format!("Audio8 GPU attention failed: {e}"))?;
+                } else {
+                    // CPU fallback: per-head attention with online softmax.
+                    cpu_attention(&q, &self.keys[index], &self.values[index], position, &mut attention_out);
                 }
+                #[cfg(not(feature = "vulkan"))]
+                cpu_attention(&q, &self.keys[index], &self.values[index], position, &mut attention_out);
                 if index == 0 {
-                    trace("kqv_out-0", Some(0), &[QUERY_HEADS, HEAD_WIDTH], &attention);
+                    trace("kqv_out-0", Some(0), &[QUERY_HEADS, HEAD_WIDTH], &attention_out);
                 }
-                let update = linear.run(&format!("blk.{index}.o"), &attention, WIDTH)?;
+                let update = linear.run(&format!("blk.{index}.o"), &attention_out, WIDTH)?;
                 for (value, update) in hidden.iter_mut().zip(update) {
                     *value += update;
                 }
+                // FFN norm: use GPU if available, else CPU fallback.
+                #[cfg(feature = "vulkan")]
+                {
+                    if let Some(gpu) = gpu_guard.as_mut() {
+                        gpu.rms_norm(&hidden, &layer.ffn_norm, &mut normed, 1e-6)
+                            .map_err(|e| format!("Audio8 GPU FFN norm failed: {e}"))?;
+                    } else {
+                        audio_rms_norm(&hidden, &layer.ffn_norm, &mut normed, 1e-6);
+                    }
+                }
+                #[cfg(not(feature = "vulkan"))]
                 audio_rms_norm(&hidden, &layer.ffn_norm, &mut normed, 1e-6);
                 for (value, scale) in normed.iter_mut().zip(&self.scales[index]) {
                     *value *= *scale;
@@ -352,6 +376,17 @@ impl<'a> Audio8TextSession<'a> {
                 // Batch gate/up into one GPU submit (2 matmuls, same input).
                 let (mut gate, up) =
                     linear.run_gate_up(&format!("blk.{index}"), &normed, FFN_WIDTH)?;
+                // SiLU: use GPU if available, else CPU fallback.
+                #[cfg(feature = "vulkan")]
+                if let Some(gpu) = gpu_guard.as_mut() {
+                    gpu.silu_mul(&mut gate, &up)
+                        .map_err(|e| format!("Audio8 GPU SiLU failed: {e}"))?;
+                } else {
+                    for (gate, up) in gate.iter_mut().zip(up) {
+                        *gate = silu(*gate) * up;
+                    }
+                }
+                #[cfg(not(feature = "vulkan"))]
                 for (gate, up) in gate.iter_mut().zip(up) {
                     *gate = silu(*gate) * up;
                 }
@@ -382,6 +417,41 @@ impl<'a> Audio8TextSession<'a> {
             self.position += 1;
         }
         Ok(logits)
+    }
+}
+
+/// CPU fallback for per-head attention with online softmax.
+fn cpu_attention(
+    q: &[f32],
+    keys: &[f32],
+    values: &[f32],
+    position: usize,
+    output: &mut [f32],
+) {
+    let scale = 1.0 / (HEAD_WIDTH as f32).sqrt();
+    for head in 0..QUERY_HEADS {
+        let kv_head = head / (QUERY_HEADS / KV_HEADS);
+        let head_start = head * HEAD_WIDTH;
+        let query = &q[head_start..head_start + HEAD_WIDTH];
+        let mut scores = Vec::with_capacity(position + 1);
+        let mut maximum = f32::NEG_INFINITY;
+        for past in 0..=position {
+            let offset = past * KV_HEADS * HEAD_WIDTH + kv_head * HEAD_WIDTH;
+            let score = audio_dot(query, &keys[offset..offset + HEAD_WIDTH]) * scale;
+            maximum = maximum.max(score);
+            scores.push(score);
+        }
+        let mut sum = 0.0f32;
+        for score in &mut scores {
+            *score = (*score - maximum).exp();
+            sum += *score;
+        }
+        for (past, score) in scores.iter().enumerate() {
+            let offset = past * KV_HEADS * HEAD_WIDTH + kv_head * HEAD_WIDTH;
+            for dimension in 0..HEAD_WIDTH {
+                output[head_start + dimension] += (*score / sum) * values[offset + dimension];
+            }
+        }
     }
 }
 

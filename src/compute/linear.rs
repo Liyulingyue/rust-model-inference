@@ -51,6 +51,12 @@ impl<'model, 'weights> LinearExecutor<'model, 'weights> {
         }
     }
 
+    /// Access the Vulkan context, if running on GPU.
+    #[cfg(feature = "vulkan")]
+    pub(crate) fn vulkan_context(&self) -> Option<&'static crate::vulkan::VulkanContext> {
+        self.runtime.as_ref().map(|r| r.ops_context().unwrap())
+    }
+
     pub(crate) fn new(
         policy: ComputePolicy,
         bindings: Vec<LinearBinding<'model, 'weights>>,
