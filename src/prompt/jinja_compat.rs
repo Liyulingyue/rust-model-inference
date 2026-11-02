@@ -253,14 +253,14 @@ pub(super) fn python_method(
                 None => value.get_item(key).ok(),
             }
             .filter(|v| !v.is_undefined());
-            match found {
-                Some(found) => Ok(found),
+            match (found, default) {
+                (Some(found), _) => Ok(found),
                 // Python's `.get(key, default)` only applies the default on a
                 // miss; a present key returns the value even if it is falsy.
-                None if let Some(default) = default => Ok(default.clone()),
+                (None, Some(default)) => Ok(default.clone()),
                 // `Value::from(())` is a genuine None. minijinja's `none` is a
                 // test, not a value, so it cannot be used for this.
-                None => Ok(Value::from(())),
+                (None, None) => Ok(Value::from(())),
             }
         }
         ValueKind::String => {
