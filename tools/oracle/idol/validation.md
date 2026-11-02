@@ -78,7 +78,18 @@ Full lib regression: **1340 passed, 17 failed, 88 ignored**; the exact 17 failur
 
 Full-size CPU CLI: transparent RGBA gallery avocado, 1024×1024 conditioning, 8192 latent tokens, one Euler step, CFG 0, seed 42, and 32768 Gaussians. Exit 0; PLY has all 17 properties, 32768 finite rows, 2,228,639 bytes, SHA256 `c918405e233c67d37d1bbccf1553bdf4f1d909e9a19798932e31d451d5331a62`. The contended 32-thread run took 1683.42 s and peaked at 13,325,924 KiB RSS (about 12.71 GiB). This is a functional smoke, not a throughput benchmark or standard-step quality result.
 
-Final standalone HTTP/Auto same-input observation is being completed.
+Standalone HTTP/Auto, launched without `--serve`, completed the same full-size RGBA input and generation settings with 8 threads. Generation returned **200** in 1776.27 s (1801.03 s including startup/validation), with the same 2,228,639-byte PLY and identical camera values as the CPU CLI run. The observed files have the same SHA256; this compares two interfaces using the same native CPU backend, rather than imposing a bitwise floating-point oracle requirement. The payload contains 32768 finite rows and all 17 properties. Compact command, timing, camera and comparison evidence is in [interface-validation.json](interface-validation.json).
+
+HTTP health returned 200, invalid/unknown options and missing images returned 400, unsupported chat/text-image JEV routes returned 404, and a concurrent generation returned 429. Final CLI negative checks rejected strict Vulkan, zero steps, unrelated text flags, missing components, and generation options passed at standalone-server startup. The test server was stopped after the request; generated PLYs remain remote.
+
+### CI snapshot
+
+[CI run 41506658890](https://github.com/Liyulingyue/rust-model-inference/actions/runs/41506658890) passed **x86 dispatch regressions**. Rustfmt and Vulkan shader checks failed on baseline content:
+
+- Rustfmt reported eight files. Seven are byte-identical to base `afed6d48`; the two reported formatting spans in the remaining, modified `src/app/server/api.rs` are also identical to base. None of the Idol additions appears in the formatting diagnostics.
+- The Vulkan job stopped before Cargo compilation because eight entries in `shaders/manifest.sha256` mismatch: GLSL and SPIR-V pairs for `q4_k_matmul`, `q5_k_matmul`, `q6_k_matmul`, and `f16_matmul`. The manifest, validation script, and all eight mismatched files are byte-identical to base. Independently hashing the checked-in files reproduced exactly these eight failures.
+
+These preexisting failures were left outside the model-adaptation change. The PR does not claim a green whole-repository CI run or a successful Vulkan build.
 
 ## Coverage limits
 

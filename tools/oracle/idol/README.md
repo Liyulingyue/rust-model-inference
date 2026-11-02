@@ -34,12 +34,12 @@ cargo build --locked --profile release-fast
 target/release-fast/rust-model-inference \
   --image-to-3d --model models/idol --components models \
   --image object.png --out object.ply \
-  --geometry-mode synthetic --seed 42 --compute cpu --threads 32
+  --geometry-mode synthetic --seed 42 --compute cpu --threads 16
 
 # Image and generation options are supplied per request in server mode.
 target/release-fast/rust-model-inference \
   --serve --image-to-3d --model models/idol --components models \
-  --host 127.0.0.1 --port 18089 --compute auto --threads 32
+  --host 127.0.0.1 --port 18089 --compute auto --threads 16
 curl --fail-with-body http://127.0.0.1:18089/v1/3d/generations \
   -H 'Content-Type: application/json' \
   -d '{"image":"object.png","options":{"steps":1,"cfg_strength":0,"num_gaussians":32768,"seed":42,"mode":"synthetic"}}' \
@@ -75,7 +75,6 @@ Use a disk-backed `TMPDIR=target/tmp` when `/tmp` is a small tmpfs. Generated te
 
 The fixture traverses every released block with short diagnostic shapes: 32 latent tokens, 9 conditioning tokens, 12 decoder queries, and 64×64 images. It isolates the PLY transform with official neural features. Production inference always uses 8192 latent tokens and 1024×1024 images. Checkpoint names, order, count, shape and finite values must match. [gates.json](gates.json) defines max absolute error, relative RMSE and cosine gates (including the documented FP16 joint-state calibration) for each precision class. FP16/BF16/SIMD reductions are assessed numerically, without a bitwise floating-point requirement; the integer preprocessing fixture checks exact output pixels. Small fixtures do not establish default-step image/3D quality or full-resolution accumulated numerical error.
 
-
 To reproduce the accumulated-state diagnosis:
 
 ```sh
@@ -84,4 +83,4 @@ TMPDIR="$PWD/target/tmp" .venv/bin/python tools/oracle/idol/diagnose_denoiser.py
   --report artifacts/idol/denoiser-drift-diagnostic.json --threads 8
 ```
 
-The diagnostic re-runs13 selected official blocks on both saved native and oracle inputs. The oracle-input control must reproduce each saved oracle output exactly. On this fixture, the final joint block has local max error0.0625/relative RMSE0.00010977 with identical input, while end-to-end accumulated max error is3.5/relative RMSE0.0055598. At the worst accumulated element, local error is0; the difference comes from propagated input state. The calibrated peak gate applies to every joint FP16 block, with the original aggregate and final-head gates retained. `denoiser-calibration.json` preserves a small source-backed summary of the original failure and diagnostic; full raw reports stay under artifacts/idol.
+The diagnostic reruns 13 selected official blocks on both saved native and oracle inputs. The oracle-input control must reproduce each saved oracle output exactly. On this fixture, the final joint block has local max error 0.0625 / relative RMSE 0.00010977 with identical input, while end-to-end accumulated max error is 3.5 / relative RMSE 0.0055598. At the worst accumulated element, local error is 0; the difference comes from propagated input state. The calibrated peak gate applies to every joint FP16 block, with the original aggregate and final-head gates retained. `denoiser-calibration.json` preserves a small source-backed summary of the original failure and diagnostic; full raw reports stay under artifacts/idol.
