@@ -4,7 +4,7 @@ Mage-Flow 已接入主 CLI；下表数值与 PNG 证据来自原适配记录，�
 
 > 更新于 2026-10-08。以主 CLI `rust-model-inference` 为准。
 
-2026-10-30：Vela3 六个包使用独立 `vela3` CLI / Rust API 与原生 safetensors，见 [使用说明](../usage/vela3.md)；下表这几项的格式不属于 GGUF。
+2026-11-02：Vela3 六个包通过现有 `rust-model-inference --system-one-request` CLI / Rust API 使用原生 safetensors，见 [使用说明](../usage/vela3.md)；下表这几项的格式不属于 GGUF。
 
 相同的 `general.architecture` 只表示会进入同一条代码路径，不代表任意同架构 GGUF 都已确认可用。未在“具体型号”表中出现的模型，应先按 `Supported` 或 `Experimental` 看待，不能默认视为 `Verified`。
 

@@ -4,6 +4,69 @@ use super::options::{
 use super::types::{normalize_tts_language, CliOptions};
 
 pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
+    if options.base_model.is_some() && options.system_one_request.is_none() {
+        return Err("--base-model requires --system-one-request".into());
+    }
+    if options.system_one_request.is_some() {
+        if options.model.as_os_str().is_empty() {
+            return Err("--system-one-request requires --model".into());
+        }
+        if options.compute_policy() != crate::compute::ComputePolicy::Cpu {
+            return Err("--system-one-request supports CPU only; use --compute cpu".into());
+        }
+        if options.serve
+            || options.jev
+            || options.rerank
+            || options.embedding
+            || options.tts
+            || options.yue2
+            || options.dreamx
+            || options.astronex
+            || options.timestral_request.is_some()
+            || options.laya_request.is_some()
+            || options.wevisone_request.is_some()
+            || options.wevisone_decoder.is_some()
+            || options.prompt.is_some()
+            || options.image.is_some()
+            || options.video.is_some()
+            || options.audio.is_some()
+            || options.mmproj.is_some()
+            || options.vae.is_some()
+            || options.text_encoder.is_some()
+            || options.out.is_some()
+            || options.output.is_some()
+            || options.qwen_image_turbo
+            || options.dry_run
+            || options.planner.is_some()
+            || options.perception.is_some()
+            || options.longcat_kind.is_some()
+            || options.components.is_some()
+            || options.input.is_some()
+            || !options.references.is_empty()
+            || options.noise.is_some()
+            || options.width.is_some()
+            || options.height.is_some()
+            || options.cfg.is_some()
+            || options.top_k.is_some()
+            || options.top_p.is_some()
+            || options.max_tokens.is_some()
+            || options.max_context.is_some()
+            || options.prefill_batch_size.is_some()
+            || options.repetition_penalty.is_some()
+            || options.temperature.is_some()
+            || options.kv_format_explicit
+            || options.bench
+            || options.profile
+            || options.dump_logits
+            || options.thinking
+            || options.jinja
+            || options.chat_template.is_some()
+            || options.chat_template_file.is_some()
+        {
+            return Err("--system-one-request cannot be combined with generation, media, server or other task options; put task inputs in the JSON request".into());
+        }
+        return Ok(());
+    }
     if options.wevisone_request.is_some() {
         if options.model.as_os_str().is_empty() || options.mmproj.is_none() {
             return Err("--wevisone-request requires --model and --mmproj".into());

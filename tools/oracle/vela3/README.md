@@ -6,6 +6,12 @@ Native 只调用已有 Rust 算子。Python 依赖仅运行只读 Oracle，安�
 
 fast-vision 原包面向更新的 Transformers；Oracle 注册包内原始 `text/modeling_ultrabert.py`，仅兼容配置声明和类注册，保持计算实现。预处理匹配 torchvision 0.24.1 的 uint8 bicubic 回退，未验证更新版本的 Lanczos 路径。所有模型文件均须先按清单下载到本地；下列 Oracle 不联网换模型。
 
+## 主程序入口
+
+Vela3 使用现有 `rust-model-inference --system-one-request FILE|-`，d3 另传 `--base-model DIR`。先前新增的模型专用 binary 改变了 Cargo 自动发现的编译产物，已移除；计算与公开 Rust API 保持在 `models::vela3`。下列复现命令已改用主程序，verification.json 中早期的专用 binary 命令仅为历史测量记录。当前入口与产物检查见 `entry_fix_2026_11_02`。
+
+2026-11-02 入口修复验证：Cargo 的 9 个 binary targets 与 main 基线一致；主程序与相关 CLI 共 38 项测试通过，包含 6 项 System One 回归。fast（stdin）、lite（独立底座）和 fast-vision 文本入口共 29 问与已有固定 Oracle fixture 对照通过，完整 JSON 也与原 native 记录一致。全库仍为 1360 通过、20 失败、94 忽略，20 项失败名称与修复前完全相同。其他模型和图像逐层记录未重跑。
+
 ## 便携检查
 
 以下检查不需要权重或 Python 推理依赖。验证机器使用 Rust 1.98.1、macOS arm64；普通测试跳过需要本地 fixture 的检查。
@@ -14,10 +20,11 @@ fast-vision 原包面向更新的 Transformers；Oracle 注册包内原始 `text
 cargo +1.98.1 test --profile release-fast --lib models::vela3::
 cargo +1.98.1 test --profile release-fast --lib format::safetensors::tests::
 .venv/bin/python -m unittest discover -s tools/oracle/vela3 -p 'test_*.py'
-cargo +1.98.1 build --profile release-fast --bin vela3
+cargo +1.98.1 build --profile release-fast --bin rust-model-inference
+cargo +1.98.1 test --locked --profile release-fast --test system_one_cli
 ```
 
-41 个 Vela3 测试通过、5 个需要本地权重的检查被忽略；比较器与 Oracle 生成契约共 6 个检查通过。完整库命令 `cargo +1.98.1 test --profile release-fast --lib` 为 1322 通过、20 失败、89 忽略；未修改的 `92d2eca0` 为 1280 通过、相同的 20 失败、84 忽略，失败名称保存在验证 JSON。Clippy 的 10 个错误均在本次未修改的模块，不能声称全仓检查通过。
+早期适配验证（非本轮入口修复）：41 个 Vela3 测试通过、5 个需要本地权重的检查被忽略；比较器与 Oracle 生成契约共 6 个检查通过。完整库命令 `cargo +1.98.1 test --profile release-fast --lib` 为 1322 通过、20 失败、89 忽略；未修改的 `92d2eca0` 为 1280 通过、相同的 20 失败、84 忽略，失败名称保存在验证 JSON。Clippy 的 10 个错误均在本次未修改的模块，不能声称全仓检查通过。
 
 ## Fast 全路由
 
@@ -49,8 +56,8 @@ RMI_VELA3_FAST_FIXTURE=models/vela3-fast-oracle.json \
   -- --ignored --nocapture
 .venv/bin/python -c 'import json; print(json.dumps(json.load(open("models/vela3-fast-oracle.json"))["system_one"]))' \
   > models/vela3-fast-response.json
-cargo +1.98.1 run --profile release-fast --bin vela3 -- \
-  --model models/vela3-fast --request tools/oracle/vela3/requests/fast.json --threads 4 \
+cargo +1.98.1 run --profile release-fast --bin rust-model-inference -- \
+  --model models/vela3-fast --system-one-request tools/oracle/vela3/requests/fast.json --threads 4 \
   > models/vela3-fast-native.json
 .venv/bin/python tools/oracle/vela3/compare_requests.py \
   models/vela3-fast-response.json models/vela3-fast-native.json \
@@ -59,9 +66,9 @@ cargo +1.98.1 run --profile release-fast --bin vela3 -- \
 
 `--require-all-adapters` 拒绝缺失的可选适配器，避免把官方回退到共享底座误记成任务适配器已验证。
 
-`requests/fast.json` 的真实权重检查包含全部九适配器和 18 个问题。`requests/fast-criteria.json` 单独覆盖普通 choice/router 的数组、重复选项，以及重复 span 标签报错；`requests/fast-thresholds.json` 覆盖 Unicode 数字、下划线、布尔值、巨大阈值和无效字符串。将上面 Oracle 和 CLI 的 `--request` 参数一并替换即可复现；两组边界请求已在确定性小型官方图上通过。
+`requests/fast.json` 的真实权重检查包含全部九适配器和 18 个问题。`requests/fast-criteria.json` 单独覆盖普通 choice/router 的数组、重复选项，以及重复 span 标签报错；`requests/fast-thresholds.json` 覆盖 Unicode 数字、下划线、布尔值、巨大阈值和无效字符串。将上面 Oracle 的 `--request` 与 CLI 的 `--system-one-request` 参数一并替换即可复现；两组边界请求已在确定性小型官方图上通过。
 
-`requests/fast-floats.json` 覆盖科学计数法 state、JSON instructions/description 和 router JSON state。此前 fast 使用 serde 的指数格式，`1e-7` 与 Python 的 `1e-07` 会改变 token IDs 和概率；现复用 d3 的 Python JSON 渲染。用此请求替换上述 `--request` 即可运行同一完整检查，不能将提示词差异计入浮点算子容差。
+`requests/fast-floats.json` 覆盖科学计数法 state、JSON instructions/description 和 router JSON state。此前 fast 使用 serde 的指数格式，`1e-7` 与 Python 的 `1e-07` 会改变 token IDs 和概率；现复用 d3 的 Python JSON 渲染。用此请求替换上述 Oracle 的 `--request` 和 CLI 的 `--system-one-request` 即可运行同一完整检查，不能将提示词差异计入浮点算子容差。
 
 ## Fast-vision 四种真实任务
 
@@ -97,8 +104,8 @@ for variant in text mixed; do
   RMI_VELA3_PUBLIC_FIXTURE="models/vela3-vision-public-$variant.json" \
     cargo +1.98.1 test --locked --profile release-fast --lib \
     models::vela3::vision::tests::public_system_one_matches_official_wrapper -- --exact --ignored
-  target/release-fast/vela3 --model models/vela3-fast-vision \
-    --request "models/vela3-vision-public-$variant.request.json" --threads 4 \
+  target/release-fast/rust-model-inference --model models/vela3-fast-vision \
+    --system-one-request "models/vela3-vision-public-$variant.request.json" --threads 4 \
     > "models/vela3-vision-public-$variant.native.json"
   .venv/bin/python tools/oracle/vela3/compare_requests.py \
     "models/vela3-vision-public-$variant.json" "models/vela3-vision-public-$variant.native.json" \
@@ -122,9 +129,9 @@ RMI_VELA3_HEAD_FIXTURE=models/vela3-head-fixture.json \
   --request tools/oracle/vela3/requests/lite.json --out models/vela3-request-oracle.json
 RMI_VELA3_REQUEST_FIXTURE=models/vela3-request-oracle.json \
   cargo +1.98.1 test --profile release-fast --lib official_request_token_ids -- --ignored --nocapture
-cargo +1.98.1 run --profile release-fast --bin vela3 -- \
+cargo +1.98.1 run --profile release-fast --bin rust-model-inference -- \
   --model models/vela3-lite --base-model models/d3-lite \
-  --request tools/oracle/vela3/requests/lite.json --threads 4 > models/vela3-request-native.json
+  --system-one-request tools/oracle/vela3/requests/lite.json --threads 4 > models/vela3-request-native.json
 .venv/bin/python tools/oracle/vela3/compare_requests.py \
   models/vela3-request-oracle.json models/vela3-request-native.json \
   --atol 0.01 --rtol 0.01 --out models/vela3-request-comparison.json
@@ -187,9 +194,9 @@ turbo 的完整八问请求使用同一固定底座和请求文件，Oracle 与 
   --model models/vela3-turbo --base models/d3-turbo/pinned \
   --request tools/oracle/vela3/requests/turbo.json --threads 8 \
   --out models/vela3-turbo-request-oracle.json
-cargo +1.98.1 run --profile release-fast --bin vela3 -- \
+cargo +1.98.1 run --profile release-fast --bin rust-model-inference -- \
   --model models/vela3-turbo --base-model models/d3-turbo/pinned \
-  --request tools/oracle/vela3/requests/turbo.json --threads 8 \
+  --system-one-request tools/oracle/vela3/requests/turbo.json --threads 8 \
   > models/vela3-turbo-request-native.json
 .venv/bin/python tools/oracle/vela3/compare_requests.py \
   models/vela3-turbo-request-oracle.json models/vela3-turbo-request-native.json \

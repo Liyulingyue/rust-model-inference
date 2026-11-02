@@ -5063,5 +5063,311 @@
       "Zero-threshold spans verify decoding/nonempty Unicode boundaries, not extraction quality; no new quality or performance benchmark.",
       "Full library retains the same 20 inherited failures; no claim of full repository success."
     ]
+  },
+  "entry_fix_2026_11_02": {
+    "client_date": "2026-11-02",
+    "verified_at_utc": "2026-11-02T09:39:12.076484+00:00",
+    "environment": {
+      "platform": "macOS arm64",
+      "rust": "1.98.1",
+      "profile": "release-fast"
+    },
+    "fix": "Remove the auto-discovered src/bin/vela3.rs target. Use the existing rust-model-inference --system-one-request FILE|- entry, shared model/thread options and --base-model for d3. JSON I/O stays in app/system_one; the model implementation and Rust API are unchanged.",
+    "reference_implementation_commit": "13c5144d3b29e3ca93f00e733aee661801e6a7c6",
+    "reference_manifest_sha256": "630393a780ae9886997e5065c33e37a2ca388591df6aba7d3b7069516bf1ace3",
+    "implementation_sha256": {
+      "src/main.rs": "ae90214c5376a4aafe906977af7d5cdb0fc07df4e8b9be77beed418377723a33",
+      "src/app/system_one.rs": "8247166382010a4935fd6dc583311f871d63338ab706eef9a2a4cc7c17f93b3f",
+      "src/app/mod.rs": "e978d041d823d64c22f2f4cbbc5421106a9a03c5de2a9b474809867312979d58",
+      "src/app/cli/types.rs": "fc10b3281ba40a03376c65cff3ec7d3a5b47cd093ffbb57e632507cb378d7806",
+      "src/app/cli/parse.rs": "da176fd3a6d55edd4bf1971e23864d98c39400ff236c22bc8563d5c7c0c99b75",
+      "src/app/cli/validate.rs": "152c1dc2d6487c65a490df41a0d6b222e3705f6eb0295eb5aee94331494e54dc",
+      "src/app/server/mod.rs": "05382f443f5d180fa0958b51b109e7ff85e60c511ee32df01f860d52e927a612"
+    },
+    "cargo_targets": {
+      "baseline_commit": "b93f43d95706a205f8cf8d32790054a6b1a61424",
+      "before": [
+        [
+          "codec_test",
+          "src/bin/codec_test.rs"
+        ],
+        [
+          "dump_dims",
+          "src/bin/dump_dims.rs"
+        ],
+        [
+          "dump_emb",
+          "src/bin/dump_emb.rs"
+        ],
+        [
+          "dump_meta",
+          "src/bin/dump_meta.rs"
+        ],
+        [
+          "dump_tensors",
+          "src/bin/dump_tensors.rs"
+        ],
+        [
+          "ggufrs",
+          "src/bin/ggufrs.rs"
+        ],
+        [
+          "micro-bench",
+          "src/bin/micro_bench.rs"
+        ],
+        [
+          "rust-model-inference",
+          "src/main.rs"
+        ],
+        [
+          "rust-model-server",
+          "src/bin/server.rs"
+        ],
+        [
+          "vela3",
+          "src/bin/vela3.rs"
+        ]
+      ],
+      "after": [
+        [
+          "codec_test",
+          "src/bin/codec_test.rs"
+        ],
+        [
+          "dump_dims",
+          "src/bin/dump_dims.rs"
+        ],
+        [
+          "dump_emb",
+          "src/bin/dump_emb.rs"
+        ],
+        [
+          "dump_meta",
+          "src/bin/dump_meta.rs"
+        ],
+        [
+          "dump_tensors",
+          "src/bin/dump_tensors.rs"
+        ],
+        [
+          "ggufrs",
+          "src/bin/ggufrs.rs"
+        ],
+        [
+          "micro-bench",
+          "src/bin/micro_bench.rs"
+        ],
+        [
+          "rust-model-inference",
+          "src/main.rs"
+        ],
+        [
+          "rust-model-server",
+          "src/bin/server.rs"
+        ]
+      ],
+      "only_removed": [
+        [
+          "vela3",
+          "src/bin/vela3.rs"
+        ]
+      ],
+      "manifest_and_bin_sources_match_base": true,
+      "passed": true
+    },
+    "entry_checks": {
+      "help_passed": true,
+      "removed_cached_outputs": [
+        "target/release-fast/vela3",
+        "target/release-fast/vela3.d"
+      ],
+      "model_implementation_unchanged": true
+    },
+    "regression": {
+      "before": {
+        "commit": "13c5144d3b29e3ca93f00e733aee661801e6a7c6",
+        "passed": 1360,
+        "failed": 20,
+        "ignored": 94
+      },
+      "after": {
+        "target": "Running unittests src/lib.rs (target/release-fast/deps/rust_model_inference-32a4f4f3d4df14fe)",
+        "result": "FAILED",
+        "passed": 1360,
+        "failed": 20,
+        "ignored": 94
+      },
+      "failure_names_identical": true,
+      "failure_names": [
+        "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+        "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+        "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+        "models::clm::tests::matches_reference_golden_vectors",
+        "models::clm::tests::rejects_wrong_embedding_width",
+        "models::diffusion::z_image::text::tests::qwen_attention_softmax_matches_the_pinned_ggml_neon_reduction",
+        "models::diffusion::z_image::text::tests::silu_mul_inplace_matches_pinned_ggml_neon_activation",
+        "models::diffusion::z_image::vae::tests::silu_matches_pinned_ggml_neon_vector_path",
+        "models::funasr::encoder::parity_tests::fsmn_rounds_product_before_adding_like_ggml",
+        "models::funasr::encoder::parity_tests::layernorm_accumulates_variance_in_ggml_neon_groups",
+        "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+        "models::gemma4::trunk::tests::per_layer_bf16_projection_matches_pinned_scalar_dot_bits",
+        "models::gemma4::trunk::tests::per_layer_projection_rejects_non_bf16_weight",
+        "models::gemma4::trunk::tests::per_layer_projection_rejects_wrong_bf16_storage_length",
+        "ops::argmax::tests::all_negative",
+        "ops::argmax::tests::large_random",
+        "ops::argmax::tests::middle_max",
+        "ops::argmax::tests::tail_handles_non_aligned_lengths",
+        "ops::argmax::tests::ties_pick_lowest_index",
+        "ops::matmul::neon_tests::neon_softmax_matches_ggml_vector_exp_and_f64_sum"
+      ],
+      "other_targets": [
+        {
+          "target": "Running unittests src/main.rs (target/release-fast/deps/rust_model_inference-fa03d2e562275ce1)",
+          "result": "ok",
+          "passed": 6,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "target": "Running tests/gliner2_cli.rs (target/release-fast/deps/gliner2_cli-300b674bee3b28a5)",
+          "result": "ok",
+          "passed": 12,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "target": "Running tests/laya_cli.rs (target/release-fast/deps/laya_cli-d9766cc6ea317702)",
+          "result": "ok",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "target": "Running tests/longcat_cli.rs (target/release-fast/deps/longcat_cli-f7f0b5b924213fa4)",
+          "result": "ok",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "target": "Running tests/mage_flow_cli.rs (target/release-fast/deps/mage_flow_cli-f013bcd98a846f34)",
+          "result": "ok",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "target": "Running tests/system_one_cli.rs (target/release-fast/deps/system_one_cli-e5bf3158a3fe8c7c)",
+          "result": "ok",
+          "passed": 6,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "target": "Running tests/timestral_cli.rs (target/release-fast/deps/timestral_cli-6dff16ad11adb8db)",
+          "result": "ok",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "target": "Running tests/unlimited_ocr_cli.rs (target/release-fast/deps/unlimited_ocr_cli-92d148e884bffd85)",
+          "result": "ok",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "target": "Running tests/yue2_cli_routing.rs (target/release-fast/deps/yue2_cli_routing-e6d7def0a5ad2b19)",
+          "result": "ok",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "other_passed": 38,
+      "new_failures": []
+    },
+    "red_checks": {
+      "before_fix_failed": 5,
+      "scope": "Initial System One parsing, conflict, file/stdin and dedicated-server regressions all failed before the entry migration. The final six-test suite adds ordinary prompt-text compatibility."
+    },
+    "real_main_cli": {
+      "fast-floats": {
+        "passed": true,
+        "questions": 3,
+        "threads": 4,
+        "input": "stdin",
+        "usage": {
+          "input_tokens": 180,
+          "output_tokens": 0
+        },
+        "atol": 0.0005,
+        "rtol": 0.0005,
+        "max_absolute_error": 1.7412329679777905e-06,
+        "question_order_exact": true,
+        "matches_previous_native_json": true,
+        "oracle": "existing pinned fixture; no new Python inference"
+      },
+      "lite": {
+        "passed": true,
+        "questions": 14,
+        "threads": 4,
+        "input": "file",
+        "usage": {
+          "input_tokens": 524,
+          "output_tokens": 0
+        },
+        "atol": 0.01,
+        "rtol": 0.01,
+        "max_absolute_error": 0.004633518871616504,
+        "question_order_exact": true,
+        "matches_previous_native_json": true,
+        "oracle": "existing pinned fixture; no new Python inference"
+      },
+      "vision-text": {
+        "passed": true,
+        "questions": 12,
+        "threads": 4,
+        "input": "file",
+        "usage": {
+          "input_tokens": 1062,
+          "output_tokens": 0
+        },
+        "atol": 0.0005,
+        "rtol": 0.0005,
+        "max_absolute_error": 9.5367431640625e-07,
+        "question_order_exact": true,
+        "matches_previous_native_json": true,
+        "oracle": "existing pinned fixture; no new Python inference"
+      }
+    },
+    "real_main_cli_commands": [
+      "target/release-fast/rust-model-inference --model models/vela3-fast --system-one-request - --threads 4 --compute cpu < tools/oracle/vela3/requests/fast-floats.json",
+      "target/release-fast/rust-model-inference --model models/vela3-lite --base-model models/d3-lite --system-one-request .codex/vela3/fix-entry/lite.request.json --threads 4",
+      "target/release-fast/rust-model-inference --model models/vela3-fast-vision --system-one-request .codex/vela3/fix-review/vision-text.request.json --threads 4"
+    ],
+    "coverage": {
+      "entries": "Existing main binary: file/stdin JSON, stdout response, strict System One option surface and early mode-conflict errors. Dedicated server explicitly rejects this CLI request mode; no HTTP/JEV backend is added.",
+      "cpu_simd": "No model or kernel changes; 29 real-weight questions use the existing numerical tolerances, with exact routing/structure/question-order/usage checks.",
+      "components": "Real lite main CLI forwards its separate pinned d3 base; real fast and fast-vision text routes use their existing independent components.",
+      "compute_policy": "CPU accepted; --gpu, --compute auto and --compute vulkan fail before model loading/device setup.",
+      "shared_impact": "38 main/CLI regression tests pass, including ordinary prompt text equal to the new flag. Full-library counts and the 20 named inherited failures match the before-fix baseline."
+    },
+    "skills_updated": [
+      ".agents/skills/adapting-new-models/SKILL.md",
+      ".agents/skills/reviewing-model-changes/SKILL.md"
+    ],
+    "other_checks": {
+      "python_oracle_tests_passed": 6,
+      "skill_validators_passed": 2,
+      "rustfmt": true,
+      "diff_check": true
+    },
+    "limits": [
+      "The six complete real-weight suites and per-task vision checkpoints were not rerun; this entry-only patch reuses pinned Oracle fixtures without new Python inference.",
+      "Existing noncausal BF16 and d3-image numerical limits remain; the PR stays draft.",
+      "No GPU/Auto, HTTP/JEV, GGUF, quality benchmark or performance validation is added."
+    ]
   }
 }

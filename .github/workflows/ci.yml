@@ -36,7 +36,7 @@ jobs:
       - run: cargo test --locked --lib raw_hidden_
       - run: 'cargo test --locked --lib models::vela3::'
       - run: 'cargo test --locked --lib format::safetensors::tests::'
-      - run: cargo check --locked --bin vela3
+      - run: cargo test --locked --test system_one_cli
       - run: python3 -m unittest discover -s tools/oracle/vela3 -p 'test_*.py'
       - run: cargo test --locked --lib unlimited_ocr
       - run: 'cargo test --locked --lib models::diffusion::dreamx::kernels::tests::'

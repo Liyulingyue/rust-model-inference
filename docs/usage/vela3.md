@@ -1,6 +1,6 @@
 # Vela3 System One
 
-六个官方 safetensors 包使用独立的 `vela3` CLI 和 `models::vela3::system_one` Rust API。计算在 CPU 上执行，复用仓库的线程池、矩阵投影、激活与 Qwen3.5 视觉编码器；不调用 Python 或外部加速库。无需 GGUF 转换。
+六个官方 safetensors 包通过现有 `rust-model-inference --system-one-request` CLI 和 `models::vela3::system_one` Rust API。计算在 CPU 上执行，复用仓库的线程池、矩阵投影、激活与 Qwen3.5 视觉编码器；不调用 Python 或外部加速库。无需 GGUF 转换。
 
 | 包 | 显式格式 / 架构 | 任务 |
 |---|---|---|
@@ -26,13 +26,13 @@ fast-vision 的文本任务使用包内 `text/` 的独立配置、tokenizer、`m
 ## 运行
 
 ```bash
-cargo build --profile release-fast --bin vela3
-cargo run --profile release-fast --bin vela3 -- \
+cargo build --profile release-fast --bin rust-model-inference
+cargo run --profile release-fast --bin rust-model-inference -- \
   --model models/vela3-lite --base-model models/d3-lite \
-  --request request.json --threads 4
+  --system-one-request request.json --threads 4
 ```
 
-`--request -` 或省略 `--request` 从 stdin 读取。stdout 只输出响应 JSON；初始化失败退出非零，单个问题的参数错误放在该问题的 `error` 中。
+`--system-one-request -` 从 stdin 读取。stdout 只输出响应 JSON；初始化失败退出非零，单个问题的参数错误放在该问题的 `error` 中。
 
 ```json
 {
@@ -44,7 +44,7 @@ cargo run --profile release-fast --bin vela3 -- \
 }
 ```
 
-fast/fast-vision 省略 `--base-model`。图像通过顶层 `images` 数组传本地文件、HTTP(S) URL 或 base64 image data URL；fast-vision 的 choice/noul 最多三张，图像 span/OCR/box 按官方实现使用第一张。Span 的 start/end 是 Unicode 字符偏移，遵循对应官方解码器的 URL、CJK、阈值和边界规则。d3 的 span pass 不计入官方 `usage.input_tokens`，这里保留该口径。turbo 的 usage 按官方入口合并共享 state，并计入路由适配器的额外 pass；当前实现仍按问题重算 state，未验证长文本性能。
+省略 `--threads` 或设为 0 时沿用主程序的自动线程数。只接受 `--model`、`--base-model`、`--system-one-request`、`--threads` 和 `--compute cpu`，其他任务输入放在 JSON 中。fast/fast-vision 省略 `--base-model`。图像通过顶层 `images` 数组传本地文件、HTTP(S) URL 或 base64 image data URL；fast-vision 的 choice/noul 最多三张，图像 span/OCR/box 按官方实现使用第一张。Span 的 start/end 是 Unicode 字符偏移，遵循对应官方解码器的 URL、CJK、阈值和边界规则。d3 的 span pass 不计入官方 `usage.input_tokens`，这里保留该口径。turbo 的 usage 按官方入口合并共享 state，并计入路由适配器的额外 pass；当前实现仍按问题重算 state，未验证长文本性能。
 
 turbo 的普通决策按官方 `validated_length` 限制为 32768 tokens，超限问题返回 `max_length_exceeded` / `question_tokens`，不截断输入。非空 `videos`、`assets` 和启用的 `long_context` 会在加载权重前明确报错；当前入口不支持这些模式。
 
@@ -61,4 +61,4 @@ let response = rust_model_inference::models::vela3::system_one(
 
 Token IDs、提示词、任务路由、窗口与输出偏移做精确检查；SIMD 归约、BF16 舍入、softmax、GELU 等浮点路径使用记录的误差门槛。默认不承诺逐位一致。[Oracle 命令与验证记录](../../tools/oracle/vela3/README.md) 区分真实整模、小型官方计算图和独立任务头。
 
-这次接入为 CPU safetensors 路径，未接入 GGUF、主生成 CLI、HTTP server 或 GPU。mini/flash/turbo 的真实公开请求通过对照，mini/flash 另有四步 greedy IDs 对照；三者的非因果内部 BF16 activation 门槛未通过，仍为实验性。turbo 不含 LM head，没有真实 causal greedy 验证。d3 图像复用 F32 视觉编码器，和官方默认 BF16 塔有可测差异，也属于实验性；长上下文性能、完整任务基准及所有尺寸的整模数值覆盖仍应按验证记录判断。
+这次接入为主 CLI 的 CPU safetensors 请求模式，未接入 GGUF、文本生成、HTTP server 或 GPU。`--compute auto/vulkan` 和 `--gpu` 会明确拒绝。mini/flash/turbo 的真实公开请求通过对照，mini/flash 另有四步 greedy IDs 对照；三者的非因果内部 BF16 activation 门槛未通过，仍为实验性。turbo 不含 LM head，没有真实 causal greedy 验证。d3 图像复用 F32 视觉编码器，和官方默认 BF16 塔有可测差异，也属于实验性；长上下文性能、完整任务基准及所有尺寸的整模数值覆盖仍应按验证记录判断。
