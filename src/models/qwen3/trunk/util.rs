@@ -215,20 +215,12 @@ pub fn checked_tensor<'a>(
             info.dims, info.ggml_type, dims, ggml_type
         ));
     }
-    let expected = usize::try_from(
-        info.checked_nbytes()
-            .ok_or_else(|| format!("Invalid tensor byte size: {name}"))?,
-    )
-    .map_err(|_| format!("Tensor byte size does not fit usize: {name}"))?;
     let bytes = source
         .tensor_slice(name)
         .ok_or_else(|| format!("Missing tensor data: {name}"))?;
-    if bytes.len() != expected {
-        return Err(format!(
-            "Invalid tensor data length for {name}: {}; expected {expected}",
-            bytes.len()
-        ));
-    }
+    // The payload is measured by the shared check, which follows the type's
+    // block layout rather than the element count.
+    crate::core::tensor::require_tensor_data(source, name)?;
     Ok(bytes)
 }
 

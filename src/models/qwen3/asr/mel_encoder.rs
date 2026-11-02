@@ -1515,14 +1515,14 @@ fn checked_tensor<'a>(
             info.dims, info.ggml_type, dims, kind
         ));
     }
+    let bytes = source
+        .tensor_slice(name)
+        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
     let expected = usize::try_from(
         info.checked_nbytes()
             .ok_or_else(|| format!("Invalid tensor byte size: {name}"))?,
     )
     .map_err(|_| format!("Tensor byte size does not fit usize: {name}"))?;
-    let bytes = source
-        .tensor_slice(name)
-        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
     if bytes.is_empty() || bytes.len() != expected {
         return Err(format!(
             "Invalid tensor data length for {name}: {}; expected {expected}",
@@ -1578,16 +1578,10 @@ fn require_tensor(
     dims: &[u64],
     ggml_type: GGMLType,
 ) -> Result<(), String> {
-    let info = source
-        .tensor_info(name)
-        .ok_or_else(|| format!("Missing Qwen3A tensor: {name}"))?;
-    if info.dims != dims || info.ggml_type != ggml_type {
-        return Err(format!(
-            "Invalid Qwen3A tensor {name}: shape {:?} type {:?}; expected {:?} {:?}",
-            info.dims, info.ggml_type, dims, ggml_type
-        ));
-    }
-    Ok(())
+    // The contract is validated before any payload is read, so only the
+    // metadata is checked here; `checked_tensor` measures the payload when
+    // the tensor is actually loaded.
+    crate::core::tensor::require_tensor_meta(source, name, dims, &[ggml_type]).map(|_| ())
 }
 
 fn require_audio_linear_tensor(
@@ -1595,6 +1589,8 @@ fn require_audio_linear_tensor(
     name: &str,
     dims: &[u64],
 ) -> Result<(), String> {
+    // Metadata only: `validate_qwen3a_source` runs before any payload is
+    // read, and `AudioLinear::load` measures the bytes when it loads them.
     let info = source
         .tensor_info(name)
         .ok_or_else(|| format!("Missing Qwen3A tensor: {name}"))?;

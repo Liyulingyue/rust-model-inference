@@ -55,6 +55,12 @@ impl<'model, 'weights> LinearExecutor<'model, 'weights> {
         }
     }
 
+    /// Access the Vulkan context, if running on GPU.
+    #[cfg(feature = "vulkan")]
+    pub(crate) fn vulkan_context(&self) -> Option<&'static crate::vulkan::VulkanContext> {
+        self.runtime.as_ref().map(|r| r.ops_context().unwrap())
+    }
+
     pub(crate) fn new(
         policy: ComputePolicy,
         bindings: Vec<LinearBinding<'model, 'weights>>,
@@ -115,7 +121,7 @@ impl<'model, 'weights> LinearExecutor<'model, 'weights> {
             && bindings.iter().any(|b| gpu_compatible(*b).is_ok())
         {
             match policy.context()? {
-                Some(context) => match crate::vulkan::ops::BatchedLinearRuntime::new(
+                Some(context) => match crate::vulkan::ops::BatchedLinearRuntime::with_output_slots(
                     context,
                     max_rows,
                     max_n_in,
@@ -124,6 +130,9 @@ impl<'model, 'weights> LinearExecutor<'model, 'weights> {
                         .len()
                         .checked_add(1)
                         .ok_or_else(|| invalid("binding count overflow"))?,
+                    // Output slots: allow up to 8 matmuls per group
+                    // (Audio8 decoder has 7: Q/K/V/O/gate/up/down).
+                    8,
                 ) {
                     Ok(runtime) => Some(runtime),
                     Err(error) if policy == ComputePolicy::Auto => {
@@ -333,34 +342,45 @@ impl<'model, 'weights> LinearExecutor<'model, 'weights> {
                     ));
                 }
             }
-            runtime.validate(
-                w.kernel.weight_bytes().unwrap(),
-                GpuMatmulSpec::prepared(w)?,
-                input.len(),
-                rows,
-                w.n_in,
-                w.n_out,
-                output.len(),
-            )?;
             total = total
                 .checked_add(output.len())
                 .ok_or_else(|| invalid("group output size overflow"))?;
         }
         self.staging.resize(total, 0.0);
-        let mut offset = 0;
-        for (binding, output) in bindings.iter().zip(outputs.iter()) {
+
+        // Build the group spec for batched recording.
+        // Each binding becomes (weight_bytes, spec, rows, n_out).
+        // All bindings share the same input activation (written once).
+        let mut group = Vec::with_capacity(N);
+        for binding in bindings.iter() {
             let w = binding.weight;
-            runtime.matmul_rows(
+            group.push((
                 w.kernel.weight_bytes().unwrap(),
                 GpuMatmulSpec::prepared(w)?,
-                input,
                 rows,
-                w.n_in,
                 w.n_out,
-                &mut self.staging[offset..offset + output.len()],
-            )?;
-            offset += output.len();
+            ));
         }
+
+        // Write input activation once, then record all dispatches into one
+        // command buffer and submit once. This eliminates N-1 submit+wait
+        // round-trips per group.
+        runtime.write_input(input)?;
+        let n_in = bindings[0].weight.n_in;
+        let output_regions = runtime.record_group_matmul(&group, n_in)?;
+
+        // Readback each output slot into staging.
+        let mut offset = 0;
+        for (slot, output) in outputs.iter().enumerate() {
+            let region = *output_regions.get(slot).ok_or_else(|| {
+                ComputeError::Device("record_group_matmul returned fewer slots".into())
+            })?;
+            let count = output.len();
+            let data = runtime.read_output(region, count)?;
+            self.staging[offset..offset + count].copy_from_slice(data);
+            offset += count;
+        }
+
         if self.staging.iter().any(|v| !v.is_finite()) {
             return Err(ComputeError::Device(
                 "linear produced non-finite output".into(),

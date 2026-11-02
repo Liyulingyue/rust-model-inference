@@ -311,6 +311,87 @@ pub trait TensorSource: Send + Sync {
     }
 }
 
+/// Check a tensor's metadata: it exists, has the expected shape, and its type
+/// is one of the given GGML types.
+///
+/// This is the half of [`require_tensor_type`] that only reads the header, so
+/// a loader that validates its whole contract before it touches any payload
+/// can use it. The type list is the caller's: which formats a model can
+/// execute is a property of the model, not of the format. Returns the
+/// tensor's type so the caller can dispatch on it.
+///
+/// Models should call this instead of reimplementing the check. See
+/// `docs/MODEL_ORGANIZATION.md` §6 for the rationale.
+pub fn require_tensor_meta<S: TensorSource + ?Sized>(
+    source: &S,
+    name: &str,
+    dims: &[u64],
+    types: &[GGMLType],
+) -> Result<GGMLType, String> {
+    let info = source
+        .tensor_info(name)
+        .ok_or_else(|| format!("Missing tensor: {name}"))?;
+    if info.dims != dims || !types.contains(&info.ggml_type) {
+        return Err(if types.len() == 1 {
+            format!(
+                "Invalid tensor {name}: shape {:?} type {:?}; expected {:?} {:?}",
+                info.dims, info.ggml_type, dims, types[0]
+            )
+        } else {
+            format!(
+                "Invalid tensor {name}: shape {:?} type {:?}; expected {:?} one of {types:?}",
+                info.dims, info.ggml_type, dims
+            )
+        });
+    }
+    Ok(info.ggml_type)
+}
+
+/// Check that a tensor's payload is exactly as long as its type's block
+/// layout implies.
+///
+/// The payload length is the part that is easy to get wrong: a block format
+/// stores a fixed number of bytes per block, so the length follows
+/// `GGMLType::type_traits` and not the element count. A model that accepts a
+/// quantized format has to measure it that way — counting two bytes per
+/// element, the way a BF16-only loader does, would accept a payload the
+/// decoder reads past the end of.
+pub fn require_tensor_data<S: TensorSource + ?Sized>(source: &S, name: &str) -> Result<(), String> {
+    let info = source
+        .tensor_info(name)
+        .ok_or_else(|| format!("Missing tensor: {name}"))?;
+    let expected = usize::try_from(
+        info.checked_nbytes()
+            .ok_or_else(|| format!("Invalid tensor byte size: {name}"))?,
+    )
+    .map_err(|_| format!("Tensor byte size does not fit usize: {name}"))?;
+    let bytes = source
+        .tensor_slice(name)
+        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
+    if bytes.len() != expected {
+        return Err(format!(
+            "Invalid tensor data length for {name}: {}; expected {expected}",
+            bytes.len()
+        ));
+    }
+    Ok(())
+}
+
+/// Check a tensor's metadata and its payload, and return its type.
+///
+/// This is [`require_tensor_meta`] followed by [`require_tensor_data`], which
+/// is what a loader wants when it validates and reads in one step.
+pub fn require_tensor_type<S: TensorSource + ?Sized>(
+    source: &S,
+    name: &str,
+    dims: &[u64],
+    types: &[GGMLType],
+) -> Result<GGMLType, String> {
+    let ggml_type = require_tensor_meta(source, name, dims, types)?;
+    require_tensor_data(source, name)?;
+    Ok(ggml_type)
+}
+
 /// Load a 1-D tensor as `Vec<f32>`, accepting both F32 and BF16 storage.
 ///
 /// This is the canonical helper for "norm weights" which ship as either F32
@@ -418,5 +499,77 @@ mod tests {
         };
         assert_eq!(info.checked_n_elements(), None);
         assert_eq!(info.checked_nbytes(), None);
+    }
+
+    /// A fake source for the shared tensor check.
+    struct Source {
+        info: TensorInfo,
+        bytes: Vec<u8>,
+    }
+    impl TensorSource for Source {
+        fn metadata(&self, _key: &str) -> Option<&MetaValue> {
+            None
+        }
+        fn tensor_info(&self, _name: &str) -> Option<&TensorInfo> {
+            Some(&self.info)
+        }
+        fn tensor_slice(&self, _name: &str) -> Option<&[u8]> {
+            Some(&self.bytes)
+        }
+    }
+
+    fn source(ggml_type: GGMLType, dims: &[u64]) -> Source {
+        let info = TensorInfo {
+            name: "weight".into(),
+            dims: dims.to_vec(),
+            ggml_type,
+            offset: 0,
+        };
+        let bytes = vec![0u8; info.checked_nbytes().unwrap_or(0) as usize];
+        Source { info, bytes }
+    }
+
+    #[test]
+    fn require_tensor_type_accepts_the_listed_type() {
+        let source = source(GGMLType::Q8_0, &[64, 2]);
+        assert_eq!(
+            require_tensor_type(&source, "weight", &[64, 2], &[GGMLType::Q8_0]),
+            Ok(GGMLType::Q8_0)
+        );
+    }
+
+    #[test]
+    fn require_tensor_type_rejects_a_type_outside_the_list() {
+        let source = source(GGMLType::BF16, &[64, 2]);
+        let error = require_tensor_type(
+            &source,
+            "weight",
+            &[64, 2],
+            &[GGMLType::Q8_0, GGMLType::Q6K],
+        )
+        .unwrap_err();
+        assert!(error.contains("Invalid tensor weight"), "{error}");
+        assert!(error.contains("one of"), "{error}");
+    }
+
+    #[test]
+    fn require_tensor_type_rejects_a_wrong_shape() {
+        let source = source(GGMLType::BF16, &[64, 2]);
+        let error =
+            require_tensor_type(&source, "weight", &[32, 2], &[GGMLType::BF16]).unwrap_err();
+        assert!(error.contains("Invalid tensor weight"), "{error}");
+    }
+
+    /// The byte length follows the type's block layout, not the element
+    /// count: a Q8_0 row of 64 values is 68 bytes, not 128.
+    #[test]
+    fn require_tensor_type_measures_a_block_payload() {
+        let mut source = source(GGMLType::Q8_0, &[64, 2]);
+        source.bytes = vec![0u8; 68 * 2];
+        assert!(require_tensor_type(&source, "weight", &[64, 2], &[GGMLType::Q8_0]).is_ok());
+        source.bytes = vec![0u8; 128 * 2];
+        let error =
+            require_tensor_type(&source, "weight", &[64, 2], &[GGMLType::Q8_0]).unwrap_err();
+        assert!(error.contains("Invalid tensor data length"), "{error}");
     }
 }

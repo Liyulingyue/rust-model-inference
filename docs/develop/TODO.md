@@ -393,6 +393,21 @@ MiniCPM-V 4.7 的 `qwen35moe`（35B-A3B）此前只在**生成面**注册，多�
       改成惰性的 `Weight` / `QuantizedTensor` 会动到已验证的数值路径，只放宽解码面。
       回归测试 `minicpmv::weights::decode_matrix_tests`（含 F32/F16 不变、
       不支持的类型仍报出类型名）。
+- [ ] **Audio8 fused layer（单 submit/层）未完成** — 当前 GPU 模式每层 8 次 submit
+       （2 norm + QKV + attention + O + gate_up + SiLU + down），每次 ~0.25ms 固定开销，
+       36 层 × 116 步 ≈ 32K 次提交，submit 开销主导了 GPU 模式 13.5s 的总耗时
+       （CPU 模式 10.5s 反而更快）。fused layer 的目标是把一整层的 8 个 op 录进同一个
+       command buffer，单次 submit。**未实施原因**：
+       1. 会破坏 `LinearExecutor` 的 CPU/GPU 自动分发——matmul 必须从 `LinearExecutor`
+          抽到 fused path，`ComputePolicy::Auto` 的 per-op 粒度选择变成 per-layer 二元选择；
+       2. `BatchedLinearRuntime` 和 `Audio8GpuCompute` 各有独立 `Qwen3Ops` arena，跨 arena
+          数据必须经 CPU readback，不共享 arena 无法真正 fused；
+       3. 需要大规模重构才能让数据在 GPU 内部流动（残差常驻设备、共享 arena 所有权）。
+       **暂缓策略**：先把算子加速做好（F16/BF16 GPU matmul 带宽优化、k-quant shader
+       u32 字解包、GPU attention/norm/SiLU 集成已完成），多探索几个模型验证通用性，
+       再回头看 fused 问题——届时可能有更清晰的 session 所有权模型可以复用。
+       关联文件：`src/models/audio8/gpu.rs`、`src/models/audio8/text.rs`、
+       `src/compute/linear.rs`、`src/vulkan/ops.rs`。
 
 
 ## Medium Priority
@@ -438,13 +453,17 @@ MiniCPM-V 4.7 的 `qwen35moe`（35B-A3B）此前只在**生成面**注册，多�
       （`parity_trace::full_f32` 用 `format!("{trace}.{name}.f32")`，
       trace 路径是 "1" 时就落在 cwd）。修法：测试结束时恢复原值，
       或改用 `TempDir` 下的绝对路径。
-- [ ] **`kquants.py` 的 Q6_K 批大小估算偏低** — `--format q6_k` 量化 783 MB 的
+- [x] **`kquants.py` 的 Q6_K 批大小估算偏低** — `--format q6_k` 量化 783 MB 的
       `gliner2.5-base-v1` 跑 15 分钟未完成（Q4_K 同输入 4.5 分钟）。`_Q6K_BYTES_PER_BLOCK`
       记的是 `16 × 19 × 8 × 3`（每个 256 元素 super-block 的 19-candidate scale 搜索），
       但 `_q6k_batch` 实际还要为整个 `(n, 256)` batch 分配 F32 输入、副本与打包中间量，
       远不止这个数，于是 `K_SEARCH_BUDGET_BYTES` 形同虚设、批大到吃满内存。修法是让
       `_Q6K_BYTES_PER_BLOCK` 覆盖真实的瞬时占用（或直接给 `_q6k_batch` 一个独立的
       批上限），Q4_K 侧同样值得复核。`q4_k` 与 `q8_0` 两条路径已验证，不受此影响。
+      → 已修：不再靠字节预算推批大小，改为 `K_SEARCH_MAX_BLOCKS = 256` 的显式上限
+      （搜索按 super-block 独立，任意批大小输出逐字节一致）。单线程 NumPy、8.4M 值实测：
+      Q4_K 从 2.22 M values/s、峰值 RSS 5.5 GiB 变为 3.35 M values/s、150 MiB；
+      同样的上限也让 Q6_K 受益。`tools/converter/utils/test_kquants.py` 的定值摘要不变。
 - [ ] **Q8_0 与 Q8_K 量化路径按需量化（消除冗余计算，保留两份 buffer）** — dispatch 按 layer 权重格式，省一次量化 pass
 - [ ] **Qwen3.5：借用权重与 FFN gate/up 输入量化复用的取舍** — 中期重构，不阻塞局部 FFN 优化
 - [ ] **删掉三个纯转发的无参 `new()`** — `CollectSink`（`src/ops/generation_runtime.rs:158`）、

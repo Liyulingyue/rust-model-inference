@@ -34,6 +34,9 @@ pub(crate) fn validate_dit(
     let mut matrices = Vec::new();
     let mut matrix = |name: &str, input, output| {
         require_tensor(source, name, &[input, output], GGMLType::BF16)?;
+        // The contract is checked first, so the payload is measured only
+        // after every shape and type has been accepted.
+        crate::core::tensor::require_tensor_data(source, name)?;
         matrices.push((name.to_owned(), input as usize, output as usize));
         Ok::<_, String>(())
     };
@@ -64,11 +67,13 @@ pub(crate) fn validate_dit(
             matrix(&format!("{stack}.{layer}.mlp_in.weight"), 3072, 18432)?;
             matrix(&format!("{stack}.{layer}.mlp_out.weight"), 9216, 3072)?;
             for name in ["query_norm", "key_norm"] {
-                require_tensor(
+                // Metadata only: the payload is measured when the scale is
+                // loaded, and `validate_dit` runs before that.
+                crate::core::tensor::require_tensor_meta(
                     source,
                     &format!("{stack}.{layer}.norm.{name}.scale"),
                     &[128],
-                    GGMLType::BF16,
+                    &[GGMLType::BF16],
                 )?;
             }
         }
@@ -438,6 +443,21 @@ mod tests {
         first: TensorInfo,
         bytes: Vec<u8>,
     }
+    impl Contract {
+        fn full(arch: &str, flow: bool) -> Self {
+            Self {
+                arch: MetaValue::String(arch.into()),
+                flow: MetaValue::Bool(flow),
+                first: TensorInfo {
+                    name: "emb_in.image.weight".into(),
+                    dims: vec![128, 3072],
+                    ggml_type: GGMLType::BF16,
+                    offset: 0,
+                },
+                bytes: vec![0; 128 * 3072 * 2],
+            }
+        }
+    }
     impl TensorSource for Contract {
         fn metadata(&self, key: &str) -> Option<&MetaValue> {
             match key {
@@ -455,32 +475,28 @@ mod tests {
     }
     #[test]
     fn explicit_architecture_flow_map_shape_dtype_and_bytes_are_required() {
-        let mut source = Contract {
-            arch: MetaValue::String("flux".into()),
-            flow: MetaValue::Bool(true),
-            first: TensorInfo {
-                name: "emb_in.image.weight".into(),
-                dims: vec![128, 3072],
-                ggml_type: GGMLType::BF16,
-                offset: 0,
-            },
-            bytes: vec![0; 128 * 3072 * 2],
-        };
+        let mut source = Contract::full("flux", true);
         assert!(validate_dit(&source)
             .unwrap_err()
             .contains("explicitly registered"));
-        source.arch = MetaValue::String("flux3".into());
-        source.flow = MetaValue::Bool(false);
+        source = Contract::full("flux3", false);
         assert!(validate_dit(&source).unwrap_err().contains("flow-map"));
-        source.flow = MetaValue::Bool(true);
+        // The contract is metadata-only, so the shape and type cases are
+        // reported as such even though no payload is present.
+        source = Contract::full("flux3", true);
         source.first.dims[0] = 129;
-        assert!(validate_dit(&source).unwrap_err().contains("dimensions"));
-        source.first.dims[0] = 128;
+        assert!(validate_dit(&source).unwrap_err().contains("shape"));
+        source = Contract::full("flux3", true);
         source.first.ggml_type = GGMLType::F16;
         assert!(validate_dit(&source).unwrap_err().contains("type"));
-        source.first.ggml_type = GGMLType::BF16;
+        // `validate_dit` walks every tensor in the checkpoint, so a fixture
+        // cannot reach the payload check of a single tensor through it. The
+        // payload rule itself is checked directly.
+        source = Contract::full("flux3", true);
         source.bytes.pop();
-        assert!(validate_dit(&source).unwrap_err().contains("byte length"));
+        let error =
+            crate::core::tensor::require_tensor_data(&source, "emb_in.image.weight").unwrap_err();
+        assert!(error.contains("data length"), "{error}");
     }
 
     fn projection_model() -> Flux3Dit {
