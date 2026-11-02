@@ -175,6 +175,8 @@ pub fn build_text_runtime(
         )?)
     } else if arch == "mellum" {
         Box::new(crate::models::mellum::trunk::runtime::MellumTextRuntime::new(options)?)
+    } else if arch == "spark2_5" {
+        Box::new(crate::models::spark::trunk::runtime::SparkTextRuntime::new(options)?)
     } else if arch == "dory" {
         Box::new(crate::models::dory::DoryTextRuntime::new(options)?)
     } else {
