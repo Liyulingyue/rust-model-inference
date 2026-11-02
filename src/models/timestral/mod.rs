@@ -10,11 +10,57 @@ use rayon::prelude::*;
 use std::collections::HashMap;
 
 const CONFIG_JSON: &str = include_str!("config.json");
+/// Legacy single-size constants (kept for non-GPU paths that don't store Config).
 pub(crate) const D: usize = 768;
 pub(crate) const HEADS: usize = 12;
 pub(crate) const HD: usize = D / HEADS;
 pub(crate) const F: usize = 2048;
 pub(crate) const PS: usize = 32;
+
+/// Runtime model configuration deserialized from GGUF metadata.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Config {
+    pub d_model: usize,
+    pub num_heads: usize,
+    pub mlp_hidden_dim: usize,
+    pub num_layers: usize,
+}
+
+impl Config {
+    pub fn hd(&self) -> usize {
+        self.d_model / self.num_heads
+    }
+}
+
+impl Config {
+    pub fn from_ggml(source: &dyn TensorSource) -> Result<Self, String> {
+        let raw = source
+            .metadata("timestral.config")
+            .and_then(MetaValue::to_string_val)
+            .ok_or("Missing timestral.config metadata")?;
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        struct ConfigJson {
+            d_model: usize,
+            num_heads: usize,
+            mlp_hidden_dim: usize,
+            #[serde(default)]
+            num_layers: Option<usize>,
+            #[serde(default)]
+            block_schedule: Option<Vec<String>>,
+        }
+        let json: ConfigJson = serde_json::from_str(&raw).map_err(|e| format!("invalid timestral.config: {e}"))?;
+        let num_layers = json.num_layers
+            .or_else(|| json.block_schedule.as_ref().map(|s| s.len()))
+            .ok_or("timestral.config: neither num_layers nor block_schedule present")?;
+        Ok(Self {
+            d_model: json.d_model,
+            num_heads: json.num_heads,
+            mlp_hidden_dim: json.mlp_hidden_dim,
+            num_layers,
+        })
+    }
+}
 pub(crate) const Q: usize = 21;
 pub(crate) const MEDIAN: usize = 10;
 pub(crate) const LEVELS: [f32; Q] = [
@@ -34,6 +80,8 @@ pub struct TimestralModel<'a> {
     /// These are read once per model load, so expanding them to F32 here
     /// costs nothing and keeps the norms exact.
     vectors: HashMap<String, Vec<f32>>,
+    /// Runtime configuration (d_model, heads, ff_dim, layers).
+    pub(crate) config: Config,
     compute: crate::compute::ComputePolicy,
     #[cfg(feature = "vulkan")]
     gpu: std::sync::Mutex<Option<crate::vulkan::timestral::Transformer>>,
@@ -107,24 +155,26 @@ impl Contract {
 /// The shapes are the same for every quantization format: GGUF stores a
 /// quantized tensor with its element count, not its block count, so only
 /// the block alignment of `n_in` changes with the format.
-fn tensor_contracts() -> Vec<(String, Contract)> {
+fn tensor_contracts(config: &Config) -> Vec<(String, Contract)> {
+    let d = config.d_model;
+    let f = config.mlp_hidden_dim;
     let mut shapes = vec![
         (
             "representation.forecast_query".into(),
-            Contract::Vector { len: D },
+            Contract::Vector { len: d },
         ),
         (
             "transformer.out_norm.scale".into(),
-            Contract::Vector { len: D },
+            Contract::Vector { len: d },
         ),
     ];
     for (prefix, inp, out, bias) in [
-        ("representation.patch_proj", 2 * PS, D, true),
-        ("head.projection", D, PS * Q, false),
+        ("representation.patch_proj", 2 * PS, d, true),
+        ("head.projection", d, PS * Q, false),
     ] {
         for (name, n_in, n_out) in [
-            ("hidden_layer", inp, 4 * D),
-            ("output_layer", 4 * D, out),
+            ("hidden_layer", inp, 4 * d),
+            ("output_layer", 4 * d, out),
             ("residual_layer", inp, out),
         ] {
             shapes.push((
@@ -139,29 +189,29 @@ fn tensor_contracts() -> Vec<(String, Contract)> {
             }
         }
     }
-    for i in 0..24 {
+    for i in 0..config.num_layers {
         let p = format!("transformer.layers.{i}");
-        shapes.push((format!("{p}.mlp_norm.scale"), Contract::Vector { len: D }));
+        shapes.push((format!("{p}.mlp_norm.scale"), Contract::Vector { len: d }));
         shapes.push((
             format!("{p}.mlp.w12.weight"),
             Contract::Matrix {
-                n_in: D,
-                n_out: 2 * F,
+                n_in: d,
+                n_out: 2 * f,
             },
         ));
         shapes.push((
             format!("{p}.mlp.w3.weight"),
-            Contract::Matrix { n_in: F, n_out: D },
+            Contract::Matrix { n_in: f, n_out: d },
         ));
         for j in 0..if i % 4 == 3 { 2 } else { 1 } {
             shapes.push((
                 format!("{p}.attn_norms.{j}.scale"),
-                Contract::Vector { len: D },
+                Contract::Vector { len: d },
             ));
-            for (name, n_out) in [("wQKV", 3 * D), ("wO", D), ("_gate", D)] {
+            for (name, n_out) in [("wQKV", 3 * d), ("wO", d), ("_gate", d)] {
                 shapes.push((
                     format!("{p}.attns.{j}.{name}.weight"),
-                    Contract::Matrix { n_in: D, n_out },
+                    Contract::Matrix { n_in: d, n_out },
                 ));
             }
         }
@@ -363,17 +413,10 @@ impl<'a> TimestralModel<'a> {
         if arch != Some("timestral") {
             return Err("Expected timestral architecture".into());
         }
-        let raw = source
-            .metadata("timestral.config")
-            .and_then(MetaValue::to_string_val)
-            .ok_or("Missing timestral.config")?;
-        let config: serde_json::Value = serde_json::from_str(raw).map_err(|e| e.to_string())?;
-        if config != serde_json::from_str::<serde_json::Value>(CONFIG_JSON).unwrap() {
-            return Err("Only the published Timestral-209M configuration is supported".into());
-        }
+        let config = Config::from_ggml(source)?;
         let mut matrices = HashMap::new();
         let mut vectors = HashMap::new();
-        for (name, contract) in tensor_contracts() {
+        for (name, contract) in tensor_contracts(&config) {
             match contract {
                 Contract::Matrix { n_in, n_out } => {
                     matrices.insert(name.clone(), load_matrix(source, &name, n_in, n_out)?);
@@ -386,6 +429,7 @@ impl<'a> TimestralModel<'a> {
         Ok(Self {
             matrices,
             vectors,
+            config,
             compute,
             #[cfg(feature = "vulkan")]
             gpu: std::sync::Mutex::new(None),
@@ -434,6 +478,7 @@ impl<'a> TimestralModel<'a> {
             name.strip_suffix(".weight").unwrap_or(name)
         ));
         let n_rows = input.len() / n_in;
+        let _ = w;
         let mut output = vec![0.; n_rows * n_out];
         self.matmul_rows(w, input, &mut output, n_in, n_out);
         if let Some(bias) = bias {
@@ -504,9 +549,10 @@ impl<'a> TimestralModel<'a> {
 
     fn norm(&self, prefix: &str, input: &[f32]) -> Vec<f32> {
         let w = &self.vectors[&format!("{prefix}.scale")];
+        let d = self.config.d_model;
         let mut out = vec![0.; input.len()];
-        out.par_chunks_mut(D)
-            .zip(input.par_chunks(D))
+        out.par_chunks_mut(d)
+            .zip(input.par_chunks(d))
             .for_each(|(out, inp)| {
                 crate::ops::rms_norm(inp, w, out, 1e-6);
             });
@@ -514,9 +560,10 @@ impl<'a> TimestralModel<'a> {
     }
 
     fn residual_block(&self, prefix: &str, input: &[f32], n_in: usize, n_out: usize) -> Vec<f32> {
-        let mut hidden = self.linear(&format!("{prefix}.hidden_layer"), input, n_in, 4 * D);
+        let d = self.config.d_model;
+        let mut hidden = self.linear(&format!("{prefix}.hidden_layer"), input, n_in, 4 * d);
         crate::ops::silu_inplace(&mut hidden);
-        let mut out = self.linear(&format!("{prefix}.output_layer"), &hidden, 4 * D, n_out);
+        let mut out = self.linear(&format!("{prefix}.output_layer"), &hidden, 4 * d, n_out);
         let residual = self.linear(&format!("{prefix}.residual_layer"), input, n_in, n_out);
         add(&mut out, &residual);
         out

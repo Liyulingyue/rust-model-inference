@@ -3181,9 +3181,14 @@ impl<'a> Qwen3Ops<'a> {
         input_stride: usize,
     ) -> Result<(), VulkanError> {
         let format = bindings.weight_format(outputs.len())?;
-        if n_in % 2 != 0 || !matches!(format, GpuWeightFormat::BF16 | GpuWeightFormat::F32) {
+        if n_in % 2 != 0
+            || !matches!(
+                format,
+                GpuWeightFormat::F16 | GpuWeightFormat::BF16 | GpuWeightFormat::F32
+            )
+        {
             return Err(VulkanError::UnsupportedShape(
-                "transposed float matmul requires BF16/F32 and even input dimension".into(),
+                "transposed float matmul requires F16/BF16/F32 and even input dimension".into(),
             ));
         }
         let (mut push, _) = matmul_rows_push(
@@ -3200,15 +3205,20 @@ impl<'a> Qwen3Ops<'a> {
         )?;
         push[16] = if format == GpuWeightFormat::F32 { 4 } else { 2 };
         let columns = outputs[0].1;
-        // Narrow batches need more workgroups and parallel K reduction.
-        let small = format == GpuWeightFormat::F32
-            && token_rows <= 32
-            && columns <= 4096
-            && outputs.len() == 1;
-        let (pipeline, column_tile, token_tile) = if small {
-            (FLOAT_MATMUL_SMALL, 2, 4)
+        // F16 uses a dedicated shader that does proper half-precision decode;
+        // BF16/F32 share the float matmul shader.
+        let (pipeline, column_tile, token_tile) = if format == GpuWeightFormat::F16 {
+            (F16_MATMUL_TILED, 64, 32)
         } else {
-            (FLOAT_MATMUL_TILED, 64, 32)
+            let small = format == GpuWeightFormat::F32
+                && token_rows <= 32
+                && columns <= 4096
+                && outputs.len() == 1;
+            if small {
+                (FLOAT_MATMUL_SMALL, 2, 4)
+            } else {
+                (FLOAT_MATMUL_TILED, 64, 32)
+            }
         };
         let dispatch = row_dispatch(
             columns.div_ceil(column_tile),
@@ -4899,6 +4909,10 @@ impl<'a> Qwen3Ops<'a> {
         op: TimestralOp,
         regions: [ArenaRegion; 6],
         geometry: [usize; 6],
+        d_model: usize,
+        mlp_hidden_dim: usize,
+        num_heads: usize,
+        hd: usize,
     ) -> Result<(), VulkanError> {
         let [rows, enc, seq, context, covariates, time] = geometry;
         if rows == 0
@@ -4914,28 +4928,28 @@ impl<'a> Qwen3Ops<'a> {
             ));
         }
         let n = product("Timestral tokens", &[rows, seq])?;
-        let d = product("Timestral hidden", &[n, 768])?;
+        let d = product("Timestral hidden", &[n, d_model])?;
         let sizes = match op {
             TimestralOp::Qkv => [
                 product("QKV", &[d, 3])?,
                 d,
                 d,
                 d,
-                product("RoPE", &[seq, 32])?,
+                product("RoPE", &[seq, hd / 2])?,
                 0,
             ],
             TimestralOp::Attention => [d, d, d, d, product("valid", &[rows, enc])?, rows],
             TimestralOp::Gate => [d, d, 0, 0, 0, 0],
             TimestralOp::SwiGlu => [
-                product("FFN", &[n, 4096])?,
-                product("FFN", &[n, 2048])?,
+                product("FFN", &[n, 2 * mlp_hidden_dim])?,
+                product("FFN", &[n, mlp_hidden_dim])?,
                 0,
                 0,
                 0,
                 0,
             ],
         };
-        let mut push = [0u32; 13];
+        let mut push = [0u32; 17];
         push[0] = op as u32;
         for (i, (region, size)) in regions.into_iter().zip(sizes).enumerate() {
             push[i + 1] = self.f32_word(region, size, "Timestral arena")?;
@@ -4943,9 +4957,13 @@ impl<'a> Qwen3Ops<'a> {
         for (i, value) in geometry.into_iter().enumerate() {
             push[i + 7] = as_u32(value, "Timestral geometry")?;
         }
+        push[13] = as_u32(d_model, "Timestral d_model")?;
+        push[14] = as_u32(num_heads, "Timestral num_heads")?;
+        push[15] = as_u32(hd, "Timestral hd")?;
+        push[16] = as_u32(mlp_hidden_dim, "Timestral mlp_hidden_dim")?;
         let groups = match op {
-            TimestralOp::Attention => product("attention queries", &[n, 12])?,
-            TimestralOp::SwiGlu => product("FFN dispatch", &[n, 2048])?.div_ceil(64),
+            TimestralOp::Attention => product("attention queries", &[n, num_heads])?,
+            TimestralOp::SwiGlu => product("FFN dispatch", &[n, mlp_hidden_dim])?.div_ceil(64),
             _ => d.div_ceil(64),
         };
         let grid = row_dispatch(groups, 1, &self.context.limits)?;

@@ -53,14 +53,15 @@ impl Layout {
 }
 
 // Timestral pairs the two halves of the full head, even with partial rotation.
-fn rotate(x: &mut [f32], pos: f32) {
-    for head in x.chunks_exact_mut(HD) {
-        for i in 0..16 {
-            let theta = pos / 10000f32.powf((2 * i) as f32 / 32.);
+fn rotate(x: &mut [f32], pos: f32, hd: usize) {
+    let rope_hd_half = hd / 2;
+    for head in x.chunks_exact_mut(hd) {
+        for i in 0..hd / 4 {
+            let theta = pos / 10000f32.powf((2 * i) as f32 / rope_hd_half as f32);
             let (sin, cos) = theta.sin_cos();
-            let (a, b) = (head[i], head[i + HD / 2]);
+            let (a, b) = (head[i], head[i + hd / 2]);
             head[i] = a * cos - b * sin;
-            head[i + HD / 2] = b * cos + a * sin;
+            head[i + hd / 2] = b * cos + a * sin;
         }
     }
 }
@@ -163,22 +164,23 @@ impl TimestralModel<'_> {
             trace("variate_mask", &[s, 1, r, r], &vm)?;
             trace("positions", &[r, s], &pos)?;
         }
-        let embed = self.residual_block("representation.patch_proj", &patch_inputs, 2 * PS, D);
+        let d = self.config.d_model;
+        let embed = self.residual_block("representation.patch_proj", &patch_inputs, 2 * PS, d);
         let query = self.weight("representation.forecast_query");
-        let mut x = Vec::with_capacity(r * s * D);
-        for row in embed.chunks_exact(enc * D) {
+        let mut x = Vec::with_capacity(r * s * d);
+        for row in embed.chunks_exact(enc * d) {
             x.extend_from_slice(row);
             for _ in 0..dec {
                 x.extend_from_slice(query);
             }
         }
-        trace("embedding", &[r, s, D], &x)?;
+        trace("embedding", &[r, s, d], &x)?;
         let out = self.transform(x, &layout)?;
-        let mut decoder = Vec::with_capacity(r * dec * D);
-        for row in out.chunks_exact(s * D) {
-            decoder.extend_from_slice(&row[enc * D..]);
+        let mut decoder = Vec::with_capacity(r * dec * d);
+        for row in out.chunks_exact(s * d) {
+            decoder.extend_from_slice(&row[enc * d..]);
         }
-        let raw = self.residual_block("head.projection", &decoder, D, PS * Q);
+        let raw = self.residual_block("head.projection", &decoder, d, PS * Q);
         trace("head_raw", &[r, dec * PS, Q], &raw)?;
         let mut preds = raw;
         for q in preds.chunks_exact_mut(Q) {
@@ -218,6 +220,7 @@ impl TimestralModel<'_> {
                     *state = None;
                     *state = Some(crate::vulkan::timestral::Transformer::new(
                         context,
+                        self.config,
                         &self.matrices,
                         &self.vectors,
                         count,
@@ -256,7 +259,7 @@ impl TimestralModel<'_> {
     /// names and the tensor layout are defined exactly once.
     fn transform_cpu(&self, x: Vec<f32>, layout: &Layout) -> Result<Vec<f32>, String> {
         let mut executor = CpuExecutor::new(self, layout, x)?;
-        for op in graph::transformer_ops() {
+        for op in graph::transformer_ops(&self.config) {
             executor.execute(op)?;
         }
         Ok(executor.take(Slot::Norm))
@@ -320,8 +323,9 @@ impl<'a, 'w> CpuExecutor<'a, 'w> {
                     let scale = self.model.weight(&weight);
                     // `rms_norm` only touches `min(input.len(), weight.len())`
                     // elements, so each row has to be normalized on its own.
+                    let d = self.model.config.d_model;
                     let mut dst = vec![0.; src.len()];
-                    for (out, inp) in dst.chunks_exact_mut(D).zip(src.chunks_exact(D)) {
+                    for (out, inp) in dst.chunks_exact_mut(d).zip(src.chunks_exact(d)) {
                         crate::ops::rms_norm(inp, scale, out, 1e-6);
                     }
                     dst
@@ -349,30 +353,35 @@ impl<'a, 'w> CpuExecutor<'a, 'w> {
                 rope: _,
                 time,
             } => {
+                let d = self.model.config.d_model;
+                let heads = self.model.config.num_heads;
+                let hd = self.model.config.hd();
                 let fused = self.take(fused);
                 let (mut qv, mut kv, mut vv) = (
-                    vec![0.; self.count * D],
-                    vec![0.; self.count * D],
-                    vec![0.; self.count * D],
+                    vec![0.; self.count * d],
+                    vec![0.; self.count * d],
+                    vec![0.; self.count * d],
                 );
                 for token in 0..self.count {
-                    for head in 0..HEADS {
-                        for dim in 0..HD {
-                            let dst = token * D + head * HD + dim;
-                            let src = token * 3 * D + dim * HEADS + head;
+                    for head in 0..heads {
+                        for dim in 0..hd {
+                            let dst = token * d + head * hd + dim;
+                            let src = token * 3 * d + dim * heads + head;
                             qv[dst] = fused[src];
-                            kv[dst] = fused[src + D];
-                            vv[dst] = fused[src + 2 * D];
+                            kv[dst] = fused[src + d];
+                            vv[dst] = fused[src + 2 * d];
                         }
                     }
                     if time {
                         rotate(
-                            &mut qv[token * D..(token + 1) * D],
+                            &mut qv[token * d..(token + 1) * d],
                             self.layout.position(token % self.seq),
+                            hd,
                         );
                         rotate(
-                            &mut kv[token * D..(token + 1) * D],
+                            &mut kv[token * d..(token + 1) * d],
                             self.layout.position(token % self.seq),
+                            hd,
                         );
                     }
                 }
@@ -406,14 +415,15 @@ impl<'a, 'w> CpuExecutor<'a, 'w> {
                 self.put(attn, values);
             }
             TimestralOpKind::SwiGlu { fused, hidden } => {
+                let f = self.model.config.mlp_hidden_dim;
                 let fused = self.take(fused);
-                let mut hidden_values = vec![0.; self.count * F];
+                let mut hidden_values = vec![0.; self.count * f];
                 for (out, inp) in hidden_values
-                    .chunks_exact_mut(F)
-                    .zip(fused.chunks_exact(2 * F))
+                    .chunks_exact_mut(f)
+                    .zip(fused.chunks_exact(2 * f))
                 {
-                    for i in 0..F {
-                        out[i] = inp[i] * crate::ops::silu(inp[F + i]);
+                    for i in 0..f {
+                        out[i] = inp[i] * crate::ops::silu(inp[f + i]);
                     }
                 }
                 self.put(hidden, hidden_values);
@@ -431,8 +441,8 @@ impl<'a, 'w> CpuExecutor<'a, 'w> {
         for (name, slot) in checkpoints {
             let values = self.borrow(slot);
             let shape: Vec<usize> = match slot {
-                Slot::Q | Slot::K | Slot::V => vec![self.rows, self.seq, HEADS, HD],
-                _ => vec![self.rows, self.seq, D],
+                Slot::Q | Slot::K | Slot::V => vec![self.rows, self.seq, self.model.config.num_heads, self.model.config.hd()],
+                _ => vec![self.rows, self.seq, self.model.config.d_model],
             };
             super::trace(&name, &shape, values)?;
         }
@@ -448,18 +458,22 @@ impl<'a, 'w> CpuExecutor<'a, 'w> {
         let s = self.seq;
         let rows = self.rows;
         let count = self.count;
-        let mut out_values = vec![0.; count * D];
+        let d = self.model.config.d_model;
+        let heads = self.model.config.num_heads;
+        let hd = self.model.config.hd();
+        let scale = (hd as f32).sqrt();
+        let mut out_values = vec![0.; count * d];
         // Tokens are independent, so the rayon pool splits them.
         out_values
-            .par_chunks_mut(D)
+            .par_chunks_mut(d)
             .enumerate()
             .for_each(|(token, token_out)| {
                 let row = token / s;
                 let slot = token % s;
                 let keys = if time { s } else { rows };
                 let mut scores = vec![0.; keys];
-                for head in 0..HEADS {
-                    let query = &q[token * D + head * HD..token * D + (head + 1) * HD];
+                for head in 0..heads {
+                    let query = &q[token * d + head * hd..token * d + (head + 1) * hd];
                     for (j, score) in scores.iter_mut().enumerate() {
                         let allowed = if time {
                             layout.time_allowed(row, slot, j)
@@ -470,9 +484,9 @@ impl<'a, 'w> CpuExecutor<'a, 'w> {
                         *score = if allowed {
                             crate::ops::dot_f32(
                                 query,
-                                &k[key * D + head * HD..key * D + (head + 1) * HD],
-                                HD,
-                            ) / 8.
+                                &k[key * d + head * hd..key * d + (head + 1) * hd],
+                                hd,
+                            ) / scale
                         } else {
                             f32::NEG_INFINITY
                         };
@@ -480,8 +494,8 @@ impl<'a, 'w> CpuExecutor<'a, 'w> {
                     crate::ops::softmax_inplace(&mut scores);
                     for (j, score) in scores.iter().enumerate() {
                         let key = if time { row * s + j } else { j * s + slot };
-                        for dim in 0..HD {
-                            token_out[head * HD + dim] += score * v[key * D + head * HD + dim];
+                        for dim in 0..hd {
+                            token_out[head * hd + dim] += score * v[key * d + head * hd + dim];
                         }
                     }
                 }
@@ -539,9 +553,10 @@ mod tests {
     use super::*;
     #[test]
     fn partial_rope_pairs_full_head_halves() {
-        let mut x = (0..D).map(|i| i as f32).collect::<Vec<_>>();
+        let hd = 64usize;
+        let mut x = (0..12 * hd).map(|i| i as f32).collect::<Vec<_>>();
         let old = x.clone();
-        rotate(&mut x, 1.);
+        rotate(&mut x, 1., hd);
         assert_eq!(x[16..32], old[16..32]);
         assert_eq!(x[48..64], old[48..64]);
         assert!((x[0] + 32. * 1f32.sin()).abs() < 1e-5);
