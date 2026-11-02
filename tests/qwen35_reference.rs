@@ -4,6 +4,7 @@ use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const LLAMA_PIN: &str = "b96806d96061049a5b574269b049bf6241d63d46";
+const OVISOCR3_RUNTIME_LLAMA_PIN: &str = "11fe02151f79c41d0d4af7da708755d73b9c0da6";
 const TRACE_FILTER: &str = "qwen35.prompt_ids,qwen35.mrope_positions,qwen35.layer_is_recurrent,qwen35.embedding,conv_output_raw-0,q_conv_predelta-0,k_conv_predelta-0,state_predelta-0,final_output-0,layer_output-0,attn_norm-3,Qcur_normed-3,Kcur_normed-3,Qcur-3,Kcur-3,layer_output-3,attn_norm-63,Qcur_normed-63,Kcur_normed-63,Qcur-63,Kcur-63,layer_output-63,result_norm,result_output,qwen35.greedy_token_ids";
 const BITWISE: &[&str] = &["qwen35.embedding", "state_predelta-0"];
 const LOSSY_BOUNDS: &[(&str, f32, f32)] = &[
@@ -1054,12 +1055,117 @@ fn precision_metric_rejects_nonfinite_and_detects_drift() {
 #[test]
 #[ignore = "requires Holo4 F16 mmproj, vision Oracle, and --features parity-trace"]
 fn holo4_vision_matches_llama_cpp_with_precision_bounds() {
+    assert_eq!(git_head(&required_path("RMI_LLAMA_CPP")), LLAMA_PIN);
+    check_qwen35_vision_with_precision_bounds(
+        required_path("RMI_HOLO4_MMPROJ"),
+        required_path("RMI_HOLO4_VISION_ORACLE"),
+        (27, 1152, 16, 5120),
+        64,
+    );
+}
+
+#[test]
+#[ignore = "requires OvisOCR3 BF16/F32 models, runtime Oracle, RMI_SCALAR=1, and --features parity-trace"]
+fn ovisocr3_text_matches_llama_cpp_with_precision_bounds() {
+    assert!(cfg!(feature = "parity-trace"), "enable parity-trace");
+    assert_eq!(std::env::var("RMI_SCALAR").as_deref(), Ok("1"));
+    assert_eq!(
+        git_head(&required_path("RMI_LLAMA_CPP")),
+        OVISOCR3_RUNTIME_LLAMA_PIN
+    );
+    let model = required_path("RMI_OVISOCR3_MODEL");
+    let widened = required_path("RMI_OVISOCR3_F32_MODEL");
+    let oracle = required_path("RMI_OVISOCR3_ORACLE");
+    let artifacts = unique_temp_dir("rmi-ovisocr3-text");
+    let native_dir = artifacts.join("native");
+    let widened_dir = artifacts.join("widened");
+    std::fs::create_dir(&native_dir).unwrap();
+    std::fs::create_dir(&widened_dir).unwrap();
+    let rust = records(&run_rust(&model, "你好", 4, &artifacts, 64, true)).unwrap();
+    let native = records(&run_oracle(&oracle, &model, "你好", 4, &native_dir)).unwrap();
+    let wide = records(&run_oracle(&oracle, &widened, "你好", 4, &widened_dir)).unwrap();
+    assert_eq!((rust.len(), native.len(), wide.len()), (325, 325, 325));
+    let mut maxima = std::collections::BTreeMap::<String, (f64, f64, f64)>::new();
+    for ((actual, expected), widened) in rust.iter().zip(&native).zip(&wide) {
+        for field in ["name", "shape", "len", "layer", "step", "occurrence"] {
+            assert_eq!(actual.get(field), expected.get(field), "{field}");
+            assert_eq!(widened.get(field), expected.get(field), "{field}");
+        }
+        if let Some(expected) = values(expected) {
+            assert_eq!(values(actual), Some(expected));
+            assert_eq!(values(widened), Some(expected));
+            continue;
+        }
+        let name = actual["name"].as_str().unwrap();
+        let actual = f32_words(actual).unwrap();
+        let expected = f32_words(expected).unwrap();
+        let widened = f32_words(widened).unwrap();
+        // Embedding lookup and the initial zero-filled state are lossless.
+        if name == "qwen35.embedding" || expected.iter().all(|&bits| bits == 0) {
+            assert_eq!(actual, expected);
+            assert_eq!(actual, widened);
+            continue;
+        }
+        let error = relative_l2(&actual, &expected);
+        let spread = relative_l2(&widened, &expected);
+        let f32_error = relative_l2(&actual, &widened);
+        let maximum = maxima.entry(name.into()).or_default();
+        maximum.0 = maximum.0.max(error);
+        maximum.1 = maximum.1.max(spread);
+        maximum.2 = maximum.2.max(f32_error);
+    }
+    eprintln!("OvisOCR3 text max (Rust/BF16, F32/BF16, Rust/F32): {maxima:?}");
+    // Calibrate each checkpoint over all forwards, as in the Holo4 reference.
+    // Widening keeps weight values exact but changes BF16 activation rounding.
+    for (name, &(error, spread, _)) in &maxima {
+        let bound = (1.5 * spread).max(1e-5).min(0.05);
+        assert!(spread <= 0.05, "{name}: Oracle precision spread={spread}");
+        assert!(error <= bound, "{name}: relative_l2={error}, bound={bound}");
+    }
+    eprintln!("OvisOCR3 text artifacts {}", artifacts.display());
+}
+
+#[test]
+#[ignore = "requires OvisOCR3 BF16 mmproj, vision Oracle, and --features parity-trace"]
+fn ovisocr3_vision_matches_llama_cpp_with_precision_bounds() {
+    use rust_model_inference::models::qwen35::vision::{
+        clip_config::ClipVisionConfig, qwen_smart_resize,
+    };
+    assert_eq!(
+        git_head(&required_path("RMI_LLAMA_CPP")),
+        OVISOCR3_RUNTIME_LLAMA_PIN
+    );
+    let mmproj = required_path("RMI_OVISOCR3_MMPROJ");
+    let source = rust_model_inference::GGUFLoader::from_file(&mmproj).unwrap();
+    let config = ClipVisionConfig::from_source(&source).unwrap();
+    assert_eq!(
+        (config.image_min_pixels, config.image_max_pixels),
+        (65536, 16777216)
+    );
+    for (side, resized, tokens) in [(32, 256, 64), (8192, 4096, 16384)] {
+        let grid = qwen_smart_resize(side, side, &config).unwrap();
+        assert_eq!(
+            (grid.image_width(), grid.image_height(), grid.token_count()),
+            (resized, resized, tokens)
+        );
+    }
+    check_qwen35_vision_with_precision_bounds(
+        mmproj,
+        required_path("RMI_OVISOCR3_VISION_ORACLE"),
+        (12, 768, 16, 1024),
+        256,
+    );
+}
+
+fn check_qwen35_vision_with_precision_bounds(
+    mmproj: PathBuf,
+    oracle: PathBuf,
+    expected_config: (usize, usize, usize, usize),
+    side: usize,
+) {
     use rust_model_inference::models::qwen35::vision::{VisionEncoder, VisionScratchpad};
     assert!(cfg!(feature = "parity-trace"), "enable parity-trace");
-    assert_eq!(git_head(&required_path("RMI_LLAMA_CPP")), LLAMA_PIN);
-    let mmproj = required_path("RMI_HOLO4_MMPROJ");
-    let oracle = required_path("RMI_HOLO4_VISION_ORACLE");
-    let artifacts = unique_temp_dir("rmi-holo4-vision");
+    let artifacts = unique_temp_dir("rmi-qwen35-vision");
     let source = rust_model_inference::GGUFLoader::from_file(&mmproj).unwrap();
     let pool = std::sync::Arc::new(rust_model_inference::ComputePool::new(1));
     let mut encoder = VisionEncoder::from_source(&source, pool.clone()).unwrap();
@@ -1070,9 +1176,9 @@ fn holo4_vision_matches_llama_cpp_with_precision_bounds() {
             encoder.config.patch_size,
             encoder.config.projection_dim
         ),
-        (27, 1152, 16, 5120)
+        expected_config
     );
-    let pixels: Vec<f32> = (0..64 * 64 * 3)
+    let pixels: Vec<f32> = (0..side * side * 3)
         .map(|i| ((i * 17 % 251) as f32 - 125.0) / 128.0)
         .collect();
     let input = artifacts.join("pixels.f32");
@@ -1090,9 +1196,9 @@ fn holo4_vision_matches_llama_cpp_with_precision_bounds() {
         Command::new(oracle)
             .arg(&mmproj)
             .arg(input)
-            .args(["64", "64"])
+            .args([side.to_string(), side.to_string()])
             .arg(&output),
-        "Holo4 vision Oracle",
+        "Qwen3.5 vision Oracle",
     );
     let expected = records(&output.join("vision.jsonl")).unwrap();
     let trace = artifacts.join("rust.jsonl");
@@ -1104,13 +1210,17 @@ fn holo4_vision_matches_llama_cpp_with_precision_bounds() {
     );
     let mut scratch = VisionScratchpad::new(&encoder.config);
     let grid = encoder
-        .encode_image(&pixels, 64, 64, &mut scratch, &pool)
+        .encode_image(&pixels, side, side, &mut scratch, &pool)
         .unwrap();
     std::env::remove_var("RMI_PARITY_TRACE");
     std::env::remove_var("RMI_PARITY_FILTER");
-    assert_eq!(grid.token_count(), 4);
+    let tokens = (side / (encoder.config.patch_size * encoder.config.spatial_merge_size)).pow(2);
+    assert_eq!(grid.token_count(), tokens);
     let actual = records(&trace).unwrap();
-    assert_eq!((actual.len(), expected.len()), (28, 29));
+    assert_eq!(
+        (actual.len(), expected.len()),
+        (expected_config.0 + 1, expected_config.0 + 2)
+    );
     for (index, (a, b)) in actual.iter().zip(&expected).enumerate() {
         let name = match index {
             0 => {
@@ -1129,12 +1239,21 @@ fn holo4_vision_matches_llama_cpp_with_precision_bounds() {
             shape(a).unwrap().into_iter().rev().collect::<Vec<_>>(),
             shape(b).unwrap()
         );
-        eprintln!("{name}");
-        assert!(relative_l2(&f32_words(a).unwrap(), &f32_words(b).unwrap()) < 0.05);
+        let error = relative_l2(&f32_words(a).unwrap(), &f32_words(b).unwrap());
+        eprintln!("{name}: relative_l2={error}");
+        assert!(error < 0.05, "{name}: relative_l2={error} exceeds 0.05");
     }
     eprintln!("qwen.vision.output");
     let projected: Vec<u32> = scratch.projected.iter().map(|x| x.to_bits()).collect();
-    assert_eq!(shape(expected.last().unwrap()).unwrap(), [5120, 4]);
-    assert!(relative_l2(&projected, &f32_words(expected.last().unwrap()).unwrap()) < 0.05);
-    eprintln!("Holo4 vision artifacts {}", artifacts.display());
+    assert_eq!(
+        shape(expected.last().unwrap()).unwrap(),
+        [expected_config.3, tokens]
+    );
+    let error = relative_l2(&projected, &f32_words(expected.last().unwrap()).unwrap());
+    eprintln!("qwen.vision.output: relative_l2={error}");
+    assert!(
+        error < 0.05,
+        "vision output: relative_l2={error} exceeds 0.05"
+    );
+    eprintln!("Qwen3.5 vision artifacts {}", artifacts.display());
 }

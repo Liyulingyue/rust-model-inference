@@ -7,9 +7,39 @@ description: Use when 用户要求下载模型/权重（GGUF、mmproj 等）到 
 
 ## 核心原则
 
-- **ModelScope 优先**：默认从 ModelScope（`modelscope download`）下载，不要默认走 HuggingFace。仅当用户明确要求或仓库在 ModelScope 上不存在时才换源，且换源前先和用户确认。
 - **按需下载文件，不整仓克隆**：只列出需要的文件名（权重 gguf、mmproj、README 等），避免下载整个仓库的冗余大文件。
 - **下载位置固定**：所有模型放在仓库根的 `models/` 下，每个 repo 一个从属于 `models` 的子目录（`--local_dir ./<repo-name>`）。
+
+## 下载渠道优先级
+
+| 顺序 | 渠道 | 何时用 |
+| --- | --- | --- |
+| 1 | **ModelScope**（`modelscope download`） | 默认首选，无需询问 |
+| 2 | **HuggingFace** | ModelScope 没有该 repo，或用户明确要求 |
+| 3 | **HuggingFace via hf-mirror** | 走 HF 但 `huggingface.co` 连不上时（见下） |
+
+**换源 vs 换传输，两件事，别混：**
+
+| | 例子 | 风险 | 是否询问用户 |
+| --- | --- | --- | --- |
+| **换源** | ModelScope → HF 的同名 repo | 内容来源变了，可能与 pin 的 revision / SHA256 不同 | ✅ **必须先问** |
+| **换传输** | HF → `hf-mirror.com` 的**同一个** repo | 镜像可能不同步或缺文件，但内容身份不变 | ❌ 不用问，**但必须校验 SHA256 与 revision** |
+
+本机实测（2026-11-01）：`https://huggingface.co` **不通**，`https://hf-mirror.com` **通**，
+`https://www.modelscope.cn` 通。所以「换到 HF」在本网络下必须配镜像，否则换不动：
+
+```bash
+# HF 走镜像（同一个 repo，只是换了传输）
+HF_ENDPOINT=https://hf-mirror.com \
+  models/.venv/bin/huggingface-cli download <org/repo> --local-dir models/<name>
+
+# 或在 python 里
+HF_ENDPOINT=https://hf-mirror.com models/.venv/bin/python -c "..."
+```
+
+镜像只对 **HF** 有意义——ModelScope 本身就是国内源，不需要再套一层。
+**镜像下载回来后照样要校验 SHA256**：镜像不同步会拿到旧版或半截文件，
+而校验不过的表现往往不是报错，而是模型跑出乱七八糟的输出。
 
 ## 浏览 / 枚举（找可适配的新模型）
 
@@ -89,4 +119,4 @@ ls -lh models/<repo-name>/
 - 不要 `modelscope download --model {repo}` 不带文件列表——会整仓下载。
 - 不要把模型下到 `models/` 之外的散落路径，或把 `--local_dir` 写成仓库根目录。
 - 不要往系统 Python 里 `pip install modelscope`——一律用 `models/.venv`。
-- 不要静默改用 HuggingFace 源——ModelScope 找不到 repo 时先问用户。
+- 不要静默换源——ModelScope 找不到 repo 时先问用户要不要走 HF（走 HF 后换 hf-mirror 属于换传输，不用问，但要校验 SHA256）。

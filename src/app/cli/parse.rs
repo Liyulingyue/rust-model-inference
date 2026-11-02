@@ -50,6 +50,14 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
             "--laya-request" => {
                 options.laya_request = Some(required_path_value(args, &mut i, "--laya-request")?);
             }
+            "--wevisone-request" => {
+                options.wevisone_request =
+                    Some(required_path_value(args, &mut i, "--wevisone-request")?);
+            }
+            "--wevisone-decoder" => {
+                options.wevisone_decoder =
+                    Some(required_path_value(args, &mut i, "--wevisone-decoder")?);
+            }
             "--timestral-request" => {
                 options.timestral_request =
                     Some(required_path_value(args, &mut i, "--timestral-request")?);
@@ -363,10 +371,11 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
             }
             "--kv-cache" => {
                 if i + 1 < args.len() {
-                    options.kv_format = match args[i + 1].as_str() {
-                        "f32" => KvFormat::F32,
+                    options.kv_format = match args[i + 1].get(0..) {
+                        Some("f32") => KvFormat::F32,
                         _ => KvFormat::F16,
                     };
+                    options.kv_format_explicit = true;
                     i += 1;
                 }
             }
@@ -666,6 +675,7 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
     if options.timestral_request.is_some() && args.iter().any(|arg| arg == "--serve") {
         return Err("--timestral-request is a CLI forecast mode; --serve is unsupported".into());
     }
+    options.serve = args.iter().any(|arg| arg == "--serve");
     Ok(options)
 }
 

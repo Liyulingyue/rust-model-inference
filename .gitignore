@@ -22,3 +22,7 @@ out/
 
 # Astronex 验证产物（视频、算子 fixture）不入库
 /artifacts/
+
+# Unlimited-OCR-2 页面 fixture：由 tools/oracle/unlimited_ocr/make_pages.py 生成，
+# 不入库（仓库只保留合成脚本）。
+/tools/oracle/unlimited_ocr/fixtures/*.png

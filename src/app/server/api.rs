@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod fixtures;
 pub mod image_input;
+mod ocr;
 pub mod protocol;
 mod stop;
 mod think;
@@ -314,7 +315,10 @@ struct PromptResult {
 }
 
 async fn prompt(state: &AppState, request: &Request) -> Result<PromptResult, (u16, String)> {
-    let Backend::Text(text) = state.model.as_ref() else {
+    if let Backend::UnlimitedOcr(native) = state.model.as_ref() {
+        return ocr::prepare(&native.model, request).map_err(|e| (400, e));
+    }
+    let Some(text) = state.model.text_backend() else {
         return Err((400, "Server is not running a text model".into()));
     };
     if text.runtime.is_none() {
@@ -513,6 +517,11 @@ async fn handle(
         Ok(r) => r,
         Err(e) => return error(protocol, 400, e),
     };
+    if matches!(state.model.as_ref(), Backend::UnlimitedOcr(_)) {
+        if let Err(e) = ocr::options(&body, &mut request) {
+            return error(protocol, 400, e);
+        }
+    }
     if let Err((status, message)) = resolve(&state, protocol, &mut request) {
         return error(protocol, status, message);
     }
@@ -641,6 +650,11 @@ async fn count_tokens(
         Ok(r) => r,
         Err(e) => return error(Protocol::Anthropic, 400, e),
     };
+    if matches!(state.model.as_ref(), Backend::UnlimitedOcr(_)) {
+        if let Err(e) = ocr::options(&body, &mut request) {
+            return error(Protocol::Anthropic, 400, e);
+        }
+    }
     if let Err((status, e)) = resolve(&state, Protocol::Anthropic, &mut request) {
         return error(Protocol::Anthropic, status, e);
     }
@@ -690,13 +704,22 @@ fn generate(
     mut emit: impl FnMut(Delta) -> bool,
     cancelled: impl Fn() -> bool,
 ) -> Result<Generation, String> {
-    let Backend::Text(text) = state.model.as_ref() else {
-        return Err("Server is not running a text model".into());
+    let (arch, handle) = match state.model.as_ref() {
+        Backend::Text(text) => (text.arch.as_str(), text.runtime.as_ref()),
+        Backend::WeVisOne(wevisone) => (
+            wevisone.text.arch.as_str(),
+            wevisone.text.runtime.as_ref(),
+        ),
+        Backend::UnlimitedOcr(native) => (
+            crate::models::unlimited_ocr::MODEL_TYPE,
+            Some(&native.runtime),
+        ),
+        _ => return Err("Server is not running a text model".into()),
     };
     if cancelled() {
         return Err("Client disconnected".into());
     }
-    let mut parser = tools::OutputParser::new(&text.arch, &request.tools, &request.choice);
+    let mut parser = tools::OutputParser::new(arch, &request.tools, &request.choice);
     let mut stop = stop::StopFilter::new(request.stop.clone());
     // Strip a leading reasoning block first: a stop sequence inside the block
     // must not cut generation short, and the parser should never see it.
@@ -708,7 +731,12 @@ fn generate(
             stopped = true;
             return false;
         }
-        let output = stop.push(&think.push(chunk));
+        let text = if arch == crate::models::unlimited_ocr::MODEL_TYPE {
+            chunk.to_owned()
+        } else {
+            think.push(chunk)
+        };
+        let output = stop.push(&text);
         match parser.push(&output) {
             Ok(deltas) => {
                 for delta in deltas {
@@ -728,8 +756,8 @@ fn generate(
         stopped = stop.hit.is_some();
         !stopped
     };
-    let Some(handle) = &text.runtime else {
-        return Err(format!("Architecture {:?} is unsupported", text.arch));
+    let Some(handle) = handle else {
+        return Err(format!("Architecture {:?} is unsupported", arch));
     };
     let mut runtime = handle.lock().map_err(|e| e.to_string())?;
     // Bridge the runtime's `TokenSink` to the existing `on_token` closure so
@@ -1043,6 +1071,31 @@ mod http_tests {
             let _guard = CancellationGuard::new(flag.clone());
         }
         assert!(flag.load(std::sync::atomic::Ordering::Relaxed));
+    }
+    #[tokio::test]
+    async fn jev_on_a_non_text_backend_is_a_client_error() {
+        let mut state = state();
+        state.model = std::sync::Arc::new(super::super::Backend::Embedding(
+            super::super::EmbeddingBackend {
+                source: std::sync::Arc::new(UnimplementedSource),
+                mmproj_path: None,
+            },
+        ));
+        let body: JevScoreRequest = serde_json::from_value(json!({
+            "context": "x",
+            "questions": [{"text": "q", "options": ["a", "b"]}]
+        }))
+        .unwrap();
+        let response = jev_score(State(state.clone()), Ok(Json(body))).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body: JevImageScoreRequest = serde_json::from_value(json!({
+            "context": "x",
+            "image_url": "data:image/png;base64,iVBORw0KGgo=",
+            "questions": [{"text": "q", "options": ["a", "b"]}]
+        }))
+        .unwrap();
+        let response = jev_image_score(State(state), Ok(Json(body))).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
     #[tokio::test]
     async fn invalid_json_and_missing_model_have_protocol_error_bodies() {
@@ -1446,7 +1499,6 @@ pub async fn jev_score(
     State(state): State<AppState>,
     body: Result<Json<JevScoreRequest>, JsonRejection>,
 ) -> Response {
-    let _compute_scope = state.compute.enter_legacy_scope();
     let Json(req) = match body {
         Ok(j) => j,
         Err(e) => return jev_error(StatusCode::BAD_REQUEST, format!("invalid JSON: {e}")),
@@ -1457,6 +1509,7 @@ pub async fn jev_score(
             "questions must contain at least one item".to_string(),
         );
     }
+    let _compute_scope = state.compute.enter_legacy_scope();
     if let Backend::Gliner2(gliner2) = state.model.as_ref() {
         // The label set is caller-supplied, exactly like the other JEV modes,
         // so the request shape does not change.  Each question is one task:
@@ -1507,7 +1560,9 @@ pub async fn jev_score(
 
     let source = match text_source(&state) {
         Ok(s) => s,
-        Err(e) => return jev_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+        // A JEV request against a server that is not running a text model
+        // is a client error, not a fault.
+        Err(e) => return jev_error(StatusCode::BAD_REQUEST, e),
     };
 
     let questions: Vec<crate::app::JevQuestionInput> = req
@@ -1572,7 +1627,6 @@ async fn jev_grouped(
     State(state): State<AppState>,
     body: Result<Json<JevGroupedRequest>, JsonRejection>,
 ) -> Response {
-    let _compute_scope = state.compute.enter_legacy_scope();
     let Json(req) = match body {
         Ok(j) => j,
         Err(e) => return jev_error(StatusCode::BAD_REQUEST, format!("invalid JSON: {e}")),
@@ -1593,9 +1647,12 @@ async fn jev_grouped(
             );
         }
     };
+    let _compute_scope = state.compute.enter_legacy_scope();
     let source = match text_source(&state) {
         Ok(s) => s,
-        Err(e) => return jev_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+        // A JEV request against a server that is not running a text model
+        // is a client error, not a fault.
+        Err(e) => return jev_error(StatusCode::BAD_REQUEST, e),
     };
 
     let questions: Vec<crate::app::JevGroupedQuestionInput> = req
@@ -1645,6 +1702,7 @@ async fn jev_grouped(
 fn text_source(state: &AppState) -> Result<Arc<dyn crate::core::tensor::TensorSource>, String> {
     match state.model.as_ref() {
         Backend::Text(text) => Ok(Arc::clone(&text.source)),
+        Backend::WeVisOne(wevisone) => Ok(Arc::clone(&wevisone.text.source)),
         // CLM owns an encoder too; it just scores differently.
         Backend::Clm(clm) => Ok(Arc::clone(&clm.source)),
         other => Err(format!(
@@ -1656,7 +1714,8 @@ fn text_source(state: &AppState) -> Result<Arc<dyn crate::core::tensor::TensorSo
 
 fn backend_label(b: &Backend) -> &'static str {
     match b {
-        Backend::Text(_) => "text",
+        Backend::Text(_) | Backend::WeVisOne(_) => "text",
+        Backend::UnlimitedOcr(_) => "unlimited-ocr",
         Backend::Embedding(_) => "embedding",
         Backend::Asr(_) => "asr",
         Backend::Audio8(_) => "audio8",
@@ -1672,6 +1731,7 @@ fn backend_label(b: &Backend) -> &'static str {
 fn jev_threads(state: &AppState) -> usize {
     match state.model.as_ref() {
         Backend::Text(text) => text.pool.n_threads(),
+        Backend::WeVisOne(wevisone) => wevisone.text.pool.n_threads(),
         Backend::Clm(clm) => clm.model.pool().n_threads(),
         Backend::Gliner2(gliner2) => gliner2.n_threads,
         _ => 1,
@@ -1681,6 +1741,7 @@ fn jev_threads(state: &AppState) -> usize {
 fn jev_prefill_batch_size(state: &AppState) -> usize {
     match state.model.as_ref() {
         Backend::Text(text) => text.prefill_batch_size,
+        Backend::WeVisOne(wevisone) => wevisone.text.prefill_batch_size,
         Backend::Clm(clm) => clm.prefill_batch_size,
         _ => 64,
     }
@@ -1756,6 +1817,18 @@ async fn jev_image_score(
         );
     }
 
+    // The image modes need the text backend's tokenizer. Asking a server
+    // that runs something else is a client error, not a fault, so say so
+    // before the image is decoded.
+    if text_tokenizer(&state).is_none() {
+        return jev_error(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "/v1/jev/image requires a text backend (got {})",
+                backend_label(state.model.as_ref())
+            ),
+        );
+    }
     let image_path = match decode_image_to_tempfile(&req.image_url) {
         Ok(p) => p,
         Err(e) => return jev_error(StatusCode::BAD_REQUEST, e),
@@ -1825,17 +1898,28 @@ async fn jev_image_grouped(
             "questions must contain at least one item".to_string(),
         );
     }
-    let mode_label = match req.mode.as_str() {
-        "multi_select" => "multi_select",
-        "block_choice" => "block_choice",
+    match req.mode.as_str() {
+        "multi_select" | "block_choice" => {}
         other => {
             return jev_error(
                 StatusCode::BAD_REQUEST,
                 format!("mode must be 'multi_select' or 'block_choice', got {other:?}"),
             );
         }
-    };
+    }
 
+    // The image modes need the text backend's tokenizer. Asking a server
+    // that runs something else is a client error, not a fault, so say so
+    // before the image is decoded.
+    if text_tokenizer(&state).is_none() {
+        return jev_error(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "/v1/jev/image requires a text backend (got {})",
+                backend_label(state.model.as_ref())
+            ),
+        );
+    }
     let image_path = match decode_image_to_tempfile(&req.image_url) {
         Ok(p) => p,
         Err(e) => return jev_error(StatusCode::BAD_REQUEST, e),
@@ -2188,7 +2272,7 @@ async fn run_image_grouped_jev_blocking(
 /// can encode "A"/"B"/... label strings into token ids for JEV
 /// argmax scoring.
 fn text_tokenizer(state: &AppState) -> Option<Arc<BPETokenizer>> {
-    if let Backend::Text(text) = state.model.as_ref() {
+    if let Some(text) = state.model.text_backend() {
         Some(Arc::clone(&text.tokenizer))
     } else {
         None
@@ -2226,6 +2310,7 @@ async fn run_multimodal_text_only(
     // Multimodal logits-only forward — dispatch by arch.
     let arch = match state.model.as_ref() {
         Backend::Text(text) => text.arch.clone(),
+        Backend::WeVisOne(wevisone) => wevisone.text.arch.clone(),
         other => {
             return Err(format!(
                 "/v1/jev/image requires a text backend (got {})",
@@ -2235,14 +2320,17 @@ async fn run_multimodal_text_only(
     };
     let source = match state.model.as_ref() {
         Backend::Text(text) => Arc::clone(&text.source),
+        Backend::WeVisOne(wevisone) => Arc::clone(&wevisone.text.source),
         _ => unreachable!(),
     };
     let mmproj_path = match state.model.as_ref() {
-        Backend::Text(text) => text.mmproj_path.clone().ok_or_else(|| {
-            "/v1/jev/image requires the server to be started with --mmproj".to_string()
-        })?,
-        _ => unreachable!(),
-    };
+        Backend::Text(text) => text.mmproj_path.clone(),
+        Backend::WeVisOne(wevisone) => wevisone.text.mmproj_path.clone(),
+        _ => None,
+    }
+    .ok_or_else(|| {
+        "/v1/jev/image requires the server to be started with --mmproj".to_string()
+    })?;
     let threads = jev_threads(&state);
     let prefill_batch_size = jev_prefill_batch_size(&state);
 
@@ -2295,7 +2383,7 @@ async fn run_multimodal_text_only(
 }
 
 fn state_for_max_ctx(state: &AppState) -> Result<usize, String> {
-    if let Backend::Text(text) = state.model.as_ref() {
+    if let Some(text) = state.model.text_backend() {
         Ok(text.context_length)
     } else {
         Err("max-context unavailable for non-text backend".to_string())
@@ -2346,35 +2434,22 @@ fn decode_image_to_tempfile(image_url: &str) -> Result<std::path::PathBuf, Strin
 }
 
 fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
-    // Minimal RFC4648 base64 decoder (whitespace-tolerant, no padding
-    // required). Avoids pulling in a base64 crate.
-    const TABLE: &[u8; 128] = &{
-        let mut t = [255u8; 128];
-        let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut i = 0;
-        while i < alphabet.len() {
-            t[alphabet[i] as usize] = i as u8;
-            i += 1;
-        }
-        t
-    };
+    use base64::Engine as _;
     let cleaned: Vec<u8> = s.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
-    let mut out = Vec::with_capacity(cleaned.len() * 3 / 4);
-    let mut buf = 0u32;
-    let mut bits = 0u32;
-    for &c in &cleaned {
-        let v = if c < 128 { TABLE[c as usize] } else { 255 };
-        if v == 255 {
-            return Err(format!("invalid base64 char: {c:?}"));
-        }
-        buf = (buf << 6) | (v as u32);
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push(((buf >> bits) & 0xff) as u8);
-        }
+    base64::engine::general_purpose::STANDARD
+        .decode(&cleaned)
+        .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(&cleaned))
+        .map_err(|e| format!("invalid base64 image: {e}"))
+}
+
+#[test]
+fn jev_base64_accepts_padding_and_rejects_truncated_bytes() {
+    for input in ["TQ==", "TQ", " TQ==\n"] {
+        assert_eq!(base64_decode(input).unwrap(), b"M");
     }
-    Ok(out)
+    for input in ["T", "TQ=garbage", "@@@"] {
+        assert!(base64_decode(input).is_err());
+    }
 }
 
 fn detect_image_suffix(bytes: &[u8]) -> &'static str {
