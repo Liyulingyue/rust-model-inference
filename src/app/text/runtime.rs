@@ -163,7 +163,7 @@ pub fn build_text_runtime(
         // surface (the CLI's `run_qwen3_family_multimodal` covers them too);
         // only the projector family differs, which the image path handles.
         Box::new(Qwen3TextRuntime::new(options)?)
-    } else if matches!(arch, "qwen35" | "qwen35moe" | "edge0") {
+    } else if matches!(arch, "qwen35" | "qwen35moe" | "edge0" | "sensenova_loop") {
         Box::new(HybridTextRuntime::new(options)?)
     } else if arch == "lfm2moe" {
         Box::new(Lfm2MoeTextRuntime::new(options)?)
@@ -682,6 +682,7 @@ pub struct HybridTextRuntime {
     mmproj: Option<Arc<dyn TensorSource>>,
     threads: usize,
     arch: String,
+    max_context: usize,
 }
 
 impl HybridTextRuntime {
@@ -692,6 +693,12 @@ impl HybridTextRuntime {
             .validate_text_arch(&arch_of(&options.source))?;
         let _scope = options.compute.enter_legacy_scope();
         let source = options.source.clone();
+        let arch = arch_of(&source);
+        if arch == crate::models::sensenova_loop::ARCH {
+            if let Some(mmproj) = &options.mmproj {
+                crate::models::sensenova_loop::validate_projector(mmproj.as_ref())?;
+            }
+        }
         let mut model = crate::models::hybrid::HybridTextModel::from_source(source.as_ref())?;
         if options.compute == crate::compute::ComputePolicy::Vulkan {
             let capacity = options.capacity_for(model.trunk().config.n_ctx);
@@ -706,7 +713,6 @@ impl HybridTextRuntime {
         // SAFETY: source outlives the runtime (see LlamaTextRuntime::new).
         let model: crate::models::hybrid::HybridTextModel<'static> =
             unsafe { std::mem::transmute(model) };
-        let arch = arch_of(&source);
         Ok(Self {
             compute: options.compute,
             model: Mutex::new(model),
@@ -717,6 +723,7 @@ impl HybridTextRuntime {
             mmproj: options.mmproj.clone(),
             threads: options.threads,
             arch,
+            max_context: options.max_context,
         })
     }
 }
@@ -731,6 +738,7 @@ impl TextRuntime for HybridTextRuntime {
             .lock()
             .map(|model| model.trunk().config.n_ctx)
             .unwrap_or(0)
+            .min(self.max_context)
     }
 
     fn generate(
@@ -761,10 +769,27 @@ impl TextRuntime for HybridTextRuntime {
         } else {
             self.prepare_image_prefill(&request.token_ids, &request.images)?
         };
+        let capacity = prefill_ids
+            .len()
+            .checked_add(request.max_new_tokens)
+            .ok_or("context length overflow")?;
+        if capacity > self.context_length() {
+            return Err(format!(
+                "request needs {capacity} tokens, exceeds context limit {}",
+                self.context_length()
+            ));
+        }
+        let mut next_text_position = prefill_positions
+            .iter()
+            .flat_map(|p| &p[..3])
+            .max()
+            .copied()
+            .and_then(|p| p.checked_add(1))
+            .ok_or("invalid prefill positions")?;
         let mut model = self.model.lock().map_err(|e| e.to_string())?;
         let mut session = crate::models::qwen35::trunk::HybridSession::new_with_compute(
             &mut *model,
-            prefill_ids.len() + request.max_new_tokens,
+            capacity,
             self.prefill_batch_size,
             self.pool.clone(),
             self.compute,
@@ -776,7 +801,10 @@ impl TextRuntime for HybridTextRuntime {
         let mut token_ids = Vec::new();
         let mut finish = Finish::Limit;
         for step in 0..request.max_new_tokens {
-            let pos = session.next_position();
+            let pos = next_text_position;
+            if step > 0 {
+                next_text_position += 1;
+            }
             let decode_positions = [[pos, pos, pos, 0]];
             let logits = if step == 0 {
                 match &prefill_embeddings {
@@ -1047,6 +1075,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn hybrid_runtime_enforces_configured_context_before_session_allocation() {
+        use super::*;
+        let mut runtime = HybridTextRuntime {
+            compute: crate::compute::ComputePolicy::Cpu,
+            model: Mutex::new(crate::models::hybrid::HybridTextModel::Qwen35(
+                crate::models::qwen35::trunk::tests::tiny_dense_session_model(),
+            )),
+            _source: Arc::new(StubSource),
+            tokenizer: Arc::new(stub_tokenizer()),
+            pool: Arc::new(crate::core::thread_pool::ComputePool::new(1)),
+            prefill_batch_size: 1,
+            mmproj: None,
+            threads: 1,
+            arch: "qwen35".into(),
+            max_context: 3,
+        };
+        assert_eq!(runtime.context_length(), 3);
+        let request = GenerationRequest::new(vec![0, 1], 2);
+        let mut sink = crate::ops::generation_runtime::CollectSink::new();
+        assert!(runtime
+            .generate(&request, &mut sink)
+            .unwrap_err()
+            .contains("exceeds context limit 3"));
+    }
+
     /// `capacity_for` is the single capacity rule adapters must use.
     #[test]
     fn capacity_for_is_the_cli_rule() {
@@ -1171,6 +1225,11 @@ impl HybridTextRuntime {
         prompt_ids: &[u32],
         images: &[Vec<u8>],
     ) -> Result<(Vec<u32>, Option<Vec<f32>>, Vec<[usize; 4]>), String> {
+        if self.arch == crate::models::sensenova_loop::ARCH && images.len() != 1 {
+            return Err("SenseNova Loop currently supports exactly one image per request".into());
+        }
+        let _cpu = (self.arch == crate::models::sensenova_loop::ARCH)
+            .then(|| crate::compute::ComputePolicy::Cpu.enter_legacy_scope());
         // The caller must NOT hold the model lock: we take it here for the
         // embedding injection and the mutex is not reentrant.
         let mmproj = self.mmproj.as_ref().ok_or_else(|| {
@@ -1235,21 +1294,19 @@ impl HybridTextRuntime {
         //    "black" for a solid-blue image when the run sat outside the turn.
         //    `tools.rs` builds the turn as `` `user\n` <text> ``,
         //    so the insert point is (first ``) + 1 + len(encode("user\n")).
-        let role_len = self
-            .tokenizer
-            .encode(
-                "user\n",
-                crate::core::tokenizer::EncodeOptions {
-                    add_special: false,
-                    parse_special: false,
-                },
-            )
-            .len();
+        let mut user_prefix = vec![im_start];
+        user_prefix.extend(self.tokenizer.encode(
+            "user\n",
+            crate::core::tokenizer::EncodeOptions {
+                add_special: false,
+                parse_special: false,
+            },
+        ));
         let insert_at = prompt_ids
-            .iter()
-            .position(|&id| id == im_start)
-            .map(|first| first + 1 + role_len)
-            .unwrap_or(prompt_ids.len());
+            .windows(user_prefix.len())
+            .rposition(|window| window == user_prefix)
+            .map(|start| start + user_prefix.len())
+            .ok_or("Image prompt requires a user turn")?;
         let mut ids = Vec::with_capacity(prompt_ids.len() + n_vis_total + 2);
         ids.extend_from_slice(&prompt_ids[..insert_at]);
         ids.push(vision_start);

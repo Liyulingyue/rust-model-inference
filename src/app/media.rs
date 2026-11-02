@@ -50,6 +50,13 @@ pub fn validate_mmproj_capabilities(
     mmproj: &dyn TensorSource,
     media: MediaKind,
 ) -> Result<ProjectorFamily, String> {
+    if llm_arch == "sensenova_loop" {
+        if media != MediaKind::Image {
+            return Err("SenseNova Loop currently supports one image, without audio/video".into());
+        }
+        crate::models::sensenova_loop::validate_projector(mmproj)?;
+        return Ok(ProjectorFamily::Qwen3VlMerger);
+    }
     // Which projector family to use is decided by `clip.projector_type` when
     // the mmproj declares one, not by the language tower's architecture.
     //
@@ -426,6 +433,43 @@ mod tests {
             validate_mmproj_capabilities("qwen35", Stub::merger().as_ref(), MediaKind::Image)
                 .expect("LensVLM-9B pairing must be accepted");
         assert_eq!(family, ProjectorFamily::Qwen3VlMerger);
+    }
+
+    #[test]
+    fn sensenova_requires_its_own_image_projector() {
+        let matching = Stub::with(
+            vec![
+                ("general.architecture", MetaValue::String("clip".into())),
+                (
+                    "clip.projector_type",
+                    MetaValue::String("qwen3vl_merger".into()),
+                ),
+                ("clip.vision.projection_dim", MetaValue::Uint32(4096)),
+                (
+                    "sensenova_loop.source_config_sha256",
+                    MetaValue::String(crate::models::sensenova_loop::SOURCE_CONFIG_SHA256.into()),
+                ),
+            ],
+            &["mm.2.weight"],
+        );
+        assert_eq!(
+            validate_mmproj_capabilities("sensenova_loop", matching.as_ref(), MediaKind::Image)
+                .unwrap(),
+            ProjectorFamily::Qwen3VlMerger
+        );
+        assert!(validate_mmproj_capabilities(
+            "sensenova_loop",
+            matching.as_ref(),
+            MediaKind::Video
+        )
+        .is_err());
+        assert!(validate_mmproj_capabilities(
+            "sensenova_loop",
+            Stub::merger().as_ref(),
+            MediaKind::Image
+        )
+        .unwrap_err()
+        .contains("matching"));
     }
 
     /// MiniCPM-V 4.7 ships as two towers: 1B is `qwen35`, 35B-A3B is

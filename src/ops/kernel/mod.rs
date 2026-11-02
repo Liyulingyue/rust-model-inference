@@ -328,6 +328,20 @@ pub struct Weight<'a> {
 }
 
 impl<'a> Weight<'a> {
+    pub fn from_f32_bytes(bytes: &'a [u8], n_in: usize, n_out: usize) -> Option<Self> {
+        let kernel: Box<dyn Kernel + 'a> =
+            Box::new(f32::F32Kernel::from_le_bytes(bytes, n_in, n_out)?);
+        let ggml_type = crate::core::tensor::GGMLType::F32;
+        #[cfg(feature = "vulkan")]
+        let kernel = vulkan::VulkanKernel::wrap(kernel, ggml_type);
+        Some(Self {
+            kernel,
+            ggml_type,
+            n_in,
+            n_out,
+        })
+    }
+
     pub fn from_quantized(tensor: QuantizedTensor<'a>) -> Self {
         let ggml_type = tensor.ggml_type();
         let n_in = tensor.n_in();

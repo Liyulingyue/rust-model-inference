@@ -2352,7 +2352,7 @@ async fn run_multimodal_text_only(
         // `qwen35moe` (MiniCPM-V 4.7 35B-A3B) uses the same `minicpmv4_7`
         // projector and the same `run_qwen35_family_multimodal_logits` helper as
         // `qwen35`; only the arch string differs.
-        "qwen35" | "qwen35moe" => {
+        "qwen35" | "qwen35moe" | "sensenova_loop" => {
             let max_context = match state_for_max_ctx(&state) {
                 Ok(v) => v,
                 Err(e) => return Err(e),

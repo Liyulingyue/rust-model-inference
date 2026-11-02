@@ -41,6 +41,7 @@ pub mod phi3;
 pub mod qwen3;
 pub mod qwen35;
 pub mod qwen_drive;
+pub mod sensenova_loop;
 pub mod spark;
 pub mod timestral;
 pub mod unlimited_ocr;

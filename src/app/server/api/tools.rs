@@ -47,7 +47,7 @@ fn is_qwen35(arch: &str) -> Result<bool, String> {
         // LFM3 has its own Jinja input template and the same plain-text
         // output parser. Neither architecture has a tool-call or vision path.
         "dory" | "lfm3" => Ok(false),
-        "qwen35" | "qwen35moe" => Ok(true),
+        "qwen35" | "qwen35moe" | "sensenova_loop" => Ok(true),
         // Llama-family archs go through the CLI prompt builder
         // (`llama::trunk::build_prompt_tokens`) and don't support tool
         // prompting. They are accepted here so `build_prompt` returns Ok

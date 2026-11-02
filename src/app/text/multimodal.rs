@@ -19,12 +19,12 @@ use crate::models::qwen3::vision::{
     VisionScratchpad as VisionScratchpad3vl,
 };
 use crate::models::qwen3::{Qwen3GenerateOptions, Qwen3Input, Qwen3Model};
+use crate::models::qwen35::build_qwen35_positions;
 use crate::models::qwen35::trunk::HybridSession;
 use crate::models::qwen35::vision::{
     qwen_smart_resize as qwen35_smart_resize, VisionEncoder as VisionEncoder35, VisionGrid,
     VisionScratchpad as VisionScratchpad35,
 };
-use crate::models::qwen35::{build_qwen35_positions, Qwen35Model, Qwen35Session};
 use crate::prompt::{append_qwen_assistant_prefix, append_qwen_message_tokens};
 use std::io::{self, Write};
 use std::path::Path;
@@ -978,8 +978,6 @@ pub fn run_qwen35_family_multimodal_logits(
         qwen_smart_resize as qwen35_smart_resize, VisionEncoder as VisionEncoder35, VisionGrid,
         VisionScratchpad as VisionScratchpad35,
     };
-    use crate::models::qwen35::{Qwen35Model, Qwen35Session};
-
     if audio_path.is_some() {
         return Err(format!(
             "Only gemma4 architecture is supported for multimodal audio, got: qwen35"
@@ -1005,6 +1003,23 @@ pub fn run_qwen35_family_multimodal_logits(
         return Err("qwen35 multimodal requires --image or --video".into());
     };
     let is_video = video_path.is_some();
+    let arch = llm_source
+        .metadata("general.architecture")
+        .and_then(|v| v.to_string_val())
+        .unwrap_or_default();
+    if arch == crate::models::sensenova_loop::ARCH {
+        crate::app::media::validate_mmproj_capabilities(
+            arch,
+            mmproj.as_ref(),
+            if is_video {
+                crate::app::media::MediaKind::Video
+            } else {
+                crate::app::media::MediaKind::Image
+            },
+        )?;
+    }
+    let _cpu = (arch == crate::models::sensenova_loop::ARCH)
+        .then(|| crate::compute::ComputePolicy::Cpu.enter_legacy_scope());
 
     let (first_w, first_h) = {
         let first = frames.first().ok_or("media produced no frames")?;
@@ -1141,21 +1156,21 @@ pub fn run_qwen35_family_multimodal_logits(
         .map(|id| i32::try_from(id).map_err(|_| format!("Token ID {id} exceeds i32")))
         .collect::<Result<_, _>>()?;
 
-    let mut llm = Qwen35Model::from_source(llm_source)
+    let mut llm = HybridTextModel::from_source(llm_source)
         .map_err(|error| format!("Failed to parse Qwen3.5 model: {error}"))?;
     let max_seq = (prompt_tokens.len() + 1)
-        .min(llm.config.n_ctx)
+        .min(llm.trunk().config.n_ctx)
         .min(max_context);
     let prompt_embd = inject_vision_embeddings(
-        &llm,
+        llm.trunk(),
         &prompt_tokens,
         Some(image_token_id_i32),
         &vis_embeddings,
         n_vis_tokens,
-        llm.config.n_embd,
+        llm.trunk().config.n_embd,
     )?;
     let t0 = std::time::Instant::now();
-    let mut session = Qwen35Session::new_with_prefill_batch_size(
+    let mut session = HybridSession::new_with_prefill_batch_size(
         &mut llm,
         max_seq,
         prefill_batch_size,
@@ -1340,7 +1355,14 @@ pub(super) fn run_multimodal_with_video_ref(
     if arch == "edge0" && (image_path.is_some() || video_path.is_some()) {
         return Err("Edge0-35B preview contains no vision weights; text input only".into());
     }
-    if arch != "qwen35" && arch != "qwen35moe" && arch != "qwen3vl" && arch != "edge0" {
+    let _cpu = (arch == crate::models::sensenova_loop::ARCH)
+        .then(|| crate::compute::ComputePolicy::Cpu.enter_legacy_scope());
+    if arch != "qwen35"
+        && arch != "qwen35moe"
+        && arch != "qwen3vl"
+        && arch != "edge0"
+        && arch != "sensenova_loop"
+    {
         return Err(format!(
             "Only qwen35, qwen35moe, qwen3vl, and edge0 architectures are supported \
              for multimodal, got: {arch}"
@@ -1586,6 +1608,36 @@ pub(super) fn run_multimodal_with_video_ref(
             }
             ids
         }
+        (false, Some(marker)) if arch == crate::models::sensenova_loop::ARCH => {
+            let template = jinja.resolve(&|k| llm_source.metadata(k).cloned())?;
+            crate::prompt::jinja::media_conversation_tokens(
+                &tokenizer,
+                template.as_ref(),
+                marker,
+                &[crate::prompt::jinja::MediaPart::image(n_vis_tokens)],
+                prompt,
+                None,
+                false,
+            )?
+            .ok_or("SenseNova image generation requires --jinja")?
+        }
+        (false, None) if arch == crate::models::sensenova_loop::ARCH => {
+            match crate::prompt::jinja::single_turn_tokens(
+                &tokenizer,
+                jinja,
+                &|k| llm_source.metadata(k).cloned(),
+                prompt,
+                false,
+            )? {
+                Some(ids) => ids,
+                None => {
+                    let mut ids = Vec::new();
+                    append_qwen_message_tokens(&mut ids, &tokenizer, "user", &content_tokens)?;
+                    append_qwen_assistant_prefix(&mut ids, &tokenizer, false)?;
+                    ids
+                }
+            }
+        }
         _ => {
             let mut ids = Vec::new();
             append_qwen_message_tokens(&mut ids, &tokenizer, "user", &content_tokens)?;
@@ -1711,7 +1763,9 @@ pub(super) fn run_multimodal_with_video_ref(
     // the session has to be sized by rows, not by tokens.
     let n_prompt = prompt_tokens.len();
     let prompt_rows = prompt_embd.len() / n_embd_row;
-    let max_seq = (prompt_rows + max_tokens).min(config.n_ctx);
+    let max_seq = (prompt_rows + max_tokens)
+        .min(config.n_ctx)
+        .min(max_context);
     let mut all_tokens = prompt_tokens.clone();
 
     let n_threads = if n_threads_arg > 0 { n_threads_arg } else { 8 };
