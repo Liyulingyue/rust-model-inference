@@ -393,6 +393,21 @@ MiniCPM-V 4.7 的 `qwen35moe`（35B-A3B）此前只在**生成面**注册，多�
       改成惰性的 `Weight` / `QuantizedTensor` 会动到已验证的数值路径，只放宽解码面。
       回归测试 `minicpmv::weights::decode_matrix_tests`（含 F32/F16 不变、
       不支持的类型仍报出类型名）。
+- [ ] **Audio8 fused layer（单 submit/层）未完成** — 当前 GPU 模式每层 8 次 submit
+       （2 norm + QKV + attention + O + gate_up + SiLU + down），每次 ~0.25ms 固定开销，
+       36 层 × 116 步 ≈ 32K 次提交，submit 开销主导了 GPU 模式 13.5s 的总耗时
+       （CPU 模式 10.5s 反而更快）。fused layer 的目标是把一整层的 8 个 op 录进同一个
+       command buffer，单次 submit。**未实施原因**：
+       1. 会破坏 `LinearExecutor` 的 CPU/GPU 自动分发——matmul 必须从 `LinearExecutor`
+          抽到 fused path，`ComputePolicy::Auto` 的 per-op 粒度选择变成 per-layer 二元选择；
+       2. `BatchedLinearRuntime` 和 `Audio8GpuCompute` 各有独立 `Qwen3Ops` arena，跨 arena
+          数据必须经 CPU readback，不共享 arena 无法真正 fused；
+       3. 需要大规模重构才能让数据在 GPU 内部流动（残差常驻设备、共享 arena 所有权）。
+       **暂缓策略**：先把算子加速做好（F16/BF16 GPU matmul 带宽优化、k-quant shader
+       u32 字解包、GPU attention/norm/SiLU 集成已完成），多探索几个模型验证通用性，
+       再回头看 fused 问题——届时可能有更清晰的 session 所有权模型可以复用。
+       关联文件：`src/models/audio8/gpu.rs`、`src/models/audio8/text.rs`、
+       `src/compute/linear.rs`、`src/vulkan/ops.rs`。
 
 
 ## Medium Priority
