@@ -612,7 +612,7 @@ pub fn run_jev_grouped_decision_data(
     eprintln!("JEV grouped: arch = {:?}, mode = {:?}", arch, mode);
 
     let results = match &*arch {
-        "qwen3" | "qwen3vl" => qwen3::run_jev_grouped_qwen3(
+        "qwen3" | "qwen3vl" | "mage_vl" => qwen3::run_jev_grouped_qwen3(
             source.clone(),
             context,
             &prepared,

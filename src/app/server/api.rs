@@ -333,6 +333,7 @@ async fn prompt(state: &AppState, request: &Request) -> Result<PromptResult, (u1
     let tokenizer = text.tokenizer.clone();
     let arch = text.arch.clone();
     let context = text.context_length;
+    let has_vision = text.mmproj_path.is_some();
     let source = text.source.clone();
     // `spawn_blocking` requires `'static`, so move the Arc rather than
     // borrowing through `state`.
@@ -367,6 +368,31 @@ async fn prompt(state: &AppState, request: &Request) -> Result<PromptResult, (u1
             compiled_chat_template.as_ref().as_ref(),
         )
         .map_err(|e| (400, e))?;
+        if arch == "mage_vl" {
+            if images.is_empty() {
+                if ids.contains(&crate::models::mage_vl::IMAGE) {
+                    return Err((
+                        400,
+                        "Mage-VL image placeholders require attached images".into(),
+                    ));
+                }
+            } else {
+                if !has_vision {
+                    return Err((400, "Mage-VL image input requires --mmproj".into()));
+                }
+                let decoded = images
+                    .iter()
+                    .map(|b| crate::app::media::decode_image_bytes(b))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| (400, e))?;
+                crate::models::mage_vl::check_image_budget(
+                    &ids,
+                    &decoded,
+                    context.saturating_sub(request.max_tokens),
+                )
+                .map_err(|e| (400, e))?;
+            }
+        }
         if ids
             .len()
             .checked_add(request.max_tokens)
@@ -706,10 +732,9 @@ fn generate(
 ) -> Result<Generation, String> {
     let (arch, handle) = match state.model.as_ref() {
         Backend::Text(text) => (text.arch.as_str(), text.runtime.as_ref()),
-        Backend::WeVisOne(wevisone) => (
-            wevisone.text.arch.as_str(),
-            wevisone.text.runtime.as_ref(),
-        ),
+        Backend::WeVisOne(wevisone) => {
+            (wevisone.text.arch.as_str(), wevisone.text.runtime.as_ref())
+        }
         Backend::UnlimitedOcr(native) => (
             crate::models::unlimited_ocr::MODEL_TYPE,
             Some(&native.runtime),
@@ -2328,27 +2353,29 @@ async fn run_multimodal_text_only(
         Backend::WeVisOne(wevisone) => wevisone.text.mmproj_path.clone(),
         _ => None,
     }
-    .ok_or_else(|| {
-        "/v1/jev/image requires the server to be started with --mmproj".to_string()
-    })?;
+    .ok_or_else(|| "/v1/jev/image requires the server to be started with --mmproj".to_string())?;
+    let max_context = state_for_max_ctx(&state)?;
     let threads = jev_threads(&state);
     let prefill_batch_size = jev_prefill_batch_size(&state);
 
     super::compute_task(state.compute, move || match arch.as_str() {
         // Same arch set the CLI `--jev --image` gate accepts; see
         // `crate::app::jev::single::image_supported_arch`.
-        "qwen3" | "qwen3vl" | "qwen3vlmoe" => crate::app::run_qwen3_family_multimodal_logits(
-            source.as_ref(),
-            source.clone(),
-            mmproj_path.as_path(),
-            Some(image_path.as_path()),
-            None,
-            None,
-            &prompt,
-            threads,
-            prefill_batch_size,
-            Some(system_prompt.as_str()),
-        ),
+        "qwen3" | "qwen3vl" | "qwen3vlmoe" | "mage_vl" => {
+            crate::app::run_qwen3_family_multimodal_logits(
+                source.as_ref(),
+                source.clone(),
+                mmproj_path.as_path(),
+                Some(image_path.as_path()),
+                None,
+                None,
+                &prompt,
+                threads,
+                prefill_batch_size,
+                Some(system_prompt.as_str()),
+                max_context,
+            )
+        }
         // `qwen35moe` (MiniCPM-V 4.7 35B-A3B) uses the same `minicpmv4_7`
         // projector and the same `run_qwen35_family_multimodal_logits` helper as
         // `qwen35`; only the arch string differs.

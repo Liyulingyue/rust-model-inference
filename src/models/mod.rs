@@ -34,6 +34,7 @@ pub mod lfm25;
 pub mod lfm2moe;
 pub mod lfm3;
 pub mod llama;
+pub mod mage_vl;
 pub mod mellum;
 pub mod minicpmv;
 pub mod nemotron_h;

@@ -28,6 +28,7 @@ pub(crate) fn run_jev_decision_qwen3(
     mmproj_path: Option<&Path>,
     image_path: Option<&Path>,
     jinja: crate::prompt::jinja::Options,
+    max_context: usize,
 ) -> Result<Vec<JevResult>, String> {
     let available_threads = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -48,6 +49,7 @@ pub(crate) fn run_jev_decision_qwen3(
             output_json,
             mmproj_path,
             image_path.expect("image_path is Some"),
+            max_context,
         );
     }
     let mut scorer = Qwen3JevScorer::new(source.clone(), n_threads, prefill_batch_size, &jinja)?;
@@ -68,6 +70,7 @@ fn run_jev_decision_qwen3_visual(
     output_json: bool,
     mmproj_path: &Path,
     image_path: &Path,
+    max_context: usize,
 ) -> Result<Vec<JevResult>, String> {
     use super::run_jev_decision_core;
     use super::JevScorer;
@@ -80,6 +83,7 @@ fn run_jev_decision_qwen3_visual(
         pending: None,
         mmproj_path: mmproj_path.to_path_buf(),
         image_path: image_path.to_path_buf(),
+        max_context,
         n_threads,
         prefill_batch_size,
     };
@@ -99,6 +103,7 @@ struct Qwen3VisualJevScorer {
     pending: Option<(String, String)>,
     mmproj_path: PathBuf,
     image_path: PathBuf,
+    max_context: usize,
     source: Arc<dyn TensorSource>,
     n_threads: usize,
     prefill_batch_size: usize,
@@ -142,6 +147,7 @@ impl JevScorer for Qwen3VisualJevScorer {
             self.n_threads,
             self.prefill_batch_size,
             Some(&system),
+            self.max_context,
         )
     }
 
@@ -169,6 +175,7 @@ impl Qwen3JevScorer {
     ) -> Result<Self, String> {
         let mut jinja = jinja.clone();
         jinja.jinja |= source.metadata("wevisone_vl.source_revision").is_some();
+        jinja.jinja |= crate::app::arch_of(source.as_ref()) == "mage_vl";
         let jinja = jinja.resolve(&|k| source.metadata(k).cloned())?;
         let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
             .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;

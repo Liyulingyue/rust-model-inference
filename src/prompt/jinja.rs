@@ -25,7 +25,10 @@
 //! `add_bos_token`, so callers must not prepend a second one.
 
 use minijinja::{Environment, UndefinedBehavior};
+use serde::Serialize;
+use serde_json::ser::{Formatter, Serializer};
 use serde_json::{json, Value};
+use std::io;
 
 use super::jinja_compat::{python_method, strip_llamacpp_extensions};
 
@@ -136,13 +139,91 @@ impl JinjaChatTemplate {
             // tools preamble the model has no way to satisfy.
             "tools": [],
         });
-        let template = self
-            .env
+        self.render_in(&self.env, &ctx)
+    }
+
+    /// Render a model's full message/tool schema without flattening its content.
+    pub fn render_context(&self, ctx: &Value) -> Result<String, String> {
+        let mut env = self.env.clone();
+        env.add_filter(
+            "tojson",
+            |value: minijinja::Value| -> Result<String, minijinja::Error> {
+                let value = serde_json::to_value(value).map_err(|e| {
+                    minijinja::Error::new(minijinja::ErrorKind::InvalidOperation, e.to_string())
+                })?;
+                serialize_json(&value, true)
+                    .map_err(|e| minijinja::Error::new(minijinja::ErrorKind::InvalidOperation, e))
+            },
+        );
+        self.render_in(&env, ctx)
+    }
+
+    fn render_in(&self, env: &Environment<'static>, ctx: &Value) -> Result<String, String> {
+        let template = env
             .get_template(TEMPLATE_NAME)
             .map_err(|e| format!("{}: template lost: {e}", self.origin))?;
         template
-            .render(&ctx)
+            .render(ctx)
             .map_err(|e| format!("{}: render failed: {e}", self.origin))
+    }
+}
+
+pub(crate) fn python_json(value: &Value) -> Result<String, String> {
+    serialize_json(value, false)
+}
+
+fn serialize_json(value: &Value, python_floats: bool) -> Result<String, String> {
+    let mut bytes = Vec::new();
+    let mut serializer =
+        Serializer::with_formatter(&mut bytes, PythonJsonFormatter { python_floats });
+    value
+        .serialize(&mut serializer)
+        .map_err(|error| error.to_string())?;
+    String::from_utf8(bytes).map_err(|error| error.to_string())
+}
+
+struct PythonJsonFormatter {
+    python_floats: bool,
+}
+
+impl Formatter for PythonJsonFormatter {
+    fn write_f64<W: ?Sized + io::Write>(&mut self, writer: &mut W, value: f64) -> io::Result<()> {
+        if self.python_floats && value != 0.0 && (value.abs() < 1e-4 || value.abs() >= 1e16) {
+            let number = format!("{value:e}");
+            let (mantissa, exponent) = number.split_once('e').unwrap();
+            let exponent: i32 = exponent.parse().unwrap();
+            write!(writer, "{mantissa}e{exponent:+03}")
+        } else {
+            // Preserve the existing Laya serialization when moving this formatter.
+            serde_json::ser::CompactFormatter.write_f64(writer, value)
+        }
+    }
+
+    fn begin_array_value<W>(&mut self, writer: &mut W, first: bool) -> io::Result<()>
+    where
+        W: ?Sized + io::Write,
+    {
+        if !first {
+            writer.write_all(b", ")?;
+        }
+        Ok(())
+    }
+
+    fn begin_object_key<W>(&mut self, writer: &mut W, first: bool) -> io::Result<()>
+    where
+        W: ?Sized + io::Write,
+    {
+        if !first {
+            writer.write_all(b", ")?;
+        }
+        Ok(())
+    }
+
+    fn begin_object_value<W>(&mut self, writer: &mut W) -> io::Result<()>
+    where
+        W: ?Sized + io::Write,
+    {
+        writer.write_all(b": ")
     }
 }
 
@@ -606,6 +687,19 @@ pub fn render_text_conversation(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn template_json_matches_python_float_exponents_without_changing_laya() {
+        let value = serde_json::json!([1e-6, 1e16, -0.0, 1e-4, 1.25, 1.234567890123456e-100]);
+        assert_eq!(
+            super::serialize_json(&value, true).unwrap(),
+            "[1e-06, 1e+16, -0.0, 0.0001, 1.25, 1.234567890123456e-100]"
+        );
+        assert_eq!(
+            super::python_json(&serde_json::json!([1e-6])).unwrap(),
+            "[1e-6]"
+        );
+    }
+
     use super::*;
     use crate::core::tensor::MetaValue;
     use crate::core::tokenizer::MockTokenizer;
