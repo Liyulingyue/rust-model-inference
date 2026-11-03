@@ -87,13 +87,22 @@ oneDNN 的分组卷积路径会让 OpenMP 分块越界，直接抛出
 ### DiT — 与官方 PyTorch 一致
 
 text embed cos = 0.99999995；每个 timestep 的 velocity cos = 0.9999993 … 0.9999999
-（maxdiff ≈ 3e-3，即 F16 权重量化噪声）。
+（maxdiff ≈ 3e-3，即 F16 权重量化噪声）。CPU 与 Vulkan 两条路径同精度：
+Vulkan 的 velocity cos = 0.9999945 … 0.9999999。
 
-### 端到端（32 步、cfg 2.0、官方 sway 网格）
+### 端到端（4 秒 · 4 步 · cfg 2.0、官方 sway 网格）
 
-- latent 轨迹：每步 cos ≈ 1.0（32 步内 worst maxdiff 1.3e-2，latent rms ≈ 1.5）
-- 最终波形：**cos = 0.99999666**，maxdiff 8.1e-3（16-bit PCM 量化）
-- cfg 0 时波形 cos = 0.99997
+| 路径 | 官方 rms / peak / 削波 | Rust rms / peak / 削波 | 波形 cos |
+| --- | --- | --- | --- |
+| CPU | 0.1477 / 0.9730 / 0% | 0.1478 / 0.9732 / 0% | 0.99976098 |
+| Vulkan | 0.1477 / 0.9730 / 0% | 0.1479 / 0.9736 / 0% | 0.99977174 |
+
+32 步时两侧都触及 VAE 末尾 `clamp(x, -1, 1)` 的上限 —— cfg 2.0 的强引导
+`v_cond + 2·(v_cond - v_uncond)` 等效标准 CFG scale 3.0，会把 latent 推出
+可表示范围；Rust 精确复现了官方这一行为。
+
+两条路径的差异来自 F16 GEMM 的累加顺序（GPU 与 CPU 的 NEON 归约不同），
+量级 1e-6 相对误差，在 cfg 2.0 的 32 步里被流匹配放大。
 
 ## 修复的官方语义差异
 
@@ -159,6 +168,35 @@ Flash 的显式网格与 `sway=-1.0` 的 4 步网格在 f32 精度内一致
 （差 < 1e-6，有单测 `flash_time_grid_matches_the_official_pinned_grid` 守住）。
 
 CLI：`--auk-sway <coef>`（默认 `-1.0`）、`--auk-flash`（锁定 Flash 配方）。
+
+## 性能
+
+GB10（20 核）+ NVIDIA GB10，24 kHz，prompt「The next train leaves in ten
+minutes.」，seed 42，`--threads 20`：
+
+| 模型 | 路径 | 优化前 | 优化后 | 加速 |
+| --- | --- | --- | --- | --- |
+| Base（32 步 · 4 秒） | Vulkan | 685.9 s | **84.5 s** | 8.1x |
+| Base（32 步 · 4 秒） | CPU | 416.1 s | **117.8 s** | 3.5x |
+| Flash（4 步 · 4 秒） | Vulkan | 73.3 s | **15.0 s** | 4.9x |
+| Flash（4 步 · 4 秒） | CPU | 53.7 s | **14.7 s** | 3.7x |
+
+Base 32 步的分解（Vulkan）：denoise 75.7 s + VAE 8.1 s。VAE 解码从
+32.1 s 降到 8.1 s（见 `auk/vae` 提交）。
+
+主要改动（每一项都保持逐位一致，见上面的对齐结果）：
+
+| 改动 | 效果 |
+| --- | --- |
+| 投影按整条 token 流批量下发（原来每个 token 一次提交） | 每次前向的设备提交 25411 → 206 |
+| attention 按 (head, query) 拆成独立单元并行，K/V 转成 head-major 布局 | attention 从内存带宽瓶颈变成算力瓶颈 |
+| 线程池空闲 worker 挂起而不是空转 | 之前 19 个空转 worker 会把 attention 线程挤掉（慢 4 倍） |
+| RoPE 表每个前向只算一次 | 每前向 920 万次 libm `sin`/`cos` → 1.3 万次 |
+| `conv_pos_embed` 四路累加器 + NEON | 211 ms → 55 ms 每前向 |
+| VAE 卷积按时间轴累加 + ConvTranspose1d 多相分解 | 4 秒解码 32.1 s → 8.1 s |
+
+`RMI_AUK_PROFILE=1` 打印 DiT 的分阶段耗时，
+`RMI_AUK_VAE_PROFILE=1` 打印 VAE 的分阶段耗时。
 
 ## 复现
 
