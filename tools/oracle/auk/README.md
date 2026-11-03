@@ -176,13 +176,13 @@ minutes.」，seed 42，`--threads 20`：
 
 | 模型 | 路径 | 优化前 | 优化后 | 加速 |
 | --- | --- | --- | --- | --- |
-| Base（32 步 · 4 秒） | Vulkan | 685.9 s | **84.5 s** | 8.1x |
-| Base（32 步 · 4 秒） | CPU | 416.1 s | **117.8 s** | 3.5x |
-| Flash（4 步 · 4 秒） | Vulkan | 73.3 s | **15.0 s** | 4.9x |
-| Flash（4 步 · 4 秒） | CPU | 53.7 s | **14.7 s** | 3.7x |
+| Base（32 步 · 4 秒） | Vulkan | 685.9 s | **82.2 s** | 8.3x |
+| Base（32 步 · 4 秒） | CPU | 416.1 s | **114.9 s** | 3.6x |
+| Flash（4 步 · 4 秒） | Vulkan | 73.3 s | **11.0 s** | 6.7x |
+| Flash（4 步 · 4 秒） | CPU | 53.7 s | **11.5 s** | 4.7x |
 
-Base 32 步的分解（Vulkan）：denoise 75.7 s + VAE 8.1 s。VAE 解码从
-32.1 s 降到 8.1 s（见 `auk/vae` 提交）。
+Base 32 步的分解（Vulkan）：denoise 77.1 s + VAE 4.4 s。VAE 解码从
+32.1 s 降到 4.4 s（见 `auk/vae` 提交）。
 
 主要改动（每一项都保持逐位一致，见上面的对齐结果）：
 
@@ -194,6 +194,7 @@ Base 32 步的分解（Vulkan）：denoise 75.7 s + VAE 8.1 s。VAE 解码从
 | RoPE 表每个前向只算一次 | 每前向 920 万次 libm `sin`/`cos` → 1.3 万次 |
 | `conv_pos_embed` 四路累加器 + NEON | 211 ms → 55 ms 每前向 |
 | VAE 卷积按时间轴累加 + ConvTranspose1d 多相分解 | 4 秒解码 32.1 s → 8.1 s |
+| VAE 的抗混叠重采样并行化 + 卷积复用输入行 | 4 秒解码 8.1 s → 4.4 s |
 
 `RMI_AUK_PROFILE=1` 打印 DiT 的分阶段耗时，
 `RMI_AUK_VAE_PROFILE=1` 打印 VAE 的分阶段耗时。
