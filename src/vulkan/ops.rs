@@ -287,6 +287,45 @@ pub(crate) fn dispatch_log_new_epoch() {
     DISPATCH_LOG_EPOCH.fetch_add(1, Relaxed);
 }
 
+/// Accumulated timings for the batched linear device path.
+#[cfg(feature = "vulkan")]
+pub(crate) static LINEAR_PROFILE: std::sync::Mutex<Option<[u64; 3]>> =
+    std::sync::Mutex::new(None);
+
+/// Whether the batched linear device timings are collected.
+#[cfg(feature = "vulkan")]
+pub(crate) fn linear_profile_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("RMI_GPU_LINEAR_PROFILE").is_some())
+}
+
+/// Record the write / record+submit / readback split of one device matmul.
+#[cfg(feature = "vulkan")]
+pub(crate) fn record_linear_profile(write_ns: u64, record_ns: u64, read_ns: u64) {
+    if let Ok(mut guard) = LINEAR_PROFILE.lock() {
+        let entry = guard.get_or_insert([0, 0, 0]);
+        entry[0] += write_ns;
+        entry[1] += record_ns;
+        entry[2] += read_ns;
+    }
+}
+
+/// Print the accumulated batched linear device timings.
+#[cfg(feature = "vulkan")]
+pub(crate) fn dump_linear_profile() {
+    if let Ok(mut guard) = LINEAR_PROFILE.lock() {
+        if let Some(entry) = guard.take() {
+            let ms = |value: u64| value as f64 / 1e6;
+            eprintln!(
+                "[GPU-LINEAR-PROFILE] write {:.1}ms  record+submit {:.1}ms  read {:.1}ms",
+                ms(entry[0]),
+                ms(entry[1]),
+                ms(entry[2]),
+            );
+        }
+    }
+}
+
 /// Forget everything recorded so far.
 #[cfg(feature = "vulkan")]
 pub fn dispatch_log_reset() {
