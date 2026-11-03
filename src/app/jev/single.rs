@@ -40,6 +40,7 @@ pub fn run_jev_decision_data(
     n_threads_arg: usize,
     prefill_batch_size: usize,
     jinja: crate::prompt::jinja::Options,
+    max_context: usize,
 ) -> Result<Vec<JevResult>, String> {
     run_jev_decision_data_with_image(
         source,
@@ -51,7 +52,7 @@ pub fn run_jev_decision_data(
         None,
         None,
         jinja,
-        usize::MAX,
+        max_context,
     )
 }
 

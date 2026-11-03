@@ -495,6 +495,60 @@ pub fn prepare(
     })
 }
 
+/// Shared image scoring pipeline for CLI and HTTP JEV.
+#[allow(clippy::too_many_arguments)]
+pub fn image_logits(
+    source: std::sync::Arc<dyn TensorSource>,
+    vision: &dyn TensorSource,
+    image: image::DynamicImage,
+    prompt: &str,
+    system: Option<&str>,
+    threads: usize,
+    prefill_batch_size: usize,
+    max_context: usize,
+) -> Result<(Vec<f32>, std::time::Duration), String> {
+    use crate::core::scratchpad::{KvFormat, KvLifecycle};
+    use crate::models::qwen3::{Qwen3Input, Qwen3Session};
+    use std::sync::Arc;
+
+    validate_components(source.as_ref(), vision)?;
+    let tokenizer = Arc::new(crate::BPETokenizer::from_gguf_metadata(|k| {
+        source.metadata(k).cloned()
+    })?);
+    let template = crate::prompt::jinja::template_from_source(&|k| source.metadata(k).cloned())
+        .ok_or("missing Mage-VL template")??;
+    let mut messages = Vec::new();
+    if let Some(system) = system {
+        messages.push(serde_json::json!({"role":"system","content":system}));
+    }
+    messages.push(serde_json::json!({"role":"user","content":[{"type":"image"},{"type":"text","text":prompt}]}));
+    let ids = prompt_tokens(
+        &tokenizer,
+        &template,
+        &serde_json::json!(messages),
+        &serde_json::json!([]),
+        false,
+    )?;
+    let pool = Arc::new(ComputePool::new(threads));
+    let model = Qwen3Model::from_source(source, tokenizer, Arc::clone(&pool))?;
+    let prepared = prepare(&model, vision, &ids, &[image], &pool, max_context)?;
+    let mut session = Qwen3Session::new_with_kv_state(
+        &model,
+        prepared.tokens.len(),
+        KvFormat::F32,
+        KvLifecycle::Ephemeral,
+    )?;
+    session.forward_logits(
+        Qwen3Input {
+            token_ids: &prepared.tokens,
+            positions: &prepared.positions,
+            embeddings: Some(&prepared.embeddings),
+            deepstack_embeddings: None,
+        },
+        prefill_batch_size,
+    )
+}
+
 fn trace(name: &str, values: &[f32]) -> Result<(), String> {
     if let Some(dir) = std::env::var_os("RMI_MAGE_TRACE_DIR") {
         let dir = std::path::Path::new(&dir);

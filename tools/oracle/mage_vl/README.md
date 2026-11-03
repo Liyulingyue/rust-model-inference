@@ -89,6 +89,10 @@ done
   models/Mage-VL-Cowork-GGUF/Mage-VL-Cowork-bf16.gguf \
   models/Mage-VL-Cowork-GGUF/mmproj-Mage-VL-Cowork-F32.gguf \
   artifacts/mage_vl/reference/square/image.png artifacts/mage_vl/smoke
+.venv/bin/python tools/oracle/mage_vl/review_regression.py \
+  models/Mage-VL-Cowork-GGUF/Mage-VL-Cowork-bf16.gguf \
+  models/Mage-VL-Cowork-GGUF/mmproj-Mage-VL-Cowork-F32.gguf \
+  artifacts/mage_vl/reference/square artifacts/mage_vl/review-fix
 ```
 
 Repeat the native checks with the F32 text export; append `f16` to the probe
@@ -105,3 +109,11 @@ Pillow bicubic is reused for resizing: the released torchvision Fast processor
 can differ by 1–2 uint8 levels. That lossy case has a separate pixel/relative
 activation gate and a strict final-logit gate; it is not claimed bitwise equal.
 See [validation.md](validation.md) for measured evidence and limits.
+
+Text JEV single/multi/block scoring checks the configured context cap before KV
+allocation; HTTP rejects that limit violation with 400. An explicit projector
+is validated even for text-only CLI JEV. Mage image usage and count-token
+responses include expanded visual tokens in all three HTTP protocols,
+including streaming (the pinned 64x64 square fixture is 26 input tokens, not
+its 23 unexpanded template IDs). The image-logits pipeline lives in
+`models/mage_vl`; app code loads inputs and adapts protocol messages.

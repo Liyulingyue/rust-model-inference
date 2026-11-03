@@ -1039,6 +1039,20 @@ fn main() {
             Err(e) => app::run_or_exit(Err(e)),
         }
     } else if options.jev {
+        if arch == "mage_vl" {
+            if let Some(path) = explicit_mmproj {
+                app::run_or_exit(
+                    open_model_source(path, ComponentRole::Mmproj)
+                        .map_err(|e| e.to_string())
+                        .and_then(|vision| {
+                            rust_model_inference::models::mage_vl::validate_components(
+                                source.as_ref(),
+                                vision.as_ref(),
+                            )
+                        }),
+                );
+            }
+        }
         match app::build_jev_inputs(&options) {
             Ok(Some(app::JevInputs::Grouped {
                 context,
@@ -1060,6 +1074,7 @@ fn main() {
                     prefill_batch_size,
                     options.jev_output_json,
                     jinja_options.clone(),
+                    options.effective_max_context(),
                 ));
             }
             Ok(Some(app::JevInputs::Single {

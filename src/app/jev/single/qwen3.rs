@@ -52,7 +52,13 @@ pub(crate) fn run_jev_decision_qwen3(
             max_context,
         );
     }
-    let mut scorer = Qwen3JevScorer::new(source.clone(), n_threads, prefill_batch_size, &jinja)?;
+    let mut scorer = Qwen3JevScorer::new(
+        source.clone(),
+        n_threads,
+        prefill_batch_size,
+        &jinja,
+        max_context,
+    )?;
     if !output_json {
         eprintln!("compute pool: {} threads", scorer.pool().n_threads());
     }
@@ -162,6 +168,7 @@ impl JevScorer for Qwen3VisualJevScorer {
 pub(crate) struct Qwen3JevScorer {
     pub(crate) model: crate::models::qwen3::Qwen3Model,
     pub(crate) prefill_batch_size: usize,
+    max_context: usize,
     /// `--jinja` template, resolved once in `new()`.
     pub(crate) jinja: Option<crate::prompt::jinja::JinjaChatTemplate>,
 }
@@ -172,6 +179,7 @@ impl Qwen3JevScorer {
         n_threads: usize,
         prefill_batch_size: usize,
         jinja: &crate::prompt::jinja::Options,
+        max_context: usize,
     ) -> Result<Self, String> {
         let mut jinja = jinja.clone();
         jinja.jinja |= source.metadata("wevisone_vl.source_revision").is_some();
@@ -189,6 +197,7 @@ impl Qwen3JevScorer {
         Ok(Self {
             model,
             prefill_batch_size,
+            max_context,
             jinja,
         })
     }
@@ -223,6 +232,11 @@ impl JevScorer for Qwen3JevScorer {
         &mut self,
         token_ids: Vec<u32>,
     ) -> Result<(Vec<f32>, std::time::Duration), String> {
+        crate::models::qwen3::trunk::util::checked_session_capacity(
+            token_ids.len(),
+            0,
+            self.max_context.min(self.model.config().n_ctx),
+        )?;
         let mut session = crate::models::qwen3::Qwen3Session::new_with_kv_state(
             &self.model,
             token_ids.len(),

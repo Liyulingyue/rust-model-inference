@@ -307,9 +307,9 @@ fn resolve(
     Ok(())
 }
 
-/// What `prompt()` produces: the tokenized prompt plus any images attached to
-/// the (last) user turn.
+/// Placeholder IDs for generation, attached images, and the expanded input count.
 struct PromptResult {
+    input_tokens: usize,
     ids: Vec<u32>,
     images: Vec<Vec<u8>>,
 }
@@ -368,6 +368,7 @@ async fn prompt(state: &AppState, request: &Request) -> Result<PromptResult, (u1
             compiled_chat_template.as_ref().as_ref(),
         )
         .map_err(|e| (400, e))?;
+        let mut input_tokens = ids.len();
         if arch == "mage_vl" {
             if images.is_empty() {
                 if ids.contains(&crate::models::mage_vl::IMAGE) {
@@ -385,7 +386,7 @@ async fn prompt(state: &AppState, request: &Request) -> Result<PromptResult, (u1
                     .map(|b| crate::app::media::decode_image_bytes(b))
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(|e| (400, e))?;
-                crate::models::mage_vl::check_image_budget(
+                input_tokens = crate::models::mage_vl::check_image_budget(
                     &ids,
                     &decoded,
                     context.saturating_sub(request.max_tokens),
@@ -393,8 +394,7 @@ async fn prompt(state: &AppState, request: &Request) -> Result<PromptResult, (u1
                 .map_err(|e| (400, e))?;
             }
         }
-        if ids
-            .len()
+        if input_tokens
             .checked_add(request.max_tokens)
             .is_none_or(|total| total > context)
         {
@@ -402,12 +402,15 @@ async fn prompt(state: &AppState, request: &Request) -> Result<PromptResult, (u1
                 400,
                 format!(
                     "Prompt ({} tokens) plus output budget ({}) exceeds model context ({context})",
-                    ids.len(),
-                    request.max_tokens
+                    input_tokens, request.max_tokens
                 ),
             ));
         }
-        Ok(PromptResult { ids, images })
+        Ok(PromptResult {
+            ids,
+            images,
+            input_tokens,
+        })
     })
     .await
     .map_err(|e| (500, format!("Prompt worker failed: {e}")))?
@@ -562,7 +565,7 @@ async fn handle(
             )
         }
     };
-    let PromptResult { ids, images } = match prompt(&state, &request).await {
+    let prepared = match prompt(&state, &request).await {
         Ok(prompt) => prompt,
         Err((status, e)) => return error(protocol, status, e),
     };
@@ -577,7 +580,7 @@ async fn handle(
         super::compute_task(state.compute, move || {
             let _permit = permit;
             let mut encoder = Encoder::new(protocol, id.clone(), state.model_name.clone());
-            let mut start = encoder.start(ids.len());
+            let mut start = encoder.start(prepared.input_tokens);
             if matches!(protocol, Protocol::Responses) {
                 patch_response_events(&mut start, &request);
             }
@@ -587,8 +590,7 @@ async fn handle(
             let result = generate(
                 &state,
                 &request,
-                &ids,
-                &images,
+                &prepared,
                 |delta| send(&tx, encoder.delta(&delta)),
                 || tx.is_closed(),
             );
@@ -643,8 +645,7 @@ async fn handle(
         let generation = generate(
             &state,
             &request,
-            &ids,
-            &images,
+            &prepared,
             |_| true,
             || cancelled.load(Ordering::Relaxed),
         )?;
@@ -685,7 +686,7 @@ async fn count_tokens(
         return error(Protocol::Anthropic, status, e);
     }
     match prompt(&state, &request).await {
-        Ok(prompt) => Json(serde_json::json!({"input_tokens":prompt.ids.len()})).into_response(),
+        Ok(prompt) => Json(serde_json::json!({"input_tokens":prompt.input_tokens})).into_response(),
         Err((status, e)) => error(Protocol::Anthropic, status, e),
     }
 }
@@ -725,8 +726,7 @@ async fn delete_response(State(state): State<AppState>, Path(id): Path<String>) 
 fn generate(
     state: &AppState,
     request: &Request,
-    ids: &[u32],
-    images: &[Vec<u8>],
+    prompt: &PromptResult,
     mut emit: impl FnMut(Delta) -> bool,
     cancelled: impl Fn() -> bool,
 ) -> Result<Generation, String> {
@@ -803,14 +803,14 @@ fn generate(
         on_token: &mut on_token,
     };
     let generation_request = GenerationRequest {
-        token_ids: ids.to_vec(),
+        token_ids: prompt.ids.clone(),
         max_new_tokens: request.max_tokens,
         sampling: SamplingParams {
             temperature: request.temperature,
             repetition_penalty: 1.0,
             ..SamplingParams::default()
         },
-        images: images.to_vec(),
+        images: prompt.images.clone(),
     };
     let generation = runtime.generate(&generation_request, &mut sink)?;
     let completion_tokens = generation.token_ids.len();
@@ -848,7 +848,7 @@ fn generate(
         text: parser.text().into(),
         calls: parser.calls().to_vec(),
         usage: Usage {
-            input: ids.len(),
+            input: prompt.input_tokens,
             output: completion_tokens,
         },
         finish,
@@ -995,6 +995,17 @@ mod http_tests {
         fn tensor_slice(&self, _name: &str) -> Option<&[u8]> {
             None
         }
+    }
+    #[test]
+    fn jev_context_errors_are_client_errors_but_model_faults_remain_server_errors() {
+        assert_eq!(
+            jev_scoring_error("Session capacity 23 exceeds model context 2".into()).status(),
+            StatusCode::BAD_REQUEST,
+        );
+        assert_eq!(
+            jev_scoring_error("Failed to load model tensor".into()).status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        );
     }
     fn state() -> AppState {
         AppState {
@@ -1632,12 +1643,15 @@ pub async fn jev_score(
         positive,
         threads,
         prefill_batch_size,
-        // The JEV HTTP endpoints have no chat-template switch yet; they
-        // keep the hand-built prompt layout.
+        // Template-mandatory architectures resolve their checkpoint template in the scorer.
         crate::prompt::jinja::Options::default(),
+        state
+            .model
+            .text_backend()
+            .map_or(usize::MAX, |text| text.context_length),
     ) {
         Ok(r) => r,
-        Err(e) => return jev_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+        Err(e) => return jev_scoring_error(e),
     };
 
     Json(json!({
@@ -1707,9 +1721,13 @@ async fn jev_grouped(
         threads,
         prefill_batch_size,
         crate::prompt::jinja::Options::default(),
+        state
+            .model
+            .text_backend()
+            .map_or(usize::MAX, |text| text.context_length),
     ) {
         Ok(r) => r,
-        Err(e) => return jev_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+        Err(e) => return jev_scoring_error(e),
     };
 
     Json(json!({
@@ -1770,6 +1788,15 @@ fn jev_prefill_batch_size(state: &AppState) -> usize {
         Backend::Clm(clm) => clm.prefill_batch_size,
         _ => 64,
     }
+}
+
+fn jev_scoring_error(message: String) -> Response {
+    let status = if message.contains("exceeds model context") {
+        StatusCode::BAD_REQUEST
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+    jev_error(status, message)
 }
 
 fn jev_error(status: StatusCode, message: String) -> Response {

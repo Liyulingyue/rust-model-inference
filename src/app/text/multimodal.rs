@@ -700,56 +700,22 @@ pub fn run_qwen3_family_multimodal_logits(
         }
         let vision =
             open_model_source(mmproj_path, ComponentRole::Mmproj).map_err(|e| e.to_string())?;
-        crate::models::mage_vl::validate_components(llm_source, vision.as_ref())?;
-        let tokenizer = Arc::new(BPETokenizer::from_gguf_metadata(|k| {
-            llm_source.metadata(k).cloned()
-        })?);
-        let template =
-            crate::prompt::jinja::template_from_source(&|k| llm_source.metadata(k).cloned())
-                .ok_or("missing Mage-VL template")??;
-        let mut messages = Vec::new();
-        if let Some(system) = system_prompt {
-            messages.push(serde_json::json!({"role":"system","content":system}));
-        }
-        messages.push(serde_json::json!({"role":"user","content":[{"type":"image"},{"type":"text","text":prompt}]}));
-        let ids = crate::models::mage_vl::prompt_tokens(
-            &tokenizer,
-            &template,
-            &serde_json::json!(messages),
-            &serde_json::json!([]),
-            false,
-        )?;
+        let image = decode_image(image_path.ok_or("Mage-VL JEV requires --image")?)?;
         let threads = resolve_thread_count(
             n_threads_arg,
             std::thread::available_parallelism()
                 .map(|n| n.get())
                 .unwrap_or(1),
         );
-        let pool = Arc::new(ComputePool::new(threads));
-        let model = Qwen3Model::from_source(model_source, tokenizer, Arc::clone(&pool))?;
-        let image = decode_image(image_path.ok_or("Mage-VL JEV requires --image")?)?;
-        let prepared = crate::models::mage_vl::prepare(
-            &model,
+        return crate::models::mage_vl::image_logits(
+            model_source,
             vision.as_ref(),
-            &ids,
-            &[image],
-            &pool,
-            max_context,
-        )?;
-        let mut session = Qwen3Session::new_with_kv_state(
-            &model,
-            prepared.tokens.len() + 1,
-            Qwen3KvFormat::F32,
-            KvLifecycle::Ephemeral,
-        )?;
-        return session.forward_logits(
-            Qwen3Input {
-                token_ids: &prepared.tokens,
-                positions: &prepared.positions,
-                embeddings: Some(&prepared.embeddings),
-                deepstack_embeddings: None,
-            },
+            image,
+            prompt,
+            system_prompt,
+            threads,
             prefill_batch_size,
+            max_context,
         );
     }
     validate_single_qwen_media(

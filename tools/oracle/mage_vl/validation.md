@@ -174,3 +174,53 @@ ordering, not full multi-image numerical accuracy.
 No real GPU execution, Mac/other-platform inference, long-context stress,
 large-image accuracy, OSWorld/desktop-agent success rate or performance
 benchmark was validated. Audio/video and interactive CLI are unsupported.
+
+## Follow-up review fixes (2026-11-03)
+
+The original 29-check smoke covered the image JEV context cap but missed the
+text-only single/grouped path. A fresh repro returned success with
+`--max-context 2` for CLI text JEV and HTTP `/v1/jev/score` and `/v1/jev/grouped`.
+The shared Qwen scorer now checks the effective configured/model context before
+KV allocation; single/multi/block CLI and both HTTP text scorers pass that cap.
+Limit violations are HTTP 400; model loading/compute faults remain HTTP 500.
+Explicit text-only CLI JEV projectors are also validated, including grouped mode.
+
+The original HTTP image preflight correctly checked expanded image tokens but
+then discarded the expanded count. Its usage and count-token response reported
+23 tokens for the official 64x64 square fixture's 26-token input. `PromptResult`
+now retains the expanded count for Chat/Responses/Anthropic, their streams, and
+`/v1/messages/count_tokens`. Generation still receives the original placeholder
+IDs, so image expansion happens once. Other backends retain their raw ID count.
+
+The shared Mage image-logits model construction, prompt, prepare and forward
+pipeline moved from `app/text/multimodal.rs` to `models/mage_vl::image_logits`.
+App code loads media/components and adapts HTTP messages/tools to the official
+schema; it no longer owns this Mage forward pipeline. No shared numerical
+operator or weight conversion changed.
+
+On the same requested Linux/x86_64 EPYC host, the fresh pre-fix library baseline
+is **1319 passed / 16 failed / 88 ignored**; after the fixes it is **1320 passed /
+16 failed / 88 ignored**. All 16 failure names are identical, compared as lists
+in `artifacts/mage_vl/review-fix-lib-comparison.json`. The new unit test covers
+context-limit versus model-fault HTTP status classification. Raw logs are
+`fix-baseline.log` and `review-fix-lib.log` in the same remote artifact directory.
+
+Final `review_regression.py`: **40 assertions pass**. Single/multi/block CLI
+accepts the exact prompt length and rejects one token below it. CLI/HTTP normal
+probabilities have maximum absolute difference **0.0** against a **1e-6** gate.
+All three protocols, their streams (including a Responses `response.incomplete`
+terminal event at the one-token output cap), and count_tokens report **26**
+input tokens for the square fixture. The original **29-check smoke passes**;
+text/image JEV probability differences against `smoke-reviewed` from before
+these fixes are both **0.0**. CPU/Auto, F16 KV, components, interleaving, history,
+image JEV and output-budget failures remain covered by that smoke.
+
+CLI and standalone server `release-fast` builds pass. The Vulkan-feature
+library/CLI/server/Oracle example `cargo check` passes; this is compile evidence,
+not GPU execution. Changed-file rustfmt, Python syntax and `git diff --check`
+pass. Raw follow-up evidence: `review-fix-green/`, `review-fix-green.log`,
+`smoke-review-fix/`, `smoke-review-fix.log`, `review-fix-final-build.log`, and
+`review-fix-vulkan-check.log` under the same remote artifact directory. Original
+numerical-operator/weight-conversion gates and existing failure/shader boundaries
+above still apply; performance and real GPU execution were not rerun for these
+request-validation/accounting fixes. All model weights remain on the remote host.
