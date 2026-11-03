@@ -59,11 +59,16 @@ pub(super) fn round_bf16(x: &mut [f32]) {
     x.iter_mut()
         .for_each(|v| *v = half::bf16::from_f32(*v).to_f32());
 }
+pub(super) fn round_bf16_checked(x: &mut [f32], name: &str) -> Result<(), String> {
+    round_bf16(x);
+    finite(x, name)
+}
 pub(super) struct Linear {
     pub input: usize,
     pub output: usize,
     weight: Vec<f32>,
     bias: Vec<f32>,
+    gpu: super::gpu::Projection,
 }
 impl Linear {
     pub fn load(
@@ -79,6 +84,7 @@ impl Linear {
         Ok(Self {
             input,
             output,
+            gpu: Default::default(),
             weight: tensor(s, &format!("{p}.weight"), &[output, input])?,
             bias: if bias {
                 tensor(s, &format!("{p}.bias"), &[output])?
@@ -100,6 +106,7 @@ impl Linear {
         finite(&self.bias, "BF16 linear bias")
     }
     pub fn forward(&self, x: &[f32]) -> Result<Vec<f32>, String> {
+        super::gpu::check_failure()?;
         if x.is_empty() || x.len() % self.input != 0 {
             return Err("Invalid Idol linear input shape".into());
         }
@@ -107,6 +114,19 @@ impl Linear {
             .checked_mul(self.output)
             .ok_or("Idol linear shape overflow")?;
         let mut y = vec![0.; size];
+        if self
+            .gpu
+            .linear(&self.weight, x, &mut y, self.input, self.output)
+        {
+            for row in y.chunks_exact_mut(self.output) {
+                for (value, bias) in row.iter_mut().zip(&self.bias) {
+                    *value += bias;
+                }
+            }
+            finite(&y, "GPU linear output")?;
+            return Ok(y);
+        }
+        super::gpu::check_failure()?;
         y.par_chunks_mut(self.output)
             .zip(x.par_chunks(self.input))
             .for_each(|(out, row)| {
@@ -160,9 +180,18 @@ mod tests {
             output: 1,
             weight: vec![f32::MAX],
             bias: vec![0.],
+            gpu: Default::default(),
         };
         assert!(linear.to_f16().is_err());
         linear.weight[0] = f32::MAX;
         assert!(linear.to_bf16().is_err());
+    }
+    #[test]
+    fn bf16_parameter_overflow_cannot_become_silent_zero_normalization() {
+        let mut variance = [f32::MAX];
+        assert!(round_bf16_checked(&mut variance, "VAE variance").is_err());
+        let mut ordinary = [1.0001];
+        round_bf16_checked(&mut ordinary, "VAE variance").unwrap();
+        assert_eq!(ordinary, [1.]);
     }
 }

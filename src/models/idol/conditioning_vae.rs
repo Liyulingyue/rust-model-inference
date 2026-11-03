@@ -1,5 +1,5 @@
 //! FLUX.2's encoder only; raw Diffusers names, BF16 module boundaries, no decoder allocation.
-use super::super::common::{finite, round_bf16, tensor, trace, Linear};
+use super::super::common::{finite, round_bf16, round_bf16_checked, tensor, trace, Linear};
 use super::{attention, validate_rgb};
 use crate::core::tensor::TensorSource;
 use rayon::prelude::*;
@@ -13,6 +13,7 @@ struct Conv {
     kernel: usize,
     weight: Vec<f32>,
     bias: Vec<f32>,
+    gpu: super::super::gpu::Projection,
 }
 impl Conv {
     fn load(
@@ -24,14 +25,15 @@ impl Conv {
     ) -> Result<Self, String> {
         let mut weight = tensor(s, &format!("{p}.weight"), &[output, input, kernel, kernel])?;
         let mut bias = tensor(s, &format!("{p}.bias"), &[output])?;
-        round_bf16(&mut weight);
-        round_bf16(&mut bias);
+        round_bf16_checked(&mut weight, "BF16 VAE convolution weight")?;
+        round_bf16_checked(&mut bias, "BF16 VAE convolution bias")?;
         Ok(Self {
             input,
             output,
             kernel,
             weight,
             bias,
+            gpu: Default::default(),
         })
     }
     // NHWC throughout; stride two uses Diffusers' zero padding on right and bottom only.
@@ -46,6 +48,27 @@ impl Conv {
         let next = side / stride;
         let patch_len = self.input * self.kernel * self.kernel;
         let mut out = vec![0.; next * next * self.output];
+        if self.gpu.convolution(
+            &self.weight,
+            x,
+            &mut out,
+            [self.input, self.output],
+            [side, side],
+            [next, next],
+            self.kernel,
+            stride,
+            if stride == 1 { self.kernel / 2 } else { 0 },
+            true,
+        ) {
+            for row in out.chunks_exact_mut(self.output) {
+                for (value, bias) in row.iter_mut().zip(&self.bias) {
+                    *value = b(*value + bias);
+                }
+            }
+            finite(&out, "GPU VAE convolution")?;
+            return Ok(out);
+        }
+        super::super::gpu::check_failure()?;
         out.par_chunks_mut(self.output).enumerate().for_each_init(
             || vec![0.; patch_len],
             |patch, (p, row)| {
@@ -84,8 +107,8 @@ impl GroupNorm {
     fn load(s: &dyn TensorSource, p: &str, c: usize) -> Result<Self, String> {
         let mut weight = tensor(s, &format!("{p}.weight"), &[c])?;
         let mut bias = tensor(s, &format!("{p}.bias"), &[c])?;
-        round_bf16(&mut weight);
-        round_bf16(&mut bias);
+        round_bf16_checked(&mut weight, "BF16 VAE normalization weight")?;
+        round_bf16_checked(&mut bias, "BF16 VAE normalization bias")?;
         Ok(Self { weight, bias })
     }
     fn forward(&self, x: &[f32]) -> Vec<f32> {
@@ -198,7 +221,7 @@ impl MidAttention {
         round_bf16(&mut q);
         round_bf16(&mut k);
         round_bf16(&mut v);
-        let mut a = attention(&q, &k, &v, 512, 1);
+        let mut a = attention(&q, &k, &v, 512, 1)?;
         round_bf16(&mut a);
         let mut a = self.o.forward(&a)?;
         round_bf16(&mut a);
@@ -250,9 +273,9 @@ impl Encoder {
             input = output;
         }
         let mut mean = tensor(s, "bn.running_mean", &[128])?;
-        round_bf16(&mut mean);
+        round_bf16_checked(&mut mean, "BF16 VAE batch normalization mean")?;
         let mut var = tensor(s, "bn.running_var", &[128])?;
-        round_bf16(&mut var);
+        round_bf16_checked(&mut var, "BF16 VAE batch normalization variance")?;
         if var.iter().any(|&v| v < 0.) {
             return Err("Idol FLUX.2 VAE batch normalization variance is negative".into());
         }

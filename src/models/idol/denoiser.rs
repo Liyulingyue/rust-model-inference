@@ -138,7 +138,22 @@ fn head_norm(x: &mut [f32], gamma: &[f32]) {
 }
 
 /// QKV stays interleaved; each worker allocates one score row, never an L×L matrix.
-fn attention(qkv: &[f32], width: usize, heads: usize) -> Vec<f32> {
+fn attention(qkv: &[f32], width: usize, heads: usize) -> Result<Vec<f32>, String> {
+    if super::gpu::enabled() {
+        let mut q = Vec::with_capacity(qkv.len() / 3);
+        let mut k = Vec::with_capacity(qkv.len() / 3);
+        let mut v = Vec::with_capacity(qkv.len() / 3);
+        for row in qkv.chunks_exact(3 * width) {
+            q.extend_from_slice(&row[..width]);
+            k.extend_from_slice(&row[width..2 * width]);
+            v.extend_from_slice(&row[2 * width..]);
+        }
+        if let Some(mut output) = super::gpu::attention(&q, &k, &v, width, heads) {
+            round_f16(&mut output);
+            return Ok(output);
+        }
+    }
+    super::gpu::check_failure()?;
     let tokens = qkv.len() / (3 * width);
     let head_dim = width / heads;
     let scale = (head_dim as f32).sqrt().recip();
@@ -170,7 +185,7 @@ fn attention(qkv: &[f32], width: usize, heads: usize) -> Vec<f32> {
             round_f16(output);
         },
     );
-    out
+    Ok(out)
 }
 
 struct Attention {
@@ -234,7 +249,7 @@ impl Attention {
             }
         });
         checkpoint(&format!("{label}.qkv_rotary_norm"), &qkv, 3 * self.width)?;
-        let h = attention(&qkv, self.width, self.heads);
+        let h = attention(&qkv, self.width, self.heads)?;
         checkpoint(&format!("{label}.weighted_values"), &h, self.width)?;
         let h = linear_half(&self.out, &h)?;
         checkpoint(&format!("{label}.out"), &h, self.width)?;
@@ -658,7 +673,10 @@ mod tests {
             0., 0., 0., 0., 0., 0., 0., 0., 2., 4., 10., 20., 0., 0., 0., 0., 0., 0., 0., 0., 6.,
             8., 30., 40.,
         ];
-        assert_eq!(attention(&qkv, 4, 2), [4., 6., 20., 30., 4., 6., 20., 30.]);
+        assert_eq!(
+            attention(&qkv, 4, 2).unwrap(),
+            [4., 6., 20., 30., 4., 6., 20., 30.]
+        );
     }
 
     #[test]

@@ -10,12 +10,8 @@ pub fn validate_options(o: &CliOptions) -> Result<(), String> {
     if o.model.as_os_str().is_empty() {
         return Err("--image-to-3d requires --model <Idol directory>".into());
     }
-    if o.compute_policy() == crate::compute::ComputePolicy::Vulkan {
-        return Err(
-            "Idol has no calibrated Vulkan path; use --compute cpu or auto (CPU fallback)".into(),
-        );
-    }
     o.validate_compute_mode()?;
+    o.compute_policy().check_build()?;
     if o.jev
         || o.embedding
         || o.rerank
@@ -158,10 +154,7 @@ pub fn components(o: &CliOptions) -> PathBuf {
 }
 pub fn load(o: &CliOptions) -> Result<Model, String> {
     validate_options(o)?;
-    if o.compute_policy() == crate::compute::ComputePolicy::Auto {
-        eprintln!("compute requested=Auto backend=Cpu arch=idol reason=no_calibrated_device_path");
-    }
-    Model::load(&o.model, &components(o))
+    Model::load_with_compute(&o.model, &components(o), o.compute_policy())
 }
 pub fn ply_bytes(rows: &[[f32; 17]]) -> Result<Vec<u8>, String> {
     if rows.is_empty() || rows.iter().flatten().any(|v| !v.is_finite()) {
@@ -213,7 +206,7 @@ pub fn run_cli(o: &CliOptions) -> Result<(), String> {
 mod tests {
     use super::*;
     #[test]
-    fn flags_and_strict_gpu_are_rejected_before_weights() {
+    fn flags_and_gpu_build_support_are_checked_before_weights() {
         let mut o = CliOptions {
             image_to_3d: true,
             model: "idol".into(),
@@ -226,7 +219,7 @@ mod tests {
         assert!(validate_options(&o).is_err());
         o.jev = false;
         o.compute = Some(crate::compute::ComputePolicy::Vulkan);
-        assert!(validate_options(&o).unwrap_err().contains("Vulkan"));
+        assert_eq!(validate_options(&o).is_ok(), cfg!(feature = "vulkan"));
     }
     #[test]
     fn ply_format_has_exact_binary_payload() {

@@ -11,8 +11,11 @@ import tempfile
 def verified(path, entry):
     if not path.is_file() or path.stat().st_size != entry["Size"]:
         return False
+    digest = hashlib.sha256()
     with path.open("rb") as source:
-        return hashlib.file_digest(source, "sha256").hexdigest() == entry["Sha256"]
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest() == entry["Sha256"]
 
 
 def main():

@@ -104,7 +104,7 @@ impl Block {
         let v = self.v.forward(&normalized)?;
         rope(&mut q, side);
         rope(&mut k, side);
-        let a = attention(&q, &k, &v, WIDTH, HEADS);
+        let a = attention(&q, &k, &v, WIDTH, HEADS)?;
         let a = self.o.forward(&a)?;
         for (i, (out, &a)) in x.iter_mut().zip(&a).enumerate() {
             *out += a * self.scale1[i % WIDTH];
@@ -225,7 +225,17 @@ fn rope(x: &mut [f32], patches: usize) {
             }
         });
 }
-pub(super) fn attention(q: &[f32], k: &[f32], v: &[f32], width: usize, heads: usize) -> Vec<f32> {
+pub(super) fn attention(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    width: usize,
+    heads: usize,
+) -> Result<Vec<f32>, String> {
+    if let Some(output) = super::gpu::attention(q, k, v, width, heads) {
+        return Ok(output);
+    }
+    super::gpu::check_failure()?;
     let tokens = q.len() / width;
     let head = width / heads;
     let scale = (head as f32).sqrt().recip();
@@ -258,7 +268,7 @@ pub(super) fn attention(q: &[f32], k: &[f32], v: &[f32], width: usize, heads: us
                 );
             }
         });
-    output
+    Ok(output)
 }
 #[cfg(test)]
 mod tests {
@@ -266,7 +276,7 @@ mod tests {
     #[test]
     fn attention_identity_and_rope_prefix() {
         assert_eq!(
-            attention(&[0., 0.], &[0., 0.], &[2., 4.], 1, 1),
+            attention(&[0., 0.], &[0., 0.], &[2., 4.], 1, 1).unwrap(),
             vec![3., 3.]
         );
         let mut x = vec![1.; 6 * WIDTH];

@@ -2,7 +2,9 @@
 
 Native Rust implementation of the released [speridlabs/idol](https://modelscope.cn/models/speridlabs/idol) graph. The model produces binary little-endian 3DGS PLY with 17 float properties per Gaussian and a predicted camera. No Python process or external acceleration library is used by inference.
 
-The implementation uses the original safetensors directly: FP16 denoiser/octree/Gaussian blocks, FP32 DINOv3 (the official `dinov3_dtype="fp32"` option), BF16 FLUX.2 VAE encoder, and FP32 CPU BiRefNet. CPU is supported; Auto explicitly selects CPU. Strict Vulkan is rejected. This is experimental until broader quality and device coverage are established; see [actual validation](validation.md).
+The implementation uses the original safetensors directly: FP16 denoiser/octree/Gaussian blocks, FP32 DINOv3 (the official `dinov3_dtype="fp32"` option), BF16 FLUX.2 VAE encoder, and FP32 BiRefNet. CPU and Vulkan are supported; Auto selects a usable Vulkan device or falls back to CPU. Vulkan accelerates projection, attention and convolution through existing repository operators. Normalization, elementwise work, patch preparation and geometry postprocessing still use CPU. Strict Vulkan rejects unavailable or failed devices. This is experimental until broader quality and device coverage are established; see [actual validation](validation.md).
+
+The RTX 5090 five-step preview wrote 262144 finite Gaussians in **24 min 44.6 s**, with 17.24 GiB peak RSS and 6.03 GiB sampled device memory. The two avocado halves are recognizable but contain floating/displaced geometry. The CLI then crashed during exit (SIGSEGV); similar post-test crashes occur on the unmodified baseline and remain unresolved. [Performance and exit evidence](performance-validation.json) distinguishes valid output from a clean process run. Native 50-step quality and production throughput are unverified.
 
 ## Download on the inference host
 
@@ -29,15 +31,15 @@ The primary config and each required tensor's shape/type/finite values are check
 ## CLI and HTTP
 
 ```bash
-cargo build --locked --profile release-fast
+cargo build --locked --release --features vulkan
 # Omit --steps/--cfg/--num-gaussians for the official 50-step/3/262144 defaults.
-target/release-fast/rust-model-inference \
+target/release/rust-model-inference \
   --image-to-3d --model models/idol --components models \
   --image object.png --out object.ply \
-  --geometry-mode synthetic --seed 42 --compute cpu --threads 16
+  --geometry-mode synthetic --seed 42 --compute vulkan --threads 16
 
 # Image and generation options are supplied per request in server mode.
-target/release-fast/rust-model-inference \
+target/release/rust-model-inference \
   --serve --image-to-3d --model models/idol --components models \
   --host 127.0.0.1 --port 18089 --compute auto --threads 16
 curl --fail-with-body http://127.0.0.1:18089/v1/3d/generations \
@@ -50,7 +52,7 @@ The standalone `rust-model-server` binary accepts the same server flags without 
 
 HTTP `image` follows the existing image-input policy (local path, data URL, or explicitly enabled remote URL). Requests are limited to 16 MiB; one generation runs at a time (429 when busy). Invalid JSON/options/image gives 400; model generation failure gives 422. The backend exposes no text, chat, embedding or JEV routes. Text/image JEV has no semantic counterpart for this generator and returns 404.
 
-Native seeds are reproducible within this implementation. They do **not** promise the same random draw stream as official PyTorch: VAE/flow noise uses the repository's Torch-MT generator and octree resampling uses seeded `StdRng`. Numerical oracle tests therefore inject exactly the same noise, latent, features and query points in both implementations. The CPU implementation favors correctness and bounded attention storage; full-size/default-step throughput is not a GPU performance claim.
+Native seeds are reproducible within this implementation. They do **not** promise the same random draw stream as official PyTorch: VAE/flow noise uses the repository's Torch-MT generator and octree resampling uses seeded `StdRng`. Numerical oracle tests therefore inject exactly the same noise, latent, features and query points in both implementations. Weights remain in their released precision boundaries; GPU reductions use F32 accumulation and tolerance-based validation. Device weights use VRAM on discrete GPUs, with the existing shared-memory fallback when VRAM cannot be allocated.
 
 ## Reproduce numerical alignment
 
@@ -67,6 +69,14 @@ IDOL_ROOT=models IDOL_FIXTURES=artifacts/idol IDOL_PYTHON=.venv/bin/python \
   RAYON_NUM_THREADS=8 cargo test --locked --profile release-fast \
   --features parity-trace --lib models::idol::tests::same_input_oracle_probe \
   -- --ignored --nocapture
+# Repeat the same pinned fixture through native Vulkan (no Python inference).
+IDOL_ROOT=models IDOL_FIXTURES=artifacts/idol IDOL_PYTHON=.venv/bin/python \
+  IDOL_COMPUTE=vulkan RUST_GPU_MIN_OUTPUTS=0 RAYON_NUM_THREADS=16 \
+  cargo test --locked --profile release-fast --features vulkan,parity-trace \
+  --lib models::idol::tests::same_input_oracle_probe -- --ignored --nocapture
+# GPU-only primitive checks include production attention shapes and sampled CPU queries.
+RUST_GPU_MIN_OUTPUTS=0 cargo test --locked --profile release-fast \
+  --features vulkan --lib models::idol::gpu::tests:: -- --ignored --nocapture --test-threads=1
 python3 tools/oracle/idol/compare.py --self-test
 python3 tools/oracle/idol/download.py --self-test
 ```

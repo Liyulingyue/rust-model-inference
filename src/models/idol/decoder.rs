@@ -116,6 +116,11 @@ impl Attention {
         self.rms(&mut k, &self.k_gamma);
         finite(&q, "decoder attention queries")?;
         finite(&k, "decoder attention keys")?;
+        if let Some(mut attended) = super::gpu::attention(&q, &k, &v, c, self.heads) {
+            round_f16(&mut attended);
+            return half_linear(&self.out, &attended);
+        }
+        super::gpu::check_failure()?;
         let source_rows = k.len() / c;
         let scale = (hd as f32).sqrt().recip();
         let mut attended = vec![0.; q.len()];

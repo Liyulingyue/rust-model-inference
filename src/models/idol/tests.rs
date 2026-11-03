@@ -25,6 +25,21 @@ fn bytes(values: Vec<f32>) -> Result<Vec<u8>, String> {
 #[ignore = "requires pinned remote Idol/DINO/VAE weights and generated oracle fixtures"]
 #[cfg(feature = "parity-trace")]
 fn same_input_oracle_probe() -> Result<(), String> {
+    let compute = match std::env::var("IDOL_COMPUTE").as_deref().unwrap_or("cpu") {
+        "cpu" => crate::compute::ComputePolicy::Cpu,
+        "auto" => crate::compute::ComputePolicy::Auto,
+        "vulkan" => crate::compute::ComputePolicy::Vulkan,
+        _ => return Err("IDOL_COMPUTE must be cpu, auto or vulkan".into()),
+    };
+    let _scope = compute.configure_cli()?;
+    #[cfg(feature = "vulkan")]
+    let device = if compute == crate::compute::ComputePolicy::Cpu {
+        None
+    } else {
+        crate::ops::get_vulkan_context()
+    };
+    #[cfg(feature = "vulkan")]
+    let submissions_before = device.map_or(0, |context| context.submission_count());
     let model_root = PathBuf::from(
         std::env::var("IDOL_ROOT").map_err(|_| "Set IDOL_ROOT to the parent models directory")?,
     );
@@ -71,7 +86,11 @@ fn same_input_oracle_probe() -> Result<(), String> {
         })
         .collect::<Result<Vec<_>, _>>()?
         .join(",");
-    let native = fixtures.join("native.jsonl");
+    let native = fixtures.join(if compute == crate::compute::ComputePolicy::Cpu {
+        "native.jsonl"
+    } else {
+        "native-gpu.jsonl"
+    });
     if native.exists() {
         std::fs::remove_file(&native).map_err(|e| e.to_string())?;
     }
@@ -126,13 +145,37 @@ fn same_input_oracle_probe() -> Result<(), String> {
         let image = common::tensor(&inputs, "background_normalized", &[1, 64, 64, 3])?;
         let _ = model.forward_fixture(&image, 64)?;
     }
+    super::gpu::check_failure()?;
+    #[cfg(feature = "vulkan")]
+    if let Some(context) = device {
+        let submitted = context.submission_count() - submissions_before;
+        eprintln!(
+            "Idol oracle device submissions={submitted} {:?}",
+            context.compute_stats()
+        );
+        if submitted == 0 && compute == crate::compute::ComputePolicy::Vulkan {
+            return Err("Strict Vulkan oracle did not submit model work".into());
+        }
+    }
     let python = std::env::var_os("IDOL_PYTHON").unwrap_or_else(|| "python3".into());
     let status = std::process::Command::new(python)
-        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/oracle/idol/compare.py"))
+        .arg(
+            std::env::var_os("IDOL_COMPARE")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/oracle/idol/compare.py")
+                }),
+        )
         .arg(&oracle)
         .arg(&native)
         .arg("--report")
-        .arg(fixtures.join("comparison.json"))
+        .arg(
+            fixtures.join(if compute == crate::compute::ComputePolicy::Cpu {
+                "comparison.json"
+            } else {
+                "comparison-gpu.json"
+            }),
+        )
         .status()
         .map_err(|e| e.to_string())?;
     if !status.success() {

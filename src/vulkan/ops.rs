@@ -1318,7 +1318,7 @@ impl BatchedLinearRuntime {
             let buffer = unsafe {
                 self.ops
                     .context
-                    .upload_static(transposed.as_deref().unwrap_or(weight_bytes))?
+                    .upload_device_static(transposed.as_deref().unwrap_or(weight_bytes))?
             };
             let bindings = match self
                 .ops
@@ -8525,7 +8525,10 @@ mod tests {
                         &mut actual,
                     )
                     .unwrap();
-                assert_eq!(context.submission_count(), before + 1);
+                assert_eq!(
+                    context.submission_count(),
+                    before + 1 + u64::from(context.is_discrete() && rows == 1)
+                );
                 for (index, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
                     assert_eq!(
                         actual.to_bits(),
@@ -9300,7 +9303,7 @@ mod tests {
             );
         }
         assert_eq!(output, [123.0]);
-        assert_eq!(context.submission_count(), 0);
+        assert_eq!(context.submission_count(), u64::from(context.is_discrete()));
         runtime.begin_commands = TokenCommands::begin;
         // A later pre-submit failure retains an owned, reusable upload.
         let arena_size = runtime.ops.arena.size;
@@ -9309,7 +9312,7 @@ mod tests {
             .matmul_rows(&weight, F32, &[1.0; 4], 1, 4, 1, &mut output)
             .is_err());
         assert_eq!(runtime.weights.len(), 1);
-        assert_eq!(context.submission_count(), 0);
+        assert_eq!(context.submission_count(), u64::from(context.is_discrete()));
         let key = (weight.as_ptr() as usize, weight.len(), 4, 1);
         let buffer = runtime.weights[&key].0.buffer;
         runtime.ops.arena.size = arena_size;
@@ -9341,6 +9344,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(output, [4.0]);
+        let completed = context.submission_count();
         // Simulate a submit/wait failure without intentionally hanging hardware.
         assert!(context
             .mutex
@@ -9384,7 +9388,7 @@ mod tests {
             }
             assert_eq!(runtime.weights.len(), 1);
             assert_eq!(output, [4.0]);
-            assert_eq!(context.submission_count(), 1);
+            assert_eq!(context.submission_count(), completed);
         }
         context
             .fail_wait_idle
@@ -9524,6 +9528,20 @@ mod tests {
         let legacy_weight = super::synthetic_q8_weight(32, 1, 3);
         let mut a = BatchedLinearRuntime::new(context, 1, 32, 1, 2).unwrap();
         let mut b = BatchedLinearRuntime::new(context, 1, 32, 1, 2).unwrap();
+        // Inject compute failures after VRAM transfers have completed.
+        for runtime in [&mut a, &mut b] {
+            runtime
+                .matmul_rows(
+                    bytemuck::cast_slice(&weight),
+                    F32,
+                    &[1.0; 32],
+                    1,
+                    32,
+                    1,
+                    &mut [0.0],
+                )
+                .unwrap();
+        }
         for legacy_producer in [false, true] {
             context.fail_fence_wait.store(true, Ordering::Relaxed);
             let result = if legacy_producer {
@@ -9654,8 +9672,9 @@ mod tests {
             assert_eq!(delta.static_upload_bytes, 16);
             assert_eq!(delta.host_write_bytes, 32);
             assert_eq!(delta.host_read_bytes, 8);
-            assert_eq!(delta.submissions, 2);
-            assert_eq!(delta.transfer_submissions, 0);
+            let transfers = u64::from(context.is_discrete());
+            assert_eq!(delta.submissions, 2 + transfers);
+            assert_eq!(delta.transfer_submissions, transfers);
             assert!(delta.peak_allocation_bytes >= delta.live_allocation_bytes);
         }
         assert_eq!(
@@ -9700,10 +9719,19 @@ mod tests {
             runtime
                 .matmul_rows(weight, *format, &input, 3, 512, 65, &mut batched)
                 .unwrap();
-            assert_eq!(context.submission_count(), before + 1);
+            assert_eq!(
+                context.submission_count(),
+                before + 1 + u64::from(context.is_discrete())
+            );
             assert!(batched[195].is_nan());
             assert_eq!(runtime.weights.len(), slot + 1);
             let key = (weight.as_ptr() as usize, weight.len(), 512, 65);
+            if context.is_discrete() {
+                assert!(
+                    runtime.weights[&key].0.mapped.is_null(),
+                    "cached projection weights must reside in VRAM"
+                );
+            }
             let buffer = runtime.weights[&key].0.buffer;
             let binding = runtime.weights[&key].1.descriptor_set;
             let mut singles = [0.0; 195];

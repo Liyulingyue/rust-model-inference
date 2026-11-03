@@ -4,6 +4,7 @@ mod common;
 mod conditioning;
 mod decoder;
 mod denoiser;
+mod gpu;
 mod preprocess;
 #[cfg(test)]
 mod tests;
@@ -102,6 +103,7 @@ fn component_config(path: &Path, expected: Value) -> Result<(), String> {
 }
 
 pub struct Model {
+    compute: crate::compute::ComputePolicy,
     denoiser: denoiser::Denoiser,
     decoder: decoder::Decoder,
     conditioning: conditioning::Conditioning,
@@ -110,6 +112,29 @@ pub struct Model {
 impl Model {
     /// `components` holds `dinov3-vith16plus/` and `FLUX.2-dev/` from the pinned ModelScope manifest.
     pub fn load(root: &Path, components: &Path) -> Result<Self, String> {
+        Self::load_with_compute(root, components, crate::compute::ComputePolicy::Cpu)
+    }
+    pub fn load_with_compute(
+        root: &Path,
+        components: &Path,
+        requested: crate::compute::ComputePolicy,
+    ) -> Result<Self, String> {
+        use crate::compute::ComputePolicy;
+        requested.check_build()?;
+        #[cfg(feature = "vulkan")]
+        let compute = if requested == ComputePolicy::Cpu {
+            requested
+        } else {
+            crate::ops::enable_gpu();
+            match requested.context().map_err(|e| e.to_string())? {
+                Some(_) => requested,
+                None => ComputePolicy::Cpu,
+            }
+        };
+        #[cfg(not(feature = "vulkan"))]
+        let compute = ComputePolicy::Cpu;
+        eprintln!("compute requested={requested:?} backend={} arch=idol scope=projection_attention_convolution",
+            if compute == ComputePolicy::Cpu { "Cpu" } else { "Vulkan" });
         let cfg: Value = serde_json::from_slice(
             &std::fs::read(root.join("config.json"))
                 .map_err(|e| format!("Read Idol config: {e}"))?,
@@ -132,6 +157,7 @@ impl Model {
         let vae = source(components.join("FLUX.2-dev/vae/diffusion_pytorch_model.safetensors"))?;
         let background = source(root.join("birefnet.safetensors"))?;
         Ok(Self {
+            compute,
             denoiser: denoiser::Denoiser::load(&denoiser)?,
             decoder: decoder::Decoder::load(&octree, &gaussian)?,
             conditioning: conditioning::Conditioning::load(&dino, &vae)?,
@@ -144,7 +170,8 @@ impl Model {
         options: &Options,
     ) -> Result<Output, String> {
         options.validate()?;
-        let _scope = crate::compute::ComputePolicy::Cpu.enter_legacy_scope();
+        let _scope = self.compute.enter_legacy_scope();
+        let started = std::time::Instant::now();
         let prepared = preprocess::image(
             image,
             1024,
@@ -159,10 +186,18 @@ impl Model {
                     .ok_or_else(|| "Invalid Idol background mask storage".into())
             },
         )?;
+        eprintln!(
+            "[idol] stage=preprocess elapsed={:.3}s",
+            started.elapsed().as_secs_f64()
+        );
         let mut rng = crate::models::diffusion::z_image::dit::TorchMt19937::new(options.seed);
         let mut vae_noise = vec![0.; 32 * 128 * 128];
         rng.fill_normal(&mut vae_noise);
         let (feature1, feature2) = self.conditioning.encode(prepared.as_raw(), &vae_noise)?;
+        eprintln!(
+            "[idol] stage=conditioning elapsed={:.3}s",
+            started.elapsed().as_secs_f64()
+        );
         common::trace("idol.feature1", &[1, 4101, 1280], &feature1);
         common::trace("idol.feature2", &[1, 4101, 128], &feature2);
         let mut latent = vec![0.; 8192 * 16];
@@ -170,12 +205,36 @@ impl Model {
         let mut camera = vec![0.; 5];
         rng.fill_normal(&mut camera);
         self.denoise(&mut latent, &mut camera, &feature1, &feature2, options)?;
+        eprintln!(
+            "[idol] stage=sampling elapsed={:.3}s",
+            started.elapsed().as_secs_f64()
+        );
         let mut random = StdRng::seed_from_u64(options.seed);
         let anchors =
             self.decoder
                 .sample_anchors(&latent, options.num_gaussians / 32, 8, &mut random)?;
         let features = self.decoder.gaussian_features(&anchors, &latent)?;
         let gaussians = self.decoder.representation(&anchors, &features)?;
+        eprintln!(
+            "[idol] stage=decode elapsed={:.3}s",
+            started.elapsed().as_secs_f64()
+        );
+        #[cfg(feature = "vulkan")]
+        if self.compute != crate::compute::ComputePolicy::Cpu {
+            if crate::vulkan::gpu_broken() && self.compute == crate::compute::ComputePolicy::Vulkan
+            {
+                return Err(
+                    "Idol Vulkan device failed during generation; refusing a silent CPU fallback"
+                        .into(),
+                );
+            }
+            if let Some(context) = crate::ops::get_vulkan_context() {
+                eprintln!(
+                    "compute arch=idol counters=device_cumulative {:?}",
+                    context.compute_stats()
+                );
+            }
+        }
         Ok(Output {
             gaussians,
             camera: decode_camera(&camera)?,

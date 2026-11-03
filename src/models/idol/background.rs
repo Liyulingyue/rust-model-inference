@@ -93,6 +93,7 @@ struct Conv {
     kernel: usize,
     stride: usize,
     padding: usize,
+    gpu: super::gpu::Projection,
 }
 impl Conv {
     #[allow(clippy::too_many_arguments)]
@@ -128,6 +129,7 @@ impl Conv {
             kernel,
             stride,
             padding,
+            gpu: Default::default(),
         })
     }
     fn forward(&self, x: &Map) -> Result<Map, String> {
@@ -141,6 +143,32 @@ impl Conv {
         let w = (x.w + 2 * self.padding - self.kernel) / self.stride + 1;
         let patch_width = self.input * self.kernel * self.kernel;
         let mut out = vec![0.; h * w * self.output];
+        if self.gpu.convolution(
+            &self.weight,
+            &x.x,
+            &mut out,
+            [self.input, self.output],
+            [x.h, x.w],
+            [h, w],
+            self.kernel,
+            self.stride,
+            self.padding,
+            false,
+        ) {
+            for row in out.chunks_exact_mut(self.output) {
+                for (value, bias) in row.iter_mut().zip(&self.bias) {
+                    *value += bias;
+                }
+            }
+            finite(&out, "GPU background convolution")?;
+            return Ok(Map {
+                x: out,
+                h,
+                w,
+                c: self.output,
+            });
+        }
+        super::gpu::check_failure()?;
         out.par_chunks_mut(self.output).enumerate().for_each_init(
             || vec![0.; patch_width],
             |patch, (pixel, row)| {
@@ -989,6 +1017,7 @@ mod tests {
         };
         let deform = Deform {
             offset: Conv {
+                gpu: Default::default(),
                 weight: vec![0.; 2],
                 bias: vec![0.5, 0.],
                 input: 1,
@@ -998,6 +1027,7 @@ mod tests {
                 padding: 0,
             },
             mask: Conv {
+                gpu: Default::default(),
                 weight: vec![0.],
                 bias: vec![0.],
                 input: 1,
@@ -1007,6 +1037,7 @@ mod tests {
                 padding: 0,
             },
             regular: Conv {
+                gpu: Default::default(),
                 weight: vec![2.],
                 bias: vec![0.],
                 input: 1,
@@ -1027,6 +1058,7 @@ mod tests {
             c: 2,
         };
         let conv = Conv {
+            gpu: Default::default(),
             weight: vec![1., 2., 3., 4., 5., 6., 7., 8.],
             bias: vec![5.],
             input: 2,
