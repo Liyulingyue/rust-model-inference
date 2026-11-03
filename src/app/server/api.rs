@@ -1719,6 +1719,7 @@ fn backend_label(b: &Backend) -> &'static str {
         Backend::Embedding(_) => "embedding",
         Backend::Asr(_) => "asr",
         Backend::Audio8(_) => "audio8",
+        Backend::AudioEnhancement(_) => "audio-enhancement",
         Backend::Tts(_) => "tts",
         Backend::Rerank(_) => "rerank",
         Backend::Clm(_) => "clm",

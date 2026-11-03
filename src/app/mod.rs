@@ -1,4 +1,5 @@
 pub(crate) mod asr;
+pub mod audio;
 pub mod cli;
 pub(crate) mod diffusion;
 pub(crate) mod jev;

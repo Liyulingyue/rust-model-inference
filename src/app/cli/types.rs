@@ -46,6 +46,7 @@ pub struct CliOptions {
     /// Defaults to one task built from `--jev-question` + `--jev-option`.
     pub gliner2_schema: Option<String>,
     pub audio: Option<PathBuf>,
+    pub enhance: bool,
     pub ref_audio: Option<PathBuf>,
     pub ref_text: Option<String>,
     pub image: Option<PathBuf>,
