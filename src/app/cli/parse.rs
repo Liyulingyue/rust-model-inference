@@ -11,6 +11,7 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
+            "--enhance" => options.enhance = true,
             "--yue2" => options.yue2 = true,
             "--dreamx" => options.dreamx = true,
             "--astronex" => options.astronex = true,

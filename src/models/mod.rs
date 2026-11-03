@@ -37,6 +37,7 @@ pub mod llama;
 pub mod mellum;
 pub mod minicpmv;
 pub mod nemotron_h;
+pub mod nemotron_reuse;
 pub mod phi3;
 pub mod qwen3;
 pub mod qwen35;

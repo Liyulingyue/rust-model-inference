@@ -89,7 +89,7 @@ fn validate_audio_temperature(route: AudioRoute, temperature: Option<f32>) -> Re
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
-        println!("{USAGE}\n\nWeVisOne-VL: --model text.gguf --mmproj vision.gguf --wevisone-decoder decoder.gguf --wevisone-request request.json [--output result.json]\n\nTimestral-209M: --model <timestral-F32.gguf> --timestral-request <series.json> [--threads N] [--compute cpu|auto|vulkan] | time-series forecasting; JSON context and prediction_length in, 21 quantiles out");
+        println!("{USAGE}\n\nAudio enhancement: --enhance --model <RE-USE directory or model.safetensors> --audio input.wav --out output.wav [--compute cpu|auto] [--overwrite] | PCM16 WAV, 8-48 kHz\n\nWeVisOne-VL: --model text.gguf --mmproj vision.gguf --wevisone-decoder decoder.gguf --wevisone-request request.json [--output result.json]\n\nTimestral-209M: --model <timestral-F32.gguf> --timestral-request <series.json> [--threads N] [--compute cpu|auto|vulkan] | time-series forecasting; JSON context and prediction_length in, 21 quantiles out");
         return;
     }
     // \n\nGLiNER2 boundary mode: --jev --gliner2-boundary --model <gliner2.5-boundary.gguf> --jev-context <text> --gliner2-schema <json> | span extraction; the schema is {\"entities\":[\"person\",\"location\"],\"entity_descriptions\":{...}} (the dict form {\"entities\":{\"person\":[...]}} is also accepted). Output is (start, end) word spans per field; --jev-output json for machine-readable.\n\nServer mode: --serve delegates to app::server::run_server which has its
@@ -104,6 +104,16 @@ fn main() {
         eprintln!("{error}");
         std::process::exit(2);
     });
+    if options.enhance {
+        app::run_or_exit(app::validate_cli_options(&options));
+        app::run_or_exit(options.validate_compute_mode());
+        let available = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        app::init_rayon_global_pool(app::resolve_thread_count(options.threads, available));
+        app::run_or_exit(app::audio::run_enhancement(&options));
+        return;
+    }
     // Reject mixed forecast/task modes before any early media route can run.
     if options.timestral_request.is_some() {
         app::run_or_exit(app::validate_cli_options(&options));

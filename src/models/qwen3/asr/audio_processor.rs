@@ -372,6 +372,42 @@ impl RealFft {
             *value = real.mul_add(real, imaginary * imaginary).sqrt();
         }
     }
+
+    pub(crate) fn complex(&mut self, input: &[f32], output: &mut [[f32; 2]]) {
+        assert_eq!(input.len(), self.size);
+        assert_eq!(output.len(), self.size / 2 + 1);
+        self.transform(input);
+        for (bin, value) in output.iter_mut().enumerate() {
+            *value = [self.output[bin * 2], self.output[bin * 2 + 1]];
+        }
+        output[0][1] = 0.0;
+        if self.size.is_multiple_of(2) {
+            output[self.size / 2][1] = 0.0;
+        }
+    }
+
+    pub(crate) fn inverse(&mut self, input: &[[f32; 2]], output: &mut [f32]) {
+        assert_eq!(input.len(), self.size / 2 + 1);
+        assert_eq!(output.len(), self.size);
+        let mut real = vec![0.0; self.size];
+        let mut imaginary = vec![0.0; self.size];
+        for (bin, &[re, im]) in input.iter().enumerate() {
+            real[bin] = re;
+            if bin != 0 && bin * 2 != self.size {
+                imaginary[bin] = im;
+                real[self.size - bin] = re;
+                imaginary[self.size - bin] = -im;
+            }
+        }
+        self.transform(&real);
+        for (i, value) in output.iter_mut().enumerate() {
+            *value = self.output[2 * i];
+        }
+        self.transform(&imaginary);
+        for (i, value) in output.iter_mut().enumerate() {
+            *value = (*value + self.output[2 * i + 1]) / self.size as f32;
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
