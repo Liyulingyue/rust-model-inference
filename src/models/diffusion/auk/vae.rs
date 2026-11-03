@@ -164,9 +164,10 @@ impl AaActivation {
         pool: &ComputePool,
     ) {
         debug_assert_eq!(x.len(), channels * frames);
-        let mut up = upsample_ratio2(x, channels, frames, &self.filter.taps);
+        let mut up = upsample_ratio2(pool, x, channels, frames, &self.filter.taps);
         apply_snake_beta_inplace(&mut up, channels, frames * AA_RATIO, alpha, beta, pool);
         x.copy_from_slice(&downsample_ratio2(
+            pool,
             &up,
             channels,
             frames * AA_RATIO,
@@ -177,8 +178,15 @@ impl AaActivation {
 
 /// `UpSample1d(ratio=2, kernel_size=12, causal=False)`.
 ///
-/// Returns a `[channels, frames * 2]` buffer.
-fn upsample_ratio2(x: &[f32], channels: usize, frames: usize, taps: &[f32]) -> Vec<f32> {
+/// Returns a `[channels, frames * 2]` buffer. The channels are independent,
+/// so the filter runs in parallel over them.
+fn upsample_ratio2(
+    pool: &ComputePool,
+    x: &[f32],
+    channels: usize,
+    frames: usize,
+    taps: &[f32],
+) -> Vec<f32> {
     let stride = AA_RATIO;
     let pad = AA_KERNEL / AA_RATIO - 1; // 5
     let pad_left = pad * stride + (AA_KERNEL - stride) / 2; // 15
@@ -192,67 +200,112 @@ fn upsample_ratio2(x: &[f32], channels: usize, frames: usize, taps: &[f32]) -> V
     debug_assert_eq!(out_frames, frames * AA_RATIO);
 
     let mut out = vec![0.0_f32; channels * out_frames];
-    for c in 0..channels {
-        let src = &x[c * frames..(c + 1) * frames];
-        let dst = &mut out[c * out_frames..(c + 1) * out_frames];
-        for n in 0..out_frames {
-            // Position in the untrimmed transposed-conv output.
-            let full_pos = n + pad_left;
-            let mut acc = 0.0_f32;
-            // conv_transpose1d: out[p] = sum_k w[k] * in[(p - k) / stride]
-            // for every k with (p - k) divisible by stride.
-            let base = full_pos % stride;
-            let mut k = base;
-            while k < AA_KERNEL {
-                let src_idx = (full_pos - k) / stride;
-                // `F.pad(x, (pad, pad), mode="replicate")`: the padded index
-                // `src_idx` maps to the source index `src_idx - pad`, clamped
-                // to the signal bounds.
-                let padded_idx = src_idx as isize - pad as isize;
-                let value = if padded_idx < 0 {
-                    src[0]
-                } else if padded_idx >= frames as isize {
-                    src[frames - 1]
-                } else {
-                    src[padded_idx as usize]
-                };
-                acc += taps[k] * value;
-                k += stride;
-            }
-            dst[n] = acc * stride as f32;
+    let x_ptr = x.as_ptr() as usize;
+    let x_len = x.len();
+    let out_ptr = out.as_mut_ptr() as usize;
+    let out_len = out.len();
+    let taps_ptr = taps.as_ptr() as usize;
+    let taps_len = taps.len();
+    pool.compute(move |ith, nth| {
+        let per_thread = (channels + nth - 1) / nth;
+        let start = ith * per_thread;
+        let end = (start + per_thread).min(channels);
+        if start >= end {
+            return;
         }
-    }
+        // SAFETY: the slices outlive the closure, and every worker owns a
+        // disjoint range of output channels.
+        let x = unsafe { std::slice::from_raw_parts(x_ptr as *const f32, x_len) };
+        let out = unsafe { std::slice::from_raw_parts_mut(out_ptr as *mut f32, out_len) };
+        let taps = unsafe { std::slice::from_raw_parts(taps_ptr as *const f32, taps_len) };
+        for c in start..end {
+            let src = &x[c * frames..(c + 1) * frames];
+            let dst = &mut out[c * out_frames..(c + 1) * out_frames];
+            for n in 0..out_frames {
+                // Position in the untrimmed transposed-conv output.
+                let full_pos = n + pad_left;
+                let mut acc = 0.0_f32;
+                // conv_transpose1d: out[p] = sum_k w[k] * in[(p - k) / stride]
+                // for every k with (p - k) divisible by stride.
+                let base = full_pos % stride;
+                let mut k = base;
+                while k < AA_KERNEL {
+                    let src_idx = (full_pos - k) / stride;
+                    // `F.pad(x, (pad, pad), mode="replicate")`: the padded index
+                    // `src_idx` maps to the source index `src_idx - pad`, clamped
+                    // to the signal bounds.
+                    let padded_idx = src_idx as isize - pad as isize;
+                    let value = if padded_idx < 0 {
+                        src[0]
+                    } else if padded_idx >= frames as isize {
+                        src[frames - 1]
+                    } else {
+                        src[padded_idx as usize]
+                    };
+                    acc += taps[k] * value;
+                    k += stride;
+                }
+                dst[n] = acc * stride as f32;
+            }
+        }
+    });
     out
 }
 
 /// `DownSample1d(ratio=2, kernel_size=12, causal=True)`.
 ///
 /// Takes a `[channels, frames]` buffer and returns `[channels, frames / 2]`.
-fn downsample_ratio2(x: &[f32], channels: usize, frames: usize, taps: &[f32]) -> Vec<f32> {
+/// The channels are independent, so the filter runs in parallel over them.
+fn downsample_ratio2(
+    pool: &ComputePool,
+    x: &[f32],
+    channels: usize,
+    frames: usize,
+    taps: &[f32],
+) -> Vec<f32> {
     let stride = AA_RATIO;
     let pad_left = AA_KERNEL - 1; // 11 (causal)
     let padded_frames = frames + pad_left;
     let out_frames = (padded_frames - AA_KERNEL) / stride + 1;
     let mut out = vec![0.0_f32; channels * out_frames];
-    for c in 0..channels {
-        let src = &x[c * frames..(c + 1) * frames];
-        let dst = &mut out[c * out_frames..(c + 1) * out_frames];
-        for n in 0..out_frames {
-            let mut acc = 0.0_f32;
-            for k in 0..AA_KERNEL {
-                let padded_idx = n * stride + k;
-                // `replicate` padding on the left only (causal).
-                let src_idx = padded_idx as isize - pad_left as isize;
-                let value = if src_idx < 0 {
-                    src[0]
-                } else {
-                    src[src_idx as usize]
-                };
-                acc += taps[k] * value;
-            }
-            dst[n] = acc;
+    let x_ptr = x.as_ptr() as usize;
+    let x_len = x.len();
+    let out_ptr = out.as_mut_ptr() as usize;
+    let out_len = out.len();
+    let taps_ptr = taps.as_ptr() as usize;
+    let taps_len = taps.len();
+    pool.compute(move |ith, nth| {
+        let per_thread = (channels + nth - 1) / nth;
+        let start = ith * per_thread;
+        let end = (start + per_thread).min(channels);
+        if start >= end {
+            return;
         }
-    }
+        // SAFETY: the slices outlive the closure, and every worker owns a
+        // disjoint range of output channels.
+        let x = unsafe { std::slice::from_raw_parts(x_ptr as *const f32, x_len) };
+        let out = unsafe { std::slice::from_raw_parts_mut(out_ptr as *mut f32, out_len) };
+        let taps = unsafe { std::slice::from_raw_parts(taps_ptr as *const f32, taps_len) };
+        for c in start..end {
+            let src = &x[c * frames..(c + 1) * frames];
+            let dst = &mut out[c * out_frames..(c + 1) * out_frames];
+            for n in 0..out_frames {
+                let mut acc = 0.0_f32;
+                for k in 0..AA_KERNEL {
+                    let padded_idx = n * stride + k;
+                    // `replicate` padding on the left only (causal).
+                    let src_idx = padded_idx as isize - pad_left as isize;
+                    let value = if src_idx < 0 {
+                        src[0]
+                    } else {
+                        src[src_idx as usize]
+                    };
+                    acc += taps[k] * value;
+                }
+                dst[n] = acc;
+            }
+        }
+    });
     out
 }
 
@@ -914,28 +967,43 @@ fn apply_branch_conv_dilated(
         let p_slice = unsafe { std::slice::from_raw_parts(padded_ptr as *const f32, padded_len) };
         let b_slice = unsafe { std::slice::from_raw_parts(bias_ptr as *const f32, channels_const) };
         let out_local = unsafe { std::slice::from_raw_parts_mut(out_ptr as *mut f32, out_len) };
+        // The bias initializes every output row.
         for oc in start..end {
             let bias_oc = b_slice[oc];
             let row = &mut out_local[oc * frames_const..(oc + 1) * frames_const];
             for value in row.iter_mut() {
                 *value = bias_oc;
             }
-            for k in 0..kernel_const {
-                let src_start = k * dilation_const;
-                // `t + k * dilation` stays inside the padded buffer for every
-                // `t < frames` because `left_pad == dilation * (kernel - 1)`.
-                if src_start + frames_const > padded_frames_const {
-                    break;
-                }
-                for ic in 0..channels_const {
+        }
+        // The kernel taps and the input channels are the outer loops, so the
+        // input row of a tap is read once and reused for every output
+        // channel of the block instead of once per output channel. The
+        // order in which a given output row accumulates its taps and input
+        // channels is unchanged (k outer, ic inner), so the result stays
+        // bit-identical to the scalar formulation.
+        //
+        // The output rows of a block are held in cache while the block is
+        // accumulated, so the block is sized to keep them resident: with
+        // many frames per row the block shrinks to a single channel, which
+        // is the original one-row-at-a-time order.
+        for k in 0..kernel_const {
+            let src_start = k * dilation_const;
+            // `t + k * dilation` stays inside the padded buffer for every
+            // `t < frames` because `left_pad == dilation * (kernel - 1)`.
+            if src_start + frames_const > padded_frames_const {
+                break;
+            }
+            for ic in 0..channels_const {
+                let src = &p_slice
+                    [ic * padded_frames_const + src_start
+                        ..ic * padded_frames_const + src_start + frames_const];
+                for oc in start..end {
                     // Weight layout is [out][kernel][in].
                     let w = w_slice[(oc * kernel_const + k) * channels_const + ic];
                     crate::ops::vec_scaled_add_inplace(
                         w,
-                        &p_slice
-                            [ic * padded_frames_const + src_start
-                                ..ic * padded_frames_const + src_start + frames_const],
-                        row,
+                        src,
+                        &mut out_local[oc * frames_const..(oc + 1) * frames_const],
                     );
                 }
             }
@@ -943,6 +1011,7 @@ fn apply_branch_conv_dilated(
     });
     x.copy_from_slice(&out);
 }
+
 
 const HIDDEN: usize = 1536;
 
