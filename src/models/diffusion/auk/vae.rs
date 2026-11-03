@@ -299,7 +299,11 @@ impl BigVGANFlowVae {
         let global_std: Vec<f32> = global_log_std.iter().map(|v| v.sqrt()).collect();
 
         // conv_pre: weight-norm Conv1d 64 -> 1536, kernel 7
-        let conv_pre = materialize_weight_norm(source.as_ref(), "conv_pre", 1536, &[7, 64, 1536])?;
+        let conv_pre = pack_conv_weight(
+            materialize_weight_norm(source.as_ref(), "conv_pre", 1536, &[7, 64, 1536])?,
+            1536,
+            7,
+        );
         let conv_pre_bias = load_f32(source.as_ref(), "conv_pre.bias", 1536)?;
 
         // Per-stage upsample ConvTranspose1d. GGUF weight layout is
@@ -320,14 +324,33 @@ impl BigVGANFlowVae {
                 &dims,
             )?;
             let bias = load_f32(source.as_ref(), &format!("ups.{stage}.0.bias"), channels)?;
-            ups_weight.push(weight);
+            // Repack from the raw ConvTranspose1d layout `[in][out][kernel]`
+            // into `[out][tap][in]`, so that for a fixed output channel and
+            // kernel tap the weights over the input channel are contiguous.
+            // The upsampling kernel then reduces along `in` with contiguous
+            // reads on both sides instead of a stride of `out * kernel`.
+            let in_channels = channels * 2;
+            let mut packed = vec![0.0_f32; channels * kernel * in_channels];
+            for ic in 0..in_channels {
+                for oc in 0..channels {
+                    for tap in 0..kernel {
+                        packed[(oc * kernel + tap) * in_channels + ic] =
+                            weight[(ic * channels + oc) * kernel + tap];
+                    }
+                }
+            }
+            ups_weight.push(packed);
             ups_bias.push(bias);
         }
 
         // conv_post: weight-norm Conv1d 24 -> 1, kernel 7 (no bias). The GGUF stores
         // this as a 2D tensor [kernel, in_channels * out_channels] (no third
         // out_channels dim because it is 1). weight_g is `[1]` (a scalar).
-        let conv_post = materialize_weight_norm_scalar_g(source.as_ref(), "conv_post", &[7, 24])?;
+        let conv_post = pack_conv_weight(
+            materialize_weight_norm_scalar_g(source.as_ref(), "conv_post", &[7, 24])?,
+            1,
+            7,
+        );
         let post_channels = STAGE_CHANNELS[UPSAMPLE_STAGES - 1];
         let post_alpha = load_f32(source.as_ref(), "activation_post.act.alpha", post_channels)?
             .into_iter()
@@ -374,23 +397,31 @@ impl BigVGANFlowVae {
                 let mut bias2: [Vec<f32>; 3] = [vec![], vec![], vec![]];
                 let dims = [kernel as u64, channels as u64, channels as u64];
                 for layer in 0..3 {
-                    conv1[layer] = materialize_weight_norm(
-                        source.as_ref(),
-                        &format!("{name_prefix}.convs1.{layer}"),
+                    conv1[layer] = pack_conv_weight(
+                        materialize_weight_norm(
+                            source.as_ref(),
+                            &format!("{name_prefix}.convs1.{layer}"),
+                            channels,
+                            &dims,
+                        )?,
                         channels,
-                        &dims,
-                    )?;
+                        kernel,
+                    );
                     bias1[layer] = load_f32(
                         source.as_ref(),
                         &format!("{name_prefix}.convs1.{layer}.bias"),
                         channels,
                     )?;
-                    conv2[layer] = materialize_weight_norm(
-                        source.as_ref(),
-                        &format!("{name_prefix}.convs2.{layer}"),
+                    conv2[layer] = pack_conv_weight(
+                        materialize_weight_norm(
+                            source.as_ref(),
+                            &format!("{name_prefix}.convs2.{layer}"),
+                            channels,
+                            &dims,
+                        )?,
                         channels,
-                        &dims,
-                    )?;
+                        kernel,
+                    );
                     bias2[layer] = load_f32(
                         source.as_ref(),
                         &format!("{name_prefix}.convs2.{layer}.bias"),
@@ -503,6 +534,8 @@ impl BigVGANFlowVae {
         // by `STAGE_RATES[stage]` (5, 4, 3, 2, 2, 2) via ConvTranspose1d
         // (audio.cpp vae.cpp::build_decoder). Total upsample = 480x.
         for stage in 0..UPSAMPLE_STAGES {
+            let profile = std::env::var_os("RMI_AUK_VAE_PROFILE").is_some();
+            let t_stage = std::time::Instant::now();
             let in_ch = if stage == 0 {
                 HIDDEN
             } else {
@@ -529,29 +562,91 @@ impl BigVGANFlowVae {
             // `N*rate` frames.
             let weight = &self.ups_weight[stage];
             let bias = &self.ups_bias[stage];
+            let t_ups = std::time::Instant::now();
             let mut upsampled = vec![0.0_f32; out_ch * out_frames];
-            for q in 0..frames {
-                for p in 0..rate {
-                    let pos = q * rate + p;
-                    for oc in 0..out_ch {
-                        let mut acc = 0.0_f32;
-                        for ic in 0..in_ch {
-                            let w = weight[(ic * out_ch + oc) * (2 * rate) + p];
-                            acc += w * pre[ic * frames + q];
-                            if q > 0 {
-                                let w_prev = weight[(ic * out_ch + oc) * (2 * rate) + (p + rate)];
-                                acc += w_prev * pre[ic * frames + (q - 1)];
-                            }
-                        }
-                        upsampled[oc * out_frames + pos] = acc;
+            // ConvTranspose1d (kernel = 2*rate, stride = rate, padding = 0)
+            // is evaluated in polyphase form:
+            //   out[q*rate + p] = w[p]     * in[q]
+            //                     + w[p+rate] * in[q-1]     (q > 0)
+            //
+            // For a fixed output channel and phase `p` the contribution of
+            // one input channel is a contiguous scaled add over the input
+            // frames, so the whole tap is one axpy instead of a scalar
+            // multiply-add per output sample. The two halves are accumulated
+            // into a per-phase buffer which is then interleaved into the
+            // [out_channels, out_frames] layout the resblocks expect.
+            //
+            // The summation order per output sample is unchanged (input
+            // channel outer, tap inner), so the result stays bit-identical
+            // to the scalar formulation.
+            {
+                let kernel = 2 * rate;
+                // `phase[p]` holds `out[q*rate + p]` for all q, laid out as
+                // [out_channels, frames].
+                let mut phase = vec![0.0_f32; rate * out_ch * frames];
+                let weight_ptr = weight.as_ptr() as usize;
+                let weight_len = weight.len();
+                let pre_ptr = pre.as_ptr() as usize;
+                let pre_len = pre.len();
+                let phase_ptr = phase.as_mut_ptr() as usize;
+                let phase_len = phase.len();
+                let in_ch_const = in_ch;
+                let out_ch_const = out_ch;
+                let rate_const = rate;
+                let frames_const = frames;
+                self.pool.as_ref().compute(move |ith, nth| {
+                    // Each unit of work is one (phase, output channel) pair.
+                    let units = rate_const * out_ch_const;
+                    let per_thread = (units + nth - 1) / nth;
+                    let start = ith * per_thread;
+                    let end = (start + per_thread).min(units);
+                    if start >= end {
+                        return;
                     }
-                }
-            }
-            // Add bias to every output sample.
-            for oc in 0..out_ch {
-                let b = bias[oc];
-                for t in 0..out_frames {
-                    upsampled[oc * out_frames + t] += b;
+                    let w_slice =
+                        unsafe { std::slice::from_raw_parts(weight_ptr as *const f32, weight_len) };
+                    let p_slice =
+                        unsafe { std::slice::from_raw_parts(pre_ptr as *const f32, pre_len) };
+                    let ph_slice =
+                        unsafe { std::slice::from_raw_parts_mut(phase_ptr as *mut f32, phase_len) };
+                    for unit in start..end {
+                        let p = unit / out_ch_const;
+                        let oc = unit % out_ch_const;
+                        let row = &mut ph_slice
+                            [(p * out_ch_const + oc) * frames_const..][..frames_const];
+                        for value in row.iter_mut() {
+                            *value = 0.0;
+                        }
+                        for ic in 0..in_ch_const {
+                            // First half of the kernel: `in[q]`.
+                            let w = w_slice[(oc * kernel + p) * in_ch_const + ic];
+                            crate::ops::vec_scaled_add_inplace(
+                                w,
+                                &p_slice[ic * frames_const..ic * frames_const + frames_const],
+                                row,
+                            );
+                            // Second half: `in[q-1]`, which contributes to
+                            // output samples `q >= 1`.
+                            let w_prev =
+                                w_slice[(oc * kernel + (p + rate_const)) * in_ch_const + ic];
+                            crate::ops::vec_scaled_add_inplace(
+                                w_prev,
+                                &p_slice[ic * frames_const..ic * frames_const + frames_const - 1],
+                                &mut row[1..],
+                            );
+                        }
+                    }
+                });
+                // Interleave the per-phase buffers into [out_channels,
+                // out_frames] and add the bias.
+                for oc in 0..out_ch {
+                    let b = bias[oc];
+                    for q in 0..frames {
+                        for p in 0..rate {
+                            let value = phase[(p * out_ch + oc) * frames + q] + b;
+                            upsampled[oc * out_frames + q * rate + p] = value;
+                        }
+                    }
                 }
             }
             // NOTE: audio.cpp does NOT apply SnakeBeta between upsample and
@@ -574,6 +669,7 @@ impl BigVGANFlowVae {
             if let Some(dir) = dump.as_ref() {
                 dump_tensor(dir, &format!("stage{stage}_up"), &stage_input);
             }
+            let t_rb = std::time::Instant::now();
             let mut acc = vec![0.0_f32; out_ch * out_frames];
             for rb_in_stage in 0..3 {
                 let rb_global = stage * 3 + rb_in_stage;
@@ -593,6 +689,15 @@ impl BigVGANFlowVae {
             pre = acc;
             if let Some(dir) = dump.as_ref() {
                 dump_tensor(dir, &format!("stage{stage}"), &pre);
+            }
+            let t_stage_end = std::time::Instant::now();
+            if profile {
+                eprintln!(
+                    "[auk-vae-profile] stage {stage}: upsample {:.1}ms  resblocks {:.1}ms  total {:.1}ms",
+                    (t_rb - t_ups).as_secs_f64() * 1000.0,
+                    (t_stage_end - t_rb).as_secs_f64() * 1000.0,
+                    (t_stage_end - t_stage).as_secs_f64() * 1000.0,
+                );
             }
         }
 
@@ -680,7 +785,11 @@ impl BigVGANFlowVae {
             filter: self.aa_filter.clone(),
         };
         let mut hidden = x.to_vec();
+        let profile = std::env::var_os("RMI_AUK_VAE_PROFILE").is_some();
+        let mut t_act = std::time::Duration::ZERO;
+        let mut t_conv = std::time::Duration::ZERO;
         for layer in 0..3 {
+            let t0 = std::time::Instant::now();
             aa.apply(
                 &mut hidden,
                 channels,
@@ -689,6 +798,7 @@ impl BigVGANFlowVae {
                 &snake.beta[2 * layer],
                 self.pool.as_ref(),
             );
+            let t1 = std::time::Instant::now();
             apply_branch_conv_dilated(
                 &mut hidden,
                 channels,
@@ -699,6 +809,7 @@ impl BigVGANFlowVae {
                 dilations[layer],
                 self.pool.as_ref(),
             );
+            let t2 = std::time::Instant::now();
             aa.apply(
                 &mut hidden,
                 channels,
@@ -707,6 +818,7 @@ impl BigVGANFlowVae {
                 &snake.beta[2 * layer + 1],
                 self.pool.as_ref(),
             );
+            let t3 = std::time::Instant::now();
             apply_branch_conv_dilated(
                 &mut hidden,
                 channels,
@@ -717,6 +829,9 @@ impl BigVGANFlowVae {
                 1,
                 self.pool.as_ref(),
             );
+            let t4 = std::time::Instant::now();
+            t_act += (t1 - t0) + (t3 - t2);
+            t_conv += (t2 - t1) + (t4 - t3);
             // `x = xt + x`: accumulate the branch output into the running
             // residual.
             for i in 0..x.len() {
@@ -724,6 +839,13 @@ impl BigVGANFlowVae {
             }
             // The next layer continues from the updated residual.
             hidden.copy_from_slice(x);
+        }
+        if profile {
+            eprintln!(
+                "[auk-vae-profile]   resblock {rb_index}: activation {:.1}ms  conv {:.1}ms",
+                t_act.as_secs_f64() * 1000.0,
+                t_conv.as_secs_f64() * 1000.0,
+            );
         }
         Ok(())
     }
@@ -763,6 +885,12 @@ fn apply_branch_conv_dilated(
     // Parallelize the output-channel loop via ComputePool: each `oc` writes
     // a disjoint slice of `out`, so the per-thread closures can run
     // independently with no synchronization.
+    //
+    // The convolution accumulates over the time axis: for a fixed
+    // (oc, ic, k) the contribution `W[oc][ic][k] * x[ic][t + k * dilation]`
+    // is a contiguous scaled add over the output frames. The kernel taps are
+    // visited in the same order as the scalar formulation (k outer, ic
+    // inner), so the accumulated result stays bit-identical to it.
     let padded_frames_const = padded_frames;
     let frames_const = frames;
     let kernel_const = kernel;
@@ -788,21 +916,28 @@ fn apply_branch_conv_dilated(
         let out_local = unsafe { std::slice::from_raw_parts_mut(out_ptr as *mut f32, out_len) };
         for oc in start..end {
             let bias_oc = b_slice[oc];
-            for t in 0..frames_const {
-                let mut sum = bias_oc;
-                for k in 0..kernel_const {
-                    let src_signed = t as isize + (k as isize * dilation_const as isize);
-                    if src_signed >= padded_frames_const as isize {
-                        continue;
-                    }
-                    let src = src_signed as usize;
-                    for ic in 0..channels_const {
-                        // Raw GGUF layout is [out][in][kernel].
-                        let w = w_slice[(oc * channels_const + ic) * kernel_const + k];
-                        sum += w * p_slice[ic * padded_frames_const + src];
-                    }
+            let row = &mut out_local[oc * frames_const..(oc + 1) * frames_const];
+            for value in row.iter_mut() {
+                *value = bias_oc;
+            }
+            for k in 0..kernel_const {
+                let src_start = k * dilation_const;
+                // `t + k * dilation` stays inside the padded buffer for every
+                // `t < frames` because `left_pad == dilation * (kernel - 1)`.
+                if src_start + frames_const > padded_frames_const {
+                    break;
                 }
-                out_local[oc * frames_const + t] = sum;
+                for ic in 0..channels_const {
+                    // Weight layout is [out][kernel][in].
+                    let w = w_slice[(oc * kernel_const + k) * channels_const + ic];
+                    crate::ops::vec_scaled_add_inplace(
+                        w,
+                        &p_slice
+                            [ic * padded_frames_const + src_start
+                                ..ic * padded_frames_const + src_start + frames_const],
+                        row,
+                    );
+                }
             }
         }
     });
@@ -923,21 +1058,31 @@ fn causal_conv1d(
         }
     }
     let mut output = vec![0.0_f32; out_channels * frames];
+    // Accumulate over the time axis: for a fixed (oc, ic, k) the contribution
+    // is a contiguous scaled add. The kernel taps are visited in the same
+    // order as the scalar formulation (k outer, ic inner), so the result
+    // stays bit-identical to it.
     for oc in 0..out_channels {
         let bias_oc = bias.map(|b| b[oc]).unwrap_or(0.0);
-        for t in 0..frames {
-            let mut sum = bias_oc;
-            for k in 0..kernel {
-                let src = t + k * dilation;
-                if src >= padded_frames {
-                    continue;
-                }
-                for ic in 0..in_channels {
-                    let w = weight[(oc * in_channels + ic) * kernel + k];
-                    sum += w * padded[ic * padded_frames + src];
-                }
+        let row = &mut output[oc * frames..(oc + 1) * frames];
+        for value in row.iter_mut() {
+            *value = bias_oc;
+        }
+        for k in 0..kernel {
+            let src_start = k * dilation;
+            // `t + k * dilation` stays inside the padded buffer for every
+            // `t < frames` because `left_pad == dilation * (kernel - 1)`.
+            if src_start + frames > padded_frames {
+                break;
             }
-            output[oc * frames + t] = sum;
+            for ic in 0..in_channels {
+                let w = weight[(oc * kernel + k) * in_channels + ic];
+                crate::ops::vec_scaled_add_inplace(
+                    w,
+                    &padded[ic * padded_frames + src_start..ic * padded_frames + src_start + frames],
+                    row,
+                );
+            }
         }
     }
     Ok(output)
@@ -976,26 +1121,41 @@ fn conv1d_into(
     if output.len() != out_channels * out_frames {
         return Err("AuK VAE conv1d output length mismatch".into());
     }
-    // Weight layout: GGUF raw bytes are the PyTorch C-order weight, i.e.
-    // `[out_channels][in_channels][kernel]` with the kernel contiguous
-    // (GGUF `ne = [kernel, in_channels, out_channels]`). Flat index:
-    // `(oc * in_ch + ic) * kernel + k`.
+    // Weight layout: `[out_channels][kernel][in_channels]` (see
+    // `pack_conv_weight`), so the weights of one (output channel, kernel tap)
+    // pair are contiguous.
+    //
+    // The convolution is evaluated by accumulating over the time axis: for a
+    // fixed output channel, kernel tap and input channel the contribution
+    // `W[oc][k][ic] * x[ic][t + k - pad]` touches a contiguous run of output
+    // frames and a contiguous run of input frames, so the whole kernel is one
+    // scaled add per (oc, k, ic) instead of one multiply-add per
+    // (oc, t, ic, k). The kernel taps are visited in the same order as the
+    // scalar formulation (k outer, ic inner), so the accumulated result stays
+    // bit-identical to the previous scalar implementation.
     for oc in 0..out_channels {
         let bias_oc = bias.map(|b| b[oc]).unwrap_or(0.0);
-        for t in 0..out_frames {
-            let mut sum = bias_oc;
-            for k in 0..kernel {
-                let src_signed = t as isize + k as isize - pad as isize;
-                if src_signed < 0 || src_signed >= in_frames as isize {
-                    continue;
-                }
-                let src = src_signed as usize;
-                for ic in 0..in_channels {
-                    let w = weight[(oc * in_channels + ic) * kernel + k];
-                    sum += w * input[ic * in_frames + src];
-                }
+        let row = &mut output[oc * out_frames..(oc + 1) * out_frames];
+        for value in row.iter_mut() {
+            *value = bias_oc;
+        }
+        for k in 0..kernel {
+            // Frames whose source index `t + k - pad` stays inside the input.
+            let t_start = pad.saturating_sub(k);
+            let t_end = out_frames.min(in_frames + pad - k);
+            if t_start >= t_end {
+                continue;
             }
-            output[oc * out_frames + t] = sum;
+            let src_start = t_start + k - pad;
+            let count = t_end - t_start;
+            for ic in 0..in_channels {
+                let w = weight[(oc * kernel + k) * in_channels + ic];
+                crate::ops::vec_scaled_add_inplace(
+                    w,
+                    &input[ic * in_frames + src_start..ic * in_frames + src_start + count],
+                    &mut row[t_start..t_end],
+                );
+            }
         }
     }
     Ok(())
@@ -1006,6 +1166,27 @@ fn conv1d_into(
 /// [kernel, in_channels, channels] where the last is norm_channels; `weight_g`
 /// has shape `[1, 1, channels]`). Returns the materialized weight where each
 /// `out_ch`-indexed slice has been divided by its L2 norm and scaled by `g`.
+/// Repack a convolution weight from the raw `[out][in][kernel]` layout into
+/// `[out][kernel][in]`.
+///
+/// The convolution kernels reduce over the input channel, so with this layout
+/// the weights of one (output channel, kernel tap) pair are contiguous and
+/// the inner loop reads them sequentially instead of with a stride of
+/// `kernel`.
+fn pack_conv_weight(weight: Vec<f32>, out_channels: usize, kernel: usize) -> Vec<f32> {
+    let in_channels = weight.len() / (out_channels * kernel);
+    let mut packed = vec![0.0_f32; weight.len()];
+    for oc in 0..out_channels {
+        for k in 0..kernel {
+            for ic in 0..in_channels {
+                packed[(oc * kernel + k) * in_channels + ic] =
+                    weight[(oc * in_channels + ic) * kernel + k];
+            }
+        }
+    }
+    packed
+}
+
 fn materialize_weight_norm(
     source: &dyn TensorSource,
     prefix: &str,

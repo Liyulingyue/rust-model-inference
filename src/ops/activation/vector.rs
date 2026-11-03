@@ -85,6 +85,80 @@ pub fn vec_add_into(a: &[f32], b: &mut [f32]) {
     }
 }
 
+/// `b[i] += scale * a[i]` for every element.
+///
+/// Used by the convolution kernels to accumulate one input channel (or one
+/// kernel tap) into the output row: for a fixed output channel and kernel
+/// tap the contribution is a contiguous scaled add over the time axis.
+///
+/// Deliberately uses a separate multiply and add rather than a fused
+/// multiply-add, so the result is bit-identical to the scalar
+/// `b[i] += scale * a[i]` it replaces. Callers rely on that: the AuK VAE
+/// decoder is validated against the official PyTorch implementation, and a
+/// different rounding there would move the decoded waveform.
+#[inline(always)]
+pub fn vec_scaled_add_inplace(scale: f32, a: &[f32], b: &mut [f32]) {
+    debug_assert_eq!(a.len(), b.len());
+    #[cfg(target_arch = "x86_64")]
+    {
+        if super::super::has_avx2_fma() {
+            unsafe { vec_scaled_add_avx2(scale, a, b) };
+            return;
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if super::super::has_neon() {
+            unsafe {
+                vec_scaled_add_neon(scale, a, b);
+            }
+            return;
+        }
+    }
+    for i in 0..a.len() {
+        b[i] += scale * a[i];
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn vec_scaled_add_neon(scale: f32, a: &[f32], b: &mut [f32]) {
+    use std::arch::aarch64::*;
+    let mut i = 0;
+    while i + 4 <= b.len() {
+        let va = vld1q_f32(a.as_ptr().add(i));
+        let vb = vld1q_f32(b.as_mut_ptr().add(i));
+        let scaled = vmulq_n_f32(va, scale);
+        vst1q_f32(b.as_mut_ptr().add(i), vaddq_f32(vb, scaled));
+        i += 4;
+    }
+    while i < b.len() {
+        *b.get_unchecked_mut(i) += scale * *a.get_unchecked(i);
+        i += 1;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2", enable = "fma")]
+unsafe fn vec_scaled_add_avx2(scale: f32, a: &[f32], b: &mut [f32]) {
+    use std::arch::x86_64::*;
+    let n = a.len();
+    let n8 = n / 8 * 8;
+    let vs = _mm256_set1_ps(scale);
+    let mut i = 0;
+    while i < n8 {
+        let va = _mm256_loadu_ps(a.as_ptr().add(i));
+        let vb = _mm256_loadu_ps(b.as_ptr().add(i));
+        // Separate multiply and add (no FMA) to stay bit-identical to scalar.
+        _mm256_storeu_ps(b.as_mut_ptr().add(i), _mm256_add_ps(vb, _mm256_mul_ps(va, vs)));
+        i += 8;
+    }
+    while i < n {
+        *b.get_unchecked_mut(i) += scale * *a.get_unchecked(i);
+        i += 1;
+    }
+}
+
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 unsafe fn vec_add_neon(a: &[f32], b: &mut [f32]) {
