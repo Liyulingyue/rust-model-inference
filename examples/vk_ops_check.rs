@@ -34,7 +34,23 @@ fn main() -> ExitCode {
     // q8_0 is checked in both suites now that the matvec operator test
     // covers it: `run_batched_matmul_check` exercises the row recorder and
     // `run_qwen3_operator_check` exercises the legacy single-row matvec.
-    let legacy_formats = formats;
+    let legacy_formats = row_formats;
+    if std::env::var("SILU_ONLY").is_ok() {
+        return match rust_model_inference::vulkan::silu_ffn_scale_probe(context) {
+            Ok(0) => {
+                println!("operator=silu_mul_ffn_scale finite=true");
+                ExitCode::SUCCESS
+            }
+            Ok(n) => {
+                eprintln!("silu_mul FFN scale: {n} non-finite values");
+                ExitCode::FAILURE
+            }
+            Err(e) => {
+                eprintln!("silu_mul FFN scale check failed: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     match run_qwen3_operator_check(context, &legacy_formats) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {

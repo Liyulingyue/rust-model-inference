@@ -4,6 +4,94 @@ use super::options::{
 use super::types::{normalize_tts_language, CliOptions};
 
 pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
+    if options.wevisone_request.is_some() {
+        if options.model.as_os_str().is_empty() || options.mmproj.is_none() {
+            return Err("--wevisone-request requires --model and --mmproj".into());
+        }
+        if options.jev
+            || options.rerank
+            || options.embedding
+            || options.tts
+            || options.yue2
+            || options.dreamx
+            || options.astronex
+            || options.timestral_request.is_some()
+            || options.laya_request.is_some()
+            || options.prompt.is_some()
+            || options.image.is_some()
+            || options.video.is_some()
+            || options.audio.is_some()
+            || options.vae.is_some()
+            || options.text_encoder.is_some()
+            || options.out.is_some()
+            || options.qwen_image_turbo
+            || options.dry_run
+            || options.planner.is_some()
+            || options.perception.is_some()
+            || options.longcat_kind.is_some()
+            || options.noise.is_some()
+            || options.width.is_some()
+            || options.height.is_some()
+            || options.cfg.is_some()
+            || options.top_k.is_some()
+            || options.top_p.is_some()
+            || options.bench
+            || options.dump_logits
+            || options.thinking
+            || options.jinja
+            || options.chat_template.is_some()
+            || options.chat_template_file.is_some()
+        {
+            return Err("--wevisone-request cannot be combined with other task modes".into());
+        }
+        return Ok(());
+    }
+    if options.wevisone_decoder.is_some() && !options.serve {
+        // The pixel decoder only exists for the WeVisOne prediction
+        // route. Without --wevisone-request it would be silently
+        // ignored and the run would fail later with an unrelated
+        // message from whichever text path was selected. The server
+        // owns the same route and supplies the decoder there, so it
+        // validates the components against the loaded model instead.
+        return Err("--wevisone-decoder requires --wevisone-request".into());
+    }
+    if options.qwen_image_turbo {
+        return Err("--qwen-image-turbo requires a Qwen-Image-2.1 DiT GGUF".into());
+    }
+    if options.timestral_request.is_some() {
+        if options.model.as_os_str().is_empty() {
+            return Err("--timestral-request requires --model".into());
+        }
+        if options.jev
+            || options.rerank
+            || options.embedding
+            || options.tts
+            || options.yue2
+            || options.dreamx
+            || options.astronex
+            || options.astronex_frames.is_some()
+            || options.laya_request.is_some()
+            || options.prompt.is_some()
+            || options.planner.is_some()
+            || options.perception.is_some()
+            || options.longcat_kind.is_some()
+            || options.image.is_some()
+            || options.audio.is_some()
+            || options.video.is_some()
+            || options.mmproj.is_some()
+            || options.vae.is_some()
+            || options.text_encoder.is_some()
+            || options.out.is_some()
+            || options.output.is_some()
+        {
+            return Err("--timestral-request is a forecasting mode; generation, media, server and other task modes are unsupported".into());
+        }
+        return Ok(());
+    }
+    if options.astronex || options.astronex_frames.is_some() {
+        crate::app::cli::astronex_cli_options(options)?;
+        return Ok(());
+    }
     if options.width.is_some()
         || options.height.is_some()
         || options.cfg.is_some()
@@ -201,18 +289,13 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
         if media_count > 1 {
             return Err("--embedding accepts only one of --image, --video, or --audio".into());
         }
-        if media_count == 1 {
-            if options
-                .mmproj
-                .as_deref()
-                .is_none_or(|path| path.as_os_str().is_empty())
-            {
-                return Err("media embedding requires --mmproj".into());
-            }
-            return Ok(());
-        }
-    }
-    if options.video.is_some() {
+        // A media embedding is fully handled by `main.rs`, which checks
+        // `--mmproj` where it opens the projector and reports the failure
+        // itself. Do not return here: this used to skip every check below,
+        // including the dispatch-mode conflicts, so `--embedding --image
+        // --rerank` got as far as loading a model instead of saying the two
+        // modes conflict.
+    } else if options.video.is_some() {
         if options
             .mmproj
             .as_deref()
@@ -275,7 +358,13 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
         }
         return Ok(());
     }
-    if options.audio.is_none() {
+    // An audio *embedding* is dispatched by `main.rs` and never reaches the ASR
+    // path, so the checks below -- which treat `--audio` as audio generation and
+    // treat `--embedding` as a conflicting mode with it -- do not apply. The old
+    // unconditional `return Ok(())` covered this by also skipping the
+    // dispatch-mode conflicts above; now the embedding block falls through, so
+    // this has to be stated explicitly.
+    if options.audio.is_none() || (options.embedding && media_count == 1) {
         return if options.language.is_some() {
             Err("--language requires --audio".into())
         } else {

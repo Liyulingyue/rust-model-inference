@@ -1,0 +1,111 @@
+#version 450
+
+// Q/K norm plus *interleaved* RoPE, for the Z-Image DiT.
+//
+// `qk_norm_rope.comp` is the same kernel with the NeoX rotation: it pairs
+// element `lane` with `lane + head_dim / 2` and reads the table the same way.
+// Z-Image's `rotate_interleaved_inplace` pairs *adjacent* elements --
+// `chunks_exact(2)` over both the activations and the table -- so only the
+// rotation indices differ. The norm below is copied verbatim from the NeoX
+// kernel on purpose: its serial Kahan-style reduction is what keeps the GPU
+// result bit-identical to `rms_norm_inplace`, and that parity is worth far more
+// than the throughput of a parallel reduction.
+//
+// The table is (cos, sin) pairs concatenated per axis, so for head element
+// `2 * lane` the cosine is `table[2 * lane]` and the sine `table[2 * lane + 1]`.
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(std430, binding = 1) readonly buffer QNorm { uint data[]; } q_norm;
+layout(std430, binding = 2) readonly buffer KNorm { uint data[]; } k_norm;
+layout(push_constant) uniform PC {
+    uint q_word;
+    uint k_word;
+    uint q_norm_word;
+    uint k_norm_word;
+    uint q_heads;
+    uint k_heads;
+    uint head_dim;
+    uint rope_word;
+    uint norm_flags;
+    float eps;
+    uint rows;
+    uint q_stride;
+    uint k_stride;
+    uint rope_stride;
+    // Elements from the Q base to the K base inside one row. The DiT packs
+    // `Q | K | V` per token, so K is a span of the same row rather than a
+    // separate block, and this is the only thing that can say where it starts.
+    uint k_base;
+} pc;
+
+shared float inverse_rms;
+
+float norm_weight(uint kind, uint index) {
+    return kind == 0u
+        ? uintBitsToFloat(q_norm.data[pc.q_norm_word + index])
+        : uintBitsToFloat(k_norm.data[pc.k_norm_word + index]);
+}
+
+void main() {
+    uint row = gl_WorkGroupID.z;
+    if (row >= pc.rows) return;
+    uint kind = gl_WorkGroupID.y;
+    uint head = gl_WorkGroupID.x;
+    uint heads = kind == 0u ? pc.q_heads : pc.k_heads;
+    if (kind > 1u || head >= heads) return;
+    uint lane = gl_LocalInvocationID.x;
+    uint base = (kind == 0u
+        ? pc.q_word + row * pc.q_stride
+        : pc.k_word + row * pc.k_stride + pc.k_base) + head * pc.head_dim;
+    bool normalize = (pc.norm_flags & (1u << kind)) != 0u;
+
+    if (normalize) {
+        // ponytail: serial reduction preserves CPU rounding; parallelize only with exact parity proof.
+        if (lane == 0u) {
+            precise float sum = 0.0;
+            precise float correction = 0.0;
+            for (uint index = 0u; index < pc.head_dim; index++) {
+                float value = uintBitsToFloat(arena.data[base + index]);
+                float square = value * value;
+                precise float next = sum + square;
+                correction += sum >= square
+                    ? (sum - next) + square
+                    : (square - next) + sum;
+                sum = next;
+            }
+            precise float mean_square = (sum + correction) / float(pc.head_dim) + pc.eps;
+            precise float root = sqrt(mean_square);
+            precise float root_residual = fma(-root, root, mean_square);
+            root = fma(root_residual, 0.5 / root, root);
+            precise float reciprocal = 1.0 / root;
+            precise float reciprocal_residual = fma(-root, reciprocal, 1.0);
+            inverse_rms = fma(reciprocal_residual, reciprocal, reciprocal);
+        }
+        barrier();
+        for (uint index = lane; index < pc.head_dim; index += 64u) {
+            float value = uintBitsToFloat(arena.data[base + index]);
+            arena.data[base + index] = floatBitsToUint(value * inverse_rms * norm_weight(kind, index));
+        }
+        barrier();
+    }
+
+    // Interleaved: one lane per adjacent (cos, sin) pair. `head_dim / 2` lanes
+    // are busy and the rest idle, exactly as in the NeoX kernel.
+    uint half_dim = pc.head_dim / 2u;
+    if (lane < half_dim) {
+        uint first = lane * 2u;
+        uint second = first + 1u;
+        float cosine = uintBitsToFloat(arena.data[pc.rope_word + row * pc.rope_stride + first]);
+        float sine = uintBitsToFloat(arena.data[pc.rope_word + row * pc.rope_stride + second]);
+        float a = uintBitsToFloat(arena.data[base + first]);
+        float b = uintBitsToFloat(arena.data[base + second]);
+        precise float first_cosine = a * cosine;
+        precise float second_sine = b * sine;
+        precise float first_sine = a * sine;
+        precise float second_cosine = b * cosine;
+        arena.data[base + first] = floatBitsToUint(first_cosine - second_sine);
+        arena.data[base + second] = floatBitsToUint(first_sine + second_cosine);
+    }
+}

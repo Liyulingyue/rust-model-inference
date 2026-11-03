@@ -8,6 +8,19 @@ use super::{
 use crate::ops::rope::rope_neox_inplace;
 
 #[test]
+fn precise_rope_preserves_unfused_rotation_across_heads() {
+    let mut values = [3.0f32, 4.0, -2.0, 1.0, 3.0, 4.0, -2.0, 1.0];
+    super::rope_neox_inplace_precise(&mut values, 1, 4, 10_000.0);
+    let expected = [3.3038489, 3.9898002, 1.4438083, 1.0399493];
+    for head in values.chunks_exact(4) {
+        for (actual, expected) in head.iter().zip(expected) {
+            assert!((actual - expected).abs() < 5e-7);
+        }
+    }
+    super::rope_neox_inplace_precise(&mut [], 1, 4, 10_000.0);
+}
+
+#[test]
 fn sleef_rope_sin_cos_matches_torch_arm_bits() {
     let expected = [
         (1.0f32, 0x3f0a5141u32, 0x3f576aa4u32),
@@ -115,7 +128,7 @@ fn mrope_matches_ggml_sincos_bits() {
     assert_eq!(head[35].to_bits(), 0xbe8e_2239);
 }
 
-/// SIMD path must produce the same result as the scalar fallback.
+/// SIMD and scalar rotations must agree within F32 rounding error.
 /// Compares public `rope_neox_inplace` against the explicit scalar helper used
 /// when SIMD is unavailable. Catches tail-handling, cache wiring, and
 /// instruction-order bugs across the three paths.
@@ -143,8 +156,8 @@ fn rope_neox_inplace_simd_matches_scalar_fallback() {
 
         // Scalar reference uses the same recurrence as the public function's
         // table build, then a plain scalar per-head rotation — the same
-        // shape as the AVX2/NEON tail loop, so SIMD-vs-scalar diffs are
-        // caught bit-for-bit.
+        // shape as the AVX2/NEON tail loop. Fused SIMD products can round
+        // differently from separate scalar products.
         let half = head_dim / 2;
         let pos_f = pos as f32;
         let mut cos_table = vec![0.0f32; half];
@@ -160,10 +173,10 @@ fn rope_neox_inplace_simd_matches_scalar_fallback() {
         rope_neox_inplace_scalar(&mut b, n_heads, head_dim, &cos_table, &sin_table);
 
         for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
-            assert_eq!(
-                x.to_bits(),
-                y.to_bits(),
-                "head_dim={head_dim} n_heads={n_heads} idx={i}"
+            let tolerance = 4.0 * f32::EPSILON * x.abs().max(y.abs()).max(1.0);
+            assert!(
+                (x - y).abs() <= tolerance,
+                "head_dim={head_dim} n_heads={n_heads} idx={i}: {x} vs {y}"
             );
         }
     }
@@ -410,5 +423,118 @@ fn rope_norm_nrot_rejects_out_of_range_n_rot_by_falling_back() {
         for (i, (a, b)) in got.iter().zip(want.iter()).enumerate() {
             assert_eq!(a.to_bits(), b.to_bits(), "n_rot={bad_n_rot} idx={i}");
         }
+    }
+}
+
+#[test]
+fn neox_frequency_divisors_preserve_unscaled_and_frozen_pairs() {
+    let input: Vec<f32> = (0..16).map(|i| i as f32 * 0.1).collect();
+    let mut plain = input.clone();
+    let mut unit = input.clone();
+    rope_neox_inplace(&mut plain, 9, 8, 10_000.0);
+    super::rope_neox_inplace_with_freqs(&mut unit, 9, 8, 10_000.0, &[1.0; 4]);
+    assert_eq!(plain, unit);
+    let mut scaled = input.clone();
+    super::rope_neox_inplace_with_freqs(&mut scaled, 9, 8, 10_000.0, &[1.0, 1.0, 1e30, 1e30]);
+    for head in 0..2 {
+        for d in [0, 1, 4, 5] {
+            assert_eq!(scaled[head * 8 + d], plain[head * 8 + d]);
+        }
+        for d in [2, 3, 6, 7] {
+            assert_eq!(scaled[head * 8 + d], input[head * 8 + d]);
+        }
+    }
+}
+
+#[test]
+fn neox_frequency_divisors_scale_each_pair_independently() {
+    // A divisor of `d` moves the pair's angle to `theta / d`, so the pair
+    // rotated at position `p * d` with that divisor lands on the angle the
+    // plain path uses at position `p`. This pins the per-pair behaviour
+    // instead of only the unscaled and frozen endpoints.
+    let input: Vec<f32> = (0..8).map(|i| i as f32 * 0.25 - 0.5).collect();
+    let mut plain = input.clone();
+    let mut scaled = input.clone();
+    rope_neox_inplace(&mut plain, 2, 8, 10_000.0);
+    super::rope_neox_inplace_with_freqs(&mut scaled, 4, 8, 10_000.0, &[2.0; 4]);
+    for (a, b) in plain.iter().zip(&scaled) {
+        assert!((a - b).abs() < 1e-6, "{a} != {b}");
+    }
+}
+
+#[test]
+fn neox_frequency_divisors_precise_agrees_with_the_fused_variant() {
+    // The precise path takes two separate libm calls where the default
+    // path takes the fused one, so the two differ in the last bit but must
+    // describe the same rotation.
+    let input: Vec<f32> = (0..16).map(|i| i as f32 * 0.1 - 0.7).collect();
+    let divisors = [1.0, 0.5, 2.0, 4.0];
+    let mut fused = input.clone();
+    let mut precise = input.clone();
+    super::rope_neox_inplace_with_freqs(&mut fused, 9, 8, 10_000.0, &divisors);
+    super::rope_neox_inplace_with_freqs_precise(&mut precise, 9, 8, 10_000.0, &divisors);
+    for (a, b) in fused.iter().zip(&precise) {
+        assert!((a - b).abs() < 1e-6, "{a} != {b}");
+    }
+    // The precise path has to freeze a pair like the default one. The
+    // divisor is finite, so the angle is near zero rather than zero and the
+    // rotation leaves a ~1e-33 residue instead of nothing at all; that
+    // residue only shows up on a channel whose value is exactly zero.
+    let mut frozen = input.clone();
+    super::rope_neox_inplace_with_freqs_precise(
+        &mut frozen,
+        9,
+        8,
+        10_000.0,
+        &[1.0, 1.0, 1e30, 1e30],
+    );
+    for head in 0..2 {
+        for d in [2, 3, 6, 7] {
+            let index = head * 8 + d;
+            assert!(
+                (frozen[index] - input[index]).abs() < 1e-30,
+                "{index}: {} != {}",
+                frozen[index],
+                input[index]
+            );
+        }
+    }
+}
+
+#[test]
+fn neox_frequency_divisors_without_a_per_pair_list_match_the_plain_path() {
+    // The `None` path is what every other architecture uses, so it has to
+    // stay bit-identical to the plain rotation.
+    let input: Vec<f32> = (0..16).map(|i| i as f32 * 0.1).collect();
+    let mut plain = input.clone();
+    let mut none = input.clone();
+    rope_neox_inplace(&mut plain, 9, 8, 10_000.0);
+    super::rope_neox_inplace_with_freqs(&mut none, 9, 8, 10_000.0, &[1.0; 4]);
+    assert_eq!(plain, none);
+}
+
+#[test]
+fn interleaved_mrope_remainder_uses_temporal_axis() {
+    let mut actual = vec![1.0; 128];
+    super::rope_mrope_interleaved(
+        &mut actual,
+        [7, 11, 13, 0],
+        [24, 20, 20, 0],
+        128,
+        5_000_000.0,
+        128,
+    );
+    for pair in 0..64 {
+        let position = if pair % 3 == 1 && pair < 60 {
+            11.0
+        } else if pair % 3 == 2 && pair < 60 {
+            13.0
+        } else {
+            7.0
+        };
+        let angle = position * 5_000_000.0f32.powf(-2.0 * pair as f32 / 128.0);
+        let (s, c) = angle.sin_cos();
+        assert!((actual[pair] - (c - s)).abs() < 2e-6, "pair {pair}");
+        assert!((actual[pair + 64] - (s + c)).abs() < 2e-6, "pair {pair}");
     }
 }

@@ -645,3 +645,59 @@ NHWC layout 的输入 `input[ic*spatial + y*side + x]` 在不同 ic 间步进 sp
 3. **小改动验证**：先做最小版本（10-20 行）跑性能，再决定是否投入大改动
 4. **记录每次实验**：即使反优化也要记录（避免后续重蹈覆辙）
 5. **NHWC layout cache 行为难预测**：依赖 profile，不靠推理
+## unified-compute 分支在 GB10 上慢 10–20%：push constant 留在了最内层循环
+
+在同一台机器上交替跑 `main` 与 `test-unified3`（gouzil/codex/unified-compute-dispatch），
+两者 dispatch 数、fence 数、submit 数、`ioctl` 数完全相同（300 dispatch/步、
+`vkWaitForFences` 312 次/2 步），差距全部落在 `vkWaitForFences` 里，即设备端真的更慢。
+`cargo test --lib` 的失败集合改前改后完全一致，35 个失败是分支既有缺陷。
+
+根因不是编译器：本机 glslangValidator 16.0.0 能**逐字节复现**两个分支的 SPIR-V。
+是 shader 为了统一 CPU/GPU 算术，把 `reduction_mode` 这类 push constant 留在了
+**最内层循环**里测试——而调用方（host）在录制前就已经知道这个值了。
+
+| kernel | 浪费 | 修复 |
+|---|---|---|
+| `q8_matmul_tiled_dp4a_wide` | 每个 token × 每个 chunk block 一次 `reduction_mode == 0` 分支 | 按 `q8_dot_mode()` 拆成 `_wide`（FMA）与 `_wide_add`（非融合加法），host 选 |
+| `attention_values` | reduction mode 0 的每个输出元素都要清零 32 个累加器，并在 token 循环里分支 | 拆出 `attention_values_f32`，mode 0 用它 |
+
+两处都是**数值无损**的：同 seed 同 prompt 的 PNG 在 256 与 512 下与修复前**逐字节相同**。
+`attention_values_f32` 里那个乘积必须保持 `precise float product = score * value;`
+的写法——写成内联实参后 glslang 会把它收缩进 `add_pair` 里的 FMA，512 下画面会差一个
+8-bit 档（PSNR 72.4 dB）。512 跑一遍就能抓到，256 有时恰好舍入到同一结果。
+
+### 效果（8 步，`gpu-block-profile` 合计，同会话交替）
+
+| 配置 | 256×256 | 512×512 |
+|---|---|---|
+| main | 19.3 / 19.4 s | 86.2 / 86.8 s |
+| unified 基线 | 22.1 / 22.7 s（+15%） | 95.9 / 97.3 s（+11%） |
+| 两处修复后 | **18.8 / 19.1 s（−1%）** | **84.5 / 85.7 s（−1%）** |
+
+512 下 attention 相位 17.6 s → 13.5 s（main 15.6 s）。norm+adaln+qkv、out proj、
+FFN 主栈现在也都与 main 持平或更快。
+
+### 试过但**回退**了：softmax 的补偿 exp
+
+第三处候选是 `softmax.comp` 里逐 score 的补偿双字 `exp_accurate`（decoder 路径需要它，
+因为 1 ULP 的 exp 误差可能翻转 F16 概率平局）。给它加 `exact_exp` 位、让 DiT 走单精度
+Horner 的结果是：
+
+- 性能：attention 只从 17.6 s 降到 16.7–17.1 s。**几乎没赚到**——因为同一个 shader
+  里同时编进两套实现，热循环里多了个 select，省下的算术被分支吃掉了。
+- 数值：DiT GPU 输出与**同分支 CPU 参考**的 PSNR 从 **37.66 dB 掉到 31.62 dB**
+  （mean|Δ| 1.76 → 2.47）。也就是说它确实让 DiT 的 GPU 输出离 CPU 更远了。
+
+用同一批次的数据看全局：DiT 与 CPU 参考的差距本来就在 mean|Δ| 1.7–2.5 / PSNR 31–38 dB
+这个区间里（与 `main` 的 GPU、与 CPU 的差都在同一量级），所以「补偿」买到的不是
+肉眼可见的画质，而是**一个可以被度量的、与 CPU 更近的对齐**。拿 6 dB 换 0.5 s 不划算，
+于是这一处回退，只保留两处无损拆分。
+
+### 怎么查的（可复用）
+
+`RUST_GPU_DISPATCH_TRACE=2` 给出每步的 pipeline 直方图（main 252 quantize +
+75 tiled + 19 silu + 8 f16 vs unified 150 + 150 wide + 34 + 20），nsys
+`--trace=vulkan` 给出 `VULKAN_API` 计时，两者合起来能把差距钉到「设备端、同样工作量」。
+把 `main` 的某个 `.spv` 换进 unified 的构建再测，就是单变量实验。
+`zimage_projection_kernel_costs`（`src/vulkan/ops.rs`，`#[ignore]`）按真实 Z-Image
+形状逐 kernel 计时，用它代替全图 A/B 可以把 ±1 s 的噪声降到可分辨。

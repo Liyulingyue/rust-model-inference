@@ -73,6 +73,15 @@ pub enum QTensorOwned {
     },
 }
 
+impl Drop for QTensorOwned {
+    fn drop(&mut self) {
+        #[cfg(feature = "vulkan")]
+        if let Self::Q8_0 { data, .. } = self {
+            crate::ops::float::release_vulkan_weight(data);
+        }
+    }
+}
+
 impl QTensorOwned {
     /// Read shape. Mirrors `QuantizedTensor::n_in()` / `n_out()`.
     pub fn n_in(&self) -> usize {
@@ -879,14 +888,11 @@ impl QTensorOwned {
             dequant_q5k_weight, dequant_q6k_weight, dequant_q80_weight, dequantize_row_q4_k,
             BLOCK_Q4K_SIZE, QK_K,
         };
-        match self {
+        let (n_cols, n_rows) = (self.n_in(), self.n_rows());
+        match &self {
             Self::F32 { .. } => self,
             Self::F16 { .. } => panic!("F16 -> F32 dequant not yet implemented in QTensorOwned"),
-            Self::BF16 {
-                data,
-                n_cols,
-                n_rows,
-            } => {
+            Self::BF16 { data, .. } => {
                 let mut out = vec![0.0f32; n_cols * n_rows];
                 for (value, chunk) in out.iter_mut().zip(data.chunks_exact(2)) {
                     *value = crate::ops::bf16_to_f32(u16::from_le_bytes([chunk[0], chunk[1]]));
@@ -897,23 +903,15 @@ impl QTensorOwned {
                     n_rows,
                 }
             }
-            Self::Q8_0 {
-                data,
-                n_cols,
-                n_rows,
-            } => {
-                let dequant = dequant_q80_weight(&data, n_cols, n_rows);
+            Self::Q8_0 { data, .. } => {
+                let dequant = dequant_q80_weight(data, n_cols, n_rows);
                 Self::F32 {
                     data: dequant,
                     n_cols,
                     n_rows,
                 }
             }
-            Self::Q4_K {
-                data,
-                n_cols,
-                n_rows,
-            } => {
+            Self::Q4_K { data, .. } => {
                 let mut out = vec![0.0f32; n_cols * n_rows];
                 let bpr = n_cols / QK_K;
                 for row in 0..n_rows {
@@ -928,12 +926,8 @@ impl QTensorOwned {
                     n_rows,
                 }
             }
-            Self::Q5_K {
-                data,
-                n_cols,
-                n_rows,
-            } => {
-                let dequant = dequant_q5k_weight(&data, n_cols, n_rows);
+            Self::Q5_K { data, .. } => {
+                let dequant = dequant_q5k_weight(data, n_cols, n_rows);
                 Self::F32 {
                     data: dequant,
                     n_cols,
@@ -943,12 +937,8 @@ impl QTensorOwned {
             Self::Q5_0 { .. } => {
                 panic!("QTensorOwned::dequant_to_f32 for Q5_0 is not yet wired; see q5_0::scalar::matmul_q5_0_scalar_range")
             }
-            Self::Q6_K {
-                data,
-                n_cols,
-                n_rows,
-            } => {
-                let dequant = dequant_q6k_weight(&data, n_cols, n_rows);
+            Self::Q6_K { data, .. } => {
+                let dequant = dequant_q6k_weight(data, n_cols, n_rows);
                 Self::F32 {
                     data: dequant,
                     n_cols,

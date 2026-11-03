@@ -13,6 +13,7 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
         match args[i].as_str() {
             "--yue2" => options.yue2 = true,
             "--dreamx" => options.dreamx = true,
+            "--astronex" => options.astronex = true,
             "--planner" => {
                 options.planner = Some(required_path_value(args, &mut i, "--planner")?);
             }
@@ -48,6 +49,18 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
             }
             "--laya-request" => {
                 options.laya_request = Some(required_path_value(args, &mut i, "--laya-request")?);
+            }
+            "--wevisone-request" => {
+                options.wevisone_request =
+                    Some(required_path_value(args, &mut i, "--wevisone-request")?);
+            }
+            "--wevisone-decoder" => {
+                options.wevisone_decoder =
+                    Some(required_path_value(args, &mut i, "--wevisone-decoder")?);
+            }
+            "--timestral-request" => {
+                options.timestral_request =
+                    Some(required_path_value(args, &mut i, "--timestral-request")?);
             }
             "--prompt" => {
                 if i + 1 < args.len() {
@@ -121,6 +134,15 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                     value
                         .parse::<usize>()
                         .map_err(|error| format!("Invalid --steps value: {error}"))?,
+                );
+                i += 1;
+            }
+            "--video-frames" => {
+                let value = args.get(i + 1).ok_or("Missing value for --video-frames")?;
+                options.astronex_frames = Some(
+                    value
+                        .parse::<usize>()
+                        .map_err(|error| format!("Invalid --video-frames value: {error}"))?,
                 );
                 i += 1;
             }
@@ -334,12 +356,26 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
             "--no-thinking" => options.thinking = false,
             "--profile" => options.profile = true,
             "--gpu" => options.gpu = true,
+            "--compute" => {
+                if options.compute.is_some() {
+                    return Err("--compute may be specified only once".into());
+                }
+                options.compute = Some(
+                    match required_string_value(args, &mut i, "--compute")?.as_str() {
+                        "cpu" => crate::compute::ComputePolicy::Cpu,
+                        "auto" => crate::compute::ComputePolicy::Auto,
+                        "vulkan" => crate::compute::ComputePolicy::Vulkan,
+                        _ => return Err("--compute expects cpu, auto or vulkan".into()),
+                    },
+                );
+            }
             "--kv-cache" => {
                 if i + 1 < args.len() {
-                    options.kv_format = match args[i + 1].as_str() {
-                        "f32" => KvFormat::F32,
+                    options.kv_format = match args[i + 1].get(0..) {
+                        Some("f32") => KvFormat::F32,
                         _ => KvFormat::F16,
                     };
+                    options.kv_format_explicit = true;
                     i += 1;
                 }
             }
@@ -428,6 +464,7 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                 i += 1;
             }
             "--srt" => options.srt = true,
+            "--qwen-image-turbo" => options.qwen_image_turbo = true,
             "--qwen-context-file" => {
                 options.qwen_context_file =
                     Some(required_path_value(args, &mut i, "--qwen-context-file")?);
@@ -632,6 +669,13 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
         }
         i += 1;
     }
+    if options.gpu && options.compute.is_some() {
+        return Err("--gpu and --compute cannot be combined".into());
+    }
+    if options.timestral_request.is_some() && args.iter().any(|arg| arg == "--serve") {
+        return Err("--timestral-request is a CLI forecast mode; --serve is unsupported".into());
+    }
+    options.serve = args.iter().any(|arg| arg == "--serve");
     Ok(options)
 }
 

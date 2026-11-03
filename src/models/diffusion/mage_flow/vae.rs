@@ -77,8 +77,19 @@ impl<'a> MageVae<'a> {
             width,
             out,
         )?;
-        let y = layer.forward(&self.pool, input, rows)?;
+        // The device has been seen to return a projection that disagrees with
+        // the CPU kernel, and the decoder amplifies a wrong number into a
+        // wrong image, so this path verifies like the denoiser does.
+        let y = layer.forward_verified(&self.pool, input, rows)?;
         trace(&format!("vae.{name}"), 1, y.len(), &y)?;
+        if std::env::var_os("RMI_MAGE_VAE_CHECKSUM").is_some() {
+            let sum: f64 = y.iter().map(|value| *value as f64).sum();
+            let squares: f64 = y
+                .iter()
+                .map(|value| (*value as f64) * (*value as f64))
+                .sum();
+            eprintln!("[Mage-VAE] {name} sum={sum:.12e} sq={squares:.12e}");
+        }
         Ok(y)
     }
     fn conv(
@@ -118,6 +129,19 @@ impl<'a> MageVae<'a> {
         } else {
             None
         };
+        let checksum = std::env::var_os("RMI_MAGE_VAE_CHECKSUM").is_some();
+        if checksum {
+            let sum: f64 = input.data.iter().map(|value| *value as f64).sum();
+            let squares: f64 = input
+                .data
+                .iter()
+                .map(|value| (*value as f64) * (*value as f64))
+                .sum();
+            eprintln!(
+                "[Mage-VAE-IN] {name} sum={sum:.12e} sq={squares:.12e} len={}",
+                input.data.len()
+            );
+        }
         let (data, shape) = conv2d(
             &self.pool,
             &input.data,
@@ -131,6 +155,14 @@ impl<'a> MageVae<'a> {
             groups,
         )?;
         trace(&format!("vae.{name}"), 1, data.len(), &data)?;
+        if checksum {
+            let sum: f64 = data.iter().map(|value| *value as f64).sum();
+            let squares: f64 = data
+                .iter()
+                .map(|value| (*value as f64) * (*value as f64))
+                .sum();
+            eprintln!("[Mage-VAE] {name} sum={sum:.12e} sq={squares:.12e}");
+        }
         Ok(Map { data, shape })
     }
     fn norm(&self, input: &Map, name: Option<&str>) -> Result<Map, String> {
@@ -322,6 +354,14 @@ impl<'a> MageVae<'a> {
                         scale: (1.0 / (c as f64).sqrt()) as f32,
                     },
                 )?;
+                if std::env::var_os("RMI_MAGE_VAE_CHECKSUM").is_some() {
+                    let sum: f64 = out.iter().map(|value| *value as f64).sum();
+                    let squares: f64 = out
+                        .iter()
+                        .map(|value| (*value as f64) * (*value as f64))
+                        .sum();
+                    eprintln!("[Mage-VAE] {name}.attn sum={sum:.12e} sq={squares:.12e}");
+                }
                 for y in 0..d.min(h - by) {
                     for x in 0..d.min(w - bx) {
                         for ch in 0..c {
@@ -452,6 +492,14 @@ impl<'a> MageVae<'a> {
             }
         }
         trace("vae.decoded", 1, image.len(), &image)?;
+        if std::env::var_os("RMI_MAGE_VAE_CHECKSUM").is_some() {
+            let sum: f64 = image.iter().map(|value| *value as f64).sum();
+            let squares: f64 = image
+                .iter()
+                .map(|value| (*value as f64) * (*value as f64))
+                .sum();
+            eprintln!("[Mage-VAE] decoded sum={sum:.12e} sq={squares:.12e}");
+        }
         Ok(image)
     }
 }

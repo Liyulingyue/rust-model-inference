@@ -5,6 +5,79 @@ use rust_model_inference::ops::kernel::q4_k::Q4_KKernel;
 use rust_model_inference::ops::kernel::q6_k::Q6_KKernel;
 use rust_model_inference::ops::kernel::Kernel;
 
+#[test]
+fn reference_arithmetic_rounds_bf16_input_and_accumulates_widely() {
+    use rust_model_inference::core::tensor::GGMLType;
+    use rust_model_inference::ops::kernel::{QuantizedTensor, Weight};
+    let weight: Vec<u8> = [100_000_000.0f32, 1.0, -100_000_000.0, 0.0, 2.0, 0.0]
+        .into_iter()
+        .flat_map(|x| rust_model_inference::ops::f32_to_bf16(x).to_le_bytes())
+        .collect();
+    let mut weight =
+        Weight::from_quantized(QuantizedTensor::from_bytes(&weight, GGMLType::BF16, 3, 2));
+    weight.kernel.use_scalar_reference();
+    assert!(weight.kernel.rounds_bf16_input());
+    let mut output = [f32::NAN; 2];
+    for thread in 0..2 {
+        weight.kernel.forward_prepared(
+            &[1.0, 1.00390625, 1.0],
+            &[],
+            &[],
+            None,
+            &mut output,
+            3,
+            2,
+            thread,
+            2,
+        );
+    }
+    assert_eq!(output, [1.0, 2.0]);
+}
+
+#[test]
+fn reference_arithmetic_preserves_k_quant_reduction_and_thread_rows() {
+    use rust_model_inference::ops::kernel::q5_k::Q5_KKernel;
+    use rust_model_inference::ops::quant::{
+        quantize_row_q8_k, vec_dot_q5k_q8k_scalar, vec_dot_q6k_q8k_scalar,
+    };
+    let input: Vec<f32> = (0..1024)
+        .map(|i| ((i * 37 % 101) as f32 - 50.0) / 71.0)
+        .collect();
+    let q8 = quantize_row_q8_k(&input);
+    for (block_bytes, dot) in [
+        (176, vec_dot_q5k_q8k_scalar as fn(&[u8], &[_]) -> f32),
+        (210, vec_dot_q6k_q8k_scalar),
+    ] {
+        let mut weight: Vec<u8> = (0..block_bytes * 4 * 3)
+            .map(|i| (i * 17 + 3) as u8)
+            .collect();
+        for (i, block) in weight.chunks_exact_mut(block_bytes).enumerate() {
+            let d = half::f16::from_f32(0.0031 * (i + 1) as f32)
+                .to_bits()
+                .to_le_bytes();
+            if block_bytes == 176 {
+                block[..2].copy_from_slice(&d);
+                block[2..4].copy_from_slice(&d);
+            } else {
+                block[208..].copy_from_slice(&d);
+            }
+        }
+        let mut kernel: Box<dyn Kernel> = if block_bytes == 176 {
+            Box::new(Q5_KKernel::new(&weight, 1024, 3))
+        } else {
+            Box::new(Q6_KKernel::new(&weight, 1024, 3))
+        };
+        kernel.use_scalar_reference();
+        let mut output = [f32::NAN; 3];
+        for thread in 0..2 {
+            kernel.forward_prepared(&input, &[], &[], Some(&q8), &mut output, 1024, 3, thread, 2);
+        }
+        for (row, actual) in weight.chunks_exact(block_bytes * 4).zip(output) {
+            assert_eq!(actual.to_bits(), dot(row, &q8).to_bits());
+        }
+    }
+}
+
 #[cfg(feature = "parity-trace")]
 #[test]
 fn parity_dot_uses_llama_scalar_double_accumulator() {

@@ -1,7 +1,24 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 #include "f16_rounding.glsl"
+#include "f16_dot.glsl"
 
+// Four output rows per workgroup, sixteen lanes each.
+//
+// One row per workgroup left three quarters of the workgroup idle: the
+// reduction modes give a row sixteen lanes (mode 2), eight (mode 8) or one
+// (mode 0), and every other thread exited immediately. That also meant one
+// warp load instruction fetched a single 32-byte sector, measured 35 GB/s
+// against 242 GB/s of memory bandwidth on GB10.
+//
+// Grouping rows makes every thread useful and every load instruction fetch
+// four sectors from four rows, without touching the per-row arithmetic:
+// each row still owns the same lanes, walks the same index classes in the
+// same order, and reduces through the same tree. The modes and their lane
+// counts are what the CPU kernels do, and the GPU has to reproduce them
+// bit for bit.
+//
+// Mode 1 needs 32 lanes per row, so it fits two rows per workgroup.
 layout(local_size_x = 64) in;
 
 layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
@@ -10,7 +27,7 @@ layout(std430, binding = 2) readonly buffer W1 { uint data[]; } w1;
 layout(std430, binding = 3) readonly buffer W2 { uint data[]; } w2;
 layout(push_constant) uniform PC {
     uint input_word;
-    uint reduction_lanes;
+    uint reduction_mode;
     uint n_in;
     uint elements_per_row;
     uint output0_word; uint rows0; uint output0_stride;
@@ -18,8 +35,6 @@ layout(push_constant) uniform PC {
     uint output2_word; uint rows2; uint output2_stride;
     uint group_count; uint input_sum_word; uint input_stride; uint q8_stride; uint scales_stride; uint input_sum_stride; uint q8k_stride; uint q8k_scales_stride; uint token_rows;
 } pc;
-
-shared float partial[8];
 
 uint weight_word(uint slot, uint index) {
     if (slot == 0u) return w0.data[index];
@@ -33,45 +48,120 @@ uint weight_f16(uint slot, uint index) {
 }
 
 float f16_decode(uint bits) {
-    uint sign = (bits >> 15u) & 1u;
-    int exponent = int((bits >> 10u) & 0x1fu);
-    uint mantissa = bits & 0x3ffu;
-    if (exponent == 31 && pc.reduction_lanes == 8u) {
-        return uintBitsToFloat((sign << 31u) | 0x7f800000u | (mantissa << 13u));
-    }
-    float value = exponent == 0
-        ? float(mantissa) * exp2(-24.0)
-        : (exponent == 31 ? 0.0 : (1.0 + float(mantissa) / 1024.0) * exp2(float(exponent - 15)));
-    return sign == 0u ? value : -value;
+    return unpackHalf2x16(bits).x;
 }
 
+// One slot per thread, so each row reduces inside its own sixteen lanes.
+shared float partial[64];
+
 void main() {
-    uint token_row = gl_WorkGroupID.z / pc.group_count; uint slot = gl_WorkGroupID.z % pc.group_count;
-    uint row = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint token_row = gl_WorkGroupID.z / pc.group_count;
+    uint slot = gl_WorkGroupID.z % pc.group_count;
+    // Each mode needs exactly as many lanes as its CPU reduction uses:
+    // 32 for the half-precision tree, 16 for the NEON accumulator, 8 for the
+    // AVX2/F16C dot, and one for the scalar walk. Packing rows until the
+    // workgroup is full keeps every thread busy.
+    uint lanes_per_row = pc.reduction_mode == 1u ? 32u
+        : (pc.reduction_mode == 2u ? 16u
+        : (pc.reduction_mode == 8u ? 8u : 1u));
+    uint rows_per_group = 64u / lanes_per_row;
+    uint lane = gl_LocalInvocationID.x;
+    uint local = lane % lanes_per_row;
+    uint lane_base = lane - local;
+    uint group = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint row = group * rows_per_group + lane / lanes_per_row;
     uint rows = slot == 0u ? pc.rows0 : (slot == 1u ? pc.rows1 : pc.rows2);
-    if (slot >= pc.group_count || row >= rows) return;
+    if (slot >= pc.group_count) return;
+    // A row past the end still runs the barriers; only its work and its
+    // write are skipped.
+    bool valid_row = row < rows;
 
     precise float sum = 0.0;
     uint row_base = row * pc.elements_per_row;
-    uint index = 0u;
-    if (pc.reduction_lanes == 8u) {
-        // Match dot_f16_f16_bytes_avx2, including its separate four-value tail.
-        // ponytail: eight active lanes; tune occupancy after model parity.
-        uint lane = gl_LocalInvocationID.x;
+    if (pc.reduction_mode == 1u) {
+        if (local < 32u && valid_row) {
+            for (uint index = local; index < pc.n_in; index += 32u) {
+                float input_value = round_f16_rte(uintBitsToFloat(arena.data[pc.input_word + token_row * pc.input_stride + index]));
+                sum = half_fma(input_value, f16_decode(weight_f16(slot, row_base + index)), sum);
+            }
+        }
+        partial[lane] = sum;
+        barrier();
+        if (local < 8u) {
+            precise float a = partial[lane_base + local] + partial[lane_base + local + 16u];
+            precise float b = partial[lane_base + local + 8u] + partial[lane_base + local + 24u];
+            partial[lane] = round_f16_rte(round_f16_rte(a) + round_f16_rte(b));
+        }
+        barrier();
+        if (local != 0u || !valid_row) return;
+        precise float a = partial[lane_base] + partial[lane_base + 4u];
+        precise float b = partial[lane_base + 1u] + partial[lane_base + 5u];
+        precise float c = partial[lane_base + 2u] + partial[lane_base + 6u];
+        precise float d = partial[lane_base + 3u] + partial[lane_base + 7u];
+        sum = (a + b) + (c + d);
+    } else if (pc.reduction_mode == 2u) {
+        if (local < 16u && valid_row) {
+            // Transposed load pattern: the sixteen lanes cooperate on a
+            // contiguous 64-element block of K per pass.  Lane `local`
+            // handles elements [base + local*4 .. base + local*4 + 3], so
+            // every pass reads 64 consecutive f32 inputs (one full 256-byte
+            // cache line) and 32 consecutive u32 weight words (128 bytes).
+            // The old stride-64 pattern had each lane walk every 64th
+            // element, leaving three quarters of each cache line behind.
+            //
+            // n_in is guaranteed to be a multiple of 32 on the NEON F16
+            // path, so 64 always divides the loop range and the tail is
+            // never taken.  Other paths (AVX2, scalar) use different modes.
+            uint aligned_end = pc.n_in / 64u * 64u;
+            for (uint base = 0u; base < aligned_end; base += 64u) {
+                uint idx = base + local * 4u;
+                float x0 = round_f16_rte(uintBitsToFloat(arena.data[pc.input_word + token_row * pc.input_stride + idx]));
+                float x1 = round_f16_rte(uintBitsToFloat(arena.data[pc.input_word + token_row * pc.input_stride + idx + 1u]));
+                float x2 = round_f16_rte(uintBitsToFloat(arena.data[pc.input_word + token_row * pc.input_stride + idx + 2u]));
+                float x3 = round_f16_rte(uintBitsToFloat(arena.data[pc.input_word + token_row * pc.input_stride + idx + 3u]));
+                uint ww0 = weight_word(slot, (row_base + idx) >> 1u);
+                uint ww1 = weight_word(slot, (row_base + idx + 2u) >> 1u);
+                float w0 = f16_decode(ww0 & 0xffffu);
+                float w1 = f16_decode(ww0 >> 16u);
+                float w2 = f16_decode(ww1 & 0xffffu);
+                float w3 = f16_decode(ww1 >> 16u);
+                sum = fma(x0, w0, sum);
+                sum = fma(x1, w1, sum);
+                sum = fma(x2, w2, sum);
+                sum = fma(x3, w3, sum);
+            }
+            // Tail: handle elements [aligned_end, n_in) with the original
+            // stride-16 pattern so every element is covered regardless of
+            // whether n_in is a multiple of 64.
+            for (uint idx = aligned_end + local; idx < pc.n_in; idx += 16u) {
+                float input_value = round_f16_rte(uintBitsToFloat(arena.data[pc.input_word + token_row * pc.input_stride + idx]));
+                sum = fma(input_value, f16_decode(weight_f16(slot, row_base + idx)), sum);
+            }
+        }
+        partial[lane] = sum;
+        barrier();
+        if (local != 0u || !valid_row) return;
+        precise float a = (partial[lane_base] + partial[lane_base + 4u]) + (partial[lane_base + 8u] + partial[lane_base + 12u]);
+        precise float b = (partial[lane_base + 1u] + partial[lane_base + 5u]) + (partial[lane_base + 9u] + partial[lane_base + 13u]);
+        precise float c = (partial[lane_base + 2u] + partial[lane_base + 6u]) + (partial[lane_base + 10u] + partial[lane_base + 14u]);
+        precise float d = (partial[lane_base + 3u] + partial[lane_base + 7u]) + (partial[lane_base + 11u] + partial[lane_base + 15u]);
+        sum = (a + b) + (c + d);
+    } else if (pc.reduction_mode == 8u) {
+        // Match the CPU AVX2/F16C dot, including its separate four-value tail.
         uint vector_end = pc.n_in / 8u * 8u;
-        if (lane < 8u) {
+        if (local < 8u && valid_row) {
             precise float acc = 0.0;
-            for (uint offset = lane; offset < vector_end; offset += 8u) {
+            for (uint offset = local; offset < vector_end; offset += 8u) {
                 float x = round_f16_rte(uintBitsToFloat(arena.data[pc.input_word + token_row * pc.input_stride + offset]));
                 acc = fma(x, f16_decode(weight_f16(slot, row_base + offset)), acc);
             }
             partial[lane] = acc;
         }
         barrier();
-        if (lane != 0u) return;
-        sum = ((partial[0] + partial[4]) + (partial[1] + partial[5]))
-            + ((partial[2] + partial[6]) + (partial[3] + partial[7]));
-        index = vector_end;
+        if (local != 0u || !valid_row) return;
+        sum = ((partial[lane_base] + partial[lane_base + 4u]) + (partial[lane_base + 1u] + partial[lane_base + 5u]))
+            + ((partial[lane_base + 2u] + partial[lane_base + 6u]) + (partial[lane_base + 3u] + partial[lane_base + 7u]));
+        uint index = vector_end;
         if (index + 4u <= pc.n_in) {
             precise float tail[4];
             for (uint k = 0u; k < 4u; k++) {
@@ -81,13 +171,17 @@ void main() {
             sum += (tail[0] + tail[1]) + (tail[2] + tail[3]);
             index += 4u;
         }
-    } else if (gl_LocalInvocationID.x != 0u) {
-        return;
-    }
-    for (; index < pc.n_in; index++) {
-        float input_value = round_f16_rte(uintBitsToFloat(arena.data[pc.input_word + token_row * pc.input_stride + index]));
-        float weight_value = f16_decode(weight_f16(slot, row_base + index));
-        sum += input_value * weight_value;
+        for (; index < pc.n_in; index++) {
+            float x = round_f16_rte(uintBitsToFloat(arena.data[pc.input_word + token_row * pc.input_stride + index]));
+            sum += x * f16_decode(weight_f16(slot, row_base + index));
+        }
+    } else {
+        if (local != 0u || !valid_row) return;
+        for (uint index = 0u; index < pc.n_in; index++) {
+            float input_value = round_f16_rte(uintBitsToFloat(arena.data[pc.input_word + token_row * pc.input_stride + index]));
+            float weight_value = f16_decode(weight_f16(slot, row_base + index));
+            sum += input_value * weight_value;
+        }
     }
 
     uint output_word = slot == 0u

@@ -432,6 +432,7 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             | "pig"
             | "lfm2"
             | "lfm2moe"
+            | "lfm3"
             | "xing4_0"
             | "nanbeige"
             | "nemotron_h"
@@ -447,6 +448,8 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             | "mistral3"
             | "ernie_image"
             | "audiocpp"
+            | "mellum"
+            | "dory"
     ) {
         return Err(format!("Unsupported architecture: {arch}"));
     }
@@ -558,6 +561,40 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             norm_eps: 1e-5,
         });
     }
+    if arch == "dory" {
+        let n_embd = source
+            .metadata("dory.embedding_length")
+            .and_then(MetaValue::to_u64)
+            .map(|v| v as usize)
+            .unwrap_or(0);
+        let n_layer = source
+            .metadata("dory.block_count")
+            .and_then(MetaValue::to_u64)
+            .map(|v| v as usize)
+            .unwrap_or(0);
+        let vocab_size = source
+            .metadata("tokenizer.ggml.tokens")
+            .and_then(MetaValue::to_arr)
+            .map(Vec::len)
+            .unwrap_or(0);
+        let n_ctx = source
+            .metadata("dory.context_length")
+            .and_then(MetaValue::to_u64)
+            .map(|v| v as usize)
+            .unwrap_or(0);
+        return Ok(ModelConfig {
+            n_embd,
+            n_layer,
+            n_head: 0,
+            n_head_kv: 0,
+            n_embd_head: 0,
+            n_ff: 0,
+            n_ctx,
+            vocab_size,
+            rope_freq_base: 0.0,
+            norm_eps: 1e-6,
+        });
+    }
     // Falcon-H1 declares key/value lengths (128) that differ from
     // n_embd / n_head (which would give 256); the trunk re-reads the
     // metadata via `models::falcon_h1::FalconH1Config`, but the generic
@@ -621,7 +658,12 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
     let as_usize = |key: String| -> Result<usize, String> {
         usize::try_from(get_u64(&key)?).map_err(|_| format!("{key} does not fit usize"))
     };
-    let n_embd_head = if arch == "qwen35" || arch == "edge0" || arch == "nanbeige" {
+    let n_embd_head = if arch == "qwen35"
+        || arch == "qwen35moe"
+        || arch == "edge0"
+        || arch == "nanbeige"
+        || arch == "mellum"
+    {
         if n_head == 0 {
             return Err(format!(
                 "Invalid {prefix} head shape: embedding_length={n_embd}, head_count={n_head}"
@@ -651,6 +693,20 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             // ModelConfig defaults. The model trunks read their own
             // head_count_kv array for per-layer dispatch.
             8
+        } else if arch == "lfm3" {
+            // LFM3 stores a per-layer array; use the first attention entry
+            // for the generic config while the LFM3 trunk keeps the full
+            // array for recurrent/attention dispatch.
+            source
+                .metadata("lfm3.attention.head_count_kv")
+                .and_then(MetaValue::to_arr)
+                .and_then(|values| {
+                    values
+                        .iter()
+                        .filter_map(MetaValue::to_u64)
+                        .find(|&value| value > 0)
+                })
+                .unwrap_or(0) as usize
         } else if arch == "granite" {
             // Granite stores head_count_kv as a per-layer array (all values
             // are identical for the dense variant). Read the first entry.
@@ -680,10 +736,17 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             as_usize(format!("{prefix}.attention.head_count_kv"))?
         },
         n_embd_head,
-        // A MoE-only tower publishes the expert width and leaves
-        // `feed_forward_length` unset, since no layer has a dense FFN.
-        n_ff: as_usize(format!("{prefix}.feed_forward_length"))
-            .or_else(|_| as_usize(format!("{prefix}.expert_feed_forward_length")))?,
+        // A MoE tower has no dense FFN, so `feed_forward_length` is absent and
+        // the width lives in `expert_feed_forward_length` instead. Fall back to
+        // that so the shared config struct stays usable for the MoE arch; the
+        // dense path never reads it.
+        n_ff: match as_usize(format!("{prefix}.feed_forward_length")) {
+            Ok(value) => value,
+            Err(error) => match as_usize(format!("{prefix}.expert_feed_forward_length")) {
+                Ok(value) => value,
+                Err(_) => return Err(error),
+            },
+        },
         n_ctx: as_usize(format!("{prefix}.context_length"))?,
         vocab_size: match get_u64(&format!("{prefix}.vocab_size")) {
             Ok(value) => usize::try_from(value)

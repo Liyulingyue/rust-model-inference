@@ -1,0 +1,2024 @@
+{
+  "record_type": "review_follow_up_validation",
+  "date": "2026-10-26",
+  "review": "https://github.com/Liyulingyue/rust-model-inference/pull/187#issuecomment-6406330731",
+  "review_start_commit": "8b583609f6daa695891f0f559daba33f2d02fa4e",
+  "code_revision": "14090fc1370f1fe1b6532fdfd6c5ec9eab9a6343",
+  "source_sha256": {
+    "src/app/server/api/tools.rs": "db9d59e34c2392b639e7b594b38f5477ea1b21042637732d5cb5db8316875e38",
+    "src/models/qwen35/trunk/config.rs": "259dd461b53dd002e8d88a524a8a10e52fdbf2c0556d195cb4d93047b95132c3",
+    "src/models/qwen35/trunk/forward.rs": "33b252b53935e68582f2eb6459fcadf86a42b435219fd94f585e609af4d0a3b7",
+    "src/models/qwen35/trunk/tests.rs": "ef901e918009f8d91d6e2d955e69c46ef17014ee211e204f098d04e4a57a4b63",
+    "src/ops/float.rs": "4293beb6987a8efc6d94217c68f951a33eafb9f6982a047970785b513c4ca2c1",
+    "src/ops/kernel/q8_0/mod.rs": "caac5578eedaac6fb0a5ffce6cd5c7e307cc67ea9f2595f31087bf446ea389b6",
+    "src/ops/kernel/qtensor_owned.rs": "74d3f1fd44dead0e724016b3d2b2db6831050395e79dc5e1c87ad002d9b8aeb3",
+    "src/ops/kernel/vulkan.rs": "c0ac0806389375aaab241c7e7b254f058594fdf6749059afe99c1a7905d48d1c",
+    "src/vulkan.rs": "b09837873d78203b77b770219f9e550c87a64eab1f434a3cdfb1438b394a1265",
+    "src/vulkan/qwen35.rs": "2b66c29e9e048579b4538bd70a304c5ebe60b7f7a3d28095a46da78100ad47a5"
+  },
+  "host": {
+    "os": "macOS",
+    "isa": "aarch64",
+    "cpu_gpu": "Apple M3 Max",
+    "memory_gib": 64,
+    "vulkan": "MoltenVK on physical Apple M3 Max"
+  },
+  "model_contract": "verification.json and completion.json (published ModelScope GGUF; no reconversion)",
+  "fixed": [
+    "HTTP chat/tool classifier accepts qwen35moe via existing Qwen3.5 grammar; real request previously returned HTTP 500.",
+    "Explicit RMI_QWEN35_MOE_SIMD=1 opts into native CPU/Vulkan arithmetic; default reference arithmetic and RMI_SCALAR override preserved.",
+    "Q8Kernel and QTensorOwned evict legacy address-keyed Q8 GPU weights on drop; warmup evicts its temporary weight.",
+    "Expired host keys are removed before recovery; GPU weights are retained in CommandSubmission until idle is confirmed, including after fence/idle failures.",
+    "CPU recurrent and last_hidden fixtures explicitly select CPU rather than process-global legacy GPU policy.",
+    "verification.json is explicitly historical and no longer labels an unclassified failure as baseline."
+  ],
+  "numerical_contract": {
+    "exact": [
+      "token IDs",
+      "embedding bits",
+      "expert IDs and order"
+    ],
+    "lossy": {
+      "relative_l2_max": 0.01,
+      "cosine_min": 0.99995,
+      "logit_max_abs": 0.5
+    },
+    "simd_opt_in": "not covered by default parity guarantee; may change experts/tokens and exceed bounds"
+  },
+  "default_cpu_oracle": {
+    "passed": true,
+    "configuration": "8 threads, F32 KV, default Rust dispatch, no RMI_SCALAR or SIMD opt-in",
+    "oracle_commit": "b96806d96061049a5b574269b049bf6241d63d46",
+    "command": "python3 tools/oracle/sage_a15/compare.py --model /Users/gouzi/Documents/git/rust-model-inference/models/Sage-A1.5-Q8_0-GGUF/Sage-A1.5-Q8_0.gguf --oracle target/sage-oracle-fresh/build/bin/llama-eval-callback --rust-test target/release-fast/deps/sage_a15-8515eb919508f670 --out target/sage-review/default-oracle",
+    "cases": {
+      "raw": {
+        "checkpoints": 220,
+        "exact_checkpoints": 16,
+        "max_relative_l2": 0,
+        "max_abs": 0,
+        "min_cosine": 1,
+        "tokens": {
+          "processed": [
+            9419,
+            11,
+            271,
+            40
+          ],
+          "generated": [
+            11,
+            271,
+            40,
+            1044
+          ]
+        },
+        "metrics_sha256": "af4f3734455adba3e871d20f43ee338d02b390aed0b0359f370539186e5312cd"
+      },
+      "chat": {
+        "checkpoints": 880,
+        "exact_checkpoints": 64,
+        "max_relative_l2": 0,
+        "max_abs": 0,
+        "min_cosine": 1,
+        "tokens": {
+          "processed": [
+            248045,
+            846,
+            198,
+            109266,
+            248046,
+            198,
+            248045,
+            74455,
+            198,
+            248068,
+            271,
+            248069,
+            271,
+            109266,
+            6115,
+            98691
+          ],
+          "generated": [
+            109266,
+            6115,
+            98691,
+            101009
+          ]
+        },
+        "metrics_sha256": "cdc84865d2346825cf1af403e5c32e1d25c6866258908dec22ae972a948f628f"
+      }
+    },
+    "boundary": "1100 selected text checkpoints; observed zero errors do not replace bounded assertions or prove all-input/cross-ISA bitwise parity. Final cache-owner changes do not alter decoder arithmetic."
+  },
+  "regressions": {
+    "legacy_wrapper_address_reuse": {
+      "red": {
+        "path": "target/sage-review/cache-red.log",
+        "sha256": "ae7178a45e1d1fa7bbcafb2a5621443d807b0307b7569a849fb6a50c038e7c23",
+        "results": [
+          {
+            "status": "FAILED",
+            "passed": 0,
+            "failed": 1,
+            "ignored": 0
+          }
+        ],
+        "failed_test_names": [
+          "ops::kernel::vulkan::tests::dropping_q8_kernel_releases_legacy_cached_weights"
+        ],
+        "failed_target_summary": "error: test failed, to rerun pass `--lib`"
+      },
+      "green": {
+        "path": "target/sage-review/cache-green.log",
+        "sha256": "b8031a7970ab839974150e8dbb4f8fd8dd60cce5e2344a65f935e0b0d155becd",
+        "results": [
+          {
+            "status": "ok",
+            "passed": 1,
+            "failed": 0,
+            "ignored": 0
+          }
+        ],
+        "failed_test_names": [],
+        "failed_target_summary": null
+      },
+      "red_observation": "second kernel returned 32 instead of 64 at the same host allocation"
+    },
+    "cleanup_safety_and_warmup": {
+      "red": {
+        "path": "target/sage-review/cache-safety-red.log",
+        "sha256": "383fcf162655d321ec447bdd23c1c346be3ecf579476cc3d5c5e3296c2639391",
+        "results": [
+          {
+            "status": "FAILED",
+            "passed": 1,
+            "failed": 2,
+            "ignored": 0
+          }
+        ],
+        "failed_test_names": [],
+        "failed_target_summary": "error: test failed, to rerun pass `--lib`"
+      },
+      "green": {
+        "path": "target/sage-review/cache-safety-green.log",
+        "sha256": "f9523256d690cf835b6a960d24737c007f88c6f5b595d4ae764e6751cb99ea05",
+        "results": [
+          {
+            "status": "ok",
+            "passed": 3,
+            "failed": 0,
+            "ignored": 0
+          }
+        ],
+        "failed_test_names": [],
+        "failed_target_summary": null
+      }
+    },
+    "borrowed_and_owned_kernel_lifetimes": {
+      "red": {
+        "path": "target/sage-review/cache-owners-red.log",
+        "sha256": "50c233ce7f864264802c6a711ff78ac893f46db2d42c2d47076d3ebe147e1d91",
+        "results": [
+          {
+            "status": "FAILED",
+            "passed": 2,
+            "failed": 2,
+            "ignored": 0
+          }
+        ],
+        "failed_test_names": [],
+        "failed_target_summary": "error: test failed, to rerun pass `--lib`"
+      },
+      "green": {
+        "path": "target/sage-review/cache-owners-green.log",
+        "sha256": "e7d22ae85bd5c363a5db174b9854e3b1ddb1ef28a637a519e6f82a2e23293648",
+        "results": [
+          {
+            "status": "ok",
+            "passed": 4,
+            "failed": 0,
+            "ignored": 0
+          }
+        ],
+        "failed_test_names": [],
+        "failed_target_summary": null
+      }
+    },
+    "http_architecture": {
+      "red": {
+        "path": "target/sage-review/http-red.log",
+        "sha256": "7765a3e0379ae2f2675f23c533d27746ecaf45fb96974396726bb2ed3adb9142",
+        "results": [
+          {
+            "status": "FAILED",
+            "passed": 0,
+            "failed": 1,
+            "ignored": 0
+          }
+        ],
+        "failed_test_names": [
+          "app::server::api::tools::tests::qwen35_moe_uses_dense_chat_and_tool_grammar"
+        ],
+        "failed_target_summary": "error: test failed, to rerun pass `--lib`"
+      },
+      "green_api_namespace": {
+        "path": "target/sage-review/http-green.log",
+        "sha256": "a36a46f2cfe8400e2953d5b99bb10d43e78acba08990a72e2935a35e9e3d8354",
+        "results": [
+          {
+            "status": "ok",
+            "passed": 68,
+            "failed": 0,
+            "ignored": 0
+          }
+        ],
+        "failed_test_names": [],
+        "failed_target_summary": null
+      },
+      "before_real_response": {
+        "request": {
+          "messages": [
+            {
+              "role": "user",
+              "content": "你好"
+            }
+          ],
+          "max_tokens": 8,
+          "temperature": 0,
+          "enable_thinking": false
+        },
+        "status": 500,
+        "seconds": 0.9572983750840649,
+        "body": "{\"error\":{\"message\":\"Tool/chat template is unsupported for architecture qwen35moe\",\"type\":\"api_error\",\"param\":null,\"code\":null}}"
+      }
+    },
+    "simd_mode_subprocess_test": "models::qwen35::trunk::config::tests::moe_simd_opt_in_preserves_reference_default_and_scalar_override (included in final library suites)",
+    "simd_red_boundary": "simd-red.log is a compile failure for the missing selector method, not a runtime numerical mismatch"
+  },
+  "real_model_functional_smoke": {
+    "passed": true,
+    "compute": "CPU",
+    "profile": "release-fast",
+    "results": {
+      "cli-jev-single": {
+        "command": [
+          "/Users/gouzi/.codex/worktrees/f165/rust-model-inference/target/release-fast/rust-model-inference",
+          "--model",
+          "/Users/gouzi/Documents/git/rust-model-inference/models/Sage-A1.5-Q8_0-GGUF/Sage-A1.5-Q8_0.gguf",
+          "--compute",
+          "cpu",
+          "--threads",
+          "8",
+          "--prefill-batch-size",
+          "64",
+          "--jev",
+          "--jev-output",
+          "json",
+          "--jev-context",
+          "The sky is blue.",
+          "--jev-question",
+          "What color is the sky?",
+          "--jev-option",
+          "blue",
+          "--jev-option",
+          "green"
+        ],
+        "env": {},
+        "exit": 0,
+        "seconds": 149.52628504205495,
+        "stdout": "{\"mode\":\"choice\",\"question\":\"What color is the sky?\",\"labels\":[\"A\",\"B\"],\"descriptions\":[\"blue\",\"green\"],\"values\":[0.0,0.0],\"probabilities\":{\"A\":0.9934966564178467,\"B\":0.0065033454447984695},\"choice\":\"A\",\"confidence\":0.99349666,\"entropy\":0.03922935,\"margin\":0.9869933,\"prefill_ms\":147822}\n",
+        "stderr": "JEV: arch = \"qwen35moe\"\ncompute pool: 8 threads (Qwen3.5)\n\n--- JEV question (2 candidates) ---\nQ: What color is the sky?\n  A: blue\n  B: green\n\nJEV total: 148044 ms (1 questions)\n"
+      },
+      "cli-jev-grouped": {
+        "command": [
+          "/Users/gouzi/.codex/worktrees/f165/rust-model-inference/target/release-fast/rust-model-inference",
+          "--model",
+          "/Users/gouzi/Documents/git/rust-model-inference/models/Sage-A1.5-Q8_0-GGUF/Sage-A1.5-Q8_0.gguf",
+          "--compute",
+          "cpu",
+          "--threads",
+          "8",
+          "--prefill-batch-size",
+          "64",
+          "--jev",
+          "--jev-output",
+          "json",
+          "--jev-context",
+          "The sky is blue.",
+          "--jev-question",
+          "What color is the sky?",
+          "--jev-block",
+          "color",
+          "--jev-option",
+          "blue",
+          "--jev-option",
+          "green"
+        ],
+        "env": {},
+        "exit": 0,
+        "seconds": 40.039657291956246,
+        "stdout": "{\"mode\":\"block_choice\",\"question\":\"What color is the sky?\",\"groups\":[{\"label\":\"color\",\"choice\":\"A\",\"probabilities\":{\"A\":0.9999839067459106,\"B\":0.000016103205780382268},\"confidence\":0.9999839067459106,\"entropy\":0.00019381602760404348,\"margin\":0.9999678134918213}],\"prefill_ms\":39526}\n",
+        "stderr": "JEV grouped: arch = \"qwen35moe\", mode = BlockChoice\ncompute pool: 8 threads (Qwen3.5)\n\n--- JEV grouped question (1 groups) ---\nQ: What color is the sky?\n\nJEV grouped total: 39788 ms (1 questions)\n"
+      },
+      "cli-simd-opt-in": {
+        "command": [
+          "/Users/gouzi/.codex/worktrees/f165/rust-model-inference/target/release-fast/rust-model-inference",
+          "--model",
+          "/Users/gouzi/Documents/git/rust-model-inference/models/Sage-A1.5-Q8_0-GGUF/Sage-A1.5-Q8_0.gguf",
+          "--compute",
+          "cpu",
+          "--threads",
+          "8",
+          "--prefill-batch-size",
+          "64",
+          "--jinja",
+          "--no-thinking",
+          "--temp",
+          "0",
+          "--max-tokens",
+          "8",
+          "--prompt",
+          "你好"
+        ],
+        "env": {
+          "RMI_QWEN35_MOE_SIMD": "1"
+        },
+        "exit": 0,
+        "seconds": 3.7228511669673026,
+        "stdout": "LLM arch: qwen35moe\nAgents A1.5 model loaded: 41 layers, n_embd=2048, n_head=16, n_ff=512, rope_freq_base=10000000, rope_sections=[11, 11, 10, 0], rope_dim_count=64\nPrompt tokens: 13 (including 0 vision placeholders)\n\n--- Generation ---\n你好！有什么可以帮助你的吗？\n--- End ---\n",
+        "stderr": "[RUST_TOKENS] n=13 ids=[248045, 846, 198, 109266, 248046, 198, 248045, 74455, 198, 248068, 271, 248069, 271]\ncompute pool: 8 threads\n[pipeline-timing] session_init=0.000147s\n[pipeline-timing] prompt_rows=13 generated_tokens=7 decode_evals=7 prefill=1.860736s decode=1.615418s generation_total=3.477825s\nPrompt: 7.0 t/s | Generation: 4.3 t/s | end-to-end: 2.0 tok/s\n"
+      },
+      "server_command": [
+        "/Users/gouzi/.codex/worktrees/f165/rust-model-inference/target/release-fast/rust-model-server",
+        "--model",
+        "/Users/gouzi/Documents/git/rust-model-inference/models/Sage-A1.5-Q8_0-GGUF/Sage-A1.5-Q8_0.gguf",
+        "--compute",
+        "cpu",
+        "--threads",
+        "8",
+        "--prefill-batch-size",
+        "64",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "56915",
+        "--max-context",
+        "512",
+        "--jinja",
+        "--no-thinking",
+        "--mmproj",
+        "/Users/gouzi/Documents/git/rust-model-inference/models/Sage-A1.5-Q8_0-GGUF/Sage-A1.5-mmproj.gguf"
+      ],
+      "http-chat": {
+        "request": {
+          "messages": [
+            {
+              "role": "user",
+              "content": "你好"
+            }
+          ],
+          "max_tokens": 8,
+          "temperature": 0,
+          "enable_thinking": false
+        },
+        "status": 200,
+        "seconds": 1.8362122080288827,
+        "response": {
+          "id": "chatcmpl-40736e8e56c0f504",
+          "object": "chat.completion",
+          "created": 1792983023,
+          "model": "Sage-A1.5-Q8_0",
+          "choices": [
+            {
+              "index": 0,
+              "message": {
+                "role": "assistant",
+                "content": "你好！有什么可以帮助你的吗？"
+              },
+              "finish_reason": "stop",
+              "logprobs": null
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 13,
+            "completion_tokens": 7,
+            "total_tokens": 20
+          }
+        }
+      },
+      "http-stream": {
+        "request": {
+          "messages": [
+            {
+              "role": "user",
+              "content": "你好"
+            }
+          ],
+          "max_tokens": 8,
+          "temperature": 0,
+          "enable_thinking": false,
+          "stream": true
+        },
+        "status": 200,
+        "seconds": 1.1868774169124663,
+        "body": "data: {\"id\":\"chatcmpl-81a46e3953dfaf55\",\"object\":\"chat.completion.chunk\",\"created\":1792983023,\"model\":\"Sage-A1.5-Q8_0\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null,\"logprobs\":null}]}\n\ndata: {\"id\":\"chatcmpl-81a46e3953dfaf55\",\"object\":\"chat.completion.chunk\",\"created\":1792983023,\"model\":\"Sage-A1.5-Q8_0\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"你好\"},\"finish_reason\":null,\"logprobs\":null}]}\n\ndata: {\"id\":\"chatcmpl-81a46e3953dfaf55\",\"object\":\"chat.completion.chunk\",\"created\":1792983023,\"model\":\"Sage-A1.5-Q8_0\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"！\"},\"finish_reason\":null,\"logprobs\":null}]}\n\ndata: {\"id\":\"chatcmpl-81a46e3953dfaf55\",\"object\":\"chat.completion.chunk\",\"created\":1792983023,\"model\":\"Sage-A1.5-Q8_0\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"有什么\"},\"finish_reason\":null,\"logprobs\":null}]}\n\ndata: {\"id\":\"chatcmpl-81a46e3953dfaf55\",\"object\":\"chat.completion.chunk\",\"created\":1792983023,\"model\":\"Sage-A1.5-Q8_0\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"可以帮助\"},\"finish_reason\":null,\"logprobs\":null}]}\n\ndata: {\"id\":\"chatcmpl-81a46e3953dfaf55\",\"object\":\"chat.completion.chunk\",\"created\":1792983023,\"model\":\"Sage-A1.5-Q8_0\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"你的\"},\"finish_reason\":null,\"logprobs\":null}]}\n\ndata: {\"id\":\"chatcmpl-81a46e3953dfaf55\",\"object\":\"chat.completion.chunk\",\"created\":1792983023,\"model\":\"Sage-A1.5-Q8_0\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"吗\"},\"finish_reason\":null,\"logprobs\":null}]}\n\ndata: {\"id\":\"chatcmpl-81a46e3953dfaf55\",\"object\":\"chat.completion.chunk\",\"created\":1792983023,\"model\":\"Sage-A1.5-Q8_0\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"？\"},\"finish_reason\":null,\"logprobs\":null}]}\n\ndata: {\"id\":\"chatcmpl-81a46e3953dfaf55\",\"object\":\"chat.completion.chunk\",\"created\":1792983023,\"model\":\"Sage-A1.5-Q8_0\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\",\"logprobs\":null}]}\n\ndata: [DONE]\n\n",
+        "assembled_text": "你好！有什么可以帮助你的吗？",
+        "done": true
+      },
+      "http-jev-single": {
+        "request": {
+          "context": "The sky is blue.",
+          "questions": [
+            {
+              "text": "What color is the sky?",
+              "options": [
+                "blue",
+                "green"
+              ]
+            }
+          ]
+        },
+        "status": 200,
+        "seconds": 9.836713167023845,
+        "response": {
+          "mode": "single",
+          "context": "The sky is blue.",
+          "results": [
+            {
+              "mode": "choice",
+              "question": "What color is the sky?",
+              "labels": [
+                "A",
+                "B"
+              ],
+              "descriptions": [
+                "blue",
+                "green"
+              ],
+              "values": [
+                0.0,
+                0.0
+              ],
+              "probabilities": {
+                "A": 0.9934966564178467,
+                "B": 0.0065033454447984695
+              },
+              "choice": "A",
+              "confidence": 0.9934966564178467,
+              "entropy": 0.03922934830188751,
+              "margin": 0.9869933128356934,
+              "prefill_ms": 9718
+            }
+          ]
+        }
+      },
+      "http-jev-grouped": {
+        "request": {
+          "context": "The sky is blue.",
+          "questions": [
+            {
+              "text": "What color is the sky?",
+              "groups": [
+                {
+                  "label": "color",
+                  "options": [
+                    "blue",
+                    "green"
+                  ]
+                }
+              ]
+            }
+          ],
+          "mode": "block_choice"
+        },
+        "status": 200,
+        "seconds": 5.480551165994257,
+        "response": {
+          "mode": "block_choice",
+          "context": "The sky is blue.",
+          "results": [
+            {
+              "mode": "block_choice",
+              "question": "What color is the sky?",
+              "groups": [
+                {
+                  "label": "color",
+                  "choice": "A",
+                  "probabilities": {
+                    "A": 0.9999839067459106,
+                    "B": 1.6103205780382268e-05
+                  },
+                  "confidence": 0.9999839067459106,
+                  "entropy": 0.00019381602760404348,
+                  "margin": 0.9999678134918213
+                }
+              ],
+              "prefill_ms": 5388
+            }
+          ]
+        }
+      },
+      "http-image": {
+        "request": {
+          "messages": [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "请按从左到右描述图中的形状和颜色。"
+                },
+                {
+                  "type": "image_url",
+                  "image_url": {
+                    "url": "data URI of tools/oracle/sage_a15/performance-shapes.png"
+                  }
+                }
+              ]
+            }
+          ],
+          "max_tokens": 48,
+          "temperature": 0,
+          "enable_thinking": false
+        },
+        "status": 200,
+        "seconds": 37.0610259170644,
+        "response": {
+          "id": "chatcmpl-22c02e7f7e6f4888",
+          "object": "chat.completion",
+          "created": 1792983077,
+          "model": "Sage-A1.5-Q8_0",
+          "choices": [
+            {
+              "index": 0,
+              "message": {
+                "role": "assistant",
+                "content": "图中从左到右依次是：\n\n1. 一个红色的圆形；\n2. 一个蓝色的正方形；\n3. 一个绿色的三角形。\n\n整体排列简洁，三种基本几何图形按红、蓝、绿三色顺序"
+              },
+              "finish_reason": "length",
+              "logprobs": null
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 22,
+            "completion_tokens": 48,
+            "total_tokens": 70
+          }
+        }
+      }
+    },
+    "raw_log": {
+      "path": "target/sage-review/smoke/results.json",
+      "sha256": "ecd88f42575b347c3dd061b6214f15729a608a2d31e64cabb691a4dab95d3634"
+    },
+    "boundary": "Functional text/SSE/JEV single/grouped/image checks. CLI and HTTP JEV probabilities agree exactly on the selected inputs; no numerical vision Oracle, tool execution, other JEV modes, GPU HTTP or speed claim. Other builds/tests were active; timings are smoke diagnostics."
+  },
+  "whole_suite": {
+    "commands": {
+      "baseline_vulkan": "cargo test --profile release-fast --features vulkan,parity-trace --lib --manifest-path target/sage-gpu/completion/baseline-source/Cargo.toml -- --test-threads=1",
+      "before_vulkan": "cargo test --profile release-fast --features vulkan,parity-trace --lib -- --test-threads=1",
+      "after_vulkan": "target/release-fast/deps/rust_model_inference-173e0979e5ada827 --test-threads=1",
+      "final_default_lib": "cargo test --profile release-fast --lib -- --test-threads=1",
+      "default_lib_and_integrations": "cargo test --profile release-fast --lib --tests --no-fail-fast"
+    },
+    "baseline_revision": "e3c49e3d",
+    "baseline_vulkan": {
+      "path": "target/sage-review/baseline-full-vulkan.log",
+      "sha256": "9bd6b2c04fb8c57a000242e5a938bd4a8dd40ec7ac84b6d468efa283ee871832",
+      "results": [
+        {
+          "status": "FAILED",
+          "passed": 1344,
+          "failed": 31,
+          "ignored": 163
+        }
+      ],
+      "failed_test_names": [
+        "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+        "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+        "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+        "models::clm::tests::matches_reference_golden_vectors",
+        "models::clm::tests::rejects_wrong_embedding_width",
+        "models::diffusion::z_image::dit::tests::attention_matches_the_ggml_neon_softmax_and_value_reduction",
+        "models::diffusion::z_image::dit::tests::silu_mul_inplace_matches_ggml_neon_activation_dit",
+        "models::diffusion::z_image::dit::tests::torch_mt19937_recomputes_the_final_sixteen_values",
+        "models::diffusion::z_image::text::tests::qwen_attention_softmax_matches_the_pinned_ggml_neon_reduction",
+        "models::diffusion::z_image::text::tests::silu_mul_inplace_matches_pinned_ggml_neon_activation",
+        "models::diffusion::z_image::vae::tests::silu_matches_pinned_ggml_neon_vector_path",
+        "models::dots::weights::tests::flattened_q8_convolution_loads_without_dequantizing_and_runs_batched",
+        "models::funasr::encoder::parity_tests::fsmn_rounds_product_before_adding_like_ggml",
+        "models::funasr::encoder::parity_tests::layernorm_accumulates_variance_in_ggml_neon_groups",
+        "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+        "models::gemma4::trunk::tests::gemma4_trace_rows_match_batch_one_raw_bits",
+        "models::gemma4::trunk::tests::per_layer_bf16_projection_matches_pinned_scalar_dot_bits",
+        "models::gemma4::trunk::tests::per_layer_projection_rejects_non_bf16_weight",
+        "models::gemma4::trunk::tests::per_layer_projection_rejects_wrong_bf16_storage_length",
+        "models::qwen35::trunk::config::tests::qwen35_config_rejects_invalid_tensor_dimensions",
+        "models::qwen35::trunk::tests::last_hidden_borrows_all_final_norm_rows_from_the_last_step",
+        "models::qwen35::trunk::tests::qwen35_failed_chunk_keeps_dense_and_recurrent_state",
+        "models::qwen35::trunk::tests::qwen35_trace_metadata_is_independent_of_prefill_batch_size",
+        "ops::argmax::tests::all_negative",
+        "ops::argmax::tests::large_random",
+        "ops::argmax::tests::middle_max",
+        "ops::argmax::tests::tail_handles_non_aligned_lengths",
+        "ops::argmax::tests::ties_pick_lowest_index",
+        "ops::kernel::q8_0::tests::q8_kernel_thread_partition",
+        "ops::matmul::neon_tests::neon_softmax_matches_ggml_vector_exp_and_f64_sum",
+        "ops::rope::tests::rope_neox_inplace_simd_matches_scalar_fallback"
+      ],
+      "failed_target_summary": "error: test failed, to rerun pass `--lib`"
+    },
+    "before_review_vulkan": {
+      "path": "target/sage-review/before-full-vulkan.log",
+      "sha256": "591c511bcb68616cadbc5e948cf1ac7f70edadd34f699803f843856a5d3df0cb",
+      "results": [
+        {
+          "status": "FAILED",
+          "passed": 1345,
+          "failed": 31,
+          "ignored": 164
+        }
+      ],
+      "failed_test_names": [
+        "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+        "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+        "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+        "models::clm::tests::matches_reference_golden_vectors",
+        "models::clm::tests::rejects_wrong_embedding_width",
+        "models::diffusion::z_image::dit::tests::attention_matches_the_ggml_neon_softmax_and_value_reduction",
+        "models::diffusion::z_image::dit::tests::silu_mul_inplace_matches_ggml_neon_activation_dit",
+        "models::diffusion::z_image::dit::tests::torch_mt19937_recomputes_the_final_sixteen_values",
+        "models::diffusion::z_image::text::tests::qwen_attention_softmax_matches_the_pinned_ggml_neon_reduction",
+        "models::diffusion::z_image::text::tests::silu_mul_inplace_matches_pinned_ggml_neon_activation",
+        "models::diffusion::z_image::vae::tests::silu_matches_pinned_ggml_neon_vector_path",
+        "models::dots::weights::tests::flattened_q8_convolution_loads_without_dequantizing_and_runs_batched",
+        "models::funasr::encoder::parity_tests::fsmn_rounds_product_before_adding_like_ggml",
+        "models::funasr::encoder::parity_tests::layernorm_accumulates_variance_in_ggml_neon_groups",
+        "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+        "models::gemma4::trunk::tests::gemma4_trace_rows_match_batch_one_raw_bits",
+        "models::gemma4::trunk::tests::per_layer_bf16_projection_matches_pinned_scalar_dot_bits",
+        "models::gemma4::trunk::tests::per_layer_projection_rejects_non_bf16_weight",
+        "models::gemma4::trunk::tests::per_layer_projection_rejects_wrong_bf16_storage_length",
+        "models::qwen35::trunk::tests::last_hidden_borrows_all_final_norm_rows_from_the_last_step",
+        "models::qwen35::trunk::tests::qwen35_failed_chunk_keeps_dense_and_recurrent_state",
+        "ops::argmax::tests::all_negative",
+        "ops::argmax::tests::large_random",
+        "ops::argmax::tests::middle_max",
+        "ops::argmax::tests::tail_handles_non_aligned_lengths",
+        "ops::argmax::tests::ties_pick_lowest_index",
+        "ops::kernel::q8_0::tests::q8_kernel_thread_partition",
+        "ops::kernel::q8_0::tests::q8_kernel_uniform_weights_sum_to_dot_product",
+        "ops::kernel::qtensor_owned::qtensor_owned_tests::qtensor_owned_fused_kernel_dispatches_correctly",
+        "ops::matmul::neon_tests::neon_softmax_matches_ggml_vector_exp_and_f64_sum",
+        "ops::rope::tests::rope_neox_inplace_simd_matches_scalar_fallback"
+      ],
+      "failed_target_summary": "error: test failed, to rerun pass `--lib`"
+    },
+    "after_review_vulkan": {
+      "path": "target/sage-review/final-owners-full-vulkan.log",
+      "sha256": "aa18e391753d5c0009e4a5ce074147e51359f142bd20d98bd8f0f5f3842d9165",
+      "results": [
+        {
+          "status": "FAILED",
+          "passed": 1352,
+          "failed": 26,
+          "ignored": 168
+        }
+      ],
+      "failed_test_names": [
+        "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+        "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+        "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+        "models::clm::tests::matches_reference_golden_vectors",
+        "models::clm::tests::rejects_wrong_embedding_width",
+        "models::diffusion::z_image::dit::tests::attention_matches_the_ggml_neon_softmax_and_value_reduction",
+        "models::diffusion::z_image::dit::tests::silu_mul_inplace_matches_ggml_neon_activation_dit",
+        "models::diffusion::z_image::dit::tests::torch_mt19937_recomputes_the_final_sixteen_values",
+        "models::diffusion::z_image::text::tests::qwen_attention_softmax_matches_the_pinned_ggml_neon_reduction",
+        "models::diffusion::z_image::text::tests::silu_mul_inplace_matches_pinned_ggml_neon_activation",
+        "models::diffusion::z_image::vae::tests::silu_matches_pinned_ggml_neon_vector_path",
+        "models::funasr::encoder::parity_tests::fsmn_rounds_product_before_adding_like_ggml",
+        "models::funasr::encoder::parity_tests::layernorm_accumulates_variance_in_ggml_neon_groups",
+        "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+        "models::gemma4::trunk::tests::gemma4_trace_rows_match_batch_one_raw_bits",
+        "models::gemma4::trunk::tests::per_layer_bf16_projection_matches_pinned_scalar_dot_bits",
+        "models::gemma4::trunk::tests::per_layer_projection_rejects_non_bf16_weight",
+        "models::gemma4::trunk::tests::per_layer_projection_rejects_wrong_bf16_storage_length",
+        "ops::argmax::tests::all_negative",
+        "ops::argmax::tests::large_random",
+        "ops::argmax::tests::middle_max",
+        "ops::argmax::tests::tail_handles_non_aligned_lengths",
+        "ops::argmax::tests::ties_pick_lowest_index",
+        "ops::kernel::q8_0::tests::q8_kernel_thread_partition",
+        "ops::matmul::neon_tests::neon_softmax_matches_ggml_vector_exp_and_f64_sum",
+        "ops::rope::tests::rope_neox_inplace_simd_matches_scalar_fallback"
+      ],
+      "failed_target_summary": null,
+      "exit": 101
+    },
+    "final_default_lib": {
+      "path": "target/sage-review/final-default-lib.log",
+      "sha256": "65a0740c3b0348be3c4faa7c2cc387cc4b3cbf0a6b3faa4074ac005653ad90ae",
+      "results": [
+        {
+          "status": "FAILED",
+          "passed": 1243,
+          "failed": 21,
+          "ignored": 80
+        }
+      ],
+      "failed_test_names": [
+        "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+        "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+        "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+        "models::clm::tests::matches_reference_golden_vectors",
+        "models::clm::tests::rejects_wrong_embedding_width",
+        "models::diffusion::z_image::text::tests::qwen_attention_softmax_matches_the_pinned_ggml_neon_reduction",
+        "models::diffusion::z_image::text::tests::silu_mul_inplace_matches_pinned_ggml_neon_activation",
+        "models::diffusion::z_image::vae::tests::silu_matches_pinned_ggml_neon_vector_path",
+        "models::funasr::encoder::parity_tests::fsmn_rounds_product_before_adding_like_ggml",
+        "models::funasr::encoder::parity_tests::layernorm_accumulates_variance_in_ggml_neon_groups",
+        "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+        "models::gemma4::trunk::tests::per_layer_bf16_projection_matches_pinned_scalar_dot_bits",
+        "models::gemma4::trunk::tests::per_layer_projection_rejects_non_bf16_weight",
+        "models::gemma4::trunk::tests::per_layer_projection_rejects_wrong_bf16_storage_length",
+        "ops::argmax::tests::all_negative",
+        "ops::argmax::tests::large_random",
+        "ops::argmax::tests::middle_max",
+        "ops::argmax::tests::tail_handles_non_aligned_lengths",
+        "ops::argmax::tests::ties_pick_lowest_index",
+        "ops::matmul::neon_tests::neon_softmax_matches_ggml_vector_exp_and_f64_sum",
+        "ops::rope::tests::rope_neox_inplace_simd_matches_scalar_fallback"
+      ],
+      "failed_target_summary": "error: test failed, to rerun pass `--lib`",
+      "exit": 101
+    },
+    "default_lib_and_integrations": {
+      "path": "target/sage-review/after-default-lib-integration.log",
+      "sha256": "2a7ef529e9254d2da467402c197443fb3e8c028fca92b47e7b680f112ddbfbf5",
+      "results": [
+        {
+          "status": "FAILED",
+          "passed": 1243,
+          "failed": 21,
+          "ignored": 80
+        },
+        {
+          "status": "ok",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 6,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 1
+        },
+        {
+          "status": "ok",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 1
+        },
+        {
+          "status": "ok",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 1
+        },
+        {
+          "status": "ok",
+          "passed": 6,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 7,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 1
+        },
+        {
+          "status": "ok",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 1
+        },
+        {
+          "status": "ok",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 8,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 6,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 1
+        },
+        {
+          "status": "ok",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 1
+        },
+        {
+          "status": "ok",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 3
+        },
+        {
+          "status": "ok",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 13,
+          "failed": 0,
+          "ignored": 1
+        },
+        {
+          "status": "ok",
+          "passed": 6,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 7,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 8,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 6,
+          "failed": 0,
+          "ignored": 6
+        },
+        {
+          "status": "ok",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "FAILED",
+          "passed": 0,
+          "failed": 4,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 9,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 8,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 7,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 11,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 7,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 12,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 6,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 9,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 11,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "FAILED",
+          "passed": 0,
+          "failed": 2,
+          "ignored": 0
+        },
+        {
+          "status": "FAILED",
+          "passed": 0,
+          "failed": 1,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 6,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "FAILED",
+          "passed": 1,
+          "failed": 1,
+          "ignored": 0
+        },
+        {
+          "status": "FAILED",
+          "passed": 0,
+          "failed": 2,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 12,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 6,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "FAILED",
+          "passed": 1,
+          "failed": 1,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 6,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "FAILED",
+          "passed": 0,
+          "failed": 1,
+          "ignored": 0
+        },
+        {
+          "status": "FAILED",
+          "passed": 0,
+          "failed": 3,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 6,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 3
+        },
+        {
+          "status": "ok",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 6,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 3
+        },
+        {
+          "status": "ok",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 1
+        },
+        {
+          "status": "ok",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 1
+        },
+        {
+          "status": "ok",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 1
+        },
+        {
+          "status": "ok",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 1
+        },
+        {
+          "status": "ok",
+          "passed": 7,
+          "failed": 0,
+          "ignored": 2
+        },
+        {
+          "status": "ok",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 2
+        },
+        {
+          "status": "ok",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 3
+        },
+        {
+          "status": "ok",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 3
+        },
+        {
+          "status": "ok",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 6,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 1
+        },
+        {
+          "status": "ok",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "FAILED",
+          "passed": 11,
+          "failed": 1,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 3
+        },
+        {
+          "status": "ok",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 4
+        },
+        {
+          "status": "ok",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 2
+        },
+        {
+          "status": "FAILED",
+          "passed": 0,
+          "failed": 3,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 1
+        },
+        {
+          "status": "ok",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 3
+        },
+        {
+          "status": "ok",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 1
+        },
+        {
+          "status": "ok",
+          "passed": 6,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 1
+        },
+        {
+          "status": "ok",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 5
+        },
+        {
+          "status": "ok",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "status": "ok",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 7
+        },
+        {
+          "status": "ok",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 1
+        }
+      ],
+      "failed_test_names": [
+        "boundary_http_extracts_spans_and_classifies",
+        "boundary_http_rejects_bad_requests",
+        "boundary_http_threshold_override_reaches_the_decoder",
+        "boundary_http_validates_request_shape",
+        "loads_embedded_json_tokenizer_twice",
+        "matches_sentencepiece_reference",
+        "matches_the_reference_stack",
+        "model_shape_matches_the_checkpoint",
+        "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+        "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+        "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+        "models::clm::tests::matches_reference_golden_vectors",
+        "models::clm::tests::rejects_wrong_embedding_width",
+        "models::diffusion::z_image::text::tests::qwen_attention_softmax_matches_the_pinned_ggml_neon_reduction",
+        "models::diffusion::z_image::text::tests::silu_mul_inplace_matches_pinned_ggml_neon_activation",
+        "models::diffusion::z_image::vae::tests::silu_matches_pinned_ggml_neon_vector_path",
+        "models::funasr::encoder::parity_tests::fsmn_rounds_product_before_adding_like_ggml",
+        "models::funasr::encoder::parity_tests::layernorm_accumulates_variance_in_ggml_neon_groups",
+        "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+        "models::gemma4::trunk::tests::per_layer_bf16_projection_matches_pinned_scalar_dot_bits",
+        "models::gemma4::trunk::tests::per_layer_projection_rejects_non_bf16_weight",
+        "models::gemma4::trunk::tests::per_layer_projection_rejects_wrong_bf16_storage_length",
+        "ops::argmax::tests::all_negative",
+        "ops::argmax::tests::large_random",
+        "ops::argmax::tests::middle_max",
+        "ops::argmax::tests::tail_handles_non_aligned_lengths",
+        "ops::argmax::tests::ties_pick_lowest_index",
+        "ops::matmul::neon_tests::neon_softmax_matches_ggml_vector_exp_and_f64_sum",
+        "ops::rope::tests::rope_neox_inplace_simd_matches_scalar_fallback",
+        "piece_to_id_round_trips",
+        "q4_0_dot_scales_in_llama_scalar_order",
+        "rerank_http_paris_top1",
+        "rerank_http_rejects_empty_documents",
+        "rerank_http_top_n_truncates",
+        "specials_are_cut_out_of_the_surrounding_text",
+        "tokenizes_exactly_like_the_reference"
+      ],
+      "failed_target_summary": "error: 11 targets failed:\n    `--lib`\n    `--test gliner2_5_base_v1_boundary_http`\n    `--test gliner2_5_decide_1b_bpe_parity`\n    `--test gliner2_5_decide_1b_parity`\n    `--test gliner2_base_v1_parity`\n    `--test gliner2_classify_parity`\n    `--test gliner2_large_v1_parity`\n    `--test gliner2_multi_v1_parity`\n    `--test gliner2_spm_parity`\n    `--test quantized_inference`\n    `--test qwen3_rerank_http`",
+      "source_note": "This full integration run preceded the final cache-owner destructor changes. The final default library run and Vulkan clippy --lib --tests validate the final ownership code; the real Sage CPU arithmetic and HTTP dispatcher did not change.",
+      "aggregate": {
+        "passed": 1739,
+        "failed": 40,
+        "ignored": 146
+      },
+      "completed_targets": 151,
+      "exit": 101
+    },
+    "after_vulkan_failures_absent_from_baseline": [],
+    "full_default_cargo_test": {
+      "exit": 101,
+      "command": "cargo test --profile release-fast --no-fail-fast",
+      "compile_error": "examples/astronex_text_determinism.rs has no main function without the vulkan feature",
+      "log": {
+        "path": "target/sage-review/full-default.log",
+        "sha256": "81dd27a8829e7b8b87e5ca536190c41a735ecda5b53507d85672d1a7bde0eeb9"
+      },
+      "boundary": "This unmodified example prevents an unrestricted default cargo test; lib and test targets were run separately."
+    },
+    "vibevoice": "Previously reported intermittent VibeVoice failure did not reproduce in this follow-up full-library runs. The demonstrated cache defect is not proven to be its unique cause.",
+    "boundary": "Failed tests are listed explicitly; the repository is not green. Library suites are serial for stateful legacy-GPU isolation; CPU integration run used normal test scheduling. No failures are suppressed."
+  },
+  "clippy": {
+    "command": "cargo clippy --profile release-fast --features vulkan,parity-trace --lib --tests --message-format=json",
+    "baseline": {
+      "exit": 101,
+      "unique_primary_error_count": 20,
+      "errors": [
+        {
+          "file": "src/models/diffusion/ernie_image/dit.rs",
+          "line": 197,
+          "lint": "clippy::modulo_one",
+          "message": "any number modulo 1 will be 0"
+        },
+        {
+          "file": "src/models/diffusion/ernie_image/dit.rs",
+          "line": 550,
+          "lint": "clippy::modulo_one",
+          "message": "any number modulo 1 will be 0"
+        },
+        {
+          "file": "src/models/diffusion/pig.rs",
+          "line": 393,
+          "lint": "clippy::erasing_op",
+          "message": "this operation will always return zero. This is likely not the intended outcome"
+        },
+        {
+          "file": "src/models/funasr/encoder.rs",
+          "line": 358,
+          "lint": "clippy::mut_from_ref",
+          "message": "mutable borrow from immutable input(s)"
+        },
+        {
+          "file": "src/models/funasr/vad.rs",
+          "line": 92,
+          "lint": "clippy::mut_from_ref",
+          "message": "mutable borrow from immutable input(s)"
+        },
+        {
+          "file": "src/models/qwen3/trunk/forward.rs",
+          "line": 359,
+          "lint": "clippy::mut_from_ref",
+          "message": "mutable borrow from immutable input(s)"
+        },
+        {
+          "file": "src/models/qwen3/vision/mod.rs",
+          "line": 1336,
+          "lint": "clippy::mut_from_ref",
+          "message": "mutable borrow from immutable input(s)"
+        },
+        {
+          "file": "src/models/qwen35/vision/mod.rs",
+          "line": 193,
+          "lint": "clippy::mut_from_ref",
+          "message": "mutable borrow from immutable input(s)"
+        },
+        {
+          "file": "src/models/qwen35/vision/mod.rs",
+          "line": 1705,
+          "lint": "clippy::mut_from_ref",
+          "message": "mutable borrow from immutable input(s)"
+        },
+        {
+          "file": "src/models/yue2/nar.rs",
+          "line": 750,
+          "lint": "clippy::approx_constant",
+          "message": "approximate value of `f32::consts::LOG2_E` found"
+        },
+        {
+          "file": "src/ops/math/torch28.rs",
+          "line": 17,
+          "lint": "clippy::approx_constant",
+          "message": "approximate value of `f{32, 64}::consts::LOG2_E` found"
+        },
+        {
+          "file": "src/core/loader.rs",
+          "line": 1219,
+          "lint": "clippy::approx_constant",
+          "message": "approximate value of `f{32, 64}::consts::PI` found"
+        },
+        {
+          "file": "src/core/loader.rs",
+          "line": 1232,
+          "lint": "clippy::approx_constant",
+          "message": "approximate value of `f{32, 64}::consts::E` found"
+        },
+        {
+          "file": "src/core/loader.rs",
+          "line": 1740,
+          "lint": "clippy::approx_constant",
+          "message": "approximate value of `f{32, 64}::consts::PI` found"
+        },
+        {
+          "file": "src/core/loader.rs",
+          "line": 1766,
+          "lint": "clippy::approx_constant",
+          "message": "approximate value of `f{32, 64}::consts::E` found"
+        },
+        {
+          "file": "src/models/diffusion/z_image/vae.rs",
+          "line": 2914,
+          "lint": "clippy::approx_constant",
+          "message": "approximate value of `f{32, 64}::consts::FRAC_1_SQRT_2` found"
+        },
+        {
+          "file": "src/models/diffusion/z_image/vae.rs",
+          "line": 2915,
+          "lint": "clippy::approx_constant",
+          "message": "approximate value of `f{32, 64}::consts::FRAC_1_SQRT_2` found"
+        },
+        {
+          "file": "src/models/diffusion/z_image/vae.rs",
+          "line": 2916,
+          "lint": "clippy::approx_constant",
+          "message": "approximate value of `f{32, 64}::consts::FRAC_1_SQRT_2` found"
+        },
+        {
+          "file": "src/models/diffusion/z_image/vae.rs",
+          "line": 2917,
+          "lint": "clippy::approx_constant",
+          "message": "approximate value of `f{32, 64}::consts::FRAC_1_SQRT_2` found"
+        },
+        {
+          "file": "src/models/mellum/trunk/config.rs",
+          "line": 583,
+          "lint": "clippy::never_loop",
+          "message": "this loop never actually loops"
+        }
+      ],
+      "log": {
+        "path": "target/sage-review/baseline-clippy.jsonl",
+        "sha256": "d498f619c954401001c4400f56608e4f45cbc5537ef73afe370cb650cf3e787a"
+      }
+    },
+    "final": {
+      "exit": 101,
+      "unique_primary_error_count": 20,
+      "errors": [
+        {
+          "file": "src/models/diffusion/ernie_image/dit.rs",
+          "line": 197,
+          "lint": "clippy::modulo_one",
+          "message": "any number modulo 1 will be 0"
+        },
+        {
+          "file": "src/models/diffusion/ernie_image/dit.rs",
+          "line": 550,
+          "lint": "clippy::modulo_one",
+          "message": "any number modulo 1 will be 0"
+        },
+        {
+          "file": "src/models/diffusion/pig.rs",
+          "line": 393,
+          "lint": "clippy::erasing_op",
+          "message": "this operation will always return zero. This is likely not the intended outcome"
+        },
+        {
+          "file": "src/models/funasr/encoder.rs",
+          "line": 358,
+          "lint": "clippy::mut_from_ref",
+          "message": "mutable borrow from immutable input(s)"
+        },
+        {
+          "file": "src/models/funasr/vad.rs",
+          "line": 92,
+          "lint": "clippy::mut_from_ref",
+          "message": "mutable borrow from immutable input(s)"
+        },
+        {
+          "file": "src/models/qwen3/trunk/forward.rs",
+          "line": 359,
+          "lint": "clippy::mut_from_ref",
+          "message": "mutable borrow from immutable input(s)"
+        },
+        {
+          "file": "src/models/qwen3/vision/mod.rs",
+          "line": 1336,
+          "lint": "clippy::mut_from_ref",
+          "message": "mutable borrow from immutable input(s)"
+        },
+        {
+          "file": "src/models/qwen35/vision/mod.rs",
+          "line": 193,
+          "lint": "clippy::mut_from_ref",
+          "message": "mutable borrow from immutable input(s)"
+        },
+        {
+          "file": "src/models/qwen35/vision/mod.rs",
+          "line": 1705,
+          "lint": "clippy::mut_from_ref",
+          "message": "mutable borrow from immutable input(s)"
+        },
+        {
+          "file": "src/models/yue2/nar.rs",
+          "line": 750,
+          "lint": "clippy::approx_constant",
+          "message": "approximate value of `f32::consts::LOG2_E` found"
+        },
+        {
+          "file": "src/ops/math/torch28.rs",
+          "line": 17,
+          "lint": "clippy::approx_constant",
+          "message": "approximate value of `f{32, 64}::consts::LOG2_E` found"
+        },
+        {
+          "file": "src/core/loader.rs",
+          "line": 1219,
+          "lint": "clippy::approx_constant",
+          "message": "approximate value of `f{32, 64}::consts::PI` found"
+        },
+        {
+          "file": "src/core/loader.rs",
+          "line": 1232,
+          "lint": "clippy::approx_constant",
+          "message": "approximate value of `f{32, 64}::consts::E` found"
+        },
+        {
+          "file": "src/core/loader.rs",
+          "line": 1740,
+          "lint": "clippy::approx_constant",
+          "message": "approximate value of `f{32, 64}::consts::PI` found"
+        },
+        {
+          "file": "src/core/loader.rs",
+          "line": 1766,
+          "lint": "clippy::approx_constant",
+          "message": "approximate value of `f{32, 64}::consts::E` found"
+        },
+        {
+          "file": "src/models/diffusion/z_image/vae.rs",
+          "line": 2914,
+          "lint": "clippy::approx_constant",
+          "message": "approximate value of `f{32, 64}::consts::FRAC_1_SQRT_2` found"
+        },
+        {
+          "file": "src/models/diffusion/z_image/vae.rs",
+          "line": 2915,
+          "lint": "clippy::approx_constant",
+          "message": "approximate value of `f{32, 64}::consts::FRAC_1_SQRT_2` found"
+        },
+        {
+          "file": "src/models/diffusion/z_image/vae.rs",
+          "line": 2916,
+          "lint": "clippy::approx_constant",
+          "message": "approximate value of `f{32, 64}::consts::FRAC_1_SQRT_2` found"
+        },
+        {
+          "file": "src/models/diffusion/z_image/vae.rs",
+          "line": 2917,
+          "lint": "clippy::approx_constant",
+          "message": "approximate value of `f{32, 64}::consts::FRAC_1_SQRT_2` found"
+        },
+        {
+          "file": "src/models/mellum/trunk/config.rs",
+          "line": 583,
+          "lint": "clippy::never_loop",
+          "message": "this loop never actually loops"
+        }
+      ],
+      "log": {
+        "path": "target/sage-review/final-clippy.jsonl",
+        "sha256": "3a99469b2c8ea798ba10fdf83a959bf3a5a3cabf13445d0a525932420e8e7e54"
+      }
+    },
+    "new_error_locations": [],
+    "boundary": "Both exit 101 with pre-existing errors; warnings are not claimed clean."
+  },
+  "other_checks": {
+    "comparator": {
+      "path": "target/sage-review/comparator.log",
+      "sha256": "d094b1bd2c8318c96097f80c50da282add5b2972970a77046de8db6c8935f6ca",
+      "results": [],
+      "failed_test_names": [],
+      "failed_target_summary": null,
+      "passed": 4
+    },
+    "rustfmt": "passed",
+    "git_diff_check": "passed",
+    "independent_lifecycle_review": "No actionable issue after lower-level owners and recovery changes; reviewer did not rerun hardware tests."
+  },
+  "remote_amd": {
+    "new_validation": false,
+    "ssh_command": "ssh -T -o BatchMode=yes -o ConnectTimeout=10 -i ~/.ssh/gouzi-remote -p 36770 root@36.150.116.206 pwd",
+    "exit": 255,
+    "stderr": "Connection closed by 36.150.116.206 port 36770",
+    "prior_amd_results": "completion.json; not repeated in this follow-up"
+  },
+  "limits": [
+    "No new AMD runtime or performance measurement because the existing endpoint closes SSH during handshake.",
+    "SIMD opt-in is functional smoke coverage only and has no aligned speedup claim.",
+    "Direct legacy raw-slice callers remain responsible for their backing allocation lifetime.",
+    "Q8Kernel is Clone but no longer Copy; QTensorOwned now has a destructor. External code relying on Copy or moving fields out of QTensorOwned may need adjustment.",
+    "Temporary QuantizedTensor bridge kernels now evict on drop; persistent Weight kernels retain cross-forward cache reuse. Legacy bridge performance is unmeasured.",
+    "No new full-model Vulkan upload on the 64 GiB unified-memory Mac; new GPU tests are small real-device regressions.",
+    "Vision lacks numerical Oracle comparison; HTTP image response ends at its 48-token budget.",
+    "No concurrency/load testing, persistent-session speed measurement, arbitrary long contexts, MTP execution, or other expert-format acceptance."
+  ]
+}

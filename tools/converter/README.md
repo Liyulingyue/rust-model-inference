@@ -8,12 +8,14 @@
 ```
 converter/
 ├── breeze/       ← 原版与扩展精度转换器
+├── bge/          ← BAAI BGE 文本和视觉 embedding 转换器
 ├── clm/          ← Contrastive-LM 投影头转换器和测试
 ├── dots/         ← dots writer、转换器和测试
 ├── dreamx/       ← DreamX 转换器和测试
 ├── edge0/        ← Edge0-35B MLX-affine 转换器、反量化与测试
 ├── gliner/       ← GLiNER 转换器和测试
 ├── neohorse/     ← NeoHorse 转换器和测试
+├── ovisocr3/     ← OvisOCR3 Qwen3.5 主模型/mmproj 转换器和测试
 ├── qwen_drive/   ← Qwen-Drive 转换器、测试和 source-tensors.json
 ├── vibevoice/    ← 原版与扩展精度转换器
 ├── yue2/         ← YuE2 主模型与 decoder-only VAE 转换器
@@ -26,16 +28,175 @@ converter/
 |---|---|
 | `breeze/convert_breeze_plain.py` | 原版未量化导出 |
 | `breeze/convert_breeze.py` | 支持 `--quant bf16/f16/f32/q8_0/q4_0/q4_mixed` 和 `--codec-quant f32/q8_0` |
+| `bge/convert_bge.py` | BAAI `bge-*` 的 BERT/XLM-R、Mistral、Qwen2/Qwen3、Gemma2 权重转换；支持单文件/分片 safetensors 与 PyTorch ZIP `.bin`，输出 `F32` 或 `Q8_0` |
+| `bge/convert_bge_visual.py` | Visualized BGE `.pth`、BGE-VL CLIP、LLaVA-NeXT、Screenshot 转换；文本、视觉、projector 和 tokenizer 合入一个 GGUF，输出 `F32` 或 `Q8_0` |
 | `clm/convert_clm.py` | CLM 投影头 F32 导出 |
 | `dots/convert_dots_tts.py` | dots 专用 writer 与 BF16/Q8_0 导出 |
 | `dreamx/convert_dreamx_creator.py` | DreamX 主模型/mmproj 配对导出 |
 | `edge0/convert_edge0.py` | Edge0-35B MLX-affine；支持 `--quant lossless/f32/f16/q8_0/q4_0` |
 | `edge0/mlx_affine.py` | MLX-affine 反量化（与 `MlxAffineKernel::decode_row` 对齐） |
 | `neohorse/convert_neohorse.py` | 使用固定 llama.cpp 版本导出 |
+| `ovisocr3/convert_ovisocr3.py` | 校验 ModelScope OvisOCR3 的 473 个 BF16 张量，并用固定 llama.cpp `b96806d96061049a5b574269b049bf6241d63d46` 导出 `qwen35` 主模型和 `qwen3vl` mmproj |
 | `qwen_drive/convert_qwen_drive.py` | `inspect`、`export`、`verify` |
 | `vibevoice/convert_vibevoice_asr_original.py` | 原版导出 |
 | `vibevoice/convert_vibevoice_asr.py` | 扩展精度导出 |
 | `yue2/convert_yue2.py` | 导出 `yue2` 主模型和 `yue2_vae` F32 decoder；`--quant bf16/f32/q8_0/q4_0/q4_k_m/q6_k`（默认 `bf16` 零拷贝）；固定协议/tokenizer metadata，原子写入并读回校验 |
+
+## 共享量化工具
+
+`utils/quantize_gguf.py` 把任意 GGUF 转成更小的格式，读取 F32 或 BF16 源，
+`--format` 支持 `q8_0` / `q4_k` / `q5_k` / `q6_k` / `f16` / `bf16`，
+`--keep NAME` 让指定张量留在源类型（运行时按浮点向量读取的张量需要它）。
+
+K-quant 的编码器在 `utils/kquants.py`：`q4_k` / `q6_k` 是 ggml 参考实现的
+向量化移植，`q5_k` 是新增的，同样按 `quantize_row_q5_K_ref` 的结构实现
+（16 个候选 scale、`get_scale_min_k4` 的 12 字节子 scale/min 表、
+第五位单独存 32 字节）。布局与运行时自己的解码器一致，可以用
+`cargo run --example kquant_roundtrip -- <fmt> <values.f32> <payload.bin>`
+交叉验证：把 Python 编码的 payload 交给 Rust 解码器，看还原误差。
+
+| 格式 | 每 256 值字节数 | 相对 RMS 误差（高斯样本） |
+|---|---|---|
+| `q4_k` | 144 | 7.2 % |
+| `q5_k` | 176 | 3.6 % |
+| `q6_k` | 210 | 1.8 % |
+## OvisOCR3
+
+先按文件下载 ModelScope `ATH-MaaS/OvisOCR3`，并准备固定的 llama.cpp
+`b96806d96061049a5b574269b049bf6241d63d46` checkout：
+
+```bash
+.venv/bin/python -m tools.converter.ovisocr3.convert_ovisocr3 \
+  models/OvisOCR3 \
+  --llama-cpp /path/to/llama.cpp \
+  --outfile models/OvisOCR3-BF16.gguf \
+  --mmproj-outfile models/mmproj-OvisOCR3-BF16.gguf
+```
+
+The adapter validates the architecture, all 473 BF16 source tensors,
+tokenizer and image processor before conversion. It also exports the source
+pixel budget (`65536` to `16777216`) into the mmproj metadata. Without these
+keys, the runtime falls back to another model's defaults: a 32x32 input yields
+9 image tokens instead of the source configuration's 64 tokens at 256x256.
+The official README's `448²` to `2880²` values are explicit vLLM overrides,
+not the checkpoint's saved defaults; this exporter preserves the saved values.
+
+The validated ModelScope source has `model.safetensors` SHA-256
+`aa2311c6b22b07cf3afe9aac6e8bcb02a2b19dd8671b2a91d0b144071577e600` and is
+1,706,030,528 bytes. Runtime validation uses a separate fixed llama.cpp
+`11fe0215` reference, whose GDN epsilon formula matches the existing runtime.
+The older converter pin uses a different normalization formula, so its failing
+strict recurrent comparison is not a rounding-only difference or a passing
+alignment result. Exact checks cover tokenizer/structure/embedding/initial
+zero state; accumulated arithmetic uses independently calibrated numerical
+bounds. See [the validation report](../oracle/ovisocr3/README.md) for pins,
+hashes, commands, results and coverage limits.
+
+
+## BGE 转换与推理
+
+先从 ModelScope 下载某个 `BAAI/bge-*` 原始仓库到 `models/`，再在仓库根目录运行：
+
+```bash
+.venv/bin/python -m tools.converter.bge.convert_bge \
+  models/BAAI-bge-small-en-v1-5 models/bge-small-en-v1.5-Q8_0.gguf \
+  --quant Q8_0
+
+./target/release-fast/rust-model-inference \
+  --model models/bge-small-en-v1.5-Q8_0.gguf \
+  --prompt "hello world" --embedding --embedding-output raw
+```
+
+2026-10-13 核对 ModelScope `BAAI` 组织后的纯文本 embedding 清单，共 20 个：
+
+| 家族 | 模型 | 向量维度 |
+|---|---|---|
+| 英文 BERT | `bge-small-en`、`bge-small-en-v1.5` | 384 |
+| 中文 BERT | `bge-small-zh`、`bge-small-zh-v1.5` | 512 |
+| BERT base | `bge-base-en`、`bge-base-en-v1.5`、`bge-base-zh`、`bge-base-zh-v1.5` | 768 |
+| BERT large | `bge-large-en`、`bge-large-en-v1.5`、`bge-large-zh`、`bge-large-zh-v1.5`、`bge-large-zh-noinstruct` | 1024 |
+| XLM-R | `bge-m3`、`bge-m3-retromae`、`bge-m3-unsupervised` | 1024 |
+| Mistral | `bge-en-icl` | 4096 |
+| Qwen2 | `bge-code-v1` | 1536 |
+| Gemma2 | `bge-multilingual-gemma2` | 3584 |
+| Qwen3 | `bge-reasoner-embed-qwen3-8b-0923` | 4096 |
+
+转换器覆盖上述 BERT
+（中英文 small/base/large、v1.5 和 `bge-large-zh-noinstruct`）、XLM-R
+（`bge-m3`、`bge-m3-retromae`、`bge-m3-unsupervised`），以及 decoder-only
+（`bge-en-icl`、`bge-code-v1`、`bge-multilingual-gemma2`、
+`bge-reasoner-embed-qwen3-8b-0923`）。BERT/XLM-R GGUF 使用 `bert` 架构；
+Mistral 使用标准 GGUF `llama` 架构和 Q/K RoPE 排列；其余 decoder 使用
+`qwen2`、`qwen3` 或 `gemma2` 架构。BERT/XLM-R 取 CLS 向量，decoder 取
+最后一个有效 token 的 hidden state，然后做 L2 归一化。
+
+`F32` 将源浮点权重导出为 F32；`Q8_0` 量化 token embedding 和线性层，norm、bias、
+位置表和 token-type 表保留 F32。转换前会检查 tokenizer 词表、必需张量、shape
+和未处理的额外张量，避免静默丢权重。
+
+BGE-M3 输出 dense 向量；sparse/ColBERT 输出和 reranker 不在本次范围内。
+Decoder query 的任务指令或 ICL 示例由调用方按模型卡拼入 prompt。
+
+另有 8 个视觉仓库，合计覆盖 28 个 BGE embedding 仓库。
+`bge-visualized` 仓库的两个 checkpoint 分别转换：
+
+| 家族 | ModelScope BAAI 仓库 / checkpoint | 向量维度 | GGUF 架构与标记 |
+|---|---|---|---|
+| EVA02 + BERT | `bge-visualized/Visualized_base_en_v1.5.pth` | 768 | `bert` + `bge.visualized` |
+| EVA02 + XLM-R | `bge-visualized/Visualized_m3.pth` | 1024 | `bert` + `bge.visualized` |
+| CLIP | `BGE-VL-base`、`BGE-VL-large` | 512 / 768 | `bge-vl-clip` |
+| LLaVA-NeXT + Mistral | `BGE-VL-v1.5-zs`、`BGE-VL-v1.5-mmeb`、`BGE-VL-MLLM-S1`、`BGE-VL-MLLM-S2` | 4096 | `llama` + `bge.llava_next` |
+| Qwen2.5-VL | `BGE-VL-Screenshot` | 2048 | `qwen2vl` + `bge.screenshot` |
+
+```bash
+# 下载时明确列出所需文件；分片模型必须下载全部权重分片。
+models/.venv/bin/modelscope download --model BAAI/BGE-VL-base \
+  model.safetensors config.json tokenizer.json preprocessor_config.json \
+  --local_dir models/BAAI-BGE-VL-base
+
+.venv/bin/python -m tools.converter.bge.convert_bge_visual \
+  models/BAAI-BGE-VL-base models/BGE-VL-base-Q8_0.gguf --quant Q8_0
+
+# Visualized checkpoint 使用对应原始文本仓库的 config/tokenizer。
+.venv/bin/python -m tools.converter.bge.convert_bge_visual \
+  models/BAAI-bge-visualized/Visualized_base_en_v1.5.pth \
+  models/Visualized-base-Q8_0.gguf --quant Q8_0 \
+  --text-model models/BAAI-bge-base-en-v1-5
+
+./target/release-fast/rust-model-inference \
+  --model models/BGE-VL-base-Q8_0.gguf --embedding --embedding-output raw \
+  --image picture.png --prompt "a red car"
+
+./target/release-fast/rust-model-server \
+  --model models/BGE-VL-base-Q8_0.gguf --embedding --port 8080
+```
+
+视觉 BGE 支持纯文本、单图和图文融合，均只需一个 GGUF，无需 `--mmproj`。
+HTTP `/v1/embeddings` 接受 `{"image":"<base64 image>","prompt":"a red car"}`；
+纯文本仍用 `input`，音频/视频返回 400。
+CLIP 的文本与图像 projection 相加后归一化；Visualized 的视觉 tokens 与文本一起
+经过 BERT/XLM-R；LLaVA/Screenshot 取最后 hidden state 后归一化。
+LLaVA 默认使用官方 candidate `[INST]` 模板，支持直传完整 `[INST]` query 模板。
+Screenshot 自动选择 text/image/query 模板，也支持直传完整 ChatML 模板，最长 3072 tokens。
+Q8_0 只量化行宽为 32 倍数的二维矩阵，其余视觉权重保留 F32。
+视觉 decoder 使用 F32 KV；LLaVA 目前逐 token 处理约 2,900 个视觉 tokens，
+CPU 图像推理较慢，尚未做批量 prefill 的吞吐优化。
+
+验证：真实 BGE-small-en-v1.5、两版 small-zh、M3 原始权重转换和 CLI 已运行，
+四种文本 decoder 的真实分片索引共 1,490 个张量已核对。
+文本与四种视觉家族的 F32/Q8_0 合成 CLI fixtures、无 mmproj 的视觉 HTTP 路径通过。
+真实 CLIP base/large、Visualized base/M3 的 F32/Q8_0，及 Screenshot、LLaVA-v1.5-zs 的 Q8_0 已完成三种输入检查；完整覆盖及哈希见 [验证记录](../oracle/bge/verification.json)。
+按本次要求，量化、F16/BF16 舍入、GELU 查表和其它有损算子全部跳过数值对齐；
+7 类无损标量算子的 44 组输入、208,828 个 F32 位模式与固定 GGML Oracle 一致。
+Tokenizer 独立比较 IDs；这些检查不建立完整模型、SIMD 或 Q8_0 的逐位结论。
+见 [Oracle 复现与边界](../oracle/bge/README.md)。
+
+```bash
+BGE_RUST_BIN=target/release-fast/rust-model-inference \
+  BGE_SERVER_BIN=target/release-fast/rust-model-server \
+  .venv/bin/python -m unittest tools.converter.bge.test_convert_bge \
+  tools.converter.bge.test_convert_bge_visual tools.oracle.bge.test_compare -v
+```
 
 ## yue2 量化支持现状
 
@@ -72,6 +233,12 @@ Q6_K 量化已改为 NumPy 分块向量化：保留 19 个候选及原有 F64 �
 7.886 s 降到 0.129 s（约 61 倍）；同一完整 2048×6144 矩阵单次对照从
 108.516 s 降到 1.504 s（约 72 倍），两组输出均逐字节一致。这是 Q6_K 编码耗时，
 **不是完整模型导出的提速倍数**；Q4_K 搜索及 NAR 的量化限制不变。
+
+批大小现在由 `K_SEARCH_MAX_BLOCKS = 256` 显式封顶，而不是从字节预算推出来：
+Q4_K 每个 super-block 的瞬时 F64 中间量约 40 KiB，5 GiB 预算会要 32k 块，
+中间量全部冲出缓存，峰值 RSS 达 5.5 GiB。单线程 NumPy、8.4M 值实测，Q4_K
+从 2.22 M values/s、5.5 GiB 变为 3.35 M values/s、150 MiB；搜索按
+super-block 独立，各批大小输出逐字节一致，定值摘要不变。
 
 回归检查：
 

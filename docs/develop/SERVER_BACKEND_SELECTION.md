@@ -38,6 +38,7 @@ handler。
 | `Rerank` | **元数据探测** `is_rerank_gguf()` | reranker 和普通 qwen3 聊天的 `general.architecture` **都是 `"qwen3"`**，命令行无从区分 |
 | `Gliner2` | `--gliner2-decide` | arch 是 `gliner2`，`--model` 本身就唯一；用 flag 是为了和 CLM 对齐、避免再造一个探测函数 |
 | `Gliner2Boundary` | `--gliner2-boundary` | 同上，**且** `gliner2.variant = "boundary"`；flag 选模式，权重确认变体 |
+| `Timestral` | **元数据探测** `is_timestral_gguf()` | arch 是 `timestral`，`--model` 本身就唯一。预测模式与聊天模式的请求体完全不同，命令行无从区分，所以按 arch 探测 |
 
 ### 为什么 rerank 必须探测而 gliner2 不必
 
@@ -127,16 +128,17 @@ tokenizer 的做法一致，因此不需要 `'static` 泄漏。
 
 后端定了，路由就是一张白名单表。当前：
 
-| 路由 | Text | Embedding | Asr | Tts | Rerank | Clm | Gliner2 |
-|---|---|---|---|---|---|---|---|
-| `/v1/chat/completions` 等 | ✓ | | | | | | |
-| `/v1/embeddings` | | ✓ | | | | | |
-| `/v1/audio/*` | | | ✓ | | | | |
-| `/v1/audio/speech` | | | | ✓ | | | |
-| `/v1/rerank` | | | | | ✓ | | |
-| `/v1/jev/score` | ✓ | | | | | ✓ | ✓ |
-| `/v1/jev/grouped` | ✓ | | | | | | |
-| `/v1/jev/image*` | ✓（需 `--mmproj`） | | | | | | |
+| 路由 | Text | Embedding | Asr | Tts | Rerank | Clm | Gliner2 | Timestral |
+|---|---|---|---|---|---|---|---|---|
+| `/v1/chat/completions` 等 | ✓ | | | | | | | |
+| `/v1/embeddings` | | ✓ | | | | | | |
+| `/v1/audio/*` | | | ✓ | | | | | |
+| `/v1/audio/speech` | | | | ✓ | | | | |
+| `/v1/rerank` | | | | | ✓ | | | |
+| `/v1/jev/score` | ✓ | | | | | ✓ | ✓ | |
+| `/v1/jev/grouped` | ✓ | | | | | | | |
+| `/v1/jev/image*` | ✓（需 `--mmproj`） | | | | | | | |
+| `/v1/forecast` | | | | | | | | ✓ |
 
 未列出的路由由 axum 直接 404。**这是模型能力边界，不是接口缺功能**——例如
 `/v1/jev/grouped` 对 Clm/Gliner2 返回 404，因为 per-group softmax 在 cosine 打分

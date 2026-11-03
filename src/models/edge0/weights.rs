@@ -316,6 +316,7 @@ fn validate_edge0_trunk(trunk: &HybridTrunk<'_>) -> Result<(), String> {
         };
     for (index, layer) in trunk.layers.iter().enumerate() {
         let prefix = format!("layer {index}");
+        // Edge0 is dense, so the shared FFN is always bound.
         require(
             &format!("{prefix} shared gate"),
             layer.ffn_gate.as_ref(),

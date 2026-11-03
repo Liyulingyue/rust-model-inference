@@ -136,7 +136,8 @@ fn read_meta(source: &dyn TensorSource) -> Result<BertConfig, String> {
 
 /// Build the per-token hidden states for a tokenized input: token embedding
 /// (token + optional segment row 0 for jina + optional absolute position for
-/// bert), then the embedding LayerNorm. `hidden` is sized `[n_tokens * n_embd]`
+/// bert). `hidden` is sized `[n_tokens * n_embd]`; `forward_bert_layers` applies
+/// the embedding LayerNorm to this raw sum.
 /// and fully populated on return. Shared by [`run_embedding_tokens`] and
 /// [`compute_rerank_score`].
 fn populate_embeddings(
@@ -187,18 +188,9 @@ fn populate_embeddings(
         }
     }
 
-    // ---- embedding LayerNorm (`bert.cpp:92`, `LLM_NORM` with bias)
-    let mut normed = vec![0.0f32; n_embd];
-    for row in hidden.chunks_exact_mut(n_embd) {
-        layer_norm(
-            row,
-            &weights.tok_norm.weight,
-            &weights.tok_norm.bias,
-            cfg.eps,
-            &mut normed,
-        );
-        row.copy_from_slice(&normed);
-    }
+    // The embedding LayerNorm is applied at the start of
+    // `forward_bert_layers`, matching `bert.cpp:92`; keep this helper's
+    // output as the raw token/type/position sum for rerank and embedding.
     Ok(())
 }
 
@@ -374,6 +366,11 @@ pub fn compute_embedding(
     prompt: &str,
     n_threads_arg: usize,
 ) -> Result<Vec<f32>, String> {
+    let tokens = encode_embedding_input(source, prompt)?;
+    run_embedding_tokens(source, &tokens, n_threads_arg)
+}
+
+pub fn encode_embedding_input(source: &dyn TensorSource, prompt: &str) -> Result<Vec<u32>, String> {
     // The tokenizer is chosen by `tokenizer.ggml.model`, exactly as
     // `llama-vocab.cpp:1804+` does — NOT by the model architecture. The two
     // are independent: `bert`-arch weights ship either WordPiece (`"bert"`,
@@ -412,7 +409,7 @@ pub fn compute_embedding(
     if prompt_tokens.is_empty() {
         return Err("Embedding input produced no tokens".into());
     }
-    run_embedding_tokens(source, &prompt_tokens, n_threads_arg)
+    Ok(prompt_tokens)
 }
 
 pub fn run_embedding_tokens(
@@ -420,10 +417,46 @@ pub fn run_embedding_tokens(
     token_ids: &[u32],
     n_threads_arg: usize,
 ) -> Result<Vec<f32>, String> {
+    run_embedding_tokens_inner(source, token_ids, None, n_threads_arg)
+}
+
+pub fn run_embedding_tokens_with_image(
+    source: &dyn TensorSource,
+    token_ids: &[u32],
+    image: &[f32],
+    threads: usize,
+) -> Result<Vec<f32>, String> {
+    run_embedding_tokens_inner(source, token_ids, Some(image), threads)
+}
+
+fn run_embedding_tokens_inner(
+    source: &dyn TensorSource,
+    token_ids: &[u32],
+    image: Option<&[f32]>,
+    n_threads_arg: usize,
+) -> Result<Vec<f32>, String> {
     if token_ids.is_empty() {
         return Err("Embedding input produced no tokens".into());
     }
     let cfg = read_meta(source)?;
+    let image_rows = if let Some(image) = image {
+        if image.is_empty()
+            || !image.len().is_multiple_of(cfg.n_embd)
+            || !matches!(
+                source.metadata("bge.visualized"),
+                Some(MetaValue::Bool(true))
+            )
+        {
+            return Err("invalid Visualized BGE image tokens".into());
+        }
+        image.len() / cfg.n_embd
+    } else {
+        0
+    };
+    let n_tokens = token_ids
+        .len()
+        .checked_add(image_rows)
+        .ok_or("BGE token count overflow")?;
     // `llama-context.cpp:133` sizes the KV cache (and hence the accepted batch)
     // from `hparams.n_ctx_train`, so an over-long input is a hard error in
     // llama.cpp rather than a silent truncation.
@@ -435,12 +468,11 @@ pub fn run_embedding_tokens(
     // decodable as f32" — which describes a decode failure that never happened
     // and hides the actual out-of-range index. There is no truncation path on
     // purpose: silently dropping 200 tokens changes what the embedding means.
-    if cfg.n_ctx_train != 0 && token_ids.len() > cfg.n_ctx_train {
+    if cfg.n_ctx_train != 0 && n_tokens > cfg.n_ctx_train {
         return Err(format!(
             "prompt is too long: {} tokens, but this model was trained for {} \
              (context_length); split the input or use a longer-context model",
-            token_ids.len(),
-            cfg.n_ctx_train
+            n_tokens, cfg.n_ctx_train
         ));
     }
     let (n_embd, n_layer, n_head, n_head_kv) = (cfg.n_embd, cfg.n_layer, cfg.n_head, cfg.n_head_kv);
@@ -474,13 +506,52 @@ pub fn run_embedding_tokens(
     let n_threads = crate::app::resolve_thread_count(n_threads_arg, available);
     let pool = Arc::new(ComputePool::new(n_threads));
 
-    let n_tokens = token_ids.len();
     #[cfg(feature = "parity-trace")]
     if crate::parity_trace::enabled("embedding.tokens") {
         crate::parity_trace::token_ids("embedding.tokens", token_ids).map_err(|e| e.to_string())?;
     }
     let mut hidden = vec![0.0f32; n_tokens * n_embd];
-    populate_embeddings(&cfg, &weights, token_ids, &mut hidden)?;
+    if let Some(image) = image {
+        let h = cfg.n_embd;
+        let info = source
+            .tensor_info("bge.raw_position.weight")
+            .ok_or("missing Visualized BGE position table")?;
+        if info.dims.len() != 2 || info.dims[0] != h as u64 || info.dims[1] < n_tokens as u64 {
+            return Err("invalid Visualized BGE position table".into());
+        }
+        let position =
+            crate::core::tensor::load_f32_tensor(source, "bge.raw_position.weight", &info.dims)?;
+        let segment = weights
+            .token_types
+            .map(|(bytes, _)| {
+                super::weights::decode_f32_row_public(bytes, h).ok_or("invalid segment embedding")
+            })
+            .transpose()?;
+        for (i, id) in token_ids.iter().enumerate() {
+            let t = if i == 0 { 0 } else { i + image_rows };
+            let row = &mut hidden[t * h..(t + 1) * h];
+            embedding_lookup(
+                weights.token_embd,
+                *id,
+                h,
+                weights.token_embd_ggml_type,
+                row,
+            );
+            for j in 0..h {
+                row[j] += segment.as_ref().map(|s| s[j]).unwrap_or(0.0);
+                row[j] += position[t * h + j];
+            }
+        }
+        for (i, image_row) in image.chunks_exact(h).enumerate() {
+            let t = i + 1;
+            let row = &mut hidden[t * h..(t + 1) * h];
+            for j in 0..h {
+                row[j] = image_row[j] + position[t * h + j];
+            }
+        }
+    } else {
+        populate_embeddings(&cfg, &weights, token_ids, &mut hidden)?;
+    }
 
     // Forward loop (per-layer transformer block + residual) lives in
     // `forward_bert_layers` so rerank and embedding share one body.

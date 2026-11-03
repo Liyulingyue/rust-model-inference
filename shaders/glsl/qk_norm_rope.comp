@@ -1,4 +1,7 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+#include "f32_divide.glsl"
+#include "f32_norm.glsl"
 
 layout(local_size_x = 64) in;
 
@@ -56,32 +59,32 @@ void main() {
                 sum = next;
             }
             precise float mean_square = (sum + correction) / float(pc.head_dim) + pc.eps;
-            precise float root = sqrt(mean_square);
-            precise float root_residual = fma(-root, root, mean_square);
-            root = fma(root_residual, 0.5 / root, root);
-            precise float reciprocal = 1.0 / root;
-            precise float reciprocal_residual = fma(-root, reciprocal, 1.0);
-            inverse_rms = fma(reciprocal_residual, reciprocal, reciprocal);
+            inverse_rms = inverse_sqrt_f32(mean_square);
         }
         barrier();
         for (uint index = lane; index < pc.head_dim; index += 64u) {
             float value = uintBitsToFloat(arena.data[base + index]);
-            arena.data[base + index] = floatBitsToUint(value * inverse_rms * norm_weight(kind, index));
+            precise float normalized = value * inverse_rms * norm_weight(kind, index);
+            arena.data[base + index] = floatBitsToUint(normalized);
         }
         barrier();
     }
 
     uint half_dim = pc.head_dim / 2u;
-    if (lane < half_dim) {
-        float cosine = uintBitsToFloat(arena.data[pc.rope_word + row * pc.rope_stride + lane]);
-        float sine = uintBitsToFloat(arena.data[pc.rope_word + row * pc.rope_stride + lane + half_dim]);
-        float first = uintBitsToFloat(arena.data[base + lane]);
-        float second = uintBitsToFloat(arena.data[base + lane + half_dim]);
+    bool interleaved = (pc.norm_flags & 4u) != 0u;
+    bool fused = interleaved || (pc.norm_flags & 8u) != 0u;
+    for (uint pair = lane; pair < half_dim; pair += 64u) {
+        uint first_index = base + (interleaved ? 2u * pair : pair);
+        uint second_index = interleaved ? first_index + 1u : first_index + half_dim;
+        float cosine = uintBitsToFloat(arena.data[pc.rope_word + row * pc.rope_stride + pair]);
+        float sine = uintBitsToFloat(arena.data[pc.rope_word + row * pc.rope_stride + pair + half_dim]);
+        float first = uintBitsToFloat(arena.data[first_index]);
+        float second = uintBitsToFloat(arena.data[second_index]);
         precise float first_cosine = first * cosine;
         precise float second_sine = second * sine;
         precise float first_sine = first * sine;
         precise float second_cosine = second * cosine;
-        arena.data[base + lane] = floatBitsToUint(first_cosine - second_sine);
-        arena.data[base + lane + half_dim] = floatBitsToUint(first_sine + second_cosine);
+        arena.data[first_index] = floatBitsToUint(fused ? fma(first, cosine, -second_sine) : first_cosine - second_sine);
+        arena.data[second_index] = floatBitsToUint(fused ? fma(first, sine, second_cosine) : first_sine + second_cosine);
     }
 }

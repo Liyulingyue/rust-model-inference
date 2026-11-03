@@ -1,0 +1,95 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "exp_accurate.glsl"
+
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(push_constant) uniform PC {
+    uint mode;
+    uint a; uint b; uint c; uint d; uint e; uint f;
+    uint rows; uint enc; uint seq; uint context; uint covariates; uint time;
+} pc;
+
+float load(uint i) { return uintBitsToFloat(arena.data[i]); }
+void store(uint i, float v) { arena.data[i] = floatBitsToUint(v); }
+
+bool allowed(uint row, uint slot, uint j) {
+    if (pc.time == 0u) {
+        if (row == j) return true;
+        uint role_q = uint(load(pc.f+row)), role_k = uint(load(pc.f+j));
+        return (slot >= pc.enc || load(pc.e+j*pc.enc+slot) != 0.0)
+            && !(role_q != 0u && role_k == 0u) && !(role_q == 2u && role_k != 2u);
+    }
+    bool valid = j < pc.enc && load(pc.e+row*pc.enc+j) != 0.0;
+    if (slot < pc.enc) {
+        return j < pc.enc && ((valid && (load(pc.f+row) == 2.0 || j <= slot)) || j == slot);
+    }
+    uint p = slot-pc.enc;
+    if (pc.covariates == 0u) return j < pc.enc ? valid : j-pc.enc <= p;
+    if (j < pc.enc) return p >= pc.context && j < pc.context && valid;
+    uint kp = j-pc.enc;
+    return kp == p || (p >= pc.context && kp >= pc.context && kp <= p);
+}
+
+shared float partial[64];
+shared float alpha, beta, denominator, maximum;
+
+void main() {
+    uint group = gl_WorkGroupID.x + gl_WorkGroupID.y*gl_NumWorkGroups.x;
+    uint lane = gl_LocalInvocationID.x;
+    uint index = group*64u + lane;
+    uint count = pc.rows*pc.seq;
+    if (pc.mode == 0u) {
+        if (index >= count*768u) return;
+        uint token = index/768u, head = (index%768u)/64u, dim = index%64u;
+        uint src = token*2304u + dim*12u + head;
+        float q = load(pc.a+src), k = load(pc.a+src+768u);
+        if (pc.time != 0u && (dim < 16u || (dim >= 32u && dim < 48u))) {
+            uint i = dim%32u, other = dim < 32u ? dim+32u : dim-32u;
+            uint coeff = pc.e+(token%pc.seq)*32u+i*2u;
+            float cos = load(coeff), sin = load(coeff+1u);
+            float sign = dim < 32u ? -1.0 : 1.0;
+            uint pair = token*2304u+other*12u+head;
+            q = q*cos + sign*load(pc.a+pair)*sin;
+            k = k*cos + sign*load(pc.a+pair+768u)*sin;
+        }
+        store(pc.b+index, q); store(pc.c+index, k); store(pc.d+index, load(pc.a+src+1536u));
+    } else if (pc.mode == 1u) {
+        // One workgroup per query/head; online softmax keeps memory linear in context.
+        if (group >= count*12u) return;
+        uint token = group/12u, head = group%12u, row = token/pc.seq, slot = token%pc.seq;
+        uint keys = pc.time != 0u ? pc.seq : pc.rows;
+        float query = load(pc.a+token*768u+head*64u+lane);
+        float value = 0.0;
+        if (lane == 0u) { maximum = -1.0/0.0; denominator = 0.0; }
+        barrier();
+        for (uint j=0u; j<keys; j++) {
+            if (!allowed(row,slot,j)) continue;
+            uint key = pc.time != 0u ? row*pc.seq+j : j*pc.seq+slot;
+            partial[lane] = query*load(pc.b+key*768u+head*64u+lane);
+            barrier();
+            for (uint step=32u; step>0u; step>>=1u) {
+                if (lane<step) partial[lane] += partial[lane+step];
+                barrier();
+            }
+            if (lane == 0u) {
+                float score = partial[0]/8.0;
+                float next = max(maximum,score);
+                alpha = exp_accurate(maximum-next); beta = exp_accurate(score-next);
+                denominator = denominator*alpha+beta; maximum=next;
+            }
+            barrier();
+            value = value*alpha + beta*load(pc.c+key*768u+head*64u+lane);
+            barrier();
+        }
+        store(pc.d+token*768u+head*64u+lane, value/denominator);
+    } else if (pc.mode == 2u) {
+        if (index >= count*768u) return;
+        store(pc.a+index, load(pc.a+index)/(1.0+exp_accurate(-load(pc.b+index))));
+    } else {
+        if (index >= count*2048u) return;
+        uint src = (index/2048u)*4096u+index%2048u;
+        float up = load(pc.a+src+2048u);
+        store(pc.b+index, load(pc.a+src)*(up/(1.0+exp_accurate(-up))));
+    }
+}

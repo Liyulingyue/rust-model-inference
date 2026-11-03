@@ -1,0 +1,106 @@
+#version 450
+#extension GL_EXT_control_flow_attributes : require
+// One warp; each staged key serves sixteen queries.
+layout(local_size_x = 32) in;
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(push_constant) uniform PC {
+    uint q_word; uint k_word; uint v_word; uint output_word;
+    uint queries; uint keys; uint q_heads; uint kv_heads; uint dim;
+    float scale; uint causal;
+} pc;
+const uint QUERIES = 16u;
+shared float query_stage[QUERIES][128];
+shared vec4 stage[1024];
+shared float scores[QUERIES][32];
+shared float maximum[QUERIES];
+shared float normalizer[QUERIES];
+shared float rescale[QUERIES];
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint query_base = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * QUERIES;
+    uint head = gl_WorkGroupID.z;
+    uint kv_head = head / (pc.q_heads / pc.kv_heads);
+    for (uint i = lane; i < QUERIES * 128u; i += 32u) {
+        uint row = query_base + i / 128u;
+        uint d = i % 128u;
+        query_stage[i / 128u][d] = row < pc.queries && d < pc.dim
+            ? uintBitsToFloat(arena.data[pc.q_word + (row * pc.q_heads + head) * pc.dim + d]) : 0.0;
+    }
+    if (lane < QUERIES) { maximum[lane] = -3.402823466e38; normalizer[lane] = 0.0; }
+    vec4 output_value[QUERIES];
+    for (uint q = 0u; q < QUERIES; q++) output_value[q] = vec4(0.0);
+    barrier();
+    for (uint start = 0u; start < pc.keys; start += 32u) {
+        uint live = min(32u, pc.keys - start);
+        for (uint i = lane; i < 1024u; i += 32u) {
+            uint d = i / 8u;
+            uint key = start + (i % 8u) * 4u;
+            vec4 value = vec4(0.0);
+            for (uint j = 0u; j < 4u; j++) {
+                if (key + j < pc.keys && d < pc.dim) {
+                    value[j] = uintBitsToFloat(arena.data[pc.k_word + ((key + j) * pc.kv_heads + kv_head) * pc.dim + d]);
+                }
+            }
+            stage[i] = value;
+        }
+        barrier();
+        vec4 score[QUERIES / 4u];
+        for (uint q = 0u; q < QUERIES / 4u; q++) score[q] = vec4(0.0);
+        for (uint d = 0u; d < pc.dim; d++) {
+            vec4 key = stage[d * 8u + lane % 8u];
+            [[unroll]] for (uint q = 0u; q < QUERIES / 4u; q++) {
+                score[q] = fma(vec4(query_stage[(lane / 8u) * (QUERIES / 4u) + q][d]), key, score[q]);
+            }
+        }
+        for (uint q = 0u; q < QUERIES / 4u; q++) for (uint d = 0u; d < 4u; d++) {
+            uint query = lane / 8u * (QUERIES / 4u) + q;
+            uint key = lane % 8u * 4u + d;
+            bool visible = key < live && query_base + query < pc.queries
+                && (pc.causal == 0u || start + key <= query_base + query + pc.keys - pc.queries);
+            scores[query][key] = visible ? score[q][d] * pc.scale : -3.402823466e38;
+        }
+        barrier();
+        if (lane < QUERIES) {
+            float next_max = maximum[lane];
+            for (uint k = 0u; k < live; k++) next_max = max(next_max, scores[lane][k]);
+            float old_scale = exp(maximum[lane] - next_max);
+            float sum = normalizer[lane] * old_scale;
+            for (uint k = 0u; k < live; k++) {
+                float p = scores[lane][k] == -3.402823466e38 ? 0.0 : exp(scores[lane][k] - next_max);
+                scores[lane][k] = p;
+                sum += p;
+            }
+            maximum[lane] = next_max;
+            normalizer[lane] = sum;
+            rescale[lane] = old_scale;
+        }
+        barrier();
+        for (uint i = lane; i < 1024u; i += 32u) {
+            uint key = start + i / 32u;
+            uint d = (i % 32u) * 4u;
+            vec4 value = vec4(0.0);
+            for (uint j = 0u; j < 4u; j++) {
+                if (key < pc.keys && d + j < pc.dim) {
+                    value[j] = uintBitsToFloat(arena.data[pc.v_word + (key * pc.kv_heads + kv_head) * pc.dim + d + j]);
+                }
+            }
+            stage[i] = value;
+        }
+        barrier();
+        for (uint q = 0u; q < QUERIES; q++) output_value[q] *= rescale[q];
+        for (uint k = 0u; k < live; k++) {
+            vec4 value = stage[k * 32u + lane];
+            [[unroll]] for (uint q = 0u; q < QUERIES; q++) output_value[q] = fma(vec4(scores[q][k]), value, output_value[q]);
+        }
+        barrier();
+    }
+    for (uint q = 0u; q < QUERIES; q++) {
+        if (query_base + q < pc.queries) {
+            for (uint d = 0u; d < 4u; d++) {
+                uint dimension = lane * 4u + d;
+                if (dimension < pc.dim) arena.data[pc.output_word + ((query_base + q) * pc.q_heads + head) * pc.dim + dimension]
+                    = floatBitsToUint(output_value[q][d] / normalizer[q]);
+            }
+        }
+    }
+}

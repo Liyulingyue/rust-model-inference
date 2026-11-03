@@ -1,5 +1,18 @@
 use super::{Condition, QwenImage21Dit, ReferenceLatent};
 
+/// Turbo model_index.json @ 4954d69c: no dynamic shift or terminal stretching.
+pub fn sampling_sigmas(steps: usize, image_tokens: usize, turbo: bool) -> Result<Vec<f32>, String> {
+    if !turbo {
+        return flow_sigmas(steps, image_tokens);
+    }
+    if steps != 8 || image_tokens == 0 {
+        return Err("Qwen-Image-2.1-Turbo requires exactly 8 steps and a nonempty image".into());
+    }
+    Ok(vec![
+        1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568, 0.0,
+    ])
+}
+
 /// Pinned sd.cpp FluxScheduler, including Qwen 2.1's terminal shift.
 pub fn flow_sigmas(steps: usize, image_tokens: usize) -> Result<Vec<f32>, String> {
     if steps == 0 || image_tokens == 0 || steps > 1000 {
@@ -41,13 +54,15 @@ pub(crate) fn sample(
     references: &[ReferenceLatent],
     steps: usize,
     cfg: f32,
+    turbo: bool,
 ) -> Result<Vec<f32>, String> {
     if !cfg.is_finite() || cfg < 1.0 {
         return Err("Qwen-Image-2.1 CFG must be finite and at least 1".into());
     }
-    let sigmas = flow_sigmas(
+    let sigmas = sampling_sigmas(
         steps,
         width.checked_mul(height).ok_or("Image size overflow")?,
+        turbo,
     )?;
     trace("qwen.sample.sigmas", &[sigmas.len()], &sigmas)?;
     trace("qwen.sample.noise", &[width, height, 64], &latent)?;

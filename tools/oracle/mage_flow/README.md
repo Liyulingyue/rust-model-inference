@@ -43,6 +43,16 @@ Qwen3-VL 文本/vision GGUF 使用 llama.cpp `11fe02151f79c41d0d4af7da708755d73b
   --outfile models/mage-flow/vision-F32.gguf
 ```
 
+pinned 的 llama.cpp 转换脚本里没有 Qwen3VL 的模型类，视觉塔改用仓库自带的转换器，
+它按引擎的契约导出 CLIP 风格的 F32 mmproj：时间维拆成 `v.patch_embd.weight` 与
+`v.patch_embd.weight.1` 两帧矩阵，deepstack 按层号（5/11/17）命名，merger 与
+deepstack merger 的第一层吃四个 patch 合并后的 4096 维。
+
+```sh
+.venv/bin/python tools/converter/mage_flow/convert_qwen3vl_vision.py \
+  models/Mage-Flow-Base/text_encoder --out-dir models/mage-flow
+```
+
 ## 运行
 
 ```sh
@@ -67,6 +77,37 @@ RMI_SCALAR=1 target/release-fast/rust-model-inference \
   --height 16 --width 16 --noise target/mage-parity/latent.f32 \
   --steps 1 --cfg 1 --threads 8 --out edited.png
 ```
+
+Turbo 变体已用真实权重跑通：256×256、4 步、CFG 1、seed 42 耗时 1 分 10 秒，
+两次运行逐位相同，输出以蓝色为主（对应「A blue cat」的提示）。RL 对齐的 Flow
+变体也跑通了：同一提示 8 步、CFG 5 耗时 2 分 44 秒。
+
+Edit-Turbo 变体同样跑通：同一张蓝猫参考图，4 步、CFG 1，耗时 2 分 14 秒。Edit-Base
+变体也跑通，8 步、CFG 5 耗时 11 分 40 秒，它没有经过 RL 对齐，需要更多步数才
+出同样的结果。三个编辑变体的输出都对上了「蓝猫变金毛犬」：每通道均值从参考图的
+[122.6, 133.2, 146.5] 变成 [179.3, 164.7, 152.0]、[173.9, 161.2, 150.2] 与
+[136.3, 129.2, 127.8]，四步的蒸馏版改动最小。
+
+GPU 路径默认关闭：它不保证可复现（见 TODO-044），`--gpu` 会被拒绝并提示
+`RMI_GPU_UNSAFE=1`。设了这个变量就走 GPU，速度约是 CPU 的两倍。设备偶尔会交回
+一个错误的投影/卷积/注意力结果，所以每个 GPU 算子都会与 CPU 内核对拍：不对就
+重跑（最多 3 次），仍旧不对就用 CPU 算子重算。采样器每步还会检查 latent 是否还
+可用，被判定为坏结果时自动用 CPU 重采样。实测（256×256，各自的真实步数/CFG）：base 72/72 次逐位相同，flow 3/3、
+turbo 3/3、edit 3/3、edit-turbo 3/3 逐位相同（edit-base 尚未在 GPU 上测）。
+flow 与 CPU 参考的 PSNR 是 81.24 dB，健康样本在 80 dB 上下。门禁文案仍写着
+"not reproducible"，因为这是观测而不是数学保证。
+
+图像编辑入口（`--edit` + `--image`/`--reference` + `--mmproj`）已用真实权重跑通：
+256×256、8 步、CFG 5、seed 42，把一张蓝猫参考图按「把猫变成一只金毛犬」编辑，
+输出与参考图的 PSNR 13.71 dB，每通道均值从 [122.6, 133.2, 146.5] 变成
+[179.3, 164.7, 152.0]（蓝降红升），两次运行逐位相同。参考图确实进入条件：把
+参考换成纯红或纯蓝，输出随之变成红主导或灰蓝，三者互不相同。
+
+默认分辨率 1024×1024 也跑通了：Turbo 4 步耗时 47 分钟（CPU，16 线程），输出是
+细节完整的图像，不是平涂。
+
+原生分辨率的极端比例也跑通了：Turbo 在 1024×256（4:1）与 256×1024（1:4）都能出图，
+两张都是有效图像（52 与 60 种颜色，梯度 1.0 以上），不需要分桶或填充。
 
 默认图像为 1024×1024；Turbo 默认 4 步/CFG 1，Base 30 步/CFG 5，Flow/Edit 20 步/CFG 5。这些默认分辨率和完整步数尚无端到端精度记录。上面的小尺寸命令是实际验证规模，不能代表大分辨率的性能或成图质量。`--image` 为第一张参考图，`--reference` 可重复追加，合计最多三张；每张参考的 VAE latent 在采样时保持不变。`--noise` 是 target token-major F32 初始噪声；不提供时使用 Rust 的 seed/Box–Muller，未对齐官方 GaussianShading RNG。
 
@@ -107,4 +148,5 @@ RMI_SCALAR=1 RMI_PARITY_TRACE=target/mage-parity/check-rust.jsonl \
 
 主 CLI 接入的工程检查与历史逐位对齐分开记录在 [verification.json](verification.json) 的 `cli_integration`。用户确认远端已关机，本次尚未上传新源码或复验主 CLI 的真实权重输出；历史记录不作为这次接入的新数值证据。
 
-历史已验证结果以 [verification.json](verification.json) 为准，包括六个真实 DiT、共享 VAE/vision/text、固定参考特征、四步采样与最小生成。实际参考图片到 VL fast processor 的 resize/归一化尚未逐位验证；编辑 PNG 当前是入口 smoke。GPU、默认大图、SIMD/FMA 和其他量化不在精度结论内。
+历史已验证结果以 [verification.json](verification.json) 为准，包括六个真实 DiT、共享 VAE/vision/text、固定参考特征、四步采样与最小生成。实际参考图片到 VL fast processor 的 resize/归一化尚未逐位验证；编辑的 PNG 现在有真实
+权重的记录，但采样步数只有 8，默认分辨率和完整步数仍无精度记录。GPU、默认大图、SIMD/FMA 和其他量化不在精度结论内。

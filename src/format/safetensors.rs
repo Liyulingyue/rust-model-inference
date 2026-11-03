@@ -1,4 +1,4 @@
-//! Read BF16/F16/F32 safetensors without copying model weights.
+//! Read BF16/F16/F32 weights and I64 buffers without copying safetensors.
 
 use crate::core::tensor::{GGMLType, MetaValue, TensorInfo, TensorSource};
 use memmap2::{Mmap, MmapOptions};
@@ -60,6 +60,7 @@ impl SafetensorSource {
                     Some("BF16") => GGMLType::BF16,
                     Some("F16") => GGMLType::F16,
                     Some("F32") => GGMLType::F32,
+                    Some("I64") => GGMLType::I64,
                     other => return Err(format!("Unsupported {name} dtype {other:?}")),
                 };
                 let shape = tensor
@@ -146,6 +147,28 @@ impl TensorSource for SafetensorSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_i64_buffers_without_treating_them_as_weights() {
+        let path = std::env::temp_dir().join(format!("rmi-i64-{}", std::process::id()));
+        let header = br#"{"position_ids":{"dtype":"I64","shape":[1,2],"data_offsets":[0,16]}}"#;
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(header);
+        bytes.extend_from_slice(&0_i64.to_le_bytes());
+        bytes.extend_from_slice(&256_i64.to_le_bytes());
+        std::fs::write(&path, bytes).unwrap();
+        let result = SafetensorSource::open(&[&path]);
+        std::fs::remove_file(path).unwrap();
+        let source = result.unwrap();
+        assert_eq!(
+            source.tensor_info("position_ids").unwrap().ggml_type,
+            GGMLType::I64
+        );
+        assert_eq!(
+            source.tensor_slice("position_ids").unwrap()[8..],
+            256_i64.to_le_bytes()
+        );
+    }
 
     #[test]
     fn reads_tensor_and_rejects_bad_range() {

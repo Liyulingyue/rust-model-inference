@@ -455,6 +455,7 @@ impl<'model> YuE2VulkanSession<'model> {
                 config.kv_heads,
                 config.head_dim,
                 rows,
+                super::ops::AttentionMode::PreparedF16,
             )?;
             self.record_weights(
                 &commands,

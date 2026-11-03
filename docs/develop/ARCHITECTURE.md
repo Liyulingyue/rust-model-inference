@@ -176,6 +176,7 @@ src/
 | `pig` | Z-Image Turbo | `models::diffusion::pig` | 文生图（diffusion） |
 | `lfm2` | LFM2.5 / LFM2.5-VL | `models::lfm2::trunk` | shortconv + GQA |
 | `lfm2moe` | LFM2-8B-A1B | `models::lfm2moe::trunk` | MoE hybrid |
+| `lfm3` | LFM3-1.7B | `models::lfm3::trunk` | shortconv + full/SWA GQA + sandwich norms |
 | `nanbeige` | Nanbeige | `models::llama::trunk` 复用 | SPM tokenizer |
 | `gemma4` | Gemma-4 E2B/E4B | `models::gemma4::trunk` | 文本 + 图像 + 音频 |
 | `spark2_5` | Spark-X2.5 | `models::spark::trunk` | 文本 + thinking |

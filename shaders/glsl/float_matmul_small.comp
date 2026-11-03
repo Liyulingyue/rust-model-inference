@@ -1,0 +1,78 @@
+#version 450
+#extension GL_EXT_control_flow_attributes : require
+
+// Small F32 projections: four tokens, two columns, 32 lanes per dot product.
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(std430, binding = 1) readonly buffer W0 { uint data[]; } w0;
+layout(std430, binding = 2) readonly buffer W1 { uint data[]; } w1;
+layout(std430, binding = 3) readonly buffer W2 { uint data[]; } w2;
+layout(push_constant) uniform PC {
+    uint input_word; uint unused; uint n_in; uint elements_per_row;
+    uint output0_word; uint rows0; uint output0_stride;
+    uint output1_word; uint rows1; uint output1_stride;
+    uint output2_word; uint rows2; uint output2_stride;
+    uint group_count; uint input_sum_word; uint input_stride; uint weight_bytes;
+    uint scales_stride; uint input_sum_stride; uint q8k_stride; uint q8k_scales_stride; uint token_rows;
+} pc;
+// Four token rows; lanes cooperate over the input dimension.
+const uint CHUNK = 32u;
+const uint COLUMNS = 2u;
+const uint K_LANES = 64u / COLUMNS;
+shared float input_stage[4u * CHUNK];
+shared float weight_stage[CHUNK * COLUMNS];
+shared vec4 partial[64];
+uint weight_word(uint slot, uint index) {
+    if (slot == 0u) return w0.data[index];
+    if (slot == 1u) return w1.data[index];
+    return w2.data[index];
+}
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint slot = gl_WorkGroupID.z % pc.group_count;
+    uint token_base = (gl_WorkGroupID.z / pc.group_count) * 4u;
+    uint column_base = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * COLUMNS;
+    uint column_lane = lane % COLUMNS;
+    uint k_lane = lane / COLUMNS;
+    uint rows = slot == 0u ? pc.rows0 : (slot == 1u ? pc.rows1 : pc.rows2);
+    uint out_word = slot == 0u ? pc.output0_word : (slot == 1u ? pc.output1_word : pc.output2_word);
+    uint stride = slot == 0u ? pc.output0_stride : (slot == 1u ? pc.output1_stride : pc.output2_stride);
+    vec4 acc = vec4(0.0);
+    for (uint chunk = 0u; chunk < pc.n_in; chunk += CHUNK) {
+        uint count = min(CHUNK, pc.n_in - chunk);
+        for (uint i = lane; i < 4u * CHUNK; i += 64u) {
+            uint t = token_base + i / CHUNK;
+            uint k = i % CHUNK;
+            input_stage[i] = t < pc.token_rows && k < count
+                ? uintBitsToFloat(arena.data[pc.input_word + t * pc.input_stride + chunk + k]) : 0.0;
+        }
+        for (uint i = lane; i < CHUNK * COLUMNS; i += 64u) {
+            uint k = i / COLUMNS;
+            uint c = column_base + i % COLUMNS;
+            weight_stage[i] = k < count && c < rows
+                ? uintBitsToFloat(weight_word(slot, (chunk + k) * rows + c)) : 0.0;
+        }
+        barrier();
+        [[unroll]] for (uint i = k_lane; i < CHUNK; i += K_LANES) {
+            vec4 x = vec4(input_stage[i], input_stage[CHUNK+i], input_stage[2u*CHUNK+i], input_stage[3u*CHUNK+i]);
+            acc = fma(vec4(weight_stage[i * COLUMNS + column_lane]), x, acc);
+        }
+        barrier();
+    }
+    partial[lane] = acc;
+    barrier();
+    [[unroll]] for (uint step = 32u; step >= COLUMNS; step >>= 1u) {
+        if (lane < step) partial[lane] += partial[lane + step];
+        barrier();
+    }
+    if (lane < COLUMNS) {
+        vec4 sum = partial[lane];
+        uint column = column_base + lane;
+        for (uint t = 0u; t < 4u; t++) {
+            uint token = token_base + t;
+            if (token < pc.token_rows && column < rows) {
+                arena.data[out_word + token * stride + column] = floatBitsToUint(sum[t]);
+            }
+        }
+    }
+}

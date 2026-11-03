@@ -7,6 +7,7 @@
 pub mod config;
 pub mod forward;
 pub mod session;
+pub mod trace;
 pub mod weights;
 
 pub use config::Lfm2MoeConfig;

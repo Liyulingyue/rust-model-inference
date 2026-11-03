@@ -228,6 +228,7 @@ pub async fn rerank(
     State(state): State<AppState>,
     Json(req): Json<RerankRequest>,
 ) -> impl axum::response::IntoResponse {
+    let _compute_scope = state.compute.enter_legacy_scope();
     let Backend::Rerank(backend) = state.model.as_ref() else {
         return (
             axum::http::StatusCode::BAD_REQUEST,

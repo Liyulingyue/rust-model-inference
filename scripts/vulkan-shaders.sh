@@ -3,16 +3,21 @@ set -euo pipefail
 
 root_dir=$(cd "$(dirname "$0")/.." && pwd)
 shader_names=(
+    dory
+    dory_matmul
     q8_matmul
     q8_matmul_dp4a
     q8_matmul_grouped_dp4a
+    q8_matmul_cooperative_dp4a
     quantize_q8_0
     quantize_q8_k
     q8_matmul_grouped
     q4_0_matmul
     q4_1_matmul
     q4_k_matmul
+    q4_k_matmul_cooperative
     q5_k_matmul
+    q5_k_matmul_cooperative
     q6_k_matmul
     f16_matmul
     bf16_matmul
@@ -20,20 +25,33 @@ shader_names=(
     mlx_affine_matmul
     rms_norm
     qk_norm_rope
+    qk_norm_rope_interleaved
     kv_write
     attention_scores
     softmax
     attention_values
+    attention_values_f32
+    timestral
     qwen35_dense_prepare
     qwen35_attention
     qwen35_recurrent_conv
     qwen35_recurrent_ssm
+    qwen35_moe_route
+    qwen35_moe_reduce
     silu_mul
     add
+    moe_reduce
     adaln_modulate
     q8_matmul_tiled_dp4a
+    q8_matmul_tiled_dp4a_wide
+    q8_matmul_tiled_dp4a_wide_add
     f16_matmul_tiled
     attention_scores_tiled
+    float_matmul_tiled
+    float_matmul_small
+    attention_online
+    attention_online_wide
+    conv3d_tiled
 )
 manifest="$root_dir/shaders/manifest.sha256"
 
@@ -77,7 +95,9 @@ hash_files() {
     local files=()
     for name in "${shader_names[@]}"; do
         files+=("shaders/glsl/$name.comp" "shaders/bin/$name.spv")
+        if [[ "$name" == "attention_online" ]]; then files+=("shaders/glsl/attention_online.glsl"); fi
     done
+    files+=(shaders/glsl/*.glsl)
     if command -v sha256sum >/dev/null 2>&1; then
         sha256sum "${files[@]}"
     else
@@ -98,7 +118,7 @@ check_workgroup_limit() {
     # Optional DiT attention is gated on both device limits in Vulkan ops;
     # keep the baseline shaders within the original 64x1x1 requirement.
     case "${shader##*/}" in
-        attention_scores_tiled.spv) limit=256 ;;
+        attention_scores_tiled.spv|attention_online.spv|attention_online_wide.spv) limit=256 ;;
     esac
     spirv-dis "$shader" -o - | awk -v shader="$shader" -v limit="$limit" '
         $1 == "OpExecutionMode" && $3 == "LocalSize" {

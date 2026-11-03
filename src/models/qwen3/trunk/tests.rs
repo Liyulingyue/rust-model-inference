@@ -373,6 +373,127 @@ pub(super) fn deterministic_session_model(n_ctx: usize) -> Qwen3Model {
 }
 
 #[test]
+#[cfg(not(feature = "vulkan"))]
+fn hidden_layer_capture_honors_policy_without_vulkan() {
+    let mut model = deterministic_session_model(16);
+    model
+        .layers
+        .push(deterministic_session_model(16).layers.remove(0));
+    model.config.n_layer = 2;
+    let _scope = crate::compute::ComputePolicy::Vulkan.enter_legacy_scope();
+    let result = model.text_encode_hidden_layers(&[0, 1], &[[0; 4], [1; 4]], &[true, false], &[1]);
+    if crate::ops::scalar_mode() {
+        assert!(result.is_ok());
+    } else {
+        let error = result.unwrap_err();
+        assert!(error.contains("vulkan"), "{error}");
+    }
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
+#[ignore = "requires a hardware Vulkan device; run alone with --test-threads=1"]
+fn hidden_layer_capture_auto_dispatches_with_padding_and_tiles() {
+    use crate::compute::ComputePolicy;
+    let mut model = deterministic_session_model(260);
+    model
+        .layers
+        .push(deterministic_session_model(260).layers.remove(0));
+    model.config.n_layer = 2;
+    let ids: Vec<_> = (0..257).map(|i| i % 8).collect();
+    let mut mask = vec![true; ids.len()];
+    mask[2] = false;
+    let positions: Vec<_> = (0..ids.len())
+        .map(|i| [if mask[i] { i } else { 1 }; 4])
+        .collect();
+    let expected = {
+        let _scope = ComputePolicy::Cpu.enter_legacy_scope();
+        model
+            .text_encode_hidden_layers(&ids, &positions, &mask, &[1])
+            .unwrap()
+    };
+    let context = ComputePolicy::Vulkan.context().unwrap().unwrap();
+    let before = context.compute_stats();
+    let actual = {
+        let _scope = ComputePolicy::Auto.enter_legacy_scope();
+        model
+            .text_encode_hidden_layers(&ids, &positions, &mask, &[1])
+            .unwrap()
+    };
+    assert!(
+        context.compute_stats().submissions > before.submissions,
+        "hidden-layer extraction must reach GPU projections"
+    );
+    let l2 = actual
+        .iter()
+        .zip(&expected)
+        .map(|(a, b)| (*a as f64 - *b as f64).powi(2))
+        .sum::<f64>()
+        / expected.iter().map(|v| (*v as f64).powi(2)).sum::<f64>();
+    assert!(l2.sqrt() < 0.005, "relative L2 {}", l2.sqrt());
+    let before_cpu = context.compute_stats();
+    let cpu = {
+        let _cpu = ComputePolicy::Cpu.enter_legacy_scope();
+        let _auto = ComputePolicy::Auto.enter_legacy_scope();
+        model
+            .text_encode_hidden_layers(&ids, &positions, &mask, &[1])
+            .unwrap()
+    };
+    assert_eq!(cpu, expected);
+    assert_eq!(context.compute_stats().submissions, before_cpu.submissions);
+}
+
+#[test]
+fn hidden_layer_capture_is_token_major_and_respects_padding() {
+    let mut model = deterministic_session_model(16);
+    model
+        .layers
+        .push(deterministic_session_model(16).layers.remove(0));
+    model
+        .layers
+        .push(deterministic_session_model(16).layers.remove(0));
+    model.config.n_layer = 3;
+    let positions = [[0; 4], [1; 4], [1; 4], [3; 4]];
+    let mask = [true, true, false, true];
+    let captured = model
+        .text_encode_hidden_layers(&[0, 1, 2, 3], &positions, &mask, &[1, 2])
+        .unwrap();
+    assert_eq!(captured.len(), 4 * 2 * 32);
+    for (index, depth) in [1, 2].into_iter().enumerate() {
+        model.config.n_layer = depth;
+        let expected = model
+            .text_encode_embeddings(
+                model.embed_tokens(&[0, 1, 2, 3]).unwrap(),
+                &positions,
+                &mask,
+            )
+            .unwrap();
+        for token in 0..4 {
+            let start = (token * 2 + index) * 32;
+            let mut normalized = [0.0; 32];
+            crate::ops::rms_norm(
+                &captured[start..start + 32],
+                &model.output_norm,
+                &mut normalized,
+                model.config.eps,
+            );
+            assert_eq!(&normalized, &expected[token * 32..(token + 1) * 32]);
+        }
+    }
+    model.config.n_layer = 3;
+    let changed = model
+        .text_encode_hidden_layers(&[0, 1, 7, 3], &positions, &mask, &[1, 2])
+        .unwrap();
+    assert_eq!(&captured[3 * 64..], &changed[3 * 64..]);
+    assert_ne!(&captured[2 * 64..3 * 64], &changed[2 * 64..3 * 64]);
+    for layers in [&[][..], &[0], &[2, 1], &[1, 1], &[3]] {
+        assert!(model
+            .text_encode_hidden_layers(&[0, 1, 2, 3], &positions, &mask, layers)
+            .is_err());
+    }
+}
+
+#[test]
 fn text_embeddings_mask_hides_middle_padding_from_later_tokens() {
     let model = deterministic_session_model(16);
     let positions = [[0, 0, 0, 0], [1, 1, 1, 0], [2, 2, 2, 0], [3, 3, 3, 0]];
@@ -639,6 +760,8 @@ fn qwen3_trace_keeps_token_major_checkpoints_for_every_prompt_row() {
     let expected_row = [
         "model.input_embed",
         "attn_norm-0",
+        "Qcur_raw-0",
+        "Kcur_raw-0",
         "Qcur_normed-0",
         "Kcur_normed-0",
         "Qcur-0",
@@ -700,6 +823,159 @@ fn qwen3_trace_keeps_token_major_checkpoints_for_every_prompt_row() {
         }
         std::fs::remove_file(trace).unwrap();
     }
+}
+
+#[test]
+fn raw_hidden_sequence_preserves_normalization_and_compute_policy() {
+    use crate::compute::ComputePolicy;
+    use crate::core::scratchpad::{KvFormat, KvLifecycle};
+    let model = deterministic_session_model(8);
+    let tokens = [1, 2, 1];
+    let positions = super::positions::qwen_text_positions(tokens.len());
+    let input = || Qwen3Input {
+        token_ids: &tokens,
+        positions: &positions,
+        embeddings: None,
+        deepstack_embeddings: None,
+    };
+    let session = || {
+        Qwen3Session::new_with_compute(
+            &model,
+            8,
+            KvFormat::F32,
+            KvLifecycle::Ephemeral,
+            ComputePolicy::Cpu,
+        )
+        .unwrap()
+    };
+    let mut raw_session = session();
+    let raw = raw_session.forward_hidden_sequence_raw(input()).unwrap();
+    let mut normalized_session = session();
+    let normalized = normalized_session.forward_hidden_sequence(input()).unwrap();
+    assert_eq!(raw_session.kv_state().seq_len, tokens.len());
+    assert_eq!(normalized_session.kv_state().seq_len, tokens.len());
+    let mut cpu_only = session();
+    assert!(cpu_only
+        .forward_hidden_sequence_raw_with_linear_offload(input(), ComputePolicy::Auto)
+        .is_err());
+    assert_eq!(cpu_only.kv_state().seq_len, 0);
+    assert!(raw
+        .iter()
+        .zip(&normalized)
+        .any(|(a, b)| a.to_bits() != b.to_bits()));
+    let width = model.config.n_embd;
+    let mut expected = vec![0.0; normalized.len()];
+    for (source, destination) in raw
+        .chunks_exact(width)
+        .zip(expected.chunks_exact_mut(width))
+    {
+        crate::ops::rms_norm(source, &model.output_norm, destination, model.config.eps);
+    }
+    assert_eq!(
+        expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        normalized.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+    );
+    for raw in [false, true] {
+        let mut forced = session();
+        // Check the shared API guard without initializing a physical device.
+        forced.compute_policy = ComputePolicy::Vulkan;
+        let result = if raw {
+            forced.forward_hidden_sequence_raw(input())
+        } else {
+            forced.forward_hidden_sequence(input())
+        };
+        assert!(result.unwrap_err().contains("Vulkan"));
+        assert_eq!(forced.kv_state().seq_len, 0);
+    }
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
+#[ignore = "requires a hardware Vulkan device"]
+fn raw_hidden_projection_offload_preserves_f32_kv_and_all_rows() {
+    use crate::{
+        compute::ComputePolicy,
+        core::scratchpad::{KvFormat, KvLifecycle},
+    };
+    let model = deterministic_session_model(8);
+    let tokens = [1, 2, 1];
+    let positions = super::positions::qwen_text_positions(tokens.len());
+    let input = || Qwen3Input {
+        token_ids: &tokens,
+        positions: &positions,
+        embeddings: None,
+        deepstack_embeddings: None,
+    };
+    let mut cpu = Qwen3Session::new_with_compute(
+        &model,
+        8,
+        KvFormat::F32,
+        KvLifecycle::Ephemeral,
+        ComputePolicy::Cpu,
+    )
+    .unwrap();
+    let expected = cpu.forward_hidden_sequence_raw(input()).unwrap();
+    let mut gpu = Qwen3Session::new_with_compute(
+        &model,
+        8,
+        KvFormat::F32,
+        KvLifecycle::Ephemeral,
+        ComputePolicy::Auto,
+    )
+    .unwrap();
+    let context = ComputePolicy::Vulkan.context().unwrap().unwrap();
+    let before = context.submission_count();
+    let actual = gpu
+        .forward_hidden_sequence_raw_with_linear_offload(input(), ComputePolicy::Vulkan)
+        .unwrap();
+    assert!(context.submission_count() > before);
+    assert_eq!(actual.len(), tokens.len() * model.config.n_embd);
+    assert!(actual
+        .iter()
+        .zip(&expected)
+        .all(|(a, b)| (a - b).abs() <= 1e-5));
+    assert_eq!(gpu.kv_state().seq_len, tokens.len());
+    assert!(matches!(gpu.kv_state().cache, KvCache::F32(_)));
+    assert!(gpu.hidden_linear.is_none());
+}
+
+#[test]
+fn raw_hidden_projection_offload_auto_falls_back_without_vulkan() {
+    use crate::{
+        compute::ComputePolicy,
+        core::scratchpad::{KvFormat, KvLifecycle},
+    };
+    // Disable device use without depending on the machine's installed Vulkan driver.
+    let _cpu_scope = ComputePolicy::Cpu.enter_legacy_scope();
+    let model = deterministic_session_model(8);
+    let tokens = [1, 2, 1];
+    let positions = super::positions::qwen_text_positions(tokens.len());
+    let input = || Qwen3Input {
+        token_ids: &tokens,
+        positions: &positions,
+        embeddings: None,
+        deepstack_embeddings: None,
+    };
+    let session = |policy| {
+        Qwen3Session::new_with_compute(&model, 8, KvFormat::F32, KvLifecycle::Ephemeral, policy)
+            .unwrap()
+    };
+    let mut cpu = session(ComputePolicy::Cpu);
+    let expected = cpu.forward_hidden_sequence_raw(input()).unwrap();
+    let mut auto = session(ComputePolicy::Auto);
+    let actual = auto
+        .forward_hidden_sequence_raw_with_linear_offload(input(), ComputePolicy::Auto)
+        .unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(auto.kv_state().seq_len, tokens.len());
+    assert!(matches!(auto.kv_state().cache, KvCache::F32(_)));
+    assert!(auto.hidden_linear.is_none());
+    let mut forced = session(ComputePolicy::Auto);
+    assert!(forced
+        .forward_hidden_sequence_raw_with_linear_offload(input(), ComputePolicy::Vulkan)
+        .is_err());
+    assert_eq!(forced.kv_state().seq_len, 0);
+    assert!(forced.hidden_linear.is_none());
 }
 
 #[test]

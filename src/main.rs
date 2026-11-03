@@ -11,21 +11,27 @@ use rust_model_inference::DreamXConfig;
 use rust_model_inference::MetaValue;
 use rust_model_inference::TensorSource;
 
-const USAGE: &str = "Usage: rust-model-inference --model <path.gguf-or-ggufrs> [--prompt ...] [--threads N] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--max-context N (default 8192)] [--repetition-penalty α (default 1.0 = disabled)] [--serve [--host 0.0.0.0] [--port 8080]]\n\nChat template: --jinja renders the GGUF's own `tokenizer.chat_template` (a Jinja2 program) with minijinja instead of the built-in per-architecture builder; --chat-template-file <path.jinja> overrides it and implies --jinja. --chat-template <name> still selects a built-in preset (chatml/llama3/gemma/lfm2/glm4/exaone/phi/none). Both are off by default, so token ids are unchanged unless you ask. tests/jinja_chat_template_ab.rs compares the two paths on real GGUFs: Qwen3 is asserted to match token for token, and LFM2.5 records a known divergence where the template is the correct one.\n\nLongCat Image Edit: --kind edit|turbo --model <transformer.gguf> --components <dir> --input <image.png> --instruction TEXT --out edited.png [--side 1024] [--steps N] [--guidance F32] [--seed N]; <dir> holds text_encoder/, vae/ and tokenizer/ safetensors, shared by both kinds; the two kinds use different Flux schedules so the step/guidance defaults differ (Edit 50/4.5, Turbo 8/1.0)\n\nQwen-Image-2.1: --model <qwen-image-2.1-Q8_0.gguf> --text-encoder <Qwen3-VL-8B.gguf> --vae <Qwen-Image-2.1/vae/diffusion_pytorch_model.safetensors> --prompt TEXT --out image.png [--width N --height N --steps N --cfg N --seed N] [--image reference.png --mmproj vision.gguf --reference another.png]\n\nMage-Flow: --model <dit.gguf> --text-encoder <text.gguf> --vae <vae.gguf> --prompt TEXT --out image.png [--resolution N | --width N --height N] [--steps N --cfg N --seed N --noise fixed.f32] [--image reference.png --mmproj vision.gguf --reference another.png]\n\nRerank mode: --rerank --rerank-query <TEXT> [--rerank-doc <TEXT> ...] | [--rerank-documents <FILE>] [--rerank-instruction <TEXT>] [--rerank-max-tokens N] | cross-encoder scoring; backend picked by GGUF arch (jina-bert-v2 + cls.weight/cls.bias → bert forward, qwen3 + cls.output.weight + pooling_type=4 → qwen3 trunk + 2-class head); one sigmoid'd score per document in [0, 1]\n\nJEV mode: --jev --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | single-forward-pass decision scoring over candidate labels A/B/C/…\n\nJEV grouped: --jev --jev-multi [--jev-option <pos> --jev-option <neg> ...] (pairs) or --jev-block <label> --jev-option <a> [--jev-option <b> ...] (blocks)\n\nServer mode: --serve [--host 0.0.0.0] [--port 8080] --model <path> [--mmproj ...] [--tts] [--embedding]\n\nCLM mode: --jev --clm-head <clm-heads.gguf> --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | cosine scoring via CLM projection heads on the chosen encoder (state = context, blank line, question; candidates verbatim\n\nGLiNER2 mode: --jev --gliner2-decide --model <gliner2-decide.gguf> --jev-context <text> [--gliner2-schema <json> | --jev-question <name> --jev-option <a> [--jev-option <b> ...]] | one DeBERTa-v3 pass scores every label of every task; --gliner2-schema takes a classify_text-shaped mapping: {intent: [a, b], aspects: {labels: [x], multi_label: true, cls_threshold: 0.4}}
+const USAGE: &str = "Usage: rust-model-inference --model <path.gguf-or-ggufrs> [--prompt ...] [--threads N] [--compute cpu|auto|vulkan (default cpu); --gpu aliases auto] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--max-context N (default 8192)] [--repetition-penalty α (default 1.0 = disabled)] [--serve [--host 0.0.0.0] [--port 8080]]\n\nChat template: --jinja renders the GGUF's own `tokenizer.chat_template` (a Jinja2 program) with minijinja instead of the built-in per-architecture builder; --chat-template-file <path.jinja> overrides it and implies --jinja. --chat-template <name> still selects a built-in preset (chatml/llama3/gemma/lfm2/glm4/exaone/phi/none). Both are off by default, so token ids are unchanged unless you ask. tests/jinja_chat_template_ab.rs compares the two paths on real GGUFs: Qwen3 is asserted to match token for token, and LFM2.5 records a known divergence where the template is the correct one.\n\nLongCat Image Edit: --kind edit|turbo --model <transformer.gguf> --components <dir> --input <image.png> --instruction TEXT --out edited.png [--side 1024] [--steps N] [--guidance F32] [--seed N]; <dir> holds text_encoder/, vae/ and tokenizer/ safetensors, shared by both kinds; the two kinds use different Flux schedules so the step/guidance defaults differ (Edit 50/4.5, Turbo 8/1.0)\n\nQwen-Image-2.1 / Turbo: add --qwen-image-turbo for the Turbo checkpoint (fixed 8-step schedule, CFG 1); --model <qwen-image-2.1-Q8_0.gguf> --text-encoder <Qwen3-VL-8B.gguf> --vae <Qwen-Image-2.1/vae/diffusion_pytorch_model.safetensors> --prompt TEXT --out image.png [--width N --height N --steps N --cfg N --seed N] [--image reference.png --mmproj vision.gguf --reference another.png]\nAstronex-World: --astronex --model <Astronex-World-BF16.gguf> --mmproj <mmproj-Astronex-World.gguf> --prompt TEXT --out video.mp4 [--width N --height N --video-frames N --fps N --steps 8 --cfg-scale N --seed N] [--image first-frame.png] | T2V or first-frame I2V; causal 8-frame blocks, 20-frame KV window, 8-step Flow-UniPC; add --gpu with the Vulkan build\n\nUnlimited-OCR-2: --model <official-safetensors-directory-or-native.gguf> --image first.png [--reference next.png ...] [--prompt TEXT] [--max-tokens N] [--max-context N] [--out result.txt --overwrite] | 1024px base, greedy OCR; --compute auto / --gpu hybrid offload; --compute vulkan requires a usable device and moves the linear projections only; CLI/HTTP OCR; see tools/oracle/unlimited_ocr/README.md\n\nMage-Flow: --model <dit.gguf> --text-encoder <text.gguf> --vae <vae.gguf> --prompt TEXT --out image.png [--resolution N | --width N --height N] [--steps N --cfg N --seed N --noise fixed.f32] [--image reference.png --mmproj vision.gguf --reference another.png]\n\nRerank mode: --rerank --rerank-query <TEXT> [--rerank-doc <TEXT> ...] | [--rerank-documents <FILE>] [--rerank-instruction <TEXT>] [--rerank-max-tokens N] | cross-encoder scoring; backend picked by GGUF arch (jina-bert-v2 + cls.weight/cls.bias → bert forward, qwen3 + cls.output.weight + pooling_type=4 → qwen3 trunk + 2-class head); one sigmoid'd score per document in [0, 1]\n\nJEV mode: --jev --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | single-forward-pass decision scoring over candidate labels A/B/C/…\n\nJEV grouped: --jev --jev-multi [--jev-option <pos> --jev-option <neg> ...] (pairs) or --jev-block <label> --jev-option <a> [--jev-option <b> ...] (blocks)\n\nServer mode: --serve [--host 0.0.0.0] [--port 8080] --model <path> [--mmproj ...] [--tts] [--embedding]\n\nCLM mode: --jev --clm-head <clm-heads.gguf> --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | cosine scoring via CLM projection heads on the chosen encoder (state = context, blank line, question; candidates verbatim\n\nGLiNER2 mode: --jev --gliner2-decide --model <gliner2-decide.gguf> --jev-context <text> [--gliner2-schema <json> | --jev-question <name> --jev-option <a> [--jev-option <b> ...]] | one DeBERTa-v3 pass scores every label of every task; --gliner2-schema takes a classify_text-shaped mapping: {intent: [a, b], aspects: {labels: [x], multi_label: true, cls_threshold: 0.4}}
 
 AuK TTS mode: --model auk-base-f16.gguf --vae auk-vae-f32.gguf [--text-encoder qwen2.5-omni-3b-q8_0.gguf] --prompt \"<TEXT>\" --out speech.wav [--steps N (default 32)] [--resolution SR (default 24000)] [--duration-seconds N (default 1)] [--cfg-scale α (default 2.0)] [--instruction \"<voice/style>\" (instruct TTS)] [--ref-audio ref.wav (CFMEdit reference voice with audio tower)] | 24 kHz mono speech generation";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DispatchMode {
+    Astronex,
     DreamX,
     QwenDrive,
     Yue2,
     Tts,
     Laya,
+    Timestral,
     Model,
 }
 
 fn dispatch_mode(options: &app::CliOptions) -> DispatchMode {
-    if options.dreamx {
+    if options.timestral_request.is_some() {
+        DispatchMode::Timestral
+    } else if options.astronex {
+        DispatchMode::Astronex
+    } else if options.dreamx {
         DispatchMode::DreamX
     } else if options.planner.is_some() || options.perception.is_some() {
         DispatchMode::QwenDrive
@@ -83,12 +89,14 @@ fn validate_audio_temperature(route: AudioRoute, temperature: Option<f32>) -> Re
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
-        println!("{USAGE}");
+        println!("{USAGE}\n\nWeVisOne-VL: --model text.gguf --mmproj vision.gguf --wevisone-decoder decoder.gguf --wevisone-request request.json [--output result.json]\n\nTimestral-209M: --model <timestral-F32.gguf> --timestral-request <series.json> [--threads N] [--compute cpu|auto|vulkan] | time-series forecasting; JSON context and prediction_length in, 21 quantiles out");
         return;
     }
     // \n\nGLiNER2 boundary mode: --jev --gliner2-boundary --model <gliner2.5-boundary.gguf> --jev-context <text> --gliner2-schema <json> | span extraction; the schema is {\"entities\":[\"person\",\"location\"],\"entity_descriptions\":{...}} (the dict form {\"entities\":{\"person\":[...]}} is also accepted). Output is (start, end) word spans per field; --jev-output json for machine-readable.\n\nServer mode: --serve delegates to app::server::run_server which has its
     // own --host/--port pre-parser and reuses the shared CLI parser for the rest.
-    if args.iter().any(|arg| arg == "--serve") {
+    if args.iter().any(|arg| arg == "--serve")
+        && !args.iter().any(|arg| arg == "--timestral-request")
+    {
         app::server::run_server();
         return;
     }
@@ -96,11 +104,36 @@ fn main() {
         eprintln!("{error}");
         std::process::exit(2);
     });
+    // Reject mixed forecast/task modes before any early media route can run.
+    if options.timestral_request.is_some() {
+        app::run_or_exit(app::validate_cli_options(&options));
+    }
+    app::run_or_exit(options.validate_compute_mode());
+    let _compute_scope = options
+        .compute_policy()
+        .configure_cli()
+        .unwrap_or_else(|error| {
+            eprintln!("{error}");
+            std::process::exit(2);
+        });
     // Resolved thread count for both LLM ComputePool and rayon global pool.
     let available_threads = std::thread::available_parallelism()
         .map(std::num::NonZeroUsize::get)
         .unwrap_or(1);
     let n_threads = app::resolve_thread_count(options.threads, available_threads);
+    if options.wevisone_request.is_some() {
+        app::run_or_exit(app::validate_cli_options(&options));
+        app::init_rayon_global_pool(n_threads);
+        app::run_or_exit(app::wevisone_vl::run_cli(&options, n_threads));
+        return;
+    }
+    if rust_model_inference::models::unlimited_ocr::matches_model(&options.model) {
+        app::init_rayon_global_pool(n_threads);
+        app::run_or_exit(rust_model_inference::models::unlimited_ocr::run_cli(
+            &options, n_threads,
+        ));
+        return;
+    }
     // LongCat Image Edit. Selected purely by its own flags rather than by GGUF
     // architecture, because the transformer advertises generic `flux` metadata
     // and would otherwise be claimed by the Z-Image branch below. Runs before
@@ -117,11 +150,33 @@ fn main() {
         None => {}
     }
 
+    // Astronex-World owns its Wan denoiser/text/VAE pair and must dispatch
+    // before the generic diffusion validators can classify it as Z-Image.
+    let astronex_options = app::astronex_cli_options(&options).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(2);
+    });
+    if let Some(astronex) = astronex_options {
+        if options.gpu {
+            ops::enable_gpu();
+        }
+        app::init_rayon_global_pool(n_threads);
+        let main: Arc<dyn TensorSource> =
+            Arc::from(app::open_or_exit(&astronex.model, ComponentRole::Llm));
+        let components: Arc<dyn TensorSource> =
+            Arc::from(app::open_or_exit(&astronex.mmproj, ComponentRole::Mmproj));
+        app::run_or_exit(app::run_astronex_cli(
+            main, components, &astronex, n_threads,
+        ));
+        return;
+    }
+
     // Select Mage before Z-Image's shared-component validation rejects edit inputs.
     let early_source: Option<Arc<dyn TensorSource>> = if dispatch_mode(&options)
         == DispatchMode::Model
         && !options.model.as_os_str().is_empty()
-        && (options.text_encoder.is_some()
+        && (options.qwen_image_turbo
+            || options.text_encoder.is_some()
             || options.vae.is_some()
             || options.out.is_some()
             || options.width.is_some()
@@ -134,6 +189,22 @@ fn main() {
     } else {
         None
     };
+    if options.qwen_image_turbo
+        && early_source
+            .as_ref()
+            .is_none_or(|s| !matches_signature(s.as_ref()))
+    {
+        eprintln!("--qwen-image-turbo requires a Qwen-Image-2.1 DiT GGUF");
+        std::process::exit(2);
+    }
+    if let Some(source) = early_source.as_ref().filter(|s| {
+        s.metadata("general.architecture")
+            .and_then(MetaValue::to_string_val)
+            == Some("flux3")
+    }) {
+        app::run_or_exit(app::run_flux3_cli(source.clone(), &options, n_threads));
+        return;
+    }
     if let Some(source) = early_source.as_ref().filter(|s| {
         s.metadata("general.architecture")
             .and_then(MetaValue::to_string_val)
@@ -220,6 +291,34 @@ fn main() {
     }
 
     match dispatch_mode(&options) {
+        DispatchMode::Timestral => {
+            let run = || -> Result<(), String> {
+                use rust_model_inference::models::timestral::{ForecastRequest, TimestralModel};
+                let path = options
+                    .timestral_request
+                    .as_ref()
+                    .expect("validated Timestral request");
+                let request: ForecastRequest = serde_json::from_slice(
+                    &std::fs::read(path).map_err(|e| format!("Timestral request: {e}"))?,
+                )
+                .map_err(|e| format!("Timestral request JSON: {e}"))?;
+                let source = open_model_source(&options.model, ComponentRole::Llm)
+                    .map_err(|e| e.to_string())?;
+                let model = TimestralModel::from_source_with_compute(
+                    source.as_ref(),
+                    options.compute_policy(),
+                )?;
+                let result = model.forecast(&request)?;
+                println!(
+                    "{}",
+                    serde_json::to_string(&result).map_err(|e| e.to_string())?
+                );
+                Ok(())
+            };
+            app::run_or_exit(run());
+            return;
+        }
+        DispatchMode::Astronex => unreachable!("Astronex is dispatched before shared model setup"),
         DispatchMode::DreamX => {
             let dreamx = dreamx_options.expect("validated DreamX options");
             let main: Arc<dyn TensorSource> =
@@ -233,12 +332,6 @@ fn main() {
             return;
         }
         DispatchMode::Yue2 => {
-            // Same reason as the Z-Image branch below: this returns before the
-            // shared `enable_gpu()`, and the AR session only reaches the Vulkan
-            // backend once the flag is set.
-            if options.gpu {
-                ops::enable_gpu();
-            }
             app::run_or_exit(app::run_yue2_cli(
                 yue2_options.expect("validated YuE2 options"),
                 n_threads,
@@ -291,9 +384,6 @@ fn main() {
     // --vae + --out + --model without --text-encoder otherwise errors out as a
     // malformed Z-Image invocation; we probed the arch earlier).
     if let Some(arch_probe) = early_auk_arch {
-        if options.gpu {
-            ops::enable_gpu();
-        }
         let vae: Arc<dyn TensorSource> = Arc::from(open_or_exit(
             options.vae.as_deref().expect("AuK VAE required"),
             ComponentRole::Llm,
@@ -346,9 +436,6 @@ fn main() {
                 .tensor_info("transformer.transformer_blocks.0.attn_norm_x.linear.weight")
                 .is_some();
         if is_auk {
-            if options.gpu {
-                ops::enable_gpu();
-            }
             let vae: Arc<dyn TensorSource> = Arc::from(open_or_exit(
                 options.vae.as_deref().expect("AuK VAE required"),
                 ComponentRole::Llm,
@@ -410,15 +497,14 @@ fn main() {
                 .is_some()
                 && arch_probe.tensor_info("text_proj.weight").is_some());
         if is_ernie_image {
+            let _cpu = rust_model_inference::compute::ComputePolicy::Cpu.enter_legacy_scope();
             let turbo = options
                 .model
                 .to_string_lossy()
                 .to_lowercase()
                 .contains("turbo");
-            if options.gpu {
-                app::run_or_exit(Err(
-                    "ERNIE-Image currently supports CPU only; remove --gpu".into()
-                ));
+            if options.compute_policy() != rust_model_inference::compute::ComputePolicy::Cpu {
+                eprintln!("compute scope=ernie_image backend=Cpu reason=unmigrated_model");
             }
             let text: Arc<dyn TensorSource> = Arc::from(open_or_exit(
                 options
@@ -456,12 +542,6 @@ fn main() {
                 "--cfg-scale is supported for ERNIE-Image and Breeze TTS".into(),
             ));
         }
-        // Has to happen here, not at the shared `enable_gpu()` below: this
-        // branch returns before reaching it, and the DiT's projections only
-        // reach the Vulkan backend once the flag is set.
-        if options.gpu {
-            ops::enable_gpu();
-        }
         let diffusion: Arc<dyn TensorSource> = early_source
             .clone()
             .unwrap_or_else(|| Arc::from(open_or_exit(&options.model, ComponentRole::Llm)));
@@ -490,6 +570,14 @@ fn main() {
     let model_path = options.model.as_path();
     let source: Arc<dyn TensorSource> =
         early_source.unwrap_or_else(|| Arc::from(open_or_exit(model_path, ComponentRole::Llm)));
+    app::run_or_exit(
+        options.validate_compute_model(
+            source
+                .metadata("general.architecture")
+                .and_then(MetaValue::to_string_val)
+                .unwrap_or_default(),
+        ),
+    );
     // Qwen-Image-2.1 diffusion GGUFs carry no metadata (kv=0), so the route is
     // chosen by tensor-name signature before the metadata-driven LLM path.
     if matches_signature(source.as_ref()) {
@@ -508,10 +596,6 @@ fn main() {
     if let Err(error) = app::reject_incomplete_z_image_architecture(&arch) {
         app::run_or_exit(Err(error));
         return;
-    }
-
-    if options.gpu {
-        ops::enable_gpu();
     }
 
     let (max_tokens, temperature) = app::resolve_cli_generation_options(&options);
@@ -555,11 +639,38 @@ fn main() {
         return;
     }
 
+    if options.embedding && rust_model_inference::models::bge_vl::is_visual(source.as_ref()) {
+        if video.is_some() || audio.is_some() {
+            app::run_or_exit(Err("BGE visual embedding accepts an image".into()));
+            return;
+        }
+        let started = std::time::Instant::now();
+        let embedding = rust_model_inference::models::bge_vl::compute_embedding(
+            source.as_ref(),
+            prompt,
+            image,
+            options.threads,
+        )
+        .unwrap_or_else(|error| {
+            eprintln!("Inference error: {error}");
+            std::process::exit(1);
+        });
+        print_embedding(
+            &embedding,
+            options.embedding_output,
+            started.elapsed().as_millis(),
+        );
+        return;
+    }
+
     if options.embedding && (image.is_some() || video.is_some() || audio.is_some()) {
         let started = std::time::Instant::now();
         let embedding = match app::run_omni_embedding(
             source.as_ref(),
-            explicit_mmproj.expect("validated media embedding mmproj"),
+            explicit_mmproj.unwrap_or_else(|| {
+                eprintln!("media embedding requires --mmproj");
+                std::process::exit(1);
+            }),
             image,
             video,
             audio,
@@ -716,7 +827,12 @@ fn main() {
             &jinja_options,
         ));
     } else if !options.jev
-        && (explicit_mmproj.is_some() || image.is_some() || video.is_some() || audio.is_some())
+        && (image.is_some() || video.is_some() || audio.is_some()
+            // A bare --mmproj carries no vision tower to run: the Qwen3-VL
+            // multimodal path requires media, and without media this branch
+            // falls through to the hybrid trunk, which does not know
+            // qwen3vl. Route those models to the text path instead.
+            || (explicit_mmproj.is_some() && arch != "qwen3vl"))
     {
         // Omni → TTS post-processor pipeline: when both the multimodal
         // media path AND a TTS model + mmproj are present, route the
@@ -943,7 +1059,7 @@ fn main() {
         ));
         return;
     } else if !prompt.is_empty() {
-        if matches!(arch, "qwen35" | "edge0") {
+        if matches!(arch, "qwen35" | "qwen35moe" | "edge0") {
             app::run_or_exit(app::run_multimodal_with_video(
                 Arc::clone(&source),
                 model_path,
@@ -968,13 +1084,24 @@ fn main() {
                 options.kv_format,
                 options.embedding_output,
             );
-        } else if arch == "qwen3vl" {
+        } else if arch == "qwen3vl"
+            && (source.metadata("wevisone_vl.source_revision").is_none()
+                || options.dump_logits
+                || options.bench
+                || options.profile)
+        {
             app::run_or_exit(app::validate_qwen3vl_decoder_mode(
                 &arch,
                 options.dump_logits,
                 options.bench,
                 options.profile,
-                options.kv_format,
+                // The shared Qwen3-VL text path always runs with F16 KV, so
+                // an F32 request only conflicts when the user asked for it.
+                if options.kv_format_explicit {
+                    options.kv_format
+                } else {
+                    app::KvFormat::F16
+                },
                 false,
             ));
             app::run_or_exit(app::run_shared_inference(
@@ -1022,6 +1149,12 @@ fn main() {
             ));
         }
     } else {
+        if options.compute_policy() == rust_model_inference::compute::ComputePolicy::Vulkan {
+            app::run_or_exit(Err(
+                "--compute vulkan requires --prompt; interactive mode is not migrated".into(),
+            ));
+            return;
+        }
         app::run_or_exit(app::validate_qwen3vl_decoder_mode(
             &arch,
             options.dump_logits,
@@ -1037,7 +1170,7 @@ fn main() {
         // tokenizer and prompt token ids line up with the rest of the
         // qwen35 family; the qwen35 multimodal stack handles the
         // image-less case (it just skips the vision stage).
-        if matches!(arch, "qwen35" | "edge0") {
+        if matches!(arch, "qwen35" | "qwen35moe" | "edge0") {
             app::run_or_exit(app::run_interactive_qwen35(
                 Arc::clone(&source),
                 model_path,
@@ -1091,6 +1224,20 @@ mod tests {
 
     #[test]
     fn dedicated_pipelines_dispatch_before_main_model_open() {
+        assert_eq!(
+            dispatch_mode(&app::CliOptions {
+                timestral_request: Some("series.json".into()),
+                ..app::CliOptions::default()
+            }),
+            DispatchMode::Timestral
+        );
+        assert_eq!(
+            dispatch_mode(&app::CliOptions {
+                astronex: true,
+                ..app::CliOptions::default()
+            }),
+            DispatchMode::Astronex
+        );
         assert_eq!(
             dispatch_mode(&app::CliOptions {
                 dreamx: true,

@@ -11,7 +11,6 @@ use crate::models::qwen35::{Qwen35Model, Qwen35Scratchpad};
 pub enum HybridTextModel<'a> {
     Qwen35(Qwen35Model<'a>),
     Edge0(Edge0Model<'a>),
-    Occamy(crate::models::occamy::weights::OccamyModel<'a>),
 }
 
 impl<'a> HybridTextModel<'a> {
@@ -20,11 +19,11 @@ impl<'a> HybridTextModel<'a> {
             .metadata("general.architecture")
             .and_then(|value| value.to_string_val())
         {
-            Some("qwen35") => Ok(Self::Qwen35(Qwen35Model::from_source(source)?)),
+            // `qwen35moe` rides the shared trunk: the attention and SSM tensors
+            // match `qwen35` and only the FFN differs, which the trunk's MoE
+            // hook carries.
+            Some("qwen35" | "qwen35moe") => Ok(Self::Qwen35(Qwen35Model::from_source(source)?)),
             Some("edge0") => Ok(Self::Edge0(Edge0Model::from_source(source)?)),
-            Some("qwen35moe") => Ok(Self::Occamy(
-                crate::models::occamy::weights::OccamyModel::from_source(source)?,
-            )),
             arch => Err(format!("Unsupported hybrid architecture: {arch:?}")),
         }
     }
@@ -33,7 +32,6 @@ impl<'a> HybridTextModel<'a> {
         match self {
             Self::Qwen35(model) => model,
             Self::Edge0(model) => &model.trunk,
-            Self::Occamy(model) => &model.trunk,
         }
     }
 }
@@ -53,28 +51,11 @@ impl<'m> HybridTrunkModel<'m> for HybridTextModel<'m> {
         positions: &[[usize; 4]],
     ) -> Result<Vec<f32>, String> {
         match self {
-            Self::Qwen35(model) => model.forward_at(
-                n_tokens,
-                base_position,
-                kv_cache,
-                scratch,
-                pool,
-                positions,
-                None,
-            ),
-            Self::Edge0(model) => {
+            Self::Qwen35(model) => {
                 model.forward_at(n_tokens, base_position, kv_cache, scratch, pool, positions)
             }
-            Self::Occamy(model) => {
-                crate::models::qwen35::trunk::session::HybridTrunkModel::forward_at(
-                    model,
-                    n_tokens,
-                    base_position,
-                    kv_cache,
-                    scratch,
-                    pool,
-                    positions,
-                )
+            Self::Edge0(model) => {
+                model.forward_at(n_tokens, base_position, kv_cache, scratch, pool, positions)
             }
         }
     }

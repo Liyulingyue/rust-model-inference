@@ -1,4 +1,7 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+#include "f32_divide.glsl"
+#include "f32_norm.glsl"
 
 // RMS normalisation, one workgroup per row.
 //
@@ -78,17 +81,13 @@ void main() {
     if (lane == 0u) {
         precise float mean_square = (partial[0] + partial_correction[0]) / float(pc.count)
             + pc.eps;
-        precise float root = sqrt(mean_square);
-        precise float root_residual = fma(-root, root, mean_square);
-        root = fma(root_residual, 0.5 / root, root);
-        precise float reciprocal = 1.0 / root;
-        precise float reciprocal_residual = fma(-root, reciprocal, 1.0);
-        inverse_rms = fma(reciprocal_residual, reciprocal, reciprocal);
+        inverse_rms = inverse_sqrt_f32(mean_square);
     }
     barrier();
     for (uint index = lane; index < pc.count; index += 64u) {
         float value = uintBitsToFloat(arena.data[pc.input_word + base + index]);
         float scale = uintBitsToFloat(weight.data[pc.weight_word + index]);
-        arena.data[pc.output_word + output_base + index] = floatBitsToUint(value * inverse_rms * scale);
+        precise float normalized = value * inverse_rms * scale;
+        arena.data[pc.output_word + output_base + index] = floatBitsToUint(normalized);
     }
 }

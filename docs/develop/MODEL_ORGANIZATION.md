@@ -404,6 +404,16 @@ for _n in 0..(QK_K / 128) {
 | T-3 | qwen3/asr/audio_processor `log_mel_windows` / `compute_log_mel` / `HOP` | qwen3/asr/audio_processor.rs（被 omni.rs 复用） | 与 T-2 同处理 |
 | T-4 | lfm2 / lfm25 / lfm2moe 共享的 shortconv state 类型 + buffer 分配 | 各模型 `forward.rs` | 若 S-4 选 A：抽到 `core/scratchpad` 或各模型 `trunk/scratch.rs` |
 
+已完成的下沉（保留在此作为约定，新模型直接复用，不要再写一份）：
+
+| 工具 | 位置 | 说明 |
+|------|------|------|
+| `require_tensor_meta` | `core::tensor` | 只读 header：存在 / shape / 类型。模型在“先校验整个契约、再读 payload”时用它 |
+| `require_tensor_data` | `core::tensor` | 只校验 payload 长度，按 `GGMLType::type_traits` 的 block 布局计算，量化格式不会被按元素数算错 |
+| `require_tensor_type` | `core::tensor` | 前两者组合，返回实际类型，供“校验即读取”的加载路径使用 |
+
+各模型的 `require_tensor` / `check_tensor` 包装一律委托给上面三个函数，只保留自己的类型白名单（例如 omni 容忍 F16/BF16）。`audio8`、`gemma4`、`diffusion/common`、`qwen3`（omni / asr mel_encoder / trunk util）、`diffusion/flux3` 已迁移。
+
 ### 9.4 尺寸警戒（§2.2 新规则触发）
 
 | # | 文件 | 行数 | 评估 | 建议 |

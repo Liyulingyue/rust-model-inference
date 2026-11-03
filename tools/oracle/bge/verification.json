@@ -1,0 +1,1910 @@
+{
+  "date": "2026-10-13",
+  "repositories": [
+    "BAAI/bge-m3",
+    "BAAI/bge-small-zh-v1.5",
+    "BAAI/bge-large-zh-v1.5",
+    "BAAI/bge-base-zh-v1.5",
+    "BAAI/bge-small-en-v1.5",
+    "BAAI/bge-large-en-v1.5",
+    "BAAI/bge-base-en-v1.5",
+    "BAAI/bge-small-zh",
+    "BAAI/bge-en-icl",
+    "BAAI/bge-large-zh",
+    "BAAI/bge-base-zh",
+    "BAAI/bge-small-en",
+    "BAAI/bge-m3-retromae",
+    "BAAI/bge-large-en",
+    "BAAI/bge-code-v1",
+    "BAAI/bge-large-zh-noinstruct",
+    "BAAI/bge-m3-unsupervised",
+    "BAAI/bge-base-en",
+    "BAAI/bge-multilingual-gemma2",
+    "BAAI/bge-reasoner-embed-qwen3-8b-0923",
+    "BAAI/bge-visualized",
+    "BAAI/BGE-VL-base",
+    "BAAI/BGE-VL-large",
+    "BAAI/BGE-VL-v1.5-zs",
+    "BAAI/BGE-VL-v1.5-mmeb",
+    "BAAI/BGE-VL-MLLM-S1",
+    "BAAI/BGE-VL-MLLM-S2",
+    "BAAI/BGE-VL-Screenshot"
+  ],
+  "repository_counts": {
+    "text": 20,
+    "visual": 8
+  },
+  "references": {
+    "llama_cpp_commit": "11fe02151f79c41d0d4af7da708755d73b9c0da6",
+    "flagembedding_commit": "fd1a2bdf69488ffebe0327999d4400d8c8058a0b",
+    "transformers_config_url": "https://raw.githubusercontent.com/huggingface/transformers/v4.51.3/src/transformers/models/qwen2_5_vl/configuration_qwen2_5_vl.py",
+    "transformers_config_sha256": "29d1d73fbebc9efeb2795d9dd5550a74124c89c54c140be458e05055eada1b85",
+    "oracle_c_flags": "-U__ARM_NEON -U__ARM_NEON__ -U__ARM_FEATURE_FMA -ffp-contract=off -fno-vectorize -fno-slp-vectorize",
+    "rust_flags": "-C no-vectorize-loops -C no-vectorize-slp",
+    "external_acceleration": false
+  },
+  "exact_f32_operator_checks": {
+    "cases": [
+      {
+        "width": 1,
+        "case": "ordinary",
+        "values": 11,
+        "sha256": "aaf2434e43f06e3353b4755a0ed1ee75938b549feb0487abb84e73398a5e40d6"
+      },
+      {
+        "width": 1,
+        "case": "constant",
+        "values": 11,
+        "sha256": "74aa1c07569db960e80173f2d93a8f3152e49cf5f2f03ba2d6e0cd2c792859e9"
+      },
+      {
+        "width": 1,
+        "case": "small",
+        "values": 11,
+        "sha256": "af4fb6466019a6450911ea7c822b040725048b9dd655ba82299fa5510c5870d4"
+      },
+      {
+        "width": 1,
+        "case": "cancellation",
+        "values": 11,
+        "sha256": "b3b1fad6e6ddf7142da131f76114fd81071dc0db486860302f41ea1d9d3ff876"
+      },
+      {
+        "width": 3,
+        "case": "ordinary",
+        "values": 23,
+        "sha256": "6fb7523078d98547f9ce608ef32d2a1c63bee3bfaff061fd7f0845e9185ec092"
+      },
+      {
+        "width": 3,
+        "case": "constant",
+        "values": 23,
+        "sha256": "1eebfa282aa5c685ef69395fed5ee88184268c794686548f5405b07d1a75d356"
+      },
+      {
+        "width": 3,
+        "case": "small",
+        "values": 23,
+        "sha256": "7c7ee00823e3ac0e50271fd3b8207233c320c067c1279163959f44ae7aadc6d9"
+      },
+      {
+        "width": 3,
+        "case": "cancellation",
+        "values": 23,
+        "sha256": "7d78acc58083c1ae1d2e6d7754b806340dab04d960ff545846c8096a7bfbf592"
+      },
+      {
+        "width": 16,
+        "case": "ordinary",
+        "values": 101,
+        "sha256": "6facd875270c7878f30914b4872dd749f3ac2fab06608773b82c28e5811023ec"
+      },
+      {
+        "width": 16,
+        "case": "constant",
+        "values": 101,
+        "sha256": "0b6a34954ea28645a5e4b9486a969ee59097f7424ab7ae3bdc62c51c52aff8ef"
+      },
+      {
+        "width": 16,
+        "case": "small",
+        "values": 101,
+        "sha256": "e0fcf6322fd1301ca57087b7c672b765d75bfeb829f7697baba2b30c150b7421"
+      },
+      {
+        "width": 16,
+        "case": "cancellation",
+        "values": 101,
+        "sha256": "7332b45037c489419b4855b3e868f59a1279b07e98db9ea5251830491905729b"
+      },
+      {
+        "width": 32,
+        "case": "ordinary",
+        "values": 197,
+        "sha256": "cd0075a22e55896ceba008abe6aa0d3a8601caf773710ef9b14ee47c32b70d13"
+      },
+      {
+        "width": 32,
+        "case": "constant",
+        "values": 197,
+        "sha256": "9ccadd4a7fc8905190b517831b2c7b615d31343f774f44198a55ad0f7a83c953"
+      },
+      {
+        "width": 32,
+        "case": "small",
+        "values": 197,
+        "sha256": "fb396b37f68fd83481997fdc62693eb677e02447406736c100f2de07ee4937cf"
+      },
+      {
+        "width": 32,
+        "case": "cancellation",
+        "values": 197,
+        "sha256": "7c93760713ef0b40fd9dd7ff7aa58c0c34af784df104485505250512500a1c52"
+      },
+      {
+        "width": 64,
+        "case": "ordinary",
+        "values": 389,
+        "sha256": "de2a323922794c0d2e646c42aef484de2def75da883eda95efc75f578a688e02"
+      },
+      {
+        "width": 64,
+        "case": "constant",
+        "values": 389,
+        "sha256": "5242ef7745124e7275fedb52286833499c284bcc108ebd9d3e705188ef6c9dd8"
+      },
+      {
+        "width": 64,
+        "case": "small",
+        "values": 389,
+        "sha256": "168d8f22d346050d6732d1bd9501a81c728eb61fd18a1208c248f854b98d1167"
+      },
+      {
+        "width": 64,
+        "case": "cancellation",
+        "values": 389,
+        "sha256": "ca07c6a253abfd8ac0115d34ef47c2b5fc31c96d6d974fa9638da45964c3f4d1"
+      },
+      {
+        "width": 256,
+        "case": "ordinary",
+        "values": 1541,
+        "sha256": "ef083f761a87ca74efa719e2d1caca11a3f7a64b6192182e0d40cd649b2134c7"
+      },
+      {
+        "width": 256,
+        "case": "constant",
+        "values": 1541,
+        "sha256": "e62a58195c92e24f23d75a450fa50764614b72db1357d7aab906bb4538a06799"
+      },
+      {
+        "width": 256,
+        "case": "small",
+        "values": 1541,
+        "sha256": "6fbeccc67ae548efdb4ad9e0925e96fa1efee2f3f9b84cf72e83b2ee772e3ef0"
+      },
+      {
+        "width": 256,
+        "case": "cancellation",
+        "values": 1541,
+        "sha256": "09397a0e85d08aceb993a814fed5999df16203ddad9622d37e01d6c2ccdc6f34"
+      },
+      {
+        "width": 384,
+        "case": "ordinary",
+        "values": 2309,
+        "sha256": "c6f75ea7d2fb2e1ab894811619607809d006322b94c81d0c35c07ecde7a0311d"
+      },
+      {
+        "width": 384,
+        "case": "constant",
+        "values": 2309,
+        "sha256": "bad67c8e58866e1c839f921d53595048894294b6c9e7d87b078872ffd4724e2d"
+      },
+      {
+        "width": 384,
+        "case": "small",
+        "values": 2309,
+        "sha256": "e6ff5f8798ad14ac4ed270a9b46fd9208bd552256b3c9494cf8d18a20f16ad4a"
+      },
+      {
+        "width": 384,
+        "case": "cancellation",
+        "values": 2309,
+        "sha256": "7dee4b6a243e1ea869d00f98cfb20a1e8a45d0278bb4819c92049b67a4636bf2"
+      },
+      {
+        "width": 768,
+        "case": "ordinary",
+        "values": 4613,
+        "sha256": "0570184ecc0373d154bbf0225c70473f9af10b36b3ad29811a65c5306d897c48"
+      },
+      {
+        "width": 768,
+        "case": "constant",
+        "values": 4613,
+        "sha256": "8336ee8f70e74752e355f99a148c7bb3e1d323778765320738ae70efc92925bb"
+      },
+      {
+        "width": 768,
+        "case": "small",
+        "values": 4613,
+        "sha256": "aa537791b6d1088a1feece55516047615792d1bf62dcc06beb71127cadbdf0c1"
+      },
+      {
+        "width": 768,
+        "case": "cancellation",
+        "values": 4613,
+        "sha256": "e534d3792e9a59d236d9c719730d0f8a618abd00eece0b95942f45c138287e12"
+      },
+      {
+        "width": 1024,
+        "case": "ordinary",
+        "values": 6149,
+        "sha256": "a8398fe9c17a109707f19111b4afd05093392d5816bcceb54bc75f3837820b63"
+      },
+      {
+        "width": 1024,
+        "case": "constant",
+        "values": 6149,
+        "sha256": "809cc1dec1dbd94aa077f27dea9af510d230aa0f04337c631261d5996e7d2cb6"
+      },
+      {
+        "width": 1024,
+        "case": "small",
+        "values": 6149,
+        "sha256": "eaa15a94f637653b3c5b65cec81e93c6bc8991db939b603b4cb4e84df5a08a33"
+      },
+      {
+        "width": 1024,
+        "case": "cancellation",
+        "values": 6149,
+        "sha256": "00cd03d2159a127a0b987030c7c5cad02ad68259b3a7616ed0feb6294a010df6"
+      },
+      {
+        "width": 2048,
+        "case": "ordinary",
+        "values": 12293,
+        "sha256": "b16d43f3a764e264208b8e06fa27241b54a0762c7eb69db977404b2b2e1a7755"
+      },
+      {
+        "width": 2048,
+        "case": "constant",
+        "values": 12293,
+        "sha256": "bfe6f65543fc72c0fa59ecac64f9c0fb2af18b95a481bd0b348d768457d67191"
+      },
+      {
+        "width": 2048,
+        "case": "small",
+        "values": 12293,
+        "sha256": "2ed13809f606201b3bb616de4860c102493aa55c6c64ec3f1679dd7fad908227"
+      },
+      {
+        "width": 2048,
+        "case": "cancellation",
+        "values": 12293,
+        "sha256": "c56dac32fa8d22db0443b305072f21d5d6e54fa351b9f021a56e2d73a54cd7e3"
+      },
+      {
+        "width": 4096,
+        "case": "ordinary",
+        "values": 24581,
+        "sha256": "725410a2f3f02d361ceba56a5ddd20609fa0952773d8d4284d814becf40e9811"
+      },
+      {
+        "width": 4096,
+        "case": "constant",
+        "values": 24581,
+        "sha256": "39536e1b8d57e1189b04184d1089c3dc72f561ca56a7ab971500070dcee2f7d6"
+      },
+      {
+        "width": 4096,
+        "case": "small",
+        "values": 24581,
+        "sha256": "2c53debee71dabaaa7ffdc5a0619f9888aee193e435aa52a2b9ad555d2181fc7"
+      },
+      {
+        "width": 4096,
+        "case": "cancellation",
+        "values": 24581,
+        "sha256": "bb351bc866d26385aa2dfc405c8f4ee562a2b38f9aab1cd153335cf0a17a34d4"
+      }
+    ],
+    "values_compared": 208828,
+    "operators": [
+      "matmul",
+      "layer_norm",
+      "rms_norm",
+      "softmax",
+      "silu",
+      "add",
+      "multiply"
+    ],
+    "skipped": [
+      "quantization",
+      "F16/BF16 activation rounding",
+      "GELU/GELU-quick F16 tables",
+      "approximate SIMD",
+      "FMA",
+      "F16 KV",
+      "pipeline output parity"
+    ]
+  },
+  "synthetic_exact_decoder_checks": {
+    "architectures": [
+      "llama",
+      "qwen2",
+      "qwen3"
+    ],
+    "hidden_size": 256,
+    "prompt": "abca",
+    "token_ids": true,
+    "pooled_bits": true,
+    "final_bits": true,
+    "real_large_weights": false
+  },
+  "tokenizer_checks": {
+    "prompts": [
+      "hello",
+      "Hello, 世界! 123",
+      "What is the capital of China?",
+      "中国的首都是北京。"
+    ],
+    "models": [
+      {
+        "model": "bge-small-en-v1.5",
+        "input_token_ids": [
+          [
+            101,
+            7592,
+            102
+          ],
+          [
+            101,
+            7592,
+            1010,
+            1745,
+            100,
+            999,
+            13138,
+            102
+          ],
+          [
+            101,
+            2054,
+            2003,
+            1996,
+            3007,
+            1997,
+            2859,
+            1029,
+            102
+          ],
+          [
+            101,
+            1746,
+            1799,
+            1916,
+            100,
+            1961,
+            100,
+            1781,
+            1755,
+            1636,
+            102
+          ]
+        ],
+        "pipeline_numeric_comparison": false
+      },
+      {
+        "model": "bge-small-zh",
+        "input_token_ids": [
+          [
+            101,
+            8701,
+            102
+          ],
+          [
+            101,
+            100,
+            117,
+            686,
+            4518,
+            106,
+            8604,
+            102
+          ],
+          [
+            101,
+            100,
+            8310,
+            8174,
+            10715,
+            8205,
+            100,
+            136,
+            102
+          ],
+          [
+            101,
+            704,
+            1744,
+            4638,
+            7674,
+            6963,
+            3221,
+            1266,
+            776,
+            511,
+            102
+          ]
+        ],
+        "pipeline_numeric_comparison": false
+      },
+      {
+        "model": "bge-small-zh-v1.5",
+        "input_token_ids": [
+          [
+            101,
+            8701,
+            102
+          ],
+          [
+            101,
+            100,
+            117,
+            686,
+            4518,
+            106,
+            8604,
+            102
+          ],
+          [
+            101,
+            100,
+            8310,
+            8174,
+            10715,
+            8205,
+            100,
+            136,
+            102
+          ],
+          [
+            101,
+            704,
+            1744,
+            4638,
+            7674,
+            6963,
+            3221,
+            1266,
+            776,
+            511,
+            102
+          ]
+        ],
+        "pipeline_numeric_comparison": false
+      },
+      {
+        "model": "bge-m3",
+        "input_token_ids": [
+          [
+            0,
+            33600,
+            31,
+            2
+          ],
+          [
+            0,
+            35378,
+            4,
+            6,
+            3221,
+            38,
+            37638,
+            2
+          ],
+          [
+            0,
+            4865,
+            83,
+            70,
+            10323,
+            111,
+            9098,
+            32,
+            2
+          ],
+          [
+            0,
+            6,
+            44031,
+            6342,
+            3352,
+            8732,
+            30,
+            2
+          ]
+        ],
+        "pipeline_numeric_comparison": false
+      }
+    ]
+  },
+  "real_models": [
+    {
+      "model": "bge-small-en-v1.5",
+      "path": "models/BAAI-bge-small-en-v1-5/bge-small-en-v1.5-F32.gguf",
+      "bytes": 133487744,
+      "sha256": "3a67fd1a4df0f2152210c10b3af6e2926f8e41d238824426ba8ceb9ee88d29e1",
+      "architecture": "bert",
+      "source_sha256": "3c9f31665447c8911517620762200d2245a2518d6e7208acc78cd9db317e21ad",
+      "tensor_count": 197,
+      "tensor_types": {
+        "F32": 197
+      },
+      "input_modes": [
+        "text"
+      ],
+      "quant": "F32",
+      "metadata": {
+        "bert.block_count": 12,
+        "bert.context_length": 512,
+        "bert.embedding_length": 384,
+        "bert.pooling_type": 2
+      },
+      "key_tensors": {
+        "token_embd.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            384,
+            30522
+          ]
+        },
+        "position_embd.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            384,
+            512
+          ]
+        },
+        "blk.0.attn_q.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            384,
+            384
+          ]
+        },
+        "blk.0.ffn_down.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            1536,
+            384
+          ]
+        }
+      },
+      "tensor_contract_sha256": "3599eac5e86f8ea029fd17880decd1ac3265c0e142804d114ca41af19ffb383d",
+      "tokenizer_metadata": {
+        "tokenizer.ggml.model": "bert",
+        "tokenizer.ggml.padding_token_id": 0,
+        "tokenizer.ggml.normalizer.lowercase": true,
+        "tokenizer.ggml.normalizer.strip_accents": true
+      }
+    },
+    {
+      "model": "bge-small-en-v1.5",
+      "path": "models/BAAI-bge-small-en-v1-5/bge-small-en-v1.5-Q8_0.gguf",
+      "bytes": 36685056,
+      "sha256": "f1615e9adcad6457a9962c269d9d3532b155e1054468912a874225c4d7d741be",
+      "architecture": "bert",
+      "source_sha256": "3c9f31665447c8911517620762200d2245a2518d6e7208acc78cd9db317e21ad",
+      "tensor_count": 197,
+      "tensor_types": {
+        "Q8_0": 73,
+        "F32": 124
+      },
+      "input_modes": [
+        "text"
+      ],
+      "quant": "Q8_0",
+      "metadata": {
+        "bert.block_count": 12,
+        "bert.context_length": 512,
+        "bert.embedding_length": 384,
+        "bert.pooling_type": 2
+      },
+      "key_tensors": {
+        "token_embd.weight": {
+          "ggml_type": 8,
+          "gguf_dims": [
+            384,
+            30522
+          ]
+        },
+        "position_embd.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            384,
+            512
+          ]
+        },
+        "blk.0.attn_q.weight": {
+          "ggml_type": 8,
+          "gguf_dims": [
+            384,
+            384
+          ]
+        },
+        "blk.0.ffn_down.weight": {
+          "ggml_type": 8,
+          "gguf_dims": [
+            1536,
+            384
+          ]
+        }
+      },
+      "tensor_contract_sha256": "1a638b3db570bb9f929450ed1cb83e4ab3bbfc274a23744396bb0f0b7bd2a8af",
+      "tokenizer_metadata": {
+        "tokenizer.ggml.model": "bert",
+        "tokenizer.ggml.padding_token_id": 0,
+        "tokenizer.ggml.normalizer.lowercase": true,
+        "tokenizer.ggml.normalizer.strip_accents": true
+      }
+    },
+    {
+      "model": "bge-small-zh",
+      "path": "models/BAAI-bge-small-zh/bge-small-zh-source-F32.gguf",
+      "bytes": 95127168,
+      "sha256": "7dc51571dda28db4824616930820fc8a6b4599f81964ae85fffe4dbb797996a6",
+      "architecture": "bert",
+      "source_sha256": "5cc750eb4f5412313aba1482e53aeccd1ed0b97bc213f2962e0c80e6c8809319",
+      "tensor_count": 69,
+      "tensor_types": {
+        "F32": 69
+      },
+      "input_modes": [
+        "text"
+      ],
+      "quant": "F32",
+      "metadata": {
+        "bert.block_count": 4,
+        "bert.context_length": 512,
+        "bert.embedding_length": 512,
+        "bert.pooling_type": 2
+      },
+      "key_tensors": {
+        "token_embd.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            512,
+            21128
+          ]
+        },
+        "position_embd.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            512,
+            512
+          ]
+        },
+        "blk.0.attn_q.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            512,
+            512
+          ]
+        },
+        "blk.0.ffn_down.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            2048,
+            512
+          ]
+        }
+      },
+      "tensor_contract_sha256": "3e9aecd9be7237a660f1768f0cc01253c701447eb211a4d030a148c1b3060769",
+      "tokenizer_metadata": {
+        "tokenizer.ggml.model": "bert",
+        "tokenizer.ggml.padding_token_id": 0,
+        "tokenizer.ggml.normalizer.lowercase": false,
+        "tokenizer.ggml.normalizer.strip_accents": false
+      }
+    },
+    {
+      "model": "bge-small-zh-v1.5",
+      "path": "models/BAAI-bge-small-zh-v1-5/bge-small-zh-v1.5-F32.gguf",
+      "bytes": 95127168,
+      "sha256": "60aaebc3954c2784c31a552ff0feab9756797ea8a9a1079f2fc926dc2c728023",
+      "architecture": "bert",
+      "source_sha256": "354763b9b1357bc9c44f62c6be2276321081ed2567773608c0d0785b61d5a026",
+      "tensor_count": 69,
+      "tensor_types": {
+        "F32": 69
+      },
+      "input_modes": [
+        "text"
+      ],
+      "quant": "F32",
+      "metadata": {
+        "bert.block_count": 4,
+        "bert.context_length": 512,
+        "bert.embedding_length": 512,
+        "bert.pooling_type": 2
+      },
+      "key_tensors": {
+        "token_embd.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            512,
+            21128
+          ]
+        },
+        "position_embd.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            512,
+            512
+          ]
+        },
+        "blk.0.attn_q.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            512,
+            512
+          ]
+        },
+        "blk.0.ffn_down.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            2048,
+            512
+          ]
+        }
+      },
+      "tensor_contract_sha256": "3e9aecd9be7237a660f1768f0cc01253c701447eb211a4d030a148c1b3060769",
+      "tokenizer_metadata": {
+        "tokenizer.ggml.model": "bert",
+        "tokenizer.ggml.padding_token_id": 0,
+        "tokenizer.ggml.normalizer.lowercase": false,
+        "tokenizer.ggml.normalizer.strip_accents": false
+      }
+    },
+    {
+      "model": "bge-small-zh-v1.5",
+      "path": "models/BAAI-bge-small-zh-v1-5/bge-small-zh-v1.5-Q8_0.gguf",
+      "bytes": 26388352,
+      "sha256": "e2e0c15a73959601a7a3f3dd96c5f85c9249d2b73485064746ad31fd3c3443fd",
+      "architecture": "bert",
+      "source_sha256": "354763b9b1357bc9c44f62c6be2276321081ed2567773608c0d0785b61d5a026",
+      "tensor_count": 69,
+      "tensor_types": {
+        "Q8_0": 25,
+        "F32": 44
+      },
+      "input_modes": [
+        "text"
+      ],
+      "quant": "Q8_0",
+      "metadata": {
+        "bert.block_count": 4,
+        "bert.context_length": 512,
+        "bert.embedding_length": 512,
+        "bert.pooling_type": 2
+      },
+      "key_tensors": {
+        "token_embd.weight": {
+          "ggml_type": 8,
+          "gguf_dims": [
+            512,
+            21128
+          ]
+        },
+        "position_embd.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            512,
+            512
+          ]
+        },
+        "blk.0.attn_q.weight": {
+          "ggml_type": 8,
+          "gguf_dims": [
+            512,
+            512
+          ]
+        },
+        "blk.0.ffn_down.weight": {
+          "ggml_type": 8,
+          "gguf_dims": [
+            2048,
+            512
+          ]
+        }
+      },
+      "tensor_contract_sha256": "daa126d26ba8f3ebe2fb5f43918e72768bb17093c3979022fe00044c026dc63d",
+      "tokenizer_metadata": {
+        "tokenizer.ggml.model": "bert",
+        "tokenizer.ggml.padding_token_id": 0,
+        "tokenizer.ggml.normalizer.lowercase": false,
+        "tokenizer.ggml.normalizer.strip_accents": false
+      }
+    },
+    {
+      "model": "bge-m3",
+      "path": "models/BAAI-bge-m3/bge-m3-source-F32.gguf",
+      "bytes": 2273655072,
+      "sha256": "897fdb28454ec5c20dafe33ff6f1575ac905f4a6fac66e6312bd6bc5a3833177",
+      "architecture": "bert",
+      "source_sha256": "b5e0ce3470abf5ef3831aa1bd5553b486803e83251590ab7ff35a117cf6aad38",
+      "tensor_count": 389,
+      "tensor_types": {
+        "F32": 389
+      },
+      "input_modes": [
+        "text"
+      ],
+      "quant": "F32",
+      "metadata": {
+        "bert.block_count": 24,
+        "bert.context_length": 8192,
+        "bert.embedding_length": 1024,
+        "bert.pooling_type": 2
+      },
+      "key_tensors": {
+        "token_embd.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            1024,
+            250002
+          ]
+        },
+        "position_embd.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            1024,
+            8192
+          ]
+        },
+        "blk.0.attn_q.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            1024,
+            1024
+          ]
+        },
+        "blk.0.ffn_down.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            4096,
+            1024
+          ]
+        }
+      },
+      "tensor_contract_sha256": "f62986f613034127ccb885f98470f500dafbfd95cdab143bd1b5b8ab30a2d860",
+      "tokenizer_metadata": {
+        "tokenizer.ggml.model": "t5",
+        "tokenizer.ggml.bos_token_id": 0,
+        "tokenizer.ggml.eos_token_id": 2,
+        "tokenizer.ggml.padding_token_id": 1
+      }
+    },
+    {
+      "model": "BGE-VL-base",
+      "path": "models/BAAI-BGE-VL-base/bge-vl-base-F32.gguf",
+      "bytes": 600743648,
+      "sha256": "96858f95ee03614aa1a1f52966f97fde8f6623a0e884fc1b000546036dcf29e8",
+      "architecture": "bge-vl-clip",
+      "source_sha256": "300ab945304bfa6d6e26046db1867815d326d7156c019fb39ba725472bc6c846",
+      "tensor_count": 397,
+      "tensor_types": {
+        "F32": 397
+      },
+      "input_modes": [
+        "text",
+        "image",
+        "fusion"
+      ],
+      "quant": "F32",
+      "metadata": {},
+      "checks": [
+        {
+          "mode": "text",
+          "dimensions": 512,
+          "norm": 1.0000000400429156,
+          "seconds": 0.291,
+          "output_log": "target/bge-real-visual/bge-vl-base-F32-final-text.log",
+          "output_sha256": "30fee2c287bc2f734374801d3fc2f51094882e289de7cca8bef643d76dd2bf4c"
+        },
+        {
+          "mode": "image",
+          "dimensions": 512,
+          "norm": 0.9999999859787012,
+          "seconds": 2.142,
+          "output_log": "target/bge-real-visual/bge-vl-base-F32-final-image.log",
+          "output_sha256": "ffb724fa2a5611b2eb4f5cc93032b89e00624853c83c1440b478e7046810160b"
+        },
+        {
+          "mode": "fusion",
+          "dimensions": 512,
+          "norm": 0.9999999251448621,
+          "seconds": 1.768,
+          "output_log": "target/bge-real-visual/bge-vl-base-F32-final-fusion.log",
+          "output_sha256": "6c29ea125451199428a5936ef563548e288672e0d53b72c7b874a4756bda3a4c"
+        }
+      ],
+      "key_tensors": {
+        "text_model.embeddings.token_embedding.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            512,
+            49408
+          ]
+        },
+        "vision_model.embeddings.patch_embedding.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            16,
+            16,
+            3,
+            768
+          ]
+        },
+        "visual_projection.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            768,
+            512
+          ]
+        }
+      },
+      "tensor_contract_sha256": "973cec112836e806e70c142445cab08e84194238212dbd79f48ded50a5edb655",
+      "tokenizer_metadata": {}
+    },
+    {
+      "model": "BGE-VL-base",
+      "path": "models/BAAI-BGE-VL-base/bge-vl-base-Q8_0.gguf",
+      "bytes": 164126432,
+      "sha256": "3f819811767f1a891acf3a767e84ab20152f4beb24834909ee105a8ed758709f",
+      "architecture": "bge-vl-clip",
+      "source_sha256": "300ab945304bfa6d6e26046db1867815d326d7156c019fb39ba725472bc6c846",
+      "tensor_count": 397,
+      "tensor_types": {
+        "F32": 250,
+        "Q8_0": 147
+      },
+      "input_modes": [
+        "text",
+        "image",
+        "fusion"
+      ],
+      "quant": "Q8_0",
+      "metadata": {},
+      "checks": [
+        {
+          "mode": "text",
+          "dimensions": 512,
+          "norm": 1.0000000378063243,
+          "seconds": 0.08
+        },
+        {
+          "mode": "image",
+          "dimensions": 512,
+          "norm": 1.000000026552721,
+          "seconds": 0.28
+        },
+        {
+          "mode": "fusion",
+          "dimensions": 512,
+          "norm": 1.0000000576746022,
+          "seconds": 0.224
+        }
+      ],
+      "key_tensors": {
+        "text_model.embeddings.token_embedding.weight": {
+          "ggml_type": 8,
+          "gguf_dims": [
+            512,
+            49408
+          ]
+        },
+        "vision_model.embeddings.patch_embedding.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            16,
+            16,
+            3,
+            768
+          ]
+        },
+        "visual_projection.weight": {
+          "ggml_type": 8,
+          "gguf_dims": [
+            768,
+            512
+          ]
+        }
+      },
+      "tensor_contract_sha256": "76e3bf6c778b17b3efd0cd74b64438e1a1bf91102a256fd72224a49a617b78db",
+      "tokenizer_metadata": {}
+    },
+    {
+      "model": "Visualized_base_en_v1.5",
+      "path": "models/BAAI-bge-visualized/visualized-base-F32.gguf",
+      "bytes": 784838912,
+      "sha256": "fe291f480a384fcbafd813a9db945974fa9a0fa851c3a9d48c7584cd6bd78ece",
+      "architecture": "bert",
+      "source_sha256": "07e58cf70ee6962530490ef1ac5b632e7e0153ba8c7ed49d55e0f41ec97bf6a6",
+      "tensor_count": 480,
+      "tensor_types": {
+        "F32": 480
+      },
+      "input_modes": [
+        "text",
+        "image",
+        "fusion"
+      ],
+      "quant": "F32",
+      "metadata": {
+        "bert.block_count": 12,
+        "bert.context_length": 512,
+        "bert.embedding_length": 768,
+        "bert.pooling_type": 2,
+        "bge.visualized": true
+      },
+      "checks": [
+        {
+          "mode": "text",
+          "dimensions": 768,
+          "norm": 1.0000000038041619,
+          "seconds": 0.637,
+          "output_log": "target/bge-real-visual/visualized-base-F32-final-text.log",
+          "output_sha256": "356c35f8ccc679de3a23ce585b21589bdf9da3a78ffb5131fe15a0386862eca9"
+        },
+        {
+          "mode": "image",
+          "dimensions": 768,
+          "norm": 0.9999999671649396,
+          "seconds": 12.757,
+          "output_log": "target/bge-real-visual/visualized-base-F32-final-image.log",
+          "output_sha256": "91e89d65c6fd3c819037efd1d73903e3fb8ace97b09015f38d189ed15531f6c7"
+        },
+        {
+          "mode": "fusion",
+          "dimensions": 768,
+          "norm": 1.0000000033671013,
+          "seconds": 95.475,
+          "output_log": "target/bge-real-visual/visualized-base-F32-final-fusion.log",
+          "output_sha256": "3c794bc68c6e6370a25b9d72f463b27db980125d94e2d0443656274679723e1e"
+        }
+      ],
+      "key_tensors": {
+        "token_embd.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            768,
+            30522
+          ]
+        },
+        "position_embd.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            768,
+            512
+          ]
+        },
+        "blk.0.attn_q.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            768,
+            768
+          ]
+        },
+        "blk.0.ffn_down.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            3072,
+            768
+          ]
+        },
+        "model_visual.visual.blocks.0.attn.rope.freqs_cos": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            64,
+            196
+          ]
+        },
+        "visual_proj.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            768,
+            768
+          ]
+        },
+        "bge.raw_position.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            768,
+            512
+          ]
+        }
+      },
+      "tensor_contract_sha256": "01f2ac8a66442ee2ca530aab96778245c9e9bc44ec83d6b6a23db0a6c06c804f",
+      "tokenizer_metadata": {
+        "tokenizer.ggml.model": "bert",
+        "tokenizer.ggml.padding_token_id": 0,
+        "tokenizer.ggml.normalizer.lowercase": true,
+        "tokenizer.ggml.normalizer.strip_accents": true
+      }
+    },
+    {
+      "model": "Visualized_base_en_v1.5",
+      "path": "models/BAAI-bge-visualized/visualized-base-Q8_0.gguf",
+      "bytes": 215257568,
+      "sha256": "17427782a3c9acb16dbc1ab8adc038e6153859cb272764311caa5e62d6d51a9f",
+      "architecture": "bert",
+      "source_sha256": "07e58cf70ee6962530490ef1ac5b632e7e0153ba8c7ed49d55e0f41ec97bf6a6",
+      "tensor_count": 480,
+      "tensor_types": {
+        "Q8_0": 158,
+        "F32": 322
+      },
+      "input_modes": [
+        "text",
+        "image",
+        "fusion"
+      ],
+      "quant": "Q8_0",
+      "metadata": {
+        "bert.block_count": 12,
+        "bert.context_length": 512,
+        "bert.embedding_length": 768,
+        "bert.pooling_type": 2,
+        "bge.visualized": true
+      },
+      "checks": [
+        {
+          "mode": "text",
+          "dimensions": 768,
+          "norm": 1.0000000543985486,
+          "seconds": 0.043
+        },
+        {
+          "mode": "image",
+          "dimensions": 768,
+          "norm": 0.9999999853045333,
+          "seconds": 1.637
+        },
+        {
+          "mode": "fusion",
+          "dimensions": 768,
+          "norm": 1.0000000329685015,
+          "seconds": 1.092
+        }
+      ],
+      "key_tensors": {
+        "token_embd.weight": {
+          "ggml_type": 8,
+          "gguf_dims": [
+            768,
+            30522
+          ]
+        },
+        "position_embd.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            768,
+            512
+          ]
+        },
+        "blk.0.attn_q.weight": {
+          "ggml_type": 8,
+          "gguf_dims": [
+            768,
+            768
+          ]
+        },
+        "blk.0.ffn_down.weight": {
+          "ggml_type": 8,
+          "gguf_dims": [
+            3072,
+            768
+          ]
+        },
+        "model_visual.visual.blocks.0.attn.rope.freqs_cos": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            64,
+            196
+          ]
+        },
+        "visual_proj.weight": {
+          "ggml_type": 8,
+          "gguf_dims": [
+            768,
+            768
+          ]
+        },
+        "bge.raw_position.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            768,
+            512
+          ]
+        }
+      },
+      "tensor_contract_sha256": "a5f1cdb8408d48829891151c8cd5cfec8696d3ab2ae0707d54a6b9d1cdc0fb39",
+      "tokenizer_metadata": {
+        "tokenizer.ggml.model": "bert",
+        "tokenizer.ggml.padding_token_id": 0,
+        "tokenizer.ggml.normalizer.lowercase": true,
+        "tokenizer.ggml.normalizer.strip_accents": true
+      }
+    },
+    {
+      "model": "clip-large",
+      "path": "models/BAAI-BGE-VL-large/clip-large-F32.gguf",
+      "quant": "F32",
+      "bytes": 1712743328,
+      "sha256": "2729dbfdab6c83bf9dae4f6e5d829af8be523519176096ca317e068dc2f11a4f",
+      "architecture": "bge-vl-clip",
+      "source_sha256": "6d6c5dcd259b71a49a51916e5fd1dc248563ce08b41a713eb00dd296dfd8f5f4",
+      "tensor_count": 589,
+      "tensor_types": {
+        "F32": 589
+      },
+      "input_modes": [
+        "text",
+        "image",
+        "fusion"
+      ],
+      "metadata": {},
+      "checks": [
+        {
+          "mode": "text",
+          "dimensions": 768,
+          "norm": 0.9999999531835724,
+          "seconds": 0.126
+        },
+        {
+          "mode": "image",
+          "dimensions": 768,
+          "norm": 1.0000000054538303,
+          "seconds": 7.764
+        },
+        {
+          "mode": "fusion",
+          "dimensions": 768,
+          "norm": 1.0000000069765862,
+          "seconds": 7.848
+        }
+      ],
+      "key_tensors": {
+        "text_model.embeddings.token_embedding.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            768,
+            49408
+          ]
+        },
+        "vision_model.embeddings.patch_embedding.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            14,
+            14,
+            3,
+            1024
+          ]
+        },
+        "visual_projection.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            1024,
+            768
+          ]
+        }
+      },
+      "tensor_contract_sha256": "f757cec4a23c1eef7e883179bfd8d0eeb2a07b89af00236f95ff5d51154f4c15",
+      "tokenizer_metadata": {}
+    },
+    {
+      "model": "clip-large",
+      "path": "models/BAAI-BGE-VL-large/clip-large-Q8_0.gguf",
+      "quant": "Q8_0",
+      "bytes": 460645280,
+      "sha256": "97cfd1d104d6d68a3005ac6cc27b54efcb509d912fbb03c02ea0fe7e88acce17",
+      "architecture": "bge-vl-clip",
+      "source_sha256": "6d6c5dcd259b71a49a51916e5fd1dc248563ce08b41a713eb00dd296dfd8f5f4",
+      "tensor_count": 589,
+      "tensor_types": {
+        "F32": 370,
+        "Q8_0": 219
+      },
+      "input_modes": [
+        "text",
+        "image",
+        "fusion"
+      ],
+      "metadata": {},
+      "checks": [
+        {
+          "mode": "text",
+          "dimensions": 768,
+          "norm": 1.0000000538791625,
+          "seconds": 0.034
+        },
+        {
+          "mode": "image",
+          "dimensions": 768,
+          "norm": 0.9999999815252381,
+          "seconds": 0.777
+        },
+        {
+          "mode": "fusion",
+          "dimensions": 768,
+          "norm": 1.0000000176792863,
+          "seconds": 0.803
+        }
+      ],
+      "key_tensors": {
+        "text_model.embeddings.token_embedding.weight": {
+          "ggml_type": 8,
+          "gguf_dims": [
+            768,
+            49408
+          ]
+        },
+        "vision_model.embeddings.patch_embedding.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            14,
+            14,
+            3,
+            1024
+          ]
+        },
+        "visual_projection.weight": {
+          "ggml_type": 8,
+          "gguf_dims": [
+            1024,
+            768
+          ]
+        }
+      },
+      "tensor_contract_sha256": "4407f7c7d3de567ca32a99ae8c76f6d8c57c95d0e31b72e647bc1ca82352de53",
+      "tokenizer_metadata": {}
+    },
+    {
+      "model": "screenshot",
+      "path": "models/BAAI-BGE-VL-Screenshot/screenshot-Q8_0.gguf",
+      "quant": "Q8_0",
+      "bytes": 4413401824,
+      "sha256": "75c96e92b829f2591ddbc4123713f3bbe7955a4ae24a8f45837b13d1d07ffd6b",
+      "architecture": "qwen2vl",
+      "source_sha256": "8e642b6dd810235a2884bd7acec67bc8ed23eeb386c661925be28e8491177194",
+      "tensor_count": 825,
+      "tensor_types": {
+        "Q8_0": 383,
+        "F32": 442
+      },
+      "input_modes": [
+        "text",
+        "image",
+        "fusion"
+      ],
+      "metadata": {
+        "qwen2vl.block_count": 36,
+        "qwen2vl.context_length": 128000,
+        "qwen2vl.embedding_length": 2048,
+        "qwen2vl.pooling_type": 3,
+        "bge.screenshot": true,
+        "clip.vision.embedding_length": 1280,
+        "clip.vision.block_count": 32
+      },
+      "checks": [
+        {
+          "mode": "text",
+          "dimensions": 2048,
+          "norm": 1.0000000271491016,
+          "seconds": 1.365
+        },
+        {
+          "mode": "image",
+          "dimensions": 2048,
+          "norm": 0.9999999971170496,
+          "seconds": 18.039
+        },
+        {
+          "mode": "fusion",
+          "dimensions": 2048,
+          "norm": 0.9999999921053893,
+          "seconds": 18.214
+        }
+      ],
+      "key_tensors": {
+        "token_embd.weight": {
+          "ggml_type": 8,
+          "gguf_dims": [
+            2048,
+            151936
+          ]
+        },
+        "output_norm.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            2048
+          ]
+        },
+        "blk.0.attn_q.weight": {
+          "ggml_type": 8,
+          "gguf_dims": [
+            2048,
+            2048
+          ]
+        },
+        "blk.0.ffn_down.weight": {
+          "ggml_type": 8,
+          "gguf_dims": [
+            11008,
+            2048
+          ]
+        },
+        "v.patch_embd.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            14,
+            14,
+            3,
+            1280
+          ]
+        },
+        "v.patch_embd.weight.1": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            14,
+            14,
+            3,
+            1280
+          ]
+        },
+        "mm.2.weight": {
+          "ggml_type": 8,
+          "gguf_dims": [
+            5120,
+            2048
+          ]
+        }
+      },
+      "tensor_contract_sha256": "37f5f26d0faa46e54e4779a447b327567f0f4f0290a4c0a97f7a874f40ce1956",
+      "tokenizer_metadata": {
+        "tokenizer.ggml.model": "gpt2",
+        "tokenizer.ggml.bos_token_id": 0,
+        "tokenizer.ggml.eos_token_id": 151645,
+        "tokenizer.ggml.padding_token_id": 151643
+      }
+    },
+    {
+      "model": "visualized-m3",
+      "path": "models/BAAI-bge-visualized/visualized-m3-F32.gguf",
+      "quant": "F32",
+      "bytes": 3527872480,
+      "sha256": "f50aa1b67e6beb44f42eba68fd401ff49fa960cb6430fd4cd523a64b4cedbd9f",
+      "architecture": "bert",
+      "source_sha256": "d14e7e8f2618b80d3f4a3283c08f79a16f09ce37d4447dac24117b44df6bd069",
+      "tensor_count": 948,
+      "tensor_types": {
+        "F32": 948
+      },
+      "input_modes": [
+        "text",
+        "image",
+        "fusion"
+      ],
+      "metadata": {
+        "bert.block_count": 24,
+        "bert.context_length": 8192,
+        "bert.embedding_length": 1024,
+        "bert.pooling_type": 2,
+        "bge.visualized": true
+      },
+      "checks": [
+        {
+          "mode": "text",
+          "dimensions": 1024,
+          "norm": 1.0000000248156509,
+          "seconds": 0.659
+        },
+        {
+          "mode": "image",
+          "dimensions": 1024,
+          "norm": 1.0000000213550218,
+          "seconds": 27.48
+        },
+        {
+          "mode": "fusion",
+          "dimensions": 1024,
+          "norm": 0.9999999959041412,
+          "seconds": 28.064
+        }
+      ],
+      "key_tensors": {
+        "token_embd.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            1024,
+            250002
+          ]
+        },
+        "position_embd.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            1024,
+            8192
+          ]
+        },
+        "blk.0.attn_q.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            1024,
+            1024
+          ]
+        },
+        "blk.0.ffn_down.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            4096,
+            1024
+          ]
+        },
+        "model_visual.visual.blocks.0.attn.rope.freqs_cos": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            64,
+            256
+          ]
+        },
+        "visual_proj.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            1024,
+            1024
+          ]
+        },
+        "bge.raw_position.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            1024,
+            8194
+          ]
+        }
+      },
+      "tensor_contract_sha256": "ad96f3b885d3fc47acf45cd48885f6a908f5e8813540911e17c8dc1f2efae840",
+      "tokenizer_metadata": {
+        "tokenizer.ggml.model": "t5",
+        "tokenizer.ggml.bos_token_id": 0,
+        "tokenizer.ggml.eos_token_id": 2,
+        "tokenizer.ggml.padding_token_id": 1
+      }
+    },
+    {
+      "model": "visualized-m3",
+      "path": "models/BAAI-bge-visualized/visualized-m3-Q8_0.gguf",
+      "quant": "Q8_0",
+      "bytes": 1195824224,
+      "sha256": "67f97b611758d8138ffcc2c9583eb55e5955fc6c91898924851c076f8d86c5de",
+      "architecture": "bert",
+      "source_sha256": "d14e7e8f2618b80d3f4a3283c08f79a16f09ce37d4447dac24117b44df6bd069",
+      "tensor_count": 948,
+      "tensor_types": {
+        "Q8_0": 290,
+        "F32": 658
+      },
+      "input_modes": [
+        "text",
+        "image",
+        "fusion"
+      ],
+      "metadata": {
+        "bert.block_count": 24,
+        "bert.context_length": 8192,
+        "bert.embedding_length": 1024,
+        "bert.pooling_type": 2,
+        "bge.visualized": true
+      },
+      "checks": [
+        {
+          "mode": "text",
+          "dimensions": 1024,
+          "norm": 1.00000004617112,
+          "seconds": 0.186
+        },
+        {
+          "mode": "image",
+          "dimensions": 1024,
+          "norm": 1.0000000250889274,
+          "seconds": 6.66
+        },
+        {
+          "mode": "fusion",
+          "dimensions": 1024,
+          "norm": 0.999999978603963,
+          "seconds": 6.885
+        }
+      ],
+      "key_tensors": {
+        "token_embd.weight": {
+          "ggml_type": 8,
+          "gguf_dims": [
+            1024,
+            250002
+          ]
+        },
+        "position_embd.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            1024,
+            8192
+          ]
+        },
+        "blk.0.attn_q.weight": {
+          "ggml_type": 8,
+          "gguf_dims": [
+            1024,
+            1024
+          ]
+        },
+        "blk.0.ffn_down.weight": {
+          "ggml_type": 8,
+          "gguf_dims": [
+            4096,
+            1024
+          ]
+        },
+        "model_visual.visual.blocks.0.attn.rope.freqs_cos": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            64,
+            256
+          ]
+        },
+        "visual_proj.weight": {
+          "ggml_type": 8,
+          "gguf_dims": [
+            1024,
+            1024
+          ]
+        },
+        "bge.raw_position.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            1024,
+            8194
+          ]
+        }
+      },
+      "tensor_contract_sha256": "b87708aff02d9e67c284c89db02229ebae662b2bdd5784573ed25b6f0258e5b8",
+      "tokenizer_metadata": {
+        "tokenizer.ggml.model": "t5",
+        "tokenizer.ggml.bos_token_id": 0,
+        "tokenizer.ggml.eos_token_id": 2,
+        "tokenizer.ggml.padding_token_id": 1
+      }
+    },
+    {
+      "model": "llava-zs",
+      "path": "models/BAAI-BGE-VL-v1-5-zs/llava-zs-Q8_0.gguf",
+      "quant": "Q8_0",
+      "bytes": 7906180576,
+      "sha256": "8266b86c130bf89a2341997df28ad4e6624b399c9d8cf8aec82c39916f73a245",
+      "architecture": "llama",
+      "source_sha256": "7347577d8912c50b798e46e46bbe822a2a7d0d3ac128b361b80fdddbd9d1ae8d",
+      "tensor_count": 686,
+      "tensor_types": {
+        "Q8_0": 371,
+        "F32": 315
+      },
+      "input_modes": [
+        "text",
+        "image",
+        "fusion"
+      ],
+      "metadata": {
+        "llama.block_count": 32,
+        "llama.context_length": 32768,
+        "llama.embedding_length": 4096,
+        "llama.pooling_type": 3,
+        "bge.llava_next": true
+      },
+      "checks": [
+        {
+          "mode": "text",
+          "dimensions": 4096,
+          "norm": 1.0000000030824734,
+          "seconds": 1.641
+        },
+        {
+          "mode": "image",
+          "dimensions": 4096,
+          "norm": 1.0000000033737149,
+          "seconds": 724.326
+        },
+        {
+          "mode": "fusion",
+          "dimensions": 4096,
+          "norm": 0.9999999944633072,
+          "seconds": 781.914
+        }
+      ],
+      "key_tensors": {
+        "token_embd.weight": {
+          "ggml_type": 8,
+          "gguf_dims": [
+            4096,
+            32064
+          ]
+        },
+        "output_norm.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            4096
+          ]
+        },
+        "blk.0.attn_q.weight": {
+          "ggml_type": 8,
+          "gguf_dims": [
+            4096,
+            4096
+          ]
+        },
+        "blk.0.ffn_down.weight": {
+          "ggml_type": 8,
+          "gguf_dims": [
+            14336,
+            4096
+          ]
+        },
+        "vision_tower.vision_model.embeddings.patch_embedding.weight": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            14,
+            14,
+            3,
+            1024
+          ]
+        },
+        "multi_modal_projector.linear_1.weight": {
+          "ggml_type": 8,
+          "gguf_dims": [
+            1024,
+            4096
+          ]
+        },
+        "image_newline": {
+          "ggml_type": 0,
+          "gguf_dims": [
+            4096
+          ]
+        }
+      },
+      "tensor_contract_sha256": "b53d9a24f0b6604423813a77b2c2edfafc910fbbb5ed4a80d0559940d9db68ba",
+      "tokenizer_metadata": {
+        "tokenizer.ggml.model": "llama",
+        "tokenizer.ggml.bos_token_id": 1,
+        "tokenizer.ggml.eos_token_id": 2,
+        "tokenizer.ggml.padding_token_id": 32001
+      }
+    }
+  ],
+  "llava_index_checks": [
+    {
+      "model": "BAAI-BGE-VL-MLLM-S1",
+      "decoder_layers": 32,
+      "tensors": 687,
+      "required": 686,
+      "allowed_omitted": [
+        "language_model.lm_head.weight"
+      ]
+    },
+    {
+      "model": "BAAI-BGE-VL-MLLM-S2",
+      "decoder_layers": 32,
+      "tensors": 687,
+      "required": 686,
+      "allowed_omitted": [
+        "language_model.lm_head.weight"
+      ]
+    },
+    {
+      "model": "BAAI-BGE-VL-v1-5-mmeb",
+      "decoder_layers": 32,
+      "tensors": 687,
+      "required": 686,
+      "allowed_omitted": [
+        "language_model.lm_head.weight"
+      ]
+    },
+    {
+      "model": "BAAI-BGE-VL-v1-5-zs",
+      "decoder_layers": 32,
+      "tensors": 687,
+      "required": 686,
+      "allowed_omitted": [
+        "language_model.lm_head.weight"
+      ]
+    }
+  ],
+  "validation": {
+    "converter_and_scope_tests": {
+      "passed": 22,
+      "failed": 0,
+      "skipped": 0
+    },
+    "shared_writer_tests": {
+      "passed": 18,
+      "failed": 0
+    },
+    "visual_rust_unit_tests": {
+      "passed": 4,
+      "failed": 0
+    },
+    "actual_model_integration_tests": {
+      "passed": 9,
+      "failed": 0,
+      "models": [
+        "models/BAAI-bge-small-en-v1-5/bge-small-en-v1.5-Q8_0.gguf",
+        "models/ggml-org-bge-m3-q8-gguf/bge-m3-q8_0.gguf"
+      ]
+    },
+    "library_suite": {
+      "passed": 1163,
+      "failed": 25,
+      "ignored": 81,
+      "baseline_commit": "b6599fd4",
+      "failure_set_matches_baseline": true,
+      "failures": [
+        "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+        "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+        "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+        "models::clm::tests::matches_reference_golden_vectors",
+        "models::clm::tests::rejects_wrong_embedding_width",
+        "models::diffusion::z_image::text::tests::qwen_attention_softmax_matches_the_pinned_ggml_neon_reduction",
+        "models::diffusion::z_image::text::tests::silu_mul_inplace_matches_pinned_ggml_neon_activation",
+        "models::diffusion::z_image::vae::tests::silu_matches_pinned_ggml_neon_vector_path",
+        "models::funasr::encoder::parity_tests::fsmn_rounds_product_before_adding_like_ggml",
+        "models::funasr::encoder::parity_tests::layernorm_accumulates_variance_in_ggml_neon_groups",
+        "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+        "models::gemma4::trunk::tests::gemma4_trace_rows_match_batch_one_raw_bits",
+        "models::gemma4::trunk::tests::per_layer_bf16_projection_matches_pinned_scalar_dot_bits",
+        "models::gemma4::trunk::tests::per_layer_projection_rejects_non_bf16_weight",
+        "models::gemma4::trunk::tests::per_layer_projection_rejects_wrong_bf16_storage_length",
+        "models::qwen35::trunk::config::tests::qwen35_config_rejects_invalid_tensor_dimensions",
+        "models::qwen35::vision::tests::layer_norm_stats_match_ggml_grouped_f32_variance",
+        "models::qwen3::trunk::tests::qwen3_trace_keeps_token_major_checkpoints_for_every_prompt_row",
+        "ops::argmax::tests::all_negative",
+        "ops::argmax::tests::large_random",
+        "ops::argmax::tests::middle_max",
+        "ops::argmax::tests::tail_handles_non_aligned_lengths",
+        "ops::argmax::tests::ties_pick_lowest_index",
+        "ops::matmul::neon_tests::neon_softmax_matches_ggml_vector_exp_and_f64_sum",
+        "ops::rope::tests::rope_neox_inplace_simd_matches_scalar_fallback"
+      ]
+    }
+  },
+  "image_fixture": {
+    "path": "target/bge-real-visual/sample.png",
+    "bytes": 99,
+    "sha256": "e77d3406ca6df90d6667d2edd4001a606daa1d70956094a9571f0c9f00b625b9",
+    "dimensions": [
+      32,
+      32
+    ]
+  },
+  "limits": [
+    "Not every repository was downloaded and run individually",
+    "No visual whole-model or resized-pixel bit parity",
+    "Lossy operator alignment including F16 GELU tables is skipped",
+    "Real decoder-only large checkpoint runtime has not been tested",
+    "M3 dense output only; sparse and ColBERT are not implemented",
+    "Smoke timing includes process initialization and is not a performance benchmark",
+    "Full library suite has 25 baseline failures"
+  ]
+}

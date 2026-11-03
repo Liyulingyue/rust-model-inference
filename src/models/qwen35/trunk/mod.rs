@@ -8,14 +8,17 @@
 //! - `scratch.rs` — `Qwen35Scratchpad` + KV cache helpers
 //! - `util.rs` — f16 decode + scalar Mamba helpers
 //! - `positions.rs` — `build_qwen35_positions` for mRoPE-aware VL inputs
+//! - `trace.rs` — `RMI_PARITY_TRACE` checkpoints for `qwen35moe`
 //! - `tests.rs` — unit tests
 
 pub mod config;
 pub mod forward;
+pub mod moe;
 pub mod positions;
 pub mod scratch;
 pub mod session;
 pub mod tests;
+pub(crate) mod trace;
 pub mod util;
 pub mod weights;
 

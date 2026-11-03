@@ -9,10 +9,10 @@
 //! `matmul_q8_0_quantized_range`; called by `parallel::matmul_q8_0_quantized_parallel_rows`
 //! and by external callers (`bin/server.rs`, `bin/micro_bench.rs`).
 
-#[cfg(target_arch = "x86_64")]
-use crate::ops::has_avx2_fma;
 #[cfg(target_arch = "aarch64")]
 use crate::ops::has_neon;
+#[cfg(target_arch = "x86_64")]
+use crate::ops::{has_avx2_fma, has_f16c};
 
 #[cfg(target_arch = "x86_64")]
 use super::avx2::matmul_q8_0_vs_q8_0_avx2;
@@ -38,7 +38,7 @@ pub fn matmul_q8_0_quantized_range(
 ) {
     debug_assert_eq!(output.len(), row_end - row_start);
     #[cfg(target_arch = "x86_64")]
-    if has_avx2_fma() {
+    if has_avx2_fma() && has_f16c() {
         unsafe {
             matmul_q8_0_vs_q8_0_avx2(
                 weight,
@@ -128,4 +128,36 @@ pub fn matmul_q8_0_quantized_range_nrc1(
         row_start,
         row_end,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quantized_range_handles_row_offset_and_tail() {
+        let mut weights = Vec::new();
+        for row in 0..7 {
+            for block in 0..2 {
+                weights.extend_from_slice(&crate::ops::f32_to_f16(0.5).to_le_bytes());
+                weights.extend_from_slice(&[(row + 1) * (block + 1); 32]);
+            }
+        }
+        let mut output = [f32::NAN; 5];
+        matmul_q8_0_quantized_range(&weights, &[2; 64], &[1.0, 2.0], &mut output, 64, 1, 6);
+        assert_eq!(output, [320.0, 480.0, 640.0, 800.0, 960.0]);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    #[ignore = "requires AVX2/FMA with F16C disabled; run under QEMU in CI"]
+    fn avx2_without_f16c_uses_scalar() {
+        assert!(
+            !cfg!(target_feature = "f16c"),
+            "build with target-cpu=x86-64"
+        );
+        assert!(crate::ops::has_avx2_fma());
+        assert!(!crate::ops::has_f16c());
+        quantized_range_handles_row_offset_and_tail();
+    }
 }

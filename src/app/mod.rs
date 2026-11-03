@@ -9,6 +9,7 @@ pub(crate) mod selftest;
 pub mod server;
 pub mod text;
 pub(crate) mod tts;
+pub mod wevisone_vl;
 pub(crate) mod yue2;
 
 pub use crate::models::qwen3::embedding::{
@@ -16,19 +17,20 @@ pub use crate::models::qwen3::embedding::{
 };
 pub use asr::run_asr_cli;
 pub use cli::{
-    dreamx_cli_options, inference_step_budget, init_rayon_global_pool, longcat_cli_options,
-    normalize_tts_language, parse_cli_options, per_second, qwen_drive_cli_options,
-    resolve_cli_generation_options, resolve_thread_count, transcription_options,
-    validate_cli_options, validate_qwen3vl_decoder_mode, yue2_cli_options, z_image_cli_options,
-    CliOptions, DreamXCliOptions, DreamXOptions, DreamXRefinerOptions, EmbeddingOutput,
-    JevBlockInput, KvFormat, LatentUpsampleKind, LongCatCliOptions, PlanningMode,
-    QwenDriveCliOptions, QwenDriveHead, RefinerDecoderKind, YuE2CliOptions, ZImageCliOptions,
-    DEFAULT_THREAD_CAP,
+    astronex_cli_options, dreamx_cli_options, inference_step_budget, init_rayon_global_pool,
+    longcat_cli_options, normalize_tts_language, parse_cli_options, per_second,
+    qwen_drive_cli_options, resolve_cli_generation_options, resolve_thread_count,
+    transcription_options, validate_cli_options, validate_qwen3vl_decoder_mode, yue2_cli_options,
+    z_image_cli_options, AstronexCliOptions, CliOptions, DreamXCliOptions, DreamXOptions,
+    DreamXRefinerOptions, EmbeddingOutput, JevBlockInput, KvFormat, LatentUpsampleKind,
+    LongCatCliOptions, PlanningMode, QwenDriveCliOptions, QwenDriveHead, RefinerDecoderKind,
+    YuE2CliOptions, ZImageCliOptions, DEFAULT_THREAD_CAP,
 };
 pub use diffusion::{
-    read_f32_file, run_auk_cli, run_dreamx_cli, run_ernie_image_cli, run_longcat_image_edit,
-    run_mage_flow_cli, run_pig_image, run_qwen_image_2_1, run_qwen_image_2_1_cli, run_z_image_cli,
-    write_output_atomically, write_png_atomically, QwenImage21Request,
+    read_f32_file, run_astronex_cli, run_auk_cli, run_dreamx_cli, run_ernie_image_cli,
+    run_flux3_cli, run_longcat_image_edit, run_mage_flow_cli, run_pig_image, run_qwen_image_2_1,
+    run_qwen_image_2_1_cli, run_z_image_cli, write_output_atomically, write_png_atomically,
+    QwenImage21Request,
 };
 pub use jev::{
     build_grouped_payload, build_grouped_system, build_jev_inputs, gliner2_schema,
@@ -71,16 +73,27 @@ pub fn arch_of(source: &dyn TensorSource) -> String {
         .to_string()
 }
 
+fn is_last_token_embedding(source: &dyn TensorSource, arch: &str) -> bool {
+    source
+        .metadata(&format!("{arch}.pooling_type"))
+        .and_then(crate::core::tensor::MetaValue::to_u64)
+        == Some(3)
+}
+
 /// Embedding entry point dispatched on `general.architecture`.
 ///
-/// Only archs with a dedicated, byte-level verified implementation are routed;
-/// an unknown arch is an error rather than a silent fallback (per
+/// Routes explicitly supported embedding architectures; verification coverage
+/// is documented per model in `docs/develop/SUPPORTED_MODELS.md`.
+/// An unknown arch is an error rather than a silent fallback (per
 /// `.agents/skills/adapting-new-models`).
 pub fn compute_embedding(
     source: &dyn TensorSource,
     prompt: &str,
     n_threads_arg: usize,
 ) -> Result<Vec<f32>, String> {
+    if crate::models::bge_vl::is_visual(source) {
+        return crate::models::bge_vl::compute_embedding(source, prompt, None, n_threads_arg);
+    }
     if crate::models::bitnet::detect_is_bitnet(source) {
         return crate::models::bitnet::compute_embedding(source, prompt, n_threads_arg);
     }
@@ -98,11 +111,21 @@ pub fn compute_embedding(
         // gemma2 (standard, non-BitNet). Shares tensor layout with
         // the llama trunk; arch-specific GeGLU + softcap + sliding
         // window is wired inside `models::llama::trunk`.
+        "gemma2" if is_last_token_embedding(source, "gemma2") => {
+            crate::models::decoder_embedding::compute_embedding(source, prompt, n_threads_arg)
+        }
         "gemma2" => crate::models::gemma2::compute_embedding(source, prompt, n_threads_arg),
         "bert" | "jina-bert-v2" | "nomic-bert" | "nomic-bert-moe" => {
             crate::models::bert_family::compute_embedding(source, prompt, n_threads_arg)
         }
-        _ => qwen3_compute_embedding(source, prompt, n_threads_arg),
+        "qwen3" => qwen3_compute_embedding(source, prompt, n_threads_arg),
+        "llama" if is_last_token_embedding(source, "llama") => {
+            crate::models::decoder_embedding::compute_embedding(source, prompt, n_threads_arg)
+        }
+        "qwen2" => {
+            crate::models::decoder_embedding::compute_embedding(source, prompt, n_threads_arg)
+        }
+        other => Err(format!("unsupported embedding architecture {other:?}")),
     }
 }
 
@@ -114,6 +137,15 @@ pub fn run_embedding(
     kv_format: KvFormat,
     output: EmbeddingOutput,
 ) {
+    if crate::models::bge_vl::is_visual(source) {
+        compute_embedding(source, prompt, n_threads_arg)
+            .map(|values| crate::models::bert_family::print_embedding(&values, output))
+            .unwrap_or_else(|error| {
+                eprintln!("{error}");
+                std::process::exit(1);
+            });
+        return;
+    }
     let arch = arch_of(source);
     match arch.as_str() {
         "gemma-embedding" => crate::models::gemma_embedding::run_embedding(
@@ -144,7 +176,42 @@ pub fn run_embedding(
         "gemma3" => {
             crate::models::gemma3::run_embedding(source, prompt, n_threads_arg, kv_format, output)
         }
-        _ => qwen3_run_embedding(source, prompt, n_threads_arg, kv_format, output),
+        "gemma2" if is_last_token_embedding(source, "gemma2") => {
+            crate::models::decoder_embedding::run_embedding(
+                source,
+                prompt,
+                n_threads_arg,
+                kv_format,
+                output,
+            )
+        }
+        "gemma2" => crate::models::gemma2::compute_embedding(source, prompt, n_threads_arg)
+            .map(|embedding| crate::models::bert_family::print_embedding(&embedding, output))
+            .unwrap_or_else(|error| {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }),
+        "llama" if is_last_token_embedding(source, "llama") => {
+            crate::models::decoder_embedding::run_embedding(
+                source,
+                prompt,
+                n_threads_arg,
+                kv_format,
+                output,
+            )
+        }
+        "qwen2" => crate::models::decoder_embedding::run_embedding(
+            source,
+            prompt,
+            n_threads_arg,
+            kv_format,
+            output,
+        ),
+        "qwen3" => qwen3_run_embedding(source, prompt, n_threads_arg, kv_format, output),
+        other => {
+            eprintln!("unsupported embedding architecture {other:?}");
+            std::process::exit(1);
+        }
     }
 }
 

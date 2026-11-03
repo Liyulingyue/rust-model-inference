@@ -1,0 +1,1056 @@
+{
+  "official_revision": "4954d69c119759f085aa36bd5e66e27647cdee60",
+  "oracle": {
+    "stable_diffusion_cpp": "2f886889e6e8b78738d6b87f7191f6018557c551",
+    "ggml": "4bf5f6000653b7881d00963cd6ddb665ccd62a8d",
+    "scalar": true
+  },
+  "cases": [
+    {
+      "case": "context",
+      "scalar": true,
+      "steps": 8,
+      "cfg": 1.0,
+      "references": 0,
+      "rust_seconds": 274.974,
+      "stages": [
+        {
+          "mode": "sample",
+          "checkpoints": 2730,
+          "f32_values": 96088593,
+          "relative_l2_limit": 0.01,
+          "max_abs": 0.0,
+          "max_relative_l2": 0.0
+        },
+        {
+          "mode": "vae",
+          "checkpoints": 85,
+          "f32_values": 9297920,
+          "relative_l2_limit": 0.01,
+          "max_abs": 0.0,
+          "max_relative_l2": 0.0,
+          "rgba_max_abs": 0,
+          "rgba_bytes": 8192
+        }
+      ],
+      "production_seconds": 8.075,
+      "width": 64,
+      "height": 32,
+      "conditioning": "fixed two-token synthetic F32 context"
+    },
+    {
+      "case": "text",
+      "scalar": true,
+      "steps": 8,
+      "cfg": 1.0,
+      "references": 0,
+      "rust_seconds": 968.666,
+      "stages": [
+        {
+          "mode": "text",
+          "checkpoints": 39,
+          "f32_values": 5079073,
+          "relative_l2_limit": 0.01,
+          "max_abs": 0.0,
+          "max_relative_l2": 0.0
+        },
+        {
+          "mode": "sample",
+          "checkpoints": 2730,
+          "f32_values": 259897873,
+          "relative_l2_limit": 0.01,
+          "max_abs": 0.0,
+          "max_relative_l2": 0.0
+        },
+        {
+          "mode": "vae",
+          "checkpoints": 85,
+          "f32_values": 9297920,
+          "relative_l2_limit": 0.01,
+          "max_abs": 0.0,
+          "max_relative_l2": 0.0,
+          "rgba_max_abs": 0,
+          "rgba_bytes": 8192
+        }
+      ],
+      "width": 64,
+      "height": 32,
+      "prompt": "A blue cat. 蓝猫 🐈",
+      "production_seconds": 32.99,
+      "png_sha256": "72b76501d8de8fbfe1714ec27d11698767afb823ea70632de23b369e54cad272",
+      "production_png_sha256": "72b76501d8de8fbfe1714ec27d11698767afb823ea70632de23b369e54cad272"
+    }
+  ],
+  "verified_artifacts": [
+    {
+      "repository": "unsloth/Qwen-Image-2.1-Turbo-GGUF",
+      "revision": "0331037889cff0eb06d6f9ee97db856b2fb9228d",
+      "path": "Qwen-Image-2.1-Turbo-GGUF/qwen-image-2.1-turbo-Q8_0.gguf",
+      "bytes": 7640860480,
+      "sha256": "399d2ddc3636f36456e2f5bfa57187da4e38721bc046430317f42a9eab5b1712"
+    },
+    {
+      "repository": "unsloth/Qwen3-VL-8B-Instruct-GGUF",
+      "revision": "4e2066f88dd47d2862aaf0a83b60cbf1eb784b4a",
+      "path": "Qwen3-VL-8B-Instruct-GGUF/Qwen3-VL-8B-Instruct-Q8_0.gguf",
+      "bytes": 8709520224,
+      "sha256": "cb8616bf6ed228982d9e47d7b72b42195342efa26044b0ee1873e61d9e78d3d7"
+    },
+    {
+      "repository": "unsloth/Qwen3-VL-8B-Instruct-GGUF",
+      "revision": "4e2066f88dd47d2862aaf0a83b60cbf1eb784b4a",
+      "path": "Qwen3-VL-8B-Instruct-GGUF/mmproj-F16.gguf",
+      "bytes": 1159030336,
+      "sha256": "d406d03ebabefdef86a2c86bf0c1b65f9e046f7a81c218f25de4931b46a07fc4"
+    },
+    {
+      "repository": "Qwen/Qwen-Image-2.1-Turbo",
+      "revision": "4954d69c119759f085aa36bd5e66e27647cdee60",
+      "path": "Qwen-Image-2.1-Turbo/vae/diffusion_pytorch_model.safetensors",
+      "bytes": 675508656,
+      "sha256": "71879ffd5321e6d10c3c87513e2b474b1252efa7f3dec2969214a9bf06a6dd5c"
+    }
+  ],
+  "hardware": {
+    "cpu": "Apple M3 Max",
+    "logical_cpus": 16,
+    "ram_bytes": 68719476736
+  },
+  "remote": {
+    "cpu": "AMD EPYC 9334",
+    "focused_passed": 11,
+    "real_weight_inference": "passed: normal scalar text-to-RGBA CLI, 64x32, 8 steps, CFG1",
+    "production": {
+      "returncode": 0,
+      "wall_seconds": 51.335,
+      "max_rss_bytes": 8181514240,
+      "user_seconds": 287.827314,
+      "system_seconds": 33.219274,
+      "scalar": true,
+      "width": 64,
+      "height": 32,
+      "threads": 8,
+      "seed": 42,
+      "steps": 8,
+      "cfg": 1,
+      "prompt": "A blue cat. 蓝猫 🐈",
+      "isolated_benchmark": false,
+      "png_sha256": "195536bb9cf2519fa77fd5fb3495eefb802fe1baafa930f161b87770f645d674"
+    },
+    "model_sha256_verified": [
+      "399d2ddc3636f36456e2f5bfa57187da4e38721bc046430317f42a9eab5b1712",
+      "cb8616bf6ed228982d9e47d7b72b42195342efa26044b0ee1873e61d9e78d3d7",
+      "71879ffd5321e6d10c3c87513e2b474b1252efa7f3dec2969214a9bf06a6dd5c"
+    ],
+    "cross_platform_rgba_max_abs": 18,
+    "cross_platform_note": "Linux versus macOS output pixels; not a same-platform Oracle comparison or a passing cross-platform alignment claim",
+    "source_audit": {
+      "matching_source_files": 503,
+      "source_fingerprint": "5753f04bd065e021eeb04f6f965dfffbd5e5a09e582f28b59aa4dafd34059a62"
+    },
+    "runtime_source_commit": "05e9d487d82569dc3c92d25bc06a09d1c7772127",
+    "scalar_oracle_configuration_correction": {
+      "cause": "baseline __SSE2__ kept vector SiLU/softmax active despite GGML_SSE42=OFF; now disabled for the scalar reference",
+      "initial_first_failed_checkpoint": {
+        "name": "qwen.text.block.35",
+        "max_abs": 17.298095703125,
+        "relative_l2": 0.017662001171485316
+      },
+      "probe_values": 256,
+      "probe_before": {
+        "exp_different_values": 146,
+        "silu_different_values": 64,
+        "softmax_sum_difference": -8.817878551781178e-07
+      },
+      "probe_after": {
+        "exp_different_values": 0,
+        "silu_different_values": 0,
+        "softmax_sum_difference": 0
+      },
+      "corrected_text": {
+        "checkpoints": 39,
+        "f32_values": 5079073,
+        "max_abs": 0.0,
+        "max_relative_l2": 0.0
+      },
+      "build_script_sha256": "93205105f0beb89a0a539233878dea39dffbb11b4ae9a7281d3e7c8bd9324f51"
+    },
+    "oracle_input_audit": {
+      "matching_files": 8,
+      "manifest_sha256": "b0d4469a5454e76130590be580f980a2739e619ebedd0ce54e5656c8438cf8c6",
+      "components_sha256": "f70e62c06654f8fb8fdc95f5f492279f0f9ea3618bc0785c6dfb1ba198594cab"
+    },
+    "parity": {
+      "case": "text",
+      "scalar": true,
+      "width": 64,
+      "height": 32,
+      "steps": 8,
+      "cfg": 1.0,
+      "references": 0,
+      "stages": [
+        {
+          "mode": "text",
+          "checkpoints": 39,
+          "f32_values": 5079073,
+          "relative_l2_limit": 0.01,
+          "max_abs": 0.0,
+          "max_relative_l2": 0.0
+        },
+        {
+          "mode": "sample",
+          "checkpoints": 2730,
+          "f32_values": 259897873,
+          "relative_l2_limit": 0.01,
+          "max_abs": 0.0,
+          "max_relative_l2": 0.0
+        },
+        {
+          "mode": "vae",
+          "checkpoints": 85,
+          "f32_values": 9297920,
+          "relative_l2_limit": 0.01,
+          "max_abs": 1.1920928955078125e-07,
+          "max_relative_l2": 5.9441857491399164e-08,
+          "rgba_max_abs": 0,
+          "rgba_bytes": 8192
+        }
+      ],
+      "production_seconds": 69.38,
+      "rust_trace_reused": true,
+      "rust_trace_note": "Reused the completed Rust run after correcting the remote Oracle harness copy; independent Oracle text, sampler and VAE use their own outputs",
+      "png_sha256": "195536bb9cf2519fa77fd5fb3495eefb802fe1baafa930f161b87770f645d674",
+      "production_png_sha256": "195536bb9cf2519fa77fd5fb3495eefb802fe1baafa930f161b87770f645d674",
+      "status": "passed unchanged 1% numerical bounds and exact structural checks",
+      "total_checkpoints": 2854,
+      "total_f32_values": 274274866
+    },
+    "normal_cli_image_512": {
+      "prompt": "A photorealistic orange tabby cat sitting on a wooden windowsill in warm afternoon sunlight, next to a steaming ceramic cup of tea and an open book. Rain-washed city rooftops outside the window, soft bokeh, detailed fur, cinematic composition.",
+      "scalar": false,
+      "width": 512,
+      "height": 512,
+      "steps": 8,
+      "cfg": 1,
+      "seed": 42,
+      "threads": 8,
+      "binary_sha256": "1ab6d3da5b186126a0b3a1c487b228b70366c93fe99e6478ec3eb28b9f7d3612",
+      "runtime_source_commit": "05e9d487d82569dc3c92d25bc06a09d1c7772127",
+      "cpu": "AMD EPYC 9334",
+      "returncode": 1,
+      "wall_seconds": 294.299,
+      "max_rss_bytes": 7849402368,
+      "error": "Non-finite Qwen-Image-2.1 latent at step 1",
+      "status": "failed; no PNG produced"
+    }
+  },
+  "output_sha256": "4754fccfdbac18477434059e3f7b7e2adf190d4752f5eca89f7cb5cb998f8b0e",
+  "production_sha256": "4754fccfdbac18477434059e3f7b7e2adf190d4752f5eca89f7cb5cb998f8b0e",
+  "official_direct_euler_formula": [
+    {
+      "step": 1,
+      "max_abs": 0.0,
+      "relative_l2": 0.0
+    },
+    {
+      "step": 2,
+      "max_abs": 2.9802322387695312e-08,
+      "relative_l2": 1.4294123444311265e-09
+    },
+    {
+      "step": 3,
+      "max_abs": 5.960464477539063e-08,
+      "relative_l2": 3.13277486409599e-09
+    },
+    {
+      "step": 4,
+      "max_abs": 1.4901161193847656e-08,
+      "relative_l2": 1.0316443125845061e-09
+    },
+    {
+      "step": 5,
+      "max_abs": 2.9802322387695312e-08,
+      "relative_l2": 2.9037271373239648e-09
+    },
+    {
+      "step": 6,
+      "max_abs": 1.1920928955078125e-07,
+      "relative_l2": 1.8696491128060736e-08
+    },
+    {
+      "step": 7,
+      "max_abs": 1.1920928955078125e-07,
+      "relative_l2": 3.17495123369983e-08
+    },
+    {
+      "step": 8,
+      "max_abs": 5.960464477539063e-08,
+      "relative_l2": 6.7161437360755144e-09
+    }
+  ],
+  "normal_cli_image": {
+    "width": 256,
+    "height": 256,
+    "steps": 8,
+    "cfg": 1,
+    "seed": 42,
+    "threads": 8,
+    "scalar": false,
+    "prompt": "An orange tabby cat sitting by a sunny window, next to a steaming cup of tea. Photorealistic.",
+    "wall_seconds": 142.99,
+    "max_rss_bytes": 9374220288,
+    "sha256": "1905687c7dd0908033ff0ca67bbf0105591d39915ee864def72e08c0010affea",
+    "visually_inspected": true,
+    "isolated_benchmark": false
+  },
+  "simd_validation": {
+    "status": "failed declared 1% bounds; not a passing SIMD alignment",
+    "case": "fixed two-token context, 64x32, 8 steps, CFG1",
+    "first_failure": {
+      "name": "qwen.debug.attn.seg1",
+      "occurrence": 8,
+      "max_abs": 0.08545827865600586,
+      "reference_peak": 7.57888126373291,
+      "relative_l2": 0.0075745305308977115,
+      "passed": false
+    },
+    "final_latent": {
+      "name": "qwen.sample.latent",
+      "occurrence": 7,
+      "max_abs": 0.023451805114746094,
+      "reference_peak": 1.3597263097763062,
+      "relative_l2": 0.012188912160074497,
+      "passed": false
+    },
+    "rgba_max_abs": 16,
+    "failed_checkpoints": 1918,
+    "total_checkpoints": 2730,
+    "native_oracle_crosscheck": {
+      "status": "failed unchanged 1% numerical bounds",
+      "oracle_build": "GGML_NATIVE=ON, -ffp-contract=off, external acceleration disabled",
+      "first_failure": {
+        "name": "qwen.debug.attn.seg1",
+        "occurrence": 7,
+        "max_abs": 0.08275669813156128,
+        "reference_peak": 7.771087646484375,
+        "relative_l2": 0.0066251952738719515
+      },
+      "final_latent": {
+        "max_abs": 0.024372607469558716,
+        "relative_l2": 0.012600705953349844
+      },
+      "rgba_max_abs": 7
+    }
+  },
+  "engineering_checks": {
+    "local_focused_passed": 11,
+    "remote_focused_passed": 11,
+    "python_comparator_passed": 6,
+    "full_lib_current": {
+      "passed": 1236,
+      "failed": 23,
+      "ignored": 80,
+      "scope": "CPU adaptation before Vulkan follow-up; not rerun for GPU changes"
+    },
+    "full_lib_baseline": {
+      "commit": "973210b6de572b8226cd576da7ace17fb22d8ad5",
+      "passed": 1235,
+      "failed": 23,
+      "ignored": 80
+    },
+    "same_failures": true,
+    "baseline_failure_names": [
+      "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+      "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+      "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+      "models::clm::tests::matches_reference_golden_vectors",
+      "models::clm::tests::rejects_wrong_embedding_width",
+      "models::diffusion::z_image::text::tests::qwen_attention_softmax_matches_the_pinned_ggml_neon_reduction",
+      "models::diffusion::z_image::text::tests::silu_mul_inplace_matches_pinned_ggml_neon_activation",
+      "models::diffusion::z_image::vae::tests::silu_matches_pinned_ggml_neon_vector_path",
+      "models::funasr::encoder::parity_tests::fsmn_rounds_product_before_adding_like_ggml",
+      "models::funasr::encoder::parity_tests::layernorm_accumulates_variance_in_ggml_neon_groups",
+      "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+      "models::gemma4::trunk::tests::per_layer_bf16_projection_matches_pinned_scalar_dot_bits",
+      "models::gemma4::trunk::tests::per_layer_projection_rejects_non_bf16_weight",
+      "models::gemma4::trunk::tests::per_layer_projection_rejects_wrong_bf16_storage_length",
+      "models::qwen35::trunk::config::tests::qwen35_config_rejects_invalid_tensor_dimensions",
+      "models::qwen35::vision::tests::layer_norm_stats_match_ggml_grouped_f32_variance",
+      "ops::argmax::tests::all_negative",
+      "ops::argmax::tests::large_random",
+      "ops::argmax::tests::middle_max",
+      "ops::argmax::tests::tail_handles_non_aligned_lengths",
+      "ops::argmax::tests::ties_pick_lowest_index",
+      "ops::matmul::neon_tests::neon_softmax_matches_ggml_vector_exp_and_f64_sum",
+      "ops::rope::tests::rope_neox_inplace_simd_matches_scalar_fallback"
+    ],
+    "remote_python_comparator_passed": 6
+  },
+  "normal_cli_image_512": {
+    "prompt": "A photorealistic orange tabby cat sitting on a wooden windowsill in warm afternoon sunlight, next to a steaming ceramic cup of tea and an open book. Rain-washed city rooftops outside the window, soft bokeh, detailed fur, cinematic composition.",
+    "scalar": false,
+    "width": 512,
+    "height": 512,
+    "steps": 8,
+    "cfg": 1,
+    "seed": 42,
+    "threads": 8,
+    "binary_sha256": "b90289927d3c2755ee4af1ffe555a9bb2e2d58c6893485c82f6f19389a480a62",
+    "source_commit": "503e4520eef4e72bd12bd43f98352e5cfb62eef8",
+    "concurrent_scalar_run": true,
+    "returncode": 0,
+    "wall_seconds": 1348.311,
+    "max_rss_bytes": 12928778240,
+    "png_sha256": "d597156d37c8f17d97dd479a927746f14474fb926bcb4ba719651292f6f885fa",
+    "cpu": "Apple M3 Max",
+    "visually_inspected": true,
+    "isolated_benchmark": false,
+    "environment_note": "Concurrent optional scalar run during the initial part; system memory compression/swap activity observed",
+    "status": "passed functional full pipeline; no 512x512 Oracle alignment claim"
+  },
+  "scalar_512_visual_run": {
+    "status": "stopped by agent due to runtime; no PNG produced",
+    "completed_steps": 2,
+    "requested_steps": 8,
+    "wall_seconds": 1016.227,
+    "prompt": "A photorealistic orange tabby cat sitting on a wooden windowsill in warm afternoon sunlight, next to a steaming ceramic cup of tea and an open book. Rain-washed city rooftops outside the window, soft bokeh, detailed fur, cinematic composition.",
+    "width": 512,
+    "height": 512,
+    "seed": 42,
+    "cfg": 1,
+    "threads": 8
+  },
+  "gpu_validation": {
+    "scope": "Vulkan text/DiT projections and VAE convolution matrices; attention, activations, normalization, F32 KV and layout conversions stay on host",
+    "validated_host_arithmetic": "RMI_SCALAR=1",
+    "device_failure_policy": "hardware Vulkan required; errors propagate without CPU fallback",
+    "unchanged_limits": {
+      "relative_l2": 0.01,
+      "max_abs": "1e-5 + 0.01 * peak(abs(reference))",
+      "rgba_max_abs": 4,
+      "structural_inputs": "exact"
+    },
+    "macos": {
+      "status": "passed",
+      "gpu": true,
+      "scalar_host": true,
+      "parallel_host_queries": true,
+      "width": 64,
+      "height": 32,
+      "steps": 8,
+      "cfg": 1,
+      "seed": 42,
+      "threads": 8,
+      "references": 0,
+      "conditioning": "fixed two-token synthetic F32 context",
+      "stages": [
+        {
+          "mode": "sample",
+          "checkpoints": 2730,
+          "f32_values": 96088593,
+          "relative_l2_limit": 0.01,
+          "max_abs": 0.0,
+          "max_relative_l2": 0.0
+        },
+        {
+          "mode": "vae",
+          "checkpoints": 85,
+          "f32_values": 9297920,
+          "relative_l2_limit": 0.01,
+          "max_abs": 0.11763381958007812,
+          "max_relative_l2": 0.0009098223636591213,
+          "rgba_max_abs": 1,
+          "rgba_bytes": 8192
+        }
+      ],
+      "run": {
+        "gpu": true,
+        "scalar_host": true,
+        "parallel_host_queries": true,
+        "binary_sha256": "2f3665bc239e896bda4d3578068985d4d8e27db8cea65cd5ae4342024e91ecc5",
+        "returncode": 0,
+        "wall_seconds": 273.278,
+        "max_rss_bytes": 15336816640,
+        "png_sha256": "86da471a3ffef6dfdf7c67829eefb1fca8dcbdcc382bca09c47b9d09e93bc082"
+      },
+      "device_counters": {
+        "submissions": 1982,
+        "static_uploads": 246,
+        "static_upload_bytes": 8079703744,
+        "host_write_bytes": 532336676,
+        "host_read_bytes": 484735104,
+        "transfer_submissions": 0,
+        "live_allocation_bytes": 8097642016,
+        "peak_allocation_bytes": 8097642016
+      },
+      "device": "Apple M3 Max (MoltenVK)",
+      "normal_build": {
+        "gpu": true,
+        "scalar_host": true,
+        "parallel_host_queries": true,
+        "binary_sha256": "a231d80c547e2296647f5f9671f1b3ac2d22eb223368b146902bfd285c659e77",
+        "returncode": 0,
+        "wall_seconds": 8.363,
+        "max_rss_bytes": 16921083904,
+        "png_sha256": "86da471a3ffef6dfdf7c67829eefb1fca8dcbdcc382bca09c47b9d09e93bc082",
+        "trace_rgba_identical": true,
+        "device_counters": {
+          "submissions": 1982,
+          "static_uploads": 246,
+          "static_upload_bytes": 8079703744,
+          "host_write_bytes": 532336676,
+          "host_read_bytes": 484735104,
+          "transfer_submissions": 0,
+          "live_allocation_bytes": 8097642016,
+          "peak_allocation_bytes": 8097642016
+        }
+      }
+    },
+    "engineering_checks": {
+      "local_integration_with_vulkan_passed": 12,
+      "local_integration_without_vulkan_passed": 12,
+      "local_qwen3_session_regressions_passed": 9,
+      "local_dense_regressions_passed": 3,
+      "local_hardware_projection_checks_passed": 2,
+      "local_cpu_scope_regressions_passed": 1,
+      "remote_integration_with_vulkan_passed": 12,
+      "remote_hardware_projection_checks_passed": 2,
+      "remote_cpu_scope_regressions_passed": 1,
+      "python_comparator_passed": 6,
+      "full_library_suite_repeated_for_gpu_followup": false,
+      "local_cpu_parallel_smoke": {
+        "returncode": 0,
+        "wall_seconds": 15.974,
+        "scalar_host": true,
+        "gpu": false,
+        "parallel_host_queries": true,
+        "binary_sha256": "8efff1b0552aa264bbeb670af6622a4174b15a801b1a00529dbe98cfcc46b50a",
+        "prior_cpu_rgba_identical": true
+      }
+    },
+    "limits": [
+      "Turbo editing and other quantizations are unverified on GPU",
+      "Default host SIMD is not covered by passing GPU alignment",
+      "64x32 per-checkpoint comparisons do not establish 512x512 Oracle alignment"
+    ],
+    "linux": {
+      "status": "passed",
+      "gpu": true,
+      "scalar_host": true,
+      "parallel_host_queries": true,
+      "width": 64,
+      "height": 32,
+      "steps": 8,
+      "cfg": 1,
+      "seed": 42,
+      "threads": 8,
+      "references": 0,
+      "prompt": "A blue cat. 蓝猫 🐈",
+      "stages": [
+        {
+          "mode": "text",
+          "checkpoints": 39,
+          "f32_values": 5079073,
+          "relative_l2_limit": 0.01,
+          "max_abs": 0.0,
+          "max_relative_l2": 0.0
+        },
+        {
+          "mode": "sample",
+          "checkpoints": 2730,
+          "f32_values": 259897873,
+          "relative_l2_limit": 0.01,
+          "max_abs": 0.0,
+          "max_relative_l2": 0.0
+        },
+        {
+          "mode": "vae",
+          "checkpoints": 85,
+          "f32_values": 9297920,
+          "relative_l2_limit": 0.01,
+          "max_abs": 0.20376968383789062,
+          "max_relative_l2": 0.0009691028640275452,
+          "rgba_max_abs": 1,
+          "rgba_bytes": 8192
+        }
+      ],
+      "run": {
+        "gpu": true,
+        "scalar_host": true,
+        "parallel_host_queries": true,
+        "binary_sha256": "32115eb42d1d8a2542e22330ee8b6f18af9730debecb93a597f595845ad11abf",
+        "source_manifest_sha256": "6efa341baa32aae550dd210ff8b15ab34415123f9ce316c1dafbb42421dc24f0",
+        "concurrent_parity_and_visual_runs": true,
+        "isolated_benchmark": false,
+        "returncode": 0,
+        "wall_seconds": 390.549,
+        "max_rss_bytes": 8775737344,
+        "user_seconds": 119.508139,
+        "system_seconds": 361.934734,
+        "png_sha256": "d1b42cc1ec3c311240ea77d009dd083d52f59ddf0a3b265795d2832be0d2d2be",
+        "device_counters": {
+          "submissions": 2234,
+          "static_uploads": 498,
+          "static_upload_bytes": 15459581632,
+          "host_write_bytes": 1282396196,
+          "host_read_bytes": 1458436224,
+          "transfer_submissions": 0,
+          "live_allocation_bytes": 8097642016,
+          "peak_allocation_bytes": 8097642016
+        }
+      },
+      "device_counters": {
+        "submissions": 2234,
+        "static_uploads": 498,
+        "static_upload_bytes": 15459581632,
+        "host_write_bytes": 1282396196,
+        "host_read_bytes": 1458436224,
+        "transfer_submissions": 0,
+        "live_allocation_bytes": 8097642016,
+        "peak_allocation_bytes": 8097642016
+      },
+      "oracle_reused": true,
+      "oracle_note": "Completed independent same-platform scalar reference; text, eight-step sampling and VAE use their own outputs",
+      "total_checkpoints": 2854,
+      "total_f32_values": 274274866,
+      "device": "AMD Radeon Graphics (RADV NAVI31)",
+      "cpu": "AMD EPYC 9334",
+      "normal_build": {
+        "gpu": true,
+        "scalar_host": true,
+        "parallel_host_queries": true,
+        "binary_sha256": "5684f15b729e86d188eabc11dc302db612f3a5388e9e6ef3d19f80fa65791480",
+        "source_manifest_sha256": "6efa341baa32aae550dd210ff8b15ab34415123f9ce316c1dafbb42421dc24f0",
+        "concurrent_parity_and_visual_runs": true,
+        "isolated_benchmark": false,
+        "returncode": 0,
+        "wall_seconds": 26.7,
+        "max_rss_bytes": 8769904640,
+        "user_seconds": 44.613065,
+        "system_seconds": 16.142214,
+        "png_sha256": "d1b42cc1ec3c311240ea77d009dd083d52f59ddf0a3b265795d2832be0d2d2be",
+        "device_counters": {
+          "submissions": 2234,
+          "static_uploads": 498,
+          "static_upload_bytes": 15459581632,
+          "host_write_bytes": 1282396196,
+          "host_read_bytes": 1458436224,
+          "transfer_submissions": 0,
+          "live_allocation_bytes": 8097642016,
+          "peak_allocation_bytes": 8097642016
+        },
+        "trace_rgba_identical": true
+      },
+      "source_audit": {
+        "files": 599,
+        "matching": 599,
+        "mismatches": [],
+        "manifest_sha256": "6efa341baa32aae550dd210ff8b15ab34415123f9ce316c1dafbb42421dc24f0"
+      },
+      "normal_cli_image_512": {
+        "command": [
+          "/root/rmi-qi21-turbo-d289/bin/rust-model-inference-gpu-v4",
+          "--qwen-image-turbo",
+          "--gpu",
+          "--model",
+          "/root/rmi-qi21-turbo-d289/models/Qwen-Image-2.1-Turbo-GGUF/qwen-image-2.1-turbo-Q8_0.gguf",
+          "--text-encoder",
+          "/root/rmi-qi21-turbo-d289/models/Qwen3-VL-8B-Instruct-GGUF/Qwen3-VL-8B-Instruct-Q8_0.gguf",
+          "--vae",
+          "/root/rmi-qi21-turbo-d289/models/Qwen-Image-2.1-Turbo/vae/diffusion_pytorch_model.safetensors",
+          "--prompt",
+          "A photorealistic orange tabby cat sitting on a wooden windowsill in warm afternoon sunlight, next to a steaming ceramic cup of tea and an open book. Rain-washed city rooftops outside the window, soft bokeh, detailed fur, cinematic composition.",
+          "--negative-prompt",
+          "low quality",
+          "--width",
+          "512",
+          "--height",
+          "512",
+          "--steps",
+          "8",
+          "--cfg",
+          "1",
+          "--seed",
+          "42",
+          "--threads",
+          "8",
+          "--out",
+          "/root/rmi-qi21-turbo-d289/gpu-visual-512-v4/output.png"
+        ],
+        "gpu": true,
+        "scalar_host": true,
+        "parallel_host_queries": true,
+        "binary_sha256": "5684f15b729e86d188eabc11dc302db612f3a5388e9e6ef3d19f80fa65791480",
+        "source_manifest_sha256": "6efa341baa32aae550dd210ff8b15ab34415123f9ce316c1dafbb42421dc24f0",
+        "concurrent_parity_and_visual_runs": true,
+        "isolated_benchmark": false,
+        "pid": 1873730,
+        "returncode": 0,
+        "wall_seconds": 645.291,
+        "max_rss_bytes": 13963321344,
+        "user_seconds": 2062.308153,
+        "system_seconds": 82.807589,
+        "png_sha256": "d41fa3587ab5f55e06ca9c7fb82983d6447eb06521d969ce8568f17ff428ce6e",
+        "device_counters": {
+          "submissions": 74437,
+          "static_uploads": 498,
+          "static_upload_bytes": 15459581632,
+          "host_write_bytes": 61874323492,
+          "host_read_bytes": 53218672768,
+          "transfer_submissions": 0,
+          "live_allocation_bytes": 8097642016,
+          "peak_allocation_bytes": 8097642016
+        },
+        "width": 512,
+        "height": 512,
+        "steps": 8,
+        "cfg": 1,
+        "seed": 42,
+        "threads": 8,
+        "references": 0,
+        "prompt": "A photorealistic orange tabby cat sitting on a wooden windowsill in warm afternoon sunlight, next to a steaming ceramic cup of tea and an open book. Rain-washed city rooftops outside the window, soft bokeh, detailed fur, cinematic composition.",
+        "device": "AMD Radeon Graphics (RADV NAVI31)",
+        "cpu": "AMD EPYC 9334",
+        "visually_inspected": true,
+        "visual_observation": "Orange tabby, wooden windowsill, cup, open book and blurred city background are present; steam is not clearly visible",
+        "max_rss_measurement": "wait4 child-process ru_maxrss, converted to bytes",
+        "allocation_counter_note": "Peak tracked Vulkan allocations, not measured physical VRAM peak; upload bytes are cumulative across components",
+        "status": "passed functional full pipeline; no 512x512 Oracle alignment claim"
+      }
+    },
+    "parallel_host_queries": "Independent query rows use the existing rayon thread pool; dot/softmax reduction order within each row is unchanged",
+    "policy_note": "Historical hardware validation policy; current Auto initialization behavior is recorded in dispatch_corrections_20261026. Original precision/timing records and source revisions are unchanged."
+  },
+  "cpu_gpu_cli_benchmark": {
+    "profile": "release",
+    "features": [
+      "vulkan"
+    ],
+    "binary_sha256": "281f4cd2e63c4b784d1f0b4838ffa934a35de44514fc610258cca1bf2fc1ee75",
+    "source_manifest_sha256": "6efa341baa32aae550dd210ff8b15ab34415123f9ce316c1dafbb42421dc24f0",
+    "source_commit": "cde71f3a4b9b26734bd891e4cba973625d13b350",
+    "cpu": "AMD EPYC 9334",
+    "device": "AMD Radeon Graphics (RADV NAVI31)",
+    "gpu_pci": "0000:c3:00.0",
+    "gpu_vram_bytes": 51522830336,
+    "scalar_host": true,
+    "threads": 8,
+    "cpu_affinity": [
+      39,
+      44,
+      46,
+      51,
+      52,
+      53,
+      59,
+      61
+    ],
+    "cpu_quota": "1600000 100000",
+    "environment": {
+      "RMI_SCALAR": "1",
+      "RAYON_NUM_THREADS": "8",
+      "VK_ICD_FILENAMES": "/usr/share/vulkan/icd.d/radeon_icd.json"
+    },
+    "steps": 8,
+    "cfg": 1,
+    "seed": 42,
+    "shared_host": true,
+    "monitor_interval_seconds": 5,
+    "measurement": "Fresh CLI process per image; OS file/shader caches not cleared; includes loading, uploads, text, eight sampling steps, VAE and PNG",
+    "accepted_sample_order": [
+      "cpu-256-1",
+      "gpu-256-1",
+      "gpu-256-2",
+      "cpu-256-2",
+      "cpu-512-retry-5",
+      "gpu-512-retry-1"
+    ],
+    "cases": [
+      {
+        "width": 256,
+        "height": 256,
+        "cpu": {
+          "repeats": 2,
+          "mean_seconds": 548.5751219419762,
+          "median_seconds": 548.5751219419762,
+          "min_seconds": 544.1491000652313,
+          "max_seconds": 553.0011438187212,
+          "records": [
+            {
+              "label": "cpu-256-1",
+              "wall_seconds": 544.1491000652313,
+              "max_rss_bytes": 8838602752,
+              "user_seconds": 4032.780439,
+              "system_seconds": 23.700778,
+              "png_sha256": "f9a7875fd6811b30c846c838c1a2b456e88e475488c5efabe90877520c2f435e",
+              "no_known_competing_jobs": true,
+              "observed_competing_processes": [],
+              "cgroup_throttled_seconds_delta": 0.0,
+              "telemetry_samples": 103
+            },
+            {
+              "label": "cpu-256-2",
+              "wall_seconds": 553.0011438187212,
+              "max_rss_bytes": 8839598080,
+              "user_seconds": 4054.745135,
+              "system_seconds": 22.342813,
+              "png_sha256": "f9a7875fd6811b30c846c838c1a2b456e88e475488c5efabe90877520c2f435e",
+              "no_known_competing_jobs": true,
+              "observed_competing_processes": [],
+              "cgroup_throttled_seconds_delta": 0.0,
+              "telemetry_samples": 105
+            }
+          ]
+        },
+        "gpu": {
+          "repeats": 2,
+          "mean_seconds": 135.65780762117356,
+          "median_seconds": 135.65780762117356,
+          "min_seconds": 135.39919798262417,
+          "max_seconds": 135.91641725972295,
+          "records": [
+            {
+              "label": "gpu-256-1",
+              "wall_seconds": 135.91641725972295,
+              "max_rss_bytes": 10114785280,
+              "user_seconds": 192.908955,
+              "system_seconds": 27.950252,
+              "png_sha256": "f9001034e11d156ce9bd4c78aeaa14973eefa4e8350b0962a9c2915c6a6c3493",
+              "no_known_competing_jobs": true,
+              "observed_competing_processes": [],
+              "cgroup_throttled_seconds_delta": 0.0,
+              "telemetry_samples": 26
+            },
+            {
+              "label": "gpu-256-2",
+              "wall_seconds": 135.39919798262417,
+              "max_rss_bytes": 10116313088,
+              "user_seconds": 195.136328,
+              "system_seconds": 27.69937,
+              "png_sha256": "f9001034e11d156ce9bd4c78aeaa14973eefa4e8350b0962a9c2915c6a6c3493",
+              "no_known_competing_jobs": true,
+              "observed_competing_processes": [],
+              "cgroup_throttled_seconds_delta": 0.0,
+              "telemetry_samples": 26
+            }
+          ]
+        },
+        "cpu_cli_command_without_output": [
+          "/root/rmi-qi21-turbo-d289/bin/rust-model-inference-benchmark-release",
+          "--qwen-image-turbo",
+          "--model",
+          "/root/rmi-qi21-turbo-d289/models/Qwen-Image-2.1-Turbo-GGUF/qwen-image-2.1-turbo-Q8_0.gguf",
+          "--text-encoder",
+          "/root/rmi-qi21-turbo-d289/models/Qwen3-VL-8B-Instruct-GGUF/Qwen3-VL-8B-Instruct-Q8_0.gguf",
+          "--vae",
+          "/root/rmi-qi21-turbo-d289/models/Qwen-Image-2.1-Turbo/vae/diffusion_pytorch_model.safetensors",
+          "--prompt",
+          "A photorealistic orange tabby cat sitting on a wooden windowsill in warm afternoon sunlight, next to a steaming ceramic cup of tea and an open book. Rain-washed city rooftops outside the window, soft bokeh, detailed fur, cinematic composition.",
+          "--negative-prompt",
+          "low quality",
+          "--width",
+          "256",
+          "--height",
+          "256",
+          "--steps",
+          "8",
+          "--cfg",
+          "1",
+          "--seed",
+          "42",
+          "--threads",
+          "8"
+        ],
+        "cpu_over_gpu_ratio": 4.043815328888997,
+        "wall_time_reduction_fraction": 0.7527087864631195,
+        "rgba_max_abs": 1,
+        "rgba_mean_abs": 0.003414154052734375,
+        "no_known_workload_overlap": true,
+        "timing_scope": "shared-host comparison with no known competing workloads observed"
+      },
+      {
+        "width": 512,
+        "height": 512,
+        "required_quiet_window_seconds": 60,
+        "cache_preparation": "No cache flush or additional warmup after waiting; file-cache residency not measured",
+        "cpu": {
+          "repeats": 1,
+          "mean_seconds": 2133.793806867674,
+          "median_seconds": 2133.793806867674,
+          "min_seconds": 2133.793806867674,
+          "max_seconds": 2133.793806867674,
+          "records": [
+            {
+              "label": "cpu-512-retry-5",
+              "wall_seconds": 2133.793806867674,
+              "max_rss_bytes": 10645299200,
+              "user_seconds": 16043.36766,
+              "system_seconds": 95.429064,
+              "png_sha256": "1119582eba3deff91c9e2aeac0a689e65c4ef724d55a485d09be8ba7b9c0326b",
+              "no_known_competing_jobs": true,
+              "observed_competing_processes": [],
+              "cgroup_throttled_seconds_delta": 0.0,
+              "telemetry_samples": 403
+            }
+          ]
+        },
+        "gpu": {
+          "repeats": 1,
+          "mean_seconds": 622.6208407897502,
+          "median_seconds": 622.6208407897502,
+          "min_seconds": 622.6208407897502,
+          "max_seconds": 622.6208407897502,
+          "records": [
+            {
+              "label": "gpu-512-retry-1",
+              "wall_seconds": 622.6208407897502,
+              "max_rss_bytes": 14023180288,
+              "user_seconds": 2007.309376,
+              "system_seconds": 77.743961,
+              "png_sha256": "d41fa3587ab5f55e06ca9c7fb82983d6447eb06521d969ce8568f17ff428ce6e",
+              "no_known_competing_jobs": true,
+              "observed_competing_processes": [],
+              "cgroup_throttled_seconds_delta": 0.0,
+              "telemetry_samples": 119
+            }
+          ]
+        },
+        "cpu_cli_command_without_output": [
+          "/root/rmi-qi21-turbo-d289/bin/rust-model-inference-benchmark-release",
+          "--qwen-image-turbo",
+          "--model",
+          "/root/rmi-qi21-turbo-d289/models/Qwen-Image-2.1-Turbo-GGUF/qwen-image-2.1-turbo-Q8_0.gguf",
+          "--text-encoder",
+          "/root/rmi-qi21-turbo-d289/models/Qwen3-VL-8B-Instruct-GGUF/Qwen3-VL-8B-Instruct-Q8_0.gguf",
+          "--vae",
+          "/root/rmi-qi21-turbo-d289/models/Qwen-Image-2.1-Turbo/vae/diffusion_pytorch_model.safetensors",
+          "--prompt",
+          "A photorealistic orange tabby cat sitting on a wooden windowsill in warm afternoon sunlight, next to a steaming ceramic cup of tea and an open book. Rain-washed city rooftops outside the window, soft bokeh, detailed fur, cinematic composition.",
+          "--negative-prompt",
+          "low quality",
+          "--width",
+          "512",
+          "--height",
+          "512",
+          "--steps",
+          "8",
+          "--cfg",
+          "1",
+          "--seed",
+          "42",
+          "--threads",
+          "8"
+        ],
+        "cpu_over_gpu_ratio": 3.4271159381062613,
+        "wall_time_reduction_fraction": 0.7082094629828675,
+        "rgba_max_abs": 1,
+        "rgba_mean_abs": 0.002681732177734375,
+        "no_known_workload_overlap": true,
+        "timing_scope": "shared-host comparison with no known competing workloads observed"
+      }
+    ],
+    "release_warmup_pngs_match_prior_validated_build": true,
+    "rejected_attempts": [
+      {
+        "label": "rejected-cpu-256-1",
+        "returncode": -15,
+        "wall_seconds": 325.10671491734684,
+        "reason": "Overlapped foreign Sage benchmark process named after and target/sage-gpu/device-arena/benchmark.py; stop own contaminated attempt only",
+        "excluded": true
+      },
+      {
+        "label": "cpu-512-1",
+        "returncode": -15,
+        "wall_seconds": 3259.2067556288093,
+        "excluded": true,
+        "termination": "Manually sent SIGTERM to end a contaminated benchmark; not an inference failure",
+        "reason": "Concurrent foreign compilation and inference; eight pinned workers obtained about 2.3 CPU core equivalents in a two-second diagnostic sample; no valid 512 comparison"
+      },
+      {
+        "label": "cpu-512-retry-2",
+        "accepted": false,
+        "wall_seconds": 16.61809583939612,
+        "returncode": -15,
+        "excluded": true,
+        "reason": "Known competing compilation or inference observed during render"
+      },
+      {
+        "label": "cpu-512-retry-3",
+        "accepted": false,
+        "wall_seconds": 123.38037119619548,
+        "returncode": -15,
+        "excluded": true,
+        "reason": "Known competing compilation or inference observed during render"
+      },
+      {
+        "label": "cpu-512-retry-4",
+        "accepted": false,
+        "wall_seconds": 10.863942176103592,
+        "returncode": -15,
+        "excluded": true,
+        "reason": "Known competing compilation or inference observed during render"
+      }
+    ],
+    "status": "finished",
+    "completed_resolutions": [
+      {
+        "width": 256,
+        "height": 256
+      },
+      {
+        "width": 512,
+        "height": 512
+      }
+    ],
+    "unavailable_resolutions": []
+  },
+  "dispatch_corrections_20261026": {
+    "based_on_commit": "0938f48f60e8d2e912ea07d136ed72c47bc579c7",
+    "changes": [
+      "AVX2 approximate softmax maximum includes every lane",
+      "Q8_0 AVX2 kernel and dispatch require AVX2, FMA and F16C",
+      "Qwen text and DiT projection initialization honor Auto CPU fallback; explicit Vulkan projections remain strict",
+      "AVX2 exponential underflow masks scales below the normal range to zero instead of wrapping to negative infinity"
+    ],
+    "shared_hsum_ps_changed": false,
+    "local_host": "Apple M3 Max / MoltenVK",
+    "regression_evidence": {
+      "auto_without_vulkan_build": "Failed before the correction; passes after",
+      "auto_with_disabled_vulkan": "Failed before the correction; passes after",
+      "dit_auto_without_driver": "Isolated child with missing ICD failed before the correction; passes after; forced Vulkan still errors",
+      "softmax_sse_reduction_probe": "Rosetta SSE3 instruction probe failed before and passed after; not a full AVX2 execution",
+      "hardware_projection_checks": "Text raw hidden rows/F32 KV and DiT BF16 tiling passed on MoltenVK",
+      "native_x86_underflow": "The initial native x86 softmax regression failed even with an even-lane maximum; exponent n=-128 wrapped to negative infinity. The underflow tail is now masked to zero."
+    },
+    "ci_coverage": {
+      "native_x86": "AVX2/FMA/F16C required; softmax large distinct logits in all lanes, Q8_0 kernels and row offsets/tails; exponential underflow and masked values remain finite and nonnegative",
+      "missing_f16c": "Portable target-cpu=x86-64 build under QEMU Haswell with F16C disabled; assert F16C is not a compile-time feature, AVX2/FMA are detected and F16C is absent, then run Q8_0 scalar fallback",
+      "policy_and_integration": "CPU/Auto/forced Vulkan policy checks and image integration tests, with and without Vulkan",
+      "full_library_suite_in_ci": false
+    },
+    "real_weight_parity_rerun": false,
+    "cli_benchmarks_rerun": false,
+    "remaining_limits": [
+      "Default host SIMD precision and the historical failed 512x512 SIMD render have not been revalidated",
+      "DiT dispatch failures after GPU runtime initialization still propagate; no mid-render recovery was added"
+    ],
+    "local_checks": {
+      "image_integration_without_vulkan_passed": 12,
+      "image_integration_with_vulkan_passed": 12,
+      "hardware_projection_tests_passed": 2,
+      "full_cpu_library_suite_before": {
+        "passed": 1236,
+        "failed": 23,
+        "ignored": 80
+      },
+      "full_cpu_library_suite_after": {
+        "passed": 1238,
+        "failed": 23,
+        "ignored": 80
+      },
+      "failure_names_unchanged": true,
+      "new_failure_names": [],
+      "logs": "target/qi21-turbo/fixes-20261026"
+    }
+  }
+}

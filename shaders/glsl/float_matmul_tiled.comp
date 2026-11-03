@@ -1,0 +1,80 @@
+#version 450
+#extension GL_EXT_control_flow_attributes : require
+
+// F32 activations and F32/BF16 weights; no narrowing of the activation range.
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(std430, binding = 1) readonly buffer W0 { uint data[]; } w0;
+layout(std430, binding = 2) readonly buffer W1 { uint data[]; } w1;
+layout(std430, binding = 3) readonly buffer W2 { uint data[]; } w2;
+layout(push_constant) uniform PC {
+    uint input_word; uint unused; uint n_in; uint elements_per_row;
+    uint output0_word; uint rows0; uint output0_stride;
+    uint output1_word; uint rows1; uint output1_stride;
+    uint output2_word; uint rows2; uint output2_stride;
+    uint group_count; uint input_sum_word; uint input_stride; uint weight_bytes;
+    uint scales_stride; uint input_sum_stride; uint q8k_stride; uint q8k_scales_stride; uint token_rows;
+} pc;
+const uint TOKENS = 32u;
+const uint CHUNK = 32u;
+shared float input_stage[TOKENS * CHUNK];
+shared vec4 weight_stage[CHUNK * 16u];
+
+uint weight_word(uint slot, uint index) {
+    if (slot == 0u) return w0.data[index];
+    if (slot == 1u) return w1.data[index];
+    return w2.data[index];
+}
+float weight(uint slot, uint index) {
+    if (pc.weight_bytes == 4u) return uintBitsToFloat(weight_word(slot, index));
+    uint packed = weight_word(slot, index / 2u);
+    return uintBitsToFloat(((packed >> ((index % 2u) * 16u)) & 65535u) << 16u);
+}
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint slot = gl_WorkGroupID.z % pc.group_count;
+    uint token_base = (gl_WorkGroupID.z / pc.group_count) * TOKENS;
+    uint column_base = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 64u;
+    uint column_group = lane % 16u;
+    uint token_group = lane / 16u;
+    uint rows = slot == 0u ? pc.rows0 : (slot == 1u ? pc.rows1 : pc.rows2);
+    uint out_word = slot == 0u ? pc.output0_word : (slot == 1u ? pc.output1_word : pc.output2_word);
+    uint stride = slot == 0u ? pc.output0_stride : (slot == 1u ? pc.output1_stride : pc.output2_stride);
+    vec4 acc[8];
+    for (uint t = 0u; t < 8u; t++) acc[t] = vec4(0.0);
+    for (uint chunk = 0u; chunk < pc.n_in; chunk += CHUNK) {
+        uint count = min(CHUNK, pc.n_in - chunk);
+        for (uint i = lane; i < TOKENS * CHUNK; i += 64u) {
+            uint token = token_base + i / CHUNK;
+            uint k = i % CHUNK;
+            input_stage[i] = token < pc.token_rows && k < count
+                ? uintBitsToFloat(arena.data[pc.input_word + token * pc.input_stride + chunk + k]) : 0.0;
+        }
+        for (uint i = lane; i < CHUNK * 16u; i += 64u) {
+            uint k = i / 16u;
+            uint column = column_base + (i % 16u) * 4u;
+            vec4 w = vec4(0.0);
+            for (uint d = 0u; d < 4u; d++) {
+                if (k < count && column + d < rows) w[d] = weight(slot, (chunk + k) * rows + column + d);
+            }
+            weight_stage[i] = w;
+        }
+        barrier();
+        [[unroll]] for (uint i = 0u; i < CHUNK; i++) {
+            vec4 w = weight_stage[i * 16u + column_group];
+            [[unroll]] for (uint t = 0u; t < 8u; t++) {
+                acc[t] = fma(w, vec4(input_stage[(token_group * 8u + t) * CHUNK + i]), acc[t]);
+            }
+        }
+        barrier();
+    }
+    for (uint t = 0u; t < 8u; t++) {
+        uint token = token_base + token_group * 8u + t;
+        for (uint d = 0u; d < 4u; d++) {
+            uint column = column_base + column_group * 4u + d;
+            if (token < pc.token_rows && column < rows) {
+                arena.data[out_word + token * stride + column] = floatBitsToUint(acc[t][d]);
+            }
+        }
+    }
+}

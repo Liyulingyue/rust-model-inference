@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use image::{Rgb, RgbImage};
+use serde_json::Value;
 
 use super::kernels::{
     attention_online, checked_len, conv2d, conv3d_with_options, AttentionSpec, Conv3dSpec,
@@ -16,6 +17,7 @@ const SPATIAL_FACTOR: usize = 16;
 const CACHE_FRAMES: usize = 2;
 const TILE_SIZE: [usize; 2] = [34, 34];
 const TILE_STRIDE: [usize; 2] = [18, 16];
+const VAE_NORM_EPSILON: f32 = 1e-6;
 
 const LATENT_MEAN: [f32; LATENT_CHANNELS] = [
     -0.2289, -0.0052, -0.1323, -0.2339, -0.2799, 0.0174, 0.1838, 0.1557, -0.1382, 0.0542, 0.2813,
@@ -63,14 +65,28 @@ impl VideoLatent {
 }
 
 pub fn normalize_latent(raw: &[f32]) -> Result<Vec<f32>, String> {
-    map_latent(raw, |value, channel| {
-        (value - LATENT_MEAN[channel]) / LATENT_STD[channel]
-    })
+    normalize_latent_with_stats(raw, &LATENT_MEAN, &LATENT_STD)
 }
 
 pub fn denormalize_latent(normalized: &[f32]) -> Result<Vec<f32>, String> {
+    denormalize_latent_with_stats(normalized, &LATENT_MEAN, &LATENT_STD)
+}
+
+fn normalize_latent_with_stats(
+    raw: &[f32],
+    mean: &[f32; LATENT_CHANNELS],
+    std: &[f32; LATENT_CHANNELS],
+) -> Result<Vec<f32>, String> {
+    map_latent(raw, |value, channel| (value - mean[channel]) / std[channel])
+}
+
+fn denormalize_latent_with_stats(
+    normalized: &[f32],
+    mean: &[f32; LATENT_CHANNELS],
+    std: &[f32; LATENT_CHANNELS],
+) -> Result<Vec<f32>, String> {
     map_latent(normalized, |value, channel| {
-        value * LATENT_STD[channel] + LATENT_MEAN[channel]
+        value * std[channel] + mean[channel]
     })
 }
 
@@ -383,7 +399,7 @@ impl ResidualBlock {
                 .then(|| {
                     Conv3::load(
                         source,
-                        &format!("{prefix}.shortcut"),
+                        &format!("{prefix}.residual.shortcut"),
                         input_channels,
                         output_channels,
                         [1; 3],
@@ -970,6 +986,7 @@ struct PrefixSource {
 impl PrefixSource {
     fn mapped(&self, name: &str) -> String {
         name.strip_prefix(PREFIX)
+            .filter(|suffix| suffix.is_empty() || suffix.starts_with('.'))
             .map(|suffix| format!("{}{suffix}", self.actual_prefix))
             .unwrap_or_else(|| name.to_owned())
     }
@@ -1103,6 +1120,133 @@ impl VaeDimensions {
     }
 }
 
+fn astronex_vae_contract(
+    config_json: &str,
+) -> Result<
+    (
+        VaeDimensions,
+        [f32; LATENT_CHANNELS],
+        [f32; LATENT_CHANNELS],
+    ),
+    String,
+> {
+    let config: Value = serde_json::from_str(config_json)
+        .map_err(|error| format!("Invalid Astronex Wan VAE config JSON: {error}"))?;
+    if config["_class_name"].as_str() != Some("AutoencoderKLWan")
+        || config["in_channels"].as_u64() != Some(12)
+        || config["out_channels"].as_u64() != Some(12)
+        || config["z_dim"].as_u64() != Some(LATENT_CHANNELS as u64)
+        || config["patch_size"].as_u64() != Some(PATCH_SIZE as u64)
+        || config["scale_factor_spatial"].as_u64() != Some(SPATIAL_FACTOR as u64)
+        || config["scale_factor_temporal"].as_u64() != Some(4)
+        || config["num_res_blocks"].as_u64() != Some(2)
+        || config["base_dim"].as_u64() != Some(160)
+        || config["decoder_base_dim"].as_u64() != Some(256)
+        || config["is_residual"].as_bool() != Some(true)
+        || config["attn_scales"]
+            .as_array()
+            .is_none_or(|values| !values.is_empty())
+        || config["dropout"].as_f64() != Some(0.0)
+        || config["clip_output"].as_bool() != Some(false)
+        || config["dim_mult"]
+            .as_array()
+            .map(|values| values.iter().filter_map(Value::as_u64).collect::<Vec<_>>())
+            != Some(vec![1, 2, 4, 4])
+        || config["temperal_downsample"]
+            .as_array()
+            .map(|values| values.iter().filter_map(Value::as_bool).collect::<Vec<_>>())
+            != Some(vec![false, true, true])
+    {
+        return Err("Astronex Wan VAE config does not match AutoencoderKLWan contract".into());
+    }
+    let parse_stats = |name: &str| -> Result<[f32; LATENT_CHANNELS], String> {
+        let values = config[name]
+            .as_array()
+            .ok_or_else(|| format!("Astronex Wan VAE config missing {name}"))?;
+        if values.len() != LATENT_CHANNELS {
+            return Err(format!(
+                "Astronex Wan VAE config {name} has {}, expected {LATENT_CHANNELS}",
+                values.len()
+            ));
+        }
+        let mut output = [0.0; LATENT_CHANNELS];
+        for (index, value) in values.iter().enumerate() {
+            output[index] = value
+                .as_f64()
+                .map(|value| value as f32)
+                .filter(|value| value.is_finite())
+                .ok_or_else(|| format!("Astronex Wan VAE config {name}[{index}] is not finite"))?;
+        }
+        Ok(output)
+    };
+    let latent_mean = parse_stats("latents_mean")?;
+    let latent_std = parse_stats("latents_std")?;
+    if latent_std.iter().any(|&value| value <= 0.0) {
+        return Err("Astronex Wan VAE latents_std must be positive".into());
+    }
+    Ok((VaeDimensions::RELEASED, latent_mean, latent_std))
+}
+
+/// Convert the runtime's channel-major VAE layout to the official wrapper's
+/// single-batch frame-major layout.  The graph stores `[C, F, H, W]`, while
+/// `Wan22VAEWrapper` exposes `[B, F, C, H, W]` to the Oracle trace.
+fn trace_vae_layout(
+    shape: [usize; 4],
+    values: &[f32],
+    clamp_output: bool,
+) -> Result<(Vec<f32>, [usize; 5]), String> {
+    let [channels, depth, height, width] = shape;
+    let expected = checked_len("Astronex VAE trace", &shape)?;
+    if values.len() != expected {
+        return Err(format!(
+            "Astronex VAE trace shape has {expected} values, buffer has {}",
+            values.len()
+        ));
+    }
+    let mut output = vec![0.0; expected];
+    let plane = height * width;
+    for frame in 0..depth {
+        for channel in 0..channels {
+            let source = (channel * depth + frame) * plane;
+            let target = (frame * channels + channel) * plane;
+            for pixel in 0..plane {
+                let value = values[source + pixel];
+                output[target + pixel] = if clamp_output {
+                    value.clamp(-1.0, 1.0)
+                } else {
+                    value
+                };
+            }
+        }
+    }
+    Ok((output, [1, depth, channels, height, width]))
+}
+
+#[cfg(feature = "parity-trace")]
+fn trace_vae_checkpoint(
+    name: &str,
+    shape: [usize; 4],
+    values: &[f32],
+    clamp_output: bool,
+) -> Result<(), String> {
+    if crate::parity_trace::enabled(name) {
+        let (values, shape) = trace_vae_layout(shape, values, clamp_output)?;
+        crate::parity_trace::checkpoint(name, None, &shape, &values)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "parity-trace"))]
+fn trace_vae_checkpoint(
+    _name: &str,
+    _shape: [usize; 4],
+    _values: &[f32],
+    _clamp_output: bool,
+) -> Result<(), String> {
+    Ok(())
+}
+
 struct VaeGraph {
     encoder: Encoder,
     posterior: Conv3,
@@ -1113,6 +1257,13 @@ struct VaeGraph {
 impl VaeGraph {
     fn load(source: &dyn TensorSource) -> Result<Self, String> {
         let dimensions = VaeDimensions::RELEASED;
+        Self::load_with_dimensions(source, dimensions)
+    }
+
+    fn load_with_dimensions(
+        source: &dyn TensorSource,
+        dimensions: VaeDimensions,
+    ) -> Result<Self, String> {
         Ok(Self {
             encoder: Encoder::load(source, dimensions)?,
             posterior: Conv3::load(
@@ -1142,6 +1293,8 @@ pub struct Wan22Vae {
     source: Option<Arc<dyn TensorSource>>,
     pool: Arc<ComputePool>,
     graph: Option<VaeGraph>,
+    latent_mean: [f32; LATENT_CHANNELS],
+    latent_std: [f32; LATENT_CHANNELS],
 }
 
 impl Wan22Vae {
@@ -1151,6 +1304,35 @@ impl Wan22Vae {
             source: Some(source),
             pool,
             graph: Some(graph),
+            latent_mean: LATENT_MEAN,
+            latent_std: LATENT_STD,
+        })
+    }
+
+    /// Load an Astronex Wan `AutoencoderKLWan` component from the canonical
+    /// `astronex.vae.*` tensor prefix and its checkpoint-owned config.
+    pub fn load_astronex(
+        source: Arc<dyn TensorSource>,
+        pool: Arc<ComputePool>,
+    ) -> Result<Self, String> {
+        let config_json = source
+            .metadata("astronex.vae.config_json")
+            .or_else(|| source.metadata("astronex.vae.config.json"))
+            .or_else(|| source.metadata("astronex.vae.config"))
+            .and_then(|value| value.to_string_val())
+            .ok_or("Invalid Astronex metadata astronex.vae.config_json: expected string")?;
+        let (dimensions, latent_mean, latent_std) = astronex_vae_contract(config_json)?;
+        let prefixed: Arc<dyn TensorSource> = Arc::new(PrefixSource {
+            source,
+            actual_prefix: "astronex.vae",
+        });
+        let graph = VaeGraph::load_with_dimensions(prefixed.as_ref(), dimensions)?;
+        Ok(Self {
+            source: Some(prefixed),
+            pool,
+            graph: Some(graph),
+            latent_mean,
+            latent_std,
         })
     }
 
@@ -1218,7 +1400,17 @@ impl Wan22Vae {
             return Err("Invalid DreamX VAE posterior channels".into());
         }
         let plane = depth * height * width;
-        let mean = normalize_latent(&posterior.data[..LATENT_CHANNELS * plane])?;
+        let mean = normalize_latent_with_stats(
+            &posterior.data[..LATENT_CHANNELS * plane],
+            &self.latent_mean,
+            &self.latent_std,
+        )?;
+        trace_vae_checkpoint(
+            "astronex.vae.latent",
+            [LATENT_CHANNELS, depth, height, width],
+            &mean,
+            false,
+        )?;
         VideoLatent::new(mean, [LATENT_CHANNELS, depth, height, width])
     }
 
@@ -1239,9 +1431,10 @@ impl Wan22Vae {
             return Err("Invalid DreamX VAE latent channels".into());
         }
         let raw = Feature::new(
-            denormalize_latent(&latent.values)?,
+            denormalize_latent_with_stats(&latent.values, &self.latent_mean, &self.latent_std)?,
             [channels, depth, height, width],
         )?;
+        trace_vae_checkpoint("astronex.vae.denormalized", raw.shape, &raw.data, false)?;
         let input = graph.latent_input.forward(source, &self.pool, &raw, None)?;
         let mut cache = CausalCache::default();
         let mut decoded: Option<Feature> = None;
@@ -1258,7 +1451,9 @@ impl Wan22Vae {
                 None => output,
             });
         }
-        unpatchify(&decoded.ok_or("DreamX VAE produced no frames")?)
+        let pixels = unpatchify(&decoded.ok_or("DreamX VAE produced no frames")?)?;
+        trace_vae_checkpoint("astronex.vae.pixel", pixels.shape, &pixels.data, true)?;
+        Ok(pixels)
     }
 
     fn encode_frames_tiled(&self, frames: &[RgbImage]) -> Result<VideoLatent, String> {
@@ -1357,6 +1552,8 @@ impl Wan22Vae {
             source: None,
             pool: Arc::new(ComputePool::new(1)),
             graph: None,
+            latent_mean: LATENT_MEAN,
+            latent_std: LATENT_STD,
         }
     }
 }
@@ -1599,12 +1796,21 @@ fn channel_rms_norm(input: &Feature, gamma: &[f32]) -> Result<Feature, String> {
     let plane = depth * height * width;
     let mut output = vec![0.0; input.data.len()];
     for index in 0..plane {
-        let mut sum = 0.0f64;
-        for channel in 0..channels {
-            let value = input.data[channel * plane + index];
-            sum += (value * value) as f64;
-        }
-        let scale = (channels as f64).sqrt() as f32 / (sum.sqrt() as f32).max(1e-12);
+        let scale = if crate::ops::scalar_mode() {
+            let mut sum = 0.0f32;
+            for channel in 0..channels {
+                let value = input.data[channel * plane + index];
+                sum += value * value;
+            }
+            1.0 / (sum / channels as f32 + VAE_NORM_EPSILON).sqrt()
+        } else {
+            let mut sum = 0.0f64;
+            for channel in 0..channels {
+                let value = input.data[channel * plane + index];
+                sum += (value * value) as f64;
+            }
+            (channels as f64).sqrt() as f32 / (sum.sqrt() as f32).max(1e-12)
+        };
         for channel in 0..channels {
             output[channel * plane + index] =
                 input.data[channel * plane + index] * scale * gamma[channel];
@@ -2020,5 +2226,76 @@ mod tests {
         assert_eq!(tile_starts(40, 34, 18).unwrap(), [0, 18]);
         assert_eq!(tile_starts(34, 34, 18).unwrap(), [0]);
         assert_eq!(tile_starts(12, 34, 18).unwrap(), [0]);
+    }
+
+    #[test]
+    fn astronex_trace_layout_matches_wrapper_and_clamps_pixels() {
+        // Source layout is [C=2, F=2, H=1, W=2]:
+        // c0/f0=[-2, -0.5], c0/f1=[0, 3],
+        // c1/f0=[0.25, 2], c1/f1=[-3, 0.75].
+        let source = [-2.0, -0.5, 0.0, 3.0, 0.25, 2.0, -3.0, 0.75];
+        let (actual, shape) = trace_vae_layout([2, 2, 1, 2], &source, true).unwrap();
+        assert_eq!(shape, [1, 2, 2, 1, 2]);
+        assert_eq!(actual, [-1.0, -0.5, 0.25, 1.0, 0.0, 1.0, -1.0, 0.75]);
+
+        let (latent, latent_shape) = trace_vae_layout([2, 2, 1, 2], &source, false).unwrap();
+        assert_eq!(latent_shape, shape);
+        assert_eq!(latent, [-2.0, -0.5, 0.25, 2.0, 0.0, 3.0, -3.0, 0.75]);
+    }
+
+    #[test]
+    fn astronex_vae_config_owns_latent_statistics() {
+        let config = serde_json::json!({
+            "_class_name": "AutoencoderKLWan",
+            "in_channels": 12,
+            "out_channels": 12,
+            "z_dim": 48,
+            "patch_size": 2,
+            "scale_factor_spatial": 16,
+            "scale_factor_temporal": 4,
+            "num_res_blocks": 2,
+            "base_dim": 160,
+            "decoder_base_dim": 256,
+            "is_residual": true,
+            "attn_scales": [],
+            "dropout": 0.0,
+            "clip_output": false,
+            "dim_mult": [1, 2, 4, 4],
+            "temperal_downsample": [false, true, true],
+            "latents_mean": vec![0.125f32; 48],
+            "latents_std": vec![0.75f32; 48]
+        })
+        .to_string();
+        let (_, mean, std) = astronex_vae_contract(&config).unwrap();
+        assert_eq!(mean, [0.125; 48]);
+        assert_eq!(std, [0.75; 48]);
+    }
+
+    #[test]
+    fn astronex_vae_prefix_is_not_dreamx_prefix() {
+        struct Empty;
+        impl TensorSource for Empty {
+            fn metadata(&self, _key: &str) -> Option<&crate::core::tensor::MetaValue> {
+                None
+            }
+            fn tensor_info(&self, _name: &str) -> Option<&crate::core::tensor::TensorInfo> {
+                None
+            }
+            fn tensor_slice(&self, _name: &str) -> Option<&[u8]> {
+                None
+            }
+        }
+        let source = PrefixSource {
+            source: Arc::new(Empty),
+            actual_prefix: "astronex.vae",
+        };
+        assert_eq!(
+            source.mapped("dreamx.video_vae.encoder.conv1.weight"),
+            "astronex.vae.encoder.conv1.weight"
+        );
+        assert_eq!(
+            source.mapped("dreamx.video_vaemodel.encoder.conv1.weight"),
+            "dreamx.video_vaemodel.encoder.conv1.weight"
+        );
     }
 }

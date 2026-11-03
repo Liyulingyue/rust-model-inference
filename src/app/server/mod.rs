@@ -1,5 +1,7 @@
 pub mod api;
+mod forecast;
 mod rerank;
+mod prediction;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -15,7 +17,8 @@ use serde::{Deserialize, Serialize};
 use tower_http::cors::CorsLayer;
 
 use crate::app::cli::{
-    normalize_tts_language, parse_cli_options, validate_cli_options, CliOptions, KvFormat,
+    normalize_tts_language, parse_cli_options, resolve_thread_count, validate_cli_options,
+    CliOptions, KvFormat,
 };
 use crate::app::{compute_embedding, open_or_exit};
 use crate::core::tensor::{MetaValue, TensorSource};
@@ -32,7 +35,7 @@ use crate::models::qwen3::tts::speaker::{reference_wav_to_mel, Qwen3TtsSpeakerEn
 use crate::models::qwen3::tts::{predictor_top_k, Qwen3TtsTalker, TtsPrompt, TtsSession};
 use crate::models::qwen3::Qwen3Model;
 
-const USAGE: &str = "Usage: rust-model-server --model <path.gguf-or-ggufrs> [--mmproj ...] [--audio ...] [--image ...] [--tts] [--embedding] [--host 0.0.0.0] [--port 8080] [--threads 4] [--prefill-batch-size N (default 64)] [--allow-remote-images]";
+const USAGE: &str = "Usage: rust-model-server --model <path.gguf-or-ggufrs> [--mmproj ...] [--audio ...] [--image ...] [--tts] [--embedding] [--host 0.0.0.0] [--port 8080] [--threads 4] [--compute cpu|auto|vulkan (default cpu); --gpu aliases auto] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--allow-remote-images]";
 
 // =============================================================================
 // Backend types
@@ -40,14 +43,30 @@ const USAGE: &str = "Usage: rust-model-server --model <path.gguf-or-ggufrs> [--m
 
 #[derive(Clone)]
 struct AppState {
+    compute: crate::compute::ComputePolicy,
     model: Arc<Backend>,
     model_name: String,
     responses: Arc<Mutex<api::ResponsesStore>>,
     generation_slot: Arc<tokio::sync::Semaphore>,
 }
 
+fn compute_task<T: Send + 'static>(
+    policy: crate::compute::ComputePolicy,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> tokio::task::JoinHandle<T> {
+    tokio::task::spawn_blocking(move || {
+        let _scope = policy.enter_legacy_scope();
+        work()
+    })
+}
+
 enum Backend {
     Text(TextBackend),
+    /// A WeVisOne text model: a Qwen3-VL release with a coordinate
+    /// vocabulary and a separate pixel decoder. It serves the ordinary
+    /// text routes and adds the image prediction route.
+    WeVisOne(WeVisOneBackend),
+    UnlimitedOcr(UnlimitedOcrBackend),
     Embedding(EmbeddingBackend),
     Asr(AsrBackend),
     Audio8(Audio8Backend),
@@ -56,6 +75,46 @@ enum Backend {
     Clm(ClmBackend),
     Gliner2(Gliner2Backend),
     Gliner2Boundary(Gliner2BoundaryBackend),
+    Timestral(TimestralBackend),
+}
+
+impl Backend {
+    /// The generic text payload, for the routes every text-capable
+    /// backend serves (chat, completions, responses, JEV).
+    fn text_backend(&self) -> Option<&TextBackend> {
+        match self {
+            Backend::Text(text) => Some(text),
+            Backend::WeVisOne(wevisone) => Some(&wevisone.text),
+            _ => None,
+        }
+    }
+}
+
+/// WeVisOne backend: the generic text backend plus the components the
+/// image prediction route needs.
+struct WeVisOneBackend {
+    /// Chat, completions and JEV use the generic text backend.
+    text: TextBackend,
+    /// The pixel decoder behind `--wevisone-decoder`, for alpha masks.
+    decoder: Option<Arc<dyn TensorSource>>,
+    /// Generation options for the prediction route.
+    options: crate::models::wevisone_vl::PredictionOptions,
+}
+
+struct UnlimitedOcrBackend {
+    model: Arc<crate::models::unlimited_ocr::Model>,
+    runtime: crate::ops::TextRuntimeHandle,
+}
+
+/// Timestral backend: the 209M time-series forecaster in one GGUF, named
+/// by `--model`.
+///
+/// The model borrows the mapped file, and the device arena it keeps is
+/// worth holding on to: rebuilding it per request would re-upload every
+/// weight to the GPU. So the source and the model are both leaked once
+/// and stay resident, the way the rerank and CLM backends do.
+struct TimestralBackend {
+    model: Arc<&'static crate::models::timestral::TimestralModel<'static>>,
 }
 
 /// GLiNER2.5-Decide backend: a DeBERTa-v3 encoder with the classifier head in
@@ -190,6 +249,12 @@ struct Audio8Backend {
     specials: crate::models::audio8::streaming::SpecialTokens,
     language: &'static str,
     max_tokens: usize,
+    /// The tower and the decoder share one compute pool, and
+    /// `ComputePool::compute` publishes its closure through shared atomics,
+    /// so two concurrent transcriptions would overwrite each other's work.
+    /// The lock serializes them, which is what lets the pool have more than
+    /// one thread.
+    compute_lock: Arc<std::sync::Mutex<()>>,
 }
 
 struct TtsBackend {
@@ -347,13 +412,20 @@ async fn embeddings(
         )
             .into_response();
     };
-    // Multimodal path: any of audio/image/video routes the request
-    // through `run_omni_embedding`, which needs mmproj + a temp file
-    // path for the media blob. mmproj is required here (matching the
-    // CLI `--mmproj` requirement).
     let has_media = req.audio.is_some() || req.image.is_some() || req.video.is_some();
     if has_media {
-        let Some(mmproj_path) = backend.mmproj_path.clone() else {
+        let bge_visual = crate::models::bge_vl::is_visual(backend.source.as_ref());
+        if bge_visual && (req.audio.is_some() || req.video.is_some()) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "BGE visual embedding accepts an image".into(),
+                }),
+            )
+                .into_response();
+        }
+        let mmproj_path = backend.mmproj_path.clone();
+        if !bge_visual && mmproj_path.is_none() {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
@@ -361,7 +433,7 @@ async fn embeddings(
                 }),
             )
                 .into_response();
-        };
+        }
         let media_count = usize::from(req.audio.is_some())
             + usize::from(req.image.is_some())
             + usize::from(req.video.is_some());
@@ -390,7 +462,7 @@ async fn embeddings(
         };
         let prompt = req.prompt.unwrap_or_default();
         let source = backend.source.clone();
-        let result = match tokio::task::spawn_blocking(move || {
+        let result = match compute_task(state.compute, move || {
             let temp_path = std::env::temp_dir().join(format!(
                 "rmi-media-{}.{}",
                 std::time::SystemTime::now()
@@ -419,15 +491,21 @@ async fn embeddings(
             } else {
                 None
             };
-            let result = crate::app::run_omni_embedding(
-                source.as_ref(),
-                &mmproj_path,
-                image_path,
-                video_path,
-                audio_path,
-                &prompt,
-                0,
-            );
+            let result = if bge_visual {
+                crate::models::bge_vl::compute_embedding(source.as_ref(), &prompt, image_path, 0)
+            } else {
+                crate::app::run_omni_embedding(
+                    source.as_ref(),
+                    mmproj_path
+                        .as_deref()
+                        .ok_or("Multimodal embedding requires --mmproj")?,
+                    image_path,
+                    video_path,
+                    audio_path,
+                    &prompt,
+                    0,
+                )
+            };
             let _ = std::fs::remove_file(&temp_path);
             let embedding = result?;
             Ok::<_, String>(EmbeddingObject {
@@ -488,7 +566,7 @@ async fn embeddings(
         }
     };
     let source = backend.source.clone();
-    let result = match tokio::task::spawn_blocking(move || {
+    let result = match compute_task(state.compute, move || {
         let mut data = Vec::with_capacity(inputs.len());
         for (index, prompt) in inputs.iter().enumerate() {
             let embedding = compute_embedding(source.as_ref(), prompt, 0)?;
@@ -662,8 +740,10 @@ async fn do_transcribe(
             };
             let runtime = backend.runtime.clone();
             let wav = wav;
-            let result =
-                tokio::task::spawn_blocking(move || runtime.transcribe_wav(&wav, &options)).await;
+            let result = compute_task(state.compute, move || {
+                runtime.transcribe_wav(&wav, &options)
+            })
+            .await;
             match result {
                 Ok(Ok(value)) => (
                     StatusCode::OK,
@@ -691,10 +771,14 @@ async fn do_transcribe(
             let decoder = backend.decoder.clone();
             let specials = backend.specials.clone();
             let tokenizer = backend.tokenizer.clone();
+            let compute_lock = backend.compute_lock.clone();
             let max_tokens = backend.max_tokens;
             let default_language = backend.language.to_string();
             let language = language.unwrap_or(default_language);
-            let result = tokio::task::spawn_blocking(move || {
+            let result = compute_task(state.compute, move || {
+                let _guard = compute_lock
+                    .lock()
+                    .map_err(|_| "Audio8 compute lock poisoned".to_string())?;
                 let samples = audio8_streaming::decode_samples(&wav)?;
                 let stream = audio8_streaming::Schedule::new().padded_stream(&samples);
                 let language_token = specials.language(&language)?;
@@ -799,7 +883,7 @@ async fn speech(
     let temperature = backend.temperature;
     let max_tokens = backend.max_tokens;
     let input = req.input.clone();
-    let wav_bytes = match tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
+    let wav_bytes = match compute_task(state.compute, move || -> Result<Vec<u8>, String> {
         let speaker = if let Some(wav) = ref_wav_bytes.as_deref() {
             let mel = reference_wav_to_mel(wav)?;
             Some(Qwen3TtsSpeakerEncoder::from_source(mmproj.as_ref())?.encode(&mel)?)
@@ -896,6 +980,24 @@ fn synthesize_tts_frames(
 // =============================================================================
 
 fn build_backend(options: &CliOptions) -> Result<Arc<Backend>, String> {
+    options.validate_compute_mode()?;
+    options.compute_policy().check_build()?;
+    let _scope = options.compute_policy().enter_legacy_scope();
+    if crate::models::unlimited_ocr::matches_model(&options.model) {
+        crate::models::unlimited_ocr::validate_options(options)?;
+        let model = Arc::new(crate::models::unlimited_ocr::Model::load(
+            &options.model,
+            options.threads,
+            options.effective_max_context(),
+        )?);
+        let runtime = Mutex::new(
+            Box::new(model.clone()) as Box<dyn crate::ops::generation_runtime::TextRuntime>
+        );
+        return Ok(Arc::new(Backend::UnlimitedOcr(UnlimitedOcrBackend {
+            model,
+            runtime,
+        })));
+    }
     if options.tts {
         return Ok(Arc::new(Backend::Tts(build_tts(options)?)));
     }
@@ -942,6 +1044,9 @@ fn build_backend(options: &CliOptions) -> Result<Arc<Backend>, String> {
     // CLM is opted into rather than detected: the encoder is an ordinary
     // Qwen3 GGUF, and it is `--clm-head` saying "score with these heads"
     // that makes it a CLM backend.
+    if is_timestral_gguf(&options.model) {
+        return Ok(Arc::new(Backend::Timestral(build_timestral(options)?)));
+    }
     if options.clm_head.is_some() {
         return Ok(Arc::new(Backend::Clm(build_clm(options)?)));
     }
@@ -953,7 +1058,15 @@ fn build_backend(options: &CliOptions) -> Result<Arc<Backend>, String> {
             options,
         )?)));
     }
-    Ok(Arc::new(Backend::Text(build_text(options)?)))
+    let (text, wevisone) = build_text(options)?;
+    Ok(Arc::new(match wevisone {
+        Some(extra) => Backend::WeVisOne(WeVisOneBackend {
+            text,
+            decoder: extra.decoder,
+            options: extra.options,
+        }),
+        None => Backend::Text(text),
+    }))
 }
 
 /// Returns `true` if the GGUF at `path` looks like a Qwen3 rerank
@@ -1060,6 +1173,55 @@ fn is_audio8_gguf(path: &std::path::Path) -> bool {
         .metadata("general.architecture")
         .and_then(MetaValue::to_string_val)
         .is_some_and(|arch| arch == "audio8_asr_infinite")
+}
+
+/// True when the file holds a Timestral checkpoint.
+fn is_timestral_gguf(path: &std::path::Path) -> bool {
+    use crate::MetaValue;
+    let loader = match crate::GGUFLoader::from_file(path) {
+        Ok(l) => l,
+        Err(_) => return false,
+    };
+    loader
+        .metadata("general.architecture")
+        .and_then(MetaValue::to_string_val)
+        .map(|arch| arch == "timestral")
+        .unwrap_or(false)
+}
+
+/// Build the forecaster and keep it resident.
+///
+/// The model borrows the mapped weights, so the source is leaked to get a
+/// `'static` borrow. The same leak holds the model, which keeps the
+/// device arena alive instead of re-uploading the weights per request.
+fn build_timestral(options: &CliOptions) -> Result<TimestralBackend, String> {
+    use crate::models::timestral::TimestralModel;
+    let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+    let source: &'static Arc<dyn TensorSource> = Box::leak(Box::new(source));
+    let model: TimestralModel<'static> =
+        TimestralModel::from_source_with_compute(source.as_ref(), options.compute_policy())?;
+    // The device path refuses the formats it has no kernel for. A server
+    // that would fail every request is worse than one that refuses to
+    // start, so the check happens here.
+    #[cfg(feature = "vulkan")]
+    if options.compute_policy() == crate::compute::ComputePolicy::Vulkan {
+        let refused: Vec<String> = model
+            .matrix_types()
+            .iter()
+            .filter(|format| !crate::vulkan::timestral::gpu_supports(**format))
+            .map(|format| format!("{format:?}"))
+            .collect();
+        if !refused.is_empty() {
+            return Err(format!(
+                "the Timestral device path has no kernel for {refused:?}; \
+                 use --compute cpu or --compute auto"
+            ));
+        }
+    }
+    let model: &'static TimestralModel<'static> = Box::leak(Box::new(model));
+    Ok(TimestralBackend {
+        model: Arc::new(model),
+    })
 }
 
 fn build_rerank(options: &CliOptions) -> Result<RerankBackend, String> {
@@ -1222,7 +1384,7 @@ fn build_gliner2_boundary(options: &CliOptions) -> Result<Gliner2BoundaryBackend
     })
 }
 
-fn build_text(options: &CliOptions) -> Result<TextBackend, String> {
+fn build_text(options: &CliOptions) -> Result<(TextBackend, Option<WeVisOneExtra>), String> {
     let prefill_batch_size = options.effective_prefill_batch_size()?;
     let raw_source: Arc<dyn TensorSource> =
         Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
@@ -1309,6 +1471,8 @@ fn build_text(options: &CliOptions) -> Result<TextBackend, String> {
         pool.clone(),
         tokenizer.clone(),
     )
+    .with_compute(options.compute_policy())
+    .with_kv_format(options.kv_format)
     .with_threads(options.threads)
     .with_max_context(options.effective_max_context())
     .with_prefill_batch_size(prefill_batch_size)
@@ -1319,7 +1483,13 @@ fn build_text(options: &CliOptions) -> Result<TextBackend, String> {
                 let context = runtime.context_length();
                 (Some(std::sync::Mutex::new(runtime)), context)
             }
-            Err(_) => (None, 0),
+            Err(error) if options.compute_policy() == crate::compute::ComputePolicy::Vulkan => {
+                return Err(error)
+            }
+            Err(error) => {
+                log::info!("text runtime unavailable: {error}");
+                (None, 0)
+            }
         };
     // Built once: the `Options` and the compiled template below must always
     // agree, and constructing both from separate literals is how a new flag
@@ -1335,7 +1505,33 @@ fn build_text(options: &CliOptions) -> Result<TextBackend, String> {
     });
     let compiled_chat_template =
         std::sync::Arc::new(chat_template.resolve(&|k| source.metadata(k).cloned())?);
-    Ok(TextBackend {
+    let wevisone_options = if source.metadata("wevisone_vl.source_revision").is_some() {
+        Some(crate::models::wevisone_vl::PredictionOptions::from_cli(
+            options,
+        )?)
+    } else {
+        None
+    };
+    let wevisone_decoder: Option<Arc<dyn TensorSource>> = options
+        .wevisone_decoder
+        .as_ref()
+        .map(|path| {
+            crate::format::ggufrs::open_model_source(path, ComponentRole::Llm).map(Arc::from)
+        })
+        .transpose()
+        .map_err(|e| e.to_string())?;
+    if let Some(decoder) = &wevisone_decoder {
+        crate::models::wevisone_vl::validate_components(
+            source.as_ref(),
+            mmproj
+                .as_ref()
+                .ok_or("--wevisone-decoder requires --mmproj")?
+                .as_ref(),
+            Some(decoder.as_ref()),
+        )?;
+        crate::models::wevisone_vl::Decoder::new(decoder.as_ref(), &pool)?;
+    }
+    let text = TextBackend {
         arch: arch.to_string(),
         pool,
         tokenizer,
@@ -1348,7 +1544,19 @@ fn build_text(options: &CliOptions) -> Result<TextBackend, String> {
         model_path: Some(model_path),
         mmproj,
         mmproj_path: options.mmproj.clone().filter(|p| !p.as_os_str().is_empty()),
-    })
+    };
+    let wevisone = wevisone_options.map(|options| WeVisOneExtra {
+        options,
+        decoder: wevisone_decoder,
+    });
+    Ok((text, wevisone))
+}
+
+/// The WeVisOne-specific components a text backend carries on top of
+/// the generic one.
+struct WeVisOneExtra {
+    options: crate::models::wevisone_vl::PredictionOptions,
+    decoder: Option<Arc<dyn TensorSource>>,
 }
 
 fn build_asr(options: &CliOptions) -> Result<AsrBackend, String> {
@@ -1385,12 +1593,24 @@ fn build_audio8(options: &CliOptions) -> Result<Audio8Backend, String> {
         return Err("Audio8 carries its audio tower in --model; omit --mmproj".into());
     }
     let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
-    let encoder = crate::models::audio8::Audio8Encoder::from_source(Arc::clone(&source))?;
+    // The pool can have more than one thread because the transcriptions take
+    // `compute_lock`, which serializes them: `ComputePool::compute` publishes
+    // its closure through shared atomics, so two concurrent requests would
+    // otherwise overwrite each other's work.
+    let pool = Arc::new(ComputePool::new(resolve_thread_count(
+        options.threads,
+        std::thread::available_parallelism()
+            .map(|value| value.get())
+            .unwrap_or(1),
+    )));
+    let encoder =
+        crate::models::audio8::Audio8Encoder::from_source(Arc::clone(&source), Arc::clone(&pool))?;
     let decoder_source = Arc::clone(&source);
     let tokenizer = Arc::new(BPETokenizer::from_gguf_metadata(|key| {
         source.metadata(key).cloned()
     })?);
-    let decoder = crate::models::audio8::text::Audio8TextDecoder::from_source(decoder_source)?;
+    let decoder =
+        crate::models::audio8::text::Audio8TextDecoder::from_source(decoder_source, pool)?;
     // Validate the whole contract once at startup rather than per request.
     let specials = audio8_streaming::SpecialTokens::lookup(&tokenizer)?;
     let language = options.language.as_deref().unwrap_or("zh");
@@ -1411,6 +1631,7 @@ fn build_audio8(options: &CliOptions) -> Result<Audio8Backend, String> {
         specials,
         language,
         max_tokens,
+        compute_lock: Arc::new(std::sync::Mutex::new(())),
     })
 }
 
@@ -1440,10 +1661,9 @@ fn build_tts(options: &CliOptions) -> Result<TtsBackend, String> {
 // main
 // =============================================================================
 
-fn configure_gpu(options: &CliOptions) {
-    if options.gpu {
-        crate::ops::enable_gpu();
-    }
+fn configure_gpu(options: &CliOptions) -> Result<crate::compute::LegacyComputeScope, String> {
+    options.validate_compute_mode()?;
+    options.compute_policy().configure_cli()
 }
 
 fn reject_unsupported_server_modes(options: &CliOptions) -> Result<(), String> {
@@ -1555,7 +1775,19 @@ pub fn run_server() {
         std::process::exit(1);
     }
 
-    configure_gpu(&options);
+    let _compute_scope = configure_gpu(&options).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(2);
+    });
+    // The forecaster's CPU projections run on the rayon global pool, so
+    // the requested thread count has to reach it.
+    let available = std::thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(1);
+    crate::app::cli::init_rayon_global_pool(crate::app::resolve_thread_count(
+        options.threads,
+        available,
+    ));
     let backend = match build_backend(&options) {
         Ok(value) => value,
         Err(error) => {
@@ -1571,7 +1803,8 @@ pub fn run_server() {
         .to_string();
 
     let mode_label = match backend.as_ref() {
-        Backend::Text(_) => "text",
+        Backend::Text(_) | Backend::WeVisOne(_) => "text",
+        Backend::UnlimitedOcr(_) => "unlimited-ocr",
         Backend::Embedding(_) => "embedding",
         Backend::Asr(_) => "asr",
         Backend::Audio8(_) => "audio8",
@@ -1580,6 +1813,7 @@ pub fn run_server() {
         Backend::Clm(_) => "clm",
         Backend::Gliner2(_) => "gliner2",
         Backend::Gliner2Boundary(_) => "gliner2-boundary",
+        Backend::Timestral(_) => "timestral",
     };
     eprintln!(
         "Model '{}' loaded (mode={}, host={}, port={})",
@@ -1587,6 +1821,7 @@ pub fn run_server() {
     );
 
     let state = AppState {
+        compute: options.compute_policy(),
         model: backend,
         model_name,
         responses: Arc::new(Mutex::new(api::ResponsesStore::default())),
@@ -1598,6 +1833,11 @@ pub fn run_server() {
         .route("/v1/models", get(list_models));
     router = match state.model.as_ref() {
         Backend::Text(_) => router.merge(api::routes()),
+        Backend::WeVisOne(_) => router.merge(api::routes()).route(
+            "/v1/prediction",
+            post(prediction::prediction).layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
+        ),
+        Backend::UnlimitedOcr(_) => router.merge(api::routes()),
         Backend::Embedding(_) => router.route(
             "/v1/embeddings",
             post(embeddings).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
@@ -1626,7 +1866,26 @@ pub fn run_server() {
         // `schema` field, which reads as a malformed request rather than as
         // "this server does not do that".
         Backend::Gliner2Boundary(_) => router.route("/v1/jev/boundary", post(api::jev_boundary)),
+        Backend::Timestral(_) => router.route("/v1/forecast", post(forecast::forecast)),
     };
+    if options.compute_policy() == crate::compute::ComputePolicy::Vulkan
+        && matches!(
+            state.model.as_ref(),
+            Backend::Text(_) | Backend::WeVisOne(_) | Backend::Clm(_) | Backend::Gliner2(_)
+        )
+    {
+        // The JEV routes score with the same text forward pass, so they
+        // take the same device path as the chat routes: the projections
+        // move to the device, the rest stays on the host. The model's own
+        // contract gate decides whether its numbers still agree with the
+        // CPU, so there is nothing to refuse here -- but the caller asked
+        // for a device and gets a partial one, so say so once.
+        eprintln!(
+            "compute requested=Vulkan backend=partial mode=jev \
+             note=no complete device path for this mode; only the \
+             offloadable parts run on the device"
+        );
+    }
     let app = router.layer(CorsLayer::permissive()).with_state(state);
 
     let addr = format!("{}:{}", host, port);
@@ -1654,13 +1913,37 @@ mod tests {
     use super::{configure_gpu, CliOptions};
 
     #[test]
+    fn compute_request_scope_reaches_blocking_workers() {
+        use crate::compute::ComputePolicy;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            super::compute_task(ComputePolicy::Cpu, || {
+                assert_eq!(ComputePolicy::legacy(), ComputePolicy::Cpu);
+                let pool = crate::ComputePool::new(2);
+                pool.compute(|_, _| assert!(crate::core::thread_pool::gpu_matmul_disabled()));
+            })
+            .await
+            .unwrap();
+            super::compute_task(ComputePolicy::Vulkan, || {
+                assert_eq!(ComputePolicy::legacy(), ComputePolicy::Vulkan);
+                assert!(!crate::core::thread_pool::gpu_matmul_disabled());
+            })
+            .await
+            .unwrap();
+        });
+    }
+
+    #[test]
     fn gpu_flag_reaches_shared_switch() {
         let options = CliOptions {
             gpu: true,
             ..CliOptions::default()
         };
 
-        configure_gpu(&options);
+        let _scope = configure_gpu(&options).unwrap();
 
         assert!(crate::ops::float::gpu_requested());
     }

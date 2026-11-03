@@ -7,6 +7,56 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 
+#[test]
+fn compute_policy_options_are_shared_and_unambiguous() {
+    use crate::compute::ComputePolicy::{Auto, Cpu, Vulkan};
+    for (flags, expected) in [
+        (vec!["rmi"], Cpu),
+        (vec!["rmi", "--gpu"], Auto),
+        (vec!["rmi", "--compute", "cpu"], Cpu),
+        (vec!["rmi", "--compute", "auto"], Auto),
+        (vec!["rmi", "--compute", "vulkan"], Vulkan),
+    ] {
+        assert_eq!(
+            parse_cli_options(&args(&flags)).unwrap().compute_policy(),
+            expected
+        );
+    }
+    for flags in [
+        vec!["rmi", "--compute"],
+        vec!["rmi", "--compute", "bogus"],
+        vec!["rmi", "--compute", "--gpu"],
+        vec!["rmi", "--gpu", "--compute", "cpu"],
+        vec!["rmi", "--compute", "auto", "--gpu"],
+        vec!["rmi", "--compute", "cpu", "--compute", "vulkan"],
+    ] {
+        assert!(parse_cli_options(&args(&flags)).is_err(), "{flags:?}");
+    }
+}
+
+#[test]
+fn compute_vulkan_reports_modes_without_a_complete_device_path() {
+    for mode in ["--embedding", "--jev", "--tts", "--yue2", "--dreamx"] {
+        let options = parse_cli_options(&args(&["rmi", "--compute", "vulkan", mode])).unwrap();
+        // The mode no longer blocks the request: `--compute vulkan` asks
+        // for a device, and the mode is reported instead.
+        assert!(options.validate_compute_mode().is_ok(), "{mode}");
+        assert!(options.vulkan_partial_mode().is_some(), "{mode}");
+    }
+    // `--bench`, `--profile` and `--dump-logits` decorate the text path
+    // instead of picking a forward path of their own.
+    for mode in ["--bench", "--profile", "--dump-logits"] {
+        let options = parse_cli_options(&args(&["rmi", "--compute", "vulkan", mode])).unwrap();
+        assert!(options.validate_compute_mode().is_ok(), "{mode}");
+        assert!(options.vulkan_partial_mode().is_none(), "{mode}");
+    }
+    let options = parse_cli_options(&args(&["rmi", "--compute", "vulkan"])).unwrap();
+    assert!(options.validate_compute_mode().is_ok());
+    assert!(options.vulkan_partial_mode().is_none());
+    assert!(options.validate_compute_model("gemma4").is_ok());
+    assert!(options.validate_compute_model("qwen3").is_ok());
+}
+
 struct TestTensorSource {
     info: TensorInfo,
     bytes: Vec<u8>,
@@ -85,6 +135,16 @@ fn mage_arguments_preserve_reference_order_and_require_values() {
         assert!(parse_cli_options(&args(&["rmi", flag])).is_err());
         assert!(parse_cli_options(&args(&["rmi", flag, "--prompt"])).is_err());
     }
+}
+
+#[test]
+fn qwen_image_turbo_flag_is_accepted() {
+    assert!(
+        parse_cli_options(&args(&["rmi", "--qwen-image-turbo"]))
+            .unwrap()
+            .qwen_image_turbo
+    );
+    assert!(!CliOptions::default().qwen_image_turbo);
 }
 
 #[test]
@@ -539,6 +599,114 @@ fn dreamx_cli_rejects_edit_only_options() {
         (vec!["--use-xvector", "auto"], "--use-xvector"),
     ] {
         let mut argv = base.to_vec();
+        argv.extend(extra);
+        let error = validate_cli_options(&parse_cli_options(&args(&argv)).unwrap()).unwrap_err();
+        assert!(error.contains(expected), "{argv:?}: {error}");
+    }
+}
+
+#[test]
+fn astronex_cli_requires_explicit_pair_prompt_and_mp4() {
+    let complete = parse_cli_options(&args(&[
+        "rmi",
+        "--astronex",
+        "--model",
+        "astronex.gguf",
+        "--mmproj",
+        "components.gguf",
+        "--prompt",
+        "a red kite",
+        "--out",
+        "kite.mp4",
+        "--cfg-scale",
+        "4.5",
+    ]))
+    .unwrap();
+    let resolved = astronex_cli_options(&complete).unwrap().unwrap();
+    assert_eq!(resolved.model, PathBuf::from("astronex.gguf"));
+    assert_eq!(resolved.mmproj, PathBuf::from("components.gguf"));
+    assert_eq!(resolved.prompt, "a red kite");
+    assert_eq!(resolved.out, PathBuf::from("kite.mp4"));
+    assert_eq!(resolved.options.frames, 9);
+    assert_eq!(resolved.options.steps, 8);
+    assert_eq!(resolved.options.guidance_scale, 4.5);
+
+    for argv in [
+        vec![
+            "rmi",
+            "--astronex",
+            "--mmproj",
+            "components.gguf",
+            "--prompt",
+            "x",
+            "--out",
+            "x.mp4",
+        ],
+        vec![
+            "rmi",
+            "--astronex",
+            "--model",
+            "m.gguf",
+            "--prompt",
+            "x",
+            "--out",
+            "x.mp4",
+        ],
+        vec![
+            "rmi",
+            "--astronex",
+            "--model",
+            "m.gguf",
+            "--mmproj",
+            "c.gguf",
+            "--out",
+            "x.mp4",
+        ],
+        vec![
+            "rmi",
+            "--astronex",
+            "--model",
+            "m.gguf",
+            "--mmproj",
+            "c.gguf",
+            "--prompt",
+            "x",
+            "--out",
+            "x.png",
+        ],
+    ] {
+        let options = parse_cli_options(&args(&argv)).unwrap();
+        assert!(validate_cli_options(&options).is_err(), "{argv:?}");
+    }
+}
+
+#[test]
+fn astronex_cli_rejects_non_contract_frames_steps_and_routes() {
+    for (extra, expected) in [
+        (vec!["--width", "15"], "multiples of 16"),
+        (vec!["--video-frames", "0"], "frame count"),
+        (vec!["--steps", "4"], "8-step"),
+        (
+            vec!["--video-frames", "9", "--steps", "8", "--dreamx"],
+            "--dreamx",
+        ),
+        (
+            vec!["--video-frames", "9", "--steps", "8", "--frames", "8"],
+            "--frames",
+        ),
+    ] {
+        let mut argv = vec![
+            "rmi",
+            "--astronex",
+            "--model",
+            "m.gguf",
+            "--mmproj",
+            "c.gguf",
+            "--prompt",
+            "x",
+            "--out",
+            "x.mp4",
+        ];
         argv.extend(extra);
         let error = validate_cli_options(&parse_cli_options(&args(&argv)).unwrap()).unwrap_err();
         assert!(error.contains(expected), "{argv:?}: {error}");
@@ -1044,9 +1212,8 @@ fn gemma4_media_requires_mmproj() {
         "x",
     ]))
     .is_ok());
-    // What IS enforced at validate time: --image under --embedding without
-    // --mmproj, and --video without --mmproj. Those paths have no
-    // standalone variant to disambiguate against.
+    // Self-contained BGE visual models need no projector. Media embeddings
+    // defer that requirement until the dispatcher can inspect the source.
     assert!(validate_cli_options(&parse(&[
         "rmi",
         "--model",
@@ -1055,7 +1222,7 @@ fn gemma4_media_requires_mmproj() {
         "--image",
         "a.png",
     ]))
-    .is_err());
+    .is_ok());
     assert!(validate_cli_options(&parse(&[
         "rmi",
         "--model",
@@ -1395,4 +1562,95 @@ fn legacy_cli_parser_and_dispatch_semantics_are_preserved() {
         }
         assert!(validate_cli_options(&options).is_ok());
     }
+}
+
+#[test]
+fn wevisone_cli_validates_mode_and_preserves_generation_options() {
+    let base = [
+        "rmi",
+        "--model",
+        "text.gguf",
+        "--mmproj",
+        "vision.gguf",
+        "--wevisone-request",
+        "request.json",
+    ];
+    let mut values = base.to_vec();
+    values.extend([
+        "--max-tokens",
+        "1",
+        "--temp",
+        "0.7",
+        "--repetition-penalty",
+        "1.2",
+        "--prefill-batch-size",
+        "1",
+        "--max-context",
+        "256",
+        "--kv-cache",
+        "f16",
+    ]);
+    let options = parse_cli_options(&args(&values)).unwrap();
+    validate_cli_options(&options).unwrap();
+    let prediction = crate::models::wevisone_vl::PredictionOptions::from_cli(&options).unwrap();
+    assert_eq!(prediction.max_new_tokens, 1);
+    assert_eq!(prediction.temperature, 0.7);
+    assert_eq!(prediction.repetition_penalty, 1.2);
+    assert_eq!(prediction.prefill_batch_size, 1);
+    assert_eq!(prediction.max_context, 256);
+    assert_eq!(prediction.kv_format, KvFormat::F16);
+    for extra in ["--dry-run", "--qwen-image-turbo", "--jev", "--dump-logits"] {
+        let mut values = base.to_vec();
+        values.push(extra);
+        assert!(validate_cli_options(&parse_cli_options(&args(&values)).unwrap()).is_err());
+    }
+}
+
+#[test]
+fn wevisone_decoder_requires_a_wevisone_request() {
+    let mut values = vec![
+        "rmi",
+        "--model",
+        "text.gguf",
+        "--mmproj",
+        "vision.gguf",
+        "--wevisone-decoder",
+        "decoder.gguf",
+    ];
+    let options = parse_cli_options(&args(&values)).unwrap();
+    let error = validate_cli_options(&options).unwrap_err();
+    assert!(error.contains("--wevisone-decoder requires --wevisone-request"));
+    values.push("--wevisone-request");
+    values.push("request.json");
+    let options = parse_cli_options(&args(&values)).unwrap();
+    assert!(validate_cli_options(&options).is_ok());
+}
+
+#[test]
+fn wevisone_decoder_is_allowed_in_server_mode() {
+    // The server owns /v1/prediction and takes the decoder from
+    // --wevisone-decoder without a request file.
+    let options = parse_cli_options(&args(&[
+        "rmi",
+        "--serve",
+        "--model",
+        "text.gguf",
+        "--mmproj",
+        "vision.gguf",
+        "--wevisone-decoder",
+        "decoder.gguf",
+    ]))
+    .unwrap();
+    assert!(options.serve);
+    assert!(validate_cli_options(&options).is_ok());
+}
+
+#[test]
+fn kv_cache_is_only_rejected_when_the_user_asked_for_it() {
+    let mut options = CliOptions::default();
+    assert!(!options.kv_format_explicit);
+    assert_eq!(options.kv_format, KvFormat::F32);
+    let options = parse_cli_options(&args(&["rmi", "--kv-cache", "f32"])).unwrap();
+    assert!(options.kv_format_explicit);
+    assert_eq!(options.kv_format, KvFormat::F32);
 }

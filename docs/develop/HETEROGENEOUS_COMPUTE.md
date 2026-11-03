@@ -2,6 +2,38 @@
 
 > **文档用途：** 本文定义 `rust-model-inference` 在多后端（AVX2 / NEON / Scalar / Vulkan / wgpu / 未来 CUDA · Metal）共存场景下的设计原则、当前形态评估与目标架构。配套的依赖方向约束见 [`MODEL_ORGANIZATION.md`](MODEL_ORGANIZATION.md)、GPU 模块归属见 [`REFACTOR_PLAN.md`](REFACTOR_PLAN.md) §1。
 
+
+## 现行实现（2026-10-09）
+
+统一计算入口已落在 `compute` 层，实施依据是
+[统一计算计划](../superpowers/plans/2026-10-08-unified-compute-dispatch.md)。
+下面原有的 Registry、priority、全模型迁移示例保留为历史设计，**不再是本轮实施要求**。
+本轮证据和限制见 [验证记录](UNIFIED_COMPUTE_VALIDATION.md)。
+
+```text
+模型权重与语义 → LinearExecutor / 共用 dense recipe
+                    ├─ CPU → 原 Kernel / PreparedRows → AVX2 / NEON / scalar
+                    └─ Vulkan → recorder → 驻留 arena / chunk 提交
+```
+
+- 权重格式分发和设备分发是两个层次。Q8、Q4、F16、BF16 等复用模型流程，
+  各格式仍需匹配的 kernel 和激活/归约契约，不能先全部转 Q8。
+- `ComputePolicy::{Cpu,Auto,Vulkan}` 独立于共享设备初始化。默认 CPU；CPU scope
+  覆盖兼容入口、请求线程及 ComputePool worker，退出后恢复上一作用域。
+- `LinearExecutor` 借用模型权重并拥有上传缓存；`Prepared`、`Forward`、`F16Strict`
+  分别校验。Gemma4 公共 projection 和 AuK 每 render linear 已复用它；这仍是局部卸载。
+- Qwen3 与标准 Llama session 复用 `run_dense_layer` 的同一运算顺序，Vulkan
+  再复用 `DenseVulkanSession` 的上传、arena、提交、KV delta 和 reset。特殊 RoPE、
+  SWA、softcap、scale、bias、post-norm 等未实现组合明确拒绝。
+- Qwen3.5 保留自己的 recurrent/conv/SSM recipe，复用策略与事务规则。
+  GPU 成功且 shadow 校验通过才提交；Auto 失败重算整个未提交 chunk，
+  强制 Vulkan 保留成功前缀并返回错误。
+- 不用 GPU 优先级代替性能门槛。新增 Llama Auto 路径留在 CPU；
+  既有 Auto 路径仍是实验性。原有权重格式、硬件历史测试不能替代本轮测量。
+- ARM prepared F16 的 32 路 half 累加已在公共 shader 匹配，并处理 FMA 的
+  double-rounding tie；非 32 对齐的 half-prefix/F64-tail 组合由执行层拒绝。
+  这不是对所有平台/格式逐位相等的承诺，`F16Strict` GPU 仍不支持。
+
 ---
 
 ## 1. 核心原则

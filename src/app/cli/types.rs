@@ -17,6 +17,7 @@ pub enum EmbeddingOutput {
 pub struct CliOptions {
     pub yue2: bool,
     pub dreamx: bool,
+    pub astronex: bool,
     pub planner: Option<PathBuf>,
     pub perception: Option<PathBuf>,
     pub scenes: Option<PathBuf>,
@@ -67,6 +68,9 @@ pub struct CliOptions {
     pub prefill_batch_size: Option<usize>,
     pub repetition_penalty: Option<f32>,
     pub steps: Option<usize>,
+    /// Astronex output latent-frame count. `--frames` remains reserved for
+    /// Qwen-Drive's frame manifest, so the video path uses `--video-frames`.
+    pub astronex_frames: Option<usize>,
     pub resolution: Option<usize>,
     pub width: Option<usize>,
     pub height: Option<usize>,
@@ -109,7 +113,18 @@ pub struct CliOptions {
     pub bench: bool,
     pub profile: bool,
     pub kv_format: KvFormat,
+    /// True when `--kv-cache` was passed on the command line. The
+    /// `KvFormat` default is F32, but the Qwen3-VL text path always runs
+    /// with F16 KV, so an F32 request is only a conflict when the user
+    /// asked for it. Without this flag the guard would also reject the
+    /// default and block plain-text Qwen3-VL entirely.
+    pub kv_format_explicit: bool,
+    /// True when `--serve` was passed. The server owns the WeVisOne
+    /// prediction route, so it accepts `--wevisone-decoder` without a
+    /// `--wevisone-request` file.
+    pub serve: bool,
     pub gpu: bool,
+    pub compute: Option<crate::compute::ComputePolicy>,
     pub tts: bool,
     pub edit: bool,
     pub source_audio: Option<PathBuf>,
@@ -124,6 +139,9 @@ pub struct CliOptions {
     pub qwen_omni_bf16: Option<PathBuf>,
     pub jev: bool,
     pub laya_request: Option<PathBuf>,
+    pub wevisone_request: Option<PathBuf>,
+    pub wevisone_decoder: Option<PathBuf>,
+    pub timestral_request: Option<PathBuf>,
     pub jev_context: Option<String>,
     pub jev_questions: Vec<JevQuestion>,
     pub jev_positive: Option<String>,
@@ -139,6 +157,8 @@ pub struct CliOptions {
     pub qwen_latent_width: Option<usize>,
     pub qwen_latent_height: Option<usize>,
     pub qwen_timestep: Option<f32>,
+    /// Select the checkpoint's fixed eight-step schedule; GGUF has no variant tag.
+    pub qwen_image_turbo: bool,
     /// Cross-encoder rerank: rank a query against a list of documents.
     /// Backend chosen by the loaded GGUF's architecture
     /// (`jina-bert-v2` + `cls.weight`/`cls.bias` → bert_family forward,
@@ -169,6 +189,94 @@ pub struct JevBlockInput {
 }
 
 impl CliOptions {
+    pub fn compute_policy(&self) -> crate::compute::ComputePolicy {
+        self.compute.unwrap_or(if self.gpu {
+            crate::compute::ComputePolicy::Auto
+        } else {
+            crate::compute::ComputePolicy::Cpu
+        })
+    }
+
+    pub fn validate_compute_mode(&self) -> Result<(), String> {
+        use crate::compute::ComputePolicy;
+        if self.gpu && self.compute.is_some() {
+            return Err("--gpu and --compute cannot be combined".into());
+        }
+        if self.compute_policy() == ComputePolicy::Vulkan {
+            if let Some(mode) = self.vulkan_partial_mode() {
+                // One line per request: the mode is checked at more than
+                // one layer, and the caller would otherwise see the same
+                // line twice.
+                static WARNED: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
+                if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    eprintln!(
+                        "compute requested=Vulkan backend=partial mode={mode} \
+                         note=no complete device path for this mode; only the \
+                         offloadable parts run on the device"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The mode whose device path is partial, if the request names one.
+    ///
+    /// `--compute vulkan` asks for a real device. A mode that cannot put
+    /// its whole graph there still runs, and the caller is told which
+    /// mode it asked for. `--bench`, `--profile` and `--dump-logits` are
+    /// not modes: they decorate the text path, which reports its own
+    /// device path. The OCR family is left out as well, because its
+    /// loader reports the path it took.
+    pub(super) fn vulkan_partial_mode(&self) -> Option<&'static str> {
+        if self.embedding {
+            Some("embedding")
+        } else if self.jev {
+            Some("jev")
+        } else if self.rerank {
+            Some("rerank")
+        } else if self.tts {
+            Some("tts")
+        } else if self.yue2 {
+            Some("yue2")
+        } else if self.dreamx {
+            Some("dreamx")
+        } else if self.audio.is_some() {
+            Some("audio")
+        } else if self.video.is_some() {
+            Some("video")
+        } else if self.mmproj.is_some() {
+            Some("mmproj")
+        } else if self.vae.is_some() {
+            Some("vae")
+        } else if self.text_encoder.is_some() {
+            Some("text-encoder")
+        } else if self.planner.is_some() {
+            Some("planner")
+        } else if self.perception.is_some() {
+            Some("perception")
+        } else if self.laya_request.is_some() {
+            Some("laya")
+        } else if self.longcat_kind.is_some() {
+            Some("longcat")
+        } else if self.image.is_some() && !self.is_ocr_model() {
+            Some("image")
+        } else {
+            None
+        }
+    }
+
+    /// Whether the model is one of the OCR family, whose loader reports
+    /// its own device path.
+    fn is_ocr_model(&self) -> bool {
+        crate::models::unlimited_ocr::matches_model(&self.model)
+    }
+
+    pub fn validate_compute_model(&self, arch: &str) -> Result<(), String> {
+        self.validate_compute_mode()?;
+        self.compute_policy().validate_text_arch(arch)
+    }
     pub fn effective_prefill_batch_size(&self) -> Result<usize, String> {
         crate::core::prefill::checked_prefill_batch_size(self.prefill_batch_size)
     }
@@ -243,6 +351,17 @@ pub struct DreamXCliOptions {
     pub dry_run: bool,
     pub overwrite: bool,
     pub allow_memory_overcommit: bool,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct AstronexCliOptions {
+    pub model: PathBuf,
+    pub mmproj: PathBuf,
+    pub image: Option<PathBuf>,
+    pub prompt: String,
+    pub out: PathBuf,
+    pub options: crate::models::diffusion::astronex_world::AstronexOptions,
+    pub overwrite: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]

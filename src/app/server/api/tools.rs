@@ -32,13 +32,22 @@ fn is_qwen35(arch: &str) -> Result<bool, String> {
         // qwen2vl / qwen3vlmoe ride the same Qwen3 ChatML prompt as qwen3;
         // their projector differs, which the runtime's image path handles.
         "qwen3" | "qwen3vl" | "lfm2moe" | "qwen2vl" | "qwen3vlmoe" => Ok(false),
+        // Mellum 2.1 ships ChatML (`<|im_start|>role\n … <|im_end|>\n`) with
+        // the same `# Tools` preamble as Qwen3, so it rides the Qwen3
+        // renderer.
+        "mellum" => Ok(false),
         // Falcon-H1 uses the same ChatML role markers as Qwen (verified
         // against the unsloth GGUF: <|im_start|>user\n...
         // <|im_end|> <|im_start|>assistant\n), so it rides the same
         // renderer; it has no tool grammar and no vision path, so
         // build_prompt rejects tools/images before we get here.
         "falcon-h1" => Ok(false),
-        "qwen35" => Ok(true),
+        // Dory 1.0 ships the same ChatML role markers (`<|im_start|>role\n …
+        // <|im_end|>\n`) as the Qwen family, so it rides the same renderer.
+        // LFM3 has its own Jinja input template and the same plain-text
+        // output parser. Neither architecture has a tool-call or vision path.
+        "dory" | "lfm3" => Ok(false),
+        "qwen35" | "qwen35moe" => Ok(true),
         // Llama-family archs go through the CLI prompt builder
         // (`llama::trunk::build_prompt_tokens`) and don't support tool
         // prompting. They are accepted here so `build_prompt` returns Ok
@@ -100,6 +109,23 @@ pub fn build_prompt(
     // re-resolving keeps a server request from recompiling the template.
     compiled_jinja: Option<&crate::prompt::jinja::JinjaChatTemplate>,
 ) -> Result<(Vec<u32>, Vec<Vec<u8>>), String> {
+    let lfm3_jinja;
+    let jinja = if arch == "lfm3" {
+        if !tools.is_empty()
+            || messages
+                .iter()
+                .any(|m| !m.images.is_empty() || !m.calls.is_empty())
+        {
+            return Err("LFM3 supports plain text conversations only".into());
+        }
+        lfm3_jinja = crate::prompt::jinja::Options {
+            jinja: true,
+            file: jinja.file.clone(),
+        };
+        &lfm3_jinja
+    } else {
+        jinja
+    };
     // `--jinja` renders the model's own chat template for a multi-turn
     // conversation. Deliberately gated to plain text turns with no tools:
     //
@@ -147,6 +173,9 @@ pub fn build_prompt(
         }
     }
 
+    if arch == "lfm3" {
+        return Err("LFM3 requires its GGUF chat template or --chat-template-file".into());
+    }
     let qwen35 = is_qwen35(arch)?;
     // LFM2 / LFM2.5 have their own `role\n{content}\n` template. Rendering
     // them with qwen ChatML happens to work (the model copes) but diverges
@@ -197,6 +226,16 @@ pub fn build_prompt(
         }
         if messages.iter().any(|m| !m.images.is_empty()) {
             return Err("Image input is unsupported for Falcon-H1 text generation".into());
+        }
+    }
+    // Dory speaks the same ChatML dialect as Falcon-H1 and has neither a
+    // tool-call grammar nor a vision path.
+    if arch == "dory" {
+        if !tools.is_empty() {
+            return Err("Function tools are unsupported for Dory text generation".into());
+        }
+        if messages.iter().any(|m| !m.images.is_empty()) {
+            return Err("Image input is unsupported for Dory text generation".into());
         }
     }
     let llama_family = matches!(
@@ -461,12 +500,15 @@ pub fn build_prompt(
         .iter()
         .map(|(role, content)| QwenMessage { role, content })
         .collect();
-    let thinking = enable_thinking.unwrap_or(false);
+    // WeVisOne has think tokens, but its trained assistant prefix contains none.
+    let thinking = enable_thinking.unwrap_or(false)
+        || source.metadata("wevisone_vl.source_revision").is_some();
     let ids = build_qwen_chat_prompt(tokenizer, &messages, thinking)?;
     Ok((ids, attached_images))
 }
 
 pub struct OutputParser {
+    plain_text: bool,
     qwen35: bool,
     tools: HashMap<String, Value>,
     choice: ToolChoice,
@@ -484,13 +526,24 @@ pub struct OutputParser {
 
 impl OutputParser {
     pub fn new(arch: &str, tools: &[Tool], choice: &ToolChoice) -> Self {
-        let arch = is_qwen35(arch);
+        let plain_text = arch == crate::models::unlimited_ocr::MODEL_TYPE;
+        let arch = if plain_text {
+            Ok(false)
+        } else {
+            is_qwen35(arch)
+        };
         let error = arch
             .as_ref()
             .err()
             .cloned()
             .or_else(|| validate_tools(tools, choice).err());
+        let error = error.or_else(|| {
+            (plain_text
+                && (!tools.is_empty() || !matches!(choice, ToolChoice::Auto | ToolChoice::None)))
+            .then(|| "Unlimited-OCR does not support tools".into())
+        });
         Self {
+            plain_text,
             qwen35: arch.unwrap_or(false),
             tools: tools
                 .iter()
@@ -516,6 +569,11 @@ impl OutputParser {
         }
         if self.finished {
             return Err("Output parser already finished".into());
+        }
+        if self.plain_text {
+            let mut deltas = Vec::new();
+            self.emit_text(text.to_owned(), &mut deltas)?;
+            return Ok(deltas);
         }
         self.pending.push_str(text);
         let result = self.drain();
@@ -865,6 +923,16 @@ mod tests {
         }]
     }
 
+    #[test]
+    fn lfm3_plain_text_stream_is_accepted() {
+        let mut parser = OutputParser::new("lfm3", &[], &ToolChoice::Auto);
+        parser.push("Hello ").unwrap();
+        parser.push("世界!").unwrap();
+        parser.finish().unwrap();
+        assert_eq!(parser.text(), "Hello 世界!");
+        assert!(parser.calls().is_empty());
+    }
+
     fn replay(arch: &str, raw: &str, split: usize) -> (String, Vec<ToolCall>) {
         let mut parser = OutputParser::new(arch, &tools(), &ToolChoice::Auto);
         let mut events = parser.push(&raw[..split]).unwrap();
@@ -936,6 +1004,20 @@ mod tests {
                 "split={split}"
             );
             assert_eq!(parser.text(), "prefix");
+        }
+    }
+
+    #[test]
+    fn qwen35_moe_uses_dense_chat_and_tool_grammar() {
+        assert!(is_qwen35("qwen35moe").unwrap());
+        let raw =
+            "<tool_call><function=lookup><parameter=city>杭州</parameter></function></tool_call>";
+        for split in raw.char_indices().map(|(i, _)| i).chain([raw.len()]) {
+            let (text, calls) = replay("qwen35moe", raw, split);
+            assert!(text.is_empty());
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].name, "lookup");
+            assert_eq!(calls[0].arguments, json!({"city": "杭州"}));
         }
     }
 
@@ -1101,10 +1183,12 @@ mod tests {
         BPETokenizer::from_gguf_metadata(|k| metadata.get(k).cloned()).unwrap()
     }
 
-    struct TestSource;
+    struct TestSource(Option<MetaValue>);
     impl crate::core::tensor::TensorSource for TestSource {
-        fn metadata(&self, _key: &str) -> Option<&crate::core::tensor::MetaValue> {
-            None
+        fn metadata(&self, key: &str) -> Option<&crate::core::tensor::MetaValue> {
+            (key == "wevisone_vl.source_revision")
+                .then_some(self.0.as_ref())
+                .flatten()
         }
         fn tensor_info(&self, _name: &str) -> Option<&crate::core::tensor::TensorInfo> {
             None
@@ -1114,7 +1198,7 @@ mod tests {
         }
     }
     fn source() -> std::sync::Arc<dyn crate::core::tensor::TensorSource> {
-        std::sync::Arc::new(TestSource)
+        std::sync::Arc::new(TestSource(None))
     }
 
     fn user_message() -> Vec<Message> {
@@ -1125,6 +1209,31 @@ mod tests {
             call_id: None,
             images: vec![],
         }]
+    }
+
+    #[test]
+    fn wevisone_assistant_prefix_has_no_thinking_markers() {
+        let tokenizer = tokenizer();
+        for marked in [false, true] {
+            let source = TestSource(marked.then(|| MetaValue::String("released".into())));
+            let (ids, _) = build_prompt(
+                &source,
+                &tokenizer,
+                "qwen3vl",
+                &user_message(),
+                &[],
+                &ToolChoice::Auto,
+                None,
+                &crate::prompt::jinja::Options::default(),
+                None,
+            )
+            .unwrap();
+            let text = tokenizer.decode(&ids, true);
+            assert_eq!(text.contains("<think>"), !marked, "{text}");
+            if marked {
+                assert!(text.ends_with("<|im_start|>assistant\n"), "{text}");
+            }
+        }
     }
 
     /// The compiled template has to be what renders, not a fresh resolve.

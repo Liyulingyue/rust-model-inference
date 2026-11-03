@@ -1,4 +1,5 @@
 use super::{pipeline::trace, Condition};
+use crate::compute::ComputePolicy;
 use crate::core::scratchpad::{KvFormat, KvLifecycle};
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
@@ -125,18 +126,30 @@ impl TextConditioner {
             }
         }
         trace("qwen.text.embeddings", &[4096, tokens.len()], &embeddings)?;
-        let mut session = Qwen3Session::new_with_kv_state(
+        let policy = ComputePolicy::legacy();
+        // F32 KV stays on the host; the projection executor enforces the requested policy.
+        let mut session = Qwen3Session::new_with_compute(
             &self.model,
             tokens.len(),
             KvFormat::F32,
             KvLifecycle::Ephemeral,
+            if policy == ComputePolicy::Vulkan {
+                ComputePolicy::Auto
+            } else {
+                policy
+            },
         )?;
-        let hidden = session.forward_hidden_sequence_raw(Qwen3Input {
+        let input = Qwen3Input {
             token_ids: &tokens,
             positions: &positions,
             embeddings: Some(&embeddings),
             deepstack_embeddings: (!references.is_empty()).then_some(deepstack.as_slice()),
-        })?;
+        };
+        let hidden = if policy != ComputePolicy::Cpu {
+            session.forward_hidden_sequence_raw_with_linear_offload(input, policy)?
+        } else {
+            session.forward_hidden_sequence_raw(input)?
+        };
         let context = hidden[drop * 4096..].to_vec();
         trace("qwen.text.context", &[4096, tokens.len() - drop], &context)?;
         if !references.is_empty() {

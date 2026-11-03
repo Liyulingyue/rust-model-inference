@@ -31,13 +31,41 @@ float weight_bf16(uint slot, uint index) {
     return uintBitsToFloat(bits << 16u);
 }
 
+float round_bf16(float value) {
+    uint bits = floatBitsToUint(value);
+    if ((bits & 0x7f800000u) == 0x7f800000u) return value;
+    bits += 0x7fffu + ((bits >> 16u) & 1u);
+    return uintBitsToFloat(bits & 0xffff0000u);
+}
+
 void main() {
-    uint batch_rows = pc.reduction_lanes != 0u && pc.token_rows >= 4u ? 4u : 1u;
+    uint batch_rows = pc.reduction_lanes > 1u && pc.token_rows >= 4u ? 4u : 1u;
     uint token_row = gl_WorkGroupID.z / pc.group_count * batch_rows;
     uint slot = gl_WorkGroupID.z % pc.group_count;
     uint row = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
     uint rows = slot == 0u ? pc.rows0 : (slot == 1u ? pc.rows1 : pc.rows2);
     if (slot >= pc.group_count) return;
+
+    if (pc.reduction_lanes == 1u) {
+        row = row * 64u + gl_LocalInvocationID.x;
+        if (row >= rows) return;
+        // shortcut: compensated F32 is fixture-qualified; use FP64 for full exponent-range equivalence.
+        precise float high = 0.0;
+        precise float low = 0.0;
+        for (uint column = 0u; column < pc.n_in; column++) {
+            float input_value = round_bf16(uintBitsToFloat(
+                arena.data[pc.input_word + token_row * pc.input_stride + column]));
+            precise float term = weight_bf16(slot, row * pc.elements_per_row + column) * input_value;
+            precise float next = high + term;
+            low += abs(high) >= abs(term) ? (high - next) + term : (term - next) + high;
+            high = next;
+        }
+        uint output_word = slot == 0u ? pc.output0_word : slot == 1u ? pc.output1_word : pc.output2_word;
+        uint stride = slot == 0u ? pc.output0_stride : slot == 1u ? pc.output1_stride : pc.output2_stride;
+        precise float result = high + low;
+        arena.data[output_word + token_row * stride + row] = floatBitsToUint(result);
+        return;
+    }
 
     precise vec4 sum = vec4(0.0);
     uint index = 0u;

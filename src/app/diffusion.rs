@@ -1,8 +1,9 @@
-use crate::app::cli::{LongCatCliOptions, ZImageCliOptions};
+use crate::app::cli::{AstronexCliOptions, LongCatCliOptions, ZImageCliOptions};
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
 use crate::format::ggufrs::{open_model_source, ComponentRole};
+use crate::models::diffusion::astronex_world::AstronexPipeline;
 use crate::models::diffusion::longcat::text::{
     encode_prompt as encode_longcat_prompt, load_tokenizer as load_longcat_tokenizer,
     LongCatTextSource,
@@ -27,6 +28,65 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
+
+pub fn run_astronex_cli(
+    main: Arc<dyn TensorSource>,
+    components: Arc<dyn TensorSource>,
+    options: &AstronexCliOptions,
+    n_threads: usize,
+) -> Result<(), String> {
+    options.options.validate()?;
+    if options.options.mode == crate::models::diffusion::astronex_world::AstronexMode::ImageToVideo
+        && options.image.is_none()
+    {
+        return Err("Astronex image-to-video requires --image".into());
+    }
+    let image = options
+        .image
+        .as_deref()
+        .map(image::open)
+        .transpose()
+        .map_err(|error| format!("Load Astronex reference image: {error}"))?
+        .map(|image| {
+            image::imageops::resize(
+                &image.to_rgb8(),
+                options.options.width as u32,
+                options.options.height as u32,
+                image::imageops::FilterType::Lanczos3,
+            )
+        });
+    let started = Instant::now();
+    let pipeline = AstronexPipeline::load(main, components, n_threads)?;
+    let frames = pipeline.generate(&options.prompt, image.as_ref(), &options.options)?;
+    if frames.len() != options.options.frames {
+        return Err(format!(
+            "Astronex VAE returned {} frames; expected {}",
+            frames.len(),
+            options.options.frames
+        ));
+    }
+    let mut writer = crate::models::diffusion::dreamx::media::FfmpegVideoWriter::create(
+        &options.out,
+        options.options.width as u32,
+        options.options.height as u32,
+        options.options.fps as u32,
+        options.overwrite,
+    )?;
+    for frame in &frames {
+        writer.write_frame(frame)?;
+    }
+    writer.finish()?;
+    println!(
+        "Astronex {} video saved to {} in {}ms",
+        match options.options.mode {
+            crate::models::diffusion::astronex_world::AstronexMode::TextToVideo => "T2V",
+            crate::models::diffusion::astronex_world::AstronexMode::ImageToVideo => "I2V",
+        },
+        options.out.display(),
+        started.elapsed().as_millis()
+    );
+    Ok(())
+}
 
 fn trace_longcat(name: &str, values: &[f32], shape: &[usize]) -> Result<(), String> {
     let Some(dir) = std::env::var_os("RMI_LONGCAT_TRACE_DIR") else {
@@ -297,6 +357,91 @@ pub fn run_pig_image(
     Ok(())
 }
 
+pub fn run_flux3_cli(
+    source: Arc<dyn TensorSource>,
+    options: &crate::app::CliOptions,
+    n_threads: usize,
+) -> Result<(), String> {
+    for (present, flag) in [
+        (
+            options.cfg.is_some()
+                || options.cfg_scale.is_some()
+                || options.negative_prompt.is_some(),
+            "--cfg/--cfg-scale/--negative-prompt",
+        ),
+        (options.noise.is_some(), "--noise"),
+        (
+            options.embedding
+                || options.rerank
+                || options.jev
+                || options.tts
+                || options.yue2
+                || options.dreamx,
+            "non-image task modes",
+        ),
+        (
+            options.audio.is_some() || options.video.is_some(),
+            "--audio/--video",
+        ),
+        (
+            options.max_tokens.is_some()
+                || options.temperature.is_some()
+                || options.top_k.is_some()
+                || options.top_p.is_some(),
+            "text generation options",
+        ),
+    ] {
+        if present {
+            return Err(format!("FLUX3 cannot be used with {flag}"));
+        }
+    }
+    let text = options
+        .text_encoder
+        .as_deref()
+        .ok_or("FLUX3 requires --text-encoder")?;
+    let vae = options.vae.as_deref().ok_or("FLUX3 requires --vae")?;
+    let out = options.out.as_deref().ok_or("FLUX3 requires --out")?;
+    if out.exists() && !options.overwrite {
+        return Err(format!("Output already exists: {}", out.display()));
+    }
+    let prompt = options
+        .prompt
+        .as_deref()
+        .ok_or("FLUX3 requires --prompt (a full scene caption)")?;
+    let side = options.resolution.unwrap_or(1024);
+    let width = options.width.unwrap_or(side);
+    let height = options.height.unwrap_or(side);
+    if width != height {
+        return Err("FLUX3 currently requires square output".into());
+    }
+    let references = options
+        .image
+        .iter()
+        .chain(&options.references)
+        .map(|p| crate::app::media::decode_image(p).map(|image| image.to_rgb8()))
+        .collect::<Result<Vec<_>, _>>()?;
+    if options.edit && references.is_empty() {
+        return Err("FLUX3 --edit requires --image or --reference".into());
+    }
+    if references.len() > 10 {
+        return Err("FLUX3 supports at most 10 references".into());
+    }
+    let text = Arc::from(open_model_source(text, ComponentRole::Llm).map_err(|e| e.to_string())?);
+    let vae = Arc::from(open_model_source(vae, ComponentRole::Mmproj).map_err(|e| e.to_string())?);
+    let pipeline =
+        crate::models::diffusion::flux3::Flux3Pipeline::load(source, text, vae, n_threads)?;
+    let rgb = pipeline.generate(
+        prompt,
+        width,
+        options.steps.unwrap_or(16),
+        options.seed.unwrap_or(42) as u64,
+        &references,
+    )?;
+    write_png_atomically(out, &rgb, options.overwrite)?;
+    println!("FLUX3 image saved to {}", out.display());
+    Ok(())
+}
+
 pub fn run_mage_flow_cli(
     source: Arc<dyn TensorSource>,
     options: &crate::app::CliOptions,
@@ -333,12 +478,20 @@ pub fn run_mage_flow_cli(
             options.top_k.is_some() || options.top_p.is_some(),
             "--top-k/--top-p",
         ),
-        (
-            options.edit,
-            "--edit (use an edit variant and --image/--reference)",
-        ),
+        // The edit variants are released and the reference image path works,
+        // so the gate on --edit is lifted.
+        // (
+        //     options.edit,
+        //     "--edit (use an edit variant and --image/--reference)",
+        // ),
         (options.cfg_scale.is_some(), "--cfg-scale (use --cfg)"),
-        (options.gpu, "--gpu"),
+        // The GPU path of this model is not reproducible (TODO-044), so it
+        // stays off by default. RMI_GPU_UNSAFE=1 turns it on for callers that
+        // want the speed and accept that two runs can differ.
+        (
+            options.gpu && std::env::var_os("RMI_GPU_UNSAFE").is_none(),
+            "--gpu (set RMI_GPU_UNSAFE=1 to allow it; the result is not reproducible)",
+        ),
         (options.overwrite, "--overwrite"),
         (
             options.ref_audio.is_some() || options.ref_text.is_some(),
@@ -472,6 +625,10 @@ pub fn run_mage_flow_cli(
         }
     }
     let context = encode_prompt(&text, prompt, &features)?;
+    if std::env::var_os("RMI_MAGE_STEP_CHECKSUM").is_some() {
+        let sum: f64 = context.iter().map(|value| *value as f64).sum();
+        eprintln!("[Mage-CHECK] context sum={sum:.12e} len={}", context.len());
+    }
     let negative = if cfg > 1.0 {
         Some(encode_prompt(
             &text,
@@ -525,7 +682,19 @@ pub fn run_mage_flow_cli(
         packed.extend((0..n * 128).map(|i| latent[(i % 128) * n + i / 128]));
         shapes.push([lh, lw]);
     }
-    let latent = dit.sample(&packed, &shapes, &context, negative.as_deref(), steps, cfg)?;
+    let latent = match dit.sample(&packed, &shapes, &context, negative.as_deref(), steps, cfg) {
+        Ok(latent) => latent,
+        Err(error) => {
+            // The GPU path of this model is not reproducible: a projection now
+            // and then returns a wrong result (TODO-044). A broken latent is
+            // refused by the sampler, so redo the sampling on the CPU, which
+            // is slower but reproducible, rather than write out a flat image.
+            eprintln!("[Mage-Flow] {error}; sampling again on the CPU");
+            #[cfg(feature = "vulkan")]
+            let _cpu = ComputePool::disable_gpu_matmul_for_scope();
+            dit.sample(&packed, &shapes, &context, negative.as_deref(), steps, cfg)?
+        }
+    };
     let chw: Vec<_> = (0..n * 128)
         .map(|i| latent[(i % n) * 128 + i / n])
         .collect();
@@ -550,6 +719,12 @@ pub fn run_mage_flow_cli(
         "Mage-Flow {variant}: saved {w}x{h} image to {}",
         out.display()
     );
+    if std::env::var_os("RMI_GPU_VERIFY_TRACE").is_some() {
+        eprintln!(
+            "[GPU-VERIFY] 健康投影与 CPU 内核的最大相对差 = {:.3e}",
+            crate::models::diffusion::dreamx::kernels::healthy_worst_difference()
+        );
+    }
     Ok(())
 }
 
@@ -781,7 +956,7 @@ pub fn run_qwen_image_2_1_cli(
     n_threads: usize,
 ) -> Result<(), String> {
     use crate::models::diffusion::qwen_image_2_1::{
-        rgba_bytes, sample,
+        rgba_bytes, sample, sampling_sigmas,
         text::{ReferenceFeatures, TextConditioner},
         vae::QwenImage21Vae,
         Condition, ReferenceLatent,
@@ -791,7 +966,8 @@ pub fn run_qwen_image_2_1_cli(
         .as_deref()
         .filter(|p| !p.as_os_str().is_empty())
         .ok_or("Qwen-Image-2.1 requires --out")?;
-    let image_mode = options.text_encoder.is_some()
+    let image_mode = options.qwen_image_turbo
+        || options.text_encoder.is_some()
         || options.vae.is_some()
         || options.prompt.is_some()
         || options.width.is_some()
@@ -805,8 +981,8 @@ pub fn run_qwen_image_2_1_cli(
         || options.cfg_scale.is_some()
         || options.negative_prompt.is_some()
         || options.noise.is_some();
-    if options.gpu {
-        return Err("Qwen-Image-2.1 currently supports CPU execution".into());
+    if options.gpu && !cfg!(feature = "vulkan") {
+        return Err("Qwen-Image-2.1 GPU execution requires --features vulkan".into());
     }
     if !image_mode {
         return run_qwen_image_2_1(
@@ -831,7 +1007,6 @@ pub fn run_qwen_image_2_1_cli(
         );
     }
     for (present, flag) in [
-        (options.gpu, "--gpu"),
         (
             options.tts || options.jev || options.embedding || options.bench || options.dump_logits,
             "text/audio modes",
@@ -871,8 +1046,14 @@ pub fn run_qwen_image_2_1_cli(
     {
         return Err("Qwen-Image-2.1 RGBA image dimensions overflow".into());
     }
-    let cfg = options.cfg.or(options.cfg_scale).unwrap_or(6.0);
-    let steps = options.steps.unwrap_or(30);
+    let cfg = options
+        .cfg
+        .or(options.cfg_scale)
+        .unwrap_or(if options.qwen_image_turbo { 1.0 } else { 6.0 });
+    let steps = options
+        .steps
+        .unwrap_or(if options.qwen_image_turbo { 8 } else { 30 });
+    sampling_sigmas(steps, width / 16 * (height / 16), options.qwen_image_turbo)?;
     if !cfg.is_finite() || cfg < 1.0 || steps == 0 || steps > 1000 {
         return Err("Qwen-Image-2.1 requires CFG >= 1 and 1..=1000 steps".into());
     }
@@ -1066,6 +1247,7 @@ pub fn run_qwen_image_2_1_cli(
         &reference_latents,
         steps,
         cfg,
+        options.qwen_image_turbo,
     )?;
     let rgba = vae.decode(&latent, w, h)?;
     let bytes = rgba_bytes(&rgba, width, height)?;
@@ -1429,6 +1611,16 @@ mod tests {
             height: 1,
             bytes: vec![255, 0, 0, 0, 255, 0],
         }
+    }
+
+    #[test]
+    fn flux3_gpu_reaches_component_validation() {
+        let options = crate::app::CliOptions {
+            gpu: true,
+            ..Default::default()
+        };
+        let error = run_flux3_cli(Arc::new(MustNotBeRead), &options, 1).unwrap_err();
+        assert!(error.contains("requires --text-encoder"), "{error}");
     }
 
     #[test]

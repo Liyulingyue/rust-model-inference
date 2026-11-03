@@ -62,7 +62,7 @@ pub fn run_qwen3_inference(
                         role: "user",
                         content: prompt,
                     }],
-                    thinking,
+                    thinking || source.metadata("wevisone_vl.source_revision").is_some(),
                 )?
             }
         }
@@ -172,7 +172,7 @@ fn run_qwen3_inference_tokens(
     println!("Prompt: {} tokens", input_tokens.len());
     let mut session =
         Qwen3Session::new_with_kv_state(&model, max_ctx, kv_format, KvLifecycle::Ephemeral)?;
-    let positions: Vec<[usize; 4]> = (0..input_tokens.len()).map(|i| [i, 0, 0, 0]).collect();
+    let positions = crate::models::qwen3::qwen_text_positions(input_tokens.len());
     print!("Output: ");
     io::stdout().flush().unwrap();
     let t_infer = Instant::now();

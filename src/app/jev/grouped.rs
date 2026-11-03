@@ -65,11 +65,14 @@ fn run_jev_grouped_core<S: JevGroupedScorer>(
     Ok(results)
 }
 
+pub(crate) mod dory;
 pub(crate) mod gemma4;
 pub(crate) mod hunyuan;
 pub(crate) mod lfm2;
 pub(crate) mod lfm25;
+pub(crate) mod lfm3;
 pub(crate) mod llama;
+pub(crate) mod mellum;
 pub(crate) mod nemotron_h;
 pub(crate) mod qwen3;
 pub(crate) mod qwen35;
@@ -258,7 +261,9 @@ fn build_jev_token_ids_for_arch(
             append_qwen_assistant_prefix(&mut token_ids, tokenizer, false)?;
             Ok(token_ids)
         }
-        "qwen35" => {
+        // `qwen35moe` (MiniCPM-V 4.7 35B-A3B) shares this arm: same ChatML
+        // message tokens, same assistant prefix, same `qwen35` grouped scorer.
+        "qwen35" | "qwen35moe" => {
             let mut token_ids = Vec::new();
             append_qwen_message_tokens(
                 &mut token_ids,
@@ -301,6 +306,21 @@ fn build_jev_token_ids_for_arch(
         // bias documented in `docs/usage/ministral3.md` §3.1 applies
         // to the JSON instruction shape; call out here so future
         // maintainers don't think a mistral3 arm is missing by mistake.
+        // Mellum 2.x: the `mellum2` GGUF template is ChatML without the
+        // `<|im_start|>` markers — `role\n content\n` plus an `assistant\n`
+        // generation prompt, with `add_bos_token = false`. This mirrors
+        // `crate::models::mellum::build_mellum_prompt` and the single-mode
+        // scorer in `src/app/jev/single/mellum.rs`.
+        "mellum" => {
+            let prompt = format!("system\n{system}\nuser\n{payload}\nassistant\n");
+            Ok(tokenizer.encode(
+                &prompt,
+                EncodeOptions {
+                    add_special: false,
+                    parse_special: false,
+                },
+            ))
+        }
         "mistral3" => {
             let prompt = format!("[INST] {system} {payload} [/INST]");
             Ok(tokenizer.encode(
@@ -453,11 +473,28 @@ fn build_jev_token_ids_for_arch(
                 },
             ))
         }
+        // Dory 1.0 ships a ChatML template (`<|im_start|>role\n …
+        // <|im_end|>\n` plus an `<|im_start|>assistant\n` generation
+        // prompt), the same shape the single-mode scorer renders.
+        "dory" => {
+            let prompt = format!(
+                "<|im_start|>system\n{system}<|im_end|>\n\
+                 <|im_start|>user\n{payload}<|im_end|>\n\
+                 <|im_start|>assistant\n"
+            );
+            Ok(tokenizer.encode(
+                &prompt,
+                EncodeOptions {
+                    add_special: true,
+                    parse_special: true,
+                },
+            ))
+        }
         other => Err(format!(
             "--jev grouped is not yet supported for architecture {:?}; \
              currently supported: qwen3 / qwen3vl / qwen35 / llama / k2-horizon / \
              granite / nanbeige / qwen2_2 / gemma4 / lfm2 / lfm25 / spark2_5 / \
-             mistral3 / hunyuan-dense / nemotron_h",
+             mistral3 / hunyuan-dense / nemotron_h / dory",
             other
         )),
     }
@@ -584,7 +621,7 @@ pub fn run_jev_grouped_decision_data(
             false,
             jinja.clone(),
         )?,
-        "qwen35" => qwen35::run_jev_grouped_qwen35(
+        "qwen35" | "qwen35moe" => qwen35::run_jev_grouped_qwen35(
             source.clone(),
             context,
             &prepared,
@@ -613,6 +650,15 @@ pub fn run_jev_grouped_decision_data(
             jinja.clone(),
         )?,
         "lfm2" => lfm2::run_jev_grouped_lfm2(
+            source.clone(),
+            context,
+            &prepared,
+            n_threads_arg,
+            prefill_batch_size,
+            false,
+            jinja.clone(),
+        )?,
+        "lfm3" => lfm3::run_jev_grouped_lfm3(
             source.clone(),
             context,
             &prepared,
@@ -657,12 +703,30 @@ pub fn run_jev_grouped_decision_data(
             false,
             jinja.clone(),
         )?,
+        "mellum" => mellum::run_jev_grouped_mellum(
+            source.clone(),
+            context,
+            &prepared,
+            n_threads_arg,
+            prefill_batch_size,
+            false,
+            jinja.clone(),
+        )?,
+        "dory" => dory::run_jev_grouped_dory(
+            source.clone(),
+            context,
+            &prepared,
+            n_threads_arg,
+            prefill_batch_size,
+            false,
+            jinja.clone(),
+        )?,
         other => {
             return Err(format!(
                 "--jev grouped is not yet supported for architecture {:?}; \
                  currently supported: qwen3 / qwen3vl / qwen35 / llama / k2-horizon / \
-                 granite / nanbeige / qwen2_2 / gemma4 / lfm2 / lfm25 / spark2_5 / \
-                 mistral3 / hunyuan-dense / nemotron_h",
+                 granite / nanbeige / qwen2_2 / gemma4 / lfm2 / lfm25 / mellum / \
+                 spark2_5 / mistral3 / hunyuan-dense / nemotron_h",
                 other
             ));
         }
