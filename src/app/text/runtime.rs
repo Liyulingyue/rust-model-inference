@@ -158,7 +158,10 @@ pub fn build_text_runtime(
     let _scope = policy.enter_legacy_scope();
     let inner: Box<dyn TextRuntime> = if crate::app::text::uses_llama_trunk(arch) {
         Box::new(LlamaTextRuntime::new(options)?)
-    } else if matches!(arch, "qwen3" | "qwen3vl" | "qwen2vl" | "qwen3vlmoe") {
+    } else if matches!(
+        arch,
+        "qwen3" | "qwen3vl" | "qwen2vl" | "qwen3vlmoe" | "mage_vl"
+    ) {
         // qwen2vl / qwen3vlmoe share the Qwen3 model + session + Qwen3Input
         // surface (the CLI's `run_qwen3_family_multimodal` covers them too);
         // only the projector family differs, which the image path handles.
@@ -394,6 +397,14 @@ impl Qwen3TextRuntime {
             .validate_text_arch(&arch_of(&options.source))?;
         let _scope = options.compute.enter_legacy_scope();
         let arch = arch_of(&options.source);
+        if arch == "mage_vl" {
+            if let Some(vision) = &options.mmproj {
+                crate::models::mage_vl::validate_components(
+                    options.source.as_ref(),
+                    vision.as_ref(),
+                )?;
+            }
+        }
         let model = crate::models::qwen3::Qwen3Model::from_source(
             options.source.clone(),
             options.tokenizer.clone(),
@@ -426,7 +437,11 @@ impl TextRuntime for Qwen3TextRuntime {
     }
 
     fn context_length(&self) -> usize {
-        self.model.config().n_ctx
+        if self.arch == "mage_vl" {
+            self.options.capacity_for(self.model.config().n_ctx)
+        } else {
+            self.model.config().n_ctx
+        }
     }
 
     fn generate(
@@ -453,10 +468,45 @@ impl TextRuntime for Qwen3TextRuntime {
         // embeddings AND the per-layer deepstack features. Mirrors
         // `app::text::multimodal::run_qwen3_family_multimodal`.
         let (token_ids, embeddings, deepstack, positions) = if request.images.is_empty() {
+            if self.arch == "mage_vl" && request.token_ids.contains(&crate::models::mage_vl::IMAGE)
+            {
+                return Err("Mage-VL image placeholders require attached images".into());
+            }
             let positions: Vec<_> = (0..request.token_ids.len()).map(|i| [i, i, i, 0]).collect();
             (request.token_ids.clone(), None, None, positions)
         } else {
-            self.prepare_qwen3vl_image_prefill(&request.token_ids, &request.images)?
+            if self.arch == "mage_vl" {
+                let vision = self
+                    .mmproj
+                    .as_ref()
+                    .ok_or("Mage-VL image input requires --mmproj")?;
+                let images = request
+                    .images
+                    .iter()
+                    .map(|b| crate::app::media::decode_image_bytes(b))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let prepared = crate::models::mage_vl::prepare(
+                    &self.model,
+                    vision.as_ref(),
+                    &request.token_ids,
+                    &images,
+                    &self.pool,
+                    capacity
+                        .checked_sub(request.max_new_tokens)
+                        .ok_or("Mage-VL output budget exceeds --max-context")?,
+                )?;
+                if prepared.tokens.len() > capacity {
+                    return Err("Mage-VL image prompt exceeds --max-context".into());
+                }
+                (
+                    prepared.tokens,
+                    Some(prepared.embeddings),
+                    None,
+                    prepared.positions,
+                )
+            } else {
+                self.prepare_qwen3vl_image_prefill(&request.token_ids, &request.images)?
+            }
         };
         let input = crate::models::qwen3::Qwen3Input {
             token_ids: &token_ids,

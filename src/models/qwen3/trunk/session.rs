@@ -178,6 +178,15 @@ impl<'model> Qwen3Session<'model> {
         lifecycle: KvLifecycle,
         compute_policy: ComputePolicy,
     ) -> Result<Self, String> {
+        let compute_policy = if model.config.architecture == crate::models::mage_vl::ARCH {
+            compute_policy.validate_text_arch(crate::models::mage_vl::ARCH)?;
+            if compute_policy == ComputePolicy::Auto {
+                eprintln!("compute requested=Auto backend=Cpu arch=mage_vl reason=uncalibrated_device_path");
+            }
+            ComputePolicy::Cpu
+        } else {
+            compute_policy
+        };
         compute_policy.check_build()?;
         let _scope = compute_policy.cpu_scope();
         if capacity == 0 || capacity > model.config.n_ctx {

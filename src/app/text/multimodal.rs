@@ -688,11 +688,36 @@ pub fn run_qwen3_family_multimodal_logits(
     // their own instructions (the JEV scorer) pass `Some`; the HTTP multimodal
     // endpoints leave it `None` to keep Qwen's default system text.
     system_prompt: Option<&str>,
+    max_context: usize,
 ) -> Result<(Vec<f32>, std::time::Duration), String> {
     use crate::app::media::{frame_pairs, normalize_resized_image};
     use crate::core::scratchpad::{KvFormat as Qwen3KvFormat, KvLifecycle};
     use crate::models::qwen3::Qwen3Session;
 
+    if crate::app::arch_of(llm_source) == "mage_vl" {
+        if video_path.is_some() || audio_path.is_some() {
+            return Err("Mage-VL-Cowork supports image/text input only".into());
+        }
+        let vision =
+            open_model_source(mmproj_path, ComponentRole::Mmproj).map_err(|e| e.to_string())?;
+        let image = decode_image(image_path.ok_or("Mage-VL JEV requires --image")?)?;
+        let threads = resolve_thread_count(
+            n_threads_arg,
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1),
+        );
+        return crate::models::mage_vl::image_logits(
+            model_source,
+            vision.as_ref(),
+            image,
+            prompt,
+            system_prompt,
+            threads,
+            prefill_batch_size,
+            max_context,
+        );
+    }
     validate_single_qwen_media(
         image_path.is_some(),
         video_path.is_some(),
