@@ -97,6 +97,45 @@ mod contract_tests {
         assert_eq!(model.double_blocks.len(), 10);
         assert_eq!(model.single_blocks.len(), 20);
     }
+
+    /// The AuK-Flash recipe pins the 4-step time grid
+    /// `[0, 0.07612049579620361, 0.2928932309150696, 0.6173166036605835, 1.0]`
+    /// from the official `infer_auk.py`. It is (to f32 precision) the
+    /// sway-warped uniform grid with `sway_sampling_coef = -1.0`, which is
+    /// how the upstream entry point warps the Base schedule.
+    #[test]
+    fn flash_time_grid_matches_the_official_pinned_grid() {
+        const OFFICIAL: [f32; 5] = [
+            0.0,
+            0.076_120_495_796_203_61,
+            0.292_893_230_915_069_6,
+            0.617_316_603_660_583_5,
+            1.0,
+        ];
+        let warped = flow_time_grid(4, Some(-1.0), None);
+        assert_eq!(warped.len(), 5);
+        for (got, want) in warped.iter().zip(OFFICIAL.iter()) {
+            assert!(
+                (got - want).abs() < 1e-6,
+                "sway grid {got} != official {want}"
+            );
+        }
+
+        // An explicit grid takes precedence over both steps and sway.
+        let pinned = flow_time_grid(4, Some(-1.0), Some(&OFFICIAL));
+        assert_eq!(pinned, OFFICIAL.to_vec());
+    }
+
+    /// Without sway the grid is uniform, and `steps` controls its length.
+    #[test]
+    fn uniform_time_grid_matches_the_official_linspace() {
+        let grid = flow_time_grid(4, None, None);
+        assert_eq!(grid.len(), 5);
+        for (index, value) in grid.iter().enumerate() {
+            let want = index as f32 / 4.0;
+            assert!((value - want).abs() < 1e-6, "grid[{index}] {value} != {want}");
+        }
+    }
 }
 
 /// Padding multiple for joint sequence length.
@@ -119,11 +158,14 @@ pub(crate) struct DoubleBlockWeights {
     /// (no `.0` suffix).
     pub(crate) out_c: String,
     pub(crate) out_c_bias: Vec<f32>,
-    /// Single shared Q/K RMS norm (used by both x-stream and c-stream).
-    /// The unsloth GGUF does not store per-stream copies -- the C++ source
-    /// (`audio.cpp`) loads a single `attn.q_norm.weight` per layer.
+    /// Q/K RMS norm for the audio (x) stream.
     pub(crate) q_norm: Vec<f32>,
     pub(crate) k_norm: Vec<f32>,
+    /// Q/K RMS norm for the text (c) stream. The official `JointAttnProcessor`
+    /// uses separate `attn.c_q_norm` / `attn.c_k_norm` modules; the GGUF
+    /// stores them as `transformer.transformer_blocks.N.attn.c_q_norm.weight`.
+    pub(crate) c_q_norm: Vec<f32>,
+    pub(crate) c_k_norm: Vec<f32>,
     pub(crate) ff_x_in: String,
     pub(crate) ff_x_out: String,
     pub(crate) ff_c_in: String,
@@ -143,11 +185,70 @@ pub(crate) struct SingleBlockWeights {
     pub(crate) ff_out: String,
 }
 
+/// ConvPositionEmbedding kernel size (`AuK modules.ConvPositionEmbedding`).
+const CONV_POS_KERNEL: usize = 31;
+/// ConvPositionEmbedding group count: `1536 / 16 = 96` channels per group.
+const CONV_POS_GROUPS: usize = 16;
+const CONV_POS_CHANNELS_PER_GROUP: usize = HIDDEN / CONV_POS_GROUPS;
+
+/// AuK `AudioEmbed.conv_pos_embed`: two grouped Conv1d layers (kernel 31,
+/// 16 groups) with Mish between and after, applied to the projected latent
+/// and added back as a residual:
+///
+/// ```python
+/// x = self.linear(x)
+/// x = self.conv_pos_embed(x) + x
+/// ```
+///
+/// Weights are stored in GGUF layout `[kernel][in_per_group][out]`.
+struct ConvPosEmbedding {
+    conv0_weight: Vec<f32>,
+    conv0_bias: Vec<f32>,
+    conv1_weight: Vec<f32>,
+    conv1_bias: Vec<f32>,
+}
+
+impl ConvPosEmbedding {
+    fn load(source: &dyn TensorSource) -> Result<Self, String> {
+        let weight_len = CONV_POS_KERNEL * CONV_POS_CHANNELS_PER_GROUP * HIDDEN;
+        Ok(Self {
+            conv0_weight: load_f32_tensor(
+                source,
+                "transformer.audio_embed.conv_pos_embed.conv1d.0.weight",
+                weight_len,
+            )?,
+            conv0_bias: load_f32_vector(
+                source,
+                "transformer.audio_embed.conv_pos_embed.conv1d.0.bias",
+                HIDDEN,
+            )?,
+            conv1_weight: load_f32_tensor(
+                source,
+                "transformer.audio_embed.conv_pos_embed.conv1d.2.weight",
+                weight_len,
+            )?,
+            conv1_bias: load_f32_vector(
+                source,
+                "transformer.audio_embed.conv_pos_embed.conv1d.2.bias",
+                HIDDEN,
+            )?,
+        })
+    }
+
+    /// Token-major forward: `input`/`out` are `[n_tokens][HIDDEN]`, `tmp` is a
+    /// scratch buffer of the same size. Returns `conv_pos_embed(input)`.
+    fn forward(&self, input: &[f32], n_tokens: usize, tmp: &mut [f32], out: &mut [f32]) {
+        grouped_conv1d_mish(&self.conv0_weight, &self.conv0_bias, input, n_tokens, tmp);
+        grouped_conv1d_mish(&self.conv1_weight, &self.conv1_bias, tmp, n_tokens, out);
+    }
+}
+
 pub(crate) struct AukDit {
     source: Arc<dyn TensorSource>,
     pool: Arc<ComputePool>,
     audio_embed_weight: String,
     audio_embed_bias: Vec<f32>,
+    conv_pos_embed: ConvPosEmbedding,
     time_mlp_0_weight: String,
     time_mlp_0_bias: Vec<f32>,
     time_mlp_2_weight: String,
@@ -173,6 +274,7 @@ impl AukDit {
         let source_ref = source.as_ref();
         let audio_embed_bias =
             load_f32_vector(source_ref, "transformer.audio_embed.linear.bias", HIDDEN)?;
+        let conv_pos_embed = ConvPosEmbedding::load(source_ref)?;
         let time_mlp_0_bias =
             load_f32_vector(source_ref, "transformer.time_embed.time_mlp.0.bias", HIDDEN)?;
         let time_mlp_2_bias =
@@ -205,6 +307,7 @@ impl AukDit {
             pool: pool.clone(),
             audio_embed_weight: "transformer.audio_embed.linear.weight".into(),
             audio_embed_bias,
+            conv_pos_embed,
             time_mlp_0_weight: "transformer.time_embed.time_mlp.0.weight".into(),
             time_mlp_0_bias,
             time_mlp_2_weight: "transformer.time_embed.time_mlp.2.weight".into(),
@@ -346,6 +449,19 @@ impl AukDit {
             *value = gaussian(&mut rng);
         }
         let steps = options.steps;
+        // An explicit time grid (e.g. the AuK-Flash recipe) overrides the
+        // step count; make sure the two agree so the sampling loop cannot
+        // index past the end of the grid.
+        if let Some(grid) = options.time_grid.as_ref() {
+            if grid.len() != steps + 1 {
+                return Err(format!(
+                    "AuK time grid has {} entries but {} steps were requested (expected {})",
+                    grid.len(),
+                    steps,
+                    steps + 1
+                ));
+            }
+        }
         let mut velocity = vec![0.0_f32; latent_values];
         let mut uncond_velocity = vec![0.0_f32; latent_values];
         let mut scratch = AukScratch::new(cond_tokens, latent_time)?;
@@ -355,16 +471,39 @@ impl AukDit {
             crate::compute::ComputePolicy::legacy(),
             self.pool.clone(),
         )?;
-        // Pre-build the unconditional text conditioning buffer (all zeros,
-        // same shape as the encoded prompt). This avoids running the text
-        // encoder twice for the CFG unconditional pass. Audio conditioning
-        // (if any) is also zeroed in the unconditional pass.
-        let mut uncond_text = vec![0.0_f32; cond_tokens * TEXT_IN];
         let guidance_scale = options.guidance_scale;
-        let do_cfg = guidance_scale > 1.0;
+        // Official (`CFMEdit.sample`) only skips the CFG branch when the
+        // strength is effectively zero:
+        // ```python
+        // if cfg_strength < 1e-5:
+        //     return self.transformer(..., drop_text=False, ...)
+        // ...
+        // return v_cond + (v_cond - v_uncond) * cfg_strength
+        // ```
+        // Note that `cfg_strength == 0` degenerates to `v_cond` anyway, so
+        // the threshold is consistent with the formula.
+        let do_cfg = guidance_scale >= 1e-5;
+        // Official time grid (`CFMEdit.sample`):
+        // ```python
+        // t = torch.linspace(0, 1, steps + 1)
+        // if sway_sampling_coef is not None:
+        //     t = t + sway_sampling_coef * (torch.cos(torch.pi / 2 * t) - 1 + t)
+        // ```
+        // The upstream inference entry point defaults to
+        // `sway_sampling_coef = -1.0`, which warps the grid so the early
+        // steps cluster near t=0 (where the noise is most informative).
+        // The distilled AuK-Flash checkpoint pins the 4-step warped grid
+        // `[0, 0.0761, 0.2929, 0.6173, 1.0]` -- exactly this formula.
+        let time_grid = flow_time_grid(
+            steps,
+            options.sway_sampling_coef,
+            options.time_grid.as_deref(),
+        );
         for step in 0..steps {
-            let sigma = 1.0 - step as f32 / steps as f32;
-            let sigma_next = 1.0 - (step + 1) as f32 / steps as f32;
+            // Flow-matching time: 0 = pure noise, 1 = clean data. The official
+            // sampler integrates `odeint(fn, y0, linspace(0, 1, steps + 1))`.
+            let t = time_grid[step];
+            let t_next = time_grid[step + 1];
             // Conditional forward. `text_conditioning` is laid out as
             // `[audio_tokens | text_tokens]` when audio is present, with
             // audio embeddings at the front (matching audio.cpp's
@@ -377,47 +516,62 @@ impl AukDit {
                 text_conditioning,
                 cond_tokens,
                 audio_tokens,
-                sigma,
+                t,
+                step,
                 &mut scratch,
                 &mut velocity,
-                1.0,
+                false,
             )?;
-            // Unconditional forward (zero text conditioning) -- only when CFG
-            // is enabled (guidance_scale > 1.0). Skip the second pass
-            // otherwise; velocity already is the conditional prediction.
+            let conditional_velocity = velocity.clone();
+            // Unconditional forward -- only when CFG is enabled
+            // (`cfg_strength >= 1e-5`). Skip the second pass otherwise; the
+            // velocity already is the conditional prediction.
             if do_cfg {
                 self.predict_velocity_inner(
                     &linear,
                     &mut latent,
                     latent_time,
-                    &uncond_text,
+                    text_conditioning,
                     cond_tokens,
                     audio_tokens,
-                    sigma,
+                    t,
+                    step,
                     &mut scratch,
                     &mut uncond_velocity,
-                    1.0,
+                    true,
                 )?;
-                // guided = uncond + scale * (cond - uncond)
+                // Official (`CFMEdit.sample`):
+                //     v_cond + (v_cond - v_uncond) * cfg_strength
+                // Note the coefficient on `v_cond` is `1 + cfg`, not `cfg`.
                 for i in 0..velocity.len() {
-                    velocity[i] =
-                        uncond_velocity[i] + guidance_scale * (velocity[i] - uncond_velocity[i]);
+                    velocity[i] = velocity[i]
+                        + guidance_scale * (velocity[i] - uncond_velocity[i]);
                 }
             }
-            // Clip velocity to a sane range to prevent NaN propagation when
-            // the block forward produces anomalously large outputs (the
-            // DiffusionFlow model is trained for small v magnitudes; the
-            // current block implementation drifts).
-            for v in velocity.iter_mut() {
-                if !v.is_finite() {
-                    *v = 0.0;
-                } else if *v > 100.0 {
-                    *v = 100.0;
-                } else if *v < -100.0 {
-                    *v = -100.0;
-                }
+            // A correct forward keeps the velocity bounded; non-finite values
+            // indicate a numerical bug, so surface them instead of clamping.
+            if std::env::var("RMI_AUK_DEBUG").is_ok() {
+                eprintln!(
+                    "[auk-debug] step {step} t={t:.3} velocity rms={:.4} max={:.4} latent rms={:.4}",
+                    rms(&velocity),
+                    max_abs(&velocity),
+                    rms(&latent)
+                );
             }
-            euler_flow_step(&mut latent, &velocity, sigma, sigma_next)?;
+            super::super::common::require_finite(&velocity, "velocity")?;
+            if let Some(dir) = std::env::var_os("RMI_AUK_DIT_DUMP") {
+                let dir = std::path::PathBuf::from(dir);
+                let _ = std::fs::create_dir_all(&dir);
+                dump_f32(&dir.join(format!("velocity_{step}.f32")), &velocity);
+                dump_f32(&dir.join(format!("latent_{step}.f32")), &latent);
+                // Un-guided conditional velocity, for comparison against the
+                // PyTorch reference (which does not apply CFG).
+                dump_f32(
+                    &dir.join(format!("velocity_cond_{step}.f32")),
+                    &conditional_velocity,
+                );
+            }
+            euler_flow_step(&mut latent, &velocity, t, t_next)?;
         }
         Ok(latent)
     }
@@ -431,14 +585,14 @@ impl AukDit {
         text_conditioning: &[f32],
         cond_tokens: usize,
         audio_tokens: usize,
-        sigma: f32,
+        t: f32,
+        step: usize,
         scratch: &mut AukScratch,
         velocity: &mut [f32],
-        guidance_scale: f32,
+        drop_text: bool,
     ) -> Result<(), String> {
-        let _ = sigma;
-        if !sigma.is_finite() || !(0.0..=1.0).contains(&sigma) {
-            return Err("AuK sigma must be finite and within [0, 1]".into());
+        if !t.is_finite() || !(0.0..=1.0).contains(&t) {
+            return Err("AuK flow time must be finite and within [0, 1]".into());
         }
         super::super::common::require_finite(latent, "latent")?;
         let latent_values = LATENT_DIM * latent_time;
@@ -451,8 +605,10 @@ impl AukDit {
         // We wire the joint into `scratch.joint` (img tokens then text).
         scratch.prepare(img_tokens, cond_tokens)?;
 
-        // Time embedding: c ∈ [HIDDEN]
-        timestep_embedding(sigma * 1000.0, &mut scratch.time_frequency);
+        // Time embedding: c ∈ [HIDDEN].
+        // `t` is the flow-matching time in [0, 1] (0 = noise, 1 = data),
+        // matching the official `odeint(fn, y0, linspace(0, 1, steps+1))`.
+        timestep_embedding(t, &mut scratch.time_frequency);
         linear_into_dispatch(
             linear,
             self.source.as_ref(),
@@ -467,7 +623,15 @@ impl AukDit {
         for (v, b) in scratch.time_hidden.iter_mut().zip(&self.time_mlp_0_bias) {
             *v += *b;
         }
-        silu_mul_inplace(&mut scratch.time_hidden, &mut scratch.time_hidden_silu);
+        // `TimestepEmbedding`: linear -> SiLU -> linear. (`silu_mul_inplace`
+        // is the SwiGLU helper and would multiply by an unrelated buffer.)
+        for (dst, src) in scratch
+            .time_hidden_silu
+            .iter_mut()
+            .zip(&scratch.time_hidden)
+        {
+            *dst = src / (1.0 + (-src).exp());
+        }
         linear_into_dispatch(
             linear,
             self.source.as_ref(),
@@ -483,6 +647,11 @@ impl AukDit {
             *v += *b;
         }
         super::super::common::require_finite(&scratch.time, "time conditioning")?;
+        // `AdaLayerNorm` projects `linear(silu(emb))`; reuse the scratch buffer
+        // for the SiLU of the time embedding.
+        for (dst, src) in scratch.time_hidden_silu.iter_mut().zip(&scratch.time) {
+            *dst = src / (1.0 + (-src).exp());
+        }
 
         // Image (audio latent) embed: latent -> hidden
         run_audio_embed(
@@ -496,6 +665,29 @@ impl AukDit {
             self.pool.as_ref(),
             &mut scratch.q8,
         )?;
+        // AudioEmbed: `x = conv_pos_embed(x) + x`. The grouped Conv1d pair
+        // injects local temporal context; without it the DiT has no notion of
+        // neighbouring latent frames and only produces noise.
+        self.conv_pos_embed.forward(
+            &scratch.img,
+            latent_time,
+            &mut scratch.conv_pos,
+            &mut scratch.conv_pos_out,
+        );
+        for (value, residual) in scratch.img.iter_mut().zip(&scratch.conv_pos_out) {
+            *value += *residual;
+        }
+        super::super::common::require_finite(&scratch.img, "audio_embed")?;
+        if std::env::var("RMI_AUK_DEBUG").is_ok() {
+            eprintln!("[auk-debug] audio_embed rms={:.4} max={:.4}", rms(&scratch.img), max_abs(&scratch.img));
+        }
+        if let Some(dir) = std::env::var_os("RMI_AUK_DIT_DUMP") {
+            let dir = std::path::PathBuf::from(dir);
+            let _ = std::fs::create_dir_all(&dir);
+            dump_f32(&dir.join("text_conditioning.f32"), text_conditioning);
+            dump_f32(&dir.join(format!("latent_in_{step}.f32")), latent);
+            dump_f32(&dir.join(format!("audio_embed_{step}.f32")), &scratch.img);
+        }
 
         // Text (and audio) conditioning embed: text_in -> hidden, then norm.
         // The layout matches audio.cpp's conditioning.cpp: audio embeddings
@@ -524,6 +716,33 @@ impl AukDit {
         }
         // RMS norm with txt_norm.
         rms_norm_inplace_text(&mut scratch.text, &self.txt_norm_weight, cond_tokens);
+        // Official `project_text(drop_text=True)` zeroes the text **after**
+        // the projection and the norm:
+        // ```python
+        // c = self.txt_norm(self.txt_proj(text))
+        // if drop_text:
+        //     c = torch.zeros_like(c)
+        // ```
+        // Zeroing the *pre-projection* LLM hidden states instead would leave
+        // the `txt_proj` bias intact (`txt_proj(0) == bias`), so the
+        // unconditional branch would still carry text information.
+        if drop_text {
+            for value in scratch.text[..cond_tokens * HIDDEN].iter_mut() {
+                *value = 0.0;
+            }
+        }
+        if let Some(dir) = std::env::var_os("RMI_AUK_DIT_DUMP") {
+            let dir = std::path::PathBuf::from(dir);
+            let _ = std::fs::create_dir_all(&dir);
+            // Only the conditional branch carries the projected text; the
+            // unconditional branch zeroes it on purpose.
+            if !drop_text {
+                dump_f32(
+                    &dir.join(format!("text_embed_{step}.f32")),
+                    &scratch.text[..cond_tokens * HIDDEN],
+                );
+            }
+        }
 
         // Concat: image tokens first, then conditioning tokens (audio + text).
         // Both are already in `scratch.img` and `scratch.text` (sized for
@@ -551,7 +770,7 @@ impl AukDit {
                 &block.adaLN_x,
                 HIDDEN,
                 ADALN_DIM,
-                &scratch.time,
+                &scratch.time_hidden_silu,
                 &mut scratch.modulation[..ADALN_DIM],
                 &mut scratch.q8,
                 self.pool.as_ref(),
@@ -568,7 +787,7 @@ impl AukDit {
                 &block.adaLN_c,
                 HIDDEN,
                 ADALN_DIM,
-                &scratch.time,
+                &scratch.time_hidden_silu,
                 &mut scratch.modulation[ADALN_DIM..2 * ADALN_DIM],
                 &mut scratch.q8,
                 self.pool.as_ref(),
@@ -627,7 +846,7 @@ impl AukDit {
                 &block.adaLN,
                 HIDDEN,
                 ADALN_DIM,
-                &scratch.time,
+                &scratch.time_hidden_silu,
                 &mut scratch.modulation[..ADALN_DIM],
                 &mut scratch.q8,
                 self.pool.as_ref(),
@@ -667,7 +886,7 @@ impl AukDit {
             &self.norm_out_weight,
             HIDDEN,
             FINAL_NORM_DIM,
-            &scratch.time,
+            &scratch.time_hidden_silu,
             &mut scratch.modulation[..FINAL_NORM_DIM],
             &mut scratch.q8,
             self.pool.as_ref(),
@@ -688,10 +907,10 @@ impl AukDit {
         for token in 0..img_tokens {
             let token_in =
                 &scratch.joint[(cond_tokens + token) * HIDDEN..(cond_tokens + token + 1) * HIDDEN];
-            // Apply (1 + scale) * x + shift.
+            // `AdaLayerNorm_Final.norm` is a bias/affine-free LayerNorm with
+            // eps=1e-6; then `(1 + scale) * norm(x) + shift`.
             let mut normalized = vec![0.0_f32; HIDDEN];
-            // Identity norm (no final_norm.norm.weight in GGUF).
-            normalized.copy_from_slice(token_in);
+            layer_norm_token(token_in, &mut normalized);
             for d in 0..HIDDEN {
                 normalized[d] = normalized[d] * (1.0 + final_scale[d]) + final_shift[d];
             }
@@ -783,6 +1002,133 @@ fn load_f32_vector(source: &dyn TensorSource, name: &str, len: usize) -> Result<
     Ok(values)
 }
 
+/// Read a small unquantized N-D tensor into a flat `Vec<f32>`.
+fn load_f32_tensor(
+    source: &dyn TensorSource,
+    name: &str,
+    expected_len: usize,
+) -> Result<Vec<f32>, String> {
+    let info = source
+        .tensor_info(name)
+        .ok_or_else(|| format!("Missing tensor: {name}"))?;
+    let len = usize::try_from(
+        info.dims
+            .iter()
+            .product::<u64>(),
+    )
+    .map_err(|_| format!("Tensor {name} is too large"))?;
+    if len != expected_len {
+        return Err(format!(
+            "Invalid {name} element count {len} (dims {:?}); expected {expected_len}",
+            info.dims
+        ));
+    }
+    if !matches!(
+        info.ggml_type,
+        GGMLType::F32 | GGMLType::F16 | GGMLType::BF16
+    ) {
+        return Err(format!(
+            "Invalid {name} type {:?}: expected F32/F16/BF16",
+            info.ggml_type
+        ));
+    }
+    let bytes = source
+        .tensor_slice(name)
+        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
+    let mut values = vec![0.0_f32; len];
+    match info.ggml_type {
+        GGMLType::F32 => {
+            for (dst, chunk) in values.iter_mut().zip(bytes.chunks_exact(4)) {
+                *dst = f32::from_le_bytes(chunk.try_into().unwrap());
+            }
+        }
+        GGMLType::F16 => {
+            for (dst, chunk) in values.iter_mut().zip(bytes.chunks_exact(2)) {
+                *dst = f16::from_bits(u16::from_le_bytes(chunk.try_into().unwrap())).to_f32();
+            }
+        }
+        GGMLType::BF16 => {
+            for (dst, chunk) in values.iter_mut().zip(bytes.chunks_exact(2)) {
+                *dst =
+                    half::bf16::from_bits(u16::from_le_bytes(chunk.try_into().unwrap())).to_f32();
+            }
+        }
+        _ => unreachable!(),
+    }
+    Ok(values)
+}
+
+/// Grouped Conv1d (kernel 31, 16 groups, zero padding) followed by Mish.
+///
+/// `weight` is the raw GGUF layout, which for a PyTorch `Conv1d` weight of
+/// shape `[out, in_per_group, kernel]` is `[out][in_per_group][kernel]` with
+/// the kernel contiguous (GGUF `ne = [kernel, in_per_group, out]`). Input and
+/// output are token-major `[n_tokens][HIDDEN]`.
+fn grouped_conv1d_mish(
+    weight: &[f32],
+    bias: &[f32],
+    input: &[f32],
+    n_tokens: usize,
+    out: &mut [f32],
+) {
+    const OUT_PER_GROUP: usize = HIDDEN / CONV_POS_GROUPS;
+    const IN_PER_GROUP: usize = CONV_POS_CHANNELS_PER_GROUP;
+    const PAD: usize = CONV_POS_KERNEL / 2;
+    debug_assert_eq!(OUT_PER_GROUP, IN_PER_GROUP);
+
+    for token in 0..n_tokens {
+        let dst = &mut out[token * HIDDEN..(token + 1) * HIDDEN];
+        for oc in 0..HIDDEN {
+            let in_base = (oc / OUT_PER_GROUP) * IN_PER_GROUP;
+            let w_block = &weight
+                [oc * IN_PER_GROUP * CONV_POS_KERNEL..(oc + 1) * IN_PER_GROUP * CONV_POS_KERNEL];
+            let mut acc = bias[oc];
+            for k in 0..CONV_POS_KERNEL {
+                let Some(src_token) = token.checked_add(k).and_then(|t| t.checked_sub(PAD)) else {
+                    continue;
+                };
+                if src_token >= n_tokens {
+                    continue;
+                }
+                let src = &input[src_token * HIDDEN + in_base..src_token * HIDDEN + in_base + IN_PER_GROUP];
+                for j in 0..IN_PER_GROUP {
+                    acc += w_block[j * CONV_POS_KERNEL + k] * src[j];
+                }
+            }
+            dst[oc] = mish(acc);
+        }
+    }
+}
+
+/// PyTorch `nn.Mish`: `x * tanh(softplus(x))` with softplus threshold 20.
+fn mish(x: f32) -> f32 {
+    let softplus = if x > 20.0 { x } else { (1.0 + x.exp()).ln() };
+    x * softplus.tanh()
+}
+
+/// Write a `f32` tensor to a file for numeric comparison with the PyTorch
+/// reference implementation.
+fn dump_f32(path: &std::path::Path, data: &[f32]) {
+    let mut bytes = Vec::with_capacity(data.len() * 4);
+    for v in data {
+        bytes.extend_from_slice(&v.to_le_bytes());
+    }
+    if let Err(error) = std::fs::write(path, &bytes) {
+        eprintln!("[auk-dump] failed to write {}: {error}", path.display());
+    }
+}
+
+fn rms(values: &[f32]) -> f32 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    (values.iter().map(|v| v * v).sum::<f32>() / values.len() as f32).sqrt()
+}
+
+fn max_abs(values: &[f32]) -> f32 {
+    values.iter().fold(0.0_f32, |m, v| m.max(v.abs()))
+}
+
 fn load_double_block(
     source: &dyn TensorSource,
     layer: usize,
@@ -806,6 +1152,8 @@ fn load_double_block(
         out_c_bias: vector("attn.to_out_c.bias", HIDDEN)?,
         q_norm: vector("attn.q_norm.weight", HEAD_DIM)?,
         k_norm: vector("attn.k_norm.weight", HEAD_DIM)?,
+        c_q_norm: vector("attn.c_q_norm.weight", HEAD_DIM)?,
+        c_k_norm: vector("attn.c_k_norm.weight", HEAD_DIM)?,
         ff_x_in: format!("{prefix}.ff_x.linear_in.weight"),
         ff_x_out: format!("{prefix}.ff_x.linear_out.weight"),
         ff_c_in: format!("{prefix}.ff_c.linear_in.weight"),
@@ -835,35 +1183,84 @@ fn load_single_block(
     })
 }
 
+/// Build the flow-matching time grid used by the official sampler.
+///
+/// ```python
+/// t = torch.linspace(0, 1, steps + 1)
+/// if t_grid is not None:
+///     t = torch.tensor(t_grid)
+/// elif sway_sampling_coef is not None:
+///     t = t + sway_sampling_coef * (torch.cos(torch.pi / 2 * t) - 1 + t)
+/// ```
+///
+/// Returns `steps + 1` monotonically increasing values in `[0, 1]`.
+fn flow_time_grid(
+    steps: usize,
+    sway_sampling_coef: Option<f32>,
+    explicit_grid: Option<&[f32]>,
+) -> Vec<f32> {
+    if let Some(grid) = explicit_grid {
+        if grid.len() >= 2 {
+            return grid.to_vec();
+        }
+    }
+    let steps = steps.max(1);
+    let mut grid: Vec<f32> = (0..=steps)
+        .map(|i| i as f32 / steps as f32)
+        .collect();
+    if let Some(sway) = sway_sampling_coef {
+        for t in grid.iter_mut() {
+            let pi = std::f32::consts::PI;
+            *t += sway * ((pi / 2.0 * *t).cos() - 1.0 + *t);
+        }
+    }
+    grid
+}
+
+/// Standard flow-matching Euler: `x_next = x + v * dt`.
+///
+/// The official sampler integrates `odeint(fn, y0, linspace(0, 1, steps+1))`
+/// with `y0 = randn` (pure noise) and the flow defined as
+/// `phi = (1 - t) * x0 + t * x1`, so `t` runs **0 → 1** (noise → data) and
+/// `dt = t_next - t` is positive.
 fn euler_flow_step(
     latent: &mut [f32],
     velocity: &[f32],
-    sigma: f32,
-    sigma_next: f32,
+    t: f32,
+    t_next: f32,
 ) -> Result<(), String> {
     if latent.len() != velocity.len() {
         return Err("Invalid AuK Euler buffer lengths".into());
     }
-    // Standard flow-matching Euler: x_next = x + v * dt, with dt = sigma -
-    // sigma_next (positive when going from noisy to clean). sigma starts
-    // at 1.0 (pure noise) and ends at 0.0 (clean).
-    let step = sigma - sigma_next;
+    let dt = t_next - t;
     for (x, v) in latent.iter_mut().zip(velocity) {
-        *x += *v * step;
+        *x += *v * dt;
     }
     Ok(())
 }
 
+/// Sinusoidal timestep embedding, matching AuK's `SinusPositionEmbedding`.
+///
+/// ```python
+/// half_dim = dim // 2                       # 128
+/// emb = log(10000) / (half_dim - 1)
+/// emb = exp(arange(half_dim) * -emb)        # 128 frequencies
+/// emb = scale * x * emb                     # scale = 1000
+/// emb = cat((sin(emb), cos(emb)), dim=-1)   # [sin(0..127), cos(0..127)]
+/// ```
+///
+/// Note the **blocked** (not interleaved) sin/cos layout and the `scale=1000`
+/// factor applied here -- the caller passes the raw timestep in `[0, 1]`.
 fn timestep_embedding(t: f32, out: &mut [f32; FREQ_DIM]) {
+    const SCALE: f32 = 1000.0;
     let half = FREQ_DIM / 2;
     let log_theta = (1e4_f32).ln();
     for i in 0..half {
         let freq_exp = (i as f32) / (half as f32 - 1.0);
         let omega = (freq_exp * -log_theta).exp();
-        let angle = t * omega;
-        let (cosine, sine) = crate::ops::rope::neox::rope_sin_cos(angle);
-        out[2 * i] = cosine;
-        out[2 * i + 1] = sine;
+        let angle = SCALE * t * omega;
+        out[i] = angle.sin();
+        out[half + i] = angle.cos();
     }
 }
 
@@ -904,6 +1301,9 @@ pub(crate) struct AukScratch {
     time_hidden_silu: [f32; HIDDEN],
     time: [f32; HIDDEN],
     img: Vec<f32>,
+    /// Scratch for `AudioEmbed.conv_pos_embed` (same size as `img`).
+    conv_pos: Vec<f32>,
+    conv_pos_out: Vec<f32>,
     text: Vec<f32>,
     joint: Vec<f32>,
     qkv: Vec<f32>,
@@ -927,6 +1327,8 @@ impl AukScratch {
             time_hidden_silu: [0.0; HIDDEN],
             time: [0.0; HIDDEN],
             img: Vec::new(),
+            conv_pos: Vec::new(),
+            conv_pos_out: Vec::new(),
             text: Vec::new(),
             joint: Vec::new(),
             qkv: Vec::new(),
@@ -946,6 +1348,16 @@ impl AukScratch {
         }
         let total = img_token_count + text_token_count;
         super::super::common::resize_zeroed(&mut self.img, img_token_count * HIDDEN, "AuK img")?;
+        super::super::common::resize_zeroed(
+            &mut self.conv_pos,
+            img_token_count * HIDDEN,
+            "AuK conv_pos",
+        )?;
+        super::super::common::resize_zeroed(
+            &mut self.conv_pos_out,
+            img_token_count * HIDDEN,
+            "AuK conv_pos_out",
+        )?;
         super::super::common::resize_zeroed(&mut self.text, (total) * HIDDEN, "AuK text")?;
         super::super::common::resize_zeroed(&mut self.joint, total * HIDDEN, "AuK joint")?;
         super::super::common::resize_zeroed(&mut self.qkv, total * QKV_DIM, "AuK qkv")?;
@@ -1024,6 +1436,11 @@ fn layer_norm_token(input: &[f32], normalized: &mut [f32]) {
     }
 }
 
+/// RMS norm over the projected text (`txt_norm`).
+///
+/// The official module is `nn.RMSNorm(dim, elementwise_affine=True)`, whose
+/// `eps=None` default resolves to `torch.finfo(float32).eps`
+/// (`RMS_NORM_EPS`), not the `1e-6` used by the AdaLN `nn.LayerNorm`.
 fn rms_norm_inplace_text(hidden: &mut [f32], weight: &[f32], n_tokens: usize) {
     for token in 0..n_tokens {
         let start = token * HIDDEN;
@@ -1033,7 +1450,7 @@ fn rms_norm_inplace_text(hidden: &mut [f32], weight: &[f32], n_tokens: usize) {
         for v in slice.iter() {
             mean += v * v;
         }
-        mean = (mean / HIDDEN as f32 + 1e-6).sqrt().recip();
+        mean = (mean / HIDDEN as f32 + RMS_NORM_EPS).sqrt().recip();
         for d in 0..HIDDEN {
             slice[d] *= mean * weight[d];
         }
@@ -1056,7 +1473,18 @@ fn rms_norm_inplace_text(hidden: &mut [f32], weight: &[f32], n_tokens: usize) {
 
 /// Apply rotary embedding in-place using a precomputed `inv_freq` table of
 /// length `head_dim/2`. `x` is a single token's head-major slice
-/// `[n_heads * head_dim]` flattened row-major; we apply neox halves.
+/// `[n_heads * head_dim]` flattened row-major.
+///
+/// AuK uses `x_transformers.RotaryEmbedding` + `apply_rotary_pos_emb`, whose
+/// `freqs` tensor is built as `stack((freqs, freqs), dim=-1)` and then
+/// flattened — i.e. the frequency for index `i` is repeated at **adjacent**
+/// positions `2*i` and `2*i+1` (interleaved / GPT-J style), not the NeoX
+/// half-split `(i, i + head_dim/2)`.
+///
+/// ```text
+/// out[2i]   = x[2i]   * cos - x[2i+1] * sin
+/// out[2i+1] = x[2i+1] * cos + x[2i]   * sin
+/// ```
 fn rope_apply_token(x: &mut [f32], pos: usize, head_dim: usize, inv_freq: &[f32]) {
     let half = head_dim / 2;
     if half == 0 || inv_freq.len() != half {
@@ -1068,17 +1496,20 @@ fn rope_apply_token(x: &mut [f32], pos: usize, head_dim: usize, inv_freq: &[f32]
     }
     for head in 0..n_heads {
         let off = head * head_dim;
-        // Half-rotation: pair (i, i+half).
+        // Interleaved rotation: pair (2i, 2i+1).
         for i in 0..half {
             let theta = pos as f32 * inv_freq[i];
             let (cos_t, sin_t) = crate::ops::rope::neox::rope_sin_cos(theta);
-            let a = x[off + i];
-            let b = x[off + half + i];
-            x[off + i] = a * cos_t - b * sin_t;
-            x[off + half + i] = b * cos_t + a * sin_t;
+            let a = x[off + 2 * i];
+            let b = x[off + 2 * i + 1];
+            x[off + 2 * i] = a * cos_t - b * sin_t;
+            x[off + 2 * i + 1] = b * cos_t + a * sin_t;
         }
     }
 }
+
+/// `torch.nn.RMSNorm` with `eps=None` uses `torch.finfo(float32).eps`.
+const RMS_NORM_EPS: f32 = 1.192_092_9e-7;
 
 /// Per-head RMS norm applied independently per token. `hidden` is laid out
 /// `[n_tokens, n_heads, head_dim]` (contiguous); `weight` is `[head_dim]`.
@@ -1223,8 +1654,8 @@ fn run_double_block(
         qkv_c_buf,
         text_tokens,
         0,
-        &block.q_norm,
-        &block.k_norm,
+        &block.c_q_norm,
+        &block.c_k_norm,
         inv_freq,
     );
 
@@ -1458,7 +1889,7 @@ fn project_qk_with_rope(
             HIDDEN / HEAD_DIM,
             HEAD_DIM,
             q_norm_w,
-            1e-6,
+            RMS_NORM_EPS,
         );
         rope_apply_token(&mut qkv[off..off + HIDDEN], pos, HEAD_DIM, inv_freq);
         // K RMSNorm + RoPE
@@ -1468,7 +1899,7 @@ fn project_qk_with_rope(
             HIDDEN / HEAD_DIM,
             HEAD_DIM,
             k_norm_w,
-            1e-6,
+            RMS_NORM_EPS,
         );
         rope_apply_token(
             &mut qkv[off + HIDDEN..off + 2 * HIDDEN],

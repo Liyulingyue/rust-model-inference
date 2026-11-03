@@ -797,6 +797,36 @@ pub fn run_z_image_cli(
     )
 }
 
+/// Validate the AuK-specific CLI knobs.
+///
+/// The AuK path deliberately bypasses the generic diffusion validators
+/// (`validate_cli_options`), so it needs its own checks: an invalid value
+/// here would otherwise be silently accepted and produce a nonsensical
+/// sampling schedule.
+///
+/// * `--cfg-scale` maps to the official `cfg_strength`. The official sampler
+///   skips the CFG branch only when `cfg_strength < 1e-5`, so `0` is a
+///   meaningful value (CFG off) and negative values are not.
+/// * `--auk-sway` maps to the official `sway_sampling_coef`, which is applied
+///   to the time grid as `t += c * (cos(pi/2 * t) - 1 + t)`; it must be
+///   finite.
+fn validate_auk_cli_options(cfg_scale: Option<f32>, auk_sway: Option<f32>) -> Result<(), String> {
+    if let Some(scale) = cfg_scale {
+        if !scale.is_finite() || scale < 0.0 {
+            return Err(format!(
+                "--cfg-scale must be finite and not negative (got {scale}); \
+                 0 disables classifier-free guidance"
+            ));
+        }
+    }
+    if let Some(sway) = auk_sway {
+        if !sway.is_finite() {
+            return Err(format!("--auk-sway must be finite (got {sway})"));
+        }
+    }
+    Ok(())
+}
+
 pub fn run_auk_cli(
     diffusion: Arc<dyn TensorSource>,
     vae: Arc<dyn TensorSource>,
@@ -811,8 +841,11 @@ pub fn run_auk_cli(
     instruct: Option<&str>,
     duration_seconds: Option<f32>,
     cfg_scale: Option<f32>,
+    auk_sway: Option<f32>,
+    auk_flash: bool,
     audio_tower: Option<Arc<dyn TensorSource>>,
 ) -> Result<(), String> {
+    validate_auk_cli_options(cfg_scale, auk_sway)?;
     let started = Instant::now();
     let pipeline = crate::models::diffusion::auk::AukPipeline::load_with_audio_tower(
         diffusion,
@@ -829,7 +862,34 @@ pub fn run_auk_cli(
         .map(|d| d as usize)
         .unwrap_or(1usize)
         .max(1);
-    let guidance_scale = cfg_scale.unwrap_or(2.0);
+    // The upstream AuK inference entry point defaults to
+    // `sway_sampling_coef = -1.0`, which warps the flow-matching time grid.
+    let sway_sampling_coef = auk_sway.or(Some(-1.0));
+    // AuK-Flash is a distilled release that only works under a fixed recipe:
+    // 4 steps, CFG off, and the explicit 4-step time grid. The official
+    // `infer_auk.py` pins the grid and disables sway entirely for Flash.
+    const AUK_FLASH_TIME_GRID: [f32; 5] = [
+        0.0,
+        0.076_120_495_796_203_61,
+        0.292_893_230_915_069_6,
+        0.617_316_603_660_583_5,
+        1.0,
+    ];
+    let (steps, guidance_scale, sway_sampling_coef, time_grid) = if auk_flash {
+        (
+            4,
+            cfg_scale.unwrap_or(0.0),
+            None,
+            Some(AUK_FLASH_TIME_GRID.to_vec()),
+        )
+    } else {
+        (steps, cfg_scale.unwrap_or(2.0), sway_sampling_coef, None)
+    };
+    if auk_flash {
+        println!(
+            "[AuK] AuK-Flash recipe: {steps} steps, cfg {guidance_scale}, pinned time grid"
+        );
+    }
     let options = crate::models::diffusion::auk::AukOptions {
         steps,
         sample_rate: sample_rate as u32,
@@ -837,6 +897,8 @@ pub fn run_auk_cli(
         seed,
         guidance_scale,
         instruct: instruct.map(|s| s.to_string()),
+        sway_sampling_coef,
+        time_grid,
     };
     let audio = match ref_audio {
         Some(wav_path) => {

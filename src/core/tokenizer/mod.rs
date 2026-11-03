@@ -2281,6 +2281,23 @@ mod tests {
     }
 
     #[test]
+    fn qwen25_omni_encodes_hello() {
+        let tokenizer = BPETokenizer::from_qwen25_omni_embedded_merges().unwrap();
+        let ids = tokenizer.encode(
+            "Hello",
+            EncodeOptions {
+                add_special: true,
+                parse_special: true,
+            },
+        );
+        eprintln!("'Hello' -> {:?} ({} tokens)", ids, ids.len());
+        for id in &ids {
+            eprintln!("  {} -> {:?}", id, tokenizer.token_piece_bytes(*id, true));
+        }
+        assert!(!ids.is_empty(), "'Hello' should encode to at least 1 token");
+    }
+
+    #[test]
     fn qwen2_scanner_preserves_reference_boundaries() {
         assert_eq!(
             scan_qwen_words("hello   world", PreTokenizer::Qwen2),

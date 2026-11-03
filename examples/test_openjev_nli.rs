@@ -19,8 +19,16 @@ use rust_model_inference::core::tokenizer::BPETokenizer;
 use rust_model_inference::format::ggufrs::{open_model_source, ComponentRole};
 use rust_model_inference::models::qwen35::trunk::run_classify_qwen35_with_batch;
 
-const GGUF_PATH: &str =
-    "/home/liyulingyue/Codes/rust-model-inference/models/openjev-0.8b-nli-probe/Qwen3.5-0.8B-NLI-v2s-long-F32.gguf";
+/// Location of the converted openjev 0.8B NLI GGUF. Override with
+/// `OPENJEV_NLI_GGUF`; the default is the repository-relative path.
+fn gguf_path() -> std::path::PathBuf {
+    std::env::var_os("OPENJEV_NLI_GGUF")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("models/openjev-0.8b-nli-probe/Qwen3.5-0.8B-NLI-v2s-long-F32.gguf")
+        })
+}
 
 fn softmax(logits: &[f32]) -> Vec<f32> {
     let m = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
@@ -35,7 +43,7 @@ fn fmt_f(x: f32, decimals: usize) -> String {
 
 fn main() {
     let source: Arc<dyn rust_model_inference::core::tensor::TensorSource> = Arc::from(
-        open_model_source(std::path::Path::new(GGUF_PATH), ComponentRole::Llm).expect("load GGUF"),
+        open_model_source(&gguf_path(), ComponentRole::Llm).expect("load GGUF"),
     );
     let tokenizer =
         BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned()).expect("tokenizer");
@@ -55,7 +63,7 @@ fn main() {
     let labels = ["contradiction", "entailment", "neutral"];
 
     println!("=== openjev 0.8B NLI smoke test ===");
-    println!("GGUF: {GGUF_PATH}");
+    println!("GGUF: {}", gguf_path().display());
     println!();
 
     for (i, (premise, hypothesis)) in samples.iter().enumerate() {

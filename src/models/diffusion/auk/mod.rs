@@ -120,6 +120,21 @@ pub struct AukOptions {
     /// passed to `generate_audio` (TTS without instruct, matching
     /// audio.cpp's `<|no_prompt_audio|>` fallback).
     pub instruct: Option<String>,
+    /// Sway sampling coefficient for the flow-matching time grid.
+    ///
+    /// `None` uses a uniform grid in `[0, 1]`. `Some(c)` applies the
+    /// official warp `t += c * (cos(pi/2 * t) - 1 + t)` to the uniform grid.
+    /// The upstream AuK inference entry point defaults to `-1.0`.
+    pub sway_sampling_coef: Option<f32>,
+    /// Explicit flow-matching time grid, overriding `steps` and
+    /// `sway_sampling_coef` when present.
+    ///
+    /// The official `CFMEdit.sample` accepts a `t_grid` argument that takes
+    /// precedence over the uniform/sway grid. The distilled AuK-Flash
+    /// release pins
+    /// `[0.0, 0.07612049579620361, 0.2928932309150696, 0.6173166036605835, 1.0]`
+    /// (and disables sway entirely).
+    pub time_grid: Option<Vec<f32>>,
 }
 
 pub struct AukPipeline {
@@ -157,10 +172,38 @@ impl AukPipeline {
     ) -> Result<Self, String> {
         validate_component(diffusion.as_ref(), Component::Dit)?;
         let pool = Arc::new(ComputePool::new(n_threads.max(1)));
-        let text = match text_source {
+        let mut text = match text_source {
             Some(src) => Some(text::AukTextEncoder::load(src, Arc::clone(&pool))?),
             None => None,
         };
+        // AuK's ELMo-style text layer fusion parameters (`layer_weights`,
+        // `layer_scale`) live in the DiT GGUF, not the text-encoder GGUF.
+        // Without them the DiT receives only the last LLM layer and produces
+        // noise, so wire them in whenever the checkpoint carries them.
+        if let Some(encoder) = text.as_mut() {
+            match (
+                load_f32_tensor(diffusion.as_ref(), "layer_weights"),
+                load_f32_tensor(diffusion.as_ref(), "layer_scale"),
+            ) {
+                (Ok(weights), Ok(scale)) if scale.len() == 1 => {
+                    encoder.set_layer_fusion(&weights, scale[0])?;
+                    eprintln!(
+                        "[AukDiT] text layer fusion enabled ({} layers, scale {:.4})",
+                        weights.len(),
+                        scale[0]
+                    );
+                }
+                (Err(error), _) => eprintln!(
+                    "[AukDiT] layer_weights unavailable ({error}); using last-layer text conditioning"
+                ),
+                (_, Err(error)) => eprintln!(
+                    "[AukDiT] layer_scale unavailable ({error}); using last-layer text conditioning"
+                ),
+                _ => eprintln!(
+                    "[AukDiT] layer_scale is not a scalar; using last-layer text conditioning"
+                ),
+            }
+        }
         let audio_tower = match qwen_omni_bf16_source {
             Some(src) => {
                 eprintln!("[AukDiT] loading Qwen2.5-Omni audio tower (BF16 GGUF)...");
@@ -464,6 +507,48 @@ impl AukPipeline {
 pub(crate) enum Component {
     Dit,
     Vae,
+}
+
+/// Read a small unquantized tensor (`F32`/`F16`/`BF16`) into a `Vec<f32>`.
+///
+/// Only used for load-time parameter tables (layer fusion, VAE latent stats),
+/// so the per-element conversion cost is irrelevant.
+fn load_f32_tensor(source: &dyn TensorSource, name: &str) -> Result<Vec<f32>, String> {
+    use half::{bf16, f16};
+    let info = source
+        .tensor_info(name)
+        .ok_or_else(|| format!("Missing tensor: {name}"))?;
+    let bytes = source
+        .tensor_slice(name)
+        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
+    let expected = usize::try_from(
+        info.checked_nbytes()
+            .ok_or_else(|| format!("Invalid {name} byte size"))?,
+    )
+    .map_err(|_| format!("Tensor byte size does not fit usize: {name}"))?;
+    if bytes.len() != expected {
+        return Err(format!(
+            "Invalid tensor data length for {name}: {}; expected {expected}",
+            bytes.len()
+        ));
+    }
+    match info.ggml_type {
+        GGMLType::F32 => Ok(bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect()),
+        GGMLType::F16 => Ok(bytes
+            .chunks_exact(2)
+            .map(|c| f16::from_bits(u16::from_le_bytes([c[0], c[1]])).to_f32())
+            .collect()),
+        GGMLType::BF16 => Ok(bytes
+            .chunks_exact(2)
+            .map(|c| bf16::from_bits(u16::from_le_bytes([c[0], c[1]])).to_f32())
+            .collect()),
+        other => Err(format!(
+            "Unsupported type {other:?} for {name}; expected F32/F16/BF16"
+        )),
+    }
 }
 
 pub(crate) fn validate_component(
@@ -984,6 +1069,8 @@ mod vulkan_tests {
             seed: 42,
             guidance_scale,
             instruct: None,
+            sway_sampling_coef: Some(-1.0),
+            time_grid: None,
         };
         let (cpu_text, cpu_latent) = {
             let _cpu = ComputePool::disable_gpu_matmul_for_scope();
