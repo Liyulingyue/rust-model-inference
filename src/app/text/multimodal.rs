@@ -1018,9 +1018,9 @@ pub fn run_qwen35_family_multimodal_logits(
             },
         )?;
     }
-    let _cpu = (arch == crate::models::sensenova_loop::ARCH)
-        .then(|| crate::compute::ComputePolicy::Cpu.enter_legacy_scope());
 
+    let vision_cpu = (arch == crate::models::sensenova_loop::ARCH)
+        .then(|| crate::compute::ComputePolicy::Cpu.enter_legacy_scope());
     let (first_w, first_h) = {
         let first = frames.first().ok_or("media produced no frames")?;
         (first.width() as usize, first.height() as usize)
@@ -1066,6 +1066,7 @@ pub fn run_qwen35_family_multimodal_logits(
         )?;
         vis_embeddings.extend_from_slice(&scratch.projected);
     }
+    drop(vision_cpu);
     let n_vis_tokens = grid.token_count();
 
     let tokenizer = BPETokenizer::from_gguf_metadata(|k| llm_source.metadata(k).cloned())
@@ -1288,6 +1289,9 @@ pub(super) fn run_multimodal_with_video_ref(
         .and_then(|v| v.to_string_val())
         .unwrap_or_default();
     validate_gemma4_temperature(arch, temperature)?;
+    if arch == crate::models::sensenova_loop::ARCH && video_path.is_some() {
+        return Err("SenseNova Loop multimodal generation does not support --video".into());
+    }
     if arch == "gemma4" {
         if video_path.is_some() {
             return Err("Gemma4 multimodal generation does not support --video".into());
@@ -1355,8 +1359,6 @@ pub(super) fn run_multimodal_with_video_ref(
     if arch == "edge0" && (image_path.is_some() || video_path.is_some()) {
         return Err("Edge0-35B preview contains no vision weights; text input only".into());
     }
-    let _cpu = (arch == crate::models::sensenova_loop::ARCH)
-        .then(|| crate::compute::ComputePolicy::Cpu.enter_legacy_scope());
     if arch != "qwen35"
         && arch != "qwen35moe"
         && arch != "qwen3vl"
@@ -1373,6 +1375,8 @@ pub(super) fn run_multimodal_with_video_ref(
     // MiniCPM-V 4.7 lays its tiles on one 2D canvas, so its M-RoPE positions
     // come from `canvas_positions` instead of the anyres grid builder.
     let mut canvas_positions: Option<Vec<[usize; 4]>> = None;
+    let vision_cpu = (arch == crate::models::sensenova_loop::ARCH)
+        .then(|| crate::compute::ComputePolicy::Cpu.enter_legacy_scope());
     let (image_grid, vis_embeddings_vec) = if let Some(image_path) = image_path {
         let projector_path = mmproj_path.unwrap_or(model_path);
         println!("Loading mmproj {} ...", projector_path.display());
@@ -1512,6 +1516,7 @@ pub(super) fn run_multimodal_with_video_ref(
     } else {
         (None, Vec::new())
     };
+    drop(vision_cpu);
     let n_vis_tokens = image_grid.map(|g| g.token_count()).unwrap_or(0);
     let vis_embeddings = &vis_embeddings_vec[..];
     if image_grid.is_some() {
@@ -1940,4 +1945,50 @@ pub(super) fn run_multimodal_with_video_ref(
         tok_s
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sensenova_video_is_rejected_before_loading_media() {
+        struct Source(crate::core::tensor::MetaValue);
+        impl TensorSource for Source {
+            fn metadata(&self, key: &str) -> Option<&crate::core::tensor::MetaValue> {
+                (key == "general.architecture").then_some(&self.0)
+            }
+            fn tensor_info(&self, _: &str) -> Option<&crate::core::tensor::TensorInfo> {
+                panic!("unsupported video must be rejected before loading tensors")
+            }
+            fn tensor_slice(&self, _: &str) -> Option<&[u8]> {
+                panic!("unsupported video must be rejected before loading tensors")
+            }
+        }
+        let source = Source(crate::core::tensor::MetaValue::String(
+            "sensenova_loop".into(),
+        ));
+        let error = run_multimodal_with_video_ref(
+            &source,
+            Path::new("missing-model.gguf"),
+            Some(Path::new("missing-mmproj.gguf")),
+            None,
+            Some(Path::new("missing-video.mp4")),
+            None,
+            "describe",
+            1,
+            0.0,
+            1,
+            1,
+            64,
+            1.0,
+            None,
+            &crate::prompt::jinja::Options::default(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "SenseNova Loop multimodal generation does not support --video"
+        );
+    }
 }

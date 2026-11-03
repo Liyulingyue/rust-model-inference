@@ -39,14 +39,14 @@ pub fn validate_projector(source: &dyn TensorSource) -> Result<(), String> {
 
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct MhcSettings {
-    start: usize,
-    end: usize,
-    streams: usize,
-    iterations: usize,
-    fixed_identity: bool,
+pub(crate) struct MhcSettings {
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+    pub(crate) streams: usize,
+    pub(crate) iterations: usize,
+    pub(crate) fixed_identity: bool,
     #[serde(default = "one")]
-    pre_scale: f32,
+    pub(crate) pre_scale: f32,
 }
 fn one() -> f32 {
     1.0
@@ -115,9 +115,16 @@ fn parse_contract(raw: &str, physical_layers: usize) -> Result<(Vec<usize>, MhcS
     Ok((plan, m))
 }
 
-struct Router<'a> {
-    weight: Weight<'a>,
-    bias: Vec<f32>,
+pub(crate) struct Router<'a> {
+    pub(crate) weight: Weight<'a>,
+    pub(crate) bias: Vec<f32>,
+}
+
+#[cfg(feature = "vulkan")]
+pub struct StreamRouting<'a, 'm> {
+    pub(crate) plan: &'a [usize],
+    pub(crate) settings: &'a MhcSettings,
+    pub(crate) routers: &'a [(Router<'m>, Router<'m>)],
 }
 pub struct SenseNovaLoopModel<'a> {
     pub trunk: HybridTrunk<'a>,
@@ -412,7 +419,15 @@ impl<'m> HybridTrunkModel<'m> for SenseNovaLoopModel<'m> {
     }
     #[cfg(feature = "vulkan")]
     fn supports_vulkan(&self) -> bool {
-        false
+        true
+    }
+    #[cfg(feature = "vulkan")]
+    fn stream_routing(&self) -> Option<StreamRouting<'_, 'm>> {
+        Some(StreamRouting {
+            plan: &self.plan,
+            settings: &self.settings,
+            routers: &self.routers,
+        })
     }
     fn forward_at(
         &mut self,

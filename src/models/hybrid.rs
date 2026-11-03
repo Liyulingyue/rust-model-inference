@@ -67,7 +67,15 @@ impl<'m> HybridTrunkModel<'m> for HybridTextModel<'m> {
 
     #[cfg(feature = "vulkan")]
     fn supports_vulkan(&self) -> bool {
-        matches!(self, Self::Qwen35(_))
+        matches!(self, Self::Qwen35(_) | Self::SenseNova(_))
+    }
+
+    #[cfg(feature = "vulkan")]
+    fn stream_routing(&self) -> Option<crate::models::sensenova_loop::StreamRouting<'_, 'm>> {
+        match self {
+            Self::SenseNova(model) => model.stream_routing(),
+            _ => None,
+        }
     }
 }
 

@@ -1,7 +1,7 @@
 pub mod api;
 mod forecast;
-mod rerank;
 mod prediction;
+mod rerank;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 

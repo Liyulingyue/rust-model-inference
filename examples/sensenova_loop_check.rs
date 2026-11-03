@@ -12,7 +12,9 @@ use std::sync::Arc;
 fn main() -> Result<(), String> {
     let args: Vec<String> = std::env::args().collect();
     if !(5..=6).contains(&args.len()) {
-        return Err("usage: sensenova_loop_check MODEL FIXTURES OUTPUT cpu|auto [MMPROJ]".into());
+        return Err(
+            "usage: sensenova_loop_check MODEL FIXTURES OUTPUT cpu|auto|vulkan [MMPROJ]".into(),
+        );
     }
     let source =
         GGUFLoader::from_file(std::path::Path::new(&args[1])).map_err(|e| e.to_string())?;
@@ -20,10 +22,11 @@ fn main() -> Result<(), String> {
     let fixtures: Vec<Value> =
         serde_json::from_str(&std::fs::read_to_string(&args[2]).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
-    let policy = if args[4] == "auto" {
-        ComputePolicy::Auto
-    } else {
-        ComputePolicy::Cpu
+    let policy = match args[4].as_str() {
+        "cpu" => ComputePolicy::Cpu,
+        "auto" => ComputePolicy::Auto,
+        "vulkan" => ComputePolicy::Vulkan,
+        other => return Err(format!("unknown compute policy {other}")),
     };
     let _scope = policy.enter_legacy_scope();
     let mut model = HybridTextModel::from_source(&source)?;

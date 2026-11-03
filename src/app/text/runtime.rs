@@ -194,6 +194,18 @@ impl TextRuntime for ComputeTextRuntime {
     fn context_length(&self) -> usize {
         self.inner.context_length()
     }
+    fn validate_request(
+        &self,
+        token_ids: &[u32],
+        images: &[Vec<u8>],
+        max_new_tokens: usize,
+    ) -> Result<(), String> {
+        if self.policy == crate::compute::ComputePolicy::Vulkan && !images.is_empty() {
+            return Err("full Vulkan runtime supports text input only".into());
+        }
+        self.inner
+            .validate_request(token_ids, images, max_new_tokens)
+    }
     fn generate(
         &mut self,
         request: &GenerationRequest,
@@ -741,18 +753,74 @@ impl TextRuntime for HybridTextRuntime {
             .min(self.max_context)
     }
 
+    fn validate_request(
+        &self,
+        token_ids: &[u32],
+        images: &[Vec<u8>],
+        max_new_tokens: usize,
+    ) -> Result<(), String> {
+        let mut prompt_len = token_ids.len();
+        if !images.is_empty() {
+            if self.compute == crate::compute::ComputePolicy::Vulkan {
+                return Err("full Vulkan runtime supports text input only".into());
+            }
+            if self.arch == "edge0" {
+                return Err("Edge0-35B preview contains no vision weights; text input only".into());
+            }
+            if self.arch == crate::models::sensenova_loop::ARCH && images.len() != 1 {
+                return Err(
+                    "SenseNova Loop currently supports exactly one image per request".into(),
+                );
+            }
+            let mmproj = self.mmproj.as_ref().ok_or(
+                "image input requires a vision projector; start the server with --mmproj <path>",
+            )?;
+            let config = crate::models::qwen35::vision::clip_config::ClipVisionConfig::from_source(
+                mmproj.as_ref(),
+            )?;
+            let mut vision_tokens = 0usize;
+            for bytes in images {
+                let image = crate::app::media::decode_image_bytes(bytes)?;
+                let grid = crate::models::qwen35::vision::qwen_smart_resize(
+                    image.width() as usize,
+                    image.height() as usize,
+                    &config,
+                )?;
+                vision_tokens = vision_tokens
+                    .checked_add(grid.token_count())
+                    .ok_or("vision token count overflow")?;
+            }
+            if vision_tokens > MAX_VISION_TOKENS {
+                return Err(format!(
+                    "image(s) expand to {vision_tokens} vision tokens, over the {MAX_VISION_TOKENS} \
+                     token budget; downscale the image before sending"
+                ));
+            }
+            // Use the encoder's resize contract without executing the vision model.
+            prompt_len = prompt_len
+                .checked_add(vision_tokens)
+                .and_then(|length| length.checked_add(2))
+                .ok_or("context length overflow")?;
+        }
+        let capacity = prompt_len
+            .checked_add(max_new_tokens)
+            .ok_or("context length overflow")?;
+        if capacity > self.context_length() {
+            return Err(format!(
+                "request needs {capacity} tokens, exceeds context limit {}",
+                self.context_length()
+            ));
+        }
+        Ok(())
+    }
+
     fn generate(
         &mut self,
         request: &GenerationRequest,
         sink: &mut dyn TokenSink,
     ) -> Result<GeneratedText, String> {
         let _scope = self.compute.enter_legacy_scope();
-        if self.compute == crate::compute::ComputePolicy::Vulkan && !request.images.is_empty() {
-            return Err("full Vulkan runtime supports text input only".into());
-        }
-        if self.arch == "edge0" && !request.images.is_empty() {
-            return Err("Edge0-35B preview contains no vision weights; text input only".into());
-        }
+        self.validate_request(&request.token_ids, &request.images, request.max_new_tokens)?;
         // Image path: expand the prompt with vision placeholders, inject the
         // projected embeddings, and prefill through `session.step` (which takes
         // embeddings rather than token ids). Mirrors the CLI multimodal path.
@@ -1025,6 +1093,9 @@ mod tests {
             fn context_length(&self) -> usize {
                 4
             }
+            fn validate_request(&self, _: &[u32], _: &[Vec<u8>], _: usize) -> Result<(), String> {
+                Err("probe validation error".into())
+            }
             fn generate(
                 &mut self,
                 _: &GenerationRequest,
@@ -1041,6 +1112,12 @@ mod tests {
         };
         let mut request = GenerationRequest::new(vec![1], 1);
         let mut sink = crate::ops::generation_runtime::CollectSink::new();
+        assert_eq!(
+            runtime
+                .validate_request(&request.token_ids, &request.images, request.max_new_tokens)
+                .unwrap_err(),
+            "probe validation error"
+        );
         assert_eq!(
             runtime.generate(&request, &mut sink).unwrap_err(),
             "probe error"
@@ -1075,23 +1152,28 @@ mod tests {
         );
     }
 
-    #[test]
-    fn hybrid_runtime_enforces_configured_context_before_session_allocation() {
+    fn tiny_hybrid_runtime(arch: &str, max_context: usize) -> super::HybridTextRuntime {
         use super::*;
-        let mut runtime = HybridTextRuntime {
+        let mut model = crate::models::qwen35::trunk::tests::tiny_dense_session_model();
+        model.config.n_ctx = 64;
+        HybridTextRuntime {
             compute: crate::compute::ComputePolicy::Cpu,
-            model: Mutex::new(crate::models::hybrid::HybridTextModel::Qwen35(
-                crate::models::qwen35::trunk::tests::tiny_dense_session_model(),
-            )),
+            model: Mutex::new(crate::models::hybrid::HybridTextModel::Qwen35(model)),
             _source: Arc::new(StubSource),
             tokenizer: Arc::new(stub_tokenizer()),
             pool: Arc::new(crate::core::thread_pool::ComputePool::new(1)),
             prefill_batch_size: 1,
             mmproj: None,
             threads: 1,
-            arch: "qwen35".into(),
-            max_context: 3,
-        };
+            arch: arch.into(),
+            max_context,
+        }
+    }
+
+    #[test]
+    fn hybrid_runtime_enforces_configured_context_before_session_allocation() {
+        use super::*;
+        let mut runtime = tiny_hybrid_runtime("qwen35", 3);
         assert_eq!(runtime.context_length(), 3);
         let request = GenerationRequest::new(vec![0, 1], 2);
         let mut sink = crate::ops::generation_runtime::CollectSink::new();
@@ -1099,6 +1181,77 @@ mod tests {
             .generate(&request, &mut sink)
             .unwrap_err()
             .contains("exceeds context limit 3"));
+    }
+
+    #[test]
+    fn hybrid_image_preflight_checks_expanded_context_without_vision_inference() {
+        use super::*;
+        use crate::core::tensor::MetaValue;
+        struct Projector(std::collections::HashMap<String, MetaValue>);
+        impl TensorSource for Projector {
+            fn metadata(&self, key: &str) -> Option<&MetaValue> {
+                self.0.get(key)
+            }
+            fn tensor_info(&self, _: &str) -> Option<&crate::core::tensor::TensorInfo> {
+                panic!("preflight must not load vision tensors")
+            }
+            fn tensor_slice(&self, _: &str) -> Option<&[u8]> {
+                panic!("preflight must not load vision tensors")
+            }
+        }
+        let mut runtime = tiny_hybrid_runtime("sensenova_loop", 64);
+        let mut request = GenerationRequest::new(vec![0; 14], 2);
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(256, 256)
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .unwrap();
+        request.images.push(bytes.into_inner());
+        assert!(runtime
+            .validate_request(&request.token_ids, &request.images, request.max_new_tokens)
+            .unwrap_err()
+            .contains("requires a vision projector"));
+        runtime.mmproj = Some(Arc::new(Projector(
+            [
+                ("clip.vision.projection_dim", 4),
+                ("clip.vision.image_size", 256),
+                ("clip.vision.patch_size", 16),
+                ("clip.vision.embedding_length", 4),
+                ("clip.vision.feed_forward_length", 8),
+                ("clip.vision.block_count", 1),
+                ("clip.vision.attention.head_count", 1),
+            ]
+            .into_iter()
+            .map(|(key, value)| (key.into(), MetaValue::Uint32(value)))
+            .chain([(
+                "clip.vision.attention.layer_norm_epsilon".into(),
+                MetaValue::Float32(1e-6),
+            )])
+            .collect(),
+        )));
+        let mut sink = crate::ops::generation_runtime::CollectSink::new();
+        assert_eq!(
+            runtime
+                .validate_request(&request.token_ids, &request.images, request.max_new_tokens)
+                .unwrap_err(),
+            "request needs 82 tokens, exceeds context limit 64"
+        );
+        assert_eq!(
+            runtime.generate(&request, &mut sink).unwrap_err(),
+            "request needs 82 tokens, exceeds context limit 64"
+        );
+        request.images.push(request.images[0].clone());
+        assert!(runtime
+            .validate_request(&request.token_ids, &request.images, request.max_new_tokens)
+            .unwrap_err()
+            .contains("exactly one image"));
+        let mut small = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(32, 32)
+            .write_to(&mut small, image::ImageFormat::Png)
+            .unwrap();
+        request.images = vec![small.into_inner()];
+        runtime
+            .validate_request(&request.token_ids, &request.images, request.max_new_tokens)
+            .unwrap();
     }
 
     /// `capacity_for` is the single capacity rule adapters must use.
@@ -1225,9 +1378,6 @@ impl HybridTextRuntime {
         prompt_ids: &[u32],
         images: &[Vec<u8>],
     ) -> Result<(Vec<u32>, Option<Vec<f32>>, Vec<[usize; 4]>), String> {
-        if self.arch == crate::models::sensenova_loop::ARCH && images.len() != 1 {
-            return Err("SenseNova Loop currently supports exactly one image per request".into());
-        }
         let _cpu = (self.arch == crate::models::sensenova_loop::ARCH)
             .then(|| crate::compute::ComputePolicy::Cpu.enter_legacy_scope());
         // The caller must NOT hold the model lock: we take it here for the

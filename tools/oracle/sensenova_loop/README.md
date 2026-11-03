@@ -9,9 +9,19 @@ The supported export is **F32 text + F32 mmproj**, matching the actual source
 tensors (the source config's BF16 declaration does not describe their storage).
 Other text quantizations are rejected. The two temporal patch matrices must stay
 F32; manually converted encodings of the other projector matrices may load but
-are unverified. CPU and Auto use CPU inference; strict
-Vulkan is rejected. The image path supports one image. Audio/video, multi-image,
-MTP, long-context quality and performance are outside this validation.
+are unverified. The Vulkan decoder shares physical weights and keeps independent
+visit state, with mHC routing, HF GDN head pairing and interleaved M-RoPE on
+the device. Physical GPU numerical/performance validation remains pending:
+the assigned RADV device also fails the unmodified baseline operator check
+with `device lost / hard recovery`. Software-ICD shader checks are not GPU
+performance evidence. Auto falls back to CPU on a device failure; strict
+Vulkan propagates the failure. Vision encoding stays on CPU. The HTTP strict
+Vulkan runtime retains its text-only contract; use Auto for image requests.
+The image path supports one image in the final user message, retaining text
+history. Historical images and video are rejected explicitly. Expanded image
+context is checked before HTTP streaming and before vision inference.
+Audio/video, multi-image, MTP and long-context quality remain unsupported or
+unvalidated.
 
 ## Pinned reference
 
@@ -24,7 +34,7 @@ MTP, long-context quality and performance are outside this validation.
 - Comparisons require exact tokenizer IDs and greedy IDs. Floating-point
   checkpoints use `max_abs <= 1e-3 + 1e-4 * ref_abs_max` and
   `RMSE <= 1e-5 + 1e-4 * ref_RMS`, with finite/shape/count checks. SIMD,
-  exp, sigmoid and normalization are not claimed bitwise identical to PyTorch.
+  exp, sigmoid, normalization and GPU reductions are not claimed bitwise identical to PyTorch.
 
 ## Remote-only weights
 
@@ -77,13 +87,17 @@ Caches and build artifacts stay inside the repository.
 export HF_MODULES_CACHE="$PWD/target/hf-modules"
 .venv/bin/python tools/oracle/sensenova_loop/oracle.py \
   models/SenseNova-Loop-9B-Preview target/loop-oracle
-cargo build --locked --profile release-fast --features parity-trace \
+cargo build --locked --profile release-fast --features parity-trace,vulkan \
   --bin rust-model-inference --bin rust-model-server --example sensenova_loop_check
 target/release-fast/examples/sensenova_loop_check \
   models/SenseNova-Loop-F32.gguf target/loop-oracle/fixtures.json target/loop-native-cpu cpu
 .venv/bin/python tools/oracle/sensenova_loop/compare.py \
   target/loop-oracle target/loop-native-cpu --output target/loop-cpu-comparison.json
-# Repeat with a fresh output directory and policy auto.
+# Repeat with a fresh output directory and policy auto or vulkan.
+# Strict vulkan must report backend=Vulkan and nonzero submission counters;
+# a successful Auto fallback is CPU evidence only.
+RMI_COMPUTE_TRACE=1 target/release-fast/examples/sensenova_loop_check \
+  models/SenseNova-Loop-F32.gguf target/loop-oracle/fixtures.json target/loop-native-vulkan vulkan
 ```
 
 The fixture runner checks Unicode/NFC, whitespace, special tokens, English
@@ -134,6 +148,11 @@ For measured coverage, metrics and remaining limits see [validation.md](validati
 cargo test --locked --profile release-fast --features parity-trace,vulkan --lib sensenova
 cargo test --locked --profile release-fast --features parity-trace,vulkan --lib qwen35::
 cargo test --locked --profile release-fast --features parity-trace,vulkan --lib borrowed_f32
+cargo test --locked --profile release-fast --features parity-trace,vulkan --lib mhc
+cargo test --locked --profile release-fast --features parity-trace,vulkan --lib recurrent_ssm_gpu_repeat_interleave
+# CPU software ICD checks exercise shader logic only, not acceleration.
+VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json cargo test --locked --profile release-fast \
+  --features parity-trace,vulkan --lib full_graph_shader_prefill_decode_cache_and_reset
 cargo test --locked --profile release-fast --lib
 cargo check --locked --profile release-fast --features parity-trace,vulkan --examples
 ```

@@ -78,6 +78,7 @@ const QWEN35_RECURRENT_SSM_SHADER: &[u8] =
 const QWEN35_MOE_ROUTE_SHADER: &[u8] = include_bytes!("../../shaders/bin/qwen35_moe_route.spv");
 const QWEN35_MOE_REDUCE_SHADER: &[u8] = include_bytes!("../../shaders/bin/qwen35_moe_reduce.spv");
 const ADALN_MODULATE_SHADER: &[u8] = include_bytes!("../../shaders/bin/adaln_modulate.spv");
+const SENSENOVA_MHC_SHADER: &[u8] = include_bytes!("../../shaders/bin/sensenova_mhc.spv");
 
 const QUANTIZE: usize = 0;
 const QUANTIZE_K: usize = 1;
@@ -128,6 +129,7 @@ const Q4_K_MATMUL_COOPERATIVE: usize = 40;
 const QWEN35_MOE_ROUTE: usize = 41;
 const QWEN35_MOE_REDUCE: usize = 42;
 const Q5_K_MATMUL_COOPERATIVE: usize = 43;
+const SENSENOVA_MHC: usize = 44;
 
 fn silu_exp_mode(approximate: bool) -> u32 {
     if !approximate {
@@ -251,6 +253,7 @@ const OPERATOR_SHADER_NAMES: [&str; OPERATOR_SHADERS.len()] = [
     "qwen35_moe_route",
     "qwen35_moe_reduce",
     "q5_k_matmul_cooperative",
+    "sensenova_mhc",
 ];
 
 /// True when the ordered dispatch log is being collected.
@@ -338,7 +341,7 @@ pub fn dump_dispatch_trace() {
     }
 }
 
-const OPERATOR_SHADERS: [&[u8]; 44] = [
+const OPERATOR_SHADERS: [&[u8]; 45] = [
     QUANTIZE_Q8_0_SHADER,
     QUANTIZE_Q8_K_SHADER,
     Q8_MATMUL_GROUPED_SHADER,
@@ -383,6 +386,7 @@ const OPERATOR_SHADERS: [&[u8]; 44] = [
     QWEN35_MOE_ROUTE_SHADER,
     QWEN35_MOE_REDUCE_SHADER,
     Q5_K_MATMUL_COOPERATIVE_SHADER,
+    SENSENOVA_MHC_SHADER,
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -581,6 +585,24 @@ pub(crate) struct ExpertSelection {
 pub(crate) struct ArenaRegion {
     pub(crate) offset: usize,
     pub(crate) size: usize,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct MhcShape {
+    pub(crate) width: usize,
+    pub(crate) streams: usize,
+    pub(crate) iterations: usize,
+    pub(crate) fixed_identity: bool,
+    pub(crate) pre_scale: f32,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct MhcRegions {
+    pub(crate) branch: ArenaRegion,
+    pub(crate) residual: ArenaRegion,
+    pub(crate) logits: ArenaRegion,
+    pub(crate) post: ArenaRegion,
+    pub(crate) mix: ArenaRegion,
 }
 
 impl ArenaRegion {
@@ -1212,7 +1234,14 @@ impl BatchedLinearRuntime {
         max_n_out: usize,
         descriptor_capacity: usize,
     ) -> Result<Self, VulkanError> {
-        Self::with_output_slots(context, max_rows, max_n_in, max_n_out, descriptor_capacity, 1)
+        Self::with_output_slots(
+            context,
+            max_rows,
+            max_n_in,
+            max_n_out,
+            descriptor_capacity,
+            1,
+        )
     }
 
     /// Create a runtime with `output_slots` independent output regions so
@@ -1420,7 +1449,12 @@ impl BatchedLinearRuntime {
         for (weight_bytes, spec, rows, n_out) in group.iter().copied() {
             let spec = spec;
             let format = spec.format;
-            let key = (weight_bytes.as_ptr() as usize, weight_bytes.len(), n_in, n_out);
+            let key = (
+                weight_bytes.as_ptr() as usize,
+                weight_bytes.len(),
+                n_in,
+                n_out,
+            );
             let bindings = if let Some((_, bindings)) = self.weights.get(&key) {
                 if bindings.weight_format(1)? != format || bindings.weight_mode != spec.mode {
                     return Err(VulkanError::UnsupportedShape(
@@ -1465,16 +1499,17 @@ impl BatchedLinearRuntime {
                         .context
                         .upload_static(transposed.as_deref().unwrap_or(weight_bytes))?
                 };
-                let bindings = match self
-                    .ops
-                    .bind_weight_buffers_mode(&[buffer], &[format], spec.mode)
-                {
-                    Ok(bindings) => bindings,
-                    Err(error) => {
-                        unsafe { self.ops.context.destroy_buffer(&buffer) };
-                        return Err(error);
-                    }
-                };
+                let bindings =
+                    match self
+                        .ops
+                        .bind_weight_buffers_mode(&[buffer], &[format], spec.mode)
+                    {
+                        Ok(bindings) => bindings,
+                        Err(error) => {
+                            unsafe { self.ops.context.destroy_buffer(&buffer) };
+                            return Err(error);
+                        }
+                    };
                 self.weights.insert(key, (buffer, bindings));
                 bindings
             };
@@ -1506,9 +1541,10 @@ impl BatchedLinearRuntime {
         for (slot, (bindings, (_weight_bytes, spec, rows, n_out))) in
             cached_bindings.iter().zip(group.iter()).enumerate()
         {
-            let output_region = self.layout.output_slot(slot).ok_or_else(|| {
-                VulkanError::UnsupportedShape("output slot unavailable".into())
-            })?;
+            let output_region = self
+                .layout
+                .output_slot(slot)
+                .ok_or_else(|| VulkanError::UnsupportedShape("output slot unavailable".into()))?;
             let outputs = [(output_region, *n_out, f32_bytes(*n_out)?)];
             let recorder = if spec.uses_tiled_f16() && n_in % 2 == 0 && *rows >= 32 {
                 Qwen3Ops::record_weight_matmul_tiled_rows
@@ -1555,7 +1591,6 @@ impl BatchedLinearRuntime {
     pub(crate) fn ops_context(&self) -> Option<&'static VulkanContext> {
         Some(self.ops.context)
     }
-
 }
 
 impl Drop for BatchedLinearRuntime {
@@ -2005,8 +2040,16 @@ impl AttentionRuntime {
             || spec.query_heads == 0
             || spec.key_value_heads == 0
             || spec.query_heads % spec.key_value_heads != 0
-            || q.len() != product("attention Q", &[spec.query_tokens, spec.query_heads, spec.head_dim])?
-            || k.len() != product("attention K", &[spec.key_tokens, spec.key_value_heads, spec.head_dim])?
+            || q.len()
+                != product(
+                    "attention Q",
+                    &[spec.query_tokens, spec.query_heads, spec.head_dim],
+                )?
+            || k.len()
+                != product(
+                    "attention K",
+                    &[spec.key_tokens, spec.key_value_heads, spec.head_dim],
+                )?
             || v.len() != k.len()
             || !spec.scale.is_finite()
             || (spec.causal && spec.query_tokens > spec.key_tokens)
@@ -2019,7 +2062,8 @@ impl AttentionRuntime {
             self.ops.f32_word(self.q, q.len(), "attention Q")?,
             self.ops.f32_word(self.k, k.len(), "attention K")?,
             self.ops.f32_word(self.v, v.len(), "attention V")?,
-            self.ops.f32_word(self.output, q.len(), "attention output")?,
+            self.ops
+                .f32_word(self.output, q.len(), "attention output")?,
             as_u32(spec.query_tokens, "attention queries")?,
             as_u32(spec.key_tokens, "attention keys")?,
             as_u32(spec.query_heads, "attention heads")?,
@@ -2029,7 +2073,8 @@ impl AttentionRuntime {
             u32::from(spec.causal),
         ];
         let dispatch = row_dispatch(
-            spec.query_tokens.div_ceil(if spec.head_dim <= 128 { 16 } else { 8 }),
+            spec.query_tokens
+                .div_ceil(if spec.head_dim <= 128 { 16 } else { 8 }),
             spec.query_heads,
             &self.ops.context.limits,
         )?;
@@ -2039,7 +2084,11 @@ impl AttentionRuntime {
         self.ops.write_f32(self.v, v)?;
         self.ops.record_linear_dispatch(
             &commands,
-            if spec.head_dim <= 128 { ATTENTION_ONLINE } else { ATTENTION_ONLINE_WIDE },
+            if spec.head_dim <= 128 {
+                ATTENTION_ONLINE
+            } else {
+                ATTENTION_ONLINE_WIDE
+            },
             self.ops.arena_bindings,
             &push,
             dispatch,
@@ -2048,7 +2097,6 @@ impl AttentionRuntime {
         output.copy_from_slice(self.ops.read_f32(self.output, output.len())?);
         Ok(())
     }
-
 }
 
 /// One shared CHW arena for a VAE; immutable weights retain stable source addresses.
@@ -4720,12 +4768,57 @@ impl<'a> Qwen3Ops<'a> {
         eps: f32,
         rows: usize,
     ) -> Result<(), VulkanError> {
+        self.record_qwen35_recurrent_ssm_layout(
+            commands,
+            bindings,
+            q,
+            k,
+            v,
+            gate,
+            beta,
+            alpha,
+            output,
+            state,
+            layer,
+            layer_count,
+            k_heads,
+            v_heads,
+            head_dim,
+            eps,
+            rows,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_qwen35_recurrent_ssm_layout(
+        &self,
+        commands: &TokenCommands<'_>,
+        bindings: OperatorBindings,
+        q: ArenaRegion,
+        k: ArenaRegion,
+        v: ArenaRegion,
+        gate: ArenaRegion,
+        beta: ArenaRegion,
+        alpha: ArenaRegion,
+        output: ArenaRegion,
+        state: ArenaRegion,
+        layer: usize,
+        layer_count: usize,
+        k_heads: usize,
+        v_heads: usize,
+        head_dim: usize,
+        eps: f32,
+        rows: usize,
+        repeat_interleave: bool,
+    ) -> Result<(), VulkanError> {
         if rows == 0
             || layer >= layer_count
             || k_heads == 0
             || v_heads == 0
             || head_dim == 0
             || head_dim > 128
+            || (repeat_interleave && v_heads % k_heads != 0)
         {
             return Err(VulkanError::UnsupportedShape(format!(
                 "invalid Qwen3.5 recurrent SSM layer={layer}/{layer_count} heads={k_heads}/{v_heads} dim={head_dim}"
@@ -4806,6 +4899,7 @@ impl<'a> Qwen3Ops<'a> {
                 0
             },
             silu_exp_mode(true),
+            u32::from(repeat_interleave),
         ];
         let (x, y) = super::dispatch_grid(v_heads, &self.context.limits)?;
         unsafe {
@@ -4818,6 +4912,21 @@ impl<'a> Qwen3Ops<'a> {
             commands.dispatch(x, y, 1);
             commands.barrier();
         }
+        Ok(())
+    }
+
+    pub(crate) fn record_mhc(
+        &self,
+        commands: &TokenCommands<'_>,
+        bias: OperatorBindings,
+        mode: u32,
+        regions: MhcRegions,
+        shape: MhcShape,
+        rows: usize,
+    ) -> Result<(), VulkanError> {
+        let push = mhc_push(self.arena.size as usize, bias, mode, regions, shape, rows)?;
+        let dispatch = row_dispatch(1, rows, &self.context.limits)?;
+        self.record_linear_dispatch(commands, SENSENOVA_MHC, bias, &push, dispatch);
         Ok(())
     }
 
@@ -5357,6 +5466,75 @@ fn pack_u16_pair(low: usize, high: usize, label: &str) -> Result<u32, VulkanErro
 
 fn f32_bytes(count: usize) -> Result<usize, VulkanError> {
     count.checked_mul(4).ok_or(VulkanError::OutOfMemory)
+}
+
+fn mhc_push(
+    arena_size: usize,
+    bias: OperatorBindings,
+    mode: u32,
+    regions: MhcRegions,
+    shape: MhcShape,
+    rows: usize,
+) -> Result<[u32; 12], VulkanError> {
+    let MhcShape {
+        width,
+        streams,
+        iterations,
+        fixed_identity,
+        pre_scale,
+    } = shape;
+    if mode > 3
+        || rows == 0
+        || width == 0
+        || !matches!(streams, 2 | 4)
+        || !(1..=1024).contains(&iterations)
+        || !pre_scale.is_finite()
+        || pre_scale <= 0.0
+    {
+        return Err(VulkanError::UnsupportedShape(
+            "invalid SenseNova mHC shape/mode".into(),
+        ));
+    }
+    let residual_width = product("mHC residual", &[streams, width])?;
+    let logits_width = 2 * streams + if fixed_identity { 0 } else { streams * streams };
+    if mode == 1 {
+        bias.require(0, f32_bytes(logits_width)?, "mHC bias")?;
+    }
+    let spans = [
+        (regions.branch, width, "mHC branch"),
+        (regions.residual, residual_width, "mHC residual"),
+        (regions.logits, logits_width, "mHC logits"),
+        (regions.post, streams, "mHC post"),
+        (regions.mix, streams * streams, "mHC mix"),
+    ];
+    let mut words = [0; 5];
+    let mut ends = [0; 5];
+    for (index, &(region, count, label)) in spans.iter().enumerate() {
+        let bytes = f32_bytes(count)?;
+        words[index] = row_word(arena_size, region, rows, bytes, bytes, label)?;
+        ends[index] = region.offset + product(label, &[rows, bytes])?;
+        for previous in 0..index {
+            if region.offset < ends[previous] && spans[previous].0.offset < ends[index] {
+                return Err(VulkanError::UnsupportedShape(
+                    "mHC regions must not overlap".into(),
+                ));
+            }
+        }
+    }
+    Ok([
+        mode,
+        as_u32(width, "mHC width")?,
+        streams as u32,
+        iterations as u32,
+        u32::from(fixed_identity),
+        pre_scale.to_bits(),
+        as_u32(rows, "mHC rows")?,
+        words[0],
+        words[1],
+        words[2],
+        words[3],
+        words[4],
+    ])
 }
 
 fn row_span(rows: usize, stride: usize, width: usize) -> Result<usize, VulkanError> {
@@ -8297,7 +8475,7 @@ mod tests {
     #[test]
     fn appended_operator_indices_match_shader_modules() {
         use super::*;
-        let operators: [(usize, &str, &[u8]); 7] = [
+        let operators: [(usize, &str, &[u8]); 8] = [
             (
                 TIMESTRAL,
                 "timestral",
@@ -8329,11 +8507,434 @@ mod tests {
                 "q5_k_matmul_cooperative",
                 Q5_K_MATMUL_COOPERATIVE_SHADER,
             ),
+            (SENSENOVA_MHC, "sensenova_mhc", SENSENOVA_MHC_SHADER),
         ];
         for (index, name, shader) in operators {
             assert_eq!(OPERATOR_SHADER_NAMES[index], name);
             assert_eq!(OPERATOR_SHADERS[index], shader);
         }
+    }
+
+    fn mhc_test_regions(shape: super::MhcShape, rows: usize) -> (super::MhcRegions, usize) {
+        use super::*;
+        let mut cursor = 0;
+        let s = shape.streams;
+        let regions = MhcRegions {
+            branch: f32_region(&mut cursor, rows * shape.width).unwrap(),
+            residual: f32_region(&mut cursor, rows * s * shape.width).unwrap(),
+            logits: f32_region(
+                &mut cursor,
+                rows * (2 * s + if shape.fixed_identity { 0 } else { s * s }),
+            )
+            .unwrap(),
+            post: f32_region(&mut cursor, rows * s).unwrap(),
+            mix: f32_region(&mut cursor, rows * s * s).unwrap(),
+        };
+        (regions, cursor)
+    }
+
+    #[test]
+    fn mhc_push_rejects_invalid_shapes_regions_and_bias() {
+        use super::*;
+        let shape = MhcShape {
+            width: 73,
+            streams: 4,
+            iterations: 7,
+            fixed_identity: false,
+            pre_scale: 0.5,
+        };
+        let (regions, bytes) = mhc_test_regions(shape, 3);
+        let bias = OperatorBindings {
+            descriptor_set: vk::DescriptorSet::null(),
+            sizes: [24 * 4, 0, 0],
+            weight_formats: [None; 3],
+            weight_mode: GpuMatmulMode::Prepared,
+        };
+        assert_eq!(
+            mhc_push(bytes, bias, 1, regions, shape, 3).unwrap().len() * 4,
+            48
+        );
+        for invalid in [
+            MhcShape { width: 0, ..shape },
+            MhcShape {
+                width: usize::MAX,
+                ..shape
+            },
+            MhcShape {
+                streams: 3,
+                ..shape
+            },
+            MhcShape {
+                iterations: 0,
+                ..shape
+            },
+            MhcShape {
+                iterations: 1025,
+                ..shape
+            },
+            MhcShape {
+                pre_scale: f32::NAN,
+                ..shape
+            },
+            MhcShape {
+                pre_scale: 0.0,
+                ..shape
+            },
+        ] {
+            assert!(mhc_push(bytes, bias, 1, regions, invalid, 3).is_err());
+        }
+        assert!(mhc_push(bytes, bias, 4, regions, shape, 3).is_err());
+        assert!(mhc_push(bytes, bias, 1, regions, shape, 0).is_err());
+        assert!(mhc_push(bytes - 4, bias, 1, regions, shape, 3).is_err());
+        assert!(mhc_push(
+            bytes,
+            bias,
+            1,
+            MhcRegions {
+                branch: ArenaRegion {
+                    offset: regions.branch.offset + 1,
+                    ..regions.branch
+                },
+                ..regions
+            },
+            shape,
+            3
+        )
+        .is_err());
+        assert!(mhc_push(
+            bytes,
+            bias,
+            1,
+            MhcRegions {
+                mix: ArenaRegion {
+                    offset: regions.post.offset,
+                    ..regions.mix
+                },
+                ..regions
+            },
+            shape,
+            3
+        )
+        .is_err());
+        assert!(mhc_push(
+            bytes,
+            OperatorBindings {
+                sizes: [23 * 4, 0, 0],
+                ..bias
+            },
+            1,
+            regions,
+            shape,
+            3
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn sensenova_mhc_gpu_matches_independent_cpu_for_all_modes_and_rows() {
+        use super::*;
+        crate::ops::float::enable_gpu();
+        let Some(context) = crate::ops::get_vulkan_context() else {
+            eprintln!("no vulkan context; skip");
+            return;
+        };
+        let close = |actual: &[f32], expected: &[f64]| {
+            assert_eq!(actual.len(), expected.len());
+            for (index, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
+                assert!(
+                    actual.is_finite()
+                        && (f64::from(actual) - expected).abs() < 2e-5 * (1.0 + expected.abs()),
+                    "mHC at {index}: gpu={actual} cpu={expected}"
+                );
+            }
+        };
+        const ROWS: usize = 3;
+        for streams in [2, 4] {
+            for fixed_identity in [false, true] {
+                let shape = MhcShape {
+                    width: 73,
+                    streams,
+                    iterations: 7,
+                    fixed_identity,
+                    pre_scale: 0.5,
+                };
+                let (regions, bytes) = mhc_test_regions(shape, ROWS);
+                let logits_width = 2 * streams + if fixed_identity { 0 } else { streams * streams };
+                let logits: Vec<f32> = (0..ROWS * logits_width)
+                    .map(|i| ((i * 17 % 31) as f32 - 15.0) * 0.13)
+                    .collect();
+                let bias: Vec<f32> = (0..logits_width)
+                    .map(|i| ((i * 7 % 13) as f32 - 6.0) * 0.11)
+                    .collect();
+                let input: Vec<f32> = (0..ROWS * shape.width)
+                    .map(|i| (i as f32 - 80.0) * 0.01)
+                    .collect();
+                let residual: Vec<f32> = (0..ROWS * streams * shape.width)
+                    .map(|i| ((i * 29 % 127) as f32 - 63.0) * 0.03)
+                    .collect();
+                let mut expected_branch = Vec::new();
+                let mut expected_post = Vec::new();
+                let mut expected_mix = Vec::new();
+                for row in 0..ROWS {
+                    let values: Vec<f64> = (0..logits_width)
+                        .map(|i| f64::from(logits[row * logits_width + i] + bias[i]))
+                        .collect();
+                    let pre: Vec<f64> = values[..streams]
+                        .iter()
+                        .map(|v| 1.0 / (1.0 + (-v).exp()))
+                        .collect();
+                    expected_post.extend(
+                        values[streams..2 * streams]
+                            .iter()
+                            .map(|v| 2.0 / (1.0 + (-v).exp())),
+                    );
+                    for k in 0..shape.width {
+                        expected_branch.push(
+                            (0..streams)
+                                .map(|s| {
+                                    pre[s]
+                                        * f64::from(residual[(row * streams + s) * shape.width + k])
+                                })
+                                .sum::<f64>()
+                                * f64::from(shape.pre_scale),
+                        );
+                    }
+                    let mut matrix: Vec<f64> = if fixed_identity {
+                        (0..streams * streams)
+                            .map(|i| f64::from(u8::from(i / streams == i % streams)))
+                            .collect()
+                    } else {
+                        values[2 * streams..].iter().map(|v| v.exp()).collect()
+                    };
+                    if !fixed_identity {
+                        // Independent probability-domain Sinkhorn reference in f64.
+                        for _ in 0..shape.iterations {
+                            for row in matrix.chunks_exact_mut(streams) {
+                                let total: f64 = row.iter().sum();
+                                row.iter_mut().for_each(|v| *v /= total);
+                            }
+                            for column in 0..streams {
+                                let total: f64 =
+                                    (0..streams).map(|row| matrix[row * streams + column]).sum();
+                                for row in 0..streams {
+                                    matrix[row * streams + column] /= total;
+                                }
+                            }
+                        }
+                    }
+                    expected_mix.extend(matrix);
+                }
+                let buffer = unsafe { context.upload_static(bytemuck::cast_slice(&bias)) }.unwrap();
+                {
+                    let mut ops = Qwen3Ops::new_with_size(context, bytes, 2).unwrap();
+                    let bindings = ops.bind_buffers(&[buffer]).unwrap();
+                    ops.write_f32(regions.branch, &input).unwrap();
+                    let commands = TokenCommands::begin(context).unwrap();
+                    ops.record_mhc(&commands, bindings, 0, regions, shape, ROWS)
+                        .unwrap();
+                    commands.submit_and_wait().unwrap();
+                    let expanded: Vec<f32> = input
+                        .chunks_exact(shape.width)
+                        .flat_map(|row| (0..streams).flat_map(move |_| row.iter().copied()))
+                        .collect();
+                    assert_eq!(
+                        ops.read_f32(regions.residual, expanded.len()).unwrap(),
+                        expanded
+                    );
+                    ops.write_f32(regions.residual, &residual).unwrap();
+                    ops.write_f32(regions.logits, &logits).unwrap();
+                    let commands = TokenCommands::begin(context).unwrap();
+                    ops.record_mhc(&commands, bindings, 1, regions, shape, ROWS)
+                        .unwrap();
+                    commands.submit_and_wait().unwrap();
+                    close(
+                        ops.read_f32(regions.branch, expected_branch.len()).unwrap(),
+                        &expected_branch,
+                    );
+                    close(
+                        ops.read_f32(regions.post, expected_post.len()).unwrap(),
+                        &expected_post,
+                    );
+                    close(
+                        ops.read_f32(regions.mix, expected_mix.len()).unwrap(),
+                        &expected_mix,
+                    );
+                    let mut merged = vec![0.0; residual.len()];
+                    for row in 0..ROWS {
+                        for i in 0..streams {
+                            for k in 0..shape.width {
+                                merged[(row * streams + i) * shape.width + k] = (0..streams)
+                                    .map(|j| {
+                                        expected_mix[(row * streams + i) * streams + j]
+                                            * f64::from(
+                                                residual[(row * streams + j) * shape.width + k],
+                                            )
+                                    })
+                                    .sum::<f64>()
+                                    + expected_post[row * streams + i]
+                                        * expected_branch[row * shape.width + k];
+                            }
+                        }
+                    }
+                    let commands = TokenCommands::begin(context).unwrap();
+                    ops.record_mhc(&commands, bindings, 2, regions, shape, ROWS)
+                        .unwrap();
+                    commands.submit_and_wait().unwrap();
+                    close(
+                        ops.read_f32(regions.residual, merged.len()).unwrap(),
+                        &merged,
+                    );
+                    let mut reduced = Vec::new();
+                    for row in 0..ROWS {
+                        for k in 0..shape.width {
+                            reduced.push(
+                                (0..streams)
+                                    .map(|i| merged[(row * streams + i) * shape.width + k])
+                                    .sum::<f64>()
+                                    / streams as f64,
+                            );
+                        }
+                    }
+                    let commands = TokenCommands::begin(context).unwrap();
+                    ops.record_mhc(&commands, bindings, 3, regions, shape, ROWS)
+                        .unwrap();
+                    commands.submit_and_wait().unwrap();
+                    close(
+                        ops.read_f32(regions.branch, reduced.len()).unwrap(),
+                        &reduced,
+                    );
+                }
+                unsafe { context.destroy_completed_buffers(&[buffer]) }.unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn recurrent_ssm_gpu_repeat_interleave_preserves_default_head_layout() {
+        use super::*;
+        crate::ops::float::enable_gpu();
+        let Some(context) = crate::ops::get_vulkan_context() else {
+            eprintln!("no vulkan context; skip");
+            return;
+        };
+        const ROWS: usize = 2;
+        const K_HEADS: usize = 2;
+        const V_HEADS: usize = 4;
+        const DIM: usize = 2;
+        let mut cursor = 0;
+        let q = f32_region(&mut cursor, ROWS * K_HEADS * DIM).unwrap();
+        let k = f32_region(&mut cursor, ROWS * K_HEADS * DIM).unwrap();
+        let v = f32_region(&mut cursor, ROWS * V_HEADS * DIM).unwrap();
+        let gate = f32_region(&mut cursor, ROWS * V_HEADS * DIM).unwrap();
+        let beta = f32_region(&mut cursor, ROWS * V_HEADS).unwrap();
+        let alpha = f32_region(&mut cursor, ROWS * V_HEADS).unwrap();
+        let output = f32_region(&mut cursor, ROWS * V_HEADS * DIM).unwrap();
+        let state = f32_region(&mut cursor, V_HEADS * DIM * DIM).unwrap();
+        let queries: Vec<f32> = (0..ROWS * K_HEADS * DIM)
+            .map(|i| 0.1 + i as f32 * 0.07)
+            .collect();
+        let keys: Vec<f32> = (0..queries.len()).map(|i| 0.2 - i as f32 * 0.03).collect();
+        let values: Vec<f32> = (0..ROWS * V_HEADS * DIM)
+            .map(|i| -0.3 + i as f32 * 0.05)
+            .collect();
+        let initial: Vec<f32> = (0..V_HEADS * DIM * DIM).map(|i| i as f32 * 0.01).collect();
+        let norm = [0.75f32, 1.25];
+        let zero = [0.0f32; V_HEADS];
+        let buffers: Vec<GpuBuffer> = [&zero[..], &zero[..], &norm[..]]
+            .into_iter()
+            .map(|values| unsafe { context.upload_static(bytemuck::cast_slice(values)) }.unwrap())
+            .collect();
+        {
+            let mut ops = Qwen3Ops::new_with_size(context, cursor, 2).unwrap();
+            let bindings = ops.bind_buffers(&buffers).unwrap();
+            for repeat_interleave in [false, true] {
+                let mut expected_state: Vec<f64> = initial.iter().copied().map(f64::from).collect();
+                let mut expected = vec![0.0; values.len()];
+                for token in 0..ROWS {
+                    for head in 0..V_HEADS {
+                        let key_head = if repeat_interleave {
+                            head / (V_HEADS / K_HEADS)
+                        } else {
+                            head % K_HEADS
+                        };
+                        let key_at = (token * K_HEADS + key_head) * DIM;
+                        let value_at = (token * V_HEADS + head) * DIM;
+                        let state_at = head * DIM * DIM;
+                        let mut projected = [0.0; DIM];
+                        for row in 0..DIM {
+                            let state_row = &mut expected_state
+                                [state_at + row * DIM..state_at + (row + 1) * DIM];
+                            let old: f64 = state_row
+                                .iter()
+                                .enumerate()
+                                .map(|(column, value)| value * f64::from(keys[key_at + column]))
+                                .sum();
+                            let delta = (f64::from(values[value_at + row]) - old) * 0.5;
+                            for column in 0..DIM {
+                                state_row[column] += f64::from(keys[key_at + column]) * delta;
+                            }
+                            projected[row] = state_row
+                                .iter()
+                                .enumerate()
+                                .map(|(column, value)| value * f64::from(queries[key_at + column]))
+                                .sum::<f64>()
+                                / (DIM as f64).sqrt();
+                        }
+                        let inverse_rms = 1.0
+                            / (projected.iter().map(|v| v * v).sum::<f64>() / DIM as f64 + 1e-6)
+                                .sqrt();
+                        for row in 0..DIM {
+                            expected[value_at + row] =
+                                projected[row] * inverse_rms * f64::from(norm[row])
+                                    / (1.0 + (-1.0f64).exp());
+                        }
+                    }
+                }
+                for (region, data) in [
+                    (q, queries.as_slice()),
+                    (k, keys.as_slice()),
+                    (v, values.as_slice()),
+                    (gate, &[1.0; ROWS * V_HEADS * DIM]),
+                    (beta, &[0.0; ROWS * V_HEADS]),
+                    (alpha, &[0.0; ROWS * V_HEADS]),
+                    (state, initial.as_slice()),
+                ] {
+                    ops.write_f32(region, data).unwrap();
+                }
+                let commands = TokenCommands::begin(context).unwrap();
+                if repeat_interleave {
+                    ops.record_qwen35_recurrent_ssm_layout(
+                        &commands, bindings, q, k, v, gate, beta, alpha, output, state, 0, 1,
+                        K_HEADS, V_HEADS, DIM, 1e-6, ROWS, true,
+                    )
+                    .unwrap();
+                } else {
+                    ops.record_qwen35_recurrent_ssm(
+                        &commands, bindings, q, k, v, gate, beta, alpha, output, state, 0, 1,
+                        K_HEADS, V_HEADS, DIM, 1e-6, ROWS,
+                    )
+                    .unwrap();
+                }
+                commands.submit_and_wait().unwrap();
+                for (region, reference) in [(output, &expected), (state, &expected_state)] {
+                    for (index, (&actual, &expected)) in ops
+                        .read_f32(region, reference.len())
+                        .unwrap()
+                        .iter()
+                        .zip(reference)
+                        .enumerate()
+                    {
+                        assert!(
+                            actual.is_finite()
+                                && (f64::from(actual) - expected).abs()
+                                    < 2e-5 * (1.0 + expected.abs()),
+                            "repeat={repeat_interleave} at {index}: gpu={actual} cpu={expected}"
+                        );
+                    }
+                }
+            }
+        }
+        unsafe { context.destroy_completed_buffers(&buffers) }.unwrap();
     }
 
     /// The operator pipelines are compiled once per device. A denoiser step

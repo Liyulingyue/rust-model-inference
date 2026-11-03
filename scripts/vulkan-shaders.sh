@@ -52,6 +52,7 @@ shader_names=(
     attention_online
     attention_online_wide
     conv3d_tiled
+    sensenova_mhc
 )
 manifest="$root_dir/shaders/manifest.sha256"
 

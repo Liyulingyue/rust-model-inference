@@ -1,8 +1,10 @@
 # SenseNova Loop validation
 
 Validation date: 2026-11-03 (Asia/Shanghai). Base: `afed6d48b`.
-This is an experimental F32, CPU implementation. CPU and Auto deliberately
-use the same CPU kernels; strict Vulkan requests are rejected.
+The original adaptation at `5937066` was an experimental F32 CPU
+implementation: CPU and Auto deliberately used the same CPU kernels, and
+strict Vulkan was rejected. The GPU extension below supersedes that routing
+behavior; the original numerical records remain CPU evidence.
 
 ## Source and environment
 
@@ -165,7 +167,7 @@ the pinned execution contract, tensor naming, invalid config,
 floating-point rejection and chunked-prefill logits
 selection. Rust regressions cover shared-weight/independent-cache visits,
 Sinkhorn/merge, tensor shape/storage validation, projector identity, strict
-Vulkan rejection, context limits and borrowed F32 storage.
+Vulkan policy, context limits and borrowed F32 storage.
 
 The CLI, server and fixture example build with
 `--features parity-trace,vulkan` passed. The same feature combination's
@@ -222,7 +224,7 @@ the reviewer did not independently rerun the remote numerical checks.
 Only the pinned Preview checkpoint, source F32 text and exported F32 projector
 are covered. Both temporal patch matrices must stay F32; manually encoded
 dtypes for other projector matrices may be accepted by the shared loader but
-are unverified. GPU acceleration, other text quantizations,
+are unverified. Physical GPU calibration/performance, other text quantizations,
 video/audio, multiple images, MTP, long-context quality, broad image/task
 quality, other platforms and performance targets have not been validated.
 Resource contention from unrelated remote jobs makes these runs unsuitable as
@@ -230,3 +232,85 @@ performance benchmarks.
 HTTP `usage.prompt_tokens` follows the existing server's text-token count
 before native image-placeholder expansion, rather than the effective image
 context length. Actual-weight regressions for other architectures were not run.
+
+
+## Vulkan extension and review fixes (2026-11-03)
+
+The decoder now records the physical execution plan on Vulkan, uploading each
+physical weight once and giving every visit independent dense KV, convolution
+and SSM state. mHC expansion/routing/log-Sinkhorn/merge/reduction run on device;
+router weights remain F32. SenseNova uses the HF repeat-interleave GDN head
+mapping and interleaved T/H/W coefficients. Existing Qwen3.5 keeps its default
+head mapping and contiguous coefficients. Vision encoding remains on CPU;
+Auto image requests can use the GPU decoder. The HTTP strict Vulkan runtime
+retains its existing text-only contract.
+
+The assigned container exposes only `/dev/dri/renderD130`, RADV NAVI31,
+48 GiB VRAM. Strict native fixture runs failed before the first checkpoint
+with `device lost / hard recovery`. An isolated source archive of the
+**unmodified `5937066`** reproduced the same error with `vk_ops_check` on
+ordinary Q8 operators. An existing small F32 device test also failed.
+This is not a successful physical GPU run: full-size GPU parity, throughput,
+VRAM residency and GPU failure/reset replay remain unverified. No GPU reset,
+host reboot or another tenant's GPU/device mapping was changed.
+
+The independent mHC test covers streams 2/4, three rows, identity and
+nonidentity routing, all four modes and a separate f64 Sinkhorn reference.
+The GDN test compares both default and repeat-interleave layouts against an
+independent f64 scan. Both passed under llvmpipe (LLVM 20.1.2); these are
+software shader correctness checks, not acceleration measurements.
+A direct full-graph llvmpipe test also passed: a tiny dense+GDN model with
+nonidentity mHC, shared physical layers, four independent visits, unequal
+position axes, 3+2-row prefill, one-row decode and reset/replay. It compares
+logits and the complete committed KV/conv/SSM shadow against CPU using
+`abs_error <= 2e-4 + 2e-4 * abs(CPU)` for this small synthetic test. This is
+separate from, and does not widen, the real-model oracle gates above.
+Loop no longer runs the unrelated Qwen3 F16 attention-chain calibration:
+its recorded dense attention is the separate Qwen3.5 F32 shader. Existing
+Qwen3.5 routing retains its old gate, and activation contracts remain checked
+according to weight format. Physical-visit validation, arena disjointness and
+CPU-equivalent interleaved coefficient tests also passed. The final shared
+Qwen3.5 regressions passed 107 tests with 19 ignored under the same software
+ICD.
+
+Auto's real-weight text fixture run encountered the queue failure, logged
+`backend=Cpu`, and passed 570/570 unchanged oracle gates with exact greedy
+IDs. The real-weight single-image Auto fallback passed 172/172 checks,
+including the visual projection, and generated `[1919, 2099, 369]` exactly.
+Text largest logits error remained `4.3392181396484375e-5`. This proves CPU
+fallback parity and does not establish GPU parity. No tolerances were widened.
+
+The three follow-up review findings are fixed:
+
+- HTTP hybrid image input is accepted only in the final user message;
+  historical images now fail explicitly instead of moving to another turn.
+  System and history text are retained.
+- SenseNova video generation fails before media/projector loading.
+- Runtime preflight checks image count, projector presence, visual budget and
+  expanded context before SSE headers and before vision encoder execution.
+  Streaming and non-streaming invalid requests both return HTTP 400.
+
+The real server was also started with Auto, the matching F32 projector and a
+128-token context. Both streaming modes returned JSON HTTP 400 for an image
+request requiring 181 expanded tokens and for a historical image (four
+requests total); the test server was stopped afterwards. A real CLI strict
+Vulkan request exited 1 with the device-loss error rather than falling back.
+
+The related HTTP suite passed 77 tests. Dedicated expanded-context and early
+video rejection tests passed. The default library baseline was 1322 passed /
+16 failed / 88 ignored; after the fixes it is 1326 / 16 / 88, with exactly the
+same failure-name set and no added or removed failures. The Python
+converter/comparator suite passed 8 tests. Physical GPU completion remains a
+required pre-merge check for this Draft PR.
+The CLI, server and fixture example built with `parity-trace,vulkan`, and all
+examples passed `cargo check` with the same features. Independent read-only
+review found no further blocking issue; it did not independently run the
+numerical checks and is not physical GPU evidence.
+
+Existing CI maintenance was also verified: the four unchanged q4_k/q5_k/q6_k/
+f16 shader binaries reproduce byte-for-byte with glslang 15.1.0, and their
+stale manifest entries were refreshed without changing those binaries.
+The shader `check` command passes with the CI-matching glslang 15.1.0 toolchain
+on the remote host, and repository formatting passes. Mac glslang 16.6.0
+accepts every manifest hash but produces different bytes for the unchanged
+`softmax` shader; existing calibrated binaries were not regenerated with it.

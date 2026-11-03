@@ -88,15 +88,13 @@ impl ComputePolicy {
     /// real device, and a model offloads what it can. This list is where
     /// the caller learns that only part of the graph qualifies.
     pub fn has_complete_device_path(arch: &str) -> bool {
-        matches!(arch, "llama" | "qwen3" | "qwen35" | "qwen35moe" | "dory")
+        matches!(
+            arch,
+            "llama" | "qwen3" | "qwen35" | "qwen35moe" | "dory" | "sensenova_loop"
+        )
     }
 
     pub fn validate_text_arch(self, arch: &str) -> Result<(), String> {
-        if self == Self::Vulkan && arch == "sensenova_loop" {
-            return Err(
-                "SenseNova Loop has no full-model Vulkan path; use --compute cpu or auto".into(),
-            );
-        }
         if self == Self::Vulkan && !Self::has_complete_device_path(arch) {
             // One line per process: the arch is checked at more than one
             // layer, and the model would otherwise repeat itself.

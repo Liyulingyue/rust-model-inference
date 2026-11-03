@@ -288,6 +288,15 @@ pub fn build_prompt(
     if messages.is_empty() {
         return Err("No messages provided".into());
     }
+    let last_user = messages.iter().rposition(|m| m.role == "user");
+    if matches!(arch, "qwen35" | "qwen35moe" | "sensenova_loop")
+        && messages
+            .iter()
+            .enumerate()
+            .any(|(index, message)| !message.images.is_empty() && Some(index) != last_user)
+    {
+        return Err("Image input is supported only in the final user message".into());
+    }
     // Collect the attached images up front: the `turns` flattening below keeps
     // only (role, text), and the local `messages` binding is later shadowed by
     // the `QwenMessage` view. Dropping them here would silently degrade an
@@ -296,7 +305,6 @@ pub fn build_prompt(
         .iter()
         .flat_map(|m| m.images.iter().map(|i| i.bytes.clone()))
         .collect();
-    let last_user = messages.iter().rposition(|m| m.role == "user");
     if qwen35 && last_user.is_none() {
         return Err("Qwen35 needs a user query in messages".into());
     }
@@ -1209,6 +1217,65 @@ mod tests {
             call_id: None,
             images: vec![],
         }]
+    }
+
+    #[test]
+    fn hybrid_images_stay_in_the_final_user_turn() {
+        let tokenizer = tokenizer();
+        let mut messages: Vec<Message> = [
+            ("system", "instructions"),
+            ("user", "first question"),
+            ("assistant", "first answer"),
+            ("user", "followup"),
+        ]
+        .into_iter()
+        .map(|(role, text)| Message {
+            role: role.into(),
+            text: text.into(),
+            calls: vec![],
+            call_id: None,
+            images: vec![],
+        })
+        .collect();
+        let image = super::super::image_input::ImageRef::new(vec![1], "test image");
+        for arch in ["qwen35", "qwen35moe", "sensenova_loop"] {
+            for index in 0..3 {
+                messages[index].images.push(image.clone());
+                assert!(build_prompt(
+                    source().as_ref(),
+                    &tokenizer,
+                    arch,
+                    &messages,
+                    &[],
+                    &ToolChoice::Auto,
+                    None,
+                    &crate::prompt::jinja::Options::default(),
+                    None,
+                )
+                .unwrap_err()
+                .contains("only in the final user message"));
+                messages[index].images.clear();
+            }
+            messages[3].images.push(image.clone());
+            let (ids, images) = build_prompt(
+                source().as_ref(),
+                &tokenizer,
+                arch,
+                &messages,
+                &[],
+                &ToolChoice::Auto,
+                None,
+                &crate::prompt::jinja::Options::default(),
+                None,
+            )
+            .unwrap();
+            assert_eq!(images, vec![image.bytes.clone()]);
+            let text = tokenizer.decode(&ids, true);
+            for content in ["instructions", "first question", "first answer", "followup"] {
+                assert!(text.contains(content), "{text}");
+            }
+            messages[3].images.clear();
+        }
     }
 
     #[test]
