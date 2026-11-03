@@ -22,7 +22,7 @@ The shared changes are a nonzero warmup check and device-resident immutable weig
 
 The shared format test passes F32/F16/BF16/Q8_0/Q4_0/Q4_1 before encountering the **same preexisting Q4_K row/batch mismatch**. The baseline and modified mismatch arrays have identical SHA256 `4de38143a822a143dfe475f0cae8d1b2d4f8b0ee648039f6d8880b8658969866`; later Q5_K/Q6_K assertions in that loop remain blocked by this failure. This is not reported as a green all-format GPU run.
 
-Some isolated device-test processes segfault **after their assertion summary** on both baseline and modified builds. GDB and a diagnostic signal handler observe teardown/unmapped-code failures; isolated newer loaders and an EGL ICD did not eliminate them. Pinning the driver's existing compiler libraries with process-local `LD_PRELOAD` produced three clean primitive runs, but did not eliminate every shared-test shutdown failure. The test JSON keeps assertion results separate from actual process exit codes. Both original CPU and GPU real-weight oracle processes exit 0; no driver-reset/system configuration changes were made. This environment issue remains a review limitation, not a claimed repository fix.
+Some isolated device-test processes segfault **after their assertion summary** on both baseline and modified builds. GDB and a diagnostic signal handler observe teardown/unmapped-code failures; isolated newer loaders and an EGL ICD did not eliminate them. Pinning the driver's existing compiler libraries with process-local `LD_PRELOAD` produced three clean primitive runs, but did not eliminate every shared-test shutdown failure. The test JSON keeps assertion results separate from actual process exit codes. Both original CPU and GPU real-weight oracle processes exit 0; no driver-reset/system configuration changes were made. This was the original unresolved environment limitation; the review follow-up below records the later EGL-core workaround separately from a driver root-cause fix.
 
 Self-review also fixed BF16 VAE parameter overflow, strict-device failure propagation before large CPU fallbacks, and stale CPU-only entrypoint/documentation claims. The download verifier now streams SHA256 on Python 3.10 as well as newer interpreters. Model computation remains in `models/idol`; CLI/HTTP only pass the compute policy and serialize results. The six pinned original safetensors components remain the only supported format.
 
@@ -52,11 +52,36 @@ The standalone server with **Auto** selected Vulkan and completed the same RGBA 
 | Review requirement | Evidence and boundary |
 |---|---|
 | Models/app ownership | Compute policy and graph remain in `models/idol`; CLI/HTTP validate inputs and serialize PLY. No model-specific field was added to a generic text backend. |
-| CLI / HTTP / JEV | Strict Vulkan CLI produced the validated five-step PLY but failed at exit; HTTP Auto request and negative statuses passed. Text/image JEV routes are absent because geometry has no JEV probability semantics. |
+| CLI / HTTP / JEV | Original strict Vulkan CLI produced valid PLY but failed at exit; the same five-step command exits 0 with the target-host EGL prefix in the review follow-up below. HTTP Auto request and negative statuses passed. Text/image JEV routes are absent because geometry has no JEV probability semantics. |
 | CPU SIMD | Existing `dot_f32`, `sum_sq_f32`, softmax and Rayon paths retained. CPU real-weight oracle passes 144 checkpoints; CPU scopes issue no device submissions. Floating reductions use the documented error gates. |
 | Components / formats | All six original pinned safetensors components and configuration contracts checked; F16/BF16 conversion overflow rejected. GGUF/quantized exports unsupported. |
 | CPU / Auto / strict Vulkan | CPU and GPU same-input oracles pass 144/144; GPU oracle submits 1901 model operations. Real HTTP proves Auto device selection; unavailable-ICD policy checks cover CPU isolation, Auto fallback and strict rejection. Full-resolution numerical parity remains unverified. |
-| Shared operators | Direct callers and unchanged upload/kernel contracts listed above; default and forced-offload full suites match their respective baseline failure names. Shared Q4_K mismatch and intermittent shutdown crashes remain explicit limitations. |
+| Shared operators | Direct callers and unchanged upload/kernel contracts listed above; default and forced-offload full suites match their respective baseline failure names. Shared Q4_K mismatch remains; the target-host shutdown workaround and its boundaries are recorded below. |
+
+## Review follow-up: target-host process exit
+
+Further diagnosis maps the shutdown fault to offset `0xa0e4c0` in the unloaded `libnvidia-eglcore.so.570.153.02`, using loader address/size records and the fault RIP. Ten primitive-test processes without a preload all pass assertions, but one exits with SIGSEGV. Preloading only GLX still gives three SIGSEGV exits in 15 runs. The driver root cause and the late caller have not been established; an independent minimal Vulkan probe did not reproduce the fault.
+
+Preloading the existing **EGL core** library for the individual process produces **15/15** clean primitive exits, followed by **50/50** clean exits of `staged_static_upload_preserves_bytes_and_zeroes_padding`. With that same prefix, the complete Idol filter, including ignored GPU and real-weight tests, has **31 passed / 0 failed / exit 0** (83.88 s in the test harness). The original numerical gates are unchanged. Seven shared-test filters also complete without SIGSEGV: six exit 0, while `batched_linear` retains its existing **7 passed / 1 failed / exit 101** Q4_K mismatch. This is not a green shared all-format suite.
+
+The same full-resolution **5-step / CFG 3 / seed 42 / 262144-Gaussian** release CLI then completes with **exit 0** in **1465.637 s (24 min 25.6 s)**, writing PLY at **1462.917 s**. The producer process is gone after normal exit. All 262144 rows / 17 properties and camera values are finite; the 17,826,208-byte PLY has the same SHA256 `2d8fb4bf34960b66f217f2647a6f55d0692e8d4f665f3e485f023af3c2d2cf9e` and camera as the original preview. This is an observed identity, not a new bitwise floating-point acceptance gate. The existing preview therefore still represents this output, including its floating/displaced geometry. The same release binary is used: the CI fix only changes Rust formatting and shader manifest hashes. This shared-host repeat, with brief shared-test overlap, does not establish a throughput improvement. [review-validation.json](review-validation.json) preserves the CI, fault mapping, repetition, test and CLI results.
+
+The target environment uses the following process-local settings; paths are specific to this Ubuntu 22.04 / NVIDIA 570.153.02 host and its repository-local Vulkan loader:
+
+```bash
+LD_LIBRARY_PATH="$PWD/target/tools/vulkan/jammy/usr/lib/x86_64-linux-gnu" \
+VK_ICD_FILENAMES=/etc/vulkan/icd.d/nvidia_icd.json \
+LD_PRELOAD=/lib/x86_64-linux-gnu/libnvidia-eglcore.so.570.153.02 \
+RUST_GPU_MIN_OUTPUTS=0 RAYON_NUM_THREADS=16 \
+target/native/release/rust-model-inference \
+  --image-to-3d --model models/idol --components models \
+  --image artifacts/idol/avocado-input.png \
+  --out artifacts/idol/review-shutdown/avocado-eglcore-5.ply \
+  --steps 5 --cfg 3 --num-gaussians 262144 --geometry-mode synthetic \
+  --seed 42 --compute vulkan --threads 16
+```
+
+This is a target-environment workaround, without changing the system driver or hardcoding NVIDIA library paths into the Rust runtime. Shutdown without the prefix remains unreliable on this host, and portability to other driver versions is unverified. The original failed run in [performance-validation.json](performance-validation.json) is retained.
 
 ## Numerical evidence
 
@@ -145,8 +170,8 @@ HTTP health returned 200, invalid/unknown options and missing images returned 40
 - Rustfmt reported eight files. Seven are byte-identical to base `afed6d48`; the two reported formatting spans in the remaining, modified `src/app/server/api.rs` are also identical to base. None of the Idol additions appears in the formatting diagnostics.
 - The Vulkan job stopped before Cargo compilation because eight entries in `shaders/manifest.sha256` mismatch: GLSL and SPIR-V pairs for `q4_k_matmul`, `q5_k_matmul`, `q6_k_matmul`, and `f16_matmul`. The manifest, validation script, and all eight mismatched files are byte-identical to base. Independently hashing the checked-in files reproduced exactly these eight failures.
 
-These preexisting failures were left outside the model-adaptation change. This CI snapshot does not establish a green whole-repository run or a successful CI Vulkan build; the later target-host native Vulkan build and tests are recorded separately above.
+These preexisting failures were initially left outside the model-adaptation change. The review follow-up fixes them in `c55a5028c9d8ccae7d4e91d6f745eed9525eef0e`: `cargo fmt --all` formats the eight reported files, and exactly eight stale entries in `shaders/manifest.sha256` are refreshed. Shader sources and SPIR-V binaries are unchanged. All three jobs in [CI run 41576553373](https://github.com/Liyulingyue/rust-model-inference/actions/runs/41576553373) pass: **Rustfmt**, **x86 dispatch regressions**, and **Vulkan compile and shaders**. The complete shader check also passes on the original Ubuntu 24 host with repository-local glslang 15.1.0 / SPIRV-Tools 2025.1 (matching CI package versions): manifest hashes, SPIR-V validation, workgroup checks and byte-identical rebuilds, exit 0 in 4.254 s. This supersedes the earlier red-CI conclusion without changing its historical evidence.
 
 ## Coverage limits
 
-The earlier CPU-only result is superseded by the native Vulkan follow-up above; it is retained here as the original validation boundary. The original six safetensors components are the supported format; GGUF/quantized exports and other configurations are unsupported. Text/image JEV is inapplicable to this geometry generator and its routes are absent. Native seed reproducibility does not imply the same random stream as PyTorch; same-input oracle tests isolate numerical correctness from random-number differences. The full-size RGBA smoke bypasses background removal; full-size opaque-photo BiRefNet inference is unverified beyond the complete side-64 oracle. Default 50-step quality, broad object/photo coverage, macOS/ARM numerics, full-resolution oracle agreement and production throughput remain unverified. The five-step PLY passed output checks but its CLI process failed at exit; reliable device shutdown remains unresolved.
+The earlier CPU-only result is superseded by the native Vulkan follow-up above; it is retained here as the original validation boundary. The original six safetensors components are the supported format; GGUF/quantized exports and other configurations are unsupported. Text/image JEV is inapplicable to this geometry generator and its routes are absent. Native seed reproducibility does not imply the same random stream as PyTorch; same-input oracle tests isolate numerical correctness from random-number differences. The full-size RGBA smoke bypasses background removal; full-size opaque-photo BiRefNet inference is unverified beyond the complete side-64 oracle. Default 50-step quality, broad object/photo coverage, macOS/ARM numerics, full-resolution oracle agreement and production throughput remain unverified. The original five-step process failed at exit; its same-parameter repeat exits 0 with the tested EGL-core prefix. Driver root cause, shutdown without that prefix and other driver environments remain unresolved or unverified.

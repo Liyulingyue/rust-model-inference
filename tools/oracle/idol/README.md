@@ -4,7 +4,7 @@ Native Rust implementation of the released [speridlabs/idol](https://modelscope.
 
 The implementation uses the original safetensors directly: FP16 denoiser/octree/Gaussian blocks, FP32 DINOv3 (the official `dinov3_dtype="fp32"` option), BF16 FLUX.2 VAE encoder, and FP32 BiRefNet. CPU and Vulkan are supported; Auto selects a usable Vulkan device or falls back to CPU. Vulkan accelerates projection, attention and convolution through existing repository operators. Normalization, elementwise work, patch preparation and geometry postprocessing still use CPU. Strict Vulkan rejects unavailable or failed devices. This is experimental until broader quality and device coverage are established; see [actual validation](validation.md).
 
-The RTX 5090 five-step preview wrote 262144 finite Gaussians in **24 min 44.6 s**, with 17.24 GiB peak RSS and 6.03 GiB sampled device memory. The two avocado halves are recognizable but contain floating/displaced geometry. The CLI then crashed during exit (SIGSEGV); similar post-test crashes occur on the unmodified baseline and remain unresolved. [Performance and exit evidence](performance-validation.json) distinguishes valid output from a clean process run. Native 50-step quality and production throughput are unverified.
+The original RTX 5090 five-step preview wrote 262144 finite Gaussians in **24 min 44.6 s**, with 17.24 GiB peak RSS and 6.03 GiB sampled device memory. The two avocado halves are recognizable but contain floating/displaced geometry. That CLI then crashed during exit (SIGSEGV); [performance-validation.json](performance-validation.json) preserves the failed process result. The review follow-up below documents a process-local workaround for this host's driver. Native 50-step quality and production throughput are unverified.
 
 ## Download on the inference host
 
@@ -53,6 +53,20 @@ The standalone `rust-model-server` binary accepts the same server flags without 
 HTTP `image` follows the existing image-input policy (local path, data URL, or explicitly enabled remote URL). Requests are limited to 16 MiB; one generation runs at a time (429 when busy). Invalid JSON/options/image gives 400; model generation failure gives 422. The backend exposes no text, chat, embedding or JEV routes. Text/image JEV has no semantic counterpart for this generator and returns 404.
 
 Native seeds are reproducible within this implementation. They do **not** promise the same random draw stream as official PyTorch: VAE/flow noise uses the repository's Torch-MT generator and octree resampling uses seeded `StdRng`. Numerical oracle tests therefore inject exactly the same noise, latent, features and query points in both implementations. Weights remain in their released precision boundaries; GPU reductions use F32 accumulation and tolerance-based validation. Device weights use VRAM on discrete GPUs, with the existing shared-memory fallback when VRAM cannot be allocated.
+
+### Target-host NVIDIA shutdown workaround
+
+On the Ubuntu 22.04 / RTX 5090 host with NVIDIA **570.153.02**, intermittent shutdown failures jump into the unloaded `libnvidia-eglcore.so.570.153.02`. Preload that existing library for the individual Vulkan command:
+
+```bash
+LD_PRELOAD=/lib/x86_64-linux-gnu/libnvidia-eglcore.so.570.153.02 \
+  RUST_GPU_MIN_OUTPUTS=0 target/release/rust-model-inference \
+  --image-to-3d --model models/idol --components models \
+  --image object.png --out object.ply --geometry-mode synthetic \
+  --steps 5 --cfg 3 --num-gaussians 262144 --seed 42 --compute vulkan --threads 16
+```
+
+The library path and version are specific to the tested host. This does not change the installed driver or system configuration, and is not a portable driver fix. Use the same process-local prefix for Vulkan tests or the server on this host. With this prefix, **50/50** repeated-exit tests and **31 Idol tests** pass, and the same five-step preview exits **0** in **24 min 25.6 s** (PLY written at 24 min 22.9 s). Its PLY SHA256 and camera match the original output, so the preview quality limitations above still apply. This observed identity is not a required floating-point bitwise gate. [review-validation.json](review-validation.json) and [validation.md](validation.md) record the evidence; numerical gates are unchanged.
 
 ## Reproduce numerical alignment
 

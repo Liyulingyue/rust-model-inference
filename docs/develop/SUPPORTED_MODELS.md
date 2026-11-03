@@ -103,7 +103,7 @@ AuK Base/Flash 的 F16/Q8_0 投影与原生 Qwen 文本入口见 [AuK 实机记�
 
 | 模型 / 范围 | GGUF architecture | 能力 | 所需组件 | 当前覆盖 | 状态 | 证据 / 限制 |
 |---|---|---|---|---|---|---|
-| Idol | 原始 safetensors，固定发布版契约 | 单图 → binary 3DGS PLY；CLI/HTTP | denoiser、octree、Gaussian、DINOv3、FLUX.2 VAE、BiRefNet | F32 / F16 / BF16 原始组件；CPU / Vulkan / Auto fallback | `Experimental` | 全部计算图原生 Rust，按精度类别做检查点数值容差验证；不要求有损浮点逐位一致。投影、注意力、卷积复用原生 Vulkan；归一化与几何后处理仍在 CPU。完整分辨率数值对齐、广泛物体质量和 GGUF/量化未验证或未实现。JEV 不适用。五步预览已有输出，退出段错误和性能/质量限制见实测记录。[复现与实测范围](../../tools/oracle/idol/README.md)。 |
+| Idol | 原始 safetensors，固定发布版契约 | 单图 → binary 3DGS PLY；CLI/HTTP | denoiser、octree、Gaussian、DINOv3、FLUX.2 VAE、BiRefNet | F32 / F16 / BF16 原始组件；CPU / Vulkan / Auto fallback | `Experimental` | 全部计算图原生 Rust，按精度类别做检查点数值容差验证；不要求有损浮点逐位一致。投影、注意力、卷积复用原生 Vulkan；归一化与几何后处理仍在 CPU。完整分辨率数值对齐、广泛物体质量和 GGUF/量化未验证或未实现。JEV 不适用。RTX 5090 / NVIDIA 570.153.02 的进程级 EGL 预加载绕行已通过重复退出测试和同参数五步 CLI（exit 0）；驱动根因、其他环境及性能/质量仍有限制。[复现与实测范围](../../tools/oracle/idol/README.md)。 |
 | ERNIE-Image | 错标 `wan`，按完整 ERNIE 张量契约识别 | 文生图 | DiT + Ministral-3-3B 文本编码器 + 转换的 Flux2 VAE | Q4_K_M DiT/Text，VAE Conv F16 / Attention Linear F32 | `Experimental`（CPU） | 固定 stable-diffusion.cpp `3f8527a` / ggml `89c4413`；64×64、seed 42、1 步、CFG 1 的 token IDs、25 层文本输出、36 层 DiT、Euler latent 和完整 VAE RGB F32 共 93 个检查点 / 6,440,960 个值标量逐位一致；2 步 / CFG 5 的两路条件与完整生成另有 261 个检查点 / 16,132,096 个值一致。远端 256×256 / 32 步运行成功，样图漏猫，质量尚未通过。`--gpu` 明确拒绝，Turbo 权重与大尺寸质量未验证。[权重和复现](../../tools/oracle/ernie_image/README.md)。 |
 | 其他 Qwen3 文本 GGUF | `qwen3` | 文本生成 | 无 | 通用 metadata/tensor 分发 | `Supported` | 未逐个验证尺寸和量化组合；应为目标 GGUF 补一次真实推理。 |
 | Gemma 4 12B 图像 | `gemma4` | 图像 | F16 `gemma4uv` mmproj | 图像预处理、投影和生成入口 | `Supported` | 入口已接入，但尚未执行 12B 图像 Oracle 或独立真实冒烟，不继承文本/音频的 `Verified` 状态。 |
