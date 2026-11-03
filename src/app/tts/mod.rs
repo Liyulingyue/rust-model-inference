@@ -16,6 +16,84 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
+pub(crate) fn is_pivo_model(path: &Path) -> bool {
+    crate::format::ggufrs::open_model_source(path, ComponentRole::Llm).is_ok_and(|s| {
+        s.metadata("general.architecture")
+            .and_then(|v| v.to_string_val())
+            == Some("pivo")
+    })
+}
+
+pub(crate) fn pivo_request(
+    options: &crate::app::cli::CliOptions,
+) -> Result<crate::models::pivo::SpeechRequest, String> {
+    if options.mmproj.is_some()
+        || options.ref_audio.is_some()
+        || options.ref_text.is_some()
+        || options.edit
+        || options.instruction.is_some()
+        || options.temperature.is_some()
+        || options.top_k.is_some()
+        || options.top_p.is_some()
+        || options.cfg_scale.is_some()
+        || options.steps.is_some()
+        || options.max_tokens.is_some()
+        || options.jev
+        || options.rerank
+        || options.clm_head.is_some()
+        || options.laya_request.is_some()
+        || options.seed.is_some()
+        || options.repetition_penalty.is_some()
+        || options.kv_format_explicit
+        || options.jinja
+        || options.chat_template.is_some()
+        || options.chat_template_file.is_some()
+        || options.thinking
+        || options.tts_model.is_some()
+        || options.tts_mmproj.is_some()
+        || options.max_context.is_some()
+        || options.prefill_batch_size.is_some()
+        || options.negative_prompt.is_some()
+        || options.vae.is_some()
+        || options.text_encoder.is_some()
+        || !options.references.is_empty()
+        || options.cfg.is_some()
+        || options.noise.is_some()
+        || options.resolution.is_some()
+        || options.duration_seconds.is_some()
+        || options.dry_run
+    {
+        return Err("PiVo --tts uses its bundled acoustic/vocoder weights; projector, reference/edit, sampling and other task options are unsupported".into());
+    }
+    if options
+        .language
+        .as_deref()
+        .is_some_and(|v| !matches!(v.to_ascii_lowercase().as_str(), "en" | "english"))
+    {
+        return Err("PiVo supports English only".into());
+    }
+    if options
+        .voice
+        .as_deref()
+        .is_some_and(|v| !matches!(v, "Pi" | "Vo"))
+    {
+        return Err("PiVo voice must be Pi or Vo".into());
+    }
+    let overrides = options
+        .pronunciations
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|e| format!("Invalid --pronunciations JSON: {e}"))?
+        .unwrap_or_default();
+    Ok(crate::models::pivo::SpeechRequest {
+        input: options.prompt.clone().unwrap_or_default(),
+        voice: options.voice.clone().unwrap_or_else(|| "Pi".into()),
+        speed: options.speed.unwrap_or(1.),
+        overrides,
+    })
+}
+
 enum TtsFrontend<'a> {
     Breeze,
     Dots,
@@ -31,6 +109,9 @@ fn tts_frontend<'a>(
     codec_arch: &str,
     is_dots_mmproj: bool,
 ) -> Result<TtsFrontend<'a>, String> {
+    if options.voice.is_some() || options.speed.is_some() || options.pronunciations.is_some() {
+        return Err("--voice/--speed/--pronunciations require a PiVo TTS model".into());
+    }
     if model_arch == "breeze" || codec_arch == "breeze_audio" {
         if model_arch != "breeze" || codec_arch != "breeze_audio" {
             return Err(
@@ -65,6 +146,30 @@ fn tts_frontend<'a>(
 
 pub fn run_tts_cli(options: &crate::app::cli::CliOptions) -> Result<(), String> {
     let started = Instant::now();
+    let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+    let arch = source
+        .metadata("general.architecture")
+        .and_then(|v| v.to_string_val())
+        .unwrap_or_default();
+    if arch == "pivo" {
+        let request = pivo_request(options)?;
+        let model =
+            crate::models::pivo::Model::from_source(source.as_ref(), options.compute_policy())?;
+        let waveform = model.synthesize(&request).map_err(|e| e.to_string())?;
+        write_wav_f32_channels(
+            options.out.as_deref().ok_or("--tts requires --out")?,
+            &waveform,
+            crate::models::pivo::SAMPLE_RATE,
+            1,
+        )?;
+        eprintln!(
+            "PiVo: voice={} samples={} elapsed={:.3}s",
+            request.voice,
+            waveform.len(),
+            started.elapsed().as_secs_f64()
+        );
+        return Ok(());
+    }
     let mmproj_path = options
         .mmproj
         .as_deref()
@@ -78,11 +183,6 @@ pub fn run_tts_cli(options: &crate::app::cli::CliOptions) -> Result<(), String> 
     // dots.tts uses an arch-qwen2 LLM gguf + a clip mmproj; dispatch on the
     // exact projector pair before the Qwen3-TTS path.
     let mmproj_probe = open_or_exit(mmproj_path, ComponentRole::Mmproj);
-    let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
-    let arch = source
-        .metadata("general.architecture")
-        .and_then(|value| value.to_string_val())
-        .unwrap_or_default();
     let codec_arch = mmproj_probe
         .metadata("general.architecture")
         .and_then(|value| value.to_string_val())
@@ -314,6 +414,40 @@ fn generate_tts_frames<R: rand::Rng + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pivo_rejects_options_that_cannot_affect_speech() {
+        for extra in [
+            vec!["--resolution", "48000"],
+            vec!["--size", "48000"],
+            vec!["--duration", "10"],
+            vec!["--dry-run"],
+            vec!["--seed", "42"],
+            vec!["--repetition-penalty", "1.1"],
+            vec!["--kv-cache", "f16"],
+            vec!["--jinja"],
+            vec!["--thinking"],
+            vec!["--tts-model", "other.gguf"],
+            vec!["--max-tokens", "10"],
+        ] {
+            let mut args = vec!["rmi", "--tts", "--voice", "Vo", "--speed", "1.5"];
+            args.extend(extra);
+            let options = crate::app::cli::parse_cli_options(
+                &args.into_iter().map(str::to_string).collect::<Vec<_>>(),
+            )
+            .unwrap();
+            assert!(pivo_request(&options).is_err(), "{options:?}");
+        }
+        let options = crate::app::cli::CliOptions {
+            voice: Some("Vo".into()),
+            speed: Some(1.5),
+            ..Default::default()
+        };
+        let request = pivo_request(&options).unwrap();
+        assert_eq!(request.voice, "Vo");
+        assert_eq!(request.speed, 1.5);
+        assert!(tts_frontend(&options, "qwen3", "clip", false).is_err());
+    }
 
     #[test]
     fn legal_dots_edit_routes_before_base_prompt_requirements() {

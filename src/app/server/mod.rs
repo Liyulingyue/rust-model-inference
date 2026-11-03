@@ -1,7 +1,8 @@
 pub mod api;
 mod forecast;
-mod rerank;
 mod prediction;
+mod rerank;
+mod speech;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -71,6 +72,7 @@ enum Backend {
     Asr(AsrBackend),
     Audio8(Audio8Backend),
     Tts(TtsBackend),
+    Pivo(PivoBackend),
     Rerank(RerankBackend),
     Clm(ClmBackend),
     Gliner2(Gliner2Backend),
@@ -263,6 +265,11 @@ struct TtsBackend {
     language: &'static str,
     temperature: f32,
     max_tokens: usize,
+}
+
+struct PivoBackend {
+    model: Arc<crate::models::pivo::Model>,
+    defaults: crate::models::pivo::SpeechRequest,
 }
 
 // =============================================================================
@@ -999,6 +1006,22 @@ fn build_backend(options: &CliOptions) -> Result<Arc<Backend>, String> {
         })));
     }
     if options.tts {
+        if crate::app::tts::is_pivo_model(&options.model) {
+            let defaults = crate::app::tts::pivo_request(options)?;
+            let source =
+                crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
+                    .map_err(|e| e.to_string())?;
+            return Ok(Arc::new(Backend::Pivo(PivoBackend {
+                model: Arc::new(crate::models::pivo::Model::from_source(
+                    source.as_ref(),
+                    options.compute_policy(),
+                )?),
+                defaults,
+            })));
+        }
+        if options.voice.is_some() || options.speed.is_some() || options.pronunciations.is_some() {
+            return Err("--voice/--speed/--pronunciations require a PiVo TTS model".into());
+        }
         return Ok(Arc::new(Backend::Tts(build_tts(options)?)));
     }
     if options.audio.is_some() {
@@ -1758,7 +1781,7 @@ pub fn run_server() {
         if options.out.is_none() {
             options.out = Some(std::path::PathBuf::from("placeholder.wav"));
         }
-        if options.max_tokens.is_none() {
+        if options.max_tokens.is_none() && !crate::app::tts::is_pivo_model(&options.model) {
             options.max_tokens = Some(128);
         }
     }
@@ -1808,7 +1831,7 @@ pub fn run_server() {
         Backend::Embedding(_) => "embedding",
         Backend::Asr(_) => "asr",
         Backend::Audio8(_) => "audio8",
-        Backend::Tts(_) => "tts",
+        Backend::Tts(_) | Backend::Pivo(_) => "tts",
         Backend::Rerank(_) => "rerank",
         Backend::Clm(_) => "clm",
         Backend::Gliner2(_) => "gliner2",
@@ -1849,6 +1872,7 @@ pub fn run_server() {
             )
             .route("/v1/audio/transcriptions_json", post(transcriptions_json)),
         Backend::Tts(_) => router.route("/v1/audio/speech", post(speech)),
+        Backend::Pivo(_) => router.route("/v1/audio/speech", post(speech::synthesize)),
         Backend::Rerank(_) => router.route("/v1/rerank", post(rerank::rerank)),
         // CLM scores by cosine, so only the single-question route applies.
         // Grouped does a per-group softmax that has no cosine analogue,

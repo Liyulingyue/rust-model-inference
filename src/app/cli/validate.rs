@@ -4,6 +4,20 @@ use super::options::{
 use super::types::{normalize_tts_language, CliOptions};
 
 pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
+    if !options.tts && crate::app::tts::is_pivo_model(&options.model) {
+        return Err("PiVo requires --tts; it is an English speech synthesis model".into());
+    }
+    if options.voice.is_some() || options.speed.is_some() || options.pronunciations.is_some() {
+        if !options.tts {
+            return Err("--voice/--speed require --tts (as does --pronunciations)".into());
+        }
+        if options
+            .speed
+            .is_some_and(|v| !v.is_finite() || !(0.5..=2.0).contains(&v))
+        {
+            return Err("--speed must be finite and between 0.5 and 2.0".into());
+        }
+    }
     if options.wevisone_request.is_some() {
         if options.model.as_os_str().is_empty() || options.mmproj.is_none() {
             return Err("--wevisone-request requires --model and --mmproj".into());
@@ -199,10 +213,11 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
         if options.model.as_os_str().is_empty() {
             return Err("--tts requires --model".into());
         }
-        if options
-            .mmproj
-            .as_deref()
-            .is_none_or(|path| path.as_os_str().is_empty())
+        if !crate::app::tts::is_pivo_model(&options.model)
+            && options
+                .mmproj
+                .as_deref()
+                .is_none_or(|path| path.as_os_str().is_empty())
         {
             return Err("--tts requires --mmproj".into());
         }
