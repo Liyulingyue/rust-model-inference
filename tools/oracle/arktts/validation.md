@@ -72,6 +72,7 @@ Rust 1.99.1 工具链；原始 BF16 权重提升为 F32 计算，对照官方 CP
 - `cargo test --locked --profile release-fast --lib audio_speech`：1 passed。
 - Python converter/comparator 单测：5 passed。
 - `cargo build --locked --profile release-fast --features parity-trace --bin rust-model-inference --bin rust-model-server`：通过。
+- `cargo check --locked --profile release-fast --features vulkan --lib --bin rust-model-inference --bin rust-model-server`：通过；仅证明 feature 编译，不代表 GPU 运行或对齐。
 - 真实权重集成测试：默认 SIMD 完整三组和标量短三组均通过。
 - `git diff --check`：通过。
 - 全库 lib 回归：1338 passed / 20 failed / 88 ignored；变更前为 1330 / 20 / 88，20 个失败名称完全相同，无新增失败。
@@ -80,6 +81,13 @@ Rust 1.99.1 工具链；原始 BF16 权重提升为 F32 计算，对照官方 CP
 Z-Image 的 3 个 NEON 逐位用例、FunASR 的 2 个 NEON 逐位用例、Gemma4 的 4 个 trunk 用例、
 argmax 的 5 个用例和 matmul 的 1 个 NEON softmax 用例。本次未修改这些计算行为；
 Breeze 仅开放已有 causal convolution 的 crate 内可见性。
+
+PR #200 的初次 CI：`x86 dispatch regressions` 通过；Rustfmt 与 Vulkan job 失败。
+后者在 `bash scripts/vulkan-shaders.sh check` 的 8 个 GLSL/SPIR-V checksum 上失败，尚未进入 Rust 编译。
+已在未修改的 `afed6d48b` 临时快照与本分支分别执行 `cargo fmt --check` 和 shader check：
+shader 输出逐字节相同，失败文件为 q4_k/q5_k/q6_k/f16 matmul 的源码与二进制。
+本次新增的 module 顺序和 backend probe 换行问题已修正；余下 32 个 Rustfmt diff blocks 均出现在未修改基线中。
+未改写无关模型/算子的既有格式或 shader 校验和；上述两项 CI 仍受基线问题影响。
 
 自查已修复：
 
@@ -92,6 +100,6 @@ Breeze 仅开放已有 causal convolution 的 crate 内可见性。
 ## 未覆盖范围
 
 仅验证上述官方发布版本及 BF16 主模型 / F32 codec。未实现 Q4/Q8 等量化导出和已校准的 Vulkan 路径；
-未验证完整 Vulkan build、其他 CPU 架构、官方原生 BF16 激活、2048 位置上限、跨 codec 滑动窗口的长音频、
+未验证 Vulkan 设备运行/数值及完整发布构建、其他 CPU 架构的真实模型推理、官方原生 BF16 激活、2048 位置上限、跨 codec 滑动窗口的长音频、
 全部 23 种语言、主观音质、声音相似度指标、完整多模态文本后处理桥或性能基准。参考 WAV 重采样沿用现有 sinc 实现，未声称与官方前端一致。
 采样 RNG 与 PyTorch 不同；随机生成的 seed 不保证跨实现复现。

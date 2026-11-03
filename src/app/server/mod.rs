@@ -1,8 +1,8 @@
 pub mod api;
 mod audio_speech;
 mod forecast;
-mod rerank;
 mod prediction;
+mod rerank;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -1001,10 +1001,12 @@ fn build_backend(options: &CliOptions) -> Result<Arc<Backend>, String> {
         })));
     }
     if options.tts {
-        let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+        let source: Arc<dyn TensorSource> =
+            Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
         if source
             .metadata("general.architecture")
-            .and_then(MetaValue::to_string_val) == Some("arktts")
+            .and_then(MetaValue::to_string_val)
+            == Some("arktts")
         {
             return Ok(Arc::new(Backend::ArkTts(audio_speech::Backend::load(
                 options, source,
