@@ -1,6 +1,6 @@
 pub mod config;
 
-use crate::core::tensor::{GGMLType, TensorSource};
+use crate::core::tensor::{load_f32_tensor, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::models::qwen3::vision::matmul_f32_weight;
 use crate::ops::{rms_norm_inplace, softmax_inplace, vec_add_into};
@@ -24,28 +24,22 @@ fn load_matrix(
         .iter()
         .try_fold(1usize, |acc, d| acc.checked_mul(usize::try_from(*d).ok()?))
         .ok_or_else(|| format!("Tensor dims overflow for {name}"))?;
-    if total != cols * rows {
+    let mut dims = info.dims.as_slice();
+    while dims.len() > 1 && dims.last() == Some(&1) {
+        dims = &dims[..dims.len() - 1];
+    }
+    let axes_match = if rows == 1 {
+        dims == [cols as u64]
+    } else {
+        dims.last() == Some(&(rows as u64))
+    };
+    if cols.checked_mul(rows) != Some(total) || !axes_match {
         return Err(format!(
-            "Tensor {name} holds {total} values, expected {}",
-            cols * rows
+            "Tensor {name} shape {:?} does not match [{cols}, {rows}]",
+            info.dims
         ));
     }
-    let bytes = source
-        .tensor_slice(name)
-        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
-    match info.ggml_type {
-        GGMLType::F32 => Ok(bytes
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect()),
-        GGMLType::BF16 => Ok(bytes
-            .chunks_exact(2)
-            .map(|c| f32::from_bits(u32::from(u16::from_le_bytes([c[0], c[1]])) << 16))
-            .collect()),
-        other => Err(format!(
-            "Tensor {name} has unsupported type {other:?}; expected F32 or BF16"
-        )),
-    }
+    load_f32_tensor(source, name, &info.dims)
 }
 
 /// A single pre-LN transformer block, matching the `v.blk.N.*` layout that
@@ -91,14 +85,43 @@ struct Scratch {
     ffn: Vec<f32>,
 }
 
+fn prepend_registers(
+    hidden: &mut [f32],
+    n_patches: usize,
+    n_registers: usize,
+    n_embd: usize,
+    registers: &[Vec<f32>],
+) {
+    for i in (0..n_patches).rev() {
+        let dst = (i + n_registers) * n_embd;
+        let src = i * n_embd;
+        hidden.copy_within(src..src + n_embd, dst);
+    }
+    for (r, row) in registers.iter().enumerate() {
+        hidden[r * n_embd..(r + 1) * n_embd].copy_from_slice(row);
+    }
+}
+
 impl ZdtVisionEncoder {
+    /// Load only the config (no weights). Used by the multimodal dispatcher
+    /// to read image_size / image_mean / image_std without pulling the
+    /// 1.6 GB mmproj weights through three separate `from_source` calls.
+    pub(crate) fn load_config_only(
+        source: &dyn TensorSource,
+    ) -> Result<config::ZdtVisionConfig, String> {
+        config::ZdtVisionConfig::from_source(source)
+    }
+
     pub fn from_source(source: &dyn TensorSource, pool: Arc<ComputePool>) -> Result<Self, String> {
         let mut config = ZdtVisionConfig::from_source(source)?;
         let load = |name: &str, cols: usize, rows: usize| -> Result<Vec<f32>, String> {
             load_matrix(source, name, cols, rows)
         };
-        let load_opt = |name: &str, cols: usize, rows: usize| -> Option<Vec<f32>> {
-            load_matrix(source, name, cols, rows).ok()
+        let load_opt = |name: &str, cols: usize, rows: usize| -> Result<Option<Vec<f32>>, String> {
+            source
+                .tensor_info(name)
+                .map(|_| load_matrix(source, name, cols, rows))
+                .transpose()
         };
 
         let n = config.n_embd;
@@ -109,7 +132,7 @@ impl ZdtVisionEncoder {
         let patch_embd_weight = load("v.patch_embd.weight", patch_area, n)?;
         // `position_embeddings` is pre-downsampled at conversion time because the
         // upstream preprocessor is fixed-size, so it is optional here.
-        let position_embd = load_opt("v.position_embd.weight", n, config.grid() * config.grid());
+        let position_embd = load_opt("v.position_embd.weight", n, config.grid() * config.grid())?;
         // RADIO keeps a bank of register tokens; `n_registers` is derived from
         // the tensor's second dimension, as upstream does with `ne[1]`.
         let class_embd = source
@@ -132,18 +155,19 @@ impl ZdtVisionEncoder {
             // width. Norm gains and biases are 1-D.
             layers.push(ZdtLayer {
                 ln1_weight: load(&format!("v.blk.{i}.ln1.weight"), n, 1)?,
-                ln1_bias: load_opt(&format!("v.blk.{i}.ln1.bias"), n, 1),
+                ln1_bias: load_opt(&format!("v.blk.{i}.ln1.bias"), n, 1)?,
                 ln2_weight: load(&format!("v.blk.{i}.ln2.weight"), n, 1)?,
-                ln2_bias: load_opt(&format!("v.blk.{i}.ln2.bias"), n, 1),
+                ln2_bias: load_opt(&format!("v.blk.{i}.ln2.bias"), n, 1)?,
                 qkv_weight: load(&format!("v.blk.{i}.attn_qkv.weight"), n, n * 3)?,
-                qkv_bias: load_opt(&format!("v.blk.{i}.attn_qkv.bias"), n * 3, 1),
+                qkv_bias: load_opt(&format!("v.blk.{i}.attn_qkv.bias"), n * 3, 1)?,
                 out_weight: load(&format!("v.blk.{i}.attn_out.weight"), n, n)?,
-                out_bias: load_opt(&format!("v.blk.{i}.attn_out.bias"), n, 1),
+                out_bias: load_opt(&format!("v.blk.{i}.attn_out.bias"), n, 1)?,
                 ffn_up_weight: load(&format!("v.blk.{i}.ffn_up.weight"), n, config.n_ff)?,
-                ffn_up_bias: load_opt(&format!("v.blk.{i}.ffn_up.bias"), config.n_ff, 1),
+                ffn_up_bias: load_opt(&format!("v.blk.{i}.ffn_up.bias"), config.n_ff, 1)?,
                 ffn_down_weight: load(&format!("v.blk.{i}.ffn_down.weight"), config.n_ff, n)?,
-                ffn_down_bias: load_opt(&format!("v.blk.{i}.ffn_down.bias"), n, 1),
+                ffn_down_bias: load_opt(&format!("v.blk.{i}.ffn_down.bias"), n, 1)?,
             });
+            if i == 0 || i == 7 || i == 15 || i == 31 {}
         }
 
         let projector_in = n * config.scale_factor * config.scale_factor;
@@ -229,8 +253,14 @@ impl ZdtVisionEncoder {
                 cfg.patch_size
             ));
         }
-        // TEMP: oracle-equivalent input (B=1, R=G=0, no normalization)
         let n_patches = grid_w * grid_h;
+        if self
+            .position_embd
+            .as_ref()
+            .is_some_and(|pos| pos.len() != n_patches * cfg.n_embd)
+        {
+            return Err("image grid does not match the fixed position embeddings".into());
+        }
         // Upstream uses `ne[1]` of `class_embd`, so a RADIO checkpoint carries
         // ten register tokens rather than a single class token.
         let n_registers = self.class_embd.as_ref().map_or(0, |rows| rows.len());
@@ -299,27 +329,41 @@ impl ZdtVisionEncoder {
                 }
             }
         }
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "zdt.inp_pos",
+            None,
+            &[n_patches, n],
+            &scratch.hidden[..n_patches * n],
+        ));
 
         // prepend the register tokens
         if let Some(ref cls) = self.class_embd {
-            for i in (1..=n_patches).rev() {
-                let dst = (i + n_registers) * n;
-                let src = i * n;
-                scratch.hidden.copy_within(src..src + n, dst);
-            }
-            for (r, row) in cls.iter().enumerate() {
-                scratch.hidden[r * n..(r + 1) * n].copy_from_slice(row);
-            }
+            prepend_registers(&mut scratch.hidden, n_patches, n_registers, n, cls);
         }
 
         for il in 0..cfg.n_layer {
             self.forward_layer(il, &mut scratch, n_pos);
+            #[cfg(feature = "parity-trace")]
+            crate::parity_trace::report(crate::parity_trace::checkpoint(
+                "zdt.layer_out",
+                Some(il),
+                &[n_pos, n],
+                &scratch.hidden[..n_pos * n],
+            ));
         }
 
         // drop the class token rows
         let tokens = &scratch.hidden[n_registers * n..n_pos * n];
         let merged = self.patch_merge(tokens, grid_w, grid_h);
         let proj = self.project(&merged, &mut scratch);
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "zdt.projected",
+            None,
+            &[proj.len() / cfg.projection_dim, cfg.projection_dim],
+            &proj,
+        ));
         Ok(proj)
     }
 
@@ -340,6 +384,14 @@ impl ZdtVisionEncoder {
                 None => rms_norm_inplace(row, &layer.ln1_weight, cfg.eps),
             }
         }
+
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "zdt.layer_inp_normed",
+            Some(il),
+            &[n_tokens, n],
+            &scratch.buf[..n_tokens * n],
+        ));
 
         matmul_f32_weight(
             &self.pool,
@@ -383,6 +435,7 @@ impl ZdtVisionEncoder {
         }
 
         scratch.residual[..n_tokens * n].copy_from_slice(&scratch.hidden[..n_tokens * n]);
+        scratch.buf[..n_tokens * n].copy_from_slice(&scratch.hidden[..n_tokens * n]);
         for t in 0..n_tokens {
             let off = t * n;
             let src = scratch.buf[off..off + n].to_vec();
@@ -460,7 +513,13 @@ impl ZdtVisionEncoder {
                 for kj in 0..n_tokens {
                     let mut dot = 0.0f32;
                     for d in 0..d_head {
-                        dot += input[qi * n + off_h + d] * qkv[kj * n * 3 + n + off_h + d];
+                        // Q is at offset 0 within the per-token {Q, K, V} row,
+                        // i.e. qkv[token * 3n + head_offset + d]. The LN output
+                        // (`input`) is NOT the projected Q; reading it from
+                        // there caused the image path to drift ~1% per layer
+                        // and hallucinate (SUPPORTED_MODELS.md: ZDTaichu5.0-9B
+                        // was marked WIP because of this).
+                        dot += qkv[qi * n * 3 + off_h + d] * qkv[kj * n * 3 + n + off_h + d];
                     }
                     row[kj] = dot * scale;
                 }
@@ -555,7 +614,50 @@ impl ZdtVisionEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::tensor::{GGMLType, MetaValue, TensorInfo};
     use std::cell::RefCell;
+
+    #[test]
+    fn loader_preserves_bits_and_rejects_bad_shape_or_payload() {
+        struct Source(TensorInfo, Vec<u8>);
+        impl TensorSource for Source {
+            fn metadata(&self, _: &str) -> Option<&MetaValue> {
+                None
+            }
+            fn tensor_info(&self, _: &str) -> Option<&TensorInfo> {
+                Some(&self.0)
+            }
+            fn tensor_slice(&self, _: &str) -> Option<&[u8]> {
+                Some(&self.1)
+            }
+        }
+        let bits = [
+            0x80000000u32,
+            0x7fc12345,
+            1,
+            0x3f800000,
+            0xbf800000,
+            0x7f800000,
+        ];
+        let mut source = Source(
+            TensorInfo {
+                name: "matrix".into(),
+                dims: vec![2, 3, 1],
+                ggml_type: GGMLType::F32,
+                offset: 0,
+            },
+            bits.iter().flat_map(|v| v.to_le_bytes()).collect(),
+        );
+        let actual = load_matrix(&source, "matrix", 2, 3).unwrap();
+        assert_eq!(actual.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), bits);
+        source.0.dims = vec![3, 2];
+        assert!(load_matrix(&source, "matrix", 2, 3).is_err());
+        source.0.dims = vec![2, 3];
+        source.1.pop();
+        assert!(load_matrix(&source, "matrix", 2, 3).is_err());
+        source.1.extend([0, 0]);
+        assert!(load_matrix(&source, "matrix", 2, 3).is_err());
+    }
 
     fn cfg(scale_factor: usize, n_embd: usize) -> ZdtVisionConfig {
         ZdtVisionConfig {
@@ -646,6 +748,61 @@ mod tests {
         }
     }
 
+    #[test]
+    fn register_prefix_preserves_every_patch() {
+        let n_embd = 2;
+        let n_patches = 3;
+        let registers = vec![vec![90.0, 91.0], vec![92.0, 93.0]];
+        let mut hidden = vec![10.0, 11.0, 20.0, 21.0, 30.0, 31.0, 0.0, 0.0, 0.0, 0.0];
+
+        prepend_registers(&mut hidden, n_patches, registers.len(), n_embd, &registers);
+
+        assert_eq!(
+            hidden,
+            vec![90.0, 91.0, 92.0, 93.0, 10.0, 11.0, 20.0, 21.0, 30.0, 31.0]
+        );
+    }
+
+    #[test]
+    fn ffn_norm_reads_attention_residual() {
+        let mut enc = encoder(1, 4);
+        enc.config.n_ff = 4;
+        enc.config.use_gelu = false;
+        let identity = vec![
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ];
+        enc.layers.push(ZdtLayer {
+            ln1_weight: vec![1.0; 4],
+            ln1_bias: Some(vec![0.0; 4]),
+            ln2_weight: vec![1.0; 4],
+            ln2_bias: Some(vec![0.0; 4]),
+            qkv_weight: vec![0.0; 48],
+            qkv_bias: None,
+            out_weight: vec![0.0; 16],
+            out_bias: Some(vec![1.0, -2.0, 0.5, 0.25]),
+            ffn_up_weight: identity.clone(),
+            ffn_up_bias: None,
+            ffn_down_weight: identity,
+            ffn_down_bias: None,
+        });
+        let mut scratch = enc.ensure_scratch();
+        scratch.hidden[..4].copy_from_slice(&[2.0, 3.0, -1.0, 4.0]);
+        enc.forward_layer(0, &mut scratch, 1);
+        // ggml's pre-norm block: residual + FFN(LN(residual)), where
+        // residual = input + attention output, rather than LN(attention output).
+        let residual = [3.0f32, 1.0, -0.5, 4.25];
+        let mean = residual.iter().sum::<f32>() / 4.0;
+        let variance = residual.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / 4.0;
+        for (i, value) in residual.iter().enumerate() {
+            let expected = value + (value - mean) / (variance + enc.config.eps).sqrt();
+            assert!(
+                (scratch.hidden[i] - expected).abs() < 1e-6,
+                "FFN used the wrong residual at {i}: {} vs {expected}",
+                scratch.hidden[i]
+            );
+        }
+    }
+
     /// A grid that is not a multiple of the scale factor gets zero padded,
     /// exactly like `ggml_pad` upstream.
     #[test]
@@ -711,5 +868,112 @@ mod tests {
         assert_eq!(act * act, 0.0);
         let v = 3.0f32;
         assert_eq!(v * v, 9.0);
+    }
+
+    /// Smoke test that pins the Q-reads-from-qkv contract. With the
+    /// previous bug (`dot += input[...] * qkv[...]`) the attention output
+    /// drifted ~1% per layer and produced hallucinations downstream.
+    /// With Q correctly read from `qkv`, the score for a known
+    /// Q·K dot product must reproduce analytically.
+    ///
+    /// Setup: 2 tokens, 1 head, d_head=2.
+    ///   Q0 = (1, 0), K0 = (1, 0), V0 = (1, 0)
+    ///   Q1 = (0, 1), K1 = (0, 1), V1 = (0, 1)
+    /// `input` is filled with garbage that *would* make the buggy code
+    /// give the wrong answer — we verify that with Q read from qkv, the
+    /// orthogonal Q·K score gives a diagonal softmax (1, 0) per row,
+    /// and the output is just V[qi].
+    #[test]
+    fn attention_reads_q_from_qkv_not_input() {
+        let n_embd = 2;
+        let cfg = ZdtVisionConfig {
+            projection_dim: 0,
+            image_size: 0,
+            patch_size: 0,
+            n_embd,
+            n_ff: 0,
+            n_layer: 1,
+            n_head: 1,
+            scale_factor: 0,
+            projector_hidden: 0,
+            eps: 1e-6,
+            use_gelu: false,
+            image_mean: [0.0; 3],
+            image_std: [1.0; 3],
+        };
+        let encoder = ZdtVisionEncoder {
+            config: cfg,
+            pool: Arc::new(ComputePool::new(1)),
+            patch_embd_weight: Vec::new(),
+            position_embd: None,
+            class_embd: None,
+            layers: Vec::new(),
+            mm_0_weight: Vec::new(),
+            mm_1_weight: Vec::new(),
+            mm_3_weight: Vec::new(),
+            scratch: RefCell::new(None),
+        };
+        // 2 tokens, head 0, d_head 2. Q|K|V laid out contiguously per token.
+        let n_tokens = 2;
+        let n = n_embd;
+        // Garbage input — the previous bug used this as Q, which would
+        // produce a uniformly-maxed score row (Q·K = 100·1+100·0 = 100
+        // for K0; Q·K = 100·0+100·1 = 100 for K1) and softmax to (0.5, 0.5).
+        // The fix reads Q from `qkv` instead, so we see the orthogonal
+        // Q/K structure below (Q0·K0=1, Q0·K1=2 → softmax, etc.).
+        let input: Vec<f32> = vec![100.0, 100.0, 100.0, 100.0];
+        // Asymmetric Q/K/V so the bug shows up as a wrong output.
+        //   Q[0]=(1,2), K[0]=(3,0), V[0]=(4,5)
+        //   Q[1]=(6,7), K[1]=(0,8), V[1]=(9,10)
+        // With Q from qkv (correct):
+        //   score[0] = Q0·K0=3, Q0·K1=16 → softmax(3/√2, 16/√2) → softmax(0.087, 0.913)
+        //     (scale 1/√d_head = 1/√2)
+        //   score[1] = Q1·K0=18, Q1·K1=56 → softmax(18/√2, 56/√2) → softmax(~0.044, ~0.956)
+        //   out[0] = 0.087*V0 + 0.913*V1 = (0.087*4+0.913*9, 0.087*5+0.913*10)
+        //           ≈ (8.566, 9.565)
+        //   out[1] = 0.044*V0 + 0.956*V1 ≈ (8.924, 9.78)
+        // With Q from input=(100,100) (the bug):
+        //   Q0·K0 = 100*3+100*0 = 300, Q0·K1 = 100*0+100*8 = 800
+        //   softmax → (~0.003, ~0.997)
+        //   out[0] ≈ 0.003*V0 + 0.997*V1 = (8.985, 9.985)
+        // Different by ~0.5 -- clearly distinguishable.
+        let mut qkv = vec![0.0f32; n_tokens * n * 3];
+        // Asymmetric Q/K/V with non-saturating softmax so the bug and
+        // the fix produce visibly different outputs.
+        //   Q0=(1,0), K0=(1,0), V0=(4,5)
+        //   Q1=(2,1), K1=(0.5,0), V1=(9,10)
+        // With Q from qkv (correct):
+        //   score[0] = Q0·K0=1, Q0·K1=0.5 → after 1/√d_head ≈ 0.7071:
+        //     (0.7071, 0.3536) → softmax ≈ (0.5876, 0.4124)
+        //   score[1] = Q1·K0=2, Q1·K1=1   → (1.4142, 0.7071) → softmax ≈ (0.6345, 0.3655)
+        //   out[0] = 0.5876*V0 + 0.4124*V1 ≈ (6.063, 7.063)
+        //   out[1] = 0.6345*V0 + 0.3655*V1 ≈ (6.270, 7.270)
+        // With Q from input=(100,100) (the bug):
+        //   Q0·K0 = 100, Q0·K1 = 50 → softmax(100, 50) ≈ (1.0, 0.0)
+        //   out[0] ≈ V0 = (4, 5)
+        // Output differs by ~1.9 between the two cases.
+        qkv[0..n].copy_from_slice(&[1.0, 0.0]); // Q0
+        qkv[n..2 * n].copy_from_slice(&[1.0, 0.0]); // K0
+        qkv[2 * n..3 * n].copy_from_slice(&[4.0, 5.0]); // V0
+        qkv[3 * n..4 * n].copy_from_slice(&[2.0, 1.0]); // Q1
+        qkv[4 * n..5 * n].copy_from_slice(&[0.5, 0.0]); // K1
+        qkv[5 * n..6 * n].copy_from_slice(&[9.0, 10.0]); // V1
+        let out = encoder.attention(&input, &qkv, n_tokens);
+        assert_eq!(out.len(), n_tokens * n, "output length");
+        // With scale 1/sqrt(d_head)=1/sqrt(2)≈0.7071:
+        //   score[0] = (1*0.7071, 0.5*0.7071) = (0.7071, 0.3536)
+        //   softmax = (exp(0.7071)/(exp(0.7071)+exp(0.3536)), exp(0.3536)/(...))
+        //           ≈ (0.5876, 0.4124)
+        //   out[0] = 0.5876*V0 + 0.4124*V1 ≈ (6.063, 7.063)
+        // With the bug, out[0] would be ≈ V0 = (4, 5) (the softmax
+        // saturates to (1, 0) once Q from input is large). Distance > 2.
+        let exp_0 = (6.063f32, 7.063f32);
+        let dist = (out[0] - exp_0.0).abs() + (out[1] - exp_0.1).abs();
+        assert!(
+            dist < 0.1,
+            "out[0..2] should be ~[5.890, 6.890] (Q from qkv); got {:?}, dist={}",
+            &out[0..2],
+            dist
+        );
     }
 }

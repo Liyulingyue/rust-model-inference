@@ -446,7 +446,7 @@ impl Gemma4Config {
                 source,
                 "per_layer_model_proj.weight",
                 &[self.embd as u64, per_layer_all as u64],
-                &[GGMLType::BF16, GGMLType::F16],
+                &[GGMLType::BF16],
             )?;
             require_tensor(
                 source,

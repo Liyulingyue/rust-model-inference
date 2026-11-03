@@ -825,6 +825,24 @@ pub struct VisionLayer<'a> {
 }
 
 impl<'a> VisionEncoder<'a> {
+    /// Load only the config (no weights). Used by the multimodal
+    /// dispatcher to read image_size / image_min_pixels / image_max_pixels
+    /// without pulling the mmproj weights through multiple `from_source`
+    /// calls.
+    pub(crate) fn load_config_only<S: TensorSource + ?Sized>(
+        source: &S,
+    ) -> Result<ClipVisionConfig, String> {
+        let mut config = ClipVisionConfig::from_source(source)?;
+        if let Some(info) = source.tensor_info("v.blk.0.ffn_up.weight") {
+            if info.dims.len() == 2 {
+                if let Ok(width) = usize::try_from(info.dims[1]) {
+                    config.n_ff = width;
+                }
+            }
+        }
+        Ok(config)
+    }
+
     pub fn from_source<S: TensorSource + ?Sized>(
         source: &'a S,
         pool: Arc<ComputePool>,
@@ -845,21 +863,21 @@ impl<'a> VisionEncoder<'a> {
         let patch_embd_weight_1 = source.tensor_slice("v.patch_embd.weight.1");
         let position_embd = source.tensor_slice("v.position_embd.weight");
         let post_ln_weight = source.tensor_slice("v.post_ln.weight");
-        let post_ln_bias = source.tensor_slice("v.post_ln.bias");
-        let patch_bias = source.tensor_slice("v.patch_embd.bias");
+        let post_ln_bias = f32_bias_slice(source, "v.post_ln.bias")?;
+        let patch_bias = f32_bias_slice(source, "v.patch_embd.bias")?;
 
         let mut layers = Vec::with_capacity(config.n_layer);
         for i in 0..config.n_layer {
             let ln1_weight = source
                 .tensor_slice(&format!("v.blk.{}.ln1.weight", i))
                 .ok_or_else(|| format!("Missing v.blk.{}.ln1.weight", i))?;
-            let ln1_bias = source.tensor_slice(&format!("v.blk.{}.ln1.bias", i));
+            let ln1_bias = f32_bias_slice(source, &format!("v.blk.{}.ln1.bias", i))?;
             let ln2_weight = source
                 .tensor_slice(&format!("v.blk.{}.ln2.weight", i))
                 .ok_or_else(|| format!("Missing v.blk.{}.ln2.weight", i))?;
-            let ln2_bias = source.tensor_slice(&format!("v.blk.{}.ln2.bias", i));
+            let ln2_bias = f32_bias_slice(source, &format!("v.blk.{}.ln2.bias", i))?;
             let qkv_weight = source.tensor_slice(&format!("v.blk.{}.attn_qkv.weight", i));
-            let qkv_bias = source.tensor_slice(&format!("v.blk.{}.attn_qkv.bias", i));
+            let qkv_bias = f32_bias_slice(source, &format!("v.blk.{}.attn_qkv.bias", i))?;
             let (q_weight, q_bias, k_weight, k_bias, v_weight, v_bias) = if qkv_weight.is_none() {
                 (
                     Some(
@@ -867,19 +885,19 @@ impl<'a> VisionEncoder<'a> {
                             .tensor_slice(&format!("v.blk.{}.attn_q.weight", i))
                             .ok_or_else(|| format!("Missing v.blk.{}.attn_q.weight", i))?,
                     ),
-                    source.tensor_slice(&format!("v.blk.{}.attn_q.bias", i)),
+                    f32_bias_slice(source, &format!("v.blk.{}.attn_q.bias", i))?,
                     Some(
                         source
                             .tensor_slice(&format!("v.blk.{}.attn_k.weight", i))
                             .ok_or_else(|| format!("Missing v.blk.{}.attn_k.weight", i))?,
                     ),
-                    source.tensor_slice(&format!("v.blk.{}.attn_k.bias", i)),
+                    f32_bias_slice(source, &format!("v.blk.{}.attn_k.bias", i))?,
                     Some(
                         source
                             .tensor_slice(&format!("v.blk.{}.attn_v.weight", i))
                             .ok_or_else(|| format!("Missing v.blk.{}.attn_v.weight", i))?,
                     ),
-                    source.tensor_slice(&format!("v.blk.{}.attn_v.bias", i)),
+                    f32_bias_slice(source, &format!("v.blk.{}.attn_v.bias", i))?,
                 )
             } else {
                 (None, None, None, None, None, None)
@@ -887,17 +905,17 @@ impl<'a> VisionEncoder<'a> {
             let out_weight = source
                 .tensor_slice(&format!("v.blk.{}.attn_out.weight", i))
                 .ok_or_else(|| format!("Missing v.blk.{}.attn_out.weight", i))?;
-            let out_bias = source.tensor_slice(&format!("v.blk.{}.attn_out.bias", i));
+            let out_bias = f32_bias_slice(source, &format!("v.blk.{}.attn_out.bias", i))?;
             let ffn_up_weight = source
                 .tensor_slice(&format!("v.blk.{}.ffn_up.weight", i))
                 .ok_or_else(|| format!("Missing v.blk.{}.ffn_up.weight", i))?;
-            let ffn_up_bias = source.tensor_slice(&format!("v.blk.{}.ffn_up.bias", i));
+            let ffn_up_bias = f32_bias_slice(source, &format!("v.blk.{}.ffn_up.bias", i))?;
             let ffn_gate_weight = source.tensor_slice(&format!("v.blk.{}.ffn_gate.weight", i));
-            let ffn_gate_bias = source.tensor_slice(&format!("v.blk.{}.ffn_gate.bias", i));
+            let ffn_gate_bias = f32_bias_slice(source, &format!("v.blk.{}.ffn_gate.bias", i))?;
             let ffn_down_weight = source
                 .tensor_slice(&format!("v.blk.{}.ffn_down.weight", i))
                 .ok_or_else(|| format!("Missing v.blk.{}.ffn_down.weight", i))?;
-            let ffn_down_bias = source.tensor_slice(&format!("v.blk.{}.ffn_down.bias", i));
+            let ffn_down_bias = f32_bias_slice(source, &format!("v.blk.{}.ffn_down.bias", i))?;
 
             layers.push(VisionLayer {
                 ln1_weight,
@@ -926,7 +944,7 @@ impl<'a> VisionEncoder<'a> {
         let mm_0_weight = source
             .tensor_slice("mm.0.weight")
             .ok_or("Missing mm.0.weight")?;
-        let mm_0_bias = source.tensor_slice("mm.0.bias");
+        let mm_0_bias = f32_bias_slice(source, "mm.0.bias")?;
         let mm_2_info = source
             .tensor_info("mm.2.weight")
             .ok_or("Missing tensor info: mm.2.weight")?;
@@ -949,7 +967,7 @@ impl<'a> VisionEncoder<'a> {
         let mm_2_weight = source
             .tensor_slice("mm.2.weight")
             .ok_or("Missing mm.2.weight")?;
-        let mm_2_bias = source.tensor_slice("mm.2.bias");
+        let mm_2_bias = f32_bias_slice(source, "mm.2.bias")?;
         let precomputed = VisionPrecomputed::from_source(source, &config)?;
 
         Ok(Self {
@@ -2523,6 +2541,29 @@ fn decode_f32_slice(data: &[u8]) -> Vec<f32> {
     out
 }
 
+/// Borrow a bias tensor's bytes, rejecting storage that is not F32.
+///
+/// Every bias in this tower is decoded four bytes per element by
+/// [`decode_f32_slice`], so a BF16 bias is read at half length and the
+/// bias-add loop then runs past the end of the merged buffer. The
+/// precomputed path already loads biases through `load_optional_f32`,
+/// which checks the type; this covers the non-precomputed path.
+fn f32_bias_slice<'a, S: TensorSource + ?Sized>(
+    source: &'a S,
+    name: &str,
+) -> Result<Option<&'a [u8]>, String> {
+    let Some(info) = source.tensor_info(name) else {
+        return Ok(None);
+    };
+    if info.ggml_type != crate::core::tensor::GGMLType::F32 {
+        return Err(format!(
+            "{name} must be F32, found {:?}: this tower decodes biases four bytes per element",
+            info.ggml_type
+        ));
+    }
+    Ok(source.tensor_slice(name))
+}
+
 fn decode_f16_slice_to_f32(data: &[u8]) -> Vec<f32> {
     let n = data.len() / 2;
     let mut out = Vec::with_capacity(n);
@@ -3574,6 +3615,24 @@ mod tests {
     }
 
     #[test]
+    fn layer_norm_stats_include_every_simd_lane_and_tail() {
+        for input in [
+            vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+            (0..13).map(|i| i as f32 - 6.0).collect(),
+        ] {
+            let mean = input.iter().map(|&v| f64::from(v)).sum::<f64>() / input.len() as f64;
+            let variance = input
+                .iter()
+                .map(|&v| (f64::from(v) - mean).powi(2))
+                .sum::<f64>()
+                / input.len() as f64;
+            let (actual_mean, actual_variance) = ggml_layer_norm_stats(&input);
+            close(actual_mean, mean as f32);
+            close(actual_variance, variance as f32);
+        }
+    }
+
+    #[test]
     fn layer_norm_stats_match_ggml_grouped_f32_variance() {
         let input = [
             0xc00724b4, 0xc04b2dd2, 0xbf54df6b, 0xc030a779, 0xc05df1bc, 0xbf498aa6, 0x4055fe34,
@@ -3595,7 +3654,7 @@ mod tests {
     }
 
     #[test]
-    fn layer_norm_stats_include_every_simd_lane_and_tail() {
+    fn layer_norm_stats_cover_every_length() {
         for len in [4, 8, 12, 13, 16, 1152] {
             let input: Vec<f32> = (0..len)
                 .map(|i| if i % 8 >= 4 { 1.0 } else { 0.0 })

@@ -17,19 +17,24 @@ pub(crate) struct EligibilityFacts {
 }
 
 pub(crate) fn check_eligibility(facts: &EligibilityFacts) -> Result<(), String> {
-    if facts.architecture != "qwen3" {
+    // `qwen3vl` is the Qwen3-VL text tower: the same dense decoder plus
+    // 4D M-RoPE positions and DeepStack injections, both of which the
+    // resident decoder now implements.
+    if !matches!(
+        facts.architecture.as_str(),
+        "qwen3" | "qwen3vl" | "qwen3vlmoe"
+    ) {
         return Err(format!("unsupported architecture {}", facts.architecture));
     }
     if facts.has_moe {
         return Err("moe models are not supported".into());
     }
-    if facts.n_deepstack_layers != 0 {
-        return Err("deepstack models are not supported".into());
-    }
     if facts.has_qkv_bias {
         return Err("qkv bias is not supported".into());
     }
-    if facts.rope != Qwen3Rope::Neox {
+    // Plain NeoX and Qwen3-VL's M-RoPE both rotate split-half pairs, so the
+    // same shader applies; only the angle table differs.
+    if !matches!(facts.rope, Qwen3Rope::Neox | Qwen3Rope::Interleaved { .. }) {
         return Err("rope layout is not supported".into());
     }
     if facts.weight_formats.is_empty() {
@@ -176,7 +181,20 @@ fn dense_shape(model: &Qwen3Model) -> DenseShape {
         has_qk_norm: c.has_qk_norm,
         vocab: c.vocab,
         freq_base: c.freq_base,
-        rope_layout: super::ops::RopeLayout::Neox,
+        rope_layout: match c.rope {
+            crate::models::qwen3::Qwen3Rope::Interleaved { .. } => {
+                super::ops::RopeLayout::MropeInterleaved
+            }
+            _ => super::ops::RopeLayout::Neox,
+        },
+        // Qwen3-VL's `Interleaved` rope rotates split-half pairs and picks
+        // each pair's axis with the `sector % 3` rule, so the shader mode
+        // stays NeoX and only the per-row angle table differs.
+        rope_mrope_sections: match c.rope {
+            crate::models::qwen3::Qwen3Rope::Interleaved { sections, .. } => Some(sections),
+            _ => None,
+        },
+        n_deepstack_layers: c.n_deepstack_layers,
         approximate_silu_multiline: true,
         attention_mode: crate::vulkan::ops::AttentionMode::PreparedF16,
     }

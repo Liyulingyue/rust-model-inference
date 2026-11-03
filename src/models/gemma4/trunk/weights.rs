@@ -105,7 +105,7 @@ impl Gemma4Model {
                     source.as_ref(),
                     "per_layer_model_proj.weight",
                     &[embd as u64, per_layer_all as u64],
-                    &[GGMLType::BF16, GGMLType::F16],
+                    &[GGMLType::BF16],
                 )?;
                 let pn = load_f32(
                     source.as_ref(),

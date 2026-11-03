@@ -241,4 +241,20 @@ mod tests {
         let values: Vec<f32> = (0..37).map(|i| (i as f32 * 0.21).sin() * 4.0).collect();
         assert_inplace_matches_scalar(&values);
     }
+
+    /// Regression: a gate of 131.219 made `exp(-131.219)` wrap to `-inf`, so
+    /// `silu` returned `-0` and the whole FFN channel was silently dropped.
+    /// This is the exact pair that broke PhysBrain1.5-2B generation.
+    #[test]
+    fn silu_mul_approx_keeps_large_positive_gates() {
+        let gates = vec![131.219f32; 16];
+        let mut ups = vec![-151.609f32; 16];
+        super::silu_mul_approx_inplace(&gates, &mut ups);
+        for (i, got) in ups.iter().enumerate() {
+            assert!(
+                got.is_finite() && *got < -1e4,
+                "lane {i}: activation collapsed to {got}"
+            );
+        }
+    }
 }
