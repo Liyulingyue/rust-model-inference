@@ -1,4 +1,5 @@
 pub mod audio8;
+pub mod arktts;
 pub mod bert_family;
 pub mod bge_vl;
 pub mod bitnet;

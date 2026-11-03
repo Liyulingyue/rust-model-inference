@@ -5,10 +5,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 /// Run multimodal inference and feed the generated text through a
-/// separate TTS model (Qwen3-TTS / Qwen2.5-Omni Talker compatible) to
-/// produce a 24 kHz WAV. Used to bridge Qwen2.5-Omni (no bundled Talker
-/// in our GGUF set) to a usable audio output. Currently uses
-/// Qwen3-TTS-12Hz-1.7B-Base as the post-processor.
+/// separate TTS model to produce a WAV at that model's sample rate.
+/// Supports Qwen3-TTS and Audio8-TTS-Realistic-Air as post-processors.
 ///
 /// Note: this implementation streams the Omni text to stdout AND
 /// synthesises it for TTS in parallel. The text is captured by running
@@ -51,7 +49,7 @@ pub fn run_multimodal_with_tts_postproc(
         repetition_penalty,
     )?;
     eprintln!(
-        "Omni → TTS: captured {} chars from reply; running Qwen3-TTS...",
+        "Omni → TTS: captured {} chars from reply; running TTS...",
         reply.chars().count()
     );
     // `synthesize_tts_to_wav` expects the Qwen3-TTS internal language
@@ -65,9 +63,8 @@ pub fn run_multimodal_with_tts_postproc(
         &reply,
         internal_language,
         // TTS frame budget: the user's --max-tokens bounds the Omni reply
-        // length; the Qwen3-TTS Talker emits one 80 ms audio frame per
-        // step and stops on EOS, so `max_tokens * 4` frames (~80 ms per
-        // frame) caps audio at ~3.2 seconds per Omni token. Clamp to a
+        // length; the TTS model stops on EOS within this frame budget.
+        // Qwen3 uses 80 ms frames and Audio8 uses ~46 ms frames. Clamp to a
         // floor of 128 so short captions (e.g. 30 tokens) still produce
         // usable audio; cap at 1024 so very long replies don't run the
         // expensive DAC decoder for minutes on end.
