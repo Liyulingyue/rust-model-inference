@@ -1817,7 +1817,6 @@ fn rms_norm_inplace_text(hidden: &mut [f32], weight: &[f32], n_tokens: usize) {
 /// ```
 fn rope_apply_token(
     x: &mut [f32],
-    pos: usize,
     head_dim: usize,
     table_cos: &[f32],
     table_sin: &[f32],
@@ -1830,9 +1829,6 @@ fn rope_apply_token(
     if n_heads == 0 {
         return;
     }
-    let cos_t = table_cos[0];
-    let sin_t = table_sin[0];
-    let _ = (cos_t, sin_t);
     for head in 0..n_heads {
         let off = head * head_dim;
         // Interleaved rotation: pair (2i, 2i+1).
@@ -2323,7 +2319,6 @@ fn project_qk_with_rope(
         let table = pos * (HEAD_DIM / 2);
         rope_apply_token(
             &mut qkv[off..off + HIDDEN],
-            pos,
             HEAD_DIM,
             &rope_cos[table..table + HEAD_DIM / 2],
             &rope_sin[table..table + HEAD_DIM / 2],
@@ -2339,7 +2334,6 @@ fn project_qk_with_rope(
         );
         rope_apply_token(
             &mut qkv[off + HIDDEN..off + 2 * HIDDEN],
-            pos,
             HEAD_DIM,
             &rope_cos[table..table + HEAD_DIM / 2],
             &rope_sin[table..table + HEAD_DIM / 2],
@@ -2565,7 +2559,6 @@ fn run_single_block(
     // (audio comes second in single block per audio.cpp).
     let heads = HEAD_DIM;
     let n_heads = HIDDEN / heads;
-    let scale = 1.0 / (heads as f32).sqrt();
     let rope_started = std::time::Instant::now();
     for token in 0..total {
         let off = token * QKV_DIM;
@@ -2589,19 +2582,18 @@ fn run_single_block(
         let table = pos * (HEAD_DIM / 2);
         rope_apply_token(
             &mut qkv_buf[off..off + HIDDEN],
-            pos,
             HEAD_DIM,
             &rope_cos[table..table + HEAD_DIM / 2],
             &rope_sin[table..table + HEAD_DIM / 2],
         );
         rope_apply_token(
             &mut qkv_buf[off + HIDDEN..off + 2 * HIDDEN],
-            pos,
             HEAD_DIM,
             &rope_cos[table..table + HEAD_DIM / 2],
             &rope_sin[table..table + HEAD_DIM / 2],
         );
     }
+    profile::add(&profile::ROPE_NS, rope_started);
 
     // Single-stream attention.
     let attention_started = std::time::Instant::now();
