@@ -47,6 +47,28 @@ RMI_AUK_VAE_DUMP=target/auk-reference/rust-vae \
 cargo test --profile release-fast --lib auk::vae -- --ignored --nocapture
 ```
 
+## 上游 PyTorch 的长度限制（oneDNN bug）
+
+官方 VAE 的 alias-free 重采样调用
+
+```python
+F.conv1d(x, self.filter.expand(C, -1, -1), stride=2, groups=C)
+```
+
+本机的 PyTorch 2.15.0+cu132（aarch64）在输出超过约 100 万个元素时，
+oneDNN 的分组卷积路径会让 OpenMP 分块越界，直接抛出
+`RuntimeError: illegal immediate parameter (range error)`，
+**任何长于 ~1.5 秒的音频都无法解码**。
+
+这是 PyTorch/oneDNN 自身的问题，与 AuK 无关：
+
+- 把权重 `.contiguous()` 后同样失败（`probe_torch_conv_bug.py`）；
+- 关掉 oneDNN 后任意长度都正常（`probe_vae_length.py`）；
+- 本仓库的 Rust 端口直接实现了同样的卷积数学，**没有这个长度上限**。
+
+因此所有 oracle 脚本都设置了 `torch.backends.mkldnn.enabled = False`。
+不这么做就只能对齐 1 秒以内的音频。
+
 ## 对齐结果
 
 ### VAE — 与官方 PyTorch 逐阶段一致
@@ -181,6 +203,17 @@ RMI_AUK_DIT_DUMP=target/auk-reference/rust-dit \
 官方 VAE 解码，产出 `e2e_latent_<step>.npy` 与 `e2e_audio.npy`，
 再与 Rust 的 `out/auk_test.wav` 比较。
 
+实测（同一 prompt + seed，24 kHz）：
+
+| 配方 | 官方 rms / peak / 削波 | Rust rms / peak / 削波 | 波形 cos |
+| --- | --- | --- | --- |
+| 4 秒 · 4 步 · cfg 2.0 | 0.1477 / 0.9730 / 0% | 0.1478 / 0.9732 / 0% | 0.99976 |
+| 4 秒 · 32 步 · cfg 2.0 | 0.3136 / 1.0000 / 0.43% | 0.3138 / 1.0000 / 0.44% | 0.99999523 |
+
+32 步时两侧都触及 VAE 末尾 `clamp(x, -1, 1)` 的上限 —— cfg 2.0 的强引导
+`v_cond + 2·(v_cond - v_uncond)` 等效标准 CFG scale 3.0，会把 latent 推出
+可表示范围；Rust 精确复现了官方这一行为。
+
 ### 3) VAE 逐阶段
 
 固定 latent 由 `auk_vae_ref.py` 生成（`target/auk-reference/dumps/auk_latent.npy` /
@@ -198,3 +231,10 @@ cargo test --profile release-fast --lib auk::vae -- --ignored --nocapture
 ```
 
 `auk_vae_stage.py` 用于把 VAE 拆到单个 stage / 单个 resblock 逐层定位分歧。
+
+### 4) 上游 oneDNN 长度限制探针
+
+```bash
+.venv/bin/python3 tools/oracle/auk/probe_vae_length.py      # 官方 VAE 各长度解码
+.venv/bin/python3 tools/oracle/auk/probe_torch_conv_bug.py  # 最小复现
+```

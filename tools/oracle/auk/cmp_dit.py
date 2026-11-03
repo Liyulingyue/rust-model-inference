@@ -40,13 +40,17 @@ nt = text.size // 2048
 print(f"text_conditioning: {nt} tokens")
 
 for step in range(4):
-    # audio_embed: Rust [T][1536]; PyTorch [1, T, 1536]
-    report(f"[{step}] audio_embed", rload(f"audio_embed_{step}.f32"),
-           np.load(f"{REF}/dit_audio_embed_{step}.npy")[0])
-    # text_embed: Rust [nt][1536]; PyTorch [1, nt, 1536]
-    report(f"[{step}] text_embed", rload(f"text_embed_{step}.f32"),
-           np.load(f"{REF}/dit_text_embed_{step}.npy")[0])
-    # velocity: Rust [D][T]; PyTorch [T, D]
-    report(f"[{step}] velocity", rload(f"velocity_cond_{step}.f32").reshape(64, -1).T,
-           np.load(f"{REF}/dit_velocity_{step}.npy"))
+    # audio_embed: Rust [T][1536]; the reference .npy already is [T, 1536].
+    audio_ref = np.load(f"{REF}/dit_audio_embed_{step}.npy")
+    report(f"[{step}] audio_embed", rload(f"audio_embed_{step}.f32").reshape(audio_ref.shape),
+           audio_ref)
+    # text_embed: Rust [nt][1536]; the reference .npy already is [nt, 1536].
+    text_ref = np.load(f"{REF}/dit_text_embed_{step}.npy")
+    report(f"[{step}] text_embed", rload(f"text_embed_{step}.f32").reshape(text_ref.shape),
+           text_ref)
+    # velocity: Rust [D][T]; the reference .npy already is [T, D].
+    velocity_ref = np.load(f"{REF}/dit_velocity_{step}.npy")
+    report(f"[{step}] velocity",
+           rload(f"velocity_cond_{step}.f32").reshape(velocity_ref.T.shape).T,
+           velocity_ref)
     print()

@@ -36,6 +36,18 @@ from auk.model.flux2_edit import Flux2Edit, Flux2EditConfig
 
 torch.set_grad_enabled(False)
 
+# The official alias-free resampler calls
+#   F.conv1d(x, filter.expand(C, -1, -1), stride=2, groups=C)
+# PyTorch 2.15 on aarch64 routes grouped convolutions through oneDNN, whose
+# OpenMP chunking aborts with "illegal immediate parameter (range error)" once
+# the output exceeds ~1M elements -- i.e. any audio longer than ~1.5 s. That
+# is a oneDNN bug in this build, not an AuK issue (the same call succeeds
+# with oneDNN disabled, and the Rust port implements the same math directly
+# with no length limit). Disable oneDNN so the reference can decode the
+# lengths we actually ship.
+torch.backends.mkldnn.enabled = False
+
+
 MODEL = os.path.join(MODEL_DIR, "auk_base.safetensors")
 REF = REF_DIR
 
