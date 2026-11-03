@@ -566,6 +566,18 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                 i += 1;
             }
             "--tts" => options.tts = true,
+            "--voice" => options.voice = Some(required_string_value(args, &mut i, "--voice")?),
+            "--speed" => {
+                options.speed = Some(
+                    required_string_value(args, &mut i, "--speed")?
+                        .parse()
+                        .map_err(|_| "--speed must be a number between 0.5 and 2.0")?,
+                );
+            }
+            "--pronunciations" => {
+                options.pronunciations =
+                    Some(required_string_value(args, &mut i, "--pronunciations")?)
+            }
             "--edit" => options.edit = true,
             "--out" => {
                 let value = args
