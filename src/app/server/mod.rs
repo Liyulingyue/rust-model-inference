@@ -1,7 +1,8 @@
 pub mod api;
+mod audio_speech;
 mod forecast;
-mod rerank;
 mod prediction;
+mod rerank;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -71,6 +72,7 @@ enum Backend {
     Asr(AsrBackend),
     Audio8(Audio8Backend),
     Tts(TtsBackend),
+    ArkTts(audio_speech::Backend),
     Rerank(RerankBackend),
     Clm(ClmBackend),
     Gliner2(Gliner2Backend),
@@ -999,6 +1001,17 @@ fn build_backend(options: &CliOptions) -> Result<Arc<Backend>, String> {
         })));
     }
     if options.tts {
+        let source: Arc<dyn TensorSource> =
+            Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+        if source
+            .metadata("general.architecture")
+            .and_then(MetaValue::to_string_val)
+            == Some("arktts")
+        {
+            return Ok(Arc::new(Backend::ArkTts(audio_speech::Backend::load(
+                options, source,
+            )?)));
+        }
         return Ok(Arc::new(Backend::Tts(build_tts(options)?)));
     }
     if options.audio.is_some() {
@@ -1397,6 +1410,11 @@ fn build_text(options: &CliOptions) -> Result<(TextBackend, Option<WeVisOneExtra
         .and_then(crate::MetaValue::to_string_val)
         .map(str::to_string)
         .unwrap_or_default();
+    if matches!(arch.as_str(), "arktts" | "arktts_codec") {
+        return Err(
+            "Audio8 TTS requires --tts with its paired --mmproj; text generation and JEV are unsupported".into(),
+        );
+    }
     let phi3_dims = if arch == "phi3" {
         Some((
             raw_source
@@ -1809,6 +1827,7 @@ pub fn run_server() {
         Backend::Asr(_) => "asr",
         Backend::Audio8(_) => "audio8",
         Backend::Tts(_) => "tts",
+        Backend::ArkTts(_) => "arktts",
         Backend::Rerank(_) => "rerank",
         Backend::Clm(_) => "clm",
         Backend::Gliner2(_) => "gliner2",
@@ -1849,6 +1868,10 @@ pub fn run_server() {
             )
             .route("/v1/audio/transcriptions_json", post(transcriptions_json)),
         Backend::Tts(_) => router.route("/v1/audio/speech", post(speech)),
+        Backend::ArkTts(_) => router.route(
+            "/v1/audio/speech",
+            post(audio_speech::speech).layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
+        ),
         Backend::Rerank(_) => router.route("/v1/rerank", post(rerank::rerank)),
         // CLM scores by cosine, so only the single-question route applies.
         // Grouped does a per-group softmax that has no cosine analogue,

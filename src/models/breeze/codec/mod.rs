@@ -267,7 +267,7 @@ impl Linear {
     }
 }
 
-struct Conv {
+pub(crate) struct Conv {
     weight: Vec<f32>,
     bias: Vec<f32>,
     input: usize,
@@ -281,7 +281,7 @@ struct Conv {
 
 impl Conv {
     #[allow(clippy::too_many_arguments)]
-    fn load(
+    pub(crate) fn load(
         source: &dyn TensorSource,
         prefix: &str,
         input: usize,
@@ -314,7 +314,7 @@ impl Conv {
         })
     }
 
-    fn forward(&self, input: &[f32]) -> Result<Vec<f32>, String> {
+    pub(crate) fn forward(&self, input: &[f32]) -> Result<Vec<f32>, String> {
         if input.is_empty() || input.len() % self.input != 0 {
             return Err("Invalid Breeze codec convolution input".into());
         }
