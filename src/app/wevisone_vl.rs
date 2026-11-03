@@ -3,10 +3,10 @@
 //! The model itself lives in [`crate::models::wevisone_vl`]: the released
 //! pixel decoder, the task prompts and the prediction pipeline. This
 //! module only wires the command line to that pipeline.
-use crate::models::wevisone_vl::{predict, PredictRequest, Prediction, PredictionOptions};
-use crate::core::thread_pool::ComputePool;
 use crate::core::tensor::TensorSource;
+use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
+use crate::models::wevisone_vl::{predict, PredictRequest, Prediction, PredictionOptions};
 use std::sync::Arc;
 
 pub fn run_cli(options: &crate::app::CliOptions, threads: usize) -> Result<(), String> {

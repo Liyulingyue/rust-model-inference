@@ -706,10 +706,9 @@ fn generate(
 ) -> Result<Generation, String> {
     let (arch, handle) = match state.model.as_ref() {
         Backend::Text(text) => (text.arch.as_str(), text.runtime.as_ref()),
-        Backend::WeVisOne(wevisone) => (
-            wevisone.text.arch.as_str(),
-            wevisone.text.runtime.as_ref(),
-        ),
+        Backend::WeVisOne(wevisone) => {
+            (wevisone.text.arch.as_str(), wevisone.text.runtime.as_ref())
+        }
         Backend::UnlimitedOcr(native) => (
             crate::models::unlimited_ocr::MODEL_TYPE,
             Some(&native.runtime),
@@ -2329,9 +2328,7 @@ async fn run_multimodal_text_only(
         Backend::WeVisOne(wevisone) => wevisone.text.mmproj_path.clone(),
         _ => None,
     }
-    .ok_or_else(|| {
-        "/v1/jev/image requires the server to be started with --mmproj".to_string()
-    })?;
+    .ok_or_else(|| "/v1/jev/image requires the server to be started with --mmproj".to_string())?;
     let threads = jev_threads(&state);
     let prefill_batch_size = jev_prefill_batch_size(&state);
 

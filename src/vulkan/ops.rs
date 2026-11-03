@@ -1212,7 +1212,14 @@ impl BatchedLinearRuntime {
         max_n_out: usize,
         descriptor_capacity: usize,
     ) -> Result<Self, VulkanError> {
-        Self::with_output_slots(context, max_rows, max_n_in, max_n_out, descriptor_capacity, 1)
+        Self::with_output_slots(
+            context,
+            max_rows,
+            max_n_in,
+            max_n_out,
+            descriptor_capacity,
+            1,
+        )
     }
 
     /// Create a runtime with `output_slots` independent output regions so
@@ -1420,7 +1427,12 @@ impl BatchedLinearRuntime {
         for (weight_bytes, spec, rows, n_out) in group.iter().copied() {
             let spec = spec;
             let format = spec.format;
-            let key = (weight_bytes.as_ptr() as usize, weight_bytes.len(), n_in, n_out);
+            let key = (
+                weight_bytes.as_ptr() as usize,
+                weight_bytes.len(),
+                n_in,
+                n_out,
+            );
             let bindings = if let Some((_, bindings)) = self.weights.get(&key) {
                 if bindings.weight_format(1)? != format || bindings.weight_mode != spec.mode {
                     return Err(VulkanError::UnsupportedShape(
@@ -1465,16 +1477,17 @@ impl BatchedLinearRuntime {
                         .context
                         .upload_static(transposed.as_deref().unwrap_or(weight_bytes))?
                 };
-                let bindings = match self
-                    .ops
-                    .bind_weight_buffers_mode(&[buffer], &[format], spec.mode)
-                {
-                    Ok(bindings) => bindings,
-                    Err(error) => {
-                        unsafe { self.ops.context.destroy_buffer(&buffer) };
-                        return Err(error);
-                    }
-                };
+                let bindings =
+                    match self
+                        .ops
+                        .bind_weight_buffers_mode(&[buffer], &[format], spec.mode)
+                    {
+                        Ok(bindings) => bindings,
+                        Err(error) => {
+                            unsafe { self.ops.context.destroy_buffer(&buffer) };
+                            return Err(error);
+                        }
+                    };
                 self.weights.insert(key, (buffer, bindings));
                 bindings
             };
@@ -1506,9 +1519,10 @@ impl BatchedLinearRuntime {
         for (slot, (bindings, (_weight_bytes, spec, rows, n_out))) in
             cached_bindings.iter().zip(group.iter()).enumerate()
         {
-            let output_region = self.layout.output_slot(slot).ok_or_else(|| {
-                VulkanError::UnsupportedShape("output slot unavailable".into())
-            })?;
+            let output_region = self
+                .layout
+                .output_slot(slot)
+                .ok_or_else(|| VulkanError::UnsupportedShape("output slot unavailable".into()))?;
             let outputs = [(output_region, *n_out, f32_bytes(*n_out)?)];
             let recorder = if spec.uses_tiled_f16() && n_in % 2 == 0 && *rows >= 32 {
                 Qwen3Ops::record_weight_matmul_tiled_rows
@@ -1555,7 +1569,6 @@ impl BatchedLinearRuntime {
     pub(crate) fn ops_context(&self) -> Option<&'static VulkanContext> {
         Some(self.ops.context)
     }
-
 }
 
 impl Drop for BatchedLinearRuntime {
@@ -2005,8 +2018,16 @@ impl AttentionRuntime {
             || spec.query_heads == 0
             || spec.key_value_heads == 0
             || spec.query_heads % spec.key_value_heads != 0
-            || q.len() != product("attention Q", &[spec.query_tokens, spec.query_heads, spec.head_dim])?
-            || k.len() != product("attention K", &[spec.key_tokens, spec.key_value_heads, spec.head_dim])?
+            || q.len()
+                != product(
+                    "attention Q",
+                    &[spec.query_tokens, spec.query_heads, spec.head_dim],
+                )?
+            || k.len()
+                != product(
+                    "attention K",
+                    &[spec.key_tokens, spec.key_value_heads, spec.head_dim],
+                )?
             || v.len() != k.len()
             || !spec.scale.is_finite()
             || (spec.causal && spec.query_tokens > spec.key_tokens)
@@ -2019,7 +2040,8 @@ impl AttentionRuntime {
             self.ops.f32_word(self.q, q.len(), "attention Q")?,
             self.ops.f32_word(self.k, k.len(), "attention K")?,
             self.ops.f32_word(self.v, v.len(), "attention V")?,
-            self.ops.f32_word(self.output, q.len(), "attention output")?,
+            self.ops
+                .f32_word(self.output, q.len(), "attention output")?,
             as_u32(spec.query_tokens, "attention queries")?,
             as_u32(spec.key_tokens, "attention keys")?,
             as_u32(spec.query_heads, "attention heads")?,
@@ -2029,7 +2051,8 @@ impl AttentionRuntime {
             u32::from(spec.causal),
         ];
         let dispatch = row_dispatch(
-            spec.query_tokens.div_ceil(if spec.head_dim <= 128 { 16 } else { 8 }),
+            spec.query_tokens
+                .div_ceil(if spec.head_dim <= 128 { 16 } else { 8 }),
             spec.query_heads,
             &self.ops.context.limits,
         )?;
@@ -2039,7 +2062,11 @@ impl AttentionRuntime {
         self.ops.write_f32(self.v, v)?;
         self.ops.record_linear_dispatch(
             &commands,
-            if spec.head_dim <= 128 { ATTENTION_ONLINE } else { ATTENTION_ONLINE_WIDE },
+            if spec.head_dim <= 128 {
+                ATTENTION_ONLINE
+            } else {
+                ATTENTION_ONLINE_WIDE
+            },
             self.ops.arena_bindings,
             &push,
             dispatch,
@@ -2048,7 +2075,6 @@ impl AttentionRuntime {
         output.copy_from_slice(self.ops.read_f32(self.output, output.len())?);
         Ok(())
     }
-
 }
 
 /// One shared CHW arena for a VAE; immutable weights retain stable source addresses.
