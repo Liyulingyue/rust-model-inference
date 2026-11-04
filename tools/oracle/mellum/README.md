@@ -235,11 +235,64 @@ worse, not better: 5785 ms versus 2053 ms.
 stay on the CPU and `--compute auto` matches `--compute cpu` instead of
 losing 40%. The scope is per call, so nothing else in the trunk is affected.
 
-This is a workaround, not the fix: the device should get the token stream in
-batches. The trunk has no batched path at all today (`forward_token` walks
-the MoE routing one token at a time, and `run_forward_logits_mellum_with_batch`
-explicitly ignores its `batch_size` argument), so the batched prefill that
-would make the device win is tracked in `docs/develop/TODO.md` (TODO-049).
+### The batched prefill
+
+The fix for the *shape* is to stop evaluating one token at a time during
+the prefill. `MellumRunner::forward_tokens` (`src/models/mellum/trunk/batch.rs`)
+evaluates the prompt as one batch, so every projection carries all the rows
+at once.
+
+The arithmetic does not change: a projection is a per-row product and the
+Q8_0 kernels accumulate each row independently, so a row's result does not
+depend on how many rows share the call. The device path was checked
+directly — the 2304 -> 98304 output head at 2, 4 and 8 rows gives **0
+mismatches** against the single row device path and against the CPU path.
+The attention, the MoE routing and the expert fold run per row, in the same
+order as the single token walk, so the whole prompt is bit-identical:
+
+```sh
+# tests/mellum_batched_prefill.rs — the two paths, compared bit for bit
+cargo test --profile release-fast --features vulkan \
+  --test mellum_batched_prefill -- --nocapture
+# compared 42 prompt tokens, 98304 logits
+```
+
+What the batch buys is traffic. One token streams 2.1 GB of weights (22.5 MB
+of attention weights and 24 experts x 3 x 2.19 MB per layer, over 28
+layers), and the prompt streamed that once per token. Batched, every weight
+is read once for the whole prompt:
+
+| prompt | prefill, single token | prefill, batched |
+| --- | --- | --- |
+| 21 tokens | 2585 ms | 1085 ms |
+| 183 tokens | 7607 ms | 3247 ms |
+
+(The JEV prefill is the cleanest measurement — it is one prompt and no
+decode. The end to end numbers are 7558 ms -> 3121 ms for the 183 token
+prompt with 8 output tokens.)
+
+The device does **not** win the batched prefill on this box, and the reason
+is the upload, not the shape. The device reads a weight once for the whole
+batch, but it has to upload it first, and the host -> device path runs at
+~10 GB/s while a DRAM read runs at ~100 GB/s. A prefill touches every
+weight exactly once, so the upload is pure overhead: with the device taking
+`wq` and `wo` of all 28 layers (`RMI_MELLUM_DEVICE_PREFILL=1`), the JEV
+prefill went from 1073 ms to 1460 ms. The batched prefill therefore stays
+on the CPU by default, and the knob is there for the serving case, where
+the weights are uploaded once and reused by every request.
+
+The one shape where the device does win is the 240 MB output head, because
+that weight does not fit in cache and the CPU has to re-read it per row:
+
+| rows | device | CPU |
+| --- | --- | --- |
+| 1 | 3.43 ms | 2.36 ms |
+| 8 | 3.53 ms | 17.55 ms |
+| 32 | 5.32 ms | 75.60 ms |
+
+At 8 rows the device is 5x faster and at 32 rows 14x faster — but the
+prefill only needs the logits of the last position, so that shape is not
+available to the batched path.
 
 ## Limits
 
