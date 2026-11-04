@@ -1,0 +1,243 @@
+{
+  "validated_on": "2026-10-21",
+  "host": "Apple Silicon macOS, CPU, 8 inference threads",
+  "profile": "release-fast",
+  "oracle": {
+    "repository": "https://github.com/ggml-org/llama.cpp",
+    "commit": "11fe02151f79c41d0d4af7da708755d73b9c0da6",
+    "patch": "llama-trace.patch",
+    "hf_transformers": "5.19.0",
+    "external_acceleration": false,
+    "python_packages": {
+      "transformers": "5.19.0",
+      "torch": "2.9.1",
+      "numpy": "2.5.3"
+    }
+  },
+  "comparison": "Exact tokenizer and lossless layout/payload checks; numerical bounds for quantized/approximate operators. No whole-model bitwise parity claim.",
+  "files": [
+    {
+      "file": "models/PhysBrain1.5-2B-GGUF/physbrain-1.5-2b-Q8_0.gguf",
+      "bytes": 2194718944,
+      "sha256": "07202f65d7a8514661f5331ed5d8ea78393926b3ec6d9b03730c19de55a6e00c",
+      "source": "https://modelscope.cn/models/DeepCybo/PhysBrain1.5-2B",
+      "converted_locally": true,
+      "tensor_types": [
+        "BF16",
+        "F32",
+        "Q8_0"
+      ],
+      "tensor_count": 310,
+      "tensor_inventory_sha256": "581177ba76006f27a1036836aaf70e22c264f310b447562e15057c5ce67c1eaf",
+      "metadata": {
+        "general.architecture": "qwen3vl",
+        "general.name": "PhysBrain1.5-2B",
+        "general.basename": "PhysBrain1.5-2B",
+        "general.size_label": "2B",
+        "general.file_type": 7,
+        "general.quantization_version": 2,
+        "general.base_model.0.name": "Qwen3-VL-2B-Instruct",
+        "general.base_model.0.organization": "Qwen",
+        "general.base_model.0.repo_url": "https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct",
+        "general.base_model.count": 1,
+        "qwen3vl.embedding_length": 2048,
+        "qwen3vl.block_count": 28,
+        "qwen3vl.attention.head_count": 16,
+        "qwen3vl.attention.head_count_kv": 8,
+        "qwen3vl.rope.dimension_count": 128,
+        "qwen3vl.rope.dimension_sections": [
+          24,
+          20,
+          20,
+          0
+        ]
+      }
+    },
+    {
+      "file": "models/PhysBrain1.5-2B-GGUF/mmproj-physbrain-1.5-2b-F16.gguf",
+      "bytes": 819394528,
+      "sha256": "1a59b05ec70b5369456234e5274dbc11c8303fc1a32c078268f318c3a73e9faf",
+      "source": "https://modelscope.cn/models/DeepCybo/PhysBrain1.5-2B",
+      "converted_locally": true,
+      "tensor_types": [
+        "F16",
+        "F32"
+      ],
+      "tensor_count": 316,
+      "tensor_inventory_sha256": "c2b44e655939908bb62342450254c0be93b9ae745353ded7177419effa4932fb",
+      "metadata": {
+        "general.architecture": "clip",
+        "general.name": "PhysBrain1.5-2B-mmproj",
+        "general.file_type": 1,
+        "clip.has_vision_encoder": true,
+        "clip.projector_type": "qwen3vl_merger",
+        "clip.vision.embedding_length": 1024,
+        "clip.vision.feed_forward_length": 4096,
+        "clip.vision.block_count": 24,
+        "clip.vision.attention.head_count": 16,
+        "clip.vision.image_size": 768,
+        "clip.vision.patch_size": 16,
+        "clip.vision.projection_dim": 2048,
+        "clip.vision.spatial_merge_size": 2,
+        "clip.vision.attention.layer_norm_epsilon": 9.999999974752427e-07,
+        "clip.use_gelu": true,
+        "clip.vision.image_mean": [
+          0.5,
+          0.5,
+          0.5
+        ],
+        "clip.vision.image_std": [
+          0.5,
+          0.5,
+          0.5
+        ],
+        "clip.vision.is_deepstack_layers": [
+          false,
+          false,
+          false,
+          false,
+          false,
+          true,
+          false,
+          false,
+          false,
+          false,
+          false,
+          true,
+          false,
+          false,
+          false,
+          false,
+          false,
+          true,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false
+        ]
+      }
+    }
+  ],
+  "text_prompt": "What is 2+2?",
+  "text": {
+    "physbrain": {
+      "prompt_tokens": 19,
+      "generated_ids": [
+        17,
+        488,
+        220,
+        17,
+        284,
+        220,
+        19,
+        271
+      ],
+      "logits": [
+        {
+          "relative_l2": 0.040462115698063274,
+          "max_abs": 0.6277709007263184
+        },
+        {
+          "relative_l2": 0.04884795762297285,
+          "max_abs": 0.37379980087280273
+        },
+        {
+          "relative_l2": 0.026452114184951785,
+          "max_abs": 0.22527778148651123
+        },
+        {
+          "relative_l2": 0.030334944439761202,
+          "max_abs": 0.28279638290405273
+        },
+        {
+          "relative_l2": 0.035481081538171665,
+          "max_abs": 0.29614853858947754
+        },
+        {
+          "relative_l2": 0.028730064274614452,
+          "max_abs": 0.2905661463737488
+        },
+        {
+          "relative_l2": 0.017206938706378967,
+          "max_abs": 0.23804962635040283
+        },
+        {
+          "relative_l2": 0.02377295689618877,
+          "max_abs": 0.3357725143432617
+        }
+      ],
+      "relative_l2_bound": 0.05,
+      "comparison": "numerical (quantized/approximate operators)"
+    }
+  },
+  "vision": {
+    "input": "512x512 already normalized debug RGB [0,0,1]",
+    "physbrain": {
+      "relative_l2_f32_weights": 0.00341198,
+      "relative_l2_q8_0_weights": 0.16355313,
+      "relative_l2_interleaved_axis_q8_0_weights": 0.56,
+      "deepstack_outputs": 3,
+      "reference": "identical weights widened exactly to F32; F32 activations",
+      "bound_f32_weights": 0.01,
+      "bound_q8_0_weights": 0.25,
+      "note": "The Q8_0 bound is the production envelope: the vision tower's weights are quantized to Q8_0, the error compounds through the ViT and is amplified by the massive activations that start at layer 10. The F32 bound isolates the structure of the tower."
+    }
+  },
+  "limitations": [
+    "Original F16 execution has vision relative L2 about 0.0442 for PhysBrain; the primary vision comparison uses the exact same weight values with F32 activations.",
+    "Qwen3-VL F32 weight caches increase memory and may affect throughput; no performance benchmark.",
+    "PhysBrain CLI requires --kv-cache f16; robot action decoding/execution is outside the generic inference path."
+  ],
+  "baseline_failures": [
+    "qwen35_config_rejects_invalid_tensor_dimensions"
+  ],
+  "regressions": {
+    "qwen35_neon_layer_norm": {
+      "cause": "Loaded four F32 lanes but advanced by eight, skipping half of each row. The existing grouped-variance check is restored by correcting the stride.",
+      "before_input_relative_l2": 0.00046011892845854163,
+      "before_first_query_relative_l2": 0.468722939491272,
+      "checks": [
+        "layer_norm_stats_include_every_simd_lane_and_tail",
+        "layer_norm_stats_match_ggml_grouped_f32_variance"
+      ]
+    }
+  },
+  "checks": {
+    "contracts": {
+      "physbrain": 13
+    },
+    "exact_tokenizer_models": 1,
+    "actual_cli_vision_oracles": 1,
+    "qwen35_unit_passed": 75,
+    "qwen35_unit_ignored": 5,
+    "qwen35_baseline_excluded": 1,
+    "related_unit_passed": 21,
+    "python_self_checks": 2,
+    "vulkan_library_and_cli_compile": "passed",
+    "rustfmt": "passed",
+    "diff_whitespace": "passed",
+    "vision_oracle_runs": 2
+  },
+  "cli_smoke": {
+    "blue_image": {
+      "physbrain": "The color of the image is blue."
+    }
+  },
+  "revalidation": {
+    "date": "2026-11-04",
+    "host": "Linux aarch64 (20 cores), CPU only, NEON",
+    "profile": "release-fast",
+    "oracle_repository": "https://github.com/ggml-org/llama.cpp",
+    "oracle_commit": "11fe02151f79c41d0d4af7da708755d73b9c0da6",
+    "oracle_build": "NEON; the scalar build differs by 0.00085 in the same comparison",
+    "notes": [
+      "The converter reproduces both GGUF files byte for byte from the ModelScope safetensors: physbrain-1.5-2b-Q8_0.gguf and mmproj-physbrain-1.5-2b-F16.gguf match the recorded SHA-256 values.",
+      "The 13 contract tests pass against the real weights; they are #[ignore]d so a run without the GGUF reports them as ignored instead of passed.",
+      "The tokenizer oracle passes.",
+      "The text logits oracle does not pass on this host, and does not pass on main either: step 0 is a near tie (tokens 17 and 785 differ by 0.075 logits) and the relative L2 reaches 0.0677 against a 0.05 bound. llama.cpp reproduces the recorded greedy ids exactly, so the reference side is not the problem. The recorded 0.0488 was already at 97.7% of the bound, so that fixture does not travel between hosts.",
+      "The vision oracle passes with the two bounds above; with the interleaved axis assignment the same comparison measures 0.56000 and fails."
+    ]
+  }
+}
