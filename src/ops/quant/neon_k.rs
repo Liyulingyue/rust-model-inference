@@ -494,7 +494,6 @@ pub(crate) unsafe fn vec_dot_q6k_q8k_neon_bits(q6k_data: &[u8], q8k: &[BlockQ8K]
     sumf
 }
 
-
 /// Fast NEON dotprod kernel for Q6_K × Q8_K.
 ///
 /// Mathematically equivalent to [`vec_dot_q6k_q8k_neon_bits`] but uses
@@ -554,14 +553,28 @@ pub(crate) unsafe fn vec_dot_q6k_q8k_neon(q6k_data: &[u8], q8k: &[BlockQ8K]) -> 
                     let back = vnegq_s8(vreinterpretq_s8_u8(vdupq_n_u8($shift)));
                     let high0 = vshlq_n_u8(vandq_u8(vshlq_u8(qh0, back), high_mask), 4);
                     let high1 = vshlq_n_u8(vandq_u8(vshlq_u8(qh1, back), high_mask), 4);
-                    let weight0 = vreinterpretq_s8_u8(vsubq_u8(vorrq_u8(nib0, high0), vdupq_n_u8(32)));
-                    let weight1 = vreinterpretq_s8_u8(vsubq_u8(vorrq_u8(nib1, high1), vdupq_n_u8(32)));
+                    let weight0 =
+                        vreinterpretq_s8_u8(vsubq_u8(vorrq_u8(nib0, high0), vdupq_n_u8(32)));
+                    let weight1 =
+                        vreinterpretq_s8_u8(vsubq_u8(vorrq_u8(nib1, high1), vdupq_n_u8(32)));
                     let dot0 = vdotq_s32(zero32, weight0, vld1q_s8(act_chunk.add($g * 32)));
                     let dot1 = vdotq_s32(zero32, weight1, vld1q_s8(act_chunk.add($g * 32 + 16)));
                     if $g % 2 == 0 {
-                        acc_even = vaddq_s32(acc_even, vaddq_s32(vmulq_n_s32(dot0, i32::from(scales[base + $g * 2] as i8)), vmulq_n_s32(dot1, i32::from(scales[base + $g * 2 + 1] as i8))));
+                        acc_even = vaddq_s32(
+                            acc_even,
+                            vaddq_s32(
+                                vmulq_n_s32(dot0, i32::from(scales[base + $g * 2] as i8)),
+                                vmulq_n_s32(dot1, i32::from(scales[base + $g * 2 + 1] as i8)),
+                            ),
+                        );
                     } else {
-                        acc_odd = vaddq_s32(acc_odd, vaddq_s32(vmulq_n_s32(dot0, i32::from(scales[base + $g * 2] as i8)), vmulq_n_s32(dot1, i32::from(scales[base + $g * 2 + 1] as i8))));
+                        acc_odd = vaddq_s32(
+                            acc_odd,
+                            vaddq_s32(
+                                vmulq_n_s32(dot0, i32::from(scales[base + $g * 2] as i8)),
+                                vmulq_n_s32(dot1, i32::from(scales[base + $g * 2 + 1] as i8)),
+                            ),
+                        );
                     }
                 }};
             }
@@ -576,10 +589,8 @@ pub(crate) unsafe fn vec_dot_q6k_q8k_neon(q6k_data: &[u8], q8k: &[BlockQ8K]) -> 
     vaddvq_f32(sums)
 }
 
-
 #[cfg(test)]
 mod tests {
-
 
     use super::*;
     use crate::ops::quant::{
@@ -864,9 +875,6 @@ mod tests {
         } else {
             diff
         };
-        assert!(
-            rel < 3e-3,
-            "dotprod={neon} scalar={scalar} rel={rel}"
-        );
+        assert!(rel < 3e-3, "dotprod={neon} scalar={scalar} rel={rel}");
     }
 }

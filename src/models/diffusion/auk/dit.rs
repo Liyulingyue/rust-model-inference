@@ -133,7 +133,10 @@ mod contract_tests {
         assert_eq!(grid.len(), 5);
         for (index, value) in grid.iter().enumerate() {
             let want = index as f32 / 4.0;
-            assert!((value - want).abs() < 1e-6, "grid[{index}] {value} != {want}");
+            assert!(
+                (value - want).abs() < 1e-6,
+                "grid[{index}] {value} != {want}"
+            );
         }
     }
 }
@@ -294,8 +297,22 @@ impl ConvPosEmbedding {
         tmp: &mut [f32],
         out: &mut [f32],
     ) {
-        grouped_conv1d_mish(pool, &self.conv0_weight, &self.conv0_bias, input, n_tokens, tmp);
-        grouped_conv1d_mish(pool, &self.conv1_weight, &self.conv1_bias, tmp, n_tokens, out);
+        grouped_conv1d_mish(
+            pool,
+            &self.conv0_weight,
+            &self.conv0_bias,
+            input,
+            n_tokens,
+            tmp,
+        );
+        grouped_conv1d_mish(
+            pool,
+            &self.conv1_weight,
+            &self.conv1_bias,
+            tmp,
+            n_tokens,
+            out,
+        );
     }
 }
 
@@ -415,12 +432,7 @@ fn grouped_conv1d_mish_range(
             // The four channels of a block always share the same group
             // because `OUT_PER_GROUP` is a multiple of `CONV_ACC`.
             let in_base = (oc / OUT_PER_GROUP) * IN_PER_GROUP;
-            let mut acc = [
-                bias[oc],
-                bias[oc + 1],
-                bias[oc + 2],
-                bias[oc + 3],
-            ];
+            let mut acc = [bias[oc], bias[oc + 1], bias[oc + 2], bias[oc + 3]];
             for k in 0..CONV_POS_KERNEL {
                 let Some(src_token) = token.checked_add(k).and_then(|t| t.checked_sub(PAD)) else {
                     continue;
@@ -748,8 +760,7 @@ impl AukDit {
                 //     v_cond + (v_cond - v_uncond) * cfg_strength
                 // Note the coefficient on `v_cond` is `1 + cfg`, not `cfg`.
                 for i in 0..velocity.len() {
-                    velocity[i] = velocity[i]
-                        + guidance_scale * (velocity[i] - uncond_velocity[i]);
+                    velocity[i] = velocity[i] + guidance_scale * (velocity[i] - uncond_velocity[i]);
                 }
             }
             // A correct forward keeps the velocity bounded; non-finite values
@@ -921,7 +932,11 @@ impl AukDit {
         }
         super::super::common::require_finite(&scratch.img, "audio_embed")?;
         if std::env::var("RMI_AUK_DEBUG").is_ok() {
-            eprintln!("[auk-debug] audio_embed rms={:.4} max={:.4}", rms(&scratch.img), max_abs(&scratch.img));
+            eprintln!(
+                "[auk-debug] audio_embed rms={:.4} max={:.4}",
+                rms(&scratch.img),
+                max_abs(&scratch.img)
+            );
         }
         if let Some(dir) = std::env::var_os("RMI_AUK_DIT_DUMP") {
             let dir = std::path::PathBuf::from(dir);
@@ -1268,12 +1283,8 @@ fn load_f32_tensor(
     let info = source
         .tensor_info(name)
         .ok_or_else(|| format!("Missing tensor: {name}"))?;
-    let len = usize::try_from(
-        info.dims
-            .iter()
-            .product::<u64>(),
-    )
-    .map_err(|_| format!("Tensor {name} is too large"))?;
+    let len = usize::try_from(info.dims.iter().product::<u64>())
+        .map_err(|_| format!("Tensor {name} is too large"))?;
     if len != expected_len {
         return Err(format!(
             "Invalid {name} element count {len} (dims {:?}); expected {expected_len}",
@@ -1470,9 +1481,7 @@ fn flow_time_grid(
         }
     }
     let steps = steps.max(1);
-    let mut grid: Vec<f32> = (0..=steps)
-        .map(|i| i as f32 / steps as f32)
-        .collect();
+    let mut grid: Vec<f32> = (0..=steps).map(|i| i as f32 / steps as f32).collect();
     if let Some(sway) = sway_sampling_coef {
         for t in grid.iter_mut() {
             let pi = std::f32::consts::PI;
@@ -1646,11 +1655,7 @@ impl AukScratch {
         super::super::common::resize_zeroed(&mut self.text, (total) * HIDDEN, "AuK text")?;
         super::super::common::resize_zeroed(&mut self.joint, total * HIDDEN, "AuK joint")?;
         super::super::common::resize_zeroed(&mut self.qkv, total * QKV_DIM, "AuK qkv")?;
-        super::super::common::resize_zeroed(
-            &mut self.qkv_head,
-            total * QKV_DIM,
-            "AuK qkv_head",
-        )?;
+        super::super::common::resize_zeroed(&mut self.qkv_head, total * QKV_DIM, "AuK qkv_head")?;
         super::super::common::resize_zeroed(&mut self.qkv_c, total * QKV_DIM, "AuK qkv_c")?;
         super::super::common::resize_zeroed(&mut self.attention, total * HIDDEN, "AuK attention")?;
         // One private score row per pool thread: the attention runs its
@@ -1683,11 +1688,7 @@ impl AukScratch {
             total * PACKED_FF_IN,
             "AuK ff_packed",
         )?;
-        super::super::common::resize_zeroed(
-            &mut self.ff_gated,
-            total * FF_INNER,
-            "AuK ff_gated",
-        )?;
+        super::super::common::resize_zeroed(&mut self.ff_gated, total * FF_INNER, "AuK ff_gated")?;
         Ok(())
     }
 }
@@ -1815,12 +1816,7 @@ fn rms_norm_inplace_text(hidden: &mut [f32], weight: &[f32], n_tokens: usize) {
 /// out[2i]   = x[2i]   * cos - x[2i+1] * sin
 /// out[2i+1] = x[2i+1] * cos + x[2i]   * sin
 /// ```
-fn rope_apply_token(
-    x: &mut [f32],
-    head_dim: usize,
-    table_cos: &[f32],
-    table_sin: &[f32],
-) {
+fn rope_apply_token(x: &mut [f32], head_dim: usize, table_cos: &[f32], table_sin: &[f32]) {
     let half = head_dim / 2;
     if half == 0 || table_cos.len() < half || table_sin.len() < half {
         return;
@@ -2158,13 +2154,7 @@ fn run_double_block(
         text_tokens,
         &mut qkv_head[..total * QKV_DIM],
     );
-    attention_heads(
-        pool,
-        &qkv_head[..total * QKV_DIM],
-        total,
-        scores,
-        attention,
-    );
+    attention_heads(pool, &qkv_head[..total * QKV_DIM], total, scores, attention);
     profile::add(&profile::ATTENTION_NS, attention_started);
     stream_block_residual_mlp(
         linear,

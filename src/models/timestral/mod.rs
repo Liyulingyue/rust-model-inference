@@ -49,8 +49,10 @@ impl Config {
             #[serde(default)]
             block_schedule: Option<Vec<String>>,
         }
-        let json: ConfigJson = serde_json::from_str(&raw).map_err(|e| format!("invalid timestral.config: {e}"))?;
-        let num_layers = json.num_layers
+        let json: ConfigJson =
+            serde_json::from_str(&raw).map_err(|e| format!("invalid timestral.config: {e}"))?;
+        let num_layers = json
+            .num_layers
             .or_else(|| json.block_schedule.as_ref().map(|s| s.len()))
             .ok_or("timestral.config: neither num_layers nor block_schedule present")?;
         Ok(Self {

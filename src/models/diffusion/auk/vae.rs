@@ -191,9 +191,9 @@ pub(super) fn upsample_ratio2(
     let pad = AA_KERNEL / AA_RATIO - 1; // 5
     let pad_left = pad * stride + (AA_KERNEL - stride) / 2; // 15
     let pad_right = pad * stride + (AA_KERNEL - stride + 1) / 2; // 15
-    // `F.pad(x, (pad, pad), mode="replicate")` then a stride-`stride`
-    // depthwise transposed convolution: output length = (padded - 1) * stride
-    // + kernel_size, then the centre trim.
+                                                                 // `F.pad(x, (pad, pad), mode="replicate")` then a stride-`stride`
+                                                                 // depthwise transposed convolution: output length = (padded - 1) * stride
+                                                                 // + kernel_size, then the centre trim.
     let padded_frames = frames + 2 * pad;
     let full = (padded_frames - 1) * stride + AA_KERNEL;
     let out_frames = full - pad_left - pad_right;
@@ -424,7 +424,8 @@ impl BigVGANFlowVae {
         // checkpoint; we verify the resblock copies match the reference).
         let aa_filter = AaFilter::load(source.as_ref(), "activation_post.upsample.filter")?;
         {
-            let down = AaFilter::load(source.as_ref(), "activation_post.downsample.lowpass.filter")?;
+            let down =
+                AaFilter::load(source.as_ref(), "activation_post.downsample.lowpass.filter")?;
             if down.taps != aa_filter.taps {
                 return Err("AuK VAE upsample/downsample filters differ".into());
             }
@@ -687,8 +688,8 @@ impl BigVGANFlowVae {
                     for unit in start..end {
                         let p = unit / out_ch_const;
                         let oc = unit % out_ch_const;
-                        let row = &mut ph_slice
-                            [(p * out_ch_const + oc) * frames_const..][..frames_const];
+                        let row =
+                            &mut ph_slice[(p * out_ch_const + oc) * frames_const..][..frames_const];
                         for value in row.iter_mut() {
                             *value = 0.0;
                         }
@@ -797,16 +798,7 @@ impl BigVGANFlowVae {
         // `conv_post` is built with `causal=True`, so it left-pads with
         // `1 * (7 - 1) = 6` zeros (instead of the symmetric padding=3 used
         // by `conv_pre`, which is `causal=False`).
-        let mut mono = causal_conv1d(
-            &pre,
-            channels_post,
-            1,
-            7,
-            1,
-            &self.conv_post,
-            None,
-            frames,
-        )?;
+        let mut mono = causal_conv1d(&pre, channels_post, 1, 7, 1, &self.conv_post, None, frames)?;
         if let Some(dir) = dump.as_ref() {
             dump_tensor(dir, "act_post", &pre);
             dump_tensor(dir, "conv_post", &mono);
@@ -1018,9 +1010,8 @@ pub(super) fn apply_branch_conv_dilated(
                 break;
             }
             for ic in 0..channels_const {
-                let src = &p_slice
-                    [ic * padded_frames_const + src_start
-                        ..ic * padded_frames_const + src_start + frames_const];
+                let src = &p_slice[ic * padded_frames_const + src_start
+                    ..ic * padded_frames_const + src_start + frames_const];
                 for oc in start..end {
                     // Weight layout is [kernel][in][out].
                     let w = w_slice[(k * channels_const + ic) * channels_const + oc];
@@ -1035,7 +1026,6 @@ pub(super) fn apply_branch_conv_dilated(
     });
     x.copy_from_slice(&out);
 }
-
 
 pub(super) const HIDDEN: usize = 1536;
 
@@ -1172,7 +1162,8 @@ fn causal_conv1d(
                 let w = weight[(k * in_channels + ic) * out_channels + oc];
                 crate::ops::vec_scaled_add_inplace(
                     w,
-                    &padded[ic * padded_frames + src_start..ic * padded_frames + src_start + frames],
+                    &padded
+                        [ic * padded_frames + src_start..ic * padded_frames + src_start + frames],
                     row,
                 );
             }
@@ -1463,13 +1454,12 @@ mod tests {
         };
         // Scratch dumps live under the repository's `target/` directory so
         // nothing leaks outside the workspace.
-        let dump_dir = std::path::PathBuf::from(
-            std::env::var_os("RMI_AUK_VAE_DUMP").unwrap_or_else(|| {
+        let dump_dir =
+            std::path::PathBuf::from(std::env::var_os("RMI_AUK_VAE_DUMP").unwrap_or_else(|| {
                 std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                     .join("target/auk-reference/rust-vae")
                     .into_os_string()
-            }),
-        );
+            }));
         std::fs::create_dir_all(&dump_dir).expect("create dump dir");
 
         let bytes = std::fs::read(&latent_path).expect("read latent");
@@ -1487,7 +1477,11 @@ mod tests {
             crate::ops::enable_gpu();
         }
         let audio = vae.decode(&latent, 24000).expect("decode");
-        dump_tensor(&dump_dir, "out", &audio.samples.iter().map(|v| *v as f32).collect::<Vec<_>>());
+        dump_tensor(
+            &dump_dir,
+            "out",
+            &audio.samples.iter().map(|v| *v as f32).collect::<Vec<_>>(),
+        );
         eprintln!("decoded {} samples", audio.samples.len());
     }
 }

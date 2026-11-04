@@ -441,7 +441,12 @@ impl<'a, 'w> CpuExecutor<'a, 'w> {
         for (name, slot) in checkpoints {
             let values = self.borrow(slot);
             let shape: Vec<usize> = match slot {
-                Slot::Q | Slot::K | Slot::V => vec![self.rows, self.seq, self.model.config.num_heads, self.model.config.hd()],
+                Slot::Q | Slot::K | Slot::V => vec![
+                    self.rows,
+                    self.seq,
+                    self.model.config.num_heads,
+                    self.model.config.hd(),
+                ],
                 _ => vec![self.rows, self.seq, self.model.config.d_model],
             };
             super::trace(&name, &shape, values)?;

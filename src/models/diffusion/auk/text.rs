@@ -105,7 +105,10 @@ impl AukTextEncoder {
             return Err("AuK layer fusion parameters contain non-finite values".into());
         }
         // Numerically stable softmax.
-        let max = layer_weights.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let max = layer_weights
+            .iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, f32::max);
         let mut weights: Vec<f32> = layer_weights.iter().map(|w| (w - max).exp()).collect();
         let sum: f32 = weights.iter().sum();
         if !(sum.is_finite() && sum > 0.0) {

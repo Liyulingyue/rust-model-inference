@@ -150,7 +150,10 @@ unsafe fn vec_scaled_add_avx2(scale: f32, a: &[f32], b: &mut [f32]) {
         let va = _mm256_loadu_ps(a.as_ptr().add(i));
         let vb = _mm256_loadu_ps(b.as_ptr().add(i));
         // Separate multiply and add (no FMA) to stay bit-identical to scalar.
-        _mm256_storeu_ps(b.as_mut_ptr().add(i), _mm256_add_ps(vb, _mm256_mul_ps(va, vs)));
+        _mm256_storeu_ps(
+            b.as_mut_ptr().add(i),
+            _mm256_add_ps(vb, _mm256_mul_ps(va, vs)),
+        );
         i += 8;
     }
     while i < n {

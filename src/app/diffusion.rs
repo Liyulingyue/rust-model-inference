@@ -886,9 +886,7 @@ pub fn run_auk_cli(
         (steps, cfg_scale.unwrap_or(2.0), sway_sampling_coef, None)
     };
     if auk_flash {
-        println!(
-            "[AuK] AuK-Flash recipe: {steps} steps, cfg {guidance_scale}, pinned time grid"
-        );
+        println!("[AuK] AuK-Flash recipe: {steps} steps, cfg {guidance_scale}, pinned time grid");
     }
     let options = crate::models::diffusion::auk::AukOptions {
         steps,

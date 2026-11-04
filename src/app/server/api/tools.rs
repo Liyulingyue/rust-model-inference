@@ -204,7 +204,11 @@ pub fn build_prompt(
             enable_thinking,
         )?
         .unwrap_or_else(|| {
-            let bot_suffix = if enable_thinking { "<think>" } else { "</think>" };
+            let bot_suffix = if enable_thinking {
+                "<think>"
+            } else {
+                "</think>"
+            };
             format!(
                 "{sos}<|System|>\nyou are a helpful assistant.{eos}\
                  {sos}<|User|>{user_text}{eos}\

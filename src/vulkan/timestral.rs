@@ -108,12 +108,16 @@ impl Transformer {
             .checked_add(q4_1_sum_bytes)
             .ok_or(VulkanError::OutOfMemory)?;
         // Q4_K/Q5_K/Q6_K quantize the activation to Q8_K (256-value blocks).
-        let q8k_bytes = capacity.checked_mul(max_in).ok_or(VulkanError::OutOfMemory)?;
+        let q8k_bytes = capacity
+            .checked_mul(max_in)
+            .ok_or(VulkanError::OutOfMemory)?;
         regions[15] = ArenaRegion {
             offset: size,
             size: q8k_bytes,
         };
-        size = size.checked_add(q8k_bytes).ok_or(VulkanError::OutOfMemory)?;
+        size = size
+            .checked_add(q8k_bytes)
+            .ok_or(VulkanError::OutOfMemory)?;
         let q8k_scale_bytes = capacity
             .checked_mul(max_in / 256)
             .and_then(|n| n.checked_mul(16))
@@ -305,7 +309,9 @@ impl Transformer {
     pub(crate) fn forward(&self, input: &[f32], layout: &Layout) -> Result<Vec<f32>, VulkanError> {
         let (r, s) = (layout.rows, layout.seq());
         let count = r.checked_mul(s).ok_or(VulkanError::OutOfMemory)?;
-        if count > self.capacity || input.len() != count * self.config.d_model || input.iter().any(|v| !v.is_finite())
+        if count > self.capacity
+            || input.len() != count * self.config.d_model
+            || input.iter().any(|v| !v.is_finite())
         {
             return Err(VulkanError::UnsupportedShape(
                 "invalid Timestral GPU input".into(),
@@ -336,7 +342,8 @@ impl Transformer {
         let mut coefficients = Vec::with_capacity(s * rope_hd_half);
         for slot in 0..s {
             for i in 0..hd / 4 {
-                let theta = layout.position(slot) / 10000f32.powf((2 * i) as f32 / rope_hd_half as f32);
+                let theta =
+                    layout.position(slot) / 10000f32.powf((2 * i) as f32 / rope_hd_half as f32);
                 let (sin, cos) = theta.sin_cos();
                 coefficients.extend([cos, sin]);
             }
@@ -363,7 +370,12 @@ impl Transformer {
                     for (name, slot) in op.trace {
                         let shape = match slot {
                             Slot::Q | Slot::K | Slot::V => {
-                                vec![geometry[0], geometry[2], self.config.num_heads, self.config.hd()]
+                                vec![
+                                    geometry[0],
+                                    geometry[2],
+                                    self.config.num_heads,
+                                    self.config.hd(),
+                                ]
                             }
                             _ => vec![geometry[0], geometry[2], self.config.d_model],
                         };

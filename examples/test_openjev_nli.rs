@@ -42,9 +42,8 @@ fn fmt_f(x: f32, decimals: usize) -> String {
 }
 
 fn main() {
-    let source: Arc<dyn rust_model_inference::core::tensor::TensorSource> = Arc::from(
-        open_model_source(&gguf_path(), ComponentRole::Llm).expect("load GGUF"),
-    );
+    let source: Arc<dyn rust_model_inference::core::tensor::TensorSource> =
+        Arc::from(open_model_source(&gguf_path(), ComponentRole::Llm).expect("load GGUF"));
     let tokenizer =
         BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned()).expect("tokenizer");
 
