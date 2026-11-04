@@ -392,6 +392,74 @@ pub fn require_tensor_type<S: TensorSource + ?Sized>(
     Ok(ggml_type)
 }
 
+/// Borrow a tensor's raw bytes after checking its shape and its type.
+///
+/// The shape, the storage type and the payload length all have to match
+/// before the bytes are read: a loader that skips any of them ends up
+/// decoding a payload it does not own. `dims` must be a non-empty shape
+/// without a zero, because a zero-length axis has no bytes to read.
+///
+/// This is the canonical helper for "validate a tensor and borrow it in one
+/// step". Models should call this instead of reimplementing the check. See
+/// `docs/MODEL_ORGANIZATION.md` §6 for the rationale.
+pub fn typed_tensor_bytes<'a, S: TensorSource + ?Sized>(
+    source: &'a S,
+    name: &str,
+    dims: &[u64],
+    kind: GGMLType,
+) -> Result<&'a [u8], String> {
+    if dims.is_empty() || dims.contains(&0) {
+        return Err(format!(
+            "Invalid tensor {name}: expected a non-zero shape, got {dims:?}"
+        ));
+    }
+    require_tensor_type(source, name, dims, &[kind])?;
+    Ok(source
+        .tensor_slice(name)
+        .ok_or_else(|| format!("Missing tensor data: {name}"))?)
+}
+
+/// Borrow a tensor's raw bytes, checking its shape and that it is F32.
+///
+/// Some loaders keep the bytes and decode them later — a vision tower that
+/// hands the same bias to several matmuls, for instance — so
+/// [`load_f32_tensor`] cannot be used: it decodes eagerly and does not
+/// accept BF16. Such a loader has to know the storage type up front,
+/// because it decodes four bytes per element.
+pub fn f32_tensor_bytes<'a, S: TensorSource + ?Sized>(
+    source: &'a S,
+    name: &str,
+    dims: &[u64],
+) -> Result<&'a [u8], String> {
+    typed_tensor_bytes(source, name, dims, GGMLType::F32)
+}
+
+/// Borrow an optional tensor's raw bytes, rejecting storage that is not F32.
+///
+/// This is the optional counterpart of [`f32_tensor_bytes`]: a missing
+/// tensor is `Ok(None)`, because the caller decides whether the tensor is
+/// optional. A present tensor of the wrong type is an error, because
+/// decoding it as F32 would read it at half length and let the caller walk
+/// off the end of the buffer.
+///
+/// See `docs/MODEL_ORGANIZATION.md` §6 for the rationale on keeping this
+/// next to the other tensor helpers instead of in each model.
+pub fn optional_f32_tensor_bytes<'a, S: TensorSource + ?Sized>(
+    source: &'a S,
+    name: &str,
+) -> Result<Option<&'a [u8]>, String> {
+    let Some(info) = source.tensor_info(name) else {
+        return Ok(None);
+    };
+    if info.ggml_type != GGMLType::F32 {
+        return Err(format!(
+            "{name} must be F32, found {:?}: this tensor decodes four bytes per element",
+            info.ggml_type
+        ));
+    }
+    Ok(source.tensor_slice(name))
+}
+
 /// Load a 1-D tensor as `Vec<f32>`, accepting both F32 and BF16 storage.
 ///
 /// This is the canonical helper for "norm weights" which ship as either F32
@@ -527,6 +595,55 @@ mod tests {
         };
         let bytes = vec![0u8; info.checked_nbytes().unwrap_or(0) as usize];
         Source { info, bytes }
+    }
+
+    #[test]
+    fn typed_tensor_bytes_returns_the_payload_after_checking_it() {
+        let source = source(GGMLType::F32, &[4]);
+        assert_eq!(
+            typed_tensor_bytes(&source, "weight", &[4], GGMLType::F32).map(|b| b.len()),
+            Ok(16)
+        );
+    }
+
+    #[test]
+    fn typed_tensor_bytes_rejects_a_shape_with_a_zero_axis() {
+        let source = source(GGMLType::F32, &[0]);
+        let error = typed_tensor_bytes(&source, "weight", &[0], GGMLType::F32).unwrap_err();
+        assert!(error.contains("non-zero shape"), "{error}");
+    }
+
+    #[test]
+    fn f32_tensor_bytes_rejects_storage_that_is_not_f32() {
+        let source = source(GGMLType::BF16, &[4]);
+        let error = f32_tensor_bytes(&source, "weight", &[4]).unwrap_err();
+        assert!(error.contains("Invalid tensor weight"), "{error}");
+    }
+
+    /// The optional variant is the one a vision loader uses for a bias that
+    /// may be absent, so a missing tensor is not an error there.
+    #[test]
+    fn optional_f32_tensor_bytes_reports_a_missing_tensor_as_none() {
+        struct Empty;
+        impl TensorSource for Empty {
+            fn metadata(&self, _key: &str) -> Option<&MetaValue> {
+                None
+            }
+            fn tensor_info(&self, _name: &str) -> Option<&TensorInfo> {
+                None
+            }
+            fn tensor_slice(&self, _name: &str) -> Option<&[u8]> {
+                None
+            }
+        }
+        assert_eq!(optional_f32_tensor_bytes(&Empty, "weight").unwrap(), None);
+    }
+
+    #[test]
+    fn optional_f32_tensor_bytes_rejects_storage_that_is_not_f32() {
+        let source = source(GGMLType::BF16, &[4]);
+        let error = optional_f32_tensor_bytes(&source, "weight").unwrap_err();
+        assert!(error.contains("must be F32"), "{error}");
     }
 
     #[test]
