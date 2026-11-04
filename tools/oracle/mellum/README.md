@@ -264,11 +264,14 @@ is read once for the whole prompt:
 
 | measurement | single token | batched |
 | --- | --- | --- |
-| JEV prefill, 21 token prompt | 2585 ms | 1085 ms |
-| end to end, 183 token prompt + 8 output tokens | 7558 ms | 3121 ms |
+| JEV prefill, 21 token prompt | 2585 ms | 1014-1102 ms |
+| end to end, 21 token prompt + 8 output tokens | 1006-1119 ms | 594-643 ms |
+| end to end, 183 token prompt + 8 output tokens | 7558-8211 ms | 2911-3078 ms |
 
-The JEV prefill is the cleanest measurement — it is one prompt and no
-decode, so it isolates the prefill.
+8 threads, three runs each, `--compute cpu`; `--compute auto` is the same
+because the device no longer takes a Mellum projection. The JEV prefill is
+the cleanest measurement — it is one prompt and no decode, so it isolates
+the prefill.
 
 The device does **not** win the batched prefill on this box, and the reason
 is the upload, not the shape. The device reads a weight once for the whole
