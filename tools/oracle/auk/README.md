@@ -124,18 +124,9 @@ Vulkan 的 velocity cos = 0.9999945 … 0.9999999。
 
 ### 逐位可复现性（已知缺口）
 
-同一个进程内用同一份 prompt + seed 重复渲染：
-
-| 路径 | 重复渲染 | 结果 |
-| --- | --- | --- |
-| CPU | 8 次 | 8/8 逐位相同 |
-| Vulkan | 6 次 | 5 次相同、1 次不同（latent rms 1.315 vs 1.162） |
-
-用 `RMI_AUK_DIT_DUMP` 定位：`text_conditioning.f32`、`latent_in_0/1.f32`、
-`velocity_0/1.f32` 都逐位相同，差异从第三个 Euler 步（`velocity_2.f32`）开始，
-`velocity_cond_2.f32` 同样分叉 —— 采样参数、随机数和文本条件都是确定的，
-不稳定性在 DiT 的设备路径内部。这是 GPU 路径的既有问题，与 HTTP 接入无关；
-CLI 每次只渲染一次，所以用户拿到的是"抽签"结果，HTTP 服务连续渲染时更容易观察到。
+同一个进程内用同一份 prompt + seed 重复渲染，CPU 路径 8/8 逐位相同，Vulkan 路径
+约 6 次里有 1 次不同。定位过程、逐张量证据和待办记在
+[TODO](../../../docs/develop/TODO.md) 的 AuK 条目里。
 
 ## 修复的官方语义差异
 

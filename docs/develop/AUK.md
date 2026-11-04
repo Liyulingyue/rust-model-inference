@@ -174,13 +174,9 @@ curl -s -F prompt="The next train leaves in ten minutes." \
 
 ## 已知限制
 
-- **Vulkan 路径的渲染不是逐位可复现的**：同一进程内同一份 prompt + seed，CPU 路径
-  8 次渲染逐位相同，Vulkan 路径大约 6 次里有 1 次不同。用 `RMI_AUK_DIT_DUMP` 定位过：
-  text conditioning、`latent_in_0/1`、`velocity_0/1` 都逐位相同，差异从第 3 个 Euler
-  步（`velocity_2`）开始出现 —— 是 DiT 设备路径内部的不确定性，不是采样参数或
-  随机数的问题。CLI 每次只渲染一次，所以用户拿到的是"抽签"结果；HTTP 服务连续
-  渲染时更容易观察到。**CPU 路径不受影响**（逐位可复现）。这条与 HTTP 接入无关，
-  是 GPU 路径的既有问题，需要单独定位。
+- **Vulkan 路径的渲染不是逐位可复现的**（GPU 路径的既有问题，约 6 次渲染有 1 次
+  不同；CPU 路径稳定）：定位过程与证据见
+  [TODO](TODO.md) 的 AuK 条目。
 - **未接入 JEV**：AuK 是生成模型，不是打分模型，JEV 路由对它没有意义。
 - **Qwen2.5-Omni audio tower 未移植**（`thinker.audio_tower.*`）：CFMEdit 端到端需要
   外部提供 audio embeddings（例如用 Python 跑 Qwen audio tower 导出）。
