@@ -293,13 +293,59 @@ At 8 rows the device is 5x faster and at 32 rows 14x faster — but the
 prefill only needs the logits of the last position, so that shape is not
 available to the batched path.
 
+## PyTorch reference
+
+`tools/bench_mellum_pytorch.py` runs the official safetensors (bf16) through
+`transformers`, so the Rust Q8_0 path has an apples-to-apples reference
+(2026-11-03):
+
+| path | weights | prefill | decode |
+| --- | --- | --- | --- |
+| PyTorch, CPU | bf16 24.3 GB | 1.5 tok/s | 1.2 tok/s |
+| Rust, CPU | Q8_0 12.9 GB | not recorded | 1.2 tok/s |
+
+Same decode speed at half the memory. (The Rust prefill rate was not
+recorded in that run; the batched prefill came later, see the
+[Vulkan device path](#vulkan-device-path) section.)
+
+The CUDA run did not fit: the box had another tenant holding 82.7 GB of the
+unified memory (`tensorfold serve`) and the CUDA path needs about 48 GB of
+peak (the bf16 weights *plus* the CPU staging copy `from_pretrained` keeps
+while sharding). **The CUDA comparison is unverified** — the numbers above
+are CPU only.
+
+## Entry points
+
+| | |
+| --- | --- |
+| CLI text | `rust-model-inference --model <gguf> --prompt ...` |
+| CLI JEV | `--jev --jev-question ... --jev-option ... --jev-context ...` |
+| HTTP JEV | `POST /v1/jev/score`, `POST /v1/jev/grouped` |
+
+The JEV probabilities agree bit for bit between the CLI and the HTTP
+endpoint. A recorded CLI run:
+
+```
+choice: B
+probabilities:
+  A: 0.7335
+  B: 0.2665
+```
+
 ## Limits
 
 * Scalar only. The Rust side needs `RMI_SCALAR=1`; the repo's NEON kernels
   accumulate differently and are not expected to match bit for bit.
-* Single-token replay only (the harness and the trunk both step one token at a
-  time). There is no batched-prefill parity evidence.
+* The oracle harness is single-token: it replays the prompt one token at a
+  time, and the trunk has to do the same for the traces to line up. The
+  trunk *also* has a batched prefill now
+  ([`MellumRunner::forward_tokens`](../../../src/models/mellum/trunk/batch.rs)),
+  and it is bit-for-bit the single token walk
+  (`tests/mellum_batched_prefill.rs`), but it does not emit the per-slot
+  expert checkpoints, so there is no *oracle* parity evidence for it.
 * F32 KV cache only (`--kv-cache f32`); F16 KV is exercised only by the
   CLI smoke path.
-* No JEV / embedding / rerank parity — those entry points are not wired for
-  `mellum`.
+* JEV is wired (CLI and HTTP, probabilities bit-identical) but there is no
+  JEV parity evidence against the oracle. Embedding and rerank entry points
+  do not exist for `mellum`.
+* The CUDA reference above did not run; only the CPU side is verified.
