@@ -303,7 +303,11 @@ def bf16_bytes_to_q8_0(raw_bf16: bytes) -> bytes:
     words = np.frombuffer(raw_bf16, dtype="<u2")
     f32 = np.empty(words.size, dtype=np.float32)
     for i, bits in enumerate(words):
-        f32[i] = struct.unpack("<f", struct.pack("<I", bits << 16))[0]
+        # Convert to a Python int first: numpy 2 keeps the uint16 dtype for
+        # `<<`, so `bits << 16` overflows to 0 and every weight decodes as
+        # zero.
+        b = int(bits)
+        f32[i] = struct.unpack("<f", struct.pack("<I", b << 16))[0]
     return quantize_q8_0(f32)
 
 
@@ -356,6 +360,22 @@ def _gguf_meta_value(value) -> bytes:
     if isinstance(value, list):
         return struct.pack("<I", _T_ARRAY) + _gguf_array(value)
     raise TypeError(f"unsupported metadata value: {value!r}")
+
+
+def model_metadata_value(value):
+    """Use llama.cpp's model metadata types, preserving explicitly typed values."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return MetaScalar(_T_UINT32 if value >= 0 else _T_INT32, value)
+    if isinstance(value, float):
+        return MetaScalar(_T_FLOAT32, value)
+    if isinstance(value, list) and value:
+        if all(type(item) is int for item in value):
+            return MetaArray(_T_INT32, tuple(value))
+        if all(type(item) is float for item in value):
+            return MetaArray(_T_FLOAT32, tuple(value))
+    return value
 
 
 def _gguf_array(values: list) -> bytes:
