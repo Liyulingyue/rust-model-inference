@@ -141,6 +141,20 @@ NEON on aarch64; no AVX-512).
 - [ ] **token 维寄存器分块：消除 per-token 权重重读** — 详见 [TODO-019](#todo-019-token-维寄存器分块消除-per-token-权重重读)。
       文本编码只跑到约 11% 的 NEON 峰值，瓶颈是每个 token 都从 DRAM 重读整个权重矩阵。
       预期 1.5-2× 加速。
+- [ ] **AVX2 的 `exp_approx` clamp 与 shader 的 ±80、与上游的无 clamp 结构三者不一致** —
+      x86 CPU 路径用 clamp（`src/ops/math/exp.rs` 的 `FAST_EXP_CLAMP`，现为 ±88.0），
+      ARM NEON 路径用的是上游 llama.cpp 的结构（`|n| > 126` 走慢路径，**没有 clamp**），
+      Vulkan shader 用 ±80（补偿算法需要 `1/den` 保持正规数，见
+      [TODO-020](#todo-020-vulkan-silu-的-f32-次正规数缺陷--已修复但饱和边界不可回退)）。
+      三者的饱和边界因此不同：`x = 88.2` 时 NEON 走慢路径给出接近真值的 2.4e38，
+      x86 给 1.65e38（31% 偏差），GPU 给 exp(80) 的饱和值。
+      现状：x86 至少不再返回 `+inf`（旧 clamp `88.376_26` 会），并且
+      `FAST_EXP_CLAMP * log2(e) <= 127` 这个不变式由
+      `fast_exp_clamp_keeps_the_exponent_inside_the_f32_exponent_field` 守住。
+      选项：① 把 AVX2 改成镜像上游的 `|n| > 126 → 慢路径`（最彻底，x86 与 ARM 对齐，
+      但需要 x86 机器实测）；② 把 CPU clamp 收到 ±80 与 shader 对齐（牺牲 [80, 88.4]
+      的精度，换 CPU↔GPU 一致）；③ 维持现状，把三者的边界写进文档。
+      **必须在 x86 上实测才能定，不能在 aarch64 上单方面决定。**
 
 - [x] **LFM2.5-24B-A2B 适配 + 标量逐位对齐** — ✅ 已完成 (2026-10-15)。
       24B 总 / 2B 激活的 MoE，`lfm2moe` 架构：40 层 × 2048 宽 × 32 头（head_dim 64），注意力层
@@ -412,6 +426,16 @@ MiniCPM-V 4.7 的 `qwen35moe`（35B-A3B）此前只在**生成面**注册，多�
 
 ## Medium Priority
 
+- [ ] **PhysBrain 文本 logits oracle 的界限不可跨主机迁移** — `tools/oracle/physbrain` 的
+      文本对照用固定提示 `What is 2+2?`、8 步 greedy、relative L2 ≤ 0.05 的界限。
+      step 0 是**近似平局**（token 17 与 785 相差 0.075 logits），而记录的 0.0488
+      已经是界限的 97.7%，所以换一台主机或换一个参考构建就会翻转：实测
+      aarch64 + scalar llama.cpp 参考得到 relative L2 0.0677、首个 greedy token 就不同。
+      llama.cpp 侧能**精确复现**记录的 ids（`[17,488,220,17,284,220,19,271]`），
+      所以参考实现没有问题，是 fixture 的包络太紧。
+      现状：main 与本分支**同样不过**，属预存问题，不是回归。
+      选项：① 换一个 top-1 差距更大的提示并重录 oracle；② 放宽界限（例如 0.1）并
+      如实记录实际值；③ 除 argmax 外同时记录 top-k 命中率，让近似平局不再翻转判定。
 - [ ] **讨论：MemoryArena 与 BlockAllocator 组合**
 - [ ] **讨论：GPU 后端架构设计** — Vulkan / wgpu / CUDA 等多后端抽象
 - [ ] **讨论：SIMD 扩展路线** — 当前 AVX2+FMA、NEON。后续可考虑 AVX-512 (高端 CPU)、ARM SVE、AVX-VNNI (int8 dot)

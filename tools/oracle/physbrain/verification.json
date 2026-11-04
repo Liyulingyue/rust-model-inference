@@ -188,7 +188,8 @@
   "limitations": [
     "Original F16 execution has vision relative L2 about 0.0442 for PhysBrain; the primary vision comparison uses the exact same weight values with F32 activations.",
     "Qwen3-VL F32 weight caches increase memory and may affect throughput; no performance benchmark.",
-    "PhysBrain CLI requires --kv-cache f16; robot action decoding/execution is outside the generic inference path."
+    "PhysBrain CLI requires --kv-cache f16; robot action decoding/execution is outside the generic inference path.",
+    "The text logits comparison does not travel between hosts: step 0 is a near tie and the recorded relative L2 was already at 97.7% of its 0.05 bound, so the check fails on other hosts (it fails on main as well). The llama.cpp side reproduces the recorded greedy ids exactly. Tracked in docs/develop/TODO.md."
   ],
   "baseline_failures": [
     "qwen35_config_rejects_invalid_tensor_dimensions"
@@ -236,7 +237,7 @@
       "The converter reproduces both GGUF files byte for byte from the ModelScope safetensors: physbrain-1.5-2b-Q8_0.gguf and mmproj-physbrain-1.5-2b-F16.gguf match the recorded SHA-256 values.",
       "The 13 contract tests pass against the real weights; they are #[ignore]d so a run without the GGUF reports them as ignored instead of passed.",
       "The tokenizer oracle passes.",
-      "The text logits oracle does not pass on this host, and does not pass on main either: step 0 is a near tie (tokens 17 and 785 differ by 0.075 logits) and the relative L2 reaches 0.0677 against a 0.05 bound. llama.cpp reproduces the recorded greedy ids exactly, so the reference side is not the problem. The recorded 0.0488 was already at 97.7% of the bound, so that fixture does not travel between hosts.",
+      "The text logits oracle does not pass on this host, and does not pass on main either; see the limitations entry.",
       "The vision oracle passes with the two bounds above; with the interleaved axis assignment the same comparison measures 0.56000 and fails."
     ]
   }
