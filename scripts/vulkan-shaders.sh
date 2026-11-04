@@ -52,6 +52,11 @@ shader_names=(
     attention_online
     attention_online_wide
     conv3d_tiled
+    conv1d_tiled
+    auk_fir
+    auk_snake
+    auk_interleave
+    auk_scale
 )
 manifest="$root_dir/shaders/manifest.sha256"
 

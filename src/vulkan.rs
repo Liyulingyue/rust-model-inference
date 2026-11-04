@@ -2252,6 +2252,14 @@ impl std::fmt::Display for VulkanError {
     }
 }
 
+/// The device errors carry their own message, so a caller that reports a
+/// failure as a string does not have to spell the conversion out.
+impl From<VulkanError> for String {
+    fn from(error: VulkanError) -> Self {
+        error.to_string()
+    }
+}
+
 #[cfg(all(test, feature = "vulkan"))]
 mod tests {
     use super::{

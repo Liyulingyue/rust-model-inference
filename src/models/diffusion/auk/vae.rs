@@ -25,15 +25,15 @@ use crate::core::thread_pool::ComputePool;
 
 use super::AukAudio;
 
-const LATENT_DIM: usize = 64;
+pub(super) const LATENT_DIM: usize = 64;
 const DOWNSAMPLE_RATE: usize = 480;
-const UPSAMPLE_STAGES: usize = 6;
-const STAGE_CHANNELS: [usize; UPSAMPLE_STAGES] = [768, 384, 192, 96, 48, 24];
+pub(super) const UPSAMPLE_STAGES: usize = 6;
+pub(super) const STAGE_CHANNELS: [usize; UPSAMPLE_STAGES] = [768, 384, 192, 96, 48, 24];
 const STAGE_KERNELS: [usize; UPSAMPLE_STAGES] = [10, 8, 6, 4, 4, 4];
 // Per-stage upsample factor. Total upsample = 5*4*3*2*2*2 = 480x, matching
 // the downsample rate of the encoder and audio.cpp's metadata
 // (model.vae.downsample_rate = 480).
-const STAGE_RATES: [usize; UPSAMPLE_STAGES] = [5, 4, 3, 2, 2, 2];
+pub(super) const STAGE_RATES: [usize; UPSAMPLE_STAGES] = [5, 4, 3, 2, 2, 2];
 
 pub(crate) struct BigVGANFlowVae {
     source: Arc<dyn TensorSource>,
@@ -41,52 +41,52 @@ pub(crate) struct BigVGANFlowVae {
     // Latent denormalization statistics. Despite the name, `global_log_std`
     // stores the latent *variance*: AuK's `denormalize` is
     // `latents * sqrt(global_log_std) + global_mean`.
-    global_mean: Vec<f32>,
-    global_std: Vec<f32>,
+    pub(super) global_mean: Vec<f32>,
+    pub(super) global_std: Vec<f32>,
     // Pre-loaded bias-free Conv1d weights stored as [out, in, kernel].
     // Loaded once at construction; weight-norm decomposition is done at load.
-    conv_pre: Vec<f32>,
-    conv_pre_bias: Vec<f32>,
+    pub(super) conv_pre: Vec<f32>,
+    pub(super) conv_pre_bias: Vec<f32>,
     // Per-stage Conv1d that produces [out_ch, in_ch, kernel] for the upsample
     // path. Output channel count is half of stage channels (the two phases
     // are folded together via the bias trick).
-    ups_weight: Vec<Vec<f32>>,
-    ups_bias: Vec<Vec<f32>>,
+    pub(super) ups_weight: Vec<Vec<f32>>,
+    pub(super) ups_bias: Vec<Vec<f32>>,
     // 18 resblocks (3 per stage x 6 stages). Each has 6 convs (3 in each
     // of two parallel branches) and 6 SnakeBeta activations.
-    resblock_convs: Vec<ResBlockConvs>,
-    resblock_snake: Vec<ResBlockSnake>,
+    pub(super) resblock_convs: Vec<ResBlockConvs>,
+    pub(super) resblock_snake: Vec<ResBlockSnake>,
     /// SnakeBeta applied before `conv_post` (AuK `activation_post`).
-    post_alpha: Vec<f32>,
-    post_beta: Vec<f32>,
+    pub(super) post_alpha: Vec<f32>,
+    pub(super) post_beta: Vec<f32>,
     /// Anti-aliased resampling filter shared by every SnakeBeta site.
-    aa_filter: AaFilter,
-    conv_post: Vec<f32>,
+    pub(super) aa_filter: AaFilter,
+    pub(super) conv_post: Vec<f32>,
 }
 
 /// All weight-norm Conv1d weights for one residual block. The block has two
 /// parallel branches (conv1 + conv2), each with three Conv1d layers.
-struct ResBlockConvs {
+pub(super) struct ResBlockConvs {
     /// Each is `[kernel, channels, channels]` materialized weight-norm data.
-    conv1: [Vec<f32>; 3],
-    conv2: [Vec<f32>; 3],
+    pub(super) conv1: [Vec<f32>; 3],
+    pub(super) conv2: [Vec<f32>; 3],
     /// Per-channel biases for each conv (some kernels have no bias in C++;
     /// GGUF always has a bias tensor of size `channels`, so we just load it).
-    bias1: [Vec<f32>; 3],
-    bias2: [Vec<f32>; 3],
+    pub(super) bias1: [Vec<f32>; 3],
+    pub(super) bias2: [Vec<f32>; 3],
     /// Kernel sizes for the 3 conv layers (matching audio.cpp's
     /// kernels = {3, 7, 11} cycling per stage).
-    kernels: [usize; 3],
+    pub(super) kernels: [usize; 3],
 }
 
 /// SnakeBeta alpha/beta for one residual block's 6 activations.
-struct ResBlockSnake {
+pub(super) struct ResBlockSnake {
     /// 6 (alpha, beta) pairs, applied in the order
     /// branch1: act[0], branch2: act[1], branch1: act[2], branch2: act[3],
     /// branch1: act[4], branch2: act[5].
-    alpha: [Vec<f32>; 6],
-    beta: [Vec<f32>; 6],
-    channels: usize,
+    pub(super) alpha: [Vec<f32>; 6],
+    pub(super) beta: [Vec<f32>; 6],
+    pub(super) channels: usize,
 }
 
 /// Anti-aliased SnakeBeta activation (AuK `Activation1d`).
@@ -107,9 +107,9 @@ struct ResBlockSnake {
 /// (`<prefix>.upsample.filter` / `<prefix>.downsample.lowpass.filter`) and
 /// are identical across every activation, so we load them once.
 #[derive(Clone)]
-struct AaFilter {
+pub(super) struct AaFilter {
     /// 12-tap Kaiser-windowed sinc filter.
-    taps: Vec<f32>,
+    pub(super) taps: Vec<f32>,
 }
 
 impl AaFilter {
@@ -123,11 +123,11 @@ impl AaFilter {
 }
 
 /// Number of taps in the alias-free resampling filters.
-const AA_FILTER_TAPS: usize = 12;
+pub(super) const AA_FILTER_TAPS: usize = 12;
 /// `UpSample1d` / `DownSample1d` resampling ratio.
-const AA_RATIO: usize = 2;
+pub(super) const AA_RATIO: usize = 2;
 /// `UpSample1d` kernel size (`int(6 * ratio // 2) * 2`).
-const AA_KERNEL: usize = 12;
+pub(super) const AA_KERNEL: usize = 12;
 
 /// Anti-aliased activation state shared by every SnakeBeta site.
 struct AaActivation {
@@ -180,7 +180,7 @@ impl AaActivation {
 ///
 /// Returns a `[channels, frames * 2]` buffer. The channels are independent,
 /// so the filter runs in parallel over them.
-fn upsample_ratio2(
+pub(super) fn upsample_ratio2(
     pool: &ComputePool,
     x: &[f32],
     channels: usize,
@@ -256,7 +256,7 @@ fn upsample_ratio2(
 ///
 /// Takes a `[channels, frames]` buffer and returns `[channels, frames / 2]`.
 /// The channels are independent, so the filter runs in parallel over them.
-fn downsample_ratio2(
+pub(super) fn downsample_ratio2(
     pool: &ComputePool,
     x: &[f32],
     channels: usize,
@@ -323,7 +323,7 @@ fn dump_f32(path: &std::path::Path, data: &[f32]) {
 
 /// Write a `f32` tensor to `<dir>/<name>.f32` for numeric comparison with
 /// the PyTorch reference implementation.
-fn dump_tensor(dir: &std::path::Path, name: &str, data: &[f32]) {
+pub(super) fn dump_tensor(dir: &std::path::Path, name: &str, data: &[f32]) {
     let path = dir.join(format!("{name}.f32"));
     let mut bytes = Vec::with_capacity(data.len() * 4);
     for v in data {
@@ -377,18 +377,25 @@ impl BigVGANFlowVae {
                 &dims,
             )?;
             let bias = load_f32(source.as_ref(), &format!("ups.{stage}.0.bias"), channels)?;
-            // Repack from the raw ConvTranspose1d layout `[in][out][kernel]`
-            // into `[out][tap][in]`, so that for a fixed output channel and
-            // kernel tap the weights over the input channel are contiguous.
-            // The upsampling kernel then reduces along `in` with contiguous
-            // reads on both sides instead of a stride of `out * kernel`.
+            // The transposed convolution is evaluated as one regular
+            // convolution per output phase, so the weights are stored phase
+            // major: `[phase][out_channels][tap][in_channels]`. The first tap
+            // of a phase weights the previous input frame and the second one
+            // the current frame, which is the layout a regular convolution
+            // with a left padding of one expects.
+            //
+            // Within a phase the weights over the input channel are
+            // contiguous, so the reduction reads them sequentially.
             let in_channels = channels * 2;
-            let mut packed = vec![0.0_f32; channels * kernel * in_channels];
-            for ic in 0..in_channels {
+            let rate = kernel / 2;
+            let mut packed = vec![0.0_f32; rate * channels * 2 * in_channels];
+            for phase in 0..rate {
                 for oc in 0..channels {
-                    for tap in 0..kernel {
-                        packed[(oc * kernel + tap) * in_channels + ic] =
-                            weight[(ic * channels + oc) * kernel + tap];
+                    for ic in 0..in_channels {
+                        let source = (ic * channels + oc) * kernel;
+                        let base = (phase * channels + oc) * 2 * in_channels;
+                        packed[base + ic] = weight[source + phase + rate];
+                        packed[base + in_channels + ic] = weight[source + phase];
                     }
                 }
             }
@@ -538,6 +545,22 @@ impl BigVGANFlowVae {
     }
 
     pub(crate) fn decode(&self, latent: &[f32], sample_rate: u32) -> Result<AukAudio, String> {
+        // The Vulkan path runs the same operators on the device; it is only
+        // used when the session asked for the GPU, and it falls back to the
+        // host path when the device refuses the work.
+        #[cfg(feature = "vulkan")]
+        if crate::ops::kernel::vulkan::offload_enabled() {
+            match super::vae_gpu::decode(self, latent, sample_rate) {
+                Ok(audio) => return Ok(audio),
+                Err(error) => {
+                    eprintln!("[auk-vae] GPU decode failed: {error}. Falling back to the CPU.");
+                }
+            }
+        }
+        self.decode_cpu(latent, sample_rate)
+    }
+
+    fn decode_cpu(&self, latent: &[f32], sample_rate: u32) -> Result<AukAudio, String> {
         let dump = std::env::var_os("RMI_AUK_VAE_DUMP").map(std::path::PathBuf::from);
         let latent_time = latent.len() / LATENT_DIM;
         if latent.len() != LATENT_DIM * latent_time || latent_time == 0 {
@@ -633,7 +656,6 @@ impl BigVGANFlowVae {
             // channel outer, tap inner), so the result stays bit-identical
             // to the scalar formulation.
             {
-                let kernel = 2 * rate;
                 // `phase[p]` holds `out[q*rate + p]` for all q, laid out as
                 // [out_channels, frames].
                 let mut phase = vec![0.0_f32; rate * out_ch * frames];
@@ -670,18 +692,20 @@ impl BigVGANFlowVae {
                         for value in row.iter_mut() {
                             *value = 0.0;
                         }
+                        let base = (p * out_ch_const + oc) * 2 * in_ch_const;
                         for ic in 0..in_ch_const {
-                            // First half of the kernel: `in[q]`.
-                            let w = w_slice[(oc * kernel + p) * in_ch_const + ic];
+                            // The phase weights are `[phase][out][tap][in]`:
+                            // the second tap weights `in[q]` and the first one
+                            // `in[q-1]`.
+                            let w = w_slice[base + in_ch_const + ic];
                             crate::ops::vec_scaled_add_inplace(
                                 w,
                                 &p_slice[ic * frames_const..ic * frames_const + frames_const],
                                 row,
                             );
-                            // Second half: `in[q-1]`, which contributes to
+                            // First tap: `in[q-1]`, which contributes to
                             // output samples `q >= 1`.
-                            let w_prev =
-                                w_slice[(oc * kernel + (p + rate_const)) * in_ch_const + ic];
+                            let w_prev = w_slice[base + ic];
                             crate::ops::vec_scaled_add_inplace(
                                 w_prev,
                                 &p_slice[ic * frames_const..ic * frames_const + frames_const - 1],
@@ -906,7 +930,7 @@ impl BigVGANFlowVae {
 
 /// Apply one weight-norm Conv1d + bias in place with optional dilation.
 /// `x` is `[channels, frames]`; the conv preserves channel and frame counts.
-fn apply_branch_conv_dilated(
+pub(super) fn apply_branch_conv_dilated(
     x: &mut [f32],
     channels: usize,
     frames: usize,
@@ -998,8 +1022,8 @@ fn apply_branch_conv_dilated(
                     [ic * padded_frames_const + src_start
                         ..ic * padded_frames_const + src_start + frames_const];
                 for oc in start..end {
-                    // Weight layout is [out][kernel][in].
-                    let w = w_slice[(oc * kernel_const + k) * channels_const + ic];
+                    // Weight layout is [kernel][in][out].
+                    let w = w_slice[(k * channels_const + ic) * channels_const + oc];
                     crate::ops::vec_scaled_add_inplace(
                         w,
                         src,
@@ -1013,7 +1037,7 @@ fn apply_branch_conv_dilated(
 }
 
 
-const HIDDEN: usize = 1536;
+pub(super) const HIDDEN: usize = 1536;
 
 fn snake_beta(x: f32, alpha: f32, beta: f32) -> f32 {
     // x + (1 / beta) * sin(alpha * x)^2
@@ -1023,7 +1047,7 @@ fn snake_beta(x: f32, alpha: f32, beta: f32) -> f32 {
 /// In-place SnakeBeta activation on a `[channels, frames]` buffer.
 /// Parallelized across output channels via `ComputePool`. Each channel's
 /// row is a disjoint slice, so no synchronization is needed.
-fn apply_snake_beta_inplace(
+pub(super) fn apply_snake_beta_inplace(
     x: &mut [f32],
     channels: usize,
     frames: usize,
@@ -1145,7 +1169,7 @@ fn causal_conv1d(
                 break;
             }
             for ic in 0..in_channels {
-                let w = weight[(oc * kernel + k) * in_channels + ic];
+                let w = weight[(k * in_channels + ic) * out_channels + oc];
                 crate::ops::vec_scaled_add_inplace(
                     w,
                     &padded[ic * padded_frames + src_start..ic * padded_frames + src_start + frames],
@@ -1190,8 +1214,8 @@ fn conv1d_into(
     if output.len() != out_channels * out_frames {
         return Err("AuK VAE conv1d output length mismatch".into());
     }
-    // Weight layout: `[out_channels][kernel][in_channels]` (see
-    // `pack_conv_weight`), so the weights of one (output channel, kernel tap)
+    // Weight layout: `[kernel][in_channels][out_channels]` (see
+    // `pack_conv_weight`), so the weights of one (kernel tap, input channel)
     // pair are contiguous.
     //
     // The convolution is evaluated by accumulating over the time axis: for a
@@ -1218,7 +1242,7 @@ fn conv1d_into(
             let src_start = t_start + k - pad;
             let count = t_end - t_start;
             for ic in 0..in_channels {
-                let w = weight[(oc * kernel + k) * in_channels + ic];
+                let w = weight[(k * in_channels + ic) * out_channels + oc];
                 crate::ops::vec_scaled_add_inplace(
                     w,
                     &input[ic * in_frames + src_start..ic * in_frames + src_start + count],
@@ -1236,19 +1260,21 @@ fn conv1d_into(
 /// has shape `[1, 1, channels]`). Returns the materialized weight where each
 /// `out_ch`-indexed slice has been divided by its L2 norm and scaled by `g`.
 /// Repack a convolution weight from the raw `[out][in][kernel]` layout into
-/// `[out][kernel][in]`.
+/// `[kernel][in][out]`.
 ///
 /// The convolution kernels reduce over the input channel, so with this layout
-/// the weights of one (output channel, kernel tap) pair are contiguous and
+/// the weights of one (kernel tap, input channel) pair are contiguous and
 /// the inner loop reads them sequentially instead of with a stride of
-/// `kernel`.
+/// `kernel`. The device kernel wants the same order: the 64 lanes of a
+/// workgroup hold 64 output channels, and the output channel is the
+/// innermost axis here, so their weight reads are consecutive as well.
 fn pack_conv_weight(weight: Vec<f32>, out_channels: usize, kernel: usize) -> Vec<f32> {
     let in_channels = weight.len() / (out_channels * kernel);
     let mut packed = vec![0.0_f32; weight.len()];
-    for oc in 0..out_channels {
-        for k in 0..kernel {
-            for ic in 0..in_channels {
-                packed[(oc * kernel + k) * in_channels + ic] =
+    for k in 0..kernel {
+        for ic in 0..in_channels {
+            for oc in 0..out_channels {
+                packed[(k * in_channels + ic) * out_channels + oc] =
                     weight[(oc * in_channels + ic) * kernel + k];
             }
         }
@@ -1456,6 +1482,10 @@ mod tests {
             .expect("open vae gguf");
         let vae = BigVGANFlowVae::load(Arc::from(source), Arc::new(ComputePool::new(4)))
             .expect("load vae");
+        // `RMI_AUK_VAE_GPU=1` runs the same decode on the Vulkan device.
+        if std::env::var_os("RMI_AUK_VAE_GPU").is_some() {
+            crate::ops::enable_gpu();
+        }
         let audio = vae.decode(&latent, 24000).expect("decode");
         dump_tensor(&dump_dir, "out", &audio.samples.iter().map(|v| *v as f32).collect::<Vec<_>>());
         eprintln!("decoded {} samples", audio.samples.len());

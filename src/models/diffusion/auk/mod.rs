@@ -38,6 +38,8 @@ pub(crate) mod dit;
 mod linear;
 pub(crate) mod text;
 pub(crate) mod vae;
+#[cfg(feature = "vulkan")]
+mod vae_gpu;
 
 pub struct AukAudio {
     pub sample_rate: u32,

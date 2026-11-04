@@ -34,6 +34,7 @@ Rust 侧用环境变量导出中间张量（`f32` little-endian）：
 | 变量 | 导出内容 |
 | --- | --- |
 | `RMI_AUK_VAE_DUMP=<dir>` | VAE：`denorm` / `conv_pre` / `stage{i}_up` / `stage{i}_rb{j}` / `stage{i}` / `act_post` / `conv_post` / `out` |
+| `RMI_AUK_VAE_GPU=1` | VAE 解码走 Vulkan 算子（需要 `--features vulkan` 的构建） |
 | `RMI_AUK_DIT_DUMP=<dir>` | DiT：`text_conditioning.f32`、`latent_in_{step}.f32`、`audio_embed_{step}.f32`、`text_embed_{step}.f32`、`velocity_cond_{step}.f32`、`velocity_{step}.f32` |
 | `RMI_AUK_DEBUG=1` | 打印每步 `t` / velocity rms / latent rms |
 
@@ -73,16 +74,33 @@ oneDNN 的分组卷积路径会让 OpenMP 分块越界，直接抛出
 
 ### VAE — 与官方 PyTorch 逐阶段一致
 
-| 检查点 | maxdiff | cos |
+CPU 路径逐位一致；Vulkan 路径把同一批算子搬到设备上（卷积用 FMA 累加、
+SnakeBeta 用设备的 `sin`），末位会漂移，但与官方仍然一致。
+
+| 检查点 | CPU maxdiff | CPU cos | Vulkan maxdiff | Vulkan cos |
+| --- | --- | --- | --- | --- |
+| `denorm` | 0 | 1.00000000 | 0 | 1.00000000 |
+| `conv_pre` | 5.2e-06 | 1.00000000 | 4.8e-06 | 1.00000000 |
+| `stage0_up`（ConvTranspose1d） | 1.7e-05 | 1.00000000 | 1.7e-05 | 1.00000000 |
+| `stage0_rb0`（单个 resblock） | 1.8e-05 | 0.99999988 | 3.3e-05 | 1.00000000 |
+| `stage0` … `stage5` | ≤1.6e-04 | ≥0.99999988 | ≤3.0e-04 | 1.00000000 |
+| `act_post` | 2.6e-04 | 1.00000000 | 4.6e-04 | 1.00000000 |
+| `conv_post` | 4.7e-05 | 1.00000000 | 1.0e-04 | 1.00000000 |
+| `out`（24000 采样） | 4.7e-05 | 0.99999988 | 1.0e-04 | 1.00000000 |
+
+### Vulkan 上的 VAE 算子
+
+解码器的控制流仍在主机侧：阶段循环、resblock 循环、残差累加都留在 Rust 里，
+只是每个算子换成设备实现（`src/models/diffusion/auk/vae_gpu.rs`）。
+激活缓冲留在显存里，所以 resblock 不会把激活来回搬 host，只有权重每次上传。
+
+| 算子 | shader | 说明 |
 | --- | --- | --- |
-| `denorm` | 0 | 1.00000000 |
-| `conv_pre` | 5.2e-06 | 1.00000000 |
-| `stage0_up`（ConvTranspose1d） | 1.7e-05 | 1.00000000 |
-| `stage0_rb0`（单个 resblock） | 1.8e-05 | 0.99999988 |
-| `stage0` … `stage5` | ≤1.6e-04 | ≥0.99999988 |
-| `act_post` | 2.6e-04 | 1.00000000 |
-| `conv_post` | 4.7e-05 | 1.00000000 |
-| `out`（24000 采样） | 4.7e-05 | 0.99999988 |
+| 稠密 Conv1d | `conv1d_tiled.comp` | 一个 workgroup 覆盖 64 个输出通道 × 32 帧；权重按 `[kernel][in][out]` 排列，64 个 lane 读连续权重 |
+| ConvTranspose1d | `conv1d_tiled.comp` + `auk_interleave.comp` | 多相分解成 `rate` 个 kernel=2 的常规卷积，再交织回 `[out][frames*rate]` |
+| 抗混叠重采样 | `auk_fir.comp` | 12 抽头 Kaiser FIR，`replicate` 边界在 shader 里 clamp |
+| SnakeBeta | `auk_snake.comp` | 逐通道的 alpha/beta |
+| 残差相加 / 缩放 | `add` / `auk_scale.comp` | 分支求和与 `/3` |
 
 ### DiT — 与官方 PyTorch 一致
 
@@ -176,13 +194,16 @@ minutes.」，seed 42，`--threads 20`：
 
 | 模型 | 路径 | 优化前 | 优化后 | 加速 |
 | --- | --- | --- | --- | --- |
-| Base（32 步 · 4 秒） | Vulkan | 685.9 s | **82.2 s** | 8.3x |
-| Base（32 步 · 4 秒） | CPU | 416.1 s | **114.9 s** | 3.6x |
+| Base（32 步 · 4 秒） | Vulkan | 685.9 s | **76.2 s** | 9.0x |
+| Base（32 步 · 4 秒） | CPU | 416.1 s | **113.9 s** | 3.7x |
 | Flash（4 步 · 4 秒） | Vulkan | 73.3 s | **11.0 s** | 6.7x |
 | Flash（4 步 · 4 秒） | CPU | 53.7 s | **11.5 s** | 4.7x |
+| VAE 解码（4 秒） | CPU | 32.1 s | **4.6 s** | 7.0x |
+| VAE 解码（4 秒） | Vulkan | 32.1 s | **0.40 s** | 80x |
 
-Base 32 步的分解（Vulkan）：denoise 77.1 s + VAE 4.4 s。VAE 解码从
-32.1 s 降到 4.4 s（见 `auk/vae` 提交）。
+Base 32 步的分解（Vulkan）：denoise 74.2 s + VAE 0.40 s；CPU 路径是
+denoise 108.1 s + VAE 4.6 s。VAE 解码在 CPU 上从 32.1 s 降到 4.6 s
+（见 `auk/vae` 提交），在 Vulkan 上是 0.40 s。
 
 主要改动（每一项都保持逐位一致，见上面的对齐结果）：
 
@@ -194,7 +215,8 @@ Base 32 步的分解（Vulkan）：denoise 77.1 s + VAE 4.4 s。VAE 解码从
 | RoPE 表每个前向只算一次 | 每前向 920 万次 libm `sin`/`cos` → 1.3 万次 |
 | `conv_pos_embed` 四路累加器 + NEON | 211 ms → 55 ms 每前向 |
 | VAE 卷积按时间轴累加 + ConvTranspose1d 多相分解 | 4 秒解码 32.1 s → 8.1 s |
-| VAE 的抗混叠重采样并行化 + 卷积复用输入行 | 4 秒解码 8.1 s → 4.4 s |
+| VAE 的抗混叠重采样并行化 + 卷积复用输入行 | 4 秒解码 8.1 s → 4.6 s |
+| VAE 算子搬到 Vulkan（卷积 / 多相转置卷积 / FIR 重采样 / SnakeBeta） | 4 秒解码 4.6 s → 0.40 s |
 
 `RMI_AUK_PROFILE=1` 打印 DiT 的分阶段耗时，
 `RMI_AUK_VAE_PROFILE=1` 打印 VAE 的分阶段耗时。
@@ -266,8 +288,18 @@ RMI_AUK_VAE_LATENT=target/auk-reference/dumps/auk_latent.f32 \
 RMI_AUK_VAE_DUMP=target/auk-reference/rust-vae \
 cargo test --profile release-fast --lib auk::vae -- --ignored --nocapture
 
+# 同一份 latent 走 Vulkan 路径（dump 的张量名相同）
+RMI_AUK_VAE=models/AuK-Base-and-Flash-GGUF/auk-vae-f32.gguf \
+RMI_AUK_VAE_LATENT=target/auk-reference/dumps/auk_latent.f32 \
+RMI_AUK_VAE_DUMP=target/auk-reference/rust-vae-gpu \
+RMI_AUK_VAE_GPU=1 \
+cargo test --profile release-fast --features vulkan --lib auk::vae -- --ignored --nocapture
+
 .venv/bin/python3 tools/oracle/auk/cmp_vae.py        # 比较
 ```
+
+`RMI_AUK_VAE_GPU=1` 让 VAE 解码走设备算子（`--features vulkan` 的构建才有），
+dump 的张量名与 CPU 路径一致，`cmp_vae.py` 直接可比。
 
 `auk_vae_stage.py` 用于把 VAE 拆到单个 stage / 单个 resblock 逐层定位分歧。
 

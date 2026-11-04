@@ -36,6 +36,17 @@ const ATTENTION_ONLINE_SHADER: &[u8] = include_bytes!("../../shaders/bin/attenti
 const ATTENTION_ONLINE_WIDE_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/attention_online_wide.spv");
 const CONV3D_TILED_SHADER: &[u8] = include_bytes!("../../shaders/bin/conv3d_tiled.spv");
+/// Dense 1D convolution for the AuK VAE decoder. The weight layout is
+/// `[out_channels][kernel][in_channels]`, the same one the host kernel uses.
+const CONV1D_TILED_SHADER: &[u8] = include_bytes!("../../shaders/bin/conv1d_tiled.spv");
+/// Depthwise FIR resampling for the AuK VAE anti-aliased activation.
+const AUK_FIR_SHADER: &[u8] = include_bytes!("../../shaders/bin/auk_fir.spv");
+/// SnakeBeta activation for the AuK VAE decoder.
+const AUK_SNAKE_SHADER: &[u8] = include_bytes!("../../shaders/bin/auk_snake.spv");
+/// Polyphase interleave for the AuK VAE upsample convolution.
+const AUK_INTERLEAVE_SHADER: &[u8] = include_bytes!("../../shaders/bin/auk_interleave.spv");
+/// Elementwise scale for the AuK VAE residual sum.
+const AUK_SCALE_SHADER: &[u8] = include_bytes!("../../shaders/bin/auk_scale.spv");
 
 const ATTENTION_SCORES_TILED_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/attention_scores_tiled.spv");
@@ -128,6 +139,13 @@ const Q4_K_MATMUL_COOPERATIVE: usize = 40;
 const QWEN35_MOE_ROUTE: usize = 41;
 const QWEN35_MOE_REDUCE: usize = 42;
 const Q5_K_MATMUL_COOPERATIVE: usize = 43;
+
+// The AuK VAE decoder operators.
+const CONV1D_TILED: usize = 44;
+const AUK_FIR: usize = 45;
+const AUK_SNAKE: usize = 46;
+const AUK_INTERLEAVE: usize = 47;
+const AUK_SCALE: usize = 48;
 
 fn silu_exp_mode(approximate: bool) -> u32 {
     if !approximate {
@@ -251,6 +269,11 @@ const OPERATOR_SHADER_NAMES: [&str; OPERATOR_SHADERS.len()] = [
     "qwen35_moe_route",
     "qwen35_moe_reduce",
     "q5_k_matmul_cooperative",
+    "conv1d_tiled",
+    "auk_fir",
+    "auk_snake",
+    "auk_interleave",
+    "auk_scale",
 ];
 
 /// True when the ordered dispatch log is being collected.
@@ -377,7 +400,7 @@ pub fn dump_dispatch_trace() {
     }
 }
 
-const OPERATOR_SHADERS: [&[u8]; 44] = [
+const OPERATOR_SHADERS: [&[u8]; 49] = [
     QUANTIZE_Q8_0_SHADER,
     QUANTIZE_Q8_K_SHADER,
     Q8_MATMUL_GROUPED_SHADER,
@@ -422,6 +445,11 @@ const OPERATOR_SHADERS: [&[u8]; 44] = [
     QWEN35_MOE_ROUTE_SHADER,
     QWEN35_MOE_REDUCE_SHADER,
     Q5_K_MATMUL_COOPERATIVE_SHADER,
+    CONV1D_TILED_SHADER,
+    AUK_FIR_SHADER,
+    AUK_SNAKE_SHADER,
+    AUK_INTERLEAVE_SHADER,
+    AUK_SCALE_SHADER,
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1694,6 +1722,434 @@ impl Conv3dRuntime {
         commands.submit_and_wait()?;
         output.copy_from_slice(self.ops.read_f32(or, output.len())?);
         Ok(())
+    }
+}
+
+/// Geometry of one dense 1D convolution of the AuK VAE decoder.
+///
+/// The weight layout is `[out_channels][kernel][in_channels]`, the same one the
+/// host kernel packs, so both paths read the same bytes.
+#[derive(Clone, Copy)]
+pub(crate) struct AukConv1dSpec {
+    pub(crate) in_channels: usize,
+    pub(crate) out_channels: usize,
+    pub(crate) kernel: usize,
+    pub(crate) stride: usize,
+    pub(crate) dilation: usize,
+    /// Zero padding on the left; the right side is zero padded implicitly.
+    pub(crate) pad_left: usize,
+    pub(crate) frames: usize,
+    pub(crate) out_frames: usize,
+    /// Weight layout: `0` is `[kernel][in_channels][out_channels]`, `1` is
+    /// `[out_channels][kernel][in_channels]`.
+    pub(crate) weight_layout: u32,
+}
+
+/// Geometry of the AuK VAE anti-aliased FIR resampling.
+#[derive(Clone, Copy)]
+pub(crate) struct AukFirSpec {
+    pub(crate) channels: usize,
+    pub(crate) kernel: usize,
+    pub(crate) stride: usize,
+    /// Trim offset of the upsample and the left padding of the downsample.
+    pub(crate) pad_left: usize,
+    /// Replicate padding of the upsample.
+    pub(crate) pad: usize,
+    pub(crate) input_frames: usize,
+    pub(crate) output_frames: usize,
+    /// The `ratio` factor of the upsample; the downsample keeps 1.
+    pub(crate) scale: f32,
+    /// `true` for the trimmed transposed convolution of `UpSample1d`.
+    pub(crate) upsample: bool,
+}
+
+/// Buffer sizes of the AuK VAE decoder arena.
+#[derive(Clone, Copy)]
+pub(crate) struct AukVaeCapacity {
+    /// Elements of one activation buffer (channels * frames).
+    pub(crate) activation: usize,
+    /// Elements of the staging buffer (the activation intermediate and the
+    /// polyphase phase buffers).
+    pub(crate) staging: usize,
+    /// Elements of one convolution weight block.
+    pub(crate) weight: usize,
+    /// Elements of the bias buffer.
+    pub(crate) bias: usize,
+    /// Elements of the per-channel activation parameter buffers.
+    pub(crate) channels: usize,
+    /// Elements of the resampling filter buffer.
+    pub(crate) filter: usize,
+}
+
+/// Device-side operators of the AuK VAE decoder.
+///
+/// The decoder keeps its control flow on the host: every operator reads and
+/// writes the arena, and the host decides which operator runs next. The
+/// activation buffers stay in device memory between the operators, so a
+/// residual block does not round trip through the host.
+pub(crate) struct AukVaeRuntime {
+    ops: Qwen3Ops<'static>,
+    /// Nanoseconds spent uploading weights and parameters.
+    pub(crate) upload_ns: u64,
+    /// Nanoseconds spent recording and submitting the dispatches.
+    pub(crate) dispatch_ns: u64,
+    /// The running residual of a residual block.
+    pub(crate) residual: ArenaRegion,
+    /// The branch the residual block computes.
+    pub(crate) branch: ArenaRegion,
+    /// The scratch buffer of the convolutions.
+    pub(crate) scratch: ArenaRegion,
+    /// The sum of the residual blocks of a stage.
+    pub(crate) accumulator: ArenaRegion,
+    /// The stage input the residual blocks read.
+    pub(crate) stage_input: ArenaRegion,
+    /// The activation intermediate and the polyphase phase buffers.
+    pub(crate) staging: ArenaRegion,
+    weight: ArenaRegion,
+    bias: ArenaRegion,
+    alpha: ArenaRegion,
+    beta: ArenaRegion,
+    filter: ArenaRegion,
+    pub(crate) capacity: AukVaeCapacity,
+}
+
+impl AukVaeRuntime {
+    pub(crate) fn new(
+        context: &'static VulkanContext,
+        capacity: AukVaeCapacity,
+    ) -> Result<Self, VulkanError> {
+        if capacity.activation == 0
+            || capacity.staging == 0
+            || capacity.weight == 0
+            || capacity.bias == 0
+            || capacity.channels == 0
+            || capacity.filter == 0
+        {
+            return Err(VulkanError::UnsupportedShape(
+                "AuK VAE arena needs a non-empty region".into(),
+            ));
+        }
+        let mut cursor = 0;
+        let regions = [
+            f32_region(&mut cursor, capacity.activation)?,
+            f32_region(&mut cursor, capacity.activation)?,
+            f32_region(&mut cursor, capacity.activation)?,
+            f32_region(&mut cursor, capacity.activation)?,
+            f32_region(&mut cursor, capacity.activation)?,
+            f32_region(&mut cursor, capacity.staging)?,
+            f32_region(&mut cursor, capacity.weight)?,
+            f32_region(&mut cursor, capacity.bias)?,
+            f32_region(&mut cursor, capacity.channels)?,
+            f32_region(&mut cursor, capacity.channels)?,
+            f32_region(&mut cursor, capacity.filter)?,
+        ];
+        Ok(Self {
+            ops: Qwen3Ops::new_with_size(context, cursor, 1)?,
+            upload_ns: 0,
+            dispatch_ns: 0,
+            residual: regions[0],
+            branch: regions[1],
+            scratch: regions[2],
+            accumulator: regions[3],
+            stage_input: regions[4],
+            staging: regions[5],
+            weight: regions[6],
+            bias: regions[7],
+            alpha: regions[8],
+            beta: regions[9],
+            filter: regions[10],
+            capacity,
+        })
+    }
+
+    /// Upload host data into an arena region.
+    pub(crate) fn upload(
+        &mut self,
+        region: ArenaRegion,
+        values: &[f32],
+    ) -> Result<(), VulkanError> {
+        self.ops.write_f32(region, values)
+    }
+
+    /// Read an arena region back to the host.
+    pub(crate) fn download(
+        &self,
+        region: ArenaRegion,
+        count: usize,
+    ) -> Result<Vec<f32>, VulkanError> {
+        Ok(self.ops.read_f32(region, count)?.to_vec())
+    }
+
+    /// Dense 1D convolution. The weight and the bias come from the host, the
+    /// input and the output stay in the arena.
+    pub(crate) fn conv1d(
+        &mut self,
+        input: ArenaRegion,
+        output: ArenaRegion,
+        weight: &[f32],
+        bias: Option<&[f32]>,
+        spec: &AukConv1dSpec,
+    ) -> Result<(), VulkanError> {
+        let weight_len = spec
+            .out_channels
+            .checked_mul(spec.kernel)
+            .and_then(|value| value.checked_mul(spec.in_channels))
+            .ok_or(VulkanError::OutOfMemory)?;
+        if weight.len() != weight_len {
+            return Err(VulkanError::UnsupportedShape(format!(
+                "AuK Conv1D weight {} != expected {weight_len}",
+                weight.len()
+            )));
+        }
+        let input_len = spec
+            .in_channels
+            .checked_mul(spec.frames)
+            .ok_or(VulkanError::OutOfMemory)?;
+        let output_len = spec
+            .out_channels
+            .checked_mul(spec.out_frames)
+            .ok_or(VulkanError::OutOfMemory)?;
+        let upload_start = std::time::Instant::now();
+        self.ops.write_f32(self.weight, weight)?;
+        match bias {
+            Some(bias) => {
+                if bias.len() != spec.out_channels {
+                    return Err(VulkanError::UnsupportedShape(
+                        "AuK Conv1D bias length mismatch".into(),
+                    ));
+                }
+                self.ops.write_f32(self.bias, bias)?;
+            }
+            None => self.ops.zero_region(self.bias)?,
+        }
+        self.upload_ns += upload_start.elapsed().as_nanos() as u64;
+        let push = [
+            self.ops.f32_word(input, input_len, "AuK Conv1D input")?,
+            self.ops.f32_word(self.weight, weight_len, "AuK Conv1D weight")?,
+            self.ops.f32_word(self.bias, spec.out_channels, "AuK Conv1D bias")?,
+            self.ops.f32_word(output, output_len, "AuK Conv1D output")?,
+            as_u32(spec.in_channels, "AuK Conv1D input channels")?,
+            as_u32(spec.out_channels, "AuK Conv1D output channels")?,
+            as_u32(spec.frames, "AuK Conv1D frames")?,
+            as_u32(spec.out_frames, "AuK Conv1D output frames")?,
+            as_u32(spec.kernel, "AuK Conv1D kernel")?,
+            as_u32(spec.stride, "AuK Conv1D stride")?,
+            as_u32(spec.dilation, "AuK Conv1D dilation")?,
+            as_u32(spec.pad_left, "AuK Conv1D padding")?,
+            spec.weight_layout,
+        ];
+        let dispatch = row_dispatch(
+            spec.out_channels.div_ceil(64),
+            spec.out_frames.div_ceil(32),
+            &self.ops.context.limits,
+        )?;
+        let commands = TokenCommands::begin(self.ops.context)?;
+        self.ops.record_linear_dispatch(
+            &commands,
+            CONV1D_TILED,
+            self.ops.arena_bindings,
+            &push,
+            dispatch,
+        );
+        let dispatch_start = std::time::Instant::now();
+        commands.submit_and_wait()?;
+        self.dispatch_ns += dispatch_start.elapsed().as_nanos() as u64;
+        Ok(())
+    }
+
+    /// Depthwise FIR resampling. The filter comes from the host.
+    pub(crate) fn fir(
+        &mut self,
+        input: ArenaRegion,
+        output: ArenaRegion,
+        filter: &[f32],
+        spec: &AukFirSpec,
+    ) -> Result<(), VulkanError> {
+        if filter.len() != spec.kernel {
+            return Err(VulkanError::UnsupportedShape(
+                "AuK FIR filter length mismatch".into(),
+            ));
+        }
+        let input_len = spec
+            .channels
+            .checked_mul(spec.input_frames)
+            .ok_or(VulkanError::OutOfMemory)?;
+        let output_len = spec
+            .channels
+            .checked_mul(spec.output_frames)
+            .ok_or(VulkanError::OutOfMemory)?;
+        self.ops.write_f32(self.filter, filter)?;
+        let push = [
+            self.ops.f32_word(input, input_len, "AuK FIR input")?,
+            self.ops.f32_word(self.filter, spec.kernel, "AuK FIR filter")?,
+            self.ops.f32_word(output, output_len, "AuK FIR output")?,
+            as_u32(spec.output_frames, "AuK FIR frames")?,
+            as_u32(spec.channels, "AuK FIR channels")?,
+            as_u32(spec.output_frames, "AuK FIR output stride")?,
+            as_u32(spec.input_frames, "AuK FIR input stride")?,
+            as_u32(spec.kernel, "AuK FIR kernel")?,
+            as_u32(spec.pad_left, "AuK FIR pad left")?,
+            as_u32(spec.pad, "AuK FIR pad")?,
+            as_u32(spec.stride, "AuK FIR stride")?,
+            as_u32(usize::from(spec.upsample), "AuK FIR mode")?,
+            spec.scale.to_bits(),
+        ];
+        let dispatch = row_dispatch(
+            spec.output_frames.div_ceil(64),
+            spec.channels,
+            &self.ops.context.limits,
+        )?;
+        let commands = TokenCommands::begin(self.ops.context)?;
+        self.ops.record_linear_dispatch(
+            &commands,
+            AUK_FIR,
+            self.ops.arena_bindings,
+            &push,
+            dispatch,
+        );
+        commands.submit_and_wait()
+    }
+
+    /// SnakeBeta activation. `alpha` and `beta` come from the host.
+    pub(crate) fn snake(
+        &mut self,
+        input: ArenaRegion,
+        output: ArenaRegion,
+        alpha: &[f32],
+        beta: &[f32],
+        channels: usize,
+        frames: usize,
+    ) -> Result<(), VulkanError> {
+        if alpha.len() != channels || beta.len() != channels {
+            return Err(VulkanError::UnsupportedShape(
+                "AuK SnakeBeta parameter length mismatch".into(),
+            ));
+        }
+        let count = channels
+            .checked_mul(frames)
+            .ok_or(VulkanError::OutOfMemory)?;
+        let alpha_word = self.ops.f32_word(self.alpha, channels, "AuK SnakeBeta alpha")?;
+        let beta_word = self.ops.f32_word(self.beta, channels, "AuK SnakeBeta beta")?;
+        self.ops.write_f32(self.alpha, alpha)?;
+        self.ops.write_f32(self.beta, beta)?;
+        let push = [
+            self.ops.f32_word(input, count, "AuK SnakeBeta input")?,
+            self.ops.f32_word(output, count, "AuK SnakeBeta output")?,
+            alpha_word,
+            beta_word,
+            as_u32(frames, "AuK SnakeBeta frames")?,
+            as_u32(channels, "AuK SnakeBeta channels")?,
+            as_u32(frames, "AuK SnakeBeta row stride")?,
+        ];
+        let dispatch = row_dispatch(frames.div_ceil(64), channels, &self.ops.context.limits)?;
+        let commands = TokenCommands::begin(self.ops.context)?;
+        self.ops.record_linear_dispatch(
+            &commands,
+            AUK_SNAKE,
+            self.ops.arena_bindings,
+            &push,
+            dispatch,
+        );
+        commands.submit_and_wait()
+    }
+
+    /// Fold the polyphase buffers back into the interleaved layout and add the
+    /// bias.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn interleave(
+        &mut self,
+        input: ArenaRegion,
+        output: ArenaRegion,
+        bias: &[f32],
+        out_channels: usize,
+        frames: usize,
+        rate: usize,
+    ) -> Result<(), VulkanError> {
+        if bias.len() != out_channels {
+            return Err(VulkanError::UnsupportedShape(
+                "AuK interleave bias length mismatch".into(),
+            ));
+        }
+        let count = frames.checked_mul(rate).ok_or(VulkanError::OutOfMemory)?;
+        let phase_stride = out_channels
+            .checked_mul(frames)
+            .ok_or(VulkanError::OutOfMemory)?;
+        self.ops.write_f32(self.bias, bias)?;
+        let push = [
+            self.ops.f32_word(input, phase_stride * rate, "AuK interleave input")?,
+            self.ops.f32_word(self.bias, out_channels, "AuK interleave bias")?,
+            self.ops.f32_word(output, count * out_channels, "AuK interleave output")?,
+            as_u32(count, "AuK interleave frames")?,
+            as_u32(out_channels, "AuK interleave channels")?,
+            as_u32(count, "AuK interleave output stride")?,
+            as_u32(frames, "AuK interleave frame count")?,
+            as_u32(rate, "AuK interleave rate")?,
+            as_u32(phase_stride, "AuK interleave phase stride")?,
+        ];
+        let dispatch = row_dispatch(
+            count.div_ceil(64),
+            out_channels,
+            &self.ops.context.limits,
+        )?;
+        let commands = TokenCommands::begin(self.ops.context)?;
+        self.ops.record_linear_dispatch(
+            &commands,
+            AUK_INTERLEAVE,
+            self.ops.arena_bindings,
+            &push,
+            dispatch,
+        );
+        commands.submit_and_wait()
+    }
+
+    /// Multiply a region by a scalar. The input and the output may be the
+    /// same region: every thread touches one element.
+    pub(crate) fn scale(
+        &mut self,
+        input: ArenaRegion,
+        output: ArenaRegion,
+        count: usize,
+        scale: f32,
+    ) -> Result<(), VulkanError> {
+        let push = [
+            self.ops.f32_word(input, count, "AuK scale input")?,
+            self.ops.f32_word(output, count, "AuK scale output")?,
+            as_u32(count, "AuK scale count")?,
+            scale.to_bits(),
+        ];
+        let dispatch = row_dispatch(count.div_ceil(64), 1, &self.ops.context.limits)?;
+        let commands = TokenCommands::begin(self.ops.context)?;
+        self.ops.record_linear_dispatch(
+            &commands,
+            AUK_SCALE,
+            self.ops.arena_bindings,
+            &push,
+            dispatch,
+        );
+        commands.submit_and_wait()
+    }
+
+    /// Add one region to another, in place on the target.
+    pub(crate) fn add(
+        &mut self,
+        target: ArenaRegion,
+        addition: ArenaRegion,
+        count: usize,
+    ) -> Result<(), VulkanError> {
+        let commands = TokenCommands::begin(self.ops.context)?;
+        self.ops.record_add(&commands, target, addition, count)?;
+        commands.submit_and_wait()
+    }
+
+    /// Copy one region into another. The scale of one is exact, so the copy
+    /// kernel doubles as the copier.
+    pub(crate) fn copy(
+        &mut self,
+        source: ArenaRegion,
+        destination: ArenaRegion,
+        count: usize,
+    ) -> Result<(), VulkanError> {
+        self.scale(source, destination, count, 1.0)
     }
 }
 
