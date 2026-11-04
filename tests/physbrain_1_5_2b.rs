@@ -72,6 +72,7 @@ fn shape<'a>(loader: &'a GGUFLoader, name: &str) -> Option<&'a TensorInfo> {
     loader.tensor_info(name)
 }
 
+#[ignore = "requires the converted GGUF: set RMI_PHYSBRAIN_1_5_2B_TEXT and RMI_PHYSBRAIN_1_5_2B_MMPROJ"]
 #[test]
 fn text_arch_and_dims_match_qwen3vl_2b_whitelist() {
     let Some(loader) = text_loader() else { return };
@@ -104,6 +105,7 @@ fn text_arch_and_dims_match_qwen3vl_2b_whitelist() {
     assert!((eps - 1e-6).abs() < 1e-9, "norm_eps={eps}");
 }
 
+#[ignore = "requires the converted GGUF: set RMI_PHYSBRAIN_1_5_2B_TEXT and RMI_PHYSBRAIN_1_5_2B_MMPROJ"]
 #[test]
 fn text_rope_sections_match_qwen3vl_mrope() {
     let Some(loader) = text_loader() else { return };
@@ -118,6 +120,7 @@ fn text_rope_sections_match_qwen3vl_mrope() {
     assert_eq!(section_vec, vec![24, 20, 20, 0]);
 }
 
+#[ignore = "requires the converted GGUF: set RMI_PHYSBRAIN_1_5_2B_TEXT and RMI_PHYSBRAIN_1_5_2B_MMPROJ"]
 #[test]
 fn text_image_token_ids_match_physbrain_specials() {
     let Some(loader) = text_loader() else { return };
@@ -126,6 +129,7 @@ fn text_image_token_ids_match_physbrain_specials() {
     assert_eq!(pick(&loader, "qwen3vl.vision_end_token_id"), 151_653);
 }
 
+#[ignore = "requires the converted GGUF: set RMI_PHYSBRAIN_1_5_2B_TEXT and RMI_PHYSBRAIN_1_5_2B_MMPROJ"]
 #[test]
 fn text_declares_the_deepstack_layer_count() {
     // The projector injects three deepstack embeddings, so the text tower has
@@ -136,6 +140,7 @@ fn text_declares_the_deepstack_layer_count() {
     assert_eq!(pick(&loader, "qwen3vl.n_deepstack_layers"), 3);
 }
 
+#[ignore = "requires the converted GGUF: set RMI_PHYSBRAIN_1_5_2B_TEXT and RMI_PHYSBRAIN_1_5_2B_MMPROJ"]
 #[test]
 fn text_tied_embedding_omits_output_weight() {
     // PhysBrain sets tie_word_embeddings=true in HF config; the engine
@@ -152,6 +157,7 @@ fn text_tied_embedding_omits_output_weight() {
     assert_eq!(embed.dims, vec![2048, 168_576]);
 }
 
+#[ignore = "requires the converted GGUF: set RMI_PHYSBRAIN_1_5_2B_TEXT and RMI_PHYSBRAIN_1_5_2B_MMPROJ"]
 #[test]
 fn text_layer_inventory_is_complete() {
     let Some(loader) = text_loader() else { return };
@@ -180,6 +186,7 @@ fn text_layer_inventory_is_complete() {
     assert!(shape(&loader, "output_norm.weight").is_some());
 }
 
+#[ignore = "requires the converted GGUF: set RMI_PHYSBRAIN_1_5_2B_TEXT and RMI_PHYSBRAIN_1_5_2B_MMPROJ"]
 #[test]
 fn text_tokenizer_vocab_is_extended_to_168576() {
     let Some(loader) = text_loader() else { return };
@@ -210,6 +217,7 @@ fn text_tokenizer_vocab_is_extended_to_168576() {
     }
 }
 
+#[ignore = "requires the converted GGUF: set RMI_PHYSBRAIN_1_5_2B_TEXT and RMI_PHYSBRAIN_1_5_2B_MMPROJ"]
 #[test]
 fn mmproj_arch_is_clip_with_qwen3vl_merger() {
     let Some(loader) = mmproj_loader() else {
@@ -229,6 +237,7 @@ fn mmproj_arch_is_clip_with_qwen3vl_merger() {
     assert!(has_ve, "clip.has_vision_encoder must be Bool(true)");
 }
 
+#[ignore = "requires the converted GGUF: set RMI_PHYSBRAIN_1_5_2B_TEXT and RMI_PHYSBRAIN_1_5_2B_MMPROJ"]
 #[test]
 fn mmproj_vision_dims_match_qwen3_vl_2b() {
     let Some(loader) = mmproj_loader() else {
@@ -244,6 +253,7 @@ fn mmproj_vision_dims_match_qwen3_vl_2b() {
     assert_eq!(pick(&loader, "clip.vision.projection_dim"), 2048);
 }
 
+#[ignore = "requires the converted GGUF: set RMI_PHYSBRAIN_1_5_2B_TEXT and RMI_PHYSBRAIN_1_5_2B_MMPROJ"]
 #[test]
 fn mmproj_deepstack_indexes_match_physbrain_5_11_17() {
     let Some(loader) = mmproj_loader() else {
@@ -267,6 +277,7 @@ fn mmproj_deepstack_indexes_match_physbrain_5_11_17() {
     assert_eq!(bools[17], 1, "block 17 is a deepstack layer");
 }
 
+#[ignore = "requires the converted GGUF: set RMI_PHYSBRAIN_1_5_2B_TEXT and RMI_PHYSBRAIN_1_5_2B_MMPROJ"]
 #[test]
 fn mmproj_deepstack_tensors_exist_for_each_index() {
     let Some(loader) = mmproj_loader() else {
@@ -286,6 +297,7 @@ fn mmproj_deepstack_tensors_exist_for_each_index() {
     }
 }
 
+#[ignore = "requires the converted GGUF: set RMI_PHYSBRAIN_1_5_2B_TEXT and RMI_PHYSBRAIN_1_5_2B_MMPROJ"]
 #[test]
 fn mmproj_conv3d_split_into_two_conv2d_weights() {
     // patch_embed.proj is shape (1024, 3, 2, 16, 16) in HF — the converter
@@ -317,6 +329,7 @@ fn mmproj_conv3d_split_into_two_conv2d_weights() {
     );
 }
 
+#[ignore = "requires the converted GGUF: set RMI_PHYSBRAIN_1_5_2B_TEXT and RMI_PHYSBRAIN_1_5_2B_MMPROJ"]
 #[test]
 fn mmproj_merger_tensors_match_qwen3vl_merger_contract() {
     let Some(loader) = mmproj_loader() else {

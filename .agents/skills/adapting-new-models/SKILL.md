@@ -31,7 +31,7 @@ description: Use when 用户要求在 rust-model-inference 中新增或扩展 GG
 5. **最小实现**：仅补齐必须的配置解析、Tokenizer 行为、权重映射、模型计算、状态/KV 管理和显式调度；复用仓库已有算子（写法见 `operator-internal-dispatch` skill），不为未来模型建立抽象层。
 6. **逐位对齐（排障手段，不是验收标准）**：新模型跑崩、输出乱码时，逐位对齐是定位**第一个分叉 checkpoint** 的手段，用来把问题缩小到具体算子。因此初次对齐时 Rust 与 Oracle 必须都使用标量、精确实现，禁用 SIMD、FMA、权重重排和近似算子；标量逐位一致后再逐项恢复仓库已有优化，每恢复一项都重新逐位比较。双方使用同一模型、prompt、chat template、线程数、CPU 路径、KV 类型和 greedy 参数。依次比较 token IDs、checkpoint 名称/顺序/shape/次数、中间 F32 的 `to_bits()`/`u32`、最终 logits 位模式和多步 greedy token。出现差异时定位第一个分叉 checkpoint；不得改用容差、余弦相似度或可读文本作为替代结论。**恢复优化之后即接受误差指标**（max_abs / RMSE / cosine）——量化与 SIMD 本来就会改变归约顺序与末位精度，生产环境不要求逐位一致。
 7. **验证真实入口**：运行最小相关单测、格式/编译检查、release 模式真实 CLI 和逐位对齐命令。完整测试中的历史失败、环境失败与本次回归必须分开报告；没有执行的检查不得声称通过。**按 `reviewing-model-changes` skill 的五条覆盖矩阵逐条留证**（CLI / HTTP / JEV、CPU SIMD、多权重分发、CPU↔GPU 自动分发、共享算子影响面）。
-8. **更新模型清单**：适配完成后同步更新 `docs/MODEL_LIST.md` 和 `docs/develop/SUPPORTED_MODELS.md`；写明具体型号、GGUF architecture、已验证格式、验证范围和已知限制。
+8. **更新模型清单**：适配完成后同步更新 `docs/MODEL_LIST.md` 和 `docs/develop/SUPPORTED_MODELS.md`；写明具体型号、GGUF architecture、已验证格式、验证范围和已知限制。备注列按 `reviewing-model-changes` skill 的 √ 约定填写——无已知限制打 `√`，有补充说明写 `√；<限制>`。
 
 ## 完成定义
 

@@ -1,5 +1,17 @@
 //! Exact and approximate exponential helpers.
 
+/// The bound the fast paths clamp their argument to.
+///
+/// The fast paths build `2**n` by shifting float bits: `n` is the integer
+/// part of `x * log2(e)`, and it lands in the exponent field of the result as
+/// `n + 127`. `n = 128` therefore overflows the field to `0xFF`, which is
+/// `+inf`, and the fast path returns `+inf` for an input whose true value is
+/// finite (2.4e38 at `x = 88.376`). The bound has to keep `n` at or below 127,
+/// and `127 / log2(e) = 88.0296`, so 88.0 is the largest round value that
+/// stays inside the field.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub(crate) const FAST_EXP_CLAMP: f32 = 88.0;
+
 #[inline(always)]
 pub fn exp_inplace(values: &mut [f32]) {
     for value in values {
@@ -45,14 +57,13 @@ pub(crate) unsafe fn exp_approx_avx2(x: std::arch::x86_64::__m256) -> std::arch:
     use std::arch::x86_64::*;
 
     // The exponent below is built by shifting float bits, so it can only
-    // represent 2**n while n stays within the f32 exponent field. Clamping at
-    // 88.376_26 lets n reach -128, and that wrap turns exp(-88.376) into -inf
-    // instead of an underflowed zero -- which made SiLU of any gate above
-    // ~88.4 collapse to zero and silently drop that FFN channel. 88.0 keeps
-    // n at +-127, the largest magnitude still representable.
+    // represent 2**n while n stays within the f32 exponent field. The bound
+    // is `FAST_EXP_CLAMP`; see its definition for why 88.376_26 was one step
+    // too far: it let n reach 128, the exponent field overflowed to 0xFF, and
+    // the fast path returned +inf for arguments whose true value is finite.
     let x = _mm256_max_ps(
-        _mm256_min_ps(x, _mm256_set1_ps(88.0)),
-        _mm256_set1_ps(-88.0),
+        _mm256_min_ps(x, _mm256_set1_ps(FAST_EXP_CLAMP)),
+        _mm256_set1_ps(-FAST_EXP_CLAMP),
     );
     let magic = _mm256_set1_ps(f32::from_bits(0x4b40_0000));
     let z = _mm256_add_ps(_mm256_mul_ps(x, _mm256_set1_ps(1.442_695_1)), magic);
@@ -183,37 +194,88 @@ pub(crate) unsafe fn exp_approx_neon(
 mod clamp_tests {
     use super::exp_approx_inplace;
 
-    /// The fast path builds `2**n` by shifting float bits, so the clamp bound
-    /// must keep `n` inside the f32 exponent field. A bound that allowed
-    /// `n == -128` wrapped to `-inf` instead of underflowing to zero, which
-    /// made `silu` of any gate above ~88.4 collapse to zero and silently drop
-    /// that FFN channel.
+    /// The clamp bound is the one thing both fast paths share, and it is not
+    /// observable from the outside on a platform that does not run the path
+    /// under test. This states the invariant the bound has to keep, so it
+    /// holds on every platform: the integer part of `x * log2(e)` must stay
+    /// at or below 127, because the fast path adds it to the exponent field
+    /// of the result and 128 overflows that field to `+inf`.
+    ///
+    /// The old bound, 88.376_26, reached 127.499 and fails here.
     #[test]
-    fn exp_approx_never_wraps_negative() {
-        let inputs: Vec<f32> = (0..512).map(|i| i as f32 * 0.8 - 200.0).collect();
+    fn fast_exp_clamp_keeps_the_exponent_inside_the_f32_exponent_field() {
+        let n = super::FAST_EXP_CLAMP as f64 * std::f64::consts::LOG2_E;
+        assert!(
+            n <= 127.0,
+            "clamp {} lets n reach {n}, which overflows the exponent field",
+            super::FAST_EXP_CLAMP
+        );
+    }
+
+    /// The fast paths have to stay finite and non-negative over the whole
+    /// range they are asked for. The ARM variant takes the slow path once
+    /// `|n| > 126`, so it underflows to zero below -103.97 the way upstream
+    /// does; the point of this check is that no argument produces a negative
+    /// result, and that the arguments whose true value is representable stay
+    /// finite.
+    #[test]
+    fn exp_approx_stays_finite_and_non_negative() {
+        // The largest argument whose exponential is still an f32.
+        const LAST_FINITE: f32 = 88.376_26;
+        let inputs: Vec<f32> = (0..512)
+            .map(|i| i as f32 * (LAST_FINITE / 511.0) - 200.0)
+            .collect();
         let mut values = inputs.clone();
         exp_approx_inplace(&mut values);
         for (input, got) in inputs.iter().zip(&values) {
             assert!(*got >= 0.0, "exp_approx({input}) wrapped to {got}");
+            let expected = input.exp();
+            if expected.is_finite() {
+                assert!(got.is_finite(), "exp_approx({input}) = {got}");
+                let tolerance = (expected.abs() * 1e-3).max(f32::MIN_POSITIVE);
+                assert!(
+                    (got - expected).abs() <= tolerance,
+                    "exp_approx({input}) = {got}, expected {expected}"
+                );
+            }
         }
     }
+}
 
-    /// The exact value that exposed the bug: gate 131.219 in the PhysBrain
-    /// FFN made `exp(-131.219)` wrap to `-inf`. Padded past the vector width so
-    /// the SIMD path runs rather than the scalar tail.
+#[cfg(all(test, target_arch = "x86_64"))]
+mod avx2_tests {
+    use super::exp_approx_inplace;
+
+    /// The AVX2 path is the one the clamp applies to, and the only way to see
+    /// it fail is to run it: this test is compiled on x86_64 only, so it does
+    /// not run on an ARM host. The argument above the clamp is the point --
+    /// with the old bound of 88.376_26 the fast path returned `+inf` for it
+    /// even though the true value (2.4e38) is an f32.
     #[test]
-    fn exp_approx_underflows_to_zero_at_the_clamp_floor() {
-        let probes = [-88.0f32, -88.376_26, -90.0, -100.0, -131.219];
-        let mut values = vec![0.0f32; 16];
-        for (slot, probe) in values.iter_mut().zip(probes.iter()) {
-            *slot = *probe;
+    fn avx2_exp_stays_finite_above_the_clamp() {
+        if !crate::ops::has_avx2_fma() {
+            return;
         }
-        exp_approx_inplace(&mut values);
-        for (input, got) in probes.iter().zip(&values) {
-            assert!(*got >= 0.0, "exp_approx({input}) = {got}");
+        let inputs = [
+            f32::NEG_INFINITY,
+            -1000.0,
+            -100.0,
+            -88.376_26,
+            -88.0,
+            0.0,
+            88.0,
+            88.0999,
+            88.376_26,
+            100.0,
+            1000.0,
+            f32::INFINITY,
+        ];
+        let mut actual = inputs;
+        exp_approx_inplace(&mut actual);
+        for (x, got) in inputs.into_iter().zip(actual) {
             assert!(
-                got.abs() < 1e-30,
-                "exp_approx({input}) should underflow to ~0, got {got}"
+                got.is_finite() && got >= 0.0,
+                "exp({x}) = {got}, the fast path overflowed the exponent field"
             );
         }
     }

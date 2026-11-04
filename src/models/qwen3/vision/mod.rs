@@ -1,7 +1,7 @@
 pub mod clip_config;
 pub mod media;
 
-use crate::core::tensor::TensorSource;
+use crate::core::tensor::{optional_f32_tensor_bytes, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::ops::{
     gelu_inplace, rope_vision, softmax_inplace, sum_f32, sum_sq_centered_f32, vec_add, vec_add_into,
@@ -457,29 +457,6 @@ fn decode_f32_slice(data: &[u8]) -> Vec<f32> {
     out
 }
 
-/// Borrow a bias tensor's bytes, rejecting storage that is not F32.
-///
-/// Every bias in this tower is decoded four bytes per element by
-/// [`decode_f32_slice`], so a BF16 bias is read at half length and the
-/// bias-add loop then runs past the end of the merged buffer. The other
-/// vision loaders already require F32 here (gemma4, qwen35, lfm2); this
-/// makes the qwen3 loader say so instead of failing later.
-fn f32_bias_slice<'a, S: TensorSource + ?Sized>(
-    source: &'a S,
-    name: &str,
-) -> Result<Option<&'a [u8]>, String> {
-    let Some(info) = source.tensor_info(name) else {
-        return Ok(None);
-    };
-    if info.ggml_type != crate::core::tensor::GGMLType::F32 {
-        return Err(format!(
-            "{name} must be F32, found {:?}: this tower decodes biases four bytes per element",
-            info.ggml_type
-        ));
-    }
-    Ok(source.tensor_slice(name))
-}
-
 fn dequant_q8_0_tensor(data: &[u8], n_cols: usize, n_rows: usize) -> Vec<f32> {
     let blocks_per_row = n_cols / 32;
     let mut out = vec![0.0f32; n_rows * n_cols];
@@ -544,35 +521,39 @@ impl<'a> VisionEncoder<'a> {
         let patch_embd_weight_1 = source.tensor_slice("v.patch_embd.weight.1");
         let position_embd = source.tensor_slice("v.position_embd.weight");
         let post_ln_weight = source.tensor_slice("v.post_ln.weight");
-        let post_ln_bias = f32_bias_slice(source, "v.post_ln.bias")?;
-        let patch_bias = f32_bias_slice(source, "v.patch_embd.bias")?;
+        let post_ln_bias = optional_f32_tensor_bytes(source, "v.post_ln.bias")?;
+        let patch_bias = optional_f32_tensor_bytes(source, "v.patch_embd.bias")?;
 
         let mut layers = Vec::with_capacity(config.n_layer);
         for i in 0..config.n_layer {
             let ln1_weight = source
                 .tensor_slice(&format!("v.blk.{}.ln1.weight", i))
                 .ok_or_else(|| format!("Missing v.blk.{}.ln1.weight", i))?;
-            let ln1_bias = f32_bias_slice(source, &format!("v.blk.{}.ln1.bias", i))?;
+            let ln1_bias = optional_f32_tensor_bytes(source, &format!("v.blk.{}.ln1.bias", i))?;
             let ln2_weight = source
                 .tensor_slice(&format!("v.blk.{}.ln2.weight", i))
                 .ok_or_else(|| format!("Missing v.blk.{}.ln2.weight", i))?;
-            let ln2_bias = f32_bias_slice(source, &format!("v.blk.{}.ln2.bias", i))?;
+            let ln2_bias = optional_f32_tensor_bytes(source, &format!("v.blk.{}.ln2.bias", i))?;
             let qkv_weight = source
                 .tensor_slice(&format!("v.blk.{}.attn_qkv.weight", i))
                 .ok_or_else(|| format!("Missing v.blk.{}.attn_qkv.weight", i))?;
-            let qkv_bias = f32_bias_slice(source, &format!("v.blk.{}.attn_qkv.bias", i))?;
+            let qkv_bias =
+                optional_f32_tensor_bytes(source, &format!("v.blk.{}.attn_qkv.bias", i))?;
             let out_weight = source
                 .tensor_slice(&format!("v.blk.{}.attn_out.weight", i))
                 .ok_or_else(|| format!("Missing v.blk.{}.attn_out.weight", i))?;
-            let out_bias = f32_bias_slice(source, &format!("v.blk.{}.attn_out.bias", i))?;
+            let out_bias =
+                optional_f32_tensor_bytes(source, &format!("v.blk.{}.attn_out.bias", i))?;
             let ffn_up_weight = source
                 .tensor_slice(&format!("v.blk.{}.ffn_up.weight", i))
                 .ok_or_else(|| format!("Missing v.blk.{}.ffn_up.weight", i))?;
-            let ffn_up_bias = f32_bias_slice(source, &format!("v.blk.{}.ffn_up.bias", i))?;
+            let ffn_up_bias =
+                optional_f32_tensor_bytes(source, &format!("v.blk.{}.ffn_up.bias", i))?;
             let ffn_down_weight = source
                 .tensor_slice(&format!("v.blk.{}.ffn_down.weight", i))
                 .ok_or_else(|| format!("Missing v.blk.{}.ffn_down.weight", i))?;
-            let ffn_down_bias = f32_bias_slice(source, &format!("v.blk.{}.ffn_down.bias", i))?;
+            let ffn_down_bias =
+                optional_f32_tensor_bytes(source, &format!("v.blk.{}.ffn_down.bias", i))?;
             let deepstack = if config.has_deepstack_layers.get(i).copied().unwrap_or(false) {
                 let tensor = |suffix: &str| {
                     let name = format!("v.deepstack.{i}.{suffix}");
@@ -582,7 +563,8 @@ impl<'a> VisionEncoder<'a> {
                 };
                 let bias = |suffix: &str| {
                     let name = format!("v.deepstack.{i}.{suffix}");
-                    f32_bias_slice(source, &name)?.ok_or_else(|| format!("Missing {name}"))
+                    optional_f32_tensor_bytes(source, &name)?
+                        .ok_or_else(|| format!("Missing {name}"))
                 };
                 Some(DeepstackWeights {
                     norm_weight: tensor("norm.weight")?,
@@ -616,11 +598,11 @@ impl<'a> VisionEncoder<'a> {
         let mm_0_weight = source
             .tensor_slice("mm.0.weight")
             .ok_or("Missing mm.0.weight")?;
-        let mm_0_bias = f32_bias_slice(source, "mm.0.bias")?;
+        let mm_0_bias = optional_f32_tensor_bytes(source, "mm.0.bias")?;
         let mm_2_weight = source
             .tensor_slice("mm.2.weight")
             .ok_or("Missing mm.2.weight")?;
-        let mm_2_bias = f32_bias_slice(source, "mm.2.bias")?;
+        let mm_2_bias = optional_f32_tensor_bytes(source, "mm.2.bias")?;
 
         Ok(Self {
             config,
@@ -642,9 +624,6 @@ impl<'a> VisionEncoder<'a> {
     }
 
     pub fn precompute(&mut self) {
-        // Keep the supplied weights: re-quantizing this tower to Q8 amplifies
-        // errors across layers. `preserve_f32` is false only for towers whose
-        // weights really are Q8 in the GGUF.
         self.precompute_impl(self.preserve_f32, false);
     }
 
@@ -1316,61 +1295,43 @@ impl<'a> VisionEncoder<'a> {
             }
         }
 
-        if self.precomputed.as_ref().is_some_and(|pc| pc.lossless) {
-            for h in 0..n_head {
-                for t in 0..n_tokens {
-                    for base in [0, n_head * n_tokens * d_head] {
-                        let row = &mut scratch.attn_buf[base + h * n_tokens * d_head + t * d_head
-                            ..base + h * n_tokens * d_head + (t + 1) * d_head];
-                        for pair in 0..d_head / 2 {
-                            let axis = pair / (d_head / 4);
-                            let exponent =
-                                if self.precomputed.as_ref().is_some_and(|pc| pc.ggml_f16) {
-                                    let dim = (d_head / 2) as f32;
-                                    let step = ((dim - 2.0) / dim) / (d_head / 4 - 1) as f32;
-                                    (pair % (d_head / 4)) as f32 * step
-                                } else {
-                                    (2 * (pair % (d_head / 4))) as f32 / (d_head / 2) as f32
-                                };
-                            let freq = 1.0 / 10000.0f32.powf(exponent);
-                            let angle = mrope_positions[t][axis] as f32 * freq;
-                            let (a, b) = (row[pair], row[pair + d_head / 2]);
-                            let (cos, sin) = crate::ops::rope_sin_cos(angle);
-                            row[pair] = a * cos + (-b) * sin;
-                            row[pair + d_head / 2] = b * cos + a * sin;
-                        }
-                    }
-                }
-            }
-        } else {
-            let mrope_sections: [i32; 4] = [
-                (d_head / 4) as i32,
-                (d_head / 4) as i32,
-                (d_head / 4) as i32,
-                (d_head / 4) as i32,
-            ];
-            let freq_base = 10000.0f32;
-            for h in 0..n_head {
-                let q_base = h * n_tokens * d_head;
-                let k_base = n_head * n_tokens * d_head + h * n_tokens * d_head;
-                for t in 0..n_tokens {
-                    rope_vision(
-                        &mut scratch.attn_buf[q_base + t * d_head..q_base + t * d_head + d_head],
-                        mrope_positions[t],
-                        mrope_sections,
-                        d_head,
-                        freq_base,
-                        d_head / 2,
-                    );
-                    rope_vision(
-                        &mut scratch.attn_buf[k_base + t * d_head..k_base + t * d_head + d_head],
-                        mrope_positions[t],
-                        mrope_sections,
-                        d_head,
-                        freq_base,
-                        d_head / 2,
-                    );
-                }
+        // One rotation for every path. The lossless branch used to carry its
+        // own hand-rolled copy of this, and the two drifted: the copy was
+        // right, the shared operator was not, so the wrong axis assignment
+        // only reached the models that quantize their weights (the production
+        // path). See `tools/oracle/physbrain/README.md`.
+        let mrope_sections: [i32; 4] = [
+            (d_head / 4) as i32,
+            (d_head / 4) as i32,
+            (d_head / 4) as i32,
+            (d_head / 4) as i32,
+        ];
+        let freq_base = 10000.0f32;
+        for h in 0..n_head {
+            let q_base = h * n_tokens * d_head;
+            let k_base = n_head * n_tokens * d_head + h * n_tokens * d_head;
+            for t in 0..n_tokens {
+                // The axis assignment is the vision tower's own: contiguous
+                // sectors, the same as llama.cpp's `GGML_ROPE_TYPE_VISION`.
+                // The text tower uses the interleaved assignment instead
+                // (`GGML_ROPE_TYPE_IMROPE`, HF `apply_interleaved_mrope`), so
+                // the two towers must not share an operator.
+                rope_vision(
+                    &mut scratch.attn_buf[q_base + t * d_head..q_base + t * d_head + d_head],
+                    mrope_positions[t],
+                    mrope_sections,
+                    d_head,
+                    freq_base,
+                    d_head / 2,
+                );
+                rope_vision(
+                    &mut scratch.attn_buf[k_base + t * d_head..k_base + t * d_head + d_head],
+                    mrope_positions[t],
+                    mrope_sections,
+                    d_head,
+                    freq_base,
+                    d_head / 2,
+                );
             }
         }
         t_rope = t_rope_start.elapsed().as_secs_f64();

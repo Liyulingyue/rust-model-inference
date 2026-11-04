@@ -168,6 +168,8 @@ pub fn run_inference(
         elapsed,
         tok_s
     );
+    #[cfg(feature = "vulkan")]
+    crate::vulkan::dump_submit_trace();
     Ok(())
 }
 

@@ -12,13 +12,14 @@ use crate::vulkan::{VulkanContext, VulkanError};
 use std::collections::HashMap;
 
 pub(crate) struct Transformer {
+    config: super::super::models::timestral::Config,
     ops: Qwen3Ops<'static>,
     _buffers: UploadedBuffers,
     bindings: HashMap<String, OperatorBindings>,
     /// The weight format of every matrix, so the recorder can pick the
     /// matching device kernel.
     formats: HashMap<String, GpuWeightFormat>,
-    regions: [ArenaRegion; 15],
+    regions: [ArenaRegion; 17],
     capacity: usize,
     context: &'static VulkanContext,
 }
@@ -45,18 +46,24 @@ impl Transformer {
 
     pub(crate) fn new(
         context: &'static VulkanContext,
+        config: crate::models::timestral::Config,
         matrices: &HashMap<String, crate::models::timestral::Matrix<'_>>,
         vectors: &HashMap<String, Vec<f32>>,
         capacity: usize,
     ) -> Result<Self, VulkanError> {
+        let d = config.d_model;
+        let f = config.mlp_hidden_dim;
+        let hd = config.hd();
         let mut size = 0usize;
-        let mut regions = [ArenaRegion { offset: 0, size: 0 }; 15];
+        let max_in = d.max(f);
+        let mut regions = [ArenaRegion { offset: 0, size: 0 }; 17];
         // x, norm, fused, q, k, v, attention, gate, projection, hidden,
-        // valid/roles, rope, q8 activation, q8 scales, q4_1 input sums.
+        // valid/roles, rope, q8 activation, q8 scales, q4_1 input sums,
+        // q8k activation, q8k scales.
         for (region, width) in
             regions
                 .iter_mut()
-                .zip([D, D, 2 * F, D, D, D, D, D, D, F, 2, 32, 0, 0, 0])
+                .zip([d, d, 2 * f, d, d, d, d, d, d, f, 2, hd / 2, 0, 0, 0, 0, 0])
         {
             let bytes = capacity
                 .checked_mul(width)
@@ -71,14 +78,14 @@ impl Transformer {
         // A quantized weight reads a Q8_0 activation, so the arena carries
         // one byte and one scale per value. The widest projection is the
         // `mlp.w3` matrix.
-        let q8_bytes = capacity.checked_mul(F).ok_or(VulkanError::OutOfMemory)?;
+        let q8_bytes = capacity.checked_mul(f).ok_or(VulkanError::OutOfMemory)?;
         regions[12] = ArenaRegion {
             offset: size,
             size: q8_bytes,
         };
         size = size.checked_add(q8_bytes).ok_or(VulkanError::OutOfMemory)?;
         let q8_scale_bytes = capacity
-            .checked_mul(F / 32)
+            .checked_mul(f / 32)
             .and_then(|n| n.checked_mul(4))
             .ok_or(VulkanError::OutOfMemory)?;
         regions[13] = ArenaRegion {
@@ -90,7 +97,7 @@ impl Transformer {
             .ok_or(VulkanError::OutOfMemory)?;
         // The Q8_0 quantizer also writes the per-block input sums.
         let q4_1_sum_bytes = capacity
-            .checked_mul(F / 32)
+            .checked_mul(f / 32)
             .and_then(|n| n.checked_mul(4))
             .ok_or(VulkanError::OutOfMemory)?;
         regions[14] = ArenaRegion {
@@ -99,6 +106,28 @@ impl Transformer {
         };
         size = size
             .checked_add(q4_1_sum_bytes)
+            .ok_or(VulkanError::OutOfMemory)?;
+        // Q4_K/Q5_K/Q6_K quantize the activation to Q8_K (256-value blocks).
+        let q8k_bytes = capacity
+            .checked_mul(max_in)
+            .ok_or(VulkanError::OutOfMemory)?;
+        regions[15] = ArenaRegion {
+            offset: size,
+            size: q8k_bytes,
+        };
+        size = size
+            .checked_add(q8k_bytes)
+            .ok_or(VulkanError::OutOfMemory)?;
+        let q8k_scale_bytes = capacity
+            .checked_mul(max_in / 256)
+            .and_then(|n| n.checked_mul(16))
+            .ok_or(VulkanError::OutOfMemory)?;
+        regions[16] = ArenaRegion {
+            offset: size,
+            size: q8k_scale_bytes,
+        };
+        size = size
+            .checked_add(q8k_scale_bytes)
             .ok_or(VulkanError::OutOfMemory)?;
         // Stable order keeps descriptor/dispatch traces reproducible.
         let mut names: Vec<_> = matrices
@@ -123,9 +152,9 @@ impl Transformer {
         for name in &names {
             let weight = &matrices[*name];
             let n_in = if name.ends_with(".mlp.w3.weight") {
-                F
+                f
             } else {
-                D
+                d
             };
             let format = GpuWeightFormat::from_ggml_type(weight.ggml_type()).map_err(|_| {
                 VulkanError::UnsupportedShape(format!(
@@ -133,29 +162,12 @@ impl Transformer {
                     weight.ggml_type()
                 ))
             })?;
-            // The K-quant formats only have a scalar device kernel, which
-            // measured far slower than the CPU path on a resident model.
-            // Refusing them lets the auto policy fall back to the CPU.
-            if matches!(
-                format,
-                GpuWeightFormat::Q4_K | GpuWeightFormat::Q5_K | GpuWeightFormat::Q6_K
-            ) {
-                return Err(VulkanError::UnsupportedShape(format!(
-                    "Timestral GPU path has no vectorised {:?} matmul kernel",
-                    weight.ggml_type()
-                )));
-            }
-            if matches!(format, GpuWeightFormat::F16) {
-                return Err(VulkanError::UnsupportedShape(
-                    "Timestral GPU path has no F16 matmul kernel".into(),
-                ));
-            }
-            // A quantized tensor keeps its block layout, so it is uploaded
-            // as it is stored. The float tensors are transposed because the
-            // device kernel reads them column-major.
+            // Float/half weights are transposed because the device kernel
+            // reads them column-major. Quantized tensors keep their block
+            // layout and are uploaded as-is.
             let buffer = match weight.f32_slice() {
                 Some(rows) => buffers.upload_f32_transposed(rows, n_in)?,
-                None if format == GpuWeightFormat::BF16 => {
+                None if matches!(format, GpuWeightFormat::F16 | GpuWeightFormat::BF16) => {
                     let bytes =
                         weight
                             .weight_bytes()
@@ -185,6 +197,7 @@ impl Transformer {
             bindings.insert((*name).clone(), ops.bind_buffers(&[buffer])?);
         }
         Ok(Self {
+            config,
             ops,
             _buffers: buffers,
             bindings,
@@ -223,7 +236,6 @@ impl Transformer {
         // A quantized weight keeps its block layout, so the device kernel
         // reads the weight as it is stored and quantizes the activation
         // itself.
-        let empty = ArenaRegion { offset: 0, size: 0 };
         self.ops.record_weight_matmul_rows(
             commands,
             self.bindings[name],
@@ -231,8 +243,8 @@ impl Transformer {
             self.regions[12],
             self.regions[13],
             self.regions[14],
-            empty,
-            empty,
+            self.regions[15],
+            self.regions[16],
             &[(output, n_out, n_out * 4)],
             n_in,
             rows,
@@ -248,16 +260,17 @@ impl Transformer {
         output: ArenaRegion,
         rows: usize,
     ) -> Result<(), VulkanError> {
+        let d = self.config.d_model;
         self.ops.record_rms_norm_rows(
             commands,
             self.bindings[name],
             input,
             output,
-            D,
+            d,
             1e-6,
             rows,
-            D,
-            D,
+            d,
+            d,
         )
     }
 
@@ -296,7 +309,9 @@ impl Transformer {
     pub(crate) fn forward(&self, input: &[f32], layout: &Layout) -> Result<Vec<f32>, VulkanError> {
         let (r, s) = (layout.rows, layout.seq());
         let count = r.checked_mul(s).ok_or(VulkanError::OutOfMemory)?;
-        if count > self.capacity || input.len() != count * D || input.iter().any(|v| !v.is_finite())
+        if count > self.capacity
+            || input.len() != count * self.config.d_model
+            || input.iter().any(|v| !v.is_finite())
         {
             return Err(VulkanError::UnsupportedShape(
                 "invalid Timestral GPU input".into(),
@@ -322,10 +337,13 @@ impl Transformer {
                 .map(|&b| f32::from(b))
                 .collect::<Vec<_>>(),
         )?;
-        let mut coefficients = Vec::with_capacity(s * 32);
+        let hd = self.config.hd();
+        let rope_hd_half = hd / 2;
+        let mut coefficients = Vec::with_capacity(s * rope_hd_half);
         for slot in 0..s {
-            for i in 0..16 {
-                let theta = layout.position(slot) / 10000f32.powf((2 * i) as f32 / 32.);
+            for i in 0..hd / 4 {
+                let theta =
+                    layout.position(slot) / 10000f32.powf((2 * i) as f32 / rope_hd_half as f32);
                 let (sin, cos) = theta.sin_cos();
                 coefficients.extend([cos, sin]);
             }
@@ -336,7 +354,7 @@ impl Transformer {
         // The op list is shared with the CPU backend; only the execution
         // differs. The command buffer is flushed at layer boundaries to
         // bound its length on drivers that truncate long recordings.
-        for layer in crate::models::timestral::graph::transformer_layer_ops() {
+        for layer in crate::models::timestral::graph::transformer_layer_ops(&self.config) {
             for op in layer {
                 let geometry = [
                     r,
@@ -352,9 +370,14 @@ impl Transformer {
                     for (name, slot) in op.trace {
                         let shape = match slot {
                             Slot::Q | Slot::K | Slot::V => {
-                                vec![geometry[0], geometry[2], HEADS, HD]
+                                vec![
+                                    geometry[0],
+                                    geometry[2],
+                                    self.config.num_heads,
+                                    self.config.hd(),
+                                ]
                             }
-                            _ => vec![geometry[0], geometry[2], D],
+                            _ => vec![geometry[0], geometry[2], self.config.d_model],
                         };
                         commands =
                             self.checkpoint(commands, &name, &shape, self.region(slot, count))?;
@@ -376,12 +399,12 @@ impl Transformer {
         #[cfg(feature = "parity-trace")]
         if std::env::var_os("RMI_PARITY_TRACE").is_some() {
             for (name, slot) in final_norm.trace {
-                let shape = vec![geometry[0], geometry[2], D];
+                let shape = vec![geometry[0], geometry[2], self.config.d_model];
                 commands = self.checkpoint(commands, &name, &shape, self.region(slot, count))?;
             }
         }
         commands.submit_and_wait()?;
-        let mut output = vec![0.0; count * D];
+        let mut output = vec![0.0; count * self.config.d_model];
         self.ops
             .read_f32_into(self.region(Slot::Norm, count), &mut output)?;
         if output.iter().any(|v| !v.is_finite()) {
@@ -460,6 +483,10 @@ impl Transformer {
                         empty,
                     ],
                     geometry,
+                    self.config.d_model,
+                    self.config.mlp_hidden_dim,
+                    self.config.num_heads,
+                    self.config.hd(),
                 )?;
             }
             TimestralOpKind::Attention {
@@ -483,6 +510,10 @@ impl Transformer {
                         self.region(*roles, count),
                     ],
                     geometry,
+                    self.config.d_model,
+                    self.config.mlp_hidden_dim,
+                    self.config.num_heads,
+                    self.config.hd(),
                 )?;
             }
             TimestralOpKind::Gate { attn, gate, .. } => {
@@ -498,6 +529,10 @@ impl Transformer {
                         empty,
                     ],
                     geometry,
+                    self.config.d_model,
+                    self.config.mlp_hidden_dim,
+                    self.config.num_heads,
+                    self.config.hd(),
                 )?;
             }
             TimestralOpKind::SwiGlu { fused, hidden } => {
@@ -513,6 +548,10 @@ impl Transformer {
                         empty,
                     ],
                     geometry,
+                    self.config.d_model,
+                    self.config.mlp_hidden_dim,
+                    self.config.num_heads,
+                    self.config.hd(),
                 )?;
             }
             TimestralOpKind::Add { input, output } => {
@@ -520,7 +559,7 @@ impl Transformer {
                     commands,
                     self.region(*output, count),
                     self.region(*input, count),
-                    D,
+                    self.config.d_model,
                     count,
                 )?;
             }

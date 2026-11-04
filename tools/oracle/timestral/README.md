@@ -1,11 +1,18 @@
-# Timestral-209M CPU / Vulkan
+# Timestral 多尺寸 CPU / Vulkan
 
-原生 Rust 预测，不依赖 Python 推理或外部加速库。显式 `general.architecture=timestral`，仅接受本目录对应的官方 209M 配置；其他尺寸会被拒绝。权重可以是 F32，也可以是 block 量化的（Q8_0 / Q4_0 / Q4_1 / Q4_K / Q5_K / Q6_K）或半精度的（F16 / BF16），逐张量读取 `general.file_type` 决定分派。
+原生 Rust 预测，不依赖 Python 推理或外部加速库。显式 `general.architecture=timestral`，运行时从 GGUF metadata `timestral.config` 读取模型配置（d_model、num_heads、mlp_hidden_dim、num_layers），支持 5M / 28M / 123M / 209M 四个官方尺寸。权重可以是 F32，也可以是 block 量化的（Q8_0 / Q4_0 / Q4_1 / Q4_K / Q5_K / Q6_K）或半精度的（F16 / BF16），逐张量读取 `general.file_type` 决定分派。
 
-固定输入：
+固定输入（以 209M 为基准，其余尺寸配置见下表）：
+
+| 尺寸 | d_model | num_heads | mlp_hidden_dim | num_layers | 参数量 |
+|---|---|---|---|---|---|
+| 5M | 192 | 3 | 512 | 8 | ~5M |
+| 28M | 384 | 6 | 1024 | 12 | ~28M |
+| 123M | 640 | 10 | 1712 | 20 | ~123M |
+| 209M | 768 | 12 | 2048 | 24 | ~209M |
 
 - HF `mistralai/Timestral-209M` revision `9874d252ab0aae16f7f7c999f98f98d6ad7d8365`。
-- `model.safetensors`：837,271,648 bytes，SHA-256 `1456effb9927e3daa8c7234f10497e3424233869245a9c72b8ecebaf7ad2b7fa`。
+- 209M `model.safetensors`：837,271,648 bytes，SHA-256 `1456effb9927e3daa8c7234f10497e3424233869245a9c72b8ecebaf7ad2b7fa`。
 - 203 个 F32 张量、209,312,256 个参数；24 层，d=768，12 heads，head_dim=64，FFN=2048，patch_size=32。每四层有一次变量 attention。
 - GGUF：837,265,632 bytes，SHA-256 `7628bcbfe43c8fec82bfbeace0ebbeb7dcd49facec6a785a51f430995d704e10`。名称、shape、全部 F32 payload 与官方权重精确一致；不重排 QKV、不量化。
 - Oracle：[mistralai/timestral](https://github.com/mistralai/timestral/tree/a534bdbd244d64f3d9d743f46c7bf6fc330ed4ff)，commit `a534bdbd244d64f3d9d743f46c7bf6fc330ed4ff`；PyTorch 2.9.1，NumPy 2.5.3，safetensors 0.8.0，CPU 单线程/F32。只使用运行时 hooks，源代码保持干净。
@@ -15,8 +22,9 @@
 所有权重统一保存在主仓库的 models 下。本地需要配置和权重两个文件，不需要 tokenizer、chat template 或 mmproj。
 
 ```sh
-MODEL_DIR=/Users/gouzi/Documents/git/rust-model-inference/models/Timestral-209M
-# config.json 和 model.safetensors 从固定 HF revision 按文件下载到 MODEL_DIR。
+# 下载并转换任意尺寸（以 209M 为例）
+MODEL_DIR=models/Timestral-209M
+# config.json 和 model.safetensors 下载到 MODEL_DIR
 .venv/bin/python -m tools.converter.timestral.convert_timestral \
   "$MODEL_DIR" "$MODEL_DIR/Timestral-209M-F32.gguf"
 cargo build --profile release-fast --bin rust-model-inference
@@ -24,6 +32,8 @@ cargo build --profile release-fast --bin rust-model-inference
   --model "$MODEL_DIR/Timestral-209M-F32.gguf" \
   --timestral-request series.json --threads 4
 ```
+
+转换脚本从 `config.json` 读取模型配置，`general.name` 使用目录名，不再硬编码 209M 参数。
 
 `series.json`：
 
@@ -67,7 +77,7 @@ F32 权重可以再量化成更小的 GGUF。逐张量决定：行宽（`dims[0]
 - `max_context`：默认 32768，范围 1..32768，只保留最近的历史并向左补齐 patch；非负裁剪的资格仍基于完整输入历史。
 - `per_shot_horizon_patches`：默认 32，范围 1..32。超过一个 block 时使用中位数反馈，已知未来协变量使用真实值，past-only 协变量使用缺失值。每个 block 都应用 advancing refine frame。
 
-不接受未知 JSON 字段。暂不提供 categorical target encoding 或批次 API；categorical 协变量不会被静默当作数值协变量处理。其他 Timestral 尺寸未经验证。
+不接受未知 JSON 字段。暂不提供 categorical target encoding 或批次 API；categorical 协变量不会被静默当作数值协变量处理。支持 5M / 28M / 123M / 209M 四个官方尺寸，均通过 CPU 和 GPU 推理验证。
 
 HTTP：`rust-model-server --model <Timestral GGUF>` 会按 `general.architecture` 探测到 timestral 后端，只挂 `POST /v1/forecast`，请求体与 `--timestral-request` 文件相同，响应为 `{"quantile_levels": [...], "quantiles": [[target][horizon][quantile]]}`。该后端不挂 `/v1/chat/completions` 等其它路由。
 
@@ -151,7 +161,7 @@ cargo test --profile release-fast --test timestral_cli
 
 另有 4 次普通 GPU CLI（严格 Vulkan / `--gpu`、关闭 parity trace）与插桩 GPU 的预测精确一致；设备不可用时 CPU/Auto 输出精确一致，严格 Vulkan 返回错误。8 个模型单测、3 个 CLI 测试、3 个 Python 检查、CPU-only 库编译、Vulkan 构建和完整 shader 检查通过。GPU 扩展后未重复全量测试，原有失败见上文记录。
 
-上述 GPU Oracle 检查实测 M3 Max/MoltenVK；优化前 NAVI31/RADV 的性能和最终输出验证见 [PERFORMANCE.md](PERFORMANCE.md)，最新结果见 [GPU_OPTIMIZATION.md](GPU_OPTIMIZATION.md)。数据集预测指标仍未验证。构建工具和依赖均保留在仓库 .venv / target，模型文件始终从上述 models 目录读取。
+上述 GPU Oracle 检查实测 M3 Max/MoltenVK；优化前 NAVI31/RADV 的性能和最终输出验证见 [PERFORMANCE.md](PERFORMANCE.md)，最新结果见 [GPU_OPTIMIZATION.md](GPU_OPTIMIZATION.md)。多尺寸（5M/28M/123M/209M）GPU 实测 NVIDIA GB10/Vulkan，四尺寸 CPU 和 GPU 均验证通过。数据集预测指标仍未验证。构建工具和依赖均保留在仓库 .venv / target，模型文件始终从上述 models 目录读取。
 
 上一版 F32 分块投影路径另见 [gpu_optimization_verification.json](gpu_optimization_verification.json)：M3 Max 上 10 个用例 × Vulkan/Auto，共 20 次 GPU 执行、6,788 个检查点，沿用原误差界全部通过；最差最终 NRMSE 为 `2.9871e-6`。两次关闭运行时 trace 的普通 CLI 输出与插桩结果精确一致。
 

@@ -365,11 +365,25 @@ impl<'model, 'weights> LinearExecutor<'model, 'weights> {
         // Write input activation once, then record all dispatches into one
         // command buffer and submit once. This eliminates N-1 submit+wait
         // round-trips per group.
+        let profile = crate::vulkan::ops::linear_profile_enabled();
+        let t_write = std::time::Instant::now();
         runtime.write_input(input)?;
+        let write_ns = if profile {
+            t_write.elapsed().as_nanos() as u64
+        } else {
+            0
+        };
         let n_in = bindings[0].weight.n_in;
+        let t_record = std::time::Instant::now();
         let output_regions = runtime.record_group_matmul(&group, n_in)?;
+        let record_ns = if profile {
+            t_record.elapsed().as_nanos() as u64
+        } else {
+            0
+        };
 
         // Readback each output slot into staging.
+        let t_read = std::time::Instant::now();
         let mut offset = 0;
         for (slot, output) in outputs.iter().enumerate() {
             let region = *output_regions.get(slot).ok_or_else(|| {
@@ -379,6 +393,15 @@ impl<'model, 'weights> LinearExecutor<'model, 'weights> {
             let data = runtime.read_output(region, count)?;
             self.staging[offset..offset + count].copy_from_slice(data);
             offset += count;
+        }
+        let read_ns = if profile {
+            t_read.elapsed().as_nanos() as u64
+        } else {
+            0
+        };
+        #[cfg(feature = "vulkan")]
+        if profile {
+            crate::vulkan::ops::record_linear_profile(write_ns, record_ns, read_ns);
         }
 
         if self.staging.iter().any(|v| !v.is_finite()) {

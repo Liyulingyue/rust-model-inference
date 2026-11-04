@@ -124,15 +124,17 @@ void main() {
         }
         barrier();
 
-        // The row starts even, so its halves come in pairs: one load and one
-        // native conversion per two weights.
-        uint row_base = read_column * pc.elements_per_row + chunk;
+        // The weight is stored in transposed layout [n_in, n_out], so element
+        // (i, j) is at byte offset (i * n_out + j) * 2. Each weight_word holds
+        // two f16 values, so the word index is (i * n_out + j) >> 1.
         uint index = 0u;
         for (; index + 1u < elements; index += 2u) {
-            vec2 pair = unpackHalf2x16(weight_word(slot, (row_base + index) >> 1u));
-            if ((row_base & 1u) != 0u) {
-                pair = vec2(pair.y, unpackHalf2x16(weight_word(slot, ((row_base + index) >> 1u) + 1u)).x);
-            }
+            uint elem = chunk + index;
+            uint word_index = (elem * output_rows + read_column) >> 1u;
+            uint second_index = ((elem + 1u) * output_rows + read_column) >> 1u;
+            float first = unpackHalf2x16(weight_word(slot, word_index))[(elem * output_rows + read_column) & 1u];
+            float second = unpackHalf2x16(weight_word(slot, second_index))[((elem + 1u) * output_rows + read_column) & 1u];
+            vec2 pair = vec2(first, second);
             // Unroll tokens so the compiler can keep each accumulator in a register.
             [[unroll]] for (uint t = 0u; t < TOKENS; t++) {
                 if (t >= live) continue;
@@ -143,7 +145,9 @@ void main() {
             }
         }
         if (index < elements) {
-            float odd = unpackHalf2x16(weight_word(slot, (row_base + index) >> 1u))[(row_base + index) & 1u];
+            uint elem = chunk + index;
+            uint word_index = (elem * output_rows + read_column) >> 1u;
+            float odd = unpackHalf2x16(weight_word(slot, word_index))[(elem * output_rows + read_column) & 1u];
             for (uint t = 0u; t < live; t++) {
                 float value = unpackHalf2x16(
                     input_stage[t * (CHUNK_ELEMENTS / 2u) + index / 2u]

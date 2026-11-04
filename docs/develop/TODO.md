@@ -141,6 +141,20 @@ NEON on aarch64; no AVX-512).
 - [ ] **token 维寄存器分块：消除 per-token 权重重读** — 详见 [TODO-019](#todo-019-token-维寄存器分块消除-per-token-权重重读)。
       文本编码只跑到约 11% 的 NEON 峰值，瓶颈是每个 token 都从 DRAM 重读整个权重矩阵。
       预期 1.5-2× 加速。
+- [ ] **AVX2 的 `exp_approx` clamp 与 shader 的 ±80、与上游的无 clamp 结构三者不一致** —
+      x86 CPU 路径用 clamp（`src/ops/math/exp.rs` 的 `FAST_EXP_CLAMP`，现为 ±88.0），
+      ARM NEON 路径用的是上游 llama.cpp 的结构（`|n| > 126` 走慢路径，**没有 clamp**），
+      Vulkan shader 用 ±80（补偿算法需要 `1/den` 保持正规数，见
+      [TODO-020](#todo-020-vulkan-silu-的-f32-次正规数缺陷--已修复但饱和边界不可回退)）。
+      三者的饱和边界因此不同：`x = 88.2` 时 NEON 走慢路径给出接近真值的 2.4e38，
+      x86 给 1.65e38（31% 偏差），GPU 给 exp(80) 的饱和值。
+      现状：x86 至少不再返回 `+inf`（旧 clamp `88.376_26` 会），并且
+      `FAST_EXP_CLAMP * log2(e) <= 127` 这个不变式由
+      `fast_exp_clamp_keeps_the_exponent_inside_the_f32_exponent_field` 守住。
+      选项：① 把 AVX2 改成镜像上游的 `|n| > 126 → 慢路径`（最彻底，x86 与 ARM 对齐，
+      但需要 x86 机器实测）；② 把 CPU clamp 收到 ±80 与 shader 对齐（牺牲 [80, 88.4]
+      的精度，换 CPU↔GPU 一致）；③ 维持现状，把三者的边界写进文档。
+      **必须在 x86 上实测才能定，不能在 aarch64 上单方面决定。**
 
 - [x] **LFM2.5-24B-A2B 适配 + 标量逐位对齐** — ✅ 已完成 (2026-10-15)。
       24B 总 / 2B 激活的 MoE，`lfm2moe` 架构：40 层 × 2048 宽 × 32 头（head_dim 64），注意力层
@@ -412,6 +426,16 @@ MiniCPM-V 4.7 的 `qwen35moe`（35B-A3B）此前只在**生成面**注册，多�
 
 ## Medium Priority
 
+- [ ] **PhysBrain 文本 logits oracle 的界限不可跨主机迁移** — `tools/oracle/physbrain` 的
+      文本对照用固定提示 `What is 2+2?`、8 步 greedy、relative L2 ≤ 0.05 的界限。
+      step 0 是**近似平局**（token 17 与 785 相差 0.075 logits），而记录的 0.0488
+      已经是界限的 97.7%，所以换一台主机或换一个参考构建就会翻转：实测
+      aarch64 + scalar llama.cpp 参考得到 relative L2 0.0677、首个 greedy token 就不同。
+      llama.cpp 侧能**精确复现**记录的 ids（`[17,488,220,17,284,220,19,271]`），
+      所以参考实现没有问题，是 fixture 的包络太紧。
+      现状：main 与本分支**同样不过**，属预存问题，不是回归。
+      选项：① 换一个 top-1 差距更大的提示并重录 oracle；② 放宽界限（例如 0.1）并
+      如实记录实际值；③ 除 argmax 外同时记录 top-k 命中率，让近似平局不再翻转判定。
 - [ ] **讨论：MemoryArena 与 BlockAllocator 组合**
 - [ ] **讨论：GPU 后端架构设计** — Vulkan / wgpu / CUDA 等多后端抽象
 - [ ] **讨论：SIMD 扩展路线** — 当前 AVX2+FMA、NEON。后续可考虑 AVX-512 (高端 CPU)、ARM SVE、AVX-VNNI (int8 dot)
@@ -1551,6 +1575,7 @@ GGUF 重量（从 `audio-cpp/AuK-Base-and-Flash-GGUF`）：
 - WAV：16-bit PCM mono writer
 
 待优化（follow-up，no rush）：
+- [ ] **Vulkan 路径的渲染不是逐位可复现的**（2026-11-04 定位）— 同一进程内同一份 prompt + seed 连着渲染：CPU 路径 8/8 逐位相同，Vulkan 路径约 6 次里有 1 次不同（latent rms 1.315 vs 1.162，更差时 rms 2.33）。用 `RMI_AUK_DIT_DUMP` 逐张量比对定位到：`text_conditioning.f32`、`latent_in_0/1.f32`、`velocity_0/1.f32` 都逐位相同，**差异从第 3 个 Euler 步（`velocity_2.f32`）开始**，`velocity_cond_2.f32` 同样分叉 —— 采样参数、随机数、文本条件都是确定的，不稳定性在 DiT 的设备路径内部（嫌疑：tiled F16 kernel 的尾块 / scratch 处理，或共享 arena 的复用）。CLI 每次进程只渲染一次，用户拿到的是"抽签"结果；HTTP 服务连续渲染时更容易撞见。回归哨兵 `tests/auk_pipeline_repeat.rs`（`#[ignore]`，CPU 过 / Vulkan 偶发失败）。**与 HTTP 接入无关**，是 GPU 路径的既有问题。
 - [ ] 数值校准 oracle-diff vs `references/audio.cpp/src/community_models/auk/flow.cpp` — block forward magnitudes drift without the velocity clip
 - [ ] Per-token matmul batching（`linear_into` 一调一次 token，瓶颈；需新增 batched Q8_0 matmul helper 或 thread-local Q8Scratch per rayon worker）
 - [x] **F16 matmul Vulkan path**（done as A：A 任务）— `auk_f16_gpu_runtime`（max_rows=1, max_n_in=4096, max_n_out=9216, descriptor_capacity=4096）+ `f16_gpu_linear_into`（单行 `BatchedLinearRuntime::matmul_rows(format=F16)`）接入 `linear_into_scaled_impl` 的 F16 分支。**pre_quantize F16→Q8_0 workaround（`f4e7879`）已删除**，主路径现在按 GGMLType dispatch——F16 走 F16 GPU，Q8_0 走 Q8 GPU matmul，BF16/Q*_K 走 `QTensorOwned` CPU。消除了 21s 一次性 F16→Q8 load + 1.5 GB cache RAM + post-training quant noise。end-to-end dev 335s（vs 311s baseline Q8 path，持平）。
