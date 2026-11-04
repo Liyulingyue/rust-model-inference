@@ -1465,7 +1465,7 @@ pub(in crate::models::qwen3) fn static_tensor(
     dims: &[u64],
     kind: GGMLType,
 ) -> Result<&'static [u8], String> {
-    let bytes = checked_tensor(source.as_ref(), name, dims, kind)?;
+    let bytes = crate::core::tensor::typed_tensor_bytes(source.as_ref(), name, dims, kind)?;
     if matches!(kind, GGMLType::F16 | GGMLType::BF16)
         && bytes.chunks_exact(2).any(|bytes| {
             let bits = u16::from_le_bytes([bytes[0], bytes[1]]);
@@ -1489,7 +1489,7 @@ pub(in crate::models::qwen3) fn load_f32_tensor(
     name: &str,
     dims: &[u64],
 ) -> Result<Vec<f32>, String> {
-    let bytes = checked_tensor(source, name, dims, GGMLType::F32)?;
+    let bytes = crate::core::tensor::f32_tensor_bytes(source, name, dims)?;
     let values: Vec<f32> = bytes
         .chunks_exact(4)
         .map(|bytes| f32::from_le_bytes(bytes.try_into().expect("four-byte chunk")))
@@ -1498,38 +1498,6 @@ pub(in crate::models::qwen3) fn load_f32_tensor(
         return Err(format!("Invalid finite F32 tensor: {name}"));
     }
     Ok(values)
-}
-
-fn checked_tensor<'a>(
-    source: &'a dyn TensorSource,
-    name: &str,
-    dims: &[u64],
-    kind: GGMLType,
-) -> Result<&'a [u8], String> {
-    let info = source
-        .tensor_info(name)
-        .ok_or_else(|| format!("Missing tensor: {name}"))?;
-    if dims.is_empty() || dims.contains(&0) || info.dims != dims || info.ggml_type != kind {
-        return Err(format!(
-            "Invalid tensor {name}: shape {:?} type {:?}; expected {:?} {:?}",
-            info.dims, info.ggml_type, dims, kind
-        ));
-    }
-    let bytes = source
-        .tensor_slice(name)
-        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
-    let expected = usize::try_from(
-        info.checked_nbytes()
-            .ok_or_else(|| format!("Invalid tensor byte size: {name}"))?,
-    )
-    .map_err(|_| format!("Tensor byte size does not fit usize: {name}"))?;
-    if bytes.is_empty() || bytes.len() != expected {
-        return Err(format!(
-            "Invalid tensor data length for {name}: {}; expected {expected}",
-            bytes.len()
-        ));
-    }
-    Ok(bytes)
 }
 
 fn to_u64(value: usize, name: &str) -> Result<u64, String> {
@@ -1579,8 +1547,8 @@ fn require_tensor(
     ggml_type: GGMLType,
 ) -> Result<(), String> {
     // The contract is validated before any payload is read, so only the
-    // metadata is checked here; `checked_tensor` measures the payload when
-    // the tensor is actually loaded.
+    // metadata is checked here; the shared byte check measures the payload
+    // when the tensor is actually loaded.
     crate::core::tensor::require_tensor_meta(source, name, dims, &[ggml_type]).map(|_| ())
 }
 

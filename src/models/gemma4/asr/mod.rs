@@ -1,5 +1,5 @@
 pub mod config;
-use crate::core::tensor::{GGMLType, TensorSource};
+use crate::core::tensor::{typed_tensor_bytes, GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::models::qwen3::asr::audio_processor::{decode_pcm16_wav_any, RealFft};
 use crate::ops::{
@@ -1063,7 +1063,7 @@ fn f16_tensor<'a>(
     name: &str,
     dims: &[u64],
 ) -> Result<&'a [u8], String> {
-    let bytes = checked_tensor(source, name, dims, GGMLType::F16)?;
+    let bytes = typed_tensor_bytes(source, name, dims, GGMLType::F16)?;
     if bytes.chunks_exact(2).any(|chunk| {
         let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
         bits & 0x7c00 == 0x7c00
@@ -1081,7 +1081,7 @@ fn f32_tensor<'a>(
     if cfg!(target_endian = "big") {
         return Err("Gemma4 borrowed F32 tensors require little-endian input".into());
     }
-    let bytes = checked_tensor(source, name, dims, GGMLType::F32)?;
+    let bytes = crate::core::tensor::f32_tensor_bytes(source, name, dims)?;
     if bytes.as_ptr().align_offset(std::mem::align_of::<f32>()) != 0 {
         return Err(format!("Unaligned F32 tensor: {name}"));
     }
@@ -1095,38 +1095,6 @@ fn f32_tensor<'a>(
 
 fn f32_scalar(source: &dyn TensorSource, name: &str) -> Result<f32, String> {
     Ok(f32_tensor(source, name, &[1])?[0])
-}
-
-fn checked_tensor<'a>(
-    source: &'a dyn TensorSource,
-    name: &str,
-    dims: &[u64],
-    kind: GGMLType,
-) -> Result<&'a [u8], String> {
-    let info = source
-        .tensor_info(name)
-        .ok_or_else(|| format!("Missing tensor: {name}"))?;
-    if dims.is_empty() || dims.contains(&0) || info.dims != dims || info.ggml_type != kind {
-        return Err(format!(
-            "Invalid tensor {name}: shape {:?} type {:?}; expected {:?} {:?}",
-            info.dims, info.ggml_type, dims, kind
-        ));
-    }
-    let expected = usize::try_from(
-        info.checked_nbytes()
-            .ok_or_else(|| format!("Invalid tensor byte size: {name}"))?,
-    )
-    .map_err(|_| format!("Tensor byte size does not fit usize: {name}"))?;
-    let bytes = source
-        .tensor_slice(name)
-        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
-    if bytes.len() != expected {
-        return Err(format!(
-            "Invalid tensor data length for {name}: {}; expected {expected}",
-            bytes.len()
-        ));
-    }
-    Ok(bytes)
 }
 
 fn checked_len(label: &str, factors: &[usize]) -> Result<usize, String> {
