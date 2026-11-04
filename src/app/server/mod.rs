@@ -1,4 +1,5 @@
 pub mod api;
+mod auk;
 mod forecast;
 mod prediction;
 mod rerank;
@@ -35,7 +36,7 @@ use crate::models::qwen3::tts::speaker::{reference_wav_to_mel, Qwen3TtsSpeakerEn
 use crate::models::qwen3::tts::{predictor_top_k, Qwen3TtsTalker, TtsPrompt, TtsSession};
 use crate::models::qwen3::Qwen3Model;
 
-const USAGE: &str = "Usage: rust-model-server --model <path.gguf-or-ggufrs> [--mmproj ...] [--audio ...] [--image ...] [--tts] [--embedding] [--host 0.0.0.0] [--port 8080] [--threads 4] [--compute cpu|auto|vulkan (default cpu); --gpu aliases auto] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--allow-remote-images]";
+const USAGE: &str = "Usage: rust-model-server --model <path.gguf-or-ggufrs> [--mmproj ...] [--audio ...] [--image ...] [--tts] [--embedding] [--host 0.0.0.0] [--port 8080] [--threads 4] [--compute cpu|auto|vulkan (default cpu); --gpu aliases auto] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--allow-remote-images] [--vae ... --text-encoder ... selects the AuK audio backend: /v1/audio/speech and /v1/audio/generations]";
 
 // =============================================================================
 // Backend types
@@ -71,6 +72,10 @@ enum Backend {
     Asr(AsrBackend),
     Audio8(Audio8Backend),
     Tts(TtsBackend),
+    /// The AuK flow-matching audio DiT: a DiT GGUF, a BigVGANFlow VAE GGUF
+    /// and an optional Qwen2.5-Omni text encoder. It serves the audio
+    /// speech routes.
+    Auk(auk::AukBackend),
     Rerank(RerankBackend),
     Clm(ClmBackend),
     Gliner2(Gliner2Backend),
@@ -979,7 +984,10 @@ fn synthesize_tts_frames(
 // Backend construction
 // =============================================================================
 
-fn build_backend(options: &CliOptions) -> Result<Arc<Backend>, String> {
+fn build_backend(
+    options: &CliOptions,
+    auk_source: Option<Arc<dyn TensorSource>>,
+) -> Result<Arc<Backend>, String> {
     options.validate_compute_mode()?;
     options.compute_policy().check_build()?;
     let _scope = options.compute_policy().enter_legacy_scope();
@@ -1000,6 +1008,11 @@ fn build_backend(options: &CliOptions) -> Result<Arc<Backend>, String> {
     }
     if options.tts {
         return Ok(Arc::new(Backend::Tts(build_tts(options)?)));
+    }
+    // AuK is a flow-matching audio DiT with its own VAE GGUF; the probe in
+    // `run_server` already opened and identified the model.
+    if let Some(source) = auk_source {
+        return Ok(Arc::new(Backend::Auk(auk::build_auk(options, source)?)));
     }
     if options.audio.is_some() {
         // ASR disambiguation: Audio8 ships the audio tower in the LLM GGUF
@@ -1762,7 +1775,18 @@ pub fn run_server() {
             options.max_tokens = Some(128);
         }
     }
-    if let Err(error) = validate_cli_options(&options) {
+    // The AuK DiT needs its own VAE GGUF, so the architecture of the
+    // `--model` file identifies the invocation. The diff-model validators
+    // (Z-Image and friends) want `--out` and would reject the AuK
+    // invocation, so they are skipped for it, exactly like the main binary
+    // does.
+    let auk_source = auk::probe_invocation(&options);
+    if auk_source.is_some() {
+        if let Err(error) = auk::validate_server_options(&options) {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+    } else if let Err(error) = validate_cli_options(&options) {
         eprintln!("{error}");
         std::process::exit(2);
     }
@@ -1788,7 +1812,7 @@ pub fn run_server() {
         options.threads,
         available,
     ));
-    let backend = match build_backend(&options) {
+    let backend = match build_backend(&options, auk_source) {
         Ok(value) => value,
         Err(error) => {
             eprintln!("Failed to build model backend: {error}");
@@ -1809,6 +1833,7 @@ pub fn run_server() {
         Backend::Asr(_) => "asr",
         Backend::Audio8(_) => "audio8",
         Backend::Tts(_) => "tts",
+        Backend::Auk(_) => "auk",
         Backend::Rerank(_) => "rerank",
         Backend::Clm(_) => "clm",
         Backend::Gliner2(_) => "gliner2",
@@ -1849,6 +1874,9 @@ pub fn run_server() {
             )
             .route("/v1/audio/transcriptions_json", post(transcriptions_json)),
         Backend::Tts(_) => router.route("/v1/audio/speech", post(speech)),
+        Backend::Auk(_) => router
+            .route("/v1/audio/speech", post(auk::speech))
+            .route("/v1/audio/generations", post(auk::generations)),
         Backend::Rerank(_) => router.route("/v1/rerank", post(rerank::rerank)),
         // CLM scores by cosine, so only the single-question route applies.
         // Grouped does a per-group softmax that has no cosine analogue,

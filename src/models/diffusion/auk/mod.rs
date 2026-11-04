@@ -41,6 +41,20 @@ pub(crate) mod vae;
 #[cfg(feature = "vulkan")]
 mod vae_gpu;
 
+/// The AuK-Flash time grid pinned by the official `infer_auk.py`.
+///
+/// The distilled release only works under this exact schedule: 4 steps, CFG
+/// off and no sway. The values are kept at full precision so the f32
+/// rounding matches the official grid bit for bit.
+#[allow(clippy::excessive_precision)]
+pub const FLASH_TIME_GRID: [f32; 5] = [
+    0.0,
+    0.076_120_495_796_203_61,
+    0.292_893_230_915_069_6,
+    0.617_316_603_660_583_5,
+    1.0,
+];
+
 pub struct AukAudio {
     pub sample_rate: u32,
     pub samples: Vec<f64>,

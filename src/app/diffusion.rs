@@ -868,19 +868,13 @@ pub fn run_auk_cli(
     // AuK-Flash is a distilled release that only works under a fixed recipe:
     // 4 steps, CFG off, and the explicit 4-step time grid. The official
     // `infer_auk.py` pins the grid and disables sway entirely for Flash.
-    const AUK_FLASH_TIME_GRID: [f32; 5] = [
-        0.0,
-        0.076_120_495_796_203_61,
-        0.292_893_230_915_069_6,
-        0.617_316_603_660_583_5,
-        1.0,
-    ];
+    let flash_time_grid = crate::models::diffusion::auk::FLASH_TIME_GRID;
     let (steps, guidance_scale, sway_sampling_coef, time_grid) = if auk_flash {
         (
             4,
             cfg_scale.unwrap_or(0.0),
             None,
-            Some(AUK_FLASH_TIME_GRID.to_vec()),
+            Some(flash_time_grid.to_vec()),
         )
     } else {
         (steps, cfg_scale.unwrap_or(2.0), sway_sampling_coef, None)
@@ -930,44 +924,14 @@ fn write_wav(
     audio: &crate::models::diffusion::auk::AukAudio,
 ) -> Result<(), String> {
     use std::io::Write;
+    let bytes = crate::format::wav::encode_wav_pcm16_f64(
+        &audio.samples,
+        audio.sample_rate,
+        audio.channels as u16,
+    )?;
     let mut file = std::fs::File::create(path)
         .map_err(|e| format!("Failed to create {}: {e}", path.display()))?;
-    let sample_rate = audio.sample_rate as u32;
-    let channels = audio.channels as u16;
-    let bits_per_sample: u16 = 16;
-    let byte_rate = sample_rate * channels as u32 * bits_per_sample as u32 / 8;
-    let block_align = channels * bits_per_sample / 8;
-    let data_len = (audio.samples.len() * 2) as u32;
-    let fmt_chunk_size: u32 = 16;
-    let riff_size: u32 = 4 + (8 + fmt_chunk_size) + (8 + data_len);
-    file.write_all(b"RIFF").map_err(|e| e.to_string())?;
-    file.write_all(&riff_size.to_le_bytes())
-        .map_err(|e| e.to_string())?;
-    file.write_all(b"WAVE").map_err(|e| e.to_string())?;
-    file.write_all(b"fmt ").map_err(|e| e.to_string())?;
-    file.write_all(&fmt_chunk_size.to_le_bytes())
-        .map_err(|e| e.to_string())?;
-    file.write_all(&1u16.to_le_bytes())
-        .map_err(|e| e.to_string())?; // PCM
-    file.write_all(&channels.to_le_bytes())
-        .map_err(|e| e.to_string())?;
-    file.write_all(&sample_rate.to_le_bytes())
-        .map_err(|e| e.to_string())?;
-    file.write_all(&byte_rate.to_le_bytes())
-        .map_err(|e| e.to_string())?;
-    file.write_all(&block_align.to_le_bytes())
-        .map_err(|e| e.to_string())?;
-    file.write_all(&bits_per_sample.to_le_bytes())
-        .map_err(|e| e.to_string())?;
-    file.write_all(b"data").map_err(|e| e.to_string())?;
-    file.write_all(&data_len.to_le_bytes())
-        .map_err(|e| e.to_string())?;
-    for sample in &audio.samples {
-        let scaled = (*sample * 32_768.0).clamp(-32_768.0, 32_767.0) as i16;
-        file.write_all(&scaled.to_le_bytes())
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(())
+    file.write_all(&bytes).map_err(|e| e.to_string())
 }
 
 pub fn run_ernie_image_cli(

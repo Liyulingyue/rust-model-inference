@@ -105,16 +105,10 @@ mod contract_tests {
     /// how the upstream entry point warps the Base schedule.
     #[test]
     fn flash_time_grid_matches_the_official_pinned_grid() {
-        const OFFICIAL: [f32; 5] = [
-            0.0,
-            0.076_120_495_796_203_61,
-            0.292_893_230_915_069_6,
-            0.617_316_603_660_583_5,
-            1.0,
-        ];
+        let official = crate::models::diffusion::auk::FLASH_TIME_GRID;
         let warped = flow_time_grid(4, Some(-1.0), None);
         assert_eq!(warped.len(), 5);
-        for (got, want) in warped.iter().zip(OFFICIAL.iter()) {
+        for (got, want) in warped.iter().zip(official.iter()) {
             assert!(
                 (got - want).abs() < 1e-6,
                 "sway grid {got} != official {want}"
@@ -122,8 +116,8 @@ mod contract_tests {
         }
 
         // An explicit grid takes precedence over both steps and sway.
-        let pinned = flow_time_grid(4, Some(-1.0), Some(&OFFICIAL));
-        assert_eq!(pinned, OFFICIAL.to_vec());
+        let pinned = flow_time_grid(4, Some(-1.0), Some(&official));
+        assert_eq!(pinned, official.to_vec());
     }
 
     /// Without sway the grid is uniform, and `steps` controls its length.

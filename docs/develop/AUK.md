@@ -7,7 +7,7 @@
 
 ## 入口
 
-只有 CLI，未接入 HTTP / JEV。
+CLI 和 HTTP 都有。CLI：
 
 ```bash
 rust-model-inference \
@@ -104,9 +104,84 @@ CFMEdit 参考音频 conditioning 走
 接受预计算的 audio embeddings（`audio_tokens * TEXT_IN`），与 text 拼成
 image/audio/text joint sequence 一起走 DiT。
 
+## HTTP 接口
+
+`rust-model-server` 用 `--model`（DiT）+ `--vae`（VAE）+ 可选 `--text-encoder` 启动；
+`--model` 的架构是 AuK 时自动选 AuK 后端（不需要额外开关）。
+
+```bash
+rust-model-server \
+  --model models/AuK-Base-and-Flash-GGUF/auk-base-f16.gguf \
+  --vae models/AuK-Base-and-Flash-GGUF/auk-vae-f32.gguf \
+  --text-encoder models/AuK-Base-and-Flash-GGUF/qwen2.5-omni-3b-q8_0.gguf \
+  --host 127.0.0.1 --port 8080
+```
+
+### `POST /v1/audio/speech`（OpenAI 兼容）
+
+请求体是 OpenAI 的形状，AuK 的旋钮作为可选扩展：
+
+```json
+{
+  "model": "auk",
+  "input": "The next train leaves in ten minutes.",
+  "voice": "file:///srv/voices/ann.wav",
+  "response_format": "wav",
+  "speed": 1.0,
+  "steps": 32,
+  "guidance_scale": 2.0,
+  "sway_sampling_coef": -1.0,
+  "duration": 4,
+  "seed": 0
+}
+```
+
+`voice` 接受 `file://<路径>` 或 `data:audio/wav;base64,...`（和 Breeze 那条
+`/v1/audio/speech` 一致）。`response_format` 支持 `wav`（默认）、`pcm`（裸
+little-endian PCM16，无 RIFF 头）、`json`（base64 的 WAV + 元信息）。
+
+### `POST /v1/audio/generations`（完整 AuK 形状）
+
+接受 JSON 或 `multipart/form-data`，暴露全部旋钮：
+
+| 字段 | 含义 |
+| --- | --- |
+| `prompt` | 要合成的文本 |
+| `instruct` | instruct-TTS 前缀 |
+| `steps` / `guidance_scale`（别名 `cfg_scale`） | 采样步数与 CFG 强度 |
+| `sway_sampling_coef` | flow-matching 时间网格的 sway 系数 |
+| `flash` | 锁定 AuK-Flash 配方（4 步、cfg 0、官方时间网格） |
+| `duration` | 音频秒数 |
+| `seed` / `sample_rate` | 随机种子与采样率 |
+| `speed` | 播放速度倍率 |
+| `pitch_shift` / `volume_change` | AuK 的 DSP 编辑（半音 / dB） |
+| `reference_audio_path` / `reference_audio_base64` | 参考音频（服务器本地路径 / base64） |
+| `response_format` | `wav` / `pcm` / `json` |
+
+multipart 用同名字段上传，参考音频放在 `reference_audio`（或 `file` / `voice`）：
+
+```bash
+curl -s -F prompt="The next train leaves in ten minutes." \
+     -F steps=32 -F duration=4 \
+     -F reference_audio=@voice.wav \
+     http://127.0.0.1:8080/v1/audio/generations -o out.wav
+```
+
+参考音频要走 Qwen2.5-Omni audio tower，服务端要用 `--qwen-omni-bf16` 启动；
+没有它时带参考音频的请求会明确返回 400 而不是静默忽略。
+
+同一时刻只跑一个渲染（`generation_slot`），并发请求返回 429。
+
 ## 已知限制
 
-- **未接入 HTTP / JEV**：只有 CLI 入口。
+- **Vulkan 路径的渲染不是逐位可复现的**：同一进程内同一份 prompt + seed，CPU 路径
+  8 次渲染逐位相同，Vulkan 路径大约 6 次里有 1 次不同。用 `RMI_AUK_DIT_DUMP` 定位过：
+  text conditioning、`latent_in_0/1`、`velocity_0/1` 都逐位相同，差异从第 3 个 Euler
+  步（`velocity_2`）开始出现 —— 是 DiT 设备路径内部的不确定性，不是采样参数或
+  随机数的问题。CLI 每次只渲染一次，所以用户拿到的是"抽签"结果；HTTP 服务连续
+  渲染时更容易观察到。**CPU 路径不受影响**（逐位可复现）。这条与 HTTP 接入无关，
+  是 GPU 路径的既有问题，需要单独定位。
+- **未接入 JEV**：AuK 是生成模型，不是打分模型，JEV 路由对它没有意义。
 - **Qwen2.5-Omni audio tower 未移植**（`thinker.audio_tower.*`）：CFMEdit 端到端需要
   外部提供 audio embeddings（例如用 Python 跑 Qwen audio tower 导出）。
 - **`pitch_shift` 同时改音高和时长**：走线性重采样，+2 半音 = 缩短到 1/1.122。
