@@ -123,7 +123,7 @@ pub struct MellumScratch {
     pub rope_cos: Vec<f32>,
     pub rope_sin: Vec<f32>,
     /// Buffers for the attention step.
-    pub attn_scratch: AttnScratch,
+    pub(crate) attn_scratch: AttnScratch,
     moe_debug: MellumMoeDebug,
     /// Quantized matmul scratch (Q8_0 and Q8_K activation buffers).
     pub project: ProjectScratch,
