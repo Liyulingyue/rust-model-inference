@@ -205,6 +205,26 @@ Base 32 步的分解（Vulkan）：denoise 74.2 s + VAE 0.40 s；CPU 路径是
 denoise 108.1 s + VAE 4.6 s。VAE 解码在 CPU 上从 32.1 s 降到 4.6 s
 （见 `auk/vae` 提交），在 Vulkan 上是 0.40 s。
 
+### 与官方 PyTorch 解码器的速度对比
+
+同一份 latent、同一份权重（`probe_vae_timing.py`）：
+
+| VAE 解码（4 秒） | 耗时 | 相对 Rust Vulkan |
+| --- | --- | --- |
+| 官方 PyTorch CPU（oneDNN 关） | 10 543 ms | 26x |
+| 官方 PyTorch CUDA | **182 ms** | **2.2x** |
+| 本仓库 Rust CPU | 4 571 ms | 11x |
+| 本仓库 Rust Vulkan | **398 ms** | 1x |
+
+官方 CPU 路径必须关掉 oneDNN：它的分组卷积（`groups=C` 的 12 抽头 FIR）
+在输出超过 ~1M 元素时直接抛 `illegal immediate parameter`，也就是
+**超过 1.5 秒的音频根本解不出来**。Rust 的手写卷积没有这个上限。
+
+Vulkan 路径比 PyTorch+cuDNN 慢 2.2 倍：cuDNN 的隐式 GEMM 用寄存器分块，
+每个 FMA 只吃一次寄存器读；本仓库的 tiled kernel 每个 FMA 配一次共享内存
+广播读，指令数大约两倍。差距只体现在 VAE 上（整轮渲染里 VAE 占 0.5%），
+换来的好处是不依赖 CUDA，只用仓库里已有的 Vulkan 通路。
+
 主要改动（每一项都保持逐位一致，见上面的对齐结果）：
 
 | 改动 | 效果 |
@@ -308,4 +328,5 @@ dump 的张量名与 CPU 路径一致，`cmp_vae.py` 直接可比。
 ```bash
 .venv/bin/python3 tools/oracle/auk/probe_vae_length.py      # 官方 VAE 各长度解码
 .venv/bin/python3 tools/oracle/auk/probe_torch_conv_bug.py  # 最小复现
+.venv/bin/python3 tools/oracle/auk/probe_vae_timing.py      # 官方 PyTorch 解码耗时
 ```
