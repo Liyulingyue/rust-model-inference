@@ -294,7 +294,11 @@ impl<'a> Audio8TextSession<'a> {
             let mut hidden = embedding.to_vec();
             trace("model.input_embed", None, &[1, WIDTH], &hidden);
             #[cfg(feature = "vulkan")]
-            let mut gpu_guard = self.model.gpu.lock().map_err(|_| "Audio8 GPU compute poisoned".to_string())?;
+            let mut gpu_guard = self
+                .model
+                .gpu
+                .lock()
+                .map_err(|_| "Audio8 GPU compute poisoned".to_string())?;
             for (index, layer) in self.model.layers.iter().enumerate() {
                 let mut normed = vec![0.0; WIDTH];
                 // RMS norm: use GPU if available, else CPU fallback.
@@ -314,8 +318,12 @@ impl<'a> Audio8TextSession<'a> {
                 }
                 let mut linear = self.model.linear()?;
                 // Batch Q/K/V into one GPU submit (3 matmuls, same input).
-                let (mut q, mut k, mut v) =
-                    linear.run_qkv(&format!("blk.{index}"), &normed, WIDTH, KV_HEADS * HEAD_WIDTH)?;
+                let (mut q, mut k, mut v) = linear.run_qkv(
+                    &format!("blk.{index}"),
+                    &normed,
+                    WIDTH,
+                    KV_HEADS * HEAD_WIDTH,
+                )?;
                 for (value, bias) in q.iter_mut().zip(&layer.q_bias) {
                     *value += *bias;
                 }
@@ -347,12 +355,29 @@ impl<'a> Audio8TextSession<'a> {
                     .map_err(|e| format!("Audio8 GPU attention failed: {e}"))?;
                 } else {
                     // CPU fallback: per-head attention with online softmax.
-                    cpu_attention(&q, &self.keys[index], &self.values[index], position, &mut attention_out);
+                    cpu_attention(
+                        &q,
+                        &self.keys[index],
+                        &self.values[index],
+                        position,
+                        &mut attention_out,
+                    );
                 }
                 #[cfg(not(feature = "vulkan"))]
-                cpu_attention(&q, &self.keys[index], &self.values[index], position, &mut attention_out);
+                cpu_attention(
+                    &q,
+                    &self.keys[index],
+                    &self.values[index],
+                    position,
+                    &mut attention_out,
+                );
                 if index == 0 {
-                    trace("kqv_out-0", Some(0), &[QUERY_HEADS, HEAD_WIDTH], &attention_out);
+                    trace(
+                        "kqv_out-0",
+                        Some(0),
+                        &[QUERY_HEADS, HEAD_WIDTH],
+                        &attention_out,
+                    );
                 }
                 let update = linear.run(&format!("blk.{index}.o"), &attention_out, WIDTH)?;
                 for (value, update) in hidden.iter_mut().zip(update) {
@@ -421,13 +446,7 @@ impl<'a> Audio8TextSession<'a> {
 }
 
 /// CPU fallback for per-head attention with online softmax.
-fn cpu_attention(
-    q: &[f32],
-    keys: &[f32],
-    values: &[f32],
-    position: usize,
-    output: &mut [f32],
-) {
+fn cpu_attention(q: &[f32], keys: &[f32], values: &[f32], position: usize, output: &mut [f32]) {
     let scale = 1.0 / (HEAD_WIDTH as f32).sqrt();
     for head in 0..QUERY_HEADS {
         let kv_head = head / (QUERY_HEADS / KV_HEADS);

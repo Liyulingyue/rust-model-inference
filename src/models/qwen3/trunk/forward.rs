@@ -248,6 +248,60 @@ impl Qwen3Model {
             layers,
         )
     }
+
+    /// Token-major concatenation of selected pre-output-norm hidden layers with
+    /// audio embeddings substituted at `<|AUDIO|>` positions.
+    ///
+    /// Layer numbers follow Transformers' `hidden_states` numbering (the
+    /// embedding output is layer 0), so `1..=n_layer` selects every transformer
+    /// layer. Unlike [`Self::text_encode_hidden_layers`] this accepts the last
+    /// layer (`n_layer`), which is what AuK's ELMo-style layer fusion needs.
+    pub(crate) fn text_encode_hidden_layers_with_audio(
+        &self,
+        token_ids: &[u32],
+        positions: &[[usize; 4]],
+        key_mask: &[bool],
+        audio_replacements: &[(usize, &[f32])],
+        layers: &[usize],
+    ) -> Result<Vec<f32>, String> {
+        validate_token_ids(token_ids, self.config.vocab)?;
+        let n_tokens = token_ids.len();
+        if positions.len() != n_tokens
+            || key_mask.len() != n_tokens
+            || key_mask.first() != Some(&true)
+            || layers.is_empty()
+            || layers[0] == 0
+            || layers.windows(2).any(|w| w[0] >= w[1])
+            || *layers.last().unwrap() > self.config.n_layer
+        {
+            return Err("Invalid Qwen hidden-layer extraction request".into());
+        }
+        let n_embd = self.config.n_embd;
+        let mut embeddings = self.embed_tokens(token_ids)?;
+        for (pos, audio_embed) in audio_replacements {
+            if *pos >= n_tokens {
+                return Err(format!(
+                    "audio_replacement position {pos} out of bounds (n_tokens={n_tokens})"
+                ));
+            }
+            if audio_embed.len() != n_embd {
+                return Err(format!(
+                    "audio embedding length {} != n_embd={n_embd}",
+                    audio_embed.len()
+                ));
+            }
+            let off = *pos * n_embd;
+            embeddings[off..off + n_embd].copy_from_slice(audio_embed);
+        }
+        text_encode_forward(
+            self,
+            &embeddings,
+            n_tokens,
+            positions,
+            Some(key_mask),
+            layers,
+        )
+    }
 }
 
 pub fn text_encode(
@@ -809,6 +863,8 @@ pub fn run_shared_inference(
         elapsed_ms,
         tokens_per_second,
     );
+    #[cfg(feature = "vulkan")]
+    crate::vulkan::dump_submit_trace();
     Ok(())
 }
 

@@ -19,12 +19,40 @@ use super::weights::{MellumLayerWeights, MellumModel};
 use crate::core::scratchpad::{KvCache, KvFormat, KvState};
 use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::Weight;
-use crate::ops::{dot_f32, quantize_q8_0_into, rms_norm, silu};
+use crate::ops::{dot_f32, rms_norm, silu};
 use std::sync::Arc;
 
 /// ggml's softmax clamp: `ggml_clamp(weights_sum, 6.103515625e-5, INFINITY)`.
 /// `6.103515625e-5` is the smallest positive normal f16.
 const MOE_WEIGHT_SUM_FLOOR: f32 = 6.103_515_6e-5;
+
+/// Scratch buffers for the quantized matmul path, shared across all projections.
+///
+/// `quantize_and_matmul_with_scratch` needs three temporary buffers whose
+/// sizes depend only on `n_in` (the widest projection input, `n_embd`).
+/// Reusing them across calls avoids per-projection allocation.
+pub struct ProjectScratch {
+    pub q8k_buf: Vec<crate::ops::quant::BlockQ8K>,
+    pub q8_buf: Vec<u8>,
+    pub scale_buf: Vec<f32>,
+}
+
+impl ProjectScratch {
+    fn new(max_n_in: usize) -> Self {
+        Self {
+            q8k_buf: vec![
+                crate::ops::quant::BlockQ8K {
+                    d: 0.0,
+                    qs: [0; crate::ops::quant::QK_K],
+                    bsums: [0; crate::ops::quant::QK_K / 16]
+                };
+                max_n_in / crate::ops::quant::QK_K
+            ],
+            q8_buf: vec![0u8; max_n_in],
+            scale_buf: vec![0.0f32; max_n_in.div_ceil(32)],
+        }
+    }
+}
 
 /// Reusable per-token buffers, sized once so the decode loop never allocates.
 pub struct MellumScratch {
@@ -59,6 +87,8 @@ pub struct MellumScratch {
     /// V window transposed to `[head_dim_v, visible]` so each attention output
     /// lane is a contiguous dot-product input.
     attn_transposed: Vec<f32>,
+    /// Quantized matmul scratch (Q8_0 and Q8_K activation buffers).
+    pub project: ProjectScratch,
 }
 
 impl MellumScratch {
@@ -99,6 +129,7 @@ impl MellumScratch {
             kq_probs: vec![0.0; capacity.max(1)],
             attn_transposed: vec![0.0; capacity.max(1) * config.n_embd_head_v],
             moe_debug: MellumMoeDebug::new(config),
+            project: ProjectScratch::new(config.n_embd.max(config.n_attn())),
         }
     }
 }
@@ -191,6 +222,7 @@ impl<'model> MellumRunner<'model> {
             config.n_embd,
             config.vocab_size,
             &mut self.scratch.logits,
+            &mut self.scratch.project,
         );
         trace::global("result_output", position, &self.scratch.logits);
         self.kv.seq_len = position + 1;
@@ -217,6 +249,7 @@ impl<'model> MellumRunner<'model> {
             n_embd,
             config.n_head * config.n_embd_head_k,
             &mut self.scratch.q,
+            &mut self.scratch.project,
         );
         project(
             pool,
@@ -225,6 +258,7 @@ impl<'model> MellumRunner<'model> {
             n_embd,
             config.n_head_kv * config.n_embd_head_k,
             &mut self.scratch.k,
+            &mut self.scratch.project,
         );
         project(
             pool,
@@ -233,6 +267,7 @@ impl<'model> MellumRunner<'model> {
             n_embd,
             config.n_head_kv * config.n_embd_head_v,
             &mut self.scratch.v,
+            &mut self.scratch.project,
         );
 
         // Per-head Q/K RMSNorm with the same eps as the block norm.
@@ -294,6 +329,7 @@ impl<'model> MellumRunner<'model> {
             config.n_attn(),
             n_embd,
             &mut self.scratch.attn_proj,
+            &mut self.scratch.project,
         );
 
         // Mellum's parallel residual: the FFN consumes `attn_out + hidden` and
@@ -328,6 +364,7 @@ impl<'model> MellumRunner<'model> {
                 &mut scratch.up_buf,
                 &mut scratch.down_buf,
                 &mut scratch.moe_debug,
+                &mut scratch.project,
             );
         }
         let scratch = &mut self.scratch;
@@ -583,10 +620,11 @@ impl Rows {
     }
 }
 
-/// Single-row quantized matmul, row-partitioned over the shared thread pool.
+/// Single-row quantized matmul with GPU/CPU auto-dispatch.
 ///
-/// The activation is quantized once and shared by every worker, which is what
-/// ggml does for one `mul_mat` row (`from_float` then `vec_dot`).
+/// Routes through `Weight::quantize_and_matmul_with_scratch`, which tries
+/// the Vulkan GPU path first and falls back to the CPU kernel.  The scratch
+/// buffers are reused across calls so the decode loop never allocates.
 fn project(
     pool: &Arc<ComputePool>,
     weight: &Weight<'_>,
@@ -594,33 +632,21 @@ fn project(
     n_in: usize,
     n_out: usize,
     output: &mut [f32],
+    scratch: &mut ProjectScratch,
 ) {
     debug_assert_eq!(input.len(), n_in);
     debug_assert_eq!(output.len(), n_out);
     if n_out == 0 {
         return;
     }
-    let mut q8 = vec![0u8; n_in];
-    let mut scales = vec![0.0f32; n_in.div_ceil(32)];
-    quantize_q8_0_into(input, n_in, &mut q8, &mut scales);
-
-    let input_ptr = input.as_ptr() as usize;
-    let q8_ptr = q8.as_ptr() as usize;
-    let scales_ptr = scales.as_ptr() as usize;
-    let rows = Rows(output.as_mut_ptr(), n_out);
-    pool.compute(move |ith, nth| {
-        // SAFETY: `input`, `q8` and `scales` outlive the dispatch (the pool
-        // joins every worker before returning) and the kernel partitions
-        // `rows` across workers by `(ith, nth)`.
-        let input = unsafe { std::slice::from_raw_parts(input_ptr as *const f32, n_in) };
-        let q8 = unsafe { std::slice::from_raw_parts(q8_ptr as *const u8, n_in) };
-        let scales =
-            unsafe { std::slice::from_raw_parts(scales_ptr as *const f32, n_in.div_ceil(32)) };
-        let out = unsafe { rows.get() };
-        weight
-            .kernel
-            .forward_prepared(input, q8, scales, None, out, n_in, n_out, ith, nth);
-    });
+    weight.quantize_and_matmul_with_scratch(
+        input,
+        &mut scratch.q8k_buf,
+        &mut scratch.q8_buf,
+        &mut scratch.scale_buf,
+        output,
+        pool,
+    );
 }
 
 /// ggml's `build_moe_ffn` for `LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX` with
@@ -642,6 +668,7 @@ fn moe_forward(
     up_buf: &mut [f32],
     down_buf: &mut [f32],
     expert_debug: &mut MellumMoeDebug,
+    project_scratch: &mut ProjectScratch,
 ) {
     let n_embd = config.n_embd;
     let n_expert = config.expert_count;
@@ -700,6 +727,7 @@ fn moe_forward(
             n_embd,
             config.expert_ffn,
             up_buf,
+            project_scratch,
         );
         project(
             pool,
@@ -708,6 +736,7 @@ fn moe_forward(
             n_embd,
             config.expert_ffn,
             gate_buf,
+            project_scratch,
         );
         let ffn_slot = index * config.expert_ffn;
         expert_debug.up[ffn_slot..ffn_slot + config.expert_ffn]
@@ -726,6 +755,7 @@ fn moe_forward(
             config.expert_ffn,
             n_embd,
             down_buf,
+            project_scratch,
         );
         let down_slot = index * n_embd;
         expert_debug.down[down_slot..down_slot + n_embd].copy_from_slice(&down_buf[..n_embd]);

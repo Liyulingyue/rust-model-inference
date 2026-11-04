@@ -295,6 +295,93 @@ pub fn decode_audio(path: &Path) -> Result<Vec<f32>, String> {
     Ok(decoded.samples)
 }
 
+/// Decode audio that is already in memory (HTTP uploads), mirroring
+/// [`decode_audio`] for callers that hold the encoded bytes instead of a
+/// path.
+///
+/// ffmpeg reads the upload from stdin, so the same mix-down and resample
+/// applies; without ffmpeg the pure-Rust WAV decoder handles 16 kHz mono
+/// PCM16 input.
+pub fn decode_audio_bytes(bytes: &[u8]) -> Result<Vec<f32>, String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut child = match Command::new("ffmpeg")
+        .args([
+            "-v",
+            "error",
+            "-i",
+            "pipe:0",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-f",
+            "f32le",
+            "-acodec",
+            "pcm_f32le",
+            "pipe:1",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => {
+            return decode_audio_bytes_pure_rust(bytes);
+        }
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        if let Err(error) = stdin.write_all(bytes) {
+            let _ = child.kill();
+            return Err(format!("failed to pipe the upload to ffmpeg: {error}"));
+        }
+    }
+    let decoded = child
+        .wait_with_output()
+        .map_err(|error| format!("ffmpeg failed for the upload: {error}"))?;
+    if !decoded.status.success() {
+        return Err(format!(
+            "ffmpeg failed for the upload: {}",
+            String::from_utf8_lossy(&decoded.stderr).trim()
+        ));
+    }
+    if decoded.stdout.is_empty() || decoded.stdout.len() % 4 != 0 {
+        return Err("ffmpeg returned invalid F32 audio".into());
+    }
+    let samples = decoded
+        .stdout
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
+        .collect::<Vec<_>>();
+    if samples.iter().any(|sample| !sample.is_finite()) {
+        return Err("ffmpeg returned non-finite audio".into());
+    }
+    Ok(samples)
+}
+
+/// The pure-Rust half of [`decode_audio_bytes`]: 16 kHz mono PCM16 WAV only.
+fn decode_audio_bytes_pure_rust(bytes: &[u8]) -> Result<Vec<f32>, String> {
+    let decoded = crate::models::qwen3::asr::audio_processor::decode_pcm16_wav_any(bytes)
+        .map_err(|error| format!("Pure-Rust audio decode failed for the upload: {error:?}"))?;
+    if decoded.channels != 1 {
+        return Err(format!(
+            "The uploaded audio has {} channels; AuK requires mono. Install ffmpeg to mix-down.",
+            decoded.channels
+        ));
+    }
+    if decoded.sample_rate != 16_000 {
+        return Err(format!(
+            "The uploaded audio has {} Hz; AuK requires 16000 Hz. Install ffmpeg to resample.",
+            decoded.sample_rate
+        ));
+    }
+    Ok(decoded.samples)
+}
+
 pub fn decode_image(path: &Path) -> Result<image::DynamicImage, String> {
     let bytes = std::fs::read(path)
         .map_err(|error| format!("Failed to read image {}: {error}", path.display()))?;
@@ -347,6 +434,53 @@ mod tests {
     use super::*;
     use crate::core::tensor::{MetaValue, TensorInfo, TensorSource};
     use std::sync::Arc;
+
+    /// A 16 kHz PCM16 WAV with the given samples.
+    fn pcm16_wav(samples: &[i16], channels: u16) -> Vec<u8> {
+        let data = samples.len() * 2;
+        let block_align = channels * 2;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data as u32).to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&channels.to_le_bytes());
+        bytes.extend_from_slice(&16_000u32.to_le_bytes());
+        bytes.extend_from_slice(&(16_000 * u32::from(block_align)).to_le_bytes());
+        bytes.extend_from_slice(&block_align.to_le_bytes());
+        bytes.extend_from_slice(&16u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&(data as u32).to_le_bytes());
+        for sample in samples {
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        bytes
+    }
+
+    /// An uploaded WAV must decode to the same samples as the file path
+    /// variant, because the AuK reference audio takes both. The decoder
+    /// returns the samples normalized to `[-1, 1]`.
+    #[test]
+    fn uploaded_audio_bytes_decode_to_mono_16k() {
+        let samples: Vec<i16> = (0..160).map(|index| index as i16 * 100).collect();
+        let wav = pcm16_wav(&samples, 1);
+        let decoded = decode_audio_bytes(&wav).expect("decode the upload");
+        assert_eq!(decoded.len(), samples.len());
+        for (got, want) in decoded.iter().zip(samples.iter()) {
+            let want = *want as f32 / 32_768.0;
+            assert!((got - want).abs() < 1e-6, "{got} != {want}");
+        }
+    }
+
+    /// A stereo upload is refused with a message that names the reason.
+    #[test]
+    fn stereo_uploads_are_refused() {
+        let wav = pcm16_wav(&[0; 16], 2);
+        let error = decode_audio_bytes(&wav).expect_err("stereo must be refused");
+        assert!(error.contains("mono"), "{error}");
+    }
 
     /// A mmproj stub exposing only the metadata and tensors a test names.
     struct Stub {
