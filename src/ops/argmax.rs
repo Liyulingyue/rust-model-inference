@@ -131,11 +131,16 @@ unsafe fn argmax_f32_neon(values: &[f32]) -> usize {
     let mut v_best_idx = vdupq_n_s32(-1i32);
     let lane_inc = vdupq_n_s32(4);
     let mut lane_offset = vdupq_n_s32(0);
+    // The index of a lane inside its own 4-wide chunk. Without it every
+    // lane of a chunk carried the chunk base, so the reduction could not
+    // tell the four candidates apart and the reported index was wrong for
+    // any input whose maximum was not in the first lane.
+    let lane_ids = vld1q_s32([0i32, 1, 2, 3].as_ptr());
 
     let mut i = 0;
     while i < n4 {
         let v = vld1q_f32(values.as_ptr().add(i));
-        let idx = lane_offset;
+        let idx = vaddq_s32(lane_offset, lane_ids);
         // vminq_f32 + vceqq: where v > v_best_val, use new (v, idx);
         // otherwise keep running (v_best_val, v_best_idx). Bitwise
         // blend via vbslq.

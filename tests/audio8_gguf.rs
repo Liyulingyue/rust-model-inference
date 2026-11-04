@@ -1,5 +1,6 @@
 use rust_model_inference::core::loader::GGUFLoader;
 use rust_model_inference::core::tensor::TensorSource;
+use rust_model_inference::core::thread_pool::ComputePool;
 use rust_model_inference::core::tokenizer::{BPETokenizer, EncodeOptions};
 use rust_model_inference::models::audio8::text::Audio8TextDecoder;
 use rust_model_inference::models::audio8::Audio8Encoder;
@@ -33,8 +34,15 @@ fn real_audio8_gguf_loads_and_matches_official_token_ids() {
             expected
         );
     }
-    let encoder = Audio8Encoder::from_source(Arc::clone(&source)).unwrap();
+    // Both towers project through the shared linear executor, so they need a
+    // compute pool; the audio tower runs entirely on the CPU.
+    let pool = Arc::new(ComputePool::new(
+        std::thread::available_parallelism()
+            .map(|value| value.get())
+            .unwrap_or(1),
+    ));
+    let encoder = Audio8Encoder::from_source(Arc::clone(&source), Arc::clone(&pool)).unwrap();
     assert_eq!(encoder.frame_embedding.len(), 3 * 2048);
-    let decoder = Audio8TextDecoder::from_source(source).unwrap();
+    let decoder = Audio8TextDecoder::from_source(source, pool).unwrap();
     assert_eq!(decoder.context(), 32_768);
 }

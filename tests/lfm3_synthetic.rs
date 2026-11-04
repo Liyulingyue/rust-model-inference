@@ -348,8 +348,17 @@ fn auto_can_fall_back_to_cpu_and_full_vulkan_is_explicit() {
         expected,
         auto.forward_logits_chunked(&[1, 2, 3], 3).unwrap()
     );
-    assert!(ComputePolicy::Vulkan.validate_text_arch("lfm3").is_err());
-    assert!(
-        Lfm3Session::new_with_compute(&model, KvFormat::F32, 19, ComputePolicy::Vulkan).is_err()
-    );
+    // `--compute vulkan` asks for a real device, not for a particular device
+    // path: LFM3 has no complete one (attention, the short convolution and
+    // the KV cache stay on the host), so the request is accepted and
+    // reported as partial instead of being rejected outright. The full-graph
+    // request still fails when the build has no Vulkan to project onto.
+    assert!(ComputePolicy::Vulkan.validate_text_arch("lfm3").is_ok());
+    assert!(!ComputePolicy::has_complete_device_path("lfm3"));
+    if !cfg!(feature = "vulkan") {
+        assert!(
+            Lfm3Session::new_with_compute(&model, KvFormat::F32, 19, ComputePolicy::Vulkan)
+                .is_err()
+        );
+    }
 }

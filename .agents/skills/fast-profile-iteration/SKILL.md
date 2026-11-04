@@ -25,7 +25,12 @@ description: Use when 在 rust-model-inference 中需要快速验证改动（编
 | 看 clippy 警告 | `cargo clippy --profile release-fast --lib -- -D warnings`（按需） |
 | 跑集成测试 | `cargo test --profile release-fast --test <test_name>` |
 
-`release-fast` 的 baseline：**1302 passed / 17 failed / 88 ignored**（2026-11-01，Linux/x86 实测）。**17 failed 是预存失败**（parity oracle 未跑、第三方依赖回归、Breeze / CLM / DOTS / Gemma4 / Qwen-Drive / YUE2 / argmax / dot BF16 / NEON RoPE / vision RoPE / GGUF sparse segment），不是本次回归。
+`release-fast` 的 baseline：**1346 passed / 26 failed / 87 ignored**（2026-11-04，Linux/aarch64 实测）。**26 failed 是预存失败**，分两类，都不是本次回归：
+
+- **平台相关（aarch64 上的 NEON parity）**：`ops::quant::neon_k`（8）、`models::funasr::encoder::parity_tests`（2）、`models::diffusion::z_image::text`（2）、`models::diffusion::z_image::vae`（1）、`ops::rope::tests` / `ops::rope::neox::tests` / `ops::matmul::neon_tests`（各 1）、`models::gemma4::asr`（1）——都是拿 ggml 的 ARM NEON 参考值比对，在 x86 上反而是过的。
+- **平台无关**：`models::breeze`（3）、`models::clm`（2）、`models::yue2` / `models::qwen_drive` / `models::gemma4::trunk` / `format::ggufrs`（各 1）——parity oracle 未跑或第三方依赖回归。
+
+x86 机器上的失败名单不同（少 NEON 那一组），所以**先跑一遍拿当次基线**再对比。
 
 > 数字会随模型适配漂移。**每次改动前先跑一遍拿到当次基线，报告时逐条对比失败名单，不要只对比总数**——新增一个失败和少一个失败在总数上可能互相抵消。
 
@@ -66,7 +71,7 @@ description: Use when 在 rust-model-inference 中需要快速验证改动（编
 ## 已知约束
 
 - 编译 warning 数量很大（lib 约 300 条，bin 2 条）几乎全部是历史遗留 `unused variable` / `dead_code` / `unused import`，与本次改动无关。**不要把 warning 当 error**（`-D warnings` 会刷屏）。
-- 编译 examples 时会有几个 example crate 因为缺 `main` 报 hard error：`astronex_gpu_determinism`、`astronex_text_determinism`、`check_norm`、`lookup_tokens`、`mage_vae_conv_probe`、`vk_mem_info`（`vk_*` 里只有 `vk_mem_info` 缺 main，`vk_bench` / `vk_check` / `vk_ops_check` 正常）。这是 pre-existing 仓库状态，**不是本次改动的回归**——忽略它们，看 lib 的 build success 即可。
+- 只跑 Vulkan 的 example（`astronex_gpu_determinism`、`astronex_text_determinism`、`mage_vae_conv_probe`、`spv_compile_probe`、`vk_mem_info` 等）在 `Cargo.toml` 里带 `required-features = ["vulkan"]`，不带该 feature 时 `cargo build --all-targets` 会自动跳过它们。**新增只跑 Vulkan 的 example 时记得补这条**，否则默认构建会报 "main function not found"。
 - 缓存命中：重复编译 + 短改动通常 ~5s；冷启动或大改动 ~30~60s。
 - 编译命令若在 bash 工具里 timeout，检查是否忘记加 `--profile release-fast` 走了默认 dev profile。
 
