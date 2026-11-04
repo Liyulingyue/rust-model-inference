@@ -690,21 +690,26 @@ impl Rows {
 /// Single-row quantized matmul, on the CPU.
 ///
 /// The Mellum trunk evaluates one token at a time, so every projection is a
-/// single row. The device only wins when a projection carries many rows: a
-/// one-row matmul reads the whole weight matrix once, and the Q8_0 device
-/// kernel walks the reduction axis with a stride, so it reaches about half
-/// the bandwidth the NEON path gets. Measured on this GB10 box with the
-/// 12B Q8_0 checkpoint (4 steps, 21 token prompt, 8 threads):
+/// single row. The device reads the whole weight matrix once per call, so
+/// it only pays off when a projection carries many rows or when the device
+/// reads the weight faster than the CPU does.
 ///
-/// | projection | CPU | Vulkan |
+/// The Q8_0 device kernel used to be the reason it did not: with ggml's
+/// own weight layout a warp reads 32 sectors one row apart, which reaches
+/// 60 GB/s against the 115 GB/s of the NEON path. The transposed layout
+/// (see `vulkan::q8_layout`) reads the weight the way a GEMV wants to
+/// read it and reaches 163 GB/s, so the device is now level with the CPU
+/// on the output head:
+///
+/// | projection | CPU | Vulkan (transposed) |
 /// | --- | --- | --- |
-/// | output head (2304 -> 98304) | 2.6 ms/token | 4.0 ms/token |
+/// | output head (2304 -> 98304) | 2.6 ms/token | 1.5 ms/token |
 ///
-/// plus a one-off ~320 ms device setup (the 226 MB weight upload and the
-/// arena), so `--compute auto` was 40% *slower* than `--compute cpu` for the
-/// decode loop while producing bit-identical output. The projections
-/// therefore stay on the CPU until the trunk can hand the device a whole
-/// token stream at once; see the TODO entry for the batched prefill.
+/// A 128 token generation then comes out about even (the device pays a
+/// one-off ~26 ms to rewrite the weight and reads the logits back over
+/// the bus), so the projections stay on the CPU until the trunk can hand
+/// the device a whole token stream at once; see the TODO entry for the
+/// batched prefill.
 ///
 /// The scope only covers this call, so the CPU kernel keeps its own
 /// dispatch and the pool workers see the same decision.

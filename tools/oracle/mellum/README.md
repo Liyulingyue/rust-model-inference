@@ -201,32 +201,44 @@ Measured on the GB10 box (12B Q8_0, `--threads 8`, prompt "What is 2+2?",
 
 The per-shape numbers behind that gap (device vs CPU for one projection):
 
-| projection | CPU | Vulkan |
-| --- | --- | --- |
-| output head (2304 → 98304) | 2.6 ms/token | 4.0 ms/token |
+| projection | CPU | Vulkan, native layout | Vulkan, transposed layout |
+| --- | --- | --- | --- |
+| output head (2304 → 98304) | 2.6 ms/token | 4.0 ms/token | **1.5 ms/token** |
 
 and the device-side breakdown of the 4.0 ms: `record` 0.011 ms,
 `submit + wait_for_fences` 3.688 ms, `read` 0.016 ms — i.e. the device is
 busy for 3.7 ms, it is the *kernel* that is slow, not the submission.
 
-Two independent causes:
+Three causes, two of which are fixed:
 
-1. **A one-row matmul is bandwidth bound on the device, and the Q8_0 device
-   kernel walks the reduction axis with a stride**, so it reaches roughly
-   half the bandwidth the NEON path gets on the same bytes. The device is
-   only the right place for a matmul with many rows (see TODO-038: the same
-   box runs Qwen3's large LM head at 70–74 GB/s, while the CPU reaches
-   84 GB/s — the device only wins when the shape is tall enough to amortise
-   the dispatch).
-2. **A one-off ~320 ms setup**: the first `try_matmul` call builds the arena
-   (12.6 MB) and uploads the 226 MB output-head weight. A short CLI run never
-   amortises that.
+1. **The Q8_0 device kernel read the weight badly** — fixed. The kernel
+   gave every lane its own output row, so a warp read 32 sectors one row
+   apart and every 4-byte load straddled the 34-byte block boundary: 60
+   GB/s against the 115 GB/s of the NEON path. The transposed layout
+   (`src/vulkan/q8_layout.rs`, `shaders/glsl/q8_matmul_transposed.comp`)
+   groups 64 output rows so a warp reads one contiguous run, and the same
+   kernel then reaches **163 GB/s** — 2.7x, and above the 130 GB/s of
+   PyTorch CUDA on this box. The result is bit-for-bit the same
+   (0 mismatches over the output head).
+2. **A one-off ~320 ms setup** — mostly fixed. 279 ms of it was the Vulkan
+   context (the driver bringing the device up), 12 ms the pipeline
+   compilation and 17 ms the weight upload. The device is now initialised
+   on a background thread while the model loads
+   (`ComputePolicy::configure_cli`), which took the 21 token prompt + 16
+   output token run from 1009 ms to 685–750 ms.
+3. **What is left is structural**: the single-row projection is only 240 MB
+   of the 2.35 GB a decode step reads, and the CPU decode is not bandwidth
+   bound anyway (53 GB/s against the 115 GB/s it reaches on the output head
+   in isolation) — it is the 785 pool dispatches per token that hold it
+   back. So the device and the CPU come out even (128 tokens: CPU
+   5672–5742 ms, device 5134–5951 ms).
 
 `RUST_GPU_SUBMIT_TRACE=1` confirms the shape of the problem for the whole
 run: `submissions=30`, `3.710 ms/submission` of which `0.017 ms` is
 `queue_submit` and `3.688 ms` is the fence wait. Forcing the threshold to
 `RUST_GPU_MIN_OUTPUTS=0` (so every projection goes to the device) makes it
-worse, not better: 5785 ms versus 2053 ms.
+worse, not better: 5785 ms versus 2053 ms — every projection pays its own
+upload, because the device path caches one weight at a time.
 
 ### What the trunk does about it
 
@@ -234,6 +246,12 @@ worse, not better: 5785 ms versus 2053 ms.
 `ComputePool::disable_gpu_matmul_for_scope()`, so the single-row projections
 stay on the CPU and `--compute auto` matches `--compute cpu` instead of
 losing 40%. The scope is per call, so nothing else in the trunk is affected.
+
+The scope can go once the rest of the trunk moves: the output head on the
+device is now level with the CPU (1.5 ms against 2.6 ms per token), so
+leaving it on the CPU costs about 1 ms per token. What is missing is weight
+residency (the device path re-uploads every weight) and one submission per
+layer instead of one per projection; see TODO-049.
 
 ### The batched prefill
 
@@ -336,15 +354,17 @@ experts of all 28 layers and the output head: 2.21 B parameters, i.e.
 | Rust CPU Q8_0 | 2.35 GB | 22.7 tok/s | 53 GB/s |
 | Rust Vulkan Q8_0 (output head only) | 2.35 GB | — | 66 GB/s |
 
-So the device **can** stream 130 GB/s on this box — our Q8_0 device kernel
-only reaches 66 GB/s of that, half. Two consequences:
+So the device **can** stream 130 GB/s on this box. The Q8_0 device kernel
+used to reach only 66 GB/s of that; with the transposed weight layout it
+reaches **163 GB/s**, above the CUDA number. Two consequences:
 
 * our CPU path is not bandwidth bound (53 GB/s against the 115 GB/s it
   reaches on the output head in isolation); the gap is the 785 pool
   dispatches per token, not the memory system;
-* a Q8_0 decode at PyTorch's 130 GB/s would be 18 ms/token, i.e. **55 tok/s
-  against the CPU's 22.7 tok/s** — the device wins Mellum's decode by 2.4x
-  if the kernel reaches the achievable bandwidth. See TODO-049.
+* a Q8_0 decode at the kernel's 163 GB/s would be 14 ms/token, i.e. **70
+  tok/s against the CPU's 22.7 tok/s** — the device wins Mellum's decode by
+  3x if the weights stay resident and the projections are submitted per
+  layer instead of per projection. See TODO-049.
 
 ## Entry points
 
@@ -380,4 +400,6 @@ probabilities:
 * JEV is wired (CLI and HTTP, probabilities bit-identical) but there is no
   JEV parity evidence against the oracle. Embedding and rerank entry points
   do not exist for `mellum`.
-* The CUDA reference above did not run; only the CPU side is verified.
+* The CUDA reference ran on an idle GPU (29.4 tok/s, 130 GB/s); it needs
+  ~48 GB of peak memory, so it does not fit while another tenant holds most
+  of the unified memory.

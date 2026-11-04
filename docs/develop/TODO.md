@@ -3405,9 +3405,64 @@ CPU 1073 ms → 设备接管 `wq`/`wo` 后 1460 ms。
 所以**批量 prefill 默认走 CPU**，`RMI_MELLUM_DEVICE_PREFILL=1` 可以打开设备路径
 （serving 场景权重常驻，上传可摊销，这条值得在服务器上复测）。
 
+#### 已做：Q8_0 转置权重布局 + 新 kernel（设备带宽 60 → 163 GB/s）
+
+新增 `shaders/glsl/q8_matmul_transposed.comp` 和 `src/vulkan/q8_layout.rs`：
+上传时把 Q8_0 权重按 **64 行一组**重排（每个 block 的 64 行 payload 连续，
+scale 紧跟其后），于是一个 warp 读到的 32 行是**连续字节**，4 字节 load 也对齐。
+
+| 设备 kernel（输出头 2304→98304，单行） | 时间 | 有效带宽 |
+|---|---|---|
+| ggml 原生布局 | 4.0 ms | 60 GB/s |
+| 转置布局 | 1.47 ms | **163 GB/s**（2.71×） |
+| 设备纯流式（element-wise，240 MB 读+写） | — | 171 GB/s（设备天花板） |
+
+**逐位一致**：转置版与原生版输出 0 mismatch（哨兵
+`q8_0_transposed_layout_matches_and_faster`）。
+
+这条路只用在**单行**（decode）。多行走 tiled kernel，而 tiled kernel 的瓶颈是
+**激活的 shared-memory 暂存**（每个 block 每 lane 要做 32 token × 8 次 LDS），
+不是权重布局——转置版实测只有 0.60×，所以多行仍用原生布局。
+（中间试过"按 block 排序"的布局，tiled 仍然更慢；按 64 行分组才让单行版
+保持 2.7×。）
+
+host 端转置 240 MB 约 26 ms（9 GB/s），一次性，直接写进设备 buffer
+（`upload_static_filled`），所以上传只比原生多约 9 ms。
+
+#### 新证据：设备的一次性开销在驱动初始化，不在 kernel
+
+| 一次性开销 | 时间 |
+|---|---|
+| Vulkan 上下文（instance + device，驱动初始化） | **279 ms** |
+| 50 个 compute pipeline 编译 | 11.7 ms |
+| 输出头权重上传（240 MB） | 17 ms（转置后 26 ms） |
+
+这 279 ms 之前算在生成时间里，是"`--compute auto` 慢 40%"的主要来源。
+现在 `compute_policy().configure_cli()` 在**后台线程**初始化设备，和 12 GB
+模型加载重叠 → 21 token prompt + 16 output 的生成时间 1009 ms → 685–750 ms。
+
+#### 现状：kernel 不再是瓶颈，但端到端仍然打平
+
+设备端 Q8_0 kernel 已经超过 PyTorch CUDA 的 130 GB/s，但 128 token 的生成
+CPU 5672–5742 ms、���备转置 5134–5951 ms，**打平**。原因：
+
+1. 单行投影只占每 token 2.35 GB 权重里的 240 MB（10%）；
+2. CPU decode 不是带宽受限，是 785 次 pool dispatch 受限（整模型 53 GB/s，
+   单个投影 115 GB/s）；
+3. 设备每 token 还要付一次提交往返（~0.4 ms）和 logits 读回。
+
+所以 `project()` 的 CPU scope 仍然保留——打平不是赢。
+
 #### 剩下的
 
-1. **decode 阶段仍然是单行**（每 token 785 次 pool dispatch，20 线程比 8 线程慢：
+1. **权重常驻**（最高优先级）：设备路径现在每个投影都重新上传权重
+   （`GpuLinear::state` 只缓存一个权重，换权重就重建 runtime），decode 每 token
+   要把 2.35 GB 拷进设备内存一遍。改成按 (weight, shape) 缓存全部权重后，
+   设备每 token 只需从显存读 2.35 GB（163 GB/s → 14 ms/token）。
+2. **把一层的投影合并成一次提交**：每 token 785 次提交，每次 ~0.4 ms = 314 ms，
+   比 kernel 本身还贵。仓库里已有 `record_group_matmul`（多权重共用一个
+   command buffer），Mellum 的 trunk 还没用。
+3. **decode 阶段仍然是单行**（每 token 785 次 pool dispatch，20 线程比 8 线程慢：
    1426–1711 ms vs 1006–1119 ms）。TODO-037 已经改过一次等待逻辑（自旋 → yield），
    但 Mellum 这个规模仍然不划算。**小投影不该扇出整个线程池**——1 行的 matmul 分给
    8 个 worker，唤醒成本可能超过计算本身。

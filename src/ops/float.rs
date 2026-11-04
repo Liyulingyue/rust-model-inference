@@ -85,6 +85,24 @@ pub fn get_vulkan_context() -> Option<&'static VulkanContext> {
         .ok()
 }
 
+/// Start the device initialization in the background.
+///
+/// Bringing the Vulkan device up costs about 300 ms on the GB10 box -- the
+/// driver loads its compiler and enumerates the device -- and a session
+/// that opens a 12 GB checkpoint has that time to spare. The context is
+/// shared, so whoever needs it first waits for the same initialization.
+#[cfg(feature = "vulkan")]
+pub fn warm_vulkan_context() {
+    if !GPU_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("vulkan-init".into())
+        .spawn(|| {
+            let _ = shared_vulkan_context();
+        });
+}
+
 /// Device initialization is shared; choosing this device belongs to each session.
 #[cfg(feature = "vulkan")]
 pub(crate) fn shared_vulkan_context() -> Result<&'static VulkanContext, String> {

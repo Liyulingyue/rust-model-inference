@@ -89,6 +89,8 @@ const QWEN35_RECURRENT_SSM_SHADER: &[u8] =
 const QWEN35_MOE_ROUTE_SHADER: &[u8] = include_bytes!("../../shaders/bin/qwen35_moe_route.spv");
 const QWEN35_MOE_REDUCE_SHADER: &[u8] = include_bytes!("../../shaders/bin/qwen35_moe_reduce.spv");
 const ADALN_MODULATE_SHADER: &[u8] = include_bytes!("../../shaders/bin/adaln_modulate.spv");
+const Q8_MATMUL_TRANSPOSED_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/q8_matmul_transposed.spv");
 
 const QUANTIZE: usize = 0;
 const QUANTIZE_K: usize = 1;
@@ -103,6 +105,8 @@ const RMS_NORM: usize = 9;
 const QK_NORM_ROPE: usize = 10;
 /// Appended after the cooperative Q8 kernel to preserve existing indices.
 const QK_NORM_ROPE_INTERLEAVED: usize = 29;
+/// Appended last so the existing pipeline indices stay valid.
+const Q8_MATMUL_TRANSPOSED: usize = OPERATOR_SHADERS.len() - 1;
 const KV_WRITE: usize = 11;
 const ATTENTION_SCORES: usize = 12;
 const SOFTMAX: usize = 13;
@@ -274,6 +278,7 @@ const OPERATOR_SHADER_NAMES: [&str; OPERATOR_SHADERS.len()] = [
     "auk_snake",
     "auk_interleave",
     "auk_scale",
+    "q8_matmul_transposed",
 ];
 
 /// True when the ordered dispatch log is being collected.
@@ -399,7 +404,7 @@ pub fn dump_dispatch_trace() {
     }
 }
 
-const OPERATOR_SHADERS: [&[u8]; 49] = [
+const OPERATOR_SHADERS: [&[u8]; 50] = [
     QUANTIZE_Q8_0_SHADER,
     QUANTIZE_Q8_K_SHADER,
     Q8_MATMUL_GROUPED_SHADER,
@@ -449,6 +454,7 @@ const OPERATOR_SHADERS: [&[u8]; 49] = [
     AUK_SNAKE_SHADER,
     AUK_INTERLEAVE_SHADER,
     AUK_SCALE_SHADER,
+    Q8_MATMUL_TRANSPOSED_SHADER,
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -464,6 +470,61 @@ pub(crate) enum GpuWeightFormat {
     F32,
     MlxAffine4,
     MlxAffine8,
+}
+
+/// Whether the Q8_0 device matmul uses the transposed weight layout.
+///
+/// The transposed layout is the default: it reads the weight the way a
+/// GEMV wants to read it, which is 2.7x the bandwidth of ggml's own
+/// layout on the GB10 box (163 GB/s against 60 GB/s) for the same result,
+/// bit for bit. Rewriting the weight costs about 26 ms per 240 MB, once,
+/// when the weight is uploaded.
+///
+/// `RMI_GPU_Q8_TRANSPOSED=0` keeps the native layout, which is what the
+/// A/B measurement in the tests uses.
+fn q8_transposed_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("RMI_GPU_Q8_TRANSPOSED")
+            .ok()
+            .map(|value| value != "0")
+            .unwrap_or(true)
+    })
+}
+
+/// How the weight bytes of a binding are laid out in device memory.
+///
+/// The layout travels with the binding, because the kernel that reads the
+/// weight and the upload that produced it have to agree on it.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum GpuWeightLayout {
+    /// ggml's own layout: one output row after the other.
+    #[default]
+    Native,
+    /// The Q8_0 blocks of a tile of 64 output rows grouped together, so a
+    /// warp reads one contiguous run instead of 32 sectors one row apart.
+    Transposed,
+}
+
+impl GpuWeightFormat {
+    /// The layout the device kernels should read this weight in.
+    ///
+    /// The one-row Q8_0 kernel reads the weight row by row, and the
+    /// transposed layout turns those reads into one contiguous run per
+    /// warp, which is 2.7x the bandwidth of the native layout on the GB10
+    /// box. The tiled kernel reads a whole tile of rows as one run either
+    /// way, so there the transpose would be pure overhead.
+    fn device_layout(self, rows: usize, context: &VulkanContext) -> GpuWeightLayout {
+        if self == GpuWeightFormat::Q8_0
+            && rows == 1
+            && q8_transposed_enabled()
+            && context.supports_integer_dot_product()
+        {
+            GpuWeightLayout::Transposed
+        } else {
+            GpuWeightLayout::Native
+        }
+    }
 }
 
 /// Numerical contract, independent of the uploaded storage layout.
@@ -1015,6 +1076,7 @@ pub(crate) struct OperatorBindings {
     sizes: [u64; 3],
     weight_formats: [Option<GpuWeightFormat>; 3],
     weight_mode: GpuMatmulMode,
+    weight_layout: GpuWeightLayout,
 }
 
 impl OperatorBindings {
@@ -1198,6 +1260,7 @@ impl BatchedLinearLayout {
             ],
             weight_formats: [Some(format), None, None],
             weight_mode: spec.mode,
+            weight_layout: GpuWeightLayout::Native,
         };
         matmul_rows_push(
             self.size,
@@ -1225,7 +1288,7 @@ impl BatchedLinearLayout {
 pub(crate) struct BatchedLinearRuntime {
     ops: std::mem::ManuallyDrop<Qwen3Ops<'static>>,
     layout: BatchedLinearLayout,
-    weights: HashMap<(usize, usize, usize, usize), (GpuBuffer, OperatorBindings)>,
+    weights: HashMap<(usize, usize, usize, usize, bool), (GpuBuffer, OperatorBindings)>,
     weight_capacity: usize,
     #[cfg(test)]
     pub(crate) begin_commands:
@@ -1258,10 +1321,14 @@ impl BatchedLinearRuntime {
             n_out,
             output_len,
         )?;
-        if let Some((_, binding)) =
-            self.weights
-                .get(&(weight.as_ptr() as usize, weight.len(), n_in, n_out))
-        {
+        let layout = format.device_layout(rows, self.ops.context);
+        if let Some((_, binding)) = self.weights.get(&(
+            weight.as_ptr() as usize,
+            weight.len(),
+            n_in,
+            n_out,
+            layout == GpuWeightLayout::Transposed,
+        )) {
             if binding.weight_format(1)? != format || binding.weight_mode != spec.mode {
                 return Err(VulkanError::UnsupportedShape(
                     "cached batched linear weight storage or numerical mode changed".into(),
@@ -1338,11 +1405,16 @@ impl BatchedLinearRuntime {
             output.len(),
         )?;
         let context = self.ops.context;
+        let layout = format.device_layout(rows, context);
+        // The layout is part of the cache key: a weight that is read once
+        // and a weight that is read as a tile of rows need different
+        // bytes, and both may be uploaded.
         let key = (
             weight_bytes.as_ptr() as usize,
             weight_bytes.len(),
             n_in,
             n_out,
+            layout == GpuWeightLayout::Transposed,
         );
         let bindings = if let Some((_, bindings)) = self.weights.get(&key) {
             if bindings.weight_format(1)? != format || bindings.weight_mode != spec.mode {
@@ -1388,15 +1460,43 @@ impl BatchedLinearRuntime {
             } else {
                 None
             };
-            let buffer = unsafe {
-                self.ops
-                    .context
-                    .upload_static(transposed.as_deref().unwrap_or(weight_bytes))?
+            // The Q8_0 kernel can read the weight in the transposed layout,
+            // which groups the blocks of a tile of output rows together.
+            // The transposed kernel needs the integer dot product, so a
+            // device without it keeps the native layout.
+            //
+            // Only the one-row kernel reads the weight row by row, so only
+            // that shape pays for the layout: the tiled kernel reads a
+            // whole tile of rows as one run either way, and the transpose
+            // would be pure overhead there.
+            let buffer = if layout == GpuWeightLayout::Transposed {
+                // The layout is written straight into the device buffer: a
+                // 240 MB weight would otherwise be staged in a second
+                // buffer and copied over.
+                let size = crate::vulkan::q8_layout::transposed_size(n_in, n_out);
+                unsafe {
+                    self.ops.context.upload_static_filled(size, |bytes| {
+                        crate::vulkan::q8_layout::transpose_q8_0_weight_into(
+                            bytes,
+                            weight_bytes,
+                            n_in,
+                            n_out,
+                        );
+                    })?
+                }
+            } else {
+                unsafe {
+                    self.ops
+                        .context
+                        .upload_static(transposed.as_deref().unwrap_or(weight_bytes))?
+                }
             };
-            let bindings = match self
-                .ops
-                .bind_weight_buffers_mode(&[buffer], &[format], spec.mode)
-            {
+            let bindings = match self.ops.bind_weight_buffers_mode_layout(
+                &[buffer],
+                &[format],
+                spec.mode,
+                layout,
+            ) {
                 Ok(bindings) => bindings,
                 Err(error) => {
                     unsafe { self.ops.context.destroy_buffer(&buffer) };
@@ -1493,11 +1593,13 @@ impl BatchedLinearRuntime {
         for (weight_bytes, spec, rows, n_out) in group.iter().copied() {
             let spec = spec;
             let format = spec.format;
+            let layout = format.device_layout(rows, context);
             let key = (
                 weight_bytes.as_ptr() as usize,
                 weight_bytes.len(),
                 n_in,
                 n_out,
+                layout == GpuWeightLayout::Transposed,
             );
             let bindings = if let Some((_, bindings)) = self.weights.get(&key) {
                 if bindings.weight_format(1)? != format || bindings.weight_mode != spec.mode {
@@ -1538,22 +1640,37 @@ impl BatchedLinearRuntime {
                 } else {
                     None
                 };
-                let buffer = unsafe {
-                    self.ops
-                        .context
-                        .upload_static(transposed.as_deref().unwrap_or(weight_bytes))?
+                let buffer = if layout == GpuWeightLayout::Transposed {
+                    let size = crate::vulkan::q8_layout::transposed_size(n_in, n_out);
+                    unsafe {
+                        self.ops.context.upload_static_filled(size, |bytes| {
+                            crate::vulkan::q8_layout::transpose_q8_0_weight_into(
+                                bytes,
+                                weight_bytes,
+                                n_in,
+                                n_out,
+                            );
+                        })?
+                    }
+                } else {
+                    unsafe {
+                        self.ops
+                            .context
+                            .upload_static(transposed.as_deref().unwrap_or(weight_bytes))?
+                    }
                 };
-                let bindings =
-                    match self
-                        .ops
-                        .bind_weight_buffers_mode(&[buffer], &[format], spec.mode)
-                    {
-                        Ok(bindings) => bindings,
-                        Err(error) => {
-                            unsafe { self.ops.context.destroy_buffer(&buffer) };
-                            return Err(error);
-                        }
-                    };
+                let bindings = match self.ops.bind_weight_buffers_mode_layout(
+                    &[buffer],
+                    &[format],
+                    spec.mode,
+                    layout,
+                ) {
+                    Ok(bindings) => bindings,
+                    Err(error) => {
+                        unsafe { self.ops.context.destroy_buffer(&buffer) };
+                        return Err(error);
+                    }
+                };
                 self.weights.insert(key, (buffer, bindings));
                 bindings
             };
@@ -2219,7 +2336,7 @@ mod video_gpu_tests {
             .unwrap();
         assert_eq!(second, [10.0, 26.0]);
         assert_eq!(runtime.weights.len(), 2);
-        let bindings = runtime.weights[&(bytes.as_ptr() as usize, bytes.len(), 2, 4)].1;
+        let bindings = runtime.weights[&(bytes.as_ptr() as usize, bytes.len(), 2, 4, false)].1;
         let commands = TokenCommands::begin(context).unwrap();
         let layout = &runtime.layout;
         assert!(runtime
@@ -3033,6 +3150,20 @@ impl<'a> Qwen3Ops<'a> {
         formats: &[GpuWeightFormat],
         mode: GpuMatmulMode,
     ) -> Result<OperatorBindings, VulkanError> {
+        self.bind_weight_buffers_mode_layout(buffers, formats, mode, GpuWeightLayout::Native)
+    }
+
+    /// Bind weights whose bytes are already in the given layout.
+    ///
+    /// The layout is a property of the upload, so it has to travel with the
+    /// binding: the recorder picks the kernel that reads that layout.
+    pub(crate) fn bind_weight_buffers_mode_layout(
+        &mut self,
+        buffers: &[GpuBuffer],
+        formats: &[GpuWeightFormat],
+        mode: GpuMatmulMode,
+        layout: GpuWeightLayout,
+    ) -> Result<OperatorBindings, VulkanError> {
         for &format in formats {
             format.with_mode(mode).validate()?;
         }
@@ -3049,6 +3180,7 @@ impl<'a> Qwen3Ops<'a> {
             formats,
         )?;
         bindings.weight_mode = mode;
+        bindings.weight_layout = layout;
         Ok(bindings)
     }
 
@@ -3690,7 +3822,14 @@ impl<'a> Qwen3Ops<'a> {
         if let Some((pipeline, push, dispatch)) = quantize {
             self.record_linear_dispatch(commands, pipeline, self.arena_bindings, &push, dispatch);
         }
-        self.record_linear_dispatch(commands, format.layout().2, bindings, &push, dispatch);
+        let pipeline = if format == GpuWeightFormat::Q8_0
+            && bindings.weight_layout == GpuWeightLayout::Transposed
+        {
+            Q8_MATMUL_TRANSPOSED
+        } else {
+            format.layout().2
+        };
+        self.record_linear_dispatch(commands, pipeline, bindings, &push, dispatch);
         Ok(())
     }
 
@@ -5881,6 +6020,7 @@ fn allocate_bindings_ranges(
         sizes,
         weight_formats: std::array::from_fn(|index| formats.get(index).copied()),
         weight_mode: GpuMatmulMode::Prepared,
+        weight_layout: GpuWeightLayout::Native,
     })
 }
 
@@ -9854,7 +9994,7 @@ mod tests {
             .is_err());
         assert_eq!(runtime.weights.len(), 1);
         assert_eq!(context.submission_count(), 0);
-        let key = (weight.as_ptr() as usize, weight.len(), 4, 1);
+        let key = (weight.as_ptr() as usize, weight.len(), 4, 1, false);
         let buffer = runtime.weights[&key].0.buffer;
         runtime.ops.arena.size = arena_size;
         runtime
@@ -10247,7 +10387,7 @@ mod tests {
             assert_eq!(context.submission_count(), before + 1);
             assert!(batched[195].is_nan());
             assert_eq!(runtime.weights.len(), slot + 1);
-            let key = (weight.as_ptr() as usize, weight.len(), 512, 65);
+            let key = (weight.as_ptr() as usize, weight.len(), 512, 65, false);
             let buffer = runtime.weights[&key].0.buffer;
             let binding = runtime.weights[&key].1.descriptor_set;
             let mut singles = [0.0; 195];
@@ -10454,6 +10594,7 @@ mod tests {
             sizes: [65, 33, 17].map(|rows| rows * 34),
             weight_formats: [Some(Q8_0); 3],
             weight_mode: super::GpuMatmulMode::Prepared,
+            weight_layout: super::GpuWeightLayout::Native,
         };
         let region = |offset, size| ArenaRegion { offset, size };
         let (_, dispatch) = matmul_rows_push(
@@ -10500,6 +10641,7 @@ mod tests {
                 sizes: [65, 28, 8].map(|rows| rows * 16 * 2),
                 weight_formats: [Some(format); 3],
                 weight_mode: mode,
+                weight_layout: super::GpuWeightLayout::Native,
             };
             let (push, dispatch) = matmul_rows_push(
                 32768,
@@ -10611,6 +10753,7 @@ mod tests {
                     sizes: [3, 2, 1].map(|rows| ((256 / block) * bytes * rows) as u64),
                     weight_formats: [Some(format); 3],
                     weight_mode: super::GpuMatmulMode::Prepared,
+                    weight_layout: super::GpuWeightLayout::Native,
                 };
                 let prepare = |r: &[ArenaRegion; 6]| {
                     matmul_rows_push(
@@ -10857,6 +11000,7 @@ mod tests {
                 sizes: [128, 0, 0],
                 weight_formats: [Some(GpuWeightFormat::F16), None, None],
                 weight_mode: mode,
+                weight_layout: super::GpuWeightLayout::Native,
             };
             matmul_rows_push(
                 layout.size,
@@ -10922,7 +11066,7 @@ mod tests {
             .unwrap();
         assert_eq!(output, [8.0]);
         let before = context.submission_count();
-        let key = (weight.as_ptr() as usize, weight.len(), 32, 1);
+        let key = (weight.as_ptr() as usize, weight.len(), 32, 1, false);
         let buffer = runtime.weights[&key].0.buffer;
         let spec = GpuWeightFormat::F16.with_mode(GpuMatmulMode::RoundedInputF32);
         assert!(runtime.validate(&weight, spec, 32, 1, 32, 1, 1).is_err());
@@ -11286,6 +11430,143 @@ mod tests {
                 unsafe { context.destroy_completed_buffers(&[buffer]) }.unwrap();
             }
         }
+    }
+
+    /// The Q8_0 device matmul with ggml's native weight layout and with the
+    /// transposed one, on the same shape.
+    ///
+    /// The two must agree bit for bit -- the transposed layout only changes
+    /// where the weight bytes live, not the arithmetic -- and the bandwidth
+    /// says whether the change is worth keeping.
+    #[test]
+    #[ignore = "requires a Vulkan device; timing harness, not a correctness gate"]
+    fn q8_0_transposed_layout_matches_and_faster() {
+        use super::*;
+        use std::time::Instant;
+        const N_IN: usize = 2304;
+        const N_OUT: usize = 98_304;
+        const ROWS: usize = 1;
+        const REPS: usize = 10;
+        let native = synthetic_weight(GpuWeightFormat::Q8_0, N_IN, N_OUT);
+        let transposed = crate::vulkan::q8_layout::transpose_q8_0_weight(&native, N_IN, N_OUT);
+        assert_eq!(native.len(), transposed.len());
+
+        // A VulkanContext owns one descriptor set, so each layout gets its own
+        // context.
+        let run = |weight: &[u8], pipeline: usize| -> (Vec<f32>, f64) {
+            let context = VulkanContext::new().unwrap();
+            let mut cursor = 0;
+            let q8 = region(&mut cursor, ROWS * N_IN).unwrap();
+            let scales = f32_region(&mut cursor, ROWS * N_IN / 32).unwrap();
+            let sums = f32_region(&mut cursor, ROWS * N_IN / 32).unwrap();
+            let output = f32_region(&mut cursor, ROWS * N_OUT).unwrap();
+            // Two descriptor sets: the arena and the weight.
+            let mut ops = Qwen3Ops::new_with_size(&context, cursor, 2).unwrap();
+            let buffer = unsafe { context.upload_static(weight) }.unwrap();
+            let bindings = ops
+                .bind_weight_buffers(&[buffer], &[GpuWeightFormat::Q8_0])
+                .unwrap();
+            let (push, _) = matmul_rows_push(
+                cursor,
+                &context.limits,
+                bindings,
+                q8,
+                scales,
+                Some(sums),
+                &[(output, N_OUT, N_OUT * 4)],
+                N_IN,
+                ROWS,
+                N_IN,
+            )
+            .unwrap();
+            let dispatch = row_dispatch(N_OUT.div_ceil(64), 1, &context.limits).unwrap();
+            let mut best = f64::MAX;
+            for _ in 0..3 {
+                let start = Instant::now();
+                for _ in 0..REPS {
+                    let commands = TokenCommands::begin(&context).unwrap();
+                    ops.record_linear_dispatch(&commands, pipeline, bindings, &push, dispatch);
+                    commands.submit_and_wait().unwrap();
+                }
+                best = best.min(start.elapsed().as_secs_f64() / REPS as f64);
+            }
+            let values = ops.read_f32(output, ROWS * N_OUT).unwrap();
+            unsafe { context.destroy_completed_buffers(&[buffer]) }.unwrap();
+            (values.to_vec(), best)
+        };
+
+        let (native_values, native_time) = run(&native, Q8_MATMUL_GROUPED);
+        let (transposed_values, transposed_time) = run(&transposed, Q8_MATMUL_TRANSPOSED);
+        let mismatches = native_values
+            .iter()
+            .zip(transposed_values.iter())
+            .filter(|(left, right)| left.to_bits() != right.to_bits())
+            .count();
+        assert_eq!(mismatches, 0, "transposed layout changed the result");
+        let bytes = (N_IN * N_OUT * 34 / 32) as f64;
+        eprintln!(
+            "[q8-transposed] native {:.3} ms ({:.1} GB/s), transposed {:.3} ms ({:.1} GB/s), {:.2}x",
+            native_time * 1e3,
+            bytes / native_time / 1e9,
+            transposed_time * 1e3,
+            bytes / transposed_time / 1e9,
+            native_time / transposed_time,
+        );
+    }
+
+    /// How much bandwidth the device can actually stream on this box.
+    ///
+    /// The Q8_0 matmul kernels read one output row per thread, so a warp
+    /// touches 32 sectors one row apart. This measures the floor: a plain
+    /// element-wise scale over one big buffer, where every lane reads a
+    /// neighbouring float. If this reaches the PyTorch CUDA number and the
+    /// matmul does not, the matmul kernel is the problem; if both are at the
+    /// same number, the device memory path is the limit.
+    #[test]
+    #[ignore = "requires a Vulkan device; timing harness, not a correctness gate"]
+    fn device_streaming_bandwidth() {
+        use super::*;
+        use std::time::Instant;
+        const FLOATS: usize = 60 * 1024 * 1024; // 240 MB
+        const REPS: usize = 10;
+        let context = VulkanContext::new().unwrap();
+        let mut cursor = 0;
+        let input = f32_region(&mut cursor, FLOATS).unwrap();
+        let output = f32_region(&mut cursor, FLOATS).unwrap();
+        let mut ops = Qwen3Ops::new_with_size(&context, cursor, 1).unwrap();
+        ops.write_f32(input, &vec![1.0f32; FLOATS]).unwrap();
+        let push = [
+            ops.f32_word(input, FLOATS, "bandwidth input").unwrap(),
+            ops.f32_word(output, FLOATS, "bandwidth output").unwrap(),
+            FLOATS as u32,
+            1.0f32.to_bits(),
+        ];
+        let dispatch = row_dispatch(FLOATS.div_ceil(64), 1, &context.limits).unwrap();
+        let mut best = f64::MAX;
+        for _ in 0..3 {
+            let start = Instant::now();
+            for _ in 0..REPS {
+                let commands = TokenCommands::begin(&context).unwrap();
+                ops.record_linear_dispatch(
+                    &commands,
+                    AUK_SCALE,
+                    ops.arena_bindings,
+                    &push,
+                    dispatch,
+                );
+                commands.submit_and_wait().unwrap();
+            }
+            best = best.min(start.elapsed().as_secs_f64() / REPS as f64);
+        }
+        // One read plus one write of 240 MB.
+        let bytes = (FLOATS * 4 * 2) as f64;
+        eprintln!(
+            "[stream] element-wise scale over {:.0} MB: {:.3} ms ({:.1} GB/s read+write, {:.1} GB/s read)",
+            bytes / 2e6,
+            best * 1e3,
+            bytes / best / 1e9,
+            (bytes / 2.0) / best / 1e9,
+        );
     }
 
     /// Times the decode-shaped Q8_0 matmul: one token against the weight

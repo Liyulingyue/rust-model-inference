@@ -57,6 +57,7 @@ shader_names=(
     auk_snake
     auk_interleave
     auk_scale
+    q8_matmul_transposed
 )
 manifest="$root_dir/shaders/manifest.sha256"
 
