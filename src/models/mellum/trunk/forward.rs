@@ -620,11 +620,27 @@ impl Rows {
     }
 }
 
-/// Single-row quantized matmul with GPU/CPU auto-dispatch.
+/// Single-row quantized matmul, on the CPU.
 ///
-/// Routes through `Weight::quantize_and_matmul_with_scratch`, which tries
-/// the Vulkan GPU path first and falls back to the CPU kernel.  The scratch
-/// buffers are reused across calls so the decode loop never allocates.
+/// The Mellum trunk evaluates one token at a time, so every projection is a
+/// single row. The device only wins when a projection carries many rows: a
+/// one-row matmul reads the whole weight matrix once, and the Q8_0 device
+/// kernel walks the reduction axis with a stride, so it reaches about half
+/// the bandwidth the NEON path gets. Measured on this GB10 box with the
+/// 12B Q8_0 checkpoint (4 steps, 21 token prompt, 8 threads):
+///
+/// | projection | CPU | Vulkan |
+/// | --- | --- | --- |
+/// | output head (2304 -> 98304) | 2.6 ms/token | 4.0 ms/token |
+///
+/// plus a one-off ~320 ms device setup (the 226 MB weight upload and the
+/// arena), so `--compute auto` was 40% *slower* than `--compute cpu` for the
+/// decode loop while producing bit-identical output. The projections
+/// therefore stay on the CPU until the trunk can hand the device a whole
+/// token stream at once; see the TODO entry for the batched prefill.
+///
+/// The scope only covers this call, so the CPU kernel keeps its own
+/// dispatch and the pool workers see the same decision.
 fn project(
     pool: &Arc<ComputePool>,
     weight: &Weight<'_>,
@@ -639,6 +655,8 @@ fn project(
     if n_out == 0 {
         return;
     }
+    #[cfg(feature = "vulkan")]
+    let _cpu_scope = crate::core::thread_pool::ComputePool::disable_gpu_matmul_for_scope();
     weight.quantize_and_matmul_with_scratch(
         input,
         &mut scratch.q8k_buf,

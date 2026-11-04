@@ -156,6 +156,91 @@ These were each a real divergence found by this harness, not speculation:
    `attn_factor` is 1.0 and `beta_fast/slow` are the llama.cpp defaults
    32 / 1. Using the GGUF values changes every YaRN angle.
 
+## Vulkan device path
+
+The trunk also runs on the Vulkan device (`--compute auto`). It is **correct**
+but **not faster**, and the reason is structural rather than a missing
+optimisation: the Mellum trunk walks the model one token at a time, so every
+projection is a single row.
+
+Setup (the box needs the NVIDIA ICD spelled out):
+
+```sh
+export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json
+MODEL=models/Mellum2.1-12B-A2.5B-Thinking-GGUF/Mellum2.1-12B-A2.5B-Thinking-Q8_0.gguf
+
+# device path (the output head is the only shape that lands on the GPU)
+target/release-fast/rust-model-inference --model "$MODEL" \
+  --prompt "What is 2+2?" --max-tokens 8 --compute auto --threads 8
+```
+
+### The device path is bit-identical to the CPU
+
+`RMI_PARITY_TRACE` on both backends over the same prompt, then join the two
+traces on `(name, layer, step)` and compare the raw F32 words:
+
+```
+cpu checkpoints 15466  gpu checkpoints 15466  common 15466
+no divergence in the traced checkpoints
+```
+
+All 15466 checkpoints agree exactly — `--compute auto` and `--compute cpu`
+produce the same sums, mins, maxes and heads. JEV agrees too: the single
+question run reports `A: 0.2219 / B: 0.7781` on both backends.
+
+### But the device path is slower than the CPU path
+
+Measured on the GB10 box (12B Q8_0, `--threads 8`, prompt "What is 2+2?",
+8 output tokens, wall clock of the whole run):
+
+| backend | wall | note |
+| --- | --- | --- |
+| `--compute cpu` | 1006–1119 ms | NEON kernels, 8 pool workers |
+| `--compute auto` (before the fix) | 1391–1506 ms | ~40% slower than the CPU |
+| `--compute auto` (after the fix) | 1061–1137 ms | projections stay on the CPU |
+
+The per-shape numbers behind that gap (device vs CPU for one projection):
+
+| projection | CPU | Vulkan |
+| --- | --- | --- |
+| output head (2304 → 98304) | 2.6 ms/token | 4.0 ms/token |
+
+and the device-side breakdown of the 4.0 ms: `record` 0.011 ms,
+`submit + wait_for_fences` 3.688 ms, `read` 0.016 ms — i.e. the device is
+busy for 3.7 ms, it is the *kernel* that is slow, not the submission.
+
+Two independent causes:
+
+1. **A one-row matmul is bandwidth bound on the device, and the Q8_0 device
+   kernel walks the reduction axis with a stride**, so it reaches roughly
+   half the bandwidth the NEON path gets on the same bytes. The device is
+   only the right place for a matmul with many rows (see TODO-038: the same
+   box runs Qwen3's large LM head at 70–74 GB/s, while the CPU reaches
+   84 GB/s — the device only wins when the shape is tall enough to amortise
+   the dispatch).
+2. **A one-off ~320 ms setup**: the first `try_matmul` call builds the arena
+   (12.6 MB) and uploads the 226 MB output-head weight. A short CLI run never
+   amortises that.
+
+`RUST_GPU_SUBMIT_TRACE=1` confirms the shape of the problem for the whole
+run: `submissions=30`, `3.710 ms/submission` of which `0.017 ms` is
+`queue_submit` and `3.688 ms` is the fence wait. Forcing the threshold to
+`RUST_GPU_MIN_OUTPUTS=0` (so every projection goes to the device) makes it
+worse, not better: 5785 ms versus 2053 ms.
+
+### What the trunk does about it
+
+`src/models/mellum/trunk/forward.rs::project` runs the projections inside
+`ComputePool::disable_gpu_matmul_for_scope()`, so the single-row projections
+stay on the CPU and `--compute auto` matches `--compute cpu` instead of
+losing 40%. The scope is per call, so nothing else in the trunk is affected.
+
+This is a workaround, not the fix: the device should get the token stream in
+batches. The trunk has no batched path at all today (`forward_token` walks
+the MoE routing one token at a time, and `run_forward_logits_mellum_with_batch`
+explicitly ignores its `batch_size` argument), so the batched prefill that
+would make the device win is tracked in `docs/develop/TODO.md` (TODO-049).
+
 ## Limits
 
 * Scalar only. The Rust side needs `RMI_SCALAR=1`; the repo's NEON kernels

@@ -3336,3 +3336,66 @@ arch 的**文本路**真的可用：
 
 **关联**：WeVisOne 适配分支（`codex/wevisone-vl-4b`）的 `src/main.rs` 改动与
 `docs/usage/qwen3.md` §3 的 M-RoPE 记录。
+
+### TODO-049: Mellum 的 GPU 路径能跑但打不过 CPU——decode 是单行投影，设备带宽只有 NEON 的一半
+
+Mellum 12B-A2.5B（Q8_0，12.9 GB）在 GB10 上接 Vulkan device 路径，
+**功能上没问题**：`RMI_PARITY_TRACE` 双后端对拍 15466 个检查点**逐位一致**
+（sum/min/max/head 全同），JEV 单问也一致（A 0.2219 / B 0.7781）。
+但 `--compute auto` 比 `--compute cpu` **慢 40%**。
+
+#### 现状：先绕开，问题留在这里
+
+`src/models/mellum/trunk/forward.rs::project` 已把投影关进
+`ComputePool::disable_gpu_matmul_for_scope()`，投影留在 CPU：
+
+| 后端（8 线程，8 output token） | wall |
+|---|---|
+| `--compute cpu` | 1006–1119 ms |
+| `--compute auto`（修前） | 1391–1506 ms |
+| `--compute auto`（修后） | 1061–1137 ms |
+
+这是**绕开**，不是修好：设备路径对 Mellum 目前没有任何贡献，
+Mellum 的 GPU 价值仍然是 0。
+
+#### 根因一：单行投影是纯带宽题，而设备的 Q8_0 kernel 沿归约轴跨步访问
+
+trunk 一次只走一个 token，所以每个投影都是 1 行。实测（输出头 2304 → 98304）：
+
+| | CPU (NEON) | Vulkan |
+|---|---|---|
+| 单次投影 | 2.6 ms/token | 4.0 ms/token |
+
+设备的 4.0 ms 拆开是 `record` 0.011 ms + `submit+wait_for_fences` 3.688 ms +
+`read` 0.016 ms——**设备真的在算 3.7 ms**，慢在 kernel 本身，不是提交开销。
+原因是设备 Q8_0 kernel 沿归约轴跨步访问权重，读到的字节数一样但有效带宽
+只有 NEON 路径的一半。
+
+这与 TODO-038 是一致的：GPU 解码是带宽受限的，只有形状足够高（rows 大）
+才能摊薄 dispatch 并跑赢 CPU；`rows=1` 的 GEMV 正是设备最吃亏的形状。
+
+#### 根因二：一次性 setup 成本 ~320 ms
+
+第一次 `try_matmul` 要建 arena（12.6 MB）并上传 226 MB 的输出头权重，实测
+320 ms（首次 `matmul_rows` 35 ms + 其余）。短 CLI 跑永远摊不平。
+
+#### 待办
+
+1. **批量 prefill**（真正的修法）。当前 trunk 只有 `forward_token`，
+   `run_forward_logits_mellum_with_batch` 明确忽略 `batch_size` 参数
+   （`src/models/mellum/trunk/run.rs` 注释里写明了「没有 rows > 1 的路径」）。
+   需要：wq/wk/wv/wo 批量、分层的 batched 投影（输出头 2304→98304 在 rows>1
+   时才是设备该干的形状）、MoE 路由按 batch 重排。
+2. **设备 Q8_0 kernel 的转置/访存**。要么把权重预转置成归约连续布局，要么改
+   kernel 的分块策略，把沿归约轴跨步访问改成连续访问。改完单行投影的带宽问题
+   可能就不需要批量 prefill 也能缓解。
+3. **每 token 785 次 pool dispatch 的线程唤醒开销**。CPU 侧 20 线程反而比 8 线程
+   慢（1426–1711 ms vs 1006–1119 ms），瓶颈不是算力，是每个 token 要发起 785 次
+   `ComputePool::compute` 的 barrier（实测：单 token 17270 次 dispatch，8 token
+   22765 次，差值正好 785/token = 28 层 × 28 次投影 + 1 次输出头）。
+   TODO-037 已经改过一次等待逻辑（自旋 → yield），但 Mellum 这个规模仍然不划算。
+   **小投影不该扇出整个线程池**——1 行的 matmul 分给 8 个 worker，唤醒成本可能
+   超过计算本身。
+4. 设备空闲时重测。TODO-038/039 指出这台机器上的 GPU 数字都受另一个租户
+   占用影响（nvidia-smi 采样 79–92%），上面的对比没有独占设备，需要在独占时
+   复测一遍再定论。
