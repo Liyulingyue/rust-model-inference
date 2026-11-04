@@ -3355,10 +3355,10 @@ attention、MoE 路由、专家折叠都按行、按 slot 顺序走，与逐 tok
 
 收益（权重流量，不是设备速度）：
 
-| prompt | prefill（逐 token） | prefill（批量） |
+| 测量 | 逐 token | 批量 |
 |---|---|---|
-| 21 token（JEV） | 2585 ms | 1085 ms |
-| 183 token | 7607 ms | 3247 ms |
+| JEV prefill（21 token prompt） | 2585 ms | 1085 ms |
+| 端到端（183 token prompt + 8 output token） | 7558 ms | 3121 ms |
 
 单 token 要流过 2.1 GB 权重（每层 22.5 MB attention + 24 专家 × 3 × 2.19 MB，28 层），
 批量后每个权重每批只读一次。

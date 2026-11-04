@@ -262,14 +262,13 @@ of attention weights and 24 experts x 3 x 2.19 MB per layer, over 28
 layers), and the prompt streamed that once per token. Batched, every weight
 is read once for the whole prompt:
 
-| prompt | prefill, single token | prefill, batched |
+| measurement | single token | batched |
 | --- | --- | --- |
-| 21 tokens | 2585 ms | 1085 ms |
-| 183 tokens | 7607 ms | 3247 ms |
+| JEV prefill, 21 token prompt | 2585 ms | 1085 ms |
+| end to end, 183 token prompt + 8 output tokens | 7558 ms | 3121 ms |
 
-(The JEV prefill is the cleanest measurement — it is one prompt and no
-decode. The end to end numbers are 7558 ms -> 3121 ms for the 183 token
-prompt with 8 output tokens.)
+The JEV prefill is the cleanest measurement — it is one prompt and no
+decode, so it isolates the prefill.
 
 The device does **not** win the batched prefill on this box, and the reason
 is the upload, not the shape. The device reads a weight once for the whole
