@@ -264,14 +264,16 @@ is read once for the whole prompt:
 
 | measurement | single token | batched |
 | --- | --- | --- |
-| JEV prefill, 21 token prompt | 2585 ms | 1014-1102 ms |
+| JEV single question (model load + prefill) | 2585 ms | 1014-1102 ms |
 | end to end, 21 token prompt + 8 output tokens | 1006-1119 ms | 594-643 ms |
 | end to end, 183 token prompt + 8 output tokens | 7558-8211 ms | 2911-3078 ms |
 
 8 threads, three runs each, `--compute cpu`; `--compute auto` is the same
-because the device no longer takes a Mellum projection. The JEV prefill is
-the cleanest measurement — it is one prompt and no decode, so it isolates
-the prefill.
+because the device no longer takes a Mellum projection. The end to end
+numbers are the clean ones — the CLI's timer starts after the model is
+loaded, so they are prefill plus decode and nothing else. The JEV number
+includes the ~250 ms model load, because that path builds the model inside
+the timer.
 
 The device does **not** win the batched prefill on this box, and the reason
 is the upload, not the shape. The device reads a weight once for the whole
@@ -299,23 +301,50 @@ available to the batched path.
 ## PyTorch reference
 
 `tools/bench_mellum_pytorch.py` runs the official safetensors (bf16) through
-`transformers`, so the Rust Q8_0 path has an apples-to-apples reference
-(2026-11-03):
+`transformers`, so the Rust Q8_0 path has an apples-to-apples reference.
 
-| path | weights | prefill | decode |
+**CUDA, on an idle GPU (2026-11-04)**: PyTorch 2.15.0+cu132, 23.13 GB peak,
+15 token prompt, 16 generated tokens:
+
+| | decode |
+| --- | --- |
+| PyTorch CUDA bf16 | 29.4 tok/s (33.9 ms/token) |
+
+**CPU, bf16 vs Q8_0 (2026-11-03)**: the same script on the CPU.
+
+| path | weights | decode |
+| --- | --- | --- |
+| PyTorch CPU bf16 | 24.3 GB | 1.2 tok/s |
+| Rust CPU Q8_0 | 12.9 GB | 1.2 tok/s |
+
+Same decode speed at half the memory.
+
+The CUDA run needs about 48 GB of peak (the bf16 weights *plus* the CPU
+staging copy `from_pretrained` keeps while sharding), so it does not fit
+while another tenant holds most of the unified memory — the 2026-11-03
+attempt failed for that reason.
+
+### What the CUDA number says about our device path
+
+One decode step reads the attention weights of all 28 layers, the top-8
+experts of all 28 layers and the output head: 2.21 B parameters, i.e.
+4.42 GB in bf16 and 2.35 GB in Q8_0.
+
+| path | bytes/token | decode | effective bandwidth |
 | --- | --- | --- | --- |
-| PyTorch, CPU | bf16 24.3 GB | 1.5 tok/s | 1.2 tok/s |
-| Rust, CPU | Q8_0 12.9 GB | not recorded | 1.2 tok/s |
+| PyTorch CUDA bf16 | 4.42 GB | 29.4 tok/s | **130 GB/s** |
+| Rust CPU Q8_0 | 2.35 GB | 22.7 tok/s | 53 GB/s |
+| Rust Vulkan Q8_0 (output head only) | 2.35 GB | — | 66 GB/s |
 
-Same decode speed at half the memory. (The Rust prefill rate was not
-recorded in that run; the batched prefill came later, see the
-[Vulkan device path](#vulkan-device-path) section.)
+So the device **can** stream 130 GB/s on this box — our Q8_0 device kernel
+only reaches 66 GB/s of that, half. Two consequences:
 
-The CUDA run did not fit: the box had another tenant holding 82.7 GB of the
-unified memory (`tensorfold serve`) and the CUDA path needs about 48 GB of
-peak (the bf16 weights *plus* the CPU staging copy `from_pretrained` keeps
-while sharding). **The CUDA comparison is unverified** — the numbers above
-are CPU only.
+* our CPU path is not bandwidth bound (53 GB/s against the 115 GB/s it
+  reaches on the output head in isolation); the gap is the 785 pool
+  dispatches per token, not the memory system;
+* a Q8_0 decode at PyTorch's 130 GB/s would be 18 ms/token, i.e. **55 tok/s
+  against the CPU's 22.7 tok/s** — the device wins Mellum's decode by 2.4x
+  if the kernel reaches the achievable bandwidth. See TODO-049.
 
 ## Entry points
 

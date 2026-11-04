@@ -3364,6 +3364,33 @@ attention、MoE 路由、专家折叠都按行、按 slot 顺序走，与逐 tok
 单 token 要流过 2.1 GB 权重（每层 22.5 MB attention + 24 专家 × 3 × 2.19 MB，28 层），
 批量后每个权重每批只读一次。
 
+#### 新证据（2026-11-04，PyTorch CUDA 对照跑通）
+
+之前"Mellum 的 CUDA 对照跑不了"（另一个租户占 82.7 GB 统一内存，CUDA 路径要
+~48 GB 峰值）这一条作废：机器空出来之后 `tools/bench_mellum_pytorch.py --device cuda`
+跑通了（PyTorch 2.15.0+cu132，23.13 GB peak，空闲 GPU）：
+
+| | bytes/token | decode | 有效带宽 |
+|---|---|---|---|
+| PyTorch CUDA bf16 | 4.42 GB | 29.4 tok/s（33.9 ms/token） | **130 GB/s** |
+| 我们的 CPU Q8_0 | 2.35 GB | 22.7 tok/s（44 ms/token） | 53 GB/s |
+| 我们的 Vulkan Q8_0（实测只有输出头） | 2.35 GB | — | 66 GB/s |
+
+**这台机器上的设备能跑到 130 GB/s，我们的 Q8_0 device kernel 只到 66 GB/s
+——一半。** 所以"设备赢不了"不是设备的天花板，是我们 kernel 的访问模式：
+`q8_matmul_dp4a.comp` 让**每个线程独占一个输出行**，一个 warp 的 64 个线程
+因此读 64 个相距 2448 字节的扇区，而不是连续字节；PyTorch/cuBLAS 的 GEMV
+是让 warp 协同读连续权重再做归约。
+
+如果 Q8_0 kernel 打到 130 GB/s，Mellum 的 decode 是 2.35 GB / 130 GB/s =
+18 ms/token = **55 tok/s，对 CPU 的 22.7 tok/s 赢 2.4×**——那才是 Mellum
+设备路径真正该有的样子。仓库里已经有转置权重的机制（BF16/F32 走
+`record_transposed_float_matmul_rows`，"上传时转置，让 tiled float kernel
+沿归约轴 unit stride 走"），**Q8_0 没有走这条路**。
+
+顺带纠正一条旧结论：我们的 CPU decode 只跑到 53 GB/s，而输出头单独测能到
+115 GB/s → **CPU decode 不是带宽受限，是 785 次 pool dispatch 受限**。
+
 #### 现状：设备仍然赢不了，原因是上传而不是形状
 
 批量形状对设备**友好**（设备一次读完权重，CPU 每行重读）：
@@ -3384,10 +3411,15 @@ CPU 1073 ms → 设备接管 `wq`/`wo` 后 1460 ms。
    1426–1711 ms vs 1006–1119 ms）。TODO-037 已经改过一次等待逻辑（自旋 → yield），
    但 Mellum 这个规模仍然不划算。**小投影不该扇出整个线程池**——1 行的 matmul 分给
    8 个 worker，唤醒成本可能超过计算本身。
-2. **设备端 Q8_0 kernel 的利用率**。输出头能跑 66 GB/s（`n_out=98304`，1536 个
-   workgroup），`wq` 只有 12 GB/s（`n_out=4096`，64 个 workgroup）——设备没被喂饱。
-   把小 `n_out` 的投影拆成多个 tile 或换 workgroup 更大的 kernel，可能把设备拉到
-   CPU 之上。
+2. **设备端 Q8_0 kernel 的带宽（最高优先级）**。PyTorch CUDA 在同一台机器上跑到
+   **130 GB/s**，我们的 Q8_0 device kernel 只有 **66 GB/s**。差在访问模式：
+   `q8_matmul_dp4a.comp` 让每个线程独占一个输出行，warp 的 64 个线程读 64 个
+   相距一行的扇区；而 BF16/F32 已经有转置权重的路子
+   （`record_transposed_float_matmul_rows`，上传时转置让 kernel 沿归约轴
+   unit stride 走），**Q8_0 没走**。给 Q8_0 加一条转置权重 + warp 协同归约的
+   路径，是让 Mellum（以及所有 Q8_0 模型）设备路径能赢 CPU 的前提。
+   另有一个次要因素：输出头能跑 66 GB/s（`n_out=98304`，1536 个 workgroup），
+   `wq` 只有 12 GB/s（`n_out=4096`，64 个 workgroup）——小 `n_out` 喂不饱设备。
 3. **每 token 的输出头 240 MB**。decode 每 token 都要读一遍 240 MB 的输出头，
    CPU 2.09 ms（115 GB/s）vs 设备 3.6 ms（66 GB/s）。设备 kernel 的带宽只有 CPU 的
    57%，这是设备端 Q8_0 kernel 本身的问题。
