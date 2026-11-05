@@ -19,6 +19,60 @@ pub(crate) fn encode_qwen35_image(
     encode_qwen35_image_dynamic(mmproj_source, &image, n_threads_arg)
 }
 
+/// Encode one image with the RADIO projector (ZDTaichu5.0-9B).
+///
+/// The projector is a RADIOv4-H tower plus a ReLU-squared MLP head, so the
+/// input is the model's own `image_size` square regardless of the aspect
+/// ratio, and the output is a `grid x grid` run of projected tokens: the
+/// patches are merged by `scale_factor` before the head runs, so the grid
+/// that reaches the language tower is already the merged one.
+pub(crate) fn encode_nemotron_v2_vl_image(
+    mmproj_source: &dyn TensorSource,
+    image: &image::DynamicImage,
+    n_threads_arg: usize,
+) -> Result<(VisionGrid, Vec<f32>), String> {
+    let encoder = crate::models::zdt::vision::ZdtVisionEncoder::from_source(
+        mmproj_source,
+        Arc::new(ComputePool::new(n_threads_arg.max(1))),
+    )
+    .map_err(|error| format!("Failed to parse ZDT vision encoder: {error}"))?;
+    let size = encoder.config.image_size;
+    let normalized = normalize_resized_image(
+        image,
+        size,
+        size,
+        &encoder.config.image_mean,
+        &encoder.config.image_std,
+    )?;
+    let projected = encoder.encode(&normalized, size, size)?;
+    // After the shuffle the grid is already downsampled by the scale factor,
+    // so report the post-merge extents; otherwise `token_count` would promise
+    // 32x32 placeholders while the projector emits 16x16.
+    let grid = size / (encoder.config.patch_size * encoder.config.scale_factor);
+    let vision_grid = VisionGrid {
+        grid_t: 1,
+        grid_h: grid,
+        grid_w: grid,
+        patch_size: encoder.config.patch_size,
+        merge_size: 1,
+    };
+    let per_token = encoder.config.projection_dim.max(1);
+    if projected.len() % per_token != 0 {
+        return Err(format!(
+            "ZDT projector output {} is not a multiple of {per_token}",
+            projected.len()
+        ));
+    }
+    if projected.len() / per_token != vision_grid.token_count() {
+        return Err(format!(
+            "ZDT projector emitted {} tokens, expected {}",
+            projected.len() / per_token,
+            vision_grid.token_count()
+        ));
+    }
+    Ok((vision_grid, projected))
+}
+
 /// Encode an already-decoded image. Split out of [`encode_qwen35_image`] so
 /// callers that hold bytes (the HTTP image-content blocks: base64 / data URI /
 /// in-memory uploads) do not have to round-trip through a temp file.

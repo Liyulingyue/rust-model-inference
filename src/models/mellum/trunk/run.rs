@@ -131,9 +131,10 @@ pub fn run_inference(
 
     let started = std::time::Instant::now();
     let mut generated: Vec<u32> = Vec::with_capacity(max_tokens);
-    for step in 0..ids.len() {
-        runner.forward_token(ids[step], step)?;
-    }
+    // The prompt is a known batch, so it goes through the batched prefill:
+    // every projection reads its weight once for the whole prompt instead
+    // of once per token.
+    runner.forward_tokens(&ids, 0)?;
     while generated.len() < max_tokens {
         let mut logits = runner.logits().to_vec();
         let chosen = sampler.sample(&mut logits, temperature, repetition_penalty);
@@ -178,9 +179,9 @@ pub fn run_inference(
 /// Used by the JEV decision scorer, which only needs the next-token
 /// distribution and never autoregressively decodes. `batch_size` is accepted
 /// for trait compatibility with the other `run_forward_logits_*` entry points
-/// but ignored: `MellumRunner::forward_token` walks the MoE routing one token
-/// at a time by construction, so there is no `rows > 1` batched path to lift
-/// yet.
+/// but ignored: the trunk picks its own batch size from the prompt length,
+/// and `MellumRunner::forward_tokens` keeps the arithmetic identical to the
+/// single token walk.
 pub fn run_forward_logits_mellum_with_batch(
     source: Arc<dyn TensorSource>,
     prompt_tokens: &[u32],
@@ -213,9 +214,7 @@ pub fn run_forward_logits_mellum_with_batch(
         ));
     }
     let mut runner = MellumRunner::new(&model, capacity, kv_format)?;
-    for (position, &token) in prompt_tokens.iter().enumerate() {
-        runner.forward_token(token, position)?;
-    }
+    runner.forward_tokens(prompt_tokens, 0)?;
     Ok((runner.logits().to_vec(), started.elapsed()))
 }
 

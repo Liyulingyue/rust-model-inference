@@ -89,6 +89,8 @@ const QWEN35_RECURRENT_SSM_SHADER: &[u8] =
 const QWEN35_MOE_ROUTE_SHADER: &[u8] = include_bytes!("../../shaders/bin/qwen35_moe_route.spv");
 const QWEN35_MOE_REDUCE_SHADER: &[u8] = include_bytes!("../../shaders/bin/qwen35_moe_reduce.spv");
 const ADALN_MODULATE_SHADER: &[u8] = include_bytes!("../../shaders/bin/adaln_modulate.spv");
+const Q8_MATMUL_TRANSPOSED_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/q8_matmul_transposed.spv");
 
 const QUANTIZE: usize = 0;
 const QUANTIZE_K: usize = 1;
@@ -103,6 +105,8 @@ const RMS_NORM: usize = 9;
 const QK_NORM_ROPE: usize = 10;
 /// Appended after the cooperative Q8 kernel to preserve existing indices.
 const QK_NORM_ROPE_INTERLEAVED: usize = 29;
+/// Appended last so the existing pipeline indices stay valid.
+const Q8_MATMUL_TRANSPOSED: usize = OPERATOR_SHADERS.len() - 1;
 const KV_WRITE: usize = 11;
 const ATTENTION_SCORES: usize = 12;
 const SOFTMAX: usize = 13;
@@ -274,6 +278,7 @@ const OPERATOR_SHADER_NAMES: [&str; OPERATOR_SHADERS.len()] = [
     "auk_snake",
     "auk_interleave",
     "auk_scale",
+    "q8_matmul_transposed",
 ];
 
 /// True when the ordered dispatch log is being collected.
@@ -399,7 +404,7 @@ pub fn dump_dispatch_trace() {
     }
 }
 
-const OPERATOR_SHADERS: [&[u8]; 49] = [
+const OPERATOR_SHADERS: [&[u8]; 50] = [
     QUANTIZE_Q8_0_SHADER,
     QUANTIZE_Q8_K_SHADER,
     Q8_MATMUL_GROUPED_SHADER,
@@ -449,6 +454,7 @@ const OPERATOR_SHADERS: [&[u8]; 49] = [
     AUK_SNAKE_SHADER,
     AUK_INTERLEAVE_SHADER,
     AUK_SCALE_SHADER,
+    Q8_MATMUL_TRANSPOSED_SHADER,
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -464,6 +470,76 @@ pub(crate) enum GpuWeightFormat {
     F32,
     MlxAffine4,
     MlxAffine8,
+}
+
+/// Whether the Q8_0 device matmul uses the transposed weight layout.
+///
+/// The transposed layout reads the weight the way a GEMV wants to read it:
+/// 2.7x the bandwidth of ggml's own layout on the GB10 box (163 GB/s
+/// against 60 GB/s) for the same result, bit for bit. Rewriting the
+/// weight costs about 26 ms per 240 MB, once, when the weight is
+/// uploaded.
+///
+/// It is **off by default**. The layout is a second reading of the same
+/// bytes -- the transpose moves them, it does not compute anything, and
+/// the kernel that reads them keeps the native reduction order -- so it
+/// cannot change a result. But a mistake in the addressing would read
+/// past the weight and fault the device, and no Mellum projection runs on
+/// the device yet, so there is nothing to gain by turning it on before
+/// the trunk can hand the device whole projections.
+///
+/// `RMI_GPU_Q8_TRANSPOSED=1` turns it on.
+fn q8_transposed_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("RMI_GPU_Q8_TRANSPOSED")
+            .ok()
+            .map(|value| value != "0")
+            .unwrap_or(false)
+    })
+}
+
+/// How the weight bytes of a binding are laid out in device memory.
+///
+/// The layout travels with the binding, because the kernel that reads the
+/// weight and the upload that produced it have to agree on it. Picking the
+/// kernel from a global flag instead would hand the transposed kernel a
+/// buffer in ggml's layout -- which is what the MoE expert path does, it
+/// binds a range of a bigger tensor -- and that reads past the weight.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum GpuWeightLayout {
+    /// ggml's own layout: one output row after the other.
+    #[default]
+    Native,
+    /// The Q8_0 blocks of a tile of 64 output rows grouped together, so a
+    /// warp reads one contiguous run instead of 32 sectors one row apart.
+    ///
+    /// See [`crate::vulkan::q8_layout`] for the layout and the
+    /// measurements.
+    Transposed,
+}
+
+impl GpuWeightFormat {
+    /// The layout the device kernels should read this weight in.
+    ///
+    /// The one-row Q8_0 kernel reads the weight row by row, and the
+    /// transposed layout turns those reads into one contiguous run per
+    /// warp, which is 2.7x the bandwidth of the native layout on the GB10
+    /// box. The tiled kernel reads a whole tile of rows as one run either
+    /// way, so there the transpose would be pure overhead.
+    ///
+    /// The transposed layout is opt-in; see [`q8_transposed_enabled`].
+    fn device_layout(self, rows: usize, context: &VulkanContext) -> GpuWeightLayout {
+        if self == GpuWeightFormat::Q8_0
+            && rows == 1
+            && q8_transposed_enabled()
+            && context.supports_integer_dot_product()
+        {
+            GpuWeightLayout::Transposed
+        } else {
+            GpuWeightLayout::Native
+        }
+    }
 }
 
 /// Numerical contract, independent of the uploaded storage layout.
@@ -1088,6 +1164,7 @@ pub(crate) struct OperatorBindings {
     sizes: [u64; 3],
     weight_formats: [Option<GpuWeightFormat>; 3],
     weight_mode: GpuMatmulMode,
+    weight_layout: GpuWeightLayout,
 }
 
 impl OperatorBindings {
@@ -1138,14 +1215,13 @@ struct BatchedLinearLayout {
     max_rows: usize,
     max_n_in: usize,
     max_n_out: usize,
+    output_slots: usize,
+    output_stride: usize,
     input: ArenaRegion,
     q8: ArenaRegion,
     scales: ArenaRegion,
     sums: ArenaRegion,
     output: ArenaRegion,
-    /// Additional output slots for batched multi-binding recording.
-    /// Slot 0 is `output`; slots 1..output_slots are extra.
-    output_slots: Vec<ArenaRegion>,
     size: usize,
 }
 
@@ -1154,16 +1230,13 @@ impl BatchedLinearLayout {
         Self::with_output_slots(max_rows, max_n_in, max_n_out, 1)
     }
 
-    /// Create a layout with `output_slots` independent output regions so that
-    /// `run_group_gpu` can record several matmuls into one command buffer
-    /// without their outputs colliding.
     fn with_output_slots(
         max_rows: usize,
         max_n_in: usize,
         max_n_out: usize,
         output_slots: usize,
     ) -> Result<Self, VulkanError> {
-        if max_rows == 0 || max_n_in == 0 || max_n_out == 0 {
+        if max_rows == 0 || max_n_in == 0 || max_n_out == 0 || output_slots == 0 {
             return Err(VulkanError::UnsupportedShape(
                 "batched linear maxima must be nonzero".into(),
             ));
@@ -1174,6 +1247,10 @@ impl BatchedLinearLayout {
         let outputs = max_rows
             .checked_mul(max_n_out)
             .ok_or(VulkanError::OutOfMemory)?;
+        let output_stride = f32_bytes(outputs)?;
+        let output_storage = output_stride
+            .checked_mul(output_slots)
+            .ok_or(VulkanError::OutOfMemory)?;
         let blocks = max_rows
             .checked_mul(max_n_in.div_ceil(32))
             .ok_or(VulkanError::OutOfMemory)?;
@@ -1183,33 +1260,41 @@ impl BatchedLinearLayout {
         let q8 = region(&mut size, inputs)?;
         let scales = f32_region(&mut size, blocks)?;
         let sums = f32_region(&mut size, blocks)?;
-        let output = f32_region(&mut size, outputs)?;
-        let mut extra_slots = Vec::with_capacity(output_slots.saturating_sub(1));
-        for _ in 1..output_slots {
-            extra_slots.push(f32_region(&mut size, outputs)?);
-        }
+        let output = region(&mut size, output_storage)?;
         as_u32((size - 1) / 4, "batched linear arena word span")?;
         Ok(Self {
             max_rows,
             max_n_in,
             max_n_out,
+            output_slots,
+            output_stride,
             input,
             q8,
             scales,
             sums,
             output,
-            output_slots: extra_slots,
             size,
         })
     }
 
-    /// Return the output region for slot `index` (0-based).
-    fn output_slot(&self, index: usize) -> Option<ArenaRegion> {
-        if index == 0 {
-            Some(self.output)
-        } else {
-            self.output_slots.get(index - 1).copied()
+    fn output_slot(&self, slot: usize) -> Result<ArenaRegion, VulkanError> {
+        if slot >= self.output_slots {
+            return Err(VulkanError::UnsupportedShape(
+                "batched linear output slot exceeds capacity".into(),
+            ));
         }
+        let offset = self
+            .output
+            .offset
+            .checked_add(
+                slot.checked_mul(self.output_stride)
+                    .ok_or(VulkanError::OutOfMemory)?,
+            )
+            .ok_or(VulkanError::OutOfMemory)?;
+        Ok(ArenaRegion {
+            offset,
+            size: self.output_stride,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1228,6 +1313,13 @@ impl BatchedLinearLayout {
         spec.validate()?;
         let format = spec.format;
 
+        if self.size > limits.max_storage_buffer_range as usize
+            || weight_len > limits.max_storage_buffer_range as usize
+        {
+            return Err(VulkanError::UnsupportedShape(
+                "batched linear buffer exceeds max_storage_buffer_range".into(),
+            ));
+        }
         if rows == 0
             || rows > self.max_rows
             || n_in == 0
@@ -1271,6 +1363,7 @@ impl BatchedLinearLayout {
             ],
             weight_formats: [Some(format), None, None],
             weight_mode: spec.mode,
+            weight_layout: GpuWeightLayout::Native,
         };
         matmul_rows_push(
             self.size,
@@ -1283,7 +1376,7 @@ impl BatchedLinearLayout {
             },
             self.scales,
             Some(self.sums),
-            &[(self.output, n_out, f32_bytes(n_out)?)],
+            &[(self.output_slot(0)?, n_out, f32_bytes(n_out)?)],
             n_in,
             rows,
             n_in,
@@ -1298,7 +1391,8 @@ impl BatchedLinearLayout {
 pub(crate) struct BatchedLinearRuntime {
     ops: std::mem::ManuallyDrop<Qwen3Ops<'static>>,
     layout: BatchedLinearLayout,
-    weights: HashMap<(usize, usize, usize, usize), (GpuBuffer, OperatorBindings)>,
+    weights: HashMap<(usize, usize, usize, usize, bool), (GpuBuffer, OperatorBindings)>,
+    grouped_weights: HashMap<Vec<(usize, usize, usize, usize, bool)>, OperatorBindings>,
     weight_capacity: usize,
     #[cfg(test)]
     pub(crate) begin_commands:
@@ -1331,10 +1425,14 @@ impl BatchedLinearRuntime {
             n_out,
             output_len,
         )?;
-        if let Some((_, binding)) =
-            self.weights
-                .get(&(weight.as_ptr() as usize, weight.len(), n_in, n_out))
-        {
+        let layout = format.device_layout(rows, self.ops.context);
+        if let Some((_, binding)) = self.weights.get(&(
+            weight.as_ptr() as usize,
+            weight.len(),
+            n_in,
+            n_out,
+            layout == GpuWeightLayout::Transposed,
+        )) {
             if binding.weight_format(1)? != format || binding.weight_mode != spec.mode {
                 return Err(VulkanError::UnsupportedShape(
                     "cached batched linear weight storage or numerical mode changed".into(),
@@ -1361,8 +1459,6 @@ impl BatchedLinearRuntime {
         )
     }
 
-    /// Create a runtime with `output_slots` independent output regions so
-    /// `run_group_gpu` can record several matmuls into one command buffer.
     pub(crate) fn with_output_slots(
         context: &'static VulkanContext,
         max_rows: usize,
@@ -1379,10 +1475,149 @@ impl BatchedLinearRuntime {
             ops: std::mem::ManuallyDrop::new(ops),
             layout,
             weights: HashMap::new(),
+            grouped_weights: HashMap::new(),
             weight_capacity: descriptor_capacity.saturating_sub(1),
             #[cfg(test)]
             begin_commands: TokenCommands::begin,
         })
+    }
+
+    fn ensure_weight(
+        &mut self,
+        weight_bytes: &[u8],
+        spec: GpuMatmulSpec,
+        rows: usize,
+        n_in: usize,
+        n_out: usize,
+    ) -> Result<((usize, usize, usize, usize, bool), GpuBuffer), VulkanError> {
+        let format = spec.format;
+        let layout = format.device_layout(rows, self.ops.context);
+        // The layout is part of the cache key: a weight that is read once
+        // and a weight that is read as a tile of rows need different
+        // bytes, and both may be uploaded.
+        let key = (
+            weight_bytes.as_ptr() as usize,
+            weight_bytes.len(),
+            n_in,
+            n_out,
+            layout == GpuWeightLayout::Transposed,
+        );
+        if let Some((buffer, bindings)) = self.weights.get(&key) {
+            if bindings.weight_format(1)? != format || bindings.weight_mode != spec.mode {
+                return Err(VulkanError::UnsupportedShape(
+                    "cached batched linear weight storage or numerical mode changed".into(),
+                ));
+            }
+            return Ok((key, *buffer));
+        }
+        self.reserve_descriptor()?;
+        // BF16 and F32 weights are uploaded transposed so the tiled float
+        // kernel can walk the reduction axis with unit stride. Only the
+        // prepared mode uses that kernel: the dot and rounded modes keep
+        // their own reduction, which the tiled float kernel does not
+        // implement.
+        let transposed = if n_in % 2 == 0
+            && matches!(format, GpuWeightFormat::BF16 | GpuWeightFormat::F32)
+            && spec.mode == GpuMatmulMode::Prepared
+        {
+            let bytes = if format == GpuWeightFormat::BF16 {
+                2
+            } else {
+                4
+            };
+            let mut packed = vec![0u8; weight_bytes.len()];
+            for r0 in (0..n_out).step_by(32) {
+                for k0 in (0..n_in).step_by(128) {
+                    for r in r0..(r0 + 32).min(n_out) {
+                        for k in k0..(k0 + 128).min(n_in) {
+                            let src = (r * n_in + k) * bytes;
+                            let dst = (k * n_out + r) * bytes;
+                            packed[dst..dst + bytes]
+                                .copy_from_slice(&weight_bytes[src..src + bytes]);
+                        }
+                    }
+                }
+            }
+            Some(packed)
+        } else {
+            None
+        };
+        // The Q8_0 kernel can read the weight in the transposed layout,
+        // which groups the blocks of a tile of output rows together.
+        // The transposed kernel needs the integer dot product, so a
+        // device without it keeps the native layout.
+        //
+        // Only the one-row kernel reads the weight row by row, so only
+        // that shape pays for the layout: the tiled kernel reads a
+        // whole tile of rows as one run either way, and the transpose
+        // would be pure overhead there.
+        let buffer = if layout == GpuWeightLayout::Transposed {
+            // The layout is written straight into the device buffer: a
+            // 240 MB weight would otherwise be staged in a second
+            // buffer and copied over.
+            let size = crate::vulkan::q8_layout::transposed_size(n_in, n_out);
+            unsafe {
+                self.ops.context.upload_static_filled(size, |bytes| {
+                    crate::vulkan::q8_layout::transpose_q8_0_weight_into(
+                        bytes,
+                        weight_bytes,
+                        n_in,
+                        n_out,
+                    );
+                })?
+            }
+        } else {
+            unsafe {
+                self.ops
+                    .context
+                    .upload_static(transposed.as_deref().unwrap_or(weight_bytes))?
+            }
+        };
+        let bindings =
+            match self
+                .ops
+                .bind_weight_buffers_mode_layout(&[buffer], &[format], spec.mode, layout)
+            {
+                Ok(bindings) => bindings,
+                Err(error) => {
+                    unsafe { self.ops.context.destroy_buffer(&buffer) };
+                    return Err(error);
+                }
+            };
+        self.weights.insert(key, (buffer, bindings));
+        Ok((key, buffer))
+    }
+
+    fn reserve_descriptor(&mut self) -> Result<(), VulkanError> {
+        if self.weights.len() + self.grouped_weights.len() >= self.weight_capacity {
+            // Every completed projection has fenced; retain uploads, recycle group sets.
+            let sets: Vec<_> = self
+                .grouped_weights
+                .values()
+                .map(|b| b.descriptor_set)
+                .collect();
+            if !sets.is_empty() {
+                let mut submission =
+                    self.ops.context.mutex.lock().map_err(|_| {
+                        VulkanError::InitFailed("Vulkan command mutex poisoned".into())
+                    })?;
+                self.ops.context.recover_commands(&mut submission)?;
+                unsafe {
+                    self.ops
+                        .context
+                        .device
+                        .free_descriptor_sets(self.ops.descriptor_pool, &sets)
+                }
+                .map_err(|error| VulkanError::InitFailed(error.to_string()))?;
+                self.grouped_weights.clear();
+            }
+        }
+        if self.weights.len() + self.grouped_weights.len() >= self.weight_capacity {
+            return Err(VulkanError::UnsupportedShape(
+                "batched linear descriptor capacity exhausted".into(),
+            ));
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1411,76 +1646,8 @@ impl BatchedLinearRuntime {
             output.len(),
         )?;
         let context = self.ops.context;
-        let key = (
-            weight_bytes.as_ptr() as usize,
-            weight_bytes.len(),
-            n_in,
-            n_out,
-        );
-        let bindings = if let Some((_, bindings)) = self.weights.get(&key) {
-            if bindings.weight_format(1)? != format || bindings.weight_mode != spec.mode {
-                return Err(VulkanError::UnsupportedShape(
-                    "cached batched linear weight storage or numerical mode changed".into(),
-                ));
-            }
-            *bindings
-        } else {
-            if self.weights.len() >= self.weight_capacity {
-                return Err(VulkanError::UnsupportedShape(
-                    "batched linear descriptor capacity exhausted".into(),
-                ));
-            }
-            // BF16 and F32 weights are uploaded transposed so the tiled float
-            // kernel can walk the reduction axis with unit stride. Only the
-            // prepared mode uses that kernel: the dot and rounded modes keep
-            // their own reduction, which the tiled float kernel does not
-            // implement.
-            let transposed = if n_in % 2 == 0
-                && matches!(format, GpuWeightFormat::BF16 | GpuWeightFormat::F32)
-                && spec.mode == GpuMatmulMode::Prepared
-            {
-                let bytes = if format == GpuWeightFormat::BF16 {
-                    2
-                } else {
-                    4
-                };
-                let mut packed = vec![0u8; weight_bytes.len()];
-                for r0 in (0..n_out).step_by(32) {
-                    for k0 in (0..n_in).step_by(128) {
-                        for r in r0..(r0 + 32).min(n_out) {
-                            for k in k0..(k0 + 128).min(n_in) {
-                                let src = (r * n_in + k) * bytes;
-                                let dst = (k * n_out + r) * bytes;
-                                packed[dst..dst + bytes]
-                                    .copy_from_slice(&weight_bytes[src..src + bytes]);
-                            }
-                        }
-                    }
-                }
-                Some(packed)
-            } else {
-                None
-            };
-            let buffer = unsafe {
-                self.ops
-                    .context
-                    .upload_static(transposed.as_deref().unwrap_or(weight_bytes))?
-            };
-            let bindings = match self
-                .ops
-                .bind_weight_buffers_mode(&[buffer], &[format], spec.mode)
-            {
-                Ok(bindings) => bindings,
-                Err(error) => {
-                    unsafe { self.ops.context.destroy_buffer(&buffer) };
-                    return Err(error);
-                }
-            };
-            // Initialization succeeded. Retain this valid upload on later errors
-            // so every GPU allocation stays owned and can be reused or dropped.
-            self.weights.insert(key, (buffer, bindings));
-            bindings
-        };
+        let (key, _) = self.ensure_weight(weight_bytes, spec, rows, n_in, n_out)?;
+        let bindings = self.weights.get(&key).unwrap().1;
         // The activation copy has to land before the command buffer starts
         // recording. The barrier that begin_commands places is the one that
         // orders host writes against the dispatches that read them, and a
@@ -1538,6 +1705,142 @@ impl BatchedLinearRuntime {
         Ok(())
     }
 
+    /// Record a projection group in one command buffer and wait only once.
+    ///
+    /// The old scalar entry point submitted and fenced every QKV or gate/up
+    /// projection separately. Keeping the activation and all outputs in the
+    /// arena lets the grouped shader do the same work with one host/device
+    /// round trip.
+    pub(crate) fn matmul_rows_group(
+        &mut self,
+        weights: &[(&[u8], GpuMatmulSpec, usize, usize)],
+        input: &[f32],
+        rows: usize,
+        outputs: &mut [&mut [f32]],
+    ) -> Result<(), VulkanError> {
+        if !(1..=3).contains(&weights.len())
+            || weights.len() > self.layout.output_slots
+            || weights.len() != outputs.len()
+        {
+            return Err(VulkanError::UnsupportedShape(
+                "invalid batched linear group size".into(),
+            ));
+        }
+        let first_spec = weights[0].1;
+        let first_n_in = weights[0].2;
+        if weights.iter().any(|(_, spec, n_in, _)| {
+            *n_in != first_n_in || spec.format != first_spec.format || spec.mode != first_spec.mode
+        }) {
+            return Err(VulkanError::UnsupportedShape(
+                "heterogeneous grouped Vulkan linear projections".into(),
+            ));
+        }
+        let mut keys = Vec::with_capacity(weights.len());
+        let mut buffers = Vec::with_capacity(weights.len());
+        let mut formats = Vec::with_capacity(weights.len());
+        let mut output_regions = Vec::with_capacity(weights.len());
+        for (slot, ((weight, spec, n_in, n_out), output)) in
+            weights.iter().zip(outputs.iter()).enumerate()
+        {
+            if *n_in != first_n_in
+                || output.len() != rows.checked_mul(*n_out).ok_or(VulkanError::OutOfMemory)?
+            {
+                return Err(VulkanError::UnsupportedShape(
+                    "grouped Vulkan linear shape mismatch".into(),
+                ));
+            }
+            self.layout.validate(
+                &self.ops.context.limits,
+                weight.len(),
+                *spec,
+                input.len(),
+                rows,
+                *n_in,
+                *n_out,
+                output.len(),
+            )?;
+            let (key, buffer) = self.ensure_weight(weight, *spec, rows, *n_in, *n_out)?;
+            keys.push(key);
+            buffers.push(buffer);
+            formats.push(spec.format);
+            output_regions.push((self.layout.output_slot(slot)?, *n_out, f32_bytes(*n_out)?));
+        }
+        let bindings = if let Some(bindings) = self.grouped_weights.get(&keys) {
+            if bindings.weight_format(weights.len())? != first_spec.format
+                || bindings.weight_mode != first_spec.mode
+            {
+                return Err(VulkanError::UnsupportedShape(
+                    "cached grouped Vulkan weight storage or numerical mode changed".into(),
+                ));
+            }
+            *bindings
+        } else {
+            self.reserve_descriptor()?;
+            let bindings =
+                self.ops
+                    .bind_weight_buffers_mode(&buffers, &formats, first_spec.mode)?;
+            self.grouped_weights.insert(keys.clone(), bindings);
+            bindings
+        };
+
+        let host_writes_early = self.ops.staging.is_none();
+        if host_writes_early {
+            self.ops.write_f32(self.layout.input, input)?;
+        }
+        let context = self.ops.context;
+        #[cfg(test)]
+        let commands = (self.begin_commands)(context)?;
+        #[cfg(not(test))]
+        let commands = TokenCommands::begin(context)?;
+        if !host_writes_early {
+            self.ops.write_f32(self.layout.input, input)?;
+        }
+        if first_n_in % 2 == 0
+            && matches!(
+                first_spec.format,
+                GpuWeightFormat::BF16 | GpuWeightFormat::F32
+            )
+            && first_spec.mode == GpuMatmulMode::Prepared
+        {
+            self.ops.record_transposed_float_matmul_rows(
+                &commands,
+                bindings,
+                self.layout.input,
+                &output_regions,
+                first_n_in,
+                rows,
+                first_n_in,
+            )?;
+        } else {
+            let recorder = if first_spec.uses_tiled_f16() && first_n_in % 2 == 0 && rows >= 32 {
+                Qwen3Ops::record_weight_matmul_tiled_rows
+            } else {
+                Qwen3Ops::record_weight_matmul_rows
+            };
+            recorder(
+                &self.ops,
+                &commands,
+                bindings,
+                self.layout.input,
+                self.layout.q8,
+                self.layout.scales,
+                self.layout.sums,
+                self.layout.q8,
+                self.layout.scales,
+                &output_regions,
+                first_n_in,
+                rows,
+                first_n_in,
+            )?;
+        }
+        commands.submit_and_wait()?;
+        for (slot, output) in outputs.iter_mut().enumerate() {
+            let count = output.len();
+            output.copy_from_slice(self.ops.read_f32(self.layout.output_slot(slot)?, count)?);
+        }
+        Ok(())
+    }
+
     /// Record N matmuls into a single command buffer and submit once.
     ///
     /// Each binding writes to its own output slot so outputs don't collide.
@@ -1553,136 +1856,77 @@ impl BatchedLinearRuntime {
         if count == 0 {
             return Ok(Vec::new());
         }
-        if count > self.layout.output_slots.len() + 1 {
+        if count > self.layout.output_slots {
             return Err(VulkanError::UnsupportedShape(
                 "record_group_matmul: more bindings than output slots".into(),
             ));
         }
         let context = self.ops.context;
 
-        // Look up / upload all weight bindings first (no GPU submit).
-        // Follow the same cache-lookup pattern as matmul_rows.
         let mut cached_bindings = Vec::with_capacity(count);
-        for (weight_bytes, spec, rows, n_out) in group.iter().copied() {
-            let spec = spec;
-            let format = spec.format;
-            let key = (
-                weight_bytes.as_ptr() as usize,
-                weight_bytes.len(),
-                n_in,
-                n_out,
-            );
-            let bindings = if let Some((_, bindings)) = self.weights.get(&key) {
-                if bindings.weight_format(1)? != format || bindings.weight_mode != spec.mode {
-                    return Err(VulkanError::UnsupportedShape(
-                        "cached batched linear weight storage or numerical mode changed".into(),
-                    ));
-                }
-                *bindings
-            } else {
-                if self.weights.len() >= self.weight_capacity {
-                    return Err(VulkanError::UnsupportedShape(
-                        "batched linear descriptor capacity exhausted".into(),
-                    ));
-                }
-                let transposed = if n_in % 2 == 0
-                    && matches!(format, GpuWeightFormat::BF16 | GpuWeightFormat::F32)
-                    && spec.mode == GpuMatmulMode::Prepared
-                {
-                    let bytes = if format == GpuWeightFormat::BF16 {
-                        2
-                    } else {
-                        4
-                    };
-                    let mut packed = vec![0u8; weight_bytes.len()];
-                    for r0 in (0..n_out).step_by(32) {
-                        for k0 in (0..n_in).step_by(128) {
-                            for r in r0..(r0 + 32).min(n_out) {
-                                for k in k0..(k0 + 128).min(n_in) {
-                                    let src = (r * n_in + k) * bytes;
-                                    let dst = (k * n_out + r) * bytes;
-                                    packed[dst..dst + bytes]
-                                        .copy_from_slice(&weight_bytes[src..src + bytes]);
-                                }
-                            }
-                        }
-                    }
-                    Some(packed)
-                } else {
-                    None
-                };
-                let buffer = unsafe {
-                    self.ops
-                        .context
-                        .upload_static(transposed.as_deref().unwrap_or(weight_bytes))?
-                };
-                let bindings =
-                    match self
-                        .ops
-                        .bind_weight_buffers_mode(&[buffer], &[format], spec.mode)
-                    {
-                        Ok(bindings) => bindings,
-                        Err(error) => {
-                            unsafe { self.ops.context.destroy_buffer(&buffer) };
-                            return Err(error);
-                        }
-                    };
-                self.weights.insert(key, (buffer, bindings));
-                bindings
-            };
-            // Validate shapes.
+        for (weight, spec, rows, n_out) in group.iter().copied() {
             self.layout.validate(
-                &self.ops.context.limits,
-                weight_bytes.len(),
+                &context.limits,
+                weight.len(),
                 spec,
-                rows * n_in,
+                rows.checked_mul(n_in).ok_or(VulkanError::OutOfMemory)?,
                 rows,
                 n_in,
                 n_out,
-                rows * n_out,
+                rows.checked_mul(n_out).ok_or(VulkanError::OutOfMemory)?,
             )?;
-            cached_bindings.push(bindings);
         }
-
-        // Write input activation once before recording (UMA: flush_mapped, no submit).
-        let host_writes_early = self.ops.staging.is_none();
-        if host_writes_early {
-            // Input is written by the caller before this method; we just need
-            // to ensure it's visible. The caller must have written to
-            // self.layout.input via write_f32 before calling record_group_matmul.
+        for (weight, spec, rows, n_out) in group.iter().copied() {
+            let (key, _) = self.ensure_weight(weight, spec, rows, n_in, n_out)?;
+            cached_bindings.push(self.weights.get(&key).unwrap().1);
         }
 
         // Begin command buffer once, record all dispatches.
+        #[cfg(test)]
+        let commands = (self.begin_commands)(context)?;
+        #[cfg(not(test))]
         let commands = TokenCommands::begin(context)?;
         let mut output_regions = Vec::with_capacity(count);
         for (slot, (bindings, (_weight_bytes, spec, rows, n_out))) in
             cached_bindings.iter().zip(group.iter()).enumerate()
         {
-            let output_region = self
-                .layout
-                .output_slot(slot)
-                .ok_or_else(|| VulkanError::UnsupportedShape("output slot unavailable".into()))?;
+            let output_region = self.layout.output_slot(slot)?;
             let outputs = [(output_region, *n_out, f32_bytes(*n_out)?)];
-            let recorder = if spec.uses_tiled_f16() && n_in % 2 == 0 && *rows >= 32 {
-                Qwen3Ops::record_weight_matmul_tiled_rows
+            if n_in % 2 == 0
+                && matches!(spec.format, GpuWeightFormat::BF16 | GpuWeightFormat::F32)
+                && spec.mode == GpuMatmulMode::Prepared
+            {
+                self.ops.record_transposed_float_matmul_rows(
+                    &commands,
+                    *bindings,
+                    self.layout.input,
+                    &outputs,
+                    n_in,
+                    *rows,
+                    n_in,
+                )?;
             } else {
-                Qwen3Ops::record_weight_matmul_rows
-            };
-            recorder(
-                &self.ops,
-                &commands,
-                *bindings,
-                self.layout.input,
-                self.layout.q8,
-                self.layout.scales,
-                self.layout.sums,
-                self.layout.q8,
-                self.layout.scales,
-                &outputs,
-                n_in,
-                *rows,
-                n_in,
-            )?;
+                let recorder = if spec.uses_tiled_f16() && n_in % 2 == 0 && *rows >= 32 {
+                    Qwen3Ops::record_weight_matmul_tiled_rows
+                } else {
+                    Qwen3Ops::record_weight_matmul_rows
+                };
+                recorder(
+                    &self.ops,
+                    &commands,
+                    *bindings,
+                    self.layout.input,
+                    self.layout.q8,
+                    self.layout.scales,
+                    self.layout.sums,
+                    self.layout.q8,
+                    self.layout.scales,
+                    &outputs,
+                    n_in,
+                    *rows,
+                    n_in,
+                )?;
+            }
             output_regions.push(output_region);
         }
         commands.submit_and_wait()?;
@@ -2292,7 +2536,7 @@ mod video_gpu_tests {
             .unwrap();
         assert_eq!(second, [10.0, 26.0]);
         assert_eq!(runtime.weights.len(), 2);
-        let bindings = runtime.weights[&(bytes.as_ptr() as usize, bytes.len(), 2, 4)].1;
+        let bindings = runtime.weights[&(bytes.as_ptr() as usize, bytes.len(), 2, 4, false)].1;
         let commands = TokenCommands::begin(context).unwrap();
         let layout = &runtime.layout;
         assert!(runtime
@@ -2951,6 +3195,11 @@ impl<'a> Qwen3Ops<'a> {
                 "Vulkan arena must not be empty".into(),
             ));
         }
+        if arena_size > context.limits.max_storage_buffer_range as usize {
+            return Err(VulkanError::UnsupportedShape(
+                "Vulkan arena exceeds max_storage_buffer_range".into(),
+            ));
+        }
         let descriptor_capacity = descriptor_capacity.max(1);
         let descriptor_count = descriptor_capacity
             .checked_mul(4)
@@ -2984,6 +3233,7 @@ impl<'a> Qwen3Ops<'a> {
         let descriptor_pool = match unsafe {
             context.device.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::builder()
+                    .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET)
                     .max_sets(max_sets)
                     .pool_sizes(&pool_sizes),
                 None,
@@ -3106,6 +3356,22 @@ impl<'a> Qwen3Ops<'a> {
         formats: &[GpuWeightFormat],
         mode: GpuMatmulMode,
     ) -> Result<OperatorBindings, VulkanError> {
+        self.bind_weight_buffers_mode_layout(buffers, formats, mode, GpuWeightLayout::Native)
+    }
+
+    /// Bind weights whose bytes are already in the given layout.
+    ///
+    /// The layout is a property of the upload, so it has to travel with the
+    /// binding: the recorder picks the kernel that reads that layout.
+    /// [`GpuWeightLayout::Native`] is the layout every upload outside the
+    /// transposed Q8_0 path produces.
+    pub(crate) fn bind_weight_buffers_mode_layout(
+        &mut self,
+        buffers: &[GpuBuffer],
+        formats: &[GpuWeightFormat],
+        mode: GpuMatmulMode,
+        layout: GpuWeightLayout,
+    ) -> Result<OperatorBindings, VulkanError> {
         for &format in formats {
             format.with_mode(mode).validate()?;
         }
@@ -3122,6 +3388,7 @@ impl<'a> Qwen3Ops<'a> {
             formats,
         )?;
         bindings.weight_mode = mode;
+        bindings.weight_layout = layout;
         Ok(bindings)
     }
 
@@ -3135,9 +3402,6 @@ impl<'a> Qwen3Ops<'a> {
             return Err(VulkanError::UnsupportedShape(
                 "invalid weight range count".into(),
             ));
-        }
-        for &(buffer, offset, size) in ranges {
-            validate_weight_range(buffer.size, offset, size, &self.context.limits)?;
         }
         allocate_bindings_ranges(
             self.context,
@@ -3763,7 +4027,16 @@ impl<'a> Qwen3Ops<'a> {
         if let Some((pipeline, push, dispatch)) = quantize {
             self.record_linear_dispatch(commands, pipeline, self.arena_bindings, &push, dispatch);
         }
-        self.record_linear_dispatch(commands, format.layout().2, bindings, &push, dispatch);
+        // The transposed kernel reads the transposed layout, so the layout
+        // of the binding -- not a global flag -- decides which kernel runs.
+        let pipeline = if format == GpuWeightFormat::Q8_0
+            && bindings.weight_layout == GpuWeightLayout::Transposed
+        {
+            Q8_MATMUL_TRANSPOSED
+        } else {
+            format.layout().2
+        };
+        self.record_linear_dispatch(commands, pipeline, bindings, &push, dispatch);
         Ok(())
     }
 
@@ -3803,28 +4076,34 @@ impl<'a> Qwen3Ops<'a> {
             input_stride,
         )?;
         push[16] = if format == GpuWeightFormat::F32 { 4 } else { 2 };
-        let columns = outputs[0].1;
-        // F16 uses a dedicated shader that does proper half-precision decode;
-        // BF16/F32 share the float matmul shader.
-        let (pipeline, column_tile, token_tile) = if format == GpuWeightFormat::F16 {
-            (F16_MATMUL_TILED, 64, 32)
-        } else {
-            let small = format == GpuWeightFormat::F32
-                && token_rows <= 32
-                && columns <= 4096
-                && outputs.len() == 1;
-            if small {
+        // Each projection keeps the kernel it would use alone, including mixed widths.
+        for small in [false, true] {
+            let mut pass = push;
+            let mut columns = 0;
+            for (slot, &(_, n_out, _)) in outputs.iter().enumerate() {
+                if (format == GpuWeightFormat::F32 && token_rows <= 32 && n_out <= 4096) == small {
+                    columns = columns.max(n_out);
+                } else {
+                    pass[5 + 3 * slot] = 0;
+                }
+            }
+            if columns == 0 {
+                continue;
+            }
+            let (pipeline, column_tile, token_tile) = if format == GpuWeightFormat::F16 {
+                (F16_MATMUL_TILED, 64, 32)
+            } else if small {
                 (FLOAT_MATMUL_SMALL, 2, 4)
             } else {
                 (FLOAT_MATMUL_TILED, 64, 32)
-            }
-        };
-        let dispatch = row_dispatch(
-            columns.div_ceil(column_tile),
-            token_rows.div_ceil(token_tile) * outputs.len(),
-            &self.context.limits,
-        )?;
-        self.record_linear_dispatch(commands, pipeline, bindings, &push, dispatch);
+            };
+            let dispatch = row_dispatch(
+                columns.div_ceil(column_tile),
+                token_rows.div_ceil(token_tile) * outputs.len(),
+                &self.context.limits,
+            )?;
+            self.record_linear_dispatch(commands, pipeline, bindings, &pass, dispatch);
+        }
         Ok(())
     }
 
@@ -3894,7 +4173,7 @@ impl<'a> Qwen3Ops<'a> {
                 token_rows,
                 input_stride,
             )?;
-            let columns = outputs.first().map(|(_, n_out, _)| *n_out).ok_or(
+            let columns = outputs.iter().map(|(_, n_out, _)| *n_out).max().ok_or(
                 VulkanError::UnsupportedShape("tiled matmul has no output".into()),
             )?;
             const FLOAT_TOKENS: usize = 32;
@@ -5915,10 +6194,19 @@ fn allocate_bindings_ranges(
     extras: &[(GpuBuffer, u64, u64)],
     formats: &[GpuWeightFormat],
 ) -> Result<OperatorBindings, VulkanError> {
+    if extras.len() > 3 {
+        return Err(VulkanError::UnsupportedShape(
+            "Vulkan descriptor set supports at most 3 weight buffers".into(),
+        ));
+    }
     if extras.len() != formats.len() && !formats.is_empty() {
         return Err(VulkanError::UnsupportedShape(
             "Vulkan weight buffer and format counts differ".into(),
         ));
+    }
+    validate_weight_range(arena.size, 0, arena.size, &context.limits)?;
+    for &(buffer, offset, size) in extras {
+        validate_weight_range(buffer.size, offset, size, &context.limits)?;
     }
     let layouts = [context.descriptor_set_layout];
     let descriptor_set = unsafe {
@@ -5959,6 +6247,7 @@ fn allocate_bindings_ranges(
         sizes,
         weight_formats: std::array::from_fn(|index| formats.get(index).copied()),
         weight_mode: GpuMatmulMode::Prepared,
+        weight_layout: GpuWeightLayout::Native,
     })
 }
 
@@ -9372,7 +9661,8 @@ mod tests {
             let q8 = region(&mut cursor, ROWS * width).unwrap();
             let scales = f32_region(&mut cursor, ROWS * width / 32 * 4).unwrap();
             let output = f32_region(&mut cursor, ROWS * OUTPUTS * 4).unwrap();
-            let mut ops = Qwen3Ops::new_with_size(&context, cursor, 2).unwrap();
+            // Three descriptor sets: the arena and the two weight layouts.
+            let mut ops = Qwen3Ops::new_with_size(&context, cursor, 3).unwrap();
             let coefficients = [
                 [47i8, -89, 13, 102, -63, 7, -31, 19],
                 [-101, 37, 83, -11, 59, -73, 23, -5],
@@ -9391,6 +9681,14 @@ mod tests {
             let bindings = ops
                 .bind_weight_buffers(&[buffer], &[GpuWeightFormat::Q8_0])
                 .unwrap();
+            // The same weight in the transposed layout: the kernel reads the
+            // same values, so it has to produce the same golden bits.
+            let transposed_weight =
+                crate::vulkan::q8_layout::transpose_q8_0_weight(&weight, width, OUTPUTS);
+            let transposed_buffer = unsafe { context.upload_static(&transposed_weight) }.unwrap();
+            let transposed_bindings = ops
+                .bind_weight_buffers(&[transposed_buffer], &[GpuWeightFormat::Q8_0])
+                .unwrap();
             let input: Vec<f32> = (1..=ROWS as u8)
                 .flat_map(|value| {
                     std::iter::repeat_n(f32::from_bits(u32::from_le_bytes([value; 4])), width / 4)
@@ -9407,6 +9705,7 @@ mod tests {
                     Q8_MATMUL_COOPERATIVE,
                     Q8_MATMUL_GROUPED_TILED_WIDE,
                     Q8_MATMUL_GROUPED_TILED_WIDE_ADD,
+                    Q8_MATMUL_TRANSPOSED,
                 ] {
                     // The two wide kernels fold the host's accumulation
                     // contract into the shader instead of testing
@@ -9423,10 +9722,15 @@ mod tests {
                     if pipeline != Q8_MATMUL_GROUPED && !ops.q8_tiled {
                         continue;
                     }
+                    let transposed = pipeline == Q8_MATMUL_TRANSPOSED;
                     let (mut push, mut dispatch) = matmul_rows_push(
                         cursor,
                         &context.limits,
-                        bindings,
+                        if transposed {
+                            transposed_bindings
+                        } else {
+                            bindings
+                        },
                         q8,
                         scales,
                         None,
@@ -9452,7 +9756,17 @@ mod tests {
                     ops.write_f32(output, &vec![f32::NAN; ROWS * OUTPUTS])
                         .unwrap();
                     let commands = TokenCommands::begin(&context).unwrap();
-                    ops.record_linear_dispatch(&commands, pipeline, bindings, &push, dispatch);
+                    ops.record_linear_dispatch(
+                        &commands,
+                        pipeline,
+                        if transposed {
+                            transposed_bindings
+                        } else {
+                            bindings
+                        },
+                        &push,
+                        dispatch,
+                    );
                     commands.submit_and_wait().unwrap();
                     let actual = ops.read_f32(output, ROWS * OUTPUTS).unwrap();
                     for (token, row) in actual.chunks_exact(OUTPUTS).enumerate() {
@@ -9466,7 +9780,11 @@ mod tests {
                     }
                 }
             }
-            unsafe { context.destroy_completed_buffers(&[buffer]) }.unwrap();
+            unsafe {
+                context
+                    .destroy_completed_buffers(&[buffer, transposed_buffer])
+                    .unwrap();
+            }
         }
     }
 
@@ -9932,7 +10250,7 @@ mod tests {
             .is_err());
         assert_eq!(runtime.weights.len(), 1);
         assert_eq!(context.submission_count(), 0);
-        let key = (weight.as_ptr() as usize, weight.len(), 4, 1);
+        let key = (weight.as_ptr() as usize, weight.len(), 4, 1, false);
         let buffer = runtime.weights[&key].0.buffer;
         runtime.ops.arena.size = arena_size;
         runtime
@@ -10066,6 +10384,7 @@ mod tests {
     fn batched_linear_layout_bounds_and_shapes() {
         use super::{BatchedLinearLayout, GpuWeightFormat::*};
         let limits = super::vk::PhysicalDeviceLimits {
+            max_storage_buffer_range: u32::MAX,
             max_compute_work_group_count: [65535; 3],
             ..Default::default()
         };
@@ -10119,6 +10438,7 @@ mod tests {
             .validate(&limits, 133120, Q8_0, 1539, 3, 513, 65, 195)
             .is_err());
         let narrow_limits = super::vk::PhysicalDeviceLimits {
+            max_storage_buffer_range: u32::MAX,
             max_compute_work_group_count: [65535, 65535, 2],
             ..Default::default()
         };
@@ -10135,6 +10455,179 @@ mod tests {
         ] {
             assert!(BatchedLinearLayout::new(maxima.0, maxima.1, maxima.2).is_err());
         }
+    }
+
+    #[test]
+    fn batched_linear_layout_rejects_descriptor_range_over_device_limit() {
+        let layout = super::BatchedLinearLayout::with_output_slots(2, 32, 4, 8).unwrap();
+        let limits = super::vk::PhysicalDeviceLimits {
+            max_storage_buffer_range: layout.size as u32 - 1,
+            max_compute_work_group_count: [65535; 3],
+            ..Default::default()
+        };
+        assert!(layout
+            .validate(
+                &limits,
+                32 * 4 * 4,
+                super::GpuWeightFormat::F32,
+                64,
+                2,
+                32,
+                4,
+                8
+            )
+            .is_err());
+        let layout = super::BatchedLinearLayout::new(1, 128, 65).unwrap();
+        let limits = super::vk::PhysicalDeviceLimits {
+            max_storage_buffer_range: layout.size as u32,
+            ..limits
+        };
+        assert!(layout
+            .validate(
+                &limits,
+                128 * 65 * 4,
+                super::GpuWeightFormat::F32,
+                128,
+                1,
+                128,
+                65,
+                65
+            )
+            .is_err());
+    }
+
+    #[test]
+    #[ignore = "requires Vulkan; also run on Lavapipe in CI"]
+    fn batched_linear_device_review_f32_group_keeps_single_projection_semantics() {
+        use super::{BatchedLinearRuntime, GpuWeightFormat::F32};
+        let context = Box::leak(Box::new(super::VulkanContext::new().unwrap()));
+        let n_in = 130;
+        for widths in [vec![65, 67], vec![65, 4097, 67]] {
+            let weights: Vec<Vec<u8>> = widths
+                .iter()
+                .enumerate()
+                .map(|(slot, &width)| {
+                    (0..n_in * width)
+                        .flat_map(|i| ((i as f32 * 0.137 + slot as f32).sin() * 2.3).to_le_bytes())
+                        .collect()
+                })
+                .collect();
+            let mut runtime =
+                BatchedLinearRuntime::with_output_slots(context, 33, n_in, 4097, 16, 8).unwrap();
+            for rows in [1, 17, 33] {
+                let input: Vec<f32> = (0..rows * n_in)
+                    .map(|i| (i as f32 * 0.193).cos() * 1.7)
+                    .collect();
+                let mut outputs: Vec<Vec<f32>> = widths
+                    .iter()
+                    .map(|&width| vec![f32::NAN; rows * width])
+                    .collect();
+                let specs: Vec<_> = weights
+                    .iter()
+                    .zip(&widths)
+                    .map(|(w, &width)| (w.as_slice(), F32.into(), n_in, width))
+                    .collect();
+                runtime
+                    .matmul_rows_group(
+                        &specs,
+                        &input,
+                        rows,
+                        &mut outputs
+                            .iter_mut()
+                            .map(Vec::as_mut_slice)
+                            .collect::<Vec<_>>(),
+                    )
+                    .unwrap();
+                for ((weight, &width), output) in weights.iter().zip(&widths).zip(&outputs) {
+                    let mut single = vec![f32::NAN; rows * width];
+                    runtime
+                        .matmul_rows(weight, F32, &input, rows, n_in, width, &mut single)
+                        .unwrap();
+                    for (i, (got, want)) in output.iter().zip(&single).enumerate() {
+                        assert_eq!(
+                            got.to_bits(),
+                            want.to_bits(),
+                            "rows={rows}, width={width}, index={i}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires Vulkan; also run on Lavapipe in CI"]
+    fn batched_linear_device_review_grouped_descriptors_are_recycled() {
+        use super::{BatchedLinearRuntime, GpuWeightFormat::F32};
+        let context = Box::leak(Box::new(super::VulkanContext::new().unwrap()));
+        let weights: Vec<Vec<u8>> = (1..=4)
+            .map(|i| {
+                vec![i as f32; 32 * 4]
+                    .into_iter()
+                    .flat_map(f32::to_le_bytes)
+                    .collect()
+            })
+            .collect();
+        let mut runtime = BatchedLinearRuntime::with_output_slots(context, 1, 32, 4, 7, 8).unwrap();
+        for _ in 0..2 {
+            for a in 0..4 {
+                for b in 0..4 {
+                    if a == b {
+                        continue;
+                    }
+                    let mut x = [f32::NAN; 4];
+                    let mut y = [f32::NAN; 4];
+                    runtime
+                        .matmul_rows_group(
+                            &[
+                                (&weights[a], F32.into(), 32, 4),
+                                (&weights[b], F32.into(), 32, 4),
+                            ],
+                            &[1.0; 32],
+                            1,
+                            &mut [&mut x, &mut y],
+                        )
+                        .unwrap();
+                    assert_eq!(x, [32.0 * (a + 1) as f32; 4]);
+                    assert_eq!(y, [32.0 * (b + 1) as f32; 4]);
+                }
+            }
+        }
+        assert_eq!(runtime.weights.len(), 4);
+        context.mutex.lock().unwrap().uncertain = true;
+        context.fail_wait_idle.store(true, super::Ordering::Relaxed);
+        runtime.weight_capacity = runtime.weights.len() + runtime.grouped_weights.len();
+        let cached = runtime.grouped_weights.len();
+        assert!(cached > 0);
+        assert!(runtime.reserve_descriptor().is_err());
+        assert_eq!(runtime.grouped_weights.len(), cached);
+        context
+            .fail_wait_idle
+            .store(false, super::Ordering::Relaxed);
+        runtime.reserve_descriptor().unwrap();
+        assert!(runtime.grouped_weights.is_empty());
+    }
+
+    #[test]
+    #[ignore = "requires Vulkan; also run on Lavapipe in CI"]
+    fn batched_linear_device_review_rejects_four_group_weights_before_upload() {
+        use super::{BatchedLinearRuntime, GpuWeightFormat::F32};
+        let context = Box::leak(Box::new(super::VulkanContext::new().unwrap()));
+        let mut runtime =
+            BatchedLinearRuntime::with_output_slots(context, 1, 32, 4, 16, 8).unwrap();
+        let weight = vec![0u8; 32 * 4 * 4];
+        let group = [(&weight[..], F32.into(), 32, 4); 4];
+        let mut storage = [[0.0; 4]; 4];
+        let mut outputs: Vec<&mut [f32]> = storage.iter_mut().map(|x| x.as_mut_slice()).collect();
+        assert!(runtime
+            .matmul_rows_group(&group, &[1.0; 32], 1, &mut outputs)
+            .is_err());
+        assert!(runtime.weights.is_empty() && runtime.grouped_weights.is_empty());
+        let arena = runtime.ops.arena;
+        assert!(runtime
+            .ops
+            .bind_weight_buffers_mode(&[arena; 4], &[F32; 4], super::GpuMatmulMode::Prepared)
+            .is_err());
     }
 
     #[test]
@@ -10288,6 +10781,80 @@ mod tests {
 
     #[test]
     #[ignore = "requires a Vulkan device"]
+    fn batched_linear_device_f16_tiled_preserves_storage_layouts() {
+        use super::{BatchedLinearRuntime, GpuMatmulMode, GpuWeightFormat, TokenCommands};
+        let context = Box::leak(Box::new(super::VulkanContext::new().unwrap()));
+        let (rows, n_out) = (33, 65);
+        for n_in in [130, 258] {
+            let weights: Vec<_> = (0..n_in * n_out)
+                .map(|i| crate::ops::f32_to_f16(((i * 17 % 101) as f32 - 50.0) / 47.0))
+                .collect();
+            let input: Vec<_> = (0..rows * n_in)
+                .map(|i| ((i * 29 % 251) as f32 - 125.0) / 97.0)
+                .collect();
+            for transposed in [false, true] {
+                let bytes: Vec<_> = (0..n_in * n_out)
+                    .flat_map(|i| {
+                        let index = if transposed {
+                            (i % n_out) * n_in + i / n_out
+                        } else {
+                            i
+                        };
+                        weights[index].to_le_bytes()
+                    })
+                    .collect();
+                let mut runtime = BatchedLinearRuntime::new(context, rows, n_in, n_out, 2).unwrap();
+                let spec = GpuWeightFormat::F16.with_mode(GpuMatmulMode::RoundedInputF32);
+                let mut actual = vec![f32::NAN; rows * n_out];
+                if transposed {
+                    let (key, _) = runtime
+                        .ensure_weight(&bytes, spec, rows, n_in, n_out)
+                        .unwrap();
+                    runtime.write_input(&input).unwrap();
+                    let commands = TokenCommands::begin(context).unwrap();
+                    runtime
+                        .ops
+                        .record_transposed_float_matmul_rows(
+                            &commands,
+                            runtime.weights[&key].1,
+                            runtime.layout.input,
+                            &[(runtime.layout.output, n_out, n_out * 4)],
+                            n_in,
+                            rows,
+                            n_in,
+                        )
+                        .unwrap();
+                    commands.submit_and_wait().unwrap();
+                    actual.copy_from_slice(
+                        runtime
+                            .read_output(runtime.layout.output, rows * n_out)
+                            .unwrap(),
+                    );
+                } else {
+                    runtime
+                        .matmul_rows(&bytes, spec, &input, rows, n_in, n_out, &mut actual)
+                        .unwrap();
+                }
+                for (row, activation) in input.chunks_exact(n_in).enumerate() {
+                    for column in 0..n_out {
+                        let expected =
+                            activation.iter().enumerate().fold(0.0f32, |sum, (i, &x)| {
+                                let x = crate::ops::f16_to_f32(crate::ops::f32_to_f16(x));
+                                x.mul_add(crate::ops::f16_to_f32(weights[column * n_in + i]), sum)
+                            });
+                        let got = actual[row * n_out + column];
+                        assert!(
+                            (got - expected).abs() <= 1e-4 + 2e-5 * expected.abs(),
+                            "transposed={transposed} n_in={n_in} row={row} column={column}: {got} vs {expected}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
     fn batched_linear_device_rows_match_and_reuse_weights() {
         use super::{BatchedLinearRuntime, GpuWeightFormat::*};
         let context = Box::leak(Box::new(super::VulkanContext::new().unwrap()));
@@ -10325,7 +10892,7 @@ mod tests {
             assert_eq!(context.submission_count(), before + 1);
             assert!(batched[195].is_nan());
             assert_eq!(runtime.weights.len(), slot + 1);
-            let key = (weight.as_ptr() as usize, weight.len(), 512, 65);
+            let key = (weight.as_ptr() as usize, weight.len(), 512, 65, false);
             let buffer = runtime.weights[&key].0.buffer;
             let binding = runtime.weights[&key].1.descriptor_set;
             let mut singles = [0.0; 195];
@@ -10532,6 +11099,7 @@ mod tests {
             sizes: [65, 33, 17].map(|rows| rows * 34),
             weight_formats: [Some(Q8_0); 3],
             weight_mode: super::GpuMatmulMode::Prepared,
+            weight_layout: super::GpuWeightLayout::Native,
         };
         let region = |offset, size| ArenaRegion { offset, size };
         let (_, dispatch) = matmul_rows_push(
@@ -10578,6 +11146,7 @@ mod tests {
                 sizes: [65, 28, 8].map(|rows| rows * 16 * 2),
                 weight_formats: [Some(format); 3],
                 weight_mode: mode,
+                weight_layout: super::GpuWeightLayout::Native,
             };
             let (push, dispatch) = matmul_rows_push(
                 32768,
@@ -10689,6 +11258,7 @@ mod tests {
                     sizes: [3, 2, 1].map(|rows| ((256 / block) * bytes * rows) as u64),
                     weight_formats: [Some(format); 3],
                     weight_mode: super::GpuMatmulMode::Prepared,
+                    weight_layout: super::GpuWeightLayout::Native,
                 };
                 let prepare = |r: &[ArenaRegion; 6]| {
                     matmul_rows_push(
@@ -11019,6 +11589,7 @@ mod tests {
                 sizes: [128, 0, 0],
                 weight_formats: [Some(GpuWeightFormat::F16), None, None],
                 weight_mode: mode,
+                weight_layout: super::GpuWeightLayout::Native,
             };
             matmul_rows_push(
                 layout.size,
@@ -11084,7 +11655,7 @@ mod tests {
             .unwrap();
         assert_eq!(output, [8.0]);
         let before = context.submission_count();
-        let key = (weight.as_ptr() as usize, weight.len(), 32, 1);
+        let key = (weight.as_ptr() as usize, weight.len(), 32, 1, false);
         let buffer = runtime.weights[&key].0.buffer;
         let spec = GpuWeightFormat::F16.with_mode(GpuMatmulMode::RoundedInputF32);
         assert!(runtime.validate(&weight, spec, 32, 1, 32, 1, 1).is_err());
@@ -11448,6 +12019,208 @@ mod tests {
                 unsafe { context.destroy_completed_buffers(&[buffer]) }.unwrap();
             }
         }
+    }
+
+    /// The Q8_0 device matmul with ggml's native weight layout and with the
+    /// transposed one, on the same shape.
+    ///
+    /// The two must agree bit for bit -- the transposed layout only changes
+    /// where the weight bytes live, not the arithmetic -- and the bandwidth
+    /// says whether the change is worth keeping.
+    #[test]
+    #[ignore = "requires a Vulkan device; timing harness, not a correctness gate"]
+    fn q8_0_transposed_layout_matches_and_faster() {
+        use super::*;
+        use std::time::Instant;
+        const N_IN: usize = 2304;
+        const N_OUT: usize = 98_304;
+        const ROWS: usize = 1;
+        const REPS: usize = 10;
+        let native = synthetic_weight(GpuWeightFormat::Q8_0, N_IN, N_OUT);
+        let transposed = crate::vulkan::q8_layout::transpose_q8_0_weight(&native, N_IN, N_OUT);
+        assert_eq!(native.len(), transposed.len());
+
+        // A VulkanContext owns one descriptor set, so each layout gets its own
+        // context.
+        let run = |weight: &[u8], pipeline: usize| -> (Vec<f32>, f64) {
+            let context = VulkanContext::new().unwrap();
+            let mut cursor = 0;
+            let q8 = region(&mut cursor, ROWS * N_IN).unwrap();
+            let scales = f32_region(&mut cursor, ROWS * N_IN / 32).unwrap();
+            let sums = f32_region(&mut cursor, ROWS * N_IN / 32).unwrap();
+            let output = f32_region(&mut cursor, ROWS * N_OUT).unwrap();
+            // Two descriptor sets: the arena and the weight.
+            let mut ops = Qwen3Ops::new_with_size(&context, cursor, 2).unwrap();
+            let buffer = unsafe { context.upload_static(weight) }.unwrap();
+            let bindings = ops
+                .bind_weight_buffers(&[buffer], &[GpuWeightFormat::Q8_0])
+                .unwrap();
+            let (push, _) = matmul_rows_push(
+                cursor,
+                &context.limits,
+                bindings,
+                q8,
+                scales,
+                Some(sums),
+                &[(output, N_OUT, N_OUT * 4)],
+                N_IN,
+                ROWS,
+                N_IN,
+            )
+            .unwrap();
+            let dispatch = row_dispatch(N_OUT.div_ceil(64), 1, &context.limits).unwrap();
+            let mut best = f64::MAX;
+            for _ in 0..3 {
+                let start = Instant::now();
+                for _ in 0..REPS {
+                    let commands = TokenCommands::begin(&context).unwrap();
+                    ops.record_linear_dispatch(&commands, pipeline, bindings, &push, dispatch);
+                    commands.submit_and_wait().unwrap();
+                }
+                best = best.min(start.elapsed().as_secs_f64() / REPS as f64);
+            }
+            let values = ops.read_f32(output, ROWS * N_OUT).unwrap();
+            unsafe { context.destroy_completed_buffers(&[buffer]) }.unwrap();
+            (values.to_vec(), best)
+        };
+
+        let (native_values, native_time) = run(&native, Q8_MATMUL_GROUPED);
+        let (transposed_values, transposed_time) = run(&transposed, Q8_MATMUL_TRANSPOSED);
+        let mismatches = native_values
+            .iter()
+            .zip(transposed_values.iter())
+            .filter(|(left, right)| left.to_bits() != right.to_bits())
+            .count();
+        assert_eq!(mismatches, 0, "transposed layout changed the result");
+        let bytes = (N_IN * N_OUT * 34 / 32) as f64;
+        eprintln!(
+            "[q8-transposed] native {:.3} ms ({:.1} GB/s), transposed {:.3} ms ({:.1} GB/s), {:.2}x",
+            native_time * 1e3,
+            bytes / native_time / 1e9,
+            transposed_time * 1e3,
+            bytes / transposed_time / 1e9,
+            native_time / transposed_time,
+        );
+    }
+
+    /// The transposed layout on the shapes where the tile arithmetic can go
+    /// wrong: an output count that is not a multiple of the tile width, a
+    /// single output row, and the smallest input a Q8_0 block allows.
+    ///
+    /// The native and the transposed kernel have to agree bit for bit on
+    /// every one of them.
+    #[test]
+    #[ignore = "requires a Vulkan device; timing harness, not a correctness gate"]
+    fn q8_0_transposed_layout_matches_on_edge_shapes() {
+        use super::*;
+        for (n_in, n_out) in [
+            (32, 1),
+            (32, 63),
+            (32, 64),
+            (32, 65),
+            (64, 127),
+            (32 * 5, 130),
+            (2304, 129),
+        ] {
+            let native = synthetic_weight(GpuWeightFormat::Q8_0, n_in, n_out);
+            let transposed = crate::vulkan::q8_layout::transpose_q8_0_weight(&native, n_in, n_out);
+            let run = |weight: &[u8], pipeline: usize| -> Vec<f32> {
+                let context = VulkanContext::new().unwrap();
+                let mut cursor = 0;
+                let q8 = region(&mut cursor, n_in).unwrap();
+                let scales = f32_region(&mut cursor, n_in / 32).unwrap();
+                let sums = f32_region(&mut cursor, n_in / 32).unwrap();
+                let output = f32_region(&mut cursor, n_out).unwrap();
+                let mut ops = Qwen3Ops::new_with_size(&context, cursor, 2).unwrap();
+                let buffer = unsafe { context.upload_static(weight) }.unwrap();
+                let bindings = ops
+                    .bind_weight_buffers(&[buffer], &[GpuWeightFormat::Q8_0])
+                    .unwrap();
+                let (push, _) = matmul_rows_push(
+                    cursor,
+                    &context.limits,
+                    bindings,
+                    q8,
+                    scales,
+                    Some(sums),
+                    &[(output, n_out, n_out * 4)],
+                    n_in,
+                    1,
+                    n_in,
+                )
+                .unwrap();
+                let dispatch = row_dispatch(n_out.div_ceil(64), 1, &context.limits).unwrap();
+                let commands = TokenCommands::begin(&context).unwrap();
+                ops.record_linear_dispatch(&commands, pipeline, bindings, &push, dispatch);
+                commands.submit_and_wait().unwrap();
+                let values = ops.read_f32(output, n_out).unwrap();
+                unsafe { context.destroy_completed_buffers(&[buffer]) }.unwrap();
+                values.to_vec()
+            };
+            let native_values = run(&native, Q8_MATMUL_GROUPED);
+            let transposed_values = run(&transposed, Q8_MATMUL_TRANSPOSED);
+            let mismatches = native_values
+                .iter()
+                .zip(transposed_values.iter())
+                .filter(|(left, right)| left.to_bits() != right.to_bits())
+                .count();
+            assert_eq!(mismatches, 0, "n_in={n_in} n_out={n_out}");
+        }
+    }
+
+    /// How much bandwidth the device can actually stream on this box.
+    ///
+    /// The Q8_0 matmul kernels read one output row per thread, so a warp
+    /// touches 32 sectors one row apart. This measures the floor: a plain
+    /// element-wise scale over one big buffer, where every lane reads a
+    /// neighbouring float. If this reaches the PyTorch CUDA number and the
+    /// matmul does not, the matmul kernel is the problem; if both are at the
+    /// same number, the device memory path is the limit.
+    #[test]
+    #[ignore = "requires a Vulkan device; timing harness, not a correctness gate"]
+    fn device_streaming_bandwidth() {
+        use super::*;
+        use std::time::Instant;
+        const FLOATS: usize = 60 * 1024 * 1024; // 240 MB
+        const REPS: usize = 10;
+        let context = VulkanContext::new().unwrap();
+        let mut cursor = 0;
+        let input = f32_region(&mut cursor, FLOATS).unwrap();
+        let output = f32_region(&mut cursor, FLOATS).unwrap();
+        let mut ops = Qwen3Ops::new_with_size(&context, cursor, 1).unwrap();
+        ops.write_f32(input, &vec![1.0f32; FLOATS]).unwrap();
+        let push = [
+            ops.f32_word(input, FLOATS, "bandwidth input").unwrap(),
+            ops.f32_word(output, FLOATS, "bandwidth output").unwrap(),
+            FLOATS as u32,
+            1.0f32.to_bits(),
+        ];
+        let dispatch = row_dispatch(FLOATS.div_ceil(64), 1, &context.limits).unwrap();
+        let mut best = f64::MAX;
+        for _ in 0..3 {
+            let start = Instant::now();
+            for _ in 0..REPS {
+                let commands = TokenCommands::begin(&context).unwrap();
+                ops.record_linear_dispatch(
+                    &commands,
+                    AUK_SCALE,
+                    ops.arena_bindings,
+                    &push,
+                    dispatch,
+                );
+                commands.submit_and_wait().unwrap();
+            }
+            best = best.min(start.elapsed().as_secs_f64() / REPS as f64);
+        }
+        // One read plus one write of 240 MB.
+        let bytes = (FLOATS * 4 * 2) as f64;
+        eprintln!(
+            "[stream] element-wise scale over {:.0} MB: {:.3} ms ({:.1} GB/s read+write, {:.1} GB/s read)",
+            bytes / 2e6,
+            best * 1e3,
+            bytes / best / 1e9,
+            (bytes / 2.0) / best / 1e9,
+        );
     }
 
     /// Times the decode-shaped Q8_0 matmul: one token against the weight

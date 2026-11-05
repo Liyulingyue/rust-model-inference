@@ -63,3 +63,11 @@ pub(crate) fn layer_2d(
 ) {
     checkpoint(name, Some(layer), step, &[cols, rows], values);
 }
+
+/// True while the parity trace is recording.
+///
+/// The batched prefill does not emit the per-slot expert checkpoints, so
+/// the prefill keeps using the single token walk while the trace runs.
+pub(crate) fn enabled() -> bool {
+    cfg!(feature = "parity-trace") && std::env::var_os("RMI_PARITY_TRACE").is_some()
+}
