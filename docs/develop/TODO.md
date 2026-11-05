@@ -536,6 +536,14 @@ ggml-org/llama.cpp 的一部分**——它们是 `microsoft/BitNet` 私有 fork 
 - [ ] 更多量化格式支持（Q4_K, Q5_K 等）
 - [ ] 完善 GGUfRS 导出功能
 - [ ] GGUF 导出支持
+- [x] **Intern-Decision-0.8B 适配与真实权重数值对齐** — 转换器写出 `qwen35` arch 与
+      `qwen3vl_merger` 投影，0.8B 在 CPU 上文本/图像/CLI/HTTP/JEV 全部跑通；引擎侧无需模型专属代码。
+      真实 CLI、模型契约、固定 llama.cpp Oracle 的完整输出对照见
+      [复现记录](../../tools/oracle/intern_decision/README.md) 和
+      [哈希/指标](../../tools/oracle/intern_decision/verification.json)。
+    - 无损载荷/layout/token IDs 使用精确检查；量化、低精度舍入、近似激活使用明确数值误差界限。
+    - 未覆盖：**Intern-Decision-4B 真实权重**（转换器已支持并校验形状，但引擎的 Qwen3.5 recurrent
+      投影尚不接受该 SSM 形状，暂时不能推理）、GPU 数值对齐、性能基准。
 
 ---
 
