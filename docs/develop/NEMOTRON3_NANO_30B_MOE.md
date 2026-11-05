@@ -114,6 +114,34 @@ out        = moe_out + shexp            # 共享专家没有 sigmoid 门
 1. **权重取未加偏置的 probs**，偏置只用来排序（DeepSeek-V3 风格）。
 2. **共享专家没有门控**，也没有乘 `weights`；`moe_out + shexp` 是唯一的加法。
 
+## 1·5. 提示构造：`nemotron_h` / `nemotron_h_moe` 也有 CLI↔HTTP 分叉
+
+这不是 MoE 特有的问题，是这一族模型的共同问题，适配 30B 之前就该修。
+
+Nemotron-3 Nano 的 GGUF 自带一个 ~290 行的 Jinja 模板（4B 与 30B 同族），
+它渲染出的是 `<|im_start|>system\n<|im_end|>\n<|im_start|>user\n…<|im_end|>\n
+<|im_start|>assistant\n<think>…`。仓库把 `nemotron_h` 映射到
+`ChatTemplate::ChatML`（`src/prompt/legacy.rs:119`），而 CLI 与 HTTP 各走一套
+builder，于是同一条消息有三种提示（用仓库自己的 tokenizer 量 4B）：
+
+| 路径 | token 数 |
+|---|---|
+| CLI 内置（`format_chat`） | **15** |
+| HTTP 内置（`build_qwen_chat_prompt`） | **19**（多一个空 think 块 `<think>\n</think>`） |
+| GGUF 自带模板（thinking=false / true） | **24 / 23**（多一个**空 system 轮**，还有一个前导 `\n`） |
+
+差别不是 cosmetic：CLI 一个 think 标记都没有，HTTP 补一个**空** think 块，
+模型自带模板**开着** think 块并且多一轮空 system。30B 的 `nemotron_h_moe` 会用
+同一个模板家族，所以适配时必须让两条入口共用同一份渲染，否则
+`nemotron_h_moe` 会带着这个分叉上线。
+
+细节、证据与修法见 [DORY_REVIEW.md](DORY_REVIEW.md) 的 F1（同一族模型、同一
+个模板、同一个问题）。
+
+**BOS 的差别**：4B 的 GGUF 写 `add_bos_token = true`，所以它**有** BOS；
+Dory 的 GGUF 写 `false`，而 llama.cpp 对 pixtral 预分词家族强制 `add_bos = true`
+→ Dory 的提示比参考实现少一个 `<s>`（见 DORY_REVIEW.md 的 F2）。
+
 ## 2. 阻塞项（按必须做的顺序）
 
 ### B1. Q5_1 dequant kernel（硬前置）
