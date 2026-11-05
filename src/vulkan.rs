@@ -20,6 +20,8 @@ pub(crate) mod matmul_q4k;
 #[cfg(feature = "vulkan")]
 pub(crate) mod ops;
 #[cfg(feature = "vulkan")]
+pub(crate) mod q8_layout;
+#[cfg(feature = "vulkan")]
 pub(crate) mod qwen3;
 #[cfg(feature = "vulkan")]
 pub(crate) mod qwen35;
@@ -1124,6 +1126,31 @@ impl VulkanContext {
         std::ptr::write_bytes(buffer.mapped.add(data.len()), 0, size as usize - data.len());
         self.flush_mapped(buffer, 0, data.len() as u64)?;
         self.count_upload(data.len());
+        Ok(buffer)
+    }
+
+    /// Upload bytes that are produced in place.
+    ///
+    /// A caller that has to rewrite the bytes anyway -- the transposed Q8_0
+    /// layout -- can write them straight into the device buffer instead of
+    /// staging them in a second buffer and copying that over.
+    pub(crate) unsafe fn upload_static_filled(
+        &self,
+        size: usize,
+        fill: impl FnOnce(&mut [u8]),
+    ) -> Result<GpuBuffer, VulkanError> {
+        let padded = size
+            .checked_add(19)
+            .and_then(|size| u64::try_from(size & !3).ok())
+            .ok_or(VulkanError::OutOfMemory)?;
+        let buffer = self.alloc_persistently_mapped(padded)?;
+        let mapped = buffer.mapped;
+        // SAFETY: the mapping covers `padded` bytes and the buffer is not
+        // in use yet.
+        fill(std::slice::from_raw_parts_mut(mapped, size));
+        std::ptr::write_bytes(mapped.add(size), 0, padded as usize - size);
+        self.flush_mapped(buffer, 0, size as u64)?;
+        self.count_upload(size);
         Ok(buffer)
     }
 
