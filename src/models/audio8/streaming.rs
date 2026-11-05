@@ -8,7 +8,7 @@ use super::mel::compute_voxtral_log_mel;
 use super::text::{Audio8TextDecoder, Audio8TextSession};
 use super::{time_condition, Audio8Encoder, Audio8State, TEXT_WIDTH};
 use crate::core::tokenizer::BPETokenizer;
-use crate::models::qwen3::asr::audio_processor::decode_pcm16_wav_any;
+use crate::ops::audio::frontend::decode_pcm16_wav_any;
 use std::collections::VecDeque;
 
 pub const SAMPLE_RATE: usize = 16_000;

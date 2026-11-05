@@ -7,11 +7,11 @@ use crate::core::{
     tokenizer::{BPETokenizer, EncodeOptions},
 };
 use crate::models::diffusion::{
-    dreamx::kernels::load_float_values,
     z_image::{dit::TorchMt19937, vae::FluxVae},
     DiffusionRgb,
 };
 use crate::models::qwen3::Qwen3Model;
+use crate::ops::nn::load_float_values;
 use std::sync::Arc;
 
 const HIDDEN: usize = 3072;
