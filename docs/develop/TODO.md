@@ -173,7 +173,8 @@ NEON on aarch64; no AVX-512).
       选项：① 加 aarch64 CI 作业（至少 `cargo check --features vulkan` + shader 编译）；
       ② 在 arm 机器上跑 Timestral F16（209M）的 GPU 路径并对 llama.cpp oracle；
       ③ 把 #198 的 conv 回归与本分支的 `transposed` 分派反馈给 main。
-- [ ] **共享算子搬迁只搬了一半：兼容 shim 还在，调用方没跟着迁移** —
+- [x] **共享算子搬迁只搬了一半：兼容 shim 还在，调用方没跟着迁移** — ✅ 已完成（2026-11-05，`hy-simulmt-plus`）。
+      两次「把共享算子搬进 `ops/`」都留下了 1 行转发 shim，调用方仍在走 models 层路径：
       两次「把共享算子搬进 `ops/`」都留下了 1 行转发 shim，调用方仍在走 models 层路径：
       - `src/models/diffusion/dreamx/kernels.rs` 现在只有 `pub use crate::ops::nn::*;`
         （实现已搬到 `src/ops/nn.rs`：32 fn + 4 struct + 7 const 逐一对应、**零丢失**）。
@@ -193,6 +194,14 @@ NEON on aarch64; no AVX-512).
       附带：`mel_encoder.rs` 的模型侧 `apply_gelu` 与共享的
       `ops::audio::transformer::apply_gelu_erf` 是两份相似实现（搬迁时新引入的重复），
       建议模型侧改为委托。
+      收尾结果：删除 `dreamx/kernels.rs` 与 `asr/audio_processor.rs` 两个 shim、去掉
+      `dreamx/mod.rs` 的 `pub mod kernels;` 与 `asr/mod.rs` 的 `pub mod audio_processor;`，
+      44 处 `dreamx::kernels` 与 20 处 `asr::audio_processor` 引用全部改指 `crate::ops::nn` /
+      `crate::ops::audio::frontend`；`mel_encoder.rs` 的转发表降级为私有 `use`，两个使用方
+      （`omni.rs` / `omni_audio/tower.rs`）改为分别从 ops 与模型侧导入；模型侧 `apply_gelu`
+      改为委托共享实现（保留 conv 专用错误文案）。**ops → models 的反向依赖已消除**。
+      回归：lib 1470 passed / 22 failed / 210 ignored，与改动前逐条一致；11 个
+      `batched_linear_device` GPU 回归 + conv GPU 测试通过；`mel_encoder.rs` 告警数与 main 相同。
 
 - [x] **LFM2.5-24B-A2B 适配 + 标量逐位对齐** — ✅ 已完成 (2026-10-15)。
       24B 总 / 2B 激活的 MoE，`lfm2moe` 架构：40 层 × 2048 宽 × 32 头（head_dim 64），注意力层

@@ -64,7 +64,7 @@ pub fn run_vibevoice_asr_cli(options: &crate::app::cli::CliOptions) -> Result<()
 
     let wav_bytes = std::fs::read(audio_path)
         .map_err(|error| format!("Failed to read {}: {error}", audio_path.display()))?;
-    let decoded = crate::models::qwen3::asr::audio_processor::decode_pcm16_wav_any(&wav_bytes)
+    let decoded = crate::ops::audio::frontend::decode_pcm16_wav_any(&wav_bytes)
         .map_err(|error| format!("Failed to decode WAV: {error:?}"))?;
     let mono: Vec<f32> = if decoded.channels == 1 {
         decoded.samples

@@ -1,7 +1,5 @@
 use rust_model_inference::core::thread_pool::ComputePool;
-use rust_model_inference::models::diffusion::dreamx::kernels::{
-    conv3d_with_options, load_float_values, Conv3dSpec, Linear,
-};
+use rust_model_inference::ops::nn::{conv3d_with_options, load_float_values, Conv3dSpec, Linear};
 use rust_model_inference::{GGUFLoader, TensorSource};
 use serde_json::Value;
 use std::path::Path;

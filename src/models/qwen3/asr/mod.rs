@@ -11,6 +11,5 @@
 //! - `runtime` depends on `core::*`, `format::*`, `models::qwen3::base`,
 //!   and `super::audio_processor` and `super::model`.
 
-pub mod audio_processor;
 pub mod mel_encoder;
 pub mod model;

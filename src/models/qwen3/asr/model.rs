@@ -2,13 +2,11 @@ use crate::core::prefill::checked_prefill_batch_size;
 use crate::core::tensor::{MetaValue, TensorSource};
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 use crate::format::ggufrs::{ComponentRole, GgufrsFile};
-use crate::models::qwen3::asr::audio_processor::{
-    decode_pcm16_wav, log_mel_windows, AsrAudioError,
-};
 use crate::models::qwen3::asr::mel_encoder::{
     validate_qwen3a_source, AudioEmbeddings, Qwen3AudioModel,
 };
 use crate::models::qwen3::{Qwen3GenerateOptions, Qwen3Input, Qwen3Model};
+use crate::ops::audio::frontend::{decode_pcm16_wav, log_mel_windows, AsrAudioError};
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;

@@ -3,10 +3,8 @@ use super::fpn::{inverse_4x4, perception_contracts, ComponentWeights, F32Tensor}
 use super::ops::{grid_sample_bilinear_aligned, resize_bilinear_aligned, Tensor4};
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
-use crate::models::diffusion::dreamx::kernels::{
-    conv2d, conv3d_with_options, group_norm_ncthw, Conv3dSpec,
-};
 use crate::models::qwen_drive::config::PerceptionConfig;
+use crate::ops::nn::{conv2d, conv3d_with_options, group_norm_ncthw, Conv3dSpec};
 use serde::Serialize;
 
 struct ClassificationBranch<'a> {
