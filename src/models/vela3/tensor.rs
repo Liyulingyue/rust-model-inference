@@ -233,28 +233,23 @@ pub(crate) fn layer_norm(
     if bias.len() != weight.len() || bias.iter().any(|v| !v.is_finite()) {
         return Err("layer norm bias shape mismatch".into());
     }
-    let mut out = Vec::with_capacity(x.len());
-    for row in x.chunks_exact(weight.len()) {
-        let mean = row.iter().sum::<f32>() / weight.len() as f32;
-        let var = row.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / weight.len() as f32;
-        let inv = (var + eps).sqrt().recip();
-        out.extend(
-            row.iter()
-                .zip(weight)
-                .zip(bias)
-                .map(|((&v, &w), &b)| (v - mean) * inv * w + b),
-        );
+    let mut out = vec![0.; x.len()];
+    for (row, output) in x
+        .chunks_exact(weight.len())
+        .zip(out.chunks_exact_mut(weight.len()))
+    {
+        crate::ops::layer_norm(row, weight, bias, eps, output);
     }
     Ok(out)
 }
 pub(crate) fn rms_norm(x: &[f32], weight: &[f32], eps: f32) -> Result<Vec<f32>, String> {
     norm_shape(x, weight, eps)?;
-    let mut out = Vec::with_capacity(x.len());
-    for row in x.chunks_exact(weight.len()) {
-        let inv = (row.iter().map(|v| v * v).sum::<f32>() / weight.len() as f32 + eps)
-            .sqrt()
-            .recip();
-        out.extend(row.iter().zip(weight).map(|(&v, &w)| v * inv * w));
+    let mut out = vec![0.; x.len()];
+    for (row, output) in x
+        .chunks_exact(weight.len())
+        .zip(out.chunks_exact_mut(weight.len()))
+    {
+        crate::ops::rms_norm(row, weight, output, eps);
     }
     Ok(out)
 }

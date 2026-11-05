@@ -9,6 +9,7 @@ use image::RgbImage;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 type Trace = Vec<(String, Vec<f32>)>;
 
@@ -226,6 +227,10 @@ struct Vocab {
     question: u32,
     sep: u32,
     image: u32,
+    bos: u32,
+    base_size: u32,
+    context: usize,
+    image_seq_len: usize,
 }
 
 impl Vocab {
@@ -242,11 +247,56 @@ impl Vocab {
                 .ok_or_else(|| format!("UltraVBERT tokenizer missing {token}"))
         };
         let (question, sep, image) = (id("?")?, id("<|sep|>")?, id("<image>")?);
+        for token in [
+            "<|sep|>",
+            "<image>",
+            "<fake_token_around_image>",
+            "<global-img>",
+        ] {
+            special_id(&tokenizer, token)?;
+        }
+        let config = read_json(&root.join("config.json"))?;
+        let processor = read_json(&root.join("processor_config.json"))?;
+        let tile = dimension(&config["vision_config"], "image_size")?;
+        let patch = dimension(&config["vision_config"], "patch_size")?;
+        let shuffle = dimension(&config, "pixel_shuffle_factor")?;
+        let merged_patch = patch
+            .checked_mul(shuffle)
+            .ok_or("UltraVBERT patch size overflow")?;
+        let image_seq_len = dimension(&processor, "image_seq_len")?;
+        if tile != 512
+            || !tile.is_multiple_of(merged_patch)
+            || image_seq_len != (tile / patch / shuffle).pow(2)
+            || image_seq_len != 64
+            || dimension(
+                &processor["image_processor"]["max_image_size"],
+                "longest_edge",
+            )? != tile
+        {
+            return Err(
+                "UltraVBERT requires the pinned 512-pixel tiles and 8x8 connector grid".into(),
+            );
+        }
+        if config["image_token_id"].as_u64() != Some(image as u64) {
+            return Err("UltraVBERT image token ID mismatch".into());
+        }
+        let bos = config["text_config"]["bos_token_id"]
+            .as_u64()
+            .and_then(|n| u32::try_from(n).ok())
+            .filter(|&n| tokenizer.id_to_token(n).is_some())
+            .ok_or("invalid UltraVBERT bos_token_id")?;
+        let context = dimension(&config["text_config"], "max_position_embeddings")?;
+        let base_size = u32::try_from(tokenizer.get_vocab_size(false))
+            .map_err(|_| "UltraVBERT vocabulary overflow")?;
         Ok(Self {
             tokenizer,
             question,
             sep,
             image,
+            bos,
+            base_size,
+            context,
+            image_seq_len,
         })
     }
     fn raw(&self, text: &str, special: bool) -> Result<tokenizers::Encoding, String> {
@@ -259,15 +309,50 @@ impl Vocab {
             .raw(text, false)?
             .get_ids()
             .iter()
-            .map(|&id| if id >= 49152 { self.question } else { id })
+            .map(|&id| {
+                if id >= self.base_size {
+                    self.question
+                } else {
+                    id
+                }
+            })
             .collect())
     }
+    fn prefix(&self, grid: (usize, usize)) -> Result<String, String> {
+        for token in ["<fake_token_around_image>", "<global-img>", "<image>"] {
+            special_id(&self.tokenizer, token)?;
+        }
+        for row in 1..=grid.0 {
+            for col in 1..=grid.1 {
+                special_id(&self.tokenizer, &format!("<row_{row}_col_{col}>"))?;
+            }
+        }
+        Ok(prefix_string(grid, self.image_seq_len))
+    }
 }
+
+fn special_id(tokenizer: &tokenizers::Tokenizer, token: &str) -> Result<u32, String> {
+    let id = tokenizer
+        .token_to_id(token)
+        .filter(|id| tokenizer.get_added_tokens_decoder().contains_key(id))
+        .ok_or_else(|| format!("UltraVBERT tokenizer missing added token {token}"))?;
+    if tokenizer
+        .encode(token, false)
+        .map_err(|e| e.to_string())?
+        .get_ids()
+        != [id]
+    {
+        return Err(format!("UltraVBERT tokenizer splits special token {token}"));
+    }
+    Ok(id)
+}
+
+type FrameCache = HashMap<(usize, usize), (Vec<Arc<Vec<f32>>>, (usize, usize))>;
 
 #[derive(Debug)]
 struct Example {
     ids: Vec<u32>,
-    frames: Vec<Vec<f32>>,
+    frames: Vec<Arc<Vec<f32>>>,
     selections: Vec<(usize, usize)>,
     offsets: Vec<(usize, usize)>,
     grid: (usize, usize),
@@ -331,12 +416,13 @@ fn flatten_fields(value: &Value, prefix: &str, out: &mut Vec<String>) {
     }
 }
 
-fn prepare(
+fn prepare_cached(
     vocab: &Vocab,
     task_config: &Value,
     state: &Value,
     question: &Value,
     images: &[RgbImage],
+    cache: &mut FrameCache,
 ) -> Result<Example, String> {
     let qtype = question["type"].as_str().unwrap_or("");
     if !["choice", "noul", "span", "box"].contains(&qtype) {
@@ -365,9 +451,9 @@ fn prepare(
         _ => "box",
     };
     let cfg = &task_config["tasks"][task];
-    let edge = cfg["edge"].as_u64().unwrap_or(1024) as usize;
+    let edge = dimension(cfg, "edge")?;
     if task == "decision" {
-        let max = cfg["max_images"].as_u64().unwrap_or(3) as usize;
+        let max = dimension(cfg, "max_images")?;
         if images.len() > max {
             return Err(format!(
                 "this model reads at most {max} images per request (got {})",
@@ -385,7 +471,7 @@ fn prepare(
         .into());
     }
     let mut e = Example {
-        ids: vec![0],
+        ids: vec![vocab.bos],
         frames: Vec::new(),
         selections: Vec::new(),
         offsets: Vec::new(),
@@ -398,14 +484,22 @@ fn prepare(
     };
     if !images.is_empty() {
         let mut pre = String::new();
-        for image in images
+        for (index, image) in images
             .iter()
             .take(if task == "decision" { images.len() } else { 1 })
+            .enumerate()
         {
-            let (frames, grid) = preprocess(image, edge)?;
-            e.frames.extend(frames);
-            e.grid = grid;
-            pre.push_str(&prefix_string(grid, 64));
+            if !cache.contains_key(&(index, edge)) {
+                let (frames, grid) = preprocess(image, edge)?;
+                cache.insert(
+                    (index, edge),
+                    (frames.into_iter().map(Arc::new).collect(), grid),
+                );
+            }
+            let (frames, grid) = &cache[&(index, edge)];
+            e.frames.extend(frames.iter().cloned());
+            e.grid = *grid;
+            pre.push_str(&vocab.prefix(*grid)?);
         }
         e.ids = vocab.raw(&pre, true)?.get_ids().to_vec();
     }
@@ -439,7 +533,7 @@ fn prepare(
         };
         if !state.trim().is_empty() {
             let ids = vocab.ids(&format!("Input: {}", state.trim()))?;
-            let max = cfg["max_state_tokens"].as_u64().unwrap_or(32768) as usize;
+            let max = dimension(cfg, "max_state_tokens")?;
             if ids.len() > max {
                 return Err(format!(
                     "input longer than the maximum model length (state {} > {max} tokens)",
@@ -545,7 +639,7 @@ fn prepare(
             }
         }
         e.ids.extend(encoded.get_ids().iter().take(768).map(|&id| {
-            if id >= 49152 {
+            if id >= vocab.base_size {
                 vocab.question
             } else {
                 id
@@ -553,16 +647,28 @@ fn prepare(
         }));
     }
     e.ids.push(vocab.sep);
-    if e.ids.len() > 32768 {
+    if e.ids.len() > vocab.context {
         return Err(format!(
-            "input longer than the maximum model length ({} > 32768 tokens)",
-            e.ids.len()
+            "input longer than the maximum model length ({} > {} tokens)",
+            e.ids.len(),
+            vocab.context
         ));
     }
     if e.selections.iter().any(|&(a, b)| a >= b || b > e.ids.len()) {
         return Err("option has no tokens".into());
     }
     Ok(e)
+}
+
+#[cfg(test)]
+fn prepare(
+    vocab: &Vocab,
+    cfg: &Value,
+    state: &Value,
+    q: &Value,
+    images: &[RgbImage],
+) -> Result<Example, String> {
+    prepare_cached(vocab, cfg, state, q, images, &mut FrameCache::new())
 }
 
 struct EncSource<'a>(&'a dyn TensorSource);
@@ -820,33 +926,60 @@ struct Task {
     base: SafetensorSource,
     adapter: SafetensorSource,
     scale: f32,
+    image_values: Option<Vec<f32>>,
+}
+
+fn lora_scale(cfg: &Value) -> Result<f32, String> {
+    let rank = cfg["lora_rank"]
+        .as_u64()
+        .ok_or("missing or invalid UltraVBERT lora_rank")?;
+    let alpha = cfg["lora_alpha"]
+        .as_f64()
+        .ok_or("missing or invalid UltraVBERT lora_alpha")?;
+    if !alpha.is_finite() || (rank == 0 && alpha != 0.) || (rank > 0 && alpha <= 0.) {
+        return Err("invalid UltraVBERT LoRA rank/alpha combination".into());
+    }
+    let scale = if rank == 0 {
+        0.
+    } else {
+        (alpha / rank as f64) as f32
+    };
+    if !scale.is_finite() || (rank > 0 && scale == 0.) {
+        return Err("invalid UltraVBERT LoRA scale".into());
+    }
+    Ok(scale)
 }
 
 impl Task {
     fn load(root: &Path, config: &Value, name: &str) -> Result<Self, String> {
         let cfg = &config["tasks"][name];
-        let base = match cfg["backbone_file"].as_str() {
-            Some(file) => SafetensorSource::open(&[root.join(file)])?,
-            None => tensor::open_weights(root)?,
+        let scale = lora_scale(cfg)?;
+        let (rank, alpha) = if name == "decision" {
+            (0, 0)
+        } else {
+            (64, 128)
         };
+        if cfg["lora_rank"] != rank || cfg["lora_alpha"] != alpha {
+            return Err(format!(
+                "UltraVBERT {name} adapter requires pinned lora_rank={rank}, lora_alpha={alpha}"
+            ));
+        }
+        super::identity::verify_vision(root, config, name)?;
+        let base =
+            SafetensorSource::open(&[root.join(super::identity::vision_backbone(config, name)?)])?;
         let file = cfg["file"]
             .as_str()
             .ok_or("missing UltraVBERT adapter file")?;
         let adapter = SafetensorSource::open(&[root.join(file)])?;
-        let rank = cfg["lora_rank"].as_f64().unwrap_or(0.);
-        let scale = if rank > 0. {
-            cfg["lora_alpha"].as_f64().unwrap_or(0.) as f32 / rank as f32
-        } else {
-            0.
-        };
         Ok(Self {
             base,
             adapter,
             scale,
+            image_values: None,
         })
     }
     fn forward(
-        &self,
+        &mut self,
         config: &Value,
         e: &Example,
         image_id: u32,
@@ -857,16 +990,24 @@ impl Task {
         let source = tensor::OverlaySource::new(&base, &self.adapter);
         let hidden = dimension(&config["text_config"], "hidden_size")?;
         let mut embeddings = embed(&source, "enc.text_model.embed_tokens.weight", &e.ids)?;
-        let mut image_values = Vec::new();
-        for pixels in &e.frames {
-            image_values.extend(encode_vision(
-                &source,
-                config,
-                pixels,
-                pool,
-                trace.as_deref_mut(),
-            )?);
+        if self.image_values.is_none() || trace.is_some() {
+            let mut image_values = Vec::new();
+            for pixels in &e.frames {
+                image_values.extend(encode_vision(
+                    &source,
+                    config,
+                    pixels,
+                    pool,
+                    trace.as_deref_mut(),
+                )?);
+            }
+            // Task is request-local: its backbone, connector, edge and selected images are fixed.
+            self.image_values = Some(image_values);
         }
+        let image_values = self
+            .image_values
+            .as_ref()
+            .ok_or("missing image embeddings")?;
         let positions: Vec<_> = e
             .ids
             .iter()
@@ -1019,8 +1160,13 @@ pub(crate) fn predict(root: &Path, request: &Value, pool: &ComputePool) -> Resul
     }
     let ordered: Map<_, _> = questions
         .keys()
-        .map(|key| (key.clone(), answers.remove(key).unwrap()))
-        .collect();
+        .map(|key| {
+            answers
+                .remove(key)
+                .map(|a| (key.clone(), a))
+                .ok_or_else(|| format!("missing Vela3 answer for {key}"))
+        })
+        .collect::<Result<_, _>>()?;
     let config = read_json(&root.join("vela3v_config.json"))?;
     Ok(
         json!({"model":format!("vllm-sr/{}",config["name"].as_str().unwrap_or("vela3-fast-vision")),
@@ -1074,10 +1220,11 @@ fn predict_traced(
     };
     let state = &request["state"];
     let mut tasks = HashMap::new();
+    let mut frames = FrameCache::new();
     let mut answers = Map::new();
     let mut tokens = 0usize;
     for (key, question) in questions {
-        let e = match prepare(&vocab, &task_config, state, question, &images) {
+        let e = match prepare_cached(&vocab, &task_config, state, question, &images, &mut frames) {
             Ok(e) => e,
             Err(message) => {
                 answers.insert(key.clone(),json!({"type":question.get("type").unwrap_or(&Value::Null),"error":"invalid_question","message":message}));
@@ -1087,7 +1234,10 @@ fn predict_traced(
         if !tasks.contains_key(e.task) {
             tasks.insert(e.task, Task::load(root, &task_config, e.task)?);
         }
-        let logits = tasks[e.task].forward(&config, &e, vocab.image, pool, trace.as_deref_mut())?;
+        let logits = tasks
+            .get_mut(e.task)
+            .ok_or("missing vision task")?
+            .forward(&config, &e, vocab.image, pool, trace.as_deref_mut())?;
         answers.insert(key.clone(), answer(&e, &logits, &task_config)?);
         tokens += e.ids.len();
     }
@@ -1245,6 +1395,27 @@ fn region(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn lora_configuration_cannot_silently_disable_an_adapter() {
+        for cfg in [
+            serde_json::json!({"lora_rank":64}),
+            serde_json::json!({"lora_alpha":128}),
+            serde_json::json!({"lora_rank":64,"lora_alpha":0}),
+            serde_json::json!({"lora_rank":-1,"lora_alpha":128}),
+            serde_json::json!({"lora_rank":0,"lora_alpha":128}),
+        ] {
+            assert!(super::lora_scale(&cfg).is_err(), "{cfg}");
+        }
+        assert_eq!(
+            super::lora_scale(&serde_json::json!({"lora_rank":64,"lora_alpha":128})).unwrap(),
+            2.
+        );
+        assert_eq!(
+            super::lora_scale(&serde_json::json!({"lora_rank":0,"lora_alpha":0})).unwrap(),
+            0.
+        );
+    }
+
     use super::*;
     #[test]
     fn public_package_routes_text_adapters_and_vision_decisions() {
@@ -1286,19 +1457,27 @@ mod tests {
     }
 
     fn vocab() -> Vocab {
-        let tokenizer=tokenizers::Tokenizer::from_bytes(br#"{"version":"1.0","truncation":null,"padding":null,"added_tokens":[],"normalizer":null,"pre_tokenizer":{"type":"Whitespace"},"post_processor":null,"decoder":null,"model":{"type":"WordLevel","vocab":{"[UNK]":0,"?":1,"<|sep|>":2,"<image>":3},"unk_token":"[UNK]"}}"#).unwrap();
+        let mut tokenizer=tokenizers::Tokenizer::from_bytes(br#"{"version":"1.0","truncation":null,"padding":null,"added_tokens":[],"normalizer":null,"pre_tokenizer":{"type":"Whitespace"},"post_processor":null,"decoder":null,"model":{"type":"WordLevel","vocab":{"[UNK]":0,"?":1,"<|sep|>":2,"<image>":3},"unk_token":"[UNK]"}}"#).unwrap();
+        tokenizer.add_special_tokens(
+            ["<image>", "<fake_token_around_image>", "<global-img>"]
+                .map(|t| tokenizers::AddedToken::from(t, true)),
+        );
         Vocab {
             tokenizer,
             question: 1,
             sep: 2,
             image: 3,
+            bos: 0,
+            base_size: 4,
+            context: 32768,
+            image_seq_len: 64,
         }
     }
 
     #[test]
     fn questions_refuse_missing_criteria_and_excess_images_without_truncating() {
         let v = vocab();
-        let cfg = json!({"tasks":{"decision":{"max_images":3,"max_state_tokens":2,"edge":1024}}});
+        let cfg = json!({"tasks":{"decision":{"max_images":3,"max_state_tokens":2,"edge":1024},"span":{"edge":1024}}});
         assert!(prepare(
             &v,
             &cfg,
@@ -1368,7 +1547,8 @@ mod tests {
     #[test]
     fn contract_duplicate_choices_select_from_final_probabilities() {
         let v = vocab();
-        let cfg = json!({"tasks":{"decision":{}}});
+        let cfg =
+            json!({"tasks":{"decision":{"edge":1024,"max_images":3,"max_state_tokens":32768}}});
         let e = prepare(
             &v,
             &cfg,
@@ -1424,6 +1604,69 @@ mod tests {
             }
         );
         assert!(image_layout(0, 100, 1024).is_err());
+    }
+
+    #[test]
+    fn preprocessing_cache_reuses_pixels_and_checks_generated_tokens() {
+        let v = vocab();
+        assert!(v.prefix((2, 1)).unwrap_err().contains("<row_1_col_1>"));
+        let cfg = json!({"tasks":{"decision":{"edge":512,"max_images":3,"max_state_tokens":32768},"span":{"edge":512,"threshold":0.05}}});
+        let images = [RgbImage::new(3, 5), RgbImage::new(5, 3)];
+        let mut cache = FrameCache::new();
+        let a = prepare_cached(
+            &v,
+            &cfg,
+            &json!("text"),
+            &json!({"type":"noul"}),
+            &images,
+            &mut cache,
+        )
+        .unwrap();
+        let b = prepare_cached(
+            &v,
+            &cfg,
+            &json!("text"),
+            &json!({"type":"span"}),
+            &images,
+            &mut cache,
+        )
+        .unwrap();
+        assert_eq!(cache.len(), 2);
+        assert_eq!(a.frames.len(), 2);
+        assert_eq!(b.frames.len(), 1);
+        assert!(Arc::ptr_eq(&a.frames[0], &b.frames[0]));
+        assert!(!Arc::ptr_eq(&a.frames[0], &a.frames[1]));
+    }
+
+    #[test]
+    #[ignore = "requires RMI_VELA3_LAYOUT_FIXTURE from layout_oracle.py"]
+    fn extreme_aspect_preprocessing_matches_official_processor() {
+        let root = std::path::PathBuf::from(std::env::var("RMI_VELA3_LAYOUT_FIXTURE").unwrap());
+        let fixture = read_json(&root.join("layouts.json")).unwrap();
+        let vocab = Vocab::load(Path::new(fixture["source_root"].as_str().unwrap())).unwrap();
+        for row in fixture["layouts"].as_array().unwrap() {
+            let image = image::open(root.join(row["image"].as_str().unwrap()))
+                .unwrap()
+                .to_rgb8();
+            let (frames, grid) =
+                preprocess(&image, row["edge"].as_u64().unwrap() as usize).unwrap();
+            assert_eq!(json!([grid.0, grid.1]), row["grid"]);
+            assert_eq!(
+                json!(vocab
+                    .raw(&vocab.prefix(grid).unwrap(), true)
+                    .unwrap()
+                    .get_ids()),
+                row["input_ids"]
+            );
+            assert!(compare(
+                row["image"].as_str().unwrap(),
+                &frames.into_iter().flatten().collect::<Vec<_>>(),
+                &f32_file(&root.join(row["pixels"]["file"].as_str().unwrap())),
+                1e-6,
+                0.,
+                0.
+            ));
+        }
     }
 
     #[test]
@@ -1640,7 +1883,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
-                .map(|p| f32_file(&fixture.join(p["file"].as_str().unwrap())))
+                .map(|p| Arc::new(f32_file(&fixture.join(p["file"].as_str().unwrap()))))
                 .collect(),
             selections: manifest["selections"]
                 .as_array()
@@ -1668,19 +1911,34 @@ mod tests {
             eprintln!("public_system_one: {output}");
             compare_output("system_one", &output, &manifest["expected"]);
         } else {
-            let task = Task {
+            let mut task = Task {
                 base: SafetensorSource::open(&[manifest["backbone"].as_str().unwrap()]).unwrap(),
                 adapter: SafetensorSource::open(&[manifest["adapter"].as_str().unwrap()]).unwrap(),
                 scale: manifest["lora_scale"].as_f64().unwrap() as f32,
+                image_values: None,
             };
-            task.forward(
-                &manifest["config"],
-                &e,
-                manifest["config"]["image_token_id"].as_u64().unwrap() as u32,
-                &pool,
-                Some(&mut trace),
-            )
-            .unwrap();
+            let logits = task
+                .forward(
+                    &manifest["config"],
+                    &e,
+                    manifest["config"]["image_token_id"].as_u64().unwrap() as u32,
+                    &pool,
+                    Some(&mut trace),
+                )
+                .unwrap();
+            let cached = task.image_values.as_ref().unwrap().as_ptr();
+            assert_eq!(
+                task.forward(
+                    &manifest["config"],
+                    &e,
+                    manifest["config"]["image_token_id"].as_u64().unwrap() as u32,
+                    &pool,
+                    None
+                )
+                .unwrap(),
+                logits
+            );
+            assert_eq!(task.image_values.as_ref().unwrap().as_ptr(), cached);
         }
         let expected = manifest["checkpoints"].as_array().unwrap();
         assert_eq!(trace.len(), expected.len());

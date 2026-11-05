@@ -65,7 +65,12 @@ fn norm(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 pub(super) fn router_questions(root: &Path) -> Result<Map<String, Value>, String> {
-    Ok(read_json(&root.join("router_questions.json"))?["questions"]
+    let config = read_json(&root.join("vela3_config.json"))?;
+    let file = match config.get("router_questions_file") {
+        Some(value) => value.as_str().ok_or("invalid router_questions_file")?,
+        None => "router_questions.json",
+    };
+    Ok(read_json(&root.join(file))?["questions"]
         .as_object()
         .ok_or("missing router questions")?
         .iter()
@@ -133,6 +138,20 @@ fn parts(state: &Value, strict: bool) -> Result<Vec<(String, String)>, String> {
 }
 fn error(typ: &Value, kind: &str, message: impl AsRef<str>) -> Value {
     json!({"type":typ,"error":kind,"message":message.as_ref()})
+}
+
+fn validate_span_config(span: &Value) -> Result<(), String> {
+    for (name, value) in [
+        ("span.threshold", &span["threshold"]),
+        ("span.relation_threshold", &span["relation_threshold"]),
+        ("span.ner.threshold", &span["ner"]["threshold"]),
+        ("span.evidence.threshold", &span["evidence"]["threshold"]),
+    ] {
+        if !value.as_f64().is_some_and(f64::is_finite) {
+            return Err(format!("missing or invalid {name}"));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn predict(root: &Path, request: &Value, pool: &ComputePool) -> Result<Value, String> {
@@ -232,28 +251,16 @@ pub(crate) fn predict(root: &Path, request: &Value, pool: &ComputePool) -> Resul
         }
     }
     let mut input_tokens = 0;
-    let mut decision_answers = Map::new();
-    let mut decision_tokens = 0;
-    let mut decision_error = None;
-    for (key, q) in &decisions {
+    for (key, q) in decisions {
         match model.decision(state, q, pool) {
             Ok((a, n)) => {
-                decision_answers.insert((*key).clone(), a);
-                decision_tokens += n;
+                answers.insert(key.clone(), a);
+                input_tokens += n;
             }
             Err(e) => {
-                decision_error = Some(e);
-                break;
+                answers.insert(key.clone(), error(&q["type"], "invalid_question", e));
             }
         }
-    }
-    if let Some(e) = decision_error {
-        for (key, q) in decisions {
-            answers.insert(key.clone(), error(&q["type"], "unsupported", &e));
-        }
-    } else {
-        answers.extend(decision_answers);
-        input_tokens += decision_tokens;
     }
     for (target, task, group) in router_groups {
         match model.router(state, &target, task.as_deref(), &group, pool) {
@@ -281,8 +288,13 @@ pub(crate) fn predict(root: &Path, request: &Value, pool: &ComputePool) -> Resul
     }
     let ordered: Map<_, _> = questions
         .keys()
-        .map(|k| (k.clone(), answers.remove(k).unwrap()))
-        .collect();
+        .map(|k| {
+            answers
+                .remove(k)
+                .map(|answer| (k.clone(), answer))
+                .ok_or_else(|| format!("missing Vela3 answer for {k}"))
+        })
+        .collect::<Result<_, _>>()?;
     Ok(
         json!({"model":format!("vllm-sr/{}",model.runtime["name"].as_str().unwrap_or("vela3-fast")),"answers":ordered,"usage":{"input_tokens":input_tokens,"output_tokens":0}}),
     )
@@ -295,6 +307,7 @@ impl<'a> FastModel<'a> {
         if config["model_type"] != "ultrabert" || runtime["format"] != "vela3-encoder/1" {
             return Err("Vela3 text adapters require vela3-encoder/1 / ultrabert".into());
         }
+        validate_span_config(&runtime["span"])?;
         let routers = router_questions(root)?;
         let mut tokenizer = read_json(&root.join("tokenizer.json"))?;
         if let Some(added) = tokenizer["added_tokens"].as_array_mut() {
@@ -408,7 +421,7 @@ impl<'a> FastModel<'a> {
         })?);
         let pe = ids.len();
         ids.push(self.boundary("eos_token_id")?);
-        let max = self.config["decision"]["max_len"].as_u64().unwrap_or(32768) as usize;
+        let max = ultrabert::integer(&self.config["decision"], "max_len")?;
         if ids.len() > max {
             return Err(format!("input longer than the {max}-token context"));
         }
@@ -530,7 +543,7 @@ impl<'a> FastModel<'a> {
                 &schema,
                 &questions,
                 &[],
-                8192,
+                ultrabert::integer(&self.runtime["span"]["window"], "max_len")?,
                 &adapter,
                 pool,
             )?;
@@ -673,9 +686,12 @@ impl<'a> FastModel<'a> {
             }
         }
         if label_set.is_none() && !evidence {
-            let route = std::env::var("VELA3_ENTITY_ROUTE")
-                .ok()
-                .unwrap_or_else(|| sp["entity_route"].as_str().unwrap_or("ner").into());
+            let route = sp["entity_route"]
+                .as_str()
+                .ok_or("missing span.entity_route")?;
+            if !matches!(route, "ner" | "span") {
+                return Err("invalid span.entity_route".into());
+            }
             let task = if relation {
                 Some("relation")
             } else if names_only && route == "ner" {
@@ -713,9 +729,9 @@ impl<'a> FastModel<'a> {
         }
         let adapter = self.adapter(&file)?;
         let max_len = if evidence {
-            sp["evidence"]["max_len"].as_u64().unwrap_or(32768) as usize
+            ultrabert::integer(&sp["evidence"], "max_len")?
         } else {
-            sp["window"]["max_len"].as_u64().unwrap_or(8192) as usize
+            ultrabert::integer(&sp["window"], "max_len")?
         };
         let raw = self.schema_raw(
             &parts,
@@ -780,7 +796,9 @@ impl<'a> FastModel<'a> {
                     raw.target_tokens
                 );
             } else {
-                threshold = sp["evidence"]["threshold"].as_f64().unwrap_or(0.5);
+                threshold = sp["evidence"]["threshold"]
+                    .as_f64()
+                    .ok_or("missing evidence threshold")?;
                 why = "evidence question".into();
             }
         } else if head == "relation" {
@@ -790,13 +808,17 @@ impl<'a> FastModel<'a> {
                 .ok_or("missing relation threshold")?;
             why = format!("relation question ({form})");
         } else if relation {
-            threshold = sp["relation_threshold"].as_f64().unwrap_or(0.55);
+            threshold = sp["relation_threshold"]
+                .as_f64()
+                .ok_or("missing relation threshold")?;
             why = "relation question".into();
         } else if head == "ner" {
-            threshold = sp["ner"]["threshold"].as_f64().unwrap_or(0.6);
+            threshold = sp["ner"]["threshold"]
+                .as_f64()
+                .ok_or("missing NER threshold")?;
             why = "open labels, names only".into();
         } else {
-            threshold = sp["threshold"].as_f64().unwrap_or(0.6);
+            threshold = sp["threshold"].as_f64().ok_or("missing span threshold")?;
             why = "open labels".into();
         }
         let threshold = match q.get("threshold") {
@@ -1362,6 +1384,85 @@ fn window_ranges(n: usize, length: usize, overlap: usize) -> Vec<(usize, usize)>
 mod tests {
     use super::*;
     #[test]
+    fn invalid_decision_does_not_discard_valid_answers_or_usage() {
+        let root = std::env::temp_dir().join(format!(
+            "vela3-fast-errors-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let config = json!({"model_type":"ultrabert","hidden_size":2,"num_hidden_layers":0,
+            "num_attention_heads":1,"bos_token_id":0,"eos_token_id":0,
+            "decision":{"max_len":16,"marker_ids":{"[Q]":1,"[O]":1,"[SEP_SCHEMA]":1,"[SEG_user]":1}}});
+        for (file, value) in [
+            ("config.json", config),
+            (
+                "vela3_config.json",
+                json!({"format":"vela3-encoder/1","name":"tiny","span":{"threshold":0.6,"relation_threshold":0.5,"ner":{"threshold":0.6},"evidence":{"threshold":0.5}}}),
+            ),
+            ("router_questions.json", json!({"questions":{}})),
+            (
+                "tokenizer.json",
+                json!({"added_tokens":[],"model":{"type":"WordLevel","vocab":{"[UNK]":0,"x":1},"unk_token":"[UNK]"}}),
+            ),
+        ] {
+            std::fs::write(root.join(file), value.to_string()).unwrap();
+        }
+        let mut header = Map::new();
+        let mut bytes = Vec::new();
+        for (name, shape, value) in [
+            ("encoder.embed_tokens.weight", vec![2, 2], 1f32),
+            ("encoder.norm.weight", vec![2], 1.),
+            ("norm.weight", vec![2], 1.),
+            ("norm.bias", vec![2], 0.),
+            ("w_p.weight", vec![2, 2], 1.),
+            ("w_q.weight", vec![2, 2], 1.),
+            ("w_o.weight", vec![2, 2], 1.),
+            ("cls_mlp.0.weight", vec![2, 2], 1.),
+            ("cls_mlp.3.weight", vec![1, 2], 1.),
+            ("log_tau", vec![1], 0.),
+        ] {
+            let start = bytes.len();
+            for _ in 0..shape.iter().product::<usize>() {
+                bytes.extend(value.to_le_bytes());
+            }
+            header.insert(
+                name.into(),
+                json!({"dtype":"F32","shape":shape,"data_offsets":[start,bytes.len()]}),
+            );
+        }
+        let header = serde_json::to_vec(&header).unwrap();
+        let mut file = (header.len() as u64).to_le_bytes().to_vec();
+        file.extend(header);
+        file.extend(bytes);
+        std::fs::write(root.join("model.safetensors"), file).unwrap();
+        let good = json!({"type":"noul","instructions":"x"});
+        let request = json!({"state":"x","questions":{"first":good,"bad":{"type":"choice",
+            "criteria":(0..20).map(|i|i.to_string()).collect::<Vec<_>>()},"last":good}});
+        let pool = ComputePool::new(2);
+        let result = predict(&root, &request, &pool).unwrap();
+        let single = predict(&root, &json!({"state":"x","questions":{"one":good}}), &pool).unwrap();
+        assert_eq!(result["answers"]["first"], single["answers"]["one"]);
+        assert_eq!(result["answers"]["last"], single["answers"]["one"]);
+        assert_eq!(result["answers"]["bad"]["error"], "invalid_question");
+        assert_eq!(
+            result["usage"]["input_tokens"].as_u64().unwrap(),
+            2 * single["usage"]["input_tokens"].as_u64().unwrap()
+        );
+        assert_eq!(
+            result["answers"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect::<Vec<_>>(),
+            ["first", "bad", "last"]
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn json_state_and_descriptions_keep_python_exponents() {
         let state = json!({"price":1e-7,"upper":1e20,"note":"中文"});
         let expected = r#"{"price":1e-07,"upper":1e+20,"note":"中文"}"#;
@@ -1374,6 +1475,23 @@ mod tests {
             string_options(&json!({"value":state})).unwrap(),
             [("value".into(), expected.into())]
         );
+    }
+    #[test]
+    fn missing_thresholds_are_configuration_errors() {
+        let valid = json!({"threshold":0.6,"relation_threshold":0.5,"ner":{"threshold":0.6},"evidence":{"threshold":0.5}});
+        validate_span_config(&valid).unwrap();
+        for pointer in [
+            "/threshold",
+            "/relation_threshold",
+            "/ner/threshold",
+            "/evidence/threshold",
+        ] {
+            let mut bad = valid.clone();
+            *bad.pointer_mut(pointer).unwrap() = Value::Null;
+            assert!(validate_span_config(&bad)
+                .unwrap_err()
+                .contains("threshold"));
+        }
     }
     #[test]
     fn assembly_shrinks_unprotected_context_before_windowing_target() {
@@ -1393,6 +1511,25 @@ mod tests {
         assert_eq!(r.ranges["answer"].2, 20);
         assert_eq!(r.ranges["user"].2, 13);
         assert!(!r.truncated);
+    }
+    #[test]
+    fn assembly_preserves_the_official_single_shrink_role_contract() {
+        let segments = vec![
+            Segment {
+                role: "user".into(),
+                ids: vec![1; 2],
+            },
+            Segment {
+                role: "context".into(),
+                ids: vec![2; 100],
+            },
+            Segment {
+                role: "answer".into(),
+                ids: vec![3; 20],
+            },
+        ];
+        let markers = json!({"[SEP_SCHEMA]":8,"[SEG_user]":9,"[SEG_context]":10,"[SEG_answer]":11});
+        assert!(assemble(&[4, 5], &segments, &["answer".into()], 40, 0, 0, &markers).is_err());
     }
     #[test]
     fn target_windows_cover_tail_and_limit_overlap_to_quarter() {
@@ -1461,8 +1598,21 @@ mod oracle_tests {
                 .zip(&expected)
                 .map(|(a, b)| (a - b).abs())
                 .fold(0f32, f32::max);
+            let peak = expected.iter().map(|v| v.abs()).fold(0f32, f32::max);
+            let rmse = (hidden
+                .iter()
+                .zip(&expected)
+                .map(|(a, b)| f64::from(a - b).powi(2))
+                .sum::<f64>()
+                / hidden.len() as f64)
+                .sqrt();
+            let rms = (expected.iter().map(|&v| f64::from(v).powi(2)).sum::<f64>()
+                / expected.len() as f64)
+                .sqrt();
+            eprintln!("{} hidden: max_abs={max_error:.9e} ref_peak={peak:.9e} rmse={rmse:.9e} ref_rms={rms:.9e}", row["key"]);
             assert!(
-                max_error < 1e-3,
+                // Shared RMSNorm uses a SIMD/f64 reduction; bound both outliers and aggregate error.
+                max_error <= 1e-3 + 1e-5 * peak && rmse <= 1e-5 + 1e-4 * rms,
                 "{} hidden max error {max_error}",
                 row["key"]
             );

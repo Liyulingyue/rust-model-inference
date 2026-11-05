@@ -4,6 +4,7 @@ use super::{
     tensor,
     text::{self, python_json},
 };
+use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::format::safetensors::SafetensorSource;
 use crate::prompt::jinja::{ChatMessage, JinjaChatTemplate, SpecialTokens};
@@ -142,20 +143,30 @@ struct DecisionUsage {
 }
 
 impl DecisionUsage {
-    fn add(&mut self, length: usize, state: Option<usize>, adapter: Option<(&str, bool)>) {
-        self.input += length;
+    fn add(
+        &mut self,
+        length: usize,
+        state: Option<usize>,
+        adapter: Option<(&str, bool)>,
+    ) -> Result<(), String> {
+        if state.is_some_and(|s| s > length) {
+            return Err("d3 shared state exceeds prompt length".into());
+        }
+        let mut cost = length;
         if let Some(state) = state {
             // Turbo reports the shared base state once, plus each gated adapter's extra pass.
             if !self.shared.insert(None) {
-                self.input -= state;
+                cost -= state;
             }
             if let Some((name, noncausal)) = adapter {
-                self.input += length;
+                cost = cost.checked_add(length).ok_or("d3 usage overflow")?;
                 if !noncausal && !self.shared.insert(Some(name.to_owned())) {
-                    self.input -= state;
+                    cost -= state;
                 }
             }
         }
+        self.input = self.input.checked_add(cost).ok_or("d3 usage overflow")?;
+        Ok(())
     }
 }
 
@@ -176,6 +187,7 @@ struct Model<'a> {
 impl<'a> Model<'a> {
     fn load(root: &'a Path, base: &Path, pool: Arc<ComputePool>) -> Result<Self, String> {
         let config = read_json(&root.join("vela3_config.json"))?;
+        super::identity::verify_d3(&config, base)?;
         let decision = read_json(&base.join("decision_config.json"))?;
         if decision["format_id"] != "d3-code-readout-v1" {
             return Err("unsupported d3 prompt format".into());
@@ -193,7 +205,11 @@ impl<'a> Model<'a> {
         let token_config = read_json(&base.join("tokenizer_config.json"))?;
         let template_file = base.join("chat_template.jinja");
         let template = if template_file.is_file() {
-            std::fs::read_to_string(&template_file).map_err(|e| e.to_string())?
+            let template = std::fs::read_to_string(&template_file).map_err(|e| e.to_string())?;
+            if token_config["chat_template"].as_str() != Some(&template) {
+                return Err("d3 chat template differs from its pinned tokenizer_config".into());
+            }
+            template
         } else {
             token_config["chat_template"]
                 .as_str()
@@ -404,7 +420,7 @@ impl<'a> Model<'a> {
                 .as_deref()
                 .filter(|_| images.is_none())
                 .map(|name| (name, self.config["decisions"]["attention"] == "noncausal")),
-        );
+        )?;
         Ok(answer)
     }
 
@@ -907,7 +923,11 @@ fn decision_answer(q: &Value, keys: &[String], logits: &[f32]) -> Result<Value, 
     if q["type"] == "score" {
         let legend: Map<_, _> = keys
             .iter()
-            .zip(q["criteria"].as_array().unwrap())
+            .zip(
+                q["criteria"]
+                    .as_array()
+                    .ok_or("score criteria must be an array")?,
+            )
             .map(|(k, v)| {
                 (
                     k.clone(),
@@ -1154,6 +1174,16 @@ fn span_head(
         .ok_or("invalid span key shape")?;
     let mut out = vec![0.; nw * nl];
     let mut mlp = vec![0.; d];
+    let v = tensor::values(source, "v.weight")?;
+    let bias = if source.tensor_info("v.bias").is_some() {
+        let bias = tensor::values(source, "v.bias")?;
+        if bias.len() != 1 {
+            return Err("invalid span v.bias shape".into());
+        }
+        bias[0]
+    } else {
+        0.
+    };
     for wi in 0..nw {
         for li in 0..nl {
             let bil = crate::ops::dot_f32(&k[wi * d..(wi + 1) * d], &q[li * d..(li + 1) * d], d)
@@ -1161,7 +1191,7 @@ fn span_head(
             for j in 0..d {
                 mlp[j] = crate::ops::gelu_erf(m[wi * d + j] + n[li * d + j]);
             }
-            out[wi * nl + li] = bil + tensor::linear(source, "v.weight", &mlp, 1, pool)?[0];
+            out[wi * nl + li] = bil + (crate::ops::dot_f32(&v, &mlp, d) + bias);
         }
     }
     Ok(out)
@@ -1344,7 +1374,7 @@ pub(crate) fn predict(
         answers.insert(id.clone(), answer);
     }
     Ok(
-        json!({"model":format!("vllm-sr/{}",model.config["size"]["name"].as_str().unwrap_or("Vela-3.0-4B")),"answers":answers,"usage":{"input_tokens":usage.input,"output_tokens":0}}),
+        json!({"model":format!("vllm-sr/{}",model.config["size"]["name"].as_str().ok_or("missing Vela3 size.name")?),"answers":answers,"usage":{"input_tokens":usage.input,"output_tokens":0}}),
     )
 }
 
@@ -1362,7 +1392,7 @@ mod tests {
             (132, Some(("decision", true))),
             (113, Some(("decision_df", true))),
         ] {
-            usage.add(length, Some(66), adapter);
+            usage.add(length, Some(66), adapter).unwrap();
         }
         // Pinned official turbo request, including both extra noncausal router passes.
         assert_eq!(usage.input, 510);
@@ -1370,12 +1400,23 @@ mod tests {
         let mut prefix = DecisionUsage::default();
         let mut plain = DecisionUsage::default();
         for length in [108, 110] {
-            prefix.add(length, Some(66), Some(("decision", false)));
-            plain.add(length, None, Some(("decision", true)));
+            prefix
+                .add(length, Some(66), Some(("decision", false)))
+                .unwrap();
+            plain.add(length, None, Some(("decision", true))).unwrap();
         }
         assert_eq!(prefix.input, 304);
         assert_eq!(plain.input, 218);
         assert_eq!(DecisionUsage::default().input, 0);
+    }
+    #[test]
+    fn usage_rejects_invalid_shared_lengths_and_overflow() {
+        let mut usage = DecisionUsage::default();
+        assert!(usage.add(1, Some(2), None).is_err());
+        assert_eq!(usage.input, 0);
+        usage.add(usize::MAX, None, None).unwrap();
+        assert!(usage.add(1, None, None).is_err());
+        assert_eq!(usage.input, usize::MAX);
     }
 
     #[test]

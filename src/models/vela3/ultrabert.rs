@@ -196,7 +196,7 @@ fn encode_impl(
     }
     norm(&format!("{prefix}norm.weight"), &x)
 }
-fn integer(config: &Value, name: &str) -> Result<usize, String> {
+pub(super) fn integer(config: &Value, name: &str) -> Result<usize, String> {
     config[name]
         .as_u64()
         .and_then(|n| usize::try_from(n).ok())

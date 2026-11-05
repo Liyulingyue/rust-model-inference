@@ -198,7 +198,11 @@ fn decode_profile(
         maxima[i] = row[best];
         labels[i] = (row[best] > threshold).then_some(best);
         let first = a + text[a..b].len() - text[a..b].trim_start().len();
-        token_units[i] = units.iter().position(|&(s, e)| s <= first && first < e);
+        let unit = units.partition_point(|&(_, end)| end <= first);
+        token_units[i] = units
+            .get(unit)
+            .filter(|&&(start, end)| start <= first && first < end)
+            .map(|_| unit);
     }
     let mut i = 0;
     while i < offsets.len() {
@@ -265,6 +269,12 @@ fn decode_profile(
         runs.push(run);
     }
     let mut spans = Vec::new();
+    let ordered_ends = offsets.windows(2).all(|p| p[0].1 <= p[1].1);
+    let char_bytes: Vec<_> = text
+        .char_indices()
+        .map(|(i, _)| i)
+        .chain(std::iter::once(text.len()))
+        .collect();
     for (c, a, b, indices) in runs {
         let trimmed = text[a..b].trim_matches(|ch: char| ch.is_whitespace() || EDGE.contains(ch));
         if trimmed.is_empty() {
@@ -301,13 +311,19 @@ fn decode_profile(
         let trimmed = &text[start..end];
         let mut score = 0.0f64;
         let mut count = 0;
-        for (i, &(s, e)) in offsets.iter().enumerate() {
+        let hi = offsets.partition_point(|&(s, _)| s < end);
+        let lo = if ordered_ends {
+            offsets[..hi].partition_point(|&(_, e)| e <= start)
+        } else {
+            0
+        };
+        for (j, &(s, e)) in offsets[lo..hi].iter().enumerate() {
             if s < end && e > start {
-                score += probs[i * names.len() + c] as f64;
+                score += probs[(lo + j) * names.len() + c] as f64;
                 count += 1;
             }
         }
-        let mut span = json!({"start":text[..start].chars().count(),"end":text[..end].chars().count(),"label":names[c],"text":trimmed,"score":if count==0 {0.0} else {score/count as f64}});
+        let mut span = json!({"start":char_bytes.partition_point(|&p|p<start),"end":char_bytes.partition_point(|&p|p<end),"label":names[c],"text":trimmed,"score":if count==0 {0.0} else {score/count as f64}});
         if fast {
             let probability = indices
                 .iter()
@@ -345,6 +361,25 @@ fn url_unit_end(text: &str, prefix: usize, trail: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn span_scores_keep_overlapping_offsets_and_unicode_boundaries() {
+        let output = decode_spans(
+            "ab cd",
+            &[(0, 5), (1, 2), (3, 5)],
+            &[0.9, 0.1, 0.1, 0.99, 0.7, 0.2],
+            &["a".into(), "b".into()],
+            0.5,
+        )
+        .unwrap();
+        assert_eq!(output[0]["text"], "ab");
+        assert_eq!(output[1]["text"], "cd");
+        assert!((output[0]["score"].as_f64().unwrap() - 0.545).abs() < 1e-6);
+        assert!((output[1]["score"].as_f64().unwrap() - 0.8).abs() < 1e-6);
+        let output =
+            decode_spans("中 A", &[(0, 3), (4, 5)], &[0.9, 0.8], &["x".into()], 0.5).unwrap();
+        assert_eq!(output[0]["start"], 0);
+        assert_eq!(output[0]["end"], 3);
+    }
     use serde_json::json;
 
     #[test]

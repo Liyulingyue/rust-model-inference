@@ -2,6 +2,7 @@
 pub(crate) mod d3;
 pub(crate) mod decoder;
 pub(crate) mod fast;
+mod identity;
 pub(crate) mod tensor;
 pub(crate) mod text;
 pub(crate) mod ultrabert;

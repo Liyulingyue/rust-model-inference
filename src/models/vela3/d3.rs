@@ -924,7 +924,9 @@ impl D3Encoder {
         let v = self.project(&format!("{p}.self_attn.v_proj"), x, rows, adapter)?;
         self.rotary(&mut q, positions, c.heads);
         self.rotary(&mut k, positions, c.kv_heads);
-        let mut out = attention(&q, &k, &v, rows, c.heads, c.kv_heads, c.head_dim, mask)?;
+        let mut out = attention(
+            &q, &k, &v, rows, c.heads, c.kv_heads, c.head_dim, mask, &self.pool,
+        )?;
         self.cast(&mut out);
         for (out, gate) in out.iter_mut().zip(gate) {
             *out = self.rounded(*out * self.rounded(1. / (1. + (-gate).exp())));
@@ -1129,6 +1131,7 @@ fn attention(
     kv_heads: usize,
     dim: usize,
     mask: Mask,
+    pool: &ComputePool,
 ) -> Result<Vec<f32>, String> {
     if heads == 0
         || kv_heads == 0
@@ -1147,32 +1150,46 @@ fn attention(
     }
     let mut out = vec![0.; q.len()];
     let scale = (dim as f32).sqrt().recip();
-    let mut scores = vec![0.; rows];
-    for row in 0..rows {
-        let count = match mask {
-            Mask::Causal => row + 1,
-            Mask::Prefix(end) if row < end => end,
-            _ => rows,
+    let address = out.as_mut_ptr() as usize;
+    pool.compute(|ith, nth| {
+        let start = rows * ith / nth;
+        let end = rows * (ith + 1) / nth;
+        let width = heads * dim;
+        // Each worker owns a disjoint band of complete output rows; reductions stay in order.
+        let output = unsafe {
+            std::slice::from_raw_parts_mut(
+                (address as *mut f32).add(start * width),
+                (end - start) * width,
+            )
         };
-        for head in 0..heads {
-            let q_start = (row * heads + head) * dim;
-            let kv_head = head / (heads / kv_heads);
-            for (key, score) in scores[..count].iter_mut().enumerate() {
-                let k_start = (key * kv_heads + kv_head) * dim;
-                *score =
-                    dot_f32(&q[q_start..q_start + dim], &k[k_start..k_start + dim], dim) * scale;
-            }
-            softmax_inplace(&mut scores[..count]);
-            for (key, &prob) in scores[..count].iter().enumerate() {
-                let v_start = (key * kv_heads + kv_head) * dim;
-                vec_mad_f32(
-                    &mut out[q_start..q_start + dim],
-                    &v[v_start..v_start + dim],
-                    prob,
-                );
+        let mut scores = vec![0.; rows];
+        for row in start..end {
+            let count = match mask {
+                Mask::Causal => row + 1,
+                Mask::Prefix(end) if row < end => end,
+                _ => rows,
+            };
+            for head in 0..heads {
+                let q_start = (row * heads + head) * dim;
+                let kv_head = head / (heads / kv_heads);
+                for (key, score) in scores[..count].iter_mut().enumerate() {
+                    let k_start = (key * kv_heads + kv_head) * dim;
+                    *score = dot_f32(&q[q_start..q_start + dim], &k[k_start..k_start + dim], dim)
+                        * scale;
+                }
+                softmax_inplace(&mut scores[..count]);
+                for (key, &prob) in scores[..count].iter().enumerate() {
+                    let v_start = (key * kv_heads + kv_head) * dim;
+                    vec_mad_f32(
+                        &mut output[(row - start) * width + head * dim
+                            ..(row - start) * width + (head + 1) * dim],
+                        &v[v_start..v_start + dim],
+                        prob,
+                    );
+                }
             }
         }
-    }
+    });
     Ok(out)
 }
 
@@ -1572,14 +1589,21 @@ mod tests {
         let q = [1., 0., 1., 0.];
         let k = [1., 0., 0., 1.];
         let v = [2., 0., 0., 4.];
-        let full = attention(&q, &k, &v, 2, 1, 1, 2, Mask::Full).unwrap();
-        let causal = attention(&q, &k, &v, 2, 1, 1, 2, Mask::Causal).unwrap();
-        let prefix = attention(&q, &k, &v, 2, 1, 1, 2, Mask::Prefix(1)).unwrap();
+        let pool = ComputePool::new(2);
+        let full = attention(&q, &k, &v, 2, 1, 1, 2, Mask::Full, &pool).unwrap();
+        let causal = attention(&q, &k, &v, 2, 1, 1, 2, Mask::Causal, &pool).unwrap();
+        let prefix = attention(&q, &k, &v, 2, 1, 1, 2, Mask::Prefix(1), &pool).unwrap();
         assert!(full[1] > 1., "the first query must see the future value");
         assert_eq!(&causal[..2], &[2., 0.]);
         assert_eq!(&prefix[..2], &[2., 0.]);
         assert_eq!(&prefix[2..], &full[2..]);
-        assert!(attention(&q, &k, &v, 2, 1, 1, 2, Mask::Prefix(2)).is_err());
+        assert!(attention(&q, &k, &v, 2, 1, 1, 2, Mask::Prefix(2), &pool).is_err());
+        for mask in [Mask::Full, Mask::Causal, Mask::Prefix(1)] {
+            assert_eq!(
+                attention(&q, &k, &v, 2, 1, 1, 2, mask, &pool).unwrap(),
+                attention(&q, &k, &v, 2, 1, 1, 2, mask, &ComputePool::new(1)).unwrap()
+            );
+        }
     }
 
     #[test]

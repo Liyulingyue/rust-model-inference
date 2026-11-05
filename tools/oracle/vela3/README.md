@@ -223,3 +223,21 @@ Checkpoint Oracle 检查名称、顺序、shape、次数、Token IDs、mRoPE 和
 - d3 图像：75 个展开 tokens 和三轴位置精确一致。F32 视觉塔相对官方 F32 投影 max `0.005106`、RMSE `0.000204`；对官方默认 BF16 塔则扩大为最终 hidden max `2.03125`、RMSE `0.10997`、logits max `0.08461`。样本 argmax 一致，但 **BF16 逐层门槛未通过**，未放宽门槛将其记为通过。
 
 mini/turbo 的当前 ModelScope 底座与 Vela 固定版本不一致，不能用当前镜像冒充固定 checkpoint。两者均按授权使用官方固定 HF 权重，通过官方 HF 接口或 hf-mirror 定位固定版本的官方 CDN 地址，实际数据从官方 CDN 传输并校验完整 SHA；执行的 d3 源码 SHA 与固定 manifest 匹配，未使用目录中的新版 wrapper。mini/flash/turbo 的非因果 BF16 内部激活门槛以及 d3 图像门槛仍未通过；真实请求与 F32 诊断的通过结论不能替代这些失败记录。GPU、GGUF、HTTP server、视频、长上下文性能、跨平台与完整公开基准均未执行。
+
+
+## 2026-11-05 review 修复复核
+
+[逐项记录](review-2026-11-05.md) 区分已修复缺陷、官方契约和未验证边界。运行时直接使用 snapshots.json 的固定哈希校验 d3 底座与视觉任务配对；没有跳过校验的生产开关。归一化切到仓库算子后仍沿用浮点容差，不要求有损路径逐位相同。
+
+新增宽高比预处理 Oracle 不加载权重，继续执行固定版本官方处理器，覆盖 6 种宽高比 × 2 个 edge：
+
+```bash
+.venv/bin/python tools/oracle/vela3/layout_oracle.py \
+  --root models/vela3-fast-vision --out .codex/vela3/layouts
+RMI_VELA3_LAYOUT_FIXTURE=.codex/vela3/layouts \
+  cargo +1.98.1 test --locked --profile release-fast --lib \
+  models::vela3::vision::tests::extreme_aspect_preprocessing_matches_official_processor \
+  -- --exact --ignored --nocapture
+```
+
+输入 IDs、grid、路由、usage 精确检查；预处理像素 `atol=1e-6`；任务 logits 和请求概率沿用原记录容差。fast hidden 改用峰值与 RMSE 双门槛：`max_abs <= 1e-3 + 1e-5*ref_peak` 且 `RMSE <= 1e-5 + 1e-4*ref_RMS`。这替代原先单独的 `max_abs < 1e-3`，原因和实测差异写在逐项记录中；BF16 门槛未变。单一主机的 SIMD/标量及 1/4 线程检查不构成新硬件平台或 32K 吞吐证明。

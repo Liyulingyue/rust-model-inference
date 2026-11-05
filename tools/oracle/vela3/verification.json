@@ -5369,5 +5369,509 @@
       "Existing noncausal BF16 and d3-image numerical limits remain; the PR stays draft.",
       "No GPU/Auto, HTTP/JEV, GGUF, quality benchmark or performance validation is added."
     ]
+  },
+  "review_fixes_2026_11_05": {
+    "client_date": "2026-11-05",
+    "verified_at_utc": "2026-11-05T02:28:09.330835+00:00",
+    "baseline_commit": "4002d8217d2fe4492da72a1bc3872982fdad0ace",
+    "environment": {
+      "platform": "macOS arm64",
+      "cpu": "Apple M3 Max",
+      "rust": "1.98.1",
+      "profile": "release-fast",
+      "cli_threads": 4,
+      "configurations": [
+        "default SIMD",
+        "RMI_SCALAR=1 for fast-floats and lite",
+        "1/2 thread full-attention portable comparison"
+      ]
+    },
+    "report": "tools/oracle/vela3/review-2026-11-05.md",
+    "reference_manifest_sha256": "630393a780ae9886997e5065c33e37a2ca388591df6aba7d3b7069516bf1ace3",
+    "implementation_sha256": {
+      "src/models/vela3/d3.rs": "8085c02f9837d382657e39cfad02c81c9c5f49825d8114b7dfc4c499ff56b243",
+      "src/models/vela3/decoder.rs": "ba7eb53394f1617a6e267ed82907a272716184b153230be150711c38a2470430",
+      "src/models/vela3/fast.rs": "dd9f097b44ab078297f71ae8d33362c6b6293c9ed73287c16f8a6359f2cb1b30",
+      "src/models/vela3/identity.rs": "c12e9988e1008c802b24b178723f12ad61b30786d6be61efd5738a3c5a5b5117",
+      "src/models/vela3/mod.rs": "5d5375b19f73a312523de1aa8cd54bdc907cc66b7e88aae57a30120416aa8bf7",
+      "src/models/vela3/tensor.rs": "5c797db535eb7e28e2a4d6c623bb9d3a90cf343bc35f470a1518d774d2c032b0",
+      "src/models/vela3/text.rs": "36551dcaba4a6be3195012e87e6870519b9ba33ca3271f4bc8bd374e1ef4e4b9",
+      "src/models/vela3/ultrabert.rs": "5aee77abf14f915848ae8338acc70fec245c60315b80aa104462f7d8549ad0af",
+      "src/models/vela3/vision.rs": "8a1ca42d0495b722ae2cba7ccffde7f78053825ff9eea4ae4de80189015a2c40"
+    },
+    "fixes": {
+      "M1": "Per-question decision success/error, invalid_question, ordered answers and successful-question usage; valid-invalid-valid portable model regression.",
+      "M2": "Fixed vision backbone/adapter pairing, sizes and full SHA256; no implicit fallback. Explicit raw + backbone.model remains supported for official span/OCR packages.",
+      "M3": "Required valid rank/alpha and finite nonzero scale for rank>0; pinned per-task rank/alpha checked.",
+      "M4": "Read base.repo_id/revision, verify pinned config/tokenizer/all weight shards/readout and actual shard selection; independently supplied chat template must match verified tokenizer_config.",
+      "S1": "Hoist span v weights/bias outside token-label loops; use existing dot_f32.",
+      "S2": "Request-local preprocessing per image/edge and image embeddings per task; trace preserves checkpoint evaluation.",
+      "S3": "Required finite span thresholds; missing context lengths fail.",
+      "S4": "Parallel full-attention output rows using ComputePool, keeping row reduction order. Quadratic complexity and delta recurrence unchanged.",
+      "S5": "Ignore Python opt-in VELA3_ENTITY_ROUTE in Rust; use validated package configuration.",
+      "S6_S7": "Tokenizer/config-driven IDs, vocabulary/context/image sequence length, configured router file and response name; validate fixed architecture geometry and generated added tokens.",
+      "S8": "Use shared norm ops, optimize unit/span offset lookup preserving overlapping ends and Unicode, replace input-related unwraps and check usage arithmetic."
+    },
+    "intentionally_preserved": [
+      "Official offset-keyed mean logits before sigmoid and strict finite probability thresholds, including values above 1.",
+      "Official single shrink role, 512 tiles/64 image tokens/8x8 heatmap and fixed visual unsupported/ocr_error heads; other span labels use text wrapper.",
+      "Pinned dense d3 config has no expert/sink/sliding-window declaration or weights; no support claim for other Qwen3.5 checkpoints.",
+      "d3 Python ties-to-even resize and fixed pixel bounds; existing Qwen35 position interpolation remains in use."
+    ],
+    "portable": {
+      "passed": 53,
+      "failed": 0,
+      "ignored": 7,
+      "new_ordinary_tests": 10,
+      "new_fixture_tests": 1,
+      "command": "cargo +1.98.1 test --locked --profile release-fast --lib models::vela3"
+    },
+    "full_library": {
+      "before": {
+        "passed": 1360,
+        "failed": 20,
+        "ignored": 94
+      },
+      "after": {
+        "passed": 1370,
+        "failed": 20,
+        "ignored": 95
+      },
+      "failure_names_identical": true,
+      "failure_names": [
+        "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+        "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+        "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+        "models::clm::tests::matches_reference_golden_vectors",
+        "models::clm::tests::rejects_wrong_embedding_width",
+        "models::diffusion::z_image::text::tests::qwen_attention_softmax_matches_the_pinned_ggml_neon_reduction",
+        "models::diffusion::z_image::text::tests::silu_mul_inplace_matches_pinned_ggml_neon_activation",
+        "models::diffusion::z_image::vae::tests::silu_matches_pinned_ggml_neon_vector_path",
+        "models::funasr::encoder::parity_tests::fsmn_rounds_product_before_adding_like_ggml",
+        "models::funasr::encoder::parity_tests::layernorm_accumulates_variance_in_ggml_neon_groups",
+        "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+        "models::gemma4::trunk::tests::per_layer_bf16_projection_matches_pinned_scalar_dot_bits",
+        "models::gemma4::trunk::tests::per_layer_projection_rejects_non_bf16_weight",
+        "models::gemma4::trunk::tests::per_layer_projection_rejects_wrong_bf16_storage_length",
+        "ops::argmax::tests::all_negative",
+        "ops::argmax::tests::large_random",
+        "ops::argmax::tests::middle_max",
+        "ops::argmax::tests::tail_handles_non_aligned_lengths",
+        "ops::argmax::tests::ties_pick_lowest_index",
+        "ops::matmul::neon_tests::neon_softmax_matches_ggml_vector_exp_and_f64_sum"
+      ],
+      "new_failures": [],
+      "command": "cargo +1.98.1 test --locked --profile release-fast --lib"
+    },
+    "other_checks": {
+      "main_tests_passed": 6,
+      "python_tests_passed": 6,
+      "main_build_passed": true,
+      "changed_rust_files_rustfmt_passed": true,
+      "diff_check_passed": true,
+      "cargo_targets": {
+        "baseline": "4002d8217d2fe4492da72a1bc3872982fdad0ace",
+        "before": {
+          "micro-bench": "src/bin/micro_bench.rs",
+          "codec_test": "src/bin/codec_test.rs",
+          "rust-model-server": "src/bin/server.rs",
+          "dump_meta": "src/bin/dump_meta.rs",
+          "dump_tensors": "src/bin/dump_tensors.rs",
+          "dump_dims": "src/bin/dump_dims.rs",
+          "dump_emb": "src/bin/dump_emb.rs",
+          "ggufrs": "src/bin/ggufrs.rs",
+          "rust-model-inference": "src/main.rs"
+        },
+        "after": {
+          "codec_test": "src/bin/codec_test.rs",
+          "dump_dims": "src/bin/dump_dims.rs",
+          "dump_emb": "src/bin/dump_emb.rs",
+          "dump_meta": "src/bin/dump_meta.rs",
+          "dump_tensors": "src/bin/dump_tensors.rs",
+          "ggufrs": "src/bin/ggufrs.rs",
+          "micro-bench": "src/bin/micro_bench.rs",
+          "rust-model-inference": "src/main.rs",
+          "rust-model-server": "src/bin/server.rs"
+        },
+        "unchanged": true
+      },
+      "clippy": "not rerun"
+    },
+    "fixture_runs_initial": [
+      {
+        "case": "layouts",
+        "code": 0,
+        "seconds": 0.33
+      },
+      {
+        "case": "heads",
+        "code": 0,
+        "seconds": 0.4
+      },
+      {
+        "case": "fast-all",
+        "code": 101,
+        "seconds": 54.06
+      },
+      {
+        "case": "vision-tiny",
+        "code": 0,
+        "seconds": 0.3
+      },
+      {
+        "case": "vision-decision",
+        "code": 0,
+        "seconds": 93.57
+      },
+      {
+        "case": "vision-span",
+        "code": 0,
+        "seconds": 91.49
+      },
+      {
+        "case": "vision-ocr",
+        "code": 0,
+        "seconds": 95.18
+      },
+      {
+        "case": "vision-box",
+        "code": 0,
+        "seconds": 108.96
+      },
+      {
+        "case": "vision-public-text",
+        "code": 0,
+        "seconds": 51.72
+      },
+      {
+        "case": "vision-public-mixed",
+        "code": 0,
+        "seconds": 748.88
+      }
+    ],
+    "fast_hidden_gate_revision": {
+      "original": "max_abs < 1e-3",
+      "initial_result": "failed domain hidden at 0.001077651978; original failure retained in fast-all.log",
+      "prior_scalar_domain_max_absolute_error": 0.0006036758423,
+      "reason": "Vela norm helpers now use repository SIMD/f64 RMSNorm reduction; bound isolated high-amplitude channels and aggregate error together.",
+      "current_max_absolute_error_gate": "1e-3 + 1e-5 * reference_peak",
+      "current_rmse_gate": "1e-5 + 1e-4 * reference_rms",
+      "both_required": true,
+      "final_passed": true,
+      "hidden": [
+        {
+          "question": "decision",
+          "max_absolute_error": 0.0003080368042,
+          "reference_peak": 89.97793579,
+          "rmse": 1.415834374e-06,
+          "reference_rms": 1.152558292,
+          "normalized_rmse": 1.2284275631240699e-06
+        },
+        {
+          "question": "noul",
+          "max_absolute_error": 0.0003471374512,
+          "reference_peak": 89.98369598,
+          "rmse": 1.823973525e-06,
+          "reference_rms": 1.150911895,
+          "normalized_rmse": 1.58480725842181e-06
+        },
+        {
+          "question": "grouped_attack",
+          "max_absolute_error": 0.000316619873,
+          "reference_peak": 89.98381805,
+          "rmse": 1.287573467e-06,
+          "reference_rms": 1.127139199,
+          "normalized_rmse": 1.1423375818553179e-06
+        },
+        {
+          "question": "domain",
+          "max_absolute_error": 0.001077651978,
+          "reference_peak": 90.00064087,
+          "rmse": 3.548875429e-06,
+          "reference_rms": 1.12730581,
+          "normalized_rmse": 3.1481035558576605e-06
+        },
+        {
+          "question": "factcheck",
+          "max_absolute_error": 0.0005683898926,
+          "reference_peak": 89.97194672,
+          "rmse": 1.686556313e-06,
+          "reference_rms": 1.211626027,
+          "normalized_rmse": 1.3919776196752165e-06
+        },
+        {
+          "question": "feedback",
+          "max_absolute_error": 0.0005722045898,
+          "reference_peak": 90.00214386,
+          "rmse": 1.90959428e-06,
+          "reference_rms": 1.16922595,
+          "normalized_rmse": 1.6332123658391263e-06
+        },
+        {
+          "question": "grouped_modality",
+          "max_absolute_error": 0.0004959106445,
+          "reference_peak": 89.99450684,
+          "rmse": 1.89722762e-06,
+          "reference_rms": 1.166673044,
+          "normalized_rmse": 1.6261862136586745e-06
+        }
+      ],
+      "max_logits_absolute_error": 2.861022949e-06,
+      "response_atol": 0.0005,
+      "response_rtol": 0.0005,
+      "bf16_gates_changed": false
+    },
+    "layout": {
+      "cases": 12,
+      "grid_and_input_ids_exact": true,
+      "pixel_atol": 1e-06,
+      "pixel_max_absolute_error": 1.19e-07,
+      "command": "RMI_VELA3_LAYOUT_FIXTURE=.codex/vela3/review-20261105/layouts cargo +1.98.1 test --locked --profile release-fast --lib models::vela3::vision::tests::extreme_aspect_preprocessing_matches_official_processor -- --exact --ignored --nocapture"
+    },
+    "real_span_heads": {
+      "packages": 4,
+      "heads": 15,
+      "max_absolute_error": 1.9073486e-06
+    },
+    "real_vision_tasks": {
+      "vision-decision": {
+        "checkpoints": 86,
+        "logits_max_absolute_error": 1.2398e-05
+      },
+      "vision-span": {
+        "checkpoints": 86,
+        "logits_max_absolute_error": 6.676e-06
+      },
+      "vision-ocr": {
+        "checkpoints": 86,
+        "logits_max_absolute_error": 1.049e-05
+      },
+      "vision-box": {
+        "checkpoints": 86,
+        "logits_max_absolute_error": 1.1206e-05
+      }
+    },
+    "main_cli": [
+      {
+        "case": "fast-floats",
+        "code": 0,
+        "seconds": 13.81,
+        "passed": true,
+        "max_absolute_error": 1.5524597423155484e-06,
+        "answer_order_exact": true,
+        "usage_exact": true
+      },
+      {
+        "case": "fast-floats-scalar",
+        "code": 0,
+        "seconds": 11.45,
+        "passed": true,
+        "max_absolute_error": 1.1734682664465979e-06,
+        "answer_order_exact": true,
+        "usage_exact": true
+      },
+      {
+        "case": "lite",
+        "code": 0,
+        "seconds": 63.91,
+        "passed": true,
+        "max_absolute_error": 0.004633518871616504,
+        "answer_order_exact": true,
+        "usage_exact": true
+      },
+      {
+        "case": "lite-scalar",
+        "code": 0,
+        "seconds": 166.28,
+        "passed": true,
+        "max_absolute_error": 0.004772923693858733,
+        "answer_order_exact": true,
+        "usage_exact": true
+      },
+      {
+        "case": "vision-text",
+        "code": 0,
+        "seconds": 49.79,
+        "passed": true,
+        "max_absolute_error": 9.5367431640625e-07,
+        "answer_order_exact": true,
+        "usage_exact": true
+      },
+      {
+        "case": "vision-mixed",
+        "code": 0,
+        "seconds": 392.4,
+        "passed": true,
+        "max_absolute_error": 3.3527612686157227e-07,
+        "answer_order_exact": true,
+        "usage_exact": true
+      },
+      {
+        "case": "entity-env",
+        "passed": true
+      },
+      {
+        "case": "reject-revision",
+        "passed": true
+      },
+      {
+        "case": "reject-backbone",
+        "passed": true
+      },
+      {
+        "case": "reject-alpha",
+        "passed": true
+      },
+      {
+        "case": "reject-swapped-backbone",
+        "passed": true
+      },
+      {
+        "case": "reject-readout",
+        "passed": true
+      }
+    ],
+    "fast_all_main_cli": {
+      "passed": true,
+      "atol": 0.0005,
+      "rtol": 0.0005,
+      "floats_compared": 52,
+      "max_absolute_error": 1.7486760879315e-06,
+      "largest_errors": [
+        {
+          "path": "response.answers.feedback.probabilities.SAT",
+          "absolute_error": 1.7486760879315e-06
+        },
+        {
+          "path": "response.answers.feedback.probabilities.WRONG_ANSWER",
+          "absolute_error": 1.6705248797599381e-06
+        },
+        {
+          "path": "response.answers.entities.spans[0].score",
+          "absolute_error": 4.4408844146470727e-07
+        },
+        {
+          "path": "response.answers.entities.spans[0].probability",
+          "absolute_error": 4.172325134277344e-07
+        },
+        {
+          "path": "response.answers.halu.spans[0].probability",
+          "absolute_error": 2.384185791015625e-07
+        },
+        {
+          "path": "response.answers.halu.spans[0].score",
+          "absolute_error": 2.3405821467786803e-07
+        },
+        {
+          "path": "response.answers.noul.noul",
+          "absolute_error": 2.2332914428879747e-07
+        },
+        {
+          "path": "response.answers.decision.probabilities.human",
+          "absolute_error": 1.5057222602088416e-07
+        },
+        {
+          "path": "response.answers.decision.probabilities.company",
+          "absolute_error": 1.5057222590986186e-07
+        },
+        {
+          "path": "response.answers.grouped_attack.probabilities.benign",
+          "absolute_error": 1.3531733866756213e-07
+        }
+      ],
+      "errors": [],
+      "answer_order_exact": true,
+      "usage_exact": true,
+      "questions": 18
+    },
+    "pinned_base_loads": [
+      {
+        "model": "mini",
+        "base": "models/d3-mini",
+        "scope": "load pinned configuration and weights; no inference",
+        "code": 0,
+        "seconds": 22.41
+      },
+      {
+        "model": "turbo",
+        "base": "models/d3-turbo/pinned",
+        "scope": "load pinned configuration and weights; no inference",
+        "code": 0,
+        "seconds": 122.27
+      }
+    ],
+    "scope_limits": [
+      "mini/turbo pinned production loader exercised with empty questions; no new full inference run. Flash base weight shards unavailable locally; only its real heads rerun.",
+      "GPU/Auto, HTTP/JEV, GGUF, generative decoding, video, new hardware, 32K throughput and full task benchmarks not verified.",
+      "Existing mini/flash/turbo noncausal BF16 internal and d3 image BF16 gates remain failed at unchanged thresholds; remain Experimental/Draft.",
+      "Shared src/ops and Qwen35 implementations unchanged; single-host scalar/SIMD checks do not prove cross-platform parity.",
+      "Recorded wall times include concurrent test runs and hash I/O; they are not benchmarks."
+    ],
+    "local_evidence_directory": ".codex/vela3/review-20261105",
+    "local_evidence_sha256": {
+      "artifacts.json": "7571724d008039cd1be8721899218c449bdf4d5a3337f823d95bb3310d97c855",
+      "build.log": "a00735d359716d7f24fe669dde362c90482b5cee859791dd5cdf233930506fc4",
+      "cli-results.json": "4577cff9691f5d4998c2c9af68ec2e42c9873a2bf2b00a253db8ac1ac2f59964",
+      "entity-ner.native.json": "7bcc5582564af8812072fda780e3bfec7d04be16b71e937bb7dd43af38ef206f",
+      "entity-ner.request.json": "1d1d5087e09db93c8b521ca2b9576e80ddfdb727441b55b4fc6bbce13263aa8a",
+      "entity-span.native.json": "7bcc5582564af8812072fda780e3bfec7d04be16b71e937bb7dd43af38ef206f",
+      "entity-span.request.json": "1d1d5087e09db93c8b521ca2b9576e80ddfdb727441b55b4fc6bbce13263aa8a",
+      "fast-all-final.log": "f5296ba29f0d1069854d1f7d92b28638b97369a493ad39e90f8f9d4623b73133",
+      "fast-all.comparison.json": "1dffdadd878dbdbbea3b0d7ea705196162858b6daeff931c4d116a95302e1c55",
+      "fast-all.log": "c990d3fc0e216c2ac3a74db0a96bef4962fa9ffcf6d881a49d762e9bed2fdd6e",
+      "fast-all.native.json": "72e1db6e48592b9057b1210ef053c977b4069512ebd4b5654d840c33104b83eb",
+      "fast-all.request.json": "00fe8db4431aa43e9212aa2b8128cba4d330b7f6629203250d09120413fd73bb",
+      "fast-floats-scalar.comparison.json": "b5412c7bd0214b22dad3d8da6f9fefe46603b57ab8d3fc6bc930b1cfc0dc2305",
+      "fast-floats-scalar.native.json": "9ac5cb3513a4e0cb95cadc40ff15f73f14fd254de7e91973995377e6f71b6cdc",
+      "fast-floats-scalar.request.json": "afa9956b610896df1ac33f6e66bf0326bdae083dd55f87c1e03a3962376f0a55",
+      "fast-floats.comparison.json": "11780b62475744f2ac8b415706d8ceee317f42da336bf8bda4ba5b46bc73dff9",
+      "fast-floats.native.json": "e9c4dac33f642f629d43fadc1378a018e9db9297cfe38268b18505d293124cad",
+      "fast-floats.request.json": "afa9956b610896df1ac33f6e66bf0326bdae083dd55f87c1e03a3962376f0a55",
+      "heads.log": "95e55f5f598f2e80e563d37956f80e2a962bc6d6a479383147c31f3c17c8b2c4",
+      "ignored-results.json": "d2310d59d3b889c436c6bd74c4d757296e7e09bd901eb8e4374ab9db00a02e53",
+      "layout-oracle.log": "005e960c231a68192923706e12645473c45ffe5b7807a5346938ad30957eaf4e",
+      "layouts.log": "a516cae2e5b20cbc1df5363c35bda6c48a8ce9ba9dd89d3de6fc729a7c5b8cf1",
+      "library-after.log": "78a82df48b450c38b7d472a4b8410847ebc669b9c81548cb599ea151d9fc925d",
+      "library-before.log": "9e88b2a880b0c15b1e75cd69397252c882974f3cba9d467375a71652f9d1891d",
+      "lite-scalar.comparison.json": "d08f840d279e34d743daf8a7b468c71b72b0fc8925fb8e18f1e5d6902cca988a",
+      "lite-scalar.native.json": "e1b4f767a663d829889acdee4133f4d8202e8c12766034a241bc9f3d5adc13ae",
+      "lite-scalar.request.json": "2262400d54a63b6cbf10466e145eee530c7df78e30629129725813a50634efa9",
+      "lite.comparison.json": "dfbb7dce3e842fabbd84012807be627414a6880ab6296bf8c9d45f25d01e3076",
+      "lite.native.json": "35e3b1b0c6d1f4595b373eebeb80b0715a507d0afc69427293c9147c75c3fb73",
+      "lite.request.json": "2262400d54a63b6cbf10466e145eee530c7df78e30629129725813a50634efa9",
+      "m1.log": "8724130acf173bc5660ba89e320f735899b37206546bcbc5150eb6d40edab313",
+      "main-tests.log": "8a6dd863d53c7fad229a6ebf93a82d575f1efd0e9bf2553c19a96543b7c82746",
+      "mandatory.log": "cb63becb227c3a15434ef3261a9adf463a00538f013792717910f4f0b7c4c598",
+      "metrics.json": "88c306a65c98ff8a6082c97fa23b77c0fb411223ca030e8e778709063e1f2a43",
+      "mini-pinned-load.json": "26884a9f61a9ed79cfaf82eb97570445247a4204cae5ad93d786e5f9c4aaef1b",
+      "pinned-load-results.json": "9e6a697aeec09cba944d647a0104c09d7439e982201e6098547c01bf65266cc7",
+      "portable-final.log": "c10ad1b104a91860a647f370b6dde4293f86f89c2be34f5c1be0e59e1287cf42",
+      "portable.log": "f3cdd6acf364cf66fc3838b29135e9cefb0674f8383268a32fadcca2e0a1b8e6",
+      "portable2.log": "26df678dacd679826c3fddfdd984c5c43156d13f71d3f1fdcdb973a99f69214e",
+      "portable3.log": "54de6da23a47eda271f8106d9c72fed0207d81674417e30556c3fe3eab61420a",
+      "portable4.log": "8c1e16d40965ac1ce0d9c3ef3befb2ea3931ef2fad59f7c44e865675fde38ecb",
+      "python-tests.log": "65378dcad145da2497120819bebfc3c46534dce9714ce064b3d809a56654aca2",
+      "regression.json": "fdb5bbbade2723e31c6f29e3faf3f4d82c0a048b24dede5259ef472cd8ecccb4",
+      "reject-alpha.request.json": "6faeacf4f64e7bacfab89b83a9b52f3aa395aea4583a97f5b0d1037a011dd325",
+      "reject-backbone.request.json": "6faeacf4f64e7bacfab89b83a9b52f3aa395aea4583a97f5b0d1037a011dd325",
+      "reject-readout.request.json": "6faeacf4f64e7bacfab89b83a9b52f3aa395aea4583a97f5b0d1037a011dd325",
+      "reject-revision.request.json": "6faeacf4f64e7bacfab89b83a9b52f3aa395aea4583a97f5b0d1037a011dd325",
+      "reject-swapped-backbone.request.json": "6faeacf4f64e7bacfab89b83a9b52f3aa395aea4583a97f5b0d1037a011dd325",
+      "rustfmt.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "turbo-pinned-load.json": "c978aba4d66039e9b199928846de4f6c7c42c7d8c8cbafa185832165019b0210",
+      "vision-box.log": "3d3297b6b28560a813f0480c62877cfb75e703e4b437cc88d62d6595055e0c0c",
+      "vision-decision.log": "04d050f65c0fab65311c2bdde2181251b66db1a78229103241eae2b1b3f506b4",
+      "vision-mixed.comparison.json": "5b65f2a48bdfacd3937f1aadc1c9618d776a4fa06d2f3fe19a249651d2d06735",
+      "vision-mixed.native.json": "bf964ef751a66e92dbfa099cbeda5e50ca28a36c6d7237207c774192e3a4ea2d",
+      "vision-mixed.request.json": "4e7a9a809dc79e555cdb678c3002a8a348507033cbd80a5da5d016882aa91cad",
+      "vision-ocr.log": "e999b56837027e5e87fb56bedea65581791a292c7fa5a48e166fcbb166502c00",
+      "vision-public-mixed.log": "cbf1ecac0921fbf1cccd6351405b67212a391fccb6b620eec8b2fb502534878f",
+      "vision-public-text.log": "ed87f018c4e8d3a1b07a3423d1b21ef0a865c9ef1285ca981a985ac86b983129",
+      "vision-span.log": "476e12b9cbed0fbf045fa089954ab37f2950172666f1f1f30a13b53ff5fa1c17",
+      "vision-text.comparison.json": "d6bcc457492fa21eca1494170e2009a451ef152c70b8cada487291e225091f01",
+      "vision-text.native.json": "3bef1108efc933e492ce82ad061b891c40ddd9d504134e5dddd38b09385b2789",
+      "vision-text.request.json": "d76cb94a0a53031c49ae668c10d766c909bc15069d65831b74f12fedd4506d97",
+      "vision-tiny.log": "4a532b4f3cafee2ee1e3f79842b875e109dcbff5c61d309c19cce6a7bfbee0b9"
+    }
   }
 }
