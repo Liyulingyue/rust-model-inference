@@ -49,3 +49,4 @@ pub mod vibevoice_asr;
 pub mod wevisone_vl;
 pub mod xing4_0;
 pub mod yue2;
+pub mod zdt;

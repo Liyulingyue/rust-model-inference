@@ -103,3 +103,4 @@
 | Mellum2.1-Thinking | 12BA2.5B | 文本（思考型 MoE） | llama.cpp @ `8e2d31e` | https://www.modelscope.cn/models/JetBrains/Mellum2.1-12B-A2.5B-Thinking | https://www.modelscope.cn/models/JetBrains/Mellum2.1-12B-A2.5B-Thinking-GGUF | √ |
 | Timestral | 5M / 28M / 123M / 209M | 时间序列概率预测 | mistralai/timestral @ `a534bdbd` | https://modelscope.cn/models/mistralai/Timestral-209M | 自转换 F32 GGUF，`architecture=timestral`，运行时从 GGUF metadata 读取配置 | √ |
 | Intern-Decision | 0.8B | 文本、图像 | llama.cpp @ `11fe0215` | https://www.modelscope.cn/models/Shanghai_AI_Laboratory/Intern-Decision-0.8B | `tools/converter/intern_decision` | √ |
+| ZDTaichu5.0 | 9B | 文本、图像 | llama.cpp @ `11fe0215` | https://www.modelscope.cn/models/TaichuAI/ZDTaichu5.0-9B | https://huggingface.co/ngquocvinh/ZDTaichu5.0-9B-GGUF | √ |
