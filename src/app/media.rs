@@ -270,14 +270,13 @@ pub fn decode_audio(path: &Path) -> Result<Vec<f32>, String> {
 
     let bytes = std::fs::read(path)
         .map_err(|error| format!("Failed to read audio {}: {error}", path.display()))?;
-    let decoded = crate::models::qwen3::asr::audio_processor::decode_pcm16_wav_any(&bytes)
-        .map_err(|error| {
-            format!(
-                "Pure-Rust audio decode failed for {}: {:?}",
-                path.display(),
-                error
-            )
-        })?;
+    let decoded = crate::ops::audio::frontend::decode_pcm16_wav_any(&bytes).map_err(|error| {
+        format!(
+            "Pure-Rust audio decode failed for {}: {:?}",
+            path.display(),
+            error
+        )
+    })?;
     if decoded.channels != 1 {
         return Err(format!(
             "Audio {} has {} channels; Omni requires mono. Install ffmpeg to mix-down.",
@@ -365,7 +364,7 @@ pub fn decode_audio_bytes(bytes: &[u8]) -> Result<Vec<f32>, String> {
 
 /// The pure-Rust half of [`decode_audio_bytes`]: 16 kHz mono PCM16 WAV only.
 fn decode_audio_bytes_pure_rust(bytes: &[u8]) -> Result<Vec<f32>, String> {
-    let decoded = crate::models::qwen3::asr::audio_processor::decode_pcm16_wav_any(bytes)
+    let decoded = crate::ops::audio::frontend::decode_pcm16_wav_any(bytes)
         .map_err(|error| format!("Pure-Rust audio decode failed for the upload: {error:?}"))?;
     if decoded.channels != 1 {
         return Err(format!(
