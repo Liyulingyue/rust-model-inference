@@ -232,114 +232,6 @@
       }
     },
     {
-      "file": "models/ZDTaichu5.0-9B-GGUF/ZDTaichu5.0-9B-Q4_K_M.gguf",
-      "bytes": 5629101440,
-      "sha256": "83bda0ff1a752979b99c895bec84f2d6cfff0c3ab4c32bdc2da731774a4ac2f0",
-      "source": "https://huggingface.co/ngquocvinh/ZDTaichu5.0-9B-GGUF",
-      "converted_locally": false,
-      "tensor_types": [
-        "F32",
-        "Q4_K",
-        "Q6_K"
-      ],
-      "tensor_count": 427,
-      "tensor_inventory_sha256": "386131a2532ef651a2876bc37186dfdd8294e921b28ea671b568a4a0c1f7ee66",
-      "metadata": {
-        "general.architecture": "qwen35",
-        "general.type": "model",
-        "general.sampling.top_k": 20,
-        "general.sampling.top_p": 0.949999988079071,
-        "general.sampling.temp": 1.0,
-        "general.sampling.penalty_repeat": 1.0,
-        "general.name": "TaichuAI/ZDTaichu5.0-9B",
-        "general.size_label": "9.0B",
-        "general.tags": [
-          "multimodal",
-          "vision-language-model",
-          "spatial-reasoning",
-          "agent",
-          "video-understanding",
-          "image-text-to-text"
-        ],
-        "general.languages": [
-          "en",
-          "zh"
-        ],
-        "qwen35.block_count": 32,
-        "qwen35.embedding_length": 4096,
-        "qwen35.attention.head_count": 16,
-        "qwen35.attention.head_count_kv": 4,
-        "qwen35.rope.dimension_sections": [
-          11,
-          11,
-          10,
-          0
-        ],
-        "qwen35.rope.dimension_count": 64,
-        "general.quantization_version": 2,
-        "general.file_type": 15
-      }
-    },
-    {
-      "file": "models/ZDTaichu5.0-9B-GGUF/mmproj-ZDTaichu5.0-9B-BF16.gguf",
-      "bytes": 1647178144,
-      "sha256": "96f58047108b8f251b2b244f52e0b44be853f1231dffccc90787c898ee6b9684",
-      "source": "https://huggingface.co/ngquocvinh/ZDTaichu5.0-9B-GGUF",
-      "converted_locally": false,
-      "tensor_types": [
-        "BF16",
-        "F32"
-      ],
-      "tensor_count": 390,
-      "tensor_inventory_sha256": "b9e882054645d6b1c2f5101ea7653e9c5cb724304dfe8a124021e5c43508d2de",
-      "metadata": {
-        "general.architecture": "clip",
-        "general.type": "mmproj",
-        "general.sampling.top_k": 20,
-        "general.sampling.top_p": 0.949999988079071,
-        "general.sampling.temp": 1.0,
-        "general.sampling.penalty_repeat": 1.0,
-        "general.name": "TaichuAI/ZDTaichu5.0-9B",
-        "general.size_label": "821M",
-        "general.tags": [
-          "multimodal",
-          "vision-language-model",
-          "spatial-reasoning",
-          "agent",
-          "video-understanding",
-          "image-text-to-text"
-        ],
-        "general.languages": [
-          "en",
-          "zh"
-        ],
-        "clip.projector_type": "nemotron_v2_vl",
-        "general.file_type": 32,
-        "clip.has_vision_encoder": true,
-        "clip.vision.projection_dim": 4096,
-        "clip.vision.image_size": 512,
-        "clip.vision.patch_size": 16,
-        "clip.vision.embedding_length": 1280,
-        "clip.vision.feed_forward_length": 5120,
-        "clip.vision.block_count": 32,
-        "clip.vision.attention.head_count": 16,
-        "clip.vision.image_mean": [
-          0.48500001430511475,
-          0.4560000002384186,
-          0.4059999883174896
-        ],
-        "clip.vision.image_std": [
-          0.2290000021457672,
-          0.2240000069141388,
-          0.22499999403953552
-        ],
-        "clip.vision.attention.layer_norm_epsilon": 9.999999974752427e-07,
-        "clip.use_gelu": true,
-        "clip.vision.projector.scale_factor": 2,
-        "general.quantization_version": 2
-      }
-    },
-    {
       "file": "models/embeddinggemma-2-GGUF/embeddinggemma-2-F16.gguf",
       "bytes": 1381933504,
       "sha256": "02a3e8d7d28993e54edba085031f331cb4f9e39ebea1a32aa8887c666a03419c",
@@ -418,30 +310,6 @@
         }
       ],
       "relative_l2_bound": 0.05,
-      "comparison": "numerical (quantized/approximate operators)"
-    },
-    "zdt": {
-      "prompt_tokens": 19,
-      "generated_ids": [
-        19,
-        248046
-      ],
-      "rust_argmax_ids": [
-        19,
-        248046
-      ],
-      "teacher_forced": false,
-      "logits": [
-        {
-          "relative_l2": 0.011398142372578838,
-          "max_abs": 0.6972465515136719
-        },
-        {
-          "relative_l2": 0.0010232381895708294,
-          "max_abs": 0.14886856079101562
-        }
-      ],
-      "relative_l2_bound": 0.02,
       "comparison": "numerical (quantized/approximate operators)"
     },
     "occamy_default_teacher_forced": {
@@ -573,12 +441,6 @@
       "reference": "identical F16 weights widened exactly to F32; F32 activations",
       "bound": 0.01
     },
-    "zdt": {
-      "relative_l2_f32": 0.00035072,
-      "bound_f32": 0.001,
-      "relative_l2_bf16": 0.00493116,
-      "bound_bf16": 0.01
-    },
     "occamy": {
       "relative_l2": 0.00336136,
       "reference": "identical F16 weights widened exactly to F32; F32 activations; actual qwen35 vision encoder",
@@ -641,7 +503,6 @@
     },
     "exact_tokenizer_models": 3,
     "actual_cli_vision_oracles": 2,
-    "zdt_projection_oracle": 1,
     "qwen35_unit_passed": 75,
     "qwen35_unit_ignored": 5,
     "qwen35_baseline_excluded": 1,
@@ -654,8 +515,7 @@
   "cli_smoke": {
     "blue_image": {
       "occamy": "blue",
-      "physbrain": "The color of the image is blue.",
-      "zdt": "blue"
+      "physbrain": "The color of the image is blue."
     },
     "occamy_llama_cpp_smoke": "blue; same image with image-min-tokens=9 and image-max-tokens=9; generation templates are not asserted identical",
     "embeddinggemma_modalities": [

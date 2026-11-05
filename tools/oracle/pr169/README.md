@@ -1,7 +1,7 @@
 # PR #169 real-weight verification
 
 This directory pins the independent CPU reference and the acceptance boundaries for
-EmbeddingGemma-2, PhysBrain1.5-2B, Occamy-1.0 and ZDTaichu5.0-9B.
+EmbeddingGemma-2, PhysBrain1.5-2B and Occamy-1.0.
 `verification.json` records the exact GGUF hashes, formats and measured errors.
 Lossless loading/layout/token IDs are checked exactly. Quantized matmul, activation
 rounding and approximate nonlinear operators use numerical checks, as requested;
@@ -80,8 +80,8 @@ RMI_PARITY_TRACE=target/pr169/text-rust.jsonl RMI_PARITY_FILTER='qwen35.prompt_i
 
 Use the other model's text path for the other rows in `verification.json`.
 PhysBrain requires `--kv-cache f16` in Rust and `-ctk f16 -ctv f16` in llama.cpp.
-Bounds are regression envelopes for these fixtures: PhysBrain 0.05, Occamy 0.10 and
-ZDT 0.02. They are not accuracy guarantees for arbitrary prompts.
+Bounds are regression envelopes for these fixtures: PhysBrain 0.05 and
+Occamy 0.10. They are not accuracy guarantees for arbitrary prompts.
 The comparator rejects missing prompt IDs, steps, shapes, payloads and nonfinite
 values, and checks every vocabulary logit at the final prefill row and each decode.
 It requires exact greedy IDs when both runs follow their own generated history.
@@ -134,20 +134,9 @@ execution differs by 2.68% / about 4.42%, respectively. This is numerical
 validation,
 not equality with the original F16 execution or a bitwise parity claim.
 
-ZDT uses the same process with filter `^zdt.projected$` and both the widened F32
-and original BF16 projectors. Set `RMI_ZDT_REFERENCE` and
-`RMI_ZDT_REFERENCE_BF16` to the respective `0000.f32` files, then run:
-
-```sh
-cargo test --profile release-fast --features parity-trace --test zdt_oracle -- --ignored --nocapture
-```
-
-When the filter selects only `zdt.projected`, the dump is `0000.f32`; dumps that
-also select intermediate tensors must use the index entry named `zdt.projected`.
-Its bounds are 0.001 (F32) and 0.01 (BF16). Loader payload/layout tests and register
-prefix tests also compare lossless operations exactly. Qwen3-VL now uses the
-existing vision RoPE operator; production precompute preserves supplied weights
-instead of silently requantizing them to Q8. Keeping F32 caches increases memory
+Loader payload/layout tests also compare lossless operations exactly. Qwen3-VL now
+uses the existing vision RoPE operator; production precompute preserves supplied
+weights instead of silently requantizing them to Q8. Keeping F32 caches increases memory
 use and may affect throughput; no performance improvement is claimed.
 
 ## Real CLI smoke
@@ -162,8 +151,8 @@ target/release-fast/rust-model-inference --model "$RMI_OCCAMY_TEXT" --mmproj "$R
 
 The original F16 llama.cpp multimodal CLI also answers `blue` with
 `--image-min-tokens 9 --image-max-tokens 9`. This is a semantic smoke check; its
-generation template is not asserted identical to Rust. PhysBrain and ZDT also
-identify the blue-image fixture correctly. Their numerical acceptance remains the
+generation template is not asserted identical to Rust. PhysBrain also
+identifies the blue-image fixture correctly. Its numerical acceptance remains the
 separate tokenizer, text-logit and full projection tests above.
 
 ## EmbeddingGemma-2 and regression checks

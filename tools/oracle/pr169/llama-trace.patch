@@ -85,18 +85,6 @@ index 703ce130b..0f7da7fcf 100644
      return true;
  }
  
-diff --git a/tools/mtmd/models/nemotron-v2-vl.cpp b/tools/mtmd/models/nemotron-v2-vl.cpp
-index 03094be1b..a0a76f121 100644
---- a/tools/mtmd/models/nemotron-v2-vl.cpp
-+++ b/tools/mtmd/models/nemotron-v2-vl.cpp
-@@ -29,6 +29,7 @@ ggml_cgraph * clip_graph_nemotron_v2_vl::build() {
-         cur = build_ffn(cur, model.mm_1_w, nullptr, nullptr, nullptr, model.mm_3_w, nullptr, FFN_RELU_SQR, -1);
-     }
- 
-+    cb(cur, "zdt.projected", -1);
-     ggml_build_forward_expand(gf, cur);
- 
-     return gf;
 diff --git a/tools/mtmd/models/qwen3vl.cpp b/tools/mtmd/models/qwen3vl.cpp
 index 48626b221..fbcb5b322 100644
 --- a/tools/mtmd/models/qwen3vl.cpp

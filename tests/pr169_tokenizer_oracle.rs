@@ -63,11 +63,6 @@ fn physbrain_tokenizer() {
 }
 #[test]
 #[ignore = "requires real model and pinned llama-tokenize"]
-fn zdt_tokenizer() {
-    compare("RMI_ZDT_TEXT");
-}
-#[test]
-#[ignore = "requires real model and pinned llama-tokenize"]
 fn occamy_tokenizer() {
     compare("RMI_OCCAMY_TEXT");
 }
