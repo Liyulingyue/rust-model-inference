@@ -10,6 +10,7 @@
 
 pub mod config;
 pub mod forward;
+pub mod moe;
 pub mod weights;
 
 pub use config::NemotronConfig;

@@ -112,7 +112,7 @@ impl NemotronModel {
     /// `ith` and `nth` are forwarded so `matmul_q4_0_vs_q8_0_avx2` (and
     /// friends) can compute their own `[my_start, my_end)` row range.
     #[inline]
-    fn run_matmul(
+    pub(crate) fn run_matmul(
         &self,
         kernel: &dyn Kernel,
         input: &[f32],
@@ -189,7 +189,16 @@ impl NemotronScratch {
         let max_width = n_embd
             .max(config.n_ff)
             .max(config.n_head * config.n_embd_head_v)
-            .max(config.ssm_inner_size);
+            .max(config.ssm_inner_size)
+            // The MoE branch needs room for the expert activation
+            // (`n_ff_exp`) and the shared-expert activation
+            // (`n_ff_shexp`).
+            .max(
+                config
+                    .moe
+                    .as_ref()
+                    .map_or(0, |moe| moe.n_ff_exp.max(moe.n_ff_shexp)),
+            );
         // Per-layer SSM state. Sized so we can index by
         // [layer * stride + offset]. conv_cols =
         // d_inner + 2*n_group*d_state = 9728 for 4B Nano.
@@ -782,6 +791,29 @@ impl NemotronModel {
                     cfg.n_ff,
                     n_embd,
                 );
+                for d in 0..n_embd {
+                    row[d] += scratch.ffn_out[d];
+                }
+            }
+            // MoE branch (30B-A3B): routed experts plus one shared
+            // expert. The block input is the normalized hidden state
+            // (`scratch.normed`), which llama.cpp's `build_ffn_layer`
+            // receives as `cur` after the layer's `attn_norm`. The
+            // router, the experts and the shared expert all read it.
+            if let Some(moe) = &lw.moe {
+                let moe_cfg = cfg
+                    .moe
+                    .as_ref()
+                    .ok_or_else(|| "Nemotron MoE weights without MoE metadata".to_string())?;
+                super::moe::forward_moe_token(
+                    self,
+                    moe,
+                    moe_cfg,
+                    &scratch.normed,
+                    &mut scratch.ffn_out,
+                    &mut scratch.q8_buf,
+                    &mut scratch.scale_buf,
+                )?;
                 for d in 0..n_embd {
                     row[d] += scratch.ffn_out[d];
                 }

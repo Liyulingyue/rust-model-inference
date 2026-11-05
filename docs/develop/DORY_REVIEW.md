@@ -154,9 +154,14 @@ prefill（多行并行）。这也解释了为什么 Dory 的设备路径在数�
 对 `dory` 改成「渲染 GGUF 模板」，CLI 与 HTTP 共用同一份渲染），并把 dory 加进
 `tests/cli_http_agreement.rs` 的覆盖列表，锁住两条入口逐 token 一致。
 
-### [建议改] F2：pixtral 的强制 BOS 没有实现 —— Dory 的提示比参考实现少一个 `<s>`
+### [已修] F2：强制 BOS 的语义与 llama.cpp 不一致 —— **Dory 本身是对的，错的是别的 arch**
 
-**位置**：`src/core/tokenizer/mod.rs:557-624`。
+> **更正（2026-11-05，在 Nemotron-3-Nano 30B 适配时重新核对）**：本节原先的结论
+> 「Dory 的提示比参考实现少一个 `<s>`」是**错的**。真正的问题是仓库把
+> `add_bos` 的**优先级**写反了。修法见下面的「实际修法」，Dory 的行为**不变**。
+
+**位置**：`src/core/tokenizer/mod.rs:557-624`（pre 分词器映射）与
+`mod.rs:705-708`（`add_bos` 的取值）。
 
 代码里的注释写着：
 
@@ -164,28 +169,76 @@ prefill（多行并行）。这也解释了为什么 Dory 的设备路径在数�
 > (llama3 / falcon3 / falcon-h1 / lfm2 / **pixtral** ...) even when the GGUF
 > omits `tokenizer.ggml.add_bos_token`.
 
-但实现里 `force_add_bos = true` **只给 `falcon-h1` 一个 arch**（`mod.rs:589-592`）。
-Dory 的 GGUF 写的是 `tokenizer.ggml.add_bos_token = false`，所以仓库既不读元数据里的
-true，也拿不到强制覆盖 → **Dory 的提示里没有 BOS**。
+但实现里 `force_add_bos = true` **只给 `falcon-h1` 一个 arch**（`mod.rs:589-592`），
+而且取值写成
 
-而 Dory 的**参考实现确实加**：
+```rust
+let add_bos = bool_meta(get_meta("tokenizer.ggml.add_bos_token"), ...)? || forced_add_bos;
+```
 
-- NVIDIA 的 Dory llama.cpp fork（`brianchmielNV/llama.cpp` @ `98a74c97`，
-  `src/llama-vocab.cpp:2286-2296`）：`tokenizer_pre == "pixtral"` 落在
-  `LLAMA_VOCAB_PRE_TYPE_LLAMA3` 分支里，`add_bos = true`；
-- 上游 master 同理（`src/llama-vocab.cpp:2623-2629`，pixtral 现在落在 TEKKEN 分支，
-  同样 `add_bos = true`）。
+也就是**强制值赢过 GGUF**。
 
-**影响面不止 Dory**：`pre = "pixtral"` / `"llama-bpe"` / `"dbrx"` / `"exaone"` /
-`"tekken"` 的 GGUF 全部走 `PreTokenizer::LlamaBpe`，全部可能缺 BOS。
-仓库自己的注释已经点出了这个家族，只是没有逐个落实。
+#### llama.cpp 的真实语义
+
+`src/llama-vocab.cpp`（上游 master 与 NVIDIA 的 Dory fork **完全一致**）分两步：
+
+1. pre 分词器分支给一个**默认值**：`pixtral` / `tekken` 落在 `LLAMA_VOCAB_PRE_TYPE_TEKKEN`
+   分支里 `add_bos = true`（Dory fork 里 pixtral 落在 `LLAMA_VOCAB_PRE_TYPE_LLAMA3`
+   分支，同样 `add_bos = true`）；
+2. 之后 GGUF 的 key **覆盖**这个默认值：
+
+```c
+// Handle add_bos, add_eos and add_sep
+{
+    bool temp = true;
+    if (ml.get_key(LLM_KV_TOKENIZER_ADD_BOS, temp, false)) {
+        add_bos = temp;      // ← GGUF 赢，连 false 都赢
+    }
+    ...
+}
+```
+
+所以**优先级是「GGUF 覆盖默认值」**，仓库写成了「默认值覆盖 GGUF」。
+
+#### 结论：Dory 没有问题，缺 BOS 的是别的 arch
+
+| GGUF | `pre` | `add_bos_token` | llama.cpp | 修正前仓库 |
+|---|---|---|---|---|
+| Dory 1.0 4B | `pixtral` | **有**，`false` | `false`（GGUF 覆盖） | `false` ✅ |
+| Nemotron-3-Nano 30B | `pixtral` | **没有这个 key** | `true`（默认值） | `false` ❌ |
+| Nemotron-3-Nano 4B | — | `add_bos_token = true` | `true` | `true` ✅ |
+
+Dory 的 GGUF 明写 `add_bos_token = false`，参考实现因此**不加** BOS，仓库也**不加**
+——两边一致。真正出问题的是 **key 缺失**的情况：此时该用 pre 分词器的默认值，
+而仓库一律当 `false`。Nemotron-3-Nano 30B 正是这一类（`pre = "pixtral"` 且没有
+`add_bos_token`），少了 `<s>` 提示就与参考实现不同。
+
+顺带一提，修正前的写法对 **falcon-h1** 也是错的：仓库无条件强制 BOS，
+而参考实现里 GGUF 的 `add_bos_token = false` 会把它盖掉。
+
+#### 实际修法
+
+1. `add_bos` 改成「**key 存在则用 key，key 缺失则用 pre 分词器默认值**」：
+   ```rust
+   let add_bos = match get_meta("tokenizer.ggml.add_bos_token") {
+       Some(value) => bool_meta(Some(value.clone()), "tokenizer.ggml.add_bos_token")?,
+       None => forced_add_bos,
+   };
+   ```
+2. `forced_add_bos` 补齐 llama.cpp 的整张表（本仓库支持的 pre 里是
+   `llama-bpe` / `pixtral` / `tekken` / `lfm2` / `falcon-h1`；
+   `exaone` / `exaone4` / `exaone-moe` **不在**表里，参考实现对它们
+   保持 `add_bos = false`）。
+3. 回归测试 `core::tokenizer::tests`：
+   - `pixtral_defaults_to_adding_bos`（30B 的情况：key 缺失 → 加 BOS）
+   - `gguf_add_bos_token_overrides_the_pretokenizer_default`（Dory 的情况：
+     key 说 false → 不加 BOS）
+   - `gguf_add_bos_token_true_adds_bos_without_a_default`
 
 **为什么没被 oracle 抓到**：Dory 的 oracle 对拍是**喂 token id** 的
 （`tests/dory_q5_k_m.rs` 自己 encode 出 `[22177]` 再喂进去），oracle 验的是
 **前向**，不是**提示构造**。BOS 属于提示构造，所以整条对拍链路都看不见它。
-
-**建议修法**：把 `force_add_bos = true` 扩展到整个 llama3 预分词家族
-（至少 pixtral），并补一个针对提示构造的断言（提示的第一个 token 是 BOS）。
+30B 这边同样的道理：oracle 验前向，提示构造要单独对 token id。
 
 ### [建议改] F3：`--compute vulkan --jev` 对 Dory 打出的「没有完整设备路径」提示是错的
 

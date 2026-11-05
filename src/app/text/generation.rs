@@ -204,7 +204,7 @@ pub fn run_inference(
             kv_format,
             jinja,
         )
-    } else if arch == "nemotron_h" {
+    } else if arch == "nemotron_h" || arch == "nemotron_h_moe" {
         crate::models::nemotron_h::trunk::run_inference(
             source.clone(),
             prompt,

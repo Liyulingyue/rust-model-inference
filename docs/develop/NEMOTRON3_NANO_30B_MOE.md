@@ -36,7 +36,7 @@
 | `nemotron_h_moe.ssm.time_step_rank` | 64 |
 | `nemotron_h_moe.expert_count` | 128 |
 | `nemotron_h_moe.expert_used_count` | 6 |
-| `nemotron_h_moe.expert_group_count` / `group_used_count` | 1 / 1（**无分组路由**） |
+| `nemotron_h_moe.expert_group_count` / `expert_group_used_count` | 1 / 1（**无分组路由**） |
 | `nemotron_h_moe.expert_feed_forward_length` | 1856 |
 | `nemotron_h_moe.expert_shared_feed_forward_length` | 3712 |
 | `nemotron_h_moe.expert_shared_count` | 1 |
@@ -142,6 +142,26 @@ builder，于是同一条消息有三种提示（用仓库自己的 tokenizer �
 Dory 的 GGUF 写 `false`，而 llama.cpp 对 pixtral 预分词家族强制 `add_bos = true`
 → Dory 的提示比参考实现少一个 `<s>`（见 DORY_REVIEW.md 的 F2）。
 
+### 1.6 提示的 BOS：30B 与 Dory 不同
+
+30B 的 GGUF：`tokenizer.ggml.pre = "pixtral"`，**没有** `tokenizer.ggml.add_bos_token` 这个 key。
+
+llama.cpp 的规则是两步（`src/llama-vocab.cpp`）：
+
+1. pre 分词器给出**默认值** —— `pixtral` / `tekken` → `add_bos = true`；
+2. GGUF 的 `tokenizer.ggml.add_bos_token` **覆盖**默认值，连 `false` 都赢。
+
+所以：
+
+| GGUF | `pre` | `add_bos_token` | llama.cpp | 结论 |
+|---|---|---|---|---|
+| Dory 1.0 4B | `pixtral` | 有，`false` | 不加 BOS | 仓库（修正后）也不加 ✅ |
+| **30B-A3B** | `pixtral` | **无** | **加 BOS** | 仓库（修正后）加 ✅ |
+
+仓库原先写成 `bool_meta(add_bos_token)? || forced_add_bos` —— **强制值赢过 GGUF**，
+而且只有 falcon-h1 设过强制值。结果是 30B 少了 `<s>`。已修（见
+[DORY_REVIEW.md](DORY_REVIEW.md) F2 与 [TODO.md](TODO.md) TODO-052 F2）。
+
 ## 2. 阻塞项（按必须做的顺序）
 
 ### B1. Q5_1 dequant kernel（硬前置）✅ 已完成
@@ -180,7 +200,7 @@ Q5_1 与 Q5_0 的差异很小（ggml `block_q5_1`，24 字节/32 元素）：
 **顺带**：`src/models/nemotron_h/trunk/weights.rs` 的 `is_supported_weight_type()`
 白名单里也漏了 `Q5_0` 和 `Q5_1`（kernel 在，但白名单不认）——4B 用不到，30B 会撞上。
 
-### B2. arch 与 config 前缀
+### B2. arch 与 config 前缀 ✅ 已实现
 
 - `src/core/loader.rs` 的 arch 白名单加 `nemotron_h_moe`；
 - loader 里 `nemotron_h` 那个专用分支要能按 arch 前缀读
@@ -191,7 +211,18 @@ Q5_1 与 Q5_0 的差异很小（ggml `block_q5_1`，24 字节/32 元素）：
 > 现状是**响亮地失败**而不是静默出错：arch 检查先拒；即使放行，权重层会因为找不到
 > `ffn_up.weight` 而报「Nemotron layer N tensors do not match layer metadata」。这点是对的。
 
-### B3. MoE 层分支
+**实现**：GGUF 把每个 arch 私有的 metadata key 放在 `{arch}.` 命名空间下，所以
+`NemotronConfig::from_source` 用 `architecture` 本身当前缀，config 里新增
+`NemotronMoeConfig`（`expert_count` / `expert_used_count` / `expert_group_count` /
+`expert_group_used_count` / `expert_feed_forward_length` /
+`expert_shared_feed_forward_length` / `expert_shared_count` / `expert_weights_norm` /
+`expert_weights_scale` / `moe_latent_size`）。
+
+> **key 名的一处订正**：分组路由已用的那个 key 实际是
+> `nemotron_h_moe.expert_group_used_count`（不是 `group_used_count`）。契约表 §1.1
+> 已按 GGUF 头部订正。
+
+### B3. MoE 层分支 ✅ 已实现
 
 `src/models/nemotron_h/trunk/` 现在只有「dense 2 层 FFN」（`ffn_up`/`ffn_down`）。
 需要加第三条分支：MoE 层。
@@ -207,7 +238,25 @@ Q5_1 与 Q5_0 的差异很小（ggml `block_q5_1`，24 字节/32 元素）：
 `2^-14` 下限 clamp、scale 放在归一化之后而不是折进除法 —— 这一点 qwen35 的注释已经
 写清楚「不是逐位等价，会移动 router argmax」）。
 
-### B4. 共享专家与平方 ReLU
+**实现**（`src/models/nemotron_h/trunk/moe.rs` + `weights.rs`）：
+
+- `NemotronMoeWeights` 持有一份借用的 `up_exps` / `down_exps` 原始字节 +
+  每个专家的字节步长，而不是 128 个 eager `Weight`（23 层 × 128 专家 = 2944 个
+  kernel，提前建好只用得上 6 个）。
+- `route_experts` 与 llama.cpp 的 `build_moe_ffn` 逐节点对应：
+  `probs = sigmoid(logits)`（ggml 的 `ggml_vec_sigmoid_f32` 就是
+  `1/(1+expf(-x))`）→ `selection = probs + exp_probs_b`（**偏置只参与排序**）→
+  `argsort_top_k` 取前 `n_expert_used` → 权重取**未加偏置**的 `probs` →
+  `sum` 用 F64 累加降到 F32 → clamp 到 `2^-14` → 相除 → 乘
+  `expert_weights_scale`。
+- 专家**没有 gate**（本架构没有 `ffn_gate_exps`），所以专家激活是
+  `relu(up)^2`；共享专家**也没有 gate**（没有 `ffn_gate_inp_shexp`），
+  最终 `out = moe_out + ffn_shexp`。
+- 层类型判定：`ffn_up.weight` 是 dense FFN，`ffn_up_exps.weight` 是 MoE 层，
+  两者互斥，且必须与 metadata 的层模式一致，否则报
+  「Nemotron layer N tensors do not match layer metadata」。
+
+### B4. 共享专家与平方 ReLU ✅ 已实现
 
 - 专家激活：仓库现有的激活算子里有 SiLU / GeLU / ReLU，**没有 squared ReLU**
   → 要么加一个 `relu_sqr_inplace`，要么在 MoE 模块里内联。
@@ -215,7 +264,10 @@ Q5_1 与 Q5_0 的差异很小（ggml `block_q5_1`，24 字节/32 元素）：
   qwen35 的共享专家是 `down(silu(gate@x) * (up@x))` 并乘一个 sigmoid 门，
   **语义不同，不能直接复用**，只能复用权重加载那部分。
 
-### B5. 数值对拍的 oracle
+**实现**：squared ReLU 直接内联在 `moe.rs`（`relu` 后 `x*x`，负数归零），
+没有单独的算子 —— 它只在这个架构的 FFN 与 MoE 里出现。
+
+### B5. 数值对拍的 oracle ⬜ 未做
 
 上游 llama.cpp **已经支持** `nemotron_h_moe`（PR #18058，2025-12-16 合并，
 `src/models/nemotron-h-moe.cpp` 只有 159 行，主图在 `nemotron-h.cpp`）。

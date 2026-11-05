@@ -391,13 +391,19 @@ LFM2 / LFM2.5 / Spark / Nemotron-H / Hunyuan / LFM2-MoE），每个 scorer 实�
       约 1100 行。契约从 GGUF 头部读出（不必下完 24 GB），详见
       [TODO-051](#todo-051-nemotron-3-nano-30b-a3bnemotron_h_moe完全不支持先补-q5_1-kernel)
       与 [NEMOTRON3_NANO_30B_MOE.md](NEMOTRON3_NANO_30B_MOE.md)。
-- [ ] **Dory 的默认提示在 CLI / HTTP / 模型自带模板之间三分，pixtral 还缺强制 BOS** —
+- [ ] **Dory 的默认提示在 CLI / HTTP / 模型自带模板之间三分** —
       CLI 15 token（无 think 标记）、HTTP 19 token（空 think 块）、模型自带模板 22 token
       （多一个空 system 轮），三者贪心输出不同，CLI↔HTTP 分叉且 `cli_http_agreement`
-      未覆盖 dory；参考实现对 pixtral 强制 `add_bos = true`，本仓库没有 BOS。
+      未覆盖 dory。
       另外 `--compute vulkan --jev` 明明整条前向都在设备上（4.2× 于 CPU、概率一致）却打出
       「no complete device path for this mode」。详见
       [TODO-052](#todo-052-dory-的默认提示在-cli--http--模型自带模板之间三分pixtral-缺强制-bosjev-的backendpartial提示对-dory-是假的)。
+- [x] **强制 BOS 的优先级与 llama.cpp 相反** — 已修（原记录「pixtral 缺强制 BOS →
+  Dory 少一个 `<s>`」是**错的**：Dory 的 GGUF 明写 `add_bos_token = false`，参考实现
+  因此也不加 BOS，仓库与参考一致）。真正的问题是 llama.cpp 让 **GGUF 的 key 覆盖**
+  pre 分词器的默认值，仓库却写成「强制值赢过 GGUF」。缺 BOS 的是 **key 缺失**的
+  情况 —— Nemotron-3-Nano 30B（`pre = "pixtral"` 且无 `add_bos_token`）正是这一类。
+  详见 [TODO-052 F2](#f2强制-bos的优先级与-llamacpp相反-已修)。
 
 ## 入口面覆盖（2026-10-19 审计）
 
@@ -3766,9 +3772,56 @@ Q5_1 dequant / matmul kernel 已落地（`src/ops/kernel/q5_1/`），逐位对�
 **未验证的部分**：以上只证明 Q5_1 的**块语义**正确。真实 30B 权重上的
 MoE 前向（sigmoid 路由 + squared ReLU + 共享专家）还没跑过 —— 那属于 B2/B3。
 
-### TODO-052: Dory 的默认提示在 CLI / HTTP / 模型自带模板之间三分；pixtral 缺强制 BOS；JEV 的「backend=partial」提示对 Dory 是假的
+#### 进展：B2/B3/B4（arch、MoE 层、共享专家）已实现，B5（oracle 对拍）未做
+
+B1 之后的三个阻塞项也已落地：
+
+- **B2 arch 与 config 前缀**：`nemotron_h_moe` 进 arch 白名单；
+  GGUF 把每个 arch 私有的 metadata key 放在 `{arch}.` 命名空间下，所以
+  `NemotronConfig::from_source` 改用 `architecture` 当前缀；新增
+  `NemotronMoeConfig` 承载 `expert_count` / `expert_used_count` /
+  `expert_group_count` / `expert_group_used_count` / `expert_feed_forward_length` /
+  `expert_shared_feed_forward_length` / `expert_shared_count` /
+  `expert_weights_norm` / `expert_weights_scale` / `moe_latent_size`。
+- **B3 MoE 层分支**：新增 `src/models/nemotron_h/trunk/moe.rs`。
+  - `NemotronMoeWeights` 持一份借用的 `up_exps` / `down_exps` 原始字节 +
+    每专家字节步长，而不是 128 个 eager `Weight`（23 层 × 128 = 2944 个 kernel，
+    提前建好只用得上 6 个）。
+  - `route_experts` 与 llama.cpp `build_moe_ffn` 逐节点对应：
+    `probs = sigmoid(logits)` → `selection = probs + exp_probs_b`（**偏置只参与
+    排序**）→ `argsort_top_k` → 权重取**未加偏置**的 `probs` → F64 累加降 F32 →
+    clamp `2^-14` → 相除 → 乘 `expert_weights_scale`。
+  - 专家**无 gate**（没有 `ffn_gate_exps`），共享专家**也无 gate**（没有
+    `ffn_gate_inp_shexp`），最终 `out = moe_out + ffn_shexp`。
+  - 层类型判定：`ffn_up.weight` = dense FFN，`ffn_up_exps.weight` = MoE 层，
+    互斥且必须与 metadata 的层模式一致。
+- **B4 共享专家与平方 ReLU**：squared ReLU 内联在 `moe.rs`（`relu` 后 `x*x`）。
+
+**顺带修掉一个更早就存在的语义错误**：`add_bos` 的**优先级**写反了
+（详见 [TODO-052 F2](#f2强制-bos的优先级与-llamacpp相反-已修)）。30B 的 GGUF
+是 `pre = "pixtral"` 且**没有** `add_bos_token` key，参考实现会加 BOS，
+仓库原先不加 —— 少了 `<s>` 提示就与参考实现不同。Dory 反而是对的（它的 GGUF
+明写 `add_bos_token = false`，参考实现同样不加）。
+
+**还没做的**：
+
+- **B5 oracle 对拍** —— 这是现在最大的缺口。上游 llama.cpp master 已支持
+  `nemotron_h_moe`，oracle 用上游即可。**没有对拍就不知道前向是否正确**：
+  路由的 sigmoid/偏置/归一化顺序、平方 ReLU、共享专家的加法位置，
+  任何一处偏差都会让输出变成噪声，但目前没有任何测试能发现。
+- **真实权重验证** —— 30B 的 Q4_K_M（24.57 GB，SHA-256
+  `0e7f6e51fdd9039928749d07eed9e846dbfd97681646544c5406bcdd788e5940`）
+  尚未下完，因此 30B 的每一层都还没在真实张量上跑过一次。
+- **HTTP 服务端** —— `nemotron_h`（4B）本来就没有 `TextRuntime` 适配器，
+  `/v1/chat/completions` 对它返回 501；30B 与 4B 一致。JEV 路径按 arch 分派，
+  已覆盖 `nemotron_h_moe`。
+- **Vulkan 路径** —— Q5_1 没有设备 kernel（见 B1 一节）。
+
+### TODO-052: Dory 的默认提示在 CLI / HTTP / 模型自带模板之间三分；JEV 的「backend=partial」提示对 Dory 是假的
 
 两条都是**文档/提示与实测不符**，实现在数值上没错。
+（原标题里的「pixtral 缺强制 BOS」已改为 **F2 强制 BOS 的优先级写反**，
+且那条已修；见下面的 F2。）
 
 #### F1：CLI 与 HTTP 给 Dory 的默认提示不一致，三条路径三个形态
 
@@ -3799,20 +3852,48 @@ day because the Earth's atmosphere scatteres sunlight (`）。
 修法：让 dory 的两条入口都走模型自带模板，并把 dory 加进
 `tests/cli_http_agreement.rs` 锁住两条入口逐 token 一致。
 
-#### F2：pixtral 的强制 BOS 没有实现
+#### F2：强制 BOS 的**优先级**与 llama.cpp 相反 ✅ 已修
 
-`src/core/tokenizer/mod.rs:557-561` 的注释写着 llama.cpp 对 llama3 预分词家族
+> **更正（2026-11-05，做 30B 适配时重新核对）**：本条原先写「pixtral 的强制 BOS
+> 没有实现 → Dory 的提示少了 `<s>`」，**结论是错的**。Dory 的 GGUF 明写
+> `add_bos_token = false`，参考实现因此**不加** BOS，仓库也没加 —— 两边一致。
+> 真正错的是**优先级**。
+
+`src/core/tokenizer/mod.rs` 的注释写着 llama.cpp 对 llama3 预分词家族
 （含 **pixtral**）强制 `add_bos = true`，但实现里 `force_add_bos = true` **只给了
-falcon-h1**（`mod.rs:589-592`）。Dory 的 GGUF 写 `add_bos_token = false`，于是
-本仓库的 Dory 提示里没有 BOS；而 Dory 的参考实现（NVIDIA 的 llama.cpp fork
-`98a74c97`，`src/llama-vocab.cpp:2286-2296`）对 `tokenizer_pre == "pixtral"`
-明确 `add_bos = true`（上游 master 同理）。
+falcon-h1**，而且取值写成 `bool_meta(add_bos_token)? || forced_add_bos` ——
+**强制值赢过 GGUF**。
 
-影响面是整个 `PreTokenizer::LlamaBpe` 家族（pixtral / llama-bpe / dbrx /
-exaone / tekken）。Dory 的 oracle 对拍是**喂 token id** 的，验的是前向不是提示
-构造，所以这条一直没被抓到。
+llama.cpp 的真实语义（上游 master 与 NVIDIA 的 Dory fork `98a74c97`
+**完全一致**，`src/llama-vocab.cpp`）是两步：
 
-修法：把 `force_add_bos` 扩展到整个家族，并补一个「提示第一个 token 是 BOS」的断言。
+1. pre 分词器分支给**默认值**（pixtral / tekken → `add_bos = true`）；
+2. GGUF 的 key **覆盖**默认值，连 `false` 都赢：
+   ```c
+   bool temp = true;
+   if (ml.get_key(LLM_KV_TOKENIZER_ADD_BOS, temp, false)) { add_bos = temp; }
+   ```
+
+所以应该是「**key 存在则用 key，key 缺失则用 pre 默认值**」。
+
+| GGUF | `pre` | `add_bos_token` | llama.cpp | 修正前仓库 |
+|---|---|---|---|---|
+| Dory 1.0 4B | `pixtral` | 有，`false` | `false` | `false` ✅ |
+| Nemotron-3-Nano 30B | `pixtral` | **无** | `true` | `false` ❌ |
+| Nemotron-3-Nano 4B | — | `true` | `true` | `true` ✅ |
+
+**缺 BOS 的是 key 缺失的情况**，30B 正是这一类。顺带修正前对 **falcon-h1**
+也是错的（仓库无条件强制 BOS，参考实现里 GGUF 的 `false` 会盖掉它）。
+
+修法（已实施）：`add_bos` 改成「key 存在则用 key，否则用 `forced_add_bos`」；
+`forced_add_bos` 补齐 llama.cpp 的表（本仓库支持的 pre 里是 `llama-bpe` /
+`pixtral` / `tekken` / `lfm2` / `falcon-h1`；`exaone` / `exaone4` /
+`exaone-moe` **不在**表里）。回归测试 `core::tokenizer::tests` 三条：
+`pixtral_defaults_to_adding_bos` / `gguf_add_bos_token_overrides_the_pretokenizer_default` /
+`gguf_add_bos_token_true_adds_bos_without_a_default`。
+
+Dory 的 oracle 对拍是**喂 token id** 的，验的是前向不是提示构造，所以这条一直
+没被抓到；30B 这边同样的道理，提示构造要单独对 token id。
 
 #### F3：`--compute vulkan --jev` 对 Dory 打出的「没有完整设备路径」提示是错的
 
