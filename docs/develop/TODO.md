@@ -3548,30 +3548,31 @@ if state.as_ref().is_none_or(|cached| {
 
 ---
 
-### TODO-050: `cargo build --all-targets` 在 main 上就失败，`cargo test`（不带 `--lib`）跑不起来
+### TODO-050: CI 不构建 `--all-targets`，集成测试的编译期断裂没人拦
 
-**现象**：
+**原现象**（已修）：`cargo build --all-targets` 在 main 上失败 ——
 
 ```
 error[E0063]: missing fields `sway_sampling_coef` and `time_grid` in initializer of `AukOptions`
 error: could not compile `rust-model-inference` (test "auk_flash_smoke") due to 1 previous error
 ```
 
-`cargo build --all-targets` 退出码 101 → **不带 `--lib` 的 `cargo test` 会先在编译期
-失败**，整套集成测试（`tests/*.rs`）跑不到。CI 因此不受影响：`.github/workflows/ci.yml`
-只 `cargo check --features vulkan --lib/--bin/--examples` 加几个点名的
-`cargo test --test <name>`，**从不构建 `--all-targets`**。
+不带 `--lib` 的 `cargo test` 会先在编译期失败，整套集成测试（`tests/*.rs`）跑不到。
+**已修**：`tests/auk_*` 的 `AukOptions` 构造补回了 recipe（AuK-Base 用
+`sway_sampling_coef: Some(-1.0)`，AuK-Flash 用 `time_grid: Some(FLASH_TIME_GRID)`），
+`cargo build --all-targets` 现在退出码 0 ✓（2026-11-05 在 `NewModelCheck` 上实测）。
 
-**归属**：`tests/auk_flash_smoke.rs` 与 `AukOptions` 的字段变更不同步，出自 AuK 那条线，
-与 ZDTaichu5.0 分支无关（该分支只碰 ZDT / qwen3 vision / app 接线，见
-`git diff --stat origin/main..HEAD`）。
+**剩下的**：CI 看不见这类问题。`.github/workflows/ci.yml` 只
+`cargo check --features vulkan --lib/--bin/--examples` 加几个点名的
+`cargo test --test <name>`，**从不构建 `--all-targets`** → 一个测试文件写错字段，
+CI 照样绿。
 
 **待办**：
 
-1. 给 `AukOptions` 的构造补上 `sway_sampling_coef` / `time_grid`（或用 `..Default::default()`），
-   让 `--all-targets` 恢复可编译。
-2. CI 加一条 `cargo build --locked --all-targets`（或 `cargo test --locked --no-run`），
-   否则这类编译期断裂还会再发生 —— 参见 TODO-026（CI 根本不跑测试）。
+1. CI 加一条 `cargo build --locked --all-targets`（或 `cargo test --locked --no-run`），
+   让集成测试的编译期断裂当场变红 —— 参见 TODO-026（CI 根本不跑测试）。
+2. `AukOptions` 的 recipe 字段没有默认值，容易漏填：考虑给 `sway_sampling_coef` /
+   `time_grid` 一个与 pipeline 默认一致的 `Default`，或改成构造期必填的 builder。
 
 **关联**：`tests/auk_flash_smoke.rs`、`src/models/auk*` 的 `AukOptions`、
 `.github/workflows/ci.yml`。
