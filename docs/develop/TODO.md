@@ -552,6 +552,17 @@ ggml-org/llama.cpp 的一部分**——它们是 `microsoft/BitNet` 私有 fork 
     - 无损载荷/layout/token IDs 使用精确检查；量化、低精度舍入、近似激活使用明确数值误差界限。
     - 未覆盖：**Intern-Decision-4B 真实权重**（转换器已支持并校验形状，但引擎的 Qwen3.5 recurrent
       投影尚不接受该 SSM 形状，暂时不能推理）、GPU 数值对齐、性能基准。
+- [x] **ZDTaichu5.0-9B 适配与真实权重数值对齐** — `qwen35` 文本塔 + `nemotron_v2_vl`
+      投影（RADIOv4-H 视觉塔 + ReLU 平方 MLP 头）。引擎侧新增 `src/models/zdt/`：
+      32 层 RADIO / 1280 hidden / 10 registers / pixel-shuffle scale=2，并修正 Q 读取、
+      register 前缀搬移越界与 FFN 残差归一化；loader 拒绝错误形状与载荷。
+      投影家族 `nemotron_v2_vl` 只接受 `qwen35` 塔，且只支持图像输入。
+      精确分词、真实文本与图像 CLI 通过；全视觉投影 relative L2=0.00035072
+      （权重精确扩为 F32 的参考）/0.00493116（原始 BF16 参考）。
+      固定 llama.cpp Oracle 的完整输出对照见
+      [复现记录](../../tools/oracle/pr169/README.md) 和
+      [哈希/指标](../../tools/oracle/pr169/verification.json)。
+    - 未覆盖：GPU 数值对齐、视频与音频输入、性能基准。
 
 ---
 
