@@ -674,6 +674,15 @@ pub(crate) fn required_activation_contracts(
 pub(crate) enum RopeLayout {
     Neox,
     Interleaved,
+    /// Qwen3-VL's M-RoPE.
+    ///
+    /// The pairing is split-half, exactly like NeoX, so the shader rotates
+    /// the same pairs. It differs in the *rounding*: the CPU's
+    /// `rope_mrope_interleaved` fuses the multiply-add on every
+    /// architecture, while `rope_neox_inplace` deliberately avoids FMA on
+    /// x86 to stay bit-exact with the pinned ggml reference. So this
+    /// variant asks the shader to fuse even where the NeoX path would not.
+    MropeInterleaved,
 }
 
 pub(crate) fn fill_rope_coefficients(
@@ -682,7 +691,7 @@ pub(crate) fn fill_rope_coefficients(
     freq_base: f32,
     layout: RopeLayout,
 ) {
-    if layout == RopeLayout::Neox {
+    if layout != RopeLayout::Interleaved {
         return fill_rope_neox(coefficients, position, freq_base);
     }
     let half = coefficients.len() / 2;
@@ -707,6 +716,57 @@ pub(crate) fn fill_rope_neox(coefficients: &mut [f32], position: usize, freq_bas
         coefficients[index] = cosine;
         coefficients[index + half] = sine;
         theta *= scale;
+    }
+}
+
+/// Host-side M-RoPE coefficient table for Qwen3-VL's `rope_mrope_interleaved`.
+///
+/// The table layout is the NeoX one -- `half` cosines then `half` sines --
+/// because Qwen3-VL's M-RoPE pairs are split-half too: the rotation is
+/// `(head[pair], head[pair + n_rope_dims / 2])`, the same pairing the
+/// `qk_norm_rope` shader already applies in NeoX mode. Only the *axis* each
+/// pair uses differs, and that is what this function computes.
+///
+/// The axis rule and the theta recurrence are copied from
+/// `crate::ops::rope_mrope_interleaved` so the GPU applies the same angles
+/// the CPU does: the `sector % 3` selection with the `3 * sections[k]`
+/// thresholds, and every axis decaying by `theta_scale` after each pair.
+pub(crate) fn fill_rope_mrope_interleaved(
+    coefficients: &mut [f32],
+    positions: [usize; 4],
+    sections: [i32; 4],
+    freq_base: f32,
+    n_rope_dims: usize,
+) {
+    let half = coefficients.len() / 2;
+    let pair_count = n_rope_dims / 2;
+    // Qwen3-VL rotates the whole head, so the table covers every pair the
+    // shader rotates. A narrower `n_rope_dims` would need a shader that
+    // leaves the tail alone, which does not exist.
+    debug_assert_eq!(
+        half, pair_count,
+        "Qwen3-VL M-RoPE must rotate the whole head dimension",
+    );
+    let section_pairs: usize = sections.iter().map(|&value| value as usize).sum();
+    let theta_scale = freq_base.powf(-2.0 / n_rope_dims as f32);
+    let mut theta = positions.map(|value| value as f32);
+    for pair in 0..pair_count {
+        let sector = pair % section_pairs;
+        let axis = if sector % 3 == 1 && sector < 3 * sections[1] as usize {
+            1
+        } else if sector % 3 == 2 && sector < 3 * sections[2] as usize {
+            2
+        } else if sector % 3 == 0 && sector < 3 * sections[0] as usize {
+            0
+        } else {
+            3
+        };
+        let (cosine, sine) = crate::ops::rope_sin_cos(theta[axis]);
+        coefficients[pair] = cosine;
+        coefficients[pair + half] = sine;
+        for value in &mut theta {
+            *value *= theta_scale;
+        }
     }
 }
 
@@ -765,6 +825,10 @@ pub(crate) struct ArenaLayout {
     pub(crate) kv_delta_k: ArenaRegion,
     pub(crate) kv_delta_v: ArenaRegion,
     pub(crate) rope: ArenaRegion,
+    /// Qwen3-VL's DeepStack planes for the current chunk, laid out
+    /// `[layer][row][n_embd]` so one layer's plane is a contiguous block of
+    /// `rows * n_embd` floats.
+    pub(crate) deepstack: ArenaRegion,
     total_size: usize,
 }
 
@@ -800,6 +864,7 @@ impl ArenaLayout {
             config.n_layer,
             capacity,
             max_rows,
+            config.n_deepstack_layers,
         )
     }
 
@@ -822,6 +887,7 @@ impl ArenaLayout {
             config.layers,
             capacity,
             max_rows,
+            0,
         )
     }
 
@@ -837,7 +903,7 @@ impl ArenaLayout {
         capacity: usize,
     ) -> Result<Self, VulkanError> {
         Self::build_rows(
-            n_embd, n_ff, n_head, n_head_kv, head_dim, vocab, n_layer, capacity, 1,
+            n_embd, n_ff, n_head, n_head_kv, head_dim, vocab, n_layer, capacity, 1, 0,
         )
     }
 
@@ -852,6 +918,7 @@ impl ArenaLayout {
         n_layer: usize,
         capacity: usize,
         rows: usize,
+        n_deepstack_layers: usize,
     ) -> Result<Self, VulkanError> {
         if [
             n_embd, n_ff, n_head, n_head_kv, head_dim, vocab, n_layer, capacity, rows,
@@ -902,6 +969,10 @@ impl ArenaLayout {
         let kv_delta_k = f32_region(&mut cursor, kv_delta_len)?;
         let kv_delta_v = f32_region(&mut cursor, kv_delta_len)?;
         let rope = f32_region(&mut cursor, product("RoPE rows", &[rows, head_dim])?)?;
+        let deepstack = f32_region(
+            &mut cursor,
+            product("deepstack rows", &[n_deepstack_layers, rows, n_embd])?,
+        )?;
 
         Ok(Self {
             x,
@@ -926,11 +997,12 @@ impl ArenaLayout {
             kv_delta_k,
             kv_delta_v,
             rope,
+            deepstack,
             total_size: cursor,
         })
     }
 
-    pub(crate) fn regions(&self) -> [ArenaRegion; 22] {
+    pub(crate) fn regions(&self) -> [ArenaRegion; 23] {
         [
             self.x,
             self.normed,
@@ -954,6 +1026,7 @@ impl ArenaLayout {
             self.kv_delta_k,
             self.kv_delta_v,
             self.rope,
+            self.deepstack,
         ]
     }
 
@@ -4629,7 +4702,12 @@ impl<'a> Qwen3Ops<'a> {
             u32::from(normalize_q)
                 | (u32::from(normalize_k) << 1)
                 | (u32::from(layout == RopeLayout::Interleaved) << 2)
-                | (u32::from(crate::ops::has_neon()) << 3),
+                | (u32::from(match layout {
+                    // The CPU's M-RoPE rotation fuses on every architecture;
+                    // the NeoX path only fuses where the CPU does.
+                    RopeLayout::MropeInterleaved => true,
+                    _ => crate::ops::has_neon(),
+                }) << 3),
             eps.to_bits(),
             as_u32(rows, "Q/K rows")?,
             as_u32(q_count, "Q stride")?,
@@ -8183,7 +8261,7 @@ fn check_rope_exact(context: &VulkanContext) -> Result<(), String> {
     const DIM: usize = 128;
     const HEADS: usize = 16;
     const ROWS: usize = 17;
-    let layout = ArenaLayout::build_rows(DIM * HEADS, DIM, HEADS, HEADS, DIM, 1, 1, ROWS, ROWS)
+    let layout = ArenaLayout::build_rows(DIM * HEADS, DIM, HEADS, HEADS, DIM, 1, 1, ROWS, ROWS, 0)
         .map_err(|error| error.to_string())?;
     let input: Vec<_> = (0..ROWS * HEADS * DIM)
         .map(|index| ((index * 43 % 191) as f32 - 95.0) / 37.0)
@@ -8246,7 +8324,7 @@ fn check_rope_exact(context: &VulkanContext) -> Result<(), String> {
 fn check_rms_norm_exact(context: &VulkanContext) -> Result<(), String> {
     const WIDTH: usize = 1024;
     const ROWS: usize = 129;
-    let layout = ArenaLayout::build_rows(WIDTH, WIDTH, 1, 1, 32, 1, 1, 1, ROWS)
+    let layout = ArenaLayout::build_rows(WIDTH, WIDTH, 1, 1, 32, 1, 1, 1, ROWS, 0)
         .map_err(|error| error.to_string())?;
     let input: Vec<_> = (0..WIDTH * ROWS)
         .map(|index| {
@@ -8342,7 +8420,7 @@ fn check_qwen35_conv_exact(context: &VulkanContext) -> Result<(), String> {
             crate::models::qwen35::trunk::util::l2_norm(head, 1e-6);
         }
     }
-    let layout = ArenaLayout::build_rows(CONV, CONV * TAPS, 1, 1, DIM, 1, 1, ROWS, ROWS)
+    let layout = ArenaLayout::build_rows(CONV, CONV * TAPS, 1, 1, DIM, 1, 1, ROWS, ROWS, 0)
         .map_err(|error| error.to_string())?;
     let buffer = unsafe { context.upload_static(bytemuck::cast_slice(&weight)) }
         .map_err(|error| error.to_string())?;
@@ -8398,7 +8476,7 @@ fn check_qwen35_conv_exact(context: &VulkanContext) -> Result<(), String> {
 fn check_qwen35_ssm_reduction(context: &VulkanContext) -> Result<(), String> {
     const DIM: usize = 128;
     const ROWS: usize = 2;
-    let layout = ArenaLayout::build_rows(256, DIM * DIM, 1, 1, DIM, 1, 1, ROWS, ROWS)
+    let layout = ArenaLayout::build_rows(256, DIM * DIM, 1, 1, DIM, 1, 1, ROWS, ROWS, 0)
         .map_err(|error| error.to_string())?;
     let input = |count: usize, seed: usize| -> Vec<f32> {
         (0..count)
@@ -10019,7 +10097,7 @@ mod tests {
     fn qwen3_chunk_attention_validates_all_spans_before_recording() {
         use super::{ArenaLayout, ArenaRegion, Qwen3Ops, TokenCommands, VulkanContext};
         let context = VulkanContext::new().unwrap();
-        let layout = ArenaLayout::build_rows(32, 32, 2, 1, 16, 8, 2, 5, 3).unwrap();
+        let layout = ArenaLayout::build_rows(32, 32, 2, 1, 16, 8, 2, 5, 3, 0).unwrap();
         let ops = Qwen3Ops::new(&context, layout, 1).unwrap();
         ops.write_f32(layout.scores, &[9.0; 30]).unwrap();
         let before = ops.read_f32(layout.scores, 30).unwrap().to_vec();
@@ -11393,6 +11471,90 @@ mod tests {
                     "dimension={dim} position={position}"
                 );
             }
+        }
+    }
+
+    /// The Qwen3-VL M-RoPE table must reproduce the CPU transform bit for
+    /// bit: the GPU applies the angles from this table, so a different axis
+    /// rule or a different theta recurrence would silently rotate the wrong
+    /// pairs. The CPU output *is* the table when the first half of the head
+    /// is 1.0 and the second half 0.0, because the rotation then yields
+    /// `head[pair] = cos` and `head[pair + half] = sin`.
+    #[test]
+    fn vulkan_mrope_interleaved_coefficients_match_cpu_recurrence() {
+        use super::*;
+        for dim in [32, 64, 128] {
+            for positions in [[0; 4], [3; 4], [7, 11, 13, 17]] {
+                let mut actual = vec![0.0; dim];
+                fill_rope_mrope_interleaved(
+                    &mut actual,
+                    positions,
+                    [24, 20, 20, 0],
+                    5_000_000.0,
+                    dim,
+                );
+                let mut expected = vec![0.0; dim];
+                expected[..dim / 2].fill(1.0);
+                crate::ops::rope_mrope_interleaved(
+                    &mut expected,
+                    positions,
+                    [24, 20, 20, 0],
+                    dim,
+                    5_000_000.0,
+                    dim,
+                );
+                assert_eq!(
+                    actual.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                    expected.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                    "dimension={dim} positions={positions:?}"
+                );
+            }
+        }
+    }
+
+    /// The M-RoPE table is the NeoX layout, not the adjacent-pair one: the
+    /// `interleaved` shader flag rotates `(2i, 2i+1)`, which is the Z-Image
+    /// DiT layout and would be wrong here.
+    #[test]
+    fn vulkan_mrope_interleaved_uses_the_split_half_pairing() {
+        use super::*;
+        let dim = 128;
+        let positions = [3, 5, 7, 9];
+        let mut coefficients = vec![0.0; dim];
+        fill_rope_mrope_interleaved(
+            &mut coefficients,
+            positions,
+            [24, 20, 20, 0],
+            5_000_000.0,
+            dim,
+        );
+        // The cosine of pair `p` lives at `p` and its sine at `p + half`,
+        // so the split-half pairs are (p, p + 64).
+        let half = dim / 2;
+        let mut head = vec![0.0; dim];
+        for pair in 0..half {
+            head[pair] = 1.0;
+        }
+        let mut rotated = head.clone();
+        crate::ops::rope_mrope_interleaved(
+            &mut rotated,
+            positions,
+            [24, 20, 20, 0],
+            dim,
+            5_000_000.0,
+            dim,
+        );
+        for pair in 0..half {
+            assert_eq!(
+                rotated[pair].to_bits(),
+                coefficients[pair].to_bits(),
+                "pair {pair} cosine"
+            );
+            assert_eq!(
+                rotated[pair + half].to_bits(),
+                coefficients[pair + half].to_bits(),
+                "pair {pair} sine"
+            );
         }
     }
 

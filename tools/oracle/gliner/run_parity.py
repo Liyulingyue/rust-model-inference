@@ -22,7 +22,7 @@ def main() -> None:
     names = [args.case] if args.case else ["refund", "multitask", "examples", "long-position"]
     for name in names:
         request = fixtures / f"{name}.json"
-        payload = json.loads(request.read_text())
+        payload = json.loads(request.read_text(encoding="utf-8"))
         official = args.output / f"{name}.official.json"
         rust = args.output / f"{name}.rust.jsonl"
         subprocess.run(

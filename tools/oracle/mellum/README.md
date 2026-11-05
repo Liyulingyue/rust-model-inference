@@ -261,7 +261,7 @@ against 2.6 ms per token), so leaving it on the CPU costs about 1 ms per
 token. What is missing is weight residency (the device path rebuilds its
 runtime when the shape changes, so a prefill and a decode each re-upload
 the weights — 2.9 GB per prefill) and one submission per layer instead of
-one per projection; see TODO-049.
+one per projection; see TODO-051.
 
 ### The batched prefill
 
@@ -374,7 +374,7 @@ reaches **163 GB/s**, above the CUDA number. Two consequences:
 * a Q8_0 decode at the kernel's 163 GB/s would be 14 ms/token, i.e. **70
   tok/s against the CPU's 22.7 tok/s** — the device wins Mellum's decode by
   3x if the weights stay resident and the projections are submitted per
-  layer instead of per projection. See TODO-049.
+  layer instead of per projection. See TODO-051.
 
 ## Entry points
 

@@ -421,7 +421,7 @@ LFM2 / LFM2.5 / Spark / Nemotron-H / Hunyuan / LFM2-MoE），每个 scorer 实�
       dispatch（每层 4 次而不是 28 次）→ 44 → 26.5 ms/token（1.66×）。不需要新的 pool
       原语，现有 `compute` 就够（closure 里顺序做多个投影，各自按 `ith/nth` 切分）。
       风险是位序和 DRAM 局部性；收益的绝对值与机器无关，相对值随 CPU 带宽上升。
-      详见 [TODO-050](#todo-050-decode-每个投影一次-pool-dispatch784-次里-26-次的开销大于活)。
+      详见 [TODO-052](#todo-052-decode-每个投影一次-pool-dispatch784-次里-26-次的开销大于活)。
 
 ## 入口面覆盖（2026-10-19 审计）
 
@@ -619,6 +619,23 @@ ggml-org/llama.cpp 的一部分**——它们是 `microsoft/BitNet` 私有 fork 
 - [ ] 更多量化格式支持（Q4_K, Q5_K 等）
 - [ ] 完善 GGUfRS 导出功能
 - [ ] GGUF 导出支持
+- [x] **PR #169 四组模型适配与真实权重数值对齐**：EmbeddingGemma-2 补齐文本/图像/音频到 768 维 embedding；PhysBrain1.5-2B 修正转换精度、token 类型和 RoPE；Occamy 复用既有 qwen35moe；修复实际 Qwen3.5 视觉入口 NEON LayerNorm 漏算半行的问题。真实 CLI、模型契约、固定 llama.cpp/HF Oracle 的完整输出对照见 [复现记录](../../tools/oracle/pr169/README.md) 和 [哈希/指标](../../tools/oracle/pr169/verification.json)。
+    - 无损载荷/layout/token IDs 使用精确检查；量化、低精度舍入、近似激活使用明确数值误差界限，不再把音频逐位相同作为本次验收要求。
+    - Occamy 标量参考 8 步 greedy 一致；默认近似路径在候选分数接近时有措辞分叉，已用相同 token 历史验证完整 logits 并保留差异。
+    - 未覆盖：GPU 数值对齐、真实机器人动作执行和性能基准。Qwen3-VL 保留 F32 权重缓存，内存和耗时需另行测量。
+- [ ] **RLCD constrained-decoding 调度器**（harshatheg/Qwen-2.5-1B-RLCD 的 value-token 切片路径）。
+      **不做**：权重（复用 `Qwen2.5-1.5B-Instruct-Q4_K_M.gguf`，已 Verified）。
+      **不做**：转换器（`tools/converter/rlcd/` 不存在意义——RLCD 没有 LoRA/分类头/微调 checkpoint，
+      只有调度逻辑）。
+      **可能要做**：~200 行 Rust 调度器——KV cache broadcast（M 份复制，每 field 一份）+
+      sub-vocab logit mask（`P(field_value | ctx) = softmax(logits[field_token_ids])`）+
+      多 token value 的 tree disambiguation。
+      **当前等价替代**：JEV 字母投票（`docs/develop/jev.md:380-430`，`P(A|ctx)/P(B|ctx)/...`），
+      数学上与 RLCD value-token 切片等价（都是 `softmax` over K tokens），单 token value /
+      instruction-tuned 模型下完全够用。
+      **触发条件**：用户要"原始 value 概率"、或模型无 instruction tuning（旧 base LLaMA/Qwen-1
+      /Qwen-1.5 base 不严格遵循字母指令）、或多 token value 的概率分布本身有意义——三个条件
+      任一成立时再开工。
 - [x] **Intern-Decision-0.8B 适配与真实权重数值对齐** — 转换器写出 `qwen35` arch 与
       `qwen3vl_merger` 投影，0.8B 在 CPU 上文本/图像/CLI/HTTP/JEV 全部跑通；引擎侧无需模型专属代码。
       真实 CLI、模型契约、固定 llama.cpp Oracle 的完整输出对照见
@@ -3531,34 +3548,35 @@ if state.as_ref().is_none_or(|cached| {
 
 ---
 
-### TODO-050: `cargo build --all-targets` 在 main 上就失败，`cargo test`（不带 `--lib`）跑不起来
+### TODO-050: CI 不构建 `--all-targets`，集成测试的编译期断裂没人拦
 
-**现象**：
+**原现象**（已修）：`cargo build --all-targets` 在 main 上失败 ——
 
 ```
 error[E0063]: missing fields `sway_sampling_coef` and `time_grid` in initializer of `AukOptions`
 error: could not compile `rust-model-inference` (test "auk_flash_smoke") due to 1 previous error
 ```
 
-`cargo build --all-targets` 退出码 101 → **不带 `--lib` 的 `cargo test` 会先在编译期
-失败**，整套集成测试（`tests/*.rs`）跑不到。CI 因此不受影响：`.github/workflows/ci.yml`
-只 `cargo check --features vulkan --lib/--bin/--examples` 加几个点名的
-`cargo test --test <name>`，**从不构建 `--all-targets`**。
+不带 `--lib` 的 `cargo test` 会先在编译期失败，整套集成测试（`tests/*.rs`）跑不到。
+**已修**：`tests/auk_*` 的 `AukOptions` 构造补回了 recipe（AuK-Base 用
+`sway_sampling_coef: Some(-1.0)`，AuK-Flash 用 `time_grid: Some(FLASH_TIME_GRID)`），
+`cargo build --all-targets` 现在退出码 0 ✓（2026-11-05 在 `NewModelCheck` 上实测）。
 
-**归属**：`tests/auk_flash_smoke.rs` 与 `AukOptions` 的字段变更不同步，出自 AuK 那条线，
-与 ZDTaichu5.0 分支无关（该分支只碰 ZDT / qwen3 vision / app 接线，见
-`git diff --stat origin/main..HEAD`）。
+**剩下的**：CI 看不见这类问题。`.github/workflows/ci.yml` 只
+`cargo check --features vulkan --lib/--bin/--examples` 加几个点名的
+`cargo test --test <name>`，**从不构建 `--all-targets`** → 一个测试文件写错字段，
+CI 照样绿。
 
 **待办**：
 
-1. 给 `AukOptions` 的构造补上 `sway_sampling_coef` / `time_grid`（或用 `..Default::default()`），
-   让 `--all-targets` 恢复可编译。
-2. CI 加一条 `cargo build --locked --all-targets`（或 `cargo test --locked --no-run`），
-   否则这类编译期断裂还会再发生 —— 参见 TODO-026（CI 根本不跑测试）。
+1. CI 加一条 `cargo build --locked --all-targets`（或 `cargo test --locked --no-run`），
+   让集成测试的编译期断裂当场变红 —— 参见 TODO-026（CI 根本不跑测试）。
+2. `AukOptions` 的 recipe 字段没有默认值，容易漏填：考虑给 `sway_sampling_coef` /
+   `time_grid` 一个与 pipeline 默认一致的 `Default`，或改成构造期必填的 builder。
 
 **关联**：`tests/auk_flash_smoke.rs`、`src/models/auk*` 的 `AukOptions`、
 `.github/workflows/ci.yml`。
-### TODO-049: Mellum 的 GPU 路径能跑但打不过 CPU——decode 是单行投影，设备带宽只有 NEON 的一半
+### TODO-051: Mellum 的 GPU 路径能跑但打不过 CPU——decode 是单行投影，设备带宽只有 NEON 的一半
 
 Mellum 12B-A2.5B（Q8_0，12.9 GB）在 GB10 上接 Vulkan device 路径，
 **功能上没问题**：`RMI_PARITY_TRACE` 双后端对拍 15466 个检查点**逐位一致**
@@ -3717,7 +3735,7 @@ CPU 5672–5742 ms、设备转置 5134–5951 ms，**打平**。原因：
    （nvidia-smi 采样 79–92%），上面的对比在 GPU 0% 利用率下测得，但仍需在独占时复测。
 
 
-### TODO-050: decode 每个投影一次 pool dispatch，784 次里 26 次的开销大于活
+### TODO-052: decode 每个投影一次 pool dispatch，784 次里 26 次的开销大于活
 
 #### 现象与账单
 

@@ -825,6 +825,24 @@ pub struct VisionLayer<'a> {
 }
 
 impl<'a> VisionEncoder<'a> {
+    /// Load only the config (no weights). Used by the multimodal
+    /// dispatcher to read image_size / image_min_pixels / image_max_pixels
+    /// without pulling the mmproj weights through multiple `from_source`
+    /// calls.
+    pub(crate) fn load_config_only<S: TensorSource + ?Sized>(
+        source: &S,
+    ) -> Result<ClipVisionConfig, String> {
+        let mut config = ClipVisionConfig::from_source(source)?;
+        if let Some(info) = source.tensor_info("v.blk.0.ffn_up.weight") {
+            if info.dims.len() == 2 {
+                if let Ok(width) = usize::try_from(info.dims[1]) {
+                    config.n_ff = width;
+                }
+            }
+        }
+        Ok(config)
+    }
+
     pub fn from_source<S: TensorSource + ?Sized>(
         source: &'a S,
         pool: Arc<ComputePool>,

@@ -91,7 +91,14 @@ unsafe fn argmax_f32_avx2(values: &[f32]) -> usize {
     _mm256_storeu_ps(buf_val.as_mut_ptr(), v_best_val);
     _mm256_storeu_si256(buf_idx.as_mut_ptr() as *mut __m256i, v_best_idx);
     for lane in 0..8 {
-        if buf_val[lane] > best_val {
+        if buf_idx[lane] < 0 {
+            continue;
+        }
+        // The lanes hold the per-lane maxima, so lane order is not index
+        // order: lane 0 may carry a later index than lane 6. Resolve ties
+        // by the lower absolute index so the result matches the scalar
+        // path, which scans left to right and keeps the first maximum.
+        if buf_val[lane] > best_val || (buf_val[lane] == best_val && buf_idx[lane] < best_idx) {
             best_val = buf_val[lane];
             best_idx = buf_idx[lane];
         }
@@ -124,11 +131,16 @@ unsafe fn argmax_f32_neon(values: &[f32]) -> usize {
     let mut v_best_idx = vdupq_n_s32(-1i32);
     let lane_inc = vdupq_n_s32(4);
     let mut lane_offset = vdupq_n_s32(0);
+    // The index of a lane inside its own 4-wide chunk. Without it every
+    // lane of a chunk carried the chunk base, so the reduction could not
+    // tell the four candidates apart and the reported index was wrong for
+    // any input whose maximum was not in the first lane.
+    let lane_ids = vld1q_s32([0i32, 1, 2, 3].as_ptr());
 
     let mut i = 0;
     while i < n4 {
         let v = vld1q_f32(values.as_ptr().add(i));
-        let idx = lane_offset;
+        let idx = vaddq_s32(lane_offset, lane_ids);
         // vminq_f32 + vceqq: where v > v_best_val, use new (v, idx);
         // otherwise keep running (v_best_val, v_best_idx). Bitwise
         // blend via vbslq.
@@ -139,15 +151,23 @@ unsafe fn argmax_f32_neon(values: &[f32]) -> usize {
         i += 4;
     }
 
-    let mut best_val = vmaxvq_f32(v_best_val);
+    let mut best_val = f32::NEG_INFINITY;
     let mut buf_val = [0.0f32; 4];
     let mut buf_idx = [0i32; 4];
     vst1q_f32(buf_val.as_mut_ptr(), v_best_val);
     vst1q_s32(buf_idx.as_mut_ptr(), v_best_idx);
     let mut best_idx = 0i32;
     for lane in 0..4 {
-        if buf_val[lane] == best_val {
-            best_idx = best_idx.max(buf_idx[lane]);
+        if buf_idx[lane] < 0 {
+            continue;
+        }
+        // The lanes hold the per-lane maxima, so lane order is not index
+        // order. Resolve ties by the lower absolute index so the result
+        // matches the scalar path, which scans left to right and keeps the
+        // first maximum.
+        if buf_val[lane] > best_val || (buf_val[lane] == best_val && buf_idx[lane] < best_idx) {
+            best_val = buf_val[lane];
+            best_idx = buf_idx[lane];
         }
     }
 
@@ -208,15 +228,39 @@ mod tests {
     }
 
     #[test]
+    fn ties_across_simd_lanes_pick_the_lowest_index() {
+        // The SIMD paths keep a per-lane running max, so the same maximum can
+        // end up in two different lanes at two different positions. Lane
+        // order is not index order, so the reduction has to compare the
+        // absolute indices rather than trusting the lane it scans first.
+        let mut values = vec![0.0f32; 1024];
+        values[22] = 2.0;
+        values[216] = 2.0;
+        assert_argmax_matches_scalar(&values, 22);
+    }
+
+    #[test]
     fn large_random() {
         let values: Vec<f32> = (0..1024)
             .map(|i| ((i * 17 + 13) % 97) as f32 * 0.07 - 4.5)
             .collect();
+        // The pattern repeats every 97 elements, so the maximum is reached
+        // several times with identical values. `max_by` would return the last
+        // of them; argmax_f32 breaks ties by lowest index, so the reference
+        // has to keep the first one.
         let scalar = values
             .iter()
             .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-            .unwrap()
+            .fold(
+                (0usize, f32::NEG_INFINITY),
+                |(best, best_value), (index, value)| {
+                    if *value > best_value {
+                        (index, *value)
+                    } else {
+                        (best, best_value)
+                    }
+                },
+            )
             .0;
         assert_eq!(argmax_f32(&values), scalar);
     }

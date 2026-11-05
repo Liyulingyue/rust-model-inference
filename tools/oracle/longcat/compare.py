@@ -7,8 +7,8 @@ import struct
 
 def compare(oracle_path, rust_path):
     oracle_path, rust_path = pathlib.Path(oracle_path), pathlib.Path(rust_path)
-    oracle = [json.loads(line) for line in oracle_path.read_text().splitlines()]
-    rust = [json.loads(line) for line in rust_path.read_text().splitlines()]
+    oracle = [json.loads(line) for line in oracle_path.read_text(encoding="utf-8").splitlines()]
+    rust = [json.loads(line) for line in rust_path.read_text(encoding="utf-8").splitlines()]
     if len(oracle) != len(rust):
         raise AssertionError(f'checkpoint count: Oracle {len(oracle)}, Rust {len(rust)}')
     names = ['longcat.prelude.img', 'longcat.prelude.txt', 'longcat.prelude.vec']
