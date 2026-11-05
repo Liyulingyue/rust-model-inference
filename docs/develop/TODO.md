@@ -624,6 +624,14 @@ ggml-org/llama.cpp 的一部分**——它们是 `microsoft/BitNet` 私有 fork 
       真实 CLI、模型契约、固定 llama.cpp Oracle 的完整输出对照见
       [复现记录](../../tools/oracle/intern_decision/README.md) 和
       [哈希/指标](../../tools/oracle/intern_decision/verification.json)。
+- [x] **Occamy-1.0 适配与真实权重数值对齐** — GGUF arch=`qwen35moe`，复用既有 Qwen3.5 MoE
+      主干与 routed/shared expert 实现，删除重复的模型专属代码；共享专家宽度按 llama.cpp 的
+      做法在 `expert_shared_feed_forward_length` 缺失时回落到 `n_ff`，并校验共享专家张量的
+      形状与载荷。官方 Q8_0 + F16 mmproj 的文本/图像 CLI 已跑通；视觉投影 relative L2=0.3362%
+      （F32 激活参考），标量参考 8 步 greedy 一致。默认近似路径在候选分数接近时有措辞分叉
+      （相同 token 历史 logits relative L2 ≤8.482%），不保证所有 greedy 相同。
+      复现记录见 [对齐记录](../../tools/oracle/pr169/README.md) 和
+      [哈希/指标](../../tools/oracle/pr169/verification.json)。
     - 无损载荷/layout/token IDs 使用精确检查；量化、低精度舍入、近似激活使用明确数值误差界限。
     - 未覆盖：**Intern-Decision-4B 真实权重**（转换器已支持并校验形状，但引擎的 Qwen3.5 recurrent
       投影尚不接受该 SSM 形状，暂时不能推理）、GPU 数值对齐、性能基准。
