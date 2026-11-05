@@ -465,9 +465,15 @@ MiniCPM-V 4.7 的 `qwen35moe`（35B-A3B）此前只在**生成面**注册，多�
       matmul 先试 `try_vulkan_rows` 再回落共享 kernel；CPU 数值不变（对 llama.cpp
       relative L2 0.00035960 → 0.00035960，差 ~1e-7），设备路径与 CPU 差 ~5e-7 且过同一组界；
       视觉投影 CPU 36.9s → 设备 27.6s（首帧含 1.6GB 权重上传）。
-      **第二步（优化）仍在**：视觉塔每个 matmul 都要把 1034x1280 的激活过一遍 host 边界
-      （130 个 matmul 往返），应让激活常驻设备、按层合并投影、走 tiled float kernel；
-      另外本机 GPU 对 9B 文本塔反而慢 2 倍（dispatch 开销占比高），批量/长上下文才是 GPU 的强项。
+      **第二步（优化）仍在，且第一步不是"激活常驻"**：trace 把 27.6s 全部解释掉了 ——
+      `GpuLinear` 的 runtime 缓存按**权重指针**分桶（`src/ops/kernel/vulkan.rs`），每个权重
+      都要重建一次管线，实测 **213ms/次 × 131 个权重 = 27.9s**（≈100%）；fence 只有
+      2.5ms × 229 = 0.57s，host↔device 传输 2.7GB ≈ 30ms，都不是瓶颈。
+      塔的权重只有约 6 种形状 → 把缓存键改成 `(format, n_in, n_out, tile_rows)` 共享，
+      创建次数从 131 降到个位数，预期 27.6s → ~2s。之后才轮到 fence 批处理
+      （`BatchedLinearRuntime::with_output_slots` + `run_group_gpu` 已支持一层的多个 matmul
+      进一个 command buffer）与激活常驻。另外本机 GPU 对 9B 文本塔反而慢 2 倍
+      （dispatch 开销占比高），批量/长上下文才是 GPU 的强项。
 - [ ] **讨论：MemoryArena 与 BlockAllocator 组合**
 - [ ] **讨论：GPU 后端架构设计** — Vulkan / wgpu / CUDA 等多后端抽象
 - [ ] **讨论：SIMD 扩展路线** — 当前 AVX2+FMA、NEON。后续可考虑 AVX-512 (高端 CPU)、ARM SVE、AVX-VNNI (int8 dot)

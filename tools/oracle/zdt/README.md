@@ -155,11 +155,24 @@ The CPU and device paths agree to about 5e-7 relative on every reference, so
 they pass the same bounds. The first device call also uploads the 1.6 GB of
 BF16 weights.
 
-The device path is still 25% faster rather than the order of magnitude the
-tower's arithmetic would allow: each of the tower's 130 matmuls moves its
-1034x1280 activation batch across the host boundary and back. Keeping the
-activations resident, batching the per-layer projections and using the tiled
-float kernel is the next step; it is tracked in `docs/develop/TODO.md`.
+The device path is still only 25% faster rather than the order of magnitude
+the tower's arithmetic would allow. The trace accounts for the whole 27.6 s:
+
+| | measured | share |
+| --- | --- | --- |
+| runtime creation | 213 ms x 131 weights = 27.9 s | ~100% |
+| fence latency | 2.5 ms x 229 submissions = 0.57 s | 2% |
+| host/device traffic | 2.7 GB = ~30 ms | 0.1% |
+
+`GpuLinear` caches its `BatchedLinearRuntime` per weight pointer, and every
+weight pays for a fresh pipeline, so the tower's 131 weights rebuild the same
+handful of shapes 131 times. The tower's weights have about six distinct
+shapes, so keying the runtime on the shape instead of the weight would cut
+the creation count by more than an order of magnitude.
+
+The activation traffic is not the problem, so keeping the activations
+resident is not the next step; the runtime cache is. That is tracked in
+`docs/develop/TODO.md`.
 
 ## The text tower
 
