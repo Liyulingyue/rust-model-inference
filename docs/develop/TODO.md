@@ -470,7 +470,7 @@ MiniCPM-V 4.7 的 `qwen35moe`（35B-A3B）此前只在**生成面**注册，多�
       都要重建一次管线，实测 **213ms/次 × 131 个权重 = 27.9s**（≈100%）；fence 只有
       2.5ms × 229 = 0.57s，host↔device 传输 2.7GB ≈ 30ms，都不是瓶颈。
       塔的权重只有约 6 种形状 → 把缓存键改成 `(format, n_in, n_out, tile_rows)` 共享，
-      创建次数从 131 降到个位数，预期 27.6s → ~2s。之后才轮到 fence 批处理
+      创建次数从 131 降到个位数，预期 27.6s → ~2s。详见 **TODO-049**。之后才轮到 fence 批处理
       （`BatchedLinearRuntime::with_output_slots` + `run_group_gpu` 已支持一层的多个 matmul
       进一个 command buffer）与激活常驻。另外本机 GPU 对 9B 文本塔反而慢 2 倍
       （dispatch 开销占比高），批量/长上下文才是 GPU 的强项。
@@ -3431,3 +3431,85 @@ arch 的**文本路**真的可用：
 
 **关联**：WeVisOne 适配分支（`codex/wevisone-vl-4b`）的 `src/main.rs` 改动与
 `docs/usage/qwen3.md` §3 的 M-RoPE 记录。
+
+---
+
+### TODO-049: `GpuLinear` 的 runtime 缓存按**权重指针**分桶，多权重模型按权重数付管线创建费
+
+**现象**：ZDTaichu5.0 的视觉塔上设备后，投影只快 25%（CPU 36.93s → 设备 27.62s）。
+一开始以为是激活往返，逐项量下来不是：
+
+| 项 | 实测 | 占比 |
+| --- | --- | --- |
+| runtime 创建 | **213ms × 131 个权重 = 27.9s** | ~100% |
+| fence 延迟 | 2.5ms × 229 次 submission = 0.57s | 2% |
+| host↔device 传输 | 写 1.21GB + 读 1.55GB ≈ 30ms | 0.1% |
+| 权重上传 | 1.64GB ≈ 1.3ms | ~0% |
+
+`BatchedLinearRuntime::new` → `Qwen3Ops::new_with_size` 每次都要建管线/描述符，
+**实测 213ms/次**（`BatchedLinearRuntime::new(ctx, 1034, 1280, 3840, 2)` 连建 10 次 = 2.13s）。
+
+**根因**：`src/ops/kernel/vulkan.rs` 的 `GpuLinear` 持有
+`state: Mutex<Option<LinearState>>`，而 `LinearState.weight` 是**权重指针**：
+
+```rust
+if state.as_ref().is_none_or(|cached| {
+    cached.weight != key || cached.spec != spec || cached.shape != shape
+})
+```
+
+每个 `Weight` 的 `VulkanKernel` 各有一个 `GpuLinear` → 每个权重一份缓存 → 第一次用这个
+权重就重建一次管线。视觉塔 131 个权重**每个只用一次** → 131 次全价创建。
+而塔的权重只有约 6 种形状（每层 4 种 × 32 + head 2 种）→ 同一形状被重复建了几十次。
+
+**影响面**：任何**权重多、每个权重用得少**的模型都中招（视觉塔、DiT、多投影塔）。
+权重少但复用多的模型（LLM 的每层权重被很多 token 复用）看不出来，因为第一次创建后
+命中缓存了。
+
+**待办**：
+
+1. 把 runtime 缓存的键从权重指针改成 `(format, n_in, n_out, tile_rows)`，进程级共享
+   （管线与权重无关，权重是 dispatch 时绑定的 buffer）。预计 ZDT 视觉投影
+   27.6s → **~2s**，创建次数 131 → 个位数。
+2. 缓存要挂在比 `GpuLinear` 更外层的地方（`GpuLinear` 是 per-weight 的），且要考虑
+   `descriptor_capacity` / `output_slots` 也进键。
+3. 改完要复核：共享 runtime 的并发安全性（多个 `Weight` 同时用同一 runtime）、显存
+   里权重 buffer 的生命周期、以及现有 GPU 路径的数值不变。
+4. 之后再看 fence 批处理（229 次 × 2.5ms = 0.57s）：`BatchedLinearRuntime::with_output_slots`
+   + `run_group_gpu` 已支持把一层的多个 matmul 记进同一个 command buffer。
+
+**不做**：激活常驻。当前传输只有 ~30ms，**不是瓶颈**；等 1、4 做完再谈。
+
+**关联**：`src/ops/kernel/vulkan.rs`（`GpuLinear::state` / `LinearState`）、
+`src/vulkan/ops.rs`（`BatchedLinearRuntime::new` → `Qwen3Ops::new_with_size`）、
+`tools/oracle/zdt/README.md` 的 device path 一节。
+
+---
+
+### TODO-050: `cargo build --all-targets` 在 main 上就失败，`cargo test`（不带 `--lib`）跑不起来
+
+**现象**：
+
+```
+error[E0063]: missing fields `sway_sampling_coef` and `time_grid` in initializer of `AukOptions`
+error: could not compile `rust-model-inference` (test "auk_flash_smoke") due to 1 previous error
+```
+
+`cargo build --all-targets` 退出码 101 → **不带 `--lib` 的 `cargo test` 会先在编译期
+失败**，整套集成测试（`tests/*.rs`）跑不到。CI 因此不受影响：`.github/workflows/ci.yml`
+只 `cargo check --features vulkan --lib/--bin/--examples` 加几个点名的
+`cargo test --test <name>`，**从不构建 `--all-targets`**。
+
+**归属**：`tests/auk_flash_smoke.rs` 与 `AukOptions` 的字段变更不同步，出自 AuK 那条线，
+与 ZDTaichu5.0 分支无关（该分支只碰 ZDT / qwen3 vision / app 接线，见
+`git diff --stat origin/main..HEAD`）。
+
+**待办**：
+
+1. 给 `AukOptions` 的构造补上 `sway_sampling_coef` / `time_grid`（或用 `..Default::default()`），
+   让 `--all-targets` 恢复可编译。
+2. CI 加一条 `cargo build --locked --all-targets`（或 `cargo test --locked --no-run`），
+   否则这类编译期断裂还会再发生 —— 参见 TODO-026（CI 根本不跑测试）。
+
+**关联**：`tests/auk_flash_smoke.rs`、`src/models/auk*` 的 `AukOptions`、
+`.github/workflows/ci.yml`。
