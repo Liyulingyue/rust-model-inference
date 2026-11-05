@@ -3870,3 +3870,40 @@ host 之间的近似差异足以翻这一步的 token（记录那次就翻了）
 
 **关联**：`tools/oracle/pr169/{README.md,verification.json}`（`occamy_reverification_2026_11_05`）、
 `src/models/qwen35/trunk/moe.rs`、`src/ops/kernel/qtensor_owned.rs`（设备 Q8_0 路径）。
+
+---
+
+### TODO-054: `--mmproj` + `--interactive` 会静默丢掉交互 REPL，按空提示跑一次
+
+**现象**：
+
+```sh
+printf 'What is 2+2?\n' | rust-model-inference --model occamy-Q8_0.gguf \
+    --mmproj mmproj-occamy-F16.gguf --interactive
+```
+
+不报错、不进 REPL，直接按**空的** `--prompt` 生成一次。模型回
+`Hello! How can I help you today?` —— 因为它根本没看到问题。
+同样的命令去掉 `--mmproj` 就正常（进 REPL、提示 19 token、答 `2 + 2 = 4`）。
+
+**根因**：`src/main.rs` 的分支顺序。带 `--mmproj`（且 arch 不是 `qwen3vl`）时，
+`else if !options.jev && (image.is_some() || … || (explicit_mmproj.is_some() && arch != "qwen3vl"))`
+先命中 → 走 `run_multimodal_with_video(..., prompt = options.prompt, ...)`，
+而 `--prompt` 为空 → 空提示跑一次就结束。交互分支在后面的 `else` 里，
+永远轮不到。`run_interactive_qwen35` 里也把 `mmproj_path` 写死成 `None`，
+所以即使进了 REPL 也用不上 mmproj。
+
+**归属**：main 既有（该分支与 Occamy 工作无关），影响所有带 mmproj 的
+qwen35 / qwen35moe / edge0 / qwen3vlmoe 家族。ZDTaichu5.0、Intern-Decision、
+PhysBrain 的入口矩阵都没有覆盖"交互 + mmproj"这一格，所以没被发现。
+
+**待办**：
+
+1. `--mmproj` 与 `--interactive` 同时出现时，要么明确报错（"交互模式暂不支持 mmproj"），
+   要么把 mmproj 传进 `run_interactive_qwen35` 并让它走 qwen35 多模态路径
+   （main.rs:1179-1182 的注释本来就写着"qwen35 多模态栈处理无图的情况"，
+   只是分支顺序把它挡住了）。
+2. 给入口矩阵补一格"交互 + mmproj"，防止再次静默降级。
+
+**关联**：`src/main.rs`（多模态分支与交互分支的顺序）、
+`src/app/text/generation.rs::run_interactive_qwen35`（mmproj 写死 None）。

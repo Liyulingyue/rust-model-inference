@@ -645,6 +645,19 @@
       "rust_vision": "RMI_OCCAMY_MMPROJ=\"$MMPROJ\" RMI_OCCAMY_VISION_REFERENCE=target/pr169/vision-reference/0000.f32 cargo test --profile release-fast --test pr169_vision_oracle occamy_vision -- --ignored",
       "tokenizer": "RMI_LLAMA_TOKENIZE=target/physbrain/oracle-build/bin/llama-tokenize RMI_OCCAMY_TEXT=\"$TEXT\" cargo test --profile release-fast --features parity-trace --test pr169_tokenizer_oracle occamy -- --ignored",
       "cli": "target/release-fast/rust-model-inference --model \"$TEXT\" --mmproj \"$MMPROJ\" --image blue-64.png --prompt 'Reply with one word: what color is this image?' --max-tokens 8 --max-context 256 --threads 8 --temperature 0"
+    },
+    "entry_points": {
+      "cli_text_cpu": "'2 + 2 = 4' at --temperature 0; the prompt is 19 tokens",
+      "cli_text_device": "same prompt, --compute vulkan: '2 + 2 equals **4**.' -- the device and the CPU pick different greedy tokens for this checkpoint, which reproduces on origin/main (see TODO-053)",
+      "cli_image_cpu": "'blue'",
+      "cli_image_device": "'blue'",
+      "cli_jev_text": "choice A ('apples') with probability 1.0000",
+      "cli_interactive": "works without --mmproj (the prompt reaches the model); with --mmproj the REPL is silently skipped -- see TODO-054",
+      "http_chat_text": "'2 + 2 equals **4**.' with 19 prompt tokens and 8 completion tokens",
+      "http_chat_image": "' blue' with 23 prompt tokens",
+      "http_jev_score": "choice A with probability 0.9999444",
+      "http_jev_image": "choice A ('blue') with probability 0.9999787",
+      "server": "rust-model-server --model ... --mmproj ... --compute auto; the Vulkan device is picked up (NVIDIA GB10)"
     }
   }
 }
