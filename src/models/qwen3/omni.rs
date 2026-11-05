@@ -985,29 +985,17 @@ fn require_tensor(
     dims: &[u64],
     kind: GGMLType,
 ) -> Result<(), String> {
-    let info = source
-        .tensor_info(name)
-        .ok_or_else(|| format!("Missing Qwen2.5-Omni audio tensor: {name}"))?;
     // Shape is strict (architectural mismatch). Type is F16-or-BF16 tolerant:
     // some Unsloth re-quantization rounds trip BF16→F16→BF16 and the upstream
     // GGUF uses F16 while our tools/tests produce BF16; both pass the same
     // matmul contract.
-    if info.dims != dims {
-        return Err(format!(
-            "Invalid Qwen2.5-Omni audio tensor {name}: shape {:?}; expected {:?}",
-            info.dims, dims
-        ));
-    }
-    if info.ggml_type != kind
-        && !(matches!(kind, GGMLType::F16) && matches!(info.ggml_type, GGMLType::BF16))
-        && !(matches!(kind, GGMLType::BF16) && matches!(info.ggml_type, GGMLType::F16))
-    {
-        return Err(format!(
-            "Invalid Qwen2.5-Omni audio tensor {name}: type {:?}; expected {:?} (or its BF16/F16 sibling)",
-            info.ggml_type, kind
-        ));
-    }
-    Ok(())
+    let types: &[GGMLType] = match kind {
+        GGMLType::F16 => &[GGMLType::F16, GGMLType::BF16],
+        GGMLType::BF16 => &[GGMLType::BF16, GGMLType::F16],
+        _ => std::slice::from_ref(&kind),
+    };
+    // Metadata only: the contract is validated before any payload is read.
+    crate::core::tensor::require_tensor_meta(source, name, dims, types).map(|_| ())
 }
 
 #[cfg(test)]

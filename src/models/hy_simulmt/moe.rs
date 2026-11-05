@@ -6,6 +6,7 @@ fn route(
     logits: &[f32],
     bias: &[f32],
     used: usize,
+    normalize_weights: bool,
     scale: f32,
 ) -> Result<(Vec<usize>, Vec<f32>), String> {
     if logits.is_empty()
@@ -13,7 +14,6 @@ fn route(
         || used == 0
         || used > logits.len()
         || !scale.is_finite()
-        || scale <= 0.0
         || logits.iter().chain(bias).any(|v| !v.is_finite())
     {
         return Err("invalid Hy-SimulMT router dimensions, values or scale".into());
@@ -26,7 +26,12 @@ fn route(
             .then(a.cmp(&b))
     });
     ids.truncate(used);
-    let sum = (ids.iter().map(|&i| f64::from(probs[i])).sum::<f64>() as f32).max(6.103515625e-5);
+    let sum = if normalize_weights {
+        (ids.iter().map(|&i| f64::from(probs[i])).sum::<f64>() as f32).max(6.103515625e-5)
+    } else {
+        1.0
+    };
+    let scale = if scale == 0.0 { 1.0 } else { scale };
     let weights = ids.iter().map(|&i| (probs[i] / sum) * scale).collect();
     Ok((ids, weights))
 }
@@ -56,7 +61,13 @@ impl HyMoe {
             .chunks_exact(input.len())
             .map(|row| crate::ops::dot::dot_f32_ggml(input, row, input.len()))
             .collect();
-        let (ids, probabilities) = route(&logits, &self.bias, cfg.expert_used_count, cfg.scale)?;
+        let (ids, probabilities) = route(
+            &logits,
+            &self.bias,
+            cfg.expert_used_count,
+            cfg.normalize_weights,
+            cfg.scale,
+        )?;
         output.fill(0.0);
         for (id, probability) in ids
             .into_iter()
@@ -103,6 +114,7 @@ mod tests {
             &[0.0, 3.0f32.ln(), -3.0f32.ln()],
             &[0.0, 0.0, 1.0],
             2,
+            true,
             2.826,
         )
         .unwrap();
@@ -111,10 +123,11 @@ mod tests {
             assert!((actual - expected).abs() < 3e-7);
         }
         assert_eq!(
-            route(&[0.0; 4], &[0.0; 4], 2, 1.0).unwrap(),
+            route(&[0.0; 4], &[0.0; 4], 2, true, 1.0).unwrap(),
             (vec![0, 1], vec![0.5, 0.5])
         );
-        assert_eq!(route(&[-1000.0], &[0.0], 1, 2.826).unwrap().1, [0.0]);
+        assert_eq!(route(&[-1000.0], &[0.0], 1, true, 2.826).unwrap().1, [0.0]);
+        assert_eq!(route(&[0.0; 2], &[0.0; 2], 1, false, 0.0).unwrap().1, [0.5]);
     }
 
     #[test]
@@ -142,6 +155,7 @@ mod tests {
             expert_used_count: 2,
             expert_ffn: 1,
             shared_expert_ffn: 1,
+            normalize_weights: true,
             scale: 2.826,
         };
         let mut executor = LinearExecutor::new(
@@ -196,6 +210,7 @@ mod tests {
             expert_used_count: 1,
             expert_ffn: 4,
             shared_expert_ffn: 4,
+            normalize_weights: true,
             scale: 1.0,
         };
         let mut executor = LinearExecutor::new(
@@ -227,7 +242,7 @@ mod tests {
             (&[0.0][..], &[f32::INFINITY][..], 1, 1.0),
             (&[0.0][..], &[0.0][..], 1, f32::NAN),
         ] {
-            assert!(route(logits, bias, used, scale).is_err());
+            assert!(route(logits, bias, used, true, scale).is_err());
         }
     }
 }

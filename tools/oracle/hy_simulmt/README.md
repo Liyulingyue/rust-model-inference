@@ -1,5 +1,7 @@
 # Hy-SimulMT alignment
 
+Latest: [2026-11-04 review fixes](validation.md#review-fixes-2026-11-04), following the [main integration validation](validation.md#main-integration-2026-11-04). Earlier dated measurements remain below.
+
 Targets Tencent's `Hy-SimulMT-30B-A3B-GGUF` and
 `Hy-SimulMT-30B-A3B-Interleave-GGUF`, using their bundled `hyv3_speech`
 audio tower. The decoder architecture is explicitly `hy_v3`.
@@ -220,13 +222,15 @@ long recordings need their own integration or validation.
 
 ## Decoder and entry regressions
 
-The synthetic HySession tests cover a dense first block, routed/shared MoE,
+The synthetic HySession tests cover router-selected dense blocks, routed/shared MoE,
 GQA, external embeddings, invalid-input recovery, CPU/Auto fallback, and both
 F32/F16 caches. Each cache format compares 129-token prefill with token-by-token
 execution, several batch sizes, and continuation. ARM Q6_K additionally compares
 NEON DotProd to the scalar reference across block boundaries and signed scales.
 F32/F16 attention use shared dot operators with the reference's AVX accumulator
 layout; cancellation and vector-tail tests cover the reduction kernels.
+`has_avx2_fma()` and `has_neon()` already honor scalar mode; a direct regression
+also checks both ggml dot entry points against the scalar accumulation.
 
 ```sh
 cargo test --profile release-fast --lib hy_
@@ -234,6 +238,49 @@ RMI_SCALAR=1 cargo test --profile release-fast --lib hy_
 cargo test --profile release-fast --test hy_simulmt --test hy_simulmt_entries
 RMI_HY_SIMULMT_MODEL="$model" RMI_HY_SIMULMT_WAV=artifacts/jfk-3.2s.wav \
   cargo test --profile release-fast --test hy_simulmt_entries -- --ignored --test-threads=1
+```
+
+Hy's output projection now has a separate one-row executor, so the vocabulary
+width does not inflate the 128-row decoder arena. Descriptor ranges are checked
+against the device limit before allocation/upload; Auto can fall back on an
+unsupported size. Group descriptors are bounded and recycled only after device
+completion, while weight uploads remain cached. F32 groups retain each single
+projection's kernel, including groups mixing widths above and below 4096.
+
+Loader compatibility follows the pinned reference: each layer's router tensor
+selects dense/MoE; missing `output.weight` ties to the token embedding; optional
+gating/norm/scale/shared-width metadata use reference defaults. Expert width
+accepts a scalar or layer array (the pin uses the first array element for all
+blocks); zero selects `feed_forward_length / expert_used_count`. The expert
+width key itself and RMS epsilon remain required. RoPE's missing-key default is
+10000. Unsupported non-sigmoid routers still fail explicitly.
+
+`hy_mt2_token_ids_match_official_tokenizer` uses a small vocabulary/merge subset
+of Tencent-Hunyuan/Hy-MT2-1.8B, preserving official IDs and merge ranks. The
+fixture records its source SHA256 and seven `tokenizers 0.23.2` reference cases;
+it does not require model downloads in CI. GPU group regressions run explicitly
+on Lavapipe in CI and on the local physical device during this review.
+
+```sh
+cargo test --locked --profile release-fast --lib hy_mt2_
+cargo test --locked --profile release-fast --features vulkan --lib \
+  batched_linear_device_review_ -- --ignored --test-threads=1
+```
+
+F16 KV still converts the attention probability input to F16 before P·V. This
+matches ggml's ordinary F16 matmul input conversion; multiplication/accumulation
+remain F32 SIMD (with the existing scalar F64 fallback). The independent
+[`f16_matmul_probe.cpp`](f16_matmul_probe.cpp) confirms that F16×F32 and explicit
+F16×F16 inputs give identical ggml outputs, distinct from unrounded F32×F32.
+On the local reference build it can be reproduced with:
+
+```sh
+clang++ -std=c++17 tools/oracle/hy_simulmt/f16_matmul_probe.cpp \
+  -I references/llama-hy-simulmt/ggml/include \
+  -L references/llama-hy-simulmt/build-hy/bin -lggml-cpu -lggml-base \
+  -Wl,-rpath,"$PWD/references/llama-hy-simulmt/build-hy/bin" \
+  -o target/hy-f16-matmul-probe
+target/hy-f16-matmul-probe
 ```
 
 Run the real-weight Auto regression separately for each complete Hy GGUF.

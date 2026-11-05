@@ -297,6 +297,18 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                 );
                 i += 1;
             }
+            "--auk-sway" => {
+                let value = args.get(i + 1).ok_or("Missing value for --auk-sway")?;
+                options.auk_sway = Some(
+                    value
+                        .parse::<f32>()
+                        .map_err(|error| format!("Invalid --auk-sway value: {error}"))?,
+                );
+                i += 1;
+            }
+            "--auk-flash" => {
+                options.auk_flash = true;
+            }
             "--top-k" => {
                 let value = args.get(i + 1).ok_or("Missing value for --top-k")?;
                 options.top_k = Some(

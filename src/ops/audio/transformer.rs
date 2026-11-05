@@ -1,6 +1,62 @@
 //! Stateless audio transformer operations shared by audio encoders.
-use crate::core::tensor::{load_f32_tensor, GGMLType, TensorSource};
+use crate::core::tensor::{load_f32_tensor, TensorSource};
 use crate::ops::{dot_f32, gelu_erf, sum_f32, sum_sq_centered_f32};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::tensor::{GGMLType, MetaValue, TensorInfo};
+
+    struct Source {
+        info: [TensorInfo; 2],
+        bytes: [Vec<u8>; 2],
+    }
+    impl TensorSource for Source {
+        fn metadata(&self, _: &str) -> Option<&MetaValue> {
+            None
+        }
+        fn tensor_info(&self, name: &str) -> Option<&TensorInfo> {
+            self.info.iter().find(|i| i.name == name)
+        }
+        fn tensor_slice(&self, name: &str) -> Option<&[u8]> {
+            self.info
+                .iter()
+                .position(|i| i.name == name)
+                .map(|i| self.bytes[i].as_slice())
+        }
+    }
+
+    #[test]
+    fn layer_norm_load_preserves_decodable_float_formats_and_finite_checks() {
+        for ty in [GGMLType::F32, GGMLType::BF16] {
+            let encode = |values: &[f32]| -> Vec<u8> {
+                values
+                    .iter()
+                    .flat_map(|&v| match ty {
+                        GGMLType::F32 => v.to_le_bytes().to_vec(),
+                        _ => crate::ops::f32_to_bf16(v).to_le_bytes().to_vec(),
+                    })
+                    .collect()
+            };
+            let mut s = Source {
+                info: ["ln.weight", "ln.bias"].map(|name| TensorInfo {
+                    name: name.into(),
+                    dims: vec![2],
+                    ggml_type: ty,
+                    offset: 0,
+                }),
+                bytes: [encode(&[1.0, 0.5]), encode(&[0.25, -0.25])],
+            };
+            let loaded = LayerNormWeights::load(&s, "ln", &[2]).unwrap();
+            assert_eq!(loaded.weight, [1.0, 0.5]);
+            assert_eq!(loaded.bias, [0.25, -0.25]);
+            s.bytes[0] = encode(&[f32::INFINITY, 0.5]);
+            assert!(LayerNormWeights::load(&s, "ln", &[2]).is_err());
+            s.bytes[0].pop();
+            assert!(LayerNormWeights::load(&s, "ln", &[2]).is_err());
+        }
+    }
+}
 
 pub(crate) struct LayerNormWeights {
     pub weight: Vec<f32>,
@@ -15,15 +71,9 @@ impl LayerNormWeights {
     ) -> Result<Self, String> {
         let load = |suffix: &str| -> Result<Vec<f32>, String> {
             let name = format!("{prefix}.{suffix}");
-            if source
-                .tensor_info(&name)
-                .is_none_or(|info| info.ggml_type != GGMLType::F32)
-            {
-                return Err(format!("Expected F32 layer norm tensor: {name}"));
-            }
             let values = load_f32_tensor(source, &name, dims)?;
             if values.is_empty() || values.iter().any(|v| !v.is_finite()) {
-                return Err(format!("Invalid finite F32 tensor: {name}"));
+                return Err(format!("Invalid finite layer norm tensor: {name}"));
             }
             Ok(values)
         };

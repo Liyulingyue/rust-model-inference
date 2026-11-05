@@ -96,7 +96,7 @@ impl HyDecoder {
                     down: matrix(s, &format!("{p}.ffn_down{suffix}.weight"), width, h)?,
                 })
             };
-            let ffn = if index == 0 {
+            let ffn = if s.tensor_info(&format!("{p}.ffn_gate_inp.weight")).is_none() {
                 HyFfn::Dense(expert("", config.n_ff)?)
             } else {
                 let m = &config.moe;
@@ -150,7 +150,16 @@ impl HyDecoder {
         }
         Ok(Self {
             embedding: matrix(s, "token_embd.weight", h, config.vocab)?,
-            output: matrix(s, "output.weight", h, config.vocab)?,
+            output: matrix(
+                s,
+                if s.tensor_info("output.weight").is_some() {
+                    "output.weight"
+                } else {
+                    "token_embd.weight"
+                },
+                h,
+                config.vocab,
+            )?,
             output_norm: vector("output_norm.weight", h)?,
             layers,
             config,

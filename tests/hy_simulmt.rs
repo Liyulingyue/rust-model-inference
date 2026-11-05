@@ -85,7 +85,7 @@ fn hy_v3_has_explicit_dispatch_and_128_wide_heads() {
 fn hy_v3_rejects_other_router_contracts() {
     for (key, value) in [
         ("expert_gating_func", MetaValue::Uint32(1)),
-        ("expert_weights_norm", MetaValue::Bool(false)),
+        ("expert_weights_norm", MetaValue::String("false".into())),
         ("expert_weights_scale", MetaValue::Float32(f32::NAN)),
         ("expert_count", MetaValue::Uint32(0)),
         ("expert_used_count", MetaValue::Uint32(129)),

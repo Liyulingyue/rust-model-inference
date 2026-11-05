@@ -100,7 +100,9 @@ use std::sync::Mutex;
 
 #[cfg(feature = "vulkan")]
 pub fn get_vulkan_context() -> Option<&'static VulkanContext> {
-    if crate::compute::ComputePolicy::legacy() == crate::compute::ComputePolicy::Cpu {
+    if !crate::ops::gpu_requested()
+        || crate::compute::ComputePolicy::legacy() == crate::compute::ComputePolicy::Cpu
+    {
         return None;
     }
     shared_vulkan_context()
@@ -108,6 +110,24 @@ pub fn get_vulkan_context() -> Option<&'static VulkanContext> {
             eprintln!("[GPU] Vulkan init failed: {e}. Falling back to CPU.");
         })
         .ok()
+}
+
+/// Start the device initialization in the background.
+///
+/// Bringing the Vulkan device up costs about 300 ms on the GB10 box -- the
+/// driver loads its compiler and enumerates the device -- and a session
+/// that opens a 12 GB checkpoint has that time to spare. The context is
+/// shared, so whoever needs it first waits for the same initialization.
+#[cfg(feature = "vulkan")]
+pub fn warm_vulkan_context() {
+    if !GPU_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("vulkan-init".into())
+        .spawn(|| {
+            let _ = shared_vulkan_context();
+        });
 }
 
 /// Device initialization is shared; choosing this device belongs to each session.
@@ -610,6 +630,35 @@ unsafe fn f32_slice_to_f16_avx2(src: &[f32], dst: &mut [u16]) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn legacy_auto_requires_gpu_opt_in_before_initializing() {
+        const CHILD: &str = "RMI_LEGACY_GPU_OPT_IN_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            assert!(!super::gpu_requested());
+            assert!(super::VULKAN_CONTEXT.get().is_none());
+            let _scope = crate::compute::ComputePolicy::Auto.enter_legacy_scope();
+            assert!(super::get_vulkan_context().is_none());
+            assert!(super::VULKAN_CONTEXT.get().is_none());
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "ops::float::tests::legacy_auto_requires_gpu_opt_in_before_initializing",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[cfg(feature = "vulkan")]
     #[test]
     #[ignore = "requires a Vulkan device; checks cleanup in isolated processes"]

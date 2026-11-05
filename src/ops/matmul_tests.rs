@@ -968,6 +968,34 @@ fn f16_ggml_typed_dot_handles_attention_widths_and_tails() {
     }
 }
 
+#[test]
+fn ggml_dots_honor_scalar_dispatch() {
+    let _scope = crate::ops::ScalarDispatchScope::new(true);
+    assert!(!crate::ops::has_avx2_fma() && !crate::ops::has_neon());
+    for n in [0, 9, 32, 128, 259] {
+        let a: Vec<_> = (0..n).map(|i| (i as f32 * 0.137).sin() * 100.0).collect();
+        let b: Vec<_> = (0..n).map(|i| (i as f32 * 0.193).cos()).collect();
+        let expected = a
+            .iter()
+            .zip(&b)
+            .map(|(&x, &y)| f64::from(x * y))
+            .sum::<f64>() as f32;
+        assert_eq!(
+            crate::ops::dot::dot_f32_ggml(&a, &b, n).to_bits(),
+            expected.to_bits()
+        );
+        let a: Vec<_> = a.into_iter().map(f32_to_f16).collect();
+        let b: Vec<_> = b.into_iter().map(f32_to_f16).collect();
+        let expected = a.iter().zip(&b).fold(0.0f64, |sum, (&x, &y)| {
+            sum + f64::from(f16_to_f32(x) * f16_to_f32(y))
+        }) as f32;
+        assert_eq!(
+            crate::ops::dot::dot_f16_ggml(&a, &b, n).to_bits(),
+            expected.to_bits()
+        );
+    }
+}
+
 #[cfg(target_arch = "aarch64")]
 #[test]
 fn neon_q8_matmul_matches_repacked_fused_block_accumulation() {

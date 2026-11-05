@@ -30,30 +30,9 @@ pub(crate) fn require_tensor(
     dims: &[u64],
     ggml_type: GGMLType,
 ) -> Result<(), String> {
-    let info = source
-        .tensor_info(name)
-        .ok_or_else(|| format!("Missing tensor: {name}"))?;
-    if info.dims != dims {
-        return Err(format!("Invalid {name} dimensions"));
-    }
-    if info.ggml_type != ggml_type {
-        return Err(format!(
-            "Invalid {name} type: expected {ggml_type:?}, got {:?}",
-            info.ggml_type
-        ));
-    }
-    let expected = usize::try_from(
-        info.checked_nbytes()
-            .ok_or_else(|| format!("Tensor byte size does not fit usize: {name}"))?,
-    )
-    .map_err(|_| format!("Tensor byte size does not fit usize: {name}"))?;
-    let bytes = source
-        .tensor_slice(name)
-        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
-    if bytes.len() != expected {
-        return Err(format!("Invalid {name} byte length"));
-    }
-    Ok(())
+    // Metadata only: the contracts are validated before any payload is read,
+    // and the loader measures the bytes when it loads the tensor.
+    crate::core::tensor::require_tensor_meta(source, name, dims, &[ggml_type]).map(|_| ())
 }
 
 /// Reject a buffer containing NaN or infinities.

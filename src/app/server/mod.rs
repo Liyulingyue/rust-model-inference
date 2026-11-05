@@ -1,4 +1,5 @@
 pub mod api;
+mod auk;
 mod forecast;
 mod prediction;
 mod rerank;
@@ -17,7 +18,8 @@ use serde::{Deserialize, Serialize};
 use tower_http::cors::CorsLayer;
 
 use crate::app::cli::{
-    normalize_tts_language, parse_cli_options, validate_cli_options, CliOptions, KvFormat,
+    normalize_tts_language, parse_cli_options, resolve_thread_count, validate_cli_options,
+    CliOptions, KvFormat,
 };
 use crate::app::{compute_embedding, open_or_exit};
 use crate::core::tensor::{MetaValue, TensorSource};
@@ -34,7 +36,7 @@ use crate::models::qwen3::tts::speaker::{reference_wav_to_mel, Qwen3TtsSpeakerEn
 use crate::models::qwen3::tts::{predictor_top_k, Qwen3TtsTalker, TtsPrompt, TtsSession};
 use crate::models::qwen3::Qwen3Model;
 
-const USAGE: &str = "Usage: rust-model-server --model <path.gguf-or-ggufrs> [--mmproj ...] [--audio ...] [--image ...] [--tts] [--embedding] [--host 0.0.0.0] [--port 8080] [--threads 4] [--compute cpu|auto|vulkan (default cpu); --gpu aliases auto] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--allow-remote-images]";
+const USAGE: &str = "Usage: rust-model-server --model <path.gguf-or-ggufrs> [--mmproj ...] [--audio ...] [--image ...] [--tts] [--embedding] [--host 0.0.0.0] [--port 8080] [--threads 4] [--compute cpu|auto|vulkan (default cpu); --gpu aliases auto] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--allow-remote-images] [--vae ... --text-encoder ... selects the AuK audio backend: /v1/audio/speech and /v1/audio/generations]";
 
 // =============================================================================
 // Backend types
@@ -84,6 +86,10 @@ enum Backend {
     HySimulMt(HySimulMtBackend),
     Audio8(Audio8Backend),
     Tts(TtsBackend),
+    /// The AuK flow-matching audio DiT: a DiT GGUF, a BigVGANFlow VAE GGUF
+    /// and an optional Qwen2.5-Omni text encoder. It serves the audio
+    /// speech routes.
+    Auk(auk::AukBackend),
     Rerank(RerankBackend),
     Clm(ClmBackend),
     Gliner2(Gliner2Backend),
@@ -272,6 +278,12 @@ struct Audio8Backend {
     specials: crate::models::audio8::streaming::SpecialTokens,
     language: &'static str,
     max_tokens: usize,
+    /// The tower and the decoder share one compute pool, and
+    /// `ComputePool::compute` publishes its closure through shared atomics,
+    /// so two concurrent transcriptions would overwrite each other's work.
+    /// The lock serializes them, which is what lets the pool have more than
+    /// one thread.
+    compute_lock: Arc<std::sync::Mutex<()>>,
 }
 
 struct TtsBackend {
@@ -901,10 +913,14 @@ async fn do_transcribe(
             let decoder = backend.decoder.clone();
             let specials = backend.specials.clone();
             let tokenizer = backend.tokenizer.clone();
+            let compute_lock = backend.compute_lock.clone();
             let max_tokens = backend.max_tokens;
             let default_language = backend.language.to_string();
             let language = language.unwrap_or(default_language);
             let result = compute_task(state.compute, move || {
+                let _guard = compute_lock
+                    .lock()
+                    .map_err(|_| "Audio8 compute lock poisoned".to_string())?;
                 let samples = audio8_streaming::decode_samples(&wav)?;
                 let stream = audio8_streaming::Schedule::new().padded_stream(&samples);
                 let language_token = specials.language(&language)?;
@@ -1105,7 +1121,10 @@ fn synthesize_tts_frames(
 // Backend construction
 // =============================================================================
 
-fn build_backend(options: &CliOptions) -> Result<Arc<Backend>, String> {
+fn build_backend(
+    options: &CliOptions,
+    auk_source: Option<Arc<dyn TensorSource>>,
+) -> Result<Arc<Backend>, String> {
     options.validate_compute_mode()?;
     options.compute_policy().check_build()?;
     let _scope = options.compute_policy().enter_legacy_scope();
@@ -1126,6 +1145,11 @@ fn build_backend(options: &CliOptions) -> Result<Arc<Backend>, String> {
     }
     if options.tts {
         return Ok(Arc::new(Backend::Tts(build_tts(options)?)));
+    }
+    // AuK is a flow-matching audio DiT with its own VAE GGUF; the probe in
+    // `run_server` already opened and identified the model.
+    if let Some(source) = auk_source {
+        return Ok(Arc::new(Backend::Auk(auk::build_auk(options, source)?)));
     }
     if options.audio.is_some() {
         if is_hy_simulmt_gguf(&options.model) {
@@ -1757,12 +1781,24 @@ fn build_audio8(options: &CliOptions) -> Result<Audio8Backend, String> {
         return Err("Audio8 carries its audio tower in --model; omit --mmproj".into());
     }
     let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
-    let encoder = crate::models::audio8::Audio8Encoder::from_source(Arc::clone(&source))?;
+    // The pool can have more than one thread because the transcriptions take
+    // `compute_lock`, which serializes them: `ComputePool::compute` publishes
+    // its closure through shared atomics, so two concurrent requests would
+    // otherwise overwrite each other's work.
+    let pool = Arc::new(ComputePool::new(resolve_thread_count(
+        options.threads,
+        std::thread::available_parallelism()
+            .map(|value| value.get())
+            .unwrap_or(1),
+    )));
+    let encoder =
+        crate::models::audio8::Audio8Encoder::from_source(Arc::clone(&source), Arc::clone(&pool))?;
     let decoder_source = Arc::clone(&source);
     let tokenizer = Arc::new(BPETokenizer::from_gguf_metadata(|key| {
         source.metadata(key).cloned()
     })?);
-    let decoder = crate::models::audio8::text::Audio8TextDecoder::from_source(decoder_source)?;
+    let decoder =
+        crate::models::audio8::text::Audio8TextDecoder::from_source(decoder_source, pool)?;
     // Validate the whole contract once at startup rather than per request.
     let specials = audio8_streaming::SpecialTokens::lookup(&tokenizer)?;
     let language = options.language.as_deref().unwrap_or("zh");
@@ -1783,6 +1819,7 @@ fn build_audio8(options: &CliOptions) -> Result<Audio8Backend, String> {
         specials,
         language,
         max_tokens,
+        compute_lock: Arc::new(std::sync::Mutex::new(())),
     })
 }
 
@@ -1913,7 +1950,18 @@ pub fn run_server() {
             options.max_tokens = Some(128);
         }
     }
-    if let Err(error) = validate_cli_options(&options) {
+    // The AuK DiT needs its own VAE GGUF, so the architecture of the
+    // `--model` file identifies the invocation. The diff-model validators
+    // (Z-Image and friends) want `--out` and would reject the AuK
+    // invocation, so they are skipped for it, exactly like the main binary
+    // does.
+    let auk_source = auk::probe_invocation(&options);
+    if auk_source.is_some() {
+        if let Err(error) = auk::validate_server_options(&options) {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+    } else if let Err(error) = validate_cli_options(&options) {
         eprintln!("{error}");
         std::process::exit(2);
     }
@@ -1939,7 +1987,7 @@ pub fn run_server() {
         options.threads,
         available,
     ));
-    let backend = match build_backend(&options) {
+    let backend = match build_backend(&options, auk_source) {
         Ok(value) => value,
         Err(error) => {
             eprintln!("Failed to build model backend: {error}");
@@ -1961,6 +2009,7 @@ pub fn run_server() {
         Backend::HySimulMt(_) => "hy-simulmt",
         Backend::Audio8(_) => "audio8",
         Backend::Tts(_) => "tts",
+        Backend::Auk(_) => "auk",
         Backend::Rerank(_) => "rerank",
         Backend::Clm(_) => "clm",
         Backend::Gliner2(_) => "gliner2",
@@ -2001,6 +2050,9 @@ pub fn run_server() {
             )
             .route("/v1/audio/transcriptions_json", post(transcriptions_json)),
         Backend::Tts(_) => router.route("/v1/audio/speech", post(speech)),
+        Backend::Auk(_) => router
+            .route("/v1/audio/speech", post(auk::speech))
+            .route("/v1/audio/generations", post(auk::generations)),
         Backend::Rerank(_) => router.route("/v1/rerank", post(rerank::rerank)),
         // CLM scores by cosine, so only the single-question route applies.
         // Grouped does a per-group softmax that has no cosine analogue,
@@ -2198,7 +2250,7 @@ mod server_mode_tests {
             compute: Some(crate::compute::ComputePolicy::Auto),
             ..CliOptions::default()
         };
-        let result = super::build_backend(&options);
+        let result = super::build_backend(&options, None);
         std::fs::remove_file(path).unwrap();
         let error = result
             .err()
@@ -2215,7 +2267,7 @@ mod server_mode_tests {
             compute: Some(crate::compute::ComputePolicy::Vulkan),
             ..options_with(path.to_str().unwrap())
         };
-        let result = super::build_backend(&options);
+        let result = super::build_backend(&options, None);
         std::fs::remove_file(path).unwrap();
         let error = result.err().expect("unsupported compute mode");
         let expected = if cfg!(feature = "vulkan") {

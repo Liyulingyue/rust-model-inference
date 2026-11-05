@@ -1725,6 +1725,7 @@ fn backend_label(b: &Backend) -> &'static str {
         Backend::HySimulMt(_) => "hy-simulmt",
         Backend::Audio8(_) => "audio8",
         Backend::Tts(_) => "tts",
+        Backend::Auk(_) => "auk",
         Backend::Rerank(_) => "rerank",
         Backend::Clm(_) => "clm",
         Backend::Gliner2(_) => "gliner2",

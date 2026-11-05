@@ -14,6 +14,7 @@ pub struct HySession<'model> {
     kv: KvState,
     compute: ComputePolicy,
     linear: LinearExecutor<'model, 'static>,
+    output: LinearExecutor<'model, 'static>,
     experts: Vec<Option<LinearExecutor<'model, 'static>>>,
 }
 
@@ -74,12 +75,19 @@ impl<'model> HySession<'model> {
                 ),
             });
         }
-        bindings.push(LinearBinding {
-            weight: &model.output,
-            mode: LinearMode::Prepared,
-        });
         let linear = LinearExecutor::new(compute, bindings, ROWS, model.pool())
             .map_err(|e| e.to_string())?;
+        // Only the last hidden row reaches the vocabulary projection.
+        let output = LinearExecutor::new(
+            compute,
+            vec![LinearBinding {
+                weight: &model.output,
+                mode: LinearMode::Prepared,
+            }],
+            1,
+            model.pool(),
+        )
+        .map_err(|e| e.to_string())?;
         let arch = Arc::new(KvArch::new(
             c.n_layer,
             c.n_head_kv,
@@ -92,6 +100,7 @@ impl<'model> HySession<'model> {
             kv: KvState::new(arch, format, capacity),
             compute,
             linear,
+            output,
             experts,
         })
     }
@@ -139,7 +148,7 @@ impl<'model> HySession<'model> {
         rms_norm(&last, &self.model.output_norm, &mut normalized, c.eps);
         let mut logits = vec![0.0; c.vocab];
         project(
-            &mut self.linear,
+            &mut self.output,
             &normalized,
             1,
             [(&self.model.output, &mut logits)],

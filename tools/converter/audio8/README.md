@@ -1,4 +1,4 @@
-# Audio8-ASR-Infinite BF16 GGUF
+# Audio8-ASR-Infinite GGUF
 
 The converter packs the supplied merged-v2 safetensors without changing BF16
 tensor bytes. It includes the eight semantic VAD tensors even though the ASR
@@ -6,8 +6,9 @@ CLI does not use them. The source index has 938 tensors; `--verify` compares
 every GGUF tensor byte against its source shard.
 
 ```bash
-MODEL=/Users/gouzi/Documents/git/rust-model-inference/models/Audio8-ASR-Infinite
+MODEL=models/Audio8-ASR-Infinite
 GGUF="$MODEL/Audio8-ASR-Infinite-BF16.gguf"
+./.venv/bin/python -m tools.converter.audio8.convert_audio8 "$MODEL" "$GGUF"
 ./.venv/bin/python -m tools.converter.audio8.convert_audio8 "$MODEL" "$GGUF" --verify
 RMI_AUDIO8_GGUF="$GGUF" cargo test --profile release-fast --test audio8_gguf
 cargo build --profile release-fast --bin rust-model-inference
@@ -22,6 +23,188 @@ For the WAV above, extract seconds 10–14 of the supplied demo video as mono,
 16 kHz PCM16 with `ffmpeg`. The Rust CLI and the pinned official implementation
 (`c8ba8eea829be0339e8d7757f8ca52dac06e1e32`) both returned
 `一个两个半年，`. This is a transcription smoke check, not bit parity.
+
+Without a system `ffmpeg`, PyAV bundles the same decoders and resampler:
+
+```bash
+./.venv/bin/python -m pip install av
+./.venv/bin/python - <<'PY'
+import wave
+import av
+
+container = av.open("models/Audio8-ASR-Infinite/Audio8-Asr-Infinite-Demo.mp4")
+stream = next(s for s in container.streams if s.type == "audio")
+resampler = av.audio.resampler.AudioResampler(format="s16", layout="mono", rate=16000)
+frames = []
+for frame in container.decode(stream):
+    if float(frame.pts * stream.time_base) + frame.samples / frame.sample_rate < 10:
+        continue
+    if float(frame.pts * stream.time_base) >= 14:
+        break
+    frames.extend(resampled.to_ndarray().tobytes() for resampled in resampler.resample(frame))
+with wave.open("/tmp/audio8-demo-10-14s.wav", "wb") as out:
+    out.setnchannels(1)
+    out.setsampwidth(2)
+    out.setframerate(16000)
+    out.writeframes(b"".join(frames))
+PY
+```
+
+The cut this produces is not the sample-for-sample twin of the `ffmpeg` one —
+the resampler starts at a different point — so the transcript differs in
+wording from the official run's without either side being wrong.
+
+## Quantized variants
+
+The BF16 file is the lossless reference. The shared quantizer reads it and
+writes the smaller formats; the runtime loads all of them through the same
+`Weight::from_quantized` path, so no separate loader is involved.
+
+```bash
+for fmt in q8_0 q5_k q6_k q4_k; do
+  ./.venv/bin/python -m tools.converter.utils.quantize_gguf \
+    "$MODEL/Audio8-ASR-Infinite-BF16.gguf" \
+    "$MODEL/Audio8-ASR-Infinite-$(echo "$fmt" | tr a-z A-Z).gguf" \
+    --format "$fmt" --keep frame_len_embedding.weight
+done
+```
+
+`--keep frame_len_embedding.weight` is required: the runtime reads that
+tensor as a float vector, so it cannot be block-quantized. Everything else is
+handled by the rules in `tools/converter/utils/quantize_gguf.py` — 1-D tensors
+(norms, biases), the 3-D convolution kernels (which the audio tower decodes
+by hand, so they stay BF16) and any tensor whose contiguous row width is not
+block-aligned keep their source type.
+
+`examples/kquant_roundtrip.rs` checks a payload against its source with the
+runtime's own decoder, so a layout mistake shows up as a huge error instead
+of a subtly wrong model:
+
+```bash
+./.venv/bin/python -c "
+import numpy as np
+from tools.converter.utils.kquants import quantize_q5_k
+values = np.random.default_rng(7).standard_normal(4096).astype(np.float32) * 0.05
+values.tofile('/tmp/values.f32')
+open('/tmp/payload.bin','wb').write(quantize_q5_k(values))
+"
+cargo run --profile release-fast --example kquant_roundtrip -- \
+  q5_k /tmp/values.f32 /tmp/payload.bin
+```
+
+Measured on this repository's runtime, 4 s of the demo clip, GB10 / aarch64,
+`--threads 4`, machine otherwise idle:
+
+| Format | Size | Peak RSS | Export | Wall clock | Transcript |
+|---|---|---|---|---|---|
+| BF16 | 7.62 GB | 8.2 GB | 14 s | 51 s | `就是两个半月，` |
+| F16 | 7.62 GB | 8.2 GB | 2.5 min | 44 s | `就是两个半月，` |
+| Q8_0 | 4.05 GB | 4.5 GB | 25 s | 19 s | `For two and a half years` |
+| Q5_K | 2.63 GB | 3.0 GB | 20 min | 79 s | `For two and a half years` |
+| Q6_K | 3.14 GB | 3.5 GB | 6 min | 64 s | `For two and a half years` |
+| Q4_K | 2.16 GB | 2.5 GB | 11 min | 10 s | `就是一个二十二年` |
+
+The Q4_K export is the slow one: the encoder is a NumPy port of ggml's
+reference scale search, and the search is per super-block. Capping the
+search batch at 256 super-blocks (`K_SEARCH_MAX_BLOCKS`) took the export
+of this model from 23.5 min to 11 min and the peak RSS from 5.5 GiB to
+150 MiB, with a byte-identical file. Q5_K's search walks sixteen candidate
+scales against Q4_K's twenty, and it took 20 min.
+
+### CPU and GPU wall clock
+
+The same 4 s of the demo clip on the GB10 (48 SMs, 20 aarch64 cores), one
+transcription, `--threads 8` (the default cap) for the CPU rows:
+
+| Format | CPU | GPU | GPU kernel |
+|---|---|---|---|
+| F16 | 10.5 s | 13.5 s | 4-row/workgroup + 4× K prefetch + batching + GPU attn/norm/silu |
+| Q5_K | 13.5 s | 8.0 s | u32 word decode + batching + GPU attn/norm/silu |
+| Q6_K | 17.1 s | 8.4 s | u32 word decode + batching + GPU attn/norm/silu |
+| Q4_K | 10.2 s | 48.0 s | cooperative split-K |
+| Q8_0 | 21.0 s | 32.0 s | cooperative 32-lane dp4a |
+
+The CPU rows use `--cpu` and the GPU rows `--gpu`. The GPU wins for the
+k-quant formats: moving attention, RMS norm, and SiLU to the GPU eliminated
+the per-step CPU attention bottleneck (~260 ms/step → <5 ms/step) and the
+u32 word-level shader decode reduced weight unpacking overhead. For F16 the
+CPU path is faster because the GPU's per-submit overhead (~0.25 ms × ~32K
+submissions) dominates the actual compute.
+
+Comparing against PyTorch (fp16, same GB10 GPU, forward pass only —
+PyTorch's `generate` needs more KV-cache memory than the GB10's unified
+RAM allows):
+
+| Implementation | Wall clock | vs Rust CPU F16 |
+|---|---|---|
+| PyTorch fp16 forward | 7.6 s | — |
+| Rust CPU F16 | 10.5 s | 1.4× slower |
+| Rust GPU F16 | 13.5 s | 1.8× slower |
+
+The gap comes from dispatch overhead: Audio8 walks one frame and one token
+at a time, so the GPU runtime issues ~32 000 Vulkan submissions per
+transcription; each costs a fixed ~0.25 ms (queue_submit + wait_for_fences).
+PyTorch launches a single CUDA graph. Fusing multiple ops per layer into one
+command buffer (shared arena) would close this gap but requires
+cross-arena data-flow refactoring.
+The matmul-only comparison isolates the kernel cost:
+
+| Weights | Unpacking | Bytes moved per weight | Wall clock |
+|---|---|---|---|
+| fp16 | none | 2 | 3.29 s |
+| Q5_K | amortized over the whole run | 0.69 read + 2 write + 2 read | 3.20 s |
+| Q5_K | per call | 0.69 read + 2 write + 2 read | 35.4 s |
+| Q5_K | fused into the matmul kernel | 0.69 | 18.3 s |
+
+Neither row can reach the 3.2 s of the first one: a streaming ASR reads the
+same weights once per frame and has to unpack them again every time. That
+row is the ceiling, and it says the remaining GPU cost is the unpacking
+arithmetic rather than the multiply -- the matmul alone would take 3.2 s.
+
+Reaching the GPU at all took fixing the k-quant shaders. `q5_k_matmul.comp`
+decoded the scale and the minimum inside its 256-element loop, staged the
+activation in shared memory only for wide projections, and was the only
+k-quant format without a split-K kernel. Together with the matching NEON
+kernels on the CPU side, that put Q5_K from 258 s to 43 s on the GPU and
+from 40 s to 11 s on the CPU.
+
+F16 keeps the transcript bit-for-bit equivalent to BF16 (the audio embeddings
+agree to 1.3e-6 relative RMS, against 7e-2 for Q8_0) and is about 14 % faster,
+because the BF16 kernel has no NEON path on this host while F16 does. F16 is
+the same size as BF16, so it is a speed knob, not a memory knob.
+
+The F16 GPU kernel used to run one output row per workgroup, which left three
+quarters of the threads idle and measured ~35 GB/s against the 242 GB/s DRAM
+bandwidth. Grouping four rows per workgroup (two when the parity reduction
+needs 32 lanes) and prefetching four K iterations raised the large-projection
+peak to ~72 GB/s and cut the end-to-end transcription from 51 s to 37 s. The
+arithmetic is unchanged: each row still walks the same index classes in the
+same order and reduces through the same tree, so the bit-for-bit contract
+with the CPU reduction holds.
+
+Q6_K has two NEON kernels. The production path uses `vdotq_s32` with four
+consecutive elements per lane (~32 GINTOP/s); a second `vmull_s8` kernel
+reproduces the scalar reference's `{l, l + 8}` pairing bit-for-bit
+(~23 GINTOP/s) and is kept for verification. The Vulkan self-check compares
+GPU against the dotprod path with 3e-3 tolerance — the same as Q4_K/Q5_K —
+because k-quant weight rounding already introduces ~1 % noise, so bit-parity
+between GPU and CPU is neither achievable nor meaningful for a quantized format.
+
+The block formats change the transcript, and they change it in different ways:
+Q8_0, Q5_K and Q6_K answer in English, Q4_K answers in Chinese with the
+wrong content. The reason is the runtime's block kernel path: it quantizes
+the *activations* to Q8_0 and accumulates in int32, the llama.cpp convention.
+The Audio8 activations are heavy-tailed, so that rounding is a few percent per
+projection, the 32 audio layers compound it, and the greedy decode flips the
+first token. The weight rounding alone is not the cause — the Q8_0 weights
+dequantize to 0.5 % relative RMS of the BF16 ones, and F16 (which keeps F32
+activations) reproduces the BF16 transcript exactly. Q4_K is the fastest
+because it moves the least data, and the least accurate for the same reason.
+
+The transcripts above are for the WAV this repository's own extraction
+produced; the README's reference clip came out of `ffmpeg`, and the two cuts
+are not the same samples, so the wording differs from the official run's
+`一个两个半年，` without either side being wrong.
 
 | Artifact | SHA-256 |
 |---|---|

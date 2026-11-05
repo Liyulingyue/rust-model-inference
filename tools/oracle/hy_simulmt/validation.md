@@ -231,3 +231,192 @@ NVIDIA 570.153.02 was not retested, at the user's request to validate locally.
 The Khronos validation layer is absent on this host; a validation-enabled
 initialization reports that missing layer, so validation-layer coverage is not
 claimed. No GPU speedup or long-recording coverage is established.
+
+
+## Main integration 2026-11-04
+
+Merged main `f4aa9d15526ec3af828c8c93f9bb943b45069e08` into Hy head
+`247e8fe2d8f638a4c9e233c71c3d63ca484bb5e2` on the same local M3 Max / MoltenVK
+host. Main's Audio8, AuK and Timestral fixes remain included. Both restored
+Q4_K_M weight files were rechecked against their recorded complete SHA256s.
+
+### Resolution and shared contracts
+
+- Resolve the five conflicts in shared linear/Vulkan, ARM quantization and
+  tokenizer code. Keep both tokenizer regressions and main's Q4/Q5/Q6 kernels,
+  including the Q6 signed-scale/truncated-block regression.
+- Unify the output-slot constructor while retaining checked allocation/slot
+  arithmetic and descriptor capacity for grouped bindings. Preserve Hy's
+  homogeneous grouped shader, main's mixed-format single-submit recording,
+  maximum-output-width dispatch and existing error/cleanup behavior. Larger
+  groups reuse eight slots in batches; device regressions cover 2/4/7/9
+  projections and nonuniform F32/BF16 storage.
+- Main's NEON F16 shader optimization reassigned inputs among accumulators;
+  the existing 256-wide regression failed by three ULPs. Restore its original
+  lane stride while keeping main's multiple-output-row workgroups. The original
+  CPU reduction contract passes without changing the test or its expectation.
+- Main's tiled F16 shader now accepts transposed weights. Preserve row-major
+  matmul/convolution callers too: only the explicit transposed recorder selects
+  that storage layout. A device test covers both layouts, 33 token rows,
+  65 outputs, 130/258 inputs and partial tiles with the same numerical bound
+  `abs <= 1e-4 + 2e-5 * abs(reference)`.
+- Keep fault injection on the new batch recorder and validate the whole linear
+  group before any upload/output write. Auto fallback, forced-device errors,
+  shared/private-context lifetime and exit cleanup regressions all pass.
+- Main added an optional AuK source to `build_backend`; update the two Hy server
+  mode tests to pass `None`. Hy remains in its independent model backend and
+  existing ASR entry, with no Qwen3-trunk integration or new model-named app file.
+
+### Complete model and entry validation
+
+Fresh three-turn traces use the same independent pinned native-NEON Oracle and
+repacking artifacts as the November 1 follow-up. No calibration or hard cap was
+changed. Each run used a new trace directory, four threads and F32 KV.
+
+| Configuration | Generated IDs | Maximum logits relative RMS | Minimum logits cosine |
+| --- | --- | --- | --- |
+| Standard CPU | All 10 match | 8.6197% | 0.996390 |
+| Standard Auto | All 10 match | 8.3869% | 0.997445 |
+| Interleave CPU | All 18 match | 11.4664% | 0.993425 |
+| Interleave Auto | All 18 match | 15.4427% | 0.989140 |
+
+All 12 audio checkpoints per run also pass. Standard's logit bounds remain
+max-abs 2.977287, relative RMS 0.1514963 and cosine 0.9942769; Interleave's remain
+4.955625, 0.20 and 0.9852752325. Quantized/SIMD arithmetic uses these bounds,
+while generated IDs, checkpoint names/order/counts/shapes are exact checks.
+
+Both variants pass their three real-weight regressions: actual CPU/Auto output
+and GPU submissions, HTTP concurrency/uploads/options, and final-EOT F16 KV
+capacity. Each Auto CLI and Auto HTTP JSON/multipart response matches the full
+library translation. Separate route probes check `/v1/jev/score`, `/grouped`,
+`/image` and `/image_grouped` under `/v1/jev`: all return 404 for both variants.
+The Interleave startup still names its CPU-decoder precision gate.
+
+Standard CLI records 568 submissions, 555 Vulkan backend reports and peak
+allocation 2,631,209,472 bytes. Interleave records 163 submissions, 150 Vulkan
+reports and peak allocation 1,325,069,760 bytes, all for its audio tower. These
+are functional counters; no timing/speedup claim is made. The wider shared
+output workspace increases Standard peak allocation from the preceding
+2,321,449,472-byte run.
+
+### Regression and remaining boundaries
+
+Commands use `RUSTUP_TOOLCHAIN=1.98.1 CARGO_TARGET_DIR=target/rmi`,
+`--locked --profile release-fast`, and one test thread for full/device suites.
+
+| Check | Result |
+| --- | --- |
+| Default full lib, before → after | 1341 passed / 20 failed / 88 ignored → 1369 / 21 / 89 |
+| Vulkan full lib, before → after | 1446 passed / 24 failed / 201 ignored → 1474 / 25 / 204 |
+| Vulkan linear ignored tests, excluding scalar-only selection | 6 passed |
+| `vulkan::ops::tests::batched_linear_device_` ignored tests | 7 passed |
+| Shared exit audit / explicit shutdown / private-context smoke | 1 passed each; exit audit checks three child processes |
+| `RMI_SCALAR=1` Hy / scalar-only linear selection | 19 passed / 1 passed |
+| Normal Hy integration/entry tests | 5 passed; 3 real-weight tests normally ignored |
+| Real-weight entry tests, Standard and Interleave | 3 passed each |
+| Both binaries and parity companion | Built with `parity-trace,vulkan` |
+| Oracle comparison-checker tests | 4 passed |
+| Shader manifest / SPIR-V validation | All hashes pass; all 54 binaries pass `spirv-val --target-env vulkan1.1` |
+
+Failed-name comparison retains every prior failure and adds only main's new
+`app::media::tests::stereo_uploads_are_refused`. A separate untouched
+`git archive` of `f4aa9d15` reproduces that exact assertion: FFmpeg is installed
+and the supported upload path mixes stereo down, while the test expects an
+error. `src/app/media.rs` is byte-identical to main; this is not a merge
+regression. Both full suites exit normally with 101 for those assertions.
+
+The complete shader rebuild/byte-comparison script also fails on unchanged
+`softmax.spv` on both untouched main and the merged tree with this local
+compiler. Its hash and SPIR-V validation pass. The two edited F16 shaders were
+rebuilt and validated; a full byte-rebuild pass is not claimed.
+
+Full records and failed-name sets are in `verification.json`; local logs and
+traces are under `target/hy-main-2026-11-04/`. No NVIDIA, other complete
+quantizations, long-recording or controlled-performance rerun was performed.
+Interleave GPU decoding and JEV remain unsupported under the existing policy.
+
+## Review fixes 2026-11-04
+
+Validated locally on Apple M3 Max (arm64, NEON and DotProd), using Rust 1.98.1
+and `release-fast`. The reference remains `e41ca4212f786815faa37606ee2e6fcf8611f9e4`.
+Both complete GGUF SHA256 values were rechecked. No new calibration, wider
+precision threshold, Qwen3 decoder dependency or Hy JEV implementation was added.
+
+### Review disposition
+
+| Item | Change or evidence |
+| --- | --- |
+| M1, scalar dispatch | The existing `has_avx2_fma()` / `has_neon()` gates already consult scalar mode. Added direct F32/F16 ggml-dot scalar regression and ran the Hy suite with process-start `RMI_SCALAR=1`; no duplicate dispatch branch was added. |
+| M2, legacy GPU opt-in | Restored `gpu_requested()` before legacy context initialization. A child-process regression proves an unenabled legacy Auto scope does not initialize Vulkan. Explicit `ComputePolicy::context()` selection remains available. |
+| M3, layer kind | Validation and loading both choose dense/MoE from each layer's router tensor, including multiple leading dense blocks. |
+| M4, tied output | Missing output weights reuse the embedding. An existing malformed output still fails; regression compares tied and explicitly copied heads. |
+| M5, metadata | Added reference defaults for optional sigmoid gating, norm, scale and shared width. Norm=false and scale=0 have their actual reference behavior. Expert width accepts scalar/array and zero fallback; **the key remains required** in the pin's `get_key_or_arr` call. Its loader uses element zero for every block, including nonuniform arrays. RMS epsilon is required; missing RoPE base defaults to 10000. |
+| M6, arena | The output head now uses a separate one-row executor. Arena and weight descriptor ranges are checked against `max_storage_buffer_range` before binding, and batched weights before upload. No general arena allocator redesign was needed. |
+| M7, descriptors | Added a bounded grouped-set cache: recover/confirm device completion before freeing group sets, retaining single-weight sets and uploaded buffers. Failure to confirm completion retains the cache. The device regression traverses all ordered pairs of four weights twice with a seven-set budget. |
+| M8, LayerNorm loading | Removed F32-only restriction, restoring `load_f32_tensor`'s decodable types and preserving finite-value/length validation. F32 and BF16 load regressions pass. F16 is not in that helper's pre-existing accepted set and is not newly claimed as supported. |
+| M9, F32 grouping | Choose small/tiled kernels per projection, including mixed `[65,4097,67]` widths. On-device grouped outputs equal the same single projections bitwise at 1/17/33 rows. This tests dispatch invariance, not universal bitwise floating-point parity. |
+| M10, group bounds | Reject more than three grouped weights and more than three descriptor extras before allocation/upload, without changing the larger independent-dispatch batching API. |
+| M11, Hy-MT2 | Added seven official 1.8B tokenizer ID cases covering Han/Kana, combining marks, long digits and English punctuation/whitespace. The sparse fixture preserves 418 vocabulary IDs and 176 original merge ranks; source hash and oracle method are recorded in the fixture. |
+| M12, F16 P·V | Retained input narrowing: the pin's F16 matmul converts F32 src1 to F16 (`ggml-cpu.c` type traits and mul_mat conversion). The independent graph probe gives F16×F32 = F16×F16 = -1.14203799, versus unrounded F32×F32 = -1.1419822. It does not accumulate in F16. |
+| M13, hygiene | Renamed the trimmed log-mel entry and its test module, removed unused `erff`, cached successful mel filters and replaced DreamX-specific shared errors. Shared frontend traces now use `audio.*`. Public WAV types require the frontend module to stay public; a glob `nn` re-export would conflict with existing exports. Falcon's dot retains its distinct F64 tail/non-x86 behavior, documented at the function instead of silently changing its arithmetic. |
+
+The ARM F32 reduction objection was also checked against the pin's
+`ggml-cpu/simd-mappings.h`: its reduction combines `(acc0+acc2)+(acc1+acc3)`,
+as the existing Rust NEON path does. Local DotProd is present, and the existing
+Q6_K NEON/DotProd regressions actually execute on this host. No unsupported
+hardware path was substituted for these checks.
+
+### Complete model comparison
+
+The same independent native-NEON Oracle and repacked baseline directories from
+the preceding follow-up are reused, with fresh actual traces, four threads,
+F32 KV, and the complete three-turn audio fixture. All 12 audio checkpoints per
+run pass. Standard's 10 generated IDs and Interleave's 18 IDs match exactly.
+
+| Configuration | Maximum logits relative RMS | Minimum logits cosine |
+| --- | --- | --- |
+| Standard CPU | 8.6197% | 0.996390 |
+| Standard Auto | 7.7182% | 0.997224 |
+| Interleave CPU | 11.4664% | 0.993425 |
+| Interleave Auto | 13.4625% | 0.991932 |
+
+The Standard gates remain max-abs 2.977287, relative RMS 0.1514963 and cosine
+0.9942769; Interleave remains 4.955625, 0.20 and 0.9852752325. The CPU runs also
+retain all 22 Standard and 30 Interleave checkpoint payloads byte-for-byte from
+the preceding main-integration run. Interleave GPU decoding stays gated to CPU;
+its Auto audio tower still runs on Vulkan.
+
+Both variants pass all three real-weight regressions: CPU/Auto translation and
+actual submissions, HTTP uploads/concurrency/options, and the F16 final-EOT KV
+boundary. Ordinary Auto CLI and both HTTP upload formats match library output;
+the four JEV routes return 404. Standard still records 568 submissions and 555
+Vulkan reports, with peak device allocation reduced from 2,631,209,472 to
+2,168,470,528 bytes (441.3 MiB saved). Interleave retains 163 submissions, 150
+Vulkan reports and 1,325,069,760 peak bytes for its audio tower. These are
+functional counters, not a controlled speed benchmark.
+
+### Regression scope
+
+- Default lib: 1369 passed / 21 failed / 89 ignored before, 1377 / 21 / 89 after.
+- Vulkan lib: 1474 passed / 25 failed / 204 ignored before, 1484 / 25 / 207 after.
+  Both final failed-name sets exactly match this review's fresh baseline.
+- Explicit physical-device tests: 10 batched-runtime and 6 linear-executor
+  regressions pass, including all three new review device tests. Scalar Hy:
+  24 pass; scalar dot and device-free scalar selection: one pass each.
+- Normal Hy contract/entry tests: 5 pass, with the three real-weight tests
+  explicitly run separately. The numerical Oracle runs use `parity-trace,vulkan`;
+  CLI/HTTP and real entry checks use ordinary `vulkan` binaries with scalar and
+  trace environment variables cleared.
+- CI now explicitly runs the new group regressions on Lavapipe, plus scalar dot,
+  Hy metadata/decoder, Hy-MT2 tokenizer, audio and descriptor-bound tests.
+- All shader hashes and all 54 SPIR-V validation checks pass. The local full
+  rebuild check still differs at unchanged `softmax.spv`, identically reproduced
+  on the untouched main archive with glslang 16.6.0; a local full byte-rebuild
+  pass is not claimed. This review changes no shaders or SPIR-V.
+
+Non-16 kHz mono WAV remains an explicit rejection, now checked separately from
+stereo rejection; automatic resampling was not introduced. Other complete
+quantizations, long audio, NVIDIA/AMD hardware and controlled speed benchmarks
+were not rerun. The model remains Experimental under its existing error budget.
+Detailed machine-readable evidence is appended to `verification.json`; local
+logs and traces are under `target/hy-review-2026-11-04/`.

@@ -141,6 +141,20 @@ NEON on aarch64; no AVX-512).
 - [ ] **token 维寄存器分块：消除 per-token 权重重读** — 详见 [TODO-019](#todo-019-token-维寄存器分块消除-per-token-权重重读)。
       文本编码只跑到约 11% 的 NEON 峰值，瓶颈是每个 token 都从 DRAM 重读整个权重矩阵。
       预期 1.5-2× 加速。
+- [ ] **AVX2 的 `exp_approx` clamp 与 shader 的 ±80、与上游的无 clamp 结构三者不一致** —
+      x86 CPU 路径用 clamp（`src/ops/math/exp.rs` 的 `FAST_EXP_CLAMP`，现为 ±88.0），
+      ARM NEON 路径用的是上游 llama.cpp 的结构（`|n| > 126` 走慢路径，**没有 clamp**），
+      Vulkan shader 用 ±80（补偿算法需要 `1/den` 保持正规数，见
+      [TODO-020](#todo-020-vulkan-silu-的-f32-次正规数缺陷--已修复但饱和边界不可回退)）。
+      三者的饱和边界因此不同：`x = 88.2` 时 NEON 走慢路径给出接近真值的 2.4e38，
+      x86 给 1.65e38（31% 偏差），GPU 给 exp(80) 的饱和值。
+      现状：x86 至少不再返回 `+inf`（旧 clamp `88.376_26` 会），并且
+      `FAST_EXP_CLAMP * log2(e) <= 127` 这个不变式由
+      `fast_exp_clamp_keeps_the_exponent_inside_the_f32_exponent_field` 守住。
+      选项：① 把 AVX2 改成镜像上游的 `|n| > 126 → 慢路径`（最彻底，x86 与 ARM 对齐，
+      但需要 x86 机器实测）；② 把 CPU clamp 收到 ±80 与 shader 对齐（牺牲 [80, 88.4]
+      的精度，换 CPU↔GPU 一致）；③ 维持现状，把三者的边界写进文档。
+      **必须在 x86 上实测才能定，不能在 aarch64 上单方面决定。**
 
 - [x] **LFM2.5-24B-A2B 适配 + 标量逐位对齐** — ✅ 已完成 (2026-10-15)。
       24B 总 / 2B 激活的 MoE，`lfm2moe` 架构：40 层 × 2048 宽 × 32 头（head_dim 64），注意力层
@@ -362,6 +376,14 @@ LFM2 / LFM2.5 / Spark / Nemotron-H / Hunyuan / LFM2-MoE），每个 scorer 实�
       host 路由/归约。Holo4 在 M3 Max / RADV NAVI31 的 MoE 分层和 batch/reset 检查通过，
       整模 logits 的 0.02 CPU/GPU 门槛仍失败；此 MiniCPM 权重尚未验证 GPU。
       见 [Holo4 验证](../../tools/oracle/holo4/README.md)。
+- [ ] **decode 每个投影一次 pool dispatch，784 次里 26 次的开销大于活** — Mellum 12B Q8_0
+      在 GB10 上 44 ms/token 里约 21 ms（48%）是 dispatch 固定开销（每次 ~26 µs：唤醒 7 个
+      worker + 同步 + 尾部效应），而每个投影每 worker 的活只有 12–98 µs。线程曲线印证：
+      1→8 线程只有 3.17× 加速，16/20 线程直接倒退。把一层里能并行的投影合并进一次
+      dispatch（每层 4 次而不是 28 次）→ 44 → 26.5 ms/token（1.66×）。不需要新的 pool
+      原语，现有 `compute` 就够（closure 里顺序做多个投影，各自按 `ith/nth` 切分）。
+      风险是位序和 DRAM 局部性；收益的绝对值与机器无关，相对值随 CPU 带宽上升。
+      详见 [TODO-050](#todo-050-decode-每个投影一次-pool-dispatch784-次里-26-次的开销大于活)。
 
 ## 入口面覆盖（2026-10-19 审计）
 
@@ -393,10 +415,43 @@ MiniCPM-V 4.7 的 `qwen35moe`（35B-A3B）此前只在**生成面**注册，多�
       改成惰性的 `Weight` / `QuantizedTensor` 会动到已验证的数值路径，只放宽解码面。
       回归测试 `minicpmv::weights::decode_matrix_tests`（含 F32/F16 不变、
       不支持的类型仍报出类型名）。
+- [ ] **Audio8 fused layer（单 submit/层）未完成** — 当前 GPU 模式每层 8 次 submit
+       （2 norm + QKV + attention + O + gate_up + SiLU + down），每次 ~0.25ms 固定开销，
+       36 层 × 116 步 ≈ 32K 次提交，submit 开销主导了 GPU 模式 13.5s 的总耗时
+       （CPU 模式 10.5s 反而更快）。fused layer 的目标是把一整层的 8 个 op 录进同一个
+       command buffer，单次 submit。**未实施原因**：
+       1. 会破坏 `LinearExecutor` 的 CPU/GPU 自动分发——matmul 必须从 `LinearExecutor`
+          抽到 fused path，`ComputePolicy::Auto` 的 per-op 粒度选择变成 per-layer 二元选择；
+       2. `BatchedLinearRuntime` 和 `Audio8GpuCompute` 各有独立 `Qwen3Ops` arena，跨 arena
+          数据必须经 CPU readback，不共享 arena 无法真正 fused；
+       3. 需要大规模重构才能让数据在 GPU 内部流动（残差常驻设备、共享 arena 所有权）。
+       **暂缓策略**：先把算子加速做好（F16/BF16 GPU matmul 带宽优化、k-quant shader
+       u32 字解包、GPU attention/norm/SiLU 集成已完成），多探索几个模型验证通用性，
+       再回头看 fused 问题——届时可能有更清晰的 session 所有权模型可以复用。
+       关联文件：`src/models/audio8/gpu.rs`、`src/models/audio8/text.rs`、
+       `src/compute/linear.rs`、`src/vulkan/ops.rs`。
 
 
 ## Medium Priority
 
+- [ ] **PhysBrain 文本 logits oracle 的界限不可跨主机迁移** — `tools/oracle/physbrain` 的
+      文本对照用固定提示 `What is 2+2?`、8 步 greedy、relative L2 ≤ 0.05 的界限。
+      step 0 是**近似平局**（token 17 与 785 相差 0.075 logits），而记录的 0.0488
+      已经是界限的 97.7%，所以换一台主机或换一个参考构建就会翻转：实测
+      aarch64 + scalar llama.cpp 参考得到 relative L2 0.0677、首个 greedy token 就不同。
+      llama.cpp 侧能**精确复现**记录的 ids（`[17,488,220,17,284,220,19,271]`），
+      所以参考实现没有问题，是 fixture 的包络太紧。
+      现状：main 与本分支**同样不过**，属预存问题，不是回归。
+      选项：① 换一个 top-1 差距更大的提示并重录 oracle；② 放宽界限（例如 0.1）并
+      如实记录实际值；③ 除 argmax 外同时记录 top-k 命中率，让近似平局不再翻转判定。
+- [ ] **Intern-Decision 文本 logits oracle 的界限同样不可跨主机迁移** —
+      `tools/oracle/intern_decision` 的文本对照用固定提示 `What is 2+2?`、8 步 greedy、
+      relative L2 ≤ 0.03 的界限。记录主机（Apple Silicon）每步 0.0143–0.0295，
+      在 aarch64 + NEON 上复测为 0.0156–0.0308：**step 6 恰好越过 0.03**（0.0308），
+      其余七步都在界内，8 步 greedy ids 与 llama.cpp 参考**逐 token 相同**。
+      与 PhysBrain 那条不同，这里不是近似平局翻转，而是包络本身太贴边。
+      选项：① 把界限放宽到 0.035 并如实记录两台主机的实测值；② 换 top-1 差距更大的
+      提示重录；③ 记录 top-k 命中率作为辅助判据。
 - [ ] **讨论：MemoryArena 与 BlockAllocator 组合**
 - [ ] **讨论：GPU 后端架构设计** — Vulkan / wgpu / CUDA 等多后端抽象
 - [ ] **讨论：SIMD 扩展路线** — 当前 AVX2+FMA、NEON。后续可考虑 AVX-512 (高端 CPU)、ARM SVE、AVX-VNNI (int8 dot)
@@ -438,13 +493,17 @@ MiniCPM-V 4.7 的 `qwen35moe`（35B-A3B）此前只在**生成面**注册，多�
       （`parity_trace::full_f32` 用 `format!("{trace}.{name}.f32")`，
       trace 路径是 "1" 时就落在 cwd）。修法：测试结束时恢复原值，
       或改用 `TempDir` 下的绝对路径。
-- [ ] **`kquants.py` 的 Q6_K 批大小估算偏低** — `--format q6_k` 量化 783 MB 的
+- [x] **`kquants.py` 的 Q6_K 批大小估算偏低** — `--format q6_k` 量化 783 MB 的
       `gliner2.5-base-v1` 跑 15 分钟未完成（Q4_K 同输入 4.5 分钟）。`_Q6K_BYTES_PER_BLOCK`
       记的是 `16 × 19 × 8 × 3`（每个 256 元素 super-block 的 19-candidate scale 搜索），
       但 `_q6k_batch` 实际还要为整个 `(n, 256)` batch 分配 F32 输入、副本与打包中间量，
       远不止这个数，于是 `K_SEARCH_BUDGET_BYTES` 形同虚设、批大到吃满内存。修法是让
       `_Q6K_BYTES_PER_BLOCK` 覆盖真实的瞬时占用（或直接给 `_q6k_batch` 一个独立的
       批上限），Q4_K 侧同样值得复核。`q4_k` 与 `q8_0` 两条路径已验证，不受此影响。
+      → 已修：不再靠字节预算推批大小，改为 `K_SEARCH_MAX_BLOCKS = 256` 的显式上限
+      （搜索按 super-block 独立，任意批大小输出逐字节一致）。单线程 NumPy、8.4M 值实测：
+      Q4_K 从 2.22 M values/s、峰值 RSS 5.5 GiB 变为 3.35 M values/s、150 MiB；
+      同样的上限也让 Q6_K 受益。`tools/converter/utils/test_kquants.py` 的定值摘要不变。
 - [ ] **Q8_0 与 Q8_K 量化路径按需量化（消除冗余计算，保留两份 buffer）** — dispatch 按 layer 权重格式，省一次量化 pass
 - [ ] **Qwen3.5：借用权重与 FFN gate/up 输入量化复用的取舍** — 中期重构，不阻塞局部 FFN 优化
 - [ ] **删掉三个纯转发的无参 `new()`** — `CollectSink`（`src/ops/generation_runtime.rs:158`）、
@@ -493,6 +552,14 @@ ggml-org/llama.cpp 的一部分**——它们是 `microsoft/BitNet` 私有 fork 
 - [ ] 更多量化格式支持（Q4_K, Q5_K 等）
 - [ ] 完善 GGUfRS 导出功能
 - [ ] GGUF 导出支持
+- [x] **Intern-Decision-0.8B 适配与真实权重数值对齐** — 转换器写出 `qwen35` arch 与
+      `qwen3vl_merger` 投影，0.8B 在 CPU 上文本/图像/CLI/HTTP/JEV 全部跑通；引擎侧无需模型专属代码。
+      真实 CLI、模型契约、固定 llama.cpp Oracle 的完整输出对照见
+      [复现记录](../../tools/oracle/intern_decision/README.md) 和
+      [哈希/指标](../../tools/oracle/intern_decision/verification.json)。
+    - 无损载荷/layout/token IDs 使用精确检查；量化、低精度舍入、近似激活使用明确数值误差界限。
+    - 未覆盖：**Intern-Decision-4B 真实权重**（转换器已支持并校验形状，但引擎的 Qwen3.5 recurrent
+      投影尚不接受该 SSM 形状，暂时不能推理）、GPU 数值对齐、性能基准。
 
 ---
 
@@ -1515,6 +1582,7 @@ GGUF 重量（从 `audio-cpp/AuK-Base-and-Flash-GGUF`）：
 - WAV：16-bit PCM mono writer
 
 待优化（follow-up，no rush）：
+- [ ] **Vulkan 路径的渲染不是逐位可复现的**（2026-11-04 定位）— 同一进程内同一份 prompt + seed 连着渲染：CPU 路径 8/8 逐位相同，Vulkan 路径约 6 次里有 1 次不同（latent rms 1.315 vs 1.162，更差时 rms 2.33）。用 `RMI_AUK_DIT_DUMP` 逐张量比对定位到：`text_conditioning.f32`、`latent_in_0/1.f32`、`velocity_0/1.f32` 都逐位相同，**差异从第 3 个 Euler 步（`velocity_2.f32`）开始**，`velocity_cond_2.f32` 同样分叉 —— 采样参数、随机数、文本条件都是确定的，不稳定性在 DiT 的设备路径内部（嫌疑：tiled F16 kernel 的尾块 / scratch 处理，或共享 arena 的复用）。CLI 每次进程只渲染一次，用户拿到的是"抽签"结果；HTTP 服务连续渲染时更容易撞见。回归哨兵 `tests/auk_pipeline_repeat.rs`（`#[ignore]`，CPU 过 / Vulkan 偶发失败）。**与 HTTP 接入无关**，是 GPU 路径的既有问题。
 - [ ] 数值校准 oracle-diff vs `references/audio.cpp/src/community_models/auk/flow.cpp` — block forward magnitudes drift without the velocity clip
 - [ ] Per-token matmul batching（`linear_into` 一调一次 token，瓶颈；需新增 batched Q8_0 matmul helper 或 thread-local Q8Scratch per rayon worker）
 - [x] **F16 matmul Vulkan path**（done as A：A 任务）— `auk_f16_gpu_runtime`（max_rows=1, max_n_in=4096, max_n_out=9216, descriptor_capacity=4096）+ `f16_gpu_linear_into`（单行 `BatchedLinearRuntime::matmul_rows(format=F16)`）接入 `linear_into_scaled_impl` 的 F16 分支。**pre_quantize F16→Q8_0 workaround（`f4e7879`）已删除**，主路径现在按 GGMLType dispatch——F16 走 F16 GPU，Q8_0 走 Q8 GPU matmul，BF16/Q*_K 走 `QTensorOwned` CPU。消除了 21s 一次性 F16→Q8 load + 1.5 GB cache RAM + post-training quant noise。end-to-end dev 335s（vs 311s baseline Q8 path，持平）。
@@ -3316,3 +3384,266 @@ arch 的**文本路**真的可用：
 
 **关联**：WeVisOne 适配分支（`codex/wevisone-vl-4b`）的 `src/main.rs` 改动与
 `docs/usage/qwen3.md` §3 的 M-RoPE 记录。
+
+### TODO-049: Mellum 的 GPU 路径能跑但打不过 CPU——decode 是单行投影，设备带宽只有 NEON 的一半
+
+Mellum 12B-A2.5B（Q8_0，12.9 GB）在 GB10 上接 Vulkan device 路径，
+**功能上没问题**：`RMI_PARITY_TRACE` 双后端对拍 15466 个检查点**逐位一致**
+（sum/min/max/head 全同），JEV 单问也一致（A 0.2219 / B 0.7781）。
+但 `--compute auto` 比 `--compute cpu` **慢 40%**。
+
+#### 已做：批量 prefill（真正的形状修复）
+
+`MellumRunner::forward_tokens`（`src/models/mellum/trunk/batch.rs`）把 prompt
+作为一批求值，每个投影一次拿到全部行，权重矩阵每批只读一次而不是每 token 一次。
+**逐位一致**：投影是逐行乘加，Q8_0 kernel 每行独立累加，一行的结果与同批有多少行无关
+（实测输出头 2304→98304 在 2/4/8 行下与单行设备路径、与 CPU 路径都是 **0 mismatch**）；
+attention、MoE 路由、专家折叠都按行、按 slot 顺序走，与逐 token 路径同序。
+哨兵 `tests/mellum_batched_prefill.rs`（42 token / 98304 logits 逐位相同）。
+
+收益（权重流量，不是设备速度）：
+
+| 测量（8 线程，各 3 次） | 逐 token | 批量 |
+|---|---|---|
+| JEV prefill（21 token prompt） | 2585 ms | 1014–1102 ms |
+| 端到端（21 token prompt + 8 output token） | 1006–1119 ms | 594–643 ms |
+| 端到端（183 token prompt + 8 output token） | 7558–8211 ms | 2911–3078 ms |
+
+单 token 要流过 2.1 GB 权重（每层 22.5 MB attention + 24 专家 × 3 × 2.19 MB，28 层），
+批量后每个权重每批只读一次。
+
+#### 新证据（2026-11-04，PyTorch CUDA 对照跑通）
+
+之前"Mellum 的 CUDA 对照跑不了"（另一个租户占 82.7 GB 统一内存，CUDA 路径要
+~48 GB 峰值）这一条作废：机器空出来之后 `tools/bench_mellum_pytorch.py --device cuda`
+跑通了（PyTorch 2.15.0+cu132，23.13 GB peak，空闲 GPU）：
+
+| | bytes/token | decode | 有效带宽 |
+|---|---|---|---|
+| PyTorch CUDA bf16 | 4.42 GB | 29.4 tok/s（33.9 ms/token） | **130 GB/s** |
+| 我们的 CPU Q8_0 | 2.35 GB | 22.7 tok/s（44 ms/token） | 53 GB/s |
+| 我们的 Vulkan Q8_0（实测只有输出头） | 2.35 GB | — | 66 GB/s |
+
+**这台机器上的设备能跑到 130 GB/s，我们的 Q8_0 device kernel 只到 66 GB/s
+——一半。** 所以"设备赢不了"不是设备的天花板，是我们 kernel 的访问模式：
+`q8_matmul_dp4a.comp` 让**每个线程独占一个输出行**，一个 warp 的 64 个线程
+因此读 64 个相距 2448 字节的扇区，而不是连续字节；PyTorch/cuBLAS 的 GEMV
+是让 warp 协同读连续权重再做归约。
+
+如果 Q8_0 kernel 打到 130 GB/s，Mellum 的 decode 是 2.35 GB / 130 GB/s =
+18 ms/token = **55 tok/s，对 CPU 的 22.7 tok/s 赢 2.4×**——那才是 Mellum
+设备路径真正该有的样子。仓库里已经有转置权重的机制（BF16/F32 走
+`record_transposed_float_matmul_rows`，"上传时转置，让 tiled float kernel
+沿归约轴 unit stride 走"），**Q8_0 没有走这条路**。
+
+顺带纠正一条旧结论：我们的 CPU decode 只跑到 53 GB/s，而输出头单独测能到
+115 GB/s → **CPU decode 不是带宽受限，是 785 次 pool dispatch 受限**。
+
+#### 现状：设备仍然赢不了，原因是上传而不是形状
+
+批量形状对设备**友好**（设备一次读完权重，CPU 每行重读）：
+输出头 2304→98304 在 8 行时设备 3.53 ms vs CPU 17.55 ms（5×），
+32 行时 5.32 ms vs 75.60 ms（14×）。但 prefill 只需要**最后一个位置**的 logits，
+所以这个形状用不上；而能用的形状（`wq`/`wo` 各 10 MB）设备只有 ~12 GB/s
+（`n_out=4096` 只有 64 个 workgroup，喂不饱设备），CPU 是 ~100 GB/s。
+
+更关键的是**上传**：host→device 只有 ~10 GB/s（DRAM 读是 ~100 GB/s），
+prefill 里每个权重只用一次，上传就是纯开销。实测 JEV prefill：
+CPU 1073 ms → 设备接管 `wq`/`wo` 后 1460 ms。
+所以**批量 prefill 默认走 CPU**，`RMI_MELLUM_DEVICE_PREFILL=1` 可以打开设备路径
+（serving 场景权重常驻，上传可摊销，这条值得在服务器上复测）。
+
+#### 已做：Q8_0 转置权重布局 + 新 kernel（设备带宽 60 → 163 GB/s）
+
+新增 `shaders/glsl/q8_matmul_transposed.comp` 和 `src/vulkan/q8_layout.rs`：
+上传时把 Q8_0 权重按 **64 行一组**重排（每个 block 的 64 行 payload 连续，
+scale 紧跟其后），于是一个 warp 读到的 32 行是**连续字节**，4 字节 load 也对齐。
+
+| 设备 kernel（输出头 2304→98304，单行） | 时间 | 有效带宽 |
+|---|---|---|
+| ggml 原生布局 | 4.0 ms | 60 GB/s |
+| 转置布局 | 1.47 ms | **163 GB/s**（2.71×） |
+| 设备纯流式（element-wise，240 MB 读+写） | — | 171 GB/s（设备天花板） |
+
+**逐位一致**：转置版与原生版输出 0 mismatch（哨兵
+`q8_0_transposed_layout_matches_and_faster`）。
+
+这条路只用在**单行**（decode）。多行走 tiled kernel，而 tiled kernel 的瓶颈是
+**激活的 shared-memory 暂存**（每个 block 每 lane 要做 32 token × 8 次 LDS），
+不是权重布局——转置版实测只有 0.60×，所以多行仍用原生布局。
+（中间试过"按 block 排序"的布局，tiled 仍然更慢；按 64 行分组才让单行版
+保持 2.7×。）
+
+host 端转置 240 MB 约 26 ms（9 GB/s），一次性，直接写进设备 buffer
+（`upload_static_filled`），所以上传只比原生多约 9 ms。
+
+**默认关闭**（`RMI_GPU_Q8_TRANSPOSED=1` 才开）。转置只搬字节不算数，
+数值契约一字未改（round-trip 测试证明布局可逆、黄金位测试证明三种
+reduction mode 下与原生 kernel 逐位相同、边界形状 n_out=1/63/64/65/127/129
+逐位相同），但寻址写错会**越界读 → GPU fault**（进程崩，不是静默错值），
+而目前 Mellum 还没有任何投影真的走设备，所以先不开。
+
+#### 新证据：设备的一次性开销在驱动初始化，不在 kernel
+
+| 一次性开销 | 时间 |
+|---|---|
+| Vulkan 上下文（instance + device，驱动初始化） | **279 ms** |
+| 50 个 compute pipeline 编译 | 11.7 ms |
+| 输出头权重上传（240 MB） | 17 ms（转置后 26 ms） |
+
+这 279 ms 之前算在生成时间里，是"`--compute auto` 慢 40%"的主要来源。
+现在 `compute_policy().configure_cli()` 在**后台线程**初始化设备，和 12 GB
+模型加载重叠 → 21 token prompt + 16 output 的生成时间 1009 ms → 685–750 ms。
+
+#### 现状：kernel 不再是瓶颈，但端到端仍然打平
+
+（下面的"设备转置"是**打开** `RMI_GPU_Q8_TRANSPOSED=1` 测的；默认关闭时
+设备走原生布局，输出头 4.0 ms/token，比 CPU 的 2.6 ms 慢，scope 必须留着。）
+
+打开后设备端 Q8_0 kernel 超过 PyTorch CUDA 的 130 GB/s，但 128 token 的生成
+CPU 5672–5742 ms、设备转置 5134–5951 ms，**打平**。原因：
+
+1. 单行投影只占每 token 2.35 GB 权重里的 240 MB（10%）；
+2. CPU decode 不是带宽受限，是 785 次 pool dispatch 受限（整模型 53 GB/s，
+   单个投影 115 GB/s）；
+3. 设备每 token 还要付一次提交往返（~0.4 ms）和 logits 读回。
+
+所以 `project()` 的 CPU scope 仍然保留——打平不是赢。
+
+#### 剩下的
+
+1. **prefill 和 decode 之间来回重传权重**（最高优先级）：权重在**同一形状**下
+   是常驻的（`GpuLinear` 是 per-weight 的，它缓存自己那一份），但 `GpuLinear::state`
+   里的 runtime 是按 (权重, 形状) 建的，而 prefill 是多行、decode 是单行
+   → 形状一变 runtime 就重建，权重跟着重传。实测（Mellum 全投影走设备）：
+   2 token 时 1047 次上传 / 2.92 GB，8 token 时 2250 次 / 5.56 GB
+   （第二份是 decode 重建 runtime 后的重传），32 token 时 2268 次 / 5.60 GB
+   —— 即 **每次 prefill 都要重传 2.9 GB**。显存不是问题（旧副本随 runtime 释放，
+   峰值 4.36 GB，开关两档一样），问题是**时间和带宽**。
+   要让 serving 场景能摊销，得让 runtime 跨形状存活（缓存按 (权重, 形状) 分开）。
+2. **把一层的投影合并成一次提交**：每 token 785 次提交，每次 ~0.4 ms = 314 ms，
+   比 kernel 本身还贵。仓库里已有 `record_group_matmul`（多权重共用一个
+   command buffer），Mellum 的 trunk 还没用。
+3. **decode 阶段仍然是单行**（每 token 785 次 pool dispatch，20 线程比 8 线程慢：
+   1426–1711 ms vs 1006–1119 ms）。TODO-037 已经改过一次等待逻辑（自旋 → yield），
+   但 Mellum 这个规模仍然不划算。**小投影不该扇出整个线程池**——1 行的 matmul 分给
+   8 个 worker，唤醒成本可能超过计算本身。
+2. **设备端 Q8_0 kernel 的带宽（最高优先级）**。PyTorch CUDA 在同一台机器上跑到
+   **130 GB/s**，我们的 Q8_0 device kernel 只有 **66 GB/s**。差在访问模式：
+   `q8_matmul_dp4a.comp` 让每个线程独占一个输出行，warp 的 64 个线程读 64 个
+   相距一行的扇区；而 BF16/F32 已经有转置权重的路子
+   （`record_transposed_float_matmul_rows`，上传时转置让 kernel 沿归约轴
+   unit stride 走），**Q8_0 没走**。给 Q8_0 加一条转置权重 + warp 协同归约的
+   路径，是让 Mellum（以及所有 Q8_0 模型）设备路径能赢 CPU 的前提。
+   另有一个次要因素：输出头能跑 66 GB/s（`n_out=98304`，1536 个 workgroup），
+   `wq` 只有 12 GB/s（`n_out=4096`，64 个 workgroup）——小 `n_out` 喂不饱设备。
+3. **每 token 的输出头 240 MB**。decode 每 token 都要读一遍 240 MB 的输出头，
+   CPU 2.09 ms（115 GB/s）vs 设备 3.6 ms（66 GB/s）。设备 kernel 的带宽只有 CPU 的
+   57%，这是设备端 Q8_0 kernel 本身的问题。
+4. 设备空闲时重测。TODO-038/039 指出这台机器上的 GPU 数字都受另一个租户占用影响
+   （nvidia-smi 采样 79–92%），上面的对比在 GPU 0% 利用率下测得，但仍需在独占时复测。
+
+
+### TODO-050: decode 每个投影一次 pool dispatch，784 次里 26 次的开销大于活
+
+#### 现象与账单
+
+Mellum 12B Q8_0（8 线程）在 GB10 上 decode 44 ms/token（22.7 tok/s）。拆开：
+
+- 纯计算下界 **23 ms/token**（每 token 读 2.35 GB 权重，CPU 多线程有效带宽 ~102 GB/s；
+  单投影实测 115 GB/s）
+- pool dispatch 固定开销 **~21 ms/token（48%）**
+
+每 token **785 次** `ComputePool::compute`（28 层 × 28 个投影）。每次的固定成本约 26 µs：
+等所有 worker 空闲 → `notify_all()` 唤醒 7 个线程 → 主线程自己也做一份 → 等最后一个
+完成（尾部效应）。
+
+而每个投影**每 worker**的活只有 12–98 µs：
+
+| 投影 | 每 worker 读 | 每 worker 算 |
+|---|---|---|
+| `wq` (2304→4096) | 1.25 MB | ~98 µs |
+| `wk` / `wv` (2304→512) | 154 KB | **~12 µs** |
+| `wo` (2304→2304) | 693 KB | ~54 µs |
+| 专家 up/gate/down (2304→896 / 896→2304) | 258 KB | **~20 µs** |
+| 输出头 (2304→98304) | 10 MB | ~784 µs |
+
+→ 784 次里 **26 次的活比 dispatch 开销还小**（wk/wv + 24 个专家投影）。
+
+#### 证据：线程曲线
+
+1→8 线程只有 3.17× 加速（不是 8×），16/20 线程直接倒退 —— 唤醒成本随线程数增长，
+8 线程已经吃完并行收益（64 token prompt，best-of-2）：
+
+| threads | 64 token | 相对 1 线程 |
+|---|---|---|
+| 1 | 8986 ms | 1× |
+| 2 | 5050 ms | 1.78× |
+| 4 | 3309 ms | 2.72× |
+| **8** | **2833 ms** | **3.17×** |
+| 16 | 3669 ms | 倒退 |
+| 20 | 4212 ms | 更慢 |
+
+#### 改法：把能并行的投影合并进一次 dispatch
+
+一层的依赖结构（`forward.rs` 的单 token 路径）：
+
+```
+{wq, wk, wv}        共享同一输入 ✓ 同组
+   ↓ attention（逐 query 行）
+{wo}                单独一个 ✗
+   ↓
+{8 专家的 up+gate}  16 个投影，专家之间彼此独立 ✓ 同组
+   ↓ silu(gate) * up
+{8 专家的 down}     8 个投影，彼此独立 ✓ 同组
+```
+
+→ 每层 **4 次** dispatch（现在 28 次）→ 112 次/token（现在 785）→ 开销
+20.4 → 2.9 ms/token → **44 → 26.5 ms/token（1.66×，22.7 → 39 tok/s）**。
+
+实现上**不需要新的 pool 原语**：现有的 `compute` 就够，closure 里让每个 worker 顺序做
+多个投影（各自按 `ith/nth` 切分）：
+
+```rust
+pool.compute(|ith, nth| {
+    wq.forward_prepared(..., ith, nth);   // 98 µs
+    wk.forward_prepared(..., ith, nth);   // 12 µs ← 被 wq 掩盖，不再单独付一次 dispatch
+    wv.forward_prepared(..., ith, nth);   // 12 µs
+});
+```
+
+「每层 1 次」需要阶段 barrier + 动态领活（新 pool 原语；`compute_with_chunks` 因为
+barrier 与常驻 worker 不兼容而不可用），收益 1.66× → 1.8×，先不做。
+
+#### 风险
+
+1. **位序 / 依赖**（真风险，可控）：组的顺序不变 → 依赖天然满足；必须用现有 Mellum 哨兵
+   验证（`tests/mellum_batched_prefill.rs` 逐位 + `RMI_PARITY_TRACE` 的 15466 个检查点）。
+2. **DRAM 局部性**（真风险，5–15%，需实测）：现在是 8 个 worker 读**同一矩阵的相邻区间**
+   （地址接近，命中同一批 DRAM 行），合并后 8 个 worker 读 8 个相距很远的矩阵 → 行缓冲
+   命中率可能下降 → 有效带宽可能从 102 GB/s 掉一点。
+3. **「`wo` 单独一次」的浪费**（已知，可接受）：7 个 worker 空转 54 µs × 28 层
+   = 0.7 ms/token。
+4. **专家阶段的输入准备**：8 个专家的 `group_input` 要同时在位（`batch.rs` 里
+   `group_input` 是每专家一份，单 token 路径要新建）。
+5. **不是风险**：带宽总量（2.35 GB/token 不变）、计算量、显存。
+
+#### 跨机器稳健性
+
+省掉的 dispatch 次数与机器无关（672 次 ≈ 17.5 ms/token），但**相对收益**取决于 CPU
+带宽 —— CPU 越强，纯计算被压得越短，dispatch 开销的占比越高：
+
+| 机器 | CPU 有效带宽 | 纯计算/token | 现在 | 合并后 | 加速 |
+|---|---|---|---|---|---|
+| GB10（18 核共享内存） | ~102 GB/s | 23 ms | 44 ms | 26.5 ms | 1.66× |
+| Intel Ultra 5（LPDDR5X-8533） | ~110 GB/s | 21 ms | 42 ms | 24.5 ms | 1.7× |
+| i7-12700（DDR4-3200 双通道） | ~45 GB/s | 52 ms | 72 ms | 55 ms | 1.3× |
+| 老 i7 / 单通道 DDR4 | ~25 GB/s | 94 ms | 114 ms | 97 ms | 1.18× |
+
+（这些带宽是量级估计，不是实测；TODO-038/039 记的那台机器就是共享内存的 GB10。）
+
+#### 顺带
+
+这条对**所有模型**都成立（任何走 `pool.compute` 做逐投影 dispatch 的 trunk），不只 Mellum。
+改的时候顺带把接口设计成能同时喂给 CPU 和设备（照 `record_group_matmul` 的形状：一层一次、
+多个权重共用一个 command buffer），以后接设备就只是换个 backend，而不是再改一遍 trunk。

@@ -20,6 +20,8 @@ pub(crate) mod matmul_q4k;
 #[cfg(feature = "vulkan")]
 pub(crate) mod ops;
 #[cfg(feature = "vulkan")]
+pub(crate) mod q8_layout;
+#[cfg(feature = "vulkan")]
 pub(crate) mod qwen3;
 #[cfg(feature = "vulkan")]
 pub(crate) mod qwen35;
@@ -1139,6 +1141,31 @@ impl VulkanContext {
         Ok(buffer)
     }
 
+    /// Upload bytes that are produced in place.
+    ///
+    /// A caller that has to rewrite the bytes anyway -- the transposed Q8_0
+    /// layout -- can write them straight into the device buffer instead of
+    /// staging them in a second buffer and copying that over.
+    pub(crate) unsafe fn upload_static_filled(
+        &self,
+        size: usize,
+        fill: impl FnOnce(&mut [u8]),
+    ) -> Result<GpuBuffer, VulkanError> {
+        let padded = size
+            .checked_add(19)
+            .and_then(|size| u64::try_from(size & !3).ok())
+            .ok_or(VulkanError::OutOfMemory)?;
+        let buffer = self.alloc_persistently_mapped(padded)?;
+        let mapped = buffer.mapped;
+        // SAFETY: the mapping covers `padded` bytes and the buffer is not
+        // in use yet.
+        fill(std::slice::from_raw_parts_mut(mapped, size));
+        std::ptr::write_bytes(mapped.add(size), 0, padded as usize - size);
+        self.flush_mapped(buffer, 0, size as u64)?;
+        self.count_upload(size);
+        Ok(buffer)
+    }
+
     /// Keep discrete GPU weights in VRAM; mutable host buffers still use
     /// upload_static. Caller must not hold the command mutex.
     pub(crate) unsafe fn upload_device_static(
@@ -1413,7 +1440,9 @@ impl VulkanContext {
         // turning on while looking for one.
         let validation_layer = CStr::from_bytes_with_nul(b"VK_LAYER_KHRONOS_validation\0").unwrap();
         let validation_requested = std::env::var_os("RMI_VULKAN_VALIDATION").is_some();
-        let layer_names: Vec<*const i8> = if validation_requested {
+        // `c_char` is `i8` on x86_64 but `u8` on aarch64, so spell it out
+        // instead of hardcoding `i8` or this fails to build on ARM.
+        let layer_names: Vec<*const std::ffi::c_char> = if validation_requested {
             vec![validation_layer.as_ptr()]
         } else {
             Vec::new()
@@ -1949,7 +1978,11 @@ impl VulkanContext {
             let create_info = vk::ComputePipelineCreateInfo {
                 s_type: vk::StructureType::COMPUTE_PIPELINE_CREATE_INFO,
                 p_next: std::ptr::null(),
-                flags: Default::default(),
+                flags: if std::env::var_os("RMI_VK_NO_OPT").is_some() {
+                    vk::PipelineCreateFlags::DISABLE_OPTIMIZATION
+                } else {
+                    vk::PipelineCreateFlags::empty()
+                },
                 stage,
                 layout: pipeline_layout,
                 base_pipeline_handle: vk::Pipeline::null(),
@@ -2279,6 +2312,14 @@ impl std::fmt::Display for VulkanError {
             VulkanError::UnsupportedShape(s) => write!(f, "Unsupported shape: {}", s),
             VulkanError::Timeout => write!(f, "GPU dispatch timed out"),
         }
+    }
+}
+
+/// The device errors carry their own message, so a caller that reports a
+/// failure as a string does not have to spell the conversion out.
+impl From<VulkanError> for String {
+    fn from(error: VulkanError) -> Self {
+        error.to_string()
     }
 }
 

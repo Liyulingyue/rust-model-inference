@@ -58,7 +58,7 @@ fn is_qwen35(arch: &str) -> Result<bool, String> {
         // chat template and additionally does post-attention / post-FFN
         // RMSNorm (`attn_post_norm` / `ffn_post_norm`); last user turn only.
         "llama" | "nanbeige" | "exaone" | "k2-horizon" | "granite" | "phi3" | "glm4"
-        | "mistral3" => Ok(false),
+        | "mistral3" | "spark2_5" => Ok(false),
         _ => Err(format!(
             "Tool/chat template is unsupported for architecture {arch}"
         )),
@@ -175,6 +175,54 @@ pub fn build_prompt(
 
     if arch == "lfm3" {
         return Err("LFM3 requires its GGUF chat template or --chat-template-file".into());
+    }
+    // Spark 2.5 uses a custom chat template (`<|Bot|>`, `<|User|>`, `<|System|>`)
+    // that is neither ChatML nor llama-style. Use the GGUF's Jinja template via
+    // `single_turn_text` when available, falling back to the hand-transcribed
+    // format that matches `run_inference` in the Spark trunk.
+    if arch == "spark2_5" {
+        if !tools.is_empty() {
+            return Err("Function tools are unsupported for Spark 2.5 text generation".into());
+        }
+        if messages.iter().any(|m| !m.images.is_empty()) {
+            return Err("Image input is unsupported for Spark 2.5 text generation".into());
+        }
+        let user_text = messages
+            .iter()
+            .find(|m| m.role == "user")
+            .map(|m| m.text.as_str())
+            .unwrap_or("");
+        let enable_thinking = enable_thinking.unwrap_or(false);
+        let sos = "<｜start▁of▁sentence｜>";
+        let eos = "<｜end▁of▁sentence｜>";
+        let rendered = crate::prompt::jinja::single_turn_text(
+            jinja,
+            &|k| source.metadata(k).cloned(),
+            sos,
+            eos,
+            user_text,
+            enable_thinking,
+        )?
+        .unwrap_or_else(|| {
+            let bot_suffix = if enable_thinking {
+                "<think>"
+            } else {
+                "</think>"
+            };
+            format!(
+                "{sos}<|System|>\nyou are a helpful assistant.{eos}\
+                 {sos}<|User|>{user_text}{eos}\
+                 {sos}<|Bot|>{bot_suffix}"
+            )
+        });
+        let ids = tokenizer.encode(
+            &rendered,
+            crate::core::tokenizer::EncodeOptions {
+                add_special: false,
+                parse_special: true,
+            },
+        );
+        return Ok((ids, Vec::new()));
     }
     let qwen35 = is_qwen35(arch)?;
     // LFM2 / LFM2.5 have their own `role\n{content}\n` template. Rendering

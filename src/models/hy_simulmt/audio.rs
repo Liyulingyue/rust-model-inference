@@ -3,7 +3,7 @@ use crate::compute::linear::LinearExecutor;
 use crate::compute::ComputePolicy;
 use crate::core::tensor::{load_f32_tensor, TensorSource};
 use crate::core::thread_pool::ComputePool;
-use crate::ops::audio::frontend::{compute_whisper_log_mel, HOP};
+use crate::ops::audio::frontend::{compute_log_mel_trimmed, HOP};
 use crate::ops::audio::transformer::{
     apply_gelu_erf, full_attention_into, layer_norm_rows, LayerNormWeights,
 };
@@ -152,7 +152,7 @@ impl HyAudioEncoder {
         }
         let mut padded = samples.to_vec();
         padded.resize(samples.len().div_ceil(HOP) * HOP, 0.0);
-        let mel = compute_whisper_log_mel(&padded).map_err(|e| format!("Hy-SimulMT mel: {e:?}"))?;
+        let mel = compute_log_mel_trimmed(&padded).map_err(|e| format!("Hy-SimulMT mel: {e:?}"))?;
         trace("hy.mel", &[128, mel.frames], &mel.normalized);
         self.encode_mel(&mel.normalized, mel.frames)
     }

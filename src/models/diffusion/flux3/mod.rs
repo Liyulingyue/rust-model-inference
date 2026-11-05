@@ -129,6 +129,10 @@ fn validate_text(source: &dyn TensorSource) -> Result<(), String> {
     }
     require_tensor(source, "token_embd.weight", &[2560, 151936], GGMLType::BF16)?;
     require_tensor(source, "output_norm.weight", &[2560], GGMLType::BF16)?;
+    // Every shape and type is checked before any payload is measured, so a
+    // contract violation is reported as such.
+    crate::core::tensor::require_tensor_data(source, "token_embd.weight")?;
+    crate::core::tensor::require_tensor_data(source, "output_norm.weight")?;
     for layer in 0..36 {
         for (suffix, dims) in [
             ("attn_norm", vec![2560]),
@@ -465,6 +469,35 @@ mod tests {
             ggml_type: GGMLType::BF16,
             offset: 0,
         };
+        // The contract is metadata-only, so the byte-length case needs a
+        // source that actually reports a payload: `TextSource` reports an
+        // empty one. `output_norm.weight` is well formed so that the
+        // truncated embedding is the first thing `validate_text` rejects.
+        struct ByteSource {
+            embedding: TensorInfo,
+            norm: TensorInfo,
+            embedding_bytes: Vec<u8>,
+            norm_bytes: Vec<u8>,
+        }
+        impl TensorSource for ByteSource {
+            fn metadata(&self, _: &str) -> Option<&MetaValue> {
+                None
+            }
+            fn tensor_info(&self, name: &str) -> Option<&TensorInfo> {
+                [&self.embedding, &self.norm]
+                    .into_iter()
+                    .find(|info| info.name == name)
+            }
+            fn tensor_slice(&self, name: &str) -> Option<&[u8]> {
+                if name == self.embedding.name {
+                    Some(&self.embedding_bytes)
+                } else if name == self.norm.name {
+                    Some(&self.norm_bytes)
+                } else {
+                    None
+                }
+            }
+        }
         for (info, message) in [
             (None, "Missing tensor"),
             (
@@ -479,9 +512,8 @@ mod tests {
                     dims: vec![2560, 1],
                     ..embedding.clone()
                 }),
-                "dimensions",
+                "shape",
             ),
-            (Some(embedding), "byte length"),
         ] {
             let error = validate_text(&TextSource(info)).unwrap_err();
             assert!(
@@ -489,6 +521,34 @@ mod tests {
                 "{error}"
             );
         }
+        let short = vec![0u8; 2560 * 151936 * 2 - 1];
+        let error = validate_text(&ByteSource {
+            embedding: embedding.clone(),
+            norm: TensorInfo {
+                name: "output_norm.weight".into(),
+                dims: vec![2560],
+                ggml_type: GGMLType::BF16,
+                offset: 0,
+            },
+            embedding_bytes: short,
+            norm_bytes: vec![0u8; 2560 * 2],
+        })
+        .unwrap_err();
+        assert!(
+            error.contains("token_embd.weight") && error.contains("data length"),
+            "{error}"
+        );
+        // The contract is metadata-only, so a shape violation is reported
+        // even when the payload is missing entirely.
+        let error = validate_text(&TextSource(Some(TensorInfo {
+            dims: vec![2560, 1],
+            ..embedding.clone()
+        })))
+        .unwrap_err();
+        assert!(
+            error.contains("token_embd.weight") && error.contains("shape"),
+            "{error}"
+        );
         for name in [
             "output.weight",
             "cls.output.weight",

@@ -57,7 +57,7 @@ impl Source {
     }
 }
 
-fn model() -> HyDecoder {
+fn source() -> Source {
     let mut source = Source::default();
     for (key, value) in [
         ("embedding_length", HIDDEN),
@@ -170,9 +170,122 @@ fn model() -> HyDecoder {
             }
         }
     }
-    let tokenizer =
-        Arc::new(BPETokenizer::from_gguf_metadata(|key| source.metadata(key).cloned()).unwrap());
-    HyDecoder::from_source(Arc::new(source), tokenizer, Arc::new(ComputePool::new(2))).unwrap()
+    source
+}
+
+fn load_model(source: Source) -> Result<HyDecoder, String> {
+    let tokenizer = Arc::new(BPETokenizer::from_gguf_metadata(|key| {
+        source.metadata(key).cloned()
+    })?);
+    HyDecoder::from_source(Arc::new(source), tokenizer, Arc::new(ComputePool::new(2)))
+}
+
+fn model() -> HyDecoder {
+    load_model(source()).unwrap()
+}
+
+#[test]
+fn hy_dense_layers_follow_router_presence() {
+    let mut s = source();
+    s.tensors.retain(|name, _| {
+        (!name.starts_with("blk.1.ffn_") || name == "blk.1.ffn_norm.weight")
+            && name != "blk.1.exp_probs_b"
+    });
+    for (name, dims) in [
+        ("gate", [HIDDEN, 12]),
+        ("up", [HIDDEN, 12]),
+        ("down", [12, HIDDEN]),
+    ] {
+        s.matrix(&format!("blk.1.ffn_{name}.weight"), &dims);
+    }
+    let model = load_model(s).unwrap();
+    assert!(model
+        .layers
+        .iter()
+        .all(|l| matches!(l.ffn, HyFfn::Dense(_))));
+    let mut session = HySession::new(&model, CONTEXT, KvFormat::F32, ComputePolicy::Cpu).unwrap();
+    assert!(session
+        .forward(&[0, 1], None, 2)
+        .unwrap()
+        .iter()
+        .all(|v| v.is_finite()));
+}
+
+#[test]
+fn hy_output_can_share_token_embedding() {
+    let mut s = source();
+    s.tensors.remove("output.weight");
+    let model = load_model(s).unwrap();
+    assert_eq!(
+        model.output.kernel.weight_bytes(),
+        model.embedding.kernel.weight_bytes()
+    );
+    let mut explicit = source();
+    let (mut info, bytes) = explicit.tensors["token_embd.weight"].clone();
+    info.name = "output.weight".into();
+    explicit.tensors.insert(info.name.clone(), (info, bytes));
+    let explicit = load_model(explicit).unwrap();
+    let mut a = HySession::new(&model, CONTEXT, KvFormat::F32, ComputePolicy::Cpu).unwrap();
+    let mut b = HySession::new(&explicit, CONTEXT, KvFormat::F32, ComputePolicy::Cpu).unwrap();
+    assert_close(
+        &a.forward(&[0, 1], None, 2).unwrap(),
+        &b.forward(&[0, 1], None, 2).unwrap(),
+        "tied output",
+    );
+    let mut corrupt = source();
+    corrupt.tensors.get_mut("output.weight").unwrap().1.pop();
+    assert!(load_model(corrupt).err().unwrap().contains("output.weight"));
+}
+
+#[test]
+fn hy_expert_width_accepts_layer_array() {
+    let mut s = source();
+    s.metadata.insert(
+        "hy_v3.expert_feed_forward_length".into(),
+        MetaValue::Array(
+            MetaValueType::Uint32,
+            vec![MetaValue::Uint32(6), MetaValue::Uint32(999)],
+        ),
+    );
+    load_model(s).unwrap();
+}
+
+#[test]
+fn hy_optional_routing_metadata_uses_reference_defaults() {
+    let mut s = source();
+    for key in [
+        "expert_gating_func",
+        "expert_weights_norm",
+        "expert_weights_scale",
+    ] {
+        s.metadata.remove(&format!("hy_v3.{key}"));
+    }
+    s.metadata.insert(
+        "hy_v3.expert_feed_forward_length".into(),
+        MetaValue::Uint32(0),
+    );
+    let model = load_model(s).unwrap();
+    assert!(!model.config.moe.normalize_weights);
+    assert_eq!(model.config.moe.scale, 1.0);
+    assert_eq!(model.config.moe.expert_ffn, 6);
+    let mut s = source();
+    s.metadata.remove("hy_v3.expert_shared_feed_forward_length");
+    assert_eq!(HyConfig::from_source(&s).unwrap().moe.shared_expert_ffn, 6);
+    s.metadata.remove("hy_v3.expert_feed_forward_length");
+    assert!(HyConfig::from_source(&s)
+        .unwrap_err()
+        .contains("expert_feed_forward_length"));
+}
+
+#[test]
+fn hy_rms_epsilon_is_required_and_rope_default_matches_reference() {
+    let mut s = source();
+    s.metadata.remove("hy_v3.rope.freq_base");
+    assert_eq!(HyConfig::from_source(&s).unwrap().freq_base, 10_000.0);
+    s.metadata.remove("hy_v3.attention.layer_norm_rms_epsilon");
+    assert!(HyConfig::from_source(&s)
+        .unwrap_err()
+        .contains("layer_norm_rms_epsilon"));
 }
 
 fn assert_close(actual: &[f32], expected: &[f32], context: &str) {

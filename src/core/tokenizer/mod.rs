@@ -2277,6 +2277,45 @@ mod tests {
     use crate::core::tensor::{MetaValue, MetaValueType};
     use std::collections::HashMap;
 
+    #[test]
+    fn hy_mt2_token_ids_match_official_tokenizer() {
+        #[derive(serde::Deserialize)]
+        struct Case {
+            text: String,
+            ids: Vec<u32>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Fixture {
+            vocab_size: usize,
+            vocab: Vec<(u32, String)>,
+            merges: Vec<(u32, String, String)>,
+            cases: Vec<Case>,
+        }
+        let fixture: Fixture = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/hy_mt2_tokenizer.json"
+        ))
+        .unwrap();
+        let mut tokenizer = tokenizer_with_pre(Some("hunyuan-dense")).unwrap();
+        tokenizer.tokens = vec![String::new(); fixture.vocab_size];
+        tokenizer.token_types = vec![TokenType::Normal; fixture.vocab_size];
+        tokenizer.token_to_id.clear();
+        for (id, token) in fixture.vocab {
+            tokenizer.tokens[id as usize] = token.clone();
+            tokenizer.token_to_id.insert(token, id);
+        }
+        // The sparse fixture keeps the official IDs and original merge ranks.
+        tokenizer.merge_ranks = fixture
+            .merges
+            .into_iter()
+            .map(|(rank, a, b)| ((a, b), rank))
+            .collect();
+        for case in fixture.cases {
+            let ids = tokenizer.encode(&case.text, EncodeOptions::default());
+            assert_eq!(ids, case.ids, "{:?}", case.text);
+            assert_eq!(tokenizer.decode(&ids, false), case.text);
+        }
+    }
+
     fn tokenizer_with_pre(pre: Option<&str>) -> Result<BPETokenizer, String> {
         let mut metadata: HashMap<String, MetaValue> = HashMap::from([
             (
@@ -2343,6 +2382,23 @@ mod tests {
                 " two"
             ]
         );
+    }
+
+    #[test]
+    fn qwen25_omni_encodes_hello() {
+        let tokenizer = BPETokenizer::from_qwen25_omni_embedded_merges().unwrap();
+        let ids = tokenizer.encode(
+            "Hello",
+            EncodeOptions {
+                add_special: true,
+                parse_special: true,
+            },
+        );
+        eprintln!("'Hello' -> {:?} ({} tokens)", ids, ids.len());
+        for id in &ids {
+            eprintln!("  {} -> {:?}", id, tokenizer.token_piece_bytes(*id, true));
+        }
+        assert!(!ids.is_empty(), "'Hello' should encode to at least 1 token");
     }
 
     #[test]

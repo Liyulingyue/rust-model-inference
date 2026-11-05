@@ -55,6 +55,12 @@ impl<'model, 'weights> LinearExecutor<'model, 'weights> {
         }
     }
 
+    /// Access the Vulkan context, if running on GPU.
+    #[cfg(feature = "vulkan")]
+    pub(crate) fn vulkan_context(&self) -> Option<&'static crate::vulkan::VulkanContext> {
+        self.runtime.as_ref().map(|r| r.ops_context().unwrap())
+    }
+
     pub(crate) fn new(
         policy: ComputePolicy,
         bindings: Vec<LinearBinding<'model, 'weights>>,
@@ -116,17 +122,18 @@ impl<'model, 'weights> LinearExecutor<'model, 'weights> {
         {
             match policy.context()? {
                 Some(context) => {
-                    match crate::vulkan::ops::BatchedLinearRuntime::new_with_output_slots(
+                    match crate::vulkan::ops::BatchedLinearRuntime::with_output_slots(
                         context,
                         max_rows,
                         max_n_in,
                         max_n_out,
+                        // Single weights stay resident; grouped sets use a bounded, recycled cache.
                         bindings
                             .len()
                             .checked_add(bindings.len().div_ceil(2))
                             .and_then(|n| n.checked_add(1))
                             .ok_or_else(|| invalid("binding count overflow"))?,
-                        bindings.len().min(3),
+                        8,
                     ) {
                         Ok(runtime) => Some(runtime),
                         Err(error) if policy == ComputePolicy::Auto => {
@@ -344,7 +351,7 @@ impl<'model, 'weights> LinearExecutor<'model, 'weights> {
                 }
             }
             runtime.validate(
-                w.kernel.weight_bytes().unwrap(),
+                bytes,
                 GpuMatmulSpec::prepared(w)?,
                 input.len(),
                 rows,
@@ -385,20 +392,59 @@ impl<'model, 'weights> LinearExecutor<'model, 'weights> {
             }
         }
         self.staging.resize(total, 0.0);
-        let mut offset = 0;
-        for (binding, output) in bindings.iter().zip(outputs.iter()) {
+
+        // Build the group spec for batched recording.
+        // Each binding becomes (weight_bytes, spec, rows, n_out).
+        // All bindings share the same input activation (written once).
+        let mut group = Vec::with_capacity(N);
+        for binding in bindings.iter() {
             let w = binding.weight;
-            runtime.matmul_rows(
+            group.push((
                 w.kernel.weight_bytes().unwrap(),
                 GpuMatmulSpec::prepared(w)?,
-                input,
                 rows,
-                w.n_in,
                 w.n_out,
-                &mut self.staging[offset..offset + output.len()],
-            )?;
-            offset += output.len();
+            ));
         }
+
+        // Write input activation once, then record all dispatches into one
+        // command buffer and submit once. This eliminates N-1 submit+wait
+        // round-trips per group.
+        let profile = crate::vulkan::ops::linear_profile_enabled();
+        let t_write = std::time::Instant::now();
+        runtime.write_input(input)?;
+        let write_ns = if profile {
+            t_write.elapsed().as_nanos() as u64
+        } else {
+            0
+        };
+        let n_in = bindings[0].weight.n_in;
+        let mut record_ns = 0;
+        let mut read_ns = 0;
+        let mut offset = 0;
+        // Reuse the eight slots for larger groups, including repeated IDs.
+        for (batch, batch_outputs) in group.chunks(8).zip(outputs.chunks(8)) {
+            let t_record = std::time::Instant::now();
+            let output_regions = runtime.record_group_matmul(batch, n_in)?;
+            if profile {
+                record_ns += t_record.elapsed().as_nanos() as u64;
+            }
+            let t_read = std::time::Instant::now();
+            for (region, output) in output_regions.into_iter().zip(batch_outputs) {
+                let count = output.len();
+                let data = runtime.read_output(region, count)?;
+                self.staging[offset..offset + count].copy_from_slice(data);
+                offset += count;
+            }
+            if profile {
+                read_ns += t_read.elapsed().as_nanos() as u64;
+            }
+        }
+        #[cfg(feature = "vulkan")]
+        if profile {
+            crate::vulkan::ops::record_linear_profile(write_ns, record_ns, read_ns);
+        }
+
         if self.staging.iter().any(|v| !v.is_finite()) {
             return Err(ComputeError::Device(
                 "linear produced non-finite output".into(),
@@ -619,13 +665,39 @@ mod tests {
     #[cfg(feature = "vulkan")]
     #[test]
     #[ignore = "requires a Vulkan device"]
-    fn linear_gpu_group_preserves_mixed_formats_and_four_projections() {
+    fn linear_gpu_group_preserves_mixed_formats_across_batches() {
+        fn check<const N: usize>(
+            executor: &mut LinearExecutor<'_, '_>,
+            ids: [LinearId; 2],
+            input: &[f32],
+            rows: usize,
+        ) {
+            let mut outputs: [Vec<f32>; N] = std::array::from_fn(|_| vec![f32::NAN; rows * 128]);
+            let backends = executor
+                .run_group(
+                    std::array::from_fn(|i| ids[i % 2]),
+                    input,
+                    rows,
+                    outputs.each_mut().map(|output| output.as_mut_slice()),
+                )
+                .unwrap();
+            assert_eq!(backends, [UsedBackend::Vulkan; N]);
+            for (index, output) in outputs.iter().enumerate() {
+                let expected = if index % 2 == 0 { 30.0 } else { 70.0 };
+                assert!(output.iter().all(|&v| (v - expected).abs() < 1e-5));
+            }
+        }
+
         let a = Weight::from_quantized(QuantizedTensor::F32 {
-            data: vec![1.0; 4 * 128],
+            data: [1.0, 2.0, 3.0, 4.0].repeat(128),
             n_in: 4,
             n_out: 128,
         });
-        let bytes = crate::ops::f32_to_bf16(2.0).to_le_bytes().repeat(4 * 128);
+        let bytes: Vec<_> = [5.0, 6.0, 7.0, 8.0]
+            .repeat(128)
+            .into_iter()
+            .flat_map(|v| crate::ops::f32_to_bf16(v).to_le_bytes())
+            .collect();
         let b = Weight::from_quantized(QuantizedTensor::from_bytes(
             &bytes,
             crate::GGMLType::BF16,
@@ -649,32 +721,11 @@ mod tests {
             )
             .unwrap();
             let ids = [executor.id(0).unwrap(), executor.id(1).unwrap()];
-            let input = vec![1.0; rows * 4];
-            let mut outputs: [Vec<f32>; 4] = std::array::from_fn(|_| vec![f32::NAN; rows * 128]);
-            let backends = executor
-                .run_group(
-                    [ids[0], ids[1], ids[0], ids[1]],
-                    &input,
-                    rows,
-                    outputs.each_mut().map(|output| output.as_mut_slice()),
-                )
-                .unwrap();
-            assert_eq!(backends, [UsedBackend::Vulkan; 4]);
-            for (output, expected) in outputs.iter().zip([4.0, 8.0, 4.0, 8.0]) {
-                assert!(output.iter().all(|&v| (v - expected).abs() < 1e-5));
-            }
-            let [out_a, out_b, _, _] = outputs.each_mut();
-            assert_eq!(
-                executor
-                    .run_group(
-                        ids,
-                        &input,
-                        rows,
-                        [out_a.as_mut_slice(), out_b.as_mut_slice()],
-                    )
-                    .unwrap(),
-                [UsedBackend::Vulkan; 2]
-            );
+            let input = [1.0, 2.0, 3.0, 4.0].repeat(rows);
+            check::<4>(&mut executor, ids, &input, rows);
+            check::<7>(&mut executor, ids, &input, rows);
+            check::<9>(&mut executor, ids, &input, rows);
+            check::<2>(&mut executor, ids, &input, rows);
         }
     }
 

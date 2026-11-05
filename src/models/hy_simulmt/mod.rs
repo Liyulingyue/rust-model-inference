@@ -73,7 +73,9 @@ pub(crate) fn validate_decoder(s: &dyn TensorSource, c: &HyConfig) -> Result<(),
         .checked_mul(c.n_embd_head_k)
         .ok_or("Hy-SimulMT KV width overflow")? as u64;
     check_tensor(s, "token_embd.weight", &[h, c.vocab as u64], false)?;
-    check_tensor(s, "output.weight", &[h, c.vocab as u64], false)?;
+    if s.tensor_info("output.weight").is_some() {
+        check_tensor(s, "output.weight", &[h, c.vocab as u64], false)?;
+    }
     check_tensor(s, "output_norm.weight", &[h], true)?;
     for l in 0..c.n_layer {
         for (name, dims, float) in [
@@ -88,7 +90,9 @@ pub(crate) fn validate_decoder(s: &dyn TensorSource, c: &HyConfig) -> Result<(),
         ] {
             check_tensor(s, &format!("blk.{l}.{name}"), &dims, float)?;
         }
-        if l == 0 {
+        if s.tensor_info(&format!("blk.{l}.ffn_gate_inp.weight"))
+            .is_none()
+        {
             for (name, dims) in [
                 ("gate", vec![h, c.n_ff as u64]),
                 ("up", vec![h, c.n_ff as u64]),

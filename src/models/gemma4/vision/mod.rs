@@ -1,7 +1,7 @@
 pub mod config;
 mod uv_config;
 mod uv_model;
-use crate::core::tensor::{GGMLType, MetaValue, TensorSource};
+use crate::core::tensor::{typed_tensor_bytes, GGMLType, MetaValue, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::ops::{
     dot_f16_f16_bytes, dot_f32, f16_to_f32, f32_to_f16, rope_neox_inplace, softmax_inplace,
@@ -173,7 +173,7 @@ impl<'a> Gemma4VisionModel<'a> {
             "v.patch_embd.weight",
             &[PATCH as u64, PATCH as u64, 3, EMBED as u64],
         )?;
-        let positions = f32_tensor_bytes(
+        let positions = finite_f32_tensor_bytes(
             source,
             "v.position_embd.weight",
             &[EMBED as u64, POSITION_ROWS as u64, 2],
@@ -976,7 +976,7 @@ fn f16_tensor<'a>(
     name: &str,
     dims: &[u64],
 ) -> Result<&'a [u8], String> {
-    let bytes = checked_tensor(source, name, dims, GGMLType::F16)?;
+    let bytes = typed_tensor_bytes(source, name, dims, GGMLType::F16)?;
     if bytes.chunks_exact(2).any(|chunk| {
         let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
         bits & 0x7c00 == 0x7c00
@@ -986,12 +986,17 @@ fn f16_tensor<'a>(
     Ok(bytes)
 }
 
-fn f32_tensor_bytes<'a>(
+/// The F32 bytes of a tensor, rejecting a non-finite value.
+///
+/// [`crate::core::tensor::f32_tensor_bytes`] does the shape, type and
+/// payload checks; this adds the value check that Gemma4 wants on its
+/// weights.
+fn finite_f32_tensor_bytes<'a>(
     source: &'a dyn TensorSource,
     name: &str,
     dims: &[u64],
 ) -> Result<&'a [u8], String> {
-    let bytes = checked_tensor(source, name, dims, GGMLType::F32)?;
+    let bytes = crate::core::tensor::f32_tensor_bytes(source, name, dims)?;
     if bytes
         .chunks_exact(4)
         .any(|chunk| !f32::from_le_bytes(chunk.try_into().unwrap()).is_finite())
@@ -1002,7 +1007,7 @@ fn f32_tensor_bytes<'a>(
 }
 
 fn f32_tensor(source: &dyn TensorSource, name: &str, dims: &[u64]) -> Result<Vec<f32>, String> {
-    let bytes = f32_tensor_bytes(source, name, dims)?;
+    let bytes = finite_f32_tensor_bytes(source, name, dims)?;
     Ok(bytes
         .chunks_exact(4)
         .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
@@ -1012,38 +1017,6 @@ fn f32_tensor(source: &dyn TensorSource, name: &str, dims: &[u64]) -> Result<Vec
 fn f32_scalar(source: &dyn TensorSource, name: &str) -> Result<f32, String> {
     let values = f32_tensor(source, name, &[1])?;
     Ok(values[0])
-}
-
-fn checked_tensor<'a>(
-    source: &'a dyn TensorSource,
-    name: &str,
-    dims: &[u64],
-    kind: GGMLType,
-) -> Result<&'a [u8], String> {
-    let info = source
-        .tensor_info(name)
-        .ok_or_else(|| format!("Missing tensor: {name}"))?;
-    if dims.is_empty() || dims.contains(&0) || info.dims != dims || info.ggml_type != kind {
-        return Err(format!(
-            "Invalid tensor {name}: shape {:?} type {:?}; expected {:?} {:?}",
-            info.dims, info.ggml_type, dims, kind
-        ));
-    }
-    let expected = usize::try_from(
-        info.checked_nbytes()
-            .ok_or_else(|| format!("Invalid tensor byte size: {name}"))?,
-    )
-    .map_err(|_| format!("Tensor byte size does not fit usize: {name}"))?;
-    let bytes = source
-        .tensor_slice(name)
-        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
-    if bytes.len() != expected {
-        return Err(format!(
-            "Invalid tensor data length for {name}: {}; expected {expected}",
-            bytes.len()
-        ));
-    }
-    Ok(bytes)
 }
 
 fn read_f32(bytes: &[u8], index: usize) -> f32 {
