@@ -436,6 +436,14 @@ MiniCPM-V 4.7 的 `qwen35moe`（35B-A3B）此前只在**生成面**注册，多�
       现状：main 与本分支**同样不过**，属预存问题，不是回归。
       选项：① 换一个 top-1 差距更大的提示并重录 oracle；② 放宽界限（例如 0.1）并
       如实记录实际值；③ 除 argmax 外同时记录 top-k 命中率，让近似平局不再翻转判定。
+- [ ] **Intern-Decision 文本 logits oracle 的界限同样不可跨主机迁移** —
+      `tools/oracle/intern_decision` 的文本对照用固定提示 `What is 2+2?`、8 步 greedy、
+      relative L2 ≤ 0.03 的界限。记录主机（Apple Silicon）每步 0.0143–0.0295，
+      在 aarch64 + NEON 上复测为 0.0156–0.0308：**step 6 恰好越过 0.03**（0.0308），
+      其余七步都在界内，8 步 greedy ids 与 llama.cpp 参考**逐 token 相同**。
+      与 PhysBrain 那条不同，这里不是近似平局翻转，而是包络本身太贴边。
+      选项：① 把界限放宽到 0.035 并如实记录两台主机的实测值；② 换 top-1 差距更大的
+      提示重录；③ 记录 top-k 命中率作为辅助判据。
 - [ ] **讨论：MemoryArena 与 BlockAllocator 组合**
 - [ ] **讨论：GPU 后端架构设计** — Vulkan / wgpu / CUDA 等多后端抽象
 - [ ] **讨论：SIMD 扩展路线** — 当前 AVX2+FMA、NEON。后续可考虑 AVX-512 (高端 CPU)、ARM SVE、AVX-VNNI (int8 dot)
@@ -553,6 +561,14 @@ ggml-org/llama.cpp 的一部分**——它们是 `microsoft/BitNet` 私有 fork 
       **触发条件**：用户要"原始 value 概率"、或模型无 instruction tuning（旧 base LLaMA/Qwen-1
       /Qwen-1.5 base 不严格遵循字母指令）、或多 token value 的概率分布本身有意义——三个条件
       任一成立时再开工。
+- [x] **Intern-Decision-0.8B 适配与真实权重数值对齐** — 转换器写出 `qwen35` arch 与
+      `qwen3vl_merger` 投影，0.8B 在 CPU 上文本/图像/CLI/HTTP/JEV 全部跑通；引擎侧无需模型专属代码。
+      真实 CLI、模型契约、固定 llama.cpp Oracle 的完整输出对照见
+      [复现记录](../../tools/oracle/intern_decision/README.md) 和
+      [哈希/指标](../../tools/oracle/intern_decision/verification.json)。
+    - 无损载荷/layout/token IDs 使用精确检查；量化、低精度舍入、近似激活使用明确数值误差界限。
+    - 未覆盖：**Intern-Decision-4B 真实权重**（转换器已支持并校验形状，但引擎的 Qwen3.5 recurrent
+      投影尚不接受该 SSM 形状，暂时不能推理）、GPU 数值对齐、性能基准。
 
 ---
 
