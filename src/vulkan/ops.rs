@@ -1934,7 +1934,7 @@ impl Conv3dRuntime {
         input_shape: [usize; 4],
         weight_shape: [usize; 5],
         output_shape: [usize; 4],
-        spec: crate::models::diffusion::dreamx::kernels::Conv3dSpec,
+        spec: crate::ops::nn::Conv3dSpec,
     ) -> Result<(), VulkanError> {
         let [ir, wr, or, br] = self.regions;
         let mut push = vec![
@@ -2427,7 +2427,7 @@ pub(crate) struct AttentionRuntime {
 #[cfg(test)]
 mod video_gpu_tests {
     use super::*;
-    use crate::models::diffusion::dreamx::kernels::{attention_scalar_f32, AttentionSpec};
+    use crate::ops::nn::{attention_scalar_f32, AttentionSpec};
 
     #[test]
     #[ignore = "requires a Vulkan device"]
@@ -2488,7 +2488,7 @@ mod video_gpu_tests {
     #[test]
     #[ignore = "requires a Vulkan device"]
     fn video_gpu_conv3d_matches_cpu_padding_stride_and_partial_tiles() {
-        use crate::models::diffusion::dreamx::kernels::{conv3d_with_options, Conv3dSpec};
+        use crate::ops::nn::{conv3d_with_options, Conv3dSpec};
         let context = Box::leak(Box::new(VulkanContext::new().unwrap()));
         let shape = [2, 3, 4, 9];
         let pool = crate::core::thread_pool::ComputePool::new(2);
@@ -2753,7 +2753,7 @@ impl AttentionRuntime {
         k: &[f32],
         v: &[f32],
         output: &mut [f32],
-        spec: crate::models::diffusion::dreamx::kernels::AttentionSpec,
+        spec: crate::ops::nn::AttentionSpec,
     ) -> Result<(), VulkanError> {
         if spec.query_tokens == 0
             || spec.key_tokens == 0
