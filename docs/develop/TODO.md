@@ -384,6 +384,18 @@ LFM2 / LFM2.5 / Spark / Nemotron-H / Hunyuan / LFM2-MoE），每个 scorer 实�
       原语，现有 `compute` 就够（closure 里顺序做多个投影，各自按 `ith/nth` 切分）。
       风险是位序和 DRAM 局部性；收益的绝对值与机器无关，相对值随 CPU 带宽上升。
       详见 [TODO-050](#todo-050-decode-每个投影一次-pool-dispatch784-次里-26-次的开销大于活)。
+- [ ] **Nemotron-3-Nano 30B-A3B（`nemotron_h_moe`）完全不支持** — arch 不在白名单、
+      MoE 层分支不存在，且**它需要的 Q5_1 量化本仓库没有 dequant kernel**（所有 unsloth
+      30B 量化档的 `ffn_up_shexp` 都是 Q5_1，换档躲不掉）。基座（Mamba-2 + attention 混合
+      trunk）已在 4B 上验证，MoE 的 3D 专家张量与路由归一化在 `qwen35moe` 里已有同构实现，
+      约 1100 行。契约从 GGUF 头部读出（不必下完 24 GB），详见
+      [TODO-051](#todo-051-nemotron-3-nano-30b-a3bnemotron_h_moe完全不支持先补-q5_1-kernel)
+      与 [NEMOTRON3_NANO_30B_MOE.md](NEMOTRON3_NANO_30B_MOE.md)。
+- [ ] **Dory 的默认 chat 模板与 GGUF 自带模板不同形，JEV 的「backend=partial」提示对 Dory
+      是假的** — 默认路径少了 `<think>\n`（同一条消息 19 vs 22 prompt token，输出不同）；
+      `--compute vulkan --jev` 明明整条前向都在设备上（4.2× 于 CPU、概率一致）却打出
+      「no complete device path for this mode」。详见
+      [TODO-052](#todo-052-dory-的默认-chat-模板与-gguf-自带模板不同形jev-的backendpartial提示对-dory-是假的)。
 
 ## 入口面覆盖（2026-10-19 审计）
 
@@ -3647,3 +3659,110 @@ barrier 与常驻 worker 不兼容而不可用），收益 1.66× → 1.8×，�
 这条对**所有模型**都成立（任何走 `pool.compute` 做逐投影 dispatch 的 trunk），不只 Mellum。
 改的时候顺带把接口设计成能同时喂给 CPU 和设备（照 `record_group_matmul` 的形状：一层一次、
 多个权重共用一个 command buffer），以后接设备就只是换个 backend，而不是再改一遍 trunk。
+
+### TODO-051: Nemotron-3-Nano 30B-A3B（`nemotron_h_moe`）完全不支持，先补 Q5_1 kernel
+
+#### 现象
+
+`NVIDIA-Nemotron-3-Nano-30B-A3B` 的 GGUF arch 是 **`nemotron_h_moe`**（30B 总参 /
+3.2B 激活，Mamba-2 + attention + MoE 混合）。本仓库：
+
+- `src/core/loader.rs` 的 arch 白名单里**没有** `nemotron_h_moe`；
+- `src/models/nemotron_h/trunk/config.rs` 硬编码 `architecture != "nemotron_h"` 即拒，
+  且 metadata key 前缀写死 `nemotron_h.`；
+- `src/models/nemotron_h/trunk/` 只有 **dense 2 层 FFN** 分支，没有 MoE 层；
+- `src/ops/kernel/` 有 `q5_0/`，**没有 `q5_1/`**；`QuantizedTensor::from_bytes`
+  的 match 里也没有 `GGMLType::Q5_1`。
+
+好消息是失败是**响亮**的：arch 检查先拒；即使放行，权重层会因为 MoE 层找不到
+`ffn_up.weight` 而报「Nemotron layer N tensors do not match layer metadata」。
+
+#### Q5_1 是硬前置，而且换量化档躲不掉
+
+`ffn_up_shexp.weight`（共享专家 up 投影）在**所有** unsloth 30B 量化档里都是 Q5_1：
+
+| 量化档 | 张量类型分布 | 缺 Q5_1？ |
+|---|---|---|
+| `Q4_K_M` | Q8_0 37 / F32 237 / Q5_0 75 / Q4_K 29 / **Q5_1 23** | ✗ |
+| `IQ4_XS` | Q8_0 24 / F32 237 / Q5_0 1 / IQ4_NL 87 / IQ4_XS 29 / **Q5_1 23** | ✗ |
+| `Q4_0` | Q8_0 24 / F32 237 / Q4_0 115 / Q4_1 2 / **Q5_1 23** | ✗ |
+
+23 个 Q5_1 = 23 个 MoE 层的共享专家 up 投影。
+
+Q5_1 与 Q5_0 的差别很小（ggml `block_q5_1`，24 字节/32 元素，比 Q5_0 多一个 fp16 的
+最小值 `m`，且还原式是 `y = d*x + m` 而不是 `y = d*x`）。照着
+`src/ops/kernel/q5_0/` 复制一份改块布局，再在 `quantized_tensor.rs` 的 `from_bytes`
+与 `GGMLType` 映射里补 `Q5_1` 即可，约 200 行。
+
+**顺带**：`src/models/nemotron_h/trunk/weights.rs` 的 `is_supported_weight_type()`
+白名单里也漏了 `Q5_0`（kernel 是有的，只是白名单不认）——4B 用不到，30B 会撞上。
+
+#### 可复用的基座
+
+| 需要的东西 | 已经有的地方 | 差在哪 |
+|---|---|---|
+| 3D 专家张量加载（expert 轴在最后、连续） | `src/models/qwen35/trunk/weights.rs::load_moe_weights` | 命名一致（`ffn_up_exps` / `ffn_down_exps`），qwen35 多一个 `ffn_gate_exps`，Nemotron 没有 |
+| 路由 top-k + 权重归一化 + 缩放 | `src/models/qwen35/trunk/moe.rs::route_experts` | qwen35 用 softmax；Nemotron 用 **sigmoid**，且偏置只参与排序 |
+| Mamba-2 SSM + attention 混合 trunk | `src/models/nemotron_h/trunk/`（4B 已验证） | 只差 MoE 层这一条分支 |
+
+两个容易写错的语义（详见 [NEMOTRON3_NANO_30B_MOE.md](NEMOTRON3_NANO_30B_MOE.md)）：
+
+1. 路由器权重取**未加偏置**的 `sigmoid(logits)`，`exp_probs_b.bias` 只用来排序；
+2. 共享专家**没有门控**，`moe_out + ffn_shexp` 是唯一的加法；专家激活是
+   **squared ReLU**，仓库现有激活算子里没有。
+
+#### 契约从哪来
+
+GGUF 的 magic / KV / 张量信息表都在文件**头部**，所以不必下完 24 GB 才能读契约：
+
+```sh
+curl -sL -r 0-67108863 -o /tmp/n3_30b_head.bin \
+  "https://hf-mirror.com/unsloth/Nemotron-3-Nano-30B-A3B-GGUF/resolve/main/Nemotron-3-Nano-30B-A3B-Q4_K_M.gguf"
+python3 tools/oracle/nemotron3_nano/gguf_header.py /tmp/n3_30b_head.bin
+```
+
+上游 llama.cpp 已支持 `nemotron_h_moe`（PR #18058，2025-12-16 合并），所以 oracle 用
+上游 master 即可，不需要 Dory 那种专用 fork。
+
+#### 规模
+
+约 1100 行（Q5_1 kernel 200 + arch/config 50 + MoE 权重 250 + MoE forward 250 +
+平方 ReLU 30 + 对拍 300），不含调试。
+
+### TODO-052: Dory 的默认 chat 模板与 GGUF 自带模板不同形；JEV 的「backend=partial」提示对 Dory 是假的
+
+两条都是**文档/提示与实测不符**，实现在数值上没错。
+
+#### F1：默认 chat 模板丢掉 `<think>\n`
+
+`src/prompt/legacy.rs:124` 把 `dory` 映射到 `ChatTemplate::ChatML`，注释说 GGUF 自带
+模板「与 ChatML 同形」。实测**不同形**：
+
+| 路径 | 生成提示收尾 | 同一条消息的 prompt token 数 |
+|---|---|---|
+| 内置 ChatML | `assistant\n` | 19 |
+| `--jinja`（渲染 GGUF 自带模板） | `assistant\n<think>\n` | 22 |
+
+Dory 的模板里 `enable_thinking` 默认 True，所以思考段是**该开的**；默认路径没开，
+输出因此不同（同一问题两种提示给出不同文本）。
+
+修法：给 `ChatTemplate` 加 `dory` 变体（ChatML + `<think>\n`），或让 `dory` 默认走
+`--jinja`。至少要把那条注释改成陈述事实。
+
+#### F2：`--compute vulkan --jev` 对 Dory 打出的「没有完整设备路径」提示是错的
+
+`src/app/cli/types.rs:240` 的 `vulkan_partial_mode()` 只看**模式**不看 **arch**，
+而 `ComputePolicy::has_complete_device_path()` 里 `dory` 是在列的。实测 Dory 的 JEV
+前向**整条在设备上**：
+
+| 路径 | prefill | 概率 |
+|---|---|---|
+| Vulkan（GB10） | 5886 ms | A 0.9309 / B 0.0166 / C 0.0505 |
+| CPU | 24646 ms | A 0.9309 / B 0.0166 / C 0.0505 |
+
+4.2× 的差距 + 完全一致的概率说明整条前向走了设备。服务端
+`src/app/server/mod.rs:1911` 打的是同一句，而且注释描述的是 qwen3 那种部分 offload
+的模型（「the projections move to the device, the rest stays on the host」），
+对 Dory 也不成立。
+
+修法：打印前先问 `has_complete_device_path(arch)`。
