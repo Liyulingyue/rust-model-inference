@@ -16,11 +16,21 @@ layout(local_size_x = 64) in;
 //       scales:  the f16 scale of every row of the tile, right after the
 //                payload, at tile_base + b * 64 * 34 + 64 * 32 + r * 2.
 //
+// where tile_base = (row / 64) * blocks_per_row * 64 * 34.
+//
 // ggml's own layout puts the blocks of one output row together, so a warp
 // reads 32 sectors one row apart and every 4-byte load straddles a block
 // boundary. Here the rows of a tile are neighbours, so a warp reads one
 // contiguous run and the payload loads are aligned. The tile is the unit a
 // workgroup works in, so the runs stay sequential over the whole tile.
+//
+// The bytes are the same values ggml stored, only moved: the scale and
+// the payload of every block are read from the same places the native
+// layout keeps them, so the result is bit-for-bit the native one.
+//
+// The host builds this layout in `vulkan::q8_layout`; the copy there and
+// the addressing here have to agree, and the round-trip test in that
+// module is what keeps them honest.
 layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
 layout(std430, binding = 1) readonly buffer W0 { uint data[]; } w0;
 layout(std430, binding = 2) readonly buffer W1 { uint data[]; } w1;
@@ -91,6 +101,9 @@ void main() {
     }
     // The transposed layout groups the output rows into tiles of TILE_ROWS
     // rows, and a tile holds blocks_per_row blocks of TILE_ROWS rows.
+    // A lane owns one output row, so it walks the blocks of its tile; the
+    // rows of the tile are neighbours, so the 64 lanes of a workgroup read
+    // one contiguous run per block.
     uint tile = read_row / TILE_ROWS;
     uint tile_row = read_row % TILE_ROWS;
     uint tile_bytes = blocks_per_row * TILE_ROWS * BLOCK_BYTES;

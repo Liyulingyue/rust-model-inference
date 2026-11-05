@@ -211,15 +211,23 @@ busy for 3.7 ms, it is the *kernel* that is slow, not the submission.
 
 Three causes, two of which are fixed:
 
-1. **The Q8_0 device kernel read the weight badly** — fixed. The kernel
-   gave every lane its own output row, so a warp read 32 sectors one row
-   apart and every 4-byte load straddled the 34-byte block boundary: 60
-   GB/s against the 115 GB/s of the NEON path. The transposed layout
-   (`src/vulkan/q8_layout.rs`, `shaders/glsl/q8_matmul_transposed.comp`)
-   groups 64 output rows so a warp reads one contiguous run, and the same
-   kernel then reaches **163 GB/s** — 2.7x, and above the 130 GB/s of
-   PyTorch CUDA on this box. The result is bit-for-bit the same
-   (0 mismatches over the output head).
+1. **The Q8_0 device kernel read the weight badly** — fixed, behind a flag.
+   The kernel gave every lane its own output row, so a warp read 32
+   sectors one row apart and every 4-byte load straddled the 34-byte block
+   boundary: 60 GB/s against the 115 GB/s of the NEON path. The transposed
+   layout (`src/vulkan/q8_layout.rs`,
+   `shaders/glsl/q8_matmul_transposed.comp`) groups 64 output rows so a
+   warp reads one contiguous run, and the same kernel then reaches
+   **163 GB/s** — 2.7x, and above the 130 GB/s of PyTorch CUDA on this
+   box. The result is bit-for-bit the same (0 mismatches over the output
+   head, and the same hard-coded golden bits as the native kernel in all
+   three reduction modes).
+
+   It is **opt-in** (`RMI_GPU_Q8_TRANSPOSED=1`). The transpose moves bytes
+   and computes nothing, so it cannot change a result — but a mistake in
+   its addressing would read past the weight and fault the device, and no
+   Mellum projection runs on the device yet, so there is nothing to gain
+   by turning it on first.
 2. **A one-off ~320 ms setup** — mostly fixed. 279 ms of it was the Vulkan
    context (the driver bringing the device up), 12 ms the pipeline
    compilation and 17 ms the weight upload. The device is now initialised
@@ -231,7 +239,7 @@ Three causes, two of which are fixed:
    bound anyway (53 GB/s against the 115 GB/s it reaches on the output head
    in isolation) — it is the 785 pool dispatches per token that hold it
    back. So the device and the CPU come out even (128 tokens: CPU
-   5672–5742 ms, device 5134–5951 ms).
+   5672–5742 ms, device 5134–5951 ms, with the transposed layout on).
 
 `RUST_GPU_SUBMIT_TRACE=1` confirms the shape of the problem for the whole
 run: `submissions=30`, `3.710 ms/submission` of which `0.017 ms` is

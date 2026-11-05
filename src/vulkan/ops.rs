@@ -474,28 +474,38 @@ pub(crate) enum GpuWeightFormat {
 
 /// Whether the Q8_0 device matmul uses the transposed weight layout.
 ///
-/// The transposed layout is the default: it reads the weight the way a
-/// GEMV wants to read it, which is 2.7x the bandwidth of ggml's own
-/// layout on the GB10 box (163 GB/s against 60 GB/s) for the same result,
-/// bit for bit. Rewriting the weight costs about 26 ms per 240 MB, once,
-/// when the weight is uploaded.
+/// The transposed layout reads the weight the way a GEMV wants to read it:
+/// 2.7x the bandwidth of ggml's own layout on the GB10 box (163 GB/s
+/// against 60 GB/s) for the same result, bit for bit. Rewriting the
+/// weight costs about 26 ms per 240 MB, once, when the weight is
+/// uploaded.
 ///
-/// `RMI_GPU_Q8_TRANSPOSED=0` keeps the native layout, which is what the
-/// A/B measurement in the tests uses.
+/// It is **off by default**. The layout is a second reading of the same
+/// bytes -- the transpose moves them, it does not compute anything, and
+/// the kernel that reads them keeps the native reduction order -- so it
+/// cannot change a result. But a mistake in the addressing would read
+/// past the weight and fault the device, and no Mellum projection runs on
+/// the device yet, so there is nothing to gain by turning it on before
+/// the trunk can hand the device whole projections.
+///
+/// `RMI_GPU_Q8_TRANSPOSED=1` turns it on.
 fn q8_transposed_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
         std::env::var("RMI_GPU_Q8_TRANSPOSED")
             .ok()
             .map(|value| value != "0")
-            .unwrap_or(true)
+            .unwrap_or(false)
     })
 }
 
 /// How the weight bytes of a binding are laid out in device memory.
 ///
 /// The layout travels with the binding, because the kernel that reads the
-/// weight and the upload that produced it have to agree on it.
+/// weight and the upload that produced it have to agree on it. Picking the
+/// kernel from a global flag instead would hand the transposed kernel a
+/// buffer in ggml's layout -- which is what the MoE expert path does, it
+/// binds a range of a bigger tensor -- and that reads past the weight.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum GpuWeightLayout {
     /// ggml's own layout: one output row after the other.
@@ -503,6 +513,9 @@ pub(crate) enum GpuWeightLayout {
     Native,
     /// The Q8_0 blocks of a tile of 64 output rows grouped together, so a
     /// warp reads one contiguous run instead of 32 sectors one row apart.
+    ///
+    /// See [`crate::vulkan::q8_layout`] for the layout and the
+    /// measurements.
     Transposed,
 }
 
@@ -514,6 +527,8 @@ impl GpuWeightFormat {
     /// warp, which is 2.7x the bandwidth of the native layout on the GB10
     /// box. The tiled kernel reads a whole tile of rows as one run either
     /// way, so there the transpose would be pure overhead.
+    ///
+    /// The transposed layout is opt-in; see [`q8_transposed_enabled`].
     fn device_layout(self, rows: usize, context: &VulkanContext) -> GpuWeightLayout {
         if self == GpuWeightFormat::Q8_0
             && rows == 1
@@ -3157,6 +3172,8 @@ impl<'a> Qwen3Ops<'a> {
     ///
     /// The layout is a property of the upload, so it has to travel with the
     /// binding: the recorder picks the kernel that reads that layout.
+    /// [`GpuWeightLayout::Native`] is the layout every upload outside the
+    /// transposed Q8_0 path produces.
     pub(crate) fn bind_weight_buffers_mode_layout(
         &mut self,
         buffers: &[GpuBuffer],
@@ -3822,6 +3839,8 @@ impl<'a> Qwen3Ops<'a> {
         if let Some((pipeline, push, dispatch)) = quantize {
             self.record_linear_dispatch(commands, pipeline, self.arena_bindings, &push, dispatch);
         }
+        // The transposed kernel reads the transposed layout, so the layout
+        // of the binding -- not a global flag -- decides which kernel runs.
         let pipeline = if format == GpuWeightFormat::Q8_0
             && bindings.weight_layout == GpuWeightLayout::Transposed
         {

@@ -694,20 +694,19 @@ impl Rows {
 /// it only pays off when a projection carries many rows or when the device
 /// reads the weight faster than the CPU does.
 ///
-/// The Q8_0 device kernel used to be the reason it did not: with ggml's
-/// own weight layout a warp reads 32 sectors one row apart, which reaches
-/// 60 GB/s against the 115 GB/s of the NEON path. The transposed layout
-/// (see `vulkan::q8_layout`) reads the weight the way a GEMV wants to
-/// read it and reaches 163 GB/s, so the device is now level with the CPU
-/// on the output head:
+/// With ggml's own weight layout the device does not: a warp reads 32
+/// sectors one row apart, which reaches 60 GB/s against the 115 GB/s of
+/// the NEON path, so the output head costs 4.0 ms/token on the device
+/// against 2.6 ms/token on the CPU.
 ///
-/// | projection | CPU | Vulkan (transposed) |
-/// | --- | --- | --- |
-/// | output head (2304 -> 98304) | 2.6 ms/token | 1.5 ms/token |
+/// The transposed layout (`vulkan::q8_layout`, opt-in through
+/// `RMI_GPU_Q8_TRANSPOSED=1`) reads the weight the way a GEMV wants to
+/// read it and reaches 163 GB/s, which puts the output head at 1.5 ms/token
+/// and the whole generation back level with the CPU. It is off by default
+/// because no Mellum projection runs on the device yet, so there is
+/// nothing to gain by turning it on first.
 ///
-/// A 128 token generation then comes out about even (the device pays a
-/// one-off ~26 ms to rewrite the weight and reads the logits back over
-/// the bus), so the projections stay on the CPU until the trunk can hand
+/// Either way the projections stay on the CPU until the trunk can hand
 /// the device a whole token stream at once; see the TODO entry for the
 /// batched prefill.
 ///

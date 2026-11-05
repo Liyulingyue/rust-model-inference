@@ -3429,6 +3429,12 @@ scale 紧跟其后），于是一个 warp 读到的 32 行是**连续字节**，
 host 端转置 240 MB 约 26 ms（9 GB/s），一次性，直接写进设备 buffer
 （`upload_static_filled`），所以上传只比原生多约 9 ms。
 
+**默认关闭**（`RMI_GPU_Q8_TRANSPOSED=1` 才开）。转置只搬字节不算数，
+数值契约一字未改（round-trip 测试证明布局可逆、黄金位测试证明三种
+reduction mode 下与原生 kernel 逐位相同、边界形状 n_out=1/63/64/65/127/129
+逐位相同），但寻址写错会**越界读 → GPU fault**（进程崩，不是静默错值），
+而目前 Mellum 还没有任何投影真的走设备，所以先不开。
+
 #### 新证据：设备的一次性开销在驱动初始化，不在 kernel
 
 | 一次性开销 | 时间 |
@@ -3443,8 +3449,11 @@ host 端转置 240 MB 约 26 ms（9 GB/s），一次性，直接写进设备 buf
 
 #### 现状：kernel 不再是瓶颈，但端到端仍然打平
 
-设备端 Q8_0 kernel 已经超过 PyTorch CUDA 的 130 GB/s，但 128 token 的生成
-CPU 5672–5742 ms、���备转置 5134–5951 ms，**打平**。原因：
+（下面的"设备转置"是**打开** `RMI_GPU_Q8_TRANSPOSED=1` 测的；默认关闭时
+设备走原生布局，输出头 4.0 ms/token，比 CPU 的 2.6 ms 慢，scope 必须留着。）
+
+打开后设备端 Q8_0 kernel 超过 PyTorch CUDA 的 130 GB/s，但 128 token 的生成
+CPU 5672–5742 ms、设备转置 5134–5951 ms，**打平**。原因：
 
 1. 单行投影只占每 token 2.35 GB 权重里的 240 MB（10%）；
 2. CPU decode 不是带宽受限，是 785 次 pool dispatch 受限（整模型 53 GB/s，
