@@ -2943,7 +2943,8 @@ Qwen3-0.6B-BF16 看起来是最干净的受害者（197 个纯 BF16 二维权重
 排查结论：主力文本模型（Qwen3 / Qwen3.5 / Edge0 / ERNIE）全部不命中，
 Z-Image 代码零改动且 3/3 逐位复现基线 md5，含 110 个 F32 二维权重的
 occamy-1.0 在 `--temp 0` 下 GPU 与 CPU 逐位一致。尚未实测的是少数多模态
-projector（ZDTaichu5 mmproj、LongCat）与几个 MoE gate。
+projector（LongCat）与几个 MoE gate。ZDTaichu5 mmproj 已在本分支按 CPU 数值
+对齐（见上面的 ZDT 条目），但 GPU 路径仍在其覆盖范围内。
 
 ### TODO-044: Mage-Flow 的 GPU 路径 run-to-run 不确定，投影的 dispatch 结果偶发不完整
 
