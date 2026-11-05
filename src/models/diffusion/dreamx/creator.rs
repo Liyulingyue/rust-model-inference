@@ -3,15 +3,15 @@ use std::sync::Arc;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
+use super::kernels::{
+    attention_online, checked_len, layer_norm_rows, load_float_values, rms_norm_rows,
+    AttentionSpec, Linear,
+};
 use super::text::TextConditioning;
 use super::video_vae::VideoLatent;
 use super::DreamXOptions;
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
-use crate::ops::nn::{
-    attention_online, checked_len, layer_norm_rows, load_float_values, rms_norm_rows,
-    AttentionSpec, Linear,
-};
 use crate::ops::{gelu_inplace, silu_inplace, vec_add_into};
 
 const VIDEO_PREFIX: &str = "dreamx.creator.video";

@@ -1,7 +1,7 @@
 pub mod config;
 use crate::core::tensor::{typed_tensor_bytes, GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
-use crate::ops::audio::frontend::{decode_pcm16_wav_any, RealFft};
+use crate::models::qwen3::asr::audio_processor::{decode_pcm16_wav_any, RealFft};
 use crate::ops::{
     dot_f16, dot_f16_f16_bytes, dot_f16_f16_bytes_ggml, dot_f32, f32_to_f16, rms_norm_inplace,
     rms_unit_inplace, silu_approx_inplace, softmax_inplace, sum_sq_f32,

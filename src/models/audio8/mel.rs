@@ -1,6 +1,6 @@
 //! Voxtral Realtime's 16 kHz, 128-bin streaming Mel frontend.
 
-use crate::ops::audio::frontend::{periodic_hann_window, reflect_pad};
+use crate::models::qwen3::asr::audio_processor::{periodic_hann_window, reflect_pad};
 
 const FFT_SIZE: usize = 400;
 const HOP: usize = 160;

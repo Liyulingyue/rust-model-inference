@@ -3,8 +3,8 @@ use crate::core::tensor::TensorSource;
 use crate::models::breeze::{BreezeCodec, BreezeModel};
 use crate::models::diffusion::dreamx::media::write_wav_atomic;
 use crate::models::dots::speaker::Resampler;
+use crate::models::qwen3::asr::audio_processor::decode_pcm16_wav_any;
 use crate::models::qwen3::tts::codec::WAVEFORM_SAMPLE_RATE;
-use crate::ops::audio::frontend::decode_pcm16_wav_any;
 use std::time::Instant;
 
 fn validate_breeze_options(options: &CliOptions) -> Result<f32, String> {

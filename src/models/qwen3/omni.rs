@@ -1,14 +1,11 @@
 use crate::core::tensor::{GGMLType, MetaValue, TensorSource};
 use crate::core::thread_pool::ComputePool;
+use crate::models::qwen3::asr::audio_processor::log_mel_windows;
+use crate::models::qwen3::asr::audio_processor::{compute_log_mel, HOP};
 use crate::models::qwen3::asr::mel_encoder::Qwen3AudioModel;
 use crate::models::qwen3::asr::mel_encoder::{
-    add_residual, load_f32_tensor, static_tensor, AudioLinear,
-};
-use crate::ops::audio::frontend::log_mel_windows;
-use crate::ops::audio::frontend::{compute_log_mel, HOP};
-use crate::ops::audio::transformer::{
-    apply_gelu_erf, checked_product, full_attention_into, layer_norm_rows, reserved_f32,
-    resize_f32, LayerNormWeights,
+    add_residual, apply_gelu_erf, checked_product, full_attention_into, layer_norm_rows,
+    load_f32_tensor, reserved_f32, resize_f32, static_tensor, AudioLinear, LayerNormWeights,
 };
 use crate::ops::dot_f16_f16_bytes;
 use std::sync::Arc;
@@ -1286,7 +1283,7 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         let wav = std::fs::read(std::env::var("RMI_JINA_AUDIO_WAV").unwrap()).unwrap();
-        let pcm = crate::ops::audio::frontend::decode_pcm16_wav(&wav).unwrap();
+        let pcm = crate::models::qwen3::asr::audio_processor::decode_pcm16_wav(&wav).unwrap();
         let mmproj = std::env::var("RMI_JINA_AUDIO_MMPROJ").unwrap();
         let source: Arc<dyn TensorSource> =
             Arc::new(crate::GGUFLoader::from_file(std::path::Path::new(&mmproj)).unwrap());

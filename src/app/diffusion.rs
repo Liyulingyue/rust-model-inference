@@ -722,7 +722,7 @@ pub fn run_mage_flow_cli(
     if std::env::var_os("RMI_GPU_VERIFY_TRACE").is_some() {
         eprintln!(
             "[GPU-VERIFY] 健康投影与 CPU 内核的最大相对差 = {:.3e}",
-            crate::ops::nn::healthy_worst_difference()
+            crate::models::diffusion::dreamx::kernels::healthy_worst_difference()
         );
     }
     Ok(())

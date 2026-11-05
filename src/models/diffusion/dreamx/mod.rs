@@ -1,6 +1,7 @@
 pub mod audio_vae;
 pub mod config;
 pub mod creator;
+pub mod kernels;
 pub mod lightvae;
 pub mod media;
 pub mod refiner;

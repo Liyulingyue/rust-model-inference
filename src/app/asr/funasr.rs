@@ -12,8 +12,8 @@ use crate::format::ggufrs::ComponentRole;
 use crate::models::funasr::encoder::FunAsrEncoder;
 use crate::models::funasr::model::{format_srt_entry, transcribe_segment};
 use crate::models::funasr::vad::FsmnVad;
+use crate::models::qwen3::asr::audio_processor::decode_pcm16_wav_any;
 use crate::models::qwen3::Qwen3Model;
-use crate::ops::audio::frontend::decode_pcm16_wav_any;
 
 const SAMPLE_RATE: usize = 16_000;
 

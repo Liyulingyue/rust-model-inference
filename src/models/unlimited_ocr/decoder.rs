@@ -3,7 +3,7 @@ use super::{
     sparse::{self, Pages},
     trace, vector, HIDDEN, PAGE, VOCAB,
 };
-use crate::ops::nn::{rms_norm_rows, Linear};
+use crate::models::diffusion::dreamx::kernels::{rms_norm_rows, Linear};
 use crate::{ComputePool, TensorSource};
 use rayon::prelude::*;
 

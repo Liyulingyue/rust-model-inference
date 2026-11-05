@@ -7,7 +7,7 @@ use crate::app::CliOptions;
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::format::safetensors::SafetensorSource;
-use crate::ops::nn::{load_float_values, Linear};
+use crate::models::diffusion::dreamx::kernels::{load_float_values, Linear};
 use serde_json::{json, Value};
 use std::path::Path;
 

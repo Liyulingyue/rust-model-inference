@@ -1,11 +1,9 @@
-use crate::ops::audio::transformer::{
+pub(crate) use crate::ops::audio::transformer::{
     apply_gelu_erf, checked_product, full_attention_into, layer_norm, layer_norm_rows,
     reserved_f32, resize_f32, LayerNormWeights,
 };
 #[cfg(test)]
 use crate::ops::audio::transformer::{attention_softmax, transpose_value_head};
-#[cfg(test)]
-use crate::ops::gelu_erf;
 
 // Qwen3-Audio model: transformer-based audio encoder.
 //
@@ -16,12 +14,12 @@ use crate::core::tensor::{GGMLType, MetaValue, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::{QuantizedTensor, Weight};
 use crate::ops::{
-    bf16_to_f32, dot_f16_f16_bytes, dot_f32, f16_to_f32, quantize_q8_0_into, vec_add_into,
+    bf16_to_f32, dot_f16_f16_bytes, dot_f32, f16_to_f32, gelu_erf, quantize_q8_0_into, vec_add_into,
 };
 use rayon::prelude::*;
 use std::sync::Arc;
 
-use crate::ops::audio::frontend::{
+use super::audio_processor::{
     compute_log_mel, decode_pcm16_wav, log_mel_windows, periodic_hann_window, reflect_pad,
     split_mel_windows, AsrAudioError, MelWindow, CHUNK_FRAMES, MEL_BINS, WINDOW_FRAMES,
 };
@@ -1057,8 +1055,13 @@ fn flatten_conv_output(
 }
 
 fn apply_gelu(values: &mut [f32]) -> Result<(), String> {
-    crate::ops::audio::transformer::apply_gelu_erf(values)
-        .map_err(|_| "Non-finite convolution GELU output".to_string())
+    for value in values {
+        *value = gelu_erf(*value);
+        if !value.is_finite() {
+            return Err("Non-finite convolution GELU output".into());
+        }
+    }
+    Ok(())
 }
 
 fn window_token_count(window: &MelWindow) -> Result<usize, String> {

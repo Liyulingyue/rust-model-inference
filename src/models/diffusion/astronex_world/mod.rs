@@ -10,10 +10,10 @@ use std::sync::Arc;
 
 use image::RgbImage;
 
+use super::dreamx::kernels::checked_len;
 use super::dreamx::video_vae::Wan22Vae;
 use crate::core::tensor::{MetaValue, TensorSource};
 use crate::core::thread_pool::ComputePool;
-use crate::ops::nn::checked_len;
 
 const DIM: usize = 3072;
 const FFN: usize = 14336;

@@ -3,11 +3,11 @@ use std::sync::Arc;
 use image::{Rgb, RgbImage};
 use serde_json::Value;
 
-use crate::core::tensor::{GGMLType, TensorSource};
-use crate::core::thread_pool::ComputePool;
-use crate::ops::nn::{
+use super::kernels::{
     attention_online, checked_len, conv2d, conv3d_with_options, AttentionSpec, Conv3dSpec,
 };
+use crate::core::tensor::{GGMLType, TensorSource};
+use crate::core::thread_pool::ComputePool;
 use crate::ops::silu_inplace;
 
 const PREFIX: &str = "dreamx.video_vae";

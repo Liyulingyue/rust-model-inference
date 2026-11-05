@@ -3,7 +3,7 @@ use super::{
 };
 use crate::core::tensor::{load_f32_tensor, GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
-use crate::ops::nn::{
+use crate::models::diffusion::dreamx::kernels::{
     attention_scalar, checked_len, layer_norm_rows, rms_norm_rows, AttentionSpec, Linear,
 };
 use crate::ops::{gelu_inplace, rms_norm_inplace, rope_sin_cos, silu_inplace};

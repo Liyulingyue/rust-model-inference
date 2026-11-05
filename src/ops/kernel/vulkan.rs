@@ -192,7 +192,7 @@ pub(crate) fn try_attention(
     query: &[f32],
     key: &[f32],
     value: &[f32],
-    spec: crate::ops::nn::AttentionSpec,
+    spec: crate::models::diffusion::dreamx::kernels::AttentionSpec,
 ) -> Option<Vec<f32>> {
     if !offload_enabled() || spec.head_dim > 1024 {
         return None;
@@ -226,7 +226,9 @@ pub(crate) fn try_attention(
             // kernel before it is used. A retry of the same call usually
             // returns the right numbers, and a retry keeps the bits of a
             // healthy run.
-            if crate::ops::nn::attention_matches_cpu(query, key, value, &output, spec) {
+            if crate::models::diffusion::dreamx::kernels::attention_matches_cpu(
+                query, key, value, &output, spec,
+            ) {
                 return Some(output);
             }
             let mut attempts = 0;
@@ -243,7 +245,9 @@ pub(crate) fn try_attention(
                 if !retry.iter().all(|v| v.is_finite()) {
                     break;
                 }
-                if crate::ops::nn::attention_matches_cpu(query, key, value, &retry, spec) {
+                if crate::models::diffusion::dreamx::kernels::attention_matches_cpu(
+                    query, key, value, &retry, spec,
+                ) {
                     return Some(retry);
                 }
             }
@@ -251,7 +255,7 @@ pub(crate) fn try_attention(
             // agree with, so the attention is computed on the CPU.
             let _cpu_scope = crate::core::thread_pool::ComputePool::disable_gpu_matmul_for_scope();
             let mut cpu = vec![0.0; query.len()];
-            if crate::ops::nn::attention_on_cpu(query, key, value, spec)
+            if crate::models::diffusion::dreamx::kernels::attention_on_cpu(query, key, value, spec)
                 .map(|values| cpu.copy_from_slice(&values))
                 .is_err()
             {
@@ -287,7 +291,7 @@ pub(crate) fn try_conv3d(
     input_shape: [usize; 4],
     weight_shape: [usize; 5],
     output_shape: [usize; 4],
-    spec: crate::ops::nn::Conv3dSpec,
+    spec: crate::models::diffusion::dreamx::kernels::Conv3dSpec,
 ) -> bool {
     if !offload_enabled() || spec.groups != 1 {
         return false;
@@ -687,7 +691,7 @@ mod tests {
     #[test]
     #[ignore = "requires a Vulkan device and the real Mage-Flow GGUFs"]
     fn bf16_prepared_after_attention_is_reproducible() {
-        use crate::ops::nn::AttentionSpec;
+        use crate::models::diffusion::dreamx::kernels::AttentionSpec;
         use crate::vulkan::ops::{GpuMatmulMode, GpuMatmulSpec, GpuWeightFormat};
         crate::ops::float::enable_gpu();
         if crate::ops::get_vulkan_context().is_none() {
@@ -781,7 +785,7 @@ mod tests {
     #[test]
     #[ignore = "requires a Vulkan device and the real Mage-Flow GGUFs"]
     fn bf16_prepared_after_attention_projection_is_reproducible() {
-        use crate::ops::nn::AttentionSpec;
+        use crate::models::diffusion::dreamx::kernels::AttentionSpec;
         use crate::vulkan::ops::{GpuMatmulMode, GpuMatmulSpec, GpuWeightFormat};
         crate::ops::float::enable_gpu();
         if crate::ops::get_vulkan_context().is_none() {
@@ -1085,7 +1089,7 @@ mod tests {
         for index in 0..rows * n_out {
             let row = index / n_out;
             let column = index % n_out;
-            cpu[index] = crate::ops::nn::dot_bf16_f32(
+            cpu[index] = crate::models::diffusion::dreamx::kernels::dot_bf16_f32(
                 &bytes[column * n_in * 2..(column + 1) * n_in * 2],
                 &input[row * n_in..(row + 1) * n_in],
             );
@@ -1176,7 +1180,7 @@ mod tests {
         for index in 0..rows * n_out {
             let row = index / n_out;
             let column = index % n_out;
-            reference[index] = crate::ops::nn::dot_bf16_f32(
+            reference[index] = crate::models::diffusion::dreamx::kernels::dot_bf16_f32(
                 &bytes[column * n_in * 2..(column + 1) * n_in * 2],
                 &input[row * n_in..(row + 1) * n_in],
             );
@@ -1246,10 +1250,14 @@ mod tests {
                     let column = index % n_out;
                     let weight = &bytes[column * n_in * 2..(column + 1) * n_in * 2];
                     let input = &input[row * n_in..(row + 1) * n_in];
-                    first_half[index] =
-                        crate::ops::nn::dot_bf16_f32(&weight[..half * 2], &input[..half]);
-                    second_half[index] =
-                        crate::ops::nn::dot_bf16_f32(&weight[half * 2..], &input[half..]);
+                    first_half[index] = crate::models::diffusion::dreamx::kernels::dot_bf16_f32(
+                        &weight[..half * 2],
+                        &input[..half],
+                    );
+                    second_half[index] = crate::models::diffusion::dreamx::kernels::dot_bf16_f32(
+                        &weight[half * 2..],
+                        &input[half..],
+                    );
                 }
                 let mut matches_first = 0usize;
                 let mut matches_second = 0usize;
@@ -1329,7 +1337,7 @@ mod tests {
             for index in 0..rows * n_out {
                 let row = index / n_out;
                 let column = index % n_out;
-                reference[index] = crate::ops::nn::dot_bf16_f32(
+                reference[index] = crate::models::diffusion::dreamx::kernels::dot_bf16_f32(
                     &bytes[column * n_in * 2..(column + 1) * n_in * 2],
                     &input[row * n_in..(row + 1) * n_in],
                 );
@@ -1434,7 +1442,7 @@ mod tests {
                     ));
                 }
             }
-            let caught = crate::ops::nn::projection_matches_cpu(
+            let caught = crate::models::diffusion::dreamx::kernels::projection_matches_cpu(
                 &crate::core::thread_pool::ComputePool::new(1),
                 bytes,
                 &input,
@@ -1732,7 +1740,7 @@ mod tests {
             &[0.0; 8],
             &[0.0; 8],
             &[1.0, 2.0, 3.0, 4.0, 3.0, 4.0, 5.0, 6.0],
-            crate::ops::nn::AttentionSpec {
+            crate::models::diffusion::dreamx::kernels::AttentionSpec {
                 query_tokens: 2,
                 key_tokens: 2,
                 query_heads: 1,

@@ -8,6 +8,9 @@ use super::creator::{
     add_residual, apply_rope, gated_residual, modulated_layer_norm, Branch, BranchDimensions,
     BranchKind, Rope,
 };
+use super::kernels::{
+    attention_online, checked_len, layer_norm_rows, rms_norm_rows, AttentionSpec,
+};
 use super::lightvae::LightVae;
 use super::text::TextConditioning;
 use super::upsampler::LatentUpsampler;
@@ -15,9 +18,6 @@ use super::video_vae::{VideoLatent, Wan22Vae};
 use super::{DreamXOptions, DreamXRefinerOptions, RefinerDecoderKind};
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
-use crate::ops::nn::{
-    attention_online, checked_len, layer_norm_rows, rms_norm_rows, AttentionSpec,
-};
 
 const DIT_PREFIX: &str = "dreamx.refiner.dit";
 const CHANNELS: usize = 48;

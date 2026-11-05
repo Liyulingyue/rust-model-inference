@@ -315,7 +315,7 @@ fn trim_edge_silence_frame_rms(wav: &[f32], top_db: f32) -> Result<Vec<f32>, Str
 fn read_dots_wav(path: &Path, mode: DotsWavMode) -> Result<Vec<f32>, String> {
     let bytes = std::fs::read(path)
         .map_err(|error| format!("Failed to read WAV {}: {error}", path.display()))?;
-    let decoded = crate::ops::audio::frontend::decode_pcm16_wav_any(&bytes)
+    let decoded = crate::models::qwen3::asr::audio_processor::decode_pcm16_wav_any(&bytes)
         .map_err(|e| format!("Failed to decode WAV {}: {e:?}", path.display()))?;
     let mut mono: Vec<f32> = if decoded.channels == 1 {
         decoded.samples

@@ -163,7 +163,7 @@ impl Audio8GpuCompute {
         position: usize,
         output: &mut [f32],
     ) -> Result<(), String> {
-        use crate::ops::nn::AttentionSpec;
+        use crate::models::diffusion::dreamx::kernels::AttentionSpec;
         let spec = AttentionSpec {
             query_tokens: 1,
             key_tokens: position + 1,

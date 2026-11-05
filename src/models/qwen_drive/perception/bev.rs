@@ -2,9 +2,9 @@ use super::fpn::{perception_contracts, ComponentWeights, F32Tensor, ViewGeometry
 use super::ops::{ms_deform_attn, round_bf16, DeformAttentionInput, Tensor4};
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
+use crate::models::diffusion::dreamx::kernels::{attention_scalar, AttentionSpec};
 use crate::models::qwen_drive::config::PerceptionConfig;
 use crate::models::qwen_drive::weights::{HeadLinear, HeadLinearScratch};
-use crate::ops::nn::{attention_scalar, AttentionSpec};
 
 const HEADS: usize = 8;
 const ENCODER_LEVELS: usize = 4;

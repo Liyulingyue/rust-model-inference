@@ -2,7 +2,7 @@ use crate::core::{
     tensor::{GGMLType, TensorSource},
     thread_pool::ComputePool,
 };
-use crate::ops::nn::{self as k, Linear};
+use crate::models::diffusion::dreamx::kernels::{self as k, Linear};
 use crate::ops::{gelu_erf_inplace, softmax_inplace};
 use std::collections::BTreeMap;
 
