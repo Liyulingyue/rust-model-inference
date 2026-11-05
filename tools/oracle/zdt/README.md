@@ -127,6 +127,40 @@ contract, which is also llama.cpp's contract. Reproducing the upstream's own
 numbers needs a converter that re-derives the mmproj from the original
 weights; that is tracked in `docs/develop/TODO.md`.
 
+## The device path
+
+The tower's projection matrices are loaded through the repo's `Weight`
+abstraction, which the Vulkan feature wraps in a device kernel, so the matmuls
+go to the GPU when one is available. The weights keep the GGUF's BF16 and
+borrow the mapped bytes, so the encoder holds no F32 copy of them.
+
+```sh
+RMI_ZDT_GPU=1 cargo test --profile release-fast --features vulkan --test zdt_oracle -- --ignored --nocapture
+RMI_COMPUTE_TRACE=1 target/release-fast/rust-model-inference --model "$RMI_ZDT_TEXT" \
+  --mmproj "$RMI_ZDT_MMPROJ" --image path/to/blue-64.png --prompt 'hi' \
+  --max-tokens 2 --compute vulkan
+```
+
+The trace prints `compute scope=linear backend=Vulkan rows=1034` for the
+tower's matmuls, which is the projection running on the device.
+
+Measured on the oracle's single 512x512 image:
+
+| Path | Projection time | F32 reference | BF16 reference | upstream PyTorch |
+| --- | --- | --- | --- | --- |
+| CPU | 36.93 s | 0.00035960 | 0.00470345 | 0.00147076 |
+| device | 27.62 s | 0.00035911 | 0.00470339 | 0.00147061 |
+
+The CPU and device paths agree to about 5e-7 relative on every reference, so
+they pass the same bounds. The first device call also uploads the 1.6 GB of
+BF16 weights.
+
+The device path is still 25% faster rather than the order of magnitude the
+tower's arithmetic would allow: each of the tower's 130 matmuls moves its
+1034x1280 activation batch across the host boundary and back. Keeping the
+activations resident, batching the per-layer projections and using the tiled
+float kernel is the next step; it is tracked in `docs/develop/TODO.md`.
+
 ## The text tower
 
 The text tower is the shared `qwen35` path, so the text checks are the

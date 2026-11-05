@@ -140,5 +140,19 @@
   ],
   "baseline_failures": [
     "qwen35_config_rejects_invalid_tensor_dimensions"
-  ]
+  ],
+  "device_path": {
+    "status": "the projection matrices run on the Vulkan device",
+    "evidence": "RMI_COMPUTE_TRACE prints scope=linear backend=Vulkan rows=1034 for the tower's matmuls",
+    "relative_l2_f32_weights": 0.00035911,
+    "relative_l2_bf16_weights": 0.00470339,
+    "relative_l2_upstream_pytorch": 0.00147061,
+    "cpu_gpu_relative_difference": "about 5e-7 on every reference; the CPU and the device paths pass the same bounds",
+    "projection_time_first_call": {
+      "cpu": 36.934,
+      "device": 27.615
+    },
+    "note": "the first device call uploads the 1.6 GB of BF16 weights; the timings are the oracle test's encode of one 512x512 image",
+    "memory": "the tower's weights stay BF16 and borrow the mapped bytes, so the encoder holds no F32 copy of them; only the 3.9 MB patch embedding and the 1-D vectors are materialized"
+  }
 }

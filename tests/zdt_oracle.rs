@@ -28,6 +28,16 @@ fn relative_l2(actual: &[f32], expected: &[f32]) -> f64 {
     (diff / norm).sqrt()
 }
 
+/// Ask for the device path when the environment says so.
+///
+/// The projection's matmuls then run on the GPU, and the comparison against
+/// the reference is measured on the device's numbers.
+fn request_device_if_asked() {
+    if std::env::var_os("RMI_ZDT_GPU").is_some() {
+        rust_model_inference::ops::enable_gpu();
+    }
+}
+
 fn read_f32_dump(path: &std::ffi::OsStr, expected_len: usize) -> Vec<f32> {
     let bytes = std::fs::read(path).expect("read Oracle output");
     assert_eq!(bytes.len(), expected_len * 4);
@@ -45,12 +55,23 @@ fn blue_image_matches_llama_cpp() {
     let path = std::env::var_os("RMI_ZDT_MMPROJ").expect("RMI_ZDT_MMPROJ is required");
     assert!(std::env::var_os("RMI_ZDT_REFERENCE").is_some());
     assert!(std::env::var_os("RMI_ZDT_REFERENCE_BF16").is_some());
+    request_device_if_asked();
     let source = GGUFLoader::from_file(path).expect("load ZDT mmproj");
     let model = ZdtVisionEncoder::from_source(&source, Arc::new(ComputePool::new(8)))
         .expect("ZDT vision contract");
     let side = model.config.image_size;
     let pixels: Vec<f32> = (0..side * side).flat_map(|_| [0.0, 0.0, 1.0]).collect();
+    let started = std::time::Instant::now();
     let actual = model.encode(&pixels, side, side).expect("ZDT encode");
+    eprintln!(
+        "ZDT projection encoded in {:.3}s on {}",
+        started.elapsed().as_secs_f64(),
+        if std::env::var_os("RMI_ZDT_GPU").is_some() {
+            "the device"
+        } else {
+            "the CPU"
+        }
+    );
     assert_eq!(actual.len(), 256 * 4096);
     assert!(actual.iter().all(|v| v.is_finite()));
     for (key, bound) in [
@@ -95,6 +116,7 @@ fn blue_image_matches_upstream_pytorch() {
     let path = std::env::var_os("RMI_ZDT_MMPROJ").expect("RMI_ZDT_MMPROJ is required");
     let reference = std::env::var_os("RMI_ZDT_PYTORCH_REFERENCE")
         .expect("RMI_ZDT_PYTORCH_REFERENCE is required");
+    request_device_if_asked();
     let source = GGUFLoader::from_file(path).expect("load ZDT mmproj");
     let model = ZdtVisionEncoder::from_source(&source, Arc::new(ComputePool::new(8)))
         .expect("ZDT vision contract");

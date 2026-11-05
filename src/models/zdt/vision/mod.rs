@@ -2,7 +2,7 @@ pub mod config;
 
 use crate::core::tensor::{load_f32_tensor, TensorSource};
 use crate::core::thread_pool::ComputePool;
-use crate::models::qwen3::vision::matmul_f32_weight;
+use crate::ops::kernel::{QuantizedTensor, Weight};
 use crate::ops::{rms_norm_inplace, softmax_inplace, vec_add_into};
 use config::ZdtVisionConfig;
 use std::sync::Arc;
@@ -42,35 +42,136 @@ fn load_matrix(
     load_f32_tensor(source, name, &info.dims)
 }
 
+/// Load a projection matrix, keeping the GGUF's own dtype.
+///
+/// The shape checks are the ones `load_matrix` does; the difference is that
+/// the payload stays in the file's format (BF16 for the published mmproj)
+/// and is borrowed from the mapped bytes. The kernel behind it dispatches to
+/// the device when one is available, and the F32 activations keep their
+/// precision on the CPU path.
+fn load_weight<'a>(
+    source: &'a dyn TensorSource,
+    name: &str,
+    cols: usize,
+    rows: usize,
+) -> Result<Weight<'a>, String> {
+    let info = source
+        .tensor_info(name)
+        .ok_or_else(|| format!("Missing tensor: {name}"))?;
+    let total: usize = info
+        .dims
+        .iter()
+        .try_fold(1usize, |acc, d| acc.checked_mul(usize::try_from(*d).ok()?))
+        .ok_or_else(|| format!("Tensor dims overflow for {name}"))?;
+    let mut dims = info.dims.as_slice();
+    while dims.len() > 1 && dims.last() == Some(&1) {
+        dims = &dims[..dims.len() - 1];
+    }
+    let axes_match = if rows == 1 {
+        dims == [cols as u64]
+    } else {
+        dims.last() == Some(&(rows as u64))
+    };
+    if cols.checked_mul(rows) != Some(total) || !axes_match {
+        return Err(format!(
+            "Tensor {name} shape {:?} does not match [{cols}, {rows}]",
+            info.dims
+        ));
+    }
+    let bytes = source
+        .tensor_slice(name)
+        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
+    let expected = usize::try_from(info.checked_nbytes().unwrap_or(u64::MAX))
+        .map_err(|_| format!("Invalid tensor byte size: {name}"))?;
+    if bytes.len() != expected {
+        return Err(format!("Invalid tensor data length for {name}"));
+    }
+    let mut weight = Weight::from_quantized(QuantizedTensor::from_bytes(
+        bytes,
+        info.ggml_type,
+        cols,
+        rows,
+    ));
+    weight.n_in = cols;
+    weight.n_out = rows;
+    Ok(weight)
+}
+
+/// One projection: the device when it is available, the shared kernel
+/// otherwise.
+///
+/// The CPU path partitions the tokens over the pool, so the kernel's batched
+/// forward sees a slice of the rows and stays parallel.
+fn matmul_weight(
+    pool: &ComputePool,
+    weight: &Weight<'_>,
+    input: &[f32],
+    output: &mut [f32],
+    n_tokens: usize,
+) {
+    debug_assert_eq!(input.len(), n_tokens * weight.n_in);
+    debug_assert_eq!(output.len(), n_tokens * weight.n_out);
+    #[cfg(feature = "vulkan")]
+    if weight.try_vulkan_rows(input, output, n_tokens) {
+        return;
+    }
+    let n_in = weight.n_in;
+    let n_out = weight.n_out;
+    let input_ptr = input.as_ptr();
+    let output_ptr = output.as_mut_ptr();
+    pool.compute(move |ith, nth| {
+        let (start, end) = crate::ops::kernel::f32::scalar::row_range(n_tokens, ith, nth);
+        if start >= end {
+            return;
+        }
+        // SAFETY: the caller checked the lengths; each worker owns a disjoint
+        // slice of the tokens, and the kernel writes only its own rows.
+        unsafe {
+            let input_slice =
+                std::slice::from_raw_parts(input_ptr.add(start * n_in), (end - start) * n_in);
+            let output_slice = std::slice::from_raw_parts_mut(
+                output_ptr.add(start * n_out),
+                (end - start) * n_out,
+            );
+            weight
+                .kernel
+                .forward_batched(input_slice, output_slice, n_in, n_out);
+        }
+    });
+}
+
 /// A single pre-LN transformer block, matching the `v.blk.N.*` layout that
 /// `nemotron_v2_vl` shares with the rest of llama.cpp's CLIP towers.
-pub struct ZdtLayer {
+pub struct ZdtLayer<'a> {
     pub ln1_weight: Vec<f32>,
     pub ln1_bias: Option<Vec<f32>>,
     pub ln2_weight: Vec<f32>,
     pub ln2_bias: Option<Vec<f32>>,
-    pub qkv_weight: Vec<f32>,
+    pub qkv_weight: Weight<'a>,
     pub qkv_bias: Option<Vec<f32>>,
-    pub out_weight: Vec<f32>,
+    pub out_weight: Weight<'a>,
     pub out_bias: Option<Vec<f32>>,
-    pub ffn_up_weight: Vec<f32>,
+    pub ffn_up_weight: Weight<'a>,
     pub ffn_up_bias: Option<Vec<f32>>,
-    pub ffn_down_weight: Vec<f32>,
+    pub ffn_down_weight: Weight<'a>,
     pub ffn_down_bias: Option<Vec<f32>>,
 }
 
-pub struct ZdtVisionEncoder {
+pub struct ZdtVisionEncoder<'a> {
     pub config: ZdtVisionConfig,
     pub pool: Arc<ComputePool>,
+    /// The patch embedding stays F32: it is consumed by the im2col matmul
+    /// below, which walks the weights directly. It is 3.9 MB, so it does not
+    /// matter that the rest of the tower does not.
     pub patch_embd_weight: Vec<f32>,
     pub position_embd: Option<Vec<f32>>,
     pub class_embd: Option<Vec<Vec<f32>>>,
-    pub layers: Vec<ZdtLayer>,
+    pub layers: Vec<ZdtLayer<'a>>,
     /// `mm.model.mlp.0.weight` is a 1-D RMSNorm gain over the merged feature,
     /// not a projection matrix. `mlp.1` and `mlp.3` are the actual matrices.
     pub mm_0_weight: Vec<f32>,
-    pub mm_1_weight: Vec<f32>,
-    pub mm_3_weight: Vec<f32>,
+    pub mm_1_weight: Weight<'a>,
+    pub mm_3_weight: Weight<'a>,
     scratch: std::cell::RefCell<Option<Scratch>>,
 }
 
@@ -102,8 +203,11 @@ fn prepend_registers(
     }
 }
 
-impl ZdtVisionEncoder {
-    pub fn from_source(source: &dyn TensorSource, pool: Arc<ComputePool>) -> Result<Self, String> {
+impl<'a> ZdtVisionEncoder<'a> {
+    pub fn from_source(
+        source: &'a dyn TensorSource,
+        pool: Arc<ComputePool>,
+    ) -> Result<Self, String> {
         let mut config = ZdtVisionConfig::from_source(source)?;
         let load = |name: &str, cols: usize, rows: usize| -> Result<Vec<f32>, String> {
             load_matrix(source, name, cols, rows)
@@ -113,6 +217,9 @@ impl ZdtVisionEncoder {
                 .tensor_info(name)
                 .map(|_| load_matrix(source, name, cols, rows))
                 .transpose()
+        };
+        let load_w = |name: &str, cols: usize, rows: usize| -> Result<Weight<'a>, String> {
+            load_weight(source, name, cols, rows)
         };
 
         let n = config.n_embd;
@@ -149,13 +256,13 @@ impl ZdtVisionEncoder {
                 ln1_bias: load_opt(&format!("v.blk.{i}.ln1.bias"), n, 1)?,
                 ln2_weight: load(&format!("v.blk.{i}.ln2.weight"), n, 1)?,
                 ln2_bias: load_opt(&format!("v.blk.{i}.ln2.bias"), n, 1)?,
-                qkv_weight: load(&format!("v.blk.{i}.attn_qkv.weight"), n, n * 3)?,
+                qkv_weight: load_w(&format!("v.blk.{i}.attn_qkv.weight"), n, n * 3)?,
                 qkv_bias: load_opt(&format!("v.blk.{i}.attn_qkv.bias"), n * 3, 1)?,
-                out_weight: load(&format!("v.blk.{i}.attn_out.weight"), n, n)?,
+                out_weight: load_w(&format!("v.blk.{i}.attn_out.weight"), n, n)?,
                 out_bias: load_opt(&format!("v.blk.{i}.attn_out.bias"), n, 1)?,
-                ffn_up_weight: load(&format!("v.blk.{i}.ffn_up.weight"), n, config.n_ff)?,
+                ffn_up_weight: load_w(&format!("v.blk.{i}.ffn_up.weight"), n, config.n_ff)?,
                 ffn_up_bias: load_opt(&format!("v.blk.{i}.ffn_up.bias"), config.n_ff, 1)?,
-                ffn_down_weight: load(&format!("v.blk.{i}.ffn_down.weight"), config.n_ff, n)?,
+                ffn_down_weight: load_w(&format!("v.blk.{i}.ffn_down.weight"), config.n_ff, n)?,
                 ffn_down_bias: load_opt(&format!("v.blk.{i}.ffn_down.bias"), n, 1)?,
             });
             if i == 0 || i == 7 || i == 15 || i == 31 {}
@@ -171,8 +278,8 @@ impl ZdtVisionEncoder {
             .and_then(|v| usize::try_from(v).ok())
             .ok_or("Missing tensor: mm.model.mlp.1.weight")?;
         config.projector_hidden = projector_hidden;
-        let mm_1_weight = load("mm.model.mlp.1.weight", projector_in, projector_hidden)?;
-        let mm_3_weight = load(
+        let mm_1_weight = load_w("mm.model.mlp.1.weight", projector_in, projector_hidden)?;
+        let mm_3_weight = load_w(
             "mm.model.mlp.3.weight",
             projector_hidden,
             config.projection_dim,
@@ -382,14 +489,12 @@ impl ZdtVisionEncoder {
             &scratch.buf[..n_tokens * n],
         ));
 
-        matmul_f32_weight(
+        matmul_weight(
             &self.pool,
             &layer.qkv_weight,
             &scratch.buf[..n_tokens * n],
             &mut scratch.qkv[..n_tokens * n * 3],
             n_tokens,
-            n,
-            n * 3,
         );
         if let Some(ref b) = layer.qkv_bias {
             for t in 0..n_tokens {
@@ -404,14 +509,12 @@ impl ZdtVisionEncoder {
             n_tokens,
         ));
 
-        matmul_f32_weight(
+        matmul_weight(
             &self.pool,
             &layer.out_weight,
             &scratch.attn[..n_tokens * n],
             &mut scratch.buf[..n_tokens * n],
             n_tokens,
-            n,
-            n,
         );
         if let Some(ref b) = layer.out_bias {
             for t in 0..n_tokens {
@@ -435,14 +538,12 @@ impl ZdtVisionEncoder {
             }
         }
 
-        matmul_f32_weight(
+        matmul_weight(
             &self.pool,
             &layer.ffn_up_weight,
             &scratch.buf[..n_tokens * n],
             &mut scratch.proj_buf[..n_tokens * cfg.n_ff],
             n_tokens,
-            n,
-            cfg.n_ff,
         );
         if let Some(ref b) = layer.ffn_up_bias {
             for t in 0..n_tokens {
@@ -459,14 +560,12 @@ impl ZdtVisionEncoder {
                 *x
             };
         }
-        matmul_f32_weight(
+        matmul_weight(
             &self.pool,
             &layer.ffn_down_weight,
             &scratch.proj_buf[..n_tokens * cfg.n_ff],
             &mut scratch.buf[..n_tokens * n],
             n_tokens,
-            cfg.n_ff,
-            n,
         );
         if let Some(ref b) = layer.ffn_down_bias {
             for t in 0..n_tokens {
@@ -574,28 +673,24 @@ impl ZdtVisionEncoder {
             rms_norm_inplace(row, &self.mm_0_weight, 1e-6);
         }
 
-        matmul_f32_weight(
+        matmul_weight(
             &self.pool,
             &self.mm_1_weight,
             &normed,
             &mut scratch.proj_buf[..n_tokens * cfg.projector_hidden],
             n_tokens,
-            projector_in,
-            cfg.projector_hidden,
         );
         // FFN_RELU_SQR: square the ReLU, no bias anywhere.
         for x in scratch.proj_buf[..n_tokens * cfg.projector_hidden].iter_mut() {
             let v = if *x > 0.0 { *x } else { 0.0 };
             *x = v * v;
         }
-        matmul_f32_weight(
+        matmul_weight(
             &self.pool,
             &self.mm_3_weight,
             &scratch.proj_buf[..n_tokens * cfg.projector_hidden],
             &mut scratch.hidden[..n_tokens * cfg.projection_dim],
             n_tokens,
-            cfg.projector_hidden,
-            cfg.projection_dim,
         );
         scratch.hidden[..n_tokens * cfg.projection_dim].to_vec()
     }
@@ -666,7 +761,7 @@ mod tests {
         }
     }
 
-    fn encoder(scale_factor: usize, n_embd: usize) -> ZdtVisionEncoder {
+    fn encoder(scale_factor: usize, n_embd: usize) -> ZdtVisionEncoder<'static> {
         ZdtVisionEncoder {
             config: cfg(scale_factor, n_embd),
             pool: Arc::new(ComputePool::new(1)),
@@ -675,10 +770,31 @@ mod tests {
             class_embd: None,
             layers: Vec::new(),
             mm_0_weight: Vec::new(),
-            mm_1_weight: Vec::new(),
-            mm_3_weight: Vec::new(),
+            mm_1_weight: empty_weight(),
+            mm_3_weight: empty_weight(),
             scratch: RefCell::new(None),
         }
+    }
+
+    /// An empty F32 weight, for the tests that only exercise the merge and
+    /// the activation, not a projection.
+    fn empty_weight() -> Weight<'static> {
+        f32_weight(Vec::new(), 1, 1)
+    }
+
+    /// An F32 weight holding the given values.
+    fn f32_weight(values: Vec<f32>, n_in: usize, n_out: usize) -> Weight<'static> {
+        let mut raw = Vec::with_capacity(values.len() * 4);
+        for value in values {
+            raw.extend_from_slice(&value.to_le_bytes());
+        }
+        let bytes: &'static [u8] = Box::leak(raw.into_boxed_slice());
+        Weight::from_quantized(QuantizedTensor::from_bytes(
+            bytes,
+            crate::core::tensor::GGMLType::F32,
+            n_in,
+            n_out,
+        ))
     }
 
     /// Every input patch must land in the output exactly once, at a distinct
@@ -765,13 +881,13 @@ mod tests {
             ln1_bias: Some(vec![0.0; 4]),
             ln2_weight: vec![1.0; 4],
             ln2_bias: Some(vec![0.0; 4]),
-            qkv_weight: vec![0.0; 48],
+            qkv_weight: f32_weight(vec![0.0; 48], 4, 12),
             qkv_bias: None,
-            out_weight: vec![0.0; 16],
+            out_weight: f32_weight(vec![0.0; 16], 4, 4),
             out_bias: Some(vec![1.0, -2.0, 0.5, 0.25]),
-            ffn_up_weight: identity.clone(),
+            ffn_up_weight: f32_weight(identity.clone(), 4, 4),
             ffn_up_bias: None,
-            ffn_down_weight: identity,
+            ffn_down_weight: f32_weight(identity, 4, 4),
             ffn_down_bias: None,
         });
         let mut scratch = enc.ensure_scratch();
@@ -898,8 +1014,8 @@ mod tests {
             class_embd: None,
             layers: Vec::new(),
             mm_0_weight: Vec::new(),
-            mm_1_weight: Vec::new(),
-            mm_3_weight: Vec::new(),
+            mm_1_weight: empty_weight(),
+            mm_3_weight: empty_weight(),
             scratch: RefCell::new(None),
         };
         // 2 tokens, head 0, d_head 2. Q|K|V laid out contiguously per token.
