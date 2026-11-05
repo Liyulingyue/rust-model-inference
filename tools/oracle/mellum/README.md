@@ -255,11 +255,13 @@ upload, because the device path caches one weight at a time.
 stay on the CPU and `--compute auto` matches `--compute cpu` instead of
 losing 40%. The scope is per call, so nothing else in the trunk is affected.
 
-The scope can go once the rest of the trunk moves: the output head on the
-device is now level with the CPU (1.5 ms against 2.6 ms per token), so
-leaving it on the CPU costs about 1 ms per token. What is missing is weight
-residency (the device path re-uploads every weight) and one submission per
-layer instead of one per projection; see TODO-049.
+The scope can go once the rest of the trunk moves: with the transposed
+layout on, the output head on the device is level with the CPU (1.5 ms
+against 2.6 ms per token), so leaving it on the CPU costs about 1 ms per
+token. What is missing is weight residency (the device path rebuilds its
+runtime when the shape changes, so a prefill and a decode each re-upload
+the weights — 2.9 GB per prefill) and one submission per layer instead of
+one per projection; see TODO-049.
 
 ### The batched prefill
 

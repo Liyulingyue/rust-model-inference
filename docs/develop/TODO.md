@@ -3464,10 +3464,15 @@ CPU 5672–5742 ms、设备转置 5134–5951 ms，**打平**。原因：
 
 #### 剩下的
 
-1. **权重常驻**（最高优先级）：设备路径现在每个投影都重新上传权重
-   （`GpuLinear::state` 只缓存一个权重，换权重就重建 runtime），decode 每 token
-   要把 2.35 GB 拷进设备内存一遍。改成按 (weight, shape) 缓存全部权重后，
-   设备每 token 只需从显存读 2.35 GB（163 GB/s → 14 ms/token）。
+1. **prefill 和 decode 之间来回重传权重**（最高优先级）：权重在**同一形状**下
+   是常驻的（`GpuLinear` 是 per-weight 的，它缓存自己那一份），但 `GpuLinear::state`
+   里的 runtime 是按 (权重, 形状) 建的，而 prefill 是多行、decode 是单行
+   → 形状一变 runtime 就重建，权重跟着重传。实测（Mellum 全投影走设备）：
+   2 token 时 1047 次上传 / 2.92 GB，8 token 时 2250 次 / 5.56 GB
+   （第二份是 decode 重建 runtime 后的重传），32 token 时 2268 次 / 5.60 GB
+   —— 即 **每次 prefill 都要重传 2.9 GB**。显存不是问题（旧副本随 runtime 释放，
+   峰值 4.36 GB，开关两档一样），问题是**时间和带宽**。
+   要让 serving 场景能摊销，得让 runtime 跨形状存活（缓存按 (权重, 形状) 分开）。
 2. **把一层的投影合并成一次提交**：每 token 785 次提交，每次 ~0.4 ms = 314 ms，
    比 kernel 本身还贵。仓库里已有 `record_group_matmul`（多权重共用一个
    command buffer），Mellum 的 trunk 还没用。
