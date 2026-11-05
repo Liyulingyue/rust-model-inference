@@ -124,17 +124,25 @@ void main() {
         }
         barrier();
 
-        // The weight is stored in transposed layout [n_in, n_out], so element
-        // (i, j) is at byte offset (i * n_out + j) * 2. Each weight_word holds
-        // two f16 values, so the word index is (i * n_out + j) >> 1.
+        // The transposed recorder marks F16 storage with q8_stride=2;
+        // ordinary matmul and convolution retain row-major weights.
+        bool transposed = pc.group_count != CONV_GROUP && pc.q8_stride == 2u;
+        uint row_base = read_column * pc.elements_per_row + chunk;
         uint index = 0u;
         for (; index + 1u < elements; index += 2u) {
-            uint elem = chunk + index;
-            uint word_index = (elem * output_rows + read_column) >> 1u;
-            uint second_index = ((elem + 1u) * output_rows + read_column) >> 1u;
-            float first = unpackHalf2x16(weight_word(slot, word_index))[(elem * output_rows + read_column) & 1u];
-            float second = unpackHalf2x16(weight_word(slot, second_index))[((elem + 1u) * output_rows + read_column) & 1u];
-            vec2 pair = vec2(first, second);
+            vec2 pair;
+            if (transposed) {
+                uint first = (chunk + index) * output_rows + read_column;
+                uint second = first + output_rows;
+                pair = vec2(
+                    unpackHalf2x16(weight_word(slot, first >> 1u))[first & 1u],
+                    unpackHalf2x16(weight_word(slot, second >> 1u))[second & 1u]);
+            } else {
+                pair = unpackHalf2x16(weight_word(slot, (row_base + index) >> 1u));
+                if ((row_base & 1u) != 0u) {
+                    pair = vec2(pair.y, unpackHalf2x16(weight_word(slot, ((row_base + index) >> 1u) + 1u)).x);
+                }
+            }
             // Unroll tokens so the compiler can keep each accumulator in a register.
             [[unroll]] for (uint t = 0u; t < TOKENS; t++) {
                 if (t >= live) continue;
@@ -145,9 +153,9 @@ void main() {
             }
         }
         if (index < elements) {
-            uint elem = chunk + index;
-            uint word_index = (elem * output_rows + read_column) >> 1u;
-            float odd = unpackHalf2x16(weight_word(slot, word_index))[(elem * output_rows + read_column) & 1u];
+            uint elem = transposed
+                ? (chunk + index) * output_rows + read_column : row_base + index;
+            float odd = unpackHalf2x16(weight_word(slot, elem >> 1u))[elem & 1u];
             for (uint t = 0u; t < live; t++) {
                 float value = unpackHalf2x16(
                     input_stage[t * (CHUNK_ELEMENTS / 2u) + index / 2u]

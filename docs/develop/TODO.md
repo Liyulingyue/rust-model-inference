@@ -154,7 +154,45 @@ NEON on aarch64; no AVX-512).
       选项：① 把 AVX2 改成镜像上游的 `|n| > 126 → 慢路径`（最彻底，x86 与 ARM 对齐，
       但需要 x86 机器实测）；② 把 CPU clamp 收到 ±80 与 shader 对齐（牺牲 [80, 88.4]
       的精度，换 CPU↔GPU 一致）；③ 维持现状，把三者的边界写进文档。
-      **必须在 x86 上实测才能定，不能在 aarch64 上单方面决定。**
+       **必须在 x86 上实测才能定，不能在 aarch64 上单方面决定。**
+- [ ] **两份 F16 shader 改动缺 aarch64 / 真实权重验证（Timestral F16 路径 + NEON 回退）** —
+      合并 `e0d01a7` 的解算对 `shaders/glsl/f16_matmul_tiled.comp` 加了
+      `transposed = (group_count != CONV_GROUP) && (q8_stride == 2)` 分派（同时保住
+      Timestral 的转置权重与 Z-Image conv / 行主序 F16 的行主序权重），并把
+      `f16_matmul.comp` 的 NEON「连续 64 元素块」加载**回退**成 stride-16。
+      两条路径本机都**没能验证**：
+      - **Timestral F16**：`src/vulkan/timestral.rs:226` 走 `record_transposed_float_matmul_rows`
+        （F16 置 `q8_stride=2`）→ 命中 transposed 分支。公式与 main `f4aa9d1`(#198) 修好
+        Timestral 时用的完全一致，属**代码推断**；本机没有 Timestral 权重，未实测。
+      - **`f16_matmul.comp` 的 NEON 回退**：模式 2 只在 aarch64 NEON 走
+        （`attention_dot_mode()` 中 x86 走模式 8），本机是 x86 且 **CI 无 aarch64 作业** →
+        该分支**从未被编译或测试**，只能确认「回到 `afed6d4`(#192) 之前的行为」。
+      已实证的部分：conv 侧 main 偏差 **9.01** → 本分支 **~1e-6**（`RUST_GPU_MIN_OUTPUTS=0`
+      下 `vulkan_vae_convolution_matches_cpu_across_tiles` 通过）；行主序 F16 tiled 由
+      `batched_linear_device_f16_tiled_preserves_storage_layouts` 覆盖。
+      选项：① 加 aarch64 CI 作业（至少 `cargo check --features vulkan` + shader 编译）；
+      ② 在 arm 机器上跑 Timestral F16（209M）的 GPU 路径并对 llama.cpp oracle；
+      ③ 把 #198 的 conv 回归与本分支的 `transposed` 分派反馈给 main。
+- [ ] **共享算子搬迁只搬了一半：兼容 shim 还在，调用方没跟着迁移** —
+      两次「把共享算子搬进 `ops/`」都留下了 1 行转发 shim，调用方仍在走 models 层路径：
+      - `src/models/diffusion/dreamx/kernels.rs` 现在只有 `pub use crate::ops::nn::*;`
+        （实现已搬到 `src/ops/nn.rs`：32 fn + 4 struct + 7 const 逐一对应、**零丢失**）。
+        但 **33 处调用方未迁移**，其中 **18 处在 ops/vulkan 层**（`src/ops/kernel/vulkan.rs`
+        14 处、`src/vulkan/ops.rs` 4 处）→ **ops → models 反向依赖**被这条 shim 续着命；
+        另有 7 个无关模型（wevisone_vl / qwen_drive / audio8 / unlimited_ocr / flux3 /
+        astronex_world / mage_flow）的 import 路径还挂着 `dreamx` 的名字。
+      - `src/models/qwen3/asr/audio_processor.rs` 同样只剩
+        `pub use crate::ops::audio::frontend::*;`，12+ 处调用方（omni / omni_audio /
+        audio8 / gemma4 asr / app::media / app::tts / app::asr）未迁移；
+        `mel_encoder.rs` 顶部还有 `pub(crate) use crate::ops::audio::transformer::{…}`
+        转发表。此处**没有** ops → models 反向依赖（方向是对的），只是路径名还挂在
+        `qwen3::asr` 下。
+      收尾：把调用方 import 改成 `crate::ops::nn::*` / `crate::ops::audio::frontend::*` /
+      `crate::ops::audio::transformer::*`，删掉两个 shim 与 `dreamx/mod.rs` 的
+      `pub mod kernels;`。纯机械改动，风险低。
+      附带：`mel_encoder.rs` 的模型侧 `apply_gelu` 与共享的
+      `ops::audio::transformer::apply_gelu_erf` 是两份相似实现（搬迁时新引入的重复），
+      建议模型侧改为委托。
 
 - [x] **LFM2.5-24B-A2B 适配 + 标量逐位对齐** — ✅ 已完成 (2026-10-15)。
       24B 总 / 2B 激活的 MoE，`lfm2moe` 架构：40 层 × 2048 宽 × 32 头（head_dim 64），注意力层
