@@ -1500,18 +1500,17 @@ impl BatchedLinearRuntime {
                     .upload_static(transposed.as_deref().unwrap_or(weight_bytes))?
             }
         };
-        let bindings = match self.ops.bind_weight_buffers_mode_layout(
-            &[buffer],
-            &[format],
-            spec.mode,
-            layout,
-        ) {
-            Ok(bindings) => bindings,
-            Err(error) => {
-                unsafe { self.ops.context.destroy_buffer(&buffer) };
-                return Err(error);
-            }
-        };
+        let bindings =
+            match self
+                .ops
+                .bind_weight_buffers_mode_layout(&[buffer], &[format], spec.mode, layout)
+            {
+                Ok(bindings) => bindings,
+                Err(error) => {
+                    unsafe { self.ops.context.destroy_buffer(&buffer) };
+                    return Err(error);
+                }
+            };
         self.weights.insert(key, (buffer, bindings));
         Ok((key, buffer))
     }
@@ -10730,7 +10729,9 @@ mod tests {
                 let spec = GpuWeightFormat::F16.with_mode(GpuMatmulMode::RoundedInputF32);
                 let mut actual = vec![f32::NAN; rows * n_out];
                 if transposed {
-                    let (key, _) = runtime.ensure_weight(&bytes, spec, rows, n_in, n_out).unwrap();
+                    let (key, _) = runtime
+                        .ensure_weight(&bytes, spec, rows, n_in, n_out)
+                        .unwrap();
                     runtime.write_input(&input).unwrap();
                     let commands = TokenCommands::begin(context).unwrap();
                     runtime
