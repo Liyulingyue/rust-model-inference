@@ -96,6 +96,8 @@ fn pipeline_runs_end_to_end_producing_a_finite_mono_audio_buffer() {
         seed: 42,
         guidance_scale: 2.0,
         instruct: None,
+        sway_sampling_coef: None,
+        time_grid: None,
     };
     let audio = pipeline
         .generate_audio("Hi", &options)

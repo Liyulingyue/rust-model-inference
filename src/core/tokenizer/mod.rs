@@ -27,6 +27,7 @@ enum PreTokenizer {
     Qwen2,
     Qwen35,
     HunyuanDense,
+    Hunyuan,
     Lfm2,
     LlamaBpe,
     Gemma4,
@@ -567,7 +568,7 @@ impl BPETokenizer {
                 Some(MetaValue::String(value)) if value == "hunyuan-dense" => {
                     PreTokenizer::HunyuanDense
                 }
-                Some(MetaValue::String(value)) if value == "hunyuan" => PreTokenizer::HunyuanDense,
+                Some(MetaValue::String(value)) if value == "hunyuan" => PreTokenizer::Hunyuan,
                 Some(MetaValue::String(value)) if value == "lfm2" => PreTokenizer::Lfm2,
                 Some(MetaValue::String(value)) if value == "llama-bpe" => PreTokenizer::LlamaBpe,
                 Some(MetaValue::String(value)) if value == "dbrx" => PreTokenizer::LlamaBpe,
@@ -723,7 +724,7 @@ impl BPETokenizer {
         // contract: literals alone do not confer special semantics).
         let force_semantic_registration = matches!(pre, PreTokenizer::Minicpm5);
         let semantic_literals: &[(&str, &str)] = match pre {
-            PreTokenizer::HunyuanDense => HUNYUAN_SEMANTIC_TOKENS,
+            PreTokenizer::HunyuanDense | PreTokenizer::Hunyuan => HUNYUAN_SEMANTIC_TOKENS,
             PreTokenizer::LlamaBpe | PreTokenizer::Minicpm5 => LLAMA_BPE_SEMANTIC_TOKENS,
             PreTokenizer::K2Horizon => K2_HORIZON_SEMANTIC_TOKENS,
             _ => QWEN_SEMANTIC_TOKENS,
@@ -1977,7 +1978,47 @@ fn contractions_are_case_insensitive(pre: PreTokenizer) -> bool {
     !matches!(pre, PreTokenizer::Mellum2)
 }
 
+// Hunyuan-Dense applies three regex passes, including digit and Han/Kana isolation.
+fn scan_hunyuan_dense_ranges(text: &str) -> Vec<Range<usize>> {
+    use std::sync::OnceLock;
+    use tokenizers::utils::SysRegex;
+    static PATTERNS: OnceLock<[SysRegex; 3]> = OnceLock::new();
+    let patterns=PATTERNS.get_or_init(|| [
+        r"\p{N}{1,3}",
+        r"[一-龥぀-ゟ゠-ヿ]+",
+        r##"[!"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~][A-Za-z]+|[^\r\n\p{L}\p{P}\p{S}]?[\p{L}\p{M}]+| ?[\p{P}\p{S}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"##,
+    ].map(|p|SysRegex::new(p).expect("valid Hunyuan-Dense regex")));
+    let mut parts = if text.is_empty() {
+        Vec::new()
+    } else {
+        vec![0..text.len()]
+    };
+    for pattern in patterns {
+        let mut next = Vec::new();
+        for part in parts {
+            let mut start = part.start;
+            for (a, b) in pattern.find_iter(&text[part.clone()]) {
+                let a = part.start + a;
+                let b = part.start + b;
+                if start < a {
+                    next.push(start..a);
+                }
+                next.push(a..b);
+                start = b;
+            }
+            if start < part.end {
+                next.push(start..part.end);
+            }
+        }
+        parts = next;
+    }
+    parts
+}
+
 fn scan_qwen_ranges(text: &str, pre: PreTokenizer) -> Vec<Range<usize>> {
+    if pre == PreTokenizer::HunyuanDense {
+        return scan_hunyuan_dense_ranges(text);
+    }
     let chars: Vec<(usize, char)> = text.char_indices().collect();
     let values: Vec<char> = chars.iter().map(|(_, value)| *value).collect();
     let byte_at = |index: usize| {
@@ -2236,6 +2277,45 @@ mod tests {
     use crate::core::tensor::{MetaValue, MetaValueType};
     use std::collections::HashMap;
 
+    #[test]
+    fn hy_mt2_token_ids_match_official_tokenizer() {
+        #[derive(serde::Deserialize)]
+        struct Case {
+            text: String,
+            ids: Vec<u32>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Fixture {
+            vocab_size: usize,
+            vocab: Vec<(u32, String)>,
+            merges: Vec<(u32, String, String)>,
+            cases: Vec<Case>,
+        }
+        let fixture: Fixture = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/hy_mt2_tokenizer.json"
+        ))
+        .unwrap();
+        let mut tokenizer = tokenizer_with_pre(Some("hunyuan-dense")).unwrap();
+        tokenizer.tokens = vec![String::new(); fixture.vocab_size];
+        tokenizer.token_types = vec![TokenType::Normal; fixture.vocab_size];
+        tokenizer.token_to_id.clear();
+        for (id, token) in fixture.vocab {
+            tokenizer.tokens[id as usize] = token.clone();
+            tokenizer.token_to_id.insert(token, id);
+        }
+        // The sparse fixture keeps the official IDs and original merge ranks.
+        tokenizer.merge_ranks = fixture
+            .merges
+            .into_iter()
+            .map(|(rank, a, b)| ((a, b), rank))
+            .collect();
+        for case in fixture.cases {
+            let ids = tokenizer.encode(&case.text, EncodeOptions::default());
+            assert_eq!(ids, case.ids, "{:?}", case.text);
+            assert_eq!(tokenizer.decode(&ids, false), case.text);
+        }
+    }
+
     fn tokenizer_with_pre(pre: Option<&str>) -> Result<BPETokenizer, String> {
         let mut metadata: HashMap<String, MetaValue> = HashMap::from([
             (
@@ -2278,6 +2358,30 @@ mod tests {
         assert!(tokenizer_with_pre(Some("default"))
             .unwrap_err()
             .contains("qwen2 or qwen35"));
+    }
+
+    #[test]
+    fn hy_dense_scanner_isolates_numbers_han_and_combining_marks() {
+        assert_eq!(
+            scan_qwen_words("6124c78e", PreTokenizer::HunyuanDense),
+            ["612", "4", "c", "78", "e"]
+        );
+        assert_eq!(
+            scan_qwen_words(
+                "a中文かなb e\u{301} !hello  two",
+                PreTokenizer::HunyuanDense
+            ),
+            [
+                "a",
+                "中文かな",
+                "b",
+                " e\u{301}",
+                " !",
+                "hello",
+                " ",
+                " two"
+            ]
+        );
     }
 
     #[test]

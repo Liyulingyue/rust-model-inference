@@ -20,6 +20,8 @@ pub(crate) mod matmul_q4k;
 #[cfg(feature = "vulkan")]
 pub(crate) mod ops;
 #[cfg(feature = "vulkan")]
+pub(crate) mod q8_layout;
+#[cfg(feature = "vulkan")]
 pub(crate) mod qwen3;
 #[cfg(feature = "vulkan")]
 pub(crate) mod qwen35;
@@ -232,6 +234,7 @@ struct IoState {
 #[cfg(feature = "vulkan")]
 #[derive(Default)]
 struct CommandSubmission {
+    shutdown: bool,
     uncertain: bool,
     retired_weights: Vec<GpuBuffer>,
 }
@@ -392,6 +395,9 @@ impl VulkanContext {
             ) {
                 Ok(candidates) => candidates,
                 Err(error) => {
+                    if let Some((utils, messenger)) = &debug_messenger {
+                        utils.destroy_debug_utils_messenger(*messenger, None);
+                    }
                     instance.destroy_instance(None);
                     return Err(error);
                 }
@@ -467,6 +473,9 @@ impl VulkanContext {
                 }
             }
 
+            if let Some((utils, messenger)) = &debug_messenger {
+                utils.destroy_debug_utils_messenger(*messenger, None);
+            }
             instance.destroy_instance(None);
             if failures.is_empty() {
                 Err(VulkanError::NoComputeDevice)
@@ -586,6 +595,11 @@ impl VulkanContext {
     }
 
     fn recover_commands(&self, submission: &mut CommandSubmission) -> Result<(), VulkanError> {
+        if submission.shutdown {
+            return Err(VulkanError::InitFailed(
+                "Vulkan context is shut down".into(),
+            ));
+        }
         submission.confirm_idle(|| {
             #[cfg(test)]
             {
@@ -1127,6 +1141,31 @@ impl VulkanContext {
         Ok(buffer)
     }
 
+    /// Upload bytes that are produced in place.
+    ///
+    /// A caller that has to rewrite the bytes anyway -- the transposed Q8_0
+    /// layout -- can write them straight into the device buffer instead of
+    /// staging them in a second buffer and copying that over.
+    pub(crate) unsafe fn upload_static_filled(
+        &self,
+        size: usize,
+        fill: impl FnOnce(&mut [u8]),
+    ) -> Result<GpuBuffer, VulkanError> {
+        let padded = size
+            .checked_add(19)
+            .and_then(|size| u64::try_from(size & !3).ok())
+            .ok_or(VulkanError::OutOfMemory)?;
+        let buffer = self.alloc_persistently_mapped(padded)?;
+        let mapped = buffer.mapped;
+        // SAFETY: the mapping covers `padded` bytes and the buffer is not
+        // in use yet.
+        fill(std::slice::from_raw_parts_mut(mapped, size));
+        std::ptr::write_bytes(mapped.add(size), 0, padded as usize - size);
+        self.flush_mapped(buffer, 0, size as u64)?;
+        self.count_upload(size);
+        Ok(buffer)
+    }
+
     /// Keep discrete GPU weights in VRAM; mutable host buffers still use
     /// upload_static. Caller must not hold the command mutex.
     pub(crate) unsafe fn upload_device_static(
@@ -1417,15 +1456,15 @@ impl VulkanContext {
         if debug_utils_available {
             extension_names.push(debug_utils_name.as_ptr());
         }
+        // Both arrays must outlive create_instance, which reads their pointers.
+        let features = [
+            vk::ValidationFeatureEnableEXT::SYNCHRONIZATION_VALIDATION,
+            vk::ValidationFeatureEnableEXT::BEST_PRACTICES,
+        ];
+        // ash 0.37 does not name this one, but the spec gives it the value 8.
+        let disabled = [vk::ValidationFeatureDisableEXT::from_raw(8)];
         let validation_features = if debug_utils_available {
-            // GPU-assisted validation crashes this driver, so keep it off
-            // and let the CPU-side checks do the work.
-            let features = [
-                vk::ValidationFeatureEnableEXT::SYNCHRONIZATION_VALIDATION,
-                vk::ValidationFeatureEnableEXT::BEST_PRACTICES,
-            ];
-            // ash 0.37 does not name this one, but the spec gives it the value 8.
-            let disabled = [vk::ValidationFeatureDisableEXT::from_raw(8)];
+            // Keep GPU-assisted validation off; CPU-side checks suffice here.
             Some(vk::ValidationFeaturesEXT {
                 s_type: vk::StructureType::VALIDATION_FEATURES_EXT,
                 p_next: std::ptr::null(),
@@ -2093,33 +2132,47 @@ impl Clone for GpuBuffer {
 impl Copy for GpuBuffer {}
 
 #[cfg(feature = "vulkan")]
-impl Drop for VulkanContext {
-    fn drop(&mut self) {
-        let Ok(mut submission) = self.mutex.lock() else {
-            return;
-        };
-        if self.recover_commands(&mut submission).is_err() {
-            // Keep device/instance/loader and all owned GPU resources alive if
-            // their completion cannot be confirmed.
-            return;
+impl VulkanContext {
+    pub(crate) fn shutdown(&self) -> Result<(), VulkanError> {
+        let mut submission = self
+            .mutex
+            .lock()
+            .map_err(|_| VulkanError::InitFailed("Vulkan command mutex poisoned".into()))?;
+        if submission.shutdown {
+            return Ok(());
         }
+        // A fence covers submitted commands; final teardown also drains the device.
+        submission.uncertain = true;
+        self.recover_commands(&mut submission)?;
+        let mut weights = self
+            .weight_cache
+            .lock()
+            .map_err(|_| VulkanError::InitFailed("Vulkan weight cache poisoned".into()))?;
+        let mut io = self
+            .io_state
+            .lock()
+            .map_err(|_| VulkanError::InitFailed("Vulkan IO cache poisoned".into()))?;
+        let mut pipelines = self
+            .operator_pipelines
+            .lock()
+            .map_err(|_| VulkanError::InitFailed("Vulkan pipeline cache poisoned".into()))?;
         unsafe {
-            for (_, buf) in self.weight_cache.lock().unwrap().drain() {
+            for (_, buf) in weights.drain() {
                 self.destroy_buffer(&buf);
             }
             let IoState {
                 input_q8,
                 scales,
                 output,
-            } = {
-                let mut io = self.io_state.lock().unwrap();
-                std::mem::take(&mut *io)
-            };
+            } = std::mem::take(&mut *io);
             for buf in [input_q8, scales, output].into_iter().flatten() {
                 self.destroy_buffer(&buf);
             }
             self.device.destroy_fence(self.fence, None);
             self.device.destroy_command_pool(self.command_pool, None);
+            for pipeline in pipelines.take().into_iter().flatten() {
+                self.device.destroy_pipeline(pipeline, None);
+            }
             self.device.destroy_pipeline(self.pipeline, None);
             self.device
                 .destroy_pipeline_layout(self.pipeline_layout, None);
@@ -2128,11 +2181,21 @@ impl Drop for VulkanContext {
             self.device
                 .destroy_descriptor_pool(self.descriptor_pool, None);
             self.device.destroy_device(None);
-            if let Some((debug_utils, messenger)) = self.debug_messenger.take() {
-                debug_utils.destroy_debug_utils_messenger(messenger, None);
+            if let Some((debug_utils, messenger)) = &self.debug_messenger {
+                debug_utils.destroy_debug_utils_messenger(*messenger, None);
             }
             self.instance.destroy_instance(None);
-            std::mem::ManuallyDrop::drop(&mut self.entry);
+        }
+        submission.shutdown = true;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "vulkan")]
+impl Drop for VulkanContext {
+    fn drop(&mut self) {
+        if self.shutdown().is_ok() {
+            unsafe { std::mem::ManuallyDrop::drop(&mut self.entry) };
         }
     }
 }
@@ -2312,6 +2375,22 @@ mod tests {
         context.warmup().unwrap();
         assert!(context.weight_cache.lock().unwrap().is_empty());
         assert_eq!(context.compute_stats().live_allocation_bytes, live);
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn vulkan_shutdown_drains_device_and_rejects_later_submissions() {
+        let context = VulkanContext::new().unwrap();
+        context.warmup().unwrap();
+        context.operator_pipelines().unwrap();
+        context.shutdown().unwrap();
+        assert_eq!(context.compute_stats().live_allocation_bytes, 0);
+        assert_eq!(context.idle_waits.load(Ordering::Relaxed), 1);
+        assert!(context.warmup().is_err());
+        context.shutdown().unwrap();
+        assert_eq!(context.idle_waits.load(Ordering::Relaxed), 1);
+        // Drop must not destroy the already-released Vulkan handles a second time.
+        drop(context);
     }
 
     #[test]

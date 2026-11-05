@@ -9,6 +9,27 @@ use crate::vulkan::ops::{
 };
 use std::sync::Mutex;
 
+static ATTENTION_RUNTIME: std::sync::OnceLock<Mutex<Option<AttentionRuntime>>> =
+    std::sync::OnceLock::new();
+static CONV3D_RUNTIME: std::sync::OnceLock<Mutex<Option<Conv3dRuntime>>> =
+    std::sync::OnceLock::new();
+
+pub(crate) fn release_shared_runtimes() -> Result<(), crate::vulkan::VulkanError> {
+    if let Some(slot) = ATTENTION_RUNTIME.get() {
+        slot.lock()
+            .map_err(|_| crate::vulkan::VulkanError::InitFailed("attention cache poisoned".into()))?
+            .take();
+    }
+    if let Some(slot) = CONV3D_RUNTIME.get() {
+        slot.lock()
+            .map_err(|_| {
+                crate::vulkan::VulkanError::InitFailed("convolution cache poisoned".into())
+            })?
+            .take();
+    }
+    Ok(())
+}
+
 #[derive(Default)]
 pub(crate) struct GpuLinear {
     state: Mutex<Option<LinearState>>,
@@ -37,7 +58,7 @@ struct LinearState {
 /// matmuls (millions of output elements per call) are unaffected.
 ///
 /// Override with `RUST_GPU_MIN_OUTPUTS=0` to restore the old behaviour.
-fn min_gpu_matmul_outputs() -> usize {
+pub(crate) fn min_gpu_matmul_outputs() -> usize {
     std::env::var("RUST_GPU_MIN_OUTPUTS")
         .ok()
         .and_then(|value| value.parse().ok())
@@ -46,7 +67,7 @@ fn min_gpu_matmul_outputs() -> usize {
 
 pub(crate) fn offload_enabled() -> bool {
     // Tracing observes the requested backend; CPU/scalar scopes select exact CPU paths.
-    crate::ops::gpu_requested()
+    crate::compute::ComputePolicy::legacy() != crate::compute::ComputePolicy::Cpu
         && !crate::ops::scalar_mode()
         && !crate::core::thread_pool::gpu_matmul_disabled()
         && !crate::vulkan::gpu_broken()
@@ -176,10 +197,11 @@ pub(crate) fn try_attention(
     if !offload_enabled() || spec.head_dim > 1024 {
         return None;
     }
-    static RUNTIME: std::sync::OnceLock<Mutex<Option<AttentionRuntime>>> =
-        std::sync::OnceLock::new();
     let context = crate::ops::get_vulkan_context()?;
-    let mut state = RUNTIME.get_or_init(Mutex::default).lock().unwrap();
+    let mut state = ATTENTION_RUNTIME
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap();
     let mut output = vec![0.0; query.len()];
     let result = (|| {
         if state.as_ref().is_none_or(|runtime| {
@@ -277,8 +299,7 @@ pub(crate) fn try_conv3d(
     let Some(context) = crate::ops::get_vulkan_context() else {
         return false;
     };
-    static RUNTIME: std::sync::OnceLock<Mutex<Option<Conv3dRuntime>>> = std::sync::OnceLock::new();
-    let mut state = RUNTIME.get_or_init(Mutex::default).lock().unwrap();
+    let mut state = CONV3D_RUNTIME.get_or_init(Mutex::default).lock().unwrap();
     let needed = [input.len(), weight.len(), output.len(), output_shape[0]];
     let result = (|| {
         if state
@@ -414,6 +435,25 @@ impl GpuConv {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn offload_enabled_tracks_explicit_policy_scopes() {
+        use crate::compute::ComputePolicy;
+        let original = ComputePolicy::legacy();
+        {
+            let _auto = ComputePolicy::Auto.enter_legacy_scope();
+            let available = !crate::ops::scalar_mode() && !crate::vulkan::gpu_broken();
+            assert_eq!(offload_enabled(), available);
+            {
+                let _cpu = ComputePolicy::Cpu.enter_legacy_scope();
+                assert!(!offload_enabled());
+            }
+            assert_eq!(offload_enabled(), available);
+            let _scalar = crate::ops::float::ScalarDispatchScope::new(true);
+            assert!(!offload_enabled());
+        }
+        assert_eq!(ComputePolicy::legacy(), original);
+    }
 
     #[test]
     #[ignore = "requires a Vulkan device"]

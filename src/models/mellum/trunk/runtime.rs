@@ -1,10 +1,16 @@
 //! HTTP `TextRuntime` adapter for Mellum 2.x (`arch = "mellum"`).
 //!
-//! Mellum's forward is a single-token KV append ([`MellumRunner::forward_token`]),
-//! so the adapter allocates a fresh [`MellumRunner`] per request and walks the
-//! prompt one token at a time before decoding. Per-request allocation is the
-//! price of a stateless API; the KV cache is the largest buffer and the model
-//! stays shared behind the mutex.
+//! The decode step is a single-token KV append
+//! ([`MellumRunner::forward_token`]), so the adapter allocates a fresh
+//! [`MellumRunner`] per request and walks the prompt one token at a time
+//! before decoding. Per-request allocation is the price of a stateless API;
+//! the KV cache is the largest buffer and the model stays shared behind the
+//! mutex.
+//!
+//! The prompt itself goes through the batched prefill
+//! ([`MellumRunner::forward_tokens`]): it is a known batch of tokens, so
+//! every projection can read its weight once for the whole prompt instead
+//! of once per token. The arithmetic is the same as the single token walk.
 
 use std::sync::{Arc, Mutex};
 
@@ -72,9 +78,10 @@ impl TextRuntime for MellumTextRuntime {
             ));
         }
         let mut runner = MellumRunner::new(&self.model, self.context_length, self.kv_format)?;
-        for (position, &token) in request.token_ids.iter().enumerate() {
-            runner.forward_token(token, position)?;
-        }
+        // The prompt is a known batch, so it goes through the batched
+        // prefill: every projection reads its weight once for the whole
+        // prompt instead of once per token.
+        runner.forward_tokens(&request.token_ids, 0)?;
 
         let eos_id = self.tokenizer.eos_id();
         let mut decoder = self.tokenizer.streaming_decoder(false);
