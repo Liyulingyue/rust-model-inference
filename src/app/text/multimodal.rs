@@ -1691,7 +1691,11 @@ pub(super) fn run_multimodal_with_video_ref(
     } else {
         let projection_dim = config.n_embd;
         if vis_embeddings.len() % projection_dim != 0 {
-            return Err("Projected vision embeddings are not row aligned".into());
+            return Err(format!(
+                "Projected vision embeddings are not row aligned: {} values for a \
+                 {projection_dim}-wide tower, so the projector does not match the model",
+                vis_embeddings.len()
+            ));
         }
         vis_embeddings.len() / projection_dim
     };
