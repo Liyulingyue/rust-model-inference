@@ -25,7 +25,6 @@ use crate::models::qwen35::vision::{
     VisionScratchpad as VisionScratchpad35,
 };
 use crate::models::qwen35::{build_qwen35_positions, Qwen35Model, Qwen35Session};
-use crate::models::zdt::vision::ZdtVisionEncoder;
 use crate::prompt::{append_qwen_assistant_prefix, append_qwen_message_tokens};
 use std::io::{self, Write};
 use std::path::Path;
@@ -129,16 +128,17 @@ pub fn run_qwen3_family_multimodal(
                 let grid = qwen35_smart_resize(first_w, first_h, &encoder.config)?;
                 (grid.image_width(), grid.image_height())
             }
-            crate::app::media::ProjectorFamily::NemotronV2Vl => {
-                // Upstream uses `mtmd_image_preprocessor_fixed_size`, so the
-                // projector always sees the config's image_size regardless of
-                // the input aspect ratio.
-                let config = ZdtVisionEncoder::load_config_only(mmproj.as_ref())
-                    .map_err(|error| format!("Failed to parse ZDT vision config: {error}"))?;
-                (config.image_size, config.image_size)
-            }
             crate::app::media::ProjectorFamily::MiniCpmV47 => {
                 return Err(MINICPMV47_CANVAS_ONLY_MSG.to_string());
+            }
+            crate::app::media::ProjectorFamily::NemotronV2Vl => {
+                // The RADIO projector is wired to a qwen35 tower; the media
+                // check in `validate_mmproj_capabilities` rejects the pairing
+                // before this point, so this arm only states the reason.
+                return Err(
+                    "the nemotron_v2_vl projector needs a qwen35 tower, not the qwen3 family"
+                        .into(),
+                );
             }
         };
         let (mean, std) = match family {
@@ -162,13 +162,17 @@ pub fn run_qwen3_family_multimodal(
                 .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
                 (encoder.config.image_mean, encoder.config.image_std)
             }
-            crate::app::media::ProjectorFamily::NemotronV2Vl => {
-                let config = ZdtVisionEncoder::load_config_only(mmproj.as_ref())
-                    .map_err(|error| format!("Failed to parse ZDT vision config: {error}"))?;
-                (config.image_mean, config.image_std)
-            }
             crate::app::media::ProjectorFamily::MiniCpmV47 => {
                 return Err(MINICPMV47_CANVAS_ONLY_MSG.to_string());
+            }
+            crate::app::media::ProjectorFamily::NemotronV2Vl => {
+                // The RADIO projector is wired to a qwen35 tower; the media
+                // check in `validate_mmproj_capabilities` rejects the pairing
+                // before this point, so this arm only states the reason.
+                return Err(
+                    "the nemotron_v2_vl projector needs a qwen35 tower, not the qwen3 family"
+                        .into(),
+                );
             }
         };
         let normalized = frames
@@ -259,30 +263,17 @@ pub fn run_qwen3_family_multimodal(
                     media_grid_shapes.push((grid.grid_h, grid.grid_w));
                 }
             }
-            crate::app::media::ProjectorFamily::NemotronV2Vl => {
-                let encoder = ZdtVisionEncoder::from_source(
-                    mmproj.as_ref(),
-                    std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(
-                        n_threads_arg.max(1),
-                    )),
-                )
-                .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
-                for (a, _b) in pairs {
-                    let projected = encoder.encode(&normalized[a], grid_w, grid_h)?;
-                    let per_token = encoder.config.projection_dim;
-                    if projected.len() % per_token != 0 {
-                        return Err(format!(
-                            "ZDT projector output {} is not a multiple of {per_token}",
-                            projected.len()
-                        ));
-                    }
-                    let tokens = projected.len() / per_token;
-                    media.extend_from_slice(&projected);
-                    media_grid_shapes.push((tokens, 1));
-                }
-            }
             crate::app::media::ProjectorFamily::MiniCpmV47 => {
                 return Err(MINICPMV47_CANVAS_ONLY_MSG.to_string());
+            }
+            crate::app::media::ProjectorFamily::NemotronV2Vl => {
+                // The RADIO projector is wired to a qwen35 tower; the media
+                // check in `validate_mmproj_capabilities` rejects the pairing
+                // before this point, so this arm only states the reason.
+                return Err(
+                    "the nemotron_v2_vl projector needs a qwen35 tower, not the qwen3 family"
+                        .into(),
+                );
             }
         }
     }
@@ -802,24 +793,20 @@ pub fn run_qwen3_family_multimodal_logits(
                 let grid = qwen35_smart_resize(first_w, first_h, &encoder.config)?;
                 (grid.image_width(), grid.image_height())
             }
-            crate::app::media::ProjectorFamily::NemotronV2Vl => {
-                // Upstream uses `mtmd_image_preprocessor_fixed_size`, so the
-                // projector always sees the config's image_size regardless of
-                // the input aspect ratio.
-                let config = ZdtVisionEncoder::load_config_only(mmproj.as_ref())
-                    .map_err(|error| format!("Failed to parse ZDT vision config: {error}"))?;
-                (config.image_size, config.image_size)
-            }
             crate::app::media::ProjectorFamily::MiniCpmV47 => {
                 return Err(MINICPMV47_CANVAS_ONLY_MSG.to_string());
             }
+            crate::app::media::ProjectorFamily::NemotronV2Vl => {
+                // The RADIO projector is wired to a qwen35 tower; the media
+                // check in `validate_mmproj_capabilities` rejects the pairing
+                // before this point, so this arm only states the reason.
+                return Err(
+                    "the nemotron_v2_vl projector needs a qwen35 tower, not the qwen3 family"
+                        .into(),
+                );
+            }
         };
         let norm_stats = match family {
-            crate::app::media::ProjectorFamily::NemotronV2Vl => {
-                let config = ZdtVisionEncoder::load_config_only(mmproj.as_ref())
-                    .map_err(|error| format!("Failed to parse ZDT vision config: {error}"))?;
-                (config.image_mean, config.image_std)
-            }
             _ => ([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
         };
         let pairs = frame_pairs(frames.len());
@@ -909,30 +896,17 @@ pub fn run_qwen3_family_multimodal_logits(
                     media_grid_shapes.push((grid.grid_h, grid.grid_w));
                 }
             }
-            crate::app::media::ProjectorFamily::NemotronV2Vl => {
-                let encoder = ZdtVisionEncoder::from_source(
-                    mmproj.as_ref(),
-                    std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(
-                        n_threads_arg.max(1),
-                    )),
-                )
-                .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
-                for (a, _b) in pairs {
-                    let projected = encoder.encode(&normalized[a], grid_w, grid_h)?;
-                    let per_token = encoder.config.projection_dim;
-                    if projected.len() % per_token != 0 {
-                        return Err(format!(
-                            "ZDT projector output {} is not a multiple of {per_token}",
-                            projected.len()
-                        ));
-                    }
-                    let tokens = projected.len() / per_token;
-                    media.extend_from_slice(&projected);
-                    media_grid_shapes.push((tokens, 1));
-                }
-            }
             crate::app::media::ProjectorFamily::MiniCpmV47 => {
                 return Err(MINICPMV47_CANVAS_ONLY_MSG.to_string());
+            }
+            crate::app::media::ProjectorFamily::NemotronV2Vl => {
+                // The RADIO projector is wired to a qwen35 tower; the media
+                // check in `validate_mmproj_capabilities` rejects the pairing
+                // before this point, so this arm only states the reason.
+                return Err(
+                    "the nemotron_v2_vl projector needs a qwen35 tower, not the qwen3 family"
+                        .into(),
+                );
             }
         }
     }
@@ -1080,55 +1054,6 @@ pub fn run_qwen35_family_multimodal_logits(
     };
     let is_video = video_path.is_some();
 
-    let (first_w, first_h) = {
-        let first = frames.first().ok_or("media produced no frames")?;
-        (first.width() as usize, first.height() as usize)
-    };
-    let mut encoder = VisionEncoder35::from_source(
-        mmproj.as_ref(),
-        std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(
-            n_threads_arg.max(1),
-        )),
-    )
-    .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
-    encoder.precompute();
-    if is_video {
-        encoder.config.image_min_pixels = encoder.config.video_min_pixels;
-        encoder.config.image_max_pixels = encoder.config.video_max_pixels;
-    }
-    let grid = qwen35_smart_resize(first_w, first_h, &encoder.config)?;
-    let mut scratch = VisionScratchpad35::new(&encoder.config);
-    let pairs = frame_pairs(frames.len());
-    let mut vis_embeddings: Vec<f32> = Vec::new();
-    for (a, b) in pairs {
-        let normalized_a = crate::app::media::normalize_resized_image(
-            &frames[a],
-            grid.image_width(),
-            grid.image_height(),
-            &[0.5, 0.5, 0.5],
-            &[0.5, 0.5, 0.5],
-        )?;
-        let normalized_b = crate::app::media::normalize_resized_image(
-            &frames[b],
-            grid.image_width(),
-            grid.image_height(),
-            &[0.5, 0.5, 0.5],
-            &[0.5, 0.5, 0.5],
-        )?;
-        encoder.encode_pair(
-            &normalized_a,
-            &normalized_b,
-            grid.image_width(),
-            grid.image_height(),
-            &mut scratch,
-            &pool,
-        )?;
-        vis_embeddings.extend_from_slice(&scratch.projected);
-    }
-    let n_vis_tokens = grid.token_count();
-
-    let tokenizer = BPETokenizer::from_gguf_metadata(|k| llm_source.metadata(k).cloned())
-        .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
     // Video and image use different pad tokens, so all three ids follow the
     // media kind. Hardcoding `image_pad` here made the Jinja path expand
     // looking for a token the template never emitted (it emits `video_pad` for
@@ -1138,6 +1063,76 @@ pub fn run_qwen35_family_multimodal_logits(
     } else {
         crate::app::media::MediaKind::Image
     };
+    // The projector family picks the encoder, not the tower: the RADIO
+    // projector (ZDTaichu5.0-9B) and the Qwen2.5-Omni projector are both
+    // driven from a qwen35 tower.
+    let family =
+        crate::app::media::validate_mmproj_capabilities("qwen35", mmproj.as_ref(), media_kind)?;
+    let (grid, vis_embeddings) = if family == crate::app::media::ProjectorFamily::NemotronV2Vl {
+        let mut embeddings: Vec<f32> = Vec::new();
+        let mut grid = None;
+        for frame in &frames {
+            let (frame_grid, projected) = crate::app::text::vision::encode_nemotron_v2_vl_image(
+                mmproj.as_ref(),
+                frame,
+                n_threads_arg,
+            )?;
+            embeddings.extend_from_slice(&projected);
+            grid = Some(frame_grid);
+        }
+        (grid.ok_or("media produced no frames")?, embeddings)
+    } else {
+        let (first_w, first_h) = {
+            let first = frames.first().ok_or("media produced no frames")?;
+            (first.width() as usize, first.height() as usize)
+        };
+        let mut encoder = VisionEncoder35::from_source(
+            mmproj.as_ref(),
+            std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(
+                n_threads_arg.max(1),
+            )),
+        )
+        .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
+        encoder.precompute();
+        if is_video {
+            encoder.config.image_min_pixels = encoder.config.video_min_pixels;
+            encoder.config.image_max_pixels = encoder.config.video_max_pixels;
+        }
+        let grid = qwen35_smart_resize(first_w, first_h, &encoder.config)?;
+        let mut scratch = VisionScratchpad35::new(&encoder.config);
+        let pairs = frame_pairs(frames.len());
+        let mut vis_embeddings: Vec<f32> = Vec::new();
+        for (a, b) in pairs {
+            let normalized_a = crate::app::media::normalize_resized_image(
+                &frames[a],
+                grid.image_width(),
+                grid.image_height(),
+                &[0.5, 0.5, 0.5],
+                &[0.5, 0.5, 0.5],
+            )?;
+            let normalized_b = crate::app::media::normalize_resized_image(
+                &frames[b],
+                grid.image_width(),
+                grid.image_height(),
+                &[0.5, 0.5, 0.5],
+                &[0.5, 0.5, 0.5],
+            )?;
+            encoder.encode_pair(
+                &normalized_a,
+                &normalized_b,
+                grid.image_width(),
+                grid.image_height(),
+                &mut scratch,
+                &pool,
+            )?;
+            vis_embeddings.extend_from_slice(&scratch.projected);
+        }
+        (grid, vis_embeddings)
+    };
+    let n_vis_tokens = grid.token_count();
+
+    let tokenizer = BPETokenizer::from_gguf_metadata(|k| llm_source.metadata(k).cloned())
+        .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
     let (start_name, pad_name, end_name) = media_kind.placeholder_tokens();
     let image_token_id = tokenizer
         .special_token_id(pad_name)
@@ -1543,38 +1538,13 @@ pub(super) fn run_multimodal_with_video_ref(
                 crate::app::media::MediaKind::Image,
             )?;
             if family == crate::app::media::ProjectorFamily::NemotronV2Vl {
-                let encoder = ZdtVisionEncoder::from_source(
-                    mmproj_source.as_ref(),
-                    std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(
-                        n_threads_arg.max(1),
-                    )),
-                )
-                .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
                 let frame = crate::app::media::decode_image(image_path)?;
-                let size = encoder.config.image_size;
-                let normalized = crate::app::media::normalize_resized_image(
+                let (grid, projected) = crate::app::text::vision::encode_nemotron_v2_vl_image(
+                    mmproj_source.as_ref(),
                     &frame,
-                    size,
-                    size,
-                    &encoder.config.image_mean,
-                    &encoder.config.image_std,
+                    n_threads_arg,
                 )?;
-                let projected = encoder.encode(&normalized, size, size)?;
-                // After the shuffle the grid is already downsampled by the
-                // scale factor, so report the post-merge extents; otherwise
-                // `token_count` would promise 32x32 placeholders while the
-                // projector emits 16x16.
-                let grid = size / (encoder.config.patch_size * encoder.config.scale_factor);
-                (
-                    Some(crate::models::qwen35::vision::VisionGrid {
-                        grid_t: 1,
-                        grid_h: grid,
-                        grid_w: grid,
-                        patch_size: encoder.config.patch_size,
-                        merge_size: 1,
-                    }),
-                    projected,
-                )
+                (Some(grid), projected)
             } else if family == crate::app::media::ProjectorFamily::MiniCpmV47 {
                 let (grid, projected, canvas) =
                     encode_minicpmv47_image(mmproj_source.as_ref(), image_path, n_threads_arg)?;

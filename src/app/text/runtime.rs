@@ -1210,13 +1210,29 @@ impl HybridTextRuntime {
         let mut grids = Vec::with_capacity(images.len());
         let mut projected: Vec<f32> = Vec::new();
         let mut n_vis_total = 0usize;
+        // The projector family picks the encoder, not the tower: the RADIO
+        // projector (ZDTaichu5.0-9B) drives a qwen35 tower with its own
+        // encoder and a fixed input size.
+        let family = crate::app::media::validate_mmproj_capabilities(
+            "qwen35",
+            mmproj.as_ref(),
+            crate::app::media::MediaKind::Image,
+        )?;
         for bytes in images {
             let image = crate::app::media::decode_image_bytes(bytes)?;
-            let (grid, embedding) = crate::app::text::vision::encode_qwen35_image_dynamic(
-                mmproj.as_ref(),
-                &image,
-                self.threads,
-            )?;
+            let (grid, embedding) = if family == crate::app::media::ProjectorFamily::NemotronV2Vl {
+                crate::app::text::vision::encode_nemotron_v2_vl_image(
+                    mmproj.as_ref(),
+                    &image,
+                    self.threads,
+                )?
+            } else {
+                crate::app::text::vision::encode_qwen35_image_dynamic(
+                    mmproj.as_ref(),
+                    &image,
+                    self.threads,
+                )?
+            };
             n_vis_total += grid.token_count();
             grids.push(grid);
             projected.extend_from_slice(&embedding);

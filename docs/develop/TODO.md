@@ -563,6 +563,19 @@ ggml-org/llama.cpp 的一部分**——它们是 `microsoft/BitNet` 私有 fork 
       [复现记录](../../tools/oracle/pr169/README.md) 和
       [哈希/指标](../../tools/oracle/pr169/verification.json)。
     - 未覆盖：GPU 数值对齐、视频与音频输入、性能基准。
+- [ ] **ZDTaichu5.0 mmproj 的位置嵌入与归一化和上游 PyTorch 不一致** — 上游把 128x128
+      位置表用 `align_corners=False` 插值到 32x32，而第三方 GGUF 转换用的是
+      `align_corners=True`（实测该插值与 GGUF 的 `v.position_embd.weight` **逐位一致**，
+      相对 L2 0.000000）；两张表相差相对 L2 **0.629774**，传到投影特征就是 **0.2015**。
+      另外上游**双重归一化**（image processor 用 ImageNet 统计 → 塔内 conditioner 再用
+      CLIP 统计），而 llama.cpp 与本引擎按 GGUF metadata 只归一化一次，忠实上游路径与
+      llama.cpp 相差相对 L2 **4.54**。
+      现状：本引擎实现的是 **GGUF 契约**（与 llama.cpp 一致，视觉投影 relative L2
+      0.00036），**不是 Rust 的 bug**；但与上游自己的数字不一致。
+      选项：① 写一个从原始 safetensors 转 mmproj 的转换器，按上游的
+      `align_corners=False` 插值并只归一化一次，让引擎与上游对齐；② 维持现状并在
+      文档里保留差异说明（当前做法）；③ 向上游/GGUF 转换作者反馈。
+      证据：[oracle 记录](../../tools/oracle/zdt/README.md)。
 
 ---
 

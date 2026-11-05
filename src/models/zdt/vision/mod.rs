@@ -103,15 +103,6 @@ fn prepend_registers(
 }
 
 impl ZdtVisionEncoder {
-    /// Load only the config (no weights). Used by the multimodal dispatcher
-    /// to read image_size / image_mean / image_std without pulling the
-    /// 1.6 GB mmproj weights through three separate `from_source` calls.
-    pub(crate) fn load_config_only(
-        source: &dyn TensorSource,
-    ) -> Result<config::ZdtVisionConfig, String> {
-        config::ZdtVisionConfig::from_source(source)
-    }
-
     pub fn from_source(source: &dyn TensorSource, pool: Arc<ComputePool>) -> Result<Self, String> {
         let mut config = ZdtVisionConfig::from_source(source)?;
         let load = |name: &str, cols: usize, rows: usize| -> Result<Vec<f32>, String> {
