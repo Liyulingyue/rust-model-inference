@@ -362,6 +362,14 @@ LFM2 / LFM2.5 / Spark / Nemotron-H / Hunyuan / LFM2-MoE），每个 scorer 实�
       host 路由/归约。Holo4 在 M3 Max / RADV NAVI31 的 MoE 分层和 batch/reset 检查通过，
       整模 logits 的 0.02 CPU/GPU 门槛仍失败；此 MiniCPM 权重尚未验证 GPU。
       见 [Holo4 验证](../../tools/oracle/holo4/README.md)。
+- [ ] **decode 每个投影一次 pool dispatch，784 次里 26 次的开销大于活** — Mellum 12B Q8_0
+      在 GB10 上 44 ms/token 里约 21 ms（48%）是 dispatch 固定开销（每次 ~26 µs：唤醒 7 个
+      worker + 同步 + 尾部效应），而每个投影每 worker 的活只有 12–98 µs。线程曲线印证：
+      1→8 线程只有 3.17× 加速，16/20 线程直接倒退。把一层里能并行的投影合并进一次
+      dispatch（每层 4 次而不是 28 次）→ 44 → 26.5 ms/token（1.66×）。不需要新的 pool
+      原语，现有 `compute` 就够（closure 里顺序做多个投影，各自按 `ith/nth` 切分）。
+      风险是位序和 DRAM 局部性；收益的绝对值与机器无关，相对值随 CPU 带宽上升。
+      详见 [TODO-050](#todo-050-decode-每个投影一次-pool-dispatch784-次里-26-次的开销大于活)。
 
 ## 入口面覆盖（2026-10-19 审计）
 
@@ -3494,3 +3502,108 @@ CPU 5672–5742 ms、设备转置 5134–5951 ms，**打平**。原因：
    57%，这是设备端 Q8_0 kernel 本身的问题。
 4. 设备空闲时重测。TODO-038/039 指出这台机器上的 GPU 数字都受另一个租户占用影响
    （nvidia-smi 采样 79–92%），上面的对比在 GPU 0% 利用率下测得，但仍需在独占时复测。
+
+
+### TODO-050: decode 每个投影一次 pool dispatch，784 次里 26 次的开销大于活
+
+#### 现象与账单
+
+Mellum 12B Q8_0（8 线程）在 GB10 上 decode 44 ms/token（22.7 tok/s）。拆开：
+
+- 纯计算下界 **23 ms/token**（每 token 读 2.35 GB 权重，CPU 多线程有效带宽 ~102 GB/s；
+  单投影实测 115 GB/s）
+- pool dispatch 固定开销 **~21 ms/token（48%）**
+
+每 token **785 次** `ComputePool::compute`（28 层 × 28 个投影）。每次的固定成本约 26 µs：
+等所有 worker 空闲 → `notify_all()` 唤醒 7 个线程 → 主线程自己也做一份 → 等最后一个
+完成（尾部效应）。
+
+而每个投影**每 worker**的活只有 12–98 µs：
+
+| 投影 | 每 worker 读 | 每 worker 算 |
+|---|---|---|
+| `wq` (2304→4096) | 1.25 MB | ~98 µs |
+| `wk` / `wv` (2304→512) | 154 KB | **~12 µs** |
+| `wo` (2304→2304) | 693 KB | ~54 µs |
+| 专家 up/gate/down (2304→896 / 896→2304) | 258 KB | **~20 µs** |
+| 输出头 (2304→98304) | 10 MB | ~784 µs |
+
+→ 784 次里 **26 次的活比 dispatch 开销还小**（wk/wv + 24 个专家投影）。
+
+#### 证据：线程曲线
+
+1→8 线程只有 3.17× 加速（不是 8×），16/20 线程直接倒退 —— 唤醒成本随线程数增长，
+8 线程已经吃完并行收益（64 token prompt，best-of-2）：
+
+| threads | 64 token | 相对 1 线程 |
+|---|---|---|
+| 1 | 8986 ms | 1× |
+| 2 | 5050 ms | 1.78× |
+| 4 | 3309 ms | 2.72× |
+| **8** | **2833 ms** | **3.17×** |
+| 16 | 3669 ms | 倒退 |
+| 20 | 4212 ms | 更慢 |
+
+#### 改法：把能并行的投影合并进一次 dispatch
+
+一层的依赖结构（`forward.rs` 的单 token 路径）：
+
+```
+{wq, wk, wv}        共享同一输入 ✓ 同组
+   ↓ attention（逐 query 行）
+{wo}                单独一个 ✗
+   ↓
+{8 专家的 up+gate}  16 个投影，专家之间彼此独立 ✓ 同组
+   ↓ silu(gate) * up
+{8 专家的 down}     8 个投影，彼此独立 ✓ 同组
+```
+
+→ 每层 **4 次** dispatch（现在 28 次）→ 112 次/token（现在 785）→ 开销
+20.4 → 2.9 ms/token → **44 → 26.5 ms/token（1.66×，22.7 → 39 tok/s）**。
+
+实现上**不需要新的 pool 原语**：现有的 `compute` 就够，closure 里让每个 worker 顺序做
+多个投影（各自按 `ith/nth` 切分）：
+
+```rust
+pool.compute(|ith, nth| {
+    wq.forward_prepared(..., ith, nth);   // 98 µs
+    wk.forward_prepared(..., ith, nth);   // 12 µs ← 被 wq 掩盖，不再单独付一次 dispatch
+    wv.forward_prepared(..., ith, nth);   // 12 µs
+});
+```
+
+「每层 1 次」需要阶段 barrier + 动态领活（新 pool 原语；`compute_with_chunks` 因为
+barrier 与常驻 worker 不兼容而不可用），收益 1.66× → 1.8×，先不做。
+
+#### 风险
+
+1. **位序 / 依赖**（真风险，可控）：组的顺序不变 → 依赖天然满足；必须用现有 Mellum 哨兵
+   验证（`tests/mellum_batched_prefill.rs` 逐位 + `RMI_PARITY_TRACE` 的 15466 个检查点）。
+2. **DRAM 局部性**（真风险，5–15%，需实测）：现在是 8 个 worker 读**同一矩阵的相邻区间**
+   （地址接近，命中同一批 DRAM 行），合并后 8 个 worker 读 8 个相距很远的矩阵 → 行缓冲
+   命中率可能下降 → 有效带宽可能从 102 GB/s 掉一点。
+3. **「`wo` 单独一次」的浪费**（已知，可接受）：7 个 worker 空转 54 µs × 28 层
+   = 0.7 ms/token。
+4. **专家阶段的输入准备**：8 个专家的 `group_input` 要同时在位（`batch.rs` 里
+   `group_input` 是每专家一份，单 token 路径要新建）。
+5. **不是风险**：带宽总量（2.35 GB/token 不变）、计算量、显存。
+
+#### 跨机器稳健性
+
+省掉的 dispatch 次数与机器无关（672 次 ≈ 17.5 ms/token），但**相对收益**取决于 CPU
+带宽 —— CPU 越强，纯计算被压得越短，dispatch 开销的占比越高：
+
+| 机器 | CPU 有效带宽 | 纯计算/token | 现在 | 合并后 | 加速 |
+|---|---|---|---|---|---|
+| GB10（18 核共享内存） | ~102 GB/s | 23 ms | 44 ms | 26.5 ms | 1.66× |
+| Intel Ultra 5（LPDDR5X-8533） | ~110 GB/s | 21 ms | 42 ms | 24.5 ms | 1.7× |
+| i7-12700（DDR4-3200 双通道） | ~45 GB/s | 52 ms | 72 ms | 55 ms | 1.3× |
+| 老 i7 / 单通道 DDR4 | ~25 GB/s | 94 ms | 114 ms | 97 ms | 1.18× |
+
+（这些带宽是量级估计，不是实测；TODO-038/039 记的那台机器就是共享内存的 GB10。）
+
+#### 顺带
+
+这条对**所有模型**都成立（任何走 `pool.compute` 做逐投影 dispatch 的 trunk），不只 Mellum。
+改的时候顺带把接口设计成能同时喂给 CPU 和设备（照 `record_group_matmul` 的形状：一层一次、
+多个权重共用一个 command buffer），以后接设备就只是换个 backend，而不是再改一遍 trunk。
