@@ -62,16 +62,6 @@ fn compare(model_env: &str, reference_env: &str, hybrid: bool) {
 
 #[test]
 #[ignore = "requires real mmproj and pinned llama.cpp projection dump"]
-fn intern_decision_vision() {
-    compare(
-        "RMI_INTERN_DECISION_0_8B_MMPROJ",
-        "RMI_INTERN_VISION_REFERENCE",
-        true,
-    );
-}
-
-#[test]
-#[ignore = "requires real mmproj and pinned llama.cpp projection dump"]
 fn physbrain_vision() {
     compare(
         "RMI_PHYSBRAIN_1_5_2B_MMPROJ",

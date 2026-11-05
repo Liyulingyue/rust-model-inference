@@ -1,7 +1,7 @@
 # PR #169 real-weight verification
 
 This directory pins the independent CPU reference and the acceptance boundaries for
-EmbeddingGemma-2, Intern-Decision-0.8B, PhysBrain1.5-2B, Occamy-1.0 and ZDTaichu5.0-9B.
+EmbeddingGemma-2, PhysBrain1.5-2B, Occamy-1.0 and ZDTaichu5.0-9B.
 `verification.json` records the exact GGUF hashes, formats and measured errors.
 Lossless loading/layout/token IDs are checked exactly. Quantized matmul, activation
 rounding and approximate nonlinear operators use numerical checks, as requested;
@@ -34,30 +34,19 @@ before every run: the index and Rust traces append to existing files.
 ## Tokenizer and contracts
 
 ```sh
-export RMI_EMBEDDINGGEMMA_2=models/embeddinggemma-2-GGUF/embeddinggemma-2-F16.gguf
-export RMI_INTERN_DECISION_0_8B_TEXT=models/Intern-Decision-0.8B-GGUF/intern-decision-0.8b-Q8_0.gguf
-export RMI_INTERN_DECISION_0_8B_MMPROJ=models/Intern-Decision-0.8B-GGUF/mmproj-intern-decision-0.8b-F16.gguf
-export RMI_PHYSBRAIN_1_5_2B_TEXT=models/PhysBrain1.5-2B-GGUF/physbrain-1.5-2b-Q8_0.gguf
-export RMI_PHYSBRAIN_1_5_2B_MMPROJ=models/PhysBrain1.5-2B-GGUF/mmproj-physbrain-1.5-2b-F16.gguf
-export RMI_OCCAMY_TEXT=models/Occamy-1.0-GGUF/occamy-1.0-Q8_0.gguf
-export RMI_OCCAMY_MMPROJ=models/Occamy-1.0-GGUF/mmproj-occamy-1.0-F16.gguf
-export RMI_ZDT_TEXT=models/ZDTaichu5.0-9B-GGUF/ZDTaichu5.0-9B-Q4_K_M.gguf
-export RMI_ZDT_MMPROJ=models/ZDTaichu5.0-9B-GGUF/mmproj-ZDTaichu5.0-9B-BF16.gguf
-export RMI_LLAMA_TOKENIZE=target/pr169/oracle-build/bin/llama-tokenize
 cargo test --profile release-fast --features parity-trace --test pr169_tokenizer_oracle -- --ignored --test-threads=1
-cargo test --profile release-fast --test embeddinggemma_2 --test intern_decision_0_8b --test physbrain_1_5_2b
+cargo test --profile release-fast --test embeddinggemma_2 --test physbrain_1_5_2b
 ```
 
 Tokenizer cases include empty input, English, Unicode, whitespace, ChatML and
 ordinary tool/thinking added tokens. EmbeddingGemma token IDs are checked against
-HF fixtures in its text Oracle. Intern/PhysBrain converters preserve CONTROL vs
+HF fixtures in its text Oracle. PhysBrain converter preserves CONTROL vs
 USER_DEFINED token types and write llama.cpp-compatible 32-bit metadata.
 PhysBrain RoPE spans the full 128-dimension head.
 
 To reproduce the local conversions from downloaded safetensors:
 
 ```sh
-./.venv/bin/python -m tools.converter.intern_decision.convert_intern_decision --hf-dir models/Intern-Decision-0.8B --variant 0.8b --out-dir models/Intern-Decision-0.8B-GGUF
 ./.venv/bin/python -m tools.converter.physbrain.convert_physbrain --hf-dir models/PhysBrain1.5-2B --out-dir models/PhysBrain1.5-2B-GGUF
 ./.venv/bin/python -m tools.converter.embeddinggemma2.convert_embeddinggemma2 --help
 ```
@@ -67,25 +56,32 @@ filename ends in `F16`, but its actual tensor types are Q8_0/BF16/F32.
 
 ## Text logits and generation
 
-Example for Intern-Decision (Bash/Zsh; preserve the trailing newlines with `-p`):
+Example for PhysBrain (Bash/Zsh; preserve the trailing newlines with `-p`):
 
 ```sh
-prompt=$'<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n'
+prompt=$<|im_start|>user
+What is 2+2?<|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>
+
+'
 mkdir -p target/pr169/text-reference
 RMI_ORACLE_DUMP=target/pr169/text-reference RMI_ORACLE_FILTER='^result_output$' \
-  target/pr169/oracle-build/bin/llama-eval-callback -m "$RMI_INTERN_DECISION_0_8B_TEXT" \
-  -p "$prompt" -n 8 -c 512 -ngl 0 -t 8 -fa off -ctk f32 -ctv f32 > target/pr169/text-reference.log 2>&1
+  target/pr169/oracle-build/bin/llama-eval-callback -m "$RMI_PHYSBRAIN_1_5_2B_TEXT" \
+  -p "$prompt" -n 8 -c 512 -ngl 0 -t 8 -fa off -ctk f16 -ctv f16 > target/pr169/text-reference.log 2>&1
 cargo build --profile release-fast --features parity-trace --bin rust-model-inference
 RMI_PARITY_TRACE=target/pr169/text-rust.jsonl RMI_PARITY_FILTER='qwen35.prompt_ids,prompt_ids,result_output' \
-  target/release-fast/rust-model-inference --model "$RMI_INTERN_DECISION_0_8B_TEXT" \
-  --prompt 'What is 2+2?' --max-tokens 8 --max-context 512 --threads 8 > target/pr169/text-rust.log 2>&1
-./.venv/bin/python tools/oracle/pr169/compare_text.py target/pr169/text-rust.jsonl target/pr169/text-reference target/pr169/text-reference.log --relative-l2 0.03
+  target/release-fast/rust-model-inference --model "$RMI_PHYSBRAIN_1_5_2B_TEXT" \
+  --prompt 'What is 2+2?' --max-tokens 8 --max-context 512 --threads 8 --kv-cache f16 > target/pr169/text-rust.log 2>&1
+./.venv/bin/python tools/oracle/pr169/compare_text.py target/pr169/text-rust.jsonl target/pr169/text-reference target/pr169/text-reference.log --relative-l2 0.05
 ```
 
 Use the other model's text path for the other rows in `verification.json`.
 PhysBrain requires `--kv-cache f16` in Rust and `-ctk f16 -ctv f16` in llama.cpp.
-Bounds are regression envelopes for these fixtures: Intern 0.03, PhysBrain 0.05,
-Occamy 0.10 and ZDT 0.02. They are not accuracy guarantees for arbitrary prompts.
+Bounds are regression envelopes for these fixtures: PhysBrain 0.05, Occamy 0.10 and
+ZDT 0.02. They are not accuracy guarantees for arbitrary prompts.
 The comparator rejects missing prompt IDs, steps, shapes, payloads and nonfinite
 values, and checks every vocabulary logit at the final prefill row and each decode.
 It requires exact greedy IDs when both runs follow their own generated history.
@@ -114,28 +110,15 @@ floats `[0,0,1]` directly. It does **not** preprocess a blue PNG. The Rust tests
 that identical input and compare all projected values, including all three
 PhysBrain DeepStack outputs in the reference's token/feature order.
 
-Intern-Decision and Occamy enter `models::qwen35::vision` through the actual
-hybrid CLI. Its normal F16 kernel uses F32 activations on the tested SIMD host.
+Occamy enters `models::qwen35::vision` through the actual hybrid CLI. Its
+normal F16 kernel uses F32 activations on the tested SIMD host.
 PhysBrain enters `models::qwen3::vision`, including DeepStack, and widens weights
 while keeping activations in F32. Use `widen_projector.py` for each reference
 projector to widen the same weight values exactly and separate architecture/layout
 errors from the reference's extra F16 activation rounding. Rust still loads the
 original F16 projector in all three tests.
 
-Example for the actual Intern-Decision encoder:
-
-```sh
-PYTHONPATH=target/pr169/llama.cpp/gguf-py ./.venv/bin/python tools/oracle/pr169/widen_projector.py "$RMI_INTERN_DECISION_0_8B_MMPROJ" models/Intern-Decision-0.8B-GGUF/mmproj-intern-decision-0.8b-oracle-F32.gguf
-mkdir -p target/pr169/intern-vision-reference
-RMI_ORACLE_DUMP=target/pr169/intern-vision-reference RMI_ORACLE_FILTER='^rmi.vision.output$' \
-  target/pr169/oracle-build/bin/llama-mtmd-debug -m "$RMI_INTERN_DECISION_0_8B_TEXT" \
-  --mmproj models/Intern-Decision-0.8B-GGUF/mmproj-intern-decision-0.8b-oracle-F32.gguf \
-  -p encode -n 512 --image blue -c 512 --no-warmup --no-repack -ngl 0 -t 8 -fa off > target/pr169/intern-vision-reference.log 2>&1
-RMI_INTERN_VISION_REFERENCE=target/pr169/intern-vision-reference/0000.f32 \
-  cargo test --profile release-fast --test pr169_vision_oracle intern_decision_vision -- --ignored --nocapture
-```
-
-Repeat for Occamy using an exactly widened F32 reference projector and
+For Occamy, create an exactly widened F32 reference projector and set
 `RMI_OCCAMY_VISION_REFERENCE`. For PhysBrain, create a local F32 reference
 projector, then substitute that projector and its text model in the reference command above:
 
@@ -143,11 +126,11 @@ projector, then substitute that projector and its text model in the reference co
 PYTHONPATH=target/pr169/llama.cpp/gguf-py ./.venv/bin/python tools/oracle/pr169/widen_projector.py "$RMI_PHYSBRAIN_1_5_2B_MMPROJ" models/PhysBrain1.5-2B-GGUF/mmproj-physbrain-1.5-2b-oracle-F32.gguf
 ```
 
-Set `RMI_PHYSBRAIN_VISION_REFERENCE` to that dump and run `physbrain_vision`. All
-three tests require relative L2 < 0.01. The widener asserts that every dequantized
-weight is exactly preserved. The actual Intern/Occamy/PhysBrain projection relative
-L2 is 0.7738% / 0.3362% / 0.4601% against F32 activations. The original F16
-execution differs by 5.11% / 2.68% / about 4.42%, respectively. This is numerical
+Set `RMI_PHYSBRAIN_VISION_REFERENCE` to that dump and run `physbrain_vision`. Both
+tests require relative L2 < 0.01. The widener asserts that every dequantized
+weight is exactly preserved. The actual Occamy/PhysBrain projection relative
+L2 is 0.3362% / 0.4601% against F32 activations. The original F16
+execution differs by 2.68% / about 4.42%, respectively. This is numerical
 validation,
 not equality with the original F16 execution or a bitwise parity claim.
 
@@ -169,7 +152,7 @@ use and may affect throughput; no performance improvement is claimed.
 
 ## Real CLI smoke
 
-The final Intern/Occamy runs both identify a solid RGB `[0,0,255]` 64x64 PNG as
+The final Occamy run identifies a solid RGB `[0,0,255]` 64x64 PNG as
 `Blue` / `blue`. Each CLI resizes it to 96x96 (nine vision tokens). Use a matching
 PNG with the corresponding text/mmproj paths:
 
@@ -205,4 +188,4 @@ The focused Qwen3.5 run excludes the previously failing
 that skipped four of every eight values is repaired; both its new lane/tail
 regression and the previously failing grouped-variance test are included. The
 prefill trace regression is also fixed and included. No full-suite pass, GPU
-numerical alignment, Intern-Decision-4B real-weight validation, robot-action execution or performance benchmark is claimed.
+numerical alignment, robot-action execution or performance benchmark is claimed.

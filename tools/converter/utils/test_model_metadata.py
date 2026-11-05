@@ -20,15 +20,18 @@ class ModelMetadataTests(unittest.TestCase):
         self.assertEqual(model_metadata_value(['a', 'b']), ['a', 'b'])
 
     def test_added_tokens_preserve_control_vs_user_defined(self):
-        from tools.converter.intern_decision.convert_intern_decision import _build_vocab as intern_vocab
         from tools.converter.physbrain.convert_physbrain import _build_vocab as physbrain_vocab
-        tokenizer = dict(model=dict(vocab={'base': 0}), added_tokens=[
-            dict(id=1, content='<control>', special=True),
-            dict(id=2, content='<ordinary>', special=False),
-        ])
-        for tokens, types in [intern_vocab({}, tokenizer, 3), physbrain_vocab({}, tokenizer)]:
-            self.assertEqual(tokens[:3], ['base', '<control>', '<ordinary>'])
-            self.assertEqual(types[:3], [1, 3, 4])
+
+        tokenizer = dict(
+            model=dict(vocab={'base': 0}),
+            added_tokens=[
+                dict(id=1, content='<control>', special=True),
+                dict(id=2, content='<ordinary>', special=False),
+            ],
+        )
+        tokens, types = physbrain_vocab({}, tokenizer)
+        self.assertEqual(tokens[:3], ['base', '<control>', '<ordinary>'])
+        self.assertEqual(types[:3], [1, 3, 4])
 
 
 if __name__ == '__main__':

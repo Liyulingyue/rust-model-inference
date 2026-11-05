@@ -536,10 +536,10 @@ ggml-org/llama.cpp 的一部分**——它们是 `microsoft/BitNet` 私有 fork 
 - [ ] 更多量化格式支持（Q4_K, Q5_K 等）
 - [ ] 完善 GGUfRS 导出功能
 - [ ] GGUF 导出支持
-- [x] **PR #169 五组模型适配与真实权重数值对齐**：EmbeddingGemma-2 补齐文本/图像/音频到 768 维 embedding；Intern-Decision-0.8B、PhysBrain1.5-2B 修正转换精度、token 类型和 RoPE；Occamy 复用既有 qwen35moe；修复实际 Qwen3.5 视觉入口 NEON LayerNorm 漏算半行的问题；ZDT 修复 register 前缀搬移、Q 读取及 FFN 残差归一化。真实 CLI、模型契约、固定 llama.cpp/HF Oracle 的完整输出对照见 [复现记录](../../tools/oracle/pr169/README.md) 和 [哈希/指标](../../tools/oracle/pr169/verification.json)。
+- [x] **PR #169 四组模型适配与真实权重数值对齐**：EmbeddingGemma-2 补齐文本/图像/音频到 768 维 embedding；PhysBrain1.5-2B 修正转换精度、token 类型和 RoPE；Occamy 复用既有 qwen35moe；修复实际 Qwen3.5 视觉入口 NEON LayerNorm 漏算半行的问题；ZDT 修复 register 前缀搬移、Q 读取及 FFN 残差归一化。真实 CLI、模型契约、固定 llama.cpp/HF Oracle 的完整输出对照见 [复现记录](../../tools/oracle/pr169/README.md) 和 [哈希/指标](../../tools/oracle/pr169/verification.json)。
     - 无损载荷/layout/token IDs 使用精确检查；量化、低精度舍入、近似激活使用明确数值误差界限，不再把音频逐位相同作为本次验收要求。
     - Occamy 标量参考 8 步 greedy 一致；默认近似路径在候选分数接近时有措辞分叉，已用相同 token 历史验证完整 logits 并保留差异。
-    - 未覆盖：Intern-Decision-4B 真实权重、GPU 数值对齐、真实机器人动作执行和性能基准。Qwen3-VL 保留 F32 权重缓存，内存和耗时需另行测量。
+    - 未覆盖：GPU 数值对齐、真实机器人动作执行和性能基准。Qwen3-VL 保留 F32 权重缓存，内存和耗时需另行测量。
 - [ ] **RLCD constrained-decoding 调度器**（harshatheg/Qwen-2.5-1B-RLCD 的 value-token 切片路径）。
       **不做**：权重（复用 `Qwen2.5-1.5B-Instruct-Q4_K_M.gguf`，已 Verified）。
       **不做**：转换器（`tools/converter/rlcd/` 不存在意义——RLCD 没有 LoRA/分类头/微调 checkpoint，

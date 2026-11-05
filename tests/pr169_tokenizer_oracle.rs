@@ -58,11 +58,6 @@ fn compare(model_env: &str) {
 
 #[test]
 #[ignore = "requires real model and pinned llama-tokenize"]
-fn intern_decision_tokenizer() {
-    compare("RMI_INTERN_DECISION_0_8B_TEXT");
-}
-#[test]
-#[ignore = "requires real model and pinned llama-tokenize"]
 fn physbrain_tokenizer() {
     compare("RMI_PHYSBRAIN_1_5_2B_TEXT");
 }
