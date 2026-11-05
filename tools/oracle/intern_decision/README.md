@@ -71,15 +71,25 @@ RMI_ORACLE_DUMP=target/intern_decision/text-reference RMI_ORACLE_FILTER='^result
 cargo build --profile release-fast --features parity-trace --bin rust-model-inference
 RMI_PARITY_TRACE=target/intern_decision/text-rust.jsonl RMI_PARITY_FILTER='qwen35.prompt_ids,prompt_ids,result_output' \
   target/release-fast/rust-model-inference --model "$RMI_INTERN_DECISION_0_8B_TEXT" \
-  --prompt 'What is 2+2?' --max-tokens 8 --max-context 512 --threads 8 > target/intern_decision/text-rust.log 2>&1
+  --prompt 'What is 2+2?' --max-tokens 8 --max-context 512 --threads 8 --temperature 0 > target/intern_decision/text-rust.log 2>&1
 ./.venv/bin/python tools/oracle/intern_decision/compare_text.py target/intern_decision/text-rust.jsonl target/intern_decision/text-reference target/intern_decision/text-reference.log --relative-l2 0.03
 ```
+
+`--temperature 0` is required: the CLI samples by default, so a sampled token
+would make the Rust history differ from the reference history and the logits
+comparison would no longer be like-for-like. The greedy IDs then match step for
+step.
 
 The 0.03 bound is a regression envelope for this fixture, not an accuracy
 guarantee for arbitrary prompts. The comparator rejects missing prompt IDs,
 steps, shapes, payloads and nonfinite values, and checks every vocabulary logit
 at the final prefill row and each decode. It requires exact greedy IDs when both
 runs follow their own generated history.
+
+The envelope is host dependent. On the aarch64 NEON host that recorded the
+numbers below, step 6 measures 0.0308, just over the bound, while the other
+seven steps land between 0.0156 and 0.0289. The recorded host measured 0.0234
+for that step. See the `limitations` entry in `verification.json`.
 
 ## Vision projections and DeepStack
 
@@ -109,7 +119,7 @@ equality with the original F16 execution or a bitwise parity claim.
 Intern-Decision identifies the blue-image fixture correctly:
 
 ```sh
-target/release-fast/rust-model-inference --model "$RMI_INTERN_DECISION_0_8B_TEXT" --mmproj "$RMI_INTERN_DECISION_0_8B_MMPROJ" --image path/to/blue-64.png --prompt 'Reply with one word: what color is this image?' --max-tokens 8 --max-context 256 --threads 8
+target/release-fast/rust-model-inference --model "$RMI_INTERN_DECISION_0_8B_TEXT" --mmproj "$RMI_INTERN_DECISION_0_8B_MMPROJ" --image path/to/blue-64.png --prompt 'Reply with one word: what color is this image?' --max-tokens 8 --max-context 256 --threads 8 --temperature 0
 ```
 
 This is a semantic smoke check; its generation template is not asserted identical

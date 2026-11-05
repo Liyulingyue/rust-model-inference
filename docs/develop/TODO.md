@@ -436,6 +436,14 @@ MiniCPM-V 4.7 的 `qwen35moe`（35B-A3B）此前只在**生成面**注册，多�
       现状：main 与本分支**同样不过**，属预存问题，不是回归。
       选项：① 换一个 top-1 差距更大的提示并重录 oracle；② 放宽界限（例如 0.1）并
       如实记录实际值；③ 除 argmax 外同时记录 top-k 命中率，让近似平局不再翻转判定。
+- [ ] **Intern-Decision 文本 logits oracle 的界限同样不可跨主机迁移** —
+      `tools/oracle/intern_decision` 的文本对照用固定提示 `What is 2+2?`、8 步 greedy、
+      relative L2 ≤ 0.03 的界限。记录主机（Apple Silicon）每步 0.0143–0.0295，
+      在 aarch64 + NEON 上复测为 0.0156–0.0308：**step 6 恰好越过 0.03**（0.0308），
+      其余七步都在界内，8 步 greedy ids 与 llama.cpp 参考**逐 token 相同**。
+      与 PhysBrain 那条不同，这里不是近似平局翻转，而是包络本身太贴边。
+      选项：① 把界限放宽到 0.035 并如实记录两台主机的实测值；② 换 top-1 差距更大的
+      提示重录；③ 记录 top-k 命中率作为辅助判据。
 - [ ] **讨论：MemoryArena 与 BlockAllocator 组合**
 - [ ] **讨论：GPU 后端架构设计** — Vulkan / wgpu / CUDA 等多后端抽象
 - [ ] **讨论：SIMD 扩展路线** — 当前 AVX2+FMA、NEON。后续可考虑 AVX-512 (高端 CPU)、ARM SVE、AVX-VNNI (int8 dot)

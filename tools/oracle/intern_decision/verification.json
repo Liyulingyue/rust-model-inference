@@ -172,6 +172,13 @@
   "checks": {
     "contracts": {
       "intern_decision_0_8b": 10
+    },
+    "oracle_revalidation": {
+      "text_greedy_ids": 8,
+      "tokenizer_oracle": 1,
+      "vision_oracle": 1,
+      "cli_smoke": 1,
+      "entry_points": 6
     }
   },
   "cli_smoke": {
@@ -180,10 +187,9 @@
     }
   },
   "limitations": [
-    "Occamy default SIMD reference and Rust choose different greedy token at step 4; reference top-two margin 0.0093708. Teacher-forced logits compare identical histories.",
-    "Original F16 execution has vision relative L2 0.05106331 / 0.02676314 / about 0.0442 for Intern / Occamy / PhysBrain; primary vision comparison uses the exact same weight values with F32 activations.",
-    "Qwen3-VL F32 weight caches increase memory and may affect throughput; no performance benchmark.",
-    "PhysBrain CLI requires --kv-cache f16; robot action decoding/execution is outside the generic inference path.",
+    "The text logits bound is a regression envelope for this fixture and does not travel across hosts: the recording host measured 0.0143-0.0295 per step, the aarch64 NEON re-measurement measured 0.0156-0.0308, so step 6 lands just over the 0.03 bound there while the other seven steps stay inside it.",
+    "The CLI samples by default. The text oracle command and the CLI smoke check need --temperature 0, otherwise the sampled token makes the Rust history differ from the reference history and the greedy ID comparison fails.",
+    "Original F16 execution has vision relative L2 0.05106331; the primary vision comparison uses the exact same weight values with F32 activations.",
     "No Intern-Decision-4B real weights, GPU numerical alignment or full-suite pass claimed."
   ],
   "baseline_failures": [
@@ -198,6 +204,53 @@
         "layer_norm_stats_include_every_simd_lane_and_tail",
         "layer_norm_stats_match_ggml_grouped_f32_variance"
       ]
+    }
+  },
+  "revalidation": {
+    "date": "2026-11-05",
+    "host": "aarch64 Linux, CPU (NEON), 8 inference threads",
+    "source": "main's engine code, unmodified: the Intern-Decision branch carries no src/ change",
+    "weights": "Shanghai_AI_Laboratory/Intern-Decision-0.8B from ModelScope, all files byte-size matched",
+    "conversion": "both GGUFs reproduce the recorded SHA-256 exactly (0a5d28076ed2485b..., 970d7cdb3301841c...)",
+    "text_greedy_ids": [
+      17,
+      478,
+      220,
+      17,
+      283,
+      2972,
+      19,
+      332
+    ],
+    "text_greedy_ids_match_reference": true,
+    "text_relative_l2_per_step": [
+      0.022275,
+      0.021075,
+      0.015602,
+      0.028932,
+      0.016125,
+      0.019916,
+      0.030819,
+      0.027883
+    ],
+    "text_bound": 0.03,
+    "text_steps_over_bound": [
+      6
+    ],
+    "tokenizer_oracle": "pass against the pinned llama-tokenize",
+    "vision_relative_l2": 0.00117697,
+    "vision_bound": 0.01,
+    "cli_smoke_blue_image": "Blue",
+    "cli_smoke_vision_tokens": 9,
+    "cli_smoke": {
+      "cli_text": "2 + 2 = **4**",
+      "cli_image_blue": "Blue",
+      "http_text": "2 + 2 = **4**",
+      "http_image_blue": " Blue",
+      "jev_text": "choice A (red) 0.6482",
+      "jev_image_blue": "choice A (blue) 0.9954",
+      "vulkan_vs_cpu_40_step_greedy": "identical",
+      "vulkan_vs_cpu_generation_time": "1.84s GPU vs 1.14s CPU for 40 tokens (aarch64 GB10 + RTX; the recording host compared an Apple Silicon CPU with a separate GPU box and measured about 10x)"
     }
   }
 }
