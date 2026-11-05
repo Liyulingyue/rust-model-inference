@@ -54,6 +54,8 @@ fn is_supported_weight_type(t: GGMLType) -> bool {
             | Q8_0
             | Q4_0
             | Q4_1
+            | Q5_0
+            | Q5_1
             | Q2K
             | Q3K
             | Q4K
@@ -82,7 +84,7 @@ pub(crate) fn load_weight(
         .ok_or_else(|| format!("Missing tensor: {name}"))?;
     if info.dims != [n_in as u64, n_out as u64] || !is_supported_weight_type(info.ggml_type) {
         return Err(format!(
-            "Invalid tensor {name}: shape {:?} type {:?}; expected [{n_in}, {n_out}] F32/F16/BF16/Q8_0/Q4_0/Q4_1/Q2K/Q3K/Q4K/Q5K/Q6K/IQ*",
+            "Invalid tensor {name}: shape {:?} type {:?}; expected [{n_in}, {n_out}] F32/F16/BF16/Q8_0/Q4_0/Q4_1/Q5_0/Q5_1/Q2K/Q3K/Q4K/Q5K/Q6K/IQ*",
             info.dims, info.ggml_type
         ));
     }

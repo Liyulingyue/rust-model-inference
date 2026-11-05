@@ -1896,6 +1896,49 @@ pub fn dequant_q80_weight(data: &[u8], n_cols: usize, n_rows: usize) -> Vec<f32>
     out
 }
 
+/// Q5_1 row dequantization — a transcription of ggml's
+/// `dequantize_row_q5_1` (`src/ggml-quants.c`).
+///
+/// A Q5_1 block is 24 bytes and holds 32 elements:
+/// - 2-byte F16 scale (`d`)
+/// - 2-byte F16 minimum (`m`)
+/// - 4-byte high-bit table (`qh`, the 5-th bit of each element)
+/// - 16-byte nibble table (`qs`, the low four bits of each element)
+///
+/// The value of an element is `level * d + m`, where `level` is the
+/// unsigned 5-bit value (0..31). Note that Q5_1 has **no** `- 16`
+/// offset (that belongs to Q5_0) and that the 5-th bit of the upper
+/// nibble lives in `qh` bit `j + 16`.
+pub fn dequantize_row_q5_1(block_bytes: &[u8], output: &mut [f32]) {
+    let num_blocks = output.len() / 32;
+    for block_idx in 0..num_blocks {
+        let boff = block_idx * 24;
+        if boff + 24 > block_bytes.len() {
+            break;
+        }
+        let d = f16_from_bytes(block_bytes, boff);
+        let m = f16_from_bytes(block_bytes, boff + 2);
+        let qh = u32::from_le_bytes([
+            block_bytes[boff + 4],
+            block_bytes[boff + 5],
+            block_bytes[boff + 6],
+            block_bytes[boff + 7],
+        ]);
+        let out_base = block_idx * 32;
+        for j in 0..16 {
+            // `xh_0` is the 5-th bit of element `j`; `xh_1` is the 5-th
+            // bit of element `j + 16`, which sits 16 bits further up in
+            // `qh`.
+            let xh_0 = (((qh >> (j + 0)) << 4) & 0x10) as u8;
+            let xh_1 = ((qh >> (j + 12)) & 0x10) as u8;
+            let x0 = (block_bytes[boff + 8 + j] & 0x0F) | xh_0;
+            let x1 = (block_bytes[boff + 8 + j] >> 4) | xh_1;
+            output[out_base + j] = x0 as f32 * d + m;
+            output[out_base + j + 16] = x1 as f32 * d + m;
+        }
+    }
+}
+
 pub fn dequantize_row_q6_k(block_bytes: &[u8], output: &mut [f32]) {
     let num_blocks = output.len() / QK_K;
     for block_idx in 0..num_blocks {

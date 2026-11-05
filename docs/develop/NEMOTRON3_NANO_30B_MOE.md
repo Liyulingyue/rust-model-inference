@@ -144,9 +144,11 @@ Dory 的 GGUF 写 `false`，而 llama.cpp 对 pixtral 预分词家族强制 `add
 
 ## 2. 阻塞项（按必须做的顺序）
 
-### B1. Q5_1 dequant kernel（硬前置）
+### B1. Q5_1 dequant kernel（硬前置）✅ 已完成
 
-`src/ops/kernel/` 下有 `q5_0/`，**没有 `q5_1/`**；`QuantizedTensor::from_bytes`
+> **状态**：已实现并逐位对齐 ggml，见 §6。
+
+原先 `src/ops/kernel/` 下有 `q5_0/` 但**没有 `q5_1/`**；`QuantizedTensor::from_bytes`
 （`src/ops/kernel/quantized_tensor.rs`）的 match 里也**没有 `GGMLType::Q5_1`**。
 
 而 `ffn_up_shexp.weight` 在**所有** unsloth 30B 量化档里都是 Q5_1：
@@ -162,10 +164,12 @@ Dory 的 GGUF 写 `false`，而 llama.cpp 对 pixtral 预分词家族强制 `add
 Q5_1 与 Q5_0 的差异很小（ggml `block_q5_1`，24 字节/32 元素）：
 
 ```c
-// Q5_0: y = d * x                    （22 字节，没有 m）
-// Q5_1: y = d * x + m                （24 字节，多一个 fp16 的 m）
+// Q5_0: y = d * (x - 16)              （22 字节，没有 m，level 是有符号的）
 //   x0 = ((qs[j] & 0x0F) | xh_0) - 16
 //   x1 = ((qs[j] >>  4)  | xh_1) - 16
+// Q5_1: y = d * x + m                 （24 字节，多一个 fp16 的 m）
+//   x0 = (qs[j] & 0x0F) | xh_0        ← 无 - 16，level 是 0..31 的无符号值
+//   x1 = (qs[j] >>  4)  | xh_1
 //   xh_0 = ((qh >> (j + 0)) << 4) & 0x10
 //   xh_1 = ((qh >> (j + 12))     ) & 0x10
 ```
@@ -226,13 +230,57 @@ Q5_1 与 Q5_0 的差异很小（ggml `block_q5_1`，24 字节/32 元素）：
 
 | 工作项 | 规模 | 备注 |
 |---|---|---|
-| Q5_1 kernel + 白名单 | ~200 行 | 照抄 q5_0，改块大小与 `+m` |
+| Q5_1 kernel + 白名单 | ~200 行 | ✅ 已完成，见 §6 |
 | arch / config 前缀 | ~50 行 | loader + config |
 | MoE 权重加载（3D + 共享专家） | ~250 行 | 抄 qwen35 的 `load_moe_weights` |
 | MoE forward（sigmoid 路由 + relu² + 共享专家） | ~250 行 | 抄 qwen35 的 `moe.rs` 换路由语义 |
 | 平方 ReLU 算子 | ~30 行 | |
 | 对拍测试 + oracle 脚本 | ~300 行 | |
 | **合计** | **~1100 行** | 不含调试 |
+
+## 3·5. Q5_1 kernel 的实现要点（已完成）
+
+`src/ops/kernel/q5_1/`（`mod.rs` / `scalar.rs` / `neon.rs` / `tests_neon.rs`）。
+
+**块布局（24 字节 / 32 元素）**：
+
+```
+d    f16   偏移 0
+m    f16   偏移 2
+qh   u32   偏移 4    第 5 bit：bit j → 元素 j，bit j+16 → 元素 j+16
+qs   16B   偏移 8    低 4 bit：qs[j] 低 nibble → 元素 j，高 nibble → 元素 j+16
+```
+
+**还原式**：`y = level * d + m`，`level ∈ [0, 31]`（**无符号**，**没有 `- 16`**）。
+这是 Q5_1 与 Q5_0 最容易搞混的地方：Q5_0 是 `y = d * (level - 16)`。
+
+**矩阵乘**：
+
+```
+sum += (d * scale) * dot + m * (scale * sum(q8))
+```
+
+`dot` 用原始 5-bit 层级（0..31），`m` 项需要块内激活和。`m` 项的缩放方式与
+ggml 一致：ggml 的 `block_q8_1.s` 存的就是 `d * sum(qs)`（已乘激活 scale），
+所以 `forward_prepared` 直接给 `input_sums`，`forward_prequantized` 则由 kernel
+内部按 `scale * sum(q8)` 现算。
+
+**对拍**：`tools/oracle/q5_1/q5_1_oracle.c` 是 ggml `dequantize_row_q5_1` 的
+逐字转写，F16 转换用 ggml 原版 `ggml_compute_fp16_to_fp32`。
+`tests/q5_1_reference.rs` 生成 4096 个随机块，喂给 C oracle 与 Rust 实现，
+**逐位比较 F32 位模式**。
+
+> 踩到的坑：最初手写了一份 half→float 的 C 转换，对拍立刻报出 6175/131072
+> 个元素差 1~3 ULP。原因是 half subnormal 的指数算错了（ ggml 用 magic-number
+> 技巧处理）。**教训：这类 oracle 必须逐字抄 ggml，不能自己重写等价实现。**
+
+**NEON（aarch64，部署目标）**：与 `q4_1::neon` 同结构。第 5 bit 用 ggml 同一张
+256 项查表展开（`table_b2b_0` 的 `(b) << 4` 语义），level 落在 0..31 可以直接
+当 int8 交给 `UDOT`。`tests_neon.rs` 断言 NEON 与 scalar **逐位相等**。
+
+**有意没做**：Q5_1 没有 Vulkan 路径。`src/compute/linear.rs` 的 GPU 白名单里
+没有 `Q5_1`，GPU 模式会明确报「weight format has no Vulkan kernel」，而不是
+静默算错。30B 的 GPU 支持留到 B2/B3 决定架构时一并评估。
 
 ## 4. 怎么复现这份契约
 

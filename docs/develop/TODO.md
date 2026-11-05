@@ -3699,6 +3699,9 @@ Q5_1 与 Q5_0 的差别很小（ggml `block_q5_1`，24 字节/32 元素，比 Q5
 **顺带**：`src/models/nemotron_h/trunk/weights.rs` 的 `is_supported_weight_type()`
 白名单里也漏了 `Q5_0`（kernel 是有的，只是白名单不认）——4B 用不到，30B 会撞上。
 
+> **B1 已完成**：Q5_1 kernel 已实现并逐位对齐 ggml，见下方「进展」。
+> 下文「现象」小节描述的是实现前的状态，仅作背景保留。
+
 #### 可复用的基座
 
 | 需要的东西 | 已经有的地方 | 差在哪 |
@@ -3730,6 +3733,38 @@ python3 tools/oracle/nemotron3_nano/gguf_header.py /tmp/n3_30b_head.bin
 
 约 1100 行（Q5_1 kernel 200 + arch/config 50 + MoE 权重 250 + MoE forward 250 +
 平方 ReLU 30 + 对拍 300），不含调试。
+
+#### 进展：B1（Q5_1 kernel）已实现
+
+Q5_1 dequant / matmul kernel 已落地（`src/ops/kernel/q5_1/`），逐位对齐 ggml 的
+`dequantize_row_q5_1`。要点：
+
+- **块布局**：24 字节 = F16 `d` + F16 `m` + `u32 qh` + 16 字节 `qs`。还原式
+  `y = level * d + m`，`level` 是**无符号** 5-bit（0..31）。
+  **Q5_1 没有 `- 16` 偏移**（那是 Q5_0 的），高 bit 在 `qh` 的 bit `j` 与 `j + 16`。
+- **对拍方式**：`tools/oracle/q5_1/q5_1_oracle.c` 是 ggml `dequantize_row_q5_1`
+  的逐字转写（含 `ggml_compute_fp16_to_fp32` 的原实现），`tests/q5_1_reference.rs`
+  生成 4096 个随机块喂给两边，**逐位比较 F32 位模式**（不是容差比较）。
+  首次对拍就抓到一个真 bug：手写 C 版把 half subnormal 的指数算错了 ——
+  说明这个 oracle 必须用 ggml 原版转换，不能自己重写。
+- **NEON 路径**（aarch64，部署目标）：与 `q4_1::neon` 同结构。第 5 bit 用 ggml
+  同一张 256 项查表展开（`table_b2b_0` 的 `(b) << 4` 语义），level 落在 0..31，
+  可以直接塞进 int8 交给 `UDOT`。`tests_neon.rs` 断言 NEON 与 scalar
+  **逐位相等**（不是 ULP 容差）。
+- **`m` 项**：Q5_1 的 `m` 需要 `sum(y)`，与 Q4_1 同源。`forward_prepared` 走
+  `input_sums`（f16 舍入的 `d * sum(qs)`，对齐 ggml `block_q8_1.s` 的语义），
+  `forward_prequantized` 走 `None`（kernel 内部按 `scale * sum(q8)` 算）。
+- **白名单**：`src/models/nemotron_h/trunk/weights.rs::is_supported_weight_type()`
+  补上了 `Q5_0` 与 `Q5_1`（此前漏了 `Q5_0`，kernel 一直是有的）。
+- **附带修复**：`gemma4` 的权重白名单早就列了 `GGMLType::Q5_1`，但
+  `QuantizedTensor::from_bytes` 没有 `Q5_1` 分支 → 遇到 Q5_1 权重会 panic。
+  这次补上后那处静默变成可用。
+- **未做（有意）**：Q5_1 没有 Vulkan 路径。`src/compute/linear.rs` 的白名单里
+  没有 `Q5_1`，GPU 模式会明确报「weight format has no Vulkan kernel」，
+  而不是静默算错。30B 的 GPU 支持留到 arch 适配那一步再决定是否补。
+
+**未验证的部分**：以上只证明 Q5_1 的**块语义**正确。真实 30B 权重上的
+MoE 前向（sigmoid 路由 + squared ReLU + 共享专家）还没跑过 —— 那属于 B2/B3。
 
 ### TODO-052: Dory 的默认提示在 CLI / HTTP / 模型自带模板之间三分；pixtral 缺强制 BOS；JEV 的「backend=partial」提示对 Dory 是假的
 
