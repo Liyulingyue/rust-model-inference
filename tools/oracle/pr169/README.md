@@ -183,3 +183,44 @@ that skipped four of every eight values is repaired; both its new lane/tail
 regression and the previously failing grouped-variance test are included. The
 prefill trace regression is also fixed and included. No full-suite pass, GPU
 numerical alignment, robot-action execution or performance benchmark is claimed.
+
+## Occamy-1.0 re-verification on the aarch64 box (2026-11-05)
+
+The `Occamy-1.0` branch (from `main`) was re-verified with the real weights on
+an aarch64 host (NVIDIA GB10 box, 8 inference threads, `release-fast`). Both
+files match the hashes in `verification.json`: `occamy-1.0-Q8_0.gguf`
+(`9bd6ecea…`, 36,903,139,456 bytes) and `mmproj-occamy-1.0-F16.gguf`
+(`8f827a1e…`, 899,282,944 bytes).
+
+| check | result |
+| --- | --- |
+| greedy ids vs llama.cpp | **8/8 identical**, and identical to the recorded default row |
+| vision projection relative L2 | **0.00070317** (bound 0.01; the Apple Silicon run measured 0.00336136) |
+| tokenizer vs the pinned llama.cpp tokenizer | exact on every fixture |
+| CLI smoke | the 64x64 blue PNG answers `blue`, 9 vision tokens, CPU and Vulkan alike |
+
+The per-step logits envelope does not transfer across hosts. This host measures
+
+```
+0.08729171 0.04906173 0.02428209 0.02397511 0.03363240 0.06843563 0.11983501 0.08049776
+```
+
+against the recorded Apple Silicon run
+
+```
+0.08481082 0.07745719 0.03895792 0.04257759 0.04971924 0.07071221 0.06171023 0.05796181
+```
+
+so step 6 lands at 0.11984, above the recorded bound of 0.1, while the recorded
+run's own maximum was 0.08481 — the envelope was already close to its edge. The
+argmax agrees with llama.cpp at every step on both hosts. The fragile step is
+step 4, where llama.cpp's top-two margin is 0.247 but the Rust's is 0.039: a
+host difference can flip that token, which is what the recorded run saw.
+
+The CPU and the device path also choose different greedy tokens for this
+checkpoint — CPU `2 + 2 = 4`, device `2 + 2 equals **4**.` — and that reproduces
+identically on `origin/main` without any of the Occamy work, so it is not
+caused by it. The earlier roadmap note that occamy-1.0 matches bit for bit
+between GPU and CPU at `--temp 0` was measured with a different weight set.
+
+Commands are in `verification.json` under `occamy_reverification_2026_11_05`.

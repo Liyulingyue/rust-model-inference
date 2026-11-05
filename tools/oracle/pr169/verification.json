@@ -540,5 +540,111 @@
       "max_tokens": 8,
       "temperature": 0
     }
+  },
+  "occamy_reverification_2026_11_05": {
+    "host": "aarch64 (NVIDIA GB10 box), CPU, 8 inference threads, release-fast",
+    "branch": "Occamy-1.0 (from main)",
+    "weights": "models/Occamy-1.0-GGUF/occamy-1.0-Q8_0.gguf sha256 9bd6eceae8434098c8c7ebec33e4ca0d0bd3f004c2bddf37d16cd906448fdbdd, mmproj-occamy-1.0-F16.gguf sha256 8f827a1e495f23e987686a7f55c26064270502a5b6ee954a828f1aec0b2fd400; both match the hashes above",
+    "text": {
+      "prompt_tokens": 19,
+      "prompt_ids": [
+        248045,
+        846,
+        198,
+        3710,
+        369,
+        220,
+        17,
+        10,
+        17,
+        30,
+        248046,
+        198,
+        248045,
+        74455,
+        198,
+        248068,
+        271,
+        248069,
+        271
+      ],
+      "llama_cpp_greedy_ids": [
+        17,
+        478,
+        220,
+        17,
+        283,
+        220,
+        19,
+        248046
+      ],
+      "rust_argmax_ids": [
+        17,
+        478,
+        220,
+        17,
+        283,
+        220,
+        19,
+        248046
+      ],
+      "greedy_matches_recorded_default_row": true,
+      "relative_l2_per_step": [
+        0.08729171,
+        0.04906173,
+        0.02428209,
+        0.02397511,
+        0.0336324,
+        0.06843563,
+        0.11983501,
+        0.08049776
+      ],
+      "max_abs_per_step": [
+        0.883604,
+        1.099089,
+        0.50666,
+        0.624161,
+        0.552139,
+        1.254957,
+        1.775427,
+        1.536587
+      ],
+      "recorded_apple_silicon_per_step": [
+        0.08481081826480966,
+        0.07745718617194278,
+        0.03895792493960703,
+        0.042577594422437415,
+        0.049719242481923616,
+        0.07071220726990583,
+        0.06171022693140365,
+        0.05796181102384276
+      ],
+      "bound": 0.1,
+      "bound_status": "step 6 measures 0.11984 on this host, above the recorded bound 0.1; the recorded run's own maximum was 0.08481, so the envelope was already close to its edge and does not transfer across hosts",
+      "note": "the argmax agrees with llama.cpp at every step on both hosts; the reference's step-4 top-two margin is 0.247 while the Rust's is 0.039, which is where a host difference can flip a token"
+    },
+    "vision": {
+      "relative_l2": 0.00070317,
+      "reference": "identical F16 weights widened exactly to F32; F32 activations; llama.cpp rmi.vision.output dump",
+      "bound": 0.01,
+      "recorded_apple_silicon": 0.00336136,
+      "tokens": 256
+    },
+    "tokenizer": "exact match against the pinned llama.cpp tokenizer for every fixture",
+    "cli_smoke": "the 64x64 solid blue PNG answers 'blue'; 9 vision tokens; the image path gives 'blue' on both CPU and Vulkan",
+    "cpu_vs_device": {
+      "finding": "the CPU and the Vulkan path choose different greedy tokens for the same prompt: CPU '2 + 2 = 4', device '2 + 2 equals **4**.'",
+      "pre_existing": "reproduced identically on origin/main (15c049d7) without any of this branch's changes",
+      "note": "the earlier roadmap note that occamy-1.0 matches bit for bit between GPU and CPU at --temp 0 was measured with a different weight set; it does not hold for this Q8_0 checkpoint on this host"
+    },
+    "commands": {
+      "reference_text": "RMI_ORACLE_DUMP=target/pr169/text-reference RMI_ORACLE_FILTER='^result_output$' target/physbrain/oracle-build/bin/llama-eval-callback -m \"$TEXT\" -p \"$prompt\" -n 8 -c 512 -ngl 0 -t 8 -fa off",
+      "rust_text": "RMI_TEXT_MODEL=\"$TEXT\" RMI_LLAMA_REFERENCE_LOG=target/pr169/text-reference.log RMI_PARITY_TRACE=target/pr169/teacher.jsonl cargo test --profile release-fast --features parity-trace --test pr169_teacher_forcing -- --ignored",
+      "compare": "./.venv/bin/python tools/oracle/pr169/compare_text.py target/pr169/teacher.jsonl target/pr169/text-reference target/pr169/text-reference.log --relative-l2 0.10 --teacher-forced",
+      "reference_vision": "RMI_ORACLE_DUMP=target/pr169/vision-reference RMI_ORACLE_FILTER='^rmi.vision.output$' target/physbrain/oracle-build/bin/llama-mtmd-debug -m \"$TEXT\" --mmproj \"$F32\" -p encode -n 512 --image blue -c 512 --no-warmup --no-repack -ngl 0 -t 8 -fa off",
+      "rust_vision": "RMI_OCCAMY_MMPROJ=\"$MMPROJ\" RMI_OCCAMY_VISION_REFERENCE=target/pr169/vision-reference/0000.f32 cargo test --profile release-fast --test pr169_vision_oracle occamy_vision -- --ignored",
+      "tokenizer": "RMI_LLAMA_TOKENIZE=target/physbrain/oracle-build/bin/llama-tokenize RMI_OCCAMY_TEXT=\"$TEXT\" cargo test --profile release-fast --features parity-trace --test pr169_tokenizer_oracle occamy -- --ignored",
+      "cli": "target/release-fast/rust-model-inference --model \"$TEXT\" --mmproj \"$MMPROJ\" --image blue-64.png --prompt 'Reply with one word: what color is this image?' --max-tokens 8 --max-context 256 --threads 8 --temperature 0"
+    }
   }
 }

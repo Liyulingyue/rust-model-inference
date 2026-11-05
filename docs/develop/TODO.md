@@ -632,6 +632,13 @@ ggml-org/llama.cpp 的一部分**——它们是 `microsoft/BitNet` 私有 fork 
       （相同 token 历史 logits relative L2 ≤8.482%），不保证所有 greedy 相同。
       复现记录见 [对齐记录](../../tools/oracle/pr169/README.md) 和
       [哈希/指标](../../tools/oracle/pr169/verification.json)。
+      **2026-11-05 在 aarch64（GB10）复验**：真实权重 SHA-256 与记录一致；greedy 与
+      llama.cpp **8/8 逐 token 相同**（且与记录的默认行一致）；视觉投影 relative L2
+      **0.00070317**（记录 0.00336，界 0.01）；tokenizer 逐条精确一致；CLI 蓝图 → `blue`
+      （CPU 与 Vulkan 都对）。**但逐步 logits 包络不跨主机**：本机 step 6 = 0.11984，
+      超过记录的界 0.1（记录那次自身最大 0.08481，本来就贴边），argmax 两台机器都一致。
+      脆弱点是 step 4：llama.cpp 的 top-2 margin 0.247，Rust 侧只有 0.039。详见
+      **TODO-053**。
     - 无损载荷/layout/token IDs 使用精确检查；量化、低精度舍入、近似激活使用明确数值误差界限。
     - 未覆盖：**Intern-Decision-4B 真实权重**（转换器已支持并校验形状，但引擎的 Qwen3.5 recurrent
       投影尚不接受该 SSM 形状，暂时不能推理）、GPU 数值对齐、性能基准。
@@ -3828,3 +3835,38 @@ barrier 与常驻 worker 不兼容而不可用），收益 1.66× → 1.8×，�
 这条对**所有模型**都成立（任何走 `pool.compute` 做逐投影 dispatch 的 trunk），不只 Mellum。
 改的时候顺带把接口设计成能同时喂给 CPU 和设备（照 `record_group_matmul` 的形状：一层一次、
 多个权重共用一个 command buffer），以后接设备就只是换个 backend，而不是再改一遍 trunk。
+
+---
+
+### TODO-053: Occamy-1.0 的 logits 包络不跨主机（step 6 越界），且 CPU 与设备的 greedy 不同
+
+**现象一：包络越界。** `tools/oracle/pr169` 的 Occamy 默认路径界限是 relative L2 ≤ 0.1，
+记录那次（Apple Silicon）逐步为 0.0848/0.0775/0.0390/0.0426/0.0497/0.0707/0.0617/0.0580
+—— 自身最大值 0.0848 已经贴边。2026-11-05 在 aarch64（GB10）用同一份权重复验，逐步为
+0.0873/0.0491/0.0243/0.0240/0.0336/0.0684/**0.1198**/0.0805 → **step 6 越界**。
+
+不是实现问题：argmax 与 llama.cpp **每一步都一致**（8/8 greedy 逐 token 相同，且与
+记录那次相同）；视觉投影 relative L2 0.00070（记录 0.00336）；tokenizer 精确一致。
+脆弱点是 step 4 —— llama.cpp 的 top-2 margin 是 0.247，Rust 侧只有 0.039，
+host 之间的近似差异足以翻这一步的 token（记录那次就翻了）。
+
+**现象二：CPU 与设备的 greedy 不同。** 同一提示、同为 `--temp 0`：
+
+- CPU：`2 + 2 = 4`
+- Vulkan：`2 + 2 equals **4**.`
+
+**在 `origin/main`（不含任何 Occamy 改动）上完全复现** → 不是这条分支引入的。
+而 TODO-043 那段写的「occamy-1.0 在 `--temp 0` 下 GPU 与 CPU 逐位一致」用的是**另一份
+权重**（含 110 个 F32 二维权重），对这份 Q8_0 checkpoint 不成立。
+
+**待办**：
+
+1. Occamy 的逐步界限改成**两台主机都如实记录**的形式（像 Intern-Decision 那条：把
+   界限放宽到能容纳两台主机的实测值，并保留逐 step 数值），不要让界限只对一台主机成立。
+2. 现象二要么定位到具体算子（MoE 路由在设备上的专家选择、还是 Q8_0 量化路径），
+   要么把 TODO-043 里那句「逐位一致」限定清楚（哪份权重、哪个 host、哪个 arch）。
+   设备侧 MoE 路由目前没有逐层专家 id 的对拍手段 —— `src/models/qwen35/trunk/moe.rs`
+   有 `ffn_moe_topk` 的 trace，但 llama.cpp 参考侧没有对应 dump。
+
+**关联**：`tools/oracle/pr169/{README.md,verification.json}`（`occamy_reverification_2026_11_05`）、
+`src/models/qwen35/trunk/moe.rs`、`src/ops/kernel/qtensor_owned.rs`（设备 Q8_0 路径）。
