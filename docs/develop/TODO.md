@@ -391,11 +391,13 @@ LFM2 / LFM2.5 / Spark / Nemotron-H / Hunyuan / LFM2-MoE），每个 scorer 实�
       约 1100 行。契约从 GGUF 头部读出（不必下完 24 GB），详见
       [TODO-051](#todo-051-nemotron-3-nano-30b-a3bnemotron_h_moe完全不支持先补-q5_1-kernel)
       与 [NEMOTRON3_NANO_30B_MOE.md](NEMOTRON3_NANO_30B_MOE.md)。
-- [ ] **Dory 的默认 chat 模板与 GGUF 自带模板不同形，JEV 的「backend=partial」提示对 Dory
-      是假的** — 默认路径少了 `<think>\n`（同一条消息 19 vs 22 prompt token，输出不同）；
-      `--compute vulkan --jev` 明明整条前向都在设备上（4.2× 于 CPU、概率一致）却打出
+- [ ] **Dory 的默认提示在 CLI / HTTP / 模型自带模板之间三分，pixtral 还缺强制 BOS** —
+      CLI 15 token（无 think 标记）、HTTP 19 token（空 think 块）、模型自带模板 22 token
+      （多一个空 system 轮），三者贪心输出不同，CLI↔HTTP 分叉且 `cli_http_agreement`
+      未覆盖 dory；参考实现对 pixtral 强制 `add_bos = true`，本仓库没有 BOS。
+      另外 `--compute vulkan --jev` 明明整条前向都在设备上（4.2× 于 CPU、概率一致）却打出
       「no complete device path for this mode」。详见
-      [TODO-052](#todo-052-dory-的默认-chat-模板与-gguf-自带模板不同形jev-的backendpartial提示对-dory-是假的)。
+      [TODO-052](#todo-052-dory-的默认提示在-cli--http--模型自带模板之间三分pixtral-缺强制-bosjev-的backendpartial提示对-dory-是假的)。
 
 ## 入口面覆盖（2026-10-19 审计）
 
@@ -3729,27 +3731,55 @@ python3 tools/oracle/nemotron3_nano/gguf_header.py /tmp/n3_30b_head.bin
 约 1100 行（Q5_1 kernel 200 + arch/config 50 + MoE 权重 250 + MoE forward 250 +
 平方 ReLU 30 + 对拍 300），不含调试。
 
-### TODO-052: Dory 的默认 chat 模板与 GGUF 自带模板不同形；JEV 的「backend=partial」提示对 Dory 是假的
+### TODO-052: Dory 的默认提示在 CLI / HTTP / 模型自带模板之间三分；pixtral 缺强制 BOS；JEV 的「backend=partial」提示对 Dory 是假的
 
 两条都是**文档/提示与实测不符**，实现在数值上没错。
 
-#### F1：默认 chat 模板丢掉 `<think>\n`
+#### F1：CLI 与 HTTP 给 Dory 的默认提示不一致，三条路径三个形态
 
-`src/prompt/legacy.rs:124` 把 `dory` 映射到 `ChatTemplate::ChatML`，注释说 GGUF 自带
-模板「与 ChatML 同形」。实测**不同形**：
+`src/models/dory/forward.rs:773` 走 `prompt::legacy::format_chat("dory", …)`，
+`src/app/server/api/tools.rs:554` 走 `prompt::build_qwen_chat_prompt(…)`，
+两者都把 `dory` 映射到 `ChatTemplate::ChatML`，但渲染结果不同。
+用仓库自己的 tokenizer 把 token id 打出来（`What color is the sky?`）：
 
-| 路径 | 生成提示收尾 | 同一条消息的 prompt token 数 |
+| 路径 | 结尾形态 | token 数 |
 |---|---|---|
-| 内置 ChatML | `assistant\n` | 19 |
-| `--jinja`（渲染 GGUF 自带模板） | `assistant\n<think>\n` | 22 |
+| CLI 内置 | `<\|im_start\|>user\n{q}<\|im_end\|>\n<\|im_start\|>assistant\n` | **15** |
+| HTTP 内置 | 同上，再补 `<think>\n</think>\n` | **19** |
+| 模型自带模板（thinking=false） | 多一个空 system 轮，结尾 `<think></think>` | 22 |
+| 模型自带模板（thinking=true） | 同上，结尾 `<think>\n` | 22 |
 
-Dory 的模板里 `enable_thinking` 默认 True，所以思考段是**该开的**；默认路径没开，
-输出因此不同（同一问题两种提示给出不同文本）。
+- CLI 一个 think 标记都没有（模型直接开答）；
+- HTTP 补一个**空** think 块（`append_qwen_assistant_prefix(…, enable_thinking=false)`）；
+- 模型自带模板多一个**空 system 轮**（`{%- set system_message = "" %}` 让
+  `{%- if system_message is defined %}` 成立）并且 think 块**开着**。
 
-修法：给 `ChatTemplate` 加 `dory` 变体（ChatML + `<think>\n`），或让 `dory` 默认走
-`--jinja`。至少要把那条注释改成陈述事实。
+贪心解码下三条路径给出不同文本（CLI `The sky appears blue during the day due to
+Rayleigh scattering` / HTTP `The sky is most commonly perceived as blue during the
+day because the Earth's atmosphere scatteres sunlight (`）。
 
-#### F2：`--compute vulkan --jev` 对 Dory 打出的「没有完整设备路径」提示是错的
+`tests/cli_http_agreement.rs` 只覆盖 llama / qwen3 / qwen35，**没有 dory**，
+所以这条分叉落在覆盖矩阵的盲区里。
+
+修法：让 dory 的两条入口都走模型自带模板，并把 dory 加进
+`tests/cli_http_agreement.rs` 锁住两条入口逐 token 一致。
+
+#### F2：pixtral 的强制 BOS 没有实现
+
+`src/core/tokenizer/mod.rs:557-561` 的注释写着 llama.cpp 对 llama3 预分词家族
+（含 **pixtral**）强制 `add_bos = true`，但实现里 `force_add_bos = true` **只给了
+falcon-h1**（`mod.rs:589-592`）。Dory 的 GGUF 写 `add_bos_token = false`，于是
+本仓库的 Dory 提示里没有 BOS；而 Dory 的参考实现（NVIDIA 的 llama.cpp fork
+`98a74c97`，`src/llama-vocab.cpp:2286-2296`）对 `tokenizer_pre == "pixtral"`
+明确 `add_bos = true`（上游 master 同理）。
+
+影响面是整个 `PreTokenizer::LlamaBpe` 家族（pixtral / llama-bpe / dbrx /
+exaone / tekken）。Dory 的 oracle 对拍是**喂 token id** 的，验的是前向不是提示
+构造，所以这条一直没被抓到。
+
+修法：把 `force_add_bos` 扩展到整个家族，并补一个「提示第一个 token 是 BOS」的断言。
+
+#### F3：`--compute vulkan --jev` 对 Dory 打出的「没有完整设备路径」提示是错的
 
 `src/app/cli/types.rs:240` 的 `vulkan_partial_mode()` 只看**模式**不看 **arch**，
 而 `ComputePolicy::has_complete_device_path()` 里 `dory` 是在列的。实测 Dory 的 JEV

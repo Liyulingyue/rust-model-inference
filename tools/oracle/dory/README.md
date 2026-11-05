@@ -398,9 +398,11 @@ artifact with `--compute vulkan`:
 | CLI `--compute vulkan` | produced the expected answer |
 
 This closes the "validated on RADV only" gap recorded below. It does **not**
-close the two other gaps this file still lists: the full 262 144-token context
-is still unverified, and the GGUF's own chat template is still not the one the
-default path renders (see `docs/develop/DORY_REVIEW.md`).
+close the three other gaps this file still lists: the full 262 144-token context
+is still unverified, the GGUF's own chat template is still not what the default
+path renders, and the CLI and the HTTP server do not render the same prompt for
+Dory at all (15 versus 19 tokens, and they produce different greedy text). See
+`docs/develop/DORY_REVIEW.md`.
 
 ## Acceptance
 

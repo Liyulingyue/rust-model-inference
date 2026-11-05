@@ -21,7 +21,7 @@ Dory 1.0 的实现是**完整且正确的**，文档里列出的两个最大缺�
 | Vulkan 设备路径 | ✓ GB10 上 5 个硬件测试全过，GPU↔CPU **逐位一致** |
 | 性能 | ✓ 拿到首个基线：设备路径比 CPU 快 **2.7×** |
 | CLI / HTTP / JEV | ✓ 三条入口都实测通（见下表） |
-| 文档一致性 | ✗ 两处与实测不符（chat 模板、JEV 的 backend 提示），已记在发现里 |
+| 文档一致性 | ✗ 三处与实测不符（CLI/HTTP 的提示分叉、JEV 的 backend 提示、缺 BOS），已记在发现里 |
 | 未验收 | 完整 262 144 上下文；chat template 本身 |
 
 ## 一、已验证（带证据）
@@ -104,48 +104,89 @@ prefill（多行并行）。这也解释了为什么 Dory 的设备路径在数�
 
 ## 二、发现清单
 
-### [建议改] F1：默认 chat 模板与 GGUF 自带模板**并不同形**
+### [必须改] F1：CLI 与 HTTP 给 Dory 的默认提示**不一致**，而且都不等于模型自带模板
 
-**位置**：`src/prompt/legacy.rs:124`（`"dory" => ChatTemplate::ChatML`），
-注释写的是「its GGUF `tokenizer.chat_template` is ChatML plus an optional
-`<think>` block, so it renders as ChatML too」。
+**位置**：
+- CLI：`src/models/dory/forward.rs:773` → `prompt::legacy::format_chat("dory", …)`；
+- HTTP：`src/app/server/api/tools.rs:554` → `prompt::build_qwen_chat_prompt(…)`；
+- 两条路都在 `src/prompt/legacy.rs:124` 把 `dory` 映射到 `ChatTemplate::ChatML`。
 
-**现象**：Dory 的 GGUF 自带模板在 `enable_thinking` 默认 True（模板里
-`{%- set enable_thinking = enable_thinking if enable_thinking is defined else True %}`）
-时，生成提示收尾是：
+**事实**（用仓库自己的 tokenizer 把每条路径的 token id 全部打出来）：
 
-```
-assistant\n<think>\n
-```
-
-而内置 ChatML 渲染出的是：
-
-```
-assistant\n
-```
-
-**证据**（同一台机器、同一权重、同一问题）：
-
-| 路径 | 渲染出的 prompt | `/v1/messages/count_tokens` |
+| 路径 | 结尾形态 | token 数 |
 |---|---|---|
-| 内置 ChatML | `user\nWhat color is the sky?\nassistant\n` | **19** |
-| `--jinja`（渲染 GGUF 自带模板） | `user\nWhat color is the sky?\nassistant\n<think>\n` | **22** |
+| **CLI** 内置 | `<\|im_start\|>user\n{q}<\|im_end\|>\n<\|im_start\|>assistant\n` | **15** |
+| **HTTP** 内置 | `<\|im_start\|>user\n{q}<\|im_end\|>\n<\|im_start\|>assistant\n<think>\n</think>\n` | **19** |
+| 模型自带模板（`enable_thinking=false`） | `<\|im_start\|>system\n<\|im_end\|>\n<\|im_start\|>user\n{q}<\|im_end\|>\n<\|im_start\|>assistant\n<think></think>` | 22 |
+| 模型自带模板（`enable_thinking=true`） | …`<\|im_start\|>assistant\n<think>\n` | 22 |
 
-差 3 个 token。两种提示给出的输出不同（内置：`The sky appears blue during the day
-because of how sunlight interacts with Earth's atmosphere.`；`--jinja`：
-`The sky appears **blue** during the day because of how the atmosphere scatters
-sunlight.`）。
+**差在哪**：
 
-**为什么是问题**：默认路径**没有打开模型的思考段**。Dory 是 reasoning 模型，
-`<think>\n` 是它训练时用的「开始思考」标记；少了它，模型的推理痕迹与答案的边界会变。
-`--jinja` 能绕过去，但默认路径给出的是另一个提示。
+1. **CLI 与 HTTP 差一个 think 块**。HTTP 走 `build_qwen_chat_prompt` →
+   `append_qwen_assistant_prefix(…, enable_thinking=false)`，它会补一个**空 think 块**
+   `<think>\n</think>\n`（id 12, 1267, 13, 1267）；CLI 走 `ChatTemplate::ChatML::render`，
+   **一个 think 标记都没有**。
+2. **模型自带模板还多一个空 system 轮** `<\|im_start\|>system\n<\|im_end\|>\n`
+   （模板里 `{%- set system_message = "" %}` 让 `{%- if system_message is defined %}`
+   成立，于是**总是**输出这一轮）。
+3. **模型自带模板的 think 块没有换行**（`<think></think>`），HTTP 的有
+   （`<think>\n</think>\n`）。
 
-**建议修法**：给 `ChatTemplate` 加一个 `Dory` 变体（或在 `default_template` 里对
-`dory` 返回一个「ChatML + `<think>\n`」的专用渲染），让默认路径与 GGUF 自带模板
-一致；或者把 `src/prompt/legacy.rs` 那条注释改成陈述事实，并让 `dory` 默认走
-`--jinja` 那条路。
+**行为差异**（同一权重、同一问题、贪心、8 线程，两次跑都稳定）：
 
-### [建议改] F2：`--compute vulkan --jev` 对 Dory 打出的「没有完整设备路径」提示是错的
+| 入口 | 输出 |
+|---|---|
+| CLI 内置 | `The sky appears blue during the day due to Rayleigh scattering` |
+| HTTP `/v1/chat/completions` | `The sky is most commonly perceived as blue during the day because the Earth's atmosphere scatteres sunlight (` |
+| CLI `--chat-template-file`（渲染等价的用户轮） | `The sky is typically blue during the day due to the scattering` |
+
+**为什么是问题**：
+
+- **CLI ↔ HTTP 不一致**，而仓库自己的 `tests/cli_http_agreement.rs` 只覆盖
+  llama / qwen3 / qwen35，**没有 dory** —— 这条分叉正好落在覆盖矩阵的盲区里。
+- Dory 是 reasoning 模型，`<think>` 是它训练时的「开始思考」信号。CLI 给零个
+  think 标记（模型直接开始答），HTTP 给一个**空** think 块，模型自带模板给一个
+  **开着的** think 块 —— 三种都不是对方。
+- 参考实现（模型自带模板）还会加 **BOS**，见 F2。
+
+**建议修法**：让 `dory` 的两条入口都走模型自带模板（最省事：`default_template`
+对 `dory` 改成「渲染 GGUF 模板」，CLI 与 HTTP 共用同一份渲染），并把 dory 加进
+`tests/cli_http_agreement.rs` 的覆盖列表，锁住两条入口逐 token 一致。
+
+### [建议改] F2：pixtral 的强制 BOS 没有实现 —— Dory 的提示比参考实现少一个 `<s>`
+
+**位置**：`src/core/tokenizer/mod.rs:557-624`。
+
+代码里的注释写着：
+
+> llama.cpp forces `add_bos = true` for the llama3 pre family
+> (llama3 / falcon3 / falcon-h1 / lfm2 / **pixtral** ...) even when the GGUF
+> omits `tokenizer.ggml.add_bos_token`.
+
+但实现里 `force_add_bos = true` **只给 `falcon-h1` 一个 arch**（`mod.rs:589-592`）。
+Dory 的 GGUF 写的是 `tokenizer.ggml.add_bos_token = false`，所以仓库既不读元数据里的
+true，也拿不到强制覆盖 → **Dory 的提示里没有 BOS**。
+
+而 Dory 的**参考实现确实加**：
+
+- NVIDIA 的 Dory llama.cpp fork（`brianchmielNV/llama.cpp` @ `98a74c97`，
+  `src/llama-vocab.cpp:2286-2296`）：`tokenizer_pre == "pixtral"` 落在
+  `LLAMA_VOCAB_PRE_TYPE_LLAMA3` 分支里，`add_bos = true`；
+- 上游 master 同理（`src/llama-vocab.cpp:2623-2629`，pixtral 现在落在 TEKKEN 分支，
+  同样 `add_bos = true`）。
+
+**影响面不止 Dory**：`pre = "pixtral"` / `"llama-bpe"` / `"dbrx"` / `"exaone"` /
+`"tekken"` 的 GGUF 全部走 `PreTokenizer::LlamaBpe`，全部可能缺 BOS。
+仓库自己的注释已经点出了这个家族，只是没有逐个落实。
+
+**为什么没被 oracle 抓到**：Dory 的 oracle 对拍是**喂 token id** 的
+（`tests/dory_q5_k_m.rs` 自己 encode 出 `[22177]` 再喂进去），oracle 验的是
+**前向**，不是**提示构造**。BOS 属于提示构造，所以整条对拍链路都看不见它。
+
+**建议修法**：把 `force_add_bos = true` 扩展到整个 llama3 预分词家族
+（至少 pixtral），并补一个针对提示构造的断言（提示的第一个 token 是 BOS）。
+
+### [建议改] F3：`--compute vulkan --jev` 对 Dory 打出的「没有完整设备路径」提示是错的
 
 **位置**：`src/app/cli/types.rs:240`（`vulkan_partial_mode()`）与
 `src/app/server/mod.rs:1911`。
@@ -175,7 +216,7 @@ host"）描述的是 qwen3 那种部分 offload 的模型，对 Dory 也不成�
 **建议修法**：打印前先问 `has_complete_device_path(arch)`；Dory 这类有整图设备路径的
 arch 不该打这句提示，或者把提示改成按 arch 措辞。
 
-### [观察] F3：无效请求也会付设备初始化的时间
+### [观察] F4：无效请求也会付设备初始化的时间
 
 `--jev` 少给 `--jev-question` 时，错误是在模型加载**之前**抛的（实测总耗时
 0.408 s，模型没被读进来），但 Vulkan 设备已经初始化并预热过了 —— 因为
@@ -184,11 +225,11 @@ arch 不该打这句提示，或者把提示改成按 arch 措辞。
 这不是 bug（设备初始化的 279 ms 本来就是为了和模型加载重叠），只是记一笔：
 **「空跑一次 0.4 s」** 是当前 `--compute vulkan` 的固定地板成本。
 
-### [已填补] F4：只在 AMD RADV NAVI31 验证过 → 现在有第二个厂商
+### [已填补] F5：只在 AMD RADV NAVI31 验证过 → 现在有第二个厂商
 
 见 §1.1。
 
-### [已填补] F5：性能从未 benchmark → 现在有基线
+### [已填补] F6：性能从未 benchmark → 现在有基线
 
 见 §1.2。
 
