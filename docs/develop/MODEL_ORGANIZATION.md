@@ -182,6 +182,7 @@ src/models/{model_name}/
 | 函数 | 当前所在 | 应去 |
 |------|----------|------|
 | `load_f32_tensor`（F32/BF16 norm 加载） | qwen3/trunk/weights.rs:65、llama/trunk/weights.rs、lfm2/trunk/weights.rs、lfm25/trunk/weights.rs | `core::tensor::load_f32_tensor`（§8 Step 1 已抽离） ✅ |
+| `typed_tensor_bytes` / `f32_tensor_bytes` / `optional_f32_tensor_bytes`（校验后借用张量原始字节） | models/gemma4/vision/mod.rs、models/gemma4/asr/mod.rs、models/qwen3/vision/mod.rs、models/qwen35/vision/mod.rs、models/qwen3/asr/mel_encoder.rs、models/qwen3/trunk/util.rs | `core::tensor`（同一组三个 helper）✅ |
 | `static_q8_matrix` / `static_q8_tensor` / `static_tensor` | qwen3/trunk/util.rs:209-240 | `core::loader`（建议抽离 — §9 待迁移） |
 | `expect_supported_embedding` / `is_supported_embedding` | `ops/embedding.rs`（已统一） | — ✅ |
 | `SUPPORTED_EMBEDDING_TYPES` | `ops/embedding.rs`（已统一） | — ✅ |
@@ -403,6 +404,16 @@ for _n in 0..(QK_K / 128) {
 | T-2 | qwen3/asr/mel_encoder 内部 helper（`add_residual` / `layer_norm_rows` / `apply_gelu_erf` / `full_attention_into` / `checked_product` / `resize_f32` / `reserved_f32` / `static_tensor` / `load_f32_tensor`） | qwen3/asr/mel_encoder.rs（被 omni.rs 复用） | 部分公开 `pub(crate)`；纯计算 helper 下沉到 `core/audio.rs` |
 | T-3 | qwen3/asr/audio_processor `log_mel_windows` / `compute_log_mel` / `HOP` | qwen3/asr/audio_processor.rs（被 omni.rs 复用） | 与 T-2 同处理 |
 | T-4 | lfm2 / lfm25 / lfm2moe 共享的 shortconv state 类型 + buffer 分配 | 各模型 `forward.rs` | 若 S-4 选 A：抽到 `core/scratchpad` 或各模型 `trunk/scratch.rs` |
+
+已完成的下沉（保留在此作为约定，新模型直接复用，不要再写一份）：
+
+| 工具 | 位置 | 说明 |
+|------|------|------|
+| `require_tensor_meta` | `core::tensor` | 只读 header：存在 / shape / 类型。模型在“先校验整个契约、再读 payload”时用它 |
+| `require_tensor_data` | `core::tensor` | 只校验 payload 长度，按 `GGMLType::type_traits` 的 block 布局计算，量化格式不会被按元素数算错 |
+| `require_tensor_type` | `core::tensor` | 前两者组合，返回实际类型，供“校验即读取”的加载路径使用 |
+
+各模型的 `require_tensor` / `check_tensor` 包装一律委托给上面三个函数，只保留自己的类型白名单（例如 omni 容忍 F16/BF16）。`audio8`、`gemma4`、`diffusion/common`、`qwen3`（omni / asr mel_encoder / trunk util）、`diffusion/flux3` 已迁移。
 
 ### 9.4 尺寸警戒（§2.2 新规则触发）
 

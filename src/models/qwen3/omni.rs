@@ -1,11 +1,14 @@
 use crate::core::tensor::{GGMLType, MetaValue, TensorSource};
 use crate::core::thread_pool::ComputePool;
-use crate::models::qwen3::asr::audio_processor::log_mel_windows;
-use crate::models::qwen3::asr::audio_processor::{compute_log_mel, HOP};
 use crate::models::qwen3::asr::mel_encoder::Qwen3AudioModel;
 use crate::models::qwen3::asr::mel_encoder::{
-    add_residual, apply_gelu_erf, checked_product, full_attention_into, layer_norm_rows,
-    load_f32_tensor, reserved_f32, resize_f32, static_tensor, AudioLinear, LayerNormWeights,
+    add_residual, load_f32_tensor, static_tensor, AudioLinear,
+};
+use crate::ops::audio::frontend::log_mel_windows;
+use crate::ops::audio::frontend::{compute_log_mel, HOP};
+use crate::ops::audio::transformer::{
+    apply_gelu_erf, checked_product, full_attention_into, layer_norm_rows, reserved_f32,
+    resize_f32, LayerNormWeights,
 };
 use crate::ops::dot_f16_f16_bytes;
 use std::sync::Arc;
@@ -985,29 +988,17 @@ fn require_tensor(
     dims: &[u64],
     kind: GGMLType,
 ) -> Result<(), String> {
-    let info = source
-        .tensor_info(name)
-        .ok_or_else(|| format!("Missing Qwen2.5-Omni audio tensor: {name}"))?;
     // Shape is strict (architectural mismatch). Type is F16-or-BF16 tolerant:
     // some Unsloth re-quantization rounds trip BF16→F16→BF16 and the upstream
     // GGUF uses F16 while our tools/tests produce BF16; both pass the same
     // matmul contract.
-    if info.dims != dims {
-        return Err(format!(
-            "Invalid Qwen2.5-Omni audio tensor {name}: shape {:?}; expected {:?}",
-            info.dims, dims
-        ));
-    }
-    if info.ggml_type != kind
-        && !(matches!(kind, GGMLType::F16) && matches!(info.ggml_type, GGMLType::BF16))
-        && !(matches!(kind, GGMLType::BF16) && matches!(info.ggml_type, GGMLType::F16))
-    {
-        return Err(format!(
-            "Invalid Qwen2.5-Omni audio tensor {name}: type {:?}; expected {:?} (or its BF16/F16 sibling)",
-            info.ggml_type, kind
-        ));
-    }
-    Ok(())
+    let types: &[GGMLType] = match kind {
+        GGMLType::F16 => &[GGMLType::F16, GGMLType::BF16],
+        GGMLType::BF16 => &[GGMLType::BF16, GGMLType::F16],
+        _ => std::slice::from_ref(&kind),
+    };
+    // Metadata only: the contract is validated before any payload is read.
+    crate::core::tensor::require_tensor_meta(source, name, dims, types).map(|_| ())
 }
 
 #[cfg(test)]
@@ -1295,7 +1286,7 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         let wav = std::fs::read(std::env::var("RMI_JINA_AUDIO_WAV").unwrap()).unwrap();
-        let pcm = crate::models::qwen3::asr::audio_processor::decode_pcm16_wav(&wav).unwrap();
+        let pcm = crate::ops::audio::frontend::decode_pcm16_wav(&wav).unwrap();
         let mmproj = std::env::var("RMI_JINA_AUDIO_MMPROJ").unwrap();
         let source: Arc<dyn TensorSource> =
             Arc::new(crate::GGUFLoader::from_file(std::path::Path::new(&mmproj)).unwrap());

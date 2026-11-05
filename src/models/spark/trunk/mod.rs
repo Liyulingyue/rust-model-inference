@@ -6,8 +6,10 @@
 
 pub mod config;
 pub mod forward;
+pub mod runtime;
 pub mod weights;
 
 pub use config::SparkConfig;
 pub use forward::{run_inference, SparkModel, SparkSession};
+pub use runtime::SparkTextRuntime;
 pub use weights::{load_layers, SparkLayerWeights};

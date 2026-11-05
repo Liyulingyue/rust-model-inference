@@ -17,7 +17,8 @@ jobs:
 
   x86:
     name: x86 dispatch regressions
-    runs-on: ubuntu-latest
+    # Ubuntu 26.04's loader requires F16C; this job also runs with it masked.
+    runs-on: ubuntu-24.04
     env:
       # Keep feature detection dynamic when QEMU removes an ISA feature.
       RUSTFLAGS: -C target-cpu=x86-64
@@ -38,6 +39,12 @@ jobs:
       - run: 'cargo test --locked --lib format::safetensors::tests::'
       - run: cargo test --locked --test system_one_cli
       - run: python3 -m unittest discover -s tools/oracle/vela3 -p 'test_*.py'
+      - run: cargo test --locked --lib ggml_dots_honor_scalar_dispatch
+      - run: RMI_SCALAR=1 cargo test --locked --lib ggml_dots_honor_scalar_dispatch
+      - run: cargo test --locked --lib hy_mt2_
+      - run: cargo test --locked --lib hy_
+      - run: RMI_SCALAR=1 cargo test --locked --lib hy_
+      - run: 'cargo test --locked --lib ops::audio::'
       - run: cargo test --locked --lib unlimited_ocr
       - run: 'cargo test --locked --lib models::diffusion::dreamx::kernels::tests::'
       - run: cargo test --locked --test unlimited_ocr_cli
@@ -55,13 +62,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: sudo apt-get update && sudo apt-get install -y glslang-tools spirv-tools
+      - run: sudo apt-get update && sudo apt-get install -y glslang-tools spirv-tools mesa-vulkan-drivers libvulkan1
       - run: bash scripts/vulkan-shaders.sh check
       - run: cargo check --locked --features vulkan --lib
       - run: cargo check --locked --features vulkan --bin rust-model-inference
       - run: cargo check --locked --features vulkan --bin rust-model-server
       - run: cargo check --locked --features vulkan --examples
       - run: 'cargo test --locked --features vulkan --lib compute::tests::'
+      - run: cargo test --locked --features vulkan --lib legacy_auto_requires_gpu_opt_in_before_initializing
+      - run: cargo test --locked --features vulkan --lib batched_linear_layout_
+      - name: Grouped linear device regressions on Lavapipe
+        run: |
+          export VK_DRIVER_FILES="$(find /usr/share/vulkan/icd.d -name 'lvp_icd*.json' -print -quit)"
+          test -n "$VK_DRIVER_FILES"
+          cargo test --locked --features vulkan --lib batched_linear_device_review_ -- --ignored --test-threads=1
       - run: cargo test --locked --features vulkan --lib raw_hidden_
       - run: 'cargo test --locked --features vulkan --lib qwen_image_2_1::gpu::tests::'
       - run: cargo test --locked --features vulkan --test qwen_image_2_1_unit --test qwen_image_2_1_pipeline

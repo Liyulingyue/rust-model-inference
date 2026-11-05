@@ -133,16 +133,9 @@ pub(super) fn require_tensor(
     expected_dims: &[u64],
     expected_type: GGMLType,
 ) -> Result<(), String> {
-    let tensor = source
-        .tensor_info(name)
-        .ok_or_else(|| format!("Missing tensor: {name}"))?;
-    if tensor.dims != expected_dims || tensor.ggml_type != expected_type {
-        return Err(format!(
-            "Invalid tensor {name}: shape {:?} type {:?}; expected {:?} {:?}",
-            tensor.dims, tensor.ggml_type, expected_dims, expected_type
-        ));
-    }
-    Ok(())
+    // Metadata only: the contracts are validated before any payload is read.
+    crate::core::tensor::require_tensor_meta(source, name, expected_dims, &[expected_type])
+        .map(|_| ())
 }
 
 pub(super) fn require_tensor_any(
@@ -151,16 +144,7 @@ pub(super) fn require_tensor_any(
     expected_dims: &[u64],
     expected_types: &[GGMLType],
 ) -> Result<GGMLType, String> {
-    let tensor = source
-        .tensor_info(name)
-        .ok_or_else(|| format!("Missing tensor: {name}"))?;
-    if tensor.dims != expected_dims || !expected_types.contains(&tensor.ggml_type) {
-        return Err(format!(
-            "Invalid tensor {name}: shape {:?} type {:?}; expected {:?} one of {expected_types:?}",
-            tensor.dims, tensor.ggml_type, expected_dims
-        ));
-    }
-    Ok(tensor.ggml_type)
+    crate::core::tensor::require_tensor_meta(source, name, expected_dims, expected_types)
 }
 
 pub(super) fn require_clippable(

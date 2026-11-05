@@ -103,6 +103,11 @@ pub struct CliOptions {
     pub allow_memory_overcommit: bool,
     pub temperature: Option<f32>,
     pub cfg_scale: Option<f32>,
+    /// Sway sampling coefficient for the AuK flow-matching time grid.
+    /// `None` (the default) uses the official `-1.0` warp.
+    pub auk_sway: Option<f32>,
+    /// Pin the AuK-Flash distilled recipe: 4 steps, CFG off.
+    pub auk_flash: bool,
     pub top_k: Option<usize>,
     pub top_p: Option<f32>,
     pub threads: usize,

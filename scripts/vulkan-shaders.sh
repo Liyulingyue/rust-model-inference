@@ -17,6 +17,7 @@ shader_names=(
     q4_k_matmul
     q4_k_matmul_cooperative
     q5_k_matmul
+    q5_k_matmul_cooperative
     q6_k_matmul
     f16_matmul
     bf16_matmul
@@ -51,6 +52,12 @@ shader_names=(
     attention_online
     attention_online_wide
     conv3d_tiled
+    conv1d_tiled
+    auk_fir
+    auk_snake
+    auk_interleave
+    auk_scale
+    q8_matmul_transposed
 )
 manifest="$root_dir/shaders/manifest.sha256"
 

@@ -120,7 +120,12 @@ impl ComputePolicy {
         self.check_build()?;
         if self == Self::Auto {
             #[cfg(feature = "vulkan")]
-            crate::ops::enable_gpu();
+            {
+                crate::ops::enable_gpu();
+                // The device takes about 300 ms to come up, and the model
+                // load that follows takes seconds, so let the two overlap.
+                crate::ops::warm_vulkan_context();
+            }
             #[cfg(not(feature = "vulkan"))]
             eprintln!("compute requested=Auto backend=Cpu reason=build_without_vulkan");
         } else if self == Self::Vulkan {
