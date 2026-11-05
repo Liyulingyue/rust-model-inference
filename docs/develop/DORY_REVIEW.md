@@ -18,6 +18,7 @@ Dory 1.0 的实现是**完整且正确的**，文档里列出的两个最大缺�
 | 项 | 结论 |
 |---|---|
 | CPU 契约 | ✓ 结构 / token / embedding 精确检查通过 |
+| 前向语义 | ✓ 与参考实现（200 行的 `dory.cpp`）逐项对拍一致，未发现正确性缺陷 |
 | Vulkan 设备路径 | ✓ GB10 上 5 个硬件测试全过，GPU↔CPU **逐位一致** |
 | 性能 | ✓ 拿到首个基线：设备路径比 CPU 快 **2.7×** |
 | CLI / HTTP / JEV | ✓ 三条入口都实测通（见下表） |
@@ -233,7 +234,34 @@ arch 不该打这句提示，或者把提示改成按 arch 措辞。
 
 见 §1.2。
 
-## 三、仍未验收的范围
+## 三、代码对拍：前向语义与参考实现逐项一致
+
+参考实现（NVIDIA 的 Dory llama.cpp fork，`src/models/dory.cpp`，**只有 200 行**）
+与 `src/models/dory/forward.rs` 逐项对照，**没有发现语义偏差**：
+
+| 参考实现 | 本仓库 | |
+|---|---|---|
+| `build_gdn_l2_norm(x, 1e-6f)` —— **L2 归一化，不是 RMSNorm** | `DoryModel::unit_norm`（按 GGML 的 `RMSNorm(eps/n)·1/√n` 写法展开） | ✓ |
+| `theta = profile[p] == 2 ? theta_2 : theta_1` | `attention_is_sliding(layer)` 选 `rope_freq_base_2 / rope_freq_base` | ✓（profile 2 ⟺ `'S'` ⟺ theta_2，仓库还在 config 层**校验**了这个不变式，比参考更严） |
+| `sq = sqr(scale(sqk, √hd / init_std))`，逐 head 广播 | `q[d] *= (qk_scale[d]·q_factor)²` | ✓ |
+| `gate = sigmoid(gate_proj · sqr(scale(gate, √gate_init / init_std)))` | `1/(1+exp(-x))`，scale 先平方 | ✓ |
+| attention scale `1/√hd` | `scale = 1/√head_dim` | ✓ |
+| `cur = norm(cur · gate)` → `wo` | `unit_norm(attn_out·gate)` → `wo` | ✓ |
+| MLP：`g·(suv_gate·√n_embd)`、`u·(suv_up·√n_embd)`、`norm(silu(g)·u)`、`ffn_down` | 同 | ✓ |
+| `alpha = abs(scale(alpha, alpha_init / init_std))`，`cur = norm(a + alpha·(b−a))` | `slerp_residual` 里 `alpha[i].abs()` | ✓ |
+| recurrent 组首 `cur = norm(cur + input_h)`（`input_h` 取自 `il == n_input`） | `prefill_chunk` 每轮开头 `h += input_h` 后 `unit_norm` | ✓ |
+| recurrent 组尾 `cur = norm(cur)` | 最后一层 recurrent 后 `unit_norm` | ✓ |
+| `logits = output(h) · (logit_scale / init_std)` | `*logit *= scale * (1/init_std)` | ✓ |
+| 张量名 `output_scale` / `blk.%d.residual_alpha` / `attn_qk_scale` / `attn_gate_scale` / `ffn_gate_scale` / `ffn_up_scale` / `attn_gate` | 同名 | ✓ |
+
+结构上也是一一对应的：参考实现里 `'S'` 是**滑窗注意力**层、`'*'` 是全注意力层、
+`'-'` 是 MLP 层，仓库用同一套 `layer_pattern` 规则分类；`per_loop` / `last_loop`
+只影响 recurrent 层的 KV 落点（参考实现 `cache_layer.push_back(… last_loop ? p : il)`）。
+
+**没找到前向路径的正确性缺陷。** 剩下的风险在别处：提示构造（F1、F2）与设备路径的
+覆盖（F3、§一）。
+
+## 四、仍未验收的范围
 
 | 范围 | 状态 | 说明 |
 |---|---|---|
@@ -242,7 +270,7 @@ arch 不该打这句提示，或者把提示改成按 arch 措辞。
 | Q6_K | 仅为计算路径 | Q6_K 文件是由 Q5_K 重新量化得到的测试文件，不代表官方原生 Q6 的质量。 |
 | 其它 GPU / 驱动 | 部分 | 现在有 AMD RADV NAVI31 与 NVIDIA GB10 两家；软件 ICD（lavapipe 等）会被 `is_software_icd()` 拒绝。 |
 
-## 四、复现
+## 五、复现
 
 ```sh
 # 权重（ModelScope 上没有这个 repo，走 HF 镜像）
