@@ -119,7 +119,7 @@
     "jev_text": "red 0.9825 / blue 0.0175",
     "jev_image": "blue 0.9999 / red 0.0001",
     "vulkan_text": "the 40-step greedy output is identical to the CPU's",
-    "vulkan_image": "backend=partial mode=mmproj: the vision tower has no device path and runs on the CPU",
+    "vulkan_image": "the tower's matmuls run on the device (the compute trace prints backend=Vulkan); the attention, norm and softmax parts stay on the CPU, so the CLI still reports backend=partial mode=mmproj",
     "invalid_nemotron_with_qwen3vl": "clip.projector_type nemotron_v2_vl is not supported with architecture qwen3vl"
   },
   "checks": {
@@ -134,7 +134,7 @@
   "limitations": [
     "The GGUF's position embeddings are the upstream 128x128 table interpolated with align_corners=True, while the upstream inference interpolates with align_corners=False. The tables differ by relative L2 0.629774 and the projected features by 0.2015. The Rust encoder implements the GGUF contract, which is also llama.cpp's.",
     "The upstream path normalizes twice (the image processor with the ImageNet statistics, then the tower's conditioner with the CLIP statistics); llama.cpp and the Rust engine normalize once with the GGUF's statistics. The faithful upstream path differs from llama.cpp by relative L2 4.54.",
-    "The vision tower has no device path: on Vulkan the image runs on the CPU while the text tower runs on the device, and the CLI reports backend=partial mode=mmproj.",
+    "The vision tower's device path covers the matmuls only: the attention, norm and softmax parts stay on the CPU, so the CLI still reports backend=partial mode=mmproj. The device path is also not faster than the CPU yet -- the projection takes 36.93 s on the CPU and 27.62 s on the device, because every weight rebuilds its device pipeline (see TODO-049).",
     "The HTTP usage counters do not include the vision placeholder tokens, so an image request reports the text prompt's token count. This is the shared HTTP runtime's behaviour for every multimodal model, not specific to this one.",
     "No Intern-Decision-4B-style larger variant, video or audio input, or performance benchmark is claimed."
   ],

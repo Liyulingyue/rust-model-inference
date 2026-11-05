@@ -223,7 +223,7 @@ Measured with the Q4_K_M text tower and the BF16 projector:
 | JEV, text | `red` 0.9825 / `blue` 0.0175 |
 | JEV, image | `blue` 0.9999 / `red` 0.0001 |
 | Vulkan, text | the 40-step greedy output is identical to the CPU's |
-| Vulkan, image | `backend=partial mode=mmproj`, the vision tower runs on the CPU |
+| Vulkan, image | the tower's matmuls run on the device (`backend=Vulkan` in the compute trace); the attention, norm and softmax parts stay on the CPU, so the CLI still reports `backend=partial mode=mmproj` |
 
 The three-colour check matters: a model that never saw the image can still
 answer "blue" for a blue question.

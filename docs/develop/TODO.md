@@ -444,27 +444,26 @@ MiniCPM-V 4.7 的 `qwen35moe`（35B-A3B）此前只在**生成面**注册，多�
       与 PhysBrain 那条不同，这里不是近似平局翻转，而是包络本身太贴边。
       选项：① 把界限放宽到 0.035 并如实记录两台主机的实测值；② 换 top-1 差距更大的
       提示重录；③ 记录 top-k 命中率作为辅助判据。
-- [ ] **ZDTaichu5.0 视觉塔上 GPU（先打通能力，再做计算优化）** — 现在 ZDT 的**文本塔**
-      能上 Vulkan，**视觉塔（RADIO v4-H）恒在 CPU**：`src/models/zdt/vision/` 把权重读成裸
-      `Vec<f32>`（`load_f32_tensor` 全部反量化）再用 `crate::ops::dot_f32` 逐元素算，结构上
-      没有设备路径。CLI 会报 `backend=partial mode=mmproj`，HTTP 侧则直接拒绝
-      （`--compute vulkan` + `--mmproj` → "full Vulkan runtime supports text input only"）。
-      实测（aarch64 + NVIDIA GB10，Q4_K_M 文本 + BF16 mmproj）：图像 1 token 的 prefill
-      **CPU 7.94s / Vulkan 23.03s**（视觉塔独占大头；文本 prefill CPU 0.94s、Vulkan 1.92s；
-      文本 40 步 decode CPU 13.5 t/s、Vulkan 6.6 t/s）。
-      **第一步（先能 GPU）**：照 `src/models/qwen35/vision/` 的做法，权重改走
-      `Weight::from_quantized(QuantizedTensor::from_bytes(...))`（保持 GGUF 的 BF16，不再反量化
-      成 F32：RAM 3.3GB→1.6GB），attention/softmax/norm 换成 `src/vulkan/ops.rs` 的设备分发
-      算子。CPU 侧已是可信参考（对 llama.cpp relative L2 0.00036、对上游 PyTorch 0.00147），
-      验收判据：同一 llama.cpp 参考下 GPU relative L2 ≤ 0.001，且 CPU↔GPU 相对差 ≤ 1e-3。
-      **第二步（再优化）**：dispatch 开销、批量、权重常驻与上传、文本塔 GPU 效率。
-      预期：视觉 prefill 7.94s → 0.2–0.5s；但本机 GPU 对 9B 文本塔慢 2 倍，所以图像请求
-      端到端约 8s → 2s，GPU 的真正收益在批量与长上下文。
-      顺带：改用 `Weight` 后 `qwen3::vision::matmul_f32_weight` 不再需要 `pub(crate)`。
-      **第一步已完成（2026-11-05）**：塔的矩阵权重改走 `Weight`（保持 BF16、零拷贝映射字节），
-      matmul 先试 `try_vulkan_rows` 再回落共享 kernel；CPU 数值不变（对 llama.cpp
-      relative L2 0.00035960 → 0.00035960，差 ~1e-7），设备路径与 CPU 差 ~5e-7 且过同一组界；
-      视觉投影 CPU 36.9s → 设备 27.6s（首帧含 1.6GB 权重上传）。
+- [ ] **ZDTaichu5.0 视觉塔上 GPU（先打通能力，再做计算优化）** — **第一步已完成（2026-11-05）**：
+      塔的矩阵权重改走 `Weight`（保持 GGUF 的 BF16、零拷贝借映射字节，不再反量化成 F32：
+      匿名内存 3.3GB→无副本），matmul 先试 `try_vulkan_rows` 再回落共享 kernel → 视觉塔
+      （RADIO v4-H）的投影现在**能在设备上跑**，CPU↔设备相对差 ~5e-7。
+      验收判据（同一 llama.cpp 参考下 GPU relative L2 ≤ 0.001，CPU↔GPU 相对差 ≤ 1e-3）已达成：
+      设备 0.00035911 / 0.00470339 / 0.00147061，CPU 侧数值不变（0.00035960 / 0.00470345 /
+      0.00147076，与改动前差 ~1e-7）。
+      改动前的现状（留档）：**文本塔**能上 Vulkan，**视觉塔恒在 CPU** ——
+      `src/models/zdt/vision/` 把权重读成裸 `Vec<f32>`（`load_f32_tensor` 全部反量化）再用
+      `crate::ops::dot_f32` 逐元素算，结构上没有设备路径；CLI 报 `backend=partial mode=mmproj`，
+      HTTP 直接拒绝（`--compute vulkan` + `--mmproj` → "full Vulkan runtime supports text
+      input only"）。
+      实测（aarch64 + NVIDIA GB10，Q4_K_M 文本 + BF16 mmproj）：**视觉投影**（单独计时）
+      CPU 36.93s → 设备 27.62s；文本 40 步 decode CPU 13.5 t/s、Vulkan 6.6 t/s。
+      ⚠ 旧记录里"图像 1 token 的 prefill CPU 7.94s / Vulkan 23.03s（视觉塔独占大头）"是
+      **误归因**：CLI 报的 `prefill=` 只含文本 prefill，**不含视觉编码**，视觉塔的耗时当时
+      没被计入（所以数字看着比实际小一个量级）。
+      **第二步（再优化）仍在**：dispatch 开销、批量、权重常驻与上传、文本塔 GPU 效率；
+      本机 GPU 对 9B 文本塔慢 2 倍，GPU 的真正收益在批量与长上下文。
+      顺带：改用 `Weight` 后 `qwen3::vision::matmul_f32_weight` 已退回私有。
       **第二步（优化）仍在，且第一步不是"激活常驻"**：trace 把 27.6s 全部解释掉了 ——
       `GpuLinear` 的 runtime 缓存按**权重指针**分桶（`src/ops/kernel/vulkan.rs`），每个权重
       都要重建一次管线，实测 **213ms/次 × 131 个权重 = 27.9s**（≈100%）；fence 只有
