@@ -209,6 +209,53 @@ mod tests {
         }
     }
 
+    /// The transpose is a permutation of the bytes, not a rewrite of them.
+    ///
+    /// This is the structural half of the correctness argument: if the
+    /// layout can be undone, the device kernel reads exactly the values
+    /// ggml stored, so the device result cannot differ from the CPU one
+    /// because of the layout.
+    #[test]
+    fn transposed_layout_round_trips_to_the_same_bytes() {
+        for (n_in, n_out) in [
+            (32, 1),
+            (32, 63),
+            (32, 64),
+            (32, 65),
+            (64, 127),
+            (32 * 5, 130),
+        ] {
+            let blocks = n_in / PAYLOAD_BYTES;
+            let mut native = Vec::new();
+            for out in 0..n_out {
+                native.extend_from_slice(&native_row(out, blocks));
+            }
+            let packed = transpose_q8_0_weight(&native, n_in, n_out);
+            // Undo the layout tile by tile.
+            let mut restored = vec![0u8; n_out * blocks * BLOCK_BYTES];
+            for tile in 0..n_out.div_ceil(TILE_ROWS) {
+                let first = tile * TILE_ROWS;
+                let rows = (n_out - first).min(TILE_ROWS);
+                let tile_base = tile * blocks * TILE_ROWS * BLOCK_BYTES;
+                for block in 0..blocks {
+                    let block_base = tile_base + block * TILE_ROWS * BLOCK_BYTES;
+                    for row in 0..rows {
+                        let out = first + row;
+                        let source = out * blocks * BLOCK_BYTES + block * BLOCK_BYTES;
+                        restored[source] = packed[block_base + TILE_ROWS * PAYLOAD_BYTES + row * 2];
+                        restored[source + 1] =
+                            packed[block_base + TILE_ROWS * PAYLOAD_BYTES + row * 2 + 1];
+                        restored[source + 2..source + BLOCK_BYTES].copy_from_slice(
+                            &packed[block_base + row * PAYLOAD_BYTES
+                                ..block_base + row * PAYLOAD_BYTES + PAYLOAD_BYTES],
+                        );
+                    }
+                }
+            }
+            assert_eq!(restored, native, "n_in={n_in} n_out={n_out}");
+        }
+    }
+
     #[test]
     fn transposed_layout_survives_a_partial_tile() {
         // 70 output rows and 3 blocks do not fill a tile, so the edges of

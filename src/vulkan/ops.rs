@@ -9434,7 +9434,8 @@ mod tests {
             let q8 = region(&mut cursor, ROWS * width).unwrap();
             let scales = f32_region(&mut cursor, ROWS * width / 32 * 4).unwrap();
             let output = f32_region(&mut cursor, ROWS * OUTPUTS * 4).unwrap();
-            let mut ops = Qwen3Ops::new_with_size(&context, cursor, 2).unwrap();
+            // Three descriptor sets: the arena and the two weight layouts.
+            let mut ops = Qwen3Ops::new_with_size(&context, cursor, 3).unwrap();
             let coefficients = [
                 [47i8, -89, 13, 102, -63, 7, -31, 19],
                 [-101, 37, 83, -11, 59, -73, 23, -5],
@@ -9453,6 +9454,14 @@ mod tests {
             let bindings = ops
                 .bind_weight_buffers(&[buffer], &[GpuWeightFormat::Q8_0])
                 .unwrap();
+            // The same weight in the transposed layout: the kernel reads the
+            // same values, so it has to produce the same golden bits.
+            let transposed_weight =
+                crate::vulkan::q8_layout::transpose_q8_0_weight(&weight, width, OUTPUTS);
+            let transposed_buffer = unsafe { context.upload_static(&transposed_weight) }.unwrap();
+            let transposed_bindings = ops
+                .bind_weight_buffers(&[transposed_buffer], &[GpuWeightFormat::Q8_0])
+                .unwrap();
             let input: Vec<f32> = (1..=ROWS as u8)
                 .flat_map(|value| {
                     std::iter::repeat_n(f32::from_bits(u32::from_le_bytes([value; 4])), width / 4)
@@ -9469,6 +9478,7 @@ mod tests {
                     Q8_MATMUL_COOPERATIVE,
                     Q8_MATMUL_GROUPED_TILED_WIDE,
                     Q8_MATMUL_GROUPED_TILED_WIDE_ADD,
+                    Q8_MATMUL_TRANSPOSED,
                 ] {
                     // The two wide kernels fold the host's accumulation
                     // contract into the shader instead of testing
@@ -9485,10 +9495,15 @@ mod tests {
                     if pipeline != Q8_MATMUL_GROUPED && !ops.q8_tiled {
                         continue;
                     }
+                    let transposed = pipeline == Q8_MATMUL_TRANSPOSED;
                     let (mut push, mut dispatch) = matmul_rows_push(
                         cursor,
                         &context.limits,
-                        bindings,
+                        if transposed {
+                            transposed_bindings
+                        } else {
+                            bindings
+                        },
                         q8,
                         scales,
                         None,
@@ -9514,7 +9529,17 @@ mod tests {
                     ops.write_f32(output, &vec![f32::NAN; ROWS * OUTPUTS])
                         .unwrap();
                     let commands = TokenCommands::begin(&context).unwrap();
-                    ops.record_linear_dispatch(&commands, pipeline, bindings, &push, dispatch);
+                    ops.record_linear_dispatch(
+                        &commands,
+                        pipeline,
+                        if transposed {
+                            transposed_bindings
+                        } else {
+                            bindings
+                        },
+                        &push,
+                        dispatch,
+                    );
                     commands.submit_and_wait().unwrap();
                     let actual = ops.read_f32(output, ROWS * OUTPUTS).unwrap();
                     for (token, row) in actual.chunks_exact(OUTPUTS).enumerate() {
@@ -9528,7 +9553,11 @@ mod tests {
                     }
                 }
             }
-            unsafe { context.destroy_completed_buffers(&[buffer]) }.unwrap();
+            unsafe {
+                context
+                    .destroy_completed_buffers(&[buffer, transposed_buffer])
+                    .unwrap();
+            }
         }
     }
 
@@ -11512,6 +11541,71 @@ mod tests {
             bytes / transposed_time / 1e9,
             native_time / transposed_time,
         );
+    }
+
+    /// The transposed layout on the shapes where the tile arithmetic can go
+    /// wrong: an output count that is not a multiple of the tile width, a
+    /// single output row, and the smallest input a Q8_0 block allows.
+    ///
+    /// The native and the transposed kernel have to agree bit for bit on
+    /// every one of them.
+    #[test]
+    #[ignore = "requires a Vulkan device; timing harness, not a correctness gate"]
+    fn q8_0_transposed_layout_matches_on_edge_shapes() {
+        use super::*;
+        for (n_in, n_out) in [
+            (32, 1),
+            (32, 63),
+            (32, 64),
+            (32, 65),
+            (64, 127),
+            (32 * 5, 130),
+            (2304, 129),
+        ] {
+            let native = synthetic_weight(GpuWeightFormat::Q8_0, n_in, n_out);
+            let transposed = crate::vulkan::q8_layout::transpose_q8_0_weight(&native, n_in, n_out);
+            let run = |weight: &[u8], pipeline: usize| -> Vec<f32> {
+                let context = VulkanContext::new().unwrap();
+                let mut cursor = 0;
+                let q8 = region(&mut cursor, n_in).unwrap();
+                let scales = f32_region(&mut cursor, n_in / 32).unwrap();
+                let sums = f32_region(&mut cursor, n_in / 32).unwrap();
+                let output = f32_region(&mut cursor, n_out).unwrap();
+                let mut ops = Qwen3Ops::new_with_size(&context, cursor, 2).unwrap();
+                let buffer = unsafe { context.upload_static(weight) }.unwrap();
+                let bindings = ops
+                    .bind_weight_buffers(&[buffer], &[GpuWeightFormat::Q8_0])
+                    .unwrap();
+                let (push, _) = matmul_rows_push(
+                    cursor,
+                    &context.limits,
+                    bindings,
+                    q8,
+                    scales,
+                    Some(sums),
+                    &[(output, n_out, n_out * 4)],
+                    n_in,
+                    1,
+                    n_in,
+                )
+                .unwrap();
+                let dispatch = row_dispatch(n_out.div_ceil(64), 1, &context.limits).unwrap();
+                let commands = TokenCommands::begin(&context).unwrap();
+                ops.record_linear_dispatch(&commands, pipeline, bindings, &push, dispatch);
+                commands.submit_and_wait().unwrap();
+                let values = ops.read_f32(output, n_out).unwrap();
+                unsafe { context.destroy_completed_buffers(&[buffer]) }.unwrap();
+                values.to_vec()
+            };
+            let native_values = run(&native, Q8_MATMUL_GROUPED);
+            let transposed_values = run(&transposed, Q8_MATMUL_TRANSPOSED);
+            let mismatches = native_values
+                .iter()
+                .zip(transposed_values.iter())
+                .filter(|(left, right)| left.to_bits() != right.to_bits())
+                .count();
+            assert_eq!(mismatches, 0, "n_in={n_in} n_out={n_out}");
+        }
     }
 
     /// How much bandwidth the device can actually stream on this box.
