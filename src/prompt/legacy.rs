@@ -116,7 +116,9 @@ pub fn default_template(arch: &str) -> Option<ChatTemplate> {
         // GGUF `tokenizer.chat_template` field for these archs. Falcon-H1
         // ships a Qwen-style im_start/im_end template too.
         "qwen2" | "qwen2vl" | "qwen3" | "qwen3vl" | "qwen3vlmoe" | "qwen35" | "qwen35moe"
-        | "edge0" | "qwen3tts" | "nemotron_h" | "falcon-h1" | "mellum" => ChatTemplate::ChatML,
+        | "edge0" | "sensenova_loop" | "qwen3tts" | "nemotron_h" | "falcon-h1" | "mellum" => {
+            ChatTemplate::ChatML
+        }
 
         // Dory 1.0 ships the same `<|im_start|>role\n … <|im_end|>\n` markers
         // as the Qwen family (its GGUF `tokenizer.chat_template` is ChatML

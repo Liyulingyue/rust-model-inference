@@ -88,7 +88,10 @@ impl ComputePolicy {
     /// real device, and a model offloads what it can. This list is where
     /// the caller learns that only part of the graph qualifies.
     pub fn has_complete_device_path(arch: &str) -> bool {
-        matches!(arch, "llama" | "qwen3" | "qwen35" | "qwen35moe" | "dory")
+        matches!(
+            arch,
+            "llama" | "qwen3" | "qwen35" | "qwen35moe" | "dory" | "sensenova_loop"
+        )
     }
 
     pub fn validate_text_arch(self, arch: &str) -> Result<(), String> {

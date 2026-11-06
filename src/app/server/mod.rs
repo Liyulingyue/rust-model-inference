@@ -1631,7 +1631,10 @@ fn build_text(options: &CliOptions) -> Result<(TextBackend, Option<WeVisOneExtra
                 let context = runtime.context_length();
                 (Some(std::sync::Mutex::new(runtime)), context)
             }
-            Err(error) if options.compute_policy() == crate::compute::ComputePolicy::Vulkan => {
+            Err(error)
+                if options.compute_policy() == crate::compute::ComputePolicy::Vulkan
+                    || arch == crate::models::sensenova_loop::ARCH =>
+            {
                 return Err(error)
             }
             Err(error) => {
