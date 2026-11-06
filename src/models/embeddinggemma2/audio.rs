@@ -959,12 +959,12 @@ impl<'a> EmbeddingGemmaAudioModel<'a> {
             }
         }
         let mut relative_keys = vec![0.0f32; REL_POSITIONS * h];
-        for p in 0..REL_POSITIONS {
-            layer.self_attn_relative_k_proj.forward(
-                &rel_input[p * h..(p + 1) * h],
-                &mut relative_keys[p * h..(p + 1) * h],
-            );
-        }
+        layer.self_attn_relative_k_proj.forward_rows(
+            &self.pool,
+            &rel_input,
+            &mut relative_keys,
+            REL_POSITIONS,
+        );
 
         let mut attn_out = vec![0.0f32; n_frames * h];
         for block in 0..num_blocks {
@@ -1050,18 +1050,34 @@ impl<'a> EmbeddingGemmaAudioModel<'a> {
             }
         }
         let mut conv_output = vec![0.0f32; n_frames * h];
-        for t in 0..n_frames {
-            for ch in 0..h {
-                let mut value = 0.0f32;
-                for kernel in 0..5 {
-                    let src_t = t as isize + kernel as isize - 4;
-                    if src_t >= 0 {
-                        value += conv_input[src_t as usize * h + ch]
-                            * layer.lconv1d_depthwise_weight[ch * 5 + kernel];
+        {
+            let weight = &layer.lconv1d_depthwise_weight;
+            let input_ptr = conv_input.as_ptr();
+            let output_ptr = conv_output.as_mut_ptr();
+            self.pool.compute(move |ith, nth| {
+                let (start, end) =
+                    crate::ops::kernel::f32::scalar::row_range(n_frames * h, ith, nth);
+                if start >= end {
+                    return;
+                }
+                // SAFETY: the ranges are disjoint and every index stays inside
+                // the slices the caller checked.
+                unsafe {
+                    for idx in start..end {
+                        let t = idx / h;
+                        let ch = idx % h;
+                        let mut value = 0.0f32;
+                        for kernel in 0..5 {
+                            let src_t = t as isize + kernel as isize - 4;
+                            if src_t >= 0 {
+                                value += std::ptr::read(input_ptr.add(src_t as usize * h + ch))
+                                    * weight[ch * 5 + kernel];
+                            }
+                        }
+                        std::ptr::write(output_ptr.add(idx), value);
                     }
                 }
-                conv_output[t * h + ch] = value;
-            }
+            });
         }
         rms_norm_rows(&mut conv_output, h, &layer.lconv1d_conv_norm);
         for value in &mut conv_output {
