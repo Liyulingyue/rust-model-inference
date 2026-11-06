@@ -19,6 +19,7 @@ fn text_forward_returns_768_dim_finite_embedding() {
     let model =
         rust_model_inference::models::embeddinggemma2::EmbeddingGemmaTextModel::from_source(
             source.as_ref(),
+            8,
         )
         .expect("EmbeddingGemmaTextModel::from_source");
 

@@ -62,7 +62,7 @@ fn vision_matches_huggingface_oracle() {
     let source: Arc<dyn rust_model_inference::TensorSource> = Arc::new(loader);
     let model =
         rust_model_inference::models::embeddinggemma2::EmbeddingGemmaVisionModel::from_source(
-            &source,
+            &source, 8,
         )
         .expect("EmbeddingGemmaVisionModel::from_source");
     let image_h = 48;
@@ -123,6 +123,7 @@ fn compare_embedding(
     let model =
         rust_model_inference::models::embeddinggemma2::EmbeddingGemmaTextModel::from_source(
             source.as_ref(),
+            8,
         )
         .unwrap();
     assert!(model

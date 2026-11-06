@@ -697,6 +697,7 @@ fn main() {
                     image,
                     audio,
                     prompt,
+                    options.threads,
                 )
             }
         } else {

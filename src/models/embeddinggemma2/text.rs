@@ -346,8 +346,8 @@ pub struct EmbeddingGemmaTextModel<'a> {
 }
 
 impl<'a> EmbeddingGemmaTextModel<'a> {
-    pub fn from_source(source: &'a dyn TensorSource) -> Result<Self, String> {
-        let pool = Arc::new(ComputePool::new(8));
+    pub fn from_source(source: &'a dyn TensorSource, n_threads: usize) -> Result<Self, String> {
+        let pool = Arc::new(ComputePool::new(n_threads.max(1)));
         let config = EmbeddingGemmaTextConfig::from_metadata(source)?;
 
         let get_f32 = |name: &str, expected: usize| -> Result<Vec<f32>, String> {
@@ -962,7 +962,7 @@ mod tests {
                 per_layer_width: 2,
                 n_ctx: 1024,
             },
-            pool: Arc::new(ComputePool::new(1)),
+            pool: Arc::new(ComputePool::new(8)),
             token_embd: vec![],
             text_embproj: zero(),
             per_layer_model_proj: zero(),

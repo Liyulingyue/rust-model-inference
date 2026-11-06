@@ -265,9 +265,12 @@ pub struct EmbeddingGemmaVisionModel<'a> {
 }
 
 impl<'a> EmbeddingGemmaVisionModel<'a> {
-    pub fn from_source(source: &'a Arc<dyn TensorSource>) -> Result<Self, String> {
+    pub fn from_source(
+        source: &'a Arc<dyn TensorSource>,
+        n_threads: usize,
+    ) -> Result<Self, String> {
         let config = EmbeddingGemmaVisionConfig::from_metadata(source.as_ref())?;
-        let pool = Arc::new(ComputePool::new(8));
+        let pool = Arc::new(ComputePool::new(n_threads.max(1)));
 
         // patch_input_proj: stored as `[embd, in_channels * patch * patch]`.
         // GGUF stores `[embd, 3*16*16]` (reversed: last dim first).
