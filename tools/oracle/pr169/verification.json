@@ -658,6 +658,36 @@
       "http_jev_score": "choice A with probability 0.9999444",
       "http_jev_image": "choice A ('blue') with probability 0.9999787",
       "server": "rust-model-server --model ... --mmproj ... --compute auto; the Vulkan device is picked up (NVIDIA GB10)"
+    },
+    "performance": {
+      "host": "aarch64 + NVIDIA GB10, 8 threads, release-fast, Q8_0",
+      "text_32_tokens": {
+        "cpu": {
+          "prefill_s": 1.088281,
+          "decode_s": 2.033819,
+          "tokens_per_s": 15.2,
+          "end_to_end_tok_s": 10.2
+        },
+        "vulkan": {
+          "prefill_s": 0.631876,
+          "decode_s": 8.164168,
+          "tokens_per_s": 3.8,
+          "end_to_end_tok_s": 3.6
+        }
+      },
+      "image_1_token": {
+        "cpu": {
+          "vision_encode_s": 0.54,
+          "prefill_s": 1.596295,
+          "decode_s": 0.05918
+        },
+        "vulkan": {
+          "vision_encode_s": 0.539,
+          "prefill_s": 1.031717,
+          "decode_s": 0.271207
+        }
+      },
+      "note": "the device wins on prefill and loses 4x on decode: every token routes through 360 single-row expert projections (8 of 256 per layer, 40 layers), which is the same shape as the Mellum dispatch finding in TODO-052; see TODO-055"
     }
   }
 }

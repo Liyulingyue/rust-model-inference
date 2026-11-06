@@ -3907,3 +3907,38 @@ PhysBrain 的入口矩阵都没有覆盖"交互 + mmproj"这一格，所以没�
 
 **关联**：`src/main.rs`（多模态分支与交互分支的顺序）、
 `src/app/text/generation.rs::run_interactive_qwen35`（mmproj 写死 None）。
+
+---
+
+### TODO-055: qwen35moe（Occamy-1.0）的设备 decode 比 CPU 慢 4 倍 —— 每 token 320 次专家投影太碎
+
+**实测**（aarch64 + NVIDIA GB10，Q8_0，8 线程，`--temperature 0`）：
+
+| 场景 | | CPU | Vulkan | 设备/CPU |
+| --- | --- | --- | --- | --- |
+| 文本 32 token | prefill | 1.088 s | **0.632 s** | **0.58×** ✅ |
+| | decode 32 token | 2.034 s | 8.164 s | **4.0×** ❌ |
+| | 生成速率 | **15.2 t/s** | 3.8 t/s | 0.25× ❌ |
+| | 端到端 | 10.2 tok/s | 3.6 tok/s | 0.35× ❌ |
+| 图像（1 token） | 视觉编码 | 0.540 s | 0.539 s | 1.00×（塔的注意力/SSM 仍在 CPU） |
+| | prefill | 1.596 s | **1.032 s** | 0.65× ✅ |
+
+**原因**：Occamy 每 token 每层要算 **8 个路由专家**（256 选 8）+ 1 个共享专家，
+40 层 → 每 token **360 次极小的投影**（1×2048 → 1×512）。设备的 prefill（一次几百行）
+划算 ✓，但 decode 是 360 次单行 dispatch ✗ → 每次的固定开销大于那点算力 ✗。
+
+与仓库里已有的结论同源：TODO-052（Mellum 的 784 次 pool dispatch）、LFM2.5 的
+`min_gpu_matmul_outputs` 阈值（单行投影留在 CPU）。**qwen35moe 的 decode 目前没有
+类似的"留在 CPU"策略** —— 单行专家投影在设备上必然亏。
+
+**待办**：
+
+1. 给 qwen35moe 的 decode 加阈值：专家投影的行数太少时留在 CPU（与
+   `min_gpu_matmul_outputs` 同思路），至少让 `--compute vulkan` 的 decode 不比 CPU 慢。
+2. 或者让专家权重常驻设备、按层合并成一次 dispatch（`BatchedLinearRuntime::with_output_slots`
+   + `run_group_gpu` 已支持一个 command buffer 里记多个 matmul ✓）。
+3. 视觉塔那边：只有 matmul 上了设备，注意力/SSM 仍在 CPU → 视觉编码在设备上没有收益
+   （0.539 s vs 0.540 s）。要么补齐，要么在文档里说明。
+
+**关联**：`src/models/qwen35/trunk/moe.rs`、`src/models/qwen35/vision/mod.rs`、
+`src/ops/kernel/vulkan.rs`（`min_gpu_matmul_outputs`）、TODO-052。
