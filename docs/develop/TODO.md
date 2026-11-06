@@ -633,6 +633,21 @@ ggml-org/llama.cpp 的一部分**——它们是 `microsoft/BitNet` 私有 fork 
       真实 CLI、模型契约、固定 llama.cpp Oracle 的完整输出对照见
       [复现记录](../../tools/oracle/intern_decision/README.md) 和
       [哈希/指标](../../tools/oracle/intern_decision/verification.json)。
+- [x] **Occamy-1.0 适配与真实权重数值对齐** — GGUF arch=`qwen35moe`，复用既有 Qwen3.5 MoE
+      主干与 routed/shared expert 实现，删除重复的模型专属代码；共享专家宽度按 llama.cpp 的
+      做法在 `expert_shared_feed_forward_length` 缺失时回落到 `n_ff`，并校验共享专家张量的
+      形状与载荷。官方 Q8_0 + F16 mmproj 的文本/图像 CLI 已跑通；视觉投影 relative L2=0.3362%
+      （F32 激活参考），标量参考 8 步 greedy 一致。默认近似路径在候选分数接近时有措辞分叉
+      （相同 token 历史 logits relative L2 ≤8.482%），不保证所有 greedy 相同。
+      复现记录见 [对齐记录](../../tools/oracle/pr169/README.md) 和
+      [哈希/指标](../../tools/oracle/pr169/verification.json)。
+      **2026-11-05 在 aarch64（GB10）复验**：真实权重 SHA-256 与记录一致；greedy 与
+      llama.cpp **8/8 逐 token 相同**（且与记录的默认行一致）；视觉投影 relative L2
+      **0.00070317**（记录 0.00336，界 0.01）；tokenizer 逐条精确一致；CLI 蓝图 → `blue`
+      （CPU 与 Vulkan 都对）。**但逐步 logits 包络不跨主机**：本机 step 6 = 0.11984，
+      超过记录的界 0.1（记录那次自身最大 0.08481，本来就贴边），argmax 两台机器都一致。
+      脆弱点是 step 4：llama.cpp 的 top-2 margin 0.247，Rust 侧只有 0.039。详见
+      **TODO-053**。
     - 无损载荷/layout/token IDs 使用精确检查；量化、低精度舍入、近似激活使用明确数值误差界限。
     - 未覆盖：**Intern-Decision-4B 真实权重**（转换器已支持并校验形状，但引擎的 Qwen3.5 recurrent
       投影尚不接受该 SSM 形状，暂时不能推理）、GPU 数值对齐、性能基准。
@@ -3829,3 +3844,149 @@ barrier 与常驻 worker 不兼容而不可用），收益 1.66× → 1.8×，�
 这条对**所有模型**都成立（任何走 `pool.compute` 做逐投影 dispatch 的 trunk），不只 Mellum。
 改的时候顺带把接口设计成能同时喂给 CPU 和设备（照 `record_group_matmul` 的形状：一层一次、
 多个权重共用一个 command buffer），以后接设备就只是换个 backend，而不是再改一遍 trunk。
+
+---
+
+### TODO-053: Occamy-1.0 的 logits 包络不跨主机（step 6 越界），且 CPU 与设备的 greedy 不同
+
+**现象一：包络越界。** `tools/oracle/pr169` 的 Occamy 默认路径界限是 relative L2 ≤ 0.1，
+记录那次（Apple Silicon）逐步为 0.0848/0.0775/0.0390/0.0426/0.0497/0.0707/0.0617/0.0580
+—— 自身最大值 0.0848 已经贴边。2026-11-05 在 aarch64（GB10）用同一份权重复验，逐步为
+0.0873/0.0491/0.0243/0.0240/0.0336/0.0684/**0.1198**/0.0805 → **step 6 越界**。
+
+不是实现问题：argmax 与 llama.cpp **每一步都一致**（8/8 greedy 逐 token 相同，且与
+记录那次相同）；视觉投影 relative L2 0.00070（记录 0.00336）；tokenizer 精确一致。
+脆弱点是 step 4 —— llama.cpp 的 top-2 margin 是 0.247，Rust 侧只有 0.039，
+host 之间的近似差异足以翻这一步的 token（记录那次就翻了）。
+
+**现象二：CPU 与设备的 greedy 不同。** 同一提示、同为 `--temp 0`：
+
+- CPU：`2 + 2 = 4`
+- Vulkan：`2 + 2 equals **4**.`
+
+**在 `origin/main`（不含任何 Occamy 改动）上完全复现** → 不是这条分支引入的。
+而 TODO-043 那段写的「occamy-1.0 在 `--temp 0` 下 GPU 与 CPU 逐位一致」用的是**另一份
+权重**（含 110 个 F32 二维权重），对这份 Q8_0 checkpoint 不成立。
+
+**待办**：
+
+1. Occamy 的逐步界限改成**两台主机都如实记录**的形式（像 Intern-Decision 那条：把
+   界限放宽到能容纳两台主机的实测值，并保留逐 step 数值），不要让界限只对一台主机成立。
+2. 现象二要么定位到具体算子（MoE 路由在设备上的专家选择、还是 Q8_0 量化路径），
+   要么把 TODO-043 里那句「逐位一致」限定清楚（哪份权重、哪个 host、哪个 arch）。
+   设备侧 MoE 路由目前没有逐层专家 id 的对拍手段 —— `src/models/qwen35/trunk/moe.rs`
+   有 `ffn_moe_topk` 的 trace，但 llama.cpp 参考侧没有对应 dump。
+
+**关联**：`tools/oracle/pr169/{README.md,verification.json}`（`occamy_reverification_2026_11_05`）、
+`src/models/qwen35/trunk/moe.rs`、`src/ops/kernel/qtensor_owned.rs`（设备 Q8_0 路径）。
+
+---
+
+### TODO-054: `--mmproj` + `--interactive` 会静默丢掉交互 REPL，按空提示跑一次
+
+**现象**：
+
+```sh
+printf 'What is 2+2?\n' | rust-model-inference --model occamy-Q8_0.gguf \
+    --mmproj mmproj-occamy-F16.gguf --interactive
+```
+
+不报错、不进 REPL，直接按**空的** `--prompt` 生成一次。模型回
+`Hello! How can I help you today?` —— 因为它根本没看到问题。
+同样的命令去掉 `--mmproj` 就正常（进 REPL、提示 19 token、答 `2 + 2 = 4`）。
+
+**根因**：`src/main.rs` 的分支顺序。带 `--mmproj`（且 arch 不是 `qwen3vl`）时，
+`else if !options.jev && (image.is_some() || … || (explicit_mmproj.is_some() && arch != "qwen3vl"))`
+先命中 → 走 `run_multimodal_with_video(..., prompt = options.prompt, ...)`，
+而 `--prompt` 为空 → 空提示跑一次就结束。交互分支在后面的 `else` 里，
+永远轮不到。`run_interactive_qwen35` 里也把 `mmproj_path` 写死成 `None`，
+所以即使进了 REPL 也用不上 mmproj。
+
+**归属**：main 既有（该分支与 Occamy 工作无关），影响所有带 mmproj 的
+qwen35 / qwen35moe / edge0 / qwen3vlmoe 家族。ZDTaichu5.0、Intern-Decision、
+PhysBrain 的入口矩阵都没有覆盖"交互 + mmproj"这一格，所以没被发现。
+
+**待办**：
+
+1. `--mmproj` 与 `--interactive` 同时出现时，要么明确报错（"交互模式暂不支持 mmproj"），
+   要么把 mmproj 传进 `run_interactive_qwen35` 并让它走 qwen35 多模态路径
+   （main.rs:1179-1182 的注释本来就写着"qwen35 多模态栈处理无图的情况"，
+   只是分支顺序把它挡住了）。
+2. 给入口矩阵补一格"交互 + mmproj"，防止再次静默降级。
+
+**关联**：`src/main.rs`（多模态分支与交互分支的顺序）、
+`src/app/text/generation.rs::run_interactive_qwen35`（mmproj 写死 None）。
+
+---
+
+### TODO-055: qwen35moe（Occamy-1.0）的设备 decode 比 CPU 慢 4 倍 —— 每 token 320 次专家投影太碎
+
+**实测**（aarch64 + NVIDIA GB10，Q8_0，8 线程，`--temperature 0`）：
+
+| 场景 | | CPU | Vulkan | 设备/CPU |
+| --- | --- | --- | --- | --- |
+| 文本 32 token | prefill | 1.088 s | **0.632 s** | **0.58×** ✅ |
+| | decode 32 token | 2.034 s | 8.164 s | **4.0×** ❌ |
+| | 生成速率 | **15.2 t/s** | 3.8 t/s | 0.25× ❌ |
+| | 端到端 | 10.2 tok/s | 3.6 tok/s | 0.35× ❌ |
+| 图像（1 token） | 视觉编码 | 0.540 s | 0.539 s | 1.00×（塔的注意力/SSM 仍在 CPU） |
+| | prefill | 1.596 s | **1.032 s** | 0.65× ✅ |
+
+**原因**：Occamy 每 token 每层要算 **8 个路由专家**（256 选 8）+ 1 个共享专家，
+40 层 → 每 token **360 次极小的投影**（1×2048 → 1×512）。设备的 prefill（一次几百行）
+划算 ✓，但 decode 是 360 次单行 dispatch ✗ → 每次的固定开销大于那点算力 ✗。
+
+与仓库里已有的结论同源：TODO-052（Mellum 的 784 次 pool dispatch）、LFM2.5 的
+`min_gpu_matmul_outputs` 阈值（单行投影留在 CPU）。**qwen35moe 的 decode 目前没有
+类似的"留在 CPU"策略** —— 单行专家投影在设备上必然亏。
+
+**待办**：
+
+1. 给 qwen35moe 的 decode 加阈值：专家投影的行数太少时留在 CPU（与
+   `min_gpu_matmul_outputs` 同思路），至少让 `--compute vulkan` 的 decode 不比 CPU 慢。
+2. 或者让专家权重常驻设备、按层合并成一次 dispatch（`BatchedLinearRuntime::with_output_slots`
+   + `run_group_gpu` 已支持一个 command buffer 里记多个 matmul ✓）。
+3. 视觉塔那边：只有 matmul 上了设备，注意力/SSM 仍在 CPU → 视觉编码在设备上没有收益
+   （0.539 s vs 0.540 s）。要么补齐，要么在文档里说明。
+
+**关联**：`src/models/qwen35/trunk/moe.rs`、`src/models/qwen35/vision/mod.rs`、
+`src/ops/kernel/vulkan.rs`（`min_gpu_matmul_outputs`）、TODO-052。
+
+---
+
+### TODO-056: qwen35 的 CLIP 视觉塔（mmproj）没有设备路径
+
+**现状**：文本塔在设备上，视觉塔不在。
+
+- 文本塔（`qwen35moe` / Occamy-1.0）：**完整在设备上** —— trace 显示
+  `scope=resident_hybrid_decoder backend=Vulkan`（prefill rows=19、decode rows=1），
+  733 个权重张量一次性上传 36.35 GB，之后每 token 41 次 submission；但比 CPU 慢 4 倍
+  （3.8 vs 15.2 t/s）→ 见 TODO-055。
+- 视觉塔（mmproj）：**不上设备** —— `src/models/qwen35/vision/mod.rs` 的
+  `matmul_weight_batch` 直接调 `weight.kernel.forward_batched(...)`，而
+  `VulkanKernel::forward_batched` 只是转发给内部的 **CPU** kernel。视觉编码两个后端
+  耗时完全一样（CPU 0.539 s vs Vulkan 0.540 s），CLI 因此如实报
+  `backend=partial mode=mmproj`。
+- ZDTaichu5.0 的 RADIO 塔**已经**接上设备（`src/models/zdt/vision/mod.rs:115` 先试
+  `weight.try_vulkan_rows(...)`）→ 同一仓库里两种做法并存。
+
+**影响面**：qwen35 的 CLIP 塔是多模型共用的底座（Qwen3.5-0.8B/2B、Qwen3.8-27B、
+OvisOCR3、Sage-A1.5、Holo4-27B、LensVLM-9B、Occamy-1.0、Intern-Decision-0.8B、
+PhysBrain1.5-2B、Qwen-Drive、LongCat 图像、Omni、BGE-VL-Screenshot，≥12 个），
+改它会改掉所有这些模型的图像输出 → **先测量再决定，不要顺手改**。
+
+**F16 是第二道闸**：文本路径明确把 F16 权重排除在设备之外（`gpu_compatible`：
+"Vulkan has no matching F16 activation/reduction contract"），而 mmproj 正是 F16 →
+要先量出 F16 的设备/CPU 数值差（Occamy 的 oracle 显示同权重 F32 激活 vs F16 激活
+的投影差 0.0268）。
+
+**待办**：
+
+1. 先测量：给塔加 `try_vulkan_rows` 分支（不动默认路径），用现成的 llama.cpp dump
+   量 F16 的差并定界。
+2. 差在界内 → 再谈铺开到各模型（每个模型跑各自的 oracle）；不可接受 → 写下
+   "F16 的 CLIP 塔留在 CPU"并关掉本条。
+3. 顺带评估收益上限：塔的 attention/softmax/norm 仍在 CPU，只搬 matmul 未必有墙钟收益。
+
+**关联**：`src/models/qwen35/vision/mod.rs`、`src/models/zdt/vision/mod.rs`、
+`src/ops/kernel/vulkan.rs`、`src/compute/linear.rs`、TODO-055。

@@ -48,7 +48,8 @@ pub struct Qwen35LayerWeights<'a> {
     pub ssm_alpha: Option<Weight<'a>>,
     pub ssm_norm: Option<Vec<f32>>,
     pub ssm_out: Option<Weight<'a>>,
-    /// Dense FFN, absent on `qwen35moe` where `moe` carries the experts.
+    /// Dense SwiGLU FFN. Absent on MoE-only towers (`qwen35moe`), where every
+    /// layer routes through experts instead and the weights are unused.
     pub ffn_gate: Option<Weight<'a>>,
     pub ffn_up: Option<Weight<'a>>,
     pub ffn_down: Option<Weight<'a>>,
@@ -311,10 +312,40 @@ fn load_moe_weights<'a, S: TensorSource + ?Sized>(
     }
 
     let has_shexp = moe.n_ff_shexp > 0;
+    let shared_weight = |suffix: &str,
+                         n_in: usize,
+                         n_out: usize|
+     -> Result<Option<Weight<'a>>, String> {
+        if !has_shexp {
+            return Ok(None);
+        }
+        let name = format!("blk.{layer}.ffn_{suffix}_shexp.weight");
+        let tensor = info(&name)?;
+        if tensor.dims != [n_in as u64, n_out as u64]
+            || tensor.checked_nbytes() != Some(need(&name)?.len() as u64)
+        {
+            return Err(format!("Invalid shared expert tensor {name}: expected [{n_in}, {n_out}] with complete payload"));
+        }
+        load_weight(source, &name)
+            .map(Some)
+            .ok_or_else(|| format!("Unsupported shared expert tensor: {name}"))
+    };
     let gate_inp_shexp = if has_shexp {
-        load_weight_f32(source, &format!("blk.{layer}.ffn_gate_inp_shexp.weight"))
-            .or_else(|| load_weight_f32(source, &format!("blk.{layer}.ffn_gate_inp_shexp")))
-            .ok_or_else(|| format!("Missing blk.{layer}.ffn_gate_inp_shexp.weight"))?
+        let name = [
+            format!("blk.{layer}.ffn_gate_inp_shexp.weight"),
+            format!("blk.{layer}.ffn_gate_inp_shexp"),
+        ]
+        .into_iter()
+        .find(|name| source.tensor_info(name).is_some())
+        .ok_or_else(|| format!("Missing blk.{layer}.ffn_gate_inp_shexp.weight"))?;
+        let tensor = info(&name)?;
+        if tensor.dims != [n_embd as u64] && tensor.dims != [n_embd as u64, 1] {
+            return Err(format!(
+                "Invalid shared expert gate {name}: shape {:?}",
+                tensor.dims
+            ));
+        }
+        crate::core::tensor::load_f32_tensor(source, &name, &tensor.dims)?
     } else {
         Vec::new()
     };
@@ -334,15 +365,9 @@ fn load_moe_weights<'a, S: TensorSource + ?Sized>(
         stride_gate,
         stride_down,
         gate_inp_shexp: has_shexp.then_some(gate_inp_shexp),
-        up_shexp: has_shexp
-            .then(|| load_weight(source, &format!("blk.{layer}.ffn_up_shexp.weight")))
-            .flatten(),
-        gate_shexp: has_shexp
-            .then(|| load_weight(source, &format!("blk.{layer}.ffn_gate_shexp.weight")))
-            .flatten(),
-        down_shexp: has_shexp
-            .then(|| load_weight(source, &format!("blk.{layer}.ffn_down_shexp.weight")))
-            .flatten(),
+        up_shexp: shared_weight("up", n_embd, moe.n_ff_shexp)?,
+        gate_shexp: shared_weight("gate", n_embd, moe.n_ff_shexp)?,
+        down_shexp: shared_weight("down", moe.n_ff_shexp, n_embd)?,
     })
 }
 
@@ -405,6 +430,8 @@ impl<'a> HybridTrunk<'a> {
         if arch == Some("edge0") {
             return Err("Edge0 architecture requires Edge0Model::from_source".into());
         }
+        // qwen35moe shares every attention and SSM tensor with qwen35; only the
+        // FFN differs, and the shared trunk carries the experts.
         let config = Qwen35Config::from_source(source)?;
         Self::load_trunk(source, config, false)
     }
