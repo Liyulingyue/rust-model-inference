@@ -36,7 +36,7 @@
 | `nemotron_h_moe.ssm.time_step_rank` | 64 |
 | `nemotron_h_moe.expert_count` | 128 |
 | `nemotron_h_moe.expert_used_count` | 6 |
-| `nemotron_h_moe.expert_group_count` / `group_used_count` | 1 / 1（**无分组路由**） |
+| `nemotron_h_moe.expert_group_count` / `expert_group_used_count` | 1 / 1（**无分组路由**） |
 | `nemotron_h_moe.expert_feed_forward_length` | 1856 |
 | `nemotron_h_moe.expert_shared_feed_forward_length` | 3712 |
 | `nemotron_h_moe.expert_shared_count` | 1 |
@@ -142,6 +142,26 @@ builder，于是同一条消息有三种提示（用仓库自己的 tokenizer �
 Dory 的 GGUF 写 `false`，而 llama.cpp 对 pixtral 预分词家族强制 `add_bos = true`
 → Dory 的提示比参考实现少一个 `<s>`（见 DORY_REVIEW.md 的 F2）。
 
+### 1.6 提示的 BOS：30B 与 Dory 不同
+
+30B 的 GGUF：`tokenizer.ggml.pre = "pixtral"`，**没有** `tokenizer.ggml.add_bos_token` 这个 key。
+
+llama.cpp 的规则是两步（`src/llama-vocab.cpp`）：
+
+1. pre 分词器给出**默认值** —— `pixtral` / `tekken` → `add_bos = true`；
+2. GGUF 的 `tokenizer.ggml.add_bos_token` **覆盖**默认值，连 `false` 都赢。
+
+所以：
+
+| GGUF | `pre` | `add_bos_token` | llama.cpp | 结论 |
+|---|---|---|---|---|
+| Dory 1.0 4B | `pixtral` | 有，`false` | 不加 BOS | 仓库（修正后）也不加 ✅ |
+| **30B-A3B** | `pixtral` | **无** | **加 BOS** | 仓库（修正后）加 ✅ |
+
+仓库原先写成 `bool_meta(add_bos_token)? || forced_add_bos` —— **强制值赢过 GGUF**，
+而且只有 falcon-h1 设过强制值。结果是 30B 少了 `<s>`。已修（见
+[DORY_REVIEW.md](DORY_REVIEW.md) F2 与 [TODO.md](TODO.md) TODO-052 F2）。
+
 ## 2. 阻塞项（按必须做的顺序）
 
 ### B1. Q5_1 dequant kernel（硬前置）✅ 已完成
@@ -180,7 +200,7 @@ Q5_1 与 Q5_0 的差异很小（ggml `block_q5_1`，24 字节/32 元素）：
 **顺带**：`src/models/nemotron_h/trunk/weights.rs` 的 `is_supported_weight_type()`
 白名单里也漏了 `Q5_0` 和 `Q5_1`（kernel 在，但白名单不认）——4B 用不到，30B 会撞上。
 
-### B2. arch 与 config 前缀
+### B2. arch 与 config 前缀 ✅ 已实现
 
 - `src/core/loader.rs` 的 arch 白名单加 `nemotron_h_moe`；
 - loader 里 `nemotron_h` 那个专用分支要能按 arch 前缀读
@@ -191,7 +211,18 @@ Q5_1 与 Q5_0 的差异很小（ggml `block_q5_1`，24 字节/32 元素）：
 > 现状是**响亮地失败**而不是静默出错：arch 检查先拒；即使放行，权重层会因为找不到
 > `ffn_up.weight` 而报「Nemotron layer N tensors do not match layer metadata」。这点是对的。
 
-### B3. MoE 层分支
+**实现**：GGUF 把每个 arch 私有的 metadata key 放在 `{arch}.` 命名空间下，所以
+`NemotronConfig::from_source` 用 `architecture` 本身当前缀，config 里新增
+`NemotronMoeConfig`（`expert_count` / `expert_used_count` / `expert_group_count` /
+`expert_group_used_count` / `expert_feed_forward_length` /
+`expert_shared_feed_forward_length` / `expert_shared_count` / `expert_weights_norm` /
+`expert_weights_scale` / `moe_latent_size`）。
+
+> **key 名的一处订正**：分组路由已用的那个 key 实际是
+> `nemotron_h_moe.expert_group_used_count`（不是 `group_used_count`）。契约表 §1.1
+> 已按 GGUF 头部订正。
+
+### B3. MoE 层分支 ✅ 已实现
 
 `src/models/nemotron_h/trunk/` 现在只有「dense 2 层 FFN」（`ffn_up`/`ffn_down`）。
 需要加第三条分支：MoE 层。
@@ -207,7 +238,25 @@ Q5_1 与 Q5_0 的差异很小（ggml `block_q5_1`，24 字节/32 元素）：
 `2^-14` 下限 clamp、scale 放在归一化之后而不是折进除法 —— 这一点 qwen35 的注释已经
 写清楚「不是逐位等价，会移动 router argmax」）。
 
-### B4. 共享专家与平方 ReLU
+**实现**（`src/models/nemotron_h/trunk/moe.rs` + `weights.rs`）：
+
+- `NemotronMoeWeights` 持有一份借用的 `up_exps` / `down_exps` 原始字节 +
+  每个专家的字节步长，而不是 128 个 eager `Weight`（23 层 × 128 专家 = 2944 个
+  kernel，提前建好只用得上 6 个）。
+- `route_experts` 与 llama.cpp 的 `build_moe_ffn` 逐节点对应：
+  `probs = sigmoid(logits)`（ggml 的 `ggml_vec_sigmoid_f32` 就是
+  `1/(1+expf(-x))`）→ `selection = probs + exp_probs_b`（**偏置只参与排序**）→
+  `argsort_top_k` 取前 `n_expert_used` → 权重取**未加偏置**的 `probs` →
+  `sum` 用 F64 累加降到 F32 → clamp 到 `2^-14` → 相除 → 乘
+  `expert_weights_scale`。
+- 专家**没有 gate**（本架构没有 `ffn_gate_exps`），所以专家激活是
+  `relu(up)^2`；共享专家**也没有 gate**（没有 `ffn_gate_inp_shexp`），
+  最终 `out = moe_out + ffn_shexp`。
+- 层类型判定：`ffn_up.weight` 是 dense FFN，`ffn_up_exps.weight` 是 MoE 层，
+  两者互斥，且必须与 metadata 的层模式一致，否则报
+  「Nemotron layer N tensors do not match layer metadata」。
+
+### B4. 共享专家与平方 ReLU ✅ 已实现
 
 - 专家激活：仓库现有的激活算子里有 SiLU / GeLU / ReLU，**没有 squared ReLU**
   → 要么加一个 `relu_sqr_inplace`，要么在 MoE 模块里内联。
@@ -215,16 +264,76 @@ Q5_1 与 Q5_0 的差异很小（ggml `block_q5_1`，24 字节/32 元素）：
   qwen35 的共享专家是 `down(silu(gate@x) * (up@x))` 并乘一个 sigmoid 门，
   **语义不同，不能直接复用**，只能复用权重加载那部分。
 
-### B5. 数值对拍的 oracle
+**实现**：squared ReLU 直接内联在 `moe.rs`（`relu` 后 `x*x`，负数归零），
+没有单独的算子 —— 它只在这个架构的 FFN 与 MoE 里出现。
+
+### B5. 数值对拍的 oracle ✅ 已完成（逐位一致）
 
 上游 llama.cpp **已经支持** `nemotron_h_moe`（PR #18058，2025-12-16 合并，
 `src/models/nemotron-h-moe.cpp` 只有 159 行，主图在 `nemotron-h.cpp`）。
 所以 oracle 用**上游 llama.cpp master**即可，不需要 Dory 那种专用 fork。
 
+**结果**：全 52 层 × 6 步（prefill 2 token + 生成 4 token）**逐位一致**，
+最终 logits 逐位一致（`worst logit disagreement 0.0000`，而 argmax 领先幅度是
+2.2746），端到端 greedy 输出一致（两侧 `generated_ids = [22177, 22177, 22177, 22177]`，
+文本 `HelloHelloHelloHello`）。
+
 注意：llama.cpp 的 `nemotron_h` / `nemotron_h_moe` 都**不开 RoPE**
-（`llama_rope_type` 返回 `LLAMA_ROPE_TYPE_NONE`）—— 这和仓库现有 `nemotron_h`
-实现的 RoPE 处理需要核对一次（4B 的 `rope.dimension_count = 78`，30B 是 84，
-都不是 head_dim 128，说明参考实现里 RoPE 覆盖的是一个子空间）。
+（`llama_rope_type` 返回 `LLAMA_ROPE_TYPE_NONE`）—— 仓库现有 `nemotron_h`
+实现与之一致（4B 的 `rope.dimension_count = 78`，30B 是 84，都不是 head_dim 128，
+参考实现里 RoPE 覆盖的是一个子空间）。
+
+#### B5.1 对拍工具
+
+| 文件 | 作用 |
+|---|---|
+| `tools/oracle/nemotron3_nano/oracle.cpp` | 上游 `llama-eval-callback` harness，dump 命名张量 |
+| `tools/oracle/nemotron3_nano/build_oracle.sh` | 解包 pinned llama.cpp tarball 并构建 harness |
+| `tools/oracle/nemotron3_nano/check_moe.py` | 把 oracle trace 与 Rust `RMI_PARITY_TRACE` 按 `(name, layer, step)` join，逐位比 |
+| `tools/oracle/q5_0/q5_0_oracle.c` | ggml ARM `ggml_vec_dot_q5_0_q8_0` 的独立转写 |
+| `tools/oracle/silu/silu_oracle.c` | ggml ARM `ggml_vec_silu_f32` 的独立转写 |
+
+Rust 侧的 checkpoint 由 `src/models/nemotron_h/trunk/trace.rs` 发出，
+只在 `--features parity-trace` 且 `RMI_PARITY_TRACE` 有值时生效。
+
+#### B5.2 为什么需要 ggml-exact kernel（而不是「差不多就行」）
+
+第一次对拍时 4B 的 SSM 分支只差 1 ULP，30B 的却差 ~1e-4。根因是**量化权重
+kernel 的 F32 累加结构**不同，被下游的 Q4_K 出投影的 Q8_K 激活量化放大了约 7000×：
+一个 1-ULP 的差足以让某个激活跨过 8-bit 的舍入边界，于是变成整整一个量化台阶。
+
+所以仓库新增了三个 **ggml-exact** 入口，与默认 kernel 并存（默认契约不动）：
+
+| 入口 | 复刻的 ggml 结构 |
+|---|---|
+| `ops/kernel/f32/ggml.rs` | `ggml_vec_dot_f32`：`GGML_F32_STEP=16` / `EPR=4` / `ARR=4`，4 个 `vfmaq_f32` 累加器 + pairwise-tree reduce + `vaddvq_f32` |
+| `ops/kernel/q8_0/ggml.rs` | `ggml_vec_dot_q8_0_q8_0`：2 个 4-lane 累加器、每 block `vaddq_s32(vdotq_s32(0,x0,y0), vdotq_s32(0,x1,y1))`、`vmlaq_n_f32`、末尾 `vaddvq_f32` 相加 |
+| `ops/kernel/q5_0/neon.rs` | 2 block/迭代 + 2 个 4-lane F32 累加器 + `table_b2b_1` 查表折 `-16` |
+| `ops/kernel/q5_1/neon.rs` | 同上，另加独立标量 `m*s` 累加器（`summs0`/`summs1`），末尾 `((vaddvq(sumv0)+vaddvq(sumv1))+summs0)+summs1` |
+
+**per-lane 分组是硬约束**。`ggml_vdotq_s32` 在 dotprod 可用时就是 native
+`vdotq_s32`（`dst[i] = Σ_{k=0..3} a[4i+k]*b[4i+k]`）；它自己的 fallback 注释写着
+「different per-lane grouping — do not use when individual lane values matter」。
+因此 oracle 与 Rust 两侧都必须在 `-march=armv8.2-a+dotprod` 下编译，且**不能开 i8mm**
+（那会走 `ggml_vec_dot_q8_0_q8_0` 的 MATMUL_INT8 分支，是另一套算术）。
+
+另外两处不显眼但必须对齐的细节：
+
+- **SiLU 用 ggml 的多项式 `exp`**（`ggml_v_expf`），不是 libm `expf`。
+  `ggml_v_expf` 里的 `vdupq_n_u32(0x7f000000)` 是 **u32 字面量不是 float**：
+  写成 `vdupq_n_f32(0x7f000000)` 会加 `0x4EFE0000`（2139095040.0f 的舍入），
+  于是溢出路径的 `s1*s1` 变成巨大有限值而不是 0 —— 而 softmax 掩码列（`-inf`）
+  必须贡献 0。这个 bug 曾**同时**存在于 Rust 与 silu oracle 两侧，所以参考测试
+  发现不了，只有对拍真实模型才暴露。
+- **Q4_K/Q5_K 的 `dmin` 修正必须分两次累加**（`total -= dmin*min_sum; … total += d*main_sum`），
+  不能合并成 `total += main + min`。
+- **Q5_1 没有 `-16` 偏移**；`block_q8_1.s = f16(sum*d)`，`d = amax/127`（现代 ggml，非负）。
+- **softmax 用 `ggml_v_expf`（NEON 4-lane 组）+ f64 累加 + 末尾 libm `expf` 尾块**；
+  `softmax_inplace` 用 libm `expf` 且 f64 累加，两者不同。
+- **llama.cpp 的 KV cache view 是 padded 的**（`GGML_PAD(used, 256)`），softmax 与
+  `V×softmax` 都在 padded key 数上跑。Rust 侧用 `n_kv = (position+1).div_ceil(16)*16`
+  复刻（16 对齐就够，因为 dot 的分组边界是 16）。
+- oracle harness 用 `RMI_NEMOTRON_KV=f32`，即 KV cache 是 F32。
 
 ## 3. 估算
 

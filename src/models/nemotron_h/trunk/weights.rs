@@ -7,10 +7,85 @@ use crate::core::tensor::{load_f32_tensor, GGMLType, TensorSource};
 use crate::ops::kernel::QuantizedTensor;
 use crate::ops::kernel::Weight;
 
-use super::config::NemotronConfig;
+use super::config::{NemotronConfig, NemotronMoeConfig};
 
 fn usize_to_u64(v: usize, name: &str) -> Result<u64, String> {
     u64::try_from(v).map_err(|_| format!("{name} does not fit u64"))
+}
+
+/// Mixture-of-experts weights for one Nemotron-3-Nano 30B-A3B layer.
+///
+/// The experts are kept as one borrowed slice per projection rather than
+/// `n_expert` eager `Weight`s: a 23-layer 128-expert model would
+/// otherwise build 2944 kernels up front for a path that only ever
+/// touches `n_expert_used` of them per token. Each expert's matrix is a
+/// contiguous block inside the 3-D GGUF tensor, so an expert is a
+/// sub-slice at a fixed stride.
+pub struct NemotronMoeWeights<'a> {
+    /// Router projection: ggml dims `[n_embd, n_expert]`, F32.
+    pub gate_inp: Weight<'a>,
+    /// Expert up projections: ggml dims `[n_embd, n_ff_exp, n_expert]`.
+    pub up_exps: &'a [u8],
+    /// Expert down projections: ggml dims `[n_ff_exp, n_embd, n_expert]`.
+    pub down_exps: &'a [u8],
+    pub up_type: GGMLType,
+    pub down_type: GGMLType,
+    pub n_expert: usize,
+    pub n_ff_exp: usize,
+    pub n_embd: usize,
+    /// Bytes per expert for each projection.
+    pub stride_up: usize,
+    pub stride_down: usize,
+    /// Shared expert up: ggml dims `[n_embd, n_ff_shexp]`.
+    pub up_shexp: Weight<'a>,
+    /// Shared expert down: ggml dims `[n_ff_shexp, n_embd]`.
+    pub down_shexp: Weight<'a>,
+    /// Router selection bias (`ffn_exp_probs_b.bias`). It only takes
+    /// part in *ranking* the experts; the routing weights themselves are
+    /// the unbiased sigmoid probabilities.
+    pub exp_probs_b: Vec<f32>,
+}
+
+impl<'a> NemotronMoeWeights<'a> {
+    /// `[n_embd, n_ff_exp]` for expert `e`, matching ggml's
+    /// `ffn_up_exps` (`[n_embd, n_ff_exp, n_expert]`).
+    pub fn up(&self, e: usize) -> Weight<'a> {
+        self.view(
+            self.up_exps,
+            self.up_type,
+            self.stride_up,
+            e,
+            self.n_embd,
+            self.n_ff_exp,
+        )
+    }
+
+    /// `[n_ff_exp, n_embd]` for expert `e`, matching ggml's
+    /// `ffn_down_exps` (`[n_ff_exp, n_embd, n_expert]`).
+    pub fn down(&self, e: usize) -> Weight<'a> {
+        self.view(
+            self.down_exps,
+            self.down_type,
+            self.stride_down,
+            e,
+            self.n_ff_exp,
+            self.n_embd,
+        )
+    }
+
+    fn view(
+        &self,
+        data: &'a [u8],
+        ggml_type: GGMLType,
+        stride: usize,
+        e: usize,
+        n_in: usize,
+        n_out: usize,
+    ) -> Weight<'a> {
+        let start = e * stride;
+        let slice = data.get(start..start + stride).unwrap_or(&data[..0]);
+        Weight::from_quantized(QuantizedTensor::from_bytes(slice, ggml_type, n_in, n_out))
+    }
 }
 
 pub struct NemotronLayerWeights<'a> {
@@ -29,6 +104,9 @@ pub struct NemotronLayerWeights<'a> {
     pub ffn_norm: Option<Vec<f32>>,
     pub w_up: Option<Weight<'a>>,
     pub w_down: Option<Weight<'a>>,
+    /// Mixture-of-experts branch (only on the MoE layers of the 30B
+    /// variant). `None` for the dense architecture.
+    pub moe: Option<NemotronMoeWeights<'a>>,
     /// Mamba2 SSM branch (only on the 21 SSM-only layers). None for the
     /// other 21 layers.
     pub ssm_in: Option<Weight<'a>>,
@@ -103,6 +181,139 @@ pub(crate) fn load_weight(
     )))
 }
 
+/// Load the mixture-of-experts weights of one layer.
+///
+/// Tensor names follow the upstream reference
+/// (`src/models/nemotron-h.cpp::build_ffn_layer`):
+///
+/// - `ffn_gate_inp.weight` — router, `[n_embd, n_expert]`, F32
+/// - `ffn_up_exps.weight`   — expert up, `[n_embd, n_ff_exp, n_expert]`
+/// - `ffn_down_exps.weight` — expert down, `[n_ff_exp, n_embd, n_expert]`
+/// - `ffn_up_shexp.weight`  — shared expert up, `[n_embd, n_ff_shexp]`
+/// - `ffn_down_shexp.weight`— shared expert down, `[n_ff_shexp, n_embd]`
+/// - `exp_probs_b.bias`     — router selection bias, `[n_expert]`
+///
+/// Unlike Qwen3.5 there is **no** `ffn_gate_exps` (the experts are not
+/// gated) and **no** `ffn_gate_inp_shexp` (the shared expert is not
+/// gated either).
+fn load_moe_weights(
+    source: &dyn TensorSource,
+    layer: usize,
+    moe: &NemotronMoeConfig,
+    n_embd_cfg: usize,
+) -> Result<NemotronMoeWeights<'static>, String> {
+    let need = |name: &str| -> Result<&'static [u8], String> {
+        let bytes = source
+            .tensor_slice(name)
+            .ok_or_else(|| format!("Missing {name}"))?;
+        // Same escape hatch as `load_weight`: the GGUF bytes outlive the
+        // loader because they come from an mmap'd file.
+        Ok(unsafe { std::mem::transmute::<&[u8], &'static [u8]>(bytes) })
+    };
+    let info = |name: &str| -> Result<&'static crate::core::tensor::TensorInfo, String> {
+        let info = source
+            .tensor_info(name)
+            .ok_or_else(|| format!("Missing {name}"))?;
+        Ok(unsafe {
+            std::mem::transmute::<&crate::core::tensor::TensorInfo, &'static crate::core::tensor::TensorInfo>(info)
+        })
+    };
+
+    let up_name = format!("blk.{layer}.ffn_up_exps.weight");
+    let down_name = format!("blk.{layer}.ffn_down_exps.weight");
+
+    let up_info = info(&up_name)?;
+    if up_info.dims.len() != 3 {
+        return Err(format!(
+            "{up_name}: expected [n_embd, n_ff_exp, n_expert], got {:?}",
+            up_info.dims
+        ));
+    }
+    let n_embd = up_info.dims[0] as usize;
+    let n_ff_exp = up_info.dims[1] as usize;
+    let n_expert = up_info.dims[2] as usize;
+    if n_embd != n_embd_cfg || n_ff_exp != moe.n_ff_exp || n_expert != moe.n_expert {
+        return Err(format!(
+            "{up_name}: got [{n_embd}, {n_ff_exp}, {n_expert}], config says \
+             [{n_embd_cfg}, {}, {}]",
+            moe.n_ff_exp, moe.n_expert
+        ));
+    }
+    // ggml stores the expert axis last and contiguous, so a 3-D tensor is
+    // `n_expert` back-to-back copies of one expert's matrix.
+    let down_info = info(&down_name)?;
+    for (name, tensor, dims) in [
+        (
+            &up_name,
+            up_info,
+            [n_embd as u64, n_ff_exp as u64, n_expert as u64],
+        ),
+        (
+            &down_name,
+            down_info,
+            [n_ff_exp as u64, n_embd as u64, n_expert as u64],
+        ),
+    ] {
+        if tensor.dims != dims || tensor.checked_nbytes() != Some(need(name)?.len() as u64) {
+            return Err(format!(
+                "{name}: invalid expert shape or payload; expected {dims:?}"
+            ));
+        }
+    }
+    let stride_up = up_info.ggml_type.nbytes(n_embd * n_ff_exp);
+    let stride_down = down_info.ggml_type.nbytes(n_ff_exp * n_embd);
+
+    let gate_inp = load_weight(
+        source,
+        &format!("blk.{layer}.ffn_gate_inp.weight"),
+        n_embd,
+        n_expert,
+    )?;
+    if gate_inp.n_in != n_embd || gate_inp.n_out != n_expert {
+        return Err(format!(
+            "blk.{layer}.ffn_gate_inp.weight: got [{}, {}], expected [{n_embd}, {n_expert}]",
+            gate_inp.n_in, gate_inp.n_out
+        ));
+    }
+
+    // The shared expert has no gate: `build_ffn(..., NULL /* no gate */, ...)`.
+    let up_shexp = load_weight(
+        source,
+        &format!("blk.{layer}.ffn_up_shexp.weight"),
+        n_embd,
+        moe.n_ff_shexp,
+    )?;
+    let down_shexp = load_weight(
+        source,
+        &format!("blk.{layer}.ffn_down_shexp.weight"),
+        moe.n_ff_shexp,
+        n_embd,
+    )?;
+
+    // The router selection bias is F32 and only participates in ranking.
+    let exp_probs_b = load_f32_tensor(
+        source,
+        &format!("blk.{layer}.exp_probs_b.bias"),
+        &[n_expert as u64],
+    )?;
+
+    Ok(NemotronMoeWeights {
+        gate_inp,
+        up_exps: need(&up_name)?,
+        down_exps: need(&down_name)?,
+        up_type: up_info.ggml_type,
+        down_type: down_info.ggml_type,
+        n_expert,
+        n_ff_exp,
+        n_embd,
+        stride_up,
+        stride_down,
+        up_shexp,
+        down_shexp,
+        exp_probs_b,
+    })
+}
+
 pub fn load_layers(
     source: &dyn TensorSource,
     config: &NemotronConfig,
@@ -131,6 +342,13 @@ pub fn load_layers(
             .tensor_info(&format!("blk.{idx}.ffn_up.weight"))
             .is_some()
     };
+    // The MoE layers carry `ffn_up_exps` instead of `ffn_up`.
+    let layer_has_moe = |idx: usize| -> bool {
+        source
+            .tensor_info(&format!("blk.{idx}.ffn_up_exps.weight"))
+            .is_some()
+    };
+    let is_moe_arch = config.is_moe();
     for layer_idx in 0..config.n_layer {
         let prefix = format!("blk.{layer_idx}");
         let attn_norm = load_f32_tensor(
@@ -141,10 +359,22 @@ pub fn load_layers(
         let this_has_attn = layer_has_attn(layer_idx);
         let this_has_ssm = layer_has_ssm(layer_idx);
         let has_layer_ffn = layer_has_ffn(layer_idx);
+        let has_layer_moe = layer_has_moe(layer_idx);
         let expected_attn = config.attention_layers.contains(&layer_idx);
         let expected_ffn = config.ffn_layers.contains(&layer_idx);
+        // The feed-forward branch of an FFN layer is dense for the 4B
+        // and routed for the 30B; the wrong one must not load silently.
+        let ffn_kind_ok = if expected_ffn {
+            if is_moe_arch {
+                has_layer_moe && !has_layer_ffn
+            } else {
+                has_layer_ffn && !has_layer_moe
+            }
+        } else {
+            !has_layer_ffn && !has_layer_moe
+        };
         if this_has_attn != expected_attn
-            || has_layer_ffn != expected_ffn
+            || !ffn_kind_ok
             || this_has_ssm != (!expected_attn && !expected_ffn)
         {
             return Err(format!(
@@ -240,6 +470,21 @@ pub fn load_layers(
             (ffn_norm, Some(wu), Some(wd))
         } else {
             (None, None, None)
+        };
+        // MoE branch: routed experts plus one shared expert.
+        let moe = if has_layer_moe {
+            let moe_cfg = config
+                .moe
+                .as_ref()
+                .ok_or_else(|| "Nemotron MoE tensors without MoE metadata".to_string())?;
+            Some(load_moe_weights(
+                source,
+                layer_idx,
+                moe_cfg,
+                config.n_embd,
+            )?)
+        } else {
+            None
         };
         // Mamba2 SSM branch.
         let (ssm_in, ssm_conv1d_w, ssm_conv1d_b, ssm_dt_bias, ssm_a_log, ssm_d, ssm_norm, ssm_out) =
@@ -349,6 +594,7 @@ pub fn load_layers(
             ffn_norm,
             w_up,
             w_down,
+            moe,
             ssm_in,
             ssm_conv1d_w,
             ssm_conv1d_b,
