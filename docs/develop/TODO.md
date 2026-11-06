@@ -4301,3 +4301,50 @@ PhysBrain1.5-2B、Qwen-Drive、LongCat 图像、Omni、BGE-VL-Screenshot，≥12
 
 **关联**：`src/models/qwen35/vision/mod.rs`、`src/models/zdt/vision/mod.rs`、
 `src/ops/kernel/vulkan.rs`、`src/compute/linear.rs`、TODO-055。
+
+---
+
+### TODO-057: Nemotron-3 Nano 4B 的 Mamba-2 SSM 层还没上设备
+
+**现状**：4B 的 FFN 与 attention 层已在设备上（阶段 1，2026-11-06），
+但 21 个 Mamba-2 SSM 层仍在 CPU 上跑，hidden state 在两者之间往返。
+
+- **已完成的阶段 1**：GPU 跑 17 个 FFN 层 + 4 个 attention 层；CPU 跑 21 个 SSM 层。
+  两者以 `scratch.hidden` 为唯一真相源：设备段读它、写它，CPU 段原地读写它。
+  42 层按「连续的非 SSM 层段」切分，段与段之间没有多余的同步。
+- **数值**：GPU↔CPU **逐位一致**（`relative_l2` 与 `scaled_max_abs` 全为 0），
+  单 token 与 3 token 都过。双 1% 门限是当时定的保守目标，实际达到了逐位一致。
+- **F32 KV cache 是必需的**：llama.cpp 默认把 KV cache 存 F16，而本模型的参考
+  harness 用 F32。F16 的舍入在 attention 输出上留下 ~1e-5 的相对误差，
+  会被随后的 Mamba-2 递归（`state = state·exp(dt·A) + B·x·dt`，`|A|` 约 10–30）
+  放大约 4000 倍，最终在 logits 上变成 1% 的相对误差。为此新增了
+  `kv_write_f32` / `attention_scores_f32` / `attention_values_f32_kv` / `softmax_f32`
+  四个 shader，只给本模型用，不改动 llama/qwen3/qwen35 共用的 F16 路径。
+- **踩过的坑**：阶段 1 最初让设备段和 CPU 段各自持有一份 hidden，
+  结果第 0 层（SSM 层）读到未初始化的全 0 —— 设备输出在第一次 `forward_layers`
+  之前就没人写。**教训**：混合路径必须指定唯一真相源，不能各持一份。
+- **踩过的坑 2**：误差归因用环境变量 `RMI_NH_CPU_ATTENTION` / `RMI_NH_CPU_FFN`
+  把某一条分支切回 CPU 才发现问题在 attention 上；逐层 dump CPU/GPU 的 hidden
+  才定位到第一个分叉层（layer 12，第一个 attention 层）。
+
+**待办**：
+
+1. 写 Mamba-2 的设备 shader：
+   - `nemotron_h_recurrent_conv.comp`：因果 depthwise conv1d（kernel=4），
+     加上 `silu(z)*y` 的 gate 和 group RMSNorm。
+   - `nemotron_h_recurrent_ssm.comp`：分组的 scan
+     `state = state·exp(dt·A) + B·x·dt`、`y = state·C`，
+     其中 `dA = exp(dt_softplus·A_log[h])`，`dt_softplus` 是 softplus。
+   语义与 qwen35 的 SSM **不同**（qwen35 是 recurrent 的 beta/alpha + `state_key` 点积），
+   不能复用它的 shader。
+2. SSM 的状态跨 chunk 保留（`ssm_conv_hist` 与 `ssm_scan_state`），
+   设备侧要有对应的持久区域。
+3. SSM 上设备后，hidden state 就不再需要 host 往返，`forward_layers` 可以一次
+   覆盖全部 42 层，混合路径的复杂度随之下降。
+4. 性能：目前设备段只覆盖 42 层里的 21 层，且每段之间有一次 host 往返。
+   全 SSM 上设备后才有可观的加速比。
+
+**关联**：`src/vulkan/nemotron_h.rs`、`src/models/nemotron_h/trunk/forward.rs`、
+`src/vulkan/ops.rs`（`record_kv_write_rows_f32`、`record_attention_scores_f32_rows`、
+`record_softmax_f32_rows`、`record_attention_values_f32_kv_rows`）、
+`shaders/glsl/nemotron_h_*.comp`（待写）、TODO-051（30B 契约）。

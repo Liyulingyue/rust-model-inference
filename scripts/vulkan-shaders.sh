@@ -58,6 +58,11 @@ shader_names=(
     auk_interleave
     auk_scale
     q8_matmul_transposed
+    relu_square
+    kv_write_f32
+    attention_scores_f32
+    attention_values_f32_kv
+    softmax_f32
 )
 manifest="$root_dir/shaders/manifest.sha256"
 

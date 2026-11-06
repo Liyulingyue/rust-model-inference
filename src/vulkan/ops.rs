@@ -91,6 +91,18 @@ const QWEN35_MOE_REDUCE_SHADER: &[u8] = include_bytes!("../../shaders/bin/qwen35
 const ADALN_MODULATE_SHADER: &[u8] = include_bytes!("../../shaders/bin/adaln_modulate.spv");
 const Q8_MATMUL_TRANSPOSED_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/q8_matmul_transposed.spv");
+/// KV cache write that keeps K and V in F32 instead of rounding them to F16.
+/// Used by the Nemotron-3 Nano path, whose reference harness runs with an F32
+/// KV cache.
+const KV_WRITE_F32_SHADER: &[u8] = include_bytes!("../../shaders/bin/kv_write_f32.spv");
+/// Attention scores computed on F32 query and key values.
+const ATTENTION_SCORES_F32_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/attention_scores_f32.spv");
+/// Attention values that consume an F32 KV cache and F32 probabilities.
+const ATTENTION_VALUES_F32_KV_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/attention_values_f32_kv.spv");
+/// Softmax that stores F32 probabilities instead of rounding them to F16.
+const SOFTMAX_F32_SHADER: &[u8] = include_bytes!("../../shaders/bin/softmax_f32.spv");
 
 const QUANTIZE: usize = 0;
 const QUANTIZE_K: usize = 1;
@@ -111,6 +123,12 @@ const KV_WRITE: usize = 11;
 const ATTENTION_SCORES: usize = 12;
 const SOFTMAX: usize = 13;
 const ATTENTION_VALUES: usize = 14;
+/// F32 variants used by the Nemotron-3 Nano path. They are appended to
+/// `OPERATOR_SHADERS`, so their indices follow every shared pipeline.
+const KV_WRITE_F32: usize = 50;
+const ATTENTION_SCORES_F32: usize = 51;
+const ATTENTION_VALUES_F32_KV: usize = 52;
+const SOFTMAX_F32: usize = 53;
 const SILU_MUL: usize = 15;
 const ADD: usize = 16;
 const QWEN35_DENSE_PREPARE: usize = 17;
@@ -279,6 +297,10 @@ const OPERATOR_SHADER_NAMES: [&str; OPERATOR_SHADERS.len()] = [
     "auk_interleave",
     "auk_scale",
     "q8_matmul_transposed",
+    "kv_write_f32",
+    "attention_scores_f32",
+    "attention_values_f32_kv",
+    "softmax_f32",
 ];
 
 /// True when the ordered dispatch log is being collected.
@@ -404,7 +426,7 @@ pub fn dump_dispatch_trace() {
     }
 }
 
-const OPERATOR_SHADERS: [&[u8]; 50] = [
+const OPERATOR_SHADERS: [&[u8]; 54] = [
     QUANTIZE_Q8_0_SHADER,
     QUANTIZE_Q8_K_SHADER,
     Q8_MATMUL_GROUPED_SHADER,
@@ -455,6 +477,10 @@ const OPERATOR_SHADERS: [&[u8]; 50] = [
     AUK_INTERLEAVE_SHADER,
     AUK_SCALE_SHADER,
     Q8_MATMUL_TRANSPOSED_SHADER,
+    KV_WRITE_F32_SHADER,
+    ATTENTION_SCORES_F32_SHADER,
+    ATTENTION_VALUES_F32_KV_SHADER,
+    SOFTMAX_F32_SHADER,
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -4676,6 +4702,88 @@ impl<'a> Qwen3Ops<'a> {
         rows: usize,
         source_stride: usize,
     ) -> Result<(), VulkanError> {
+        self.record_kv_write_rows_with(
+            commands,
+            KV_WRITE,
+            k,
+            v,
+            cache_k,
+            cache_v,
+            delta_k,
+            delta_v,
+            layer,
+            position,
+            layer_count,
+            capacity,
+            kv_count,
+            rows,
+            source_stride,
+        )
+    }
+
+    /// Write K and V into the KV cache without rounding them to F16.
+    ///
+    /// The shared [`Self::record_kv_write_rows`] stores F16, which is what
+    /// llama.cpp's default KV cache type does. Nemotron-3 Nano's reference
+    /// harness keeps an F32 cache, and the F16 rounding is amplified by the
+    /// Mamba-2 layers that follow each attention layer, so that path uses
+    /// this variant instead.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_kv_write_rows_f32(
+        &self,
+        commands: &TokenCommands<'_>,
+        k: ArenaRegion,
+        v: ArenaRegion,
+        cache_k: ArenaRegion,
+        cache_v: ArenaRegion,
+        delta_k: ArenaRegion,
+        delta_v: ArenaRegion,
+        layer: usize,
+        position: usize,
+        layer_count: usize,
+        capacity: usize,
+        kv_count: usize,
+        rows: usize,
+        source_stride: usize,
+    ) -> Result<(), VulkanError> {
+        self.record_kv_write_rows_with(
+            commands,
+            KV_WRITE_F32,
+            k,
+            v,
+            cache_k,
+            cache_v,
+            delta_k,
+            delta_v,
+            layer,
+            position,
+            layer_count,
+            capacity,
+            kv_count,
+            rows,
+            source_stride,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_kv_write_rows_with(
+        &self,
+        commands: &TokenCommands<'_>,
+        pipeline: usize,
+        k: ArenaRegion,
+        v: ArenaRegion,
+        cache_k: ArenaRegion,
+        cache_v: ArenaRegion,
+        delta_k: ArenaRegion,
+        delta_v: ArenaRegion,
+        layer: usize,
+        position: usize,
+        layer_count: usize,
+        capacity: usize,
+        kv_count: usize,
+        rows: usize,
+        source_stride: usize,
+    ) -> Result<(), VulkanError> {
         if layer >= layer_count
             || rows == 0
             || position.checked_add(rows).is_none_or(|end| end > capacity)
@@ -4710,7 +4818,7 @@ impl<'a> Qwen3Ops<'a> {
         let [x, y, z] = row_dispatch(kv_count.div_ceil(64), rows, &self.context.limits)?;
         unsafe {
             commands.bind(
-                self.pipelines[KV_WRITE],
+                self.pipelines[pipeline],
                 self.context.pipeline_layout,
                 &[self.arena_bindings.descriptor_set],
                 bytemuck::cast_slice(&push),
@@ -4799,6 +4907,90 @@ impl<'a> Qwen3Ops<'a> {
         Ok(())
     }
 
+    /// Attention scores computed on F32 query and key values.
+    ///
+    /// The shared [`Self::record_attention_scores_rows`] rounds the query and
+    /// the key to F16 to match a F16 KV cache. An F32 cache keeps the values
+    /// the CPU path would have used, so the scores have to be computed on
+    /// those values; the F32 kernel also uses the mode-0 compensated sum.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_attention_scores_f32_rows(
+        &self,
+        commands: &TokenCommands<'_>,
+        q: ArenaRegion,
+        cache_k: ArenaRegion,
+        scores: ArenaRegion,
+        layer: usize,
+        layer_count: usize,
+        base_position: usize,
+        capacity: usize,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        rows: usize,
+    ) -> Result<(), VulkanError> {
+        let sequence_length = base_position
+            .checked_add(rows)
+            .ok_or(VulkanError::OutOfMemory)?;
+        if rows == 0 {
+            return Err(VulkanError::UnsupportedShape(
+                "empty attention chunk".into(),
+            ));
+        }
+        validate_attention_shape(
+            layer,
+            layer_count,
+            sequence_length,
+            capacity,
+            q_heads,
+            kv_heads,
+            head_dim,
+        )?;
+        let q_count = q_heads
+            .checked_mul(head_dim)
+            .ok_or(VulkanError::OutOfMemory)?;
+        let kv_count = kv_heads
+            .checked_mul(head_dim)
+            .ok_or(VulkanError::OutOfMemory)?;
+        let cache_count = layer_count
+            .checked_mul(capacity)
+            .and_then(|value| value.checked_mul(kv_count))
+            .ok_or(VulkanError::OutOfMemory)?;
+        let score_count = q_heads
+            .checked_mul(sequence_length)
+            .ok_or(VulkanError::OutOfMemory)?;
+        let push = [
+            self.f32_rows_word(q, rows, q_count, q_count, "attention query")?,
+            self.f32_rows_word(cache_k, 1, cache_count, cache_count, "attention K cache")?,
+            self.f32_rows_word(scores, rows, score_count, score_count, "attention scores")?,
+            as_u32(layer, "attention layer")?,
+            as_u32(sequence_length, "attention sequence length")?,
+            as_u32(capacity, "attention capacity")?,
+            as_u32(q_heads, "attention Q heads")?,
+            as_u32(kv_heads, "attention KV heads")?,
+            as_u32(head_dim, "attention head dimension")?,
+            (1.0 / (head_dim as f32).sqrt()).to_bits(),
+            as_u32(base_position, "attention base position")?,
+            as_u32(rows, "attention rows")?,
+            // 0 keeps the decoder's causal limit; the DiT path passes 1.
+            0,
+            // The F32 kernel always uses the compensated single accumulator.
+            0,
+        ];
+        let [x, y, z] = row_dispatch(score_count.div_ceil(64), rows, &self.context.limits)?;
+        unsafe {
+            commands.bind(
+                self.pipelines[ATTENTION_SCORES_F32],
+                self.context.pipeline_layout,
+                &[self.arena_bindings.descriptor_set],
+                bytemuck::cast_slice(&push),
+            );
+            commands.dispatch(x, y, z);
+            commands.barrier();
+        }
+        Ok(())
+    }
+
     fn record_softmax_rows(
         &self,
         commands: &TokenCommands<'_>,
@@ -4831,6 +5023,53 @@ impl<'a> Qwen3Ops<'a> {
         unsafe {
             commands.bind(
                 self.pipelines[SOFTMAX],
+                self.context.pipeline_layout,
+                &[self.arena_bindings.descriptor_set],
+                bytemuck::cast_slice(&push),
+            );
+            commands.dispatch(x, y, z);
+            commands.barrier();
+        }
+        Ok(())
+    }
+
+    /// Softmax that stores F32 probabilities.
+    ///
+    /// [`Self::record_softmax_rows`] rounds each probability to F16 before
+    /// storing it, which only matches a F16 attention pipeline. The Nemotron-3
+    /// Nano path keeps the CPU path's F32 probabilities.
+    pub(crate) fn record_softmax_f32_rows(
+        &self,
+        commands: &TokenCommands<'_>,
+        scores: ArenaRegion,
+        heads: usize,
+        base_position: usize,
+        rows: usize,
+        full_attention: bool,
+    ) -> Result<(), VulkanError> {
+        let sequence_length = base_position
+            .checked_add(rows)
+            .ok_or(VulkanError::OutOfMemory)?;
+        if heads == 0 || rows == 0 {
+            return Err(VulkanError::UnsupportedShape(
+                "softmax heads and sequence length must be nonzero".into(),
+            ));
+        }
+        let count = heads
+            .checked_mul(sequence_length)
+            .ok_or(VulkanError::OutOfMemory)?;
+        let push = [
+            self.f32_rows_word(scores, rows, count, count, "softmax scores")?,
+            as_u32(heads, "softmax heads")?,
+            as_u32(sequence_length, "softmax sequence length")?,
+            as_u32(base_position, "softmax base position")?,
+            as_u32(rows, "softmax rows")?,
+            u32::from(full_attention),
+        ];
+        let [x, y, z] = row_dispatch(heads, rows, &self.context.limits)?;
+        unsafe {
+            commands.bind(
+                self.pipelines[SOFTMAX_F32],
                 self.context.pipeline_layout,
                 &[self.arena_bindings.descriptor_set],
                 bytemuck::cast_slice(&push),
@@ -4927,6 +5166,94 @@ impl<'a> Qwen3Ops<'a> {
         unsafe {
             commands.bind(
                 self.pipelines[values_pipeline],
+                self.context.pipeline_layout,
+                &[self.arena_bindings.descriptor_set],
+                bytemuck::cast_slice(&push),
+            );
+            commands.dispatch(x, y, z);
+            commands.barrier();
+        }
+        Ok(())
+    }
+
+    /// Attention values that read an F32 KV cache and F32 probabilities.
+    ///
+    /// [`Self::record_attention_values_rows`] rounds both the probability and
+    /// the cached value to F16 on the way in, which only matches a F16 KV
+    /// cache. This variant keeps both in F32 and uses the same compensated
+    /// F32 accumulation.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_attention_values_f32_kv_rows(
+        &self,
+        commands: &TokenCommands<'_>,
+        scores: ArenaRegion,
+        cache_v: ArenaRegion,
+        output: ArenaRegion,
+        layer: usize,
+        layer_count: usize,
+        base_position: usize,
+        capacity: usize,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        rows: usize,
+        full_attention: bool,
+    ) -> Result<(), VulkanError> {
+        let sequence_length = base_position
+            .checked_add(rows)
+            .ok_or(VulkanError::OutOfMemory)?;
+        if rows == 0 {
+            return Err(VulkanError::UnsupportedShape(
+                "empty attention chunk".into(),
+            ));
+        }
+        validate_attention_shape(
+            layer,
+            layer_count,
+            sequence_length,
+            capacity,
+            q_heads,
+            kv_heads,
+            head_dim,
+        )?;
+        let score_count = q_heads
+            .checked_mul(sequence_length)
+            .ok_or(VulkanError::OutOfMemory)?;
+        let output_count = q_heads
+            .checked_mul(head_dim)
+            .ok_or(VulkanError::OutOfMemory)?;
+        let kv_count = kv_heads
+            .checked_mul(head_dim)
+            .ok_or(VulkanError::OutOfMemory)?;
+        let cache_count = layer_count
+            .checked_mul(capacity)
+            .and_then(|value| value.checked_mul(kv_count))
+            .ok_or(VulkanError::OutOfMemory)?;
+        let push = [
+            self.f32_rows_word(
+                scores,
+                rows,
+                score_count,
+                score_count,
+                "attention probabilities",
+            )?,
+            self.f32_rows_word(cache_v, 1, cache_count, cache_count, "attention V cache")?,
+            self.f32_rows_word(output, rows, output_count, output_count, "attention output")?,
+            as_u32(layer, "attention layer")?,
+            as_u32(sequence_length, "attention sequence length")?,
+            as_u32(capacity, "attention capacity")?,
+            as_u32(q_heads, "attention Q heads")?,
+            as_u32(kv_heads, "attention KV heads")?,
+            as_u32(head_dim, "attention head dimension")?,
+            as_u32(base_position, "attention base position")?,
+            as_u32(rows, "attention rows")?,
+            u32::from(full_attention),
+            0,
+        ];
+        let [x, y, z] = row_dispatch(output_count.div_ceil(64), rows, &self.context.limits)?;
+        unsafe {
+            commands.bind(
+                self.pipelines[ATTENTION_VALUES_F32_KV],
                 self.context.pipeline_layout,
                 &[self.arena_bindings.descriptor_set],
                 bytemuck::cast_slice(&push),
@@ -6227,7 +6554,7 @@ fn row_word(
     as_u32(region.offset / 4, label)
 }
 
-fn row_dispatch(
+pub(crate) fn row_dispatch(
     groups: usize,
     rows: usize,
     limits: &vk::PhysicalDeviceLimits,
