@@ -120,7 +120,11 @@ fn silu_matches_the_ggml_arm_reference() {
         .chunks_exact(4)
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
-    assert_eq!(reference.len(), input.len(), "oracle produced the wrong length");
+    assert_eq!(
+        reference.len(),
+        input.len(),
+        "oracle produced the wrong length"
+    );
 
     let mut ours = input.clone();
     rust_model_inference::ops::activation::silu_ggml_inplace(&mut ours);
@@ -140,7 +144,8 @@ fn silu_matches_the_ggml_arm_reference() {
         }
     }
     assert_eq!(
-        mismatches, 0,
+        mismatches,
+        0,
         "{mismatches} of {} SiLU values differ from ggml's ARM kernel",
         ours.len()
     );

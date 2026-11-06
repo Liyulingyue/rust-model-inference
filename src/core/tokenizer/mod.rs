@@ -2430,7 +2430,10 @@ mod tests {
                 "tokenizer.ggml.bos_token_id".to_string(),
                 MetaValue::Uint32(0),
             ),
-            ("tokenizer.ggml.pre".to_string(), MetaValue::String(pre.into())),
+            (
+                "tokenizer.ggml.pre".to_string(),
+                MetaValue::String(pre.into()),
+            ),
         ]);
         if let Some(value) = add_bos_token {
             metadata.insert(

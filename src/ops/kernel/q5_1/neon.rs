@@ -138,14 +138,8 @@ pub unsafe fn matmul_q5_1_vs_q8_0_neon(
                 *w_ptr.add(off1 + 6),
                 *w_ptr.add(off1 + 7),
             ]);
-            let d_x0 = f16_to_f32(u16::from_le_bytes([
-                *w_ptr.add(off0),
-                *w_ptr.add(off0 + 1),
-            ]));
-            let d_x1 = f16_to_f32(u16::from_le_bytes([
-                *w_ptr.add(off1),
-                *w_ptr.add(off1 + 1),
-            ]));
+            let d_x0 = f16_to_f32(u16::from_le_bytes([*w_ptr.add(off0), *w_ptr.add(off0 + 1)]));
+            let d_x1 = f16_to_f32(u16::from_le_bytes([*w_ptr.add(off1), *w_ptr.add(off1 + 1)]));
             let m_x0 = f16_to_f32(u16::from_le_bytes([
                 *w_ptr.add(off0 + 2),
                 *w_ptr.add(off0 + 3),
@@ -165,15 +159,19 @@ pub unsafe fn matmul_q5_1_vs_q8_0_neon(
             // the low nibbles, bits 16..31 on the high nibbles.
             expanded[0..8].copy_from_slice(&B2B_TABLE[(qh0 & 0xff) as usize].to_le_bytes());
             expanded[8..16].copy_from_slice(&B2B_TABLE[((qh0 >> 8) & 0xff) as usize].to_le_bytes());
-            expanded[16..24].copy_from_slice(&B2B_TABLE[((qh0 >> 16) & 0xff) as usize].to_le_bytes());
-            expanded[24..32].copy_from_slice(&B2B_TABLE[((qh0 >> 24) & 0xff) as usize].to_le_bytes());
+            expanded[16..24]
+                .copy_from_slice(&B2B_TABLE[((qh0 >> 16) & 0xff) as usize].to_le_bytes());
+            expanded[24..32]
+                .copy_from_slice(&B2B_TABLE[((qh0 >> 24) & 0xff) as usize].to_le_bytes());
             let bit_low = vld1q_u8(expanded.as_ptr());
             let bit_high = vld1q_u8(expanded.as_ptr().add(16));
 
             expanded[0..8].copy_from_slice(&B2B_TABLE[(qh1 & 0xff) as usize].to_le_bytes());
             expanded[8..16].copy_from_slice(&B2B_TABLE[((qh1 >> 8) & 0xff) as usize].to_le_bytes());
-            expanded[16..24].copy_from_slice(&B2B_TABLE[((qh1 >> 16) & 0xff) as usize].to_le_bytes());
-            expanded[24..32].copy_from_slice(&B2B_TABLE[((qh1 >> 24) & 0xff) as usize].to_le_bytes());
+            expanded[16..24]
+                .copy_from_slice(&B2B_TABLE[((qh1 >> 16) & 0xff) as usize].to_le_bytes());
+            expanded[24..32]
+                .copy_from_slice(&B2B_TABLE[((qh1 >> 24) & 0xff) as usize].to_le_bytes());
             let bit_low1 = vld1q_u8(expanded.as_ptr());
             let bit_high1 = vld1q_u8(expanded.as_ptr().add(16));
 
@@ -193,28 +191,12 @@ pub unsafe fn matmul_q5_1_vs_q8_0_neon(
             let y1_high = vld1q_s8(iq_ptr.add((block + 1) * BLOCK_ELEMENTS + 16) as *const i8);
 
             let p0 = vaddq_s32(
-                vdotq_s32(
-                    vdupq_n_s32(0),
-                    vreinterpretq_s8_u8(level0_low),
-                    y0_low,
-                ),
-                vdotq_s32(
-                    vdupq_n_s32(0),
-                    vreinterpretq_s8_u8(level0_high),
-                    y0_high,
-                ),
+                vdotq_s32(vdupq_n_s32(0), vreinterpretq_s8_u8(level0_low), y0_low),
+                vdotq_s32(vdupq_n_s32(0), vreinterpretq_s8_u8(level0_high), y0_high),
             );
             let p1 = vaddq_s32(
-                vdotq_s32(
-                    vdupq_n_s32(0),
-                    vreinterpretq_s8_u8(level1_low),
-                    y1_low,
-                ),
-                vdotq_s32(
-                    vdupq_n_s32(0),
-                    vreinterpretq_s8_u8(level1_high),
-                    y1_high,
-                ),
+                vdotq_s32(vdupq_n_s32(0), vreinterpretq_s8_u8(level1_low), y1_low),
+                vdotq_s32(vdupq_n_s32(0), vreinterpretq_s8_u8(level1_high), y1_high),
             );
 
             sumv0 = vmlaq_n_f32(sumv0, vcvtq_f32_s32(p0), d_x0 * d_y0);

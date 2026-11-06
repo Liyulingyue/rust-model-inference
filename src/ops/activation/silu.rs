@@ -165,7 +165,9 @@ unsafe fn fms(
 /// between them per group of four lanes.
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-pub(crate) unsafe fn ggml_v_expf_neon(x: std::arch::aarch64::float32x4_t) -> std::arch::aarch64::float32x4_t {
+pub(crate) unsafe fn ggml_v_expf_neon(
+    x: std::arch::aarch64::float32x4_t,
+) -> std::arch::aarch64::float32x4_t {
     use std::arch::aarch64::*;
 
     use self::ggml_exp_consts::*;
@@ -179,7 +181,11 @@ pub(crate) unsafe fn ggml_v_expf_neon(x: std::arch::aarch64::float32x4_t) -> std
     let u = vmulq_f32(b, b);
     let j = fma(
         vmulq_f32(vdupq_n_f32(P0), b),
-        fma(fma(vdupq_n_f32(P1), vdupq_n_f32(P2), b), fma(vdupq_n_f32(P3), b, vdupq_n_f32(P4)), u),
+        fma(
+            fma(vdupq_n_f32(P1), vdupq_n_f32(P2), b),
+            fma(vdupq_n_f32(P3), b, vdupq_n_f32(P4)),
+            u,
+        ),
         u,
     );
     if vaddvq_u32(c) == 0 {

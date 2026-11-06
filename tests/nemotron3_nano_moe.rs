@@ -33,7 +33,9 @@ use std::sync::Arc;
 
 fn source() -> Option<Arc<dyn TensorSource>> {
     let path = std::env::var_os("RMI_NEMOTRON3_MODEL")?;
-    Some(Arc::new(GGUFLoader::from_file(path).expect("open 30B GGUF")))
+    Some(Arc::new(
+        GGUFLoader::from_file(path).expect("open 30B GGUF"),
+    ))
 }
 
 fn reference_prompt() -> String {
@@ -182,7 +184,8 @@ fn nemotron3_nano_4b_reference_trace() {
         std::env::var_os("RMI_PARITY_TRACE").is_some(),
         "set RMI_PARITY_TRACE to the manifest path"
     );
-    let source: Arc<dyn TensorSource> = Arc::new(GGUFLoader::from_file(path).expect("open 4B GGUF"));
+    let source: Arc<dyn TensorSource> =
+        Arc::new(GGUFLoader::from_file(path).expect("open 4B GGUF"));
     let tokenizer = BPETokenizer::from_gguf_metadata(|key| source.metadata(key).cloned())
         .expect("4B tokenizer");
     let prompt = tokenizer.encode(

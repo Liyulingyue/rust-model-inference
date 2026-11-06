@@ -145,11 +145,7 @@ fn build_oracle(work_dir: &Path) -> Option<PathBuf> {
             // the comparison to mean anything.
             command.arg("-march=armv8.2-a+dotprod");
         }
-        let status = command
-            .arg("-o")
-            .arg(&binary)
-            .arg(&source)
-            .status();
+        let status = command.arg("-o").arg(&binary).arg(&source).status();
         match status {
             Ok(status) if status.success() => return Some(binary),
             // A compiler that fails to build the oracle is a *failure*, not

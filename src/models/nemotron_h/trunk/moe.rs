@@ -117,12 +117,7 @@ pub(crate) fn route_experts(
     let sum = gathered.iter().map(|&v| f64::from(v)).sum::<f64>() as f32;
     trace::layer_1d("ffn_moe_weights_sum", layer, step, &[sum]);
     let sum_clamped = sum.max(SUM_FLOOR);
-    trace::layer_1d(
-        "ffn_moe_weights_sum_clamped",
-        layer,
-        step,
-        &[sum_clamped],
-    );
+    trace::layer_1d("ffn_moe_weights_sum_clamped", layer, step, &[sum_clamped]);
 
     let normed: Vec<f32> = if weights_norm {
         gathered.iter().map(|w| w / sum_clamped).collect()

@@ -70,9 +70,7 @@ pub fn forward_f32_rows_ggml(
             // SAFETY: NEON is available (runtime probe) and every load is
             // bounded by `n_in` / `row_end * n_in`.
             unsafe {
-                neon::matmul_f32_vs_f32_ggml(
-                    weight, input, output, n_in, row_start, row_end,
-                );
+                neon::matmul_f32_vs_f32_ggml(weight, input, output, n_in, row_start, row_end);
             }
             return;
         }
@@ -131,12 +129,7 @@ pub mod scalar {
     }
 
     /// Strided variant where the entries beyond `n_valid` read as zero.
-    pub fn dot_f32_ggml_stride_padded(
-        x: &[f32],
-        stride: usize,
-        y: &[f32],
-        n_valid: usize,
-    ) -> f32 {
+    pub fn dot_f32_ggml_stride_padded(x: &[f32], stride: usize, y: &[f32], n_valid: usize) -> f32 {
         let n = y.len();
         let mut sum = [[0.0f32; 4]; 4];
         let np = n & !(16 - 1);
@@ -196,8 +189,7 @@ pub mod scalar {
     ) {
         for (out_idx, row) in (row_start..row_end).enumerate() {
             let row_off = row * n_in;
-            output[out_idx] =
-                dot_f32_ggml(&weight[row_off..row_off + n_in], &input[..n_in]);
+            output[out_idx] = dot_f32_ggml(&weight[row_off..row_off + n_in], &input[..n_in]);
         }
     }
 }
@@ -215,11 +207,7 @@ pub mod neon {
         while i < np {
             for (j, acc) in sum.iter_mut().enumerate() {
                 let base = i + j * 4;
-                *acc = vfmaq_f32(
-                    *acc,
-                    vld1q_f32(x.add(base)),
-                    vld1q_f32(y.add(base)),
-                );
+                *acc = vfmaq_f32(*acc, vld1q_f32(x.add(base)), vld1q_f32(y.add(base)));
             }
             i += 16;
         }

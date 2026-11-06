@@ -215,7 +215,10 @@ fn load_moe_weights(
             .tensor_info(name)
             .ok_or_else(|| format!("Missing {name}"))?;
         Ok(unsafe {
-            std::mem::transmute::<&crate::core::tensor::TensorInfo, &'static crate::core::tensor::TensorInfo>(info)
+            std::mem::transmute::<
+                &crate::core::tensor::TensorInfo,
+                &'static crate::core::tensor::TensorInfo,
+            >(info)
         })
     };
 
@@ -477,12 +480,7 @@ pub fn load_layers(
                 .moe
                 .as_ref()
                 .ok_or_else(|| "Nemotron MoE tensors without MoE metadata".to_string())?;
-            Some(load_moe_weights(
-                source,
-                layer_idx,
-                moe_cfg,
-                config.n_embd,
-            )?)
+            Some(load_moe_weights(source, layer_idx, moe_cfg, config.n_embd)?)
         } else {
             None
         };

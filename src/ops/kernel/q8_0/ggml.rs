@@ -117,8 +117,8 @@ pub mod scalar {
                 let off = row_off + ib * BLOCK_BYTES;
                 let mut sumi = 0i32;
                 for j in 0..32 {
-                    sumi += (weight[off + 2 + j] as i8 as i32)
-                        * (input_q8[ib * 32 + j] as i8 as i32);
+                    sumi +=
+                        (weight[off + 2 + j] as i8 as i32) * (input_q8[ib * 32 + j] as i8 as i32);
                 }
                 let d = f16_to_f32(u16::from_le_bytes([weight[off], weight[off + 1]]))
                     * input_scales[ib];
@@ -218,8 +218,8 @@ pub mod neon {
                 let off = row_off + ib * BLOCK_BYTES;
                 let mut sumi = 0i32;
                 for j in 0..32 {
-                    sumi += (weight[off + 2 + j] as i8 as i32)
-                        * (input_q8[ib * 32 + j] as i8 as i32);
+                    sumi +=
+                        (weight[off + 2 + j] as i8 as i32) * (input_q8[ib * 32 + j] as i8 as i32);
                 }
                 let d = f16_to_f32(u16::from_le_bytes([weight[off], weight[off + 1]]))
                     * input_scales[ib];
@@ -288,8 +288,8 @@ pub mod neon {
                 let off = row_off + ib * BLOCK_BYTES;
                 let mut sumi = 0i32;
                 for j in 0..32 {
-                    sumi += (weight[off + 2 + j] as i8 as i32)
-                        * (input_q8[ib * 32 + j] as i8 as i32);
+                    sumi +=
+                        (weight[off + 2 + j] as i8 as i32) * (input_q8[ib * 32 + j] as i8 as i32);
                 }
                 let d = f16_to_f32(u16::from_le_bytes([weight[off], weight[off + 1]]))
                     * input_scales[ib];

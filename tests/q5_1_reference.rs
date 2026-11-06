@@ -62,8 +62,10 @@ fn build_blocks(count: usize) -> Vec<u8> {
         for j in 0..16 {
             // Sweep the 5-bit levels so the corpus covers 0..31 for
             // both nibbles, plus pseudo-random levels on top.
-            let lo = ((index as u8).wrapping_mul(7).wrapping_add(j as u8) % 32) | (rng.next_u32() as u8 & 0xE0);
-            let hi = ((index as u8).wrapping_mul(11).wrapping_add(j as u8) % 32) | (rng.next_u32() as u8 & 0xE0);
+            let lo = ((index as u8).wrapping_mul(7).wrapping_add(j as u8) % 32)
+                | (rng.next_u32() as u8 & 0xE0);
+            let hi = ((index as u8).wrapping_mul(11).wrapping_add(j as u8) % 32)
+                | (rng.next_u32() as u8 & 0xE0);
             qs[j] = (lo & 0x0F) | ((hi & 0x0F) << 4);
             qh |= ((lo >> 4) as u32 & 1) << j;
             qh |= ((hi >> 4) as u32 & 1) << (j + 16);
@@ -130,7 +132,11 @@ fn q5_1_matches_the_ggml_c_reference() {
         .chunks_exact(4)
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
-    assert_eq!(reference.len(), BLOCKS * 32, "oracle produced the wrong length");
+    assert_eq!(
+        reference.len(),
+        BLOCKS * 32,
+        "oracle produced the wrong length"
+    );
 
     let mut ours = vec![0.0f32; BLOCKS * 32];
     rust_model_inference::ops::quant::dequantize_row_q5_1(&blocks, &mut ours);
@@ -152,7 +158,8 @@ fn q5_1_matches_the_ggml_c_reference() {
         }
     }
     assert_eq!(
-        mismatches, 0,
+        mismatches,
+        0,
         "{mismatches} of {} Q5_1 elements differ from the ggml reference",
         ours.len()
     );

@@ -40,28 +40,9 @@ fn assert_neon_eq_scalar(label: &str, weight: &[u8], q8: &[u8], scales: &[f32]) 
     let mut neon_out = vec![0.0f32; n_out];
     let mut scalar_out = vec![0.0f32; n_out];
     unsafe {
-        matmul_q5_1_vs_q8_0_neon(
-            weight,
-            q8,
-            scales,
-            None,
-            &mut neon_out,
-            n_in,
-            0,
-            n_out,
-        );
+        matmul_q5_1_vs_q8_0_neon(weight, q8, scales, None, &mut neon_out, n_in, 0, n_out);
     }
-    matmul_q5_1_scalar_range(
-        weight,
-        q8,
-        scales,
-        None,
-        &mut scalar_out,
-        n_in,
-        n_out,
-        0,
-        1,
-    );
+    matmul_q5_1_scalar_range(weight, q8, scales, None, &mut scalar_out, n_in, n_out, 0, 1);
     for (i, (a, b)) in neon_out.iter().zip(scalar_out.iter()).enumerate() {
         assert!(
             a.to_bits() == b.to_bits(),

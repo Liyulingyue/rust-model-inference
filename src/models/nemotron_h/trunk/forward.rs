@@ -331,11 +331,7 @@ impl NemotronModel {
             self.config.norm_eps,
         );
         #[cfg(feature = "parity-trace")]
-        trace::global(
-            "result_norm",
-            base_position + last_pos,
-            &scratch.normed,
-        );
+        trace::global("result_norm", base_position + last_pos, &scratch.normed);
         let blocks = (self.config.n_embd + 31) / 32;
         quantize_q8_0_into(
             &scratch.normed,
@@ -354,11 +350,7 @@ impl NemotronModel {
         );
         scratch.next_position += n;
         #[cfg(feature = "parity-trace")]
-        trace::global(
-            "result_output",
-            base_position + last_pos,
-            &scratch.logits,
-        );
+        trace::global("result_output", base_position + last_pos, &scratch.logits);
         Ok(scratch.logits.clone())
     }
 
@@ -501,8 +493,8 @@ impl NemotronModel {
                         // `kq = ggml_mul_mat(k, q)` with both sides F32:
                         // ggml's four-accumulator `ggml_vec_dot_f32`, then
                         // `ggml_soft_max_ext` scales by `kq_scale`.
-                        scores[j] = crate::ops::kernel::f32::ggml::dot_f32_ggml(q_row, k_row)
-                            * kq_scale;
+                        scores[j] =
+                            crate::ops::kernel::f32::ggml::dot_f32_ggml(q_row, k_row) * kq_scale;
                     }
                     // ggml's NEON softmax uses its polynomial `exp`
                     // (`ggml_v_expf`), not libm's `expf`.
@@ -1225,10 +1217,8 @@ unsafe fn ssm_scan_row_avx2(
                 let v_b = _mm256_loadu_ps(b_row.as_ptr().add(off));
                 // ggml: ax = s0 * dA; ay = B * x_dt; ax = ax + ay.
                 // Two separate ops, not an FMA -- the rounding differs.
-                let v_new_state = _mm256_add_ps(
-                    _mm256_mul_ps(v_state, v_dA),
-                    _mm256_mul_ps(v_b, v_x_dt),
-                );
+                let v_new_state =
+                    _mm256_add_ps(_mm256_mul_ps(v_state, v_dA), _mm256_mul_ps(v_b, v_x_dt));
                 _mm256_storeu_ps(state_row.as_mut_ptr().add(off), v_new_state);
                 let v_c = _mm256_loadu_ps(c_row.as_ptr().add(off));
                 acc[j] = _mm256_fmadd_ps(v_new_state, v_c, acc[j]);
@@ -1293,8 +1283,7 @@ unsafe fn ssm_scan_row_neon(
                 let v_state = vld1q_f32(state_row.as_ptr().add(off));
                 let v_b = vld1q_f32(b_row.as_ptr().add(off));
                 // ggml: ax = s0 * dA; ay = B * x_dt; ax = ax + ay.
-                let v_new_state =
-                    vaddq_f32(vmulq_f32(v_state, v_dA), vmulq_f32(v_b, v_x_dt));
+                let v_new_state = vaddq_f32(vmulq_f32(v_state, v_dA), vmulq_f32(v_b, v_x_dt));
                 vst1q_f32(state_row.as_mut_ptr().add(off), v_new_state);
                 let v_c = vld1q_f32(c_row.as_ptr().add(off));
                 acc[j] = vfmaq_f32(acc[j], v_new_state, v_c);

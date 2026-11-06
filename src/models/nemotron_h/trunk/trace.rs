@@ -94,9 +94,6 @@ mod tests {
     fn topk_order_is_preserved() {
         let chosen: Vec<u32> = vec![117, 3, 88, 0, 64, 12];
         let widened: Vec<f32> = chosen.iter().map(|&value| value as f32).collect();
-        assert_eq!(
-            widened,
-            vec![117.0, 3.0, 88.0, 0.0, 64.0, 12.0]
-        );
+        assert_eq!(widened, vec![117.0, 3.0, 88.0, 0.0, 64.0, 12.0]);
     }
 }

@@ -152,14 +152,7 @@ impl Kernel for F32Kernel {
         if input_f32.len() >= n_in {
             let (start, end) = scalar::row_range(n_out, ith, nth);
             if start < end {
-                ggml::forward_f32_rows_ggml(
-                    &self.weight,
-                    input_f32,
-                    output,
-                    n_in,
-                    start,
-                    end,
-                );
+                ggml::forward_f32_rows_ggml(&self.weight, input_f32, output, n_in, start, end);
             }
         } else {
             self.forward_prepared(
