@@ -90,13 +90,18 @@ fn validate_audio_temperature(route: AudioRoute, temperature: Option<f32>) -> Re
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
-        println!("{USAGE}\n\nWeVisOne-VL: --model text.gguf --mmproj vision.gguf --wevisone-decoder decoder.gguf --wevisone-request request.json [--output result.json]\n\nTimestral-209M: --model <timestral-F32.gguf> --timestral-request <series.json> [--threads N] [--compute cpu|auto|vulkan] | time-series forecasting; JSON context and prediction_length in, 21 quantiles out");
+        println!("{USAGE}\n\nWeVisOne-VL: --model text.gguf --mmproj vision.gguf --wevisone-decoder decoder.gguf --wevisone-request request.json [--output result.json]\n\nTimestral-209M: --model <timestral-F32.gguf> --timestral-request <series.json> [--threads N] [--compute cpu|auto|vulkan] | time-series forecasting; JSON context and prediction_length in, 21 quantiles out\n\nSystem One (Vela3): --model <base-directory> --system-one-request <request.json|-> [--adapter <vela3-package>] [--threads N] [--compute cpu] | JSON request from a file or stdin; one JSON response to stdout");
         return;
     }
     // \n\nGLiNER2 boundary mode: --jev --gliner2-boundary --model <gliner2.5-boundary.gguf> --jev-context <text> --gliner2-schema <json> | span extraction; the schema is {\"entities\":[\"person\",\"location\"],\"entity_descriptions\":{...}} (the dict form {\"entities\":{\"person\":[...]}} is also accepted). Output is (start, end) word spans per field; --jev-output json for machine-readable.\n\nServer mode: --serve delegates to app::server::run_server which has its
     // own --host/--port pre-parser and reuses the shared CLI parser for the rest.
     if args.iter().any(|arg| arg == "--serve")
-        && !args.iter().any(|arg| arg == "--timestral-request")
+        && !args.iter().any(|arg| {
+            matches!(
+                arg.as_str(),
+                "--timestral-request" | "--system-one-request" | "--adapter"
+            )
+        })
     {
         app::server::run_server();
         return;
@@ -105,8 +110,11 @@ fn main() {
         eprintln!("{error}");
         std::process::exit(2);
     });
-    // Reject mixed forecast/task modes before any early media route can run.
-    if options.timestral_request.is_some() {
+    // Reject mixed JSON/task modes before any early media route can run.
+    if options.timestral_request.is_some()
+        || options.system_one_request.is_some()
+        || options.adapter.is_some()
+    {
         app::run_or_exit(app::validate_cli_options(&options));
     }
     app::run_or_exit(options.validate_compute_mode());
@@ -122,6 +130,11 @@ fn main() {
         .map(std::num::NonZeroUsize::get)
         .unwrap_or(1);
     let n_threads = app::resolve_thread_count(options.threads, available_threads);
+    if options.system_one_request.is_some() {
+        app::init_rayon_global_pool(n_threads);
+        app::run_or_exit(app::system_one::run_cli(&options, n_threads));
+        return;
+    }
     if options.wevisone_request.is_some() {
         app::run_or_exit(app::validate_cli_options(&options));
         app::init_rayon_global_pool(n_threads);

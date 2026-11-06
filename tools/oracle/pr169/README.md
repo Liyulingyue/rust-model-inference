@@ -2,6 +2,11 @@
 
 This directory pins the independent CPU reference and the acceptance boundaries for
 EmbeddingGemma-2, PhysBrain1.5-2B and Occamy-1.0.
+
+**Scope on this branch**: only the Occamy-1.0 work is here. The EmbeddingGemma-2 and
+PhysBrain1.5-2B sections are kept because the Occamy verification shared this record
+(one oracle run, one set of hashes); their model code lives on other branches, so
+their commands do not run here.
 `verification.json` records the exact GGUF hashes, formats and measured errors.
 Lossless loading/layout/token IDs are checked exactly. Quantized matmul, activation
 rounding and approximate nonlinear operators use numerical checks, as requested;
@@ -178,3 +183,108 @@ that skipped four of every eight values is repaired; both its new lane/tail
 regression and the previously failing grouped-variance test are included. The
 prefill trace regression is also fixed and included. No full-suite pass, GPU
 numerical alignment, robot-action execution or performance benchmark is claimed.
+
+## Occamy-1.0 re-verification on the aarch64 box (2026-11-05)
+
+The `Occamy-1.0` branch (from `main`) was re-verified with the real weights on
+an aarch64 host (NVIDIA GB10 box, 8 inference threads, `release-fast`). Both
+files match the hashes in `verification.json`: `occamy-1.0-Q8_0.gguf`
+(`9bd6ecea…`, 36,903,139,456 bytes) and `mmproj-occamy-1.0-F16.gguf`
+(`8f827a1e…`, 899,282,944 bytes).
+
+| check | result |
+| --- | --- |
+| greedy ids vs llama.cpp | **8/8 identical**, and identical to the recorded default row |
+| vision projection relative L2 | **0.00070317** (bound 0.01; the Apple Silicon run measured 0.00336136) |
+| tokenizer vs the pinned llama.cpp tokenizer | exact on every fixture |
+| CLI smoke | the 64x64 blue PNG answers `blue`, 9 vision tokens, CPU and Vulkan alike |
+
+The per-step logits envelope does not transfer across hosts. This host measures
+
+```
+0.08729171 0.04906173 0.02428209 0.02397511 0.03363240 0.06843563 0.11983501 0.08049776
+```
+
+against the recorded Apple Silicon run
+
+```
+0.08481082 0.07745719 0.03895792 0.04257759 0.04971924 0.07071221 0.06171023 0.05796181
+```
+
+so step 6 lands at 0.11984, above the recorded bound of 0.1, while the recorded
+run's own maximum was 0.08481 — the envelope was already close to its edge. The
+argmax agrees with llama.cpp at every step on both hosts. The fragile step is
+step 4, where llama.cpp's top-two margin is 0.247 but the Rust's is 0.039: a
+host difference can flip that token, which is what the recorded run saw.
+
+The CPU and the device path also choose different greedy tokens for this
+checkpoint — CPU `2 + 2 = 4`, device `2 + 2 equals **4**.` — and that reproduces
+identically on `origin/main` without any of the Occamy work, so it is not
+caused by it. The earlier roadmap note that occamy-1.0 matches bit for bit
+between GPU and CPU at `--temp 0` was measured with a different weight set.
+
+Commands are in `verification.json` under `occamy_reverification_2026_11_05`.
+
+## The upstream PyTorch reference (2026-11-06)
+
+The GGUF is a conversion of `Accio-Lab/occamy-1.0`, and llama.cpp is another
+port of the same architecture. The upstream weights (13 safetensors shards plus
+`model-visual`, 65.40 GiB) were fetched from ModelScope, together with the
+tokenizer files the Hugging Face mirror's file list omits.
+
+`pytorch_reference.py` runs them through transformers' own
+`Qwen3_5MoeForConditionalGeneration` (5.19.0, bfloat16, CPU) on the engine's
+exact 19-token prompt, and `compare_pytorch.py` compares the dumps.
+
+The greedy output agrees token for token with both other implementations:
+
+| implementation | greedy ids |
+| --- | --- |
+| upstream PyTorch (BF16) | 17 478 220 17 283 220 19 248046 |
+| llama.cpp (pinned `11fe0215`) | 17 478 220 17 283 220 19 248046 |
+| this engine (Q8_0 GGUF) | 17 478 220 17 283 220 19 248046 |
+
+The final prefill row, relative L2 over all 248,320 logits:
+
+| pair | relative L2 |
+| --- | --- |
+| engine vs llama.cpp | 0.08729171 |
+| engine vs upstream PyTorch | 0.12501672 |
+| llama.cpp vs upstream PyTorch | 0.10422619 |
+
+The two independent implementations differ from each other by more than the
+engine differs from llama.cpp, so the row-level spread is the port difference of
+a 37B sparse hybrid MoE rather than an engine defect: the engine implements the
+GGUF contract, and the GGUF is llama.cpp's. This is the same shape as the
+ZDTaichu5.0 result, where the upstream PyTorch path and llama.cpp differ by
+4.54 and the engine follows the GGUF.
+
+Speed, same prompt, same machine:
+
+| | load | prefill (19 tokens) | decode |
+| --- | --- | --- | --- |
+| upstream PyTorch, CPU, BF16 | 46.3 s | 11.59 s | 0.90 tok/s |
+| upstream PyTorch, GB10, BF16 | 388.4 s | 2.75 s | 4.71 tok/s |
+| this engine, CPU, Q8_0, 8 threads | ~40 s (mmap) | 1.09 s | **15.2 tok/s** |
+| this engine, Vulkan, Q8_0 | ~40 s (mmap) | **0.63 s** | 3.8 tok/s |
+
+The engine's CPU decode is 17x the upstream CPU decode: it reads only the eight
+active experts per layer in Q8_0 and uses the NEON kernels, while the reference
+runs transformers' fallback kernels without `causal_conv1d` or
+`flash-linear-attention`. Those PyTorch numbers are therefore a floor, not an
+optimized reference. On the GPU the reference is slightly ahead of the engine's
+device path (4.71 against 3.8 tok/s) while the engine wins the prefill by 4.4x
+(0.63 against 2.75 s).
+
+The vision side is **not** compared, and the numbers say why. The upstream
+tower is a Qwen3-VL style merger with its own position embedding interpolation
+and preprocessing, while the mmproj here is llama.cpp's CLIP tower, so the
+two are not the same function. For information only: the upstream features
+differ from the llama.cpp dump by relative L2 **0.74595491**, while this
+engine differs from that same dump by **0.00070317**. The engine follows the
+GGUF contract, which is llama.cpp's, and the GGUF was converted from the same
+safetensors the upstream weights come from.
+
+`pytorch_reference.py` can still produce the upstream vision dump; the vision
+tower wants the patchified sequence in the `(-1, C, temporal_patch, patch,
+patch)` layout, which is 1024 rows of 1536 values for a 512x512 input.

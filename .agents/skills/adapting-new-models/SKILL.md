@@ -15,6 +15,10 @@ description: Use when 用户要求在 rust-model-inference 中新增或扩展 GG
 - 不得把未知架构默认路由到相近模型。只有 Tokenizer、张量契约、位置编码、归一化、Attention/KV、FFN/MoE 和输出变换均一致时才能复用实现，并且仍需显式注册新架构。
 - 将用户指定的 llama.cpp 或官方实现视为只读 Oracle。需要插桩时，在临时副本中固定 commit 后修改，不污染用户的参考仓库。
 - 以实际提供的 GGUF、mmproj 和组件为范围边界；没有多模态组件就不扩展多模态支持。
+- **模型适配不得擅自改变编译产物集合。** 除非用户明确要求独立可执行文件，否则接入现有
+  `rust-model-inference` / `rust-model-server` 的参数与调度，不新增 `src/bin/<model>.rs`
+  或 `[[bin]]`。Cargo 会自动发现 `src/bin/*.rs`，未改 Cargo.toml 也会增加产物；
+  不得靠修改 `default-run`、关闭 `autobins` 或 feature gate 掩盖这个问题。
 - **入口层按能力抽象，不按模型名堆文件。** 模型级 CLI 编排层放在 `src/app/<model>.rs`
   是允许的（`MODEL_ORGANIZATION.md` §9 P-4 的迁移目标就是 `src/app/gemma4.rs`），
   但它成立的前提是「这个入口形态只服务一个模型」。当第二个同形态的模型接入、
@@ -26,7 +30,7 @@ description: Use when 用户要求在 rust-model-inference 中新增或扩展 GG
 
 1. **固定输入**：记录模型路径、SHA256、文件大小、量化类型，读取 `general.architecture`、全部相关 metadata、Tokenizer/chat template，以及张量名称、shape、类型和组件清单。**取权重按 `model-download` skill 的渠道优先级走**（ModelScope 优先 → HF；HF 连不上时试 `HF_ENDPOINT=https://hf-mirror.com`，仍要校验 SHA256 与 revision）。
 2. **固定 Oracle**：优先检查用户点名的本地参考仓库，确认其 commit、工作区状态、模型实现、Tokenizer 和转换脚本确实支持目标架构。找不到匹配 Oracle 时停止并说明缺口，不猜测实现。
-3. **追踪现有路径**：结构查询优先使用 CodeGraph；定位架构注册、配置解析、Tokenizer、张量加载、模型构造、forward/session、CLI 调度、`parity-trace` 和相邻测试。先比较契约，再决定可复用部分。
+3. **追踪现有路径**：结构查询优先使用 CodeGraph；定位架构注册、配置解析、Tokenizer、张量加载、模型构造、forward/session、CLI 调度、`parity-trace` 和相邻测试。先比较契约，再决定可复用部分。用 `cargo metadata --locked --no-deps --format-version 1` 记录二进制 targets 的名称和路径，完成后与基线比较，确认没有意外新增或移除编译产物。
 4. **先写失败检查**：至少覆盖新架构不会落入旧模型、关键 metadata/shape 错误会被拒绝、Tokenizer 的 BOS/EOS/特殊 token/Unicode/空白与 Oracle 一致，以及 CLI 确实进入新路径。
 5. **最小实现**：仅补齐必须的配置解析、Tokenizer 行为、权重映射、模型计算、状态/KV 管理和显式调度；复用仓库已有算子（写法见 `operator-internal-dispatch` skill），不为未来模型建立抽象层。
 6. **逐位对齐（排障手段，不是验收标准）**：新模型跑崩、输出乱码时，逐位对齐是定位**第一个分叉 checkpoint** 的手段，用来把问题缩小到具体算子。因此初次对齐时 Rust 与 Oracle 必须都使用标量、精确实现，禁用 SIMD、FMA、权重重排和近似算子；标量逐位一致后再逐项恢复仓库已有优化，每恢复一项都重新逐位比较。双方使用同一模型、prompt、chat template、线程数、CPU 路径、KV 类型和 greedy 参数。依次比较 token IDs、checkpoint 名称/顺序/shape/次数、中间 F32 的 `to_bits()`/`u32`、最终 logits 位模式和多步 greedy token。出现差异时定位第一个分叉 checkpoint；不得改用容差、余弦相似度或可读文本作为替代结论。**恢复优化之后即接受误差指标**（max_abs / RMSE / cosine）——量化与 SIMD 本来就会改变归约顺序与末位精度，生产环境不要求逐位一致。

@@ -8,8 +8,11 @@ use super::types::{
 
 pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
     let mut options = CliOptions::default();
+    // A flag-shaped prompt value is not a mode switch.
+    let mut parsed_flags = Vec::new();
     let mut i = 1;
     while i < args.len() {
+        parsed_flags.push(i);
         match args[i].as_str() {
             "--yue2" => options.yue2 = true,
             "--dreamx" => options.dreamx = true,
@@ -61,6 +64,13 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
             "--timestral-request" => {
                 options.timestral_request =
                     Some(required_path_value(args, &mut i, "--timestral-request")?);
+            }
+            "--system-one-request" => {
+                options.system_one_request =
+                    Some(required_path_value(args, &mut i, "--system-one-request")?);
+            }
+            "--adapter" => {
+                options.adapter = Some(required_path_value(args, &mut i, "--adapter")?);
             }
             "--prompt" => {
                 if i + 1 < args.len() {
@@ -680,6 +690,24 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
             }
         }
         i += 1;
+    }
+    if options.system_one_request.is_some() {
+        for mut index in parsed_flags {
+            match args[index].as_str() {
+                "--model" => {
+                    required_path_value(args, &mut index, "--model")?;
+                }
+                "--threads" => {
+                    required_usize_value(args, &mut index, "--threads")?;
+                }
+                "--adapter" | "--system-one-request" | "--compute" => {}
+                flag => {
+                    return Err(format!(
+                        "--system-one-request cannot be combined with {flag}"
+                    ));
+                }
+            }
+        }
     }
     if options.gpu && options.compute.is_some() {
         return Err("--gpu and --compute cannot be combined".into());

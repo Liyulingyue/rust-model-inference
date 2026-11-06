@@ -1855,6 +1855,9 @@ fn configure_gpu(options: &CliOptions) -> Result<crate::compute::LegacyComputeSc
 }
 
 fn reject_unsupported_server_modes(options: &CliOptions) -> Result<(), String> {
+    if options.system_one_request.is_some() || options.adapter.is_some() {
+        return Err("--system-one-request is not supported by rust-model-server".into());
+    }
     if options.yue2 {
         return Err("--yue2 is not supported by rust-model-server".into());
     }

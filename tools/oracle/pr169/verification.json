@@ -540,5 +540,228 @@
       "max_tokens": 8,
       "temperature": 0
     }
+  },
+  "occamy_reverification_2026_11_05": {
+    "host": "aarch64 (NVIDIA GB10 box), CPU, 8 inference threads, release-fast",
+    "branch": "Occamy-1.0 (from main)",
+    "weights": "models/Occamy-1.0-GGUF/occamy-1.0-Q8_0.gguf sha256 9bd6eceae8434098c8c7ebec33e4ca0d0bd3f004c2bddf37d16cd906448fdbdd, mmproj-occamy-1.0-F16.gguf sha256 8f827a1e495f23e987686a7f55c26064270502a5b6ee954a828f1aec0b2fd400; both match the hashes above",
+    "text": {
+      "prompt_tokens": 19,
+      "prompt_ids": [
+        248045,
+        846,
+        198,
+        3710,
+        369,
+        220,
+        17,
+        10,
+        17,
+        30,
+        248046,
+        198,
+        248045,
+        74455,
+        198,
+        248068,
+        271,
+        248069,
+        271
+      ],
+      "llama_cpp_greedy_ids": [
+        17,
+        478,
+        220,
+        17,
+        283,
+        220,
+        19,
+        248046
+      ],
+      "rust_argmax_ids": [
+        17,
+        478,
+        220,
+        17,
+        283,
+        220,
+        19,
+        248046
+      ],
+      "greedy_matches_recorded_default_row": true,
+      "relative_l2_per_step": [
+        0.08729171,
+        0.04906173,
+        0.02428209,
+        0.02397511,
+        0.0336324,
+        0.06843563,
+        0.11983501,
+        0.08049776
+      ],
+      "max_abs_per_step": [
+        0.883604,
+        1.099089,
+        0.50666,
+        0.624161,
+        0.552139,
+        1.254957,
+        1.775427,
+        1.536587
+      ],
+      "recorded_apple_silicon_per_step": [
+        0.08481081826480966,
+        0.07745718617194278,
+        0.03895792493960703,
+        0.042577594422437415,
+        0.049719242481923616,
+        0.07071220726990583,
+        0.06171022693140365,
+        0.05796181102384276
+      ],
+      "bound": 0.1,
+      "bound_status": "step 6 measures 0.11984 on this host, above the recorded bound 0.1; the recorded run's own maximum was 0.08481, so the envelope was already close to its edge and does not transfer across hosts",
+      "note": "the argmax agrees with llama.cpp at every step on both hosts; the reference's step-4 top-two margin is 0.247 while the Rust's is 0.039, which is where a host difference can flip a token"
+    },
+    "vision": {
+      "relative_l2": 0.00070317,
+      "reference": "identical F16 weights widened exactly to F32; F32 activations; llama.cpp rmi.vision.output dump",
+      "bound": 0.01,
+      "recorded_apple_silicon": 0.00336136,
+      "tokens": 256
+    },
+    "tokenizer": "exact match against the pinned llama.cpp tokenizer for every fixture",
+    "cli_smoke": "the 64x64 solid blue PNG answers 'blue'; 9 vision tokens; the image path gives 'blue' on both CPU and Vulkan",
+    "cpu_vs_device": {
+      "finding": "the CPU and the Vulkan path choose different greedy tokens for the same prompt: CPU '2 + 2 = 4', device '2 + 2 equals **4**.'",
+      "pre_existing": "reproduced identically on origin/main (15c049d7) without any of this branch's changes",
+      "note": "the earlier roadmap note that occamy-1.0 matches bit for bit between GPU and CPU at --temp 0 was measured with a different weight set; it does not hold for this Q8_0 checkpoint on this host"
+    },
+    "commands": {
+      "reference_text": "RMI_ORACLE_DUMP=target/pr169/text-reference RMI_ORACLE_FILTER='^result_output$' target/physbrain/oracle-build/bin/llama-eval-callback -m \"$TEXT\" -p \"$prompt\" -n 8 -c 512 -ngl 0 -t 8 -fa off",
+      "rust_text": "RMI_TEXT_MODEL=\"$TEXT\" RMI_LLAMA_REFERENCE_LOG=target/pr169/text-reference.log RMI_PARITY_TRACE=target/pr169/teacher.jsonl cargo test --profile release-fast --features parity-trace --test pr169_teacher_forcing -- --ignored",
+      "compare": "./.venv/bin/python tools/oracle/pr169/compare_text.py target/pr169/teacher.jsonl target/pr169/text-reference target/pr169/text-reference.log --relative-l2 0.10 --teacher-forced",
+      "reference_vision": "RMI_ORACLE_DUMP=target/pr169/vision-reference RMI_ORACLE_FILTER='^rmi.vision.output$' target/physbrain/oracle-build/bin/llama-mtmd-debug -m \"$TEXT\" --mmproj \"$F32\" -p encode -n 512 --image blue -c 512 --no-warmup --no-repack -ngl 0 -t 8 -fa off",
+      "rust_vision": "RMI_OCCAMY_MMPROJ=\"$MMPROJ\" RMI_OCCAMY_VISION_REFERENCE=target/pr169/vision-reference/0000.f32 cargo test --profile release-fast --test pr169_vision_oracle occamy_vision -- --ignored",
+      "tokenizer": "RMI_LLAMA_TOKENIZE=target/physbrain/oracle-build/bin/llama-tokenize RMI_OCCAMY_TEXT=\"$TEXT\" cargo test --profile release-fast --features parity-trace --test pr169_tokenizer_oracle occamy -- --ignored",
+      "cli": "target/release-fast/rust-model-inference --model \"$TEXT\" --mmproj \"$MMPROJ\" --image blue-64.png --prompt 'Reply with one word: what color is this image?' --max-tokens 8 --max-context 256 --threads 8 --temperature 0"
+    },
+    "entry_points": {
+      "cli_text_cpu": "'2 + 2 = 4' at --temperature 0; the prompt is 19 tokens",
+      "cli_text_device": "same prompt, --compute vulkan: '2 + 2 equals **4**.' -- the device and the CPU pick different greedy tokens for this checkpoint, which reproduces on origin/main (see TODO-053)",
+      "cli_image_cpu": "'blue'",
+      "cli_image_device": "'blue'",
+      "cli_jev_text": "choice A ('apples') with probability 1.0000",
+      "cli_interactive": "works without --mmproj (the prompt reaches the model); with --mmproj the REPL is silently skipped -- see TODO-054",
+      "http_chat_text": "'2 + 2 equals **4**.' with 19 prompt tokens and 8 completion tokens",
+      "http_chat_image": "' blue' with 23 prompt tokens",
+      "http_jev_score": "choice A with probability 0.9999444",
+      "http_jev_image": "choice A ('blue') with probability 0.9999787",
+      "server": "rust-model-server --model ... --mmproj ... --compute auto; the Vulkan device is picked up (NVIDIA GB10)"
+    },
+    "performance": {
+      "host": "aarch64 + NVIDIA GB10, 8 threads, release-fast, Q8_0",
+      "text_32_tokens": {
+        "cpu": {
+          "prefill_s": 1.088281,
+          "decode_s": 2.033819,
+          "tokens_per_s": 15.2,
+          "end_to_end_tok_s": 10.2
+        },
+        "vulkan": {
+          "prefill_s": 0.631876,
+          "decode_s": 8.164168,
+          "tokens_per_s": 3.8,
+          "end_to_end_tok_s": 3.6
+        }
+      },
+      "image_1_token": {
+        "cpu": {
+          "vision_encode_s": 0.54,
+          "prefill_s": 1.596295,
+          "decode_s": 0.05918
+        },
+        "vulkan": {
+          "vision_encode_s": 0.539,
+          "prefill_s": 1.031717,
+          "decode_s": 0.271207
+        }
+      },
+      "note": "the device wins on prefill and loses 4x on decode: every token routes through 360 single-row expert projections (8 of 256 per layer, 40 layers), which is the same shape as the Mellum dispatch finding in TODO-052; see TODO-055"
+    }
+  },
+  "occamy_upstream_pytorch_2026_11_06": {
+    "purpose": "a third opinion: the GGUF is a conversion of the upstream safetensors, and llama.cpp is another port of the same architecture, so the upstream implementation shows where a port difference lives",
+    "upstream_weights": "Accio-Lab/occamy-1.0 on ModelScope, 13 safetensors shards plus model-visual, 65.40 GiB, shard sizes match the upstream listing; tokenizer.json and tokenizer_config.json fetched from the same repo (the Hugging Face mirror's file list is incomplete)",
+    "reference": "transformers 5.19.0, Qwen3_5MoeForConditionalGeneration, bfloat16 on the CPU, the engine's exact 19-token prompt",
+    "greedy_ids_upstream": [
+      17,
+      478,
+      220,
+      17,
+      283,
+      220,
+      19,
+      248046
+    ],
+    "greedy_ids_engine": [
+      17,
+      478,
+      220,
+      17,
+      283,
+      220,
+      19,
+      248046
+    ],
+    "greedy_ids_llama_cpp": [
+      17,
+      478,
+      220,
+      17,
+      283,
+      220,
+      19,
+      248046
+    ],
+    "greedy_three_way_identical": true,
+    "final_prefill_logits": {
+      "engine_vs_llama_cpp_relative_l2": 0.08729171,
+      "engine_vs_upstream_pytorch_relative_l2": 0.12501672,
+      "llama_cpp_vs_upstream_pytorch_relative_l2": 0.10422619,
+      "argmax": {
+        "engine": 17,
+        "llama_cpp": 17,
+        "upstream_pytorch": 17
+      },
+      "reading": "the two independent implementations differ from each other by more than the engine differs from llama.cpp, so the row-level spread is the port difference of a 37B sparse hybrid MoE, not an engine defect; the engine follows the GGUF contract, which is llama.cpp's"
+    },
+    "vision": "dropped: the upstream tower is a Qwen3-VL style merger with its own position embedding interpolation and preprocessing, while the mmproj here is llama.cpp's CLIP tower, so the two are not comparable. For information only, the upstream features differ from the llama.cpp dump by relative L2 0.74595491, while this engine differs from the same dump by 0.00070317. The script can still produce the upstream dump (the vision tower wants the patchified sequence in (-1, C, temporal_patch, patch, patch) layout, 1024 rows of 1536 values for a 512x512 input)",
+    "limitation": "the upstream reference runs the CPU fallback kernels (no causal_conv1d, no flash-linear-attention) and the BF16 weights, so it is a semantic reference, not a bitwise one",
+    "performance": {
+      "upstream_pytorch_cpu_bfloat16": {
+        "load_s": 46.3,
+        "prefill_19_tokens_s": 11.59,
+        "decode_tokens_per_s": 0.9,
+        "threads": null
+      },
+      "upstream_pytorch_gpu_gb10_bfloat16": {
+        "load_s": 388.4,
+        "prefill_19_tokens_s": 2.75,
+        "decode_tokens_per_s": 4.71
+      },
+      "engine_cpu_q8_0_8_threads": {
+        "prefill_21_tokens_s": 1.088,
+        "decode_tokens_per_s": 15.2,
+        "end_to_end_tok_s": 10.2
+      },
+      "engine_vulkan_gb10_q8_0": {
+        "prefill_21_tokens_s": 0.632,
+        "decode_tokens_per_s": 3.8,
+        "end_to_end_tok_s": 3.6
+      },
+      "reading": "the engine's CPU decode is 17x the upstream PyTorch CPU decode (15.2 against 0.90 tok/s) because it reads only the eight active experts per layer in Q8_0 and uses the NEON kernels, while the reference runs transformers' fallback kernels without causal_conv1d or flash-linear-attention; on the GPU the reference is slightly ahead of the engine's device path (4.71 against 3.8 tok/s), and the engine's prefill is 4.4x faster (0.632 against 2.75 s)",
+      "caveat": "the PyTorch numbers are a floor, not an optimized reference: the reference implementations of causal_conv1d and chunk_gated_delta_rule are used, so an installed flash-linear-attention would move them"
+    }
   }
 }
