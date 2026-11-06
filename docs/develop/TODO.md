@@ -3945,60 +3945,39 @@ PhysBrain 的入口矩阵都没有覆盖"交互 + mmproj"这一格，所以没�
 
 ---
 
-### TODO-056: qwen35 的 CLIP 视觉塔（mmproj）没有设备路径 —— 共享地基，**不要顺手改**
+### TODO-056: qwen35 的 CLIP 视觉塔（mmproj）没有设备路径
 
-**这不是一个可以顺手做的改动。** qwen35 的 CLIP 视觉塔是多模型共用的底座，
-动它等于动所有依赖它的模型。本条只做记录与调研，**实施要单独立项**。
+**现状**：文本塔在设备上，视觉塔不在。
 
-**现状：文本塔在设备上，视觉塔不在。**
-
-- 文本塔（`qwen35moe` / Occamy-1.0）：**完整在设备上**。trace 显示
+- 文本塔（`qwen35moe` / Occamy-1.0）：**完整在设备上** —— trace 显示
   `scope=resident_hybrid_decoder backend=Vulkan`（prefill rows=19、decode rows=1），
-  733 个权重张量一次性上传 36.35 GB，之后每 token 41 次 submission。
-  但它比 CPU 慢 4 倍（3.8 vs 15.2 t/s）→ 见 TODO-055。
-- 视觉塔（mmproj）：**不上设备**。`src/models/qwen35/vision/mod.rs` 的
+  733 个权重张量一次性上传 36.35 GB，之后每 token 41 次 submission；但比 CPU 慢 4 倍
+  （3.8 vs 15.2 t/s）→ 见 TODO-055。
+- 视觉塔（mmproj）：**不上设备** —— `src/models/qwen35/vision/mod.rs` 的
   `matmul_weight_batch` 直接调 `weight.kernel.forward_batched(...)`，而
-  `VulkanKernel::forward_batched` 只是转发给内部那个 **CPU** kernel
-  （`src/ops/kernel/vulkan.rs` 里它包的是 `Box<dyn Kernel>`）。
-  视觉编码耗时在两个后端完全一样：CPU 0.539 s vs Vulkan 0.540 s。
-  CLI 因此如实报 `backend=partial mode=mmproj`。
-- ZDTaichu5.0 的 RADIO 塔**已经**接上设备 ——
-  `src/models/zdt/vision/mod.rs:115` 先试 `weight.try_vulkan_rows(...)`。
-  同一个仓库里两种做法并存（那座塔是本分支自己的、权重 BF16 ✓）。
+  `VulkanKernel::forward_batched` 只是转发给内部的 **CPU** kernel。视觉编码两个后端
+  耗时完全一样（CPU 0.539 s vs Vulkan 0.540 s），CLI 因此如实报
+  `backend=partial mode=mmproj`。
+- ZDTaichu5.0 的 RADIO 塔**已经**接上设备（`src/models/zdt/vision/mod.rs:115` 先试
+  `weight.try_vulkan_rows(...)`）→ 同一仓库里两种做法并存。
 
-**为什么不能顺手改：影响面是共享地基。**
+**影响面**：qwen35 的 CLIP 塔是多模型共用的底座（Qwen3.5-0.8B/2B、Qwen3.8-27B、
+OvisOCR3、Sage-A1.5、Holo4-27B、LensVLM-9B、Occamy-1.0、Intern-Decision-0.8B、
+PhysBrain1.5-2B、Qwen-Drive、LongCat 图像、Omni、BGE-VL-Screenshot，≥12 个），
+改它会改掉所有这些模型的图像输出 → **先测量再决定，不要顺手改**。
 
-调用点（7 处）：`src/app/text/multimodal.rs`（3）、`src/app/text/vision.rs`、
-`src/app/text/runtime.rs`（2）、`src/app/omni.rs`、`src/app/diffusion.rs`、
-`src/app/qwen_drive.rs`、`src/models/diffusion/longcat/text.rs`、
-`src/models/bge_vl/screenshot.rs`。
+**F16 是第二道闸**：文本路径明确把 F16 权重排除在设备之外（`gpu_compatible`：
+"Vulkan has no matching F16 activation/reduction contract"），而 mmproj 正是 F16 →
+要先量出 F16 的设备/CPU 数值差（Occamy 的 oracle 显示同权重 F32 激活 vs F16 激活
+的投影差 0.0268）。
 
-依赖 qwen35 CLIP mmproj 的模型（≥12 个）：Qwen3.5-0.8B、Qwen3.5-2B、
-Qwen3.8-27B、OvisOCR3、Sage-A1.5、Holo4-27B、LensVLM-9B、Occamy-1.0、
-Intern-Decision-0.8B、PhysBrain1.5-2B、Qwen-Drive-1.0-4B、LongCat 图像编辑、
-Qwen3.5-Omni、BGE-VL-Screenshot。它们的图像输出、显存占用与性能口径都会变。
+**待办**：
 
-**数值契约是第二道闸。** 文本路径里 F16 权重被明确排除在设备之外
-（`src/compute/linear.rs::gpu_compatible`："Vulkan has no matching F16
-activation/reduction contract" ✓）：CPU 侧用 `dot_f16_f16_bytes_ggml`（F64 累加、
-F32 尾 ✓），设备侧的 F16 归约不等价。qwen35 CLIP 塔的 mmproj 正是 **F16** ✓
-→ 即使加上 `try_vulkan_rows` 分支，**也必须先测出 F16 的数值差** ✓，
-不能默认"差不多就行" ✓（Occamy 的 oracle 显示：同一批权重 F32 激活 vs
-F16 激活的投影差 0.0268 ✓，这个量级会改掉图像输出 ✓）。
-
-**待办（按顺序，别跳步）**：
-
-1. **先只做测量**：在独立分支上给 qwen35 CLIP 塔加 `try_vulkan_rows` 分支，
-   对**一个**模型（建议 Occamy-1.0，oracle 现成 ✓）用同一份 llama.cpp dump
-   量 F16 的设备/CPU 差 ✓，定界并记录 ✓。**不改默认路径** ✓。
-2. **判定**：差在可接受界内 → 进下一步；不可接受 → 明确写下"F16 的 CLIP 塔
-   留在 CPU"这个结论并关闭本条 ✓（不要为了"上 GPU"牺牲数值一致性 ✓）。
-3. 若继续：按模型铺开，每个模型跑各自的 oracle（`tools/oracle/` 下
-   occamy / intern_decision / physbrain / holo4 …✓），CPU 与设备的图像输出
-   都要过各自的界 ✓，再谈默认路径 ✓。
-4. 顺带评估收益上限：塔里非 matmul 的部分（attention / softmax / norm）仍在
-   CPU ✓，单把 matmul 搬上设备未必有墙钟收益 —— 先量再改 ✓。
+1. 先测量：给塔加 `try_vulkan_rows` 分支（不动默认路径），用现成的 llama.cpp dump
+   量 F16 的差并定界。
+2. 差在界内 → 再谈铺开到各模型（每个模型跑各自的 oracle）；不可接受 → 写下
+   "F16 的 CLIP 塔留在 CPU"并关掉本条。
+3. 顺带评估收益上限：塔的 attention/softmax/norm 仍在 CPU，只搬 matmul 未必有墙钟收益。
 
 **关联**：`src/models/qwen35/vision/mod.rs`、`src/models/zdt/vision/mod.rs`、
-`src/ops/kernel/vulkan.rs`（`VulkanKernel::forward_batched`）、
-`src/compute/linear.rs`（`gpu_compatible`）、TODO-055。
+`src/ops/kernel/vulkan.rs`、`src/compute/linear.rs`、TODO-055。
