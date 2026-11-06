@@ -133,14 +133,47 @@ pub struct SenseNovaLoopModel<'a> {
     routers: Vec<(Router<'a>, Router<'a>)>,
 }
 
-fn check_tensor(source: &dyn TensorSource, name: &str, dims: &[usize]) -> Result<(), String> {
+/// Validate one tensor's shape, storage type and payload length.
+///
+/// The linear projections may ship block-quantized (`load_weight` decodes
+/// Q8_0/Q4_K/... through the shared kernels); norms, biases, the depthwise
+/// convolution and the recurrent state tensors must stay F32 because their
+/// arithmetic is not block-quantized.
+fn check_tensor(
+    source: &dyn TensorSource,
+    name: &str,
+    dims: &[usize],
+    quant_ok: bool,
+) -> Result<(), String> {
     let info = source
         .tensor_info(name)
         .ok_or_else(|| format!("Missing SenseNova tensor {name}"))?;
     let expected: Vec<u64> = dims.iter().map(|&v| v as u64).collect();
-    if info.dims != expected || info.ggml_type != GGMLType::F32 {
+    let quantizable = matches!(
+        info.ggml_type,
+        GGMLType::F32
+            | GGMLType::F16
+            | GGMLType::BF16
+            | GGMLType::Q8_0
+            | GGMLType::Q4_0
+            | GGMLType::Q4_1
+            | GGMLType::Q4K
+            | GGMLType::Q5K
+            | GGMLType::Q6K
+    );
+    let dtype_ok = if quant_ok {
+        quantizable
+    } else {
+        info.ggml_type == GGMLType::F32
+    };
+    if info.dims != expected || !dtype_ok {
+        let allowed = if quant_ok {
+            "F32/F16/BF16/Q8_0/Q4_0/Q4_1/Q4_K/Q5_K/Q6_K"
+        } else {
+            "F32"
+        };
         return Err(format!(
-            "Invalid SenseNova tensor {name}: {:?} {:?}, expected {expected:?} F32",
+            "Invalid SenseNova tensor {name}: {:?} {:?}, expected {expected:?} {allowed}",
             info.dims, info.ggml_type,
         ));
     }
@@ -224,12 +257,12 @@ impl<'a> SenseNovaLoopModel<'a> {
         let ff = cfg.n_ff;
         let q = cfg.n_head * cfg.key_length;
         let kv = cfg.n_head_kv * cfg.key_length;
-        for (name, dims) in [
-            ("token_embd.weight", vec![h, cfg.vocab_size]),
-            ("output.weight", vec![h, cfg.vocab_size]),
-            ("output_norm.weight", vec![h]),
+        for (name, dims, quant_ok) in [
+            ("token_embd.weight", vec![h, cfg.vocab_size], true),
+            ("output.weight", vec![h, cfg.vocab_size], true),
+            ("output_norm.weight", vec![h], false),
         ] {
-            check_tensor(source, name, &dims)?;
+            check_tensor(source, name, &dims, quant_ok)?;
         }
         for i in 0..cfg.n_layer {
             let mut shapes = vec![
@@ -263,7 +296,18 @@ impl<'a> SenseNovaLoopModel<'a> {
                 ]);
             }
             for (suffix, dims) in shapes {
-                check_tensor(source, &format!("blk.{i}.{suffix}"), &dims)?;
+                let quant_ok = !matches!(
+                    suffix,
+                    "attn_norm.weight"
+                        | "post_attention_norm.weight"
+                        | "attn_q_norm.weight"
+                        | "attn_k_norm.weight"
+                        | "ssm_norm.weight"
+                        | "ssm_conv1d.weight"
+                        | "ssm_dt.bias"
+                        | "ssm_a"
+                );
+                check_tensor(source, &format!("blk.{i}.{suffix}"), &dims, quant_ok)?;
             }
         }
         let s = settings.streams;
@@ -272,8 +316,8 @@ impl<'a> SenseNovaLoopModel<'a> {
         for i in settings.start..settings.end {
             let load = |kind: &str| -> Result<Router<'a>, String> {
                 let stem = format!("blk.{i}.{kind}");
-                check_tensor(source, &format!("{stem}.weight"), &[s * h, out])?;
-                check_tensor(source, &format!("{stem}.bias"), &[out])?;
+                check_tensor(source, &format!("{stem}.weight"), &[s * h, out], true)?;
+                check_tensor(source, &format!("{stem}.bias"), &[out], false)?;
                 let bias =
                     load_weight_f32(source, &format!("{stem}.bias")).ok_or("Missing mHC bias")?;
                 if bias.iter().any(|v| !v.is_finite()) {

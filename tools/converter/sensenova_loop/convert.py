@@ -38,6 +38,26 @@ STEMS = {
 }
 
 
+#: The only tensors a --quant mode re-encodes: the linear projections.
+#: Norms, biases, the depthwise convolution and the SSM state/alpha/beta stay F32.
+LINEAR_PROJECTIONS = (
+    "token_embd.weight",
+    "output.weight",
+    ".attn_qkv.weight",
+    ".attn_q.weight",
+    ".attn_k.weight",
+    ".attn_v.weight",
+    ".attn_output.weight",
+    ".attn_gate.weight",
+    ".ssm_out.weight",
+    ".ffn_gate.weight",
+    ".ffn_up.weight",
+    ".ffn_down.weight",
+    ".mhc_attn.weight",
+    ".mhc_ffn.weight",
+)
+
+
 def execution_plan(config):
     text = config["text_config"]
     loop = config["loop_settings"]
@@ -219,7 +239,7 @@ def add_metadata(writer, root, config):
     )
 
 
-def convert(root, output, mmproj):
+def convert(root, output, mmproj, quant="f32"):
     import numpy as np
     from tools.converter.mage_flow.convert_qwen3vl_vision import (
         Reader,
@@ -272,6 +292,7 @@ def convert(root, output, mmproj):
             raise FileExistsError(f"refusing to overwrite {path}")
     writer = GgufWriter(output.with_suffix(".gguf.partial"))
     add_metadata(writer, root, config)
+    keep: set[str] = set()
     for name in expected:
         if name.startswith("model.visual."):
             continue
@@ -289,6 +310,11 @@ def convert(root, output, mmproj):
             or target == "output_norm.weight"
             or target.endswith(".ssm_a")
         )
+        if not any(target.endswith(suffix) for suffix in LINEAR_PROJECTIONS):
+            # Everything that is not a linear projection (norms, biases, the
+            # depthwise convolution, the SSM state/alpha/beta) stays F32 in
+            # every --quant mode.
+            keep.add(target)
         if transform:
             values = reader.f32(name)
             values = (
@@ -381,13 +407,31 @@ def convert(root, output, mmproj):
             put(f"{target}.{suffix}", f"model.visual.merger.{stem}.{suffix}")
     writer.write()
     writer.path.rename(mmproj)
-    text_partial.rename(output)
+    if quant == "f32":
+        text_partial.rename(output)
+    else:
+        quantized = output.with_name(output.name + ".quantized")
+        from tools.converter.utils.quantize_gguf import quantize_gguf
+
+        quantize_gguf(
+            text_partial, quantized, target_format=quant, keep=tuple(sorted(keep))
+        )
+        quantized.rename(output)
+        text_partial.unlink()
 
 
 if __name__ == "__main__":
+    from tools.converter.utils.quantize_gguf import BLOCK_FORMATS
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("model", type=Path)
     parser.add_argument("--outfile", type=Path, required=True)
     parser.add_argument("--mmproj-outfile", type=Path, required=True)
+    parser.add_argument(
+        "--quant",
+        default="f32",
+        choices=["f32", *sorted(BLOCK_FORMATS)],
+        help="block-quantize the text projections (norms and biases stay F32)",
+    )
     args = parser.parse_args()
-    convert(args.model, args.outfile, args.mmproj_outfile)
+    convert(args.model, args.outfile, args.mmproj_outfile, args.quant)

@@ -78,14 +78,29 @@ fn rejects_truncated_wrong_shape_or_bf16_router() {
         },
         bytes: vec![0; 128],
     };
-    assert!(check_tensor(&source, "router", &[4, 8]).is_ok());
-    assert!(check_tensor(&source, "missing", &[4, 8]).is_err());
-    assert!(check_tensor(&source, "router", &[8, 4]).is_err());
+    assert!(check_tensor(&source, "router", &[4, 8], true).is_ok());
+    assert!(check_tensor(&source, "missing", &[4, 8], true).is_err());
+    assert!(check_tensor(&source, "router", &[8, 4], true).is_err());
     source.bytes.pop();
-    assert!(check_tensor(&source, "router", &[4, 8]).is_err());
+    assert!(check_tensor(&source, "router", &[4, 8], true).is_err());
+    // A projection may ship block-quantized or half precision: `load_weight`
+    // decodes both, so the validator accepts them.
     source.info.ggml_type = GGMLType::BF16;
     source.bytes = vec![0; 64];
-    assert!(check_tensor(&source, "router", &[4, 8]).is_err());
+    assert!(check_tensor(&source, "router", &[4, 8], true).is_ok());
+    // Q8_0 quantizes the contiguous row width, so dims[0] has to be a multiple
+    // of the 32-element block: 32 values + one f16 scale per 4 rows.
+    source.info.dims = vec![32, 4];
+    source.info.ggml_type = GGMLType::Q8_0;
+    source.bytes = vec![0; 136];
+    assert!(check_tensor(&source, "router", &[32, 4], true).is_ok());
+    // Norms, biases and the recurrent state are not block-quantized.
+    source.info.dims = vec![4, 8];
+    source.info.ggml_type = GGMLType::BF16;
+    assert!(check_tensor(&source, "router", &[4, 8], false).is_err());
+    source.info.dims = vec![32, 4];
+    source.info.ggml_type = GGMLType::Q8_0;
+    assert!(check_tensor(&source, "router", &[32, 4], false).is_err());
 }
 
 #[cfg(feature = "vulkan")]
