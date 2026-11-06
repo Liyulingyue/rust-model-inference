@@ -1101,6 +1101,8 @@ impl D3Encoder {
         if max_new > 40 {
             return Err("Vela definition generation is limited to 40 new tokens".into());
         }
+        // shortcut: keep generated prompt text on CPU until GPU definition-token parity is calibrated.
+        let _cpu = crate::compute::ComputePolicy::Cpu.enter_legacy_scope();
         let mut prompt = ids.to_vec();
         let mut output = Vec::new();
         for _ in 0..max_new {
