@@ -19,6 +19,7 @@ use super::Kernel;
 pub mod avx2;
 #[cfg(target_arch = "x86_64")]
 pub mod avx2_q8;
+pub mod ggml;
 #[cfg(target_arch = "aarch64")]
 pub mod neon;
 #[cfg(target_arch = "aarch64")]
@@ -129,6 +130,42 @@ impl Kernel for F32Kernel {
             forward_f32_rows_dispatch(&self.weight, input_f32, output, n_in, n_out, ith, nth);
         } else {
             self.forward_prequantized(input_q8, input_scales, output, n_in, n_out, ith, nth);
+        }
+    }
+
+    /// ggml-parity path: same input as `forward_prepared`, but the F32 dot
+    /// uses `ggml_vec_dot_f32`'s four-accumulator NEON reduction. Only the
+    /// Nemotron trunk opts in; every other caller keeps the default F32
+    /// contract (single scalar accumulator, left-to-right).
+    fn forward_prepared_ggml(
+        &self,
+        input_f32: &[f32],
+        input_q8: &[u8],
+        input_scales: &[f32],
+        q8_k: Option<&[crate::ops::quant::BlockQ8K]>,
+        output: &mut [f32],
+        n_in: usize,
+        n_out: usize,
+        ith: usize,
+        nth: usize,
+    ) {
+        if input_f32.len() >= n_in {
+            let (start, end) = scalar::row_range(n_out, ith, nth);
+            if start < end {
+                ggml::forward_f32_rows_ggml(&self.weight, input_f32, output, n_in, start, end);
+            }
+        } else {
+            self.forward_prepared(
+                input_f32,
+                input_q8,
+                input_scales,
+                q8_k,
+                output,
+                n_in,
+                n_out,
+                ith,
+                nth,
+            );
         }
     }
 

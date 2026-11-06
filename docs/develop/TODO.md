@@ -203,6 +203,15 @@ NEON on aarch64; no AVX-512).
       回归：lib 1470 passed / 22 failed / 210 ignored，与改动前逐条一致；11 个
       `batched_linear_device` GPU 回归 + conv GPU 测试通过；`mel_encoder.rs` 告警数与 main 相同。
 
+- [ ] **`_ggml` 后缀函数的收口** — 仓库原则是「实现并采用 `dot_f32` 这样的函数，
+      尽量不采用 `dot_f32_ggml` 这样的函数，仅当无法绕开时才使用」（浮点加法不满足
+      结合律，ggml 的累加结构既不是精度最优也不是速度最优）。当前仓库里已有一批
+      `_ggml` 函数，是历次对拍留下的，需要逐条评估能否迁回默认入口。
+      **注意**：`q5_0::neon` / `q5_1::neon` 的 NEON kernel **不是**对齐副本，而是
+      这两个格式在 aarch64 上的唯一生产实现（被重写成 ggml 结构），所以其他模型也在用；
+      收口前必须确认其他模型的既有 oracle 是否仍成立。
+      清单、存在理由与收口方向见
+      [GGML_PARITY_BOUNDARY.md](GGML_PARITY_BOUNDARY.md)。
 - [x] **LFM2.5-24B-A2B 适配 + 标量逐位对齐** — ✅ 已完成 (2026-10-15)。
       24B 总 / 2B 激活的 MoE，`lfm2moe` 架构：40 层 × 2048 宽 × 32 头（head_dim 64），注意力层
       `[2,6,…,38]`（每 4 层一个），前 2 层 dense SwiGLU（`feed_forward_length=11776`），其余 38 层
@@ -431,6 +440,29 @@ LFM2 / LFM2.5 / Spark / Nemotron-H / Hunyuan / LFM2-MoE），每个 scorer 实�
       原语，现有 `compute` 就够（closure 里顺序做多个投影，各自按 `ith/nth` 切分）。
       风险是位序和 DRAM 局部性；收益的绝对值与机器无关，相对值随 CPU 带宽上升。
       详见 [TODO-050](#todo-050-decode-每个投影一次-pool-dispatch784-次里-26-次的开销大于活)。
+- [~] **Nemotron-3-Nano 30B-A3B（`nemotron_h_moe`）完全不支持** — arch 不在白名单、
+      MoE 层分支不存在，且**它需要的 Q5_1 量化本仓库没有 dequant kernel**（所有 unsloth
+      30B 量化档的 `ffn_up_shexp` 都是 Q5_1，换档躲不掉）。基座（Mamba-2 + attention 混合
+      trunk）已在 4B 上验证，MoE 的 3D 专家张量与路由归一化在 `qwen35moe` 里已有同构实现，
+      约 1100 行。契约从 GGUF 头部读出（不必下完 24 GB），详见
+      [TODO-051](#todo-051-nemotron-3-nano-30b-a3bnemotron_h_moe完全不支持先补-q5_1-kernel)
+      与 [NEMOTRON3_NANO_30B_MOE.md](NEMOTRON3_NANO_30B_MOE.md)。
+      **B1–B5 已全部完成**：Q5_1 kernel、arch/config、MoE 层、共享专家，以及
+      与上游 llama.cpp 的 oracle 对拍（全 52 层 × 6 步逐位一致，最终 logits
+      逐位一致，greedy 输出一致）。剩下 HTTP 服务端与 Vulkan 路径未做。
+- [ ] **Dory 的默认提示在 CLI / HTTP / 模型自带模板之间三分** —
+      CLI 15 token（无 think 标记）、HTTP 19 token（空 think 块）、模型自带模板 22 token
+      （多一个空 system 轮），三者贪心输出不同，CLI↔HTTP 分叉且 `cli_http_agreement`
+      未覆盖 dory。
+      另外 `--compute vulkan --jev` 明明整条前向都在设备上（4.2× 于 CPU、概率一致）却打出
+      「no complete device path for this mode」。详见
+      [TODO-052](#todo-052-dory-的默认提示在-cli--http--模型自带模板之间三分pixtral-缺强制-bosjev-的backendpartial提示对-dory-是假的)。
+- [x] **强制 BOS 的优先级与 llama.cpp 相反** — 已修（原记录「pixtral 缺强制 BOS →
+  Dory 少一个 `<s>`」是**错的**：Dory 的 GGUF 明写 `add_bos_token = false`，参考实现
+  因此也不加 BOS，仓库与参考一致）。真正的问题是 llama.cpp 让 **GGUF 的 key 覆盖**
+  pre 分词器的默认值，仓库却写成「强制值赢过 GGUF」。缺 BOS 的是 **key 缺失**的
+  情况 —— Nemotron-3-Nano 30B（`pre = "pixtral"` 且无 `add_bos_token`）正是这一类。
+  详见 [TODO-052 F2](#f2强制-bos的优先级与-llamacpp相反-已修)。
 
 ## 入口面覆盖（2026-10-19 审计）
 
@@ -3845,6 +3877,285 @@ barrier 与常驻 worker 不兼容而不可用），收益 1.66× → 1.8×，�
 改的时候顺带把接口设计成能同时喂给 CPU 和设备（照 `record_group_matmul` 的形状：一层一次、
 多个权重共用一个 command buffer），以后接设备就只是换个 backend，而不是再改一遍 trunk。
 
+### TODO-051: Nemotron-3-Nano 30B-A3B（`nemotron_h_moe`）完全不支持，先补 Q5_1 kernel
+
+#### 现象
+
+`NVIDIA-Nemotron-3-Nano-30B-A3B` 的 GGUF arch 是 **`nemotron_h_moe`**（30B 总参 /
+3.2B 激活，Mamba-2 + attention + MoE 混合）。本仓库：
+
+- `src/core/loader.rs` 的 arch 白名单里**没有** `nemotron_h_moe`；
+- `src/models/nemotron_h/trunk/config.rs` 硬编码 `architecture != "nemotron_h"` 即拒，
+  且 metadata key 前缀写死 `nemotron_h.`；
+- `src/models/nemotron_h/trunk/` 只有 **dense 2 层 FFN** 分支，没有 MoE 层；
+- `src/ops/kernel/` 有 `q5_0/`，**没有 `q5_1/`**；`QuantizedTensor::from_bytes`
+  的 match 里也没有 `GGMLType::Q5_1`。
+
+好消息是失败是**响亮**的：arch 检查先拒；即使放行，权重层会因为 MoE 层找不到
+`ffn_up.weight` 而报「Nemotron layer N tensors do not match layer metadata」。
+
+#### Q5_1 是硬前置，而且换量化档躲不掉
+
+`ffn_up_shexp.weight`（共享专家 up 投影）在**所有** unsloth 30B 量化档里都是 Q5_1：
+
+| 量化档 | 张量类型分布 | 缺 Q5_1？ |
+|---|---|---|
+| `Q4_K_M` | Q8_0 37 / F32 237 / Q5_0 75 / Q4_K 29 / **Q5_1 23** | ✗ |
+| `IQ4_XS` | Q8_0 24 / F32 237 / Q5_0 1 / IQ4_NL 87 / IQ4_XS 29 / **Q5_1 23** | ✗ |
+| `Q4_0` | Q8_0 24 / F32 237 / Q4_0 115 / Q4_1 2 / **Q5_1 23** | ✗ |
+
+23 个 Q5_1 = 23 个 MoE 层的共享专家 up 投影。
+
+Q5_1 与 Q5_0 的差别很小（ggml `block_q5_1`，24 字节/32 元素，比 Q5_0 多一个 fp16 的
+最小值 `m`，且还原式是 `y = d*x + m` 而不是 `y = d*x`）。照着
+`src/ops/kernel/q5_0/` 复制一份改块布局，再在 `quantized_tensor.rs` 的 `from_bytes`
+与 `GGMLType` 映射里补 `Q5_1` 即可，约 200 行。
+
+**顺带**：`src/models/nemotron_h/trunk/weights.rs` 的 `is_supported_weight_type()`
+白名单里也漏了 `Q5_0`（kernel 是有的，只是白名单不认）——4B 用不到，30B 会撞上。
+
+> **B1 已完成**：Q5_1 kernel 已实现并逐位对齐 ggml，见下方「进展」。
+> 下文「现象」小节描述的是实现前的状态，仅作背景保留。
+
+#### 可复用的基座
+
+| 需要的东西 | 已经有的地方 | 差在哪 |
+|---|---|---|
+| 3D 专家张量加载（expert 轴在最后、连续） | `src/models/qwen35/trunk/weights.rs::load_moe_weights` | 命名一致（`ffn_up_exps` / `ffn_down_exps`），qwen35 多一个 `ffn_gate_exps`，Nemotron 没有 |
+| 路由 top-k + 权重归一化 + 缩放 | `src/models/qwen35/trunk/moe.rs::route_experts` | qwen35 用 softmax；Nemotron 用 **sigmoid**，且偏置只参与排序 |
+| Mamba-2 SSM + attention 混合 trunk | `src/models/nemotron_h/trunk/`（4B 已验证） | 只差 MoE 层这一条分支 |
+
+两个容易写错的语义（详见 [NEMOTRON3_NANO_30B_MOE.md](NEMOTRON3_NANO_30B_MOE.md)）：
+
+1. 路由器权重取**未加偏置**的 `sigmoid(logits)`，`exp_probs_b.bias` 只用来排序；
+2. 共享专家**没有门控**，`moe_out + ffn_shexp` 是唯一的加法；专家激活是
+   **squared ReLU**，仓库现有激活算子里没有。
+
+#### 契约从哪来
+
+GGUF 的 magic / KV / 张量信息表都在文件**头部**，所以不必下完 24 GB 才能读契约：
+
+```sh
+curl -sL -r 0-67108863 -o /tmp/n3_30b_head.bin \
+  "https://hf-mirror.com/unsloth/Nemotron-3-Nano-30B-A3B-GGUF/resolve/main/Nemotron-3-Nano-30B-A3B-Q4_K_M.gguf"
+python3 tools/oracle/nemotron3_nano/gguf_header.py /tmp/n3_30b_head.bin
+```
+
+上游 llama.cpp 已支持 `nemotron_h_moe`（PR #18058，2025-12-16 合并），所以 oracle 用
+上游 master 即可，不需要 Dory 那种专用 fork。
+
+#### 规模
+
+约 1100 行（Q5_1 kernel 200 + arch/config 50 + MoE 权重 250 + MoE forward 250 +
+平方 ReLU 30 + 对拍 300），不含调试。
+
+#### 进展：B1（Q5_1 kernel）已实现
+
+Q5_1 dequant / matmul kernel 已落地（`src/ops/kernel/q5_1/`），逐位对齐 ggml 的
+`dequantize_row_q5_1`。要点：
+
+- **块布局**：24 字节 = F16 `d` + F16 `m` + `u32 qh` + 16 字节 `qs`。还原式
+  `y = level * d + m`，`level` 是**无符号** 5-bit（0..31）。
+  **Q5_1 没有 `- 16` 偏移**（那是 Q5_0 的），高 bit 在 `qh` 的 bit `j` 与 `j + 16`。
+- **对拍方式**：`tools/oracle/q5_1/q5_1_oracle.c` 是 ggml `dequantize_row_q5_1`
+  的逐字转写（含 `ggml_compute_fp16_to_fp32` 的原实现），`tests/q5_1_reference.rs`
+  生成 4096 个随机块喂给两边，**逐位比较 F32 位模式**（不是容差比较）。
+  首次对拍就抓到一个真 bug：手写 C 版把 half subnormal 的指数算错了 ——
+  说明这个 oracle 必须用 ggml 原版转换，不能自己重写。
+- **NEON 路径**（aarch64，部署目标）：与 `q4_1::neon` 同结构。第 5 bit 用 ggml
+  同一张 256 项查表展开（`table_b2b_0` 的 `(b) << 4` 语义），level 落在 0..31，
+  可以直接塞进 int8 交给 `UDOT`。`tests_neon.rs` 断言 NEON 与 scalar
+  **逐位相等**（不是 ULP 容差）。
+- **`m` 项**：Q5_1 的 `m` 需要 `sum(y)`，与 Q4_1 同源。`forward_prepared` 走
+  `input_sums`（f16 舍入的 `d * sum(qs)`，对齐 ggml `block_q8_1.s` 的语义），
+  `forward_prequantized` 走 `None`（kernel 内部按 `scale * sum(q8)` 算）。
+- **白名单**：`src/models/nemotron_h/trunk/weights.rs::is_supported_weight_type()`
+  补上了 `Q5_0` 与 `Q5_1`（此前漏了 `Q5_0`，kernel 一直是有的）。
+- **附带修复**：`gemma4` 的权重白名单早就列了 `GGMLType::Q5_1`，但
+  `QuantizedTensor::from_bytes` 没有 `Q5_1` 分支 → 遇到 Q5_1 权重会 panic。
+  这次补上后那处静默变成可用。
+- **未做（有意）**：Q5_1 没有 Vulkan 路径。`src/compute/linear.rs` 的白名单里
+  没有 `Q5_1`，GPU 模式会明确报「weight format has no Vulkan kernel」，
+  而不是静默算错。30B 的 GPU 支持留到 arch 适配那一步再决定是否补。
+
+**未验证的部分**：以上只证明 Q5_1 的**块语义**正确。真实 30B 权重上的
+MoE 前向（sigmoid 路由 + squared ReLU + 共享专家）还没跑过 —— 那属于 B2/B3。
+
+#### 进展：B2/B3/B4（arch、MoE 层、共享专家）已实现，B5（oracle 对拍）已完成
+
+B1 之后的三个阻塞项也已落地：
+
+- **B2 arch 与 config 前缀**：`nemotron_h_moe` 进 arch 白名单；
+  GGUF 把每个 arch 私有的 metadata key 放在 `{arch}.` 命名空间下，所以
+  `NemotronConfig::from_source` 改用 `architecture` 当前缀；新增
+  `NemotronMoeConfig` 承载 `expert_count` / `expert_used_count` /
+  `expert_group_count` / `expert_group_used_count` / `expert_feed_forward_length` /
+  `expert_shared_feed_forward_length` / `expert_shared_count` /
+  `expert_weights_norm` / `expert_weights_scale` / `moe_latent_size`。
+- **B3 MoE 层分支**：新增 `src/models/nemotron_h/trunk/moe.rs`。
+  - `NemotronMoeWeights` 持一份借用的 `up_exps` / `down_exps` 原始字节 +
+    每专家字节步长，而不是 128 个 eager `Weight`（23 层 × 128 = 2944 个 kernel，
+    提前建好只用得上 6 个）。
+  - `route_experts` 与 llama.cpp `build_moe_ffn` 逐节点对应：
+    `probs = sigmoid(logits)` → `selection = probs + exp_probs_b`（**偏置只参与
+    排序**）→ `argsort_top_k` → 权重取**未加偏置**的 `probs` → F64 累加降 F32 →
+    clamp `2^-14` → 相除 → 乘 `expert_weights_scale`。
+  - 专家**无 gate**（没有 `ffn_gate_exps`），共享专家**也无 gate**（没有
+    `ffn_gate_inp_shexp`），最终 `out = moe_out + ffn_shexp`。
+  - 层类型判定：`ffn_up.weight` = dense FFN，`ffn_up_exps.weight` = MoE 层，
+    互斥且必须与 metadata 的层模式一致。
+- **B4 共享专家与平方 ReLU**：squared ReLU 内联在 `moe.rs`（`relu` 后 `x*x`）。
+
+**顺带修掉一个更早就存在的语义错误**：`add_bos` 的**优先级**写反了
+（详见 [TODO-052 F2](#f2强制-bos的优先级与-llamacpp相反-已修)）。30B 的 GGUF
+是 `pre = "pixtral"` 且**没有** `add_bos_token` key，参考实现会加 BOS，
+仓库原先不加 —— 少了 `<s>` 提示就与参考实现不同。Dory 反而是对的（它的 GGUF
+明写 `add_bos_token = false`，参考实现同样不加）。
+
+#### 进展：B5（oracle 对拍）已完成，逐位一致
+
+**全 52 层 × 6 步逐位一致（0 差异）**，且最终 logits 逐位一致
+（`worst logit disagreement 0.0000`，而 argmax 领先幅度 2.2746），
+端到端 greedy 一致（两侧 `generated_ids = [22177, 22177, 22177, 22177]`，
+文本 `HelloHelloHelloHello`）。138 个 top-k 路由决策**集合与顺序都一致**。
+
+工具在 `tools/oracle/nemotron3_nano/`（oracle harness + `check_moe.py`），
+另有两个独立 kernel oracle（`tools/oracle/q5_0/`、`tools/oracle/silu/`）。
+Rust 侧 checkpoint 由 `src/models/nemotron_h/trunk/trace.rs` 发出
+（仅 `--features parity-trace` + `RMI_PARITY_TRACE` 时生效）。
+
+**根因**：第一次对拍时 4B 的 SSM 分支只差 1 ULP，30B 的却差 ~1e-4。分歧被
+Q4_K 出投影的 Q8_K 激活量化放大了约 7000× —— 一个 1-ULP 的差足以让某个激活
+跨过 8-bit 舍入边界，于是变成整整一个量化台阶。所以必须**复刻 ggml 的 F32
+累加结构**，而不是「差不多就行」：
+
+- `ops/kernel/f32/ggml.rs`：`ggml_vec_dot_f32` 的 4 个 `vfmaq_f32` 累加器 +
+  pairwise-tree reduce + `vaddvq_f32`；
+- `ops/kernel/q8_0/ggml.rs`：2 个 4-lane 累加器 + 每 block `vaddq_s32(vdotq_s32(…))`
+  + `vmlaq_n_f32` + 末尾 `vaddvq_f32` 相加；
+- `ops/kernel/q5_0/neon.rs` / `q5_1/neon.rs`：2 block/迭代 + 2 个 4-lane F32
+  累加器；Q5_1 另有独立的 `m*s` 标量累加器（`summs0`/`summs1`）；
+- `ops/softmax.rs::softmax_ggml_inplace`：ggml 的 `ggml_v_expf` + f64 累加 +
+  末尾 libm `expf` 尾块；
+- `ops/activation/silu.rs::silu_ggml`：ggml 的多项式 `exp`，不是 libm `expf`。
+
+这些都是**新增的 ggml-exact 入口**，默认 kernel 契约不动。
+
+**两个必须记住的坑**（都写进了代码注释）：
+
+1. `ggml_v_expf` 的 `vdupq_n_u32(0x7f000000)` 是 **u32 字面量不是 float**。
+   写成 `vdupq_n_f32(0x7f000000)` 会加 `0x4EFE0000`，于是溢出路径的 `s1*s1`
+   变成巨大有限值而不是 0 —— 而 softmax 掩码列（`-inf`）必须贡献 0。
+   这个 bug 曾**同时**存在于 Rust 与 silu oracle 两侧，所以参考测试发现不了。
+2. **per-lane 分组是硬约束**：`ggml_vdotq_s32` 在 dotprod 可用时就是 native
+   `vdotq_s32`（`dst[i] = Σ_{k=0..3} a[4i+k]*b[4i+k]`），ggml 自己的 fallback
+   注释写着「different per-lane grouping — do not use when individual lane
+   values matter」。所以 oracle 与 Rust 两侧都必须在
+   `-march=armv8.2-a+dotprod` 下编译，且**不能开 i8mm**。
+
+**还没做的**：
+
+- **HTTP 服务端** —— `nemotron_h`（4B）本来就没有 `TextRuntime` 适配器，
+  `/v1/chat/completions` 对它返回 501；30B 与 4B 一致。JEV 路径按 arch 分派，
+  已覆盖 `nemotron_h_moe`。
+- **Vulkan 路径** —— Q5_1 没有设备 kernel（见 B1 一节）；Q5_0/Q8_0 的
+  ggml-exact 路径也只覆盖 CPU。
+
+### TODO-052: Dory 的默认提示在 CLI / HTTP / 模型自带模板之间三分；JEV 的「backend=partial」提示对 Dory 是假的
+
+两条都是**文档/提示与实测不符**，实现在数值上没错。
+（原标题里的「pixtral 缺强制 BOS」已改为 **F2 强制 BOS 的优先级写反**，
+且那条已修；见下面的 F2。）
+
+#### F1：CLI 与 HTTP 给 Dory 的默认提示不一致，三条路径三个形态
+
+`src/models/dory/forward.rs:773` 走 `prompt::legacy::format_chat("dory", …)`，
+`src/app/server/api/tools.rs:554` 走 `prompt::build_qwen_chat_prompt(…)`，
+两者都把 `dory` 映射到 `ChatTemplate::ChatML`，但渲染结果不同。
+用仓库自己的 tokenizer 把 token id 打出来（`What color is the sky?`）：
+
+| 路径 | 结尾形态 | token 数 |
+|---|---|---|
+| CLI 内置 | `<\|im_start\|>user\n{q}<\|im_end\|>\n<\|im_start\|>assistant\n` | **15** |
+| HTTP 内置 | 同上，再补 `<think>\n</think>\n` | **19** |
+| 模型自带模板（thinking=false） | 多一个空 system 轮，结尾 `<think></think>` | 22 |
+| 模型自带模板（thinking=true） | 同上，结尾 `<think>\n` | 22 |
+
+- CLI 一个 think 标记都没有（模型直接开答）；
+- HTTP 补一个**空** think 块（`append_qwen_assistant_prefix(…, enable_thinking=false)`）；
+- 模型自带模板多一个**空 system 轮**（`{%- set system_message = "" %}` 让
+  `{%- if system_message is defined %}` 成立）并且 think 块**开着**。
+
+贪心解码下三条路径给出不同文本（CLI `The sky appears blue during the day due to
+Rayleigh scattering` / HTTP `The sky is most commonly perceived as blue during the
+day because the Earth's atmosphere scatteres sunlight (`）。
+
+`tests/cli_http_agreement.rs` 只覆盖 llama / qwen3 / qwen35，**没有 dory**，
+所以这条分叉落在覆盖矩阵的盲区里。
+
+修法：让 dory 的两条入口都走模型自带模板，并把 dory 加进
+`tests/cli_http_agreement.rs` 锁住两条入口逐 token 一致。
+
+#### F2：强制 BOS 的**优先级**与 llama.cpp 相反 ✅ 已修
+
+> **更正（2026-11-05，做 30B 适配时重新核对）**：本条原先写「pixtral 的强制 BOS
+> 没有实现 → Dory 的提示少了 `<s>`」，**结论是错的**。Dory 的 GGUF 明写
+> `add_bos_token = false`，参考实现因此**不加** BOS，仓库也没加 —— 两边一致。
+> 真正错的是**优先级**。
+
+`src/core/tokenizer/mod.rs` 的注释写着 llama.cpp 对 llama3 预分词家族
+（含 **pixtral**）强制 `add_bos = true`，但实现里 `force_add_bos = true` **只给了
+falcon-h1**，而且取值写成 `bool_meta(add_bos_token)? || forced_add_bos` ——
+**强制值赢过 GGUF**。
+
+llama.cpp 的真实语义（上游 master 与 NVIDIA 的 Dory fork `98a74c97`
+**完全一致**，`src/llama-vocab.cpp`）是两步：
+
+1. pre 分词器分支给**默认值**（pixtral / tekken → `add_bos = true`）；
+2. GGUF 的 key **覆盖**默认值，连 `false` 都赢：
+   ```c
+   bool temp = true;
+   if (ml.get_key(LLM_KV_TOKENIZER_ADD_BOS, temp, false)) { add_bos = temp; }
+   ```
+
+所以应该是「**key 存在则用 key，key 缺失则用 pre 默认值**」。
+
+| GGUF | `pre` | `add_bos_token` | llama.cpp | 修正前仓库 |
+|---|---|---|---|---|
+| Dory 1.0 4B | `pixtral` | 有，`false` | `false` | `false` ✅ |
+| Nemotron-3-Nano 30B | `pixtral` | **无** | `true` | `false` ❌ |
+| Nemotron-3-Nano 4B | — | `true` | `true` | `true` ✅ |
+
+**缺 BOS 的是 key 缺失的情况**，30B 正是这一类。顺带修正前对 **falcon-h1**
+也是错的（仓库无条件强制 BOS，参考实现里 GGUF 的 `false` 会盖掉它）。
+
+修法（已实施）：`add_bos` 改成「key 存在则用 key，否则用 `forced_add_bos`」；
+`forced_add_bos` 补齐 llama.cpp 的表（本仓库支持的 pre 里是 `llama-bpe` /
+`pixtral` / `tekken` / `lfm2` / `falcon-h1`；`exaone` / `exaone4` /
+`exaone-moe` **不在**表里）。回归测试 `core::tokenizer::tests` 三条：
+`pixtral_defaults_to_adding_bos` / `gguf_add_bos_token_overrides_the_pretokenizer_default` /
+`gguf_add_bos_token_true_adds_bos_without_a_default`。
+
+Dory 的 oracle 对拍是**喂 token id** 的，验的是前向不是提示构造，所以这条一直
+没被抓到；30B 这边同样的道理，提示构造要单独对 token id。
+
+#### F3：`--compute vulkan --jev` 对 Dory 打出的「没有完整设备路径」提示是错的
+
+`src/app/cli/types.rs:240` 的 `vulkan_partial_mode()` 只看**模式**不看 **arch**，
+而 `ComputePolicy::has_complete_device_path()` 里 `dory` 是在列的。实测 Dory 的 JEV
+前向**整条在设备上**：
+
+| 路径 | prefill | 概率 |
+|---|---|---|
+| Vulkan（GB10） | 5886 ms | A 0.9309 / B 0.0166 / C 0.0505 |
+| CPU | 24646 ms | A 0.9309 / B 0.0166 / C 0.0505 |
+
+4.2× 的差距 + 完全一致的概率说明整条前向走了设备。服务端
+`src/app/server/mod.rs:1911` 打的是同一句，而且注释描述的是 qwen3 那种部分 offload
+的模型（「the projections move to the device, the rest stays on the host」），
+对 Dory 也不成立。
+
+修法：打印前先问 `has_complete_device_path(arch)`。
 ---
 
 ### TODO-053: Occamy-1.0 的 logits 包络不跨主机（step 6 越界），且 CPU 与设备的 greedy 不同
