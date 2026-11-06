@@ -936,18 +936,28 @@ fn apply_rope_neox(x: &mut [f32], head_dim: usize, cos: &[f32], sin: &[f32]) {
 mod tests {
     use super::*;
 
+    /// A 2x2 F32 projection; the bytes stay owned by the caller.
+    fn f32_linear(bytes: &[u8]) -> Linear<'_> {
+        Linear {
+            weight: Weight::from_quantized(QuantizedTensor::from_bytes(bytes, GGMLType::F32, 2, 2)),
+        }
+    }
+
     #[test]
     fn sliding_attention_keeps_inclusive_boundary_and_masks_distant_token() {
-        let zero = || Linear {
-            matrix: vec![0.0; 4],
-            n_in: 2,
-            n_out: 2,
+        // The tower's projections are [n_out, n_in] rows of F32 weights, and
+        // the weights borrow their bytes, so the bytes outlive the model.
+        let f32_bytes = |rows: [f32; 4]| {
+            let mut bytes = Vec::new();
+            for value in rows {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            bytes
         };
-        let identity = || Linear {
-            matrix: vec![1.0, 0.0, 0.0, 1.0],
-            n_in: 2,
-            n_out: 2,
-        };
+        let zero_bytes = f32_bytes([0.0; 4]);
+        let identity_bytes = f32_bytes([1.0, 0.0, 0.0, 1.0]);
+        let zero = || f32_linear(&zero_bytes);
+        let identity = || f32_linear(&identity_bytes);
         let model = EmbeddingGemmaTextModel {
             config: EmbeddingGemmaTextConfig {
                 n_embd: 2,

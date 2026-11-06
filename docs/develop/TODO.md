@@ -4066,15 +4066,35 @@ qwen35 CLIP 塔同一类缺口 ✓）。权重是 Q8_0/BF16/F32 ✓，设备侧�
 （cosine 0.9995 ✓，看起来接近但不是同一个向量 ✓）。仓库的惯例是
 「GPU 路径必须与 CPU 一致 ✓」（ZDTaichu5.0 实测差 ~5e-7 ✓），这里差 0.033 ✗。
 
+**2026-11-06 定位结果**（视觉塔注意力上设备 ✓）：
+
+| 对比 | relative L2 | cosine |
+| --- | --- | --- |
+| 视觉塔：设备 vs CPU | **0.00000858** | 1.00000000 ✓ |
+| 媒体最终向量：设备 vs CPU | **0.023764** | 0.99973 |
+| 纯文本：设备 vs CPU | **0.008853** | 0.99996 |
+
+差异**不在注意力** ✓ —— 视觉塔的设备注意力走 F32 的融合双向 kernel ✓
+（`AttentionRuntime` ✓、`shaders/glsl/attention_online.comp` ✓，无 mask ✓、
+Gemma4 的单位 scale ✓），两边一致到 1e-5 ✓。
+
+差异在 **F16 matmul 的激活精度** ✓：设备的 `shaders/glsl/f16_matmul.comp` ✓
+把激活舍入到 F16（`round_f16_rte` ✓，对齐 ggml ✓），而 CPU 的 F16 kernel ✓
+（`src/ops/kernel/f16/neon.rs` ✓）只把**权重**转成 F32 ✓、激活保持 F32 ✓。
+也就是说**设备侧才是 ggml 语义 ✓，CPU 侧更精确 ✓** —— 差 0.0089 的方向与
+TODO-056 的 F16 契约缺口一致 ✓。
+
 **待办**：
 
-1. 定位差异来源：设备的 Q8_0 shader（`shaders/glsl/q8_matmul*.comp` ✓）的
-   累加与 CPU 的 `vec_dot_q8_0` ✓ 是否等价 ✓；BF16 同理（`f16_matmul` ✓）。
-2. 要么让设备对齐 CPU ✓（改 shader 或改用与 CPU 相同的归约 ✓），
-   要么如实记录「EG2 的设备路径有 0.033 的向量差 ✓，默认不启用 ✓」。
-3. 在对齐之前，EG2 的设备路径**默认关闭**（`--compute vulkan` 仍可强制 ✓），
-   或至少在文档里写明 ✓。
+1. 决定契约方向 ✓：要么让 CPU 也把激活舍入到 F16 ✓（对齐 ggml/llama.cpp ✓，
+   但会拉大 CPU 与上游 HF 的差 ✓ —— 目前 CPU vs HF 是 0.0507 ✓），
+   要么让设备保留 F32 激活 ✓（偏离 ggml ✓）。
+2. 对齐之前如实记录数值 ✓（已写进 `tools/oracle/pr169/verification.json` ✓
+   的 `device_attention_2026_11_06` ✓ 与 README ✓）。
+3. 媒体最终向量仍差 0.0238 ✓，略高于 oracle 的 0.02 界 ✓ —— 只针对**设备路径** ✓，
+   CPU 路径仍是 0.0147 ✓。
 
 **关联**：`src/ops/kernel/vulkan.rs`（`try_matmul` ✓）、
-`shaders/glsl/q8_matmul_transposed.comp`、`shaders/glsl/f16_matmul*.comp`、
-`src/models/embeddinggemma2/text.rs`、TODO-056。
+`shaders/glsl/f16_matmul.comp`、`src/ops/kernel/f16/neon.rs`、
+`src/models/embeddinggemma2/text.rs`、`src/models/embeddinggemma2/vision.rs`
+（设备注意力 ✓）、`tests/embeddinggemma_2_device_parity.rs` ✓、TODO-056。

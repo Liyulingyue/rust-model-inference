@@ -203,6 +203,29 @@ impl Linear<'_> {
     }
 }
 
+/// The device-side attention: an arena with the q/k/v and the output.
+///
+/// The vision tower attends in both directions over every patch, so the
+/// runtime is driven with `causal: false` and the unit scale Gemma4 uses.
+#[cfg(feature = "vulkan")]
+struct DeviceAttention {
+    runtime: crate::vulkan::ops::AttentionRuntime,
+    rows: usize,
+}
+
+#[cfg(feature = "vulkan")]
+impl DeviceAttention {
+    fn new(config: &EmbeddingGemmaVisionConfig, rows: usize) -> Option<Self> {
+        let context = crate::ops::get_vulkan_context()?;
+        let heads = config.head_count;
+        let width = heads * config.head_dim;
+        let runtime =
+            crate::vulkan::ops::AttentionRuntime::new(context, (rows * width, rows * width))
+                .ok()?;
+        Some(Self { runtime, rows })
+    }
+}
+
 fn linear_from_gguf<'a>(
     source: &'a dyn TensorSource,
     name: &str,
@@ -256,6 +279,10 @@ pub struct EmbeddingGemmaVisionModel<'a> {
     pub config: EmbeddingGemmaVisionConfig,
     pub(super) source: &'a Arc<dyn TensorSource>,
     pub(super) pool: Arc<ComputePool>,
+    /// The device attention, built on first use. `None` until then and after
+    /// any failure, in which case the layer falls back to the CPU.
+    #[cfg(feature = "vulkan")]
+    device: std::cell::RefCell<Option<DeviceAttention>>,
     pub(super) patch_input_proj: Linear<'a>,
     /// `vision.position_embedding_table` shape `(2, position_embedding_size,
     /// embd)` — separate (h, w) tables. We read it as a flat F32 vector.
@@ -411,6 +438,8 @@ impl<'a> EmbeddingGemmaVisionModel<'a> {
             config,
             source,
             pool,
+            #[cfg(feature = "vulkan")]
+            device: std::cell::RefCell::new(None),
             patch_input_proj,
             position_embedding_table,
             layers,
@@ -553,6 +582,93 @@ impl<'a> EmbeddingGemmaVisionModel<'a> {
         Ok(output)
     }
 
+    /// Run the bidirectional attention on the device. `false` means the
+    /// caller should use the CPU path.
+    #[cfg(feature = "vulkan")]
+    fn device_attention(
+        &self,
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        rows: usize,
+        attn_out: &mut [f32],
+    ) -> bool {
+        let spec = crate::ops::nn::AttentionSpec {
+            query_tokens: rows,
+            key_tokens: rows,
+            query_heads: self.config.head_count,
+            key_value_heads: self.config.head_count,
+            head_dim: self.config.head_dim,
+            causal: false,
+            scale: 1.0,
+        };
+        let mut cell = self.device.borrow_mut();
+        if cell.as_ref().is_none_or(|device| device.rows != rows) {
+            *cell = DeviceAttention::new(&self.config, rows);
+        }
+        match cell.as_mut() {
+            Some(device) => device.runtime.forward(q, k, v, attn_out, spec).is_ok(),
+            None => false,
+        }
+    }
+
+    /// The CPU attention: one task per (query patch, head), each worker with
+    /// its own score buffer.
+    fn cpu_attention(
+        &self,
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        n_patches: usize,
+        attn_out: &mut [f32],
+    ) {
+        let embd = self.config.embd;
+        let n_head = self.config.head_count;
+        let head_dim = self.config.head_dim;
+        let tasks = n_patches * n_head;
+        let q_ptr = q.as_ptr();
+        let k_ptr = k.as_ptr();
+        let v_ptr = v.as_ptr();
+        let out_ptr = attn_out.as_mut_ptr();
+        self.pool.compute(move |ith, nth| {
+            let (start, end) = crate::ops::kernel::f32::scalar::row_range(tasks, ith, nth);
+            if start >= end {
+                return;
+            }
+            let mut scores = vec![0.0f32; n_patches];
+            for task in start..end {
+                let i = task / n_head;
+                let head_off = (task % n_head) * head_dim;
+                // SAFETY: the pointers come from slices the caller checked; each
+                // task reads only its own head column and writes only its own
+                // output rows.
+                unsafe {
+                    let q_i = std::slice::from_raw_parts(q_ptr.add(i * embd + head_off), head_dim);
+                    for j in 0..n_patches {
+                        let k_j =
+                            std::slice::from_raw_parts(k_ptr.add(j * embd + head_off), head_dim);
+                        scores[j] = crate::ops::dot_f32(q_i, k_j, head_dim);
+                    }
+                    crate::ops::softmax::softmax_inplace(&mut scores);
+                    let out_i =
+                        std::slice::from_raw_parts_mut(out_ptr.add(i * embd + head_off), head_dim);
+                    // The reduction below accumulates, so the slice starts at
+                    // zero: the device path may have written it before failing.
+                    for value in out_i.iter_mut() {
+                        *value = 0.0;
+                    }
+                    for j in 0..n_patches {
+                        let v_j =
+                            std::slice::from_raw_parts(v_ptr.add(j * embd + head_off), head_dim);
+                        for d in 0..head_dim {
+                            out_i[d] += scores[j] * v_j[d];
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     fn forward_vision_layer(
         &self,
         il: usize,
@@ -651,45 +767,12 @@ impl<'a> EmbeddingGemmaVisionModel<'a> {
         // a unit attention scale; the head dimension is already normalized by
         // the trained projections.
         let mut attn_out = vec![0.0f32; n_patches * embd];
-        // One task per (query patch, head); each worker keeps its own score
-        // buffer so the tasks share nothing.
-        let tasks = n_patches * n_head;
-        let q_ptr = q.as_ptr();
-        let k_ptr = k.as_ptr();
-        let v_ptr = v.as_ptr();
-        let out_ptr = attn_out.as_mut_ptr();
-        self.pool.compute(move |ith, nth| {
-            let (start, end) = crate::ops::kernel::f32::scalar::row_range(tasks, ith, nth);
-            if start >= end {
-                return;
-            }
-            let mut scores = vec![0.0f32; n_patches];
-            for task in start..end {
-                let i = task / n_head;
-                let head_off = (task % n_head) * head_dim;
-                // SAFETY: the pointers come from slices the caller checked; each
-                // task reads only its own head column and writes only its own
-                // output rows.
-                unsafe {
-                    let q_i = std::slice::from_raw_parts(q_ptr.add(i * embd + head_off), head_dim);
-                    for j in 0..n_patches {
-                        let k_j =
-                            std::slice::from_raw_parts(k_ptr.add(j * embd + head_off), head_dim);
-                        scores[j] = crate::ops::dot_f32(q_i, k_j, head_dim);
-                    }
-                    crate::ops::softmax::softmax_inplace(&mut scores);
-                    let out_i =
-                        std::slice::from_raw_parts_mut(out_ptr.add(i * embd + head_off), head_dim);
-                    for j in 0..n_patches {
-                        let v_j =
-                            std::slice::from_raw_parts(v_ptr.add(j * embd + head_off), head_dim);
-                        for d in 0..head_dim {
-                            out_i[d] += scores[j] * v_j[d];
-                        }
-                    }
-                }
-            }
-        });
+        #[cfg(feature = "vulkan")]
+        if !self.device_attention(&q, &k, &v, n_patches, &mut attn_out) {
+            self.cpu_attention(&q, &k, &v, n_patches, &mut attn_out);
+        }
+        #[cfg(not(feature = "vulkan"))]
+        self.cpu_attention(&q, &k, &v, n_patches, &mut attn_out);
 
         // Step e: output projection.
         let mut proj_out = vec![0.0f32; n_patches * embd];

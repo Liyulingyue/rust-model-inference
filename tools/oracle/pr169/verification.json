@@ -792,6 +792,18 @@
       "note": "the device and the CPU kernels disagree by 0.033, and the kernel path itself differs from the old F32 dequant path by 0.051; the oracle bounds were recalibrated for the kernel path (cosine 0.9985, relative L2 0.06, multimodal 0.021)",
       "tracked": "TODO-058",
       "text_tower_speed": "the media path's text forward went from about 48.7 s to about 2.5 s (batching plus the pool)"
+    },
+    "device_attention_2026_11_06": {
+      "status": "the vision tower's attention runs on the device: the patches attend in both directions over every patch, which the decoder-shaped device attention cannot express, so the tower uses the fused bidirectional kernel (src/vulkan/ops.rs AttentionRuntime, shaders/glsl/attention_online.comp) with F32 arithmetic, causal off and Gemma4's unit attention scale",
+      "device_vs_cpu_vision_tower_relative_l2": 8.58e-06,
+      "device_vs_cpu_vision_tower_cosine": 1.0,
+      "device_vs_cpu_media_final_relative_l2": 0.023764,
+      "device_vs_cpu_media_final_cosine": 0.99972924,
+      "device_vs_cpu_text_relative_l2": 0.008853,
+      "residual_cause": "the device F16 matmul rounds the activations to F16 (round_f16_rte, ggml parity) while the CPU F16 kernel converts only the weights and keeps the activations in F32, so the remaining gap is the CPU path's extra precision, not a device bug; the vision tower's attention itself is F32 on both sides",
+      "media_path_speed": "one 768x768 image: CPU 16.1 s against Vulkan 6.7 s; the attention was the last CPU-bound stage of the tower",
+      "other_paths": "text: CPU 0.79 s against Vulkan 1.70 s; audio: CPU 1.33 s against Vulkan 2.19 s; the short text and audio paths stay on the CPU",
+      "test": "tests/embeddinggemma_2_device_parity.rs (vision tower, device against CPU, relative L2 under 0.02 and cosine over 0.999)"
     }
   }
 }
