@@ -1,3 +1,4 @@
+pub(crate) mod batch;
 pub mod config;
 pub mod forward;
 pub mod run;

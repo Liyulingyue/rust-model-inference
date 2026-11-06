@@ -1,0 +1,36 @@
+#version 450
+
+// Polyphase interleave for the AuK VAE upsample convolution.
+//
+// The transposed convolution is evaluated as one regular convolution per
+// output phase; this kernel folds the phase buffers back into the
+// `[out_channels][frames * rate]` layout and adds the bias.
+//
+// Input: `[rate][out_channels][frames]` (phase major).
+// Output: `[out_channels][frames * rate]`.
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+
+layout(push_constant) uniform PC {
+    uint input_word; uint bias_word; uint output_word;
+    uint count; uint rows; uint output_stride;
+    uint frames; uint rate; uint phase_stride;
+} pc;
+
+void main() {
+    uint row = gl_WorkGroupID.z;
+    if (row >= pc.rows) return;
+    uint group = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint index = group * 64u + gl_LocalInvocationID.x;
+    if (index >= pc.count) return;
+
+    uint frame = index / pc.rate;
+    uint phase = index - frame * pc.rate;
+    uint source = phase * pc.phase_stride + row * pc.frames + frame;
+    float value = uintBitsToFloat(arena.data[pc.input_word + source]);
+    float bias = uintBitsToFloat(arena.data[pc.bias_word + row]);
+    arena.data[pc.output_word + row * pc.output_stride + index] =
+        floatBitsToUint(value + bias);
+}

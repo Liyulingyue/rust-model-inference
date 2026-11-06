@@ -13,7 +13,7 @@ use rust_model_inference::TensorSource;
 
 const USAGE: &str = "Usage: rust-model-inference --model <path.gguf-or-ggufrs> [--prompt ...] [--threads N] [--compute cpu|auto|vulkan (default cpu); --gpu aliases auto] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--max-context N (default 8192)] [--repetition-penalty α (default 1.0 = disabled)] [--serve [--host 0.0.0.0] [--port 8080]]\n\nChat template: --jinja renders the GGUF's own `tokenizer.chat_template` (a Jinja2 program) with minijinja instead of the built-in per-architecture builder; --chat-template-file <path.jinja> overrides it and implies --jinja. --chat-template <name> still selects a built-in preset (chatml/llama3/gemma/lfm2/glm4/exaone/phi/none). Both are off by default, so token ids are unchanged unless you ask. tests/jinja_chat_template_ab.rs compares the two paths on real GGUFs: Qwen3 is asserted to match token for token, and LFM2.5 records a known divergence where the template is the correct one.\n\nLongCat Image Edit: --kind edit|turbo --model <transformer.gguf> --components <dir> --input <image.png> --instruction TEXT --out edited.png [--side 1024] [--steps N] [--guidance F32] [--seed N]; <dir> holds text_encoder/, vae/ and tokenizer/ safetensors, shared by both kinds; the two kinds use different Flux schedules so the step/guidance defaults differ (Edit 50/4.5, Turbo 8/1.0)\n\nQwen-Image-2.1 / Turbo: add --qwen-image-turbo for the Turbo checkpoint (fixed 8-step schedule, CFG 1); --model <qwen-image-2.1-Q8_0.gguf> --text-encoder <Qwen3-VL-8B.gguf> --vae <Qwen-Image-2.1/vae/diffusion_pytorch_model.safetensors> --prompt TEXT --out image.png [--width N --height N --steps N --cfg N --seed N] [--image reference.png --mmproj vision.gguf --reference another.png]\nAstronex-World: --astronex --model <Astronex-World-BF16.gguf> --mmproj <mmproj-Astronex-World.gguf> --prompt TEXT --out video.mp4 [--width N --height N --video-frames N --fps N --steps 8 --cfg-scale N --seed N] [--image first-frame.png] | T2V or first-frame I2V; causal 8-frame blocks, 20-frame KV window, 8-step Flow-UniPC; add --gpu with the Vulkan build\n\nUnlimited-OCR-2: --model <official-safetensors-directory-or-native.gguf> --image first.png [--reference next.png ...] [--prompt TEXT] [--max-tokens N] [--max-context N] [--out result.txt --overwrite] | 1024px base, greedy OCR; --compute auto / --gpu hybrid offload; --compute vulkan requires a usable device and moves the linear projections only; CLI/HTTP OCR; see tools/oracle/unlimited_ocr/README.md\n\nMage-Flow: --model <dit.gguf> --text-encoder <text.gguf> --vae <vae.gguf> --prompt TEXT --out image.png [--resolution N | --width N --height N] [--steps N --cfg N --seed N --noise fixed.f32] [--image reference.png --mmproj vision.gguf --reference another.png]\n\nRerank mode: --rerank --rerank-query <TEXT> [--rerank-doc <TEXT> ...] | [--rerank-documents <FILE>] [--rerank-instruction <TEXT>] [--rerank-max-tokens N] | cross-encoder scoring; backend picked by GGUF arch (jina-bert-v2 + cls.weight/cls.bias → bert forward, qwen3 + cls.output.weight + pooling_type=4 → qwen3 trunk + 2-class head); one sigmoid'd score per document in [0, 1]\n\nJEV mode: --jev --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | single-forward-pass decision scoring over candidate labels A/B/C/…\n\nJEV grouped: --jev --jev-multi [--jev-option <pos> --jev-option <neg> ...] (pairs) or --jev-block <label> --jev-option <a> [--jev-option <b> ...] (blocks)\n\nServer mode: --serve [--host 0.0.0.0] [--port 8080] --model <path> [--mmproj ...] [--tts] [--embedding]\n\nCLM mode: --jev --clm-head <clm-heads.gguf> --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | cosine scoring via CLM projection heads on the chosen encoder (state = context, blank line, question; candidates verbatim\n\nGLiNER2 mode: --jev --gliner2-decide --model <gliner2-decide.gguf> --jev-context <text> [--gliner2-schema <json> | --jev-question <name> --jev-option <a> [--jev-option <b> ...]] | one DeBERTa-v3 pass scores every label of every task; --gliner2-schema takes a classify_text-shaped mapping: {intent: [a, b], aspects: {labels: [x], multi_label: true, cls_threshold: 0.4}}
 
-AuK TTS mode: --model auk-base-f16.gguf --vae auk-vae-f32.gguf [--text-encoder qwen2.5-omni-3b-q8_0.gguf] --prompt \"<TEXT>\" --out speech.wav [--steps N (default 32)] [--resolution SR (default 24000)] [--duration-seconds N (default 1)] [--cfg-scale α (default 2.0)] [--instruction \"<voice/style>\" (instruct TTS)] [--ref-audio ref.wav (CFMEdit reference voice with audio tower)] | 24 kHz mono speech generation";
+AuK TTS mode: --model auk-base-f16.gguf --vae auk-vae-f32.gguf [--text-encoder qwen2.5-omni-3b-q8_0.gguf] --prompt \"<TEXT>\" --out speech.wav [--steps N (default 32)] [--resolution SR (default 24000)] [--duration-seconds N (default 1)] [--cfg-scale α (default 2.0)] [--auk-sway α (default -1.0, sway-warped time grid)] [--auk-flash (pin the AuK-Flash recipe: 4 steps, cfg 0, official time grid)] [--instruction \"<voice/style>\" (instruct TTS)] [--ref-audio ref.wav (CFMEdit reference voice with audio tower)] | 24 kHz mono speech generation";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DispatchMode {
     Astronex,
@@ -63,7 +63,8 @@ fn dispatch_audio_arch(arch: &str) -> Result<AudioRoute, String> {
         | "qwen2"
         | "sensevoice-small"
         | "paraformer"
-        | "audio8_asr_infinite" => Ok(AudioRoute::Asr),
+        | "audio8_asr_infinite"
+        | "hy_v3" => Ok(AudioRoute::Asr),
         "qwen2vl" | "qwen3vlmoe" => Ok(AudioRoute::Multimodal),
         "gemma4" => Ok(AudioRoute::Gemma4),
         _ => Err(format!(
@@ -74,14 +75,14 @@ fn dispatch_audio_arch(arch: &str) -> Result<AudioRoute, String> {
 
 fn validate_audio_route(route: AudioRoute, has_image: bool) -> Result<(), String> {
     if route == AudioRoute::Asr && has_image {
-        return Err("Qwen3-ASR --audio cannot be used with --image".into());
+        return Err("ASR --audio cannot be used with --image".into());
     }
     Ok(())
 }
 
 fn validate_audio_temperature(route: AudioRoute, temperature: Option<f32>) -> Result<(), String> {
     if route == AudioRoute::Asr && temperature.is_some_and(|value| value != 0.0) {
-        return Err("Qwen3-ASR requires greedy decoding; --temp must be 0".into());
+        return Err("ASR requires greedy decoding; --temp must be 0".into());
     }
     Ok(())
 }
@@ -89,13 +90,18 @@ fn validate_audio_temperature(route: AudioRoute, temperature: Option<f32>) -> Re
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
-        println!("{USAGE}\n\nWeVisOne-VL: --model text.gguf --mmproj vision.gguf --wevisone-decoder decoder.gguf --wevisone-request request.json [--output result.json]\n\nTimestral-209M: --model <timestral-F32.gguf> --timestral-request <series.json> [--threads N] [--compute cpu|auto|vulkan] | time-series forecasting; JSON context and prediction_length in, 21 quantiles out");
+        println!("{USAGE}\n\nWeVisOne-VL: --model text.gguf --mmproj vision.gguf --wevisone-decoder decoder.gguf --wevisone-request request.json [--output result.json]\n\nTimestral-209M: --model <timestral-F32.gguf> --timestral-request <series.json> [--threads N] [--compute cpu|auto|vulkan] | time-series forecasting; JSON context and prediction_length in, 21 quantiles out\n\nSystem One (Vela3): --model <base-directory> --system-one-request <request.json|-> [--adapter <vela3-package>] [--threads N] [--compute cpu] | JSON request from a file or stdin; one JSON response to stdout");
         return;
     }
     // \n\nGLiNER2 boundary mode: --jev --gliner2-boundary --model <gliner2.5-boundary.gguf> --jev-context <text> --gliner2-schema <json> | span extraction; the schema is {\"entities\":[\"person\",\"location\"],\"entity_descriptions\":{...}} (the dict form {\"entities\":{\"person\":[...]}} is also accepted). Output is (start, end) word spans per field; --jev-output json for machine-readable.\n\nServer mode: --serve delegates to app::server::run_server which has its
     // own --host/--port pre-parser and reuses the shared CLI parser for the rest.
     if args.iter().any(|arg| arg == "--serve")
-        && !args.iter().any(|arg| arg == "--timestral-request")
+        && !args.iter().any(|arg| {
+            matches!(
+                arg.as_str(),
+                "--timestral-request" | "--system-one-request" | "--adapter"
+            )
+        })
     {
         app::server::run_server();
         return;
@@ -104,8 +110,11 @@ fn main() {
         eprintln!("{error}");
         std::process::exit(2);
     });
-    // Reject mixed forecast/task modes before any early media route can run.
-    if options.timestral_request.is_some() {
+    // Reject mixed JSON/task modes before any early media route can run.
+    if options.timestral_request.is_some()
+        || options.system_one_request.is_some()
+        || options.adapter.is_some()
+    {
         app::run_or_exit(app::validate_cli_options(&options));
     }
     app::run_or_exit(options.validate_compute_mode());
@@ -121,6 +130,11 @@ fn main() {
         .map(std::num::NonZeroUsize::get)
         .unwrap_or(1);
     let n_threads = app::resolve_thread_count(options.threads, available_threads);
+    if options.system_one_request.is_some() {
+        app::init_rayon_global_pool(n_threads);
+        app::run_or_exit(app::system_one::run_cli(&options, n_threads));
+        return;
+    }
     if options.wevisone_request.is_some() {
         app::run_or_exit(app::validate_cli_options(&options));
         app::init_rayon_global_pool(n_threads);
@@ -416,6 +430,8 @@ fn main() {
             options.instruction.as_deref(),
             options.duration_seconds,
             options.cfg_scale,
+            options.auk_sway,
+            options.auk_flash,
             audio_tower,
         ));
         return;
@@ -468,10 +484,17 @@ fn main() {
                 options.instruction.as_deref(),
                 options.duration_seconds,
                 options.cfg_scale,
+                options.auk_sway,
+                options.auk_flash,
                 audio_tower,
             ));
             return;
         }
+    }
+    // The AuK-only knobs must not be silently ignored on a non-AuK model.
+    if options.auk_flash || options.auk_sway.is_some() {
+        eprintln!("--auk-flash / --auk-sway require an AuK model (--model + --vae)");
+        std::process::exit(2);
     }
     // ERNIE-Image / ERNIE-Image-Turbo dispatch (MUST run before the Z-Image
     // branch below, since both share --model/--text-encoder/--vae; the GGUF
@@ -1271,6 +1294,7 @@ mod tests {
     #[test]
     fn architecture_aware_audio_dispatch_preserves_asr() {
         assert_eq!(dispatch_audio_arch("qwen3vl").unwrap(), AudioRoute::Asr);
+        assert_eq!(dispatch_audio_arch("hy_v3").unwrap(), AudioRoute::Asr);
         assert_eq!(
             dispatch_audio_arch("audio8_asr_infinite").unwrap(),
             AudioRoute::Asr
@@ -1280,14 +1304,14 @@ mod tests {
     }
 
     #[test]
-    fn qwen_asr_audio_route_rejects_images() {
+    fn asr_audio_route_rejects_images() {
         assert!(validate_audio_route(AudioRoute::Asr, true).is_err());
         assert!(validate_audio_route(AudioRoute::Asr, false).is_ok());
         assert!(validate_audio_route(AudioRoute::Gemma4, true).is_ok());
     }
 
     #[test]
-    fn only_qwen_asr_keeps_greedy_audio_validation() {
+    fn only_asr_routes_keep_greedy_audio_validation() {
         assert!(validate_audio_temperature(AudioRoute::Asr, Some(0.1)).is_err());
         assert!(validate_audio_temperature(AudioRoute::Multimodal, Some(0.1)).is_ok());
     }

@@ -1,3 +1,12 @@
+use crate::ops::audio::transformer::{
+    apply_gelu_erf, checked_product, full_attention_into, layer_norm, layer_norm_rows,
+    reserved_f32, resize_f32, LayerNormWeights,
+};
+#[cfg(test)]
+use crate::ops::audio::transformer::{attention_softmax, transpose_value_head};
+#[cfg(test)]
+use crate::ops::gelu_erf;
+
 // Qwen3-Audio model: transformer-based audio encoder.
 //
 // Phase 4b split from qwen3a.rs. Owns: Qwen3AudioConfig, Qwen3AudioModel, the per-layer
@@ -7,13 +16,12 @@ use crate::core::tensor::{GGMLType, MetaValue, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::{QuantizedTensor, Weight};
 use crate::ops::{
-    bf16_to_f32, dot_f16_f16_bytes, dot_f32, f16_to_f32, gelu_erf, quantize_q8_0_into, sum_f32,
-    sum_sq_centered_f32, vec_add_into,
+    bf16_to_f32, dot_f16_f16_bytes, dot_f32, f16_to_f32, quantize_q8_0_into, vec_add_into,
 };
 use rayon::prelude::*;
 use std::sync::Arc;
 
-use super::audio_processor::{
+use crate::ops::audio::frontend::{
     compute_log_mel, decode_pcm16_wav, log_mel_windows, periodic_hann_window, reflect_pad,
     split_mel_windows, AsrAudioError, MelWindow, CHUNK_FRAMES, MEL_BINS, WINDOW_FRAMES,
 };
@@ -63,11 +71,6 @@ pub(crate) struct AudioEmbeddings {
     pub values: Vec<f32>,
     pub tokens: usize,
     pub dim: usize,
-}
-
-pub(in crate::models::qwen3) struct LayerNormWeights {
-    pub weight: Vec<f32>,
-    pub bias: Vec<f32>,
 }
 
 struct AudioTransformerLayer {
@@ -544,19 +547,6 @@ impl Qwen3AudioModel {
         Ok(AudioHidden {
             values: hidden,
             tokens,
-        })
-    }
-}
-
-impl LayerNormWeights {
-    pub(in crate::models::qwen3) fn load(
-        source: &dyn TensorSource,
-        prefix: &str,
-        dims: &[u64],
-    ) -> Result<Self, String> {
-        Ok(Self {
-            weight: load_f32_tensor(source, &format!("{prefix}.weight"), dims)?,
-            bias: load_f32_tensor(source, &format!("{prefix}.bias"), dims)?,
         })
     }
 }
@@ -1067,13 +1057,8 @@ fn flatten_conv_output(
 }
 
 fn apply_gelu(values: &mut [f32]) -> Result<(), String> {
-    for value in values {
-        *value = gelu_erf(*value);
-        if !value.is_finite() {
-            return Err("Non-finite convolution GELU output".into());
-        }
-    }
-    Ok(())
+    crate::ops::audio::transformer::apply_gelu_erf(values)
+        .map_err(|_| "Non-finite convolution GELU output".to_string())
 }
 
 fn window_token_count(window: &MelWindow) -> Result<usize, String> {
@@ -1090,123 +1075,6 @@ fn window_token_count(window: &MelWindow) -> Result<usize, String> {
         return Err("Invalid Mel window values".into());
     }
     checked_product("convolution tokens", window.frames / CHUNK_FRAMES, 13)
-}
-
-fn layer_norm(
-    input: &[f32],
-    weight: &[f32],
-    bias: &[f32],
-    epsilon: f32,
-    output: &mut [f32],
-) -> Result<(), String> {
-    if input.is_empty()
-        || input.len() != weight.len()
-        || input.len() != bias.len()
-        || input.len() != output.len()
-        || !epsilon.is_finite()
-        || epsilon < 0.0
-        || input
-            .iter()
-            .chain(weight)
-            .chain(bias)
-            .any(|value| !value.is_finite())
-    {
-        return Err("Invalid layer norm tensors".into());
-    }
-
-    let n = input.len();
-    let sum = sum_f32(input);
-    let mean = (sum / n as f64) as f32;
-    let variance = (sum_sq_centered_f32(input, mean) / n as f64) as f32;
-    let inverse_std = 1.0 / (variance + epsilon).sqrt();
-    if !inverse_std.is_finite() {
-        return Err("Non-finite layer norm statistics".into());
-    }
-    for ((output, input), (weight, bias)) in
-        output.iter_mut().zip(input).zip(weight.iter().zip(bias))
-    {
-        *output = (*input - mean) * inverse_std * weight + bias;
-    }
-    if output.iter().any(|value| !value.is_finite()) {
-        return Err("Non-finite layer norm output".into());
-    }
-    Ok(())
-}
-
-/// Apply layer normalization to `rows` independent rows.
-///
-/// If a future Jina/Qwen2.5 audio parity test reveals that the f32
-/// accumulator here drifts from llama.cpp, swap it for a higher-
-/// precision (f64) variant. See git history for a prior f64
-/// implementation that was removed without an oracle test verifying
-/// it was necessary.
-pub(in crate::models::qwen3) fn layer_norm_rows(
-    input: &[f32],
-    rows: usize,
-    weights: &LayerNormWeights,
-    epsilon: f32,
-    output: &mut Vec<f32>,
-) -> Result<(), String> {
-    if rows == 0 || weights.weight.is_empty() || weights.weight.len() != weights.bias.len() {
-        return Err("Invalid audio layer norm weights".into());
-    }
-    let width = weights.weight.len();
-    let len = checked_product("audio layer norm values", rows, width)?;
-    if input.len() != len {
-        return Err("Invalid audio layer norm input".into());
-    }
-    resize_f32(output, "audio layer norm output", len)?;
-    for row in 0..rows {
-        layer_norm(
-            &input[row * width..(row + 1) * width],
-            &weights.weight,
-            &weights.bias,
-            epsilon,
-            &mut output[row * width..(row + 1) * width],
-        )?;
-    }
-    Ok(())
-}
-
-pub(in crate::models::qwen3) fn apply_gelu_erf(values: &mut [f32]) -> Result<(), String> {
-    if values.is_empty() || values.iter().any(|value| !value.is_finite()) {
-        return Err("Invalid audio GELU input".into());
-    }
-    for value in values {
-        *value = gelu_erf(*value);
-        if !value.is_finite() {
-            return Err("Non-finite audio GELU output".into());
-        }
-    }
-    Ok(())
-}
-
-fn attention_softmax(scores: &mut [f32]) -> Result<(), String> {
-    crate::ops::softmax_inplace(scores);
-    if scores.iter().any(|score| !score.is_finite()) {
-        return Err("Invalid attention softmax".into());
-    }
-    Ok(())
-}
-
-fn transpose_value_head(
-    value: &[f32],
-    tokens: usize,
-    width: usize,
-    head: usize,
-    head_dim: usize,
-    columns: &mut [f32],
-) {
-    debug_assert_eq!(value.len(), tokens * width);
-    debug_assert_eq!(columns.len(), tokens * head_dim);
-    debug_assert!((head + 1) * head_dim <= width);
-    let head_start = head * head_dim;
-    for dimension in 0..head_dim {
-        let column = &mut columns[dimension * tokens..(dimension + 1) * tokens];
-        for (key_token, target) in column.iter_mut().enumerate() {
-            *target = value[key_token * width + head_start + dimension];
-        }
-    }
 }
 
 fn full_attention(
@@ -1230,70 +1098,6 @@ fn full_attention(
         &mut output,
     )?;
     Ok(output)
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(in crate::models::qwen3) fn full_attention_into(
-    query: &[f32],
-    key: &[f32],
-    value: &[f32],
-    tokens: usize,
-    heads: usize,
-    head_dim: usize,
-    scores: &mut Vec<f32>,
-    output: &mut Vec<f32>,
-) -> Result<(), String> {
-    if tokens == 0 || heads == 0 || head_dim == 0 {
-        return Err("Attention dimensions must be non-zero".into());
-    }
-    let width = checked_product("attention width", heads, head_dim)?;
-    let len = checked_product("attention values", tokens, width)?;
-    if query.len() != len
-        || key.len() != len
-        || value.len() != len
-        || query
-            .iter()
-            .chain(key)
-            .chain(value)
-            .any(|value| !value.is_finite())
-    {
-        return Err("Invalid full attention tensors".into());
-    }
-    resize_f32(scores, "attention scores", tokens)?;
-    resize_f32(output, "attention output", len)?;
-    let value_columns_len = checked_product("attention value columns", tokens, head_dim)?;
-    let mut value_columns = reserved_f32("attention value columns", value_columns_len)?;
-    output.fill(0.0);
-    let scale = 1.0 / (head_dim as f32).sqrt();
-    for head in 0..heads {
-        transpose_value_head(value, tokens, width, head, head_dim, &mut value_columns);
-        for query_token in 0..tokens {
-            let query_start = query_token * width + head * head_dim;
-            let query_head = &query[query_start..query_start + head_dim];
-            let mut maximum = f32::NEG_INFINITY;
-            for key_token in 0..tokens {
-                let key_start = key_token * width + head * head_dim;
-                let dot = dot_f32(query_head, &key[key_start..key_start + head_dim], head_dim);
-                let score = dot * scale;
-                if !score.is_finite() {
-                    return Err("Non-finite attention score".into());
-                }
-                scores[key_token] = score;
-                maximum = maximum.max(score);
-            }
-            attention_softmax(&mut scores[..tokens])?;
-            let output_start = query_token * width + head * head_dim;
-            let output_row = &mut output[output_start..output_start + head_dim];
-            for dimension in 0..head_dim {
-                let column = &value_columns[dimension * tokens..(dimension + 1) * tokens];
-                output_row[dimension] = dot_f32(column, scores, tokens);
-            }
-        }
-    }
-    if output.iter().any(|value| !value.is_finite()) {
-        return Err("Non-finite attention output".into());
-    }
-    Ok(())
 }
 
 fn add_position_embeddings(
@@ -1418,24 +1222,6 @@ fn audio_projector(
     )
 }
 
-pub(in crate::models::qwen3) fn checked_product(
-    name: &str,
-    left: usize,
-    right: usize,
-) -> Result<usize, String> {
-    left.checked_mul(right)
-        .ok_or_else(|| format!("{name} overflows usize"))
-}
-
-pub(in crate::models::qwen3) fn reserved_f32(name: &str, len: usize) -> Result<Vec<f32>, String> {
-    let mut values = Vec::new();
-    values
-        .try_reserve_exact(len)
-        .map_err(|_| format!("Failed to allocate {name}"))?;
-    values.resize(len, 0.0);
-    Ok(values)
-}
-
 fn reserved_u8(name: &str, len: usize) -> Result<Vec<u8>, String> {
     let mut values = Vec::new();
     values
@@ -1445,27 +1231,13 @@ fn reserved_u8(name: &str, len: usize) -> Result<Vec<u8>, String> {
     Ok(values)
 }
 
-pub(in crate::models::qwen3) fn resize_f32(
-    values: &mut Vec<f32>,
-    name: &str,
-    len: usize,
-) -> Result<(), String> {
-    if len > values.len() {
-        values
-            .try_reserve_exact(len - values.len())
-            .map_err(|_| format!("Failed to allocate {name}"))?;
-    }
-    values.resize(len, 0.0);
-    Ok(())
-}
-
 pub(in crate::models::qwen3) fn static_tensor(
     source: &Arc<dyn TensorSource>,
     name: &str,
     dims: &[u64],
     kind: GGMLType,
 ) -> Result<&'static [u8], String> {
-    let bytes = checked_tensor(source.as_ref(), name, dims, kind)?;
+    let bytes = crate::core::tensor::typed_tensor_bytes(source.as_ref(), name, dims, kind)?;
     if matches!(kind, GGMLType::F16 | GGMLType::BF16)
         && bytes.chunks_exact(2).any(|bytes| {
             let bits = u16::from_le_bytes([bytes[0], bytes[1]]);
@@ -1489,7 +1261,7 @@ pub(in crate::models::qwen3) fn load_f32_tensor(
     name: &str,
     dims: &[u64],
 ) -> Result<Vec<f32>, String> {
-    let bytes = checked_tensor(source, name, dims, GGMLType::F32)?;
+    let bytes = crate::core::tensor::f32_tensor_bytes(source, name, dims)?;
     let values: Vec<f32> = bytes
         .chunks_exact(4)
         .map(|bytes| f32::from_le_bytes(bytes.try_into().expect("four-byte chunk")))
@@ -1498,38 +1270,6 @@ pub(in crate::models::qwen3) fn load_f32_tensor(
         return Err(format!("Invalid finite F32 tensor: {name}"));
     }
     Ok(values)
-}
-
-fn checked_tensor<'a>(
-    source: &'a dyn TensorSource,
-    name: &str,
-    dims: &[u64],
-    kind: GGMLType,
-) -> Result<&'a [u8], String> {
-    let info = source
-        .tensor_info(name)
-        .ok_or_else(|| format!("Missing tensor: {name}"))?;
-    if dims.is_empty() || dims.contains(&0) || info.dims != dims || info.ggml_type != kind {
-        return Err(format!(
-            "Invalid tensor {name}: shape {:?} type {:?}; expected {:?} {:?}",
-            info.dims, info.ggml_type, dims, kind
-        ));
-    }
-    let bytes = source
-        .tensor_slice(name)
-        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
-    let expected = usize::try_from(
-        info.checked_nbytes()
-            .ok_or_else(|| format!("Invalid tensor byte size: {name}"))?,
-    )
-    .map_err(|_| format!("Tensor byte size does not fit usize: {name}"))?;
-    if bytes.is_empty() || bytes.len() != expected {
-        return Err(format!(
-            "Invalid tensor data length for {name}: {}; expected {expected}",
-            bytes.len()
-        ));
-    }
-    Ok(bytes)
 }
 
 fn to_u64(value: usize, name: &str) -> Result<u64, String> {
@@ -1579,8 +1319,8 @@ fn require_tensor(
     ggml_type: GGMLType,
 ) -> Result<(), String> {
     // The contract is validated before any payload is read, so only the
-    // metadata is checked here; `checked_tensor` measures the payload when
-    // the tensor is actually loaded.
+    // metadata is checked here; the shared byte check measures the payload
+    // when the tensor is actually loaded.
     crate::core::tensor::require_tensor_meta(source, name, dims, &[ggml_type]).map(|_| ())
 }
 

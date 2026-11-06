@@ -430,6 +430,7 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             | "k2-horizon"
             | "granite"
             | "hunyuan-dense"
+            | "hy_v3"
             | "pig"
             | "lfm2"
             | "lfm2moe"
@@ -665,6 +666,7 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
         || arch == "sensenova_loop"
         || arch == "nanbeige"
         || arch == "mellum"
+        || arch == "hy_v3"
     {
         if n_head == 0 {
             return Err(format!(
