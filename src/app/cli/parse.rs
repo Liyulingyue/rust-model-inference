@@ -69,8 +69,8 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                 options.system_one_request =
                     Some(required_path_value(args, &mut i, "--system-one-request")?);
             }
-            "--base-model" => {
-                options.base_model = Some(required_path_value(args, &mut i, "--base-model")?);
+            "--adapter" => {
+                options.adapter = Some(required_path_value(args, &mut i, "--adapter")?);
             }
             "--prompt" => {
                 if i + 1 < args.len() {
@@ -700,7 +700,7 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                 "--threads" => {
                     required_usize_value(args, &mut index, "--threads")?;
                 }
-                "--base-model" | "--system-one-request" | "--compute" => {}
+                "--adapter" | "--system-one-request" | "--compute" => {}
                 flag => {
                     return Err(format!(
                         "--system-one-request cannot be combined with {flag}"

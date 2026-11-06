@@ -128,8 +128,8 @@ def synthetic(root, dtype, prefix=False):
 
 def run_trace(args):
     if args.causal and not args.synthetic:
-        config = json.loads((args.base / 'config.json').read_text())
-        vela = json.loads((args.vela / 'vela3_config.json').read_text())
+        config = json.loads((args.model / 'config.json').read_text())
+        vela = json.loads((args.adapter / 'vela3_config.json').read_text())
         tied = config.get('text_config', {}).get('tie_word_embeddings')
         if not isinstance(tied, bool):
             tied = config.get('tie_word_embeddings')
@@ -146,7 +146,7 @@ def _run_trace(args, scope):
     torch.set_num_threads(args.threads)
     torch.set_grad_enabled(False)
     os.environ['D3_FAST'] = '0'
-    base, vela = args.base.absolute(), args.vela.absolute()
+    base, vela = args.model.absolute(), args.adapter.absolute()
     dtype = torch.float32 if args.dtype == 'float32' else torch.bfloat16
     if args.stream_f32_weights and (args.dtype != 'float32' or args.synthetic or args.images):
         raise ValueError('stream-f32-weights requires a real float32 text trace')
@@ -188,12 +188,12 @@ def _run_trace(args, scope):
         model = backbone.language_model
     unexpanded_ids = ids[0].tolist()
     vela_config = json.loads((vela / 'vela3_config.json').read_text())
-    adapters = load_module((args.vela if not args.synthetic else Path('models/vela3-lite')).absolute() / 'vela3_adapters.py')
-    if args.adapter:
-        spec = vela_config['adapters'][args.adapter]
-        info = adapters.attach(model, args.adapter, vela / spec['file'])
+    adapters = load_module((args.adapter if not args.synthetic else Path('models/vela3-lite')).absolute() / 'vela3_adapters.py')
+    if args.task_adapter:
+        spec = vela_config['adapters'][args.task_adapter]
+        info = adapters.attach(model, args.task_adapter, vela / spec['file'])
         if any(info[field] != spec[field] for field in ['r', 'alpha', 'modules']):
-            raise ValueError(f'adapter {args.adapter} does not match vela3_config.json: {info}')
+            raise ValueError(f'adapter {args.task_adapter} does not match vela3_config.json: {info}')
     if args.stream_f32_weights:
         from stream_f32 import stream_f32
         scope.enter_context(stream_f32(model))
@@ -204,14 +204,14 @@ def _run_trace(args, scope):
                     Path(runtime.__file__)]
     if args.stream_f32_weights:
         source_paths.append(Path(__file__).with_name('stream_f32.py'))
-    if args.adapter:
-        source_paths.append(vela / vela_config['adapters'][args.adapter]['file'])
+    if args.task_adapter:
+        source_paths.append(vela / vela_config['adapters'][args.task_adapter]['file'])
     if args.causal and vela_config.get('definitions', {}).get('writer') == 'grafted_head':
         source_paths.append(vela / vela_config['definitions']['lm_head_file'])
     trace.record(dict(kind='oracle', torch=torch.__version__, transformers=transformers.__version__,
         dtype=str(dtype), storage_dtype=str(storage_dtype), stream_f32_weights=args.stream_f32_weights,
         checked_bf16_source_tensors=checked_bf16_tensors,
-        adapter=args.adapter, text=input_text, unexpanded_token_ids=unexpanded_ids,
+        adapter=args.task_adapter, text=input_text, unexpanded_token_ids=unexpanded_ids,
         images=[str(p.absolute()) for p in args.images], state_tokens=args.state_tokens,
         causal=args.causal, generation_steps=args.generation_steps,
         sources={str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in source_paths if p.is_file()}))
@@ -277,12 +277,12 @@ def _run_trace(args, scope):
         if mrope is not None:
             trace.emit('vela3.d3.positions', mrope[:, 0, :].T.unsqueeze(0))
         trace.emit('vela3.d3.embedding', embeds)
-        with adapters.active(args.adapter):
+        with adapters.active(args.task_adapter):
             if args.causal:
                 hidden = model(input_ids=ids, attention_mask=mask, use_cache=False).last_hidden_state
             elif encoder is not None:
                 extra = {}
-                gated_full = args.adapter and vela_config.get('decisions', {}).get('attention') == 'noncausal'
+                gated_full = args.task_adapter and vela_config.get('decisions', {}).get('attention') == 'noncausal'
                 if state_tokens is not None and not gated_full:
                     extra['blocks'] = runtime.StateBlocks.of(ids.shape[-1], [ids.shape[-1]], [state_tokens])
                 if mrope is not None:
@@ -377,15 +377,15 @@ def suite(args):
     import subprocess
     args.out.mkdir(parents=True, exist_ok=True)
     results = []
-    for adapter in ([None] if args.causal else [None, *args.adapters]):
+    for adapter in ([None] if args.causal else [None, *args.task_adapters]):
         name = adapter or 'base'
         oracle = (args.out / f'{name}-oracle.jsonl').absolute()
         native = (args.out / f'{name}-native.jsonl').absolute()
         command = [sys.executable, str(Path(__file__).absolute()), 'trace',
-            '--base', str(args.base), '--vela', str(args.vela), '--text', args.text,
+            '--model', str(args.model), '--adapter', str(args.adapter), '--text', args.text,
             '--dtype', args.dtype, '--out', str(oracle)]
         if adapter:
-            command += ['--adapter', adapter]
+            command += ['--task-adapter', adapter]
         if args.ids:
             command += ['--ids', str(args.ids)]
         if args.state_tokens is not None:
@@ -407,8 +407,8 @@ def suite(args):
         for variable in ['ADAPTER', 'IMAGES', 'STATE', 'CAUSAL', 'STEPS', 'F32']:
             environment.pop(f'RMI_VELA3_D3_{variable}', None)
         environment.pop('RMI_PARITY_FILTER', None)
-        environment.update(RMI_VELA3_D3_BASE=str(args.base.absolute()),
-            RMI_VELA3_D3_ROOT=str((args.base if args.synthetic else args.vela).absolute()),
+        environment.update(RMI_VELA3_D3_BASE=str(args.model.absolute()),
+            RMI_VELA3_D3_ROOT=str((args.model if args.synthetic else args.adapter).absolute()),
             RMI_VELA3_D3_IDS=json.dumps(metadata['unexpanded_token_ids']),
             RMI_PARITY_TRACE=str(native))
         if adapter:
@@ -496,12 +496,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
     trace = commands.add_parser('trace')
-    trace.add_argument('--base', type=Path, required=True)
-    trace.add_argument('--vela', type=Path, required=True)
+    trace.add_argument('--model', type=Path, required=True, help='base model directory (d3 snapshot)')
+    trace.add_argument('--adapter', type=Path, required=True, help='Vela3 adapter package directory')
     trace.add_argument('--text', default='State:\nAlice works at Acme.\nQuestion:\nWhere does Alice work?')
     trace.add_argument('--ids', type=Path)
     trace.add_argument('--images', type=Path, action='append', default=[])
-    trace.add_argument('--adapter')
+    trace.add_argument('--task-adapter')
     trace.add_argument('--state-tokens', type=int)
     trace.add_argument('--causal', action='store_true')
     trace.add_argument('--generation-steps', type=int)
@@ -519,8 +519,8 @@ def main():
     comparison_options(cmp)
     cmp.set_defaults(run=compare)
     batch = commands.add_parser('suite', help='reproduce local full-graph oracle/native parity with explicit thresholds')
-    batch.add_argument('--base', type=Path, required=True)
-    batch.add_argument('--vela', type=Path, required=True)
+    batch.add_argument('--model', type=Path, required=True, help='base model directory (d3 snapshot)')
+    batch.add_argument('--adapter', type=Path, required=True, help='Vela3 adapter package directory')
     batch.add_argument('--native', type=Path, required=True, help='parity-trace lib test executable')
     batch.add_argument('--text', default='Alice works at Acme.')
     batch.add_argument('--ids', type=Path)
@@ -532,7 +532,7 @@ def main():
     batch.add_argument('--stream-f32-weights', action='store_true',
                        help='load BF16 weights and temporarily cast one layer for F32 text diagnostics')
     batch.add_argument('--dtype', choices=['float32', 'bfloat16'], default='bfloat16')
-    batch.add_argument('--adapters', nargs='*', default=['span', 'decision'])
+    batch.add_argument('--task-adapters', nargs='*', default=['span', 'decision'])
     batch.add_argument('--out', type=Path, required=True)
     comparison_options(batch, suite_mode=True)
     batch.set_defaults(run=suite)

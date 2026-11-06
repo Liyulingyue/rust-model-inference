@@ -148,7 +148,9 @@ pub struct CliOptions {
     pub wevisone_decoder: Option<PathBuf>,
     pub timestral_request: Option<PathBuf>,
     pub system_one_request: Option<PathBuf>,
-    pub base_model: Option<PathBuf>,
+    /// Vela3 adapter package (LoRA + heads + config). `--model` is the base
+    /// weights; the d3 variants need both.
+    pub adapter: Option<PathBuf>,
     pub jev_context: Option<String>,
     pub jev_questions: Vec<JevQuestion>,
     pub jev_positive: Option<String>,

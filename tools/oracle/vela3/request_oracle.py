@@ -23,8 +23,10 @@ def load(path: Path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", required=True, type=Path)
-    parser.add_argument("--base", required=True, type=Path)
+    parser.add_argument("--model", required=True, type=Path,
+                        help="base model directory (d3 snapshot)")
+    parser.add_argument("--adapter", required=True, type=Path,
+                        help="Vela3 adapter package directory (LoRA, heads, vela3_config.json)")
     parser.add_argument("--request", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--threads", default=1, type=int)
@@ -33,23 +35,25 @@ def main():
     os.environ.update(HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", D3_FAST="0")
     import torch
     torch.set_num_threads(args.threads)
-    model_path, base_path = args.model.resolve(), args.base.resolve()
-    sys.path.insert(0, str(base_path))
+    model_path, adapter_path = args.model.resolve(), args.adapter.resolve()
+    sys.path.insert(0, str(model_path))
     executed_sources = {}
     original_exec_module = importlib.machinery.SourceFileLoader.exec_module
 
     def recording_exec_module(loader, module):
         path = Path(loader.path).resolve()
         if path.suffix == ".py" and (module.__name__.startswith("transformers_modules.") or
-                any(path.is_relative_to(root) for root in (model_path, base_path))):
+                any(path.is_relative_to(root) for root in (model_path, adapter_path))):
             entry = executed_sources.setdefault(str(path), dict(
                 sha256=hashlib.sha256(path.read_bytes()).hexdigest(), modules=[]))
             entry["modules"].append(module.__name__)
         return original_exec_module(loader, module)
 
     importlib.machinery.SourceFileLoader.exec_module = recording_exec_module
-    model = load(model_path / "modeling_vela3.py").Vela3MiniModel.from_pretrained(
-        str(model_path), base_path=str(base_path), device="cpu", batch_size=1,
+    # The official entry point names the Vela3 package the model and takes the d3
+    # snapshot as base_path; keep that mapping explicit here.
+    model = load(adapter_path / "modeling_vela3.py").Vela3MiniModel.from_pretrained(
+        str(adapter_path), base_path=str(model_path), device="cpu", batch_size=1,
         verify="none", local_files_only=True,
     )
     request = json.loads(args.request.read_text())
@@ -96,17 +100,17 @@ def main():
     answer = model.system_one(**request)
     importlib.machinery.SourceFileLoader.exec_module = original_exec_module
     sources = {}
-    for root in (model_path, base_path):
+    for root in (model_path, adapter_path):
         for path in sorted(root.glob("*.py")):
             sources[str(path)] = hashlib.sha256(path.read_bytes()).hexdigest()
     import transformers
     result = dict(request=request, response=answer, decision_tokens=decision_tokens,
                   span_records=span_records, adapter_calls=adapter_calls,
                   definition_generations=definition_generations, provenance=dict(
-        model=str(model_path), base=str(base_path), torch=torch.__version__,
+        model=str(model_path), adapter=str(adapter_path), torch=torch.__version__,
         transformers=transformers.__version__, threads=args.threads, sources=sources,
         executed_source_modules=executed_sources, environment={"D3_FAST": os.environ["D3_FAST"]},
-        vela_config=json.loads((model_path / "vela3_config.json").read_text()),
+        vela_config=json.loads((adapter_path / "vela3_config.json").read_text()),
     ))
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False) + "\n")

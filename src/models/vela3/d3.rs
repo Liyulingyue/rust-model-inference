@@ -352,7 +352,7 @@ impl Adapter {
 
 impl D3Encoder {
     pub(crate) fn load(
-        root: &Path,
+        adapter: &Path,
         base_root: &Path,
         pool: Arc<ComputePool>,
     ) -> Result<Self, String> {
@@ -525,7 +525,7 @@ impl D3Encoder {
         let final_norm = norm_weight(&source, "language_model.norm.weight", config.hidden, true)?;
         let readout = SafetensorSource::open(&[base_root.join("readout.safetensors")])?;
         require_shape(&readout, "weight", &[255, config.hidden])?;
-        let vela = json_file(&root.join("vela3_config.json"))?;
+        let vela = json_file(&adapter.join("vela3_config.json"))?;
         let gated_noncausal = match vela["decisions"]["attention"].as_str() {
             None | Some("prefix_bidir") => false,
             Some("noncausal") => true,
@@ -543,7 +543,7 @@ impl D3Encoder {
             }
             adapters.insert(
                 name.clone(),
-                Adapter::load(&root.join(file), &source, info)?,
+                Adapter::load(&adapter.join(file), &source, info)?,
             );
         }
         let generation_head = if vela["definitions"]["writer"] == "grafted_head" {
@@ -553,7 +553,7 @@ impl D3Encoder {
             if Path::new(file).components().count() != 1 {
                 return Err("grafted head filename must be local".into());
             }
-            let path = root.join(file);
+            let path = adapter.join(file);
             if path.is_file() {
                 let head = SafetensorSource::open(&[path])?;
                 require_shape(&head, "lm_head.weight", &[config.vocab, config.hidden])?;

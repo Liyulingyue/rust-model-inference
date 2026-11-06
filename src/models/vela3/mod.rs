@@ -32,11 +32,16 @@ fn family(config: &Value, model: &Value) -> Result<Family, String> {
 }
 
 /// Answer a System One `{state, questions, images?}` request.
-/// d3 variants require the separate base directory pinned by `vela3_config.json`.
+///
+/// `model_dir` holds the model weights: the d3 base snapshot for the d3
+/// variants, or the self-contained package for `fast` and `fast-vision`.
+/// `adapter_dir` holds the Vela3 adapter package (LoRA, heads and config)
+/// that the d3 variants need; the self-contained variants carry their own
+/// adapters and pass `None`.
 /// All computation uses the repository's CPU operators and thread pool.
 pub fn system_one(
     model_dir: &Path,
-    base_dir: Option<&Path>,
+    adapter_dir: Option<&Path>,
     request: &Value,
     threads: usize,
 ) -> Result<Value, String> {
@@ -61,14 +66,17 @@ pub fn system_one(
     if threads == 0 {
         return Err("threads must be positive".into());
     }
+    // The family marker (`vela3_config.json`) ships with the adapter package;
+    // the self-contained variants keep it next to their weights.
+    let config_dir = adapter_dir.unwrap_or(model_dir);
     let read = |file: &str| -> Result<Value, String> {
-        let path = model_dir.join(file);
+        let path = config_dir.join(file);
         serde_json::from_slice(
             &std::fs::read(&path).map_err(|e| format!("Read {}: {e}", path.display()))?,
         )
         .map_err(|e| format!("Parse {}: {e}", path.display()))
     };
-    let config_path = if model_dir.join("vela3v_config.json").is_file() {
+    let config_path = if config_dir.join("vela3v_config.json").is_file() {
         "vela3v_config.json"
     } else {
         "vela3_config.json"
@@ -77,8 +85,9 @@ pub fn system_one(
     let pool = Arc::new(ComputePool::new(threads));
     match kind {
         Family::D3 => decoder::predict(
+            adapter_dir
+                .ok_or("d3 variants need --adapter pointing to the Vela3 adapter package")?,
             model_dir,
-            base_dir.ok_or("d3 variants need --base-model pointing to the pinned d3 snapshot")?,
             request,
             pool,
         ),

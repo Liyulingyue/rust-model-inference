@@ -1028,8 +1028,8 @@
         }
       },
       "reproducing_commands": [
-        ".venv/bin/python tools/oracle/vela3/d3_oracle.py suite --native .codex/vela3/bin/vela3-parity --base .codex/vela3/tiny-turbo-groups-f32 --vela models/vela3-turbo --synthetic --dtype float32 --state-tokens 2 --adapters span --atol 2e-6 --rtol 1e-6 --out .codex/vela3/tiny-turbo-groups-f32-suite",
-        ".venv/bin/python tools/oracle/vela3/d3_oracle.py suite --native .codex/vela3/bin/vela3-parity --base .codex/vela3/tiny-turbo-groups-bf16 --vela models/vela3-turbo --synthetic --dtype bfloat16 --state-tokens 2 --adapters span --profile pointwise --atol 0.01 --rtol 0.01 --out .codex/vela3/tiny-turbo-groups-bf16-suite"
+        ".venv/bin/python tools/oracle/vela3/d3_oracle.py suite --native .codex/vela3/bin/vela3-parity --model .codex/vela3/tiny-turbo-groups-f32 --adapter models/vela3-turbo --synthetic --dtype float32 --state-tokens 2 --task-adapters span --atol 2e-6 --rtol 1e-6 --out .codex/vela3/tiny-turbo-groups-f32-suite",
+        ".venv/bin/python tools/oracle/vela3/d3_oracle.py suite --native .codex/vela3/bin/vela3-parity --model .codex/vela3/tiny-turbo-groups-bf16 --adapter models/vela3-turbo --synthetic --dtype bfloat16 --state-tokens 2 --task-adapters span --profile pointwise --atol 0.01 --rtol 0.01 --out .codex/vela3/tiny-turbo-groups-bf16-suite"
       ]
     },
     "real_flash_bf16": {
@@ -2235,12 +2235,12 @@
     },
     "mini_interpretation": "All 297 FP32 short numeric checkpoints pass at the original pointwise tolerance. All final BF16 short readouts pass with matching argmax, but 11 of 297 short numeric checkpoints fail only the activation max-absolute-error envelope; full BF16 activation parity remains failed. Accumulated BF16 rounding is consistent with these observations, but the responsible operator was not isolated. The four-step causal graph passes all 396 numeric checkpoints and exact generated tokens. Full SystemOne output passes the tested fixture, including actual automatic base-writer generation and six text adapter routes. Threshold-zero spans validate decoding/Unicode offsets rather than extraction quality. No mini image input or image_halu inference was tested.",
     "mini_reproducing_commands": [
-      ".venv/bin/python tools/oracle/vela3/request_oracle.py --model models/vela3-mini --base models/d3-mini --request tools/oracle/vela3/requests/mini.json --out .codex/vela3/mini-request-oracle.json --threads 4",
-      ".codex/vela3/bin/vela3 --model models/vela3-mini --base-model models/d3-mini --request tools/oracle/vela3/requests/mini.json --threads 4 > .codex/vela3/mini-request-native.json",
+      ".venv/bin/python tools/oracle/vela3/request_oracle.py --model models/d3-mini --adapter models/vela3-mini --request tools/oracle/vela3/requests/mini.json --out .codex/vela3/mini-request-oracle.json --threads 4",
+      ".codex/vela3/bin/vela3 --model models/d3-mini --adapter models/vela3-mini --request tools/oracle/vela3/requests/mini.json --threads 4 > .codex/vela3/mini-request-native.json",
       ".venv/bin/python tools/oracle/vela3/compare_requests.py .codex/vela3/mini-request-oracle.json .codex/vela3/mini-request-native.json --out .codex/vela3/mini-request-comparison.json",
-      "HF_MODULES_CACHE=/Users/gouzi/.codex/worktrees/a06a/rust-model-inference/.codex/vela3/hf-modules .venv/bin/python tools/oracle/vela3/d3_oracle.py suite --base models/d3-mini --vela models/vela3-mini --text 'Alice works at Acme.' --native /Users/gouzi/.codex/worktrees/a06a/rust-model-inference/.codex/vela3/bin/vela3-parity --dtype bfloat16 --out .codex/vela3/mini-bf16-suite",
-      "HF_MODULES_CACHE=/Users/gouzi/.codex/worktrees/a06a/rust-model-inference/.codex/vela3/hf-modules .venv/bin/python tools/oracle/vela3/d3_oracle.py suite --base models/d3-mini --vela models/vela3-mini --text 'Alice works at Acme.' --native /Users/gouzi/.codex/worktrees/a06a/rust-model-inference/.codex/vela3/bin/vela3-parity --dtype float32 --out .codex/vela3/mini-f32-suite",
-      "HF_MODULES_CACHE=/Users/gouzi/.codex/worktrees/a06a/rust-model-inference/.codex/vela3/hf-modules .venv/bin/python tools/oracle/vela3/d3_oracle.py suite --base models/d3-mini --vela models/vela3-mini --text 'Alice works at Acme.' --native /Users/gouzi/.codex/worktrees/a06a/rust-model-inference/.codex/vela3/bin/vela3-parity --dtype bfloat16 --causal --generation-steps 4 --out .codex/vela3/mini-causal-four-suite"
+      "HF_MODULES_CACHE=/Users/gouzi/.codex/worktrees/a06a/rust-model-inference/.codex/vela3/hf-modules .venv/bin/python tools/oracle/vela3/d3_oracle.py suite --model models/d3-mini --adapter models/vela3-mini --text 'Alice works at Acme.' --native /Users/gouzi/.codex/worktrees/a06a/rust-model-inference/.codex/vela3/bin/vela3-parity --dtype bfloat16 --out .codex/vela3/mini-bf16-suite",
+      "HF_MODULES_CACHE=/Users/gouzi/.codex/worktrees/a06a/rust-model-inference/.codex/vela3/hf-modules .venv/bin/python tools/oracle/vela3/d3_oracle.py suite --model models/d3-mini --adapter models/vela3-mini --text 'Alice works at Acme.' --native /Users/gouzi/.codex/worktrees/a06a/rust-model-inference/.codex/vela3/bin/vela3-parity --dtype float32 --out .codex/vela3/mini-f32-suite",
+      "HF_MODULES_CACHE=/Users/gouzi/.codex/worktrees/a06a/rust-model-inference/.codex/vela3/hf-modules .venv/bin/python tools/oracle/vela3/d3_oracle.py suite --model models/d3-mini --adapter models/vela3-mini --text 'Alice works at Acme.' --native /Users/gouzi/.codex/worktrees/a06a/rust-model-inference/.codex/vela3/bin/vela3-parity --dtype bfloat16 --causal --generation-steps 4 --out .codex/vela3/mini-causal-four-suite"
     ],
     "turbo_causal_contract": {
       "supported": false,
@@ -4125,13 +4125,13 @@
       }
     },
     "turbo_reproducing_commands": [
-      "/Users/gouzi/.codex/worktrees/a06a/rust-model-inference/.venv/bin/python tools/oracle/vela3/request_oracle.py --model models/vela3-turbo --base models/d3-turbo/pinned --request tools/oracle/vela3/requests/turbo.json --threads 8 --out .codex/vela3/turbo-request-oracle.json",
+      "/Users/gouzi/.codex/worktrees/a06a/rust-model-inference/.venv/bin/python tools/oracle/vela3/request_oracle.py --model models/d3-turbo/pinned --adapter models/vela3-turbo --request tools/oracle/vela3/requests/turbo.json --threads 8 --out .codex/vela3/turbo-request-oracle.json",
       ".codex/vela3/bin/vela3-parity models::vela3::decoder::tests::official_request_token_ids_and_word_label_positions_are_exact --ignored --exact --nocapture",
-      ".codex/vela3/bin/vela3 --model models/vela3-turbo --base-model models/d3-turbo/pinned --request tools/oracle/vela3/requests/turbo.json --threads 8",
+      ".codex/vela3/bin/vela3 --model models/d3-turbo/pinned --adapter models/vela3-turbo --request tools/oracle/vela3/requests/turbo.json --threads 8",
       "/Users/gouzi/.codex/worktrees/a06a/rust-model-inference/.venv/bin/python tools/oracle/vela3/compare_requests.py .codex/vela3/turbo-request-oracle.json .codex/vela3/turbo-request-native.json --atol 0.01 --rtol 0.01 --out .codex/vela3/turbo-request-comparison.json",
-      "/Users/gouzi/.codex/worktrees/a06a/rust-model-inference/.venv/bin/python tools/oracle/vela3/d3_oracle.py suite --native .codex/vela3/bin/vela3-parity --base models/d3-turbo/pinned --vela models/vela3-turbo --text 'Alice works at Acme.' --state-tokens 2 --adapters span decision --dtype bfloat16 --out .codex/vela3/turbo-bf16-suite",
-      "/Users/gouzi/.codex/worktrees/a06a/rust-model-inference/.venv/bin/python tools/oracle/vela3/d3_oracle.py suite --native .codex/vela3/bin/vela3-parity --base models/d3-turbo/pinned --vela models/vela3-turbo --text 'Alice works at Acme.' --state-tokens 2 --adapters span decision --dtype float32 --stream-f32-weights --out .codex/vela3/turbo-f32-suite",
-      "target/release-fast/vela3 --model models/vela3-turbo --base-model models/d3-turbo/pinned --request tools/oracle/vela3/requests/turbo.json --threads 8",
+      "/Users/gouzi/.codex/worktrees/a06a/rust-model-inference/.venv/bin/python tools/oracle/vela3/d3_oracle.py suite --native .codex/vela3/bin/vela3-parity --model models/d3-turbo/pinned --adapter models/vela3-turbo --text 'Alice works at Acme.' --state-tokens 2 --task-adapters span decision --dtype bfloat16 --out .codex/vela3/turbo-bf16-suite",
+      "/Users/gouzi/.codex/worktrees/a06a/rust-model-inference/.venv/bin/python tools/oracle/vela3/d3_oracle.py suite --native .codex/vela3/bin/vela3-parity --model models/d3-turbo/pinned --adapter models/vela3-turbo --text 'Alice works at Acme.' --state-tokens 2 --task-adapters span decision --dtype float32 --stream-f32-weights --out .codex/vela3/turbo-f32-suite",
+      "target/release-fast/vela3 --model models/d3-turbo/pinned --adapter models/vela3-turbo --request tools/oracle/vela3/requests/turbo.json --threads 8",
       "/Users/gouzi/.codex/worktrees/a06a/rust-model-inference/.venv/bin/python tools/oracle/vela3/compare_requests.py .codex/vela3/turbo-request-oracle.json .codex/vela3/turbo-request-native-fixed.json --atol 0.01 --rtol 0.01 --out .codex/vela3/turbo-request-comparison-fixed.json"
     ]
   },
@@ -5344,7 +5344,7 @@
     },
     "real_main_cli_commands": [
       "target/release-fast/rust-model-inference --model models/vela3-fast --system-one-request - --threads 4 --compute cpu < tools/oracle/vela3/requests/fast-floats.json",
-      "target/release-fast/rust-model-inference --model models/vela3-lite --base-model models/d3-lite --system-one-request .codex/vela3/fix-entry/lite.request.json --threads 4",
+      "target/release-fast/rust-model-inference --model models/d3-lite --adapter models/vela3-lite --system-one-request .codex/vela3/fix-entry/lite.request.json --threads 4",
       "target/release-fast/rust-model-inference --model models/vela3-fast-vision --system-one-request .codex/vela3/fix-review/vision-text.request.json --threads 4"
     ],
     "coverage": {
@@ -5873,5 +5873,9 @@
       "vision-text.request.json": "d76cb94a0a53031c49ae668c10d766c909bc15069d65831b74f12fedd4506d97",
       "vision-tiny.log": "4a532b4f3cafee2ee1e3f79842b875e109dcbff5c61d309c19cce6a7bfbee0b9"
     }
+  },
+  "cli_flag_rename_2026_11_06": {
+    "change": "The System One CLI now names the base weights --model and the Vela3 adapter package --adapter; --base-model is gone. The oracle scripts follow the same convention (--model = base snapshot, --adapter = Vela3 package); the d3 trace task-level flag is --task-adapter.",
+    "note": "Command strings recorded before this change keep the old flags on purpose: they are the historical record of what was run. The reproducing_commands and real_main_cli_commands entries are updated to the current flags."
   }
 }

@@ -8,7 +8,7 @@ fast-vision 原包面向更新的 Transformers；Oracle 注册包内原始 `text
 
 ## 主程序入口
 
-Vela3 使用现有 `rust-model-inference --system-one-request FILE|-`，d3 另传 `--base-model DIR`。先前新增的模型专用 binary 改变了 Cargo 自动发现的编译产物，已移除；计算与公开 Rust API 保持在 `models::vela3`。下列复现命令已改用主程序，verification.json 中早期的专用 binary 命令仅为历史测量记录。当前入口与产物检查见 `entry_fix_2026_11_02`。
+Vela3 使用现有 `rust-model-inference --system-one-request FILE|-`；`--model` 是主权重（d3 底座快照），d3 另传 `--adapter DIR` 指向 Vela3 适配器包。先前新增的模型专用 binary 改变了 Cargo 自动发现的编译产物，已移除；计算与公开 Rust API 保持在 `models::vela3`。下列复现命令已改用主程序，verification.json 中早期的专用 binary 命令仅为历史测量记录。当前入口与产物检查见 `entry_fix_2026_11_02`。
 
 2026-11-02 入口修复验证：Cargo 的 9 个 binary targets 与 main 基线一致；主程序与相关 CLI 共 38 项测试通过，包含 6 项 System One 回归。fast（stdin）、lite（独立底座）和 fast-vision 文本入口共 29 问与已有固定 Oracle fixture 对照通过，完整 JSON 也与原 native 记录一致。全库仍为 1360 通过、20 失败、94 忽略，20 项失败名称与修复前完全相同。其他模型和图像逐层记录未重跑。
 
@@ -119,18 +119,18 @@ done
 
 ```bash
 .venv/bin/python tools/oracle/vela3/head_oracle.py \
-  --models models/vela3-lite models/vela3-mini models/vela3-flash models/vela3-turbo \
+  --adapters models/vela3-lite models/vela3-mini models/vela3-flash models/vela3-turbo \
   --out models/vela3-head-fixture.json
 RMI_VELA3_HEAD_FIXTURE=models/vela3-head-fixture.json \
   cargo +1.98.1 test --profile release-fast --lib real_heads_match -- --ignored --nocapture
 
 .venv/bin/python tools/oracle/vela3/request_oracle.py \
-  --model models/vela3-lite --base models/d3-lite \
+  --model models/d3-lite --adapter models/vela3-lite \
   --request tools/oracle/vela3/requests/lite.json --out models/vela3-request-oracle.json
 RMI_VELA3_REQUEST_FIXTURE=models/vela3-request-oracle.json \
   cargo +1.98.1 test --profile release-fast --lib official_request_token_ids -- --ignored --nocapture
 cargo +1.98.1 run --profile release-fast --bin rust-model-inference -- \
-  --model models/vela3-lite --base-model models/d3-lite \
+  --model models/d3-lite --adapter models/vela3-lite \
   --system-one-request tools/oracle/vela3/requests/lite.json --threads 4 > models/vela3-request-native.json
 .venv/bin/python tools/oracle/vela3/compare_requests.py \
   models/vela3-request-oracle.json models/vela3-request-native.json \
@@ -147,42 +147,42 @@ cargo +1.98.1 test --profile release-fast --lib --features parity-trace \
 vela3_test_bin=$(.venv/bin/python -c 'import json; print(next(r["executable"] for line in open("models/vela3-test-build.jsonl") if (r := json.loads(line)).get("executable") and r["target"]["kind"] == ["lib"]))')
 
 .venv/bin/python tools/oracle/vela3/d3_oracle.py suite \
-  --native "$vela3_test_bin" --base models/d3-tiny --vela models/vela3-lite \
+  --native "$vela3_test_bin" --model models/d3-tiny --adapter models/vela3-lite \
   --synthetic --dtype float32 --causal --generation-steps 4 \
   --atol 2e-6 --rtol 1e-6 --out models/vela3-d3-tiny-causal
 
 .venv/bin/python tools/oracle/vela3/d3_oracle.py suite \
-  --native "$vela3_test_bin" --base models/d3-tiny-prefix --vela models/vela3-turbo \
+  --native "$vela3_test_bin" --model models/d3-tiny-prefix --adapter models/vela3-turbo \
   --synthetic --dtype float32 --state-tokens 2 --adapters \
   --atol 2e-6 --rtol 1e-6 --out models/vela3-d3-tiny-prefix
 
 .venv/bin/python tools/oracle/vela3/d3_oracle.py suite \
-  --native "$vela3_test_bin" --base models/d3-lite --vela models/vela3-lite \
+  --native "$vela3_test_bin" --model models/d3-lite --adapter models/vela3-lite \
   --dtype bfloat16 --causal --generation-steps 4 \
   --out models/vela3-d3-lite-causal
 
 .venv/bin/python tools/oracle/vela3/d3_oracle.py suite \
-  --native "$vela3_test_bin" --base models/d3-lite --vela models/vela3-lite \
+  --native "$vela3_test_bin" --model models/d3-lite --adapter models/vela3-lite \
   --dtype float32 --adapters span decision \
   --out models/vela3-d3-lite-f32
 
 .venv/bin/python tools/oracle/vela3/d3_oracle.py suite \
-  --native "$vela3_test_bin" --base models/d3-flash --vela models/vela3-flash \
+  --native "$vela3_test_bin" --model models/d3-flash --adapter models/vela3-flash \
   --text 'Alice works at Acme.' --dtype float32 --out models/vela3-d3-flash-f32
 .venv/bin/python tools/oracle/vela3/d3_oracle.py suite \
-  --native "$vela3_test_bin" --base models/d3-flash --vela models/vela3-flash \
+  --native "$vela3_test_bin" --model models/d3-flash --adapter models/vela3-flash \
   --text 'Alice works at Acme.' --dtype bfloat16 --causal --generation-steps 4 \
   --out models/vela3-d3-flash-causal
 
 .venv/bin/python tools/oracle/vela3/stream_f32.py --self-test
 .venv/bin/python tools/oracle/vela3/d3_oracle.py suite \
-  --native "$vela3_test_bin" --base models/d3-turbo/pinned --vela models/vela3-turbo \
+  --native "$vela3_test_bin" --model models/d3-turbo/pinned --adapter models/vela3-turbo \
   --text 'Alice works at Acme.' --dtype float32 --stream-f32-weights \
   --state-tokens 2 --adapters span decision \
   --out models/vela3-d3-turbo-f32
 
 .venv/bin/python tools/oracle/vela3/d3_oracle.py suite \
-  --native "$vela3_test_bin" --base models/d3-turbo/pinned --vela models/vela3-turbo \
+  --native "$vela3_test_bin" --model models/d3-turbo/pinned --adapter models/vela3-turbo \
   --text 'Alice works at Acme.' --dtype bfloat16 --state-tokens 2 \
   --adapters span decision --out models/vela3-d3-turbo-bf16
 ```
@@ -191,11 +191,11 @@ turbo 的完整八问请求使用同一固定底座和请求文件，Oracle 与 
 
 ```bash
 .venv/bin/python tools/oracle/vela3/request_oracle.py \
-  --model models/vela3-turbo --base models/d3-turbo/pinned \
+  --model models/d3-turbo/pinned --adapter models/vela3-turbo \
   --request tools/oracle/vela3/requests/turbo.json --threads 8 \
   --out models/vela3-turbo-request-oracle.json
 cargo +1.98.1 run --profile release-fast --bin rust-model-inference -- \
-  --model models/vela3-turbo --base-model models/d3-turbo/pinned \
+  --model models/d3-turbo/pinned --adapter models/vela3-turbo \
   --system-one-request tools/oracle/vela3/requests/turbo.json --threads 8 \
   > models/vela3-turbo-request-native.json
 .venv/bin/python tools/oracle/vela3/compare_requests.py \

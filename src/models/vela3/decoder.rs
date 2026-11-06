@@ -171,7 +171,8 @@ impl DecisionUsage {
 }
 
 struct Model<'a> {
-    root: &'a Path,
+    /// The Vela3 adapter package: LoRA, heads and `vela3_config.json`.
+    adapter: &'a Path,
     config: Value,
     routers: Value,
     defs: Value,
@@ -185,8 +186,8 @@ struct Model<'a> {
 }
 
 impl<'a> Model<'a> {
-    fn load(root: &'a Path, base: &Path, pool: Arc<ComputePool>) -> Result<Self, String> {
-        let config = read_json(&root.join("vela3_config.json"))?;
+    fn load(adapter: &'a Path, base: &Path, pool: Arc<ComputePool>) -> Result<Self, String> {
+        let config = read_json(&adapter.join("vela3_config.json"))?;
         super::identity::verify_d3(&config, base)?;
         let decision = read_json(&base.join("decision_config.json"))?;
         if decision["format_id"] != "d3-code-readout-v1" {
@@ -249,13 +250,13 @@ impl<'a> Model<'a> {
             }
         }
         let routers = read_json(
-            &root.join(
+            &adapter.join(
                 config["router_questions_file"]
                     .as_str()
                     .unwrap_or("router_questions.json"),
             ),
         )?;
-        let cache = root.join(
+        let cache = adapter.join(
             config["definitions"]["cache_file"]
                 .as_str()
                 .unwrap_or("label_definitions.json"),
@@ -265,9 +266,9 @@ impl<'a> Model<'a> {
         } else {
             json!({"sets":[]})
         };
-        let encoder = D3Encoder::load(root, base, pool.clone())?;
+        let encoder = D3Encoder::load(adapter, base, pool.clone())?;
         Ok(Self {
-            root,
+            adapter,
             config,
             routers,
             defs,
@@ -452,7 +453,7 @@ impl<'a> Model<'a> {
         if writer == "names"
             || (writer == "grafted_head"
                 && !self
-                    .root
+                    .adapter
                     .join(
                         self.config["definitions"]["lm_head_file"]
                             .as_str()
@@ -639,7 +640,7 @@ impl<'a> Model<'a> {
             sp[if route == "rel" { "relation" } else { route }]["head_file"].as_str()
         }
         .ok_or("missing span head file")?;
-        let head = SafetensorSource::open(&[self.root.join(head_file)])?;
+        let head = SafetensorSource::open(&[self.adapter.join(head_file)])?;
         let enc = self.encode(target_text)?;
         let n_tok = enc.len();
         if images.is_some() && n_tok > 2048 {
@@ -1339,7 +1340,7 @@ fn evidence(
 }
 
 pub(crate) fn predict(
-    root: &Path,
+    adapter: &Path,
     base: &Path,
     request: &Value,
     pool: Arc<ComputePool>,
@@ -1347,7 +1348,7 @@ pub(crate) fn predict(
     let questions = request["questions"]
         .as_object()
         .ok_or("questions must be an object")?;
-    let model = Model::load(root, base, pool)?;
+    let model = Model::load(adapter, base, pool)?;
     let mut answers = Map::new();
     let mut usage = DecisionUsage::default();
     let images = match request["images"].as_array().filter(|a| !a.is_empty()) {

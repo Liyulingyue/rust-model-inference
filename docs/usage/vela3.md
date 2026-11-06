@@ -28,7 +28,7 @@ fast-vision 的文本任务使用包内 `text/` 的独立配置、tokenizer、`m
 ```bash
 cargo build --profile release-fast --bin rust-model-inference
 cargo run --profile release-fast --bin rust-model-inference -- \
-  --model models/vela3-lite --base-model models/d3-lite \
+  --model models/d3-lite --adapter models/vela3-lite \
   --system-one-request request.json --threads 4
 ```
 
@@ -44,7 +44,7 @@ cargo run --profile release-fast --bin rust-model-inference -- \
 }
 ```
 
-省略 `--threads` 或设为 0 时沿用主程序的自动线程数。只接受 `--model`、`--base-model`、`--system-one-request`、`--threads` 和 `--compute cpu`，其他任务输入放在 JSON 中。fast/fast-vision 省略 `--base-model`。图像通过顶层 `images` 数组传本地文件、HTTP(S) URL 或 base64 image data URL；fast-vision 的 choice/noul 最多三张，图像 span/OCR/box 按官方实现使用第一张。Span 的 start/end 是 Unicode 字符偏移，遵循对应官方解码器的 URL、CJK、阈值和边界规则。d3 的 span pass 不计入官方 `usage.input_tokens`，这里保留该口径。turbo 的 usage 按官方入口合并共享 state，并计入路由适配器的额外 pass；当前实现仍按问题重算 state，未验证长文本性能。
+省略 `--threads` 或设为 0 时沿用主程序的自动线程数。只接受 `--model`、`--adapter`、`--system-one-request`、`--threads` 和 `--compute cpu`，其他任务输入放在 JSON 中。`--model` 是主权重（d3 底座快照），`--adapter` 是 Vela3 适配器包（LoRA、heads 与 `vela3_config.json`）；fast/fast-vision 自包含，只给 `--model`（即整个包）。图像通过顶层 `images` 数组传本地文件、HTTP(S) URL 或 base64 image data URL；fast-vision 的 choice/noul 最多三张，图像 span/OCR/box 按官方实现使用第一张。Span 的 start/end 是 Unicode 字符偏移，遵循对应官方解码器的 URL、CJK、阈值和边界规则。d3 的 span pass 不计入官方 `usage.input_tokens`，这里保留该口径。turbo 的 usage 按官方入口合并共享 state，并计入路由适配器的额外 pass；当前实现仍按问题重算 state，未验证长文本性能。
 
 fast 的 span 路由只读取包内配置，Rust 入口不采用 Python 的可选 `VELA3_ENTITY_ROUTE` 环境覆盖；阈值和上下文长度缺失会报错。视觉 tokenizer 的普通词表边界来自 tokenizer，起始 ID、上下文来自模型配置；实际使用的图像前缀特殊 token 必须是完整 added token。
 

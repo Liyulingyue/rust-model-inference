@@ -20,7 +20,7 @@ pub fn run_cli(options: &crate::app::CliOptions, threads: usize) -> Result<(), S
         .map_err(|e| format!("Invalid System One request JSON: {e}"))?;
     let answer = crate::models::vela3::system_one(
         &options.model,
-        options.base_model.as_deref(),
+        options.adapter.as_deref(),
         &request,
         threads,
     )?;

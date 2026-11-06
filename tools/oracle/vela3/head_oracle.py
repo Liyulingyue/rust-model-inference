@@ -12,7 +12,8 @@ from pathlib import Path
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--models", type=Path, nargs="+", required=True)
+    parser.add_argument("--adapters", type=Path, nargs="+", required=True,
+                        help="Vela3 adapter package directories (one per d3 variant)")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
     import torch
@@ -20,7 +21,7 @@ def main():
     torch.set_num_threads(1)
     torch.set_grad_enabled(False)
     fixtures = []
-    for root in args.models:
+    for root in args.adapters:
         root = root.resolve()
         source = root / "vela3_span.py"
         spec = importlib.util.spec_from_file_location("vela_head_" + root.name, source)

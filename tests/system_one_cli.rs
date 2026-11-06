@@ -8,9 +8,9 @@ fn system_one_request_uses_shared_cli_options() {
         let args = [
             "rmi",
             "--model",
-            "vela",
-            "--base-model",
             "d3",
+            "--adapter",
+            "vela",
             "--system-one-request",
             request,
             "--threads",
@@ -20,10 +20,10 @@ fn system_one_request_uses_shared_cli_options() {
         ]
         .map(String::from);
         let options = parse_cli_options(&args).unwrap();
-        assert_eq!(options.model.to_str(), Some("vela"));
+        assert_eq!(options.model.to_str(), Some("d3"));
         assert_eq!(
-            options.base_model.as_deref(),
-            Some(std::path::Path::new("d3"))
+            options.adapter.as_deref(),
+            Some(std::path::Path::new("vela"))
         );
         assert_eq!(
             options.system_one_request.as_deref(),
@@ -59,8 +59,8 @@ fn system_one_options_require_their_mode_and_values() {
     for flags in [
         vec!["rmi", "--system-one-request"],
         vec!["rmi", "--system-one-request", "request.json"],
-        vec!["rmi", "--model", "vela", "--base-model"],
-        vec!["rmi", "--model", "vela", "--base-model", "d3"],
+        vec!["rmi", "--model", "d3", "--adapter"],
+        vec!["rmi", "--model", "d3", "--adapter", "vela"],
         vec!["rmi", "--system-one-request", "--model", "vela"],
         vec!["rmi", "--system-one-request", "request.json", "--model"],
         vec!["rmi", "--system-one-request", "request.json", "--threads"],

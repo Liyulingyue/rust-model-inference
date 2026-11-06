@@ -4,8 +4,8 @@ use super::options::{
 use super::types::{normalize_tts_language, CliOptions};
 
 pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
-    if options.base_model.is_some() && options.system_one_request.is_none() {
-        return Err("--base-model requires --system-one-request".into());
+    if options.adapter.is_some() && options.system_one_request.is_none() {
+        return Err("--adapter requires --system-one-request".into());
     }
     if options.system_one_request.is_some() {
         if options.model.as_os_str().is_empty() {

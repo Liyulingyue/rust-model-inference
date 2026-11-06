@@ -90,7 +90,7 @@ fn validate_audio_temperature(route: AudioRoute, temperature: Option<f32>) -> Re
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
-        println!("{USAGE}\n\nWeVisOne-VL: --model text.gguf --mmproj vision.gguf --wevisone-decoder decoder.gguf --wevisone-request request.json [--output result.json]\n\nTimestral-209M: --model <timestral-F32.gguf> --timestral-request <series.json> [--threads N] [--compute cpu|auto|vulkan] | time-series forecasting; JSON context and prediction_length in, 21 quantiles out\n\nSystem One (Vela3): --model <safetensors-directory> --system-one-request <request.json|-> [--base-model <d3-directory>] [--threads N] [--compute cpu] | JSON request from a file or stdin; one JSON response to stdout");
+        println!("{USAGE}\n\nWeVisOne-VL: --model text.gguf --mmproj vision.gguf --wevisone-decoder decoder.gguf --wevisone-request request.json [--output result.json]\n\nTimestral-209M: --model <timestral-F32.gguf> --timestral-request <series.json> [--threads N] [--compute cpu|auto|vulkan] | time-series forecasting; JSON context and prediction_length in, 21 quantiles out\n\nSystem One (Vela3): --model <base-directory> --system-one-request <request.json|-> [--adapter <vela3-package>] [--threads N] [--compute cpu] | JSON request from a file or stdin; one JSON response to stdout");
         return;
     }
     // \n\nGLiNER2 boundary mode: --jev --gliner2-boundary --model <gliner2.5-boundary.gguf> --jev-context <text> --gliner2-schema <json> | span extraction; the schema is {\"entities\":[\"person\",\"location\"],\"entity_descriptions\":{...}} (the dict form {\"entities\":{\"person\":[...]}} is also accepted). Output is (start, end) word spans per field; --jev-output json for machine-readable.\n\nServer mode: --serve delegates to app::server::run_server which has its
@@ -99,7 +99,7 @@ fn main() {
         && !args.iter().any(|arg| {
             matches!(
                 arg.as_str(),
-                "--timestral-request" | "--system-one-request" | "--base-model"
+                "--timestral-request" | "--system-one-request" | "--adapter"
             )
         })
     {
@@ -113,7 +113,7 @@ fn main() {
     // Reject mixed JSON/task modes before any early media route can run.
     if options.timestral_request.is_some()
         || options.system_one_request.is_some()
-        || options.base_model.is_some()
+        || options.adapter.is_some()
     {
         app::run_or_exit(app::validate_cli_options(&options));
     }
