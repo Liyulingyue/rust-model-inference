@@ -154,7 +154,54 @@ NEON on aarch64; no AVX-512).
       选项：① 把 AVX2 改成镜像上游的 `|n| > 126 → 慢路径`（最彻底，x86 与 ARM 对齐，
       但需要 x86 机器实测）；② 把 CPU clamp 收到 ±80 与 shader 对齐（牺牲 [80, 88.4]
       的精度，换 CPU↔GPU 一致）；③ 维持现状，把三者的边界写进文档。
-      **必须在 x86 上实测才能定，不能在 aarch64 上单方面决定。**
+       **必须在 x86 上实测才能定，不能在 aarch64 上单方面决定。**
+- [ ] **两份 F16 shader 改动缺 aarch64 / 真实权重验证（Timestral F16 路径 + NEON 回退）** —
+      合并 `e0d01a7` 的解算对 `shaders/glsl/f16_matmul_tiled.comp` 加了
+      `transposed = (group_count != CONV_GROUP) && (q8_stride == 2)` 分派（同时保住
+      Timestral 的转置权重与 Z-Image conv / 行主序 F16 的行主序权重），并把
+      `f16_matmul.comp` 的 NEON「连续 64 元素块」加载**回退**成 stride-16。
+      两条路径本机都**没能验证**：
+      - **Timestral F16**：`src/vulkan/timestral.rs:226` 走 `record_transposed_float_matmul_rows`
+        （F16 置 `q8_stride=2`）→ 命中 transposed 分支。公式与 main `f4aa9d1`(#198) 修好
+        Timestral 时用的完全一致，属**代码推断**；本机没有 Timestral 权重，未实测。
+      - **`f16_matmul.comp` 的 NEON 回退**：模式 2 只在 aarch64 NEON 走
+        （`attention_dot_mode()` 中 x86 走模式 8），本机是 x86 且 **CI 无 aarch64 作业** →
+        该分支**从未被编译或测试**，只能确认「回到 `afed6d4`(#192) 之前的行为」。
+      已实证的部分：conv 侧 main 偏差 **9.01** → 本分支 **~1e-6**（`RUST_GPU_MIN_OUTPUTS=0`
+      下 `vulkan_vae_convolution_matches_cpu_across_tiles` 通过）；行主序 F16 tiled 由
+      `batched_linear_device_f16_tiled_preserves_storage_layouts` 覆盖。
+      选项：① 加 aarch64 CI 作业（至少 `cargo check --features vulkan` + shader 编译）；
+      ② 在 arm 机器上跑 Timestral F16（209M）的 GPU 路径并对 llama.cpp oracle；
+      ③ 把 #198 的 conv 回归与本分支的 `transposed` 分派反馈给 main。
+- [x] **共享算子搬迁只搬了一半：兼容 shim 还在，调用方没跟着迁移** — ✅ 已完成（2026-11-05，`hy-simulmt-plus`）。
+      两次「把共享算子搬进 `ops/`」都留下了 1 行转发 shim，调用方仍在走 models 层路径：
+      两次「把共享算子搬进 `ops/`」都留下了 1 行转发 shim，调用方仍在走 models 层路径：
+      - `src/models/diffusion/dreamx/kernels.rs` 现在只有 `pub use crate::ops::nn::*;`
+        （实现已搬到 `src/ops/nn.rs`：32 fn + 4 struct + 7 const 逐一对应、**零丢失**）。
+        但 **33 处调用方未迁移**，其中 **18 处在 ops/vulkan 层**（`src/ops/kernel/vulkan.rs`
+        14 处、`src/vulkan/ops.rs` 4 处）→ **ops → models 反向依赖**被这条 shim 续着命；
+        另有 7 个无关模型（wevisone_vl / qwen_drive / audio8 / unlimited_ocr / flux3 /
+        astronex_world / mage_flow）的 import 路径还挂着 `dreamx` 的名字。
+      - `src/models/qwen3/asr/audio_processor.rs` 同样只剩
+        `pub use crate::ops::audio::frontend::*;`，12+ 处调用方（omni / omni_audio /
+        audio8 / gemma4 asr / app::media / app::tts / app::asr）未迁移；
+        `mel_encoder.rs` 顶部还有 `pub(crate) use crate::ops::audio::transformer::{…}`
+        转发表。此处**没有** ops → models 反向依赖（方向是对的），只是路径名还挂在
+        `qwen3::asr` 下。
+      收尾：把调用方 import 改成 `crate::ops::nn::*` / `crate::ops::audio::frontend::*` /
+      `crate::ops::audio::transformer::*`，删掉两个 shim 与 `dreamx/mod.rs` 的
+      `pub mod kernels;`。纯机械改动，风险低。
+      附带：`mel_encoder.rs` 的模型侧 `apply_gelu` 与共享的
+      `ops::audio::transformer::apply_gelu_erf` 是两份相似实现（搬迁时新引入的重复），
+      建议模型侧改为委托。
+      收尾结果：删除 `dreamx/kernels.rs` 与 `asr/audio_processor.rs` 两个 shim、去掉
+      `dreamx/mod.rs` 的 `pub mod kernels;` 与 `asr/mod.rs` 的 `pub mod audio_processor;`，
+      44 处 `dreamx::kernels` 与 20 处 `asr::audio_processor` 引用全部改指 `crate::ops::nn` /
+      `crate::ops::audio::frontend`；`mel_encoder.rs` 的转发表降级为私有 `use`，两个使用方
+      （`omni.rs` / `omni_audio/tower.rs`）改为分别从 ops 与模型侧导入；模型侧 `apply_gelu`
+      改为委托共享实现（保留 conv 专用错误文案）。**ops → models 的反向依赖已消除**。
+      回归：lib 1470 passed / 22 failed / 210 ignored，与改动前逐条一致；11 个
+      `batched_linear_device` GPU 回归 + conv GPU 测试通过；`mel_encoder.rs` 告警数与 main 相同。
 
 - [x] **LFM2.5-24B-A2B 适配 + 标量逐位对齐** — ✅ 已完成 (2026-10-15)。
       24B 总 / 2B 激活的 MoE，`lfm2moe` 架构：40 层 × 2048 宽 × 32 头（head_dim 64），注意力层
@@ -475,6 +522,35 @@ MiniCPM-V 4.7 的 `qwen35moe`（35B-A3B）此前只在**生成面**注册，多�
       与 PhysBrain 那条不同，这里不是近似平局翻转，而是包络本身太贴边。
       选项：① 把界限放宽到 0.035 并如实记录两台主机的实测值；② 换 top-1 差距更大的
       提示重录；③ 记录 top-k 命中率作为辅助判据。
+- [ ] **ZDTaichu5.0 视觉塔上 GPU（先打通能力，再做计算优化）** — **第一步已完成（2026-11-05）**：
+      塔的矩阵权重改走 `Weight`（保持 GGUF 的 BF16、零拷贝借映射字节，不再反量化成 F32：
+      匿名内存 3.3GB→无副本），matmul 先试 `try_vulkan_rows` 再回落共享 kernel → 视觉塔
+      （RADIO v4-H）的投影现在**能在设备上跑**，CPU↔设备相对差 ~5e-7。
+      验收判据（同一 llama.cpp 参考下 GPU relative L2 ≤ 0.001，CPU↔GPU 相对差 ≤ 1e-3）已达成：
+      设备 0.00035911 / 0.00470339 / 0.00147061，CPU 侧数值不变（0.00035960 / 0.00470345 /
+      0.00147076，与改动前差 ~1e-7）。
+      改动前的现状（留档）：**文本塔**能上 Vulkan，**视觉塔恒在 CPU** ——
+      `src/models/zdt/vision/` 把权重读成裸 `Vec<f32>`（`load_f32_tensor` 全部反量化）再用
+      `crate::ops::dot_f32` 逐元素算，结构上没有设备路径；CLI 报 `backend=partial mode=mmproj`，
+      HTTP 直接拒绝（`--compute vulkan` + `--mmproj` → "full Vulkan runtime supports text
+      input only"）。
+      实测（aarch64 + NVIDIA GB10，Q4_K_M 文本 + BF16 mmproj）：**视觉投影**（单独计时）
+      CPU 36.93s → 设备 27.62s；文本 40 步 decode CPU 13.5 t/s、Vulkan 6.6 t/s。
+      ⚠ 旧记录里"图像 1 token 的 prefill CPU 7.94s / Vulkan 23.03s（视觉塔独占大头）"是
+      **误归因**：CLI 报的 `prefill=` 只含文本 prefill，**不含视觉编码**，视觉塔的耗时当时
+      没被计入（所以数字看着比实际小一个量级）。
+      **第二步（再优化）仍在**：dispatch 开销、批量、权重常驻与上传、文本塔 GPU 效率；
+      本机 GPU 对 9B 文本塔慢 2 倍，GPU 的真正收益在批量与长上下文。
+      顺带：改用 `Weight` 后 `qwen3::vision::matmul_f32_weight` 已退回私有。
+      **第二步（优化）仍在，且第一步不是"激活常驻"**：trace 把 27.6s 全部解释掉了 ——
+      `GpuLinear` 的 runtime 缓存按**权重指针**分桶（`src/ops/kernel/vulkan.rs`），每个权重
+      都要重建一次管线，实测 **213ms/次 × 131 个权重 = 27.9s**（≈100%）；fence 只有
+      2.5ms × 229 = 0.57s，host↔device 传输 2.7GB ≈ 30ms，都不是瓶颈。
+      塔的权重只有约 6 种形状 → 把缓存键改成 `(format, n_in, n_out, tile_rows)` 共享，
+      创建次数从 131 降到个位数，预期 27.6s → ~2s。详见 **TODO-049**。之后才轮到 fence 批处理
+      （`BatchedLinearRuntime::with_output_slots` + `run_group_gpu` 已支持一层的多个 matmul
+      进一个 command buffer）与激活常驻。另外本机 GPU 对 9B 文本塔反而慢 2 倍
+      （dispatch 开销占比高），批量/长上下文才是 GPU 的强项。
 - [ ] **讨论：MemoryArena 与 BlockAllocator 组合**
 - [ ] **讨论：GPU 后端架构设计** — Vulkan / wgpu / CUDA 等多后端抽象
 - [ ] **讨论：SIMD 扩展路线** — 当前 AVX2+FMA、NEON。后续可考虑 AVX-512 (高端 CPU)、ARM SVE、AVX-VNNI (int8 dot)
@@ -580,9 +656,48 @@ ggml-org/llama.cpp 的一部分**——它们是 `microsoft/BitNet` 私有 fork 
       真实 CLI、模型契约、固定 llama.cpp Oracle 的完整输出对照见
       [复现记录](../../tools/oracle/intern_decision/README.md) 和
       [哈希/指标](../../tools/oracle/intern_decision/verification.json)。
+- [x] **Occamy-1.0 适配与真实权重数值对齐** — GGUF arch=`qwen35moe`，复用既有 Qwen3.5 MoE
+      主干与 routed/shared expert 实现，删除重复的模型专属代码；共享专家宽度按 llama.cpp 的
+      做法在 `expert_shared_feed_forward_length` 缺失时回落到 `n_ff`，并校验共享专家张量的
+      形状与载荷。官方 Q8_0 + F16 mmproj 的文本/图像 CLI 已跑通；视觉投影 relative L2=0.3362%
+      （F32 激活参考），标量参考 8 步 greedy 一致。默认近似路径在候选分数接近时有措辞分叉
+      （相同 token 历史 logits relative L2 ≤8.482%），不保证所有 greedy 相同。
+      复现记录见 [对齐记录](../../tools/oracle/pr169/README.md) 和
+      [哈希/指标](../../tools/oracle/pr169/verification.json)。
+      **2026-11-05 在 aarch64（GB10）复验**：真实权重 SHA-256 与记录一致；greedy 与
+      llama.cpp **8/8 逐 token 相同**（且与记录的默认行一致）；视觉投影 relative L2
+      **0.00070317**（记录 0.00336，界 0.01）；tokenizer 逐条精确一致；CLI 蓝图 → `blue`
+      （CPU 与 Vulkan 都对）。**但逐步 logits 包络不跨主机**：本机 step 6 = 0.11984，
+      超过记录的界 0.1（记录那次自身最大 0.08481，本来就贴边），argmax 两台机器都一致。
+      脆弱点是 step 4：llama.cpp 的 top-2 margin 0.247，Rust 侧只有 0.039。详见
+      **TODO-053**。
     - 无损载荷/layout/token IDs 使用精确检查；量化、低精度舍入、近似激活使用明确数值误差界限。
     - 未覆盖：**Intern-Decision-4B 真实权重**（转换器已支持并校验形状，但引擎的 Qwen3.5 recurrent
       投影尚不接受该 SSM 形状，暂时不能推理）、GPU 数值对齐、性能基准。
+- [x] **ZDTaichu5.0-9B 适配与真实权重数值对齐** — `qwen35` 文本塔 + `nemotron_v2_vl`
+      投影（RADIOv4-H 视觉塔 + ReLU 平方 MLP 头）。引擎侧新增 `src/models/zdt/`：
+      32 层 RADIO / 1280 hidden / 10 registers / pixel-shuffle scale=2，并修正 Q 读取、
+      register 前缀搬移越界与 FFN 残差归一化；loader 拒绝错误形状与载荷。
+      投影家族 `nemotron_v2_vl` 只接受 `qwen35` 塔，且只支持图像输入。
+      精确分词、真实文本与图像 CLI 通过；全视觉投影 relative L2=0.00035072
+      （权重精确扩为 F32 的参考）/0.00493116（原始 BF16 参考）。
+      固定 llama.cpp Oracle 的完整输出对照见
+      [复现记录](../../tools/oracle/pr169/README.md) 和
+      [哈希/指标](../../tools/oracle/pr169/verification.json)。
+    - 未覆盖：GPU 数值对齐、视频与音频输入、性能基准。
+- [ ] **ZDTaichu5.0 mmproj 的位置嵌入与归一化和上游 PyTorch 不一致** — 上游把 128x128
+      位置表用 `align_corners=False` 插值到 32x32，而第三方 GGUF 转换用的是
+      `align_corners=True`（实测该插值与 GGUF 的 `v.position_embd.weight` **逐位一致**，
+      相对 L2 0.000000）；两张表相差相对 L2 **0.629774**，传到投影特征就是 **0.2015**。
+      另外上游**双重归一化**（image processor 用 ImageNet 统计 → 塔内 conditioner 再用
+      CLIP 统计），而 llama.cpp 与本引擎按 GGUF metadata 只归一化一次，忠实上游路径与
+      llama.cpp 相差相对 L2 **4.54**。
+      现状：本引擎实现的是 **GGUF 契约**（与 llama.cpp 一致，视觉投影 relative L2
+      0.00036），**不是 Rust 的 bug**；但与上游自己的数字不一致。
+      选项：① 写一个从原始 safetensors 转 mmproj 的转换器，按上游的
+      `align_corners=False` 插值并只归一化一次，让引擎与上游对齐；② 维持现状并在
+      文档里保留差异说明（当前做法）；③ 向上游/GGUF 转换作者反馈。
+      证据：[oracle 记录](../../tools/oracle/zdt/README.md)。
 
 ---
 
@@ -2963,7 +3078,8 @@ Qwen3-0.6B-BF16 看起来是最干净的受害者（197 个纯 BF16 二维权重
 排查结论：主力文本模型（Qwen3 / Qwen3.5 / Edge0 / ERNIE）全部不命中，
 Z-Image 代码零改动且 3/3 逐位复现基线 md5，含 110 个 F32 二维权重的
 occamy-1.0 在 `--temp 0` 下 GPU 与 CPU 逐位一致。尚未实测的是少数多模态
-projector（ZDTaichu5 mmproj、LongCat）与几个 MoE gate。
+projector（LongCat）与几个 MoE gate。ZDTaichu5 mmproj 已在本分支按 CPU 数值
+对齐（见上面的 ZDT 条目），但 GPU 路径仍在其覆盖范围内。
 
 ### TODO-044: Mage-Flow 的 GPU 路径 run-to-run 不确定，投影的 dispatch 结果偶发不完整
 
@@ -3408,6 +3524,87 @@ arch 的**文本路**真的可用：
 **关联**：WeVisOne 适配分支（`codex/wevisone-vl-4b`）的 `src/main.rs` 改动与
 `docs/usage/qwen3.md` §3 的 M-RoPE 记录。
 
+---
+
+### TODO-049: `GpuLinear` 的 runtime 缓存按**权重指针**分桶，多权重模型按权重数付管线创建费
+
+**现象**：ZDTaichu5.0 的视觉塔上设备后，投影只快 25%（CPU 36.93s → 设备 27.62s）。
+一开始以为是激活往返，逐项量下来不是：
+
+| 项 | 实测 | 占比 |
+| --- | --- | --- |
+| runtime 创建 | **213ms × 131 个权重 = 27.9s** | ~100% |
+| fence 延迟 | 2.5ms × 229 次 submission = 0.57s | 2% |
+| host↔device 传输 | 写 1.21GB + 读 1.55GB ≈ 30ms | 0.1% |
+| 权重上传 | 1.64GB ≈ 1.3ms | ~0% |
+
+`BatchedLinearRuntime::new` → `Qwen3Ops::new_with_size` 每次都要建管线/描述符，
+**实测 213ms/次**（`BatchedLinearRuntime::new(ctx, 1034, 1280, 3840, 2)` 连建 10 次 = 2.13s）。
+
+**根因**：`src/ops/kernel/vulkan.rs` 的 `GpuLinear` 持有
+`state: Mutex<Option<LinearState>>`，而 `LinearState.weight` 是**权重指针**：
+
+```rust
+if state.as_ref().is_none_or(|cached| {
+    cached.weight != key || cached.spec != spec || cached.shape != shape
+})
+```
+
+每个 `Weight` 的 `VulkanKernel` 各有一个 `GpuLinear` → 每个权重一份缓存 → 第一次用这个
+权重就重建一次管线。视觉塔 131 个权重**每个只用一次** → 131 次全价创建。
+而塔的权重只有约 6 种形状（每层 4 种 × 32 + head 2 种）→ 同一形状被重复建了几十次。
+
+**影响面**：任何**权重多、每个权重用得少**的模型都中招（视觉塔、DiT、多投影塔）。
+权重少但复用多的模型（LLM 的每层权重被很多 token 复用）看不出来，因为第一次创建后
+命中缓存了。
+
+**待办**：
+
+1. 把 runtime 缓存的键从权重指针改成 `(format, n_in, n_out, tile_rows)`，进程级共享
+   （管线与权重无关，权重是 dispatch 时绑定的 buffer）。预计 ZDT 视觉投影
+   27.6s → **~2s**，创建次数 131 → 个位数。
+2. 缓存要挂在比 `GpuLinear` 更外层的地方（`GpuLinear` 是 per-weight 的），且要考虑
+   `descriptor_capacity` / `output_slots` 也进键。
+3. 改完要复核：共享 runtime 的并发安全性（多个 `Weight` 同时用同一 runtime）、显存
+   里权重 buffer 的生命周期、以及现有 GPU 路径的数值不变。
+4. 之后再看 fence 批处理（229 次 × 2.5ms = 0.57s）：`BatchedLinearRuntime::with_output_slots`
+   + `run_group_gpu` 已支持把一层的多个 matmul 记进同一个 command buffer。
+
+**不做**：激活常驻。当前传输只有 ~30ms，**不是瓶颈**；等 1、4 做完再谈。
+
+**关联**：`src/ops/kernel/vulkan.rs`（`GpuLinear::state` / `LinearState`）、
+`src/vulkan/ops.rs`（`BatchedLinearRuntime::new` → `Qwen3Ops::new_with_size`）、
+`tools/oracle/zdt/README.md` 的 device path 一节。
+
+---
+
+### TODO-050: `cargo build --all-targets` 在 main 上就失败，`cargo test`（不带 `--lib`）跑不起来
+
+**现象**：
+
+```
+error[E0063]: missing fields `sway_sampling_coef` and `time_grid` in initializer of `AukOptions`
+error: could not compile `rust-model-inference` (test "auk_flash_smoke") due to 1 previous error
+```
+
+`cargo build --all-targets` 退出码 101 → **不带 `--lib` 的 `cargo test` 会先在编译期
+失败**，整套集成测试（`tests/*.rs`）跑不到。CI 因此不受影响：`.github/workflows/ci.yml`
+只 `cargo check --features vulkan --lib/--bin/--examples` 加几个点名的
+`cargo test --test <name>`，**从不构建 `--all-targets`**。
+
+**归属**：`tests/auk_flash_smoke.rs` 与 `AukOptions` 的字段变更不同步，出自 AuK 那条线，
+与 ZDTaichu5.0 分支无关（该分支只碰 ZDT / qwen3 vision / app 接线，见
+`git diff --stat origin/main..HEAD`）。
+
+**待办**：
+
+1. 给 `AukOptions` 的构造补上 `sway_sampling_coef` / `time_grid`（或用 `..Default::default()`），
+   让 `--all-targets` 恢复可编译。
+2. CI 加一条 `cargo build --locked --all-targets`（或 `cargo test --locked --no-run`），
+   否则这类编译期断裂还会再发生 —— 参见 TODO-026（CI 根本不跑测试）。
+
+**关联**：`tests/auk_flash_smoke.rs`、`src/models/auk*` 的 `AukOptions`、
+`.github/workflows/ci.yml`。
 ### TODO-049: Mellum 的 GPU 路径能跑但打不过 CPU——decode 是单行投影，设备带宽只有 NEON 的一半
 
 Mellum 12B-A2.5B（Q8_0，12.9 GB）在 GB10 上接 Vulkan device 路径，
@@ -3950,3 +4147,148 @@ Dory 的 oracle 对拍是**喂 token id** 的，验的是前向不是提示构�
 对 Dory 也不成立。
 
 修法：打印前先问 `has_complete_device_path(arch)`。
+---
+
+### TODO-053: Occamy-1.0 的 logits 包络不跨主机（step 6 越界），且 CPU 与设备的 greedy 不同
+
+**现象一：包络越界。** `tools/oracle/pr169` 的 Occamy 默认路径界限是 relative L2 ≤ 0.1，
+记录那次（Apple Silicon）逐步为 0.0848/0.0775/0.0390/0.0426/0.0497/0.0707/0.0617/0.0580
+—— 自身最大值 0.0848 已经贴边。2026-11-05 在 aarch64（GB10）用同一份权重复验，逐步为
+0.0873/0.0491/0.0243/0.0240/0.0336/0.0684/**0.1198**/0.0805 → **step 6 越界**。
+
+不是实现问题：argmax 与 llama.cpp **每一步都一致**（8/8 greedy 逐 token 相同，且与
+记录那次相同）；视觉投影 relative L2 0.00070（记录 0.00336）；tokenizer 精确一致。
+脆弱点是 step 4 —— llama.cpp 的 top-2 margin 是 0.247，Rust 侧只有 0.039，
+host 之间的近似差异足以翻这一步的 token（记录那次就翻了）。
+
+**现象二：CPU 与设备的 greedy 不同。** 同一提示、同为 `--temp 0`：
+
+- CPU：`2 + 2 = 4`
+- Vulkan：`2 + 2 equals **4**.`
+
+**在 `origin/main`（不含任何 Occamy 改动）上完全复现** → 不是这条分支引入的。
+而 TODO-043 那段写的「occamy-1.0 在 `--temp 0` 下 GPU 与 CPU 逐位一致」用的是**另一份
+权重**（含 110 个 F32 二维权重），对这份 Q8_0 checkpoint 不成立。
+
+**待办**：
+
+1. Occamy 的逐步界限改成**两台主机都如实记录**的形式（像 Intern-Decision 那条：把
+   界限放宽到能容纳两台主机的实测值，并保留逐 step 数值），不要让界限只对一台主机成立。
+2. 现象二要么定位到具体算子（MoE 路由在设备上的专家选择、还是 Q8_0 量化路径），
+   要么把 TODO-043 里那句「逐位一致」限定清楚（哪份权重、哪个 host、哪个 arch）。
+   设备侧 MoE 路由目前没有逐层专家 id 的对拍手段 —— `src/models/qwen35/trunk/moe.rs`
+   有 `ffn_moe_topk` 的 trace，但 llama.cpp 参考侧没有对应 dump。
+
+**关联**：`tools/oracle/pr169/{README.md,verification.json}`（`occamy_reverification_2026_11_05`）、
+`src/models/qwen35/trunk/moe.rs`、`src/ops/kernel/qtensor_owned.rs`（设备 Q8_0 路径）。
+
+---
+
+### TODO-054: `--mmproj` + `--interactive` 会静默丢掉交互 REPL，按空提示跑一次
+
+**现象**：
+
+```sh
+printf 'What is 2+2?\n' | rust-model-inference --model occamy-Q8_0.gguf \
+    --mmproj mmproj-occamy-F16.gguf --interactive
+```
+
+不报错、不进 REPL，直接按**空的** `--prompt` 生成一次。模型回
+`Hello! How can I help you today?` —— 因为它根本没看到问题。
+同样的命令去掉 `--mmproj` 就正常（进 REPL、提示 19 token、答 `2 + 2 = 4`）。
+
+**根因**：`src/main.rs` 的分支顺序。带 `--mmproj`（且 arch 不是 `qwen3vl`）时，
+`else if !options.jev && (image.is_some() || … || (explicit_mmproj.is_some() && arch != "qwen3vl"))`
+先命中 → 走 `run_multimodal_with_video(..., prompt = options.prompt, ...)`，
+而 `--prompt` 为空 → 空提示跑一次就结束。交互分支在后面的 `else` 里，
+永远轮不到。`run_interactive_qwen35` 里也把 `mmproj_path` 写死成 `None`，
+所以即使进了 REPL 也用不上 mmproj。
+
+**归属**：main 既有（该分支与 Occamy 工作无关），影响所有带 mmproj 的
+qwen35 / qwen35moe / edge0 / qwen3vlmoe 家族。ZDTaichu5.0、Intern-Decision、
+PhysBrain 的入口矩阵都没有覆盖"交互 + mmproj"这一格，所以没被发现。
+
+**待办**：
+
+1. `--mmproj` 与 `--interactive` 同时出现时，要么明确报错（"交互模式暂不支持 mmproj"），
+   要么把 mmproj 传进 `run_interactive_qwen35` 并让它走 qwen35 多模态路径
+   （main.rs:1179-1182 的注释本来就写着"qwen35 多模态栈处理无图的情况"，
+   只是分支顺序把它挡住了）。
+2. 给入口矩阵补一格"交互 + mmproj"，防止再次静默降级。
+
+**关联**：`src/main.rs`（多模态分支与交互分支的顺序）、
+`src/app/text/generation.rs::run_interactive_qwen35`（mmproj 写死 None）。
+
+---
+
+### TODO-055: qwen35moe（Occamy-1.0）的设备 decode 比 CPU 慢 4 倍 —— 每 token 320 次专家投影太碎
+
+**实测**（aarch64 + NVIDIA GB10，Q8_0，8 线程，`--temperature 0`）：
+
+| 场景 | | CPU | Vulkan | 设备/CPU |
+| --- | --- | --- | --- | --- |
+| 文本 32 token | prefill | 1.088 s | **0.632 s** | **0.58×** ✅ |
+| | decode 32 token | 2.034 s | 8.164 s | **4.0×** ❌ |
+| | 生成速率 | **15.2 t/s** | 3.8 t/s | 0.25× ❌ |
+| | 端到端 | 10.2 tok/s | 3.6 tok/s | 0.35× ❌ |
+| 图像（1 token） | 视觉编码 | 0.540 s | 0.539 s | 1.00×（塔的注意力/SSM 仍在 CPU） |
+| | prefill | 1.596 s | **1.032 s** | 0.65× ✅ |
+
+**原因**：Occamy 每 token 每层要算 **8 个路由专家**（256 选 8）+ 1 个共享专家，
+40 层 → 每 token **360 次极小的投影**（1×2048 → 1×512）。设备的 prefill（一次几百行）
+划算 ✓，但 decode 是 360 次单行 dispatch ✗ → 每次的固定开销大于那点算力 ✗。
+
+与仓库里已有的结论同源：TODO-052（Mellum 的 784 次 pool dispatch）、LFM2.5 的
+`min_gpu_matmul_outputs` 阈值（单行投影留在 CPU）。**qwen35moe 的 decode 目前没有
+类似的"留在 CPU"策略** —— 单行专家投影在设备上必然亏。
+
+**待办**：
+
+1. 给 qwen35moe 的 decode 加阈值：专家投影的行数太少时留在 CPU（与
+   `min_gpu_matmul_outputs` 同思路），至少让 `--compute vulkan` 的 decode 不比 CPU 慢。
+2. 或者让专家权重常驻设备、按层合并成一次 dispatch（`BatchedLinearRuntime::with_output_slots`
+   + `run_group_gpu` 已支持一个 command buffer 里记多个 matmul ✓）。
+3. 视觉塔那边：只有 matmul 上了设备，注意力/SSM 仍在 CPU → 视觉编码在设备上没有收益
+   （0.539 s vs 0.540 s）。要么补齐，要么在文档里说明。
+
+**关联**：`src/models/qwen35/trunk/moe.rs`、`src/models/qwen35/vision/mod.rs`、
+`src/ops/kernel/vulkan.rs`（`min_gpu_matmul_outputs`）、TODO-052。
+
+---
+
+### TODO-056: qwen35 的 CLIP 视觉塔（mmproj）没有设备路径
+
+**现状**：文本塔在设备上，视觉塔不在。
+
+- 文本塔（`qwen35moe` / Occamy-1.0）：**完整在设备上** —— trace 显示
+  `scope=resident_hybrid_decoder backend=Vulkan`（prefill rows=19、decode rows=1），
+  733 个权重张量一次性上传 36.35 GB，之后每 token 41 次 submission；但比 CPU 慢 4 倍
+  （3.8 vs 15.2 t/s）→ 见 TODO-055。
+- 视觉塔（mmproj）：**不上设备** —— `src/models/qwen35/vision/mod.rs` 的
+  `matmul_weight_batch` 直接调 `weight.kernel.forward_batched(...)`，而
+  `VulkanKernel::forward_batched` 只是转发给内部的 **CPU** kernel。视觉编码两个后端
+  耗时完全一样（CPU 0.539 s vs Vulkan 0.540 s），CLI 因此如实报
+  `backend=partial mode=mmproj`。
+- ZDTaichu5.0 的 RADIO 塔**已经**接上设备（`src/models/zdt/vision/mod.rs:115` 先试
+  `weight.try_vulkan_rows(...)`）→ 同一仓库里两种做法并存。
+
+**影响面**：qwen35 的 CLIP 塔是多模型共用的底座（Qwen3.5-0.8B/2B、Qwen3.8-27B、
+OvisOCR3、Sage-A1.5、Holo4-27B、LensVLM-9B、Occamy-1.0、Intern-Decision-0.8B、
+PhysBrain1.5-2B、Qwen-Drive、LongCat 图像、Omni、BGE-VL-Screenshot，≥12 个），
+改它会改掉所有这些模型的图像输出 → **先测量再决定，不要顺手改**。
+
+**F16 是第二道闸**：文本路径明确把 F16 权重排除在设备之外（`gpu_compatible`：
+"Vulkan has no matching F16 activation/reduction contract"），而 mmproj 正是 F16 →
+要先量出 F16 的设备/CPU 数值差（Occamy 的 oracle 显示同权重 F32 激活 vs F16 激活
+的投影差 0.0268）。
+
+**待办**：
+
+1. 先测量：给塔加 `try_vulkan_rows` 分支（不动默认路径），用现成的 llama.cpp dump
+   量 F16 的差并定界。
+2. 差在界内 → 再谈铺开到各模型（每个模型跑各自的 oracle）；不可接受 → 写下
+   "F16 的 CLIP 塔留在 CPU"并关掉本条。
+3. 顺带评估收益上限：塔的 attention/softmax/norm 仍在 CPU，只搬 matmul 未必有墙钟收益。
+
+**关联**：`src/models/qwen35/vision/mod.rs`、`src/models/zdt/vision/mod.rs`、
+`src/ops/kernel/vulkan.rs`、`src/compute/linear.rs`、TODO-055。

@@ -66,6 +66,16 @@ gemma4 的模型级 CLI 编排层定为迁移到 `src/app/gemma4.rs`，现行文
 出现即该抽象。注意抽象方向是**把差异下沉**，不是在入口层加一个模型枚举再分派——
 后者只是把 `app/<model>.rs` 的复制品换个地方放。
 
+### 编译产物与入口契约
+
+- 模型适配默认复用现有 `rust-model-inference` / `rust-model-server`。用户没有明确要求
+  独立可执行文件时，新增模型专用 `src/bin/*.rs` 或 `[[bin]]` 属于必须修复的问题。
+- `src/bin/*.rs` 会被 Cargo 自动发现；只看 Cargo.toml 的 diff 不能证明产物未变。
+  用 `cargo metadata --locked --no-deps --format-version 1` 对比基线与当前的 bin target
+  名称、路径，确认既有产物保留且没有意外新增；不靠 default-run/autobins/feature gate 绕过。
+- 通过既有主程序实测新增能力的文件/stdin 输入、任务互斥和加载前报错，确认调用 models 层；
+  文档、Oracle 命令和 CI 不得仍依赖被移除的专用 binary。
+
 ## 五条必查覆盖矩阵
 
 审阅任何模型适配/重构，逐条给出**证据**（命令 + 输出），没有证据的条目按「未验证」写，

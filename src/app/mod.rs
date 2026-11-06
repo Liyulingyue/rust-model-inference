@@ -7,6 +7,7 @@ pub(crate) mod omni;
 pub(crate) mod qwen_drive;
 pub(crate) mod selftest;
 pub mod server;
+pub mod system_one;
 pub mod text;
 pub(crate) mod tts;
 pub mod wevisone_vl;

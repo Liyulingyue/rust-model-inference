@@ -886,6 +886,7 @@ pub(crate) fn q8_matmul_ggml(
 /// F16 x F16 dot with ggml's `vec_dot_f16` AVX2 reduction order:
 /// four FMA accumulators over 32-wide blocks, `(a0+a2)+(a1+a3)` reduce,
 /// then a sequential scalar tail.
+/// Preserve this model's f64 tail and non-x86 fallback; the shared dot rounds differently.
 pub(crate) fn dot_f16_ggml(a: &[u16], b: &[u16], n: usize) -> f32 {
     #[cfg(target_arch = "x86_64")]
     {

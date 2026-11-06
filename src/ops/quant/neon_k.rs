@@ -1,5 +1,4 @@
-//! ARM NEON dot-product kernels for IQ4_NL × Q8_K, Q4_K × Q8_K and
-//! Q5_K × Q8_K.
+//! ARM NEON dot-product kernels for IQ4_NL, Q4_K, Q5_K and Q6_K × Q8_K.
 
 #![cfg(target_arch = "aarch64")]
 
@@ -605,9 +604,59 @@ mod tests {
 
     use super::*;
     use crate::ops::quant::{
-        vec_dot_q4k_q8k_scalar, vec_dot_q5k_q8k_scalar, vec_dot_q6k_q8k_scalar, BlockQ8K,
-        BLOCK_Q4K_SIZE, BLOCK_Q5K_SIZE, BLOCK_Q6K_SIZE,
+        vec_dot_q4k_q8k_scalar, vec_dot_q5k_q8k_scalar, vec_dot_q6k_q8k, vec_dot_q6k_q8k_scalar,
+        BlockQ8K, BLOCK_Q4K_SIZE, BLOCK_Q5K_SIZE, BLOCK_Q6K_SIZE,
     };
+
+    #[test]
+    fn q6k_neon_matches_scalar_signed_scales_and_block_boundaries() {
+        if !std::arch::is_aarch64_feature_detected!("dotprod") {
+            return;
+        }
+        let mut bytes = Vec::new();
+        let mut activations = Vec::new();
+        for seed in 0..9usize {
+            let mut block = vec![0u8; BLOCK_Q6K_SIZE];
+            for (index, value) in block[..208].iter_mut().enumerate() {
+                *value = (index * 131 + seed * 53) as u8;
+            }
+            block[208..]
+                .copy_from_slice(&crate::ops::f32_to_f16(0.125 + seed as f32 * 0.25).to_le_bytes());
+            bytes.extend(block);
+            let qs = std::array::from_fn(|index| (index * 193 + seed * 29) as u8 as i8);
+            let bsums = std::array::from_fn(|group| {
+                qs[group * 16..group * 16 + 16]
+                    .iter()
+                    .map(|&v| v as i16)
+                    .sum()
+            });
+            activations.push(BlockQ8K {
+                d: 0.03125,
+                qs,
+                bsums,
+            });
+        }
+        for blocks in [0, 1, 2, 9] {
+            let input = &activations[..blocks];
+            for length in [blocks * BLOCK_Q6K_SIZE, blocks * BLOCK_Q6K_SIZE + 1] {
+                let length = length.min(bytes.len());
+                let weights = &bytes[..length];
+                let expected = vec_dot_q6k_q8k_scalar(weights, input);
+                let neon = unsafe { vec_dot_q6k_q8k_neon(weights, input) };
+                let dispatched = vec_dot_q6k_q8k(weights, input);
+                let tolerance = 2e-5 * expected.abs().max(1.0);
+                assert!(
+                    (neon - expected).abs() <= tolerance,
+                    "blocks={blocks}: {neon} != {expected}"
+                );
+                assert!((dispatched - expected).abs() <= tolerance);
+            }
+        }
+        let weights = &bytes[..bytes.len() - 1];
+        let expected = vec_dot_q6k_q8k_scalar(weights, &activations);
+        let actual = unsafe { vec_dot_q6k_q8k_neon(weights, &activations) };
+        assert!((actual - expected).abs() <= 2e-5 * expected.abs().max(1.0));
+    }
 
     /// Deterministic Q4_K block fixture: random-ish but reproducible
     /// weights with known scales/mins, so a NEON vs scalar mismatch

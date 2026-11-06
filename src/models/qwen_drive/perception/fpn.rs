@@ -1,10 +1,8 @@
 use super::ops::{resize_bilinear_aligned, round_bf16, voxel_pool_depth, Tensor4, VoxelPoolInput};
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
-use crate::models::diffusion::dreamx::kernels::{
-    conv2d, conv3d_with_options, group_norm_ncthw, Conv3dSpec,
-};
 use crate::models::qwen_drive::config::PerceptionConfig;
+use crate::ops::nn::{conv2d, conv3d_with_options, group_norm_ncthw, Conv3dSpec};
 use std::collections::BTreeMap;
 
 unsafe extern "C" {

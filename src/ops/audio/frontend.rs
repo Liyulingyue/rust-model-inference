@@ -1,7 +1,4 @@
-// Qwen3-Audio audio pre-processing: WAV decoding + log-mel feature extraction.
-//
-// Phase 4b split from qwen3a.rs. Owns: AsrAudioError, decode_pcm16_wav, MelWindow,
-// LogMel, AudioFft, compute_log_mel, split_mel_windows, log_mel_windows.
+//! WAV decoding and reusable log-mel frontends.
 
 pub(crate) const SAMPLE_RATE: usize = 16_000;
 pub(crate) const FFT_SIZE: usize = 400;
@@ -12,7 +9,6 @@ pub(crate) const CHUNK_FRAMES: usize = 100;
 
 unsafe extern "C" {
     fn cosf(value: f32) -> f32;
-    fn erff(value: f32) -> f32;
     fn log10(value: f64) -> f64;
 }
 
@@ -62,7 +58,7 @@ pub fn decode_pcm16_wav(bytes: &[u8]) -> Result<Vec<f32>, AsrAudioError> {
 
     #[cfg(feature = "parity-trace")]
     crate::parity_trace::report(crate::parity_trace::checkpoint(
-        "asr.pcm",
+        "audio.pcm",
         None,
         &[decoded.samples.len()],
         &decoded.samples,
@@ -248,7 +244,11 @@ fn slaney_mel_hz(mel: f64) -> f64 {
     }
 }
 
-fn mel_filters() -> Result<Vec<f32>, AsrAudioError> {
+fn mel_filters() -> Result<&'static [f32], AsrAudioError> {
+    static FILTERS: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
+    if let Some(filters) = FILTERS.get() {
+        return Ok(filters);
+    }
     let fft_bins = FFT_SIZE / 2 + 1;
     let filter_len = MEL_BINS
         .checked_mul(fft_bins)
@@ -274,7 +274,7 @@ fn mel_filters() -> Result<Vec<f32>, AsrAudioError> {
             filters[mel * fft_bins + bin] = weight as f32;
         }
     }
-    Ok(filters)
+    Ok(FILTERS.get_or_init(|| filters))
 }
 
 pub(crate) fn periodic_hann_window() -> Vec<f32> {
@@ -439,7 +439,34 @@ fn fft_real(
     }
 }
 
+pub(crate) fn compute_log_mel_trimmed(samples: &[f32]) -> Result<LogMel, AsrAudioError> {
+    compute_log_mel_impl(samples, 1e-10, true)
+}
+
+#[cfg(test)]
+mod trimmed_mel_tests {
+    #[test]
+    fn trimmed_mel_drops_the_trailing_frame_and_uses_1e_minus_10_floor() {
+        let mel = super::compute_log_mel_trimmed(&vec![0.0; 16_000]).unwrap();
+        assert_eq!(mel.frames, 100);
+        assert_eq!(mel.raw, vec![-10.0; 128 * 100]);
+        assert_eq!(mel.normalized, vec![-1.5; 128 * 100]);
+        assert!(std::ptr::eq(
+            super::mel_filters().unwrap(),
+            super::mel_filters().unwrap()
+        ));
+    }
+}
+
 pub(crate) fn compute_log_mel(samples: &[f32]) -> Result<LogMel, AsrAudioError> {
+    compute_log_mel_impl(samples, 5.960464477539063e-8, false)
+}
+
+fn compute_log_mel_impl(
+    samples: &[f32],
+    floor: f64,
+    drop_last: bool,
+) -> Result<LogMel, AsrAudioError> {
     if samples.is_empty() || samples.iter().any(|sample| !sample.is_finite()) {
         return Err(AsrAudioError::Invalid(
             "audio samples must be non-empty and finite".into(),
@@ -457,7 +484,9 @@ pub(crate) fn compute_log_mel(samples: &[f32]) -> Result<LogMel, AsrAudioError> 
         .checked_div(HOP)
         .and_then(|frames| frames.checked_add(1))
         .ok_or_else(|| AsrAudioError::Invalid("effective frame count overflow".into()))?;
-    let frames = stft_frames.min(sample_frames);
+    let frames = stft_frames
+        .min(sample_frames)
+        .saturating_sub(usize::from(drop_last));
     let raw_len = MEL_BINS
         .checked_mul(frames)
         .ok_or_else(|| AsrAudioError::Invalid("log-Mel size overflow".into()))?;
@@ -502,7 +531,7 @@ pub(crate) fn compute_log_mel(samples: &[f32]) -> Result<LogMel, AsrAudioError> 
                 power_sum += f64::from(power[bin] * filter[bin]);
                 bin += 1;
             }
-            let value = unsafe { log10(power_sum.max(f64::from(5.960464477539063e-8f32))) } as f32;
+            let value = unsafe { log10(power_sum.max(floor)) } as f32;
             if !value.is_finite() {
                 return Err(AsrAudioError::Invalid("non-finite log-Mel value".into()));
             }
@@ -533,13 +562,13 @@ pub(crate) fn compute_log_mel(samples: &[f32]) -> Result<LogMel, AsrAudioError> 
     #[cfg(feature = "parity-trace")]
     {
         crate::parity_trace::report(crate::parity_trace::checkpoint(
-            "asr.raw_log_mel",
+            "audio.raw_log_mel",
             None,
             &[MEL_BINS, frames],
             &raw,
         ));
         crate::parity_trace::report(crate::parity_trace::checkpoint(
-            "asr.normalized_mel",
+            "audio.normalized_mel",
             None,
             &[MEL_BINS, frames],
             &normalized,
@@ -608,7 +637,7 @@ pub(crate) fn split_mel_windows(
 
         #[cfg(feature = "parity-trace")]
         crate::parity_trace::report(crate::parity_trace::checkpoint(
-            "asr.padded_mel",
+            "audio.padded_mel",
             None,
             &[MEL_BINS, padded_frames],
             &values,
@@ -667,6 +696,9 @@ mod tests {
             decode_pcm16_wav(&wav),
             Err(AsrAudioError::Unsupported(message)) if message.contains("mono audio")
         ));
+        let mono = pcm16_wav(48_000, 1, &[1, 2]);
+        assert!(matches!(decode_pcm16_wav(&mono),
+            Err(AsrAudioError::Unsupported(message)) if message.contains("16000 Hz")));
     }
 
     #[test]
