@@ -1027,12 +1027,9 @@ impl<'a> EmbeddingGemmaAudioModel<'a> {
             }
         }
         let mut projected = vec![0.0f32; n_frames * h];
-        for t in 0..n_frames {
-            layer.self_attn_post.forward(
-                &attn_out[t * h..(t + 1) * h],
-                &mut projected[t * h..(t + 1) * h],
-            );
-        }
+        layer
+            .self_attn_post
+            .forward_rows(&self.pool, &attn_out, &mut projected, n_frames);
         rms_norm_rows(&mut projected, h, &layer.norm_post_attn);
         for (value, &base) in projected.iter_mut().zip(&residual) {
             *value += base;
@@ -1042,14 +1039,14 @@ impl<'a> EmbeddingGemmaAudioModel<'a> {
         let residual = hidden.clone();
         rms_norm_rows(&mut hidden, h, &layer.lconv1d_pre_layer_norm);
         let mut conv_input = vec![0.0f32; n_frames * h];
-        let mut linear_start = vec![0.0f32; 2 * h];
+        let mut linear_start = vec![0.0f32; n_frames * 2 * h];
+        layer
+            .lconv1d_linear_start
+            .forward_rows(&self.pool, &hidden, &mut linear_start, n_frames);
         for t in 0..n_frames {
-            layer
-                .lconv1d_linear_start
-                .forward(&hidden[t * h..(t + 1) * h], &mut linear_start);
             for d in 0..h {
-                conv_input[t * h + d] =
-                    linear_start[d] * (1.0 + (-linear_start[h + d]).exp()).recip();
+                conv_input[t * h + d] = linear_start[t * 2 * h + d]
+                    * (1.0 + (-linear_start[t * 2 * h + h + d]).exp()).recip();
             }
         }
         let mut conv_output = vec![0.0f32; n_frames * h];
@@ -1070,12 +1067,9 @@ impl<'a> EmbeddingGemmaAudioModel<'a> {
         for value in &mut conv_output {
             *value = crate::ops::silu(*value);
         }
-        for t in 0..n_frames {
-            layer.lconv1d_linear_end.forward(
-                &conv_output[t * h..(t + 1) * h],
-                &mut projected[t * h..(t + 1) * h],
-            );
-        }
+        layer
+            .lconv1d_linear_end
+            .forward_rows(&self.pool, &conv_output, &mut projected, n_frames);
         for (value, &base) in projected.iter_mut().zip(&residual) {
             *value += base;
         }
