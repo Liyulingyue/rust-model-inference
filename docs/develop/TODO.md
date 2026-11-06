@@ -4044,3 +4044,37 @@ qwen35 CLIP 塔同一类缺口 ✓）。权重是 Q8_0/BF16/F32 ✓，设备侧�
 
 **关联**：`src/models/embeddinggemma2/text.rs`、`src/models/embeddinggemma2/mod.rs`
 （`compute_media_embedding`）、`tests/embeddinggemma_2_vision_smoke.rs`、TODO-056。
+
+---
+
+### TODO-058: EmbeddingGemma-2 的设备路径与 CPU 差 0.033 —— 设备的量化归约契约未对齐
+
+**背景**：EG2 的文本塔已改为持 `Weight`（GGUF 契约 ✓）并批量化 ✓，
+`--compute vulkan` 下设备确实接活 ✓（trace：`backend=Vulkan rows=263` ✓、
+媒体路径 1083 次 submission ✓）。但实测：
+
+| 对比 | relative L2 | cosine |
+| --- | --- | --- |
+| CPU kernel vs Vulkan（同一提示、768 维输出） | **0.03330** | 0.99948 |
+| CPU kernel vs 上游 HF transformers 参考 | 0.05069 | 0.99873 |
+
+即：**设备的量化 matmul 与 CPU 的量化 matmul 本身就不一致** ✗（0.033 ✓），
+这与 TODO-056 的 F16 契约缺口同类 ✓ —— 设备侧的 Q8_0/BF16 归约（shader 的
+累加顺序/中间精度 ✓）与 CPU kernel 不同 ✓。
+
+**影响**：嵌入模型对向量敏感 ✓ —— 同一提示在 CPU 与 GPU 上会得到不同的 768 维向量 ✓
+（cosine 0.9995 ✓，看起来接近但不是同一个向量 ✓）。仓库的惯例是
+「GPU 路径必须与 CPU 一致 ✓」（ZDTaichu5.0 实测差 ~5e-7 ✓），这里差 0.033 ✗。
+
+**待办**：
+
+1. 定位差异来源：设备的 Q8_0 shader（`shaders/glsl/q8_matmul*.comp` ✓）的
+   累加与 CPU 的 `vec_dot_q8_0` ✓ 是否等价 ✓；BF16 同理（`f16_matmul` ✓）。
+2. 要么让设备对齐 CPU ✓（改 shader 或改用与 CPU 相同的归约 ✓），
+   要么如实记录「EG2 的设备路径有 0.033 的向量差 ✓，默认不启用 ✓」。
+3. 在对齐之前，EG2 的设备路径**默认关闭**（`--compute vulkan` 仍可强制 ✓），
+   或至少在文档里写明 ✓。
+
+**关联**：`src/ops/kernel/vulkan.rs`（`try_matmul` ✓）、
+`shaders/glsl/q8_matmul_transposed.comp`、`shaders/glsl/f16_matmul*.comp`、
+`src/models/embeddinggemma2/text.rs`、TODO-056。
