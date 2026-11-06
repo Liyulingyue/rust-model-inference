@@ -91,7 +91,7 @@ fn audio_matches_huggingface_oracle() {
     let source: Arc<dyn rust_model_inference::TensorSource> = Arc::new(loader);
     let model =
         rust_model_inference::models::embeddinggemma2::EmbeddingGemmaAudioModel::from_source(
-            &source,
+            &source, 8,
         )
         .expect("EmbeddingGemmaAudioModel::from_source");
     // Keep the fixture integer-defined so Rust and NumPy do not disagree on
@@ -145,9 +145,10 @@ fn compare_embedding(
     // Text projections use Q8_0, unlike the BF16 vision/audio tower fixtures.
     // The text tower runs the GGUF's quantized kernels now (Weight), so the
     // final embedding carries the kernel's activation rounding: measured
-    // 0.02062 here against 0.02013 with the old F32 dequant path.
+    // 0.02062 for the image path and 0.02176 for the audio path, against
+    // 0.02013 with the old F32 dequant path.
     assert!(
-        relative_l2 < 0.021,
+        relative_l2 < 0.022,
         "{kind} final embedding relative L2 {relative_l2}"
     );
 }

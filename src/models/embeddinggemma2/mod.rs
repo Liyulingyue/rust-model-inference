@@ -84,7 +84,7 @@ pub fn compute_media_embedding(
             .collect();
         (
             "audio",
-            EmbeddingGemmaAudioModel::from_source(&source)?.encode(&pcm)?,
+            EmbeddingGemmaAudioModel::from_source(&source, n_threads)?.encode(&pcm)?,
         )
     };
     let get_id = |key: &str| -> Result<u32, String> {

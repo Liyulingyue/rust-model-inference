@@ -15,7 +15,7 @@ fn audio_forward_returns_correct_shape_finite_values() {
 
     let model =
         rust_model_inference::models::embeddinggemma2::EmbeddingGemmaAudioModel::from_source(
-            &source,
+            &source, 8,
         )
         .expect("EmbeddingGemmaAudioModel::from_source");
 

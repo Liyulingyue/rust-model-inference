@@ -18,6 +18,8 @@
 //! Forward flow: audio → log-mel → subsample → 12 Conformer layers → output_proj.
 
 use crate::core::tensor::TensorSource;
+use crate::core::thread_pool::ComputePool;
+use crate::ops::kernel::{QuantizedTensor, Weight};
 use std::sync::Arc;
 
 pub const RMS_NORM_EPS: f32 = 1e-6;
@@ -115,48 +117,120 @@ struct LinearClamp {
     output_max: f32,
 }
 
-struct Linear {
-    matrix: Vec<f32>,
-    n_in: usize,
-    n_out: usize,
+struct Linear<'a> {
+    weight: Weight<'a>,
     clamp: Option<LinearClamp>,
 }
 
-impl Linear {
+impl Linear<'_> {
     fn forward(&self, input: &[f32], output: &mut [f32]) {
-        assert_eq!(input.len(), self.n_in);
-        assert_eq!(output.len(), self.n_out);
-        for i in 0..self.n_out {
-            let row = &self.matrix[i * self.n_in..(i + 1) * self.n_in];
-            let mut s = 0.0f32;
-            for k in 0..self.n_in {
-                let value = self
-                    .clamp
-                    .map(|clamp| input[k].clamp(clamp.input_min, clamp.input_max))
-                    .unwrap_or(input[k]);
-                s += row[k] * value;
+        debug_assert_eq!(input.len(), self.weight.n_in);
+        debug_assert_eq!(output.len(), self.weight.n_out);
+        let clamped;
+        let input = match &self.clamp {
+            Some(clamp) => {
+                clamped = input
+                    .iter()
+                    .map(|&value| value.clamp(clamp.input_min, clamp.input_max))
+                    .collect::<Vec<f32>>();
+                clamped.as_slice()
             }
-            output[i] = self
-                .clamp
-                .map(|clamp| s.clamp(clamp.output_min, clamp.output_max))
-                .unwrap_or(s);
+            None => input,
+        };
+        self.weight
+            .kernel
+            .forward_batched(input, output, self.weight.n_in, self.weight.n_out);
+        self.apply_output_clamp(output);
+    }
+
+    /// A whole row batch: the device first, then the shared kernel with the
+    /// rows partitioned over the pool. The clamp is applied per row.
+    fn forward_rows(&self, pool: &ComputePool, input: &[f32], output: &mut [f32], rows: usize) {
+        debug_assert_eq!(input.len(), rows * self.weight.n_in);
+        debug_assert_eq!(output.len(), rows * self.weight.n_out);
+        // The input clamp has to happen before the projection; the clamped
+        // copy is only worth making when a clamp is configured.
+        let clamped;
+        let input = match &self.clamp {
+            Some(clamp) => {
+                clamped = input
+                    .iter()
+                    .map(|&value| value.clamp(clamp.input_min, clamp.input_max))
+                    .collect::<Vec<f32>>();
+                clamped.as_slice()
+            }
+            None => input,
+        };
+        #[cfg(feature = "vulkan")]
+        if self.weight.try_vulkan_rows(input, output, rows) {
+            self.apply_output_clamp(output);
+            return;
+        }
+        let n_in = self.weight.n_in;
+        let n_out = self.weight.n_out;
+        let input_ptr = input.as_ptr();
+        let output_ptr = output.as_mut_ptr();
+        pool.compute(move |ith, nth| {
+            let (start, end) = crate::ops::kernel::f32::scalar::row_range(rows, ith, nth);
+            if start >= end {
+                return;
+            }
+            // SAFETY: the caller checked the lengths; each worker owns a
+            // disjoint row range and the kernel writes only its own rows.
+            unsafe {
+                let input_slice =
+                    std::slice::from_raw_parts(input_ptr.add(start * n_in), (end - start) * n_in);
+                let output_slice = std::slice::from_raw_parts_mut(
+                    output_ptr.add(start * n_out),
+                    (end - start) * n_out,
+                );
+                self.weight
+                    .kernel
+                    .forward_batched(input_slice, output_slice, n_in, n_out);
+            }
+        });
+        self.apply_output_clamp(output);
+    }
+
+    fn apply_output_clamp(&self, output: &mut [f32]) {
+        if let Some(clamp) = &self.clamp {
+            for value in output.iter_mut() {
+                *value = value.clamp(clamp.output_min, clamp.output_max);
+            }
         }
     }
 }
 
-fn linear_from_gguf_bf16(
-    source: &dyn TensorSource,
+fn linear_from_gguf<'a>(
+    source: &'a dyn TensorSource,
     name: &str,
     n_in: usize,
     n_out: usize,
-) -> Result<Linear, String> {
-    let raw = source
+) -> Result<Linear<'a>, String> {
+    let info = source
+        .tensor_info(name)
+        .ok_or_else(|| format!("Missing tensor: {name}"))?;
+    if info.dims != [n_in as u64, n_out as u64] {
+        return Err(format!(
+            "{name}: shape {:?} != [n_in={n_in}, n_out={n_out}]",
+            info.dims
+        ));
+    }
+    let bytes = source
         .tensor_slice(name)
-        .ok_or_else(|| format!("Missing tensor: {name}"));
+        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
+    let expected = usize::try_from(info.checked_nbytes().unwrap_or(u64::MAX))
+        .map_err(|_| format!("Invalid tensor byte size: {name}"))?;
+    if bytes.len() != expected {
+        return Err(format!("Invalid tensor data length for {name}"));
+    }
     Ok(Linear {
-        matrix: dequant_bf16_to_f32(raw?, n_in * n_out),
-        n_in,
-        n_out,
+        weight: Weight::from_quantized(QuantizedTensor::from_bytes(
+            bytes,
+            info.ggml_type,
+            n_in,
+            n_out,
+        )),
         clamp: None,
     })
 }
@@ -169,14 +243,14 @@ fn bf16_scalar(source: &dyn TensorSource, name: &str) -> Result<f32, String> {
     Ok(values[0])
 }
 
-fn linear_from_gguf_bf16_clipped(
-    source: &dyn TensorSource,
+fn linear_from_gguf_clipped<'a>(
+    source: &'a dyn TensorSource,
     name: &str,
     n_in: usize,
     n_out: usize,
     prefix: &str,
-) -> Result<Linear, String> {
-    let mut linear = linear_from_gguf_bf16(source, name, n_in, n_out)?;
+) -> Result<Linear<'a>, String> {
+    let mut linear = linear_from_gguf(source, name, n_in, n_out)?;
     linear.clamp = Some(LinearClamp {
         input_min: bf16_scalar(source, &format!("{prefix}.input_min"))?,
         input_max: bf16_scalar(source, &format!("{prefix}.input_max"))?,
@@ -388,6 +462,7 @@ fn conv2d_stride2(
 }
 
 fn feed_forward(
+    pool: &ComputePool,
     input: &[f32],
     hidden_size: usize,
     ffn_hidden_size: usize,
@@ -396,67 +471,74 @@ fn feed_forward(
     ffw2: &Linear,
     post_norm: &[f32],
 ) -> Vec<f32> {
+    let rows = input.len() / hidden_size;
     let mut output = input.to_vec();
-    let mut normalized = vec![0.0f32; hidden_size];
-    let mut intermediate = vec![0.0f32; ffn_hidden_size];
-    let mut projected = vec![0.0f32; hidden_size];
-    for (row_idx, row) in input.chunks_exact(hidden_size).enumerate() {
-        normalized.copy_from_slice(row);
-        crate::ops::norm::rms_norm_inplace(&mut normalized, pre_norm, RMS_NORM_EPS);
-        ffw1.forward(&normalized, &mut intermediate);
-        for value in &mut intermediate {
-            *value = crate::ops::silu(*value);
-        }
-        ffw2.forward(&intermediate, &mut projected);
-        crate::ops::norm::rms_norm_inplace(&mut projected, post_norm, RMS_NORM_EPS);
-        let offset = row_idx * hidden_size;
+    let mut normalized = vec![0.0f32; input.len()];
+    for (dst, src) in normalized
+        .chunks_exact_mut(hidden_size)
+        .zip(input.chunks_exact(hidden_size))
+    {
+        dst.copy_from_slice(src);
+        crate::ops::norm::rms_norm_inplace(dst, pre_norm, RMS_NORM_EPS);
+    }
+    let mut intermediate = vec![0.0f32; rows * ffn_hidden_size];
+    ffw1.forward_rows(pool, &normalized, &mut intermediate, rows);
+    for value in &mut intermediate {
+        *value = crate::ops::silu(*value);
+    }
+    let mut projected = vec![0.0f32; input.len()];
+    ffw2.forward_rows(pool, &intermediate, &mut projected, rows);
+    for (idx, row) in projected.chunks_exact_mut(hidden_size).enumerate() {
+        crate::ops::norm::rms_norm_inplace(row, post_norm, RMS_NORM_EPS);
+        let offset = idx * hidden_size;
         for j in 0..hidden_size {
-            output[offset + j] = row[j] + 0.5 * projected[j];
+            output[offset + j] = input[offset + j] + 0.5 * row[j];
         }
     }
     output
 }
 
-struct ConformerLayer {
+struct ConformerLayer<'a> {
     lconv1d_conv_norm: Vec<f32>,
     /// `[hidden, 1, 5]` Conv1d weight (stored as BF16).
     lconv1d_depthwise_weight: Vec<f32>,
     lconv1d_pre_layer_norm: Vec<f32>,
-    lconv1d_linear_start: Linear,
-    lconv1d_linear_end: Linear,
+    lconv1d_linear_start: Linear<'a>,
+    lconv1d_linear_end: Linear<'a>,
     norm_pre_attn: Vec<f32>,
     norm_post_attn: Vec<f32>,
     norm_out: Vec<f32>,
-    self_attn_q_proj: Linear,
-    self_attn_k_proj: Linear,
-    self_attn_v_proj: Linear,
-    self_attn_post: Linear,
-    self_attn_relative_k_proj: Linear,
+    self_attn_q_proj: Linear<'a>,
+    self_attn_k_proj: Linear<'a>,
+    self_attn_v_proj: Linear<'a>,
+    self_attn_post: Linear<'a>,
+    self_attn_relative_k_proj: Linear<'a>,
     /// 128-element per-dim scaling for Q·K attention scores.
     self_attn_per_dim_scale: Vec<f32>,
     ff1_pre_layer_norm: Vec<f32>,
-    ff1_ffw_layer_1: Linear,
-    ff1_ffw_layer_2: Linear,
+    ff1_ffw_layer_1: Linear<'a>,
+    ff1_ffw_layer_2: Linear<'a>,
     ff1_post_layer_norm: Vec<f32>,
     ff2_pre_layer_norm: Vec<f32>,
-    ff2_ffw_layer_1: Linear,
-    ff2_ffw_layer_2: Linear,
+    ff2_ffw_layer_1: Linear<'a>,
+    ff2_ffw_layer_2: Linear<'a>,
     ff2_post_layer_norm: Vec<f32>,
 }
 
-pub struct EmbeddingGemmaAudioModel {
+pub struct EmbeddingGemmaAudioModel<'a> {
     pub config: EmbeddingGemmaAudioConfig,
-    pub(super) source: Arc<dyn TensorSource>,
-    pub(super) subsample_input_proj_linear: Linear,
+    pub(super) source: &'a Arc<dyn TensorSource>,
+    pub(super) pool: Arc<ComputePool>,
+    pub(super) subsample_input_proj_linear: Linear<'a>,
     /// Subsample conv2d: `[128, 1, 3, 3]` (in=1, out=128, kernel=3, stride=2).
     pub(super) subsample_layer0_conv: Vec<f32>,
     pub(super) subsample_layer0_norm: Vec<f32>,
     pub(super) subsample_layer1_conv: Vec<f32>,
     pub(super) subsample_layer1_norm: Vec<f32>,
-    pub(super) output_proj: Linear,
+    pub(super) output_proj: Linear<'a>,
     pub(super) output_proj_bias: Vec<f32>,
-    pub(super) audio_embed: Linear,
-    pub(super) layers: Vec<ConformerLayer>,
+    pub(super) audio_embed: Linear<'a>,
+    pub(super) layers: Vec<ConformerLayer<'a>>,
 }
 
 #[cfg(test)]
@@ -486,11 +568,14 @@ mod tests {
     }
 }
 
-impl EmbeddingGemmaAudioModel {
-    pub fn from_source(source: &Arc<dyn TensorSource>) -> Result<Self, String> {
+impl<'a> EmbeddingGemmaAudioModel<'a> {
+    pub fn from_source(
+        source: &'a Arc<dyn TensorSource>,
+        n_threads: usize,
+    ) -> Result<Self, String> {
         let config = EmbeddingGemmaAudioConfig::from_metadata(source.as_ref())?;
 
-        let subsample_input_proj_linear = linear_from_gguf_bf16(
+        let subsample_input_proj_linear = linear_from_gguf(
             source.as_ref(),
             "audio.subsample_conv_projection.input_proj_linear.weight",
             (128 / 4) * 32,
@@ -522,7 +607,7 @@ impl EmbeddingGemmaAudioModel {
             32,
         );
 
-        let output_proj = linear_from_gguf_bf16(
+        let output_proj = linear_from_gguf(
             source.as_ref(),
             "audio.output_proj.weight",
             config.hidden_size,
@@ -539,7 +624,7 @@ impl EmbeddingGemmaAudioModel {
             .and_then(|value| value.to_u64())
             .and_then(|value| usize::try_from(value).ok())
             .ok_or("Missing metadata: gemma4-embedding.embedding_length")?;
-        let audio_embed = linear_from_gguf_bf16(
+        let audio_embed = linear_from_gguf(
             source.as_ref(),
             "audio_embed.weight",
             config.projection_dim,
@@ -567,14 +652,14 @@ impl EmbeddingGemmaAudioModel {
                     .ok_or_else(|| format!("Missing {}.weight", blk("lconv1d.pre_layer_norm")))?,
                 config.hidden_size,
             );
-            let lconv1d_linear_start = linear_from_gguf_bf16_clipped(
+            let lconv1d_linear_start = linear_from_gguf_clipped(
                 source.as_ref(),
                 &blk("lconv1d.linear_start.linear.weight"),
                 config.hidden_size,
                 2 * config.hidden_size,
                 &blk("lconv1d.linear_start"),
             )?;
-            let lconv1d_linear_end = linear_from_gguf_bf16_clipped(
+            let lconv1d_linear_end = linear_from_gguf_clipped(
                 source.as_ref(),
                 &blk("lconv1d.linear_end.linear.weight"),
                 config.hidden_size,
@@ -601,35 +686,35 @@ impl EmbeddingGemmaAudioModel {
                 config.hidden_size,
             );
 
-            let self_attn_q_proj = linear_from_gguf_bf16_clipped(
+            let self_attn_q_proj = linear_from_gguf_clipped(
                 source.as_ref(),
                 &blk("self_attn.q_proj.linear.weight"),
                 config.hidden_size,
                 config.hidden_size,
                 &blk("self_attn.q_proj"),
             )?;
-            let self_attn_k_proj = linear_from_gguf_bf16_clipped(
+            let self_attn_k_proj = linear_from_gguf_clipped(
                 source.as_ref(),
                 &blk("self_attn.k_proj.linear.weight"),
                 config.hidden_size,
                 config.hidden_size,
                 &blk("self_attn.k_proj"),
             )?;
-            let self_attn_v_proj = linear_from_gguf_bf16_clipped(
+            let self_attn_v_proj = linear_from_gguf_clipped(
                 source.as_ref(),
                 &blk("self_attn.v_proj.linear.weight"),
                 config.hidden_size,
                 config.hidden_size,
                 &blk("self_attn.v_proj"),
             )?;
-            let self_attn_post = linear_from_gguf_bf16_clipped(
+            let self_attn_post = linear_from_gguf_clipped(
                 source.as_ref(),
                 &blk("self_attn.post.linear.weight"),
                 config.hidden_size,
                 config.hidden_size,
                 &blk("self_attn.post"),
             )?;
-            let self_attn_relative_k_proj = linear_from_gguf_bf16(
+            let self_attn_relative_k_proj = linear_from_gguf(
                 source.as_ref(),
                 &blk("self_attn.relative_k_proj.weight"),
                 config.hidden_size,
@@ -653,14 +738,14 @@ impl EmbeddingGemmaAudioModel {
                         .ok_or_else(|| format!("Missing {}.weight", ff("pre_layer_norm")))?,
                     config.hidden_size,
                 );
-                let ffw_1 = linear_from_gguf_bf16_clipped(
+                let ffw_1 = linear_from_gguf_clipped(
                     source.as_ref(),
                     &ff("ffw_layer_1.linear.weight"),
                     config.hidden_size,
                     config.ffn_hidden_size,
                     &ff("ffw_layer_1"),
                 )?;
-                let ffw_2 = linear_from_gguf_bf16_clipped(
+                let ffw_2 = linear_from_gguf_clipped(
                     source.as_ref(),
                     &ff("ffw_layer_2.linear.weight"),
                     config.ffn_hidden_size,
@@ -706,9 +791,11 @@ impl EmbeddingGemmaAudioModel {
             });
         }
 
+        let pool = Arc::new(ComputePool::new(n_threads.max(1)));
         Ok(Self {
             config,
-            source: Arc::clone(source),
+            source,
+            pool,
             subsample_input_proj_linear,
             subsample_layer0_conv: layer0_conv,
             subsample_layer0_norm: layer0_norm,
@@ -792,10 +879,10 @@ impl EmbeddingGemmaAudioModel {
     pub fn encode(&self, pcm16: &[i16]) -> Result<Vec<f32>, String> {
         let tower = self.encode_tower(pcm16)?;
         let mut output =
-            vec![0.0f32; tower.len() / self.config.projection_dim * self.audio_embed.n_out];
+            vec![0.0f32; tower.len() / self.config.projection_dim * self.audio_embed.weight.n_out];
         for (input, out) in tower
             .chunks_exact(self.config.projection_dim)
-            .zip(output.chunks_exact_mut(self.audio_embed.n_out))
+            .zip(output.chunks_exact_mut(self.audio_embed.weight.n_out))
         {
             let mut normalized = input.to_vec();
             crate::ops::norm::rms_unit_inplace(&mut normalized, RMS_NORM_EPS);
@@ -816,6 +903,7 @@ impl EmbeddingGemmaAudioModel {
         // Gemma4's Conformer order is FFN1 -> attention -> light convolution ->
         // FFN2 -> output norm. Each feed-forward block has a 0.5 residual.
         let mut hidden = feed_forward(
+            &self.pool,
             x,
             h,
             cfg.ffn_hidden_size,
@@ -830,16 +918,15 @@ impl EmbeddingGemmaAudioModel {
         let mut q = vec![0.0f32; n_frames * h];
         let mut k = vec![0.0f32; n_frames * h];
         let mut v = vec![0.0f32; n_frames * h];
-        let mut tmp = vec![0.0f32; h];
-        for t in 0..n_frames {
-            let row = &hidden[t * h..(t + 1) * h];
-            layer.self_attn_q_proj.forward(row, &mut tmp);
-            q[t * h..(t + 1) * h].copy_from_slice(&tmp);
-            layer.self_attn_k_proj.forward(row, &mut tmp);
-            k[t * h..(t + 1) * h].copy_from_slice(&tmp);
-            layer.self_attn_v_proj.forward(row, &mut tmp);
-            v[t * h..(t + 1) * h].copy_from_slice(&tmp);
-        }
+        layer
+            .self_attn_q_proj
+            .forward_rows(&self.pool, &hidden, &mut q, n_frames);
+        layer
+            .self_attn_k_proj
+            .forward_rows(&self.pool, &hidden, &mut k, n_frames);
+        layer
+            .self_attn_v_proj
+            .forward_rows(&self.pool, &hidden, &mut v, n_frames);
         let head_dim = 128;
         let n_heads = h / head_dim;
         let q_scale = (head_dim as f32).sqrt().recip() / std::f32::consts::LN_2;
@@ -997,6 +1084,7 @@ impl EmbeddingGemmaAudioModel {
             *value += base;
         }
         hidden = feed_forward(
+            &self.pool,
             &projected,
             h,
             cfg.ffn_hidden_size,
