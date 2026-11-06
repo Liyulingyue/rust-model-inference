@@ -845,30 +845,27 @@ impl<'a> EmbeddingGemmaAudioModel<'a> {
             *value = value.max(0.0);
         }
         let proj_input = bins1 * 32;
-        let mut x = vec![0.0f32; frames1 * cfg.hidden_size];
+        let mut gathered = vec![0.0f32; frames1 * proj_input];
         for t in 0..frames1 {
-            let mut input = vec![0.0f32; proj_input];
             for b in 0..bins1 {
                 for c in 0..32 {
-                    input[b * 32 + c] = conv1[(t * bins1 + b) * 32 + c];
+                    gathered[t * proj_input + b * 32 + c] = conv1[(t * bins1 + b) * 32 + c];
                 }
             }
-            self.subsample_input_proj_linear.forward(
-                &input,
-                &mut x[t * cfg.hidden_size..(t + 1) * cfg.hidden_size],
-            );
         }
+        let mut x = vec![0.0f32; frames1 * cfg.hidden_size];
+        self.subsample_input_proj_linear
+            .forward_rows(&self.pool, &gathered, &mut x, frames1);
         for il in 0..cfg.depth {
             self.forward_conformer_layer(il, &mut x, frames1)?;
         }
 
         let mut proj = vec![0.0f32; frames1 * cfg.projection_dim];
-        let mut tmp = vec![0.0f32; cfg.projection_dim];
-        for t in 0..frames1 {
-            let src = &x[t * cfg.hidden_size..(t + 1) * cfg.hidden_size];
-            self.output_proj.forward(src, &mut tmp);
-            for j in 0..cfg.projection_dim {
-                proj[t * cfg.projection_dim + j] = tmp[j] + self.output_proj_bias[j];
+        self.output_proj
+            .forward_rows(&self.pool, &x, &mut proj, frames1);
+        for row in proj.chunks_exact_mut(cfg.projection_dim) {
+            for (value, bias) in row.iter_mut().zip(self.output_proj_bias.iter()) {
+                *value += bias;
             }
         }
         Ok(proj)
@@ -880,14 +877,13 @@ impl<'a> EmbeddingGemmaAudioModel<'a> {
         let tower = self.encode_tower(pcm16)?;
         let mut output =
             vec![0.0f32; tower.len() / self.config.projection_dim * self.audio_embed.weight.n_out];
-        for (input, out) in tower
-            .chunks_exact(self.config.projection_dim)
-            .zip(output.chunks_exact_mut(self.audio_embed.weight.n_out))
-        {
-            let mut normalized = input.to_vec();
-            crate::ops::norm::rms_unit_inplace(&mut normalized, RMS_NORM_EPS);
-            self.audio_embed.forward(&normalized, out);
+        let rows = tower.len() / self.config.projection_dim;
+        let mut normalized = tower;
+        for row in normalized.chunks_exact_mut(self.config.projection_dim) {
+            crate::ops::norm::rms_unit_inplace(row, RMS_NORM_EPS);
         }
+        self.audio_embed
+            .forward_rows(&self.pool, &normalized, &mut output, rows);
         Ok(output)
     }
 
