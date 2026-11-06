@@ -763,5 +763,19 @@
       "reading": "the engine's CPU decode is 17x the upstream PyTorch CPU decode (15.2 against 0.90 tok/s) because it reads only the eight active experts per layer in Q8_0 and uses the NEON kernels, while the reference runs transformers' fallback kernels without causal_conv1d or flash-linear-attention; on the GPU the reference is slightly ahead of the engine's device path (4.71 against 3.8 tok/s), and the engine's prefill is 4.4x faster (0.632 against 2.75 s)",
       "caveat": "the PyTorch numbers are a floor, not an optimized reference: the reference implementations of causal_conv1d and chunk_gated_delta_rule are used, so an installed flash-linear-attention would move them"
     }
+  },
+  "embeddinggemma2_reverification_2026_11_06": {
+    "host": "aarch64 (NVIDIA GB10 box), release-fast",
+    "weights": "reproduced byte-identically with the repository converter: models/EmbeddingGemma-2/model.safetensors (google/embeddinggemma-2 on ModelScope) -> models/embeddinggemma-2-GGUF/embeddinggemma-2-F16.gguf, 1381933504 bytes, sha256 02a3e8d7d28993e54edba085031f331cb4f9e39ebea1a32aa8887c666a03419c",
+    "tests": {
+      "embeddinggemma_2_text_oracle": "1 passed (13.12 s) against the HF transformers reference",
+      "embeddinggemma_2": "16 passed (contract tests)",
+      "embeddinggemma_2_smoke": "1 passed",
+      "embeddinggemma_2_audio_smoke": "1 passed (10.88 s)",
+      "embeddinggemma_2_vision_smoke": "1 passed",
+      "embeddinggemma_2_multimodal_oracle": "2 passed (8.14 s)"
+    },
+    "entry_points": "CLI --embedding text 768 dims; CLI --embedding --image media path 768 dims (about 51 s for one 64x64 image); HTTP /v1/embeddings returns a 768-dim vector",
+    "note": "the media path is slow on this host; not investigated further here since the migration is the task"
   }
 }
