@@ -14,6 +14,14 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
     while i < args.len() {
         parsed_flags.push(i);
         match args[i].as_str() {
+            "--image-to-3d" => options.image_to_3d = true,
+            "--geometry-mode" => {
+                options.geometry_mode =
+                    Some(required_string_value(args, &mut i, "--geometry-mode")?)
+            }
+            "--num-gaussians" => {
+                options.num_gaussians = Some(required_usize_value(args, &mut i, "--num-gaussians")?)
+            }
             "--yue2" => options.yue2 = true,
             "--dreamx" => options.dreamx = true,
             "--astronex" => options.astronex = true,

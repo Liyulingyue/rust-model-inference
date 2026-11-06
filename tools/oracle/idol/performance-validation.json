@@ -1,0 +1,121 @@
+{
+  "started_at": "2026-11-03T03:11:25.018491+00:00",
+  "source_base_commit": "8f39f278d512f8e46991b3d960bb72eac9b94aed",
+  "profile": "release",
+  "threads": 16,
+  "steps": 5,
+  "cfg": 3,
+  "num_gaussians": 262144,
+  "seed": 42,
+  "mode": "synthetic",
+  "host": "RTX 5090 / Xeon Gold 6138",
+  "compute": "vulkan",
+  "command": [
+    "target/native/release/rust-model-inference",
+    "--image-to-3d",
+    "--model",
+    "models/idol",
+    "--components",
+    "models",
+    "--image",
+    "artifacts/idol/avocado-input.png",
+    "--out",
+    "/home/tianchuan/rust-model-inference-idol/artifacts/idol/perf/20261103-vulkan-5090-5/avocado.ply",
+    "--geometry-mode",
+    "synthetic",
+    "--seed",
+    "42",
+    "--steps",
+    "5",
+    "--cfg",
+    "3",
+    "--num-gaussians",
+    "262144",
+    "--compute",
+    "vulkan",
+    "--threads",
+    "16"
+  ],
+  "binary_sha256": "cbba44ae507d44d4167c9d435bc3d4ce289afc79e1ac96eecde514c6000f3f3d",
+  "exit_code": -11,
+  "elapsed_seconds": 1488.1812884835526,
+  "max_rss_kib": 18075400,
+  "user_seconds": 1908.148236,
+  "system_seconds": 319.499586,
+  "status": "output_validated_process_failed",
+  "output": {
+    "output_validated": true,
+    "producer_exit_code": -11,
+    "producer_status": "failed",
+    "gaussians": 262144,
+    "properties": 17,
+    "ply_bytes": 17826208,
+    "ply_sha256": "2d8fb4bf34960b66f217f2647a6f55d0692e8d4f665f3e485f023af3c2d2cf9e",
+    "camera": {
+      "yaw": 0.37496700998994204,
+      "pitch": 0.13235408928243342,
+      "radius": 1000.0,
+      "fov": 0.07002071375042525
+    },
+    "note": "PLY validation passed independently after the producer crashed during exit. This does not count as a clean CLI success."
+  },
+  "input_sha256": "773a01e6d0fefa64e3a601d62bb1ef118d874f603b0aa87403613733cbc07b27",
+  "stage_cumulative_seconds": {
+    "preprocess": 0.077,
+    "conditioning": 177.568,
+    "sampling": 1373.053,
+    "decode": 1460.423
+  },
+  "stage_seconds": {
+    "preprocess": 0.077,
+    "conditioning": 177.491,
+    "sampling": 1195.4850000000001,
+    "decode": 87.36999999999989
+  },
+  "sample_completion_seconds": [
+    462.2062840014696,
+    701.6822862401605,
+    934.9247358478606,
+    1167.8029738198966,
+    1397.070013128221
+  ],
+  "sample_intervals_seconds": [
+    260.6207284014672,
+    239.47600223869085,
+    233.2424496077001,
+    232.878237972036,
+    229.26703930832446
+  ],
+  "time_to_ply_seconds": 1484.6249304385856,
+  "device_counters": {
+    "submissions": 49122,
+    "static_uploads": 729,
+    "static_upload_bytes": 7193512512,
+    "host_write_bytes": 216930471048,
+    "host_read_bytes": 161744313832,
+    "transfer_submissions": 728,
+    "live_allocation_bytes": 16928628096,
+    "peak_allocation_bytes": 16930594192
+  },
+  "gpu_memory_peak_mib": 6178,
+  "gpu_memory_note": "GPU 1 device memory sampled every five seconds with nvidia-smi, not an exact process allocation peak.",
+  "source_note": "Formal release built on target host; final test-only edits and restoration of unused grouped-matmul upload do not change the Idol inference path.",
+  "benchmark_note": "Shared host, including concurrent test compilation during part of this run; single cold generation, not a dedicated throughput benchmark.",
+  "quality_note": "Five-step preview only; default 50-step native quality was not completed. Render is a diagnostic CPU Gaussian preview, not official-rasterizer parity.",
+  "shutdown_note": "Producer wrote PLY then exited with SIGSEGV (-11). Independent finite/schema validation passed. Similar post-summary device-test crashes also occur on the unmodified baseline; root cause remains unresolved.",
+  "preview": {
+    "renderer": "CPU NumPy, covariance projection and back-to-front alpha blending; diagnostic preview, not an official rasterizer parity claim",
+    "views": 8,
+    "visual_inspection": "Two avocado halves recognizable; floating and displaced cut surfaces/pit visible. Five-step diagnostic preview only.",
+    "files": {
+      "contact-sheet.png": {
+        "bytes": 194053,
+        "sha256": "5c556e7f2b47f23eb3e9db46c5ecd34c42e6ad2b9a8cddb24b3336129cc97ccd"
+      },
+      "turntable.gif": {
+        "bytes": 97786,
+        "sha256": "db7e66abea108ba86c85b34734a700353f2b9492d83e3c9ea18156a4dfaca149"
+      }
+    }
+  }
+}

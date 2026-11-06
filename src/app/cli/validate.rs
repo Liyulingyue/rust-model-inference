@@ -4,6 +4,12 @@ use super::options::{
 use super::types::{normalize_tts_language, CliOptions};
 
 pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
+    if crate::app::geometry::selected(options) {
+        return crate::app::geometry::validate_options(options);
+    }
+    if options.geometry_mode.is_some() || options.num_gaussians.is_some() {
+        return Err("--geometry-mode and --num-gaussians require --image-to-3d".into());
+    }
     if options.adapter.is_some() && options.system_one_request.is_none() {
         return Err("--adapter requires --system-one-request".into());
     }

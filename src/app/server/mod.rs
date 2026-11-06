@@ -1,6 +1,7 @@
 pub mod api;
 mod auk;
 mod forecast;
+mod geometry;
 mod prediction;
 mod rerank;
 use std::path::PathBuf;
@@ -81,6 +82,7 @@ enum Backend {
     /// text routes and adds the image prediction route.
     WeVisOne(WeVisOneBackend),
     UnlimitedOcr(UnlimitedOcrBackend),
+    Idol(IdolBackend),
     Embedding(EmbeddingBackend),
     Asr(AsrBackend),
     HySimulMt(HySimulMtBackend),
@@ -118,6 +120,10 @@ struct WeVisOneBackend {
     decoder: Option<Arc<dyn TensorSource>>,
     /// Generation options for the prediction route.
     options: crate::models::wevisone_vl::PredictionOptions,
+}
+
+struct IdolBackend {
+    model: Arc<crate::models::idol::Model>,
 }
 
 struct UnlimitedOcrBackend {
@@ -1125,6 +1131,11 @@ fn build_backend(
     options: &CliOptions,
     auk_source: Option<Arc<dyn TensorSource>>,
 ) -> Result<Arc<Backend>, String> {
+    if crate::app::geometry::selected(options) {
+        return Ok(Arc::new(Backend::Idol(IdolBackend {
+            model: Arc::new(crate::app::geometry::load(options)?),
+        })));
+    }
     options.validate_compute_mode()?;
     options.compute_policy().check_build()?;
     let _scope = options.compute_policy().enter_legacy_scope();
@@ -1927,13 +1938,15 @@ pub fn run_server() {
     // Apply the parsed flag before any request can be decoded.
     api::image_input::set_allow_remote(allow_remote_images);
 
-    let options = match parse_cli_options(&cli_args) {
+    let mut options = match parse_cli_options(&cli_args) {
         Ok(value) => value,
         Err(error) => {
             eprintln!("{error}");
             std::process::exit(2);
         }
     };
+    // The standalone server binary enters here without a literal --serve flag.
+    options.serve = true;
     if let Err(error) = reject_unsupported_server_modes(&options) {
         eprintln!("{error}");
         std::process::exit(2);
@@ -1941,7 +1954,6 @@ pub fn run_server() {
     // `--tts` validation requires non-empty `--prompt` and `--out`, but the
     // server receives both over HTTP. Inject placeholders so validation
     // passes; the real values come from `/v1/audio/speech` requests.
-    let mut options = options;
     if options.tts {
         if options.prompt.as_deref().is_none_or(str::is_empty) {
             options.prompt = Some("placeholder".to_string());
@@ -2018,6 +2030,7 @@ pub fn run_server() {
         Backend::Gliner2(_) => "gliner2",
         Backend::Gliner2Boundary(_) => "gliner2-boundary",
         Backend::Timestral(_) => "timestral",
+        Backend::Idol(_) => "idol",
     };
     eprintln!(
         "Model '{}' loaded (mode={}, host={}, port={})",
@@ -2074,6 +2087,10 @@ pub fn run_server() {
         // "this server does not do that".
         Backend::Gliner2Boundary(_) => router.route("/v1/jev/boundary", post(api::jev_boundary)),
         Backend::Timestral(_) => router.route("/v1/forecast", post(forecast::forecast)),
+        Backend::Idol(_) => router.route(
+            "/v1/3d/generations",
+            post(geometry::generate).layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
+        ),
     };
     if options.compute_policy() == crate::compute::ComputePolicy::Vulkan
         && matches!(

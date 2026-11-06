@@ -15,6 +15,9 @@ pub enum EmbeddingOutput {
 
 #[derive(Debug, Default)]
 pub struct CliOptions {
+    pub image_to_3d: bool,
+    pub geometry_mode: Option<String>,
+    pub num_gaussians: Option<usize>,
     pub yue2: bool,
     pub dreamx: bool,
     pub astronex: bool,

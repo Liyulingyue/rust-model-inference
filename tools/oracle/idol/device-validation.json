@@ -1,0 +1,260 @@
+{
+  "date": "2026-11-03",
+  "host": "Ubuntu 22.04.5 / Xeon Gold 6138 / RTX 5090 32 GiB; NVIDIA 570.153.02",
+  "oracle_commit": "4702a7f00850e34b6e83a2170cc123c3e9570744",
+  "inputs_sha256": "015f2ddd8a92cdbde37c0b572aa4dd8b217c75c02a08eba33fd5d4483e8a8560",
+  "gates_sha256": "01287e798a9466cc487148750cd4693671cea1ad77efa0d9bec0e73194e0c8e1",
+  "fixture_note": "144 unchanged oracle tensors copied server to server; only absolute binary paths relocated; original trace hash ca5d47555e1eb868e9787565faa9da29385e32c8f24e5068a9129a0950cb69b9, relocated 913a3029d89045cb5148219fac48467c136395887d965d96200a4b4665db75de",
+  "configs": {
+    "cpu": {
+      "passed": true,
+      "checkpoint_count": 144,
+      "endpoints": [
+        {
+          "name": "idol.preprocess",
+          "shape": [
+            64,
+            64,
+            3
+          ],
+          "max_abs": 0.0,
+          "rmse": 0.0,
+          "relative_rmse": 0.0,
+          "cosine": 1.0,
+          "passed": true
+        },
+        {
+          "name": "idol.denoiser.velocity_latent",
+          "shape": [
+            1,
+            32,
+            16
+          ],
+          "max_abs": 0.005012989044189453,
+          "rmse": 0.0014002683220331836,
+          "relative_rmse": 0.0012656758458191402,
+          "cosine": 0.9999992013749827,
+          "passed": true
+        },
+        {
+          "name": "idol.denoiser.velocity_camera",
+          "shape": [
+            1,
+            1,
+            5
+          ],
+          "max_abs": 0.019348502159118652,
+          "rmse": 0.011163980273489743,
+          "relative_rmse": 0.01119446319434203,
+          "cosine": 0.9999373550527572,
+          "passed": true
+        },
+        {
+          "name": "idol.octree.output",
+          "shape": [
+            12,
+            8
+          ],
+          "max_abs": 0.029169559478759766,
+          "rmse": 0.0073755736897100545,
+          "relative_rmse": 0.0014599841677411074,
+          "cosine": 0.9999989361969973,
+          "passed": true
+        },
+        {
+          "name": "idol.gaussian.output",
+          "shape": [
+            12,
+            480
+          ],
+          "max_abs": 0.028026878833770752,
+          "rmse": 0.0029061405676772943,
+          "relative_rmse": 0.0008497142552344678,
+          "cosine": 0.9999996399902296,
+          "passed": true
+        },
+        {
+          "name": "idol.ply",
+          "shape": [
+            384,
+            17
+          ],
+          "max_abs": 4.76837158203125e-07,
+          "rmse": 4.912897003806623e-08,
+          "relative_rmse": 1.2089615487304451e-08,
+          "cosine": 0.9999999999999999,
+          "passed": true
+        },
+        {
+          "name": "idol.condition.feature1",
+          "shape": [
+            1,
+            21,
+            1280
+          ],
+          "max_abs": 1.5139579772949219e-05,
+          "rmse": 1.363131250941511e-06,
+          "relative_rmse": 1.363278330360812e-06,
+          "cosine": 0.9999999999990709,
+          "passed": true
+        },
+        {
+          "name": "idol.condition.feature2",
+          "shape": [
+            1,
+            21,
+            128
+          ],
+          "max_abs": 0.0234375,
+          "rmse": 0.004566546836941311,
+          "relative_rmse": 0.006757809123817214,
+          "cosine": 0.9999772149981005,
+          "passed": true
+        },
+        {
+          "name": "idol.background.alpha",
+          "shape": [
+            1,
+            64,
+            64,
+            1
+          ],
+          "max_abs": 2.1827872842550278e-10,
+          "rmse": 2.0474055077045957e-11,
+          "relative_rmse": 1.907648008092161e-06,
+          "cosine": 0.999999999998289,
+          "passed": true
+        }
+      ]
+    },
+    "gpu": {
+      "passed": true,
+      "checkpoint_count": 144,
+      "endpoints": [
+        {
+          "name": "idol.preprocess",
+          "shape": [
+            64,
+            64,
+            3
+          ],
+          "max_abs": 0.0,
+          "rmse": 0.0,
+          "relative_rmse": 0.0,
+          "cosine": 1.0,
+          "passed": true
+        },
+        {
+          "name": "idol.denoiser.velocity_latent",
+          "shape": [
+            1,
+            32,
+            16
+          ],
+          "max_abs": 0.0043298304080963135,
+          "rmse": 0.001373478346961793,
+          "relative_rmse": 0.00124146089799491,
+          "cosine": 0.9999992316490427,
+          "passed": true
+        },
+        {
+          "name": "idol.denoiser.velocity_camera",
+          "shape": [
+            1,
+            1,
+            5
+          ],
+          "max_abs": 0.012430667877197266,
+          "rmse": 0.006621408164943301,
+          "relative_rmse": 0.006639487725823747,
+          "cosine": 0.9999784726700868,
+          "passed": true
+        },
+        {
+          "name": "idol.octree.output",
+          "shape": [
+            12,
+            8
+          ],
+          "max_abs": 0.021912574768066406,
+          "rmse": 0.006021561633833358,
+          "relative_rmse": 0.0011919594353371015,
+          "cosine": 0.9999992970363858,
+          "passed": true
+        },
+        {
+          "name": "idol.gaussian.output",
+          "shape": [
+            12,
+            480
+          ],
+          "max_abs": 0.017161905765533447,
+          "rmse": 0.002154748577384904,
+          "relative_rmse": 0.0006300179017539708,
+          "cosine": 0.9999998020546427,
+          "passed": true
+        },
+        {
+          "name": "idol.ply",
+          "shape": [
+            384,
+            17
+          ],
+          "max_abs": 4.76837158203125e-07,
+          "rmse": 4.912897003806623e-08,
+          "relative_rmse": 1.2089615487304451e-08,
+          "cosine": 0.9999999999999999,
+          "passed": true
+        },
+        {
+          "name": "idol.condition.feature1",
+          "shape": [
+            1,
+            21,
+            1280
+          ],
+          "max_abs": 1.9669532775878906e-05,
+          "rmse": 2.322909785333853e-06,
+          "relative_rmse": 2.323160423137131e-06,
+          "cosine": 0.9999999999973015,
+          "passed": true
+        },
+        {
+          "name": "idol.condition.feature2",
+          "shape": [
+            1,
+            21,
+            128
+          ],
+          "max_abs": 0.0234375,
+          "rmse": 0.0043516736559116,
+          "relative_rmse": 0.006439828821616085,
+          "cosine": 0.9999793012768176,
+          "passed": true
+        },
+        {
+          "name": "idol.background.alpha",
+          "shape": [
+            1,
+            64,
+            64,
+            1
+          ],
+          "max_abs": 2.6193447411060333e-10,
+          "rmse": 4.0397647443369496e-11,
+          "relative_rmse": 3.7640072465836223e-06,
+          "cosine": 0.9999999999929591,
+          "passed": true
+        }
+      ]
+    }
+  },
+  "final_focused_run": {
+    "log": "artifacts/idol/final-idol-gpu.log",
+    "summary": "31 passed; 0 failed; 0 ignored",
+    "exit_code": 0,
+    "seconds": 93.47,
+    "scope": "All Idol tests including physical-device primitives, production joint attention 12294x12294 and sampled CPU queries, CPU-scope no submissions, both convolution layouts, and 144-checkpoint real-weight oracle.",
+    "oracle_device_submissions": 1901
+  }
+}

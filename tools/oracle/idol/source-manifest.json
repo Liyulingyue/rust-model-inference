@@ -1,0 +1,20 @@
+{
+  "commit": "4702a7f00850e34b6e83a2170cc123c3e9570744",
+  "files": {
+    "demo/app.py": "9e17d3bc1dfc11756cd5001d3d4fbcf201e5354b6dbc37272dd53251035d0031",
+    "demo/model.py": "c35a6dc1971b6cd3941d7c4109ce676b9a0ac204968af00698827f19ae5a0e0d",
+    "idol/__init__.py": "609efc7390b29f2eb504e70dd274bf07e03e92d2e6a7adaff054b9abd7778e27",
+    "idol/camera.py": "5576043593454e492403b821d1e355433e71f515a2d4406a51c53c30fc097935",
+    "idol/conditioning.py": "8c9cc50d327df3a5269cda392ef46cf4ed9c1e603f42f46050beda83f355f5ab",
+    "idol/gaussian.py": "f181ae2eaf5e44fee3055bd032d57b5545ad2e38e4d2315ae3c21a2fb4f85217",
+    "idol/models/__init__.py": "228d5d073a601cbd20e188bcee45135ee3313eafc2537549d0b33d5325436b4a",
+    "idol/models/birefnet.py": "7c8e5e1021978225740bc9e0a94beef2fba1545a2ffc739235fab6aadc244068",
+    "idol/models/decoder.py": "ffaf304f0924360782f902a126efac72084ff907b23db8721b4937f0c3175bbd",
+    "idol/models/dit.py": "fbe725cc478b0acd245d9404ac8d9df327ebfbf79fe51c954d94b005c5bd6af4",
+    "idol/models/layers.py": "2dbf24107396194636c9a2e89e7acee1bcf91b14dba1b4cde0318cb85b3f482f",
+    "idol/pipeline.py": "091fc0fe7d8f66f5f9f63795a91f9b654e12cf879d94bf03624f39c360ddd4a1",
+    "idol/preprocess.py": "b6ef41020760b1d1ffbee2f82a2eb22752797d8c474f7b3eaa25f2a6413a1ffe",
+    "idol/sample.py": "4c32003164917631b5b650640ee7ef44d2dfd0198cd70539f6d02d6d7a56fd62",
+    "idol/sampler.py": "532987b5599be678361c2fcf566335bb3e1b0171696f985818d10b7460bfc8b0"
+  }
+}

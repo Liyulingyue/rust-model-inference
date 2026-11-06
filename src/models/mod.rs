@@ -29,6 +29,7 @@ pub mod gliner_boundary;
 pub mod gliner_ettin;
 pub mod hy_simulmt;
 pub mod hybrid;
+pub mod idol;
 pub mod laya;
 pub mod lfm2;
 pub mod lfm25;

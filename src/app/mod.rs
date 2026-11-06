@@ -1,6 +1,7 @@
 pub(crate) mod asr;
 pub mod cli;
 pub(crate) mod diffusion;
+pub mod geometry;
 pub(crate) mod jev;
 pub(crate) mod media;
 pub(crate) mod omni;
