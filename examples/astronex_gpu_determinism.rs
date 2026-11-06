@@ -5,11 +5,9 @@
 //! the same binary, and the divergence was already present in the sampled
 //! latent, so it is not the VAE. This probe runs the same operator twice with
 //! identical inputs and compares the results bit for bit.
-use rust_model_inference::models::diffusion::dreamx::kernels::{
-    attention_scalar_f32, AttentionSpec,
-};
 use rust_model_inference::ops::float::enable_gpu;
 use rust_model_inference::ops::get_vulkan_context;
+use rust_model_inference::ops::nn::{attention_scalar_f32, AttentionSpec};
 
 fn synth(len: usize, seed: u64) -> Vec<f32> {
     let mut state = seed | 1;
@@ -64,9 +62,7 @@ fn probe_attention(query_tokens: usize, key_tokens: usize, heads: usize, head_di
 /// VAE uses windowed attention with a single head whose head_dim is the
 /// channel count, so both shapes have to be checked.
 fn probe_correctness() {
-    use rust_model_inference::models::diffusion::dreamx::kernels::{
-        attention_scalar_f32, AttentionSpec,
-    };
+    use rust_model_inference::ops::nn::{attention_scalar_f32, AttentionSpec};
     let mut state: u64 = 0x9E3779B97F4A7C15;
     let mut next = move || {
         state ^= state << 13;
@@ -156,9 +152,7 @@ fn probe_correctness() {
 /// destroyed and recreated whenever a larger shape shows up, so a shape can
 /// give different answers depending on what ran before it.
 fn probe_shape_interference() {
-    use rust_model_inference::models::diffusion::dreamx::kernels::{
-        attention_scalar_f32, AttentionSpec,
-    };
+    use rust_model_inference::ops::nn::{attention_scalar_f32, AttentionSpec};
     let mut state: u64 = 0x243F6A8885A308D3;
     let mut next = move || {
         state ^= state << 13;

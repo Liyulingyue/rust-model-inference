@@ -98,6 +98,9 @@ pub fn run_inference(
         source
     };
 
+    if arch == "hy_v3" {
+        return Err("Hy-SimulMT requires --audio with a mono 16 kHz PCM16 WAV; use --language for the target language".into());
+    }
     if arch == "hunyuan-dense" {
         crate::app::text::run_hunyuan_inference(
             source.clone(),
@@ -174,6 +177,19 @@ pub fn run_inference(
             max_context,
             repetition_penalty,
             thinking,
+            jinja,
+        )
+    } else if arch == "qwen35moe" {
+        crate::models::occamy::run::run_inference(
+            source.clone(),
+            prompt,
+            max_tokens,
+            temperature,
+            n_threads_arg,
+            bench,
+            kv_format,
+            max_context,
+            repetition_penalty,
             jinja,
         )
     } else if arch == "xing4_0" {

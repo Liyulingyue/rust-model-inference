@@ -153,7 +153,7 @@ pub(super) fn attention(
                 k,
                 v,
                 &mut output,
-                crate::models::diffusion::dreamx::kernels::AttentionSpec {
+                crate::ops::nn::AttentionSpec {
                     query_tokens: q.len() / width,
                     key_tokens: k.len() / width,
                     query_heads: heads,
@@ -231,11 +231,11 @@ mod tests {
                     .collect();
                 let v: Vec<_> = k.iter().map(|v| v * 0.7).collect();
                 let actual = attention(&q, &k, &v, width, heads).expect("device attention");
-                let expected = crate::models::diffusion::dreamx::kernels::attention_on_cpu(
+                let expected = crate::ops::nn::attention_on_cpu(
                     &q,
                     &k,
                     &v,
-                    crate::models::diffusion::dreamx::kernels::AttentionSpec {
+                    crate::ops::nn::AttentionSpec {
                         query_tokens: queries,
                         key_tokens: keys,
                         query_heads: heads,
@@ -286,11 +286,11 @@ mod tests {
                 .iter()
                 .flat_map(|&i| q[i * width..(i + 1) * width].iter().copied())
                 .collect();
-            let expected = crate::models::diffusion::dreamx::kernels::attention_on_cpu(
+            let expected = crate::ops::nn::attention_on_cpu(
                 &sampled,
                 &k,
                 &v,
-                crate::models::diffusion::dreamx::kernels::AttentionSpec {
+                crate::ops::nn::AttentionSpec {
                     query_tokens: indices.len(),
                     key_tokens: keys,
                     query_heads: heads,

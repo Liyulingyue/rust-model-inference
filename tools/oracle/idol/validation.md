@@ -2,6 +2,25 @@
 
 Validated on the user-provided Linux x86_64 SSH host (AMD EPYC 9334). Although the host advertises 128 logical CPUs and about 503 GiB RAM, the container is capped at **16 CPUs and 55 GiB RAM**. Rust 1.94.1, `release-fast`, repository-native SIMD/Rayon. Weights, fixtures and generated meshes stayed on the remote host; ModelScope direct downloads worked, so no Mac weight/cache storage or streaming relay was needed.
 
+## Main integration — 2026-11-06
+
+Merged upstream `21c657a6547b2510c5cd47f377b07f59f3ccf931` (10 commits) into the existing Idol branch. Conflict resolution preserves the Vela3/System One entrypoint, AuK backend construction, shared-operator migration, Q8 layout-aware cache keys, descriptor recycling and grouped upload behavior. Single native-layout projections retain device-static uploads. Idol attention now references `ops::nn`, where main moved the former DreamX helpers. Both safetensors scalar tests remain, with separate temporary paths. A new regression rejects Idol/System One options in either task mode; neither entrypoint silently ignores the other task's flags. CLI help lists both tasks and Idol's CPU/Auto/Vulkan policies.
+
+Local macOS ARM validation uses `cargo test --locked --profile release-fast --features vulkan --lib <filter>` (the already-built test executable was reused for subsequent filters):
+
+| Filter | Passed | Failed | Ignored |
+|---|---:|---:|---:|
+| `idol` | 27 | 0 | 3 |
+| `app::geometry::` | 4 | 0 | 0 |
+| `app::cli::` | 49 | 0 | 0 |
+| `app::server::` | 98 | 0 | 0 |
+| `format::safetensors::` | 4 | 0 | 1 |
+| `compute::tests::` | 10 | 0 | 0 |
+| `batched_linear_layout_` | 2 | 0 | 0 |
+| `ops::nn::tests::` | 10 | 0 | 0 |
+
+`cargo check --locked --profile release-fast --features vulkan --bin rust-model-inference --bin rust-model-server` passes. All 122 merged shader manifest hashes match the actual files; no shaders were regenerated during conflict resolution. Rustfmt and diff whitespace checks pass. Physical-device tests, real-weight oracles and full-size generation were not rerun for this merge; the numerical/performance results below retain their original source and environment boundaries. This is focused validation, not a new full-library baseline comparison.
+
 ## Native Vulkan follow-up — 2026-11-03
 
 The original CPU-only / strict-Vulkan rejection conclusion below is superseded by the native Vulkan implementation in this follow-up. No HIP, CUDA inference, BLAS, or new Rust dependency was added. Projection, attention and convolution reuse the repository's Vulkan operators; patch preparation, normalization, elementwise operations and geometric postprocessing remain on CPU. CPU explicitly avoids device initialization; Auto selects a usable physical Vulkan device or falls back; strict Vulkan reports device failures instead of silently continuing the large CPU path.

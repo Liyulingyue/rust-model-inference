@@ -154,7 +154,7 @@ mod tests {
 
     #[test]
     fn scalar_storage_has_one_element_and_rejects_invalid_length() {
-        let path = std::env::temp_dir().join(format!("rmi-scalar-{}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("rmi-scalar-length-{}", std::process::id()));
         for (end, valid) in [(4, true), (0, false), (8, false)] {
             let header =
                 format!(r#"{{"scalar":{{"dtype":"F32","shape":[],"data_offsets":[0,{end}]}}}}"#);
@@ -169,6 +169,25 @@ mod tests {
                 assert_eq!(source.tensor_slice("scalar").unwrap().len(), 4);
             }
         }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn scalar_readout_is_one_element_and_keeps_range_validation() {
+        let path = std::env::temp_dir().join(format!("rmi-scalar-readout-{}", std::process::id()));
+        let header = br#"{"log_tau":{"dtype":"F32","shape":[],"data_offsets":[0,4]}}"#;
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(header);
+        bytes.extend_from_slice(&1.25f32.to_le_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+        let source = SafetensorSource::open(&[&path]).unwrap();
+        assert_eq!(source.tensor_info("log_tau").unwrap().dims, [1]);
+        assert_eq!(
+            source.tensor_slice("log_tau").unwrap(),
+            &1.25f32.to_le_bytes()
+        );
+        std::fs::write(&path, &bytes[..bytes.len() - 1]).unwrap();
+        assert!(SafetensorSource::open(&[&path]).is_err());
         std::fs::remove_file(path).unwrap();
     }
 

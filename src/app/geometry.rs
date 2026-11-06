@@ -32,6 +32,8 @@ pub fn validate_options(o: &CliOptions) -> Result<(), String> {
         || o.timestral_request.is_some()
         || o.wevisone_request.is_some()
         || o.wevisone_decoder.is_some()
+        || o.system_one_request.is_some()
+        || o.adapter.is_some()
         || o.clm_head.is_some()
         || o.gliner2_decide
         || o.gliner2_boundary
@@ -250,5 +252,40 @@ mod tests {
         o.max_tokens = None;
         o.image = Some("ignored.png".into());
         assert!(validate_options(&o).is_err());
+    }
+
+    #[test]
+    fn system_one_and_geometry_options_are_mutually_exclusive() {
+        let mut o = CliOptions {
+            image_to_3d: true,
+            model: "idol".into(),
+            image: Some("a.png".into()),
+            out: Some("a.ply".into()),
+            ..CliOptions::default()
+        };
+        o.system_one_request = Some("request.json".into());
+        assert!(crate::app::validate_cli_options(&o)
+            .unwrap_err()
+            .contains("Idol"));
+        o.system_one_request = None;
+        o.adapter = Some("adapter".into());
+        assert!(crate::app::validate_cli_options(&o)
+            .unwrap_err()
+            .contains("Idol"));
+
+        let mut o = CliOptions {
+            model: "vela3".into(),
+            system_one_request: Some("request.json".into()),
+            num_gaussians: Some(32768),
+            ..CliOptions::default()
+        };
+        assert!(crate::app::validate_cli_options(&o)
+            .unwrap_err()
+            .contains("--image-to-3d"));
+        o.num_gaussians = None;
+        o.geometry_mode = Some("real".into());
+        assert!(crate::app::validate_cli_options(&o)
+            .unwrap_err()
+            .contains("--image-to-3d"));
     }
 }

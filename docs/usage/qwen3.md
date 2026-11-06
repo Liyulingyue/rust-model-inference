@@ -101,25 +101,58 @@ n_ff=9728, head_dim=128, n_ctx=262144, freq_base=5e6, M-RoPE [24,20,20,0]`）。
 
 **Qwen3-VL 其它尺寸 (`-2B` / `-8B` / `-32B` / `-30B-A3B` / `-235B-A22B`) 状态**：
 
-- **`-2B`（`-Instruct` 与 `-Thinking` 两个 GGUF 均下载并尝试过）——本仓库未适配**。
-  在 4 核 + 7.5 GiB RAM 上 2B 端到端不工作：
-  - 文本-only + ChatML: 首 token 预测 `151645`（`<|im_end|>` = EOS），0 输出 token；
-  - 文本-only + `--thinking` flag: 工作（首 token 是普通文本）；
-  - 多模态 + ChatML: 首 token 仍预测 `151645`，立即结束；
-  - 多模态 + 字面文字 chat (`\nuser\n…assistant\n` 各种变体): 不预测 EOS，但陷入退化循环
-    —— 反复输出 `\n\n\n...` / `####...` / `sponsorsponsor...` / `mainmainmain...` 等；
-  - 多模态 + 高温度采样 (temp=2.0 + rep_penalty 1.1): 产出 multilingual 乱码
-    （`abandoningดีๆ imorig eloney craz…`），无可用语义。
-  - 根因疑似：2B-Instruct GGUF 的 `tokenizer.chat_template` 用字面文字 `user\n…\nassistant\n`
-    格式而非 ChatML 的 `<|im_start|>…<|im_end|>` tokens；我们的代码走 ChatML。
-    4B 能容忍两种格式，2B 不能。即便换成字面文字也只是把 "首 token = EOS" 问题替换成
-    "生成退化为重复 token"，vision encoder 输出与 2B 的 LLM 主干也可能有交互问题。
-  - 2B 容量 (2.1B) 对 vision encoder embedding 的容错较差也是候选原因之一。
-  - 暂时不打算修，等用户进一步指令。
+- **`-2B`——根因重新定位（2026-11-04 更正此前的结论）；官方 `-Instruct` / `-Thinking` GGUF 本身未复测。**
+  此前记录的症状（文本-only 首 token = EOS、多模态退化为重复 token、高温采样出乱码）
+  与 `qwen3vl` 2B 尺寸无关，也不是 chat template 的问题。
+
+  **原结论**：根因是 `exp_approx_avx2` 的 clamp 越界（`88.376_26` 让 `n` 达到 `-128`，
+  指数位溢出成 `-inf`，`silu` 变成 `-0`，FFN 通道被整个丢掉）。
+
+  **为什么被推翻**：`481ec939`（#186，2026-10-27，已在 main）给 AVX2 路径补了
+  `_mm256_andnot_ps(cmp(n, -126), …)` 掩码，把 `n < -126` 的 lane **清成 0**。
+  逐位模拟该指令序列：`-131.219` → clamp 到 `-88.376_26` → `z = 12582784.0`
+  → `n = -128` → `scale = -inf` → **被掩码清零** → `silu(131.219) = 131.219`
+  → `silu(gate)*up = -19893.98`，正是当年记下的「正确值」，**不是 `0.0`**。
+  也就是说负侧的 `-inf` 在 #186 之后就被中和了；而 oracle 的记录主机是
+  Apple Silicon（NEON 路径，用的是上游 `|n| > 126` 慢结构，从未受影响），
+  在从未中招的机器上模型是好的——AVX2 的 clamp 不可能是根因。
+
+  **新结论（实测）**：clamp 改动修的是**正侧**的溢出。`exp_approx_avx2` 用位移
+  构造 `2**n`，结果落在指数位 `n + 127` 上；`n = 128` 让指数位溢出成 `0xFF`，
+  函数对 `x ∈ (88.0999, 88.376_26]` 返回 `+inf`，而真值（`x = 88.376` 时
+  `2.4e38`）是能表示成 f32 的。唯一会把大正数喂进 `exp` 的调用方是 `silu`
+  （softmax 传的是 `v - max ≤ 0`，tanh 先钳到 ±10），对应 gate ∈ [-88.376, -88.1]，
+  真值约 `-3.7e-37`，所以新旧结果都是 ≈0——**溢出成 `+inf` 本身是错的，
+  但它不是当年 2B 症状的成因**。clamp 现为 `±88.0`（`n ≤ 127`），
+  并由 `fast_exp_clamp_keeps_the_exponent_inside_the_f32_exponent_field` 守住。
+
+  **图像路径另有一个独立根因**（PR #179 修掉）：`qwen3vl` 视觉塔此前用
+  `rope_mrope_interleaved` 旋转 Q/K，而它带的是**文本塔**的**交错轴分配**
+  （HF `apply_interleaved_mrope` / llama.cpp 的 `GGML_ROPE_TYPE_IMROPE`）。
+  视觉塔要的是**连续扇区**的轴分配（llama.cpp 的 `GGML_ROPE_TYPE_VISION`，
+  本仓库 `qwen35` 视觉塔一直是对的）。**两者的旋转配对都是 split-half（NeoX），
+  差的是轴分配**——配对没错，轴错了。轴分配错了以后，图像 embedding 的几何
+  关系是乱的，但模型照样能吐出一句通顺的描述——**幻觉而非报错**，比崩溃难查得多。
+
+  > 实测证据：官方 `Qwen3-VL-2B`（真实权重）喂一张「红圆 + 蓝方块」的图，
+  > 修复前的引擎答 “Two stylized, **overlapping ellipses**, one red and one blue”
+  > （形状与空间关系都错），修复后答
+  > “A red **circle** and a blue **square** are placed **side by side**”
+  > （完全正确）。对 llama.cpp 的跨实现对照：视觉投影 relative L2 从
+  > **0.5600**（交错轴）降到 **0.1635**（连续扇区轴，残差是 ViT 权重
+  > Q8_0 量化的包络）；F32 权重下是 **0.0034**。
+  > 详见 `tools/oracle/physbrain/README.md`。
+
+  官方 `-2B` GGUF 建议在升级后重测；`PhysBrain1.5-2B` 已端到端验证（文本 + 图像）。
 
 - **`-8B` / `-32B` / `-30B-A3B` / `-235B-A22B` 等更大尺寸**：Q4_K_M 量化后 ≥ 5 GB，
   在 4 核 + 7.5 GiB RAM 环境下未做端到端验证。需要更大机器才能跑。
 - 文本-only `-0.6B`（同 `-2B` 等 Instruct 模型）不在 ModelScope 上能找到 GGUF，本仓库未尝试。
+
+> **大图显存注意**：视觉塔对全部 patch 做全注意力，注意力分数缓冲是
+> `n_head * n_tokens^2 * 4B`。`PhysBrain1.5-2B` 的 2594×1557 原图会产生
+> 15876 个 patch，分数缓冲约 16 GB，直接把内存打满。缩到 768×461
+> （384 个 patch，约 9 MB）即可正常跑完。
 
 限制：
 

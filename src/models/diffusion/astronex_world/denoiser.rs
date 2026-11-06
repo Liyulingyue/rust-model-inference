@@ -1,15 +1,15 @@
 //! Astronex-World base Wan denoiser.
 
-use super::super::dreamx::kernels::{
-    attention_scalar_f32, checked_len, conv3d_with_options, gelu_approx_inplace, load_float_values,
-    AttentionSpec, Conv3dSpec, Linear,
-};
 use super::cache::KvCache;
 use super::{
     DIM, FFN, FREQ_DIM, HEADS, HEAD_DIM, LATENT_CHANNELS, LAYERS, PATCH, TEXT_DIM, TEXT_LEN,
 };
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
+use crate::ops::nn::{
+    attention_scalar_f32, checked_len, conv3d_with_options, gelu_approx_inplace, load_float_values,
+    AttentionSpec, Conv3dSpec, Linear,
+};
 use std::sync::Arc;
 
 pub(super) struct BranchCache {

@@ -19,12 +19,86 @@ use super::weights::{MellumLayerWeights, MellumModel};
 use crate::core::scratchpad::{KvCache, KvFormat, KvState};
 use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::Weight;
-use crate::ops::{dot_f32, quantize_q8_0_into, rms_norm, silu};
+use crate::ops::{dot_f32, rms_norm, silu};
 use std::sync::Arc;
 
 /// ggml's softmax clamp: `ggml_clamp(weights_sum, 6.103515625e-5, INFINITY)`.
 /// `6.103515625e-5` is the smallest positive normal f16.
-const MOE_WEIGHT_SUM_FLOOR: f32 = 6.103_515_6e-5;
+pub(crate) const MOE_WEIGHT_SUM_FLOOR: f32 = 6.103_515_6e-5;
+
+/// Scratch buffers for the quantized matmul path, shared across all projections.
+///
+/// `quantize_and_matmul_with_scratch` needs three temporary buffers whose
+/// sizes depend only on `n_in` (the widest projection input, `n_embd`).
+/// Reusing them across calls avoids per-projection allocation.
+pub struct ProjectScratch {
+    pub q8k_buf: Vec<crate::ops::quant::BlockQ8K>,
+    pub q8_buf: Vec<u8>,
+    pub scale_buf: Vec<f32>,
+}
+
+impl ProjectScratch {
+    fn new(max_n_in: usize) -> Self {
+        Self {
+            q8k_buf: vec![
+                crate::ops::quant::BlockQ8K {
+                    d: 0.0,
+                    qs: [0; crate::ops::quant::QK_K],
+                    bsums: [0; crate::ops::quant::QK_K / 16]
+                };
+                max_n_in / crate::ops::quant::QK_K
+            ],
+            q8_buf: vec![0u8; max_n_in],
+            scale_buf: vec![0.0f32; max_n_in.div_ceil(32)],
+        }
+    }
+}
+
+/// Buffers one attention step needs, sized once so the decode loop never
+/// allocates.
+///
+/// The batched prefill keeps its own copy: the two paths never run at the
+/// same time, but they must not share a buffer either, because the batched
+/// path walks several rows of the same layer back to back.
+pub(crate) struct AttnScratch {
+    /// Reused for the per-head softmax weights; sized to the widest visible
+    /// window (`min(capacity, n_swa)` for SWA layers, `capacity` otherwise).
+    pub probs: Vec<f32>,
+    pub k_window: Vec<f32>,
+    pub v_window: Vec<f32>,
+    /// V window transposed to `[head_dim_v, visible]` so each attention output
+    /// lane is a contiguous dot-product input.
+    pub attn_transposed: Vec<f32>,
+    /// Debug rows for the whole cache (masked keys = -INF), matching ggml's
+    /// `kq` / `kq_soft_max` shapes.
+    pub kq_row: Vec<f32>,
+    pub kq_probs: Vec<f32>,
+    /// The `kq` / `kq_soft_max` rows of every head, concatenated.
+    pub kq_debug: Vec<f32>,
+    pub kq_soft_max_debug: Vec<f32>,
+}
+
+impl AttnScratch {
+    pub(crate) fn new(config: &MellumConfig, capacity: usize) -> Self {
+        let head_dim = config.n_embd_head_k;
+        let head_dim_v = config.n_embd_head_v;
+        // The visible key window is bounded by the *sliding window* on SWA
+        // layers but by the whole sequence on the rest, so size every
+        // per-key buffer by `capacity` — the worst case is a non-SWA layer at
+        // the last position.
+        let window = capacity.max(1);
+        Self {
+            probs: vec![0.0; window],
+            k_window: vec![0.0; window * head_dim],
+            v_window: vec![0.0; window * head_dim_v],
+            attn_transposed: vec![0.0; window * head_dim_v],
+            kq_row: vec![0.0; window],
+            kq_probs: vec![0.0; window],
+            kq_debug: Vec::new(),
+            kq_soft_max_debug: Vec::new(),
+        }
+    }
+}
 
 /// Reusable per-token buffers, sized once so the decode loop never allocates.
 pub struct MellumScratch {
@@ -34,11 +108,6 @@ pub struct MellumScratch {
     pub k: Vec<f32>,
     pub v: Vec<f32>,
     pub attn: Vec<f32>,
-    /// Reused for the per-head softmax weights; sized to the widest visible
-    /// window (`min(capacity, n_swa)` for SWA layers, `capacity` otherwise).
-    pub probs: Vec<f32>,
-    pub k_window: Vec<f32>,
-    pub v_window: Vec<f32>,
     pub attn_proj: Vec<f32>,
     pub ffn_inp: Vec<f32>,
     pub ffn_normed: Vec<f32>,
@@ -53,12 +122,11 @@ pub struct MellumScratch {
     pub logits: Vec<f32>,
     pub rope_cos: Vec<f32>,
     pub rope_sin: Vec<f32>,
-    kq_row: Vec<f32>,
-    kq_probs: Vec<f32>,
+    /// Buffers for the attention step.
+    pub(crate) attn_scratch: AttnScratch,
     moe_debug: MellumMoeDebug,
-    /// V window transposed to `[head_dim_v, visible]` so each attention output
-    /// lane is a contiguous dot-product input.
-    attn_transposed: Vec<f32>,
+    /// Quantized matmul scratch (Q8_0 and Q8_K activation buffers).
+    pub project: ProjectScratch,
 }
 
 impl MellumScratch {
@@ -66,11 +134,6 @@ impl MellumScratch {
         let n_embd_q = config.n_head * config.n_embd_head_k;
         let n_embd_k = config.n_head_kv * config.n_embd_head_k;
         let n_embd_v = config.n_head_kv * config.n_embd_head_v;
-        // The visible key window is bounded by the *sliding window* on SWA
-        // layers but by the whole sequence on the rest, so size every
-        // per-key buffer by `capacity` — the worst case is a non-SWA layer at
-        // the last position.
-        let window = capacity.max(1);
         Self {
             hidden: vec![0.0; config.n_embd],
             normed: vec![0.0; config.n_embd],
@@ -78,9 +141,6 @@ impl MellumScratch {
             k: vec![0.0; n_embd_k],
             v: vec![0.0; n_embd_v],
             attn: vec![0.0; config.n_attn()],
-            probs: vec![0.0; window.max(1)],
-            k_window: vec![0.0; capacity.max(1) * config.n_embd_head_k],
-            v_window: vec![0.0; capacity.max(1) * config.n_embd_head_v],
             attn_proj: vec![0.0; config.n_embd],
             ffn_inp: vec![0.0; config.n_embd],
             ffn_normed: vec![0.0; config.n_embd],
@@ -95,10 +155,9 @@ impl MellumScratch {
             logits: vec![0.0; config.vocab_size],
             rope_cos: vec![0.0; config.n_rot / 2],
             rope_sin: vec![0.0; config.n_rot / 2],
-            kq_row: vec![0.0; capacity.max(1)],
-            kq_probs: vec![0.0; capacity.max(1)],
-            attn_transposed: vec![0.0; capacity.max(1) * config.n_embd_head_v],
+            attn_scratch: AttnScratch::new(config, capacity),
             moe_debug: MellumMoeDebug::new(config),
+            project: ProjectScratch::new(config.n_embd.max(config.n_attn())),
         }
     }
 }
@@ -108,7 +167,9 @@ pub struct MellumRunner<'model> {
     pub model: &'model MellumModel,
     pub kv: KvState,
     pub scratch: MellumScratch,
-    capacity: usize,
+    /// Buffers for the batched prefill.
+    pub(crate) batch: super::batch::BatchScratch,
+    pub(crate) capacity: usize,
 }
 
 impl<'model> MellumRunner<'model> {
@@ -135,6 +196,7 @@ impl<'model> MellumRunner<'model> {
             model,
             kv: KvState::new(arch, kv_format, capacity),
             scratch: MellumScratch::new(config, capacity),
+            batch: super::batch::BatchScratch::new(config, capacity),
             capacity,
         })
     }
@@ -191,6 +253,7 @@ impl<'model> MellumRunner<'model> {
             config.n_embd,
             config.vocab_size,
             &mut self.scratch.logits,
+            &mut self.scratch.project,
         );
         trace::global("result_output", position, &self.scratch.logits);
         self.kv.seq_len = position + 1;
@@ -217,6 +280,7 @@ impl<'model> MellumRunner<'model> {
             n_embd,
             config.n_head * config.n_embd_head_k,
             &mut self.scratch.q,
+            &mut self.scratch.project,
         );
         project(
             pool,
@@ -225,6 +289,7 @@ impl<'model> MellumRunner<'model> {
             n_embd,
             config.n_head_kv * config.n_embd_head_k,
             &mut self.scratch.k,
+            &mut self.scratch.project,
         );
         project(
             pool,
@@ -233,6 +298,7 @@ impl<'model> MellumRunner<'model> {
             n_embd,
             config.n_head_kv * config.n_embd_head_v,
             &mut self.scratch.v,
+            &mut self.scratch.project,
         );
 
         // Per-head Q/K RMSNorm with the same eps as the block norm.
@@ -260,7 +326,8 @@ impl<'model> MellumRunner<'model> {
         build_rope_cache(
             config.rope_for(layer_index),
             config.freq_base,
-            &mut self.scratch,
+            &mut self.scratch.rope_cos,
+            &mut self.scratch.rope_sin,
             position,
         );
         for head in 0..config.n_head {
@@ -294,6 +361,7 @@ impl<'model> MellumRunner<'model> {
             config.n_attn(),
             n_embd,
             &mut self.scratch.attn_proj,
+            &mut self.scratch.project,
         );
 
         // Mellum's parallel residual: the FFN consumes `attn_out + hidden` and
@@ -328,6 +396,7 @@ impl<'model> MellumRunner<'model> {
                 &mut scratch.up_buf,
                 &mut scratch.down_buf,
                 &mut scratch.moe_debug,
+                &mut scratch.project,
             );
         }
         let scratch = &mut self.scratch;
@@ -363,135 +432,31 @@ impl<'model> MellumRunner<'model> {
     }
 
     fn attend(&mut self, layer_index: usize, position: usize) {
-        let config = &self.model.config;
-        let head_dim = config.n_embd_head_k;
-        let head_dim_v = config.n_embd_head_v;
-        let stride = config.n_head_kv * head_dim.max(head_dim_v);
-        let group = config.n_head / config.n_head_kv;
-        let scale = 1.0f32 / (head_dim as f32).sqrt();
-        let swa = config.is_swa(layer_index);
-        let first = if swa {
-            (position + 1).saturating_sub(config.n_swa)
-        } else {
-            0
-        };
-        let visible = position + 1 - first;
-        debug_assert!(visible <= self.scratch.probs.len());
-        let base = layer_index * self.capacity;
+        let model = self.model;
+        let config = model.config();
         let kv_cache = &self.kv.cache;
-        let mut kq_debug: Vec<f32> = Vec::with_capacity(config.n_head * (position + 1));
-        let mut kq_soft_max_debug: Vec<f32> = Vec::with_capacity(config.n_head * (position + 1));
-
-        for head in 0..config.n_head {
-            let kv_head = head / group;
-            let q_start = head * head_dim;
-            let attn_start = head * head_dim_v;
-            // Materialise this head's visible K/V window once; the F16 cache
-            // needs the widening anyway.
-            let k_start = kv_head * head_dim;
-            let v_start = kv_head * head_dim_v;
-            {
-                let scratch = &mut self.scratch;
-                let k_window = &mut scratch.k_window[..visible * head_dim];
-                let v_window = &mut scratch.v_window[..visible * head_dim_v];
-                for index in 0..visible {
-                    let offset = (base + first + index) * stride;
-                    let k_slot = index * head_dim;
-                    let v_slot = index * head_dim_v;
-                    read_into(
-                        kv_cache,
-                        true,
-                        offset + k_start,
-                        head_dim,
-                        &mut k_window[k_slot..k_slot + head_dim],
-                    );
-                    read_into(
-                        kv_cache,
-                        false,
-                        offset + v_start,
-                        head_dim_v,
-                        &mut v_window[v_slot..v_slot + head_dim_v],
-                    );
-                }
-            }
-
-            // ggml: `wp[i] = sp[i] * scale`, then the mask adds -INF, then
-            // `max`, then `expf`, summed in f64 and inverted once in f64.
-            let scratch = &mut self.scratch;
-            let q_row = &scratch.q[q_start..q_start + head_dim];
-            let k_window = &scratch.k_window[..visible * head_dim];
-            let v_window = &scratch.v_window[..visible * head_dim_v];
-            let probs = &mut scratch.probs[..visible];
-            let attn = &mut scratch.attn[attn_start..attn_start + head_dim_v];
-            let mut max = f32::NEG_INFINITY;
-            for index in 0..visible {
-                let k_row = &k_window[index * head_dim..(index + 1) * head_dim];
-                let score = dot_f32(q_row, k_row, head_dim) * scale;
-                probs[index] = score;
-                if score > max {
-                    max = score;
-                }
-            }
-
-            let mut sum = 0.0f64;
-            for index in 0..visible {
-                let value = (probs[index] - max).exp();
-                probs[index] = value;
-                sum += f64::from(value);
-            }
-            let inv = (1.0f64 / sum) as f32;
-            for index in 0..visible {
-                probs[index] *= inv;
-            }
-
-            // Transpose this head's V window into `attn_transposed` so each
-            // output lane is a contiguous row: ggml's `kqv = ggml_mul_mat(v,
-            // kq)` is one `ggml_vec_dot_f32` per lane, i.e. f32 products
-            // accumulated in f64 and narrowed once.
-            {
-                let transposed = &mut scratch.attn_transposed[..visible * head_dim_v];
-                for dim in 0..head_dim_v {
-                    for index in 0..visible {
-                        transposed[dim * visible + index] = v_window[index * head_dim_v + dim];
-                    }
-                }
-            }
-            let transposed = &scratch.attn_transposed[..visible * head_dim_v];
-            for dim in 0..head_dim_v {
-                attn[dim] = dot_f32(
-                    probs,
-                    &transposed[dim * visible..(dim + 1) * visible],
-                    visible,
-                );
-            }
-
-            // Debug rows for the whole cache (masked keys = -INF), matching
-            // ggml's `kq` / `kq_soft_max` shapes.
-            let row = &mut scratch.kq_row[..position + 1];
-            let row_probs = &mut scratch.kq_probs[..position + 1];
-            for index in 0..first {
-                // ggml fills the masked entries with -INF before the softmax,
-                // and `kq` is captured before that, so keep the raw dot only
-                // for the visible window.
-                row[index] = 0.0;
-                row_probs[index] = 0.0;
-            }
-            for index in 0..visible {
-                let k_row = &k_window[index * head_dim..(index + 1) * head_dim];
-                row[first + index] = dot_f32(q_row, k_row, head_dim);
-                row_probs[first + index] = probs[index];
-            }
-            kq_debug.extend_from_slice(row);
-            kq_soft_max_debug.extend_from_slice(row_probs);
-        }
-
+        let capacity = self.capacity;
+        let scratch = &mut self.scratch;
+        let q = &scratch.q;
+        let attn = &mut scratch.attn;
+        let attn_scratch = &mut scratch.attn_scratch;
+        attend_heads(
+            kv_cache,
+            capacity,
+            config,
+            layer_index,
+            position,
+            q,
+            attn,
+            attn_scratch,
+        );
         trace::layer_2d(
             "kq",
             layer_index,
             position,
             config.n_head,
             position + 1,
-            &kq_debug,
+            &attn_scratch.kq_debug,
         );
         trace::layer_2d(
             "kq_soft_max",
@@ -499,13 +464,151 @@ impl<'model> MellumRunner<'model> {
             position,
             config.n_head,
             position + 1,
-            &kq_soft_max_debug,
+            &attn_scratch.kq_soft_max_debug,
         );
     }
 }
 
+/// One attention step: every head against the keys visible to `position`.
+///
+/// ggml's `kqv = ggml_mul_mat(v, kq)` is one `ggml_vec_dot_f32` per output
+/// lane, i.e. f32 products accumulated in f64 and narrowed once, and the
+/// softmax is ggml's two-pass `max` / `expf` / f64 sum. Both the single
+/// token walk and the batched prefill call this, so the two paths cannot
+/// drift apart.
+///
+/// `q` holds the query rows of one token (or one row of a batch) and
+/// `attn_out` receives the attention output of the same token.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn attend_heads(
+    kv_cache: &KvCache,
+    capacity: usize,
+    config: &MellumConfig,
+    layer_index: usize,
+    position: usize,
+    q: &[f32],
+    attn_out: &mut [f32],
+    scratch: &mut AttnScratch,
+) {
+    let head_dim = config.n_embd_head_k;
+    let head_dim_v = config.n_embd_head_v;
+    let stride = config.n_head_kv * head_dim.max(head_dim_v);
+    let group = config.n_head / config.n_head_kv;
+    let scale = 1.0f32 / (head_dim as f32).sqrt();
+    let swa = config.is_swa(layer_index);
+    let first = if swa {
+        (position + 1).saturating_sub(config.n_swa)
+    } else {
+        0
+    };
+    let visible = position + 1 - first;
+    debug_assert!(visible <= scratch.probs.len());
+    let base = layer_index * capacity;
+    scratch.kq_debug.clear();
+    scratch.kq_soft_max_debug.clear();
+
+    for head in 0..config.n_head {
+        let kv_head = head / group;
+        let q_start = head * head_dim;
+        let attn_start = head * head_dim_v;
+        // Materialise this head's visible K/V window once; the F16 cache
+        // needs the widening anyway.
+        let k_start = kv_head * head_dim;
+        let v_start = kv_head * head_dim_v;
+        {
+            let k_window = &mut scratch.k_window[..visible * head_dim];
+            let v_window = &mut scratch.v_window[..visible * head_dim_v];
+            for index in 0..visible {
+                let offset = (base + first + index) * stride;
+                let k_slot = index * head_dim;
+                let v_slot = index * head_dim_v;
+                read_into(
+                    kv_cache,
+                    true,
+                    offset + k_start,
+                    head_dim,
+                    &mut k_window[k_slot..k_slot + head_dim],
+                );
+                read_into(
+                    kv_cache,
+                    false,
+                    offset + v_start,
+                    head_dim_v,
+                    &mut v_window[v_slot..v_slot + head_dim_v],
+                );
+            }
+        }
+
+        // ggml: `wp[i] = sp[i] * scale`, then the mask adds -INF, then
+        // `max`, then `expf`, summed in f64 and inverted once in f64.
+        let q_row = &q[q_start..q_start + head_dim];
+        let k_window = &scratch.k_window[..visible * head_dim];
+        let v_window = &scratch.v_window[..visible * head_dim_v];
+        let probs = &mut scratch.probs[..visible];
+        let attn = &mut attn_out[attn_start..attn_start + head_dim_v];
+        let mut max = f32::NEG_INFINITY;
+        for index in 0..visible {
+            let k_row = &k_window[index * head_dim..(index + 1) * head_dim];
+            let score = dot_f32(q_row, k_row, head_dim) * scale;
+            probs[index] = score;
+            if score > max {
+                max = score;
+            }
+        }
+
+        let mut sum = 0.0f64;
+        for index in 0..visible {
+            let value = (probs[index] - max).exp();
+            probs[index] = value;
+            sum += f64::from(value);
+        }
+        let inv = (1.0f64 / sum) as f32;
+        for index in 0..visible {
+            probs[index] *= inv;
+        }
+
+        // Transpose this head's V window into `attn_transposed` so each
+        // output lane is a contiguous row.
+        {
+            let transposed = &mut scratch.attn_transposed[..visible * head_dim_v];
+            for dim in 0..head_dim_v {
+                for index in 0..visible {
+                    transposed[dim * visible + index] = v_window[index * head_dim_v + dim];
+                }
+            }
+        }
+        let transposed = &scratch.attn_transposed[..visible * head_dim_v];
+        for dim in 0..head_dim_v {
+            attn[dim] = dot_f32(
+                probs,
+                &transposed[dim * visible..(dim + 1) * visible],
+                visible,
+            );
+        }
+
+        // Debug rows for the whole cache (masked keys = -INF), matching
+        // ggml's `kq` / `kq_soft_max` shapes.
+        let row = &mut scratch.kq_row[..position + 1];
+        let row_probs = &mut scratch.kq_probs[..position + 1];
+        for index in 0..first {
+            // ggml fills the masked entries with -INF before the softmax,
+            // and `kq` is captured before that, so keep the raw dot only
+            // for the visible window.
+            row[index] = 0.0;
+            row_probs[index] = 0.0;
+        }
+        for index in 0..visible {
+            let k_row = &k_window[index * head_dim..(index + 1) * head_dim];
+            row[first + index] = dot_f32(q_row, k_row, head_dim);
+            row_probs[first + index] = probs[index];
+        }
+        scratch.kq_debug.extend_from_slice(row);
+        scratch.kq_soft_max_debug.extend_from_slice(row_probs);
+    }
+}
+
 /// Read one contiguous K or V row out of the cache, widening f16 on the fly.
-fn read_into(cache: &KvCache, keys: bool, offset: usize, len: usize, out: &mut [f32]) {
+pub(crate) fn read_into(cache: &KvCache, keys: bool, offset: usize, len: usize, out: &mut [f32]) {
     match cache {
         KvCache::F32(cache) => {
             let source = if keys { &cache.k } else { &cache.v };
@@ -520,22 +623,23 @@ fn read_into(cache: &KvCache, keys: bool, offset: usize, len: usize, out: &mut [
     }
 }
 
-/// Fill `rope_cos` / `rope_sin` for the layer's flavour at `position`.
-fn build_rope_cache(
+/// Fill `cos` / `sin` for the layer's flavour at `position`.
+pub(crate) fn build_rope_cache(
     flavour: MellumRope,
     freq_base: f32,
-    scratch: &mut MellumScratch,
+    cos: &mut [f32],
+    sin: &mut [f32],
     position: usize,
 ) {
-    let half = scratch.rope_cos.len();
+    let half = cos.len();
     match flavour {
         MellumRope::Plain => {
             let scale = freq_base.powf(-2.0 / (2 * half) as f32);
             let mut theta = position as f32;
             for index in 0..half {
-                let (cos, sin) = crate::ops::rope::neox::rope_sin_cos(theta);
-                scratch.rope_cos[index] = cos;
-                scratch.rope_sin[index] = sin;
+                let (value_cos, value_sin) = crate::ops::rope::neox::rope_sin_cos(theta);
+                cos[index] = value_cos;
+                sin[index] = value_sin;
                 theta *= scale;
             }
         }
@@ -543,9 +647,9 @@ fn build_rope_cache(
             let theta_scale = yarn.theta_scale();
             let mut theta = position as f32;
             for index in 0..half {
-                let (cos, sin) = yarn.sin_cos(yarn.theta_from_extrap(theta, index));
-                scratch.rope_cos[index] = cos;
-                scratch.rope_sin[index] = sin;
+                let (value_cos, value_sin) = yarn.sin_cos(yarn.theta_from_extrap(theta, index));
+                cos[index] = value_cos;
+                sin[index] = value_sin;
                 theta *= theta_scale;
             }
         }
@@ -553,7 +657,7 @@ fn build_rope_cache(
 }
 
 /// ggml's NEOX `rotate_pairs` with `n_offset = n_rot / 2`.
-fn apply_rope(values: &mut [f32], cos: &[f32], sin: &[f32]) {
+pub(crate) fn apply_rope(values: &mut [f32], cos: &[f32], sin: &[f32]) {
     let half = cos.len();
     for index in 0..half {
         let x0 = values[index];
@@ -583,44 +687,55 @@ impl Rows {
     }
 }
 
-/// Single-row quantized matmul, row-partitioned over the shared thread pool.
+/// Single-row quantized matmul, on the CPU.
 ///
-/// The activation is quantized once and shared by every worker, which is what
-/// ggml does for one `mul_mat` row (`from_float` then `vec_dot`).
-fn project(
+/// The Mellum trunk evaluates one token at a time, so every projection is a
+/// single row. The device reads the whole weight matrix once per call, so
+/// it only pays off when a projection carries many rows or when the device
+/// reads the weight faster than the CPU does.
+///
+/// With ggml's own weight layout the device does not: a warp reads 32
+/// sectors one row apart, which reaches 60 GB/s against the 115 GB/s of
+/// the NEON path, so the output head costs 4.0 ms/token on the device
+/// against 2.6 ms/token on the CPU.
+///
+/// The transposed layout (`vulkan::q8_layout`, opt-in through
+/// `RMI_GPU_Q8_TRANSPOSED=1`) reads the weight the way a GEMV wants to
+/// read it and reaches 163 GB/s, which puts the output head at 1.5 ms/token
+/// and the whole generation back level with the CPU. It is off by default
+/// because no Mellum projection runs on the device yet, so there is
+/// nothing to gain by turning it on first.
+///
+/// Either way the projections stay on the CPU until the trunk can hand
+/// the device a whole token stream at once; see the TODO entry for the
+/// batched prefill.
+///
+/// The scope only covers this call, so the CPU kernel keeps its own
+/// dispatch and the pool workers see the same decision.
+pub(crate) fn project(
     pool: &Arc<ComputePool>,
     weight: &Weight<'_>,
     input: &[f32],
     n_in: usize,
     n_out: usize,
     output: &mut [f32],
+    scratch: &mut ProjectScratch,
 ) {
     debug_assert_eq!(input.len(), n_in);
     debug_assert_eq!(output.len(), n_out);
     if n_out == 0 {
         return;
     }
-    let mut q8 = vec![0u8; n_in];
-    let mut scales = vec![0.0f32; n_in.div_ceil(32)];
-    quantize_q8_0_into(input, n_in, &mut q8, &mut scales);
-
-    let input_ptr = input.as_ptr() as usize;
-    let q8_ptr = q8.as_ptr() as usize;
-    let scales_ptr = scales.as_ptr() as usize;
-    let rows = Rows(output.as_mut_ptr(), n_out);
-    pool.compute(move |ith, nth| {
-        // SAFETY: `input`, `q8` and `scales` outlive the dispatch (the pool
-        // joins every worker before returning) and the kernel partitions
-        // `rows` across workers by `(ith, nth)`.
-        let input = unsafe { std::slice::from_raw_parts(input_ptr as *const f32, n_in) };
-        let q8 = unsafe { std::slice::from_raw_parts(q8_ptr as *const u8, n_in) };
-        let scales =
-            unsafe { std::slice::from_raw_parts(scales_ptr as *const f32, n_in.div_ceil(32)) };
-        let out = unsafe { rows.get() };
-        weight
-            .kernel
-            .forward_prepared(input, q8, scales, None, out, n_in, n_out, ith, nth);
-    });
+    #[cfg(feature = "vulkan")]
+    let _cpu_scope = crate::core::thread_pool::ComputePool::disable_gpu_matmul_for_scope();
+    weight.quantize_and_matmul_with_scratch(
+        input,
+        &mut scratch.q8k_buf,
+        &mut scratch.q8_buf,
+        &mut scratch.scale_buf,
+        output,
+        pool,
+    );
 }
 
 /// ggml's `build_moe_ffn` for `LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX` with
@@ -642,6 +757,7 @@ fn moe_forward(
     up_buf: &mut [f32],
     down_buf: &mut [f32],
     expert_debug: &mut MellumMoeDebug,
+    project_scratch: &mut ProjectScratch,
 ) {
     let n_embd = config.n_embd;
     let n_expert = config.expert_count;
@@ -700,6 +816,7 @@ fn moe_forward(
             n_embd,
             config.expert_ffn,
             up_buf,
+            project_scratch,
         );
         project(
             pool,
@@ -708,6 +825,7 @@ fn moe_forward(
             n_embd,
             config.expert_ffn,
             gate_buf,
+            project_scratch,
         );
         let ffn_slot = index * config.expert_ffn;
         expert_debug.up[ffn_slot..ffn_slot + config.expert_ffn]
@@ -726,6 +844,7 @@ fn moe_forward(
             config.expert_ffn,
             n_embd,
             down_buf,
+            project_scratch,
         );
         let down_slot = index * n_embd;
         expert_debug.down[down_slot..down_slot + n_embd].copy_from_slice(&down_buf[..n_embd]);
@@ -813,7 +932,7 @@ impl MellumMoeDebug {
 
 /// ggml's `soft_max` with `scale = 1.0` and no mask: subtract the row max,
 /// `expf`, accumulate the sum in f64, then one f32 reciprocal multiply.
-fn ggml_softmax(values: &mut [f32]) {
+pub(crate) fn ggml_softmax(values: &mut [f32]) {
     let mut max = f32::NEG_INFINITY;
     for &value in values.iter() {
         if value > max {
