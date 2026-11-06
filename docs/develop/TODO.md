@@ -3942,3 +3942,41 @@ PhysBrain 的入口矩阵都没有覆盖"交互 + mmproj"这一格，所以没�
 
 **关联**：`src/models/qwen35/trunk/moe.rs`、`src/models/qwen35/vision/mod.rs`、
 `src/ops/kernel/vulkan.rs`（`min_gpu_matmul_outputs`）、TODO-052。
+
+---
+
+### TODO-056: qwen35 的 CLIP 视觉塔（mmproj）没有设备路径 —— 与 ZDT 的 RADIO 塔不一致
+
+**现状**：文本塔在设备上，视觉塔不在。
+
+- 文本塔（`qwen35moe` / Occamy-1.0）：**完整在设备上**。trace 显示
+  `scope=resident_hybrid_decoder backend=Vulkan`（prefill rows=19、decode rows=1），
+  733 个权重张量一次性上传 36.35 GB，之后每 token 41 次 submission。
+  但它比 CPU 慢 4 倍（3.8 vs 15.2 t/s）→ 见 TODO-055。
+- 视觉塔（mmproj）：**不上设备**。`src/models/qwen35/vision/mod.rs` 的
+  `matmul_weight_batch` 直接调 `weight.kernel.forward_batched(...)`，而
+  `VulkanKernel::forward_batched` 只是转发给内部那个 **CPU** kernel
+  （`src/ops/kernel/vulkan.rs` 里它包的是 `Box<dyn Kernel>`）。
+  视觉编码耗时在两个后端完全一样：CPU 0.539 s vs Vulkan 0.540 s。
+  CLI 因此如实报 `backend=partial mode=mmproj`。
+
+**对比**：ZDTaichu5.0 的 RADIO 塔**已经**接上设备 ——
+`src/models/zdt/vision/mod.rs:115` 先试 `weight.try_vulkan_rows(...)`，
+落不到才回落共享 kernel。同一个仓库里两种做法并存。
+
+**影响面**：所有用 qwen35 CLIP mmproj 的模型 —— Occamy-1.0、
+Intern-Decision-0.8B、PhysBrain1.5-2B 的图像路都吃不到设备。
+
+**待办**：
+
+1. 把 qwen35 CLIP 塔的批处理 matmul 改成和 ZDT 塔同一套：先
+   `try_vulkan_rows`，落不到再回落共享 kernel（`Weight` 抽象已经有了 ✓，
+   改动集中在 `matmul_weight_batch` / `matmul_weight_batch_pooled` ✓）。
+2. 设备化之后要核对数值：CLIP 塔是 F16 权重，设备侧走 `f16_matmul` 的
+   舍入与 CPU 的 `dot_f16_f16_bytes_ggml` 不一定逐位相同 ✓，需要定界
+   （可以照 ZDT 塔的办法比同一份 llama.cpp dump ✓）。
+3. 注意收益上限：塔里非 matmul 的部分（attention / softmax / norm）仍在
+   CPU ✓，单把 matmul 搬上设备未必有墙钟收益 —— 先量再改 ✓。
+
+**关联**：`src/models/qwen35/vision/mod.rs`、`src/models/zdt/vision/mod.rs`、
+`src/ops/kernel/vulkan.rs`（`VulkanKernel::forward_batched`）、TODO-055。
