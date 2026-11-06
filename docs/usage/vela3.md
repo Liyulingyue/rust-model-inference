@@ -2,6 +2,11 @@
 
 六个官方 safetensors 包通过现有 `rust-model-inference --system-one-request` CLI 和 `models::vela3::system_one` Rust API。计算在 CPU 上执行，复用仓库的线程池、矩阵投影、激活与 Qwen3.5 视觉编码器；不调用 Python 或外部加速库。无需 GGUF 转换。
 
+这三个包是**三个模型族**（架构、格式串与实现都不同），不是同一模型的变体：
+`Vela3-D3`（`vela3/3` + `qwen3_5` decoder，mini/lite/flash/turbo 是同架构的不同尺寸）、
+`Vela3-Fast`（`vela3-encoder/1` + `ultrabert` 编码器，自包含）、
+`Vela3-Fast-Vision`（`vela3v-encoder/1` + `ultravbert` 视觉编码器，文本侧复用 Fast 的路径）。
+
 | 包 | 显式格式 / 架构 | 任务 |
 |---|---|---|
 | `vllm-sr/vela3-mini` | `vela3/3` / `qwen3_5` | choice、noul、score、span；图像输入为实验性 |
