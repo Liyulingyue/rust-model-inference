@@ -45,6 +45,7 @@ pub mod qwen_drive;
 pub mod spark;
 pub mod timestral;
 pub mod unlimited_ocr;
+pub mod vela3;
 pub mod vibevoice_asr;
 pub mod wevisone_vl;
 pub mod xing4_0;
