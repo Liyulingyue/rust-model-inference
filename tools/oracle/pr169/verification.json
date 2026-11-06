@@ -689,5 +689,54 @@
       },
       "note": "the device wins on prefill and loses 4x on decode: every token routes through 360 single-row expert projections (8 of 256 per layer, 40 layers), which is the same shape as the Mellum dispatch finding in TODO-052; see TODO-055"
     }
+  },
+  "occamy_upstream_pytorch_2026_11_06": {
+    "purpose": "a third opinion: the GGUF is a conversion of the upstream safetensors, and llama.cpp is another port of the same architecture, so the upstream implementation shows where a port difference lives",
+    "upstream_weights": "Accio-Lab/occamy-1.0 on ModelScope, 13 safetensors shards plus model-visual, 65.40 GiB, shard sizes match the upstream listing; tokenizer.json and tokenizer_config.json fetched from the same repo (the Hugging Face mirror's file list is incomplete)",
+    "reference": "transformers 5.19.0, Qwen3_5MoeForConditionalGeneration, bfloat16 on the CPU, the engine's exact 19-token prompt",
+    "greedy_ids_upstream": [
+      17,
+      478,
+      220,
+      17,
+      283,
+      220,
+      19,
+      248046
+    ],
+    "greedy_ids_engine": [
+      17,
+      478,
+      220,
+      17,
+      283,
+      220,
+      19,
+      248046
+    ],
+    "greedy_ids_llama_cpp": [
+      17,
+      478,
+      220,
+      17,
+      283,
+      220,
+      19,
+      248046
+    ],
+    "greedy_three_way_identical": true,
+    "final_prefill_logits": {
+      "engine_vs_llama_cpp_relative_l2": 0.08729171,
+      "engine_vs_upstream_pytorch_relative_l2": 0.12501672,
+      "llama_cpp_vs_upstream_pytorch_relative_l2": 0.10422619,
+      "argmax": {
+        "engine": 17,
+        "llama_cpp": 17,
+        "upstream_pytorch": 17
+      },
+      "reading": "the two independent implementations differ from each other by more than the engine differs from llama.cpp, so the row-level spread is the port difference of a 37B sparse hybrid MoE, not an engine defect; the engine follows the GGUF contract, which is llama.cpp's"
+    },
+    "vision": "not compared: the upstream tower is a Qwen3-VL style merger over a different preprocessing convention, while the engine's mmproj is a CLIP tower; the engine's vision projection is already checked against llama.cpp at relative L2 0.00070317",
+    "limitation": "the upstream reference runs the CPU fallback kernels (no causal_conv1d, no flash-linear-attention) and the BF16 weights, so it is a semantic reference, not a bitwise one"
   }
 }

@@ -224,3 +224,42 @@ caused by it. The earlier roadmap note that occamy-1.0 matches bit for bit
 between GPU and CPU at `--temp 0` was measured with a different weight set.
 
 Commands are in `verification.json` under `occamy_reverification_2026_11_05`.
+
+## The upstream PyTorch reference (2026-11-06)
+
+The GGUF is a conversion of `Accio-Lab/occamy-1.0`, and llama.cpp is another
+port of the same architecture. The upstream weights (13 safetensors shards plus
+`model-visual`, 65.40 GiB) were fetched from ModelScope, together with the
+tokenizer files the Hugging Face mirror's file list omits.
+
+`pytorch_reference.py` runs them through transformers' own
+`Qwen3_5MoeForConditionalGeneration` (5.19.0, bfloat16, CPU) on the engine's
+exact 19-token prompt, and `compare_pytorch.py` compares the dumps.
+
+The greedy output agrees token for token with both other implementations:
+
+| implementation | greedy ids |
+| --- | --- |
+| upstream PyTorch (BF16) | 17 478 220 17 283 220 19 248046 |
+| llama.cpp (pinned `11fe0215`) | 17 478 220 17 283 220 19 248046 |
+| this engine (Q8_0 GGUF) | 17 478 220 17 283 220 19 248046 |
+
+The final prefill row, relative L2 over all 248,320 logits:
+
+| pair | relative L2 |
+| --- | --- |
+| engine vs llama.cpp | 0.08729171 |
+| engine vs upstream PyTorch | 0.12501672 |
+| llama.cpp vs upstream PyTorch | 0.10422619 |
+
+The two independent implementations differ from each other by more than the
+engine differs from llama.cpp, so the row-level spread is the port difference of
+a 37B sparse hybrid MoE rather than an engine defect: the engine implements the
+GGUF contract, and the GGUF is llama.cpp's. This is the same shape as the
+ZDTaichu5.0 result, where the upstream PyTorch path and llama.cpp differ by
+4.54 and the engine follows the GGUF.
+
+The vision side is not compared: the upstream tower is a Qwen3-VL style merger
+over a different preprocessing convention, while the mmproj here is a CLIP
+tower. The engine's vision projection is already checked against llama.cpp at
+relative L2 0.00070317.

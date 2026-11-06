@@ -32,10 +32,7 @@ from transformers import AutoProcessor, AutoModelForImageTextToText
 
 def chat_prompt(processor, question: str) -> str:
     """Render the checkpoint's own chat template for one user turn."""
-    messages = [
-        {"role": "user", "content": question},
-        {"role": "assistant", "content": ""},
-    ]
+    messages = [{"role": "user", "content": question}]
     return processor.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
     )
@@ -50,6 +47,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True, help="directory with the safetensors")
     parser.add_argument("--prompt", default="What is 2+2?")
+    parser.add_argument(
+        "--input-ids",
+        default=None,
+        help="comma separated token ids; use this to run the engine's exact prompt",
+    )
     parser.add_argument("--out", required=True, help="output directory")
     parser.add_argument(
         "--device",
@@ -62,6 +64,12 @@ def main() -> None:
         help="torch dtype for the weights (bfloat16 is what the repo ships)",
     )
     parser.add_argument("--image", default=None, help="optional PNG for the vision dump")
+    parser.add_argument(
+        "--generate",
+        type=int,
+        default=0,
+        help="greedy tokens to generate after the prompt",
+    )
     parser.add_argument(
         "--vision-input",
         default="blue",
@@ -79,10 +87,16 @@ def main() -> None:
     ).eval()
     model = model.to(args.device)
 
-    prompt = chat_prompt(processor, args.prompt)
-    tokenizer = processor.tokenizer
-    encoded = tokenizer(prompt, return_tensors="pt", add_special_tokens=False)
-    input_ids = encoded["input_ids"].to(args.device)
+    if args.input_ids:
+        input_ids = torch.tensor(
+            [[int(v) for v in args.input_ids.split(",")]], dtype=torch.long
+        ).to(args.device)
+        prompt = "<explicit ids>"
+    else:
+        prompt = chat_prompt(processor, args.prompt)
+        tokenizer = processor.tokenizer
+        encoded = tokenizer(prompt, return_tensors="pt", add_special_tokens=False)
+        input_ids = encoded["input_ids"].to(args.device)
     print(f"prompt tokens: {input_ids.shape[-1]}")
     print(f"prompt ids: {input_ids[0].tolist()}")
 
@@ -93,6 +107,17 @@ def main() -> None:
     top = torch.topk(logits, 5)
     print("top-5:", list(zip(top.indices.tolist(), [round(v, 4) for v in top.values.tolist()])))
 
+    if args.generate:
+        generated = model.generate(
+            input_ids=input_ids,
+            max_new_tokens=args.generate,
+            do_sample=False,
+            use_cache=True,
+        )
+        tail = generated[0, input_ids.shape[-1] :].tolist()
+        print(f"generated ids: {tail}")
+        (out / "generated-ids.json").write_text(json.dumps(tail))
+
     if args.vision_input != "blue":
         return
 
@@ -102,8 +127,26 @@ def main() -> None:
     side = 512
     pixels = torch.zeros((1, 3, side, side), dtype=torch.float32)
     pixels[:, 2] = 1.0
+    # The tower is a Qwen3-VL style patchified CLIP: it needs the grid, and
+    # 512/16 = 32 patches per side with a merge of 2 gives 16x16 = 256 tokens,
+    # the same count the engine reports for this input.
+    patch = model.config.vision_config.patch_size
+    merge = model.config.vision_config.spatial_merge_size
+    grid = side // patch
+    grid_thw = torch.tensor([[1, grid, grid]], dtype=torch.long)
+    print(f"vision grid: {grid_thw.tolist()} -> {grid * grid // (merge * merge)} tokens")
+    # The tower takes the patchified sequence, not the image: (num_patches,
+    # C * patch * patch) in the Qwen3-VL layout.
+    patches = (
+        pixels.reshape(1, 3, grid, patch, grid, patch)
+        .permute(0, 2, 4, 1, 3, 5)
+        .reshape(grid * grid, 3 * patch * patch)
+    )
     with torch.no_grad():
-        features = model.get_image_features(pixel_values=pixels.to(args.device))
+        features = model.get_image_features(
+            pixel_values=patches.to(args.device),
+            image_grid_thw=grid_thw.to(args.device),
+        )
     if isinstance(features, (list, tuple)):
         features = features[0]
     features = features.to(torch.float32)
