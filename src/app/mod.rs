@@ -152,6 +152,13 @@ pub fn run_embedding(
     }
     let arch = arch_of(source);
     match arch.as_str() {
+        "gemma4-embedding" => crate::models::embeddinggemma2::run_embedding(
+            source,
+            prompt,
+            n_threads_arg,
+            kv_format,
+            output,
+        ),
         "gemma-embedding" => crate::models::gemma_embedding::run_embedding(
             source,
             prompt,

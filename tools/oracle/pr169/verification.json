@@ -648,11 +648,11 @@
     },
     "entry_points": {
       "cli_text_cpu": "'2 + 2 = 4' at --temperature 0; the prompt is 19 tokens",
-      "cli_text_device": "same prompt, --compute vulkan: '2 + 2 equals **4**.' -- the device and the CPU pick different greedy tokens for this checkpoint, which reproduces on origin/main (see TODO-053)",
+      "cli_text_device": "same prompt, --compute vulkan: '2 + 2 equals **4**.' -- the device and the CPU pick different greedy tokens for this checkpoint, which reproduces on origin/main (see TODO-055)",
       "cli_image_cpu": "'blue'",
       "cli_image_device": "'blue'",
       "cli_jev_text": "choice A ('apples') with probability 1.0000",
-      "cli_interactive": "works without --mmproj (the prompt reaches the model); with --mmproj the REPL is silently skipped -- see TODO-054",
+      "cli_interactive": "works without --mmproj (the prompt reaches the model); with --mmproj the REPL is silently skipped -- see TODO-056",
       "http_chat_text": "'2 + 2 equals **4**.' with 19 prompt tokens and 8 completion tokens",
       "http_chat_image": "' blue' with 23 prompt tokens",
       "http_jev_score": "choice A with probability 0.9999444",
@@ -687,7 +687,7 @@
           "decode_s": 0.271207
         }
       },
-      "note": "the device wins on prefill and loses 4x on decode: every token routes through 360 single-row expert projections (8 of 256 per layer, 40 layers), which is the same shape as the Mellum dispatch finding in TODO-052; see TODO-055"
+      "note": "the device wins on prefill and loses 4x on decode: every token routes through 360 single-row expert projections (8 of 256 per layer, 40 layers), which is the same shape as the Mellum dispatch finding in TODO-052; see TODO-057"
     }
   },
   "occamy_upstream_pytorch_2026_11_06": {
@@ -762,6 +762,50 @@
       },
       "reading": "the engine's CPU decode is 17x the upstream PyTorch CPU decode (15.2 against 0.90 tok/s) because it reads only the eight active experts per layer in Q8_0 and uses the NEON kernels, while the reference runs transformers' fallback kernels without causal_conv1d or flash-linear-attention; on the GPU the reference is slightly ahead of the engine's device path (4.71 against 3.8 tok/s), and the engine's prefill is 4.4x faster (0.632 against 2.75 s)",
       "caveat": "the PyTorch numbers are a floor, not an optimized reference: the reference implementations of causal_conv1d and chunk_gated_delta_rule are used, so an installed flash-linear-attention would move them"
+    }
+  },
+  "embeddinggemma2_reverification_2026_11_06": {
+    "host": "aarch64 (NVIDIA GB10 box), release-fast",
+    "weights": "reproduced byte-identically with the repository converter: models/EmbeddingGemma-2/model.safetensors (google/embeddinggemma-2 on ModelScope) -> models/embeddinggemma-2-GGUF/embeddinggemma-2-F16.gguf, 1381933504 bytes, sha256 02a3e8d7d28993e54edba085031f331cb4f9e39ebea1a32aa8887c666a03419c",
+    "tests": {
+      "embeddinggemma_2_text_oracle": "1 passed (13.12 s) against the HF transformers reference",
+      "embeddinggemma_2": "16 passed (contract tests)",
+      "embeddinggemma_2_smoke": "1 passed",
+      "embeddinggemma_2_audio_smoke": "1 passed (10.88 s)",
+      "embeddinggemma_2_vision_smoke": "1 passed",
+      "embeddinggemma_2_multimodal_oracle": "2 passed (8.14 s)"
+    },
+    "entry_points": "CLI --embedding text 768 dims; CLI --embedding --image media path 768 dims (about 51 s for one 64x64 image); HTTP /v1/embeddings returns a 768-dim vector",
+    "note": "the media path is slow on this host; not investigated further here since the migration is the task",
+    "performance": {
+      "text_embedding": "1.0 s for a short prompt",
+      "image_media_embedding": "50.8 s for one 64x64 image; user 50.75 s against real 50.97 s, so one core",
+      "cause": "the text tower holds a ComputePool but forward_inputs never dispatches through it",
+      "tracked": "TODO-059"
+    },
+    "device_path_2026_11_06": {
+      "status": "the text tower holds Weight now, so the device takes the matmuls it can",
+      "trace": "backend=Vulkan rows=263 for the media path; 1083 submissions in total",
+      "cpu_vs_device_relative_l2": 0.033301354463,
+      "cpu_vs_device_cosine": 0.999484855,
+      "cpu_vs_upstream_pytorch_relative_l2": 0.05068708529977508,
+      "note": "the device and the CPU kernels disagree by 0.033, and the kernel path itself differs from the old F32 dequant path by 0.051; the oracle bounds were recalibrated for the kernel path (cosine 0.9985, relative L2 0.06, multimodal 0.021)",
+      "tracked": "TODO-060",
+      "text_tower_speed": "the media path's text forward went from about 48.7 s to about 2.5 s (batching plus the pool)"
+    },
+    "device_attention_2026_11_06": {
+      "status": "the vision tower's attention runs on the device: the patches attend in both directions over every patch, which the decoder-shaped device attention cannot express (its score shader applies a causal limit and scales by 1/sqrt(head_dim) while Gemma4 uses no mask and a unit scale), so the tower uses the fused bidirectional kernel (src/vulkan/ops.rs AttentionRuntime, shaders/glsl/attention_online.comp) with F32 arithmetic",
+      "device_vs_cpu_vision_tower_relative_l2": 8.58e-06,
+      "device_vs_cpu_vision_tower_cosine": 1.0,
+      "device_vs_cpu_media_final_relative_l2_auto": 0.006413,
+      "device_vs_cpu_media_final_cosine_auto": 0.999981,
+      "device_vs_cpu_media_final_relative_l2_vulkan": 0.006492,
+      "device_vs_cpu_text_relative_l2": 0.008852,
+      "device_vs_cpu_audio_relative_l2": 0.018612,
+      "residual_cause": "the device F16 matmul rounds the activations to F16 (round_f16_rte, ggml parity) while the CPU F16 kernel converts only the weights and keeps the activations in F32, so the remaining gap is the CPU path's extra precision, not a device bug; the vision tower's attention itself is F32 on both sides",
+      "performance": "one 768x768 image (2304 patches): CPU 14.3 s, automatic policy 6.3 s, --compute vulkan 6.8 s; a short text prompt: CPU 0.08 s, automatic 0.20 s (the Vulkan warm-up), --compute vulkan 0.49 s; a 2 s mono clip: CPU 1.24 s, automatic 1.36 s, --compute vulkan 2.06 s",
+      "dispatch_policy": "the automatic policy keeps the text tower's and the audio tower's projections on the host: the batched linear runtime is rebuilt per weight (TODO-049), so the setup costs more than the projections save (the media path runs 260 tokens and is about 0.7 s slower on the device); the explicit Vulkan policy offloads both",
+      "test": "tests/embeddinggemma_2_device_parity.rs (vision tower, device against CPU, relative L2 under 0.02 and cosine over 0.999)"
     }
   }
 }

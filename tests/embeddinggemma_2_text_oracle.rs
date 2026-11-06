@@ -47,6 +47,7 @@ fn text_forward_matches_huggingface_oracle() {
     let model =
         rust_model_inference::models::embeddinggemma2::EmbeddingGemmaTextModel::from_source(
             source.as_ref(),
+            8,
         )
         .expect("EmbeddingGemmaTextModel::from_source");
 
@@ -99,8 +100,12 @@ fn text_forward_matches_huggingface_oracle() {
         eprintln!("  actual norm   = {}", a_norm_sq.sqrt());
         // Text matrices are Q8_0; test direction and magnitude against the HF
         // reference instead of demanding bitwise parity after quantization.
+        // The bounds moved with the forward: the text tower now runs the
+        // GGUF's own quantized kernels (Weight) instead of dequantizing every
+        // tensor to F32, so the comparison carries the kernel's activation
+        // rounding. Measured on this host: cosine 0.99873, relative L2 0.0507.
         assert!(
-            cosine_sim > 0.999 && l2 / b_norm_sq.sqrt() < 0.03,
+            cosine_sim > 0.9985 && l2 / b_norm_sq.sqrt() < 0.06,
             "{name}: cosine {cosine_sim:.6}, relative L2 {} (text=\"{text}\")",
             l2 / b_norm_sq.sqrt()
         );

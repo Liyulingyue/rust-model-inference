@@ -21,6 +21,8 @@
 //! - spatial merge: every (merge × merge) block of patches becomes 1 token
 
 use crate::core::tensor::TensorSource;
+use crate::core::thread_pool::ComputePool;
+use crate::ops::kernel::{QuantizedTensor, Weight};
 use std::sync::Arc;
 
 pub const RMS_NORM_EPS: f32 = 1e-6;
@@ -142,74 +144,166 @@ mod tests {
     }
 }
 
-/// Linear weight stored as a flat F32 matrix (row-major `[n_out, n_in]`,
-/// i.e. `out[i, k] = matrix[i * n_in + k]`). We compute
-/// `out_vec[i] = sum_k matrix[i, k] * input[k]`.
-struct Linear {
-    matrix: Vec<f32>,
-    n_in: usize,
-    n_out: usize,
+/// One linear projection over the borrowed GGUF bytes.
+///
+/// The vision tower's tensors are stored with their GGUF dims reversed
+/// (`[n_out, n_in]`, see the converter), so the loader takes the semantic
+/// shape and lets `Weight` keep the bytes as they are.
+struct Linear<'a> {
+    weight: Weight<'a>,
 }
 
-impl Linear {
+impl Linear<'_> {
+    /// A single row. The device's per-submission fence costs more than one
+    /// row of arithmetic, so this stays on the shared kernel.
     fn forward(&self, input: &[f32], output: &mut [f32]) {
-        assert_eq!(input.len(), self.n_in, "Linear::forward input shape");
-        assert_eq!(output.len(), self.n_out, "Linear::forward output shape");
-        for i in 0..self.n_out {
-            let row = &self.matrix[i * self.n_in..(i + 1) * self.n_in];
-            output[i] = crate::ops::dot_f32(row, input, self.n_in);
+        debug_assert_eq!(input.len(), self.weight.n_in, "Linear::forward input shape");
+        debug_assert_eq!(
+            output.len(),
+            self.weight.n_out,
+            "Linear::forward output shape"
+        );
+        self.weight
+            .kernel
+            .forward_batched(input, output, self.weight.n_in, self.weight.n_out);
+    }
+
+    /// A whole row batch: the device first, then the shared kernel with the
+    /// rows partitioned over the pool.
+    fn forward_rows(&self, pool: &ComputePool, input: &[f32], output: &mut [f32], rows: usize) {
+        debug_assert_eq!(input.len(), rows * self.weight.n_in);
+        debug_assert_eq!(output.len(), rows * self.weight.n_out);
+        #[cfg(feature = "vulkan")]
+        if self.weight.try_vulkan_rows(input, output, rows) {
+            return;
         }
+        // The batched device path above either took the whole batch or
+        // declined it. The per-row CPU kernels hand quantized work to the
+        // device one token at a time, which costs far more than the batch
+        // they declined, so the fallback stays on the CPU.
+        #[cfg(feature = "vulkan")]
+        let _cpu_scope = crate::core::thread_pool::ComputePool::disable_gpu_matmul_for_scope();
+        let n_in = self.weight.n_in;
+        let n_out = self.weight.n_out;
+        let input_ptr = input.as_ptr();
+        let output_ptr = output.as_mut_ptr();
+        pool.compute(move |ith, nth| {
+            let (start, end) = crate::ops::kernel::f32::scalar::row_range(rows, ith, nth);
+            if start >= end {
+                return;
+            }
+            // SAFETY: the caller checked the lengths; each worker owns a
+            // disjoint row range and the kernel writes only its own rows.
+            unsafe {
+                let input_slice =
+                    std::slice::from_raw_parts(input_ptr.add(start * n_in), (end - start) * n_in);
+                let output_slice = std::slice::from_raw_parts_mut(
+                    output_ptr.add(start * n_out),
+                    (end - start) * n_out,
+                );
+                self.weight
+                    .kernel
+                    .forward_batched(input_slice, output_slice, n_in, n_out);
+            }
+        });
     }
 }
 
-fn linear_from_gguf_bf16(
-    source: &dyn TensorSource,
+/// The device-side attention: an arena with the q/k/v and the output.
+///
+/// The vision tower attends in both directions over every patch, so the
+/// runtime is driven with `causal: false` and the unit scale Gemma4 uses.
+#[cfg(feature = "vulkan")]
+struct DeviceAttention {
+    runtime: crate::vulkan::ops::AttentionRuntime,
+    rows: usize,
+}
+
+#[cfg(feature = "vulkan")]
+impl DeviceAttention {
+    fn new(config: &EmbeddingGemmaVisionConfig, rows: usize) -> Option<Self> {
+        let context = crate::ops::get_vulkan_context()?;
+        let heads = config.head_count;
+        let width = heads * config.head_dim;
+        let runtime =
+            crate::vulkan::ops::AttentionRuntime::new(context, (rows * width, rows * width))
+                .ok()?;
+        Some(Self { runtime, rows })
+    }
+}
+
+fn linear_from_gguf<'a>(
+    source: &'a dyn TensorSource,
     name: &str,
     n_in: usize,
     n_out: usize,
-) -> Result<Linear, String> {
-    let raw = source
+) -> Result<Linear<'a>, String> {
+    let info = source
+        .tensor_info(name)
+        .ok_or_else(|| format!("Missing tensor: {name}"))?;
+    if info.dims != [n_in as u64, n_out as u64] {
+        return Err(format!(
+            "{name}: shape {:?} != [n_in={n_in}, n_out={n_out}]",
+            info.dims
+        ));
+    }
+    let bytes = source
         .tensor_slice(name)
         .ok_or_else(|| format!("Missing tensor: {name}"))?;
-    // Payload is already `[n_out, n_in]`; GGUF dims are metadata only.
-    let matrix = dequant_bf16_to_f32_linear(raw, n_in, n_out);
+    let expected = usize::try_from(info.checked_nbytes().unwrap_or(u64::MAX))
+        .map_err(|_| format!("Invalid tensor byte size: {name}"))?;
+    if bytes.len() != expected {
+        return Err(format!("Invalid tensor data length for {name}"));
+    }
     Ok(Linear {
-        matrix,
-        n_in,
-        n_out,
+        weight: Weight::from_quantized(QuantizedTensor::from_bytes(
+            bytes,
+            info.ggml_type,
+            n_in,
+            n_out,
+        )),
     })
 }
 
-struct VisionLayer {
+struct VisionLayer<'a> {
     input_layernorm: Vec<f32>,
-    attn_q_w: Linear,
-    attn_k_w: Linear,
-    attn_v_w: Linear,
-    attn_out: Linear,
+    attn_q_w: Linear<'a>,
+    attn_k_w: Linear<'a>,
+    attn_v_w: Linear<'a>,
+    attn_out: Linear<'a>,
     attn_q_norm: Vec<f32>,
     attn_k_norm: Vec<f32>,
     post_attention_layernorm: Vec<f32>,
     pre_ffn_norm: Vec<f32>,
-    ffn_gate: Linear,
-    ffn_up: Linear,
-    ffn_down: Linear,
+    ffn_gate: Linear<'a>,
+    ffn_up: Linear<'a>,
+    ffn_down: Linear<'a>,
     post_ffn_norm: Vec<f32>,
 }
 
-pub struct EmbeddingGemmaVisionModel {
+pub struct EmbeddingGemmaVisionModel<'a> {
     pub config: EmbeddingGemmaVisionConfig,
-    pub(super) source: Arc<dyn TensorSource>,
-    pub(super) patch_input_proj: Linear,
+    pub(super) source: &'a Arc<dyn TensorSource>,
+    pub(super) pool: Arc<ComputePool>,
+    /// The device attention, built on first use. `None` until then and after
+    /// any failure, in which case the layer falls back to the CPU.
+    #[cfg(feature = "vulkan")]
+    device: std::cell::RefCell<Option<DeviceAttention>>,
+    pub(super) patch_input_proj: Linear<'a>,
     /// `vision.position_embedding_table` shape `(2, position_embedding_size,
     /// embd)` — separate (h, w) tables. We read it as a flat F32 vector.
     pub(super) position_embedding_table: Vec<f32>,
-    pub(super) layers: Vec<VisionLayer>,
-    pub(super) vision_embed: Linear,
+    pub(super) layers: Vec<VisionLayer<'a>>,
+    pub(super) vision_embed: Linear<'a>,
 }
 
-impl EmbeddingGemmaVisionModel {
-    pub fn from_source(source: &Arc<dyn TensorSource>) -> Result<Self, String> {
+impl<'a> EmbeddingGemmaVisionModel<'a> {
+    pub fn from_source(
+        source: &'a Arc<dyn TensorSource>,
+        n_threads: usize,
+    ) -> Result<Self, String> {
         let config = EmbeddingGemmaVisionConfig::from_metadata(source.as_ref())?;
+        let pool = Arc::new(ComputePool::new(n_threads.max(1)));
 
         // patch_input_proj: stored as `[embd, in_channels * patch * patch]`.
         // GGUF stores `[embd, 3*16*16]` (reversed: last dim first).
@@ -225,7 +319,6 @@ impl EmbeddingGemmaVisionModel {
         let pe_raw = source
             .tensor_slice("vision.patch_input_proj.weight")
             .ok_or("Missing tensor: vision.patch_input_proj.weight")?;
-        let pe_flat = dequant_bf16_to_f32(pe_raw, (pe_info.dims[0] * pe_info.dims[1]) as usize);
         // Convert GGUF storage [embd, in_features] → [out, in].
         let embd = config.embd;
         let in_features = (config.patch_size * config.patch_size * 3) as u64;
@@ -236,16 +329,13 @@ impl EmbeddingGemmaVisionModel {
             ));
         }
         let in_features_usize = in_features as usize;
-        let mut patch_input_proj = vec![0.0f32; embd * in_features_usize];
-        for o in 0..embd {
-            for i in 0..in_features_usize {
-                patch_input_proj[o * in_features_usize + i] = pe_flat[o * in_features_usize + i];
-            }
-        }
         let patch_input_proj = Linear {
-            matrix: patch_input_proj,
-            n_in: in_features as usize,
-            n_out: embd,
+            weight: Weight::from_quantized(QuantizedTensor::from_bytes(
+                pe_raw,
+                pe_info.ggml_type,
+                in_features_usize,
+                embd,
+            )),
         };
 
         // position_embedding_table: shape `(2, position_embedding_size, embd)`.
@@ -268,14 +358,10 @@ impl EmbeddingGemmaVisionModel {
                 embd,
             )?;
             // attn_q/k/v are separate (not fused QKV).
-            let attn_q_w =
-                linear_from_gguf_bf16(source.as_ref(), &blk("attn_q.weight")?, embd, embd)?;
-            let attn_k_w =
-                linear_from_gguf_bf16(source.as_ref(), &blk("attn_k.weight")?, embd, embd)?;
-            let attn_v_w =
-                linear_from_gguf_bf16(source.as_ref(), &blk("attn_v.weight")?, embd, embd)?;
-            let out =
-                linear_from_gguf_bf16(source.as_ref(), &blk("attn_output.weight")?, embd, embd)?;
+            let attn_q_w = linear_from_gguf(source.as_ref(), &blk("attn_q.weight")?, embd, embd)?;
+            let attn_k_w = linear_from_gguf(source.as_ref(), &blk("attn_k.weight")?, embd, embd)?;
+            let attn_v_w = linear_from_gguf(source.as_ref(), &blk("attn_v.weight")?, embd, embd)?;
+            let out = linear_from_gguf(source.as_ref(), &blk("attn_output.weight")?, embd, embd)?;
             let qn = decode_f32(
                 source
                     .tensor_slice(&blk("attn_q_norm.weight")?)
@@ -300,19 +386,19 @@ impl EmbeddingGemmaVisionModel {
                     .ok_or_else(|| "Missing pre_ffn_norm.weight".to_string())?,
                 embd,
             )?;
-            let gate = linear_from_gguf_bf16(
+            let gate = linear_from_gguf(
                 source.as_ref(),
                 &blk("ffn_gate.weight")?,
                 embd,
                 config.intermediate_size,
             )?;
-            let up = linear_from_gguf_bf16(
+            let up = linear_from_gguf(
                 source.as_ref(),
                 &blk("ffn_up.weight")?,
                 embd,
                 config.intermediate_size,
             )?;
-            let down = linear_from_gguf_bf16(
+            let down = linear_from_gguf(
                 source.as_ref(),
                 &blk("ffn_down.weight")?,
                 config.intermediate_size,
@@ -347,7 +433,7 @@ impl EmbeddingGemmaVisionModel {
             .and_then(|value| value.to_u64())
             .and_then(|value| usize::try_from(value).ok())
             .ok_or("Missing metadata: gemma4-embedding.embedding_length")?;
-        let vision_embed = linear_from_gguf_bf16(
+        let vision_embed = linear_from_gguf(
             source.as_ref(),
             "vision_embed.weight",
             config.embd,
@@ -356,7 +442,10 @@ impl EmbeddingGemmaVisionModel {
 
         Ok(Self {
             config,
-            source: Arc::clone(source),
+            source,
+            pool,
+            #[cfg(feature = "vulkan")]
+            device: std::cell::RefCell::new(None),
             patch_input_proj,
             position_embedding_table,
             layers,
@@ -407,8 +496,7 @@ impl EmbeddingGemmaVisionModel {
         //   embed[p] = patch_input_proj @ pixels[p]  (linear in_features → embd)
         // stored as `[embd, in_features]` so it's a matvec.
         let mut patches = vec![0.0f32; n_patches * embd];
-        let mut patch_pixels = vec![0.0f32; in_features];
-        let mut patch_out = vec![0.0f32; embd];
+        let mut patch_pixels = vec![0.0f32; n_patches * in_features];
         for p in 0..n_patches {
             // Extract patch pixels: a 16x16x3 block starting at row=p/n_patches_x, col=p%n_patches_x.
             let py = p / n_patches_x;
@@ -418,15 +506,15 @@ impl EmbeddingGemmaVisionModel {
                     let img_row = py * ps + dy;
                     let img_col = px * ps + dx;
                     for c in 0..3 {
-                        let idx = (dy * ps + dx) * 3 + c;
+                        let idx = p * in_features + (dy * ps + dx) * 3 + c;
                         let img_idx = (img_row * image_w + img_col) * 3 + c;
                         patch_pixels[idx] = 2.0 * (image_pixels[img_idx] - 0.5);
                     }
                 }
             }
-            self.patch_input_proj.forward(&patch_pixels, &mut patch_out);
-            patches[p * embd..(p + 1) * embd].copy_from_slice(&patch_out);
         }
+        self.patch_input_proj
+            .forward_rows(&self.pool, &patch_pixels, &mut patches, n_patches);
 
         // Step 2: add 2D position embeddings. `position_embedding_table`
         // stores `[2, position_embedding_size, embd]`. Index 0 is the
@@ -489,16 +577,102 @@ impl EmbeddingGemmaVisionModel {
         image_w: usize,
     ) -> Result<Vec<f32>, String> {
         let tower = self.encode_tower(image_pixels, image_h, image_w)?;
-        let mut output = vec![0.0f32; tower.len() / self.config.embd * self.vision_embed.n_out];
-        for (input, out) in tower
-            .chunks_exact(self.config.embd)
-            .zip(output.chunks_exact_mut(self.vision_embed.n_out))
-        {
-            let mut normalized = input.to_vec();
-            crate::ops::norm::rms_unit_inplace(&mut normalized, RMS_NORM_EPS);
-            self.vision_embed.forward(&normalized, out);
+        let n_tokens = tower.len() / self.config.embd;
+        let mut output = vec![0.0f32; n_tokens * self.vision_embed.weight.n_out];
+        let mut normalized = tower;
+        for row in normalized.chunks_exact_mut(self.config.embd) {
+            crate::ops::norm::rms_unit_inplace(row, RMS_NORM_EPS);
         }
+        self.vision_embed
+            .forward_rows(&self.pool, &normalized, &mut output, n_tokens);
         Ok(output)
+    }
+
+    /// Run the bidirectional attention on the device. `false` means the
+    /// caller should use the CPU path.
+    #[cfg(feature = "vulkan")]
+    fn device_attention(
+        &self,
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        rows: usize,
+        attn_out: &mut [f32],
+    ) -> bool {
+        let spec = crate::ops::nn::AttentionSpec {
+            query_tokens: rows,
+            key_tokens: rows,
+            query_heads: self.config.head_count,
+            key_value_heads: self.config.head_count,
+            head_dim: self.config.head_dim,
+            causal: false,
+            scale: 1.0,
+        };
+        let mut cell = self.device.borrow_mut();
+        if cell.as_ref().is_none_or(|device| device.rows != rows) {
+            *cell = DeviceAttention::new(&self.config, rows);
+        }
+        match cell.as_mut() {
+            Some(device) => device.runtime.forward(q, k, v, attn_out, spec).is_ok(),
+            None => false,
+        }
+    }
+
+    /// The CPU attention: one task per (query patch, head), each worker with
+    /// its own score buffer.
+    fn cpu_attention(
+        &self,
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        n_patches: usize,
+        attn_out: &mut [f32],
+    ) {
+        let embd = self.config.embd;
+        let n_head = self.config.head_count;
+        let head_dim = self.config.head_dim;
+        let tasks = n_patches * n_head;
+        let q_ptr = q.as_ptr();
+        let k_ptr = k.as_ptr();
+        let v_ptr = v.as_ptr();
+        let out_ptr = attn_out.as_mut_ptr();
+        self.pool.compute(move |ith, nth| {
+            let (start, end) = crate::ops::kernel::f32::scalar::row_range(tasks, ith, nth);
+            if start >= end {
+                return;
+            }
+            let mut scores = vec![0.0f32; n_patches];
+            for task in start..end {
+                let i = task / n_head;
+                let head_off = (task % n_head) * head_dim;
+                // SAFETY: the pointers come from slices the caller checked; each
+                // task reads only its own head column and writes only its own
+                // output rows.
+                unsafe {
+                    let q_i = std::slice::from_raw_parts(q_ptr.add(i * embd + head_off), head_dim);
+                    for j in 0..n_patches {
+                        let k_j =
+                            std::slice::from_raw_parts(k_ptr.add(j * embd + head_off), head_dim);
+                        scores[j] = crate::ops::dot_f32(q_i, k_j, head_dim);
+                    }
+                    crate::ops::softmax::softmax_inplace(&mut scores);
+                    let out_i =
+                        std::slice::from_raw_parts_mut(out_ptr.add(i * embd + head_off), head_dim);
+                    // The reduction below accumulates, so the slice starts at
+                    // zero: the device path may have written it before failing.
+                    for value in out_i.iter_mut() {
+                        *value = 0.0;
+                    }
+                    for j in 0..n_patches {
+                        let v_j =
+                            std::slice::from_raw_parts(v_ptr.add(j * embd + head_off), head_dim);
+                        for d in 0..head_dim {
+                            out_i[d] += scores[j] * v_j[d];
+                        }
+                    }
+                }
+            }
+        });
     }
 
     fn forward_vision_layer(
@@ -526,18 +700,15 @@ impl EmbeddingGemmaVisionModel {
         let mut q = vec![0.0f32; n_patches * embd];
         let mut k = vec![0.0f32; n_patches * embd];
         let mut v = vec![0.0f32; n_patches * embd];
-        let mut tmp_q = vec![0.0f32; embd];
-        let mut tmp_k = vec![0.0f32; embd];
-        let mut tmp_v = vec![0.0f32; embd];
-        for p in 0..n_patches {
-            let src = &normed[p * embd..(p + 1) * embd];
-            layer.attn_q_w.forward(src, &mut tmp_q);
-            layer.attn_k_w.forward(src, &mut tmp_k);
-            layer.attn_v_w.forward(src, &mut tmp_v);
-            q[p * embd..(p + 1) * embd].copy_from_slice(&tmp_q);
-            k[p * embd..(p + 1) * embd].copy_from_slice(&tmp_k);
-            v[p * embd..(p + 1) * embd].copy_from_slice(&tmp_v);
-        }
+        layer
+            .attn_q_w
+            .forward_rows(&self.pool, &normed, &mut q, n_patches);
+        layer
+            .attn_k_w
+            .forward_rows(&self.pool, &normed, &mut k, n_patches);
+        layer
+            .attn_v_w
+            .forward_rows(&self.pool, &normed, &mut v, n_patches);
 
         // Step c: per-head Q/K RMSNorm + axial RoPE.
         // HF computes head_dim/4 frequencies and repeats each axis' frequency
@@ -602,34 +773,19 @@ impl EmbeddingGemmaVisionModel {
         // a unit attention scale; the head dimension is already normalized by
         // the trained projections.
         let mut attn_out = vec![0.0f32; n_patches * embd];
-        let mut scores = vec![0.0f32; n_patches];
-        for i in 0..n_patches {
-            for h in 0..n_head {
-                let head_off = h * head_dim;
-                let q_i = &q[i * embd + head_off..i * embd + head_off + head_dim];
-                for j in 0..n_patches {
-                    let k_j = &k[j * embd + head_off..j * embd + head_off + head_dim];
-                    scores[j] = crate::ops::dot_f32(q_i, k_j, head_dim);
-                }
-                crate::ops::softmax::softmax_inplace(&mut scores);
-                let out_i = &mut attn_out[i * embd + head_off..i * embd + head_off + head_dim];
-                for j in 0..n_patches {
-                    let v_j = &v[j * embd + head_off..j * embd + head_off + head_dim];
-                    for d in 0..head_dim {
-                        out_i[d] += scores[j] * v_j[d];
-                    }
-                }
-            }
+        #[cfg(feature = "vulkan")]
+        let device_used = self.device_attention(&q, &k, &v, n_patches, &mut attn_out);
+        #[cfg(not(feature = "vulkan"))]
+        let device_used = false;
+        if !device_used {
+            self.cpu_attention(&q, &k, &v, n_patches, &mut attn_out);
         }
 
         // Step e: output projection.
         let mut proj_out = vec![0.0f32; n_patches * embd];
-        let mut tmp_o = vec![0.0f32; embd];
-        for p in 0..n_patches {
-            let src = &attn_out[p * embd..(p + 1) * embd];
-            layer.attn_out.forward(src, &mut tmp_o);
-            proj_out[p * embd..(p + 1) * embd].copy_from_slice(&tmp_o);
-        }
+        layer
+            .attn_out
+            .forward_rows(&self.pool, &attn_out, &mut proj_out, n_patches);
 
         // Step f: residual + post_attention_norm.
         for p in 0..n_patches {
@@ -654,19 +810,18 @@ impl EmbeddingGemmaVisionModel {
         let mut gate_buf = vec![0.0f32; n_patches * cfg.intermediate_size];
         let mut up_buf = vec![0.0f32; n_patches * cfg.intermediate_size];
         let mut ffn_out = vec![0.0f32; n_patches * embd];
-        let mut tmp_g = vec![0.0f32; cfg.intermediate_size];
-        let mut tmp_u = vec![0.0f32; cfg.intermediate_size];
-        let mut tmp_d = vec![0.0f32; embd];
-        for p in 0..n_patches {
-            let src = &ff_x[p * embd..(p + 1) * embd];
-            layer.ffn_gate.forward(src, &mut tmp_g);
-            layer.ffn_up.forward(src, &mut tmp_u);
-            for j in 0..cfg.intermediate_size {
-                tmp_g[j] = crate::ops::activation::gelu(tmp_g[j]) * tmp_u[j];
-            }
-            layer.ffn_down.forward(&tmp_g, &mut tmp_d);
-            ffn_out[p * embd..(p + 1) * embd].copy_from_slice(&tmp_d);
+        layer
+            .ffn_gate
+            .forward_rows(&self.pool, &ff_x, &mut gate_buf, n_patches);
+        layer
+            .ffn_up
+            .forward_rows(&self.pool, &ff_x, &mut up_buf, n_patches);
+        for j in 0..gate_buf.len() {
+            gate_buf[j] = crate::ops::activation::gelu(gate_buf[j]) * up_buf[j];
         }
+        layer
+            .ffn_down
+            .forward_rows(&self.pool, &gate_buf, &mut ffn_out, n_patches);
 
         // Step i: post_ffn_norm + residual.
         for p in 0..n_patches {

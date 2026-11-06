@@ -339,6 +339,71 @@ RMI_DORY_Q5_MODEL="$RMI_DORY_Q5_MODEL" \
 Latest coverage and limits are recorded in the completion validation below.
 Historical operator failures above have not been relaxed or counted as passing.
 
+## Second GPU device: NVIDIA GB10 (2026-11-05)
+
+Every device result above was recorded on **AMD RADV NAVI31**. The resident graph
+was re-run on a second vendor's device to check that the parts of the contract
+that are vendor-specific actually are, and that the parts that are not do not
+regress.
+
+Host: NVIDIA GB10 (integrated, `PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU`),
+driver 580.173.02, Vulkan API 1.4.312. Device limits that matter here:
+`shaderFloat64 = true`, `shaderInt64 = true`,
+`maxStorageBufferRange = 4294967295` (4 GiB). The `shaderFloat64` requirement is
+therefore met on this device as well — that gate is not a RADV-only property, and
+the failure mode on a device without it stays the same (forced Vulkan is refused
+with a named reason, Auto may fall back to CPU at initialization).
+
+Artifact: the same pinned `NVIDIA-Nemotron-Labs-Dory1.0-4B-Q5_K_M.gguf`,
+SHA-256 `96080be49ffd67b916018b7bdef8c484762576fb52780e10ab98ac4978a660e0`,
+3,673,288,864 bytes. The download was re-verified byte-for-byte against the
+pin before the run.
+
+```sh
+RMI_DORY_Q5_MODEL="$PWD/models/NVIDIA-Nemotron-Labs-Dory1.0-4B-GGUF/NVIDIA-Nemotron-Labs-Dory1.0-4B-Q5_K_M.gguf" \
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json \
+  cargo test --locked --profile release-fast --features vulkan \
+  --test dory_q5_k_m -- --ignored --nocapture --test-threads=1
+```
+
+Observed on 2026-11-05:
+
+| Test | Result |
+|---|---|
+| `dory_q5_contract_and_tokenizer` | ok (CPU) |
+| `dory_q5_single_token_logits_are_finite` | ok (CPU) |
+| `dory_q5_prefill_chunking_and_reset` | ok |
+| `dory_q5_vulkan_executes_and_matches_cpu` | ok — 8 comparisons, `relative_l2 = 0`, `scaled_max_abs = 0` |
+| `dory_batched_modes_and_packed_kv` | ok — `relative_l2 = 0` |
+| `dory_reset_rebuilds_changed_config` | ok — `relative_l2 = 0` |
+| `dory_q5_reference_trace` | ok — `generated_ids=[1897, 1429, 22177, 5325, 1897, 1429, 22177, 5325]` |
+
+Five tests, 179.87 s wall clock, no failures. The device reported itself as
+`NVIDIA GB10 (int8 dot product: supported, shader f16: supported)` and the
+Q8_0 matmul selected the packed int8 dot product, so the device path is the
+same one the RADV host exercised, not a fallback.
+
+The CPU/GPU comparison was **bit-identical** here, not merely inside the 1%
+gate: every reported `relative_l2` and `scaled_max_abs` was exactly `0`. The
+README's gates stay at 1%; zero is the observation, not a relaxed threshold.
+
+Server and JEV surfaces were exercised on the same host against the same
+artifact with `--compute vulkan`:
+
+| Surface | Observation |
+|---|---|
+| `/v1/chat/completions` | 200, `finish_reason=length`, 24 completion tokens |
+| `/v1/messages` | 200, Anthropic-shaped reply, 16 output tokens |
+| `/v1/messages/count_tokens` | 200, `input_tokens=19` |
+| CLI `--compute vulkan` | produced the expected answer |
+
+This closes the "validated on RADV only" gap recorded below. It does **not**
+close the three other gaps this file still lists: the full 262 144-token context
+is still unverified, the GGUF's own chat template is still not what the default
+path renders, and the CLI and the HTTP server do not render the same prompt for
+Dory at all (15 versus 19 tokens, and they produce different greedy text). See
+`docs/develop/DORY_REVIEW.md`.
+
 ## Acceptance
 
 The reference build disables NEON on ARM and SSE2/SSE4.2, AVX/AVX2/AVX512, FMA,

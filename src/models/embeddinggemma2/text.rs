@@ -223,33 +223,83 @@ fn dequant_to_f32(
     }
 }
 
-/// Linear weight stored as a flat F32 matrix (row-major `[n_out, n_in]`,
-/// i.e. `out[i, k] = matrix[i * n_in + k]`). We compute
-/// `out_vec[i] = sum_k matrix[i, k] * input[k]`.
-struct Linear {
-    matrix: Vec<f32>,
-    n_in: usize,
-    n_out: usize,
+/// One linear projection over the borrowed GGUF bytes.
+///
+/// The GGUF dtype is kept and the bytes are borrowed, so there is no F32 copy
+/// of the weight and the device can take the matmul when the shape suits it.
+struct Linear<'a> {
+    weight: Weight<'a>,
 }
 
-impl Linear {
+impl Linear<'_> {
+    /// A single row. The device's per-submission fence costs more than one
+    /// row of arithmetic, so this stays on the shared kernel.
     fn forward(&self, input: &[f32], output: &mut [f32]) {
-        assert_eq!(input.len(), self.n_in, "Linear::forward input shape");
-        assert_eq!(output.len(), self.n_out, "Linear::forward output shape");
-        // For each output row i, compute the dot product with input.
-        for i in 0..self.n_out {
-            let row = &self.matrix[i * self.n_in..(i + 1) * self.n_in];
-            output[i] = crate::ops::dot_f32(row, input, self.n_in);
+        debug_assert_eq!(input.len(), self.weight.n_in, "Linear::forward input shape");
+        debug_assert_eq!(
+            output.len(),
+            self.weight.n_out,
+            "Linear::forward output shape"
+        );
+        self.weight
+            .kernel
+            .forward_batched(input, output, self.weight.n_in, self.weight.n_out);
+    }
+
+    /// A whole token batch: the device first, then the shared kernel with the
+    /// rows partitioned over the pool.
+    fn forward_rows(&self, pool: &ComputePool, input: &[f32], output: &mut [f32], rows: usize) {
+        debug_assert_eq!(input.len(), rows * self.weight.n_in);
+        debug_assert_eq!(output.len(), rows * self.weight.n_out);
+        // The batched linear runtime is rebuilt for every weight (TODO-049),
+        // so the setup costs more than the projections save at the sizes this
+        // tower sees: the media path runs 260 tokens and is about 0.7 s slower
+        // on the device, a short prompt is far slower. The explicit Vulkan
+        // policy still asks for the device.
+        #[cfg(feature = "vulkan")]
+        if crate::compute::ComputePolicy::legacy() == crate::compute::ComputePolicy::Vulkan
+            && self.weight.try_vulkan_rows(input, output, rows)
+        {
+            return;
         }
+        // The batched device path above either took the whole batch or
+        // declined it. The per-row CPU kernels hand quantized work to the
+        // device one token at a time, which costs far more than the batch
+        // they declined, so the fallback stays on the CPU.
+        #[cfg(feature = "vulkan")]
+        let _cpu_scope = crate::core::thread_pool::ComputePool::disable_gpu_matmul_for_scope();
+        let n_in = self.weight.n_in;
+        let n_out = self.weight.n_out;
+        let input_ptr = input.as_ptr();
+        let output_ptr = output.as_mut_ptr();
+        pool.compute(move |ith, nth| {
+            let (start, end) = crate::ops::kernel::f32::scalar::row_range(rows, ith, nth);
+            if start >= end {
+                return;
+            }
+            // SAFETY: the caller checked the lengths; each worker owns a
+            // disjoint row range and the kernel writes only its own rows.
+            unsafe {
+                let input_slice =
+                    std::slice::from_raw_parts(input_ptr.add(start * n_in), (end - start) * n_in);
+                let output_slice = std::slice::from_raw_parts_mut(
+                    output_ptr.add(start * n_out),
+                    (end - start) * n_out,
+                );
+                self.weight
+                    .kernel
+                    .forward_batched(input_slice, output_slice, n_in, n_out);
+            }
+        });
     }
 }
 
-fn linear_from_gguf(
-    source: &dyn TensorSource,
+fn linear_from_gguf<'a>(
+    source: &'a dyn TensorSource,
     name: &str,
     n_in: usize,
     n_out: usize,
-) -> Result<Linear, String> {
+) -> Result<Linear<'a>, String> {
     let info = source
         .tensor_info(name)
         .ok_or_else(|| format!("Missing tensor: {name}"))?;
@@ -259,51 +309,58 @@ fn linear_from_gguf(
             info.dims
         ));
     }
-    let raw = source
+    let bytes = source
         .tensor_slice(name)
         .ok_or_else(|| format!("Missing tensor: {name}"))?;
-    let matrix = dequant_to_f32(raw, info.ggml_type, n_in, n_out)?;
+    let expected = usize::try_from(info.checked_nbytes().unwrap_or(u64::MAX))
+        .map_err(|_| format!("Invalid tensor byte size: {name}"))?;
+    if bytes.len() != expected {
+        return Err(format!("Invalid tensor data length for {name}"));
+    }
     Ok(Linear {
-        matrix,
-        n_in,
-        n_out,
+        weight: Weight::from_quantized(QuantizedTensor::from_bytes(
+            bytes,
+            info.ggml_type,
+            n_in,
+            n_out,
+        )),
     })
 }
 
-struct LayerWeights {
+struct LayerWeights<'a> {
     attn_norm: Vec<f32>,
     post_attention_norm: Vec<f32>,
     pre_ffn_norm: Vec<f32>,
     post_ffn_norm: Vec<f32>,
     layer_scalar: f32,
-    ple_input_gate: Linear,
-    ple_projection: Linear,
+    ple_input_gate: Linear<'a>,
+    ple_projection: Linear<'a>,
     ple_post_norm: Vec<f32>,
-    attn_q: Linear,
-    attn_k: Linear,
-    attn_v: Linear,
-    attn_output: Linear,
+    attn_q: Linear<'a>,
+    attn_k: Linear<'a>,
+    attn_v: Linear<'a>,
+    attn_output: Linear<'a>,
     attn_q_norm: Vec<f32>,
     attn_k_norm: Vec<f32>,
-    ffn_gate: Linear,
-    ffn_up: Linear,
-    ffn_down: Linear,
+    ffn_gate: Linear<'a>,
+    ffn_up: Linear<'a>,
+    ffn_down: Linear<'a>,
 }
 
-pub struct EmbeddingGemmaTextModel {
+pub struct EmbeddingGemmaTextModel<'a> {
     pub config: EmbeddingGemmaTextConfig,
     pub(super) pool: Arc<ComputePool>,
     pub(super) token_embd: Vec<f32>,
-    pub(super) text_embproj: Linear,
-    pub(super) per_layer_model_proj: Linear,
+    pub(super) text_embproj: Linear<'a>,
+    pub(super) per_layer_model_proj: Linear<'a>,
     pub(super) per_layer_proj_norm: Vec<f32>,
     pub(super) output_norm: Vec<f32>,
-    pub(super) layers: Vec<LayerWeights>,
+    pub(super) layers: Vec<LayerWeights<'a>>,
 }
 
-impl EmbeddingGemmaTextModel {
-    pub fn from_source(source: &dyn TensorSource) -> Result<Self, String> {
-        let pool = Arc::new(ComputePool::new(8));
+impl<'a> EmbeddingGemmaTextModel<'a> {
+    pub fn from_source(source: &'a dyn TensorSource, n_threads: usize) -> Result<Self, String> {
+        let pool = Arc::new(ComputePool::new(n_threads.max(1)));
         let config = EmbeddingGemmaTextConfig::from_metadata(source)?;
 
         let get_f32 = |name: &str, expected: usize| -> Result<Vec<f32>, String> {
@@ -373,16 +430,8 @@ impl EmbeddingGemmaTextModel {
                 te_info.dims, config.n_embd, EMBEDDING_DIM
             ));
         }
-        let te_raw = source
-            .tensor_slice("text_embproj.weight")
-            .ok_or("Missing tensor: text_embproj.weight")?;
-        let text_embproj_matrix =
-            dequant_to_f32(te_raw, te_info.ggml_type, config.n_embd, EMBEDDING_DIM)?;
-        let text_embproj = Linear {
-            matrix: text_embproj_matrix,
-            n_in: config.n_embd,
-            n_out: EMBEDDING_DIM,
-        };
+        let text_embproj =
+            linear_from_gguf(source, "text_embproj.weight", config.n_embd, EMBEDDING_DIM)?;
 
         // per_layer_model_proj: GGUF stores [per_layer_w, n_embd]; we want
         // [n_embd, per_layer_w] for matvec.
@@ -396,18 +445,14 @@ impl EmbeddingGemmaTextModel {
                 config.n_embd
             ));
         }
-        let ple_raw = source
-            .tensor_slice("per_layer_model_proj.weight")
-            .ok_or("Missing tensor: per_layer_model_proj.weight")?;
         // GGUF shape: [n_embd, per_layer_width * n_layer].
         let ple_n_out = config.per_layer_width * config.n_layer;
-        let per_layer_model_proj_matrix =
-            dequant_to_f32(ple_raw, ple_info.ggml_type, config.n_embd, ple_n_out)?;
-        let per_layer_model_proj = Linear {
-            matrix: per_layer_model_proj_matrix,
-            n_in: config.n_embd,
-            n_out: config.per_layer_width * config.n_layer,
-        };
+        let per_layer_model_proj = linear_from_gguf(
+            source,
+            "per_layer_model_proj.weight",
+            config.n_embd,
+            config.per_layer_width * config.n_layer,
+        )?;
         let per_layer_proj_norm = get_f32("per_layer_proj_norm.weight", config.per_layer_width)?;
         let output_norm = get_f32("output_norm.weight", config.n_embd)?;
 
@@ -608,19 +653,18 @@ impl EmbeddingGemmaTextModel {
         let n_layer = cfg.n_layer;
         let per_layer_proj_scale = 1.0f32 / (n_embd as f32).sqrt();
         let mut per_layer_input = vec![0.0f32; n_tokens * n_layer * per_layer_w];
-        let mut tmp = vec![0.0f32; per_layer_w * n_layer];
+        let mut proj = vec![0.0f32; n_tokens * n_layer * per_layer_w];
+        self.per_layer_model_proj
+            .forward_rows(&self.pool, &x, &mut proj, n_tokens);
         for t in 0..n_tokens {
-            let src = &x[t * n_embd..(t + 1) * n_embd];
-            self.per_layer_model_proj.forward(src, &mut tmp);
-            for j in 0..tmp.len() {
-                tmp[j] *= per_layer_proj_scale;
-            }
             for il in 0..n_layer {
-                let slot = &mut tmp[il * per_layer_w..(il + 1) * per_layer_w];
+                let base = t * n_layer * per_layer_w + il * per_layer_w;
+                let slot = &mut proj[base..base + per_layer_w];
+                for v in slot.iter_mut() {
+                    *v *= per_layer_proj_scale;
+                }
                 crate::ops::norm::rms_norm_inplace(slot, &self.per_layer_proj_norm, EPS);
-                per_layer_input[t * n_layer * per_layer_w + il * per_layer_w
-                    ..t * n_layer * per_layer_w + (il + 1) * per_layer_w]
-                    .copy_from_slice(slot);
+                per_layer_input[base..base + per_layer_w].copy_from_slice(slot);
             }
         }
 
@@ -640,12 +684,12 @@ impl EmbeddingGemmaTextModel {
         }
 
         let mut pooled = vec![0.0f32; EMBEDDING_DIM];
-        let mut out = vec![0.0f32; EMBEDDING_DIM];
+        let mut proj = vec![0.0f32; n_tokens * EMBEDDING_DIM];
+        self.text_embproj
+            .forward_rows(&self.pool, &x_normed, &mut proj, n_tokens);
         for t in 0..n_tokens {
-            let src = &x_normed[t * n_embd..(t + 1) * n_embd];
-            self.text_embproj.forward(src, &mut out);
             for j in 0..EMBEDDING_DIM {
-                pooled[j] += out[j];
+                pooled[j] += proj[t * EMBEDDING_DIM + j];
             }
         }
         let inv_n = 1.0 / n_tokens as f32;
@@ -687,17 +731,15 @@ impl EmbeddingGemmaTextModel {
         let mut q = vec![0.0f32; q_len];
         let mut k = vec![0.0f32; kv_len];
         let mut v = vec![0.0f32; kv_len];
-        let mut tmp_q = vec![0.0f32; n_head * head_dim];
-        let mut tmp_kv = vec![0.0f32; n_kv * head_dim];
-        for t in 0..n_tokens {
-            let src = &normed[t * n_embd..(t + 1) * n_embd];
-            layer.attn_q.forward(src, &mut tmp_q);
-            layer.attn_k.forward(src, &mut tmp_kv);
-            k[t * n_kv * head_dim..(t + 1) * n_kv * head_dim].copy_from_slice(&tmp_kv);
-            layer.attn_v.forward(src, &mut tmp_kv);
-            v[t * n_kv * head_dim..(t + 1) * n_kv * head_dim].copy_from_slice(&tmp_kv);
-            q[t * n_head * head_dim..(t + 1) * n_head * head_dim].copy_from_slice(&tmp_q);
-        }
+        layer
+            .attn_q
+            .forward_rows(&self.pool, &normed, &mut q, n_tokens);
+        layer
+            .attn_k
+            .forward_rows(&self.pool, &normed, &mut k, n_tokens);
+        layer
+            .attn_v
+            .forward_rows(&self.pool, &normed, &mut v, n_tokens);
 
         // Step d: per-head Q/K RMSNorm + RoPE.
         // Apply RMSNorm over head_dim for each head (before RoPE).
@@ -793,12 +835,9 @@ impl EmbeddingGemmaTextModel {
 
         // Step f: output projection.
         let mut proj_out = vec![0.0f32; n_tokens * n_embd];
-        let mut tmp_o = vec![0.0f32; n_embd];
-        for t in 0..n_tokens {
-            let src = &attn_out[t * attn_dim..(t + 1) * attn_dim];
-            layer.attn_output.forward(src, &mut tmp_o);
-            proj_out[t * n_embd..(t + 1) * n_embd].copy_from_slice(&tmp_o);
-        }
+        layer
+            .attn_output
+            .forward_rows(&self.pool, &attn_out, &mut proj_out, n_tokens);
 
         // Step g: post_attention_norm + residual.
         let mut post_attn_pre = vec![0.0f32; n_tokens * n_embd];
@@ -824,19 +863,20 @@ impl EmbeddingGemmaTextModel {
         // Step i: GeGLU FFN (per llama.cpp gemma4.cpp line 357: LLM_FFN_GELU, LLM_FFN_PAR).
         // gelu(gate) * up, then ffn_down.
         let mut ffn_out = vec![0.0f32; n_tokens * n_embd];
-        let mut tmp_g = vec![0.0f32; n_ff];
-        let mut tmp_u = vec![0.0f32; n_ff];
-        let mut tmp_d = vec![0.0f32; n_embd];
-        for t in 0..n_tokens {
-            let src = &ff_x[t * n_embd..(t + 1) * n_embd];
-            layer.ffn_gate.forward(src, &mut tmp_g);
-            layer.ffn_up.forward(src, &mut tmp_u);
-            for j in 0..n_ff {
-                tmp_g[j] = crate::ops::activation::gelu(tmp_g[j]) * tmp_u[j];
-            }
-            layer.ffn_down.forward(&tmp_g, &mut tmp_d);
-            ffn_out[t * n_embd..(t + 1) * n_embd].copy_from_slice(&tmp_d);
+        let mut gate = vec![0.0f32; n_tokens * n_ff];
+        let mut up = vec![0.0f32; n_tokens * n_ff];
+        layer
+            .ffn_gate
+            .forward_rows(&self.pool, &ff_x, &mut gate, n_tokens);
+        layer
+            .ffn_up
+            .forward_rows(&self.pool, &ff_x, &mut up, n_tokens);
+        for j in 0..gate.len() {
+            gate[j] = crate::ops::activation::gelu(gate[j]) * up[j];
         }
+        layer
+            .ffn_down
+            .forward_rows(&self.pool, &gate, &mut ffn_out, n_tokens);
 
         // Step j: post_ffn_norm + residual.
         for t in 0..n_tokens {
@@ -853,25 +893,28 @@ impl EmbeddingGemmaTextModel {
         //   x = pe_in + cur
         let per_layer_w = cfg.per_layer_width;
         let n_layer = cfg.n_layer;
-        let mut pe_in_buf = x.to_vec();
-        let mut ple_gate_buf = vec![0.0f32; per_layer_w];
-        let mut ple_gated = vec![0.0f32; per_layer_w];
-        let mut ple_out = vec![0.0f32; n_embd];
+        let pe_in_buf = x.to_vec();
+        let mut gate = vec![0.0f32; n_tokens * per_layer_w];
+        layer
+            .ple_input_gate
+            .forward_rows(&self.pool, &pe_in_buf, &mut gate, n_tokens);
+        let mut ple_gated = vec![0.0f32; n_tokens * per_layer_w];
         for t in 0..n_tokens {
-            let src = &pe_in_buf[t * n_embd..(t + 1) * n_embd];
-            layer.ple_input_gate.forward(src, &mut ple_gate_buf);
-            for j in 0..per_layer_w {
-                ple_gate_buf[j] = crate::ops::activation::gelu(ple_gate_buf[j]);
-            }
-            // Use the per-layer slice of per_layer_input corresponding to this layer il.
             let slice_off = t * n_layer * per_layer_w + il * per_layer_w;
             for j in 0..per_layer_w {
-                ple_gated[j] = per_layer_input[slice_off + j] * ple_gate_buf[j];
+                let gv = crate::ops::activation::gelu(gate[t * per_layer_w + j]);
+                ple_gated[t * per_layer_w + j] = per_layer_input[slice_off + j] * gv;
             }
-            layer.ple_projection.forward(&ple_gated, &mut ple_out);
-            crate::ops::norm::rms_norm_inplace(&mut ple_out, &layer.ple_post_norm, EPS);
+        }
+        let mut ple_all = vec![0.0f32; n_tokens * n_embd];
+        layer
+            .ple_projection
+            .forward_rows(&self.pool, &ple_gated, &mut ple_all, n_tokens);
+        for t in 0..n_tokens {
+            let mut tmp = ple_all[t * n_embd..(t + 1) * n_embd].to_vec();
+            crate::ops::norm::rms_norm_inplace(&mut tmp, &layer.ple_post_norm, EPS);
             for j in 0..n_embd {
-                x[t * n_embd + j] = pe_in_buf[t * n_embd + j] + ple_out[j];
+                x[t * n_embd + j] = pe_in_buf[t * n_embd + j] + tmp[j];
             }
         }
 
@@ -906,18 +949,28 @@ fn apply_rope_neox(x: &mut [f32], head_dim: usize, cos: &[f32], sin: &[f32]) {
 mod tests {
     use super::*;
 
+    /// A 2x2 F32 projection; the bytes stay owned by the caller.
+    fn f32_linear(bytes: &[u8]) -> Linear<'_> {
+        Linear {
+            weight: Weight::from_quantized(QuantizedTensor::from_bytes(bytes, GGMLType::F32, 2, 2)),
+        }
+    }
+
     #[test]
     fn sliding_attention_keeps_inclusive_boundary_and_masks_distant_token() {
-        let zero = || Linear {
-            matrix: vec![0.0; 4],
-            n_in: 2,
-            n_out: 2,
+        // The tower's projections are [n_out, n_in] rows of F32 weights, and
+        // the weights borrow their bytes, so the bytes outlive the model.
+        let f32_bytes = |rows: [f32; 4]| {
+            let mut bytes = Vec::new();
+            for value in rows {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            bytes
         };
-        let identity = || Linear {
-            matrix: vec![1.0, 0.0, 0.0, 1.0],
-            n_in: 2,
-            n_out: 2,
-        };
+        let zero_bytes = f32_bytes([0.0; 4]);
+        let identity_bytes = f32_bytes([1.0, 0.0, 0.0, 1.0]);
+        let zero = || f32_linear(&zero_bytes);
+        let identity = || f32_linear(&identity_bytes);
         let model = EmbeddingGemmaTextModel {
             config: EmbeddingGemmaTextConfig {
                 n_embd: 2,
@@ -932,7 +985,7 @@ mod tests {
                 per_layer_width: 2,
                 n_ctx: 1024,
             },
-            pool: Arc::new(ComputePool::new(1)),
+            pool: Arc::new(ComputePool::new(8)),
             token_embd: vec![],
             text_embproj: zero(),
             per_layer_model_proj: zero(),

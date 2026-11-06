@@ -1,6 +1,6 @@
 ---
 name: operator-internal-dispatch
-description: Use when 在 rust-model-inference 中设计/重构算子（SIMD dispatch、kernel selection、严格 vs 近似精度切换）时。强调函数级 cfg + 运行时 feature 检测，调用方不应嗅探 target_arch / ggml_type / weight_bytes()。
+description: Use when 在 rust-model-inference 中设计/重构算子（SIMD dispatch、kernel selection、严格 vs 近似精度切换、是否引入 `_ggml` 后缀的对齐函数）时。强调函数级 cfg + 运行时 feature 检测，调用方不应嗅探 target_arch / ggml_type / weight_bytes()；`_ggml` 函数仅在无法绕开时才使用。
 ---
 
 # Operator-internal dispatch
@@ -142,6 +142,64 @@ PyTorch ATEN kernel 的逐行翻译几乎总是错误的——它们是为特定
 判断标准：如果你写了一个超过 10 行的标量函数，检查 `crate::ops::` 和
 Rust 标准库是否已有等价入口。PyTorch 的内部 kernel 不是"更快"的参考
 ——Rust 编译器对标量循环的自动向量化通常优于手写多累加器。
+
+## `_ggml` 后缀函数的使用边界
+
+仓库里有一批 `_ggml` 后缀的函数（`dot_f32_ggml`、`silu_ggml`、`softmax_ggml_inplace`、
+`forward_prepared_ggml`、`ops/kernel/{f32,q8_0}/ggml.rs` 等）。它们复刻上游
+llama.cpp / ggml 的**具体累加结构**（几个累加器、什么顺序 reduce、用哪个 `exp`），
+目的是让结果与 ggml **逐位一致**。
+
+**默认不新开这种函数。** 仓库的原则是「实现并采用 `dot_f32` 这样的函数，尽量不采用
+`dot_f32_ggml` 这样的函数」。理由：
+
+- 浮点加法**不满足结合律**，所以「换一种累加顺序」只是换了一种舍入，不是更正确；
+- ggml 的累加结构是**其实现细节**，不是精度或速度上的最优解 —— 从两个方向都很难证明
+  它最优，因此没有理由让仓库默认遵循它；
+- 每多一条 `_ggml` 路径，就多一份要维护、要测试、要和上游同步的算术。
+
+**只有以下四种情况可以引入 `_ggml` 函数**：
+
+| 允许 | 例子 |
+| --- | --- |
+| 无法绕开的精度问题 | 上游用某结构算出的值与仓库结构差异过大，导致量化档位翻转、输出崩掉 |
+| 行为对齐问题 | 参考实现的行为（不是数值）依赖该结构，例如 softmax 掩码列必须恰好贡献 0 |
+| 行为对齐测试 | 需要逐位复现参考实现才能定位第一个分叉点 |
+| 精确数值测试 | 断言两个实现在特定位模式上完全一致 |
+
+引入时必须同时满足：
+
+1. **注释写明为什么绕不开** —— 具体到「不用它会怎样」，而不是「为了对齐 ggml」；
+2. **不改变默认路径的契约** —— 既有调用方继续走 `dot_f32` 等默认入口，`_ggml` 是
+   opt-in 的并行入口（trait method 或独立函数）；
+3. **命名与文档可发现** —— 新函数名带 `_ggml`，并在 `docs/develop/` 登记它为什么存在。
+
+### 现状与收口方向
+
+当前仓库里已有一批 `_ggml` 函数（`src/ops/dot.rs::dot_f32_ggml`、
+`src/ops/kernel/f32/ggml.rs`、`src/ops/kernel/q8_0/ggml.rs`、`silu_ggml`、
+`softmax_ggml_inplace`、`forward_prepared_ggml` 等）。它们是**历史既有**，
+其中一部分是 nemotron_h_moe 逐位对拍时引入的。
+
+**未来改动的收口方向**：
+
+- 新增代码**不得**再引入 `_ggml` 函数，除非命中上表四种情况之一；
+- 对既有 `_ggml` 函数，若其存在的理由已消失（例如对拍已完成、模型已验证），
+  应评估把调用点迁回默认入口，让 `_ggml` 路径自然消亡；
+- 无法迁移的（例如上游行为确实依赖该结构），在 `docs/develop/` 记下「为什么绕不开」，
+  避免下一个人重新纠结。
+
+### 同名不同义：`dot_f32_ggml` 的两处定义
+
+仓库里有两个 `dot_f32_ggml`，**同名但签名与语义都不同**，读代码时注意区分：
+
+| 位置 | 签名 | 语义 |
+| --- | --- | --- |
+| `src/ops/dot.rs` | `dot_f32_ggml(a: &[f32], b: &[f32], n: usize) -> f32` | 通用算子层的 ggml 归约顺序；aarch64 上转发到 `dot_f32_neon` |
+| `src/ops/kernel/f32/ggml.rs` | `dot_f32_ggml(x: &[f32], y: &[f32]) -> f32` | 带 slice 长度；另有 `_stride` / `_stride_padded` 变体，供 nemotron trunk 用 |
+
+**aarch64 上两者等价**（都走 `dot_f32_neon` 的 4 累加器结构）；**x86 上不等价**
+（前者 4 个 256-bit 累加器，后者单累加器）。
 
 ## 检查清单（提交前）
 

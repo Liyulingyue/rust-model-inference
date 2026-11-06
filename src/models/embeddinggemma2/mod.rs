@@ -28,7 +28,7 @@ pub use vision::{EmbeddingGemmaVisionConfig, EmbeddingGemmaVisionModel};
 pub fn compute_embedding(
     source: &dyn TensorSource,
     prompt: &str,
-    _n_threads_arg: usize,
+    n_threads_arg: usize,
 ) -> Result<Vec<f32>, String> {
     let tokenizer = BPETokenizer::from_gguf_metadata(|key| source.metadata(key).cloned())
         .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
@@ -42,7 +42,7 @@ pub fn compute_embedding(
     if token_ids.is_empty() {
         return Err("Embedding input produced no tokens".into());
     }
-    EmbeddingGemmaTextModel::from_source(source)?.forward(&token_ids)
+    EmbeddingGemmaTextModel::from_source(source, n_threads_arg)?.forward(&token_ids)
 }
 
 /// Encode a single image or audio file, optionally followed by text. All
@@ -52,12 +52,13 @@ pub fn compute_media_embedding(
     image: Option<&Path>,
     audio: Option<&Path>,
     prompt: &str,
+    n_threads: usize,
 ) -> Result<Vec<f32>, String> {
     if usize::from(image.is_some()) + usize::from(audio.is_some()) != 1 {
         return Err("EmbeddingGemma requires exactly one image or audio input".into());
     }
     let (kind, soft_tokens) = if let Some(path) = image {
-        let model = EmbeddingGemmaVisionModel::from_source(&source)?;
+        let model = EmbeddingGemmaVisionModel::from_source(&source, n_threads)?;
         let rgb = crate::app::media::decode_image(path)?.to_rgb8();
         let (width, height) = image_size(
             rgb.width() as usize,
@@ -83,7 +84,7 @@ pub fn compute_media_embedding(
             .collect();
         (
             "audio",
-            EmbeddingGemmaAudioModel::from_source(&source)?.encode(&pcm)?,
+            EmbeddingGemmaAudioModel::from_source(&source, n_threads)?.encode(&pcm)?,
         )
     };
     let get_id = |key: &str| -> Result<u32, String> {
@@ -101,7 +102,7 @@ pub fn compute_media_embedding(
     };
     let start_id = get_id(&format!("gemma4-embedding.{start}_token_id"))?;
     let end_id = get_id(&format!("gemma4-embedding.{end}_token_id"))?;
-    let model = EmbeddingGemmaTextModel::from_source(source.as_ref())?;
+    let model = EmbeddingGemmaTextModel::from_source(source.as_ref(), n_threads)?;
     let rows = soft_tokens.len() / model.config.n_embd;
     let tokenizer = BPETokenizer::from_gguf_metadata(|key| source.metadata(key).cloned())?;
     let mut tokens = tokenizer.encode(
