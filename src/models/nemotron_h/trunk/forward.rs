@@ -1,9 +1,9 @@
 //! Nemotron-3 Nano forward pass.
 
-use half::f16;
 use std::sync::Arc;
 
 use super::config::NemotronConfig;
+use super::trace;
 use super::weights::NemotronLayerWeights;
 
 use crate::core::scratchpad::KvState;
@@ -11,9 +11,7 @@ use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
 use crate::ops::kernel::{Kernel, Weight};
-use crate::ops::{
-    f32_slice_to_f16, quantize_q8_0_into, rms_norm, sample_llama_cpp, softmax_inplace,
-};
+use crate::ops::{quantize_q8_0_into, rms_norm, sample_llama_cpp, softmax_ggml_inplace};
 
 fn split_mamba2_projection(
     values: &[f32],
@@ -140,7 +138,11 @@ impl NemotronModel {
             let my_q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_in) };
             let my_sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_in.div_ceil(32)) };
             let my_out = unsafe { std::slice::from_raw_parts_mut(out_ptr, n_out) };
-            kernel.forward_prepared(my_in, my_q8, my_sc, None, my_out, n_in, n_out, ith, nth);
+            // Use the ggml-parity entry: F32 (router) and Q8_0 (expert down
+            // projections) need ggml's reduction order to stay bit-exact
+            // with llama.cpp. Every other dtype's default implementation
+            // delegates straight to `forward_prepared`.
+            kernel.forward_prepared_ggml(my_in, my_q8, my_sc, None, my_out, n_in, n_out, ith, nth);
         });
     }
 }
@@ -186,6 +188,10 @@ impl NemotronScratch {
         let n_attn_kv = config.n_head_kv * config.n_embd_head_k;
         let n_attn_v = config.n_head_kv * config.n_embd_head_v;
         let n_embd = config.n_embd;
+        let moe_width = config
+            .moe
+            .as_ref()
+            .map_or(0, |moe| moe.n_ff_exp.max(moe.n_ff_shexp));
         let max_width = n_embd
             .max(config.n_ff)
             .max(config.n_head * config.n_embd_head_v)
@@ -193,12 +199,14 @@ impl NemotronScratch {
             // The MoE branch needs room for the expert activation
             // (`n_ff_exp`) and the shared-expert activation
             // (`n_ff_shexp`).
-            .max(
-                config
-                    .moe
-                    .as_ref()
-                    .map_or(0, |moe| moe.n_ff_exp.max(moe.n_ff_shexp)),
-            );
+            .max(moe_width);
+        // The MoE branch keeps the quantized *block input* in
+        // `q8_buf[..n_embd]` and quantizes each expert's intermediate
+        // activation in the region after it. The two must not alias: the
+        // 30B's `n_ff_exp` (1856) is narrower than `n_embd` (2688), so
+        // quantizing the intermediate in place would overwrite the input
+        // that the next expert still has to read.
+        let q8_len = n_embd + max_width;
         // Per-layer SSM state. Sized so we can index by
         // [layer * stride + offset]. conv_cols =
         // d_inner + 2*n_group*d_state = 9728 for 4B Nano.
@@ -213,8 +221,8 @@ impl NemotronScratch {
             v: vec![0.0; config.attention_layers.len() * capacity * n_attn_v],
             attn_out: vec![0.0; capacity * n_attn_v],
             ffn_out: vec![0.0; n_embd],
-            q8_buf: vec![0u8; max_width],
-            scale_buf: vec![0.0; max_width.div_ceil(32)],
+            q8_buf: vec![0u8; q8_len],
+            scale_buf: vec![0.0; q8_len.div_ceil(32)],
             scores: vec![0.0; capacity * capacity],
             logits: vec![0.0; config.vocab_size],
             ssm_state: vec![0.0; config.ssm_state_size * config.ssm_inner_size],
@@ -271,12 +279,42 @@ impl NemotronModel {
                 scratch.capacity
             ));
         }
+        // The trace schema is token-major: one record per (name, layer, step).
+        // `step` is the position in the sequence, which is what the oracle's
+        // `trace.step` counts too, so the two join without either side having
+        // to know how the other chunks its batches.
+        //
+        // Deliberately **not** `TokenMajorTrace`: that type buffers the whole
+        // chunk and only flushes on drop, so a caller that splits the prompt
+        // across several `prefill` calls would keep only the first chunk's
+        // records. `trace::checkpoint` writes straight through with an absolute
+        // position, which is what the Dory trunk does
+        // (`src/models/dory/forward.rs::trace`).
         // 1) Embed input tokens.
         for (i, &tid) in token_ids.iter().enumerate() {
             let row_start = i * self.config.n_embd;
             self.tok_embd.embedding_lookup(
                 tid,
                 &mut scratch.hidden[row_start..row_start + self.config.n_embd],
+            );
+            // The oracle's `embd` node is the token rows straight out of
+            // `ggml_get_rows`; the 30B has no `f_embedding_scale`, so nothing
+            // is applied on top. Emitting it makes the join able to say the
+            // two sides started from the same hidden state rather than
+            // assuming it.
+            //
+            // The checkpoint is written from the token's own row: the
+            // hidden buffer is indexed by the token index *inside this
+            // batch*, while the checkpoint is keyed by the absolute
+            // position. Slicing by the absolute position would read the
+            // wrong row as soon as the prompt is fed one token at a time.
+            #[cfg(feature = "parity-trace")]
+            trace::checkpoint(
+                "embd",
+                None,
+                base_position + i,
+                &[self.config.n_embd],
+                &scratch.hidden[row_start..row_start + self.config.n_embd],
             );
         }
         // 2) Per-layer forward.
@@ -291,6 +329,12 @@ impl NemotronModel {
             &self.output_norm,
             &mut scratch.normed,
             self.config.norm_eps,
+        );
+        #[cfg(feature = "parity-trace")]
+        trace::global(
+            "result_norm",
+            base_position + last_pos,
+            &scratch.normed,
         );
         let blocks = (self.config.n_embd + 31) / 32;
         quantize_q8_0_into(
@@ -309,6 +353,12 @@ impl NemotronModel {
             self.config.vocab_size,
         );
         scratch.next_position += n;
+        #[cfg(feature = "parity-trace")]
+        trace::global(
+            "result_output",
+            base_position + last_pos,
+            &scratch.logits,
+        );
         Ok(scratch.logits.clone())
     }
 
@@ -342,6 +392,14 @@ impl NemotronModel {
             let row = &mut scratch.hidden[off..off + n_embd];
             // Pre-attention norm.
             rms_norm(row, &lw.attn_norm, &mut scratch.normed, cfg.norm_eps);
+            // `attn_norm` is the RMS-norm output that feeds whichever branch
+            // this layer runs (`src/models/nemotron-h.cpp:225`). Emitting it
+            // is the cheapest possible bisection: if it matches the oracle
+            // bit-for-bit then the embedding path and the norm are correct
+            // and any divergence is inside the branch, and if it does not
+            // match then the norm is the very first thing that broke.
+            #[cfg(feature = "parity-trace")]
+            trace::layer_1d("attn_norm", layer_idx, position, &scratch.normed);
             // QKV projections (Q8 matmul, SIMD via existing Q8 path).
             let mut q = vec![0.0f32; n_attn_q];
             let mut k = vec![0.0f32; n_attn_kv];
@@ -414,54 +472,54 @@ impl NemotronModel {
                 // llama.cpp registers nemotron_h as LLAMA_ROPE_TYPE_NONE.
                 scratch.k[k_base + position * n_attn_kv..k_base + (position + 1) * n_attn_kv]
                     .copy_from_slice(&k);
-                for (cached, &value) in scratch.v
-                    [v_base + position * n_attn_v_kv..v_base + (position + 1) * n_attn_v_kv]
-                    .iter_mut()
-                    .zip(&v)
-                {
-                    *cached = f16::from_f32(value).to_f32();
-                }
+                // The reference harness runs with an F32 KV cache
+                // (`RMI_NEMOTRON_KV=f32`): K and V are copied into the
+                // cache verbatim. Rounding them to F16 here (llama.cpp's
+                // *default* cache type) would diverge from the oracle from
+                // the very first attention layer.
+                scratch.v[v_base + position * n_attn_v_kv..v_base + (position + 1) * n_attn_v_kv]
+                    .copy_from_slice(&v);
                 let mut attn_out = vec![0.0f32; n_attn_v];
-                // q/k/v each hold n_attn_q / n_attn_kv / n_attn_v values for
-                // a single token. Convert ALL of them to f16, not just the
-                // first head — each head reads its own slot.
-                let mut q_f16 = vec![0u16; n_attn_q];
-                f32_slice_to_f16(&q[..n_attn_q], &mut q_f16);
-                // Convert ALL cached K rows to f16 in one shot — they
-                // were written into scratch.k above. (Old code accessed
-                // a freshly-allocated per-token `k` vector, which was
-                // out of bounds for j > 0.)
-                let mut k_f16_storage: Vec<Vec<u16>> =
-                    (0..=position).map(|_| vec![0u16; n_attn_kv]).collect();
-                for j in 0..=position {
-                    f32_slice_to_f16(
-                        &scratch.k[k_base + j * n_attn_kv..k_base + (j + 1) * n_attn_kv],
-                        &mut k_f16_storage[j],
-                    );
-                }
-                let mut v_storage: Vec<Vec<f32>> =
-                    (0..=position).map(|_| vec![0.0f32; n_attn_v_kv]).collect();
-                for j in 0..=position {
-                    v_storage[j].copy_from_slice(
-                        &scratch.v[v_base + j * n_attn_v_kv..v_base + (j + 1) * n_attn_v_kv],
-                    );
-                }
+                // llama.cpp's KV cache view is padded (`GGML_PAD(used, 256)`),
+                // so the softmax and the `V x softmax` product run over the
+                // *padded* key count, not just over the causal prefix. The
+                // masked columns are `-inf` before the softmax and `0`
+                // after it, so they contribute nothing to the sum -- but
+                // they do decide which group of four lanes ggml's
+                // polynomial `exp` treats as "overflowing", and they decide
+                // how many 16-element groups the dot product accumulates.
+                // Both effects are visible in the last mantissa bit, so the
+                // padding has to be reproduced rather than approximated.
+                let n_kv = (position + 1).div_ceil(16) * 16;
                 for h in 0..n_head {
                     let kv_h = h / group_size;
-                    let mut scores = vec![0.0f32; position + 1];
+                    let mut scores = vec![f32::NEG_INFINITY; n_kv];
+                    let q_row = &q[h * head_dim_k..(h + 1) * head_dim_k];
                     for j in 0..=position {
-                        let k_row = &k_f16_storage[j][kv_h * head_dim_k..(kv_h + 1) * head_dim_k];
-                        let q_row = &q_f16[h * head_dim_k..(h + 1) * head_dim_k];
-                        scores[j] = crate::ops::dot_f16(q_row, k_row, head_dim_k) * kq_scale;
+                        let k_row = &scratch.k[k_base + j * n_attn_kv + kv_h * head_dim_k
+                            ..k_base + j * n_attn_kv + (kv_h + 1) * head_dim_k];
+                        // `kq = ggml_mul_mat(k, q)` with both sides F32:
+                        // ggml's four-accumulator `ggml_vec_dot_f32`, then
+                        // `ggml_soft_max_ext` scales by `kq_scale`.
+                        scores[j] = crate::ops::kernel::f32::ggml::dot_f32_ggml(q_row, k_row)
+                            * kq_scale;
                     }
-                    softmax_inplace(&mut scores);
+                    // ggml's NEON softmax uses its polynomial `exp`
+                    // (`ggml_v_expf`), not libm's `expf`.
+                    softmax_ggml_inplace(&mut scores);
                     let head_out = &mut attn_out[h * head_dim_v..(h + 1) * head_dim_v];
-                    for j in 0..=position {
-                        let s = f16::from_f32(scores[j]).to_f32();
-                        let v_row = &v_storage[j][kv_h * head_dim_v..(kv_h + 1) * head_dim_v];
-                        for d in 0..head_dim_v {
-                            head_out[d] += f16::from_f32(s * v_row[d]).to_f32();
-                        }
+                    // `kqv = ggml_mul_mat(v, kq)`: one dot per output
+                    // channel over the cached keys. The cache stores whole
+                    // K/V rows per token, so consecutive keys are
+                    // `n_attn_v_kv` floats apart.
+                    for (d, out) in head_out.iter_mut().enumerate() {
+                        let base = v_base + kv_h * head_dim_v + d;
+                        *out = crate::ops::kernel::f32::ggml::dot_f32_ggml_stride_padded(
+                            &scratch.v[base..],
+                            n_attn_v_kv,
+                            &scores,
+                            position + 1,
+                        );
                     }
                 }
                 if let Some(wo) = &lw.wo {
@@ -580,9 +638,28 @@ impl NemotronModel {
                     cur_input,
                     conv_kernel,
                 );
-                for value in &mut conv_out {
-                    *value = crate::ops::silu(*value);
-                }
+                // ggml's SiLU, not libm's. Upstream applies `ggml_silu`
+                // (`src/models/mamba-base.cpp:237`), whose vectorized form uses
+                // ggml's polynomial `exp` approximation. The two differ by up
+                // to one ULP, and one ULP here is enough to flip an 8-bit
+                // Q8_K activation level in the Q4_K out projection further
+                // down, which turns a 1e-7 relative difference into a 4e-4
+                // one.
+                crate::ops::activation::silu_ggml_inplace(&mut conv_out);
+                // `mamba2_xbc` is the conv1d output after the SiLU, i.e.
+                // the whole `[d_inner + 2 * n_group * d_state]`-wide fused
+                // tensor that holds `x` (the first `d_inner` channels),
+                // `B` and `C` (the trailing `2 * n_group * d_state`).
+                // Upstream emits the same node right after
+                // `ggml_silu` (`src/models/mamba-base.cpp:237`).
+                //
+                // It is the coarse bisection point of the SSM branch: if it
+                // matches, the in-projection, the conv1d and the SiLU are
+                // all correct and the divergence is in the scan, the z
+                // gate, the group norm or the out projection; if it does
+                // not match, the divergence is in one of the three.
+                #[cfg(feature = "parity-trace")]
+                trace::layer_1d("mamba2_xbc", layer_idx, position, &conv_out);
                 // The conv_out contains: x_conv (first d_inner channels),
                 // B, C (next 2 * n_group * d_state channels). Per
                 // llama.cpp mamba-base.cpp:
@@ -641,6 +718,11 @@ impl NemotronModel {
                 // Snapshot dt per head, then apply softplus. dt_base is
                 // a per-head projection of x (size n_head).
                 let mut dt_per_head = vec![0.0f32; n_head];
+                // The pre-softplus time step is a checkpoint of its own:
+                // upstream adds the bias and then lets the scan op apply
+                // the softplus (`src/models/mamba-base.cpp:252`), so the
+                // comparable node is the sum *before* the softplus.
+                let mut dt_raw = vec![0.0f32; n_head];
                 for h in 0..n_head {
                     // The GGUF stores ssm_dt.bias as (dt_rank,) but
                     // n_head = dt_rank for this model, so it pairs 1:1
@@ -648,8 +730,14 @@ impl NemotronModel {
                     let dt_bias_h = if h < dt_rank { ssm_dt_bias[h] } else { 0.0 };
                     let dt_base = dt_input[h];
                     let z = dt_base + dt_bias_h;
+                    dt_raw[h] = z;
                     dt_per_head[h] = if z > 20.0 { z } else { (1.0 + z.exp()).ln() };
                 }
+                // `mamba2_dt` is the bias-adjusted time step, before the
+                // softplus. Upstream emits the same node right after
+                // `ggml_add(dt, ssm_dt_b)` (`src/models/mamba-base.cpp:252`).
+                #[cfg(feature = "parity-trace")]
+                trace::layer_1d("mamba2_dt", layer_idx, position, &dt_raw);
                 // Per-head dA factor (decay): exp(dt_soft_plus * A_log[h]).
                 // A_log stored raw (negative). llama.cpp matches this.
                 let mut dA_per_head = vec![0.0f32; n_head];
@@ -702,12 +790,41 @@ impl NemotronModel {
                         y_buf[head_x_off + k] = sumf + d_h * x_pre[head_x_off + k];
                     }
                 }
+                // `mamba2_y_cont` is the scan output plus the D skip, before
+                // the z gate (`src/models/mamba-base.cpp:289`). Emitting it
+                // splits the SSM branch at its widest point: everything up
+                // to and including the scan is on one side, the z gate /
+                // group norm / out projection on the other.
+                #[cfg(feature = "parity-trace")]
+                trace::layer_1d("mamba2_y_add_d", layer_idx, position, &y_buf);
+                // `mamba2_z` is the z gate's input: the first `d_inner`
+                // channels of the in-projection. Upstream emits the same
+                // node right before `ggml_swiglu_split`
+                // (`src/models/mamba-base.cpp:290`).
+                #[cfg(feature = "parity-trace")]
+                trace::layer_1d("mamba2_z", layer_idx, position, z_slice);
                 // z-gate applied AFTER the scan+D-skip:
                 //   y_final[h, k] = silu(z[h, k]) * y_buf[h, k]
                 // (equivalent to ggml_swiglu_split(z, y_buf)).
+                //
+                // The SiLU is ggml's, for the same reason as the conv1d's
+                // above: upstream's `ggml_swiglu_split` uses the polynomial
+                // `exp`, and a one-ULP difference is enough to flip an
+                // 8-bit activation level in the out projection.
+                let mut z_gated = z_slice.to_vec();
+                crate::ops::activation::silu_ggml_inplace(&mut z_gated);
                 for j in 0..inner_size {
-                    y_buf[j] = crate::ops::silu(z_slice[j]) * y_buf[j];
+                    y_buf[j] = z_gated[j] * y_buf[j];
                 }
+                // `mamba2_ygated` is the scan output after the z gate but
+                // before the group norm: `silu(z) * (scan + D * x)`.
+                // Upstream emits the same node right after
+                // `ggml_swiglu_split` (`src/models/mamba-base.cpp:288`).
+                //
+                // Together with `mamba2_xbc` this narrows the SSM branch
+                // down to the scan / z gate / group norm / out projection.
+                #[cfg(feature = "parity-trace")]
+                trace::layer_1d("mamba2_ygated", layer_idx, position, &y_buf);
                 // Group RMSNorm on the scan output.
                 for g in 0..n_group {
                     let group_start = g * per_group;
@@ -719,6 +836,16 @@ impl NemotronModel {
                         *v = *v * rstd * ssm_norm[g * per_group + j];
                     }
                 }
+                // `mamba2_normed` is the scan output after the group RMS norm and
+                // before the out projection. Upstream emits the same node
+                // right after `ggml_reshape_2d`
+                // (`src/models/mamba-base.cpp:304`).
+                //
+                // It splits the last stage of the SSM branch in two: the
+                // group norm on one side and the Q4_K out projection on
+                // the other.
+                #[cfg(feature = "parity-trace")]
+                trace::layer_1d("mamba2_normed", layer_idx, position, &y_buf);
                 // Output projection: y = ssm_out @ y_buf.
                 let blocks_out = (inner_size + 31) / 32;
                 quantize_q8_0_into(
@@ -736,6 +863,16 @@ impl NemotronModel {
                     inner_size,
                     n_embd,
                 );
+                // `mamba_out` is the SSM branch output **before** the
+                // residual add: upstream emits it at the end of
+                // `build_mamba2_layer` (`src/models/mamba-base.cpp:306`) and
+                // the caller adds the residual afterwards
+                // (`src/models/nemotron-h.cpp:242`). Emitting it here, before
+                // the add, keeps the two sides on the same node; emitting it
+                // after would compare a branch output against a residual
+                // sum.
+                #[cfg(feature = "parity-trace")]
+                trace::layer_1d("mamba_out", layer_idx, position, &scratch.ffn_out);
                 for d in 0..n_embd {
                     row[d] += scratch.ffn_out[d];
                 }
@@ -813,11 +950,24 @@ impl NemotronModel {
                     &mut scratch.ffn_out,
                     &mut scratch.q8_buf,
                     &mut scratch.scale_buf,
+                    layer_idx,
+                    position,
                 )?;
                 for d in 0..n_embd {
                     row[d] += scratch.ffn_out[d];
                 }
             }
+            // `l_out` is the layer output after the residual add, which is
+            // the last node the oracle emits for a layer. Emitting it makes a
+            // divergence attributable to a layer rather than to "somewhere
+            // in the trunk".
+            //
+            // `row` is this token's `n_embd` values, not a token-major
+            // buffer, so it goes out as a single row: `row_of` would index at
+            // `position * n_embd` and silently write nothing for any position
+            // past the first.
+            #[cfg(feature = "parity-trace")]
+            trace::layer_1d("l_out", layer_idx, position, row);
         }
         Ok(())
     }
@@ -1052,29 +1202,50 @@ unsafe fn ssm_scan_row_avx2(
     {
         use std::arch::x86_64::*;
         let n = state_row.len();
-        let n8 = n / 8 * 8;
+        // Mirror ggml's `ggml_compute_forward_ssm_scan_f32` exactly. The
+        // accumulation shape is not a detail: ggml keeps `GGML_F32_ARR` (= 4)
+        // separate 8-lane accumulators over a `GGML_F32_STEP` (= 32) block and
+        // reduces them with a pairwise tree, so a single-accumulator loop
+        // produces a different rounding and the two sides drift apart by
+        // ~1e-5 per SSM layer -- which compounds across 23 layers into a
+        // completely different routing decision.
+        const STEP: usize = 32;
+        const EPR: usize = 8;
+        const ARR: usize = STEP / EPR;
+        let np = n / STEP * STEP;
         let v_dA = _mm256_set1_ps(dA);
         let v_x_dt = _mm256_set1_ps(x_dt);
-        let mut v_sumf = _mm256_setzero_ps();
+        let mut acc = [_mm256_setzero_ps(); ARR];
 
         let mut i = 0;
-        while i < n8 {
-            let v_state = _mm256_loadu_ps(state_row.as_ptr().add(i));
-            let v_b = _mm256_loadu_ps(b_row.as_ptr().add(i));
-            // new_state = state * dA + b * x_dt  (FMA, exact when the
-            // multiply result fits in f32 — both inputs are pre-cast
-            // f32, so no rounding between the two FMA operands).
-            let v_new_state = _mm256_fmadd_ps(v_b, v_x_dt, _mm256_mul_ps(v_state, v_dA));
-            // Persist updated state for the next token. Safe to
-            // overwrite: the next read of state_row[i] is the next
-            // (head, k) pair's first load, not this iteration's.
-            _mm256_storeu_ps(state_row.as_mut_ptr().add(i), v_new_state);
-            // sumf += new_state * c
-            let v_c = _mm256_loadu_ps(c_row.as_ptr().add(i));
-            v_sumf = _mm256_fmadd_ps(v_new_state, v_c, v_sumf);
-            i += 8;
+        while i < np {
+            for j in 0..ARR {
+                let off = i + j * EPR;
+                let v_state = _mm256_loadu_ps(state_row.as_ptr().add(off));
+                let v_b = _mm256_loadu_ps(b_row.as_ptr().add(off));
+                // ggml: ax = s0 * dA; ay = B * x_dt; ax = ax + ay.
+                // Two separate ops, not an FMA -- the rounding differs.
+                let v_new_state = _mm256_add_ps(
+                    _mm256_mul_ps(v_state, v_dA),
+                    _mm256_mul_ps(v_b, v_x_dt),
+                );
+                _mm256_storeu_ps(state_row.as_mut_ptr().add(off), v_new_state);
+                let v_c = _mm256_loadu_ps(c_row.as_ptr().add(off));
+                acc[j] = _mm256_fmadd_ps(v_new_state, v_c, acc[j]);
+            }
+            i += STEP;
         }
-        let mut sumf = crate::ops::dot::hsum_ps(v_sumf);
+        // GGML_F32x8_REDUCE: pairwise tree over the 4 accumulators, then
+        // low+high 128-bit add and two hadds.
+        acc[0] = _mm256_add_ps(acc[0], acc[2]);
+        acc[1] = _mm256_add_ps(acc[1], acc[3]);
+        acc[0] = _mm256_add_ps(acc[0], acc[1]);
+        let t0 = _mm_add_ps(
+            _mm256_castps256_ps128(acc[0]),
+            _mm256_extractf128_ps(acc[0], 1),
+        );
+        let t1 = _mm_hadd_ps(t0, t0);
+        let mut sumf = _mm_cvtss_f32(_mm_hadd_ps(t1, t1));
         // Tail: scalar fallback for any leftover lanes.
         while i < n {
             let new_state = state_row[i] * dA + b_row[i] * x_dt;
@@ -1105,22 +1276,36 @@ unsafe fn ssm_scan_row_neon(
     {
         use std::arch::aarch64::*;
         let n = state_row.len();
-        let n4 = n / 4 * 4;
+        // Same shape as ggml's NEON path: `GGML_F32_STEP` = 16, `EPR` = 4,
+        // so 4 accumulators reduced by a pairwise tree. A single
+        // accumulator rounds differently and drifts across the 23 SSM layers.
+        const STEP: usize = 16;
+        const EPR: usize = 4;
+        const ARR: usize = STEP / EPR;
+        let np = n / STEP * STEP;
         let v_dA = vdupq_n_f32(dA);
         let v_x_dt = vdupq_n_f32(x_dt);
-        let mut v_sumf = vdupq_n_f32(0.0);
+        let mut acc = [vdupq_n_f32(0.0); ARR];
         let mut i = 0;
-        while i < n4 {
-            let v_state = vld1q_f32(state_row.as_ptr().add(i));
-            let v_b = vld1q_f32(b_row.as_ptr().add(i));
-            // new_state = state * dA + b * x_dt
-            let v_new_state = vfmaq_f32(vmulq_f32(v_state, v_dA), v_b, v_x_dt);
-            vst1q_f32(state_row.as_mut_ptr().add(i), v_new_state);
-            let v_c = vld1q_f32(c_row.as_ptr().add(i));
-            v_sumf = vfmaq_f32(v_sumf, v_new_state, v_c);
-            i += 4;
+        while i < np {
+            for j in 0..ARR {
+                let off = i + j * EPR;
+                let v_state = vld1q_f32(state_row.as_ptr().add(off));
+                let v_b = vld1q_f32(b_row.as_ptr().add(off));
+                // ggml: ax = s0 * dA; ay = B * x_dt; ax = ax + ay.
+                let v_new_state =
+                    vaddq_f32(vmulq_f32(v_state, v_dA), vmulq_f32(v_b, v_x_dt));
+                vst1q_f32(state_row.as_mut_ptr().add(off), v_new_state);
+                let v_c = vld1q_f32(c_row.as_ptr().add(off));
+                acc[j] = vfmaq_f32(acc[j], v_new_state, v_c);
+            }
+            i += STEP;
         }
-        let mut sumf = vaddvq_f32(v_sumf);
+        // GGML_F32x4_REDUCE: pairwise tree, then vaddvq_f32.
+        acc[0] = vaddq_f32(acc[0], acc[2]);
+        acc[1] = vaddq_f32(acc[1], acc[3]);
+        acc[0] = vaddq_f32(acc[0], acc[1]);
+        let mut sumf = vaddvq_f32(acc[0]);
         while i < n {
             let new_state = state_row[i] * dA + b_row[i] * x_dt;
             state_row[i] = new_state;

@@ -267,16 +267,73 @@ Q5_1 与 Q5_0 的差异很小（ggml `block_q5_1`，24 字节/32 元素）：
 **实现**：squared ReLU 直接内联在 `moe.rs`（`relu` 后 `x*x`，负数归零），
 没有单独的算子 —— 它只在这个架构的 FFN 与 MoE 里出现。
 
-### B5. 数值对拍的 oracle ⬜ 未做
+### B5. 数值对拍的 oracle ✅ 已完成（逐位一致）
 
 上游 llama.cpp **已经支持** `nemotron_h_moe`（PR #18058，2025-12-16 合并，
 `src/models/nemotron-h-moe.cpp` 只有 159 行，主图在 `nemotron-h.cpp`）。
 所以 oracle 用**上游 llama.cpp master**即可，不需要 Dory 那种专用 fork。
 
+**结果**：全 52 层 × 6 步（prefill 2 token + 生成 4 token）**逐位一致**，
+最终 logits 逐位一致（`worst logit disagreement 0.0000`，而 argmax 领先幅度是
+2.2746），端到端 greedy 输出一致（两侧 `generated_ids = [22177, 22177, 22177, 22177]`，
+文本 `HelloHelloHelloHello`）。
+
 注意：llama.cpp 的 `nemotron_h` / `nemotron_h_moe` 都**不开 RoPE**
-（`llama_rope_type` 返回 `LLAMA_ROPE_TYPE_NONE`）—— 这和仓库现有 `nemotron_h`
-实现的 RoPE 处理需要核对一次（4B 的 `rope.dimension_count = 78`，30B 是 84，
-都不是 head_dim 128，说明参考实现里 RoPE 覆盖的是一个子空间）。
+（`llama_rope_type` 返回 `LLAMA_ROPE_TYPE_NONE`）—— 仓库现有 `nemotron_h`
+实现与之一致（4B 的 `rope.dimension_count = 78`，30B 是 84，都不是 head_dim 128，
+参考实现里 RoPE 覆盖的是一个子空间）。
+
+#### B5.1 对拍工具
+
+| 文件 | 作用 |
+|---|---|
+| `tools/oracle/nemotron3_nano/oracle.cpp` | 上游 `llama-eval-callback` harness，dump 命名张量 |
+| `tools/oracle/nemotron3_nano/build_oracle.sh` | 解包 pinned llama.cpp tarball 并构建 harness |
+| `tools/oracle/nemotron3_nano/check_moe.py` | 把 oracle trace 与 Rust `RMI_PARITY_TRACE` 按 `(name, layer, step)` join，逐位比 |
+| `tools/oracle/q5_0/q5_0_oracle.c` | ggml ARM `ggml_vec_dot_q5_0_q8_0` 的独立转写 |
+| `tools/oracle/silu/silu_oracle.c` | ggml ARM `ggml_vec_silu_f32` 的独立转写 |
+
+Rust 侧的 checkpoint 由 `src/models/nemotron_h/trunk/trace.rs` 发出，
+只在 `--features parity-trace` 且 `RMI_PARITY_TRACE` 有值时生效。
+
+#### B5.2 为什么需要 ggml-exact kernel（而不是「差不多就行」）
+
+第一次对拍时 4B 的 SSM 分支只差 1 ULP，30B 的却差 ~1e-4。根因是**量化权重
+kernel 的 F32 累加结构**不同，被下游的 Q4_K 出投影的 Q8_K 激活量化放大了约 7000×：
+一个 1-ULP 的差足以让某个激活跨过 8-bit 的舍入边界，于是变成整整一个量化台阶。
+
+所以仓库新增了三个 **ggml-exact** 入口，与默认 kernel 并存（默认契约不动）：
+
+| 入口 | 复刻的 ggml 结构 |
+|---|---|
+| `ops/kernel/f32/ggml.rs` | `ggml_vec_dot_f32`：`GGML_F32_STEP=16` / `EPR=4` / `ARR=4`，4 个 `vfmaq_f32` 累加器 + pairwise-tree reduce + `vaddvq_f32` |
+| `ops/kernel/q8_0/ggml.rs` | `ggml_vec_dot_q8_0_q8_0`：2 个 4-lane 累加器、每 block `vaddq_s32(vdotq_s32(0,x0,y0), vdotq_s32(0,x1,y1))`、`vmlaq_n_f32`、末尾 `vaddvq_f32` 相加 |
+| `ops/kernel/q5_0/neon.rs` | 2 block/迭代 + 2 个 4-lane F32 累加器 + `table_b2b_1` 查表折 `-16` |
+| `ops/kernel/q5_1/neon.rs` | 同上，另加独立标量 `m*s` 累加器（`summs0`/`summs1`），末尾 `((vaddvq(sumv0)+vaddvq(sumv1))+summs0)+summs1` |
+
+**per-lane 分组是硬约束**。`ggml_vdotq_s32` 在 dotprod 可用时就是 native
+`vdotq_s32`（`dst[i] = Σ_{k=0..3} a[4i+k]*b[4i+k]`）；它自己的 fallback 注释写着
+「different per-lane grouping — do not use when individual lane values matter」。
+因此 oracle 与 Rust 两侧都必须在 `-march=armv8.2-a+dotprod` 下编译，且**不能开 i8mm**
+（那会走 `ggml_vec_dot_q8_0_q8_0` 的 MATMUL_INT8 分支，是另一套算术）。
+
+另外两处不显眼但必须对齐的细节：
+
+- **SiLU 用 ggml 的多项式 `exp`**（`ggml_v_expf`），不是 libm `expf`。
+  `ggml_v_expf` 里的 `vdupq_n_u32(0x7f000000)` 是 **u32 字面量不是 float**：
+  写成 `vdupq_n_f32(0x7f000000)` 会加 `0x4EFE0000`（2139095040.0f 的舍入），
+  于是溢出路径的 `s1*s1` 变成巨大有限值而不是 0 —— 而 softmax 掩码列（`-inf`）
+  必须贡献 0。这个 bug 曾**同时**存在于 Rust 与 silu oracle 两侧，所以参考测试
+  发现不了，只有对拍真实模型才暴露。
+- **Q4_K/Q5_K 的 `dmin` 修正必须分两次累加**（`total -= dmin*min_sum; … total += d*main_sum`），
+  不能合并成 `total += main + min`。
+- **Q5_1 没有 `-16` 偏移**；`block_q8_1.s = f16(sum*d)`，`d = amax/127`（现代 ggml，非负）。
+- **softmax 用 `ggml_v_expf`（NEON 4-lane 组）+ f64 累加 + 末尾 libm `expf` 尾块**；
+  `softmax_inplace` 用 libm `expf` 且 f64 累加，两者不同。
+- **llama.cpp 的 KV cache view 是 padded 的**（`GGML_PAD(used, 256)`），softmax 与
+  `V×softmax` 都在 padded key 数上跑。Rust 侧用 `n_kv = (position+1).div_ceil(16)*16`
+  复刻（16 对齐就够，因为 dot 的分组边界是 16）。
+- oracle harness 用 `RMI_NEMOTRON_KV=f32`，即 KV cache 是 F32。
 
 ## 3. 估算
 

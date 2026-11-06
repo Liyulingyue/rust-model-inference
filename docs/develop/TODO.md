@@ -384,13 +384,16 @@ LFM2 / LFM2.5 / Spark / Nemotron-H / Hunyuan / LFM2-MoE），每个 scorer 实�
       原语，现有 `compute` 就够（closure 里顺序做多个投影，各自按 `ith/nth` 切分）。
       风险是位序和 DRAM 局部性；收益的绝对值与机器无关，相对值随 CPU 带宽上升。
       详见 [TODO-050](#todo-050-decode-每个投影一次-pool-dispatch784-次里-26-次的开销大于活)。
-- [ ] **Nemotron-3-Nano 30B-A3B（`nemotron_h_moe`）完全不支持** — arch 不在白名单、
+- [~] **Nemotron-3-Nano 30B-A3B（`nemotron_h_moe`）完全不支持** — arch 不在白名单、
       MoE 层分支不存在，且**它需要的 Q5_1 量化本仓库没有 dequant kernel**（所有 unsloth
       30B 量化档的 `ffn_up_shexp` 都是 Q5_1，换档躲不掉）。基座（Mamba-2 + attention 混合
       trunk）已在 4B 上验证，MoE 的 3D 专家张量与路由归一化在 `qwen35moe` 里已有同构实现，
       约 1100 行。契约从 GGUF 头部读出（不必下完 24 GB），详见
       [TODO-051](#todo-051-nemotron-3-nano-30b-a3bnemotron_h_moe完全不支持先补-q5_1-kernel)
       与 [NEMOTRON3_NANO_30B_MOE.md](NEMOTRON3_NANO_30B_MOE.md)。
+      **B1–B5 已全部完成**：Q5_1 kernel、arch/config、MoE 层、共享专家，以及
+      与上游 llama.cpp 的 oracle 对拍（全 52 层 × 6 步逐位一致，最终 logits
+      逐位一致，greedy 输出一致）。剩下 HTTP 服务端与 Vulkan 路径未做。
 - [ ] **Dory 的默认提示在 CLI / HTTP / 模型自带模板之间三分** —
       CLI 15 token（无 think 标记）、HTTP 19 token（空 think 块）、模型自带模板 22 token
       （多一个空 system 轮），三者贪心输出不同，CLI↔HTTP 分叉且 `cli_http_agreement`
@@ -3772,7 +3775,7 @@ Q5_1 dequant / matmul kernel 已落地（`src/ops/kernel/q5_1/`），逐位对�
 **未验证的部分**：以上只证明 Q5_1 的**块语义**正确。真实 30B 权重上的
 MoE 前向（sigmoid 路由 + squared ReLU + 共享专家）还没跑过 —— 那属于 B2/B3。
 
-#### 进展：B2/B3/B4（arch、MoE 层、共享专家）已实现，B5（oracle 对拍）未做
+#### 进展：B2/B3/B4（arch、MoE 层、共享专家）已实现，B5（oracle 对拍）已完成
 
 B1 之后的三个阻塞项也已落地：
 
@@ -3803,19 +3806,54 @@ B1 之后的三个阻塞项也已落地：
 仓库原先不加 —— 少了 `<s>` 提示就与参考实现不同。Dory 反而是对的（它的 GGUF
 明写 `add_bos_token = false`，参考实现同样不加）。
 
+#### 进展：B5（oracle 对拍）已完成，逐位一致
+
+**全 52 层 × 6 步逐位一致（0 差异）**，且最终 logits 逐位一致
+（`worst logit disagreement 0.0000`，而 argmax 领先幅度 2.2746），
+端到端 greedy 一致（两侧 `generated_ids = [22177, 22177, 22177, 22177]`，
+文本 `HelloHelloHelloHello`）。138 个 top-k 路由决策**集合与顺序都一致**。
+
+工具在 `tools/oracle/nemotron3_nano/`（oracle harness + `check_moe.py`），
+另有两个独立 kernel oracle（`tools/oracle/q5_0/`、`tools/oracle/silu/`）。
+Rust 侧 checkpoint 由 `src/models/nemotron_h/trunk/trace.rs` 发出
+（仅 `--features parity-trace` + `RMI_PARITY_TRACE` 时生效）。
+
+**根因**：第一次对拍时 4B 的 SSM 分支只差 1 ULP，30B 的却差 ~1e-4。分歧被
+Q4_K 出投影的 Q8_K 激活量化放大了约 7000× —— 一个 1-ULP 的差足以让某个激活
+跨过 8-bit 舍入边界，于是变成整整一个量化台阶。所以必须**复刻 ggml 的 F32
+累加结构**，而不是「差不多就行」：
+
+- `ops/kernel/f32/ggml.rs`：`ggml_vec_dot_f32` 的 4 个 `vfmaq_f32` 累加器 +
+  pairwise-tree reduce + `vaddvq_f32`；
+- `ops/kernel/q8_0/ggml.rs`：2 个 4-lane 累加器 + 每 block `vaddq_s32(vdotq_s32(…))`
+  + `vmlaq_n_f32` + 末尾 `vaddvq_f32` 相加；
+- `ops/kernel/q5_0/neon.rs` / `q5_1/neon.rs`：2 block/迭代 + 2 个 4-lane F32
+  累加器；Q5_1 另有独立的 `m*s` 标量累加器（`summs0`/`summs1`）；
+- `ops/softmax.rs::softmax_ggml_inplace`：ggml 的 `ggml_v_expf` + f64 累加 +
+  末尾 libm `expf` 尾块；
+- `ops/activation/silu.rs::silu_ggml`：ggml 的多项式 `exp`，不是 libm `expf`。
+
+这些都是**新增的 ggml-exact 入口**，默认 kernel 契约不动。
+
+**两个必须记住的坑**（都写进了代码注释）：
+
+1. `ggml_v_expf` 的 `vdupq_n_u32(0x7f000000)` 是 **u32 字面量不是 float**。
+   写成 `vdupq_n_f32(0x7f000000)` 会加 `0x4EFE0000`，于是溢出路径的 `s1*s1`
+   变成巨大有限值而不是 0 —— 而 softmax 掩码列（`-inf`）必须贡献 0。
+   这个 bug 曾**同时**存在于 Rust 与 silu oracle 两侧，所以参考测试发现不了。
+2. **per-lane 分组是硬约束**：`ggml_vdotq_s32` 在 dotprod 可用时就是 native
+   `vdotq_s32`（`dst[i] = Σ_{k=0..3} a[4i+k]*b[4i+k]`），ggml 自己的 fallback
+   注释写着「different per-lane grouping — do not use when individual lane
+   values matter」。所以 oracle 与 Rust 两侧都必须在
+   `-march=armv8.2-a+dotprod` 下编译，且**不能开 i8mm**。
+
 **还没做的**：
 
-- **B5 oracle 对拍** —— 这是现在最大的缺口。上游 llama.cpp master 已支持
-  `nemotron_h_moe`，oracle 用上游即可。**没有对拍就不知道前向是否正确**：
-  路由的 sigmoid/偏置/归一化顺序、平方 ReLU、共享专家的加法位置，
-  任何一处偏差都会让输出变成噪声，但目前没有任何测试能发现。
-- **真实权重验证** —— 30B 的 Q4_K_M（24.57 GB，SHA-256
-  `0e7f6e51fdd9039928749d07eed9e846dbfd97681646544c5406bcdd788e5940`）
-  尚未下完，因此 30B 的每一层都还没在真实张量上跑过一次。
 - **HTTP 服务端** —— `nemotron_h`（4B）本来就没有 `TextRuntime` 适配器，
   `/v1/chat/completions` 对它返回 501；30B 与 4B 一致。JEV 路径按 arch 分派，
   已覆盖 `nemotron_h_moe`。
-- **Vulkan 路径** —— Q5_1 没有设备 kernel（见 B1 一节）。
+- **Vulkan 路径** —— Q5_1 没有设备 kernel（见 B1 一节）；Q5_0/Q8_0 的
+  ggml-exact 路径也只覆盖 CPU。
 
 ### TODO-052: Dory 的默认提示在 CLI / HTTP / 模型自带模板之间三分；JEV 的「backend=partial」提示对 Dory 是假的
 

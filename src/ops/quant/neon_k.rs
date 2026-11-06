@@ -121,7 +121,19 @@ pub(crate) unsafe fn vec_dot_q4k_q8k_neon(q4k_data: &[u8], q8k: &[BlockQ8K]) -> 
         let min_sum_hi = vaddvq_s32(min_prod2);
         let min_sum_lo2 = vaddvq_s32(min_prod3);
         let min_sum_hi2 = vaddvq_s32(min_prod4);
-        let min_correction = -dmin * (min_sum_lo + min_sum_hi + min_sum_lo2 + min_sum_hi2) as f32;
+        let min_sum = min_sum_lo + min_sum_hi + min_sum_lo2 + min_sum_hi2;
+        // ggml accumulates the two terms into the running total as two
+        // separate operations, in this order:
+        //
+        //     sumf -= dmin * vaddvq_s32(prod);
+        //     ...
+        //     sumf += d * (sumi1 + sumi2);
+        //
+        // Folding them into one `total += main + min` is algebraically
+        // the same but rounds differently, and a one-ULP difference in
+        // the SSM branch's out projection is enough to change the
+        // quantized output.
+        total -= dmin * min_sum as f32;
 
         // --- Main dot product: 8 groups of 32 values ---
         let q4_ptr = q4k_data.as_ptr().add(boff + 16);
@@ -170,9 +182,8 @@ pub(crate) unsafe fn vec_dot_q4k_q8k_neon(q4k_data: &[u8], q8k: &[BlockQ8K]) -> 
         let group_hi = vld1q_s32(group_sums.as_ptr().add(4)); // i32x4
         let prod_lo = vmulq_s32(scales_i32_lo, group_lo);
         let prod_hi = vmulq_s32(scales_i32_hi, group_hi);
-        let main_sum = d * (vaddvq_s32(prod_lo) + vaddvq_s32(prod_hi)) as f32;
-
-        total += main_sum + min_correction;
+        let main_sum = vaddvq_s32(prod_lo) + vaddvq_s32(prod_hi);
+        total += d * main_sum as f32;
     }
 
     total
