@@ -648,25 +648,45 @@ impl<'a> EmbeddingGemmaVisionModel<'a> {
         // a unit attention scale; the head dimension is already normalized by
         // the trained projections.
         let mut attn_out = vec![0.0f32; n_patches * embd];
-        let mut scores = vec![0.0f32; n_patches];
-        for i in 0..n_patches {
-            for h in 0..n_head {
-                let head_off = h * head_dim;
-                let q_i = &q[i * embd + head_off..i * embd + head_off + head_dim];
-                for j in 0..n_patches {
-                    let k_j = &k[j * embd + head_off..j * embd + head_off + head_dim];
-                    scores[j] = crate::ops::dot_f32(q_i, k_j, head_dim);
-                }
-                crate::ops::softmax::softmax_inplace(&mut scores);
-                let out_i = &mut attn_out[i * embd + head_off..i * embd + head_off + head_dim];
-                for j in 0..n_patches {
-                    let v_j = &v[j * embd + head_off..j * embd + head_off + head_dim];
-                    for d in 0..head_dim {
-                        out_i[d] += scores[j] * v_j[d];
+        // One task per (query patch, head); each worker keeps its own score
+        // buffer so the tasks share nothing.
+        let tasks = n_patches * n_head;
+        let q_ptr = q.as_ptr();
+        let k_ptr = k.as_ptr();
+        let v_ptr = v.as_ptr();
+        let out_ptr = attn_out.as_mut_ptr();
+        self.pool.compute(move |ith, nth| {
+            let (start, end) = crate::ops::kernel::f32::scalar::row_range(tasks, ith, nth);
+            if start >= end {
+                return;
+            }
+            let mut scores = vec![0.0f32; n_patches];
+            for task in start..end {
+                let i = task / n_head;
+                let head_off = (task % n_head) * head_dim;
+                // SAFETY: the pointers come from slices the caller checked; each
+                // task reads only its own head column and writes only its own
+                // output rows.
+                unsafe {
+                    let q_i = std::slice::from_raw_parts(q_ptr.add(i * embd + head_off), head_dim);
+                    for j in 0..n_patches {
+                        let k_j =
+                            std::slice::from_raw_parts(k_ptr.add(j * embd + head_off), head_dim);
+                        scores[j] = crate::ops::dot_f32(q_i, k_j, head_dim);
+                    }
+                    crate::ops::softmax::softmax_inplace(&mut scores);
+                    let out_i =
+                        std::slice::from_raw_parts_mut(out_ptr.add(i * embd + head_off), head_dim);
+                    for j in 0..n_patches {
+                        let v_j =
+                            std::slice::from_raw_parts(v_ptr.add(j * embd + head_off), head_dim);
+                        for d in 0..head_dim {
+                            out_i[d] += scores[j] * v_j[d];
+                        }
                     }
                 }
             }
-        }
+        });
 
         // Step e: output projection.
         let mut proj_out = vec![0.0f32; n_patches * embd];
