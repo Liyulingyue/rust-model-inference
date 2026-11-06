@@ -203,6 +203,15 @@ NEON on aarch64; no AVX-512).
       回归：lib 1470 passed / 22 failed / 210 ignored，与改动前逐条一致；11 个
       `batched_linear_device` GPU 回归 + conv GPU 测试通过；`mel_encoder.rs` 告警数与 main 相同。
 
+- [ ] **`_ggml` 后缀函数的收口** — 仓库原则是「实现并采用 `dot_f32` 这样的函数，
+      尽量不采用 `dot_f32_ggml` 这样的函数，仅当无法绕开时才使用」（浮点加法不满足
+      结合律，ggml 的累加结构既不是精度最优也不是速度最优）。当前仓库里已有一批
+      `_ggml` 函数，是历次对拍留下的，需要逐条评估能否迁回默认入口。
+      **注意**：`q5_0::neon` / `q5_1::neon` 的 NEON kernel **不是**对齐副本，而是
+      这两个格式在 aarch64 上的唯一生产实现（被重写成 ggml 结构），所以其他模型也在用；
+      收口前必须确认其他模型的既有 oracle 是否仍成立。
+      清单、存在理由与收口方向见
+      [GGML_PARITY_BOUNDARY.md](GGML_PARITY_BOUNDARY.md)。
 - [x] **LFM2.5-24B-A2B 适配 + 标量逐位对齐** — ✅ 已完成 (2026-10-15)。
       24B 总 / 2B 激活的 MoE，`lfm2moe` 架构：40 层 × 2048 宽 × 32 头（head_dim 64），注意力层
       `[2,6,…,38]`（每 4 层一个），前 2 层 dense SwiGLU（`feed_forward_length=11776`），其余 38 层
