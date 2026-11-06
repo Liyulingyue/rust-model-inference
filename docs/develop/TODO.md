@@ -4026,5 +4026,21 @@ PhysBrain1.5-2B、Qwen-Drive、LongCat 图像、Omni、BGE-VL-Screenshot，≥12
 3. 改完复测：媒体路径应从 50 s 降到个位数秒 ✓，并用
    `tests/embeddinggemma_2_multimodal_oracle`（2 passed ✓）确认数值不变 ✓。
 
+**同一处的第三个后果：`--compute vulkan` 下 EG2 一个算子都不上设备。**
+
+实测（`--embedding --prompt 'The sky is blue'`，同一份 GGUF）：
+
+| 后端 | 耗时 | trace |
+| --- | --- | --- |
+| CPU | 779 ms | — |
+| Vulkan | 762 ms | **没有任何 `scope=` 行** ✓ |
+
+CLI 接受 `--compute vulkan` 并如实报 `backend=partial mode=embedding` ✓，但耗时与 CPU 一样 ✓ →
+塔的 matmul 直接调 `Weight::forward` ✗，没有 `try_vulkan_rows` 分支 ✗（与 TODO-056 的
+qwen35 CLIP 塔同一类缺口 ✓）。权重是 Q8_0/BF16/F32 ✓，设备侧格式都支持 ✓ → 补分支即可 ✓。
+
+**收益预估**：文本路径本来就快（0.8 s ✓ → 收益小 ✓）；媒体路径 50.8 s ✗ → 收益大 ✓，
+但要先做上面的批量化 ✓（否则单线程 + 设备提交开销会互相拖累 ✓）。
+
 **关联**：`src/models/embeddinggemma2/text.rs`、`src/models/embeddinggemma2/mod.rs`
-（`compute_media_embedding`）、`tests/embeddinggemma_2_vision_smoke.rs`。
+（`compute_media_embedding`）、`tests/embeddinggemma_2_vision_smoke.rs`、TODO-056。
