@@ -11,9 +11,7 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
         if options.model.as_os_str().is_empty() {
             return Err("--system-one-request requires --model".into());
         }
-        if options.compute_policy() != crate::compute::ComputePolicy::Cpu {
-            return Err("--system-one-request supports CPU only; use --compute cpu".into());
-        }
+        options.validate_compute_mode()?;
         if options.serve
             || options.jev
             || options.rerank
