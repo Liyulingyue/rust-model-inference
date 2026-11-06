@@ -3537,6 +3537,16 @@ arch 的**文本路**真的可用：
 
 ### TODO-049: `GpuLinear` 的 runtime 缓存按**权重指针**分桶，多权重模型按权重数付管线创建费
 
+> **2026-11-06 补充（EmbeddingGemma-2）**：同一根因在 EG2 上更明显。EG2 的文本塔
+> 有 24 层 × 约 6 个权重 = 约 145 个投影，每个都重建一次 `BatchedLinearRuntime`，
+> 于是**文本塔上设备一律是亏的**：媒体路径（260 token）慢约 0.7 s（6.97 s vs
+> 6.26 s），短提示（7 token）慢得多（0.49 s vs 0.08 s）—— 固定开销摊不开。
+> EG2 的自动策略因此把文本塔与音频塔的投影都留在主机 ✓
+> （`src/models/embeddinggemma2/text.rs` ✓、`audio.rs` ✓），只让视觉塔上设备 ✓
+> （它的投影与注意力都是净赚 ✓）。修好这个 TODO（runtime 按形状共享 ✓）后，
+> 文本塔与音频塔就能一起上设备 ✓。
+
+
 **现象**：ZDTaichu5.0 的视觉塔上设备后，投影只快 25%（CPU 36.93s → 设备 27.62s）。
 一开始以为是激活往返，逐项量下来不是：
 
@@ -4301,3 +4311,113 @@ PhysBrain1.5-2B、Qwen-Drive、LongCat 图像、Omni、BGE-VL-Screenshot，≥12
 
 **关联**：`src/models/qwen35/vision/mod.rs`、`src/models/zdt/vision/mod.rs`、
 `src/ops/kernel/vulkan.rs`、`src/compute/linear.rs`、TODO-055。
+
+---
+
+### TODO-057: EmbeddingGemma-2 的文本塔 forward 不走线程池 —— 媒体 embedding 比文本慢 50 倍
+
+**实测**（aarch64 + GB10，8 线程可用，`--embedding`，同一个 1.29 GB GGUF）：
+
+| 路径 | token 数 | 耗时 | user/real |
+| --- | --- | --- | --- |
+| 文本 | ~5 | **1.0 s** | 0.88 / 1.00 |
+| 图像（媒体路径） | ~300（280 个视觉 soft token + 提示） | **50.8 s** | 50.75 / 50.97 |
+
+`user ≈ real` → **只用了一个核** ✗。视觉塔本身不慢
+（`tests/embeddinggemma_2_vision_smoke` 48×48 输入 0.76 s ✓）。
+
+**根因**：`src/models/embeddinggemma2/text.rs` 的 `EmbeddingGemmaTextModel` 持有
+`pool: Arc<ComputePool>`（第 295 行 ✓、构造于第 306 行 ✓），但 `forward_inputs`
+**从不通过它分发** ✓ —— 全文只有字段、构造和一句 "mean pool" 注释引用 `pool` ✓：
+
+- Step 2 的 `per_layer_model_proj`（768 → 24×per_layer_width）**逐 token** 直接调
+  `Weight::forward` ✓
+- Step 3 的 24 层 transformer ✓
+- Step 4 的 `text_embproj` 也是**逐 token** ✓
+
+其它模型（qwen35 / llama / gemma4 …）都在这些循环里用 `ComputePool` ✓。
+
+**待办**：
+
+1. 把 `forward_inputs` 的逐 token 循环按 token 分块交给 `ComputePool::compute` ✓
+   （每线程一个输出切片 ✓，照 `src/models/qwen35/trunk/weights.rs` 的
+   `matmul_weight_batch_pooled` 写法 ✓）。
+2. Step 2 的 `per_layer_model_proj` 是逐 token 独立的 ✓，可以**一次算完整批**
+   （`PreparedRows::matmul_group` 或批量 kernel ✓）。
+3. 改完复测：媒体路径应从 50 s 降到个位数秒 ✓，并用
+   `tests/embeddinggemma_2_multimodal_oracle`（2 passed ✓）确认数值不变 ✓。
+
+**同一处的第三个后果：`--compute vulkan` 下 EG2 一个算子都不上设备。**
+
+实测（`--embedding --prompt 'The sky is blue'`，同一份 GGUF）：
+
+| 后端 | 耗时 | trace |
+| --- | --- | --- |
+| CPU | 779 ms | — |
+| Vulkan | 762 ms | **没有任何 `scope=` 行** ✓ |
+
+CLI 接受 `--compute vulkan` 并如实报 `backend=partial mode=embedding` ✓，但耗时与 CPU 一样 ✓ →
+塔的 matmul 直接调 `Weight::forward` ✗，没有 `try_vulkan_rows` 分支 ✗（与 TODO-056 的
+qwen35 CLIP 塔同一类缺口 ✓）。权重是 Q8_0/BF16/F32 ✓，设备侧格式都支持 ✓ → 补分支即可 ✓。
+
+**收益预估**：文本路径本来就快（0.8 s ✓ → 收益小 ✓）；媒体路径 50.8 s ✗ → 收益大 ✓，
+但要先做上面的批量化 ✓（否则单线程 + 设备提交开销会互相拖累 ✓）。
+
+**关联**：`src/models/embeddinggemma2/text.rs`、`src/models/embeddinggemma2/mod.rs`
+（`compute_media_embedding`）、`tests/embeddinggemma_2_vision_smoke.rs`、TODO-056。
+
+---
+
+### TODO-058: EmbeddingGemma-2 的设备路径与 CPU 差 0.033 —— 设备的量化归约契约未对齐
+
+**背景**：EG2 的文本塔已改为持 `Weight`（GGUF 契约 ✓）并批量化 ✓，
+`--compute vulkan` 下设备确实接活 ✓（trace：`backend=Vulkan rows=263` ✓、
+媒体路径 1083 次 submission ✓）。但实测：
+
+| 对比 | relative L2 | cosine |
+| --- | --- | --- |
+| CPU kernel vs Vulkan（同一提示、768 维输出） | **0.03330** | 0.99948 |
+| CPU kernel vs 上游 HF transformers 参考 | 0.05069 | 0.99873 |
+
+即：**设备的量化 matmul 与 CPU 的量化 matmul 本身就不一致** ✗（0.033 ✓），
+这与 TODO-056 的 F16 契约缺口同类 ✓ —— 设备侧的 Q8_0/BF16 归约（shader 的
+累加顺序/中间精度 ✓）与 CPU kernel 不同 ✓。
+
+**影响**：嵌入模型对向量敏感 ✓ —— 同一提示在 CPU 与 GPU 上会得到不同的 768 维向量 ✓
+（cosine 0.9995 ✓，看起来接近但不是同一个向量 ✓）。仓库的惯例是
+「GPU 路径必须与 CPU 一致 ✓」（ZDTaichu5.0 实测差 ~5e-7 ✓），这里差 0.033 ✗。
+
+**2026-11-06 定位结果**（视觉塔注意力上设备 ✓）：
+
+| 对比 | relative L2 | cosine |
+| --- | --- | --- |
+| 视觉塔：设备 vs CPU | **0.00000858** | 1.00000000 ✓ |
+| 媒体最终向量：设备 vs CPU（自动策略） | **0.006413** | 0.99998 |
+| 媒体最终向量：设备 vs CPU（`--compute vulkan`） | 0.006492 | 0.99998 |
+| 纯文本：设备 vs CPU | 0.008853 | 0.99996 |
+| 纯音频：设备 vs CPU | 0.018612 | 0.99983 |
+
+差异**不在注意力** ✓ —— 视觉塔的设备注意力走 F32 的融合双向 kernel ✓
+（`AttentionRuntime` ✓、`shaders/glsl/attention_online.comp` ✓，无 mask ✓、
+Gemma4 的单位 scale ✓），两边一致到 1e-5 ✓。
+
+差异在 **F16 matmul 的激活精度** ✓：设备的 `shaders/glsl/f16_matmul.comp` ✓
+把激活舍入到 F16（`round_f16_rte` ✓，对齐 ggml ✓），而 CPU 的 F16 kernel ✓
+（`src/ops/kernel/f16/neon.rs` ✓）只把**权重**转成 F32 ✓、激活保持 F32 ✓。
+也就是说**设备侧才是 ggml 语义 ✓，CPU 侧更精确 ✓** —— 差 0.0089 的方向与
+TODO-056 的 F16 契约缺口一致 ✓。
+
+**待办**：
+
+1. 决定契约方向 ✓：要么让 CPU 也把激活舍入到 F16 ✓（对齐 ggml/llama.cpp ✓，
+   但会拉大 CPU 与上游 HF 的差 ✓ —— 目前 CPU vs HF 是 0.0507 ✓），
+   要么让设备保留 F32 激活 ✓（偏离 ggml ✓）。
+2. 对齐之前如实记录数值 ✓（已写进 `tools/oracle/pr169/verification.json` ✓
+   的 `device_attention_2026_11_06` ✓ 与 README ✓）。
+3. 媒体最终向量仍差 0.0064 ✓（自动策略）/ 0.0065 ✓（`--compute vulkan` ✓），
+   都在 oracle 的 0.02 界内 ✓；CPU 路径是 0.0147 ✓。
+
+**关联**：`src/ops/kernel/vulkan.rs`（`try_matmul` ✓）、
+`shaders/glsl/f16_matmul.comp`、`src/ops/kernel/f16/neon.rs`、
+`src/models/embeddinggemma2/text.rs`、`src/models/embeddinggemma2/vision.rs`
+（设备注意力 ✓）、`tests/embeddinggemma_2_device_parity.rs` ✓、TODO-056。

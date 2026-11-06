@@ -164,6 +164,7 @@ separate tokenizer, text-logit and full projection tests above.
 
 ```sh
 cargo test --profile release-fast --test embeddinggemma_2_text_oracle --test embeddinggemma_2_multimodal_oracle --test embeddinggemma_2_smoke --test embeddinggemma_2_vision_smoke --test embeddinggemma_2_audio_smoke -- --nocapture
+cargo test --profile release-fast --features vulkan --test embeddinggemma_2_device_parity -- --nocapture
 ./.venv/bin/python -m unittest tools.converter.utils.test_model_metadata tools.oracle.pr169.test_compare_text
 cargo fmt --all -- --check
 cargo check --profile release-fast --features vulkan,parity-trace --lib --bin rust-model-inference
@@ -176,6 +177,38 @@ and final 768-dimensional embeddings. Text uses cosine >0.999 and relative L2
 Fixture generators are in `tests/oracle/run_embeddinggemma2_*_oracle.py`.
 CLI supports `--embedding --image ...` or `--embedding --audio ...` with the single
 GGUF; simultaneous image/audio and video are explicitly rejected.
+
+### The vision tower's device attention (2026-11-06)
+
+The vision tower's attention runs on the device. Gemma4's vision tower attends
+in both directions over every patch, which the decoder-shaped device attention
+cannot express: the score shader applies a causal limit and scales by
+`1/sqrt(head_dim)`, while Gemma4 uses no mask and a unit scale. The tower
+therefore uses the fused bidirectional kernel (`AttentionRuntime` in
+`src/vulkan/ops.rs`, `shaders/glsl/attention_online.comp`), which is F32 and
+takes both the mask and the scale as arguments.
+
+`tests/embeddinggemma_2_device_parity.rs` pins the device tower to the CPU one
+on a 768x768 image (2304 patches, the tower's default output length): relative
+L2 **0.00000858**, cosine **1.00000000**.
+
+One 768x768 image takes **14.3 s** on the CPU, **6.3 s** with the automatic
+policy and **6.8 s** with `--compute vulkan`. A short text prompt (0.08 s CPU)
+and a 2 s mono clip (1.24 s CPU) stay on the host under the automatic policy,
+where they are faster; `--compute vulkan` offloads them as asked.
+
+The automatic policy keeps the text tower's and the audio tower's projections
+on the host: the batched linear runtime is rebuilt for every weight
+(TODO-049), so the setup costs more than the projections save (the media path
+runs 260 tokens and is about 0.7 s slower on the device). The vision tower's
+projections and its attention do take the device either way.
+
+The device and the CPU still differ on the media path as a whole (relative L2
+0.0064, cosine 0.99998, down from 0.0333 before this change). The remainder
+is not in the attention: the device's F16 matmul rounds the activations to F16
+(ggml parity) while the CPU's F16 kernel converts only the weights and keeps
+the activations in F32, so the CPU path is the more precise of the two. See
+TODO-058.
 
 The focused Qwen3.5 run excludes the previously failing
 `qwen35_config_rejects_invalid_tensor_dimensions`. The NEON LayerNorm stride bug
