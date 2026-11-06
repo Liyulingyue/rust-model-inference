@@ -736,7 +736,7 @@
       },
       "reading": "the two independent implementations differ from each other by more than the engine differs from llama.cpp, so the row-level spread is the port difference of a 37B sparse hybrid MoE, not an engine defect; the engine follows the GGUF contract, which is llama.cpp's"
     },
-    "vision": "not compared: the upstream tower is a Qwen3-VL style merger over a different preprocessing convention, while the engine's mmproj is a CLIP tower; the engine's vision projection is already checked against llama.cpp at relative L2 0.00070317",
+    "vision": "dropped: the upstream tower is a Qwen3-VL style merger with its own position embedding interpolation and preprocessing, while the mmproj here is llama.cpp's CLIP tower, so the two are not comparable. For information only, the upstream features differ from the llama.cpp dump by relative L2 0.74595491, while this engine differs from the same dump by 0.00070317. The script can still produce the upstream dump (the vision tower wants the patchified sequence in (-1, C, temporal_patch, patch, patch) layout, 1024 rows of 1536 values for a 512x512 input)",
     "limitation": "the upstream reference runs the CPU fallback kernels (no causal_conv1d, no flash-linear-attention) and the BF16 weights, so it is a semantic reference, not a bitwise one",
     "performance": {
       "upstream_pytorch_cpu_bfloat16": {

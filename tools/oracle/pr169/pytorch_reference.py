@@ -84,10 +84,15 @@ def main() -> None:
 
     started = time.perf_counter()
     processor = AutoProcessor.from_pretrained(args.model)
+    # Load straight onto the device when it is a GPU: the weights are 65 GB and
+    # this machine's memory is shared with the GPU, so a host copy first would
+    # need the weights twice.
+    device_map = None if args.device == "cpu" else args.device
     model = AutoModelForImageTextToText.from_pretrained(
-        args.model, dtype=dtype, device_map=None
+        args.model, dtype=dtype, device_map=device_map
     ).eval()
-    model = model.to(args.device)
+    if device_map is None:
+        model = model.to(args.device)
     print(f"load: {time.perf_counter() - started:.1f}s")
 
     if args.input_ids:
@@ -146,18 +151,27 @@ def main() -> None:
     grid = side // patch
     grid_thw = torch.tensor([[1, grid, grid]], dtype=torch.long)
     print(f"vision grid: {grid_thw.tolist()} -> {grid * grid // (merge * merge)} tokens")
-    # The tower takes the patchified sequence, not the image: (num_patches,
-    # C * patch * patch) in the Qwen3-VL layout.
+    # The tower takes the patchified sequence, not the image. Its patch embed
+    # views the input as (-1, C, temporal_patch, patch, patch) and convolves
+    # with stride equal to the kernel, so each row must hold
+    # C * temporal_patch * patch * patch values. An image occupies the
+    # temporal patch twice, which is what the Qwen3-VL processor emits.
+    temporal = model.config.vision_config.temporal_patch_size
     patches = (
         pixels.reshape(1, 3, grid, patch, grid, patch)
         .permute(0, 2, 4, 1, 3, 5)
-        .reshape(grid * grid, 3 * patch * patch)
+        .reshape(grid * grid, 3, 1, patch, patch)
+        .expand(grid * grid, 3, temporal, patch, patch)
+        .reshape(grid * grid, 3 * temporal * patch * patch)
     )
+    print(f"patch rows: {tuple(patches.shape)}")
     with torch.no_grad():
         features = model.get_image_features(
             pixel_values=patches.to(args.device),
             image_grid_thw=grid_thw.to(args.device),
         )
+    if hasattr(features, "pooler_output"):
+        features = features.pooler_output
     if isinstance(features, (list, tuple)):
         features = features[0]
     features = features.to(torch.float32)

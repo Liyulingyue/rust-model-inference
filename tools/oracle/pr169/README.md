@@ -276,7 +276,15 @@ optimized reference. On the GPU the reference is slightly ahead of the engine's
 device path (4.71 against 3.8 tok/s) while the engine wins the prefill by 4.4x
 (0.63 against 2.75 s).
 
-The vision side is not compared: the upstream tower is a Qwen3-VL style merger
-over a different preprocessing convention, while the mmproj here is a CLIP
-tower. The engine's vision projection is already checked against llama.cpp at
-relative L2 0.00070317.
+The vision side is **not** compared, and the numbers say why. The upstream
+tower is a Qwen3-VL style merger with its own position embedding interpolation
+and preprocessing, while the mmproj here is llama.cpp's CLIP tower, so the
+two are not the same function. For information only: the upstream features
+differ from the llama.cpp dump by relative L2 **0.74595491**, while this
+engine differs from that same dump by **0.00070317**. The engine follows the
+GGUF contract, which is llama.cpp's, and the GGUF was converted from the same
+safetensors the upstream weights come from.
+
+`pytorch_reference.py` can still produce the upstream vision dump; the vision
+tower wants the patchified sequence in the `(-1, C, temporal_patch, patch,
+patch)` layout, which is 1024 rows of 1536 values for a 512x512 input.
