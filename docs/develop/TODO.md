@@ -3990,3 +3990,41 @@ PhysBrain1.5-2B、Qwen-Drive、LongCat 图像、Omni、BGE-VL-Screenshot，≥12
 
 **关联**：`src/models/qwen35/vision/mod.rs`、`src/models/zdt/vision/mod.rs`、
 `src/ops/kernel/vulkan.rs`、`src/compute/linear.rs`、TODO-055。
+
+---
+
+### TODO-057: EmbeddingGemma-2 的文本塔 forward 不走线程池 —— 媒体 embedding 比文本慢 50 倍
+
+**实测**（aarch64 + GB10，8 线程可用，`--embedding`，同一个 1.29 GB GGUF）：
+
+| 路径 | token 数 | 耗时 | user/real |
+| --- | --- | --- | --- |
+| 文本 | ~5 | **1.0 s** | 0.88 / 1.00 |
+| 图像（媒体路径） | ~300（280 个视觉 soft token + 提示） | **50.8 s** | 50.75 / 50.97 |
+
+`user ≈ real` → **只用了一个核** ✗。视觉塔本身不慢
+（`tests/embeddinggemma_2_vision_smoke` 48×48 输入 0.76 s ✓）。
+
+**根因**：`src/models/embeddinggemma2/text.rs` 的 `EmbeddingGemmaTextModel` 持有
+`pool: Arc<ComputePool>`（第 295 行 ✓、构造于第 306 行 ✓），但 `forward_inputs`
+**从不通过它分发** ✓ —— 全文只有字段、构造和一句 "mean pool" 注释引用 `pool` ✓：
+
+- Step 2 的 `per_layer_model_proj`（768 → 24×per_layer_width）**逐 token** 直接调
+  `Weight::forward` ✓
+- Step 3 的 24 层 transformer ✓
+- Step 4 的 `text_embproj` 也是**逐 token** ✓
+
+其它模型（qwen35 / llama / gemma4 …）都在这些循环里用 `ComputePool` ✓。
+
+**待办**：
+
+1. 把 `forward_inputs` 的逐 token 循环按 token 分块交给 `ComputePool::compute` ✓
+   （每线程一个输出切片 ✓，照 `src/models/qwen35/trunk/weights.rs` 的
+   `matmul_weight_batch_pooled` 写法 ✓）。
+2. Step 2 的 `per_layer_model_proj` 是逐 token 独立的 ✓，可以**一次算完整批**
+   （`PreparedRows::matmul_group` 或批量 kernel ✓）。
+3. 改完复测：媒体路径应从 50 s 降到个位数秒 ✓，并用
+   `tests/embeddinggemma_2_multimodal_oracle`（2 passed ✓）确认数值不变 ✓。
+
+**关联**：`src/models/embeddinggemma2/text.rs`、`src/models/embeddinggemma2/mod.rs`
+（`compute_media_embedding`）、`tests/embeddinggemma_2_vision_smoke.rs`。

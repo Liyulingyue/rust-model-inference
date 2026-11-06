@@ -776,6 +776,12 @@
       "embeddinggemma_2_multimodal_oracle": "2 passed (8.14 s)"
     },
     "entry_points": "CLI --embedding text 768 dims; CLI --embedding --image media path 768 dims (about 51 s for one 64x64 image); HTTP /v1/embeddings returns a 768-dim vector",
-    "note": "the media path is slow on this host; not investigated further here since the migration is the task"
+    "note": "the media path is slow on this host; not investigated further here since the migration is the task",
+    "performance": {
+      "text_embedding": "1.0 s for a short prompt",
+      "image_media_embedding": "50.8 s for one 64x64 image; user 50.75 s against real 50.97 s, so one core",
+      "cause": "the text tower holds a ComputePool but forward_inputs never dispatches through it",
+      "tracked": "TODO-057"
+    }
   }
 }
