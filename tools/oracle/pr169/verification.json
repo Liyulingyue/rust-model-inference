@@ -794,15 +794,17 @@
       "text_tower_speed": "the media path's text forward went from about 48.7 s to about 2.5 s (batching plus the pool)"
     },
     "device_attention_2026_11_06": {
-      "status": "the vision tower's attention runs on the device: the patches attend in both directions over every patch, which the decoder-shaped device attention cannot express, so the tower uses the fused bidirectional kernel (src/vulkan/ops.rs AttentionRuntime, shaders/glsl/attention_online.comp) with F32 arithmetic, causal off and Gemma4's unit attention scale",
+      "status": "the vision tower's attention runs on the device: the patches attend in both directions over every patch, which the decoder-shaped device attention cannot express (its score shader applies a causal limit and scales by 1/sqrt(head_dim) while Gemma4 uses no mask and a unit scale), so the tower uses the fused bidirectional kernel (src/vulkan/ops.rs AttentionRuntime, shaders/glsl/attention_online.comp) with F32 arithmetic",
       "device_vs_cpu_vision_tower_relative_l2": 8.58e-06,
       "device_vs_cpu_vision_tower_cosine": 1.0,
-      "device_vs_cpu_media_final_relative_l2": 0.023764,
-      "device_vs_cpu_media_final_cosine": 0.99972924,
-      "device_vs_cpu_text_relative_l2": 0.008853,
+      "device_vs_cpu_media_final_relative_l2_auto": 0.006413,
+      "device_vs_cpu_media_final_cosine_auto": 0.999981,
+      "device_vs_cpu_media_final_relative_l2_vulkan": 0.006492,
+      "device_vs_cpu_text_relative_l2": 0.008852,
+      "device_vs_cpu_audio_relative_l2": 0.018612,
       "residual_cause": "the device F16 matmul rounds the activations to F16 (round_f16_rte, ggml parity) while the CPU F16 kernel converts only the weights and keeps the activations in F32, so the remaining gap is the CPU path's extra precision, not a device bug; the vision tower's attention itself is F32 on both sides",
-      "media_path_speed": "one 768x768 image: CPU 16.1 s against Vulkan 6.7 s; the attention was the last CPU-bound stage of the tower",
-      "other_paths": "text: CPU 0.79 s against Vulkan 1.70 s; audio: CPU 1.33 s against Vulkan 2.19 s; the short text and audio paths stay on the CPU",
+      "performance": "one 768x768 image (2304 patches): CPU 14.3 s, automatic policy 6.3 s, --compute vulkan 6.8 s; a short text prompt: CPU 0.08 s, automatic 0.20 s (the Vulkan warm-up), --compute vulkan 0.49 s; a 2 s mono clip: CPU 1.24 s, automatic 1.36 s, --compute vulkan 2.06 s",
+      "dispatch_policy": "the automatic policy keeps the text tower's and the audio tower's projections on the host: the batched linear runtime is rebuilt per weight (TODO-049), so the setup costs more than the projections save (the media path runs 260 tokens and is about 0.7 s slower on the device); the explicit Vulkan policy offloads both",
       "test": "tests/embeddinggemma_2_device_parity.rs (vision tower, device against CPU, relative L2 under 0.02 and cosine over 0.999)"
     }
   }

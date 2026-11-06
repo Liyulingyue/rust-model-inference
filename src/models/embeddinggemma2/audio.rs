@@ -161,11 +161,22 @@ impl Linear<'_> {
             }
             None => input,
         };
+        // The audio tower's projections are small enough that the device
+        // setup (TODO-049) costs more than they save; the explicit Vulkan
+        // policy still asks for the device.
         #[cfg(feature = "vulkan")]
-        if self.weight.try_vulkan_rows(input, output, rows) {
+        if crate::compute::ComputePolicy::legacy() == crate::compute::ComputePolicy::Vulkan
+            && self.weight.try_vulkan_rows(input, output, rows)
+        {
             self.apply_output_clamp(output);
             return;
         }
+        // The batched device path above either took the whole batch or
+        // declined it. The per-row CPU kernels hand quantized work to the
+        // device one token at a time, which costs far more than the batch
+        // they declined, so the fallback stays on the CPU.
+        #[cfg(feature = "vulkan")]
+        let _cpu_scope = crate::core::thread_pool::ComputePool::disable_gpu_matmul_for_scope();
         let n_in = self.weight.n_in;
         let n_out = self.weight.n_out;
         let input_ptr = input.as_ptr();

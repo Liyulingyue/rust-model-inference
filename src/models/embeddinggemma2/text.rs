@@ -251,10 +251,23 @@ impl Linear<'_> {
     fn forward_rows(&self, pool: &ComputePool, input: &[f32], output: &mut [f32], rows: usize) {
         debug_assert_eq!(input.len(), rows * self.weight.n_in);
         debug_assert_eq!(output.len(), rows * self.weight.n_out);
+        // The batched linear runtime is rebuilt for every weight (TODO-049),
+        // so the setup costs more than the projections save at the sizes this
+        // tower sees: the media path runs 260 tokens and is about 0.7 s slower
+        // on the device, a short prompt is far slower. The explicit Vulkan
+        // policy still asks for the device.
         #[cfg(feature = "vulkan")]
-        if self.weight.try_vulkan_rows(input, output, rows) {
+        if crate::compute::ComputePolicy::legacy() == crate::compute::ComputePolicy::Vulkan
+            && self.weight.try_vulkan_rows(input, output, rows)
+        {
             return;
         }
+        // The batched device path above either took the whole batch or
+        // declined it. The per-row CPU kernels hand quantized work to the
+        // device one token at a time, which costs far more than the batch
+        // they declined, so the fallback stays on the CPU.
+        #[cfg(feature = "vulkan")]
+        let _cpu_scope = crate::core::thread_pool::ComputePool::disable_gpu_matmul_for_scope();
         let n_in = self.weight.n_in;
         let n_out = self.weight.n_out;
         let input_ptr = input.as_ptr();

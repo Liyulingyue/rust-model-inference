@@ -3505,6 +3505,16 @@ arch 的**文本路**真的可用：
 
 ### TODO-049: `GpuLinear` 的 runtime 缓存按**权重指针**分桶，多权重模型按权重数付管线创建费
 
+> **2026-11-06 补充（EmbeddingGemma-2）**：同一根因在 EG2 上更明显。EG2 的文本塔
+> 有 24 层 × 约 6 个权重 = 约 145 个投影，每个都重建一次 `BatchedLinearRuntime`，
+> 于是**文本塔上设备一律是亏的**：媒体路径（260 token）慢约 0.7 s（6.97 s vs
+> 6.26 s），短提示（7 token）慢得多（0.49 s vs 0.08 s）—— 固定开销摊不开。
+> EG2 的自动策略因此把文本塔与音频塔的投影都留在主机 ✓
+> （`src/models/embeddinggemma2/text.rs` ✓、`audio.rs` ✓），只让视觉塔上设备 ✓
+> （它的投影与注意力都是净赚 ✓）。修好这个 TODO（runtime 按形状共享 ✓）后，
+> 文本塔与音频塔就能一起上设备 ✓。
+
+
 **现象**：ZDTaichu5.0 的视觉塔上设备后，投影只快 25%（CPU 36.93s → 设备 27.62s）。
 一开始以为是激活往返，逐项量下来不是：
 
@@ -4071,8 +4081,10 @@ qwen35 CLIP 塔同一类缺口 ✓）。权重是 Q8_0/BF16/F32 ✓，设备侧�
 | 对比 | relative L2 | cosine |
 | --- | --- | --- |
 | 视觉塔：设备 vs CPU | **0.00000858** | 1.00000000 ✓ |
-| 媒体最终向量：设备 vs CPU | **0.023764** | 0.99973 |
-| 纯文本：设备 vs CPU | **0.008853** | 0.99996 |
+| 媒体最终向量：设备 vs CPU（自动策略） | **0.006413** | 0.99998 |
+| 媒体最终向量：设备 vs CPU（`--compute vulkan`） | 0.006492 | 0.99998 |
+| 纯文本：设备 vs CPU | 0.008853 | 0.99996 |
+| 纯音频：设备 vs CPU | 0.018612 | 0.99983 |
 
 差异**不在注意力** ✓ —— 视觉塔的设备注意力走 F32 的融合双向 kernel ✓
 （`AttentionRuntime` ✓、`shaders/glsl/attention_online.comp` ✓，无 mask ✓、
@@ -4091,8 +4103,8 @@ TODO-056 的 F16 契约缺口一致 ✓。
    要么让设备保留 F32 激活 ✓（偏离 ggml ✓）。
 2. 对齐之前如实记录数值 ✓（已写进 `tools/oracle/pr169/verification.json` ✓
    的 `device_attention_2026_11_06` ✓ 与 README ✓）。
-3. 媒体最终向量仍差 0.0238 ✓，略高于 oracle 的 0.02 界 ✓ —— 只针对**设备路径** ✓，
-   CPU 路径仍是 0.0147 ✓。
+3. 媒体最终向量仍差 0.0064 ✓（自动策略）/ 0.0065 ✓（`--compute vulkan` ✓），
+   都在 oracle 的 0.02 界内 ✓；CPU 路径是 0.0147 ✓。
 
 **关联**：`src/ops/kernel/vulkan.rs`（`try_matmul` ✓）、
 `shaders/glsl/f16_matmul.comp`、`src/ops/kernel/f16/neon.rs`、

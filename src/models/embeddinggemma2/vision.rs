@@ -177,6 +177,12 @@ impl Linear<'_> {
         if self.weight.try_vulkan_rows(input, output, rows) {
             return;
         }
+        // The batched device path above either took the whole batch or
+        // declined it. The per-row CPU kernels hand quantized work to the
+        // device one token at a time, which costs far more than the batch
+        // they declined, so the fallback stays on the CPU.
+        #[cfg(feature = "vulkan")]
+        let _cpu_scope = crate::core::thread_pool::ComputePool::disable_gpu_matmul_for_scope();
         let n_in = self.weight.n_in;
         let n_out = self.weight.n_out;
         let input_ptr = input.as_ptr();
@@ -768,11 +774,12 @@ impl<'a> EmbeddingGemmaVisionModel<'a> {
         // the trained projections.
         let mut attn_out = vec![0.0f32; n_patches * embd];
         #[cfg(feature = "vulkan")]
-        if !self.device_attention(&q, &k, &v, n_patches, &mut attn_out) {
+        let device_used = self.device_attention(&q, &k, &v, n_patches, &mut attn_out);
+        #[cfg(not(feature = "vulkan"))]
+        let device_used = false;
+        if !device_used {
             self.cpu_attention(&q, &k, &v, n_patches, &mut attn_out);
         }
-        #[cfg(not(feature = "vulkan"))]
-        self.cpu_attention(&q, &k, &v, n_patches, &mut attn_out);
 
         // Step e: output projection.
         let mut proj_out = vec![0.0f32; n_patches * embd];
