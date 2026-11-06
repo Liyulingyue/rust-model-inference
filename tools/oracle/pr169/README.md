@@ -259,6 +259,23 @@ GGUF contract, and the GGUF is llama.cpp's. This is the same shape as the
 ZDTaichu5.0 result, where the upstream PyTorch path and llama.cpp differ by
 4.54 and the engine follows the GGUF.
 
+Speed, same prompt, same machine:
+
+| | load | prefill (19 tokens) | decode |
+| --- | --- | --- | --- |
+| upstream PyTorch, CPU, BF16 | 46.3 s | 11.59 s | 0.90 tok/s |
+| upstream PyTorch, GB10, BF16 | 388.4 s | 2.75 s | 4.71 tok/s |
+| this engine, CPU, Q8_0, 8 threads | ~40 s (mmap) | 1.09 s | **15.2 tok/s** |
+| this engine, Vulkan, Q8_0 | ~40 s (mmap) | **0.63 s** | 3.8 tok/s |
+
+The engine's CPU decode is 17x the upstream CPU decode: it reads only the eight
+active experts per layer in Q8_0 and uses the NEON kernels, while the reference
+runs transformers' fallback kernels without `causal_conv1d` or
+`flash-linear-attention`. Those PyTorch numbers are therefore a floor, not an
+optimized reference. On the GPU the reference is slightly ahead of the engine's
+device path (4.71 against 3.8 tok/s) while the engine wins the prefill by 4.4x
+(0.63 against 2.75 s).
+
 The vision side is not compared: the upstream tower is a Qwen3-VL style merger
 over a different preprocessing convention, while the mmproj here is a CLIP
 tower. The engine's vision projection is already checked against llama.cpp at

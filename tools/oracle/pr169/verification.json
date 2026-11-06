@@ -737,6 +737,31 @@
       "reading": "the two independent implementations differ from each other by more than the engine differs from llama.cpp, so the row-level spread is the port difference of a 37B sparse hybrid MoE, not an engine defect; the engine follows the GGUF contract, which is llama.cpp's"
     },
     "vision": "not compared: the upstream tower is a Qwen3-VL style merger over a different preprocessing convention, while the engine's mmproj is a CLIP tower; the engine's vision projection is already checked against llama.cpp at relative L2 0.00070317",
-    "limitation": "the upstream reference runs the CPU fallback kernels (no causal_conv1d, no flash-linear-attention) and the BF16 weights, so it is a semantic reference, not a bitwise one"
+    "limitation": "the upstream reference runs the CPU fallback kernels (no causal_conv1d, no flash-linear-attention) and the BF16 weights, so it is a semantic reference, not a bitwise one",
+    "performance": {
+      "upstream_pytorch_cpu_bfloat16": {
+        "load_s": 46.3,
+        "prefill_19_tokens_s": 11.59,
+        "decode_tokens_per_s": 0.9,
+        "threads": null
+      },
+      "upstream_pytorch_gpu_gb10_bfloat16": {
+        "load_s": 388.4,
+        "prefill_19_tokens_s": 2.75,
+        "decode_tokens_per_s": 4.71
+      },
+      "engine_cpu_q8_0_8_threads": {
+        "prefill_21_tokens_s": 1.088,
+        "decode_tokens_per_s": 15.2,
+        "end_to_end_tok_s": 10.2
+      },
+      "engine_vulkan_gb10_q8_0": {
+        "prefill_21_tokens_s": 0.632,
+        "decode_tokens_per_s": 3.8,
+        "end_to_end_tok_s": 3.6
+      },
+      "reading": "the engine's CPU decode is 17x the upstream PyTorch CPU decode (15.2 against 0.90 tok/s) because it reads only the eight active experts per layer in Q8_0 and uses the NEON kernels, while the reference runs transformers' fallback kernels without causal_conv1d or flash-linear-attention; on the GPU the reference is slightly ahead of the engine's device path (4.71 against 3.8 tok/s), and the engine's prefill is 4.4x faster (0.632 against 2.75 s)",
+      "caveat": "the PyTorch numbers are a floor, not an optimized reference: the reference implementations of causal_conv1d and chunk_gated_delta_rule are used, so an installed flash-linear-attention would move them"
+    }
   }
 }

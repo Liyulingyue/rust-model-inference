@@ -23,6 +23,7 @@ Usage:
 import argparse
 import json
 import struct
+import time
 from pathlib import Path
 
 import numpy as np
@@ -81,11 +82,13 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
     dtype = getattr(torch, args.dtype)
 
+    started = time.perf_counter()
     processor = AutoProcessor.from_pretrained(args.model)
     model = AutoModelForImageTextToText.from_pretrained(
         args.model, dtype=dtype, device_map=None
     ).eval()
     model = model.to(args.device)
+    print(f"load: {time.perf_counter() - started:.1f}s")
 
     if args.input_ids:
         input_ids = torch.tensor(
@@ -100,22 +103,30 @@ def main() -> None:
     print(f"prompt tokens: {input_ids.shape[-1]}")
     print(f"prompt ids: {input_ids[0].tolist()}")
 
+    started = time.perf_counter()
     with torch.no_grad():
         output = model(input_ids=input_ids, use_cache=False)
+    print(f"prefill: {time.perf_counter() - started:.2f}s")
     logits = output.logits[0, -1].to(torch.float32)
     dump_f32(out / "text-logits.f32", logits.cpu().numpy())
     top = torch.topk(logits, 5)
     print("top-5:", list(zip(top.indices.tolist(), [round(v, 4) for v in top.values.tolist()])))
 
     if args.generate:
+        started = time.perf_counter()
         generated = model.generate(
             input_ids=input_ids,
             max_new_tokens=args.generate,
             do_sample=False,
             use_cache=True,
         )
+        elapsed = time.perf_counter() - started
         tail = generated[0, input_ids.shape[-1] :].tolist()
         print(f"generated ids: {tail}")
+        print(
+            f"generate: {elapsed:.2f}s for {len(tail)} tokens "
+            f"({len(tail) / elapsed:.2f} tok/s)"
+        )
         (out / "generated-ids.json").write_text(json.dumps(tail))
 
     if args.vision_input != "blue":
