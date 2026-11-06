@@ -554,11 +554,24 @@ impl BPETokenizer {
         let pre = if gemma4 {
             PreTokenizer::Gemma4
         } else {
-            // llama.cpp forces `add_bos = true` for the llama3 pre family
-            // (llama3 / falcon3 / falcon-h1 / lfm2 / pixtral ...) even when
-            // the GGUF omits `tokenizer.ggml.add_bos_token`. Falcon-H1 is
-            // the one arch in this repo whose GGUF relies on that override,
-            // so mirror it explicitly (merged into `add_bos` below).
+            // llama.cpp sets a *default* `add_bos = true` for a whole
+            // family of pre-tokenizers, even when the GGUF omits
+            // `tokenizer.ggml.add_bos_token`. The list below mirrors
+            // `src/llama-vocab.cpp` (the `LLAMA_VOCAB_TYPE_BPE` branch):
+            //
+            //   llama3, llama-v3, llama-bpe, falcon3, falcon-h1,
+            //   midm-2.0, jina-v5-nano, lfm2, tekken, pixtral,
+            //   tekken-num3, chameleon, nemotron-3.5-embed
+            //
+            // Of the pre-tokenizers this repository supports, that is
+            // llama-bpe, pixtral, tekken, lfm2 and falcon-h1. The
+            // GGUF's own `tokenizer.ggml.add_bos_token` still overrides
+            // the default (see below), so this only decides the case
+            // where the key is absent — which is exactly the case the
+            // Nemotron-3-Nano 30B is in (`pre = "pixtral"`, no key).
+            //
+            // Note that `exaone` / `exaone4` / `exaone-moe` are *not* in
+            // llama.cpp's list: they keep `add_bos = false`.
             let mut force_add_bos = false;
             let pre = match get_meta("tokenizer.ggml.pre") {
                 Some(MetaValue::String(value)) if value == "qwen2" => PreTokenizer::Qwen2,
@@ -568,10 +581,19 @@ impl BPETokenizer {
                     PreTokenizer::HunyuanDense
                 }
                 Some(MetaValue::String(value)) if value == "hunyuan" => PreTokenizer::HunyuanDense,
-                Some(MetaValue::String(value)) if value == "lfm2" => PreTokenizer::Lfm2,
-                Some(MetaValue::String(value)) if value == "llama-bpe" => PreTokenizer::LlamaBpe,
+                Some(MetaValue::String(value)) if value == "lfm2" => {
+                    force_add_bos = true;
+                    PreTokenizer::Lfm2
+                }
+                Some(MetaValue::String(value)) if value == "llama-bpe" => {
+                    force_add_bos = true;
+                    PreTokenizer::LlamaBpe
+                }
                 Some(MetaValue::String(value)) if value == "dbrx" => PreTokenizer::LlamaBpe,
-                Some(MetaValue::String(value)) if value == "pixtral" => PreTokenizer::LlamaBpe,
+                Some(MetaValue::String(value)) if value == "pixtral" => {
+                    force_add_bos = true;
+                    PreTokenizer::LlamaBpe
+                }
                 Some(MetaValue::String(value)) if value == "exaone" => PreTokenizer::LlamaBpe,
                 // jina-v1-en / jina-v2-code / roberta-bpe all map to standard
                 // GPT-2 byte-level BPE in llama.cpp
@@ -605,9 +627,14 @@ impl BPETokenizer {
                 // pretokenizer regex. The byte-level BPE encoding is the
                 // same as Llama-3 / pixtral / dbrx, so reusing
                 // `LlamaBpe` is correct. Special-token boundaries
-                // (BOS=1, EOS=2, pad=11) are pinned by the GGUF, no extra
-                // `force_add_bos` needed.
-                Some(MetaValue::String(value)) if value == "tekken" => PreTokenizer::LlamaBpe,
+                // (BOS=1, EOS=2, pad=11) are pinned by the GGUF.
+                // llama.cpp gives `tekken` the `add_bos = true` default,
+                // so the same default is mirrored here; a GGUF that
+                // carries `tokenizer.ggml.add_bos_token` still wins.
+                Some(MetaValue::String(value)) if value == "tekken" => {
+                    force_add_bos = true;
+                    PreTokenizer::LlamaBpe
+                }
                 // JetBrains Mellum 2.1 (`tokenizer.ggml.pre = "mellum2"`).
                 // llama.cpp splits `\p{N}` out before the StarCoder word
                 // regex, so every digit becomes its own pre-token.
@@ -680,10 +707,27 @@ impl BPETokenizer {
             return Err("tokenizer.ggml.model gemma4 requires tokenizer.ggml.bos_token_id".into());
         }
 
-        let add_bos = bool_meta(
-            get_meta("tokenizer.ggml.add_bos_token"),
-            "tokenizer.ggml.add_bos_token",
-        )? || forced_add_bos;
+        // llama.cpp treats the pre-tokenizer's `add_bos` as a *default*
+        // and lets the GGUF override it — including with `false`
+        // (`src/llama-vocab.cpp`):
+        //
+        // ```c
+        // bool temp = true;
+        // if (ml.get_key(LLM_KV_TOKENIZER_ADD_BOS, temp, false)) {
+        //     add_bos = temp;
+        // }
+        // ```
+        //
+        // So the key wins when it is present, and the pre-tokenizer
+        // default stands when it is absent. That distinction matters:
+        // the Dory GGUF says `add_bos_token = false` with
+        // `pre = "pixtral"`, so llama.cpp does **not** add a BOS there,
+        // while the Nemotron-3-Nano 30B GGUF has `pre = "pixtral"` and
+        // no `add_bos_token` key at all, so llama.cpp **does** add one.
+        let add_bos = match get_meta("tokenizer.ggml.add_bos_token") {
+            Some(value) => bool_meta(Some(value.clone()), "tokenizer.ggml.add_bos_token")?,
+            None => forced_add_bos,
+        };
         let add_eos = bool_meta(
             get_meta("tokenizer.ggml.add_eos_token"),
             "tokenizer.ggml.add_eos_token",
@@ -2268,6 +2312,99 @@ mod tests {
             metadata.insert("tokenizer.ggml.pre".into(), MetaValue::String(pre.into()));
         }
         BPETokenizer::from_gguf_metadata(|key| metadata.get(key).cloned())
+    }
+
+    /// The same fixture, plus a BOS token id and an optional
+    /// `tokenizer.ggml.add_bos_token` key.
+    fn tokenizer_with_bos_policy(
+        pre: &str,
+        add_bos_token: Option<bool>,
+    ) -> Result<BPETokenizer, String> {
+        let mut metadata: HashMap<String, MetaValue> = HashMap::from([
+            (
+                "tokenizer.ggml.model".to_string(),
+                MetaValue::String("gpt2".into()),
+            ),
+            (
+                "tokenizer.ggml.tokens".to_string(),
+                MetaValue::Array(
+                    MetaValueType::String,
+                    ["<s>", "a", "b", "Ġ", "Ġa", "Ġb"]
+                        .into_iter()
+                        .map(|value| MetaValue::String(value.into()))
+                        .collect(),
+                ),
+            ),
+            (
+                "tokenizer.ggml.token_type".to_string(),
+                MetaValue::Array(
+                    MetaValueType::Uint32,
+                    std::iter::repeat(MetaValue::Uint32(1)).take(6).collect(),
+                ),
+            ),
+            (
+                "tokenizer.ggml.merges".to_string(),
+                MetaValue::Array(MetaValueType::String, vec![]),
+            ),
+            (
+                "tokenizer.ggml.bos_token_id".to_string(),
+                MetaValue::Uint32(0),
+            ),
+            ("tokenizer.ggml.pre".to_string(), MetaValue::String(pre.into())),
+        ]);
+        if let Some(value) = add_bos_token {
+            metadata.insert(
+                "tokenizer.ggml.add_bos_token".to_string(),
+                MetaValue::Bool(value),
+            );
+        }
+        BPETokenizer::from_gguf_metadata(|key| metadata.get(key).cloned())
+    }
+
+    /// llama.cpp gives `pixtral` the `add_bos = true` default, so a GGUF
+    /// without `tokenizer.ggml.add_bos_token` still gets a BOS. This is
+    /// the Nemotron-3-Nano 30B's situation.
+    #[test]
+    fn pixtral_defaults_to_adding_bos() {
+        let tokenizer = tokenizer_with_bos_policy("pixtral", None).expect("load");
+        let ids = tokenizer.encode(
+            "hi",
+            EncodeOptions {
+                add_special: true,
+                parse_special: false,
+            },
+        );
+        assert_eq!(ids.first(), Some(&0), "{ids:?}");
+    }
+
+    /// ... but the GGUF's own `add_bos_token = false` overrides that
+    /// default. This is the Dory GGUF's situation.
+    #[test]
+    fn gguf_add_bos_token_overrides_the_pretokenizer_default() {
+        let tokenizer = tokenizer_with_bos_policy("pixtral", Some(false)).expect("load");
+        let ids = tokenizer.encode(
+            "hi",
+            EncodeOptions {
+                add_special: true,
+                parse_special: false,
+            },
+        );
+        assert_ne!(ids.first(), Some(&0), "{ids:?}");
+    }
+
+    /// `add_bos_token = true` in the GGUF also wins, for a pre-tokenizer
+    /// that has no default of its own.
+    #[test]
+    fn gguf_add_bos_token_true_adds_bos_without_a_default() {
+        let tokenizer = tokenizer_with_bos_policy("qwen2", Some(true)).expect("load");
+        let ids = tokenizer.encode(
+            "hi",
+            EncodeOptions {
+                add_special: true,
+                parse_special: false,
+            },
+        );
+        assert_eq!(ids.first(), Some(&0), "{ids:?}");
     }
 
     #[test]
